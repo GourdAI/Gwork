@@ -989,6 +989,10 @@
         if (typeof window.exitCodeMode === 'function' && window.appMode === 'code') {
             window.exitCodeMode();
         }
+        if (typeof window.closeSkills === 'function') window.closeSkills();
+        if (typeof window.closeChannel === 'function') window.closeChannel();
+        if (typeof window.closeModelSettings === 'function') window.closeModelSettings();
+        if (typeof window.closeMemoryView === 'function') window.closeMemoryView();
         $('#welcomeView').hide();
         $('#chatView').removeClass('active');
         $('#automationView').addClass('active');

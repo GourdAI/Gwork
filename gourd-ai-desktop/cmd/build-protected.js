@@ -80,9 +80,12 @@ try {
   console.log('[build-protected] main/ 已原位混淆（源码快照: main-src-bak/）');
 
   // ── 4. electron-builder 打包 ──
+  // 额外参数原样透传给 electron-builder（如 macOS 分架构打包的 --x64 / --arm64，
+  // 不透传会导致每次打包都构建全部架构，两次换 JRE 的打包互相覆盖、产出错误 JRE 的包）
+  const extraArgs = process.argv.slice(3);
   const bin = path.join(ROOT, 'node_modules', 'electron-builder', 'cli.js');
-  const ebArgs = [bin, '--config', path.join(ROOT, 'cmd', 'builder-' + PLATFORM + '.json')];
-  console.log('\n[build-protected] $ electron-builder --config cmd/builder-' + PLATFORM + '.json');
+  const ebArgs = [bin, '--config', path.join(ROOT, 'cmd', 'builder-' + PLATFORM + '.json')].concat(extraArgs);
+  console.log('\n[build-protected] $ electron-builder --config cmd/builder-' + PLATFORM + '.json' + (extraArgs.length > 0 ? ' ' + extraArgs.join(' ') : ''));
   execFileSync(process.execPath, ebArgs, { cwd: ROOT, stdio: 'inherit' });
 } finally {
   // ── 5. 无条件还原：源码树绝不能被污染 ──

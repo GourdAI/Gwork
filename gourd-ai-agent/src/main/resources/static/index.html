@@ -13,6 +13,10 @@
     <link rel="stylesheet" href="/css/settings.css"/>
     <link rel="stylesheet" href="/css/code.css"/>
     <link rel="stylesheet" href="/css/automation.css"/>
+    <link rel="stylesheet" href="/css/skills.css"/>
+    <link rel="stylesheet" href="/css/channel.css"/>
+    <link rel="stylesheet" href="/css/model-settings.css"/>
+    <link rel="stylesheet" href="/css/memory-view.css"/>
     <link rel="stylesheet" href="/highlight/github.min.css" media="(prefers-color-scheme: light)" id="hljs-light-theme"/>
     <link rel="stylesheet" href="/highlight/github-dark.min.css" media="(prefers-color-scheme: dark)" id="hljs-dark-theme" disabled/>
     <!-- 编辑器样式由 Monaco editor.main.js 运行时自动注入（vs/editor/editor.main.css） -->
@@ -72,13 +76,25 @@
                 <span class="main-nav-label" data-i18n="app.sidebar.new_task">新建任务</span>
                 <span class="main-nav-kbd">Ctrl+N</span>
             </button>
+            <button class="main-nav-item" id="modelConfigNavBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                <span class="main-nav-label" data-i18n="app.sidebar.model_config">模型配置</span>
+            </button>
             <button class="main-nav-item" id="automationNavBtn">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="11" rx="2"/><path d="M12 4v4"/><circle cx="9.5" cy="13" r="1"/><circle cx="14.5" cy="13" r="1"/></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                 <span class="main-nav-label" data-i18n="app.sidebar.automation">自动化</span>
             </button>
             <button class="main-nav-item" id="skillsNavBtn">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16"/><path d="M5.1 8l13.8 8"/><path d="M18.9 8L5.1 16"/></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></svg>
                 <span class="main-nav-label" data-i18n="app.skills">技能</span>
+            </button>
+            <button class="main-nav-item" id="memoryNavBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>
+                <span class="main-nav-label" data-i18n="app.sidebar.memory">记忆</span>
+            </button>
+            <button class="main-nav-item" id="channelNavBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.2 19.1 19.1"/></svg>
+                <span class="main-nav-label" data-i18n="app.sidebar.remote_channel">远控通道</span>
             </button>
         </div>
     </div>
@@ -115,12 +131,6 @@
     </div>
     <div class="sidebar-list" id="historyList"></div>
     <div class="sidebar-footer">
-        <!-- 底部功能按钮：心智记忆（专注模式的终端/记忆/视图切换入口在文件树面板头部） -->
-        <div class="sidebar-footer-icons">
-            <button class="sidebar-icon-btn memory-view-btn" id="memoryViewBtn" data-i18n-title="app.memory_view">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>
-            </button>
-        </div>
         <button class="settings-btn" id="settingsBtn" data-i18n-title="settings.title">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3"/>

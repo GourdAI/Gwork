@@ -61,8 +61,6 @@
             apiRetries: parseNumStr($('#generalApiRetries').val().trim()),
             mcpRetries: parseNumStr($('#generalMcpRetries').val().trim()),
             modelRetries: parseNumStr($('#generalModelRetries').val().trim()),
-            memoryEnabled: $('#generalMemoryEnabled').is(':checked'),
-            memoryIsolation: $('#generalMemoryIsolation').is(':checked'),
             mcpEnabled: $('#generalMcpEnabled').is(':checked'),
             openApiEnabled: $('#generalOpenApiEnabled').is(':checked'),
             bashAsyncEnabled: $('#generalBashAsyncEnabled').is(':checked'),
@@ -113,8 +111,6 @@
         'generalSandboxMode',
         'generalSandboxAllowUserHome',
         'generalSandboxSystemRestrict',
-        'generalMemoryEnabled',
-        'generalMemoryIsolation',
         'generalCliPrintSimplified',
         'generalBashAsyncEnabled',
         'generalSubagentEnabled',
@@ -161,8 +157,6 @@
                 $('#generalApiRetries').val(d.apiRetries != null ? d.apiRetries : '');
                 $('#generalMcpRetries').val(d.mcpRetries != null ? d.mcpRetries : '');
                 $('#generalModelRetries').val(d.modelRetries != null ? d.modelRetries : '');
-                $('#generalMemoryEnabled').prop('checked', d.memoryEnabled !== false);
-                $('#generalMemoryIsolation').prop('checked', d.memoryIsolation !== false);
                 $('#generalMcpEnabled').prop('checked', d.mcpEnabled !== false);
                 $('#generalOpenApiEnabled').prop('checked', d.openApiEnabled !== false);
                 $('#generalBashAsyncEnabled').prop('checked', !!d.bashAsyncEnabled);

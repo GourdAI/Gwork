@@ -767,29 +767,34 @@ $(document).on('click', '#settingsBtn', function() {
     }, 50);
 });
 
-/* 打开设置浮层并跳转到指定 tab（侧边栏主导航「自动化 / 技能」入口）。
-   app-settings.js 整体包裹在 IIFE 内，openSettings 未必挂到全局——取不到时退回
-   点击 #settingsBtn（其 click 已绑定 openSettings）。tab 点击走 .settings-tabs 上
-   已注册的委托，trigger('click') 可命中。 */
-function openSettingsToTab(tab) {
-    if (typeof openSettings === 'function') openSettings();
-    else $('#settingsBtn').trigger('click');
-    var $t = $('.settings-tab[data-tab="' + tab + '"]');
-    if ($t.length) $t.trigger('click');
-}
-/* 「自动化」是独立主视图（app-automation.js），不再走设置浮层 */
+/* 「自动化 / 技能」均为独立主视图，不再走设置浮层 */
 $(document).on('click', '#automationNavBtn', function() {
     if (typeof window.openAutomation === 'function') window.openAutomation();
 });
-$(document).on('click', '#skillsNavBtn', function() { openSettingsToTab('skills'); });
+$(document).on('click', '#skillsNavBtn', function() {
+    if (typeof window.openSkills === 'function') window.openSkills();
+});
+$(document).on('click', '#channelNavBtn', function() {
+    if (typeof window.openChannel === 'function') window.openChannel();
+});
+$(document).on('click', '#modelConfigNavBtn', function() {
+    if (typeof window.openModelSettings === 'function') window.openModelSettings();
+});
 
 /* ===== View Switch ===== */
 function switchToChatMode() {
     // 自动化视图占据主区时，即便 inChatMode 仍为 true 也必须走完整恢复流程，
     // 否则 chatView 拿不回 .active（防御未来又出现只改 DOM 不同步标志的入口）
     var fromAutomation = (typeof window.isAutomationOpen === 'function') && window.isAutomationOpen();
+    var fromSkills = (typeof window.isSkillsOpen === 'function') && window.isSkillsOpen();
+    var fromChannel = (typeof window.isChannelOpen === 'function') && window.isChannelOpen();
+    var fromModelSettings = (typeof window.isModelSettingsOpen === 'function') && window.isModelSettingsOpen();
     if (typeof window.closeAutomation === 'function') window.closeAutomation();
-    if (inChatMode && !fromAutomation) return;
+    if (typeof window.closeSkills === 'function') window.closeSkills();
+    if (typeof window.closeChannel === 'function') window.closeChannel();
+    if (typeof window.closeModelSettings === 'function') window.closeModelSettings();
+    if (typeof window.closeMemoryView === 'function') window.closeMemoryView();
+    if (inChatMode && !fromAutomation && !fromSkills && !fromChannel && !fromModelSettings) return;
     inChatMode = true;
     $(welcomeView).hide();
     $(chatView).addClass('active');
@@ -799,6 +804,10 @@ function switchToChatMode() {
 }
 function switchToWelcomeMode() {
     if (typeof window.closeAutomation === 'function') window.closeAutomation();
+    if (typeof window.closeSkills === 'function') window.closeSkills();
+    if (typeof window.closeChannel === 'function') window.closeChannel();
+    if (typeof window.closeModelSettings === 'function') window.closeModelSettings();
+    if (typeof window.closeMemoryView === 'function') window.closeMemoryView();
     inChatMode = false;
     if (typeof forgetActiveSession === 'function') forgetActiveSession();
     SESSION_ID = (typeof newSessionId === 'function') ? newSessionId() : ('work-' + Date.now().toString(36));

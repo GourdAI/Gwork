@@ -68,7 +68,7 @@
     })();
 
     // 界面片段：按此顺序注入，保证同一挂载点内的源序（chat 的欢迎/对话视图在 code 的编辑器之前）
-    var FRAGMENTS = ['/chat.html', '/code.html', '/automation.html', '/settings.html'];
+    var FRAGMENTS = ['/chat.html', '/code.html', '/automation.html', '/skills.html', '/channel.html', '/settings.html', '/model-settings.html', '/memory.html'];
 
     // 应用脚本加载顺序（与原 web.html 第 1404-1425 行完全一致）
     var APP_SCRIPTS = [
@@ -83,17 +83,17 @@
         '/js/app-monaco.js',
         '/js/app-gitdiff.js',
         '/js/app-todos.js',
-    '/js/app-memory.js',
+        '/js/app-memory.js',
         '/js/app-context.js',
         '/js/app-settings.js',
         '/js/app-settings-general.js',
         '/js/app-settings-permission.js',
-        '/js/app-settings-providers.js',
         '/js/app-settings-mounts.js',
         '/js/app-settings-mcp.js',
         '/js/app-settings-openapi.js',
         '/js/app-settings-lsp.js',
-        '/js/app-settings-skill.js',
+        '/js/app-model-settings.js',
+        '/js/app-skills.js',
         '/js/app-automation.js',
         '/js/app-channel-config.js',
         '/js/app-settings-acp.js',

@@ -634,31 +634,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .todo-float-panel .todo-list { max-height: 260px; overflow-y: auto; }
 .todo-float-panel .todo-empty { height: auto; }
 
-/* ===== Memory panel（心智记忆查看，全局浮层） ===== */
-.memory-panel { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); width: 600px; max-width: calc(100vw - 32px); max-height: calc(100vh - 110px); background: var(--bg-input-box); border: 1px solid var(--border-color); border-radius: 12px; box-shadow: var(--shadow-lg); z-index: 1200; display: none; flex-direction: column; overflow: hidden; }
-.memory-panel.show { display: flex; }
-.memory-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px 0 12px; }
-.memory-panel-tabs { display: flex; gap: 4px; background: var(--bg-secondary); border-radius: 8px; padding: 3px; }
-.memory-tab { border: none; background: transparent; color: var(--text-secondary); font-size: 13px; padding: 5px 14px; border-radius: 6px; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
-.memory-tab:hover { color: var(--text-primary); }
-.memory-tab.active { background: var(--bg-input-box); color: var(--text-primary); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
-.memory-panel-actions { display: flex; gap: 4px; }
-.memory-icon-btn { width: 26px; height: 26px; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
-.memory-icon-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
-.memory-panel-meta { padding: 6px 14px 0 14px; font-size: 12px; color: var(--text-tertiary); }
-.memory-panel-body { overflow-y: auto; padding: 10px 12px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
-.memory-empty { padding: 32px 12px; text-align: center; color: var(--text-tertiary); font-size: 13px; }
-.memory-error { color: #e5484d; }
-.memory-item { border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 12px; background: var(--bg-primary); }
-.memory-item-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; min-width: 0; }
-.memory-item-key { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-.memory-item-imp { flex-shrink: 0; font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-color); color: var(--text-secondary); background: var(--bg-secondary); }
-.memory-item-imp.imp-critical { color: #c2410c; border-color: rgba(194,65,12,.35); background: rgba(194,65,12,.08); }
-.memory-item-imp.imp-high { color: #b45309; border-color: rgba(180,83,9,.3); background: rgba(180,83,9,.08); }
-.memory-item-time { flex-shrink: 0; font-size: 11px; color: var(--text-tertiary); }
-.memory-item-content { font-size: 13px; line-height: 1.6; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; }
-[data-theme="dark"] .memory-item-imp.imp-critical { color: #fb923c; }
-[data-theme="dark"] .memory-item-imp.imp-high { color: #fbbf24; }
+
 
 
 /* Voice Input */

@@ -1,0 +1,75 @@
+/* ===== memory-view.css — 记忆独立主视图 =====
+ * 骨架与 .automation-view / .model-settings-view 同构（基线 none + .active 显示）。
+ * 开关卡片对齐参考图交互（左标题+描述、右开关）；toggle-switch 复用 settings.css 全局组件类。
+ * 记忆条目卡片由原浮层样式迁入并扩展删除按钮；全部使用主题变量，亮暗自适应。
+ */
+
+.memory-view { flex: 1; display: none; flex-direction: column; min-height: 0; overflow: hidden; }
+.memory-view.active { display: flex; }
+body.code-mode .memory-view { display: none !important; }
+
+.memory-view-scroll { flex: 1; overflow-y: auto; padding: 28px 24px 40px; }
+.memory-view-inner { max-width: 1100px; margin: 0 auto; width: 100%; }
+
+/* ===== 头部（与 .automation-header / .skills-header 同规格） ===== */
+.memory-view-header { margin-bottom: 22px; }
+.memory-view-title { margin: 0; font-size: 26px; font-weight: 600; color: var(--text-primary); letter-spacing: .3px; }
+.memory-view-subtitle { margin-top: 6px; font-size: 13px; color: var(--text-tertiary); line-height: 1.6; }
+
+/* ===== 开关卡片（左标题+描述、右开关） ===== */
+.memory-switch-card {
+    display: flex; align-items: center; gap: 16px;
+    border: 1px solid var(--border-color); border-radius: 12px;
+    background: var(--bg-card, var(--bg-main));
+    padding: 14px 18px; margin-bottom: 12px;
+}
+.memory-switch-info { flex: 1; min-width: 0; }
+.memory-switch-title { font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
+.memory-switch-desc { font-size: 12px; color: var(--text-tertiary); line-height: 1.6; }
+
+/* ===== 已保存的记忆区 ===== */
+.memory-saved-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin: 26px 0 12px; }
+.memory-saved-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.memory-saved-desc { margin-top: 4px; font-size: 12px; color: var(--text-tertiary); }
+.memory-view-icon-btn {
+    width: 28px; height: 28px; flex-shrink: 0;
+    border: 1px solid var(--border-color); border-radius: 8px;
+    background: var(--bg-card, var(--bg-main)); color: var(--text-secondary);
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: all .15s;
+}
+.memory-view-icon-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.memory-saved-tabs { display: flex; gap: 4px; background: var(--bg-secondary); border-radius: 8px; padding: 3px; width: fit-content; margin-bottom: 12px; }
+.memory-view-tab { border: none; background: transparent; color: var(--text-secondary); font-size: 13px; padding: 5px 14px; border-radius: 6px; cursor: pointer; transition: all .15s; white-space: nowrap; }
+.memory-view-tab:hover { color: var(--text-primary); }
+.memory-view-tab.active { background: var(--bg-input-box); color: var(--text-primary); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+
+.memory-saved-meta { padding: 0 2px 8px; font-size: 12px; color: var(--text-tertiary); }
+.memory-saved-list { display: flex; flex-direction: column; gap: 8px; }
+
+/* ===== 记忆条目卡片 ===== */
+.memory-item { border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 12px; background: var(--bg-card, var(--bg-main)); }
+.memory-item-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; min-width: 0; }
+.memory-item-key { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+/* 重要度徽章：分级配色（imp 数值 → 核心/重要/普通/次要 易懂文案，见 app-memory.js） */
+.memory-item-imp { flex-shrink: 0; font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-color); color: var(--text-secondary); background: var(--bg-secondary); cursor: default; }
+.memory-item-imp.imp-critical { color: #c2410c; border-color: rgba(194,65,12,.35); background: rgba(194,65,12,.08); }
+.memory-item-imp.imp-high { color: #b45309; border-color: rgba(180,83,9,.3); background: rgba(180,83,9,.08); }
+.memory-item-imp.imp-mid { color: #0369a1; border-color: rgba(3,105,161,.3); background: rgba(3,105,161,.08); }
+.memory-item-time { flex-shrink: 0; font-size: 11px; color: var(--text-tertiary); }
+.memory-item-delete {
+    flex-shrink: 0; width: 24px; height: 24px;
+    border: none; border-radius: 6px; background: transparent;
+    color: var(--text-tertiary); cursor: pointer;
+    display: flex; align-items: center; justify-content: center; transition: all .15s;
+}
+.memory-item-delete:hover { background: var(--bg-hover); color: var(--color-danger, #e5484d); }
+.memory-item-content { font-size: 13px; line-height: 1.6; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; }
+
+.memory-empty { padding: 32px 12px; text-align: center; color: var(--text-tertiary); font-size: 13px; }
+.memory-error { color: #e5484d; }
+
+[data-theme="dark"] .memory-item-imp.imp-critical { color: #fb923c; }
+[data-theme="dark"] .memory-item-imp.imp-high { color: #fbbf24; }
+[data-theme="dark"] .memory-item-imp.imp-mid { color: #7dd3fc; }

@@ -102,8 +102,7 @@
     function mod(name) { return window[name]; }
 
     function resetCurrentTabView(targetTab) {
-        if (targetTab === 'providers' && window.settingsProviders) { window.settingsProviders.showList(); }
-        else if (targetTab === 'mounts' && mod('_settingsMounts')) { mod('_settingsMounts').showList(); mod('_settingsMounts').reset(); }
+        if (targetTab === 'mounts' && mod('_settingsMounts')) { mod('_settingsMounts').showList(); mod('_settingsMounts').reset(); }
         else if (targetTab === 'mcp' && mod('_settingsMcp')) { mod('_settingsMcp').showList(); mod('_settingsMcp').reset(); $('#mcpToolsToolbar').hide(); }
         else if (targetTab === 'openapi' && mod('_settingsOpenapi')) { mod('_settingsOpenapi').showList(); mod('_settingsOpenapi').reset(); }
         else if (targetTab === 'lsp' && mod('_settingsLsp')) { mod('_settingsLsp').showList(); mod('_settingsLsp').reset(); }
@@ -124,17 +123,13 @@
         $overlay.hide();
         // 广播设置关闭：侧栏「任务」区等依赖设置页数据的视图据此刷新
         document.dispatchEvent(new Event('settings:closed'));
-        if (window.settingsProviders) window.settingsProviders.showList();
         if (mod('_settingsMcp')) mod('_settingsMcp').showList();
         if (mod('_settingsOpenapi')) mod('_settingsOpenapi').showList();
         if (mod('_settingsLsp')) mod('_settingsLsp').showList();
         if (mod('_settingsMounts')) mod('_settingsMounts').showList();
         $('#mcpFormActions, #openapiFormActions, #lspFormActions').hide();
-        if ($('#skillsSearchInput').length) {
-            $('#skillsSearchInput').val('');
-            $('#skillsSearchClear').hide();
-        }
     }
+
 
     $settingsBtn.on('click', openSettings);
     $('#settingsCloseBtn').on('click', closeSettings);
@@ -169,12 +164,6 @@
         } else if (targetTab === 'permission') {
             $('#settingsTabPermission').addClass('active');
             if (mod('_settingsPermission')) mod('_settingsPermission').load();
-        } else if (targetTab === 'providers') {
-            $('#settingsTabProviders').addClass('active');
-            if (window.settingsProviders) window.settingsProviders.loadList();
-        } else if (targetTab === 'skills') {
-            $('#settingsTabSkills').addClass('active');
-            if (window._skillModule) window._skillModule.resetAndLoad();
         } else if (targetTab === 'mounts') {
             $('#settingsTabMounts').addClass('active');
             if (mod('_settingsMounts')) mod('_settingsMounts').load();
@@ -187,9 +176,6 @@
         } else if (targetTab === 'lsp') {
             $('#settingsTabLsp').addClass('active');
             if (mod('_settingsLsp')) mod('_settingsLsp').load();
-        } else if (targetTab === 'channel') {
-            $('#settingsTabChannel').addClass('active');
-            if (window._channelModule) window._channelModule.load();
         } else if (targetTab === 'acp') {
             $('#settingsTabAcp').addClass('active');
             if (mod('_settingsAcp')) mod('_settingsAcp').load();
@@ -205,13 +191,10 @@
         var targetTab = $active.attr('data-tab');
         if (targetTab === 'general') { if (mod('_settingsGeneral')) mod('_settingsGeneral').load(); }
         else if (targetTab === 'permission') { if (mod('_settingsPermission')) mod('_settingsPermission').load(); }
-        else if (targetTab === 'providers') { if (window.settingsProviders) window.settingsProviders.loadList(); }
-        else if (targetTab === 'skills') { if (window._skillModule) window._skillModule.resetAndLoad(); }
         else if (targetTab === 'mounts') { if (mod('_settingsMounts')) mod('_settingsMounts').load(); }
         else if (targetTab === 'mcp') { if (mod('_settingsMcp')) mod('_settingsMcp').load(); }
         else if (targetTab === 'openapi') { if (mod('_settingsOpenapi')) mod('_settingsOpenapi').load(); }
         else if (targetTab === 'lsp') { if (mod('_settingsLsp')) mod('_settingsLsp').load(); }
-        else if (targetTab === 'channel') { if (window._channelModule) window._channelModule.load(); }
         else if (targetTab === 'acp') { if (mod('_settingsAcp')) mod('_settingsAcp').load(); }
         else if (targetTab === 'about') { if (mod('_settingsAbout')) mod('_settingsAbout').load(); }
     }

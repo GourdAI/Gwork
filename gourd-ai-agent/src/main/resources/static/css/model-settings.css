@@ -1,0 +1,125 @@
+/* ===== model-settings.css — 模型配置独立主视图（双栏 Master-Detail） =====
+ * 骨架与 .automation-view 同构（基线 none + .active 显示）。
+ * 双栏卡片：左栏供应商列表（内置/自定义分组 + 状态圆点），右栏详情/表单常驻。
+ * 表单内部组件（form-group / provider-model-* / settings-scope-toggle /
+ *  model-add-* / btn-primary 等）全部复用 settings.css 组件类，主题变量自适应亮暗。
+ * 底色与卡片规格对齐自动化/技能视图（--bg-card, var(--bg-main) fallback）。
+ */
+
+.model-settings-view { flex: 1; display: none; flex-direction: column; min-height: 0; overflow: hidden; }
+.model-settings-view.active { display: flex; }
+body.code-mode .model-settings-view { display: none !important; }
+
+.model-settings-scroll { flex: 1; overflow-y: auto; padding: 28px 24px 40px; }
+/* inner 撑满滚动容器可视高度：卡片 flex:1 填充剩余空间，
+   左右栏各自内部滚动；仅当内容真正超出（窗口过短触底下限）才出现滚动条 */
+.model-settings-inner { max-width: 1100px; margin: 0 auto; width: 100%; height: 100%; display: flex; flex-direction: column; }
+
+/* ===== 头部（与 .automation-header / .skills-header 同规格） ===== */
+.model-settings-header { margin-bottom: 22px; }
+.model-settings-title { margin: 0; font-size: 26px; font-weight: 600; color: var(--text-primary); letter-spacing: .3px; }
+.model-settings-subtitle { margin-top: 6px; font-size: 13px; color: var(--text-tertiary); line-height: 1.6; }
+
+
+/* ===== 双栏卡片 ===== */
+.model-settings-card {
+    display: flex; align-items: stretch;
+    border: 1px solid var(--border-color); border-radius: 12px;
+    background: var(--bg-card, var(--bg-main)); overflow: hidden;
+    flex: 1; min-height: 480px; /* 填充剩余高度；窗口过短超出下限时由外层滚动接管 */
+}
+
+/* ----- 左栏 ----- */
+.model-settings-left {
+    width: 240px; flex-shrink: 0;
+    border-right: 1px solid var(--border-color);
+    display: flex; flex-direction: column; min-height: 0;
+}
+.model-settings-left-scroll { flex: 1; overflow-y: auto; padding: 16px 12px 12px; min-height: 0; }
+
+.model-settings-group { margin-bottom: 18px; }
+.model-settings-group-label {
+    font-size: 12px; color: var(--text-secondary); padding: 0 8px 8px;
+    user-select: none;
+}
+.model-settings-group-list { display: flex; flex-direction: column; gap: 2px; }
+
+/* 供应商项（自定义项支持拖拽排序：顺序持久化于 localStorage） */
+.ms-provider-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 10px; border-radius: 8px; cursor: pointer;
+    transition: background .15s;
+    user-select: none; /* 拖拽时防止选中文本（mousedown 不能 preventDefault，否则拖拽无法发起） */
+}
+.ms-provider-item.dragging { opacity: .45; }
+
+/* 拖拽手柄（仅自定义供应商渲染；点击不触发选中） */
+.ms-provider-drag-handle {
+    width: 14px; height: 18px; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--text-tertiary, var(--text-secondary)); opacity: .55;
+    cursor: grab; border-radius: 4px; transition: opacity .15s;
+    user-select: none; touch-action: none;
+}
+.ms-provider-item:hover .ms-provider-drag-handle { opacity: 1; }
+.ms-provider-drag-handle:hover { background: var(--bg-hover, var(--bg-main)); color: var(--text-secondary); }
+.ms-provider-item.dragging .ms-provider-drag-handle { cursor: grabbing; }
+.ms-provider-item:hover { background: var(--bg-hover, var(--bg-main)); }
+.ms-provider-item.selected { background: var(--accent-light); }
+.ms-provider-item.selected .ms-provider-name { color: var(--accent); font-weight: 600; }
+.ms-provider-item.disabled { opacity: .55; }
+.ms-provider-item.disabled .ms-provider-name { color: var(--text-secondary); }
+
+.ms-provider-icon {
+    width: 28px; height: 28px; flex-shrink: 0; border-radius: 7px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700; color: #fff;
+    background: var(--accent);
+}
+.ms-provider-icon.builtin { background: var(--text-secondary); }
+.ms-provider-icon.custom { background: var(--bg-main); border: 1px solid var(--border-color); color: var(--text-primary); }
+
+.ms-provider-info { flex: 1; min-width: 0; }
+.ms-provider-name { font-size: 13px; font-weight: 500; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ms-provider-count { font-size: 11px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.ms-provider-dot {
+    width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%;
+    background: var(--text-secondary);
+}
+.ms-provider-dot.on { background: var(--color-success, #3ecf6f); }
+
+/* 左栏底部添加按钮（虚线全宽，参考图样式） */
+.model-settings-add-provider-btn {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    width: 100%; padding: 9px 0; margin-top: 4px;
+    border: 1px dashed var(--border-color); border-radius: 8px;
+    background: transparent; color: var(--text-secondary);
+    font-size: 13px; cursor: pointer; transition: color .15s, border-color .15s, background .15s;
+}
+.model-settings-add-provider-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-light); }
+
+/* 空分组占位 */
+.model-settings-group-empty { font-size: 12px; color: var(--text-secondary); padding: 2px 8px 6px; }
+
+/* 拖拽排序时的释放位置指示线（由 JS 插入/移除） */
+.ms-drag-indicator {
+    height: 2px; margin: 1px 6px; border-radius: 1px;
+    background: var(--accent); flex-shrink: 0;
+}
+
+/* ----- 右栏 ----- */
+.model-settings-right { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.model-settings-form-wrap { flex: 1; overflow-y: auto; padding: 24px 28px; min-height: 0; }
+/* settings-section 在右栏内不额外撑边距（头部间距交给 .model-settings-form-wrap） */
+.model-settings-right .settings-section { padding: 0; }
+
+/* 响应式：窄屏时上下堆叠 */
+@media (max-width: 860px) {
+    .model-settings-inner { height: auto; display: block; }
+    .model-settings-card { flex-direction: column; flex: none; min-height: 0; }
+    .model-settings-left { width: 100%; border-right: none; border-bottom: 1px solid var(--border-color); }
+    .model-settings-left-scroll { max-height: 300px; }
+    .model-settings-right { overflow: visible; }
+    .model-settings-form-wrap { overflow: visible; }
+}

@@ -1,159 +1,206 @@
 /* ===== app-memory.js ===== */
-/* 心智记忆面板：查看工作空间 / 全局两个域的记忆条目（只读）。
-   入口：chat 模式侧边栏 #memoryViewBtn；专注模式文件树面板顶部 #filerMemoryBtn。 */
+/* 记忆主视图：开关卡片（心智记忆 / 记忆隔离）+ 已保存记忆列表（workspace/global 双域，支持手动删除）。
+   入口：侧栏主导航 #memoryNavBtn；专注模式 #filerMemoryBtn（退出专注模式并打开本视图）。
+   视图互斥与 openAutomation 同构；开关走 /web/settings/general/save（后端 bindTo 为部分 merge，
+   仅提交变更字段不会冲掉其它已保存值）。 */
 
-(function() {
-    if (document.getElementById('memoryPanelWrap')) return; // 防重复挂载
+(function () {
+    'use strict';
+
+    var $view = $('#memoryView');
+    if (!$view.length) return; // 片段未注入时静默退出
 
     var SCOPE_WORKSPACE = 'workspace';
-    var SCOPE_GLOBAL = 'global';
     var currentScope = SCOPE_WORKSPACE;
-    var panelOpen = false;
 
+    function t(key) { return window.GourdI18n ? window.GourdI18n.t(key) : key; }
     function escHtml(s) {
-        return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
-            return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+    }
+    function sessionHeaders() {
+        var headers = {};
+        var cwd = (typeof window.getSessionCwd === 'function') ? window.getSessionCwd() : '';
+        if (cwd) headers['X-Session-Cwd'] = cwd;
+        return headers;
+    }
+
+    var $list = $('#memoryViewList');
+    var $meta = $('#memoryViewMeta');
+    var $enabledSwitch = $('#memoryEnabledSwitch');
+    var $isolationSwitch = $('#memoryIsolationSwitch');
+
+    /* ===================== 视图入口（与 openAutomation 同构） ===================== */
+
+    function openMemoryView() {
+        if (typeof window.exitCodeMode === 'function' && window.appMode === 'code') {
+            window.exitCodeMode();
+        }
+        if (typeof window.closeAutomation === 'function') window.closeAutomation();
+        if (typeof window.closeSkills === 'function') window.closeSkills();
+        if (typeof window.closeChannel === 'function') window.closeChannel();
+        if (typeof window.closeModelSettings === 'function') window.closeModelSettings();
+        $('#welcomeView').hide();
+        $('#chatView').removeClass('active');
+        $view.addClass('active');
+        $('.main-nav-item').removeClass('active');
+        $('#memoryNavBtn').addClass('active');
+
+        // 关键：本视图既不属于 chat 也不属于 welcome，必须让出 inChatMode（同 openAutomation 注释）
+        window.inChatMode = false;
+
+        if (typeof window.closeSettings === 'function') window.closeSettings();
+        else if ($('#settingsOverlay').is(':visible')) $('#settingsCloseBtn').trigger('click');
+
+        loadSwitches();
+        loadMemories();
+    }
+
+    function closeMemoryView() {
+        $view.removeClass('active');
+        $('#memoryNavBtn').removeClass('active');
+    }
+
+    window.openMemoryView = openMemoryView;
+    window.closeMemoryView = closeMemoryView;
+    window.isMemoryViewOpen = function () { return $view.hasClass('active'); };
+
+    /* ===================== 开关（即时保存，部分 merge 安全） ===================== */
+
+    function loadSwitches() {
+        $.get('/web/settings/general').done(function (res) {
+            var d = (res && res.data) ? res.data : (res || {});
+            $enabledSwitch.prop('checked', d.memoryEnabled !== false);
+            $isolationSwitch.prop('checked', d.memoryIsolation !== false);
         });
     }
 
-    function t(key) {
-        return (window.GourdI18n && GourdI18n.t) ? GourdI18n.t(key) : key;
+    function saveSwitch(field, value) {
+        var body = {};
+        body[field] = value;
+        $.ajax({
+            url: '/web/settings/general/save',
+            method: 'POST',
+            data: JSON.stringify(body),
+            contentType: 'application/json',
+            dataType: 'json'
+        }).fail(function () {
+            loadSwitches(); // 保存失败回滚开关态
+        });
     }
 
-    /* ---------- DOM 构建 ---------- */
-    function buildPanel() {
-        var wrap = document.createElement('div');
-        wrap.id = 'memoryPanelWrap';
-        wrap.className = 'memory-panel';
-        wrap.innerHTML =
-            '<div class="memory-panel-header">' +
-                '<div class="memory-panel-tabs">' +
-                    '<button class="memory-tab active" data-scope="workspace">' + escHtml(t('memory.tab_workspace')) + '</button>' +
-                    '<button class="memory-tab" data-scope="global">' + escHtml(t('memory.tab_global')) + '</button>' +
-                '</div>' +
-                '<div class="memory-panel-actions">' +
-                    '<button class="memory-icon-btn" id="memoryRefreshBtn" title="' + escHtml(t('memory.refresh')) + '">' +
-                        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>' +
-                    '</button>' +
-                    '<button class="memory-icon-btn" id="memoryCloseBtn" title="' + escHtml(t('memory.close')) + '">' +
-                        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>' +
-                    '</button>' +
-                '</div>' +
-            '</div>' +
-            '<div class="memory-panel-meta" id="memoryPanelMeta"></div>' +
-            '<div class="memory-panel-body" id="memoryPanelBody">' +
-                '<div class="memory-empty">' + escHtml(t('memory.loading')) + '</div>' +
-            '</div>';
-        document.body.appendChild(wrap);
-        return wrap;
-    }
+    $enabledSwitch.on('change', function () { saveSwitch('memoryEnabled', this.checked); });
+    $isolationSwitch.on('change', function () { saveSwitch('memoryIsolation', this.checked); });
 
-    var panel = buildPanel();
-    var body = panel.querySelector('#memoryPanelBody');
-    var meta = panel.querySelector('#memoryPanelMeta');
-    var tabs = panel.querySelectorAll('.memory-tab');
+    /* ===================== 记忆列表 ===================== */
 
-    /* ---------- 数据加载 ---------- */
     function loadMemories() {
-        body.innerHTML = '<div class="memory-empty">' + escHtml(t('memory.loading')) + '</div>';
-        meta.textContent = '';
+        $list.html('<div class="memory-empty">' + escHtml(t('memory.loading')) + '</div>');
+        $meta.text('');
 
-        var headers = {};
-        var cwd = (typeof getSessionCwd === 'function') ? getSessionCwd() : '';
-        if (cwd) headers['X-Session-Cwd'] = cwd;
-
-        fetch('/web/chat/memory/list?scope=' + encodeURIComponent(currentScope), { headers: headers })
-            .then(function(r) { return r.json(); })
-            .then(function(res) {
+        fetch('/web/chat/memory/list?scope=' + encodeURIComponent(currentScope), { headers: sessionHeaders() })
+            .then(function (r) { return r.json(); })
+            .then(function (res) {
                 var data = (res && res.data) ? res.data : {};
                 renderList(data.items || [], data.total || 0);
             })
-            .catch(function() {
-                body.innerHTML = '<div class="memory-empty memory-error">' + escHtml(t('memory.load_failed')) + '</div>';
+            .catch(function () {
+                $list.html('<div class="memory-empty memory-error">' + escHtml(t('memory.load_failed')) + '</div>');
             });
     }
 
-    function impClass(imp) {
+    /* 重要度（importance 1-10）→ 易懂分级文案 */
+    function impInfo(imp) {
         var v = Number(imp) || 0;
-        if (v >= 10) return 'imp-critical';
-        if (v >= 7) return 'imp-high';
-        if (v >= 4) return 'imp-mid';
-        return 'imp-low';
+        if (v >= 10) return { cls: 'imp-critical', label: t('memory.imp_critical') };
+        if (v >= 7) return { cls: 'imp-high', label: t('memory.imp_high') };
+        if (v >= 4) return { cls: 'imp-mid', label: t('memory.imp_mid') };
+        return { cls: 'imp-low', label: t('memory.imp_low') };
     }
 
     function renderList(items, total) {
-        meta.textContent = t('memory.count').replace('{n}', total);
+        $meta.text(t('memory.count').replace('{n}', total));
 
         if (!items.length) {
-            body.innerHTML = '<div class="memory-empty">' + escHtml(t('memory.empty')) + '</div>';
+            $list.html('<div class="memory-empty">' + escHtml(t('memory.empty')) + '</div>');
             return;
         }
 
         var html = '';
         for (var i = 0; i < items.length; i++) {
             var it = items[i];
+            var info = impInfo(it.importance);
+            var tip = t('memory.imp_tip').replace('{n}', String(Math.round(Number(it.importance) || 0)));
             html += '<div class="memory-item">' +
                 '<div class="memory-item-head">' +
                     '<span class="memory-item-key" title="' + escHtml(it.key) + '">' + escHtml(it.key) + '</span>' +
-                    '<span class="memory-item-imp ' + impClass(it.importance) + '">Imp ' + escHtml(it.importance) + '</span>' +
+                    '<span class="memory-item-imp ' + info.cls + '" title="' + escHtml(tip) + '">' + escHtml(info.label) + '</span>' +
                     '<span class="memory-item-time">' + escHtml(it.time || '') + '</span>' +
+                    '<button class="memory-item-delete" data-key="' + escHtml(it.key) + '" title="' + escHtml(t('memory.delete')) + '">' +
+                        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>' +
+                    '</button>' +
                 '</div>' +
                 '<div class="memory-item-content">' + escHtml(it.content) + '</div>' +
             '</div>';
         }
-        body.innerHTML = html;
+        $list.html(html);
     }
 
-    /* ---------- 交互 ---------- */
-    function setActiveTab(scope) {
-        for (var i = 0; i < tabs.length; i++) {
-            var b = tabs[i];
-            if (b.getAttribute('data-scope') === scope) b.classList.add('active');
-            else b.classList.remove('active');
-        }
-    }
+    /* ===================== 手动删除 ===================== */
 
-    function openPanel() {
-        panelOpen = true;
-        panel.classList.add('show');
-        loadMemories();
-    }
+    $list.on('click', '.memory-item-delete', function () {
+        var key = $(this).attr('data-key');
+        if (!key) return;
 
-    function closePanel() {
-        panelOpen = false;
-        panel.classList.remove('show');
-    }
-
-    function togglePanel() {
-        if (panelOpen) closePanel(); else openPanel();
-    }
-
-    for (var i = 0; i < tabs.length; i++) {
-        (function(btn) {
-            btn.addEventListener('click', function() {
-                var scope = btn.getAttribute('data-scope');
-                if (scope === currentScope) return;
-                currentScope = scope;
-                setActiveTab(scope);
-                loadMemories();
-            });
-        })(tabs[i]);
-    }
-
-    panel.querySelector('#memoryRefreshBtn').addEventListener('click', loadMemories);
-    panel.querySelector('#memoryCloseBtn').addEventListener('click', closePanel);
-
-    /* 点击面板外关闭 */
-    document.addEventListener('mousedown', function(e) {
-        if (!panelOpen) return;
-        if (panel.contains(e.target)) return;
-        if (e.target.closest && (e.target.closest('#memoryViewBtn') || e.target.closest('#filerMemoryBtn'))) return;
-        closePanel();
+        var doDelete = function () {
+            var headers = sessionHeaders();
+            headers['Content-Type'] = 'application/json';
+            fetch('/web/chat/memory/delete', {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({ scope: currentScope, key: key })
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    if (res && res.code === 200) {
+                        loadMemories();
+                    } else {
+                        window.layAlert(t('memory.delete_failed') + (res && res.description ? '：' + res.description : ''));
+                    }
+                })
+                .catch(function () {
+                    window.layAlert(t('memory.delete_failed'));
+                });
+        };
+        /* 与对话删除一致：统一 layConfirm 弹框（自动跟随主题），layer 缺失时兜底原生 confirm */
+        if (typeof window.layConfirm === 'function') window.layConfirm(t('memory.delete_confirm'), doDelete);
+        else if (window.confirm(t('memory.delete_confirm'))) doDelete();
     });
 
-    /* ---------- 入口绑定 ---------- */
-    var btnChat = document.getElementById('memoryViewBtn');
-    var btnFiler = document.getElementById('filerMemoryBtn');
-    if (btnChat) btnChat.addEventListener('click', togglePanel);
-    if (btnFiler) btnFiler.addEventListener('click', togglePanel);
+    /* ===================== tab 切换 / 刷新 / 入口绑定 ===================== */
+
+    $view.on('click', '.memory-view-tab', function () {
+        var scope = $(this).attr('data-scope');
+        if (!scope || scope === currentScope) return;
+        currentScope = scope;
+        $view.find('.memory-view-tab').removeClass('active');
+        $(this).addClass('active');
+        loadMemories();
+    });
+
+    $('#memoryViewRefreshBtn').on('click', function () { loadMemories(); });
+
+    /* 侧栏主导航入口（委托绑定，兼容脚本加载时序） */
+    $(document).on('click', '#memoryNavBtn', function () {
+        openMemoryView();
+    });
+
+    /* 专注模式入口：退出专注模式并打开记忆主视图 */
+    $(document).on('click', '#filerMemoryBtn', function () {
+        if (typeof window.exitCodeMode === 'function' && window.appMode === 'code') {
+            window.exitCodeMode();
+        }
+        openMemoryView();
+    });
 })();

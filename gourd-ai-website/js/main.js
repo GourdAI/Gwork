@@ -89,6 +89,9 @@ function renderDownloads() {
         const a = document.createElement('a');
         a.className = 'dl-row';
         a.href = row.url;
+        // 新开顶层窗口触发下载：站点被嵌在 sandbox iframe 中时，
+        // 同框导航会被 allow-downloads 拦截（无反应）。
+        a.target = '_blank';
         a.rel = 'noopener';
         a.innerHTML = info +
           '<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>';
@@ -121,9 +124,14 @@ function setupHeroCta() {
 
   if (row) {
     cta.href = row.url;
+    cta.target = '_blank';
+    cta.rel = 'noopener';
     title.textContent = '下载 GWork';
     desc.textContent = '适用于 ' + row.label;
   } else {
+    // 锚点跳转必须留在当前页
+    cta.removeAttribute('target');
+    cta.removeAttribute('rel');
     cta.href = '#downloads';
     title.textContent = '下载 GWork';
     desc.textContent = platform.name + ' 版即将推出 · 查看全部下载';
@@ -338,12 +346,69 @@ function setupSpotlight() {
   }, { passive: true });
 }
 
+/* ================= 顶部导航条 ================= */
+function setupNav() {
+  const header = document.getElementById('siteHeader');
+  const toggle = document.getElementById('navToggle');
+  const links = document.getElementById('navLinks');
+  const navSectionIds = ['features', 'quickstart', 'downloads'];
+
+  // 滚动：头部背景 + 当前区块高亮
+  function updateActive() {
+    if (!links) return;
+    const probe = window.scrollY + 120;
+    let currentId = '';
+    for (const id of navSectionIds) {
+      const sec = document.getElementById(id);
+      if (!sec) continue;
+      if (sec.getBoundingClientRect().top + window.scrollY <= probe) currentId = id;
+    }
+    const atBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
+    if (atBottom) currentId = 'downloads';
+
+    links.querySelectorAll('a').forEach(a => {
+      const target = a.getAttribute('href') || '';
+      a.classList.toggle('active', target === '#' + currentId);
+    });
+  }
+
+  function onScroll() {
+    if (header) header.classList.toggle('scrolled', window.scrollY > 8);
+    updateActive();
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+
+  // 移动端菜单开合
+  if (!toggle || !links) return;
+  const close = () => {
+    toggle.classList.remove('open');
+    links.classList.remove('open');
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-label', '打开菜单');
+  };
+  toggle.addEventListener('click', () => {
+    const open = links.classList.toggle('open');
+    toggle.classList.toggle('open', open);
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.setAttribute('aria-label', open ? '关闭菜单' : '打开菜单');
+  });
+  links.querySelectorAll('a').forEach(a => a.addEventListener('click', close));
+  document.addEventListener('click', e => {
+    if (links.classList.contains('open') && !e.target.closest('.site-header')) close();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') close();
+  });
+}
+
 /* ================= 启动 ================= */
 document.addEventListener('DOMContentLoaded', () => {
   renderDownloads();
   setupHeroCta();
   setupReveal();
   setupSpotlight();
+  setupNav();
 
   const win = document.querySelector('.app-window');
   if (win && 'IntersectionObserver' in window) {

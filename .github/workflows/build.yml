@@ -195,9 +195,16 @@ jobs:
           rm -rf "$JRE"
           cp -R build/jre-mac-x64 "$JRE"
           npm run build:mac -- --x64
+          # 暂存 x64 打包生成的 latest-mac.yml（下一步 arm64 打包会覆盖它），arm64 打包后再合并，
+          # 保证最终 latest-mac.yml 同时包含 x64 与 arm64 两个更新条目
+          if [ -f out/latest-mac.yml ]; then cp -f out/latest-mac.yml out/latest-mac.x64.yml; fi
           rm -rf "$JRE"
           cp -R build/jre-mac-arm64 "$JRE"
           npm run build:mac -- --arm64
+          if [ -f out/latest-mac.x64.yml ]; then
+            node scripts/merge-latest-yml.js out/latest-mac.x64.yml out/latest-mac.yml out/latest-mac.yml
+            rm -f out/latest-mac.x64.yml
+          fi
 
       # 校验 ad-hoc 签名与资源密封，防止再次产出 arm64「文件已损坏」包
       - name: 校验 macOS 签名
@@ -222,4 +229,6 @@ jobs:
             gourd-ai-desktop/out/*.dmg
             gourd-ai-desktop/out/*.AppImage
             gourd-ai-desktop/out/*.deb
+            gourd-ai-desktop/out/latest*.yml
+            gourd-ai-desktop/out/*.blockmap
           if-no-files-found: error

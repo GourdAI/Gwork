@@ -3,18 +3,81 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GWork · 桌面 AI 工作台</title>
-  <meta name="description" content="GWork 把多模型接入、Agent 任务编排、技能市场与本地工作区结合在一起，在一个桌面窗口里完成对话、编码、文档与自动化。支持 Windows / macOS / Linux。">
-  <meta name="keywords" content="GWork, AI 工作台, 桌面 AI, Agent, 智能编码, 多模型, noear, Solon">
-  <meta property="og:title" content="GWork · 桌面 AI 工作台">
-  <meta property="og:description" content="一个桌面，装下所有 AI 工作。多模型接入 · Agent 任务编排 · 技能市场 · 本地优先。">
+  <title>GWork · 桌面 AI 工作台｜Agent 任务编排 · 多模型接入 · AI 编码助手</title>
+
+  <!-- 基础 SEO -->
+  <meta name="description" content="GWork 是本地优先的桌面 AI 工作台：一个窗口接入 OpenAI、Claude、Gemini、DeepSeek、通义千问、Kimi、智谱 GLM 与本地 Ollama，内置 Agent 任务编排、AI 编码助手、技能市场与 MCP 工具，支持 Windows / macOS / Linux，数据本地存储、可完全自托管。">
+  <meta name="keywords" content="GWork,GWork下载,GWork官网,桌面AI工作台,AI工作台,AI桌面应用,桌面AI助手,AI助手,AI Agent,Agent任务编排,多模型接入,多模型AI客户端,AI编程助手,AI编码工具,智能编码,AI对话客户端,ChatGPT桌面版,Claude客户端,OpenAI客户端,DeepSeek客户端,通义千问,通义千问客户端,Kimi,智谱GLM,Gemini客户端,Ollama,本地模型,本地大模型,MCP工具,技能市场,AI插件,本地优先,数据自主,自托管AI,跨平台AI工具,Windows AI工具,macOS AI工具,Linux AI工具">
+  <meta name="author" content="GWork">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+  <meta name="theme-color" content="#050607">
+  <link rel="canonical" href="https://gourdwork.com/">
+
+  <!-- Open Graph / 社交分享 -->
+  <meta property="og:site_name" content="GWork">
+  <meta property="og:locale" content="zh_CN">
   <meta property="og:type" content="website">
+  <meta property="og:title" content="GWork · 桌面 AI 工作台｜多模型接入 · Agent 编排 · AI 编码">
+  <meta property="og:description" content="一个桌面，装下所有 AI 工作。多模型接入 · Agent 任务编排 · 技能市场 · 本地优先，支持 Windows / macOS / Linux。">
   <meta property="og:url" content="https://gourdwork.com/">
   <meta property="og:image" content="https://gourdwork.com/assets/icon-512.png">
-  <meta name="theme-color" content="#050607">
+  <meta property="og:image:alt" content="GWork 桌面 AI 工作台">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="GWork · 桌面 AI 工作台">
+  <meta name="twitter:description" content="多模型接入 · Agent 任务编排 · AI 编码助手 · 本地优先。支持 Windows / macOS / Linux。">
+  <meta name="twitter:image" content="https://gourdwork.com/assets/icon-512.png">
+
+  <!-- 图标 -->
   <link rel="icon" href="assets/favicon.ico">
   <link rel="apple-touch-icon" href="assets/icon-512.png">
   <link rel="stylesheet" href="css/styles.css">
+
+  <!-- 结构化数据：SoftwareApplication + Organization + WebSite -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "name": "GWork",
+        "alternateName": "GWork 桌面 AI 工作台",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Windows, macOS, Linux",
+        "description": "GWork 是本地优先的桌面 AI 工作台，支持多模型接入、Agent 任务编排、AI 编码助手与技能市场。",
+        "url": "https://gourdwork.com/",
+        "image": "https://gourdwork.com/assets/icon-512.png",
+        "featureList": [
+          "多模型统一接入",
+          "Agent 任务编排",
+          "技能与插件市场",
+          "内置编码工作台",
+          "本地优先 · 数据自主",
+          "跨平台一致体验"
+        ],
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "CNY"
+        }
+      },
+      {
+        "@type": "Organization",
+        "name": "GWork",
+        "url": "https://gourdwork.com/",
+        "logo": "https://gourdwork.com/assets/icon-512.png",
+        "description": "GWork 桌面 AI 工作台官网"
+      },
+      {
+        "@type": "WebSite",
+        "name": "GWork",
+        "url": "https://gourdwork.com/",
+        "inLanguage": "zh-CN"
+      }
+    ]
+  }
+  </script>
 </head>
 <body>
 
@@ -22,6 +85,29 @@
   <div class="bg-aurora" aria-hidden="true"></div>
   <div class="bg-grid" aria-hidden="true"></div>
   <div class="bg-spot" aria-hidden="true"></div>
+
+  <!-- ===== 顶部导航条 ===== -->
+  <header class="site-header" id="siteHeader">
+    <div class="container nav-inner">
+      <a class="nav-brand" href="#top" aria-label="GWork 首页">
+        <img src="assets/logo-white.png" alt="GWork">
+        <span>GWork</span>
+      </a>
+
+      <nav class="nav-links" id="navLinks" aria-label="主导航">
+        <a href="#features">产品能力</a>
+        <a href="#quickstart">快速上手</a>
+        <a href="#downloads">下载</a>
+      </nav>
+
+      <div class="nav-actions">
+        <a class="nav-cta" id="navCta" href="#downloads">下载 GWork</a>
+        <button class="nav-toggle" id="navToggle" type="button" aria-label="打开菜单" aria-expanded="false" aria-controls="navLinks">
+          <span></span><span></span><span></span>
+        </button>
+      </div>
+    </div>
+  </header>
 
   <main id="top">
 
@@ -242,7 +328,7 @@
             <div class="dl-col">
               <div class="dl-col-head"><h3>Windows</h3></div>
               <div class="dl-rows">
-                <a class="dl-row" href="downloads/GWork-Setup.exe">
+                <a class="dl-row" href="downloads/GWork-Setup.exe" target="_blank" rel="noopener">
                   <span class="dl-info"><span class="dl-name">Windows（64 位）</span><span class="fmt">.exe</span></span>
                 </a>
               </div>
@@ -250,10 +336,10 @@
             <div class="dl-col">
               <div class="dl-col-head"><h3>macOS</h3></div>
               <div class="dl-rows">
-                <a class="dl-row" href="downloads/GWork-arm64.dmg">
+                <a class="dl-row" href="downloads/GWork-arm64.dmg" target="_blank" rel="noopener">
                   <span class="dl-info"><span class="dl-name">macOS（Apple 芯片）</span><span class="fmt">.dmg</span></span>
                 </a>
-                <a class="dl-row" href="downloads/GWork-x64.dmg">
+                <a class="dl-row" href="downloads/GWork-x64.dmg" target="_blank" rel="noopener">
                   <span class="dl-info"><span class="dl-name">macOS（Intel 芯片）</span><span class="fmt">.dmg</span></span>
                 </a>
               </div>
@@ -261,10 +347,10 @@
             <div class="dl-col">
               <div class="dl-col-head"><h3>Linux</h3></div>
               <div class="dl-rows">
-                <a class="dl-row" href="downloads/GWork.AppImage">
+                <a class="dl-row" href="downloads/GWork.AppImage" target="_blank" rel="noopener">
                   <span class="dl-info"><span class="dl-name">Linux x64（免安装）</span><span class="fmt">.AppImage</span></span>
                 </a>
-                <a class="dl-row" href="downloads/GWork.deb">
+                <a class="dl-row" href="downloads/GWork.deb" target="_blank" rel="noopener">
                   <span class="dl-info"><span class="dl-name">Linux x64（Debian/Ubuntu）</span><span class="fmt">.deb</span></span>
                 </a>
               </div>

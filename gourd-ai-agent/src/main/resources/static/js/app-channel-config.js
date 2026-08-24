@@ -1,6 +1,7 @@
 /* ===== app-channel-config.js ===== */
-/* IM 通道管理 —— 作为设置面板的 "channel" tab 内容渲染 */
-/* 依赖：app-settings.js（负责 tab 切换），app-base.js */
+/* IM 通道管理（远控通道）—— 独立主视图（#channelView，侧栏「技能」下方入口），
+   与自动化/技能视图同构，互斥切换。 */
+/* 依赖：app-base.js */
 
 (function() {
     // 通道状态缓存
@@ -35,8 +36,9 @@
         return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
 
+    // 渲染容器：独立主视图的 #channelPanel（见 channel.html）
     function getContainer() {
-        return document.getElementById('settingsTabChannel');
+        return document.getElementById('channelPanel');
     }
 
     // ==================== 通道管理 - 卡片列表 ====================
@@ -45,8 +47,7 @@
         var body = getContainer();
         if (!body) return;
 
-        var html = '<div class="channel-cards-desc">' + GourdI18n.t('settings.channel.channel_cards_desc') + '</div>';
-        html += '<div class="channel-cards-grid">';
+        var html = '<div class="channel-cards-grid">';
 
         var channels = getChannels();
         for (var i = 0; i < channels.length; i++) {
@@ -875,7 +876,52 @@
         pollTimers = [];
     }
 
-    // ==================== 公开接口（供 app-settings.js 调用） ====================
+    // ==================== 视图入口（独立主视图，与自动化/技能同构） ====================
+
+    /** 打开远控通道视图（由左侧栏「远控通道」导航触发） */
+    function openChannel() {
+        // 与聊天/欢迎/自动化/技能视图互斥：隐藏它们，显示本视图
+        if (typeof window.exitCodeMode === 'function' && window.appMode === 'code') {
+            window.exitCodeMode();
+        }
+        if (typeof window.closeAutomation === 'function') window.closeAutomation();
+        if (typeof window.closeSkills === 'function') window.closeSkills();
+        if (typeof window.closeModelSettings === 'function') window.closeModelSettings();
+        if (typeof window.closeMemoryView === 'function') window.closeMemoryView();
+        $('#welcomeView').hide();
+        $('#chatView').removeClass('active');
+        $('#channelView').addClass('active');
+        $('.main-nav-item').removeClass('active');
+        $('#channelNavBtn').addClass('active');
+
+        // 独立视图既不属于 chat 也不属于 welcome，必须让出 inChatMode（与 automation/skills 一致），
+        // 否则切回聊天时 #chatView 拿不回 .active（主区停留白屏）
+        window.inChatMode = false;
+
+        // 关掉可能打开的设置浮层（浮层为高 z-index 遮罩，会盖住本视图）
+        if (typeof window.closeSettings === 'function') window.closeSettings();
+        else if ($('#settingsOverlay').is(':visible')) $('#settingsCloseBtn').trigger('click');
+
+        load();
+    }
+
+    /** 离开远控通道视图（切回聊天/欢迎/自动化/技能时由对应切换函数调用） */
+    function closeChannel() {
+        clearAllPolls();
+        $('#channelView').removeClass('active');
+        $('#channelNavBtn').removeClass('active');
+    }
+
+    window.openChannel = openChannel;
+    window.closeChannel = closeChannel;
+    window.isChannelOpen = function () { return $('#channelView').hasClass('active'); };
+
+    // 语言切换后重绘当前页（卡片/详情是动态渲染的，静态翻译无法覆盖）
+    document.addEventListener('i18n:localeChanged', function () {
+        if (window.isChannelOpen()) load();
+    });
+
+    // ==================== 公开接口 ====================
 
     function load() {
         clearAllPolls();
@@ -888,6 +934,7 @@
         loadSessions(check);
     }
 
-    window._channelModule = { load: load };
+    // 兼容保留：独立视图由 open/closeChannel 管理，load 在打开时调用
+    window._channelModule = { load: load, unload: clearAllPolls };
 
 })();

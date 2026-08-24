@@ -1,0 +1,21 @@
+/* channel.css — 远控通道（IM 通道管理）独立主视图
+ * 视图容器 / 滚动 / 内层宽度 / 页头与内容区块，命名与 automation.css、skills.css 对齐。
+ * 卡片、详情、二维码等内部样式沿用 app.css / settings.css 既有的 .channel-* 规则。
+ */
+
+/* ===== 视图容器（照 .automation-view / .skills-view 模式：基线 none + .active 显示） ===== */
+.channel-view { flex: 1; display: none; flex-direction: column; min-height: 0; overflow: hidden; }
+.channel-view.active { display: flex; }
+body.code-mode .channel-view { display: none !important; }
+
+.channel-scroll { flex: 1; overflow-y: auto; padding: 28px 24px 40px; }
+.channel-inner { max-width: 860px; margin: 0 auto; }
+
+/* ===== 页头（标题/描述复用 skills.css 的 .skills-title / .skills-desc） ===== */
+.channel-page-header { margin-bottom: 22px; }
+
+/* ===== 内容区块（照 .skills-section） ===== */
+.channel-page-section {
+    background: var(--bg-card, var(--bg-main)); border: 1px solid var(--border-color);
+    border-radius: 12px; padding: 18px 20px;
+}

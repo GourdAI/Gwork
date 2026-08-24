@@ -1536,6 +1536,60 @@ public class WebController {
         }
     }
 
+    /**
+     * 记忆删除接口（记忆主视图手动清理入口）。
+     *
+     * <p>与 {@code MemoryTalent.prune} 同款组合：storer.remove + searcher.removeIndex，
+     * userId 固定 "shared"（与 list 端点一致）。cwd 解析逻辑与 {@link #memoryList} 完全对齐。</p>
+     *
+     * @param ctx  请求上下文（workspace 域需携带 X-Session-Cwd 头）
+     * @param json 请求体：{"scope":"workspace|global","key":"..."}
+     */
+    @Post
+    @Mapping("/web/chat/memory/delete")
+    public Result memoryDelete(Context ctx, @Body String json) {
+        ONode tmp = ONode.ofJson(json);
+        String key = tmp.get("key").getString();
+        if (key == null || key.trim().isEmpty()) {
+            return Result.failure(400, "key is required");
+        }
+        String scope = tmp.get("scope").getString();
+
+        MemorySolutionProvider memoryProvider = engine.getMemoryProvider();
+        if (memoryProvider == null) {
+            return Result.failure(500, "Memory provider not configured");
+        }
+
+        boolean global = "global".equals(scope);
+        String cwd;
+        if (global) {
+            cwd = AgentFlags.getHarnessBase();
+        } else {
+            // 与 memoryList 同一套工作区解析逻辑
+            String sessionCwd = ctx.header("X-Session-Cwd");
+            if (sessionCwd != null && sessionCwd.contains("..")) {
+                return Result.failure(400, "Invalid Session Cwd");
+            }
+            cwd = Assert.isNotEmpty(sessionCwd) ? sessionCwd : engine.getWorkspace();
+        }
+
+        try {
+            MemorySolution solution = memoryProvider.get(cwd);
+            if (solution == null) {
+                return Result.failure(500, "Memory solution not available");
+            }
+            solution.getStorer().remove("shared", key);
+            MemorySearcher searcher = solution.getSearcher();
+            if (searcher != null) {
+                searcher.removeIndex("shared", key);
+            }
+            return Result.succeed();
+        } catch (Exception e) {
+            LOG.error("Failed to delete memory, scope={}, key={}: {}", scope, key, e.getMessage());
+            return Result.failure(500, e.getMessage());
+        }
+    }
+
     // ==================== 文件浏览（委派给 FileService） ====================
 
     /**
