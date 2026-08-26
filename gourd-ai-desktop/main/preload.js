@@ -54,25 +54,25 @@ window.addEventListener('DOMContentLoaded', () => {
     document.body.classList.add('is-mac');
   }
 
-  // 左侧 sidebar logo 行可拖拽移动窗口，按钮保持可点击
+  // 左侧 sidebar logo 行（macOS 上还含红绿灯让位空白区）可拖拽移动窗口，
+  // 按钮等交互元素保持可点击。
+  // 注意：no-drag 白名单一律用通用元素选择器（button/input/a），不得枚举业务类名——
+  // 历史教训：曾枚举 .new-chat-btn / .sidebar-header-actions，UI 重构类名失效后
+  // mac 拖拽区吞掉整个主导航导致全部按钮不可点击。
   const style = document.createElement('style');
   style.textContent = `
     body.is-electron .sidebar-header-top {
       -webkit-app-region: drag;
     }
-    body.is-electron .sidebar-header-actions,
-    body.is-electron .sidebar-header-actions * {
-      -webkit-app-region: no-drag;
-    }
-    /* macOS：让位出来的侧边栏顶部空白区也可拖拽窗口，交互元素保持可点击 */
+    /* macOS：让位出来的侧边栏顶部空白区也可拖拽窗口 */
     body.is-electron.is-mac .sidebar-header {
       -webkit-app-region: drag;
     }
-    body.is-electron.is-mac .sidebar-header-actions,
-    body.is-electron.is-mac .sidebar-header-actions *,
-    body.is-electron.is-mac .new-chat-btn,
-    body.is-electron.is-mac .sidebar-search-bar,
-    body.is-electron.is-mac .sidebar-search-bar * {
+    /* 拖拽区内交互元素打 no-drag 洞（含按钮内部图标/文字子节点） */
+    body.is-electron .sidebar-header button,
+    body.is-electron .sidebar-header button *,
+    body.is-electron .sidebar-header input,
+    body.is-electron .sidebar-header a {
       -webkit-app-region: no-drag;
     }
   `;

@@ -205,10 +205,16 @@ function hideAllWindows() {
 function createTray() {
   // 图标资源缺失时（如 mac 包未打包 icons 目录）createFromPath 得到空图，
   // new Tray 会直接抛异常并中断后续后端引导，这里降级跳过托盘。
-  const icon = nativeImage.createFromPath(getIconPath());
+  let icon = nativeImage.createFromPath(getIconPath());
   if (!icon || icon.isEmpty()) {
     console.warn('[gourd-ai-desktop] 托盘图标缺失，跳过托盘创建:', getIconPath());
     return;
+  }
+  // macOS 状态栏项按图片原始点尺寸渲染，不会像 Windows 托盘那样自动缩放：
+  // 820×820 的应用图标会被菜单栏高度裁成一条横贯菜单条的黑白色带。
+  // 交给 Tray 前缩放到菜单栏标准高度（约 18pt）。
+  if (process.platform === 'darwin') {
+    icon = icon.resize({ width: 18, height: 18 });
   }
   let trayInstance;
   try {
