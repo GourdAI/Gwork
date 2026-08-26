@@ -183,6 +183,7 @@
                                        "clear":  "Xóa lựa chọn"
                                    },
                 "sidebar":  {
+                                 "loop_mark":  "Tác vụ định kỳ",
                                 "new_task":  "Tác vụ mới",
                                 "search":  "Tìm kiếm",
                                 "automation":  "Tự động hóa",
@@ -198,8 +199,8 @@
                                 "expand_all":  "Mở rộng tất cả",
                                 "clear_all":  "Xóa tất cả phiên",
                                 "confirm_clear":  "Xóa tất cả phiên? Thao tác này không thể hoàn tác.",
-                                "no_tasks":  "Chưa có tác vụ định kỳ nào",
-                                "task_paused":  "Đã tạm dừng",
+                                
+                                
                                 "remove_project":  "Xóa khỏi danh sách",
                                 "model_config":  "Cấu hình mô hình",
                    "memory":  "Bộ nhớ"
@@ -545,6 +546,8 @@
                                   "maker_agent":  "Subagent thực thi",
                                   "checker_agent":  "Subagent xác minh",
                                   "max_iter":  "Số lặp tối đa",
+                                  "max_iter_unlimited":  "Không giới hạn",
+                                  "view_session":  "Xem hội thoại thực thi",
                                   "worktree_isolation":  "Cách ly Worktree",
                                   "test_run":  "Chạy thử",
                                   "save":  "Lưu",

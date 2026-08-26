@@ -183,6 +183,7 @@
                                        "clear":  "Clear selection"
                                    },
                 "sidebar":  {
+                                 "loop_mark":  "Scheduled task",
                                 "new_task":  "New Task",
                                 "search":  "Search",
                                 "automation":  "Automation",
@@ -198,8 +199,8 @@
                                 "expand_all":  "Expand all",
                                 "clear_all":  "Clear all sessions",
                                 "confirm_clear":  "Clear all sessions? This cannot be undone.",
-                                "no_tasks":  "No scheduled tasks",
-                                "task_paused":  "Paused",
+                                
+                                
                                 "remove_project":  "Remove from list",
                                 "model_config":  "Model Config",
                    "memory":  "Memory"
@@ -545,6 +546,8 @@
                                   "maker_agent":  "Executor Agent",
                                   "checker_agent":  "Checker Agent",
                                   "max_iter":  "Max Iterations",
+                                  "max_iter_unlimited":  "Unlimited",
+                                  "view_session":  "View execution chat",
                                   "worktree_isolation":  "Worktree Isolation",
                                   "test_run":  "Test Run",
                                   "save":  "Save",

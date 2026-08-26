@@ -1,6 +1,11 @@
 /**
- * electron-builder afterPack 钩子：对 macOS .app 做 ad-hoc 签名
+ * electron-builder afterPack 钩子
  *
+ * 按平台分派两件事：
+ *   - Windows：把内置 JRE 的 exe 版本资源改写为 GWork 品牌（防火墙弹窗 / 任务管理器）；
+ *   - macOS：对 .app 做 ad-hoc 签名。
+ *
+ * ── macOS ad-hoc 签名 ──
  * 背景：无 Apple 开发者证书时，electron-builder 会完全跳过签名流程。
  * 而 Apple Silicon (arm64) 的 macOS 要求所有可执行文件至少具备 ad-hoc 签名，
  * 否则 Gatekeeper 直接报「文件已损坏，无法打开」，且右键→打开也无法绕过
@@ -16,8 +21,20 @@
 const { execFileSync } = require('child_process');
 const path = require('path');
 
+const { brandJre } = require('./brand-jre.js');
+
 exports.default = async function afterPack(context) {
-  // 仅 macOS 产物需要处理
+  if (context.electronPlatformName === 'win32') {
+    // 在 NSIS 打包前对已解包产物处理，改动会被收进安装包
+    const jreDir = path.join(context.appOutDir, 'resources', 'extraResources', 'jre');
+    // 打标失败不阻断出包：品牌化属观感优化，缺失只是弹窗仍显示 OpenJDK，不影响功能
+    if (!brandJre(jreDir)) {
+      console.warn('[afterPack] JRE 品牌化未完全成功，安装包仍可用（弹窗可能显示 OpenJDK 字样）');
+    }
+    return;
+  }
+
+  // 以下仅 macOS 产物需要处理
   if (context.electronPlatformName !== 'darwin') return;
 
   // 有真实证书时由 electron-builder 官方签名流程处理（含公证），此处不干预

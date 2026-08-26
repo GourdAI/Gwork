@@ -1,6 +1,6 @@
 /* ===== app-memory.js ===== */
 /* 记忆主视图：开关卡片（心智记忆 / 记忆隔离）+ 已保存记忆列表（workspace/global 双域，支持手动删除）。
-   入口：侧栏主导航 #memoryNavBtn；专注模式 #filerMemoryBtn（退出专注模式并打开本视图）。
+   入口：侧栏主导航 #memoryNavBtn；专注模式 #filerMemoryBtn（以弹层形式打开本视图，不退出专注模式）。
    视图互斥与 openAutomation 同构；开关走 /web/settings/general/save（后端 bindTo 为部分 merge，
    仅提交变更字段不会冲掉其它已保存值）。 */
 
@@ -33,7 +33,19 @@
 
     /* ===================== 视图入口（与 openAutomation 同构） ===================== */
 
-    function openMemoryView() {
+    function openMemoryView(opts) {
+        /* 专注模式：以弹层（遮罩+居中面板）形式打开，不退出 code 模式。
+           旧行为先 exitCodeMode() 会经 startFreshSession→switchToWelcomeMode 闪现主页面，已废弃。
+           弹层盖在专注模式界面之上，不切换底层视图、不动 inChatMode（右栏对话流式不受影响）。 */
+        if (opts && opts.overlay && window.appMode === 'code') {
+            $view.addClass('memory-overlay active');
+            if (typeof window.closeSettings === 'function') window.closeSettings();
+            else if ($('#settingsOverlay').is(':visible')) $('#settingsCloseBtn').trigger('click');
+            loadSwitches();
+            loadMemories();
+            return;
+        }
+        $view.removeClass('memory-overlay');
         if (typeof window.exitCodeMode === 'function' && window.appMode === 'code') {
             window.exitCodeMode();
         }
@@ -58,7 +70,7 @@
     }
 
     function closeMemoryView() {
-        $view.removeClass('active');
+        $view.removeClass('active memory-overlay');
         $('#memoryNavBtn').removeClass('active');
     }
 
@@ -196,11 +208,20 @@
         openMemoryView();
     });
 
-    /* 专注模式入口：退出专注模式并打开记忆主视图 */
+    /* 专注模式入口：以弹层形式打开记忆视图，不退出专注模式 */
     $(document).on('click', '#filerMemoryBtn', function () {
-        if (typeof window.exitCodeMode === 'function' && window.appMode === 'code') {
-            window.exitCodeMode();
-        }
-        openMemoryView();
+        if (window.appMode === 'code') openMemoryView({ overlay: true });
+        else openMemoryView();
+    });
+
+    /* 弹层关闭（专注模式）：关闭按钮 / Esc / 点击遮罩空白处 */
+    $(document).on('click', '#memoryViewCloseBtn', function () {
+        if ($view.hasClass('memory-overlay')) closeMemoryView();
+    });
+    $view.on('click', function (e) {
+        if ($view.hasClass('memory-overlay') && e.target === $view[0]) closeMemoryView();
+    });
+    $(document).on('keydown', function (e) {
+        if (e.key === 'Escape' && $view.hasClass('memory-overlay') && $view.hasClass('active')) closeMemoryView();
     });
 })();

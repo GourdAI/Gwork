@@ -34,6 +34,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 定时循环任务调度管理器
@@ -89,6 +90,14 @@ public class LoopScheduler {
     // 工作空间路径（用于保存任务状态）
     private volatile String workspace;
     private volatile String harnessSessions;
+
+    // restore 幂等标记：成功恢复过且全局任务文件未变化时，后续调用直接短路。
+    // 会话列表接口会按扫描到的每个会话目录触发 restore，若无短路与加锁，
+    // 并发 restore 的 clear/addAll 交错会把同一任务重复加入列表并持久化（任务列表出现重复项）。
+    private final AtomicBoolean restored = new AtomicBoolean(false);
+
+    // 全局任务文件最近一次加载/保存的 mtime 快照（供 restore 短路比较）
+    private volatile long loadedFileMtime = -1L;
 
     /**
      * CLI 端任务执行器（同步阻塞）
@@ -193,25 +202,27 @@ public class LoopScheduler {
      * @return 已注册的任务
      */
     public LoopTask schedule(String sessionId, String workspace, String harnessSessions, LoopTask task) {
-        // 1. 检查最大任务数（全局限制）
-        if (globalTasks.size() >= MAX_TASKS_GLOBAL) {
-            throw new IllegalStateException("Max global tasks reached: " + MAX_TASKS_GLOBAL);
+        synchronized (globalTasks) {
+            // 1. 检查最大任务数（全局限制）
+            if (globalTasks.size() >= MAX_TASKS_GLOBAL) {
+                throw new IllegalStateException("Max global tasks reached: " + MAX_TASKS_GLOBAL);
+            }
+
+            // 2. 清理过期任务
+            cleanExpiredGlobal(workspace, harnessSessions);
+
+            // 3. 注册到 IJobManager（cron 模式用 cron 表达式，否则 fixedDelay 串行）
+            //    firstRegistration=true，使 runNow 生效
+            registerJob(sessionId, task, true);
+
+            // 4. 加入全局列表
+            globalTasks.add(task);
+
+            // 5. 持久化到全局 JSON
+            saveGlobalToFile(workspace, harnessSessions);
+
+            return task;
         }
-
-        // 2. 清理过期任务
-        cleanExpiredGlobal(workspace, harnessSessions);
-
-        // 3. 注册到 IJobManager（cron 模式用 cron 表达式，否则 fixedDelay 串行）
-        //    firstRegistration=true，使 runNow 生效
-        registerJob(sessionId, task, true);
-
-        // 4. 加入全局列表
-        globalTasks.add(task);
-
-        // 5. 持久化到全局 JSON
-        saveGlobalToFile(workspace, harnessSessions);
-
-        return task;
     }
 
     // ==================== 任务移除 ====================
@@ -220,43 +231,47 @@ public class LoopScheduler {
      * 停止指定任务
      */
     public void remove(String sessionId, String workspace, String harnessSessions, String taskId) {
-        globalTasks.removeIf(t -> {
-            if (t.getId().equals(taskId)) {
-                t.cancel();
-                String jobName = t.getJobName();
-                if (jobManager.jobExists(jobName)) {
-                    jobManager.jobRemove(jobName);
+        synchronized (globalTasks) {
+            globalTasks.removeIf(t -> {
+                if (t.getId().equals(taskId)) {
+                    t.cancel();
+                    String jobName = t.getJobName();
+                    if (jobManager.jobExists(jobName)) {
+                        jobManager.jobRemove(jobName);
+                    }
+                    return true;
                 }
-                return true;
-            }
-            return false;
-        });
+                return false;
+            });
 
-        saveGlobalToFile(workspace, harnessSessions);
+            saveGlobalToFile(workspace, harnessSessions);
+        }
     }
 
     /**
      * 启用/停用任务（toggle enabled 字段）
      */
     public void toggle(String sessionId, String workspace, String harnessSessions, String taskId) {
-        for (LoopTask t : globalTasks) {
-            if (t.getId().equals(taskId)) {
-                boolean newEnabled = !t.isEnabled();
-                t.setEnabled(newEnabled);
+        synchronized (globalTasks) {
+            for (LoopTask t : globalTasks) {
+                if (t.getId().equals(taskId)) {
+                    boolean newEnabled = !t.isEnabled();
+                    t.setEnabled(newEnabled);
 
-                if (newEnabled) {
-                    // 恢复：重新注册 Job（即时模式会被 registerJob 内部跳过）
-                    registerJob(sessionId, t);
-                } else {
-                    // 暂停：移除 Job，但不 cancel
-                    String jobName = t.getJobName();
-                    if (jobManager.jobExists(jobName)) {
-                        jobManager.jobRemove(jobName);
+                    if (newEnabled) {
+                        // 恢复：重新注册 Job（即时模式会被 registerJob 内部跳过）
+                        registerJob(sessionId, t);
+                    } else {
+                        // 暂停：移除 Job，但不 cancel
+                        String jobName = t.getJobName();
+                        if (jobManager.jobExists(jobName)) {
+                            jobManager.jobRemove(jobName);
+                        }
                     }
-                }
 
-                saveGlobalToFile(workspace, harnessSessions);
-                return;
+                    saveGlobalToFile(workspace, harnessSessions);
+                    return;
+                }
             }
         }
     }
@@ -265,25 +280,27 @@ public class LoopScheduler {
      * 更新任务定义（重建 Job）
      */
     public void update(String sessionId, String workspace, String harnessSessions, String taskId, LoopTask newTask) {
-        for (int i = 0; i < globalTasks.size(); i++) {
-            LoopTask t = globalTasks.get(i);
-            if (t.getId().equals(taskId)) {
-                // 移除旧 Job
-                String jobName = t.getJobName();
-                if (jobManager.jobExists(jobName)) {
-                    jobManager.jobRemove(jobName);
+        synchronized (globalTasks) {
+            for (int i = 0; i < globalTasks.size(); i++) {
+                LoopTask t = globalTasks.get(i);
+                if (t.getId().equals(taskId)) {
+                    // 移除旧 Job
+                    String jobName = t.getJobName();
+                    if (jobManager.jobExists(jobName)) {
+                        jobManager.jobRemove(jobName);
+                    }
+
+                    // 替换任务
+                    globalTasks.set(i, newTask);
+
+                    // 如果 enabled 且未取消，注册新 Job
+                    if (newTask.isEnabled() && !newTask.isCancelled()) {
+                        registerJob(sessionId, newTask);
+                    }
+
+                    saveGlobalToFile(workspace, harnessSessions);
+                    return;
                 }
-
-                // 替换任务
-                globalTasks.set(i, newTask);
-
-                // 如果 enabled 且未取消，注册新 Job
-                if (newTask.isEnabled() && !newTask.isCancelled()) {
-                    registerJob(sessionId, newTask);
-                }
-
-                saveGlobalToFile(workspace, harnessSessions);
-                return;
             }
         }
     }
@@ -294,14 +311,16 @@ public class LoopScheduler {
     public void trigger(String sessionId, String workspace, String harnessSessions, String taskId) {
         LOG.info("trigger called: sessionId={}, taskId={}", sessionId, taskId);
 
-        for (LoopTask t : globalTasks) {
-            if (t.getId().equals(taskId)) {
-                LOG.info("Task found, starting trigger thread for taskId={}", taskId);
-                // 异步执行，避免阻塞 HTTP 请求
-                Thread thread = new Thread(() -> onTrigger(sessionId, t), "loop-trigger-" + taskId);
-                thread.setDaemon(true);
-                thread.start();
-                return;
+        synchronized (globalTasks) {
+            for (LoopTask t : globalTasks) {
+                if (t.getId().equals(taskId)) {
+                    LOG.info("Task found, starting trigger thread for taskId={}", taskId);
+                    // 异步执行，避免阻塞 HTTP 请求
+                    Thread thread = new Thread(() -> onTrigger(sessionId, t), "loop-trigger-" + taskId);
+                    thread.setDaemon(true);
+                    thread.start();
+                    return;
+                }
             }
         }
         LOG.warn("Task not found: taskId={}", taskId);
@@ -311,8 +330,10 @@ public class LoopScheduler {
      * 根据 ID 获取任务
      */
     public LoopTask getTaskById(String sessionId, String taskId) {
-        for (LoopTask t : globalTasks) {
-            if (t.getId().equals(taskId)) return t;
+        synchronized (globalTasks) {
+            for (LoopTask t : globalTasks) {
+                if (t.getId().equals(taskId)) return t;
+            }
         }
         return null;
     }
@@ -323,20 +344,39 @@ public class LoopScheduler {
      * 列出活跃任务（自动清理过期）
      */
     public List<LoopTask> listActive(String sessionId, String workspace, String harnessSessions) {
-        // 清理过期任务
-        cleanExpiredGlobal(workspace, harnessSessions);
+        synchronized (globalTasks) {
+            // 清理过期任务
+            cleanExpiredGlobal(workspace, harnessSessions);
 
-        return new ArrayList<>(globalTasks);
+            return new ArrayList<>(globalTasks);
+        }
     }
 
     /**
      * 列出所有任务（含已停用的），自动清理过期
      */
     public List<LoopTask> listAll(String sessionId, String workspace, String harnessSessions) {
-        // 清理过期任务
-        cleanExpiredGlobal(workspace, harnessSessions);
+        synchronized (globalTasks) {
+            // 清理过期任务
+            cleanExpiredGlobal(workspace, harnessSessions);
 
-        return new ArrayList<>(globalTasks);
+            return new ArrayList<>(globalTasks);
+        }
+    }
+
+    /**
+     * 当前所有定时任务占用的会话 ID 集合（运行时会话 + 绑定会话）。
+     * <p>会话列表接口据此标记 loop=true，前端侧栏在对应条目前渲染时钟小图标。</p>
+     */
+    public Set<String> loopSessionIds() {
+        synchronized (globalTasks) {
+            Set<String> ids = new HashSet<>();
+            for (LoopTask t : globalTasks) {
+                if (t.getRuntimeSessionId() != null) ids.add(t.getRuntimeSessionId());
+                if (t.getBoundSessionId() != null) ids.add(t.getBoundSessionId());
+            }
+            return ids;
+        }
     }
 
     // ==================== 批量停止 ====================
@@ -345,20 +385,24 @@ public class LoopScheduler {
      * 停止所有全局任务
      */
     public void stopAll(String sessionId, String workspace, String harnessSessions) {
-        for (LoopTask t : globalTasks) {
-            t.cancel();
-            String jobName = t.getJobName();
-            if (jobManager.jobExists(jobName)) {
-                jobManager.jobRemove(jobName);
+        synchronized (globalTasks) {
+            for (LoopTask t : globalTasks) {
+                t.cancel();
+                String jobName = t.getJobName();
+                if (jobManager.jobExists(jobName)) {
+                    jobManager.jobRemove(jobName);
+                }
+                // F6: 清理 worktree（工作空间回退口径必须与创建时一致，否则 workspace 为空的任务会漏清理）
+                if (t.isWorktreeEnabled()) {
+                    getWorktreeManager().cleanup(worktreeBaseOf(t));
+                }
             }
-            // F6: 清理 worktree（工作空间回退口径必须与创建时一致，否则 workspace 为空的任务会漏清理）
-            if (t.isWorktreeEnabled()) {
-                getWorktreeManager().cleanup(worktreeBaseOf(t));
-            }
+            globalTasks.clear();
+            // 删除全局 JSON 文件
+            deleteGlobalFile(workspace, harnessSessions);
+            loadedFileMtime = -1L;
+            restored.set(true);
         }
-        globalTasks.clear();
-        // 删除全局 JSON 文件
-        deleteGlobalFile(workspace, harnessSessions);
     }
 
     // ==================== 会话恢复 ====================
@@ -369,47 +413,76 @@ public class LoopScheduler {
      * <p>在应用启动时调用一次，加载全局任务列表
      */
     public void restore(String sessionId, String workspace, String harnessSessions) {
-        // 保存路径供后续使用
-        this.workspace = workspace;
-        this.harnessSessions = harnessSessions;
+        synchronized (globalTasks) {
+            // 保存路径供后续使用
+            this.workspace = workspace;
+            this.harnessSessions = harnessSessions;
 
-        // 尝试加载全局任务文件
-        List<LoopTask> tasks = loadGlobalFromFile(workspace, harnessSessions);
-
-        // 如果全局文件不存在，尝试从旧的会话文件迁移
-        if (tasks == null || tasks.isEmpty()) {
-            tasks = migrateFromSessionFiles(workspace, harnessSessions);
-        }
-
-        if (tasks == null || tasks.isEmpty()) return;
-
-        // 移除过期/已取消任务
-        List<LoopTask> alive = new ArrayList<>();
-        for (LoopTask t : tasks) {
-            if (t.isExpired() || t.isCancelled()) {
-                continue;
+            // 短路：已成功恢复且文件未变化 → 不重建不重写。
+            // 会话列表接口按扫描到的每个会话目录各触发一次 restore，无短路时并发 restore
+            // 的 clear/addAll 交错（clear→clear→addAll→addAll）会把任务重复加入并持久化。
+            long mtime = fileMtimeOf(getGlobalFilePath(workspace, harnessSessions));
+            if (restored.get() && mtime == loadedFileMtime) {
+                return;
             }
-            alive.add(t);
-        }
 
-        if (alive.isEmpty()) {
-            deleteGlobalFile(workspace, harnessSessions);
-            return;
-        }
+            // 尝试加载全局任务文件
+            List<LoopTask> tasks = loadGlobalFromFile(workspace, harnessSessions);
 
-        globalTasks.clear();
-        globalTasks.addAll(alive);
-
-        // 重新注册到 IJobManager（只注册启用的任务）
-        for (LoopTask t : alive) {
-            if (t.isEnabled()) {
-                registerJob(sessionId, t);
+            // 如果全局文件不存在，尝试从旧的会话文件迁移
+            if (tasks == null || tasks.isEmpty()) {
+                tasks = migrateFromSessionFiles(workspace, harnessSessions);
             }
-        }
 
-        // 回写（去掉过期任务）
-        saveGlobalToFile(workspace, harnessSessions);
-        LOG.info("Restored {} global loop tasks", alive.size());
+            if (tasks == null || tasks.isEmpty()) {
+                // 磁盘无可恢复任务：保持内存现状，仅记录状态避免反复扫描
+                loadedFileMtime = mtime;
+                restored.set(true);
+                return;
+            }
+
+            // 过滤过期/已取消 + 按 id 去重（自愈历史并发写入造成的重复项，保留首份）
+            Map<String, LoopTask> byId = new LinkedHashMap<>();
+            for (LoopTask t : tasks) {
+                if (t.isExpired() || t.isCancelled()) {
+                    continue;
+                }
+                byId.putIfAbsent(t.getId(), t);
+            }
+            List<LoopTask> alive = new ArrayList<>(byId.values());
+
+            if (alive.isEmpty()) {
+                globalTasks.clear();
+                deleteGlobalFile(workspace, harnessSessions);
+                loadedFileMtime = -1L;
+                restored.set(true);
+                return;
+            }
+
+            globalTasks.clear();
+            globalTasks.addAll(alive);
+
+            // 重新注册到 IJobManager（只注册启用的任务）
+            for (LoopTask t : alive) {
+                if (t.isEnabled()) {
+                    registerJob(sessionId, t);
+                }
+            }
+
+            // 回写（去掉过期任务/重复项）；saveGlobalToFile 内部记录最新 mtime
+            saveGlobalToFile(workspace, harnessSessions);
+            restored.set(true);
+            LOG.info("Restored {} global loop tasks", alive.size());
+        }
+    }
+
+    /** 文件 mtime（毫秒）；不存在或读取失败返回 -1。 */
+    private static long fileMtimeOf(Path p) {
+        try {
+            return Files.exists(p) ? Files.getLastModifiedTime(p).toMillis() : -1L;
+        } catch (Exception e) {
+            return -1L;
+        }
     }
 
     // ==================== IJobManager 注册 ====================
@@ -558,12 +631,16 @@ public class LoopScheduler {
                 // 仅在执行完成时递增迭代计数，避免 session busy 等场景下空转消耗迭代
                 int iteration = task.incrementIteration();
 
+                // 持久化执行状态（迭代数 / 上次结果），避免仅存内存重启丢失
+                persistTasks();
+
                 // Goal 条件检查 — 解析 AI 响应中的 [GOAL_ACHIEVED] 标记
                 boolean goalMet = executionResult != null && executionResult.contains("[GOAL_ACHIEVED]");
                 if (goalMet) {
                     LOG.info("Loop task '{}' goal achieved at iteration {}", task.getId(), iteration);
                     LoopStateManager.appendHistory(engine.getWorkspace(), task.getId(), executionResult, iteration, "GOAL_ACHIEVED");
                     removeCurrentTask(effectiveSessionId, task);
+                    persistTasks();
                     return;
                 }
 
@@ -571,6 +648,7 @@ public class LoopScheduler {
                     LOG.info("Loop task '{}' reached max iterations ({})", task.getId(), task.getMaxIterations());
                     LoopStateManager.appendHistory(engine.getWorkspace(), task.getId(), executionResult, iteration, "MAX_ITERATIONS_REACHED");
                     removeCurrentTask(effectiveSessionId, task);
+                    persistTasks();
                     return;
                 }
 
@@ -588,6 +666,7 @@ public class LoopScheduler {
         } catch (Exception e) {
             LOG.error("Loop task '{}' failed", task.getId(), e);
             task.updateLastExecution("error: " + e.getMessage());
+            persistTasks();
         } finally {
             task.finish();
         }
@@ -678,25 +757,35 @@ public class LoopScheduler {
         task.cancel();
     }
 
+    /**
+     * 持久化任务列表快照（执行状态变化后调用：迭代数 / 上次结果 / 取消标记等），
+     * 避免执行记录仅存内存、进程重启后丢失或状态回退。
+     */
+    private void persistTasks() {
+        saveGlobalToFile(engine.getWorkspace(), engine.getHarnessSessions());
+    }
+
     // ==================== 清理过期任务 ====================
 
     /**
      * 清理全局任务列表中的过期任务
      */
     private void cleanExpiredGlobal(String workspace, String harnessSessions) {
-        boolean changed = globalTasks.removeIf(t -> {
-            if (t.isExpired()) {
-                String jobName = t.getJobName();
-                if (jobManager.jobExists(jobName)) {
-                    jobManager.jobRemove(jobName);
+        synchronized (globalTasks) {
+            boolean changed = globalTasks.removeIf(t -> {
+                if (t.isExpired()) {
+                    String jobName = t.getJobName();
+                    if (jobManager.jobExists(jobName)) {
+                        jobManager.jobRemove(jobName);
+                    }
+                    return true;
                 }
-                return true;
-            }
-            return false;
-        });
+                return false;
+            });
 
-        if (changed) {
-            saveGlobalToFile(workspace, harnessSessions);
+            if (changed) {
+                saveGlobalToFile(workspace, harnessSessions);
+            }
         }
     }
 
@@ -760,27 +849,31 @@ public class LoopScheduler {
      * 保存全局任务列表到 JSON 文件
      */
     private void saveGlobalToFile(String workspace, String harnessSessions) {
-        try {
-            Path filePath = getGlobalFilePath(workspace, harnessSessions);
-            Files.createDirectories(filePath.getParent());
+        synchronized (globalTasks) {
+            try {
+                Path filePath = getGlobalFilePath(workspace, harnessSessions);
+                Files.createDirectories(filePath.getParent());
 
-            ONode root = new ONode(Options.of(Feature.Write_PrettyFormat));
-            for (LoopTask t : globalTasks) {
-                root.add(t.toONode());
-            }
-            String json = root.toJson();
+                ONode root = new ONode(Options.of(Feature.Write_PrettyFormat));
+                for (LoopTask t : globalTasks) {
+                    root.add(t.toONode());
+                }
+                String json = root.toJson();
 
-            // 原子写入
-            Path tempFile = filePath.resolveSibling(filePath.getFileName() + ".tmp");
-            try (Writer w = new OutputStreamWriter(Files.newOutputStream(tempFile,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING),
-                    StandardCharsets.UTF_8)) {
-                w.write(json);
+                // 原子写入
+                Path tempFile = filePath.resolveSibling(filePath.getFileName() + ".tmp");
+                try (Writer w = new OutputStreamWriter(Files.newOutputStream(tempFile,
+                        StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING),
+                        StandardCharsets.UTF_8)) {
+                    w.write(json);
+                }
+                Files.move(tempFile, filePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                // 记录最新 mtime，供 restore 在文件未变化时短路
+                loadedFileMtime = fileMtimeOf(filePath);
+                LOG.debug("Saved {} global loop tasks to {}", globalTasks.size(), filePath);
+            } catch (Exception e) {
+                LOG.error("Failed to save global loop tasks: {}", e.getMessage());
             }
-            Files.move(tempFile, filePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            LOG.debug("Saved {} global loop tasks to {}", globalTasks.size(), filePath);
-        } catch (Exception e) {
-            LOG.error("Failed to save global loop tasks: {}", e.getMessage());
         }
     }
 

@@ -130,6 +130,11 @@ public class WebChunk {
     /** 最终答案正文，仅在 type 为 {@code trace} 时使用，携带 ReAct 完成时的全量最终答复，供前端复制使用。 */
     private String finalAnswer;
 
+    /** 会话所属工作空间根（仅 {@code user_input} 自动化任务推送时填充）：
+     * 携带任务的工作空间根，供前端把执行记录登记进侧栏时直接归属到对应项目/对话区，
+     * 避免误挂到用户当前所选工作空间。 */
+    private String root;
+
     /** 消息块创建时间戳（ epoch 毫秒），由工厂方法自动填充。 */
     private Long createdAt;
 
@@ -294,13 +299,15 @@ public class WebChunk {
      *
      * @param text 用户输入文本
      * @param source 来源标识（如 "Loop"）
+     * @param root 任务所属工作空间根（可为 null，null 表示全局区）
      * @return 携带用户输入文本的消息块
      */
-    public static WebChunk ofUserInput(String text, String source) {
+    public static WebChunk ofUserInput(String text, String source, String root) {
         WebChunk tmp = new WebChunk();
         tmp.type = "user_input";
         tmp.text = text;
         tmp.toolName = source; // 复用 toolName 字段传递来源标识
+        tmp.root = root;
         tmp.createdAt = Instant.now().toEpochMilli();
 
         return tmp;

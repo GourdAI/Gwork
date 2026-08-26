@@ -87,12 +87,6 @@
 
     function $c() { return $('#' + CONTAINER); }
 
-    /** 任务增删改后同步左侧栏任务区（原先依赖 settings:closed 事件，独立视图下需主动通知） */
-    function notifyTasksChanged() {
-        if (typeof window.reloadLoopTasks === 'function') {
-            window.reloadLoopTasks();
-        }
-    }
 
     function formatAgo(isoStr) {
         if (!isoStr) return '';
@@ -370,6 +364,12 @@
         h += '<span class="auto-task-schedule">' + escapeHtml(scheduleText) + '</span>';
         h += '<span class="auto-task-status ' + statusClass + '">' + escapeHtml(statusText) + '</span>';
         h += '<div class="auto-task-actions">';
+        if (x.runtimeSessionId) {
+            // data-sid = 执行对话的会话 ID（跳转必须用它，任务 id 不是会话 id）；data-root = 归属工作空间（拉历史消息的根）
+            h += '<button class="auto-task-btn auto-act" data-action="session" data-id="' + escapeHtml(x.id)
+                + '" data-sid="' + escapeHtml(x.runtimeSessionId) + '" data-root="' + escapeHtml(toSelection(x.workspace)) + '" title="'
+                + escapeHtml(t('settings.loop.view_session')) + '"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>';
+        }
         if (!x.cancelled) {
             h += '<button class="auto-task-btn auto-act" data-action="toggle" data-id="' + escapeHtml(x.id) + '" title="'
                 + escapeHtml(x.enabled ? t('settings.loop.disable') : t('settings.loop.enable')) + '">' + toggleIcon + '</button>';
@@ -527,7 +527,7 @@
         html += '<div class="auto-advanced" id="autoAdvanced" style="display:none">';
         html += '<div class="auto-form-row">';
         html += '<div class="auto-form-group"><label>' + escapeHtml(t('settings.loop.max_iter')) + '</label>';
-        html += '<input type="number" id="autoMaxIter" class="auto-input" value="20" min="1"/></div>';
+        html += '<input type="number" id="autoMaxIter" class="auto-input" value="" min="1" placeholder="' + escapeHtml(t('settings.loop.max_iter_unlimited')) + '"/></div>';
         html += '<div class="auto-form-group auto-form-group-check">';
         html += '<label><input type="checkbox" id="autoWorktree"/> ' + escapeHtml(t('settings.loop.worktree_isolation')) + '</label></div>';
         html += '</div></div>';
@@ -565,7 +565,6 @@
                 } else {
                     // 任务已被删除 / 请求失败：退回列表，避免用户在空白表单上误建或误更新
                     toast((r && r.description) || t('settings.loop.operation_failed'), 'error');
-                    notifyTasksChanged();
                     showList();
                 }
             });
@@ -705,7 +704,7 @@
         $('#autoPrompt').val(x.prompt || '');
         autoGrowPrompt();
         if (x.worktreeEnabled) $('#autoWorktree').prop('checked', true);
-        if (x.maxIterations) $('#autoMaxIter').val(x.maxIterations);
+        if (x.maxIterations > 0) $('#autoMaxIter').val(x.maxIterations);
 
         // 工作空间归一：旧任务可能存了“默认工作区绝对路径”，归一为 '' 以匹配新语义
         formState.workspace = toSelection(x.workspace);
@@ -719,7 +718,7 @@
 
         applySchedule(x);
 
-        if (x.worktreeEnabled || (x.maxIterations && x.maxIterations !== 20)) {
+        if (x.worktreeEnabled || x.maxIterations > 0) {
             $('#autoAdvanced').show();
             $('#autoAdvancedToggle').removeClass('collapsed');
         }
@@ -810,7 +809,8 @@
             intervalMinutes: intervalVal,
             cron: cronVal,
             worktreeEnabled: $('#autoWorktree').is(':checked'),
-            maxIterations: parseInt($('#autoMaxIter').val()) || null,
+            // 留空 = 不限制轮次：显式传 0，确保更新时也能解除既有限制（后端 null 会沿用旧值）
+            maxIterations: parseInt($('#autoMaxIter').val()) || 0,
             channelNotify: formState.channel || '',
             taskWorkspace: formState.workspace || '',
             modelName: formState.modelName || '',
@@ -824,7 +824,6 @@
             api('update', params, function (r) {
                 if (r && r.code === 200) {
                     toast(t('settings.loop.updated'), 'success');
-                    notifyTasksChanged();
                     showList();
                 } else {
                     restore();
@@ -835,7 +834,6 @@
             api('add', params, function (r) {
                 if (r && r.code === 200) {
                     toast(t('settings.loop.created'), 'success');
-                    notifyTasksChanged();
                     showList();
                 } else {
                     restore();
@@ -870,7 +868,6 @@
                 api('toggle', { taskId: id }, function (r) {
                     if (r && r.code === 200) {
                         toast(t('settings.loop.operation_success'), 'success');
-                        notifyTasksChanged();
                         showList();
                     }
                 });
@@ -883,7 +880,6 @@
                     api('remove', { taskId: id }, function (r) {
                         if (r && r.code === 200) {
                             toast(t('settings.loop.deleted'), 'success');
-                            notifyTasksChanged();
                             showList();
                         }
                     });
@@ -893,6 +889,11 @@
             } else if (action === 'edit') {
                 editId = id;
                 showForm();
+            } else if (action === 'session') {
+                var sessId = $(this).attr('data-sid');
+                var sessRoot = $(this).attr('data-root') || '';
+                var sessLabel = $(this).closest('.auto-task-item').find('.auto-task-name').text();
+                if (sessId && typeof window.openSessionById === 'function') window.openSessionById(sessId, sessLabel, sessRoot);
             }
         });
 

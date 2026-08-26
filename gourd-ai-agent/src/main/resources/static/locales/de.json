@@ -183,6 +183,7 @@
                                        "clear":  "Auswahl aufheben"
                                    },
                 "sidebar":  {
+                                 "loop_mark":  "Geplante Aufgabe",
                                 "new_task":  "Neue Aufgabe",
                                 "search":  "Suchen",
                                 "automation":  "Automatisierung",
@@ -198,8 +199,8 @@
                                 "expand_all":  "Alle erweitern",
                                 "clear_all":  "Alle Sitzungen löschen",
                                 "confirm_clear":  "Alle Sitzungen löschen? Dieser Vorgang kann nicht rückgängig gemacht werden.",
-                                "no_tasks":  "Keine geplanten Aufgaben",
-                                "task_paused":  "Pausiert",
+                                
+                                
                                 "remove_project":  "Aus Liste entfernen",
                                 "model_config":  "Modellkonfiguration",
                    "memory":  "Gedächtnis"
@@ -545,6 +546,8 @@
                                   "maker_agent":  "Ausführender Unteragent",
                                   "checker_agent":  "Prüfender Unteragent",
                                   "max_iter":  "Maximale Iteration",
+                                  "max_iter_unlimited":  "Unbegrenzt",
+                                  "view_session":  "Ausführungschat anzeigen",
                                   "worktree_isolation":  "Worktree-Isolierung",
                                   "test_run":  "Testlauf",
                                   "save":  "Speichern",

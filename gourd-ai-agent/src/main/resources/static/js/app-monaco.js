@@ -211,6 +211,9 @@
         });
     }
 
-    // 页面加载即预载（不等待进入 code 模式）：首次打开编辑器时通常已就绪
-    load();
+    // 不在页面加载时预载：Monaco（editor.main + worker + 基础语言包）常驻内存约 30-50MB，
+    // 而纯 chat 用户全程用不到编辑器。改为按需加载，触发时机：
+    //   ① enterCodeMode()（app-code.js）—— 进入 code 模式即预热，打开首个文件时通常已就绪；
+    //   ② openFile / Diff / 文件查看器 —— 均已经 __monacoLoad(cb) 回调入口，未就绪会自动等待。
+    // （启动时若 localStorage 恢复到 code 模式，initMode 会调 enterCodeMode，行为等同于原预载。）
 })();

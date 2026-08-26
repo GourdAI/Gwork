@@ -255,6 +255,14 @@ public class WebController {
                     (sessionLocator.boundRoot((String) item.get("sessionId")) != null) == isGlobal);
         }
 
+        // 标记定时任务占用的会话（运行时会话/绑定会话）：前端侧栏据此在条目名前渲染时钟小图标
+        Set<String> loopSids = loopScheduler.loopSessionIds();
+        if (!loopSids.isEmpty()) {
+            for (Map item : data) {
+                if (loopSids.contains(item.get("sessionId"))) item.put("loop", true);
+            }
+        }
+
         // 按时间倒序
         data.sort((a, b) -> Long.compare(
                 ((Number) b.getOrDefault("time", 0L)).longValue(),
@@ -1068,6 +1076,8 @@ public class WebController {
             if (t.getThinkingDepth() != null) item.put("thinkingDepth", t.getThinkingDepth());
             if (t.getChannelNotify() != null) item.put("channelNotify", t.getChannelNotify());
             if (t.getBoundSessionId() != null) item.put("boundSessionId", t.getBoundSessionId());
+            // 运行时会话（执行对话）：前端据此在点击任务行时打开该任务的执行记录
+            if (t.getRuntimeSessionId() != null) item.put("runtimeSessionId", t.getRuntimeSessionId());
             data.add(item);
         }
         return Result.succeed(data);
@@ -1112,6 +1122,7 @@ public class WebController {
                 if (t.getThinkingDepth() != null) item.put("thinkingDepth", t.getThinkingDepth());
                 if (t.getChannelNotify() != null) item.put("channelNotify", t.getChannelNotify());
                 if (t.getBoundSessionId() != null) item.put("boundSessionId", t.getBoundSessionId());
+                if (t.getRuntimeSessionId() != null) item.put("runtimeSessionId", t.getRuntimeSessionId());
                 return Result.succeed(item);
             }
         }

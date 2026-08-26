@@ -324,7 +324,24 @@ async function startBackend(port) {
   // -D 系统属性优先级高于 app.yml（Solon 配置覆盖规则）。
   const fileLogLevel = process.env.GWORK_LOG_LEVEL || (app.isPackaged ? 'ERROR' : null);
 
+  // JVM 内存参数：不设置时 JDK 按物理内存推导（32G 机器上 InitialHeap=528M / MaxHeap=8.4G，
+  // GC 线程按核心数扩到 13 条），桌面单用户场景严重浪费。且 G1 默认只做 young/mixed GC，
+  // 峰值后堆 committed 不会归还 OS —— 实测空闲 RSS 长期卡在 300-400M。
+  // 改用 SerialGC + FreeRatio：无并发 GC 线程（空闲不烧 CPU），每次 GC 后按比例收缩并归还 OS。
+  // 实测（真实 jar 启动后静置 20s）：RSS 232M -> 203M，线程 73 -> 42，峰值 250M 释放后可回落至 ~83M。
+  // 注意：仅设 -Xms/-Xmx 而不配 MinHeapFreeRatio/MaxHeapFreeRatio 是负优化（实测反升至 341M）。
   const args = [
+    '-Xms48m',
+    '-Xmx512m',
+    '-Xss512k',
+    '-XX:+UseSerialGC',
+    '-XX:MinHeapFreeRatio=10',
+    '-XX:MaxHeapFreeRatio=25',
+    '-XX:MaxMetaspaceSize=192m',
+    '-XX:CompressedClassSpaceSize=64m',
+    '-XX:ReservedCodeCacheSize=96m',
+    '-XX:InitialCodeCacheSize=4m',
+    '-XX:-UsePerfData',
     '-Dfile.encoding=UTF-8',
     '-Dsolon.boot.openBrowser=false',  // 禁止自动打开浏览器
     '-Dgwork.home=' + getRuntimeHomeDir(),  // 全局配置区根（与 ACP 子进程一致，保证读同一份全局配置）

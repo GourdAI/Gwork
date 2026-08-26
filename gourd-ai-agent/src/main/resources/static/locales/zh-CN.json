@@ -183,6 +183,7 @@
                                        "clear":  "清除选择"
                                    },
                 "sidebar":  {
+                                 "loop_mark":  "定时任务",
                                 "new_task":  "新建任务",
                                 "search":  "搜索",
                                 "automation":  "自动化",
@@ -198,8 +199,8 @@
                                 "expand_all":  "展开全部",
                                 "clear_all":  "清空所有会话",
                                 "confirm_clear":  "确定清空所有会话？此操作不可恢复。",
-                                "no_tasks":  "暂无定时任务",
-                                "task_paused":  "已停用",
+                                
+                                
                                 "remove_project":  "从列表移除",
                                 "model_config":  "模型配置",
                    "memory":  "记忆"
@@ -545,6 +546,8 @@
                                   "maker_agent":  "执行者子代理",
                                   "checker_agent":  "验证者子代理",
                                   "max_iter":  "最大迭代",
+                                  "max_iter_unlimited":  "不限",
+                                  "view_session":  "查看执行对话",
                                   "worktree_isolation":  "Worktree 隔离",
                                   "test_run":  "测试运行",
                                   "save":  "保存",

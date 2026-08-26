@@ -906,7 +906,7 @@ public class WebGate extends SimpleWebSocketListener {
             }
         }
 
-        emitToClient(sessionId, WebChunk.ofUserInput(input, source));
+        emitToClient(sessionId, WebChunk.ofUserInput(input, source, projectRoot));
 
         String agentName = null;
         String currentInput = input;

@@ -196,6 +196,9 @@ body.code-mode #chatView .code-chat-header {
     font-weight: 600; color: var(--text-secondary);
 }
 .code-chat-list-item.active .code-chat-list-item-num { color: var(--accent); }
+/* 定时任务会话标记：名称前 clock 小图标（与 chat 侧栏 .sidebar-item-loop 同语义） */
+.code-chat-list-item-loop { display: inline-flex; align-items: center; flex-shrink: 0; margin-right: 5px; color: var(--text-tertiary); }
+.code-chat-list-item.active .code-chat-list-item-loop { color: var(--accent); }
 .code-chat-list-item-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .code-chat-list-item-spin {
     flex-shrink: 0; width: 10px; height: 10px; border: 2px solid var(--border-color);

@@ -183,6 +183,7 @@
                                        "clear":  "Limpar seleção"
                                    },
                 "sidebar":  {
+                                 "loop_mark":  "Tarefa agendada",
                                 "new_task":  "Nova tarefa",
                                 "search":  "Buscar",
                                 "automation":  "Automação",
@@ -198,8 +199,8 @@
                                 "expand_all":  "Expandir tudo",
                                 "clear_all":  "Limpar todas as sessões",
                                 "confirm_clear":  "Limpar todas as sessões? Esta ação não pode ser desfeita.",
-                                "no_tasks":  "Nenhuma tarefa agendada",
-                                "task_paused":  "Pausada",
+                                
+                                
                                 "remove_project":  "Remover da lista",
                                 "model_config":  "Configuração de modelos",
                    "memory":  "Memória"
@@ -545,6 +546,8 @@
                                   "maker_agent":  "Subagente executor",
                                   "checker_agent":  "Subagente verificador",
                                   "max_iter":  "Iterações máximas",
+                                  "max_iter_unlimited":  "Ilimitado",
+                                  "view_session":  "Ver chat de execução",
                                   "worktree_isolation":  "Isolamento Worktree",
                                   "test_run":  "Execução de teste",
                                   "save":  "Salvar",

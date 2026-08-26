@@ -183,6 +183,7 @@
                                        "clear":  "選択を解除"
                                    },
                 "sidebar":  {
+                                 "loop_mark":  "定期タスク",
                                 "new_task":  "新規タスク",
                                 "search":  "検索",
                                 "automation":  "自動化",
@@ -198,8 +199,8 @@
                                 "expand_all":  "すべて展開",
                                 "clear_all":  "すべてのセッションを削除",
                                 "confirm_clear":  "すべてのセッションを削除しますか？この操作は元に戻せません。",
-                                "no_tasks":  "定期タスクはありません",
-                                "task_paused":  "停止中",
+                                
+                                
                                 "remove_project":  "リストから削除",
                                 "model_config":  "モデル設定",
                    "memory":  "メモリ"
@@ -545,6 +546,8 @@
                                   "maker_agent":  "実行者サブエージェント",
                                   "checker_agent":  "検証者サブエージェント",
                                   "max_iter":  "最大反復",
+                                  "max_iter_unlimited":  "無制限",
+                                  "view_session":  "実行チャットを表示",
                                   "worktree_isolation":  "Worktree 分離",
                                   "test_run":  "テスト実行",
                                   "save":  "保存",

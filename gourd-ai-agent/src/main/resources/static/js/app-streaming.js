@@ -618,7 +618,13 @@ function dispatchGateChunk(chunk) {
         if (!sid) return;
         var userSess = getOrCreateSession(sid);
         if (typeof ensureChatInHistory === 'function') {
-            ensureChatInHistory(sid, chunk.text, true);
+            // Loop 定时任务执行记录：按任务归属工作空间（chunk.root）静默登记，
+            // 不切换 tab / 不抢焦点，避免打扰用户当前视图；其它来源（微信等）保持原联动语义
+            if (chunk.type === 'user_input' && chunk.toolName === 'Loop') {
+                ensureChatInHistory(sid, chunk.text, false, { root: chunk.root || '', silent: true, loop: true });
+            } else {
+                ensureChatInHistory(sid, chunk.text, true);
+            }
         }
         appendUserMessage(userSess, chunk.text, null, null, chunk.createdAt);
         if (userSess.sessionId === activeSessionId) {

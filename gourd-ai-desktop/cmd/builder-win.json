@@ -29,6 +29,7 @@
       "to": "icons"
     }
   ],
+  "afterPack": "cmd/afterPack.js",
   "win": {
     "icon": "build/icons/icon.ico",
     "forceCodeSigning": false,

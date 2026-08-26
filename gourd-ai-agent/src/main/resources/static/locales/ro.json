@@ -183,6 +183,7 @@
                                        "clear":  "Șterge selecția"
                                    },
                 "sidebar":  {
+                                 "loop_mark":  "Sarcină programată",
                                 "new_task":  "Sarcină nouă",
                                 "search":  "Căutare",
                                 "automation":  "Automatizare",
@@ -198,8 +199,8 @@
                                 "expand_all":  "Extinde tot",
                                 "clear_all":  "Șterge toate sesiunile",
                                 "confirm_clear":  "Ștergeți toate sesiunile? Această acțiune este ireversibilă.",
-                                "no_tasks":  "Fără sarcini programate",
-                                "task_paused":  "În pauză",
+                                
+                                
                                 "remove_project":  "Elimină din listă",
                                 "model_config":  "Configurare modele",
                    "memory":  "Memorie"
@@ -545,6 +546,8 @@
                                   "maker_agent":  "Sub-agent executor",
                                   "checker_agent":  "Sub-agent de verificare",
                                   "max_iter":  "Iterații maxime",
+                                  "max_iter_unlimited":  "Nelimitat",
+                                  "view_session":  "Vezi conversația execuției",
                                   "worktree_isolation":  "Izolare Worktree",
                                   "test_run":  "Testare execuție",
                                   "save":  "Salvare",

@@ -47,6 +47,8 @@ function SessionState(sessionId) {
     this.thinkingUserScrolledUp = false;  // 思考区用户主动向上滚动标记
     // 最近一次 context_size 快照：上下文指示器是全局单例 DOM，靠它按会话回填，使切会话不丢失用量/缓存指标
     this.lastContextChunk = null;
+    // 最后一次被激活的时间戳，供容器 LRU 淘汰排序（见 evictInactiveSessions）
+    this.lastActiveAt = 0;
 
     this.userMsgCounter = 0;
 }
@@ -102,12 +104,51 @@ function getOrCreateSession(sessionId) {
     return sessionMap[sessionId];
 }
 
+/* 会话容器 LRU 淘汰：
+   切会话只 hide 不移除 DOM，长时间使用会把浏览过的每个会话的完整消息 DOM 全部累积在
+   messagesWrap 中且无上限（长对话单会话可达数千节点），是渲染进程内存的主要增长源。
+   这里保留最近 KEEP_ALIVE_SESSIONS 个会话的 DOM，更早的清空其容器内容（容器本身保留，
+   仍挂在 messagesWrap 上，sess.container 引用不变）。
+   再次进入被淘汰的会话时，selectSession 的 `container.children.length === 0` 判据会
+   自动触发 loadMessages 重新拉取，故必须同步重置回放分页状态，否则会误判为「已加载完」。 */
+var KEEP_ALIVE_SESSIONS = 3;
+
+function evictInactiveSessions() {
+    var alive = [];
+    for (var sid in sessionMap) {
+        if (!sessionMap.hasOwnProperty(sid)) continue;
+        var s = sessionMap[sid];
+        if (!s || sid === activeSessionId) continue;
+        // 流式中/回放中/网关缓冲中的会话必须保留：清空 DOM 会让正在写入的帧丢失落点
+        if (s.isStreaming || s._replaying || s._gateBuffering || s._replayLoadingMore) continue;
+        if (!s.container || s.container.children.length === 0) continue;   // 已是空壳，无需处理
+        alive.push(s);
+    }
+    if (alive.length <= KEEP_ALIVE_SESSIONS) return;
+
+    // 最近活跃的排前面，淘汰尾部；无 lastActiveAt（未经 setActiveSession）的视为最旧
+    alive.sort(function (a, b) { return (b.lastActiveAt || 0) - (a.lastActiveAt || 0); });
+    for (var i = KEEP_ALIVE_SESSIONS; i < alive.length; i++) {
+        var sess = alive[i];
+        // 先清理增量渲染器/挂起帧与 DOM 引用，再清空容器，避免残留帧写入已摘除的节点
+        if (typeof resetStreamState === 'function') resetStreamState(sess);
+        $(sess.container).empty();
+        // 重置回放分页状态：下次进入走完整 loadMessages 重新拉取
+        sess._replayTotalCount = 0;
+        sess._replayHasMore = false;
+        sess._replayLoadedCount = 0;
+        sess._replayCoverage = null;
+        sess._replayLoadingMore = false;
+    }
+}
+
 function setActiveSession(sessionId) {
     if (activeSessionId && sessionMap[activeSessionId]) {
         $(sessionMap[activeSessionId].container).hide();
     }
     var sess = getOrCreateSession(sessionId);
     $(sess.container).show();
+    sess.lastActiveAt = Date.now();
     activeSessionId = sessionId;
     SESSION_ID = sessionId;
     isStreaming = sess.isStreaming;
@@ -126,6 +167,8 @@ function setActiveSession(sessionId) {
     // 按会话恢复上下文指示器（该会话有历史用量则回填，否则清空）
     if (typeof restoreContextIndicator === 'function') restoreContextIndicator(sess);
     else if (typeof resetContextIndicator === 'function') resetContextIndicator();
+    // 切换完成后回收较早会话的 DOM（当前会话已置为 active，不会被误淘汰）
+    evictInactiveSessions();
 }
 
 function deactivateSession() {

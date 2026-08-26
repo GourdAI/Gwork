@@ -13,6 +13,7 @@
     "start": "electron .",
     "generate-icons": "electron cmd/generate-icons.js",
     "generate-jre": "node generate-jre.js",
+    "brand-jre": "node cmd/brand-jre.js",
     "verify": "node verify-setup.js",
     "prepare-resources": "node cmd/prepare-resources.js",
     "obfuscate-ui": "node cmd/obfuscate-ui.js",
@@ -24,7 +25,8 @@
   "devDependencies": {
     "electron": "^33.0.0",
     "electron-builder": "^25.0.0",
-    "javascript-obfuscator": "^5.5.0"
+    "javascript-obfuscator": "^5.5.0",
+    "resedit": "^1.7.2"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",

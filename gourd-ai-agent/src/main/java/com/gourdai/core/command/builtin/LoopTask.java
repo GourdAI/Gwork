@@ -43,7 +43,7 @@ public class LoopTask {
     private static final int MIN_INTERVAL = 0; // 0 = 即时模式（goal 专用）
     private static final int MAX_INTERVAL = 1440; // 24h
     private static final int EXPIRE_DAYS = 7;
-    private static final int DEFAULT_MAX_ITERATIONS = 20;
+    private static final int DEFAULT_MAX_ITERATIONS = 0; // 0 = 默认不限制轮次（仅显式设置 >0 时才限制）
 
     // ---- 核心调度字段 ----
     private final String id;
@@ -65,7 +65,7 @@ public class LoopTask {
     private final String modelName;          // 指定模型名（null 表示跟随默认模型）
     // 思考深度档位：null = 未设置（仅旧数据，执行时跟随运行时会话的选择）；"off" = 显式关闭思考
     private final String thinkingDepth;
-    private final int maxIterations;         // 最大迭代次数
+    private final int maxIterations;         // 最大迭代次数（0 = 不限制）
     private final boolean runNow;            // 注册后立即执行首次（initialDelay=0）
 
     // ---- 运行时状态 ----
@@ -185,7 +185,7 @@ public class LoopTask {
         this.workspace = blankToNull(workspace);
         this.modelName = blankToNull(modelName);
         this.thinkingDepth = blankToNull(thinkingDepth);
-        this.maxIterations = maxIterations != null ? maxIterations : DEFAULT_MAX_ITERATIONS;
+        this.maxIterations = normalizeMaxIterations(maxIterations);
         this.runNow = runNow;
         this.currentIteration = 0;
         this.enabled = true;
@@ -200,6 +200,14 @@ public class LoopTask {
         }
         String t = s.trim();
         return t.isEmpty() ? null : t;
+    }
+
+    /**
+     * 归一最大迭代次数：null → 默认（不限制），负值 → 0（不限制）。
+     */
+    private static int normalizeMaxIterations(Integer maxIterations) {
+        int v = maxIterations != null ? maxIterations : DEFAULT_MAX_ITERATIONS;
+        return Math.max(0, v);
     }
 
     /**
@@ -244,7 +252,7 @@ public class LoopTask {
                 workspace,
                 modelName,
                 thinkingDepth,
-                maxIterations != null ? maxIterations : DEFAULT_MAX_ITERATIONS,
+                normalizeMaxIterations(maxIterations),
                 runNow != null ? runNow : this.runNow,
                 this.cancelled,
                 this.lastResult,

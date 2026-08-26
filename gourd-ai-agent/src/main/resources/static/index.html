@@ -165,7 +165,8 @@
 <script>window.$ = layui.$;</script>
 <script src="/js/marked.min.js"></script>
 <script src="/js/qrcode.min.js"></script>
-<script src="/js/mermaid.min.js"></script>
+<!-- mermaid.min.js（约 3.2MB）改为按需加载：由 app-ui.js 的 processMermaidBlocks 在
+     首次遇到 ```mermaid 代码块时动态注入，纯对话场景可省约 25-40MB 常驻内存 -->
 <script src="/highlight/highlight.min.js"></script>
 
 <!-- Monaco Editor（离线打包，Code 模式编辑器；AMD 入口 vs/editor/editor.main，Worker/CSS 由编辑器运行时自举）-->

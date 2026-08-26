@@ -183,6 +183,7 @@
                                        "clear":  "Borrar selección"
                                    },
                 "sidebar":  {
+                                 "loop_mark":  "Tarea programada",
                                 "new_task":  "Nueva tarea",
                                 "search":  "Buscar",
                                 "automation":  "Automatización",
@@ -198,8 +199,8 @@
                                 "expand_all":  "Expandir todo",
                                 "clear_all":  "Borrar todas las sesiones",
                                 "confirm_clear":  "¿Borrar todas las sesiones? Esta acción no se puede deshacer.",
-                                "no_tasks":  "Sin tareas programadas",
-                                "task_paused":  "Pausada",
+                                
+                                
                                 "remove_project":  "Quitar de la lista",
                                 "model_config":  "Configuración de modelos",
                    "memory":  "Memoria"
@@ -545,6 +546,8 @@
                                   "maker_agent":  "Subagente ejecutor",
                                   "checker_agent":  "Subagente verificador",
                                   "max_iter":  "Iteración máxima",
+                                  "max_iter_unlimited":  "Ilimitado",
+                                  "view_session":  "Ver chat de ejecución",
                                   "worktree_isolation":  "Aislamiento Worktree",
                                   "test_run":  "Ejecución de prueba",
                                   "save":  "Guardar",

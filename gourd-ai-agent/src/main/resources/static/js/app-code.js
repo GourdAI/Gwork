@@ -122,6 +122,9 @@
 
     function enterCodeMode(opts) {
         if (isCode()) return;
+        // Monaco 已改为按需加载（不再在页面加载时预载，约省 30-50MB）：
+        // 进入 code 模式即开始异步预热，不阻塞后续布局，打开首个文件时通常已就绪。
+        if (typeof window.__monacoLoad === 'function') window.__monacoLoad();
         // 关闭进入前 chat 模式可能残留的文件查看浮层（与 #gitDiffViewer 共用），
         // 否则切到 code 后 body.viewer-open 会连带隐藏编辑器面板、悬留旧浮层。
         if (typeof window.closeDiffViewer === 'function') window.closeDiffViewer();
@@ -187,6 +190,10 @@
 
     function exitCodeMode() {
         if (!isCode()) return;
+        // 防御性关闭 code 模式下可能打开的记忆弹层：#filerMemoryBtn 以弹层形式打开、不退出 code 模式
+        // （见 app-memory.js openMemoryView({overlay:true})），若经其它路径退出专注模式，须先收起弹层，
+        // 避免 .memory-overlay 残留类在 chat 视图下产生异常样式。此处对未打开状态为空操作。
+        if (typeof window.closeMemoryView === 'function') window.closeMemoryView();
         // 先缓存当前 code 会话 ID，稍后在 startFreshSession 清空 localStorage 后写回
         var codeSessionId = window.SESSION_ID;
         window.appMode = 'chat';
@@ -291,6 +298,7 @@
                 var num = hist.length - i;
                 html += '<div class="code-chat-list-item' + (active ? ' active' : '') + '" data-idx="' + i + '">'
                     + '<span class="code-chat-list-item-num">' + num + '</span>'
+                    + (hist[i].loop ? '<span class="code-chat-list-item-loop" title="' + escAttr(GourdI18n.t('app.sidebar.loop_mark')) + '"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>' : '')
                     + '<span class="code-chat-list-item-title">' + escHtml(hist[i].label || (GourdI18n.t('code.session') + ' ' + num)) + '</span>'
                     + (streaming ? '<span class="code-chat-list-item-spin"></span>' : '')
                     + '</div>';

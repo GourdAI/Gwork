@@ -1002,8 +1002,17 @@
 
     // ---- 初始化 ----
     loadGitStatus();
-    // 每60秒兜底刷新
-    setInterval(loadGitStatus, 60000);
+    // 每 60 秒兜底刷新。原先无条件常驻：窗口收入托盘后仍周期性唤醒渲染进程并发起后端请求。
+    // 现改为：不可见时停表，恢复可见时先立即补一次（避免展示陈旧状态）再重开周期。
+    var gitPollTimer = null;
+    function startGitPoll() { if (!gitPollTimer) gitPollTimer = setInterval(loadGitStatus, 60000); }
+    function stopGitPoll() { if (gitPollTimer) { clearInterval(gitPollTimer); gitPollTimer = null; } }
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) { stopGitPoll(); return; }
+        loadGitStatus();
+        startGitPoll();
+    });
+    if (!document.hidden) startGitPoll();
 
     // 暴露全局（供 app-filer.js / app-message.js 调用）
     window.loadGitStatus = loadGitStatus;

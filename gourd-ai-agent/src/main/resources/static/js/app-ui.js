@@ -671,32 +671,88 @@ function highlightCodeBlocks(container) {
     }
 }
 
-/* ===== Mermaid ===== */
+/* ===== Mermaid（按需加载）=====
+   mermaid.min.js 约 3.2MB（含 katex/cytoscape/langium 等），解析+常驻内存约 25-40MB，
+   而绝大多数对话不含 mermaid 图表 —— 原先在 index.html 同步 <script> 无条件加载是纯浪费。
+   改为：processMermaidBlocks 发现确有 .language-mermaid 代码块时才注入脚本。
+   脚本末尾会设置 globalThis.mermaid，故 onload 后即可直接使用。 */
+var __mermaidState = 0;   // 0=未加载 1=加载中 2=已就绪 3=加载失败
+var __mermaidQueue = [];
+
+function __mermaidLoad(cb) {
+    if (__mermaidState === 2) { cb(window.mermaid); return; }
+    if (__mermaidState === 3) { cb(null); return; }
+    __mermaidQueue.push(cb);
+    if (__mermaidState === 1) return;
+    __mermaidState = 1;
+
+    var s = document.createElement('script');
+    s.src = '/js/mermaid.min.js';
+    s.async = true;
+    s.onload = function () {
+        __mermaidState = (typeof window.mermaid !== 'undefined') ? 2 : 3;
+        if (__mermaidState === 2) {
+            // 原先在 app-ui.js 顶层执行的初始化，移到加载完成时（主题取当前值，与 applyTheme 一致）
+            window.mermaid.initialize({
+                startOnLoad: false,
+                theme: currentTheme === 'dark' ? 'dark' : 'default',
+                securityLevel: 'loose',
+                fontFamily: 'var(--font-sans)',
+            });
+        }
+        __mermaidFlush();
+    };
+    s.onerror = function () { __mermaidState = 3; __mermaidFlush(); };
+    document.head.appendChild(s);
+}
+
+function __mermaidFlush() {
+    var q = __mermaidQueue;
+    __mermaidQueue = [];
+    var m = (__mermaidState === 2) ? window.mermaid : null;
+    for (var i = 0; i < q.length; i++) {
+        try { q[i](m); } catch (e) { console.error('[mermaid] 回调异常', e); }
+    }
+}
+
 function processMermaidBlocks(container) {
-    if (!container || typeof mermaid === 'undefined') return;
+    if (!container) return;
     var blocks = container.querySelectorAll('pre code.language-mermaid:not([data-mermaid-processed])');
     if (blocks.length === 0) return;
 
-    var nodes = [];
+    // 同步打标记：流式渲染会高频重入，避免同一批块被重复排队（加载失败时也不会无限重试）
+    var pending = [];
     for (var i = 0; i < blocks.length; i++) {
         var codeEl = blocks[i];
         codeEl.setAttribute('data-mermaid-processed', 'true');
-        var preEl = codeEl.parentNode;
-        var txt = codeEl.textContent.trim();
-        if (!txt) continue;
-
-        var div = document.createElement('div');
-        div.id = 'm-' + Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 8);
-        div.className = 'mermaid-svg';
-        div.style.cssText = 'text-align:center;padding:10px 0;overflow-x:auto;';
-        div.textContent = txt;
-        preEl.parentNode.replaceChild(div, preEl);
-        nodes.push(div);
+        if (codeEl.textContent.trim()) pending.push(codeEl);
     }
+    if (pending.length === 0) return;
 
-    if (nodes.length > 0 && mermaid.run) {
-        mermaid.run({ nodes: nodes, suppressErrors: true }).catch(function() {});
-    }
+    __mermaidLoad(function (mermaid) {
+        // 加载失败：保留原 <pre> 代码块，降级为纯文本展示（不做 DOM 替换）
+        if (!mermaid || !mermaid.run) return;
+
+        var nodes = [];
+        for (var j = 0; j < pending.length; j++) {
+            var codeEl = pending[j];
+            var preEl = codeEl.parentNode;
+            // 首次加载期间容器可能已被重渲染/移除，替换已脱离文档的节点会抛错
+            if (!preEl || !preEl.parentNode) continue;
+
+            var div = document.createElement('div');
+            div.id = 'm-' + Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 8);
+            div.className = 'mermaid-svg';
+            div.style.cssText = 'text-align:center;padding:10px 0;overflow-x:auto;';
+            div.textContent = codeEl.textContent.trim();
+            preEl.parentNode.replaceChild(div, preEl);
+            nodes.push(div);
+        }
+
+        if (nodes.length > 0) {
+            mermaid.run({ nodes: nodes, suppressErrors: true }).catch(function () {});
+        }
+    });
 }
 
 function applyHljsTheme(theme) {
@@ -719,15 +775,8 @@ var currentTheme = localStorage.getItem('chat-theme') || 'light';
 $('body').attr('data-theme', currentTheme);
 applyHljsTheme(currentTheme);
 
-/* ===== Mermaid Init ===== */
-if (typeof mermaid !== 'undefined') {
-    mermaid.initialize({
-        startOnLoad: false,
-        theme: currentTheme === 'dark' ? 'dark' : 'default',
-        securityLevel: 'loose',
-        fontFamily: 'var(--font-sans)',
-    });
-}
+/* ===== Mermaid Init =====
+   已移至 __mermaidLoad 的 onload 回调（按需加载后才初始化），此处不再预初始化。 */
 
 // 启动时从后端同步主题（清空 localStorage 后仍能恢复）。
 // 桌面端延后到后端就绪再拉，避免冷启动期占用连接；此前已由上面的 localStorage 值先行生效，无闪烁。
@@ -744,8 +793,9 @@ function applyTheme(theme) {
     $('body').attr('data-theme', theme);
     localStorage.setItem('chat-theme', theme);
     applyHljsTheme(theme);
-    if (typeof mermaid !== 'undefined') {
-        mermaid.initialize({ theme: theme === 'dark' ? 'dark' : 'default' });
+    // 仅在 mermaid 已按需加载后才重设主题；未加载时不触发加载（加载后会读 currentTheme 自行初始化）
+    if (__mermaidState === 2 && typeof window.mermaid !== 'undefined') {
+        window.mermaid.initialize({ theme: theme === 'dark' ? 'dark' : 'default' });
     }
     // sync checkbox if settings panel is open
     var cb = document.getElementById('generalDarkMode');
@@ -1077,11 +1127,11 @@ initVoice();
     var searchClear = $('#sidebarSearchClear');
     var historyList = $('#historyList');
 
-    /* 清空搜索时统一恢复各行可见性：会话/定时任务/项目行恢复显示（清除 filter-hit 标记），
+    /* 清空搜索时统一恢复各行可见性：会话/项目行恢复显示（清除 filter-hit 标记），
        .proj-sessions 仅清除内联样式（是否展示交还给展开态 CSS），小节标题与空态提示恢复显示。 */
     function restoreSidebarFilter() {
         historyList.find('.filter-hit').removeClass('filter-hit');
-        historyList.find('.sidebar-item, .loop-item, .proj-node').show();
+        historyList.find('.sidebar-item, .proj-node').show();
         historyList.find('.proj-sessions').css('display', '');
         historyList.find('.sidebar-section-title, .sidebar-empty-hint').show();
     }
@@ -1126,9 +1176,9 @@ initVoice();
                 restoreSidebarFilter();
                 return;
             }
-            // 逐项按标签过滤（会话行 + 定时任务行），filter-hit 记录命中供分组统计
-            historyList.find('.sidebar-item, .loop-item').each(function() {
-                var label = $(this).find('.sidebar-item-label, .loop-item-label').text().toLowerCase();
+            // 逐项按标签过滤（会话行），filter-hit 记录命中供分组统计
+            historyList.find('.sidebar-item').each(function() {
+                var label = $(this).find('.sidebar-item-label').text().toLowerCase();
                 var hit = label.indexOf(val) >= 0;
                 $(this).toggleClass('filter-hit', hit).toggle(hit);
             });

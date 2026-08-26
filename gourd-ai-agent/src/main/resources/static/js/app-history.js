@@ -33,8 +33,8 @@ function restoreActiveSession() {
 /* ===== 历史会话视图（tab：项目 / 对话）===== */
 /* 统一 work- 会话按有无所属根分两类：全局会话（安装目录，无根）/ 项目会话（项目根下）。
    侧栏提供两个 tab：
-   - 项目 tab（'project'）：已登记项目为文件夹节点嵌套各自会话，其后「任务」区展示定时任务（loop）。
-   - 对话 tab（'global'）：仅全局会话（非工作空间下），按时间倒序平铺。
+   - 项目 tab（'project'）：已登记项目为文件夹节点嵌套各自会话；绑定该项目的定时任务嵌套在对应项目节点下。
+   - 对话 tab（'global'）：仅全局会话（非工作空间下），按时间倒序平铺；未绑定项目的定时任务追加在列表尾部。
    手动切换 tab 持久化；项目树不依赖工作空间选择。code 模式恒为项目视图（当前项目根平铺），tab 行隐藏。 */
 var LS_HISTORY_SCOPE = 'gourdai-history-scope';
 try { window.chatHistoryScope = localStorage.getItem(LS_HISTORY_SCOPE) || ''; } catch (e) { window.chatHistoryScope = ''; }
@@ -86,31 +86,13 @@ var _projExpanded = {};
 /* code 模式单根加载令牌（防竞态，原逻辑） */
 var _sessionsReqToken = 0;
 
-/* 定时任务列表（项目 tab「任务」区）：/web/chat/loop/list 全局返回所有任务（sessionId 仅做校验）。
-   自动化主视图（app-automation.js）在增/删/改/启停后调 window.reloadLoopTasks() 主动同步，
-   保证侧栏与自动化页数据一致。 */
-var _loopTasks = [];
-function loadLoopTasks() {
-    if (window.appMode === 'code') return;
-    var sid = activeSessionId || SESSION_ID;
-    if (!sid) return;
-    $.get('/web/chat/loop/list', { sessionId: sid }, function (resp) {
-        var list = (resp && resp.data) ? resp.data : [];
-        var arr = [];
-        for (var i = 0; i < list.length; i++) if (!list[i].cancelled) arr.push(list[i]);
-        _loopTasks = arr;
-        updateHistoryUI();
-    });
-}
-/* 供自动化视图跳轮刷新侧栏任务区 */
-window.reloadLoopTasks = loadLoopTasks;
 
 /* 后端会话列表 → 本地条目（projectRoot 由后端回填，切换历史会话时据此恢复所属根，
    保证发送时 X-Session-Cwd 指向该会话真实目录） */
 function toSessionEntries(list) {
     var arr = [];
     for (var i = 0; i < (list || []).length; i++) {
-        arr.push({ label: list[i].label, sessionId: list[i].sessionId, projectRoot: list[i].projectRoot || '', time: list[i].time || 0 });
+        arr.push({ label: list[i].label, sessionId: list[i].sessionId, projectRoot: list[i].projectRoot || '', time: list[i].time || 0, loop: !!list[i].loop });
     }
     return arr;
 }
@@ -149,9 +131,8 @@ function loadSessionHistory() {
         return;
     }
     // chat 模式：先拉已登记项目列表，再对 global（不带 root）与每个 project.path 并行发会话请求，
-    // 全部完成后汇总（任一路失败记为空数组，不阻塞其它路）。定时任务列表并行拉取供「任务」区渲染。
+    // 全部完成后汇总（任一路失败记为空数组，不阻塞其它路）。
     var myToken2 = ++_sidebarReqToken;
-    loadLoopTasks();
     $.get('/web/chat/projects', function (resp) {
         if (myToken2 !== _sidebarReqToken) return;
         var plist = (resp && resp.data) ? resp.data : [];
@@ -232,11 +213,17 @@ function removeSidebarEntry(sessionId) {
     }
 }
 
-function ensureChatInHistory(sessionId, firstMsg, makeCurrent) {
+function ensureChatInHistory(sessionId, firstMsg, makeCurrent, opts) {
     if (!sessionId) return;
     var label = (firstMsg || GourdI18n.t('history.new_chat')).toString();
     label = label.length > 30 ? label.substring(0, 30) + '...' : label;
     var shouldMakeCurrent = (makeCurrent !== false) && (sessionId === SESSION_ID || sessionId === activeSessionId || currentChatIndex === -1);
+    // opts: {root, silent} —— 自动化任务（Loop 定时任务）执行记录登记专用：
+    // root 显式指定所属工作空间（不挂到用户当前所选下）；silent 不做视图联动（不切 tab、不抢焦点）
+    var optRoot = (opts && typeof opts.root === 'string') ? opts.root : null;
+    var silent = !!(opts && opts.silent);
+    // loop：定时任务执行记录标记，侧栏条目名前渲染时钟小图标
+    var optLoop = !!(opts && opts.loop);
 
     if (window.appMode !== 'code' && _sidebarData) {
         // chat 聚合视图：直接登记进 _sidebarData（不再 unshift chatHistory）；渲染会重建平铺
@@ -245,24 +232,33 @@ function ensureChatInHistory(sessionId, firstMsg, makeCurrent) {
         if (exist) {
             exist.label = label;
             exist.time = Date.now();
+            if (optLoop) exist.loop = true;
         } else {
             // 新会话所属根 = 当前所选工作空间；匹配已登记项目则归入该项目，否则归全局
-            var pr = window.currentChatWorkspace || '';
+            // 自动化任务经 opts.root 传入任务自身工作空间，保证执行记录落在对应项目/对话区
+            var pr = (optRoot != null) ? optRoot : (window.currentChatWorkspace || '');
             var entry = { label: label, sessionId: sessionId, projectRoot: pr, time: Date.now() };
+            if (optLoop) entry.loop = true;
             var owner = findSidebarProject(pr);
             if (owner) {
                 owner.sessions.unshift(entry);
             } else {
                 _sidebarData.global.unshift(entry);
-                // 新会话归全局而当前停在项目 tab：联动切「对话」tab 保证新建会话可见（与欢迎页视图联动同一语义）
-                if (effectiveHistoryScope() === 'project') setHistoryScope('global', false);
+                // 新会话归全局而当前停在项目 tab：联动切「对话」tab 保证新建会话可见（与欢迎页视图联动同一语义）；
+                // silent 登记（自动化任务执行记录）不参与联动，避免切走用户当前视图
+                if (!silent && effectiveHistoryScope() === 'project') setHistoryScope('global', false);
             }
         }
         updateHistoryUI();
         return;
     }
 
-    // code 模式（或聚合数据未到达时）保持原平铺登记逻辑
+    // code 模式（或聚合数据未到达时）保持原平铺登记逻辑；
+    // 自动化任务执行记录（带显式 root）仅当所属根即当前项目时登记，避免跨项目污染侧栏
+    if (optRoot != null) {
+        var trimTrailSep = function (p) { return String(p || '').replace(/[\\/]+$/, ''); };
+        if (trimTrailSep(optRoot) !== trimTrailSep(window.currentProjectRoot)) return;
+    }
     for (var i = 0; i < chatHistory.length; i++) {
         if (chatHistory[i].sessionId === sessionId) {
             if (shouldMakeCurrent) currentChatIndex = i;
@@ -270,10 +266,13 @@ function ensureChatInHistory(sessionId, firstMsg, makeCurrent) {
             return;
         }
     }
-    // 新会话在本地登记：其所属根即当前所选（code=项目 / chat=工作空间，新会话正是在其下创建的）。
-    // 记入 chatHistory，使后续切走再切回时也能恢复出正确的工作空间上下文。
-    var pr2 = (window.appMode === 'code') ? (window.currentProjectRoot || '') : (window.currentChatWorkspace || '');
-    chatHistory.unshift({ label: label, sessionId: sessionId, projectRoot: pr2 });
+    // 新会话在本地登记：其所属根即当前所选（code=项目 / chat=工作空间，新会话正是在其下创建的）；
+    // 自动化任务带显式 root 时以其为准。记入 chatHistory，使后续切走再切回时也能恢复出正确的工作空间上下文。
+    var pr2 = (optRoot != null) ? optRoot
+            : ((window.appMode === 'code') ? (window.currentProjectRoot || '') : (window.currentChatWorkspace || ''));
+    var entry2 = { label: label, sessionId: sessionId, projectRoot: pr2 };
+    if (optLoop) entry2.loop = true;
+    chatHistory.unshift(entry2);
     if (chatHistory.length > 50) chatHistory.pop();
     if (shouldMakeCurrent) {
         currentChatIndex = 0;
@@ -321,8 +320,12 @@ function sidebarItemHtml(i) {
     var streaming = sess && sess.isStreaming;
     var cls = 'sidebar-item' + (i === currentChatIndex ? ' active' : '') + (streaming ? ' streaming' : '');
 
-    var html = '<div class="' + cls + '" data-idx="' + i + '">'
-        + '<span class="sidebar-item-label">' + escapeHtml(chatHistory[i].label) + '</span>';
+    var html = '<div class="' + cls + '" data-idx="' + i + '">';
+    // 定时任务执行会话：条目名前时钟小图标（与旧任务行同款 feather clock）
+    if (chatHistory[i].loop) {
+        html += '<span class="sidebar-item-loop" title="' + escAttr(GourdI18n.t('app.sidebar.loop_mark')) + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>';
+    }
+    html += '<span class="sidebar-item-label">' + escapeHtml(chatHistory[i].label) + '</span>';
     // 任务进度 badge
     var todoInfo = window.sessionTodoMap && window.sessionTodoMap[chatHistory[i].sessionId];
     if (todoInfo && todoInfo.total > 0) {
@@ -345,25 +348,6 @@ function sidebarItemHtml(i) {
     return html;
 }
 
-/* 定时任务行：clock 图标 + 名称/prompt 截断 + 右侧周期文案；停用置灰、运行中转圈。
-   整行点击跳自动化主视图并打开该任务编辑页（见列表点击委托，依赖 data-id）。
-   周期文案复用 settings.loop.* 语言键。 */
-function loopTaskHtml(t) {
-    var label = t.name || t.prompt || '';
-    if (label.length > 30) label = label.substring(0, 30) + '...';
-    var schedule = t.cron ? GourdI18n.t('settings.loop.cron_format', [t.cron])
-                          : GourdI18n.t('settings.loop.interval_format', [t.intervalMinutes]);
-    var cls = 'loop-item' + (t.enabled ? '' : ' disabled');
-    var html = '<div class="' + cls + '" data-id="' + escAttr(t.id || '') + '" title="' + escAttr(t.prompt || label) + '">'
-        + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>'
-        + '<span class="loop-item-label">' + escapeHtml(label) + '</span>';
-    if (t.running) {
-        html += '<span class="sidebar-item-spinner" title="' + escAttr(GourdI18n.t('history.streaming')) + '"></span>';
-    }
-    html += '<span class="loop-item-schedule">' + escapeHtml(t.enabled ? schedule : GourdI18n.t('app.sidebar.task_paused')) + '</span>'
-        + '</div>';
-    return html;
-}
 
 /* 项目文件夹行：chevron + folder 图标 + 名称（点击切换展开，见列表点击委托）。
    右侧悬浮操作组 .proj-actions：新建任务 / 进入专注模式 / 从列表移除（样式见 app.css）。 */
@@ -389,12 +373,6 @@ function projNodeHtml(path, name, expanded) {
 /* Sidebar event delegation — single listener instead of per-item binding */
 $(historyList).on('click', function(e) {
     var $target = $(e.target);
-    // 定时任务行：整行点击 → 自动化主视图，并直接打开该任务的编辑页（置于其它分支之前）
-    var $loop = $target.closest('.loop-item');
-    if ($loop.length) {
-        if (typeof window.openAutomation === 'function') window.openAutomation($loop.attr('data-id') || null);
-        return;
-    }
     // 项目行「新建任务」图标：聊天工作空间切到该项目并回欢迎页开新会话（须置于 proj-node 分支之前，避免被展开/收起吸收）
     var $newChat = $target.closest('.proj-new-chat');
     if ($newChat.length) {
@@ -498,7 +476,7 @@ function buildSidebar() {
     var projMeta = [];
     var i, j;
 
-    // —— 第一遍：按渲染顺序构建平铺（仅会话条目；定时任务行不入 chatHistory）——
+    // —— 第一遍：按渲染顺序构建平铺（仅会话条目）——
     if (scope === 'project') {
         // 项目 tab：文件夹节点嵌套项目会话（全局会话不在本 tab 展示，见「对话」tab）
         for (i = 0; i < projects.length; i++) {
@@ -529,19 +507,12 @@ function buildSidebar() {
             var pm = projMeta[i];
             var expanded = !!_projExpanded[pm.path];
             html += projNodeHtml(pm.path, pm.name, expanded);
-            // 子会话列表始终入 DOM（收起态由 CSS 控制），保证搜索可过滤折叠项目的会话
+            // 子列表始终入 DOM（收起态由 CSS 控制），保证搜索可过滤折叠项目的会话
             if (pm.count > 0) {
                 html += '<div class="proj-sessions">';
                 for (j = pm.start; j < pm.start + pm.count; j++) html += sidebarItemHtml(j);
                 html += '</div>';
             }
-        }
-        // 「任务」区：定时任务（loop），点击行跳转设置页「自动化」tab
-        html += '<div class="sidebar-section-title">' + GourdI18n.t('app.tasks') + '</div>';
-        if (_loopTasks.length === 0) {
-            html += '<div class="sidebar-empty-hint">' + GourdI18n.t('app.sidebar.no_tasks') + '</div>';
-        } else {
-            for (i = 0; i < _loopTasks.length; i++) html += loopTaskHtml(_loopTasks[i]);
         }
     } else {
         for (i = 0; i < flat.length; i++) html += sidebarItemHtml(i);
@@ -704,6 +675,38 @@ function selectSession(idx) {
         }
     }
 }
+
+/* 按 sessionId 直接打开对话（用于不在侧栏列表中的会话，如定时任务运行时会话）：
+   在当前 chatHistory 中则复用 selectSession；否则以临时条目直接打开（不插入侧栏列表）。
+   root 为会话所属工作空间根：绑定项目的执行对话落盘在该项目根下，必须传入才能正确拉取历史；
+   未绑定传 ''（全局区）。 */
+function openSessionById(sessionId, label, root) {
+    if (!sessionId) return false;
+    for (var i = 0; i < chatHistory.length; i++) {
+        if (chatHistory[i].sessionId === sessionId) { selectSession(i); return true; }
+    }
+    var r = (root == null) ? '' : root;
+    currentChatIndex = -1;
+    SESSION_ID = sessionId;
+    // Chat 模式：恢复会话所属工作空间（绑定项目 → 该项目根；未绑定 → 全局），
+    // 保证 replay/messages 拉取与后续发送的 X-Session-Cwd 指向真实所属目录（silent，不重载列表）
+    if (window.appMode !== 'code' && typeof window.applyChatWorkspace === 'function') {
+        window.applyChatWorkspace(r, true);
+    }
+    if (window.appMode !== 'code' && typeof closeDiffViewer === 'function') closeDiffViewer();
+    if (!inChatMode) switchToChatMode();
+    setActiveSession(sessionId);
+    if (sessionMap[sessionId]) sessionMap[sessionId].projectRoot = r;
+    updateHistoryUI();
+    var sess = sessionMap[sessionId];
+    if (!sess.isStreaming && !sess._replaying && !sess._gateBuffering && sess.container.children.length === 0) {
+        loadMessages(sess);
+    } else {
+        scrollToBottom(true);
+    }
+    return true;
+}
+window.openSessionById = openSessionById;
 
 /* tab 行三操作按钮：展开全部/收起全部、搜索（tab 行下方展开搜索条）、清空所有会话 */
 $(document).on('click', '#expandAllBtn', function () {

@@ -154,8 +154,12 @@
             // i18n 就绪后再填欢迎语，避免拿到 key 字面量
             GourdI18n.whenReady(function () {
                 titleEl.textContent = pickWelcomeTitle();
-                // 每 10 秒轮换欢迎语：淡出→换文→淡入，且避免与当前条重复
-                setInterval(function () {
+                // 每 10 秒轮换欢迎语：淡出→换文→淡入，且避免与当前条重复。
+                // 原先无条件常驻：窗口最小化/收入托盘后仍每 10s 唤醒渲染进程。
+                // 现改为：不可见时停表，恢复可见时重开；且非欢迎页（元素未布局）直接跳过 DOM 操作。
+                var rotateTimer = null;
+                function rotateOnce() {
+                    if (titleEl.offsetParent === null) return;   // 不在欢迎页（已隐藏），无需换文
                     var next = pickWelcomeTitle(titleEl.textContent);
                     if (!next || next === titleEl.textContent) return;
                     titleEl.classList.add('welcome-rotating');
@@ -163,7 +167,13 @@
                         titleEl.textContent = next;
                         titleEl.classList.remove('welcome-rotating');
                     }, 260);
-                }, 10000);
+                }
+                function startRotate() { if (!rotateTimer) rotateTimer = setInterval(rotateOnce, 10000); }
+                function stopRotate() { if (rotateTimer) { clearInterval(rotateTimer); rotateTimer = null; } }
+                document.addEventListener('visibilitychange', function () {
+                    if (document.hidden) stopRotate(); else startRotate();
+                });
+                if (!document.hidden) startRotate();
             });
         }
 
