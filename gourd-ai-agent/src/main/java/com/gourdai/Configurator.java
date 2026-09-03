@@ -100,17 +100,17 @@ public class Configurator {
         });
 
         String workspace = AgentFlags.getUserDir();
+        String globalBase = AgentFlags.getHarnessBase();
         // LRU 会话缓存：容量上限 100，超限按最近访问时间淘汰最老的非活跃会话；
         // 淘汰仅摘除内存引用（磁盘文件保留），下次访问自动从磁盘重载，
         // 对话历史与压缩摘要不受影响；在途（busy）或挂起（HITL）会话不淘汰
         LruSessionCache sessionCache = new LruSessionCache();
 
-        // 会话目录定位器：统一 work- 会话，按有无所属根划分——
-        // 项目会话（绑根）落 <root>/.gwork/sessions/，全局会话（无根）落安装目录
-        this.sessionLocator = new SessionLocator(workspace, AgentFlags.getHarnessSessions());
+        // 会话目录定位器：项目会话写项目根，全局会话写明确的全局基准目录。
+        this.sessionLocator = new SessionLocator(workspace, globalBase, AgentFlags.getHarnessSessions());
         final SessionLocator locator = this.sessionLocator;
 
-        // 按会话所属根解析落盘目录（未登记根的全局会话回退安装目录）
+        // 按会话所属根解析落盘目录（未登记根的全局会话回退全局基准目录）
         AgentSessionProvider sessionProvider = new AgentSessionProvider() {
             @Override
             public AgentSession getSession(String sessionId) {
@@ -135,9 +135,8 @@ public class Configurator {
                 .maxTurns(settings.getGeneral().getMaxTurns())
                 .autoRethink(settings.getGeneral().getAutoRethink())
                 .sessionProvider(sessionProvider)
-                // 历史窗口大小用于保留窗口兜底（minReservedMessages = maxMessages / 3），
-                // 第二个参数 maxTokens 不参与触发判据，仅作为极端场景的兜底基准
-                .compressionThreshold(settings.getGeneral().getHistoryWindowSize(), null)
+                // 历史窗口大小用于保留窗口兜底（minReservedMessages = maxMessages / 3）
+                .compressionThreshold(settings.getGeneral().getHistoryWindowSize())
                 .compressionRatio(settings.getGeneral().getCompressionRatio())
                 .compressionModel(settings.getGeneral().getSummaryModel())
                 .memoryEnabled(settings.getGeneral().getMemoryEnabled())
@@ -180,9 +179,8 @@ public class Configurator {
                     .build());
         }
 
-        // 全局区技能/子代理：统一落安装目录（与工作区同基准，不再指向用户主目录）。
-        // 保留 @global-* 别名（UI/提示词/测试均按别名引用），仅把物理路径改到安装目录。
-        String globalBase = AgentFlags.getHarnessBase();
+        // 全局区技能/子代理：统一落全局基准目录。
+        // 保留 @global-* 别名（UI/提示词/测试均按别名引用）。
         engine.addMount(MountDir.builder().alias("@global-skills").type(MountType.SKILLS).path(Paths.get(globalBase, engine.getHarnessSkills()).toString()).primary(true).build());
         engine.addMount(MountDir.builder().alias("@workspace-skills").type(MountType.SKILLS).path("./" + engine.getHarnessSkills()).primary(true).build());
 
@@ -409,7 +407,7 @@ public class Configurator {
         }
 
         //web
-        BeanWrap webController = Solon.context().wrapAndPut(WebController.class, new WebController(agentRuntime, webGate, loopScheduler, sessionLocator, workspaceWatcher));
+        BeanWrap webController = Solon.context().wrapAndPut(WebController.class, new WebController(agentRuntime, webGate, loopScheduler, sessionLocator, settings, workspaceWatcher));
         Solon.app().router().add(webController);
 
         WebSettingsController settingsController = new WebSettingsController(agentRuntime, settings);
@@ -433,12 +431,49 @@ public class Configurator {
         // 启动微信通道
         RunUtil.async((Runnable) webChannel.get());
 
+        // 启动后静默增量归档用量：把各会话新产生的 token 消耗并入月度账本，
+        // 使历史用量不随项目删除/移走而丢失（统计页打开时还会再做一次，幂等）。
+        // 延迟让位给启动主流程；守护线程 + 异常静默，不影响启动。
+        // 启动桌面 Web 生命周期内的小时用量同步；无 endpoint 时仅生成本地 outbox。
+        try {
+            UsageSubmissionService.shared().startHourlySync();
+        } catch (Throwable e) {
+            LOG.warn("Unable to start usage telemetry (application startup continues): {}", e.getMessage());
+        }
+        startUsageArchiveWarmup(agentRuntime);
+
         if (cliShell == null) {
             return;
         }
 
 //        String url = "http://localhost:" + Solon.cfg().serverPort() + "/";
 //        cliShell.printWelcome("Web interface: " + url);
+    }
+
+
+    /**
+     * 启动时静默增量归档用量账本。
+     *
+     * <p>扫描全局区与所有已登记项目根下的会话流文件，把水位之后的新事件
+     * 聚合进 {@code <globalBase>/.gwork/usage/usage-YYYY-MM.json}。首次运行会回填存量历史，
+     * 之后每次只处理增量，耗时极短。</p>
+     */
+    private void startUsageArchiveWarmup(HarnessEngine agentRuntime) {
+        if (sessionLocator == null) {
+            return;
+        }
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(3000L);
+                new UsageArchiveService(sessionLocator, AgentFlags.getHarnessBase()).archiveIncremental();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Throwable e) {
+                // 忽略：归档失败不影响主流程（下次启动或打开统计页时重试）
+            }
+        }, "usage-archive-warmup");
+        t.setDaemon(true);
+        t.start();
     }
 
 

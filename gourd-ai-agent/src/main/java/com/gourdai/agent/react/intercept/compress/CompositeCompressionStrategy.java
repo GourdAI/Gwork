@@ -39,7 +39,7 @@ import java.util.List;
  *     .addStrategy(new HierarchicalCompressionStrategy(chatModel)); // 后压缩
  *
  * // 2. 注入拦截器
- * ContextCompressionInterceptor interceptor = new ContextCompressionInterceptor(12, 15000, composite);
+ * ContextCompressionInterceptor interceptor = new ContextCompressionInterceptor(12, null, composite);
  * }</pre>
  *
  * @author oisin

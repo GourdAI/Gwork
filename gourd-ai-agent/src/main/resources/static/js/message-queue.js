@@ -182,10 +182,16 @@ class MessageQueue {
         if (sessionId) {
             headers['X-Session-Id'] = sessionId;
         }
-        var sessionCwd = (typeof window.getSessionCwd === 'function') ? window.getSessionCwd() : '';
-        if (sessionCwd) {
-            headers['X-Session-Cwd'] = sessionCwd;
+        var root = '';
+        if (sessionId && typeof window.sessionMap !== 'undefined'
+                && window.sessionMap[sessionId] && window.sessionMap[sessionId].projectRoot) {
+            root = window.sessionMap[sessionId].projectRoot;
+        } else if (typeof sessionMap !== 'undefined' && sessionMap[sessionId] && sessionMap[sessionId].projectRoot) {
+            root = sessionMap[sessionId].projectRoot;
+        } else if (typeof window.getSessionCwd === 'function') {
+            root = window.getSessionCwd();
         }
+        if (root) headers['X-Session-Cwd'] = root;
         return headers;
     };
 }

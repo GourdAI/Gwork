@@ -387,8 +387,8 @@
             renderLineHighlight: 'none',
             matchBrackets: 'always',
             bracketPairColorization: { enabled: true },
-            // 滚动条尺寸与全局规范一致（theme.css --scrollbar-size: 6px），颜色/圆角由 code.css 统一覆盖
-            scrollbar: { useShadows: false, verticalScrollbarSize: 6, horizontalScrollbarSize: 6 },
+            // 滚动条尺寸与全局规范一致（theme.css --scrollbar-size: 12px），颜色/圆角/视觉收窄由 code.css 统一覆盖
+            scrollbar: { useShadows: false, verticalScrollbarSize: 12, horizontalScrollbarSize: 12 },
             wordBasedSuggestions: 'currentDocument',
             quickSuggestions: { other: true, comments: false, strings: false },
             largeFileOptimizations: true,
@@ -417,8 +417,8 @@
             showFoldingControls: 'always',
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
-            // 滚动条尺寸与全局规范一致（theme.css --scrollbar-size: 6px），颜色/圆角由 code.css 统一覆盖
-            scrollbar: { useShadows: false, verticalScrollbarSize: 6, horizontalScrollbarSize: 6 },
+            // 滚动条尺寸与全局规范一致（theme.css --scrollbar-size: 12px），颜色/圆角/视觉收窄由 code.css 统一覆盖
+            scrollbar: { useShadows: false, verticalScrollbarSize: 12, horizontalScrollbarSize: 12 },
             matchBrackets: 'always',
             bracketPairColorization: { enabled: true },
             largeFileOptimizations: true,

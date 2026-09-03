@@ -57,6 +57,32 @@ function releaseAttachmentData(item) {
     if (item.file) { item.file = null; }
 }
 
+/**
+ * 发送前把超过 64 KiB UTF-8 的原始输入折叠成 TXT 附件。
+ * 返回 true 表示已转换；false 表示无需转换；null 表示无法转换且必须中止发送。
+ */
+function foldLongInputToAttachment(rawText) {
+    if (!rawText || !rawText.trim()) return false;
+    var blob = new Blob([rawText], { type: 'text/plain;charset=utf-8' });
+    if (blob.size <= LONG_INPUT_THRESHOLD_BYTES) return false;
+    if (pendingFiles.length >= MAX_ATTACHMENTS) {
+        showToast(GourdI18n.t('ui.attachment_limit', MAX_ATTACHMENTS), 'error');
+        return null;
+    }
+    var now = new Date();
+    function pad(v) { return String(v).padStart(2, '0'); }
+    var stamp = now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate()) + '-'
+        + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds());
+    var name = 'long-input-' + stamp + '-' + Math.random().toString(36).slice(2, 8) + '.txt';
+    var file = new File([blob], name, { type: 'text/plain;charset=utf-8', lastModified: Date.now() });
+    pendingFiles.push({ type: 'file', name: name, size: file.size, file: file,
+        attachmentsType: 'file', generatedFromInput: true });
+    renderAttachments();
+    showToast(GourdI18n.t('streaming.long_input_converted', [formatFileSize(file.size), name]), 'info', 5000);
+    return true;
+}
+window.foldLongInputToAttachment = foldLongInputToAttachment;
+
 function handlePaste(e) {
     var clipboard = e.clipboardData || e.originalEvent.clipboardData;
     if (!clipboard) return;
@@ -139,6 +165,11 @@ function clearAttachmentPreview() {
         releaseAttachmentData(pendingFiles[k]);
     }
     pendingFiles.length = 0;
+    // 同步断开当前会话的草稿附件引用（draftFiles 与 pendingFiles 持有同一批对象），
+    // 否则已发送/已清空的附件仍被 SessionState 长期持有
+    if (typeof sessionMap !== 'undefined' && activeSessionId && sessionMap[activeSessionId]) {
+        sessionMap[activeSessionId].draftFiles = null;
+    }
     renderAttachments();
     // 重置异步操作版本号，使后续到达的旧回调失效
     _pendingFilesVersion++;
@@ -155,6 +186,7 @@ function removeAttachment(idx) {
 function processSelectedFile(file, attachmentsType) {
     if (!file) return;
     if (pendingFiles.length >= MAX_ATTACHMENTS) return;
+    // 大小限制由后端配置决定，不在前端人为拦截。
 
     // 捕获当前版本号，用于后续异步回调校验
     var currentVersion = _pendingFilesVersion;
@@ -283,15 +315,19 @@ $(chatInput).on('paste', handlePaste);
     bindDropZone(chatDropZone, chatDropOverlay, { val: chatDragCounter });
 })();
 
-// Attachment remove buttons - use event delegation on both wraps
-welcomeAttachmentsWrap.on('click', function(e) {
+// Attachment remove buttons / image zoom - use event delegation on both wraps
+function onAttachmentsWrapClick(e) {
     var btn = e.target.closest('.attachment-item-remove');
-    if (btn) removeAttachment(parseInt(btn.getAttribute('data-idx')));
-});
-chatAttachmentsWrap.on('click', function(e) {
-    var btn = e.target.closest('.attachment-item-remove');
-    if (btn) removeAttachment(parseInt(btn.getAttribute('data-idx')));
-});
+    if (btn) {
+        removeAttachment(parseInt(btn.getAttribute('data-idx')));
+        return;
+    }
+    // 缩略图点击放大（复用消息区同一套 lightbox）
+    var img = e.target.closest('.attachment-item img');
+    if (img && typeof openLightbox === 'function') openLightbox(img.src);
+}
+welcomeAttachmentsWrap.on('click', onAttachmentsWrapClick);
+chatAttachmentsWrap.on('click', onAttachmentsWrapClick);
 
 // Attach button handlers
 $('#welcomeAttachBtn').on('click', function(e) {
@@ -609,6 +645,14 @@ function createStreamMd(hostEl) {
         r.host.innerHTML = mdParse(r.buf);
         r.tailEl = null; r.fencePre = null; r.fenceCode = null;
         r.stableLen = r.buf.length; r.inFence = false;
+        // 收尾后释放全文缓冲：此时内容已全量渲染进 host.innerHTML，且权威复制源是
+        // .md-content 上的 data-md-raw 属性， buf 自身不再被读取。不释放的话，每个流式渲染过的
+        // 元素都会随 _streamMd 永久携带一份正文原文副本（与已渲染 HTML 重复存储）。
+        // 安全性：append() 在 !active 时走重置分支（ buf='' 后重新累加），replace() 直接整体赋值，
+        // 二者均不依赖 finish() 后的旧 buf；重复调用 finish() 被 !active 守卫直接返回。
+        // 注意：dispose() 仍须保留 buf（其语义是「可能还要 finish() 收尾」），此处不得上移。
+        r.buf = '';
+        r.stableLen = 0;
     };
     r.dispose = function () {
         // 仅取消挂起帧与回调；保留 active/buf，保证 dispose 后仍可 finish() 全量收尾
@@ -827,6 +871,9 @@ $(document).on('click', '#skillsNavBtn', function() {
 $(document).on('click', '#channelNavBtn', function() {
     if (typeof window.openChannel === 'function') window.openChannel();
 });
+$(document).on('click', '#usageNavBtn', function() {
+    if (typeof window.openUsage === 'function') window.openUsage();
+});
 $(document).on('click', '#modelConfigNavBtn', function() {
     if (typeof window.openModelSettings === 'function') window.openModelSettings();
 });
@@ -838,13 +885,15 @@ function switchToChatMode() {
     var fromAutomation = (typeof window.isAutomationOpen === 'function') && window.isAutomationOpen();
     var fromSkills = (typeof window.isSkillsOpen === 'function') && window.isSkillsOpen();
     var fromChannel = (typeof window.isChannelOpen === 'function') && window.isChannelOpen();
+    var fromUsage = (typeof window.isUsageOpen === 'function') && window.isUsageOpen();
     var fromModelSettings = (typeof window.isModelSettingsOpen === 'function') && window.isModelSettingsOpen();
     if (typeof window.closeAutomation === 'function') window.closeAutomation();
     if (typeof window.closeSkills === 'function') window.closeSkills();
     if (typeof window.closeChannel === 'function') window.closeChannel();
     if (typeof window.closeModelSettings === 'function') window.closeModelSettings();
     if (typeof window.closeMemoryView === 'function') window.closeMemoryView();
-    if (inChatMode && !fromAutomation && !fromSkills && !fromChannel && !fromModelSettings) return;
+    if (typeof window.closeUsage === 'function') window.closeUsage();
+    if (inChatMode && !fromAutomation && !fromSkills && !fromChannel && !fromModelSettings && !fromUsage) return;
     inChatMode = true;
     $(welcomeView).hide();
     $(chatView).addClass('active');
@@ -858,7 +907,12 @@ function switchToWelcomeMode() {
     if (typeof window.closeChannel === 'function') window.closeChannel();
     if (typeof window.closeModelSettings === 'function') window.closeModelSettings();
     if (typeof window.closeMemoryView === 'function') window.closeMemoryView();
+    if (typeof window.closeUsage === 'function') window.closeUsage();
     inChatMode = false;
+    // 欢迎页输入框不参与按会话草稿：每次回欢迎页都会另开新 sessionId（见下一行），
+    // 旧内容无处可归；不清就会被所有「新建对话」入口（侧栏新建/项目新建任务/Ctrl+N/
+    // 删会话回退/切工作空间）带到下一个新对话里。
+    if (welcomeInput) { welcomeInput.value = ''; autoResize(welcomeInput); }
     if (typeof forgetActiveSession === 'function') forgetActiveSession();
     SESSION_ID = (typeof newSessionId === 'function') ? newSessionId() : ('work-' + Date.now().toString(36));
     // 新会话落盘跟随工作空间选择（getSessionCwd→X-Session-Cwd）：选了工作空间即落该项目区。
@@ -1345,13 +1399,14 @@ function getFileIcon(fileName) {
 // 全局队列处理状态
 var _queueProcessing = {}; // { sessionId: boolean }
 
-/* 输入框上方的 chip 容器（#chatTodoChipWrap）同时承载 todo chip 与 queue chip，
-   二者任一可见即应显示该容器。由 app-todos.js 与本模块分别置位后统一汇算。 */
+/* 输入框上方的 chip 容器（#chatTodoChipWrap）同时承载 todo chip、queue chip
+   与执行中的键位提示条，三者任一可见即应显示该容器。
+   由 app-todos.js / app-base.js / 本模块分别置位后统一汇算。 */
 window._queueChipVisible = false;
 function updateChipWrapVisibility() {
     var $wrap = $('#chatTodoChipWrap');
     if (!$wrap.length) return;
-    var visible = !!window._queueChipVisible || !!window._todoChipVisible;
+    var visible = !!window._queueChipVisible || !!window._todoChipVisible || !!window._runHintVisible;
     $wrap.css('display', visible ? 'flex' : 'none');
 }
 window.updateChipWrapVisibility = updateChipWrapVisibility;
@@ -1487,10 +1542,10 @@ async function processMessageQueue(targetSessionId) {
 }
 
 async function processNextQueuedMessage(sessionId) {
-    // 存在 busy 暂存消息时不再出队新消息：暂存消息会在当前任务 done 后自动补发，
-    // 此时若再出队发送，服务端仍会返回 busy，导致暂存标记被覆盖、消息丢失
-    var guardSess = sessionMap[sessionId];
-    if (guardSess && guardSess._pendingResend) return;
+    // 队列必须按目标会话发送，不能借用全局输入框/sendMessage；否则后台会话 A 完成后
+    // 会把 A 的队列项提交到用户当前查看的会话 B。
+    var guardSess = sessionMap[sessionId] || getOrCreateSession(sessionId);
+    if (!guardSess || guardSess._pendingResend || guardSess.isStreaming) return;
 
     var item = await window.messageQueue.shift(sessionId);
 
@@ -1501,23 +1556,23 @@ async function processNextQueuedMessage(sessionId) {
 
     updateMessageQueueUI();
 
-    // 设置输入框文本：按当前视图选择对应输入框（chatInput / welcomeInput）。
-    // 此前用 $('#chat-input') 选择器命中不到任何元素（实际 id 为 chatInput），
-    // 导致出队后 sendMessage 读到空输入直接 return，队列消息永远发不出去。
     var text = item.content || '';
-    if (inChatMode) {
-        if (chatInput) { chatInput.value = text; autoResize(chatInput); }
-    } else {
-        if (welcomeInput) { welcomeInput.value = text; autoResize(welcomeInput); }
-    }
+    // 队列用户气泡也要乐观渲染；recovery 按 clientMessageId 跳过 user 回放的前提就是本地已展示。
+    appendUserMessage(guardSess, text, null, null);
+    guardSess._pendingClientMessageId = 'msg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    guardSess._requestStartSeq = guardSess.lastEventSeq || 0;
+    guardSess._awaitingSendAck = true;
+    guardSess._sendAckConfirmed = false;
+    guardSess._queueOriginItem = item;
+    // 队列目前持久化的是附件文件名而非 File/服务端 token，不能伪装成已携带附件；
+    // 文本占位会保留原有提示语义，附件可靠续发需后续单独升级队列协议。
+    sendWithFormDataGrouped(guardSess, text, []);
 
-    // 发送消息
-    sendMessage();
-
-    // 等待发送完成
+    // 等待目标会话发送完成（不能看全局 isStreaming，它属于当前活动会话）。
     await new Promise(function(resolve) {
         var checkInterval = setInterval(function() {
-            if (!isStreaming) {
+            var target = sessionMap[sessionId];
+            if (!target || !target.isStreaming) {
                 clearInterval(checkInterval);
                 resolve();
             }

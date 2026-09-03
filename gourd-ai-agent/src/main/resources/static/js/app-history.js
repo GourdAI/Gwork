@@ -464,6 +464,22 @@ function updateHistoryUI() {
     });
 }
 
+/* 侧栏条目排序：执行中的任务优先，其余按最近活动时间倒序；最后保持接口原顺序稳定。 */
+function sortSidebarEntries(entries) {
+    var decorated = (entries || []).map(function (entry, index) {
+        var sess = (typeof sessionMap !== 'undefined' && sessionMap) ? sessionMap[entry.sessionId] : null;
+        return { entry: entry, index: index, running: !!(sess && sess.isStreaming) };
+    });
+    decorated.sort(function (a, b) {
+        if (a.running !== b.running) return a.running ? -1 : 1;
+        var at = Number(a.entry.time) || 0;
+        var bt = Number(b.entry.time) || 0;
+        if (at !== bt) return bt - at;
+        return a.index - b.index;
+    });
+    return decorated.map(function (item) { return item.entry; });
+}
+
 /* 构建 chat 聚合视图，返回 html 字符串。
    副作用：按渲染顺序重建 chatHistory 平铺并按 sessionId 修正 currentChatIndex——
    必须先于 HTML 生成完成，sidebarItemHtml 依赖 currentChatIndex 判定 active 样式
@@ -478,17 +494,17 @@ function buildSidebar() {
 
     // —— 第一遍：按渲染顺序构建平铺（仅会话条目）——
     if (scope === 'project') {
-        // 项目 tab：文件夹节点嵌套项目会话（全局会话不在本 tab 展示，见「对话」tab）
+        // 项目 tab：项目内执行中的任务置顶，其余按最近活动时间倒序
         for (i = 0; i < projects.length; i++) {
             var start = flat.length;
-            var ss = projects[i].sessions || [];
+            var ss = sortSidebarEntries(projects[i].sessions || []);
             for (j = 0; j < ss.length; j++) flat.push(ss[j]);
             projMeta.push({ path: projects[i].path, name: projects[i].name, start: start, count: ss.length });
         }
     } else {
-        // 对话 tab：仅全局会话（非工作空间下），按 time 倒序（time 缺省按 Date.now()）
+        // 对话 tab：仅全局会话（非工作空间下），执行中的任务置顶，其余按 time 倒序
         for (i = 0; i < global.length; i++) flat.push(global[i]);
-        flat.sort(function (a, b) { return (b.time || Date.now()) - (a.time || Date.now()); });
+        flat = sortSidebarEntries(flat);
     }
 
     // —— 重建全局量并修正激活下标 ——
@@ -574,10 +590,26 @@ function deleteSession(idx) {
     $.post('/web/chat/sessions/delete?sessionId=' + encodeURIComponent(entry.sessionId) + rootQ, function() {
         /* Clean up session state after server confirms */
         var sess = sessionMap[entry.sessionId];
+        if (window.messageQueue) {
+            try { window.messageQueue.clear(entry.sessionId); } catch (e) {}
+        }
+        if (typeof _queueProcessing !== 'undefined') _queueProcessing[entry.sessionId] = false;
         if (sess) {
+            // 让在途 replay 回调/重试闭包立即失效，避免删除后继续请求并持有会话对象。
+            sess._recoverGeneration = (sess._recoverGeneration || 0) + 1;
+            sess._recovering = false;
+            sess._gateBuffering = false;
+            sess._gateBuffer = [];
+            if (sess._recoverRetryTimer) { clearTimeout(sess._recoverRetryTimer); sess._recoverRetryTimer = null; }
+            if (sess._resumePromise && typeof sess._resumePromise.abort === 'function') {
+                try { sess._resumePromise.abort(); } catch (e) {}
+            }
+            sess._resumePromise = null;
             if (sess.eventSource) sess.eventSource.close();
             if (sess.silenceTimer) clearTimeout(sess.silenceTimer);
             if (typeof disposeSessionStreamMd === 'function') disposeSessionStreamMd(sess);
+            // 释放未发送草稿及其附件大对象（删会话后草稿永无去处）
+            if (typeof releaseSessionDraft === 'function') releaseSessionDraft(sess);
             $(sess.container).remove();
             delete sessionMap[entry.sessionId];
             // 删除会话时清理可能残留的加载按钮
@@ -745,6 +777,7 @@ $(document).on('click', '#clearAllBtn', function () {
                         if (cs.eventSource) cs.eventSource.close();
                         if (cs.silenceTimer) clearTimeout(cs.silenceTimer);
                         if (typeof disposeSessionStreamMd === 'function') disposeSessionStreamMd(cs);
+                        if (typeof releaseSessionDraft === 'function') releaseSessionDraft(cs);
                         $(cs.container).remove();
                         delete sessionMap[entries[c].sessionId];
                     }
@@ -789,7 +822,12 @@ function loadMessages(sess) {
                 sess._replayLoadedCount = rpData.events.length;
                 // 快照覆盖集：标识「回放已渲染的事件」，供缓冲/迟到的实时帧去重（本轮 done 时清除）
                 sess._replayCoverage = buildReplayCoverage(rpData.events);
-                replaySession(sess, rpData.events, false);
+                // 尾部快照中实际渲染的最大 eventSeq 才是稳定游标；不能使用 latestSeq（文件可能还有未渲染的新事件）。
+                for (var rsi = 0; rsi < rpData.events.length; rsi++) {
+                    var rseq = Number(rpData.events[rsi] && rpData.events[rsi].eventSeq || 0);
+                    if (rseq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, rseq);
+                }
+                replaySession(sess, rpData.events, false, !!rpData.running);
                 return;
             } catch (e) {
                 // 回放异常：清空可能的半成品，回退纯文本加载
@@ -838,6 +876,10 @@ function loadMoreMessages(sess) {
             sess._replayHasMore = rpData.hasMore || (sess._replayLoadedCount + newCount < sess._replayTotalCount);
             if (newCount > 0) {
                 var olderEvents = rpData.events.slice(0, newCount);
+                for (var ose = 0; ose < olderEvents.length; ose++) {
+                    var oldSeq = Number(olderEvents[ose] && olderEvents[ose].eventSeq || 0);
+                    if (oldSeq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, oldSeq);
+                }
                 sess._replayLoadedCount += newCount;
                 // 标记为 prepend 模式，replayDone 会根据 scrollHeight 差值自动恢复滚动位置（缓冲在 replayDone 排空）
                 replaySession(sess, olderEvents, true);
@@ -905,13 +947,8 @@ function updateLoadMoreBtn(sess) {
 }
 
 /* ===== 回放/实时流互斥门禁 =====
-   历史回放期间（含等待回放响应窗口），同会话实时 WS 帧先入缓冲（beginGateBuffer），
-   回放完成/legacy 加载完成后由 drainGateBuffer 统一排空；快照覆盖集（_replayCoverage）
-   标识「回放已渲染的事件」：
-   - 非文本块（工具卡片/trace/user/done 等）后端逐块落盘，按指纹或 createdAt<=快照最大时间戳 命中；
-   - text/reason 后端按 (type,runId) 合并落盘（与实时逐 token 帧粒度不同），按 (type,runId) 命中；
-   缓冲或迟到的帧命中覆盖集即丢弃，其余喂入实时管线，保证不重不漏。
-   覆盖集在本轮 done 到达时清除（dispatchGateChunk），不误拦后续轮次。 */
+   新版事件携带 eventSeq：历史快照与实时缓冲统一按会话游标去重、排序；
+   旧 stream 文件没有 eventSeq 时，继续使用指纹/时间与 (type,runId) 覆盖集兼容。 */
 function beginGateBuffer(sess) {
     if (!sess._gateBuffer) sess._gateBuffer = [];
     sess._gateBuffering = true;
@@ -942,16 +979,24 @@ function replayCoverageHas(cov, c) {
     return !!cov.fps[gateChunkFp(c)];
 }
 function drainGateBuffer(sess) {
-    sess._gateBuffering = false;
     var buf = sess._gateBuffer || [];
     sess._gateBuffer = [];
+    sess._gateBufferOverflowed = false;
+    buf.sort(function(a, b) {
+        return Number(a && a.eventSeq || 0) - Number(b && b.eventSeq || 0);
+    });
     for (var i = 0; i < buf.length; i++) {
         var c = buf[i];
         try {
-            if (sess._replayCoverage && replayCoverageHas(sess._replayCoverage, c)) continue;
-            dispatchGateChunk(c);
+            if (c && c.eventSeq) {
+                applySequencedGateChunk(sess, c);
+            } else {
+                if (sess._replayCoverage && replayCoverageHas(sess._replayCoverage, c)) continue;
+                dispatchGateChunk(c);
+            }
         } catch (e) {}
     }
+    sess._gateBuffering = false;
 }
 
 /* 流式过程回放：把 replay 事件序列喂给与实时流完全相同的渲染管线（onWebChunk + finishStream），
@@ -962,9 +1007,9 @@ function drainGateBuffer(sess) {
    
    @param {Object} sess 会话对象
    @param {Array} events 事件列表
-   @param {boolean} prepend 是否为 prepend 模式（在现有内容之前追加）
+   @param {boolean} keepOpen 服务端任务是否仍在运行
    */
-function replaySession(sess, events, prepend) {
+function replaySession(sess, events, prepend, keepOpen) {
     var realContainer = sess.container;
     var tempDiv = document.createElement('div');
     sess.container = tempDiv;
@@ -976,7 +1021,7 @@ function replaySession(sess, events, prepend) {
     resetStreamState(sess);
 
     function endTurn() {
-        if (sess.currentBubbleEl || sess.thinkingBlockEl || sess.pendingToolCard || sess.currentBatch) {
+        if (sess.currentBubbleEl || sess.thinkingBlockEl || sess.pendingToolCard) {
             // 回放期间不经过 finishStream（避免空 buffer 产生空气泡和 setAssistantTime 副作用），
             // 手动取消待渲染帧并强刷 buffer，然后清理状态。
             if (sess.reasonBuffer) {
@@ -999,28 +1044,32 @@ function replaySession(sess, events, prepend) {
 
     function replayChunk() {
         var end = Math.min(idx + CHUNK_SIZE, events.length);
-        
+
         try {
             for (; idx < end; idx++) {
-                var chunk = events[idx];
-                if (!chunk || !chunk.type) continue;
-                sess._replayClock = (typeof chunk.createdAt === 'number') ? chunk.createdAt : (sess._replayClock || 0);
+                    var chunk = events[idx];
+                    try {
+                        if (!chunk || !chunk.type) continue;
+                        sess._replayClock = (typeof chunk.createdAt === 'number') ? chunk.createdAt : (sess._replayClock || 0);
 
-                if (chunk.type === 'user' || chunk.type === 'user_input') {
-                    endTurn();                 // 新用户消息前，先收尾上一轮 AI
-                    resetStreamState(sess);
-                    appendUserMessage(sess, chunk.text, null, null, chunk.createdAt);
-                    continue;
+                        if (chunk.type === 'user' || chunk.type === 'user_input') {
+                            endTurn();
+                            resetStreamState(sess);
+                            appendUserMessage(sess, chunk.text, null, null, chunk.createdAt);
+                            continue;
+                        }
+                        if (chunk.type === 'done') { endTurn(); resetStreamState(sess); continue; }
+
+                        sess.isStreaming = true;
+                        onWebChunk(sess, chunk);
+                        sess.isStreaming = false;
+                        if (chunk.type === 'trace') { endTurn(); resetStreamState(sess); }
+                    } catch (eventError) {
+                        // 单条损坏事件不能卡死同一个 idx；for 的 idx++ 会继续下一条并最终释放 gate。
+                        console.error('[replaySession] 跳过异常事件:', eventError);
+                        sess.isStreaming = false;
+                    }
                 }
-                if (chunk.type === 'done') { endTurn(); resetStreamState(sess); continue; }
-
-                // 其余事件（reason/text/action_start/action_end/trace/hitl/command/error/rewind）
-                // 走与实时流一致的分发；trace 到达即本轮结束，收尾后重置以承接下一轮
-                sess.isStreaming = true;
-                onWebChunk(sess, chunk);
-                sess.isStreaming = false;
-                if (chunk.type === 'trace') { endTurn(); resetStreamState(sess); }
-            }
         } catch (e) {
             console.error('[replaySession] 回放异常:', e);
         }
@@ -1035,9 +1084,28 @@ function replaySession(sess, events, prepend) {
     }
 
     function replayDone() {
-        // 收尾最后一轮（可能无 trace，如中断）— endTurn 不再调用 finishStream，
-        // 而是直接强刷 buffer 并清理，避免空 buffer 产生空气泡
-        endTurn();
+        var resumeState = null;
+        if (keepOpen && !prepend && (sess.currentBubbleEl || sess.thinkingBlockEl || sess.pendingToolCard)) {
+            resumeState = {
+                currentBubbleEl: sess.currentBubbleEl,
+                reasonBuffer: sess.reasonBuffer,
+                thinkingBlockEl: sess.thinkingBlockEl,
+                thinkingBodyMdEl: sess.thinkingBodyMdEl,
+                thinkingBodyWrapEl: sess.thinkingBodyWrapEl,
+                thinkingBuffer: sess.thinkingBuffer,
+                currentRunId: sess.currentRunId,
+                pendingToolCard: sess.pendingToolCard,
+                pendingToolStarted: sess.pendingToolStarted,
+                approvedToolCard: sess.approvedToolCard,
+                toolCardsById: sess.toolCardsById,
+                toolBatchesById: sess.toolBatchesById,
+                agentCards: sess.agentCards,
+                agentStates: sess.agentStates,
+                agentStateLast: sess._agentStateLast
+            };
+        } else {
+            endTurn();
+        }
         sess._replaying = false;
         sess._replayClock = null;
         sess.isStreaming = false;
@@ -1082,13 +1150,36 @@ function replaySession(sess, events, prepend) {
         if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(realContainer);
         if (typeof processMermaidBlocks === 'function') processMermaidBlocks(realContainer);
 
-        // 回放结束，清空 Markdown 缓存释放内存（回放过程中的短文本已转为 HTML，无需再缓存）
+        // 回放结束，清空 Markdown 缓存并清理临时流状态。
         if (typeof clearMdCache === 'function') clearMdCache();
-
         resetStreamState(sess);
+        if (resumeState) {
+            sess.currentBubbleEl = resumeState.currentBubbleEl;
+            sess.reasonBuffer = resumeState.reasonBuffer;
+            sess.thinkingBlockEl = resumeState.thinkingBlockEl;
+            sess.thinkingBodyMdEl = resumeState.thinkingBodyMdEl;
+            sess.thinkingBodyWrapEl = resumeState.thinkingBodyWrapEl;
+            sess.thinkingBuffer = resumeState.thinkingBuffer;
+            sess.currentRunId = resumeState.currentRunId;
+            sess.pendingToolCard = resumeState.pendingToolCard;
+            sess.pendingToolStarted = resumeState.pendingToolStarted;
+            sess.approvedToolCard = resumeState.approvedToolCard;
+            sess.toolBatchesById = resumeState.toolBatchesById || {};
+            sess.toolCardsById = resumeState.toolCardsById;
+            sess.agentCards = resumeState.agentCards;
+            sess.agentStates = resumeState.agentStates;
+            sess._agentStateLast = resumeState.agentStateLast;
+            sess.isStreaming = true;
+            if (sess.sessionId === activeSessionId) { isStreaming = true; setBtnStopMode(); }
+        }
 
-        // 排空回放期间累积的实时帧缓冲：命中快照覆盖集（回放已渲染）的丢弃，
-        // 其余喂入实时管线（此时容器已恢复为真实容器）
+        // 回放事件已经被渲染，更新稳定游标；否则下次断线恢复会重复渲染已回放事件。
+        for (var si = 0; si < events.length; si++) {
+            var replaySeq = Number(events[si] && events[si].eventSeq || 0);
+            if (replaySeq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, replaySeq);
+        }
+
+        // 排空回放期间累积的实时帧缓冲，按同一游标去重。
         drainGateBuffer(sess);
 
         if (!prepend) {
@@ -1122,19 +1213,23 @@ function loadMessagesLegacy(sess, rootQ) {
             function loadChunk() {
                 var end = Math.min(idx + CHUNK_SIZE, msgs.length);
                 for (; idx < end; idx++) {
-                    var m = msgs[idx];
-                    if (m.role === 'USER') {
-                        resetStreamState(sess);
-                        appendUserMessage(sess, m.content, null, null, m.createdAt);
-                    } else if (m.role === 'ASSISTANT') {
-                        var isConsecutive = (idx > 0 && msgs[idx - 1].role === 'ASSISTANT');
-                        if (!isConsecutive) resetStreamState(sess);
-                        var el = ensureAssistantBubble(sess);
-                        sess.reasonBuffer = isConsecutive ? sess.reasonBuffer + '\n\n' + m.content : m.content;
-                        el.setAttribute('data-md-raw', sess.reasonBuffer);
-                        $(el).html(renderMd(sess.reasonBuffer));
-                        if (typeof addCodeBlockButtons === 'function') addCodeBlockButtons(el);
-                        setAssistantTime(sess, m.createdAt);
+                    try {
+                        var m = msgs[idx];
+                        if (m.role === 'USER') {
+                            resetStreamState(sess);
+                            appendUserMessage(sess, m.content, null, null, m.createdAt);
+                        } else if (m.role === 'ASSISTANT') {
+                            var isConsecutive = (idx > 0 && msgs[idx - 1].role === 'ASSISTANT');
+                            if (!isConsecutive) resetStreamState(sess);
+                            var el = ensureAssistantBubble(sess);
+                            sess.reasonBuffer = isConsecutive ? sess.reasonBuffer + '\n\n' + m.content : m.content;
+                            el.setAttribute('data-md-raw', sess.reasonBuffer);
+                            $(el).html(renderMd(sess.reasonBuffer));
+                            if (typeof addCodeBlockButtons === 'function') addCodeBlockButtons(el);
+                            setAssistantTime(sess, m.createdAt);
+                        }
+                    } catch (eventError) {
+                        console.error('[loadMessagesLegacy] 跳过异常消息:', eventError);
                     }
                 }
 
@@ -1173,6 +1268,10 @@ function loadMessagesLegacy(sess, rootQ) {
             if (realContainer) sess.container = realContainer;
             drainGateBuffer(sess);
         }
+    }).fail(function() {
+        // legacy 请求失败也必须释放回放/实时互斥门禁；
+        // 否则后续 WebSocket 帧会永久滞留在 _gateBuffer。
+        drainGateBuffer(sess);
     });
 }
 
@@ -1451,7 +1550,13 @@ $(chatInput).on('keydown', function(e) {
         showHistoryPanel();
         return;
     }
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    // Tab：任务执行中显式加入持久化队列（Enter 保留给即时插话）。
+    if (e.key === 'Tab' && activeSessionId && sessionMap[activeSessionId] && sessionMap[activeSessionId].isStreaming) {
+        e.preventDefault();
+        sendMessage(true);
+        return;
+    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(false); }
 });
 
 // Click on completion item
@@ -1869,11 +1974,16 @@ function modelShortName(m) {
     return m.name;
 }
 
+// 模型下拉搜索：两处下拉（欢迎页/对话页）共用同一关键词，每次打开时清空
+var modelFilterText = '';
+// 当前过滤结果中的首个模型名，供搜索框回车直接选中
+var modelFirstMatch = null;
+
 function renderModelUI() {
     var $chatName = $('#chatModelName');
     var $welcomeName = $('#welcomeModelName');
-    var $chatDropdown = $('#chatModelDropdown');
-    var $welcomeDropdown = $('#welcomeModelDropdown');
+    var $chatList = $('#chatModelList');
+    var $welcomeList = $('#welcomeModelList');
 
     var currentModel = getSelectedModel();
     var currentEntry = null;
@@ -1891,36 +2001,35 @@ function renderModelUI() {
     $('#chatModelThinkingTag').text(tagLabel).toggle(!!tagLabel);
     $('#welcomeModelThinkingTag').text(tagLabel).toggle(!!tagLabel);
 
-    // 按供应商分组（map 归组，不依赖相邻性：用户改名导致同组 name 不连续时也不会拆组/重复标题）；无 provider 的归入「其他」组
-    var groups = [];
-    var groupIndex = {};
-    for (var g0 = 0; g0 < modelList.length; g0++) {
-        var gk = modelList[g0].provider || '';
-        if (!(gk in groupIndex)) { groupIndex[gk] = groups.length; groups.push({ provider: gk, items: [] }); }
-        groups[groupIndex[gk]].items.push(modelList[g0]);
-    }
-    var html = '';
-    for (var gi = 0; gi < groups.length; gi++) {
-        var grp = groups[gi];
-        html += '<div class="model-dropdown-group">' + escapeHtml(grp.provider || GourdI18n.t('history.model_group_other')) + '</div>';
-        for (var i = 0; i < grp.items.length; i++) {
-            var m = grp.items[i];
-            var cls = m.name === currentModel ? ' active' : '';
+    // 严格保持接口顺序；仅当 provider 与紧邻上一模型不同时插入标题（允许同一 provider 重复出现）
+    var entries = ModelListOrder.buildEntries(modelList);
+    // 折成分段后交给公共渲染器：统一处理搜索过滤、服务商折叠与空态
+    var result = GourdModelDropdown.render({
+        segments: GourdModelDropdown.toSegments(entries),
+        query: modelFilterText,
+        currentModel: currentModel,
+        currentProvider: currentEntry ? (currentEntry.provider || '') : '',
+        otherLabel: GourdI18n.t('history.model_group_other'),
+        emptyText: GourdI18n.t('history.model_search_empty'),
+        toggleTitle: GourdI18n.t('history.model_group_toggle'),
+        itemHtml: function (m, active) {
             var ctxLen = m.contextLength ? (m.contextLength >= 1000000 && m.contextLength % 1000000 === 0 ? (m.contextLength / 1000000) + 'm' : (m.contextLength >= 1000 ? (m.contextLength / 1000) + 'k' : m.contextLength)) : '';
             var shortName = modelShortName(m);
             // 描述与模型ID相同时属冗余信息（名称行已展示），不再重复渲染第二行
             var desc = m.desc || '';
             if (desc && m.model && desc === m.model) desc = '';
-            html += '<div class="model-dropdown-item' + cls + '" data-model="' + escapeHtml(m.name) + '">'
+            return '<div class="model-dropdown-item' + (active ? ' active' : '') + '" data-model="' + escapeHtml(m.name) + '">'
                 + '<span class="model-item-name">' + escapeHtml(shortName) + (ctxLen ? '<span class="model-item-ctx">' + ctxLen + '</span>' : '') + '</span>'
                 + (desc ? '<span class="model-item-desc">' + escapeHtml(desc) + '</span>' : '')
                 // 关联选择：思考档位内嵌在当前选中模型项下，跟随所选模型展示
-                + (m.name === currentModel ? thinkingChipsHtml() : '')
+                + (active ? thinkingChipsHtml() : '')
                 + '</div>';
         }
-    }
-    $chatDropdown.html(html);
-    $welcomeDropdown.html(html);
+    });
+    // 仅重绘列表层：搜索框是下拉内的静态节点，重绘会丢失输入内容与焦点
+    $chatList.html(result.html);
+    $welcomeList.html(result.html);
+    modelFirstMatch = result.firstModel;
 }
 
 // 思考深度：在当前模型的档位集里查某值的短标签；查不到（关闭/接口不支持）返回默认
@@ -2013,14 +2122,77 @@ function initModelSelector(selectorId, currentId, dropdownId) {
         $('.model-selector.open').each(function() {
             if (this.id !== selectorId) $(this).removeClass('open');
         });
+        var willOpen = !$selector.hasClass('open');
         $selector.toggleClass('open');
+        // 每次打开都从完整列表开始：清空上次关键词并自动聚焦，可直接敲字筛选
+        if (willOpen) {
+            if (modelFilterText) { modelFilterText = ''; renderModelUI(); }
+            $dropdown.find('.model-search-input').val('');
+            $dropdown.find('.model-search-clear').hide();
+            $dropdown.find('.model-dropdown-list').scrollTop(0);
+            setTimeout(function () { try { $dropdown.find('.model-search-input').focus(); } catch (err) {} }, 0);
+        }
+    });
+
+    // 搜索框：输入即过滤（只重绘列表层，不动搜索框，焦点与光标位置不丢）。
+    // 用委托而非直接绑定：不依赖本函数执行时搜索框是否已在 DOM 中
+    $dropdown.on('input', '.model-search-input', function () {
+        modelFilterText = $(this).val() || '';
+        $dropdown.find('.model-search-clear').toggle(!!modelFilterText);
+        renderModelUI();
+        $dropdown.find('.model-dropdown-list').scrollTop(0);
+    });
+
+    $dropdown.on('keydown', '.model-search-input', function (e) {
+        if (e.key === 'Escape' || e.keyCode === 27) {
+            e.stopPropagation();
+            // 有关键词时先清空关键词，再按一次才收起下拉
+            if (modelFilterText) {
+                modelFilterText = '';
+                $(this).val('');
+                $dropdown.find('.model-search-clear').hide();
+                renderModelUI();
+            } else {
+                $selector.removeClass('open');
+            }
+            return;
+        }
+        if (e.key === 'Enter' || e.keyCode === 13) {
+            e.preventDefault();
+            e.stopPropagation();
+            // 回车选中当前过滤结果的首项；下拉保持打开以便继续选思考档位
+            if (modelFirstMatch && modelFirstMatch !== getSelectedModel()) selectModel(modelFirstMatch);
+            else $selector.removeClass('open');
+        }
+    });
+
+    $dropdown.on('click', '.model-search-clear', function (e) {
+        e.stopPropagation();
+        modelFilterText = '';
+        $dropdown.find('.model-search-input').val('').focus();
+        $(this).hide();
+        renderModelUI();
     });
 
     $dropdown.on('click', function(e) {
+        // 下拉内部点击一律不冒泡到 document 收起器：
+        // 否则点搜索框/组头/空白处会直接关闭下拉（搜索框将无法输入）
+        e.stopPropagation();
+
+        // 服务商组头：折叠/展开该组（状态持久化，跳页与重启后保留）
+        var $group = $(e.target).closest('.model-dropdown-group');
+        if ($group.length) {
+            var $wrap = $group.closest('.model-dropdown-group-wrap');
+            var collapsed = !$wrap.hasClass('collapsed');
+            GourdModelDropdown.setCollapsed($group.attr('data-provider') || '', collapsed);
+            // 两处下拉（欢迎页/对话页）共享折叠态：重绘保证两边一致
+            renderModelUI();
+            return;
+        }
+
         // 关联的思考档位 chip：仅设置档位，不切模型；保持下拉打开便于连续调整
         var $chip = $(e.target).closest('.model-thinking-chip');
         if ($chip.length) {
-            e.stopPropagation();
             var depth = $chip.attr('data-thinking');
             if (depth != null && depth !== getSelectedThinking()) {
                 selectThinking(depth);
@@ -2029,7 +2201,6 @@ function initModelSelector(selectorId, currentId, dropdownId) {
         }
         var $item = $(e.target).closest('.model-dropdown-item');
         if (!$item.length) return;
-        e.stopPropagation();
         var modelName = $item.attr('data-model');
         if (modelName && modelName !== getSelectedModel()) {
             selectModel(modelName);

@@ -60,13 +60,7 @@ public class TerminalTalent extends AbsTalent {
     public static final String PARAM_EDITS = "edits";
 
 
-    static enum ShellMode {
-        CMD, POWERSHELL, UNIX_SHELL
-    }
-
-
-    private final String shellCmd;
-    private final String extension;
+    private final ShellCommandFactory shellCommandFactory;
     private final ShellMode shellMode;
     private final TerminalSupport support;
 
@@ -83,12 +77,19 @@ public class TerminalTalent extends AbsTalent {
     private final ReentrantLock sandboxInitLock = new ReentrantLock();
     private final SandboxViolationStore violationStore = new SandboxViolationStore(Collections.emptyMap());
 
-    private final String pythonCmd;
-    private final String nodeCmd;
+    /** 运行时探测失败后的重试间隔：失败结果在窗口期内直接返回 null，避免每次对话都 fork 探测（最长等 2s 超时） */
+    private static final long PROBE_RETRY_INTERVAL_MS = 60_000;
+
+    private volatile String pythonCmd;
+    private volatile String nodeCmd;
+    /** 上次 python 探测失败时间（0 表示无失败记录） */
+    private volatile long pythonProbeFailedAt;
+    /** 上次 node 探测失败时间（0 表示无失败记录） */
+    private volatile long nodeProbeFailedAt;
 
     protected Charset fileCharset = StandardCharsets.UTF_8;
     protected final ProcessExecutor executor = new ProcessExecutor();
-    protected final TerminalSessionManager bashSessionManager = new TerminalSessionManager();
+    protected final TerminalSessionManager bashSessionManager;
     //异步会话模式：启用后提供 bash_start/wait/stdin/stop 工具
     private boolean bashAsyncEnabled = false;
 
@@ -307,35 +308,80 @@ public class TerminalTalent extends AbsTalent {
     }
 
     public TerminalTalent(MountManager mountManager) {
-        this.mountManager = mountManager;
+        this(mountManager, ShellCommandFactory.detect());
+    }
 
-        boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
-
-        if (isWindows) {
-            String comspec = System.getenv("COMSPEC");
-            if (comspec != null && comspec.toLowerCase().contains("powershell")) {
-                this.shellCmd = "powershell -Command";
-                this.extension = ".ps1";
-                this.shellMode = ShellMode.POWERSHELL;
-            } else {
-                this.shellCmd = "cmd /c";
-                this.extension = ".bat";
-                this.shellMode = ShellMode.CMD;
-            }
-        } else {
-            this.shellCmd = probeUnixShell();
-            this.extension = ".sh";
-            this.shellMode = ShellMode.UNIX_SHELL;
+    /**
+     * 显式指定 shell 方案的构造器（主要给测试用：引导词需要按 CMD / POWERSHELL / UNIX_SHELL
+     * 三种方言分别验证，不能只依赖当前宿主机的探测结果）。
+     */
+    TerminalTalent(MountManager mountManager, ShellCommandFactory shellCommandFactory) {
+        if (shellCommandFactory == null) {
+            throw new IllegalArgumentException("shellCommandFactory is required");
         }
-
+        this.mountManager = mountManager;
+        this.shellCommandFactory = shellCommandFactory;
+        this.shellMode = shellCommandFactory.getShellMode();
+        this.bashSessionManager = new TerminalSessionManager(shellCommandFactory);
         this.support = new TerminalSupport(mountManager, ignoreDirs, shellMode);
-
-        pythonCmd = executor.probePythonCommand();
-        nodeCmd = executor.probeNodeCommand();
+        // python/node 探测延迟到首次使用时（惰性），
+        // 确保用户在运行期间新安装的运行时也能被识别（配合实时 PATH 注入）
     }
 
     public ProcessExecutor getExecutor() {
         return executor;
+    }
+
+    /**
+     * 惰性探测 Python 命令（线程安全）。失败结果进入时间窗缓存，窗口期内直接返回 null，
+     * 避免每次对话都 fork 探测（单次最长等 2s 超时）；窗口过期后重试，
+     * 以便运行期间新安装的运行时能被自动识别（配合实时 PATH 注入）。
+     */
+    private String pythonCmd() {
+        String cmd = pythonCmd;
+        if (cmd == null) {
+            if (System.currentTimeMillis() - pythonProbeFailedAt < PROBE_RETRY_INTERVAL_MS) {
+                return null;
+            }
+            synchronized (this) {
+                cmd = pythonCmd;
+                if (cmd == null) {
+                    cmd = executor.probePythonCommand();
+                    if (cmd != null) {
+                        pythonCmd = cmd;
+                        pythonProbeFailedAt = 0;
+                    } else {
+                        pythonProbeFailedAt = System.currentTimeMillis();
+                    }
+                }
+            }
+        }
+        return cmd;
+    }
+
+    /**
+     * 惰性探测 Node 命令（线程安全）。失败时间窗缓存策略同 {@link #pythonCmd()}。
+     */
+    private String nodeCmd() {
+        String cmd = nodeCmd;
+        if (cmd == null) {
+            if (System.currentTimeMillis() - nodeProbeFailedAt < PROBE_RETRY_INTERVAL_MS) {
+                return null;
+            }
+            synchronized (this) {
+                cmd = nodeCmd;
+                if (cmd == null) {
+                    cmd = executor.probeNodeCommand();
+                    if (cmd != null) {
+                        nodeCmd = cmd;
+                        nodeProbeFailedAt = 0;
+                    } else {
+                        nodeProbeFailedAt = System.currentTimeMillis();
+                    }
+                }
+            }
+        }
+        return cmd;
     }
 
     @Override
@@ -347,32 +393,52 @@ public class TerminalTalent extends AbsTalent {
     public String getInstruction(Prompt prompt) {
         StringBuilder sb = new StringBuilder();
 
+        // 当前 shell 是否为 Windows 系（CMD / PowerShell）。引导词中所有涉及
+        // 命令方言、进程管理、路径语义的表述都必须按此分支给出，
+        // 否则会向模型泄漏错误的平台先验（如在 Windows 上建议 pkill / 2>/dev/null）。
+        boolean windowsShell = shellCommandFactory.isWindowsShell();
 
         sb.append("## Terminal 环境状态\n");
         sb.append("- **沙盒模式**: ").append((sandboxEnabled ? "开启 (受限)" : "关闭 (开放)")).append("\n");
         sb.append("- **运行环境**: ").append(System.getProperty("os.name"))
                 .append(" (").append(System.getProperty("os.arch")).append(")\n");
-        sb.append("- **终端类型**: ").append(shellMode).append("\n");
+        sb.append("- **终端类型**: ").append(shellMode).append(" — ").append(shellDialectSummary()).append("\n");
 
 
         // 在 getInstruction 增加以下逻辑
         sb.append("- **自我保护机制**:\n");
         sb.append("  - 你的所有指令都在 Java 进程 (PID: ").append(Utils.pid()).append(") 的子 shell 中运行。\n");
         sb.append("  - 杀死该 PID 或其父进程会导致你立即停止工作并丢失所有上下文。\n");
-        sb.append("  - 严禁执行 `pkill java`, `killall java`。严禁执行 `kill -9` 任何数字，除非你先执行了 `ps` 明确该 PID 与当前 Java 进程无关。\n");
-        sb.append("  - 建议：若需清理任务，请使用 `pkill -P [PID]` 仅停止子进程。\n");
+        if (windowsShell) {
+            sb.append("  - 严禁执行 `taskkill /IM java.exe`、`Stop-Process -Name java`。严禁用 `taskkill /PID <PID>` 或 `Stop-Process -Id <PID>` 指向任意 PID，除非你先用 `Get-Process -Id <PID>`（或 `tasklist /FI \"PID eq <PID>\"`）确认该进程与当前 Java 进程无关。\n");
+            sb.append("  - 建议：若需清理任务，只终止你自己启动的那个子进程（按其已知 PID 执行 `Stop-Process -Id <子PID>`），不要按进程名批量终止。\n");
+        } else {
+            sb.append("  - 严禁执行 `pkill java`, `killall java`。严禁执行 `kill -9` 任何数字，除非你先执行了 `ps` 明确该 PID 与当前 Java 进程无关。\n");
+            sb.append("  - 建议：若需清理任务，请使用 `pkill -P [PID]` 仅停止子进程。\n");
+        }
 
+        // 这里只列「会被 validateCommandNoKill 直接拦下」的两类硬禁令：exit 与根/系统目录删除。
+        // 泛化条款（如「不要改变宿主系统状态」）没有可判定边界、也无代码兜底，写了只是占 token，
+        // 真正的强制隔离交给 sandboxSystemRestrict + OS 沙盒。
         sb.append("- **严禁指令**:\n");
-        sb.append("  - 严禁执行 `exit`。如果你需要结束脚本，请让脚本自然执行完毕。\n");
-        sb.append("  - 严禁执行任何针对根目录 `/` 或系统目录（如 `/etc`, `/usr`）的删除操作。\n");
-        sb.append("  - 严禁执行任何可能改变宿主系统状态的命令（如修改网络配置、安装系统驱动等）。\n");
+        sb.append("  - 严禁执行 `exit`（会被安全策略拦截）。如果你需要结束脚本，请让脚本自然执行完毕。\n");
+        if (windowsShell) {
+            sb.append("  - 严禁对盘符根目录（如 `C:\\`）或系统目录（如 `C:\\Windows`、`C:\\Program Files`、`C:\\Users`）执行任何删除操作。\n");
+        } else {
+            sb.append("  - 严禁执行任何针对根目录 `/` 或系统目录（如 `/etc`, `/usr`）的删除操作。\n");
+        }
 
         sb.append("- **执行环境**: \n");
-        if(Assert.isNotEmpty(pythonCmd)) {
-            sb.append("  - Python 命令: `").append(pythonCmd).append("` (系统已预置变量 `$PYTHON`)\n");
+        String pyCmd = pythonCmd();
+        String ndCmd = nodeCmd();
+        if(Assert.isNotEmpty(pyCmd)) {
+            // 占位符必须按 shell 方言给出：CMD 为 %PYTHON%、PowerShell 为 $env:PYTHON、Unix 为 $PYTHON
+            sb.append("  - Python 命令: `").append(pyCmd).append("` (系统已预置变量 `")
+                    .append(support.getEnvPlaceholder("PYTHON")).append("`)\n");
         }
-        if(Assert.isNotEmpty(nodeCmd)) {
-            sb.append("  - Node.js 命令: `").append(nodeCmd).append("` (系统已预置变量 `$NODE`)\n");
+        if(Assert.isNotEmpty(ndCmd)) {
+            sb.append("  - Node.js 命令: `").append(ndCmd).append("` (系统已预置变量 `")
+                    .append(support.getEnvPlaceholder("NODE")).append("`)\n");
         }
 
         // 动态判断是否有可写挂载点
@@ -383,10 +449,10 @@ public class TerminalTalent extends AbsTalent {
                 .anyMatch(m->m.isEnabled());
 
         sb.append("- **路径规则**: \n");
-        sb.append("  - **工作区（默认作用域）**: 你的主目录，支持读写。所有文件查找（ls/glob/grep/read）与路径解析默认都以工作区为根，使用相对路径访问（如 `src/app.java`）。\n");
+        sb.append("  - **工作区（默认作用域）**").append(": 你的主目录，支持读写。所有文件查找（ls/glob/grep/read）与路径解析默认都以工作区为根，使用相对路径访问（如 `src/app.java`）。\n");
 
         if(hasMount) {
-            sb.append("  - **挂载点（仅按需访问）**: 以 `@` 开头的逻辑路径（别名），对应一个真实的物理目录（通过环境变量引用）。见下方挂载点清单。**仅当用户的提示词中明确提及了具体的挂载点名时**（如 `@global-skills`、`@workspace-agents`），才去对应挂载点下查找。\n");
+            sb.append("  - **挂载点（仅按需访问）**: 以 `@` 开头的逻辑路径（如 `@pool1/bin/tool/`），对应一个真实的物理目录。见下方挂载点清单。**仅当用户的提示词中明确提及了具体的挂载点名时**（如 `@global-skills`、`@workspace-agents`），才去对应挂载点下查找。\n");
         }
 
         // 挂载点清单表格
@@ -412,7 +478,7 @@ public class TerminalTalent extends AbsTalent {
 
         if (sandboxEnabled) {
             if (hasMount) {
-                sb.append("  - **安全级别**: 沙盒模式已开启。严禁使用绝对路径。仅限相对路径 (如 `src/app.java`) 或逻辑路径 (@pool)。\n");
+                sb.append("  - **安全级别**: 沙盒模式已开启。严禁使用绝对路径。仅限相对路径 (如 `src/app.java`) 或逻辑路径 (`@pool1/src/app.java`)。\n");
             } else {
                 sb.append("  - **安全级别**: 沙盒模式已开启。严禁使用绝对路径。仅限相对路径 (如 `src/app.java`)。\n");
             }
@@ -438,13 +504,13 @@ public class TerminalTalent extends AbsTalent {
 
         if (sandboxEnabled) {
             if (hasMount) {
-                sb.append("- **命令执行**: 在 `bash` 中，直接使用逻辑路径（如 `@pool1/bin/tool`），系统会自动转换。在沙盒模式下，**严禁**在 bash 命令中使用绝对路径（如：ls /users/）。\n");
+                sb.append("- **命令执行**: 在 `bash` 中，直接使用逻辑路径（如 `cd @pool1/bin/tool/`），系统会自动转换。在沙盒模式下，**严禁**在 bash 命令中使用绝对路径（如：`ls /users/`）。\n");
             } else {
                 sb.append("- **命令执行**: 在沙盒模式下，**严禁**在 bash 命令中使用绝对路径（如：ls /users/）。\n");
             }
         } else {
             if (hasMount) {
-                sb.append("- **命令执行**: 在 `bash` 中，直接使用逻辑路径（如 `@pool1/bin/tool`），系统会自动转换。支持绝对路径访问。\n");
+                sb.append("- **命令执行**: 在 `bash` 中，直接使用逻辑路径（如 `cd @pool1/bin/tool/`），系统会自动转换。也支持绝对路径访问。\n");
             } else {
                 sb.append("- **命令执行**: 在 `bash` 中支持绝对路径访问。\n");
             }
@@ -453,6 +519,20 @@ public class TerminalTalent extends AbsTalent {
         if (bashAsyncEnabled) {
             sb.append("- **长命令执行**: 对可能耗时较长、持续输出、等待输入或需要观察状态的命令，优先使用 `bash_start`。如果结果包含 `Process running with session ID`，表示命令仍在运行；需要继续观察时调用 `bash_wait`，需要向进程输入时调用 `bash_stdin`，需要主动停止时调用 `bash_stop`。\n");
         }
+
+        // 参数示例必须用当前 shell 真存在的命令：在 Windows 上举 `python3` / `cat` 会被模型当作可用命令而直接照拄
+        sb.append("- **参数与编码**: 含空格/引号等特殊字符的参数务必用引号包裹（如 `")
+                .append(Assert.isNotEmpty(pyCmd) ? pyCmd : (windowsShell ? "python" : "python3"))
+                .append(" a.py \"hello world\"`、`").append(readFileCommandExample()).append("`）。");
+        // 编码说明只在 Windows 下成立：类 Unix 没有代码页概念（OutputDecoder 也不做代码页兼底），
+        // 也不存在 chcp，向 Linux/macOS 上的模型描述这些只会注入错误的平台先验
+        if (windowsShell) {
+            sb.append("输出编码由系统自动识别（UTF-8 优先，Windows 遗留代码页兜底），无需自行加 chcp 或设置编码环境变量。\n");
+        } else {
+            sb.append("输出按 UTF-8 解码，无需额外设置编码环境变量。\n");
+        }
+
+        appendShellDialectRules(sb);
 
         if (sandboxEnabled) {
             sb.append("\n<SYSTEM_CONSTRAINTS>\n");
@@ -464,6 +544,144 @@ public class TerminalTalent extends AbsTalent {
 
         return sb.toString();
     }
+
+    /**
+     * 当前 shell 的一句话定性说明，跟在「终端类型」后面。
+     *
+     * <p>只给出 {@code POWERSHELL} / {@code CMD} 这样的枚举名不足以纠偏：`bash` 这个工具名
+     * 本身就是极强的先验，模型会默认自己在 POSIX 环境里。这里显式点明「不是 bash/sh」。</p>
+     */
+    private String shellDialectSummary() {
+        if (shellMode == ShellMode.POWERSHELL) {
+            return (shellCommandFactory.isPowerShellCore() ? "PowerShell 7+ (pwsh)" : "Windows PowerShell")
+                    + "，**不是** bash/sh，POSIX 命令与语法一律不可用";
+        }
+        if (shellMode == ShellMode.CMD) {
+            return "Windows cmd.exe 批处理，**不是** bash/sh，POSIX 命令与语法一律不可用";
+        }
+        return shellCommandFactory.getShellCmd() + "（POSIX shell）";
+    }
+
+    /**
+     * 「查看文件内容」在当前 shell 下的可用写法，用于参数引号示例。
+     */
+    private String readFileCommandExample() {
+        if (shellMode == ShellMode.POWERSHELL) {
+            return "Get-Content \"my file.txt\"";
+        }
+        if (shellMode == ShellMode.CMD) {
+            return "type \"my file.txt\"";
+        }
+        return "cat \"my file.txt\"";
+    }
+
+    /**
+     * 追加当前 shell 的方言规则。
+     *
+     * <p>PowerShell / CMD 分支以「负面清单 + 等价写法」成对给出：只说「不要用 Unix 语法」
+     * 模型无法自行推导替代写法，仍会退回 `2>/dev/null`、`head` 这类习惯用法。</p>
+     */
+    private void appendShellDialectRules(StringBuilder sb) {
+        if (shellMode == ShellMode.POWERSHELL) {
+            boolean core = shellCommandFactory.isPowerShellCore();
+            sb.append("- **PowerShell 方言（必须遵守）**: 当前 shell 是 PowerShell，以下 Unix 写法在此**不存在**，用后必报错，须按右侧改写：\n");
+            sb.append("  - 丢弃全部输出：`| Out-Null`（只丢 stderr 的写法见下方 stderr 规约）。\n");
+            if (core) {
+                sb.append("  - 命令串联：`&&` / `||` 可用（PowerShell 7+），`;` 也可用；需要「前一步失败就停」时请用 `&&` 而不是 `;`。\n");
+            } else {
+                sb.append("  - 命令串联：`&&` / `||` → `;`（Windows PowerShell 5.1 不支持 `&&`、`||`）。\n");
+                // `;` 不等于 `&&`：换写后丢的是「失败即停」语义，而整条命令的退出码只反映最后一步，
+                // 前面的编译/测试失败会被后面一步的成功掩盖（模型会据此误判为构建通过）。
+                // 替代写法一律不用 `exit`：上面的「严禁指令」已禁止 exit，且 validateCommandNoKill 会
+                // 按 `(^|[;|&])\s*exit\b` 拦截，示范带 exit 的写法会让模型照抄后撞上自家护栏。
+                sb.append("    - 注意 `;` 不等于 `&&`：前一步失败不会中断后续步骤，且返回的 `[exit_code]` 只反映最后一步。")
+                        .append("多步骤构建/测试请拆成多次 `bash` 调用，或写 `cmd1; if ($LASTEXITCODE -eq 0) { cmd2 }`（不要用 `exit`）。\n");
+            }
+            // 「命令不存在」类映射（head/cat/grep/find/uname/pwd/which/export）模型看到
+            // CommandNotFoundException 一轮即可自纠，故压成一行速查表而非逐条展开：既省常驻 token，
+            // 又不丢信息。真正不可自纠的（别名参数陷阱、2>&1、`;` 语义）仍单独成条。
+            sb.append("  - 常用等价（一次报错即可自纠，此处仅作速查）：`head/tail -n N` → `Select-Object -First/-Last N`；`cat` → `Get-Content`；`grep` → `Select-String`；`find` → `Get-ChildItem -Recurse -Filter`；`uname -a`、`cat /etc/os-release` → `Get-ComputerInfo`、`$PSVersionTable`；`pwd` → `Get-Location`；`which x` → `Get-Command x`；`export A=B` → `$env:A='B'`（读环境变量用 `$env:NAME`，不是 `$NAME`）。\n");
+            // 「无 Unix 路径」一条已由「终端类型」里的「**不是** bash/sh，POSIX 命令与语法一律不可用」覆盖，
+            // `\` 分隔符与 $env:TEMP 属常识，删掉以免同一件事在一份提示里说第三遍。
+            appendPowerShellAliasTrapRule(sb, core);
+            appendMergedStderrRule(sb);
+            appendEncodingRules(sb, core);
+        } else if (shellMode == ShellMode.CMD) {
+            sb.append("- **CMD 方言（必须遵守）**: 当前 shell 是 cmd.exe，以下 Unix 写法在此**不存在**，用后必报错，须按右侧改写：\n");
+            // 同 PowerShell 分支：`2>nul` 由下方 stderr 规约给出，「无 Unix 路径」由「不是 bash/sh」覆盖，此处不再重复。
+            sb.append("  - 常用等价（一次报错即可自纠，此处仅作速查）：`cat` → `type`；`grep` → `findstr`；`ls` → `dir`；`uname -a` → `ver`、`systeminfo`；`which x` → `where x`；`export A=B` → `set A=B`（读环境变量用 `%NAME%`，不是 `$NAME`）。没有 `head` / `tail`（取前 N 行用 `more +N`）。\n");
+            // 跨盘符切目录是 CMD 特有的陷：`cd D:\x` 不报错、也不切，后续命令全在错的目录里执行
+            sb.append("  - 跨盘符切目录必须写 `cd /d D:\\proj`（或 `pushd D:\\proj`）：`cd D:\\proj` 既不报错也不会切过去，后续命令会静默地在原目录执行。\n");
+            sb.append("  - 多步骤串联：`&&`（失败即停）可用；用 `&` 串联则前一步失败不会中断，且返回的 `[exit_code]` 只反映最后一步。\n");
+            appendMergedStderrRule(sb);
+            // 多行命令会以批处理脚本形式执行，% 语义与单行命令不同，需向模型说明
+            sb.append("  - `%` 的语义差异：单行命令按命令行语义（`for %i in (...) do ...`）；多行命令按批处理脚本语义执行，循环变量需写成 `%%i`，字面百分号需写成 `%%`。不确定时优先拆成单行命令执行。\n");
+            sb.append("  - **读文件会乱码**：`type` / `findstr` 按当前代码页（非 UTF-8）解析文件，读含中文/日韩文/emoji 的 UTF-8 文件必乱码，**且无法在命令里可靠地修正**。读文件一律改用 `read` 工具，检索一律改用 `grep` 工具。\n");
+        }
+    }
+
+
+    /**
+     * PowerShell 下的「Unix 别名陷阱」规约。
+     *
+     * <p>这一类错误比「命令不存在」更难自教：{@code ls}、{@code rm}、{@code cp}、{@code ps}
+     * 在 PowerShell 里确实存在（都是 cmdlet 别名），模型看到命令能识别会认为自己写对了，
+     * 但它们一律不接受 Unix 风格的短参数：{@code ls -la} / {@code rm -rf x} 报的是参数绑定错误，
+     * 而不是「未知命令」。不明说就会反复重试同一写法。</p>
+     *
+     * <p>{@code curl} / {@code wget} 需分版本：Windows PowerShell 5.1 把两者别名到
+     * {@code Invoke-WebRequest}（所以 {@code curl -s <url>} 必报错）；PowerShell 7+ 已移除这两个别名，
+     * {@code curl} 直接指向系统自带的 {@code curl.exe}。</p>
+     */
+    private void appendPowerShellAliasTrapRule(StringBuilder sb, boolean powerShellCore) {
+        sb.append("  - **Unix 别名是陷阱（命令存在但参数不兼容）**：`ls`、`rm`、`cp`、`mv`、`ps`、`cat` 在此都是 cmdlet 别名，")
+                .append("不接受 Unix 短参数：`ls -la`、`rm -rf dir`、`cp -r a b`、`ps aux` 全部报参数绑定错误（不是命令不存在，重试同写法也不会好）。")
+                .append("等价写法：`Get-ChildItem -Force`、`Remove-Item -Recurse -Force dir`、`Copy-Item -Recurse a b`、`Get-Process`。\n");
+        if (powerShellCore) {
+            sb.append("    - `curl` / `wget` 在 PowerShell 7+ 已不再是别名，指向真实的 `curl.exe`，Unix 参数可用。\n");
+        } else {
+            sb.append("    - `curl` / `wget` 在 Windows PowerShell 5.1 是 `Invoke-WebRequest` 的别名，`curl -s <url>` 必报错；要用真 curl 请写 `curl.exe -s <url>`。\n");
+        }
+    }
+
+    /**
+     * 「stderr 已合流」规约（仅 Windows 系 shell 输出）。
+     *
+     * <p>本工具在 Java 层已经 {@code redirectErrorStream(true)}，命令里再写 {@code 2>&1} 完全多余；
+     * 而在 PowerShell 下它还有实实在在的危害：一旦把原生程序的 stderr 重定向进 PowerShell 的流，
+     * 引擎会把每一行 stderr 包成 {@code NativeCommandError} 错误记录（额外输出「所在位置 行:1 字符:1」
+     * 等四五行噪声），并且使整个 PowerShell 进程的退出码变成 1。实测：`mvn test` 明明 BUILD SUCCESS，
+     * 只因为命令里写了 {@code 2>&1}，结果就带上了 {@code [exit_code=1]}——模型会据此误判为失败并无意义地重试。</p>
+     */
+    private void appendMergedStderrRule(StringBuilder sb) {
+        sb.append("  - **不要在命令里写 `2>&1`**：stderr 已由系统自动合并到输出里，无需任何重定向。");
+        if (shellMode == ShellMode.POWERSHELL) {
+            sb.append("在 PowerShell 下额外写 `2>&1` 还会把原生程序的 stderr 转成错误记录，凭空多出「所在位置 行:1 字符:1 / NativeCommandError」几行噪声，")
+                    .append("并让整条命令的退出码变成 1（成功也会被报成 `[exit_code=1]`）。只想丢弃 stderr 时用 `2>$null`。\n");
+        } else {
+            sb.append("只想丢弃 stderr 时用 `2>nul`。\n");
+        }
+    }
+
+    /**
+     * 追加编码规约（仅 PowerShell）。
+     *
+     * <p>必须告知模型「已经做了什么」，而不是只说「注意编码」：启动时已注入 UTF-8 前置
+     * （参见 {@code ShellCommandFactory.POWERSHELL_PREAMBLE}），若模型不知道，就会自己叠一层
+     * {@code chcp 65001} 或 {@code -Encoding UTF8}，反而引入新问题；更重要的是得告知它唯一的
+     * 例外（真正的 GBK 文件需 {@code -Encoding Default}），否则遇到 GBK 文件时它无从下手。</p>
+     */
+    private void appendEncodingRules(StringBuilder sb, boolean powerShellCore) {
+        sb.append("  - **编码（系统已前置处理，按此书写）**：本次会话的输入/输出/文件读写默认编码已统一为 UTF-8（包括 `Get-Content`、`Select-String`、`Import-Csv` 的读，以及 `Set-Content`、`Add-Content`、`Out-File` 和 `>` / `>>` 的写）。无需自行 `chcp`、设置 `$OutputEncoding` 或反复加 `-Encoding UTF8`。\n");
+        sb.append("    - 例外：若已确认某文件是 GBK/ANSI 编码，必须显式写 `-Encoding Default` 才能读对。\n");
+        if (powerShellCore == false) {
+            sb.append("    - Windows PowerShell 5.1 的 UTF-8 写入带 BOM，本工具的 `read` / `edit` / `grep` 会自动忽略它，无需特殊处理。\n");
+        }
+        sb.append("    - 若输出仍有乱码，几乎一定是被调用的第三方程序自己按 ANSI 输出的，不要在命令里反复调编码；读文件内容请直接用 `read` / `grep` 工具。\n");
+    }
+
+
+
 
 
     /**
@@ -505,12 +723,14 @@ public class TerminalTalent extends AbsTalent {
         Path workPath = getWorkPath(__cwd);
         Map<String, String> envs = new HashMap<>();
 
-        if(Assert.isNotEmpty(pythonCmd)) {
-            envs.put("PYTHON", pythonCmd);
+        String pyCmd = pythonCmd();
+        String ndCmd = nodeCmd();
+        if(Assert.isNotEmpty(pyCmd)) {
+            envs.put("PYTHON", pyCmd);
         }
 
-        if(Assert.isNotEmpty(nodeCmd)) {
-            envs.put("NODE", nodeCmd);
+        if(Assert.isNotEmpty(ndCmd)) {
+            envs.put("NODE", ndCmd);
         }
 
         String finalCommand;
@@ -533,7 +753,24 @@ public class TerminalTalent extends AbsTalent {
             }
         }
 
-        return executor.executeCode(workPath, finalCommand, shellCmd, extension, envs, timeout, maxOutputChars, null);
+        // 与 bash_start 共用 ShellCommandFactory：Unix 直接 shell -lc 执行；Windows 改走 prepare
+        // （PowerShell 用 -EncodedCommand 避开命令文本代码页转换；CMD 默认 /d /c 直连，仅多行/非 ANSI/超长命令才落 .bat）
+        if (shellCommandFactory.isWindowsShell()) {
+            ShellCommandFactory.PreparedCommand prepared;
+            try {
+                prepared = shellCommandFactory.prepare(finalCommand);
+            } catch (IOException ex) {
+                return "错误：无法准备 Windows 执行方案: " + ex.getMessage();
+            }
+            if (prepared != null) {
+                try {
+                    return executor.executeCmd(workPath, prepared.argv(), envs, timeout, maxOutputChars, null);
+                } finally {
+                    prepared.cleanup();
+                }
+            }
+        }
+        return executor.executeCmd(workPath, shellCommandFactory.build(finalCommand), envs, timeout, maxOutputChars, null);
     }
 
     @ToolMapping(
@@ -1047,18 +1284,7 @@ public class TerminalTalent extends AbsTalent {
         return sb.toString();
     }
 
-    private static String probeUnixShell() {
-        try {
-            ProcessBuilder pb = new ProcessBuilder("bash", "--version");
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            boolean ok = p.waitFor(3, TimeUnit.SECONDS) && p.exitValue() == 0;
-            p.destroyForcibly();
-            return ok ? "bash" : "/bin/sh";
-        } catch (Throwable e) {
-            return "/bin/sh";
-        }
-    }
+    // shell 探测已统一到 ShellCommandFactory（probeUnixShell / detectWindowsShell）
 
     // ========== 沙盒相关桥接方法（供测试反射调用） ==========
 

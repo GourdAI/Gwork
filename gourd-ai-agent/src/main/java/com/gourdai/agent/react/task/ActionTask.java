@@ -38,6 +38,8 @@ import org.noear.solon.core.util.RunUtil;
 import org.noear.solon.flow.FlowContext;
 import org.noear.solon.lang.Preview;
 import com.gourdai.agent.util.AgentUtil;
+import com.gourdai.harness.agent.TaskTalent;
+import com.gourdai.harness.talents.memory.MemoryTalent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -119,7 +121,8 @@ public class ActionTask {
         }
     }
 
-    private ToolResult doAction(ReActTrace trace, String toolName, Map<String, Object> args, List<ChatMessage> toolResults, ToolCall call, List<String> aliasIds) {
+    private ToolResult doAction(ReActTrace trace, String toolName, Map<String, Object> args, List<ChatMessage> toolResults,
+                                ToolCall call, List<String> aliasIds, BatchMetadata batch) {
         if (LOG.isDebugEnabled()) {
             LOG.debug("Action for agent [{}], toolName:{}, args:{}", config.getName(), toolName, args);
         }
@@ -145,7 +148,8 @@ public class ActionTask {
 
         // 3. 推送流式动作片
         if (trace.getOptions().getStreamSink() != null) {
-            trace.getOptions().getStreamSink().next(new ActionChunk(trace, toolName, args, actionId));
+            trace.getOptions().getStreamSink().next(new ActionChunk(trace, toolName, args, actionId,
+                    batch.batchId, batch.batchIndex, batch.batchSize));
         }
 
         long startMs = System.currentTimeMillis();
@@ -195,7 +199,8 @@ public class ActionTask {
             }
 
             // 无论正常结束、挂起退出、还是中途抛出 critical error，100% 走统一清理与下发逻辑
-            handleSingleObservation(trace, toolExchanger, observationMessage, durationMs, thrownError, toolResults, actionId);
+            handleSingleObservation(trace, toolExchanger, observationMessage, durationMs, thrownError, toolResults,
+                    actionId, batch);
 
             // 同轮完全相同调用去重的回填：重复 id 不执行、不推流式卡（前端只渲染一张），
             // 但工作记忆需按 id 各补一条 tool 结果，保证 tool_calls ↔ observation 协议配对完整
@@ -228,12 +233,13 @@ public class ActionTask {
         // 仅首个真正执行并推一张卡，重复 id 记录别名、执行后按 id 回填结果，避免双执行与双卡片
         Map<String, List<String>> aliasIdsByPrimaryId = new HashMap<>();
         List<ToolCall> calls = dedupeIdenticalCalls(lastReason.getToolCalls(), aliasIdsByPrimaryId);
+        Map<ToolCall, BatchMetadata> batchByCall = createVisibleBatch(calls);
 
         boolean parallelEnabled = trace.getOptions().isParallelToolEnabled();
 
         // 是否存在可并行的只读段（≥2 个连续只读工具且开关开启）；否则直接走串行快路径。
         if (!parallelEnabled || !hasParallelReadonlyRun(calls)) {
-            runCallsSerial(calls, trace, toolResults, aliasIdsByPrimaryId);
+            runCallsSerial(calls, trace, toolResults, aliasIdsByPrimaryId, batchByCall);
             flushToolResults(lastReason, trace, toolResults);
             return; // 串行路径：中止与否都已在 toolResults 落地，直接返回
         }
@@ -251,13 +257,13 @@ public class ActionTask {
                 }
                 List<ToolCall> segment = calls.subList(i, j);
                 if (segment.size() == 1) {
-                    aborted = !doActionInto(segment.get(0), trace, toolResults, aliasIdsByPrimaryId);
+                    aborted = !doActionInto(segment.get(0), trace, toolResults, aliasIdsByPrimaryId, batchByCall);
                 } else {
-                    aborted = runReadonlySegmentParallel(segment, trace, toolResults, aliasIdsByPrimaryId);
+                    aborted = runReadonlySegmentParallel(segment, trace, toolResults, aliasIdsByPrimaryId, batchByCall);
                 }
                 i = j;
             } else {
-                aborted = !doActionInto(first, trace, toolResults, aliasIdsByPrimaryId);
+                aborted = !doActionInto(first, trace, toolResults, aliasIdsByPrimaryId, batchByCall);
                 i++;
             }
         }
@@ -270,9 +276,11 @@ public class ActionTask {
      *
      * @return 是否中止（某工具返回 null：挂起/END/被拦截）
      */
-    private boolean runCallsSerial(List<ToolCall> calls, ReActTrace trace, List<ChatMessage> toolResults, Map<String, List<String>> aliasIdsByPrimaryId) {
+    private boolean runCallsSerial(List<ToolCall> calls, ReActTrace trace, List<ChatMessage> toolResults,
+                                   Map<String, List<String>> aliasIdsByPrimaryId,
+                                   Map<ToolCall, BatchMetadata> batchByCall) {
         for (ToolCall call : calls) {
-            if (!doActionInto(call, trace, toolResults, aliasIdsByPrimaryId)) {
+            if (!doActionInto(call, trace, toolResults, aliasIdsByPrimaryId, batchByCall)) {
                 return true;
             }
         }
@@ -289,7 +297,9 @@ public class ActionTask {
      *
      * @return 是否中止（并行只读段恒为 false；保留返回值以统一调用形态）
      */
-    private boolean runReadonlySegmentParallel(List<ToolCall> segment, ReActTrace trace, List<ChatMessage> toolResults, Map<String, List<String>> aliasIdsByPrimaryId) throws Throwable {
+    private boolean runReadonlySegmentParallel(List<ToolCall> segment, ReActTrace trace, List<ChatMessage> toolResults,
+                                               Map<String, List<String>> aliasIdsByPrimaryId,
+                                               Map<ToolCall, BatchMetadata> batchByCall) throws Throwable {
         int n = segment.size();
         List<List<ChatMessage>> slots = new ArrayList<>(n);
         for (int k = 0; k < n; k++) {
@@ -301,7 +311,7 @@ public class ActionTask {
             final ToolCall call = segment.get(k);
             final List<ChatMessage> slot = slots.get(k);
             futures.add(CompletableFuture.runAsync(
-                    () -> doActionInto(call, trace, slot, aliasIdsByPrimaryId), RunUtil.io())
+                    () -> doActionInto(call, trace, slot, aliasIdsByPrimaryId, batchByCall), RunUtil.io())
                     // 防挂死兑底：任务卡死/被队列饿死时以 TimeoutException 完成，
                     // 避免 allOf().join() 无限阻塞进而拖死整轮 ReAct 流（done 永不发射）。
                     // 超时后上层按异常收口，前端仍能收到 error+done 收敛。
@@ -343,10 +353,13 @@ public class ActionTask {
      *
      * @return true=正常产出（可继续）；false=中止（doAction 返回 null：挂起/END/拦截）
      */
-    private boolean doActionInto(ToolCall call, ReActTrace trace, List<ChatMessage> resultsSink, Map<String, List<String>> aliasIdsByPrimaryId) {
+    private boolean doActionInto(ToolCall call, ReActTrace trace, List<ChatMessage> resultsSink,
+                                 Map<String, List<String>> aliasIdsByPrimaryId,
+                                 Map<ToolCall, BatchMetadata> batchByCall) {
         Map<String, Object> args = (call.getArguments() == null) ? new HashMap<>() : call.getArguments();
         List<String> aliasIds = (call.getId() != null && aliasIdsByPrimaryId != null) ? aliasIdsByPrimaryId.get(call.getId()) : null;
-        ToolResult result = doAction(trace, call.getName(), args, resultsSink, call, aliasIds);
+        ToolResult result = doAction(trace, call.getName(), args, resultsSink, call, aliasIds,
+                batchByCall.getOrDefault(call, BatchMetadata.NONE));
         return result != null;
     }
 
@@ -388,6 +401,54 @@ public class ActionTask {
                     config.getName(), calls.size() - result.size(), aliasIdsByPrimaryId);
         }
         return result;
+    }
+
+    private Map<ToolCall, BatchMetadata> createVisibleBatch(List<ToolCall> calls) {
+        Map<ToolCall, BatchMetadata> result = new IdentityHashMap<>();
+        List<ToolCall> visibleCalls = new ArrayList<>();
+        for (ToolCall call : calls) {
+            if (isWebVisibleCall(call)) {
+                visibleCalls.add(call);
+            }
+        }
+
+        if (visibleCalls.size() <= 1) {
+            return result;
+        }
+
+        String batchId = UUID.randomUUID().toString();
+        int batchSize = visibleCalls.size();
+        for (int i = 0; i < batchSize; i++) {
+            result.put(visibleCalls.get(i), new BatchMetadata(batchId, i, batchSize));
+        }
+        return result;
+    }
+
+    /**
+     * 与 WebStreamBuilder/WsGate 的内部工具过滤口径保持一致，使展示批次只统计真正可见的卡。
+     * todowrite 虽不发送 start，但会以专用 action_end 卡展示，仍计入可见批次。
+     */
+    private boolean isWebVisibleCall(ToolCall call) {
+        if (call == null || Assert.isEmpty(call.getName())) {
+            return false;
+        }
+        String toolName = call.getName();
+        return !TaskTalent.TOOL_MULTITASK.equals(toolName)
+                && !TaskTalent.TOOL_TASK.equals(toolName)
+                && !MemoryTalent.isMemoryTool(toolName);
+    }
+
+    private static final class BatchMetadata {
+        private static final BatchMetadata NONE = new BatchMetadata(null, null, null);
+        private final String batchId;
+        private final Integer batchIndex;
+        private final Integer batchSize;
+
+        private BatchMetadata(String batchId, Integer batchIndex, Integer batchSize) {
+            this.batchId = batchId;
+            this.batchIndex = batchIndex;
+            this.batchSize = batchSize;
+        }
     }
 
     /**
@@ -462,7 +523,7 @@ public class ActionTask {
                         ONode argsNode = actionNode.get("arguments");
                         Map<String, Object> args = argsNode.isObject() ? argsNode.toBean(Map.class) : new HashMap<>();
 
-                        ToolResult result = doAction(trace, toolName, args, toolResults, null, null);
+                        ToolResult result = doAction(trace, toolName, args, toolResults, null, null, BatchMetadata.NONE);
                         if (result == null) {
                             return;
                         }
@@ -481,7 +542,7 @@ public class ActionTask {
                     foundAny = true;
                     Map<String, Object> args = new HashMap<>();
 
-                    ToolResult result = doAction(trace, toolName, args, toolResults, null, null);
+                    ToolResult result = doAction(trace, toolName, args, toolResults, null, null, BatchMetadata.NONE);
                     if (result == null) {
                         return;
                     }
@@ -508,7 +569,8 @@ public class ActionTask {
      */
     private void handleSingleObservation(ReActTrace trace, ToolExchanger toolExchanger,
                                          ChatMessage observationMessage, long durationMs,
-                                         Throwable error, List<ChatMessage> toolResults, String actionId) {
+                                         Throwable error, List<ChatMessage> toolResults, String actionId,
+                                         BatchMetadata batch) {
 
         if (observationMessage == null) {
             if (error == null) {
@@ -523,7 +585,8 @@ public class ActionTask {
         if (trace.getOptions().getStreamSink() != null) {
             try {
                 trace.getOptions().getStreamSink().next(
-                        new ObservationChunk(trace, toolExchanger.getToolName(), toolExchanger.getArgs(), observationMessage, error, durationMs, actionId));
+                        new ObservationChunk(trace, toolExchanger.getToolName(), toolExchanger.getArgs(), observationMessage,
+                                error, durationMs, actionId, batch.batchId, batch.batchIndex, batch.batchSize));
             } catch (Throwable e) {
                 LOG.error("Push ObservationChunk failed", e);
             }

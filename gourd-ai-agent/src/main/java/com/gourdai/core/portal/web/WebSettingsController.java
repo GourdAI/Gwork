@@ -56,6 +56,8 @@ import com.gourdai.core.config.entity.ProviderDo;
 import com.gourdai.core.portal.web.model.ModelInfo;
 import com.gourdai.core.portal.web.model.ModelsAdapter;
 import com.gourdai.core.portal.web.model.ModelsAdapterManager;
+import com.gourdai.core.portal.web.model.ModelsFetchException;
+import com.gourdai.core.portal.web.model.ModelsFetchReason;
 import com.gourdai.core.portal.web.market.Market;
 import com.gourdai.core.portal.web.market.MarketManager;
 import org.noear.solon.core.handle.Context;
@@ -219,7 +221,7 @@ public class WebSettingsController {
                 settings.getGeneral().setCompressionRatio(defaults.getCompressionRatio());
             }
 
-            engine.setCompressionThreshold(settings.getGeneral().getHistoryWindowSize(), null);
+            engine.setCompressionThreshold(settings.getGeneral().getHistoryWindowSize());
             engine.setCompressionRatio(settings.getGeneral().getCompressionRatio());
 
             engine.setModelRetries(settings.getGeneral().getModelRetries());
@@ -294,7 +296,8 @@ public class WebSettingsController {
     // ==================== 设置：LLM 模型管理 ====================
 
     /**
-     * 获取所有模型配置列表（含启用状态，专供设置面板使用）
+     * 获取所有模型配置列表（含启用状态，专供设置面板使用）。
+     * <p>按 settings 中的配置顺序输出（与模型选择下拉一致）。</p>
      */
     @Get
     @Mapping("/web/settings/llm/models")
@@ -318,7 +321,7 @@ public class WebSettingsController {
             list.add(item);
         }
 
-        sortByName(list, "name");
+        // 不再按名称排序：模型顺序以 settings 配置顺序为准（与聊天/自动化模型选择器一致）
 
         data.put("list", list);
         data.put("default", settings.getDefaultModel());
@@ -1796,6 +1799,11 @@ public class WebSettingsController {
             name = existing.getName();
         }
 
+        // 改名冲突校验：新名称不能与其他供应商重名
+        if (!lookupName.equals(name) && settings.getProviders().containsKey(name)) {
+            return Result.failure("Provider name already exists: " + name);
+        }
+
         // 如果名称变更，移除旧 key
         if (!lookupName.equals(name)) {
             settings.getProviders().remove(lookupName);
@@ -1807,6 +1815,7 @@ public class WebSettingsController {
         provider.setApiUrl(existing.isBuiltin()
                 ? existing.getApiUrl()
                 : (root.hasKey("apiUrl") ? root.get("apiUrl").getString() : existing.getApiUrl()));
+        // 密钥缺省（前端在详情未回填、真实密钥未知时不提交该字段）保留原值；显式传空串=用户主动清空
         provider.setApiKey(root.hasKey("apiKey") ? root.get("apiKey").getString() : existing.getApiKey());
         provider.setEnabled(root.hasKey("enabled") ? root.get("enabled").getBoolean(true) : existing.isEnabled());
         provider.setScope(root.hasKey("scope") ? root.get("scope").getString() : (existing.getScope() != null ? existing.getScope() : AgentFlags.SCOPE_USER));
@@ -1822,9 +1831,68 @@ public class WebSettingsController {
         }
 
         settings.getProviders().put(name, provider);
+
+        // 改名：将该供应商下的 LLM 模型从旧名称前缀迁移到新前缀（map key/name/provider 同步更新），
+        // 运行时引擎实例同步切换，否则旧前缀模型成为孤儿且无法再被更新/同步；
+        // 先收集待迁移 key 再逐个处理，避免迭代中结构性修改
+        if (!lookupName.equals(name)) {
+            String oldPrefix = lookupName + "-";
+            String newPrefix = name + "-";
+            List<String> renameKeys = new ArrayList<>();
+            for (Map.Entry<String, ModelDo> entry : settings.getModels().entrySet()) {
+                if (lookupName.equals(entry.getValue().getProvider()) && entry.getKey().startsWith(oldPrefix)) {
+                    renameKeys.add(entry.getKey());
+                }
+            }
+            for (String oldKey : renameKeys) {
+                ModelDo model = settings.getModels().get(oldKey);
+                if (model == null) {
+                    continue;
+                }
+                String newKey = newPrefix + oldKey.substring(oldPrefix.length());
+                if (settings.getModels().containsKey(newKey)) {
+                    continue; // 新 key 已存在则跳过，避免覆盖同名模型
+                }
+                settings.getModels().remove(oldKey);
+                model.setName(newKey);
+                model.setProvider(name);
+                settings.getModels().put(newKey, model);
+                engine.removeModel(oldKey);
+                if (model.isEnabled()) {
+                    engine.addModel(model);
+                }
+                LOG.info("[Settings] Model renamed on provider rename: {} -> {}", oldKey, newKey);
+            }
+            // 模型名引用悬空修复：defaultModel / general.acpModel 指向旧前缀模型时同步切到新前缀，
+            // 否则改名后全局默认模型与 ACP 模型失效（按名查找拿不到旧 key，静默回退）
+            String defaultModel = settings.getDefaultModel();
+            String newDefault = renameModelRef(defaultModel, oldPrefix, newPrefix);
+            if (newDefault != null && !newDefault.equals(defaultModel)) {
+                settings.setDefaultModel(newDefault);
+                LOG.info("[Settings] Default model renamed on provider rename: {} -> {}", defaultModel, newDefault);
+            }
+            String acpModel = settings.getGeneral().getAcpModel();
+            String newAcp = renameModelRef(acpModel, oldPrefix, newPrefix);
+            if (newAcp != null && !newAcp.equals(acpModel)) {
+                settings.getGeneral().setAcpModel(newAcp);
+                LOG.info("[Settings] ACP model renamed on provider rename: {} -> {}", acpModel, newAcp);
+            }
+        }
+
         saveSettings();
         LOG.info("[Settings] Provider updated: {}", name);
         return Result.succeed();
+    }
+
+    /**
+     * 供应商改名后迁移模型名引用（旧前缀 -> 新前缀）：非该前缀引用或新名称不存在时原样返回。
+     */
+    private String renameModelRef(String ref, String oldPrefix, String newPrefix) {
+        if (ref == null || !ref.startsWith(oldPrefix)) {
+            return ref;
+        }
+        String renamed = newPrefix + ref.substring(oldPrefix.length());
+        return settings.getModels().containsKey(renamed) ? renamed : ref;
     }
 
     /**
@@ -1903,7 +1971,10 @@ public class WebSettingsController {
     @Mapping("/web/settings/providers/fetch")
     public Result providersFetch(@Param("apiUrl") String apiUrl, @Param("apiKey") String apiKey, @Param("standard") String standard) {
         if (Assert.isEmpty(apiUrl)) {
-            return Result.failure("apiUrl is required");
+            Map<String, Object> failure = new LinkedHashMap<>();
+            failure.put("reason", ModelsFetchReason.INVALID_URL.name());
+            failure.put("status", 0);
+            return Result.failure("fetch models failed", failure);
         }
 
         try {
@@ -1930,10 +2001,19 @@ public class WebSettingsController {
                 modelList.add(item);
             }
             
-        return Result.succeed(modelList);
-        } catch (Exception e) {
-            LOG.warn("[Settings] Failed to fetch models: {}", e.getMessage());
-            return Result.failure("拉取模型列表失败: " + e.getMessage());
+            return Result.succeed(modelList);
+        } catch (ModelsFetchException e) {
+            Map<String, Object> failure = new LinkedHashMap<>();
+            failure.put("reason", e.getReason().name());
+            failure.put("status", e.getStatus());
+            LOG.warn("[Settings] Failed to fetch models: reason={}, status={}", e.getReason(), e.getStatus());
+            return Result.failure("fetch models failed", failure);
+        } catch (Throwable e) {
+            Map<String, Object> failure = new LinkedHashMap<>();
+            failure.put("reason", ModelsFetchReason.UNKNOWN.name());
+            failure.put("status", 0);
+            LOG.warn("[Settings] Unexpected model fetch failure", e);
+            return Result.failure("fetch models failed", failure);
         }
     }
 
@@ -2879,13 +2959,14 @@ public class WebSettingsController {
         // ACP 走独立子进程，无前端会话态可选模型，因此其使用的模型由本页预先选定（存入 general.acpModel）。
         // 回传当前选定值与可选模型列表（仅已启用的），供前端渲染下拉框。
         data.put("acpModel", settings.getGeneral().getAcpModel());
-        data.put("defaultModel", settings.getDefaultModel());
+        // 与 /web/chat/models 的 selected 同口径：下发引擎解析后的实际生效模型名，而非 settings 原始值。
+        // settings.getDefaultModel() 可能为空或指向已删除模型，此时引擎实际回落到模型表首项 ——
+        // 若直接下发原始值，前端「未显式选模」时会找不到可高亮的项。
+        data.put("defaultModel", resolveEffectiveModelName(null));
         // 思考深度
         data.put("acpThinkingDepth", settings.getGeneral().getAcpThinkingDepth());
-        // acpModel 对应的接口类型，供前端确定思考档位选项集
+        // acpModel 对应的接口类型，供前端确定思考档位选项集（置空时同样回落实际生效模型）
         data.put("acpModelStandard", getModelStandard(settings.getGeneral().getAcpModel()));
-        // 默认模型对应的接口类型（acpModel 置空=跟随默认时，思考档位选项集按其展示）
-        data.put("defaultModelStandard", getModelStandard(settings.getDefaultModel()));
 
         // models 由纯字符串数组升级为 {name, provider} 对象数组，供前端按供应商分组展示下拉
         List<Map<String, Object>> modelItems = new ArrayList<>();
@@ -2948,11 +3029,28 @@ public class WebSettingsController {
     }
 
     /**
+     * 解析模型名实际生效的模型。
+     *
+     * <p>与 {@code /web/chat/models} 下发 {@code selected} 同口径（均走
+     * {@link HarnessEngine#getModelOrDef(String)}）：传空或传入已失效的模型名时，回落到
+     * {@code defaultModel}；{@code defaultModel} 也空或悬空时再回落模型表首项。
+     * 前端据此能拿到一个总存在于下拉列表中的具体模型名，无需再给「跟随默认」单独建项。</p>
+     *
+     * @return 实际生效的模型名；一个模型都没配时返回空串
+     */
+    private String resolveEffectiveModelName(String modelName) {
+        ChatConfig config = engine.getModelOrDef(modelName);
+        return config == null ? "" : config.getNameOrModel();
+    }
+
+    /**
      * 获取模型的接口类型（standard）。
      * 如果模型不存在或为空，则返回默认模型的接口类型。
      */
     private String getModelStandard(String modelName) {
-        String targetModel = Assert.isEmpty(modelName) ? settings.getDefaultModel() : modelName.trim();
+        // 与 defaultModel 同口径走引擎解析：空值、悬空或已禁用的模型名均回落到实际生效模型，
+        // 否则 defaultModel 未配置时这里会返回空串，前端思考档位选项集会退化到通用集。
+        String targetModel = resolveEffectiveModelName(modelName);
         if (Assert.isEmpty(targetModel)) {
             return "";
         }

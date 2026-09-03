@@ -43,7 +43,14 @@
                             <span class="model-thinking-tag" id="welcomeModelThinkingTag" style="display:none"></span>
                             <i class="layui-icon layui-icon-down model-arrow"></i>
                         </div>
-                        <div class="model-dropdown" id="welcomeModelDropdown"></div>
+                        <div class="model-dropdown has-search" id="welcomeModelDropdown">
+                            <div class="model-dropdown-search">
+                                <svg class="model-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                                <input type="text" class="model-search-input" id="welcomeModelSearch" autocomplete="off" spellcheck="false" data-i18n-placeholder="history.model_search_placeholder" />
+                                <span class="model-search-clear" style="display:none">&#10005;</span>
+                            </div>
+                            <div class="model-dropdown-list" id="welcomeModelList"></div>
+                        </div>
                     </div>
                     <div class="plus-menu-wrap">
                         <button class="plus-btn" id="welcomePlusBtn" data-i18n-title="app.plus_more">
@@ -136,6 +143,24 @@
                     <span class="queue-chip-label" data-i18n="app.queue">队列</span>
                     <span class="queue-badge" id="queueBadge" style="display:none">0</span>
                 </button>
+                <!-- 任务执行中的键位提示：Enter 插话 / Tab 排队 / 停止。
+                     与 chip 同行右对齐，不额外占用垂直空间；由 app-base.js 按 isStreaming 切换显隐。 -->
+                <div class="run-hint" id="chatRunHint" style="display:none">
+                    <span class="run-hint-item">
+                        <kbd class="run-hint-kbd">⏎</kbd>
+                        <span class="run-hint-text" data-i18n="app.run_hint_steer">插话纠错</span>
+                    </span>
+                    <span class="run-hint-sep">·</span>
+                    <span class="run-hint-item">
+                        <kbd class="run-hint-kbd">⇥</kbd>
+                        <span class="run-hint-text" data-i18n="app.run_hint_queue">加入队列</span>
+                    </span>
+                    <span class="run-hint-sep">·</span>
+                    <span class="run-hint-item">
+                        <kbd class="run-hint-kbd run-hint-kbd-wide">⇧⏎</kbd>
+                        <span class="run-hint-text" data-i18n="app.run_hint_newline">换行</span>
+                    </span>
+                </div>
             </div>
         <!-- 输入框（放在面板前面，让面板在 DOM 最后渲染=最上层） -->
         <div class="input-box" id="chatDropZone">
@@ -161,7 +186,14 @@
                                 <span class="model-thinking-tag" id="chatModelThinkingTag" style="display:none"></span>
                                 <i class="layui-icon layui-icon-down model-arrow"></i>
                             </div>
-                            <div class="model-dropdown" id="chatModelDropdown"></div>
+                            <div class="model-dropdown has-search" id="chatModelDropdown">
+                                <div class="model-dropdown-search">
+                                    <svg class="model-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                                    <input type="text" class="model-search-input" id="chatModelSearch" autocomplete="off" spellcheck="false" data-i18n-placeholder="history.model_search_placeholder" />
+                                    <span class="model-search-clear" style="display:none">&#10005;</span>
+                                </div>
+                                <div class="model-dropdown-list" id="chatModelList"></div>
+                            </div>
                         </div>
                         <div class="plus-menu-wrap">
                             <button class="plus-btn" id="chatPlusBtn" data-i18n-title="app.plus_more">

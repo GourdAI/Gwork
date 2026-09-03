@@ -23,14 +23,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -41,7 +45,7 @@ import java.util.function.Consumer;
  * <p>提供通用的代码持久化、子进程启动、标准输出捕获及执行超时控制。
  * 具备输出截断保护机制，防止大数据量输出导致内存溢出。</p>
  *
- * @author oisin
+ * @author noear
  * @since 3.9.1
  */
 @Preview("3.9.1")
@@ -49,6 +53,8 @@ public class ProcessExecutor {
     private static final Logger LOG = LoggerFactory.getLogger(ProcessExecutor.class);
 
     private static final int DEFAULT_TIMEOUT_MS = 120_000; //120s
+    /** 进程结束后等待输出读取线程排空管道的时间上限 */
+    private static final long OUTPUT_DRAIN_TIMEOUT_MS = 5_000;
 
     // 面向 LLM 的默认输出字符上限。
     public static final int DEFAULT_LLM_OUTPUT_CHARS = 64_000;
@@ -90,18 +96,34 @@ public class ProcessExecutor {
 
     /**
      * 探测系统命令是否可用
+     *
+     * <p><b>为何输出必须交给独立守护线程</b>：本方法处在对话的同步路径上（{@code getInstruction} /
+     * {@code bash} 首次调用都会触发运行时探测）。若在当前线程同步读到 EOF，遇到「启动后不退出也不关
+     * 输出流」的可执行文件（Windows 应用商店 python 存根、等待输入的 wrapper 脚本、被安全软件挂起的
+     * 进程）就会永久阻塞，下面的 {@code waitFor(2s)} 形同虚设——表现为整个会话卡死。</p>
      */
     public boolean isCommandAvailable(String cmd) {
         Process process = null;
         try {
             ProcessBuilder pb = new ProcessBuilder(cmd, "--version");
             pb.redirectErrorStream(true);
+            // 注入实时 PATH（Windows），使新安装的运行时能被探测到，无需重启 JVM
+            EnvironmentResolver.applyTo(pb, null);
             process = pb.start();
+            // 探测不需要输入：立即给出 EOF，避免读 stdin 的 wrapper 脚本挂在这里
+            closeQuietly(process.getOutputStream());
 
-            try (java.io.InputStream in = process.getInputStream()) {
-                byte[] buf = new byte[1024];
-                while (in.read(buf) != -1) ;
-            }
+            final Process proc = process;
+            Thread reader = new Thread(() -> {
+                try (InputStream in = proc.getInputStream()) {
+                    byte[] buf = new byte[1024];
+                    while (in.read(buf) != -1) ;
+                } catch (Throwable ignore) {
+                    // 进程被强杀或流关闭，读取线程静默退出
+                }
+            }, "solon-ai-probe-reader");
+            reader.setDaemon(true);
+            reader.start();
 
             if (process.waitFor(2, TimeUnit.SECONDS)) {
                 return process.exitValue() == 0;
@@ -117,15 +139,40 @@ public class ProcessExecutor {
         }
     }
 
+    /**
+     * 关闭流并忽略异常（进程已退出时 close 会抛 IOException）。
+     */
+    private static void closeQuietly(Closeable closeable) {
+        if (closeable == null) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (Throwable ignored) {
+            // 进程已退出/管道已断开，无需处理
+        }
+    }
 
+
+    /**
+     * 探测可用的 Python 命令。
+     *
+     * <p><b>Windows 上必须先试 {@code python}</b>：python.org 安装器只会放 {@code python.exe}，
+     * 而 {@code python3} 在未安装 Store 版本时会解析到
+     * {@code %LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe} 这个应用商店存根（执行它会弹商店
+     * 而不是跑 Python）。先试 {@code python3} 就会反复撞上存根，白白多花一次探测超时。
+     * 类 Unix 上相反：{@code python} 可能指向已停维的 Python 2，应优先 {@code python3}。</p>
+     */
     public String probePythonCommand() {
-        if (isCommandAvailable("python3")) {
-            return "python3";
+        String[] candidates = EnvironmentResolver.isWindows()
+                ? new String[]{"python", "python3"}
+                : new String[]{"python3", "python"};
+        for (String candidate : candidates) {
+            if (isCommandAvailable(candidate)) {
+                return candidate;
+            }
         }
-        if (isCommandAvailable("python")) {
-            return "python";
-        }
-        return null; // 或者返回 ""，表示没找到
+        return null; // 没找到
     }
 
     public String probeNodeCommand() {
@@ -139,7 +186,10 @@ public class ProcessExecutor {
     }
 
     /**
-     * 执行代码脚本（持久化为临时文件后执行）
+     * 执行代码脚本（持久化为系统临时文件后执行）。
+     *
+     * <p>临时脚本写入 {@code java.io.tmpdir}，避免污染工作区；
+     * 执行结束后立即删除，并注册 {@code deleteOnExit} 作为兜底。</p>
      */
     public String executeCode(Path rootPath, String code, String cmd, String ext, Map<String, String> envs, Integer timeoutMs, Integer maxOutputChars, Consumer<String> onOutput) {
         if (Assert.isEmpty(cmd)) {
@@ -148,12 +198,12 @@ public class ProcessExecutor {
 
         Path tempScript = null;
         try {
-            // 1. 持久化脚本（Windows .bat 文件需前置 chcp 65001 以确保 UTF-8 输出）
+            // 1. 持久化脚本到系统临时目录（Windows .bat：仅当脚本按 UTF-8 写入时才需 chcp 65001 切页）
             String finalCode = code;
-            if (".bat".equals(ext)) {
+            if (".bat".equals(ext) && StandardCharsets.UTF_8.equals(scriptCharset)) {
                 finalCode = "@chcp 65001 > nul\r\n" + code;
             }
-            tempScript = Files.createTempFile(rootPath, "_script_", ext);
+            tempScript = createTempScript(ext);
             Files.write(tempScript, finalCode.getBytes(scriptCharset));
 
             // 2. 构建完整命令（处理带空格的命令字符串）
@@ -175,6 +225,38 @@ public class ProcessExecutor {
     }
 
     /**
+     * 在系统临时目录创建脚本文件：前缀 solon-ai-script-，Unix 尽量收紧为 600。
+     */
+    static Path createTempScript(String ext) throws IOException {
+        return createTempScript(ext, true);
+    }
+
+    /**
+     * 在系统临时目录创建脚本文件。
+     *
+     * @param registerDeleteOnExit 是否注册 {@code deleteOnExit} 兜底。调用方能保证主动删除时应传
+     *                             {@code false}：{@code DeleteOnExitHook} 的集合只增不减，长驻进程里
+     *                             每次命令都注册会造成慢性内存增长。
+     */
+    static Path createTempScript(String ext, boolean registerDeleteOnExit) throws IOException {
+        Path tempScript = Files.createTempFile("solon-ai-script-", ext);
+        if (registerDeleteOnExit) {
+            // JVM 异常退出时的兜底清理；正常路径仍由 finally 主动删除
+            tempScript.toFile().deleteOnExit();
+        }
+        try {
+            Set<PosixFilePermission> perms = EnumSet.of(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE
+            );
+            Files.setPosixFilePermissions(tempScript, perms);
+        } catch (UnsupportedOperationException ignored) {
+            // 非 POSIX 文件系统（如 Windows）静默降级
+        }
+        return tempScript;
+    }
+
+    /**
      * 执行完整命令，支持实时输出回调及面向 LLM 的输出字符上限。
      *
      * <p>{@code maxOutputChars} 仅约束最终返回给模型的文本（头尾保留 + 二进制降级），
@@ -190,69 +272,175 @@ public class ProcessExecutor {
             pb.directory(rootPath.toFile());
             pb.redirectErrorStream(true);
 
-            if (envs != null) {
-                pb.environment().putAll(envs);
-            }
+            // 注入实时系统 PATH（Windows：修复 JVM 环境快照不刷新导致新装命令不可见）；
+            // 显式 envs（如 PYTHON/NODE）优先级更高
+            EnvironmentResolver.applyTo(pb, envs);
 
             Process process = pb.start();
+            // 非交互执行：立刻关闭子进程 stdin，让读取输入的命令拿到 EOF 而不是一直等到超时。
+            // 不关的话（ProcessBuilder 默认给 stdin 挂一个没人写的管道），`git commit`（拉起编辑器）、
+            // `npm login`、Unix 的 `read`、CMD 的 `pause` 这类命令会稳定空转到 timeoutMs 才返回——
+            // 三个平台同病。需要交互输入的场景走 bash_start / bash_stdin（那条路径保留 stdin）
+            closeQuietly(process.getOutputStream());
 
             // 1. 异步读取输出（在字节层收集，便于可靠的二进制探测）
+            final OutputDecoder streamDecoder = onOutput == null ? null : new OutputDecoder(outputCharset);
+            // PowerShell 的 stderr 被重定向时会强制写出 CLIXML 块：必须在解码前剥离，否则
+            // 「CLIXML(ANSI 代码页) + stdout(UTF-8)」两种编码混在一条流里，字符集只能锁一种，另一半必乱码
+            final CliXmlFilter cliXmlFilter = CliXmlFilter.isNeeded() ? new CliXmlFilter() : null;
+            // 读取线程写、主线程读：超时路径下 awaitOutput 可能在读取线程仍在收尾时就返回，
+            // 因此必须用线程安全的 StringBuffer，避免此时 toString() 撞上并发修改
+            final StringBuffer cliXmlMessages = new StringBuffer();
+            // 输出是否撞上物理字节上限（maxOutputSize）：撞上后进程会被终止，必须显式告知模型
+            // 「这不是命令自然结束」，否则它会把被截断的输出当成完整结果继续推理
+            final boolean[] sizeCapped = {false};
             CompletableFuture<byte[]> outputFuture = RunUtil.async(() -> {
                 ByteArrayOutputStream buf = new ByteArrayOutputStream();
                 try (InputStream in = process.getInputStream()) {
                     byte[] buffer = new byte[4096];
                     int n;
                     while ((n = in.read(buffer)) != -1) {
-
-                        if (onOutput != null) {
-                            // 实时回调按 outputCharset 解码片段（流式场景）
-                            onOutput.accept(new String(buffer, 0, n, outputCharset));
+                        byte[] chunk = buffer;
+                        int len = n;
+                        if (cliXmlFilter != null) {
+                            chunk = cliXmlFilter.accept(buffer, n);
+                            len = chunk.length;
+                            if (len == 0) {
+                                continue; // 本段全部落在 CLIXML 块内（或为待定的标记前缀）
+                            }
                         }
 
-                        if (buf.size() + n <= maxOutputSize) {
-                            buf.write(buffer, 0, n);
+                        if (onOutput != null) {
+                            // 实时回调：增量解码，避免多字节字符被读取分块切断
+                            String piece = streamDecoder.decode(chunk, len);
+                            if (!piece.isEmpty()) {
+                                onOutput.accept(piece);
+                            }
+                        }
+
+                        if (buf.size() + len <= maxOutputSize) {
+                            buf.write(chunk, 0, len);
                         } else {
                             int remaining = maxOutputSize - buf.size();
                             if (remaining > 0) {
-                                buf.write(buffer, 0, remaining);
+                                buf.write(chunk, 0, remaining);
                             }
-                            // 物理上限兜底：防止超大输出撑爆内存
-                            process.destroyForcibly();
+                            // 物理上限兜底：防止超大输出撑爆内存。必须整树终止——Windows 无进程组信号，
+                            // 只杀 shell 会让孙进程（node/mvn/java 等）孤儿化继续跑
+                            sizeCapped[0] = true;
+                            TerminalSessionManager.destroyProcessTree(process);
                             break;
                         }
                     }
                 } catch (IOException e) {
                     LOG.debug("Stream reading interrupted: {}", e.getMessage());
                 }
+                if (cliXmlFilter != null) {
+                    byte[] rest = cliXmlFilter.flush();
+                    if (rest.length > 0 && buf.size() + rest.length <= maxOutputSize) {
+                        buf.write(rest, 0, rest.length);
+                        if (onOutput != null) {
+                            String piece = streamDecoder.decode(rest, rest.length);
+                            if (!piece.isEmpty()) {
+                                onOutput.accept(piece);
+                            }
+                        }
+                    }
+                    cliXmlMessages.append(cliXmlFilter.drainMessages());
+                }
+                if (streamDecoder != null) {
+                    String tail = streamDecoder.flush();
+                    if (!tail.isEmpty()) {
+                        onOutput.accept(tail);
+                    }
+                }
+                if (onOutput != null && cliXmlMessages.length() > 0) {
+                    onOutput.accept(cliXmlMessages.toString());
+                }
                 return buf.toByteArray();
             });
 
-            // 2. 超时控制
+            // 2. 超时控制：必须整树终止。Windows 没有进程组信号，只 destroyForcibly 根 shell 的话，
+            // `cmd /d /c mvn ...` / `powershell ... npm run dev` 的孙进程会孤儿化并继续占用端口
             if (!process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
-                process.destroyForcibly();
-                return "执行超时：运行时间超过 " + timeoutMs + " 毫秒。";
+                TerminalSessionManager.destroyProcessTree(process);
+                // 超时前已产生的输出是最有价值的诊断线索（卡在哪一步、最后一条日志是什么），
+                // 不能连同超时一起丢弃。进程树已终止，读取线程会随管道关闭而收尾，故此处等待极短
+                String partial = renderOutput(awaitOutput(outputFuture, OUTPUT_DRAIN_TIMEOUT_MS),
+                        streamDecoder, cliXmlMessages, maxOutputChars);
+                String head = "执行超时：运行时间超过 " + timeoutMs + " 毫秒（已终止进程树）。";
+                return partial.isEmpty() ? head : (head + "\n--- 超时前已产生的输出 ---\n" + partial);
             }
 
-            // 3. 获取原始字节输出
-            byte[] raw = outputFuture.get(1, TimeUnit.SECONDS);
+            // 3. 获取原始字节输出（读取线程可能仍在收尾：给足排空时间，而不是 1 秒硬超时后抛异常
+            // ——那会让模型收到一句无信息量的「系统失败: null」）
+            byte[] raw = awaitOutput(outputFuture, OUTPUT_DRAIN_TIMEOUT_MS);
 
             // 二进制输出降级：在字节层探测，避免乱码塞满上下文（如 cat 某个 jar/class/图片）
             if (isLikelyBinary(raw)) {
                 return summarizeBinaryOutput(raw);
             }
 
-            String result = new String(raw, outputCharset).trim();
+            String result = renderOutput(raw, streamDecoder, cliXmlMessages, maxOutputChars);
+
+            if (sizeCapped[0]) {
+                result = result + "\n... [输出超过 " + maxOutputSize
+                        + " 字节的物理上限，命令已被终止。请缩小输出范围（如加过滤/分页），或重定向到文件后再分段查看]";
+            }
+
+            // 退出码：非零时必须显式给出。否则命令失败（编译报错、测试失败、脚本 exit 1）时模型只能
+            // 从输出文本里猜成败，而 PowerShell 的错误对象经 CLIXML 剥离后已丢失与正文的交错顺序
+            int exitCode = process.exitValue();
+            if (exitCode != 0) {
+                result = (result.isEmpty() ? "" : result + "\n") + "[exit_code=" + exitCode + "]";
+            }
+
             if (result.isEmpty()) {
                 return "执行成功";
             }
-
-            // 面向 LLM 的输出上限：头尾保留截断
-            return truncateForLlm(result, normalizeMaxOutputChars(maxOutputChars));
+            return result;
 
         } catch (Throwable e) {
             LOG.error("Process execution failed", e);
-            return "系统失败: " + e.getMessage();
+            return "系统失败: " + e;
         }
+    }
+
+    /**
+     * 等待输出读取线程交出已收集的字节；超时或失败时返回已知的空结果（绝不因此让整条命令报错）。
+     */
+    private static byte[] awaitOutput(CompletableFuture<byte[]> outputFuture, long timeoutMs) {
+        try {
+            return outputFuture.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (Throwable e) {
+            LOG.debug("Collect process output failed: {}", e.toString());
+            return new byte[0];
+        }
+    }
+
+    /**
+     * 把原始字节渲染为面向 LLM 的文本：解码 + 追加 CLIXML 文本记录 + 头尾保留截断。
+     *
+     * @param streamDecoder   流式回调用过的解码器（可为 null）：已锁定字符集时必须复用，否则同一次执行里
+     *                        「实时输出」与「最终返回值」会按不同字符集解码，给出两份不一致的文本
+     * @param cliXmlMessages  CLIXML 里还原出的 error/warning 文本（与主流不同编码，只能单独解码，
+     *                        因此无法保持原始交错顺序，统一补在末尾）
+     */
+    private String renderOutput(byte[] raw, OutputDecoder streamDecoder,
+                                StringBuffer cliXmlMessages, Integer maxOutputChars) {
+        Charset locked = streamDecoder == null ? null : streamDecoder.selectedCharset();
+        String result = (raw == null || raw.length == 0)
+                ? ""
+                : (locked == null ? decodeSmartly(raw, outputCharset) : new String(raw, locked)).trim();
+
+        if (cliXmlMessages.length() > 0) {
+            String extra = cliXmlMessages.toString().trim();
+            if (!extra.isEmpty()) {
+                result = result.isEmpty() ? extra : (result + "\n" + extra);
+            }
+        }
+
+        return truncateForLlm(result, normalizeMaxOutputChars(maxOutputChars));
     }
 
     private static int normalizeMaxOutputChars(Integer maxOutputChars) {
@@ -260,6 +448,16 @@ public class ProcessExecutor {
             return DEFAULT_LLM_OUTPUT_CHARS;
         }
         return maxOutputChars;
+    }
+
+    /**
+     * 智能解码子进程输出（一次性完整字节）：委托 {@link OutputDecoder#decodeAll}。
+     *
+     * <p>期望字符集（{@code outputCharset}，默认 UTF-8）优先，严格校验不通过时按平台遗留代码页
+     * （Windows 中文系统为 GBK）重解，避免第三方工具按 ANSI 代码页输出导致乱码。</p>
+     */
+    static String decodeSmartly(byte[] raw, Charset primary) {
+        return OutputDecoder.decodeAll(raw, primary);
     }
 
     /**

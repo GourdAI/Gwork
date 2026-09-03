@@ -60,7 +60,10 @@ public class App {
 
         AgentProperties agentProps = new AgentProperties();
 
-        //配置用户扩展目录
+        // 配置文件日志必须在 Solon 初始化日志插件前确定，且与全局根 override 保持一致。
+        System.setProperty("gwork.log.dir", java.nio.file.Paths
+                .get(AgentFlags.getHarnessBase(), AgentFlags.getHarnessHome(), "logs")
+                .toString());
         System.setProperty("solon.extend", "!" + AgentFlags.getUserExtensions());
 
         Solon.start(App.class, args, app -> {

@@ -32,7 +32,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ul>
  *   <li><b>项目会话</b>（有所属根）：存到 {@code <root>/.gwork/sessions/work-xxx}，
  *       随所选工作空间/项目走。</li>
- *   <li><b>全局会话</b>（无所属根）：存到安装目录 {@code <安装目录>/.gwork/sessions/work-xxx}，
+ *   <li><b>全局会话</b>（无所属根）：存到 {@code <globalBase>/.gwork/sessions/work-xxx}，
  *       即全局对话区。</li>
  * </ul>
  *
@@ -51,16 +51,29 @@ public class SessionLocator {
     /** 统一会话 ID 前缀（chat / code / acp 等历史前缀已废弃，不做兼容） */
     public static final String PREFIX_WORK = "work-";
 
-    /** 安装目录 / 全局会话根（进程 user.dir，固定不变） */
+    /** 项目工作区根，用于项目会话；不承担全局数据存储语义。 */
     private final String workspace;
+    /** 全局基准目录，用于全局会话及 session-roots.json。 */
+    private final String globalBase;
     /** 马具会话相对存放区，如 ".gwork/sessions/" */
     private final String harnessSessions;
 
     /** sessionId → 所属工作空间根 的内存登记表（进程内有效，session-roots.json 持久化） */
     private final Map<String, String> boundRoots = new ConcurrentHashMap<>();
 
+    /** 兼容旧调用：workspace 同时作为全局基准目录。 */
     public SessionLocator(String workspace, String harnessSessions) {
+        this(workspace, workspace, harnessSessions);
+    }
+
+    /**
+     * @param workspace 项目工作区根
+     * @param globalBase 全局会话、登记表的基准目录
+     * @param harnessSessions 会话相对存放区
+     */
+    public SessionLocator(String workspace, String globalBase, String harnessSessions) {
         this.workspace = workspace;
+        this.globalBase = globalBase;
         this.harnessSessions = harnessSessions;
         loadBoundRoots();
     }
@@ -72,7 +85,7 @@ public class SessionLocator {
      * 登记持久化到 {@code session-roots.json}，进程重启不丢失。</p>
      *
      * @param sessionId     会话 ID
-     * @param workspaceRoot 所属工作空间根绝对路径；为空则忽略（回退到安装目录）
+     * @param workspaceRoot 所属工作空间根绝对路径；为空则忽略（回退到全局基准目录）
      */
     public void bindSessionRoot(String sessionId, String workspaceRoot) {
         if (sessionId == null || workspaceRoot == null || workspaceRoot.trim().isEmpty()) {
@@ -136,17 +149,15 @@ public class SessionLocator {
                 ? projectRoot.trim()
                 : boundRoots.get(sessionId);
         if (root == null || root.isEmpty()) {
-            // 未登记所属根：全局会话，落安装目录
-            root = workspace;
+            // 未登记所属根：全局会话，落全局基准目录
+            root = globalBase;
         }
         return sessionDir(root, sessionId);
     }
 
-    /**
-     * 全局会话列表的扫描根目录（安装目录，固定不变）。
-     */
+    /** 全局会话列表的扫描根目录（全局基准目录）。 */
     public File globalSessionsRoot() {
-        return sessionsRoot(workspace);
+        return sessionsRoot(globalBase);
     }
 
     /**
@@ -154,10 +165,10 @@ public class SessionLocator {
      * <p>会话均落在所属工作空间的 {@code .gwork/sessions/}，
      * 列表扫描时由调用方指定要查看的工作空间根。</p>
      *
-     * @param root 工作空间根目录；为空时回退到安装目录（即全局会话区）
+     * @param root 工作空间根目录；为空时回退到全局基准目录（即全局会话区）
      */
     public File sessionsRoot(String root) {
-        String effective = (root != null && !root.trim().isEmpty()) ? root.trim() : workspace;
+        String effective = (root != null && !root.trim().isEmpty()) ? root.trim() : globalBase;
         return doSessionsRoot(effective);
     }
 
@@ -169,7 +180,7 @@ public class SessionLocator {
     /**
      * 品牌升级懒迁移：项目根下旧 {@code .gourdai} 目录一次性改名 {@code .gwork}（幂等）。
      * <p>Code 模式会话/记忆随项目走，而工作区级目录只能在该项目被打开时迁移；
-     * 全局区（安装目录）已由 {@code App.main} 启动时统一迁移。</p>
+     * 全局区（全局基准目录）已由 {@code App.main} 启动时统一迁移。</p>
      */
     private void migrateLegacyWorkspace(String root) {
         try {
@@ -184,14 +195,14 @@ public class SessionLocator {
     }
 
     /**
-     * 登记表持久化文件：{@code <安装目录>/.gwork/session-roots.json}（sessionId → 所属根）。
+     * 登记表持久化文件：{@code <globalBase>/.gwork/session-roots.json}（sessionId → 所属根）。
      */
     private File rootsIndexFile() {
-        return Paths.get(workspace, AgentFlags.getHarnessHome(), "session-roots.json").toFile();
+        return Paths.get(globalBase, AgentFlags.getHarnessHome(), "session-roots.json").toFile();
     }
 
     /**
-     * 启动时回读登记表（失败不阻断，最坏退化为安装目录兜底）。
+     * 启动时回读登记表（失败不阻断，全局基准目录兜底）。
      */
     private void loadBoundRoots() {
         try {

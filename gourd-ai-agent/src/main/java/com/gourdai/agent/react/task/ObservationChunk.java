@@ -41,7 +41,13 @@ public class ObservationChunk extends AbsActionChunk {
     }
 
     public ObservationChunk(ReActTrace trace, String toolName, Map<String, Object> args, @Nullable ChatMessage observation, @Nullable Throwable error, long durationMs, String actionId) {
-        super(trace, toolName, args, observation, actionId);
+        this(trace, toolName, args, observation, error, durationMs, actionId, null, null, null);
+    }
+
+    public ObservationChunk(ReActTrace trace, String toolName, Map<String, Object> args, @Nullable ChatMessage observation,
+                            @Nullable Throwable error, long durationMs, String actionId,
+                            String batchId, Integer batchIndex, Integer batchSize) {
+        super(trace, toolName, args, observation, actionId, batchId, batchIndex, batchSize);
 
         this.error = error;
         this.durationMs = durationMs;

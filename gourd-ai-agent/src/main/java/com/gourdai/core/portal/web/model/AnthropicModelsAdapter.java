@@ -23,7 +23,7 @@ public class AnthropicModelsAdapter implements ModelsAdapter {
 
     @Override
     public List<ModelInfo> fetchModels(String baseUrl, Map<String, String> headers, String apiKey) {
-        String modelsUrl = baseUrl + "/v1/models";
+        String modelsUrl = ModelsHttp.requireHttpUrl(deriveModelsUrl(baseUrl), "Anthropic");
         List<ModelInfo> result = new ArrayList<>();
 
         try {
@@ -41,12 +41,21 @@ public class AnthropicModelsAdapter implements ModelsAdapter {
                 http.header("anthropic-version", "2023-06-01");
             }
 
-            String body = http.get();
+            String body = ModelsHttp.getBody(http, "Anthropic");
 
-            ONode root = ONode.ofJson(body);
+            ONode root;
+            try {
+                root = ONode.ofJson(body);
+            } catch (Throwable e) {
+                throw new ModelsFetchException(ModelsFetchReason.INVALID_RESPONSE, 200,
+                        "[Anthropic] invalid JSON response", e);
+            }
             ONode data = root.get("data");
-            if (data.isArray()) {
-                for (ONode item : data.getArray()) {
+            if (data == null || !data.isArray()) {
+                throw new ModelsFetchException(ModelsFetchReason.INVALID_RESPONSE, 200,
+                        "[Anthropic] missing data array");
+            }
+            for (ONode item : data.getArray()) {
                     ModelInfo modelInfo = ModelInfo.builder()
                             .id(item.get("id").getString())
                             .object(item.get("type").getString())
@@ -60,13 +69,24 @@ public class AnthropicModelsAdapter implements ModelsAdapter {
                             .capabilities(parseCapabilities(item.get("capabilities")))
                             .build();
                     result.add(modelInfo);
-                }
             }
+        } catch (ModelsFetchException e) {
+            log.warn("[Anthropic] model fetch failed: reason={}, status={}", e.getReason(), e.getStatus());
+            throw e;
         } catch (Exception e) {
-            log.warn("[Anthropic] Error fetching models from {}: {}", modelsUrl, e.getMessage());
+            log.warn("[Anthropic] invalid models response", e);
+            throw new ModelsFetchException(ModelsFetchReason.INVALID_RESPONSE, 200,
+                    "[Anthropic] invalid models response", e);
         }
 
         return result;
+    }
+
+    private String deriveModelsUrl(String baseUrl) {
+        String base = baseUrl == null ? "" : baseUrl.replaceAll("/+$", "");
+        if (base.endsWith("/models")) return base;
+        if (base.endsWith("/v1")) return base + "/models";
+        return base + "/v1/models";
     }
 
     private long parseCreatedAt(String createdAt) {

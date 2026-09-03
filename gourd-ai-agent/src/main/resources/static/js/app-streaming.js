@@ -6,13 +6,14 @@
 $(welcomeSendBtn).on('click', function() { sendMessage(); });
 $(chatSendBtn).on('click', function() {
     if (isStreaming && activeSessionId && sessionMap[activeSessionId]) {
-        try {
-            //提交 interrupt
-            $.post('/web/chat/interrupt?sessionId=' + encodeURIComponent(activeSessionId));
-        } finally {
-            // 停止流
-            finishStream(sessionMap[activeSessionId]);
-        }
+        var stopSess = sessionMap[activeSessionId];
+        $.post('/web/chat/interrupt', {
+            sessionId: activeSessionId,
+            runId: stopSess.activeRunId || ''
+        }).fail(function() {
+            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_failed'), 'error');
+        });
+        // 等待服务端 matched run 的 steer_cancelled + done；不在本地提前 finish，避免误启队列。
     } else {
         sendMessage();
     }
@@ -42,7 +43,63 @@ $(newChatBtn).on('click', function() {
 });
 
 /* ===== Send ===== */
-function sendMessage() {
+function queueRunningText(sess, text) {
+    var queueText = (text || '').trim();
+    if (!queueText || !window.messageQueue) return;
+    window.messageQueue.add(sess.sessionId, queueText, [], []).then(function() {
+        updateMessageQueueUI();
+        clearInput();
+        if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.queued'), 'info');
+    });
+}
+
+function makeSteerId() {
+    return 'steer-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
+function sendSteer(sess, text) {
+    if (!sess || sess._steerSending) return;
+    var steerId = makeSteerId();
+    var snapshot = (text || '').trim();
+    var runId = sess.activeRunId || '';
+    var pending = { steerId: steerId, text: snapshot, runId: runId, createdAt: Date.now(), state: 'sending' };
+    sess.steerPending[steerId] = pending; // 先登记，处理 WS applied 早于 HTTP 200 的竞态
+    sess._steerSending = true;
+
+    $.ajax({
+        url: '/web/chat/steer',
+        method: 'POST',
+        data: { sessionId: sess.sessionId, runId: runId, steerId: steerId, text: snapshot },
+        headers: sess.projectRoot ? { 'X-Session-Cwd': sess.projectRoot } : {}
+    }).done(function(resp) {
+        var status = resp && resp.data && resp.data.status;
+        if ((resp && resp.code === 200) && (status === 'accepted' || status === 'duplicate')) {
+            if (!sess.steerResolved[steerId] && sess.steerPending[steerId]) {
+                sess.steerPending[steerId].state = 'accepted';
+            }
+            clearInput();
+            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_accepted'), 'info');
+            return;
+        }
+        delete sess.steerPending[steerId];
+        // run 已切换/刚结束或邮箱已满：可靠降级为已有持久化队列。
+        queueRunningText(sess, snapshot);
+        if (typeof showToast === 'function') {
+            var key = status === 'box_full' ? 'streaming.steer_box_full' : 'streaming.steer_deferred';
+            showToast(GourdI18n.t(key), 'info');
+        }
+    }).fail(function() {
+        delete sess.steerPending[steerId];
+        // 网络失败不清空输入，不自动重试，避免是否已受理不确定时重复执行。
+        if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_failed'), 'error');
+    }).always(function() {
+        sess._steerSending = false;
+    });
+}
+
+function sendMessage(forceQueue) {
+    var inputEl = inChatMode ? chatInput : welcomeInput;
+    var rawText = inputEl ? inputEl.value : '';
     var text = getInputText();
     if (!text && pendingFiles.length === 0) return;
     /* Block only if the active session is currently streaming */
@@ -50,41 +107,48 @@ function sendMessage() {
     var isBlocked = activeSessionId && sessionMap[activeSessionId] && sessionMap[activeSessionId].isStreaming;
     
     if (isBlocked) {
-        // 任务执行中，将消息加入对应会话的队列
-        // 注意：排队时附件尚未上传到服务端，队列只保存文本和附件元数据
-        // 出队时只发送文本，附件需要用户手动重新上传
-        var imageCount = 0, fileCount = 0;
-        var imagePaths = [], filePaths = [];
-        for (var i = 0; i < pendingFiles.length; i++) {
-            if (pendingFiles[i].type === 'image') {
-                imageCount++;
-                imagePaths.push(pendingFiles[i].name); // 保存文件名作为占位
-            } else {
-                fileCount++;
-                filePaths.push(pendingFiles[i].name);
-            }
+        var blockedSess = sessionMap[activeSessionId];
+        // 当前队列只持久化附件名，不持久化 File；禁止伪排队后静默丢附件。
+        if (pendingFiles.length > 0) {
+            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_attachment_wait'), 'info');
+            return; // 保留文本与附件
         }
-        
-        var queueText = (text && text.trim()) ? text.trim() : '';
-        if (!queueText) {
-            if (imageCount > 0 && fileCount > 0) {
-                queueText = GourdI18n.t('streaming.describe_images') + ' ' + GourdI18n.t('streaming.process_files');
-            } else if (imageCount > 0) {
-                queueText = GourdI18n.t('streaming.describe_images');
-            } else {
-                queueText = GourdI18n.t('streaming.process_files');
-            }
+        if (forceQueue === true) {
+            queueRunningText(blockedSess, text);
+            return;
         }
-        
-        window.messageQueue.add(activeSessionId, queueText, imagePaths, filePaths).then(function() {
-            updateMessageQueueUI();
-            clearInput();
-            clearAttachmentPreview();
-        });
+        // 运行中 Enter：纯文本非命令即时插话；斜杠命令需 Tab 显式排队。
+        if (text && text.trim().charAt(0) === '/') {
+            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_command_queue'), 'info');
+            return;
+        }
+        sendSteer(blockedSess, text);
         return;
     }
 
-    var filesToSend = pendingFiles.slice(); // snapshot
+    // 空闲发送前折叠超长输入：原文只保存在 TXT，避免超大气泡/Markdown/Prompt。
+    var folded = (typeof foldLongInputToAttachment === 'function')
+        ? foldLongInputToAttachment(rawText) : false;
+    if (folded === null) return;
+    if (folded === true) {
+        text = GourdI18n.t('streaming.long_input_prompt');
+        if (inputEl) {
+            inputEl.value = '';
+            inputEl._manualH = 0;
+            autoResize(inputEl);
+        }
+    }
+
+    if (pendingFiles.length > MAX_ATTACHMENTS) {
+        showToast(GourdI18n.t('ui.attachment_limit', MAX_ATTACHMENTS), 'error');
+        return;
+    }
+    var filesToSend = [];
+    for (var fs = 0; fs < pendingFiles.length; fs++) {
+        // 独立快照保留 File/dataUrl 引用；clearAttachmentPreview 只释放 pendingFiles 中的原对象，
+        // HTTP 稍后返回 busy 时仍可安全补发附件。
+        filesToSend.push($.extend({}, pendingFiles[fs]));
+    }
 
     // Build display text
     var displayText = text || '';
@@ -116,6 +180,10 @@ function sendMessage() {
         else fileAttachments.push(filesToSend[i]);
     }
     appendUserMessage(sess, displayText, imageDataUrls, fileAttachments);
+    sess._pendingClientMessageId = 'msg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    sess._requestStartSeq = sess.lastEventSeq || 0;
+    sess._awaitingSendAck = true;
+    sess._sendAckConfirmed = false;
 
     sess.isStreaming = true;
     isStreaming = true;
@@ -172,6 +240,7 @@ function sendWithFormDataGrouped(sess, text, filesToSend) {
     var formData = new FormData();
     formData.append('input', text);
     formData.append('sessionId', sess.sessionId);
+    if (sess._pendingClientMessageId) formData.append('clientMessageId', sess._pendingClientMessageId);
     if (model) formData.append('model', model);
     for (var i = 0; i < filesToSend.length; i++) {
         formData.append('attachments', filesToSend[i].file, filesToSend[i].name);
@@ -193,8 +262,8 @@ function sendWithFormDataGrouped(sess, text, filesToSend) {
         data: formData,
         processData: false,
         contentType: false,
-        headers: (typeof getSessionCwd === 'function' && getSessionCwd())
-            ? { 'X-Session-Cwd': getSessionCwd() } : {}
+        headers: sess.projectRoot
+            ? { 'X-Session-Cwd': sess.projectRoot } : {}
     }).done(function(resp) {
         // 正常响应为 {"code":200}；若服务端判定会话繁忙（上一条任务未结束的重复触发），
         // 返回 data="busy"：前端暂存本条消息，待当前任务的 done 到达后自动补发，
@@ -202,15 +271,25 @@ function sendWithFormDataGrouped(sess, text, filesToSend) {
         var st = resp;
         if (typeof st === 'string') { try { st = JSON.parse(st); } catch (e) { st = null; } }
         if (st && st.data === 'busy') {
-            handleSendBusy(sess, text);
+            sess._awaitingSendAck = false;
+            sess._queueOriginItem = null;
+            handleSendBusy(sess, text, filesToSend);
+        } else if (st && st.code === 200) {
+            sess._sendAckConfirmed = true;
+            sess._awaitingSendAck = false;
+            sess._queueOriginItem = null;
         }
     }).fail(function(err) {
         console.error('Send error:', err);
         var errMsg = GourdI18n.t('streaming.send_failed');
-        if (typeof showToast === 'function') {
-            showToast(errMsg, 'error');
-        }
-        finishStream(sess);
+        if (typeof showToast === 'function') showToast(errMsg, 'error');
+        // 请求可能已被服务端接受，只是响应在网络抖动中丢失。保留当前消息并进入 replay 确认，
+        // 不能直接 finishStream，否则后端继续生成时同一回复会再次被拆开。
+        sess._recovering = true;
+        sess._recoverGeneration = (sess._recoverGeneration || 0) + 1;
+        beginGateBuffer(sess);
+        if (webGateSocket && webGateSocket.readyState === WebSocket.OPEN) recoverStreamingSession(sess);
+        else ensureWebGateConnected();
     });
 }
 
@@ -218,11 +297,18 @@ function sendWithFormDataGrouped(sess, text, filesToSend) {
    服务端对“会话已有任务在执行”的重复触发会跳过并返回 busy。
    前端此处收尾本地流状态，并暂存本条消息（非斜杠命令），
    待当前任务的 done 块到达后自动补发（不重复渲染用户气泡），确保消息不丢失。 */
-function handleSendBusy(sess, text) {
+function handleSendBusy(sess, text, filesToSend) {
     console.warn('[WebGate] server busy, message deferred for session:', sess.sessionId);
     var t = (text && text.trim()) ? text.trim() : '';
-    if (t && t.charAt(0) !== '/') {
-        sess._pendingResend = t;
+    var files = filesToSend ? filesToSend.slice() : [];
+    // 保留完整发送快照。只存文本会使附件在 busy 竞态下静默丢失；纯附件消息也必须可补发。
+    if ((t && t.charAt(0) !== '/') || files.length > 0) {
+        sess._pendingResend = {
+            text: t,
+            files: files,
+            clientMessageId: sess._pendingClientMessageId,
+            projectRoot: sess.projectRoot || ''
+        };
     }
     if (typeof showToast === 'function') {
         showToast(GourdI18n.t('streaming.busy_deferred'), 'warning');
@@ -239,9 +325,13 @@ function onWebChunk(sess, chunk) {
 
         removeInlineThinking(sess);
 
-        // 存储当前 chunk 的 runId，用于后续消息渲染
+        // 存储当前 chunk 的 runId，用于后续消息渲染；主 run 单独追踪，防子代理 runId 覆盖插话目标。
         if (chunk.runId) {
             sess.currentRunId = chunk.runId;
+            if (!(chunk.args && chunk.args.agentName)
+                    && chunk.type !== 'agent_start' && chunk.type !== 'agent_end') {
+                sess.activeRunId = chunk.runId;
+            }
         }
 
         switch (chunk.type) {
@@ -270,13 +360,13 @@ function onWebChunk(sess, chunk) {
             case 'action_end': finishThinkingBlock(sess); clearRetryChunk(sess);
                 var endOwnerState = resolveAgentState(sess, chunk.args);
                 if (endOwnerState) { finishAgentThinkingBlock(sess, endOwnerState); }
-                appendActionEndChunk(sess, chunk.toolName, chunk.text, chunk.args, chunk.toolTitle, chunk.actionId, chunk.truncated ? { truncated: true, seq: chunk.seq, fullLength: chunk.fullLength } : null, endOwnerState ? endOwnerState.bodyEl : null);
+                appendActionEndChunk(sess, chunk.toolName, chunk.text, chunk.args, chunk.toolTitle, chunk.actionId, chunk.truncated ? { truncated: true, seq: chunk.seq, fullLength: chunk.fullLength } : null, endOwnerState ? endOwnerState.bodyEl : null, { batchId: chunk.batchId, batchIndex: chunk.batchIndex, batchSize: chunk.batchSize });
                 if (window._todoChunkHandlers) window._todoChunkHandlers.forEach(function(h){h(chunk);});
                 break;
             case 'action_start': finishThinkingBlock(sess); clearRetryChunk(sess);
                 var startOwnerState = resolveAgentState(sess, chunk.args);
                 if (startOwnerState) { finishAgentThinkingBlock(sess, startOwnerState); }
-                appendActionStartChunk(sess, chunk.toolName, chunk.args, chunk.toolTitle, chunk.actionId, startOwnerState ? startOwnerState.bodyEl : null);
+                appendActionStartChunk(sess, chunk.toolName, chunk.args, chunk.toolTitle, chunk.actionId, startOwnerState ? startOwnerState.bodyEl : null, { batchId: chunk.batchId, batchIndex: chunk.batchIndex, batchSize: chunk.batchSize });
                 break;
             case 'agent':  finishThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess);
                 var agentOwner = resolveAgentState(sess, chunk.args);
@@ -368,11 +458,10 @@ function finishStream(sess) {
     finishAgentThinkingBlock(sess);
     finishPendingTool(sess);
 
-    // 修复：确保所有工具卡片的状态图标都更新为完成状态
-    // 查找当前会话容器中所有处于 loading 状态的工具卡片和智能体状态点
+    // 普通工具卡可在流结束时视为完成；批量卡需留给下方批次完整性检查，缺帧时标黄。
     if (sess.container) {
-        $(sess.container).find('.tool-status-icon.loading').each(function() {
-            this.className = 'tool-status-icon done';
+        $(sess.container).find('.tool-card:not([data-batch-key]) .tool-status-icon.loading').each(function() {
+            this.className = 'tool-status-icon warn';
             this.innerHTML = '';
         });
         // 同时清理残留的 loading 态子智能体状态点
@@ -387,12 +476,27 @@ function finishStream(sess) {
 
     sess.approvedToolCard = null;
 
-    // 收尾批量分组状态：把仍在 loading 的分组头部转完成态（纯色绿点，不放内部图标），并清空 id 卡片表，避免残留跨轮
-    if (sess.currentBatch && sess.currentBatch.groupEl) {
-        var bIcon = $(sess.currentBatch.groupEl).find('.tool-batch-header .tool-status-icon.loading')[0];
-        if (bIcon) { bIcon.className = 'tool-status-icon done'; bIcon.innerHTML = ''; }
+    // 收尾批量分组状态：完整批次标记成功；缺 start/end 或无效槽位的批次标记 warning，
+    // 避免流已结束仍保留闪烁 loading，也避免把缺帧批次误报为全部成功。
+    if (sess.toolBatchesById) {
+        Object.keys(sess.toolBatchesById).forEach(function(key) {
+            var b = sess.toolBatchesById[key];
+            if (!b || !b.groupEl) return;
+            var present = b.slots ? b.slots.filter(Boolean).length : 0;
+            var complete = (b.doneCount || 0) >= (b.batchSize || 0) && present >= (b.batchSize || 0);
+            var bIcon = $(b.groupEl).find('.tool-batch-header .tool-status-icon.loading')[0];
+            if (bIcon) { bIcon.className = 'tool-status-icon ' + (complete ? 'done' : 'warn'); bIcon.innerHTML = ''; }
+            $(b.groupEl).find('.tool-card .tool-status-icon.loading').each(function() {
+                this.className = 'tool-status-icon warn'; this.innerHTML = '';
+            });
+            if (!complete) {
+                $(b.groupEl).find('.tool-card .tool-status-icon.done').each(function() {
+                    this.className = 'tool-status-icon warn';
+                });
+            }
+        });
     }
-    sess.currentBatch = null;
+    sess.toolBatchesById = {};
     sess.toolCardsById = {};
 
     if (sess.eventSource) { sess.eventSource.close(); sess.eventSource = null; }
@@ -428,7 +532,7 @@ function finishStream(sess) {
     if (window.loadTodos) window.loadTodos();
     
     // 任务完成，自动处理当前会话的消息队列
-    if (sess && sess.sessionId && window.messageQueue) {
+    if (!sess._suppressQueueDispatch && sess && sess.sessionId && window.messageQueue) {
         window.messageQueue.size(sess.sessionId).then(function(qSize) {
             if (qSize > 0) {
                 setTimeout(function() {
@@ -456,7 +560,22 @@ function gateFpSeen(fp) {
     if (gateFpQueue.length > GATE_FP_WINDOW) delete gateFpSet[gateFpQueue.shift()];
     return false;
 }
+/* 报文指纹摘要：取代把整条 raw JSON 拼进指纹的做法。
+   action_end 类帧携带工具输出（读文件/grep 结果）单帧可达数百 KB，滑窗内 200 条
+   就是数十 MB 常驻（且同时被数组与对象两处引用）。用「长度 + 滚动哈希」代替全文：
+   长度不同即不同帧；长度相同时靠哈希区分。叠加 type/sessionId/createdAt 三重限定后，
+   碰撞仅发生在「同会话同类型同毫秒时间戳且长度相等」的帧之间，实际上就是重复推送本身。 */
+function gateRawDigest(raw) {
+    var s = String(raw == null ? '' : raw);
+    var h = 5381;
+    for (var i = 0; i < s.length; i++) {
+        h = ((h << 5) + h + s.charCodeAt(i)) | 0;   // djb2, 保持 32 位整数
+    }
+    return s.length + ':' + (h >>> 0).toString(36);
+}
 var WEBGATE_MAX_RECONNECT = 10;
+// 恢复期实时帧缓冲区容量上限（防止 replay 长期失败时无限堆积 chunk 对象）
+var GATE_BUFFER_MAX = 3000;
 
 // 用户主动发起会话时确保连接就绪：若连接已断且退避已停止，则重置计数并立即重连。
 function ensureWebGateConnected() {
@@ -469,16 +588,129 @@ function ensureWebGateConnected() {
 }
 window.ensureWebGateConnected = ensureWebGateConnected;
 
-// 连接断开时：不弹顶部横幅。仅当有会话正在流式输出时，在该对话里就地提示
-// （与普通对话异常同款的红色错误），并结束其流。空闲/启动阶段没有流式会话，则完全静默。
-function notifyStreamingSessionsDisconnected() {
+// 连接断开时保留当前消息 DOM 和流式状态，重连后按 eventSeq 补回缺失事件。
+function markStreamingSessionsForRecovery() {
     for (var sid in sessionMap) {
         if (!sessionMap.hasOwnProperty(sid)) continue;
         var sess = sessionMap[sid];
         if (sess && sess.isStreaming) {
-            if (typeof appendErrorChunk === 'function') appendErrorChunk(sess, GourdI18n.t('streaming.connection_disconnected'));
-            finishStream(sess);
+            sess._recovering = true;
+            sess._recoverGeneration = (sess._recoverGeneration || 0) + 1;
+            beginGateBuffer(sess);
         }
+    }
+}
+
+function applySequencedGateChunk(sess, chunk) {
+    if (!sess) return false;
+    var seq = Number(chunk && chunk.eventSeq || 0);
+    if (seq && seq <= (sess.lastEventSeq || 0)) return false;
+    dispatchGateChunk(chunk);
+    if (seq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, seq);
+    return true;
+}
+
+function scheduleStreamingRecovery(sess, generation) {
+    if (!sess || sess._recoverRetryTimer || !sess._recovering) return;
+    var count = sess._recoverRetryCount || 0;
+    var delay = Math.min(1000 * Math.pow(2, Math.min(count, 5)), 30000);
+    sess._recoverRetryCount = count + 1;
+    sess._recoverRetryTimer = setTimeout(function() {
+        sess._recoverRetryTimer = null;
+        if (sessionMap[sess.sessionId] === sess && sess._recovering
+                && sess._recoverGeneration === generation
+                && webGateSocket && webGateSocket.readyState === WebSocket.OPEN) {
+            recoverStreamingSession(sess);
+        }
+    }, delay);
+}
+
+function recoverStreamingSession(sess) {
+    if (!sess || sessionMap[sess.sessionId] !== sess || !sess._recovering || sess._resumePromise) return;
+    var generation = sess._recoverGeneration;
+    var rootQ = sess.projectRoot ? '&root=' + encodeURIComponent(sess.projectRoot) : '';
+    var url = '/web/chat/replay?sessionId=' + encodeURIComponent(sess.sessionId)
+        + rootQ + '&afterSeq=' + encodeURIComponent(sess.lastEventSeq || 0) + '&limit=500';
+    var request = $.get(url);
+    sess._resumePromise = request;
+    request.done(function(resp) {
+        if (!sess._recovering || sess._recoverGeneration !== generation) return;
+        var data = resp && resp.data || {};
+        var events = data.events || [];
+        var ackMatched = !!sess._sendAckConfirmed;
+        for (var i = 0; i < events.length; i++) {
+            var recovered = events[i];
+            if (recovered && recovered.type === 'user'
+                    && recovered.clientMessageId && recovered.clientMessageId === sess._pendingClientMessageId) {
+                ackMatched = true;
+                sess._sendAckConfirmed = true;
+                sess._awaitingSendAck = false;
+                var userSeq = Number(recovered.eventSeq || 0);
+                if (userSeq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, userSeq);
+                continue;
+            }
+            applySequencedGateChunk(sess, recovered);
+        }
+        // 先把所有 replay 分页连续补齐，再处理 HTTP 快照期间缓冲的实时帧；否则实时高序号
+        // 会提前推进游标，导致中间分页被 afterSeq 跳过。
+        if (data.hasMore && sess._recovering) {
+            if (sess._resumePromise === request) sess._resumePromise = null;
+            recoverStreamingSession(sess);
+            return;
+        }
+        var live = sess._gateBuffer || [];
+        sess._gateBuffer = [];
+        sess._gateBufferOverflowed = false;
+        live.sort(function(a, b) { return Number(a.eventSeq || 0) - Number(b.eventSeq || 0); });
+        for (var j = 0; j < live.length; j++) applySequencedGateChunk(sess, live[j]);
+        sess._recovering = false;
+        sess._gateBuffering = false;
+        sess._recoverRetryCount = 0;
+        if (sess._recoverRetryTimer) { clearTimeout(sess._recoverRetryTimer); sess._recoverRetryTimer = null; }
+        // HTTP 失败既可能是“服务端已受理、响应丢失”，也可能是“请求根本未到达”。
+        // replay 未发现本条 user 事件，且本次请求起点之后没有任何事件、服务端也未运行时，
+        // 不能伪装成正常完成：明确标记失败并收尾，让用户可重新发送。
+        if (sess._awaitingSendAck && !ackMatched && !data.running
+                && (sess.lastEventSeq || 0) <= (sess._requestStartSeq || 0)) {
+            sess._awaitingSendAck = false;
+            appendErrorChunk(sess, GourdI18n.t('streaming.send_failed'));
+            // 队列项已 shift 但请求确认未到服务端：重新入队，避免网络错误造成持久化消息永久丢失。
+            if (sess._queueOriginItem && window.messageQueue) {
+                var qi = sess._queueOriginItem;
+                sess._queueOriginItem = null;
+                window.messageQueue.add(sess.sessionId, qi.content || '', qi.imagePaths || [], qi.filePaths || []).always(function() {
+                    finishStream(sess);
+                });
+                return;
+            }
+            finishStream(sess);
+            return;
+        }
+        sess._awaitingSendAck = false;
+        // 最终一页处理完后恢复真实 running 状态。中间 done 曾临时 finish UI，若服务端仍运行需继续保持流式；
+        // 若已结束则此时才允许触发消息队列。
+        if (data.running) {
+            sess.isStreaming = true;
+            if (sess.sessionId === activeSessionId) { isStreaming = true; setBtnStopMode(); }
+        } else if (sess.isStreaming || sess._suppressQueueDispatch) {
+            sess._suppressQueueDispatch = false;
+            finishStream(sess);
+        } else if (window.messageQueue) {
+            processMessageQueue(sess.sessionId);
+        }
+    }).fail(function() {
+        // replay 暂时失败时按会话指数退避，且删除会话后旧闭包会自行失效。
+        scheduleStreamingRecovery(sess, generation);
+    }).always(function() {
+        // 只清理当前请求，不能把 done 回调中刚发起的下一页请求置空。
+        if (sess._resumePromise === request) sess._resumePromise = null;
+    });
+}
+
+function recoverStreamingSessions() {
+    for (var sid in sessionMap) {
+        if (!sessionMap.hasOwnProperty(sid)) continue;
+        recoverStreamingSession(sessionMap[sid]);
     }
 }
 
@@ -522,6 +754,7 @@ function connectWebGate() {
         if (typeof loadTree === 'function') {
             loadTree();
         }
+        recoverStreamingSessions();
     };
 
     webGateSocket.onmessage = function(event) {
@@ -535,16 +768,29 @@ function connectWebGate() {
             // 重复推送兜底去重：多连接并存时同一事件可能送达两次（payload 完全一致），
             // 滑窗内重复帧丢弃（相邻与交错重复均覆盖）；仅带 createdAt 的业务帧参与，心跳/系统帧原样放行。
             if (chunk && chunk.createdAt) {
-                var fp = (chunk.type || '') + '\u0001' + (chunk.sessionId || '') + '\u0001' + chunk.createdAt + '\u0001' + raw;
+                var fp = (chunk.type || '') + '\u0001' + (chunk.sessionId || '') + '\u0001' + chunk.createdAt + '\u0001' + gateRawDigest(raw);
                 if (gateFpSeen(fp)) return;
             }
 
-            // 回放/实时互斥门禁：会话处于历史回放中或等待回放响应期间，同会话实时帧（含 user/done）
-            // 先入缓冲队列，由 replayDone/加载完成统一去重喂入（drainGateBuffer），避免同一事件被
-            // 回放快照与实时流两条管线各渲染一次；回放结束后快照覆盖集继续生效（至本轮 done），拦截迟到的快照内帧。
+            // 恢复/回放期间先缓冲；其它事件统一用 eventSeq 去重后分发。
             var gateSess = chunk.sessionId ? sessionMap[chunk.sessionId] : null;
-            if (gateSess && (gateSess._replaying || gateSess._gateBuffering)) {
+            if (gateSess && (gateSess._replaying || gateSess._gateBuffering || gateSess._recovering)) {
+                // 容量上限：若 replay 持续失败，会话会长期卡在恢复态，此处原本只进不出、无上限，
+                // 是唯一能无限增长的 chunk 堆积点。超限后丢弃最早的帧：恢复完成时本就会走
+                // loadMessages/replay 从服务端完整重建，缓冲区仅用于衔接窗口内的实时帧，
+                // 丢旧留新不会造成最终内容缺失。
+                if (gateSess._gateBuffer.length >= GATE_BUFFER_MAX) {
+                    gateSess._gateBuffer.shift();
+                    if (!gateSess._gateBufferOverflowed) {
+                        gateSess._gateBufferOverflowed = true;
+                        console.warn('[gate] _gateBuffer 超过 ' + GATE_BUFFER_MAX + ' 帧，开始丢弃最早帧（会话 ' + gateSess.sessionId + ' 恢复异常）');
+                    }
+                }
                 gateSess._gateBuffer.push(chunk);
+                return;
+            }
+            if (chunk && chunk.eventSeq && chunk.sessionId) {
+                applySequencedGateChunk(gateSess || getOrCreateSession(chunk.sessionId), chunk);
                 return;
             }
             if (gateSess && gateSess._replayCoverage && replayCoverageHas(gateSess._replayCoverage, chunk)) return;
@@ -558,8 +804,8 @@ function connectWebGate() {
     webGateSocket.onclose = function() {
         console.log('[WebGate] closed');
         stopWebGateHeartbeat();
-        // 不弹顶部横幅：仅当有会话正在流式输出时，在对话内就地提示异常
-        notifyStreamingSessionsDisconnected();
+        // 保留流式上下文，等待新连接通过 replay 精确补流。
+        markStreamingSessionsForRecovery();
         scheduleWebGateReconnect();
     };
 
@@ -581,16 +827,42 @@ function dispatchGateChunk(chunk) {
         if (chunk.createdAt) sess._lastCreatedAt = chunk.createdAt;
         // 本轮结束：清除回放快照覆盖集（使命完成，避免误拦后续轮次帧）
         sess._replayCoverage = null;
+        var resumeInProgress = !!(sess._recovering || sess._gateBuffering);
+        if (!resumeInProgress) {
+            sess._recovering = false;
+            sess._gateBuffering = false;
+        }
+        // 旧 run 的迟到 done 不得结束新 run；回放态仍按 eventSeq 重建。
+        if (!resumeInProgress && chunk.runId && sess.activeRunId && chunk.runId !== sess.activeRunId) return;
+        sess._pendingClientMessageId = null;
+        sess._awaitingSendAck = false;
+        sess._sendAckConfirmed = false;
+        sess.activeRunId = null;
+        sess._suppressQueueDispatch = resumeInProgress;
         finishStream(sess);
-        // busy 暂存的消息：当前任务已结束，延迟补发（不重复渲染用户气泡）。
-        // 延迟 300ms 避开 finishStream 内部的队列处理时序；若期间用户已手动发送则跳过。
-        if (sess._pendingResend) {
-            var pr = sess._pendingResend;
-            sess._pendingResend = null;
-            setTimeout(function() {
+        sess._suppressQueueDispatch = false;
+        if (resumeInProgress) {
+            // replay 分页中的中间轮次 done 不能关闭整个恢复状态；后续页和实时缓冲仍要补齐。
+            sess._recovering = true;
+            sess._gateBuffering = true;
+        }
+        if (sess._pendingResend && !resumeInProgress) {
+            var pending = sess._pendingResend;
+            setTimeout(function retryPendingSend() {
                 var s2 = sessionMap[sid];
-                if (!s2 || s2.isStreaming) return;
-                sendWithFormDataGrouped(s2, pr, []);
+                if (!s2 || s2._pendingResend !== pending) return;
+                if (s2.isStreaming) {
+                    setTimeout(retryPendingSend, 500);
+                    return;
+                }
+                s2._pendingClientMessageId = pending.clientMessageId || s2._pendingClientMessageId;
+                s2.projectRoot = pending.projectRoot || s2.projectRoot || '';
+                s2._requestStartSeq = s2.lastEventSeq || 0;
+                s2._awaitingSendAck = true;
+                s2._sendAckConfirmed = false;
+                sendWithFormDataGrouped(s2, pending.text || '', pending.files || []);
+                // 只有真正发起补发后才移除；若 300ms 内另一任务启动，消息不会被静默丢弃。
+                if (s2._pendingResend === pending) s2._pendingResend = null;
             }, 300);
         }
         return;
@@ -605,6 +877,28 @@ function dispatchGateChunk(chunk) {
     }
 
     if (!sid) return; // 无 sessionId 的消息丢弃
+
+    // 插话协议事件必须在「自动进入 streaming 态」之前处理：历史回放 dropped/cancelled 不应制造假流。
+    if (chunk.type === 'steer_applied' || chunk.type === 'steer_dropped' || chunk.type === 'steer_cancelled') {
+        var steerSess = getOrCreateSession(sid);
+        var items = (chunk.args && chunk.args.items) || [];
+        for (var si = 0; si < items.length; si++) {
+            var item = items[si] || {};
+            if (!item.steerId || steerSess.steerResolved[item.steerId]) continue;
+            steerSess.steerResolved[item.steerId] = chunk.type;
+            delete steerSess.steerPending[item.steerId];
+            if (chunk.type === 'steer_applied' && typeof appendSteerNote === 'function') {
+                appendSteerNote(steerSess, item);
+            }
+        }
+        if (chunk.type === 'steer_dropped') {
+            // 后端已按 originSteerId 原子、幂等入 queue.json；前端只失效缓存并刷新 UI。
+            if (window.messageQueue && window.messageQueue.caches) delete window.messageQueue.caches[sid];
+            if (sid === activeSessionId && typeof updateMessageQueueUI === 'function') updateMessageQueueUI();
+            if (!steerSess._replaying && typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_dropped'), 'info');
+        }
+        return;
+    }
 
     // 即使 sess2 不存在，也优先处理 todowrite 动作（用于更新左侧 Sidebar 的 todo 进度）
     if (chunk.type === 'action_end' && chunk.toolName === 'todowrite') {
@@ -666,8 +960,8 @@ function stopWebGateHeartbeat() {
 
 function scheduleWebGateReconnect() {
     if (webGateReconnectAttempts >= WEBGATE_MAX_RECONNECT) {
-        console.warn('[WebGate] max reconnect attempts reached');
-        return;
+        console.warn('[WebGate] reconnect attempts continuing at capped interval');
+        webGateReconnectAttempts = WEBGATE_MAX_RECONNECT - 1;
     }
     var delay = Math.min(1000 * Math.pow(2, webGateReconnectAttempts), 30000);
     webGateReconnectAttempts++;

@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>模型统计 · GWork</title>
+  <meta name="description" content="GWork 模型使用统计">
+  <link rel="icon" href="assets/favicon.ico">
+  <link rel="stylesheet" href="css/styles.css">
+  <link rel="stylesheet" href="css/models.css">
+  <script src="js/models.js" defer></script>
+</head>
+<body>
+  <div class="bg-aurora" aria-hidden="true"></div>
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="bg-spot" aria-hidden="true"></div>
+
+  <header class="site-header scrolled" id="siteHeader">
+    <div class="container nav-inner">
+      <a class="nav-brand" href="index.html#top" aria-label="GWork 首页">
+        <img src="assets/logo-white.png" alt="GWork"><span>GWork</span>
+      </a>
+      <nav class="nav-links" id="navLinks" aria-label="主导航">
+        <a href="index.html#features">产品能力</a>
+        <a href="index.html#quickstart">快速上手</a>
+        <a class="active" href="models.html" aria-current="page">模型统计</a>
+        <a href="index.html#downloads">下载</a>
+      </nav>
+      <div class="nav-actions">
+        <a class="nav-social" href="https://github.com/GourdAI/Gwork" target="_blank" rel="noopener" aria-label="GitHub 仓库">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+        </a>
+        <a class="nav-social" href="https://gitee.com/gourdwork/gwork" target="_blank" rel="noopener" aria-label="Gitee 仓库">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11.984 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.016 0zm6.09 5.333c.328 0 .593.266.592.593v1.482a.594.594 0 0 1-.593.592H9.777c-.982 0-1.778.796-1.778 1.778v5.63c0 .327.266.592.593.592h5.63c.982 0 1.778-.796 1.778-1.778v-.296a.593.593 0 0 0-.592-.593h-4.15a.592.592 0 0 1-.592-.592v-1.482a.593.593 0 0 1 .593-.592h6.815c.327 0 .593.265.593.592v3.408a4 4 0 0 1-4 4H5.926a.593.593 0 0 1-.593-.593V9.778a4.444 4.444 0 0 1 4.445-4.444h8.296Z"/></svg>
+        </a>
+        <a class="nav-cta" href="index.html#downloads">下载 GWork</a>
+        <button class="nav-toggle" id="navToggle" type="button" aria-label="打开菜单" aria-expanded="false" aria-controls="navLinks"><span></span><span></span><span></span></button>
+      </div>
+    </div>
+  </header>
+
+  <main class="models-page">
+    <div class="container">
+      <section class="models-hero">
+        <div class="eyebrow">MODEL OBSERVATORY</div>
+        <h1>模型统计</h1>
+        <p>透明了解 GWork 的模型使用概况。</p>
+        <div class="period-tabs" role="tablist" aria-label="统计周期">
+          <button type="button" aria-pressed="true" data-period="24h">24h</button>
+          <button type="button" aria-pressed="false" data-period="7d">7d</button>
+          <button type="button" aria-pressed="false" data-period="30d">30d</button>
+          <button type="button" aria-pressed="false" data-period="all">累计</button>
+        </div>
+      </section>
+
+      <section aria-labelledby="overview-title">
+        <h2 class="sr-only" id="overview-title">统计概览</h2>
+        <div class="stats-grid" id="statsGrid" aria-live="polite"></div>
+      </section>
+
+      <section class="ranking-section" aria-labelledby="ranking-title">
+        <div class="section-heading"><div><div class="eyebrow">RANKING</div><h2 id="ranking-title">模型排行</h2></div><time id="updatedAt">—</time></div>
+        <div class="table-shell">
+          <table class="model-table" aria-busy="true">
+            <thead><tr><th scope="col">排名</th><th scope="col">模型</th><th scope="col">总 token</th><th scope="col">输入 / 输出</th><th scope="col">调用次数</th><th scope="col">占比</th><th scope="col">趋势</th></tr></thead>
+            <tbody id="modelRows"><tr><td colspan="7" class="table-state">正在加载统计…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="error-message" id="errorMessage" role="alert" hidden>统计服务暂不可用</p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer"><div class="container"><hr><div class="footer-inner"><div class="footer-brand"><img src="assets/logo-white.png" alt="GWork"><span>© 2026 GWork · gourdwork.com</span></div><div class="footer-links"><a href="index.html#features">产品能力</a><a href="models.html">模型统计</a><a href="index.html#downloads">下载</a><a href="https://github.com/GourdAI/Gwork" target="_blank" rel="noopener">GitHub</a><a href="https://gitee.com/gourdwork/gwork" target="_blank" rel="noopener">Gitee</a><a href="index.html#top">返回顶部</a></div></div></div></footer>
+</body>
+</html>

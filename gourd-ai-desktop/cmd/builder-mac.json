@@ -10,15 +10,20 @@
     "url": "https://gourdwork.com/downloads/",
     "channel": "latest"
   },
+  "compression": "maximum",
+  "electronLanguages": ["en-US", "zh-CN"],
   "files": [
     "main/**/*",
     "loading.html"
   ],
   "extraResources": [
     {
-      "from": "build/extraResources/",
-      "to": "extraResources",
-      "filter": ["**/*", "!.gwork", "!.gwork/**", "!.gourdai", "!.gourdai/**"]
+      "from": "build/extraResources/gourd-ai-agent.jar",
+      "to": "extraResources/gourd-ai-agent.jar"
+    },
+    {
+      "from": "build/extraResources/jre",
+      "to": "extraResources/jre"
     },
     {
       "from": "build/ui/",

@@ -15,12 +15,40 @@
     /* Scrollbar —— 全局唯一的滚动条视觉规范。
        原生滚动条（*::-webkit-scrollbar）与 Monaco 自绘滚动条
        （code.css 覆盖）共用此组变量，保证 code 编辑器 / diff / 其它区域观感一致。
-       thumb 高度半透明蓝灰，透光不压内容（模拟毛玻璃），细窄+大圆角。
-       明暗主题下均协调，无需分主题赋值。 */
-    --scrollbar-size: 6px;
-    --scrollbar-radius: 6px;
+       thumb 高度半透明蓝灰，透光不压内容（模拟毛玻璃），大圆角。
+       明暗主题下均协调，无需分主题赋值。
+
+       ——「细看着好看，但点不到」的两个根因（已实测确认，勿回退）——
+       1) 命中区太窄：原 size=6px，远低于指针设备的舒适命中阈值。现将
+          *命中区* 与 *视觉宽度* 解耦：轨道 --scrollbar-size 给足 12px 供鼠标
+          捕获，滑块用 --scrollbar-thumb-inset 透明内衬 + background-clip:padding-box
+          收窄为 6px 视觉宽度。即「看起来还是细的，但好点了一倍」。
+       2) 滑块被压成细条：Chromium 对 ::-webkit-scrollbar-thumb 默认不设最小长度，
+          长会话 / 大文件下滑块会缩到几 px 高，鼠标根本按不住 —— 这才是
+          「有时候完全点不到」的主因。--scrollbar-thumb-min 强制下限。
+
+       注意：本滚动条 *占据布局宽度*（实测 offsetWidth-clientWidth == size），
+       并非悬浮覆盖在内容之上。改 size 会等量压缩滚动容器的内容宽度。 */
+    --scrollbar-size: 12px;
+    --scrollbar-thumb-inset: 3px;
+    --scrollbar-thumb-inset-hover: 2px;
+    --scrollbar-thumb-min: 36px;
+    --scrollbar-radius: 8px;
     --scrollbar-thumb: rgba(160, 170, 195, 0.32);
     --scrollbar-thumb-hover: rgba(160, 170, 195, 0.6);
+
+    /* Dropdown —— 全站悬浮下拉/菜单面板的统一宽度档位。
+       改造前各处散落 160/170/220/248/260/280/320 七种宽度，同一产品里
+       面板宽窄不一，且窄面板下长模型名频繁省略号截断。此处收敛为三档：
+         sm : 纯动作菜单（无长文本，如「+」菜单、安装方式菜单）
+         md : 常规列表面板（模型下拉、模板菜单）——默认档
+         lg : 宽面板（ACP 设置、工作空间选择等长路径/长模型名场景）
+       max 用于给 md/lg 封顶，避免超长条目把面板撑到失控宽度。
+       条目右内边距需另留出 --scrollbar-size，避免滑块压住右侧文字。 */
+    --dropdown-w-sm: 190px;
+    --dropdown-w-md: 288px;
+    --dropdown-w-lg: 320px;
+    --dropdown-w-max: 380px;
 }
 
 /* ===== Light Theme ===== */
@@ -188,12 +216,28 @@
 *::-webkit-scrollbar-track {
     background: transparent;
 }
+/* 滑块：轨道占 12px 便于命中，但用透明边框把可见部分收窄回 6px。
+   background-clip: padding-box 是关键 —— 没有它，background 会铺满 border 区，
+   透明边框就失去收窄效果，滑块会变成一根 12px 的粗棍。 */
 *::-webkit-scrollbar-thumb {
     background: var(--scrollbar-thumb);
     border-radius: var(--scrollbar-radius);
+    border: var(--scrollbar-thumb-inset) solid transparent;
+    background-clip: padding-box;
+    min-height: var(--scrollbar-thumb-min);
+    min-width: var(--scrollbar-thumb-min);
 }
+/* 悬浮：加深 + 变粗（内衬 3px→2px），给出「抓住了」的反馈 */
 *::-webkit-scrollbar-thumb:hover {
     background: var(--scrollbar-thumb-hover);
+    background-clip: padding-box;
+    border-width: var(--scrollbar-thumb-inset-hover);
+}
+/* 拖拽中保持高亮，避免指针移出滑块窄边时视觉「松手」 */
+*::-webkit-scrollbar-thumb:active {
+    background: var(--scrollbar-thumb-hover);
+    background-clip: padding-box;
+    border-width: var(--scrollbar-thumb-inset-hover);
 }
 /* 一旦自定义 ::-webkit-scrollbar，Chromium 默认不再渲染上下箭头按钮；
    显式 none 双保险，避免个别平台残留。 */

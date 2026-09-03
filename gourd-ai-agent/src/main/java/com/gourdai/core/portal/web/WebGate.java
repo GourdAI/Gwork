@@ -50,6 +50,7 @@ import java.io.IOException;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -98,6 +99,15 @@ public class WebGate extends SimpleWebSocketListener {
      */
     private final List<WebSocket> connections = new CopyOnWriteArrayList<>();
 
+    /** 原子串行化同一会话的输入受理，收拢 busy 检查、user 落盘与任务登记之间的竞态窗口。 */
+    private final Map<String, Object> inputLocks = new ConcurrentHashMap<>();
+
+    /** 会话流事件固定所属根。活动任务期间不再依赖可变的 SessionLocator 绑定，避免 busy 请求改绑后写错目录。 */
+    private final Map<String, String> streamRoots = new ConcurrentHashMap<>();
+
+    /** 统一序列化同一会话的持久化与广播，避免并发事件乱序。 */
+    private final Map<String, Object> publishLocks = new ConcurrentHashMap<>();
+
 
     /**
      * 构造网关实例。
@@ -106,7 +116,7 @@ public class WebGate extends SimpleWebSocketListener {
      */
     public WebGate(HarnessEngine engine) {
         this.engine = engine;
-        this.streamBuilder = new WebStreamBuilder(engine);
+        this.streamBuilder = new WebStreamBuilder(engine, this);
     }
 
     /**
@@ -210,31 +220,25 @@ public class WebGate extends SimpleWebSocketListener {
     public void emitToClient(String sessionId, WebChunk jsonChunk) {
         if (jsonChunk == null) {
             return;
-        } else {
-            jsonChunk.setSessionId(sessionId);
         }
+        jsonChunk.setSessionId(sessionId);
+        synchronized (publishLocks.computeIfAbsent(sessionId, k -> new Object())) {
+            if (streamStore != null) {
+                streamStore.record(sessionId, streamRoots.get(sessionId), jsonChunk);
+            }
+            String enriched = ONode.serialize(jsonChunk);
 
-        // 旁路持久化：把本块记入 <sessionId>.stream.ndjson，供历史加载时回放。
-            // projectRoot 传 null——会话所属根已由 bindSessionRoot 登记在 locator 注册表，
-        // 由 resolveDir 自行解析；不影响正常出站推送。
-        if (streamStore != null) {
-            streamStore.record(sessionId, null, jsonChunk);
-        }
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("emit: " + enriched);
+            }
 
-        // 确保消息中包含 sessionId
-        String enriched = ONode.serialize(jsonChunk);
-
-        if (LOG.isDebugEnabled()) {
-            LOG.debug("emit: " + enriched);
-        }
-
-        // 广播给所有连接（每条消息都带 sessionId，前端自行路由）
-        for (WebSocket socket : connections) {
-            if (socket != null) {
-                try {
-                    socket.send(enriched);
-                } catch (Throwable e) {
-                    LOG.warn("[WebGate] Failed to send to socket {}: {}", socket.id(), e.getMessage());
+            for (WebSocket socket : connections) {
+                if (socket != null) {
+                    try {
+                        socket.send(enriched);
+                    } catch (Throwable e) {
+                        LOG.warn("[WebGate] Failed to send to socket {}: {}", socket.id(), e.getMessage());
+                    }
                 }
             }
         }
@@ -292,24 +296,66 @@ public class WebGate extends SimpleWebSocketListener {
                                String input, String selectedModel,
                                UploadedFile[] attachments, String[] attachmentTypes,
                                String hitlAction, String source) {
+        return onChatInput(sessionId, sessionCwd, input, selectedModel, attachments, attachmentTypes,
+                hitlAction, source, null);
+    }
+
+    public boolean onChatInput(String sessionId,
+                               String sessionCwd,
+                               String input, String selectedModel,
+                               UploadedFile[] attachments, String[] attachmentTypes,
+                               String hitlAction, String source, String clientMessageId) {
+        synchronized (inputLocks.computeIfAbsent(sessionId, k -> new Object())) {
+            return doOnChatInput(sessionId, sessionCwd, input, selectedModel, attachments, attachmentTypes,
+                    hitlAction, source, clientMessageId);
+        }
+    }
+
+    private boolean doOnChatInput(String sessionId,
+                                  String sessionCwd,
+                                  String input, String selectedModel,
+                                  UploadedFile[] attachments, String[] attachmentTypes,
+                                  String hitlAction, String source, String clientMessageId) {
         AgentSession session = null;
         try {
             session = engine.getSession(sessionId);
-            // 记录本轮输入来源：出站回推 IM 时据此判断——网页手动输入(source=null)不回推 IM，
-            // 避免把网页发起的任务误推到恰好为活跃指针的 IM 通道。每轮覆盖，防止残留上一轮来源。
-            // 注意：attrs() 底层为 ConcurrentHashMap，不允许 null 值；source 为空时改为移除旧键（语义等价：读取仍为 null）。
+
+            // busy 请求不能覆盖正在运行任务的来源；来源只在确认本次输入可受理后更新。
+            if (Assert.isEmpty(hitlAction) && isSessionBusy(session)) {
+                LOG.warn("[WebGate] chat input skipped for session {}: task in progress", sessionId);
+                return false;
+            }
             if (source != null) {
                 session.attrs().put("_input_source", source);
             } else {
                 session.attrs().remove("_input_source");
             }
 
-            // 并发防护：同一会话已有任务在执行时，跳过重复触发（如客户端超时重试/双发），
-            // 避免两个并行 ReAct 循环的 chunk 流交错推送到同一会话，导致前端思考块与正文错位。
-            // 与 safeChatInput 的 busy-skip 语义一致；HITL 审批/拒绝不受限（其前置流已结束）。
-            if (Assert.isEmpty(hitlAction) && isSessionBusy(session)) {
-                LOG.warn("[WebGate] chat input skipped for session {}: task in progress", sessionId);
-                return false;
+            // 通过受理锁内的 busy 检查后才允许登记所属根，确保首次解析及后续旁路落盘一致；
+            // busy 请求不会改绑活动会话。
+            if (sessionLocator != null && Assert.isNotEmpty(sessionCwd)) {
+                sessionLocator.bindSessionRoot(sessionId, sessionCwd);
+            }
+
+            // 本会话流事件固定写入本轮所属根。后续即使另一个 busy 请求误带不同 cwd，
+            // emitToClient 也不会跟随可变注册表跳到其它项目目录。
+            String streamRoot = Assert.isNotEmpty(sessionCwd)
+                    ? sessionCwd
+                    : (sessionLocator == null ? null : sessionLocator.boundRoot(sessionId));
+            if (Assert.isNotEmpty(streamRoot)) {
+                streamRoots.put(sessionId, streamRoot);
+            } else {
+                streamRoots.remove(sessionId);
+            }
+
+            // 网页手动输入只有在本次受理锁内通过 busy 检查后才落盘；这样既保证 user 在首个
+            // AI chunk 之前，又避免竞态失败请求留下幽灵 user。IM/Loop 自己通过 emitToClient 记录用户事件。
+            if (clientMessageId != null && Assert.isEmpty(hitlAction) && Assert.isNotEmpty(input)
+                    && !input.startsWith("/") && streamStore != null) {
+                streamStore.recordUser(sessionId, streamRoot, input, System.currentTimeMillis(), clientMessageId);
+            }
+            if (source != null && Assert.isEmpty(hitlAction)) {
+                emitToClient(sessionId, WebChunk.ofUser(input, source));
             }
 
             String agentName = null;
@@ -509,11 +555,14 @@ public class WebGate extends SimpleWebSocketListener {
         // 实测存在 cancel/竞态下 concatWith(done) 不再发射的路径（如新任务取代旧任务 dispose、
         // 并行工具段异常完成方式不完整），前端将永远停留在加载态，故在 doFinally 兜底补发（幂等）。
         final AtomicBoolean doneSent = new AtomicBoolean(false);
+        final java.util.concurrent.atomic.AtomicReference<String> runIdSeen = new java.util.concurrent.atomic.AtomicReference<>();
 
         Disposable disposable = streamBuilder.buildStreamFlux(session, agent, chatModel, sessionCwd, prompt)
                 .subscribeOn(Schedulers.boundedElastic())
                 .doOnNext(line -> {
+                    if (line.getRunId() != null) runIdSeen.compareAndSet(null, line.getRunId());
                     if ("done".equals(line.getType())) {
+                        if (line.getRunId() == null) line.setRunId(runIdSeen.get());
                         doneSent.set(true);
                     }
                     emitToClient(sessionId, line);
@@ -524,7 +573,9 @@ public class WebGate extends SimpleWebSocketListener {
 
                     emitToClient(sessionId, WebChunk.ofError(e));
                     if (doneSent.compareAndSet(false, true)) {
-                        emitToClient(sessionId, WebChunk.ofDone());
+                        WebChunk done = WebChunk.ofDone();
+                        done.setRunId(runIdSeen.get());
+                        emitToClient(sessionId, done);
                     }
                 })
                 .doFinally(s -> {
@@ -539,7 +590,9 @@ public class WebGate extends SimpleWebSocketListener {
                             LOG.info("[WebGate] stream cancelled by replacement/interrupt for session {}, skip fallback done", sessionId);
                         } else {
                             LOG.warn("[WebGate] done missing on signal {} for session {}, emitting fallback done", s, sessionId);
-                            emitToClient(sessionId, WebChunk.ofDone());
+                            WebChunk done = WebChunk.ofDone();
+                            done.setRunId(runIdSeen.get());
+                            emitToClient(sessionId, done);
                         }
                     }
                 })
@@ -816,11 +869,13 @@ public class WebGate extends SimpleWebSocketListener {
      * @param source      调用来源标识（用于日志记录，如 "WeChat"）
      */
     public void safeChatInput(String sessionId, String projectRoot, String input, String source) {
-        // 在解析会话（getSession 会触发 AgentSessionProvider）之前先登记所属工作空间根
-        if (sessionLocator != null && Assert.isNotEmpty(projectRoot)) {
-            sessionLocator.bindSessionRoot(sessionId, projectRoot);
+        synchronized (inputLocks.computeIfAbsent(sessionId, k -> new Object())) {
+            doSafeChatInput(sessionId, projectRoot, input, source);
         }
+    }
 
+    private void doSafeChatInput(String sessionId, String projectRoot, String input, String source) {
+        // 活动会话的所属根不可被一个最终会 busy-skip 的异步输入改写。
         try {
             AgentSession session = engine.getSession(sessionId);
             if (isSessionBusy(session)) {
@@ -831,10 +886,11 @@ public class WebGate extends SimpleWebSocketListener {
             LOG.warn("[WebGate] {} event check failed for session {}: {}", source, sessionId, e.getMessage());
             return;
         }
+        if (sessionLocator != null && Assert.isNotEmpty(projectRoot)) {
+            sessionLocator.bindSessionRoot(sessionId, projectRoot);
+        }
 
-        // 向 Web 端推送用户消息（来自 IM 通道的消息在 Web 页面上也需要显示）
-        emitToClient(sessionId, WebChunk.ofUser(input, source));
-
+        // onChatInput 在同一会话受理锁内再次确认 busy，并在真正受理后推送用户气泡。
         onChatInput(sessionId, projectRoot, input, null, null, null, null, source);
     }
 
@@ -879,10 +935,31 @@ public class WebGate extends SimpleWebSocketListener {
      */
     public String safeChatInputAndCaptureLoop(String sessionId, String projectRoot, String worktreeRoot, String input, String source,
                                               String modelName, String thinkingDepth) {
-        // 仅持久化任务的工作空间根，worktree 为本轮瞬态目录，绝不入注册表
+        synchronized (inputLocks.computeIfAbsent(sessionId, k -> new Object())) {
+            return doSafeChatInputAndCaptureLoop(sessionId, projectRoot, worktreeRoot, input, source, modelName, thinkingDepth);
+        }
+    }
+
+    private String doSafeChatInputAndCaptureLoop(String sessionId, String projectRoot, String worktreeRoot, String input, String source,
+                                                 String modelName, String thinkingDepth) {
+        try {
+            AgentSession existing = engine.getSession(sessionId);
+            if (isSessionBusy(existing)) {
+                LOG.warn("[WebGate] {} event skipped for session {}: task in progress", source, sessionId);
+                return null;
+            }
+            if (source != null) existing.attrs().put("_input_source", source);
+            else existing.attrs().remove("_input_source");
+        } catch (Throwable e) {
+            LOG.warn("[WebGate] {} event check failed for session {}: {}", source, sessionId, e.getMessage());
+            return null;
+        }
+        // 只有确认空闲后才允许更新持久化根/本轮固定流根。
         if (sessionLocator != null && Assert.isNotEmpty(projectRoot)) {
             sessionLocator.bindSessionRoot(sessionId, projectRoot);
         }
+        if (Assert.isNotEmpty(projectRoot)) streamRoots.put(sessionId, projectRoot);
+        else streamRoots.remove(sessionId);
         AgentSession session;
         try {
             session = engine.getSession(sessionId);
@@ -985,18 +1062,151 @@ public class WebGate extends SimpleWebSocketListener {
      *
      * @param sessionId 待中断的会话标识
      */
-    public void interruptSession(String sessionId) {
-        try {
-            AgentSession session = engine.getSession(sessionId);
-            Disposable disposable = (Disposable) session.attrs().remove("disposable");
-            if (disposable != null) {
-                disposable.dispose();
+    public String interruptSession(String sessionId, String expectedRunId) {
+        synchronized (inputLocks.computeIfAbsent(sessionId, k -> new Object())) {
+            try {
+                AgentSession session = engine.getSession(sessionId);
+                SteerRunState state = (SteerRunState) session.attrs().get(SteerInterceptor.ATTR_RUN_STATE);
+                if (state == null || state.lifecycle != SteerRunState.Lifecycle.RUNNING) {
+                    return "not_running";
+                }
+                if (expectedRunId != null && !expectedRunId.isEmpty() && !expectedRunId.equals(state.runId)) {
+                    return "turn_changed";
+                }
+
+                state.lifecycle = SteerRunState.Lifecycle.CANCELLED;
+                java.util.List<SteerEnvelope> cancelled = state.drain();
+                session.attrs().remove(SteerInterceptor.ATTR_RUN_STATE, state);
+                session.attrs().remove(SteerInterceptor.ATTR_ACTIVE_RUN_ID, state.runId);
+                Disposable disposable = (Disposable) session.attrs().remove("disposable");
+                if (disposable != null) disposable.dispose();
+
+                if (!cancelled.isEmpty()) {
+                    emitToClient(sessionId, WebChunk.ofSteerCancelled(state.runId, cancelled));
+                }
+                session.addMessage(ChatMessage.ofAssistant("用户已取消任务."));
+                WebChunk done = WebChunk.ofDone();
+                done.setRunId(state.runId);
+                emitToClient(sessionId, done);
+                LOG.info("[WebGate] Session {} run {} interrupted", sessionId, state.runId);
+                return "cancelled";
+            } catch (Exception e) {
+                LOG.error("[WebGate] Interrupt failed for session {}: {}", sessionId, e.getMessage(), e);
+                return "not_running";
             }
-            session.addMessage(ChatMessage.ofAssistant("用户已取消任务."));
-            emitToClient(sessionId, WebChunk.ofDone());
-            LOG.info("[WebGate] Session {} interrupted", sessionId);
-        } catch (Exception e) {
-            LOG.error("[WebGate] Interrupt failed for session {}: {}", sessionId, e.getMessage());
+        }
+    }
+
+    /** 兼容非 Web 调用方；仅取消当前活跃 run。 */
+    public void interruptSession(String sessionId) {
+        interruptSession(sessionId, null);
+    }
+
+    /**
+     * 受理一条即时插话请求。
+     *
+     * <p>必须在 {@link #inputLocks} 下调用，保证 busy 检查与 offer 原子。</p>
+     *
+     * @param sessionId 会话 ID
+     * @param expectedRunId 前端期望的当前 runId（防迟到插话进入下一 run）
+     * @param steerId 客户端幂等 ID
+     * @param text 插话文本（已校验非空且长度不超限）
+     * @return 语义结果："accepted" / "not_running" / "turn_changed" / "box_full" / "duplicate"
+     */
+    public String steer(String sessionId, String expectedRunId, String steerId, String text) {
+        synchronized (inputLocks.computeIfAbsent(sessionId, k -> new Object())) {
+            try {
+                AgentSession session = engine.getSession(sessionId);
+                SteerRunState state = (SteerRunState) session.attrs().get(SteerInterceptor.ATTR_RUN_STATE);
+                if (state == null || state.lifecycle != SteerRunState.Lifecycle.RUNNING) {
+                    return "not_running";
+                }
+                String activeRunId = state.runId;
+                if (expectedRunId != null && !expectedRunId.isEmpty()
+                        && !expectedRunId.equals(activeRunId)) {
+                    return "turn_changed";
+                }
+                if (state.pending.containsKey(steerId)) return "duplicate";
+                if (state.pending.size() >= SteerInterceptor.MAX_BOX_SIZE) return "box_full";
+                state.pending.put(steerId, new SteerEnvelope(steerId, text, activeRunId, System.currentTimeMillis()));
+                return "accepted";
+            } catch (Exception e) {
+                LOG.error("[WebGate] steer failed for session {}: {}", sessionId, e.getMessage());
+                return "not_running";
+            }
+        }
+    }
+
+    /** 注册新 run；旧 run 残留被明确 cancelled，且旧回调之后无法清理新 run。 */
+    void registerSteerRun(AgentSession session, String runId) {
+        java.util.List<SteerEnvelope> cancelled = java.util.Collections.emptyList();
+        String oldRunId = null;
+        synchronized (inputLocks.computeIfAbsent(session.getSessionId(), k -> new Object())) {
+            SteerRunState old = (SteerRunState) session.attrs().get(SteerInterceptor.ATTR_RUN_STATE);
+            if (old != null && !old.runId.equals(runId)) {
+                old.lifecycle = SteerRunState.Lifecycle.CANCELLED;
+                oldRunId = old.runId;
+                cancelled = old.drain();
+            }
+            SteerRunState state = new SteerRunState(runId);
+            session.attrs().put(SteerInterceptor.ATTR_RUN_STATE, state);
+            session.attrs().put(SteerInterceptor.ATTR_ACTIVE_RUN_ID, runId);
+        }
+        if (!cancelled.isEmpty()) emitToClient(session.getSessionId(), WebChunk.ofSteerCancelled(oldRunId, cancelled));
+    }
+
+    /** 在与 Stop/结束相同的 session 锁内完成摘取、注入和 applied 发布。 */
+    void applySteers(AgentSession session, String runId,
+                     java.util.function.Consumer<java.util.List<SteerEnvelope>> injector) {
+        synchronized (inputLocks.computeIfAbsent(session.getSessionId(), k -> new Object())) {
+            SteerRunState state = (SteerRunState) session.attrs().get(SteerInterceptor.ATTR_RUN_STATE);
+            if (state == null || !state.runId.equals(runId)
+                    || state.lifecycle != SteerRunState.Lifecycle.RUNNING || state.pending.isEmpty()) return;
+            java.util.List<SteerEnvelope> items = state.drain();
+            injector.accept(items);
+            emitToClient(session.getSessionId(), WebChunk.ofSteerApplied(runId, items));
+        }
+    }
+
+    /** 正常结束当前 owner run；旧 run 的迟到回调不会触碰新 run。 */
+    void finishSteerRun(AgentSession session, String runId) {
+        java.util.List<SteerEnvelope> dropped;
+        synchronized (inputLocks.computeIfAbsent(session.getSessionId(), k -> new Object())) {
+            SteerRunState state = (SteerRunState) session.attrs().get(SteerInterceptor.ATTR_RUN_STATE);
+            if (state == null || !state.runId.equals(runId)
+                    || state.lifecycle != SteerRunState.Lifecycle.RUNNING) return;
+            state.lifecycle = SteerRunState.Lifecycle.ENDED;
+            dropped = state.drain();
+            session.attrs().remove(SteerInterceptor.ATTR_RUN_STATE, state);
+            session.attrs().remove(SteerInterceptor.ATTR_ACTIVE_RUN_ID, runId);
+        }
+        if (!dropped.isEmpty()) {
+            persistDroppedSteers(session.getSessionId(), dropped);
+            emitToClient(session.getSessionId(), WebChunk.ofSteerDropped(runId, dropped));
+        }
+    }
+
+    /**
+     * 把未生效的插话原子、幂等地降级为持久化队列消息。
+     */
+    void persistDroppedSteers(String sessionId, java.util.List<SteerEnvelope> items) {
+        if (items == null || items.isEmpty()) return;
+        try {
+            java.io.File sessionDir;
+            String root = streamRoots.get(sessionId);
+            if (sessionLocator != null) {
+                sessionDir = sessionLocator.resolveDir(sessionId, root);
+            } else {
+                sessionDir = java.nio.file.Paths.get(engine.getWorkspace(), engine.getHarnessSessions(), sessionId)
+                        .toAbsolutePath().normalize().toFile();
+            }
+            QueueFileHelper helper = new QueueFileHelper();
+            for (SteerEnvelope item : items) {
+                helper.add(sessionDir, item.getText(), java.util.Collections.emptyList(),
+                        java.util.Collections.emptyList(), item.getSteerId());
+            }
+        } catch (Throwable e) {
+            LOG.error("[WebGate] persist dropped steer failed for session {}: {}", sessionId, e.getMessage(), e);
         }
     }
 }

@@ -23,6 +23,8 @@ function SessionState(sessionId) {
     $(this.container).hide();
     $(messagesWrap).append(this.container);
     this.eventSource = null;
+    // 会话所属根必须随会话保存；后台补发/队列发送不能读取当前活动会话的全局工作区。
+    this.projectRoot = '';
     this.isStreaming = false;
     this.currentBubbleEl = null;
     this.reasonBuffer = '';
@@ -32,6 +34,8 @@ function SessionState(sessionId) {
     this.thinkingBuffer = '';
     this.pendingToolCard = null;
     this.pendingToolStarted = false;
+    this.toolCardsById = {};
+    this.completedActionIds = {};
     this.approvedToolCard = null;
     this.thinkingEl = null;
     this.inlineThinkingEl = null;
@@ -47,8 +51,32 @@ function SessionState(sessionId) {
     this.thinkingUserScrolledUp = false;  // 思考区用户主动向上滚动标记
     // 最近一次 context_size 快照：上下文指示器是全局单例 DOM，靠它按会话回填，使切会话不丢失用量/缓存指标
     this.lastContextChunk = null;
-    // 最后一次被激活的时间戳，供容器 LRU 淘汰排序（见 evictInactiveSessions）
+    // 最后一次被激活的时间戳，供容器 LRU 淘汰排序（见 evictInactiveSessions / pruneSessionDrafts）
     this.lastActiveAt = 0;
+    // 未发送的输入草稿：输入框/附件区是全局单例 DOM，必须按会话存取（见 saveSessionDraft）
+    this.draft = '';
+    this.draftFiles = null;   // null=无草稿附件；数组=该会话暂存的附件（持有 File/dataUrl，需按 LRU 释放）
+
+    // 断线恢复状态：lastEventSeq 是已应用的稳定游标，恢复期间实时帧先进入 _gateBuffer。
+    this.lastEventSeq = 0;
+    this._pendingClientMessageId = null;
+    this._recovering = false;
+    this._recoverGeneration = 0;
+    this._resumePromise = null;
+    this._recoverRetryTimer = null;
+    this._recoverRetryCount = 0;
+    this._gateBuffering = false;
+    this._gateBuffer = [];
+    this._requestStartSeq = null;
+    this._awaitingSendAck = false;
+    this._sendAckConfirmed = false;
+
+    // 即时插话（steer）状态：activeRunId 仅追踪主代理运行，不能被子代理 chunk 覆盖。
+    this.currentRunId = null;
+    this.activeRunId = null;
+    this.steerPending = {};   // steerId -> {text, runId, createdAt, state}
+    this.steerResolved = {};  // 已收到 applied/dropped/cancelled 的短期幂等集合
+    this._steerSending = false;
 
     this.userMsgCounter = 0;
 }
@@ -88,6 +116,8 @@ var chatHistory = [];
 var currentChatIndex = -1;
 var pendingFiles = [];
 var MAX_ATTACHMENTS = 10;
+// 输入超过 64 KiB UTF-8 时折叠为 TXT 附件；上传大小由后端配置决定，不在前端人为限制。
+var LONG_INPUT_THRESHOLD_BYTES = 64 * 1024;
 var userScrolledUp = false;
 
 var onFinishStream = null;
@@ -139,14 +169,123 @@ function evictInactiveSessions() {
         sess._replayLoadedCount = 0;
         sess._replayCoverage = null;
         sess._replayLoadingMore = false;
+        // 深度释放 JS 侧大对象：仅 empty() 只断开 DOM，下面这些字段仍会随 SessionState 长期驻留
+        // （sessionMap 条目本身除用户主动删会话外不会被移除）。被淘汰的会话下次进入必走
+        // loadMessages 完整重建，这些中间态无需保留。
+        sess.toolCardsById = {};
+        sess.toolBatchesById = {};
+        sess.completedActionIds = {};
+        sess.agentCards = {};
+        sess.pendingToolCard = null;
+        sess.approvedToolCard = null;
+        sess.retryEl = null;
+        // 未排空的实时帧缓冲（恢复失败/中途切走时可能残留整批 chunk 对象）
+        sess._gateBuffer = [];
+    }
+}
+
+/* ===== Per-Session Input Draft =====
+   输入框与附件区都是全局单例 DOM，而会话是多路的：不按会话存取草稿，在 A 输入到一半切到 B，
+   内容会跟着显示在 B，且切回 A 也回不来。
+   约定：chatInput 始终持有 activeSessionId 的草稿——切走时存回原会话，切入时取出目标会话的。
+   欢迎页输入框不参与：每次回欢迎页都会生成全新 sessionId（switchToWelcomeMode），草稿无处可归，
+   由 clearInput / switchToWelcomeMode 统一清空。
+
+   注：不能按 inChatMode 判断该读哪个输入框——switchToWelcomeMode 先置 inChatMode=false 再调
+   setActiveSession，此时读到的会是欢迎框而非离开会话的真实草稿。 */
+
+/* 草稿保留上限（分两档，因为两类草稿的内存量级差一个数量级）：
+   - 附件（draftFiles）：持有 File 与 base64 dataUrl，单会话可达数 MB（最多 10 个附件），
+     是真正的内存大头，只保留最近几个会话。
+   - 文本（draft）：单条上限 64 KiB（超过即在发送时折叠为 TXT 附件，见
+     LONG_INPUT_THRESHOLD_BYTES），为省几 KB 就静默吐掉用户打了一半的字得不偿失；
+     给个显著更大的上限做兵底，保证总量有界（最坏约 30 × 64 KiB ≈ 2 MB）。 */
+var KEEP_DRAFT_FILE_SESSIONS = 5;
+var KEEP_DRAFT_TEXT_SESSIONS = 30;
+
+function saveSessionDraft(sess) {
+    if (!sess || !chatInput) return;
+    sess.draft = chatInput.value;
+    if (typeof pendingFiles === 'undefined') return;
+    sess.draftFiles = pendingFiles.length > 0 ? pendingFiles.slice() : null;
+}
+
+function restoreSessionDraft(sess) {
+    if (!sess || !chatInput) return;
+    chatInput.value = sess.draft || '';
+    autoResize(chatInput);
+    // 补全弹层是按旧输入内容算出来的，换了草稿就失效，不收会跟着悬在新会话上
+    if (typeof hideCmdComplete === 'function') hideCmdComplete();
+    if (typeof pendingFiles === 'undefined') return;
+    // 保持 pendingFiles 数组本身的引用不变（多处模块直接读写它），只换内容
+    pendingFiles.length = 0;
+    var df = sess.draftFiles;
+    if (df) {
+        for (var i = 0; i < df.length; i++) pendingFiles.push(df[i]);
+    }
+    if (typeof renderAttachments === 'function') renderAttachments();
+}
+
+/* 只释放草稿附件中的 File/dataUrl 大对象（保留文本） */
+function releaseSessionDraftFiles(sess) {
+    if (!sess || !sess.draftFiles) return;
+    for (var i = 0; i < sess.draftFiles.length; i++) {
+        if (typeof releaseAttachmentData === 'function') releaseAttachmentData(sess.draftFiles[i]);
+    }
+    sess.draftFiles = null;
+}
+
+/* 释放某会话的全部草稿（会话被删除时用） */
+function releaseSessionDraft(sess) {
+    if (!sess) return;
+    releaseSessionDraftFiles(sess);
+    sess.draft = '';
+}
+
+/* 草稿 LRU 回收：与 evictInactiveSessions 分开实现，因为后者会跳过「容器为空」的会话
+   （`container.children.length === 0` 直接 continue），而只输入过未发送的会话恰好就是空容器，
+   放在那里会永远收不掉。 */
+function pruneSessionDrafts() {
+    var withFiles = [];
+    var withText = [];
+    for (var sid in sessionMap) {
+        if (!sessionMap.hasOwnProperty(sid)) continue;
+        var s = sessionMap[sid];
+        if (!s || sid === activeSessionId) continue;   // 当前会话的草稿正显示在输入框里，不能动
+        if (s.draftFiles) withFiles.push(s);
+        if (s.draft) withText.push(s);
+    }
+    function byRecencyDesc(a, b) { return (b.lastActiveAt || 0) - (a.lastActiveAt || 0); }
+    // 先回收附件（大头），文本单独保留：只掉附件的会话，切回去文字仍在
+    if (withFiles.length > KEEP_DRAFT_FILE_SESSIONS) {
+        withFiles.sort(byRecencyDesc);
+        for (var i = KEEP_DRAFT_FILE_SESSIONS; i < withFiles.length; i++) {
+            releaseSessionDraftFiles(withFiles[i]);
+        }
+    }
+    if (withText.length > KEEP_DRAFT_TEXT_SESSIONS) {
+        withText.sort(byRecencyDesc);
+        for (var k = KEEP_DRAFT_TEXT_SESSIONS; k < withText.length; k++) {
+            withText[k].draft = '';
+        }
     }
 }
 
 function setActiveSession(sessionId) {
+    // 同会话重复激活（发送、selectSession、初始化都会触发）不能走草稿交换：
+    // 那是无谓的 renderAttachments 重建，也会白白作废正在读取的附件回调。
+    var switching = (sessionId !== activeSessionId);
     if (activeSessionId && sessionMap[activeSessionId]) {
         $(sessionMap[activeSessionId].container).hide();
+        // 切走前把输入框内容存回原会话，切回来才能原样恢复
+        if (switching) saveSessionDraft(sessionMap[activeSessionId]);
     }
     var sess = getOrCreateSession(sessionId);
+    if (switching) {
+        // 使切换途中到达的 FileReader 回调失效，避免上一个会话正在读取的附件落进新会话
+        if (typeof _pendingFilesVersion !== 'undefined') _pendingFilesVersion++;
+        restoreSessionDraft(sess);
+    }
     $(sess.container).show();
     sess.lastActiveAt = Date.now();
     activeSessionId = sessionId;
@@ -167,13 +306,17 @@ function setActiveSession(sessionId) {
     // 按会话恢复上下文指示器（该会话有历史用量则回填，否则清空）
     if (typeof restoreContextIndicator === 'function') restoreContextIndicator(sess);
     else if (typeof resetContextIndicator === 'function') resetContextIndicator();
-    // 切换完成后回收较早会话的 DOM（当前会话已置为 active，不会被误淘汰）
+    // 切换完成后回收较早会话的 DOM 与草稿（当前会话已置为 active，不会被误淘汰）
     evictInactiveSessions();
+    pruneSessionDrafts();
 }
 
 function deactivateSession() {
     if (activeSessionId && sessionMap[activeSessionId]) {
         $(sessionMap[activeSessionId].container).hide();
+        // 与 setActiveSession 对齐：startFreshSession 会先 deactivate 再激活新会话，
+        // 不在这里存一次，离开会话的草稿就丢了
+        saveSessionDraft(sessionMap[activeSessionId]);
     }
     activeSessionId = null;
     isStreaming = false;
@@ -208,6 +351,7 @@ function resetStreamState(sess) {
     if (typeof disposeSessionStreamMd === 'function') disposeSessionStreamMd(sess);
     sess.currentBubbleEl = null;
     sess.pendingToolStarted = false;
+    sess.completedActionIds = {};
     sess.reasonBuffer = '';
         sess.thinkingBlockEl = null;
         sess.thinkingBodyMdEl = null;
@@ -227,13 +371,41 @@ function setBtnStopMode() {
     $(chatSendBtn).addClass('stop-mode');
     $(chatSendBtn).html('<div class="stop-icon"></div>');
     chatSendBtn.title = GourdI18n.t('base.stop_generating');
+    setRunHintVisible(true);
 }
 function setBtnSendMode() {
     $(chatSendBtn).removeClass('stop-mode');
     $(chatSendBtn).html('<svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>');
     chatSendBtn.title = GourdI18n.t('base.send');
     chatSendBtn.disabled = false;
+    setRunHintVisible(false);
 }
+
+/* ===== 任务执行中的键位提示 =====
+   执行中 Enter/Tab 的含义与空闲时不同（Enter=即时插话、Tab=加入队列），两处同步提示：
+   1) 输入框 placeholder 切为执行态文案；
+   2) chip 行内的键位提示条（用户已开始打字、placeholder 消失后依然可见）。 */
+window._runHintVisible = false;
+function setRunHintVisible(show) {
+    show = !!show;
+    window._runHintVisible = show;
+    var hint = document.getElementById('chatRunHint');
+    if (hint) hint.style.display = show ? 'flex' : 'none';
+    // chip 容器显隐由 todo/queue/提示条三方汇算（只要任一可见就得显示）
+    if (typeof window.updateChipWrapVisibility === 'function') window.updateChipWrapVisibility();
+    applyChatPlaceholder();
+}
+
+/* 按当前运行状态回填对话输入框 placeholder。
+   注：data-i18n-placeholder 会在语言包就绪/切语言时被 i18n 无条件重写，
+   所以这里不改 data-i18n-placeholder 属性，而是在 localeChanged 之后再跡一次。 */
+function applyChatPlaceholder() {
+    if (!chatInput || !window.GourdI18n) return;
+    chatInput.placeholder = GourdI18n.t(window._runHintVisible ? 'app.placeholder_chat_running' : 'app.placeholder_chat');
+}
+
+// 语言包就绪 / 用户切语言后，i18n 会把 placeholder 重置回空闲态文案，在其之后重新应用执行态文案
+document.addEventListener('i18n:localeChanged', applyChatPlaceholder);
 
 // Input box height: by default auto-adapts to content (capped at 320px);
 // after the user drags the top drag bar, el._manualH is written and switches to manual fixed height (double-click the drag bar to restore auto).
@@ -277,9 +449,18 @@ function getInputText() {
     return welcomeInput.value.trim();
 }
 function clearInput() {
+    // 两个输入框都要清：从欢迎页发出的首条消息会先 switchToChatMode() 把 inChatMode 置为 true，
+    // 只按当前模式清就会漏掉 welcomeInput，其原文一直残留到下次回欢迎页
+    // （表现为「新建对话带上了上次的内容」）。
     // Go through autoResize uniformly: if there is no manual height, revert to the default min-height; if there is, preserve the height selected by the user
-    if (inChatMode) { chatInput.value = ''; autoResize(chatInput); }
-    else { welcomeInput.value = ''; autoResize(welcomeInput); }
+    chatInput.value = '';
+    autoResize(chatInput);
+    welcomeInput.value = '';
+    autoResize(welcomeInput);
+    // 同步清掉当前会话的草稿，否则发送后切走再切回，已发送的内容会被再恢复出来
+    if (activeSessionId && sessionMap[activeSessionId]) {
+        sessionMap[activeSessionId].draft = '';
+    }
 }
 
 /* ===== Toast Notification ===== */

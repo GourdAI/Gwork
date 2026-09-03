@@ -1229,6 +1229,13 @@ input[type=number] { -moz-appearance: textfield; }
     background: var(--bg-hover);
 }
 
+/* 清空模型是破坏性操作：标准垃圾桶轮廓 + 危险色悬停，避免与拉取/添加混淆 */
+.provider-model-icon-btn.danger:hover {
+    color: #ef4444;
+    border-color: #ef4444;
+    background: rgba(239, 68, 68, 0.08);
+}
+
 .provider-model-icon-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
@@ -1706,7 +1713,7 @@ input[type=number] { -moz-appearance: textfield; }
 /* 模型 & 思考深度：合并关联选择器（复用全局 .model-selector 组件，向下展开） */
 .acp-model-selector .model-selector-current { max-width: 340px; }
 .acp-model-selector .model-selector-current .model-name { max-width: 260px; }
-.acp-model-selector .model-dropdown { min-width: 320px; max-width: 340px; }
+.acp-model-selector .model-dropdown { min-width: var(--dropdown-w-lg); max-width: var(--dropdown-w-max); }
 .acp-model-empty {
     margin-top: 12px;
     font-size: 12px;

@@ -36,4 +36,9 @@ public class ActionChunk extends AbsActionChunk {
     public ActionChunk(ReActTrace trace, String toolName, Map<String, Object> args, String actionId) {
         super(trace, toolName, args, ChatMessage.ofAssistant(""), actionId);
     }
+
+    public ActionChunk(ReActTrace trace, String toolName, Map<String, Object> args, String actionId,
+                       String batchId, Integer batchIndex, Integer batchSize) {
+        super(trace, toolName, args, ChatMessage.ofAssistant(""), actionId, batchId, batchIndex, batchSize);
+    }
 }

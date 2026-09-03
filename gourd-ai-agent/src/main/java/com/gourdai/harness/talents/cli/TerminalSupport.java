@@ -27,6 +27,8 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * TerminalTalent 的内部支撑逻辑。
@@ -54,9 +56,9 @@ public class TerminalSupport {
 
     private final MountManager mountManager;
     private final Set<String> ignoreDirs;
-    private final TerminalTalent.ShellMode shellMode;
+    private final ShellMode shellMode;
 
-    TerminalSupport(MountManager mountManager, Set<String> ignoreDirs, TerminalTalent.ShellMode shellMode) {
+    TerminalSupport(MountManager mountManager, Set<String> ignoreDirs, ShellMode shellMode) {
         this.mountManager = mountManager;
         this.ignoreDirs = ignoreDirs;
         this.shellMode = shellMode;
@@ -511,12 +513,107 @@ public class TerminalSupport {
         return resolveSafePath(workPath, workdir, false, sandboxEnabled, sandboxAllowUserHome);
     }
 
+    /** 类 Unix 的进程终止动词（PowerShell 里 {@code kill} 也是 Stop-Process 的别名，故不分平台都查） */
+    private static final Pattern UNIX_KILL_VERB =
+            Pattern.compile("\\b(?:kill|pkill|killall)\\b", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Windows 下「杀宿主进程」的终止动词。
+     *
+     * <p>Unix 侧只靠 {@code kill|pkill|killall} 关键字就够了，Windows 完全不同：
+     * {@code taskkill /F /PID 1234} 里 PID 前面隔着 {@code /F /PID} 这种含 {@code /} 的开关（不属于
+     * {@code [\s\w]}，所以旧正则永不命中），而 {@code Stop-Process -Id 1234} /
+     * {@code Stop-Process -Name java} 连 {@code kill} 字样都没有。引导词里已向模型明文承诺
+     * 「严禁 taskkill /IM java.exe、Stop-Process -Name java」，这里必须有对应的硬拦截，
+     * 否则两个平台的自保护强度不对等。</p>
+     *
+     * <p>{@code spps} 是 PowerShell 里 {@code Stop-Process} 的别名（{@code kill} 也是，已由 Unix
+     * 分支的关键字覆盖）。</p>
+     */
+    private static final Pattern WINDOWS_KILL_VERB =
+            Pattern.compile("\\b(?:taskkill|stop-process|spps)\\b", Pattern.CASE_INSENSITIVE);
+
+    /** 按进程名批量终止 java（{@code /IM java.exe}、{@code -Name java}、{@code -Name javaw}） */
+    private static final Pattern WINDOWS_KILL_JAVA_BY_NAME =
+            Pattern.compile("\\bjavaw?(?:\\.exe)?\\b", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * 删除动词（含 PowerShell 别名 {@code ri}/{@code rm}、CMD 的 {@code rd}/{@code rmdir}/{@code del}）。
+     */
+    private static final Pattern WINDOWS_DELETE_VERB = Pattern.compile(
+            "(?:\\bremove-item\\b|\\bri\\b|\\brm\\b|\\brd\\b|\\brmdir\\b|\\bdel\\b|\\berase\\b)",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Windows 高危删除目标：盘符根（{@code C:\}、{@code C:/}）与系统目录。
+     *
+     * <p>这是 {@code rm -rf /} 在 Windows 上的等价物：{@code Remove-Item -Recurse -Force C:\}、
+     * {@code rd /s /q C:\}。同样包含环境变量写法（{@code %SystemRoot%}、{@code $env:windir}），
+     * 否则一个变量就能绕过字面量匹配。</p>
+     *
+     * <p><b>系统目录与用户目录区别对待</b>：{@code C:\Windows}、{@code Program Files} 连子路径一并拦
+     * （删其中任何一块都不是正常开发动作）；而用户目录（{@code C:\Users}、{@code %USERPROFILE%}）
+     * <b>只拦目录自身</b>。后者如果连子路径一起拦，{@code Remove-Item -Recurse
+     * $env:USERPROFILE\.gradle\caches}、{@code del %USERPROFILE%\Downloads\x.zip} 这类日常清理就全部被误伤，
+     * 而 Unix 侧对应的 {@code rm -rf ~/.gradle/caches} 是放行的——两个平台的护栏强度必须一致。</p>
+     */
+    private static final Pattern WINDOWS_CRITICAL_TARGET = Pattern.compile(
+            "(?:(?<![\\w:])[a-z]:[\\\\/](?=[\\s\"']|$)"
+                    + "|(?<![\\w:])[a-z]:[\\\\/](?:windows|winnt|programdata|program files(?: \\(x86\\))?)\\b"
+                    + "|(?<![\\w:])[a-z]:[\\\\/]users[\\\\/]?(?=[\\s\"']|$)"
+                    + "|%(?:systemroot|windir|systemdrive|programfiles)%"
+                    + "|\\$env:(?:systemroot|windir|systemdrive|programfiles)\\b"
+                    + "|%userprofile%[\\\\/]?(?=[\\s\"']|$)"
+                    + "|\\$env:userprofile[\\\\/]?(?=[\\s\"']|$))",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * 类 Unix 的「递归强删根目录 / 系统目录」。
+     *
+     * <p><b>旧写法的误伤</b>：{@code .*rm\s+.*-[rR].*f\s+/.*} 只要删除目标以 {@code /} 开头就命中，
+     * 于是 {@code rm -rf /tmp/build}、{@code rm -rf /var/folders/xx/T/xxx}（macOS 临时目录）这类
+     * 完全正当、且已在临时目录白名单内的清理命令全部被拦，Linux/macOS 上的误报率远高于命中率。</p>
+     *
+     * <p>现改为只认「目标就是根目录或某个系统目录本身」：{@code rm -rf /}、{@code rm -rf /usr} 拦；
+     * {@code rm -rf /usr/local/lib/node_modules/x}（Homebrew 区）、{@code rm -rf /tmp/x} 放行。</p>
+     *
+     * <p><b>递归/强制开关改用两个 lookahead 分开认</b>：只列举 {@code -rf}、{@code -fr}、{@code -r -f}
+     * 这些组合永远会漏——{@code rm --recursive --force /}、{@code rm -r --force /} 都是合法的 GNU 写法，
+     * 一个长选项就能绕过整条护栏。现在只要同一命令段内同时出现「含 r 的短选项或 --recursive」与
+     * 「含 f 的短选项或 --force」即命中，与书写顺序无关。开关判定宽一点不危险：精度由后面的
+     * 目标限定（必须是根/系统目录本身）撑着。</p>
+     *
+     * <p><b>目标前的引号要可选吞掉</b>：{@code rm -rf "/"}、{@code rm -rf '/usr'} 与裸写法危害完全相同，
+     * 而只写 {@code \s+/} 会因为中间夹了一个引号导致整条不命中。Windows 侧的
+     * {@link #WINDOWS_CRITICAL_TARGET} 已在收尾 lookahead 里认了 {@code "'}，两侧须对称。</p>
+     *
+     * <p><b>为何把 {@code ~} / {@code $HOME} 也当临界目标</b>：本校验跑在
+     * {@link #translateCommandToEnv} 之前，看到的是未展开的原文，所以 {@code rm -rf ~} 既不会命中
+     * {@code /home} 字面量，也不会命中任何其它分支——而 Windows 侧的 {@code %USERPROFILE%} /
+     * {@code $env:USERPROFILE} 是拦的。同样只拦目录自身：{@code rm -rf ~/.gradle/caches} 放行。</p>
+     */
+    private static final Pattern UNIX_RM_CRITICAL = Pattern.compile(
+            "\\brm\\b"
+                    + "(?=[^;|&\\r\\n]*?(?:\\s-[a-z]*r|\\s--recursive\\b))"
+                    + "(?=[^;|&\\r\\n]*?(?:\\s-[a-z]*f|\\s--force\\b))"
+                    + "[^;|&\\r\\n]*?\\s+[\"']?(?:/\\*?"
+                    + "|/(?:etc|usr|bin|sbin|lib|lib64|boot|proc|sys|dev|var|opt|root|home|users"
+                    + "|system|library|applications)/?"
+                    + "|~[\\\\/]?|\\$\\{?home\\}?[\\\\/]?)"
+                    + "(?=[\\s\"';|&]|$)",
+            Pattern.CASE_INSENSITIVE);
+
     /**
      * 统一的命令安全校验
      *
      * <p>设计理念（参考 Anthropic sandbox-runtime）：Java 层仅做最小自保护，
      * 安全隔离的重活交给 OS 内核沙盒（Seatbelt / bwrap）。
      * 当 sandboxSystemRestrict=true 时，由 wrapCommand() 在 OS 内核级强制隔离。</p>
+     *
+     * <p><b>平台对等</b>：自保护与根目录删除这两条红线必须在 Unix / CMD / PowerShell 上强度一致。
+     * 只在引导词里写「严禁」而不做硬拦截，等于给了一个不存在的护栏。
+     * Windows 侧的 1b / 2b 以「宿主 OS 是 Windows」为适用判据（见 {@link #isWindowsRiskScope()}），
+     * 以免 Windows 上跑 {@link ShellMode#UNIX_SHELL} 时整条护栏隐形失效。</p>
      *
      * @return null 表示校验通过；非 null 为错误消息
      */
@@ -529,20 +626,97 @@ public class TerminalSupport {
         String lowerCmd = command.toLowerCase();
 
         // 1. 自保护：禁止杀死当前 Java 进程（全模式、全配置始终生效）
-        String killPattern = "(?i).*(?:kill|pkill|killall)\\s+[\\s\\w]*\\b" + pid + "\\b.*";
-        if (lowerCmd.matches(killPattern) ||
-                lowerCmd.contains("pkill java") ||
-                lowerCmd.contains("killall java")) {
+        if (isUnixHostKill(lowerCmd, pid)) {
             return "错误：检测到危险命令。严禁试图停止宿主进程 (PID: " + pid + ")。";
         }
 
-        // 2. 高危自毁命令：exit / rm -rf / （全模式、全配置始终生效）
+        // 1b. Windows 侧的等价形态（taskkill / Stop-Process）
+        if (isWindowsRiskScope() && isWindowsHostKill(command, pid)) {
+            return "错误：检测到危险命令。严禁试图停止宿主进程 (PID: " + pid + ")。";
+        }
+
+        // 2. 高危自毁命令：exit / 递归强删根目录或系统目录（全模式、全配置始终生效）
         if (lowerCmd.matches("(?i)(?:^|.*[;|&])\\s*exit\\b.*") ||
-                lowerCmd.matches("(?i).*rm\\s+.*-[rR].*f\\s+/.*")) {
-            return "错误：检测到高危指令。出于安全策略，禁止执行 exit、系统重启或根目录删除的操作。";
+                UNIX_RM_CRITICAL.matcher(lowerCmd).find()) {
+            return "错误：检测到高危指令。出于安全策略，禁止执行 exit、系统重启或根目录/系统目录删除的操作。";
+        }
+
+        // 2b. Windows 侧的盘符根/系统目录删除
+        if (isWindowsRiskScope()
+                && WINDOWS_DELETE_VERB.matcher(command).find()
+                && WINDOWS_CRITICAL_TARGET.matcher(command).find()) {
+            return "错误：检测到高危指令。禁止对盘符根目录或系统目录（Windows / Program Files / Users 等）执行删除操作。";
         }
 
         return null; // null 表示校验通过
+    }
+
+    /**
+     * Windows 专属红线（自保护 1b、盘符根/系统目录删除 2b）的适用范围。
+     *
+     * <p><b>判据是宿主 OS，不是 shell 方言</b>：旧实现只看 {@code shellMode == CMD || POWERSHELL}，
+     * 于是在 Windows 宿主上一旦方言是 {@link ShellMode#UNIX_SHELL}（Git Bash / MSYS / WSL 风格的会话，
+     * 或用户通过 shell override 显式指定），两条红线整体失效——而 {@code taskkill /IM java.exe}、
+     * {@code Remove-Item -Recurse -Force C:\} 在那种会话里照样能执行并杀掉宿主 JVM。
+     * 护栏的成立条件是「命令可能在 Windows 宿主上生效」，与用哪种方言书写无关。</p>
+     *
+     * <p><b>为何仍保留方言判定</b>：一是非 Windows 宿主上声明 Windows 方言时（单元测试即如此）
+     * 护栏依然要可验证；二是这两条规则在类 Unix 宿主上本就不可能命中真实命令
+     * （没有 {@code taskkill}、没有盘符），多判一次零成本、无误伤风险。</p>
+     */
+    private boolean isWindowsRiskScope() {
+        return EnvironmentResolver.isWindows()
+                || this.shellMode == ShellMode.CMD
+                || this.shellMode == ShellMode.POWERSHELL;
+    }
+
+    /**
+     * 是否属于类 Unix 下「指向宿主进程」的终止命令。
+     *
+     * <p><b>旧实现的洞</b>：旧正则为 {@code (?:kill|pkill|killall)\s+[\s\w]*\b<pid>\b}——
+     * {@code [\s\w]} 不包含 {@code -}，所以只要动词与 PID 之间夹了任何开关（而“带信号”才是
+     * 真实用法）就彻底失效：{@code kill -9 <pid>}、{@code kill -TERM <pid>}、{@code killall -9 java}
+     * 全部不命中。而引导词里写的是「严禁执行 kill -9 任何数字」——同样是一个对模型承诺了
+     * 却不存在的护栏。此处改为按「同一命令段内出现终止动词 + 目标」判定。</p>
+     *
+     * <p><b>不能误伤 {@code pkill -P <pid>}</b>：它只终止宿主的<b>子进程</b>，是引导词明确推荐的
+     * 清理方式，必须显式放行；否则新护栏会把自己推荐的用法也拦了。</p>
+     *
+     * <p>跨命令段（{@code ; | &}）不算：{@code kill 111; echo <pid>} 里的 PID 只是一个被打印的
+     * 数字，与终止目标无关。</p>
+     */
+    private static boolean isUnixHostKill(String lowerCmd, String pid) {
+        if (UNIX_KILL_VERB.matcher(lowerCmd).find() == false) {
+            return false;
+        }
+        String quotedPid = Pattern.quote(pid);
+        if (lowerCmd.matches("(?s).*\\bpkill\\b[^\\r\\n;|&]*\\s-p\\s+" + quotedPid + "\\b.*")) {
+            return false; // pkill -P <pid>：只杀子进程，放行
+        }
+        if (lowerCmd.matches("(?s).*\\b(?:kill|pkill|killall)\\b[^\\r\\n;|&]*\\b" + quotedPid + "\\b.*")) {
+            return true;
+        }
+        // 按进程名批量终止 java（pkill java、killall -9 java、pkill -f javaw）
+        return lowerCmd.matches("(?s).*\\b(?:pkill|killall)\\b[^\\r\\n;|&]*\\bjavaw?\\b.*");
+    }
+
+    /**
+     * 是否属于 Windows 下「指向宿主进程」的终止命令。
+     *
+     * <p>三种形态：① 终止动词 + 宿主 PID；② 终止动词 + java 进程名（批量杀必然误伤自己）；
+     * ③ {@code Get-Process java | Stop-Process} 这种管道形式——终止动词后面没有任何参数，
+     * 但“java”仍出现在同一条命令里，故第二条能覆盖。</p>
+     */
+    private static boolean isWindowsHostKill(String command, String pid) {
+        if (WINDOWS_KILL_VERB.matcher(command).find() == false) {
+            return false;
+        }
+        // ① 直接指向宿主 PID（taskkill /PID 1234、Stop-Process -Id 1234）
+        if (Pattern.compile("\\b" + Pattern.quote(pid) + "\\b").matcher(command).find()) {
+            return true;
+        }
+        // ②/③ 按进程名批量终止 java
+        return WINDOWS_KILL_JAVA_BY_NAME.matcher(command).find();
     }
 
     /**
@@ -652,6 +826,8 @@ public class TerminalSupport {
                 }
             }
 
+            enforceFilesystemPolicy(mount.getRealPath(), target, writeMode, sandboxEnabled);
+
             return target;
         }
 
@@ -699,6 +875,8 @@ public class TerminalSupport {
             }
         }
 
+        enforceFilesystemPolicy(workPath, target, writeMode, sandboxEnabled);
+
         return target;
     }
 
@@ -742,6 +920,84 @@ public class TerminalSupport {
     private static final List<String> MANDATORY_DENY_DIRS = Collections.unmodifiableList(Arrays.asList(
             ".vscode", ".idea", ".gwork/commands", ".gwork/agents", ".gourdai/commands", ".gourdai/agents", ".git/hooks"
     ));
+
+    /**
+     * 读取即敏感的路径：这些文件本身承载凭据或可执行配置，读到即等于泄漏。
+     * 其余 deny 项（.vscode/.idea/.gwork/agents 等）威胁在于「被写入」而非「被读取」，
+     * 故不纳入读拦截，避免影响正常的工程浏览。
+     */
+    private static final List<String> READ_DENY_FILES = Collections.unmodifiableList(Arrays.asList(
+            ".gitconfig", ".mcp.json", ".bashrc", ".bash_profile", ".bash_logout",
+            ".zshrc", ".zprofile", ".profile"
+    ));
+
+    /**
+     * 判定某个「工作区相对路径」是否命中读拦截名单。
+     */
+    public static boolean isReadDenied(String relativePath) {
+        if (relativePath == null) {
+            return false;
+        }
+        String normalized = relativePath.replace("\\", "/");
+        if (normalized.startsWith("./")) {
+            normalized = normalized.substring(2);
+        }
+        for (String denyFile : READ_DENY_FILES) {
+            if (normalized.equals(denyFile)
+                    || normalized.endsWith("/" + denyFile)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 敏感路径准入校验：写操作拦截全部 mandatory-deny 名单，读操作仅拦截 {@link #READ_DENY_FILES}。
+     *
+     * <p>仅在沙盒模式下生效，与 {@code resolveSafePath} 中其余校验保持一致的启用条件；
+     * 开放模式下用户已明确放弃隔离，不做额外限制。</p>
+     *
+     * <p>注意：本校验作用于结构化文件工具（read/write/edit/ls/glob/grep），
+     * 不覆盖 bash 命令——属纵深防御，非不可绕过的安全边界。</p>
+     */
+    private void enforceFilesystemPolicy(Path workPath, Path target, boolean writeMode, boolean sandboxEnabled) {
+        if (!sandboxEnabled) {
+            return;
+        }
+
+        String relative = toPolicyRelative(workPath, target);
+        if (relative == null) {
+            return;
+        }
+
+        if (writeMode) {
+            if (isMandatoryDenyRelativePath(relative)) {
+                throw new SecurityException(
+                        "权限拒绝：路径 " + relative + " 属于受保护的敏感配置，禁止写入（沙盒模式已开启）。");
+            }
+        } else {
+            if (isReadDenied(relative)) {
+                throw new SecurityException(
+                        "权限拒绝：路径 " + relative + " 可能包含凭据，禁止读取（沙盒模式已开启）。");
+            }
+        }
+    }
+
+    /**
+     * 将目标路径换算为相对工作区的路径字符串；越界或无法换算时返回 null（越界由既有校验负责）。
+     */
+    private String toPolicyRelative(Path workPath, Path target) {
+        try {
+            Path normalizedTarget = target.toAbsolutePath().normalize();
+            Path normalizedWork = workPath.toAbsolutePath().normalize();
+            if (!normalizedTarget.startsWith(normalizedWork)) {
+                return null;
+            }
+            return normalizedWork.relativize(normalizedTarget).toString().replace("\\", "/");
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
 
     public static boolean isMandatoryDenyRelativePath(String relativePath) {
         if (relativePath == null) {
@@ -847,10 +1103,10 @@ public class TerminalSupport {
     }
 
     String getEnvPlaceholder(String envKey) {
-        if (this.shellMode == TerminalTalent.ShellMode.CMD) {
+        if (this.shellMode == ShellMode.CMD) {
             return "%" + envKey + "%";
         }
-        if (this.shellMode == TerminalTalent.ShellMode.POWERSHELL) {
+        if (this.shellMode == ShellMode.POWERSHELL) {
             return "$env:" + envKey;
         }
         return "$" + envKey;

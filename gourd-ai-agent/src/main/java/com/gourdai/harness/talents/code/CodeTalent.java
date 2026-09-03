@@ -37,7 +37,7 @@ import java.util.stream.Collectors;
 public class CodeTalent extends AbsTalent {
     private static final Logger LOG = LoggerFactory.getLogger(CodeTalent.class);
 
-    public final static String NAME_CODE_MD = "CODE.md";
+    public final static String NAME_WORK_MD = "WORK.md";
     public final static String ATTR_CWD = "__cwd";
 
     private final String workDir;
@@ -62,14 +62,14 @@ public class CodeTalent extends AbsTalent {
         providers.add(new DotNetProvider());
     }
 
-    public String HOME_CODE_MD() {
-        return codeDir + NAME_CODE_MD;
+    public String HOME_WORK_MD() {
+        return codeDir + NAME_WORK_MD;
     }
 
 
     @Override
     public String description() {
-        return "代码专家。支持项目初始化、技术栈自动识别以及 `" + HOME_CODE_MD() + "` 规约生成。";
+        return "代码专家。支持项目初始化、技术栈自动识别以及 `" + HOME_WORK_MD() + "` 规约生成。";
     }
 
     @Override
@@ -77,7 +77,7 @@ public class CodeTalent extends AbsTalent {
         String __cwd = prompt.attrAs(ATTR_CWD);
         Path rootPath = getRootPath(__cwd);
 
-        if (rootExists(rootPath, HOME_CODE_MD())) {
+        if (rootExists(rootPath, HOME_WORK_MD())) {
             return true;
         }
 
@@ -110,8 +110,8 @@ public class CodeTalent extends AbsTalent {
         buf.append("> 项目当前上下文: ").append(msg).append("\n\n");
 
         buf.append("为了确保工程质量，要严格执行以下操作：\n")
-                .append("1. **动作前导**: 在开始任何任务前，先读 `" + HOME_CODE_MD() + "` 以获取构建和测试指令。\n")
-                .append("2. **验证驱动**: 修改代码后，参考 `" + HOME_CODE_MD() + "` 中的指令运行测试，严禁未验证提交。\n");
+                .append("1. **动作前导**: 在开始任何任务前，先读 `" + HOME_WORK_MD() + "` 以获取构建和测试指令。\n")
+                .append("2. **验证驱动**: 修改代码后，参考 `" + HOME_WORK_MD() + "` 中的指令运行测试，严禁未验证提交。\n");
 
         return buf.toString();
     }
@@ -218,7 +218,7 @@ public class CodeTalent extends AbsTalent {
 
             appendGuidelines(newContent);
 
-            Path targetPath = rootPath.resolve(HOME_CODE_MD());
+            Path targetPath = rootPath.resolve(HOME_WORK_MD());
             String finalContent = newContent.toString();
             boolean updated = true;
             if (Files.exists(targetPath)) {

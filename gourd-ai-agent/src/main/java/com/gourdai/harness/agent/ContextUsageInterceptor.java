@@ -15,6 +15,7 @@
  */
 package com.gourdai.harness.agent;
 
+import com.gourdai.core.portal.web.UsageSubmissionService;
 import org.noear.solon.ai.AiUsage;
 import com.gourdai.agent.AgentChunk;
 import com.gourdai.agent.react.AbsReActInterceptor;
@@ -59,6 +60,11 @@ public class ContextUsageInterceptor extends AbsReActInterceptor {
         AiUsage usage = resp.getUsage();
         if (usage == null) {
             return;
+        }
+        try {
+            UsageSubmissionService.recordSafely(trace.getOptions().getChatModel().getModel(), usage, System.currentTimeMillis());
+        } catch (Throwable e) {
+            // Metrics and chat rendering must not depend on telemetry.
         }
 
         long cacheCreation = usage.cacheCreationInputTokens();

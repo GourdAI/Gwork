@@ -18,7 +18,6 @@ package com.gourdai.core.portal.web;
 import org.noear.snack4.ONode;
 import org.noear.solon.Solon;
 import com.gourdai.agent.AgentSession;
-import org.noear.solon.ai.chat.ChatConfig;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.talents.cli.TodoTalent;
 import com.gourdai.harness.talents.memory.MemorySearchResult;
@@ -30,6 +29,8 @@ import com.gourdai.harness.command.Command;
 import org.noear.solon.ai.talents.mount.SkillDir;
 import org.noear.solon.annotation.*;
 import com.gourdai.core.config.AgentFlags;
+import com.gourdai.core.config.AgentSettings;
+import com.gourdai.core.config.entity.ModelDo;
 import com.gourdai.core.portal.WorkspaceWatcher;
 import com.gourdai.core.command.builtin.LoopScheduler;
 import com.gourdai.core.command.builtin.LoopStateManager;
@@ -96,11 +97,20 @@ public class WebController {
     /** 文件业务逻辑服务，封装工作区文件浏览、搜索、读取操作 */
     private final FileService fileService;
 
-    /** 会话目录定位器：解析 chat（全局）/ code（项目）会话的落盘位置 */
+    /** 会话目录定位器：解析全局基准目录下的全局会话与项目根下的项目会话 */
     private final SessionLocator sessionLocator;
+
+    /** 用量归档账本：把各会话的 token 消耗增量固化到全局基准目录，历史不随项目删除而丢失 */
+    private final UsageArchiveService usageArchiveService;
+
+    /** 用量统计服务：聚合全局 + 所有已登记项目会话的 token 消耗、活跃度与模型分布 */
+    private final UsageStatsService usageStatsService;
 
     /** 项目登记服务：Code 模式的本地项目目录列表 */
     private final ProjectService projectService = new ProjectService();
+
+    /** 统一模型配置（保序 Map，模型列表按配置顺序输出） */
+    private final AgentSettings settings;
 
     /** 工作区文件变化监听器：可为 null（Code 模式项目根动态登记监听） */
     private final WorkspaceWatcher workspaceWatcher;
@@ -113,20 +123,24 @@ public class WebController {
      * @param loopScheduler 循环任务调度器，可为 null（无循环任务场景）
      * @param sessionLocator 会话目录定位器
      */
-    public WebController(HarnessEngine engine, WebGate webGate, LoopScheduler loopScheduler, SessionLocator sessionLocator) {
-        this(engine, webGate, loopScheduler, sessionLocator, null);
+    public WebController(HarnessEngine engine, WebGate webGate, LoopScheduler loopScheduler, SessionLocator sessionLocator, AgentSettings settings) {
+        this(engine, webGate, loopScheduler, sessionLocator, settings, null);
     }
 
     /**
      * 构造函数（含文件变化监听器）。
      *
+     * @param settings          统一模型配置（模型列表按配置顺序输出）
      * @param workspaceWatcher 工作区文件变化监听器，可为 null
      */
-    public WebController(HarnessEngine engine, WebGate webGate, LoopScheduler loopScheduler, SessionLocator sessionLocator, WorkspaceWatcher workspaceWatcher) {
+    public WebController(HarnessEngine engine, WebGate webGate, LoopScheduler loopScheduler, SessionLocator sessionLocator, AgentSettings settings, WorkspaceWatcher workspaceWatcher) {
         this.engine = engine;
         this.webGate = webGate;
         this.loopScheduler = loopScheduler;
         this.sessionLocator = sessionLocator;
+        this.settings = settings;
+        this.usageArchiveService = new UsageArchiveService(sessionLocator, AgentFlags.getHarnessBase());
+        this.usageStatsService = new UsageStatsService(usageArchiveService);
         this.workspaceWatcher = workspaceWatcher;
         this.gitService = new GitService(engine.getWorkspace(), engine);
         this.fileService = new FileService(engine.getWorkspace());
@@ -221,7 +235,7 @@ public class WebController {
 
     /**
      * 加载会话列表（统一 work- 会话，按所属根划分全局 / 项目两类）。
-     * <p><b>root</b> 指定要查看的工作空间根；为空时返回<b>全局会话</b>（未登记所属根），
+      * <p><b>root</b> 指定要查看的项目工作空间根；为空时扫描全局基准目录下的全局会话，
      * 否则返回该根下的<b>项目会话</b>并回填 projectRoot，供前端切换会话时恢复工作空间上下文
      * （X-Session-Cwd）。</p>
      * <p>扫描目录为全局区（root 为空或恰等于安装目录）时，物理目录可能混入另一类会话
@@ -237,22 +251,15 @@ public class WebController {
     public Result<List<Map>> sessions(@Param(value = "root", required = false) String root) throws Exception {
         List<Map> data = new ArrayList<>();
 
-        // 有效扫描根：root 为空回退安装目录（全局会话区）
-        String effectiveRoot = Assert.isNotEmpty(root) ? root : engine.getWorkspace();
-        boolean sameAsWorkspace = normalizeRoot(effectiveRoot).equals(normalizeRoot(engine.getWorkspace()));
-        // 全局视图 = 未带 root（扫全局区）；带 root 即项目视图，即便恰等于安装目录也按项目扫描
-        // 并回填 projectRoot（前端切换会话时据此恢复所属工作空间）。
-        boolean isGlobal = sameAsWorkspace && Assert.isEmpty(root);
-        collectSessions(sessionLocator.sessionsRoot(effectiveRoot),
+        // root 为空必须扫描全局基准目录；显式 root 始终扫描对应项目根
+        boolean isGlobal = Assert.isEmpty(root);
+        String effectiveRoot = isGlobal ? null : root;
+        collectSessions(isGlobal ? sessionLocator.globalSessionsRoot() : sessionLocator.sessionsRoot(effectiveRoot),
                 isGlobal ? null : effectiveRoot, data);
 
-        // 扫描目录为全局区时物理扫描无法区分会话归属（典型：会话发送过程中工作空间状态变化，
-        // 在全局区与项目区各落了一份目录）→ 按登记表（session-roots.json）切分：
-        // 全局视图仅保留未登记所属根的真全局会话；项目视图仅保留已登记的，
-        // 避免工作空间会话混入「对话」tab、全局会话混入项目文件夹。
-        if (sameAsWorkspace) {
-            data.removeIf(item ->
-                    (sessionLocator.boundRoot((String) item.get("sessionId")) != null) == isGlobal);
+        // 仅全局视图按登记表切分：全局目录中可能残留已绑定项目会话的空壳/副本。
+        if (isGlobal) {
+            data.removeIf(item -> sessionLocator.boundRoot((String) item.get("sessionId")) != null);
         }
 
         // 标记定时任务占用的会话（运行时会话/绑定会话）：前端侧栏据此在条目名前渲染时钟小图标
@@ -271,7 +278,21 @@ public class WebController {
         return Result.succeed(data);
     }
 
-    /** 规范化工作空间根（绝对路径 + 消除 .. 与尾分隔符），用于与安装目录比较判定全局会话。 */
+    /**
+     * 使用统计：聚合<b>全局对话区</b>所有会话的 token 消耗、活跃度与模型分布，
+     * 供设置面板「使用统计」页展示。数据源为各会话 {@code stream.ndjson} 中的 {@code trace} 事件，
+     * 无需额外埋点（见 {@link UsageStatsService}）。
+     *
+     * @param days 统计天数，仅接受 7 / 30（默认 30）
+     * @return 结构化统计结果（概览指标 + 逐日序列 + 模型分布）
+     */
+    @Get
+    @Mapping("/web/chat/usage/stats")
+    public Result<Map> usageStats(@Param(value = "days", required = false, defaultValue = "30") int days) {
+        return Result.succeed(usageStatsService.compute(days));
+    }
+
+    /** 规范化项目工作空间根，用于兼容调用方的路径比较。 */
     private static String normalizeRoot(String r) {
         if (r == null) return "";
         try {
@@ -366,10 +387,12 @@ public class WebController {
         // 文件，导致目录非空删不掉、累计空垃圾文件夹
         engine.removeSession(sessionId);
 
+        // 在解绑之前解析物理目录：root 为空的项目会话仍需依赖登记表定位项目真身；
+        // 若先 unbind，会错误回退到全局目录，只删掉空壳而遗留项目数据。
+        File sessionDir = sessionLocator.resolveDir(sessionId, root);
+
         // 清除所属根登记，避免注册表残留
         sessionLocator.unbind(sessionId);
-
-        File sessionDir = sessionLocator.resolveDir(sessionId, root);
 
         if (sessionDir.exists() && sessionDir.isDirectory()) {
             if (!deleteDirectory(sessionDir)) {
@@ -432,7 +455,10 @@ public class WebController {
         Map<String, Object> data = new LinkedHashMap<>();
         List<Map> list = new ArrayList<>();
 
-        for (ChatConfig config : engine.getModels()) {
+        // 模型列表按 settings 中的配置顺序输出（LinkedHashMap 保序），不再按名称排序：
+        // 对话页 / 专注模式右栏 / 自动化任务的模型选择器均以此顺序分组展示。
+        // 运行时 engine 的模型集为无序 Map，故此处以配置为唯一顺序来源。
+        for (ModelDo config : settings.getModels().values()) {
             if (config.isEnabled()) {
                 Map<String, Object> item = new LinkedHashMap<>();
                 item.put("model", config.getModel());
@@ -446,11 +472,6 @@ public class WebController {
                 list.add(item);
             }
         }
-        list.sort((a, b) -> {
-            String nameA = (String) a.getOrDefault("name", "");
-            String nameB = (String) b.getOrDefault("name", "");
-            return nameA.compareToIgnoreCase(nameB);
-        });
 
         data.put("list", list);
 
@@ -587,8 +608,10 @@ public class WebController {
     @Get
     @Mapping("/web/chat/replay")
     public Result<Map> replay(@Param("sessionId") String sessionId,
-                                     @Param(value = "root", required = false) String root,
-                                     @Param(value = "tail", required = false) Integer tail) {
+                                      @Param(value = "root", required = false) String root,
+                                      @Param(value = "tail", required = false) Integer tail,
+                                      @Param(value = "afterSeq", required = false) Long afterSeq,
+                                      @Param(value = "limit", required = false) Integer limit) {
         if (sessionId == null || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
             return Result.failure(400, "Invalid sessionId");
         }
@@ -600,11 +623,17 @@ public class WebController {
             empty.put("hasMore", false);
             return Result.succeed(empty);
         }
-        SessionStreamStore.LoadResult lr = store.loadWithMeta(sessionId, root, tail);
+        SessionStreamStore.LoadResult lr = afterSeq != null
+                ? store.loadAfter(sessionId, root, Math.max(0L, afterSeq), limit)
+                : store.loadWithMeta(sessionId, root, tail);
         Map result = new HashMap<>();
         result.put("events", lr.events);
         result.put("totalCount", lr.totalCount);
         result.put("hasMore", lr.hasMore);
+        result.put("firstSeq", lr.firstSeq);
+        result.put("lastSeq", lr.lastSeq);
+        result.put("latestSeq", lr.latestSeq);
+        result.put("running", webGate.isSessionBusy(sessionId));
         return Result.succeed(result);
     }
 
@@ -642,14 +671,55 @@ public class WebController {
      */
     @Post
     @Mapping("/web/chat/interrupt")
-    public Result interruptSession(@Param("sessionId") String sessionId) {
-        if (sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
-            return Result.failure();
+    public Result<Map<String, Object>> interruptSession(@Param("sessionId") String sessionId,
+                                                        @Param("runId") String runId) {
+        if (Assert.isEmpty(sessionId)
+                || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
+            return Result.failure("invalid_session");
         }
+        String status = webGate.interruptSession(sessionId, runId);
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("status", status);
+        return "cancelled".equals(status) ? Result.succeed(data) : Result.failure(status, data);
+    }
 
-        webGate.interruptSession(sessionId);
-
-        return Result.succeed();
+    /**
+     * 接收一条即时插话请求。
+     *
+     * <p>HTTP 200 + accepted 仅表示已进入邮箱，实际生效须等待 steer_applied 或 steer_dropped 事件。</p>
+     */
+    @Post
+    @Mapping("/web/chat/steer")
+    public Result<Map<String, Object>> steer(Context ctx,
+            @Param String sessionId,
+            @Param String runId,
+            @Param String steerId,
+            @Param String text) {
+        // sessionId 安全校验（复用现有逻辑）
+        if (Assert.isEmpty(sessionId)) sessionId = ctx.header("X-Session-Id");
+        if (Assert.isEmpty(sessionId)) sessionId = "web";
+        if (sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
+            return Result.failure("INVALID_SESSION");
+        }
+        // 参数校验
+        if (Assert.isEmpty(text) || text.trim().isEmpty()) {
+            return Result.failure("EMPTY_TEXT");
+        }
+        if (text.codePointCount(0, text.length()) > SteerInterceptor.MAX_TEXT_LENGTH) {
+            return Result.failure("TEXT_TOO_LONG");
+        }
+        if (Assert.isEmpty(steerId)) {
+            return Result.failure("MISSING_STEER_ID");
+        }
+        String result = webGate.steer(sessionId, runId, steerId, text);
+        Map<String, Object> resp = new java.util.LinkedHashMap<>();
+        resp.put("status", result);
+        if ("accepted".equals(result) || "duplicate".equals(result)) {
+            return Result.succeed(resp);
+        } else {
+            // not_running / turn_changed / box_full 返回语义失败，让前端降级
+            return Result.failure(result, resp);
+        }
     }
 
     /**
@@ -799,6 +869,7 @@ public class WebController {
                 sessionId = ctx.headerOrDefault("X-Session-Id", "web");
             }
             String sessionCwd = ctx.header("X-Session-Cwd");
+            String clientMessageId = ctx.param("clientMessageId");
 
             if (sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
                 ctx.status(400);
@@ -814,33 +885,21 @@ public class WebController {
                 }
             }
 
-            // 先登记会话所属工作空间根（chat / code 通用），确保 AgentSessionProvider 把会话落到 <root>/.gwork/sessions/
-            if (Assert.isNotEmpty(sessionCwd)) {
-                sessionLocator.bindSessionRoot(sessionId, sessionCwd);
-            }
-
             String hitlAction = ctx.param("hitlAction");
 
-            // 并发防护预检：会话已有任务在执行时直接返回 busy（前端暂存消息待完成后补发），
-            // 并避免把不会执行的用户输入记入 stream.ndjson（补发时会重新记录）。
-            // HITL 审批/拒绝不受限（其前置流必终止）。WebGate.onChatInput 内部仍有同语义兵底检查。
+            // busy 请求不允许改变活动任务的会话根；真正的原子 busy 判定在 WebGate 输入锁内完成。
             if (Assert.isEmpty(hitlAction) && webGate.isSessionBusy(sessionId)) {
                 return Result.succeed("busy");
             }
 
-            // 流式过程回放留存：网页手动输入的用户气泡由前端本地渲染、不走 emitToClient，
-            // 故在此显式补记一条 user 事件到 stream.ndjson，保证历史回放时用户消息不丢失。
-            // 仅记真实文本输入（HITL 决策、纯命令的斜杠文本除外）。
-            if (Assert.isEmpty(hitlAction) && Assert.isNotEmpty(input)
-                    && !input.startsWith("/") && webGate.getStreamStore() != null) {
-                webGate.getStreamStore().recordUser(sessionId, sessionCwd, input, System.currentTimeMillis());
-            }
+            // 根登记与最终受理都在 WebGate 中按同一会话串行处理；这里不提前改绑，
+            // 避免预检通过后被并发任务抢先启动时污染活动会话根。
 
             // 路由到 WebGate 处理（AI 结果通过 WebSocket 推送到前端）
             // 网页端手动输入：source=null，出站不回推 IM（仅当活跃会话由 IM/Loop 触发时才回推）
-            boolean accepted = webGate.onChatInput(sessionId, sessionCwd, input, model, attachments, attachmentTypes, hitlAction, null);
+            boolean accepted = webGate.onChatInput(sessionId, sessionCwd, input, model, attachments, attachmentTypes,
+                    hitlAction, null, clientMessageId);
             if (!accepted) {
-                // 预检与受理之间的竞态窗口内任务刚启动：同 busy 语义返回，前端暂存补发
                 return Result.succeed("busy");
             }
 

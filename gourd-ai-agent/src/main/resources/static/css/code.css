@@ -58,7 +58,7 @@
     border-color: transparent; background: var(--bg-hover);
     border-radius: 10px; padding: 7px 10px; font-size: 13px;
 }
-.workspace-selector-row .project-dropdown { left: 0; right: auto; min-width: 280px; }
+.workspace-selector-row .project-dropdown { left: 0; right: auto; min-width: var(--dropdown-w-lg); }
 /* 已选工作空间时：悬停按钮，文件夹图标切换为清除小标（点击清除回「选择项目」= 全局） */
 .workspace-selector-clear {
     display: none; align-items: center; justify-content: center;
@@ -276,10 +276,10 @@ body.code-mode #chatView .send-btn svg { width: 16px; height: 16px; }
 body.code-mode #chatView .input-toolbar { gap: 4px; }
 body.code-mode #chatView .toolbar-right { gap: 3px; }
 
-/* code 模式：模型选择器展示图标（配合窄宽时只留图标） */
-body.code-mode #chatView .model-selector-current .model-icon { display: block; }
+/* code 模式：模型选择器仅收敛尺寸，形态与主界面一致（图标默认隐藏，见 app.css .model-icon）。
+   图标只在下方容器查询的窄栏降级里出现，作为文字隐藏后的替代标识。 */
 body.code-mode #chatView .model-selector-current { max-width: 150px; padding: 4px 8px; }
-body.code-mode #chatView .model-selector-current .model-name { max-width: 96px; }
+body.code-mode #chatView .model-selector-current .model-name { max-width: 115px; }
 
 /* 对话栏声明为容器，供下方容器查询按实际宽度响应 */
 body.code-mode .chat-view { container-type: inline-size; container-name: codechat; }
@@ -291,8 +291,17 @@ body.code-mode .chat-view { container-type: inline-size; container-name: codecha
     .input-toolbar .model-selector-current .model-arrow {
         display: none;
     }
+    /* 文字全部隐藏后，按钮需要图标兜底，否则只剩一个空框 */
+    .input-toolbar .model-selector-current .model-icon {
+        display: block;
+    }
     .input-toolbar .model-selector-current {
         gap: 0; padding: 5px 7px;
+    }
+    /* 窄到放不下三段提示时，只保留最关键的 Enter/Tab 两条，隐去第二个分隔点与换行提示。
+       （子节点均为 span，:last-of-type 按标签名匹配不到 .run-hint-sep，故用 nth-child） */
+    .run-hint > :nth-child(n+4) {
+        display: none;
     }
 }
 
@@ -452,8 +461,8 @@ body.code-mode.viewer-open .code-editor-pane { display: none; }
 .code-preview-binary-name { font-size: 12px; font-family: var(--font-mono); word-break: break-all; max-width: 420px; }
 .code-preview-binary-desc { font-size: 12px; }
 /* Monaco 编辑器宿主：占满容器；字体/字号由 Monaco 自带。
-   滚动条：尺寸由 JS 侧 scrollbar 选项定为 6px（与全局 --scrollbar-size 一致），
-   滑块颜色/圆角在此与 theme.css 的全局 --scrollbar-* 规范对齐（覆盖 Monaco 默认观感）。 */
+   滚动条：尺寸由 JS 侧 scrollbar 选项定为 12px（与全局 --scrollbar-size 一致），
+   滑块颜色/圆角/视觉收窄在此与 theme.css 的全局 --scrollbar-* 规范对齐（覆盖 Monaco 默认观感）。 */
 .code-editor-host .monaco-editor {
     position: absolute;
     inset: 0;
@@ -463,14 +472,28 @@ body.code-mode.viewer-open .code-editor-pane { display: none; }
     border-radius: 0;
 }
 
-/* ---- Monaco 滚动条与全局滚动条规范统一（编辑器 / diff / 文件查看器 / minimap 一并生效）---- */
+/* ---- Monaco 滚动条与全局滚动条规范统一（编辑器 / diff / 文件查看器 / minimap 一并生效）----
+   Monaco 的 slider 宽/高由 JS 端 inline style 写死（=verticalScrollbarSize 12px），
+   无法用 width 收窄；与原生滚动条同理，用透明内衬 + background-clip:padding-box
+   把可见宽度收回 6px，命中区仍为 12px。 */
 .monaco-editor .monaco-scrollable-element > .scrollbar > .slider {
     background: var(--scrollbar-thumb) !important;
     border-radius: var(--scrollbar-radius);
+    border: var(--scrollbar-thumb-inset) solid transparent;
+    background-clip: padding-box !important;
+    box-sizing: border-box;
+}
+.monaco-editor .monaco-scrollable-element > .scrollbar.vertical > .slider {
+    min-height: var(--scrollbar-thumb-min);
+}
+.monaco-editor .monaco-scrollable-element > .scrollbar.horizontal > .slider {
+    min-width: var(--scrollbar-thumb-min);
 }
 .monaco-editor .monaco-scrollable-element > .scrollbar > .slider:hover,
 .monaco-editor .monaco-scrollable-element > .scrollbar > .slider.active {
     background: var(--scrollbar-thumb-hover) !important;
+    background-clip: padding-box !important;
+    border-width: var(--scrollbar-thumb-inset-hover);
 }
 
 /* 底部状态栏已移除（视觉从未启用，DOM/JS/CSS 一并清理，保存走 Ctrl+S） */
@@ -602,6 +625,10 @@ body.code-mode #chatView .thinking-bubble { font-size: 12px; padding: 6px 0; }
 /* 输入框字号与对话正文统一到 12px */
 body.code-mode #chatView .input-box textarea { font-size: 12px; }
 body.code-mode #chatView .input-box textarea::placeholder { font-size: 12px; }
+/* 键位提示条在窄对话栏下再收一号，与紧凑风格对齐 */
+body.code-mode #chatView .run-hint { font-size: 10px; gap: 4px; padding-left: 6px; }
+body.code-mode #chatView .run-hint-kbd { min-width: 14px; height: 14px; font-size: 9px; padding: 0 3px; }
+body.code-mode #chatView .run-hint-kbd-wide { min-width: 20px; }
 
 /* ---- Code 模式输入区域适配 ----
    对话栏被压窄到 ~440px，输入框相关元素改为全宽，与容器对齐 */

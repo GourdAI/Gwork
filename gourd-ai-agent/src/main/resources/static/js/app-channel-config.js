@@ -888,6 +888,7 @@
         if (typeof window.closeSkills === 'function') window.closeSkills();
         if (typeof window.closeModelSettings === 'function') window.closeModelSettings();
         if (typeof window.closeMemoryView === 'function') window.closeMemoryView();
+        if (typeof window.closeUsage === 'function') window.closeUsage();
         $('#welcomeView').hide();
         $('#chatView').removeClass('active');
         $('#channelView').addClass('active');

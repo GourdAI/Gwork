@@ -67,7 +67,7 @@ class HarnessOptions implements Serializable {
     // ========== 会话与压缩 ==========
     private volatile int sessionWindowSize = 8;
     private volatile int compressionMaxMessages = 30;
-    private volatile int compressionMaxTokens = 30_000;
+    private volatile long compressionDefaultContextLength = ContextCompressionInterceptor.DEFAULT_CONTEXT_LENGTH;
     // 压缩触发比例（1~100）：占用达到 "当前模型 contextLength × 比例%" 时触发压缩
     private volatile int compressionRatio = 80;
     private volatile String compressionModel; //压缩大模型
@@ -226,13 +226,13 @@ class HarnessOptions implements Serializable {
         }
     }
 
-    int getCompressionMaxTokens() {
-        return compressionMaxTokens;
+    long getCompressionDefaultContextLength() {
+        return compressionDefaultContextLength;
     }
 
-    void setCompressionMaxTokens(Integer compressionMaxTokens) {
-        if (compressionMaxTokens != null) {
-            this.compressionMaxTokens = compressionMaxTokens;
+    void setCompressionDefaultContextLength(Long value) {
+        if (value != null && value > 0L) {
+            this.compressionDefaultContextLength = value;
         }
     }
 

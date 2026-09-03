@@ -14,6 +14,7 @@ const net = require('net');
 const http = require('http');
 const { spawn, execFileSync } = require('child_process');
 const tkill = require('tree-kill');
+const { migrateGlobalData } = require('./migration');
 const { app } = require('electron');
 
 // 子进程句柄
@@ -38,66 +39,37 @@ function getResourcesDir() {
  * harnessHome=".gwork/"，Node 侧绝不能预先拼，否则全局区会嵌套成 .gwork/.gwork，
  * 表现为重装后"配置被清空"——2026-08-08 复发事故的根因）。
  *
- * macOS 的 .app 是签名密封包（Gatekeeper 还可能将其转移至只读挂载运行），
- * 往包内写数据会 EROFS/破坏签名，导致后端启动失败、所有 jar 接口报错。
- * 故 macOS 打包版统一落到用户目录（基目录 ~/Library/Application Support/Gourd AI，
- * 全局区即其下 .gwork/），其余平台为安装目录（extraResources）。
+ * All platforms use the OS user home as the base; the resource directory is
+ * only used for migration and bundled runtime assets.
  */
+const { getRuntimeHomeDirFor, resolveUserHome } = require('./runtime-paths');
+
 function getRuntimeHomeDir() {
-  if (process.platform === 'darwin' && app.isPackaged) {
-    return path.join(app.getPath('appData'), 'Gourd AI');
-  }
-  return getResourcesDir();
+  // 解析顺序集中在 runtime-paths.resolveUserHome，保证与 cli-provision 完全一致。
+  return getRuntimeHomeDirFor({ userHome: resolveUserHome() });
 }
 
 /**
- * 一次性迁移：①上移旧版误产生的嵌套全局区 `<基目录>/.gourdai/.gourdai`；
- * ②品牌升级：旧 `.gourdai` 全局区整体改名 `.gwork`。
- *
- * 背景：2026-08 期间 getRuntimeHomeDir 曾把 .gourdai 提前拼进 -Dgourdai.home/cwd，
- * Java 侧再拼一层 → 运行时把配置/会话写进了嵌套目录。修正语义后需把嵌套层内容
- * 上移合并回真正的全局区，避免用户数据"看起来丢了"。品牌升级后全局区改名 .gwork，
- * 旧目录整体 rename（原子、数据零丢失）；新目录已存在则保守不动旧目录、绝不删除。
- *
- * 策略：逐项移动；同名条目以<b>嵌套层（更新）为准</b>覆盖外层旧值；全部成功后删除
- * 嵌套空目录。任何异常只告警、绝不阻断启动。Java 侧 App.main 亦有等价迁移（ACP/CLI
- * 启动器直连 java -jar 不经本进程），两边幂等互补。
+ * Windows/macOS/Linux development and packaged builds all use the OS user home
+ * as the -Dgwork.home base. The resource directory is only a migration source
+ * and the location of the bundled JRE/JAR.
  */
 function migrateLegacyHarnessDirs() {
   try {
-    const fs = require('fs');
-    const base = getRuntimeHomeDir();
-    const legacy = path.join(base, '.gourdai');
-    if (!fs.existsSync(legacy)) return;
-
-    // ① 嵌套上移：<base>/.gourdai/.gourdai → <base>/.gourdai
-    const nested = path.join(legacy, '.gourdai');
-    if (fs.existsSync(nested)) {
-      console.warn('[gourd-ai-desktop] 检测到嵌套全局区，执行上移: ' + nested + ' → ' + legacy);
-      fs.mkdirSync(legacy, { recursive: true });
-      for (const name of fs.readdirSync(nested)) {
-        const src = path.join(nested, name);
-        const dst = path.join(legacy, name);
-        // 嵌套层数据更新（正是 bug 期间持续写入的），同名时先清掉外层旧值再上移
-        if (fs.existsSync(dst)) {
-          fs.rmSync(dst, { recursive: true, force: true });
-        }
-        fs.renameSync(src, dst);
-      }
-      try { fs.rmdirSync(nested); } catch (e) {
-        // rename 后仍残留（如空子目录占用）时用递归删除兜底
-        fs.rmSync(nested, { recursive: true, force: true });
-      }
+    const legacyRoots = [];
+    if (process.platform === 'darwin') {
+      const macAppData = app.getPath('appData');
+      legacyRoots.push(path.join(macAppData, 'Gourd AI', '.gwork'));
+      legacyRoots.push(path.join(macAppData, 'Gourd AI', '.gourdai'));
     }
-
-    // ② 品牌升级：.gourdai → .gwork（新目录已存在则不动旧目录，绝不删除用户数据）
-    const current = path.join(base, '.gwork');
-    if (!fs.existsSync(current)) {
-      fs.renameSync(legacy, current);
-      console.log('[gourd-ai-desktop] 旧全局区已升级: ' + legacy + ' → ' + current);
-    }
+    return migrateGlobalData({
+      homeDir: getRuntimeHomeDir(),
+      resourcesDir: getResourcesDir(),
+      legacyRoots,
+    });
   } catch (e) {
-    console.warn('[gourd-ai-desktop] 旧全局区迁移失败（不影响启动）:', e && e.message);
+    console.warn('[gourd-ai-desktop] 全局目录迁移失败（保留 staging，不影响启动）:', e && e.message);
+    return null;
   }
 }
 
@@ -349,7 +321,14 @@ async function startBackend(port) {
   if (fileLogLevel) {
     args.push('-Dsolon.logging.appender.file.level=' + fileLogLevel);
   }
-  args.push('-jar', jar, 'web', String(port));  // web 模式：完整注册 WebController + /web/gate + WebSocket
+  if (process.env.GWORK_USAGE_ENDPOINT) {
+    args.push('-Dgwork.usage.endpoint=' + process.env.GWORK_USAGE_ENDPOINT);
+  }
+  if (process.env.GWORK_USAGE_CLIENT_TOKEN) {
+    args.push('-Dgwork.usage.client-token=' + process.env.GWORK_USAGE_CLIENT_TOKEN);
+  }
+
+  args.push('-jar', jar, 'web', String(port));
 
   // 日志文件：<基目录>/.gwork/logs/gwork-desktop-server.log（mac 上基目录为包外用户目录，避免写签名包）
   const logPath = getServerLogPath();
@@ -363,7 +342,14 @@ async function startBackend(port) {
 
   const stdio = ['ignore', logFd, logFd];
 
-  console.log(`[gourd-ai-desktop] 启动后端: ${java} ${args.join(' ')}`);
+  const safeArgs = args.map((arg) => {
+    const token = process.env.GWORK_USAGE_CLIENT_TOKEN;
+    if (token && arg === '-Dgwork.usage.client-token=' + token) {
+      return '-Dgwork.usage.client-token=<redacted>';
+    }
+    return arg;
+  });
+  console.log(`[gourd-ai-desktop] 启动后端: ${java} ${safeArgs.join(' ')}`);
 
   // 显式清除可能影响 JVM classloader 的环境变量
   const cleanEnv = { ...process.env };
@@ -458,8 +444,8 @@ function stopBackend() {
 
 /**
  * 服务端日志路径
- * <p>与后端 Java 侧一致：统一落<b>全局区</b>（基目录 + .gwork）下的 logs，
- * 不再写用户主目录 ~/.gourdai（macOS 打包版基目录为包外用户目录）。</p>
+ * 服务端日志路径统一落用户全局区（基目录 + .gwork）；Windows packaged
+ * 的基目录为用户主目录，因此日志位于 ~/.gwork/logs。
  */
 function getServerLogPath() {
   return path.join(getRuntimeHomeDir(), '.gwork', 'logs', 'gwork-desktop-server.log');

@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * main/index.js - Electron 主进程入口
- *
+ * Windows packaged startup migrates legacy/resource data before the backend and
+ * CLI are started; development and macOS path behavior remain unchanged.
  * 启动流程（UI 已从后端解耦，界面外壳「秒开」）：
  * 1. app ready 后立即起本地 UI 服务器（http://localhost:{uiPort}）
  * 2. 主窗口导航到该 localhost 地址 —— 无需等待后端（秒开）
@@ -28,6 +28,7 @@ const {
 const uiServer = require('./ui-server');
 const { provisionCli } = require('./cli-provision');
 const updater = require('./updater');
+const titlebar = require('./titlebar');
 
 // 单实例锁：防止多开
 const gotTheLock = app.requestSingleInstanceLock();
@@ -137,7 +138,7 @@ function createMainWindow() {
     show: false,
     icon: getIconPath(),
     titleBarStyle: 'hidden',
-    titleBarOverlay: THEME_COLORS.dark,
+    titleBarOverlay: titlebar.THEME_COLORS.dark,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -150,6 +151,14 @@ function createMainWindow() {
 
   // 禁止页面 <title> 覆盖窗口标题
   mainWindow.on('page-title-updated', (e) => e.preventDefault());
+
+  // 登记原生装饰初始状态（构造函数已按 dark 应用过一次，此处只记状态）
+  titlebar.initWindowChrome(mainWindow, 'dark');
+
+  // 页面重载 / 渲染进程崩溃后，渲染层的遮罩探测状态归零，主进程必须同步复位，
+  // 否则 mac 红绿灯会一直隐藏、Win/Linux 按钮区一直发暗。
+  mainWindow.webContents.on('did-start-loading', () => titlebar.resetWindowScrim(mainWindow));
+  mainWindow.webContents.on('render-process-gone', () => titlebar.resetWindowScrim(mainWindow));
 
   // 外链（target="_blank" / window.open）一律交给系统浏览器。
   // Electron 默认会在应用内弹裸新窗口（多一个渲染进程、无导航栏体验差），这里拦截改外部打开。
@@ -304,25 +313,22 @@ async function bootstrap() {
 
 // ─── Electron 生命周期 ──────────────────────────────────────────────────────
 
-// 主题色映射，与 web 端 theme.css 的 --bg-main 保持一致。
-// 注意：color 必须用不透明的实际标题栏背景色，而不能用透明色——
-// Windows 按 color 的亮度推导窗口按钮的 hover 底色：透明黑会被判为深色背景，
-// hover 给白色高亮，在亮色（白底）下白上白完全不可见。
-const THEME_COLORS = {
-  light: { color: '#ffffff', symbolColor: '#1a1a2e', height: 36 },
-  dark:  { color: '#1a1b1e', symbolColor: '#dcdde1', height: 36 },
-};
-
-ipcMain.on('theme-changed', (event, theme) => {
-  // 同步发送方窗口的标题栏颜色
+/** 取发送方窗口（已销毁则退回主窗口）。 */
+function senderWindow(event) {
   const sender = event && event.sender;
-  const win = sender && !sender.isDestroyed() ? BrowserWindow.fromWebContents(sender) : mainWindow;
-  // setTitleBarOverlay 仅 Windows 支持；macOS 上该方法不存在，
-  // 直接调用会抛 TypeError 导致主进程未捕获异常（连带后端引导中断）。
-  if (win && !win.isDestroyed() && typeof win.setTitleBarOverlay === 'function') {
-    const colors = THEME_COLORS[theme] || THEME_COLORS.dark;
-    win.setTitleBarOverlay(colors);
-  }
+  const win = sender && !sender.isDestroyed() ? BrowserWindow.fromWebContents(sender) : null;
+  return win || mainWindow;
+}
+
+// 主题切换：同步发送方窗口的标题栏颜色（主题色表、平台差异、遮罩叠加均见 main/titlebar.js）
+ipcMain.on('theme-changed', (event, theme) => {
+  titlebar.setWindowTheme(senderWindow(event), theme);
+});
+
+// 全屏遮罩开关：原生窗口按钮由系统框架层绘制，DOM 遮罩盖不住（WCO 规范），
+// 改由主进程把按钮区跟着一起压暗（探测与上报见 main/preload.js）。
+ipcMain.on('ui-scrim-changed', (event, color) => {
+  titlebar.setWindowScrim(senderWindow(event), typeof color === 'string' ? color : null);
 });
 
 
@@ -337,8 +343,44 @@ ipcMain.on('window-title-update', (event, title) => {
 // 与 backend-ready/backend-failed 事件互补，消除“事件早于监听器注册”的启动竞态。
 ipcMain.handle('get-backend-state', () => backendReadyState);
 
+/**
+ * macOS 全局菜单栏不允许移除：Electron 内部实现中 darwin 分支对 null 直接 return，
+ * 不会清掉已安装的菜单（后果是始终残留默认的 File/Edit/View/Window/Help）。
+ * 因此 macOS 安装一个精简菜单替代默认菜单；Windows/Linux 置 null 整体隐藏。
+ * 保留 Edit/Cmd+C/Cmd+V 等系统编辑快捷键，避免 null 菜单导致复制粘贴失效。
+ */
+function installAppMenu() {
+  if (process.platform === 'darwin') {
+    const template = [
+      {
+        label: app.name,
+        submenu: [{ role: 'quit' }],
+      },
+      {
+        label: 'Edit',
+        submenu: [
+          { role: 'undo' },
+          { role: 'redo' },
+          { type: 'separator' },
+          { role: 'cut' },
+          { role: 'copy' },
+          { role: 'paste' },
+          { role: 'selectAll' },
+        ],
+      },
+      {
+        label: 'Window',
+        submenu: [{ role: 'minimize' }, { role: 'close' }],
+      },
+    ];
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  } else {
+    Menu.setApplicationMenu(null); // 非 mac 平台去掉原生菜单栏
+  }
+}
+
 app.whenReady().then(async () => {
-  Menu.setApplicationMenu(null); // 去掉原生菜单栏
+  installAppMenu();
 
   // 放行媒体权限（摄像头/麦克风）——Electron 默认拒绝，即使 localhost 也需显式允许。
   // 仅放行本地 UI origin 的 media 请求，其余照常。
@@ -371,7 +413,7 @@ app.whenReady().then(async () => {
   updater.on('state', (state) => broadcastToRenderer('updater-state', state));
   updater.init();
 
-  // 注册终端命令 `gwork`（写启动器到安装目录的 .gwork/bin 并加入 PATH，指向自带 JRE）。
+  // 注册终端命令 `gwork`（写启动器到用户主目录 ~/.gwork/bin 并加入 PATH，指向自带 JRE）。
   // 非阻塞、幂等、自愈；失败只告警不影响 App。仅打包版执行（dev 态无自带 JRE），
   // 可用 GWORK_PROVISION_CLI=1（兼容旧名 GOURDAI_PROVISION_CLI）在开发时强制启用以便调试。
   if (app.isPackaged || process.env.GWORK_PROVISION_CLI === '1' || process.env.GOURDAI_PROVISION_CLI === '1') {

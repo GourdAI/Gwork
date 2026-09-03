@@ -21,8 +21,8 @@
     var currentProvider = null; // 当前编辑的连接（null 表示新增）
     var fetchedModels = []; // 已拉取/已配置的模型列表
     var selectedName = null; // 左栏选中项（'__add__' 表示右侧为新增表单）
-    // 左栏是否展示内置供应商（当前按产品要求暂屏蔽，需恢复时改为 true）
-    var SHOW_BUILTIN_PROVIDERS = false;
+    var fetchRequestId = 0; // 拉取结果只允许写回发起时的同一 Provider/表单版本
+    var detailKeyLoaded = false; // 右栏密钥输入框是否已由详情接口回填真实密钥（false=密钥未知，不可提交空串覆盖）
 
     // 接口类型选项（按模型单独配置）
     var STANDARD_OPTIONS = [
@@ -47,9 +47,11 @@
     // ==================== 初始化 ====================
     function init() {
         bindEvents();
-        // 桌面端冷启动时后端 jar 尚未就绪，直接拉取会失败并弹“加载失败”。
-        // 与其它启动即拉取的模块一致，改经 __whenBackendReady 门闸延后到后端就绪再发。
-        __whenBackendReady(loadProvidersList);
+        // 后端启动失败时仍会释放门闸，但模型配置页不能因此渲染任何内置内容。
+        // 先清空并隐藏内置分组，避免静态 HTML 在接口失败/后端未启动期间短暂露出。
+        $groupBuiltin.hide();
+        $builtinList.empty();
+        __whenBackendReady(loadProvidersListIfBackendReady);
     }
 
     function bindEvents() {
@@ -255,6 +257,21 @@
             });
         }
 
+        // 名称：编辑模式下变更即时保存（内置连接输入框为 readonly，不会触发）
+        $('#msProviderName').on('change', function () {
+            if (!currentProvider) return;
+            var newName = ($(this).val() || '').trim();
+            $(this).val(newName);
+            if (newName === currentProvider.name) return; // 无实质变更（含仅首尾空格差异）
+            if (!newName) {
+                // 名称必填：留空直接回退，否则表单会卡在空名状态（后续任何即时保存都被拦截）
+                $(this).val(currentProvider.name);
+                showToast(GourdI18n.t('common.name') + GourdI18n.t('common.required'), 'error');
+                return;
+            }
+            persistProvider();
+        });
+
         // 连接基础字段（作用域/模型列表接口/API 地址/密钥/超时）：编辑模式下变更即时保存；新增模式仍走保存按钮
         $('.settings-scope-toggle[data-target="msProviderScope"]').on('click', '.settings-scope-btn', function () {
             if (currentProvider) {
@@ -331,6 +348,7 @@
         if (typeof window.closeSkills === 'function') window.closeSkills();
         if (typeof window.closeChannel === 'function') window.closeChannel();
         if (typeof window.closeMemoryView === 'function') window.closeMemoryView();
+        if (typeof window.closeUsage === 'function') window.closeUsage();
         $('#welcomeView').hide();
         $('#chatView').removeClass('active');
         $('#modelSettingsView').addClass('active');
@@ -345,9 +363,9 @@
         if (typeof window.closeSettings === 'function') window.closeSettings();
         else if ($('#settingsOverlay').is(':visible')) $('#settingsCloseBtn').trigger('click');
 
-        // 默认右栏为「添加供应商」表单（对齐参考交互），左栏列表异步加载
+        // 默认右栏为「添加供应商」表单；后端失败时不请求接口，也不影响自定义供应商表单使用。
         selectAdd();
-        loadProvidersList();
+        __whenBackendReady(loadProvidersListIfBackendReady);
     }
 
     /** 离开模型配置视图（切回聊天/欢迎/自动化/技能时由对应切换函数调用） */
@@ -387,6 +405,15 @@
         });
     }
 
+    /** 改名后同步本地展示顺序中的名称，保持原有拖拽位置（顺序按名称存储，不同步会掉到列表末尾） */
+    function renameProviderOrder(oldName, newName) {
+        var order = readProviderOrder();
+        var idx = order.indexOf(oldName);
+        if (idx === -1) return;
+        order[idx] = newName;
+        try { localStorage.setItem(LS_PROVIDER_ORDER, JSON.stringify(order)); } catch (e) { /* 存储不可用时忽略 */ }
+    }
+
     /** 持久化展示顺序：裁剪已删除的名称，并追加新增的自定义供应商 */
     function saveProviderOrder(names) {
         var valid = {};
@@ -396,6 +423,15 @@
             if (!p.builtin && pruned.indexOf(p.name) === -1) pruned.push(p.name);
         });
         try { localStorage.setItem(LS_PROVIDER_ORDER, JSON.stringify(pruned)); } catch (e) { /* 存储不可用时忽略 */ }
+    }
+
+    function loadProvidersListIfBackendReady() {
+        if (typeof window.__backendReadyState === 'function' && window.__backendReadyState() === 'failed') {
+            providers = [];
+            renderProviderList();
+            return;
+        }
+        loadProvidersList();
     }
 
     function loadProvidersList(onDone) {
@@ -408,7 +444,7 @@
                     // 若当前选中项仍存在于新列表（且未被屏蔽）中则保持选中，否则回落到「添加供应商」表单
                     if (selectedName !== '__add__') {
                         var stillExists = false;
-                        providers.forEach(function (p) { if (p.name === selectedName && (!p.builtin || SHOW_BUILTIN_PROVIDERS)) stillExists = true; });
+                        providers.forEach(function (p) { if (p.name === selectedName && !p.builtin) stillExists = true; });
                         if (!stillExists) {
                             selectedName = '__add__';
                         }
@@ -442,8 +478,9 @@
         var hasCustom = false;
 
         providers.forEach(function (provider) {
-            // 内置供应商暂屏蔽：不渲染、不计入分组（内置分组标签随 hasBuiltin 自动隐藏）
-            if (provider.builtin && !SHOW_BUILTIN_PROVIDERS) return;
+            // 内置供应商始终屏蔽：不渲染、不计入分组。
+            // 产品要求内置相关内容不出现在模型配置页，不能只依赖后端成功返回后的 CSS 状态。
+            if (provider.builtin) return;
             var item = renderProviderItem(provider);
             if (provider.builtin) {
                 builtinHtml += item;
@@ -487,6 +524,7 @@
         selectedName = '__add__';
         currentProvider = null;
         fetchedModels = [];
+        detailKeyLoaded = false;
         // 左栏选中态同步
         $('.ms-provider-item').removeClass('selected');
         renderDetailForm(null);
@@ -505,6 +543,8 @@
     function fillDetailFromCache(name) {
         var cached = null;
         providers.forEach(function (p) { if (p.name === name) cached = p; });
+        // 真实密钥尚未到位：该窗口内的即时保存不提交 apiKey 字段（见 persistProvider）
+        detailKeyLoaded = false;
         if (cached) {
             renderDetailForm(cached);
             // 列表接口返回的 apiKey 是脱敏值：清空输入框等待详情接口回填真实密钥，
@@ -539,7 +579,8 @@
 
         // 填充表单
         var isBuiltin = !!(provider && provider.builtin);
-        $('#msProviderName').val(provider ? provider.name : '').prop('readonly', !!provider);
+        // 名称：仅内置连接锁定；自定义供应商可改名（后端 update 支持 originalName 迁移）
+        $('#msProviderName').val(provider ? provider.name : '').prop('readonly', isBuiltin);
         var stdVal = provider ? (provider.standard || DEFAULT_STANDARD) : DEFAULT_STANDARD;
         $('input[name="msProviderStandard"]').prop('checked', false)
             .filter('[value="' + stdVal + '"]').prop('checked', true);
@@ -716,6 +757,26 @@
         }
     }
 
+    var FETCH_REASON_KEYS = {
+        INVALID_URL: 'fetch_invalid_url', NOT_SUPPORTED: 'fetch_not_supported',
+        AUTH_FAILED: 'fetch_auth_failed', RATE_LIMITED: 'fetch_rate_limited',
+        UPSTREAM_ERROR: 'fetch_upstream_error', BAD_STATUS: 'fetch_bad_status',
+        CONNECT_TIMEOUT: 'fetch_connect_timeout', READ_TIMEOUT: 'fetch_read_timeout',
+        TIMEOUT: 'fetch_timeout', DNS_FAILED: 'fetch_dns_failed',
+        CONNECT_REFUSED: 'fetch_connect_refused', TLS_ERROR: 'fetch_tls_error',
+        NETWORK_ERROR: 'fetch_network_error', INVALID_RESPONSE: 'fetch_invalid_response', UNKNOWN: 'fetch_unknown'
+    };
+
+    function showFetchFailure(res) {
+        var data = res && res.data;
+        if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { data = {}; } }
+        data = data || {};
+        var key = FETCH_REASON_KEYS[data.reason] || FETCH_REASON_KEYS.UNKNOWN;
+        var msg = GourdI18n.t('settings.providers.' + key);
+        if (data.status) msg = msg.replace('{0}', data.status);
+        showToast(msg, 'error');
+    }
+
     function fetchModels() {
         var apiUrl = $('#msProviderApiUrl').val();
         var apiKey = $('#msProviderApiKey').val();
@@ -725,6 +786,12 @@
             showToast(GourdI18n.t('settings.providers.api_url') + GourdI18n.t('common.required'), 'error');
             return;
         }
+
+        var requestId = ++fetchRequestId;
+        var requestSelectedName = selectedName;
+        var requestProviderName = currentProvider && currentProvider.name;
+        var requestApiUrl = apiUrl;
+        var requestStandard = standard;
 
         var $btn = $('#msProviderFetchModelsBtn');
         $btn.prop('disabled', true).html('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>');
@@ -738,11 +805,23 @@
                 standard: standard
             },
             success: function (res) {
+                if (requestId !== fetchRequestId || selectedName !== requestSelectedName
+                        || (currentProvider && currentProvider.name) !== requestProviderName
+                        || $('#msProviderApiUrl').val() !== requestApiUrl
+                        || ($('input[name="msProviderStandard"]:checked').val() || DEFAULT_STANDARD) !== requestStandard) {
+                    return; // Provider/表单已切换，丢弃旧请求结果
+                }
                 $btn.prop('disabled', false).html('<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>');
                 if (res.code === 200) {
                     try {
                         var data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
                         var models = data.data || data.models || data || [];
+                        if (!Array.isArray(models)) throw new Error('invalid models response');
+                        models = models.filter(function (m) { return !!(m && (m.id || m.name || (typeof m === 'string' && m))); });
+                        if (models.length === 0) {
+                            showToast(GourdI18n.t('settings.providers.fetch_empty_keep_existing'), 'info');
+                            return;
+                        }
                         // 记录已有模型的接口类型，拉取后尽量沿用
                         var prevStandards = {};
                         var prevEnabled = {};
@@ -780,6 +859,8 @@
                         fetchedModels = fetchedMapped;
                         // 加载 LLM 模型列表缓存，用于判断同步状态
                         loadLlmModelsCache(function () {
+                            if (requestId !== fetchRequestId || selectedName !== requestSelectedName
+                                    || (currentProvider && currentProvider.name) !== requestProviderName) return;
                             renderModelsList();
                             // 编辑模式下拉取结果即时生效
                             if (currentProvider) {
@@ -791,12 +872,12 @@
                         showToast(GourdI18n.t('settings.providers.fetch_models') + GourdI18n.t('settings.loop.operation_failed'), 'error');
                     }
                 } else {
-                    showToast(res.msg || GourdI18n.t('settings.providers.fetch_models') + GourdI18n.t('settings.loop.operation_failed'), 'error');
+                    showFetchFailure(res);
                 }
             },
             error: function (xhr) {
                 $btn.prop('disabled', false).html('<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>');
-                showToast(GourdI18n.t('settings.providers.fetch_models') + GourdI18n.t('settings.loop.operation_failed') + ': ' + (xhr.responseText || GourdI18n.t('settings.network_error')), 'error');
+                showToast(GourdI18n.t('settings.providers.fetch_network_error'), 'error');
             }
         });
     }
@@ -938,6 +1019,7 @@
                     // 若期间用户已切走（selectedName 变了）则不覆盖右栏
                     if (selectedName === name) {
                         renderDetailForm(res.data);
+                        detailKeyLoaded = true; // 真实密钥已回填，此后输入框为空=用户主动清空
                     }
                 } else {
                     showToast(res.msg || GourdI18n.t('settings.loop.operation_failed'), 'error');
@@ -986,12 +1068,24 @@
             enabled: currentProvider ? currentProvider.enabled !== false : true
         };
 
-        // 如果是编辑模式，添加 originalName
-        if (currentProvider) {
-            data.originalName = currentProvider.name;
+        // 如果是编辑模式，添加 originalName（以提交时缓存的名称查找旧记录）
+        var renameFrom = null;
+        // 捕获提交时正在编辑的对象：请求在途期间用户可能切到别的供应商，
+        // 回调必须改回这个对象，不能改到新选中的供应商上
+        var target = currentProvider;
+        if (target) {
+            data.originalName = target.name;
+            renameFrom = target.name;
+        }
+        // 密钥未知（详情尚未回填/详情拉取失败）且输入框为空：不提交该字段，避免空串覆盖真实密钥；
+        // 详情已回填后清空输入框=用户主动清空，照常提交空串由后端清除
+        var keySubmitted = true;
+        if (target && !detailKeyLoaded && !apiKey) {
+            delete data.apiKey;
+            keySubmitted = false;
         }
 
-        var url = currentProvider ? '/web/settings/providers/update' : '/web/settings/providers/add';
+        var url = target ? '/web/settings/providers/update' : '/web/settings/providers/add';
 
         $.ajax({
             url: url,
@@ -1000,22 +1094,40 @@
             data: JSON.stringify(data),
             success: function (res) {
                 if (res.code === 200) {
-                    if (currentProvider) {
+                    var stillEditing = (currentProvider === target); // 请求在途期间用户未切走
+                    if (target) {
+                        var renamed = !!(renameFrom && data.name !== renameFrom);
                         // 列表接口返回的 apiKey 是脱敏值，回填真实密钥，避免下次即时保存把脱敏值写进去
-                        currentProvider.apiKey = apiKey;
+                        //（本次未提交密钥时不动缓存，否则会把未知密钥记成空串）
+                        if (keySubmitted) target.apiKey = apiKey;
                         // 本地同步左栏缓存（模型数/接口/地址/超时/作用域/启用态）并重绘左栏，
                         // 不走整体 loadProvidersList，避免右栏重新渲染打断即时编辑
-                        currentProvider.models = models;
-                        currentProvider.standard = standard;
-                        currentProvider.apiUrl = apiUrl;
-                        currentProvider.scope = scope;
-                        currentProvider.timeout = data.timeout;
-                        currentProvider.enabled = data.enabled;
+                        target.models = models;
+                        target.standard = standard;
+                        target.apiUrl = apiUrl;
+                        target.scope = scope;
+                        target.timeout = data.timeout;
+                        target.enabled = data.enabled;
+                        target.name = data.name; // 改名成功后缓存切到新名称
                         var pIdx = -1;
                         providers.forEach(function (p, i) { if (p.name === data.name) pIdx = i; });
-                        if (pIdx >= 0) providers[pIdx] = currentProvider; else providers.push(currentProvider);
-                        renderProviderList();
-                        // 先同步生成运行时模型，再重载 LLM 缓存重绘模型列表，保证已同步徽标/开关态与运行时一致
+                        if (pIdx >= 0) providers[pIdx] = target; else providers.push(target);
+                        if (renamed) {
+                            // 本地拖拽顺序按名称存储，改名后同步替换，否则该项会掉到列表末尾
+                            renameProviderOrder(renameFrom, data.name);
+                            // 左栏整表刷新；仅在用户仍停留在该供应商时才接管选中并重填右栏
+                            //（详情接口回真实密钥）
+                            if (stillEditing) {
+                                selectedName = data.name;
+                                loadProvidersList();
+                                fillDetailFromCache(data.name);
+                            } else {
+                                loadProvidersList();
+                            }
+                        } else {
+                            renderProviderList();
+                        }
+                        // 先同步生成运行时模型（改名时后端已按新前缀迁移，这里按新名同步），再重载 LLM 缓存重绘模型列表，保证已同步徽标/开关态与运行时一致
                         syncModelsToLlm(data, function () {
                             loadLlmModelsCache(function () {
                                 renderModelsList();
@@ -1023,12 +1135,16 @@
                         });
                     } else {
                         syncModelsToLlm(data, null);
-                        // 新增成功：左栏刷新并选中新增项，右栏切换为其编辑详情
-                        selectedName = data.name;
+                        // 新增成功：左栏刷新并选中新增项，右栏切换为其编辑详情（用户已切走则不抢选中）
+                        if (stillEditing) selectedName = data.name;
                         loadProvidersList();
                     }
                 } else {
                     showToast(res.msg || GourdI18n.t('settings.save_failed'), 'error');
+                    // 失败时输入框与缓存不同步会残留脏值（如改名冲突后新名称滞留输入框），回退到缓存名
+                    if (target && currentProvider === target) {
+                        $('#msProviderName').val(target.name);
+                    }
                 }
             },
             error: function () {

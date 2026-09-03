@@ -16,6 +16,7 @@
 package com.gourdai.agent.simple;
 
 import com.gourdai.agent.*;
+import com.gourdai.core.portal.web.UsageSubmissionService;
 import org.noear.snack4.Feature;
 import org.noear.snack4.ONode;
 import com.gourdai.agent.exception.LlmNoReturnException;
@@ -394,6 +395,9 @@ public class SimpleAgent implements Agent<SimpleRequest, SimpleResponse> {
 
             if (response.getUsage() != null) {
                 trace.getMetrics().addUsage(response.getUsage());
+                if (config.getChatModel() != null) {
+                    UsageSubmissionService.recordSafely(config.getChatModel().getModel(), response.getUsage(), System.currentTimeMillis());
+                }
             }
 
             if (responseMessage.hasContent() && responseMessage.getMetadata().containsKey(Agent.META_AGENT)) {

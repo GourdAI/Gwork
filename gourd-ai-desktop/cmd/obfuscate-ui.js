@@ -20,6 +20,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 let JavaScriptObfuscator;
 try {
@@ -50,6 +51,36 @@ if (targets.length === 0) {
   fail('未在 ' + JS_DIR + ' 下找到任何 app-*.js');
 }
 
+/**
+ * 每个文件独享的标识符前缀。
+ *
+ * 【必需，勿删】混淆器除了重命名局部变量，还会在<b>文件顶层</b>注入自己的辅助函数
+ * （字符串数组解码器 `_0xXXXX`、stringArrayWrappers 等）。这些名字由混淆器自行随机
+ * 生成，只有 4 位十六进制（65536 空间），且 renameGlobals=false 只保护「源码里的」
+ * 全局名，管不到它们。本项目 31 个业务脚本各自独立混淆、又都以经典 <script> 共享同一
+ * 个全局作用域，按生日问题约几百分之一的概率就会撞名：后加载的文件覆盖先加载的同名
+ * 解码器，先加载文件再解码字符串时索引错位返回 undefined，运行期炸在毫不相干的位置。
+ *
+ * 2026-09-01 线上事故即由此而来：app-settings-mounts.js 与 app-context.js 同时生成了
+ * 顶层 `function _0x2112()`，导致 restoreContextIndicator 里 `undefined.charAt()` 抛错，
+ * 「切换历史会话」与「新建任务」两条路径同时失效（仅安装包复现，dev 明文模式正常）。
+ */
+function identifiersPrefixFor(file) {
+  const stem = path.basename(file, '.js');
+  return '_' + crypto.createHash('sha1').update(stem).digest('hex').slice(0, 8) + '_';
+}
+
+/** 提取产物中的顶层标识符（混淆器注入的解码器/包装器均为此形态），用于碰撞自检。 */
+function topLevelNames(code) {
+  const names = new Set();
+  let m;
+  const reFn = /(?:^|[;}])\s*function\s+([A-Za-z_$][\w$]*)\s*\(/g;
+  while ((m = reFn.exec(code))) names.add(m[1]);
+  const reVar = /^var\s+([A-Za-z_$][\w$]*)\s*=/gm;
+  while ((m = reVar.exec(code))) names.add(m[1]);
+  return names;
+}
+
 const options = {
   compact: true,
   target: 'browser',
@@ -76,12 +107,16 @@ const options = {
 
 let totalIn = 0;
 let totalOut = 0;
+const nameOwners = new Map();   // 顶层标识符 -> 首个产出它的文件
+const collisions = [];
 for (const file of targets) {
   const src = fs.readFileSync(file, 'utf8');
   totalIn += src.length;
   let result;
   try {
-    result = JavaScriptObfuscator.obfuscate(src, options).getObfuscatedCode();
+    result = JavaScriptObfuscator.obfuscate(src, Object.assign({}, options, {
+      identifiersPrefix: identifiersPrefixFor(file),
+    })).getObfuscatedCode();
   } catch (e) {
     fail('混淆失败 ' + path.basename(file) + ': ' + (e && e.message));
   }
@@ -92,8 +127,22 @@ for (const file of targets) {
   } catch (e) {
     fail('混淆产物语法校验失败 ' + path.basename(file) + ': ' + (e && e.message));
   }
+  // 顶层标识符碰撞自检：所有业务脚本共享同一全局作用域，重名即静默覆盖
+  const base = path.basename(file);
+  for (const name of topLevelNames(result)) {
+    const owner = nameOwners.get(name);
+    if (owner && owner !== base) {
+      collisions.push(name + ' (' + owner + ' ↔ ' + base + ')');
+    } else {
+      nameOwners.set(name, base);
+    }
+  }
   fs.writeFileSync(file, result, 'utf8');
   totalOut += result.length;
+}
+
+if (collisions.length > 0) {
+  fail('检测到跨文件顶层标识符碰撞，产物会在浏览器中互相覆盖：\n  - ' + collisions.join('\n  - '));
 }
 
 console.log('[obfuscate-ui] 已混淆 ' + targets.length + ' 个业务脚本 ('

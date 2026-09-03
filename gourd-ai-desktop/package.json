@@ -10,6 +10,7 @@
   "main": "main/index.js",
   "scripts": {
     "dev": "node main/dev-launch.js",
+    "test": "node --test test/**/*.test.js",
     "start": "electron .",
     "generate-icons": "electron cmd/generate-icons.js",
     "generate-jre": "node generate-jre.js",

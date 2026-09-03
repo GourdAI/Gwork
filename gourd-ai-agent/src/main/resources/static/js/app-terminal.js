@@ -115,11 +115,23 @@
         return d.innerHTML;
     }
 
+    /* 终端回滚缓冲上限（子节点个数）。
+       输出区原本只追加不裁剪，跑一次 mvn build 就是数万个节点常驻，只能手动点「清空」释放。
+       注：TERM_MAX_HEIGHT 是面板像素高度，与回滚量无关，不能当上限用。 */
+    var TERM_MAX_NODES = 4000;
+    function trimOutputBuffer() {
+        // 超限时从头部成批移除，保留最新输出（终端语义：旧输出可丢）
+        while (output.childNodes.length > TERM_MAX_NODES) {
+            output.removeChild(output.firstChild);
+        }
+    }
+
     // 追加原始输出（保留换行/空白，做 HTML 转义，剥离常见 ANSI 转义序列）
     function appendOutput(text) {
         var clean = stripAnsi(text);
         var atBottom = isScrolledToBottom();
         output.insertAdjacentHTML('beforeend', escHtml(clean));
+        trimOutputBuffer();
         if (atBottom) scrollToBottom();
     }
 
@@ -127,6 +139,7 @@
         var atBottom = isScrolledToBottom();
         output.insertAdjacentHTML('beforeend',
             '<span class="code-terminal-sys">' + escHtml(text) + '\n</span>');
+        trimOutputBuffer();
         if (atBottom) scrollToBottom();
     }
 

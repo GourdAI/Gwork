@@ -30,7 +30,19 @@
     var openFiles = [];           // [{path, name}]
     var activeFilePath = null;
     var editor = null;            // Monaco 编辑器实例（单实例，切换 model）
-    var docs = {};                // path -> {model, cleanVer, lang, large, dirty, diskChanged, viewState}
+    var docs = {};                // path -> {model, cleanVer, lang, large, dirty, diskChanged, viewState, contentSub}
+
+    /* 给指定文件的 model 挂内容变更监听（幂等：已挂过则直接返回）。
+       disposable 存进 docs[path].contentSub，由 closeFile / 淘汰逻辑统一 dispose。 */
+    function attachModelListener(path) {
+        var st = docs[path];
+        if (!st || !st.model || st.contentSub) return;
+        st.contentSub = st.model.onDidChangeContent(function () {
+            var cur = docs[path];
+            if (!cur || cur.model !== st.model) return;
+            markDirty(path, st.model.getAlternativeVersionId() !== cur.cleanVer);
+        });
+    }
     var LARGE_FILE_LIMIT = 1500000; // 超过约 1.5M 字符的文件降级为纯文本 + 关闭补全，避免卡顿
 
     // 一次性拉取用户主目录，作为“新建项目”对话框的默认父目录
@@ -78,8 +90,9 @@
             cursorSmoothCaretAnimation: 'off',
             // 布局自适应（容器 resize 自动重排）
             automaticLayout: true,
-            // 滚动条尺寸与全局规范一致（theme.css --scrollbar-size: 6px），颜色/圆角由 code.css 统一覆盖
-            scrollbar: { useShadows: false, verticalScrollbarSize: 6, horizontalScrollbarSize: 6 },
+            // 滚动条尺寸与全局规范一致（theme.css --scrollbar-size: 12px）；颜色/圆角/最小长度由 code.css 统一覆盖。
+            // Monaco 滑块默认铺满整个轨道宽，视觉收窄同样在 code.css 用透明内衬实现
+            scrollbar: { useShadows: false, verticalScrollbarSize: 12, horizontalScrollbarSize: 12 },
             wordBasedSuggestions: 'currentDocument',
             quickSuggestions: { other: true, comments: false, strings: false },
             suggest: { showKeywords: true },
@@ -89,17 +102,11 @@
         });
         // 保存快捷键（Ctrl/Cmd+S）
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, function () { saveActive(); });
-        // 内容变更：按 model 版本号判断 dirty（多标签下 model 独立，切换不串台）
-        editor.onDidChangeModel(function () {
-            var m = editor.getModel();
-            if (!m) return;
-            m.onDidChangeContent(function () {
-                if (!activeFilePath) return;
-                var st = docs[activeFilePath];
-                if (!st || st.model !== m) return;
-                markDirty(activeFilePath, m.getAlternativeVersionId() !== st.cleanVer);
-            });
-        });
+        // 内容变更：按 model 版本号判断 dirty（多标签下 model 独立，切换不串台）。
+        // 注意：监听必须按 model 只挂一次，不能写在 onDidChangeModel 里——那样每次 setModel
+        // （每点一次标签页）都会给同一个 model 再叠一个回调且 IDisposable 被丢弃，
+        // A→B→A 来回切即无界累积，导致每次击键同步跑 N 遍回调（输入发卡）。
+        // 改为在 attachModelListener 中按 docs[path] 登记 disposable，close 时统一释放。
         return editor;
     }
 
@@ -745,7 +752,8 @@
                 // 大文件降级：超阈值跳过语法着色与补全（Monaco 视口渲染本身不会像旧编辑器那样全量 DOM 卡顿）
                 var large = content.length > LARGE_FILE_LIMIT;
                 var model = monaco.editor.createModel(content, large ? 'plaintext' : info.langId);
-                docs[path] = { model: model, cleanVer: model.getAlternativeVersionId(), large: large, dirty: false, diskChanged: false, viewState: null };
+                docs[path] = { model: model, cleanVer: model.getAlternativeVersionId(), large: large, dirty: false, diskChanged: false, viewState: null, contentSub: null };
+                attachModelListener(path);
                 openFiles.push({ path: path, name: fileName });
                 renderTabs();
                 activateFile(path);
@@ -859,7 +867,8 @@
         if (st && st.dirty) {
             if (!window.confirm(GourdI18n.t('code.unsaved_confirm', baseName(path)))) return;
         }
-        // 释放 model（大文件标签必须释放，避免内存泄漏）
+        // 释放内容监听与 model（大文件标签必须释放，避免内存泄漏）
+        if (st && st.contentSub) { try { st.contentSub.dispose(); } catch (e) {} st.contentSub = null; }
         if (st && st.model) st.model.dispose();
         delete docs[path];
         openFiles = openFiles.filter(function (f) { return f.path !== path; });
@@ -876,7 +885,9 @@
     function closeAllFiles() {
         hidePreview();
         for (var p in docs) {
-            if (docs[p] && docs[p].model) docs[p].model.dispose();
+            if (!docs[p]) continue;
+            if (docs[p].contentSub) { try { docs[p].contentSub.dispose(); } catch (e) {} }
+            if (docs[p].model) docs[p].model.dispose();
         }
         openFiles = [];
         docs = {};

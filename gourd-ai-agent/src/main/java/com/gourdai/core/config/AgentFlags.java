@@ -87,106 +87,147 @@ public class AgentFlags {
     /** 旧品牌时期的马具目录名（仅用于启动时一次性迁移，勿再用于新路径拼接） */
     private static final String LEGACY_HARNESS_HOME = ".gourdai";
 
-    /**
-     * 当前目录（进程工作目录 user.dir）。
-     * <p>桌面端由 backend.js 以 {@code cwd=安装资源目录} 拉起后端，故此值即“安装目录”。</p>
-     */
+    /** 当前进程工作目录；项目级数据仍以此作为默认工作区根。 */
     public static String getUserDir() {
         return System.getProperty("user.dir");
     }
 
     /**
      * 用户主目录（操作系统真实 HOME）。
-     * <p>仅用于“目录选择器起点/默认父目录、向前端回报 homeDir、沙箱主目录判定”等
-     * <b>确需操作系统 HOME 语义</b>的场景；<b>不再</b>作为 {@code .gourdai} 全局区的落盘根。</p>
      */
     public static String getUserHome() {
         return System.getProperty("user.home");
     }
 
     /**
-     * 马具全局区落盘根（<b>安装目录</b>，与进程当前工作目录解耦）。
+     * 马具全局区落盘基目录（返回值不包含 {@code .gwork}）。
      *
-     * <p>解析顺序：系统属性 {@code -Dgwork.home} → 环境变量 {@code GWORK_HOME} →
-     * 兼容旧名 {@code -Dgourdai.home} / {@code GOURDAI_HOME}（品牌升级前的启动器/脚本仍在用）
-     * → 回退 {@code user.dir}。</p>
+     * <p>解析顺序：trim 后的系统属性 {@code -Dgwork.home} → 环境变量
+     * {@code GWORK_HOME} → 旧名 {@code -Dgourdai.home} / {@code GOURDAI_HOME}
+     * → {@code user.home}。显式 override 允许启动器把多个入口指向同一全局区。</p>
      *
-     * <p>桌面端由 {@code backend.js} 以 {@code cwd=安装资源目录} 拉起 web 后端，二者恰好一致；
-     * 但 <b>ACP 子进程</b>由编辑器从<b>工作区</b>拉起（{@code cwd=工作区}），若仍用 {@code user.dir}
-     * 会把全局区错误地指向工作区，导致读不到全局模型配置。故桌面端在拉起 Java 时统一注入
-     * {@code -Dgwork.home=<安装目录>}，使 web/桌面/CLI/ACP 四种入口解析到同一份全局配置。
-     * 纯 CLI 安装（无注入）时回退 {@code user.dir}，行为与历史一致。</p>
-     *
-     * <p>注意：全局区仅承载<b>配置/技能/子代理/命令/扩展</b>等跨工作区不变的数据；
-     * <b>会话、工作区记忆、channel 凭据</b>等随工作区走的数据走 {@link #getUserDir()}，不经此方法。</p>
+     * <p><b>行为变更（全局区统一到用户目录）</b>：兜底值由 {@code user.dir}（进程当前
+     * 工作目录）改为 {@code user.home}。桌面端与安装脚本生成的启动器都会显式注入
+     * {@code -Dgwork.home}，不受影响；但**直接 java -jar 且不带任何注入**的裸 CLI 用法，
+     * 全局区会从「当前目录/.gwork」变为「~/.gwork」，升级后位置发生变化，需在发布说明中告知。</p>
      */
     public static String getHarnessBase() {
-        String home = System.getProperty("gwork.home");
-        if (home == null || home.isEmpty()) {
-            home = System.getenv("GWORK_HOME");
+        String home = trimmed(System.getProperty("gwork.home"));
+        if (home == null) {
+            home = trimmed(System.getenv("GWORK_HOME"));
         }
-        if (home == null || home.isEmpty()) {
-            // 品牌升级（Gourd AI → GWork）旧名兼容：升级前的桌面端/启动器注入的旧属性仍有效
-            home = System.getProperty("gourdai.home");
+        if (home == null) {
+            home = trimmed(System.getProperty("gourdai.home"));
         }
-        if (home == null || home.isEmpty()) {
-            home = System.getenv("GOURDAI_HOME");
+        if (home == null) {
+            home = trimmed(System.getenv("GOURDAI_HOME"));
         }
-        if (home != null && !home.isEmpty()) {
-            return home;
+        return home != null ? home : trimmed(getUserHome());
+    }
+
+    private static String trimmed(String value) {
+        if (value == null) {
+            return null;
         }
-        return getUserDir();
+        String result = value.trim();
+        return result.isEmpty() ? null : result;
     }
 
     /**
-     * 一次性迁移：把旧品牌时期的 {@code .gourdai} 目录整体升级为 {@code .gwork}。
-     *
-     * <p>对<b>全局区</b>（{@code getHarnessBase()}）与<b>工作区</b>（{@code user.dir}，
-     * 二者不同时）各执行一次：若旧目录存在且新目录尚不存在，则整体改名（原子 rename，
-     * 数据零丢失）；新目录已存在则不动旧目录（保守起见绝不删除，避免历史“配置丢失”事故复发）。
-     * 改名前会先把 2026-08 期间误产生的嵌套 {@code .gourdai/.gourdai} 内容上移归位。</p>
-     *
-     * <p>必须由 {@code App.main} 在<b>读取任何配置之前</b>调用；ACP/CLI 启动器直连
-     * java -jar 不经桌面端 Node，因此迁移不能只依赖 Node 侧。</p>
+     * 将全局根中的旧 {@code .gourdai} 兼容合并到 {@code .gwork}。
+     * 项目根不在此处理；项目级旧目录由 {@link com.gourdai.core.portal.web.SessionLocator} 懒迁移。
+     * 目标内容优先补缺，任何失败仅记录日志，不阻断启动。
      */
     public static void migrateLegacyHarnessHome() {
         try {
             String base = getHarnessBase();
-            if (base != null && !base.isEmpty()) {
-                migrateLegacyDir(base);
-            }
-            String userDir = getUserDir();
-            if (userDir != null && !userDir.isEmpty() && !userDir.equals(base)) {
-                migrateLegacyDir(userDir);
+            if (base != null && !base.trim().isEmpty()) {
+                migrateLegacyDir(Paths.get(base.trim()));
             }
         } catch (Throwable e) {
             LOG.warn("[AgentFlags] Legacy harness home migration failed: {}", e.getMessage());
         }
     }
 
-    private static void migrateLegacyDir(String root) throws java.io.IOException {
-        Path legacy = Paths.get(root, LEGACY_HARNESS_HOME);
-        Path current = Paths.get(root, harnessHome);
-        if (!Files.isDirectory(legacy) || Files.exists(current)) {
-            return; // 无旧数据，或新目录已存在（不覆盖、不删除旧目录）
+    private static void migrateLegacyDir(Path root) throws java.io.IOException {
+        Path legacy = root.resolve(LEGACY_HARNESS_HOME);
+        Path current = root.resolve(harnessHome);
+        if (!Files.isDirectory(legacy)) {
+            return;
         }
-        // 先上移历史嵌套遗留（.gourdai/.gourdai），避免旧 bug 数据被埋进新目录
-        Path nested = legacy.resolve(LEGACY_HARNESS_HOME);
-        if (Files.isDirectory(nested)) {
-            try (java.util.stream.Stream<Path> children = Files.list(nested)) {
-                for (Path child : children.toList()) {
-                    Files.move(child, legacy.resolve(child.getFileName()),
-                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        if (!Files.exists(current)) {
+            Files.createDirectories(current);
+        }
+        // 先整树复制，全部成功后才回收源：中途失败时旧目录仍然完整，下次启动可重跑；
+        // 逐文件 move 会在失败时把数据劈成两半，故不再使用。
+        java.util.List<Path> copied = new java.util.ArrayList<>();
+        mergeLegacyContents(legacy, current, true, copied);
+        // 只回收**本次确认复制成功**的源文件。不能改用「目标存在就删源」判定：
+        // 冲突项（目标已有同名文件，源压根没被复制）会被误删，比旧 move 实现更激进。
+        for (Path source : copied) {
+            try {
+                Files.deleteIfExists(source);
+            } catch (Exception e) {
+                LOG.warn("[AgentFlags] 旧文件回收失败 {}: {}", source, e.getMessage());
+            }
+        }
+        deleteEmptyTree(legacy);
+        LOG.info("[AgentFlags] 旧马具目录已合并: {} → {}", legacy, current);
+    }
+
+    /**
+     * 复制旧目录内容到新目录，目标已存在则保留目标（补缺语义）。
+     *
+     * @param topLevel {@code bin} 与嵌套旧根只在**迁移源根部**具有特殊含义。若在每层递归都跳过
+     *                 {@code bin}，会静默丢弃 {@code skills/<name>/bin}、{@code extensions/<name>/bin}
+     *                 等合法的嵌套数据。
+     * @param copied   收集复制成功的源文件，供调用方在整树完成后统一回收。
+     */
+    private static void mergeLegacyContents(Path source, Path target, boolean topLevel,
+                                            java.util.List<Path> copied) throws java.io.IOException {
+        try (java.util.stream.Stream<Path> children = Files.list(source)) {
+            for (Path child : children.toList()) {
+                String name = child.getFileName().toString();
+                if (topLevel) {
+                    // 根部 bin 是旧启动器，由 cli-provision/安装脚本重建，不迁移。
+                    if ("bin".equals(name)) {
+                        continue;
+                    }
+                    // 修复历史误写入的 .gourdai/.gourdai：嵌套旧根内容直接并入当前根。
+                    if (LEGACY_HARNESS_HOME.equals(name) && Files.isDirectory(child)) {
+                        mergeLegacyContents(child, target, true, copied);
+                        continue;
+                    }
+                }
+                Path destination = target.resolve(name);
+                if (Files.isDirectory(child)) {
+                    if (Files.exists(destination) && !Files.isDirectory(destination)) {
+                        continue;
+                    }
+                    if (!Files.exists(destination)) {
+                        Files.createDirectories(destination);
+                    }
+                    mergeLegacyContents(child, destination, false, copied);
+                } else if (!Files.exists(destination)) {
+                    Files.createDirectories(destination.getParent());
+                    Files.copy(child, destination);
+                    copied.add(child);
                 }
             }
-            try {
-                Files.deleteIfExists(nested); // 上移后应为空目录
-            } catch (java.io.IOException e) {
-                // 仍非空（或权限受限）则随整目录 rename 一并带走，不影响迁移
-            }
         }
-        Files.move(legacy, current);
-        LOG.info("[AgentFlags] 旧马具目录已升级: {} → {}", legacy, current);
+    }
+
+    private static void deleteEmptyTree(Path directory) {
+        try {
+            if (Files.isDirectory(directory)) {
+                try (java.util.stream.Stream<Path> children = Files.list(directory)) {
+                    children.forEach(AgentFlags::deleteEmptyTree);
+                }
+                Files.deleteIfExists(directory);
+            }
+        } catch (Exception ignored) {
+            // 兼容迁移失败不应阻断启动；下次启动继续尝试
+        }
     }
 
     public static String getUserExtensions() {

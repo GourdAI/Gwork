@@ -20,6 +20,31 @@ public class SessionLocatorTest {
     }
 
     @Test
+    public void testWorkspaceAndGlobalBaseAreDistinct() throws Exception {
+        Path workspace = Files.createTempDirectory("locator-workspace");
+        Path globalBase = Files.createTempDirectory("locator-global-base");
+        Path project = Files.createTempDirectory("locator-project-distinct");
+        try {
+            SessionLocator locator = new SessionLocator(workspace.toString(), globalBase.toString(), ".gwork/sessions");
+            String sid = "work-distinct";
+            locator.bindSessionRoot(sid, project.toString());
+            Assertions.assertEquals(globalBase.resolve(".gwork/sessions").resolve("work-global")
+                    .toAbsolutePath().normalize().toString(), locator.resolveDir("work-global").getAbsolutePath());
+            Assertions.assertEquals(project.resolve(".gwork/sessions").resolve(sid)
+                    .toAbsolutePath().normalize().toString(), locator.resolveDir(sid).getAbsolutePath());
+            Assertions.assertEquals(globalBase.resolve(".gwork/sessions").toAbsolutePath().normalize().toString(),
+                    locator.globalSessionsRoot().getAbsolutePath());
+            locator.bindSessionRoot("work-index", project.toString());
+            Assertions.assertTrue(Files.isRegularFile(globalBase.resolve(".gwork/session-roots.json")));
+            Assertions.assertFalse(Files.exists(workspace.resolve(".gwork/session-roots.json")));
+        } finally {
+            deleteRecursively(workspace.toFile());
+            deleteRecursively(globalBase.toFile());
+            deleteRecursively(project.toFile());
+        }
+    }
+
+    @Test
     public void testUnifiedPrefix() {
         Assertions.assertEquals("work-", SessionLocator.PREFIX_WORK, "会话 ID 统一 work- 前缀");
     }

@@ -204,7 +204,7 @@ body.code-mode .automation-view { display: none !important; }
 
 /* ---- 模型选择器：复用 app.css 的 .model-selector 视觉，仅补尺寸 ---- */
 .auto-model-selector .model-selector-current { max-width: 220px; }
-.auto-model-selector .model-dropdown { min-width: 260px; max-width: 340px; }
+.auto-model-selector .model-dropdown { min-width: var(--dropdown-w-md); max-width: var(--dropdown-w-max); }
 
 /* ===== 高级 / 操作区 ===== */
 .auto-advanced-toggle {

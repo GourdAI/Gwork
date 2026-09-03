@@ -280,8 +280,14 @@ public class HarnessEngine {
         return options.getCompressionMaxMessages();
     }
 
-    public int getCompressionMaxTokens() {
-        return options.getCompressionMaxTokens();
+    public long getCompressionDefaultContextLength() {
+        return options.getCompressionDefaultContextLength();
+    }
+
+    /** 当前实际使用的压缩回退上下文长度。 */
+    public long getEffectiveCompressionDefaultContextLength() {
+        ContextCompressionInterceptor interceptor = options.getCompressionInterceptor();
+        return interceptor == null ? options.getCompressionDefaultContextLength() : interceptor.getDefaultContextLength();
     }
 
     public String getCompressionModel() {
@@ -469,15 +475,17 @@ public class HarnessEngine {
         options.setSessionWindowSize(sessionWindowSize);
     }
 
-    public void setCompressionThreshold(Integer maxMessages, Integer maxTokens) {
+    public void setCompressionThreshold(Integer maxMessages) {
         if (maxMessages != null) {
             options.setCompressionMaxMessages(maxMessages);
             options.getCompressionInterceptor().setMaxMessages(maxMessages);
         }
+    }
 
-        if (maxTokens != null) {
-            options.setCompressionMaxTokens(maxTokens);
-            options.getCompressionInterceptor().setMaxTokens(maxTokens);
+    public void setCompressionDefaultContextLength(Long defaultContextLength) {
+        if (defaultContextLength != null && defaultContextLength > 0L) {
+            options.setCompressionDefaultContextLength(defaultContextLength);
+            options.getCompressionInterceptor().setDefaultContextLength(defaultContextLength);
         }
     }
 
@@ -788,13 +796,14 @@ public class HarnessEngine {
 
             options.setCompressionInterceptor(new ContextCompressionInterceptor(
                     options.getCompressionMaxMessages(),
-                    options.getCompressionMaxTokens(),
-                    options.getModelRetries(),
                     () -> getModelOrMain(options.getCompressionModel()),
                     strategy));
-            //同步初始压缩触发比例（拦截器构造器不含该参数，需显式注入）
-            options.getCompressionInterceptor().setCompressionRatio(options.getCompressionRatio());
         }
+        // 无论默认或自定义实例，HarnessOptions 都是运行时配置真源。
+        options.getCompressionInterceptor().setMaxMessages(options.getCompressionMaxMessages());
+        options.getCompressionInterceptor().setMaxRetries(options.getModelRetries());
+        options.getCompressionInterceptor().setDefaultContextLength(options.getCompressionDefaultContextLength());
+        options.getCompressionInterceptor().setCompressionRatio(options.getCompressionRatio());
 
         //停止循环拦截器默认处理
         if (options.getStopLoopInterceptor() == null) {
@@ -1206,9 +1215,13 @@ public class HarnessEngine {
             return this;
         }
 
-        public Builder compressionThreshold(Integer maxMessages, Integer maxTokens) {
+        public Builder compressionThreshold(Integer maxMessages) {
             options.setCompressionMaxMessages(maxMessages);
-            options.setCompressionMaxTokens(maxTokens);
+            return this;
+        }
+
+        public Builder compressionDefaultContextLength(Long defaultContextLength) {
+            options.setCompressionDefaultContextLength(defaultContextLength);
             return this;
         }
 

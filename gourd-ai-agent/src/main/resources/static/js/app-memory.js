@@ -53,6 +53,7 @@
         if (typeof window.closeSkills === 'function') window.closeSkills();
         if (typeof window.closeChannel === 'function') window.closeChannel();
         if (typeof window.closeModelSettings === 'function') window.closeModelSettings();
+        if (typeof window.closeUsage === 'function') window.closeUsage();
         $('#welcomeView').hide();
         $('#chatView').removeClass('active');
         $view.addClass('active');

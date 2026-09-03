@@ -22,7 +22,7 @@ public class OpenAIModelsAdapter implements ModelsAdapter {
 
     @Override
     public List<ModelInfo> fetchModels(String baseUrl, Map<String, String> headers, String apiKey) {
-        String modelsUrl = baseUrl + "/v1/models";
+        String modelsUrl = ModelsHttp.requireHttpUrl(deriveModelsUrl(baseUrl), "OpenAI");
         List<ModelInfo> result = new ArrayList<>();
 
         try {
@@ -36,12 +36,21 @@ public class OpenAIModelsAdapter implements ModelsAdapter {
                 http.header("Authorization", "Bearer " + apiKey);
             }
 
-            String body = http.get();
+            String body = ModelsHttp.getBody(http, "OpenAI");
 
-            ONode root = ONode.ofJson(body);
+            ONode root;
+            try {
+                root = ONode.ofJson(body);
+            } catch (Throwable e) {
+                throw new ModelsFetchException(ModelsFetchReason.INVALID_RESPONSE, 200,
+                        "[OpenAI] invalid JSON response", e);
+            }
             ONode data = root.get("data");
-            if (data.isArray()) {
-                for (ONode item : data.getArray()) {
+            if (data == null || !data.isArray()) {
+                throw new ModelsFetchException(ModelsFetchReason.INVALID_RESPONSE, 200,
+                        "[OpenAI] missing data array");
+            }
+            for (ONode item : data.getArray()) {
                     ModelInfo modelInfo = item.toBean(ModelInfo.class);
 
                     // supported_endpoint_types 为下划线命名，toBean 不会自动映射；
@@ -57,12 +66,23 @@ public class OpenAIModelsAdapter implements ModelsAdapter {
                     }
 
                     result.add(modelInfo);
-                }
             }
+        } catch (ModelsFetchException e) {
+            log.warn("[OpenAI] model fetch failed: reason={}, status={}", e.getReason(), e.getStatus());
+            throw e;
         } catch (Exception e) {
-            log.warn("[OpenAI] Error fetching models from {}: {}", modelsUrl, e.getMessage());
+            log.warn("[OpenAI] invalid models response", e);
+            throw new ModelsFetchException(ModelsFetchReason.INVALID_RESPONSE, 200,
+                    "[OpenAI] invalid models response", e);
         }
 
         return result;
+    }
+
+    private String deriveModelsUrl(String baseUrl) {
+        String base = baseUrl == null ? "" : baseUrl.replaceAll("/+$", "");
+        if (base.endsWith("/models")) return base;
+        if (base.endsWith("/v1")) return base + "/models";
+        return base + "/v1/models";
     }
 }

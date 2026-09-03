@@ -91,6 +91,27 @@ function appendSystemNotice(sess, text) {
     if (sess.sessionId === activeSessionId) scrollToBottom(true);
 }
 
+function appendSteerNote(sess, item) {
+    if (!sess || !item || !item.steerId) return;
+    if ($(sess.container).find('[data-steer-id="' + item.steerId + '"]').length) return;
+
+    finishThinkingBlock(sess);
+    ensureAssistantBubble(sess);
+
+    var note = $('<div>').addClass('steer-note')[0];
+    note.setAttribute('data-steer-id', item.steerId);
+    if (item.runId || sess.activeRunId) note.setAttribute('data-run-id', item.runId || sess.activeRunId);
+    note.innerHTML = '<span class="steer-note-badge">' + escapeHtml(GourdI18n.t('streaming.steer_tag')) + '</span>'
+        + '<span class="steer-note-text"></span>';
+    $(note).find('.steer-note-text').text(item.text || '');
+    insertBeforeActions(sess, note);
+
+    // 推进正文指针，让后续 AI 正文落在插话卡片之后；不清 toolCardsById/currentBatch。
+    advanceBodyPointer(sess, sess, function(freshMd) { insertBeforeActions(sess, freshMd); });
+    if (sess.sessionId === activeSessionId) scrollToBottom(true);
+}
+window.appendSteerNote = appendSteerNote;
+
 function ensureAssistantBubble(sess) {
     if (!sess.currentBubbleEl) {
         removeThinking(sess);
@@ -836,11 +857,78 @@ function resolveAgentCardBody(sess, args) {
     return st ? st.bodyEl : null;
 }
 
+/* 归一化批量元数据：允许 action_start/action_end 任一侧缺帧；字段不完整时保留 batchId/size，
+   由插入逻辑按到达顺序分配槽位，避免批量卡片退化成互相套叠的普通卡片。 */
+function normalizeBatchMeta(batchMeta) {
+    if (!batchMeta || typeof batchMeta !== 'object') return null;
+    var batchId = batchMeta.batchId == null ? '' : String(batchMeta.batchId).trim();
+    var batchSize = Number(batchMeta.batchSize);
+    if (!batchId || !isFinite(batchSize) || batchSize < 2 || Math.floor(batchSize) !== batchSize) return null;
+    var batchIndex = Number(batchMeta.batchIndex);
+    var hasIndex = isFinite(batchIndex) && Math.floor(batchIndex) === batchIndex
+        && batchIndex >= 0 && batchIndex < batchSize;
+    return { batchId: batchId, batchIndex: hasIndex ? batchIndex : null, batchSize: batchSize, degraded: !hasIndex };
+}
+
+/* 根据 action_start/action_end 共享的批量元数据建组并插入卡片。缺少 index 时按当前空槽顺序兜底。 */
+function appendCardToBatch(sess, card, batchMeta, insertAgentBody) {
+    var meta = normalizeBatchMeta(batchMeta);
+    if (!meta) return false;
+    if (!sess.toolBatchesById) sess.toolBatchesById = {};
+    var batchKey = (sess.currentRunId || '') + '|' + meta.batchId;
+    var batch = sess.toolBatchesById[batchKey];
+    if (!batch || !document.contains(batch.groupEl)) {
+        var group = $('<div>').addClass('tool-batch-group')[0];
+        if (sess.currentRunId) group.setAttribute('data-run-id', sess.currentRunId);
+        group.setAttribute('data-batch-id', meta.batchId);
+        group.innerHTML = '<div class="tool-batch-header">'
+            + '<span class="tool-type-icon"></span>'
+            + '<span class="tool-status-icon loading"></span>'
+            + '<span class="tool-batch-title"></span>'
+            + '<span class="tool-batch-progress"></span>'
+            + '</div>'
+            + '<div class="batch-tool-items"></div>';
+        $(group).find('.tool-batch-header').on('click', function() { $(group).toggleClass('expanded'); });
+        if (window.cliPrintSimplified === false) $(group).addClass('expanded');
+        if (insertAgentBody) {
+            $(insertAgentBody).append(group);
+            followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
+        } else {
+            insertBeforeActions(sess, group);
+        }
+        batch = { groupEl: group, batchSize: meta.batchSize, doneCount: 0,
+            slots: new Array(meta.batchSize), agentBody: insertAgentBody || null };
+        sess.toolBatchesById[batchKey] = batch;
+    }
+    var slot = meta.batchIndex;
+    if (slot == null || batch.slots[slot]) {
+        slot = -1;
+        for (var i = 0; i < batch.slots.length; i++) {
+            if (!batch.slots[i]) { slot = i; break; }
+        }
+        // 同一批次槽位已满时不覆盖已渲染卡片，退回普通卡片插入。
+        if (slot < 0) return false;
+    }
+    batch.slots[slot] = card;
+    card.setAttribute('data-batch-key', batchKey);
+    card.setAttribute('data-batch-index', slot);
+    if (meta.degraded) card.setAttribute('data-batch-degraded', '1');
+    var itemsEl = $(batch.groupEl).find('.batch-tool-items')[0];
+    var fragment = document.createDocumentFragment();
+    for (var si = 0; si < batch.slots.length; si++) if (batch.slots[si]) fragment.appendChild(batch.slots[si]);
+    itemsEl.appendChild(fragment);
+    updateBatchGroupHeaderExplicit(batch);
+    return true;
+}
+window.normalizeBatchMeta = normalizeBatchMeta;
+
 /* action_start：工具调用前（来源引擎 ActionChunk）提前渲染 loading 卡片骨架。
    - 有 actionId（并发/并行场景）：卡片按 id 登记到 sess.toolCardsById，action_end 靠 id 精确配对，
-     不再依赖到达顺序；同一并行批次（短时间窗口内连续到达）的只读工具卡片归入同一「批量容器」分组展示。
+     不再依赖到达顺序；后端下发 batchId/batchIndex/batchSize 时归入显式批量容器分组展示。
    - 无 actionId（旧数据/兼容）：退回原有 sess.pendingToolCard 位置配对逻辑，行为不变。 */
-function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agentBody) {
+function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agentBody, batchMeta) {
+    if (actionId && sess.completedActionIds && sess.completedActionIds[actionId]) return;
+    batchMeta = normalizeBatchMeta(batchMeta);
     ensureAssistantBubble(sess);
 
     var argsStr = formatToolArgsStr(args);
@@ -851,6 +939,7 @@ function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agent
         card.setAttribute('data-run-id', sess.currentRunId);
     }
     if (actionId) card.setAttribute('data-action-id', actionId);
+    if (toolName) card.setAttribute('data-tool-name', toolName);
     if (window.cliPrintSimplified === false) $(card).addClass('expanded');
     card.innerHTML = '<div class="tool-card-header">'
         + '<span class="tool-type-icon">' + toolTypeIcon(toolName) + '</span>'
@@ -871,65 +960,23 @@ function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agent
     var insertAgentBody = agentBody || resolveAgentCardBody(sess, args);
 
     if (actionId && !sess.approvedToolCard) {
-        // id 模式：登记卡片，供 action_end 精确回填；并做批量分组
+        // id 模式：登记卡片，供 action_end 精确回填；后端显式批次时归入批量容器
         // （HITL 审批结果回填态例外——让位给位置配对，复用审批卡，避免多卡）
         if (!sess.toolCardsById) sess.toolCardsById = {};
+        if (sess.toolCardsById[actionId]) {
+            // 重复 action_start：忽略，不建第二张卡
+            return;
+        }
         sess.toolCardsById[actionId] = card;
 
-        var now = Date.now();
-        // 回放态：所有 chunk 瞬时到达，用真实时钟会把全部卡片错归为同一批次。
-        // 改用持久化的 createdAt 作为时钟（由 replaySession 写入 sess._replayClock），
-        // 还原真实的到达间隙，使并行批量分组与流式时一致。
-        if (sess._replaying && typeof sess._replayClock === 'number') now = sess._replayClock;
-        var BATCH_WINDOW = 800; // ms：窗口内连续到达的 start 视为同一并行批次
-        var batch = sess.currentBatch;
-            // 归属守卫：既有批次属于某智能体容器而本卡属于另一作用域（主对话或其他智能体）时，
-            // 不复用该批次，强制新开分组，避免不同智能体的工具卡混进同一个批量分组
-            var batchOwner = batch ? (batch.agentBody || null) : null;
-            var ownerMismatch = batch && (batchOwner || insertAgentBody) && batchOwner !== insertAgentBody;
-            if (batch && !ownerMismatch && (now - batch.lastStartAt) <= BATCH_WINDOW && document.contains(batch.groupEl)) {
-            // 归入既有批量分组。必须从 batch.groupEl 内找 items 容器：同一智能体卡片内可能
-            // 先后出现多个批量分组，按 insertAgentBody 范围搜索会命中旧的（已结束的）分组容器
-            var items = $(batch.groupEl).find('.batch-tool-items');
-            items.append(card);
-            batch.count++;
-            batch.lastStartAt = now;
-            updateBatchGroupHeader(batch);
+        // 显式或降级批次：统一由共享插入器建组；缺少 batchIndex 时按到达顺序放入空槽。
+        if (appendCardToBatch(sess, card, batchMeta, insertAgentBody)) {
+            // 已归入批次，继续走统一滚动收尾。
+        } else if (insertAgentBody) {
+            $(insertAgentBody).append(card);
+            followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
         } else {
-            // 开启新的批量分组容器（首个 start 先建组；若最终只有一个，收尾时降级为普通单卡样式）
-            var group = $('<div>').addClass('tool-batch-group')[0];
-            if (sess.currentRunId) group.setAttribute('data-run-id', sess.currentRunId);
-            group.innerHTML = '<div class="tool-batch-header">'
-                + '<span class="tool-type-icon"></span>'
-                + '<span class="tool-status-icon loading"></span>'
-                + '<span class="tool-batch-title"></span>'
-                + '<span class="tool-batch-progress"></span>'
-                + '</div>'
-                + '<div class="batch-tool-items"></div>';
-            $(group).find('.tool-batch-header').on('click', function() {
-                $(group).toggleClass('expanded');
-            });
-            if (window.cliPrintSimplified === false) $(group).addClass('expanded');
-            $(group).find('.batch-tool-items').append(card);
-
-            // 决定插入位置
-            if (insertAgentBody) {
-                // 子代理内部：插入 .agent-card-body
-                $(insertAgentBody).append(group);
-                followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
-            } else {
-                // 主代理：正常插入气泡
-                insertBeforeActions(sess, group);
-            }
-            sess.currentBatch = {
-                groupEl: group,
-                count: 1,
-                doneCount: 0,
-                lastStartAt: now,
-                toolName: toolName,
-                agentBody: insertAgentBody || null
-            };
-            updateBatchGroupHeader(sess.currentBatch);
+            insertBeforeActions(sess, card);
         }
     } else {
         // 兼容路径：无 id，沿用位置配对
@@ -948,50 +995,87 @@ function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agent
     if (sess.sessionId === activeSessionId) scrollToBottom();
 }
 
-/* 更新批量分组头部：类型图标 + 标题（正在读取 N 个）+ 进度（done/total） */
+/* 批量分组标题文案：单一工具用该工具名，混合工具用通用「工具」。
+   name/count 一并交给 chat.batch_tool_title 模板，避免手工拼接——各语言的词序与
+   词间空格不同（如 en 需要 "Batch Read"、zh 需要「批量读取」），拼接会丢空格。 */
+function batchTitleText(toolName, total) {
+    var name = toolName ? localizeToolName(toolName, null) : GourdI18n.t('chat.tools');
+    return GourdI18n.t('chat.batch_tool_title', { name: name, count: total });
+}
+
+/* 更新批量分组头部：类型图标 + 标题 + 进度。
+   兼容旧 currentBatch 结构（有 toolName/count）和新显式批次结构（有 batchSize/slots）。 */
 function updateBatchGroupHeader(batch) {
     if (!batch || !batch.groupEl) return;
     var iconEl = $(batch.groupEl).find('.tool-type-icon')[0];
     var titleEl = $(batch.groupEl).find('.tool-batch-title')[0];
     var progEl = $(batch.groupEl).find('.tool-batch-progress')[0];
-    if (iconEl) iconEl.textContent = toolTypeIcon(batch.toolName);
-    var cn = localizeToolName(batch.toolName, null);
+    var total = batch.batchSize || batch.count || 0;
+    var done = batch.doneCount || 0;
+    if (progEl) progEl.textContent = done + '/' + total;
+    if (iconEl) iconEl.textContent = toolTypeIcon(batch.toolName || null);
     if (titleEl) {
-        titleEl.textContent = GourdI18n.t('chat.batch_tool') + cn + ' · ' + batch.count + ' ' + GourdI18n.t('chat.items');
-        titleEl.setAttribute('data-i18n-batch-tool', batch.toolName == null ? '' : batch.toolName);
-        titleEl.setAttribute('data-i18n-batch-count', batch.count);
+        titleEl.textContent = batchTitleText(batch.toolName || null, total);
+        titleEl.setAttribute('data-i18n-batch-tool', batch.toolName || '');
+        titleEl.setAttribute('data-i18n-batch-count', total);
     }
-    if (progEl) progEl.textContent = batch.doneCount + '/' + batch.count;
 }
 
-/* 批量分组收尾：全部完成后头部转完成态；若分组内只有 1 项，降级为普通单卡（去掉分组外壳），
-   避免非并行场景平白多一层分组 UI。 */
-function finishBatchGroup(sess, batch) {
+/* 显式批次头部更新（方案 B）：混合工具名用通用文案，图标用通用工具图标 */
+function updateBatchGroupHeaderExplicit(batch) {
+    if (!batch || !batch.groupEl) return;
+    var iconEl = $(batch.groupEl).find('.tool-type-icon')[0];
+    var titleEl = $(batch.groupEl).find('.tool-batch-title')[0];
+    var progEl = $(batch.groupEl).find('.tool-batch-progress')[0];
+    var total = batch.batchSize || 0;
+    var done = batch.doneCount || 0;
+    var presentCount = batch.slots ? batch.slots.filter(Boolean).length : 0;
+    if (progEl) progEl.textContent = done + '/' + total;
+    // 图标：若所有已到达卡片工具名相同则用该图标，否则用通用工具图标
+    var names = batch.slots ? batch.slots.filter(Boolean).map(function(c) { return c.getAttribute && c.getAttribute('data-tool-name'); }) : [];
+    var uniqueNames = names.filter(function(n, i, a) { return n && a.indexOf(n) === i; });
+    var iconTool = uniqueNames.length === 1 ? uniqueNames[0] : null;
+    if (iconEl) iconEl.textContent = toolTypeIcon(iconTool);
+    if (titleEl) {
+        titleEl.textContent = batchTitleText(iconTool, total);
+        // 混合工具名写空串：relocalizeDynamicLabels 靠属性存在与否选中元素，
+        // 不写属性会让批量标题在切换语言时整体漏译。
+        titleEl.setAttribute('data-i18n-batch-tool', iconTool || '');
+        titleEl.setAttribute('data-i18n-batch-count', total);
+    }
+}
+
+/* 批量卡片完成计数：无论结果来自 action_start 配对还是 action_end 兜底，都只计一次。 */
+function markBatchCardDone(sess, card) {
+    if (!sess || !card || !card.getAttribute) return;
+    var batchKey = card.getAttribute('data-batch-key');
+    if (!batchKey || !sess.toolBatchesById || !sess.toolBatchesById[batchKey]) return;
+    var batch = sess.toolBatchesById[batchKey];
+    if (card.hasAttribute('data-batch-done')) return;
+    card.setAttribute('data-batch-done', '1');
+    batch.doneCount = (batch.doneCount || 0) + 1;
+    updateBatchGroupHeaderExplicit(batch);
+    if (batch.doneCount >= batch.batchSize) finishBatchGroup(sess, batch, batchKey);
+}
+
+/* 批量分组收尾：全部完成后头部转完成态。方案 A 允许部分 start/end 缺失，
+   因此 finishStream 仍会对未闭合分组做最终视觉兜底。 */
+function finishBatchGroup(sess, batch, batchKey) {
     if (!batch || !batch.groupEl) return;
     var group = batch.groupEl;
-
-    if (batch.count <= 1) {
-        // 只有一项：把内部单卡提升到分组所在位置，移除分组外壳
-        var only = $(group).find('.batch-tool-items > .tool-card').first()[0];
-        if (only && group.parentNode) {
-            group.parentNode.insertBefore(only, group);
-            group.parentNode.removeChild(group);
-        }
-    } else {
-        var icon = $(group).find('.tool-batch-header .tool-status-icon').first()[0];
-        if (icon) {
-            // 批量组统一绿标；纯色圆点，不放内部图标；
-            // 延迟切换确保用户能看到 loading 绿点闪烁。
-            setTimeout(function() {
-                if (icon) {
-                    icon.className = 'tool-status-icon done';
-                    icon.innerHTML = '';
-                }
-            }, 300);
-        }
+    var icon = $(group).find('.tool-batch-header .tool-status-icon').first()[0];
+    if (icon) {
+        setTimeout(function() {
+            if (icon) {
+                icon.className = 'tool-status-icon done';
+                icon.innerHTML = '';
+            }
+        }, 300);
     }
-
-    if (sess.currentBatch === batch) sess.currentBatch = null;
+    // 从 toolBatchesById 移除（已完成的批次无需继续持有）
+    if (batchKey && sess.toolBatchesById) {
+        delete sess.toolBatchesById[batchKey];
+    }
 }
 
 /* 统一填充工具卡片结果体：命中专用 renderer 则用之，否则纯文本兜底；
@@ -1035,12 +1119,15 @@ function appendExpandFullBtn(sess, bodyEl, toolName, args, meta) {
     bodyEl.appendChild(btn);
 }
 
-function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, meta, agentBody) {
+function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, meta, agentBody, batchMeta) {
     // id 分支：并发/并行场景按 actionId 精确回填对应卡片（不依赖到达顺序），并推进批量分组进度。
     // 若正处于 HITL 审批结果回填态（sess.approvedToolCard 存在），让位给下方审批卡复用逻辑，避免两张卡。
+    if (actionId && sess.completedActionIds && sess.completedActionIds[actionId]) return;
     if (actionId && !sess.approvedToolCard && sess.toolCardsById && sess.toolCardsById[actionId]) {
         var idCard = sess.toolCardsById[actionId];
         delete sess.toolCardsById[actionId];
+        if (!sess.completedActionIds) sess.completedActionIds = {};
+        sess.completedActionIds[actionId] = true;
 
         var idArgsStr = formatToolArgsStr(args);
         $(idCard).find('.tool-name').text(localizeToolName(toolName, toolTitle));
@@ -1059,17 +1146,10 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         }
         setToolCardStatus(idCard, text);
 
-        // 推进批量分组进度；本卡属于当前批次时更新计数，全部完成则收尾分组
-        // （归属守卫：批次作用域与本卡不一致时不推进，避免把别家工具计入本批次）
-        var b = sess.currentBatch;
+        // 推进显式批量分组进度（方案 A）：根据卡片所属的 batchKey 定位批次，幂等推进。
+        // 批次可能由 action_end 兜底创建，统一走 helper 保证计数口径一致。
+        markBatchCardDone(sess, idCard);
         var idOwner = agentBody || resolveAgentCardBody(sess, args);
-        if (b && b.groupEl && (b.agentBody || null) === (idOwner || null) && $.contains(b.groupEl, idCard)) {
-            b.doneCount++;
-            updateBatchGroupHeader(b);
-            if (b.doneCount >= b.count) {
-                finishBatchGroup(sess, b);
-            }
-        }
         // 推进正文指针：新建空 .md-content 落在工具卡/分组「之后」，让工具执行完后到达的
         // text/agent 正文写入卡片下方，而非停留在旧气泡里被卡片顶到上方。
         // （与无 actionId 旧路径一致；缺此步会导致正文在上、工具卡垫底的错序渲染。）
@@ -1118,10 +1198,34 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         if (sess.sessionId === activeSessionId) scrollToBottom();
         return;
     }
-    finishPendingTool(sess);
-    ensureAssistantBubble(sess);
+    if (actionId && sess.completedActionIds && sess.completedActionIds[actionId]) return;
+    var endBatchMeta = normalizeBatchMeta(batchMeta);
+    if (endBatchMeta) {
+        if (actionId) {
+            if (!sess.completedActionIds) sess.completedActionIds = {};
+            sess.completedActionIds[actionId] = true;
+        }
+        var fallbackCard = $('<div>').addClass('tool-card')[0];
+        if (sess.currentRunId) fallbackCard.setAttribute('data-run-id', sess.currentRunId);
+        if (actionId) fallbackCard.setAttribute('data-action-id', actionId);
+        if (toolName) fallbackCard.setAttribute('data-tool-name', toolName);
+        if (window.cliPrintSimplified === false) $(fallbackCard).addClass('expanded');
+        fallbackCard.innerHTML = '<div class="tool-card-header"><span class="tool-type-icon">' + toolTypeIcon(toolName) + '</span><span class="tool-status-icon loading"></span><span class="tool-name">' + escapeHtml(localizeToolName(toolName, toolTitle)) + '</span></div><div class="tool-card-body"></div>';
+        tagToolName($(fallbackCard).find('.tool-name')[0], toolName, toolTitle);
+        updateToolHeaderMeta(fallbackCard, toolName, args, text);
+        fillToolBody(sess, $(fallbackCard).find('.tool-card-body')[0], toolName, text, args, meta);
+        setToolCardStatus(fallbackCard, text);
+        $(fallbackCard).find('.tool-card-header').on('click', function() { $(fallbackCard).toggleClass('expanded'); });
+        var fallbackAgentBody = agentBody || resolveAgentCardBody(sess, args);
+        if (appendCardToBatch(sess, fallbackCard, endBatchMeta, fallbackAgentBody)) markBatchCardDone(sess, fallbackCard);
+        else if (fallbackAgentBody) $(fallbackAgentBody).append(fallbackCard);
+        else insertBeforeActions(sess, fallbackCard);
+        if (fallbackAgentBody) advanceAgentBodyPointer(sess, findAgentStateByBody(sess, fallbackAgentBody));
+        else advanceBodyPointer(sess, sess, function(el) { insertBeforeActions(sess, el); });
+        if (sess.sessionId === activeSessionId) scrollToBottom();
+        return;
+    }
 
-    // 参考 CliShell 简化打印方式，将 args 拼接为短字符串
     function formatArgValue(v) {
         if (v === null) return 'null';
         if (v === undefined) return 'undefined';
@@ -1499,6 +1603,13 @@ function clearAgentState(sess, st) {
         }
         sess.agentStates = {};
     }
+    // agentCards 必须与 agentStates 同步清空：它以 agentName+':'+desc 为键持有 .agent-card DOM 强引用，
+    // 而 desc 每次任务都不同（不会覆盖旧键），仅在配对 agent_end 到达时才 delete（见本文件 agent_end 分支）。
+    // 中断/报错/丢帧时条目永久残留，会钉住已被 evictInactiveSessions 的 $(container).empty() 摘除的
+    // 卡片子树，使其无法 GC（连带卡片内各 .md-content 上的 _streamMd.buf 全文），
+    // 表现为「清了 DOM 内存却不降」。注意：断线恢复路径会先保存再回填 agentCards
+    // （app-history.js 的 resumeState），此处清空不影响该路径。
+    sess.agentCards = {};
     sess._agentStateLast = null;
 }
 
@@ -1792,9 +1903,10 @@ function addCodeBlockButtons(container) {
 }
 
 /* ===== Image Lightbox ===== */
+/* 附件图片挂在 .user-attach-imgs 下（气泡直接子节点），正文图片在 .md-content 下，两者都要可点开 */
 function addImageLightbox(container) {
     if (!container) return;
-    var imgs = $(container).find('.msg-bubble img, .md-content img');
+    var imgs = $(container).find('.user-attach-imgs img, .md-content img');
     for (var i = 0; i < imgs.length; i++) {
         if ($(imgs[i]).data('lightbox')) continue;
         $(imgs[i]).data('lightbox', '1');
@@ -1805,22 +1917,25 @@ function addImageLightbox(container) {
         });
     }
 }
+window.addImageLightbox = addImageLightbox;
 
 function openLightbox(src) {
     var overlay = $('<div>').addClass('lightbox-overlay')[0];
     var img = $('<img>').attr('src', src)[0];
     $(overlay).append(img);
-    $(overlay).on('click', function() {
+    // 点遮罩与 Esc 两条关闭路径共用 close，避免点遮罩关闭后 keydown 监听残留累积
+    function onKey(e) {
+        if (e.key === 'Escape') close();
+    }
+    function close() {
         $(overlay).remove();
-    });
-    $(document).on('keydown', function handler(e) {
-        if (e.key === 'Escape') {
-            $(overlay).remove();
-            $(document).off('keydown', handler);
-        }
-    });
+        $(document).off('keydown', onKey);
+    }
+    $(overlay).on('click', close);
+    $(document).on('keydown', onKey);
     $(document.body).append(overlay);
 }
+window.openLightbox = openLightbox;
 
 /* ===== 动态标签的语言切换重译 =====
    工具卡/思考块/批量分组/HITL 等在流式渲染时把译文写死进 DOM 文本节点，不带 data-i18n，
@@ -1845,7 +1960,7 @@ function relocalizeDynamicLabels() {
     document.querySelectorAll('.tool-batch-title[data-i18n-batch-tool]').forEach(function(el) {
         var tn = el.getAttribute('data-i18n-batch-tool');
         var c = el.getAttribute('data-i18n-batch-count') || '0';
-        el.textContent = GourdI18n.t('chat.batch_tool') + localizeToolName(tn, null) + ' · ' + c + ' ' + GourdI18n.t('chat.items');
+        el.textContent = batchTitleText(tn || null, c);
     });
     document.querySelectorAll('.thinking-block-label[data-i18n-thinking]').forEach(function(el) {
         var st = el.getAttribute('data-i18n-thinking');

@@ -22,6 +22,7 @@ import com.gourdai.agent.react.ReActChunk;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.react.intercept.HITL;
 import com.gourdai.agent.react.intercept.HITLTask;
+import com.gourdai.agent.react.intercept.ContextCompressionInterceptor;
 import com.gourdai.agent.react.task.ActionChunk;
 import com.gourdai.agent.react.task.ObservationChunk;
 import com.gourdai.agent.react.task.ReasonChunk;
@@ -80,6 +81,11 @@ public class WebStreamBuilder {
     private final HarnessEngine engine;
 
     /**
+     * WebSocket 网关引用，供 SteerInterceptor 拉取/消费插话邮箱
+     */
+    private final WebGate webGate;
+
+    /**
      * IM 通道路由表：所有注册的 IM 通道（微信、飞书、钉钉等）
      */
     private final List<Channel> imLinks = new ArrayList<>();
@@ -124,12 +130,24 @@ public class WebStreamBuilder {
     }
 
     /**
-     * 构造函数
+     * 构造函数（向后兼容，不含插话支持）
      *
-     * @param engine 任务执行引擎实例，用于后续判断 chunk 所属的引擎/代理层级
+     * @param engine 任务执行引擎实例
      */
     public WebStreamBuilder(HarnessEngine engine) {
         this.engine = engine;
+        this.webGate = null;
+    }
+
+    /**
+     * 构造函数（含插话支持）
+     *
+     * @param engine   任务执行引擎实例
+     * @param webGate  WebSocket 网关，供 SteerInterceptor 消费插话邮箱
+     */
+    public WebStreamBuilder(HarnessEngine engine, WebGate webGate) {
+        this.engine = engine;
+        this.webGate = webGate;
     }
 
     /**
@@ -208,6 +226,9 @@ public class WebStreamBuilder {
 
                     if (Assert.isNotEmpty(sessionCwd)) {
                         o.toolContextPut(HarnessEngine.ATTR_CWD, sessionCwd);
+                    }
+                    if (webGate != null) {
+                        o.interceptorAdd(new SteerInterceptor(webGate));
                     }
                 })
                 .stream()
@@ -296,7 +317,7 @@ public class WebStreamBuilder {
 
         long contextLength = chatModel.getConfig().getContextLength();
         if(contextLength == 0){
-            contextLength = 128_000; //默认
+            contextLength = engine.getEffectiveCompressionDefaultContextLength(); // 与实际压缩回退值一致
         }
 
         Map<String, Object> args = new HashMap<>();
@@ -383,7 +404,7 @@ public class WebStreamBuilder {
         fillEditDiff(args);
 
         WebChunk startChunk = WebChunk.ofActionStart(toolName, toolTitle, args);
-        startChunk.setActionId(chunk.getActionId());
+        copyActionMetadata(chunk, startChunk);
         // 子代理工具调用标记：供前端将工具卡片嵌套到智能体卡片内部
         if (chunk.hasMeta("__parentAgentName")) {
             // args 可能为 null（无参工具），先兜底建 map，避免 put 时 NPE 打断整流
@@ -425,7 +446,7 @@ public class WebStreamBuilder {
             }
 
             WebChunk webChunk = WebChunk.ofActionEnd(chunk.getContent());
-            webChunk.setActionId(chunk.getActionId());
+            copyActionMetadata(chunk, webChunk);
 
             // 子代理工具调用标记：供前端将工具卡片嵌套到智能体卡片内部
             if (chunk.hasMeta("__parentAgentName")) {
@@ -480,6 +501,13 @@ public class WebStreamBuilder {
         }
 
         return WebChunk.EMPTY;
+    }
+
+    static void copyActionMetadata(com.gourdai.agent.react.task.AbsActionChunk source, WebChunk target) {
+        target.setActionId(source.getActionId());
+        target.setBatchId(source.getBatchId());
+        target.setBatchIndex(source.getBatchIndex());
+        target.setBatchSize(source.getBatchSize());
     }
 
     /**

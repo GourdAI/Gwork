@@ -36,7 +36,7 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public class QueueFileHelper {
     private static final String QUEUE_FILE = "queue.json";
-    private final ReentrantLock lock = new ReentrantLock();
+    private static final ReentrantLock LOCK = new ReentrantLock();
 
     /**
      * 获取会话的队列文件路径。
@@ -52,7 +52,7 @@ public class QueueFileHelper {
      * @return 队列项列表
      */
     public List<ONode> read(File sessionDir) {
-        lock.lock();
+        LOCK.lock();
         try {
             File queueFile = getQueueFile(sessionDir);
             if (!queueFile.exists()) {
@@ -71,7 +71,7 @@ public class QueueFileHelper {
             }
             return itemsNode.getArray();
         } finally {
-            lock.unlock();
+            LOCK.unlock();
         }
     }
 
@@ -85,7 +85,15 @@ public class QueueFileHelper {
      * @return 追加后的队列总长度
      */
     public int add(File sessionDir, String content, List<String> imagePaths, List<String> filePaths) {
-        lock.lock();
+        return add(sessionDir, content, imagePaths, filePaths, null);
+    }
+
+    /**
+     * 向队列追加消息；originSteerId 非空时按该 ID 幂等，供 dropped 插话安全降级。
+     */
+    public int add(File sessionDir, String content, List<String> imagePaths, List<String> filePaths,
+                   String originSteerId) {
+        LOCK.lock();
         try {
             File queueFile = getQueueFile(sessionDir);
             ONode root;
@@ -120,11 +128,22 @@ public class QueueFileHelper {
             root.set("items", itemsNode);
             List<ONode> items = itemsNode.getArray();
 
+            if (originSteerId != null && !originSteerId.isEmpty()) {
+                for (ONode existing : items) {
+                    if (originSteerId.equals(existing.get("originSteerId").getString())) {
+                        return items.size();
+                    }
+                }
+            }
+
             ONode item = new ONode();
             item.set("content", content != null ? content : "");
             item.set("imagePaths", imagePaths != null ? imagePaths : Collections.emptyList());
             item.set("filePaths", filePaths != null ? filePaths : Collections.emptyList());
             item.set("timestamp", System.currentTimeMillis());
+            if (originSteerId != null && !originSteerId.isEmpty()) {
+                item.set("originSteerId", originSteerId);
+            }
             items.add(item);
 
             // 确保会话目录存在，否则写入会失败
@@ -137,7 +156,7 @@ public class QueueFileHelper {
         } catch (IOException e) {
             throw new RuntimeException("Failed to write queue file", e);
         } finally {
-            lock.unlock();
+            LOCK.unlock();
         }
     }
 
@@ -148,7 +167,7 @@ public class QueueFileHelper {
      * @return 首条消息，队列为空时返回 null
      */
     public ONode shift(File sessionDir) {
-        lock.lock();
+        LOCK.lock();
         try {
             File queueFile = getQueueFile(sessionDir);
             if (!queueFile.exists()) {
@@ -185,7 +204,7 @@ public class QueueFileHelper {
         } catch (IOException e) {
             throw new RuntimeException("Failed to update queue file", e);
         } finally {
-            lock.unlock();
+            LOCK.unlock();
         }
     }
 
@@ -195,11 +214,11 @@ public class QueueFileHelper {
      * @param sessionDir 会话存储目录
      */
     public void clear(File sessionDir) {
-        lock.lock();
+        LOCK.lock();
         try {
             delete(sessionDir);
         } finally {
-            lock.unlock();
+            LOCK.unlock();
         }
     }
 

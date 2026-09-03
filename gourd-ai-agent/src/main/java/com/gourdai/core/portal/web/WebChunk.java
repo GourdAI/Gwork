@@ -87,6 +87,15 @@ public class WebChunk {
      */
     private String actionId;
 
+    /** 同一次模型聚合响应中可见工具卡的批次标识；旧历史或单卡为 null。 */
+    private String batchId;
+
+    /** 批次内可见工具卡的 0-based 顺序；旧历史或单卡为 null。 */
+    private Integer batchIndex;
+
+    /** 批次内实际可见工具卡数量；旧历史或单卡为 null。 */
+    private Integer batchSize;
+
     /**
      * 工具显示名，仅供前端展示。
      * <p>本引擎工具时与 {@link #toolName} 相同；子代理工具时为 {@code agentName + "/" + toolName}。</p>
@@ -135,8 +144,17 @@ public class WebChunk {
      * 避免误挂到用户当前所选工作空间。 */
     private String root;
 
+    /** 客户端输入幂等标识，仅 user 事件使用；用于回放时识别已在本地渲染的用户气泡。 */
+    private String clientMessageId;
+
     /** 消息块创建时间戳（ epoch 毫秒），由工厂方法自动填充。 */
     private Long createdAt;
+
+    /**
+     * 会话内单调递增的可恢复事件序号。实时 WebSocket 与 replay 使用同一序号，
+     * 前端据此在断线重连时排他地补取并去重；旧历史事件可能没有该字段。
+     */
+    private Long eventSeq;
 
     /**
      * 创建「完成」消息块。
@@ -452,5 +470,64 @@ public class WebChunk {
         tmp.createdAt = Instant.now().toEpochMilli();
 
         return tmp;
+    }
+
+    // ── 插话（Steer）事件工厂方法 ──────────────────────────────────────────────
+
+    /**
+     * 创建「插话已生效」消息块。
+     * <p>type 为 {@code steer_applied}，表示邮箱中的插话已在当前 Reason 边界注入 WorkingMemory。</p>
+     */
+    public static WebChunk ofSteerApplied(String runId, java.util.List<SteerEnvelope> items) {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "steer_applied";
+        tmp.runId = runId;
+        tmp.createdAt = Instant.now().toEpochMilli();
+        tmp.args = buildSteerArgs(items);
+        return tmp;
+    }
+
+    /**
+     * 创建「插话已取消」消息块。
+     * <p>type 为 {@code steer_cancelled}，表示用户主动 Stop 后残留插话被丢弃。</p>
+     */
+    public static WebChunk ofSteerCancelled(String runId, java.util.List<SteerEnvelope> items) {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "steer_cancelled";
+        tmp.runId = runId;
+        tmp.createdAt = Instant.now().toEpochMilli();
+        tmp.args = buildSteerArgs(items);
+        return tmp;
+    }
+
+    /**
+     * 创建「插话已丢弃」消息块。
+     * <p>type 为 {@code steer_dropped}，表示任务正常结束后残留插话被转入持久化队列。</p>
+     */
+    public static WebChunk ofSteerDropped(String runId, java.util.List<SteerEnvelope> items) {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "steer_dropped";
+        tmp.runId = runId;
+        tmp.createdAt = Instant.now().toEpochMilli();
+        tmp.args = buildSteerArgs(items);
+        return tmp;
+    }
+
+    private static Map<String, Object> buildSteerArgs(java.util.List<SteerEnvelope> items) {
+        Map<String, Object> args = new LinkedHashMap<>();
+        java.util.List<Map<String, Object>> serialized = new java.util.ArrayList<>();
+        if (items != null) {
+            for (SteerEnvelope item : items) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("steerId", item.getSteerId());
+                row.put("text", item.getText());
+                row.put("runId", item.getRunId());
+                row.put("createdAt", item.getCreatedAt());
+                serialized.add(row);
+            }
+        }
+        args.put("count", serialized.size());
+        args.put("items", serialized);
+        return args;
     }
 }

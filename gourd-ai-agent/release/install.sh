@@ -1,353 +1,84 @@
 #!/bin/bash
-# =============================================
-#  Solon Code Installer (Linux / macOS)
-#  支持重复安装，保留已有 AGENTS.md
-#  兼容 bash, zsh, sh 等多种 shell
-# =============================================
-
+# Solon Code CLI installer (Linux / macOS / Git Bash)
 set -e
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
-
-echo ""
-echo "============================================"
-echo -e "   Solon Code Installer"
-echo "============================================"
-echo ""
-
-# =============================================
-# 检查 Java 是否安装
-# =============================================
-echo -e "${YELLOW}[Pre-check]${NC} Verifying Java installation..."
-
-if ! command -v java &> /dev/null; then
-    echo ""
-    echo -e "${RED}[Error] Java is not installed or not in PATH${NC}"
-    echo ""
-    echo "  Please install Java 8 or later:"
-    echo "    - Download from: https://adoptium.net/"
-    echo ""
-    # If not called from setup.sh, wait for user input
-    if [ -z "$GOURDWORK_SETUP" ]; then
-        echo "Press Enter to exit..."
-        read -r
-    fi
-    exit 1
-fi
-
-# 获取 Java 版本
-JAVA_VERSION=$(java -version 2>&1 | head -n 1)
-echo -e "      ${JAVA_VERSION}${NC}"
-echo ""
-
-# 源目录（脚本所在目录）
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# 目标目录
-TARGET_DIR="$HOME/.gourdai"
-TARGET_BIN_DIR="$TARGET_DIR/bin"
-TARGET_SKILLS_DIR="$TARGET_DIR/skills"
-
-# 源目录
 SOURCE_BIN_DIR="$SOURCE_DIR/bin"
 SOURCE_SKILLS_DIR="$SOURCE_DIR/skills"
 SOURCE_AGENTS="$SOURCE_DIR/AGENTS.md"
+TARGET_DIR="$HOME/.gwork"
+TARGET_BIN_DIR="$TARGET_DIR/bin"
+TARGET_SKILLS_DIR="$TARGET_DIR/skills"
+OLD_DIR="$HOME/.gourdai"
 
-# =============================================
-# 检查源目录是否存在
-# =============================================
-if [ ! -d "$SOURCE_BIN_DIR" ]; then
-    echo "[Error] Source bin directory not found: $SOURCE_BIN_DIR"
-    exit 1
+if ! command -v java >/dev/null 2>&1; then
+  echo -e "${RED}[Error] Java is not installed or not in PATH${NC}"; exit 1
 fi
+if [ ! -d "$SOURCE_BIN_DIR" ]; then echo "[Error] Source bin directory not found: $SOURCE_BIN_DIR"; exit 1; fi
 
-# =============================================
-# [1/5] 检查并备份已有的 AGENTS.md，并迁移旧版本文件
-# =============================================
-echo "[1/5] Checking for existing configuration..."
-AGENTS_BACKUP=""
-TARGET_AGENTS="$TARGET_DIR/AGENTS.md"
-OLD_TARGET_AGENTS="$TARGET_BIN_DIR/AGENTS.md"
+mkdir -p "$TARGET_DIR" "$TARGET_BIN_DIR" "$TARGET_SKILLS_DIR"
 
-# 迁移旧版本的 AGENTS.md（从 bin/ 目录移动到根目录）
-if [ -f "$OLD_TARGET_AGENTS" ] && [ ! -f "$TARGET_AGENTS" ]; then
-    mv "$OLD_TARGET_AGENTS" "$TARGET_AGENTS"
-    echo "      Migrated AGENTS.md from bin/ to root directory"
-fi
-
-# 备份现有的 AGENTS.md
-if [ -f "$TARGET_AGENTS" ]; then
-    AGENTS_BACKUP=$(mktemp)
-    cp "$TARGET_AGENTS" "$AGENTS_BACKUP"
-    echo "      Found existing AGENTS.md (will be preserved)"
-else
-    echo "      No existing AGENTS.md found"
-fi
-
-# =============================================
-# [2/5] 创建目标目录结构
-# =============================================
-echo ""
-echo "[2/5] Preparing target directory: $TARGET_DIR"
-
-mkdir -p "$TARGET_DIR"
-mkdir -p "$TARGET_BIN_DIR"
-mkdir -p "$TARGET_SKILLS_DIR"
-
-echo "      Created directory structure"
-
-# =============================================
-# [3/5] 复制文件
-# =============================================
-echo ""
-echo "[3/5] Copying files..."
-
-# 复制 bin 目录内容
-cp -R "$SOURCE_BIN_DIR/"* "$TARGET_BIN_DIR/" 2>/dev/null || true
-echo "      Copied bin/ directory"
-
-# 复制 AGENTS.md（从根目录）
-if [ -f "$SOURCE_AGENTS" ]; then
-    cp "$SOURCE_AGENTS" "$TARGET_AGENTS" 2>/dev/null || true
-    echo "      Copied AGENTS.md"
-fi
-
-# 复制 skills 目录（仅同名目录替换，保留用户自行安装的 skill）
-if [ -d "$SOURCE_SKILLS_DIR" ]; then
-    mkdir -p "$TARGET_SKILLS_DIR"
-    # 仅遍历安装包自带的 skill 子目录，逐个替换同名目录
-    for SKILL_PATH in "$SOURCE_SKILLS_DIR"/*/; do
-        # 防止没有匹配项时 glob 原样返回
-        [ -d "$SKILL_PATH" ] || continue
-        SKILL_NAME=$(basename "$SKILL_PATH")
-        # 删除目标中的同名 skill 目录后再复制（不影响其他用户 skill）
-        if [ -d "$TARGET_SKILLS_DIR/$SKILL_NAME" ]; then
-            rm -rf "$TARGET_SKILLS_DIR/$SKILL_NAME"
-        fi
-        cp -R "$SKILL_PATH" "$TARGET_SKILLS_DIR/$SKILL_NAME" 2>/dev/null || true
-        echo "      Updated skill: $SKILL_NAME"
-    done
-else
-    echo "      No skills/ directory to copy"
-fi
-
-# =============================================
-# [4/5] 恢复 AGENTS.md（如果之前存在）
-# =============================================
-echo ""
-echo "[4/5] Finalizing installation..."
-
-if [ -n "$AGENTS_BACKUP" ]; then
-    cp "$AGENTS_BACKUP" "$TARGET_AGENTS"
-    rm -f "$AGENTS_BACKUP"
-    echo "      Preserved existing AGENTS.md"
-fi
-
-# 清理旧位置的 AGENTS.md（如果还存在）
-if [ -f "$OLD_TARGET_AGENTS" ]; then
-    rm -f "$OLD_TARGET_AGENTS"
-fi
-
-# 检查 jar 文件是否存在
-if [ ! -f "$TARGET_BIN_DIR/gourd-ai-agent.jar" ]; then
-    echo "[Error] gourd-ai-agent.jar not found in $TARGET_BIN_DIR"
-    exit 1
-fi
-echo "      Found gourd-ai-agent.jar"
-
-# =============================================
-# [5/5] 创建 gourdai 命令脚本
-# =============================================
-echo ""
-echo "[5/5] Creating 'gourdai' command..."
-cat > "$TARGET_BIN_DIR/gourdai" << 'LAUNCHER_EOF'
-#!/bin/bash
-# Solon Code CLI Launcher
-# 获取脚本真实路径（兼容软链接）
-SCRIPT_PATH="$0"
-# 解析软链接（兼容 macOS 和 Linux）
-while [ -L "$SCRIPT_PATH" ]; do
-    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
-    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
-    # 如果是相对路径，转换为绝对路径
-    case "$SCRIPT_PATH" in
-        /*) ;;  # 已经是绝对路径
-        *)  SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH" ;;
-    esac
-done
-SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
-
-# 检测 Java 版本，如果是 21+ 则添加 --enable-native-access 参数
-JAVA_VER=$(java -version 2>&1 | head -n1 | grep -oE '"[0-9]+' | grep -oE '[0-9]+' | head -1)
-if [ -z "$JAVA_VER" ]; then
-    # 如果提取失败，尝试另一种方式
-    JAVA_VER=$(java -version 2>&1 | head -n1 | cut -d'"' -f2 | cut -d'.' -f1)
-fi
-JAVA_OPTS="-Dfile.encoding=UTF-8"
-if [ -n "$JAVA_VER" ] && [ "$JAVA_VER" -ge 21 ]; then
-    JAVA_OPTS="$JAVA_OPTS --enable-native-access=ALL-UNNAMED"
-fi
-
-# Git Bash / MSYS terminals on Windows often need winpty for correct line editing.
-if [ -n "$MSYSTEM" ]; then
-    JAVA_OPTS="$JAVA_OPTS -Djline.terminal.type=xterm-256color"
-    if [ -t 0 ] && [ -t 1 ] && command -v winpty >/dev/null 2>&1; then
-        exec winpty java $JAVA_OPTS -jar "$SCRIPT_DIR/gourd-ai-agent.jar" "$@"
+# Migrate user data only. bin is deliberately excluded; existing target files win.
+merge_tree() {
+  local src="$1" dest="$2" child name
+  mkdir -p "$dest"
+  while IFS= read -r -d '' child; do
+    name="$(basename "$child")"
+    [ "$name" = "bin" ] && continue
+    if [ "$src" = "$OLD_DIR" ] && [ "$name" = ".gourdai" ] && [ -d "$child" ]; then
+      merge_tree "$child" "$dest"
+      continue
     fi
-fi
-
-java $JAVA_OPTS -jar "$SCRIPT_DIR/gourd-ai-agent.jar" "$@"
-LAUNCHER_EOF
-chmod +x "$TARGET_BIN_DIR/gourdai"
-echo "      Created: $TARGET_BIN_DIR/gourdai"
-
-# =============================================
-# 配置 PATH 环境变量（兼容多种 shell 和系统）
-# =============================================
-echo ""
-echo "Configuring PATH..."
-
-# 要添加的 PATH 配置
-PATH_LINE='export PATH="$PATH:$HOME/.gourdai/bin"'
-PATH_MARKER='# Solon Code CLI'
-
-# 检测当前用户默认 shell
-USER_SHELL=$(basename "$SHELL" 2>/dev/null || echo "unknown")
-
-# 定义需要配置的 shell 配置文件（按优先级排序）
-declare -a CONFIG_FILES=()
-
-case "$USER_SHELL" in
-    zsh)
-        # Zsh: 优先 .zshrc
-        CONFIG_FILES+=("$HOME/.zshrc")
-        ;;
-    bash)
-        # Bash: 不同系统读取不同文件
-        # macOS 默认读取 .bash_profile
-        # Linux 通常读取 .bashrc
-        if [[ "$(uname -s)" == "Darwin" ]]; then
-            # macOS
-            CONFIG_FILES+=("$HOME/.bash_profile")
-            # 同时也写入 .bashrc 以兼容非登录 shell
-            CONFIG_FILES+=("$HOME/.bashrc")
-        else
-            # Linux
-            CONFIG_FILES+=("$HOME/.bashrc")
-            # 同时也写入 .bash_profile 以兼容登录 shell
-            CONFIG_FILES+=("$HOME/.bash_profile")
-        fi
-        ;;
-    fish)
-        # Fish shell
-        CONFIG_FILES+=("$HOME/.config/fish/config.fish")
-        PATH_LINE='set -gx PATH $PATH $HOME/.gourdai/bin'
-        ;;
-    *)
-        # 未知 shell，尝试写入多个文件
-        CONFIG_FILES+=("$HOME/.profile")
-        CONFIG_FILES+=("$HOME/.bashrc")
-        CONFIG_FILES+=("$HOME/.zshrc")
-        ;;
-esac
-
-# 写入配置文件
-CONFIG_UPDATED=false
-for CONFIG_FILE in "${CONFIG_FILES[@]}"; do
-    # 确保 Fish 使用正确的配置语法
-    if [[ "$USER_SHELL" == "fish" && "$CONFIG_FILE" == *".fish" ]]; then
-        PATH_LINE='set -gx PATH $PATH $HOME/.gourdai/bin'
+    if [ -e "$dest/$name" ] || [ -L "$dest/$name" ]; then
+      [ -d "$child" ] && [ -d "$dest/$name" ] && merge_tree "$child" "$dest/$name"
     else
-        PATH_LINE='export PATH="$PATH:$HOME/.gourdai/bin"'
+      cp -R "$child" "$dest/$name"
     fi
-    
-    # 检查文件是否已包含配置（使用 .gourdai/bin 作为匹配关键词，避免 $HOME 展开导致匹配失败）
-    if [ -f "$CONFIG_FILE" ]; then
-        if grep -qF '.gourdai/bin' "$CONFIG_FILE" 2>/dev/null; then
-            echo "      PATH already configured in $(basename "$CONFIG_FILE")"
-            CONFIG_UPDATED=true
-            continue
-        fi
-    fi
-    
-    # 创建目录（针对 Fish 等需要子目录的情况）
-    CONFIG_DIR=$(dirname "$CONFIG_FILE")
-    if [ ! -d "$CONFIG_DIR" ]; then
-        mkdir -p "$CONFIG_DIR" 2>/dev/null || continue
-    fi
-    
-    # 追加配置
-    echo "" >> "$CONFIG_FILE" 2>/dev/null || continue
-    echo "$PATH_MARKER" >> "$CONFIG_FILE" 2>/dev/null || continue
-    echo "$PATH_LINE" >> "$CONFIG_FILE" 2>/dev/null || continue
-    echo "      Added to PATH in $(basename "$CONFIG_FILE")"
-    CONFIG_UPDATED=true
+  done < <(find "$src" -mindepth 1 -maxdepth 1 -print0)
+}
+if [ -d "$OLD_DIR" ]; then
+  echo "Migrating user data from $OLD_DIR (without bin/, target files win)..."
+  merge_tree "$OLD_DIR" "$TARGET_DIR"
+fi
+
+# Runtime files are installer-owned and may be refreshed.
+cp -R "$SOURCE_BIN_DIR/." "$TARGET_BIN_DIR/"
+[ -f "$SOURCE_AGENTS" ] && [ ! -f "$TARGET_DIR/AGENTS.md" ] && cp "$SOURCE_AGENTS" "$TARGET_DIR/AGENTS.md"
+if [ -d "$SOURCE_SKILLS_DIR" ]; then
+  for skill in "$SOURCE_SKILLS_DIR"/*/; do
+    [ -d "$skill" ] || continue
+    name=$(basename "$skill"); rm -rf "$TARGET_SKILLS_DIR/$name"; cp -R "$skill" "$TARGET_SKILLS_DIR/$name"
+  done
+fi
+
+cat > "$TARGET_BIN_DIR/gwork" <<'LAUNCHER'
+#!/bin/bash
+# gwork-cli-installed
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+JAVA_OPTS=("-Dfile.encoding=UTF-8" "-Dgwork.home=$HOME")
+JAVA_VER=$(java -version 2>&1 | sed -n 's/.*version "\([0-9]*\).*/\1/p' | head -1)
+[ -n "$JAVA_VER" ] && [ "$JAVA_VER" -ge 21 ] 2>/dev/null && JAVA_OPTS+=("--enable-native-access=ALL-UNNAMED")
+[ -n "$MSYSTEM" ] && JAVA_OPTS+=("-Djline.terminal.type=xterm-256color")
+exec java "${JAVA_OPTS[@]}" -jar "$SCRIPT_DIR/gourd-ai-agent.jar" "$@"
+LAUNCHER
+cp "$TARGET_BIN_DIR/gwork" "$TARGET_BIN_DIR/gourdai"
+chmod +x "$TARGET_BIN_DIR/gwork" "$TARGET_BIN_DIR/gourdai"
+
+# Remove only installer-owned legacy PATH entries, then add the exact new directory.
+PATH_FILES=("$HOME/.profile" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zshrc")
+for file in "${PATH_FILES[@]}"; do
+  [ -f "$file" ] || continue
+  tmp="${file}.gwork.tmp"
+  sed -E '/^[[:space:]]*# Solon Code CLI[[:space:]]*$/d; /^[[:space:]]*export PATH="\$PATH:\$HOME\/\.gourdai\/bin"[[:space:]]*$/d; /^[[:space:]]*export PATH="\$PATH:\$HOME\/\.gwork\/bin"[[:space:]]*$/d' "$file" > "$tmp"
+  printf '\n# Solon Code CLI\nexport PATH="$PATH:$HOME/.gwork/bin"\n' >> "$tmp"
+  mv "$tmp" "$file"
 done
-
-# =============================================
-# 尝试创建软链接到 /usr/local/bin（可选）
-# =============================================
-SYMLINK_CREATED=false
-if [ ! -e "/usr/local/bin/gourdai" ]; then
-    if [ -w "/usr/local/bin" ] 2>/dev/null; then
-        # 有写权限，直接创建
-        ln -sf "$TARGET_BIN_DIR/gourdai" /usr/local/bin/gourdai 2>/dev/null && SYMLINK_CREATED=true
-    elif command -v sudo >/dev/null 2>&1; then
-        # 尝试用 sudo（非交互式，静默失败）
-        if sudo -n true 2>/dev/null; then
-            sudo ln -sf "$TARGET_BIN_DIR/gourdai" /usr/local/bin/gourdai 2>/dev/null && SYMLINK_CREATED=true
-        fi
-    fi
+FISH_CONFIG="$HOME/.config/fish/config.fish"
+if [ -f "$FISH_CONFIG" ]; then
+  tmp="${FISH_CONFIG}.gwork.tmp"; sed -E '/^[[:space:]]*# Solon Code CLI[[:space:]]*$/d; /^[[:space:]]*set -gx PATH.*\$HOME\/\.gourdai\/bin[[:space:]]*$/d; /^[[:space:]]*set -gx PATH.*\$HOME\/\.gwork\/bin[[:space:]]*$/d' "$FISH_CONFIG" > "$tmp"
+  printf '\n# Solon Code CLI\nset -gx PATH $PATH $HOME/.gwork/bin\n' >> "$tmp"; mv "$tmp" "$FISH_CONFIG"
 fi
 
-if [ "$SYMLINK_CREATED" = true ]; then
-    echo "      Created symlink: /usr/local/bin/gourdai"
-fi
-
-# =============================================
-# 完成
-# =============================================
-echo ""
-echo -e "${GREEN}============================================${NC}"
-echo -e "${GREEN}   Installation Complete!${NC}"
-echo -e "${GREEN}============================================${NC}"
-echo ""
-echo "  Install path: $TARGET_DIR"
-echo "  Java version: $JAVA_VERSION"
-echo ""
-
-if [ "$SYMLINK_CREATED" = true ]; then
-    echo -e "  ${CYAN}Symlink created: /usr/local/bin/gourdai${NC}"
-    echo -e "  You can run ${CYAN}gourdai${NC} directly now!"
-else
-    echo -e "  ${CYAN}Usage:${NC}"
-    echo "    1. Run: source ~/.${USER_SHELL}rc"
-    echo "    2. Or restart your terminal"
-    echo "    3. Then run: 'gourdai cli' or 'gourdai web 0'"
-fi
-
-echo ""
-echo -e "  ${CYAN}Directory structure:${NC}"
-echo "    ~/.gourdai/"
-
-echo "    ├── AGENTS.md       (agents config, preserved if exists)"
-echo "    ├── bin/            (executables)"
-echo "    │   ├── gourd-ai-agent.jar"
-echo "    │   ├── gourdai       (launcher)"
-echo "    │   └── uninstall.sh    (uninstall script)"
-echo "    └── skills/        (skill modules)"
-echo ""
-echo -e "  ${YELLOW}[Tip]${NC} To use gourdai immediately in current terminal:"
-echo "    source ~/.${USER_SHELL}rc"
-echo ""
-
-# If not called from setup.sh, wait for user input
-if [ -z "$GOURDWORK_SETUP" ]; then
-    echo "Press Enter to exit..."
-    read -r
-fi
+echo -e "${GREEN}Installation complete: $TARGET_DIR${NC}"
+echo "Commands: gwork (primary), gourdai (compatibility alias)"

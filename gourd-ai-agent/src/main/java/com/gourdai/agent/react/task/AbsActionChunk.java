@@ -41,17 +41,31 @@ public abstract class AbsActionChunk extends AbsAgentChunk {
      * 文本模式无原生 id 时由调用方生成稳定串。可能为 null（旧构造/未提供）。
      */
     private final transient String actionId;
+    /** 同一模型响应内可见工具调用批次标识；旧历史或单卡调用为 null。 */
+    private final transient String batchId;
+    /** 去重后、按 Web 可见调用计算的 0-based 批次索引；旧历史或单卡调用为 null。 */
+    private final transient Integer batchIndex;
+    /** 去重后、Web 可见工具卡数量；旧历史或单卡调用为 null。 */
+    private final transient Integer batchSize;
 
     public AbsActionChunk(ReActTrace trace, String toolName, Map<String, Object> args, ChatMessage message) {
-        this(trace, toolName, args, message, null);
+        this(trace, toolName, args, message, null, null, null, null);
     }
 
     public AbsActionChunk(ReActTrace trace, String toolName, Map<String, Object> args, ChatMessage message, String actionId) {
+        this(trace, toolName, args, message, actionId, null, null, null);
+    }
+
+    public AbsActionChunk(ReActTrace trace, String toolName, Map<String, Object> args, ChatMessage message,
+                          String actionId, String batchId, Integer batchIndex, Integer batchSize) {
         super(trace.getRunId(), trace.getAgentName(), trace.getSession(), message);
 
         this.trace = trace;
         this.toolName = toolName;
         this.actionId = actionId;
+        this.batchId = batchId;
+        this.batchIndex = batchIndex;
+        this.batchSize = batchSize;
         if (args == null) {
             this.args = Collections.EMPTY_MAP;
         } else {
@@ -61,6 +75,18 @@ public abstract class AbsActionChunk extends AbsAgentChunk {
 
     public @Nullable String getActionId() {
         return actionId;
+    }
+
+    public @Nullable String getBatchId() {
+        return batchId;
+    }
+
+    public @Nullable Integer getBatchIndex() {
+        return batchIndex;
+    }
+
+    public @Nullable Integer getBatchSize() {
+        return batchSize;
     }
 
     public @Nullable String getToolName() {

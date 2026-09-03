@@ -432,6 +432,7 @@ public class WsGate extends SimpleWebSocketListener {
         }
 
         if (chunk.getArgs() != null) node.set("args", chunk.getArgs());
+        copyActionMetadata(node, chunk);
 
         return node.toJson();
     }
@@ -464,6 +465,7 @@ public class WsGate extends SimpleWebSocketListener {
             node.set("text", chunk.getObservation().getContent());
         }
         if (chunk.getArgs() != null) node.set("args", chunk.getArgs());
+        copyActionMetadata(node, chunk);
 
         if ("todowrite".equals(chunk.getToolName())) {
             String todos = AgentUtil.asStringArg(chunk.getArgs(), "todos");
@@ -473,6 +475,13 @@ public class WsGate extends SimpleWebSocketListener {
         }
 
         return node.toJson();
+    }
+
+    private void copyActionMetadata(ONode node, com.gourdai.agent.react.task.AbsActionChunk chunk) {
+        if (chunk.getActionId() != null) node.set("actionId", chunk.getActionId());
+        if (chunk.getBatchId() != null) node.set("batchId", chunk.getBatchId());
+        if (chunk.getBatchIndex() != null) node.set("batchIndex", chunk.getBatchIndex());
+        if (chunk.getBatchSize() != null) node.set("batchSize", chunk.getBatchSize());
     }
 
     /**

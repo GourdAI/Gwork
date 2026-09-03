@@ -46,13 +46,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * <h3>落盘策略</h3>
  * <ul>
  *   <li><b>逐会话串行写</b>：每个 sessionId 一把锁，保证 ndjson 行不交错。</li>
- *   <li><b>text/reason 合并</b>：流式正文/推理是大量增量小块（每 token 一条），
- *       直接落盘会产生成千上万行。故在内存按 (type,runId) 累积，遇到边界事件
- *       （工具卡片、trace、done 等非同类型块）或 flush 时，把累积文本合并为一条再写。</li>
+ *   <li><b>实时粒度落盘</b>：text/reason 与其它可见事件都按实际广播粒度保存，
+ *       并带会话内单调 eventSeq，保证断线后可按排他游标准确补流。</li>
  *   <li><b>存全文、传预览</b>：落盘<b>保留完整</b>工具结果（read 大文件/bash 长日志），磁盘即
  *       完整源真相、可回溯（仅保留 1MB 病态防护上限）；仅在 {@link #load} 回传前端时，对超长块
  *       截断为预览 + {@code truncated} 标记，把卡顿问题收敛在传输/渲染层，而不是靠丢数据。</li>
- *   <li><b>过滤瞬时提示</b>：{@code retry}（瞬时重试提示）不落盘；{@code done} 仅落一条无文本的轮次边界标记。其余全部保留。</li>
+ *   <li><b>完整事件序列</b>：retry、done 等事件同样落盘，恢复后 UI 状态与实时展示一致。</li>
  * </ul>
  *
  * @author oisin
@@ -90,98 +89,63 @@ public class SessionStreamStore {
     /** 逐会话写锁，防止并发轮次的行交错 */
     private final Map<String, Object> locks = new ConcurrentHashMap<>();
 
-    /** 逐会话的 text/reason 累积缓冲（合并小增量块） */
-    private final Map<String, TextBuffer> buffers = new ConcurrentHashMap<>();
+    /**
+     * 会话内下一事件序号缓存。Key 同时包含 sessionId 与实际存储目录，避免不同工作区
+     * 使用相同 sessionId 时共享序号状态。
+     */
+    private final Map<String, Long> nextSequences = new ConcurrentHashMap<>();
 
     public SessionStreamStore(SessionLocator sessionLocator) {
         this.sessionLocator = sessionLocator;
-    }
-
-    /** text/reason 增量合并缓冲：同一 (type,runId) 连续到达时在内存累积，遇边界一次性落盘。 */
-    private static final class TextBuffer {
-        String type;      // "text" 或 "reason"
-        String runId;
-        StringBuilder sb = new StringBuilder();
-        long createdAt;
-
-        boolean isEmpty() {
-            return sb.length() == 0;
-        }
     }
 
     private Object lockFor(String sessionId) {
         return locks.computeIfAbsent(sessionId, k -> new Object());
     }
 
-    /**
-     * 记录一条流经 {@link WebGate#emitToClient} 的出站消息块。
-     *
-     * @param sessionId  会话标识
-     * @param projectRoot code 会话的项目根（chat 会话传 null），用于解析落盘目录
-     * @param chunk      待记录的消息块
-     */
+    /** 在当前会话写锁内分配不会因 rewind 而复用的事件序号。 */
+    private long nextEventSeq(String sessionId, String projectRoot) {
+        String sequenceKey = sequenceKey(sessionId, projectRoot);
+        Long next = nextSequences.get(sequenceKey);
+        if (next == null) {
+            long max = 0;
+            File file = streamFile(sessionId, projectRoot);
+            if (file != null && file.exists()) {
+                try (BufferedReader br = new BufferedReader(new InputStreamReader(
+                        new FileInputStream(file), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        try {
+                            Map bean = ONode.ofJson(line.trim()).toBean(Map.class);
+                            Object seq = bean.get("eventSeq");
+                            if (seq instanceof Number) max = Math.max(max, ((Number) seq).longValue());
+                            else if (seq != null) max = Math.max(max, Long.parseLong(String.valueOf(seq)));
+                        } catch (Throwable ignore) {
+                            // 兼容旧文件中的损坏行或无 eventSeq 行
+                        }
+                    }
+                } catch (Throwable e) {
+                    LOG.warn("[StreamStore] scan sequence failed for session {}: {}", sessionId, e.getMessage());
+                }
+            }
+            next = max + 1;
+        }
+        nextSequences.put(sequenceKey, next + 1);
+        return next;
+    }
+
+    private String sequenceKey(String sessionId, String projectRoot) {
+        File file = streamFile(sessionId, projectRoot);
+        return (file == null ? "" : file.getAbsolutePath()) + '\u0001' + sessionId;
+    }
     public void record(String sessionId, String projectRoot, WebChunk chunk) {
         if (chunk == null || chunk.getType() == null) {
             return;
         }
-        String type = chunk.getType();
-
-        // done：作为轮次边界。flush 文本缓冲后落一条轻量边界标记（保留 type=done，
-        // 不携文本），使回放时能可靠地切分轮次——尤其无 trace 的纯命令轮（如 /git），
-        // 仅靠 trace/user 无法划分，会两轮粘连。
-        if ("done".equals(type)) {
-            try {
-                synchronized (lockFor(sessionId)) {
-                    TextBuffer pending = buffers.remove(sessionId);
-                    if (pending != null && !pending.isEmpty()) {
-                        writeBuffer(sessionId, projectRoot, pending);
-                    }
-                    WebChunk dc = new WebChunk();
-                    dc.setType("done");
-                    dc.setSessionId(sessionId);
-                    dc.setRunId(chunk.getRunId());
-                    dc.setCreatedAt(chunk.getCreatedAt() != null ? chunk.getCreatedAt() : System.currentTimeMillis());
-                    appendLine(sessionId, projectRoot, ONode.serialize(dc));
-                }
-            } catch (Throwable e) {
-                LOG.warn("[StreamStore] record done failed for session {}: {}", sessionId, e.getMessage());
-            }
-            return;
-        }
-
-        // 瞬时提示：历史回放无意义，不落盘
-        if ("retry".equals(type)) {
-            return;
-        }
-
         try {
             synchronized (lockFor(sessionId)) {
-                if ("text".equals(type) || "reason".equals(type)) {
-                    // 增量合并：与当前缓冲同类型且同 runId 则累积，否则先冲刷旧缓冲再起新缓冲
-                    TextBuffer buf = buffers.get(sessionId);
-                    if (buf != null && (!buf.type.equals(type) || !sameRun(buf.runId, chunk.getRunId()))) {
-                        writeBuffer(sessionId, projectRoot, buf);
-                        buf = null;
-                    }
-                    if (buf == null) {
-                        buf = new TextBuffer();
-                        buf.type = type;
-                        buf.runId = chunk.getRunId();
-                        buf.createdAt = chunk.getCreatedAt() != null ? chunk.getCreatedAt() : System.currentTimeMillis();
-                        buffers.put(sessionId, buf);
-                    }
-                    if (chunk.getText() != null) {
-                        buf.sb.append(chunk.getText());
-                    }
-                    return;
-                }
-
-                // 非文本块（工具卡片、trace、user、rewind、hitl、command、error…）：
-                // 先冲刷挂起的文本缓冲（保证顺序），再直接落盘本块
-                TextBuffer pending = buffers.remove(sessionId);
-                if (pending != null && !pending.isEmpty()) {
-                    writeBuffer(sessionId, projectRoot, pending);
-                }
+                chunk.setSessionId(sessionId);
+                chunk.setEventSeq(nextEventSeq(sessionId, projectRoot));
                 appendLine(sessionId, projectRoot, serialize(chunk));
             }
         } catch (Throwable e) {
@@ -189,49 +153,32 @@ public class SessionStreamStore {
         }
     }
 
-    /**
-     * 冲刷指定会话挂起的文本缓冲（轮次结束/中断时调用）。
-     */
+    /** 兼容旧调用方：实时事件已逐条落盘，不再需要冲刷内存文本缓冲。 */
     public void flush(String sessionId, String projectRoot) {
-        try {
-            synchronized (lockFor(sessionId)) {
-                TextBuffer buf = buffers.remove(sessionId);
-                if (buf != null && !buf.isEmpty()) {
-                    writeBuffer(sessionId, projectRoot, buf);
-                }
-            }
-        } catch (Throwable e) {
-            LOG.warn("[StreamStore] flush failed for session {}: {}", sessionId, e.getMessage());
-        }
+        // no-op
     }
 
     /**
-     * 直接记录一条用户输入事件（网页手动输入不走 emitToClient，需显式补记，
-     * 否则回放时缺少用户气泡）。
-     *
-     * @param sessionId 会话标识
-     * @param projectRoot code 会话项目根（chat 传 null）
-     * @param text      用户输入文本
-     * @param createdAt 时间戳（epoch 毫秒）
+     * 直接记录一条用户输入事件（网页手动输入不走 emitToClient）。
      */
     public void recordUser(String sessionId, String projectRoot, String text, long createdAt) {
+        recordUser(sessionId, projectRoot, text, createdAt, null);
+    }
+
+    public void recordUser(String sessionId, String projectRoot, String text, long createdAt, String clientMessageId) {
         if (text == null) {
             return;
         }
         try {
             synchronized (lockFor(sessionId)) {
-                // 补记用户前先冲刷上一轮可能残留的文本缓冲
-                TextBuffer pending = buffers.remove(sessionId);
-                if (pending != null && !pending.isEmpty()) {
-                    writeBuffer(sessionId, projectRoot, pending);
-                }
                 WebChunk uc = new WebChunk();
-                // 复用前端 user 分支渲染（app-streaming.js 对 type=user 渲染用户气泡）
                 uc.setType("user");
                 uc.setText(text);
                 uc.setSessionId(sessionId);
                 uc.setCreatedAt(createdAt);
-                appendLine(sessionId, projectRoot, ONode.serialize(uc));
+                uc.setClientMessageId(clientMessageId);
+                uc.setEventSeq(nextEventSeq(sessionId, projectRoot));
+                appendLine(sessionId, projectRoot, serialize(uc));
             }
         } catch (Throwable e) {
             LOG.warn("[StreamStore] recordUser failed for session {}: {}", sessionId, e.getMessage());
@@ -239,16 +186,53 @@ public class SessionStreamStore {
     }
 
     /**
+     * 增量加载 eventSeq 大于 afterSeq 的事件。afterSeq 为排他游标，供断线重连补流。
+     */
+    public LoadResult loadAfter(String sessionId, String projectRoot, long afterSeq, Integer limit) {
+        LoadResult result = new LoadResult();
+        File file = streamFile(sessionId, projectRoot);
+        if (file == null || !file.exists()) return result;
+        int max = limit == null || limit <= 0 ? 500 : Math.min(limit, 2000);
+        try {
+            synchronized (lockFor(sessionId)) {
+                try (BufferedReader br = new BufferedReader(new InputStreamReader(
+                        new FileInputStream(file), StandardCharsets.UTF_8))) {
+                    String line;
+                    int lineNo = 0;
+                    while ((line = br.readLine()) != null) {
+                        lineNo++;
+                        try {
+                            Map bean = ONode.ofJson(line.trim()).toBean(Map.class);
+                            result.totalCount++;
+                            Object rawSeq = bean.get("eventSeq");
+                            if (rawSeq == null) continue;
+                            long seq = rawSeq instanceof Number ? ((Number) rawSeq).longValue() : Long.parseLong(String.valueOf(rawSeq));
+                            result.latestSeq = Math.max(result.latestSeq, seq);
+                            if (seq <= afterSeq) continue;
+                            if (result.events.size() >= max) {
+                                result.hasMore = true;
+                                continue;
+                            }
+                            previewForTransport(bean, lineNo);
+                            result.events.add(bean);
+                            if (result.firstSeq == 0) result.firstSeq = seq;
+                            result.lastSeq = seq;
+                        } catch (Throwable ignore) {
+                            // 跳过已完整落盘但损坏的历史行；读锁保证不会把正在追加的半行误判为损坏。
+                        }
+                    }
+                    if (!result.events.isEmpty() && result.lastSeq < result.latestSeq) result.hasMore = true;
+                }
+            }
+        } catch (Throwable e) {
+            LOG.warn("[StreamStore] loadAfter failed for session {}: {}", sessionId, e.getMessage());
+        }
+        return result;
+    }
+    /**
      * 读取指定会话已落盘的全部流式事件（供 {@code /web/chat/replay} 回放）。
      *
-     * <p><b>传输层瘦身</b>：磁盘存的是全文（信息零丢失），但本方法会把整个文件读回内存并
-     * 作为一个 JSON 响应回传前端。若某些工具结果数 MB，全量传输 + 重建 DOM 会卡顿。故对超过
-     * {@link #PREVIEW_CHARS} 的 {@code text} 块，<b>仅在返回副本上</b>截断为预览并标记 {@code truncated=true}、
-     * {@code fullLength}，前端据此提示「结果较长」并按需拉取全文。磁盘全文不受影响，始终可追溯。</p>
-     *
-     * @param sessionId  会话标识
-     * @param projectRoot code 会话项目根（chat 传 null）
-     * @return 事件列表（每项为 chunk 的原始字段 Map，长文本已瘦身为预览）；无记录时返回空列表
+     * <p>对超过预览上限的文本仅在传输副本上截断，磁盘仍保留完整事件。</p>
      */
     public List<Map> load(String sessionId, String projectRoot) {
         return loadWithMeta(sessionId, projectRoot, null).events;
@@ -289,6 +273,22 @@ public class SessionStreamStore {
                 }
             }
             result.totalCount = allData.size();
+            for (Map bean : allData) {
+                Object rawSeq = bean.get("eventSeq");
+                if (rawSeq == null) {
+                    continue;
+                }
+                try {
+                    long seq = rawSeq instanceof Number
+                            ? ((Number) rawSeq).longValue()
+                            : Long.parseLong(String.valueOf(rawSeq));
+                    result.latestSeq = Math.max(result.latestSeq, seq);
+                    if (result.firstSeq == 0) result.firstSeq = seq;
+                    result.lastSeq = seq;
+                } catch (NumberFormatException ignore) {
+                    // 兼容损坏或非数字 eventSeq；事件本身仍可按旧格式回放
+                }
+            }
             if (tail != null && tail > 0 && allData.size() > tail) {
                 result.events = new ArrayList<>(allData.subList(allData.size() - tail, allData.size()));
                 result.hasMore = true;
@@ -302,11 +302,13 @@ public class SessionStreamStore {
         return result;
     }
 
-    /** 分页加载结果 */
     public static class LoadResult {
         public List<Map> events = new ArrayList<>();
         public int totalCount;
         public boolean hasMore;
+        public long firstSeq;
+        public long lastSeq;
+        public long latestSeq;
     }
 
     /**
@@ -401,7 +403,6 @@ public class SessionStreamStore {
         }
         try {
             synchronized (lockFor(sessionId)) {
-                buffers.remove(sessionId);
                 File file = streamFile(sessionId, projectRoot);
                 if (file == null || !file.exists()) {
                     return;
@@ -474,40 +475,25 @@ public class SessionStreamStore {
     public void delete(String sessionId, String projectRoot) {
         try {
             synchronized (lockFor(sessionId)) {
-                buffers.remove(sessionId);
                 File file = streamFile(sessionId, projectRoot);
                 if (file != null && file.exists()) {
                     file.delete();
                 }
+                nextSequences.remove(sequenceKey(sessionId, projectRoot));
             }
         } catch (Throwable e) {
             LOG.warn("[StreamStore] delete failed for session {}: {}", sessionId, e.getMessage());
         }
     }
 
-    private void writeBuffer(String sessionId, String projectRoot, TextBuffer buf) {
-        WebChunk wc = new WebChunk();
-        wc.setType(buf.type);
-        wc.setText(buf.sb.toString());
-        wc.setRunId(buf.runId);
-        wc.setSessionId(sessionId);
-        wc.setCreatedAt(buf.createdAt);
-        appendLine(sessionId, projectRoot, serialize(wc));
-    }
-
     /**
-     * 序列化一个待落盘的块：<b>默认存全文</b>（信息零丢失，供回溯），只在 {@code text} 长度
-     * 达到病态上限 {@link #MAX_TEXT_CHARS}（1MB）时才截断——防某个异常工具吐出数百 MB 撑爆磁盘。
-     * 正常 read/bash 结果远不及此阈值。
-     * <p>截断时仅在<b>副本</b>上操作，严禁直接改动传入的 chunk——它可能是 {@link WebGate#emitToClient}
-     * 正在同步推送给前端的同一实例。未超限时直接序列化原块（零拷贝）。传输层的预览瘦身另见 {@link #load}。</p>
+     * 序列化一个待落盘的块：默认存全文，仅在 text 达到病态上限时截断。
      */
     private static String serialize(WebChunk chunk) {
         String text = chunk.getText();
         if (text == null || text.length() <= MAX_TEXT_CHARS) {
             return ONode.serialize(chunk);
         }
-        // 浅拷一份，仅替换 text，其余字段（toolName/actionId/args…）原样保留
         ONode node = ONode.ofBean(chunk);
         node.set("text", text.substring(0, MAX_TEXT_CHARS) + TRUNCATE_MARK);
         return node.toJson();
@@ -522,7 +508,6 @@ public class SessionStreamStore {
         if (dir != null && !dir.exists()) {
             dir.mkdirs();
         }
-        // 追加写，一行一个 JSON（与 messages.ndjson 格式一致）
         try (Writer w = new OutputStreamWriter(new FileOutputStream(file, true), StandardCharsets.UTF_8)) {
             w.write(json);
             w.write('\n');
@@ -539,9 +524,5 @@ public class SessionStreamStore {
             LOG.warn("[StreamStore] resolve dir failed for session {}: {}", sessionId, e.getMessage());
             return null;
         }
-    }
-
-    private static boolean sameRun(String a, String b) {
-        return a == null ? b == null : a.equals(b);
     }
 }

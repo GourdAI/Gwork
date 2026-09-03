@@ -108,22 +108,22 @@
     // 页面状态（load() 时从 /web/settings/acp/info 重建）
     var acpState = {
         models: [],          // [{name, provider, standard}, ...]
-        current: '',         // 当前 acpModel（''=跟随默认）
-        defaultModel: '',
-        defaultStandard: '',
-        currentStandard: '', // 当前选中模型对应的接口类型（决定思考档位选项集）
+        current: '',         // 存储值 acpModel（''=未显式选择，跟随默认）
+        defaultModel: '',    // 后端解析后的实际生效模型名（与会话页 selected 同口径）
+        currentStandard: '', // 当前生效模型对应的接口类型（决定思考档位选项集）
         thinking: 'off'
     };
 
-    function followLabel() {
-        return acpState.defaultModel
-            ? t('settings.acp.model_follow_default', [acpState.defaultModel])
-            : t('settings.acp.model_follow_default_empty');
+    /* 展示用的生效模型：未显式选择时回落后端解析的默认模型。
+     * 存储语义不变（'' 仍表示跟随默认，不主动回写），仅在 UI 上始终高亮一个具体模型，
+     * 与会话页一致 —— 因此不需要「跟随默认模型」这个额外选项。 */
+    function effectiveModel() {
+        return acpState.current || acpState.defaultModel || '';
     }
 
-    // 查模型对应的接口类型（''=跟随默认 → 默认模型的接口类型）
+    // 查模型对应的接口类型
     function standardOfAcpModel(name) {
-        if (!name) return acpState.defaultStandard || '';
+        if (!name) return '';
         for (var i = 0; i < acpState.models.length; i++) {
             if (acpState.models[i].name === name) return acpState.models[i].standard || '';
         }
@@ -152,10 +152,9 @@
 
         acpState.current = info.acpModel || '';
         acpState.defaultModel = info.defaultModel || '';
-        acpState.defaultStandard = info.defaultModelStandard || '';
         acpState.thinking = info.acpThinkingDepth || 'off';
-        // 当前模型接口类型：优先从列表查，回退后端已解析值（acpModel 置空时后端回落默认模型）
-        acpState.currentStandard = standardOfAcpModel(acpState.current) || info.acpModelStandard || '';
+        // 接口类型：优先从列表查生效模型；若该模型未在可见列表中（已启用但隐藏）则用后端解析值
+        acpState.currentStandard = standardOfAcpModel(effectiveModel()) || info.acpModelStandard || '';
 
         var body = renderAcpSelectorHtml();
 
@@ -232,48 +231,57 @@
         return html;
     }
 
-    function acpDropdownItemsHtml() {
-        var current = acpState.current;
-        var html = '';
+    // 模型下拉搜索关键词（每次打开下拉时清空）与当前过滤首项
+    var acpFilterText = '';
+    var acpFirstMatch = null;
 
-        // 首项：跟随默认模型（acpModel 置空即回落 defaultModel）
-        html += '<div class="model-dropdown-item' + (current === '' ? ' active' : '') + '" data-model="">'
-            + '<span class="model-item-name">' + escapeHtml(followLabel()) + '</span>'
-            + (current === '' ? acpThinkingChipsHtml() : '')
-            + '</div>';
+    function acpDropdownItemsHtml() {
+        var current = effectiveModel();
 
         // 按供应商分组（map 归组，不依赖相邻性）；无 provider 的归入「其他」组
         var groups = [];
         var groupIndex = {};
         for (var i = 0; i < acpState.models.length; i++) {
             var g = acpState.models[i].provider || '';
-            if (!(g in groupIndex)) { groupIndex[g] = groups.length; groups.push({ provider: g, items: [] }); }
-            groups[groupIndex[g]].items.push(acpState.models[i]);
+            if (!(g in groupIndex)) { groupIndex[g] = groups.length; groups.push({ provider: g, models: [] }); }
+            groups[groupIndex[g]].models.push(acpState.models[i]);
         }
-        for (var gi = 0; gi < groups.length; gi++) {
-            var grp = groups[gi];
-            html += '<div class="model-dropdown-group">' + escapeHtml(grp.provider || t('history.model_group_other')) + '</div>';
-            for (var j = 0; j < grp.items.length; j++) {
-                var m = grp.items[j];
-                var active = m.name === current;
-                html += '<div class="model-dropdown-item' + (active ? ' active' : '') + '" data-model="' + escapeHtml(m.name) + '">'
-                    + '<span class="model-item-name">' + escapeHtml(modelShortName(m.name, grp.provider)) + '</span>'
+
+        var result = GourdModelDropdown.render({
+            segments: groups,
+            query: acpFilterText,
+            currentModel: current,
+            currentProvider: providerOf(current),
+            otherLabel: t('history.model_group_other'),
+            emptyText: t('history.model_search_empty'),
+            toggleTitle: t('history.model_group_toggle'),
+            itemHtml: function (m, active, provider) {
+                return '<div class="model-dropdown-item' + (active ? ' active' : '') + '" data-model="' + escapeHtml(m.name) + '">'
+                    + '<span class="model-item-name">' + escapeHtml(modelShortName(m.name, provider)) + '</span>'
                     + (active ? acpThinkingChipsHtml() : '')
                     + '</div>';
             }
-        }
-        return html;
+        });
+        acpFirstMatch = result.firstModel;
+        return result.html;
     }
 
     // 固定骨架（结构与聊天页选择器一致）：内容统一由 updateAcpModelUI 填充
     function renderAcpSelectorHtml() {
+        // 骨架重建时搜索框回到空白，关键词必须同步重置，
+        // 否则列表会按上次关键词过滤但输入框看上去是空的
+        acpFilterText = '';
+        acpFirstMatch = null;
         return '<div class="model-selector dropdown-down acp-model-selector" id="acpModelSelector">'
             + '<div class="model-selector-current">'
             + '<span class="model-name"></span>'
             + '<span class="model-thinking-tag" style="display:none"></span>'
             + '<span class="model-arrow">▾</span>'
             + '</div>'
-            + '<div class="model-dropdown"></div>'
+            + '<div class="model-dropdown has-search">'
+            + GourdModelDropdown.searchHtml(t('history.model_search_placeholder'))
+            + '<div class="model-dropdown-list"></div>'
+            + '</div>'
             + '</div>';
     }
 
@@ -290,14 +298,16 @@
     function updateAcpModelUI() {
         var $sel = $('#acpModelSelector');
         if (!$sel.length) return;
-        var displayName = acpState.current ? modelShortName(acpState.current, providerOf(acpState.current)) : followLabel();
+        var effective = effectiveModel();
+        var displayName = modelShortName(effective, providerOf(effective));
         var tag = acpThinkingTag();
         $sel.find('.model-selector-current .model-name').text(displayName);
         $sel.find('.model-selector-current .model-thinking-tag').text(tag).toggle(!!tag);
-        $sel.find('.model-dropdown').html(acpDropdownItemsHtml());
+        // 只重绘列表层：搜索框为骨架静态节点，重绘会丢焦点与已输入内容
+        $sel.find('.model-dropdown-list').html(acpDropdownItemsHtml());
     }
 
-    // 保存到 general.acpModel（允许置空=跟随默认）。
+    // 保存到 general.acpModel。
     // 交互对齐聊天页 selectModel：先乐观更新 UI（零延迟反馈），请求失败回滚并提示。
     function saveAcpModel(value) {
         var prevModel = acpState.current;
@@ -340,14 +350,74 @@
     /* ===== 选择器事件（document 委托：render() 每次重建 HTML，无需重复绑定） ===== */
     $(document).on('click', '#' + CONTAINER + ' .model-selector-current', function (e) {
         e.stopPropagation();
+        var willOpen = !$('#acpModelSelector').hasClass('open');
         $('#acpModelSelector').toggleClass('open');
+        // 每次打开从完整列表开始：清空关键词并聚焦搜索框
+        if (willOpen) {
+            if (acpFilterText) { acpFilterText = ''; updateAcpModelUI(); }
+            var $dd = $('#acpModelSelector').find('.model-dropdown');
+            $dd.find('.model-search-input').val('');
+            $dd.find('.model-search-clear').hide();
+            setTimeout(function () { try { $dd.find('.model-search-input').focus(); } catch (err) {} }, 0);
+        }
+    });
+
+    // 搜索：输入即过滤（只重绘列表层，焦点不丢）
+    $(document).on('input', '#' + CONTAINER + ' .model-search-input', function () {
+        acpFilterText = $(this).val() || '';
+        $('#acpModelSelector').find('.model-search-clear').toggle(!!acpFilterText);
+        updateAcpModelUI();
+        $('#acpModelSelector').find('.model-dropdown-list').scrollTop(0);
+    });
+
+    $(document).on('keydown', '#' + CONTAINER + ' .model-search-input', function (e) {
+        if (e.key === 'Escape' || e.keyCode === 27) {
+            e.stopPropagation();
+            if (acpFilterText) {
+                acpFilterText = '';
+                $(this).val('');
+                $('#acpModelSelector').find('.model-search-clear').hide();
+                updateAcpModelUI();
+            } else {
+                $('#acpModelSelector').removeClass('open');
+            }
+            return;
+        }
+        if (e.key === 'Enter' || e.keyCode === 13) {
+            e.preventDefault();
+            e.stopPropagation();
+            // 回车选中过滤结果首项；与当前生效模型相同时视为确认收起
+            if (acpFirstMatch != null && acpFirstMatch !== effectiveModel()) saveAcpModel(acpFirstMatch);
+            else $('#acpModelSelector').removeClass('open');
+        }
     });
 
     $(document).on('click', '#' + CONTAINER + ' .model-dropdown', function (e) {
+        // 下拉内部点击一律不冒泡：否则点搜索框/组头/空白处会被外部收起器关闭
+        e.stopPropagation();
+
+        // 清空按钮
+        if ($(e.target).closest('.model-search-clear').length) {
+            acpFilterText = '';
+            var $dd = $('#acpModelSelector').find('.model-dropdown');
+            $dd.find('.model-search-input').val('').focus();
+            $dd.find('.model-search-clear').hide();
+            updateAcpModelUI();
+            return;
+        }
+
+        // 服务商组头：折叠/展开（与聊天页共享持久化折叠态）
+        var $group = $(e.target).closest('.model-dropdown-group');
+        if ($group.length) {
+            var $wrap = $group.closest('.model-dropdown-group-wrap');
+            GourdModelDropdown.setCollapsed($group.attr('data-provider') || '', !$wrap.hasClass('collapsed'));
+            updateAcpModelUI();
+            return;
+        }
+
         // 关联的思考档位 chip：仅设定档位，不切模型；保持下拉打开便于连续调整
         var $chip = $(e.target).closest('.model-thinking-chip');
         if ($chip.length) {
-            e.stopPropagation();
             var depth = $chip.attr('data-thinking');
             if (depth != null && depth !== acpState.thinking) {
                 saveAcpThinking(depth);
@@ -356,11 +426,11 @@
         }
         var $item = $(e.target).closest('.model-dropdown-item');
         if (!$item.length) return;
-        e.stopPropagation();
         var modelName = $item.attr('data-model');
         if (modelName == null) return;
-        if (modelName === acpState.current) {
-            // 点击当前已选模型项：视为「确认/收起」动作，关闭下拉
+        if (modelName === effectiveModel()) {
+            // 点击当前已选模型项：视为「确认/收起」动作，关闭下拉。
+            // 此时若存储值为空（未显式选择），保持不写入，继续跟随默认模型
             $('#acpModelSelector').removeClass('open');
             return;
         }

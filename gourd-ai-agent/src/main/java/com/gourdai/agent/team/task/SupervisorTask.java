@@ -9,6 +9,7 @@
  */
 package com.gourdai.agent.team.task;
 
+import com.gourdai.core.portal.web.UsageSubmissionService;
 import org.noear.snack4.ONode;
 import com.gourdai.agent.Agent;
 import com.gourdai.agent.AgentChunk;
@@ -177,6 +178,7 @@ public class SupervisorTask implements NamedTaskComponent {
 
         if (response.getUsage() != null) {
             trace.getMetrics().addUsage(response.getUsage());
+            UsageSubmissionService.recordSafely(config.getChatModel().getModel(), response.getUsage(), System.currentTimeMillis());
         }
 
         for (RankEntity<TeamInterceptor> item : trace.getOptions().getInterceptors()) {

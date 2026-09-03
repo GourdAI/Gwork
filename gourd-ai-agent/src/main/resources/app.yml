@@ -1,8 +1,9 @@
 server.port: 4808
 
 server.request:
-  maxBodySize: 2mb
-  maxFileSize: 2mb
+  # 不限制请求体和单文件大小；超长输入仍会在前端自动折叠为 TXT 附件
+  maxBodySize: -1
+  maxFileSize: -1
 
 solon.app:
   name: "gwork"
@@ -13,7 +14,10 @@ solon.logging.appender:
     enable: false
   file:
     level: DEBUG
-    name: ".gwork/logs/${solon.app.name}"
+    # 默认值兜底：仅 App.main 会注入 gwork.log.dir（见 App.java）。任何不经过 App.main 的
+    # Solon 启动路径（单测、未来新入口）若解析不到该占位符，最坏会在磁盘上建出名为
+    # "${gwork.log.dir}" 的字面量目录。
+    name: "${gwork.log.dir:.gwork/logs}/${solon.app.name}"
 
 solon:
   logging:

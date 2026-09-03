@@ -22,7 +22,7 @@ public class OllamaModelsAdapter implements ModelsAdapter {
 
     @Override
     public List<ModelInfo> fetchModels(String baseUrl, Map<String, String> headers, String apiKey) {
-        String modelsUrl = baseUrl + "/api/tags";
+        String modelsUrl = ModelsHttp.requireHttpUrl(deriveModelsUrl(baseUrl), "Ollama");
         List<ModelInfo> result = new ArrayList<>();
 
         try {
@@ -35,12 +35,21 @@ public class OllamaModelsAdapter implements ModelsAdapter {
                 http.header("Authorization", "Bearer " + apiKey);
             }
 
-            String body = http.get();
+            String body = ModelsHttp.getBody(http, "Ollama");
 
-            ONode root = ONode.ofJson(body);
+            ONode root;
+            try {
+                root = ONode.ofJson(body);
+            } catch (Throwable e) {
+                throw new ModelsFetchException(ModelsFetchReason.INVALID_RESPONSE, 200,
+                        "[Ollama] invalid JSON response", e);
+            }
             ONode models = root.get("models");
-            if (models.isArray()) {
-                for (int i = 0; i < models.size(); i++) {
+            if (models == null || !models.isArray()) {
+                throw new ModelsFetchException(ModelsFetchReason.INVALID_RESPONSE, 200,
+                        "[Ollama] missing models array");
+            }
+            for (int i = 0; i < models.size(); i++) {
                     ONode item = models.get(i);
                     String name = item.get("name").getString();
                     long created = System.currentTimeMillis() / 1000;
@@ -57,12 +66,22 @@ public class OllamaModelsAdapter implements ModelsAdapter {
                             .ownedBy("ollama")
                             .type("chat")
                             .build());
-                }
             }
+        } catch (ModelsFetchException e) {
+            log.warn("[Ollama] model fetch failed: reason={}, status={}", e.getReason(), e.getStatus());
+            throw e;
         } catch (Exception e) {
-            log.warn("[Ollama] Error fetching models from {}: {}", modelsUrl, e.getMessage());
+            log.warn("[Ollama] invalid models response", e);
+            throw new ModelsFetchException(ModelsFetchReason.INVALID_RESPONSE, 200,
+                    "[Ollama] invalid models response", e);
         }
 
         return result;
+    }
+
+    private String deriveModelsUrl(String baseUrl) {
+        String base = baseUrl == null ? "" : baseUrl.replaceAll("/+$", "");
+        if (base.endsWith("/api/tags")) return base;
+        return base + "/api/tags";
     }
 }

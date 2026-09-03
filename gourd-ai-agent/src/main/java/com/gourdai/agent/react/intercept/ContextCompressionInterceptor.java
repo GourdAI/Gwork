@@ -81,6 +81,14 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
 
     public final static String META_COMPRESSED = "_compressed";
 
+    /**
+     * 模型未配置 contextLength（=0）时的回退上下文窗口长度。
+     *
+     * <p>作为全局唯一事实源对外暴露：Web 层展示上下文占用比例时（{@code WebStreamBuilder#onContextUsageChunk}）
+     * 必须复用此常量，避免「展示用默认窗口」与「压缩决策用默认窗口」两处硬编码漂移。</p>
+     */
+    public static final long DEFAULT_CONTEXT_LENGTH = 128_000L;
+
     // 在类中预加载注册表
     private static final EncodingRegistry registry = Encodings.newDefaultEncodingRegistry();
     // 适配 GPT-4o (o200k_base)，对 DeepSeek 等使用 cl100k_base 的模型有微小偏差（通常 <5%）
@@ -89,13 +97,11 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
 
     // 保留窗口的最大消息数（= 历史窗口大小 N，压缩时保护最后 N 条）
     private int maxMessages;
-    // 保留窗口的最大 Token 数（降级为兜底基准，不再作为触发阈值）
-    private int maxTokens;
     // 压缩触发比例（1~100）：当上下文占用达到 "当前模型 contextLength × 比例%" 时触发压缩
     // ⚠️ 非线程安全，需通过 copy()/copyWith() 获取独立副本后使用，不可跨线程共享
     private int compressionRatio = 80;
-    // 当前模型无 contextLength（=0）时的回退默认，与 WebStreamBuilder 对齐
-    private static final int DEFAULT_CONTEXT_LENGTH = 128_000;
+    // 当前模型无 contextLength（=0）时的回退窗口长度（可配置，默认 DEFAULT_CONTEXT_LENGTH）
+    private long defaultContextLength = DEFAULT_CONTEXT_LENGTH;
     // 保留窗口的最小消息数下限（默认 maxMessages / 3，最低 3）
     // 防止 Token 维度截断导致保留窗口被压缩到只剩 1~2 条消息
     private int minReservedMessages;
@@ -113,8 +119,20 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         this.minReservedMessages = Math.max(3, this.maxMessages / 3);
     }
 
-    public void setMaxTokens(int maxTokens) {
-        this.maxTokens = Math.max(10_000, maxTokens);
+    /**
+     * 设置模型未配置 contextLength 时的回退窗口长度。
+     *
+     * <p>非正数为无意义配置（会让压缩预算恒为 0、每轮都触发压缩），故直接拒绝并保持原值。</p>
+     */
+    public void setDefaultContextLength(long defaultContextLength) {
+        if (defaultContextLength <= 0L) {
+            throw new IllegalArgumentException("defaultContextLength must be positive");
+        }
+        this.defaultContextLength = defaultContextLength;
+    }
+
+    public long getDefaultContextLength() {
+        return defaultContextLength;
     }
 
     public void setCompressionRatio(int compressionRatio) {
@@ -132,26 +150,27 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
     /**
      * 构造（使用默认压缩比例 80%，默认重试 3 次）。
      */
-    public ContextCompressionInterceptor(int maxMessages, int maxTokens, Supplier<ChatModel> chatModelSupplier, CompressionStrategy compressionStrategy) {
-        init(this, maxMessages, maxTokens, 80, 3, chatModelSupplier, compressionStrategy);
+    public ContextCompressionInterceptor(int maxMessages, Supplier<ChatModel> chatModelSupplier,
+                                         CompressionStrategy compressionStrategy) {
+        init(this, maxMessages, 80, 3, chatModelSupplier, compressionStrategy);
     }
 
     /**
-     * 构造（指定重试次数，使用默认压缩比例 80%）。
-     *
-     * <p>如需指定压缩比例，请构造后调用 {@link #setCompressionRatio(int)}。</p>
+     * 兼容旧四参数 API。第二个参数原为 maxTokens，现已不参与压缩判据，仅保留源兼容；
+     * 重试次数请通过 {@link #setMaxRetries(int)} 配置，避免同签名静默改变语义。
      */
-    public ContextCompressionInterceptor(int maxMessages, int maxTokens, int maxRetries, Supplier<ChatModel> chatModelSupplier, CompressionStrategy compressionStrategy) {
-        init(this, maxMessages, maxTokens, 80, maxRetries, chatModelSupplier, compressionStrategy);
+    @Deprecated
+    public ContextCompressionInterceptor(int maxMessages, int legacyMaxTokens,
+                                         Supplier<ChatModel> chatModelSupplier,
+                                         CompressionStrategy compressionStrategy) {
+        init(this, maxMessages, 80, 3, chatModelSupplier, compressionStrategy);
     }
 
-    /**
-     * 全参数初始化。
-     */
-    private static void init(ContextCompressionInterceptor self, int maxMessages, int maxTokens, int compressionRatio, int maxRetries,
-                      Supplier<ChatModel> chatModelSupplier, CompressionStrategy compressionStrategy) {
+    private static void init(ContextCompressionInterceptor self, int maxMessages,
+                             int compressionRatio, int maxRetries,
+                             Supplier<ChatModel> chatModelSupplier,
+                             CompressionStrategy compressionStrategy) {
         self.maxMessages = Math.max(10, maxMessages);
-        self.maxTokens = Math.max(10_000, maxTokens);
         self.minReservedMessages = Math.max(3, self.maxMessages / 3);
         self.compressionRatio = Math.min(100, Math.max(1, compressionRatio));
         self.maxRetries = maxRetries;
@@ -159,17 +178,17 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         self.compressionStrategy = compressionStrategy;
     }
 
-    public ContextCompressionInterceptor(){
-        this(15, 15_000, null, null);
+    public ContextCompressionInterceptor() {
+        this(15, null, null);
     }
 
-    /**
-     * 复制实例，并使用新的限制
-     */
-    public ContextCompressionInterceptor copyWith(int maxMessages, int maxTokens) {
+    /** 复制实例，并使用新的消息限制。 */
+    public ContextCompressionInterceptor copyWith(int maxMessages) {
         ContextCompressionInterceptor tmp = new ContextCompressionInterceptor();
-        init(tmp, maxMessages, maxTokens, this.compressionRatio, this.maxRetries,
+        init(tmp, maxMessages, this.compressionRatio, this.maxRetries,
                 this.chatModelSupplier, this.compressionStrategy);
+        tmp.defaultContextLength = this.defaultContextLength;
+        tmp.minReservedMessages = this.minReservedMessages;
         return tmp;
     }
 
@@ -838,20 +857,38 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
      * 模型未设置 contextLength（=0）时回退 {@link #DEFAULT_CONTEXT_LENGTH}。</p>
      */
     private int resolveBudget(ReActTrace trace) {
-        int ctxLen = DEFAULT_CONTEXT_LENGTH;
+        ChatModel model = null;
         try {
-            long ctx = trace.getOptions().getChatModel().getConfig().getContextLength();
-            if (ctx > 0) {
-                ctxLen = (int) Math.min(Integer.MAX_VALUE, ctx);
-            }
+            model = trace.getOptions().getChatModel();
         } catch (Exception e) {
-            // 取不到模型上下文时保守回退，不阻断推理
             if (log.isDebugEnabled()) {
                 log.debug("ReActAgent [{}] resolve contextLength failed, fallback {}: {}",
-                        trace.getAgentName(), DEFAULT_CONTEXT_LENGTH, e.getMessage());
+                        trace.getAgentName(), defaultContextLength, e.getMessage());
             }
         }
-        return (int) ((long) ctxLen * compressionRatio / 100);
+        return finalTokenThreshold(model);
+    }
+
+    /** 返回模型的完整 long 上下文窗口；未配置时回退可配置默认值。 */
+    private long finalContextLength(ChatModel model) {
+        if (model != null && model.getConfig() != null) {
+            long configured = model.getConfig().getContextLength();
+            if (configured > 0L) return configured;
+        }
+        return defaultContextLength;
+    }
+
+    /**
+     * 把 long 上下文窗口转换为本地 token 估算阈值。
+     * jtokkit {@code countTokens} 返回 int，因此此处是刻意且唯一的收窄边界：
+     * 先按比例用 long 计算，再饱和钳制到 Integer.MAX_VALUE，绝不回绕为负数。
+     */
+    private int finalTokenThreshold(ChatModel model) {
+        long contextLength = finalContextLength(model);
+        long threshold = contextLength > Long.MAX_VALUE / compressionRatio
+                ? Long.MAX_VALUE
+                : contextLength * compressionRatio / 100L;
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(1L, threshold));
     }
 
     /**
