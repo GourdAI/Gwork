@@ -20,6 +20,11 @@ on:
         description: '版本号（留空则使用 tauri.conf.json 当前版本）'
         required: false
         default: ''
+      publish_release:
+        description: '构建后发布到 GitHub Release（必须同时填写上面的版本号）'
+        type: boolean
+        required: false
+        default: false
   push:
     tags:
       - 'v*'
@@ -416,31 +421,127 @@ jobs:
             b="src-tauri/target/$triple/release/bundle"
             [ -d "$b" ] || continue
             mkdir -p "staging/$arch"
-            find "$b" -maxdepth 3 \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) \
-              -exec cp {} "staging/$arch/" \;
+            # dmg 文件名自带架构（GWork_<ver>_x64.dmg / _aarch64.dmg），原样复制即可
+            find "$b" -maxdepth 3 -name '*.dmg' -exec cp {} "staging/$arch/" \;
+            # .app.tar.gz（及 .sig）两个架构**同名**，这里就改名而不是留到发布时再改：
+            # 下面的上传按文件逐个传，artifact 名就是 basename（见上传步骤注释），
+            # 同名会让两次上传撞成同一个 artifact。命名与 publish-downloads.js /
+            # generate-latest-json.js 的固定名约定（GWork-{x64,arm64}.app.tar.gz）一致。
+            while IFS= read -r f; do
+              base="$(basename "$f")"
+              cp "$f" "staging/$arch/${base/.app.tar.gz/-$arch.app.tar.gz}"
+            done < <(find "$b" -maxdepth 3 \( -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \))
           done
           find staging -type f | sort
 
-      # !cancelled() 而非默认的成功才跑：Linux 腿现在 deb 与 AppImage 分两步，
-      # AppImage 失败时 deb 已经落盘，必须让它进 artifact —— 否则 manifest / release
-      # 两个 job 拿到的 Linux 产物是空的，比「少一个 AppImage」糟得多。
-      # if-no-files-found 保持 error：成功路径上它仍是有用的护栏（防 path 写错静默零产物）。
-      - name: 上传安装包
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+      # ── 逐个文件上传，每个安装包 = 一个独立 artifact（不再打成 zip） ──
+      # upload-artifact v7 的 archive: false 才能跳过 zip 包装；它有两条硬约束：
+      #   1. 一次只能传**一个**文件，glob 匹配到多个直接失败；
+      #   2. artifact 名恒等于文件的 basename，`name:` 参数被忽略
+      #      （@actions/artifact 在 skipArchive 分支里 name = basename(files[0])）。
+      # 所以这里不能再用一条 path 列表把整个平台的产物打包上传，只能按产物类型
+      # 拆成独立步骤。副作用是 artifact 名不再有 gwork-tauri-* 前缀，下游两个 job
+      # 的 pattern 也随之改成按扩展名匹配（见 manifest / release job）。
+      #
+      # 每步都带 if: ${{ !cancelled() }}：Linux 腿 deb 与 AppImage 分两步，AppImage
+      # 失败时 deb 已落盘，必须照常上传 —— 否则下游拿到的 Linux 产物是空的。
+      # if-no-files-found 逐步细分：
+      #   - 安装包本体用 error（成功路径上必须存在，防 path 写错静默零产物）；
+      #   - .sig 用 ignore（未配置签名密钥时 configure-updater.js 会关掉
+      #     createUpdaterArtifacts，此时**本就不该有** .sig，用 error 会误杀）。
+      - name: 上传安装包（Windows nsis）
+        if: ${{ !cancelled() && matrix.platform == 'win' }}
+        uses: actions/upload-artifact@v7
         with:
-          name: gwork-tauri-${{ matrix.platform }}
-          # 不带 --target 时产物在 target/release/bundle/；带 --target（macOS）时已由上一步
-          # 归集到 staging/<arch>/。.sig 必须随包上传 —— latest.json 的 signature 字段
-          # 就是它的内容，丢了就无法生成清单。
-          path: |
-            gourd-ai-tauri/src-tauri/target/release/bundle/nsis/*.exe
-            gourd-ai-tauri/src-tauri/target/release/bundle/nsis/*.exe.sig
-            gourd-ai-tauri/src-tauri/target/release/bundle/appimage/*.AppImage
-            gourd-ai-tauri/src-tauri/target/release/bundle/appimage/*.AppImage.sig
-            gourd-ai-tauri/src-tauri/target/release/bundle/deb/*.deb
-            gourd-ai-tauri/staging/**
+          path: gourd-ai-tauri/src-tauri/target/release/bundle/nsis/*.exe
+          archive: false
           if-no-files-found: error
+
+      - name: 上传更新签名（Windows nsis）
+        if: ${{ !cancelled() && matrix.platform == 'win' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-tauri/src-tauri/target/release/bundle/nsis/*.exe.sig
+          archive: false
+          if-no-files-found: ignore
+
+      - name: 上传安装包（Linux deb）
+        if: ${{ !cancelled() && matrix.platform == 'linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-tauri/src-tauri/target/release/bundle/deb/*.deb
+          archive: false
+          if-no-files-found: error
+
+      # AppImage 用 warn 而非 error：它可能在上一步失败而 deb 已经成功，
+      # 此时不该让「上传」这一步再报一次错把真因盖掉。
+      - name: 上传安装包（Linux AppImage）
+        if: ${{ !cancelled() && matrix.platform == 'linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-tauri/src-tauri/target/release/bundle/appimage/*.AppImage
+          archive: false
+          if-no-files-found: warn
+
+      - name: 上传更新签名（Linux AppImage）
+        if: ${{ !cancelled() && matrix.platform == 'linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-tauri/src-tauri/target/release/bundle/appimage/*.AppImage.sig
+          archive: false
+          if-no-files-found: ignore
+
+      # macOS 两个架构必须分步：archive: false 一次只收一个文件，而 staging/ 下
+      # x64 与 arm64 各有一份 dmg / app.tar.gz。
+      - name: 上传安装包（macOS dmg x64）
+        if: ${{ !cancelled() && matrix.platform == 'mac' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-tauri/staging/x64/*.dmg
+          archive: false
+          if-no-files-found: error
+
+      - name: 上传安装包（macOS dmg arm64）
+        if: ${{ !cancelled() && matrix.platform == 'mac' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-tauri/staging/arm64/*.dmg
+          archive: false
+          if-no-files-found: error
+
+      # .app.tar.gz 是 macOS 的**更新载荷**（dmg 只用于首装），latest.json 的
+      # signature 取自随行的 .sig，丢了就没法生成清单。文件名已在归集步骤按架构改名。
+      - name: 上传更新载荷（macOS x64）
+        if: ${{ !cancelled() && matrix.platform == 'mac' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-tauri/staging/x64/*.app.tar.gz
+          archive: false
+          if-no-files-found: ignore
+
+      - name: 上传更新签名（macOS x64）
+        if: ${{ !cancelled() && matrix.platform == 'mac' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-tauri/staging/x64/*.app.tar.gz.sig
+          archive: false
+          if-no-files-found: ignore
+
+      - name: 上传更新载荷（macOS arm64）
+        if: ${{ !cancelled() && matrix.platform == 'mac' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-tauri/staging/arm64/*.app.tar.gz
+          archive: false
+          if-no-files-found: ignore
+
+      - name: 上传更新签名（macOS arm64）
+        if: ${{ !cancelled() && matrix.platform == 'mac' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-tauri/staging/arm64/*.app.tar.gz.sig
+          archive: false
+          if-no-files-found: ignore
 
   # 三个平台全部构完后汇总：tauri-plugin-updater 用的是**单个** latest.json，
   # 内部 platforms 映射覆盖全平台（不像 electron-updater 每平台一个 yml），
@@ -459,11 +560,33 @@ jobs:
         with:
           node-version: 20
 
+      # 不再用 pattern: gwork-tauri-*：archive: false 下 artifact 名恒等于文件名
+      # （GWork_1.2.3_x64-setup.exe 这样），没有统一前缀。不写 pattern 则拉本次 run
+      # 的全部 artifact，正是我们要的；此时又必须 **不开** merge-multiple：
+      # 默认每个 artifact 落入以其名命名的子目录，而 generate-latest-json.js 靠
+      # `载荷旁边的同名 .sig` 配对 —— 包与签名分居两个同级目录就配不上了，
+      # 所以下一步先把所有文件拍平到同一层再交给脚本。
       - name: 下载全平台产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
-          pattern: gwork-tauri-*
-          path: artifacts
+          path: artifacts-raw
+
+      # 拍平：把 artifacts-raw/<artifact名>/<文件> 收成 artifacts/<文件>。
+      # macOS 两个架构的 .app.tar.gz 已在构建腿改过名（GWork-x64 / GWork-arm64），
+      # 此处不会再撞名；万一撞了就直接报错，不能静默覆盖。
+      - name: 拍平产物目录
+        shell: bash
+        run: |
+          set -e
+          mkdir -p artifacts
+          while IFS= read -r f; do
+            base="$(basename "$f")"
+            if [ -e "artifacts/$base" ]; then
+              echo "::error::同名产物冲突: $base ($f)"; exit 1
+            fi
+            cp "$f" "artifacts/$base"
+          done < <(find artifacts-raw -type f | sort)
+          ls -lh artifacts
 
       - name: 生成 latest.json
         shell: bash
@@ -488,52 +611,51 @@ jobs:
 
       - name: 上传 latest.json
         if: hashFiles('latest.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: gwork-tauri-latest-json
           path: latest.json
+          archive: false
           if-no-files-found: error
 
-  # 打 v* tag 时把全平台产物 + latest.json 发布到同名 GitHub Release。
+  # 把全平台产物 + latest.json 发布到 GitHub Release。
   # 在此之前产物只存在于 Actions artifact（保留期有限、需登录才能下载），
   # Release 页面始终为空。与 build.yml 的 release job 同构，两者写入同一个 Release。
   release:
     name: 发布到 GitHub Release
     needs: [build, manifest]
-    # manifest 在未配置签名密钥时也会「成功但不产出 latest.json」，故用 always()
-    # 兼容部分失败；发布已成功的平台比整个发版卡住强。
-    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result != 'cancelled'
+    # 触发条件：打 v* tag，或手动触发时勾选了 publish_release。
+    #
+    # 原来只有 startsWith(github.ref, 'refs/tags/v')，于是 workflow_dispatch 跑出来的
+    # 构建虽然三个平台全绿，发布步骤却恒为 skipped —— 这就是「最后没有推送」的
+    # 直接原因（本仓库目前也确实一个 tag 都没有，所以从未走到过发布分支）。
+    # 手动发布必须填 version：没有 tag 时它既是 Release 的 tag 名，也是安装包版本号，
+    # 缺了就会拿 tauri.conf.json 里的默认版本反复覆盖同一个 Release。
+    if: |
+      always() && needs.build.result != 'cancelled' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish_release))
     runs-on: ubuntu-latest
     permissions:
       contents: write   # 创建 Release、上传资产所需（默认 token 只读）
     steps:
-      # 不用 merge-multiple：macOS 两个架构的更新载荷同名（都叫 GWork.app.tar.gz），
-      # 合并时会直接互相覆盖。保留目录结构，下一步按路径里的架构改名。
+      # 与 manifest job 同理：archive: false 后 artifact 名就是文件名，无统一前缀，
+      # 故不写 pattern（拉全部），也不开 merge-multiple（保留目录以便下一步查重）。
       - name: 下载全平台产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
-          pattern: gwork-tauri-*
           path: artifacts
 
-      - name: 汇总待发布文件（macOS 双架构按架构改名）
+      - name: 汇总待发布文件
         shell: bash
         run: |
           set -e
           mkdir -p release
-          # Release 资产是扁平的，只认 basename。dmg/exe/AppImage/deb 的文件名已带
-          # version+arch，扁平后唯一；但 .app.tar.gz（及其 .sig）两个架构同名，
-          # 架构信息只在目录名里，必须改名后再上传，否则 x64 会被 arm64 盖掉，
-          # 而用户拿到的包与 latest.json 里的签名对不上 —— 此命名与
-          # cmd/publish-downloads.js 的固定名约定（GWork-{x64,arm64}.app.tar.gz）一致。
+          # Release 资产是扁平的，只认 basename。exe/dmg/AppImage/deb 的文件名自带
+          # version+arch；macOS 的 .app.tar.gz（及 .sig）两个架构本来同名，已在构建腿的
+          # 「归集产物」步骤改成 GWork-{x64,arm64}.app.tar.gz，此处不需再改。
+          # 仍保留撞名检查：静默覆盖会让用户下到错架构的包，比构建失败更难排查。
           while IFS= read -r f; do
             base="$(basename "$f")"
-            case "$f" in
-              *.app.tar.gz|*.app.tar.gz.sig)
-                arch=x64
-                case "$f" in *aarch64*|*arm64*) arch=arm64 ;; esac
-                base="${base/GWork.app.tar.gz/GWork-$arch.app.tar.gz}"
-                ;;
-            esac
             if [ -e "release/$base" ]; then
               echo "::error::同名产物冲突，上传会互相覆盖: $base ($f)"; exit 1
             fi
@@ -549,12 +671,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          TAG="$GITHUB_REF_NAME"
+          # tag 触发时用 tag 名；手动发布时没有 tag，用输入的版本号拼出 v<version>，
+          # 并用 --target 把 Release 绑定到当前 commit（否则 gh 会拿默认分支 HEAD）。
+          if [ -n "$GITHUB_REF_NAME" ] && [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            V="${{ github.event.inputs.version }}"
+            if [ -z "$V" ]; then
+              echo "::error::手动发布需要填写版本号（version 输入框）"; exit 1
+            fi
+            TAG="v${V#v}"
+          fi
+          echo "目标 Release: $TAG"
           # Release 可能已由 build.yml（同 tag 触发）建好，直接复用；
           # 两条流水线可能同时探测到「不存在」，后到者 create 会失败，
           # 故失败后再 view 一次确认确实已存在。
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --generate-notes \
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes \
               || gh release view "$TAG" >/dev/null
           fi
           gh release upload "$TAG" release/* --clobber

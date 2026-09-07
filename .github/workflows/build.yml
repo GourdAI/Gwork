@@ -7,6 +7,11 @@ on:
         description: '版本号（留空则使用 package.json 当前版本）'
         required: false
         default: ''
+      publish_release:
+        description: '构建后发布到 GitHub Release（必须同时填写上面的版本号）'
+        type: boolean
+        required: false
+        default: false
   push:
     tags:
       - 'v*'
@@ -221,18 +226,83 @@ jobs:
             codesign -dv --verbose=2 "$app" 2>&1 | grep -E "Authority|Signature=|TeamIdentifier" || true
           done
 
-      - name: 上传安装包
+      # ── 逐个文件上传，每个安装包 = 一个独立 artifact（不再打成 zip） ──
+      # upload-artifact v7 的 archive: false 才能跳过 zip 包装，但它有两条硬约束：
+      #   1. 一次只能传**一个**文件，glob 匹配到多个直接失败；
+      #   2. artifact 名恒等于文件 basename，`name:` 参数被忽略
+      #      （@actions/artifact 在 skipArchive 分支里 name = basename(files[0])）。
+      # 所以不能再用一条 path 列表把整个平台的产物一起传，只能按产物类型拆成独立步骤。
+      # 副作用是 artifact 名不再有 gwork-* 前缀，release job 的 pattern 也随之取消。
+      #
+      # latest*.yml / *.blockmap 是 electron-updater 的更新元数据，不是给人下载的安装包，
+      # 但发布时必须随包上 Release，否则老客户端检不到更新，所以一并上传。
+      - name: 上传安装包（Windows nsis）
+        if: ${{ !cancelled() && matrix.platform == 'win' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-desktop/out/*.exe
+          archive: false
+          if-no-files-found: error
+
+      - name: 上传安装包（Linux AppImage）
+        if: ${{ !cancelled() && matrix.platform == 'linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-desktop/out/*.AppImage
+          archive: false
+          if-no-files-found: error
+
+      - name: 上传安装包（Linux deb）
+        if: ${{ !cancelled() && matrix.platform == 'linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-desktop/out/*.deb
+          archive: false
+          if-no-files-found: error
+
+      # mac 两个架构的 dmg 同时存在于 out/，而 archive: false 一次只收一个，必须拆两步。
+      # 注意不能写成 *-x64.dmg：builder-mac.json 没配 artifactName，electron-builder 的
+      # 默认命名对 x64 **不加架构后缀**（archSuffix 在 x64 时为空串），只有 arm64 带
+      # -arm64。故 x64 那步用「全部 dmg 减去 arm64」的排除写法，两种命名下都成立。
+      - name: 上传安装包（macOS dmg x64）
+        if: ${{ !cancelled() && matrix.platform == 'mac' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: |
+            gourd-ai-desktop/out/*.dmg
+            !gourd-ai-desktop/out/*-arm64.dmg
+          archive: false
+          if-no-files-found: error
+
+      - name: 上传安装包（macOS dmg arm64）
+        if: ${{ !cancelled() && matrix.platform == 'mac' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-desktop/out/*-arm64.dmg
+          archive: false
+          if-no-files-found: error
+
+      # 更新元数据：每平台一个 latest*.yml（win 为 latest.yml、mac 为 latest-mac.yml、
+      # linux 为 latest-linux.yml），同一腿内只有一个，可安全地用通配匹配。
+      - name: 上传更新清单 latest*.yml
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: gourd-ai-desktop/out/latest*.yml
+          archive: false
+          if-no-files-found: warn
+
+      # blockmap 用于差分更新，可选；数量不确定（每个安装包一个），所以不能用
+      # archive: false 逐个传（会因多文件失败），也不值得为它拆很多步骤。
+      # 它不是用户会去下载的东西，打成一个 zip 不影响「每个安装包单独一个包」的目标；
+      # 发布步骤会把它解开后平铺到 Release。
+      - name: 上传 blockmap（差分更新用）
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: gwork-${{ matrix.platform }}
-          path: |
-            gourd-ai-desktop/out/*.exe
-            gourd-ai-desktop/out/*.dmg
-            gourd-ai-desktop/out/*.AppImage
-            gourd-ai-desktop/out/*.deb
-            gourd-ai-desktop/out/latest*.yml
-            gourd-ai-desktop/out/*.blockmap
-          if-no-files-found: error
+          name: gwork-blockmap-${{ matrix.platform }}
+          path: gourd-ai-desktop/out/*.blockmap
+          if-no-files-found: warn
 
   # 打 v* tag 时把三平台产物汇总发布到同名 GitHub Release。
   # 在此之前产物只存在于 Actions 的 artifact 中（保留期有限、且需登录才能下载），
@@ -245,20 +315,25 @@ jobs:
   release:
     name: 发布到 GitHub Release
     needs: build
-    # 手动触发（workflow_dispatch）没有 tag，产物只留在 artifact，不发版。
-    # 沿用 build-tauri.yml 中 manifest job 的口径：fail-fast: false 下允许部分
-    # 平台失败，此时仍发布已成功的平台，缺的平台重跑后 --clobber 补传即可。
-    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result != 'cancelled'
+    # 触发条件：打 v* tag，或手动触发时勾选了 publish_release。
+    # 原来只认 tag，于是 workflow_dispatch 跑出来的构建即使全绿，发布 job 也恒为
+    # skipped（截图里那个灯色的⊘ 就是它）。手动发布必须填 version：没有 tag 时
+    # 它既是 Release 的 tag 名，也是安装包版本号。
+    if: |
+      always() && needs.build.result != 'cancelled' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish_release))
     runs-on: ubuntu-latest
     permissions:
       contents: write   # 创建 Release、上传资产所需（默认 token 只读）
     steps:
+      # 不写 pattern：安装包现在以 archive: false 上传，artifact 名就是文件名，
+      # 没有 gwork-* 前缀了；直接拉本次 run 的全部 artifact（含 blockmap 那个 zip）。
+      # merge-multiple 保持不开，保留目录以便下一步查重名。
       - name: 下载全平台产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
-          pattern: gwork-*
           path: artifacts
-          merge-multiple: true
 
       - name: 汇总待发布文件
         shell: bash
@@ -285,12 +360,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          TAG="$GITHUB_REF_NAME"
+          # tag 触发时用 tag 名；手动发布时没有 tag，用输入的版本号拼出 v<version>，
+          # 并用 --target 把 Release 绑定到当前 commit。
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ -n "$GITHUB_REF_NAME" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            V="${{ github.event.inputs.version }}"
+            if [ -z "$V" ]; then
+              echo "::error::手动发布需要填写版本号（version 输入框）"; exit 1
+            fi
+            TAG="v${V#v}"
+          fi
+          echo "目标 Release: $TAG"
           # Release 可能已由 Tauri 流水线（同 tag 触发）建好，此时直接复用。
           # create 与 view 之间存在竞态：两条流水线可能同时探测到「不存在」，
           # 后到者 create 会失败，故失败后再 view 一次确认确实已存在。
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --generate-notes \
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes \
               || gh release view "$TAG" >/dev/null
           fi
           # --clobber：重跑流水线时覆盖同名旧资产，而不是报「已存在」中断
