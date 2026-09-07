@@ -59,6 +59,21 @@ jobs:
         with:
           node-version: 20
 
+      # ── 构建脚本自检门禁：放在所有昂贵步骤（Rust/Maven/jlink）之前 ──
+      # 事故（2026-09-07）：cmd/pin-linuxdeploy-tools.js 里一个 TypeError 把整条 Linux
+      # job 干红。它躲过了两道防线：① 开发机是 Windows，resolveArch() 提前 return，
+      # 那行代码从未被执行；② 单测每个用例都注入了 homedir 覆写，默认分支零覆盖。
+      # 于是 24 项断言全绿、CI 第一行就崩，且崩在编译完 4m46s 之后。
+      # 两个对策同时生效：
+      #   1. 脚本用 --platform/--arch 让 Linux-only 路径能在任意平台真实执行；
+      #   2. 本门禁在**三条平台腿都跑**（win/mac runner 也执行 Linux 逻辑），
+      #      谁再写出「只在某平台崩」的代码，几秒内当场就红。
+      # 放在 node 安装之后、Rust 之前：零依赖（只用 node 内置模块），失败无需等编译。
+      - name: 构建脚本自检（Linux 逻辑在任意平台可验证）
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: npm run selftest
+
       # macOS 要出 x64 + arm64 两个 dmg，需预装两个 target；其余平台用默认宿主 target
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
