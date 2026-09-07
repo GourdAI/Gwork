@@ -233,3 +233,66 @@ jobs:
             gourd-ai-desktop/out/latest*.yml
             gourd-ai-desktop/out/*.blockmap
           if-no-files-found: error
+
+  # 打 v* tag 时把三平台产物汇总发布到同名 GitHub Release。
+  # 在此之前产物只存在于 Actions 的 artifact 中（保留期有限、且需登录才能下载），
+  # Release 页面始终是空的 —— 这就是「构建完不会自动发布」的直接原因。
+  #
+  # 为什么用 gh CLI 而不是第三方 release action：Electron 版与 Tauri 版是两条
+  # 独立流水线，同一个 tag 会**同时**往同一个 Release 写资产。gh 的
+  # 「view 探测 → create 失败即忽略 → upload --clobber」组合天然幂等，
+  # 两条流水线谁先到都不会互相踩，重跑也能原地覆盖补传。
+  release:
+    name: 发布到 GitHub Release
+    needs: build
+    # 手动触发（workflow_dispatch）没有 tag，产物只留在 artifact，不发版。
+    # 沿用 build-tauri.yml 中 manifest job 的口径：fail-fast: false 下允许部分
+    # 平台失败，此时仍发布已成功的平台，缺的平台重跑后 --clobber 补传即可。
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 创建 Release、上传资产所需（默认 token 只读）
+    steps:
+      - name: 下载全平台产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gwork-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: 汇总待发布文件
+        shell: bash
+        run: |
+          set -e
+          mkdir -p release
+          # Release 资产是**扁平**的，只认 basename。electron-builder 的产物名已带
+          # version/arch（如 GWork-1.0.0-x86_64.AppImage），latest*.yml 也每平台一个，
+          # 三平台之间不会撞名；但仍显式校验一次 —— 一旦哪天改了 artifactName 导致
+          # 同名，静默覆盖会让用户下到错架构的包，比构建失败更难排查。
+          dups="$(find artifacts -type f -printf '%f\n' | sort | uniq -d)"
+          if [ -n "$dups" ]; then
+            echo "::error::存在同名产物，扁平上传会互相覆盖："; echo "$dups"; exit 1
+          fi
+          find artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' \
+            -o -name '*.deb' -o -name '*.blockmap' -o -name 'latest*.yml' \) \
+            -exec cp {} release/ \;
+          ls -lh release
+          [ -n "$(ls -A release)" ] || { echo "::error::没有可发布的产物"; exit 1; }
+
+      - name: 创建 Release 并上传资产
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="$GITHUB_REF_NAME"
+          # Release 可能已由 Tauri 流水线（同 tag 触发）建好，此时直接复用。
+          # create 与 view 之间存在竞态：两条流水线可能同时探测到「不存在」，
+          # 后到者 create 会失败，故失败后再 view 一次确认确实已存在。
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --generate-notes \
+              || gh release view "$TAG" >/dev/null
+          fi
+          # --clobber：重跑流水线时覆盖同名旧资产，而不是报「已存在」中断
+          gh release upload "$TAG" release/* --clobber
+          echo "已发布到: $(gh release view "$TAG" --json url -q .url)"

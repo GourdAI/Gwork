@@ -344,3 +344,69 @@ jobs:
           name: gwork-tauri-latest-json
           path: latest.json
           if-no-files-found: error
+
+  # 打 v* tag 时把全平台产物 + latest.json 发布到同名 GitHub Release。
+  # 在此之前产物只存在于 Actions artifact（保留期有限、需登录才能下载），
+  # Release 页面始终为空。与 build.yml 的 release job 同构，两者写入同一个 Release。
+  release:
+    name: 发布到 GitHub Release
+    needs: [build, manifest]
+    # manifest 在未配置签名密钥时也会「成功但不产出 latest.json」，故用 always()
+    # 兼容部分失败；发布已成功的平台比整个发版卡住强。
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 创建 Release、上传资产所需（默认 token 只读）
+    steps:
+      # 不用 merge-multiple：macOS 两个架构的更新载荷同名（都叫 GWork.app.tar.gz），
+      # 合并时会直接互相覆盖。保留目录结构，下一步按路径里的架构改名。
+      - name: 下载全平台产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gwork-tauri-*
+          path: artifacts
+
+      - name: 汇总待发布文件（macOS 双架构按架构改名）
+        shell: bash
+        run: |
+          set -e
+          mkdir -p release
+          # Release 资产是扁平的，只认 basename。dmg/exe/AppImage/deb 的文件名已带
+          # version+arch，扁平后唯一；但 .app.tar.gz（及其 .sig）两个架构同名，
+          # 架构信息只在目录名里，必须改名后再上传，否则 x64 会被 arm64 盖掉，
+          # 而用户拿到的包与 latest.json 里的签名对不上 —— 此命名与
+          # cmd/publish-downloads.js 的固定名约定（GWork-{x64,arm64}.app.tar.gz）一致。
+          while IFS= read -r f; do
+            base="$(basename "$f")"
+            case "$f" in
+              *.app.tar.gz|*.app.tar.gz.sig)
+                arch=x64
+                case "$f" in *aarch64*|*arm64*) arch=arm64 ;; esac
+                base="${base/GWork.app.tar.gz/GWork-$arch.app.tar.gz}"
+                ;;
+            esac
+            if [ -e "release/$base" ]; then
+              echo "::error::同名产物冲突，上传会互相覆盖: $base ($f)"; exit 1
+            fi
+            cp "$f" "release/$base"
+          done < <(find artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' \
+            -o -name '*.deb' -o -name '*.sig' -o -name '*.app.tar.gz' -o -name 'latest.json' \) | sort)
+          ls -lh release
+          [ -n "$(ls -A release)" ] || { echo "::error::没有可发布的产物"; exit 1; }
+
+      - name: 创建 Release 并上传资产
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="$GITHUB_REF_NAME"
+          # Release 可能已由 build.yml（同 tag 触发）建好，直接复用；
+          # 两条流水线可能同时探测到「不存在」，后到者 create 会失败，
+          # 故失败后再 view 一次确认确实已存在。
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --generate-notes \
+              || gh release view "$TAG" >/dev/null
+          fi
+          gh release upload "$TAG" release/* --clobber
+          echo "已发布到: $(gh release view "$TAG" --json url -q .url)"
