@@ -1,0 +1,346 @@
+name: Desktop (Tauri) 多平台打包
+
+# 与 build.yml（Electron 版）并列的 Tauri 版打包流水线。两者触发条件一致，
+# 打同一个 v* tag 会同时产出两套安装包，产物用不同的 artifact 名区分。
+#
+# 与 Electron 版的关键差异：
+#   1. 后端资源在**本模块自己的目录** gourd-ai-tauri/build/extraResources/。
+#      2026-09-06 前它跨模块引用 gourd-ai-desktop/build/extraResources/，等于「打 Tauri 包
+#      要先打 Electron 包」；现由 cmd/sync-backend.js 直接从 gourd-ai-agent/target 取 jar，
+#      两个桌面壳互不依赖。
+#   2. 多一条 Rust 工具链，且 Linux 需要 WebKitGTK 等系统库（Tauri 用系统 WebView，
+#      不像 Electron 自带 Chromium）。
+#   3. macOS 双架构靠 `tauri build --target <triple>` 交叉编译，而非 electron-builder 的
+#      --x64/--arm64；两次构建落在不同的 target/<triple>/ 目录，互不覆盖。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（留空则使用 tauri.conf.json 当前版本）'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+            label: Windows (nsis x64)
+          - os: macos-latest
+            platform: mac
+            label: macOS (dmg x64+arm64)
+          # 固定 22.04 而非 ubuntu-latest：Tauri v2 需要 webkit2gtk-4.1，
+          # 且低版本 glibc 能让 AppImage 覆盖更多发行版
+          - os: ubuntu-22.04
+            platform: linux
+            label: Linux (AppImage/deb x64)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 17（Maven 编译 + jlink 生成内置 JRE）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # macOS 要出 x64 + arm64 两个 dmg，需预装两个 target；其余平台用默认宿主 target
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'mac' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust 构建缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './gourd-ai-tauri/src-tauri -> target'
+
+      # Tauri 在 Linux 用系统 WebView（webkit2gtk）而非自带 Chromium，这些是硬依赖：
+      #   libwebkit2gtk-4.1-dev  Tauri v2 的 WebView（4.0 是 v1 的，不通用）
+      #   libayatana-appindicator3-dev  托盘图标（Cargo features 开了 tray-icon）
+      #   librsvg2-dev / patchelf / file  AppImage 打包链路
+      - name: 安装 Linux 系统依赖
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            xdg-utils
+
+      # 版本号来源与 Electron 版不同：Tauri 读 src-tauri/tauri.conf.json 的 version
+      # （NSIS 升级链、dmg 文件名都取自它）。三处版本必须同步，否则 Cargo.toml 与
+      # 配置漂移，后续排查产物版本会对不上。
+      - name: 写入版本号
+        shell: bash
+        run: |
+          set -e
+          VERSION=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "未指定版本号，使用 tauri.conf.json 当前版本"
+            exit 0
+          fi
+          echo "使用版本号: $VERSION"
+          cd gourd-ai-tauri
+          node cmd/set-version.js "$VERSION"
+          grep -m1 '"version"' src-tauri/tauri.conf.json
+          grep -m1 '^version' src-tauri/Cargo.toml
+
+      # ── 后端产物：Maven 出 jar，jlink 出 JRE，落点是**本模块**的 build/extraResources/ ──
+
+      # -Dgwork.build.revision：把 git 短 sha 写入 jar 内 build-info.properties（与 build.yml 保持一致）
+      - name: Maven 构建后端 JAR
+        shell: bash
+        run: mvn -B -ntp -pl gourd-ai-agent -am package -DskipTests -Dgwork.build.revision=${GITHUB_SHA::7}
+
+      # jar 的复制交给 cmd/sync-backend.js（beforeBuildCommand 里也会跑一次，幂等），
+      # 保证 CI 与本地走**同一段逻辑**，不再出现「本地忘了复制 jar」这类分叉。
+      # --jar-only：此刻 JRE 尚未生成（在下一步），不能做 JRE 校验，否则必败。
+      - name: 同步后端 JAR 到 extraResources
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: node cmd/sync-backend.js --jar-only
+
+      # 模块清单与 build.ps1 / build.sh / build.yml / cmd/sync-backend.js 保持一致
+      - name: 生成内置 JRE（Windows / Linux）
+        if: matrix.platform != 'mac'
+        shell: bash
+        run: |
+          set -e
+          MODULES="java.base,java.logging,java.sql,java.naming,java.management,java.instrument,java.net.http,jdk.crypto.ec,jdk.zipfs,jdk.unsupported"
+          JRE_DIR="gourd-ai-tauri/build/extraResources/jre"
+          rm -rf "$JRE_DIR"
+          "$JAVA_HOME/bin/jlink" --module-path "$JAVA_HOME/jmods" --add-modules "$MODULES" \
+            --output "$JRE_DIR" --strip-debug --compress 2 --no-header-files --no-man-pages
+
+      # macOS 需要同时出 x64 与 arm64 两个包：jlink 产物架构取决于 jmods，
+      # 因此下载两种架构的 JDK，统一用本机 jlink 分别链接出两套 JRE。
+      - name: 生成内置 JRE（macOS 双架构）
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          set -e
+          MODULES="java.base,java.logging,java.sql,java.naming,java.management,java.instrument,java.net.http,jdk.crypto.ec,jdk.zipfs,jdk.unsupported"
+          mkdir -p /tmp/jdk-x64 /tmp/jdk-arm64
+          curl -fsSL -o /tmp/jdk-x64.tar.gz "https://api.adoptium.net/v3/binary/latest/17/ga/mac/x64/jdk/hotspot/normal/eclipse"
+          curl -fsSL -o /tmp/jdk-arm64.tar.gz "https://api.adoptium.net/v3/binary/latest/17/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
+          tar -xzf /tmp/jdk-x64.tar.gz -C /tmp/jdk-x64 --strip-components=1
+          tar -xzf /tmp/jdk-arm64.tar.gz -C /tmp/jdk-arm64 --strip-components=1
+          X64_HOME="$(find /tmp/jdk-x64 -maxdepth 5 -name jmods -type d | head -n1 | sed 's|/jmods$||')"
+          ARM_HOME="$(find /tmp/jdk-arm64 -maxdepth 5 -name jmods -type d | head -n1 | sed 's|/jmods$||')"
+          echo "x64 JDK: $X64_HOME"
+          echo "arm64 JDK: $ARM_HOME"
+          OUT_X64="gourd-ai-tauri/build/jre-mac-x64"
+          OUT_ARM="gourd-ai-tauri/build/jre-mac-arm64"
+          rm -rf "$OUT_X64" "$OUT_ARM"
+          "$JAVA_HOME/bin/jlink" --module-path "$X64_HOME/jmods" --add-modules "$MODULES" \
+            --output "$OUT_X64" --strip-debug --compress 2 --no-header-files --no-man-pages
+          "$JAVA_HOME/bin/jlink" --module-path "$ARM_HOME/jmods" --add-modules "$MODULES" \
+            --output "$OUT_ARM" --strip-debug --compress 2 --no-header-files --no-man-pages
+          # 保证可执行位（经压缩/解压或跨架构链接后可能丢失），否则包内 java 无法 spawn
+          chmod +x "$OUT_X64/bin/"* "$OUT_ARM/bin/"*
+
+      # 只装 @tauri-apps/cli；ui/ 与 NSIS 位图由 tauri.conf.json 的 beforeBuildCommand
+      # （prepare-ui.js + generate-nsis-assets.js）在 build 时现生成，无需入库
+      - name: 安装前端依赖
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: npm install
+
+      # 决定本次构建是否产出更新包（.sig）由 npm scripts 的 preflight 步骤完成
+      # （build:win / build:mac / build:linux 均已内联 configure-updater.js + -c overlay），
+      # 无需在 CI 单独执行 —— 单独跑反而会与打包步骤的环境变量不一致：
+      # 本步骤若拿不到 Secret 就会生成「禁用」overlay，而下一步打包却有私钥，
+      # 结果是有钥却不签名。故这里不再单列，只保证打包步骤注入了私钥。
+
+      - name: 打包（Windows nsis）
+        if: matrix.platform == 'win'
+        shell: bash
+        working-directory: gourd-ai-tauri
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run build:win
+
+      - name: 打包（Linux AppImage + deb）
+        if: matrix.platform == 'linux'
+        shell: bash
+        working-directory: gourd-ai-tauri
+        env:
+          # linuxdeploy 内置的 strip 遇到新版 glibc 的 .relr.dyn 段会中断 AppImage 打包；
+          # 跳过无损失 —— Cargo.toml 的 [profile.release] 已配 strip = true
+          NO_STRIP: 'true'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run build:linux
+
+      # 分两次交叉编译：每次换入对应架构的 JRE，产物落在 target/<triple>/ 互不覆盖。
+      # 签名：配置了 APPLE_CERTIFICATE 等 Secrets 时走 Developer ID 正式签名 + 公证；
+      # 未配置时降级为 ad-hoc（APPLE_SIGNING_IDENTITY="-"）——Apple Silicon 要求
+      # 至少 ad-hoc 签名才能执行，否则用户会遇到「文件已损坏」。
+      - name: 打包（macOS dmg x64 + arm64）
+        if: matrix.platform == 'mac'
+        shell: bash
+        working-directory: gourd-ai-tauri
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # 更新包签名（minisign）与上面的 Apple 代码签名是两套完全独立的机制：
+          # 前者保证「更新内容未被篡改」，后者保证「macOS 肯运行这个 app」。缺一不可。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -e
+          # Secret 未配置时 ${{ secrets.X }} 渲染为空串（而非未定义）。tauri-bundler 只看
+          # var_os()「是否存在」，空串会被当成有效值：空的 APPLE_CERTIFICATE 会走证书导入
+          # 并失败，空的 APPLE_ID 会触发 notarytool 调用后报错。必须先 unset 空值。
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                   APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v}" ] || unset "$v"
+          done
+          if [ -n "${APPLE_CERTIFICATE:-}" ]; then
+            echo "签名模式: Developer ID 正式签名${APPLE_ID:+ + 公证}"
+          else
+            export APPLE_SIGNING_IDENTITY="-"
+            echo "签名模式: ad-hoc（未配置证书 Secrets）"
+          fi
+          JRE="build/extraResources/jre"
+          for arch in x64:x86_64-apple-darwin arm64:aarch64-apple-darwin; do
+            name="${arch%%:*}"
+            triple="${arch##*:}"
+            echo "=== 构建 macOS $name ($triple) ==="
+            rm -rf "$JRE"
+            cp -R "build/jre-mac-$name" "$JRE"
+            chmod +x "$JRE/bin/"*
+            npm run build:mac -- --target "$triple"
+          done
+
+      # 校验签名与资源密封：包内嵌了整个 JRE，任何一处密封失败都会让用户拿到「已损坏」的包
+      - name: 校验 macOS 签名
+        if: matrix.platform == 'mac'
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: |
+          set -e
+          for app in src-tauri/target/*/release/bundle/macos/*.app; do
+            [ -d "$app" ] || continue
+            echo "校验: $app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign -dv --verbose=2 "$app" 2>&1 | grep -E "Authority|Signature=|TeamIdentifier" || true
+          done
+
+      # macOS 的两个架构产物同名（都叫 GWork.app.tar.gz，只是 triple 目录不同），
+      # 而 upload-artifact 会拍平目录结构 → 同名文件互相覆盖，arm64 的包会把 x64 的盖掉，
+      # 而 .sig 却来自另一个架构 → 签名校验必败。故先按架构改名归集到 staging/。
+      - name: 归集产物（macOS 双架构防同名覆盖）
+        if: matrix.platform == 'mac'
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: |
+          set -e
+          mkdir -p staging
+          for triple in x86_64-apple-darwin aarch64-apple-darwin; do
+            arch="x64"; [ "$triple" = "aarch64-apple-darwin" ] && arch="arm64"
+            b="src-tauri/target/$triple/release/bundle"
+            [ -d "$b" ] || continue
+            mkdir -p "staging/$arch"
+            find "$b" -maxdepth 3 \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) \
+              -exec cp {} "staging/$arch/" \;
+          done
+          find staging -type f | sort
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: gwork-tauri-${{ matrix.platform }}
+          # 不带 --target 时产物在 target/release/bundle/；带 --target（macOS）时已由上一步
+          # 归集到 staging/<arch>/。.sig 必须随包上传 —— latest.json 的 signature 字段
+          # 就是它的内容，丢了就无法生成清单。
+          path: |
+            gourd-ai-tauri/src-tauri/target/release/bundle/nsis/*.exe
+            gourd-ai-tauri/src-tauri/target/release/bundle/nsis/*.exe.sig
+            gourd-ai-tauri/src-tauri/target/release/bundle/appimage/*.AppImage
+            gourd-ai-tauri/src-tauri/target/release/bundle/appimage/*.AppImage.sig
+            gourd-ai-tauri/src-tauri/target/release/bundle/deb/*.deb
+            gourd-ai-tauri/staging/**
+          if-no-files-found: error
+
+  # 三个平台全部构完后汇总：tauri-plugin-updater 用的是**单个** latest.json，
+  # 内部 platforms 映射覆盖全平台（不像 electron-updater 每平台一个 yml），
+  # 所以必须等所有平台的 .sig 齐了才能生成。
+  manifest:
+    name: 生成更新清单 latest.json
+    needs: build
+    # fail-fast: false 下允许部分平台失败；此时仍给成功的平台出清单，
+    # 比整个发布卡住强（缺的平台重跑后重新生成即可）。
+    if: always() && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 下载全平台产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gwork-tauri-*
+          path: artifacts
+
+      - name: 生成 latest.json
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: |
+          set -e
+          VERSION=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          ARGS=(--artifacts ../artifacts --out ../latest.json)
+          [ -n "$VERSION" ] && ARGS+=(--version "$VERSION")
+          # 未配置签名密钥时本步会因「无任何带签名载荷」而非零退出，这是预期的：
+          # 宁可不产出清单，也不能产出一个缺签名、客户端装不上的清单。
+          node cmd/generate-latest-json.js "${ARGS[@]}" || {
+            echo "::warning::未生成 latest.json（通常是未配置 TAURI_SIGNING_PRIVATE_KEY）"
+            exit 0
+          }
+          cat ../latest.json
+
+      - name: 上传 latest.json
+        if: hashFiles('latest.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: gwork-tauri-latest-json
+          path: latest.json
+          if-no-files-found: error

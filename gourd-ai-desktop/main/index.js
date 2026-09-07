@@ -19,11 +19,25 @@
 
 const { app, BrowserWindow, screen, Menu, Tray, ipcMain, nativeImage, session, shell } = require('electron');
 const path = require('path');
+
+// 主进程日志落盘必须最先安装：backend.js 里的端口分配 / java 探测明细 /
+// 探针状态码全靠 console，晚一步安装就丢一段关键现场。
+const desktopLog = require('./desktop-log');
+desktopLog.install();
+
 const {
   findAvailablePort,
   startBackend,
   waitForBackend,
   stopBackend,
+  getServerLogPath,
+  getResourcesDir,
+  getRuntimeHomeDir,
+  getBackendPid,
+  isBackendAlive,
+  getLastProbe,
+  onBackendExit,
+  verifyBuildIdentity,
 } = require('./backend');
 const uiServer = require('./ui-server');
 const { provisionCli } = require('./cli-provision');
@@ -49,22 +63,76 @@ let isQuitting = false;
 let backendReadyState = 'pending';
 const backendReadyWaiters = [];
 
+// ─── 自动重启 / 状态详情（新增于 2026-09-06）────────────────────────────────
+/** 最近一次失败原因（透传给前端横幅与状态详情 IPC） */
+let backendLastError = '';
+/** 自动重启退避表（毫秒）。耗尽后不再重试，等用户手动重试或重启应用。 */
+const AUTO_RESTART_DELAYS = [1000, 3000, 10000, 30000, 60000];
+let autoRestartAttempt = 0;
+let autoRestartTimer = null;
+/** 重启串行锁：并发 restart（自动 + 手动 + 退出监听）只允许一个在跑 */
+let backendRestarting = false;
+
+function safeCall(fn) {
+  try {
+    return fn();
+  } catch (e) {
+    return `<不可用: ${e && e.message}>`;
+  }
+}
+
 /**
  * 标记后端就绪结果，唤醒所有等待者，并通知渲染层。
+ *
+ * 【2026-09-06 修正】旧实现开头是 `if (backendReadyState !== 'pending') return;`
+ * —— 单向闩锁。一旦引导失败就永久锁在 'failed'，UI 代理对每个 /web/** 请求
+ * 固定返回 503「后端启动中，请稍候…」，即使后来后端已恢复也不会放行；
+ * 叠加 bootstrap() 的幂等锁使重探无从发起，表现为「覆盖安装后接口永远不通」。
+ * 现在状态可双向迁移；幂等靠 bootstrap 锁与 backendRestarting 串行锁保障，
+ * 而不是靠状态机自己拒绝迁移。
+ *
  * @param {boolean} ok
+ * @param {string} [reason] 失败原因（ok=false 时携带）
  */
-function settleBackendReady(ok) {
-  if (backendReadyState !== 'pending') return;
-  backendReadyState = ok ? 'ready' : 'failed';
+function settleBackendReady(ok, reason) {
+  const prev = backendReadyState;
+  if (ok) {
+    backendReadyState = 'ready';
+    backendLastError = '';
+  } else {
+    backendReadyState = 'failed';
+    if (reason) backendLastError = String(reason);
+  }
+
   const waiters = backendReadyWaiters.splice(0);
   for (const w of waiters) w(ok);
 
   if (ok) {
     // 通知渲染层：后端已就绪（前端据此重连 WebSocket / 触发数据刷新 / 放行启动请求）。
-    // 广播到主窗口；页面可能尚未加载完成，
-    // sendToWindow 内部用 did-finish-load 兜底，避免事件丢失导致前端一直等待。
+    // 页面可能尚未加载完成，sendToWindow 内部用 did-finish-load 兜底，避免事件丢失。
+    if (prev !== 'ready') {
+      console.log(`[gourd-ai-desktop] 后端状态迁移: ${prev} -> ready (port=${backendPort})`);
+    }
     broadcastToRenderer('backend-ready', { port: backendPort });
+  } else {
+    console.error(`[gourd-ai-desktop] 后端状态迁移: ${prev} -> failed: ${backendLastError}`);
+    broadcastToRenderer('backend-failed', backendFailedPayload());
   }
+}
+
+/** 统一的失败负载：除原因外还带上探针状态码、下一次自动重试与日志路径，前端直接可展示。 */
+function backendFailedPayload() {
+  const probe = getLastProbe();
+  return {
+    message: backendLastError || '后端启动失败',
+    status: probe ? probe.status : 0,
+    probeError: probe ? probe.error : '',
+    logPath: desktopLog.currentLogPath(),
+    serverLogPath: getServerLogPath(),
+    autoRetryAttempt: autoRestartAttempt,
+    autoRetryMax: AUTO_RESTART_DELAYS.length,
+    retrying: backendRestarting,
+  };
 }
 
 /**
@@ -93,7 +161,7 @@ function broadcastToRenderer(channel, payload) {
 
 
 /**
- * 等待后端就绪。已定局立即返回；否则挂起直至 settle 或超时。
+ * 等待后端就绪。ready 立即 true；failed 立即 false；pending 挂起直至 settle 或超时。
  * @param {number} timeoutMs
  * @returns {Promise<boolean>} ready→true，failed/超时→false
  */
@@ -110,6 +178,101 @@ function awaitBackendReady(timeoutMs) {
     backendReadyWaiters.push(once);
     setTimeout(() => once(false), timeoutMs);
   });
+}
+
+/** 后端状态快照（供 get-backend-detail IPC）。 */
+function backendDetail() {
+  return {
+    state: backendReadyState,
+    port: backendPort,
+    uiPort: uiServerHandle ? uiServerHandle.port : 0,
+    pid: getBackendPid(),
+    alive: isBackendAlive(),
+    lastError: backendLastError,
+    lastProbe: getLastProbe(),
+    restarting: backendRestarting,
+    autoRetryAttempt: autoRestartAttempt,
+    autoRetryMax: AUTO_RESTART_DELAYS.length,
+    logPath: desktopLog.currentLogPath(),
+    serverLogPath: getServerLogPath(),
+    resourcesDir: safeCall(getResourcesDir),
+    runtimeHomeDir: safeCall(getRuntimeHomeDir),
+    logInstallError: desktopLog.getInstallError(),
+    appVersion: safeCall(() => app.getVersion()),
+  };
+}
+
+/**
+ * 重启后端：停旧进程 → 确保端口 → 启动 → 等就绪 → 恢复 ready。
+ * 并发安全（同一时刻只跑一个），失败时重新置 failed 并广播。
+ * @param {string} trigger 'auto'（退出监听/引导失败）| 'manual'（用户点重试）
+ * @returns {Promise<{ok:boolean, skipped?:boolean, error?:string}>}
+ */
+async function restartBackend(trigger) {
+  if (backendRestarting) {
+    return { ok: false, skipped: true, error: '重启已在进行中' };
+  }
+  if (isQuitting || quitCleanupStarted) {
+    return { ok: false, skipped: true, error: '应用正在退出' };
+  }
+  backendRestarting = true;
+  // 重置为 pending：让代理请求走短暂宽限后快速 503，而不是一直拿旧 failed 结论
+  backendReadyState = 'pending';
+  backendLastError = '';
+  const waiters = backendReadyWaiters.splice(0);
+  for (const w of waiters) w(false);
+
+  console.log(`[gourd-ai-desktop] 重启后端（trigger=${trigger}，第 ${autoRestartAttempt + 1} 次尝试）`);
+  try {
+    await stopBackend();
+    if (!backendPort) {
+      backendPort = await findAvailablePort();
+    }
+    await startBackend(backendPort);
+    await waitForBackend(backendPort, 60000);
+    // 成功：清零退避计数，下次意外退出仍从最快间隔重新开始
+    autoRestartAttempt = 0;
+    settleBackendReady(true);
+    return { ok: true };
+  } catch (err) {
+    const msg = String(err && err.message ? err.message : err);
+    settleBackendReady(false, msg);
+    // 【顺序敏感】必须先解锁再排期：scheduleAutoRestart 开头有 `if (backendRestarting) return`，
+    // 而此刻仍在 try/catch 内（finally 尚未执行），锁还是 true——在这里直接排期会被自己挡掉，
+    // 退避链只跑 1 次就断，5 级退避形同虚设（已用最小复现验证）。
+    backendRestarting = false;
+    if (trigger === 'auto') scheduleAutoRestart(msg);
+    return { ok: false, error: msg };
+  } finally {
+    // 成功路径与异常路径的兜底解锁；catch 分支已提前置 false，这里重复赋值无副作用
+    backendRestarting = false;
+  }
+}
+
+/**
+ * 安排一次指数退避的自动重启；达上限后不再重试，等用户手动重试。
+ * @param {string} reason
+ */
+function scheduleAutoRestart(reason) {
+  if (isQuitting || quitCleanupStarted) return;
+  if (backendRestarting) return;
+  if (autoRestartTimer) return; // 已排期
+
+  if (autoRestartAttempt >= AUTO_RESTART_DELAYS.length) {
+    console.error('[gourd-ai-desktop] 自动重启已达上限（' + AUTO_RESTART_DELAYS.length
+      + ' 次），停止重试。若为覆盖安装后出现此故障，多半是安装目录未能完全替换（旧 jar/jre 被占用），请卸载后重装。原因: ' + reason);
+    broadcastToRenderer('backend-failed', backendFailedPayload());
+    return;
+  }
+
+  const delay = AUTO_RESTART_DELAYS[autoRestartAttempt];
+  autoRestartAttempt += 1;
+  console.warn(`[gourd-ai-desktop] ${delay}ms 后发起第 ${autoRestartAttempt} 次自动重启，原因: ${reason}`);
+  broadcastToRenderer('backend-failed', backendFailedPayload());
+  autoRestartTimer = setTimeout(() => {
+    autoRestartTimer = null;
+    restartBackend('auto').catch(() => { /* 失败已在 restartBackend 内处理并排期下一次 */ });
+  }, delay);
 }
 
 /**
@@ -284,6 +447,15 @@ async function bootstrap() {
   if (bootstrapStarted) return;
   bootstrapStarted = true;
   try {
+    // 0. 启动现场进日志：排障时先看到「本次到底在看哪份资源」，而不是事后猜
+    desktopLog.report('启动环境', [
+      `appVersion=${safeCall(() => app.getVersion())} packaged=${app.isPackaged}`,
+      `resourcesDir=${safeCall(getResourcesDir)}`,
+      `runtimeHome=${safeCall(getRuntimeHomeDir)}`,
+      `mainLog=${desktopLog.currentLogPath()}`,
+      `serverLog=${safeCall(getServerLogPath)}`,
+    ]);
+
     // 1. 分配后端 jar 端口
     if (!backendPort) {
       backendPort = await findAvailablePort();
@@ -296,20 +468,54 @@ async function bootstrap() {
 
     // 3. 等待就绪（此期间界面外壳已可见，仅 /web/** 接口请求在 UI 服务器挂起等待）
     console.log('[gourd-ai-desktop] 等待后端就绪...');
-    await waitForBackend(backendPort, 60000);
-    console.log('[gourd-ai-desktop] 后端就绪');
+    const probeInfo = await waitForBackend(backendPort, 60000);
+    console.log(`[gourd-ai-desktop] 后端就绪（轮询 ${probeInfo && probeInfo.attempts} 次）`);
 
-    // 4. 放行代理请求并通知渲染层刷新
+    // 4. 放行代理请求并通知渲染层刷新（广播已收敛在 settleBackendReady 内）
+    autoRestartAttempt = 0;
     settleBackendReady(true);
+
+    // 5. 安装一致性自检（失败不阻断使用）：把「jar 没被真正替换」从隐性变成一句明确提示
+    try {
+      const identity = await verifyBuildIdentity(backendPort);
+      if (identity.ok) {
+        if (identity.skipped) {
+          console.warn(`[gourd-ai-desktop] 跳过安装一致性自检: ${identity.skipped}`);
+        } else {
+          console.log(`[gourd-ai-desktop] 安装一致性自检通过 buildId=${identity.actual}`);
+        }
+      } else {
+        desktopLog.report('安装一致性告警', [
+          `清单记录(期望): ${identity.expected}`,
+          `运行中后端(实际): ${identity.actual || '<无 buildId，疑为旧 jar>'}`,
+          `原因: ${identity.reason}`,
+          `resourcesDir=${safeCall(getResourcesDir)}`,
+        ]);
+        broadcastToRenderer('install-mismatch', identity);
+      }
+    } catch (e) {
+      console.warn('[gourd-ai-desktop] 安装一致性自检异常:', e && e.message);
+    }
   } catch (err) {
-    console.error('[gourd-ai-desktop] 启动失败:', err.message);
-    // 让挂起中的 /web/** 代理请求尽快得到 503，而不是一直等到超时
-    settleBackendReady(false);
-    // 通知渲染层展示错误横幅（外壳已加载，直接注入提示即可）
-    const errMsg = String(err.message || err).replace(/`/g, '\\`');
-    broadcastToRenderer('backend-failed', { message: errMsg });
+    const msg = String(err && err.message ? err.message : err);
+    console.error('[gourd-ai-desktop] 启动失败:', msg);
+    // 让挂起中的 /web/** 代理请求尽快得到 503（带真实原因），并排期自动重试
+    settleBackendReady(false, msg);
+    scheduleAutoRestart(msg);
   }
 }
+
+// 后端子进程意外退出 → 状态复位 + 自动重启。
+// 旧实现只在 console 打一行（而主进程 console 根本不落盘），界面毫无反应：
+// 状态仍是 'ready'，代理照放行，但每个 /web/** 都是 502，用户只看到“接口神秘不通”。
+onBackendExit((info) => {
+  if (info.expected) return; // stopBackend 主动停止（重启流程/退出应用）不触发
+  const detail = `后端进程意外退出 (PID=${info.pid}, code=${info.code}, signal=${info.signal}`
+    + `${info.error ? ', error=' + info.error : ''})`;
+  console.error(`[gourd-ai-desktop] ${detail}`);
+  settleBackendReady(false, detail);
+  scheduleAutoRestart(detail);
+});
 
 // ─── Electron 生命周期 ──────────────────────────────────────────────────────
 
@@ -342,6 +548,20 @@ ipcMain.on('window-title-update', (event, title) => {
 // 渲染层主动查询后端就绪状态（'pending' | 'ready' | 'failed'）。
 // 与 backend-ready/backend-failed 事件互补，消除“事件早于监听器注册”的启动竞态。
 ipcMain.handle('get-backend-state', () => backendReadyState);
+
+// 完整状态详情：端口、PID、存活、最近探针结果、失败原因、两份日志路径、资源目录。
+// 前端错误条与排障都靠它“一句话说清”，不必再让用户开 devtools 猜。
+ipcMain.handle('get-backend-detail', () => backendDetail());
+
+// 手动重试（错误条上的「重试」按钮）：重置退避计数，给用户一个从头再来的确定性。
+ipcMain.handle('restart-backend', async () => {
+  autoRestartAttempt = 0;
+  if (autoRestartTimer) {
+    clearTimeout(autoRestartTimer);
+    autoRestartTimer = null;
+  }
+  return restartBackend('manual');
+});
 
 /**
  * macOS 全局菜单栏不允许移除：Electron 内部实现中 darwin 分支对 null 直接 return，
@@ -397,6 +617,8 @@ app.whenReady().then(async () => {
     uiServerHandle = await uiServer.start({
       getBackendPort: () => backendPort,
       awaitBackend: awaitBackendReady,
+      // 让 503 能区分「启动中」与「已判定失败」并携带真实原因（见 ui-server.js buildReject）
+      getBackendDetail: backendDetail,
     });
     uiOrigin = uiServerHandle.origin;
     console.log(`[gourd-ai-desktop] UI 服务器: ${uiOrigin}`);
@@ -448,6 +670,12 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   isQuitting = true;
   quitCleanupStarted = true;
+
+  // 取消未到期/周期性的自动重启，避免退出过程中又被拉起一个新后端
+  if (autoRestartTimer) {
+    clearTimeout(autoRestartTimer);
+    autoRestartTimer = null;
+  }
 
   // 兜底：清理卡死时强制退出（unref 使其不阻塞正常退出后的进程终止）
   const guard = setTimeout(() => app.exit(0), 10000);

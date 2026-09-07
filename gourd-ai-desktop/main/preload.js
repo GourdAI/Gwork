@@ -20,6 +20,16 @@ contextBridge.exposeInMainWorld('__GOURD_IPC__', {
   // 主动查询后端就绪状态（'pending' | 'ready' | 'failed'）。
   // 消除“就绪事件早于渲染层注册监听器”的竞态：渲染层可在任意时刻拉取当前状态。
   getBackendState: () => ipcRenderer.invoke('get-backend-state'),
+  // 完整状态详情（端口/PID/存活/最近探针/失败原因/两份日志路径），供错误条与设置页展示。
+  getBackendDetail: () => ipcRenderer.invoke('get-backend-detail'),
+  // 手动重试后端（错误条上的「重试」）：返回 { ok, skipped, error }。
+  restartBackend: () => ipcRenderer.invoke('restart-backend'),
+  // 安装一致性告警：jar 自报 buildId 与打包快照不符（覆盖安装未完全替换）。
+  onInstallMismatch: (cb) => {
+    if (typeof cb === 'function') {
+      ipcRenderer.on('install-mismatch', (_e, data) => cb(data));
+    }
+  },
   // 定制窗口标题（如 Code 模式显示当前项目名）。
   setWindowTitle: (title) => ipcRenderer.send('window-title-update', String(title || '')),
 
@@ -68,7 +78,8 @@ function scrimColorOf(el) {
   if (!el || el.nodeType !== 1) return null;
   const cs = window.getComputedStyle(el);
   if (!cs || cs.position !== 'fixed' || cs.display === 'none' || cs.visibility === 'hidden') return null;
-  // 只认半透明：全透明不算遮罩，完全不透明（如启动白屏 #appBootLoading）也不需要联动
+  // 只认半透明：全透明不算遮罩，完全不透明的整屏盖层（历史上曾是启动白屏 #appBootLoading，
+  // 现已按「打开即展示首页」移除）也不需要联动——那种盖层下面没有可交互内容。
   const bg = cs.backgroundColor;
   const m = /^rgba?\(([^)]+)\)$/.exec(bg);
   let a = 1;

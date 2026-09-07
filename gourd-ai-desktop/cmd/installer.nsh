@@ -25,10 +25,152 @@
 ;                     （见 main/migration.js）。多用户各自迁移到各自的用户目录，语义正确。
 ; 4. customRemoveFiles —— 优先调用用户全局区中的 desktop-cli-uninstall.ps1，再兼容旧安装目录中的
 ;                     助手；默认删除安装目录，但不删除用户目录下的 .gwork 数据。
+;
+; ── 本文件的第二个职责：覆盖安装前释放旧安装目录的文件占用 ──────────────────
+;
+; 故障链（这是 customInit 里多出一段「判杀进程」的唯一原因，别当冗余删掉）：
+;   1) 桌面端启动时会拉起一个 javaw.exe 子进程跑 resources\extraResources\gourd-ai-agent.jar，
+;      该子进程的执行映像正是安装目录内的 extraResources\jre\bin\javaw.exe（文件句柄 = 运行中映像）。
+;   2) 关窗只是隐藏到托盘，只有 before-quit 才 stopBackend；因此「没正常退出过的老安装」在升级时
+;      仍然留有 java 残留进程。
+;   3) 模板的 CHECK_APP_RUNNING（app-builder-lib templates/nsis/include/
+;      allowOnlyOneInstallerInstance.nsh 的 _CHECK_APP_RUNNING）只对主程序下手：
+;      `taskkill /im "${APP_EXECUTABLE_FILENAME}"` —— 它从来不管 java / javaw。主进程被强杀后
+;      那个 javaw.exe 就成了孤儿，且继续占着 jre 与 jar。
+;   4) 孤儿占用的文件处于「运行中映像」状态，禁止改名与删除 → customRemoveFiles 里
+;      un.atomicRMDir 返回 busy 而 Abort（或 CopyFiles 重试后静默取消）→ 最终形成
+;      新 jar + 旧 jre（或反之、或新旧 asar 混编）的**部分覆盖** → 新装的后端起不来 →
+;      全部 /web/** 接口不通。全新机器没有残留进程，所以永远复现不了，只能由安装器主动回收。
+;
+; 为什么绝不能用 `taskkill /im javaw.exe`：用户机器上的 java 进程几乎一定不止我们这一个
+;   （IDEA / Android Studio / Gradle daemon / 各类自建服务），按映像名批量杀 = 不可接受的误杀。
+;   所以判据只认「可执行文件完整路径是否位于旧安装目录之下」，前缀不成立就绝不动手；
+;   判据取不到（读不到旧目录）时同样直接跳过 —— 宁可放过，不可误杀。
+;
+; 为什么是 customInit：它在 .onInit 内、initMultiUser 之后执行（templates/nsis/installer.nsi），
+;   而旧卸载器要等到 install 段里的 uninstallOldVersion 才被静默调用 —— customInit 是唯一还来得及
+;   在卸载器删文件之前释放占用的时机。
+;
+; 为什么用 FileOpen 逐行写出 .ps1，而不是把 PowerShell 塞进 nsExec 的引号串：
+;   ${if}、双引号、反引号、$变量 在 NSIS 与 PowerShell 之间会被反复展开，属于转义地狱。改成
+;   「纯文本脚本 + 旁挂数据文件」后：安装目录值不走命令行（写进同目录下的 .root.txt 由脚本自读），
+;   路径含空格、含单引号、含 $ 都不会破坏解析；脚本正文本身刻意保持纯 ASCII 且不含 " 与 \，
+;   这样 NSIS 的 FileWrite（按 ANSI/ACP 落盘）与 PowerShell 读到的字节完全一致。
+;   代价：FileWrite 串里每个美元符都要写成 $$（NSIS 的转义），改脚本时别漏。
 
 !ifndef BUILD_UNINSTALLER
 
-; ── 安装前：暂存旧安装目录里的用户配置 ───────────────────────────────────────
+; ── 辅助宏：向 $PLUGINSDIR 写出判杀脚本并执行一次 ───────────────────────────
+; 参数 _oldDir：需要清理占用的旧安装目录。整个宏不阻断安装：任何一步失败都只是 DetailPrint。
+!macro gworkKillProcsUnder _oldDir
+  ; customInit 跑在 .onInit 里，此时 $PLUGINSDIR 可能还没建（模板要到 install 段才 InitPluginsDir），
+  ; 故显式初始化；模板自身在 customInit 之后也有同样的用法（installer.nsi 的 addLicenseFiles 分支）。
+  InitPluginsDir
+
+  ; 第一步：旧安装目录写成旁挂数据文件。绝不用命令行传参 —— 路径尾部反斜杠 + 引号会让
+  ; CommandLineToArgvW 把结尾引号吃掉，单引号/$ 同理，用文件承载则完全免疫。
+  StrCpy $R7 ""
+  ClearErrors
+  FileOpen $R7 "$PLUGINSDIR\gwork-old-install.root.txt" w
+  ${if} ${Errors}
+    DetailPrint "gwork-kill: cannot create root file in $PLUGINSDIR; skip process cleanup"
+  ${else}
+    FileWrite $R7 "${_oldDir}$\r$\n"
+    FileClose $R7
+
+    ; 第二步：逐行落盘判杀脚本（一行一条 FileWrite；正文已在本机抽取后实测）。
+    ClearErrors
+    FileOpen $R7 "$PLUGINSDIR\gwork-kill-procs.ps1" w
+    ${if} ${Errors}
+      DetailPrint "gwork-kill: cannot create helper script in $PLUGINSDIR; skip process cleanup"
+    ${else}
+      FileWrite $R7 "# gwork-kill-procs.ps1 -- written at runtime by the installer; do not hand-edit.$\r$\n"
+      FileWrite $R7 "# Releases file locks held by processes whose executable image lives inside a previous$\r$\n"
+      FileWrite $R7 "# install directory, so that jar / jre / asar files can actually be overwritten.$\r$\n"
+      FileWrite $R7 "# A process is stopped ONLY when its ExecutablePath starts with one of the roots found in$\r$\n"
+      FileWrite $R7 "# a sibling *.root.txt. The image names below are a scan filter, never a kill criterion:$\r$\n"
+      FileWrite $R7 "# JVMs owned by an IDE, Android Studio, Gradle or a self-hosted service must survive.$\r$\n"
+      FileWrite $R7 "# Keep this body ASCII, without double quotes and without backslashes: FileWrite stores$\r$\n"
+      FileWrite $R7 "# ANSI(ACP) bytes, so ASCII keeps both sides byte-identical, and every dollar sign has$\r$\n"
+      FileWrite $R7 "# to be doubled for the NSIS string that carries it.$\r$\n"
+      FileWrite $R7 "$$ErrorActionPreference = 'SilentlyContinue'$\r$\n"
+      FileWrite $R7 "$$ProgressPreference = 'SilentlyContinue'$\r$\n"
+      FileWrite $R7 "$$roots = @()$\r$\n"
+      FileWrite $R7 "foreach ($$rf in @(Get-ChildItem -LiteralPath $$PSScriptRoot -Filter *.root.txt)) {$\r$\n"
+      FileWrite $R7 "  $$raw = [IO.File]::ReadAllBytes($$rf.FullName)$\r$\n"
+      FileWrite $R7 "  if ($$raw.Length -lt 1) { continue }$\r$\n"
+      FileWrite $R7 "  $$txt = $$null$\r$\n"
+      FileWrite $R7 "  if ($$raw.Length -ge 3 -and $$raw[0] -eq 239 -and $$raw[1] -eq 187 -and $$raw[2] -eq 191) {$\r$\n"
+      FileWrite $R7 "    $$txt = [Text.Encoding]::UTF8.GetString($$raw, 3, $$raw.Length - 3)$\r$\n"
+      FileWrite $R7 "  } else {$\r$\n"
+      FileWrite $R7 "    try { $$txt = (New-Object Text.UTF8Encoding($$false, $$true)).GetString($$raw) } catch { $$txt = [Text.Encoding]::Default.GetString($$raw) }$\r$\n"
+      FileWrite $R7 "  }$\r$\n"
+      FileWrite $R7 "  $$root = $$txt.Trim().TrimEnd([char]92)$\r$\n"
+      FileWrite $R7 "  if ($$root.Length -gt 0) { $$roots += $$root }$\r$\n"
+      FileWrite $R7 "}$\r$\n"
+      FileWrite $R7 "if ($$roots.Count -lt 1) {$\r$\n"
+      FileWrite $R7 "  Write-Output 'gwork-kill: no install root supplied; skip'$\r$\n"
+      FileWrite $R7 "  exit 0$\r$\n"
+      FileWrite $R7 "}$\r$\n"
+      FileWrite $R7 "$$names = @('GWork.exe', 'java.exe', 'javaw.exe')$\r$\n"
+      FileWrite $R7 "$$victims = @()$\r$\n"
+      FileWrite $R7 "foreach ($$p in @(Get-CimInstance -ClassName Win32_Process)) {$\r$\n"
+      FileWrite $R7 "  if ($$names -notcontains $$p.Name) { continue }$\r$\n"
+      FileWrite $R7 "  if ($$p.ProcessId -eq $$PID) { continue }$\r$\n"
+      FileWrite $R7 "  $$exe = [string]$$p.ExecutablePath$\r$\n"
+      FileWrite $R7 "  if ($$exe.Length -lt 1) { continue }$\r$\n"
+      FileWrite $R7 "  foreach ($$r in $$roots) {$\r$\n"
+      FileWrite $R7 "    if ($$exe.StartsWith($$r + [char]92, [StringComparison]::OrdinalIgnoreCase)) {$\r$\n"
+      FileWrite $R7 "      $$victims += [PSCustomObject]@{ Pid = $$p.ProcessId; Name = $$p.Name; Exe = $$exe }$\r$\n"
+      FileWrite $R7 "      break$\r$\n"
+      FileWrite $R7 "    }$\r$\n"
+      FileWrite $R7 "  }$\r$\n"
+      FileWrite $R7 "}$\r$\n"
+      FileWrite $R7 "if ($$victims.Count -lt 1) {$\r$\n"
+      FileWrite $R7 "  Write-Output ('gwork-kill: no process under ' + ($$roots -join ' ; '))$\r$\n"
+      FileWrite $R7 "  exit 0$\r$\n"
+      FileWrite $R7 "}$\r$\n"
+      FileWrite $R7 "foreach ($$v in $$victims) {$\r$\n"
+      FileWrite $R7 "  Write-Output ('gwork-kill: stopping ' + $$v.Name + ' pid=' + $$v.Pid + ' exe=' + $$v.Exe)$\r$\n"
+      FileWrite $R7 "  Stop-Process -Id $$v.Pid -Force$\r$\n"
+      FileWrite $R7 "}$\r$\n"
+      FileWrite $R7 "$$pids = @($$victims | ForEach-Object { $$_.Pid })$\r$\n"
+      FileWrite $R7 "$$deadline = (Get-Date).AddSeconds(5)$\r$\n"
+      FileWrite $R7 "while ((Get-Date) -lt $$deadline) {$\r$\n"
+      FileWrite $R7 "  $$alive = @($$pids | Where-Object { Get-Process -Id $$_ })$\r$\n"
+      FileWrite $R7 "  if ($$alive.Count -lt 1) { break }$\r$\n"
+      FileWrite $R7 "  Start-Sleep -Milliseconds 250$\r$\n"
+      FileWrite $R7 "}$\r$\n"
+      FileWrite $R7 "$$alive = @($$pids | Where-Object { Get-Process -Id $$_ })$\r$\n"
+      FileWrite $R7 "if ($$alive.Count -gt 0) {$\r$\n"
+      FileWrite $R7 "  Write-Output ('gwork-kill: still alive after 5s: pid ' + (($$alive | ForEach-Object { [string]$$_ }) -join ','))$\r$\n"
+      FileWrite $R7 "} else {$\r$\n"
+      FileWrite $R7 "  Write-Output 'gwork-kill: matched processes exited'$\r$\n"
+      FileWrite $R7 "}$\r$\n"
+      FileWrite $R7 "# Always exit 0. A lock that really survived must be surfaced by the installer itself.$\r$\n"
+      FileWrite $R7 "exit 0$\r$\n"
+      FileClose $R7
+
+      ; 第三步：执行。脚本内部已「强杀 + 最多等 5 秒真实退出」，句柄释放需要这段等待。
+      ; 用 ExecToLog 把 killed / no process 之类结论带进安装日志，便于远程排障。
+      nsExec::ExecToLog 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\gwork-kill-procs.ps1"'
+      Pop $R6
+      ${if} $R6 == "error"
+        ; 企业环境里 powershell 可能被策略禁掉（本机就有 SRP 拦未签名 exe 的先例）；不能因此卡住安装。
+        DetailPrint "gwork-kill: powershell.exe could not run (absent or policy-blocked); continue install"
+      ${else}
+        DetailPrint "gwork-kill: helper exit code=$R6"
+      ${endif}
+      Delete "$PLUGINSDIR\gwork-kill-procs.ps1"
+      Delete "$PLUGINSDIR\gwork-old-install.root.txt"
+    ${endif}
+  ${endif}
+  StrCpy $R7 ""
+  StrCpy $R6 ""
+  ClearErrors
+!macroend
+
+; ── 安装前：先释放旧目录占用，再暂存旧安装目录里的用户配置 ──────────────────
 !macro customInit
   ; 从注册表读取上一次安装位置（SHELL_CONTEXT 已由 initMultiUser 按安装模式设定）
   ReadRegStr $R9 SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}" InstallLocation
@@ -38,6 +180,18 @@
   ${andIf} $R9 == ""
     ReadRegStr $R9 HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation
   ${endIf}
+
+  ; 抢占在旧卸载器之前：把「旧安装目录下的」java / javaw（以及仍赖着不走的主程序）按路径判杀，
+  ; 否则 un.atomicRMDir 会因 javaw.exe 是运行中映像而 Abort，留下新旧混合的部分覆盖。
+  ; 已知缺陷：$R9 为空时无处作为前缀判据，只能跳过（全新安装本就没有旧目录；但老版本卸载键的
+  ; InstallLocation 属性在本项目历史上确实缺失过 —— HKLM 侧丢过这个值，那种机器的占用问题仍会残留，
+  ; 需要靠 App 侧 before-quit 正常退出，或后续把 InstallLocation 写全来兜底）。
+  ${if} $R9 == ""
+    DetailPrint "gwork-kill: no previous InstallLocation in registry; skip process cleanup"
+  ${else}
+    DetailPrint "gwork-kill: releasing file locks under $R9"
+    !insertmacro gworkKillProcsUnder "$R9"
+  ${endif}
 
   ; 两个旧数据区独立暂存；只在检测到对应源时重建对应 staging。
   ${if} $R9 != ""

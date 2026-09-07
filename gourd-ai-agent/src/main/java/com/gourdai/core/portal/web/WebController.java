@@ -30,6 +30,7 @@ import org.noear.solon.ai.talents.mount.SkillDir;
 import org.noear.solon.annotation.*;
 import com.gourdai.core.config.AgentFlags;
 import com.gourdai.core.config.AgentSettings;
+import com.gourdai.core.config.BuildInfo;
 import com.gourdai.core.config.entity.ModelDo;
 import com.gourdai.core.portal.WorkspaceWatcher;
 import com.gourdai.core.command.builtin.LoopScheduler;
@@ -204,7 +205,12 @@ public class WebController {
     /**
      * 页面元信息接口：供前端启动时一次性获取应用标题、版本号、工作区路径等基础信息。
      *
-     * @return 包含 appTitle、appVersion、workspace、workname 的结果对象
+     * <p>除原有字段外额外并列输出构建指纹 {@code buildId} / {@code buildTime}（来自 jar 内
+     * {@code /build-info.properties}，由构建期生成）：桌面端覆盖安装若旧 jar 被占用而未真正替换，
+     * 前端可据此自证「后端与桌面壳不是同一次构建」。{@code appVersion} 的语义与取值保持不变，
+     * 不拼入任何构建信息。</p>
+     *
+     * @return 包含 appTitle、appVersion、workspace、workname、homeDir、buildId、buildTime 的结果对象
      * @throws Exception 读取配置异常
      */
     @Get
@@ -216,6 +222,8 @@ public class WebController {
         data.put("workspace", engine.getWorkspace());
         data.put("workname", getLastSegment(engine.getWorkspace()));
         data.put("homeDir", AgentFlags.getUserHome());
+        data.put("buildId", BuildInfo.getBuildId());
+        data.put("buildTime", BuildInfo.getBuildTime());
         return Result.succeed(data);
     }
 
@@ -283,8 +291,8 @@ public class WebController {
      * 供设置面板「使用统计」页展示。数据源为各会话 {@code stream.ndjson} 中的 {@code trace} 事件，
      * 无需额外埋点（见 {@link UsageStatsService}）。
      *
-     * @param days 统计天数，仅接受 7 / 30（默认 30）
-     * @return 结构化统计结果（概览指标 + 逐日序列 + 模型分布）
+     * @param days 统计天数：0 = 累计至今（全部历史），7 = 最近 7 天（兼容旧页面），其它值收敛到 30（默认 30）
+     * @return 结构化统计结果（概览指标 + 趋势序列 + 模型分布；趋势粒度随跨度自适应，见 {@code granularity}）
      */
     @Get
     @Mapping("/web/chat/usage/stats")

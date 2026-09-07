@@ -140,10 +140,6 @@ public class AgentSettings implements Serializable {
             general.setModelRetries(props.getModelRetries());
         }
 
-        if (general.getBashAsyncEnabled() == null) {
-            general.setBashAsyncEnabled(props.isBashAsyncEnabled());
-        }
-
         if (general.getMemoryEnabled() == null) {
             general.setMemoryEnabled(props.isMemoryEnabled());
         }

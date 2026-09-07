@@ -1,0 +1,26 @@
+{
+  "name": "gourd-ai-tauri",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GWork Desktop (Tauri) —— Electron 版的低内存重写",
+  "homepage": "https://gourdwork.com",
+  "scripts": {
+    "prepare-ui": "node cmd/prepare-ui.js",
+    "preflight": "node cmd/configure-updater.js",
+    "dev": "npm run prepare-ui && tauri dev",
+    "build": "npm run preflight && tauri build --ci -c src-tauri/updater.generated.conf.json",
+    "build:win": "npm run preflight && tauri build --ci -c src-tauri/updater.generated.conf.json --bundles nsis",
+    "build:mac": "npm run preflight && tauri build --ci -c src-tauri/updater.generated.conf.json --bundles app,dmg",
+    "build:linux": "npm run preflight && tauri build --ci -c src-tauri/updater.generated.conf.json --bundles appimage,deb",
+    "check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "latest-json": "node cmd/generate-latest-json.js",
+    "brand-jre": "node ../gourd-ai-desktop/cmd/brand-jre.js build/extraResources/jre",
+    "publish:downloads": "node cmd/publish-downloads.js"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "resedit": "^1.7.2"
+  }
+}

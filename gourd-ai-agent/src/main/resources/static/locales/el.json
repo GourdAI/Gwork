@@ -252,8 +252,8 @@
                                     "title":  "Usage Stats",
                                     "refresh":  "Refresh",
                                     "range_label":  "Time Range",
-                                    "range_7":  "Last 7 Days",
                                     "range_30":  "Last 30 Days",
+                                    "range_all":  "All Time",
                                     "stat_tokens":  "Tokens Used",
                                     "stat_sessions":  "Sessions",
                                     "stat_messages":  "Messages",
@@ -265,9 +265,13 @@
                                     "heat_less":  "Less",
                                     "heat_more":  "More",
                                     "trend_title":  "Daily Token Trend",
+                                    "trend_title_week":  "Weekly Token Trend",
+                                    "trend_title_month":  "Monthly Token Trend",
                                     "models_title":  "Model Usage",
                                     "tokens_unit":  "tokens",
                                     "date_md":  "{0}/{1}",
+                                    "date_ym":  "{0}-{1}",
+                                    "range_hint":  "Period {0} ~ {1} · {2} days",
                                     "tooltip":  "{0}: {1} Tokens · {2} rounds",
                                     "loading":  "Loading…",
                                     "load_failed":  "Failed to load",
@@ -322,8 +326,6 @@
                                             },
                                      "features":  {
                                                       "title":  "Διακόπτες λειτουργιών",
-                                                      "bash_async_name":  "Ασύγχρονος μηχανισμός Bash",
-                                                      "bash_async_desc":  "Ενεργοποίηση: υποστήριξη ασύγχρονου Bash (συνήθως δεν απαιτείται)· απενεργοποίηση μειώνει την κατανάλωση του ngữ контекст",
                                                       "subagent_name":  "Μηχανισμός υπο-агентов",
                                                       "subagent_desc":  "Ενεργοποίηση: ανάθεση εργασιών σε εξειδικευμένους υπο-агентов· απενεργοποίηση μειώνει την κατανάλωση του ngữ контекст",
                                                       "mcp_name":  "Πύλη εργαλείων MCP",
@@ -803,6 +805,7 @@
                  "tool_write":  "Εγγραφή",
                  "tool_edit":  "Επεξεργασία",
                  "tool_bash":  "Εκτέλεση",
+                 "tool_bash_output": "Έλεγχος εξόδου παρασκηνίου",
                  "tool_skill":  "Δεξιότητα",
                  "tool_todo":  "Εργασίες",
                  "tool_code":  "Κώδικας",
@@ -996,8 +999,9 @@
     "todos":  {
                   "no_tasks":  "Καμία εργασία",
                   "no_task_list":  "Καμία λίστα εργασιών",
-                  "load_failed":  "Αποτυχία φόρτωσης λίστας"
-              },
+                  "load_failed":  "Αποτυχία φόρτωσης λίστας",
+                  "malformed": "Η λίστα εργασιών φαίνεται ελαττωματική: δεν αναγνωρίστηκε καμία γραμμή εργασίας"
+},
     "context":  {
                     "length":  "Μήκος παρασκηνίου: {0} / {1} ({2})",
                     "cache":  "Κεφάλα"

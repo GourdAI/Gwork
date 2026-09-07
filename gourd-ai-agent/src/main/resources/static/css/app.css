@@ -2255,6 +2255,33 @@ pre:hover .code-copy-btn { opacity: 1; }
     text-align: center;
 }
 
+/* 清单格式异常：文件有内容却解析不出任何任务行（历史脏数据），
+   在面板内给出可见线索，而不是静默收起任务入口 */
+.todo-malformed {
+    padding: 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.todo-malformed-title {
+    color: #e0a030;
+    line-height: 1.5;
+    margin-bottom: 8px;
+}
+
+.todo-malformed-raw {
+    margin: 0;
+    padding: 8px;
+    max-height: 160px;
+    overflow: auto;
+    background: rgba(128, 128, 128, 0.08);
+    border-radius: 4px;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
 /* ===== Context Status (above textarea) ===== */
 .context-status {
     text-align: center;

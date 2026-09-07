@@ -450,11 +450,6 @@ public class ReActAgent implements Agent<ReActRequest, ReActResponse> {
             return this;
         }
 
-        public Builder parallelToolEnabled(boolean val) {
-            config.getDefaultOptions().setParallelToolEnabled(val);
-            return this;
-        }
-
         public Builder outputKey(String val) {
             config.setOutputKey(val);
             return this;

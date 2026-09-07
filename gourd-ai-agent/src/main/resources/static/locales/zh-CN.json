@@ -252,8 +252,8 @@
                                     "title":  "使用统计",
                                     "refresh":  "刷新",
                                     "range_label":  "时间范围",
-                                    "range_7":  "最近 7 天",
                                     "range_30":  "最近 30 天",
+                                    "range_all":  "累计至今",
                                     "stat_tokens":  "tokens 用量",
                                     "stat_sessions":  "会话数量",
                                     "stat_messages":  "消息数量",
@@ -265,9 +265,13 @@
                                     "heat_less":  "较少",
                                     "heat_more":  "较多",
                                     "trend_title":  "按天 Token 趋势",
+                                    "trend_title_week":  "按周 Token 趋势",
+                                    "trend_title_month":  "按月 Token 趋势",
                                     "models_title":  "模型用量",
                                     "tokens_unit":  "tokens",
                                     "date_md":  "{0}月{1}日",
+                                    "date_ym":  "{0}年{2}月",
+                                    "range_hint":  "统计区间 {0} ~ {1} · 共 {2} 天",
                                     "tooltip":  "{0}：{1} Tokens · {2} 轮",
                                     "loading":  "加载中…",
                                     "load_failed":  "加载失败",
@@ -322,8 +326,6 @@
                                             },
                                      "features":  {
                                                       "title":  "功能开关",
-                                                      "bash_async_name":  "Bash 异步机制",
-                                                      "bash_async_desc":  "开启后可支持 Bash 异步机制（一般没必要）；关闭可减少上下文消耗",
                                                       "subagent_name":  "Subagent 子代理机制",
                                                       "subagent_desc":  "开启后可支持 Subagent 子代理机制，允许委派任务给专项子代理；关闭可减少上下文消耗",
                                                       "mcp_name":  "MCP 工具网关",
@@ -803,6 +805,7 @@
                  "tool_write":  "写入",
                  "tool_edit":  "编辑",
                  "tool_bash":  "执行命令",
+                 "tool_bash_output": "查看后台输出",
                  "tool_skill":  "技能",
                  "tool_todo":  "任务清单",
                  "tool_code":  "编码",
@@ -996,8 +999,9 @@
     "todos":  {
                   "no_tasks":  "暂无任务",
                   "no_task_list":  "当前会话暂无任务清单",
-                  "load_failed":  "加载任务清单失败"
-              },
+                  "load_failed":  "加载任务清单失败",
+                  "malformed": "任务清单格式异常：未能识别出任何任务行"
+},
     "context":  {
                     "length":  "上下文长度: {0} / {1} ({2})",
                     "cache":  "缓存"

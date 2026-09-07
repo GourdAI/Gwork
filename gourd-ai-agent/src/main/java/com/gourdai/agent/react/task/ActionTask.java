@@ -20,6 +20,7 @@ import org.noear.snack4.json.JsonReader;
 import com.gourdai.agent.Agent;
 import com.gourdai.agent.team.TeamTrace;
 import com.gourdai.agent.util.FeedbackTool;
+import com.gourdai.agent.react.BackgroundNoticeCenter;
 import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.react.ReActAgentConfig;
 import com.gourdai.agent.react.ReActInterceptor;
@@ -235,10 +236,9 @@ public class ActionTask {
         List<ToolCall> calls = dedupeIdenticalCalls(lastReason.getToolCalls(), aliasIdsByPrimaryId);
         Map<ToolCall, BatchMetadata> batchByCall = createVisibleBatch(calls);
 
-        boolean parallelEnabled = trace.getOptions().isParallelToolEnabled();
-
-        // 是否存在可并行的只读段（≥2 个连续只读工具且开关开启）；否则直接走串行快路径。
-        if (!parallelEnabled || !hasParallelReadonlyRun(calls)) {
+        // 是否存在可并行的只读段（≥2 个连续只读工具）；否则直接走串行快路径。
+        // 并行行为恒开启：只读段（read/grep/glob/ls）并行，写工具（write/edit/bash）始终串行。
+        if (!hasParallelReadonlyRun(calls)) {
             runCallsSerial(calls, trace, toolResults, aliasIdsByPrimaryId, batchByCall);
             flushToolResults(lastReason, trace, toolResults);
             return; // 串行路径：中止与否都已在 toolResults 落地，直接返回
@@ -624,6 +624,10 @@ public class ActionTask {
         }
 
         if (tool != null) {
+            // 绑定后台任务归属：bash(run_in_background=true) 据此把完成通知投递回本会话。
+            // bash 属写工具，恒在 ActionTask 当前线程串行执行（不会落到并行只读段的线程池），
+            // 故 ThreadLocal 传递可靠；但必须在 finally 里解绑，否则线程复用会把 A 会话的通知投给 B。
+            BackgroundNoticeCenter.bindCurrentOwner(BackgroundNoticeCenter.resolveOwner(trace.getContext()));
             try {
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("Agent [{}] invoking tool start [{}], args: {}", config.getName(), name, args);
@@ -650,6 +654,8 @@ public class ActionTask {
             } catch (Throwable e) {
                 LOG.error("Agent [" + config.getName() + "] tool [" + name + "] execution failed", e);
                 return ToolResult.success("__ERROR__ Execution error in tool [" + name + "]: " + e.getMessage());
+            } finally {
+                BackgroundNoticeCenter.unbindCurrentOwner();
             }
         }
 

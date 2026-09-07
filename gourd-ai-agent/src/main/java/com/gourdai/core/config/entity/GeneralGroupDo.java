@@ -37,10 +37,6 @@ public class GeneralGroupDo implements Serializable {
     private Integer mcpRetries;
     //模型重试次数
     private Integer modelRetries;
-    //启用异步终端（增加上下文消耗，非编码用户建议关闭）
-    private Boolean bashAsyncEnabled;
-    //启用只读工具并行执行（read/grep/glob/ls 一轮多个时并行，加速批量读取）
-    private Boolean parallelToolEnabled;
     //启用心智记忆（跨会话长期记忆）
     private Boolean memoryEnabled;
     //启用心智记忆隔离（按工作区隔离长期记忆）

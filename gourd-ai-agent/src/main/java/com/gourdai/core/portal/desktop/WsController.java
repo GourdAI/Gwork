@@ -5,6 +5,7 @@ import org.noear.solon.ai.chat.ChatConfig;
 import com.gourdai.harness.HarnessEngine;
 import org.noear.solon.annotation.*;
 import com.gourdai.core.config.AgentFlags;
+import com.gourdai.core.config.BuildInfo;
 import com.gourdai.core.portal.web.model.ModelInfo;
 import com.gourdai.core.portal.desktop.provider.ModelProvider;
 import com.gourdai.core.portal.desktop.provider.ModelProviderFactory;
@@ -37,6 +38,9 @@ public class WsController {
 
     /**
      * 获取消息详细记录信息
+     *
+     * <p>{@code version} 保持原语义不动；额外并列 {@code buildId} / {@code buildTime} 构建指纹，
+     * 便于 CLI / 桌面端命令行侧核对当前 jar 是否为本次构建产物。</p>
      */
     @Get
     @Mapping("/version")
@@ -44,6 +48,8 @@ public class WsController {
         Map<String, String> data = new LinkedHashMap<>();
         data.put("version", AgentFlags.getVersion());
         data.put("workspace", engine.getWorkspace());
+        data.put("buildId", BuildInfo.getBuildId());
+        data.put("buildTime", BuildInfo.getBuildTime());
         return Result.succeed(data);
     }
 

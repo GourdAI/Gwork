@@ -22,6 +22,10 @@
       "to": "extraResources/gourd-ai-agent.jar"
     },
     {
+      "from": "build/extraResources/build-manifest.json",
+      "to": "extraResources/build-manifest.json"
+    },
+    {
       "from": "build/extraResources/jre",
       "to": "extraResources/jre"
     },

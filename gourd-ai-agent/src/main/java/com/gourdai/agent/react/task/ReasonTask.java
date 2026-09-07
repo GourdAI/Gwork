@@ -202,6 +202,12 @@ public class ReasonTask {
 
         String systemPromptStr = systemPromptBuf.toString();
 
+        // [逻辑 2.2: 后台任务完成通知] 把已完成的后台命令以消息形式注入工作记忆。
+        // 这是「系统主动告知」替代「模型轮询」的落点：模型不再需要反复调用 bash_output 询问
+        // “跑完了没”，从而避免每次轮询都沉淀一条消息在历史里、再被后续每轮全量重发放大 token 成本。
+        // 置于消息组装之前，保证本轮请求就能看到通知；也覆盖“上一回合已结束、任务在空闲期完成”的场景。
+        injectBackgroundNotices(trace);
+
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(ChatMessage.ofSystem(systemPromptStr));
         messages.addAll(trace.getWorkingMemory().getMessages());
@@ -353,6 +359,36 @@ public class ReasonTask {
         // 3. 兜底逻辑：既无明确工具调用也无完成标识，视为直接回复 Final Answer
         trace.setRoute(Agent.ID_END);
         trace.setFinalAnswer(extractFinalAnswer(clearContent), false);
+    }
+
+    /**
+     * 把已完成的后台任务通知注入工作记忆。
+     *
+     * <p>只读取已存在的归属键（peekOwner）：从未启动过后台任务的会话直接短路返回，
+     * 不产生任何开销，也不白白生成归属键。</p>
+     *
+     * <p>用 user 角色而非 system：部分模型供应商对历史中段出现 system 消息兼容性差，
+     * user 消息在各方言下都能稳定插入。</p>
+     */
+    private void injectBackgroundNotices(ReActTrace trace) {
+        String owner = BackgroundNoticeCenter.peekOwner(trace.getContext());
+        if (Assert.isEmpty(owner)) {
+            return;
+        }
+
+        List<BackgroundNoticeCenter.Notice> notices = BackgroundNoticeCenter.drain(owner);
+        if (notices.isEmpty()) {
+            return;
+        }
+
+        for (BackgroundNoticeCenter.Notice notice : notices) {
+            trace.getWorkingMemory().addMessage(ChatMessage.ofUser(notice.render()));
+        }
+
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("ReActAgent [{}] injected {} background completion notice(s)",
+                    config.getName(), notices.size());
+        }
     }
 
     private @Nullable ChatResponse callWithRetry(ReActTrace trace, List<ChatMessage> messages) throws RuntimeException {

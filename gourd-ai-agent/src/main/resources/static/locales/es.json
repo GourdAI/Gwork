@@ -252,8 +252,8 @@
                                     "title":  "Usage Stats",
                                     "refresh":  "Refresh",
                                     "range_label":  "Time Range",
-                                    "range_7":  "Last 7 Days",
                                     "range_30":  "Last 30 Days",
+                                    "range_all":  "All Time",
                                     "stat_tokens":  "Tokens Used",
                                     "stat_sessions":  "Sessions",
                                     "stat_messages":  "Messages",
@@ -265,9 +265,13 @@
                                     "heat_less":  "Less",
                                     "heat_more":  "More",
                                     "trend_title":  "Daily Token Trend",
+                                    "trend_title_week":  "Weekly Token Trend",
+                                    "trend_title_month":  "Monthly Token Trend",
                                     "models_title":  "Model Usage",
                                     "tokens_unit":  "tokens",
                                     "date_md":  "{0}/{1}",
+                                    "date_ym":  "{0}-{1}",
+                                    "range_hint":  "Period {0} ~ {1} · {2} days",
                                     "tooltip":  "{0}: {1} Tokens · {2} rounds",
                                     "loading":  "Loading…",
                                     "load_failed":  "Failed to load",
@@ -322,8 +326,6 @@
                                             },
                                      "features":  {
                                                       "title":  "Interruptores de funciones",
-                                                      "bash_async_name":  "Mecanismo asíncrono de Bash",
-                                                      "bash_async_desc":  "Activado: soportar Bash asíncrono (normalmente innecesario); desactivado reduce consumo de contexto",
                                                       "subagent_name":  "Mecanismo de sub-agentes",
                                                       "subagent_desc":  "Activado: delegar tareas a sub-agentes especializados; desactivado reduce consumo de contexto",
                                                       "mcp_name":  "Puerta de enlace MCP",
@@ -803,6 +805,7 @@
                  "tool_write":  "Escribir",
                  "tool_edit":  "Editar",
                  "tool_bash":  "Ejecutar",
+                 "tool_bash_output": "Ver salida en segundo plano",
                  "tool_skill":  "Habilidad",
                  "tool_todo":  "Tareas",
                  "tool_code":  "Código",
@@ -996,8 +999,9 @@
     "todos":  {
                   "no_tasks":  "Sin tareas",
                   "no_task_list":  "Sin lista de tareas",
-                  "load_failed":  "Error al cargar lista de tareas"
-              },
+                  "load_failed":  "Error al cargar lista de tareas",
+                  "malformed": "La lista de tareas parece incorrecta: no se reconoció ninguna línea de tarea"
+},
     "context":  {
                     "length":  "Longitud de contexto: {0} / {1} ({2})",
                     "cache":  "Caché"

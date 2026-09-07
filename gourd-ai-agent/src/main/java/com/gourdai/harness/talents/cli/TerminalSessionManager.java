@@ -25,6 +25,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,6 +37,8 @@ public final class TerminalSessionManager {
 
     private static final Logger LOG = LoggerFactory.getLogger(TerminalSessionManager.class);
     private static final long DESTROY_GRACE_MS = 250L;
+    /** 完成通知里携带的尾部输出上限：通知会随历史被每轮重发，必须克制 */
+    private static final int NOTICE_TAIL_CHARS = 2_000;
     private static final long COMPLETED_SESSION_TTL_MS = Duration.ofMinutes(10).toMillis();
     private static final ScheduledExecutorService TIMEOUT_EXECUTOR =
             Executors.newSingleThreadScheduledExecutor(
@@ -75,6 +78,24 @@ public final class TerminalSessionManager {
             Integer maxOutputChars,
             Integer hardTimeoutMs)
             throws IOException {
+        return exec(command, workdir, env, yieldTimeMs, maxOutputChars, hardTimeoutMs, null);
+    }
+
+    /**
+     * 执行命令，并在会话结束时回调通知。
+     *
+     * @param onComplete 进程结束（正常退出 / 硬超时 / 被终止）后的回调；可为 null。
+     *                   回调在命令等待线程上执行，实现方必须自行吞掉异常且不得阻塞。
+     */
+    public CommandSnapshot exec(
+            String command,
+            Path workdir,
+            Map<String, String> env,
+            Integer yieldTimeMs,
+            Integer maxOutputChars,
+            Integer hardTimeoutMs,
+            Consumer<CommandSnapshot> onComplete)
+            throws IOException {
         cleanupCompletedSessions();
         requireNonEmptyCommand(command);
         Path normalizedWorkdir = normalizeWorkdir(workdir);
@@ -84,7 +105,7 @@ public final class TerminalSessionManager {
             // Windows：改用 ShellCommandFactory 的可靠启动方案（PowerShell 用 -EncodedCommand；
             // CMD 默认 /d /c 直连、仅多行/非 ANSI/超长命令才落 .bat），规避命令文本代码页转换问题；
             // 若产生临时脚本，由会话结束回调清理（异步会话下进程可能在本方法返回后仍在运行，不能提前删除）。
-            // interactive=true：会话支持 bash_stdin，不能加 -NonInteractive，否则等待输入的命令会直接失败
+    // interactive=true：会话支持 stdin 写入，不能加 -NonInteractive，否则等待输入的命令会直接失败
             if (shellCommandFactory.isWindowsShell()) {
                 prepared = shellCommandFactory.prepare(command, true);
             }
@@ -108,7 +129,8 @@ public final class TerminalSessionManager {
                             System.currentTimeMillis(),
                             normalizeHardTimeoutMs(hardTimeoutMs),
                             outputCharset,
-                            cleanup);
+                            cleanup,
+                            onComplete);
             sessions.put(sessionId, session);
             session.start();
             return waitAndSnapshot(session, yieldTimeMs, maxOutputChars);
@@ -468,6 +490,7 @@ public final class TerminalSessionManager {
         private final int hardTimeoutMs;
         private final Charset outputCharset;
         private final Runnable cleanup; // 会话结束后的临时脚本清理（Windows 脚本执行方案）
+        private final Consumer<CommandSnapshot> onComplete; // 进程结束回调（后台任务完成通知），可为 null
         private final Object lock = new Object();
         private final StringBuilder output = new StringBuilder();
         private final CompletableFuture<Integer> exitFuture = new CompletableFuture<>();
@@ -486,7 +509,8 @@ public final class TerminalSessionManager {
                 long startedAt,
                 int hardTimeoutMs,
                 Charset outputCharset,
-                Runnable cleanup) {
+                Runnable cleanup,
+                Consumer<CommandSnapshot> onComplete) {
             this.sessionId = sessionId;
             this.command = command;
             this.workdir = workdir;
@@ -495,6 +519,7 @@ public final class TerminalSessionManager {
             this.hardTimeoutMs = hardTimeoutMs;
             this.outputCharset = outputCharset;
             this.cleanup = cleanup;
+            this.onComplete = onComplete;
         }
 
         void start() {
@@ -521,6 +546,26 @@ public final class TerminalSessionManager {
                 exitFuture.completeExceptionally(e);
             } finally {
                 runCleanup();
+                fireCompletion();
+            }
+        }
+
+        /**
+         * 触发完成回调（后台任务通知）。
+         *
+         * <p>先等读取线程把管道残余输出排干，否则通知里的尾部输出会缺最后几行（失败原因常在最后一行）。
+         * 取的是「非消费性」快照：不推进 nextOutputOffset，否则后续 bash_output 会漏掉这段增量。</p>
+         */
+        private void fireCompletion() {
+            if (onComplete == null) {
+                return;
+            }
+            try {
+                awaitReaderIfCompleted(500);
+                onComplete.accept(snapshotTail(NOTICE_TAIL_CHARS));
+            } catch (Throwable e) {
+                // 通知失败不得影响命令本身的生命周期
+                LOG.debug("Command completion callback failed for {}: {}", sessionId, e.getMessage());
             }
         }
 
@@ -578,7 +623,7 @@ public final class TerminalSessionManager {
         CommandSnapshot snapshot(int maxOutputChars) {
             // 解码由读取线程增量完成（O(n)，多字节字符跨分块由 OutputDecoder 保留残字节处理）；
             // 这里只在锁内读取已解码文本并推进「已消费字符偏移」——偏移的读-改-写必须与读取同处一个
-            // 临界区，否则并发调用（如 bash_wait 与 bash_stop 同时发生）会重复返回或漏掉一段输出
+    // 临界区，否则并发调用（如多次 bash_output 查询同时发生）会重复返回或漏掉一段输出
             String outputText;
             int outputLength;
             boolean truncated = false;
@@ -597,6 +642,48 @@ public final class TerminalSessionManager {
                     outputText = output.substring(start, outputLength);
                 }
                 nextOutputOffset = outputLength;
+            }
+            Integer exitCode = null;
+            if (exitFuture.isDone()) {
+                try {
+                    exitCode = exitFuture.getNow(null);
+                } catch (Throwable ignored) {
+                }
+            }
+            return new CommandSnapshot(
+                    sessionId,
+                    command,
+                    workdir,
+                    isRunning(),
+                    exitCode,
+                    timedOut,
+                    terminated,
+                    terminateReason,
+                    System.currentTimeMillis() - startedAt,
+                    outputLength,
+                    outputText.length(),
+                    truncated,
+                    outputText);
+        }
+
+        /**
+         * 非消费性尾部快照：只取末尾若干字符，不推进「已消费字符偏移」。
+         *
+         * <p>专供完成通知使用：通知里展示过的内容，后续 bash_output 仍应能完整取到，
+         * 两者互不干扰。</p>
+         */
+        CommandSnapshot snapshotTail(int maxOutputChars) {
+            String outputText;
+            int outputLength;
+            boolean truncated = false;
+            synchronized (lock) {
+                outputLength = output.length();
+                if (outputLength > maxOutputChars) {
+                    outputText = output.substring(outputLength - maxOutputChars, outputLength);
+                    truncated = true;
+                } else {
+                    outputText = output.substring(0, outputLength);
+                }
             }
             Integer exitCode = null;
             if (exitFuture.isDone()) {

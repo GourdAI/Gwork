@@ -32,6 +32,52 @@ const net = require('net');
  */
 const PROXY_GRACE_MS = 1500;
 
+/** 503 日志节流：同一状态下最多每这么久记一行，避免前端轮期期把日志刷满。 */
+const REJECT_LOG_THROTTLE_MS = 5000;
+let lastRejectLogged = ''; // `${state}:${status}` -> 上次记录时刻
+let lastRejectAt = 0;
+
+/**
+ * 构造「后端不可用」的 503 响应体。
+ *
+ * 旧实现无论什么原因都回一句「后端启动中，请稍候…」。而失败态下这句话
+ * 永远是真的「请稍候」—— 用户与排障者都无法从响应里看出后端已经判定失败，
+ * 看起来就像 “接口一直访问不通”。现在把真实状态与原因一并回给客户端。
+ * @param {object} ctx 启动上下文
+ * @returns {{state:string, body:string, retryAfter:string}}
+ */
+function buildReject(ctx) {
+  const d = typeof ctx.getBackendDetail === 'function' ? ctx.getBackendDetail() : null;
+  const state = (d && d.state) || 'pending';
+
+  if (state !== 'failed') {
+    return { state, body: '后端启动中，请稍候…', retryAfter: '1' };
+  }
+
+  const err = (d && d.lastError) || '未知原因';
+  const probe = d && d.lastProbe;
+  const probeText = probe ? (probe.status ? 'HTTP ' + probe.status : '连接失败 ' + (probe.error || 'unknown')) : '未探测';
+  const retry = d && d.autoRetryMax && d.autoRetryAttempt < d.autoRetryMax
+    ? `自动重试进度 ${d.autoRetryAttempt}/${d.autoRetryMax}`
+    : '自动重试已停止';
+
+  const body = '后端启动失败（非启动中）。\n原因: ' + err + '\n探针: ' + probeText
+    + '\n' + retry + '\n主进程日志: ' + ((d && d.logPath) || '不可用')
+    + '\n后端日志: ' + ((d && d.serverLogPath) || '不可用')
+    + (probe && probe.status === 404 ? '\n【诊断】404 常为覆盖安装未完全替换 jar，请卸载后重装。' : '');
+
+  // 节流记录：即使没人开 devtools，主进程日志里也留下“代理曾以何种原因拒绝”的硬证据
+  const key = state + ':' + probeText;
+  const now = Date.now();
+  if (key !== lastRejectLogged || now - lastRejectAt > REJECT_LOG_THROTTLE_MS) {
+    lastRejectLogged = key;
+    lastRejectAt = now;
+    console.warn('[ui-server] 拒绝后端请求 503: ' + key.replace(/\s+/g, ' '));
+  }
+
+  return { state, body, retryAfter: '10' };
+}
+
 /** 需要转发到后端 jar 的路径前缀（其余按本地静态文件处理）。 */
 function isBackendPath(pathname) {
   return pathname.startsWith('/web/')
@@ -130,10 +176,13 @@ async function proxyHttp(ctx, req, res) {
   // 故这里只需给一个很短的宽限（应对“就绪前一刻抵达”的请求），随后立即 503。
   const ready = await ctx.awaitBackend(PROXY_GRACE_MS);
   if (!ready) {
+    const r = buildReject(ctx);
     res.statusCode = 503;
     res.setHeader('content-type', 'text/plain; charset=utf-8');
-    res.setHeader('retry-after', '1');
-    res.end('后端启动中，请稍候…');
+    res.setHeader('retry-after', r.retryAfter);
+    // 供前端/devtools 一眼分辨「还在启动」与「已判定失败」，无需解析 body
+    res.setHeader('x-backend-state', r.state);
+    res.end(r.body);
     return;
   }
 
@@ -169,7 +218,9 @@ async function proxyUpgrade(ctx, req, clientSocket, head) {
   // 且后端就绪时主进程会经 IPC 通知前端立即重连（见 app-streaming.js），无需在此久等。
   const ready = await ctx.awaitBackend(PROXY_GRACE_MS);
   if (!ready) {
-    clientSocket.end('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+    const d = typeof ctx.getBackendDetail === 'function' ? ctx.getBackendDetail() : null;
+    const st = (d && d.state) || 'pending';
+    clientSocket.end('HTTP/1.1 503 Service Unavailable\r\nX-Backend-State: ' + st + '\r\nRetry-After: 10\r\n\r\n');
     return;
   }
 

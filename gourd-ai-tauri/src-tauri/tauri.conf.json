@@ -1,0 +1,84 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GWork",
+  "version": "0.1.0",
+  "identifier": "com.gourdwork.desktop",
+  "build": {
+    "beforeDevCommand": "node cmd/prepare-ui.js",
+    "beforeBuildCommand": "node cmd/prepare-ui.js && node cmd/sync-backend.js && node ../gourd-ai-desktop/cmd/brand-jre.js build/extraResources/jre --no-fail && node ../gourd-ai-desktop/cmd/gen-build-manifest.js --extra-dir build/extraResources && node cmd/generate-nsis-assets.js && node cmd/verify-icons.js",
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "publisher": "GWork",
+    "homepage": "https://gourdwork.com",
+    "copyright": "Copyright © 2026 GWork",
+    "shortDescription": "GWork 桌面端",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../ui/": "ui/",
+      "../build/extraResources/gourd-ai-agent.jar": "extraResources/gourd-ai-agent.jar",
+      "../build/extraResources/jre/": "extraResources/jre/"
+    },
+    "externalBin": [],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese"
+        ],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp",
+        "installerHooks": "installer/hooks.nsh"
+      },
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      }
+    },
+    "macOS": {
+      "entitlements": null,
+      "exceptionDomain": "",
+      "frameworks": [],
+      "providerShortName": null,
+      "signingIdentity": null
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://www.gourdwork.com/downloads/tauri/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE5MEJCQkJDREM0RjY5NEIKUldSTGFVL2N2THNMR1NWVm44bUt6QVpRTFN4QzZzT0hTWlRrSEY1anE0dTJOSGtOR1p1U0trSmEK"
+    }
+  }
+}

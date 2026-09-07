@@ -40,6 +40,15 @@ public class TodoTalent extends AbsTalent {
 
     public static final String PARAM_TODOS = "todos";
 
+    /**
+     * 入参经归一化后仍识别不出任务行时追加的提示（不改变落盘行为，仅告知模型修正入参）。
+     * 文案刻意不出现「短横线 + 方括号状态符」的完整形态，避免被前端兜底统计正则误判为任务行。
+     */
+    private static final String FORMAT_WARN =
+            "\n[格式警告] 未能从入参中识别出任何任务行，进度统计为 0、任务面板无法展示。"
+                    + "请传入 Markdown 原文：每条任务独占一行、以短横线开头并带方括号状态标记；"
+                    + "使用真实换行分隔，不要包 JSON 外壳，也不要把换行写成字面反斜杠 n。";
+
     private final String relativeDir;
 
     public TodoTalent() {
@@ -103,6 +112,185 @@ public class TodoTalent extends AbsTalent {
     }
 
     /**
+     * checkbox 任务行的统一识别规则：形如 {@code - [x]} / {@code - [ ]} / {@code - [/]}，
+     * 状态字符大小写均兼容。行首锚定——本方法的所有调用方（进度页脚、未完成项判定、
+     * 入参归一化）必须共用此口径，否则会出现「前端统计到 N 条但后端解析到 0 条」的分歧。
+     */
+    private static boolean isCheckboxLine(String trimmed) {
+        if (trimmed.length() < 5 || !trimmed.startsWith("- [") || trimmed.charAt(4) != ']') {
+            return false;
+        }
+        char mark = Character.toLowerCase(trimmed.charAt(3));
+        return mark == 'x' || mark == '/' || mark == ' ';
+    }
+
+    /**
+     * 统计内容中可识别的 checkbox 任务行数（按行锚定，与 {@link #isCheckboxLine} 同口径）
+     */
+    static int countCheckboxLines(String content) {
+        if (content == null || content.isEmpty()) {
+            return 0;
+        }
+        int count = 0;
+        for (String line : content.split("\n")) {
+            if (isCheckboxLine(line.trim())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * 归一化模型传入的清单文本，修复「清单塌缩成单行」这一类脏入参。
+     *
+     * <p>实战中模型偶发把工具调用的 JSON 外壳当作参数值输出（形如
+     * {@code [{"todos": "- [x] A\n- [ ] B"}]}），且其中的换行常退化为字面两字符而非真换行。
+     * 原样落盘会让 TODO.md 只剩一行，于是所有按行锚定解析的下游——进度页脚、
+     * {@code /web/chat/todos} 接口、前端任务面板、中断恢复校准——全部解析为 0 条，
+     * 表现为「任务按钮点击后闪消」以及模型收到 {@code [进度] total: 0}。</p>
+     *
+     * <p>修复采取「候选择优」：对 原文 / 解包 JSON 壳 / 还原字面换行 几种形态各统计一次
+     * 可识别任务数，取最多者；**平手时保留原文**，因此本就正常的清单（包括任务描述里
+     * 正当出现字面 {@code \n} 的清单）不会被改写，任何情况下也不会把清单改得更差。</p>
+     *
+     * <p>为何不能只判「能解析出任务就不动」：塌行文本的首行往往已能命中一条（如
+     * {@code - [x] A\n- [ ] B} 整体一行），带真换行的 JSON 壳末尾 {@code - [ ] B"}]}
+     * 也能命中一条——这两种情况下都有更优形态存在，需要择优而非短路。</p>
+     */
+    static String sanitizeTodoMarkdown(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String text = raw.trim();
+        if (text.isEmpty()) {
+            return text;
+        }
+        int best = countCheckboxLines(text);
+
+        // ① 入参带着 JSON 外壳：取出 todos 字段的字符串值（内部转义已一并还原）
+        String unwrapped = extractTodosField(text);
+        if (unwrapped != null) {
+            String value = unwrapped.trim();
+            int count = countCheckboxLines(value);
+            if (count > best) {
+                best = count;
+                text = value;
+            }
+        }
+
+        // ② 字面换行序列还原为真换行（覆盖「有壳且塌行」与「无壳但塌行」两类）
+        String unescaped = unescapeLiteralNewlines(text);
+        if (countCheckboxLines(unescaped) > best) {
+            text = unescaped;
+        }
+
+        return text;
+    }
+
+    /**
+     * 从文本中定位 {@code "todos"} 键并取出其字符串字面量值（含 JSON 转义还原）。
+     * 值不是字符串字面量、或引号未闭合时返回 null，交由调用方走后续兜底分支。
+     */
+    private static String extractTodosField(String text) {
+        int key = text.indexOf("\"todos\"");
+        if (key < 0) {
+            return null;
+        }
+        int i = key + "\"todos\"".length();
+        while (i < text.length() && (Character.isWhitespace(text.charAt(i)) || text.charAt(i) == ':')) {
+            i++;
+        }
+        if (i >= text.length() || text.charAt(i) != '"') {
+            return null;
+        }
+        int start = i + 1;
+        for (int p = start; p < text.length(); p++) {
+            char c = text.charAt(p);
+            if (c == '\\') {
+                p++;
+                continue;
+            }
+            if (c == '"') {
+                return unescapeJsonString(text.substring(start, p));
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 还原 JSON 字符串字面量中的转义序列（{@code \n} {@code \r} {@code \t} {@code \\} {@code \"} {@code \/} {@code \b} {@code \f} {@code \\uXXXX}）；
+     * 无法识别的转义按原样保留，不做破坏性处理。
+     */
+    private static String unescapeJsonString(String s) {
+        if (s.indexOf('\\') < 0) {
+            return s;
+        }
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c != '\\' || i + 1 >= s.length()) {
+                sb.append(c);
+                continue;
+            }
+            char next = s.charAt(++i);
+            switch (next) {
+                case 'n':
+                    sb.append('\n');
+                    break;
+                case 'r':
+                    sb.append('\r');
+                    break;
+                case 't':
+                    sb.append('\t');
+                    break;
+                case 'b':
+                    sb.append('\b');
+                    break;
+                case 'f':
+                    sb.append('\f');
+                    break;
+                case '"':
+                    sb.append('"');
+                    break;
+                case '\\':
+                    sb.append('\\');
+                    break;
+                case '/':
+                    sb.append('/');
+                    break;
+                case 'u':
+                    if (i + 4 < s.length()) {
+                        try {
+                            sb.append((char) Integer.parseInt(s.substring(i + 1, i + 5), 16));
+                            i += 4;
+                        } catch (NumberFormatException e) {
+                            sb.append('\\').append(next);
+                        }
+                    } else {
+                        sb.append('\\').append(next);
+                    }
+                    break;
+                default:
+                    sb.append('\\').append(next);
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 把字面书写（反斜杠 + n/r 两字符）的换行还原为真换行，并统一行尾为 LF。
+     */
+    private static String unescapeLiteralNewlines(String s) {
+        if (s.indexOf("\\n") < 0 && s.indexOf("\\r") < 0) {
+            return s;
+        }
+        return s.replace("\\r\\n", "\n")
+                .replace("\\n", "\n")
+                .replace("\\r", "\n")
+                .replace("\r\n", "\n");
+    }
+
+    /**
      * 判断清单中是否存在未完成项（`[ ]` 待办或 `[/]` 进行中）
      */
     public static boolean hasUnfinishedItems(String content) {
@@ -112,7 +300,7 @@ public class TodoTalent extends AbsTalent {
         for (String line : content.split("\n")) {
             String trimmed = line.trim();
             // 与 buildProgressFooter 保持一致的 checkbox 行识别规则
-            if (trimmed.length() < 5 || !trimmed.startsWith("- [") || trimmed.charAt(4) != ']') {
+            if (!isCheckboxLine(trimmed)) {
                 continue;
             }
             char mark = Character.toLowerCase(trimmed.charAt(3));
@@ -175,13 +363,28 @@ public class TodoTalent extends AbsTalent {
 
         Path todoFile = workPath.resolve(TODO_FILE_NAME);
 
-        String content = todosMarkdown.trim();
-        if (!content.isEmpty() && !content.endsWith("\n")) {
+        String content = sanitizeTodoMarkdown(todosMarkdown);
+
+        // 【空入参不得落盘·勿删】content 为空（todosMarkdown 为 null / 纯空白）时，若照常
+        // Files.write 会把已有 TODO.md <b>整份抗掉</b>；而且因 content.isEmpty()，
+        // FORMAT_WARN 与「继续/完成」推力全部被跳过，模型只收到一条「TODO saved.」+
+        // total: 0——清单没了、进度归零、还告诉它保存成功，是最坏的组合。
+        // HarnessEngine 的中断恢复校准也依赖 TODO.md 内容，被抗后一并失效。
+        // 故空内容视为非法入参：不碰磁盘，并把格式要求回给模型。
+        if (content.isEmpty()) {
+            return "TODO not saved: todos 参数为空（未改动已有清单）。" + FORMAT_WARN;
+        }
+
+        if (!content.endsWith("\n")) {
             content = content + "\n";
         }
         Files.write(todoFile, content.getBytes(StandardCharsets.UTF_8));
 
-        return "TODO saved." + buildProgressFooter(content);
+        String result = "TODO saved." + buildProgressFooter(content);
+        if (countCheckboxLines(content) == 0) {
+            result += FORMAT_WARN;
+        }
+        return result;
     }
 
     /**
@@ -192,8 +395,8 @@ public class TodoTalent extends AbsTalent {
         String firstUnfinished = null;
         for (String line : content.split("\n")) {
             String trimmed = line.trim();
-            // 仅识别形如 "- [x]" 的 checkbox 行，状态字符大小写均兼容（如 [X] / [ ] / [/]）
-            if (trimmed.length() < 5 || !trimmed.startsWith("- [") || trimmed.charAt(4) != ']') {
+            // 仅识别 checkbox 行，口径见 isCheckboxLine（状态字符大小写均兼容）
+            if (!isCheckboxLine(trimmed)) {
                 continue;
             }
             char mark = Character.toLowerCase(trimmed.charAt(3));

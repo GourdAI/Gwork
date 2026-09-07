@@ -67,12 +67,6 @@ public class ReActOptions implements NonSerializable {
     private boolean autoRethink = false;
 
     /**
-     * 并行工具执行：一轮内 ≥2 个连续只读工具（read/grep/glob/ls）时并行执行（默认开启）。
-     * 写工具（write/edit/bash）始终串行，不受此开关影响。
-     */
-    private boolean parallelToolEnabled = true;
-
-    /**
      * 最大重试次数
      */
     private int maxRetries = 3;
@@ -120,7 +114,6 @@ public class ReActOptions implements NonSerializable {
 
         tmp.maxTurns = maxTurns;
         tmp.autoRethink = autoRethink;
-        tmp.parallelToolEnabled = parallelToolEnabled;
         tmp.maxRetries = maxRetries;
         tmp.retryDelayMs = retryDelayMs;
         tmp.sessionWindowSize = sessionWindowSize;
@@ -190,10 +183,6 @@ public class ReActOptions implements NonSerializable {
      */
     protected void setAutoRethink(boolean autoRethink) {
         this.autoRethink = autoRethink;
-    }
-
-    protected void setParallelToolEnabled(boolean parallelToolEnabled) {
-        this.parallelToolEnabled = parallelToolEnabled;
     }
 
     protected void setOutputSchema(String val) {
@@ -292,10 +281,6 @@ public class ReActOptions implements NonSerializable {
 
     public boolean isAutoRethink() {
         return autoRethink;
-    }
-
-    public boolean isParallelToolEnabled() {
-        return parallelToolEnabled;
     }
 
     public int getMaxRetries() {

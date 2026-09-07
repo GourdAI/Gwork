@@ -244,8 +244,8 @@
                                     "title":  "使用統計",
                                     "refresh":  "重新整理",
                                     "range_label":  "時間範圍",
-                                    "range_7":  "最近 7 天",
                                     "range_30":  "最近 30 天",
+                                    "range_all":  "累計至今",
                                     "stat_tokens":  "tokens 用量",
                                     "stat_sessions":  "會話數量",
                                     "stat_messages":  "訊息數量",
@@ -257,9 +257,13 @@
                                     "heat_less":  "較少",
                                     "heat_more":  "較多",
                                     "trend_title":  "按天 Token 趨勢",
+                                    "trend_title_week":  "按週 Token 趨勢",
+                                    "trend_title_month":  "按月 Token 趨勢",
                                     "models_title":  "模型用量",
                                     "tokens_unit":  "tokens",
                                     "date_md":  "{0}月{1}日",
+                                    "date_ym":  "{0}年{2}月",
+                                    "range_hint":  "統計區間 {0} ~ {1} · 共 {2} 天",
                                     "tooltip":  "{0}：{1} Tokens · {2} 輪",
                                     "loading":  "載入中…",
                                     "load_failed":  "載入失敗",
@@ -314,8 +318,6 @@
                                             },
                                      "features":  {
                                                       "title":  "功能開關",
-                                                      "bash_async_name":  "Bash 非同步機制",
-                                                      "bash_async_desc":  "開啟後可支援 Bash 非同步機制（一般沒必要）；關閉可減少上下文消耗",
                                                       "subagent_name":  "Subagent 子代理機制",
                                                       "subagent_desc":  "開啟後可支援 Subagent 子代理機制，允許委派任務給專項子代理；關閉可減少上下文消耗",
                                                       "mcp_name":  "MCP 工具閘道",
@@ -803,6 +805,7 @@
                  "tool_write":  "寫入",
                  "tool_edit":  "編輯",
                  "tool_bash":  "執行命令",
+                 "tool_bash_output": "檢視背景輸出",
                  "tool_skill":  "技能",
                  "tool_todo":  "任務清單",
                  "tool_code":  "編碼",
@@ -1001,8 +1004,9 @@
     "todos":  {
                   "no_tasks":  "暫無工作",
                   "no_task_list":  "目前會話暫無工作清單",
-                  "load_failed":  "載入工作清單失敗"
-              },
+                  "load_failed":  "載入工作清單失敗",
+                  "malformed": "工作清單格式異常：未能識別出任何工作行"
+},
     "context":  {
                     "length":  "上下文長度: {0} / {1} ({2})",
                     "cache":  "快取"

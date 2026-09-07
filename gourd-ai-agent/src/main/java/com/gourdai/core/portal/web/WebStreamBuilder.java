@@ -219,7 +219,6 @@ public class WebStreamBuilder {
                     o.retryConfig(engine.getModelRetries());
                     o.maxTurns(engine.getMaxTurns());
                     o.sessionWindowSize(engine.getSessionWindowSize());
-                    o.parallelToolEnabled(engine.isParallelToolEnabled());
 
                     // 思考深度按接口类型注入（OFF/切换档位/接口不支持时会清理旧键，保证幂等）
                     ThinkingDepth.applyTo(o, modelStandard, thinkingDepth);

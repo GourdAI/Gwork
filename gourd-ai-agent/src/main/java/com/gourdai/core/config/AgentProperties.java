@@ -57,7 +57,6 @@ public class AgentProperties implements Serializable {
 
     private boolean hitlEnabled = false;
     private boolean subagentEnabled = true;
-    private boolean bashAsyncEnabled = false;
 
     private boolean mcpEnabled = true;
     private boolean openApiEnabled = true;

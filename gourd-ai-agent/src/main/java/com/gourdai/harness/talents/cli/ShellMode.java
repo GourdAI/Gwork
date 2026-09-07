@@ -16,7 +16,7 @@
 package com.gourdai.harness.talents.cli;
 
 /**
- * Shell 启动模式。同步 {@code bash} 与异步 {@code bash_start} 共用同一套契约。
+ * Shell 启动模式。同步 {@code bash} 与后台任务（{@code run_in_background}）共用同一套契约。
  *
  * @author noear
  * @since 4.0.4

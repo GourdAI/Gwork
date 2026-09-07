@@ -8,10 +8,14 @@ import org.noear.solon.ai.chat.tool.FunctionTool;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.stream.Collectors;
 
 /**
  * TerminalTalent 代理
+ *
+ * <p>作用是「按需暴露工具子集」：TerminalTalent 自身持有全部终端类工具，
+ * 而每个 agent 只应看到 AgentFactory 为其挑选的那几个（如 pi 只给 read/write/edit/bash/bash_output）。
+ * 故 {@link #getTools(Prompt)} 必须返回本代理累积的 {@link #toolList}，而不是委托给 TerminalTalent，
+ * 否则工具权限控制会整体失效。</p>
  *
  * @author oisin
  */
@@ -68,12 +72,6 @@ public class TerminalTalentProxy implements Talent {
 
     @Override
     public Collection<FunctionTool> getTools(Prompt prompt) {
-        if (terminalTalent.isBashAsyncEnabled()) {
-            return toolList;
-        } else {
-            return toolList.stream()
-                    .filter(t -> terminalTalent.isNotAsyncBash(t.name()))
-                    .collect(Collectors.toList());
-        }
+        return toolList;
     }
 }

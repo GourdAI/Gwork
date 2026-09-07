@@ -252,8 +252,8 @@
                                     "title":  "Usage Stats",
                                     "refresh":  "Refresh",
                                     "range_label":  "Time Range",
-                                    "range_7":  "Last 7 Days",
                                     "range_30":  "Last 30 Days",
+                                    "range_all":  "All Time",
                                     "stat_tokens":  "Tokens Used",
                                     "stat_sessions":  "Sessions",
                                     "stat_messages":  "Messages",
@@ -265,9 +265,13 @@
                                     "heat_less":  "Less",
                                     "heat_more":  "More",
                                     "trend_title":  "Daily Token Trend",
+                                    "trend_title_week":  "Weekly Token Trend",
+                                    "trend_title_month":  "Monthly Token Trend",
                                     "models_title":  "Model Usage",
                                     "tokens_unit":  "tokens",
                                     "date_md":  "{0}/{1}",
+                                    "date_ym":  "{0}-{1}",
+                                    "range_hint":  "Period {0} ~ {1} · {2} days",
                                     "tooltip":  "{0}: {1} Tokens · {2} rounds",
                                     "loading":  "Loading…",
                                     "load_failed":  "Failed to load",
@@ -322,8 +326,6 @@
                                             },
                                      "features":  {
                                                       "title":  "Feature Toggles",
-                                                      "bash_async_name":  "Bash Async",
-                                                      "bash_async_desc":  "Enable Bash async execution; disable to reduce context",
                                                       "subagent_name":  "Subagent",
                                                       "subagent_desc":  "Enable subagent delegation; disable to reduce context",
                                                       "mcp_name":  "MCP Gateway",
@@ -803,6 +805,7 @@
                  "tool_write":  "Write",
                  "tool_edit":  "Edit",
                  "tool_bash":  "Run",
+                 "tool_bash_output": "Check Background Output",
                  "tool_skill":  "Skill",
                  "tool_todo":  "Todos",
                  "tool_code":  "Code",
@@ -1001,8 +1004,9 @@
     "todos":  {
                   "no_tasks":  "No tasks",
                   "no_task_list":  "No task list for this session",
-                  "load_failed":  "Failed to load task list"
-              },
+                  "load_failed":  "Failed to load task list",
+                  "malformed": "Task list looks malformed: no task lines were recognized"
+},
     "context":  {
                     "length":  "Context length: {0} / {1} ({2})",
                     "cache":  "Cache"

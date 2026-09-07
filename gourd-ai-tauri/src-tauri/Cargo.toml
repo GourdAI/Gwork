@@ -1,0 +1,87 @@
+[package]
+name = "gourd-ai-tauri"
+version = "0.1.0"
+description = "GWork Desktop (Tauri)"
+authors = ["gourdai"]
+license = "MIT"
+repository = "https://gourdwork.com"
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [ "tray-icon", "image-png", "image-ico", "devtools" ] }
+tauri-plugin-updater = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-os = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-http = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "1"
+local-ip-address = "0.6"
+portpicker = "0.1"
+sysinfo = "0.30"
+base64 = "0.22"
+url = "2"
+mime_guess = "2"
+walkdir = "2"
+# 本地 UI 服务器 + WS 裸 TCP 透传（与 axum 0.7 同版本线）
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
+tower = { version = "0.5", features = ["util"] }
+dirs = "5"
+regex = "1"
+lazy_static = "1"
+rand = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading", "Win32_Graphics_Dwm"] }
+
+# backend.rs 在 Unix 下用 libc::setsid / libc::kill 做进程组管理（对齐 Electron 的 tree-kill）。
+# libc 虽被 tokio/sysinfo 间接依赖，但间接依赖不可直接 `use`，必须显式声明，
+# 否则 macOS/Linux 编译必报 E0433（Windows 因 #[cfg(unix)] 裁剪而侥幸绕过）。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# titlebar.rs 用 AppKit 的 standardWindowButton + setHidden 显隐红绿灯。
+#
+# 两个必须遵守的点（之前均写错，导致 macOS 根本编译不过）：
+#
+# 1. **版本必须跟随 tauri/tao 的同一条线**（当前 objc2 0.6 / app-kit 0.3）。
+#    写 0.5 / 0.2 会多编译一整套 AppKit 绑定，且 `ns_window()` 拿到的指针
+#    被转成另一个 crate 实例的 NSWindow 类型，语义上对不上。
+#
+# 2. **必须显式开启用到的类的 feature**。objc2-app-kit 默认只开 std/alloc，
+#    每个类都藏在同名 feature 后面；不写就是 `NSWindow` 符号不存在（E0433）。
+#    NSWindow 需 NSResponder（父类）；standardWindowButton 返回 NSButton，
+#    需 NSButton + NSControl + NSView，setHidden 也挂在 NSView 上。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSResponder",
+    "NSWindow",
+    "NSView",
+    "NSControl",
+    "NSButton",
+] }
+objc2-foundation = "0.3"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

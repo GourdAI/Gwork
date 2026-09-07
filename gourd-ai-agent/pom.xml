@@ -43,6 +43,23 @@
         </dependencies>
     </dependencyManagement>
 
+    <!--
+      构建指纹参数（供 src/main/buildinfo/build-info.properties 的 Maven filtering 使用）。
+
+      【实测记录，勿再试图“修正”】maven.build.timestamp.format 在本仓使用的 Maven 3.9.x 上
+      已不再生效：无论写在 pom <properties> 还是命令行 -D，${maven.build.timestamp} 终输出
+      ISO-8601 UTC（形如 2026-09-06T06:59:13Z）。因此这里不再声明那个无效属性，
+      直接使用 Maven 输出的 ISO 值：它本身已可读、可排序、带显式 Z 后缀（时区无歧义），
+      且能被桌面端 new Date(iso) 直接解析，比自定义格式更适合做构建指纹。
+
+      - gwork.build.revision：本地构建兜底值 local（已实测生效）；CI 以
+        -Dgwork.build.revision=${GITHUB_SHA::7} 覆盖（命令行 -D 优先级高于 pom 属性），
+        因此本地 build.ps1 / build.sh 无需任何改动。
+    -->
+    <properties>
+        <gwork.build.revision>local</gwork.build.revision>
+    </properties>
+
     <dependencies>
         <!-- ============ agent 层 ============ -->
         <dependency>
@@ -261,6 +278,31 @@
     </dependencies>
 
     <build>
+        <!--
+          构建指纹所需的两段资源声明。
+
+          【致命点】此处一旦显式声明 <resources>，就会整体覆盖 Maven 超级 pom 的默认资源目录，
+          所以必须把 src/main/resources 原样重新声明回来，否则 app.yml、META-INF/gourdai/agents
+          以及整个 static/ 前端资源都不会再进包。保持与超级 pom 默认值一致的 <filtering>false</filtering>。
+
+          【为什么不对 src/main/resources 开 filtering】
+          1. static/ 下含 monaco、字体等二进制资产，被当文本做编码往返会损坏，且构建显著变慢；
+          2. app.yml 里有 Solon 运行期占位符 ${gwork.log.dir:.gwork/logs}/${solon.app.name}，
+             被 Maven filtering 扫到会被替换成空值，直接破坏日志路径解析。
+          故把待替换的模板单独放在 resources 之外的 src/main/buildinfo/ 目录，只对它开 filtering；
+          两者都输出到 classes 根，产物即 classpath 下的 /build-info.properties。
+        -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+            </resource>
+            <resource>
+                <directory>src/main/buildinfo</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
+
         <plugins>
             <plugin>
                 <groupId>org.noear</groupId>

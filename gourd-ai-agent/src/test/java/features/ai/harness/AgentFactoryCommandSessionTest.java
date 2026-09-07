@@ -1,5 +1,6 @@
 package features.ai.harness;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Field;
@@ -9,19 +10,26 @@ import com.gourdai.harness.agent.AgentFactory;
 public class AgentFactoryCommandSessionTest {
 
     @Test
-    public void publicToolSetIncludesCommandSessionTools() throws Exception {
-        assertTrue(toolSetContains("TOOL_ALL_PUBLIC", "bash_start"));
-        assertTrue(toolSetContains("TOOL_ALL_PUBLIC", "bash_wait"));
-        assertTrue(toolSetContains("TOOL_ALL_PUBLIC", "bash_stdin"));
-        assertTrue(toolSetContains("TOOL_ALL_PUBLIC", "bash_stop"));
+    public void publicToolSetIncludesBashAndBashOutput() throws Exception {
+        assertTrue(toolSetContains("TOOL_ALL_PUBLIC", "bash"));
+        assertTrue(toolSetContains("TOOL_ALL_PUBLIC", "bash_output"));
     }
 
     @Test
-    public void piToolSetIncludesCommandSessionTools() throws Exception {
-        assertTrue(toolSetContains("TOOL_PI", "bash_start"));
-        assertTrue(toolSetContains("TOOL_PI", "bash_wait"));
-        assertTrue(toolSetContains("TOOL_PI", "bash_stdin"));
-        assertTrue(toolSetContains("TOOL_PI", "bash_stop"));
+    public void piToolSetIncludesBashAndBashOutput() throws Exception {
+        assertTrue(toolSetContains("TOOL_PI", "bash"));
+        assertTrue(toolSetContains("TOOL_PI", "bash_output"));
+    }
+
+    @Test
+    public void asyncBashToolsRemoved() throws Exception {
+        // bash_start/wait/stdin/stop 已彻底删除，统一由 bash 的 run_in_background + bash_output 取代
+        for (String set : new String[]{"TOOL_ALL_FULL", "TOOL_ALL_PUBLIC", "TOOL_PI"}) {
+            assertFalse(toolSetContains(set, "bash_start"));
+            assertFalse(toolSetContains(set, "bash_wait"));
+            assertFalse(toolSetContains(set, "bash_stdin"));
+            assertFalse(toolSetContains(set, "bash_stop"));
+        }
     }
 
     private static boolean toolSetContains(String fieldName, String toolName) throws Exception {

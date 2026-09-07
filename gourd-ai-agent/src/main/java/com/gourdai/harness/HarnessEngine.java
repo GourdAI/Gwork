@@ -310,14 +310,6 @@ public class HarnessEngine {
         return options.isSubagentEnabled();
     }
 
-    public boolean isBashAsyncEnabled() {
-        return options.isBashAsyncEnabled();
-    }
-
-    public boolean isParallelToolEnabled() {
-        return options.isParallelToolEnabled();
-    }
-
     public int getApiRetries() {
         return options.getApiRetries();
     }
@@ -459,16 +451,6 @@ public class HarnessEngine {
 
         generateTalent.setEnabled(options.isSubagentEnabled());
         taskTalent.setEnabled(options.isSubagentEnabled());
-    }
-
-    public void setBashAsyncEnabled(Boolean bashAsyncEnabled) {
-        options.setBashAsyncEnabled(bashAsyncEnabled);
-
-        terminalTalent.setBashAsyncEnabled(bashAsyncEnabled);
-    }
-
-    public void setParallelToolEnabled(Boolean parallelToolEnabled) {
-        options.setParallelToolEnabled(parallelToolEnabled);
     }
 
     public void setSessionWindowSize(Integer sessionWindowSize) {
@@ -870,7 +852,6 @@ public class HarnessEngine {
 
         agentManager = new AgentManager(options.getMountManager());
 
-        terminalTalent.setBashAsyncEnabled(options.isBashAsyncEnabled());
         terminalTalent.setSandboxEnabled(options.isSandboxEnabled());
         terminalTalent.setSandboxAllowUserHome(options.isSandboxAllowUserHome());
         terminalTalent.setSandboxSystemRestrict(options.isSandboxSystemRestrict());
@@ -1277,16 +1258,6 @@ public class HarnessEngine {
 
         public Builder subagentEnabled(Boolean subagentEnabled) {
             options.setSubagentEnabled(subagentEnabled);
-            return this;
-        }
-
-        public Builder bashAsyncEnabled(Boolean bashAsyncEnabled) {
-            options.setBashAsyncEnabled(bashAsyncEnabled);
-            return this;
-        }
-
-        public Builder parallelToolEnabled(Boolean parallelToolEnabled) {
-            options.setParallelToolEnabled(parallelToolEnabled);
             return this;
         }
 

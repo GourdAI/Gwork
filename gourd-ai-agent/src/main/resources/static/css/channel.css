@@ -14,8 +14,22 @@ body.code-mode .channel-view { display: none !important; }
 /* ===== 页头（标题/描述复用 skills.css 的 .skills-title / .skills-desc） ===== */
 .channel-page-header { margin-bottom: 22px; }
 
-/* ===== 内容区块（照 .skills-section） ===== */
-.channel-page-section {
+/* ===== 内容区 =====
+ * 方案A：不再套一层区块外框（原 .channel-page-section）。
+ * 原因：--bg-card 未在 theme.css 中定义，回落为 --bg-main，与主区背景同色，
+ * 该外框只贡献一圈边框 + 一层内边距，与内部卡片叠成「卡中卡」。
+ * 现在卡片直接铺在主区背景上（卡片自带 --bg-body 底色与边框，明暗色下均有对比）。
+ */
+
+/* 卡片网格：外框移除后，清掉旧设置弹窗时代残留的内边距，并放宽单卡最小宽度 */
+#channelPanel .channel-cards-grid {
+    padding: 0;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 16px;
+}
+
+/* 详情页：原先靠外框提供边界，去框后由自身承担容器外观 */
+#channelPanel .channel-detail {
     background: var(--bg-card, var(--bg-main)); border: 1px solid var(--border-color);
     border-radius: 12px; padding: 18px 20px;
 }

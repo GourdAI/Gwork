@@ -1,0 +1,53 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "GWork 主窗口权限。同时覆盖本地源与本地 UI 服务器的远程源（http://localhost:*）。",
+  "windows": ["main"],
+  "local": true,
+  "remote": {
+    "urls": [
+      "http://localhost:*",
+      "http://127.0.0.1:*"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "core:app:allow-version",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit",
+    "core:event:allow-emit-to",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-set-title",
+    "core:window:allow-set-focus",
+    "core:window:allow-minimize",
+    "core:window:allow-unminimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-is-visible",
+    "core:window:allow-start-dragging",
+    "core:webview:allow-internal-toggle-devtools",
+    "os:default",
+    "process:default",
+    "shell:allow-open",
+    "allow-get-backend-state",
+    "allow-get-backend-detail",
+    "allow-restart-backend",
+    "allow-set-window-title",
+    "allow-set-window-theme",
+    "allow-set-window-scrim",
+    "allow-window-minimize",
+    "allow-window-toggle-maximize",
+    "allow-window-close",
+    "allow-window-get-chrome",
+    "allow-updater-get-version",
+    "allow-updater-get-state",
+    "allow-updater-check",
+    "allow-updater-download",
+    "allow-updater-install"
+  ]
+}

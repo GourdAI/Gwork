@@ -252,8 +252,8 @@
                                     "title":  "Usage Stats",
                                     "refresh":  "Refresh",
                                     "range_label":  "Time Range",
-                                    "range_7":  "Last 7 Days",
                                     "range_30":  "Last 30 Days",
+                                    "range_all":  "All Time",
                                     "stat_tokens":  "Tokens Used",
                                     "stat_sessions":  "Sessions",
                                     "stat_messages":  "Messages",
@@ -265,9 +265,13 @@
                                     "heat_less":  "Less",
                                     "heat_more":  "More",
                                     "trend_title":  "Daily Token Trend",
+                                    "trend_title_week":  "Weekly Token Trend",
+                                    "trend_title_month":  "Monthly Token Trend",
                                     "models_title":  "Model Usage",
                                     "tokens_unit":  "tokens",
                                     "date_md":  "{0}/{1}",
+                                    "date_ym":  "{0}-{1}",
+                                    "range_hint":  "Period {0} ~ {1} · {2} days",
                                     "tooltip":  "{0}: {1} Tokens · {2} rounds",
                                     "loading":  "Loading…",
                                     "load_failed":  "Failed to load",
@@ -322,8 +326,6 @@
                                             },
                                      "features":  {
                                                       "title":  "機能スイッチ",
-                                                      "bash_async_name":  "Bash 非同期メカニズム",
-                                                      "bash_async_desc":  "オンにすると Bash 非同期メカニズムをサポート（通常は不要）；オフにするとコンテキスト消費を削減できます",
                                                       "subagent_name":  "Subagent 子エージェントメカニズム",
                                                       "subagent_desc":  "オンにすると Subagent 子エージェントメカニズムをサポート、タスクの委譲を許可；オフにするとコンテキスト消費を削減できます",
                                                       "mcp_name":  "MCP ツールゲートウェイ",
@@ -803,6 +805,7 @@
                  "tool_write":  "書き込み",
                  "tool_edit":  "編集",
                  "tool_bash":  "コマンド実行",
+                 "tool_bash_output": "バックグラウンド出力を確認",
                  "tool_skill":  "スキル",
                  "tool_todo":  "タスク一覧",
                  "tool_code":  "コーディング",
@@ -996,8 +999,9 @@
     "todos":  {
                   "no_tasks":  "タスクなし",
                   "no_task_list":  "現在のセッションにタスクリストなし",
-                  "load_failed":  "タスクリストの読み込みに失敗"
-              },
+                  "load_failed":  "タスクリストの読み込みに失敗",
+                  "malformed": "タスクリストの形式が不正です：タスク行を認識できませんでした"
+},
     "context":  {
                     "length":  "コンテキスト長: {0} / {1} ({2})",
                     "cache":  "キャッシュ"

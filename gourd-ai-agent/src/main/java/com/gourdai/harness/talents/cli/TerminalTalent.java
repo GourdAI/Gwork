@@ -17,6 +17,7 @@ package com.gourdai.harness.talents.cli;
 
 import org.noear.solon.Utils;
 import org.noear.solon.ai.annotation.ToolMapping;
+import com.gourdai.agent.react.BackgroundNoticeCenter;
 import org.noear.solon.ai.chat.prompt.Prompt;
 import org.noear.solon.ai.chat.talent.AbsTalent;
 import org.noear.solon.ai.sandbox.SandboxManager;
@@ -90,8 +91,16 @@ public class TerminalTalent extends AbsTalent {
     protected Charset fileCharset = StandardCharsets.UTF_8;
     protected final ProcessExecutor executor = new ProcessExecutor();
     protected final TerminalSessionManager bashSessionManager;
-    //异步会话模式：启用后提供 bash_start/wait/stdin/stop 工具
-    private boolean bashAsyncEnabled = false;
+
+    /** 同步执行默认超时：2 分钟。 */
+    private static final int SYNC_DEFAULT_TIMEOUT_MS = 120_000;
+    /**
+     * 后台任务默认硬超时：6 小时。
+     *
+     * <p>不能复用同步的 2 分钟：能跑超过 2 分钟的长命令正是后台模式存在的唯一理由，
+     * 若仍用 2 分钟封顶，后台任务会在 enforceHardTimeout 里被直接 kill，模式本身失去意义。</p>
+     */
+    private static final int BACKGROUND_DEFAULT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 
     private final Set<String> ignoreDirs = new HashSet<>(Arrays.asList(
             ".gwork", ".gourdai", ".claude", ".opencode",
@@ -134,16 +143,6 @@ public class TerminalTalent extends AbsTalent {
     public void setSandboxSystemRestrict(Boolean sandboxSystemRestrict) {
         if (sandboxSystemRestrict != null) {
             this.sandboxSystemRestrict = sandboxSystemRestrict;
-        }
-    }
-
-    public boolean isBashAsyncEnabled() {
-        return bashAsyncEnabled;
-    }
-
-    public void setBashAsyncEnabled(Boolean bashAsyncEnabled) {
-        if (bashAsyncEnabled != null) {
-            this.bashAsyncEnabled = bashAsyncEnabled;
         }
     }
 
@@ -516,10 +515,6 @@ public class TerminalTalent extends AbsTalent {
             }
         }
 
-        if (bashAsyncEnabled) {
-            sb.append("- **长命令执行**: 对可能耗时较长、持续输出、等待输入或需要观察状态的命令，优先使用 `bash_start`。如果结果包含 `Process running with session ID`，表示命令仍在运行；需要继续观察时调用 `bash_wait`，需要向进程输入时调用 `bash_stdin`，需要主动停止时调用 `bash_stop`。\n");
-        }
-
         // 参数示例必须用当前 shell 真存在的命令：在 Windows 上举 `python3` / `cat` 会被模型当作可用命令而直接照拄
         sb.append("- **参数与编码**: 含空格/引号等特殊字符的参数务必用引号包裹（如 `")
                 .append(Assert.isNotEmpty(pyCmd) ? pyCmd : (windowsShell ? "python" : "python3"))
@@ -684,36 +679,15 @@ public class TerminalTalent extends AbsTalent {
 
 
 
-    /**
-     * 异步会话工具名称集合，用于过滤
-     */
-    private static final Set<String> ASYNC_BASH_TOOLS = new HashSet<>(Arrays.asList(
-            "bash_start", "bash_wait", "bash_stdin", "bash_stop"
-    ));
-
-    protected boolean isNotAsyncBash(String toolName){
-        return !ASYNC_BASH_TOOLS.contains(toolName);
-    }
-
-    @Override
-    public Collection<FunctionTool> getTools(Prompt prompt) {
-        if (bashAsyncEnabled) {
-            return super.getTools(prompt);
-        }
-
-        return super.getTools(prompt).stream()
-                .filter(t -> isNotAsyncBash(t.name()))
-                .collect(Collectors.toList());
-    }
-
     // --- 1. 执行命令 ---
     @ToolMapping(
             name = "bash",
-            description = "在终端执行非交互式 Shell 指令。支持多行脚本，支持逻辑路径（如 @pool）自动转环境变量。"
+            description = "在终端执行 Shell 指令。支持多行脚本，支持逻辑路径（如 @pool）自动转环境变量。长任务可设 run_in_background=true 后台运行。"
     )
     public String bash(@Param(value = "command", description = "要执行的指令。") String command,
-                       @Param(name = "timeout", required = false, defaultValue = "120000", description = "可选超时时间，单位为毫秒") Integer timeout,
+                       @Param(name = "timeout", required = false, description = "可选超时时间，单位为毫秒。不传时：同步模式默认 120000（2 分钟），run_in_background=true 时默认 6 小时。") Integer timeout,
                        @Param(name = "max_output_chars", required = false, defaultValue = "64000", description = "本次最多返回多少字符输出，超出保留首尾片段。读取大文件请改用 read 工具。") Integer maxOutputChars,
+                       @Param(name = "run_in_background", required = false, defaultValue = "false", description = "是否后台运行（长构建/测试用 true）。后台任务完成时系统会自动告知，无需轮询等待；期间可用 bash_output 主动查看进度。") Boolean runInBackground,
                        String __cwd) {
 
         // 统一安全校验（替代原来的内联检查）
@@ -753,7 +727,28 @@ public class TerminalTalent extends AbsTalent {
             }
         }
 
-        // 与 bash_start 共用 ShellCommandFactory：Unix 直接 shell -lc 执行；Windows 改走 prepare
+        // 后台模式：启动后立即返回 session_id，不等待完成
+        if (Boolean.TRUE.equals(runInBackground)) {
+            // 归属键由 ActionTask 在工具执行前绑定到当前线程；缺失时（如单测直接调用）退化为无通知模式，
+            // 此时必须在启动响应里如实告知模型“需自行查询”，不能承诺不存在的通知
+            final String owner = BackgroundNoticeCenter.currentOwner();
+            try {
+                TerminalSessionManager.CommandSnapshot snapshot =
+                        bashSessionManager.exec(finalCommand, workPath, envs, 0, maxOutputChars,
+                                backgroundTimeoutMs(timeout),
+                                owner == null ? null : done -> BackgroundNoticeCenter.publish(owner,
+                                        new BackgroundNoticeCenter.Notice(
+                                                done.sessionId(), done.command(), done.exitCode(),
+                                                done.timedOut(), done.terminated(), done.wallTimeMs(),
+                                                done.output())));
+                return formatBackgroundStart(snapshot, owner != null);
+            } catch (IOException ex) {
+                return "错误：后台任务启动失败: " + ex.getMessage();
+            }
+        }
+
+        // 同步模式：等待完成或超时
+        // 后台/同步共用 ShellCommandFactory：Unix 直接 shell -lc 执行；Windows 改走 prepare
         // （PowerShell 用 -EncodedCommand 避开命令文本代码页转换；CMD 默认 /d /c 直连，仅多行/非 ANSI/超长命令才落 .bat）
         if (shellCommandFactory.isWindowsShell()) {
             ShellCommandFactory.PreparedCommand prepared;
@@ -764,94 +759,87 @@ public class TerminalTalent extends AbsTalent {
             }
             if (prepared != null) {
                 try {
-                    return executor.executeCmd(workPath, prepared.argv(), envs, timeout, maxOutputChars, null);
+                    return executor.executeCmd(workPath, prepared.argv(), envs, syncTimeoutMs(timeout), maxOutputChars, null);
                 } finally {
                     prepared.cleanup();
                 }
             }
         }
-        return executor.executeCmd(workPath, shellCommandFactory.build(finalCommand), envs, timeout, maxOutputChars, null);
+        return executor.executeCmd(workPath, shellCommandFactory.build(finalCommand), envs, syncTimeoutMs(timeout), maxOutputChars, null);
+    }
+
+    /**
+     * 同步执行超时：未传或非正数时用 2 分钟默认值（与改造前行为一致）。
+     */
+    private static int syncTimeoutMs(Integer timeout) {
+        return (timeout != null && timeout > 0) ? timeout : SYNC_DEFAULT_TIMEOUT_MS;
+    }
+
+    /**
+     * 后台任务硬超时：未传时用 6 小时，而不是复用同步的 2 分钟。
+     */
+    private static int backgroundTimeoutMs(Integer timeout) {
+        return (timeout != null && timeout > 0) ? timeout : BACKGROUND_DEFAULT_TIMEOUT_MS;
+    }
+
+    /**
+     * 格式化后台任务启动响应
+     *
+     * @param noticeEnabled 当前上下文是否真能投递完成通知。为 false 时绝不能写“会收到通知”，
+     *                      否则模型会停止查询、死等一个永远不来的消息。
+     */
+    private String formatBackgroundStart(TerminalSessionManager.CommandSnapshot snapshot, boolean noticeEnabled) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Background task started\n");
+        sb.append("session_id: ").append(snapshot.sessionId()).append('\n');
+        sb.append("status: running\n");
+        sb.append("command: ").append(snapshot.command()).append('\n');
+        sb.append("workdir: ").append(snapshot.workdir()).append('\n');
+        if (noticeEnabled) {
+            sb.append("\n任务完成时你会自动收到一条 [后台任务完成] 消息，无需轮询等待；")
+                    .append("期间若需查看进度，可用 bash_output 查询该 session_id。\n");
+        } else {
+            sb.append("\n请用 bash_output 查询该 session_id 获取进度与结果（当前上下文未启用完成通知）。\n");
+        }
+        if (Assert.isNotEmpty(snapshot.output())) {
+            sb.append("\nInitial output:\n").append(snapshot.output());
+        }
+        return sb.toString();
     }
 
     @ToolMapping(
-            name = "bash_start",
-            description = "启动 shell 命令会话。命令超过 yield_time_ms 仍未结束时不会失败，而是返回 session_id，后续可用 bash_wait 继续等待、bash_stdin 输入或 bash_stop 终止。")
-    public String bashStart(@Param(value = "command", description = "要执行的 shell 命令。") String command,
-                            @Param(value = "workdir", required = false, description = "工作目录。默认使用当前工作区。") String workdir,
-                            @Param(value = "yield_time_ms", required = false, defaultValue = "1000", description = "先等待多久再把控制权交还给模型，单位毫秒。") Integer yieldTimeMs,
-                            @Param(value = "max_output_chars", required = false, defaultValue = "64000", description = "本次最多返回多少字符输出，超出保留最新部分。") Integer maxOutputChars,
-                            @Param(value = "hard_timeout_ms", required = false, defaultValue = "120000", description = "硬超时兜底，超过后终止进程树，单位毫秒。") Integer hardTimeoutMs,
-                            String __cwd) throws IOException {
-        String danger = support.validateCommandNoKill(command);
-        if (danger != null) {
-            return danger;
-        }
-
-        Path workPath = getWorkPath(__cwd);
-        SandboxRuntimeConfig dynamicCfg = buildDynamicCustomConfig();
-        Path targetWorkPath = support.resolveCommandWorkPath(workPath, workdir, sandboxEnabled, sandboxAllowUserHome);
-        Map<String, String> envs = new HashMap<>();
-
-        if(Assert.isNotEmpty(pythonCmd)) {
-            envs.put("PYTHON", pythonCmd);
-        }
-        if(Assert.isNotEmpty(nodeCmd)) {
-            envs.put("NODE", nodeCmd);
-        }
-
-        String finalCommand;
+            name = "bash_output",
+            description = "查看/控制后台任务（仅对 run_in_background=true 启动的任务有效）。默认返回自上次查看以来的新增输出。")
+    public String bashOutput(@Param(value = "session_id", description = "bash 返回的后台任务 session_id。") String sessionId,
+                             @Param(value = "action", required = false, defaultValue = "peek", description = "操作：peek=查看新增输出（默认）；write=向进程 stdin 写入 input（交互式命令用）；kill=终止该后台任务。") String action,
+                             @Param(value = "input", required = false, description = "action=write 时写入 stdin 的文本，通常需以换行符结尾。") String input,
+                             @Param(value = "max_chars", required = false, defaultValue = "4000", description = "本次最多返回多少字符。返回的是自上次查看以来的新增输出；若新增量超过此值，则只保留最后 max_chars 个字符。") Integer maxChars) {
+        String act = (action == null || action.trim().isEmpty())
+                ? "peek" : action.trim().toLowerCase(Locale.ROOT);
         try {
-            finalCommand = support.translateCommandToEnv(command, envs, sandboxEnabled, sandboxAllowUserHome);
-        } catch (SecurityException ex) {
-            return "错误：" + ex.getMessage();
-        }
-
-        // OS 级沙盒包装（内核级强制隔离：Seatbelt / bwrap）
-        // 仅当 sandboxSystemRestrict=true 时启用，将安全隔离的重活交给 OS 内核
-        // 关闭后仅保留 Java 层最小自保护（kill PID / exit / rm -rf /），减少误伤
-        ensureSandboxInitialized();
-        if (sandboxEnabled && sandboxSystemRestrict && SandboxManager.isSandboxingEnabled()) {
-            try {
-                finalCommand = SandboxManager.wrapWithSandbox(
-                        finalCommand, null, buildDynamicCustomConfig());
-            } catch (Exception e) {
-                SandboxLog.debug("Sandbox wrap failed, running without OS sandbox: " + e.getMessage());
+            TerminalSessionManager.CommandSnapshot snapshot;
+            if ("kill".equals(act)) {
+                snapshot = bashSessionManager.terminate(sessionId, "requested by model", maxChars);
+            } else if ("write".equals(act)) {
+                if (input == null || input.isEmpty()) {
+                    return "错误：action=write 时必须提供非空的 input。";
+                }
+                snapshot = bashSessionManager.writeStdin(sessionId, input, 0, maxChars);
+            } else if ("peek".equals(act)) {
+                // 传 null 不写 stdin（CommandSession.write 对空值直接返回），仅取增量快照
+                snapshot = bashSessionManager.writeStdin(sessionId, null, 0, maxChars);
+            } else {
+                return "错误：未知 action=" + act + "，可选值：peek / write / kill。";
             }
+            return formatCommandSnapshot(snapshot, "bash_output");
+        } catch (IllegalArgumentException ex) {
+            // 会话不存在或已回收（完成 10 分钟后自动清理）：必须在工具内收口，
+            // 否则异常逐出工具方法，模型只能看到一条无意义的 Execution error
+            return "错误：后台任务不可用: " + ex.getMessage()
+                    + "（任务可能已完成并超过保留期，或 session_id 有误）";
+        } catch (IOException ex) {
+            return "错误：查询后台任务失败: " + ex.getMessage();
         }
-
-        TerminalSessionManager.CommandSnapshot snapshot =
-                bashSessionManager.exec(finalCommand, targetWorkPath, envs, yieldTimeMs, maxOutputChars, hardTimeoutMs);
-        return formatCommandSnapshot(snapshot, "bash_start");
-    }
-
-    @ToolMapping(
-            name = "bash_wait",
-            description = "继续等待仍在运行的命令会话，返回自上次读取后的新增输出或最终状态。")
-    public String bashWait(@Param(value = "session_id", description = "bash_start 返回的命令会话 id。") String sessionId,
-                           @Param(value = "yield_time_ms", required = false, defaultValue = "1000", description = "等待新增输出或进程结束的时长，单位毫秒。") Integer yieldTimeMs,
-                           @Param(value = "max_output_chars", required = false, defaultValue = "64000", description = "本次最多返回多少字符新增输出，超出保留最新部分。") Integer maxOutputChars) throws IOException {
-        TerminalSessionManager.CommandSnapshot snapshot =
-                bashSessionManager.writeStdin(sessionId, "", yieldTimeMs, maxOutputChars);
-        return formatCommandSnapshot(snapshot, "bash_wait");
-    }
-
-    @ToolMapping(name = "bash_stdin", description = "向仍在运行的命令会话写入 stdin，然后等待新增输出或进程结束。")
-    public String bashStdin(@Param(value = "session_id", description = "bash_start 返回的命令会话 id。") String sessionId,
-                            @Param(value = "chars", description = "写入 stdin 的文本。") String chars,
-                            @Param(value = "yield_time_ms", required = false, defaultValue = "1000", description = "写入后等待新增输出或进程结束的时长，单位毫秒。") Integer yieldTimeMs,
-                            @Param(value = "max_output_chars", required = false, defaultValue = "64000", description = "本次最多返回多少字符新增输出，超出保留最新部分。") Integer maxOutputChars) throws IOException {
-        TerminalSessionManager.CommandSnapshot snapshot =
-                bashSessionManager.writeStdin(sessionId, chars, yieldTimeMs, maxOutputChars);
-        return formatCommandSnapshot(snapshot, "bash_stdin");
-    }
-
-    @ToolMapping(name = "bash_stop", description = "终止仍在运行的命令会话及其子进程树。")
-    public String bashStop(@Param(value = "session_id", description = "bash_start 返回的命令会话 id。") String sessionId,
-                           @Param(value = "reason", required = false, description = "终止原因，便于日志诊断。") String reason,
-                           @Param(value = "max_output_chars", required = false, defaultValue = "64000", description = "终止后最多返回多少字符新增输出。") Integer maxOutputChars) {
-        TerminalSessionManager.CommandSnapshot snapshot =
-                bashSessionManager.terminate(sessionId, reason, maxOutputChars);
-        return formatCommandSnapshot(snapshot, "bash_stop");
     }
 
     // --- 2. 发现文件 ---
@@ -1273,7 +1261,7 @@ public class TerminalTalent extends AbsTalent {
         sb.append("output_truncated: ").append(snapshot.outputTruncated()).append('\n');
         if (snapshot.running()) {
             sb.append("Process running with session ID: ").append(snapshot.sessionId()).append('\n');
-            sb.append("Use bash_wait to continue waiting, bash_stdin to send input, or bash_stop to stop it.\n");
+            sb.append("Use bash_output with this session_id to check progress.\n");
         }
         sb.append("Output:\n");
         if (Assert.isEmpty(snapshot.output())) {

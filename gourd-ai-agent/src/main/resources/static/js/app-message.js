@@ -466,7 +466,7 @@ function finishPendingTool(sess) {
 /* ===== Tool header meta helpers（类型图标 / 语言图标 / diff 统计 / 文件名回填） ===== */
 /* 左侧工具类型图标（emoji，按工具名映射） */
 function toolTypeIcon(name) {
-    var map = { edit: '\u270f\ufe0f', write: '\ud83d\udcdd', read: '\ud83d\udcd6', grep: '\ud83d\udd0d', glob: '\ud83d\udcc1', ls: '\ud83d\udcc1', bash: '\u26a1', todowrite: '\u2705', todoread: '\u2705', websearch: '\ud83c\udf10', webfetch: '\ud83d\udd17', codesearch: '\ud83d\udd0e', skill: '\ud83e\udde9', task: '\ud83e\udd16', multitask: '\ud83e\udd16', generate: '\u2728' };
+    var map = { edit: '\u270f\ufe0f', write: '\ud83d\udcdd', read: '\ud83d\udcd6', grep: '\ud83d\udd0d', glob: '\ud83d\udcc1', ls: '\ud83d\udcc1', bash: '\u26a1', bash_output: '\ud83d\udcca', todowrite: '\u2705', todoread: '\u2705', websearch: '\ud83c\udf10', webfetch: '\ud83d\udd17', codesearch: '\ud83d\udd0e', skill: '\ud83e\udde9', task: '\ud83e\udd16', multitask: '\ud83e\udd16', generate: '\u2728' };
     return map[name] || '\ud83d\udd27';
 }
 
@@ -475,8 +475,7 @@ function toolTypeIcon(name) {
 var TOOL_I18N_KEY = {
     read: 'chat.tool_read', write: 'chat.tool_write', edit: 'chat.tool_edit',
     glob: 'chat.tool_glob', grep: 'chat.tool_grep', ls: 'chat.tool_ls',
-    bash: 'chat.tool_bash', bash_start: 'chat.tool_bash', bash_wait: 'chat.tool_bash',
-    bash_stdin: 'chat.tool_bash', bash_stop: 'chat.tool_bash',
+    bash: 'chat.tool_bash', bash_output: 'chat.tool_bash_output',
     skill: 'chat.tool_skill',
     todo: 'chat.tool_todo', todowrite: 'chat.tool_todo', todoread: 'chat.tool_todo',
     code: 'chat.tool_code', codesearch: 'chat.tool_codesearch',

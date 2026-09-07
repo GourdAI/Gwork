@@ -84,3 +84,13 @@ if (!fs.existsSync(jreJava)) {
     + '\n  请运行 `npm run generate-jre` 生成完整的内置 JRE 后再打包');
 }
 console.log('[prepare-resources] 后端产物已就位: JAR + 内置 JRE (' + jreJava + ')');
+
+// ── 安装指纹清单：extraResources/build-manifest.json ────────────────────────
+// 逻辑不在这里，统一由 cmd/gen-build-manifest.js 产出 —— Tauri 的 beforeBuildCommand
+// 调的是同一个脚本。两份实现迟早会分叉（同类教训见 gourd-ai-tauri/paths.rs 顶部注释）。
+try {
+  const { generate } = require('./gen-build-manifest');
+  generate({ extraDir: EXTRA });
+} catch (e) {
+  fail('生成安装指纹清单失败: ' + (e && e.message));
+}

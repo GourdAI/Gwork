@@ -68,9 +68,10 @@ jobs:
           fi
 
       # 对应本地 build.ps1 / build.sh 的 [1/5]
+      # -Dgwork.build.revision：把 git 短 sha 写入 jar 内 build-info.properties（属性名与 pom 默认值一致）
       - name: Maven 构建后端 JAR
         shell: bash
-        run: mvn -B -ntp -pl gourd-ai-agent -am package -DskipTests
+        run: mvn -B -ntp -pl gourd-ai-agent -am package -DskipTests -Dgwork.build.revision=${GITHUB_SHA::7}
 
       # 对应本地构建脚本的 [2/5]
       - name: 复制 JAR 到 extraResources

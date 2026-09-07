@@ -8,6 +8,7 @@ import com.gourdai.core.portal.web.*;
 import org.noear.solon.Solon;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.AgentSessionProvider;
+import com.gourdai.agent.react.BackgroundNoticeCenter;
 import com.gourdai.agent.session.FileAgentSession;
 import com.gourdai.agent.session.LruSessionCache;
 import org.noear.solon.ai.chat.CacheControl;
@@ -121,6 +122,11 @@ public class Configurator {
             @Override
             public void removeSession(String sessionId) {
                 AgentSession removed = sessionCache.remove(sessionId);
+                if (removed != null) {
+                    // 会话被删除后不会再有下一轮推理去消费后台任务完成通知，立即回收其归属桶，
+                    // 否则要等到 TTL 到期才释放（TTL 只是兜底，覆盖 LRU 淘汰等拿不到时机的路径）
+                    BackgroundNoticeCenter.discardByContext(removed.getContext());
+                }
                 if (removed instanceof FileAgentSession) {
                     // 清理内存缓存（并删除已落盘的 messages/snapshot 文件），
                     // 切断后续持久化重建目录的可能
@@ -144,8 +150,6 @@ public class Configurator {
                 .sandboxEnabled(settings.getGeneral().getSandboxMode())
                 .sandboxAllowUserHome(settings.getGeneral().getSandboxAllowUserHome())
                 .sandboxSystemRestrict(settings.getGeneral().getSandboxSystemRestrict())
-                .bashAsyncEnabled(settings.getGeneral().getBashAsyncEnabled())
-                .parallelToolEnabled(settings.getGeneral().getParallelToolEnabled())
                 .subagentEnabled(settings.getGeneral().getSubagentEnabled())
                 .hitlEnabled(settings.getGeneral().getHitlEnabled())
                 .apiRetries(settings.getGeneral().getApiRetries())

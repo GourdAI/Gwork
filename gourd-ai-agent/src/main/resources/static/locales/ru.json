@@ -252,8 +252,8 @@
                                     "title":  "Usage Stats",
                                     "refresh":  "Refresh",
                                     "range_label":  "Time Range",
-                                    "range_7":  "Last 7 Days",
                                     "range_30":  "Last 30 Days",
+                                    "range_all":  "All Time",
                                     "stat_tokens":  "Tokens Used",
                                     "stat_sessions":  "Sessions",
                                     "stat_messages":  "Messages",
@@ -265,9 +265,13 @@
                                     "heat_less":  "Less",
                                     "heat_more":  "More",
                                     "trend_title":  "Daily Token Trend",
+                                    "trend_title_week":  "Weekly Token Trend",
+                                    "trend_title_month":  "Monthly Token Trend",
                                     "models_title":  "Model Usage",
                                     "tokens_unit":  "tokens",
                                     "date_md":  "{0}/{1}",
+                                    "date_ym":  "{0}-{1}",
+                                    "range_hint":  "Period {0} ~ {1} · {2} days",
                                     "tooltip":  "{0}: {1} Tokens · {2} rounds",
                                     "loading":  "Loading…",
                                     "load_failed":  "Failed to load",
@@ -322,8 +326,6 @@
                                             },
                                      "features":  {
                                                       "title":  "Переключатели функций",
-                                                      "bash_async_name":  "Асинхронный механизм Bash",
-                                                      "bash_async_desc":  "Включение: поддержка асинхронного Bash (обычно не нужно); выключение снижает расход контекста",
                                                       "subagent_name":  "Механизм под-агентов",
                                                       "subagent_desc":  "Включение: поддержка делегирования задач под-агентам; выключение снижает расход контекста",
                                                       "mcp_name":  "Шлюз MCP-инструментов",
@@ -803,6 +805,7 @@
                  "tool_write":  "Запись",
                  "tool_edit":  "Редактирование",
                  "tool_bash":  "Выполнить",
+                 "tool_bash_output": "Проверить фоновый вывод",
                  "tool_skill":  "Навык",
                  "tool_todo":  "Задачи",
                  "tool_code":  "Код",
@@ -996,8 +999,9 @@
     "todos":  {
                   "no_tasks":  "Нет задач",
                   "no_task_list":  "Нет списка задач для этой сессии",
-                  "load_failed":  "Не удалось загрузить список задач"
-              },
+                  "load_failed":  "Не удалось загрузить список задач",
+                  "malformed": "Список задач некорректен: строки задач не распознаны"
+},
     "context":  {
                     "length":  "Длина контекста: {0} / {1} ({2})",
                     "cache":  "Кэш"

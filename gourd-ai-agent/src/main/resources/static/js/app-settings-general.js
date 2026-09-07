@@ -63,7 +63,6 @@
             modelRetries: parseNumStr($('#generalModelRetries').val().trim()),
             mcpEnabled: $('#generalMcpEnabled').is(':checked'),
             openApiEnabled: $('#generalOpenApiEnabled').is(':checked'),
-            bashAsyncEnabled: $('#generalBashAsyncEnabled').is(':checked'),
             subagentEnabled: $('#generalSubagentEnabled').is(':checked'),
             lspEnabled: $('#generalLspEnabled').is(':checked'),
             cliPrintSimplified: $('#generalCliPrintSimplified').is(':checked'),
@@ -112,7 +111,6 @@
         'generalSandboxAllowUserHome',
         'generalSandboxSystemRestrict',
         'generalCliPrintSimplified',
-        'generalBashAsyncEnabled',
         'generalSubagentEnabled',
         'generalMcpEnabled',
         'generalOpenApiEnabled',
@@ -159,7 +157,6 @@
                 $('#generalModelRetries').val(d.modelRetries != null ? d.modelRetries : '');
                 $('#generalMcpEnabled').prop('checked', d.mcpEnabled !== false);
                 $('#generalOpenApiEnabled').prop('checked', d.openApiEnabled !== false);
-                $('#generalBashAsyncEnabled').prop('checked', !!d.bashAsyncEnabled);
                 $('#generalSubagentEnabled').prop('checked', d.subagentEnabled !== false);
                 $('#generalLspEnabled').prop('checked', !!d.lspEnabled);
                 $('#generalCliPrintSimplified').prop('checked', d.cliPrintSimplified !== false);

@@ -111,6 +111,14 @@ body.code-mode .usage-view { display: none !important; }
     margin-top: 4px;
 }
 
+/* 统计区间提示：紧贴概览卡片网格下方，不上承卡面、不抢图表标题的视觉重量 */
+#usageView .usage-range-hint {
+    margin: -8px 0 16px;
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+}
+
 /* ── 公共卡片外壳 ─────────────────────────────────────── */
 #usageView .usage-card {
     background: var(--bg-secondary);

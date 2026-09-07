@@ -252,8 +252,8 @@
                                     "title":  "Usage Stats",
                                     "refresh":  "Refresh",
                                     "range_label":  "Time Range",
-                                    "range_7":  "Last 7 Days",
                                     "range_30":  "Last 30 Days",
+                                    "range_all":  "All Time",
                                     "stat_tokens":  "Tokens Used",
                                     "stat_sessions":  "Sessions",
                                     "stat_messages":  "Messages",
@@ -265,9 +265,13 @@
                                     "heat_less":  "Less",
                                     "heat_more":  "More",
                                     "trend_title":  "Daily Token Trend",
+                                    "trend_title_week":  "Weekly Token Trend",
+                                    "trend_title_month":  "Monthly Token Trend",
                                     "models_title":  "Model Usage",
                                     "tokens_unit":  "tokens",
                                     "date_md":  "{0}/{1}",
+                                    "date_ym":  "{0}-{1}",
+                                    "range_hint":  "Period {0} ~ {1} · {2} days",
                                     "tooltip":  "{0}: {1} Tokens · {2} rounds",
                                     "loading":  "Loading…",
                                     "load_failed":  "Failed to load",
@@ -322,8 +326,6 @@
                                             },
                                      "features":  {
                                                       "title":  "Comutatoare funcții",
-                                                      "bash_async_name":  "Mecanism Bash asincron",
-                                                      "bash_async_desc":  "Activat: suport Bash asincron (de obicei inutil); dezactivat reduce consumul de context",
                                                       "subagent_name":  "Mecanism sub-agents",
                                                       "subagent_desc":  "Activat: delegarea sarcinilor către sub-agents specializați; dezactivat reduce consumul de context",
                                                       "mcp_name":  "Gateway instrumente MCP",
@@ -803,6 +805,7 @@
                  "tool_write":  "Scriere",
                  "tool_edit":  "Editare",
                  "tool_bash":  "Executare",
+                 "tool_bash_output": "Verifică ieșirea din fundal",
                  "tool_skill":  "Abilitate",
                  "tool_todo":  "Sarcini",
                  "tool_code":  "Cod",
@@ -996,8 +999,9 @@
     "todos":  {
                   "no_tasks":  "Nicio sarcină",
                   "no_task_list":  "Nicio listă de sarcini",
-                  "load_failed":  "Eșec la încărcarea listei"
-              },
+                  "load_failed":  "Eșec la încărcarea listei",
+                  "malformed": "Lista de sarcini pare invalidă: nu a fost recunoscută nicio linie de sarcină"
+},
     "context":  {
                     "length":  "Lungime context: {0} / {1} ({2})",
                     "cache":  "Cache"

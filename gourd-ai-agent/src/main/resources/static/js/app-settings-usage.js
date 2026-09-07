@@ -3,7 +3,7 @@
  * 聚合全局对话区所有会话的 token 消耗、活跃度与模型分布，可视化展示：
  *   - 概览卡片：tokens 用量 / 会话数 / 消息数 / 活跃天数 / 连续天数 / 最常用模型
  *   - 活跃热力图（GitHub 贡献图风格，按天着色）
- *   - 按天 Token 趋势（SVG 堆叠柱，按模型分色）
+ *   - Token 趋势（SVG 堆叠柱，按模型分色；粒度随区间跨度自适应：按天 / 按周 / 按月）
  *   - 模型用量（SVG 环形图 + 明细列表）
  *
  * 数据来源：后端 /web/chat/usage/stats（解析各会话 stream.ndjson 的 trace 事件，无额外埋点）。
@@ -22,7 +22,10 @@
     var PALETTE = ['--accent', '--color-success', '--color-warning', '--color-feishu',
         '--color-dingtalk', '--color-danger', '--color-wechat'];
 
-    var currentDays = 30;
+    // 时间范围取值，与后端 UsageStatsService 对齐：0 = 累计至今（全部历史）
+    var RANGE_ALL = 0;
+    var RANGE_30 = 30;
+    var currentDays = RANGE_30;
     var loadSerial = 0;
     var pendingRequest = null;
 
@@ -51,6 +54,18 @@
         // dateStr: yyyy-MM-dd
         var parts = String(dateStr).split('-');
         if (parts.length < 3) return dateStr;
+        return t('settings.usage.date_md', [String(Number(parts[1])), String(Number(parts[2]))]);
+    }
+
+    /* 趋势图坐标标签：按天/按周用「8月3日」，按月用「2026年8月」。
+     * date_ym 约定传 [年, 补零月, 不补零月]：英文系取 {1} 得 2026-08，
+     * 中文取 {2} 得 2026年8月，两边都不丑。 */
+    function fmtBucketLabel(dateStr, granularity) {
+        var parts = String(dateStr).split('-');
+        if (parts.length < 3) return dateStr;
+        if (granularity === 'month') {
+            return t('settings.usage.date_ym', [parts[0], parts[1], String(Number(parts[1]))]);
+        }
         return t('settings.usage.date_md', [String(Number(parts[1])), String(Number(parts[2]))]);
     }
 
@@ -124,8 +139,8 @@
         var html = '<div class="usage-range-bar">';
         html += '<span class="usage-range-label">' + escapeHtml(t('settings.usage.range_label')) + '</span>';
         html += '<div class="usage-range-toggle">';
-        html += '<button type="button" class="usage-range-btn' + (currentDays === 7 ? ' active' : '') + '" data-days="7">' + escapeHtml(t('settings.usage.range_7')) + '</button>';
-        html += '<button type="button" class="usage-range-btn' + (currentDays === 30 ? ' active' : '') + '" data-days="30">' + escapeHtml(t('settings.usage.range_30')) + '</button>';
+        html += '<button type="button" class="usage-range-btn' + (currentDays === RANGE_30 ? ' active' : '') + '" data-days="' + RANGE_30 + '">' + escapeHtml(t('settings.usage.range_30')) + '</button>';
+        html += '<button type="button" class="usage-range-btn' + (currentDays === RANGE_ALL ? ' active' : '') + '" data-days="' + RANGE_ALL + '">' + escapeHtml(t('settings.usage.range_all')) + '</button>';
         html += '</div></div>';
         return html;
     }
@@ -154,10 +169,13 @@
             return;
         }
 
-        // 活跃热力图（固定 26 周窗口，铺满整卡宽度）
+        // 统计区间提示：说清「累计至今」究竟从哪天算起，避免被读成无限久的历史
+        html += renderRangeHint(data);
+
+        // 活跃热力图（固定 26 周窗口，与时间范围解耦，铺满整卡宽度）
         html += renderHeatmapCard(data.heatmap || []);
-        // 按天 Token 趋势
-        html += renderTrendCard(data.daily || [], models, colorMap);
+        // Token 趋势（粒度由后端按跨度选定：day / week / month）
+        html += renderTrendCard(data.daily || [], models, colorMap, data.granularity);
         // 模型用量
         html += renderModelsCard(data, models, colorMap);
         // 缓存命中率排行
@@ -207,6 +225,17 @@
         return '<svg class="usage-stat-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
     }
 
+    /* 统计区间提示行。rangeStart/rangeEnd 直接用后端回传的 ISO 日期（yyyy-MM-dd）：
+     * 这一行是技术口径说明，用 ISO 在任何语言下都无歧义，也省掉为 12 个语种
+     * 各自排一整套年月日顺序。 */
+    function renderRangeHint(data) {
+        var days = Number(data.rangeDays) || 0;
+        if (!data.rangeStart || !data.rangeEnd || days <= 0) return '';
+        return '<div class="usage-range-hint">'
+            + escapeHtml(t('settings.usage.range_hint', [data.rangeStart, data.rangeEnd, String(days)]))
+            + '</div>';
+    }
+
     /* ── 活跃热力图 ───────────────────────────────────────── */
     /* heatmap: 后端返回的按周对齐固定窗口（周日为列首），每项 {date, tokens, rounds, future}。
      * 采用 CSS Grid（列主序，7 行、列数自适应 1fr），方块 aspect-ratio:1，铺满整卡宽度，
@@ -240,8 +269,14 @@
         return card(t('settings.usage.heatmap_title'), '<div class="usage-heat-wrap">' + grid + legend + '</div>');
     }
 
-    /* ── 按天 Token 趋势（SVG 堆叠柱） ─────────────────────── */
-    function renderTrendCard(daily, models, colorMap) {
+    /* ── Token 趋势（SVG 堆叠柱，粒度自适应） ─────────────── */
+    function trendTitle(granularity) {
+        if (granularity === 'week') return t('settings.usage.trend_title_week');
+        if (granularity === 'month') return t('settings.usage.trend_title_month');
+        return t('settings.usage.trend_title');
+    }
+
+    function renderTrendCard(daily, models, colorMap, granularity) {
         var n = daily.length;
         var maxTotal = 0;
         daily.forEach(function (d) { if (d.tokens > maxTotal) maxTotal = d.tokens; });
@@ -287,12 +322,12 @@
             var lx = padL + slot * k + slot / 2;
             // 首尾刻度贴边对齐，避免文本溢出画布
             var anchor = (k === 0) ? 'start' : (k === n - 1 ? 'end' : 'middle');
-            svg += '<text class="usage-axis-label" x="' + fx(lx) + '" y="' + (H - 8) + '" text-anchor="' + anchor + '">' + escapeHtml(fmtDateMd(daily[k].date)) + '</text>';
+            svg += '<text class="usage-axis-label" x="' + fx(lx) + '" y="' + (H - 8) + '" text-anchor="' + anchor + '">' + escapeHtml(fmtBucketLabel(daily[k].date, granularity)) + '</text>';
         }
 
         svg += '</svg>';
 
-        return card(t('settings.usage.trend_title'),
+        return card(trendTitle(granularity),
             '<div class="usage-trend-wrap">' + svg + '</div>' + renderLegend(models, colorMap));
     }
 
@@ -382,7 +417,8 @@
     $(document).on('click', '#' + CONTAINER + ' .usage-range-btn', function () {
         var days = parseInt($(this).attr('data-days'), 10);
         if (days === currentDays) return;
-        currentDays = (days === 7) ? 7 : 30;
+        // 只认后端支持的取值，NaN / 异常值一律回落到 30 天
+        currentDays = (days === RANGE_ALL || days === 7) ? days : RANGE_30;
         updateRangeBar();
         load();
     });

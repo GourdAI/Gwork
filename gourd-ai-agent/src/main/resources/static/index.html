@@ -22,23 +22,9 @@
     <link rel="stylesheet" href="/highlight/github-dark.min.css" media="(prefers-color-scheme: dark)" id="hljs-dark-theme" disabled/>
     <!-- 编辑器样式由 Monaco editor.main.js 运行时自动注入（vs/editor/editor.main.css） -->
     <style>
-        /* 片段注入前的启动遮罩（bootstrap 注入完成后移除），内联以免依赖尚未加载的样式 */
-        #appBootLoading {
-            position: fixed; inset: 0; z-index: 99999;
-            display: flex; align-items: center; justify-content: center;
-            background: #ffffff;
-        }
-        @media (prefers-color-scheme: dark) { #appBootLoading { background: #1e1e1e; } }
-        body[data-theme="dark"] #appBootLoading { background: #1e1e1e; }
-        #appBootLoading .boot-spinner {
-            width: 30px; height: 30px; border-radius: 50%;
-            border: 3px solid rgba(128,128,128,.25); border-top-color: #4f9cf9;
-            animation: bootspin .8s linear infinite;
-        }
-        @keyframes bootspin { to { transform: rotate(360deg); } }
-        #appBootLoading.boot-error .boot-spinner { display: none; }
-        #appBootLoading .boot-error-msg { display: none; color: #ef4444; font: 14px/1.6 sans-serif; text-align: center; padding: 0 24px; }
-        #appBootLoading.boot-error .boot-error-msg { display: block; }
+        /* 启动阶段不再设全屏遮罩：应用打开即展示首页骨架（sidebar + 主区）。
+           旧版 #appBootLoading 遮罩要等最后一个 app-*.js 的 onload 才移除，
+           反而把「已可用的界面」盖住，桌面端表现为一段无意义的转圈缓冲页。 */
         /* i18n 就绪前隐藏需翻译的文本，避免中文兜底文本闪烁 */
         [data-i18n].i18n-hidden { opacity: 0 !important; transition: none !important; }
         [data-i18n].i18n-hidden::after { content: ''; display: inline-block; width: 0; overflow: hidden; }
@@ -159,11 +145,9 @@
 
 <!-- code.html 的文件树面板、settings.html 的设置浮层注入到 body 级（此处之后） -->
 
-<!-- 启动遮罩：片段注入完成后由 bootstrap 移除 -->
-<div id="appBootLoading">
-    <div class="boot-spinner"></div>
-    <div class="boot-error-msg" data-i18n="app.boot_error">页面加载失败，请刷新重试</div>
-</div>
+<!-- 此处原为启动遮罩 #appBootLoading，已移除：打开即展示首页，不再经过转圈缓冲页。
+     后端启动失败同样不做任何提示（无感，界面自行降级为空态）；右下角非阻塞错误条
+     仅保留给界面片段装配失败这一种情况（见 app-bootstrap.js showBootError）。 -->
 
 <!-- ============ 第三方库（不依赖应用 DOM，静态按序加载，与原 web.html 一致）============ -->
 <script src="/layui/layui.js"></script>

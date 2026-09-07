@@ -92,11 +92,6 @@ public class ReActOptionsAmend extends ModelOptionsAmend<ReActOptionsAmend, ReAc
         return this;
     }
 
-    public ReActOptionsAmend parallelToolEnabled(boolean val) {
-        options.setParallelToolEnabled(val);
-        return this;
-    }
-
     public ReActOptionsAmend outputSchema(String val) {
         options.setOutputSchema(val);
         return this;

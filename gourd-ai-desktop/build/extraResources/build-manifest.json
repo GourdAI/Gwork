@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "buildId": "2026.6.21-2026-09-06T07:09:25Z-local",
+  "buildTime": "2026-09-06T07:09:25Z",
+  "buildVersion": "2026.6.21",
+  "buildRevision": "local",
+  "jarFile": "gourd-ai-agent.jar",
+  "jarSize": 53094410,
+  "jarSha256": "97b740230984467e4274a18c8cd101e0c571d27bfd7c03cf72b7d23f17b8edf6",
+  "desktopVersion": "0.1.0",
+  "generatedAt": "2026-09-06T09:34:06.506Z"
+}

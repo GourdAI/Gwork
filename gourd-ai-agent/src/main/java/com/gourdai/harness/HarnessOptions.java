@@ -82,8 +82,6 @@ class HarnessOptions implements Serializable {
 
     private volatile boolean hitlEnabled = false;
     private volatile boolean subagentEnabled = true;
-    private volatile boolean bashAsyncEnabled = false;
-    private volatile boolean parallelToolEnabled = true;
 
     // ========== 重试配置 ==========
     private volatile int apiRetries = 3;
@@ -315,26 +313,6 @@ class HarnessOptions implements Serializable {
     void setSubagentEnabled(Boolean subagentEnabled) {
         if (subagentEnabled != null) {
             this.subagentEnabled = subagentEnabled;
-        }
-    }
-
-    boolean isBashAsyncEnabled() {
-        return bashAsyncEnabled;
-    }
-
-    void setBashAsyncEnabled(Boolean bashAsyncEnabled) {
-        if (bashAsyncEnabled != null) {
-            this.bashAsyncEnabled = bashAsyncEnabled;
-        }
-    }
-
-    boolean isParallelToolEnabled() {
-        return parallelToolEnabled;
-    }
-
-    void setParallelToolEnabled(Boolean parallelToolEnabled) {
-        if (parallelToolEnabled != null) {
-            this.parallelToolEnabled = parallelToolEnabled;
         }
     }
 

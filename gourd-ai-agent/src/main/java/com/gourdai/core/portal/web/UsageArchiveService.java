@@ -33,6 +33,7 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -91,6 +92,13 @@ public class UsageArchiveService {
 
     /** 账本目录名（位于全局基准目录 {@code .gwork/} 下） */
     private static final String USAGE_DIR = "usage";
+
+    /** 月度分片文件名前缀（{@code usage-YYYY-MM.json}）；列举分片与拼路径共用此常量。 */
+    private static final String LEDGER_PREFIX = "usage-";
+    /** 月度分片文件名后缀。落盘中途的 {@code .json.tmp} 因不匹配此后缀而天然被排除。 */
+    private static final String LEDGER_SUFFIX = ".json";
+    /** 月份标识长度（{@code yyyy-MM}）。 */
+    private static final int MONTH_KEY_LEN = 7;
 
     private final SessionLocator sessionLocator;
     /** 全局基准目录（通常为 AgentFlags.getHarnessBase()），不随项目工作区变化。 */
@@ -230,6 +238,59 @@ public class UsageArchiveService {
         return result;
     }
 
+    /**
+     * 读取账本中的<b>全部历史</b>（所有月度分片），供「累计至今」视图使用。
+     *
+     * <p>与 {@link #load(LocalDate, LocalDate)} 的关键区别：调用方<b>不知道</b>区间起点，
+     * 若仍按月份逐月推进去找「最早一天」，就得从公元 0 年一路空扫到现代，代价不可接受。
+     * 因此这里直接<b>列举目录下真实存在的分片文件</b>，读几个算几个，与历史长度成正比。</p>
+     *
+     * @return 日期 → 当日聚合（升序）；账本目录缺失或为空时返回空表
+     */
+    public TreeMap<LocalDate, DayStat> loadAll() {
+        TreeMap<LocalDate, DayStat> result = new TreeMap<>();
+        synchronized (archiveLock) {
+            for (String month : listMonths()) {
+                MonthLedger ledger = readLedger(month);
+                for (Map.Entry<String, DayStat> e : ledger.days.entrySet()) {
+                    LocalDate d;
+                    try {
+                        d = LocalDate.parse(e.getKey(), DATE_FMT);
+                    } catch (Throwable ignore) {
+                        continue;
+                    }
+                    result.put(d, e.getValue());
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 列举账本目录下全部分片的月份标识（升序，形如 {@code 2026-08}）。
+     *
+     * <p>只认 {@code usage-YYYY-MM.json} 这一种命名：写盘过程中的临时文件
+     * （{@code usage-2026-08.json.tmp}）后缀不匹配，天然不会被当成有效分片读进来。</p>
+     */
+    private List<String> listMonths() {
+        List<String> months = new ArrayList<>();
+        File[] files = usageDir().listFiles(f -> f.isFile()
+                && f.getName().startsWith(LEDGER_PREFIX)
+                && f.getName().endsWith(LEDGER_SUFFIX));
+        if (files == null) {
+            return months;
+        }
+        for (File f : files) {
+            String name = f.getName();
+            String month = name.substring(LEDGER_PREFIX.length(), name.length() - LEDGER_SUFFIX.length());
+            if (month.length() == MONTH_KEY_LEN) {
+                months.add(month);
+            }
+        }
+        Collections.sort(months);
+        return months;
+    }
+
     // ────────────────────────────── 归档实现 ──────────────────────────────
 
     private void doArchive() {
@@ -333,10 +394,24 @@ public class UsageArchiveService {
             return;
         }
 
-        // 以「当前月」账本承载该会话的水位（水位比对用绝对时间戳，跨月不会重复累加）
+        // 以「当前月」账本承载该会话的水位。
+        //
+        // 【跨月回落·勿删】水位只登记在写入当时的「当前月」账本里，因此每逢月份翻页，
+        // 新月账本里必然查不到旧会话的水位。若就此按 wm == null 处理，sinceTs 会退化为
+        // Long.MIN_VALUE，整个流文件被从头重扫，而事件按各自日期落回<b>上月账本</b>，
+        // 在已有历史上再加一遍 —— 每个自然月的第一次归档都会让存活会话的历史翻倍，
+        // 跨 N 个月的长会话被叠加 N 次。已由 UsageArchiveRolloverProbeTest 实测复现（1000→2000）。
+        //
+        // 故当月查不到时向前回落一个月继承：水位比对的是<b>绝对时间戳</b>，与月份无关，
+        // 直接沿用即可。回落一个月足以覆盖翻页场景（归档至少每月跑到一次）；更久未归档的
+        // 会话回落不到，退化为重扫，那是「少归档一次」而非「重复累加」，方向安全。
         String currentMonth = LocalDate.now(zone).format(MONTH_FMT);
         MonthLedger current = ledger(ledgers, currentMonth);
         Watermark wm = current.watermarks.get(sf.sid);
+        if (wm == null) {
+            MonthLedger prev = ledger(ledgers, LocalDate.now(zone).minusMonths(1).format(MONTH_FMT));
+            wm = prev.watermarks.get(sf.sid);
+        }
         long sinceTs = wm == null ? Long.MIN_VALUE : wm.ts;
 
         // 文件未增长且已归档过：直接跳过（省掉整轮 IO）
@@ -446,7 +521,7 @@ public class UsageArchiveService {
     }
 
     private File ledgerFile(String month) {
-        return new File(usageDir(), "usage-" + month + ".json");
+        return new File(usageDir(), LEDGER_PREFIX + month + LEDGER_SUFFIX);
     }
 
     /** 回读月度账本（文件不存在或损坏时返回空账本，不阻断统计）。 */

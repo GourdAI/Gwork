@@ -6,7 +6,7 @@
 
 一个真正能干活的开源桌面智能体 —— 给它一个目标，它还你一份结果。
 
-基于 [Solon AI](https://github.com/opensolon/solon-ai) 构建 · 纯 Java · 100% 开源
+基于 [Solon AI](https://github.com/opensolon/solon-ai) 构建 · Java AI Agent
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-8%20~%2026-orange.svg)](#)
@@ -15,8 +15,6 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20鸿蒙-lightgrey.svg)](#)
 
 **Desktop 桌面端 · Web 网页端 · CLI 命令行 · ACP 编辑器接入 · 微信/企微/飞书远程控制**
-
-[中文](README.zh.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Deutsch](README.de.md) | [Français](README.fr.md) | [Español](README.es.md) | [Italiano](README.it.md) | [Русский](README.ru.md) | [العربية](README.ar.md) | [Português (BR)](README.br.md) | [ไทย](README.th.md) | [Tiếng Việt](README.vi.md) | [Polski](README.pl.md) | [বাংলা](README.bn.md) | [Bosanski](README.bs.md) | [Dansk](README.da.md) | [Ελληνικά](README.gr.md) | [Norsk](README.no.md) | [Türkçe](README.tr.md) | [Українська](README.uk.md)
 
 </div>
 

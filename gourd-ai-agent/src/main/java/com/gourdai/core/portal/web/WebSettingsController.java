@@ -232,7 +232,6 @@ public class WebSettingsController {
             engine.setSandboxAllowUserHome(settings.getGeneral().getSandboxAllowUserHome());
             engine.setSandboxSystemRestrict(settings.getGeneral().getSandboxSystemRestrict());
 
-            engine.setBashAsyncEnabled(settings.getGeneral().getBashAsyncEnabled());
             engine.setMemoryEnabled(settings.getGeneral().getMemoryEnabled());
             engine.setSubagentEnabled(settings.getGeneral().getSubagentEnabled());
 
