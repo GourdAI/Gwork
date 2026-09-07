@@ -235,15 +235,31 @@ jobs:
         run: npm run build:linux:deb
 
       # AppImage 是两条 Linux 产物里唯一要联网拉工具、也唯一长期不稳定的一条。
-      #   1. NO_STRIP —— linuxdeploy 自带的 strip 是老 binutils，遇新 glibc 库的
+      #   1. LD_LIBRARY_PATH —— **`Could not find dependency: libjvm.so` 的真因**。
+      #      linuxdeploy 会递归扫 AppDir/usr/lib 下**所有** ELF 并逐个 ldd，而本项目
+      #      整棵内置 JRE 正好落在 usr/lib/GWork/extraResources/jre/（bundle.resources
+      #      经 deb data 目录进 AppDir，Tauri 固定放 usr/lib/<productName>/，改不掉）。
+      #      JRE 的 lib/*.so（libnio.so、libnet.so、libjava.so…）都 NEEDED libjvm.so，
+      #      但 libjvm.so 在**下一层** lib/server/ 里，而这些兄弟库的 RPATH 只有 $ORIGIN
+      #      （= lib/，不含 server/）。运行期没问题 —— java 启动器按自己的 home 算出绝对
+      #      路径 dlopen libjvm.so；可 ldd 只认标准路径 + RPATH + LD_LIBRARY_PATH，于是
+      #      解析不到，linuxdeploy 硬失败（失败日志里两行紧挨着，因果很直白）：
+      #        Deploying dependencies for ELF file .../jre/lib/libnio.so
+      #        ERROR: Could not find dependency: libjvm.so
+      #        ERROR: Failed to deploy dependencies for existing files
+      #      把 JRE 自己的 lib/ 与 lib/server/ 喂给 LD_LIBRARY_PATH，ldd 即可解析。
+      #      安全性：本项目 jlink 模块清单不含 java.desktop，这两个目录里只有 libjava /
+      #      libnio / libzip / libjvm 等 JDK 私有库，**没有任何会遮蔽系统库的同名 so**；
+      #      且变量只作用于本步骤，不会影响 cargo/rustc。
+      #   2. NO_STRIP —— linuxdeploy 自带的 strip 是老 binutils，遇新 glibc 库的
       #      .relr.dyn 段会报 `unknown type [0x13] section`。注意：本仓库首次报
       #      `failed to run linuxdeploy` 时它**已经是开的**，所以它不是本例真因，
       #      保留只是因为它能排掉一类常见故障且无副作用。
-      #   2. --verbose（写在 npm script 里）—— tauri-bundler 在日志级别为 Error（默认）
+      #   3. --verbose（写在 npm script 里）—— tauri-bundler 在日志级别为 Error（默认）
       #      时把 linuxdeploy 的 stdout/stderr **捕获后整份丢弃**，只剩一句没有内容的
       #      `failed to run linuxdeploy`；verbose 下才流式打印真错。判据很硬：报错带路径
       #      （`failed to run /…/linuxdeploy-x86_64.AppImage`）说明没被吞，不带路径的
-      #      就是被吞了。真因尚未定位，先把日志拿到手。
+      #      就是被吞了。上面第 1 条的真因正是靠它打出来的，必须保留。
       # tee 一份日志留作 artifact（Actions 日志有保留期且不便 grep）。GHA 的
       # `shell: bash` 自带 -eo pipefail，管道退出码取 npm 的，不会被 tee 掩盖。
       - name: 打包（Linux AppImage）
@@ -252,16 +268,20 @@ jobs:
         shell: bash
         working-directory: gourd-ai-tauri
         env:
+          # 指向**源** JRE（build/extraResources/jre）而非 AppDir 内的副本：本步骤开始时
+          # AppDir 尚未生成，而源目录在「生成内置 JRE」步骤后必定存在，两者是同一份文件。
+          LD_LIBRARY_PATH: ${{ github.workspace }}/gourd-ai-tauri/build/extraResources/jre/lib:${{ github.workspace }}/gourd-ai-tauri/build/extraResources/jre/lib/server
           NO_STRIP: 'true'
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run build:linux:appimage 2>&1 | tee /tmp/appimage-build.log
 
       # AppImage 失败时补「现场」。verbose 已让 linuxdeploy 的输出进日志，但「它当时
-      # 看到了哪些文件」只能从磁盘取。重点：JRE 有没有落进 usr/lib —— linuxdeploy 会
-      # **递归**扫 usr/lib 下所有 ELF，逐个 ldd 并把 rpath 改写成 $ORIGIN。整棵 JRE
-      # （本项目 bundle.resources 里就有）进去既拖慢打包，也会打乱 libjvm.so / bin/java
-      # 的相对加载路径 —— 典型症状是「包出来了但跑不起来」。
+      # 看到了哪些文件」只能从磁盘取。重点：JRE 确实会落进 usr/lib（已实测确认：
+      # usr/lib/GWork/extraResources/jre/）—— linuxdeploy 会**递归**扫 usr/lib 下所有
+      # ELF，逐个 ldd 并把 rpath 改写成 $ORIGIN。这正是 libjvm.so 解析失败的来源（见
+      # 上一步 LD_LIBRARY_PATH 的注释），也是「包出来了但跑不起来」的典型风险点，
+      # 所以这几项计数保留：万一后续又红，先看它们能快速分流。
       - name: 诊断（Linux AppImage 失败时）
         if: failure() && matrix.platform == 'linux' && steps.linux-appimage.outcome == 'failure'
         shell: bash
@@ -287,10 +307,20 @@ jobs:
             echo "--- usr/lib 递归文件总数 / 其中 .so 数 ---"
             find "$d/usr/lib" -type f 2>/dev/null | wc -l
             find "$d/usr/lib" -name '*.so*' 2>/dev/null | wc -l
-            echo "--- usr/lib 内是否存在 jre 目录（见下方 JRE 假设的量化点） ---"
+            echo "--- usr/lib 内的 jre 目录（实测必存：它就是 libjvm.so 报错的导火索） ---"
             find "$d/usr/lib" -type d -name jre 2>/dev/null | head -5 || true
+            echo "--- libjvm.so 实际位置（应在 jre/lib/server/，与兄弟库差一层目录） ---"
+            find "$d/usr/lib" -name 'libjvm.so' 2>/dev/null | head -5 || true
             echo "--- JRE 在 usr/lib 下占多少文件（linuxdeploy 会逐个 ldd + 改写 rpath） ---"
             find "$d/usr/lib" -path '*/jre/*' -type f 2>/dev/null | wc -l
+          done
+          echo
+          echo "===== LD_LIBRARY_PATH 是否指向真实存在的 JRE lib 目录 ====="
+          # 上一步靠它让 ldd 能解析 libjvm.so；路径写错/JRE 未生成时会静默失效，
+          # 表现与未设置完全一致，所以失败时必须把它当成首要嫌疑人核对。
+          for p in build/extraResources/jre/lib build/extraResources/jre/lib/server; do
+            printf '%s -> ' "$p"
+            [ -d "$p" ] && echo "存在（so 数：$(find "$p" -maxdepth 1 -name '*.so' | wc -l)）" || echo "不存在！"
           done
           echo
           echo "===== 磁盘剩余（AppImage 要同时容纳 AppDir 与 squashfs） ====="
