@@ -59,21 +59,6 @@ jobs:
         with:
           node-version: 20
 
-      # ── 构建脚本自检门禁：放在所有昂贵步骤（Rust/Maven/jlink）之前 ──
-      # 事故（2026-09-07）：cmd/pin-linuxdeploy-tools.js 里一个 TypeError 把整条 Linux
-      # job 干红。它躲过了两道防线：① 开发机是 Windows，resolveArch() 提前 return，
-      # 那行代码从未被执行；② 单测每个用例都注入了 homedir 覆写，默认分支零覆盖。
-      # 于是 24 项断言全绿、CI 第一行就崩，且崩在编译完 4m46s 之后。
-      # 两个对策同时生效：
-      #   1. 脚本用 --platform/--arch 让 Linux-only 路径能在任意平台真实执行；
-      #   2. 本门禁在**三条平台腿都跑**（win/mac runner 也执行 Linux 逻辑），
-      #      谁再写出「只在某平台崩」的代码，几秒内当场就红。
-      # 放在 node 安装之后、Rust 之前：零依赖（只用 node 内置模块），失败无需等编译。
-      - name: 构建脚本自检（Linux 逻辑在任意平台可验证）
-        shell: bash
-        working-directory: gourd-ai-tauri
-        run: npm run selftest
-
       # macOS 要出 x64 + arm64 两个 dmg，需预装两个 target；其余平台用默认宿主 target
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -224,21 +209,16 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run build:linux:deb
 
-      # AppImage 是三条 Linux 产物里唯一要联网拉工具、也唯一长期不稳定的一条。
-      # 两个关键处置（都已写进 npm script，此处只保留环境变量）：
-      #   1. NO_STRIP —— linuxdeploy 自带的 strip 是老 binutils，遇到新 glibc 库的
-      #      .relr.dyn 段会报 `unknown type [0x13] section`。跳过无损失：Cargo.toml
-      #      的 [profile.release] 已配 strip = true，主程序早就剥过了。
-      #   2. --verbose —— tauri-bundler 在日志级别为 Error（默认）时走的是
-      #        if !cmd.output()?.status.success() {
-      #            return Err(GenericError("failed to run linuxdeploy"))
-      #        }
-      #      即把 linuxdeploy 的 stdout/stderr **捕获后整份丢弃**；只有 verbose 下才
-      #      改走 output_ok() 流式打印真错。判据很硬：报错带路径
-      #      （`failed to run /…/linuxdeploy-x86_64.AppImage`）说明没被吞，
-      #      不带路径的 `failed to run linuxdeploy` 就是被吞了 —— 本次日志属于后者。
-      #      工具钉版由 script 里的 cmd/pin-linuxdeploy-tools.js 完成（消除上游
-      #      continuous 滚动 tag 漂移）。
+      # AppImage 是两条 Linux 产物里唯一要联网拉工具、也唯一长期不稳定的一条。
+      #   1. NO_STRIP —— linuxdeploy 自带的 strip 是老 binutils，遇新 glibc 库的
+      #      .relr.dyn 段会报 `unknown type [0x13] section`。注意：本仓库首次报
+      #      `failed to run linuxdeploy` 时它**已经是开的**，所以它不是本例真因，
+      #      保留只是因为它能排掉一类常见故障且无副作用。
+      #   2. --verbose（写在 npm script 里）—— tauri-bundler 在日志级别为 Error（默认）
+      #      时把 linuxdeploy 的 stdout/stderr **捕获后整份丢弃**，只剩一句没有内容的
+      #      `failed to run linuxdeploy`；verbose 下才流式打印真错。判据很硬：报错带路径
+      #      （`failed to run /…/linuxdeploy-x86_64.AppImage`）说明没被吞，不带路径的
+      #      就是被吞了。真因尚未定位，先把日志拿到手。
       # tee 一份日志留作 artifact（Actions 日志有保留期且不便 grep）。GHA 的
       # `shell: bash` 自带 -eo pipefail，管道退出码取 npm 的，不会被 tee 掩盖。
       - name: 打包（Linux AppImage）
@@ -253,12 +233,10 @@ jobs:
         run: npm run build:linux:appimage 2>&1 | tee /tmp/appimage-build.log
 
       # AppImage 失败时补「现场」。verbose 已让 linuxdeploy 的输出进日志，但「它当时
-      # 看到了哪些文件」只能从磁盘取。重点两处：
-      #   - 工具目录里的插件是不是我们钉的那份（钉版失败会静默退回 continuous）
-      #   - JRE 有没有落进 usr/lib：linuxdeploy 会**递归**扫 usr/lib 下所有 ELF，逐个
-      #     ldd 并把 rpath 改写成 $ORIGIN。整棵 JRE（本项目 bundle.resources 里就有）
-      #     进去既拖慢打包，也会打乱 libjvm.so / bin/java 的相对加载路径 —— 典型症状
-      #     是「包出来了但跑不起来」。
+      # 看到了哪些文件」只能从磁盘取。重点：JRE 有没有落进 usr/lib —— linuxdeploy 会
+      # **递归**扫 usr/lib 下所有 ELF，逐个 ldd 并把 rpath 改写成 $ORIGIN。整棵 JRE
+      # （本项目 bundle.resources 里就有）进去既拖慢打包，也会打乱 libjvm.so / bin/java
+      # 的相对加载路径 —— 典型症状是「包出来了但跑不起来」。
       - name: 诊断（Linux AppImage 失败时）
         if: failure() && matrix.platform == 'linux' && steps.linux-appimage.outcome == 'failure'
         shell: bash
@@ -266,9 +244,6 @@ jobs:
         run: |
           echo "===== 已产出的 bundle ====="
           find src-tauri/target/release/bundle -maxdepth 2 -type f 2>/dev/null | sort || true
-          echo
-          echo "===== tauri 工具目录（确认钉版是否生效） ====="
-          ls -la "$HOME/.cache/tauri" 2>/dev/null || echo "(无 ~/.cache/tauri)"
           echo
           # 注意：GHA 的 shell:bash 是 `bash -eo pipefail`（本次失败日志第 12 行实测）。
           # `find | sort | head -N` 里 head 提前退出会让 sort 收到 SIGPIPE 而返回 141，
