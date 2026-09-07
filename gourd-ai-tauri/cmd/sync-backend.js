@@ -209,7 +209,54 @@ function ensureJre() {
   if (!hasUsableJre(JRE_DIR)) {
     fail('jlink 已执行但产物缺少 java 可执行文件: ' + path.join(JRE_DIR, 'bin'));
   }
+  unlockTree(JRE_DIR);
   log('内置 JRE 生成完成: ' + JRE_DIR);
+}
+
+/**
+ * 去掉 JRE 目录树里的只读位（本地打包路径的同款排雷，CI 侧由 workflow 的
+ * `chmod -R u+w` 负责）。
+ *
+ * 为什么必须做：jlink 会把 `legal/**` 设为只读（0444），该逻辑在 JDK 的
+ * DefaultImageBuilder 里被 `supportsFileAttributeView(PosixFileAttributeView)`
+ * 包着，**只在 POSIX 生效**。而 tauri-build 的 copy_file 是裸 `fs::copy`（不像同
+ * 文件的 copy_binaries 会先 remove_file(dest)），Unix 上 fs::copy 连源权限位一起
+ * 复制 → target/<profile>/extraResources/jre/legal/** 也成 0444 → **第二次**
+ * `tauri build` 以 O_TRUNC 打开只读目标，报 `Permission denied (os error 13)`，
+ * 且 panic 信息里不带路径，极难定位。
+ *
+ * Windows 上 jlink 不设只读位，这里恒为 no-op —— 这正是该问题只在 Linux/macOS
+ * 暴露、开发机永远复现不了的原因。
+ */
+function unlockTree(dir) {
+  let st;
+  try {
+    st = fs.lstatSync(dir);
+  } catch {
+    return;
+  }
+  // 不跟随符号链接，避免绕出目标树
+  if (st.isSymbolicLink()) return;
+
+  try {
+    // 目录还需 u+x，否则给了 u+w 也进不去
+    const want = st.isDirectory() ? 0o300 : 0o200;
+    if ((st.mode & want) !== want) {
+      fs.chmodSync(dir, st.mode | want);
+    }
+  } catch {
+    // 排雷失败不阻断：真正的失败留给 tauri-build 报带路径的错
+  }
+
+  if (st.isDirectory()) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of entries) unlockTree(path.join(dir, name));
+  }
 }
 
 // ── 入口 ────────────────────────────────────────────────────────────────────
@@ -233,6 +280,9 @@ function main() {
       );
     }
     log('已跳过 JRE 生成（--skip-jre），现有 JRE 通过检查');
+    // 现成的 JRE 可能来自 jlink（legal/** 0444）或从 POSIX 机器拷来的只读目录树，
+    // 同样要排雷，否则第二次 tauri build 必报 os error 13
+    unlockTree(JRE_DIR);
   } else {
     ensureJre();
   }

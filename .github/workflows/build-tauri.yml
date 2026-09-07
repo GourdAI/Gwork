@@ -59,6 +59,17 @@ jobs:
         with:
           node-version: 20
 
+      # 回归门禁：只读资源导致的 `build.rs ... Permission denied (os error 13)`。
+      # jlink 的 legal/** 只读位只在 POSIX 产生，而开发机多为 Windows —— 这类
+      # 「只在某平台炸」的问题正是本仓库反复踩坑的原因，所以不加 platform 条件，
+      # **三条腿都跑**：Linux/macOS 腿验的是真 POSIX 权限位语义。
+      # 零依赖（只用 node 内置模块），放在 Rust/Maven/jlink 等昂贵步骤之前，
+      # 坏了几秒内当场红，不用等编译 4 分钟。
+      - name: 回归测试（只读资源重复构建）
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: node test/readonly-resource-repro.js
+
       # macOS 要出 x64 + arm64 两个 dmg，需预装两个 target；其余平台用默认宿主 target
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -133,6 +144,16 @@ jobs:
         run: node cmd/sync-backend.js --jar-only
 
       # 模块清单与 build.ps1 / build.sh / build.yml / cmd/sync-backend.js 保持一致
+      #
+      # chmod -R u+w：jlink 会把 legal/** 设为只读（0444），这段逻辑在 JDK 的
+      # DefaultImageBuilder 里被 supportsFileAttributeView(PosixFileAttributeView)
+      # 包着，**只在 POSIX 生效**。而 tauri-build 的 copy_file 是裸 fs::copy（不像
+      # 同文件的 copy_binaries 会先 remove_file(dest)），Unix 上 fs::copy 连源权限位
+      # 一起复制 → target/release/extraResources/jre/legal/** 也成 0444 → **第二次**
+      # tauri build 以 O_TRUNC 打开只读目标，报 Permission denied (os error 13)。
+      # 本仓库 Linux 腿正好跑两次 tauri build（deb + AppImage）共用同一个 target/，
+      # 必然命中；rust-cache 还会把带毒的 target/ 跨运行恢复，导致重跑也修不好。
+      # 这里在源头去掉只读位，src-tauri/build.rs 另有一层清理 target/ 内既有副本。
       - name: 生成内置 JRE（Windows / Linux）
         if: matrix.platform != 'mac'
         shell: bash
@@ -143,6 +164,7 @@ jobs:
           rm -rf "$JRE_DIR"
           "$JAVA_HOME/bin/jlink" --module-path "$JAVA_HOME/jmods" --add-modules "$MODULES" \
             --output "$JRE_DIR" --strip-debug --compress 2 --no-header-files --no-man-pages
+          chmod -R u+w "$JRE_DIR"
 
       # macOS 需要同时出 x64 与 arm64 两个包：jlink 产物架构取决于 jmods，
       # 因此下载两种架构的 JDK，统一用本机 jlink 分别链接出两套 JRE。
@@ -169,6 +191,9 @@ jobs:
           "$JAVA_HOME/bin/jlink" --module-path "$ARM_HOME/jmods" --add-modules "$MODULES" \
             --output "$OUT_ARM" --strip-debug --compress 2 --no-header-files --no-man-pages
           # 保证可执行位（经压缩/解压或跨架构链接后可能丢失），否则包内 java 无法 spawn
+          # u+w 见上一步注释：jlink 的 legal/** 只读位会经 fs::copy 传染到 target/，
+          # 让第二次 tauri build 报 Permission denied (os error 13)。
+          chmod -R u+w "$OUT_X64" "$OUT_ARM"
           chmod +x "$OUT_X64/bin/"* "$OUT_ARM/bin/"*
 
       # 只装 @tauri-apps/cli；ui/ 与 NSIS 位图由 tauri.conf.json 的 beforeBuildCommand
@@ -325,6 +350,9 @@ jobs:
             echo "=== 构建 macOS $name ($triple) ==="
             rm -rf "$JRE"
             cp -R "build/jre-mac-$name" "$JRE"
+            # cp -R 会把只读位一并带过来；只读的 jre 会让下一个架构的 rm -rf 与
+            # tauri-build 的 fs::copy 同时遭殃（见生成 JRE 步骤的 os error 13 注释）
+            chmod -R u+w "$JRE"
             chmod +x "$JRE/bin/"*
             npm run build:mac -- --target "$triple"
           done
