@@ -125,18 +125,7 @@ pub(crate) fn release_candidates_from(exe: &Path) -> Vec<PathBuf> {
 
     // macOS：exe 在 *.app/Contents/MacOS，资源在 *.app/Contents/Resources
     #[cfg(target_os = "macos")]
-    {
-        if let Some(contents) = exe.parent().and_then(|p| p.parent()) {
-            out.push(contents.join("Resources").join("extraResources"));
-            // 部分打包路径会再嵌一层 resources/
-            out.push(
-                contents
-                    .join("Resources")
-                    .join("resources")
-                    .join("extraResources"),
-            );
-        }
-    }
+    out.extend(macos_candidates_from(exe));
 
     // 当前布局：可执行文件同级（Tauri 2.x NSIS/deb 实测落点）
     out.push(exe.join("extraResources"));
@@ -146,6 +135,36 @@ pub(crate) fn release_candidates_from(exe: &Path) -> Vec<PathBuf> {
     out.push(exe.join("..").join("lib").join("extraResources"));
 
     out
+}
+
+/// 纯函数版 **macOS** 候选枚举：给定 exe 目录（`*.app/Contents/MacOS`），
+/// 返回该平台按优先级排序的 extraResources 候选。
+///
+/// ## 为什么单独拆出，且**不加 cfg 门禁**
+///
+/// mac 分支的路径推导只有 mac 机器才跑得到。历史上这里多回溯了一层
+/// `.parent()`：从 `*.app/Contents/MacOS` 一路退到 `*.app`，于是探测的是
+/// `*.app/Resources/extraResources`，而 bundler 的真实落点是
+/// `*.app/Contents/Resources/extraResources` —— 正确路径压根没进候选表。
+/// 后果是 mac 装机版必然「未找到 gourd-ai-agent.jar」，而 Windows/Linux 的
+/// CI 与本地 `cargo test` 全程绿灯，问题只能等用户开机才暴露。
+///
+/// 因此把推导保持为**跨平台可编译、可断言**的纯函数：任意开发机上的
+/// `cargo test` 都能钉死这条布局（见 `macos_candidates_live_under_contents_resources`）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn macos_candidates_from(exe: &Path) -> Vec<PathBuf> {
+    // exe 位于 *.app/Contents/MacOS，故**只回溯一层**即得 *.app/Contents。
+    let contents = match exe.parent() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let resources = contents.join("Resources");
+    vec![
+        // 当前布局：bundle.resources 的 target 落在 Contents/Resources 下
+        resources.join("extraResources"),
+        // 兼容布局：部分打包路径会再嵌一层 resources/
+        resources.join("resources").join("extraResources"),
+    ]
 }
 
 /// 按判据强度从候选中挑出实际使用的 extraResources 目录。
@@ -333,15 +352,14 @@ fn legacy_layout_paths() -> Vec<PathBuf> {
     // 非 macOS 平台只有单一候选，mut 在那些 target 上不会被用到
     #[allow(unused_mut)]
     let mut out = vec![exe.join("resources").join("extraResources")];
+    // mac 的旧布局候选直接从候选表派生再按形状过滤：路径推导只保留一处真源，
+    // 避免第二份手写的 Contents 推导再次走偏（正是本次 mac 故障的成因）。
     #[cfg(target_os = "macos")]
-    if let Some(contents) = exe.parent().and_then(|p| p.parent()) {
-        out.push(
-            contents
-                .join("Resources")
-                .join("resources")
-                .join("extraResources"),
-        );
-    }
+    out.extend(
+        macos_candidates_from(&exe)
+            .into_iter()
+            .filter(|p| is_legacy_nested_layout(p)),
+    );
     out
 }
 
@@ -502,6 +520,75 @@ mod tests {
             pick_resources_dir(&[flat_dir.clone(), nested_dir.clone()]),
             flat_dir,
             "两个候选都缺 jre 时，不得选中嵌套残留"
+        );
+    }
+
+    /// macOS 候选必须落在 `*.app/Contents/Resources` 下，且**当前布局排第一**。
+    ///
+    /// 这是本次 mac 装机版「未找到 gourd-ai-agent.jar」故障的直接回归护栏：
+    /// 旧实现从 `*.app/Contents/MacOS` 回溯了两层 parent，退到 `*.app` 才拼
+    /// `Resources/extraResources`，探测的是 `*.app/Resources/extraResources`，
+    /// 而 bundler 实际写的是 `*.app/Contents/Resources/extraResources`
+    /// —— 真实路径从未进入候选表，无论装多少次都必然失败。
+    ///
+    /// 断言走**纯函数**而非 `release_candidates_from`，故在任何平台都会执行：
+    /// mac 专属推导若只在 mac 上可测，等于没有护栏（本次故障恰因此漏到线上）。
+    #[test]
+    fn macos_candidates_live_under_contents_resources() {
+        let app = PathBuf::from("/Applications/GWork.app");
+        let exe_dir = app.join("Contents").join("MacOS");
+        let cands = macos_candidates_from(&exe_dir);
+
+        let expected = app
+            .join("Contents")
+            .join("Resources")
+            .join("extraResources");
+        assert_eq!(
+            cands.first(),
+            Some(&expected),
+            "mac 首选候选必须是 Contents/Resources/extraResources（bundler 真实落点）"
+        );
+
+        // 少一层 Contents 的错误形状绝不能出现在任何位置
+        let wrong = app.join("Resources").join("extraResources");
+        assert!(
+            !cands.contains(&wrong),
+            "候选中出现越过 Contents 的错误路径 {:?}：{:?}",
+            wrong,
+            cands
+        );
+
+        // 每个候选都必须在 Contents/ 之内，杜绝再次回溯过头
+        let contents = app.join("Contents");
+        for c in &cands {
+            assert!(
+                c.starts_with(&contents),
+                "候选逃出 .app/Contents：{}",
+                c.display()
+            );
+        }
+    }
+
+    /// mac 的旧布局清理候选同样必须锚在 Contents/Resources 下。
+    /// 若这里推导过头，`cleanup_legacy_resources` 会拿着 `.app` 外的路径去删目录。
+    #[test]
+    fn macos_legacy_candidate_is_under_contents_resources() {
+        let app = PathBuf::from("/Applications/GWork.app");
+        let exe_dir = app.join("Contents").join("MacOS");
+
+        let legacy: Vec<PathBuf> = macos_candidates_from(&exe_dir)
+            .into_iter()
+            .filter(|p| is_legacy_nested_layout(p))
+            .collect();
+
+        assert_eq!(
+            legacy,
+            vec![app
+                .join("Contents")
+                .join("Resources")
+                .join("resources")
+                .join("extraResources")],
+            "mac 旧布局清理候选路径不符"
         );
     }
 
