@@ -99,6 +99,16 @@ import java.util.List;
  */
 public class WebSettingsController {
     /**
+     * {@code maxTokens} 被当作上下文窗口采信的最小阈值。
+     *
+     * <p>多数供应商的 {@code maxTokens} 语义是「单次最大输出 token」（典型 4K~8K），
+     * 而非上下文窗口。若直接写入 contextLength，会使压缩预算远小于真实窗口，
+     * 导致该模型每一轮都触发压缩、反复烧摘要调用。仅当其大到不可能是纯输出
+     * 上限时（≥ 32K）才视为供应商确实在用它表达窗口。</p>
+     */
+    private static final int MIN_TRUSTWORTHY_CONTEXT_LENGTH = 32_000;
+
+    /**
      * 日志记录器
      */
     private static final Logger LOG = LoggerFactory.getLogger(WebSettingsController.class);
@@ -220,9 +230,22 @@ public class WebSettingsController {
             if (tmp.hasKey("compressionRatio") && tmp.get("compressionRatio").isNull()) {
                 settings.getGeneral().setCompressionRatio(defaults.getCompressionRatio());
             }
+            if (tmp.hasKey("compressionTargetRatio") && tmp.get("compressionTargetRatio").isNull()) {
+                settings.getGeneral().setCompressionTargetRatio(defaults.getCompressionTargetRatio());
+            }
+            if (tmp.hasKey("compressionReservedOutputTokens") && tmp.get("compressionReservedOutputTokens").isNull()) {
+                settings.getGeneral().setCompressionReservedOutputTokens(defaults.getCompressionReservedOutputTokens());
+            }
+            if (tmp.hasKey("intentChainMaxTokens") && tmp.get("intentChainMaxTokens").isNull()) {
+                settings.getGeneral().setIntentChainMaxTokens(defaults.getIntentChainMaxTokens());
+            }
 
             engine.setCompressionThreshold(settings.getGeneral().getHistoryWindowSize());
             engine.setCompressionRatio(settings.getGeneral().getCompressionRatio());
+            engine.setCompressionTargetRatio(settings.getGeneral().getCompressionTargetRatio());
+            engine.setCompressionReservedOutputTokens(settings.getGeneral().getCompressionReservedOutputTokens());
+            engine.setIntentChainEnabled(settings.getGeneral().getIntentChainEnabled());
+            engine.setIntentChainMaxTokens(settings.getGeneral().getIntentChainMaxTokens());
 
             engine.setModelRetries(settings.getGeneral().getModelRetries());
             engine.setMcpRetries(settings.getGeneral().getMcpRetries());
@@ -2072,11 +2095,14 @@ public class WebSettingsController {
                     modelDo.setTimeout(provider.getTimeout());
                 }
 
-                // 设置 contextLength：优先 maxInputTokens，其次 maxTokens；
-                // 供应商模型列表不带 token 上限时保持 0（压缩预算按默认上下文长度回退）
+                // 设置 contextLength：优先 maxInputTokens；
+                // ⚠️ maxTokens 在多数供应商语义里是「最大输出 token」而非上下文窗口，
+                // 直接当窗口用会把 contextLength 误设为 8192 之类的小值 → 该模型每轮都触发压缩。
+                // 故仅在其大到不可能是纯输出上限时才采信；否则保持 0，回退到默认上下文长度。
                 if (modelInfo.getMaxInputTokens() != null && modelInfo.getMaxInputTokens() > 0) {
                     modelDo.setContextLength(modelInfo.getMaxInputTokens());
-                } else if (modelInfo.getMaxTokens() != null && modelInfo.getMaxTokens() > 0) {
+                } else if (modelInfo.getMaxTokens() != null
+                        && modelInfo.getMaxTokens() >= MIN_TRUSTWORTHY_CONTEXT_LENGTH) {
                     modelDo.setContextLength(modelInfo.getMaxTokens());
                 }
                 
@@ -2117,7 +2143,9 @@ public class WebSettingsController {
                     long newContextLength = 0;
                     if (modelInfo.getMaxInputTokens() != null && modelInfo.getMaxInputTokens() > 0) {
                         newContextLength = modelInfo.getMaxInputTokens();
-                    } else if (modelInfo.getMaxTokens() != null && modelInfo.getMaxTokens() > 0) {
+                    } else if (modelInfo.getMaxTokens() != null
+                            && modelInfo.getMaxTokens() >= MIN_TRUSTWORTHY_CONTEXT_LENGTH) {
+                        // 同上：maxTokens 通常是输出上限，小值不可信，不能当上下文窗口
                         newContextLength = modelInfo.getMaxTokens();
                     }
                     if (newContextLength > 0 && existingModel.getContextLength() != newContextLength) {

@@ -16,6 +16,7 @@
 package com.gourdai.harness.agent;
 
 import com.gourdai.agent.react.ReActAgent;
+import com.gourdai.agent.react.intercept.ToolSanitizerInterceptor;
 import com.gourdai.harness.HarnessExtension;
 import org.noear.solon.ai.chat.ChatModel;
 import com.gourdai.harness.HarnessEngine;
@@ -71,6 +72,13 @@ public class AgentFactory {
         builder.defaultInterceptorAdd(9, engine.getStopLoopInterceptor());
         builder.defaultInterceptorAdd(new RetryNotifyInterceptor());
         builder.defaultInterceptorAdd(new ContextUsageInterceptor());
+
+        // ⭐ 工具输出预算统一入口：按上下文压力动态调档（<60% 宽松 / 60-75% 中等 / ≥75% 严格）。
+        //    从源头控制进入上下文的量，是唯一零信息损失的省法——工具可分页重调，
+        //    而摘要一旦丢弃就找不回来了。
+        ToolSanitizerInterceptor sanitizer = new ToolSanitizerInterceptor();
+        sanitizer.setPressureSupplier(engine.getCompressionInterceptor()::getContextPressure);
+        builder.defaultInterceptorAdd(sanitizer);
 
         if (Assert.isNotEmpty(agentDefinition.getSystemPrompt())) {
             builder.systemPrompt(r -> agentDefinition.getSystemPrompt());

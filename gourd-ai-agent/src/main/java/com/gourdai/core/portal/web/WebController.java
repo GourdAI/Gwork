@@ -605,13 +605,17 @@ public class WebController {
      * 本端点返回流经 {@code emitToClient} 的全部事件（推理、工具卡片、正文、trace 等），
      * 前端据此将历史会话的工具调用、过程叙述原样回放。无流式文件时返回空列表（
      * 前端回退到 {@code /web/chat/messages} 的纯文本加载）。</p>
-     * <p>支持 {@code tail} 参数实现尾部加载（分页）：只返回最后 N 条事件，
-     * 并附带 {@code totalCount} 和 {@code hasMore} 供前端判断是否需要加载更多。</p>
+     * <p>分页以<b>对话轮</b>为单位（{@code rounds} + {@code beforeSeq} 游标）：一次返回若干完整轮次，
+     * 并附带 {@code remainingRounds}（还剩多少条用户消息）供前端展示与判断是否还能继续加载。
+     * 不能按 ndjson 行分页——text/reason 是 token 级增量，占全部行的九成以上，
+     * 「一页 N 行」实际连半轮对话都不到。{@code tail} 为兼容旧前端保留。</p>
      *
      * @param sessionId 会话 ID
      * @param root      可选项目根提示（code 模式）
-     * @param tail      可选，只返回最后 tail 条事件（用于尾部加载优化）
-     * @return 包含 events、totalCount、hasMore 的分页结果
+     * @param tail      可选，只返回最后 tail 条事件（旧版行分页，保留兼容）
+     * @param beforeSeq 可选，向上翻页游标：只返回 eventSeq 小于它的更早事件
+     * @param rounds    可选，本页期望的对话轮数（配合 beforeSeq 使用）
+     * @return 包含 events、totalRounds、remainingRounds、hasMore 的分页结果
      */
     @Get
     @Mapping("/web/chat/replay")
@@ -619,7 +623,9 @@ public class WebController {
                                       @Param(value = "root", required = false) String root,
                                       @Param(value = "tail", required = false) Integer tail,
                                       @Param(value = "afterSeq", required = false) Long afterSeq,
-                                      @Param(value = "limit", required = false) Integer limit) {
+                                      @Param(value = "limit", required = false) Integer limit,
+                                      @Param(value = "beforeSeq", required = false) Long beforeSeq,
+                                      @Param(value = "rounds", required = false) Integer rounds) {
         if (sessionId == null || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
             return Result.failure(400, "Invalid sessionId");
         }
@@ -628,15 +634,24 @@ public class WebController {
             Map empty = new HashMap<>();
             empty.put("events", new ArrayList<>());
             empty.put("totalCount", 0);
+            empty.put("totalRounds", 0);
+            empty.put("remainingRounds", 0);
             empty.put("hasMore", false);
             return Result.succeed(empty);
         }
-        SessionStreamStore.LoadResult lr = afterSeq != null
-                ? store.loadAfter(sessionId, root, Math.max(0L, afterSeq), limit)
-                : store.loadWithMeta(sessionId, root, tail);
+        SessionStreamStore.LoadResult lr;
+        if (afterSeq != null) {
+            lr = store.loadAfter(sessionId, root, Math.max(0L, afterSeq), limit);
+        } else if (rounds != null || beforeSeq != null) {
+            lr = store.loadRounds(sessionId, root, beforeSeq, rounds);
+        } else {
+            lr = store.loadWithMeta(sessionId, root, tail);
+        }
         Map result = new HashMap<>();
         result.put("events", lr.events);
         result.put("totalCount", lr.totalCount);
+        result.put("totalRounds", lr.totalRounds);
+        result.put("remainingRounds", lr.remainingRounds);
         result.put("hasMore", lr.hasMore);
         result.put("firstSeq", lr.firstSeq);
         result.put("lastSeq", lr.lastSeq);

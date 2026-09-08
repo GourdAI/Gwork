@@ -153,7 +153,9 @@ body.code-mode .usage-view { display: none !important; }
     border-radius: 2px;
     background: var(--bg-hover);
 }
-#usageView .usage-heat-empty { background: transparent; }
+/* 未来日：与「零活跃」同色，保证整块热力图始终是完整矩形。
+   若留空透明，末列尚未到来的那几天会透出卡面底色，在暗色主题下形成突兀的黑洞。 */
+#usageView .usage-heat-empty { background: var(--bg-hover); }
 #usageView .usage-heat-cell[data-level="0"] { background: var(--bg-hover); }
 #usageView .usage-heat-cell[data-level="1"] { background: var(--accent); opacity: .3; }
 #usageView .usage-heat-cell[data-level="2"] { background: var(--accent); opacity: .5; }

@@ -1,4 +1,4 @@
-﻿{
+{
     "streaming":  {
                       "describe_images":  "画像の説明中",
                       "process_files":  "ファイル処理中",
@@ -77,8 +77,8 @@
                     "confirm_delete":  "セッション「{0}」を削除しますか？",
                     "untitled":  "無題",
                     "delete_failed":  "セッションの削除に失敗しました。再試行してください",
-                    "load_more_before":  "前の {0} 件のメッセージをロード",
                     "load_more_messages":  "前の {0} 件のメッセージを表示",
+                    "load_more_earlier":  "以前のメッセージを表示",
                     "loading":  "読み込み中…",
                     "no_input_history":  "入力履歴なし",
                     "search_placeholder":  "履歴を検索…",
@@ -293,12 +293,18 @@
                                                         "theme_desc":  "インターフェースのテーマをダークまたはライトに切り替え"
                                                     },
                                      "conversation":  {
-                                                          "title":  "会話戦略",
+                                                          "title":  "コンテキスト圧縮戦略",
                                                           "history_window":  "履歴ウィンドウサイズ",
                                                           "history_window_placeholder":  "デフォルト 30",
                                                           "compression_ratio":  "圧縮トリガー率(%)",
-                                                          "compression_ratio_placeholder":  "デフォルト 80",
-                                                          "hint":  "履歴ウィンドウ：圧縮時に最後のメッセージを常に完全に保護（圧縮除外）；圧縮トリガー率：コンテキスト使用量が「モデルウィンドウ × この率%」に達すると、中間の実行過程が要約として自動圧縮されます（元の意図と最後の N 件は完全保留）"
+                                                          "compression_ratio_placeholder":  "デフォルト 100",
+                                                          "compression_target_ratio":  "圧縮目標水位(%)",
+                                                          "compression_target_ratio_placeholder":  "デフォルト 45",
+                                                          "reserved_output":  "1ターン出力予約(tokens)",
+                                                          "reserved_output_placeholder":  "デフォルト 20000",
+                                                          "intent_chain":  "セッション意図チェーン",
+                                                          "intent_chain_desc":  "圧縮時にユーザーの過去の質問の簡潔なインデックスを保持し（コストは極小）、完了済みの古い目標に固執するのを防ぎます",
+                                                          "hint":  "履歴ウィンドウ：圧縮時に最後の何件のメッセージを常に完全保護するか\n1ターン出力予約：モデルの次の応答のために確保する絶対的な余白、トリガー点 =「モデルウィンドウ − この予約 − ターンバッファ」\n圧縮トリガー率：「前倒し」トリガーのみに使用（両者の小さい方を採用）、100 は追加の前倒しなし\n圧縮目標水位：1 回でどこまで圧縮するかを決定、値が高いほど圧縮は浅くトリガーは頻繁になります"
                                                       },
                                      "sandbox":  {
                                                      "title":  "サンドボックスモード",

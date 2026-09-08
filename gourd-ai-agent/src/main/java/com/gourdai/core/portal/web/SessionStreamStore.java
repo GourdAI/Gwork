@@ -84,6 +84,21 @@ public class SessionStreamStore {
      */
     private static final int PREVIEW_CHARS = 64 * 1024;
 
+    /**
+     * 分页默认加载的<b>对话轮数</b>（一轮 = 一条 user 消息及其后的全部 AI 过程事件）。
+     *
+     * <p>历史分页必须以「轮」为单位，不能以 ndjson 物理行为单位：text/reason 是<b>token 级增量</b>，
+     * 实测占全部行的 ~92%（某会话 15383 行里 14190 行是增量，真实用户消息只有 11 条）。按行分页时
+     * 「一页 150 行」实际只有 0.1 轮对话，用户点一次几乎看不到新内容，且切片会落在半句话中间。</p>
+     */
+    private static final int DEFAULT_PAGE_ROUNDS = 5;
+
+    /**
+     * 单页原始事件行的软上限：某一轮若异常庞大（长任务刷了几万条增量），
+     * 达到上限就提前收尾留给下一页。但<b>至少保证一整轮</b>，绝不在轮中间切断。
+     */
+    private static final int MAX_PAGE_LINES = 4000;
+
     private final SessionLocator sessionLocator;
 
     /** 逐会话写锁，防止并发轮次的行交错 */
@@ -290,16 +305,260 @@ public class SessionStreamStore {
                 }
             }
             if (tail != null && tail > 0 && allData.size() > tail) {
-                result.events = new ArrayList<>(allData.subList(allData.size() - tail, allData.size()));
+                result.events = coalesceDeltas(new ArrayList<>(allData.subList(allData.size() - tail, allData.size())));
                 result.hasMore = true;
             } else {
-                result.events = allData;
+                result.events = coalesceDeltas(allData);
                 result.hasMore = false;
             }
         } catch (Throwable e) {
             LOG.warn("[StreamStore] load failed for session {}: {}", sessionId, e.getMessage());
         }
         return result;
+    }
+
+    /**
+     * 按<b>对话轮</b>分页加载历史事件（供「显示之前的 N 条消息」向上翻页）。
+     *
+     * <p>相比旧的 {@code tail=N} 行分页，本方法解决三个问题：</p>
+     * <ul>
+     *   <li><b>每次出一整轮</b>：以 user 事件为边界切页，不会把一轮对话截成半句。</li>
+     *   <li><b>游标翻页</b>：{@code beforeSeq} 指向上一页的起始事件，只回传<b>更早</b>的事件。
+     *       旧实现每次都从尾部重取 {@code 已加载+150} 条（第 N 页要重传前 N-1 页的全部数据），
+     *       翻到深处后每次点击都要重新传输、去重、渲染整段历史，越点越慢。</li>
+     *   <li><b>计数稳定</b>：回传 {@code remainingRounds}（剩余用户消息数），
+     *       不再把 token 级增量行当成「条消息」显示，也不会因会话仍在流式而越点越多。</li>
+     * </ul>
+     *
+     * @param sessionId   会话标识
+     * @param projectRoot code 会话项目根（chat 传 null）
+     * @param beforeSeq   游标：只取 eventSeq 严格小于它的事件；null 表示从尾部开始
+     * @param rounds      本页期望的对话轮数；null/&lt;=0 用 {@link #DEFAULT_PAGE_ROUNDS}
+     * @return 本页事件（已按 runId 合并 token 增量）与轮次元信息
+     */
+    public LoadResult loadRounds(String sessionId, String projectRoot, Long beforeSeq, Integer rounds) {
+        LoadResult result = new LoadResult();
+        File file = streamFile(sessionId, projectRoot);
+        if (file == null || !file.exists()) {
+            return result;
+        }
+        int wantRounds = (rounds == null || rounds <= 0) ? DEFAULT_PAGE_ROUNDS : rounds;
+        try {
+            List<String> lines = new ArrayList<>();
+            try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    lines.add(line);
+                }
+            }
+            result.totalCount = lines.size();
+
+            // 一次轻量扫描（只做 indexOf，不做 JSON 反序列化）定位：轮边界、游标位置、最大 seq。
+            // 全量 parse 15k 行是纯浪费——本页只需要其中一小段。
+            List<Integer> bounds = new ArrayList<>();
+            int endIdx = lines.size();
+            boolean endFound = false;
+            for (int i = 0; i < lines.size(); i++) {
+                String raw = lines.get(i);
+                if (raw == null || raw.trim().isEmpty()) {
+                    continue;
+                }
+                long seq = rawEventSeq(raw);
+                if (seq > 0) {
+                    result.latestSeq = Math.max(result.latestSeq, seq);
+                    if (beforeSeq != null && !endFound && seq >= beforeSeq) {
+                        endIdx = i;
+                        endFound = true;
+                    }
+                }
+                if (isRoundBoundary(raw)) {
+                    bounds.add(i);
+                }
+            }
+            result.totalRounds = bounds.size();
+
+            // 本页起点：游标之前的最后 wantRounds 个轮边界；至少含一整轮，且受单页行数软上限约束
+            List<Integer> before = new ArrayList<>();
+            for (int i = 0; i < bounds.size(); i++) {
+                if (bounds.get(i) < endIdx) {
+                    before.add(bounds.get(i));
+                }
+            }
+            int start = before.isEmpty() ? 0 : before.get(before.size() - 1);
+            int taken = before.isEmpty() ? 0 : 1;
+            for (int i = before.size() - 2; i >= 0 && taken < wantRounds; i--) {
+                int cand = before.get(i);
+                if (endIdx - cand > MAX_PAGE_LINES) {
+                    break;
+                }
+                start = cand;
+                taken++;
+            }
+
+            List<Map> page = new ArrayList<>();
+            for (int i = start; i < endIdx; i++) {
+                String trimmed = lines.get(i) == null ? "" : lines.get(i).trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                try {
+                    Map bean = ONode.ofJson(trimmed).toBean(Map.class);
+                    previewForTransport(bean, i + 1);   // seq 用物理行号（1 起），供展开全文回指
+                    page.add(bean);
+                } catch (Throwable ignore) {
+                    // 跳过损坏行
+                }
+            }
+
+            result.events = coalesceDeltas(page);
+            result.hasMore = start > 0;
+            // 下一页游标 = 本页首个事件的 seq；剩余轮数 = 本页起点之前的轮边界数
+            result.firstSeq = page.isEmpty() ? 0 : seqOf(page.get(0));
+            result.lastSeq = page.isEmpty() ? 0 : seqOf(page.get(page.size() - 1));
+            int remaining = 0;
+            for (int i = 0; i < bounds.size(); i++) {
+                if (bounds.get(i) < start) {
+                    remaining++;
+                }
+            }
+            result.remainingRounds = remaining;
+        } catch (Throwable e) {
+            LOG.warn("[StreamStore] loadRounds failed for session {}: {}", sessionId, e.getMessage());
+        }
+        return result;
+    }
+
+    /**
+     * 合并相邻的 token 级增量（{@code text}/{@code reason}）为整段文本。
+     *
+     * <p>回放渲染管线本就是把同一 runId 的连续增量拼进同一个气泡，逐条回传只是把「拼接」
+     * 的成本转嫁给传输与 DOM：实测 15383 行里 14190 行是增量，合并后事件数降一个数量级，
+     * 回放耗时与响应体同步下降。</p>
+     *
+     * <p>合并的安全边界：只合并<b>物理相邻</b>、同 type、同 runId、同归属智能体的块；
+     * 中间只要夹了任何其它事件（工具卡片、trace…）即断开，保证时序与原样回放一致。
+     * 合并后的文本长度受 {@link #PREVIEW_CHARS} 约束，超出即另起一条，
+     * 因此永不触发 {@link #previewForTransport} 的截断（截断块带物理行号 seq，合并后无法回指）。</p>
+     */
+    private static List<Map> coalesceDeltas(List<Map> src) {
+        if (src == null || src.isEmpty()) {
+            return src == null ? new ArrayList<>() : src;
+        }
+        List<Map> out = new ArrayList<>();
+        Map open = null;              // 当前正在累积的合并块
+        StringBuilder buf = null;
+        for (int i = 0; i < src.size(); i++) {
+            Map bean = src.get(i);
+            if (bean == null) {
+                continue;
+            }
+            Object typeObj = bean.get("type");
+            String type = typeObj == null ? "" : String.valueOf(typeObj);
+            boolean mergeable = ("text".equals(type) || "reason".equals(type))
+                    && !Boolean.TRUE.equals(bean.get("truncated"))
+                    && bean.get("text") instanceof String;
+
+            if (mergeable && open != null
+                    && sameDeltaOwner(open, bean)
+                    && buf.length() + ((String) bean.get("text")).length() <= PREVIEW_CHARS) {
+                buf.append((String) bean.get("text"));
+                // 游标推进到组内最后一条，避免断线重连时重复补发已合并的增量
+                if (bean.get("eventSeq") != null) {
+                    open.put("eventSeq", bean.get("eventSeq"));
+                }
+                continue;
+            }
+
+            if (open != null) {
+                open.put("text", buf.toString());
+                open = null;
+                buf = null;
+            }
+            if (mergeable) {
+                open = bean;
+                buf = new StringBuilder((String) bean.get("text"));
+            }
+            out.add(bean);
+        }
+        if (open != null) {
+            open.put("text", buf.toString());
+        }
+        return out;
+    }
+
+    /** 两个增量块是否属于同一渲染目标（同 run、同归属智能体）。 */
+    private static boolean sameDeltaOwner(Map a, Map b) {
+        if (!eq(a.get("type"), b.get("type")) || !eq(a.get("runId"), b.get("runId"))) {
+            return false;
+        }
+        return eq(agentNameOf(a), agentNameOf(b));
+    }
+
+    private static Object agentNameOf(Map bean) {
+        Object args = bean.get("args");
+        return (args instanceof Map) ? ((Map) args).get("agentName") : null;
+    }
+
+    private static boolean eq(Object a, Object b) {
+        return a == null ? b == null : a.equals(b);
+    }
+
+    private static long seqOf(Map bean) {
+        Object raw = bean == null ? null : bean.get("eventSeq");
+        if (raw instanceof Number) {
+            return ((Number) raw).longValue();
+        }
+        try {
+            return raw == null ? 0 : Long.parseLong(String.valueOf(raw));
+        } catch (NumberFormatException ignore) {
+            return 0;
+        }
+    }
+
+    /**
+     * 不做 JSON 反序列化地取出一行的 {@code eventSeq}（分页扫描要跑全文件，全量 parse 太浪费）。
+     * 取不到时返回 0，调用方按「无序号的旧行」处理。
+     */
+    private static long rawEventSeq(String line) {
+        int at = line.indexOf("\"eventSeq\":");
+        if (at < 0) {
+            return 0;
+        }
+        int i = at + 11;
+        int n = line.length();
+        while (i < n && (line.charAt(i) == ' ' || line.charAt(i) == '"')) {
+            i++;
+        }
+        long v = 0;
+        boolean any = false;
+        while (i < n && line.charAt(i) >= '0' && line.charAt(i) <= '9') {
+            v = v * 10 + (line.charAt(i) - '0');
+            any = true;
+            i++;
+        }
+        return any ? v : 0;
+    }
+
+    /**
+     * 是否为一轮对话的起始边界。{@code user}（网页手输）与 {@code user_input}（定时任务推送）
+     * 在前端回放里都渲染成用户气泡，故都算边界。
+     *
+     * <p>与 {@link #isUserLine} 分开：后者服务于 rewind 的回退语义，口径改动会影响回退轮数。</p>
+     */
+    private static boolean isRoundBoundary(String line) {
+        if (line == null) {
+            return false;
+        }
+        if (line.indexOf("\"type\":\"user\"") < 0 && line.indexOf("\"type\":\"user_input\"") < 0) {
+            return false;
+        }
+        try {
+            String type = ONode.ofJson(line).get("type").getString();
+            return "user".equals(type) || "user_input".equals(type);
+        } catch (Throwable ignore) {
+            return false;
+        }
     }
 
     public static class LoadResult {
@@ -309,6 +568,10 @@ public class SessionStreamStore {
         public long firstSeq;
         public long lastSeq;
         public long latestSeq;
+        /** 会话内的对话轮总数（user 消息条数） */
+        public int totalRounds;
+        /** 本页之前尚未加载的对话轮数（供「显示之前的 N 条消息」计数） */
+        public int remainingRounds;
     }
 
     /**

@@ -29,9 +29,7 @@ import com.gourdai.agent.react.intercept.HITLInterceptor;
 import com.gourdai.agent.react.intercept.ContextCompressionInterceptor;
 import com.gourdai.agent.react.intercept.CompressionStrategy;
 import com.gourdai.agent.react.intercept.StopLoopInterceptor;
-import com.gourdai.agent.react.intercept.compress.CompositeCompressionStrategy;
-import com.gourdai.agent.react.intercept.compress.HierarchicalCompressionStrategy;
-import com.gourdai.agent.react.intercept.compress.KeyInfoExtractionStrategy;
+import com.gourdai.agent.react.intercept.compress.UnifiedCompressionStrategy;
 import org.noear.solon.ai.chat.CacheControl;
 import org.noear.solon.ai.chat.ChatConfig;
 import org.noear.solon.ai.chat.ChatModel;
@@ -478,6 +476,72 @@ public class HarnessEngine {
         }
     }
 
+    /**
+     * 设置压缩后的目标水位比例（10~95）。决定「压到多深」，与触发比例解耦。
+     */
+    public void setCompressionTargetRatio(Integer compressionTargetRatio) {
+        if (compressionTargetRatio != null) {
+            options.setCompressionTargetRatio(compressionTargetRatio);
+            options.getCompressionInterceptor().setCompressionTargetRatio(options.getCompressionTargetRatio());
+        }
+    }
+
+    public int getCompressionTargetRatio() {
+        return options.getCompressionTargetRatio();
+    }
+
+    /** 设置为模型单轮输出预留的 token 数（绝对量）。 */
+    public void setCompressionReservedOutputTokens(Integer value) {
+        if (value != null) {
+            options.setCompressionReservedOutputTokens(value);
+            options.getCompressionInterceptor().setReservedOutputTokens(options.getCompressionReservedOutputTokens());
+        }
+    }
+
+    public int getCompressionReservedOutputTokens() {
+        return options.getCompressionReservedOutputTokens();
+    }
+
+    /** 启用/关闭会话意图链（防多轮对话意图漂移）。 */
+    public void setIntentChainEnabled(Boolean value) {
+        if (value != null) {
+            options.setIntentChainEnabled(value);
+            options.getCompressionInterceptor().setIntentChainEnabled(options.isIntentChainEnabled());
+        }
+    }
+
+    public boolean isIntentChainEnabled() {
+        return options.isIntentChainEnabled();
+    }
+
+    public void setIntentChainMaxTokens(Integer value) {
+        if (value != null) {
+            options.setIntentChainMaxTokens(value);
+            options.getCompressionInterceptor().setIntentChainMaxTokens(options.getIntentChainMaxTokens());
+        }
+    }
+
+    public int getIntentChainMaxTokens() {
+        return options.getIntentChainMaxTokens();
+    }
+
+    // ========== 手动压缩（/compact） ==========
+
+    /**
+     * 请求在下一轮推理开始时强制执行一次压缩（无视阈值）。
+     *
+     * <p>自动压缩只在触达阈值时发生，但用户往往比阈值更早知道
+     * 「前面那一大段探索已经没用了」。</p>
+     */
+    public void requestCompact() {
+        options.getCompressionInterceptor().requestCompact();
+    }
+
+    /** 设置下一次压缩的 focus 指令（透传给摘要模型）。 */
+    public void setCompactFocus(String focus) {
+        options.getCompressionInterceptor().setCompactFocus(focus);
+    }
+
     public void setSystemPrompt(String systemPrompt) {
         if (Assert.isNotEmpty(systemPrompt)) {
             options.setSystemPrompt(systemPrompt);
@@ -772,9 +836,10 @@ public class HarnessEngine {
 
         //上下文压缩拦截器默认处理
         if (options.getCompressionInterceptor() == null) {
-            CompressionStrategy strategy = new CompositeCompressionStrategy()
-                    .addStrategy(new KeyInfoExtractionStrategy())      // 提取干货（去水）
-                    .addStrategy(new HierarchicalCompressionStrategy()); // 滚动更新摘要
+            // 单次 LLM 调用完成「关键信息提取 + 滚动摘要 + 防意图漂移」。
+            // 旧装配 Composite(KeyInfo + Hierarchical) 会把同一段历史独立发给 LLM 两次，
+            // 输入 token 与调用次数均翻倍；两者职责可在一个 prompt 内用分段完成。
+            CompressionStrategy strategy = new UnifiedCompressionStrategy();
 
             options.setCompressionInterceptor(new ContextCompressionInterceptor(
                     options.getCompressionMaxMessages(),
@@ -786,6 +851,10 @@ public class HarnessEngine {
         options.getCompressionInterceptor().setMaxRetries(options.getModelRetries());
         options.getCompressionInterceptor().setDefaultContextLength(options.getCompressionDefaultContextLength());
         options.getCompressionInterceptor().setCompressionRatio(options.getCompressionRatio());
+        options.getCompressionInterceptor().setCompressionTargetRatio(options.getCompressionTargetRatio());
+        options.getCompressionInterceptor().setReservedOutputTokens(options.getCompressionReservedOutputTokens());
+        options.getCompressionInterceptor().setIntentChainEnabled(options.isIntentChainEnabled());
+        options.getCompressionInterceptor().setIntentChainMaxTokens(options.getIntentChainMaxTokens());
 
         //停止循环拦截器默认处理
         if (options.getStopLoopInterceptor() == null) {
@@ -1208,6 +1277,26 @@ public class HarnessEngine {
 
         public Builder compressionRatio(Integer compressionRatio) {
             options.setCompressionRatio(compressionRatio);
+            return this;
+        }
+
+        public Builder compressionTargetRatio(Integer compressionTargetRatio) {
+            options.setCompressionTargetRatio(compressionTargetRatio);
+            return this;
+        }
+
+        public Builder compressionReservedOutputTokens(Integer value) {
+            options.setCompressionReservedOutputTokens(value);
+            return this;
+        }
+
+        public Builder intentChainEnabled(Boolean value) {
+            options.setIntentChainEnabled(value);
+            return this;
+        }
+
+        public Builder intentChainMaxTokens(Integer value) {
+            options.setIntentChainMaxTokens(value);
             return this;
         }
 

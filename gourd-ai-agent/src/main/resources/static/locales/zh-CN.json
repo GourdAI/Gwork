@@ -1,4 +1,4 @@
-﻿{
+{
     "streaming":  {
                       "describe_images":  "请描述这些图片",
                       "process_files":  "请帮我处理这些文件",
@@ -77,8 +77,8 @@
                     "confirm_delete":  "确定删除对话",
                     "untitled":  "未命名",
                     "delete_failed":  "删除对话失败，请重试",
-                    "load_more_before":  "显示之前的",
-                    "load_more_messages":  "条消息",
+                    "load_more_messages":  "显示之前的 {0} 条消息",
+                    "load_more_earlier":  "显示更早的消息",
                     "loading":  "加载中...",
                     "no_input_history":  "暂无输入历史",
                     "search_placeholder":  "搜索历史消息...",
@@ -293,12 +293,18 @@
                                                         "theme_desc":  "切换界面主题为深色或浅色"
                                                     },
                                      "conversation":  {
-                                                          "title":  "对话策略",
+                                                          "title":  "上下文压缩策略",
                                                           "history_window":  "历史窗口大小",
                                                           "history_window_placeholder":  "默认 30",
                                                           "compression_ratio":  "压缩触发比例(%)",
-                                                          "compression_ratio_placeholder":  "默认 80",
-                                                          "hint":  "历史窗口：压缩时始终保护最后多少条消息完整不压缩；压缩触发比例：上下文占用达到「模型窗口 × 该比例%」时，自动把中间执行过程压缩为摘要（原始意图与最后 N 条完整保留）"
+                                                          "compression_ratio_placeholder":  "默认 100",
+                                                          "compression_target_ratio":  "压缩目标水位(%)",
+                                                          "compression_target_ratio_placeholder":  "默认 45",
+                                                          "reserved_output":  "单轮输出预留(tokens)",
+                                                          "reserved_output_placeholder":  "默认 20000",
+                                                          "intent_chain":  "会话意图链",
+                                                          "intent_chain_desc":  "压缩时保留用户历轮提问的精简索引（成本极低），防止多轮对话中围着早已完成的旧目标打转",
+                                                          "hint":  "历史窗口：压缩时始终保护最后多少条消息完整不压缩\n单轮输出预留：为模型下一轮回复预留的绝对空间，触发点 =「模型窗口 − 该预留 − 回合缓冲」\n压缩触发比例：仅用于「提前」触发（取两者较小值），100 表示不额外提前\n压缩目标水位：决定一次压到多深，值越高压得越浅、触发越频繁"
                                                       },
                                      "sandbox":  {
                                                      "title":  "沙盒模式",

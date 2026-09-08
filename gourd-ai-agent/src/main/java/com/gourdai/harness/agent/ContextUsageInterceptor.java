@@ -51,6 +51,11 @@ import reactor.core.publisher.FluxSink;
 public class ContextUsageInterceptor extends AbsReActInterceptor {
     private static final Logger LOG = LoggerFactory.getLogger(ContextUsageInterceptor.class);
 
+    /** 上一轮模型返回的真实输入 token（含缓存），供压缩拦截器校准本地估算 */
+    public static final String CTX_LAST_REAL_INPUT_TOKENS = "ctx:last_real_input_tokens";
+    /** 上述真实用量对应的消息条数（用于判断校准值是否过期） */
+    public static final String CTX_LAST_REAL_MESSAGE_COUNT = "ctx:last_real_message_count";
+
     @Override
     public void onReasonEnd(ReActTrace trace, ChatResponse resp, AssistantMessage message, long durationMs) {
         if (resp == null) {
@@ -80,6 +85,17 @@ public class ContextUsageInterceptor extends AbsReActInterceptor {
             }
         } catch (Exception ignore) {
             // 消息数仅用于展示，取不到不影响用量推送
+        }
+
+        // ⭐ 回灌真实用量给压缩决策：
+        //    压缩拦截器用 jtokkit 本地估算，与模型实际计费口径存在偏差（不同 tokenizer、
+        //    供应商额外开销等）。这里把上一轮的真实 input_tokens 存入 trace，
+        //    供下一轮 onReasonStart 作为校准锚点，使触发判据贴合真实计费。
+        try {
+            trace.setExtra(CTX_LAST_REAL_INPUT_TOKENS, inputTokens);
+            trace.setExtra(CTX_LAST_REAL_MESSAGE_COUNT, messageCount);
+        } catch (Exception ignore) {
+            // 校准仅为优化，失败时回退到纯本地估算
         }
 
         pushUsageChunk(trace, inputTokens, outputTokens, cacheCreation, cacheRead, cacheRate, messageCount);

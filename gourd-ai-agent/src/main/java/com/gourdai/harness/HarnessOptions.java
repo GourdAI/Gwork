@@ -68,8 +68,16 @@ class HarnessOptions implements Serializable {
     private volatile int sessionWindowSize = 8;
     private volatile int compressionMaxMessages = 30;
     private volatile long compressionDefaultContextLength = ContextCompressionInterceptor.DEFAULT_CONTEXT_LENGTH;
-    // 压缩触发比例（1~100）：占用达到 "当前模型 contextLength × 比例%" 时触发压缩
-    private volatile int compressionRatio = 80;
+    // 压缩触发比例（1~100）：作为「提前触发」的上限钳制器，与绝对阈值取 min。
+    // 100 = 不额外提前，完全由「窗口 − 输出预留 − 回合缓冲」决定。
+    private volatile int compressionRatio = 100;
+    // 压缩后的目标水位比例（决定「压到多深」）
+    private volatile int compressionTargetRatio = 45;
+    // 为模型单轮输出预留的 token（绝对量）
+    private volatile int compressionReservedOutputTokens = 20_000;
+    // 会话意图链（防多轮对话意图漂移）
+    private volatile boolean intentChainEnabled = true;
+    private volatile int intentChainMaxTokens = 2_000;
     private volatile String compressionModel; //压缩大模型
 
     // ========== 记忆 ==========
@@ -236,6 +244,46 @@ class HarnessOptions implements Serializable {
 
     int getCompressionRatio() {
         return compressionRatio;
+    }
+
+    int getCompressionTargetRatio() {
+        return compressionTargetRatio;
+    }
+
+    void setCompressionTargetRatio(Integer value) {
+        if (value != null) {
+            this.compressionTargetRatio = Math.min(95, Math.max(10, value));
+        }
+    }
+
+    int getCompressionReservedOutputTokens() {
+        return compressionReservedOutputTokens;
+    }
+
+    void setCompressionReservedOutputTokens(Integer value) {
+        if (value != null) {
+            this.compressionReservedOutputTokens = Math.max(1_000, value);
+        }
+    }
+
+    boolean isIntentChainEnabled() {
+        return intentChainEnabled;
+    }
+
+    void setIntentChainEnabled(Boolean value) {
+        if (value != null) {
+            this.intentChainEnabled = value;
+        }
+    }
+
+    int getIntentChainMaxTokens() {
+        return intentChainMaxTokens;
+    }
+
+    void setIntentChainMaxTokens(Integer value) {
+        if (value != null) {
+            this.intentChainMaxTokens = Math.max(200, value);
+        }
     }
 
     /**

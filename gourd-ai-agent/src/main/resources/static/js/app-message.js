@@ -9,10 +9,9 @@ var OK_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke
 var RERUN_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>';
 var CONTINUE_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>';
 
-/* trace 用量小图标（线条风格，替代 emoji：输入=下箭头 / 缓存=循环 / 输出=上箭头 / 耗时=时钟） */
-var TRACE_IN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>';
-var TRACE_CACHE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>';
-var TRACE_OUT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>';
+/* trace 耗时小图标（线条风格：时钟）。
+   token 用量图标（输入/缓存/输出）已移除：用量只在输入框上方的上下文指示条展示一处，
+   避免两处不同统计口径（本轮累计 vs 本次推理）并列造成歧义，详见 appendTraceBadge。 */
 var TRACE_TIME_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>';
 
 /* ===== Message Rendering (Session-Aware) ===== */
@@ -1365,46 +1364,28 @@ function clearRetryChunk(sess) {
     }
 }
 
-/* ===== Trace Badge ===== */
+/* ===== Trace Badge =====
+   只展示耗时。token 用量（输入/缓存/输出）故意不在此展示：
+   本行数据源为 trace.getMetrics()，是「本轮累计」口径（所有 ReAct 迭代求和）；
+   而输入框上方的上下文指示条是「本次推理」口径（每轮 onReasonEnd 覆盖一次）。
+   两者分母不同，数字天然对不上（尤其缓存命中率：累计值含首次冷缓存，按输入量加权后必然低于末次），
+   并列展示会让用户误以为统计出错。故用量统一只在指示条展示一处。 */
 function appendTraceBadge(sess, chunk) {
     ensureAssistantBubble(sess);
     // 后端携带的最终答案为权威复制源，写到当前 .md-content 的 data-md-raw（与历史消息统一属性名），供复制按钮读取。
     if (chunk.finalAnswer != null && sess.currentBubbleEl) {
         sess.currentBubbleEl.setAttribute('data-md-raw', chunk.finalAnswer);
     }
-    function fmtK(n) {
-        if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'm';
-        if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
-        return n.toString();
-    }
     function fmtSec(s) {
         if (s >= 60) { var m = Math.floor(s / 60), r = s % 60; return r > 0 ? m + 'min ' + r + 's' : m + 'min'; }
         return s + 's';
     }
-    // 图标化：以小图标替代"输入/缓存/输出/耗时"文字标签，节省横向空间；title 保留完整中文语义以便悬停理解
+    // 图标化：以小图标替代"耗时"文字标签，节省横向空间；title 保留完整中文语义以便悬停理解
     function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
     function item(icon, val, tip) {
         return '<span class="trace-item" title="' + esc(tip) + '"><span class="trace-ic">' + icon + '</span>' + esc(val) + '</span>';
     }
     var parts = [];
-    if (chunk.inputTokens) {
-        parts.push(item(TRACE_IN_SVG, fmtK(chunk.inputTokens), GourdI18n.t('chat.input_tokens')));
-        // 缓存读取占比通常很大（开启 Prompt Caching 后输入几乎全走缓存），单独标注避免"输入虚小"的误解；
-        // 同时附命中率百分比（自带分母，不需用户心算缓存占输入的比例）
-        if (chunk.cacheReadTokens) {
-            var cacheVal = fmtK(chunk.cacheReadTokens);
-            var cacheTip = GourdI18n.t('chat.cache_read_tokens');
-            // 命中率格式化复用 app-context.js 的 fmtCacheRate，保证两处精度口径一致
-            var rateTxt = (typeof fmtCacheRate === 'function') ? fmtCacheRate(chunk.cacheRate) : '';
-            if (rateTxt) {
-                cacheVal += ' (' + rateTxt + ')';
-                // 本行为「本轮累计」口径（多次 ReAct 迭代汇总），与指示条的「本次推理」口径不同，在 title 中标注区分
-                cacheTip += ' · ' + GourdI18n.t('chat.cache_hit_rate') + ' ' + rateTxt;
-            }
-            parts.push(item(TRACE_CACHE_SVG, cacheVal, cacheTip));
-        }
-    }
-    if (chunk.outputTokens != null) parts.push(item(TRACE_OUT_SVG, fmtK(chunk.outputTokens), GourdI18n.t('chat.output_tokens')));
     if (chunk.elapsedSeconds != null) parts.push(item(TRACE_TIME_SVG, fmtSec(chunk.elapsedSeconds), GourdI18n.t('chat.elapsed_time')));
     if (parts.length === 0) return;
 

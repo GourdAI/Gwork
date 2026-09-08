@@ -801,8 +801,11 @@ $(document).on('click', '#clearAllBtn', function () {
     });
 });
 
-/* 尾部加载配置：初始加载最后 N 条事件（约 30 轮对话），避免长对话一次性加载过慢 */
-var REPLAY_TAIL_SIZE = 150;
+/* 历史分页配置：以「对话轮」为单位（一轮 = 一条用户消息 + 其后的全部 AI 过程）。
+   不能用事件行数分页：text/reason 是 token 级增量，实测占全部事件的 ~92%
+   （某会话 15383 行里 14190 行是增量，真实用户消息只有 11 条），
+   按行分页时「一页 150 行」实际连半轮对话都不到，用户点一次几乎看不到新内容。 */
+var REPLAY_PAGE_ROUNDS = 5;
 
 function loadMessages(sess) {
     var rootQ = sessionRootQ(sess);
@@ -812,14 +815,15 @@ function loadMessages(sess) {
     beginGateBuffer(sess);
     // 优先尝试「流式过程回放」：若该会话已落盘完整过程事件（工具卡片/思考/正文/trace），
     // 原样重建，历史里也能看到「做了哪些操作」。无回放数据时回退到旧的纯文本加载。
-    // 为优化长对话加载性能，初始只加载尾部 REPLAY_TAIL_SIZE 条事件。
-    $.get('/web/chat/replay?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ + '&tail=' + REPLAY_TAIL_SIZE, function(rp) {
+    // 初始只加载最后 REPLAY_PAGE_ROUNDS 轮对话。
+    $.get('/web/chat/replay?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ + '&rounds=' + REPLAY_PAGE_ROUNDS, function(rp) {
         var rpData = rp && rp.data;
         if (rpData && rpData.events && rpData.events.length > 0) {
             try {
-                sess._replayTotalCount = rpData.totalCount || 0;
-                sess._replayHasMore = rpData.hasMore || false;
-                sess._replayLoadedCount = rpData.events.length;
+                sess._replayHasMore = !!rpData.hasMore;
+                sess._replayRemainingRounds = rpData.remainingRounds || 0;
+                // 向上翻页游标：本页最早事件的 seq，下次只取比它更早的，不再重拉整段历史
+                sess._replayFirstSeq = rpData.firstSeq || 0;
                 // 快照覆盖集：标识「回放已渲染的事件」，供缓冲/迟到的实时帧去重（本轮 done 时清除）
                 sess._replayCoverage = buildReplayCoverage(rpData.events);
                 // 尾部快照中实际渲染的最大 eventSeq 才是稳定游标；不能使用 latestSeq（文件可能还有未渲染的新事件）。
@@ -842,53 +846,48 @@ function loadMessages(sess) {
 }
 
 /**
- * 加载更多历史消息（prepend 到现有内容之前）
+ * 加载更早的历史消息（prepend 到现有内容之前）。
+ * 按游标（_replayFirstSeq）向前取 REPLAY_PAGE_ROUNDS 轮，服务端只回传这一页，
+ * 不会像旧实现那样每次从尾部重取「已加载 + 一页」导致越翻越慢。
  */
 function loadMoreMessages(sess) {
     if (!sess || sess._replayLoadingMore || sess.sessionId !== activeSessionId) return;
+    if (!sess._replayHasMore) return;
     sess._replayLoadingMore = true;
     // prepend 回放期间缓冲实时帧，避免混入临时容器（replayDone 后排空）
     beginGateBuffer(sess);
+    // 翻页窗口内挂锁视口：任务执行中时，缓冲帧排空会触发 finishStream 的
+    // scrollToBottom(true)，它会无视 userScrolledUp 把用户从旧内容处拽到底部。
+    holdScrollAnchor();
 
     var rootQ = sessionRootQ(sess);
-    // 需要加载的总数量 = 已加载 + 更多
-    var needTotal = sess._replayLoadedCount + REPLAY_TAIL_SIZE;
-    // tail 参数：从尾部取 needTotal 条，但我们只要其中最早的那 REPLAY_TAIL_SIZE 条
-    var prevTotal = sess._replayTotalCount || 0;
-    var tail = Math.min(needTotal, prevTotal);
+    var beforeQ = sess._replayFirstSeq ? '&beforeSeq=' + sess._replayFirstSeq : '';
 
-    // 移除加载按钮（稍后由 replayDone→updateLoadMoreBtn 重建）
-    $(sess.container).prev('.chat-load-more-wrapper').remove();
+    // 保留加载按钮并置为 loading：旧实现在发请求时就把按钮整个移除，响应返回前
+    // 顶部凭空矮了一截（约 54px），内容当场上跳；现在交由 updateLoadMoreBtn 在
+    // prepend 后、锚定修正前重建，高度变化能被锚点整体吸收。
+    $(sess.container).prev('.chat-load-more-wrapper').find('.chat-load-more-btn').addClass('loading');
 
-    $.get('/web/chat/replay?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ + '&tail=' + tail, function(rp) {
+    $.get('/web/chat/replay?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ
+            + '&rounds=' + REPLAY_PAGE_ROUNDS + beforeQ, function(rp) {
         // 请求返回后，如果用户已切换会话，丢弃结果 — 不污染新会话的滚动和 DOM
-        if (sess.sessionId !== activeSessionId) { sess._replayLoadingMore = false; drainGateBuffer(sess); return; }
+        if (sess.sessionId !== activeSessionId) { sess._replayLoadingMore = false; releaseScrollAnchor(); drainGateBuffer(sess); return; }
         var rpData = rp && rp.data;
         if (rpData && rpData.events && rpData.events.length > 0) {
-            // 会话可能仍在流式：totalCount 相对发请求时已增长，tail 窗口尾部是
-            // 「比已加载区间更新的事件」，不能当作更老历史 prepend（旧版直接
-            // newCount=events-loaded，假设 totalCount 不增长，导致重叠区间渲染两次）。
-            var grown = (rpData.totalCount || 0) - prevTotal;
-            if (grown < 0) grown = 0;
-            var newCount = rpData.events.length - sess._replayLoadedCount - grown;
-            if (newCount < 0) newCount = 0;
-            sess._replayTotalCount = rpData.totalCount || prevTotal;
-            sess._replayHasMore = rpData.hasMore || (sess._replayLoadedCount + newCount < sess._replayTotalCount);
-            if (newCount > 0) {
-                var olderEvents = rpData.events.slice(0, newCount);
-                for (var ose = 0; ose < olderEvents.length; ose++) {
-                    var oldSeq = Number(olderEvents[ose] && olderEvents[ose].eventSeq || 0);
-                    if (oldSeq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, oldSeq);
-                }
-                sess._replayLoadedCount += newCount;
-                // 标记为 prepend 模式，replayDone 会根据 scrollHeight 差值自动恢复滚动位置（缓冲在 replayDone 排空）
-                replaySession(sess, olderEvents, true);
-            } else {
-                drainGateBuffer(sess);
-                if (typeof updateLoadMoreBtn === 'function') updateLoadMoreBtn(sess);
-            }
+            // 游标分页天然只返回「更早」的事件，无需再按 totalCount 增长做重叠区间修正：
+            // 会话仍在流式时新事件的 seq 只会更大，不可能落进 beforeSeq 之前的窗口。
+            sess._replayHasMore = !!rpData.hasMore;
+            sess._replayRemainingRounds = rpData.remainingRounds || 0;
+            if (rpData.firstSeq) sess._replayFirstSeq = rpData.firstSeq;
+            // 标记为 prepend 模式：replayDone 会以视口顶部消息行为锚点恢复滚动位置（缓冲在 replayDone 排空）
+            replaySession(sess, rpData.events, true);
         } else {
+            // 没有更早的事件了：收起入口，避免留下永远点不出内容的按钮
+            sess._replayHasMore = false;
+            sess._replayRemainingRounds = 0;
             drainGateBuffer(sess);
+            if (typeof updateLoadMoreBtn === 'function') updateLoadMoreBtn(sess);
+            releaseScrollAnchor();
         }
         sess._replayLoadingMore = false;
     }).fail(function() {
@@ -896,6 +895,7 @@ function loadMoreMessages(sess) {
         drainGateBuffer(sess);
         // 请求失败时恢复按钮，避免用户永久丢失加载入口
         if (typeof updateLoadMoreBtn === 'function') updateLoadMoreBtn(sess);
+        releaseScrollAnchor();
     });
 }
 
@@ -911,16 +911,22 @@ function updateLoadMoreBtn(sess) {
 
     // 只移除当前会话容器前的加载按钮
     $(sess.container).prev('.chat-load-more-wrapper').remove();
-    
+
     if (sess._replayHasMore) {
-        var remaining = sess._replayTotalCount - sess._replayLoadedCount;
-        if (remaining <= 0) return;  // 已加载完
+        // 计数单位是「用户消息条数」，与用户在界面上数得出来的气泡一致；
+        // 旧实现显示的是 ndjson 事件行数（含 token 级增量），既看不懂又会随流式增长而变大。
+        // 文案改用单键占位符格式化：旧实现拼接 load_more_before + load_more_messages 两段，
+        // 而多数语种两个键各自就是含 {0} 的完整句，拼出来是重复病句。
+        var remaining = sess._replayRemainingRounds || 0;
+        var label = remaining > 0
+            ? GourdI18n.t('history.load_more_messages', ['<span class="load-more-count">' + remaining + '</span>'])
+            : GourdI18n.t('history.load_more_earlier');
         var html = '<div class="chat-load-more-wrapper fade-enter">' +
             '<button class="chat-load-more-btn">' +
                 '<svg class="load-more-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
                     '<polyline points="18 15 12 9 6 15"></polyline>' +
                 '</svg>' +
-                GourdI18n.t('history.load_more_before') + ' <span class="load-more-count">' + remaining + '</span> ' + GourdI18n.t('history.load_more_messages') +
+                label +
             '</button>' +
         '</div>';
         var $btn = $(html);
@@ -945,6 +951,17 @@ function updateLoadMoreBtn(sess) {
         });
     }
 }
+
+/* 向上滚动到顶部附近时自动加载上一页（按钮保留作为显式入口与加载态提示）。
+   仅在已渲染完当前页、且不处于回放/缓冲态时触发，避免与 prepend 的滚动补偿打架。 */
+$(messagesWrap).on('scroll', function() {
+    if (messagesWrap.scrollTop > 240) return;
+    var sess = activeSessionId && sessionMap ? sessionMap[activeSessionId] : null;
+    if (!sess || !sess._replayHasMore) return;
+    if (sess._replayLoadingMore || sess._replaying || sess._gateBuffering) return;
+    $(sess.container).prev('.chat-load-more-wrapper').find('.chat-load-more-btn').addClass('loading');
+    loadMoreMessages(sess);
+});
 
 /* ===== 回放/实时流互斥门禁 =====
    新版事件携带 eventSeq：历史快照与实时缓冲统一按会话游标去重、排序；
@@ -1116,17 +1133,38 @@ function replaySession(sess, events, prepend, keepOpen) {
         sess.container = realContainer;
         var fragment = document.createDocumentFragment();
         while (tempDiv.firstChild) { fragment.appendChild(tempDiv.firstChild); }
+        // prepend 的空气泡清扫只能扫本页新插入的节点，故先留存引用（入 DOM 后 fragment 会被清空）
+        var prependedRows = prepend ? Array.prototype.slice.call(fragment.childNodes) : null;
 
         if (prepend) {
-            // 加载更多：记录插入前的滚动位置和总高度
-            var oldScrollHeight = messagesWrap.scrollHeight;
-            var oldScrollTop = messagesWrap.scrollTop;
+            // 选锚点：当前视口顶部第一个可见消息行，以及它相对视口的偏移。
+            // 不用 scrollHeight 差值：那个算法只在「高度变化全部发生在视口上方」时成立，
+            // 而下面的空气泡清理会删除视口下方的行、回放期间流式内容也在长高，
+            // 两者都会把 delta 算歪。锚定到具体元素则对任何位置的高度变化都免疫。
+            var anchorEl = null, anchorOffset = 0;
+            var wrapTop = messagesWrap.getBoundingClientRect().top;
+            var rows = realContainer.children;
+            for (var ai = 0; ai < rows.length; ai++) {
+                var rect = rows[ai].getBoundingClientRect();
+                // 第一个底边落在视口顶部下方的元素，即用户正在看的那一条
+                if (rect.bottom > wrapTop) { anchorEl = rows[ai]; anchorOffset = rect.top - wrapTop; break; }
+            }
+
             // prepend 插入到现有内容之前
             realContainer.insertBefore(fragment, realContainer.firstChild);
+
             // 清理回放过程中产生的空白助手消息（无内容、无工具卡、无思考块），
-            // 这些是分片边界处 finishStream 强刷空 buffer 留下的空壳
-            $(realContainer).find('.msg-row.assistant').each(function() {
-                var $row = $(this);
+            // 这些是分片边界处 finishStream 强刷空 buffer 留下的空壳。
+            // 只扫本页新插入的节点：旧实现扫全容器，会误删下方已有行——尤其是任务
+            // 执行中那个「已创建但还没收到首个 token」的实时气泡，删掉它会让
+            // sess.currentBubbleEl 指向脱离文档的节点，后续流式内容再也显示不出来。
+            for (var pi = 0; pi < prependedRows.length; pi++) {
+                var rowEl = prependedRows[pi];
+                if (rowEl.nodeType !== 1) continue;
+                var $row = $(rowEl);
+                if (!$row.hasClass('msg-row') || !$row.hasClass('assistant')) continue;
+                // 兜底：绝不清扫承载当前流式输出的节点
+                if (sess.currentBubbleEl && (rowEl === sess.currentBubbleEl || rowEl.contains(sess.currentBubbleEl))) continue;
                 var $bubble = $row.find('.msg-bubble');
                 var hasContent = $bubble.find('.md-content').filter(function() { return $(this).text().trim().length > 0; }).length > 0;
                 var hasTools = $row.find('.tool-card').length > 0;
@@ -1135,11 +1173,17 @@ function replaySession(sess, events, prepend, keepOpen) {
                 if (!hasContent && !hasTools && !hasThinking && !hasBadge) {
                     $row.remove();
                 }
-            });
-            // 用 scrollHeight delta 恢复滚动位置——新增内容在顶部，
-            // 把 scrollTop 增加相同 delta，用户视口中的内容视觉位置不变
-            var delta = messagesWrap.scrollHeight - oldScrollHeight;
-            messagesWrap.scrollTop = oldScrollTop + delta;
+            }
+
+            // 加载按钮在锚定修正之前重建：它插在容器顶部（高约 54px），若留到修正之后，
+            // 这段高度会在锚点上方凭空出现，把刚对齐好的内容再顶下去。
+            if (typeof updateLoadMoreBtn === 'function') updateLoadMoreBtn(sess);
+
+            // 把锚点回弹到原来的视口偏移，用户眼中的内容纹丝不动
+            if (anchorEl) {
+                var newTop = anchorEl.getBoundingClientRect().top - messagesWrap.getBoundingClientRect().top;
+                messagesWrap.scrollTop += (newTop - anchorOffset);
+            }
         } else {
             // 初始加载模式：清空后移入
             $(realContainer).html('');
@@ -1180,6 +1224,8 @@ function replaySession(sess, events, prepend, keepOpen) {
         }
 
         // 排空回放期间累积的实时帧缓冲，按同一游标去重。
+        // 注意：prepend 时视口锚锁仍生效——缓冲里的 done 帧会走 finishStream →
+        // scrollToBottom(true)，不锁住就会把刚对齐的视口直接拽到底部。
         drainGateBuffer(sess);
 
         if (!prepend) {
@@ -1187,8 +1233,12 @@ function replaySession(sess, events, prepend, keepOpen) {
             if (sess.sessionId === activeSessionId) scrollToBottom(true);
             if (typeof updateLoadMoreBtn === 'function') updateLoadMoreBtn(sess);
         } else {
-            // prepend 滚动已在 DOM 插入后处理完成
-            if (typeof updateLoadMoreBtn === 'function') updateLoadMoreBtn(sess);
+            // 按钮与滚动位置均已在 DOM 插入后处理完毕。
+            // 锚锁延到下一帧再释放：排空缓冲时投递的 rAF 滚动帧尚未执行，
+            // 此刻直接释放仍会被它们拽到底部。
+            requestAnimationFrame(function() {
+                requestAnimationFrame(function() { releaseScrollAnchor(); });
+            });
         }
 
     }

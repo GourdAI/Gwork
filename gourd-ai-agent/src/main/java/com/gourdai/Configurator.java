@@ -144,6 +144,10 @@ public class Configurator {
                 // 历史窗口大小用于保留窗口兜底（minReservedMessages = maxMessages / 3）
                 .compressionThreshold(settings.getGeneral().getHistoryWindowSize())
                 .compressionRatio(settings.getGeneral().getCompressionRatio())
+                .compressionTargetRatio(settings.getGeneral().getCompressionTargetRatio())
+                .compressionReservedOutputTokens(settings.getGeneral().getCompressionReservedOutputTokens())
+                .intentChainEnabled(settings.getGeneral().getIntentChainEnabled())
+                .intentChainMaxTokens(settings.getGeneral().getIntentChainMaxTokens())
                 .compressionModel(settings.getGeneral().getSummaryModel())
                 .memoryEnabled(settings.getGeneral().getMemoryEnabled())
                 .memoryProvider(new MemoryProvider(agentSettings))
@@ -201,6 +205,7 @@ public class Configurator {
         engine.getCommandRegistry().register(new RerunCommand());
         engine.getCommandRegistry().register(new RewindCommand());
         engine.getCommandRegistry().register(new ModelCommand());
+        engine.getCommandRegistry().register(new CompactCommand());
 
         engine.getLspTalent().setEnabled(settings.getGeneral().getLspEnabled());
 

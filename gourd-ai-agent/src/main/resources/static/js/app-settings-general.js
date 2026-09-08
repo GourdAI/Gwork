@@ -55,6 +55,15 @@
                 var v = parseNumStr($('#generalCompressionRatio').val().trim());
                 return (v != null && v >= 1 && v <= 100) ? v : null;
             })(),
+            compressionTargetRatio: (function () {
+                var v = parseNumStr($('#generalCompressionTargetRatio').val().trim());
+                return (v != null && v >= 10 && v <= 95) ? v : null;
+            })(),
+            compressionReservedOutputTokens: (function () {
+                var v = parseNumStr($('#generalCompressionReservedOutputTokens').val().trim());
+                return (v != null && v >= 1000) ? v : null;
+            })(),
+            intentChainEnabled: $('#generalIntentChainEnabled').is(':checked'),
             sandboxMode: $('#generalSandboxMode').is(':checked'),
             sandboxAllowUserHome: $('#generalSandboxAllowUserHome').is(':checked'),
             sandboxSystemRestrict: $('#generalSandboxSystemRestrict').is(':checked'),
@@ -114,7 +123,8 @@
         'generalSubagentEnabled',
         'generalMcpEnabled',
         'generalOpenApiEnabled',
-        'generalLspEnabled'
+        'generalLspEnabled',
+        'generalIntentChainEnabled'
     ];
 
     $(document).on('change', '#' + switchIds.join(', #'), function () {
@@ -139,7 +149,7 @@
     }
 
     // ===== 数字输入框：input 事件 + 防抖 =====
-    $(document).on('input', '#generalHistoryWindowSize, #generalCompressionRatio, #generalModelRetries, #generalMcpRetries, #generalApiRetries', function () {
+    $(document).on('input', '#generalHistoryWindowSize, #generalCompressionRatio, #generalCompressionTargetRatio, #generalCompressionReservedOutputTokens, #generalModelRetries, #generalMcpRetries, #generalApiRetries', function () {
         saveGeneralSettings(false); // 防抖保存
     });
 
@@ -149,6 +159,9 @@
                 var d = resp.data;
                 $('#generalHistoryWindowSize').val(d.historyWindowSize != null ? d.historyWindowSize : '');
                 $('#generalCompressionRatio').val(d.compressionRatio != null ? d.compressionRatio : '');
+                $('#generalCompressionTargetRatio').val(d.compressionTargetRatio != null ? d.compressionTargetRatio : '');
+                $('#generalCompressionReservedOutputTokens').val(d.compressionReservedOutputTokens != null ? d.compressionReservedOutputTokens : '');
+                $('#generalIntentChainEnabled').prop('checked', d.intentChainEnabled !== false);
                 $('#generalSandboxMode').prop('checked', !!d.sandboxMode);
                 $('#generalSandboxAllowUserHome').prop('checked', d.sandboxAllowUserHome !== false);
                 $('#generalSandboxSystemRestrict').prop('checked', !!d.sandboxSystemRestrict);

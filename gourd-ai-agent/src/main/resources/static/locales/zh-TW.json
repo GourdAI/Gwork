@@ -1,4 +1,4 @@
-﻿{
+{
     "streaming":  {
                       "describe_images":  "描述圖片",
                       "process_files":  "處理檔案中",
@@ -77,8 +77,8 @@
                     "confirm_delete":  "確定刪除會話「{0}」嗎？",
                     "untitled":  "未命名",
                     "delete_failed":  "刪除會話失敗，請重試",
-                    "load_more_before":  "載入之前的 {0} 則訊息",
                     "load_more_messages":  "顯示之前的 {0} 則訊息",
+                    "load_more_earlier":  "顯示更早的訊息",
                     "loading":  "載入中…",
                     "no_input_history":  "暫無輸入歷史",
                     "search_placeholder":  "搜尋歷史…",
@@ -285,12 +285,18 @@
                                                         "theme_desc":  "切換介面主題為深色或淺色"
                                                     },
                                      "conversation":  {
-                                                          "title":  "對話策略",
+                                                          "title":  "上下文壓縮策略",
                                                           "history_window":  "歷史視窗大小",
                                                           "history_window_placeholder":  "預設 30",
                                                           "compression_ratio":  "壓縮觸發比例(%)",
-                                                          "compression_ratio_placeholder":  "預設 80",
-                                                          "hint":  "歷史視窗：壓縮時始終保護最後多少則訊息完整不壓縮；壓縮觸發比例：上下文佔用達到「模型視窗 × 該比例%」時，自動把中間執行過程壓縮為摘要（原始意圖與最後 N 則完整保留）"
+                                                          "compression_ratio_placeholder":  "預設 100",
+                                                          "compression_target_ratio":  "壓縮目標水位(%)",
+                                                          "compression_target_ratio_placeholder":  "預設 45",
+                                                          "reserved_output":  "單輪輸出預留(tokens)",
+                                                          "reserved_output_placeholder":  "預設 20000",
+                                                          "intent_chain":  "會話意圖鏈",
+                                                          "intent_chain_desc":  "壓縮時保留使用者歷輪提問的精簡索引（成本極低），防止多輪對話中圍著早已完成的舊目標打轉",
+                                                          "hint":  "歷史視窗：壓縮時始終保護最後多少則訊息完整不壓縮\n單輪輸出預留：為模型下一輪回覆預留的絕對空間，觸發點 =「模型視窗 − 該預留 − 回合緩衝」\n壓縮觸發比例：僅用於「提前」觸發（取兩者較小值），100 表示不額外提前\n壓縮目標水位：決定一次壓到多深，值越高壓得越淺、觸發越頻繁"
                                                       },
                                      "sandbox":  {
                                                      "title":  "沙盒模式",

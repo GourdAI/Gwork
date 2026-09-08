@@ -205,13 +205,10 @@ public class TeamAgent implements Agent<TeamRequest, TeamResponse> {
                     List<ChatMessage> history = session.getMessages();
                     for (int i = 0; i < history.size(); i++) {
                         ChatMessage message = history.get(i);
-                        if (i == 0) {
-                            //仅会话首条（原始意图）标记初心，永不被压缩
-                            message.addMetadata(AgentTrace.META_FIRST, 1);
-                        } else {
-                            //中间历史必须可被压缩：主动清除可能残留的初心标记（消息对象会跨轮复用）
-                            message.getMetadata().remove(AgentTrace.META_FIRST);
-                        }
+                        //历史消息一律可压缩（与 ReActAgent 保持一致）：
+                        //不再把「会话第一条」当作永久初心（多轮对话中用户目标会变），
+                        //历史意图改由压缩拦截器的「会话意图链」统一保留。
+                        message.getMetadata().remove(AgentTrace.META_FIRST);
                         trace.getWorkingMemory().addMessage(message);
                     }
                 }

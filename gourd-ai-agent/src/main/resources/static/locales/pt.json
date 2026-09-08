@@ -1,4 +1,4 @@
-﻿{
+{
     "streaming":  {
                       "describe_images":  "Por favor, descreva essas imagens",
                       "process_files":  "Por favor, ajude-me a processar esses arquivos",
@@ -77,8 +77,8 @@
                     "confirm_delete":  "Tem certeza que deseja excluir a conversa?",
                     "untitled":  "Sem título",
                     "delete_failed":  "Falha ao excluir a conversa, tente novamente",
-                    "load_more_before":  "Exibir anteriores",
-                    "load_more_messages":  "mensagens",
+                    "load_more_messages":  "Exibir {0} mensagens anteriores",
+                    "load_more_earlier":  "Mostrar mensagens anteriores",
                     "loading":  "Carregando...",
                     "no_input_history":  "Nenhum histórico de entrada",
                     "search_placeholder":  "Pesquisar no histórico...",
@@ -293,12 +293,18 @@
                                                         "theme_desc":  "Alternar tema da interface entre escuro e claro"
                                                     },
                                      "conversation":  {
-                                                          "title":  "Estratégia de conversa",
+                                                          "title":  "Compressão de contexto",
                                                           "history_window":  "Tamanho da janela de histórico",
                                                           "history_window_placeholder":  "Padrão 30",
                                                           "compression_ratio":  "Limite de compressão (%)",
-                                                          "compression_ratio_placeholder":  "Padrão 80",
-                                                          "hint":  "Janela de histórico: sempre proteger as últimas N mensagens da compressão; Limite de compressão: quando o uso de contexto atinge «janela do modelo × esta porcentagem%», o processo de execução intermediário é automaticamente compactado como resumo (a intenção original e as últimas N mensagens são preservadas integralmente)"
+                                                          "compression_ratio_placeholder":  "Padrão 100",
+                                                          "compression_target_ratio":  "Alvo de compressão (%)",
+                                                          "compression_target_ratio_placeholder":  "Padrão 45",
+                                                          "reserved_output":  "Saída reservada (tokens)",
+                                                          "reserved_output_placeholder":  "Padrão 20000",
+                                                          "intent_chain":  "Cadeia de intenções da sessão",
+                                                          "intent_chain_desc":  "Mantém ao comprimir um índice compacto dos pedidos anteriores do utilizador (custo muito baixo), evitando que o agente volte a insistir em objetivos já concluídos",
+                                                          "hint":  "Janela de histórico: quantas mensagens finais permanecem sempre sem compressão.\nSaída reservada: margem absoluta para a próxima resposta do modelo; ponto de acionamento = janela do modelo − reserva − buffer de turno.\nLimite de compressão: apenas antecipa o acionamento (aplica-se o menor dos dois); 100 significa sem antecipação adicional.\nAlvo de compressão: quão profunda é cada compressão — quanto maior, mais superficial e mais frequentes os acionamentos"
                                                       },
                                      "sandbox":  {
                                                      "title":  "Modo sandbox",

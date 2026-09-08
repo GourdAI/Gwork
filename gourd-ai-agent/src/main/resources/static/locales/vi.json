@@ -1,4 +1,4 @@
-﻿{
+{
     "streaming":  {
                       "describe_images":  "Mô tả những hình ảnh này",
                       "process_files":  "Xin vui lòng xử lý những tệp này",
@@ -77,8 +77,8 @@
                     "confirm_delete":  "Xác nhận xóa đoạn hội thoại",
                     "untitled":  "Chưa đặt tên",
                     "delete_failed":  "Xóa đoạn hội thoại thất bại, vui lòng thử lại",
-                    "load_more_before":  "Hiển thị trước",
-                    "load_more_messages":  "tin nhắn",
+                    "load_more_messages":  "Hiển thị {0} tin nhắn trước đó",
+                    "load_more_earlier":  "Hiển thị tin nhắn trước đó",
                     "loading":  "Đang tải...",
                     "no_input_history":  "Chưa có lịch sử nhập",
                     "search_placeholder":  "Tìm kiếm tin nhắn cũ...",
@@ -293,12 +293,18 @@
                                                         "theme_desc":  "Chuyển đổi giao diện giữa tối và sáng"
                                                     },
                                      "conversation":  {
-                                                          "title":  "Chiến lược hội thoại",
+                                                          "title":  "Nén ngữ cảnh",
                                                           "history_window":  "Kích thước cửa sổ lịch sử",
                                                           "history_window_placeholder":  "Mặc định 30",
                                                           "compression_ratio":  "Ngưỡng nén (%)",
-                                                          "compression_ratio_placeholder":  "Mặc định 80",
-                                                          "hint":  "Cửa sổ lịch sử: luôn bảo vệ N tin nhắn cuối khỏi bị nén; Ngưỡng nén: khi lượng ngữ cảnh đạt «cửa sổ mô hình × phần trăm này%», quá trình thực thi trung gian sẽ tự động nén thành tóm tắt (ý định gốc và N tin nhắn cuối vẫn nguyên vẹn)"
+                                                          "compression_ratio_placeholder":  "Mặc định 100",
+                                                          "compression_target_ratio":  "Mục tiêu nén (%)",
+                                                          "compression_target_ratio_placeholder":  "Mặc định 45",
+                                                          "reserved_output":  "Dự trữ đầu ra (tokens)",
+                                                          "reserved_output_placeholder":  "Mặc định 20000",
+                                                          "intent_chain":  "Chuỗi ý định phiên",
+                                                          "intent_chain_desc":  "Khi nén vẫn giữ lại chỉ mục rút gọn các yêu cầu trước đó của người dùng (chi phí rất thấp), tránh việc tác nhân quay lại các mục tiêu đã hoàn thành",
+                                                          "hint":  "Cửa sổ lịch sử: bao nhiêu tin nhắn cuối luôn được giữ nguyên không nén.\nDự trữ đầu ra: khoảng trống tuyệt đối cho lượt trả lời kế tiếp của mô hình; điểm kích hoạt = cửa sổ mô hình − phần dự trữ − bộ đệm lượt.\nNgưỡng nén: chỉ kích hoạt SỚM HƠN (lấy giá trị nhỏ hơn trong hai); 100 nghĩa là không kích hoạt sớm thêm.\nMục tiêu nén: mỗi lần nén sâu đến đâu — giá trị càng cao thì nén càng nông và kích hoạt càng thường xuyên"
                                                       },
                                      "sandbox":  {
                                                      "title":  "Chế độ Sandbox",

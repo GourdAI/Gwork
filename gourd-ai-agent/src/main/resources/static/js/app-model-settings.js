@@ -51,7 +51,8 @@
         // 先清空并隐藏内置分组，避免静态 HTML 在接口失败/后端未启动期间短暂露出。
         $groupBuiltin.hide();
         $builtinList.empty();
-        __whenBackendReady(loadProvidersListIfBackendReady);
+        // 静默预载：此时界面停在首页，拉不到供应商不应该弹窗打扰
+        __whenBackendReady(function () { loadProvidersListIfBackendReady(true); });
     }
 
     function bindEvents() {
@@ -365,7 +366,8 @@
 
         // 默认右栏为「添加供应商」表单；后端失败时不请求接口，也不影响自定义供应商表单使用。
         selectAdd();
-        __whenBackendReady(loadProvidersListIfBackendReady);
+        // 用户主动打开本页：失败要可见，否则只看到一个空列表
+        __whenBackendReady(function () { loadProvidersListIfBackendReady(false); });
     }
 
     /** 离开模型配置视图（切回聊天/欢迎/自动化/技能时由对应切换函数调用） */
@@ -425,16 +427,27 @@
         try { localStorage.setItem(LS_PROVIDER_ORDER, JSON.stringify(pruned)); } catch (e) { /* 存储不可用时忽略 */ }
     }
 
-    function loadProvidersListIfBackendReady() {
+    /**
+     * @param silent 见 loadProvidersList。启动预载传 true：用户此刻停在首页，
+     *        主页面不该冒出模型配置的失败提示；打开模型配置视图时传 false，
+     *        那是用户主动进入本页，列表空白必须给出原因。
+     */
+    function loadProvidersListIfBackendReady(silent) {
         if (typeof window.__backendReadyState === 'function' && window.__backendReadyState() === 'failed') {
             providers = [];
             renderProviderList();
             return;
         }
-        loadProvidersList();
+        loadProvidersList(null, silent);
     }
 
-    function loadProvidersList(onDone) {
+    /**
+     * @param silent 静默模式：接口失败时只记日志、不弹 toast。
+     *        冷启动预载（init / openModelSettings 前）走这条路：那时用户多半停在首页，
+     *        后端还没起来，弹一条「模型操作失败」既无从处理也解释不清（后端未就绪已有
+     *        右下角错误条兜底说明）。用户主动触发的增删改查仍要弹，否则操作静默失败更糟。
+     */
+    function loadProvidersList(onDone, silent) {
         $.ajax({
             url: '/web/settings/providers',
             method: 'GET',
@@ -462,6 +475,10 @@
                 }
             },
             error: function () {
+                if (silent) {
+                    console.warn('[model-settings] 供应商列表加载失败（启动预载，已静默）');
+                    return;
+                }
                 showToast(GourdI18n.t('common.loading') + GourdI18n.t('settings.providers.title') + GourdI18n.t('settings.loop.operation_failed'), 'error');
             },
             complete: function () {

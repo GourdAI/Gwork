@@ -45,7 +45,16 @@ public class AgentProperties implements Serializable {
 
     private int historyWindowSize = 30;
 
-    private int compressionRatio = 80;
+    //压缩触发比例：作为「提前触发」的上限钳制器，100 = 完全由绝对阈值决定
+    private int compressionRatio = 100;
+    //压缩后的目标水位比例（决定「压到多深」，过高会导致压缩抖动）
+    private int compressionTargetRatio = 45;
+    //为模型单轮输出预留的 token（绝对量）
+    private int compressionReservedOutputTokens = 20000;
+    //启用会话意图链（防多轮对话意图漂移）
+    private boolean intentChainEnabled = true;
+    //意图链 token 上限
+    private int intentChainMaxTokens = 2000;
     private String summaryModel; //摘要大模型
 
     private boolean memoryIsolation = true;

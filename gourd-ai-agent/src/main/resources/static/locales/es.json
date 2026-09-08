@@ -1,4 +1,4 @@
-﻿{
+{
     "streaming":  {
                       "describe_images":  "Describiendo imágenes",
                       "process_files":  "Procesando archivos",
@@ -77,8 +77,8 @@
                     "confirm_delete":  "¿Eliminar la sesión \"{0}\"?",
                     "untitled":  "Sin nombre",
                     "delete_failed":  "Error al eliminar la sesión, reintenta",
-                    "load_more_before":  "Cargar {0} mensajes anteriores",
                     "load_more_messages":  "Mostrar los {0} mensajes anteriores",
+                    "load_more_earlier":  "Mostrar mensajes anteriores",
                     "loading":  "Cargando…",
                     "no_input_history":  "Sin historial de entrada",
                     "search_placeholder":  "Buscar en el historial…",
@@ -293,12 +293,18 @@
                                                         "theme_desc":  "Cambiar el tema de la interfaz entre oscuro y claro"
                                                     },
                                      "conversation":  {
-                                                          "title":  "Estrategia de conversación",
+                                                          "title":  "Compresión de contexto",
                                                           "history_window":  "Tamaño de la ventana de historial",
                                                           "history_window_placeholder":  "Predeterminado 30",
                                                           "compression_ratio":  "Umbral de compresión (%)",
-                                                          "compression_ratio_placeholder":  "Predeterminado 80",
-                                                          "hint":  "Ventana de historial: siempre proteger las últimas N mensajes de la compresión; Umbral de compresión: cuando el uso de contexto alcanza «ventana del modelo × este porcentaje%», el proceso de ejecución intermedia se comprime automáticamente como resumen (la intención original y las últimas N mensajes se conservan íntegramente)"
+                                                          "compression_ratio_placeholder":  "Predeterminado 100",
+                                                          "compression_target_ratio":  "Objetivo de compresión (%)",
+                                                          "compression_target_ratio_placeholder":  "Predeterminado 45",
+                                                          "reserved_output":  "Salida reservada (tokens)",
+                                                          "reserved_output_placeholder":  "Predeterminado 20000",
+                                                          "intent_chain":  "Cadena de intenciones de sesión",
+                                                          "intent_chain_desc":  "Conserva al comprimir un índice compacto de las peticiones anteriores del usuario (coste muy bajo), para que el agente no siga girando en torno a objetivos ya completados",
+                                                          "hint":  "Ventana de historial: cuántos mensajes finales permanecen siempre sin comprimir.\nSalida reservada: margen absoluto para la siguiente respuesta del modelo; punto de activación = ventana del modelo − reserva − búfer de turno.\nUmbral de compresión: solo adelanta la activación (se aplica el menor de los dos); 100 significa sin adelanto adicional.\nObjetivo de compresión: qué tan profunda es cada compresión — cuanto mayor sea, más superficial será y más frecuentes las activaciones"
                                                       },
                                      "sandbox":  {
                                                      "title":  "Modo sandbox",

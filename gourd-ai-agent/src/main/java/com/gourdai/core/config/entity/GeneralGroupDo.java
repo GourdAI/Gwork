@@ -15,8 +15,16 @@ import java.io.Serializable;
 public class GeneralGroupDo implements Serializable {
     //历史窗口大小（压缩时保护最后 N 条消息完整不压 = 拦截器 maxMessages）
     private Integer historyWindowSize;
-    //压缩触发比例（1~100）：占用达到「模型 contextLength × 该比例%」时触发压缩
+    //压缩触发比例（1~100）：作为「提前触发」的上限钳制器；100 = 完全由绝对阈值决定
     private Integer compressionRatio;
+    //压缩后的目标水位比例（10~95）：决定「压到多深」，过高会导致压缩抖动
+    private Integer compressionTargetRatio;
+    //为模型单轮输出预留的 token（绝对量）
+    private Integer compressionReservedOutputTokens;
+    //启用会话意图链（防多轮对话意图漂移）
+    private Boolean intentChainEnabled;
+    //意图链 token 上限
+    private Integer intentChainMaxTokens;
     //压缩模型
     private String summaryModel;
     //ACP（编码工具接入）使用的模型；留空则回落到 defaultModel

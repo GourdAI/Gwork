@@ -1,4 +1,4 @@
-﻿{
+{
     "streaming":  {
                       "describe_images":  "Veuillez décrire ces images",
                       "process_files":  "Veuillez m\u0027aider à traiter ces fichiers",
@@ -77,8 +77,8 @@
                     "confirm_delete":  "Êtes-vous sûr de vouloir supprimer la conversation ?",
                     "untitled":  "Sans titre",
                     "delete_failed":  "Échec de la suppression de la conversation, veuillez réessayer",
-                    "load_more_before":  "Afficher les précédentes",
-                    "load_more_messages":  "messages",
+                    "load_more_messages":  "Afficher les {0} messages précédents",
+                    "load_more_earlier":  "Afficher les messages précédents",
                     "loading":  "Chargement...",
                     "no_input_history":  "Aucun historique d\u0027entrée",
                     "search_placeholder":  "Rechercher dans l\u0027historique...",
@@ -293,12 +293,18 @@
                                                         "theme_desc":  "Basculer le thème de l\u0027interface entre sombre et clair"
                                                     },
                                      "conversation":  {
-                                                          "title":  "Stratégie de conversation",
+                                                          "title":  "Compression du contexte",
                                                           "history_window":  "Taille de la fenêtre d\u0027historique",
                                                           "history_window_placeholder":  "Par défaut 30",
                                                           "compression_ratio":  "Seuil de compression (%)",
-                                                          "compression_ratio_placeholder":  "Par défaut 80",
-                                                          "hint":  "Fenêtre d\u0027historique : toujours protéger les N derniers messages lors de la compression ; Seuil de compression : lorsque l\u0027utilisation du contexte atteint « fenêtre du modèle × ce pourcentage % », le processus d\u0027exécution intermédiaire est automatiquement compressé en résumé (l\u0027intention originale et les N derniers messages restent intacts)"
+                                                          "compression_ratio_placeholder":  "Par défaut 100",
+                                                          "compression_target_ratio":  "Cible de compression (%)",
+                                                          "compression_target_ratio_placeholder":  "Par défaut 45",
+                                                          "reserved_output":  "Sortie réservée (tokens)",
+                                                          "reserved_output_placeholder":  "Par défaut 20000",
+                                                          "intent_chain":  "Chaîne d\u0027intentions de session",
+                                                          "intent_chain_desc":  "Conserve lors de la compression un index compact des demandes précédentes de l\u0027utilisateur (coût très faible), afin d\u0027éviter que l\u0027agent ne revienne sur des objectifs déjà accomplis",
+                                                          "hint":  "Fenêtre d\u0027historique : combien de derniers messages restent toujours non compressés.\nSortie réservée : marge absolue pour la prochaine réponse du modèle ; point de déclenchement = fenêtre du modèle − réserve − tampon de tour.\nSeuil de compression : ne fait que déclencher PLUS TÔT (la plus petite des deux valeurs s\u0027applique) ; 100 signifie aucune anticipation supplémentaire.\nCible de compression : profondeur de chaque compression — plus la valeur est élevée, plus la compression est légère et les déclenchements fréquents"
                                                       },
                                      "sandbox":  {
                                                      "title":  "Mode bac à sable",

@@ -207,13 +207,14 @@ public class ReActAgent implements Agent<ReActRequest, ReActResponse> {
                     List<ChatMessage> history = session.getMessages();
                     for (int i = 0; i < history.size(); i++) {
                         ChatMessage message = history.get(i);
-                        if (i == 0) {
-                            //仅会话首条（原始意图）标记初心，永不被压缩
-                            message.addMetadata(AgentTrace.META_FIRST, 1);
-                        } else {
-                            //中间历史必须可被压缩：主动清除可能残留的初心标记（消息对象会跨轮复用）
-                            message.getMetadata().remove(AgentTrace.META_FIRST);
-                        }
+                        //历史消息一律可压缩：主动清除可能残留的初心标记（消息对象会跨轮复用）。
+                        //
+                        //为什么不再钉死首条：多轮对话中用户目标会变，把「会话第一条」当作永久初心会：
+                        //  1) 语义误导——早已完成的旧目标持续与当前任务抢注意力；
+                        //  2) 预算污染——它计入不可压缩的 fixedTokens，若首条是大段粘贴内容将永久占用预算；
+                        //  3) 类型假设脆弱——首条未必是用户消息（可能是恢复出的 assistant 消息）。
+                        //历史各轮的真实意图改由压缩拦截器的「会话意图链」统一保留（按 runId 分组，成本极低）。
+                        message.getMetadata().remove(AgentTrace.META_FIRST);
                         trace.getWorkingMemory().addMessage(message);
                     }
                 }

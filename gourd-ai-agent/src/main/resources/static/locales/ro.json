@@ -1,4 +1,4 @@
-﻿{
+{
     "streaming":  {
                       "describe_images":  "Descriți aceste imagini",
                       "process_files":  "Vă rog să procesați aceste fișiere",
@@ -77,8 +77,8 @@
                     "confirm_delete":  "Confirmare ștergere conversație",
                     "untitled":  "Fără titlu",
                     "delete_failed":  "Ștergerea conversației a eșuat, vă rugăm să încercați din nou",
-                    "load_more_before":  "Afișare anterior",
-                    "load_more_messages":  "mesaje",
+                    "load_more_messages":  "Afișare {0} mesaje anterioare",
+                    "load_more_earlier":  "Afișare mesaje anterioare",
                     "loading":  "Se încarcă...",
                     "no_input_history":  "Nu există istoric de introducere",
                     "search_placeholder":  "Căutare istoric mesaje...",
@@ -293,12 +293,18 @@
                                                         "theme_desc":  "Comutare tema interfeței între întunecat și luminos"
                                                     },
                                      "conversation":  {
-                                                          "title":  "Strategia de conversație",
+                                                          "title":  "Comprimarea contextului",
                                                           "history_window":  "Dimensiunea ferestrei de istoric",
                                                           "history_window_placeholder":  "Implicit 30",
                                                           "compression_ratio":  "Prag de compresie (%)",
-                                                          "compression_ratio_placeholder":  "Implicit 80",
-                                                          "hint":  "Fereastra de istoric: protejați mereu ultimele N mesaje de compresie; Prag de compresie: când utilizarea contextului atinge «fereastra modelului × acest procent%», procesul de executare intermediar este compresat automat ca rezumat (intenția originală și ultimele N mesaje rămân intacte)"
+                                                          "compression_ratio_placeholder":  "Implicit 100",
+                                                          "compression_target_ratio":  "Țintă de compresie (%)",
+                                                          "compression_target_ratio_placeholder":  "Implicit 45",
+                                                          "reserved_output":  "Ieșire rezervată (tokens)",
+                                                          "reserved_output_placeholder":  "Implicit 20000",
+                                                          "intent_chain":  "Lanțul de intenții al sesiunii",
+                                                          "intent_chain_desc":  "Păstrează la comprimare un index compact al cererilor anterioare ale utilizatorului (cost foarte mic), pentru ca agentul să nu revină la obiective deja finalizate",
+                                                          "hint":  "Fereastra de istoric: câte mesaje finale rămân mereu necomprimate.\nIeșire rezervată: spațiul absolut pentru următorul răspuns al modelului; punct de declanșare = fereastra modelului − rezerva − bufferul de tură.\nPrag de compresie: doar declanșează MAI DEVREME (se aplică cea mai mică dintre cele două); 100 înseamnă fără devansare suplimentară.\nȚintă de compresie: cât de adânc comprimă o dată — cu cât valoarea e mai mare, cu atât compresia e mai superficială și declanșările mai frecvente"
                                                       },
                                      "sandbox":  {
                                                      "title":  "Mod sandbox",

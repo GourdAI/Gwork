@@ -1,4 +1,4 @@
-﻿{
+{
     "streaming":  {
                       "describe_images":  "Bilder beschreiben",
                       "process_files":  "Dateien verarbeiten",
@@ -77,8 +77,8 @@
                     "confirm_delete":  "Sitzung \"{0}\" wirklich löschen?",
                     "untitled":  "Unbenannt",
                     "delete_failed":  "Löschen der Sitzung fehlgeschlagen, bitte erneut versuchen",
-                    "load_more_before":  "Vorherige {0} Nachrichten laden",
                     "load_more_messages":  "{0} vorherige Nachrichten anzeigen",
+                    "load_more_earlier":  "Frühere Nachrichten anzeigen",
                     "loading":  "Wird geladen…",
                     "no_input_history":  "Kein Eingabe-Verlauf",
                     "search_placeholder":  "Verlauf durchsuchen…",
@@ -293,12 +293,18 @@
                                                         "theme_desc":  "Oberflächenthema zwischen dunkel und hell wechseln"
                                                     },
                                      "conversation":  {
-                                                          "title":  "Konversationsstrategie",
+                                                          "title":  "Kontextkomprimierung",
                                                           "history_window":  "Größe des Historienfensters",
                                                           "history_window_placeholder":  "Standard 30",
                                                           "compression_ratio":  "Komprimierungs-Auslöser (%)",
-                                                          "compression_ratio_placeholder":  "Standard 80",
-                                                          "hint":  "Historienfenster: Immer die letzte Anzahl von Nachrichten vollständig vor Komprimierung schützen; Komprimierungs-Auslöser: Wenn der Kontextverbrauch «Modellfenster × dieser Prozentsatz%» erreicht, wird der zwischenliegende Ausführungsverlauf automatisch als Zusammenfassung komprimiert (ursprüngliche Absicht und die letzten N Nachrichten bleiben vollständig erhalten)"
+                                                          "compression_ratio_placeholder":  "Standard 100",
+                                                          "compression_target_ratio":  "Komprimierungsziel (%)",
+                                                          "compression_target_ratio_placeholder":  "Standard 45",
+                                                          "reserved_output":  "Reservierte Ausgabe (Tokens)",
+                                                          "reserved_output_placeholder":  "Standard 20000",
+                                                          "intent_chain":  "Sitzungs-Absichtskette",
+                                                          "intent_chain_desc":  "Behält beim Komprimieren einen kompakten Index früherer Nutzeranfragen (sehr geringe Kosten), damit der Agent nicht auf bereits erledigte Ziele zurückfällt",
+                                                          "hint":  "Historienfenster: Wie viele der letzten Nachrichten stets unkomprimiert bleiben.\nReservierte Ausgabe: absoluter Spielraum für die nächste Antwort des Modells; Auslösepunkt = Modellfenster − Reserve − Runden-Puffer.\nKomprimierungs-Auslöser: löst nur FRÜHER aus (der kleinere der beiden Werte gilt); 100 bedeutet keine zusätzliche Vorverlegung.\nKomprimierungsziel: wie tief jede Komprimierung geht — höhere Werte komprimieren flacher und lösen häufiger aus"
                                                       },
                                      "sandbox":  {
                                                      "title":  "Sandbox-Modus",

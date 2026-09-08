@@ -1,4 +1,4 @@
-﻿{
+{
     "streaming":  {
                       "describe_images":  "Describing images",
                       "process_files":  "Processing files",
@@ -77,8 +77,8 @@
                     "confirm_delete":  "Delete session \"{0}\"?",
                     "untitled":  "Untitled",
                     "delete_failed":  "Failed to delete session, please retry",
-                    "load_more_before":  "Load previous {0} messages",
                     "load_more_messages":  "Show previous {0} messages",
+                    "load_more_earlier":  "Show earlier messages",
                     "loading":  "Loading…",
                     "no_input_history":  "No input history",
                     "search_placeholder":  "Search history…",
@@ -293,12 +293,18 @@
                                                         "theme_desc":  "Switch between dark and light theme"
                                                     },
                                      "conversation":  {
-                                                          "title":  "Conversation Policy",
+                                                          "title":  "Context Compression",
                                                           "history_window":  "History Window Size",
                                                           "history_window_placeholder":  "Default 30",
-                                                          "compression_ratio":  "Compression Trigger %",
-                                                          "compression_ratio_placeholder":  "Default 80",
-                                                          "hint":  "History Window: messages to keep intact during compression; Compression Ratio: auto-compress when context reaches \u0027model window × this %\u0027"
+                                                          "compression_ratio":  "Compression Trigger (%)",
+                                                          "compression_ratio_placeholder":  "Default 100",
+                                                          "compression_target_ratio":  "Compression Target (%)",
+                                                          "compression_target_ratio_placeholder":  "Default 45",
+                                                          "reserved_output":  "Reserved Output (tokens)",
+                                                          "reserved_output_placeholder":  "Default 20000",
+                                                          "intent_chain":  "Session Intent Chain",
+                                                          "intent_chain_desc":  "Keeps a compact index of the user\u0027s earlier requests when compressing (very low cost), so the agent stops circling back to goals that were already completed",
+                                                          "hint":  "History window: how many trailing messages always stay uncompressed.\nReserved output: absolute headroom for the model\u0027s next reply; trigger point = model window − reserved output − turn buffer.\nCompression trigger: only fires the trigger EARLIER (the smaller of the two applies); 100 means no extra earlying.\nCompression target: how deep each compaction goes — higher means shallower compaction and more frequent triggers"
                                                       },
                                      "sandbox":  {
                                                      "title":  "Sandbox Mode",

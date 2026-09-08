@@ -83,7 +83,7 @@
                             <div class="general-card">
                                 <div class="general-card-header">
                                         <div class="general-card-text">
-                                        <div class="general-card-title" data-i18n="settings.general.conversation.title">对话策略</div>
+                                        <div class="general-card-title" data-i18n="settings.general.conversation.title">上下文压缩策略</div>
                                     </div>
                                 </div>
                                 <div class="general-card-body">
@@ -94,10 +94,33 @@
                                         </div>
                                         <div class="general-field">
                                             <label class="general-field-label" data-i18n="settings.general.conversation.compression_ratio">压缩触发比例(%)</label>
-                                            <input type="number" min="1" max="100" class="general-input" id="generalCompressionRatio" placeholder="默认 80" data-i18n-placeholder="settings.general.conversation.compression_ratio_placeholder"/>
+                                            <input type="number" min="1" max="100" class="general-input" id="generalCompressionRatio" placeholder="默认 100" data-i18n-placeholder="settings.general.conversation.compression_ratio_placeholder"/>
                                         </div>
                                     </div>
-                                    <div class="general-toggle-desc settings-gap-top-sm" data-i18n="settings.general.conversation.hint">历史窗口：压缩时始终保护最后多少条消息完整不压缩；压缩触发比例：上下文占用达到「模型窗口 × 该比例%」时，自动把中间执行过程压缩为摘要（原始意图与最后 N 条完整保留）</div>
+                                    <div class="general-field-row">
+                                        <div class="general-field">
+                                            <label class="general-field-label" data-i18n="settings.general.conversation.compression_target_ratio">压缩目标水位(%)</label>
+                                            <input type="number" min="10" max="95" class="general-input" id="generalCompressionTargetRatio" placeholder="默认 45" data-i18n-placeholder="settings.general.conversation.compression_target_ratio_placeholder"/>
+                                        </div>
+                                        <div class="general-field">
+                                            <label class="general-field-label" data-i18n="settings.general.conversation.reserved_output">单轮输出预留(tokens)</label>
+                                            <input type="number" min="1000" class="general-input" id="generalCompressionReservedOutputTokens" placeholder="默认 20000" data-i18n-placeholder="settings.general.conversation.reserved_output_placeholder"/>
+                                        </div>
+                                    </div>
+                                    <div class="general-toggle-desc general-hint-lines settings-gap-top-sm" data-i18n="settings.general.conversation.hint">历史窗口：压缩时始终保护最后多少条消息完整不压缩
+                                    单轮输出预留：为模型下一轮回复预留的绝对空间，触发点 =「模型窗口 − 该预留 − 回合缓冲」
+                                    压缩触发比例：仅用于「提前」触发（取两者较小值），100 表示不额外提前
+                                    压缩目标水位：决定一次压到多深，值越高压得越浅、触发越频繁</div>
+                                    <div class="general-toggle-row settings-gap-top-sm">
+                                        <div class="general-toggle-text">
+                                            <div class="general-toggle-title" data-i18n="settings.general.conversation.intent_chain">会话意图链</div>
+                                            <div class="general-toggle-desc" data-i18n="settings.general.conversation.intent_chain_desc">压缩时保留用户历轮提问的精简索引（成本极低），防止多轮对话中围着早已完成的旧目标打转</div>
+                                        </div>
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="generalIntentChainEnabled"/>
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
                                 </div>
                             </div>
 

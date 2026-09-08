@@ -164,9 +164,9 @@ function evictInactiveSessions() {
         if (typeof resetStreamState === 'function') resetStreamState(sess);
         $(sess.container).empty();
         // 重置回放分页状态：下次进入走完整 loadMessages 重新拉取
-        sess._replayTotalCount = 0;
         sess._replayHasMore = false;
-        sess._replayLoadedCount = 0;
+        sess._replayRemainingRounds = 0;
+        sess._replayFirstSeq = 0;
         sess._replayCoverage = null;
         sess._replayLoadingMore = false;
         // 深度释放 JS 侧大对象：仅 empty() 只断开 DOM，下面这些字段仍会随 SessionState 长期驻留
@@ -292,6 +292,9 @@ function setActiveSession(sessionId) {
     SESSION_ID = sessionId;
     isStreaming = sess.isStreaming;
     userScrolledUp = false;
+    // 切会话必须释放可能残留的视口锚锁（上一个会话的翻页还在飞行中就切走），
+    // 否则新会话的自动滚到底部会被锁死，表现为流式输出不跟随。
+    if (typeof releaseScrollAnchor === 'function') releaseScrollAnchor();
     if (isStreaming) setBtnStopMode();
     else setBtnSendMode();
     // 清除 messagesWrap 中所有残留的加载按钮（按钮是 messagesWrap 直接子元素，不属于 sess.container，
@@ -328,19 +331,41 @@ $(messagesWrap).on('scroll', function() {
     var gap = messagesWrap.scrollHeight - messagesWrap.scrollTop - messagesWrap.clientHeight;
     userScrolledUp = gap > 80;
 });
+/* ===== 视口锚定锁（历史向上翻页期间禁用一切自动滚动） =====
+   向上翻页时用户明确在读旧内容，而此时任务可能仍在运行：回放缓冲排空会补发实时帧，
+   其中的 done 帧走 finishStream → scrollToBottom(true)，force 语义会无视 userScrolledUp
+   直接把视口拽到底部，正是「往上拉后位置乱跳」的元凶。翻页窗口内统一挂锁屏蔽。
+   锁带安全阀定时器：请求失败等异常路径没走到 release 时，不会永久锁死自动滚动。 */
+var _scrollAnchorHold = false;
+var _scrollAnchorHoldTimer = null;
+function holdScrollAnchor(maxMs) {
+    _scrollAnchorHold = true;
+    if (_scrollAnchorHoldTimer) clearTimeout(_scrollAnchorHoldTimer);
+    _scrollAnchorHoldTimer = setTimeout(releaseScrollAnchor, maxMs || 8000);
+}
+function releaseScrollAnchor() {
+    _scrollAnchorHold = false;
+    if (_scrollAnchorHoldTimer) { clearTimeout(_scrollAnchorHoldTimer); _scrollAnchorHoldTimer = null; }
+}
+function isScrollAnchorHeld() { return _scrollAnchorHold; }
+
 var scrollRafPending = false;
 function scrollToBottom(force) {
+    if (isScrollAnchorHeld()) return;
     if (!force && userScrolledUp) return;
     if (force) userScrolledUp = false;
     // 滚动与内容更新在同一次 rAF 内执行，避免跨帧跳动
     if (scrollRafPending) return;
     scrollRafPending = true;
     requestAnimationFrame(function() {
+        // 挂锁可能发生在本次调度之后，落地前需再判一次，否则挂起帧仍会把视口拽走
+        if (isScrollAnchorHeld()) { scrollRafPending = false; return; }
         // 若当前帧内有多次滚动调用，确保最终落在最底部
         messagesWrap.scrollTop = messagesWrap.scrollHeight;
         // 再等下一帧确认高度稳定后再次修正（始终执行，确保最终落在最底部）
         requestAnimationFrame(function() {
             scrollRafPending = false;
+            if (isScrollAnchorHeld()) return;
             messagesWrap.scrollTop = messagesWrap.scrollHeight;
         });
     });

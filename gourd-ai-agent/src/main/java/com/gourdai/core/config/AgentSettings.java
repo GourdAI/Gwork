@@ -112,6 +112,22 @@ public class AgentSettings implements Serializable {
             general.setCompressionRatio(props.getCompressionRatio());
         }
 
+        if (general.getCompressionTargetRatio() == null) {
+            general.setCompressionTargetRatio(props.getCompressionTargetRatio());
+        }
+
+        if (general.getCompressionReservedOutputTokens() == null) {
+            general.setCompressionReservedOutputTokens(props.getCompressionReservedOutputTokens());
+        }
+
+        if (general.getIntentChainEnabled() == null) {
+            general.setIntentChainEnabled(props.isIntentChainEnabled());
+        }
+
+        if (general.getIntentChainMaxTokens() == null) {
+            general.setIntentChainMaxTokens(props.getIntentChainMaxTokens());
+        }
+
         if(general.getSummaryModel() == null){
             general.setSummaryModel(props.getSummaryModel());
         }

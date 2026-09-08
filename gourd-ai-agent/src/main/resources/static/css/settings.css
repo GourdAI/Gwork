@@ -432,6 +432,9 @@
     display: flex;
     gap: 14px;
 }
+.general-field-row + .general-field-row {
+    margin-top: 12px;
+}
 .general-field {
     flex: 1;
     min-width: 0;
@@ -489,6 +492,11 @@
     color: var(--text-secondary);
     margin-top: 2px;
     line-height: 1.4;
+}
+/* 多行说明：译文以 \n 分隔每条解释，逐行展示 */
+.general-hint-lines {
+    white-space: pre-line;
+    line-height: 1.7;
 }
 
 /* 语言选择器容器（layui select，与定时任务/远控通道同款） */
