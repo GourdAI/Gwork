@@ -326,6 +326,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # 创建 Release、上传资产所需（默认 token 只读）
+    # 本 job **刻意不做 actions/checkout**：它只下载 artifact 再上传 Release，不碰源码。
+    # 但 gh 需要知道「操作哪个仓库」——它默认从当前目录的 `git remote get-url origin`
+    # 推断，而 runner 的工作目录此刻不是 git 仓库，于是每条 gh 命令都直接失败：
+    #   failed to run git: fatal: not a git repository (or any of the parent directories): .git
+    # 报错信息完全不提「仓库没指定」，极易被误读成 git/权限问题。
+    # GH_REPO 显式补上这份上下文，无需为此多 clone 一遍仓库（checkout 也能消除报错，
+    # 但那是「为了让推断步骤有东西可推断」而拉一份用不上的源码，代价白花）。
+    # 注意必须写 github.repository：env.GITHUB_REPOSITORY 在表达式里取不到（此时
+    # 默认环境变量尚未注入 env 上下文），会渲染成空串，等于没设。
+    env:
+      GH_REPO: ${{ github.repository }}
     steps:
       # 不写 pattern：安装包现在以 archive: false 上传，artifact 名就是文件名，
       # 没有 gwork-* 前缀了；直接拉本次 run 的全部 artifact（含 blockmap 那个 zip）。
@@ -377,7 +388,7 @@ jobs:
           # 后到者 create 会失败，故失败后再 view 一次确认确实已存在。
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes \
-              || gh release view "$TAG" >/dev/null
+              || gh release view "$TAG"
           fi
           # --clobber：重跑流水线时覆盖同名旧资产，而不是报「已存在」中断
           gh release upload "$TAG" release/* --clobber
