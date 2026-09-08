@@ -1087,7 +1087,18 @@
                    "imp_tip":  "Wichtigkeit {n}/10: bestimmt Abrufpriorität und Behaltungsgewicht dieser Erinnerung",
                    "delete":  "Löschen",
                    "delete_confirm":  "Diese Erinnerung löschen? Das kann nicht rückgängig gemacht werden.",
-                   "delete_failed":  "Löschen fehlgeschlagen"
+                   "delete_failed":  "Löschen fehlgeschlagen",
+                   "clear_scope":  "Aktuellen Bereich leeren",
+                   "clear_confirm":  "Alle Erinnerungen in „{scope}“ löschen? Dies kann nicht rückgängig gemacht werden.",
+                   "clear_failed":  "Leeren fehlgeschlagen",
+                   "untitled":  "Unbenannte Erinnerung",
+                   "ttl_permanent":  "Dauerhaft",
+                   "ttl_unknown":  "Ablauf unbekannt",
+                   "ttl_expired":  "Abgelaufen",
+                   "ttl_days":  "Noch {n} Tage",
+                   "ttl_hours":  "Noch {n} Stunden",
+                   "ttl_minutes":  "Noch {n} Minuten",
+                   "workspace_aliased":  "Die Speicherisolation ist deaktiviert: Arbeitsbereichsspeicher ist global geteilt. Wechseln Sie zu „Global“ und bestätigen Sie das Löschen ausdrücklich."
                },
     "memory_view":  {
                         "title":  "Gedächtnis",

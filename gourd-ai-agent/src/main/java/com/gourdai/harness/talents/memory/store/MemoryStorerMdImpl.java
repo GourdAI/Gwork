@@ -72,4 +72,9 @@ public class MemoryStorerMdImpl implements MemoryStorer {
     public void remove(String userId, String key) {
         data.remove(userId, key);
     }
+
+    @Override
+    public ClearResult clear(String userId) {
+        return data.clear(userId);
+    }
 }

@@ -1087,7 +1087,18 @@
                    "imp_tip":  "Importanță {n}/10: determină prioritatea de recuperare și ponderea de reținere a acestei amintiri",
                    "delete":  "Șterge",
                    "delete_confirm":  "Ștergi această amintire? Acțiunea nu poate fi anulată.",
-                   "delete_failed":  "Ștergere eșuată"
+                   "delete_failed":  "Ștergere eșuată",
+                   "clear_scope":  "Șterge domeniul curent",
+                   "clear_confirm":  "Ștergeți toate memoriile din „{scope}”? Acțiunea este ireversibilă.",
+                   "clear_failed":  "Ștergerea a eșuat",
+                   "untitled":  "Memorie fără titlu",
+                   "ttl_permanent":  "Permanentă",
+                   "ttl_unknown":  "Expirare necunoscută",
+                   "ttl_expired":  "Expirată",
+                   "ttl_days":  "Au rămas {n} zile",
+                   "ttl_hours":  "Au rămas {n} ore",
+                   "ttl_minutes":  "Au rămas {n} minute",
+                   "workspace_aliased":  "Izolarea memoriei este dezactivată: memoria spațiului de lucru este memorie globală partajată. Comutați la Global și confirmați explicit ștergerea."
                },
     "memory_view":  {
                         "title":  "Memorie",

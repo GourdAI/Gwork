@@ -22,6 +22,7 @@ import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.talents.cli.TodoTalent;
 import com.gourdai.harness.talents.memory.MemorySearchResult;
 import com.gourdai.harness.talents.memory.MemorySearcher;
+import com.gourdai.harness.talents.memory.MemoryStorer;
 import com.gourdai.harness.talents.memory.MemorySolution;
 import com.gourdai.harness.talents.memory.MemorySolutionProvider;
 import com.gourdai.harness.agent.AgentDefinition;
@@ -1398,6 +1399,22 @@ public class WebController {
 
     // ==================== 工具方法 ====================
 
+    private String resolveMemoryCwd(Context ctx, boolean global) {
+        if (global) {
+            return Paths.get(AgentFlags.getHarnessBase()).toAbsolutePath().normalize().toString();
+        }
+        String sessionCwd = ctx.header(AgentFlags.X_SESSION_CWD);
+        if (Assert.isEmpty(sessionCwd)) {
+            return Paths.get(engine.getWorkspace()).toAbsolutePath().normalize().toString();
+        }
+        return projectService.resolveRegisteredDirectory(sessionCwd);
+    }
+
+    private boolean isMemoryIsolationEnabled() {
+        return settings.getGeneral().getMemoryIsolation() == null
+                || settings.getGeneral().getMemoryIsolation();
+    }
+
     /**
      * 递归删除目录及其所有子文件和子目录。
      *
@@ -1589,21 +1606,14 @@ public class WebController {
             return Result.failure(500, "Memory provider not configured");
         }
 
-        boolean global = "global".equals(scope);
-        String cwd;
-        if (global) {
-            cwd = AgentFlags.getHarnessBase();
-        } else {
-            // 与 todos() 同一套工作区解析逻辑：code 会话记忆落在所选项目目录下
-            String sessionCwd = ctx.header("X-Session-Cwd");
-            if (sessionCwd != null && sessionCwd.contains("..")) {
-                return Result.failure(400, "Invalid Session Cwd");
-            }
-            cwd = Assert.isNotEmpty(sessionCwd) ? sessionCwd : engine.getWorkspace();
+        if (!"workspace".equals(scope) && !"global".equals(scope)) {
+            return Result.failure(400, "scope must be workspace or global");
         }
+        boolean global = "global".equals(scope);
 
         Map<String, Object> data = new LinkedHashMap<>();
         try {
+            String cwd = resolveMemoryCwd(ctx, global);
             MemorySolution solution = memoryProvider.get(cwd);
             MemorySearcher searcher = solution == null ? null : solution.getSearcher();
 
@@ -1612,17 +1622,27 @@ public class WebController {
                 for (MemorySearchResult r : searcher.listAll("shared", 200)) {
                     Map<String, Object> item = new LinkedHashMap<>();
                     item.put("key", r.getKey());
+                    item.put("title", r.getTitle());
                     item.put("content", r.getContent());
                     item.put("importance", r.getImportance());
                     item.put("time", r.getTime());
+                    item.put("ttl", r.getTtl());
+                    item.put("ttlKnown", r.isTtlKnown());
+                    item.put("expiresAtEpochMs", r.getExpiresAtEpochMs());
                     items.add(item);
                 }
             }
 
             data.put("scope", global ? "global" : "workspace");
+            data.put("effectiveScope", !global && !isMemoryIsolationEnabled() ? "global" : (global ? "global" : "workspace"));
+            data.put("aliased", !global && !isMemoryIsolationEnabled());
+            int total = searcher == null ? 0 : searcher.count("shared");
             data.put("items", items);
-            data.put("total", items.size());
+            data.put("total", total);
+            data.put("hasMore", total > items.size());
             return Result.succeed(data);
+        } catch (IllegalArgumentException e) {
+            return Result.failure(400, e.getMessage());
         } catch (Exception e) {
             LOG.error("Failed to list memories, scope={}: {}", scope, e.getMessage());
             return Result.failure(500, e.getMessage());
@@ -1653,20 +1673,13 @@ public class WebController {
             return Result.failure(500, "Memory provider not configured");
         }
 
-        boolean global = "global".equals(scope);
-        String cwd;
-        if (global) {
-            cwd = AgentFlags.getHarnessBase();
-        } else {
-            // 与 memoryList 同一套工作区解析逻辑
-            String sessionCwd = ctx.header("X-Session-Cwd");
-            if (sessionCwd != null && sessionCwd.contains("..")) {
-                return Result.failure(400, "Invalid Session Cwd");
-            }
-            cwd = Assert.isNotEmpty(sessionCwd) ? sessionCwd : engine.getWorkspace();
+        if (!"workspace".equals(scope) && !"global".equals(scope)) {
+            return Result.failure(400, "scope must be workspace or global");
         }
+        boolean global = "global".equals(scope);
 
         try {
+            String cwd = resolveMemoryCwd(ctx, global);
             MemorySolution solution = memoryProvider.get(cwd);
             if (solution == null) {
                 return Result.failure(500, "Memory solution not available");
@@ -1677,8 +1690,76 @@ public class WebController {
                 searcher.removeIndex("shared", key);
             }
             return Result.succeed();
+        } catch (IllegalArgumentException e) {
+            return Result.failure(400, e.getMessage());
         } catch (Exception e) {
             LOG.error("Failed to delete memory, scope={}, key={}: {}", scope, key, e.getMessage());
+            return Result.failure(500, e.getMessage());
+        }
+    }
+
+    /**
+     * 清空当前指定记忆域。请求必须显式携带 workspace/global，避免默认值导致跨域误删。
+     */
+    @Post
+    @Mapping("/web/chat/memory/clear")
+    public Result<Map> memoryClear(Context ctx, @Body String json) {
+        ONode tmp = ONode.ofJson(json);
+        String scope = tmp.get("scope").getString();
+        if (!"workspace".equals(scope) && !"global".equals(scope)) {
+            return Result.failure(400, "scope must be workspace or global");
+        }
+
+        MemorySolutionProvider memoryProvider = engine.getMemoryProvider();
+        if (memoryProvider == null) {
+            return Result.failure(500, "Memory provider not configured");
+        }
+
+        if ("workspace".equals(scope) && !isMemoryIsolationEnabled()) {
+            return Result.failure(409, "WORKSPACE_MEMORY_ALIASED_TO_GLOBAL: select global scope to confirm clearing shared memory");
+        }
+
+        try {
+            String cwd = resolveMemoryCwd(ctx, "global".equals(scope));
+            MemorySolution solution = memoryProvider.get(cwd);
+            if (solution == null || solution.getSearcher() == null) {
+                return Result.failure(500, "Memory solution not available");
+            }
+            MemoryStorer.ClearResult clearResult = solution.getStorer().clear("shared");
+            int deleted = 0;
+            List<String> failed = new ArrayList<>();
+            if (clearResult != null) {
+                deleted = clearResult.getDeleted();
+                failed.addAll(clearResult.getFailed());
+            } else {
+                // 非 MD 实现使用稳定全量快照；即使前 200 项全部失败，后续条目仍会被尝试。
+                List<MemorySearchResult> snapshot = solution.getSearcher().listAll("shared", Integer.MAX_VALUE);
+                for (MemorySearchResult item : snapshot) {
+                    try {
+                        solution.getStorer().remove("shared", item.getKey());
+                        solution.getSearcher().removeIndex("shared", item.getKey());
+                        deleted++;
+                    } catch (Exception e) {
+                        failed.add(item.getKey());
+                        LOG.error("Failed to clear memory, scope={}, key={}", scope, item.getKey(), e);
+                    }
+                }
+            }
+            int remaining = solution.getSearcher().count("shared");
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("scope", scope);
+            data.put("effectiveScope", scope);
+            data.put("deleted", deleted);
+            data.put("failed", failed);
+            data.put("remaining", remaining);
+            if (remaining > 0 || !failed.isEmpty()) {
+                return Result.failure("MEMORY_CLEAR_PARTIAL", data);
+            }
+            return Result.succeed(data);
+        } catch (IllegalArgumentException e) {
+            return Result.failure(400, e.getMessage());
+        } catch (Exception e) {
+            LOG.error("Failed to clear memories, scope={}", scope, e);
             return Result.failure(500, e.getMessage());
         }
     }
@@ -1901,7 +1982,7 @@ public class WebController {
         String content = json.get("content").getString();
         ONode imagePathsNode = json.get("imagePaths");
         ONode filePathsNode = json.get("filePaths");
-        
+
         List<String> imagePaths = new ArrayList<>();
         if (imagePathsNode != null && imagePathsNode.isArray()) {
             for (ONode n : imagePathsNode.getArray()) imagePaths.add(n.getString());

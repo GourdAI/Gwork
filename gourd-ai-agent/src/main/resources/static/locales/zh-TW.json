@@ -1087,7 +1087,18 @@
                    "imp_tip":  "重要度 {n}/10：決定該記憶被檢索召回的優先級與保留權重",
                    "delete":  "刪除",
                    "delete_confirm":  "確定刪除此記憶？刪除後無法復原。",
-                   "delete_failed":  "刪除失敗"
+                   "delete_failed":  "刪除失敗",
+                   "clear_scope":  "清空目前作用域",
+                   "clear_confirm":  "確定清空「{scope}」中的全部記憶？此操作無法復原。",
+                   "clear_failed":  "清空失敗",
+                   "untitled":  "未命名記憶",
+                   "ttl_permanent":  "永久",
+                   "ttl_unknown":  "有效期未知",
+                   "ttl_expired":  "已過期",
+                   "ttl_days":  "剩餘 {n} 天",
+                   "ttl_hours":  "剩餘 {n} 小時",
+                   "ttl_minutes":  "剩餘 {n} 分鐘",
+                   "workspace_aliased":  "記憶隔離已關閉：工作空間記憶實際為全域共享記憶。請切換到「全域」並明確確認清空。"
                },
     "memory_view":  {
                         "title":  "記憶",

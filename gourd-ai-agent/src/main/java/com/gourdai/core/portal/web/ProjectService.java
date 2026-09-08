@@ -247,6 +247,37 @@ public class ProjectService {
 
     // ==================== 内部 ====================
 
+    /**
+     * 解析并校验前端工作区头。Code/Chat 工作区只能来自现有项目登记表，避免任意请求头
+     * 将记忆读写定向到未授权的本地绝对路径。
+     */
+    public String resolveRegisteredDirectory(String path) {
+        if (path == null || path.trim().isEmpty() || path.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("Invalid Session Cwd");
+        }
+        final Path requested;
+        try {
+            requested = Paths.get(path.trim()).toAbsolutePath().normalize();
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Invalid Session Cwd", e);
+        }
+        if (!Files.isDirectory(requested)) {
+            throw new IllegalArgumentException("Session Cwd is not an existing directory");
+        }
+        for (Map project : load()) {
+            Object registeredPath = project.get("path");
+            if (registeredPath == null) continue;
+            try {
+                Path registered = Paths.get(String.valueOf(registeredPath)).toAbsolutePath().normalize();
+                if (requested.equals(registered)) {
+                    return requested.toString();
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        throw new IllegalArgumentException("Session Cwd is not a registered workspace");
+    }
+
     @SuppressWarnings("unchecked")
     private List<Map> load() {
         List<Map> result = new ArrayList<>();

@@ -46,9 +46,12 @@
                     <div class="memory-saved-title" data-i18n="memory_view.saved_title">已保存的记忆</div>
                     <div class="memory-saved-desc" data-i18n="memory_view.saved_desc">切换工作区与全局域，查看已保存的记忆</div>
                 </div>
-                <button class="memory-view-icon-btn" id="memoryViewRefreshBtn" data-i18n-title="memory.refresh">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
-                </button>
+                <div class="memory-saved-actions">
+                    <button class="memory-clear-btn" id="memoryViewClearBtn" data-i18n="memory.clear_scope">清空当前作用域</button>
+                    <button class="memory-view-icon-btn" id="memoryViewRefreshBtn" data-i18n-title="memory.refresh">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+                    </button>
+                </div>
             </div>
             <div class="memory-saved-tabs">
                 <button class="memory-view-tab active" data-scope="workspace" data-i18n="memory.tab_workspace">工作空间</button>

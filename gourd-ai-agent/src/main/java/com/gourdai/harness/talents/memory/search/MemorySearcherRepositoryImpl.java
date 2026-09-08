@@ -102,17 +102,24 @@ public class MemorySearcherRepositoryImpl implements MemorySearcher {
 
     @Override
     public void updateIndex(String userId, String key, String fact, int importance, String time) {
+        updateIndex(userId, key, null, fact, importance, time);
+    }
+
+    @Override
+    public void updateIndex(String userId, String key, String title, String fact, int importance, String time) {
         try {
             Document doc = new Document(fact);
             doc.id(getDocId(userId, key));
             doc.metadata("user_id", userId);
             doc.metadata("mem_key", key);
+            doc.metadata("title", title);
             doc.metadata("importance", importance);
             doc.metadata("time", time);
 
             repository.save(doc);
         } catch (Exception e) {
-            log.error("MemSearchProvider updateIndex error: {}", e.getMessage());
+            log.error("MemSearchProvider updateIndex error, userId={}, key={}", userId, key, e);
+            throw new IllegalStateException("Failed to update memory index: " + key, e);
         }
     }
 
@@ -121,7 +128,8 @@ public class MemorySearcherRepositoryImpl implements MemorySearcher {
         try {
             repository.deleteById(getDocId(userId, key));
         } catch (Exception e) {
-            log.error("MemSearchProvider removeIndex error: {}", e.getMessage());
+            log.error("MemSearchProvider removeIndex error, userId={}, key={}", userId, key, e);
+            throw new IllegalStateException("Failed to remove memory index: " + key, e);
         }
     }
 
@@ -131,6 +139,7 @@ public class MemorySearcherRepositoryImpl implements MemorySearcher {
 
     protected MemorySearchResult mapToResult(Document doc) {
         String key = doc.getMetadataAs("mem_key");
+        String title = doc.getMetadataAs("title");
         String time = doc.getMetadataAs("time");
 
         int importance = 0;
@@ -141,6 +150,6 @@ public class MemorySearcherRepositoryImpl implements MemorySearcher {
             importance = Integer.parseInt((String) impObj);
         }
 
-        return new MemorySearchResult(key, doc.getContent(), importance, time);
+        return new MemorySearchResult(key, title, doc.getContent(), importance, time, -1, null, false, null);
     }
 }

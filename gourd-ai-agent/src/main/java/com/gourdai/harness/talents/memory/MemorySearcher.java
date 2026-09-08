@@ -40,8 +40,23 @@ public interface MemorySearcher {
     default List<MemorySearchResult> listAll(String userId, int limit) {
         return getHotMemories(userId, limit);
     }
-    /** 同步索引 */
+
+    /**
+     * 返回指定用户的准确条目数。默认实现通过全量列举兼容旧实现；实现可覆盖为低成本计数。
+     */
+    default int count(String userId) {
+        return listAll(userId, Integer.MAX_VALUE).size();
+    }
+
+    /** 同步索引（保留既有五参抽象方法，兼容已有实现类） */
     void updateIndex(String userId, String key, String fact, int importance, String time);
+
+    /**
+     * 同步带可读标题的索引。旧实现无需修改即可继续工作；支持标题元数据的实现可覆盖此方法。
+     */
+    default void updateIndex(String userId, String key, String title, String fact, int importance, String time) {
+        updateIndex(userId, key, fact, importance, time);
+    }
     /** 移除索引 */
     void removeIndex(String userId, String key);
 }

@@ -1087,7 +1087,18 @@
                    "imp_tip":  "重要度 {n}/10：この記憶が検索召回される優先度と保持重みを決定",
                    "delete":  "削除",
                    "delete_confirm":  "この記憶を削除しますか？削除後は元に戻せません。",
-                   "delete_failed":  "削除に失敗しました"
+                   "delete_failed":  "削除に失敗しました",
+                   "clear_scope":  "現在のスコープをクリア",
+                   "clear_confirm":  "「{scope}」のすべての記憶を削除しますか？元に戻せません。",
+                   "clear_failed":  "クリアに失敗しました",
+                   "untitled":  "無題の記憶",
+                   "ttl_permanent":  "永久",
+                   "ttl_unknown":  "有効期限不明",
+                   "ttl_expired":  "期限切れ",
+                   "ttl_days":  "残り {n} 日",
+                   "ttl_hours":  "残り {n} 時間",
+                   "ttl_minutes":  "残り {n} 分",
+                   "workspace_aliased":  "記憶の分離が無効です。ワークスペースの記憶はグローバル共有です。「グローバル」に切り替えて削除を明示的に確認してください。"
                },
     "memory_view":  {
                         "title":  "メモリ",

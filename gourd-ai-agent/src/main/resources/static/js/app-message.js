@@ -1377,6 +1377,10 @@ function appendTraceBadge(sess, chunk) {
         sess.currentBubbleEl.setAttribute('data-md-raw', chunk.finalAnswer);
     }
     function fmtSec(s) {
+        if (s >= 3600) {
+            var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+            return h + 'h' + (m > 0 ? ' ' + m + 'min' : '') + (r > 0 ? ' ' + r + 's' : '');
+        }
         if (s >= 60) { var m = Math.floor(s / 60), r = s % 60; return r > 0 ? m + 'min ' + r + 's' : m + 'min'; }
         return s + 's';
     }

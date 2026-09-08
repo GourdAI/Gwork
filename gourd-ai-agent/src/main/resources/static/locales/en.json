@@ -1087,7 +1087,18 @@
                    "imp_tip":  "Importance {n}/10: determines the recall priority and retention weight of this memory",
                    "delete":  "Delete",
                    "delete_confirm":  "Delete this memory? This cannot be undone.",
-                   "delete_failed":  "Delete failed"
+                   "delete_failed":  "Delete failed",
+                   "clear_scope":  "Clear current scope",
+                   "clear_confirm":  "Clear all memories in “{scope}”? This cannot be undone.",
+                   "clear_failed":  "Clear failed",
+                   "untitled":  "Untitled memory",
+                   "ttl_permanent":  "Permanent",
+                   "ttl_unknown":  "Expiration unknown",
+                   "ttl_expired":  "Expired",
+                   "ttl_days":  "{n} days left",
+                   "ttl_hours":  "{n} hours left",
+                   "ttl_minutes":  "{n} minutes left",
+                   "workspace_aliased":  "Memory isolation is off: workspace memories are global shared memories. Switch to Global and explicitly confirm clearing."
                },
     "memory_view":  {
                         "title":  "Memory",

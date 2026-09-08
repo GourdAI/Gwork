@@ -32,6 +32,13 @@ body.code-mode .memory-view:not(.memory-overlay) { display: none !important; }
 .memory-saved-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin: 26px 0 12px; }
 .memory-saved-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
 .memory-saved-desc { margin-top: 4px; font-size: 12px; color: var(--text-tertiary); }
+.memory-saved-actions { display: flex; align-items: center; gap: 8px; }
+.memory-clear-btn {
+    height: 28px; padding: 0 10px; border: 1px solid rgba(229,72,77,.4); border-radius: 8px;
+    background: transparent; color: var(--color-danger, #e5484d); font-size: 12px; cursor: pointer;
+}
+.memory-clear-btn:hover { background: rgba(229,72,77,.08); }
+.memory-clear-btn:disabled { opacity: .55; cursor: not-allowed; }
 .memory-view-icon-btn {
     width: 28px; height: 28px; flex-shrink: 0;
     border: 1px solid var(--border-color); border-radius: 8px;
@@ -52,7 +59,8 @@ body.code-mode .memory-view:not(.memory-overlay) { display: none !important; }
 /* ===== 记忆条目卡片 ===== */
 .memory-item { border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 12px; background: var(--bg-card, var(--bg-main)); }
 .memory-item-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; min-width: 0; }
-.memory-item-key { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.memory-item-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-item-ttl { flex-shrink: 0; font-size: 11px; color: var(--text-secondary); background: var(--bg-secondary); border-radius: 999px; padding: 1px 7px; }
 /* 重要度徽章：分级配色（imp 数值 → 核心/重要/普通/次要 易懂文案，见 app-memory.js） */
 .memory-item-imp { flex-shrink: 0; font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-color); color: var(--text-secondary); background: var(--bg-secondary); cursor: default; }
 .memory-item-imp.imp-critical { color: #c2410c; border-color: rgba(194,65,12,.35); background: rgba(194,65,12,.08); }

@@ -1087,7 +1087,18 @@
                    "imp_tip":  "Importância {n}/10: determina a prioridade de recuperação e o peso de retenção desta memória",
                    "delete":  "Excluir",
                    "delete_confirm":  "Excluir esta memória? Esta ação não pode ser desfeita.",
-                   "delete_failed":  "Falha ao excluir"
+                   "delete_failed":  "Falha ao excluir",
+                   "clear_scope":  "Limpar escopo atual",
+                   "clear_confirm":  "Limpar todas as memórias em “{scope}”? Esta ação não pode ser desfeita.",
+                   "clear_failed":  "Falha ao limpar",
+                   "untitled":  "Memória sem título",
+                   "ttl_permanent":  "Permanente",
+                   "ttl_unknown":  "Expiração desconhecida",
+                   "ttl_expired":  "Expirada",
+                   "ttl_days":  "Restam {n} dias",
+                   "ttl_hours":  "Restam {n} horas",
+                   "ttl_minutes":  "Restam {n} minutos",
+                   "workspace_aliased":  "O isolamento de memória está desativado: a memória do espaço de trabalho é global e compartilhada. Mude para Global e confirme explicitamente a limpeza."
                },
     "memory_view":  {
                         "title":  "Memória",

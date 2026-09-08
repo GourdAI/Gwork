@@ -15,6 +15,8 @@
  */
 package com.gourdai.harness.talents.memory;
 
+import java.util.Collections;
+import java.util.List;
 
 /**
  * 记忆存储供应商接口
@@ -47,4 +49,30 @@ public interface MemoryStorer {
      * @param key   存储键
      */
     void remove(String userId, String key);
+
+    /**
+     * 在存储实现自身的一致性边界内批量清空用户记忆。
+     *
+     * <p>默认返回 {@code null} 表示不支持存储级批量操作，调用方应使用稳定快照逐项删除；
+     * 实现不得把默认方法解释为跨存储器与独立搜索器的事务承诺。</p>
+     */
+    default ClearResult clear(String userId) {
+        return null;
+    }
+
+    final class ClearResult {
+        private final int deleted;
+        private final List<String> failed;
+        private final int remaining;
+
+        public ClearResult(int deleted, List<String> failed, int remaining) {
+            this.deleted = deleted;
+            this.failed = failed == null ? Collections.emptyList() : Collections.unmodifiableList(failed);
+            this.remaining = remaining;
+        }
+
+        public int getDeleted() { return deleted; }
+        public List<String> getFailed() { return failed; }
+        public int getRemaining() { return remaining; }
+    }
 }

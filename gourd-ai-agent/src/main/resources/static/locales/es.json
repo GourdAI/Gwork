@@ -1087,7 +1087,18 @@
                    "imp_tip":  "Importancia {n}/10: determina la prioridad de recuperación y el peso de retención de este recuerdo",
                    "delete":  "Eliminar",
                    "delete_confirm":  "¿Eliminar este recuerdo? Esta acción no se puede deshacer.",
-                   "delete_failed":  "Error al eliminar"
+                   "delete_failed":  "Error al eliminar",
+                   "clear_scope":  "Limpiar ámbito actual",
+                   "clear_confirm":  "¿Borrar todas las memorias de «{scope}»? Esta acción no se puede deshacer.",
+                   "clear_failed":  "Error al limpiar",
+                   "untitled":  "Memoria sin título",
+                   "ttl_permanent":  "Permanente",
+                   "ttl_unknown":  "Caducidad desconocida",
+                   "ttl_expired":  "Caducada",
+                   "ttl_days":  "Quedan {n} días",
+                   "ttl_hours":  "Quedan {n} horas",
+                   "ttl_minutes":  "Quedan {n} minutos",
+                   "workspace_aliased":  "El aislamiento de memoria está desactivado: la memoria del espacio de trabajo es memoria global compartida. Cambia a Global y confirma explícitamente el borrado."
                },
     "memory_view":  {
                         "title":  "Memoria",

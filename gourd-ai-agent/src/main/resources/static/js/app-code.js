@@ -380,9 +380,15 @@
         // 切项目会关闭全部打开文件；有未保存改动时先确认，取消则中止切换、保留文件与当前项目。
         // 启动期无打开文件，hasUnsavedFiles() 为假，不会打断自动恢复流程。
         if (path !== window.currentProjectRoot && !confirmDiscardUnsavedIfAny()) return;
+        var previous = window.currentProjectRoot;
         window.currentProjectRoot = path;
         // 同步项目相关视图 + 持久化项目根（名称/下拉/文件树/已开文件/Git/终端）
         syncProjectContext(path);
+        if (path !== previous) {
+            document.dispatchEvent(new CustomEvent('workspace:changed', {
+                detail: { mode: 'code', cwd: path, previousCwd: previous }
+            }));
+        }
         // 刷新 code 会话列表（按该项目）——仅项目选择器主动切项目时需要；
         // 从「会话切换」间接触发时不重载列表（避免把当前历史列表刷掉）。
         if (!silent) reloadSessionsForMode();

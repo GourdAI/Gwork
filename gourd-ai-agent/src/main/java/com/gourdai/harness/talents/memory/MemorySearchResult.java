@@ -23,23 +23,47 @@ package com.gourdai.harness.talents.memory;
  */
 public class MemorySearchResult {
     private String key;
+    private String title;
     private String content;
     private double importance;
     private String time; // 新增：记录时间，用于时序冲突判断
+    private int ttl = -1;
+    private String storedTime;
+    private boolean ttlKnown;
+    private Long expiresAtEpochMs;
 
     public MemorySearchResult() {
         //用于反序列化
     }
 
     public MemorySearchResult(String key, String content, double importance, String time) {
+        this(key, null, content, importance, time, -1, null, false, null);
+    }
+
+    public MemorySearchResult(String key, String title, String content, double importance, String time,
+                              int ttl, String storedTime) {
+        this(key, title, content, importance, time, ttl, storedTime, true, null);
+    }
+
+    public MemorySearchResult(String key, String title, String content, double importance, String time,
+                              int ttl, String storedTime, boolean ttlKnown, Long expiresAtEpochMs) {
         this.key = key;
+        this.title = MemoryTitles.resolve(title, content);
         this.content = content;
         this.importance = importance;
         this.time = time;
+        this.ttl = ttl;
+        this.storedTime = storedTime;
+        this.ttlKnown = ttlKnown;
+        this.expiresAtEpochMs = expiresAtEpochMs;
     }
 
     public String getKey() {
         return key;
+    }
+
+    public String getTitle() {
+        return MemoryTitles.resolve(title, content);
     }
 
     public String getContent() {
@@ -52,5 +76,21 @@ public class MemorySearchResult {
 
     public String getTime() {
         return time;
+    }
+
+    public int getTtl() {
+        return ttl;
+    }
+
+    public String getStoredTime() {
+        return storedTime;
+    }
+
+    public boolean isTtlKnown() {
+        return ttlKnown;
+    }
+
+    public Long getExpiresAtEpochMs() {
+        return expiresAtEpochMs;
     }
 }

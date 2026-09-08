@@ -104,9 +104,13 @@
         var sel = toSelection(path);
         closeAll();
         if (sel !== window.currentChatWorkspace) {
+            var previous = window.currentChatWorkspace;
             window.currentChatWorkspace = sel;
             persist();
             renderSelectors();
+            document.dispatchEvent(new CustomEvent('workspace:changed', {
+                detail: { mode: 'chat', cwd: sel, previousCwd: previous }
+            }));
             if (sel && typeof window.notifyWatchRoot === 'function') window.notifyWatchRoot(sel);
             if (!silent) {
                 if (typeof switchToWelcomeMode === 'function') switchToWelcomeMode();

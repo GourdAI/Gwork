@@ -1087,7 +1087,18 @@
                    "imp_tip":  "Mức quan trọng {n}/10: quyết định ưu tiên truy xuất và trọng số lưu giữ của ký ức này",
                    "delete":  "Xóa",
                    "delete_confirm":  "Xóa ký ức này? Không thể hoàn tác sau khi xóa.",
-                   "delete_failed":  "Xóa thất bại"
+                   "delete_failed":  "Xóa thất bại",
+                   "clear_scope":  "Xóa phạm vi hiện tại",
+                   "clear_confirm":  "Xóa toàn bộ bộ nhớ trong “{scope}”? Không thể hoàn tác.",
+                   "clear_failed":  "Xóa thất bại",
+                   "untitled":  "Bộ nhớ chưa đặt tên",
+                   "ttl_permanent":  "Vĩnh viễn",
+                   "ttl_unknown":  "Không rõ hạn",
+                   "ttl_expired":  "Đã hết hạn",
+                   "ttl_days":  "Còn {n} ngày",
+                   "ttl_hours":  "Còn {n} giờ",
+                   "ttl_minutes":  "Còn {n} phút",
+                   "workspace_aliased":  "Đã tắt cô lập bộ nhớ: bộ nhớ không gian làm việc thực tế là bộ nhớ dùng chung toàn cục. Hãy chuyển sang Toàn cục và xác nhận xóa rõ ràng."
                },
     "memory_view":  {
                         "title":  "Bộ nhớ",

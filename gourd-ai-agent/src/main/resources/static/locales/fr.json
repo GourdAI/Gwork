@@ -1087,7 +1087,18 @@
                    "imp_tip":  "Importance {n}/10 : détermine la priorité de rappel et le poids de rétention de ce souvenir",
                    "delete":  "Supprimer",
                    "delete_confirm":  "Supprimer ce souvenir ? Cette action est irréversible.",
-                   "delete_failed":  "Échec de la suppression"
+                   "delete_failed":  "Échec de la suppression",
+                   "clear_scope":  "Effacer la portée actuelle",
+                   "clear_confirm":  "Effacer toutes les mémoires de « {scope} » ? Cette action est irréversible.",
+                   "clear_failed":  "Échec de l’effacement",
+                   "untitled":  "Mémoire sans titre",
+                   "ttl_permanent":  "Permanente",
+                   "ttl_unknown":  "Expiration inconnue",
+                   "ttl_expired":  "Expirée",
+                   "ttl_days":  "{n} jours restants",
+                   "ttl_hours":  "{n} heures restantes",
+                   "ttl_minutes":  "{n} minutes restantes",
+                   "workspace_aliased":  "L’isolation de la mémoire est désactivée : la mémoire de l’espace de travail est partagée globalement. Passez à Global et confirmez explicitement l’effacement."
                },
     "memory_view":  {
                         "title":  "Mémoire",
