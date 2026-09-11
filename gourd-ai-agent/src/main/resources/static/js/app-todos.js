@@ -38,10 +38,21 @@
         var headers = root ? { 'X-Session-Cwd': root } : {};
 
         return fetch('/web/chat/todos?sessionId=' + encodeURIComponent(sid), { headers: headers })
-            .then(function(r) { return r.json(); })
+            .then(function(r) {
+                // fetch 对 4xx/5xx 不会 reject。若不在此拦截，失败响应会以 res.data 为空的形态
+                // 流进 renderTodos，被当成「确认没有清单」→ 删缓存 + 收起 chip，与真实状态相反。
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
             .then(function(res) {
                 // 同一会话的旧请求晚到时不得覆盖较新的结果。
                 if (todoRequestVersions[sid] !== requestVersion) return;
+                // 业务层失败（Result.failure，如 400 Invalid sessionId）同样属于「读取异常」，
+                // 不是「没有清单」，按瞬态错误处理以保住任务入口。
+                if (res && res.code !== undefined && res.code !== 0 && !res.data) {
+                    renderError(sid);
+                    return;
+                }
                 renderTodos(res && res.data ? res.data : {}, sid);
             })
             .catch(function() {

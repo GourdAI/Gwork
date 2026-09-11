@@ -18,6 +18,7 @@ package com.gourdai.harness;
 import com.gourdai.agent.Agent;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.AgentSessionProvider;
+import com.gourdai.core.config.AgentFlags;
 import com.gourdai.harness.agent.*;
 import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.react.ReActRequest;
@@ -1148,8 +1149,12 @@ public class HarnessEngine {
      * 恢复续跑前，读取 TODO.md 落盘清单并注入校准消息，防止盲目重复执行已完成的步骤。
      *
      * <p>清单路径与 TodoTalent 落盘规则保持一致：{@code <cwd>/<harnessSessions>/<sessionId>/TODO.md}。
-     * 工作目录优先取入参，其次会话属性 ATTR_CWD（与 WebGate/WsGate 取 cwd 的口径一致），
-     * 均缺失时回退工作区根目录；异常只记日志，绝不影响恢复主流程。</p>
+     * 工作目录优先取入参，其次会话属性 ATTR_CWD（与 WebGate/WsGate 取 cwd 的口径一致）；
+     * 均缺失时依次回探全局基准目录与工作区根；异常只记日志，绝不影响恢复主流程。</p>
+     *
+     * <p><b>为何要多根回探：</b>无所属根的会话在旧版本里把 TODO.md 写进了
+     * {@code user.dir}（workspace），而会话落盘标准位置是 {@code user.home}（全局基准）。
+     * 只试单一根会让这批会话恢复时读不到清单 → 模型重复执行已完成步骤。</p>
      */
     private void injectTodoCalibration(AgentSession session, ReActTrace trace, String cwd) {
         try {
@@ -1159,14 +1164,25 @@ public class HarnessEngine {
                 Object cwdAttr = session.attrs().get(ATTR_CWD);
                 cwd = cwdAttr != null ? cwdAttr.toString() : null;
             }
-            if (Assert.isEmpty(cwd)) {
-                cwd = getWorkspace();
+
+            // 候选根：显式 cwd → 全局基准目录 → 工作区根（去重、跳空）
+            java.util.List<String> candidates = new java.util.ArrayList<>(3);
+            for (String c : new String[]{cwd, AgentFlags.getHarnessBase(), getWorkspace()}) {
+                if (Assert.isNotEmpty(c) && !candidates.contains(c)) {
+                    candidates.add(c);
+                }
             }
-            if (Assert.isEmpty(cwd)) {
+            if (candidates.isEmpty()) {
                 return;
             }
 
-            String content = todoTalent.readTodoContentOrNil(cwd, sessionId);
+            String content = null;
+            for (String candidate : candidates) {
+                content = todoTalent.readTodoContentOrNil(candidate, sessionId);
+                if (content != null) {
+                    break;
+                }
+            }
             if (content == null) {
                 return;
             }

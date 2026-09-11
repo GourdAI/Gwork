@@ -2626,3 +2626,67 @@ pre:hover .code-copy-btn { opacity: 1; }
     border-bottom: none;
 }
 
+/* ===== 对话工具轨迹：低彩度视觉 =====
+   工具卡是同一条执行轨迹，不再用 emoji 和红/绿/蓝状态色制造多套视觉焦点。
+   增删、状态与工具类别仍通过文字、线框和位置表达；真正的错误提示保留原有语义颜色。 */
+.tool-type-icon,
+.agent-icon,
+.file-change-kind,
+.file-changes-card .tool-file,
+.tool-card .tool-file,
+.tool-batch-title,
+.tool-batch-progress,
+.tool-name,
+.file-changes-summary,
+.file-change-path,
+.file-change-state { color: var(--text-secondary); }
+.tool-type-icon svg,
+.agent-icon svg { width: 15px; height: 15px; display: block; stroke: currentColor; }
+.tool-card .tool-file,
+.file-changes-card .tool-file { color: var(--text-primary); }
+.tool-diff-stat .add,
+.tool-diff-stat .del,
+.file-changes-card .tool-diff-stat .add,
+.file-changes-card .tool-diff-stat .del { color: var(--text-secondary); font-weight: 600; }
+.tool-status-icon,
+.tool-status-icon.loading,
+.tool-status-icon.done,
+.tool-status-icon.warn,
+.tool-status-icon.reject,
+.agent-status-icon,
+.agent-status-icon.loading,
+.agent-status-icon.done,
+.agent-status-icon.reject,
+.thinking-status-dot { background: var(--text-tertiary); border-color: var(--text-tertiary); box-shadow: none; }
+.tool-status-icon.loading,
+.agent-status-icon.loading,
+.thinking-block.streaming .thinking-status-dot { animation: status-dot-blink 1.2s ease-in-out infinite; }
+.tool-card.hitl-pending,
+.agent-card.agent-card-streaming,
+.thinking-block.streaming { border-color: var(--border-color); }
+.thinking-block.streaming .thinking-block-label,
+.thinking-block .tool-type-icon,
+.thinking-block-toggle { color: var(--text-secondary); }
+.thinking-block-toggle { margin-left: auto; }
+.thinking-block .thinking-status-dot { margin-left: 0; }
+.thinking-block-dots span { background: var(--text-secondary); }
+.tool-batch-group:hover { border-color: var(--border-color); box-shadow: none; }
+.tool-batch-header:hover,
+.tool-batch-group:hover .tool-batch-header { background: var(--bg-hover); }
+.file-change-kind.kind-A,
+.file-change-kind.kind-D,
+.file-change-kind.kind-M { color: var(--text-secondary); }
+.file-change-action.undo-run,
+.file-change-action.reapply-run { border-color: var(--border-color); color: var(--text-secondary); }
+.todo-badge,
+.todo-in_progress .todo-check,
+.todo-in_progress .todo-text,
+.todo-done .todo-check { color: var(--text-secondary); background-color: transparent; }
+.todo-badge { border: 1px solid var(--border-color); }
+.todo-done .todo-text { color: var(--text-tertiary); }
+.bash-prompt { color: var(--text-secondary); }
+.edit-result.is-ok,
+.edit-result.is-error { background: transparent; }
+.edit-result.is-ok .edit-result-label,
+.edit-result.is-error .edit-result-label { color: var(--text-secondary); }
+

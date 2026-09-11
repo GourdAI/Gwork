@@ -15,7 +15,8 @@ test('主会话 read 保留裸工具语义与本地化展示', () => {
     const model = resolveToolPresentation('read', 'read', { translate });
     assert.equal(model.bareToolName, 'read');
     assert.equal(model.displayName, '读取');
-    assert.equal(model.icon, '📖');
+    assert.match(model.icon, /^<svg[\s\S]*currentColor[\s\S]*<\/svg>$/);
+    assert.doesNotMatch(model.icon, /[\u{1F000}-\u{1FAFF}\u2600-\u27BF]/u);
     assert.equal(model.nested, false);
 });
 
@@ -75,7 +76,8 @@ test('未知工具与空 title 稳定回退', () => {
     const unknown = resolveToolPresentation('custom_tool', '', { translate });
     assert.equal(unknown.bareToolName, 'custom_tool');
     assert.equal(unknown.displayName, 'custom_tool');
-    assert.equal(unknown.icon, '🔧');
+    assert.match(unknown.icon, /^<svg[\s\S]*currentColor[\s\S]*<\/svg>$/);
+    assert.doesNotMatch(unknown.icon, /[\u{1F000}-\u{1FAFF}\u2600-\u27BF]/u);
     assert.equal(unknown.source, '');
 
     const empty = resolveToolPresentation('', '', { translate });
@@ -98,6 +100,13 @@ test('HITL 复用调用契约消费批准卡、登记 actionId 并清除旧重�
     assert.match(source, /ordinaryToolNameCleanupAttributes\(\)\.forEach/);
     assert.match(source, /data-i18n-hitl-tool', toolName \|\| 'unknown'/);
 });
+test('工具图标用 currentColor SVG 注入，避免彩色 emoji 字形', () => {
+    const source = fs.readFileSync(path.join(staticJs, 'app-message.js'), 'utf8').replace(/^\uFEFF/, '');
+    assert.match(source, /iconEl\.innerHTML = presentation\.icon/);
+    assert.match(source, /iconEl\.innerHTML = toolTypeIcon\(/);
+    assert.doesNotMatch(source, /tool-type-icon">🧠/);
+});
+
 test('公共模块先于 app-message 加载且所有 action_end 路径复用公共更新', () => {
     const bootstrap = fs.readFileSync(path.join(staticJs, 'app-bootstrap.js'), 'utf8');
     const message = fs.readFileSync(path.join(staticJs, 'app-message.js'), 'utf8');

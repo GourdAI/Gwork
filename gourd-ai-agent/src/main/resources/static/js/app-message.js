@@ -14,6 +14,8 @@ var CONTINUE_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" 
    避免两处不同统计口径（本轮累计 vs 本次推理）并列造成歧义，详见 appendTraceBadge。 */
 var TRACE_TIME_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>';
 
+var THINKING_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5.2 11.8c-1.6-.9-2.7-2.5-2.7-4.4A5.5 5.5 0 0 1 8 2a5.5 5.5 0 0 1 5.5 5.4c0 2.3-1.4 4.3-3.4 5.1-.6.2-1 .7-1 1.3H6.9c0-.8-.5-1.6-1.7-2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M6.3 15h3.4M6.7 7.5h2.6M8 6.2v2.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+
 /* ===== Message Rendering (Session-Aware) ===== */
 function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt) {
     var row = $('<div>').addClass('msg-row user')[0];
@@ -213,12 +215,13 @@ function createThinkingBlockEl(sess) {
     // 与工具卡片保持一致：简洁展示关闭时才默认展开
     if (window.cliPrintSimplified === false) $(block).addClass('expanded');
     block.innerHTML = '<div class="thinking-block-header">'
-        + '<span class="tool-type-icon">🧠</span>'
+         + '<span class="tool-type-icon">' + THINKING_SVG + '</span>'
         + '<span class="thinking-block-label" data-i18n-thinking="progress">' + GourdI18n.t('chat.thinking_in_progress') + '</span>'
         + '<span class="thinking-timer-wrap" style="margin-left:4px">'
-        + '<span class="thinking-current-timer">0s</span>'
-        + '</span>'
-        + '<span class="thinking-status-dot"></span>'
+         + '<span class="thinking-current-timer">0s</span>'
+         + '</span>'
+         + '<span class="thinking-block-toggle" aria-hidden="true">›</span>'
+         + '<span class="thinking-status-dot"></span>'
         + '</div>'
         + '<div class="thinking-block-body"><div class="md-content"></div></div>';
     $(block).find('.thinking-block-header').on('click', function() {
@@ -858,7 +861,7 @@ function applyToolPresentation(cardEl, toolName, toolTitle, options) {
         });
         tagToolName(nameEl, presentation);
     }
-    if (iconEl) iconEl.textContent = presentation.icon;
+    if (iconEl) iconEl.innerHTML = presentation.icon;
     cardEl.setAttribute('data-tool-name', presentation.bareToolName);
     return presentation;
 }
@@ -1085,7 +1088,7 @@ function updateBatchGroupHeader(batch) {
     var total = batch.batchSize || batch.count || 0;
     var done = batch.doneCount || 0;
     if (progEl) progEl.textContent = done + '/' + total;
-    if (iconEl) iconEl.textContent = toolTypeIcon(batch.toolName || null);
+    if (iconEl) iconEl.innerHTML = toolTypeIcon(batch.toolName || null);
     if (titleEl) {
         titleEl.textContent = batchTitleText(batch.toolName || null, total);
         titleEl.setAttribute('data-i18n-batch-tool', batch.toolName || '');
@@ -1107,7 +1110,7 @@ function updateBatchGroupHeaderExplicit(batch) {
     var names = batch.slots ? batch.slots.filter(Boolean).map(function(c) { return c.getAttribute && c.getAttribute('data-tool-name'); }) : [];
     var uniqueNames = names.filter(function(n, i, a) { return n && a.indexOf(n) === i; });
     var iconTool = uniqueNames.length === 1 ? uniqueNames[0] : null;
-    if (iconEl) iconEl.textContent = toolTypeIcon(iconTool);
+    if (iconEl) iconEl.innerHTML = toolTypeIcon(iconTool);
     if (titleEl) {
         titleEl.textContent = batchTitleText(iconTool, total);
         // 混合工具名写空串：relocalizeDynamicLabels 靠属性存在与否选中元素，

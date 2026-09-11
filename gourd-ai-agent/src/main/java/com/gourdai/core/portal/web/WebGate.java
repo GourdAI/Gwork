@@ -146,12 +146,20 @@ public class WebGate extends SimpleWebSocketListener {
      * 现在本方法的返回值会被直接传给 buildStreamFlux 作为工具 cwd，三方口径强制一致。</p>
      */
     private String resolveChangeRoot(String sessionId, String sessionCwd) {
+        // 统一走 SessionLocator 的写入根口径（sessionCwd > boundRoot > globalBase），
+        // 使「工具写入根 == 会话落盘根 == 前端读取根」三方一致。
+        //
+        // 旧实现末级兜底用 engine.getWorkspace()（user.dir），而 SessionLocator 读取侧兜底
+        // 用 globalBase（user.home）：两者在桌面端/裸 CLI 下并不相等。于是无所属根的会话中
+        // todowrite 把 TODO.md 写进 user.dir、查询接口却去 user.home 找，任务面板恒为空。
+        if (sessionLocator != null) {
+            String resolved = sessionLocator.resolveWriteRoot(sessionId, sessionCwd);
+            if (Assert.isNotEmpty(resolved)) {
+                return resolved;
+            }
+        }
         if (Assert.isNotEmpty(sessionCwd)) {
             return sessionCwd;
-        }
-        String bound = (sessionLocator == null) ? null : sessionLocator.boundRoot(sessionId);
-        if (Assert.isNotEmpty(bound)) {
-            return bound;
         }
         return engine.getWorkspace();
     }

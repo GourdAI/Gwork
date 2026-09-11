@@ -1689,7 +1689,12 @@ public class WebController {
             sessionLocator.bindSessionRoot(sessionId, sessionCwd);
         }
 
-        Path todoPath = sessionLocator.resolveDir(sessionId, sessionCwd).toPath()
+        // 用带历史兜底的读取解析：旧版本在无所属根会话上把 TODO.md 写进了 workspace
+        // （user.dir），而标准读取位置是 globalBase（user.home）。不回探历史位置的话，
+        // 这批存量会话的任务清单升级后会直接「消失」。
+        Path todoPath = sessionLocator
+                .resolveDirForRead(sessionId, sessionCwd, TodoTalent.TODO_FILE_NAME)
+                .toPath()
                 .resolve(TodoTalent.TODO_FILE_NAME);
 
         Map<String, Object> data = new LinkedHashMap<>();

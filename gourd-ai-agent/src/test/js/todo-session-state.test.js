@@ -66,8 +66,14 @@ function createContext() {
     return { context, elements, requests };
 }
 
-function respond(request, data) {
-    request.pending.resolve({ json() { return Promise.resolve({ data }); } });
+function respond(request, data, options) {
+    const opts = options || {};
+    request.pending.resolve({
+        // fetch 真实响应带 ok/status；app-todos 靠 !r.ok 区分「读取异常」与「确认无清单」。
+        ok: opts.ok !== undefined ? opts.ok : true,
+        status: opts.status || 200,
+        json() { return Promise.resolve(opts.body !== undefined ? opts.body : { data }); }
+    });
 }
 
 async function flushPromises() {
@@ -138,4 +144,48 @@ test('流结束与会话切换刷新均显式传入目标 sessionId 和 projectR
     assert.match(source, /window\.loadTodos\(sess\.sessionId, sess\.projectRoot\)/);
     assert.match(source, /window\.loadTodos\(sid, todoSess \? todoSess\.projectRoot : ''\)/);
     assert.doesNotMatch(source, /if \(window\.loadTodos\) window\.loadTodos\(\);/);
+});
+
+test('HTTP 失败响应不得被当成「无清单」而收走任务按钮', async () => {
+    const { context, elements, requests } = createContext();
+    context.window.sessionTodoMap = { 'session-a': { done: 1, total: 3 } };
+    elements.chatTodoChip.style.display = '';
+
+    const loading = context.window.loadTodos('session-a');
+    // 500：fetch 不会 reject，旧实现会拿到空 body 走进「确认无清单」分支
+    respond(requests[0], null, { ok: false, status: 500, body: {} });
+    await loading;
+    await flushPromises();
+
+    assert.equal(context.window._todoChipVisible, true, '瞬态错误不得隐藏任务入口');
+    assert.equal(elements.chatTodoChip.style.display, '');
+    assert.deepEqual(context.window.sessionTodoMap['session-a'], { done: 1, total: 3 },
+        '读取异常不得清空已有任务缓存');
+});
+
+test('业务失败响应（Result.failure）同样按读取异常处理', async () => {
+    const { context, elements, requests } = createContext();
+    context.window.sessionTodoMap = { 'session-a': { done: 2, total: 5 } };
+    elements.chatTodoChip.style.display = '';
+
+    const loading = context.window.loadTodos('session-a');
+    respond(requests[0], null, { ok: true, status: 200, body: { code: 400, description: 'Invalid sessionId' } });
+    await loading;
+    await flushPromises();
+
+    assert.equal(context.window._todoChipVisible, true);
+    assert.deepEqual(context.window.sessionTodoMap['session-a'], { done: 2, total: 5 });
+});
+
+test('确认无清单（成功响应 exists=false）仍应收起任务按钮', async () => {
+    const { context, requests } = createContext();
+    context.window._todoChipVisible = true;
+
+    const loading = context.window.loadTodos('session-a');
+    respond(requests[0], { exists: false, items: [], stats: { total: 0 } });
+    await loading;
+    await flushPromises();
+
+    assert.equal(context.window._todoChipVisible, false,
+        '后端明确返回「没有清单」时应收起，不能因为容错而该收不收');
 });

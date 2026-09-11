@@ -217,6 +217,11 @@ public class WebStreamBuilder {
         // 因此「继续/恢复」的新一轮不会继承上一轮的相位。
         // 用单元素数组做可变持有者，因为 lambda 内无法改写外部局部变量。
         final String[] phase = {WebChunk.PHASE_WAITING};
+        // 每个 buildTurnFlux 对应一轮用户请求，但一个 ReAct run 可包含多次「思考→工具」循环。
+        // 用轮次级标记判断 ReasonEnd 是否需要补发聚合思考，避免「没有 thinking delta 时思考
+        // 消失」与「已有 delta 时聚合全文重复」二者择一。
+
+        final boolean[] thinkingDeltaSinceEnd = {false};
 
         return agent.prompt(prompt)
                 .session(session)
@@ -262,7 +267,7 @@ public class WebStreamBuilder {
                     String candidatePhase = nextPhase(chunk, phase[0]);
 
                     List<WebChunk> out = new ArrayList<>(2);
-                    for (WebChunk webChunk : mapEvent(session, chatModel, chunk, turnStartMs)) {
+                    for (WebChunk webChunk : mapEvent(session, chatModel, chunk, turnStartMs, thinkingDeltaSinceEnd[0])) {
                         if (webChunk == null || webChunk == WebChunk.EMPTY) {
                             continue;
                         }
@@ -271,6 +276,15 @@ public class WebStreamBuilder {
                         phase[0] = candidatePhase;
                         webChunk.setPhase(candidatePhase);
                         out.add(webChunk);
+                    }
+                    if (chunk instanceof ReasonDeltaEvent) {
+                        ReasonDeltaEvent delta = (ReasonDeltaEvent) chunk;
+                        if (delta.isThinking() && !delta.isToolCalls() && delta.hasContent()) {
+                            thinkingDeltaSinceEnd[0] = true;
+                        }
+                    } else if (chunk instanceof ReasonEndEvent) {
+                        // ReasonEndEvent 已完成当前轮次；下一轮重新等待 thinking delta。
+                        thinkingDeltaSinceEnd[0] = false;
                     }
                     return out;
                 })
@@ -324,7 +338,8 @@ public class WebStreamBuilder {
      * @param turnStartMs 本轮任务订阅时刻（毫秒）
      * @return 待下发的帧列表，可能为空
      */
-    private List<WebChunk> mapEvent(AgentSession session, ChatModel chatModel, AgentEvent chunk, long turnStartMs) {
+    private List<WebChunk> mapEvent(AgentSession session, ChatModel chatModel, AgentEvent chunk, long turnStartMs,
+                                    boolean thinkingDeltaSinceEnd) {
         if (chunk instanceof ContextUsageEvent) {
             // 子代理的用量不刷全局上下文指示器：其 token 来自子代理模型，而指示器分母
             // 用的是主模型 contextLength（两者窗口可不同），且会覆盖主代理指标并随会话快照长期留存。
@@ -337,7 +352,7 @@ public class WebStreamBuilder {
             return oneFrame(onReasonDeltaEvent((ReasonDeltaEvent) chunk));
         }
         if (chunk instanceof ReasonEndEvent) {
-            return onReasonEndEvent(session, (ReasonEndEvent) chunk);
+            return onReasonEndEvent(session, (ReasonEndEvent) chunk, thinkingDeltaSinceEnd);
         }
         if (chunk instanceof ToolCallStartEvent) {
             return oneFrame(onToolCallStartEvent((ToolCallStartEvent) chunk));
@@ -728,9 +743,8 @@ public class WebStreamBuilder {
      * <ol>
      *   <li><b>子代理载荷</b>（带 {@link TaskTalent#META_SUBAGENT}）：只负责把内容渲染进智能体卡片，
      *       <b>不做 IM 转发</b>。思考与正文是两份独立载荷，各出一帧。</li>
-     *   <li><b>主代理载荷</b>：根据本轮是否有工具调用、是否为源代理的最终结果，以不同的标记
-     *       （isFinal）将内容推送到所有已绑定的 IM 通道；不向 Web 端出帧（正文已由
-     *       ReasonDeltaEvent 增量送达，再补一份会整段重复）。</li>
+     *   <li><b>主代理载荷</b>：正文增量不补发；若模型只在聚合事件中提供思考且本轮没有
+     *       thinking delta，则向 Web 补发一帧思考。同时按工具调用/最终结果语义转发 IM。</li>
      * </ol>
      *
      * <p><b>为什么子代理一律不转发 IM：</b>IM 通道绑定的是会话，用户要的是主代理的最终答案
@@ -746,7 +760,7 @@ public class WebStreamBuilder {
      * @param event 思考轮次结束事件，包含助手消息和追踪信息
      * @return 0..2 帧 WebChunk（思考帧 + 正文帧），或空列表
      */
-    private List<WebChunk> onReasonEndEvent(AgentSession session, ReasonEndEvent event) {
+    private List<WebChunk> onReasonEndEvent(AgentSession session, ReasonEndEvent event, boolean thinkingDeltaSinceEnd) {
         String sessionId = session.getSessionId();
         // 4.1 事件体系：正文由 getText() 直接给出（与 getThinking() 物理分离），
         // 不再绕道 AgentUtil.getAggregatedResultContent() 反推——旧写法是
@@ -776,7 +790,14 @@ public class WebStreamBuilder {
             return frames;
         }
 
-        // === 主代理载荷：IM 转发，不出 Web 帧 ===
+        // 主代理同样可能只在聚合 ReasonEndEvent 中携带 thinking（部分模型/中转不发
+        // THINKING_DELTA）。此时补发一帧；若本轮已有思考增量，则由增量负责展示，避免全文重复。
+        List<WebChunk> fallbackFrames = new ArrayList<>(1);
+        if (!thinkingDeltaSinceEnd && displayableThinking(event)) {
+            fallbackFrames.add(WebChunk.ofReason(event.getThinking()));
+        }
+
+        // === 主代理载荷：IM 转发 ===
         if (Assert.isNotEmpty(resultContent)) {
             if (event.isToolCalls()) {
                 replyToBoundChannel(sessionId, resultContent, false);
@@ -804,7 +825,22 @@ public class WebStreamBuilder {
             }
         }
 
-        return Collections.emptyList();
+        return fallbackFrames;
+    }
+
+    /**
+     * 只有真实 thinking 通道或文本 ReAct 的 Thought 段才可作为思考展示。
+     * Native tool 的普通正文回退值不能重复渲染成思考。
+     */
+    private static boolean displayableThinking(ReasonEndEvent event) {
+        if (event == null || !event.hasThinking() || event.getAssistantMessage() == null) {
+            return false;
+        }
+        if (event.getAssistantMessage().isThinking()) {
+            return true;
+        }
+        String content = event.getAssistantMessage().getContent();
+        return content != null && content.contains("Thought:");
     }
 
     /**

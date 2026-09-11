@@ -155,6 +155,85 @@ public class SessionLocator {
         return sessionDir(root, sessionId);
     }
 
+    /**
+     * 解析会话存储目录（<b>读取专用</b>，带历史落点兜底）。
+     *
+     * <p><b>为何需要与 {@link #resolveDir(String, String)} 分开：</b>写入侧（工具链的
+     * {@code ATTR_CWD}）在无根会话上的兜底值是 {@code workspace}（即 {@code user.dir}，
+     * 进程启动目录），而读取侧的兜底值是 {@code globalBase}（即 {@code user.home}）。
+     * 二者在桌面端/裸 CLI 下并不相等，于是「无所属根的会话」会出现读写分叉：
+     * {@code todowrite} 把 TODO.md 写进 {@code user.dir}，查询接口却去 {@code user.home}
+     * 找 → 恒返回「暂无任务清单」，前端任务入口还会随之消失。</p>
+     *
+     * <p>本方法在标准解析落空（目录里没有目标文件）时，再探一次 {@code workspace} 下的
+     * 同名会话目录；命中则返回历史落点，使既有会话立即恢复可读。新写入由
+     * {@link #resolveWriteRoot(String, String)} 收敛到统一根，分叉不会继续扩大。</p>
+     *
+     * @param sessionId   会话 ID
+     * @param projectRoot 可选的工作空间根提示
+     * @param probeFile   用于判定「该目录确实是这个会话的落点」的文件名（如 {@code TODO.md}）；
+     *                    为空时只做目录存在性判定
+     * @return 优先返回标准目录；仅当标准目录不含 probeFile 而历史目录含有时，返回历史目录
+     */
+    public File resolveDirForRead(String sessionId, String projectRoot, String probeFile) {
+        File primary = resolveDir(sessionId, projectRoot);
+        if (hasProbe(primary, probeFile)) {
+            return primary;
+        }
+        // 标准位置没有：回探写入侧的历史兜底根（workspace），命中才改用
+        File legacy = legacyWorkspaceDir(sessionId);
+        if (legacy != null && hasProbe(legacy, probeFile)) {
+            return legacy;
+        }
+        return primary;
+    }
+
+    /**
+     * 解析会话的<b>写入根</b>——与 {@link #resolveDir(String, String)} 完全同源的口径，
+     * 供工具链注入 {@code ATTR_CWD} 使用，确保「写进去的目录 == 读出来的目录」。
+     *
+     * <p>顺序：显式 cwd 提示 &gt; 会话已登记所属根 &gt; 全局基准目录。注意最后一级是
+     * {@code globalBase} 而非 {@code workspace}，这正是本次修复的关键：把写入侧的兜底
+     * 从 {@code user.dir} 纠正为与读取侧一致的 {@code user.home}。</p>
+     *
+     * @param sessionId  会话 ID
+     * @param sessionCwd 显式工作目录提示，可为空
+     * @return 该会话的写入根目录（绝对路径字符串）
+     */
+    public String resolveWriteRoot(String sessionId, String sessionCwd) {
+        if (sessionCwd != null && !sessionCwd.trim().isEmpty()) {
+            return sessionCwd.trim();
+        }
+        String bound = (sessionId == null) ? null : boundRoots.get(sessionId);
+        if (bound != null && !bound.isEmpty()) {
+            return bound;
+        }
+        return globalBase;
+    }
+
+    /** 写入侧历史兜底根（{@code workspace}）下的会话目录；与全局区相同则返回 null。 */
+    private File legacyWorkspaceDir(String sessionId) {
+        if (workspace == null || workspace.isEmpty() || workspace.equals(globalBase)) {
+            return null;
+        }
+        try {
+            return sessionDir(workspace, sessionId);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** 目录是否存在，且（指定 probeFile 时）其中确实存在该文件。 */
+    private static boolean hasProbe(File dir, String probeFile) {
+        if (dir == null || !dir.isDirectory()) {
+            return false;
+        }
+        if (probeFile == null || probeFile.isEmpty()) {
+            return true;
+        }
+        return new File(dir, probeFile).isFile();
+    }
+
     /** 全局会话列表的扫描根目录（全局基准目录）。 */
     public File globalSessionsRoot() {
         return sessionsRoot(globalBase);
