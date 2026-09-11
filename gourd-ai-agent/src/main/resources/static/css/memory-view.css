@@ -56,6 +56,8 @@ body.code-mode .memory-view:not(.memory-overlay) { display: none !important; }
 
 /* 记忆页专属选择器：避免 app-workspace.js 的全局项目事件代理 */
 .memory-project-selector { position: relative; min-width: 220px; max-width: 360px; }
+/* 全局域与项目无关：整块选择器不展示（仅工作空间域展示项目切换，见 app-memory.js renderProjectSelector） */
+.memory-project-selector.hidden { display: none; }
 .memory-project-current { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 38px; padding: 5px 10px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-card, var(--bg-main)); color: var(--text-secondary); cursor: pointer; text-align: left; }
 .memory-project-current:hover { background: var(--bg-hover); color: var(--text-primary); }
 .memory-project-current:disabled { cursor: default; opacity: .78; }

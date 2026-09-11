@@ -643,7 +643,6 @@ body.code-mode #chatView .context-status { max-width: 100%; }
 body.code-mode #chatView .thinking-block { margin: 6px 0; border-radius: 8px; }
 body.code-mode #chatView .thinking-block-header { padding: 6px 10px; font-size: 12px; }
 body.code-mode #chatView .thinking-block-label { font-size: 12px; }
-body.code-mode #chatView .thinking-block-toggle { font-size: 11px; }
 body.code-mode #chatView .thinking-block-body { padding: 0 10px 8px; font-size: 12px; line-height: 1.6; }
 body.code-mode #chatView .thinking-block-body .md-content { font-size: 12px; }
 
@@ -654,6 +653,11 @@ body.code-mode #chatView .tool-type-icon { font-size: 13px; }
 body.code-mode #chatView .tool-file-lang { font-size: 12px; }
 body.code-mode #chatView .tool-args { font-size: 11px; }
 body.code-mode #chatView .tool-card-body { padding: 0 10px 8px; font-size: 11px; }
+
+/* 变更按钮（任务 chip 形态）：头部补零内边距（覆盖 .tool-card-header 的 6px/10px），胶囊整体收紧 */
+body.code-mode #chatView .file-changes-header { padding: 0; }
+body.code-mode #chatView .file-changes-pill { padding: 3px 8px; gap: 5px; font-size: 11px; }
+body.code-mode #chatView .file-changes-pill .tool-type-icon svg { width: 13px; height: 13px; }
 
 body.code-mode #chatView .file-changes-body { padding: 3px 5px 6px; max-height: 280px; }
 body.code-mode #chatView .file-change-row { gap: 5px; padding: 5px 3px; align-items: flex-start; flex-direction: column; }

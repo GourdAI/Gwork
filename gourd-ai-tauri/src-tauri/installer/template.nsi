@@ -1,8 +1,17 @@
 ; ⚠ 本文件是对 @tauri-apps/cli 内置 NSIS 模板的【整份覆盖】，不是补丁、也不是增量 include。
 ;
 ;   覆盖对象 : tauri-bundler 的 crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi
-;              （handlebars 原文；本文件里的 {{...}} 占位符由 bundler 在打包时渲染，
+;              （handlebars 原文；本文件里的「双花括号」占位符由 bundler 在打包时渲染，
 ;               因此本文件【无法】用 makensis 直接编译验证，只能靠 tauri build 完整跑一遍）
+;
+;   ⚠ 本文件的【注释里严禁】出现字面的「左双花括号」/「右双花括号」：
+;     bundler 是先拿 handlebars 整体 parse 本文件，NSIS 的分号注释对它【毫无屏蔽作用】。
+;     后果分两档：
+;       · parse 期直接失败（expected path_id or path_up），报错行号指向注释行；
+;       · 侥幸 parse 通过的（如 #if/#each 块、helper 名），会在 render 期被当成【真占位符】，
+;         注释内容被实际值替换、条件块整段消失，或 helper 因缺参数在 render 期报错。
+;     需要提及占位符时，一律写成不带花括号的形式（例：installer_hooks 条件 include 块）。
+;     注：installer/hooks.nsh 不经 handlebars（由 NSIS 直接 !include），不受此约束。
 ;   接入方式 : tauri.conf.json → bundle.windows.nsis.template = "installer/template.nsi"
 ;   对应版本 : @tauri-apps/cli 2.11.4
 ;              （取自 gourd-ai-tauri/package-lock.json 里 node_modules/@tauri-apps/cli 的 version，
@@ -11,7 +20,7 @@
 ;
 ;   ⇒ 升级 @tauri-apps/cli 时【必须】重新提取官方模板并 diff，再重新套用下面列出的定制点：
 ;      · 官方模板后续的 bugfix / 新特性【不会】自动进入本文件 —— 整份覆盖等于主动放弃上游更新；
-;      · 若新版 bundler 改了 handlebars helper（如 {{no-escape}}、{{or}}）或增删占位符，
+;      · 若新版 bundler 改了 handlebars helper（如 no-escape、or 这两个 helper）或增删占位符，
 ;        本文件会渲染失败或渲染出错误脚本，且报错发生在 tauri build 阶段，不在 NSIS 编译阶段；
 ;      · 是否把 "^2" 钉死到具体版本属于依赖策略变更，需单独决策，本注释只陈述现状、不改依赖。
 ;
@@ -24,7 +33,7 @@
 ;   4) Install / Uninstall 段的 PRE hook 均移到 CheckIfAppIsRunning 之后、首个文件写入/删除之前：
 ;      交互模式先保留官方运行中确认，静默模式仍由官方宏自动停止主进程，再做锁与 CLI 清理。
 ;   除以上四处外逐字未动；hooks.nsh 仍经 installerHooks 接入（模板自带的
-;   `{{#if installer_hooks}} !include "{{installer_hooks}}" {{/if}}` 那个 include 点，
+;   installer_hooks 条件 include 块（if installer_hooks → !include 路径 → /if）那个 include 点，
 ;   位于本文件头部 !include 群之后、所有 !define 与 Section 之前）。
 Unicode true
 ManifestDPIAware true
@@ -1015,14 +1024,14 @@ FunctionEnd
 ; GWorkApplyFonts **不是**本模板定义的 Function，而是 installerHooks（installer/hooks.nsh）里
 ; GWorkUiFontFix 宏（SUF="" 那次展开）生成的。NSIS 没有「某个 Function 是否存在」的内建判断，
 ; 所以一旦有人删掉 tauri.conf.json 的 bundle.windows.nsis.installerHooks，本文件头部那个
-; `{{#if installer_hooks}} !include "{{installer_hooks}}" {{/if}}` 就整段消失，下面这句 Call 会
+; installer_hooks 条件 include 块就整段消失，下面这句 Call 会
 ; 直接以 "Function not found" 编译失败 —— 而报错完全不会
 ; 指向真因（缺的是 hooks 配置，不是缺 Function）。
 ; 因此约定显式契约：hooks.nsh 在展开出 Function GWorkApplyFonts 之后 !define GWORK_APPLY_FONTS_DEFINED，
 ; 这里用 !ifdef 守卫。缺少 hooks 时 GWorkNativePageShow 退化为空 Function（已用 NSIS 3.11 实测：
 ; 空 Function/FunctionEnd 合法编译），上面 MUI_PAGE_CUSTOMFUNCTION_SHOW 仍能正常 Call，
 ; 安装器行为退回官方模板原样。
-; 包含顺序已核实：!include "{{installer_hooks}}" 位于本文件头部 !include 群之后
+; 包含顺序已核实：installer_hooks 的 !include 位于本文件头部 !include 群之后
 ; （MUI2.nsh 等之后、所有 !define 与 Section 之前），远早于此处，
 ; 故 !define 必然先于 !ifdef 求值，守卫成立。
 Function GWorkNativePageShow

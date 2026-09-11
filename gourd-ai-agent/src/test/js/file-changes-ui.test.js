@@ -181,6 +181,22 @@ test('样式复用 theme token 并包含直属行与窄窗口防溢出规则', (
     assert.doesNotMatch(block, /background:\s*#[0-9a-f]{3,8}/i);
 });
 
+test('已撤销的行不再渲染审查/打开按钮，仅保留已撤销状态', () => {
+    const source = read('js/app-file-changes.js');
+    const buildRow = source.slice(source.indexOf('function buildRow'), source.indexOf('function render('));
+    // 审查 / 打开 / 撤销文件 三枚操作全部只在未撤销分支内渲染
+    assert.equal((buildRow.match(/actionButton\(/g) || []).length, 3, 'buildRow 应只有 3 处 actionButton');
+    const applied = buildRow.slice(buildRow.indexOf('if (canUndoFile(file))'), buildRow.indexOf('else {'));
+    assert.match(applied, /actionButton\('review'/);
+    assert.match(applied, /actionButton\('open'/);
+    assert.match(applied, /actionButton\('undo-file'/);
+    // 已撤销分支不渲染任何按钮，只显示「已撤销」标签
+    const undone = buildRow.slice(buildRow.indexOf('else {'));
+    assert.doesNotMatch(undone, /actionButton\(/);
+    assert.match(undone, /file-change-state/);
+    assert.match(undone, /t\('undone'\)/);
+});
+
 test('模块可独立解析（语法自检）', () => {
     const vm = require('node:vm');
     const source = fs.readFileSync(path.join(jsDir, 'app-file-changes.js'), 'utf8').replace(/^\uFEFF/, '');
@@ -279,4 +295,33 @@ test('openInEditor 保留 rootOverride，跨项目退回只读查看器并防重
     assert.match(code, /if \(!samePathRoot\(requestedRoot, window\.currentProjectRoot \|\| ''\)\) return;/);
     assert.match(code, /if \(openingFiles\[openKey\]\) return;/);
     assert.match(code, /delete openingFiles\[openKey\]/);
+});
+
+test('无文件变更的 run 不生成卡片：空快照在 upsert 入口短路', () => {
+    const source = read('js/app-file-changes.js');
+    const upsert = source.slice(source.indexOf('function upsert('), source.indexOf('window.onFileChangesChunk'));
+    assert.match(upsert, /if \(!Array\.isArray\(summary\.files\) \|\| !summary\.files\.length\) return;/);
+    // 空快照必须先于缓存写入短路：不落 _fileChangesByRun、不参与 revision 单调门禁
+    assert.ok(upsert.indexOf('summary.files.length) return;') < upsert.indexOf('sess._fileChangesByRun[runKey] = summary;'),
+        '空快照守卫应在缓存写入之前');
+});
+
+test('变更按钮采用任务 chip 形态：数量徽标展示文件数，展开列表独立成卡', () => {
+    const source = read('js/app-file-changes.js');
+    const header = source.slice(source.indexOf('function headerHtml'), source.indexOf('function fillHeadActions'));
+    assert.match(header, /file-changes-pill/);
+    assert.match(header, /file-changes-badge/);
+    // 徽标数字与文件数同源（fileCount 优先，缺失回落 files.length）
+    assert.match(header, /num\(summary\.fileCount\) != null \? num\(summary\.fileCount\) : files\.length/);
+    // 旧的「N 个文件」整句文案不再出现在头部
+    assert.doesNotMatch(header, /file-changes-summary/);
+
+    const css = read('css/app.css');
+    const block = css.slice(css.indexOf('.file-changes-run-row'), css.indexOf('/* Batch tool group'));
+    assert.match(block, /\.file-changes-pill \{[^}]*border-radius:\s*14px/);
+    assert.match(block, /\.file-changes-pill \{[^}]*background:\s*var\(--bg-hover\)/);
+    assert.match(block, /\.file-changes-header:hover \.file-changes-pill \{[^}]*border-color:\s*var\(--accent\)/);
+    assert.match(block, /\.file-changes-badge \{[^}]*border:\s*1px solid var\(--border-color\)/);
+    assert.match(block, /\.file-changes-card\.expanded \.file-changes-body \{[^}]*display:\s*block/);
+    assert.match(block, /@media \(max-width:\s*680px\)/);
 });

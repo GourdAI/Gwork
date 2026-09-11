@@ -14,7 +14,12 @@ var CONTINUE_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" 
    避免两处不同统计口径（本轮累计 vs 本次推理）并列造成歧义，详见 appendTraceBadge。 */
 var TRACE_TIME_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>';
 
-var THINKING_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5.2 11.8c-1.6-.9-2.7-2.5-2.7-4.4A5.5 5.5 0 0 1 8 2a5.5 5.5 0 0 1 5.5 5.4c0 2.3-1.4 4.3-3.4 5.1-.6.2-1 .7-1 1.3H6.9c0-.8-.5-1.6-1.7-2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M6.3 15h3.4M6.7 7.5h2.6M8 6.2v2.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+/* 思考块图标：大脑线框（经典双半球轮廓 + 中央纵缝），与工具图标同为 currentColor 线性 SVG。
+   内置 0.85 等比缩放并同步补偿描边，使视觉体量与兄弟图标（机器人/工具）一致。 */
+var THINKING_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><g transform="translate(1.2 1.2) scale(0.85)"><path d="M6.33 1.33A1.67 1.67 0 0 1 8 3v10a1.67 1.67 0 0 1-3.31.29 1.67 1.67 0 0 1-1.97-2.05 2 2 0 0 1-.23-3.72 1.67 1.67 0 0 1 .88-2.83 1.67 1.67 0 0 1 1.32-2A1.67 1.67 0 0 1 6.33 1.33Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.67 1.33A1.67 1.67 0 0 0 8 3v10a1.67 1.67 0 0 0 3.31.29 1.67 1.67 0 0 0 1.97-2.05 2 2 0 0 0 .23-3.72 1.67 1.67 0 0 0-.88-2.83 1.67 1.67 0 0 0-1.32-2A1.67 1.67 0 0 0 9.67 1.33Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></g></svg>';
+
+/* 智能体卡片图标：机器人头线框（替代 emoji，保持线框风格统一）。 */
+var AGENT_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 4.4V2.9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="2.1" r=".75" fill="currentColor"/><rect x="3.2" y="4.4" width="9.6" height="7.4" rx="2.2" stroke="currentColor" stroke-width="1.2"/><circle cx="6.4" cy="8" r=".8" fill="currentColor"/><circle cx="9.6" cy="8" r=".8" fill="currentColor"/><path d="M6.6 10h2.8" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>';
 
 /* ===== Message Rendering (Session-Aware) ===== */
 function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt) {
@@ -220,7 +225,6 @@ function createThinkingBlockEl(sess) {
         + '<span class="thinking-timer-wrap" style="margin-left:4px">'
          + '<span class="thinking-current-timer">0s</span>'
          + '</span>'
-         + '<span class="thinking-block-toggle" aria-hidden="true">›</span>'
          + '<span class="thinking-status-dot"></span>'
         + '</div>'
         + '<div class="thinking-block-body"><div class="md-content"></div></div>';
@@ -585,6 +589,8 @@ function setToolCardDuration(cardEl, durationMs, failed) {
         ? (Math.round(durationMs / 100) / 10) + 's'
         : Math.round(durationMs) + 'ms';
     var span = $('<span>').addClass('tool-duration' + (failed === true ? ' failed' : '')).text(label)[0];
+    // has-duration：CSS 依此把耗时排到状态点之前（耗时吸收剩余空白、状态点贴行尾）
+    $(header).addClass('has-duration');
     $(header).append(span);
 }
 window.setToolCardDuration = setToolCardDuration;
@@ -1542,7 +1548,7 @@ function appendTraceBadge(sess, chunk) {
     var argsHtml = desc ? '<span class="tool-args">' + escapeHtml(desc) + '</span>' : '';
     card.innerHTML = '<div class="agent-card-header">'
         + '<span class="agent-status-icon ' + statusClass + '"></span>'
-        + '<span class="agent-icon">🤖</span>'
+        + '<span class="agent-icon">' + AGENT_SVG + '</span>'
         + '<span class="agent-label" data-i18n="chat.agent_label">' + GourdI18n.t('chat.agent_label') + '</span>'
         + '<span class="agent-name">' + escapeHtml(agentName) + '</span>'
         + argsHtml

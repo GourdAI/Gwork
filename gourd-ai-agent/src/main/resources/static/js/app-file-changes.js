@@ -1,5 +1,7 @@
 /* ===== app-file-changes.js ===== */
-/* Per-run file change summaries, snapshot review, undo and reapply controls. */
+/* Per-run file change summaries, snapshot review, undo and reapply controls.
+   呈现形态：每 run 一个「变更按钮」（对齐任务 chip：图标 + 文案 + 数量徽标），
+   点击展开变更列表；无文件变更/新增的 run 不渲染任何节点。 */
 /* 契约对齐（后端 manifest summary）：
    summary: revision / status / ready / possiblyIncomplete / incompleteReasons[] /
             fileCount / additions / deletions / runApplyState(FULLY_APPLIED|PARTIALLY_UNDONE|FULLY_UNDONE) / files[]
@@ -303,14 +305,19 @@
     function headActionsSignature(stats) {
         return (stats.undone > 0 ? 'R' : '-') + (stats.applied > 0 ? 'U' : '-');
     }
+    /* 头部即变更按钮：形态对齐输入框上方的任务 chip（图标 + 文案 + 数量徽标 + 增删统计）。
+       文件数量收敛为徽标数字，点击按钮展开/收起下方变更列表。 */
     function headerHtml(summary, files) {
         var additions = num(summary.additions);
         var deletions = num(summary.deletions);
-        return '<span class="tool-type-icon">' + FILE_SVG + '</span>'
+        var count = num(summary.fileCount) != null ? num(summary.fileCount) : files.length;
+        return '<span class="file-changes-pill">'
+            + '<span class="tool-type-icon">' + FILE_SVG + '</span>'
             + '<span class="tool-name">' + t('title') + '</span>'
-            + '<span class="file-changes-summary">' + t('summary', { count: num(summary.fileCount) != null ? num(summary.fileCount) : files.length }) + '</span>'
+            + '<span class="file-changes-badge">' + count + '</span>'
             + diffStatHtml(additions != null ? additions : statSum(files, 'additions'),
-                deletions != null ? deletions : statSum(files, 'deletions'));
+                deletions != null ? deletions : statSum(files, 'deletions'))
+            + '</span>';
     }
     function fillHeadActions(sess, runId, headActions, stats) {
         headActions.innerHTML = '';
@@ -336,14 +343,18 @@
             + diffStatHtml(file.additions, file.deletions);
         var actions = document.createElement('div');
         actions.className = 'file-change-row-actions';
-        actions.appendChild(actionButton('review', t('review'), REVIEW_SVG, function (button) { reviewFile(sess, runId, file, button); }));
-        if (canOpenFile(file)) actions.appendChild(actionButton('open', t('open'), OPEN_SVG, function () {
-            if (typeof window.openFileViewer === 'function') window.openFileViewer(file.path, (file.path || '').split(/[\\/]/).pop(), rootFor(sess));
-        }));
-        if (canUndoFile(file)) actions.appendChild(actionButton('undo-file', t('undo_file'), UNDO_SVG, function (button) {
-            layConfirm(t('confirm_undo_file', [file.path || '']), function () { undoFile(sess, runId, file, button); });
-        }));
+        if (canUndoFile(file)) {
+            /* 未撤销：提供 审查 / 打开 / 撤销文件 三枚操作 */
+            actions.appendChild(actionButton('review', t('review'), REVIEW_SVG, function (button) { reviewFile(sess, runId, file, button); }));
+            if (canOpenFile(file)) actions.appendChild(actionButton('open', t('open'), OPEN_SVG, function () {
+                if (typeof window.openFileViewer === 'function') window.openFileViewer(file.path, (file.path || '').split(/[\\/]/).pop(), rootFor(sess));
+            }));
+            actions.appendChild(actionButton('undo-file', t('undo_file'), UNDO_SVG, function (button) {
+                layConfirm(t('confirm_undo_file', [file.path || '']), function () { undoFile(sess, runId, file, button); });
+            }));
+        }
         else {
+            /* 已撤销：审查 / 打开 / 撤销文件 均不再需要，仅保留「已撤销」状态标签 */
             var state = document.createElement('span');
             state.className = 'file-change-state';
             state.textContent = t('undone');
@@ -398,8 +409,8 @@
             body = cache.body;
         }
 
-        /* 头部文本：header.innerHTML 会摸掉 headActions，重写后把持久节点挂回末尾，
-           保持原有子节点顺序（icon / name / summary / stat / headActions）不变。 */
+        /* 头部文本：header.innerHTML 会摸掉 headActions，重写后把持久节点挂回末尾
+           （pill 内为 icon / name / 数量徽标 / 增删统计，headActions 排在其后）。 */
         var hSig = headerSignature(summary, files);
         if (cache.headerSig !== hSig) {
             cache.headerSig = hSig;
@@ -482,6 +493,10 @@
        相同 revision 已有卡片时不重复渲染；若卡片因历史重建 / DOM 淘汰而不存在，则允许按缓存快照重建。 */
     function upsert(sess, runId, summary) {
         if (!sess || !sess.container || !runId || !summary) return;
+        /* 空快照（没有任何文件变更/新增）不生成卡片：入口直接短路，不落缓存、不参与 revision 门禁。
+           否则空 run（或流式早期的空帧）会在对话尾部留下「0 个文件」的空壳；
+           且一旦空帧占用 revision，同 revision 的有效快照会被单调门禁误挡。 */
+        if (!Array.isArray(summary.files) || !summary.files.length) return;
         if (!sess._fileChangesByRun) sess._fileChangesByRun = {};
         var runKey = String(runId);
         var selector = '[data-file-changes-run="' + CSS.escape(runKey) + '"]';

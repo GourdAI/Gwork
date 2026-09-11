@@ -192,7 +192,9 @@
         $('#memoryProjectPath').text(currentPath).attr('title', currentPath);
         $projectCurrent.prop('disabled', global || !memoryProjectsLoaded || !memoryProjects.length)
             .attr('aria-expanded', $projectSelector.hasClass('open') ? 'true' : 'false');
-        $projectSelector.toggleClass('disabled', global || !memoryProjectsLoaded || !memoryProjects.length);
+        // 全局域与项目无关：整块项目选择器不展示（仅工作空间域才需要切换项目）
+        $projectSelector.toggleClass('hidden', global)
+            .toggleClass('disabled', global || !memoryProjectsLoaded || !memoryProjects.length);
         if (global || !memoryProjectsLoaded || !memoryProjects.length) $projectSelector.removeClass('open');
 
         var selectedKey = pathKey(memorySelectedCwd);

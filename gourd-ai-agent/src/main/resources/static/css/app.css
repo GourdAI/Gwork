@@ -329,9 +329,12 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 /* 头部参数串默认隐藏：与已单独展示的工具名/文件名重复，显得杂乱；详细参数仍可在展开的卡片体中查看。 */
  .tool-args { display: none; order: 3; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 /* 工具真实耗时（后端 WebChunk.durationMs 下发，来源 ToolCallEndEvent.getDurationMs()）。
-   状态点负责把右侧元信息整体推到行尾，耗时紧随其后，避免两个 auto margin 平分空白导致状态点漂到中间。 */
+   顺序为「耗时在前、状态点收尾」：带耗时的卡由 .has-duration（setToolCardDuration 打标）把右侧
+   元信息整体右推——耗时吸收剩余空白、状态点贴行尾；无耗时卡片维持状态点直接靠右。 */
 .tool-duration { order: 5; color: var(--text-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; opacity: 0.75; }
 .tool-duration.failed { color: var(--color-danger, #e5484d); opacity: 1; }
+.tool-card-header.has-duration .tool-duration { order: 4; margin-left: auto; }
+.tool-card-header.has-duration .tool-status-icon { order: 5; margin-left: 0; }
 .tool-label { color: var(--text-secondary); font-size: 12px; }
 .tool-card-body { display: none; padding: 0 14px 12px; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; border-top: 1px solid var(--border-color); }
 .tool-card.expanded .tool-card-body { display: block; }
@@ -339,15 +342,27 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .tool-expand-full:hover:not(:disabled) { color: var(--text-primary); border-color: var(--text-secondary); }
 .tool-expand-full:disabled { opacity: .6; cursor: default; }
 
-/* Per-run file changes: each run owns one messages-inner direct row; revisions update its card in place. */
+/* Per-run file changes: each run owns one messages-inner direct row; revisions update it in place.
+   呈现形态 = 按钮 + 展开列表：收起态是任务 chip 形态的「变更按钮」（图标 + 文案 + 数量徽标），
+   点击展开下方变更列表；容器本身透明，不再常驻一张整宽空卡片。 */
 .file-changes-run-row { display: flex; width: 92%; margin-bottom: 28px; animation: msg-in 0.25s ease-out; }
-.file-changes-run-row > .file-changes-card { width: 100%; margin: 0; background: var(--bg-card, transparent); }
-.file-changes-card .tool-type-icon svg { width: 15px; height: 15px; display: block; }
-.file-changes-header { cursor: pointer; min-width: 0; }
-.file-changes-summary { color: var(--text-secondary); white-space: nowrap; font-size: 12px; }
+.file-changes-run-row > .file-changes-card { width: 100%; margin: 0; background: transparent; border: 0; border-radius: 0; overflow: visible; }
+/* 变更按钮：小圆角胶囊 + 数字徽标，视觉与输入框上方的 .todo-chip 同族 */
+.file-changes-header { display: flex; align-items: center; gap: 8px; padding: 0; cursor: pointer; min-width: 0; }
+.file-changes-header:hover { background: none; }
+.file-changes-pill { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 5px 10px; background: var(--bg-hover); border: 1px solid var(--border-color); border-radius: 14px; font-size: 12px; color: var(--text-primary); transition: border-color 0.15s, background 0.15s; }
+.file-changes-header:hover .file-changes-pill { border-color: var(--accent); }
+.file-changes-pill .tool-type-icon { order: 0; }
+.file-changes-pill .tool-type-icon svg { width: 14px; height: 14px; display: block; color: var(--text-secondary); }
+.file-changes-pill .tool-name { order: 1; font-weight: 500; color: var(--text-primary); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.file-changes-pill .file-changes-badge { order: 2; }
+.file-changes-pill .tool-diff-stat { order: 3; }
+/* 文件数量徽标：低彩度描边数字，与任务徽标（.todo-badge）同款 */
+.file-changes-badge { background: transparent; border: 1px solid var(--border-color); border-radius: 8px; padding: 1px 5px; font-size: 10px; font-weight: 600; color: var(--text-secondary); }
 .file-changes-head-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
-.file-changes-header > .tool-diff-stat { margin-left: 2px; }
-.file-changes-body { padding: 4px 8px 8px; max-height: 360px; font-family: var(--font-sans); white-space: normal; word-break: normal; }
+/* 展开列表：独立成卡挂在按钮下方 */
+.file-changes-body { display: none; margin-top: 6px; padding: 4px 8px 8px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-card, transparent); max-height: 360px; overflow-y: auto; font-family: var(--font-sans); white-space: normal; word-break: normal; }
+.file-changes-card.expanded .file-changes-body { display: block; }
 .file-change-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 7px 6px; border-bottom: 1px solid var(--border-color); }
 .file-change-row:last-child { border-bottom: 0; }
 .file-change-row:hover { background: var(--bg-hover); }
@@ -514,8 +529,6 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .thinking-block-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; font-size: 13px; user-select: none; transition: background 0.15s; }
 .thinking-block-header:hover { background: var(--bg-hover); }
 .thinking-block-label { color: var(--text-secondary); font-weight: 500; }
-.thinking-block-toggle { margin-left: auto; color: var(--text-secondary); font-size: 12px; transition: transform 0.25s; }
-.thinking-block.expanded .thinking-block-toggle { transform: rotate(90deg); }
 /* 思考块右侧状态点：与工具卡统一的圆点。思考中绿点闪动，结束后绿点常亮。 */
 .thinking-status-dot { margin-left: auto; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: var(--color-success, #4ac26b); box-shadow: 0 0 4px rgba(74,194,107,0.6); transition: all 0.3s; }
 .thinking-block.streaming .thinking-status-dot { animation: status-dot-blink 1s ease-in-out infinite; box-shadow: none; }
@@ -2627,8 +2640,8 @@ pre:hover .code-copy-btn { opacity: 1; }
 }
 
 /* ===== 对话工具轨迹：低彩度视觉 =====
-   工具卡是同一条执行轨迹，不再用 emoji 和红/绿/蓝状态色制造多套视觉焦点。
-   增删、状态与工具类别仍通过文字、线框和位置表达；真正的错误提示保留原有语义颜色。 */
+   工具图标统一采用 currentColor 线框 SVG，不再用 emoji 彩色字形制造视觉噪音；
+   状态点保留语义色（执行中闪动 / 成功 / 失败 / 等待），真正的错误提示保留原有语义颜色。 */
 .tool-type-icon,
 .agent-icon,
 .file-change-kind,
@@ -2637,7 +2650,6 @@ pre:hover .code-copy-btn { opacity: 1; }
 .tool-batch-title,
 .tool-batch-progress,
 .tool-name,
-.file-changes-summary,
 .file-change-path,
 .file-change-state { color: var(--text-secondary); }
 .tool-type-icon svg,
@@ -2648,28 +2660,11 @@ pre:hover .code-copy-btn { opacity: 1; }
 .tool-diff-stat .del,
 .file-changes-card .tool-diff-stat .add,
 .file-changes-card .tool-diff-stat .del { color: var(--text-secondary); font-weight: 600; }
-.tool-status-icon,
-.tool-status-icon.loading,
-.tool-status-icon.done,
-.tool-status-icon.warn,
-.tool-status-icon.reject,
-.agent-status-icon,
-.agent-status-icon.loading,
-.agent-status-icon.done,
-.agent-status-icon.reject,
-.thinking-status-dot { background: var(--text-tertiary); border-color: var(--text-tertiary); box-shadow: none; }
-.tool-status-icon.loading,
-.agent-status-icon.loading,
-.thinking-block.streaming .thinking-status-dot { animation: status-dot-blink 1.2s ease-in-out infinite; }
 .tool-card.hitl-pending,
 .agent-card.agent-card-streaming,
 .thinking-block.streaming { border-color: var(--border-color); }
 .thinking-block.streaming .thinking-block-label,
-.thinking-block .tool-type-icon,
-.thinking-block-toggle { color: var(--text-secondary); }
-.thinking-block-toggle { margin-left: auto; }
-.thinking-block .thinking-status-dot { margin-left: 0; }
-.thinking-block-dots span { background: var(--text-secondary); }
+.thinking-block .tool-type-icon { color: var(--text-secondary); }
 .tool-batch-group:hover { border-color: var(--border-color); box-shadow: none; }
 .tool-batch-header:hover,
 .tool-batch-group:hover .tool-batch-header { background: var(--bg-hover); }
