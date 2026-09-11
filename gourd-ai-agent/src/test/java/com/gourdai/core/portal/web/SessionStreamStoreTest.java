@@ -5,7 +5,14 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 class SessionStreamStoreTest {
     @Test
@@ -106,6 +113,40 @@ class SessionStreamStoreTest {
     }
 
     @Test
+    void dedupesFileChangesByRunOnRead() throws Exception {
+        Path workspace = Files.createTempDirectory("stream-store-file-changes");
+        try {
+            SessionLocator locator = new SessionLocator(workspace.toString(), ".gwork/sessions");
+            SessionStreamStore store = new SessionStreamStore(locator);
+            String sid = "work-file-changes";
+
+            WebChunk first = WebChunk.ofFileChanges("run-1", Map.of("revision", 1, "fileCount", 1));
+            WebChunk second = WebChunk.ofFileChanges("run-1", Map.of("revision", 2, "fileCount", 2));
+            store.record(sid, null, first);
+            store.record(sid, null, second);
+
+            // 写入侧恒为纯追加（O(1)，不重写整个 ndjson）：磁盘上应存在两帧
+            Path streamFile = locator.resolveDir(sid, null).toPath()
+                    .resolve(sid + SessionStreamStore.STREAM_SUFFIX);
+            Assertions.assertEquals(2, Files.readAllLines(streamFile).stream()
+                    .filter(l -> !l.trim().isEmpty()).count());
+
+            // 读取侧按 runId 去重，只得到 eventSeq 最大的终态摘要
+            SessionStreamStore.LoadResult loaded = store.loadAfter(sid, null, 0L, 20);
+            Assertions.assertEquals(1, loaded.events.size());
+            Assertions.assertEquals("file_changes", loaded.events.get(0).get("type"));
+            Assertions.assertEquals(2, ((Number) ((Map) loaded.events.get(0).get("args")).get("revision")).intValue());
+            Assertions.assertEquals(2L, ((Number) loaded.events.get(0).get("eventSeq")).longValue());
+
+            SessionStreamStore.LoadResult full = store.loadWithMeta(sid, null, null);
+            Assertions.assertEquals(1, full.events.size());
+            Assertions.assertEquals(2, ((Number) ((Map) full.events.get(0).get("args")).get("revision")).intValue());
+        } finally {
+            delete(workspace);
+        }
+    }
+
+    @Test
     void loadsLegacyEventsWithoutBatchFields() throws Exception {
         Path workspace = Files.createTempDirectory("stream-store-legacy-batch");
         try {
@@ -125,6 +166,86 @@ class SessionStreamStoreTest {
             Assertions.assertFalse(loaded.events.get(0).containsKey("batchSize"));
         } finally {
             delete(workspace);
+        }
+    }
+
+    @Test
+    void rewindMatchesOddAndEvenMessageCounts() throws Exception {
+        for (int count = 1; count <= 4; count++) {
+            Path workspace = Files.createTempDirectory("stream-store-rewind-" + count);
+            try {
+                SessionLocator locator = new SessionLocator(workspace.toString(), ".gwork/sessions");
+                SessionStreamStore store = new SessionStreamStore(locator);
+                String sid = "work-rewind-" + count;
+                store.recordUser(sid, null, "u1", 1L);
+                store.record(sid, null, WebChunk.ofText("a1"));
+                store.recordUser(sid, null, "u2", 2L);
+                store.record(sid, null, WebChunk.ofText("a2"));
+
+                int retainedMessages = 4 - count;
+                int retainedUsers = retainedMessages == 0 ? 0 : (retainedMessages + 1) / 2;
+                boolean trailingUserOnly = retainedMessages % 2 == 1;
+                store.rewindToMessageState(sid, null, retainedUsers, trailingUserOnly);
+
+                SessionStreamStore.LoadResult loaded = store.loadAfter(sid, null, 0L, 20);
+                Assertions.assertEquals(retainedMessages, loaded.events.size(), "count=" + count);
+                if (retainedMessages > 0) {
+                    Assertions.assertEquals("user", loaded.events.get(0).get("type"));
+                }
+                if (trailingUserOnly) {
+                    Assertions.assertEquals("user", loaded.events.get(loaded.events.size() - 1).get("type"));
+                }
+            } finally {
+                delete(workspace);
+            }
+        }
+    }
+
+    @Test
+    void concurrentAppendAndReadNeverExposePartialLines() throws Exception {
+        Path workspace = Files.createTempDirectory("stream-store-concurrent");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            SessionLocator locator = new SessionLocator(workspace.toString(), ".gwork/sessions");
+            SessionStreamStore store = new SessionStreamStore(locator);
+            String sid = "work-concurrent";
+            CountDownLatch start = new CountDownLatch(1);
+            Future<?> writer = pool.submit(() -> {
+                await(start);
+                for (int i = 0; i < 200; i++) store.record(sid, null, WebChunk.ofText("v" + i));
+            });
+            Future<?> reader = pool.submit(() -> {
+                await(start);
+                while (!writer.isDone()) {
+                    SessionStreamStore.LoadResult loaded = store.loadAfter(sid, null, 0L, 1000);
+                    for (Map event : loaded.events) {
+                        Assertions.assertNotNull(event.get("type"));
+                        Assertions.assertNotNull(event.get("eventSeq"));
+                    }
+                }
+            });
+            start.countDown();
+            writer.get(20, TimeUnit.SECONDS);
+            reader.get(20, TimeUnit.SECONDS);
+
+            SessionStreamStore.LoadResult loaded = store.loadAfter(sid, null, 0L, 1000);
+            Assertions.assertEquals(200, loaded.events.size());
+            Set<Long> sequences = new HashSet<>();
+            for (Map event : loaded.events) sequences.add(((Number) event.get("eventSeq")).longValue());
+            Assertions.assertEquals(200, sequences.size());
+            Assertions.assertEquals(200L, loaded.latestSeq);
+        } finally {
+            pool.shutdownNow();
+            delete(workspace);
+        }
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(e);
         }
     }
 

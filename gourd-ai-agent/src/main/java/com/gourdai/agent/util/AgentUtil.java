@@ -142,6 +142,40 @@ public class AgentUtil {
     }
 
     /**
+     * 获取聚合响应的纯净正文（Solon AI 4.1 双通道优先）。
+     *
+     * <p><b>4.1 变更</b>：{@code AssistantMessage} 拆成 {@code text} / {@code thinking}
+     * 两个独立通道，方言侧已在 {@code AbstractChatDialect} 的状态机里剥掉
+     * {@code <think>} 标签并分流，聚合消息不再出现「推理 + 正文」拼接。因此只要
+     * 本条消息确实带思考通道，正文就应直接取 {@code text}，无需任何标签启发式。</p>
+     *
+     * <p><b>为何不能沿用 getContent()</b>：4.1 的 {@code getContent()} 在
+     * {@code text} 为空、{@code thinking} 非空时会<strong>返回思考文本</strong>
+     * （纯推理轮：思考完直接调工具）。若继续按 content 取正文，这一轮的思考会被
+     * 当成最终答案外发，造成思考泄漏。</p>
+     *
+     * <p>不具备双通道信息（旧持久化消息、非流式方言只给 content）时退回
+     * {@link #getResultContentWithoutReasoning(AssistantMessage, String)} 的标签启发式。</p>
+     *
+     * @param message 助手消息（可为 null）
+     * @param streamedReasoningPrefix 流式累积的思考前缀（仅退化路径使用，可为 null/空）
+     * @return 纯净正文；无正文时为空串
+     */
+    public static String getAggregatedResultContent(AssistantMessage message, String streamedReasoningPrefix) {
+        if (message == null) {
+            return "";
+        }
+
+        // 4.1 双通道：thinking 非空即证明方言已分流，text 就是纯正文（可能为空串＝纯推理轮）
+        String textRaw = message.getTextRaw();
+        if (textRaw != null && Assert.isNotEmpty(message.getThinkingRaw())) {
+            return textRaw;
+        }
+
+        return getResultContentWithoutReasoning(message, streamedReasoningPrefix);
+    }
+
+    /**
      * 规范化流式累积的思考前缀：截掉「最后一个思考帧」内首个 {@code </think>} 之后的内容。
      *
      * <p><b>背景</b>：chat 方言的 inline-think 路径（无独立推理字段，模型在 content 里内联

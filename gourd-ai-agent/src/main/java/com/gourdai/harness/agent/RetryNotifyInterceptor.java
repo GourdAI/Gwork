@@ -15,11 +15,11 @@
  */
 package com.gourdai.harness.agent;
 
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.react.AbsReActInterceptor;
 import com.gourdai.agent.react.ReActTrace;
 import org.noear.solon.ai.chat.ChatRequest;
-import org.noear.solon.ai.chat.ChatResponse;
+import org.noear.solon.ai.chat.event.ChatEvent;
 import org.noear.solon.ai.chat.ChatSession;
 import org.noear.solon.ai.chat.interceptor.StreamChain;
 import org.slf4j.Logger;
@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p><b>原理：</b>同一次 Reason 回合内，框架会对同一个模型请求反复调用 {@code req.stream()}，
  * 每调用一次即代表一次尝试，因此每次进入 {@link #interceptStream} 就是一次新尝试。
- * 首次尝试不提示；从第 2 次尝试起（即发生了重试）推送 {@link RetryChunk}。</p>
+ * 首次尝试不提示；从第 2 次尝试起（即发生了重试）推送 {@link RetryEvent}。</p>
  *
  * <p><b>无状态约束：</b>拦截器按 class 注册为全局单例，故所有会话相关状态都必须按
  * sessionId 隔离存放在 {@link #stateMap} 中，不能使用普通实例字段，否则并发会话会互相污染。</p>
@@ -91,7 +91,7 @@ public class RetryNotifyInterceptor extends AbsReActInterceptor {
      * 从第 2 次尝试起推送重试提示；请求本身照常放行。
      */
     @Override
-    public Flux<ChatResponse> interceptStream(ChatRequest req, StreamChain chain) {
+    public Flux<ChatEvent> interceptStream(ChatRequest req, StreamChain chain) {
         Object sessionId = req.getOptions().toolContext().get(ChatSession.ATTR_SESSIONID);
         if (sessionId != null) {
             RetryState state = stateMap.get(sessionId.toString());
@@ -99,7 +99,7 @@ public class RetryNotifyInterceptor extends AbsReActInterceptor {
                 int attempt = state.attempt.incrementAndGet();
                 if (attempt > 1) {
                     // 发生了重试：attempt 即当前是第几次尝试
-                    pushRetryChunk(state.trace, attempt);
+                    pushRetryEvent(state.trace, attempt);
                 }
             }
         }
@@ -118,16 +118,16 @@ public class RetryNotifyInterceptor extends AbsReActInterceptor {
         }
     }
 
-    private void pushRetryChunk(ReActTrace trace, int attempt) {
+    private void pushRetryEvent(ReActTrace trace, int attempt) {
         try {
-            FluxSink<AgentChunk> sink = trace.getOptions().getStreamSink();
+            FluxSink<AgentEvent> sink = trace.getOptions().getStreamSink();
             if (sink != null && !sink.isCancelled()) {
                 int maxRetries = trace.getOptions().getMaxRetries();
-                sink.next(new RetryChunk(trace, attempt, maxRetries));
+                sink.next(new RetryEvent(trace, attempt, maxRetries));
             }
         } catch (Exception e) {
             if (LOG.isDebugEnabled()) {
-                LOG.debug("Failed to push RetryChunk: {}", e.getMessage());
+                LOG.debug("Failed to push RetryEvent: {}", e.getMessage());
             }
         }
     }

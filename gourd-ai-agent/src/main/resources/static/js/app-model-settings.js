@@ -22,7 +22,10 @@
     var fetchedModels = []; // 已拉取/已配置的模型列表
     var selectedName = null; // 左栏选中项（'__add__' 表示右侧为新增表单）
     var fetchRequestId = 0; // 拉取结果只允许写回发起时的同一 Provider/表单版本
-    var detailKeyLoaded = false; // 右栏密钥输入框是否已由详情接口回填真实密钥（false=密钥未知，不可提交空串覆盖）
+    // 右栏密钥输入框是否被用户真正编辑过。后端列表/详情接口返回的 apiKey 一律是脱敏值，
+    // 输入框不再回填任何密钥值，所以「未编辑过」就等于「真实密钥未知」——
+    // 此时绝不能提交 apiKey 字段，否则会把脱敏值或空串写回后端污染真实密钥
+    var keyTouched = false;
 
     // 接口类型选项（按模型单独配置）
     var STANDARD_OPTIONS = [
@@ -284,6 +287,11 @@
         $('input[name="msProviderStandard"]').on('change', function () {
             if (currentProvider) persistProvider();
         });
+        // 密钥输入框：任何真实键入都标记为「用户已编辑」，persistProvider 据此决定是否提交 apiKey 字段
+        //（用 input 而非 change：用户输入后又删空也要算编辑过，空串=主动清空密钥）
+        $('#msProviderApiKey').on('input', function () {
+            keyTouched = true;
+        });
         $('#msProviderApiUrl, #msProviderApiKey, #msProviderTimeout').on('change', function () {
             if (currentProvider) persistProvider();
         });
@@ -541,7 +549,7 @@
         selectedName = '__add__';
         currentProvider = null;
         fetchedModels = [];
-        detailKeyLoaded = false;
+        keyTouched = false;
         // 左栏选中态同步
         $('.ms-provider-item').removeClass('selected');
         renderDetailForm(null);
@@ -556,24 +564,34 @@
         fillDetailFromCache(name);
     }
 
-    /** 填充右栏：先用列表缓存快速回填基础字段，再拉取后端详情（含未脱敏密钥与完整模型列表）覆盖 */
+    /** 填充右栏：先用列表缓存快速回填基础字段，再拉取后端详情（含完整模型列表）覆盖 */
     function fillDetailFromCache(name) {
         var cached = null;
         providers.forEach(function (p) { if (p.name === name) cached = p; });
-        // 真实密钥尚未到位：该窗口内的即时保存不提交 apiKey 字段（见 persistProvider）
-        detailKeyLoaded = false;
+        // 真实密钥前端永远拿不到（列表与详情接口都只回脱敏值）：
+        // 未被用户编辑过就不提交 apiKey 字段，后端保留原值（见 persistProvider）
+        keyTouched = false;
         if (cached) {
             renderDetailForm(cached);
-            // 列表接口返回的 apiKey 是脱敏值：清空输入框等待详情接口回填真实密钥，
-            // 防止脱敏值进入右栏后被即时保存写回后端污染真实密钥
-            $('#msProviderApiKey').val('');
         }
         editProvider(name);
+    }
+
+    /**
+     * 密钥输入框的占位提示：只用后端返回的脱敏值告知「已配置密钥」，绝不回显明文。
+     * 新增态或尚未配置密钥时回落到 i18n 默认占位文案。
+     */
+    function keyPlaceholder(provider) {
+        if (provider && provider.apiKey) return provider.apiKey; // 后端脱敏值，如 sk-a****wxyz
+        if (provider && provider.hasKey) return '••••••••';
+        return GourdI18n.t('settings.providers.api_key_placeholder');
     }
 
     /** 填充右栏详情表单（provider 为 null 表示新增态） */
     function renderDetailForm(provider) {
         currentProvider = provider;
+        // 每次重绘表单都视为「用户尚未编辑密钥」：输入框一律留空，只有真实键入才提交
+        keyTouched = false;
         // 复制模型列表，并为每个模型补齐接口类型（缺省 openai）
         fetchedModels = (provider && provider.models) ? provider.models.map(function (m) {
             return {
@@ -603,7 +621,10 @@
             .filter('[value="' + stdVal + '"]').prop('checked', true);
         // 内置连接：API 地址锁定只读（名称已在编辑态 readonly）
         $('#msProviderApiUrl').val(provider ? provider.apiUrl : '').prop('readonly', isBuiltin);
-        $('#msProviderApiKey').val(provider ? provider.apiKey : '');
+        // 密钥不回显到输入框：后端返回的 provider.apiKey 是脱敏值（如 sk-a****wxyz），
+        // 一旦进入输入框就会被即时保存当成真实密钥写回，污染配置。改用 placeholder 提示「已配置」，
+        // 输入框保持空；用户真正输入过才提交 apiKey（见 persistProvider）
+        $('#msProviderApiKey').val('').attr('placeholder', keyPlaceholder(provider));
         $('#msProviderTimeout').val(provider && provider.timeout ? provider.timeout : '');
         $('#msProviderScope').val(provider ? (provider.scope || 'user') : 'user');
 
@@ -819,7 +840,10 @@
             data: {
                 apiUrl: apiUrl,
                 apiKey: apiKey,
-                standard: standard
+                standard: standard,
+                // 输入框留空时后端按该名称回落到已保存的真实密钥（前端已不再持有明文），
+                // 否则编辑既有连接时不重新输入密钥就无法拉取模型
+                providerName: (currentProvider && currentProvider.name) || ''
             },
             success: function (res) {
                 if (requestId !== fetchRequestId || selectedName !== requestSelectedName
@@ -1020,7 +1044,7 @@
     }
 
     // ==================== CRUD 操作 ====================
-    /** 拉取供应商详情（含未脱敏密钥）并填充右栏 */
+    /** 拉取供应商详情（含完整模型列表；密钥为脱敏值）并填充右栏 */
     function editProvider(name) {
         $.ajax({
             url: '/web/settings/providers/get',
@@ -1035,8 +1059,9 @@
                     renderProviderList();
                     // 若期间用户已切走（selectedName 变了）则不覆盖右栏
                     if (selectedName === name) {
+                        // renderDetailForm 内部会把 keyTouched 重置为 false：详情接口回的也是脱敏值，
+                        // 前端始终不持有真实密钥，故只有用户真正键入过才提交 apiKey 字段
                         renderDetailForm(res.data);
-                        detailKeyLoaded = true; // 真实密钥已回填，此后输入框为空=用户主动清空
                     }
                 } else {
                     showToast(res.msg || GourdI18n.t('settings.loop.operation_failed'), 'error');
@@ -1094,10 +1119,11 @@
             data.originalName = target.name;
             renameFrom = target.name;
         }
-        // 密钥未知（详情尚未回填/详情拉取失败）且输入框为空：不提交该字段，避免空串覆盖真实密钥；
-        // 详情已回填后清空输入框=用户主动清空，照常提交空串由后端清除
+        // 用户没真正编辑过密钥输入框：不提交该字段，后端保留原值。
+        // 前端持有的 apiKey 只可能是脱敏值或空串，提交上去就会污染真实密钥；
+        // 编辑过（含输入后又删空）才提交，空串=用户主动清空，由后端清除
         var keySubmitted = true;
-        if (target && !detailKeyLoaded && !apiKey) {
+        if (target && !keyTouched) {
             delete data.apiKey;
             keySubmitted = false;
         }
@@ -1112,11 +1138,16 @@
             success: function (res) {
                 if (res.code === 200) {
                     var stillEditing = (currentProvider === target); // 请求在途期间用户未切走
+                    // 本次密钥（若有）已落库，重置编辑标记：后续因其它字段触发的即时保存不再重复提交
+                    keyTouched = false;
                     if (target) {
                         var renamed = !!(renameFrom && data.name !== renameFrom);
-                        // 列表接口返回的 apiKey 是脱敏值，回填真实密钥，避免下次即时保存把脱敏值写进去
-                        //（本次未提交密钥时不动缓存，否则会把未知密钥记成空串）
-                        if (keySubmitted) target.apiKey = apiKey;
+                        // 缓存里不留明文密钥：renderDetailForm 会把 target.apiKey 当 placeholder 明文展示出来。
+                        // 只记「是否已配置」，脱敏值等下次列表/详情刷新时由后端补回
+                        if (keySubmitted) {
+                            target.hasKey = !!apiKey;
+                            target.apiKey = '';
+                        }
                         // 本地同步左栏缓存（模型数/接口/地址/超时/作用域/启用态）并重绘左栏，
                         // 不走整体 loadProvidersList，避免右栏重新渲染打断即时编辑
                         target.models = models;
@@ -1219,6 +1250,10 @@
                 success: function (res) {
                     if (res.code === 200) {
                         showToast(GourdI18n.t('settings.loop.deleted'), 'success');
+                        // 删除会级联移除该供应商的运行时模型，立即刷新聊天模型下拉。
+                        if (typeof window.reloadModels === 'function') {
+                            window.reloadModels();
+                        }
                         // 删除成功：左栏刷新，右栏回落到首个供应商或新增表单
                         selectedName = null;
                         loadProvidersList();

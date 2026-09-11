@@ -334,7 +334,8 @@ public class WebSettingsController {
             item.put("model", config.getModel());
             item.put("standard", config.getStandardOrProvider());
             item.put("apiUrl", config.getApiUrl());
-            item.put("apiKey", config.getApiKey());
+            //密钥统一走脱敏口径：渲染只需要「是否已配置」与大致形状，不需要明文
+            putMaskedApiKey(item, config.getApiKey());
             item.put("contextLength", config.getContextLength());
             item.put("enabled", config.isEnabled());
             item.put("visibled", config.isVisibled());
@@ -377,7 +378,8 @@ public class WebSettingsController {
         item.put("apiUrl", config.getApiUrl());
         item.put("model", config.getModel());
         item.put("name", config.getNameOrModel());
-        item.put("apiKey", config.getApiKey());
+        //密钥统一走脱敏口径：本接口用于编辑表单回填，明文回传会被前端当成真实密钥再次提交
+        putMaskedApiKey(item, config.getApiKey());
         item.put("standard", config.getStandardOrProvider());
         item.put("scope", config.getScope() != null ? config.getScope() : AgentFlags.SCOPE_USER);
         item.put("provider", config.getProvider());  // 所属供应商
@@ -438,7 +440,8 @@ public class WebSettingsController {
             settings.setDefaultModel(config.getNameOrModel());
         }
 
-        settings.getModels().put(config.getNameOrModel(), config);
+        // 插入所属 provider 区块末尾（无同组模型时追加总表末尾），避免劈裂同 provider 区块
+        settings.addModelInProviderBlock(config);
         saveSettings();
 
         LOG.info("[Settings] Model added: {}", config.getNameOrModel());
@@ -457,7 +460,9 @@ public class WebSettingsController {
 
         engine.removeModel(name);
 
-        settings.getModels().remove(name);
+        //走封装方法：同时修复 defaultModel / ACP 引用
+        settings.removeModel(name);
+        engine.setDefaultModel(settings.getDefaultModel());
         saveSettings();
 
         LOG.info("[Settings] Model removed: {}", name);
@@ -474,16 +479,27 @@ public class WebSettingsController {
             return Result.failure("originalName is required");
         }
 
-        // 先移除旧配置
-        engine.removeModel(originalName);
-        engine.addModel(config);
+        // 改名撞库前置校验：目标名已被另一个模型占用时直接报错，不能静默覆盖（否则丢模型）；
+        // 必须在动 engine 之前判定，避免旧模型已从引擎摘除却未能写回配置
+        String targetName = config.getNameOrModel();
+        if (!targetName.equals(originalName) && settings.getModels().containsKey(targetName)) {
+            return Result.failure("模型名称已存在: " + targetName);
+        }
 
-        settings.getModels().remove(originalName);
-        settings.getModels().put(config.getNameOrModel(), config);
+        // 先原子提交配置替换（含改名引用修复），成功后再修改运行时引擎。
+        // 不能先动 engine：并发改名冲突若导致配置替换失败，会留下 engine 已删旧模型的不一致状态。
+        if (settings.replaceModelInPlace(originalName, config) == false) {
+            return Result.failure("模型名称已存在: " + targetName);
+        }
+        // replaceModelInPlace 已在 provider 变化时自行归组，此处仅作幂等兵底（正常情况下是 no-op）
+        settings.normalizeModelProviderOrder();
         if (isDefaultModel) {
             settings.setDefaultModel(config.getNameOrModel());
-            engine.setDefaultModel(config.getNameOrModel());
         }
+
+        engine.removeModel(originalName);
+        engine.addModel(config);
+        engine.setDefaultModel(settings.getDefaultModel());
         saveSettings();
 
         LOG.info("[Settings] Model updated: {} -> {}", originalName, config.getNameOrModel());
@@ -499,21 +515,19 @@ public class WebSettingsController {
         if (Assert.isEmpty(name) || enabled == null) {
             return Result.failure("name and enabled are required");
         }
-        for (ChatConfig config : settings.getModels().values()) {
-            if (name.equals(config.getNameOrModel())) {
-                config.setEnabled(enabled);
-                // 即时同步运行时引擎（isEnabled 已综合 visibled，禁用即从引擎移除）
-                if (config.isEnabled()) {
-                    engine.addModel(config);
-                } else {
-                    engine.removeModel(name);
-                }
-                saveSettings();
-                LOG.info("[Settings] Model {} {}", name, enabled ? "enabled" : "disabled");
-                return Result.succeed();
-            }
+        ModelDo config = settings.setModelEnabled(name, enabled);
+        if (config == null) {
+            return Result.failure("Model not found: " + name);
         }
-        return Result.failure("Model not found: " + name);
+        // 即时同步运行时引擎（isEnabled 已综合 visibled，禁用即从引擎移除）
+        if (config.isEnabled()) {
+            engine.addModel(config);
+        } else {
+            engine.removeModel(name);
+        }
+        saveSettings();
+        LOG.info("[Settings] Model {} {}", name, enabled ? "enabled" : "disabled");
+        return Result.succeed();
     }
 
     // ==================== 设置：MCP 服务器管理 ====================
@@ -1713,7 +1727,7 @@ public class WebSettingsController {
             item.put("name", name);
             item.put("standard", provider.getStandard());
             item.put("apiUrl", provider.getApiUrl());
-            item.put("apiKey", maskApiKey(provider.getApiKey()));
+            putMaskedApiKey(item, provider.getApiKey());
             if (provider.getTimeout() != null) {
                 item.put("timeout", provider.getTimeout().getSeconds() + "s");
             }
@@ -1747,7 +1761,9 @@ public class WebSettingsController {
         item.put("name", name);
         item.put("standard", provider.getStandard());
         item.put("apiUrl", provider.getApiUrl());
-        item.put("apiKey", provider.getApiKey());
+        //详情接口同样只回脱敏值：前端把这里的 apiKey 当成真实密钥回写会污染配置（已配套改 JS：
+        //输入框不再回填任何密钥值，仅当用户真正输入过才提交 apiKey 字段）
+        putMaskedApiKey(item, provider.getApiKey());
         if (provider.getTimeout() != null) {
             item.put("timeout", provider.getTimeout().getSeconds() + "s");
         }
@@ -1790,7 +1806,7 @@ public class WebSettingsController {
             provider.setModels(parseProviderModels(root.get("models")));
         }
 
-        settings.getProviders().put(name, provider);
+        settings.putProvider(name, provider);
         saveSettings();
         LOG.info("[Settings] Provider added: {}", name);
         return Result.succeed();
@@ -1826,11 +1842,6 @@ public class WebSettingsController {
             return Result.failure("Provider name already exists: " + name);
         }
 
-        // 如果名称变更，移除旧 key
-        if (!lookupName.equals(name)) {
-            settings.getProviders().remove(lookupName);
-        }
-
         ProviderDo provider = new ProviderDo();
         provider.setName(name);
         provider.setStandard(root.hasKey("standard") ? root.get("standard").getString() : existing.getStandard());
@@ -1852,69 +1863,29 @@ public class WebSettingsController {
             provider.setModels(existing.getModels());
         }
 
-        settings.getProviders().put(name, provider);
+        if (settings.replaceProvider(lookupName, name, provider) == false) {
+            return Result.failure("Provider update conflict: " + name);
+        }
 
         // 改名：将该供应商下的 LLM 模型从旧名称前缀迁移到新前缀（map key/name/provider 同步更新），
         // 运行时引擎实例同步切换，否则旧前缀模型成为孤儿且无法再被更新/同步；
         // 先收集待迁移 key 再逐个处理，避免迭代中结构性修改
         if (!lookupName.equals(name)) {
-            String oldPrefix = lookupName + "-";
-            String newPrefix = name + "-";
-            List<String> renameKeys = new ArrayList<>();
-            for (Map.Entry<String, ModelDo> entry : settings.getModels().entrySet()) {
-                if (lookupName.equals(entry.getValue().getProvider()) && entry.getKey().startsWith(oldPrefix)) {
-                    renameKeys.add(entry.getKey());
-                }
-            }
-            for (String oldKey : renameKeys) {
-                ModelDo model = settings.getModels().get(oldKey);
-                if (model == null) {
-                    continue;
-                }
-                String newKey = newPrefix + oldKey.substring(oldPrefix.length());
-                if (settings.getModels().containsKey(newKey)) {
-                    continue; // 新 key 已存在则跳过，避免覆盖同名模型
-                }
-                settings.getModels().remove(oldKey);
-                model.setName(newKey);
-                model.setProvider(name);
-                settings.getModels().put(newKey, model);
-                engine.removeModel(oldKey);
-                if (model.isEnabled()) {
+            Map<String, String> renamed = settings.renameProviderModels(lookupName, name);
+            for (Map.Entry<String, String> entry : renamed.entrySet()) {
+                engine.removeModel(entry.getKey());
+                ModelDo model = settings.getModels().get(entry.getValue());
+                if (model != null && model.isEnabled()) {
                     engine.addModel(model);
                 }
-                LOG.info("[Settings] Model renamed on provider rename: {} -> {}", oldKey, newKey);
+                LOG.info("[Settings] Model renamed on provider rename: {} -> {}", entry.getKey(), entry.getValue());
             }
-            // 模型名引用悬空修复：defaultModel / general.acpModel 指向旧前缀模型时同步切到新前缀，
-            // 否则改名后全局默认模型与 ACP 模型失效（按名查找拿不到旧 key，静默回退）
-            String defaultModel = settings.getDefaultModel();
-            String newDefault = renameModelRef(defaultModel, oldPrefix, newPrefix);
-            if (newDefault != null && !newDefault.equals(defaultModel)) {
-                settings.setDefaultModel(newDefault);
-                LOG.info("[Settings] Default model renamed on provider rename: {} -> {}", defaultModel, newDefault);
-            }
-            String acpModel = settings.getGeneral().getAcpModel();
-            String newAcp = renameModelRef(acpModel, oldPrefix, newPrefix);
-            if (newAcp != null && !newAcp.equals(acpModel)) {
-                settings.getGeneral().setAcpModel(newAcp);
-                LOG.info("[Settings] ACP model renamed on provider rename: {} -> {}", acpModel, newAcp);
-            }
+            engine.setDefaultModel(settings.getDefaultModel());
         }
 
         saveSettings();
         LOG.info("[Settings] Provider updated: {}", name);
         return Result.succeed();
-    }
-
-    /**
-     * 供应商改名后迁移模型名引用（旧前缀 -> 新前缀）：非该前缀引用或新名称不存在时原样返回。
-     */
-    private String renameModelRef(String ref, String oldPrefix, String newPrefix) {
-        if (ref == null || !ref.startsWith(oldPrefix)) {
-            return ref;
-        }
-        String renamed = newPrefix + ref.substring(oldPrefix.length());
-        return settings.getModels().containsKey(renamed) ? renamed : ref;
     }
 
     /**
@@ -1932,9 +1903,13 @@ public class WebSettingsController {
             return Result.failure("内置连接不可删除");
         }
 
-        settings.getProviders().remove(name);
+        // 级联删除：连带摘除该 provider 名下的所有 ModelDo 与运行时引擎实例。
+        // 早前只删 providers 里的一条，名下模型成为孤儿（仍可被调用）且其 apiKey 永久残留在配置里
+        List<String> removedModels = settings.removeProviderCascade(name, engine::removeModel);
+        engine.setDefaultModel(settings.getDefaultModel());
         saveSettings();
-        LOG.info("[Settings] Provider removed: {}", name);
+        LOG.info("[Settings] Provider removed: {} (cascade removed {} model(s): {})",
+                name, removedModels.size(), removedModels);
         return Result.succeed();
     }
 
@@ -1948,12 +1923,10 @@ public class WebSettingsController {
             return Result.failure("name and enabled are required");
         }
 
-        ProviderDo provider = settings.getProviders().get(name);
+        ProviderDo provider = settings.setProviderEnabled(name, enabled);
         if (provider == null) {
             return Result.failure("Provider not found: " + name);
         }
-
-        provider.setEnabled(enabled);
 
         // 同步关联模型的启用状态：连接开关 与 按模型启用态 取与，
         // 单独禁用过的模型在连接重新启用后仍保持禁用
@@ -1965,19 +1938,12 @@ public class WebSettingsController {
                 }
             }
         }
-        String prefix = name + "-";
-        for (ModelDo model : settings.getModels().values()) {
-            if (name.equals(model.getProvider())) {
-                Boolean me = (model.getName() != null && model.getName().startsWith(prefix))
-                        ? modelEnabled.get(model.getName().substring(prefix.length()))
-                        : null;
-                model.setVisibled(enabled && (me == null || me));
-                // 即时同步运行时引擎
-                if (model.isEnabled()) {
-                    engine.addModel(model);
-                } else {
-                    engine.removeModel(model.getNameOrModel());
-                }
+        for (ModelDo model : settings.setProviderModelsVisible(name, enabled, modelEnabled)) {
+            // 即时同步运行时引擎
+            if (model.isEnabled()) {
+                engine.addModel(model);
+            } else {
+                engine.removeModel(model.getNameOrModel());
             }
         }
 
@@ -1991,7 +1957,8 @@ public class WebSettingsController {
      */
     @Post
     @Mapping("/web/settings/providers/fetch")
-    public Result providersFetch(@Param("apiUrl") String apiUrl, @Param("apiKey") String apiKey, @Param("standard") String standard) {
+    public Result providersFetch(@Param("apiUrl") String apiUrl, @Param("apiKey") String apiKey,
+                                 @Param("standard") String standard, @Param("providerName") String providerName) {
         if (Assert.isEmpty(apiUrl)) {
             Map<String, Object> failure = new LinkedHashMap<>();
             failure.put("reason", ModelsFetchReason.INVALID_URL.name());
@@ -2000,8 +1967,22 @@ public class WebSettingsController {
         }
 
         try {
-            // 使用 ModelProviderFactory 获取对应的提供商
-            ModelsAdapter provider = modelProviderFactory.getProvider(standard);
+            String effectiveApiUrl = apiUrl;
+            String effectiveStandard = standard;
+            String effectiveApiKey = apiKey;
+            if (Assert.isEmpty(effectiveApiKey) && Assert.isNotEmpty(providerName)) {
+                ProviderDo stored = settings.getProviders().get(providerName);
+                if (stored != null && Assert.isNotEmpty(stored.getApiKey())) {
+                    // 保存密钥只能与其保存时的地址和协议成组使用。若沿用请求方 apiUrl/standard，
+                    // 恶意页面可借 providerName 把真实密钥转发到任意主机或错误协议适配器。
+                    effectiveApiKey = stored.getApiKey();
+                    effectiveApiUrl = stored.getApiUrl();
+                    effectiveStandard = stored.getStandard();
+                }
+            }
+
+            // 使用与最终连接参数一致的 adapter 获取模型列表
+            ModelsAdapter provider = modelProviderFactory.getProvider(effectiveStandard);
 
             // 鉴权头交给对应协议的 adapter 自行处理（OpenAI/Ollama 用 Authorization: Bearer，
             // Anthropic 用 x-api-key + anthropic-version），此处不再写死 Bearer，
@@ -2009,7 +1990,7 @@ public class WebSettingsController {
             Map<String, String> headers = new HashMap<>();
 
             // 调用提供商获取模型列表
-            List<ModelInfo> models = provider.fetchModels(apiUrl, headers, apiKey);
+            List<ModelInfo> models = provider.fetchModels(effectiveApiUrl, headers, effectiveApiKey);
             
             // 转换为前端需要的格式
             List<Map<String, Object>> modelList = new ArrayList<>();
@@ -2066,6 +2047,7 @@ public class WebSettingsController {
         int syncCount = 0;      // 新增/更新的模型数（用于前端提示）
         int removedCount = 0;   // 清理掉的已删除模型数
         String prefix = providerName + "-";
+        List<String> syncedKeys = new ArrayList<>(); // 本次同步后的模型 key，按供应商模型列表顺序
 
         // 本次提交后该供应商下的合法模型名集合，用于清理用户已删除的模型
         Set<String> validNames = new HashSet<>();
@@ -2078,6 +2060,7 @@ public class WebSettingsController {
 
             String modelName = prefix + modelId;
             validNames.add(modelName);
+            syncedKeys.add(modelName);
             
             // 如果模型不存在，创建新模型配置
             if (!settings.getModels().containsKey(modelName)) {
@@ -2106,78 +2089,77 @@ public class WebSettingsController {
                     modelDo.setContextLength(modelInfo.getMaxTokens());
                 }
                 
-                settings.getModels().put(modelName, modelDo);
+                // 插入所属 provider 区块末尾，而不是追加总表末尾：使「同 provider 连续」在每一步都成立，
+                // 不依赖方法末尾的 reorderProviderModels 兵底（reorder 只负责块内排序）
+                settings.addModelInProviderBlock(modelDo);
                 engine.addModel(modelDo);
                 syncCount++;
             } else {
                 // 模型已存在，检查是否需要同步状态
-                ModelDo existingModel = (ModelDo) settings.getModels().get(modelName);
+                ModelDo existingModel = settings.getModels().get(modelName);
                 if (providerName.equals(existingModel.getProvider())) {
-                    // 连接开关 与 按模型启用态 取与，未单独设置时回退到供应商启用状态
                     boolean targetVisibled = provider.isEnabled() && (modelInfo.getEnabled() == null || modelInfo.getEnabled());
-                    boolean visibledChanged = existingModel.isVisibled() != targetVisibled;
-                    if (visibledChanged) {
-                        existingModel.setVisibled(targetVisibled);
-                        syncCount++;
-                    }
-                    // 同步连接参数（接口类型按模型、地址/密钥/超时按连接）
                     String newStandard = resolveModelStandard(modelInfo, provider);
-                    if (newStandard != null && !newStandard.equals(existingModel.getStandard())) {
-                        existingModel.setStandard(newStandard);
-                        syncCount++;
-                    }
-                    if (provider.getApiUrl() != null && !provider.getApiUrl().equals(existingModel.getApiUrl())) {
-                        existingModel.setApiUrl(provider.getApiUrl());
-                        syncCount++;
-                    }
-                    if (provider.getApiKey() != null && !provider.getApiKey().equals(existingModel.getApiKey())) {
-                        existingModel.setApiKey(provider.getApiKey());
-                        syncCount++;
-                    }
-                    if (provider.getTimeout() != null && !provider.getTimeout().equals(existingModel.getTimeout())) {
-                        existingModel.setTimeout(provider.getTimeout());
-                        syncCount++;
-                    }
-                    // 更新 contextLength：优先 maxInputTokens，其次 maxTokens；
-                    // 供应商不报 token 上限时保留用户已有值（newContextLength=0 不触发更新）
+                    // AiConfig#setTimeout(null) 是 no-op，不能用 null 清除旧自定义值；
+                    // provider 未配置 timeout 时显式恢复框架默认值。
+                    Duration targetTimeout = provider.getTimeout() == null
+                            ? new ModelDo().getTimeout() : provider.getTimeout();
                     long newContextLength = 0;
                     if (modelInfo.getMaxInputTokens() != null && modelInfo.getMaxInputTokens() > 0) {
                         newContextLength = modelInfo.getMaxInputTokens();
                     } else if (modelInfo.getMaxTokens() != null
                             && modelInfo.getMaxTokens() >= MIN_TRUSTWORTHY_CONTEXT_LENGTH) {
-                        // 同上：maxTokens 通常是输出上限，小值不可信，不能当上下文窗口
                         newContextLength = modelInfo.getMaxTokens();
                     }
-                    if (newContextLength > 0 && existingModel.getContextLength() != newContextLength) {
-                        existingModel.setContextLength(newContextLength);
+                    final long targetContextLength = newContextLength;
+                    boolean changed = existingModel.isVisibled() != targetVisibled
+                            || !Objects.equals(newStandard, existingModel.getStandard())
+                            || !Objects.equals(provider.getApiUrl(), existingModel.getApiUrl())
+                            || !Objects.equals(provider.getApiKey(), existingModel.getApiKey())
+                            || !Objects.equals(provider.getScope(), existingModel.getScope())
+                            || !Objects.equals(targetTimeout, existingModel.getTimeout())
+                            || existingModel.getContextLength() != targetContextLength;
+                    if (changed) {
+                        ModelDo updated = settings.updateModel(modelName, copy -> {
+                            copy.setVisibled(targetVisibled);
+                            copy.setStandard(newStandard);
+                            copy.setApiUrl(provider.getApiUrl());
+                            copy.setApiKey(provider.getApiKey());
+                            copy.setScope(provider.getScope());
+                            copy.setTimeout(targetTimeout);
+                            copy.setContextLength(targetContextLength);
+                        });
                         syncCount++;
-                    }
-                    // visibled 变化时即时同步运行时引擎（字段类修改直接作用于引擎持有的同一实例，无需重加）
-                    if (visibledChanged) {
-                        if (targetVisibled) {
-                            engine.addModel(existingModel);
-                        } else {
-                            engine.removeModel(modelName);
-                        }
+                        if (updated.isEnabled()) engine.addModel(updated); else engine.removeModel(modelName);
                     }
                 }
             }
         }
 
         // 清理该供应商下、已被用户删除的模型（不在本次提交列表中的 ModelDo）
-        Iterator<Map.Entry<String, ModelDo>> it = settings.getModels().entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<String, ModelDo> entry = it.next();
-            ModelDo model = entry.getValue();
-            if (providerName.equals(model.getProvider()) && !validNames.contains(entry.getKey())) {
-                it.remove();
-                engine.removeModel(entry.getKey());
-                removedCount++;
-                LOG.info("[Settings] Model removed on provider sync: {}", entry.getKey());
+        // 走 AgentSettings 的封装方法：早前用 iterator 直接对内部 map 做结构性修改，既绕过了 models
+        // 的并发保护（与顺序不变量方法互相覆盖），也可能破坏「同 provider 连续」不变量
+        String defaultBeforeRemoval = settings.getDefaultModel();
+        List<String> staleKeys = new ArrayList<>();
+        for (Map.Entry<String, ModelDo> entry : settings.getModels().entrySet()) {
+            if (providerName.equals(entry.getValue().getProvider()) && !validNames.contains(entry.getKey())) {
+                staleKeys.add(entry.getKey());
             }
         }
+        for (String staleKey : settings.removeModels(staleKeys)) {
+            engine.removeModel(staleKey);
+            removedCount++;
+            LOG.info("[Settings] Model removed on provider sync: {}", staleKey);
+        }
+        if (Objects.equals(defaultBeforeRemoval, settings.getDefaultModel()) == false) {
+            engine.setDefaultModel(settings.getDefaultModel());
+        }
 
-        if (syncCount > 0 || removedCount > 0) {
+        // 顺序不变量：该 provider 的模型区块整体置于首次出现位置，块内顺序 = 供应商模型列表顺序，
+        // 避免新增模型被追加到总表末尾、把同一 provider 劈成两段
+        boolean reordered = settings.reorderProviderModels(providerName, syncedKeys);
+
+        if (syncCount > 0 || removedCount > 0 || reordered) {
             saveSettings();
         }
 
@@ -2257,6 +2239,20 @@ public class WebSettingsController {
             return modelInfo.getStandard();
         }
         return provider.getStandard();
+    }
+
+    /**
+     * 响应里的密钥字段统一口径：明文一律不出网，只回脱敏值 + {@code hasKey} 布尔。
+     *
+     * <p>渲染并不需要明文，只需要「是否已配置」与大致形状。早前列表/详情接口直接
+     * {@code item.put("apiKey", config.getApiKey())} 把明文回传前端，与 {@code providersList}
+     * 已用的 {@link #maskApiKey(String)} 口径自相矛盾。</p>
+     *
+     * <p>{@code hasKey} 保留给前端的「是否已配置密钥」布尔语义，取代靠明文是否为空来判断。</p>
+     */
+    private void putMaskedApiKey(Map<String, Object> item, String apiKey) {
+        item.put("apiKey", maskApiKey(apiKey));
+        item.put("hasKey", apiKey != null && apiKey.isEmpty() == false);
     }
 
     /**
@@ -2722,8 +2718,8 @@ public class WebSettingsController {
                 modelDo.setTimeout(java.time.Duration.ofSeconds(timeout));
             }
             
-            // 保存模型配置
-            settings.getModels().put(modelName, modelDo);
+            // 保存模型配置：插入所属 provider 区块末尾，避免劈裂已有区块
+            settings.addModelInProviderBlock(modelDo);
             
             // 注入运行时引擎（即时生效，无需重启）
             engine.addModel(modelDo);

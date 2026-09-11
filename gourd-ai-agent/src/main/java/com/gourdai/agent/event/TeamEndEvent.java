@@ -13,21 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.gourdai.agent.team;
+package com.gourdai.agent.event;
 
-import com.gourdai.agent.AbsAgentChunk;
+import com.gourdai.agent.team.TeamResponse;
+import com.gourdai.agent.team.TeamTrace;
 
 /**
- * 团队智能体响应汇总块（协作结束块）
- * <p>用于在团队协作任务（Team Task）结束时，传递最终的响应结果及整个团队的执行轨迹（TeamTrace）</p>
+ * 团队智能体运行结束事件（协作结束事件）
+ *
+ * <p>替代旧的 {@code TeamChunk}。用于在团队协作任务结束时，
+ * 传递最终的响应结果及整个团队的执行轨迹。</p>
  *
  * @author oisin
- * @since 3.9.1
+ * @since 4.1.0
  */
-public class TeamChunk extends AbsAgentChunk {
+public class TeamEndEvent extends AbsAgentEvent {
     private final transient TeamResponse response;
 
-    public TeamChunk(TeamResponse resp) {
+    public TeamEndEvent(TeamResponse resp) {
         super(resp.getTrace().getRunId(), resp.getTrace().getAgentName(), resp.getSession(), resp.getMessage());
         this.response = resp;
     }

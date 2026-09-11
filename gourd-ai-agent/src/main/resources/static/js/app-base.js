@@ -48,6 +48,9 @@ function SessionState(sessionId) {
     this.inlineThinkingStartTime = null;
     this.thinkingBlockTimerId = null;
     this.thinkingBlockStartTime = null;
+    // 当前生命周期相位（waiting/thinking/text/tool/hitl/retry/done），
+    // 由后端 WebChunk.phase 驱动，旧历史帧降级按 type 推断。见 app-streaming.js 的相位状态机。
+    this.phase = null;
     this.thinkingUserScrolledUp = false;  // 思考区用户主动向上滚动标记
     // 最近一次 context_size 快照：上下文指示器是全局单例 DOM，靠它按会话回填，使切会话不丢失用量/缓存指标
     this.lastContextChunk = null;
@@ -181,6 +184,13 @@ function evictInactiveSessions() {
         sess.retryEl = null;
         // 未排空的实时帧缓冲（恢复失败/中途切走时可能残留整批 chunk 对象）
         sess._gateBuffer = [];
+        // 文件变更摘要按 run 累积，每条都带完整 files[]，不清会随会话长期驻留；
+        // 且 DOM 已清空而高 revision 快照仍在时，重建期到达的旧 revision 会被单调门禁
+        // 直接丢弃，导致卡片再也建不回来。DOM 与快照必须同生共死。
+        sess._fileChangesByRun = {};
+        sess._fileChangesExpanded = {};
+        sess._fileChangesReconciledAt = {};
+        sess._fileChangesReplayPending = null;
     }
 }
 
@@ -372,6 +382,17 @@ function scrollToBottom(force) {
 }
 
 function resetStreamState(sess) {
+    // R2 修复：思考块引用被清空前，必须先走正规收敛（停 setInterval + 摘 .streaming 闪烁类）。
+    // 旧实现直接把 thinkingBlockEl 置 null，DOM 上的闪烁动画与计时器就此失联：
+    // 会话切换 / 中断等不经过 finishStream 的路径下，思考块会永久闪烁且计时器永久持有。
+    // 必须放在 disposeSessionStreamMd 之前：收敛过程需要调用增量渲染器的 finish()。
+    try {
+        if (typeof finishThinkingBlockCore === 'function') finishThinkingBlockCore(sess, sess);
+        if (typeof finishAgentThinkingBlock === 'function') finishAgentThinkingBlock(sess);
+        if (typeof purgeInlineThinking === 'function') purgeInlineThinking(sess);
+    } catch (e) { /* 收敛失败不应阻断状态重置 */ }
+    // 相位一并复位，避免下一轮沿用上一轮的相位误报等待语义
+    sess.phase = null;
     // 先处置增量渲染器（取消挂起帧），再清空元素引用，避免会话切换后残留帧写入旧 DOM
     if (typeof disposeSessionStreamMd === 'function') disposeSessionStreamMd(sess);
     sess.currentBubbleEl = null;

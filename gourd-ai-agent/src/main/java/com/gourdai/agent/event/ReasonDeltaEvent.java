@@ -13,38 +13,41 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.gourdai.agent.react.task;
+package com.gourdai.agent.event;
 
-import com.gourdai.agent.AbsAgentChunk;
 import com.gourdai.agent.react.ReActTrace;
 import org.noear.solon.ai.chat.ChatResponse;
 import org.noear.solon.ai.chat.message.AssistantMessage;
 import org.noear.solon.ai.chat.tool.ToolCall;
-import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Nullable;
 import org.noear.solon.lang.Preview;
 
+import java.util.Collections;
 import java.util.List;
 
 /**
- * ReAct 思考聚合块
+ * 推理增量事件：模型流式输出的单个增量片段
+ *
+ * <p>替代旧的 {@code ReasonChunk}。名称中的 <b>Delta</b> 明确表达「增量」粒度，
+ * 与聚合态的 {@link ReasonEndEvent} 从类型名即可区分。</p>
+ *
+ * <p>增量片段可能是思考也可能是正文，由 {@link #isThinking()} 判定——这与
+ * {@link ReasonEndEvent} 不同：聚合态已知全貌故可拆成两个字段，增量态则需逐片判定。</p>
  *
  * @author oisin
- * @since 3.9.7
+ * @since 4.1.0
  */
-@Preview("3.9.7")
-public class ThoughtChunk extends AbsAgentChunk {
+@Preview("4.1.0")
+public class ReasonDeltaEvent extends AbsAgentEvent {
     private final transient ReActTrace trace;
     private final transient @Nullable ChatResponse response;
-    private final transient String thoughtContent;
     private final transient AssistantMessage assistantMessage;
 
-    public ThoughtChunk(ReActTrace trace, @Nullable ChatResponse response, AssistantMessage message, String thoughtContent) {
-        super(trace.getRunId(), trace.getAgentName(), trace.getSession(), message);
+    public ReasonDeltaEvent(ReActTrace trace, @Nullable ChatResponse response, AssistantMessage assistantMessage) {
+        super(trace.getRunId(), trace.getAgentName(), trace.getSession(), assistantMessage);
         this.trace = trace;
         this.response = response;
-        this.thoughtContent = thoughtContent;
-        this.assistantMessage = message;
+        this.assistantMessage = assistantMessage;
     }
 
     public ReActTrace getTrace() {
@@ -59,15 +62,24 @@ public class ThoughtChunk extends AbsAgentChunk {
         return assistantMessage;
     }
 
-    public String getThoughtContent() {
-        return thoughtContent;
+    /**
+     * 本增量是否为思考内容（false 表示正文增量）
+     */
+    public boolean isThinking() {
+        return assistantMessage != null && assistantMessage.isThinking();
     }
 
+    /**
+     * 本增量是否为工具调用
+     */
     public boolean isToolCalls() {
-        return Assert.isNotEmpty(assistantMessage.getToolCalls());
+        return assistantMessage != null && assistantMessage.isToolCalls();
     }
 
+    /**
+     * 获取工具调用
+     */
     public List<ToolCall> getToolCalls() {
-        return assistantMessage.getToolCalls();
+        return assistantMessage == null ? Collections.emptyList() : assistantMessage.getToolCalls();
     }
 }

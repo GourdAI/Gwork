@@ -15,10 +15,16 @@
  */
 package com.gourdai.agent.react.task;
 
+import com.gourdai.agent.event.ToolCallEndEvent;
+import com.gourdai.agent.event.ToolCallStartEvent;
+
 import org.noear.snack4.ONode;
 import org.noear.snack4.json.JsonReader;
 import com.gourdai.agent.Agent;
 import com.gourdai.agent.team.TeamTrace;
+import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.change.FileChangeService;
+import com.gourdai.harness.talents.cli.TerminalTalent;
 import com.gourdai.agent.util.FeedbackTool;
 import com.gourdai.agent.react.BackgroundNoticeCenter;
 import com.gourdai.agent.react.ReActAgent;
@@ -40,7 +46,7 @@ import org.noear.solon.flow.FlowContext;
 import org.noear.solon.lang.Preview;
 import com.gourdai.agent.util.AgentUtil;
 import com.gourdai.harness.agent.TaskTalent;
-import com.gourdai.harness.talents.memory.MemoryTalent;
+import com.gourdai.harness.agent.WebToolVisibilityPolicy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -149,7 +155,7 @@ public class ActionTask {
 
         // 3. 推送流式动作片
         if (trace.getOptions().getStreamSink() != null) {
-            trace.getOptions().getStreamSink().next(new ActionChunk(trace, toolName, args, actionId,
+            trace.getOptions().getStreamSink().next(new ToolCallStartEvent(trace, toolName, args, actionId,
                     batch.batchId, batch.batchIndex, batch.batchSize));
         }
 
@@ -157,8 +163,30 @@ public class ActionTask {
         ToolResult result = null;
         Throwable thrownError = null;
 
+        FileChangeService.Capture fileCapture = null;
         try {
-            // 4. 执行工具调用
+            // 4. 执行工具调用。write/edit 只在 Agent 工具边界做前后快照；bash 不扫描工作区，
+            // 仅把该 run 标为 possiblyIncomplete。
+            String changeRoot = toolContextText(trace, HarnessEngine.ATTR_CWD);
+            // 变更归属：子代理跑在独立 session/runId 上，若按各自 trace 落账，manifest 会写进前端查不到的
+            // 孤儿目录（见 FileChangeService.ATTR_CHANGE_*）。TaskTalent 会透传主 run 归属，这里优先采用。
+            // 必须成对生效，否则会出现「主 sessionId 配子 runId」的混合归属，产生新的孤儿账本。
+            String changeSessionId = trace.getSession().getSessionId();
+            String changeRunId = trace.getRunId();
+            String ownerSessionId = toolContextText(trace, FileChangeService.ATTR_CHANGE_SESSIONID);
+            String ownerRunId = toolContextText(trace, FileChangeService.ATTR_CHANGE_RUNID);
+            if (Assert.isNotEmpty(ownerSessionId) && Assert.isNotEmpty(ownerRunId)) {
+                changeSessionId = ownerSessionId;
+                changeRunId = ownerRunId;
+            }
+            if (TerminalTalent.TOOL_WRITE.equals(toolName) || TerminalTalent.TOOL_EDIT.equals(toolName)) {
+                fileCapture = FileChangeService.getInstance().before(
+                        changeSessionId, changeRunId, changeRoot,
+                        AgentUtil.asStringArg(args, "file_path"));
+            } else if ("bash".equals(toolName)) {
+                FileChangeService.getInstance().markBash(changeSessionId, changeRunId, changeRoot);
+            }
+
             if (Assert.isEmpty(toolExchanger.getResult())) {
                 result = executeTool(trace, toolName, args);
             } else {
@@ -176,6 +204,9 @@ public class ActionTask {
             thrownError = e;
             throw e;
         } finally {
+            if (fileCapture != null) {
+                FileChangeService.getInstance().after(fileCapture);
+            }
             // ================== 【100% 强物理闭环】 ==================
             long durationMs = System.currentTimeMillis() - startMs;
             ChatMessage observationMessage = null;
@@ -366,7 +397,7 @@ public class ActionTask {
     /**
      * 同轮完全相同调用去重：模型偶发在同一轮输出内容完全一致的并行 tool_calls
      * （同名 + 同参，如两个一模一样的 todowrite/grep）。若不去重，每个调用都会真实执行
-     * 并各推一条 ActionChunk，前端据此渲染出两张完全相同的工具卡片（如「任务清单」展示两次），
+     * 并各推一条 ToolCallStartEvent，前端据此渲染出两张完全相同的工具卡片（如「任务清单」展示两次），
      * 写工具/命令还会产生重复副作用。此处按「工具名 + 参数序列化」分组，仅保留首个调用进入执行管线，
      * 其余重复调用的 id 记入 {@code aliasIdsByPrimaryId}，由 doAction 在执行后按 id 回填结果
      * （不推额外流式块），保证协议配对完整且 UI 只出一张卡。
@@ -428,14 +459,8 @@ public class ActionTask {
      * 与 WebStreamBuilder/WsGate 的内部工具过滤口径保持一致，使展示批次只统计真正可见的卡。
      * todowrite 虽不发送 start，但会以专用 action_end 卡展示，仍计入可见批次。
      */
-    private boolean isWebVisibleCall(ToolCall call) {
-        if (call == null || Assert.isEmpty(call.getName())) {
-            return false;
-        }
-        String toolName = call.getName();
-        return !TaskTalent.TOOL_MULTITASK.equals(toolName)
-                && !TaskTalent.TOOL_TASK.equals(toolName)
-                && !MemoryTalent.isMemoryTool(toolName);
+    static boolean isWebVisibleCall(ToolCall call) {
+        return call != null && WebToolVisibilityPolicy.isBaseVisible(call.getName());
     }
 
     private static final class BatchMetadata {
@@ -585,10 +610,10 @@ public class ActionTask {
         if (trace.getOptions().getStreamSink() != null) {
             try {
                 trace.getOptions().getStreamSink().next(
-                        new ObservationChunk(trace, toolExchanger.getToolName(), toolExchanger.getArgs(), observationMessage,
+                        new ToolCallEndEvent(trace, toolExchanger.getToolName(), toolExchanger.getArgs(), observationMessage,
                                 error, durationMs, actionId, batch.batchId, batch.batchIndex, batch.batchSize));
             } catch (Throwable e) {
-                LOG.error("Push ObservationChunk failed", e);
+                LOG.error("Push ToolCallEndEvent failed", e);
             }
         }
 
@@ -602,6 +627,19 @@ public class ActionTask {
                 }
             }
         }
+    }
+
+    /** 从 toolContext 读取字符串值；缺失或空白返回 null。 */
+    private static String toolContextText(ReActTrace trace, String key) {
+        if (trace.getOptions() == null || trace.getOptions().getToolContext() == null) {
+            return null;
+        }
+        Object value = trace.getOptions().getToolContext().get(key);
+        if (value == null) {
+            return null;
+        }
+        String text = String.valueOf(value).trim();
+        return text.isEmpty() ? null : text;
     }
 
     /**

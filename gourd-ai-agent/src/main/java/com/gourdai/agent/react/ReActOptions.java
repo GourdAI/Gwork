@@ -15,7 +15,7 @@
  */
 package com.gourdai.agent.react;
 
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.AgentEvent;
 import org.noear.solon.ai.chat.CacheControl;
 import org.noear.solon.ai.chat.ChatModel;
 import org.noear.solon.ai.chat.ModelOptionsAmend;
@@ -41,7 +41,7 @@ import java.util.function.Function;
 public class ReActOptions implements NonSerializable {
     private static final Logger LOG = LoggerFactory.getLogger(ReActOptions.class);
 
-    private transient FluxSink<AgentChunk> streamSink;
+    private transient FluxSink<AgentEvent> streamSink;
 
     /**
      * 执行推理的基础模型
@@ -123,16 +123,14 @@ public class ReActOptions implements NonSerializable {
         tmp.planningMode = planningMode;
         tmp.planningInstructionProvider = planningInstructionProvider;
 
-        //tmp.streamSink = streamSink;
-
         return tmp;
     }
 
-    protected void setStreamSink(FluxSink<AgentChunk> streamSink) {
+    protected void setStreamSink(FluxSink<AgentEvent> streamSink) {
         this.streamSink = streamSink;
     }
 
-    public FluxSink<AgentChunk> getStreamSink() {
+    public FluxSink<AgentEvent> getStreamSink() {
         return streamSink;
     }
 

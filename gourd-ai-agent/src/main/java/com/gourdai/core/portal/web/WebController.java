@@ -19,6 +19,7 @@ import org.noear.snack4.ONode;
 import org.noear.solon.Solon;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.change.FileChangeService;
 import com.gourdai.harness.talents.cli.TodoTalent;
 import com.gourdai.harness.talents.memory.MemorySearchResult;
 import com.gourdai.harness.talents.memory.MemorySearcher;
@@ -640,13 +641,17 @@ public class WebController {
             empty.put("hasMore", false);
             return Result.succeed(empty);
         }
+        String sessionRoot = resolveSessionRoot(sessionId, root);
+        if (sessionRoot == null && Assert.isNotEmpty(root)) {
+            return Result.failure(400, "Workspace root does not match the session binding");
+        }
         SessionStreamStore.LoadResult lr;
         if (afterSeq != null) {
-            lr = store.loadAfter(sessionId, root, Math.max(0L, afterSeq), limit);
+            lr = store.loadAfter(sessionId, sessionRoot, Math.max(0L, afterSeq), limit);
         } else if (rounds != null || beforeSeq != null) {
-            lr = store.loadRounds(sessionId, root, beforeSeq, rounds);
+            lr = store.loadRounds(sessionId, sessionRoot, beforeSeq, rounds);
         } else {
-            lr = store.loadWithMeta(sessionId, root, tail);
+            lr = store.loadWithMeta(sessionId, sessionRoot, tail);
         }
         Map result = new HashMap<>();
         result.put("events", lr.events);
@@ -683,7 +688,11 @@ public class WebController {
         if (store == null) {
             return Result.succeed("");
         }
-        String full = store.loadFull(sessionId, root, seq);
+        String sessionRoot = resolveSessionRoot(sessionId, root);
+        if (sessionRoot == null && Assert.isNotEmpty(root)) {
+            return Result.failure(400, "Workspace root does not match the session binding");
+        }
+        String full = store.loadFull(sessionId, sessionRoot, seq);
         return Result.succeed(full != null ? full : "");
     }
 
@@ -768,46 +777,84 @@ public class WebController {
         }
 
         try {
+            String sessionRoot = resolveSessionRoot(sessionId, root);
+            if (sessionRoot == null && Assert.isNotEmpty(root)) {
+                return Result.failure(400, "Workspace root does not match the session binding");
+            }
             // 只操作 ndjson 文件（内存中的 AgentSession 在重新生成时会通过新的 prompt 重建上下文）
-            File sessionDir = sessionLocator.resolveDir(sessionId, root);
+            File sessionDir = sessionLocator.resolveDir(sessionId, sessionRoot);
             File msgFile = new File(sessionDir, sessionId + ".messages.ndjson");
+            List<String> retained = new ArrayList<>();
             if (msgFile.exists()) {
-                // 读取现有消息
-                java.util.List<String> lines = new ArrayList<>();
                 try (BufferedReader br = new BufferedReader(
-                        new InputStreamReader(new FileInputStream(msgFile), "UTF-8"))) {
+                        new InputStreamReader(new FileInputStream(msgFile), java.nio.charset.StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = br.readLine()) != null) {
                         line = line.trim();
-                        if (!line.isEmpty()) lines.add(line);
+                        if (!line.isEmpty()) retained.add(line);
                     }
                 }
-                // 移除最后 count 条
-                int removeCount = Math.min(count, lines.size());
-                for (int i = 0; i < removeCount; i++) {
-                    lines.remove(lines.size() - 1);
-                }
-                // 重写文件
-                StringBuilder sb = new StringBuilder();
-                for (String l : lines) {
-                    sb.append(l).append("\n");
-                }
-                java.nio.file.Files.write(msgFile.toPath(), sb.toString().getBytes("UTF-8"));
+                int keep = Math.max(0, retained.size() - Math.min(count, retained.size()));
+                retained = new ArrayList<>(retained.subList(0, keep));
+                atomicWriteLines(msgFile.toPath(), retained);
             }
 
-            // 流式事件文件按用户轮次边界裁剪，与 messages.ndjson 的回退对齐——保留未回退
-            // 轮次的完整富回放（工具卡片/过程叙述），避免一次 rewind 就把整段历史降级为纯文本。
-            // count 以消息条计（一轮 = user + assistant = 2 条），换算为要剔除的用户轮次数。
+            // 依据裁剪后 messages 的真实角色状态裁剪 stream。奇数 count 可能留下末尾 user，
+            // 此时只保留该 user 边界，不保留其后已经被撤销的未完成 AI 过程。
+            int retainedUsers = 0;
+            boolean trailingUserOnly = false;
+            for (String line : retained) {
+                String role = ONode.ofJson(line).get("role").getString();
+                if ("user".equals(role)) retainedUsers++;
+                trailingUserOnly = "user".equals(role);
+            }
             SessionStreamStore store = webGate.getStreamStore();
             if (store != null) {
-                int turns = Math.max(1, count / 2);
-                store.rewindTurns(sessionId, root, turns);
+                store.rewindToMessageState(sessionId, sessionRoot, retainedUsers, trailingUserOnly);
             }
 
             return Result.succeed();
         } catch (Exception e) {
             LOG.error("Rewind failed for session {}: {}", sessionId, e.getMessage());
             return Result.failure(500, e.getMessage());
+        }
+    }
+
+    private String resolveSessionRoot(String sessionId, String requestedRoot) {
+        try {
+            String bound = sessionLocator == null ? null : sessionLocator.boundRoot(sessionId);
+            if (Assert.isNotEmpty(bound)) {
+                Path expected = realDirectory(bound);
+                Path supplied = realDirectory(requestedRoot);
+                requireSameRoot(supplied, expected);
+                return expected.toString();
+            }
+            if (Assert.isEmpty(requestedRoot)) return null; // 未绑定即全局会话
+            Path requested = realDirectory(requestedRoot);
+            Path registered = realDirectory(projectService.resolveRegisteredDirectory(requested.toString()));
+            if (!requested.equals(registered)) throw new IllegalArgumentException("Workspace root is not registered");
+            return registered.toString();
+        } catch (Throwable e) {
+            LOG.warn("[Session] rejected workspace root for session {}: {}", sessionId, e.getMessage());
+            return null;
+        }
+    }
+
+    private static void atomicWriteLines(Path target, List<String> lines) throws Exception {
+        Files.createDirectories(target.getParent());
+        Path temp = Files.createTempFile(target.getParent(), target.getFileName() + ".", ".rewind.tmp");
+        boolean moved = false;
+        try {
+            Files.write(temp, lines, java.nio.charset.StandardCharsets.UTF_8);
+            try {
+                Files.move(temp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(temp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            moved = true;
+        } finally {
+            if (!moved) Files.deleteIfExists(temp);
         }
     }
 
@@ -935,6 +982,153 @@ public class WebController {
         }
     }
 
+
+    // ==================== Agent 文件变更（非 Git） ====================
+
+    @Get
+    @Mapping("/web/chat/changes/run")
+    public Result<Map<String, Object>> changesRun(Context ctx,
+                                                   @Param("sessionId") String sessionId,
+                                                   @Param("runId") String runId,
+                                                   @Param(value = "root", required = false) String root) {
+        return changeQueryResult(FileChangeService.getInstance()
+                .getRun(sessionId, runId, resolveChangeRoot(ctx, sessionId, root)));
+    }
+
+    @Get
+    @Mapping("/web/chat/changes/diff")
+    public Result<Map<String, Object>> changesDiff(Context ctx,
+                                                    @Param("sessionId") String sessionId,
+                                                    @Param("runId") String runId,
+                                                    @Param(value = "root", required = false) String root,
+                                                    @Param("path") String path) {
+        return changeQueryResult(FileChangeService.getInstance()
+                .diff(sessionId, runId, resolveChangeRoot(ctx, sessionId, root), path));
+    }
+
+    @Post
+    @Mapping("/web/chat/changes/undo/file")
+    public Result<Map<String, Object>> changesUndoFile(Context ctx, @Body String body) {
+        String sessionId = parseJsonField(body, "sessionId");
+        // operationId：前端重试用的幂等键，同键重复提交直接返回首次结果，不重复改写文件。
+        String operationId = parseJsonField(body, "operationId");
+        return changeWriteResult(ctx, FileChangeService.getInstance().undoFile(
+                sessionId, parseJsonField(body, "runId"),
+                resolveChangeRoot(ctx, sessionId, parseJsonField(body, "root")),
+                parseJsonField(body, "path"), operationId), operationId);
+    }
+
+    @Post
+    @Mapping("/web/chat/changes/undo/run")
+    public Result<Map<String, Object>> changesUndoRun(Context ctx, @Body String body) {
+        String sessionId = parseJsonField(body, "sessionId");
+        String operationId = parseJsonField(body, "operationId");
+        return changeWriteResult(ctx, FileChangeService.getInstance().undoRun(
+                sessionId, parseJsonField(body, "runId"),
+                resolveChangeRoot(ctx, sessionId, parseJsonField(body, "root")), operationId), operationId);
+    }
+
+    @Post
+    @Mapping("/web/chat/changes/reapply/run")
+    public Result<Map<String, Object>> changesReapplyRun(Context ctx, @Body String body) {
+        String sessionId = parseJsonField(body, "sessionId");
+        String operationId = parseJsonField(body, "operationId");
+        return changeWriteResult(ctx, FileChangeService.getInstance().reapplyRun(
+                sessionId, parseJsonField(body, "runId"),
+                resolveChangeRoot(ctx, sessionId, parseJsonField(body, "root")), operationId), operationId);
+    }
+
+    /**
+     * 解析变更账本根。客户端参数只作一致性断言，不能选择任意目录：
+     * 已绑定会话强制使用 SessionLocator 根；未绑定会话只允许安装工作区或已登记项目根。
+     * 所有比较均使用 real path，避免符号链接、大小写或 {@code ..} 形式绕过。
+     */
+    private String resolveChangeRoot(Context ctx, String sessionId, String root) {
+        String headerCwd = ctx == null ? null : ctx.header("X-Session-Cwd");
+        try {
+            return resolveChangeRoot(sessionLocator == null ? null : sessionLocator.boundRoot(sessionId), root, headerCwd,
+                    engine.getWorkspace(), projectService::resolveRegisteredDirectory);
+        } catch (Throwable e) {
+            LOG.warn("[Changes] rejected workspace root for session {}: {}", sessionId, e.getMessage());
+            return null;
+        }
+    }
+
+    /** 包可见纯逻辑 seam，便于在不启动 Web 容器的情况下验证根目录安全边界。 */
+    static String resolveChangeRoot(String boundRoot, String root, String headerCwd, String workspace,
+                                    java.util.function.Function<String, String> registeredResolver) throws Exception {
+        Path bound = realDirectory(boundRoot);
+        Path explicitRoot = realDirectory(root);
+        Path explicitHeader = realDirectory(headerCwd);
+        if (bound != null) {
+            requireSameRoot(explicitRoot, bound);
+            requireSameRoot(explicitHeader, bound);
+            return bound.toString();
+        }
+
+        Path safeWorkspace = realDirectory(workspace);
+        Path requested = explicitRoot != null ? explicitRoot : explicitHeader;
+        if (explicitRoot != null && explicitHeader != null && !explicitRoot.equals(explicitHeader)) {
+            throw new IllegalArgumentException("Conflicting workspace roots");
+        }
+        if (requested == null || requested.equals(safeWorkspace)) return safeWorkspace.toString();
+
+        Path registered = realDirectory(registeredResolver.apply(requested.toString()));
+        if (!requested.equals(registered)) throw new IllegalArgumentException("Workspace root is not registered");
+        return registered.toString();
+    }
+
+    private static Path realDirectory(String value) throws Exception {
+        if (Assert.isEmpty(value)) return null;
+        if (value.indexOf('\0') >= 0) throw new IllegalArgumentException("Invalid workspace root");
+        Path path = Paths.get(value.trim()).toAbsolutePath().normalize();
+        if (!Files.isDirectory(path)) throw new IllegalArgumentException("Workspace root does not exist");
+        return path.toRealPath();
+    }
+
+    private static void requireSameRoot(Path supplied, Path expected) {
+        if (supplied != null && !supplied.equals(expected)) {
+            throw new IllegalArgumentException("Workspace root does not match the session binding");
+        }
+    }
+
+    /** 只读查询：仅参数/缺失/异常类状态算失败，CONFLICT、INCOMPLETE 等历史遗留状态照常回传数据。 */
+    private Result<Map<String, Object>> changeQueryResult(Map<String, Object> data) {
+        String status = data == null ? "ERROR" : String.valueOf(data.get("status"));
+        if ("INVALID_REQUEST".equals(status) || "NOT_FOUND".equals(status) || status.startsWith("ERROR")) {
+            return Result.failure(status, data);
+        }
+        return Result.succeed(data);
+    }
+
+    /** 写操作：严格状态映射，并回写真实 HTTP 状态码（前端按 409 判定冲突）。 */
+    private Result<Map<String, Object>> changeWriteResult(Context ctx, Map<String, Object> data, String operationId) {
+        String status = data == null ? "ERROR" : String.valueOf(data.get("status"));
+        if (data != null && Assert.isNotEmpty(operationId)) {
+            data.put("operationId", operationId);
+        }
+        if ("OK".equals(status) || "CAPTURED".equals(status) || "READY".equals(status)
+                || "UNDONE".equals(status) || "REAPPLIED".equals(status) || "INCOMPLETE".equals(status)) {
+            return Result.succeed(data);
+        }
+        if (ctx != null) {
+            ctx.status(changeHttpStatus(status));
+        }
+        return Result.failure(status, data);
+    }
+
+    private static int changeHttpStatus(String status) {
+        if ("CONFLICT".equals(status) || "BUSY".equals(status)) {
+            return 409;
+        }
+        if ("INVALID_REQUEST".equals(status)) {
+            return 400;
+        }
+        if ("NOT_FOUND".equals(status)) {
+            return 404;
+        }
+        return 500;
+    }
 
 
     // ==================== Git 集成（委派给 GitService） ====================

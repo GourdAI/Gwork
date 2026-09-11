@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      https://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,40 +13,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.gourdai.agent.react;
+package com.gourdai.agent.event;
 
-import com.gourdai.agent.AbsAgentChunk;
-import com.gourdai.agent.trace.Metrics;
+import com.gourdai.agent.simple.SimpleResponse;
 import org.noear.solon.lang.Preview;
 
 /**
- * ReAct 最终汇总块：完成所有循环后的最终结果输出
+ * 简单智能体运行结束事件（流式结束事件）
+ *
+ * <p>替代旧的 {@code SimpleChunk}。通常作为流式输出的最后一个元素，
+ * 提供完整的响应结果、会话状态及最终的指标统计。</p>
  *
  * @author oisin
- * @since 3.9.1
+ * @since 4.1.0
  */
-@Preview("3.9.1")
-public class ReActChunk extends AbsAgentChunk {
-    private final transient ReActResponse response;
+@Preview("4.1.0")
+public class SimpleEndEvent extends AbsAgentEvent {
+    private final transient SimpleResponse response;
 
-    public ReActChunk(ReActResponse resp) {
+    public SimpleEndEvent(SimpleResponse resp) {
         super(resp.getTrace().getRunId(), resp.getTrace().getAgentName(), resp.getSession(), resp.getMessage());
         this.response = resp;
     }
 
-    public ReActResponse getResponse() {
+    public SimpleResponse getResponse() {
         return response;
-    }
-
-    public ReActTrace getTrace() {
-        return response.getTrace();
-    }
-
-    public Metrics getMetrics() {
-        return response.getMetrics();
-    }
-
-    public boolean isAbnormal() {
-        return response.getTrace().isAbnormal();
     }
 }

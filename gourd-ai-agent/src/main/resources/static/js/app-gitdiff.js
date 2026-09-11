@@ -346,6 +346,30 @@
     var viewerFileModel = null;       // 文件查看器当前 model
     var viewerDiffModels = null;      // { original, modified }
     var VIEWER_LARGE_LIMIT = 1500000; // 与 app-code.js 一致：超阈值 plaintext + 关补全
+    // 大文件 diff 计算预算（毫秒）：Monaco 的 diff 是同步主线程计算，超大文件不设预算会直接卡死页面。
+    var VIEWER_DIFF_BUDGET_MS = 2500;
+
+    // viewer 代次：每次 open/close 自增。Monaco 为 AMD 异步加载、内容为异步 fetch，
+    // 回调返回时用户可能已关闭 viewer 或切到了另一个文件。所有异步回调必须先校验代次，
+    // 否则会：1) 关闭后仍创建隐藏 model（内存泄漏）；2) 慢响应覆盖后点击的新文件（竞态）。
+    var viewerGeneration = 0;
+    function beginViewerRequest() { return ++viewerGeneration; }
+    function viewerStale(gen) { return gen !== viewerGeneration; }
+
+    // model 释放助手：必须先 setModel(null) 再 dispose，避免编辑器短暂引用已销毁 model。
+    function releaseFileViewerModel() {
+        if (fileViewerEditor) { try { fileViewerEditor.setModel(null); } catch (e) {} }
+        if (viewerFileModel) { try { viewerFileModel.dispose(); } catch (e) {} }
+        viewerFileModel = null;
+    }
+    function releaseDiffViewerModels() {
+        if (diffViewerEditor) { try { diffViewerEditor.setModel(null); } catch (e) {} }
+        if (viewerDiffModels) {
+            try { viewerDiffModels.original.dispose(); } catch (e) {}
+            try { viewerDiffModels.modified.dispose(); } catch (e) {}
+        }
+        viewerDiffModels = null;
+    }
 
     var gitViewerInfoBar = document.getElementById('gitViewerInfoBar');
     var gitViewerMsg = document.getElementById('gitViewerMsg');
@@ -443,10 +467,14 @@
         diffViewerActive = true;
     }
 
-    function openFileViewer(path, name) {
+    function openFileViewer(path, name, rootOverride) {
         if (!gitDiffViewer) return;
 
         viewerMode = 'file';
+        var gen = beginViewerRequest();
+        // 模式互斥：diff model 与 file model 曾共用 file:///<path>，不先释放会触发
+        // 「已存在相同 URI 的 model」并让旧大 model 常驻。
+        releaseDiffViewerModels();
 
         // 显示 viewer（隐藏欢迎页/聊天视图，并在 code 模式接管编辑器列）
         showViewer();
@@ -463,13 +491,16 @@
 
         // Monaco 为 AMD 异步加载：待就绪后再读取并渲染
         window.__monacoLoad(function () {
+            if (viewerStale(gen)) return;
             var monaco = window.__monacoGet && window.__monacoGet();
             if (!monaco) { showViewerMsg(GourdI18n.t('code.editor_not_loaded'), true); return; }
 
-            // code 模式必须携带 root（当前项目根），否则后端回退到启动工作区解析路径 → 404
-            fetch('/web/chat/filer/read?path=' + encodeURIComponent(path) + gitRootQ())
+            // 会话卡片可来自非当前工作区，显式 root 优先；其它入口沿用当前 code 项目根。
+            var explicitRootQ = rootOverride ? '&root=' + encodeURIComponent(rootOverride) : gitRootQ();
+            fetch('/web/chat/filer/read?path=' + encodeURIComponent(path) + explicitRootQ)
                 .then(function(r) { return r.json(); })
                 .then(function(res) {
+                    if (viewerStale(gen)) return;
                     var d = (res && res.data) ? res.data : {};
                     if (res && res.code !== 200) {
                         showViewerMsg((res && res.data && res.data.message) || res.description || GourdI18n.t('git.cannot_read'), true);
@@ -478,6 +509,7 @@
                     renderFileContentMonaco(d.content || '', d.name || name, d.size, path);
                 })
                 .catch(function(e) {
+                    if (viewerStale(gen)) return;
                     showViewerMsg(GourdI18n.t('git.load_failed', (e && e.message) || ''), true);
                 });
         });
@@ -494,8 +526,10 @@
         var ed = ensureFileViewerEditor();
         if (!ed) return;
         // 替换 model（旧 model dispose 释放内存，大文件不残留）
-        if (viewerFileModel) viewerFileModel.dispose();
-        var uri = monaco.Uri.parse('file:///' + (filePath || fileName || 'file'));
+        releaseFileViewerModel();
+        // URI 按用途隔离：file viewer 与 diff 的 modified 侧若共用 file:///<path>，
+        // 先后打开同一文件会撞 URI。用独立 scheme 彻底避免冲突。
+        var uri = monaco.Uri.parse('inmemory://gwork-file-viewer/' + encodeURI(filePath || fileName || 'file'));
         viewerFileModel = monaco.editor.createModel(content || '', langId, uri);
         ed.setModel(viewerFileModel);
         ed.updateOptions({
@@ -560,6 +594,8 @@
         if (!gitDiffViewer) return;
 
         viewerMode = 'diff';
+        var gen = beginViewerRequest();
+        releaseFileViewerModel();
 
         // 显示 diff viewer（隐藏欢迎页/聊天视图，并在 code 模式接管编辑器列）
         showViewer();
@@ -583,6 +619,7 @@
         // - 旧版：/web/chat/git/file-content?ref=HEAD（git show HEAD:path；新文件/无 HEAD 时为空）
         // - 新版：/web/chat/filer/read（工作区当前内容）
         window.__monacoLoad(function () {
+            if (viewerStale(gen)) return;
             var monaco = window.__monacoGet && window.__monacoGet();
             if (!monaco) { showViewerMsg(GourdI18n.t('code.editor_not_loaded'), true); return; }
 
@@ -614,6 +651,7 @@
             }
 
             Promise.all([oldP, newP]).then(function(parts) {
+                if (viewerStale(gen)) return;
                 var oldText = parts[0] || '';
                 var newText = parts[1];
                 if (newText === null) { showViewerMsg(GourdI18n.t('git.cannot_read'), true); return; }
@@ -711,6 +749,40 @@
 
     // ---- Diff Viewer：Monaco DiffEditor 渲染（左右并排 + 行内 diff + 折叠，替代手写 unified diff 解析）----
     // 输入为修改前后两份完整内容（openDiffViewer 经 file-content + filer/read 取得）。
+    function openSnapshotDiffViewer(path, beforeText, afterText) {
+        if (!gitDiffViewer) return;
+        viewerMode = 'diff';
+        var gen = beginViewerRequest();
+        releaseFileViewerModel();
+        showViewer();
+        if (gitViewerLabel) gitViewerLabel.textContent = GourdI18n.t('git.change_detail');
+        if (gitViewerFile) gitViewerFile.textContent = path || '';
+        var oldActions = gitDiffViewer.querySelector('.git-viewer-actions');
+        if (oldActions) oldActions.remove();
+        showViewerMsg(GourdI18n.t('git.loading'));
+        window.__monacoLoad(function () {
+            if (viewerStale(gen)) return;
+            var monaco = window.__monacoGet && window.__monacoGet();
+            if (!monaco) { showViewerMsg(GourdI18n.t('code.editor_not_loaded'), true); return; }
+            renderViewerDiffMonaco(path, beforeText || '', afterText || '');
+        });
+    }
+
+    function openUnifiedDiffViewer(path, diffText) {
+        if (!gitDiffViewer) return;
+        viewerMode = 'diff';
+        beginViewerRequest();
+        // 纯文本提示态：两套 model 都不再需要，立即释放，避免旧大文件常驻到关闭为止。
+        releaseFileViewerModel();
+        releaseDiffViewerModels();
+        showViewer();
+        if (gitViewerLabel) gitViewerLabel.textContent = GourdI18n.t('git.change_detail');
+        if (gitViewerFile) gitViewerFile.textContent = path || '';
+        var oldActions = gitDiffViewer.querySelector('.git-viewer-actions');
+        if (oldActions) oldActions.remove();
+        showViewerMsg(diffText || GourdI18n.t('git.no_diff'));
+    }
+
     function renderViewerDiffMonaco(path, oldText, newText) {
         var monaco = window.__monacoGet && window.__monacoGet();
         if (!monaco) return;
@@ -721,16 +793,21 @@
         var de = ensureDiffEditor();
         if (!de) return;
         // 替换 model（旧 model dispose 释放内存）
-        if (viewerDiffModels) {
-            viewerDiffModels.original.dispose();
-            viewerDiffModels.modified.dispose();
-        }
-        var origUri = monaco.Uri.parse('file:///HEAD/' + (path || 'file'));
-        var modUri = monaco.Uri.parse('file:///' + (path || 'file'));
+        releaseDiffViewerModels();
+        var origUri = monaco.Uri.parse('inmemory://gwork-diff-original/' + encodeURI(path || 'file'));
+        var modUri = monaco.Uri.parse('inmemory://gwork-diff-modified/' + encodeURI(path || 'file'));
         viewerDiffModels = {
             original: monaco.editor.createModel(oldText || '', langId, origUri),
             modified: monaco.editor.createModel(newText || '', langId, modUri)
         };
+        // 大文件：plaintext 只减少高亮开销，diff 计算本身仍是主线程同步工作，
+        // 必须同时给出计算预算并关掉行内精细 diff，否则「审查」点下去就是长时间白屏卡死。
+        de.updateOptions({
+            maxComputationTime: large ? VIEWER_DIFF_BUDGET_MS : 0,
+            maxFileSize: 0,
+            renderIndicators: !large,
+            renderOverviewRuler: !large
+        });
         de.setModel({ original: viewerDiffModels.original, modified: viewerDiffModels.modified });
 
         if (gitViewerInfoBar) gitViewerInfoBar.style.display = 'none';
@@ -750,14 +827,12 @@
         var oldActions = gitDiffViewer.querySelector('.git-viewer-actions');
         if (oldActions) oldActions.remove();
 
+        // 关闭即作废所有在途异步回调（Monaco 加载、内容 fetch），否则它们回来还会建 model
+        beginViewerRequest();
+
         // 释放 Monaco model（大文件内存及时回收）
-        if (viewerFileModel) { viewerFileModel.dispose(); viewerFileModel = null; if (fileViewerEditor) fileViewerEditor.setModel(null); }
-        if (viewerDiffModels) {
-            viewerDiffModels.original.dispose();
-            viewerDiffModels.modified.dispose();
-            viewerDiffModels = null;
-            if (diffViewerEditor) diffViewerEditor.setModel(null);
-        }
+        releaseFileViewerModel();
+        releaseDiffViewerModels();
 
         // 解除对编辑器列的接管（code 模式下让 #codeEditorPane 重新显示）
         try { document.body.classList.remove('viewer-open'); } catch (e) {}
@@ -1014,9 +1089,11 @@
     });
     if (!document.hidden) startGitPoll();
 
-    // 暴露全局（供 app-filer.js / app-message.js 调用）
+    // 暴露全局（供 app-filer.js / app-message.js / app-file-changes.js 调用）
     window.loadGitStatus = loadGitStatus;
     window.openFileViewer = openFileViewer;
+    window.openSnapshotDiffViewer = openSnapshotDiffViewer;
+    window.openUnifiedDiffViewer = openUnifiedDiffViewer;
     window.closeDiffViewer = closeDiffViewer;
     window.guessLang = guessLang;
 })();

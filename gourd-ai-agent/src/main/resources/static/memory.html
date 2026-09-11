@@ -53,9 +53,24 @@
                     </button>
                 </div>
             </div>
-            <div class="memory-saved-tabs">
-                <button class="memory-view-tab active" data-scope="workspace" data-i18n="memory.tab_workspace">工作空间</button>
-                <button class="memory-view-tab" data-scope="global" data-i18n="memory.tab_global">全局</button>
+            <div class="memory-saved-toolbar">
+                <div class="memory-saved-tabs">
+                    <button class="memory-view-tab active" data-scope="workspace" data-i18n="memory.tab_workspace">工作空间</button>
+                    <button class="memory-view-tab" data-scope="global" data-i18n="memory.tab_global">全局</button>
+                </div>
+                <!-- 记忆页私有项目选择器：仅改变正在查看的记忆空间，不复用全局 workspace 事件与类名 -->
+                <div class="memory-project-selector" id="memoryProjectSelector">
+                    <button class="memory-project-current" id="memoryProjectCurrent" type="button"
+                            aria-haspopup="listbox" aria-expanded="false" data-i18n-title="app.chat_workspace.switch">
+                        <svg class="memory-project-folder" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                        <span class="memory-project-current-text">
+                            <span class="memory-project-current-name" id="memoryProjectName" data-i18n="code.select_project">选择项目</span>
+                            <span class="memory-project-current-path" id="memoryProjectPath"></span>
+                        </span>
+                        <svg class="memory-project-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    <div class="memory-project-dropdown" id="memoryProjectDropdown" role="listbox"></div>
+                </div>
             </div>
             <div class="memory-saved-meta" id="memoryViewMeta"></div>
             <div class="memory-saved-list" id="memoryViewList">

@@ -327,13 +327,54 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .tool-card .hitl-card-actions { display: flex; gap: 10px; padding: 0 14px 14px; }
 .tool-name { order: 1; font-weight: 600; color: var(--text-primary); white-space: nowrap; flex-shrink: 0; }
 /* 头部参数串默认隐藏：与已单独展示的工具名/文件名重复，显得杂乱；详细参数仍可在展开的卡片体中查看。 */
-.tool-args { display: none; order: 3; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+ .tool-args { display: none; order: 3; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* 工具真实耗时（后端 WebChunk.durationMs 下发，来源 ToolCallEndEvent.getDurationMs()）。
+   状态点负责把右侧元信息整体推到行尾，耗时紧随其后，避免两个 auto margin 平分空白导致状态点漂到中间。 */
+.tool-duration { order: 5; color: var(--text-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; opacity: 0.75; }
+.tool-duration.failed { color: var(--color-danger, #e5484d); opacity: 1; }
 .tool-label { color: var(--text-secondary); font-size: 12px; }
 .tool-card-body { display: none; padding: 0 14px 12px; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; border-top: 1px solid var(--border-color); }
 .tool-card.expanded .tool-card-body { display: block; }
 .tool-expand-full { display: inline-block; margin: 8px 0 2px; padding: 4px 12px; font-size: 12px; font-family: inherit; color: var(--text-secondary); background: var(--bg-code-block, rgba(127,127,127,.08)); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; }
 .tool-expand-full:hover:not(:disabled) { color: var(--text-primary); border-color: var(--text-secondary); }
 .tool-expand-full:disabled { opacity: .6; cursor: default; }
+
+/* Per-run file changes: each run owns one messages-inner direct row; revisions update its card in place. */
+.file-changes-run-row { display: flex; width: 92%; margin-bottom: 28px; animation: msg-in 0.25s ease-out; }
+.file-changes-run-row > .file-changes-card { width: 100%; margin: 0; background: var(--bg-card, transparent); }
+.file-changes-card .tool-type-icon svg { width: 15px; height: 15px; display: block; }
+.file-changes-header { cursor: pointer; min-width: 0; }
+.file-changes-summary { color: var(--text-secondary); white-space: nowrap; font-size: 12px; }
+.file-changes-head-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.file-changes-header > .tool-diff-stat { margin-left: 2px; }
+.file-changes-body { padding: 4px 8px 8px; max-height: 360px; font-family: var(--font-sans); white-space: normal; word-break: normal; }
+.file-change-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 7px 6px; border-bottom: 1px solid var(--border-color); }
+.file-change-row:last-child { border-bottom: 0; }
+.file-change-row:hover { background: var(--bg-hover); }
+.file-change-row.is-undone { opacity: .68; }
+.file-change-main { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; }
+.file-change-kind { width: 18px; height: 18px; border: 1px solid currentColor; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 18px; font: 600 10px/1 var(--font-mono); color: var(--git-status-modified); }
+.file-change-kind.kind-A { color: var(--git-status-added); }
+.file-change-kind.kind-D { color: var(--git-status-deleted); }
+.file-change-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font: 12px/1.5 var(--font-mono); }
+.file-change-main > .tool-diff-stat { margin-left: auto; }
+.file-change-row-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.file-change-action { min-height: 26px; padding: 3px 7px; border: 1px solid var(--border-color); border-radius: 6px; background: transparent; color: var(--text-secondary); display: inline-flex; align-items: center; gap: 4px; font: 12px/1.2 var(--font-sans); cursor: pointer; white-space: nowrap; }
+.file-change-action svg { width: 13px; height: 13px; flex-shrink: 0; }
+.file-change-action:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); border-color: var(--text-tertiary); }
+.file-change-action:disabled { opacity: .55; cursor: default; }
+.file-change-action.undo-run, .file-change-action.reapply-run { border-color: var(--accent); color: var(--accent); }
+.file-change-state { color: var(--text-tertiary); font-size: 12px; white-space: nowrap; padding: 0 4px; }
+.file-changes-warning { margin: 4px 4px 6px; padding: 7px 9px; border-left: 3px solid var(--color-warning); border-radius: 5px; background: var(--bg-hover); color: var(--text-secondary); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+@media (max-width: 680px) {
+    .file-changes-run-row { width: 100%; }
+    .file-changes-header { flex-wrap: wrap; }
+    .file-changes-head-actions { margin-left: 0; }
+    .file-change-row { align-items: flex-start; flex-direction: column; }
+    .file-change-main, .file-change-row-actions { width: 100%; }
+    .file-change-row-actions { flex-wrap: wrap; padding-left: 26px; }
+    .file-change-action { min-width: 26px; }
+}
 
 /* Batch tool group: single outer shell with flat rows; no nested card borders. */
 .tool-batch-group { margin: 10px 0; border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden; background: var(--bg-card, transparent); transition: border-color 0.2s, box-shadow 0.2s; }
@@ -440,11 +481,12 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .user-copy-btn.copied { color: var(--color-success); opacity: 1; }
 
 /* 重新运行 / 继续运行：仅在最后一条 AI 消息显示（该语义只针对最近一轮）。
-   用 :last-child 零维护：发送新消息后新 AI 气泡自动成为末尾，旧气泡按钮自动隐藏。 */
+   文件变更行现为 messages-inner 直属尾部节点，故不能再用 :last-child 判断助手行；
+   改为选择「其后没有其它助手行」的最后一条助手消息。 */
 .msg-row.assistant .rerun-btn,
 .msg-row.assistant .continue-btn { display: none; }
-.messages-inner > .msg-row.assistant:last-child .rerun-btn,
-.messages-inner > .msg-row.assistant:last-child .continue-btn { display: flex; }
+.messages-inner > .msg-row.assistant:not(:has(~ .msg-row.assistant)) .rerun-btn,
+.messages-inner > .msg-row.assistant:not(:has(~ .msg-row.assistant)) .continue-btn { display: flex; }
 
 /* Thinking */
 .inline-thinking { display: flex; align-items: center; gap: 8px; padding: 8px 0; color: var(--text-secondary); font-size: 13px; will-change: visibility; }
@@ -453,7 +495,11 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    头部恒可见（卡片体默认折叠），margin-left:auto 靠右、flex-shrink:0 不被挤压（描述文本自行省略）。 */
 
 
-.thinking-timer-wrap { font-variant-numeric: tabular-nums; color: var(--text-secondary); opacity: 0.7; font-size: 12px; margin-left: 2px; }
+ .thinking-timer-wrap { font-variant-numeric: tabular-nums; color: var(--text-secondary); opacity: 0.7; font-size: 12px; margin-left: 2px; }
+/* 相位文案：等待指示器按引擎真实生命周期显示「思考中 / 输出中 / 等待响应」。
+   过去两个等待指示器（.thinking-row / .inline-thinking）只有三个点、没有任何文字，
+   因此无论在哪个相位视觉完全一致，用户无从区分「在思考」还是「在输出正文」。 */
+.thinking-phase-label { color: var(--text-secondary); font-size: 12px; opacity: 0.85; white-space: nowrap; }
 .thinking-current-timer { color: var(--text-secondary); opacity: 0.9; }
 .thinking-row { display: flex; gap: 0; margin-bottom: 28px; animation: msg-in 0.25s ease-out; }
 .thinking-bubble { display: flex; align-items: center; gap: 10px; color: var(--text-secondary); font-size: 14px; padding: 10px 0; }
@@ -2361,8 +2407,16 @@ pre:hover .code-copy-btn { opacity: 1; }
 .chat-load-more-btn:hover .load-more-icon {
     transform: translateY(-1px);
 }
+.chat-load-more-btn.loading {
+    cursor: progress;
+    pointer-events: none;
+}
 .chat-load-more-btn.loading .load-more-icon {
     animation: spin 0.8s linear infinite;
+}
+/* 加载态悬停不做位移，避免 transform 覆盖旋转动画导致 spinner 抖动 */
+.chat-load-more-btn.loading:hover .load-more-icon {
+    transform: none;
 }
 .chat-load-more-btn .load-more-count {
     font-weight: 600;

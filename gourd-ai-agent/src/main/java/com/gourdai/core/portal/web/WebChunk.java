@@ -1,8 +1,11 @@
 package com.gourdai.core.portal.web;
 
+import com.gourdai.agent.event.ToolCallEndEvent;
+import com.gourdai.agent.event.ToolCallStartEvent;
+
 import lombok.Getter;
 import lombok.Setter;
-import com.gourdai.harness.agent.RetryChunk;
+import com.gourdai.harness.agent.RetryEvent;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -15,22 +18,33 @@ import java.util.Map;
  * <p>封装单条消息片段的类型、文本内容与相关元数据，作为 SSE / WebSocket 等推送协议的标准载荷载体。</p>
  *
  * <h3>type 类型枚举</h3>
+ * <p>下表为本类实际产出的全部 type 取值，与各 {@code ofXxx} 工厂方法、以及
+ * {@code WebStreamBuilder#onContextUsageEvent}（{@code context_size}）、
+ * {@code SessionStreamStore#recordUser}（{@code user}）中的 {@code setType} 调用一一对应。
+ * 已废弃的 {@code action} 不再产出：工具调用改由 {@code action_start} / {@code action_end} 成对表达。</p>
  * <table>
  *   <tr><th>type 值</th><th>含义</th></tr>
- *   <tr><td>{@code text}</td><td>普通文本输出，通常为最终呈现给用户的回复内容</td></tr>
- *   <tr><td>{@code reason}</td><td>推理过程文本，表示模型正在进行的中间思考/分析过程</td></tr>
- *   <tr><td>{@code action}</td><td>动作说明文本，描述当前正在执行的操作（如调用工具前的简要说明）</td></tr>
- *   <tr><td>{@code command}</td><td>命令文本，表示需要前端展示或执行的命令内容</td></tr>
+ *   <tr><td>{@code text}</td><td>正文增量，最终呈现给用户的回复内容</td></tr>
+ *   <tr><td>{@code reason}</td><td>推理增量，模型的中间思考/分析过程（与正文同走此通道，按 isThinking 区分）</td></tr>
+ *   <tr><td>{@code action_start}</td><td>工具调用开始（来源 ToolCallStartEvent），携带工具名与参数、不含结果，前端渲染 loading 骨架</td></tr>
+ *   <tr><td>{@code action_end}</td><td>工具调用结束（来源 ToolCallEndEvent），填充执行结果并将工具卡转为完成/失败态</td></tr>
+ *   <tr><td>{@code command}</td><td>命令文本，需前端展示或执行的命令内容</td></tr>
  *   <tr><td>{@code hitl}</td><td>人机协同中断（Human-in-the-Loop），暂停执行以等待人工审批或确认</td></tr>
- *   <tr><td>{@code rewind}</td><td>回退指令，表示需要撤销或回退之前若干步操作</td></tr>
- *   <tr><td>{@code done}</td><td>完成信号，表示当前响应流已全部发送完毕</td></tr>
- *   <tr><td>{@code error}</td><td>错误信息，表示处理过程中发生了异常</td></tr>
- *   <tr><td>{@code trace}</td><td>追踪信息，包含模型名称、token 消耗和推理耗时（仅在最终汇总时输出）</td></tr>
- *   <tr><td>{@code context_size}</td><td>上下文大小信息，包含当前上下文的消息数和 token 数（每次推理前推送）</td></tr>
-     *   <tr><td>{@code retry}</td><td>模型调用失败后的自动重试提示，携带当前尝试序号与最大次数（每次重试时推送）</td></tr>
-     *   <tr><td>{@code agent_start}</td><td>子代理启动信号，携带子代理名称和任务描述（供前端渲染「智能体」徽章卡片）</td></tr>
-     *   <tr><td>{@code agent_end}</td><td>子代理结束信号，携带执行结果（供前端将徽章卡片转为完成态）</td></tr>
-     * </table>
+ *   <tr><td>{@code rewind}</td><td>回退指令，撤销或回退之前若干步操作</td></tr>
+ *   <tr><td>{@code user}</td><td>IM 通道的用户消息，在 Web 端同步展示非本端发送的用户输入</td></tr>
+ *   <tr><td>{@code user_input}</td><td>后端推送的自动化任务（如 Loop 定时任务）中的用户提示词，补齐对话的用户侧消息</td></tr>
+ *   <tr><td>{@code agent_start}</td><td>子代理启动信号，携带名称与任务描述（前端渲染「智能体」徽章卡片）</td></tr>
+ *   <tr><td>{@code agent_end}</td><td>子代理结束信号，携带执行结果（前端将徽章卡片转为完成态）</td></tr>
+ *   <tr><td>{@code steer_applied}</td><td>插话已生效：邮箱中的插话已在 Reason 边界注入 WorkingMemory</td></tr>
+ *   <tr><td>{@code steer_cancelled}</td><td>插话已取消：用户主动 Stop 后残留插话被丢弃</td></tr>
+ *   <tr><td>{@code steer_dropped}</td><td>插话已丢弃：任务正常结束后残留插话被转入持久化队列</td></tr>
+ *   <tr><td>{@code context_size}</td><td>上下文用量，推理后依据模型真实 usage 生成（输入/输出/缓存明细），刷新「上下文长度」指示器</td></tr>
+ *   <tr><td>{@code trace}</td><td>追踪信息：模型名称、token 消耗与推理耗时（最终汇总时输出）</td></tr>
+ *   <tr><td>{@code retry}</td><td>模型调用失败后的自动重试提示，携带当前尝试序号与最大次数</td></tr>
+ *   <tr><td>{@code file_changes}</td><td>Agent 文件变更账本事件，args 携带该 revision 的完整轻量摘要</td></tr>
+ *   <tr><td>{@code done}</td><td>完成信号，当前响应流已全部发送完毕</td></tr>
+ *   <tr><td>{@code error}</td><td>错误信息，处理过程中发生了异常</td></tr>
+ * </table>
  *
  * <h3>架构位置</h3>
  * <p>位于 {@code portal.web} 层，属于 Web 门户模块的内部传输对象（DTO），
@@ -47,6 +61,31 @@ public class WebChunk {
      * 当 type 为 {@code null} 时，{@link #isNotEmpty(WebChunk)} 将返回 {@code false}。
      */
     public static final WebChunk EMPTY = new WebChunk();
+
+    // ── 相位常量（生命周期状态机）─────────────────────────────────────────────
+    // 与前端 app-streaming.js 的 PHASE_* 一一对应。相位表达的是「本帧之后引擎正处于什么状态」，
+    // 前端据此在帧间隙显示语义正确的等待指示器，而不再靠「静默 1 秒」猜测。
+
+    /** 相位：等待模型响应（上一相位已结束，尚无新增量）。 */
+    public static final String PHASE_WAITING = "waiting";
+
+    /** 相位：思考增量输出中（思维链）。 */
+    public static final String PHASE_THINKING = "thinking";
+
+    /** 相位：正文增量输出中。 */
+    public static final String PHASE_TEXT = "text";
+
+    /** 相位：工具执行中（已下发 action_start，等待 action_end）。 */
+    public static final String PHASE_TOOL = "tool";
+
+    /** 相位：等待人工审批（HITL）。 */
+    public static final String PHASE_HITL = "hitl";
+
+    /** 相位：模型调用失败自动重试中。 */
+    public static final String PHASE_RETRY = "retry";
+
+    /** 相位：本轮运行已结束。 */
+    public static final String PHASE_DONE = "done";
 
     /**
      * 判断给定消息块是否为非空（即包含有效的 type 信息）。
@@ -67,7 +106,7 @@ public class WebChunk {
 
     /**
      * 消息块类型标识。
-     * 取值范围见类级文档中的 type 类型枚举表（text / reason / action / command / hitl / rewind / done / error）。
+     * 取值范围以类级文档中的「type 类型枚举」表为准（共 20 种，含 text / reason / action_start / action_end / context_size / file_changes / steer_* / user / user_input 等；已废弃 action）。
      */
     private String type;
 
@@ -157,6 +196,37 @@ public class WebChunk {
     private Long eventSeq;
 
     /**
+     * 相位标识（生命周期状态机），取值见本类 {@code PHASE_*} 常量。
+     *
+     * <p><b>为什么需要它：</b>引擎内部本就有完整的生命周期（思考开始/增量/结束、正文增量、
+     * 工具开始/结束），但旧实现只把「增量帧」下发，边界帧一律丢弃，前端只能靠
+     * 「静默 1 秒就弹思考点」来猜测状态。该猜测与相位无关，会在正文流式、工具执行、
+     * 等待审批等场景一律误报为「思考中」。</p>
+     *
+     * <p><b>兼容性：</b>本字段是<b>附加</b>在既有帧上的，不新增 type、不改变任何已有字段语义，
+     * 因此线格式与磁盘历史格式（{@code SessionStreamStore} 落盘的 ndjson）完全向后兼容：
+     * 旧历史帧没有该字段（反序列化为 null），前端降级为按 type 推断相位，不会失效。</p>
+     */
+    private String phase;
+
+    /**
+     * 工具真实耗时（毫秒），仅 {@code action_end} 使用。
+     * <p>来源 {@link ToolCallEndEvent#getDurationMs()}。旧实现从未下发该值，
+     * 故前端工具卡无法显示真实执行耗时，只能自增计时。</p>
+     */
+    private Long durationMs;
+
+    /**
+     * 工具是否执行失败，仅 {@code action_end} 使用；为 {@code null} 或 {@code false} 表示成功。
+     *
+     * <p><b>存在原因：</b>旧实现在 {@code ToolCallEndEvent.getError() != null} 时直接返回
+     * {@code WebChunk.EMPTY}，把失败帧整个吞掉。后果是 {@code action_start} 建出的 loading
+     * 工具卡永远等不到配对的结束帧，卡片上的绿色状态点<b>永久闪烁</b>、计时器永久累加。
+     * 现改为下发带本标记的 {@code action_end}，前端据此把卡片收成错误态。</p>
+     */
+    private Boolean failed;
+
+    /**
      * 创建「完成」消息块。
      * <p>type 为 {@code done}，表示当前响应流已全部发送完毕，前端收到后可结束等待状态。</p>
      *
@@ -239,7 +309,7 @@ public class WebChunk {
 
     /**
      * 创建「动作结束」消息块。
-     * <p>type 为 {@code action_end}，在工具执行完成后发送（来源于引擎的 ObservationChunk），
+     * <p>type 为 {@code action_end}，在工具执行完成后发送（来源于引擎的 ToolCallEndEvent），
      * 携带工具执行结果。与 {@code action_start} 成对：前者标记调用开始并渲染 loading 骨架，
      * 本块到达时填充结果并将工具卡转为完成态。</p>
      *
@@ -256,10 +326,24 @@ public class WebChunk {
     }
 
     /**
+     * 创建「动作结束」消息块（携带工具真实耗时）。
+     *
+     * @param text       工具执行结果文本
+     * @param durationMs 工具真实耗时（毫秒），取自 {@link ToolCallEndEvent#getDurationMs()}
+     * @return 携带执行结果与耗时的动作结束消息块
+     */
+    public static WebChunk ofActionEnd(String text, Long durationMs) {
+        WebChunk tmp = ofActionEnd(text);
+        tmp.durationMs = durationMs;
+
+        return tmp;
+    }
+
+    /**
      * 创建「动作开始」消息块。
-     * <p>type 为 {@code action_start}，在工具实际执行前发送（来源于引擎的 ActionChunk），
+     * <p>type 为 {@code action_start}，在工具实际执行前发送（来源于引擎的 ToolCallStartEvent），
      * 携带工具名与调用参数但不含结果。前端据此提前渲染一张 loading 状态的工具卡片骨架，
-     * 待后续 {@code action}（来源于 ObservationChunk）到达时填充结果并转为完成态。</p>
+     * 待后续 {@code action_end}（来源于 ToolCallEndEvent）到达时填充结果并转为完成态。</p>
      *
      * @param toolName  工具原名（裸名，供前端识别）
      * @param toolTitle 工具显示名（供前端展示，可含 agentName 前缀）
@@ -381,7 +465,7 @@ public class WebChunk {
     public static WebChunk ofRetry(int attempt, int maxRetries) {
         WebChunk tmp = new WebChunk();
         tmp.type = "retry";
-        tmp.text = RetryChunk.formatText(attempt, maxRetries);
+        tmp.text = RetryEvent.formatText(attempt, maxRetries);
         tmp.createdAt = Instant.now().toEpochMilli();
 
         return tmp;
@@ -397,6 +481,10 @@ public class WebChunk {
      * @return 携带子代理信息的启动消息块
      */
     public static WebChunk ofAgentStart(String agentName, String description) {
+        return ofAgentStart(agentName, description, null);
+    }
+
+    public static WebChunk ofAgentStart(String agentName, String description, String invocationId) {
         WebChunk tmp = new WebChunk();
         tmp.type = "agent_start";
         tmp.toolName = agentName;
@@ -406,6 +494,7 @@ public class WebChunk {
         Map<String, Object> args = new LinkedHashMap<>();
         args.put("agentName", agentName);
         args.put("description", description);
+        if (invocationId != null) args.put("invocationId", invocationId);
         tmp.args = args;
         return tmp;
     }
@@ -422,6 +511,10 @@ public class WebChunk {
      * @return 携带子代理结束信息的消息块
      */
     public static WebChunk ofAgentEnd(String agentName, String description, boolean success, String result) {
+        return ofAgentEnd(agentName, description, success, result, null);
+    }
+
+    public static WebChunk ofAgentEnd(String agentName, String description, boolean success, String result, String invocationId) {
         WebChunk tmp = new WebChunk();
         tmp.type = "agent_end";
         tmp.toolName = agentName;
@@ -433,6 +526,7 @@ public class WebChunk {
         args.put("description", description);
         args.put("success", success);
         args.put("resultSummary", result != null ? result : "");
+        if (invocationId != null) args.put("invocationId", invocationId);
         tmp.args = args;
         return tmp;
     }
@@ -469,6 +563,16 @@ public class WebChunk {
         tmp.finalAnswer = finalAnswer;
         tmp.createdAt = Instant.now().toEpochMilli();
 
+        return tmp;
+    }
+
+    /** 创建 Agent 文件变更账本事件；args 始终携带该 revision 的完整轻量摘要。 */
+    public static WebChunk ofFileChanges(String runId, Map<String, Object> summary) {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "file_changes";
+        tmp.runId = runId;
+        tmp.args = summary == null ? new LinkedHashMap<>() : new LinkedHashMap<>(summary);
+        tmp.createdAt = Instant.now().toEpochMilli();
         return tmp;
     }
 

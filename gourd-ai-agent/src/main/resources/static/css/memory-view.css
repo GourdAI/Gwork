@@ -48,10 +48,34 @@ body.code-mode .memory-view:not(.memory-overlay) { display: none !important; }
 }
 .memory-view-icon-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 
-.memory-saved-tabs { display: flex; gap: 4px; background: var(--bg-secondary); border-radius: 8px; padding: 3px; width: fit-content; margin-bottom: 12px; }
+.memory-saved-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.memory-saved-tabs { display: flex; gap: 4px; background: var(--bg-secondary); border-radius: 8px; padding: 3px; width: fit-content; }
 .memory-view-tab { border: none; background: transparent; color: var(--text-secondary); font-size: 13px; padding: 5px 14px; border-radius: 6px; cursor: pointer; transition: all .15s; white-space: nowrap; }
 .memory-view-tab:hover { color: var(--text-primary); }
 .memory-view-tab.active { background: var(--bg-input-box); color: var(--text-primary); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+
+/* 记忆页专属选择器：避免 app-workspace.js 的全局项目事件代理 */
+.memory-project-selector { position: relative; min-width: 220px; max-width: 360px; }
+.memory-project-current { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 38px; padding: 5px 10px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-card, var(--bg-main)); color: var(--text-secondary); cursor: pointer; text-align: left; }
+.memory-project-current:hover { background: var(--bg-hover); color: var(--text-primary); }
+.memory-project-current:disabled { cursor: default; opacity: .78; }
+.memory-project-folder { flex: 0 0 auto; }
+.memory-project-current-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.memory-project-current-name, .memory-project-current-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-project-current-name { font-size: 12px; color: var(--text-primary); }
+.memory-project-current-path { font-size: 10px; color: var(--text-tertiary); }
+.memory-project-arrow { flex: 0 0 auto; transition: transform .18s; }
+.memory-project-selector.open .memory-project-arrow { transform: rotate(180deg); }
+.memory-project-selector.disabled .memory-project-arrow { display: none; }
+.memory-project-dropdown { position: absolute; top: calc(100% + 6px); right: 0; min-width: 280px; max-width: 420px; max-height: 280px; overflow-y: auto; display: none; z-index: 100; padding: 4px; background: var(--bg-card, var(--bg-main)); border: 1px solid var(--border-color); border-radius: 9px; box-shadow: var(--shadow-lg, 0 8px 24px rgba(0,0,0,.18)); }
+.memory-project-selector.open .memory-project-dropdown { display: block; }
+.memory-project-option { display: block; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; cursor: pointer; text-align: left; }
+.memory-project-option:hover, .memory-project-option.active { background: var(--bg-hover); }
+.memory-project-option-name, .memory-project-option-path { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-project-option-name { font-size: 12px; color: var(--text-primary); }
+.memory-project-option-path { margin-top: 2px; font-size: 10px; color: var(--text-tertiary); }
+.memory-project-empty { padding: 10px; text-align: center; font-size: 12px; color: var(--text-tertiary); }
+@media (max-width: 680px) { .memory-saved-toolbar { flex-direction: column; } .memory-project-selector { width: 100%; max-width: none; } .memory-project-dropdown { left: 0; right: auto; min-width: 100%; } }
 
 .memory-saved-meta { padding: 0 2px 8px; font-size: 12px; color: var(--text-tertiary); }
 .memory-saved-list { display: flex; flex-direction: column; gap: 8px; }

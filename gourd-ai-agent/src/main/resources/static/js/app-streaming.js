@@ -316,14 +316,72 @@ function handleSendBusy(sess, text, filesToSend) {
     finishStream(sess);
 }
 
+/* ===== 相位（生命周期）状态机 =====
+   后端已在每个 WebChunk 上标注 phase（见 WebChunk.PHASE_*），表达「本帧之后引擎正处于什么相位」。
+   旧实现只靠「任何帧之后静默 1 秒就弹思考点」猜测状态，完全不判断上一帧属于哪个相位，
+   因此在正文流式、工具执行、等待审批、重试退避等场景一律误报为「思考中」。
+   现改为相位驱动：静默时展示的是「上一帧所属相位」的真实文案与计时。 */
+var PHASE_WAITING = 'waiting';
+var PHASE_THINKING = 'thinking';
+var PHASE_TEXT = 'text';
+var PHASE_TOOL = 'tool';
+var PHASE_HITL = 'hitl';
+var PHASE_RETRY = 'retry';
+var PHASE_DONE = 'done';
+
+/* 相位 → 文案 i18n key。只给「主气泡底部指示器真正会出现」的相位配文案；
+   tool/hitl/retry/done 各自已有专属指示器（工具卡绿点 / 授权卡 / 重试提示 / 结束态），不在此列。 */
+var PHASE_I18N_KEY = {};
+PHASE_I18N_KEY[PHASE_THINKING] = 'chat.phase_thinking';
+PHASE_I18N_KEY[PHASE_TEXT] = 'chat.phase_text';
+PHASE_I18N_KEY[PHASE_WAITING] = 'chat.phase_waiting';
+
+/* 旧历史帧没有 phase 字段（反序列化为 undefined），降级为按 type 推断，保证回放不失效。
+   返回 null 表示「本帧不改变相位」（元数据类帧与子代理活动帧）。 */
+function inferPhaseFromType(type) {
+    switch (type) {
+        case 'reason': return PHASE_THINKING;
+        case 'text': return PHASE_TEXT;
+        case 'action_start': return PHASE_TOOL;
+        case 'action_end': return PHASE_WAITING;
+        case 'hitl': return PHASE_HITL;
+        case 'retry': return PHASE_RETRY;
+        case 'trace': case 'done': case 'error': return PHASE_DONE;
+        default: return null;
+    }
+}
+
+/* 静默到期时按相位决定是否、以及如何展示等待指示器 */
+function showPhaseIndicator(sess) {
+    var phase = sess.phase || PHASE_WAITING;
+    // tool：工具卡自己的绿色状态点就是指示器；hitl：授权卡带按钮；retry：重试提示自带旋转圈；
+    // done：本轮已结束。这四种相位下再在主气泡底部叠一个点，会出现同屏两个闪烁指示器且语义冲突。
+    if (phase === PHASE_TOOL || phase === PHASE_HITL || phase === PHASE_RETRY || phase === PHASE_DONE) return;
+    // 思考块自身正在闪烁时，等待语义已由思考块头部承担，不重复显示
+    if (sess.thinkingBlockEl) return;
+    showInlineThinking(sess, phase);
+}
+
 /* ===== WebChunk Handling (Session-Aware) ===== */
 function onWebChunk(sess, chunk) {
     try {
+        /* file_changes 是 run 级被动快照：只更新独立持久卡，不得清等待指示器、推进
+           currentRunId / activeRunId / phase，也不得重置静默计时。历史回放仍复用此入口。 */
+        if (chunk.type === 'file_changes') {
+            if (typeof window.onFileChangesChunk === 'function') window.onFileChangesChunk(sess, chunk);
+            return;
+        }
+
         if (sess.silenceTimer) {
             clearTimeout(sess.silenceTimer);
         }
 
         removeInlineThinking(sess);
+
+        // 相位推进：优先用后端标注的真实相位，缺失时按 type 降级推断（旧历史帧）。
+        // 元数据类帧（context_size / file_changes / agent_start / agent_end 等）不改变相位。
+        var nextPhase = chunk.phase || inferPhaseFromType(chunk.type);
+        if (nextPhase) sess.phase = nextPhase;
 
         // 存储当前 chunk 的 runId，用于后续消息渲染；主 run 单独追踪，防子代理 runId 覆盖插话目标。
         if (chunk.runId) {
@@ -335,8 +393,8 @@ function onWebChunk(sess, chunk) {
         }
 
         switch (chunk.type) {
-            case 'command': finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); appendCommandOutput(sess, chunk.text); break;
-            case 'rewind': finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); handleRewind(sess, parseInt(chunk.text) || 1); break;
+            case 'command': finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendCommandOutput(sess, chunk.text); break;
+            case 'rewind': finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); handleRewind(sess, parseInt(chunk.text) || 1); break;
             case 'reason': finishPendingTool(sess); clearRetryChunk(sess);
                 // 归属路由：chunk.args.agentName 指向活跃智能体卡片时进卡片内，否则归主对话
                 var reasonOwner = resolveAgentState(sess, chunk.args);
@@ -360,7 +418,7 @@ function onWebChunk(sess, chunk) {
             case 'action_end': finishThinkingBlock(sess); clearRetryChunk(sess);
                 var endOwnerState = resolveAgentState(sess, chunk.args);
                 if (endOwnerState) { finishAgentThinkingBlock(sess, endOwnerState); }
-                appendActionEndChunk(sess, chunk.toolName, chunk.text, chunk.args, chunk.toolTitle, chunk.actionId, chunk.truncated ? { truncated: true, seq: chunk.seq, fullLength: chunk.fullLength } : null, endOwnerState ? endOwnerState.bodyEl : null, { batchId: chunk.batchId, batchIndex: chunk.batchIndex, batchSize: chunk.batchSize });
+                appendActionEndChunk(sess, chunk.toolName, chunk.text, chunk.args, chunk.toolTitle, chunk.actionId, chunk.truncated ? { truncated: true, seq: chunk.seq, fullLength: chunk.fullLength } : null, endOwnerState ? endOwnerState.bodyEl : null, { batchId: chunk.batchId, batchIndex: chunk.batchIndex, batchSize: chunk.batchSize }, chunk.failed === true, chunk.durationMs);
                 if (window._todoChunkHandlers) window._todoChunkHandlers.forEach(function(h){h(chunk);});
                 break;
             case 'action_start': finishThinkingBlock(sess); clearRetryChunk(sess);
@@ -387,13 +445,13 @@ function onWebChunk(sess, chunk) {
                 appendErrorChunk(sess, chunk.text);
                 break;
             case 'retry':  finishThinkingBlock(sess); finishPendingTool(sess);
-                // 后端不会转发子代理的 RetryChunk（TaskTalent 只转发 ContextUsage/Action/Observation/Reason/Thought），
+                // 后端不会转发子代理的 RetryEvent（TaskTalent 只转发 ContextUsage/ToolCallStart/ToolCallEnd/ReasonDelta/ReasonEnd），
                 // 故 retry 恒为主代理事件；且 WebChunk.ofRetry 不携带 agentName，无法归属，
                 // 始终在主对话展示重试提示（下一 chunk 到达时自动清除），不得写入智能体卡片体
                 appendRetryChunk(sess, chunk.text);
                 break;
-            case 'hitl':   finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); appendHitlCard(sess, chunk.toolName, chunk.command); break;
-            case 'trace':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); appendTraceBadge(sess, chunk); break;
+            case 'hitl':   finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendHitlCard(sess, chunk.toolName, chunk.command); break;
+            case 'trace':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendTraceBadge(sess, chunk); break;
             case 'context_size':
                 // 快照始终写入会话（即使非活跃），保证切回该会话时能恢复；仅活跃会话刷新 DOM。
                 // 两分支均遵循单调时间戳门禁（回放旧帧不得覆盖新帧）
@@ -408,11 +466,12 @@ function onWebChunk(sess, chunk) {
                 break;
         }
         sess.silenceTimer = setTimeout(function() {
-            if (!sess.isStreaming || sess.thinkingBlockEl) return;
+            if (!sess.isStreaming) return;
             // 存在活跃子智能体卡片时：运行中状态由卡片头部状态标识闪烁表示，
             // 不在主气泡底部显示全局指示器——多智能体并行时全局指示器归属不明（跑到卡片外）
             if (sess.agentStates && Object.keys(sess.agentStates).length > 0) return;
-            showInlineThinking(sess);
+            // 相位感知：不再「无论上一帧是什么相位都弹思考点」，而是按真实相位决定显示什么
+            showPhaseIndicator(sess);
         }, 1000);
         // 回放态：纯历史重建，不应触发「思考中」等待指示器（它依赖真实的流间隙）
         if (sess._replaying && sess.silenceTimer) { clearTimeout(sess.silenceTimer); sess.silenceTimer = null; }
@@ -422,6 +481,7 @@ function onWebChunk(sess, chunk) {
 function finishStream(sess) {
     var wasStreaming = sess.isStreaming;
     sess.isStreaming = false;
+    sess.phase = PHASE_DONE;
     if (sess.silenceTimer) { clearTimeout(sess.silenceTimer); sess.silenceTimer = null; }
 
     // 清除可能残留的重试提示（如所有重试失败、最终错误已作为答复展示）
@@ -528,8 +588,10 @@ function finishStream(sess) {
     // 刷新侧边栏，清除该会话的 spinner
     if (typeof updateHistoryUI === 'function') updateHistoryUI();
 
-    // 刷新任务面板
-    if (window.loadTodos) window.loadTodos();
+    // 使用本次结束会话自己的根刷新任务；后台会话收尾不能借用当前全局工作区。
+    if (window.loadTodos && sess && sess.sessionId) {
+        window.loadTodos(sess.sessionId, sess.projectRoot);
+    }
     
     // 任务完成，自动处理当前会话的消息队列
     if (!sess._suppressQueueDispatch && sess && sess.sessionId && window.messageQueue) {
@@ -878,6 +940,14 @@ function dispatchGateChunk(chunk) {
 
     if (!sid) return; // 无 sessionId 的消息丢弃
 
+    /* file_changes 可能在 run 收尾后延迟到达，只是后端状态快照，不代表新流开始。
+       必须在通用自动 streaming 分支之前消费，避免伪造 activeRunId、停止按钮和思考气泡。 */
+    if (chunk.type === 'file_changes') {
+        var fileChangesSess = getOrCreateSession(sid);
+        if (typeof window.onFileChangesChunk === 'function') window.onFileChangesChunk(fileChangesSess, chunk);
+        return;
+    }
+
     // 插话协议事件必须在「自动进入 streaming 态」之前处理：历史回放 dropped/cancelled 不应制造假流。
     if (chunk.type === 'steer_applied' || chunk.type === 'steer_dropped' || chunk.type === 'steer_cancelled') {
         var steerSess = getOrCreateSession(sid);
@@ -1042,8 +1112,9 @@ setActiveSession = function(sid) {
         updateWechatUI();
         updateFeishuUI();
         updateDingTalkUI();
-        // 切换会话时刷新任务面板
-        if (window.loadTodos) window.loadTodos();
+        // 绑定本次切换的会话及其所属根，避免异步请求读取后续变化的全局工作区。
+        var todoSess = (typeof sessionMap !== 'undefined' && sessionMap) ? sessionMap[sid] : null;
+        if (window.loadTodos) window.loadTodos(sid, todoSess ? todoSess.projectRoot : '');
         // 切换会话时刷新消息队列 UI（列表/chip/badge）
         if (window.updateMessageQueueUI) window.updateMessageQueueUI();
         // 注：上下文指示器的恢复已由 setActiveSession 内部单点完成（app-base.js），

@@ -15,12 +15,14 @@
  */
 package com.gourdai.agent.react.intercept;
 
+import com.gourdai.agent.event.ContextSizeEvent;
+
 import com.gourdai.agent.react.intercept.compress.KeyInfoExtractionStrategy;
 import com.knuddels.jtokkit.Encodings;
 import com.knuddels.jtokkit.api.Encoding;
 import com.knuddels.jtokkit.api.EncodingRegistry;
 import com.knuddels.jtokkit.api.ModelType;
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.AgentTrace;
 import com.gourdai.agent.react.ReActInterceptor;
 import com.gourdai.agent.react.ReActStyle;
@@ -194,7 +196,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
     /**
      * 模型未配置 contextLength（=0）时的回退上下文窗口长度。
      *
-     * <p>作为全局唯一事实源对外暴露：Web 层展示上下文占用比例时（{@code WebStreamBuilder#onContextUsageChunk}）
+     * <p>作为全局唯一事实源对外暴露：Web 层展示上下文占用比例时（{@code WebStreamBuilder#onContextUsageEvent}）
      * 必须复用此常量，避免「展示用默认窗口」与「压缩决策用默认窗口」两处硬编码漂移。</p>
      */
     public static final long DEFAULT_CONTEXT_LENGTH = 128_000L;
@@ -414,7 +416,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         // ⭐ 触发判据：当前已超、预计下一轮会超，或用户手动 /compact → 压缩
         boolean forced = consumeCompactRequest(trace);
         if (!forced && currentTokens <= budget && projectedTokens <= budget) {
-            pushContextChunk(trace, messages.size(), currentTokens, false, 0, 0, 0, 0);
+            pushContextSizeEvent(trace, messages.size(), currentTokens, false, 0, 0, 0, 0);
             return;
         }
         // 消费手动请求（无论本次压缩结果如何，都不重复触发）——已在 consumeCompactRequest 中复位
@@ -440,7 +442,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
                     log.debug("ReActAgent [{}] free-tier sweep hit: {} -> {} tokens (no LLM call)",
                             trace.getAgentName(), currentTokens, sweptTokens);
                 }
-                pushContextChunk(trace, swept.size(), sweptTokens, true,
+                pushContextSizeEvent(trace, swept.size(), sweptTokens, true,
                         messages.size(), swept.size(), currentTokens, sweptTokens);
                 return;
             }
@@ -645,12 +647,12 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
             }
 
             int afterTokens = estimateTokens(compressed, null) + toolsTokens;
-            pushContextChunk(trace, compressed.size(), afterTokens, true,
+            pushContextSizeEvent(trace, compressed.size(), afterTokens, true,
                             beforeSize, compressed.size(),
                             currentTokens, afterTokens);
         } else {
             // 压缩条件触发但实际未变更（兜底），仍推送当前状态
-            pushContextChunk(trace, messages.size(), currentTokens, false, 0, 0, 0, 0);
+            pushContextSizeEvent(trace, messages.size(), currentTokens, false, 0, 0, 0, 0);
         }
     }
 
@@ -1310,7 +1312,13 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
             if (Assert.isNotEmpty(am.getToolCalls())) {
                 return null;
             }
-            AssistantMessage rebuilt = new AssistantMessage(newContent, am.isThinking());
+
+            // 4.1 起 text/thinking 是两个独立通道，截断结果须回填到原消息所属的通道，
+            // 否则思考消息会被降级成正文（历史重放时思考内容泄漏到答案区）。
+            AssistantMessage rebuilt = am.isThinking()
+                    ? new AssistantMessage(am.getTextRaw(), newContent, true)
+                    : new AssistantMessage(newContent, am.getThinkingRaw(), false);
+
             copyMetadataExceptTokenSize(origin, rebuilt);
             return rebuilt;
         }
@@ -1589,20 +1597,20 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         }
     }
 
-    private void pushContextChunk(ReActTrace trace, int msgCount, int tokenCount,
+    private void pushContextSizeEvent(ReActTrace trace, int msgCount, int tokenCount,
                                   boolean compressed,
                                   int beforeMessageCount, int afterMessageCount,
                                   int beforeTokenCount, int afterTokenCount) {
         try {
-            FluxSink<AgentChunk> sink = trace.getOptions().getStreamSink();
+            FluxSink<AgentEvent> sink = trace.getOptions().getStreamSink();
             if (sink != null && !sink.isCancelled()) {
-                sink.next(new ContextSizeChunk(trace, msgCount, tokenCount, compressed,
+                sink.next(new ContextSizeEvent(trace, msgCount, tokenCount, compressed,
                         beforeMessageCount, afterMessageCount,
                         beforeTokenCount, afterTokenCount));
             }
         } catch (Exception e) {
             if (log.isDebugEnabled()) {
-                log.debug("ReActAgent [{}] failed to push ContextChunk: {}",
+                log.debug("ReActAgent [{}] failed to push ContextSizeEvent: {}",
                         trace.getAgentName(), e.getMessage());
             }
         }

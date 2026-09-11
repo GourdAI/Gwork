@@ -15,14 +15,19 @@
  */
 package com.gourdai.agent.simple;
 
+import com.gourdai.agent.event.SimpleDeltaEvent;
+
 import com.gourdai.agent.*;
 import com.gourdai.core.portal.web.UsageSubmissionService;
 import org.noear.snack4.Feature;
 import org.noear.snack4.ONode;
 import com.gourdai.agent.exception.LlmNoReturnException;
+import com.gourdai.agent.util.AgentUtil;
+import com.gourdai.agent.util.ChatEventSupport;
 import com.gourdai.agent.team.TeamProtocol;
 import com.gourdai.agent.team.TeamTrace;
 import org.noear.solon.ai.chat.*;
+import org.noear.solon.ai.chat.event.ChatEventType;
 import org.noear.solon.ai.chat.message.AssistantMessage;
 import org.noear.solon.ai.chat.message.ChatMessage;
 import org.noear.solon.ai.chat.prompt.Prompt;
@@ -373,24 +378,32 @@ public class SimpleAgent implements Agent<SimpleRequest, SimpleResponse> {
             if (trace.getOptions().getStreamSink() == null) {
                 response = chatReq.call();
             } else {
-                response = chatReq.stream()
-                        .doOnNext(resp -> {
-                            trace.getOptions().getStreamSink().next(
-                                    new ChatChunk(trace, resp));
+                final ChatResponse[] finalResponse = {null};
+                chatReq.stream()
+                        .doOnNext(event -> {
+                            if (event.is(ChatEventType.RESPONSE_END)) {
+                                finalResponse[0] = event.getResponse();
+                                return;
+                            }
+
+                            AssistantMessage delta = ChatEventSupport.message(event);
+                            if (delta != null) {
+                                trace.getOptions().getStreamSink().next(
+                                        new SimpleDeltaEvent(trace, null, delta));
+                            }
                         })
                         .blockLast();
+                response = finalResponse[0];
             }
 
-            if (response.isEmpty()) {
+            if (response == null || response.isEmpty()) {
                 //触发重试
                 throw new LlmNoReturnException("The LLM did not return");
             }
 
-            final AssistantMessage responseMessage;
-            if (response.isStream()) {
-                responseMessage = response.getAggregationMessage();
-            } else {
-                responseMessage = response.getMessage();
+            final AssistantMessage responseMessage = response.getMessage();
+            if (responseMessage == null) {
+                throw new LlmNoReturnException("The LLM returned no assistant message");
             }
 
             if (response.getUsage() != null) {
@@ -407,7 +420,9 @@ public class SimpleAgent implements Agent<SimpleRequest, SimpleResponse> {
                 }
             }
 
-            String clearContent = responseMessage.hasContent() ? responseMessage.getResultContent() : "";
+            // 4.1：聚合消息的 text/thinking 已分流，取正文不能走 getResultContent()
+            // 以外的 content 路径（纯推理轮的 content 会回退为思考文本）
+            String clearContent = AgentUtil.getAggregatedResultContent(responseMessage, null);
             return ChatMessage.ofAssistant(clearContent);
         } else {
             // fallback 到自定义处理器

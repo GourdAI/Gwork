@@ -15,7 +15,9 @@
  */
 package com.gourdai.agent.simple;
 
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.SimpleEndEvent;
+
+import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.AgentRequest;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.session.InMemoryAgentSession;
@@ -90,7 +92,7 @@ public class SimpleRequest implements AgentRequest<SimpleRequest, SimpleResponse
         return new SimpleResponse(session, trace, message);
     }
 
-    public Flux<AgentChunk> stream() {
+    public Flux<AgentEvent> stream() {
         if (session == null) {
             if (LOG.isDebugEnabled()) {
                 LOG.debug("No session provided for SimpleRequest, using temporary InMemoryAgentSession.");
@@ -99,7 +101,7 @@ public class SimpleRequest implements AgentRequest<SimpleRequest, SimpleResponse
             session = InMemoryAgentSession.of();
         }
 
-        return Flux.<AgentChunk>create(sink -> {
+        return Flux.<AgentEvent>create(sink -> {
             try {
                 Thread currentThread = Thread.currentThread();
                 sink.onCancel(() -> {
@@ -113,7 +115,7 @@ public class SimpleRequest implements AgentRequest<SimpleRequest, SimpleResponse
 
                 SimpleResponse resp = new SimpleResponse(session, trace, message);
 
-                sink.next(new SimpleChunk(resp));
+                sink.next(new SimpleEndEvent(resp));
                 sink.complete();
             } catch (Throwable e) {
                 if (!sink.isCancelled()) {

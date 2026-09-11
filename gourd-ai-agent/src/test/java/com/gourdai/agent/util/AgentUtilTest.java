@@ -86,14 +86,15 @@ public class AgentUtilTest {
     @Test
     @DisplayName("thinking 流式帧（isThinking=true 的增量，非投影形态）→ 原样返回")
     void thinkingDeltaFrame() {
-        AssistantMessage delta = new AssistantMessage("用户要求", true);
+        // 4.1：思考帧为 text="" + thinking=内容 + isThinking=true
+        AssistantMessage delta = new AssistantMessage("", "用户要求", true);
         assertEquals("用户要求", AgentUtil.getResultContentWithoutReasoning(delta));
     }
 
     @Test
     @DisplayName("thinking 首帧字面量 <think>（未闭合）→ 返回空串，不外发标签")
     void thinkingOpenFrameLiteral() {
-        assertEquals("", AgentUtil.getResultContentWithoutReasoning(new AssistantMessage("<think>", true)));
+        assertEquals("", AgentUtil.getResultContentWithoutReasoning(new AssistantMessage("", "<think>", true)));
     }
 
     // ==================== 流式思考前缀精确剥离（2026-08-19 线上事故：思考内引用 </think> 字面量时启发式切错位置） ====================

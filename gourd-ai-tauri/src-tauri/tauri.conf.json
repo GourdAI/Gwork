@@ -41,6 +41,7 @@
     "externalBin": [],
     "windows": {
       "nsis": {
+        "template": "installer/template.nsi",
         "installMode": "currentUser",
         "languages": [
           "SimpChinese"

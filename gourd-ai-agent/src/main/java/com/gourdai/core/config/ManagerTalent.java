@@ -72,8 +72,8 @@ public class ManagerTalent extends AbsTalent {
         // 1) 注册到引擎（运行时生效）
         engine.addModel(modelDo);
 
-        // 2) 同步到 settings（持久化）
-        settings.getModels().put(modelDo.getNameOrModel(), modelDo);
+        // 2) 同步到 settings（持久化）：插入所属 provider 区块末尾，维持同 provider 连续不变量
+        settings.addModelInProviderBlock(modelDo);
         settings.saveToFile();
 
         return "OK: 模型 '" + name + "' 已添加";

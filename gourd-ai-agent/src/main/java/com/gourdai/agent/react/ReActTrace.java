@@ -153,7 +153,15 @@ public class ReActTrace implements AgentTrace {
     }
 
     public void setExtra(String key, Object val) {
-        extras.put(key, val);
+        if (val == null) {
+            extras.remove(key);
+        } else {
+            extras.put(key, val);
+        }
+    }
+
+    public void removeExtra(String key) {
+        extras.remove(key);
     }
 
     public ReActTrace() {

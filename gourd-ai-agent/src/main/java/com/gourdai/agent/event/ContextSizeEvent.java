@@ -13,54 +13,35 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.gourdai.agent.react.intercept;
+package com.gourdai.agent.event;
 
-import com.gourdai.agent.AbsAgentChunk;
 import com.gourdai.agent.react.ReActTrace;
 import org.noear.solon.lang.Preview;
 
 /**
- * 上下文大小状态块：向用户侧推送当前上下文的大小信息
+ * 上下文大小事件：向用户侧推送当前上下文的大小信息
  *
- * <p>在每次推理回合开始前由 {@link ContextCompressionInterceptor} 生成，
- * 让用户侧能感知到当前上下文的规模以及是否发生了压缩。
+ * <p>替代旧的 {@code ContextSizeChunk}。在每次推理回合开始前生成，
+ * 让用户侧能感知当前上下文规模以及是否发生了压缩。</p>
+ *
+ * <p>与 {@link ContextUsageEvent} 的区别：本事件是推理<b>前</b>用 jtokkit 本地<b>估算</b>，
+ * 仅供框架内部做压缩决策；后者是推理<b>后</b>的<b>真实</b>用量，用于对用户展示。</p>
  *
  * @author oisin
- * @since 4.0.0
+ * @since 4.1.0
  */
-@Preview("4.0.0")
-public class ContextSizeChunk extends AbsAgentChunk {
+@Preview("4.1.0")
+public class ContextSizeEvent extends AbsAgentEvent {
     private final ReActTrace trace;
-    /**
-     * 当前上下文的总消息数
-     */
     private final int messageCount;
-    /**
-     * 当前上下文的总 token 数（估算）
-     */
     private final int tokenCount;
-    /**
-     * 本次是否触发了压缩
-     */
     private final boolean compressed;
-    /**
-     * 压缩前消息数（未压缩时为 0）
-     */
     private final int beforeMessageCount;
-    /**
-     * 压缩后消息数（未压缩时为 0）
-     */
     private final int afterMessageCount;
-    /**
-     * 压缩前 token 数（估算，未压缩时为 0）
-     */
     private final int beforeTokenCount;
-    /**
-     * 压缩后 token 数（估算，未压缩时为 0）
-     */
     private final int afterTokenCount;
 
-    public ContextSizeChunk(ReActTrace trace, int messageCount, int tokenCount,
+    public ContextSizeEvent(ReActTrace trace, int messageCount, int tokenCount,
                             boolean compressed,
                             int beforeMessageCount, int afterMessageCount,
                             int beforeTokenCount, int afterTokenCount) {
@@ -80,51 +61,30 @@ public class ContextSizeChunk extends AbsAgentChunk {
         return trace;
     }
 
-    /**
-     * 获取当前上下文的总消息数
-     */
     public int getMessageCount() {
         return messageCount;
     }
 
-    /**
-     * 获取当前上下文的总 token 数（估算）
-     */
     public int getTokenCount() {
         return tokenCount;
     }
 
-    /**
-     * 本次是否触发了压缩
-     */
     public boolean isCompressed() {
         return compressed;
     }
 
-    /**
-     * 获取压缩前消息数（未压缩时为 0）
-     */
     public int getBeforeMessageCount() {
         return beforeMessageCount;
     }
 
-    /**
-     * 获取压缩后消息数（未压缩时为 0）
-     */
     public int getAfterMessageCount() {
         return afterMessageCount;
     }
 
-    /**
-     * 获取压缩前 token 数（估算，未压缩时为 0）
-     */
     public int getBeforeTokenCount() {
         return beforeTokenCount;
     }
 
-    /**
-     * 获取压缩后 token 数（估算，未压缩时为 0）
-     */
     public int getAfterTokenCount() {
         return afterTokenCount;
     }

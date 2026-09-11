@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      https://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,9 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.gourdai.agent.react.task;
+package com.gourdai.agent.event;
 
-import com.gourdai.agent.AbsAgentChunk;
 import com.gourdai.agent.react.ReActTrace;
 import org.noear.solon.ai.chat.message.ChatMessage;
 import org.noear.solon.lang.Nullable;
@@ -25,18 +24,20 @@ import java.util.Collections;
 import java.util.Map;
 
 /**
- * ReAct 动作块（Acting）：标识智能体正在调用外部工具或执行特定指令
+ * 工具调用事件抽象基类
+ *
+ * <p>替代旧的 {@code AbsActionChunk}。承载工具名、入参及批次配对信息。</p>
  *
  * @author oisin
- * @since 3.9.6
+ * @since 4.1.0
  */
-@Preview("3.9.6")
-public abstract class AbsActionChunk extends AbsAgentChunk {
+@Preview("4.1.0")
+public abstract class AbsToolCallEvent extends AbsAgentEvent {
     private final transient ReActTrace trace;
     private final transient String toolName;
     private final transient Map<String, Object> args;
     /**
-     * 工具调用标识：用于并发场景下将 action(开始) 与 observation(结束) 精确配对，
+     * 工具调用标识：用于并发场景下将 start(开始) 与 end(结束) 精确配对，
      * 以及 HITL 批量审批时按调用而非工具名寻址。原生 ToolCall 有 id 时用其 id；
      * 文本模式无原生 id 时由调用方生成稳定串。可能为 null（旧构造/未提供）。
      */
@@ -48,16 +49,16 @@ public abstract class AbsActionChunk extends AbsAgentChunk {
     /** 去重后、Web 可见工具卡数量；旧历史或单卡调用为 null。 */
     private final transient Integer batchSize;
 
-    public AbsActionChunk(ReActTrace trace, String toolName, Map<String, Object> args, ChatMessage message) {
+    public AbsToolCallEvent(ReActTrace trace, String toolName, Map<String, Object> args, ChatMessage message) {
         this(trace, toolName, args, message, null, null, null, null);
     }
 
-    public AbsActionChunk(ReActTrace trace, String toolName, Map<String, Object> args, ChatMessage message, String actionId) {
+    public AbsToolCallEvent(ReActTrace trace, String toolName, Map<String, Object> args, ChatMessage message, String actionId) {
         this(trace, toolName, args, message, actionId, null, null, null);
     }
 
-    public AbsActionChunk(ReActTrace trace, String toolName, Map<String, Object> args, ChatMessage message,
-                          String actionId, String batchId, Integer batchIndex, Integer batchSize) {
+    public AbsToolCallEvent(ReActTrace trace, String toolName, Map<String, Object> args, ChatMessage message,
+                            String actionId, String batchId, Integer batchIndex, Integer batchSize) {
         super(trace.getRunId(), trace.getAgentName(), trace.getSession(), message);
 
         this.trace = trace;
@@ -67,7 +68,7 @@ public abstract class AbsActionChunk extends AbsAgentChunk {
         this.batchIndex = batchIndex;
         this.batchSize = batchSize;
         if (args == null) {
-            this.args = Collections.EMPTY_MAP;
+            this.args = Collections.emptyMap();
         } else {
             this.args = Collections.unmodifiableMap(args);
         }

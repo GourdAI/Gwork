@@ -11,28 +11,63 @@
     var todoChip = document.getElementById('chatTodoChip');
     var todoPanel = document.getElementById('chatTodoPanel');
 
-    function loadTodos() {
-        var sid = typeof SESSION_ID !== 'undefined' ? SESSION_ID : null;
-        if (!sid) return;
+    var todoRequestVersions = {};
 
-        fetch('/web/chat/todos?sessionId=' + encodeURIComponent(sid), {
-            // code 会话的任务清单落在所选项目目录下，需随请求头带上项目根，
-            // 否则后端按全局工作区解析路径查不到清单（桌面端表现为面板空、按钮隐藏）
-            headers: (typeof getSessionCwd === 'function' && getSessionCwd())
-                ? { 'X-Session-Cwd': getSessionCwd() } : {}
-        })
+    function currentSessionId() {
+        return typeof SESSION_ID !== 'undefined' ? SESSION_ID : null;
+    }
+
+    function resolveTodoRoot(sid, targetRoot) {
+        if (targetRoot !== undefined && targetRoot !== null) return String(targetRoot);
+
+        var sess = (typeof sessionMap !== 'undefined' && sessionMap) ? sessionMap[sid] : null;
+        if (sess && sess.projectRoot) return sess.projectRoot;
+
+        // 新会话在第一次发送前 projectRoot 仍为空，此时仅当前会话可安全回退到选择器中的根。
+        if (sid === currentSessionId() && typeof getSessionCwd === 'function') return getSessionCwd() || '';
+        return sess && typeof sess.projectRoot === 'string' ? sess.projectRoot : '';
+    }
+
+    function loadTodos(targetSessionId, targetRoot) {
+        var sid = targetSessionId || currentSessionId();
+        if (!sid) return Promise.resolve();
+
+        var root = resolveTodoRoot(sid, targetRoot);
+        var requestVersion = (todoRequestVersions[sid] || 0) + 1;
+        todoRequestVersions[sid] = requestVersion;
+        var headers = root ? { 'X-Session-Cwd': root } : {};
+
+        return fetch('/web/chat/todos?sessionId=' + encodeURIComponent(sid), { headers: headers })
             .then(function(r) { return r.json(); })
             .then(function(res) {
-                renderTodos(res && res.data ? res.data : {});
+                // 同一会话的旧请求晚到时不得覆盖较新的结果。
+                if (todoRequestVersions[sid] !== requestVersion) return;
+                renderTodos(res && res.data ? res.data : {}, sid);
             })
             .catch(function() {
-                renderError();
+                if (todoRequestVersions[sid] !== requestVersion) return;
+                renderError(sid);
             });
     }
 
-    function renderTodos(data) {
+    function renderTodos(data, sid) {
         var items = data.items || [];
         var stats = data.stats || {};
+        var isCurrent = sid === currentSessionId();
+        window.sessionTodoMap = window.sessionTodoMap || {};
+
+        // 先更新响应所属会话的缓存；后台会话的请求不得触碰当前面板 DOM。
+        var raw = typeof data.raw === 'string' ? data.raw : '';
+        var malformed = !!data.exists && items.length === 0 && raw.trim().length > 0;
+        if (!malformed) {
+            if (!data.exists || items.length === 0) {
+                delete window.sessionTodoMap[sid];
+            } else {
+                window.sessionTodoMap[sid] = { done: stats.done || 0, total: stats.total || 0 };
+            }
+            if (typeof updateHistoryUI === 'function') updateHistoryUI();
+        }
+        if (!isCurrent) return;
 
         // badge
         if (todoBadge) {
@@ -50,9 +85,6 @@
         // 三态区分：清单文件不存在 / 文件为空 / 文件有内容但一行任务也解析不出来（格式异常）。
         // 只有「确认没有清单」才允许收起 chip；格式异常要保持 chip 可见并在面板内给提示，
         // 否则用户点开面板后异步回包会立即把它关掉，表现为「任务按钮点击后闪消」。
-        var raw = typeof data.raw === 'string' ? data.raw : '';
-        var malformed = !!data.exists && items.length === 0 && raw.trim().length > 0;
-
         if (malformed) {
             renderMalformedTodos(raw);
             setTodoChipVisible(true);
@@ -67,10 +99,6 @@
             todoStats.style.display = 'none';
             // 只收起 chip，不走 showTodoChip(false)：面板由用户主动点开，异步回包无权关闭它
             setTodoChipVisible(false);
-            // 清理会话级缓存
-            var sid = typeof SESSION_ID !== 'undefined' ? SESSION_ID : null;
-            if (sid) delete (window.sessionTodoMap || {})[sid];
-            if (typeof updateHistoryUI === 'function') updateHistoryUI();
             return;
         }
 
@@ -78,15 +106,6 @@
         todoStats.style.display = '';
         todoStats.textContent = '(' + stats.done + ' / ' + stats.total + ')';
         setTodoChipVisible(true);
-
-        // 写入会话级缓存，驱动侧边栏 badge 更新
-        window.sessionTodoMap = window.sessionTodoMap || {};
-        var cacheSid = typeof SESSION_ID !== 'undefined' ? SESSION_ID : null;
-        if (cacheSid) {
-            window.sessionTodoMap[cacheSid] = { done: stats.done || 0, total: stats.total || 0 };
-            if (typeof updateHistoryUI === 'function') updateHistoryUI();
-        }
-
         renderTodoItems(items);
     }
 
@@ -165,8 +184,8 @@
         return items;
     }
 
-    function renderError() {
-        if (!todoList || !todoEmpty || !todoStats) return;
+    function renderError(sid) {
+        if (sid !== currentSessionId() || !todoList || !todoEmpty || !todoStats) return;
         todoList.innerHTML = '';
         todoEmpty.style.display = '';
         todoEmpty.textContent = GourdI18n.t('todos.load_failed');
@@ -223,7 +242,7 @@
 
     // refresh button
     if (todoRefreshBtn) {
-        todoRefreshBtn.addEventListener('click', loadTodos);
+        todoRefreshBtn.addEventListener('click', function() { loadTodos(); });
     }
 
     // 监听 WebSocket action chunk，当 todowrite 完成时直接从返回值提取统计

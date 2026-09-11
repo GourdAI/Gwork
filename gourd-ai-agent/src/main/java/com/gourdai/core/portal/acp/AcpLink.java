@@ -6,16 +6,16 @@ import com.agentclientprotocol.sdk.agent.PromptContext;
 import com.agentclientprotocol.sdk.spec.AcpAgentTransport;
 import com.agentclientprotocol.sdk.spec.AcpSchema;
 import com.gourdai.agent.AgentSession;
-import com.gourdai.agent.react.ReActChunk;
+import com.gourdai.agent.event.RunEndEvent;
 import com.gourdai.agent.react.ReActTrace;
-import com.gourdai.agent.react.task.ActionChunk;
-import com.gourdai.agent.react.task.ObservationChunk;
-import com.gourdai.agent.react.task.PlanChunk;
-import com.gourdai.agent.react.task.ReasonChunk;
-import com.gourdai.agent.react.task.ThoughtChunk;
-import com.gourdai.harness.agent.AgentEndChunk;
-import com.gourdai.harness.agent.AgentStartChunk;
-import com.gourdai.harness.agent.RetryChunk;
+import com.gourdai.agent.event.ToolCallStartEvent;
+import com.gourdai.agent.event.ToolCallEndEvent;
+import com.gourdai.agent.event.PlanEvent;
+import com.gourdai.agent.event.ReasonDeltaEvent;
+import com.gourdai.agent.event.ReasonEndEvent;
+import com.gourdai.harness.agent.AgentEndEvent;
+import com.gourdai.harness.agent.AgentStartEvent;
+import com.gourdai.harness.agent.RetryEvent;
 import com.gourdai.core.portal.web.ThinkingDepth;
 import com.gourdai.core.portal.web.SessionLocator;
 import org.noear.solon.ai.chat.ChatModel;
@@ -55,7 +55,7 @@ public class AcpLink implements Runnable {
 
     private final Map<String, AcpSessionContext> sessionStates = new ConcurrentHashMap<>();
 
-    /** ActionChunk.actionId -> ACP toolCallId：保证工具「开始/结束」两张卡同 id，编辑器可原位更新 */
+    /** ToolCallStartEvent.actionId -> ACP toolCallId：保证工具「开始/结束」两张卡同 id，编辑器可原位更新 */
     private final Map<String, String> actionToolCallIds = new ConcurrentHashMap<>();
 
     /** 子代理标识(agentName:description) -> ACP toolCallId：保证子代理「启动/结束」同 id 更新 */
@@ -184,15 +184,19 @@ public class AcpLink implements Runnable {
                                 // 应用思考深度配置
                                 final String modelStandard = finalChatModel.getStandardOrProvider();
                                 ThinkingDepth.applyTo(o, modelStandard, acpThinkingDepth);
+                                // 同时透传给工具链：TaskTalent 据此让子代理与本轮使用同一档位，
+                                // 否则子代理只能读到会话级旧值（甚至 null→OFF）而静默降档。
+                                o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH,
+                                        ThinkingDepth.normalize(acpThinkingDepth));
                             })
                             .stream()
                             .takeWhile(chunk -> !context.isCancelled())
                             .concatMap(chunk -> {
                                 // === 规划阶段：映射到 ACP Plan 结构化输出（完整步骤列表 + 按进度标记状态） ===
-                                if (chunk instanceof PlanChunk) {
-                                    PlanChunk planChunk = (PlanChunk) chunk;
-                                    List<String> plans = planChunk.getPlans();
-                                    int currIdx = planChunk.getPlanIndex();
+                                if (chunk instanceof PlanEvent) {
+                                    PlanEvent planEvent = (PlanEvent) chunk;
+                                    List<String> plans = planEvent.getPlans();
+                                    int currIdx = planEvent.getPlanIndex();
 
                                     List<AcpSchema.PlanEntry> entries = new ArrayList<>();
                                     if (plans != null) {
@@ -214,17 +218,17 @@ public class AcpLink implements Runnable {
                                 // === 推理阶段：思考流 → thought；正文增量 → message ===
                                 // ACP 是结构化协议，思考/正文的折叠展示由编辑器决定，
                                 // 不复用 CLI 终端的 cliThinkPrinted 开关（该开关仅约束 CLI 打印）。
-                                else if (chunk instanceof ReasonChunk) {
-                                    ReasonChunk reasonChunk = (ReasonChunk) chunk;
-                                    if (chunk.hasContent() && !reasonChunk.isToolCalls()) {
+                                else if (chunk instanceof ReasonDeltaEvent) {
+                                    ReasonDeltaEvent reasonDelta = (ReasonDeltaEvent) chunk;
+                                    if (chunk.hasContent() && !reasonDelta.isToolCalls()) {
                                         // 剥离 think 标签噪声；剥离后为空的 chunk 直接过滤（避免客户端空泡/标签残片）
                                         String text = stripThinkTags(chunk.getContent());
                                         if (text == null || text.trim().isEmpty()) {
                                             return Mono.just(chunk);
                                         }
-                                        if (reasonChunk.isThinking()) {
+                                        if (reasonDelta.isThinking()) {
                                             // 实测：部分 ACP 客户端不渲染 agent_thought_chunk 块，
-                                            // 思考内容需双发到正文才能保证可见（与 RetryChunk 同策略）
+                                            // 思考内容需双发到正文才能保证可见（与 RetryEvent 同策略）
                                             return acpContext.sendThought(text)
                                                     .then(acpContext.sendMessage(text))
                                                     .thenReturn(chunk);
@@ -233,21 +237,36 @@ public class AcpLink implements Runnable {
                                                 .thenReturn(chunk);
                                     }
                                 }
-                                // === ThoughtChunk（多任务并行） ===
-                                else if (chunk instanceof ThoughtChunk) {
-                                    ThoughtChunk thoughtChunk = (ThoughtChunk) chunk;
-                                    if (thoughtChunk.hasMeta(TaskTalent.TOOL_MULTITASK)) {
-                                        String content = thoughtChunk.getAssistantMessage().getResultContent();
-                                        if (Assert.isNotEmpty(content)) {
-                                            return acpContext.sendThought(content)
-                                                    .thenReturn(chunk);
+                                // === ReasonEndEvent（子代理聚合载荷） ===
+                                else if (chunk instanceof ReasonEndEvent) {
+                                    ReasonEndEvent reasonEnd = (ReasonEndEvent) chunk;
+                                    if (reasonEnd.hasMeta(TaskTalent.META_SUBAGENT)) {
+                                        // 思考与正文都走 thought 通道：对 ACP 客户端而言两者都是「子代理
+                                        // 内部产出」，需与主代理的最终答案（agent_message_chunk）区分开，
+                                        // 否则子代理中间产物会被当成最终回复展示。
+                                        Mono<Void> send = Mono.empty();
+
+                                        // 思考：旧实现完全不下发，子代理思考在 ACP 端永远不可见
+                                        if (reasonEnd.hasThinking()) {
+                                            send = send.then(acpContext.sendThought(reasonEnd.getThinking()));
                                         }
+
+                                        // 正文必须用 getText()：getAssistantMessage().getResultContent() 内部是
+                                        // stripThinkTags，对「inline-think 方言」（Qwen 等把思考直接写在正文里、
+                                        // 用 <think> 标签包裹）会把标签前的真实正文一并吃掉，只剩标签后的残段
+                                        // ——AgentUtilTest 里已有针对该缺陷的护栏用例。
+                                        String content = reasonEnd.getText();
+                                        if (Assert.isNotEmpty(content)) {
+                                            send = send.then(acpContext.sendThought(content));
+                                        }
+
+                                        return send.thenReturn(chunk);
                                     }
                                 }
                                 // === 工具开始：先下发 IN_PROGRESS 卡片，编辑器可渲染 loading 骨架 ===
-                                else if (chunk instanceof ActionChunk) {
-                                    ActionChunk actionChunk = (ActionChunk) chunk;
-                                    String toolName = actionChunk.getToolName();
+                                else if (chunk instanceof ToolCallStartEvent) {
+                                    ToolCallStartEvent toolStart = (ToolCallStartEvent) chunk;
+                                    String toolName = toolStart.getToolName();
 
                                     // 跳过内部任务分发工具（不向客户端展示）
                                     if (Assert.isEmpty(toolName)
@@ -257,19 +276,19 @@ public class AcpLink implements Runnable {
                                     }
 
                                     String toolCallId = idPrefix + "-" + toolCallCounter.incrementAndGet();
-                                    if (actionChunk.getActionId() != null) {
-                                        actionToolCallIds.put(actionChunk.getActionId(), toolCallId);
+                                    if (toolStart.getActionId() != null) {
+                                        actionToolCallIds.put(mapKey(sessionId, toolStart.getActionId()), toolCallId);
                                     }
 
                                     AcpSchema.ToolCall toolCall = new AcpSchema.ToolCall(
                                             "tool_call",
                                             toolCallId,
-                                            buildStartTitle(toolName, actionChunk.getArgs()),
+                                            buildStartTitle(toolName, toolStart.getArgs()),
                                             mapToolKind(toolName),
                                             AcpSchema.ToolCallStatus.IN_PROGRESS,
                                             Collections.emptyList(),
-                                            buildLocations(toolName, actionChunk.getArgs()),
-                                            actionChunk.getArgs(),   // rawInput
+                                            buildLocations(toolName, toolStart.getArgs()),
+                                            toolStart.getArgs(),   // rawInput
                                             null,                    // rawOutput
                                             null                     // meta
                                     );
@@ -277,9 +296,9 @@ public class AcpLink implements Runnable {
                                             .thenReturn(chunk);
                                 }
                                 // === 工具完成：同 id 更新为 COMPLETED/FAILED（含错误信息，不再静默丢弃） ===
-                                else if (chunk instanceof ObservationChunk) {
-                                    ObservationChunk observationChunk = (ObservationChunk) chunk;
-                                    String toolName = observationChunk.getToolName();
+                                else if (chunk instanceof ToolCallEndEvent) {
+                                    ToolCallEndEvent toolEnd = (ToolCallEndEvent) chunk;
+                                    String toolName = toolEnd.getToolName();
 
                                     // 跳过内部任务分发工具（不向客户端展示）
                                     if (TaskTalent.TOOL_MULTITASK.equals(toolName) || TaskTalent.TOOL_TASK.equals(toolName)) {
@@ -287,14 +306,16 @@ public class AcpLink implements Runnable {
                                     }
 
                                     // actionId 可能为 null（旧构造/未提供），ConcurrentHashMap.remove(null) 会 NPE
-                                    String actionId = observationChunk.getActionId();
-                                    String toolCallId = actionId != null ? actionToolCallIds.remove(actionId) : null;
+                                    String actionId = toolEnd.getActionId();
+                                    String toolCallId = actionId != null
+                                            ? actionToolCallIds.remove(mapKey(sessionId, actionId))
+                                            : null;
                                     if (toolCallId == null) {
                                         toolCallId = idPrefix + "-" + toolCallCounter.incrementAndGet();
                                     }
                                     String content = chunk.getContent();
 
-                                    Throwable error = observationChunk.getError();
+                                    Throwable error = toolEnd.getError();
                                     AcpSchema.ToolCallStatus status = error != null
                                             ? AcpSchema.ToolCallStatus.FAILED
                                             : AcpSchema.ToolCallStatus.COMPLETED;
@@ -306,12 +327,12 @@ public class AcpLink implements Runnable {
                                     AcpSchema.ToolCall toolCall = new AcpSchema.ToolCall(
                                             "tool_call",
                                             toolCallId,
-                                            buildToolTitle(toolName, observationChunk.getArgs(), content),
+                                            buildToolTitle(toolName, toolEnd.getArgs(), content),
                                             mapToolKind(toolName),
                                             status,
                                             buildToolContent(rawOutput),
-                                            buildLocations(toolName, observationChunk.getArgs()),
-                                            observationChunk.getArgs(),   // rawInput
+                                            buildLocations(toolName, toolEnd.getArgs()),
+                                            toolEnd.getArgs(),   // rawInput
                                             rawOutput,                 // rawOutput
                                             null                     // meta
                                     );
@@ -319,11 +340,11 @@ public class AcpLink implements Runnable {
                                             .thenReturn(chunk);
                                 }
                                 // === 子代理启动：映射为 IN_PROGRESS 的 ToolCall 卡片 ===
-                                else if (chunk instanceof AgentStartChunk) {
-                                    AgentStartChunk startChunk = (AgentStartChunk) chunk;
-                                    String agentKey = startChunk.getAgentName() + ":" + startChunk.getDescription();
+                                else if (chunk instanceof AgentStartEvent) {
+                                    AgentStartEvent startChunk = (AgentStartEvent) chunk;
+                                    String agentKey = agentKey(startChunk.getAgentName(), startChunk.getDescription(), startChunk.getInvocationId());
                                     String toolCallId = idPrefix + "-agent-" + toolCallCounter.incrementAndGet();
-                                    agentToolCallIds.put(agentKey, toolCallId);
+                                    agentToolCallIds.put(mapKey(sessionId, agentKey), toolCallId);
 
                                     AcpSchema.ToolCall toolCall = new AcpSchema.ToolCall(
                                             "tool_call",
@@ -339,10 +360,14 @@ public class AcpLink implements Runnable {
                                             .thenReturn(chunk);
                                 }
                                 // === 子代理结束：同 id 更新为 COMPLETED/FAILED，附结果摘要 ===
-                                else if (chunk instanceof AgentEndChunk) {
-                                    AgentEndChunk endChunk = (AgentEndChunk) chunk;
-                                    String agentKey = endChunk.getAgentName() + ":" + endChunk.getDescription();
-                                    String toolCallId = agentToolCallIds.remove(agentKey);
+                                else if (chunk instanceof AgentEndEvent) {
+                                    AgentEndEvent endChunk = (AgentEndEvent) chunk;
+                                    String agentKey = agentKey(endChunk.getAgentName(), endChunk.getDescription(), endChunk.getInvocationId());
+                                    String toolCallId = agentToolCallIds.remove(mapKey(sessionId, agentKey));
+                                    if (toolCallId == null && endChunk.getInvocationId() != null) {
+                                        toolCallId = agentToolCallIds.remove(mapKey(sessionId,
+                                                agentKey(endChunk.getAgentName(), endChunk.getDescription(), null)));
+                                    }
                                     if (toolCallId == null) {
                                         toolCallId = idPrefix + "-agent-" + toolCallCounter.incrementAndGet();
                                     }
@@ -365,22 +390,22 @@ public class AcpLink implements Runnable {
                                             .thenReturn(chunk);
                                 }
                                 // === 重试通知：映射到 thought，避免静默等待 ===
-                                else if (chunk instanceof RetryChunk) {
+                                else if (chunk instanceof RetryEvent) {
                                     // thought 进入可折叠的思考区；另推一条可见正文消息，
                                     // 保证默认折叠 thought 的编辑器也能看到「正在重试」提示
-                                    String retryText = ((RetryChunk) chunk).toText();
+                                    String retryText = ((RetryEvent) chunk).toText();
                                     return acpContext.sendThought(retryText)
                                             .then(acpContext.sendMessage(retryText))
                                             .thenReturn(chunk);
                                 }
                                 // === 最终回复阶段 ===
-                                else if (chunk instanceof ReActChunk) {
-                                    ReActChunk reActChunk = (ReActChunk) chunk;
-                                    String traceInfo = buildTraceInfo(reActChunk.getTrace(), startTime);
+                                else if (chunk instanceof RunEndEvent) {
+                                    RunEndEvent runEnd = (RunEndEvent) chunk;
+                                    String traceInfo = buildTraceInfo(runEnd.getTrace(), startTime);
 
-                                    // 正文增量已由 ReasonChunk 流式下发，正常结束只补发 trace 统计（走 thought），
+                                    // 正文增量已由 ReasonDeltaEvent 流式下发，正常结束只补发 trace 统计（走 thought），
                                     // 避免编辑器把全文再拼接一遍造成重复；异常结束时正文可能未流完，补发全文保证错误可见。
-                                    if (reActChunk.isAbnormal()) {
+                                    if (runEnd.isAbnormal()) {
                                         return acpContext.sendMessage(chunk.getContent() + traceInfo)
                                                 .thenReturn(chunk);
                                     }
@@ -416,22 +441,43 @@ public class AcpLink implements Runnable {
      * @return 对应 ChatModel；未配置可用模型时返回 null
      */
     public static ChatModel resolveChatModel(HarnessEngine runtime, AgentSettings settings) {
-        String acpModel = resolveModelName(settings);
+        Map<String, ModelDo> latestModels = settings.getModels();
 
-        if (Assert.isEmpty(acpModel)) {
-            return null;
+        // 常驻 ACP 进程中的模型注册表必须跟随最新 settings：先摘除已删除/禁用的旧实例。
+        for (org.noear.solon.ai.chat.ChatConfig registered : new ArrayList<>(runtime.getModels())) {
+            String name = registered.getNameOrModel();
+            ModelDo latest = latestModels.get(name);
+            if (latest == null || !latest.isEnabled()) {
+                runtime.removeModel(name);
+            }
         }
 
-        // 以最新配置为准（保鲜）：模型存在且启用则注册/刷新（addModel 按名覆盖，幂等）后取。
-        // 这样用户在 ACP 进程启动后对模型的修改（apiKey/apiUrl/启停）也能即时生效。
-        ModelDo modelDo = settings.getModels().get(acpModel);
-        if (modelDo != null && modelDo.isEnabled()) {
+        // 明确 fallback 顺序：ACP 指定模型 -> defaultModel -> 最新配置中首个启用模型。
+        List<String> candidates = new ArrayList<>();
+        String configured = settings.getGeneral().getAcpModel();
+        if (configured != null) configured = configured.trim();
+        if (Assert.isNotEmpty(configured)) candidates.add(configured);
+        if (Assert.isNotEmpty(settings.getDefaultModel()) && !candidates.contains(settings.getDefaultModel())) {
+            candidates.add(settings.getDefaultModel());
+        }
+        for (Map.Entry<String, ModelDo> entry : latestModels.entrySet()) {
+            if (entry.getValue() != null && entry.getValue().isEnabled() && !candidates.contains(entry.getKey())) {
+                candidates.add(entry.getKey());
+            }
+        }
+
+        for (String candidate : candidates) {
+            ModelDo modelDo = latestModels.get(candidate);
+            if (modelDo == null || !modelDo.isEnabled()) {
+                runtime.removeModel(candidate);
+                continue;
+            }
+            runtime.removeModel(candidate);
             runtime.addModel(modelDo);
-            return runtime.getModelOrMain(acpModel);
+            org.noear.solon.ai.chat.ChatConfig exact = runtime.getModelOrNil(candidate);
+            return exact == null ? null : exact.toChatModel();
         }
-
-        // 兜底：settings 中无此模型，但运行时已注册（配置合并边缘场景），沿用运行时实例
-        return runtime.getModelOrMain(acpModel);
+        return null;
     }
 
     /**
@@ -513,14 +559,29 @@ public class AcpLink implements Runnable {
     /** 详情面板文本上限（字符） */
     private static final int MAX_CONTENT_CHARS = 20000;
 
+    private static String mapKey(String sessionId, String value) {
+        return sessionId + "\u0000" + value;
+    }
+
+    private static String agentKey(String name, String description, String invocationId) {
+        if (invocationId != null && !invocationId.isEmpty()) {
+            return invocationId;
+        }
+        return name + ":" + description;
+    }
+
     /**
-     * 流结束时收尾未闭合的工具/子代理卡片（ActionChunk 已发但 Observation 未到达、
+     * 流结束时收尾未闭合的工具/子代理卡片（ToolCallStartEvent 已发但 Observation 未到达、
      * 或用户取消导致流提前终止），避免编辑器里卡片永远停在 loading 态。
      * fire-and-forget：收尾失败不影响主流程。
      */
     private void drainUnclosedToolCalls(PromptContext acpContext, String sessionId) {
         try {
+            String sessionPrefix = sessionId + "\u0000";
             for (Map.Entry<String, String> e : new HashMap<>(actionToolCallIds).entrySet()) {
+                if (!e.getKey().startsWith(sessionPrefix)) {
+                    continue;
+                }
                 actionToolCallIds.remove(e.getKey());
                 AcpSchema.ToolCall toolCall = new AcpSchema.ToolCall(
                         "tool_call", e.getValue(), "已中断",
@@ -531,6 +592,9 @@ public class AcpLink implements Runnable {
                 acpContext.sendUpdate(sessionId, toolCall).subscribe();
             }
             for (Map.Entry<String, String> e : new HashMap<>(agentToolCallIds).entrySet()) {
+                if (!e.getKey().startsWith(sessionPrefix)) {
+                    continue;
+                }
                 agentToolCallIds.remove(e.getKey());
                 AcpSchema.ToolCall toolCall = new AcpSchema.ToolCall(
                         "tool_call", e.getValue(), "已中断",

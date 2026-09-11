@@ -18,7 +18,7 @@ package com.gourdai.agent;
 import org.noear.snack4.Feature;
 import org.noear.snack4.ONode;
 import com.gourdai.agent.session.InMemoryAgentSession;
-import com.gourdai.agent.team.NodeChunk;
+import com.gourdai.agent.event.NodeEvent;
 import com.gourdai.agent.team.TeamInterceptor;
 import com.gourdai.agent.team.TeamTrace;
 import com.gourdai.agent.util.AgentUtil;
@@ -180,7 +180,7 @@ public interface Agent<Req extends AgentRequest<Req, Resp>, Resp extends AgentRe
         if (trace != null) {
             //状态实时化
             if (trace.getOptions().getStreamSink() != null) {
-                trace.getOptions().getStreamSink().next(new NodeChunk(node, trace, msg));
+                trace.getOptions().getStreamSink().next(new NodeEvent(node, trace, msg));
             }
 
             //协议后处理集成

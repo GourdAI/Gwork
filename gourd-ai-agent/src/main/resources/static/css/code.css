@@ -655,6 +655,15 @@ body.code-mode #chatView .tool-file-lang { font-size: 12px; }
 body.code-mode #chatView .tool-args { font-size: 11px; }
 body.code-mode #chatView .tool-card-body { padding: 0 10px 8px; font-size: 11px; }
 
+body.code-mode #chatView .file-changes-body { padding: 3px 5px 6px; max-height: 280px; }
+body.code-mode #chatView .file-change-row { gap: 5px; padding: 5px 3px; align-items: flex-start; flex-direction: column; }
+body.code-mode #chatView .file-change-main, body.code-mode #chatView .file-change-row-actions { width: 100%; }
+body.code-mode #chatView .file-change-row-actions { padding-left: 23px; flex-wrap: wrap; }
+body.code-mode #chatView .file-change-action span { display: none; }
+body.code-mode #chatView .file-change-action { width: 25px; min-width: 25px; padding: 3px; justify-content: center; }
+body.code-mode #chatView .file-changes-head-actions .file-change-action span { display: inline; }
+body.code-mode #chatView .file-changes-head-actions .file-change-action { width: auto; padding: 3px 6px; }
+
 body.code-mode #chatView .tool-batch-group { margin: 6px 0; border-radius: 8px; }
 body.code-mode #chatView .tool-batch-header { padding: 6px 10px; gap: 8px; font-size: 12px; }
 body.code-mode #chatView .tool-batch-progress { font-size: 11px; }

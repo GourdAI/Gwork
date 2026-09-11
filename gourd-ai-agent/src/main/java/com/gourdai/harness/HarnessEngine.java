@@ -74,6 +74,18 @@ public class HarnessEngine {
     public final static String CTX_MODEL_SELECTED = "_model_selected";
     public final static String CTX_THINKING_DEPTH = "_thinking_depth";
 
+    /**
+     * 本轮生效的思考档位（per-turn，经 toolContext 透传）。
+     *
+     * <p>存在的理由：{@link #CTX_THINKING_DEPTH} 是<b>会话级</b>的用户前台选择，而 Loop 定时任务等
+     * 场景需要「按任务而非按会话」指定档位（见 WebStreamBuilder 的 thinkingDepthOverride），
+     * 该 override 刻意<b>不写入</b>会话上下文以免污染用户选择。若不另行透传，TaskTalent 只能读会话级值，
+     * 于是主代理用 override（如 high）、子代理读到旧值（甚至 null→OFF）而静默降档。</p>
+     *
+     * <p>下划线前缀参数由框架注入且不进入 JSON schema，与 {@link #ATTR_CWD} 同机制。</p>
+     */
+    public final static String ATTR_THINKING_DEPTH = "__thinkingDepth";
+
     private final ReentrantLock agentLock = new ReentrantLock();
 
     private final HarnessOptions options;
@@ -561,7 +573,7 @@ public class HarnessEngine {
         options.setDefaultModel(defaultModel);
 
         if (mainAgent != null
-                && !defaultModel.equals(oldDefault)
+                && !Objects.equals(defaultModel, oldDefault)
                 && (oldDefault == null || oldDefault.equals(mainAgent.getModel().getNameOrModel()))) {
             refreshMainAgent();
         }

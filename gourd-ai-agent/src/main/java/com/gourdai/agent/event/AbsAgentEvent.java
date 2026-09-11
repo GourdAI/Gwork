@@ -13,8 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.gourdai.agent;
+package com.gourdai.agent.event;
 
+import com.gourdai.agent.AgentSession;
 import org.noear.solon.ai.chat.message.ChatMessage;
 import org.noear.solon.lang.Nullable;
 import org.noear.solon.lang.Preview;
@@ -23,20 +24,20 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * 智能体响应块抽象基类
+ * 智能体事件抽象基类
  *
  * @author oisin
- * @since 3.9.1
+ * @since 4.1.0
  */
-@Preview("3.9.1")
-public abstract class AbsAgentChunk implements AgentChunk {
+@Preview("4.1.0")
+public abstract class AbsAgentEvent implements AgentEvent {
     protected final String runId;
     protected final String agentName;
     protected final @Nullable ChatMessage message;
     protected final transient AgentSession session;
     protected Map<String, Object> meta;
 
-    public AbsAgentChunk(String runId, String agentName, AgentSession session, ChatMessage message) {
+    public AbsAgentEvent(String runId, String agentName, AgentSession session, ChatMessage message) {
         this.runId = runId;
         this.agentName = agentName;
         this.session = session;

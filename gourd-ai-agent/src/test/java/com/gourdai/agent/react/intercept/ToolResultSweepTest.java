@@ -36,7 +36,8 @@ class ToolResultSweepTest {
             // ToolCall(uuid, index, name, argumentsStr, arguments)
             calls.add(new ToolCall(id, null, "read", "{}", new LinkedHashMap<>()));
         }
-        return new AssistantMessage("", false, null, null, calls, null);
+        // 4.1：AssistantMessage 改为 text/thinking 双通道，构造签名新增 thinking 位
+        return new AssistantMessage("", "", false, null, null, calls, null);
     }
 
     private static ToolMessage resultOf(String id, String tool, String content) {

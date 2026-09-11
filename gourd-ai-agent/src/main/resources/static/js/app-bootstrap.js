@@ -117,6 +117,7 @@
     // 应用脚本加载顺序（与原 web.html 第 1404-1425 行完全一致）
     var APP_SCRIPTS = [
         '/js/app-base.js',
+        '/js/app-tool-presentation.js',
         '/js/message-queue.js',
         '/js/app-ui.js',
         '/js/model-list-order.js',
@@ -124,10 +125,11 @@
         '/js/app-history.js',
         '/js/app-workspace.js',
         '/js/app-message.js',
-        '/js/app-streaming.js',
         '/js/app-filer.js',
         '/js/app-monaco.js',
         '/js/app-gitdiff.js',
+        '/js/app-file-changes.js',
+        '/js/app-streaming.js',
         '/js/app-todos.js',
         '/js/app-memory.js',
         '/js/app-context.js',

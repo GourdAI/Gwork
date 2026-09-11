@@ -307,7 +307,7 @@
             <plugin>
                 <groupId>org.noear</groupId>
                 <artifactId>solon-maven-plugin</artifactId>
-                <version>4.0.2</version>
+                <version>4.1.0</version>
                 <configuration>
                     <finalName>gourd-ai-agent</finalName>
                     <mainClass>com.gourdai.App</mainClass>

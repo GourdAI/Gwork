@@ -15,28 +15,29 @@
  */
 package com.gourdai.core.portal.web;
 
+import com.gourdai.agent.event.AgentEvent;
+
 import com.gourdai.agent.AgentSession;
 import com.gourdai.harness.agent.*;
 import com.gourdai.agent.react.ReActAgent;
-import com.gourdai.agent.react.ReActChunk;
+import com.gourdai.agent.event.RunEndEvent;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.react.intercept.HITL;
 import com.gourdai.agent.react.intercept.HITLTask;
 import com.gourdai.agent.react.intercept.ContextCompressionInterceptor;
-import com.gourdai.agent.react.task.ActionChunk;
-import com.gourdai.agent.react.task.ObservationChunk;
-import com.gourdai.agent.react.task.ReasonChunk;
+import com.gourdai.agent.event.ToolCallStartEvent;
+import com.gourdai.agent.event.ToolCallEndEvent;
+import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.react.task.ReasonTask;
-import com.gourdai.agent.react.task.ThoughtChunk;
+import com.gourdai.agent.event.ReasonEndEvent;
 import com.gourdai.agent.trace.UsageNormalizer;
 import com.gourdai.agent.util.AgentUtil;
 import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.ChatResponseDefault;
 import org.noear.solon.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.talents.cli.TerminalTalent;
 import com.gourdai.harness.talents.cli.TodoTalent;
-import com.gourdai.harness.talents.memory.MemoryTalent;
+import com.gourdai.harness.agent.WebToolVisibilityPolicy;
 import com.gourdai.core.channel.Channel;
 import com.gourdai.core.channel.wechat.WeChatLink;
 import org.noear.solon.core.util.Assert;
@@ -56,14 +57,16 @@ import java.util.*;
  *
  * <p><b>核心机制：</b>
  * <ul>
- *   <li>基于 ReAct 流式 chunk 类型分发：ReasonDeltaChunk → 思维链/文本输出；
- *       ReasonCompleteChunk → 思考轮次输出 + IM 通道同步转发；
- *       ActionEndChunk → 工具调用结果；
- *       ReActChunk → 最终汇总（含异常）。</li>
- *   <li>IM 通道同步转发：在处理 ReasonCompleteChunk 和 FinalChunk 时，将内容同步推送到
+ *   <li>基于 ReAct 流式事件类型分发：ReasonDeltaEvent → 思维链/文本输出；
+ *       ReasonEndEvent → 思考轮次输出 + IM 通道同步转发；
+ *       ToolCallEndEvent → 工具调用结果；
+ *       RunEndEvent → 最终汇总（含异常）。</li>
+ *   <li>IM 通道同步转发：在处理 ReasonEndEvent 和 RunEndEvent 时，将内容同步推送到
  *       所有已绑定的 IM 通道（微信、飞书、钉钉等），实现 Web 端与 IM 端双路输出。</li>
  *   <li>HITL（人机交互循环）支持：流结束后自动检测挂起的人工审批任务，
  *       如有则生成对应的 HITL WebChunk 以暂停流等待人工确认。</li>
+ *   <li>相位状态机：为每个下发帧标注 {@code phase}（见 {@link WebChunk} 的 {@code PHASE_*} 常量），
+ *       使前端能按引擎真实生命周期显示等待指示器，而不必靠「静默超时」猜测。</li>
  * </ul></p>
  *
  * <p><b>架构位置：</b>位于 portal/web 层，是 Agent 后端与 Web 前端之间的流式适配器；
@@ -157,7 +160,7 @@ public class WebStreamBuilder {
      * <ol>
      *   <li>处理 prompt（null兜底、/resume重置）并记录当前选择的 Agent</li>
      *   <li>调用 {@link ReActAgent # stream()} 获取 ReAct 流式输出</li>
-     *   <li>按 chunk 类型分发到对应的处理方法（onReasonDeltaChunk / onReasonCompleteChunk / onActionEndChunk / onFinalChunk）</li>
+     *   <li>按事件类型分发到对应的处理方法（onReasonDeltaEvent / onReasonEndEvent / onToolCallEndEvent / onRunEndEvent）</li>
      *   <li>过滤空 chunk、捕获异常并生成错误 WebChunk</li>
      *   <li>流结束后检测 HITL 状态，如有挂起的人工审批任务则追加 HITL WebChunk</li>
      * </ol></p>
@@ -210,6 +213,11 @@ public class WebStreamBuilder {
                 : ThinkingDepth.normalize(session.getContext().getAs(HarnessEngine.CTX_THINKING_DEPTH));
         String modelStandard = (chatModel == null) ? null : chatModel.getStandardOrProvider();
 
+        // 本轮（turn）相位状态机。per-turn 局部持有：buildTurnFlux 每次订阅（Flux.defer）都会重建，
+        // 因此「继续/恢复」的新一轮不会继承上一轮的相位。
+        // 用单元素数组做可变持有者，因为 lambda 内无法改写外部局部变量。
+        final String[] phase = {WebChunk.PHASE_WAITING};
+
         return agent.prompt(prompt)
                 .session(session)
                 .options(o -> {
@@ -223,55 +231,57 @@ public class WebStreamBuilder {
                     // 思考深度按接口类型注入（OFF/切换档位/接口不支持时会清理旧键，保证幂等）
                     ThinkingDepth.applyTo(o, modelStandard, thinkingDepth);
 
-                    if (Assert.isNotEmpty(sessionCwd)) {
-                        o.toolContextPut(HarnessEngine.ATTR_CWD, sessionCwd);
-                    }
+                    // 把本轮生效的档位经 toolContext 透传给工具链。Loop 定时任务的 thinkingDepthOverride
+                    // 刻意不写入会话上下文（避免污染用户前台选择），若不透传，TaskTalent 只能读到会话级
+                    // 旧值，于是主代理用 override（如 high）、子代理读到 null→OFF 而静默降档。
+                    o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, thinkingDepth);
+
+                    // TerminalTalent 在 cwd 为空时本就回退 engine workspace；显式注入可让文件变更账本
+                    // 与工具使用完全相同的规范根，并覆盖 Web 主 Agent 的全局会话。
+                    //
+                    // 注：Web 路径下 WebGate 传进来的 sessionCwd 已经是它自己 resolveChangeRoot() 的结果
+                    // （sessionCwd > 会话已登记所属根 > workspace），与它随后调 FileChangeService.finish()
+                    // 用的根是同一个值。ActionTask 写账本用的正是这里注入的 ATTR_CWD，于是
+                    // 「写账本的根 == 收口的根 == 前端读取的根」三方强制一致。
+                    // 下面的 workspace 兜底仍保留：其它调用方（不经过 WebGate 的路径）可能传空 cwd。
+                    String effectiveCwd = Assert.isNotEmpty(sessionCwd) ? sessionCwd : engine.getWorkspace();
+                    o.toolContextPut(HarnessEngine.ATTR_CWD, effectiveCwd);
                     if (webGate != null) {
                         o.interceptorAdd(new SteerInterceptor(webGate));
                     }
                 })
                 .stream()
-                .map(chunk -> {
-                    WebChunk webChunk = null;
-                    if (chunk instanceof ContextUsageChunk) {
-                        // 子代理的用量不刷全局上下文指示器：其 token 来自子代理模型，而指示器分母
-                        // 用的是主模型 contextLength（两者窗口可不同），且会覆盖主代理指标并随会话快照长期留存。
-                        if (chunk.getMeta().containsKey("__parentAgentName")) {
-                            return WebChunk.EMPTY;
-                        }
-                        webChunk = onContextUsageChunk(chatModel, (ContextUsageChunk) chunk);
-                    } else if (chunk instanceof ReasonChunk) {
-                        webChunk = onReasonChunk((ReasonChunk) chunk);
-                    } else if (chunk instanceof ThoughtChunk) {
-                        webChunk = onThoughtChunk(session, (ThoughtChunk) chunk);
-                    } else if (chunk instanceof ActionChunk) {
-                        webChunk = onActionStartChunk((ActionChunk) chunk);
-                    } else if (chunk instanceof ObservationChunk) {
-                        webChunk = onObservationChunk((ObservationChunk) chunk);
-                    } else if (chunk instanceof RetryChunk) {
-                        webChunk = WebChunk.ofRetry(((RetryChunk) chunk).getAttempt(), ((RetryChunk) chunk).getMaxRetries());
-                    } else if (chunk instanceof AgentStartChunk) {
-                        webChunk = onAgentStartChunk((AgentStartChunk) chunk);
-                    } else if (chunk instanceof AgentEndChunk) {
-                        webChunk = onAgentEndChunk((AgentEndChunk) chunk);
-                    } else if (chunk instanceof ReActChunk) {
-                        webChunk = onFinalChunk(session, (ReActChunk) chunk, turnStartMs);
-                    }
-                    // 注：ContextSizeChunk（推理前 jtokkit 估算）仅供框架内部做压缩决策，
-                    //     不映射、不上送前端；上下文指示器只认真实用量的 ContextUsageChunk。
+                // 用 concatMapIterable 而非 map：一个引擎事件可能对应<b>多帧</b> WebChunk。
+                // WebChunk 是「一帧一载荷」，而 ReasonEndEvent 的 getThinking() 与 getText() 是两份
+                // 独立载荷——子代理那一轮既需补发思考又需兜底正文时，必须下发两帧。旧的 map 只能
+                // 二选一，先 return 思考帧就把正文帧（以及紧随其后的 IM 转发副作用）整个吞掉。
+                .concatMapIterable(chunk -> {
+                    // 先算出「若本帧真的下发，引擎将处于什么相位」；只有非 EMPTY 帧才提交推进，
+                    // 否则被过滤掉的内部工具帧（task/multitask/memory/todowrite-start）会把相位
+                    // 误推进成 tool，让前端在根本没有工具卡的时刻显示「执行中」。
+                    String candidatePhase = nextPhase(chunk, phase[0]);
 
-                    if(webChunk == null || webChunk == WebChunk.EMPTY) {
-                        return WebChunk.EMPTY;
-                    } else {
+                    List<WebChunk> out = new ArrayList<>(2);
+                    for (WebChunk webChunk : mapEvent(session, chatModel, chunk, turnStartMs)) {
+                        if (webChunk == null || webChunk == WebChunk.EMPTY) {
+                            continue;
+                        }
                         webChunk.setRunId(chunk.getRunId());
-                        return webChunk;
+                        // 同一事件拆出的多帧共享同一相位，重复赋值幂等
+                        phase[0] = candidatePhase;
+                        webChunk.setPhase(candidatePhase);
+                        out.add(webChunk);
                     }
+                    return out;
                 })
                 .filter(WebChunk::isNotEmpty)
                 .onErrorResume(e -> {
                     LOG.error("Task fail: {}", e.getMessage(), e);
 
-                    return Mono.just(WebChunk.ofError(e));
+                    // 异常即本轮终止：相位推到 done，让前端停止一切等待指示器
+                    WebChunk errChunk = WebChunk.ofError(e);
+                    errChunk.setPhase(WebChunk.PHASE_DONE);
+                    return Mono.just(errChunk);
                 })
                 .concatWith(Flux.defer(() -> {
                     // Check HITL state after stream completes
@@ -282,39 +292,195 @@ public class WebStreamBuilder {
                                     ? String.valueOf(task.getArgs().get("command"))
                                     : null;
 
-                            WebChunk hitlChuck = WebChunk.ofHitl(task.getToolName(), command);
+                            WebChunk hitlChunk = WebChunk.ofHitl(task.getToolName(), command);
+                            hitlChunk.setPhase(WebChunk.PHASE_HITL);
 
-                            return Flux.just(hitlChuck, WebChunk.ofDone());
+                            WebChunk doneChunk = WebChunk.ofDone();
+                            doneChunk.setPhase(WebChunk.PHASE_DONE);
+
+                            return Flux.just(hitlChunk, doneChunk);
                         }
                     }
 
-                    return Flux.just(WebChunk.ofDone());
+                    WebChunk doneChunk = WebChunk.ofDone();
+                    doneChunk.setPhase(WebChunk.PHASE_DONE);
+                    return Flux.just(doneChunk);
                 }));
+    }
+
+    /**
+     * 引擎事件 → WebChunk 帧的分发。
+     *
+     * <p>返回 0..N 帧（空列表 = 本事件不上送前端）。之所以不是 1:1，是因为
+     * {@link ReasonEndEvent} 的 {@code getThinking()} 与 {@code getText()} 是两份独立载荷，
+     * 子代理兜底时可能两份都要下发，而一个 WebChunk 只能承载一份。</p>
+     *
+     * <p>链尾的 debug 日志是刷意的：未映射的事件类型若直接静默丢弃，会让「有意不上送」与
+     * 「新增事件忘了处理」在现象上完全一样（都是前端什么都不变），排查时无法区分。</p>
+     *
+     * @param session     Agent 会话
+     * @param chatModel   当前模型（供上下文指示器取窗口大小）
+     * @param chunk       引擎事件
+     * @param turnStartMs 本轮任务订阅时刻（毫秒）
+     * @return 待下发的帧列表，可能为空
+     */
+    private List<WebChunk> mapEvent(AgentSession session, ChatModel chatModel, AgentEvent chunk, long turnStartMs) {
+        if (chunk instanceof ContextUsageEvent) {
+            // 子代理的用量不刷全局上下文指示器：其 token 来自子代理模型，而指示器分母
+            // 用的是主模型 contextLength（两者窗口可不同），且会覆盖主代理指标并随会话快照长期留存。
+            if (chunk.getMeta().containsKey("__parentAgentName")) {
+                return Collections.emptyList();
+            }
+            return oneFrame(onContextUsageEvent(chatModel, (ContextUsageEvent) chunk));
+        }
+        if (chunk instanceof ReasonDeltaEvent) {
+            return oneFrame(onReasonDeltaEvent((ReasonDeltaEvent) chunk));
+        }
+        if (chunk instanceof ReasonEndEvent) {
+            return onReasonEndEvent(session, (ReasonEndEvent) chunk);
+        }
+        if (chunk instanceof ToolCallStartEvent) {
+            return oneFrame(onToolCallStartEvent((ToolCallStartEvent) chunk));
+        }
+        if (chunk instanceof ToolCallEndEvent) {
+            return oneFrame(onToolCallEndEvent((ToolCallEndEvent) chunk));
+        }
+        if (chunk instanceof RetryEvent) {
+            return oneFrame(WebChunk.ofRetry(((RetryEvent) chunk).getAttempt(), ((RetryEvent) chunk).getMaxRetries()));
+        }
+        if (chunk instanceof AgentStartEvent) {
+            return oneFrame(onAgentStartEvent((AgentStartEvent) chunk));
+        }
+        if (chunk instanceof AgentEndEvent) {
+            return oneFrame(onAgentEndEvent((AgentEndEvent) chunk));
+        }
+        if (chunk instanceof RunEndEvent) {
+            return oneFrame(onRunEndEvent(session, (RunEndEvent) chunk, turnStartMs));
+        }
+
+        // 以下事件<b>有意</b>不映射、不上送前端：
+        //   · ContextSizeEvent：推理前 jtokkit 本地估算，仅供框架内部做压缩决策；
+        //     上下文指示器只认推理后真实用量的 ContextUsageEvent。
+        //   · PlanEvent / NodeEvent / SupervisorDeltaEvent / TeamEndEvent：团队代理体系事件，
+        //     Web 端当前未渲染对应 UI（PlanEvent 的 CREATE/PROGRESS/REVISE 三种语义也未下发）。
+        //   · SimpleDeltaEvent / SimpleEndEvent：Simple（非 ReAct）代理事件，同上。
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("事件未映射为 WebChunk，已丢弃: {}", chunk.getClass().getSimpleName());
+        }
+        return Collections.emptyList();
+    }
+
+    /** 包一帧；空帧归一为空列表，使调用方不必再判 EMPTY。 */
+    private static List<WebChunk> oneFrame(WebChunk chunk) {
+        return (chunk == null || chunk == WebChunk.EMPTY)
+                ? Collections.<WebChunk>emptyList()
+                : Collections.singletonList(chunk);
+    }
+
+    /**
+     * 相位状态机：根据事件类型推导「该事件对应的帧下发后，引擎处于什么相位」。
+     *
+     * <p>返回值仅在调用方确认该帧非 {@link WebChunk#EMPTY}（即真的会下发）时才被提交，
+     * 因此被过滤的内部工具帧不会污染相位。</p>
+     *
+     * <p>不改变相位的事件（返回 {@code current}）：
+     * {@code ContextUsageEvent}（元数据）、{@code AgentStartEvent}/{@code AgentEndEvent}
+     * （子代理活动，主气泡指示器此时本就被 agentStates 守卫抑制）、{@code ContextSizeEvent}（内部估算）。</p>
+     *
+     * @param event   引擎事件
+     * @param current 当前相位
+     * @return 推进后的相位；无变化时原样返回 {@code current}
+     */
+    private static String nextPhase(AgentEvent event, String current) {
+        if (event instanceof ReasonDeltaEvent) {
+            ReasonDeltaEvent delta = (ReasonDeltaEvent) event;
+            // 与 onReasonDeltaEvent 的下发条件严格一致：只有真正产出内容的增量才代表相位
+            if (!delta.isToolCalls() && delta.hasContent()) {
+                return (delta.getMessage() != null && delta.getMessage().isThinking())
+                        ? WebChunk.PHASE_THINKING
+                        : WebChunk.PHASE_TEXT;
+            }
+            return current;
+        }
+        if (event instanceof ReasonEndEvent) {
+            // 思考轮次结束：接下来要么派发工具、要么进入最终汇总，此刻引擎在「等模型继续」
+            return WebChunk.PHASE_WAITING;
+        }
+        if (event instanceof ToolCallStartEvent) {
+            return WebChunk.PHASE_TOOL;
+        }
+        if (event instanceof ToolCallEndEvent) {
+            // 工具结束（含失败）：回到等待模型继续
+            return WebChunk.PHASE_WAITING;
+        }
+        if (event instanceof RetryEvent) {
+            return WebChunk.PHASE_RETRY;
+        }
+        if (event instanceof RunEndEvent) {
+            return WebChunk.PHASE_DONE;
+        }
+        return current;
+    }
+
+    /**
+     * 工具显示名：本引擎工具用裸名，子代理工具加 {@code agentName/} 前缀。
+     * <p>start / end / failure 三条路径共用，避免口径漂移导致前端配不上卡片。</p>
+     */
+    private String resolveToolTitle(String agentName, String toolName) {
+        return engine.getName().equals(agentName) ? toolName : agentName + "/" + toolName;
+    }
+
+    /**
+     * 工具执行失败时构造带 {@code failed} 标记的 action_end。
+     *
+     * <p><b>为什么必须有这一帧：</b>旧实现在 {@code getError() != null} 时直接返回
+     * {@link WebChunk#EMPTY}，把失败帧整个吞掉。而 {@code action_start} 已经建出了 loading
+     * 卡片，它永远等不到配对的结束帧 —— 卡片上的状态点<b>永久闪烁</b>、计时器永久累加，
+     * 直到整流结束才被 finishStream 兜底标黄（批量卡甚至会被误判）。</p>
+     *
+     * <p>todowrite 例外：它的开始帧本就不建卡（走专用面板通道），失败时若下发 action_end，
+     * 前端 todo 面板会把错误文案当作 todos 解析，故维持不下发（与旧行为一致，无回归）。</p>
+     */
+    private WebChunk onToolFailure(ToolCallEndEvent chunk) {
+        if (!WebToolVisibilityPolicy.isFailedEndVisible(chunk.getToolName())) {
+            return WebChunk.EMPTY;
+        }
+        Throwable error = chunk.getError();
+        String errText = error.getMessage();
+        if (Assert.isEmpty(errText)) {
+            errText = error.getClass().getSimpleName();
+        }
+
+        WebChunk webChunk = WebChunk.ofActionEnd(errText, chunk.getDurationMs());
+        webChunk.setFailed(true);
+        projectToolCommon(chunk, webChunk);
+        return webChunk;
     }
 
 
     /**
      * 处理上下文用量块（推理后依据模型真实 usage 生成，含缓存创建/读取明细）。
      * <p>据此刷新「上下文长度」指示器，展示真实输入/输出/缓存。
-     * 注：推理前 jtokkit 估算的 {@code ContextSizeChunk} 不在此处理，仅供框架内部做压缩决策。
+     * 注：推理前 jtokkit 估算的 {@code ContextSizeEvent} 不在此处理，仅供框架内部做压缩决策。
      */
-    public WebChunk onContextUsageChunk(ChatModel chatModel, ContextUsageChunk chunk){
-        long inputTokens = chunk.getInputTokens();
-        long outputTokens = chunk.getOutputTokens();
+    public WebChunk onContextUsageEvent(ChatModel chatModel, ContextUsageEvent event){
+        long inputTokens = event.getInputTokens();
+        long outputTokens = event.getOutputTokens();
 
         WebChunk wc = new WebChunk();
         wc.setType("context_size");
-        wc.setSessionId(chunk.getSession().getSessionId());
+        wc.setSessionId(event.getSession().getSessionId());
         // 当前上下文占用 ≈ 本轮输入(含缓存) + 本轮输出（输出会并入下一轮历史）
         wc.setTotalTokens(inputTokens + outputTokens);
         wc.setInputTokens(inputTokens);
         wc.setOutputTokens(outputTokens);
-        wc.setCacheCreationTokens(chunk.getCacheCreationTokens());
-        wc.setCacheReadTokens(chunk.getCacheReadTokens());
-        wc.setCacheRate(chunk.getCacheRate());
-        wc.setText(String.valueOf(chunk.getMessageCount()));
+        wc.setCacheCreationTokens(event.getCacheCreationTokens());
+        wc.setCacheReadTokens(event.getCacheReadTokens());
+        wc.setCacheRate(event.getCacheRate());
+        wc.setText(String.valueOf(event.getMessageCount()));
 
-        long contextLength = chatModel.getConfig().getContextLength();
+        long contextLength = chatModel != null && chatModel.getConfig() != null
+                ? chatModel.getConfig().getContextLength() : 0;
         if(contextLength == 0){
             contextLength = engine.getEffectiveCompressionDefaultContextLength(); // 与实际压缩回退值一致
         }
@@ -336,20 +502,21 @@ public class WebStreamBuilder {
      * </ul>
      * 否则返回空 chunk。</p>
      *
-     * @param chunk 推理阶段的 chunk 数据
+     * @param event 推理阶段的增量事件
      * @return 映射后的 WebChunk，或 {@link WebChunk#EMPTY}
      */
-    private WebChunk onReasonChunk(ReasonChunk chunk) {
-        if (!chunk.isToolCalls() && chunk.hasContent()) {
-            WebChunk webChunk = chunk.getMessage().isThinking()
-                    ? WebChunk.ofReason(chunk.getContent())
-                    : WebChunk.ofText(chunk.getContent());
+    private WebChunk onReasonDeltaEvent(ReasonDeltaEvent event) {
+        if (!event.isToolCalls() && event.hasContent()) {
+            WebChunk webChunk = event.getMessage().isThinking()
+                    ? WebChunk.ofReason(event.getContent())
+                    : WebChunk.ofText(event.getContent());
 
             // 子代理产生的思考/正文：透传父智能体归属信息，供前端路由到对应智能体卡片内渲染
-            if (chunk.hasMeta("__parentAgentName")) {
+            if (event.hasMeta("__parentAgentName")) {
                 Map<String, Object> args = new LinkedHashMap<>();
-                args.put("agentName", chunk.getMeta().get("__parentAgentName"));
-                args.put("agentDesc", chunk.getMeta().get("__parentAgentDesc"));
+                args.put("agentName", event.getMeta().get("__parentAgentName"));
+                args.put("agentDesc", event.getMeta().get("__parentAgentDesc"));
+                copyInvocationId(event, args);
                 webChunk.setArgs(args);
             }
 
@@ -361,118 +528,58 @@ public class WebStreamBuilder {
 
 
     /**
-     * 处理工具调用开始阶段的 chunk（来源引擎 ActionChunk）
+     * 处理工具调用开始阶段的 chunk（来源引擎 ToolCallStartEvent）
      *
      * <p>在工具实际执行前发送 action_start，让前端提前渲染 loading 状态的工具卡片骨架，
-     * 待后续 {@link #onObservationChunk} 的结果到达时复用同一卡片填充并转完成态。
-     * 过滤规则与 {@link #onObservationChunk} 保持一致，避免建卡后无对应结果填充。</p>
+     * 待后续 {@link #onToolCallEndEvent} 的结果到达时复用同一卡片填充并转完成态。
+     * 过滤规则与 {@link #onToolCallEndEvent} 保持一致，避免建卡后无对应结果填充。</p>
      *
-     * @param chunk 工具调用开始的 chunk 数据
+     * @param event 工具调用开始事件
      * @return 映射后的 WebChunk（含工具名与参数），或 {@link WebChunk#EMPTY}（内部工具或无名称时）
      */
-    private WebChunk onActionStartChunk(ActionChunk chunk) {
-        if (Assert.isEmpty(chunk.getToolName())) {
+    private WebChunk onToolCallStartEvent(ToolCallStartEvent event) {
+        if (!WebToolVisibilityPolicy.isStartVisible(event.getToolName())) {
             return WebChunk.EMPTY;
         }
 
-        if (TaskTalent.TOOL_MULTITASK.equals(chunk.getToolName()) ||
-                TaskTalent.TOOL_TASK.equals(chunk.getToolName()) ||
-                MemoryTalent.isMemoryTool(chunk.getToolName())) {
-            return WebChunk.EMPTY;
-        }
-
-        // todowrite 的展示走专用通道，由 ObservationChunk 携带完整 todos 渲染，开始阶段不提前建卡
-        if (TodoTalent.TOOL_TODOWRITE.equals(chunk.getToolName())) {
-            return WebChunk.EMPTY;
-        }
-
-        // toolName 恒为裸名（供前端识别/查表）；toolTitle 为显示名（子代理时加 agentName 前缀）
-        String toolName = chunk.getToolName();
-        String toolTitle;
-        if (engine.getName().equals(chunk.getAgentName())) {
-            toolTitle = toolName;
-        } else {
-            toolTitle = chunk.getAgentName() + "/" + toolName;
-        }
-
-        Map<String, Object> args = chunk.getArgs() != null
-                ? new LinkedHashMap<>(chunk.getArgs())
-                : null;
-
-        // edit 开始阶段即重建 diff，让 loading 骨架卡也能预览改动
-        fillEditDiff(args);
-
-        WebChunk startChunk = WebChunk.ofActionStart(toolName, toolTitle, args);
-        copyActionMetadata(chunk, startChunk);
-        // 子代理工具调用标记：供前端将工具卡片嵌套到智能体卡片内部
-        if (chunk.hasMeta("__parentAgentName")) {
-            // args 可能为 null（无参工具），先兜底建 map，避免 put 时 NPE 打断整流
-            if (startChunk.getArgs() == null) {
-                startChunk.setArgs(new LinkedHashMap<>());
-            }
-            startChunk.getArgs().put("agentName", chunk.getMeta().get("__parentAgentName"));
-            startChunk.getArgs().put("agentDesc", chunk.getMeta().get("__parentAgentDesc"));
-        }
+        // 公共方法负责唯一一次参数复制；edit 转换直接作用于最终写入 chunk 的参数。
+        WebChunk startChunk = WebChunk.ofActionStart(event.getToolName(),
+                resolveToolTitle(event.getAgentName(), event.getToolName()), null);
+        projectToolCommon(event, startChunk);
+        fillEditDiff(startChunk.getArgs());
         return startChunk;
     }
 
 
     /**
-     * 处理工具调用完成阶段的 chunk
+     * 处理工具调用结束事件（ToolCallEndEvent）
      *
      * <p>过滤掉内部工具（多任务调度 task/multitask、记忆工具）后，
-     * 将工具调用结果包装为 {@link WebChunk}，并附带工具名称和参数信息：
+     * 将工具调用结果包装为 {@link WebChunk}，并附带工具名称、参数与真实耗时：
      * <ul>
      *   <li>工具名称：若属于当前引擎则使用短名，否则使用 {@code agentName/toolName} 全路径</li>
      *   <li>特殊处理 {@code todowrite} 工具：将 todos 参数内容设为文本</li>
+     *   <li>失败时（{@code getError() != null}）走 {@link #onToolFailure}，不再吞帧</li>
      * </ul></p>
      *
-     * @param chunk 工具调用结束的 chunk 数据
+     * @param chunk 工具调用结束事件
      * @return 映射后的 WebChunk（含工具信息），或 {@link WebChunk#EMPTY}（内部工具或无名称时）
      */
-    private WebChunk onObservationChunk(ObservationChunk chunk) {
-        if(chunk.getError() != null){
-            return WebChunk.EMPTY;
+    private WebChunk onToolCallEndEvent(ToolCallEndEvent chunk) {
+        // R1 修复：工具执行失败不再吞帧。旧实现直接 return EMPTY，而 action_start 已建出
+        // loading 卡片，它永远等不到配对的结束帧 —— 卡片状态点永久闪烁、计时器永久累加。
+        if (chunk.getError() != null) {
+            return onToolFailure(chunk);
         }
 
-        // todowrite 完成时，前端通过 action chunk 的 toolName='todowrite' 自动刷新任务面板
+        // todowrite 完成时，前端通过 action_end 的 toolName='todowrite' 自动刷新任务面板
 
-        if (Assert.isNotEmpty(chunk.getToolName())) {
-            if (TaskTalent.TOOL_MULTITASK.equals(chunk.getToolName()) ||
-                    TaskTalent.TOOL_TASK.equals(chunk.getToolName()) ||
-                    MemoryTalent.isMemoryTool(chunk.getToolName())) {
-                return WebChunk.EMPTY;
-            }
-
-            WebChunk webChunk = WebChunk.ofActionEnd(chunk.getContent());
-            copyActionMetadata(chunk, webChunk);
-
-            // 子代理工具调用标记：供前端将工具卡片嵌套到智能体卡片内部
-            if (chunk.hasMeta("__parentAgentName")) {
-                webChunk.setArgs(new LinkedHashMap<>(chunk.getArgs() != null ? chunk.getArgs() : Collections.emptyMap()));
-                webChunk.getArgs().put("agentName", chunk.getMeta().get("__parentAgentName"));
-                webChunk.getArgs().put("agentDesc", chunk.getMeta().get("__parentAgentDesc"));
-            } else {
-                // args 可能为 null，兜底空 map，避免后续 getArgs().remove 时 NPE
-                webChunk.setArgs(chunk.getArgs() != null
-                        ? new LinkedHashMap<>(chunk.getArgs()) : new LinkedHashMap<>());
-            }
+        if (WebToolVisibilityPolicy.isBaseVisible(chunk.getToolName())) {
+            // durationMs 取自引擎真实耗时，使前端工具卡能展示实际执行时长而非自增计时
+            WebChunk webChunk = WebChunk.ofActionEnd(chunk.getContent(), chunk.getDurationMs());
+            projectToolCommon(chunk, webChunk);
 
             if (Assert.isNotEmpty(chunk.getToolName())) {
-                if (webChunk.getArgs() == null) {
-                    // args 可能为 null，兜底空 map（后续 todowrite/write 的 remove 依赖非 null）
-                    webChunk.setArgs(chunk.getArgs() != null
-                            ? new LinkedHashMap<>(chunk.getArgs()) : new LinkedHashMap<>());
-                }
-
-                // toolName 恒为裸名（供前端识别/查表）；toolTitle 为显示名（子代理时加 agentName 前缀）
-                webChunk.setToolName(chunk.getToolName());
-                if (engine.getName().equals(chunk.getAgentName())) {
-                    webChunk.setToolTitle(chunk.getToolName());
-                } else {
-                    webChunk.setToolTitle(chunk.getAgentName() + "/" + chunk.getToolName());
-                }
-
                 if (TodoTalent.TOOL_TODOWRITE.equals(chunk.getToolName())) {
                     String todos = AgentUtil.asStringArg(chunk.getArgs(), TodoTalent.PARAM_TODOS);
 
@@ -502,7 +609,30 @@ public class WebStreamBuilder {
         return WebChunk.EMPTY;
     }
 
-    static void copyActionMetadata(com.gourdai.agent.react.task.AbsActionChunk source, WebChunk target) {
+    /**
+     * 统一投影工具帧的公共字段。调用方先创建带有帧特有 type/text/duration 的 chunk，
+     * 本方法再覆盖工具标识、复制参数、批次元数据及子代理路由字段。
+     */
+    void projectToolCommon(com.gourdai.agent.event.AbsToolCallEvent source, WebChunk target) {
+        projectToolCommon(source, target, engine.getName(), source.getAgentName());
+    }
+
+    static void projectToolCommon(com.gourdai.agent.event.AbsToolCallEvent source, WebChunk target,
+                                  String mainAgentName, String toolAgentName) {
+        target.setToolName(source.getToolName());
+        target.setToolTitle(Objects.equals(mainAgentName, toolAgentName)
+                ? source.getToolName() : toolAgentName + "/" + source.getToolName());
+        target.setArgs(source.getArgs() == null
+                ? new LinkedHashMap<>() : new LinkedHashMap<>(source.getArgs()));
+        copyActionMetadata(source, target);
+        if (source.hasMeta("__parentAgentName")) {
+            target.getArgs().put("agentName", source.getMeta().get("__parentAgentName"));
+            target.getArgs().put("agentDesc", source.getMeta().get("__parentAgentDesc"));
+            copyInvocationId(source, target.getArgs());
+        }
+    }
+
+    static void copyActionMetadata(com.gourdai.agent.event.AbsToolCallEvent source, WebChunk target) {
         target.setActionId(source.getActionId());
         target.setBatchId(source.getBatchId());
         target.setBatchIndex(source.getBatchIndex());
@@ -592,36 +722,68 @@ public class WebStreamBuilder {
     }
 
     /**
-     * 处理思考轮次（Thought）阶段的 chunk
+     * 处理推理结束（ReasonEnd）阶段的事件。
      *
-     * <p>核心职责：
+     * <p>两条<b>互斥</b>路径：</p>
      * <ol>
-     *   <li><b>IM 通道转发</b>：根据本轮是否有工具调用、是否为源代理的最终结果，
-     *       以不同的标记（isFinal）将内容推送到所有已绑定的 IM 通道。</li>
-     *   <li><b>Web 输出</b>：仅在多任务并行（multitask）标记存在时，才向 Web 端输出文本 chunk；
-     *       普通单轮 Thought 不输出到 Web（避免与 ReasonDeltaChunk 重复）。</li>
-     * </ol></p>
+     *   <li><b>子代理载荷</b>（带 {@link TaskTalent#META_SUBAGENT}）：只负责把内容渲染进智能体卡片，
+     *       <b>不做 IM 转发</b>。思考与正文是两份独立载荷，各出一帧。</li>
+     *   <li><b>主代理载荷</b>：根据本轮是否有工具调用、是否为源代理的最终结果，以不同的标记
+     *       （isFinal）将内容推送到所有已绑定的 IM 通道；不向 Web 端出帧（正文已由
+     *       ReasonDeltaEvent 增量送达，再补一份会整段重复）。</li>
+     * </ol>
+     *
+     * <p><b>为什么子代理一律不转发 IM：</b>IM 通道绑定的是会话，用户要的是主代理的最终答案
+     * （由 {@link #onRunEndEvent} 以 isFinal=true 推送）。把子代理的中间产物推过去既是噪声，
+     * 又会与最终答案重复。旧实现是否转发取决于「这一轮模型有没有吐思考」——吐了就早退跳过
+     * 转发、没吐就转发，同一个功能的行为随模型方言漂移，属于非确定性缺陷。</p>
+     *
+     * <p><b>为什么必须返回多帧：</b>旧实现先 {@code return} 思考帧，使得同一事件里的正文帧
+     * 永不可达——当模型「吐了思考增量但不吐正文增量」时（部分中转/方言确实如此，
+     * TaskTalent 的放行条件是 hasThinking() || needBody 的 OR），子代理正文会静默丢失。</p>
      *
      * @param session Agent 会话，用于获取会话ID和已选择的代理名称
-     * @param chunk 思考轮次的 chunk 数据，包含助手消息和追踪信息
-     * @return 映射后的 WebChunk（多任务并行时有内容），或 {@link WebChunk#EMPTY}
+     * @param event 思考轮次结束事件，包含助手消息和追踪信息
+     * @return 0..2 帧 WebChunk（思考帧 + 正文帧），或空列表
      */
-    private WebChunk onThoughtChunk(AgentSession session, ThoughtChunk chunk) {
+    private List<WebChunk> onReasonEndEvent(AgentSession session, ReasonEndEvent event) {
         String sessionId = session.getSessionId();
-        // responses 等接口聚合时可能把推理混入 content，IM 转发前剥离，避免与思考通道重复；
-        // 优先用流式累积的思考前缀精确剥离（思考内引用 </think> 字面量时启发式会切错位置）
-        String streamedReasoningPrefix = (chunk.getResponse() instanceof ChatResponseDefault)
-                ? ((ChatResponseDefault) chunk.getResponse()).attrAs(ReasonTask.ATTR_STREAMED_REASONING)
-                : null;
-        String resultContent = AgentUtil.getResultContentWithoutReasoning(chunk.getAssistantMessage(), streamedReasoningPrefix);
+        // 4.1 事件体系：正文由 getText() 直接给出（与 getThinking() 物理分离），
+        // 不再绕道 AgentUtil.getAggregatedResultContent() 反推——旧写法是
+        // 「类名叫 Thought、下发的却是正文」错位的根源。
+        String resultContent = event.getText();
 
+        // === 子代理载荷：只渲染进卡片，不碰 IM 通道 ===
+        if (event.hasMeta(TaskTalent.META_SUBAGENT)) {
+            List<WebChunk> frames = new ArrayList<>(2);
+
+            // 思考帧：reason 通道。旧体系此处完全丢弃，导致前端智能体卡片内永远看不到思考。
+            // 能不能走到这里由 TaskTalent 的 thinkingStreamed 去重门禁决定：已逐字下发过增量就不再补发。
+            if (event.hasThinking()) {
+                WebChunk thinkingChunk = WebChunk.ofReason(event.getThinking());
+                applyParentAgentArgs(event, thinkingChunk);
+                frames.add(thinkingChunk);
+            }
+
+            // 正文帧：text 通道。仅在「本轮未流式产出正文增量」时才会被 TaskTalent 放行到这里，
+            // 故不会与 ReasonDeltaEvent 的增量重复。前置换行是多子代理并行时的帧间分隔。
+            if (Assert.isNotEmpty(resultContent)) {
+                WebChunk bodyChunk = WebChunk.ofText("\n" + resultContent);
+                applyParentAgentArgs(event, bodyChunk);
+                frames.add(bodyChunk);
+            }
+
+            return frames;
+        }
+
+        // === 主代理载荷：IM 转发，不出 Web 帧 ===
         if (Assert.isNotEmpty(resultContent)) {
-            if (chunk.isToolCalls()) {
+            if (event.isToolCalls()) {
                 replyToBoundChannel(sessionId, resultContent, false);
             } else {
                 String agentSelectedTmp = (String) session.attrs().get("_agent_selected_tmp");
 
-                if (chunk.getTrace().getAgentName().equals(agentSelectedTmp)) {
+                if (event.getTrace().getAgentName().equals(agentSelectedTmp)) {
                     // 最终结果：推送到已绑定的 IM 通道
                     replyToBoundChannel(sessionId, resultContent, true);
 
@@ -640,35 +802,43 @@ public class WebStreamBuilder {
                     replyToBoundChannel(sessionId, resultContent, false);
                 }
             }
-
-            if (chunk.hasMeta(TaskTalent.TOOL_MULTITASK)) {
-                WebChunk webChunk = WebChunk.ofText("\n" + resultContent);
-                // 子代理产生的正文：透传父智能体归属信息，供前端路由到对应智能体卡片内渲染
-                if (chunk.hasMeta("__parentAgentName")) {
-                    Map<String, Object> args = new LinkedHashMap<>();
-                    args.put("agentName", chunk.getMeta().get("__parentAgentName"));
-                    args.put("agentDesc", chunk.getMeta().get("__parentAgentDesc"));
-                    webChunk.setArgs(args);
-                }
-                return webChunk;
-            }
         }
 
-        return WebChunk.EMPTY;
+        return Collections.emptyList();
     }
 
     /**
-     * 处理子代理启动阶段的 chunk
+     * 透传父智能体归属信息，供前端 resolveAgentState 路由到对应智能体卡片内渲染。
      */
-    private WebChunk onAgentStartChunk(AgentStartChunk chunk) {
-        return WebChunk.ofAgentStart(chunk.getAgentName(), chunk.getDescription());
+    private static void applyParentAgentArgs(AgentEvent event, WebChunk target) {
+        if (event.hasMeta("__parentAgentName")) {
+            Map<String, Object> args = new LinkedHashMap<>();
+            args.put("agentName", event.getMeta().get("__parentAgentName"));
+            args.put("agentDesc", event.getMeta().get("__parentAgentDesc"));
+            copyInvocationId(event, args);
+            target.setArgs(args);
+        }
+    }
+
+    private static void copyInvocationId(AgentEvent event, Map<String, Object> args) {
+        Object invocationId = event.getMeta().get(TaskTalent.META_INVOCATION_ID);
+        if (invocationId != null) args.put("invocationId", invocationId);
     }
 
     /**
-     * 处理子代理结束阶段的 chunk
+     * 处理子代理启动事件
      */
-    private WebChunk onAgentEndChunk(AgentEndChunk chunk) {
-        return WebChunk.ofAgentEnd(chunk.getAgentName(), chunk.getDescription(), chunk.isSuccess(), chunk.getResultSummary());
+    private WebChunk onAgentStartEvent(AgentStartEvent event) {
+        String invocationId = event instanceof AgentStartEvent ? ((AgentStartEvent) event).getInvocationId() : null;
+        return WebChunk.ofAgentStart(event.getAgentName(), event.getDescription(), invocationId);
+    }
+
+    /**
+     * 处理子代理结束事件
+     */
+    private WebChunk onAgentEndEvent(AgentEndEvent event) {
+        String invocationId = event instanceof AgentEndEvent ? ((AgentEndEvent) event).getInvocationId() : null;
+        return WebChunk.ofAgentEnd(event.getAgentName(), event.getDescription(), event.isSuccess(), event.getResultSummary(), invocationId);
     }
 
     /**
@@ -683,7 +853,7 @@ public class WebStreamBuilder {
      * @param turnStartMs 本轮任务订阅时刻（毫秒），用于计算单轮耗时
      * @return 包含追踪信息的 trace 类型 WebChunk
      */
-    private WebChunk onFinalChunk(AgentSession session, ReActChunk chunk, long turnStartMs) {
+    private WebChunk onRunEndEvent(AgentSession session, RunEndEvent chunk, long turnStartMs) {
         ReActTrace trace = chunk.getTrace();
 
         if (chunk.isAbnormal()) {

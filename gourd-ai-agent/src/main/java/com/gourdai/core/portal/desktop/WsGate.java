@@ -15,15 +15,18 @@
  */
 package com.gourdai.core.portal.desktop;
 
+import com.gourdai.agent.event.AbsToolCallEvent;
+import com.gourdai.agent.event.AgentEvent;
+
 import org.noear.snack4.ONode;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.react.ReActAgent;
-import com.gourdai.agent.react.ReActChunk;
+import com.gourdai.agent.event.RunEndEvent;
 import com.gourdai.agent.react.ReActTrace;
-import com.gourdai.agent.react.task.ActionChunk;
-import com.gourdai.agent.react.task.ObservationChunk;
-import com.gourdai.agent.react.task.ReasonChunk;
-import com.gourdai.agent.react.task.ThoughtChunk;
+import com.gourdai.agent.event.ToolCallStartEvent;
+import com.gourdai.agent.event.ToolCallEndEvent;
+import com.gourdai.agent.event.ReasonDeltaEvent;
+import com.gourdai.agent.event.ReasonEndEvent;
 import com.gourdai.agent.util.AgentUtil;
 import org.noear.solon.ai.chat.ChatConfig;
 import org.noear.solon.ai.chat.ChatModel;
@@ -34,14 +37,15 @@ import org.noear.solon.ai.chat.content.ImageBlock;
 import org.noear.solon.ai.chat.content.TextBlock;
 import org.noear.solon.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
-import com.gourdai.harness.agent.AgentEndChunk;
-import com.gourdai.harness.agent.AgentStartChunk;
-import com.gourdai.harness.agent.RetryChunk;
+import com.gourdai.harness.agent.AgentEndEvent;
+import com.gourdai.harness.agent.AgentStartEvent;
+import com.gourdai.harness.agent.RetryEvent;
 import com.gourdai.harness.agent.TaskTalent;
 import com.gourdai.harness.command.Command;
 import com.gourdai.harness.talents.memory.MemoryTalent;
 import org.noear.solon.ai.util.CmdUtil;
 import com.gourdai.core.command.WebCommandContext;
+import com.gourdai.core.portal.web.ThinkingDepth;
 import com.gourdai.agent.react.intercept.HITL;
 import com.gourdai.agent.react.intercept.HITLTask;
 import com.gourdai.core.config.AgentFlags;
@@ -55,6 +59,7 @@ import reactor.core.Disposable;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -293,37 +298,14 @@ public class WsGate extends SimpleWebSocketListener {
                     .options(o -> {
                         o.chatModel(chatModel);
                         o.toolContextPut(HarnessEngine.ATTR_CWD, finalCwd);
+                        applyThinkingDepth(o, chatModel, session);
                     })
                     .stream()
                     .doFinally(signal -> {
                         session.attrs().remove("disposable");
                     })
-                    .doOnNext(chunk -> {
-                        // ReActChunk 需要优先处理 metrics 收集（无论 hasContent 状态）
-                        String msg = null;
-                        if (chunk instanceof ReActChunk) {
-                            onReActChunk((ReActChunk) chunk, finalSessionId, socket, turnStartMs);
-                            return;
-                        } else if (chunk instanceof ReasonChunk) {
-                            msg = onReasonChunk((ReasonChunk) chunk, finalSessionId);
-                        } else if (chunk instanceof ActionChunk) {
-                            msg = onActionStartChunk((ActionChunk) chunk, finalSessionId);
-                        } else if (chunk instanceof ObservationChunk) {
-                            msg = onObservationChunk((ObservationChunk) chunk, finalSessionId);
-                        } else if (chunk instanceof ThoughtChunk) {
-                            msg = onThoughtChunk((ThoughtChunk) chunk, finalSessionId);
-                        } else if (chunk instanceof AgentStartChunk) {
-                            msg = onAgentStartChunk((AgentStartChunk) chunk, finalSessionId);
-                        } else if (chunk instanceof AgentEndChunk) {
-                            msg = onAgentEndChunk((AgentEndChunk) chunk, finalSessionId);
-                        } else if (chunk instanceof RetryChunk) {
-                            msg = onRetryChunk((RetryChunk) chunk, finalSessionId);
-                        }
-
-                        if (Assert.isNotEmpty(msg)) {
-                            socket.send(msg);
-                        }
-                    }).doOnError(err -> {
+                    .doOnNext(chunk -> projectAndSend(chunk, finalSessionId, socket, turnStartMs))
+                    .doOnError(err -> {
                         String msg = new ONode().set("type", "error")
                                 .set("sessionId", finalSessionId)
                                 .set("text", err.getMessage())
@@ -343,7 +325,60 @@ public class WsGate extends SimpleWebSocketListener {
         }
     }
 
-    private void onReActChunk(ReActChunk chunk, String finalSessionId, WebSocket socket, long turnStartMs) {
+    /**
+     * 单一事件投影入口：把引擎事件投影为 /ws 通道的 JSON 文本并下发。
+     *
+     * <p><b>为什么存在：</b>onMessage / handleHitlAction / handleFallbackPrompt 三处此前
+     * 各自复制了一份完全相同的 instanceof 分发链（仅判定顺序不同），共 24 处分支，
+     * 改一处必漏两处。现统一收敛到本方法（各事件类型互斥，判定顺序不影响语义）。</p>
+     *
+     * <p><b>重要：本通道的线格式与 Web 通道（/web/gate 的 WebChunk）刻意不同，不得合并。</b>
+     * 思考帧用 {@code think}、正文用 {@code reason}、结束用 {@code done}+modelName/elapsedMs，
+     * 且不落盘、无 eventSeq；消费方是外部 CLI 客户端而非浏览器前端
+     * （前端只连 /web/gate，见 app-streaming.js 的 connectWebGate）。
+     * 因此这里只做内部去重，严禁改产出 WebChunk，否则会破坏 /ws 的既有契约。</p>
+     *
+     * @param chunk       引擎事件
+     * @param sessionId   会话标识
+     * @param socket      目标 WebSocket
+     * @param turnStartMs 本轮订阅时刻，用于 RunEndEvent 计算单轮耗时
+     */
+    private void projectAndSend(AgentEvent chunk, String sessionId, WebSocket socket, long turnStartMs) {
+        // RunEndEvent 需要优先处理 metrics 收集（无论 hasContent 状态）
+        if (chunk instanceof RunEndEvent) {
+            onRunEndEvent((RunEndEvent) chunk, sessionId, socket, turnStartMs);
+            return;
+        }
+
+        String msg = null;
+        if (chunk instanceof ReasonDeltaEvent) {
+            msg = onReasonDeltaEvent((ReasonDeltaEvent) chunk, sessionId);
+        } else if (chunk instanceof ToolCallStartEvent) {
+            msg = onToolCallStartEvent((ToolCallStartEvent) chunk, sessionId);
+        } else if (chunk instanceof ToolCallEndEvent) {
+            msg = onToolCallEndEvent((ToolCallEndEvent) chunk, sessionId);
+        } else if (chunk instanceof ReasonEndEvent) {
+            // 子代理聚合载荷可能同时带思考与正文，需下发两帧（一个 ONode 只能装一份 text）
+            for (String frame : onReasonEndEvent((ReasonEndEvent) chunk, sessionId)) {
+                if (Assert.isNotEmpty(frame)) {
+                    socket.send(frame);
+                }
+            }
+            return;
+        } else if (chunk instanceof RetryEvent) {
+            msg = onRetryEvent((RetryEvent) chunk, sessionId);
+        } else if (chunk instanceof AgentStartEvent) {
+            msg = onAgentStartEvent((AgentStartEvent) chunk, sessionId);
+        } else if (chunk instanceof AgentEndEvent) {
+            msg = onAgentEndEvent((AgentEndEvent) chunk, sessionId);
+        }
+
+        if (Assert.isNotEmpty(msg)) {
+            socket.send(msg);
+        }
+    }
+
+    private void onRunEndEvent(RunEndEvent chunk, String finalSessionId, WebSocket socket, long turnStartMs) {
         ReActTrace trace = chunk.getTrace();
         // 单轮耗时：从本轮订阅起算，而非 originalPrompt 里的 start_time（跨轮复用会累计成整段对话时长）。
         long elapsed = turnStartMs > 0 ? System.currentTimeMillis() - turnStartMs : 0;
@@ -352,6 +387,7 @@ public class WsGate extends SimpleWebSocketListener {
 
         String msg2 = new ONode().set("type", "done")
                 .set("sessionId", finalSessionId)
+                .set("runId", trace.getRunId())
                 .set("modelName", trace.getOptions().getChatModel().getNameOrModel())
                 .set("inputTokens", inputTokens)
                 .set("outputTokens", outputTokens)
@@ -360,7 +396,7 @@ public class WsGate extends SimpleWebSocketListener {
         socket.send(msg2);
     }
 
-    private String onReasonChunk(ReasonChunk chunk, String finalSessionId) {
+    private String onReasonDeltaEvent(ReasonDeltaEvent chunk, String finalSessionId) {
         if (!chunk.isToolCalls() && chunk.getMessage() != null) {
             String content = chunk.getMessage().getContent();
             if (content != null && !content.isEmpty()) {
@@ -383,10 +419,10 @@ public class WsGate extends SimpleWebSocketListener {
     }
 
     /**
-     * 处理 RetryChunk（模型调用失败自动重试时发送）：推送 retry 提示，
+     * 处理 RetryEvent（模型调用失败自动重试时发送）：推送 retry 提示，
      * 让前端展示「正在重试 N/M」的中间状态。
      */
-    private String onRetryChunk(RetryChunk chunk, String finalSessionId) {
+    private String onRetryEvent(RetryEvent chunk, String finalSessionId) {
         ONode node = new ONode().set("type", "retry")
                 .set("sessionId", finalSessionId)
                 .set("attempt", chunk.getAttempt())
@@ -402,11 +438,11 @@ public class WsGate extends SimpleWebSocketListener {
     }
 
     /**
-     * 处理 ActionChunk（工具调用前发送）：在工具实际执行前推送 action_start，
+     * 处理 ToolCallStartEvent（工具调用前发送）：在工具实际执行前推送 action_start，
      * 让前端提前渲染 loading 状态的工具卡片骨架，提升流式实时感。
-     * 过滤规则与 onObservationChunk 保持一致，避免卡片创建后却无对应结果填充。
+     * 过滤规则与 onToolCallEndEvent 保持一致，避免卡片创建后却无对应结果填充。
      */
-    private String onActionStartChunk(ActionChunk chunk, String finalSessionId) {
+    private String onToolCallStartEvent(ToolCallStartEvent chunk, String finalSessionId) {
         if (Assert.isEmpty(chunk.getToolName())) {
             return null;
         }
@@ -417,7 +453,7 @@ public class WsGate extends SimpleWebSocketListener {
             return null;
         }
 
-        // todowrite 的展示走专用通道，由 ObservationChunk 携带完整 todos 渲染，开始阶段不提前建卡
+        // todowrite 的展示走专用通道，由 ToolCallEndEvent 携带完整 todos 渲染，开始阶段不提前建卡
         if ("todowrite".equals(chunk.getToolName())) {
             return null;
         }
@@ -437,9 +473,20 @@ public class WsGate extends SimpleWebSocketListener {
         return node.toJson();
     }
 
-    private String onObservationChunk(ObservationChunk chunk, String finalSessionId) {
+    private String onToolCallEndEvent(ToolCallEndEvent chunk, String finalSessionId) {
         if (chunk.getError() != null) {
-            return null;
+            if (!isVisibleTool(chunk.getToolName())) return null;
+            ONode node = new ONode().set("type", "action_end")
+                    .set("sessionId", finalSessionId)
+                    .set("text", "__ERROR__" + safeError(chunk.getError()));
+            if (engine.getName().equals(chunk.getAgentName())) {
+                node.set("toolName", chunk.getToolName());
+            } else {
+                node.set("toolName", chunk.getAgentName() + "/" + chunk.getToolName());
+            }
+            if (chunk.getArgs() != null) node.set("args", chunk.getArgs());
+            copyActionMetadata(node, chunk);
+            return node.toJson();
         }
 
         if (Assert.isEmpty(chunk.getToolName())) {
@@ -477,7 +524,7 @@ public class WsGate extends SimpleWebSocketListener {
         return node.toJson();
     }
 
-    private void copyActionMetadata(ONode node, com.gourdai.agent.react.task.AbsActionChunk chunk) {
+    private void copyActionMetadata(ONode node, com.gourdai.agent.event.AbsToolCallEvent chunk) {
         if (chunk.getActionId() != null) node.set("actionId", chunk.getActionId());
         if (chunk.getBatchId() != null) node.set("batchId", chunk.getBatchId());
         if (chunk.getBatchIndex() != null) node.set("batchIndex", chunk.getBatchIndex());
@@ -526,34 +573,11 @@ public class WsGate extends SimpleWebSocketListener {
                         if (Assert.isNotEmpty(cwd)) {
                             o.toolContextPut(HarnessEngine.ATTR_CWD, cwd);
                         }
+                        applyThinkingDepth(o, chatModel, session);
                     })
                     .stream()
                     .doFinally(signal -> session.attrs().remove("disposable"))
-                    .doOnNext(chunk -> {
-                        if (chunk instanceof ReActChunk) {
-                            onReActChunk((ReActChunk) chunk, sessionId, socket, turnStartMs);
-                            return;
-                        }
-                        String msg = null;
-                        if (chunk instanceof ReasonChunk) {
-                            msg = onReasonChunk((ReasonChunk) chunk, sessionId);
-                        } else if (chunk instanceof ActionChunk) {
-                            msg = onActionStartChunk((ActionChunk) chunk, sessionId);
-                        } else if (chunk instanceof ObservationChunk) {
-                            msg = onObservationChunk((ObservationChunk) chunk, sessionId);
-                        } else if (chunk instanceof ThoughtChunk) {
-                            msg = onThoughtChunk((ThoughtChunk) chunk, sessionId);
-                        } else if (chunk instanceof RetryChunk) {
-                            msg = onRetryChunk((RetryChunk) chunk, sessionId);
-                        } else if (chunk instanceof AgentStartChunk) {
-                            msg = onAgentStartChunk((AgentStartChunk) chunk, sessionId);
-                        } else if (chunk instanceof AgentEndChunk) {
-                            msg = onAgentEndChunk((AgentEndChunk) chunk, sessionId);
-                        }
-                        if (Assert.isNotEmpty(msg)) {
-                            socket.send(msg);
-                        }
-                    })
+                    .doOnNext(chunk -> projectAndSend(chunk, sessionId, socket, turnStartMs))
                     .doOnError(err -> socket.send(new ONode().set("type", "error")
                             .set("sessionId", sessionId).set("text", err.getMessage()).toJson()))
                     .subscribe();
@@ -565,32 +589,64 @@ public class WsGate extends SimpleWebSocketListener {
         }
     }
 
-    private String onThoughtChunk(ThoughtChunk chunk, String finalSessionId) {
-        if (chunk.hasMeta(TaskTalent.TOOL_MULTITASK)) {
-            String content = chunk.getAssistantMessage().getResultContent();
-            if (Assert.isNotEmpty(content)) {
-                ONode node = new ONode().set("type", "reason")
-                        .set("sessionId", finalSessionId)
-                        .set("text", "\n" + content);
-
-                String agentName = chunk.getTrace().getAgentName();
-                if (!engine.getName().equals(agentName)) {
-                    node.set("agentName", agentName);
-                }
-
-                return node.toJson();
-            }
+    /**
+     * 处理子代理的聚合载荷（ReasonEndEvent）。
+     *
+     * <p>正文必须用 {@code getText()} 而不是 {@code getAssistantMessage().getResultContent()}：
+     * 后者内部是 stripThinkTags，对「inline-think 方言」（Qwen 等把思考直接写在正文里、用
+     * &lt;think&gt; 标签包裹）会把标签前的真实正文一并吃掉，只剩标签后的残段——
+     * AgentUtilTest 里已有针对该缺陷的护栏用例。</p>
+     *
+     * <p><b>通道命名与 Web 端相反，切勿写反：</b>/ws 协议里 {@code think}=思考、{@code reason}=正文
+     * （见 {@link #onReasonDeltaEvent}）；而 Web 端 WebChunk 里 {@code reason}=思考、{@code text}=正文。</p>
+     *
+     * <p>返回多帧而非单帧：一个 ONode 只能承载一份 text，而思考与正文是两份独立载荷；
+     * 旧实现只发正文，子代理思考在桌面端永远不可见。</p>
+     *
+     * @return 0..2 帧 JSON（思考帧 + 正文帧）
+     */
+    private List<String> onReasonEndEvent(ReasonEndEvent chunk, String finalSessionId) {
+        if (!chunk.hasMeta(TaskTalent.META_SUBAGENT)) {
+            return Collections.emptyList();
         }
-        return null;
+
+        List<String> frames = new ArrayList<>(2);
+        String agentName = chunk.getTrace().getAgentName();
+
+        if (chunk.hasThinking()) {
+            frames.add(reasonFrame("think", chunk.getThinking(), finalSessionId, agentName));
+        }
+
+        String content = chunk.getText();
+        if (Assert.isNotEmpty(content)) {
+            // 前置换行是多子代理并行时的帧间分隔（与旧行为一致）
+            frames.add(reasonFrame("reason", "\n" + content, finalSessionId, agentName));
+        }
+
+        return frames;
+    }
+
+    /** 组一帧 think/reason 载荷；非主引擎代理附带 agentName 供客户端分组。 */
+    private String reasonFrame(String type, String text, String sessionId, String agentName) {
+        ONode node = new ONode().set("type", type)
+                .set("sessionId", sessionId)
+                .set("text", text);
+
+        if (!engine.getName().equals(agentName)) {
+            node.set("agentName", agentName);
+        }
+
+        return node.toJson();
     }
 
     /**
-     * 处理 AgentStartChunk（子代理启动）
+     * 处理 AgentStartEvent（子代理启动）
      */
-    private String onAgentStartChunk(AgentStartChunk chunk, String sessionId) {
+    private String onAgentStartEvent(AgentStartEvent chunk, String sessionId) {
         String agentName = chunk.getAgentName();
         String description = chunk.getDescription();
         ONode args = new ONode().set("agentName", agentName).set("description", description);
+        if (chunk.getInvocationId() != null) args.set("invocationId", chunk.getInvocationId());
         ONode node = new ONode()
                 .set("type", "agent_start")
                 .set("sessionId", sessionId)
@@ -602,14 +658,15 @@ public class WsGate extends SimpleWebSocketListener {
     }
 
     /**
-     * 处理 AgentEndChunk（子代理结束）
+     * 处理 AgentEndEvent（子代理结束）
      */
-    private String onAgentEndChunk(AgentEndChunk chunk, String sessionId) {
+    private String onAgentEndEvent(AgentEndEvent chunk, String sessionId) {
         String agentName = chunk.getAgentName();
         String description = chunk.getDescription();
         ONode args = new ONode()
                 .set("agentName", agentName)
                 .set("description", description)
+                .set("invocationId", chunk.getInvocationId())
                 .set("success", chunk.isSuccess())
                 .set("resultSummary", chunk.getResultSummary() != null ? chunk.getResultSummary() : "");
         ONode node = new ONode()
@@ -792,34 +849,11 @@ public class WsGate extends SimpleWebSocketListener {
                     if (Assert.isNotEmpty(sessionCwd)) {
                         o.toolContextPut(HarnessEngine.ATTR_CWD, sessionCwd);
                     }
+                    applyThinkingDepth(o, chatModel, session);
                 })
                 .stream()
                 .doFinally(signal -> session.attrs().remove("disposable"))
-                .doOnNext(chunk -> {
-                    if (chunk instanceof ReActChunk) {
-                        onReActChunk((ReActChunk) chunk, finalSessionId, socket, turnStartMs);
-                        return;
-                    }
-                    String msg = null;
-                    if (chunk instanceof ReasonChunk) {
-                        msg = onReasonChunk((ReasonChunk) chunk, finalSessionId);
-                    } else if (chunk instanceof ActionChunk) {
-                        msg = onActionStartChunk((ActionChunk) chunk, finalSessionId);
-                    } else if (chunk instanceof ObservationChunk) {
-                        msg = onObservationChunk((ObservationChunk) chunk, finalSessionId);
-                    } else if (chunk instanceof ThoughtChunk) {
-                        msg = onThoughtChunk((ThoughtChunk) chunk, finalSessionId);
-                    } else if (chunk instanceof RetryChunk) {
-                        msg = onRetryChunk((RetryChunk) chunk, finalSessionId);
-                    } else if (chunk instanceof AgentStartChunk) {
-                        msg = onAgentStartChunk((AgentStartChunk) chunk, finalSessionId);
-                    } else if (chunk instanceof AgentEndChunk) {
-                        msg = onAgentEndChunk((AgentEndChunk) chunk, finalSessionId);
-                    }
-                    if (Assert.isNotEmpty(msg)) {
-                        socket.send(msg);
-                    }
-                })
+                .doOnNext(chunk -> projectAndSend(chunk, finalSessionId, socket, turnStartMs))
                 .doOnError(err -> socket.send(new ONode().set("type", "error")
                         .set("sessionId", finalSessionId)
                         .set("text", err.getMessage()).toJson()))
@@ -829,5 +863,21 @@ public class WsGate extends SimpleWebSocketListener {
         if (old != null && !old.isDisposed()) {
             old.dispose();
         }
+    }
+
+    private void applyThinkingDepth(com.gourdai.agent.react.ReActOptionsAmend o, ChatModel model, AgentSession session) {
+        String depth = ThinkingDepth.normalize(session.getContext().getAs(HarnessEngine.CTX_THINKING_DEPTH));
+        ThinkingDepth.applyTo(o, model == null ? null : model.getStandardOrProvider(), depth);
+        o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, depth);
+    }
+
+    private static boolean isVisibleTool(String toolName) {
+        return Assert.isNotEmpty(toolName) && !TaskTalent.TOOL_TASK.equals(toolName)
+                && !TaskTalent.TOOL_MULTITASK.equals(toolName) && !MemoryTalent.isMemoryTool(toolName);
+    }
+
+    private static String safeError(Throwable error) {
+        if (error == null) return "unknown";
+        return Assert.isNotEmpty(error.getMessage()) ? error.getMessage() : error.getClass().getSimpleName();
     }
 }

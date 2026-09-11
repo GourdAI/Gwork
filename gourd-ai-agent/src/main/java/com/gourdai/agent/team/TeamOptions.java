@@ -15,7 +15,7 @@
  */
 package com.gourdai.agent.team;
 
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.AgentEvent;
 import org.noear.solon.ai.chat.ModelOptionsAmend;
 import org.noear.solon.ai.chat.tool.FunctionTool;
 import org.noear.solon.core.util.RankEntity;
@@ -38,7 +38,7 @@ import java.util.function.Function;
 public class TeamOptions implements NonSerializable {
     private static final Logger LOG = LoggerFactory.getLogger(TeamOptions.class);
 
-    private transient FluxSink<AgentChunk> streamSink;
+    private transient FluxSink<AgentEvent> streamSink;
 
     /**
      * 最大协作回合数（指团队中 Supervisor 指派专家的次数上限，防止死循环）
@@ -87,11 +87,11 @@ public class TeamOptions implements NonSerializable {
         return tmp;
     }
 
-    protected void setStreamSink(FluxSink<AgentChunk> streamSink) {
+    protected void setStreamSink(FluxSink<AgentEvent> streamSink) {
         this.streamSink = streamSink;
     }
 
-    public FluxSink<AgentChunk> getStreamSink() {
+    public FluxSink<AgentEvent> getStreamSink() {
         return streamSink;
     }
 

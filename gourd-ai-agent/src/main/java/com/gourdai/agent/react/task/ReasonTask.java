@@ -15,15 +15,19 @@
  */
 package com.gourdai.agent.react.task;
 
+import com.gourdai.agent.event.ReasonDeltaEvent;
+import com.gourdai.agent.event.ReasonEndEvent;
+
 import com.gourdai.agent.react.*;
 import org.noear.solon.Utils;
 import com.gourdai.agent.Agent;
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.exception.LlmNoReturnException;
 import com.gourdai.agent.util.AgentUtil;
+import com.gourdai.agent.util.ChatEventSupport;
 import org.noear.solon.ai.chat.ChatRequestDesc;
 import org.noear.solon.ai.chat.ChatResponse;
-import org.noear.solon.ai.chat.ChatResponseDefault;
+import org.noear.solon.ai.chat.event.ChatEventType;
 import org.noear.solon.ai.chat.message.AssistantMessage;
 import org.noear.solon.ai.chat.message.ChatMessage;
 import org.noear.solon.ai.util.RetryTask;
@@ -50,7 +54,7 @@ import java.util.concurrent.TimeoutException;
 public class ReasonTask {
     private static final Logger LOG = LoggerFactory.getLogger(ReasonTask.class);
 
-    /** 流式阶段累积的思考投影前缀（含方言标签帧），存于 ChatResponseDefault.attr，供剥离时精确匹配 */
+    /** 流式阶段累积的思考投影前缀（含方言标签帧），存于当前 trace，供剥离时精确匹配 */
     public static final String ATTR_STREAMED_REASONING = "gourd_streamed_reasoning_prefix";
 
     private final ReActAgentConfig config;
@@ -220,12 +224,7 @@ public class ReasonTask {
             return;
         }
 
-        final AssistantMessage responseMessage;
-        if (response.isStream()) {
-            responseMessage = response.getAggregationMessage();
-        } else {
-            responseMessage = response.getMessage();
-        }
+        final AssistantMessage responseMessage = response.getMessage();
 
         if(responseMessage == null){
             trace.setRoute(Agent.ID_END);
@@ -235,10 +234,8 @@ public class ReasonTask {
         // 部分接口（openai-responses）流式聚合时把推理文本混入 content，
         // 统一在此剥离，避免下游（最终答案/历史消息/IM）与思考通道重复渲染；
         // 优先用流式累积的思考前缀做精确剥离（思考内引用 </think> 字面量时启发式会切错位置）
-        final String streamedReasoningPrefix = (response instanceof ChatResponseDefault)
-                ? ((ChatResponseDefault) response).attrAs(ATTR_STREAMED_REASONING)
-                : null;
-        final String resultContent = AgentUtil.getResultContentWithoutReasoning(responseMessage, streamedReasoningPrefix);
+        final String streamedReasoningPrefix = trace.getExtraAs(ATTR_STREAMED_REASONING);
+        final String resultContent = AgentUtil.getAggregatedResultContent(responseMessage, streamedReasoningPrefix);
 
         if (response.getUsage() != null) {
             trace.getMetrics().addUsage(response.getUsage());
@@ -258,7 +255,7 @@ public class ReasonTask {
         if (Assert.isEmpty(resultContent) && Assert.isEmpty(responseMessage.getToolCalls())) {
             if (trace.getEmptyRetryCounter().incrementAndGet() < 3) {
                 //做3次重复
-                LOG.warn("ReActAgent[{}] choices size:{}, responseMessage is empty: {}", trace.getAgentName(), response.getChoices().size(), responseMessage);
+                LOG.warn("ReActAgent[{}] responseMessage is empty: {}", trace.getAgentName(), responseMessage);
 
                 if (Assert.isNotEmpty(responseMessage.getContent())) {
                     trace.getWorkingMemory().addMessage(responseMessage); //有些 llm 不能接受空消息
@@ -297,9 +294,10 @@ public class ReasonTask {
         final String thoughtContent;
 
         if (trace.getConfig().getStyle() == ReActStyle.NATIVE_TOOL) {
-            // 原生工具模式：非思考模式 LLM 的 getReasoning 可能为空，需回退到 extractThought
-            thoughtContent = Utils.isNotEmpty(responseMessage.getReasoning())
-                    ? responseMessage.getReasoning()
+            // 原生工具模式：非思考模式 LLM 的思考通道可能为空，需回退到 extractThought
+            // 4.1：getReasoning() 已弃用，改用 getThinking()
+            thoughtContent = Utils.isNotEmpty(responseMessage.getThinking())
+                    ? responseMessage.getThinking()
                     : extractThought(trace, clearContent);
         } else {
             // 文本结构模式：按 ReAct 协议 "Thought:" 解析
@@ -316,7 +314,9 @@ public class ReasonTask {
         }
 
         if(trace.getOptions().getStreamSink() != null){
-            trace.getOptions().getStreamSink().next(new ThoughtChunk(trace, response, responseMessage, thoughtContent));
+            // 思考（thoughtContent）与正文（clearContent）分别传入，由 ReasonEndEvent 的
+            // getThinking() / getText() 两个独立 getter 暴露，消费方不会再取错。
+            trace.getOptions().getStreamSink().next(new ReasonEndEvent(trace, response, responseMessage, thoughtContent, clearContent));
         }
 
         trace.setLastReasonMessage(responseMessage);
@@ -435,7 +435,7 @@ public class ReasonTask {
                     .callWithRetry(() -> {
                                 final ChatResponse response;
                                 if (trace.getOptions().getStreamSink() != null) {
-                                    final FluxSink<AgentChunk> sink = trace.getOptions().getStreamSink();
+                                    final FluxSink<AgentEvent> sink = trace.getOptions().getStreamSink();
 
                                     if (sink.isCancelled()) {
                                         return null;
@@ -446,27 +446,40 @@ public class ReasonTask {
                                     // 修复思考文本内部引用 </think> 字面量时启发式剥离切错位置导致的思考泄漏
                                     final StringBuilder streamedReasoningBuf = new StringBuilder();
                                     final int[] lastThinkingFrameStart = {-1};
+                                    final ChatResponse[] finalResponse = {null};
+                                    // 每次物理重试都是独立响应，不能沿用上一尝试的思考前缀。
+                                    trace.removeExtra(ATTR_STREAMED_REASONING);
 
-                                    response = req.stream()
-                                            .takeUntil(r -> sink.isCancelled())
-                                            .doOnNext(resp -> {
-                                                if (!sink.isCancelled()) {
-                                                    AssistantMessage frameMsg = resp.getMessage();
-                                                    if (frameMsg != null && frameMsg.isThinking() && frameMsg.hasContent()) {
-                                                        lastThinkingFrameStart[0] = streamedReasoningBuf.length();
-                                                        streamedReasoningBuf.append(frameMsg.getContent());
-                                                    }
-                                                    sink.next(new ReasonChunk(trace, resp, resp.getMessage()));
+                                    req.stream()
+                                            .takeUntil(event -> sink.isCancelled())
+                                            .doOnNext(event -> {
+                                                if (sink.isCancelled()) {
+                                                    return;
+                                                }
+
+                                                if (event.is(ChatEventType.RESPONSE_END)) {
+                                                    finalResponse[0] = event.getResponse();
+                                                    return;
+                                                }
+
+                                                if (event.is(ChatEventType.THINKING_DELTA) && event.hasText()) {
+                                                    lastThinkingFrameStart[0] = streamedReasoningBuf.length();
+                                                    streamedReasoningBuf.append(event.getText());
+                                                }
+
+                                                AssistantMessage delta = ChatEventSupport.message(event);
+                                                if (delta != null) {
+                                                    sink.next(new ReasonDeltaEvent(trace, null, delta));
                                                 }
                                             }).blockLast();
+                                    response = finalResponse[0];
 
-                                    if (response instanceof ChatResponseDefault
-                                            && streamedReasoningBuf.length() > 0) {
-                                        // chat 方言 inline-think（Qwen 风格）的闭标签帧携带正文头，截断避免前缀吞正文；
-                                        // 其余方言末思考帧为纯 </think> 标签帧，此截断为 no-op
+                                    if (streamedReasoningBuf.length() > 0) {
                                         String streamedReasoningPrefix = AgentUtil.normalizeStreamedReasoningPrefix(
                                                 streamedReasoningBuf.toString(), lastThinkingFrameStart[0]);
-                                        ((ChatResponseDefault) response).attrPut(ATTR_STREAMED_REASONING, streamedReasoningPrefix);
+                                        trace.setExtra(ATTR_STREAMED_REASONING, streamedReasoningPrefix);
+                                    } else {
+                                        trace.removeExtra(ATTR_STREAMED_REASONING);
                                     }
                                 } else {
                                     response = req.call();

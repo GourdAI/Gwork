@@ -16,21 +16,25 @@
 package com.gourdai.harness.agent;
 
 import org.noear.snack4.ONode;
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.react.ReActAgent;
-import com.gourdai.agent.react.ReActChunk;
+import com.gourdai.agent.event.RunEndEvent;
+import com.gourdai.agent.react.ReActOptionsAmend;
 import com.gourdai.agent.react.ReActTrace;
-import com.gourdai.agent.react.task.ActionChunk;
-import com.gourdai.agent.react.task.ObservationChunk;
-import com.gourdai.agent.react.task.ReasonChunk;
-import com.gourdai.agent.react.task.ThoughtChunk;
+import com.gourdai.agent.event.ToolCallStartEvent;
+import com.gourdai.agent.event.ToolCallEndEvent;
+import com.gourdai.agent.event.ReasonDeltaEvent;
+import com.gourdai.agent.event.ReasonEndEvent;
 import com.gourdai.agent.session.InMemoryAgentSession;
+import com.gourdai.core.portal.web.ThinkingDepth;
 import org.noear.solon.ai.annotation.ToolMapping;
+import org.noear.solon.ai.chat.ChatModel;
 import org.noear.solon.ai.chat.ChatSession;
 import org.noear.solon.ai.chat.prompt.Prompt;
 import org.noear.solon.ai.chat.talent.AbsTalent;
 import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.change.FileChangeService;
 import org.noear.solon.annotation.Body;
 import org.noear.solon.annotation.Param;
 import org.noear.solon.core.util.Assert;
@@ -43,7 +47,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.UUID;
 
 /**
  * 子代理才能
@@ -58,6 +64,18 @@ public class TaskTalent extends AbsTalent {
 
     public static final String TOOL_TASK = "task";
     public static final String TOOL_MULTITASK = "multitask";
+
+    /**
+     * 事件元数据键：标记「这条 ReasonEndEvent 是子代理的聚合载荷」。
+     *
+     * <p>各端（Web/ACP/CLI/WS）据此把它路由进智能体卡片或以缩进块打印，而不是当作主代理正文。
+     * 旧实现复用 {@link #TOOL_MULTITASK} 作这个标记，语义上是错的：单 task 路径从不打该标记，
+     * 导致单 task 子代理遇到不吐 delta 的模型时卡片内正文恒空。故拆出独立键，
+     * task 与 multitask 一律打。</p>
+     */
+    public static final String META_SUBAGENT = "__subagentReason";
+    /** 每次 task/multitask 调用的唯一关联标识；前端和 ACP 用它配对并行同名任务。 */
+    public static final String META_INVOCATION_ID = "__invocationId";
 
     private final HarnessEngine engine;
 
@@ -100,7 +118,8 @@ public class TaskTalent extends AbsTalent {
 
     @ToolMapping(name = TOOL_TASK, description =
             "委派单一任务给专项子代理。适用于需要深度思考、多步操作或特定领域知识（如文件操作、代码分析）的场景。不支持并行调用（并行请用 multitask）。")
-    public String task(@Body SingleTaskOp taskSpec, String __cwd, String __sessionId) {
+    public String task(@Body SingleTaskOp taskSpec, String __cwd, String __sessionId,
+                       String __changeSessionId, String __changeRunId, String __thinkingDepth) {
         if (Assert.isEmpty(__sessionId)) {
             throw new IllegalStateException("__sessionId is required");
         }
@@ -113,13 +132,15 @@ public class TaskTalent extends AbsTalent {
         taskOp.description = taskSpec.description;
         taskOp.prompt = taskSpec.prompt;
 
-        return taskDo(__parentTrace, __cwd, __sessionId, __parentSession, taskOp, 1, false)
+        return taskDo(__parentTrace, __cwd, __sessionId, __parentSession, taskOp, 1, false,
+                __changeSessionId, __changeRunId, __thinkingDepth)
                 + TODO_UPDATE_REMINDER;
     }
 
     @ToolMapping(name = TOOL_MULTITASK, description =
             "并行执行多个互不依赖的子任务。要求任务之间必须没有资源竞争（例如：不同的模块开发、多路搜索）。")
-    public String multitask(@Param(name = "tasks", description = "任务列表") List<MultiTaskOp> tasks, String __cwd, String __sessionId) {
+    public String multitask(@Param(name = "tasks", description = "任务列表") List<MultiTaskOp> tasks, String __cwd, String __sessionId,
+                            String __changeSessionId, String __changeRunId, String __thinkingDepth) {
         if (Assert.isEmpty(tasks)) {
             return "WARNING: 任务列表为空";
         }
@@ -149,7 +170,8 @@ public class TaskTalent extends AbsTalent {
             CompletableFuture<String> future;
             try {
                 future = CompletableFuture.supplyAsync(() ->
-                                taskDo(__parentTrace, __cwd, __sessionId, __parentSession, task, tasks.size(), true), RunUtil.io())
+                                taskDo(__parentTrace, __cwd, __sessionId, __parentSession, task, tasks.size(), true,
+                                        __changeSessionId, __changeRunId, __thinkingDepth), RunUtil.io())
                         //兜住 taskDo 自身 try 之外的漏网异常，使其就地降级为一条失败结果；
                         //否则 allOf 整体失败会连带丢弃已经成功的兄弟任务
                         .exceptionally(ex -> {
@@ -189,10 +211,126 @@ public class TaskTalent extends AbsTalent {
         return result;
     }
 
-    private String taskDo(ReActTrace __parentTrace, String __cwd, String __sessionId, AgentSession __parentSession, MultiTaskOp task, int count, boolean isMultitask) {
+    /**
+     * 解析文件变更的归属 run（sessionId/runId 二元组，任一为空则返回 null）。
+     * <p>嵌套子代理（子代理再调 task）时，子代理的 __sessionId 已是子会话名，而
+     * InMemoryAgentSession 未注册进 SessionProvider，engine.getSession() 会拿到另一个新建空会话
+     * 且 trace 为 null，父链就在此断裂。故根归属必须由工具参数 __changeSessionId/__changeRunId
+     * 逐层透传（下划线参数由框框注入且不进入 JSON schema，与 __cwd/__sessionId 同机制）。
+     */
+    private static String[] resolveChangeOwner(ReActTrace __parentTrace, String __sessionId,
+                                               String __changeSessionId, String __changeRunId) {
+        // 1) 优先用上层透传下来的根归属（支持任意嵌套深度）
+        if (Assert.isNotEmpty(__changeSessionId) && Assert.isNotEmpty(__changeRunId)) {
+            return new String[]{__changeSessionId.trim(), __changeRunId.trim()};
+        }
+
+        // 2) 顶层调用：用主会话 id + 主 trace 的 runId
+        if (__parentTrace == null) {
+            // 拿不到主 runId，无法组成完整归属；下游回退到子代理自身 trace。
+            return null;
+        }
+
+        String ownerRunId = __parentTrace.getRunId();
+        if (Assert.isEmpty(__sessionId) || Assert.isEmpty(ownerRunId)) {
+            return null;
+        }
+
+        return new String[]{__sessionId.trim(), ownerRunId};
+    }
+
+    /** 把变更归属写入子代理 toolContext；归属不完整时不写，让下游回退到子代理自身 trace。 */
+    private static void applyChangeOwner(ReActOptionsAmend o, String[] changeOwner) {
+        if (changeOwner != null) {
+            o.toolContextPut(FileChangeService.ATTR_CHANGE_SESSIONID, changeOwner[0]);
+            o.toolContextPut(FileChangeService.ATTR_CHANGE_RUNID, changeOwner[1]);
+        }
+    }
+
+    /**
+     * 解析本轮生效的思考档位。
+     *
+     * <p>优先用 toolContext 透传的 per-turn override（{@link HarnessEngine#ATTR_THINKING_DEPTH}），
+     * 其次回退会话上下文里用户在前台的选择。</p>
+     *
+     * <p><b>为什么必须有 override 这一路：</b>WebStreamBuilder / AcpLink 支持「按任务而非按会话」
+     * 指定档位（Loop 定时任务），且该 override 刻意<b>不写入</b>会话上下文以免污染用户选择。
+     * 旧实现只读会话上下文，于是主代理用 override（如 high）、子代理读到旧值（甚至 null→OFF）
+     * 而<b>静默降档</b>——这正是「子代理必须与外部使用一致的模型和思考级别」要求被破坏的地方。</p>
+     */
+    private static String resolveThinkingDepth(AgentSession parentSession, String overrideDepth) {
+        if (Assert.isNotEmpty(overrideDepth)) {
+            return ThinkingDepth.normalize(overrideDepth);
+        }
+        if (parentSession == null) {
+            return ThinkingDepth.OFF;
+        }
+        return ThinkingDepth.normalize(parentSession.getContext().getAs(HarnessEngine.CTX_THINKING_DEPTH));
+    }
+
+    /**
+     * 把已解析出的思考档位应用到子代理的请求选项上。
+     *
+     * <p>模型本身已经继承（CTX_MODEL_SELECTED 传给 agentDefinition.builder），但思考档位原先只在
+     * WebStreamBuilder / AcpLink 注入，子代理构建路径整个缺失——对 OpenAI o 系、Gemini 3.x、
+     * Anthropic adaptive thinking 这类<b>需显式开启思考</b>的模型，子代理请求不带思考参数，
+     * 上游就不会回 THINKING_DELTA，卡片内的思考块恒为空。</p>
+     *
+     * <p>standard 必须取<b>子代理自己的</b> ChatModel：子代理可在 AgentDefinition 里指定别家模型，
+     * 若沿用主模型的 standard 会把参数包成错的形状（如给 Gemini 发 reasoning_effort）。
+     * ThinkingDepth.applyTo 内部对不适用档位按关闭处理，故跨厂商不匹配时自然降级为不注入。</p>
+     */
+    private static void applyThinkingDepth(ReActOptionsAmend o, ReActAgent agent, String depth) {
+        if (ThinkingDepth.OFF.equals(depth)) {
+            return;
+        }
+
+        ChatModel subModel = (agent == null) ? null : agent.getModel();
+        if (subModel == null) {
+            return;
+        }
+
+        ThinkingDepth.applyTo(o, subModel.getStandardOrProvider(), depth);
+    }
+
+    /**
+     * 给事件打上父代理归属标记，供下游把内容路由进对应智能体卡片。
+     *
+     * <p>包一层 try/catch 是纵深防御：{@link AgentEvent#getMeta()} 的接口契约并未强制「可变」，
+     * 若将来某个事件实现返回不可变 Map，这里会让整条子代理流炸掉，并被 taskDo 的兜底 catch
+     * 误报成「任务执行失败」。丢归属标记（内容漏进主对话）远比炸掉整个子任务轻，故降级为 WARN。</p>
+     */
+    private static void stampParentAgent(AgentEvent event, String agentName, String description, String invocationId) {
+        try {
+            // 嵌套子代理事件已经带有内层归属，不能被外层 doOnNext 覆盖；普通事件则写入当前调用。
+            event.getMeta().putIfAbsent("__parentAgentName", agentName);
+            event.getMeta().putIfAbsent("__parentAgentDesc", description);
+            if (invocationId != null) {
+                event.getMeta().putIfAbsent(META_INVOCATION_ID, invocationId);
+            }
+        } catch (UnsupportedOperationException e) {
+            LOG.warn("事件 {} 的 meta 不可变，跳过父代理归属标记（该内容将无法路由进智能体卡片）",
+                    event.getClass().getSimpleName());
+        }
+    }
+
+    /** 给子代理的聚合载荷打 {@link #META_SUBAGENT} 标记，各端据此识别「这是子代理内容」。 */
+    private static void stampSubagentReason(AgentEvent event) {
+        try {
+            event.getMeta().put(META_SUBAGENT, 1);
+        } catch (UnsupportedOperationException e) {
+            LOG.warn("事件 {} 的 meta 不可变，无法标记子代理归属，该内容将不会路由进智能体卡片",
+                    event.getClass().getSimpleName());
+        }
+    }
+
+    private String taskDo(ReActTrace __parentTrace, String __cwd, String __sessionId, AgentSession __parentSession, MultiTaskOp task, int count, boolean isMultitask,
+                          String __changeSessionId, String __changeRunId, String __thinkingDepth) {
         //注意：getAgent 找不到时抛 IllegalArgumentException，而该异常会被 ActionTask.executeTool
         //归类为“参数 schema 错误”，从而误导模型反复纠正参数格式。这里必须先判存在性，
         //把“代理名不存在”转成可读结果并附上可选列表，让模型能自行改名重试。
+        final String invocationId = UUID.randomUUID().toString();
+
         AgentDefinition agentDefinition;
         try {
             if (engine.getAgentManager().hasAgent(task.agent_name) == false) {
@@ -229,45 +367,67 @@ public class TaskTalent extends AbsTalent {
         }
 
         String result = null;
+        final String[] changeOwner = resolveChangeOwner(__parentTrace, __sessionId, __changeSessionId, __changeRunId);
+        // 本轮生效的思考档位；同时写回子代理 toolContext，使嵌套委派（子代理再调 task）逐层继承
+        final String thinkingDepth = resolveThinkingDepth(__parentSession, __thinkingDepth);
 
         try {
             AtomicReference<Throwable> errRef = new AtomicReference<>();
 
             if (__parentTrace == null || __parentTrace.getOptions() == null || __parentTrace.getOptions().getStreamSink() == null) {
                 // 同步模式
-                ReActChunk agentChunk = (ReActChunk) agent.prompt(originalPrompt)
+                RunEndEvent runEnd = agent.prompt(originalPrompt)
                         .session(session)
                         .options(o -> {
                             o.toolContextPut(HarnessEngine.ATTR_CWD, __cwd);
                             o.toolContextPut(ChatSession.ATTR_SESSIONID, __sessionId);
+                            o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, thinkingDepth);
+                            applyChangeOwner(o, changeOwner);
+                            applyThinkingDepth(o, agent, thinkingDepth);
                         })
                         .stream()
-                        .doOnError(err -> {
-                            errRef.set(err);
-                        })
+                        .doOnError(errRef::set)
+                        // 用 ofType 过滤而非直接强转 blockLast()：流末尾并不保证恰好是 RunEndEvent
+                        // （异常收尾、上游提前 complete 时最后一个元素可能是别的事件），强转会抛
+                        // ClassCastException，被下方兜底 catch 报成「任务执行失败: java.lang.
+                        // ClassCastException...」这种对模型零信息量、也无法自纠的 observation。
+                        .ofType(RunEndEvent.class)
                         .blockLast();
 
                 if (errRef.get() != null) {
                     throw errRef.get();
                 }
 
-                if (__parentTrace != null) {
-                    __parentTrace.getMetrics().addMetrics(agentChunk.getMetrics());
+                if (runEnd == null) {
+                    throw new IllegalStateException("子代理流已结束但未产出 RunEndEvent，无最终结果可取");
                 }
 
-                result = agentChunk.getContent();
+                if (__parentTrace != null) {
+                    __parentTrace.getMetrics().addMetrics(runEnd.getMetrics());
+                }
+
+                result = runEnd.getContent();
             } else {
                 // 流式模式
-                final FluxSink<AgentChunk> sink = __parentTrace.getOptions().getStreamSink();
+                final FluxSink<AgentEvent> sink = __parentTrace.getOptions().getStreamSink();
 
                 // 推送子代理启动信号
-                sink.next(new AgentStartChunk(task.agent_name, task.description, __sessionId));
+                sink.next(new AgentStartEvent(task.agent_name, task.description, __sessionId, invocationId));
 
-                ReActChunk response = (ReActChunk) agent.prompt(originalPrompt)
+                // 本轮是否已流式下发过「正文增量」/「思考增量」：决定 ReasonEndEvent 的聚合载荷要不要
+                // 兜底补发（避免与增量重复）。两者必须<b>各自独立</b>计数——思考与正文由不同的 delta
+                // 承载，只记正文会让思考被下发两次（详见下方 ReasonEndEvent 分支注释）。
+                final AtomicBoolean bodyStreamed = new AtomicBoolean(false);
+                final AtomicBoolean thinkingStreamed = new AtomicBoolean(false);
+
+                RunEndEvent response = agent.prompt(originalPrompt)
                         .session(session)
                         .options(o -> {
                             o.toolContextPut(HarnessEngine.ATTR_CWD, __cwd);
                             o.toolContextPut(ChatSession.ATTR_SESSIONID, __sessionId);
+                            o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, thinkingDepth);
+                            applyChangeOwner(o, changeOwner);
+                            applyThinkingDepth(o, agent, thinkingDepth);
                         })
                         .stream()
                         .takeUntil(r -> sink.isCancelled())
@@ -275,43 +435,86 @@ public class TaskTalent extends AbsTalent {
                             // 统一标记 chunk 的父智能体归属（__parentAgentName/__parentAgentDesc），
                             // 下游流构建器据此把 agentName/agentDesc 透传给前端，使子代理的思考/正文/工具
                             // 内容能路由到对应智能体卡片内部渲染，而不是漏进主对话。
-                            chunk.getMeta().put("__parentAgentName", task.agent_name);
-                            chunk.getMeta().put("__parentAgentDesc", task.description);
+                            stampParentAgent(chunk, task.agent_name, task.description, invocationId);
 
-                            if (chunk instanceof ContextUsageChunk) {
+                            if (chunk instanceof ContextUsageEvent) {
                                 sink.next(chunk);
-                            } else if (chunk instanceof ActionChunk) {
+                            } else if (chunk instanceof ToolCallStartEvent) {
                                 sink.next(chunk);
-                            } else if (chunk instanceof ObservationChunk) {
+                            } else if (chunk instanceof ToolCallEndEvent) {
                                 sink.next(chunk);
-                            } else if (chunk instanceof ReasonChunk) {
-                                // 单任务模式转发增量思考/正文；multitask 时由 ThoughtChunk 承载，避免重复
-                                if (isMultitask == false) {
-                                    sink.next(chunk);
+                            } else if (chunk instanceof ReasonDeltaEvent) {
+                                // 思考与正文增量一律放行（task 与 multitask 一致）。
+                                // 二者都带 __parentAgentName，下游 onReasonDeltaEvent 会按 isThinking() 分流成
+                                // reason/text 两类 WebChunk，前端再由 resolveAgentState 路由进对应智能体卡片
+                                // （思考进 thinking-block，正文进 md-content），不会漏进主对话。
+                                ReasonDeltaEvent rc = (ReasonDeltaEvent) chunk;
+                                if (rc.isToolCalls() == false && rc.hasContent()) {
+                                    if (rc.isThinking()) {
+                                        thinkingStreamed.set(true);
+                                    } else {
+                                        bodyStreamed.set(true);
+                                    }
                                 }
-                            } else if (chunk instanceof ThoughtChunk) {
-                                if (isMultitask) {
-                                    chunk.getMeta().put(TOOL_MULTITASK, 1);
+                                sink.next(chunk);
+                            } else if (chunk instanceof ReasonEndEvent) {
+                                // 4.1 事件体系：ReasonEndEvent 的 getThinking() 与 getText() 物理分离，
+                                // 思考与正文是<b>两份独立载荷</b>，必须各自判断「本轮是否已由 delta 送达」：
+                                //
+                                //   · 只记正文、思考无条件放行（旧实现）→ 思考被下发两次：一次由
+                                //     ReasonDeltaEvent 增量逐字送达，一次由这里补发聚合全文；且
+                                //     ReasonEndEvent 每轮都发，N 轮就重复 N 次（前端 appendReasonChunkCore
+                                //     是纯追加，没有去重）。
+                                //   · 两者都记 → 各自独立兜底，既不重复也不丢失。
+                                //
+                                // getAndSet(false)：判定后立即重置，使「本轮是否已流式产出」按 ReAct 轮次
+                                // 独立判断——ReasonEndEvent 每轮都发，而第 1 轮有增量不代表第 N 轮也有
+                                // （有些模型/中转会直接给完整消息而不吐 delta），不重置会使那一轮内容
+                                // 被误抑制、直接丢失。
+                                //
+                                // 不再用 isMultitask 作门禁：单 task 子代理同样需要兜底，否则遇到不吐
+                                // delta 的模型时卡片内正文恒空。归属一律用 META_SUBAGENT 标记，
+                                // 各端（Web/ACP/CLI/WS）按同一个键识别，不再区分 task 与 multitask。
+                                ReasonEndEvent re = (ReasonEndEvent) chunk;
+                                boolean needThinking = thinkingStreamed.getAndSet(false) == false && re.hasThinking();
+                                boolean needBody = bodyStreamed.getAndSet(false) == false && re.hasText();
+
+                                if (needThinking || needBody) {
+                                    stampSubagentReason(chunk);
                                     sink.next(chunk);
                                 }
                             }
                         })
-                        .doOnError(err -> {
-                            errRef.set(err);
-                        })
+                        .doOnError(errRef::set)
+                        .ofType(RunEndEvent.class)
                         .blockLast();
 
                 if (errRef.get() != null) {
                     // 推送失败信号
-                    sink.next(new AgentEndChunk(task.agent_name, task.description, false, errRef.get().getMessage(), __sessionId));
+                    sink.next(new AgentEndEvent(task.agent_name, task.description, false, errRef.get().getMessage(), __sessionId, invocationId));
                     throw errRef.get();
+                }
+
+                if (response == null) {
+                    // takeUntil 在「用户 Stop / 客户端断连」时会截断流，此刻最后一个元素多半不是
+                    // RunEndEvent，ofType 过滤后为空 → blockLast() 返回 null。这是<b>正常取消</b>，不是
+                    // 子代理失败：旧实现直接强转会抛 ClassCastException（或对 null 取 getMetrics() 抛
+                    // NPE），两者都被下方兜底 catch 报成「ERROR: 任务执行失败」，把一次用户主动停止
+                    // 误报成子代理出错并回灌给模型，模型会据此重试一个本该终止的任务。
+                    LOG.warn("任务被取消[{}/{} - {}]：上游流已取消或未产出 RunEndEvent",
+                            task.index, count, task.agent_name);
+
+                    // 补一个结束帧收口卡片（sink 已取消时 next 是 no-op，无副作用）
+                    sink.next(new AgentEndEvent(task.agent_name, task.description, false, CANCELLED_MESSAGE, __sessionId, invocationId));
+
+                    return formatTaskResp(task, false, CANCELLED_MESSAGE, isMultitask);
                 }
 
                 __parentTrace.getMetrics().addMetrics(response.getMetrics());
                 result = response.getContent();
 
                 // 推送子代理结束信号
-                sink.next(new AgentEndChunk(task.agent_name, task.description, true, result, __sessionId));
+                sink.next(new AgentEndEvent(task.agent_name, task.description, true, result, __sessionId, invocationId));
             }
 
 
@@ -377,6 +580,15 @@ public class TaskTalent extends AbsTalent {
      */
     private static final String TODO_UPDATE_REMINDER =
             "\n[提醒] 子任务结果已返回：若存在 TODO 清单，请立即调用 todowrite 更新对应项状态（成功则置 [x]），再继续后续动作，禁止延后补记。";
+
+    /**
+     * 子代理被上游取消（用户 Stop / 客户端断连）时的中性结果文案。
+     *
+     * <p>刻意不用 "ERROR:" 前缀：这不是子代理出错，而是一次正常的用户主动终止。带 ERROR 前缀会让
+     * 模型把它当作可重试的失败并反复重派同一个任务。</p>
+     */
+    private static final String CANCELLED_MESSAGE =
+            "CANCELLED: 任务已被用户停止或连接中断，未产出结果。这是正常的主动终止，不是子代理出错，请勿重试同一任务。";
 
     private String formatTaskResp(MultiTaskOp task, boolean successful, String result, boolean isMultitask) {
         StringBuilder buf = new StringBuilder();

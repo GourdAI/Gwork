@@ -463,39 +463,26 @@ function finishPendingTool(sess) {
 }
 
 /* ===== Tool header meta helpers（类型图标 / 语言图标 / diff 统计 / 文件名回填） ===== */
-/* 左侧工具类型图标（emoji，按工具名映射） */
+/* 公共展示模型始终以裸工具名做 icon/i18n/renderer；nested 决定是否隐藏来源前缀。 */
+function resolveToolPresentation(toolName, toolTitle, options) {
+    options = options || {};
+    var model = window.GourdToolPresentation.resolveToolPresentation(toolName, toolTitle, {
+        nested: options.nested === true,
+        internal: options.internal === true,
+        agentName: options.agentName,
+        translate: window.GourdI18n ? function(key) { return GourdI18n.t(key); } : null
+    });
+    return model;
+}
+window.resolveToolPresentation = resolveToolPresentation;
+
 function toolTypeIcon(name) {
-    var map = { edit: '\u270f\ufe0f', write: '\ud83d\udcdd', read: '\ud83d\udcd6', grep: '\ud83d\udd0d', glob: '\ud83d\udcc1', ls: '\ud83d\udcc1', bash: '\u26a1', bash_output: '\ud83d\udcca', todowrite: '\u2705', todoread: '\u2705', websearch: '\ud83c\udf10', webfetch: '\ud83d\udd17', codesearch: '\ud83d\udd0e', skill: '\ud83e\udde9', task: '\ud83e\udd16', multitask: '\ud83e\udd16', generate: '\u2728' };
-    return map[name] || '\ud83d\udd27';
+    return resolveToolPresentation(name, null).icon;
 }
 
-/* 工具名本地化映射：后端裸工具名 → i18n key。
-   未列出的工具（如 MCP / OpenAPI 动态工具）回退原样显示。 */
-var TOOL_I18N_KEY = {
-    read: 'chat.tool_read', write: 'chat.tool_write', edit: 'chat.tool_edit',
-    glob: 'chat.tool_glob', grep: 'chat.tool_grep', ls: 'chat.tool_ls',
-    bash: 'chat.tool_bash', bash_output: 'chat.tool_bash_output',
-    skill: 'chat.tool_skill',
-    todo: 'chat.tool_todo', todowrite: 'chat.tool_todo', todoread: 'chat.tool_todo',
-    code: 'chat.tool_code', codesearch: 'chat.tool_codesearch',
-    websearch: 'chat.tool_websearch', webfetch: 'chat.tool_webfetch',
-    task: 'chat.tool_task', multitask: 'chat.tool_multitask', generate: 'chat.tool_generate',
-    mcp: 'chat.tool_mcp', openapi: 'chat.tool_openapi', lsp: 'chat.tool_lsp', memory: 'chat.tool_memory'
-};
-/* 将工具名本地化用于展示。toolTitle 可能形如 "agentName/toolName"（子代理内部调用），
-   拆出前缀单独保留、仅翻译工具名部分；主代理时 toolTitle===toolName。未知工具回退原样。 */
-function localizeToolName(toolName, toolTitle) {
-    var prefix = '';
-    var base = toolTitle || toolName || 'tool';
-    if (toolName) {
-        var sep = base.lastIndexOf('/' + toolName);
-        if (sep >= 0 && base.slice(sep + 1) === toolName) {
-            prefix = base.slice(0, sep + 1);  // 含末尾 '/'
-            base = toolName;
-        }
-    }
-    var key = TOOL_I18N_KEY[base];
-    return prefix + (key && window.GourdI18n ? GourdI18n.t(key) : base);
+/* 兼容旧调用入口；新卡片路径应显式传 nested，避免只凭 title 猜测展示上下文。 */
+function localizeToolName(toolName, toolTitle, options) {
+    return resolveToolPresentation(toolName, toolTitle, options).displayName;
 }
 window.localizeToolName = localizeToolName;
 /* 文件语言图标（emoji，按扩展名映射） */
@@ -552,15 +539,23 @@ window.updateToolHeaderMeta = updateToolHeaderMeta;
 /* 统一设置卡状态点：依据 chunk.text 是否以 __ERROR__ 开头判定。后端 WebStreamBuilder
    在工具真正出错（Exception）时仍然发 action_end，但文本前缀为 "__ERROR__"；
    正常执行结果不带此标记。失败则显示红点，成功显示绿点。 */
-function setToolCardStatus(cardEl, text) {
+function setToolCardStatus(cardEl, text, failed) {
     var icon = $(cardEl).find('.tool-status-icon').first()[0];
     if (!icon) return;
 
-    var isError = typeof text === 'string' && text.startsWith('__ERROR__');
+    // 失败判定双通道：failed（后端 WebChunk.failed 显式标记，语义最可靠）优先，
+    // __ERROR__ 文本前缀作为旧历史帧与其它通道的兼容约定。
+    // 二者任一成立即判失败，保证没有 failed 字段的旧历史回放仍能正确显示红点。
+    var isError = failed === true || (typeof text === 'string' && text.startsWith('__ERROR__'));
 
     setTimeout(function() {
         requestAnimationFrame(function() {
             if (icon) {
+                // R6 修复：本回调有 300ms 延迟，与 finishStream 存在竞态。
+                // finishStream 对缺帧批次会先把卡片收成 warn（缺帧标记），
+                // 若本回调随后无条件覆写为 done，缺帧批次就会被误报成功。
+                // 故仅当图标仍处于 loading（尚未被任何收尾逻辑处置）时才落态。
+                if (icon.className.indexOf('loading') < 0) return;
                 if (isError) {
                     icon.className = 'tool-status-icon reject';
                 } else {
@@ -575,9 +570,27 @@ function setToolCardStatus(cardEl, text) {
 
 window.setToolCardStatus = setToolCardStatus;
 
+/* 展示后端下发的工具真实耗时（WebChunk.durationMs，来源 ToolCallEndEvent.getDurationMs()）。
+   旧实现从未下发该值，工具卡只能自增计时，无法反映实际执行时长。 */
+function setToolCardDuration(cardEl, durationMs, failed) {
+    if (typeof durationMs !== 'number' || !isFinite(durationMs) || durationMs < 0) return;
+    if (!cardEl) return;
+    var header = $(cardEl).find('.tool-card-header').first()[0];
+    if (!header) return;
+    if ($(header).find('.tool-duration').length) return; // 已有则不重复插入
+    var label = durationMs >= 1000
+        ? (Math.round(durationMs / 100) / 10) + 's'
+        : Math.round(durationMs) + 'ms';
+    var span = $('<span>').addClass('tool-duration' + (failed === true ? ' failed' : '')).text(label)[0];
+    $(header).append(span);
+}
+window.setToolCardDuration = setToolCardDuration;
+
 /* 工具失败时把当前正在执行（loading）的卡片状态点置为红点。
-   后端失败走 error 独立通道，不会发 action_end，故卡片会残留在 loading；
-   若不处理，finishStream 会将其强刷为绿点（误报成功）。此处改赋红点。 */
+   注：4.1 事件体系后，后端已不再吞掉失败的 ToolCallEndEvent（见 WebStreamBuilder#onToolFailure），
+   失败会带 WebChunk.failed=true 下发，并由 appendActionEndChunk 就地把卡片收成红点；
+   本函数保留作为 error 独立通道（整流异常）的兜底，把所有残留 loading 卡片一并置红，
+   否则 finishStream 会将其强刷为绿点（误报成功）。 */
 function markToolCardFailed(sess) {
     var icons = [];
     if (sess.pendingToolCard) {
@@ -802,8 +815,7 @@ function renderToolBody(bodyEl, toolName, text, args) {
     return false;
 }
 
-/* 抽取：把 args 对象格式化为短字符串（供卡片头部 tool-args 展示）。
-   与 appendActionEndChunk 内的实现保持一致，供 action_start 复用。 */
+/* 抽取：把 args 对象格式化为短字符串（供所有工具卡创建与更新路径复用）。 */
 function formatToolArgsStr(args) {
     function formatArgValue(v) {
         if (v === null) return 'null';
@@ -832,6 +844,32 @@ function formatToolArgsStr(args) {
     return argsStr;
 }
 
+/* 工具卡公共展示更新：标题、图标、裸 toolName 数据契约一次完成。
+   nested 由调用点的实际归属容器决定，不从带前缀 title 隐式推断。 */
+function applyToolPresentation(cardEl, toolName, toolTitle, options) {
+    if (!cardEl) return resolveToolPresentation(toolName, toolTitle, options);
+    var presentation = resolveToolPresentation(toolName, toolTitle, options);
+    var nameEl = $(cardEl).find('.tool-name').first()[0];
+    var iconEl = $(cardEl).find('.tool-type-icon').first()[0];
+    if (nameEl) {
+        nameEl.textContent = presentation.displayName;
+        window.GourdToolPresentation.ordinaryToolNameCleanupAttributes().forEach(function(attr) {
+            nameEl.removeAttribute(attr);
+        });
+        tagToolName(nameEl, presentation);
+    }
+    if (iconEl) iconEl.textContent = presentation.icon;
+    cardEl.setAttribute('data-tool-name', presentation.bareToolName);
+    return presentation;
+}
+
+function toolPresentationOptions(agentBody, args, cardEl) {
+    return {
+        nested: !!agentBody || !!(cardEl && $(cardEl).closest('.agent-card').length),
+        agentName: args && args.agentName
+    };
+}
+
 /* 解析 chunk 归属的智能体输出状态：args.agentName 非空且该智能体卡片仍在活跃登记中时，
    返回其独立状态对象（每个智能体一份，支持并行多智能体互不串卡）；否则返回 null。
    注意：本函数与 resolveAgentCardBody 必须定义在顶层作用域——app-streaming.js 的 onWebChunk
@@ -842,8 +880,15 @@ function formatToolArgsStr(args) {
 function resolveAgentState(sess, args) {
     var agentName = args && args.agentName;
     var agentDesc = (args && args.agentDesc != null) ? args.agentDesc : '';
-    if (agentName && sess.agentCards && sess.agentCards[agentName + ':' + agentDesc] && sess.agentStates) {
-        return sess.agentStates[agentName + ':' + agentDesc] || null;
+    var invocationId = args && args.invocationId;
+    var key = invocationId || (agentName ? agentName + ':' + agentDesc : '');
+    if (key && sess.agentCards && sess.agentCards[key] && sess.agentStates) {
+        return sess.agentStates[key] || null;
+    }
+    // 兼容旧历史帧：没有 invocationId 时继续按 name:desc 配对。
+    var legacyKey = agentName ? agentName + ':' + agentDesc : '';
+    if (invocationId && legacyKey && sess.agentCards && sess.agentCards[legacyKey] && sess.agentStates) {
+        return sess.agentStates[legacyKey] || null;
     }
     return null;
 }
@@ -920,7 +965,7 @@ function appendCardToBatch(sess, card, batchMeta, insertAgentBody) {
 }
 window.normalizeBatchMeta = normalizeBatchMeta;
 
-/* action_start：工具调用前（来源引擎 ActionChunk）提前渲染 loading 卡片骨架。
+/* action_start：工具调用前（来源引擎 ToolCallStartEvent）提前渲染 loading 卡片骨架。
    - 有 actionId（并发/并行场景）：卡片按 id 登记到 sess.toolCardsById，action_end 靠 id 精确配对，
      不再依赖到达顺序；后端下发 batchId/batchIndex/batchSize 时归入显式批量容器分组展示。
    - 无 actionId（旧数据/兼容）：退回原有 sess.pendingToolCard 位置配对逻辑，行为不变。 */
@@ -928,36 +973,65 @@ function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agent
     if (actionId && sess.completedActionIds && sess.completedActionIds[actionId]) return;
     batchMeta = normalizeBatchMeta(batchMeta);
     ensureAssistantBubble(sess);
+    var insertAgentBody = agentBody || resolveAgentCardBody(sess, args);
+    var presentation = resolveToolPresentation(toolName, toolTitle, toolPresentationOptions(insertAgentBody, args));
+    var presentationTitle = toolTitle || (presentation.source ? presentation.source + '/' + presentation.bareToolName : null);
+    toolName = presentation.bareToolName;
 
     var argsStr = formatToolArgsStr(args);
     var argsHtml = argsStr ? '<span class="tool-args">' + escapeHtml(argsStr) + '</span>' : '';
+    var approvedState = window.GourdToolPresentation.resolveActionStartCardState(!!sess.approvedToolCard, actionId);
+
+    // HITL 批准后的 action_start 必须接管原审批卡：有 actionId 时登记到 id 映射，
+    // 无 actionId 时沿用 pending 配对；两种模式都立即消费 approvedToolCard，避免残留或重复建卡。
+    if (approvedState.reuseApprovedCard) {
+        var approvedCard = sess.approvedToolCard;
+        sess.approvedToolCard = null;
+        if (actionId) approvedCard.setAttribute('data-action-id', actionId);
+        applyToolPresentation(approvedCard, toolName, presentationTitle, toolPresentationOptions(insertAgentBody, args, approvedCard));
+        updateToolHeaderMeta(approvedCard, toolName, args, null);
+        var approvedArgsEl = $(approvedCard).find('.tool-args').first()[0];
+        if (argsStr) {
+            if (approvedArgsEl) approvedArgsEl.textContent = argsStr;
+            else $('<span>').addClass('tool-args').text(argsStr).insertAfter($(approvedCard).find('.tool-name').first());
+        }
+        var approvedBody = $(approvedCard).find('.tool-card-body').first()[0];
+        if (approvedBody) { approvedBody.removeAttribute('style'); approvedBody.innerHTML = ''; }
+        if (window.cliPrintSimplified === false) $(approvedCard).addClass('expanded');
+        else $(approvedCard).removeClass('expanded');
+
+        if (approvedState.registerByActionId) {
+            if (!sess.toolCardsById) sess.toolCardsById = {};
+            sess.toolCardsById[actionId] = approvedCard;
+        } else {
+            sess.pendingToolCard = approvedCard;
+            sess.pendingToolStarted = true;
+        }
+        if (sess.sessionId === activeSessionId) scrollToBottom();
+        return;
+    }
 
     var card = $('<div>').addClass('tool-card')[0];
     if (sess.currentRunId) {
         card.setAttribute('data-run-id', sess.currentRunId);
     }
     if (actionId) card.setAttribute('data-action-id', actionId);
-    if (toolName) card.setAttribute('data-tool-name', toolName);
     if (window.cliPrintSimplified === false) $(card).addClass('expanded');
     card.innerHTML = '<div class="tool-card-header">'
-        + '<span class="tool-type-icon">' + toolTypeIcon(toolName) + '</span>'
+        + '<span class="tool-type-icon"></span>'
         + '<span class="tool-status-icon loading"></span>'
-        + '<span class="tool-name">' + escapeHtml(localizeToolName(toolName, toolTitle)) + '</span>'
+        + '<span class="tool-name"></span>'
         + argsHtml
         + '</div>'
         + '<div class="tool-card-body"></div>';
-    tagToolName($(card).find('.tool-name')[0], toolName, toolTitle);
+    applyToolPresentation(card, toolName, presentationTitle, toolPresentationOptions(insertAgentBody, args));
     updateToolHeaderMeta(card, toolName, args, null);
 
     $(card).find('.tool-card-header').on('click', function() {
         $(card).toggleClass('expanded');
     });
 
-/* 确定插入容器：如果 args.agentName 存在，说明这是子代理内部的工具调用，
-     应插入到对应的 .agent-card-body 容器内（复用主智能体样式），而不是主代理的气泡中 */
-    var insertAgentBody = agentBody || resolveAgentCardBody(sess, args);
-
-    if (actionId && !sess.approvedToolCard) {
+    if (actionId) {
         // id 模式：登记卡片，供 action_end 精确回填；后端显式批次时归入批量容器
         // （HITL 审批结果回填态例外——让位给位置配对，复用审批卡，避免多卡）
         if (!sess.toolCardsById) sess.toolCardsById = {};
@@ -1087,6 +1161,26 @@ function fillToolBody(sess, bodyEl, toolName, text, args, meta) {
     }
 }
 
+/* action_end 各配对/兜底路径共用：展示模型、参数、头部元数据与结果体一次回填。 */
+function updateToolCardContent(sess, cardEl, toolName, toolTitle, args, text, meta, options) {
+    var presentation = applyToolPresentation(cardEl, toolName, toolTitle, options);
+    var bareToolName = presentation.bareToolName;
+    updateToolHeaderMeta(cardEl, bareToolName, args, text);
+    var argsStr = formatToolArgsStr(args);
+    var argsEl = $(cardEl).find('.tool-args').first()[0];
+    if (argsStr) {
+        if (argsEl) argsEl.textContent = argsStr;
+        else $('<span>').addClass('tool-args').text(argsStr).insertAfter($(cardEl).find('.tool-name').first());
+    }
+    var bodyEl = $(cardEl).find('.tool-card-body').first()[0];
+    if (bodyEl) {
+        bodyEl.removeAttribute('style');
+        bodyEl.innerHTML = '';
+        fillToolBody(sess, bodyEl, bareToolName, text, args, meta);
+    }
+    return bareToolName;
+}
+
 /* 为被截断的工具结果体追加「展开全文」按钮。点击调用 /web/chat/replay/full 按 seq 取全文，
    成功后用完整文本重渲染该体（去掉按钮）。拉取中禁用按钮防重复点击。 */
 function appendExpandFullBtn(sess, bodyEl, toolName, args, meta) {
@@ -1099,7 +1193,9 @@ function appendExpandFullBtn(sess, bodyEl, toolName, args, meta) {
         if (btn.disabled) return;
         btn.disabled = true;
         btn.textContent = GourdI18n.t('chat.loading_dots');
-        var rootQ = (window.appMode === 'code' && window.currentProjectRoot) ? '&root=' + encodeURIComponent(window.currentProjectRoot) : '';
+        // 全文必须从卡片所属会话的根读取；用户切换项目后 currentProjectRoot 已不再代表本卡片。
+        var sessionRoot = sess && sess.projectRoot ? sess.projectRoot : '';
+        var rootQ = sessionRoot ? '&root=' + encodeURIComponent(sessionRoot) : '';
         $.get('/web/chat/replay/full?sessionId=' + encodeURIComponent(sess.sessionId)
                 + '&seq=' + encodeURIComponent(meta.seq) + rootQ, function(resp) {
             var full = resp && resp.data;
@@ -1117,7 +1213,7 @@ function appendExpandFullBtn(sess, bodyEl, toolName, args, meta) {
     bodyEl.appendChild(btn);
 }
 
-function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, meta, agentBody, batchMeta) {
+function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, meta, agentBody, batchMeta, failed, durationMs) {
     // id 分支：并发/并行场景按 actionId 精确回填对应卡片（不依赖到达顺序），并推进批量分组进度。
     // 若正处于 HITL 审批结果回填态（sess.approvedToolCard 存在），让位给下方审批卡复用逻辑，避免两张卡。
     if (actionId && sess.completedActionIds && sess.completedActionIds[actionId]) return;
@@ -1127,27 +1223,15 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         if (!sess.completedActionIds) sess.completedActionIds = {};
         sess.completedActionIds[actionId] = true;
 
-        var idArgsStr = formatToolArgsStr(args);
-        $(idCard).find('.tool-name').text(localizeToolName(toolName, toolTitle));
-        tagToolName($(idCard).find('.tool-name')[0], toolName, toolTitle);
-        updateToolHeaderMeta(idCard, toolName, args, text);
-        var idArgsEl = $(idCard).find('.tool-args')[0];
-        if (idArgsStr) {
-            if (idArgsEl) { idArgsEl.textContent = idArgsStr; }
-            else { $('<span>').addClass('tool-args').text(idArgsStr).insertAfter($(idCard).find('.tool-name')); }
-        }
-        var idBody = $(idCard).find('.tool-card-body')[0];
-        if (idBody) {
-            idBody.removeAttribute('style');
-            idBody.innerHTML = '';
-            fillToolBody(sess, idBody, toolName, text, args, meta);
-        }
-        setToolCardStatus(idCard, text);
+        var idOwner = agentBody || resolveAgentCardBody(sess, args);
+        toolName = updateToolCardContent(sess, idCard, toolName, toolTitle, args, text, meta,
+            toolPresentationOptions(idOwner, args, idCard));
+        setToolCardStatus(idCard, text, failed);
+        setToolCardDuration(idCard, durationMs, failed);
 
         // 推进显式批量分组进度（方案 A）：根据卡片所属的 batchKey 定位批次，幂等推进。
         // 批次可能由 action_end 兜底创建，统一走 helper 保证计数口径一致。
         markBatchCardDone(sess, idCard);
-        var idOwner = agentBody || resolveAgentCardBody(sess, args);
         // 推进正文指针：新建空 .md-content 落在工具卡/分组「之后」，让工具执行完后到达的
         // text/agent 正文写入卡片下方，而非停留在旧气泡里被卡片顶到上方。
         // （与无 actionId 旧路径一致；缺此步会导致正文在上、工具卡垫底的错序渲染。）
@@ -1169,23 +1253,11 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
     if (sess.pendingToolStarted && sess.pendingToolCard) {
         var pc = sess.pendingToolCard;
         sess.pendingToolStarted = false;
-        var pcArgsStr = formatToolArgsStr(args);
-        $(pc).find('.tool-name').text(localizeToolName(toolName, toolTitle));
-        tagToolName($(pc).find('.tool-name')[0], toolName, toolTitle);
-        updateToolHeaderMeta(pc, toolName, args, text);
-        var pcArgsEl = $(pc).find('.tool-args')[0];
-        if (pcArgsStr) {
-            if (pcArgsEl) { pcArgsEl.textContent = pcArgsStr; }
-            else { $('<span>').addClass('tool-args').text(pcArgsStr).insertAfter($(pc).find('.tool-name')); }
-        }
-        var pcBody = $(pc).find('.tool-card-body')[0];
-        if (pcBody) {
-            pcBody.removeAttribute('style');
-            pcBody.innerHTML = '';
-            fillToolBody(sess, pcBody, toolName, text, args, meta);
-        }
+        toolName = updateToolCardContent(sess, pc, toolName, toolTitle, args, text, meta,
+            toolPresentationOptions(agentBody, args, pc));
         finishPendingTool(sess);
-        setToolCardStatus(pc, text);
+        setToolCardStatus(pc, text, failed);
+        setToolCardDuration(pc, durationMs, failed);
         if (window._todoChunkHandlers) { /* todo 由 streaming 层单独处理，这里不重复 */ }
         // 归属守卫：该卡属于智能体卡片内部时不动主对话正文指针；卡内正文指针同样推进
         if (!$(pc).closest('.agent-card').length) {
@@ -1206,15 +1278,14 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         var fallbackCard = $('<div>').addClass('tool-card')[0];
         if (sess.currentRunId) fallbackCard.setAttribute('data-run-id', sess.currentRunId);
         if (actionId) fallbackCard.setAttribute('data-action-id', actionId);
-        if (toolName) fallbackCard.setAttribute('data-tool-name', toolName);
         if (window.cliPrintSimplified === false) $(fallbackCard).addClass('expanded');
-        fallbackCard.innerHTML = '<div class="tool-card-header"><span class="tool-type-icon">' + toolTypeIcon(toolName) + '</span><span class="tool-status-icon loading"></span><span class="tool-name">' + escapeHtml(localizeToolName(toolName, toolTitle)) + '</span></div><div class="tool-card-body"></div>';
-        tagToolName($(fallbackCard).find('.tool-name')[0], toolName, toolTitle);
-        updateToolHeaderMeta(fallbackCard, toolName, args, text);
-        fillToolBody(sess, $(fallbackCard).find('.tool-card-body')[0], toolName, text, args, meta);
-        setToolCardStatus(fallbackCard, text);
-        $(fallbackCard).find('.tool-card-header').on('click', function() { $(fallbackCard).toggleClass('expanded'); });
+        fallbackCard.innerHTML = '<div class="tool-card-header"><span class="tool-type-icon"></span><span class="tool-status-icon loading"></span><span class="tool-name"></span></div><div class="tool-card-body"></div>';
         var fallbackAgentBody = agentBody || resolveAgentCardBody(sess, args);
+        toolName = updateToolCardContent(sess, fallbackCard, toolName, toolTitle, args, text, meta,
+            toolPresentationOptions(fallbackAgentBody, args, fallbackCard));
+        setToolCardStatus(fallbackCard, text, failed);
+        setToolCardDuration(fallbackCard, durationMs, failed);
+        $(fallbackCard).find('.tool-card-header').on('click', function() { $(fallbackCard).toggleClass('expanded'); });
         if (appendCardToBatch(sess, fallbackCard, endBatchMeta, fallbackAgentBody)) markBatchCardDone(sess, fallbackCard);
         else if (fallbackAgentBody) $(fallbackAgentBody).append(fallbackCard);
         else insertBeforeActions(sess, fallbackCard);
@@ -1224,54 +1295,14 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         return;
     }
 
-    function formatArgValue(v) {
-        if (v === null) return 'null';
-        if (v === undefined) return 'undefined';
-        if (typeof v === 'string') return v.replace(/\n/g, ' ');
-        if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-        if (Array.isArray(v)) return '[' + v.length + GourdI18n.t('chat.items') + ']';
-        if (typeof v === 'object') {
-            var keys = Object.keys(v);
-            if (keys.length === 0) return '{}';
-            if (keys.length > 3) return '{' + keys.slice(0, 2).join(',') + ',...}';
-            var inner = [];
-            keys.forEach(function(k) { inner.push(k + ':' + formatArgValue(v[k])); });
-            var s = '{' + inner.join(',') + '}';
-            return s.length > 30 ? '{' + keys.join(',') + '}' : s;
-        }
-        return String(v);
-    }
-    var argsHtml = '';
-    if (args && typeof args === 'object') {
-        var parts = [];
-        var skipArgs = { diff: 1, content: 1, todos: 1 };
-        Object.keys(args).forEach(function(k) {
-            if (skipArgs[k]) return; parts.push(k + '=' + formatArgValue(args[k]));
-        });
-        var argsStr = parts.join(' ');
-        if (argsStr.length > 80) argsStr = argsStr.substring(0, 77) + '...';
-        if (argsStr) argsHtml = '<span class="tool-args">' + escapeHtml(argsStr) + '</span>';
-    }
-
     // 复用分支：若刚批准过 HITL，结果渲染进同一张审批卡片，避免出现两张卡
     if (sess.approvedToolCard) {
         var rc = sess.approvedToolCard;
         sess.approvedToolCard = null;
-        $(rc).find('.tool-name').text(localizeToolName(toolName, toolTitle));
-        tagToolName($(rc).find('.tool-name')[0], toolName, toolTitle);
-        updateToolHeaderMeta(rc, toolName, args, text);
-        setToolCardStatus(rc, text);
-        var rcArgsEl = $(rc).find('.tool-args')[0];
-        if (argsStr) {
-            if (rcArgsEl) { rcArgsEl.textContent = argsStr; }
-            else { $('<span>').addClass('tool-args').text(argsStr).insertAfter($(rc).find('.tool-name')); }
-        }
-        var rcBody = $(rc).find('.tool-card-body')[0];
-        if (rcBody) {
-            rcBody.removeAttribute('style');
-            rcBody.innerHTML = '';
-            fillToolBody(sess, rcBody, toolName, text, args, meta);
-        }
+        toolName = updateToolCardContent(sess, rc, toolName, toolTitle, args, text, meta,
+            toolPresentationOptions(agentBody, args, rc));
+        setToolCardStatus(rc, text, failed);
+        setToolCardDuration(rc, durationMs, failed);
         if (window.cliPrintSimplified === false) $(rc).addClass('expanded');
         else $(rc).removeClass('expanded');
         sess.pendingToolCard = rc;
@@ -1280,6 +1311,7 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         return;
     }
 
+    var fallbackOwner = agentBody || resolveAgentCardBody(sess, args);
     var card = $('<div>').addClass('tool-card')[0];
     // 存储当前 runId，用于后续删除同一运行的消息
     if (sess.currentRunId) {
@@ -1287,28 +1319,26 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
     }
     if (window.cliPrintSimplified === false) $(card).addClass('expanded');
     card.innerHTML = '<div class="tool-card-header">'
-        + '<span class="tool-type-icon">' + toolTypeIcon(toolName) + '</span>'
+        + '<span class="tool-type-icon"></span>'
         + '<span class="tool-status-icon loading"></span>'
-        + '<span class="tool-name">' + escapeHtml(localizeToolName(toolName, toolTitle)) + '</span>'
-        + argsHtml
+        + '<span class="tool-name"></span>'
         + '</div>'
         + '<div class="tool-card-body"></div>';
-    tagToolName($(card).find('.tool-name')[0], toolName, toolTitle);
-    updateToolHeaderMeta(card, toolName, args, text);
+    toolName = updateToolCardContent(sess, card, toolName, toolTitle, args, text, meta,
+        toolPresentationOptions(fallbackOwner, args, card));
 
-    // 工具结果渲染：委托注册表分发，未命中专用 renderer 则纯文本兜底；截断则挂展开按钮
-    var toolBody = $(card).find('.tool-card-body')[0];
-    fillToolBody(sess, toolBody, toolName, text, args, meta);
-    setToolCardStatus(card, text);
+    // 工具结果渲染：公共更新方法已按裸 toolName 委托注册表并处理纯文本兜底/截断按钮
+    setToolCardStatus(card, text, failed);
+    setToolCardDuration(card, durationMs, failed);
 
     $(card).find('.tool-card-header').on('click', function() {
         $(card).toggleClass('expanded');
     });
 
     // 归属守卫：子代理的工具结果（无 action_start 前置建卡时）同样插入智能体卡片内部
-    if (agentBody) {
-        $(agentBody).append(card);
-        advanceAgentBodyPointer(sess, findAgentStateByBody(sess, agentBody));
+    if (fallbackOwner) {
+        $(fallbackOwner).append(card);
+        advanceAgentBodyPointer(sess, findAgentStateByBody(sess, fallbackOwner));
         sess.pendingToolCard = card;
         if (sess.sessionId === activeSessionId) scrollToBottom();
         return;
@@ -1425,7 +1455,8 @@ function appendTraceBadge(sess, chunk) {
     function appendAgentBadge(sess, chunk, isStart) {
     var agentName = chunk.toolName || (chunk.args && chunk.args.agentName) || 'agent';
     var desc = chunk.text || (chunk.args && chunk.args.description) || '';
-    var agentId = agentName + ':' + desc;
+    var invocationId = chunk.args && chunk.args.invocationId;
+    var agentId = invocationId || (agentName + ':' + desc);
             
     // agent_end：查找已有容器并更新
     if (!isStart) {
@@ -1463,7 +1494,7 @@ function appendTraceBadge(sess, chunk) {
             purgeEmptyMdBlocks(existCard);
 
             // resultSummary 作为独立的 .md-content 块追加到 .agent-card-body 末尾。
-            // 去重守卫：卡片已有流式正文时（单任务 ReasonChunk 增量 / multitask ThoughtChunk 结果），
+            // 去重守卫：卡片已有流式正文时（单任务 ReasonDeltaEvent 增量 / multitask ReasonEndEvent 结果），
             // resultSummary 与其同文，成功时不再追加，避免卡片内同一段内容出现两次；
             // 失败（success=false）时 summary 承载错误信息，仍需追加。
             var hasStreamedBody = !!(endState && endState.bodyText && endState.bodyText.trim());
@@ -1695,15 +1726,34 @@ function startThinkingTimer(sess, timerKey, startTimeKey, currentTimerSpan) {
     sess[timerKey] = setInterval(tick, 1000);
 }
 
-// 启动等待指示器：尚无气泡时，在消息区独立显示一行「圆点 + Ns」（无文字）
+// 按相位给等待指示器换上真实语义文案。
+// 过去两个等待指示器（.thinking-row / .inline-thinking）连文字都没有，只有三个点，
+// 因此无论在哪个相位长得都一模一样；现按 phase 显示「思考中 / 输出中 / 等待响应」。
+function applyPhaseLabel(el, phase) {
+    if (!el) return;
+    var labelEl = $(el).find('.thinking-phase-label').first()[0];
+    if (!labelEl) return;
+    // 防御：PHASE_* 常量定义在 app-streaming.js，若本文件先于它加载则运行时可能未就绪；
+    // 指示器只会在流式期间被调用（彼时全部脚本已加载），此处仅作兼容兜底。
+    var keys = (typeof PHASE_I18N_KEY !== 'undefined') ? PHASE_I18N_KEY : null;
+    var waitKey = (typeof PHASE_WAITING !== 'undefined') ? PHASE_WAITING : 'waiting';
+    var key = (keys && (keys[phase] || keys[waitKey])) || 'chat.phase_waiting';
+    $(labelEl).text(GourdI18n.t(key));
+    labelEl.setAttribute('data-i18n', key);
+    $(el).attr('data-phase', phase || waitKey);
+}
+
+// 启动等待指示器：尚无气泡时，在消息区独立显示一行「圆点 + 相位文案 + Ns」
 function showThinking(sess) {
     removeThinking(sess);
     sess.thinkingEl = $('<div>').addClass('thinking-row')[0];
-    sess.thinkingEl.innerHTML = '<div class="thinking-bubble">' + DOTS_HTML 
+    sess.thinkingEl.innerHTML = '<div class="thinking-bubble">' + DOTS_HTML
+        + '<span class="thinking-phase-label"></span>'
         + '<span class="thinking-timer-wrap">'
         + '<span class="thinking-current-timer">0s</span>'
         + '</span></div>';
     $(sess.container).append(sess.thinkingEl);
+    applyPhaseLabel(sess.thinkingEl, sess.phase);
     var currentTimerSpan = $(sess.thinkingEl).find('.thinking-current-timer')[0];
     startThinkingTimer(sess, 'thinkingTimerId', 'thinkingStartTime', currentTimerSpan);
     if (sess.sessionId === activeSessionId) scrollToBottom(true);
@@ -1713,14 +1763,15 @@ function removeThinking(sess) {
     if (sess.thinkingEl) { $(sess.thinkingEl).remove(); sess.thinkingEl = null; }
 }
 
-// 气泡内的间隙等待指示器（「圆点 + Ns」，无文字）。
+// 气泡内的间隙等待指示器（「圆点 + 相位文案 + Ns」）。
 // 关键：元素一旦创建便常驻气泡底部（actions 之前），不可见时用 visibility:hidden 占位，
 // 避免显隐导致的高度跳动；流式结束时再由 purgeInlineThinking 彻底移除。
 function ensureInlineThinking(sess) {
     if (!sess.currentBubbleEl) return null;
     if (sess.inlineThinkingEl && sess.inlineThinkingEl.parentNode) return sess.inlineThinkingEl;
     var el = $('<div>').addClass('inline-thinking hidden-reserve')[0];
-    el.innerHTML = DOTS_HTML + '<span class="thinking-timer-wrap">'
+    el.innerHTML = DOTS_HTML + '<span class="thinking-phase-label"></span>'
+        + '<span class="thinking-timer-wrap">'
         + '<span class="thinking-current-timer">0s</span>'
         + '</span>';
     sess.inlineThinkingEl = el;
@@ -1730,10 +1781,11 @@ function ensureInlineThinking(sess) {
     if (footer) $(footer).before(el);
     return el;
 }
-function showInlineThinking(sess) {
+function showInlineThinking(sess, phase) {
     var el = ensureInlineThinking(sess);
     if (!el) return;
     $(el).removeClass('hidden-reserve');
+    applyPhaseLabel(el, phase || sess.phase);
     var currentTimerSpan = $(el).find('.thinking-current-timer')[0];
     startThinkingTimer(sess, 'inlineThinkingTimerId', 'inlineThinkingStartTime', currentTimerSpan);
     if (sess.sessionId === activeSessionId) scrollToBottom();
@@ -1752,6 +1804,8 @@ function purgeInlineThinking(sess) {
 /* ===== HITL ===== */
 function appendHitlCard(sess, toolName, command) {
     ensureAssistantBubble(sess);
+    var presentation = resolveToolPresentation(toolName, null);
+    toolName = presentation.bareToolName;
 
     // 采用 tool-card 视觉体系：审批通过后原地复用为工具结果卡片
     var argsHtml = command ? '<span class="tool-args">' + escapeHtml(command) + '</span>' : '';
@@ -1760,9 +1814,10 @@ function appendHitlCard(sess, toolName, command) {
     if (sess.currentRunId) {
         card.setAttribute('data-run-id', sess.currentRunId);
     }
+    card.setAttribute('data-tool-name', toolName);
     card.innerHTML = '<div class="tool-card-header">'
         + '<span class="tool-status-icon warn"><i class="layui-icon layui-icon-tips" style="font-size:13px"></i></span>'
-        + '<span class="tool-name">' + GourdI18n.t('chat.need_auth') + escapeHtml(toolName || 'unknown') + '</span>'
+        + '<span class="tool-name">' + GourdI18n.t('chat.need_auth') + escapeHtml(presentation.displayName || 'unknown') + '</span>'
         + argsHtml
         + '</div>'
         + '<div class="tool-card-body">' + (command ? escapeHtml(command) : GourdI18n.t('chat.waiting_auth')) + '</div>'
@@ -1801,7 +1856,7 @@ function appendHitlCard(sess, toolName, command) {
         rejectBtn.disabled = true;
         var icon = $(card).find('.tool-status-icon')[0];
         if (icon) { icon.className = 'tool-status-icon reject'; icon.innerHTML = ''; }
-        $(card).find('.tool-name').text(GourdI18n.t('chat.rejected') + (toolName || 'unknown'));
+        $(card).find('.tool-name').text(GourdI18n.t('chat.rejected') + (presentation.displayName || 'unknown'));
         (function() { var hn = $(card).find('.tool-name')[0]; if (hn) { hn.setAttribute('data-i18n-hitl', 'rejected'); hn.setAttribute('data-i18n-hitl-tool', toolName || 'unknown'); } })();
         $(card).find('.hitl-card-actions').remove();
         $(card).removeClass('hitl-pending expanded');
@@ -1925,21 +1980,36 @@ window.openLightbox = openLightbox;
    工具卡/思考块/批量分组/HITL 等在流式渲染时把译文写死进 DOM 文本节点，不带 data-i18n，
    translateDOM 扫不到；语言切换时按渲染阶段存下的原始数据（工具名/状态/耗时）用新语言重建。
    .agent-label、HITL 审批按钮为纯 key 独占元素，已加 data-i18n 交由 translateDOM 处理，此处不含。 */
-function tagToolName(el, toolName, toolTitle) {
-    if (!el) return;
-    el.setAttribute('data-i18n-tool', toolName == null ? '' : toolName);
-    if (toolTitle) el.setAttribute('data-i18n-tooltitle', toolTitle);
+function tagToolName(el, presentation) {
+    if (!el || !presentation) return;
+    el.setAttribute('data-i18n-tool', presentation.bareToolName || 'tool');
+    if (presentation.toolTitle) el.setAttribute('data-i18n-tooltitle', presentation.toolTitle);
     else el.removeAttribute('data-i18n-tooltitle');
+    el.setAttribute('data-i18n-tool-nested', presentation.nested ? '1' : '0');
+    if (presentation.source) el.setAttribute('data-tool-source', presentation.source);
+    else el.removeAttribute('data-tool-source');
+    if (presentation.agentName) el.setAttribute('data-tool-agent', presentation.agentName);
+    else el.removeAttribute('data-tool-agent');
 }
 window.tagToolName = tagToolName;
 
 function relocalizeDynamicLabels() {
     if (!window.GourdI18n) return;
     document.querySelectorAll('.tool-name[data-i18n-tool]').forEach(function(el) {
-        el.textContent = localizeToolName(el.getAttribute('data-i18n-tool'), el.getAttribute('data-i18n-tooltitle') || null);
+        var presentation = resolveToolPresentation(
+            el.getAttribute('data-i18n-tool'),
+            el.getAttribute('data-i18n-tooltitle') || null,
+            {
+                nested: el.getAttribute('data-i18n-tool-nested') === '1',
+                agentName: el.getAttribute('data-tool-agent') || null
+            }
+        );
+        el.textContent = presentation.displayName;
     });
     document.querySelectorAll('.tool-name[data-i18n-hitl]').forEach(function(el) {
-        el.textContent = GourdI18n.t('chat.' + el.getAttribute('data-i18n-hitl')) + (el.getAttribute('data-i18n-hitl-tool') || 'unknown');
+        var hitlTool = el.getAttribute('data-i18n-hitl-tool') || 'unknown';
+        var hitlPresentation = resolveToolPresentation(hitlTool, null);
+        el.textContent = GourdI18n.t('chat.' + el.getAttribute('data-i18n-hitl')) + hitlPresentation.displayName;
     });
     document.querySelectorAll('.tool-batch-title[data-i18n-batch-tool]').forEach(function(el) {
         var tn = el.getAttribute('data-i18n-batch-tool');

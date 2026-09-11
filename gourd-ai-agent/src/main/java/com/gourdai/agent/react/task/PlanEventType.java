@@ -18,13 +18,13 @@ package com.gourdai.agent.react.task;
 import org.noear.solon.lang.Preview;
 
 /**
- * ReAct 计划事件
+ * ReAct 计划事件类型
  *
  * @author oisin
  * @since 3.9.3
  */
 @Preview("3.9.3")
-public enum PlanEvent {
+public enum PlanEventType {
     CREATE,
     PROGRESS,
     REVISE

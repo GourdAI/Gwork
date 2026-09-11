@@ -30,6 +30,7 @@ import org.noear.solon.ai.chat.message.ChatMessage;
 import org.noear.solon.ai.chat.message.UserMessage;
 import org.noear.solon.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.change.FileChangeService;
 import com.gourdai.harness.command.Command;
 import org.noear.solon.ai.util.CmdUtil;
 import com.gourdai.core.command.WebCommandContext;
@@ -117,6 +118,8 @@ public class WebGate extends SimpleWebSocketListener {
     public WebGate(HarnessEngine engine) {
         this.engine = engine;
         this.streamBuilder = new WebStreamBuilder(engine, this);
+        FileChangeService.getInstance().setListener((sessionId, runId, summary) ->
+                emitToClient(sessionId, WebChunk.ofFileChanges(runId, summary)));
     }
 
     /**
@@ -126,6 +129,75 @@ public class WebGate extends SimpleWebSocketListener {
      */
     public void setSessionLocator(SessionLocator sessionLocator) {
         this.sessionLocator = sessionLocator;
+    }
+
+    /**
+     * 解析本轮任务的文件变更账本所属根（写账本 / 收口 / 前端读取 三方共用的唯一口径）。
+     *
+     * <p>优先级：显式 sessionCwd &gt; 会话已登记的所属根 &gt; 安装工作区。与上方 streamRoot
+     * 的取法保持一致（只多一个 workspace 兜底，因为账本必须有一个确定的根）。</p>
+     *
+     * <p><b>为何必须抽成方法：</b>旧实现把这段表达式在异步/同步两条路径里各拄了一份，
+     * 而 WebStreamBuilder 注入 ATTR_CWD（ActionTask 据此写账本）时用的却是
+     * {@code sessionCwd ?: engine.getWorkspace()}——<b>少了 boundRoot 这一级</b>。于是当
+     * sessionCwd 为空且 boundRoot 与 workspace 不同时（IM 通道流入 code 会话正是此形态），
+     * 账本被写进 workspace 那份，而 finish() 去标记 boundRoot 那份 → 真实 manifest 永远
+     * 不 ready，叠加“ready 是撤销第一道门禁”就是卡片显示 0 个文件、而磁盘实际改了 N 个。
+     * 现在本方法的返回值会被直接传给 buildStreamFlux 作为工具 cwd，三方口径强制一致。</p>
+     */
+    private String resolveChangeRoot(String sessionId, String sessionCwd) {
+        if (Assert.isNotEmpty(sessionCwd)) {
+            return sessionCwd;
+        }
+        String bound = (sessionLocator == null) ? null : sessionLocator.boundRoot(sessionId);
+        if (Assert.isNotEmpty(bound)) {
+            return bound;
+        }
+        return engine.getWorkspace();
+    }
+
+    /**
+     * run 收口：把文件变更账本从「进行中」切到可撤销状态，全程只允许生效一次。
+     *
+     * <p><b>为何必须在每一条终止路径上都调：</b>{@code FileChangeService.finish} 里的
+     * {@code ready=true} 是撤销/重放的第一道门禁（{@code applyLocked} 里 {@code !ready} 直接回
+     * BUSY）。旧实现只在 doOnNext 收到 done 帧且 {@code !streamFailed} 时才 finish，于是三条
+     * 终止路径全部漏掉：① 流异常（error 帧置了 streamFailed，done 帧被跳过）；② 用户 Stop /
+     * 新任务取代（cancel 时 done 帧根本不经过 doOnNext）；③ 进程崩溃。而“agent 跑挂了、
+     * 工作区被改乱”恰恰是最需要回滚的时刻，撤销按钮却永久返回 BUSY。</p>
+     *
+     * <p>③ 由 {@code FileChangeService} 的进程启动补偿兜底（按 {@code updatedAt < 进程启动时刻}
+     * 识别遗留账本）；①② 由本方法的三个调用点覆盖。</p>
+     *
+     * @param clean true = 正常收口（READY）；false = 异常/取消收口。后者<b>同样解锁撤销能力</b>，
+     *              只是额外标记 possiblyIncomplete：异常终止时最后几个 write/edit 可能没来得及落账。
+     * @param once  幂等守卫；三条路径共享同一个，成功后保持完成，失败则释放供后续回调重试
+     */
+    private void finishFileChanges(String sessionId, String runId, String changeRoot, boolean clean, AtomicBoolean once) {
+        if (runId == null || changeRoot == null) {
+            // runId 从未出现说明这一轮没有任何事件带 runId，账本也就根本没被建出来，没有需要解锁的东西。
+            // 刻意不消耗 once 标志：后续帧仍可能带上 runId。
+            return;
+        }
+        finishOnce(once, () -> FileChangeService.getInstance().finish(sessionId, runId, changeRoot, clean));
+    }
+
+    /**
+     * 可测试的收口幂等 seam：同一时刻最多一个调用；只有真实成功才永久关闭，失败允许 doFinally 再试。
+     */
+    static boolean finishOnce(AtomicBoolean once, java.util.function.BooleanSupplier action) {
+        if (!once.compareAndSet(false, true)) {
+            return false;
+        }
+        boolean succeeded = false;
+        try {
+            succeeded = action.getAsBoolean();
+            return succeeded;
+        } finally {
+            if (!succeeded) {
+                once.set(false);
+            }
+        }
     }
 
     /**
@@ -555,21 +627,38 @@ public class WebGate extends SimpleWebSocketListener {
         // 实测存在 cancel/竞态下 concatWith(done) 不再发射的路径（如新任务取代旧任务 dispose、
         // 并行工具段异常完成方式不完整），前端将永远停留在加载态，故在 doFinally 兜底补发（幂等）。
         final AtomicBoolean doneSent = new AtomicBoolean(false);
+        final AtomicBoolean streamFailed = new AtomicBoolean(false);
+        // 账本收口的幂等守卫：三条终止路径（done 帧 / error / finally）都会调，只允许生效一次
+        final AtomicBoolean changeFinished = new AtomicBoolean(false);
         final java.util.concurrent.atomic.AtomicReference<String> runIdSeen = new java.util.concurrent.atomic.AtomicReference<>();
 
-        Disposable disposable = streamBuilder.buildStreamFlux(session, agent, chatModel, sessionCwd, prompt)
+        final String changeRoot = resolveChangeRoot(sessionId, sessionCwd);
+        // 传 changeRoot 而不是 sessionCwd：ActionTask 用 ATTR_CWD（由 buildStreamFlux 根据本参注入）
+        // 作为写账本的根，必须与下面 finishFileChanges 用的根完全一致，否则账本写一份、收口另一份。
+        Disposable disposable = streamBuilder.buildStreamFlux(session, agent, chatModel, changeRoot, prompt)
                 .subscribeOn(Schedulers.boundedElastic())
                 .doOnNext(line -> {
                     if (line.getRunId() != null) runIdSeen.compareAndSet(null, line.getRunId());
+                    if ("error".equals(line.getType())) streamFailed.set(true);
                     if ("done".equals(line.getType())) {
                         if (line.getRunId() == null) line.setRunId(runIdSeen.get());
+                        String completedRunId = line.getRunId();
+                        // 旧写法是 `if (!streamFailed.get()) finish(...)`：一旦本轮出现过 error 帧就整个跳过，
+                        // 账本永远停在 ready=false，而 ready 正是撤销的第一道门禁 → 撤销按钮永久 BUSY。
+                        // 现在异常路径也要收口，只是以 clean=false 标记账本可能不完整。
+                        finishFileChanges(sessionId, completedRunId, changeRoot, !streamFailed.get(), changeFinished);
                         doneSent.set(true);
                     }
                     emitToClient(sessionId, line);
                 })
                 .doOnError(e -> {
+                    streamFailed.set(true);
                     LOG.error("Task fail: {}", e.getMessage(), e);
                     removeDisposableIfSame(session, self[0]);
+
+                    // 流异常时 done 帧不会再经过 doOnNext（onErrorResume 只补一个 error 帧），
+                    // 必须在这里收口，否则这个 run 的撤销能力永久锁死
+                    finishFileChanges(sessionId, runIdSeen.get(), changeRoot, false, changeFinished);
 
                     emitToClient(sessionId, WebChunk.ofError(e));
                     if (doneSent.compareAndSet(false, true)) {
@@ -580,6 +669,10 @@ public class WebGate extends SimpleWebSocketListener {
                 })
                 .doFinally(s -> {
                     removeDisposableIfSame(session, self[0]);  // 正常完成时清理
+                    // 兜底收口：用户 Stop / 新任务取代旧订阅时是 cancel 信号，done 帧根本不会下发，
+                    // 上面两个回调都进不来。而“被改乱的工作区需要回滚”恰恰最常发生在这种场景。
+                    // 正常完成时 once 已被 doOnNext 消耗，这里是 no-op。
+                    finishFileChanges(sessionId, runIdSeen.get(), changeRoot, false, changeFinished);
                     // cancel/异常竞态兜底：done 仍未发出则补发，保证前端等待态必然收敛。
                     // 但 cancel 需甄别来源：被新任务取代（attrs 已登记新订阅，由新任务发 done）或被
                     // interruptSession 接管（attrs 已移除，由其推送 done）时，此处补发会误杀前端
@@ -657,11 +750,21 @@ public class WebGate extends SimpleWebSocketListener {
         final Disposable[] self = new Disposable[1];
         // done 兜底守卫（与异步路径同因）：任何终止信号下保证前端恰好收到一个 done
         final AtomicBoolean doneSent = new AtomicBoolean(false);
+        final AtomicBoolean streamFailed = new AtomicBoolean(false);
+        // 账本收口的幂等守卫（与异步路径同因）
+        final AtomicBoolean changeFinished = new AtomicBoolean(false);
 
-        Disposable disposable = streamBuilder.buildStreamFlux(session, agent, chatModel, sessionCwd, prompt, thinkingDepthOverride)
+        final java.util.concurrent.atomic.AtomicReference<String> runIdSeen = new java.util.concurrent.atomic.AtomicReference<>();
+        final String changeRoot = resolveChangeRoot(sessionId, sessionCwd);
+        // 同异步路径：传 changeRoot 以保证「写账本的根 == 收口的根 == 前端读取的根」
+        Disposable disposable = streamBuilder.buildStreamFlux(session, agent, chatModel, changeRoot, prompt, thinkingDepthOverride)
                 .subscribeOn(Schedulers.boundedElastic())
                 .doOnNext(line -> {
+                    if (line.getRunId() != null) runIdSeen.compareAndSet(null, line.getRunId());
+                    if ("error".equals(line.getType())) streamFailed.set(true);
                     if ("done".equals(line.getType())) {
+                        if (line.getRunId() == null) line.setRunId(runIdSeen.get());
+                        finishFileChanges(sessionId, line.getRunId(), changeRoot, !streamFailed.get(), changeFinished);
                         doneSent.set(true);
                     }
                     emitToClient(sessionId, line);
@@ -671,8 +774,11 @@ public class WebGate extends SimpleWebSocketListener {
                     }
                 })
                 .doOnError(e -> {
+                    streamFailed.set(true);
                     LOG.error("Task fail: {}", e.getMessage(), e);
                     removeDisposableIfSame(session, self[0]);
+
+                    finishFileChanges(sessionId, runIdSeen.get(), changeRoot, false, changeFinished);
 
                     emitToClient(sessionId, WebChunk.ofError(e));
                     if (doneSent.compareAndSet(false, true)) {
@@ -681,6 +787,8 @@ public class WebGate extends SimpleWebSocketListener {
                 })
                 .doFinally(s -> {
                     removeDisposableIfSame(session, self[0]);
+                    // 兜底收口：cancel（用户 Stop / 新任务取代）时 done 帧不会下发，上面两个回调都进不来
+                    finishFileChanges(sessionId, runIdSeen.get(), changeRoot, false, changeFinished);
                     // 与异步路径同策略：cancel 且已被取代/interrupt 接管时跳过补发，防误杀新一轮等待态
                     if (doneSent.compareAndSet(false, true)) {
                         if (s == SignalType.CANCEL && session.attrs().get("disposable") != self[0]) {

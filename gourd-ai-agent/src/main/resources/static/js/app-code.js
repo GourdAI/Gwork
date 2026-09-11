@@ -712,10 +712,31 @@
         filerSettingsBtn.addEventListener('click', function () { $('#settingsBtn').trigger('click'); });
     }
 
-    function openInEditor(path, name) {
+    /* 跨工作区打开保护：文件变更卡可能属于另一个项目的 session。若把它当成当前项目的
+       相对路径打开，轻则 404，重则静默打开另一个项目的同名文件（更危险，可能被编辑保存）。 */
+    function samePathRoot(a, b) {
+        var na = String(a || '').replace(/[\\/]+$/, '').replace(/\\/g, '/');
+        var nb = String(b || '').replace(/[\\/]+$/, '').replace(/\\/g, '/');
+        if (!na || !nb) return na === nb;
+        /* Windows 路径大小写不敏感；POSIX 保留大小写语义 */
+        if (/^[a-zA-Z]:/.test(na) || /^[a-zA-Z]:/.test(nb)) return na.toLowerCase() === nb.toLowerCase();
+        return na === nb;
+    }
+    /* 打开中的文件门禁：docs[path] 要等 HTTP 回来才写入，期间重复点击会发多个请求、
+       建多个 model 并重复 push tab，先建的 model 还会失去引用无法释放。 */
+    var openingFiles = {};
+
+    function openInEditor(path, name, rootOverride) {
         if (!isCode()) {
-            // chat 模式仍走原只读查看器（若存在）
-            if (window._origOpenFileViewer) return window._origOpenFileViewer(path, name);
+            // chat 模式仍走原只读查看器（若存在）；rootOverride 必须透传，否则文件变更卡
+            // 好不容易带上的 session 工作区会在这一层丢掉。
+            if (window._origOpenFileViewer) return window._origOpenFileViewer(path, name, rootOverride);
+            return;
+        }
+        var requestedRoot = rootOverride || window.currentProjectRoot || '';
+        if (rootOverride && !samePathRoot(rootOverride, window.currentProjectRoot)) {
+            // 跨项目：不当作当前项目的可编辑 tab 打开，退回只读查看器并保留显式 root。
+            if (window._origOpenFileViewer) return window._origOpenFileViewer(path, name, rootOverride);
             return;
         }
         // 可预览二进制文件（图片/PDF/音视频）：跳过文本读取，直接开预览标签
@@ -736,9 +757,15 @@
 
             // 已打开则直接激活
             if (docs[path]) { activateFile(path); return; }
+            var openKey = requestedRoot + '\u0000' + path;
+            if (openingFiles[openKey]) return;                  // 同一文件正在加载，忽略重复点击
+            openingFiles[openKey] = true;
 
-            var url = '/web/chat/filer/read?path=' + encodeURIComponent(path) + rootQuery();
+            var url = '/web/chat/filer/read?path=' + encodeURIComponent(path)
+                + (requestedRoot ? '&root=' + encodeURIComponent(requestedRoot) : '');
             $.get(url, function (resp) {
+                // 响应回来时项目可能已切换：旧项目的文件不得写进新项目的 docs
+                if (!samePathRoot(requestedRoot, window.currentProjectRoot || '')) return;
                 if (!resp || resp.code !== 200) {
                     if (typeof showToast === 'function') showToast((resp && resp.description) || GourdI18n.t('code.cannot_read_file'), 'error');
                     return;
@@ -765,7 +792,7 @@
                 activateFile(path);
             }).fail(function () {
                 if (typeof showToast === 'function') showToast(GourdI18n.t('code.read_failed'), 'error');
-            });
+            }).always(function () { delete openingFiles[openKey]; });
         });
     }
 

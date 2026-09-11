@@ -15,7 +15,11 @@
  */
 package com.gourdai.agent.react;
 
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.ReasonDeltaEvent;
+import com.gourdai.agent.event.RunEndEvent;
+import com.gourdai.agent.event.ToolCallStartEvent;
+
+import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.AgentRequest;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.session.InMemoryAgentSession;
@@ -119,13 +123,13 @@ public class ReActRequest implements AgentRequest<ReActRequest, ReActResponse> {
     }
 
     /**
-     * 响应式流输出：实时推送推理过程中的 Chunk（如 ReasonChunk, ActionChunk）
+     * 响应式流输出：实时推送推理过程中的 Chunk（如 ReasonDeltaEvent, ToolCallStartEvent）
      * 适用于 Web 端 SSE 或 WebSocket 实时展示思考过程
      */
-    public Flux<AgentChunk> stream() {
+    public Flux<AgentEvent> stream() {
         init();
 
-        return Flux.<AgentChunk>create(sink -> {
+        return Flux.<AgentEvent>create(sink -> {
             try {
                 Thread currentThread = Thread.currentThread();
                 sink.onCancel(() -> {
@@ -140,7 +144,7 @@ public class ReActRequest implements AgentRequest<ReActRequest, ReActResponse> {
 
                 ReActResponse resp = new ReActResponse(session, trace, message);
 
-                sink.next(new ReActChunk(resp));
+                sink.next(new RunEndEvent(resp));
                 sink.complete();
             } catch (Throwable e) {
                 if (!sink.isCancelled()) {

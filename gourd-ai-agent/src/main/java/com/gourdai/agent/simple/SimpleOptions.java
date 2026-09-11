@@ -1,6 +1,6 @@
 package com.gourdai.agent.simple;
 
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.AgentEvent;
 import org.noear.solon.ai.chat.ModelOptionsAmend;
 import org.noear.solon.lang.Preview;
 import reactor.core.publisher.FluxSink;
@@ -13,21 +13,19 @@ import reactor.core.publisher.FluxSink;
  */
 @Preview("3.9.1")
 public class SimpleOptions extends ModelOptionsAmend<SimpleOptions, SimpleInterceptor> {
-    private transient FluxSink<AgentChunk> streamSink;
+    private transient FluxSink<AgentEvent> streamSink;
 
-    protected void setStreamSink(FluxSink<AgentChunk> streamSink) {
+    protected void setStreamSink(FluxSink<AgentEvent> streamSink) {
         this.streamSink = streamSink;
     }
 
-    public FluxSink<AgentChunk> getStreamSink() {
+    public FluxSink<AgentEvent> getStreamSink() {
         return streamSink;
     }
 
     protected SimpleOptions copy() {
         SimpleOptions tmp = new SimpleOptions();
         tmp.putAll(this);
-
-        //tmp.streamSink = streamSink;
 
         return tmp;
     }

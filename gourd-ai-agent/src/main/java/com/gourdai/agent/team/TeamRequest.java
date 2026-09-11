@@ -15,7 +15,9 @@
  */
 package com.gourdai.agent.team;
 
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.TeamEndEvent;
+
+import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.AgentRequest;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.session.InMemoryAgentSession;
@@ -114,10 +116,10 @@ public class TeamRequest implements AgentRequest<TeamRequest, TeamResponse> {
         return new TeamResponse(session, trace, message);
     }
 
-    public Flux<AgentChunk> stream() {
+    public Flux<AgentEvent> stream() {
         init();
 
-        return Flux.<AgentChunk>create(sink -> {
+        return Flux.<AgentEvent>create(sink -> {
             try {
                 Thread currentThread = Thread.currentThread();
                 sink.onCancel(() -> {
@@ -131,7 +133,7 @@ public class TeamRequest implements AgentRequest<TeamRequest, TeamResponse> {
 
                 TeamResponse resp = new TeamResponse(session, trace, message);
 
-                sink.next(new TeamChunk(resp));
+                sink.next(new TeamEndEvent(resp));
                 sink.complete();
             } catch (Throwable e) {
                 if (!sink.isCancelled()) {

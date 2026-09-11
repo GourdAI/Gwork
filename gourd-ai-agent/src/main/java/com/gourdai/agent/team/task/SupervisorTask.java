@@ -9,18 +9,23 @@
  */
 package com.gourdai.agent.team.task;
 
+import com.gourdai.agent.event.SupervisorDeltaEvent;
+
 import com.gourdai.core.portal.web.UsageSubmissionService;
 import org.noear.snack4.ONode;
 import com.gourdai.agent.Agent;
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.exception.LlmNoReturnException;
 import com.gourdai.agent.util.FeedbackTool;
+import com.gourdai.agent.util.AgentUtil;
+import com.gourdai.agent.util.ChatEventSupport;
 import com.gourdai.agent.team.TeamAgent;
 import com.gourdai.agent.team.TeamAgentConfig;
 import com.gourdai.agent.team.TeamInterceptor;
 import com.gourdai.agent.team.TeamTrace;
 import org.noear.solon.ai.chat.ChatRequestDesc;
 import org.noear.solon.ai.chat.ChatResponse;
+import org.noear.solon.ai.chat.event.ChatEventType;
 import org.noear.solon.ai.chat.ModelOptionsAmend;
 import org.noear.solon.ai.chat.ChatRole;
 import org.noear.solon.ai.chat.message.AssistantMessage;
@@ -169,12 +174,7 @@ public class SupervisorTask implements NamedTaskComponent {
             return;
         }
 
-        final AssistantMessage responseMessage;
-        if (response.isStream()) {
-            responseMessage = response.getAggregationMessage();
-        } else {
-            responseMessage = response.getMessage();
-        }
+        final AssistantMessage responseMessage = response.getMessage();
 
         if (response.getUsage() != null) {
             trace.getMetrics().addUsage(response.getUsage());
@@ -191,7 +191,8 @@ public class SupervisorTask implements NamedTaskComponent {
             return;
         }
 
-        String clearContent = responseMessage.hasContent() ? responseMessage.getResultContent() : "";
+        // 4.1：取正文走双通道感知路径，避免纯推理轮把思考当成调度决策
+        String clearContent = AgentUtil.getAggregatedResultContent(responseMessage, null);
         String decision = clearContent.trim();
         trace.setLastDecision(decision);
 
@@ -356,21 +357,31 @@ public class SupervisorTask implements NamedTaskComponent {
                         if (trace.getOptions().getStreamSink() == null) {
                             response = req.call();
                         } else {
-                            FluxSink<AgentChunk> sink = trace.getOptions().getStreamSink();
+                            final ChatResponse[] finalResponse = {null};
+                            FluxSink<AgentEvent> sink = trace.getOptions().getStreamSink();
 
                             if (sink.isCancelled()) {
                                 return null;
                             }
 
-                            response = req.stream()
-                                    .takeUntil(r -> sink.isCancelled())
-                                    .doOnNext(resp -> {
-                                        sink.next(new SupervisorChunk(node, trace, resp));
+                            req.stream()
+                                    .takeUntil(event -> sink.isCancelled())
+                                    .doOnNext(event -> {
+                                        if (event.is(ChatEventType.RESPONSE_END)) {
+                                            finalResponse[0] = event.getResponse();
+                                            return;
+                                        }
+
+                                        AssistantMessage delta = ChatEventSupport.message(event);
+                                        if (delta != null && !sink.isCancelled()) {
+                                            sink.next(new SupervisorDeltaEvent(node, trace, null, delta));
+                                        }
                                     })
                                     .blockLast();
+                            response = finalResponse[0];
                         }
 
-                        if (response.isEmpty()) {
+                        if (response == null || response.isEmpty()) {
                             //触发重试
                             throw new LlmNoReturnException("The LLM did not return");
                         }

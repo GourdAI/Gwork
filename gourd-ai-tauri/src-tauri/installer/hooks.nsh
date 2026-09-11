@@ -10,12 +10,11 @@
 ;      给出同一段示例：{ "bundle": { "windows": { "nsis": { "installerHooks": "./windows/hooks.nsh" } } } }
 ;      并列出四个钩子宏名；docs.rs 的 NsisConfig 页面（tauri_utils::config::NsisConfig::installer_hooks）同文。
 ;   3) 官方模板 crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi：顶部
-;      `{{#if installer_hooks}} !include "{{installer_hooks}}" {{/if}}`，Section Install 内
-;      `!ifmacrodef NSIS_HOOK_PREINSTALL` → `!insertmacro NSIS_HOOK_PREINSTALL` → 之后才
-;      `!insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe"` 与 File /a 拷贝资源。
-;      即 PREINSTALL 早于「杀主进程 + 覆盖文件」，正是唯一还来得及释放占用的时机
-;      （与 Electron 线 gourd-ai-desktop/cmd/installer.nsh 里 customInit 所处的位置对位）。
-;   ⇒ 结论：Tauri v2 原生支持该钩子，无需 template 整模板覆盖（也就没有与官方模板漂移的代价）。
+;      `{{#if installer_hooks}} !include "{{installer_hooks}}" {{/if}}`，Section Install 内原生顺序是
+;      PREINSTALL → CheckIfAppIsRunning → File。为保留官方交互确认语义，本项目的 template.nsi
+;      将 PREINSTALL 精确移到 CheckIfAppIsRunning 成功之后、首个 File 之前；静默模式仍由官方宏
+;      自动停止主进程，再由本钩子释放仅限 $INSTDIR 下的 orphan JVM 文件锁。
+;   ⇒ 结论：hooks.nsh 通过 Tauri v2 原生 installerHooks 接入；仅调用时序由本项目模板调整。
 ;
 ; 为什么要这个钩子（故障链，与 Electron 线同源，这里只列本线特有的差异）：
 ;   桌面端启动时拉起 javaw.exe 跑 extraResources\gourd-ai-agent.jar，其执行映像就是安装目录内的
@@ -43,8 +42,11 @@
 ; 两份实现的关系：本文件的 gworkKillProcsUnder 宏与 gourd-ai-desktop/cmd/installer.nsh 里的同名宏
 ;   必须逐字一致（两条安装线共用同一份判杀语义）。改一处就要改另一处，别只改一边。
 ;
-; 刻意不接 NSIS_HOOK_PREUNINSTALL：卸载段的判杀会抢在模板自带的「应用正在运行」确认提示之前把后端
-;   干掉，等于改掉既有交互语义；而覆盖安装与自动更新都走 Section Install，已被 PREINSTALL 覆盖。
+; 卸载段接 NSIS_HOOK_PREUNINSTALL，但**只**在其中做 CLI 终端命令清理，刻意不做进程判杀。
+;   template.nsi 已将该 hook 放到 CheckIfAppIsRunning 成功之后、首个 Delete 之前：交互卸载先由用户确认，
+;   静默卸载则自动通过官方判杀流程。CLI 清理必须在删除应用文件前执行，否则卸载后
+;   ~\.gwork\bin\gwork.bat 与用户 PATH 里的该目录条目残留，且 bat 指向已删除的
+;   $INSTDIR\extraResources\jre —— 详见下方 NSIS_HOOK_PREUNINSTALL 处注释。
 ;
 ; 不要给本文件加 !ifndef 式包含保护：Tauri 的模板会针对安装器与卸载器分别编译同一份源码，
 ;   预处理器状态跨编译趟并不保证重置，加了保护反而可能在第二趟里丢掉宏定义。
@@ -158,8 +160,352 @@
   ClearErrors
 !macroend
 
-; ── 安装段最开始：释放旧文件占用 ────────────────────────────────────────────
+; ── 主进程检查成功之后、复制文件之前：释放旧文件占用 ──────────────────────────
 !macro NSIS_HOOK_PREINSTALL
   DetailPrint "gwork-kill: releasing file locks under $INSTDIR"
   !insertmacro gworkKillProcsUnder "$INSTDIR"
+!macroend
+
+; ── 用户确认之后、删除文件之前：清理 CLI 终端命令与用户 PATH 条目 ─────────────────
+; 为什么必须接这个钩子：App 首启时 cli_provision 会把启动器写进**用户全局区** ~\.gwork\bin，
+;   并把该目录加进用户 PATH（src-tauri/src/cli_provision.rs：HARNESS_HOME = ".gwork"，
+;   bin_dir() = resolve_user_home()\.gwork\bin，Windows 上 resolve_user_home() 取 USERPROFILE；
+;   PATH 由 ensure_path_windows() 写 HKCU\Environment）。全局区不随 $INSTDIR 删除，而模板自带的
+;   卸载逻辑只删 $INSTDIR（template.nsi 的 Section Uninstall：从 "; Delete the app directory"
+;   一直到 RMDir "$INSTDIR" 那一段），于是卸载后 gwork.bat 残留，且 bat 里烤死的
+;   javaw / jar 路径指向已消失的 $INSTDIR\extraResources\jre → 用户命令行里留下一个必然失败的
+;   `gwork` 入口。Electron 线在 gourd-ai-desktop/cmd/installer.nsh:264-281 的 customRemoveFiles
+;   里做了同一件事，本线此前缺失。
+; 为什么调助手 ps1、而不是用 NSIS 原语内联：Tauri 侧**已经有**这份助手 —— cli_provision.rs:657-658
+;   在 provision 时写出 ~\.gwork\bin\desktop-cli-uninstall.ps1，其函数注释（同文件 283-286 行）
+;   明确写着「由卸载器在删除应用文件**之前**调用」，即它本来就是为这个钩子准备的，只是一直没被挂上。
+;   与 Electron 线用的是同一个文件名、同一个 ~\.gwork\bin 路径、同一条 powershell 命令行，
+;   语义天然对齐。反过来若用 NSIS 原语重写一份，就会出现两套判据（启动器归属的 sentinel 匹配、
+;   与独立 CLI 安装模式共存的判定、PATH 条目的精确摘除），必然随时间漂移。
+; 为什么 PREUNINSTALL 而不是 POSTUNINSTALL：助手要求在删除应用文件之前调用；template.nsi 将
+;   `!insertmacro NSIS_HOOK_PREUNINSTALL` 放在 CheckIfAppIsRunning 成功之后、首个 Delete 之前，
+;   同时满足用户确认和助手生命周期要求。助手位于用户主目录，与 $INSTDIR 生命周期无关。
+; 为什么这里**不**做进程判杀：主进程已经由紧邻其前的官方 CheckIfAppIsRunning 处理；重复按名称判杀
+;   没有必要。安装时的 orphan java/javaw 则由 PREINSTALL 按可执行文件完整路径归属处理。
+; PATH 安全性：绝不清空、也绝不重写整个 PATH。摘除逻辑在助手内（cli_provision.rs:305-316）：
+;   先按 $bin 全等比较过滤用户 PATH（$_.TrimEnd("\") -ne $target），只摘掉本项目自己加的那一项；
+;   且仅当目录内已无其它启动器、也不存在 CLI 安装模式（gourd-ai-agent.jar）时才动手；
+;   启动器本身也只删带 SENTINEL（"gourd-ai-desktop-provisioned"）的那几个，独立 CLI 的同名文件不受影响。
+; 助手可能不存在（App 从未启动过 → 从未 provision），故用 ${FileExists} 守卫；调用失败也只
+;   DetailPrint，绝不阻断卸载（与 gworkKillProcsUnder 同一口径）。
+!macro NSIS_HOOK_PREUNINSTALL
+  Push $R6
+  ${if} ${FileExists} "$PROFILE\.gwork\bin\desktop-cli-uninstall.ps1"
+    DetailPrint "gwork-cli: removing 'gwork' terminal command and its user PATH entry"
+    nsExec::ExecToLog 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PROFILE\.gwork\bin\desktop-cli-uninstall.ps1"'
+    Pop $R6
+    ${if} $R6 == "error"
+      ; 企业环境里 powershell 可能被策略禁掉（本机就有 SRP 拦未签名 exe 的先例）；不能因此卡住卸载。
+      DetailPrint "gwork-cli: powershell.exe could not run (absent or policy-blocked); continue uninstall"
+    ${else}
+      DetailPrint "gwork-cli: helper exit code=$R6"
+    ${endif}
+  ${else}
+    DetailPrint "gwork-cli: no helper under $PROFILE\.gwork\bin; nothing to clean"
+  ${endif}
+  Pop $R6
+  ClearErrors
+!macroend
+
+; ── UI 排版修复：宋体 9pt 行距过密 + radio/checkbox 8u 高度裁切文字 ───────────────
+; 证据（2026-09-09 本机实测：Win32 枚举运行中安装器各控件的字体与矩形）：
+;   1) SimpChinese.nlf 的字体是宋体 9，内层对话框的 MS Shell Dlg 在中文系统也落到宋体：
+;      CJK 字形墨迹几乎撑满 em 盒，tmInternalLeading 仅 3px，相邻换行视觉「贴在一起」，
+;      即用户反馈的「换行之间没间隔、文字挤在一起」；
+;   2) 模板维护页 ${NSD_CreateRadioButton} ... 8u 实测高度仅 12px，而正文字体行高
+;      tmHeight=16px，单行文字被上下裁切，即用户反馈的「字被遮挡」
+;      （实测维护页两个 Button rect 406x12、字体 tmH=16）；卸载页复选框同病。
+; 为什么不改模板：与本文件开头同源的理由——整模板覆盖有跟官方升级漂移的代价；
+;   MUI2 留了两个模板未占用的全局注入点（Interface.nsh:299/317）：
+;   MUI_CUSTOMFUNCTION_GUIINIT（安装趟）/ MUI_CUSTOMFUNCTION_UNGUIINIT（卸载趟），
+;   它们在本文件 !include 之后才展开，在这里定义必然生效。
+; 做法：GUIInit 里按 DPI 创建微软雅黑 9pt 常规/粗体与 12pt 粗体（标题用）三把字体，
+;   内层页面控件则由文件尾的 NSD_Create* 包装宏在创建时刻同步设字体 + 补高度：
+;   两级遍历 $HWNDPARENT 子窗（内层对话框与底部按钮）+ 内层对话框子窗（当页控件），
+;   按原字体 weight/字号挑对应雅黑字体 WM_SETFONT（保住 header 标题的粗体与大字号）；
+;   对高度小于「字体像素高+6」的 Button 类控件（radio/checkbox；下一步/取消按钮自身
+;   21px 足够高，天然免疫）MoveWindow 补足高度。全部幂等：字体句柄相同且高度够就
+;   什么都不做，无闪烁；扫一遍约 20 个控件、纯轻量消息，开销可忽略。
+; 字体创建失败的极端环境（雅黑被精简掉）保持宋体原样，绝不让安装器因此异常。
+!define MUI_CUSTOMFUNCTION_GUIINIT GWorkUiInit
+!define MUI_CUSTOMFUNCTION_UNGUIINIT un.GWorkUiInit
+
+Var GWorkFontNormal   ; 雅黑 9pt 常规
+Var GWorkFontBold     ; 雅黑 9pt 粗体
+Var GWorkFontHeader   ; 雅黑 12pt 粗体（header/欢迎页标题）
+Var GWorkFontPx       ; 9pt 的像素高（正数），控件最小高度基准
+Var GWorkLogFontBuf   ; 复用的 92 字节 LOGFONT 缓冲
+Var GWorkRectBuf      ; 复用的 16 字节 RECT 缓冲
+Var GWorkTextBuf      ; 复用的 2048 字节窗体文本缓冲（Static 行wrap测高用）
+
+!macro GWorkUiFontFix SUF
+Function ${SUF}GWorkUiInit
+  ; 9pt -> 像素高，跟随系统 DPI：MulDiv(9, LOGPIXELSY, 72)
+  System::Call 'user32::GetDC(p 0) i .r0'
+  System::Call 'gdi32::GetDeviceCaps(i r0, i 90) i .r1'
+  System::Call 'user32::ReleaseDC(p 0, i r0)'
+  System::Call 'kernel32::MulDiv(i 9, i r1, i 72) i .r2'
+  StrCpy $GWorkFontPx $2
+  IntOp $2 0 - $2
+  ; charset 134 (GB2312)、输出质量 5 (CLEARTYPE)
+  System::Call 'gdi32::CreateFontW(i r2, i 0, i 0, i 0, i 400, i 0, i 0, i 0, i 134, i 3, i 2, i 1, i 5, w "Microsoft YaHei") i .s'
+  Pop $GWorkFontNormal
+  System::Call 'gdi32::CreateFontW(i r2, i 0, i 0, i 0, i 700, i 0, i 0, i 0, i 134, i 3, i 2, i 1, i 5, w "Microsoft YaHei") i .s'
+  Pop $GWorkFontBold
+  System::Call 'kernel32::MulDiv(i 12, i r1, i 72) i .r2'
+  IntOp $2 0 - $2
+  System::Call 'gdi32::CreateFontW(i r2, i 0, i 0, i 0, i 700, i 0, i 0, i 0, i 134, i 3, i 2, i 1, i 5, w "Microsoft YaHei") i .s'
+  Pop $GWorkFontHeader
+  StrCmp $GWorkFontNormal 0 gwork_uiinit_done
+  System::Alloc 92
+  Pop $GWorkLogFontBuf
+  System::Alloc 16
+  Pop $GWorkRectBuf
+  System::Alloc 2048
+  Pop $GWorkTextBuf
+  SendMessage $HWNDPARENT 0x0030 $GWorkFontNormal 1   ; WM_SETFONT
+  Call ${SUF}GWorkApplyFonts
+  ; 全局定时器：hwnd=0 不被页面切换销毁，每页新建的控件 25ms 内被扫到
+  gwork_uiinit_done:
+FunctionEnd
+
+
+Function ${SUF}GWorkApplyFonts
+  StrCmp $GWorkFontNormal 0 gwork_af_done
+  Push $R0
+  Push $R1
+  StrCpy $R0 0
+  gwork_af_l1:
+  System::Call 'user32::FindWindowEx(p $HWNDPARENT, p R0, p 0, p 0) i .R0'
+  StrCmp $R0 0 gwork_af_done2
+  Push $R0
+  Call ${SUF}GWorkApplyOne
+  StrCpy $R1 0
+  gwork_af_l2:
+  System::Call 'user32::FindWindowEx(p R0, p R1, p 0, p 0) i .R1'
+  StrCmp $R1 0 gwork_af_l1
+  Push $R1
+  Call ${SUF}GWorkApplyOne
+  Goto gwork_af_l2
+  gwork_af_done2:
+  Pop $R1
+  Pop $R0
+  gwork_af_done:
+FunctionEnd
+
+; 栈顶取 hwnd；恢复所有用到的寄存器，保证对调用者零副作用
+Function ${SUF}GWorkApplyOne
+  Exch $R9
+  Push $R8
+  Push $R7
+  Push $R6
+  Push $R5
+  Push $R4
+  Push $R3
+  Push $R2
+  Push $R1
+  Push $R0
+
+  ; ── 高度补足：仅 Button 类且高度不够者 ──
+  System::Call 'user32::GetClassName(p R9, t .R0, i 64)'
+  StrCmp $R0 "Button" 0 gwork_ao_font
+  System::Call 'user32::GetWindowRect(p R9, p $GWorkRectBuf)'
+  System::Call '*$GWorkRectBuf(i .R4, i .R3, i .R2, i .R1)'   ; left,top,right,bottom（屏幕坐标）
+  IntOp $R5 $R1 - $R3
+  IntOp $R6 $GWorkFontPx + 6
+  IntCmp $R5 $R6 gwork_ao_font gwork_ao_move gwork_ao_font    ; 已够高就跳过
+  gwork_ao_move:
+  System::Call 'user32::GetParent(p R9) i .R7'
+  System::Call 'user32::MapWindowPoints(p 0, p R7, p $GWorkRectBuf, i 2)'
+  System::Call '*$GWorkRectBuf(i .R4, i .R3, i .R2, i .R1)'   ; 转父窗客户区坐标
+  IntOp $R2 $R2 - $R4
+  System::Call 'user32::MoveWindow(p R9, i R4, i R3, i R2, i R6, i 1)'
+
+  ; ── 字体替换：按原 weight/字号选雅黑，幂等 ──
+  gwork_ao_font:
+  SendMessage $R9 0x0031 0 0 $R8                              ; WM_GETFONT
+  StrCmp $R8 0 gwork_ao_wN
+  System::Call 'gdi32::GetObjectW(i R8, i 92, p $GWorkLogFontBuf)'
+  System::Call '*$GWorkLogFontBuf(i .R6, i .R7, i .R7, i .R7, i .R5)'  ; R6=lfHeight, R5=lfWeight
+  IntCmpU $R5 600 gwork_ao_wN gwork_ao_wN gwork_ao_chkBig
+  gwork_ao_chkBig:
+  IntCmp $R6 -14 gwork_ao_wH gwork_ao_wH gwork_ao_wB          ; <=-14px 视为标题级字号
+  gwork_ao_wH:
+  StrCpy $R7 $GWorkFontHeader
+  Goto gwork_ao_have
+  gwork_ao_wB:
+  StrCpy $R7 $GWorkFontBold
+  Goto gwork_ao_have
+  gwork_ao_wN:
+  StrCpy $R7 $GWorkFontNormal
+  gwork_ao_have:
+  StrCmp $R8 $R7 gwork_ao_done
+  SendMessage $R9 0x0030 $R7 1                                ; WM_SETFONT + 重绘
+
+  ; ── 内层 Static：按实际行wrap高度补足控件高（原生页 DirText / finish 文本等）──
+  System::Call 'user32::GetParent(p R9) i .R8'
+  StrCmp $R8 $HWNDPARENT gwork_ao_done                        ; 外层对话框自带控件（header 等）不动
+  System::Call 'user32::GetClassName(p R9, t .R7, i 64)'
+  StrCmp $R7 "Static" 0 gwork_ao_done
+  System::Call 'user32::GetWindowText(p R9, p $GWorkTextBuf, i 1024)'
+  System::Call 'user32::GetWindowRect(p R9, p $GWorkRectBuf)'
+  System::Call '*$GWorkRectBuf(i .R4, i .R3, i .R2, i .R1)'
+  IntOp $R5 $R1 - $R3
+  IntOp $R6 $R2 - $R4
+  System::Call '*$GWorkRectBuf(i 0, i 0, i R6, i 0)'
+  System::Call 'user32::GetDC(p R9) i .R8'
+  SendMessage $R9 0x0031 0 0 $R7
+  System::Call 'gdi32::SelectObject(i R8, i R7) i .R1'
+  System::Call 'user32::DrawTextW(i R8, p $GWorkTextBuf, i -1, p $GWorkRectBuf, i 0x410)'  ; DT_CALCRECT|DT_WORDBREAK
+  System::Call 'gdi32::SelectObject(i R8, i R1)'
+  System::Call 'user32::ReleaseDC(p R9, i R8)'
+  System::Call '*$GWorkRectBuf(i .R4, i .R3, i .R2, i .R1)'
+  IntOp $R1 $R1 - $R3
+  IntOp $R1 $R1 + 2
+  IntCmp $R5 $R1 gwork_ao_done gwork_ao_move2 gwork_ao_done
+  gwork_ao_move2:
+  System::Call 'user32::GetWindowRect(p R9, p $GWorkRectBuf)'
+  System::Call 'user32::GetParent(p R9) i .R8'
+  System::Call 'user32::MapWindowPoints(p 0, p R8, p $GWorkRectBuf, i 2)'
+  System::Call '*$GWorkRectBuf(i .R4, i .R3, i .R2, i .R6)'
+  IntOp $R2 $R2 - $R4
+  System::Call 'user32::MoveWindow(p R9, i R4, i R3, i R2, i R1, i 1)'
+  gwork_ao_done:
+  Pop $R0
+  Pop $R1
+  Pop $R2
+  Pop $R3
+  Pop $R4
+  Pop $R5
+  Pop $R6
+  Pop $R7
+  Pop $R8
+  Pop $R9
+FunctionEnd
+!macroend
+
+!insertmacro GWorkUiFontFix ""
+; ── 显式契约：上一行展开之后，Function GWorkApplyFonts 才真实存在 ───────────────────
+; template.nsi 尾部的 Function GWorkNativePageShow 会 Call GWorkApplyFonts，而该 Function 不是
+; 模板自带的，是上面这个宏（SUF="" 那次展开）生成的。NSIS 没有「某个 Function 是否存在」的
+; 内建判断，所以只能靠「定义方 !define + 使用方 !ifdef」这种显式契约：一旦有人删掉
+; tauri.conf.json 的 bundle.windows.nsis.installerHooks，hooks.nsh 整个不再被 include，
+; template.nsi 那句 Call 会直接以 "Function not found" 编译失败，且报错不指向真因。
+; 包含顺序已核实（下面一律用锚点而不是行号描述，行号会随模板改版漂移）：template.nsi 里
+; `{{#if installer_hooks}} !include "{{installer_hooks}}" {{/if}}` 紧跟在 !include MUI2.nsh 等头部
+; include 群之后、所有 !define 与 Section 之前；而 Call GWorkApplyFonts 在文件最末尾的
+; Function GWorkNativePageShow 内。故本 !define 必然先于那边的 !ifdef 求值。
+; 放在这一行（而不是宏体内）的原因：宏会被 SUF="" 与 SUF="un." 展开两次，写在宏体内会
+; "already defined"；而 un.GWorkApplyFonts 的存在并不代表 GWorkApplyFonts 存在，故契约只跟
+; SUF="" 这次展开绑定。
+!define GWORK_APPLY_FONTS_DEFINED
+!insertmacro GWorkUiFontFix "un."
+
+; ── 内层控件：创建时刻同步设字体 + 补足高度（NSD_Create* 包装宏）─────────────
+; 为什么不用全局定时器：System 插件 'k' 回调只在创建它的那次 System::Call 内同步有效
+;   （实测 SetTimer 返回成功但回调永不触发）；MUI_PAGE_CUSTOMFUNCTION_SHOW 每页消费后
+;   即 !undef（Pages.nsh:109），hooks 无法全局注入。但所有内层控件都经 nsDialogs 的
+;   NSD_Create* 出生 —— 它们是 !define（nsDialogs.nsh:406-408 由 __NSD_DefineControl 生成），
+;   可以 !undef + !define 重定义：包一层，在原插件调用创建控件后（hwnd 在栈顶）同步
+;   WM_SETFONT 雅黑 + 对过矮控件 MoveWindow 补高，栈形态不变（Exch 进出各一次）。
+; 跳转写法：GWorkNSD_FixBtn 曾在宏体内用相对跳转（IntCmp +N），理由是本宏会在多处展开、固定标号
+;   会重定义冲突。但相对跳转要求人肉数指令条数，而「!insertmacro 本身不算一条指令，宏展开后
+;   其中每条运行时指令各算一条」（NSIS 手册 4.4 Relative Jumps），一旦增删一行就整体错位 ——
+;   本文件已经错过两处（原 404 / 410 行，均少算一条）。现改用 ${__COUNTER__} 生成每次展开
+;   唯一的绝对标号，既免去数数，又不冲突。
+;   GWorkNSD_Fix（下面只设字体的短宏）也使用 StrCmp 做零值判断：零句柄安全跳过，
+;   非零句柄明确继续执行 WM_SETFONT，不依赖 IntCmp 三分支位置语义。
+
+!macro GWorkNSD_Fix
+  !define GWORK_FIX_DONE gwork_fix_done_${__COUNTER__}
+  Exch $R9
+  Push $R8
+  StrCmp $GWorkFontNormal 0 ${GWORK_FIX_DONE}
+  SendMessage $R9 0x0030 $GWorkFontNormal 1
+  ${GWORK_FIX_DONE}:
+  Pop $R8
+  Exch $R9
+  !undef GWORK_FIX_DONE
+!macroend
+
+!macro GWorkNSD_Label x y w h t
+  nsDialogs::CreateControl ${__NSD_Label_CLASS} ${__NSD_Label_STYLE} ${__NSD_Label_EXSTYLE} ${x} ${y} ${w} ${h} ${t}
+  !insertmacro GWorkNSD_Fix
+!macroend
+!macro GWorkNSD_RadioButton x y w h t
+  nsDialogs::CreateControl ${__NSD_RadioButton_CLASS} ${__NSD_RadioButton_STYLE} ${__NSD_RadioButton_EXSTYLE} ${x} ${y} ${w} ${h} ${t}
+  !insertmacro GWorkNSD_FixBtn
+!macroend
+!macro GWorkNSD_CheckBox x y w h t
+  nsDialogs::CreateControl ${__NSD_CheckBox_CLASS} ${__NSD_CheckBox_STYLE} ${__NSD_CheckBox_EXSTYLE} ${x} ${y} ${w} ${h} ${t}
+  !insertmacro GWorkNSD_FixBtn
+!macroend
+!macro GWorkNSD_Text x y w h t
+  nsDialogs::CreateControl ${__NSD_Text_CLASS} ${__NSD_Text_STYLE} ${__NSD_Text_EXSTYLE} ${x} ${y} ${w} ${h} ${t}
+  !insertmacro GWorkNSD_Fix
+!macroend
+
+!undef NSD_CreateLabel
+!define NSD_CreateLabel "!insertmacro GWorkNSD_Label "
+!undef NSD_CreateRadioButton
+!define NSD_CreateRadioButton "!insertmacro GWorkNSD_RadioButton "
+!undef NSD_CreateCheckBox
+!define NSD_CreateCheckBox "!insertmacro GWorkNSD_CheckBox "
+!undef NSD_CreateText
+!define NSD_CreateText "!insertmacro GWorkNSD_Text "
+
+
+; Button 族（radio/checkbox）专用：设字体 + 补足被 8u 裁切的高度（模板里 Next/Cancel 等
+;   _pushbutton 不走这两个包装宏，天然不受影响；Label/Text 只设字体不动几何，避免误压）
+; 句柄使用 StrCmp 做零值判断；高度比较仍用 IntCmp，等于或大于目标高度时跳到收尾段。
+; 标号名带 ${__COUNTER__}：本宏经 NSD_CreateRadioButton / NSD_CreateCheckBox 在多处展开，
+;   固定标号会 "label already declared"；${__COUNTER__} 每次展开自增，!define 在展开时求值、
+;   !undef 在展开末尾释放，下一次展开拿到新号（NSIS 3.11 自带 x64.nsh:76 就是同一写法：
+;   !define GetNativeMachineArchitecture_lbl lbl_GNMA_${__COUNTER__}）。
+; 标号是编译期符号、不占指令位，所以加标号不会改变任何指令编号，栈形态与寄存器用途完全不变。
+!macro GWorkNSD_FixBtn
+  !define GWORK_FBTN_DONE gwork_fb_done_${__COUNTER__}
+  Exch $R9
+  Push $R8
+  Push $R7
+  Push $R6
+  Push $R5
+  Push $R4
+  Push $R3
+  Push $R2
+  Push $R1
+  ; 雅黑句柄为零则整段跳过；非零句柄必须继续执行字体与高度逻辑。
+  StrCmp $GWorkFontNormal 0 ${GWORK_FBTN_DONE}
+  SendMessage $R9 0x0030 $GWorkFontNormal 1
+  System::Call 'user32::GetWindowRect(p R9, p $GWorkRectBuf)'
+  System::Call '*$GWorkRectBuf(i .R4, i .R3, i .R2, i .R1)'
+  IntOp $R5 $R1 - $R3
+  IntOp $R8 $GWorkFontPx + 6
+  ; 已够高（$R5 == $R8）或更高（$R5 > $R8）都直接进收尾，跳过补高。
+  ; 原写法 IntCmp $R5 $R8 +5 0 +5 少算一条：+5 从本条（第 16 条）落在第 21 条 MoveWindow 上，
+  ; 而不是第 22 条 Pop $R1。后果比「分支永不生效」更糟 —— 它跳过了 GetParent / MapWindowPoints /
+  ; RECT 回读 / IntOp $R2-$R4 这四条，$R4/$R3/$R2 仍是第 13 条读出的**屏幕**坐标，
+  ; MoveWindow 拿屏幕坐标当父窗客户区坐标用 → 控件被挪到错误位置，并被强制压到 $R8 高度。
+  IntCmp $R5 $R8 ${GWORK_FBTN_DONE} 0 ${GWORK_FBTN_DONE}
+  System::Call 'user32::GetParent(p R9) i .R7'
+  System::Call 'user32::MapWindowPoints(p 0, p R7, p $GWorkRectBuf, i 2)'
+  System::Call '*$GWorkRectBuf(i .R4, i .R3, i .R2, i .R1)'
+  IntOp $R2 $R2 - $R4
+  System::Call 'user32::MoveWindow(p R9, i R4, i R3, i R2, i R8, i 1)'
+  ${GWORK_FBTN_DONE}:
+  Pop $R1
+  Pop $R2
+  Pop $R3
+  Pop $R4
+  Pop $R5
+  Pop $R6
+  Pop $R7
+  Pop $R8
+  Exch $R9
+  !undef GWORK_FBTN_DONE
 !macroend

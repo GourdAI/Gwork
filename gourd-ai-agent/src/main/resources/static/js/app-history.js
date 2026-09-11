@@ -866,7 +866,8 @@ function loadMoreMessages(sess) {
     // 保留加载按钮并置为 loading：旧实现在发请求时就把按钮整个移除，响应返回前
     // 顶部凭空矮了一截（约 54px），内容当场上跳；现在交由 updateLoadMoreBtn 在
     // prepend 后、锚定修正前重建，高度变化能被锚点整体吸收。
-    $(sess.container).prev('.chat-load-more-wrapper').find('.chat-load-more-btn').addClass('loading');
+    // 统一走 setLoadMoreBtnLoading 换环形 spinner：只加 .loading 类会让空闲态的
+    // 上箭头图标原地旋转，观感是「箭头在转」而非加载。
 
     $.get('/web/chat/replay?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ
             + '&rounds=' + REPLAY_PAGE_ROUNDS + beforeQ, function(rp) {
@@ -934,22 +935,28 @@ function updateLoadMoreBtn(sess) {
         $btn.find('.chat-load-more-btn').on('click', function() {
             var $this = $(this);
             if ($this.hasClass('loading')) return;
-            $this.addClass('loading').html(
-                '<svg class="load-more-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-                    '<line x1="12" y1="2" x2="12" y2="6"></line>' +
-                    '<line x1="12" y1="18" x2="12" y2="22"></line>' +
-                    '<line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line>' +
-                    '<line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line>' +
-                    '<line x1="2" y1="12" x2="6" y2="12"></line>' +
-                    '<line x1="18" y1="12" x2="22" y2="12"></line>' +
-                    '<line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line>' +
-                    '<line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line>' +
-                '</svg>' +
-                GourdI18n.t('history.loading')
-            );
+            $this.addClass('loading').html(loadMoreLoadingHtml());
             loadMoreMessages(sess);
         });
     }
+}
+
+/* 加载更多按钮的加载态内容：环形 spinner（淡底全环 + 亮色弧段，旋转即经典加载环）+ 加载文案。
+   旧实现里自动加载路径只加 .loading 类，CSS 旋转的是空闲态的上箭头图标——
+   观感为「一个箭头原地转圈」，更像「返回上一页」的动作而非加载指示。
+   现在点击、滚动自动加载、请求在途三处入口统一经 setLoadMoreBtnLoading 换成本内容。 */
+function loadMoreLoadingHtml() {
+    return '<svg class="load-more-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">' +
+               '<circle cx="12" cy="12" r="9" stroke-opacity="0.25"></circle>' +
+               '<path d="M21 12a9 9 0 0 0-9-9"></path>' +
+           '</svg>' +
+           GourdI18n.t('history.loading');
+}
+function setLoadMoreBtnLoading(sess) {
+    if (!sess || !sess.container) return;
+    var $btn = $(sess.container).prev('.chat-load-more-wrapper').find('.chat-load-more-btn');
+    if (!$btn.length || $btn.hasClass('loading')) return;
+    $btn.addClass('loading').html(loadMoreLoadingHtml());
 }
 
 /* 向上滚动到顶部附近时自动加载上一页（按钮保留作为显式入口与加载态提示）。
@@ -959,7 +966,7 @@ $(messagesWrap).on('scroll', function() {
     var sess = activeSessionId && sessionMap ? sessionMap[activeSessionId] : null;
     if (!sess || !sess._replayHasMore) return;
     if (sess._replayLoadingMore || sess._replaying || sess._gateBuffering) return;
-    $(sess.container).prev('.chat-load-more-wrapper').find('.chat-load-more-btn').addClass('loading');
+    setLoadMoreBtnLoading(sess);
     loadMoreMessages(sess);
 });
 
@@ -999,11 +1006,18 @@ function drainGateBuffer(sess) {
     var buf = sess._gateBuffer || [];
     sess._gateBuffer = [];
     sess._gateBufferOverflowed = false;
+    // 缓冲中的 done 帧经 dispatchGateChunk 时，会把当前 _gateBuffering 视为「恢复进行中」，
+    // 在 finishStream 后重新武装 _recovering/_gateBuffering（该语义本为防止恢复分页的中间轮
+    // done 关闭恢复态）。排空场景下这次重武装是误伤：_recovering 残留 true 会让 onmessage
+    // 把后续全部实时帧永久缓冲，流式界面卡死到下次重连。故排空前快照、排空后复原。
+    var recoveringBefore = sess._recovering;
+    var doneDrained = false;
     buf.sort(function(a, b) {
         return Number(a && a.eventSeq || 0) - Number(b && b.eventSeq || 0);
     });
     for (var i = 0; i < buf.length; i++) {
         var c = buf[i];
+        if (c && c.type === 'done') doneDrained = true;
         try {
             if (c && c.eventSeq) {
                 applySequencedGateChunk(sess, c);
@@ -1013,7 +1027,45 @@ function drainGateBuffer(sess) {
             }
         } catch (e) {}
     }
+    sess._recovering = recoveringBefore;
     sess._gateBuffering = false;
+    // 缓冲里的 done 已借 finishStream 收尾本轮，但当时 _suppressQueueDispatch 抑制了队列派发；
+    // 排空后若已不在流式/回放态，补一次派发（与 recoverStreamingSession 收尾对齐），
+    // 避免排队消息因一次上拉加载而永久滞留。
+    if (doneDrained && !sess.isStreaming && !sess._replaying
+            && window.messageQueue && typeof processMessageQueue === 'function') {
+        processMessageQueue(sess.sessionId);
+    }
+}
+
+/* 快照会话「正在进行」的实时流渲染状态，供 prepend 回放结束后原样恢复。
+   任务执行中用户上拉加载更早历史时，replaySession 的 resetStreamState 会清掉
+   currentBubbleEl/reasonBuffer/思考块/工具卡等引用；若不快照，缓冲实时帧排空时会在
+   容器尾部另起一个新气泡——进行中的回复被劈成「冻结半截 + 新开半截」，思考块与工具卡
+   重复出现，即「上拉加载把正在对话的区域弄乱」的老问题残遗变体。
+   无进行中的实时输出时返回 null，行为与旧版完全一致。 */
+function captureLiveStreamState(sess) {
+    var isLive = sess.isStreaming || sess.currentBubbleEl || sess.thinkingBlockEl || sess.pendingToolCard;
+    if (!isLive) return null;
+    return {
+        wasStreaming: !!sess.isStreaming,
+        currentBubbleEl: sess.currentBubbleEl,
+        reasonBuffer: sess.reasonBuffer || '',
+        thinkingBlockEl: sess.thinkingBlockEl,
+        thinkingBodyMdEl: sess.thinkingBodyMdEl,
+        thinkingBodyWrapEl: sess.thinkingBodyWrapEl,
+        thinkingBuffer: sess.thinkingBuffer || '',
+        currentRunId: sess.currentRunId,
+        pendingToolCard: sess.pendingToolCard,
+        pendingToolStarted: sess.pendingToolStarted,
+        approvedToolCard: sess.approvedToolCard,
+        toolCardsById: sess.toolCardsById,
+        toolBatchesById: sess.toolBatchesById,
+        completedActionIds: sess.completedActionIds,
+        agentCards: sess.agentCards,
+        agentStates: sess.agentStates,
+        agentStateLast: sess._agentStateLast
+    };
 }
 
 /* 流式过程回放：把 replay 事件序列喂给与实时流完全相同的渲染管线（onWebChunk + finishStream），
@@ -1028,6 +1080,9 @@ function drainGateBuffer(sess) {
    */
 function replaySession(sess, events, prepend, keepOpen) {
     var realContainer = sess.container;
+    // prepend 回放且会话存在进行中的实时流时先快照（replayDone 里恢复，见 captureLiveStreamState）；
+    // 初始加载（prepend=false）走原有 resumeState 逻辑，不受影响。
+    var liveState = prepend ? captureLiveStreamState(sess) : null;
     var tempDiv = document.createElement('div');
     sess.container = tempDiv;
     sess._replaying = true;
@@ -1050,7 +1105,23 @@ function replaySession(sess, events, prepend, keepOpen) {
             removeThinking(sess);
             purgeInlineThinking(sess);
             finishThinkingBlock(sess);
+            finishAgentThinkingBlock(sess);
             finishPendingTool(sess);
+            // R10 修复：回放收尾必须与 finishStream 同等彻底。
+            // 旧实现只清主线路思考块与待定工具卡，遗漏了工具卡 / 智能体卡的 loading 闪烁态，
+            // 导致历史消息里固化了「绿点永久闪 + 计时器一直跳」——重开旧会话即可复现。
+            // 回放路径不会再接收任何帧，故直接全量清 loading（包括批量卡，它不会再有批次完整性检查）。
+            if (sess.container) {
+                $(sess.container).find('.tool-status-icon.loading').each(function() {
+                    this.className = 'tool-status-icon warn';
+                    this.innerHTML = '';
+                });
+                $(sess.container).find('.agent-status-icon.loading').each(function() {
+                    this.className = 'agent-status-icon done';
+                });
+                $(sess.container).find('.agent-card-streaming').removeClass('agent-card-streaming');
+                $(sess.container).find('.thinking-block.streaming').removeClass('streaming');
+            }
             resetStreamState(sess);
             purgeEmptyMdBlocks(sess.container);
         }
@@ -1076,6 +1147,12 @@ function replaySession(sess, events, prepend, keepOpen) {
                             continue;
                         }
                         if (chunk.type === 'done') { endTurn(); resetStreamState(sess); continue; }
+                        /* file_changes 是被动 run 快照：回放时也不得为了复用渲染入口临时置
+                           isStreaming=true，否则对账与流状态语义会被元数据事件污染。 */
+                        if (chunk.type === 'file_changes') {
+                            onWebChunk(sess, chunk);
+                            continue;
+                        }
 
                         sess.isStreaming = true;
                         onWebChunk(sess, chunk);
@@ -1197,24 +1274,30 @@ function replaySession(sess, events, prepend, keepOpen) {
         // 回放结束，清空 Markdown 缓存并清理临时流状态。
         if (typeof clearMdCache === 'function') clearMdCache();
         resetStreamState(sess);
-        if (resumeState) {
-            sess.currentBubbleEl = resumeState.currentBubbleEl;
-            sess.reasonBuffer = resumeState.reasonBuffer;
-            sess.thinkingBlockEl = resumeState.thinkingBlockEl;
-            sess.thinkingBodyMdEl = resumeState.thinkingBodyMdEl;
-            sess.thinkingBodyWrapEl = resumeState.thinkingBodyWrapEl;
-            sess.thinkingBuffer = resumeState.thinkingBuffer;
-            sess.currentRunId = resumeState.currentRunId;
-            sess.pendingToolCard = resumeState.pendingToolCard;
-            sess.pendingToolStarted = resumeState.pendingToolStarted;
-            sess.approvedToolCard = resumeState.approvedToolCard;
-            sess.toolBatchesById = resumeState.toolBatchesById || {};
-            sess.toolCardsById = resumeState.toolCardsById;
-            sess.agentCards = resumeState.agentCards;
-            sess.agentStates = resumeState.agentStates;
-            sess._agentStateLast = resumeState.agentStateLast;
-            sess.isStreaming = true;
-            if (sess.sessionId === activeSessionId) { isStreaming = true; setBtnStopMode(); }
+        // 恢复进行中的渲染状态：初始加载用 resumeState（服务端任务仍在跑），
+        // prepend 回放用 liveState（回放开始前对实时流的快照）。恢复后缓冲实时帧排空时
+        // 会继续写回原气泡/思考块/工具卡，而不是在容器尾部另起炉灶把进行中的回复劈成两半。
+        var restoreState = resumeState || liveState;
+        if (restoreState) {
+            sess.currentBubbleEl = restoreState.currentBubbleEl;
+            sess.reasonBuffer = restoreState.reasonBuffer;
+            sess.thinkingBlockEl = restoreState.thinkingBlockEl;
+            sess.thinkingBodyMdEl = restoreState.thinkingBodyMdEl;
+            sess.thinkingBodyWrapEl = restoreState.thinkingBodyWrapEl;
+            sess.thinkingBuffer = restoreState.thinkingBuffer;
+            sess.currentRunId = restoreState.currentRunId;
+            sess.pendingToolCard = restoreState.pendingToolCard;
+            sess.pendingToolStarted = restoreState.pendingToolStarted;
+            sess.approvedToolCard = restoreState.approvedToolCard;
+            sess.toolBatchesById = restoreState.toolBatchesById || {};
+            sess.toolCardsById = restoreState.toolCardsById || {};
+            sess.completedActionIds = restoreState.completedActionIds || {};
+            sess.agentCards = restoreState.agentCards;
+            sess.agentStates = restoreState.agentStates;
+            sess._agentStateLast = restoreState.agentStateLast;
+            var liveAgain = restoreState.wasStreaming !== false;
+            sess.isStreaming = liveAgain;
+            if (liveAgain && sess.sessionId === activeSessionId) { isStreaming = true; setBtnStopMode(); }
         }
 
         // 回放事件已经被渲染，更新稳定游标；否则下次断线恢复会重复渲染已回放事件。
@@ -1227,6 +1310,11 @@ function replaySession(sess, events, prepend, keepOpen) {
         // 注意：prepend 时视口锚锁仍生效——缓冲里的 done 帧会走 finishStream →
         // scrollToBottom(true)，不锁住就会把刚对齐的视口直接拽到底部。
         drainGateBuffer(sess);
+
+        // 回放期新建的文件变更卡片在这里统一补对账。file_changes 是被动事件，不会临时进入
+        // streaming 态；但回放 DOM 仍先建在临时容器中，所以必须等节点移入真实容器后再请求，
+        // 确保对账响应回填时 upsert 能命中并原地更新已有卡片。
+        if (typeof window.flushFileChangesReplayReconcile === 'function') window.flushFileChangesReplayReconcile(sess);
 
         if (!prepend) {
             // 初始加载：滚动到底部，然后显示/隐藏加载按钮

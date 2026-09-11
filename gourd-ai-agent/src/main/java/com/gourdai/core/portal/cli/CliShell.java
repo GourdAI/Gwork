@@ -15,9 +15,9 @@
  */
 package com.gourdai.core.portal.cli;
 
-import com.gourdai.agent.react.task.ObservationChunk;
-import com.gourdai.agent.react.task.ReasonChunk;
-import com.gourdai.agent.react.task.ThoughtChunk;
+import com.gourdai.agent.event.ToolCallEndEvent;
+import com.gourdai.agent.event.ReasonDeltaEvent;
+import com.gourdai.agent.event.ReasonEndEvent;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
@@ -29,11 +29,11 @@ import org.noear.solon.Utils;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.util.AgentUtil;
 import com.gourdai.agent.react.ReActAgent;
-import com.gourdai.agent.react.ReActChunk;
+import com.gourdai.agent.event.RunEndEvent;
 import com.gourdai.agent.react.ReActTrace;
-import com.gourdai.harness.agent.RetryChunk;
-import com.gourdai.harness.agent.AgentStartChunk;
-import com.gourdai.harness.agent.AgentEndChunk;
+import com.gourdai.harness.agent.RetryEvent;
+import com.gourdai.harness.agent.AgentStartEvent;
+import com.gourdai.harness.agent.AgentEndEvent;
 import com.gourdai.agent.react.intercept.HITL;
 import com.gourdai.agent.react.intercept.HITLDecision;
 import com.gourdai.agent.react.intercept.HITLTask;
@@ -203,7 +203,7 @@ public class CliShell implements Runnable {
                 }
 
                 // 直接返回 ReAct 完成时的权威全文（goal 检查依赖此返回值）。
-                // 含 [GOAL_ACHIEVED] 的全文来自 ReActChunk，必须以此为准。
+                // 含 [GOAL_ACHIEVED] 的全文来自 RunEndEvent，必须以此为准。
                 return safeChatInput(session, effectiveInput);
             });
         }
@@ -373,26 +373,26 @@ public class CliShell implements Runnable {
                     .stream()
                     .subscribeOn(Schedulers.boundedElastic())
                     .doOnNext(chunk -> {
-                        if (chunk instanceof ReasonChunk) {
-                            // ReasonChunk （思考）为增量块（工具调用时为全量，不需要打印）
-                            onReasonChunk((ReasonChunk) chunk, isFirstReasonDeltaChunk, isFirstConversation);
-                        } else if (chunk instanceof ThoughtChunk) {
-                            //ThoughtChunk （想法）为完成块
-                            onThoughtChunk((ThoughtChunk) chunk);
-                        } else if (chunk instanceof ObservationChunk) {
-                            //ObservationChunk 为全量，一次工具调用产生一个 ObservationChunk
-                            onObservationChunk((ObservationChunk) chunk, isFirstReasonDeltaChunk);
-                        } else if (chunk instanceof AgentStartChunk) {
+                        if (chunk instanceof ReasonDeltaEvent) {
+                            // ReasonDeltaEvent 为思考或正文的增量块（按 isThinking() 区分；工具调用时为全量，不需要打印）
+                            onReasonDeltaEvent((ReasonDeltaEvent) chunk, isFirstReasonDeltaChunk, isFirstConversation);
+                        } else if (chunk instanceof ReasonEndEvent) {
+                            //ReasonEndEvent 为一轮推理的完成块（同时承载思考与正文，经 getThinking()/getText() 物理分离）
+                            onReasonEndEvent((ReasonEndEvent) chunk);
+                        } else if (chunk instanceof ToolCallEndEvent) {
+                            //ToolCallEndEvent 为全量，一次工具调用产生一个 ToolCallEndEvent
+                            onToolCallEndEvent((ToolCallEndEvent) chunk, isFirstReasonDeltaChunk);
+                        } else if (chunk instanceof AgentStartEvent) {
                             // 子代理启动：打印紫色提示
-                            terminal.writer().println("\n" + PURPLE + "  ⟳ Sub-agent started: " + ((AgentStartChunk) chunk).getAgentName() + RESET);
-                            String desc = ((AgentStartChunk) chunk).getDescription();
+                            terminal.writer().println("\n" + PURPLE + "  ⟳ Sub-agent started: " + ((AgentStartEvent) chunk).getAgentName() + RESET);
+                            String desc = ((AgentStartEvent) chunk).getDescription();
                             if (Assert.isNotEmpty(desc)) {
                                 terminal.writer().println(DIM + "    " + desc + RESET);
                             }
                             terminal.flush();
-                        } else if (chunk instanceof AgentEndChunk) {
+                        } else if (chunk instanceof AgentEndEvent) {
                             // 子代理结束：打印完成/失败提示
-                            AgentEndChunk aec = (AgentEndChunk) chunk;
+                            AgentEndEvent aec = (AgentEndEvent) chunk;
                             if (aec.isSuccess()) {
                                 terminal.writer().println(GREEN + "  ✓ Sub-agent completed: " + aec.getAgentName() + RESET);
                             } else {
@@ -403,13 +403,13 @@ public class CliShell implements Runnable {
                                 terminal.writer().println(DIM + "    " + summary + RESET);
                             }
                             terminal.flush();
-                        } else if (chunk instanceof RetryChunk) {
-                            //RetryChunk 模型调用失败自动重试时推送，提示"正在重试 N/M"
-                            terminal.writer().println("\n" + YELLOW + "  ⟳ " + ((RetryChunk) chunk).toText() + RESET);
+                        } else if (chunk instanceof RetryEvent) {
+                            //RetryEvent 模型调用失败自动重试时推送，提示"正在重试 N/M"
+                            terminal.writer().println("\n" + YELLOW + "  ⟳ " + ((RetryEvent) chunk).toText() + RESET);
                             terminal.flush();
-                        } else if (chunk instanceof ReActChunk) {
-                            // ReActChunk 为全量，ReAct 完成任务时的最后答复
-                            String answer = onFinalChunk((ReActChunk) chunk, turnStartMs);
+                        } else if (chunk instanceof RunEndEvent) {
+                            // RunEndEvent 为全量，ReAct 完成任务时的最后答复
+                            String answer = onRunEndEvent((RunEndEvent) chunk, turnStartMs);
                             if (Assert.isNotEmpty(answer)) {
                                 finalAnswer.set(answer);
                             }
@@ -567,7 +567,7 @@ public class CliShell implements Runnable {
         return seconds + "s";
     }
 
-    private String onFinalChunk(ReActChunk react, long turnStartMs) {
+    private String onRunEndEvent(RunEndEvent react, long turnStartMs) {
         StringBuilder traceInfo = getTraceInfo(react.getTrace(), turnStartMs);
 
         if (traceInfo.length() > 4) {
@@ -578,21 +578,21 @@ public class CliShell implements Runnable {
         return clearThink(react.getContent());
     }
 
-    private void onReasonChunk(ReasonChunk reason, AtomicBoolean isFirstReasonDeltaChunk, AtomicBoolean isFirstConversation) {
+    private void onReasonDeltaEvent(ReasonDeltaEvent reason, AtomicBoolean isFirstReasonDeltaChunk, AtomicBoolean isFirstConversation) {
         if (!reason.isToolCalls() && reason.hasContent()) {
             String delta = clearThink(reason.getContent());
 
             if (reason.getMessage().isThinking()) {
                 if (agentProps.getGeneral().getCliThinkPrinted()) {
-                    onReasonDeltaChunkDo(DIM + delta + RESET, isFirstReasonDeltaChunk, isFirstConversation);
+                    writeReasonDelta(DIM + delta + RESET, isFirstReasonDeltaChunk, isFirstConversation);
                 }
             } else {
-                onReasonDeltaChunkDo(delta, isFirstReasonDeltaChunk, isFirstConversation);
+                writeReasonDelta(delta, isFirstReasonDeltaChunk, isFirstConversation);
             }
         }
     }
 
-    private void onReasonDeltaChunkDo(String delta, AtomicBoolean isFirstReasonDeltaChunk, AtomicBoolean isFirstConversation) {
+    private void writeReasonDelta(String delta, AtomicBoolean isFirstReasonDeltaChunk, AtomicBoolean isFirstConversation) {
         if (Assert.isNotEmpty(delta)) {
             if (isFirstReasonDeltaChunk.get()) {
                 String trimmed = delta.replaceAll("^[\\s\\n]+", "");
@@ -616,25 +616,52 @@ public class CliShell implements Runnable {
     }
 
 
-    private void onThoughtChunk(ThoughtChunk thought) {
-        if (thought.hasMeta(TaskTalent.TOOL_MULTITASK)) {
-            // 仅在多任务并行且有内容时输出
-            String content = thought.getAssistantMessage().getResultContent();
-            if (Assert.isNotEmpty(content)) {
+    /**
+     * 处理子代理的聚合载荷（ReasonEndEvent）。
+     *
+     * <p>正文必须用 {@code getText()} 而不是 {@code getAssistantMessage().getResultContent()}：
+     * 后者内部是 stripThinkTags，对「inline-think 方言」（Qwen 等把思考直接写在正文里、用
+     * &lt;think&gt; 标签包裹）会把标签前的真实正文一并吃掉，只剩标签后的残段。</p>
+     *
+     * <p>思考是否打印沿用 {@code cliThinkPrinted} 开关，与 {@link #onReasonDeltaEvent} 的增量路径
+     * 保持同一口径：用户关了思考输出时，兜底路径也不能突然把整段思考糊到屏幕上。</p>
+     */
+    private void onReasonEndEvent(ReasonEndEvent thought) {
+        if (!thought.hasMeta(TaskTalent.META_SUBAGENT)) {
+            return;
+        }
 
-                //content = content + DIM + "(" + thought.getTrace().getOptions().getChatModel().getNameOrModel() + ")" + RESET;
+        // 子代理思考：旧实现完全不下发，终端里永远看不到委派出去的那一层在想什么
+        if (thought.hasThinking() && agentProps.getGeneral().getCliThinkPrinted()) {
+            printIndented(DIM + thought.getThinking().trim() + RESET);
+        }
 
-                // 保持间接缩进，去掉首尾多余换行
-                terminal.writer().println();
-                terminal.writer().print("  " + content.trim().replace("\n", "\n  "));
-                terminal.writer().println();
-                terminal.flush();
-            }
+        String content = thought.getText();
+        if (Assert.isNotEmpty(content)) {
+            printIndented(content.trim());
         }
     }
 
-    private void onObservationChunk(ObservationChunk action, AtomicBoolean isFirstReasonDeltaChunk) {
+    /** 按终端惯例缩进两格打印一段多行文本（前后各一空行作块分隔）。 */
+    private void printIndented(String text) {
+        if (Assert.isEmpty(text)) {
+            return;
+        }
+        terminal.writer().println();
+        terminal.writer().print("  " + text.replace("\n", "\n  "));
+        terminal.writer().println();
+        terminal.flush();
+    }
+
+    private void onToolCallEndEvent(ToolCallEndEvent action, AtomicBoolean isFirstReasonDeltaChunk) {
         if(action.getError() != null){
+            String message = Assert.isNotEmpty(action.getError().getMessage())
+                    ? action.getError().getMessage() : action.getError().getClass().getSimpleName();
+            terminal.writer().println();
+            terminal.writer().println(RED + "! Tool failed: " + action.getToolName() + RESET);
+            terminal.writer().println(RED + "  " + message + RESET);
+            terminal.flush();
+            isFirstReasonDeltaChunk.set(true);
             return;
         }
 

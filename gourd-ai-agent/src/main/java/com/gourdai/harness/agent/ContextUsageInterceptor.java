@@ -17,7 +17,7 @@ package com.gourdai.harness.agent;
 
 import com.gourdai.core.portal.web.UsageSubmissionService;
 import org.noear.solon.ai.AiUsage;
-import com.gourdai.agent.AgentChunk;
+import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.react.AbsReActInterceptor;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.trace.UsageNormalizer;
@@ -36,7 +36,7 @@ import reactor.core.publisher.FluxSink;
  * 导致每条回复的 trace 行只显示「未命中缓存的增量」（开启 Prompt Caching 后常是个位数）。
  *
  * <p><b>职责：</b>在每一轮推理<b>结束后</b>（{@link #onReasonEnd}）读取模型返回的真实
- * {@link AiUsage}（含缓存创建/读取），换算出「输入（含缓存）」并推送一个 {@link ContextUsageChunk}，
+ * {@link AiUsage}（含缓存创建/读取），换算出「输入（含缓存）」并推送一个 {@link ContextUsageEvent}，
  * 让指示器改用真实用量刷新——不再显示估算值。
  *
  * <p><b>口径归一：</b>不同接口规范（及不同框架版本）对「输入 token 是否含缓存」的口径不同，
@@ -98,22 +98,22 @@ public class ContextUsageInterceptor extends AbsReActInterceptor {
             // 校准仅为优化，失败时回退到纯本地估算
         }
 
-        pushUsageChunk(trace, inputTokens, outputTokens, cacheCreation, cacheRead, cacheRate, messageCount);
+        pushContextUsageEvent(trace, inputTokens, outputTokens, cacheCreation, cacheRead, cacheRate, messageCount);
     }
 
-    private void pushUsageChunk(ReActTrace trace,
+    private void pushContextUsageEvent(ReActTrace trace,
                                 long inputTokens, long outputTokens,
                                 long cacheCreation, long cacheRead, double cacheRate,
                                 int messageCount) {
         try {
-            FluxSink<AgentChunk> sink = trace.getOptions().getStreamSink();
+            FluxSink<AgentEvent> sink = trace.getOptions().getStreamSink();
             if (sink != null && !sink.isCancelled()) {
-                sink.next(new ContextUsageChunk(trace, inputTokens, outputTokens,
+                sink.next(new ContextUsageEvent(trace, inputTokens, outputTokens,
                         cacheCreation, cacheRead, cacheRate, messageCount));
             }
         } catch (Exception e) {
             if (LOG.isDebugEnabled()) {
-                LOG.debug("Failed to push ContextUsageChunk: {}", e.getMessage());
+                LOG.debug("Failed to push ContextUsageEvent: {}", e.getMessage());
             }
         }
     }

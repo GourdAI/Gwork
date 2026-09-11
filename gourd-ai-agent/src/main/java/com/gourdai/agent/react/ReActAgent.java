@@ -18,7 +18,7 @@ package com.gourdai.agent.react;
 import com.gourdai.agent.*;
 import com.gourdai.agent.react.task.ActionTask;
 import com.gourdai.agent.react.task.PlanTalent;
-import com.gourdai.agent.react.task.ReasonChunk;
+import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.react.task.ReasonTask;
 import com.gourdai.agent.team.TeamProtocol;
 import com.gourdai.agent.team.TeamTrace;
@@ -326,7 +326,7 @@ public class ReActAgent implements Agent<ReActRequest, ReActResponse> {
 
         if (trace.isAbnormal()) {
             if (trace.getOptions().getStreamSink() != null) {
-                trace.getOptions().getStreamSink().next(new ReasonChunk(trace, null, assistantMessage));
+                trace.getOptions().getStreamSink().next(new ReasonDeltaEvent(trace, null, assistantMessage));
             }
         }
 

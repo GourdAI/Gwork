@@ -27,6 +27,10 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -101,7 +105,11 @@ public class SessionStreamStore {
 
     private final SessionLocator sessionLocator;
 
-    /** 逐会话写锁，防止并发轮次的行交错 */
+    /**
+     * 逐物理 stream 文件锁。不能只用 sessionId：不同 workspace 可以存在同名会话，
+     * 反之同一文件也可能分别通过显式 root 与已绑定 root 访问。规范化绝对路径保证所有
+     * 读、追加、回退与删除命中同一把锁，读取不会观察到半行或替换中间态。
+     */
     private final Map<String, Object> locks = new ConcurrentHashMap<>();
 
     /**
@@ -114,8 +122,9 @@ public class SessionStreamStore {
         this.sessionLocator = sessionLocator;
     }
 
-    private Object lockFor(String sessionId) {
-        return locks.computeIfAbsent(sessionId, k -> new Object());
+    private Object lockFor(File file) {
+        String key = file == null ? "<unresolved>" : file.toPath().toAbsolutePath().normalize().toString();
+        return locks.computeIfAbsent(key, k -> new Object());
     }
 
     /** 在当前会话写锁内分配不会因 rewind 而复用的事件序号。 */
@@ -158,14 +167,72 @@ public class SessionStreamStore {
             return;
         }
         try {
-            synchronized (lockFor(sessionId)) {
+            File file = streamFile(sessionId, projectRoot);
+            if (file == null) return;
+            synchronized (lockFor(file)) {
                 chunk.setSessionId(sessionId);
                 chunk.setEventSeq(nextEventSeq(sessionId, projectRoot));
+                // file_changes 也走纯追加：旧实现每帧重写整个 ndjson（长会话数十 MB），
+                // 而该链路同步压在 Agent 每次 write/edit/bash 的工具边界上，且与未加锁的读取路径
+                // 在 Windows 下存在文件替换竞态（AccessDeniedException 会吞掉事件）。
+                // 去重改由读取侧按 runId 取 eventSeq 最大者完成，见 dedupeFileChanges。
                 appendLine(sessionId, projectRoot, serialize(chunk));
             }
         } catch (Throwable e) {
             LOG.warn("[StreamStore] record failed for session {}: {}", sessionId, e.getMessage());
         }
+    }
+
+    /**
+     * 读取侧收敛：同一 runId 的 file_changes 只保留 eventSeq 最大的一条（该 run 的终态摘要），
+     * 保留位置为该条在原序列中的物理位置，其余同 run 的旧帧丢弃。
+     *
+     * <p>非 file_changes 事件、以及缺失 runId 的 file_changes 一律原样保留，顺序不变。</p>
+     */
+    private static List<Map> dedupeFileChanges(List<Map> src) {
+        if (src == null || src.isEmpty()) {
+            return src == null ? new ArrayList<>() : src;
+        }
+        // 第一遍：记录每个 runId 的终态所在下标（seq 相同时取靠后的物理行）
+        Map<String, Integer> keepAt = new java.util.HashMap<>();
+        Map<String, Long> keepSeq = new java.util.HashMap<>();
+        boolean any = false;
+        for (int i = 0; i < src.size(); i++) {
+            Map bean = src.get(i);
+            if (bean == null || !"file_changes".equals(String.valueOf(bean.get("type")))) {
+                continue;
+            }
+            Object runId = bean.get("runId");
+            if (runId == null) {
+                continue;
+            }
+            any = true;
+            String key = String.valueOf(runId);
+            long seq = seqOf(bean);
+            Long prev = keepSeq.get(key);
+            if (prev == null || seq >= prev) {
+                keepSeq.put(key, seq);
+                keepAt.put(key, i);
+            }
+        }
+        if (!any) {
+            return src;
+        }
+        List<Map> out = new ArrayList<>(src.size());
+        for (int i = 0; i < src.size(); i++) {
+            Map bean = src.get(i);
+            if (bean != null && "file_changes".equals(String.valueOf(bean.get("type")))) {
+                Object runId = bean.get("runId");
+                if (runId != null) {
+                    Integer at = keepAt.get(String.valueOf(runId));
+                    if (at != null && at != i) {
+                        continue;
+                    }
+                }
+            }
+            out.add(bean);
+        }
+        return out;
     }
 
     /** 兼容旧调用方：实时事件已逐条落盘，不再需要冲刷内存文本缓冲。 */
@@ -185,7 +252,9 @@ public class SessionStreamStore {
             return;
         }
         try {
-            synchronized (lockFor(sessionId)) {
+            File file = streamFile(sessionId, projectRoot);
+            if (file == null) return;
+            synchronized (lockFor(file)) {
                 WebChunk uc = new WebChunk();
                 uc.setType("user");
                 uc.setText(text);
@@ -209,7 +278,7 @@ public class SessionStreamStore {
         if (file == null || !file.exists()) return result;
         int max = limit == null || limit <= 0 ? 500 : Math.min(limit, 2000);
         try {
-            synchronized (lockFor(sessionId)) {
+            synchronized (lockFor(file)) {
                 try (BufferedReader br = new BufferedReader(new InputStreamReader(
                         new FileInputStream(file), StandardCharsets.UTF_8))) {
                     String line;
@@ -237,6 +306,8 @@ public class SessionStreamStore {
                         }
                     }
                     if (!result.events.isEmpty() && result.lastSeq < result.latestSeq) result.hasMore = true;
+                    // 同一 run 的 file_changes 只留终态摘要（写入侧已改为纯追加）；不影响游标与分页元信息。
+                    result.events = dedupeFileChanges(result.events);
                 }
             }
         } catch (Throwable e) {
@@ -267,52 +338,53 @@ public class SessionStreamStore {
         if (file == null || !file.exists()) {
             return result;
         }
-        try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
-            String line;
-            int lineNo = 0;
-            List<Map> allData = new ArrayList<>();
-            while ((line = br.readLine()) != null) {
-                lineNo++;
-                String trimmed = line.trim();
-                if (trimmed.isEmpty()) {
-                    continue;
+        synchronized (lockFor(file)) {
+            try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+                String line;
+                int lineNo = 0;
+                List<Map> allData = new ArrayList<>();
+                while ((line = br.readLine()) != null) {
+                    lineNo++;
+                    String trimmed = line.trim();
+                    if (trimmed.isEmpty()) {
+                        continue;
+                    }
+                    try {
+                        ONode node = ONode.ofJson(trimmed);
+                        Map bean = node.toBean(Map.class);
+                        previewForTransport(bean, lineNo);
+                        allData.add(bean);
+                    } catch (Throwable ignore) {
+                        // 跳过损坏行；统一文件锁保证这里不会读到正在追加或替换的半行
+                    }
                 }
-                try {
-                    ONode node = ONode.ofJson(trimmed);
-                    Map bean = node.toBean(Map.class);
-                    previewForTransport(bean, lineNo);
-                    allData.add(bean);
-                } catch (Throwable ignore) {
-                    // 跳过损坏行
+                result.totalCount = allData.size();
+                for (Map bean : allData) {
+                    Object rawSeq = bean.get("eventSeq");
+                    if (rawSeq == null) continue;
+                    try {
+                        long seq = rawSeq instanceof Number
+                                ? ((Number) rawSeq).longValue()
+                                : Long.parseLong(String.valueOf(rawSeq));
+                        result.latestSeq = Math.max(result.latestSeq, seq);
+                        if (result.firstSeq == 0) result.firstSeq = seq;
+                        result.lastSeq = seq;
+                    } catch (NumberFormatException ignore) {
+                        // 兼容损坏或非数字 eventSeq；事件本身仍可按旧格式回放
+                    }
                 }
+                if (tail != null && tail > 0 && allData.size() > tail) {
+                    result.events = dedupeFileChanges(
+                            coalesceDeltas(new ArrayList<>(allData.subList(allData.size() - tail, allData.size()))));
+                    result.hasMore = true;
+                } else {
+                    result.events = dedupeFileChanges(coalesceDeltas(allData));
+                    result.hasMore = false;
+                }
+            } catch (Throwable e) {
+                LOG.warn("[StreamStore] load failed for session {}: {}", sessionId, e.getMessage());
             }
-            result.totalCount = allData.size();
-            for (Map bean : allData) {
-                Object rawSeq = bean.get("eventSeq");
-                if (rawSeq == null) {
-                    continue;
-                }
-                try {
-                    long seq = rawSeq instanceof Number
-                            ? ((Number) rawSeq).longValue()
-                            : Long.parseLong(String.valueOf(rawSeq));
-                    result.latestSeq = Math.max(result.latestSeq, seq);
-                    if (result.firstSeq == 0) result.firstSeq = seq;
-                    result.lastSeq = seq;
-                } catch (NumberFormatException ignore) {
-                    // 兼容损坏或非数字 eventSeq；事件本身仍可按旧格式回放
-                }
-            }
-            if (tail != null && tail > 0 && allData.size() > tail) {
-                result.events = coalesceDeltas(new ArrayList<>(allData.subList(allData.size() - tail, allData.size())));
-                result.hasMore = true;
-            } else {
-                result.events = coalesceDeltas(allData);
-                result.hasMore = false;
-            }
-        } catch (Throwable e) {
-            LOG.warn("[StreamStore] load failed for session {}: {}", sessionId, e.getMessage());
         }
         return result;
     }
@@ -344,6 +416,7 @@ public class SessionStreamStore {
         }
         int wantRounds = (rounds == null || rounds <= 0) ? DEFAULT_PAGE_ROUNDS : rounds;
         try {
+            synchronized (lockFor(file)) {
             List<String> lines = new ArrayList<>();
             try (BufferedReader br = new BufferedReader(
                     new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
@@ -411,7 +484,7 @@ public class SessionStreamStore {
                 }
             }
 
-            result.events = coalesceDeltas(page);
+            result.events = dedupeFileChanges(coalesceDeltas(page));
             result.hasMore = start > 0;
             // 下一页游标 = 本页首个事件的 seq；剩余轮数 = 本页起点之前的轮边界数
             result.firstSeq = page.isEmpty() ? 0 : seqOf(page.get(0));
@@ -423,6 +496,7 @@ public class SessionStreamStore {
                 }
             }
             result.remainingRounds = remaining;
+            }
         } catch (Throwable e) {
             LOG.warn("[StreamStore] loadRounds failed for session {}: {}", sessionId, e.getMessage());
         }
@@ -609,34 +683,25 @@ public class SessionStreamStore {
      * @return 该块的完整 text；行号越界、行无 text 或文件缺失时返回 null
      */
     public String loadFull(String sessionId, String projectRoot, int seq) {
-        if (seq <= 0) {
-            return null;
-        }
+        if (seq <= 0) return null;
         File file = streamFile(sessionId, projectRoot);
-        if (file == null || !file.exists()) {
-            return null;
-        }
-        try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
-            String line;
-            int lineNo = 0;
-            while ((line = br.readLine()) != null) {
-                lineNo++;
-                if (lineNo < seq) {
-                    continue;
+        if (file == null || !file.exists()) return null;
+        synchronized (lockFor(file)) {
+            try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+                String line;
+                int lineNo = 0;
+                while ((line = br.readLine()) != null) {
+                    lineNo++;
+                    if (lineNo < seq) continue;
+                    if (lineNo > seq) break;
+                    String trimmed = line.trim();
+                    if (trimmed.isEmpty()) return null;
+                    return ONode.ofJson(trimmed).get("text").getString();
                 }
-                if (lineNo > seq) {
-                    break;
-                }
-                String trimmed = line.trim();
-                if (trimmed.isEmpty()) {
-                    return null;
-                }
-                ONode node = ONode.ofJson(trimmed);
-                return node.get("text").getString();
+            } catch (Throwable e) {
+                LOG.warn("[StreamStore] loadFull failed for session {} seq {}: {}", sessionId, seq, e.getMessage());
             }
-        } catch (Throwable e) {
-            LOG.warn("[StreamStore] loadFull failed for session {} seq {}: {}", sessionId, seq, e.getMessage());
         }
         return null;
     }
@@ -650,72 +715,100 @@ public class SessionStreamStore {
     }
 
     /**
-     * 按用户轮次边界裁剪 stream 文件（回退时调用）——保留未回退轮次的完整富回放。
+     * 按 messages.ndjson 裁剪后的真实状态裁剪富 stream。
      *
-     * <p>rewind 是高频操作（重发/改一句重问），若每次都整删 stream 文件，代价是整段会话
-     * 的工具卡片/过程叙述永久丢失。故改为以 {@code user} 事件为边界，仅剔除最后 {@code turns}
-     * 个用户轮次（含其后的全部 AI 过程事件），与 messages.ndjson 的裁剪对齐。</p>
-     *
-     * @param sessionId  会话标识
-     * @param projectRoot code 会话项目根（chat 传 null）
-     * @param turns      剔除的用户轮次数（至少 1）
+     * @param retainedUserCount messages 文件中保留下来的 user 消息数
+     * @param trailingUserOnly  保留消息是否以 user 结尾；为 true 时只保留该 user 边界本身，
+     *                          删除其后尚未形成 assistant 消息的流式过程
      */
-    public void rewindTurns(String sessionId, String projectRoot, int turns) {
-        if (turns <= 0) {
-            turns = 1;
-        }
+    public void rewindToMessageState(String sessionId, String projectRoot,
+                                     int retainedUserCount, boolean trailingUserOnly) {
+        File file = streamFile(sessionId, projectRoot);
+        if (file == null) return;
         try {
-            synchronized (lockFor(sessionId)) {
-                File file = streamFile(sessionId, projectRoot);
-                if (file == null || !file.exists()) {
+            synchronized (lockFor(file)) {
+                if (!file.exists()) return;
+                List<String> lines = readNonEmptyLines(file);
+                List<Integer> userBounds = new ArrayList<>();
+                for (int i = 0; i < lines.size(); i++) {
+                    if (isUserLine(lines.get(i))) userBounds.add(i);
+                }
+
+                if (retainedUserCount <= 0 || userBounds.isEmpty()) {
+                    Files.deleteIfExists(file.toPath());
                     return;
                 }
 
-                List<String> lines = new ArrayList<>();
-                try (BufferedReader br = new BufferedReader(
-                        new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = br.readLine()) != null) {
-                        if (!line.trim().isEmpty()) {
-                            lines.add(line);
-                        }
-                    }
+                int cutExclusive;
+                if (trailingUserOnly) {
+                    if (retainedUserCount > userBounds.size()) return;
+                    cutExclusive = userBounds.get(retainedUserCount - 1) + 1;
+                } else if (retainedUserCount < userBounds.size()) {
+                    cutExclusive = userBounds.get(retainedUserCount);
+                } else {
+                    return; // 全部现有轮次均有对应 assistant，stream 无需裁剪
                 }
+                replaceWithPrefix(file.toPath(), lines, cutExclusive);
+            }
+        } catch (Throwable e) {
+            LOG.warn("[StreamStore] rewindToMessageState failed for session {}: {}", sessionId, e.getMessage());
+        }
+    }
 
-                // 从尾向前找第 turns 个 user 边界，截至该边界（含）之前
-                int cut = -1;
-                int seen = 0;
-                for (int i = lines.size() - 1; i >= 0; i--) {
-                    if (isUserLine(lines.get(i))) {
-                        seen++;
-                        if (seen >= turns) {
-                            cut = i;
-                            break;
-                        }
-                    }
-                }
-
-                if (cut < 0) {
-                    // 要回退的轮次多于文件中的 user 边界（如回退超出历史），整删
-                    file.delete();
-                    return;
-                }
-
-                if (cut == 0) {
-                    file.delete();
-                    return;
-                }
-
-                StringBuilder sb = new StringBuilder();
-                for (int i = 0; i < cut; i++) {
-                    sb.append(lines.get(i)).append('\n');
-                }
-                try (Writer w = new OutputStreamWriter(new FileOutputStream(file, false), StandardCharsets.UTF_8)) {
-                    w.write(sb.toString());
-                }
+    /** 兼容旧调用：按完整用户轮次回退。 */
+    public void rewindTurns(String sessionId, String projectRoot, int turns) {
+        if (turns <= 0) turns = 1;
+        File file = streamFile(sessionId, projectRoot);
+        if (file == null) return;
+        try {
+            synchronized (lockFor(file)) {
+                if (!file.exists()) return;
+                List<String> lines = readNonEmptyLines(file);
+                int totalUsers = 0;
+                for (String line : lines) if (isUserLine(line)) totalUsers++;
+                int retained = Math.max(0, totalUsers - turns);
+                if (retained == 0) Files.deleteIfExists(file.toPath());
+                else rewindToMessageState(sessionId, projectRoot, retained, false);
             }
         } catch (Throwable e) {
             LOG.warn("[StreamStore] rewindTurns failed for session {}: {}", sessionId, e.getMessage());
+        }
+    }
+
+    private static List<String> readNonEmptyLines(File file) throws java.io.IOException {
+        List<String> lines = new ArrayList<>();
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (!line.trim().isEmpty()) lines.add(line);
+            }
+        }
+        return lines;
+    }
+
+    private static void replaceWithPrefix(Path target, List<String> lines, int cutExclusive) throws java.io.IOException {
+        if (cutExclusive <= 0) {
+            Files.deleteIfExists(target);
+            return;
+        }
+        Path temp = Files.createTempFile(target.getParent(), target.getFileName() + ".", ".rewind.tmp");
+        boolean moved = false;
+        try {
+            try (Writer w = new OutputStreamWriter(new FileOutputStream(temp.toFile()), StandardCharsets.UTF_8)) {
+                for (int i = 0; i < Math.min(cutExclusive, lines.size()); i++) {
+                    w.write(lines.get(i));
+                    w.write('\n');
+                }
+            }
+            try {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+            moved = true;
+        } finally {
+            if (!moved) Files.deleteIfExists(temp);
         }
     }
 
@@ -736,12 +829,11 @@ public class SessionStreamStore {
      * 删除指定会话的流式事件文件（会话删除时调用）。
      */
     public void delete(String sessionId, String projectRoot) {
+        File file = streamFile(sessionId, projectRoot);
+        if (file == null) return;
         try {
-            synchronized (lockFor(sessionId)) {
-                File file = streamFile(sessionId, projectRoot);
-                if (file != null && file.exists()) {
-                    file.delete();
-                }
+            synchronized (lockFor(file)) {
+                Files.deleteIfExists(file.toPath());
                 nextSequences.remove(sequenceKey(sessionId, projectRoot));
             }
         } catch (Throwable e) {

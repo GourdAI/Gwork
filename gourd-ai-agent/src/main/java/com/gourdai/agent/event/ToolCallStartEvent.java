@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      https://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.gourdai.agent.react.task;
+package com.gourdai.agent.event;
 
 import com.gourdai.agent.react.ReActTrace;
 import org.noear.solon.ai.chat.message.ChatMessage;
@@ -22,23 +22,25 @@ import org.noear.solon.lang.Preview;
 import java.util.Map;
 
 /**
- * ReAct 动作块（Action）：标识智能体正在调用外部工具或执行特定指令
+ * 工具调用开始事件：智能体开始调用外部工具或执行特定指令
+ *
+ * <p>替代旧的 {@code ActionChunk}。</p>
  *
  * @author oisin
- * @since 3.9.6
+ * @since 4.1.0
  */
-@Preview("3.9.6")
-public class ActionChunk extends AbsActionChunk {
-    public ActionChunk(ReActTrace trace, String toolName, Map<String, Object> args) {
+@Preview("4.1.0")
+public class ToolCallStartEvent extends AbsToolCallEvent {
+    public ToolCallStartEvent(ReActTrace trace, String toolName, Map<String, Object> args) {
         super(trace, toolName, args, ChatMessage.ofAssistant(""));
     }
 
-    public ActionChunk(ReActTrace trace, String toolName, Map<String, Object> args, String actionId) {
+    public ToolCallStartEvent(ReActTrace trace, String toolName, Map<String, Object> args, String actionId) {
         super(trace, toolName, args, ChatMessage.ofAssistant(""), actionId);
     }
 
-    public ActionChunk(ReActTrace trace, String toolName, Map<String, Object> args, String actionId,
-                       String batchId, Integer batchIndex, Integer batchSize) {
+    public ToolCallStartEvent(ReActTrace trace, String toolName, Map<String, Object> args, String actionId,
+                              String batchId, Integer batchIndex, Integer batchSize) {
         super(trace, toolName, args, ChatMessage.ofAssistant(""), actionId, batchId, batchIndex, batchSize);
     }
 }

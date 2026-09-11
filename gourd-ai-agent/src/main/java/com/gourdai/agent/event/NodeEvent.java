@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      https://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,24 +13,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.gourdai.agent.team;
+package com.gourdai.agent.event;
 
-import com.gourdai.agent.AbsAgentChunk;
+import com.gourdai.agent.team.TeamTrace;
 import org.noear.solon.ai.chat.message.ChatMessage;
 import org.noear.solon.flow.Node;
 
 /**
- * 协作节点片段块（图执行状态块）
- * <p>用于在团队计算图（Graph）执行过程中，实时传递当前执行节点的状态、消息增量及团队轨迹</p>
+ * 协作节点事件（图执行状态事件）
+ *
+ * <p>替代旧的 {@code NodeChunk}。用于在团队计算图执行过程中，
+ * 实时传递当前执行节点的状态、消息增量及团队轨迹。</p>
  *
  * @author oisin
- * @since 3.9.1
+ * @since 4.1.0
  */
-public class NodeChunk extends AbsAgentChunk {
+public class NodeEvent extends AbsAgentEvent {
     private final transient TeamTrace trace;
     private final transient Node node;
 
-    public NodeChunk(Node node, TeamTrace trace, ChatMessage message) {
+    public NodeEvent(Node node, TeamTrace trace, ChatMessage message) {
         super(trace.getRunId(), trace.getAgentName(), trace.getSession(), message);
         this.trace = trace;
         this.node = node;

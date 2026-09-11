@@ -67,22 +67,30 @@
         return 'zh-CN';
     }
 
-    // 加载语言包
+    // 加载语言包。非中文包失败时把 zh-CN 数据绑定到请求 locale，确保 currentLocale 不变时
+    // translateDOM 仍能命中消息表；zh-CN 也失败则保持未就绪，不误触发 ready。
     function loadMessages(locale) {
         if (messages[locale]) return Promise.resolve(messages[locale]);
         return fetch('/locales/' + locale + '.json')
-            .then(function (resp) { return resp.json(); })
+            .then(function (resp) {
+                if (!resp || !resp.ok) {
+                    throw new Error('HTTP ' + (resp ? resp.status : 0));
+                }
+                return resp.json();
+            })
             .then(function (data) {
+                if (!data || typeof data !== 'object') throw new Error('Invalid locale payload');
                 messages[locale] = data;
                 messagesLoaded = true;
                 return data;
             })
-            .catch(function () {
-                if (locale !== 'zh-CN') {
-                    return loadMessages('zh-CN');
-                }
-                messages[locale] = {};
-                return {};
+            .catch(function (error) {
+                if (locale === 'zh-CN') throw error;
+                return loadMessages('zh-CN').then(function (fallback) {
+                    messages[locale] = fallback;
+                    messagesLoaded = true;
+                    return fallback;
+                });
             });
     }
 
@@ -101,17 +109,32 @@
         return typeof val === 'string' ? val : key;
     }
 
+    // 字面量替换：split/join 不做任何模式解释。
+    // 旧实现用 String.prototype.replace(search, replacement) 且第二参是字符串，而字符串形式的
+    // replacement 会解释 $& / $` / $' / $1 / $$ 等替换模式。插值参数正是后端返回的文件路径
+    // （app-file-changes.js 的 confirm_undo_file、conflict.paths），文件名为 price$&.txt 时
+    // 确认框会把 $& 展开成「匹配到的内容」而显示成错误文件名。这是正确性 bug，不是 XSS。
+    // 顺带修掉两处不一致：数组分支 replace(search, ...) 只替换第一个匹配，同一占位符在模板里
+    // 出现多次时会漏替换（对象分支本来就是全局替换）；对象分支用 new RegExp('\\{' + k + '}')
+    // 拼正则，k 含正则元字符时语义会跑偏，按字面量切分则不受影响。
+    function replaceLiteral(msg, search, value) {
+        if (!search) return msg;
+        // 兜底行为保持不变：沿用 replace 的 ToString 语义（null → "null"，undefined → "undefined"）。
+        // 必须显式 String()：[].join(undefined) 会退回默认逗号分隔符，而不是拼出 "undefined"。
+        return msg.split(search).join(String(value));
+    }
+
     // 格式化消息，支持 {0} {1} 占位符
     function formatMessage(key, params) {
         var msg = getMessage(key);
         if (!params) return msg;
         if (Array.isArray(params)) {
             for (var i = 0; i < params.length; i++) {
-                msg = msg.replace('{' + i + '}', params[i] !== undefined ? params[i] : '{' + i + '}');
+                msg = replaceLiteral(msg, '{' + i + '}', params[i] !== undefined ? params[i] : '{' + i + '}');
             }
         } else if (typeof params === 'object') {
             for (var k in params) {
-                msg = msg.replace(new RegExp('\\{' + k + '}', 'g'), params[k]);
+                msg = replaceLiteral(msg, '{' + k + '}', params[k]);
             }
         }
         return msg;
@@ -171,17 +194,24 @@
     }
 
     function setLocale(locale) {
-        if (locale === currentLocale) {
+        if (locale === currentLocale && messages[locale]) {
             translateDOM();
-            return;
+            return Promise.resolve(messages[locale]);
         }
         currentLocale = locale;
         localStorage.setItem(LOCALE_KEY, locale);
         document.documentElement.setAttribute('lang', locale);
         document.documentElement.setAttribute('data-locale', locale);
-        loadMessages(locale).then(function () {
-            translateDOM();
-            fireReady();   // 首个语言包就绪：触发注册的初始渲染回调
+        return loadMessages(locale).then(function (data) {
+            // 异步加载期间可能再次切换语言；只翻译当前仍选中的 locale。
+            if (currentLocale === locale && messages[locale]) {
+                translateDOM();
+                fireReady();   // 仅在当前 locale 确有消息表时触发初始渲染
+            }
+            return data;
+        }).catch(function (error) {
+            console.error('[i18n] 语言包加载失败:', locale, error);
+            return null;
         });
     }
 
