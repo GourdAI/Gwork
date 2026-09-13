@@ -11,6 +11,7 @@
                       "steer_box_full":  "Há muitas intervenções pendentes; adicionada à fila",
                       "steer_deferred":  "A etapa atual terminou; adicionada à fila",
                       "steer_failed":  "Falha ao enviar a intervenção; o texto foi mantido",
+                      "force_finished":  "A execução já terminou (servidor ocioso); o fluxo foi encerrado automaticamente",
                       "steer_attachment_wait":  "Anexos não podem ser usados como intervenção nem enfileirados durante uma tarefa. Aguarde ou interrompa",
                       "steer_command_queue":  "Comandos não podem ser usados como intervenção. Pressione Tab para adicionar à fila",
                       "steer_dropped":  "A intervenção não entrou em vigor antes do fim e foi adicionada à fila",
@@ -89,7 +90,7 @@
                     "model_search_empty":  "Nenhum modelo correspondente",
                     "model_group_toggle":  "Recolher / expandir este provedor",
                     "thinking":  {
-                                     "off":  {
+                                     "auto":  {
                                                  "label":  "Padrão",
                                                  "desc":  "Usar o comportamento padrão do modelo"
                                              },
@@ -203,7 +204,8 @@
                                        "switch":  "Alternar espaço de trabalho",
                                        "clear":  "Limpar seleção"
                                    },
-                "sidebar":  {
+                 "sidebar":  {
+                                 "load_failed_retry":  "Falha ao carregar, clique para tentar novamente",
                                  "loop_mark":  "Tarefa agendada",
                                 "new_task":  "Nova tarefa",
                                 "search":  "Buscar",
@@ -741,7 +743,7 @@
                                  "model_none":  "Nenhum modelo configurado ainda. Adicione e ative um em Configurações - Modelos primeiro.",
                                  "model_saved":  "Modelo do ACP salvo",
                                  "model_save_failed":  "Falha ao salvar, tente novamente",
-                                 "thinking_hint":  "Controla o esforço de raciocínio; ao desativar, usa o comportamento padrão do modelo",
+                                 "thinking_hint":  "Controla o esforço de raciocínio; com Padrão, usa o comportamento próprio do modelo",
                                  "thinking_saved":  "Configuração de profundidade de raciocínio salva",
                                  "thinking_save_failed":  "Falha ao salvar, tente novamente",
                                  "zed_integration_desc":  "Mescle o JSON abaixo nas configurações ACP do seu editor e, em seguida, selecione o GWork no painel Agent.",
@@ -799,6 +801,7 @@
                  "phase_thinking":  "Pensando",
                  "phase_text":  "Escrevendo",
                  "phase_waiting":  "Aguardando resposta",
+                 "args_streaming":  "Gerando argumentos · {size}",
                  "rerun":  "Reexecutar",
                  "continue_run":  "Continuar execução",
                  "need_auth":  "Autorização necessária:",

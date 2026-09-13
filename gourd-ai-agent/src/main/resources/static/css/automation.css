@@ -148,7 +148,7 @@ body.code-mode .automation-view { display: none !important; }
 }
 .auto-ws-current:hover { background: var(--bg-hover); color: var(--text-primary); }
 .auto-ws-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.auto-ws-arrow { font-size: 12px; transition: transform .18s; }
+.auto-ws-arrow { width: 12px; height: 12px; flex-shrink: 0; transition: transform .18s; }
 .auto-ws-selector.open .auto-ws-arrow { transform: rotate(180deg); }
 .auto-ws-dropdown {
     position: absolute; bottom: 100%; left: 0; margin-bottom: 6px;

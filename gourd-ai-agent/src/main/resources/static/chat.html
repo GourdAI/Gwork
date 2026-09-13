@@ -16,7 +16,8 @@
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                     </button>
                     <span class="project-selector-name workspace-selector-name"></span>
-                    <i class="layui-icon layui-icon-down"></i>
+                    <!-- 箭头用内联 SVG：layui 图标字体首帧未就绪时会渲染成缺字方块（Tauri/WebView2 首启可见） -->
+                    <svg class="workspace-selector-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
                 </div>
                 <div class="project-dropdown workspace-dropdown"></div>
             </div>
@@ -39,9 +40,9 @@
                     <div class="model-selector" id="welcomeModelSelector">
                         <div class="model-selector-current" id="welcomeModelCurrent" data-i18n-title="app.switch_model">
                             <svg class="model-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
-                            <span class="model-name" id="welcomeModelName" data-i18n="app.loading">加载中...</span>
+                            <span class="model-name" id="welcomeModelName">加载中...</span>
                             <span class="model-thinking-tag" id="welcomeModelThinkingTag" style="display:none"></span>
-                            <i class="layui-icon layui-icon-down model-arrow"></i>
+                            <svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
                         </div>
                         <div class="model-dropdown has-search" id="welcomeModelDropdown">
                             <div class="model-dropdown-search">
@@ -138,6 +139,9 @@
                     <span class="todo-chip-label" data-i18n="app.tasks">任务</span>
                     <span class="todo-badge" id="todoBadge" style="display:none">0</span>
                 </button>
+                <!-- 本轮文件变更：点击查看变更列表；无变更时隐藏（由 app-file-changes.js 控制显隐）。
+                     位置紧随「任务」chip，形态同族（图标 + 文案 + 数量徽标 + 增删统计）。 -->
+                <button class="file-changes-chip" id="chatFileChangesChip" style="display:none" data-i18n-title="file_changes.title"></button>
                 <button class="queue-chip" id="chatQueueChip" style="display:none" data-i18n-title="app.view_queue">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
                     <span class="queue-chip-label" data-i18n="app.queue">队列</span>
@@ -182,9 +186,9 @@
                         <div class="model-selector" id="chatModelSelector">
                             <div class="model-selector-current" id="chatModelCurrent" data-i18n-title="app.switch_model">
                                 <svg class="model-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
-                                <span class="model-name" id="chatModelName" data-i18n="app.loading">加载中...</span>
+                                <span class="model-name" id="chatModelName">加载中...</span>
                                 <span class="model-thinking-tag" id="chatModelThinkingTag" style="display:none"></span>
-                                <i class="layui-icon layui-icon-down model-arrow"></i>
+                                <svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
                             </div>
                             <div class="model-dropdown has-search" id="chatModelDropdown">
                                 <div class="model-dropdown-search">
@@ -252,6 +256,16 @@
                     </div>
                     <div class="todo-list" id="todoList"></div>
                     <div class="todo-empty" id="todoEmpty" style="display:none" data-i18n="app.no_tasks">当前会话暂无任务清单</div>
+                </div>
+            </div>
+            <!-- 本轮文件变更面板（悬浮在 chip 按钮上方；点击变更 chip 展开，DOM 靠后=最上层） -->
+            <div class="file-changes-float-panel" id="chatFileChangesPanel" style="display:none">
+                <div class="file-changes-panel">
+                    <div class="file-changes-panel-header">
+                        <div class="file-changes-panel-title" data-i18n="file_changes.title">本轮文件变更</div>
+                        <span class="file-changes-panel-actions" id="fileChangesPanelActions"></span>
+                    </div>
+                    <div class="file-changes-panel-body" id="fileChangesPanelBody"></div>
                 </div>
             </div>
             <!-- 消息执行队列（悬浮在 chip 按钮上方，DOM 最后=最上层） -->

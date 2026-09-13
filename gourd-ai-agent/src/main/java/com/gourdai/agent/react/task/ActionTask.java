@@ -139,7 +139,8 @@ public class ActionTask {
                 ? call.getId()
                 : (toolName + "#" + actionIdSeq.incrementAndGet());
 
-        ToolExchanger toolExchanger = new ToolExchanger(toolName, args);
+        // actionId 一并交给交换器：拦截器挂起任务时要靠它告知 UI 层「被挂起的是哪一次调用」
+        ToolExchanger toolExchanger = new ToolExchanger(toolName, args, actionId);
 
         // 1. 触发前置生命周期
         for (RankEntity<ReActInterceptor> item : trace.getOptions().getInterceptors()) {

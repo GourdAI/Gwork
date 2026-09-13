@@ -24,6 +24,8 @@ import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.event.RunEndEvent;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.event.ToolCallStartEvent;
+import com.gourdai.agent.event.ToolCallDraftEvent;
+import com.gourdai.agent.event.ToolCallArgsDeltaEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.event.ReasonEndEvent;
@@ -355,6 +357,12 @@ public class WsGate extends SimpleWebSocketListener {
             msg = onReasonDeltaEvent((ReasonDeltaEvent) chunk, sessionId);
         } else if (chunk instanceof ToolCallStartEvent) {
             msg = onToolCallStartEvent((ToolCallStartEvent) chunk, sessionId);
+        } else if (chunk instanceof ToolCallDraftEvent) {
+            // 与 ToolCallStartEvent 是兄弟类（同继承 AbsToolCallEvent），判定先后不影响语义；
+            // 紧挨着放是为了让「同一张卡片的三个生命周期阶段」在代码里保持相邻可读。
+            msg = onToolCallDraftEvent((ToolCallDraftEvent) chunk, sessionId);
+        } else if (chunk instanceof ToolCallArgsDeltaEvent) {
+            msg = onToolCallArgsDeltaEvent((ToolCallArgsDeltaEvent) chunk, sessionId);
         } else if (chunk instanceof ToolCallEndEvent) {
             msg = onToolCallEndEvent((ToolCallEndEvent) chunk, sessionId);
         } else if (chunk instanceof ReasonEndEvent) {
@@ -468,6 +476,64 @@ public class WsGate extends SimpleWebSocketListener {
         }
 
         if (chunk.getArgs() != null) node.set("args", chunk.getArgs());
+        copyActionMetadata(node, chunk);
+
+        return node.toJson();
+    }
+
+    /**
+     * 处理 ToolCallDraftEvent（模型刚说出函数名、参数仍在流式生成）：提前下发 action_draft。
+     *
+     * <p><b>为什么必须有这一帧：</b>{@code action_start} 要等参数<b>完整</b>、工具即将执行时才发出，
+     * 而一次大参数调用（如 write 一整篇文档）的参数生成可持续数十秒。这段空窗期本通道一帧不发，
+     * 消费方无从区分「模型还在写」与「连接已死」，只能干等。本帧把卡片骨架提前立起来补上该盲区。</p>
+     *
+     * <p>本帧与随后的 action_start 共享同一个 actionId（同源于原生 ToolCall.getId()），
+     * 消费方据此幂等接管同一张卡片而不是重复建卡；此刻参数尚不完整故不带 args，由 action_start 回填。</p>
+     */
+    private String onToolCallDraftEvent(ToolCallDraftEvent chunk, String finalSessionId) {
+        if (!isStartPhaseVisible(chunk.getToolName())) {
+            return null;
+        }
+
+        ONode node = new ONode().set("type", "action_draft")
+                .set("sessionId", finalSessionId);
+
+        if (engine.getName().equals(chunk.getAgentName())) {
+            node.set("toolName", chunk.getToolName());
+        } else {
+            node.set("toolName", chunk.getAgentName() + "/" + chunk.getToolName());
+        }
+
+        copyActionMetadata(node, chunk);
+
+        return node.toJson();
+    }
+
+    /**
+     * 处理 ToolCallArgsDeltaEvent（参数生成进度）：下发 action_args 报告累计字节数。
+     *
+     * <p><b>只报字节数不报内容：</b>参数生成期消费方需要的只是「还在动、进展到哪」，完整参数最终由
+     * action_start 给出；不传内容同时免去了对未闭合 JSON 片段（如 {@code '{"comm'}）的容错解析。</p>
+     *
+     * <p>下发频率由生产方（ReasonTask）按时间/字节双阈值节流，故此处不再二次限流；
+     * 本帧是瞬态进度帧，/ws 通道本就不落盘，断线重连后由 action_start/action_end 重建卡片。</p>
+     */
+    private String onToolCallArgsDeltaEvent(ToolCallArgsDeltaEvent chunk, String finalSessionId) {
+        if (!isStartPhaseVisible(chunk.getToolName())) {
+            return null;
+        }
+
+        ONode node = new ONode().set("type", "action_args")
+                .set("sessionId", finalSessionId)
+                .set("argsBytes", chunk.getArgsBytes());
+
+        if (engine.getName().equals(chunk.getAgentName())) {
+            node.set("toolName", chunk.getToolName());
+        } else {
+            node.set("toolName", chunk.getAgentName() + "/" + chunk.getToolName());
+        }
+
         copyActionMetadata(node, chunk);
 
         return node.toJson();
@@ -867,13 +933,24 @@ public class WsGate extends SimpleWebSocketListener {
 
     private void applyThinkingDepth(com.gourdai.agent.react.ReActOptionsAmend o, ChatModel model, AgentSession session) {
         String depth = ThinkingDepth.normalize(session.getContext().getAs(HarnessEngine.CTX_THINKING_DEPTH));
-        ThinkingDepth.applyTo(o, model == null ? null : model.getStandardOrProvider(), depth);
+        ThinkingDepth.applyTo(o, model, depth);
         o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, depth);
     }
 
     private static boolean isVisibleTool(String toolName) {
         return Assert.isNotEmpty(toolName) && !TaskTalent.TOOL_TASK.equals(toolName)
                 && !TaskTalent.TOOL_MULTITASK.equals(toolName) && !MemoryTalent.isMemoryTool(toolName);
+    }
+
+    /**
+     * 参数生成期帧（action_draft / action_args）的可见性判定。
+     *
+     * <p>口径必须与 {@link #onToolCallStartEvent} 逐条一致：一旦漂移，被过滤的内部工具会被提前建出
+     * 骨架卡，而它永远等不到配对的 action_start / action_end，卡片将永久停在 loading 态。</p>
+     */
+    private static boolean isStartPhaseVisible(String toolName) {
+        // todowrite 的展示走专用面板（由 action_end 携带完整 todos 渲染），开始阶段一律不建卡
+        return isVisibleTool(toolName) && !"todowrite".equals(toolName);
     }
 
     private static String safeError(Throwable error) {

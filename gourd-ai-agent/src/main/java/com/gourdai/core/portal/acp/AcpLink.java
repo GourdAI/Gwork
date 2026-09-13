@@ -9,6 +9,8 @@ import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.event.RunEndEvent;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.event.ToolCallStartEvent;
+import com.gourdai.agent.event.ToolCallDraftEvent;
+import com.gourdai.agent.event.ToolCallArgsDeltaEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
 import com.gourdai.agent.event.PlanEvent;
 import com.gourdai.agent.event.ReasonDeltaEvent;
@@ -167,7 +169,7 @@ public class AcpLink implements Runnable {
 
                     // 读取思考深度配置（确保 effectively final，供 lambda 引用）
                     final String acpThinkingDepth = latestSettings.getGeneral().getAcpThinkingDepth() != null
-                            ? latestSettings.getGeneral().getAcpThinkingDepth() : "off";
+                            ? latestSettings.getGeneral().getAcpThinkingDepth() : ThinkingDepth.AUTO;
 
                     final long startTime = System.currentTimeMillis();
                     final AtomicInteger toolCallCounter = new AtomicInteger(0);
@@ -181,11 +183,10 @@ public class AcpLink implements Runnable {
                                 if (Assert.isNotEmpty(context.getCwd())) {
                                     o.toolContextPut(HarnessEngine.ATTR_CWD, context.getCwd());
                                 }
-                                // 应用思考深度配置
-                                final String modelStandard = finalChatModel.getStandardOrProvider();
-                                ThinkingDepth.applyTo(o, modelStandard, acpThinkingDepth);
+                                // 应用思考深度配置（按模型推理能力翻译，而非仅凭接口类型）
+                                ThinkingDepth.applyTo(o, finalChatModel, acpThinkingDepth);
                                 // 同时透传给工具链：TaskTalent 据此让子代理与本轮使用同一档位，
-                                // 否则子代理只能读到会话级旧值（甚至 null→OFF）而静默降档。
+                                // 否则子代理只能读到会话级旧值（甚至 null→AUTO）而静默降档。
                                 o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH,
                                         ThinkingDepth.normalize(acpThinkingDepth));
                             })
@@ -275,9 +276,17 @@ public class AcpLink implements Runnable {
                                         return Mono.just(chunk);
                                     }
 
-                                    String toolCallId = idPrefix + "-" + toolCallCounter.incrementAndGet();
-                                    if (toolStart.getActionId() != null) {
-                                        actionToolCallIds.put(mapKey(sessionId, toolStart.getActionId()), toolCallId);
+                                    // 参数生成期的草稿帧可能已用同一 actionId 建过卡：必须复用它的 toolCallId
+                                    // 做原位更新，否则编辑器里会多出一张卡，且草稿卡永远收不了口（停在 IN_PROGRESS）。
+                                    String startActionId = toolStart.getActionId();
+                                    String toolCallId = startActionId != null
+                                            ? actionToolCallIds.get(mapKey(sessionId, startActionId))
+                                            : null;
+                                    if (toolCallId == null) {
+                                        toolCallId = idPrefix + "-" + toolCallCounter.incrementAndGet();
+                                        if (startActionId != null) {
+                                            actionToolCallIds.put(mapKey(sessionId, startActionId), toolCallId);
+                                        }
                                     }
 
                                     AcpSchema.ToolCall toolCall = new AcpSchema.ToolCall(
@@ -291,6 +300,75 @@ public class AcpLink implements Runnable {
                                             toolStart.getArgs(),   // rawInput
                                             null,                    // rawOutput
                                             null                     // meta
+                                    );
+                                    return acpContext.sendUpdate(sessionId, toolCall)
+                                            .thenReturn(chunk);
+                                }
+                                // === 工具参数生成期：提前立起 IN_PROGRESS 卡片，补上「函数名已出、参数还在写」的盲区 ===
+                                // ToolCallStartEvent 要等参数完整才发出，一次大参数调用（如 write 整篇文档）可持续数十秒，
+                                // 期间 ACP 客户端一条通知都收不到，无法区分「模型还在写」与「代理已卡死」。
+                                // 这里用与 start/end 同一个 actionId→toolCallId 映射建卡，使三个阶段原位更新同一张卡。
+                                else if (chunk instanceof ToolCallDraftEvent) {
+                                    ToolCallDraftEvent toolDraft = (ToolCallDraftEvent) chunk;
+                                    String toolName = toolDraft.getToolName();
+
+                                    // 过滤口径与 ToolCallStartEvent 分支一致；额外要求 actionId 非空：
+                                    // 没有 actionId 就无法与后续 start/end 配对，建出来只会是一张无人收口的孤卡。
+                                    if (Assert.isEmpty(toolName)
+                                            || TaskTalent.TOOL_MULTITASK.equals(toolName)
+                                            || TaskTalent.TOOL_TASK.equals(toolName)
+                                            || toolDraft.getActionId() == null) {
+                                        return Mono.just(chunk);
+                                    }
+
+                                    String draftToolCallId = idPrefix + "-" + toolCallCounter.incrementAndGet();
+                                    // putIfAbsent：同一 actionId 只允许建一次卡（草稿帧重复到达时退化为无操作）
+                                    if (actionToolCallIds.putIfAbsent(mapKey(sessionId, toolDraft.getActionId()), draftToolCallId) != null) {
+                                        return Mono.just(chunk);
+                                    }
+
+                                    AcpSchema.ToolCall toolCall = new AcpSchema.ToolCall(
+                                            "tool_call",
+                                            draftToolCallId,
+                                            toolName + "(参数生成中...)",
+                                            mapToolKind(toolName),
+                                            AcpSchema.ToolCallStatus.IN_PROGRESS,
+                                            Collections.emptyList(),
+                                            Collections.emptyList(),   // locations：参数未成形，尚无法解析文件位置
+                                            null,                      // rawInput：此刻参数不完整，由随后的 start 回填
+                                            null,                      // rawOutput
+                                            null                       // meta
+                                    );
+                                    return acpContext.sendUpdate(sessionId, toolCall)
+                                            .thenReturn(chunk);
+                                }
+                                // === 参数生成进度：原位刷新标题上的累计字节数，让卡片「看得见在动」 ===
+                                else if (chunk instanceof ToolCallArgsDeltaEvent) {
+                                    ToolCallArgsDeltaEvent toolArgs = (ToolCallArgsDeltaEvent) chunk;
+                                    String actionId = toolArgs.getActionId();
+                                    String argsToolCallId = actionId != null
+                                            ? actionToolCallIds.get(mapKey(sessionId, actionId))
+                                            : null;
+
+                                    // 只刷新草稿帧已建出的卡。查不到即表示该工具被上面的口径过滤掉（或端点没给
+                                    // actionId），此时补建卡会凭空产生无人收口的孤卡，故直接放行不做任何下发。
+                                    if (argsToolCallId == null) {
+                                        return Mono.just(chunk);
+                                    }
+
+                                    // 下发频率已由生产方（ReasonTask）按时间/字节双阈值节流，这里不再二次限流；
+                                    // 帧体只含标题与状态，不带参数内容，故高频更新对 stdio 链路是安全的。
+                                    AcpSchema.ToolCall toolCall = new AcpSchema.ToolCall(
+                                            "tool_call",
+                                            argsToolCallId,
+                                            toolArgs.getToolName() + "(参数生成中 " + toolArgs.getArgsBytes() + " 字节...)",
+                                            mapToolKind(toolArgs.getToolName()),
+                                            AcpSchema.ToolCallStatus.IN_PROGRESS,
+                                            Collections.emptyList(),
+                                            Collections.emptyList(),
+                                            null,
+                                            null,
+                                            null
                                     );
                                     return acpContext.sendUpdate(sessionId, toolCall)
                                             .thenReturn(chunk);

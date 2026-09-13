@@ -8,6 +8,9 @@
     <link rel="shortcut icon" type="image/x-icon" href="/img/favicon.png"/>
     <link rel="icon" sizes="any" type="image/x-icon" href="/img/favicon.png"/>
     <link rel="stylesheet" href="/layui/css/layui.css"/>
+    <!-- layui 图标字体预热：layer / laydate 等内置组件的图标走该字体。
+         不预热时字体要等首次用到才去下载，桌面端（Tauri/WebView2）首启会出现缺字方块。 -->
+    <link rel="preload" as="font" type="font/woff2" href="/layui/font/iconfont.woff2?v=293" crossorigin="anonymous"/>
     <link rel="stylesheet" href="/css/theme.css"/>
     <link rel="stylesheet" href="/css/app.css"/>
     <link rel="stylesheet" href="/css/settings.css"/>

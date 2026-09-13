@@ -17,10 +17,12 @@
  * 只改资源、不改文件名：backend.js / cli-provision.js / dev-launch.js 中对
  * javaw.exe、java.exe 的硬编码路径全部保持有效，无需同步改动。
  *
- * 复用方：Electron 走 cmd/afterPack.js（electron-builder 的 afterPack 钩子），
- * Tauri 走自己的 beforeBuildCommand（Tauri 无 afterPack 概念，故在打包前对
- * gourd-ai-tauri/build/extraResources/jre 直接打标）。两端共用本文件而不各写一份 ——
- * 同类跨模块复用见 cmd/gen-build-manifest.js。
+ * 调用方：Electron 走 cmd/afterPack.js（electron-builder 的 afterPack 钩子）。
+ *
+ * 【Tauri 侧已拆分（2026-09-12）】Tauri 原先也执行本文件（跨模块写成
+ * `node ../gourd-ai-desktop/cmd/brand-jre.js`），现已在 gourd-ai-tauri/cmd/ 下另立
+ * 自有副本。两端从此各自演进：改 Electron 的品牌化改这里，改 Tauri 的改那份副本，
+ * 只有确属共性的问题才两边同步。
  *
  * 诚实性：OriginalFilename 与 InternalName 保留上游原值（java/javaw/keytool），
  * "Full Version" 保留 JDK 构建号，据此仍可辨明二进制的真实出身。

@@ -13,9 +13,11 @@
  *   1. 作为模块：`require('./gen-build-manifest').generate({ ... })`
  *      —— Electron 的 cmd/prepare-resources.js 走这条路。
  *   2. 作为 CLI：`node cmd/gen-build-manifest.js [--extra-dir <目录>]`
- *      —— Tauri 的 beforeBuildCommand 走这条路，并用 --extra-dir 指向**自己的**
- *      gourd-ai-tauri/build/extraResources（2026-09-06 起两端各自持有暂存目录，
- *      不再共用；不传则回落到 Electron 的 build/extraResources）。
+ *
+ * 【Tauri 侧已拆分（2026-09-12）】Tauri 原先也执行本文件（跨模块写成
+ * `node ../gourd-ai-desktop/cmd/gen-build-manifest.js --extra-dir ...`），现已在
+ * gourd-ai-tauri/cmd/ 下另立自有副本（2026-09-06 起两端就各自持有暂存目录，并不共用）。
+ * 本文件此后只服务 Electron：--extra-dir 的跨模块用法随之消失，默认值即本模块目录。
  *
  * buildId 取自 `gourd-ai-agent/target/classes/build-info.properties`：它与 jar 出自
  * 同一次 mvn 产物（会被复制进 jar 内 BOOT-INF/classes/），因此无需在 Node 侧解 zip。

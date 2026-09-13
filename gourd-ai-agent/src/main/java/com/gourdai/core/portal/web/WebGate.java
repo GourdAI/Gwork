@@ -715,31 +715,37 @@ public class WebGate extends SimpleWebSocketListener {
     }
 
     /**
-     * 执行 Agent 流式任务。
+     * 同步 run 的等待句柄。
      *
-     * <p>通过 {@link WebStreamBuilder} 构建 ReAct Agent 的响应流，
-     * 订阅流数据并通过 {@link #emitToClient} 逐条推送至前端。
-     * 同时将 RxJava {@link Disposable} 保存到会话属性中，以支持 {@link #interruptSession} 中断。</p>
-     *
-     * @param session      Agent 会话实例
-     * @param sessionCwd   会话当前工作目录
-     * @param prompt       用户输入的 Prompt（为 null 时表示 HITL 恢复等无需新 Prompt 的场景）
-     * @param selectedModel 用户选择的 AI 模型标识
-     * @param agentName    指定 Agent 名称（可为 null，表示使用默认 Agent）
+     * <p>订阅与 disposable 登记已在调用线程内同步完成（非阻塞），等待必须在
+     * 「会话输入锁之外」执行：{@link #startSyncRun} 所属的调用链若在锁内 await，
+     * 而流线程又会回调 {@link #registerSteerRun}（同样要抢该会话锁），必然互锁。</p>
      */
-    private String performAgentTaskSync(AgentSession session, String sessionCwd, Prompt prompt, String selectedModel, String agentName) {
-        return performAgentTaskSync(session, sessionCwd, prompt, selectedModel, agentName, false, null);
+    private static final class SyncRunHandle {
+        private final CountDownLatch latch;
+        private final AtomicReference<String> finalAnswerRef;
+
+        SyncRunHandle(CountDownLatch latch, AtomicReference<String> finalAnswerRef) {
+            this.latch = latch;
+            this.finalAnswerRef = finalAnswerRef;
+        }
+
+        /** 阻塞直到本轮 run 终止，返回捕获到的最终文本。必须在会话输入锁之外调用。 */
+        String await() {
+            RunUtil.runAndTry(latch::await);
+            return finalAnswerRef.get();
+        }
     }
 
     /**
-     * 执行 Agent 流式任务（同步等待，可指定不持久化选择）。
+     * 订阅并登记一轮同步 run，立即返回等待句柄（不阻塞）。
      *
-     * @param transientSelection    true 时本轮指定的模型不写入会话上下文（仅本轮生效）。
-     *                              用于 Loop 定时任务：选择属于任务定义，不应污染运行时会话的用户选择。
-     * @param thinkingDepthOverride 本轮思考深度档位（null 时回退会话选择），同样不写入会话上下文。
+     * <p>调用方必须在「会话输入锁之外」执行 {@link SyncRunHandle#await()}：本方法只做订阅与
+     * disposable 登记（与异步路径一致），等待期间流线程会回调 {@link #registerSteerRun}、
+     * Stop 会调用 {@link #interruptSession}，两者都要抢同一把会话锁，持锁等待必然死锁。</p>
      */
-    private String performAgentTaskSync(AgentSession session, String sessionCwd, Prompt prompt, String selectedModel, String agentName,
-                                        boolean transientSelection, String thinkingDepthOverride) {
+    private SyncRunHandle startSyncRun(AgentSession session, String sessionCwd, Prompt prompt, String selectedModel, String agentName,
+                                       boolean transientSelection, String thinkingDepthOverride) {
         String sessionId = session.getSessionId();
 
         if (selectedModel != null) {
@@ -821,8 +827,9 @@ public class WebGate extends SimpleWebSocketListener {
         if (disposable.isDisposed()) {
             removeDisposableIfSame(session, disposable);
         }
-        RunUtil.runAndTry(countDownLatch::await);
-        return finalAnswerRef.get();
+        // 不在本方法内 await：等待交给调用方在会话输入锁之外执行，避免与流线程的
+        // registerSteerRun / interruptSession 争用同一把会话锁造成死锁。
+        return new SyncRunHandle(countDownLatch, finalAnswerRef);
     }
 
     /**
@@ -960,6 +967,27 @@ public class WebGate extends SimpleWebSocketListener {
     }
 
     /**
+     * 当前活跃 run 的 runId（无运行中 run 时返回 null）。
+     *
+     * <p>由 {@code /web/chat/replay} 一并回传，作为前端“本轮到底在跑哪个 run”的权威真值。
+     * 前端 {@code activeRunId} 可能被历史回放写成陈旧值，导致中断请求因 runId 不匹配被后端
+     * 判为 {@code turn_changed}；前端据此校准后重试中断才能命中真正的当前 run。</p>
+     *
+     * @param sessionId 会话标识
+     * @return 活跃 run 的 runId；无运行中 run 或查询异常时返回 null
+     */
+    public String getCurrentRunId(String sessionId) {
+        try {
+            AgentSession session = engine.getSession(sessionId);
+            Object runId = session.attrs().get(SteerInterceptor.ATTR_ACTIVE_RUN_ID);
+            return runId == null ? null : String.valueOf(runId);
+        } catch (Exception e) {
+            LOG.warn("[WebGate] current runId lookup failed for session {}: {}", sessionId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * 安全聊天输入入口（chat 会话或不关心项目根时使用）。
      *
      * @param sessionId 会话标识
@@ -1051,13 +1079,38 @@ public class WebGate extends SimpleWebSocketListener {
      */
     public String safeChatInputAndCaptureLoop(String sessionId, String projectRoot, String worktreeRoot, String input, String source,
                                               String modelName, String thinkingDepth) {
+        LoopRunPlan plan;
+        SyncRunHandle handle;
+        // 会话输入锁只在「受理准备 + 订阅登记」这一短临界区内持有。
+        // 绝不能在锁内等待本轮 run 终止：本方法会阻塞到流结束，而流线程上的
+        // onAgentStart→registerSteerRun 与 Stop 的 interruptSession 都要抢同一把会话锁，
+        // 持锁等待会造成永久死锁（现象：点暂停无反应、一直显示“思考中”且计时器不停）。
         synchronized (inputLocks.computeIfAbsent(sessionId, k -> new Object())) {
-            return doSafeChatInputAndCaptureLoop(sessionId, projectRoot, worktreeRoot, input, source, modelName, thinkingDepth);
+            plan = doSafeChatInputAndCaptureLoopPrepare(sessionId, projectRoot, worktreeRoot, input, source);
+            if (plan == null) return null;
+            if (plan.earlyResult != null) return plan.earlyResult;
+            handle = startSyncRun(plan.session, plan.cwd, Prompt.of(plan.input), modelName, plan.agentName, true, thinkingDepth);
         }
+        // 锁外等待：此时锁已释放，流线程可正常完成 run 注册与插话，Stop 也可即时受理。
+        return handle.await();
     }
 
-    private String doSafeChatInputAndCaptureLoop(String sessionId, String projectRoot, String worktreeRoot, String input, String source,
-                                                 String modelName, String thinkingDepth) {
+    /** Loop 受理准备结果：earlyResult 非空表示可直接返回（如目标已达成），否则按 session/cwd/input/agentName 发起本轮 run。 */
+    private static final class LoopRunPlan {
+        String earlyResult;
+        AgentSession session;
+        String cwd;
+        String input;
+        String agentName;
+    }
+
+    /**
+     * 在会话输入锁内执行的 Loop 受理准备：busy 检查、所属根绑定、目标达成短路、用户气泡推送。
+     *
+     * <p>准备阶段不阻塞，故可安全地在锁内执行；真正的流式执行（会阻塞至本轮结束）由调用方在锁外发起。</p>
+     */
+    private LoopRunPlan doSafeChatInputAndCaptureLoopPrepare(String sessionId, String projectRoot, String worktreeRoot,
+                                                             String input, String source) {
         try {
             AgentSession existing = engine.getSession(sessionId);
             if (isSessionBusy(existing)) {
@@ -1089,12 +1142,14 @@ public class WebGate extends SimpleWebSocketListener {
         }
 
         List<ChatMessage> messageList = session.getMessages();
-        if(Assert.isNotEmpty(messageList)) {
+        if (Assert.isNotEmpty(messageList)) {
             //如果最新的消息里有 GOAL_ACHIEVED，说明任务完成了
             ChatMessage message = messageList.get(messageList.size() - 1);
             if (message instanceof AssistantMessage) {
                 if (message.getContent().contains(LoopExecutionResult.GOAL_ACHIEVED)) {
-                    return message.getContent();
+                    LoopRunPlan finished = new LoopRunPlan();
+                    finished.earlyResult = message.getContent();
+                    return finished;
                 }
             }
         }
@@ -1113,12 +1168,13 @@ public class WebGate extends SimpleWebSocketListener {
             }
         }
 
+        LoopRunPlan plan = new LoopRunPlan();
+        plan.session = session;
         // 工作目录：worktree 优先（隔离执行），否则用任务工作空间根
-        String effectiveCwd = Assert.isNotEmpty(worktreeRoot) ? worktreeRoot : projectRoot;
-
-        // 任务级选择仅本轮生效（transientSelection=true），不污染会话上下文
-        return performAgentTaskSync(session, effectiveCwd, Prompt.of(currentInput), modelName, agentName,
-                true, thinkingDepth);
+        plan.cwd = Assert.isNotEmpty(worktreeRoot) ? worktreeRoot : projectRoot;
+        plan.input = currentInput;
+        plan.agentName = agentName;
+        return plan;
     }
 
 
@@ -1183,7 +1239,23 @@ public class WebGate extends SimpleWebSocketListener {
             try {
                 AgentSession session = engine.getSession(sessionId);
                 SteerRunState state = (SteerRunState) session.attrs().get(SteerInterceptor.ATTR_RUN_STATE);
-                if (state == null || state.lifecycle != SteerRunState.Lifecycle.RUNNING) {
+                if (state == null) {
+                    // 兜底：run 状态已摘除但底层订阅仍活着（如 onAgentStart 之前的窗口、或异常路径漏删），
+                    // 只要还有活跃 disposable 就必须真停并补发 done，否则前端会永久停在思考态。
+                    // 用带同实例判定的 remove(key, value) 原子摘取：即便存在未持锁登记 disposable 的路径，
+                    // 也绝不会误摘后一个 run 的订阅。dispose 与补 done 仍在锁内完成，与“摘取 + 登记”同锁互斥，
+                    // 从而不会出现「已摘旧订阅但新 run 已登记」的窗口去误杀新一轮等待态。
+                    Disposable orphan = (Disposable) session.attrs().get("disposable");
+                    if (orphan != null && !orphan.isDisposed() && session.attrs().remove("disposable", orphan)) {
+                        orphan.dispose();
+                        session.addMessage(ChatMessage.ofAssistant("用户已取消任务."));
+                        emitToClient(sessionId, WebChunk.ofDone());
+                        LOG.info("[WebGate] Session {} interrupted via disposable fallback (no run state)", sessionId);
+                        return "cancelled";
+                    }
+                    return "not_running";
+                }
+                if (state.lifecycle != SteerRunState.Lifecycle.RUNNING) {
                     return "not_running";
                 }
                 if (expectedRunId != null && !expectedRunId.isEmpty() && !expectedRunId.equals(state.runId)) {

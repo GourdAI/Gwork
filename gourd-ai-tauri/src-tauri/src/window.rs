@@ -281,11 +281,17 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     tauri::async_runtime::spawn(async move {
         let state = app_for_fallback.state::<AppState>();
         let mut rx = state.backend_ready.subscribe();
-        // 最多等 15s，避免后端异常时窗口永远不显示
-        let timeout = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            let _ = rx.changed().await;
-        });
-        let _ = timeout.await;
+        // 【必须先读当前值】后端引导现在可能早于窗口创建完成（见 main.rs setup 的顺序说明），
+        // 订阅时它很可能已经置位 true。`changed()` 等的是「下一次变化」，值已就绪时它会一直
+        // 空等到超时 —— 兜底就从「后端就绪即显示」退化成「固定等满 15s」，与提速目标正好相反。
+        // borrow_and_update() 顺带推进已读游标，避免后续重复触发。
+        if !*rx.borrow_and_update() {
+            // 最多等 15s，避免后端异常时窗口永远不显示
+            let timeout = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                let _ = rx.changed().await;
+            });
+            let _ = timeout.await;
+        }
         if let Some(win) = app_for_fallback.get_webview_window(MAIN_WINDOW_LABEL) {
             if !win.is_visible().unwrap_or(true) {
                 let _ = win.show();

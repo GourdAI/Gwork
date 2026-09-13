@@ -11,6 +11,7 @@
                       "steer_box_full":  "Trop d’interventions en attente ; ajout à la file",
                       "steer_deferred":  "L’étape en cours est terminée ; ajout à la file",
                       "steer_failed":  "Échec de l’envoi de l’intervention ; la saisie a été conservée",
+                      "force_finished":  "L’exécution est déjà terminée (serveur inactif) ; le flux a été fermé automatiquement",
                       "steer_attachment_wait":  "Les pièces jointes ne peuvent pas être envoyées ni mises en file pendant une tâche. Attendez ou arrêtez-la",
                       "steer_command_queue":  "Les commandes ne peuvent pas servir d’intervention. Appuyez sur Tab pour les mettre en file",
                       "steer_dropped":  "L’intervention n’a pas pris effet avant la fin et a été ajoutée à la file",
@@ -89,7 +90,7 @@
                     "model_search_empty":  "Aucun modèle correspondant",
                     "model_group_toggle":  "Replier / déplier ce fournisseur",
                     "thinking":  {
-                                     "off":  {
+                                     "auto":  {
                                                  "label":  "Par défaut",
                                                  "desc":  "Utiliser le comportement par défaut du modèle"
                                              },
@@ -203,7 +204,8 @@
                                        "switch":  "Changer d\u0027espace de travail",
                                        "clear":  "Effacer la sélection"
                                    },
-                "sidebar":  {
+                 "sidebar":  {
+                                 "load_failed_retry":  "Échec du chargement, cliquez pour réessayer",
                                  "loop_mark":  "Tâche planifiée",
                                 "new_task":  "Nouvelle tâche",
                                 "search":  "Rechercher",
@@ -741,7 +743,7 @@
                                  "model_none":  "Aucun modèle configuré pour le moment. Veuillez d\u0027abord ajouter et activer un modèle dans Paramètres - Modèles.",
                                  "model_saved":  "Modèle ACP enregistré",
                                  "model_save_failed":  "Échec de l\u0027enregistrement, veuillez réessayer",
-                                 "thinking_hint":  "Contrôle l\u0027effort de raisonnement ; désactivé utilise le comportement par défaut du modèle",
+                                 "thinking_hint":  "Contrôle l\u0027effort de raisonnement ; l\u0027option Par défaut utilise le comportement natif du modèle",
                                  "thinking_saved":  "Paramètres de profondeur de réflexion enregistrés",
                                  "thinking_save_failed":  "Échec de l\u0027enregistrement, veuillez réessayer",
                                  "zed_integration_desc":  "Fusionnez le JSON ci-dessous dans les paramètres ACP de votre éditeur, puis sélectionnez GWork dans le panneau Agent.",
@@ -799,6 +801,7 @@
                  "phase_thinking":  "Réflexion",
                  "phase_text":  "Rédaction",
                  "phase_waiting":  "En attente de réponse",
+                 "args_streaming":  "Génération des arguments · {size}",
                  "rerun":  "Relancer",
                  "continue_run":  "Continuer",
                  "need_auth":  "Autorisation requise :",

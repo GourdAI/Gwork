@@ -627,8 +627,16 @@ app.whenReady().then(async () => {
   }
 
   createMainWindow();
-  createTray();
+
+  // 后端引导紧跟建窗派发，且排在 createTray 之前。
+  // createMainWindow 本身只构造 BrowserWindow + loadURL（不等页面），耗时是百毫秒级；
+  // 但托盘创建、自动更新初始化都可能有百毫秒级开销，把 bootstrap 排在这些之后等于白等。
+  //
+  // 这里刻意与 Tauri 版保持同一时序（那边 `WebviewWindowBuilder::build()` 是同步建 WebView2，
+  // 必须靠「先 spawn 后端再建窗」并行化，见 gourd-ai-tauri/src-tauri/src/main.rs 的 setup）。
+  // 两壳的启动顺序一旦分叉，就会再次出现「换了壳就变慢」这类只能靠日志倒推的问题。
   bootstrap();
+  createTray();
 
   // 自动更新：注册 IPC、启动延迟首检与周期复检（仅打包态生效，见 updater.js）。
   // 状态变化经 updater-state 广播到所有窗口，设置页"关于与更新"实时展示。

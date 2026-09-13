@@ -3000,6 +3000,10 @@ public class WebSettingsController {
                 item.put("provider", config.getProvider());
                 // 接口类型随列表下发：切换模型后前端无需重拉页面即可更新关联的思考档位选项集
                 item.put("standard", config.getStandardOrProvider());
+                // 与 /web/chat/models 同口径：该模型真正可区分的思考档位（不含 auto），
+                // 供前端收缩档位选择器；空列表 = 无可调档位，应隐藏选择器
+                item.put("thinkingLevels", ThinkingDepth.selectableCodes(
+                        config.getStandardOrProvider(), config.getModel(), config.getCapabilities()));
                 modelItems.add(item);
             }
         }

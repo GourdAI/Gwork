@@ -242,6 +242,7 @@ Var GWorkFontPx       ; 9pt 的像素高（正数），控件最小高度基准
 Var GWorkLogFontBuf   ; 复用的 92 字节 LOGFONT 缓冲
 Var GWorkRectBuf      ; 复用的 16 字节 RECT 缓冲
 Var GWorkTextBuf      ; 复用的 2048 字节窗体文本缓冲（Static 行wrap测高用）
+Var GWorkTmBuf        ; 复用的 128 字节 TEXTMETRIC 缓冲（品牌文字行高测量用）
 
 !macro GWorkUiFontFix SUF
 Function ${SUF}GWorkUiInit
@@ -268,8 +269,13 @@ Function ${SUF}GWorkUiInit
   Pop $GWorkRectBuf
   System::Alloc 2048
   Pop $GWorkTextBuf
+  ; TEXTMETRICW 实测 60 字节（11×LONG + 4×WCHAR + 5×BYTE），128 留足对齐余量
+  System::Alloc 128
+  Pop $GWorkTmBuf
   SendMessage $HWNDPARENT 0x0030 $GWorkFontNormal 1   ; WM_SETFONT
   Call ${SUF}GWorkApplyFonts
+  ; 品牌文字（版权行）：垂直对齐到按钮行 + 补足被控件高度裁掉的行高（详见下方函数头注释）
+  Call ${SUF}GWorkAlignBrandingText
   ; 全局定时器：hwnd=0 不被页面切换销毁，每页新建的控件 25ms 内被扫到
   gwork_uiinit_done:
 FunctionEnd
@@ -386,6 +392,150 @@ Function ${SUF}GWorkApplyOne
   Pop $R7
   Pop $R8
   Pop $R9
+FunctionEnd
+
+; ── 品牌文字行对齐 + 高度补足：id 1256/1028 对齐到按钮行（id 1）中心，并补足被裁的高度 ──
+; 现象（2026-09-11 用户反馈 + 本机 PrintWindow 像素剖面实测）：
+;   a) 位置：维护页等「非 welcome/finish 页」显示品牌文字时
+;      （MUI 在 .onGUIInit 里对 1256 设 WM_SETTEXT，并在这些页把它与 1028 置为可见），NSIS 3.11
+;      的资源布局里品牌文字 rect (719,643) 483x12 与「标准分隔线」(id 1035) rect (719,651)
+;      480x2 垂直重叠 2~3px：文字骑在线上，且其不透明行盒把线在文字宽度内「咬断」。
+;   b) 高度（本轮修复）：GWorkApplyFonts 把品牌文字字体从对话框默认字体换成微软雅黑 9pt
+;      （实测 tmHeight=16、tmAscent=13），但该控件是**外层对话框 $HWNDPARENT 的子窗**，
+;      正是 GWorkApplyOne 里「StrCmp $R8 $HWNDPARENT gwork_ao_done」刻意跳过的那一类
+;      （原意是避免误动 header），于是高度一直停在资源里的 12px。
+;      12 < 16：Static 自顶部绘制，底部 4px（含 p / y / g 的降部）被控件边界裁掉。
+;      实测证据：品牌文字墨迹只占 y=309..317 共 **9 行**，而**同一字体**的按钮文字为 11 行，
+;      差额正是被裁掉的降部 —— 用户看到的就是「版权行下半截没了，像被一条线挡住」。
+; 依据：官方「经典布局」（Source/exehead/resource.rc 的 IDD_INST）中 IDC_VERSTR 相对按钮行
+;   垂直居中（按钮 142..156、文字 145..153：145 = 142 + (14-8)/2），「品牌文字与按钮同一
+;   水平行」正是这套 UI 的初衷；本函数把同一关系施加到当前 rect 上：
+;     target = max(文字自身字体 tmHeight + 2, $GWorkFontPx + 6)
+;     newTop = 按钮top + (按钮高 - target) / 2（整除），x / 宽保持不变。
+;   高度取「字体实测行高 + 2」而不是写死常量：DPI 缩放与字体回退都能自适应；下限用
+;   $GWorkFontPx + 6 是为了与 radio/checkbox 包装宏 GWorkNSD_FixBtn 共用同一留白口径，
+;   且字体/DC 任一不可得时它就是唯一可用值（此时退化为纯位置对齐，即上一版语义）。
+; 安全性：基准只认「id=1 且类名为 Button」的控件，找不到即整段跳过；全部在「父窗客户坐标」
+;   内运算（GetWindowRect → MapWindowPoints(0, $HWNDPARENT, ...) → MoveWindow，与
+;   GWorkNSD_FixBtn 的既有套路一致）；幂等（高度已够则只改位置）；不动分隔线、不动 MUI 的
+;   页面显隐；仅依赖 $GWorkRectBuf / $GWorkTmBuf（均在 UiInit 内分配，随字体句柄一起受
+;   同一道守卫保护）。
+; 覆盖范围：安装器与卸载器各展开一次（SUF 参数化），两者窗口结构相同（同一份 exehead 资源）。
+Function ${SUF}GWorkAlignBrandingText
+  Push $R0
+  Push $R1
+  Push $R2
+  Push $R3
+  Push $R4
+  Push $R5
+  Push $R6
+  Push $R7
+  Push $R8
+
+  ; 基准控件：id=1 的按钮（安装器/卸载器各页都在）；顺带校验类名，防资源变动误伤
+  System::Call 'user32::GetDlgItem(p $HWNDPARENT, i 1) i .R0'
+  StrCmp $R0 0 gwork_abt_done
+  System::Call 'user32::GetClassName(p R0, t .R7, i 64)'
+  StrCmp $R7 "Button" 0 gwork_abt_done
+
+  ; 按钮 rect：先屏幕坐标、再转父窗客户坐标；R5=按钮高、R6=按钮top
+  System::Call 'user32::GetWindowRect(p R0, p $GWorkRectBuf)'
+  System::Call 'user32::MapWindowPoints(p 0, p $HWNDPARENT, p $GWorkRectBuf, i 2)'
+  System::Call '*$GWorkRectBuf(i .R1, i .R2, i .R3, i .R4)'
+  IntOp $R5 $R4 - $R2
+  StrCpy $R6 $R2
+
+  ; ── 目标高度 R8：先落兜底值，再用品牌文字自身字体实测的行高顶上去 ──
+  IntOp $R8 $GWorkFontPx + 6
+  System::Call 'user32::GetDlgItem(p $HWNDPARENT, i 1256) i .R0'
+  StrCmp $R0 0 gwork_abt_hset
+  ; 缓冲必须真实存在：GetTextMetricsW 会向该指针写约 60 字节，传 NULL 是访问违例
+  ;（和 GetWindowRect(hwnd, NULL) 那种「失败即返回 FALSE」的 API 不同）。Alloc 失败只在内存
+  ;  耗尽时出现，但代价是安装器直接崩溃 —— 比「文字被裁」严重得多，所以显式挡住。
+  StrCmp $GWorkTmBuf 0 gwork_abt_hset
+  SendMessage $R0 0x0031 0 0 $R7                                ; WM_GETFONT
+  StrCmp $R7 0 gwork_abt_hset
+  System::Call 'user32::GetDC(p R0) i .R2'
+  StrCmp $R2 0 gwork_abt_hset
+  System::Call 'gdi32::SelectObject(i R2, i R7) i .R3'
+  System::Call 'gdi32::GetTextMetricsW(i R2, p $GWorkTmBuf)'
+  System::Call '*$GWorkTmBuf(i .R4)'                            ; tmHeight
+  System::Call 'gdi32::SelectObject(i R2, i R3)'
+  System::Call 'user32::ReleaseDC(p R0, i R2)'
+  IntOp $R4 $R4 + 2
+  ; 只有实测值更大时才采用它：相等/小于 → hset（保留兜底值），大于 → hbig（改用实测值）
+  IntCmp $R4 $R8 gwork_abt_hset gwork_abt_hset gwork_abt_hbig
+  gwork_abt_hbig:
+  StrCpy $R8 $R4
+  gwork_abt_hset:
+
+  ; ── 上限钳制：目标高不得超过按钮高 ──
+  ; 两个作用：① GWorkAlignOneBranding 要算 (按钮高 - 最终高) / 2，目标高更大时差值为负，
+  ;   居中失去意义、控件还会向下溢出客户区；② 万一 GetTextMetricsW 未真正写入，读到的
+  ;   未初始化缓冲可能是任意大值，这一步把异常值兜回按钮高。当前字号下不会触发
+  ;   （96dpi：19 < 21），属于纯防御。
+  IntCmp $R8 $R5 gwork_abt_hmax_ok gwork_abt_hmax_ok gwork_abt_hmax_fix
+  gwork_abt_hmax_fix:
+  StrCpy $R8 $R5
+  gwork_abt_hmax_ok:
+
+  ; 品牌文字控件 (id 1256 = MUI Branding.Text)
+  System::Call 'user32::GetDlgItem(p $HWNDPARENT, i 1256) i .R0'
+  Call ${SUF}GWorkAlignOneBranding
+
+  ; 品牌文字背景控件 (id 1028 = MUI Branding.Background)：同法对齐（当前与 1256 同 rect）
+  System::Call 'user32::GetDlgItem(p $HWNDPARENT, i 1028) i .R0'
+  Call ${SUF}GWorkAlignOneBranding
+
+  gwork_abt_done:
+  Pop $R8
+  Pop $R7
+  Pop $R6
+  Pop $R5
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Pop $R1
+  Pop $R0
+FunctionEnd
+
+; 入参（约定复用寄存器，全部只读，不进 NSIS 栈）：
+;   $R0 = 目标控件句柄   $R5 = 按钮高   $R6 = 按钮top   $R8 = 目标高度
+; 自身临时寄存器 $R1..$R4 / $R7 在函数首尾 Push/Pop 保护（与 GWorkApplyOne 同一风格），
+; 调用方无需再关心寄存器存活；$R5/$R6/$R8 全程只读，不动。
+Function ${SUF}GWorkAlignOneBranding
+  Push $R1
+  Push $R2
+  Push $R3
+  Push $R4
+  Push $R7
+  ; ⚠ 这 5 个 Push 必须排在下面那条零值判断之前：否则 $R0=0 时会直接跳到 gwork_aob_done
+  ;   去 Pop，从调用者的栈上弹掉 5 个不属于本函数的字，把调用方彻底搞坏。
+  StrCmp $R0 0 gwork_aob_done
+  System::Call 'user32::GetWindowRect(p R0, p $GWorkRectBuf)'
+  System::Call 'user32::MapWindowPoints(p 0, p $HWNDPARENT, p $GWorkRectBuf, i 2)'
+  System::Call '*$GWorkRectBuf(i .R1, i .R2, i .R3, i .R4)'
+  IntOp $R3 $R3 - $R1                       ; 宽（保持不变）
+  IntOp $R7 $R4 - $R2                       ; 当前高
+  ; 当前高 < 目标高 → 提升；>= 目标高 → 沿用当前高（不压缩已有留白）
+  ; ⚠ IntCmp 三段跳转的顺序是【相等 / 小于 / 大于】（NSIS 手册 Reference/IntCmp），
+  ;   不是直觉上的「小于 / 相等 / 大于」。此处曾写反一次，后果是本该补高的分支永不命中、
+  ;   现象与「完全没改过」一模一样，极易被误判成「函数没被调用」而白绕一大圈。
+  ;   同类三分支写法在 GWorkNSD_FixBtn / GWorkApplyOne 里也有，动任何一处前先对手册确认顺序。
+  IntCmp $R7 $R8 gwork_aob_keep gwork_aob_big gwork_aob_keep
+  gwork_aob_big:
+  StrCpy $R7 $R8
+  gwork_aob_keep:
+  IntOp $R4 $R5 - $R7                       ; 按钮高 - 最终高
+  IntOp $R4 $R4 / 2
+  IntOp $R4 $R4 + $R6                       ; + 按钮top → 垂直居中于按钮行
+  System::Call 'user32::MoveWindow(p R0, i R1, i $R4, i $R3, i $R7, i 1)'
+  gwork_aob_done:
+  Pop $R7
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Pop $R1
 FunctionEnd
 !macroend
 

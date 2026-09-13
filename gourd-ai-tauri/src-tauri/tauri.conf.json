@@ -5,7 +5,7 @@
   "identifier": "com.gourdwork.desktop",
   "build": {
     "beforeDevCommand": "node cmd/prepare-ui.js",
-    "beforeBuildCommand": "node cmd/prepare-ui.js && node cmd/sync-backend.js && node ../gourd-ai-desktop/cmd/brand-jre.js build/extraResources/jre --no-fail && node ../gourd-ai-desktop/cmd/gen-build-manifest.js --extra-dir build/extraResources && node cmd/generate-nsis-assets.js && node cmd/verify-icons.js",
+    "beforeBuildCommand": "node cmd/prepare-ui.js && node cmd/sync-backend.js && node cmd/brand-jre.js build/extraResources/jre --no-fail && node cmd/gen-build-manifest.js --extra-dir build/extraResources && node cmd/generate-nsis-assets.js && node cmd/verify-icons.js",
     "frontendDist": "../ui"
   },
   "app": {

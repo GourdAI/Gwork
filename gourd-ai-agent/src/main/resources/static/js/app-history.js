@@ -85,6 +85,9 @@ var _sidebarReqToken = 0;
 var _projExpanded = {};
 /* code 模式单根加载令牌（防竞态，原逻辑） */
 var _sessionsReqToken = 0;
+/* 侧栏首屏加载失败标记：projects 接口失败时置位，buildSidebar 在当前视图无数据时渲染可点击重试提示；
+   加载成功后清零。避免首屏失败后项目块空白无反馈、只能靠切 tab 自愈。 */
+var _sidebarLoadFailed = false;
 
 
 /* 后端会话列表 → 本地条目（projectRoot 由后端回填，切换历史会话时据此恢复所属根，
@@ -135,6 +138,7 @@ function loadSessionHistory() {
     var myToken2 = ++_sidebarReqToken;
     $.get('/web/chat/projects', function (resp) {
         if (myToken2 !== _sidebarReqToken) return;
+        _sidebarLoadFailed = false;
         var plist = (resp && resp.data) ? resp.data : [];
         var projects = [];
         for (var i = 0; i < plist.length; i++) {
@@ -161,6 +165,9 @@ function loadSessionHistory() {
     }).fail(function () {
         // 项目列表获取失败：降级为仅渲染全局会话
         if (myToken2 !== _sidebarReqToken) return;
+        // 标记加载失败：当前视图完全无数据时由 buildSidebar 渲染「点击重试」提示，
+        // 否则默认「项目」tab 只由 projects 构建平铺，失败后是纯空白且无恢复路径
+        _sidebarLoadFailed = true;
         $.get('/web/chat/sessions', function (resp) {
             finalizeSidebar(myToken2, [], toSessionEntries(resp && resp.data));
         }).fail(function () {
@@ -373,6 +380,13 @@ function projNodeHtml(path, name, expanded) {
 /* Sidebar event delegation — single listener instead of per-item binding */
 $(historyList).on('click', function(e) {
     var $target = $(e.target);
+    // 侧栏加载失败提示：点击任意位置重试（重拉项目列表 + 会话）
+    var $retryHint = $target.closest('.sidebar-load-failed-hint');
+    if ($retryHint.length) {
+        _sidebarLoadFailed = false;
+        loadSessionHistory();
+        return;
+    }
     // 项目行「新建任务」图标：聊天工作空间切到该项目并回欢迎页开新会话（须置于 proj-node 分支之前，避免被展开/收起吸收）
     var $newChat = $target.closest('.proj-new-chat');
     if ($newChat.length) {
@@ -532,6 +546,14 @@ function buildSidebar() {
         }
     } else {
         for (i = 0; i < flat.length; i++) html += sidebarItemHtml(i);
+    }
+    // 加载失败空态：当前视图一条条目都没有且此前记录过加载失败时，渲染可点击的重试提示。
+    // 默认「项目」tab 的 flat 仅由 projects 构建，projects 接口失败时旧实现留下纯空白、
+    // 全局会话兜底数据也不可见，用户无从自救（只能切 tab 碰运气）。
+    if (_sidebarLoadFailed && flat.length === 0) {
+        html += '<div class="sidebar-empty-hint sidebar-load-failed-hint" role="button" tabindex="0">'
+            + escapeHtml(GourdI18n.t('app.sidebar.load_failed_retry'))
+            + '</div>';
     }
     return html;
 }
@@ -1112,6 +1134,10 @@ function replaySession(sess, events, prepend, keepOpen) {
             // 导致历史消息里固化了「绿点永久闪 + 计时器一直跳」——重开旧会话即可复现。
             // 回放路径不会再接收任何帧，故直接全量清 loading（包括批量卡，它不会再有批次完整性检查）。
             if (sess.container) {
+                // 孤儿骨架卡先移除再标黄：它从未执行过，黄点空卡会被读成「工具失败」。
+                // 回放路径理论上碰不到（action_draft / action_args 不落盘），但实时流与回放共用
+                // 同一渲染管线，此处与 finishStream 保持同构，避免两条收尾路径语义不一致。
+                if (typeof removeOrphanArgsStreamingCards === 'function') removeOrphanArgsStreamingCards(sess);
                 $(sess.container).find('.tool-status-icon.loading').each(function() {
                     this.className = 'tool-status-icon warn';
                     this.innerHTML = '';
@@ -1420,6 +1446,16 @@ __whenBackendReady(function () {
     loadSessionHistory();
 });
 
+/* 桌面端：后端恢复（首启失败重试成功 / 自动重启成功）后补拉首屏失败的数据。
+   侧栏仅在此前失败过时补拉（避免每次重启都覆盖本地较新数据）；
+   模型仅在没有可用列表时补拉（此前 reload 失败保留旧列表的场景，下次成功响应会自行重解析）。 */
+if (window.__GOURD_IPC__ && typeof window.__GOURD_IPC__.onBackendReady === 'function') {
+    window.__GOURD_IPC__.onBackendReady(function () {
+        if (_sidebarLoadFailed) loadSessionHistory();
+        if (!modelsLoaded) loadModels(null);
+    });
+}
+
 /* ===== Command System ===== */
 var commandList = []; // [{name, description, type}, ...]
 var commandsLoaded = false;
@@ -1447,7 +1483,7 @@ function getActiveCmdComplete() {
 
 /**
  * 关闭所有工具栏弹出面板（互斥核心）
- * 包括：命令补全、输入历史、循环任务、模型下拉、任务面板、队列面板
+ * 包括：命令补全、输入历史、循环任务、模型下拉、任务面板、变更面板、队列面板
  */
 function closeAllToolbarPanels() {
     // 命令补全
@@ -1458,6 +1494,8 @@ function closeAllToolbarPanels() {
     $('#chatModelDropdown, #welcomeModelDropdown').removeClass('show');
     // 任务面板
     if (typeof window.hideTodoPanel === 'function') window.hideTodoPanel();
+    // 变更面板
+    if (typeof window.hideFileChangesPanel === 'function') window.hideFileChangesPanel();
     // 队列面板
     $('#message-queue-container').hide();
 }
@@ -1912,69 +1950,40 @@ $chatHistoryPanel.on('click', function(e) {
 });
 
 /* ===== Model Selector ===== */
-var modelList = [];        // [{name, desc, contextLength, standard}, ...] (shared, only loaded once)
-var modelsLoaded = false;  // whether model list has been fetched
+var modelList = [];        // [{name, desc, contextLength, standard, thinkingLevels}, ...] (shared, only loaded once)
+var modelsLoaded = false;  // whether model list holds usable data（会话级模型刷新的门闸语义）
+var modelsListStale = false; // reload 失败但保留了旧列表：下次成功响应时强制重解析列表
 var sessionModelMap = {};  // { sessionId: selectedModelName }
-var sessionThinkingMap = {}; // { sessionId: thinkingDepth }  接口各自的档位值 / off
+var sessionThinkingMap = {}; // { sessionId: thinkingDepth }  统一 5 档编码 / auto
 
-// 思考深度档位——按接口类型各自一套（值与档数不同），与后端 ThinkingDepth 保持同步。
-// 每套开头统一放一个「关闭」项；其余为该接口的真实入口值。
+// 思考深度档位——全局统一 5 档，可选项由后端按「模型推理能力」下发（策略 S2）。
+//
+// 后端 /web/chat/models 为每个模型下发 thinkingLevels：该模型【真正可区分】的档位编码，
+// 由低到高、不含 auto。只渲染真实可区分的档位，用户就永远选不到无效档位：
+//   现代 Claude                      → ["low","medium","high","xhigh","max"]
+//   只支持单一 effort 值（gpt-5-pro） → ["high"]            （5 档全发同一个值，故只呈现 1 档）
+//   仅开关 / 不可控（glm-4.6、M2）    → []                   （无可调档位，应隐藏选择器）
+//
+// 这里不再按接口类型硬编码档位表：推理能力天然是【按模型】而非按接口的——同属 anthropic
+// 接口的 claude-sonnet-4-5 只认 budget_tokens、claude-sonnet-5 只认 output_config.effort，
+// 按接口一刀切必然有一方 400。判定统一收归后端 ThinkingDepth，前端只消费结果。
 //
 // ⚠️ 国际化关键：档位文案必须在【渲染时】动态求值，不能在脚本解析期固化。
 // 语言包由 app-i18n.js 异步 fetch，脚本顶层执行时可能尚未就绪 → GourdI18n.t() 会
 // 回落成 key 字面量并被永久缓存进静态数组（历史 bug：思考下拉显示 history.thinking.xxx）。
-// 因此改为工厂函数：每次 currentThinkingOptions() 调用时重新读取语言包。
-function buildThinkingProfiles() {
-    var t = function (k) { return GourdI18n.t(k); };
-    var OFF = { value: 'off', label: t('history.thinking.off.label'), desc: t('history.thinking.off.desc') };
-    return {
-        // OpenAI Chat Completions：reasoning_effort（4 档）
-        'openai': [
-            OFF,
-            { value: 'minimal', label: t('history.thinking.minimal.label'), desc: t('history.thinking.minimal.desc') },
-            { value: 'low',     label: t('history.thinking.low.label'), desc: t('history.thinking.low.desc') },
-            { value: 'medium',  label: t('history.thinking.medium.label'), desc: t('history.thinking.medium.desc') },
-            { value: 'high',    label: t('history.thinking.high.label'), desc: t('history.thinking.high.desc') }
-        ],
-        // OpenAI Responses：reasoning.effort（4 档，同上）
-        'openai-responses': [
-            OFF,
-            { value: 'minimal', label: t('history.thinking.minimal.label'), desc: t('history.thinking.minimal.desc') },
-            { value: 'low',     label: t('history.thinking.low.label'), desc: t('history.thinking.low.desc') },
-            { value: 'medium',  label: t('history.thinking.medium.label'), desc: t('history.thinking.medium.desc') },
-            { value: 'high',    label: t('history.thinking.high.label'), desc: t('history.thinking.high.desc') }
-        ],
-        // Gemini 3.x：thinkingConfig.thinkingLevel（4 档，desc 用 gemini 专属语境）
-        'gemini': [
-            OFF,
-            { value: 'minimal', label: t('history.thinking.minimal.label'), desc: t('history.thinking.minimal.gemini_desc') },
-            { value: 'low',     label: t('history.thinking.low.label'), desc: t('history.thinking.low.gemini_desc') },
-            { value: 'medium',  label: t('history.thinking.medium.label'), desc: t('history.thinking.medium.gemini_desc') },
-            { value: 'high',    label: t('history.thinking.high.label'), desc: t('history.thinking.high.gemini_desc') }
-        ],
-        // Anthropic Messages：现代 Claude 用 adaptive thinking + output_config.effort（5 档）
-        // 后端 ThinkingDepth.ANTHROPIC_USE_EFFORT=false 时改回老的 budget_tokens 3 档（low/medium/high）
-        'anthropic': [
-            OFF,
-            { value: 'low',    label: t('history.thinking.low.label'), desc: t('history.thinking.low.desc') },
-            { value: 'medium', label: t('history.thinking.medium.label'), desc: t('history.thinking.medium.desc') },
-            { value: 'high',   label: t('history.thinking.high.label'), desc: t('history.thinking.high.desc') },
-            { value: 'xhigh',  label: t('history.thinking.xhigh.label'), desc: t('history.thinking.xhigh.desc') },
-            { value: 'max',    label: t('history.thinking.max.label'), desc: t('history.thinking.max.desc') }
-        ]
-    };
-}
-// ollama 及未知接口回退到 openai 那套（reasoning_effort 顶层透传）
-var THINKING_PROFILE_FALLBACK = 'openai';
+// 因此下面是函数而非常量：每次调用都重新读取语言包。
 
-// 把后端 standard 归一到 profile key
-function thinkingProfileKey(standard) {
-    var s = (standard || '').toLowerCase();
-    if (s.indexOf('anthropic') >= 0 || s.indexOf('claude') >= 0) return 'anthropic';
-    if (s.indexOf('responses') >= 0) return 'openai-responses';
-    if (s.indexOf('gemini') >= 0 || s.indexOf('google') >= 0) return 'gemini';
-    if (s.indexOf('openai') >= 0 || s.indexOf('ollama') >= 0) return THINKING_PROFILE_FALLBACK;
-    return THINKING_PROFILE_FALLBACK;
+// 默认档位编码：不注入任何思考参数、跟随模型默认行为。
+// 旧名为 'off'，但其真实行为一直是「不注入」而非「关闭思考」，与 i18n 文案（"默认"）长期矛盾，
+// 故更名消除歧义。历史落盘的 'off' / 'minimal' 由 normalizeThinkingCode() 与后端同口径归一。
+var THINKING_AUTO = 'auto';
+
+// 历史档位值归一（与后端 ThinkingDepth.normalize 同口径，仅影响回显，不回写）
+function normalizeThinkingCode(depth) {
+    var d = String(depth == null ? '' : depth).toLowerCase();
+    if (!d || d === 'off') return THINKING_AUTO;
+    if (d === 'minimal') return 'low';   // 统一 5 档不含 minimal（原厂支持率仅 14.7%），就近归入 low
+    return d;
 }
 
 // 查某模型名对应的接口类型
@@ -1985,11 +1994,56 @@ function standardOfModel(modelName) {
     return '';
 }
 
-// 当前选中模型对应的思考档位选项集（每次调用都重建，保证国际化文案取最新语言包）
+// 查某模型「真正可区分的档位」编码表。
+// 返回 null 与返回 [] 语义不同，不可混淆：
+//   null = 后端没下发该字段（旧接口/模型未收录）→ 调用方走兜底档位集；
+//   []   = 后端明确说该模型无可调档位          → 调用方应隐藏整个选择器。
+function thinkingLevelsOfModel(modelName) {
+    for (var i = 0; i < modelList.length; i++) {
+        if (modelList[i].name === modelName) {
+            var lv = modelList[i].thinkingLevels;
+            return (Object.prototype.toString.call(lv) === '[object Array]') ? lv : null;
+        }
+    }
+    return null;
+}
+
+// 兜底档位集（不含 auto）：仅当后端未下发 thinkingLevels 时使用
+function fallbackThinkingLevels(standard) {
+    var s = (standard || '').toLowerCase();
+    if (s.indexOf('anthropic') >= 0 || s.indexOf('claude') >= 0) {
+        return ['low', 'medium', 'high', 'xhigh', 'max'];
+    }
+    return ['low', 'medium', 'high'];
+}
+
+// 指定模型的思考档位选项集（每次调用都重建，保证国际化文案取最新语言包）
+function thinkingOptionsForModel(modelName) {
+    var t = function (k) { return GourdI18n.t(k); };
+    var opts = [{
+        value: THINKING_AUTO,
+        label: t('history.thinking.auto.label'),
+        desc: t('history.thinking.auto.desc')
+    }];
+    var levels = thinkingLevelsOfModel(modelName);
+    if (levels == null) {
+        levels = fallbackThinkingLevels(standardOfModel(modelName));
+    }
+    for (var i = 0; i < levels.length; i++) {
+        var code = levels[i];
+        if (!code || code === THINKING_AUTO) continue;
+        opts.push({
+            value: code,
+            label: t('history.thinking.' + code + '.label'),
+            desc: t('history.thinking.' + code + '.desc')
+        });
+    }
+    return opts;
+}
+
+// 当前选中模型对应的思考档位选项集
 function currentThinkingOptions() {
-    var profiles = buildThinkingProfiles();
-    var key = thinkingProfileKey(standardOfModel(getSelectedModel()));
-    return profiles[key] || profiles[THINKING_PROFILE_FALLBACK];
+    return thinkingOptionsForModel(getSelectedModel());
 }
 
 // Get the effective selected model for current context
@@ -2005,7 +2059,7 @@ function getSelectedThinking() {
     if (activeSessionId && sessionThinkingMap[activeSessionId]) {
         return sessionThinkingMap[activeSessionId];
     }
-    return sessionThinkingMap['_default'] || 'off';
+    return sessionThinkingMap['_default'] || THINKING_AUTO;
 }
 
 // 新建对话时，把「当前对话」已选的模型与思考档位继承给新会话，
@@ -2025,7 +2079,7 @@ function inheritSelectionToSession(newSessionId) {
     }
     if (depth) {
         sessionThinkingMap[newSessionId] = depth;
-        if (depth !== 'off') {
+        if (depth !== THINKING_AUTO) {
             $.post('/web/chat/thinking/select', { sessionId: newSessionId, depth: depth })
                 .fail(function (err) { console.error('Failed to inherit thinking depth to new session:', err); });
         }
@@ -2040,7 +2094,15 @@ function loadModels(sessionId, callback) {
 
     $.get(url, function(resp) {
         try {
-            var data = resp.data || {};
+            // HTTP 200 ≠ 业务成功：后端未就绪/代理瞬态错误窗口可能拿到错误页或 {code:!=200}。
+            // 旧实现无条件把空列表记为已加载（modelsLoaded=true），模型列表会被永久锁死、再无重试机会。
+            if (!modelsResponseValid(resp)) {
+                console.warn('Models response invalid (code=' + (resp && resp.code) + '), degrading to failure branch');
+                degradeModelLoad();
+                if (callback) callback(new Error('invalid models response'));
+                return;
+            }
+            var data = resp.data;
             var selected = data.selected || '';
 
             // Store selected model per session
@@ -2051,33 +2113,71 @@ function loadModels(sessionId, callback) {
             }
 
             // Store selected thinking depth per session (mirrors model selection)
-            var depth = data.thinkingDepth || 'off';
+            var depth = normalizeThinkingCode(data.thinkingDepth);
             if (sessionId) {
                 sessionThinkingMap[sessionId] = depth;
             } else {
                 sessionThinkingMap['_default'] = depth;
             }
 
-            // Only parse list once (it's the same for all sessions)
-            if (!modelsLoaded) {
+            // Only parse list once (it's the same for all sessions)；
+            // modelsListStale=true（reload 失败保留旧列表）时同样强制重解析，保证与后端最终一致
+            if (!modelsLoaded || modelsListStale) {
                 modelList = [];
                 var list = data.list || [];
                 for (var i = 0; i < list.length; i++) {
-                    modelList.push({ name: list[i].name || list[i].model, model: list[i].model || list[i].name, desc: list[i].description, contextLength: list[i].contextLength || 0, standard: list[i].standard || '', provider: list[i].provider || '' });
+                    modelList.push({ name: list[i].name || list[i].model, model: list[i].model || list[i].name, desc: list[i].description, contextLength: list[i].contextLength || 0, standard: list[i].standard || '', provider: list[i].provider || '', thinkingLevels: (Object.prototype.toString.call(list[i].thinkingLevels) === '[object Array]') ? list[i].thinkingLevels : null });
                 }
                 modelsLoaded = true;
+                modelsListStale = false;
             }
 
             renderModelUI();
             if (callback) callback();
         } catch (e) {
             console.error('Failed to parse models:', e);
+            // 解析失败也不能把欢迎页永久留在“加载中”状态。
+            degradeModelLoad();
+            if (callback) callback(e);
         }
+    }).fail(function (xhr) {
+        // Tauri 冷启动首批请求若遇到 503/代理瞬态错误，旧实现没有 fail 分支，
+        // 按钮会永久停留在 chat.html 的“加载中...”；切换页面后再次加载才看似恢复。
+        // 共享 backend_port 修复了根因，这里再做 UI 侧兜底：释放加载态并允许后续 reloadModels 重试。
+        console.warn('Failed to load models:', xhr && xhr.status ? ('HTTP ' + xhr.status) : 'network error');
+        degradeModelLoad();
+        if (callback) callback(xhr || new Error('Failed to load models'));
     });
 }
 
+// 模型接口响应的业务校验：仅当 code===200 且 data.list 为数组才算成功。
+// Tauri 冷启动竞态或代理降级时可能出现「HTTP 200 + 错误体」，不校验会把空列表锁成「已加载」。
+function modelsResponseValid(resp) {
+    if (!resp || typeof resp !== 'object') return false;
+    if (resp.code !== 200) return false;
+    var data = resp.data;
+    return !!data && typeof data === 'object' && Array.isArray(data.list);
+}
+
+// 模型加载失败的统一出口：释放加载态；是否丢弃数据取决于有无「旧可用列表」：
+// - reloadModels 失败（有旧列表）：保留旧列表且 modelsLoaded=true，标记 modelsListStale，
+//   下拉与会话级模型刷新继续可用（避免「可用 → 未找到」的回归），下次成功响应再重解析；
+// - 首次加载失败（无数据）：空列表 + modelsLoaded=false，renderModelUI 走空态，
+//   等 backend-ready 补拉或 reloadModels 重试。
+function degradeModelLoad() {
+    if (modelList.length > 0) {
+        modelsLoaded = true;
+        modelsListStale = true;
+    } else {
+        modelsLoaded = false;
+        modelsListStale = false;
+    }
+    renderModelUI();
+}
+
 function reloadModels(callback) {
-    modelsLoaded = false;
+    // 不预先清空 modelsLoaded/modelList：失败时由 degradeModelLoad 决定是否保留旧列表（见其注释）
+    modelsListStale = true;
     loadModels(activeSessionId || null, callback);
 }
 
@@ -2091,9 +2191,16 @@ function refreshSessionModel(sessionId) {
             try {
                 var data = resp.data;
                 sessionModelMap[sessionId] = data.selected || '';
-                sessionThinkingMap[sessionId] = data.thinkingDepth || 'off';
+                sessionThinkingMap[sessionId] = normalizeThinkingCode(data.thinkingDepth);
                 renderModelUI();
-            } catch (e) {}
+            } catch (e) {
+                console.error('Failed to parse session model:', e);
+                renderModelUI();
+            }
+        }).fail(function (xhr) {
+            // 会话切换期间接口失败不能让当前模型按钮保持旧的 loading 文案。
+            console.warn('Failed to load session model:', xhr && xhr.status ? ('HTTP ' + xhr.status) : 'network error');
+            renderModelUI();
         });
     } else {
         // Already cached — just re-render UI
@@ -2170,9 +2277,9 @@ function renderModelUI() {
     modelFirstMatch = result.firstModel;
 }
 
-// 思考深度：在当前模型的档位集里查某值的短标签；查不到（关闭/接口不支持）返回默认
+// 思考深度：在当前模型的档位集里查某值的短标签；查不到（默认档/模型不支持该档）返回默认
 function thinkingShortLabel(value) {
-    if (!value || value === 'off') return GourdI18n.t('history.thinking.default_label');
+    if (!value || value === THINKING_AUTO) return GourdI18n.t('history.thinking.default_label');
     var opts = currentThinkingOptions();
     for (var i = 0; i < opts.length; i++) {
         if (opts[i].value === value) return opts[i].label;
@@ -2180,23 +2287,23 @@ function thinkingShortLabel(value) {
     return GourdI18n.t('history.thinking.default_label');
 }
 
-// 按钮内思考档位小标签：当前值为默认（off）或不在档位集内时不显示，其余显示短标签
+// 按钮内思考档位小标签：当前值为默认（auto）或不在档位集内时不显示，其余显示短标签
 function thinkingButtonTagLabel() {
     var current = getSelectedThinking();
     var opts = currentThinkingOptions();
     for (var k = 0; k < opts.length; k++) {
-        if (opts[k].value === current && current !== 'off') return thinkingShortLabel(current);
+        if (opts[k].value === current && current !== THINKING_AUTO) return thinkingShortLabel(current);
     }
     return '';
 }
 
-// 关联思考档位区（内嵌在当前模型项下）：首项为「默认」（off，跟随模型默认行为）
+// 关联思考档位区（内嵌在当前模型项下）：首项为「默认」（auto，跟随模型默认行为）
 function thinkingChipsHtml() {
     var current = getSelectedThinking();
     var opts = currentThinkingOptions();
 
-    // 当前档位是否在本接口档位集内（切换模型后旧值可能不适用 → 视作默认）
-    var valid = 'off';
+    // 当前档位是否在本模型可选档位内（切换模型后旧值可能不可区分 → 视作默认）
+    var valid = THINKING_AUTO;
     for (var k = 0; k < opts.length; k++) {
         if (opts[k].value === current) { valid = current; break; }
     }
@@ -2357,7 +2464,8 @@ $(document).on('click', function() {
 
 // 国际化：语言包就绪 / 切换语言后，重新渲染模型选择器（模型 + 关联思考档位文案随语言变）
 document.addEventListener('i18n:localeChanged', function () {
-    if (typeof renderModelUI === 'function') { try { renderModelUI(); } catch (e) {} }
+    // 空 catch 会吞掉 renderModelUI 的异常：一旦抛错，模型按钮将永久停留旧文案且无任何线索
+    if (typeof renderModelUI === 'function') { try { renderModelUI(); } catch (e) { console.error('[i18n] renderModelUI failed:', e); } }
     updateHistoryUI();
     updateHistoryScopeBar();
 });
@@ -2368,8 +2476,7 @@ initModelSelector('welcomeModelSelector', 'welcomeModelCurrent', 'welcomeModelDr
 window.reloadModels = reloadModels;
 window.loadModels = loadModels;
 // 思考深度档位单一真源：供自动化视图（app-automation.js）复用，避免重复维护档位表
-window.buildThinkingProfiles = buildThinkingProfiles;
-window.thinkingProfileKey = thinkingProfileKey;
+window.thinkingOptionsForModel = thinkingOptionsForModel;
 
 // Initial load (no specific session, get default selected)
 __whenBackendReady(function () { loadModels(null); });

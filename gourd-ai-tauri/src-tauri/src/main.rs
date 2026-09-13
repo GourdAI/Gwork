@@ -35,7 +35,9 @@ fn updater_pubkey_usable(pubkey: &str) -> bool {
 /// 全局应用状态
 pub struct AppState {
     pub backend_ready: tokio::sync::watch::Sender<bool>,
-    pub backend_port: std::sync::Mutex<u16>,
+    /// 后端端口的唯一运行时状态。UI 代理必须直接共享此锁，不能复制后再轮询同步，
+    /// 否则 backend-ready 广播与代理端口更新之间会出现首批请求打到 0 端口的竞态。
+    pub backend_port: std::sync::Arc<std::sync::Mutex<u16>>,
     pub ui_port: std::sync::Mutex<u16>,
     pub is_quitting: AtomicBool,
 }
@@ -45,7 +47,7 @@ impl AppState {
         let (tx, _rx) = tokio::sync::watch::channel(false);
         Self {
             backend_ready: tx,
-            backend_port: std::sync::Mutex::new(0),
+            backend_port: std::sync::Arc::new(std::sync::Mutex::new(0)),
             ui_port: std::sync::Mutex::new(0),
             is_quitting: AtomicBool::new(false),
         }
@@ -174,6 +176,27 @@ fn main() {
                 }
             }
 
+            // 引导后端启动（异步，不阻塞窗口显示）
+            //
+            // 必须**先于**窗口创建派发。create_main_window() 内部的
+            // `WebviewWindowBuilder::build()` 是同步创建 WebView2（实测 Windows 冷态 0.7~3.4s，
+            // macOS/Linux 的 WKWebView/WebKitGTK 同样是阻塞式建窗），若排在它后面，jar 的整个
+            // 启动过程会被这段建窗时间串行挡住 —— 冷启动白等数秒，且与 jar 本身快慢无关。
+            //
+            // 调整为「先 spawn 后端（立刻开始跑 JVM），再在主线程建窗口」后两者并行，
+            // 恢复到 Electron 版天然具备的时序（那边的 createMainWindow 只构造 BrowserWindow
+            // + loadURL，不等页面，因此 bootstrap 紧跟着就跑了）。
+            //
+            // 事件时序：窗口未创建期间发出的 backend-ready / backend-failed 会被丢弃，但
+            // create_main_window 的 on_page_load(Finished) 会调 push_state_to_window()
+            // 按当前真实状态补推一次，渲染层的 __whenBackendReady 门闸不会失联。
+            let backend_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = backend::bootstrap(backend_handle).await {
+                    error!("后端引导失败: {}", e);
+                }
+            });
+
             // 创建主窗口
             if let Err(e) = window::create_main_window(&app_handle) {
                 error!("主窗口创建失败: {}", e);
@@ -183,14 +206,6 @@ fn main() {
             if let Err(e) = tray::create_tray(&app_handle) {
                 error!("托盘创建失败: {}", e);
             }
-
-            // 引导后端启动（异步，不阻塞窗口显示）
-            let backend_handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = backend::bootstrap(backend_handle).await {
-                    error!("后端引导失败: {}", e);
-                }
-            });
 
             // CLI provision（仅打包版）
             if !cfg!(debug_assertions) {

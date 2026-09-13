@@ -11,6 +11,7 @@
                       "steer_box_full":  "Zu viele ausstehende Zwischenrufe; zur Warteschlange hinzugefügt",
                       "steer_deferred":  "Der aktuelle Schritt ist beendet; zur Warteschlange hinzugefügt",
                       "steer_failed":  "Zwischenruf konnte nicht gesendet werden; die Eingabe bleibt erhalten",
+                      "force_finished":  "Lauf bereits beendet (Server inaktiv); der Stream wurde automatisch geschlossen",
                       "steer_attachment_wait":  "Anhänge können während einer laufenden Aufgabe nicht eingeworfen oder eingereiht werden. Bitte warten oder stoppen",
                       "steer_command_queue":  "Befehle können nicht eingeworfen werden. Mit Tab zur Warteschlange hinzufügen",
                       "steer_dropped":  "Der Zwischenruf wurde vor Abschluss nicht wirksam und zur Warteschlange hinzugefügt",
@@ -89,7 +90,7 @@
                     "model_search_empty":  "Keine passenden Modelle",
                     "model_group_toggle":  "Anbieter ein-/ausklappen",
                     "thinking":  {
-                                     "off":  {
+                                     "auto":  {
                                                  "label":  "Standard",
                                                  "desc":  "Standardverhalten des Modells verwenden"
                                              },
@@ -203,7 +204,8 @@
                                        "switch":  "Arbeitsbereich wechseln",
                                        "clear":  "Auswahl aufheben"
                                    },
-                "sidebar":  {
+                 "sidebar":  {
+                                 "load_failed_retry":  "Laden fehlgeschlagen, klicken zum Wiederholen",
                                  "loop_mark":  "Geplante Aufgabe",
                                 "new_task":  "Neue Aufgabe",
                                 "search":  "Suchen",
@@ -741,7 +743,7 @@
                                  "model_none":  "Noch kein Modell konfiguriert. Bitte fügen Sie zuerst unter Einstellungen - Modelle ein Modell hinzu und aktivieren Sie es.",
                                  "model_saved":  "ACP-Modell gespeichert",
                                  "model_save_failed":  "Speichern fehlgeschlagen, bitte erneut versuchen",
-                                 "thinking_hint":  "Steuert die Reasoning-Intensität; bei Deaktivierung wird das Standardverhalten des Modells verwendet",
+                                 "thinking_hint":  "Steuert die Reasoning-Intensität; bei Standard wird das eigene Verhalten des Modells verwendet",
                                  "thinking_saved":  "Denktiefe-Einstellung gespeichert",
                                  "thinking_save_failed":  "Speichern fehlgeschlagen, bitte erneut versuchen",
                                  "zed_integration_desc":  "Führen Sie das folgende JSON in die ACP-Einstellungen Ihres Editors zusammen und wählen Sie anschließend im Agent-Panel GWork aus.",
@@ -799,6 +801,7 @@
                  "phase_thinking":  "Denkt gerade",
                  "phase_text":  "Schreibt",
                  "phase_waiting":  "Wartet auf Antwort",
+                 "args_streaming":  "Parameter werden erzeugt · {size}",
                  "rerun":  "Neu ausführen",
                  "continue_run":  "Fortsetzen",
                  "need_auth":  "Autorisierung erforderlich:",

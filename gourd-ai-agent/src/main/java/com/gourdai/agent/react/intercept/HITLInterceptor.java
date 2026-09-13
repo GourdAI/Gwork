@@ -78,7 +78,9 @@ public class HITLInterceptor extends AbsReActInterceptor {
 
         // 1. 阶段：暂无决策 —— 挂起任务
         if (decision == null) {
-            trace.getContext().put(HITL.LAST_INTERVENED, new HITLTask(toolExchanger.getToolName(), new LinkedHashMap<>(toolExchanger.getArgs()), comment));
+            // 带上 actionId：前端据此把审批卡与参数生成期的骨架卡精确配对（并发同名工具不串卡）
+            trace.getContext().put(HITL.LAST_INTERVENED, new HITLTask(toolExchanger.getToolName(),
+                    new LinkedHashMap<>(toolExchanger.getArgs()), comment, toolExchanger.getActionId()));
             trace.getSession().pending(true, comment);
             trace.setFinalAnswer(comment);
 

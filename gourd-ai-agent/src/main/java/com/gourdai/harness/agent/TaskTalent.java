@@ -23,6 +23,8 @@ import com.gourdai.agent.event.RunEndEvent;
 import com.gourdai.agent.react.ReActOptionsAmend;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.event.ToolCallStartEvent;
+import com.gourdai.agent.event.ToolCallDraftEvent;
+import com.gourdai.agent.event.ToolCallArgsDeltaEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.event.ReasonEndEvent;
@@ -263,7 +265,7 @@ public class TaskTalent extends AbsTalent {
             return ThinkingDepth.normalize(overrideDepth);
         }
         if (parentSession == null) {
-            return ThinkingDepth.OFF;
+            return ThinkingDepth.AUTO;
         }
         return ThinkingDepth.normalize(parentSession.getContext().getAs(HarnessEngine.CTX_THINKING_DEPTH));
     }
@@ -276,12 +278,12 @@ public class TaskTalent extends AbsTalent {
      * Anthropic adaptive thinking 这类<b>需显式开启思考</b>的模型，子代理请求不带思考参数，
      * 上游就不会回 THINKING_DELTA，卡片内的思考块恒为空。</p>
      *
-     * <p>standard 必须取<b>子代理自己的</b> ChatModel：子代理可在 AgentDefinition 里指定别家模型，
-     * 若沿用主模型的 standard 会把参数包成错的形状（如给 Gemini 发 reasoning_effort）。
-     * ThinkingDepth.applyTo 内部对不适用档位按关闭处理，故跨厂商不匹配时自然降级为不注入。</p>
+     * <p>模型能力必须取<b>子代理自己的</b> ChatModel：子代理可在 AgentDefinition 里指定别家模型，
+     * 若沿用主模型的能力会把参数包成错的形状（如给 Gemini 发 reasoning_effort）。
+     * ThinkingDepth.applyTo 内部对不支持的档位只清理不注入，故跨厂商不匹配时自然降级。</p>
      */
     private static void applyThinkingDepth(ReActOptionsAmend o, ReActAgent agent, String depth) {
-        if (ThinkingDepth.OFF.equals(depth)) {
+        if (ThinkingDepth.AUTO.equals(depth)) {
             return;
         }
 
@@ -290,7 +292,7 @@ public class TaskTalent extends AbsTalent {
             return;
         }
 
-        ThinkingDepth.applyTo(o, subModel.getStandardOrProvider(), depth);
+        ThinkingDepth.applyTo(o, subModel, depth);
     }
 
     /**
@@ -440,6 +442,15 @@ public class TaskTalent extends AbsTalent {
                             if (chunk instanceof ContextUsageEvent) {
                                 sink.next(chunk);
                             } else if (chunk instanceof ToolCallStartEvent) {
+                                sink.next(chunk);
+                            } else if (chunk instanceof ToolCallDraftEvent || chunk instanceof ToolCallArgsDeltaEvent) {
+                                // 参数生成期的进度帧与 ToolCallStartEvent 同等对待：子代理内部同样会发生
+                                // 大参数工具调用（如 write 整篇文档），若只透传 start，智能体卡片会静默数十秒，
+                                // 表现得与「子代理卡死」无法区分。
+                                //
+                                // 归属 meta 已由上方 stampParentAgent 统一打好（__parentAgentName/__parentAgentDesc/
+                                // META_INVOCATION_ID），与 ToolCallStartEvent 走同一条标记路径，故下游会把骨架卡
+                                // 路由进同一张智能体卡片；这里切不可另行补盖 meta，否则嵌套子代理的内层归属会被覆盖。
                                 sink.next(chunk);
                             } else if (chunk instanceof ToolCallEndEvent) {
                                 sink.next(chunk);

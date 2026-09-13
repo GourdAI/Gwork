@@ -20,13 +20,16 @@ import org.noear.solon.SolonApp;
 import com.gourdai.core.config.AgentFlags;
 import com.gourdai.core.config.AgentProperties;
 import com.gourdai.core.config.AgentSettings;
+import com.gourdai.core.config.entity.ModelDo;
 import com.gourdai.core.portal.web.WebAuthFilter;
+import com.gourdai.core.portal.web.thinking.ModelProfiles;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.scheduling.annotation.EnableScheduling;
 import org.noear.solon.web.cors.CrossFilter;
 import org.slf4j.bridge.SLF4JBridgeHandler;
 
 import java.net.URL;
+import java.util.Map;
 
 /**
  * Cli 应用
@@ -121,7 +124,43 @@ public class App {
 
         app.context().wrapAndPut(AgentSettings.class, agentSettings);
 
+        // 思考档位：把「按模型名查能力覆写」的通路绑给 thinking 层。
+        //
+        // 为何必须在此绑定：真正发请求的注入点（WebStreamBuilder / AcpLink / WsGate /
+        // TaskTalent）只拿到 ChatModel，而 ChatModel.getConfig() 返回的 ChatConfigReadonly
+        // 是个包装器，与 ModelDo 并非同一继承体系，怎么探测都取不到 capabilities。
+        // 若不绑定，UI 端点（直接读 ModelDo）与请求路径（读不到）就会各读一套，
+        // 表现为「UI 显示覆写已生效，实际请求仍发兜底值」——比完全不支持更具误导性。
+        //
+        // 注：这里捕获的是 AgentSettings 实例而非某个快照，models 本身是 COW volatile，
+        // 故用户在设置页改完配置无需重启即生效。
+        ModelProfiles.bind(modelName -> lookupCapabilities(agentSettings, modelName));
+
         return agentSettings;
+    }
+
+    /**
+     * 按模型名查能力覆写。
+     *
+     * <p>配置的 key 是「显示名」（nameOrModel），而请求路径拿到的是「实际模型 id」
+     * （{@code ChatConfig.getModel()}），两者常不相等（如用户把 gpt-5.6-sol 命名为「主力模型」）。
+     * 故先按 key 直取，再回掉到遍历比对 model / nameOrModel。</p>
+     */
+    private static Map<String, Object> lookupCapabilities(AgentSettings settings, String modelName) {
+        Map<String, ModelDo> models = settings.getModels();
+        if (models == null || modelName == null) {
+            return null;
+        }
+        ModelDo hit = models.get(modelName);
+        if (hit == null) {
+            for (ModelDo m : models.values()) {
+                if (modelName.equals(m.getModel()) || modelName.equals(m.getNameOrModel())) {
+                    hit = m;
+                    break;
+                }
+            }
+        }
+        return hit == null ? null : hit.getCapabilities();
     }
 
     private static void enabledWeb(SolonApp app, AgentProperties c, AgentSettings settings) {

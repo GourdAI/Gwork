@@ -11,6 +11,7 @@
                       "steer_box_full":  "待生效插話較多，已加入佇列",
                       "steer_deferred":  "目前步驟已結束，已加入佇列",
                       "steer_failed":  "插話傳送失敗，輸入內容已保留",
+                      "force_finished":  "本輪已結束（伺服器已空閒），已自動收尾",
                       "steer_attachment_wait":  "任務執行中無法插話或排隊附件，請等待任務完成或先停止任務",
                       "steer_command_queue":  "命令無法作為插話，請按 Tab 加入佇列",
                       "steer_dropped":  "插話未能在任務結束前生效，已加入佇列",
@@ -89,7 +90,7 @@
                     "model_search_empty":  "找不到符合的模型",
                     "model_group_toggle":  "折疊/展開該服務商",
                     "thinking":  {
-                                     "off":  {
+                                     "auto":  {
                                                  "label":  "預設",
                                                  "desc":  "跟隨模型預設行為"
                                              },
@@ -203,7 +204,8 @@
                                        "switch":  "切換工作空間",
                                        "clear":  "清除選擇"
                                    },
-                "sidebar":  {
+                 "sidebar":  {
+                                 "load_failed_retry":  "載入失敗，點擊重試",
                                  "loop_mark":  "定時任務",
                                 "new_task":  "建立任務",
                                 "search":  "搜尋",
@@ -733,7 +735,7 @@
                                  "model_none":  "尚未設定任何模型，請先在「設定 - 模型」中新增並啟用一個模型。",
                                  "model_saved":  "已儲存 ACP 模型",
                                  "model_save_failed":  "儲存失敗，請重試",
-                                 "thinking_hint":  "控制推理力度，關閉則使用模型預設行為",
+                                 "thinking_hint":  "控制推理力度，選擇「預設」則跟隨模型自身行為",
                                  "thinking_saved":  "已儲存思考深度設定",
                                  "thinking_save_failed":  "儲存失敗，請重試",
                                  "zed_integration_desc":  "將以下 JSON 配置合併到編輯器的 ACP 設定中，然後在 Agent 面板選擇 GWork。",
@@ -799,6 +801,7 @@
                  "phase_thinking":  "思考中",
                  "phase_text":  "輸出中",
                  "phase_waiting":  "等待回應",
+                 "args_streaming":  "產生參數中 · {size}",
                  "rerun":  "重新執行",
                  "continue_run":  "繼續執行",
                  "need_auth":  "需要授權：",

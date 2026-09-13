@@ -475,18 +475,24 @@ public class WebController {
                 item.put("name", config.getNameOrModel());
                 item.put("description", config.getDescriptionOrModel());
                 item.put("contextLength", config.getContextLength());
-                // 接口类型：前端据此可展示每个模型对应的思考深度参数形态（档位本身是统一的）
+                // 接口类型：前端据此展示模型归属与调试信息
                 item.put("standard", config.getStandardOrProvider());
                 // 所属供应商：前端据此对模型下拉做分组展示
                 item.put("provider", config.getProvider());
+                // 该模型真正可区分的思考档位（策略 S2）。
+                // 档位本身是全局统一的 5 档，但各模型能区分几档各不相同：
+                // 若模型只支持单一 effort 值，渲染 5 档会让用户误以为选了有效果，
+                // 实际全部发同一个值。空列表 = 无可调档位，前端应隐藏整个选择器。
+                item.put("thinkingLevels", ThinkingDepth.selectableCodes(
+                        config.getStandardOrProvider(), config.getModel(), config.getCapabilities()));
                 list.add(item);
             }
         }
 
         data.put("list", list);
 
-        // 当前会话的思考深度档位（无会话时给默认 off），供前端初始化切换器
-        String thinkingDepth = ThinkingDepth.OFF;
+        // 当前会话的思考深度档位（无会话时给默认 auto），供前端初始化切换器
+        String thinkingDepth = ThinkingDepth.AUTO;
 
         if (Assert.isNotEmpty(list)) {
             if (Assert.isNotEmpty(sessionId)) {
@@ -663,6 +669,9 @@ public class WebController {
         result.put("lastSeq", lr.lastSeq);
         result.put("latestSeq", lr.latestSeq);
         result.put("running", webGate.isSessionBusy(sessionId));
+        // 当前活跃 run 的 runId（无运行中 run 时为 null）。前端据此校准可能被历史回放写成陈旧值的
+        // activeRunId：否则中断请求会因 runId 不匹配被后端判为 turn_changed，重试也依旧空转。
+        result.put("runId", webGate.getCurrentRunId(sessionId));
         return Result.succeed(result);
     }
 

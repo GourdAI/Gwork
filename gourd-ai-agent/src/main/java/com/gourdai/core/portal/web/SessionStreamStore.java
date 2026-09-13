@@ -166,6 +166,13 @@ public class SessionStreamStore {
         if (chunk == null || chunk.getType() == null) {
             return;
         }
+        // 瞬态进度帧不落盘：action_draft / action_args 只表达「参数正在生成」的实时进度，
+        // 一次大参数调用可产生数百帧，落盘会让历史文件与回放规模失控（回放按轮分页，
+        // 这些帧会把一轮撑成上千行）。历史回放时由 action_start（含完整 args）+ action_end
+        // 完整重建卡片，因此跳过它们不会丢失任何历史信息。
+        if (isEphemeralType(chunk.getType())) {
+            return;
+        }
         try {
             File file = streamFile(sessionId, projectRoot);
             if (file == null) return;
@@ -181,6 +188,17 @@ public class SessionStreamStore {
         } catch (Throwable e) {
             LOG.warn("[StreamStore] record failed for session {}: {}", sessionId, e.getMessage());
         }
+    }
+
+    /**
+     * 是否为瞬态帧（仅实时下发、不写入历史）。
+     *
+     * <p>判据是「该帧的全部信息是否能由其他持久帧重建」：
+     * {@code action_draft} / {@code action_args} 只携带工具名与参数字节数，
+     * 而这两者在随后的 {@code action_start} 中都有（且参数是完整的）。</p>
+     */
+    private static boolean isEphemeralType(String type) {
+        return "action_draft".equals(type) || "action_args".equals(type);
     }
 
     /**

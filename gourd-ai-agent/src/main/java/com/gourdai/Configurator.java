@@ -264,9 +264,18 @@ public class Configurator {
         });
 
 
-        // ACP 模式下跳过 CliShell 构造（避免初始化 JLine 终端等不必要的组件）
-        CliShell cliShell = isAcpMode() ? null : new CliShell(agentRuntime, agentSettings, loopScheduler);
         String flag = Solon.cfg().argx().flagAt(0);
+
+        // 按 flag 惰性构造 CliShell —— 此前只有 ACP 模式跳过，导致桌面端（web）也在启动主线程上
+        // 付了 JLine 终端的初始化成本：TerminalBuilder 要反复 fork 子进程探测标准流是否接在真实
+        // 终端上（Windows 实测 0.5~1.9s；PATH 里存在 msys sh.exe 时更慢），而这段完全发生在
+        // Solon 启动主线程、HTTP 端口绑定之前，直接表现为冷启动变慢。
+        //
+        // 各分支的真实用法：run 自己另建一个；web / acp 全程不使用；serve 只用到 printWelcome；
+        // 只有 cli（交互式命令行）真正需要它。故除这三者外一律不构造。
+        CliShell cliShell = needsInteractiveShell(flag)
+                ? new CliShell(agentRuntime, agentSettings, loopScheduler)
+                : null;
 
         if (AgentFlags.FLAG_VERSION.equals(flag)) {
             System.out.println(Solon.cfg().appTitle() + " " + AgentFlags.getVersion());
@@ -525,5 +534,21 @@ public class Configurator {
     private boolean isAcpMode() {
         String flag = Solon.cfg().argx().flagAt(0);
         return AgentFlags.FLAG_ACP.equals(flag);
+    }
+
+    /**
+     * 是否需要预先构造交互式 {@link CliShell}。
+     *
+     * <p>只有 {@code cli}（交互式命令行）与 {@code serve}（启动后打印欢迎语）会真正用到它：
+     * {@code run} 在分支内自行构造，{@code web} / {@code acp} 全程不使用。</p>
+     *
+     * <p><b>维护约束</b>：本判定必须与 {@link #init()} 里各分支的实际用法同步。新增对
+     * {@code cliShell} 的使用点时，务必回到这里放行对应的 flag，否则会在运行期退化为 NPE。</p>
+     *
+     * <p>包可见而非私有：这是「启动路径上少 init 一个 JLine 终端」与「NPE」之间唯一的开关，
+     * 必须有回归护栏钉死各 flag 的取值（见 {@code ConfiguratorCliShellTest}）。</p>
+     */
+    static boolean needsInteractiveShell(String flag) {
+        return AgentFlags.FLAG_CLI.equals(flag) || AgentFlags.FLAG_SERVE.equals(flag);
     }
 }

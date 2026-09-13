@@ -11,6 +11,7 @@
                       "steer_box_full":  "Hay demasiadas intervenciones pendientes; se añadió a la cola",
                       "steer_deferred":  "El paso actual ha terminado; se añadió a la cola",
                       "steer_failed":  "No se pudo enviar la intervención; se conservó el texto",
+                      "force_finished":  "La ejecución ya finalizó (servidor inactivo); la transmisión se cerró automáticamente",
                       "steer_attachment_wait":  "No se pueden intervenir ni poner en cola archivos mientras se ejecuta una tarea. Espere o detenga la tarea",
                       "steer_command_queue":  "Los comandos no pueden usarse como intervención. Pulse Tab para añadirlos a la cola",
                       "steer_dropped":  "La intervención no surtió efecto antes de finalizar y se añadió a la cola",
@@ -89,7 +90,7 @@
                     "model_search_empty":  "No hay modelos coincidentes",
                     "model_group_toggle":  "Contraer / expandir este proveedor",
                     "thinking":  {
-                                     "off":  {
+                                     "auto":  {
                                                  "label":  "Predeterminado",
                                                  "desc":  "Usar el comportamiento predeterminado del modelo"
                                              },
@@ -203,7 +204,8 @@
                                        "switch":  "Cambiar espacio de trabajo",
                                        "clear":  "Borrar selección"
                                    },
-                "sidebar":  {
+                 "sidebar":  {
+                                 "load_failed_retry":  "Error al cargar, haz clic para reintentar",
                                  "loop_mark":  "Tarea programada",
                                 "new_task":  "Nueva tarea",
                                 "search":  "Buscar",
@@ -741,7 +743,7 @@
                                  "model_none":  "Aún no hay ningún modelo configurado. Primero añade y activa un modelo en Ajustes - Modelos.",
                                  "model_saved":  "Modelo de ACP guardado",
                                  "model_save_failed":  "Error al guardar, inténtalo de nuevo",
-                                 "thinking_hint":  "Controla el esfuerzo de razonamiento; al desactivarlo se usa el comportamiento predeterminado del modelo",
+                                 "thinking_hint":  "Controla el esfuerzo de razonamiento; con Predeterminado se usa el comportamiento propio del modelo",
                                  "thinking_saved":  "Configuración de profundidad de razonamiento guardada",
                                  "thinking_save_failed":  "Error al guardar, inténtalo de nuevo",
                                  "zed_integration_desc":  "Fusiona el JSON de abajo en los ajustes de ACP de tu editor y luego selecciona GWork en el panel del Agente.",
@@ -799,6 +801,7 @@
                  "phase_thinking":  "Pensando",
                  "phase_text":  "Escribiendo",
                  "phase_waiting":  "Esperando respuesta",
+                 "args_streaming":  "Generando argumentos · {size}",
                  "rerun":  "Reejecutar",
                  "continue_run":  "Continuar ejecución",
                  "need_auth":  "Se requiere autorización:",

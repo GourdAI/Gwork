@@ -17,6 +17,8 @@ package com.gourdai.agent.react.task;
 
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.event.ReasonEndEvent;
+import com.gourdai.agent.event.ToolCallArgsDeltaEvent;
+import com.gourdai.agent.event.ToolCallDraftEvent;
 
 import com.gourdai.agent.react.*;
 import org.noear.solon.Utils;
@@ -30,6 +32,7 @@ import org.noear.solon.ai.chat.ChatResponse;
 import org.noear.solon.ai.chat.event.ChatEventType;
 import org.noear.solon.ai.chat.message.AssistantMessage;
 import org.noear.solon.ai.chat.message.ChatMessage;
+import org.noear.solon.ai.chat.tool.ToolCall;
 import org.noear.solon.ai.util.RetryTask;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.core.util.RankEntity;
@@ -56,6 +59,33 @@ public class ReasonTask {
 
     /** 流式阶段累积的思考投影前缀（含方言标签帧），存于当前 trace，供剥离时精确匹配 */
     public static final String ATTR_STREAMED_REASONING = "gourd_streamed_reasoning_prefix";
+
+    /**
+     * 工具参数进度下发的时间阈值（毫秒）。
+     * <p>模型分片粒度极细（一篇文档可产生上千片），逐片下发会压垮传输与渲染，
+     * 故按「时间或字节」双阈值合并，先到者触发。</p>
+     */
+    private static final long ARGS_PROGRESS_INTERVAL_MS = 200L;
+
+    /** 工具参数进度下发的字节阈值。 */
+    private static final int ARGS_PROGRESS_BYTES = 4096;
+
+    /**
+     * 单个工具调用的参数生成进度跟踪器（仅存活于一次流式请求内）。
+     *
+     * <p>分片协议只在首片携带 {@code id}/{@code name}，后续分片会退化，
+     * 故在首片登记后，后续增量一律从这里取回稳定的 actionId 与 toolName。</p>
+     */
+    private static final class ArgsProgress {
+        private String actionId;
+        private String toolName;
+        /** 累计已生成的参数字符数 */
+        private long bytes;
+        /** 上次下发时刻 */
+        private long lastEmitAt;
+        /** 上次下发时的累计字节数 */
+        private long lastEmitBytes;
+    }
 
     private final ReActAgentConfig config;
     private final ReActAgent agent;
@@ -447,6 +477,9 @@ public class ReasonTask {
                                     final StringBuilder streamedReasoningBuf = new StringBuilder();
                                     final int[] lastThinkingFrameStart = {-1};
                                     final ChatResponse[] finalResponse = {null};
+                                    // 工具参数生成进度：按「分片聚合键」跟踪。本 Map 随 lambda 每次物理重试重建，
+                                    // 无需手动清理（与 streamedReasoningBuf 同理）。
+                                    final Map<String, ArgsProgress> argsProgresses = new LinkedHashMap<>();
                                     // 每次物理重试都是独立响应，不能沿用上一尝试的思考前缀。
                                     trace.removeExtra(ATTR_STREAMED_REASONING);
 
@@ -459,6 +492,58 @@ public class ReasonTask {
 
                                                 if (event.is(ChatEventType.RESPONSE_END)) {
                                                     finalResponse[0] = event.getResponse();
+                                                    return;
+                                                }
+
+                                                // 工具调用首片：模型刚说出函数名，参数尚在生成中。此刻提前下发草稿帧，
+                                                // 让订阅方先把骨架卡建出来，消除「大参数生成期零反馈」的盲区。
+                                                // 降级：端点未给 id 或 name 时不登记也不下发，行为完全退回原有链路。
+                                                if (event.is(ChatEventType.TOOL_CALL_START)) {
+                                                    ToolCall call = ChatEventSupport.toolCall(event);
+                                                    String progressKey = ChatEventSupport.toolCallKey(event);
+                                                    if (call != null && progressKey != null
+                                                            && Assert.isNotEmpty(call.getId())
+                                                            && Assert.isNotEmpty(call.getName())) {
+                                                        ArgsProgress progress = new ArgsProgress();
+                                                        progress.actionId = call.getId();
+                                                        progress.toolName = call.getName();
+                                                        progress.lastEmitAt = System.currentTimeMillis();
+                                                        argsProgresses.put(progressKey, progress);
+
+                                                        sink.next(new ToolCallDraftEvent(trace, progress.toolName, progress.actionId));
+                                                    }
+                                                    return;
+                                                }
+
+                                                // 参数增量：只累加字节数、不转发内容（完整参数由随后的
+                                                // ToolCallStartEvent.getArgs() 提供）。双阈值节流，避免上千帧风暴。
+                                                if (event.is(ChatEventType.TOOL_CALL_ARGS_DELTA)) {
+                                                    String progressKey = ChatEventSupport.toolCallKey(event);
+                                                    ArgsProgress progress = progressKey == null ? null : argsProgresses.get(progressKey);
+                                                    if (progress != null) {
+                                                        progress.bytes += ChatEventSupport.argsDeltaLength(event);
+
+                                                        long now = System.currentTimeMillis();
+                                                        if (now - progress.lastEmitAt >= ARGS_PROGRESS_INTERVAL_MS
+                                                                || progress.bytes - progress.lastEmitBytes >= ARGS_PROGRESS_BYTES) {
+                                                            progress.lastEmitAt = now;
+                                                            progress.lastEmitBytes = progress.bytes;
+
+                                                            sink.next(new ToolCallArgsDeltaEvent(trace, progress.toolName,
+                                                                    progress.actionId, progress.bytes));
+                                                        }
+                                                    }
+                                                    return;
+                                                }
+
+                                                // 参数拼接完成：节流可能吞掉最后一段，此处强制补发一帧以保证终值准确。
+                                                if (event.is(ChatEventType.TOOL_CALL_END)) {
+                                                    String progressKey = ChatEventSupport.toolCallKey(event);
+                                                    ArgsProgress progress = progressKey == null ? null : argsProgresses.remove(progressKey);
+                                                    if (progress != null && progress.bytes > progress.lastEmitBytes) {
+                                                        sink.next(new ToolCallArgsDeltaEvent(trace, progress.toolName,
+                                                                progress.actionId, progress.bytes));
+                                                    }
                                                     return;
                                                 }
 

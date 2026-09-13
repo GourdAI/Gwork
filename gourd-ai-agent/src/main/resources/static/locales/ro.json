@@ -11,6 +11,7 @@
                       "steer_box_full":  "Prea multe intervenții în așteptare; adăugat în coadă",
                       "steer_deferred":  "Pasul curent s-a încheiat; adăugat în coadă",
                       "steer_failed":  "Trimiterea intervenției a eșuat; textul a fost păstrat",
+                      "force_finished":  "Execuția s-a încheiat deja (server inactiv); fluxul a fost închis automat",
                       "steer_attachment_wait":  "Atașamentele nu pot fi intervenite sau puse în coadă în timpul unei sarcini. Așteptați sau opriți sarcina",
                       "steer_command_queue":  "Comenzile nu pot fi folosite ca intervenție. Apăsați Tab pentru a le adăuga în coadă",
                       "steer_dropped":  "Intervenția nu s-a aplicat înainte de final și a fost adăugată în coadă",
@@ -89,7 +90,7 @@
                     "model_search_empty":  "Niciun model potrivit",
                     "model_group_toggle":  "Restrânge / extinde furnizorul",
                     "thinking":  {
-                                     "off":  {
+                                     "auto":  {
                                                  "label":  "Implicit",
                                                  "desc":  "Folosește comportamentul implicit al modelului"
                                              },
@@ -203,7 +204,8 @@
                                        "switch":  "Comută spațiul de lucru",
                                        "clear":  "Șterge selecția"
                                    },
-                "sidebar":  {
+                 "sidebar":  {
+                                 "load_failed_retry":  "Încărcare eșuată, faceți clic pentru reîncercare",
                                  "loop_mark":  "Sarcină programată",
                                 "new_task":  "Sarcină nouă",
                                 "search":  "Căutare",
@@ -741,7 +743,7 @@
                                  "model_none":  "Niciun model configurat încă. Adăugați și activați mai întâi unul din Setări - Modele.",
                                  "model_saved":  "Modelul ACP a fost salvat",
                                  "model_save_failed":  "Salvarea a eșuat, încercați din nou",
-                                 "thinking_hint":  "Controlează efortul de raționament; dezactivat folosește comportamentul implicit al modelului",
+                                 "thinking_hint":  "Controlează efortul de raționament; opțiunea Implicit folosește comportamentul propriu al modelului",
                                  "thinking_saved":  "Setările de adâncime de raționament au fost salvate",
                                  "thinking_save_failed":  "Salvarea a eșuat, încercați din nou",
                                  "zed_integration_desc":  "Îmbinați JSON-ul de mai jos în setările ACP ale editorului dvs., apoi selectați GWork în panoul Agent.",
@@ -799,6 +801,7 @@
                  "phase_thinking":  "Gândește",
                  "phase_text":  "Scrie",
                  "phase_waiting":  "Așteaptă răspunsul",
+                 "args_streaming":  "Se generează argumentele · {size}",
                  "rerun":  "Relansare",
                  "continue_run":  "Continuare execuție",
                  "need_auth":  "Necesită autorizare:",

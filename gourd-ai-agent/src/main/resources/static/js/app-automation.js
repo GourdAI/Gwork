@@ -25,7 +25,7 @@
     var formState = {
         workspace: '',      // '' = 不选 = 全局（与聊天页语义一致）
         modelName: '',      // '' = 未显式选模，运行时跟随默认模型
-        thinking: 'off',
+        thinking: 'auto',
         channel: '',        // 推送通道（layui select 托管，值存这里避免读隐藏原生 select）
         intervalUnit: 'm',  // 间隔单位（同上）
         projects: [],       // [{name, path}]
@@ -282,17 +282,25 @@
         return '';
     }
 
+    /** 历史档位值归一（与后端 ThinkingDepth.normalize 同口径）：'off' 是 'auto' 的旧名，不再有 minimal 档 */
+    function normThinking(depth) {
+        var d = String(depth == null ? '' : depth).toLowerCase();
+        if (!d || d === 'off') return 'auto';
+        if (d === 'minimal') return 'low';
+        return d;
+    }
+
     /**
-     * 思考档位选项：唯一真源为聊天页 app-history.js 的 buildThinkingProfiles()/thinkingProfileKey()，
+     * 思考档位选项：唯一真源为聊天页 app-history.js 的 thinkingOptionsForModel()，
+     * 它按后端下发的「该模型真正可区分的档位」构建（策略 S2），故入参是模型名而非接口类型。
      * 本页不再自行维护档位表。若加载顺序异常导致真源缺失，回退到最小内置集合以保证 UI 不崩。
      */
-    function thinkingOptions(standard) {
-        if (typeof window.buildThinkingProfiles === 'function' && typeof window.thinkingProfileKey === 'function') {
-            var profiles = window.buildThinkingProfiles();
-            var opts = profiles[window.thinkingProfileKey(standard)];
+    function thinkingOptions(modelName) {
+        if (typeof window.thinkingOptionsForModel === 'function') {
+            var opts = window.thinkingOptionsForModel(modelName);
             if (opts && opts.length) return opts;
         }
-        var vals = ['off', 'minimal', 'low', 'medium', 'high'];
+        var vals = ['auto', 'low', 'medium', 'high'];
         var fallback = [];
         for (var i = 0; i < vals.length; i++) {
             fallback.push({ value: vals[i], label: t('history.thinking.' + vals[i] + '.label') });
@@ -311,8 +319,8 @@
     }
 
     function thinkingTagLabel() {
-        if (!formState.thinking || formState.thinking === 'off') return '';
-        var opts = thinkingOptions(standardOfModel(effectiveModel()));
+        if (!formState.thinking || formState.thinking === 'auto') return '';
+        var opts = thinkingOptions(effectiveModel());
         for (var i = 0; i < opts.length; i++) {
             if (opts[i].value === formState.thinking) return opts[i].label;
         }
@@ -396,7 +404,7 @@
         var tags = [];
         if (x.workspace) tags.push('<span class="auto-task-tag">' + escapeHtml(baseName(x.workspace)) + '</span>');
         if (x.modelName) tags.push('<span class="auto-task-tag">' + escapeHtml(x.modelName) + '</span>');
-        if (x.thinkingDepth && x.thinkingDepth !== 'off') tags.push('<span class="auto-task-tag">' + escapeHtml(x.thinkingDepth) + '</span>');
+        if (x.thinkingDepth && normThinking(x.thinkingDepth) !== 'auto') tags.push('<span class="auto-task-tag">' + escapeHtml(x.thinkingDepth) + '</span>');
         if (x.goalCondition) tags.push('<span class="auto-task-tag">goal</span>');
         if (x.worktreeEnabled) tags.push('<span class="auto-task-tag">wt</span>');
         if (x.channelNotify) tags.push('<span class="auto-task-tag accent">' + escapeHtml(x.channelNotify) + '</span>');
@@ -425,7 +433,7 @@
         if (!editId) {
             formState.workspace = '';
             formState.modelName = '';
-            formState.thinking = 'off';
+            formState.thinking = 'auto';
             formState.channel = '';
             formState.intervalUnit = 'm';
         }
@@ -513,7 +521,7 @@
         html += '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
         html += '</button>';
         html += '<span class="auto-ws-name" id="autoWsName"></span>';
-        html += '<i class="layui-icon layui-icon-down auto-ws-arrow"></i>';
+        html += '<svg class="auto-ws-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
         html += '</div>';
         html += '<div class="auto-ws-dropdown" id="autoWsDropdown"></div>';
         html += '</div>';
@@ -522,7 +530,7 @@
         html += '<div class="model-selector-current" id="autoModelCurrent">';
         html += '<span class="model-name" id="autoModelName"></span>';
         html += '<span class="model-thinking-tag" id="autoModelThinkingTag" style="display:none"></span>';
-        html += '<i class="layui-icon layui-icon-down model-arrow"></i>';
+        html += '<svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
         html += '</div>';
         // 骨架重建（进表单页）：搜索框回到空白，关键词必须同步重置，
         // 否则列表会按上次关键词过滤但输入框看上去是空的
@@ -663,8 +671,8 @@
     }
 
     function thinkingChipsHtml() {
-        var opts = thinkingOptions(standardOfModel(effectiveModel()));
-        var valid = 'off';
+        var opts = thinkingOptions(effectiveModel());
+        var valid = 'auto';
         for (var k = 0; k < opts.length; k++) {
             if (opts[k].value === formState.thinking) { valid = formState.thinking; break; }
         }
@@ -732,8 +740,8 @@
         // 工作空间归一：旧任务可能存了“默认工作区绝对路径”，归一为 '' 以匹配新语义
         formState.workspace = toSelection(x.workspace);
         formState.modelName = x.modelName || '';
-        // 旧任务 thinkingDepth 为 null 时展示为「默认」（off），保存后会固化为 "off"（显式关闭）
-        formState.thinking = x.thinkingDepth || 'off';
+        // 旧任务 thinkingDepth 为 null 或历史值 "off" 时一律展示为「默认」（auto = 不传参、跟随模型默认）
+        formState.thinking = normThinking(x.thinkingDepth);
         formState.channel = x.channelNotify || '';
         renderSelects();
         renderWorkspaceUI();
@@ -837,7 +845,7 @@
             channelNotify: formState.channel || '',
             taskWorkspace: formState.workspace || '',
             modelName: formState.modelName || '',
-            thinkingDepth: formState.thinking || 'off'
+            thinkingDepth: formState.thinking || 'auto'
         };
 
         function restore() { $saveBtn.prop('disabled', false).text(t('settings.loop.save')); }
@@ -1046,10 +1054,10 @@
         // 切模型：思考档位集可能变化，当前档位不在新集合内则回落 off
         function applyModelSelection(name) {
             formState.modelName = name;
-            var opts = thinkingOptions(standardOfModel(name));
+            var opts = thinkingOptions(name);
             var ok = false;
             for (var i = 0; i < opts.length; i++) { if (opts[i].value === formState.thinking) { ok = true; break; } }
-            if (!ok) formState.thinking = 'off';
+            if (!ok) formState.thinking = 'auto';
             renderModelUI();
         }
 

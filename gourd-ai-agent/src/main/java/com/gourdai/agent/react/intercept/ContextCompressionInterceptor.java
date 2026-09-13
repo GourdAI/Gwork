@@ -20,7 +20,6 @@ import com.gourdai.agent.event.ContextSizeEvent;
 import com.gourdai.agent.react.intercept.compress.KeyInfoExtractionStrategy;
 import com.knuddels.jtokkit.Encodings;
 import com.knuddels.jtokkit.api.Encoding;
-import com.knuddels.jtokkit.api.EncodingRegistry;
 import com.knuddels.jtokkit.api.ModelType;
 import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.AgentTrace;
@@ -201,10 +200,32 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
      */
     public static final long DEFAULT_CONTEXT_LENGTH = 128_000L;
 
-    // 在类中预加载注册表
-    private static final EncodingRegistry registry = Encodings.newDefaultEncodingRegistry();
-    // 适配 GPT-4o (o200k_base)，对 DeepSeek 等使用 cl100k_base 的模型有微小偏差（通常 <5%）
-    private static final Encoding encoding = registry.getEncodingForModel(ModelType.GPT_4O);
+    /**
+     * 分词器的惰性持有者（initialization-on-demand holder 惯用法）。
+     *
+     * <p><b>为什么必须惰性</b>：本类被 {@code HarnessEngine} 构造期引用，clinit 发生在 Solon 启动
+     * 主线程、HTTP 端口绑定之前。旧写法（{@code newDefaultEncodingRegistry()} 即时初始化）会把
+     * BPE 词表的构建（cl100k + o200k 两套，实测 0.8~1.7s：Base64 解码 + 十万级 HashMap put）
+     * 整个压进冷启动路径 —— 桌面端每次启动都白等这段，而它在「用户发出第一条消息」之前毫无用处。</p>
+     *
+     * <p><b>为什么用 {@code newLazyEncodingRegistry()} 而不是默认注册表</b>：默认注册表在构造时
+     * 就把全部默认编码（r50k/p50k/cl100k/o200k）都建一遍；lazy 版只登记供应商，首次
+     * {@code getEncodingForModel} 才构建——并且只构建被查的那一个（本处即 GPT-4o 的 o200k_base），
+     * 首次使用的一次性成本也跟着减半。</p>
+     *
+     * <p>线程安全由 JVM 的类初始化锁保证；持有者类不暴露可变状态。</p>
+     */
+    private static final class EncodingHolder {
+        // 适配 GPT-4o (o200k_base)，对 DeepSeek 等使用 cl100k_base 的模型有微小偏差（通常 <5%）
+        static final Encoding ENCODING =
+                Encodings.newLazyEncodingRegistry().getEncodingForModel(ModelType.GPT_4O);
+    }
+
+    /** 首次调用时构建分词器（约 0.5s，一次性），此后每次都是静态字段读取。 */
+    private static Encoding encoding() {
+        return EncodingHolder.ENCODING;
+    }
+
     private static final String META_TOKEN_SIZE = "token_size";
 
     // 保留窗口的最大消息数（= 历史窗口大小 N，压缩时保护最后 N 条）
@@ -472,7 +493,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         // 2. 计算固定开销（不可压缩部分：systemPrompt + 初心链 + tools定义） —— 【已引入完备兜底】
         int fixedTokens = 0;
         if (!Assert.isEmpty(systemPrompt)) {
-            fixedTokens += encoding.countTokens(systemPrompt) + 4;
+            fixedTokens += encoding().countTokens(systemPrompt) + 4;
         }
         fixedTokens += toolsTokens;
 
@@ -481,7 +502,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
             if (cachedSize == null) {
                 cachedSize = 0;
                 if (firstMsg.getContent() != null) {
-                    cachedSize += encoding.countTokens(firstMsg.getContent());
+                    cachedSize += encoding().countTokens(firstMsg.getContent());
                 }
                 if (firstMsg instanceof AssistantMessage) {
                     AssistantMessage am = (AssistantMessage) firstMsg;
@@ -489,7 +510,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
                         for (ToolCall tc : am.getToolCalls()) {
                             String name = tc.getName() != null ? tc.getName() : "";
                             String args = tc.getArgumentsStr() != null ? tc.getArgumentsStr() : "";
-                            cachedSize += encoding.countTokens(name + args) + 10;
+                            cachedSize += encoding().countTokens(name + args) + 10;
                         }
                     }
                 }
@@ -821,7 +842,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         if (cached != null) {
             return cached;
         }
-        return msg.getContent() == null ? 0 : encoding.countTokens(msg.getContent());
+        return msg.getContent() == null ? 0 : encoding().countTokens(msg.getContent());
     }
 
     /**
@@ -984,10 +1005,10 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
 
         int startIdx = 0;
         // 从尾部往前取，优先保证最近的意图一定在内
-        int approxTokens = encoding.countTokens(buf.toString());
+        int approxTokens = encoding().countTokens(buf.toString());
         List<String> picked = new ArrayList<>();
         for (int i = intents.size() - 1; i >= 0; i--) {
-            int t = encoding.countTokens(intents.get(i)) + 8;
+            int t = encoding().countTokens(intents.get(i)) + 8;
             if (approxTokens + t > intentChainMaxTokens && !picked.isEmpty()) {
                 startIdx = i + 1;
                 break;
@@ -1246,7 +1267,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
                 continue;
             }
 
-            int contentTokens = encoding.countTokens(content);
+            int contentTokens = encoding().countTokens(content);
             if (contentTokens <= perMessageCap) {
                 result.add(msg);
                 continue;
@@ -1346,13 +1367,13 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
      * 以字符切分逼近，再用编码器精确收敛，确保结果不超过 maxTokens。
      */
     private String truncateTextToTokens(String text, int maxTokens) {
-        if (text == null || encoding.countTokens(text) <= maxTokens) {
+        if (text == null || encoding().countTokens(text) <= maxTokens) {
             return text;
         }
 
         String marker = "\n... [内容过大已截断：单条消息超过上下文预算，省略中间部分，仅保留首尾。"
                 + "如需完整内容，请用分页方式重新获取] ...\n";
-        int markerTokens = encoding.countTokens(marker);
+        int markerTokens = encoding().countTokens(marker);
         int budget = Math.max(0, maxTokens - markerTokens);
         int headTokens = budget / 2;
         int tailTokens = budget - headTokens;
@@ -1362,13 +1383,13 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         int tailChars = Math.min(text.length() - headChars, tailTokens * 3);
 
         String head = text.substring(0, headChars);
-        while (encoding.countTokens(head) > headTokens && head.length() > 0) {
+        while (encoding().countTokens(head) > headTokens && head.length() > 0) {
             int newLen = Math.min(head.length() - 1, head.length() * 9 / 10);
             head = head.substring(0, Math.max(0, newLen));
         }
 
         String tail = text.substring(text.length() - tailChars);
-        while (encoding.countTokens(tail) > tailTokens && tail.length() > 0) {
+        while (encoding().countTokens(tail) > tailTokens && tail.length() > 0) {
             int cut = Math.max(1, tail.length() / 10);
             tail = tail.substring(cut);
         }
@@ -1385,7 +1406,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
             if (cachedCount == null) {
                 cachedCount = 0;
                 if (m.getContent() != null) {
-                    cachedCount += encoding.countTokens(m.getContent());
+                    cachedCount += encoding().countTokens(m.getContent());
                 }
 
                 // 补算 AssistantMessage 的 toolCalls 序列化开销
@@ -1396,7 +1417,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
                             String name = tc.getName() != null ? tc.getName() : "";
                             String args = tc.getArgumentsStr() != null ? tc.getArgumentsStr() : "";
 
-                            cachedCount += encoding.countTokens(name + args);
+                            cachedCount += encoding().countTokens(name + args);
                             cachedCount += 10; // id + JSON 结构开销
                         }
                     }
@@ -1411,7 +1432,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
 
         // systemPrompt 的 token 开销
         if (systemPrompt != null && !systemPrompt.isEmpty()) {
-            totalTokens += encoding.countTokens(systemPrompt) + 4;
+            totalTokens += encoding().countTokens(systemPrompt) + 4;
         }
 
         return totalTokens + 3;
@@ -1426,15 +1447,15 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         for (FunctionTool tool : tools) {
             // name
             if (tool.name() != null) {
-                tokens += encoding.countTokens(tool.name());
+                tokens += encoding().countTokens(tool.name());
             }
             // description（含 meta 信息）
             if (tool.descriptionAndMeta() != null) {
-                tokens += encoding.countTokens(tool.descriptionAndMeta());
+                tokens += encoding().countTokens(tool.descriptionAndMeta());
             }
             // inputSchema（JSON Schema 定义）
             if (tool.inputSchema() != null) {
-                tokens += encoding.countTokens(tool.inputSchema());
+                tokens += encoding().countTokens(tool.inputSchema());
             }
             tokens += 15; // JSON 结构开销（type, function, parameters 等字段）
         }

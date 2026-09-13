@@ -97,6 +97,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 
 /* 侧栏空态提示（如无定时任务） */
 .sidebar-empty-hint { padding: 4px 8px 8px; font-size: 12px; color: var(--text-tertiary); }
+/* 侧栏加载失败提示：整块可点击重试（hover 提亮给出可交互暗示） */
+.sidebar-load-failed-hint { cursor: pointer; }
+.sidebar-load-failed-hint:hover { color: var(--text-secondary); }
 
 /* Sidebar resize handle */
 .sidebar-resize-handle {
@@ -303,7 +306,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 
 /* Tool Card */
 .tool-card { margin: 10px 0; border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden; transition: border-color 0.2s; }
-.tool-card-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; transition: background 0.15s; font-size: 13px; overflow: hidden; }
+.tool-card-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; transition: background 0.15s; font-size: 13px; overflow: hidden; contain: paint; }
 .tool-card-header:hover { background: var(--bg-hover); }
 /* 左侧工具类型图标 */
 .tool-type-icon { order: 0; flex-shrink: 0; font-size: 14px; line-height: 1; }
@@ -315,54 +318,84 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .tool-diff-stat { order: 3; display: inline-flex; gap: 6px; font-size: 12px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
 .tool-diff-stat .add { color: var(--color-success, #4ac26b); font-weight: 600; }
 .tool-diff-stat .del { color: var(--color-danger, #e5534b); font-weight: 600; }
-/* 右侧状态点：加载转圈 / 成功绿点 / 失败红点 */
-.tool-status-icon { order: 4; margin-left: auto; width: 10px; height: 10px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.3s; }
+/* 右侧状态点：加载转圈 / 成功绿点 / 失败红点。
+   order 必须是本容器所有元素中的最大值（当前：duration 5 / diff-stat·args·args-progress 3 / file 2 / name 1 / type 0），
+   且与「模板中位于 header 末尾」的 DOM 位置一致——两者缺一，类切换或重排的一瞬圆点就会落回内容一侧。
+   transition 只允许视觉属性：绝不要写 transition: all ——
+   Chrome 会把 order 这类布局属性的变化放进「离散过渡」（实测 transitionrun prop=order），
+   排序切换被推迟到过渡窗口里执行，期间圆点先瞬移回内容之后、再跳回行尾（「从左侧闪一下跑到右侧」）。 */
+.tool-status-icon { order: 6; margin-left: auto; width: 10px; height: 10px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background-color 0.3s, box-shadow 0.3s; }
 .tool-status-icon.loading { background: var(--color-success, #4ac26b); border: none; animation: status-dot-blink 1s ease-in-out infinite; }
 .tool-status-icon.done { background: var(--color-success, #4ac26b); border: none; animation: none; box-shadow: 0 0 4px rgba(74,194,107,0.6); }
 .tool-status-icon.warn { background: var(--color-warning); border: none; animation: none; }
 .tool-status-icon.reject { background: var(--color-danger, #e5534b); border: none; animation: none; box-shadow: 0 0 4px rgba(229,83,75,0.6); }
-/* 统一状态点：执行中绿点闪动 / 成功绿点常亮 / 失败红点。思考块与工具卡共用。 */
-@keyframes status-dot-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+/* 统一状态点：执行中绿点闪动 / 成功绿点常亮 / 失败红点。思考块与工具卡共用。
+
+   ——为什么闪动用 background-color 而不是 opacity（已实测确认，勿回退）——
+   opacity 是「合成器可加速属性」，对它做关键帧动画会让浏览器把这个 10px 圆点
+   单独提升为一个合成层（compositing layer）。而该点的祖先容器
+   （.agent-card / .tool-card / .thinking-block）都是 overflow:hidden，整条消息流
+   又处在滚动容器内；于是滚动/拖动窗口时，独立合成层与主层的重绘不同步，圆点会
+   「掉队」停留在旧位置，视觉上脱离 header 跑到卡片下方——表现为同一屏里多张卡的
+   点以相同方向和幅度整体偏移（合成层位移未跟随的典型特征），而非布局算错。
+   改用 background-color 插值：它不属于合成器可加速属性，由主线程随卡片一起绘制，
+   不会触发层提升，残影随之消失。
+
+   视觉等价性：这三处圆点内部均无子内容，且 loading 态都没有 box-shadow
+   （.thinking-block.streaming 显式 box-shadow:none），因此
+   「opacity:0.25 + 纯色背景」与「同色 25% alpha 背景」的渲染结果完全一致。
+   暗态取 --color-success-dim（theme.css 按主题定义，= 对应主题绿的 25% alpha），
+   兜底值 rgba(74,194,107,.25) 与 --color-success 的兜底 #4ac26b 保持同源。 */
+@keyframes status-dot-blink {
+    0%, 100% { background-color: var(--color-success, #4ac26b); }
+    50%      { background-color: var(--color-success-dim, rgba(74,194,107,0.25)); }
+}
 .tool-card.hitl-pending { border-color: var(--color-warning); }
 .tool-card .hitl-card-actions { display: flex; gap: 10px; padding: 0 14px 14px; }
 .tool-name { order: 1; font-weight: 600; color: var(--text-primary); white-space: nowrap; flex-shrink: 0; }
 /* 头部参数串默认隐藏：与已单独展示的工具名/文件名重复，显得杂乱；详细参数仍可在展开的卡片体中查看。 */
  .tool-args { display: none; order: 3; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 /* 工具真实耗时（后端 WebChunk.durationMs 下发，来源 ToolCallEndEvent.getDurationMs()）。
-   顺序为「耗时在前、状态点收尾」：带耗时的卡由 .has-duration（setToolCardDuration 打标）把右侧
-   元信息整体右推——耗时吸收剩余空白、状态点贴行尾；无耗时卡片维持状态点直接靠右。 */
+   顺序恒为「耗时（order 5）在前、状态点（order 6）收尾」：JS 把耗时直接插到状态点之前，
+   排序不随「耗时出现」变化，状态点因此全程不动、稳定贴行尾。
+   （旧实现的 .has-duration 覆盖会把两者 order 对调——类切换的过渡窗口里排序异步变化，
+   圆点先左闪再右跳，已随实测修复移除，勿再引入。） */
 .tool-duration { order: 5; color: var(--text-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; opacity: 0.75; }
 .tool-duration.failed { color: var(--color-danger, #e5484d); opacity: 1; }
-.tool-card-header.has-duration .tool-duration { order: 4; margin-left: auto; }
-.tool-card-header.has-duration .tool-status-icon { order: 5; margin-left: 0; }
 .tool-label { color: var(--text-secondary); font-size: 12px; }
 .tool-card-body { display: none; padding: 0 14px 12px; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; border-top: 1px solid var(--border-color); }
 .tool-card.expanded .tool-card-body { display: block; }
+/* 参数流式生成中的骨架卡（action_draft 建卡 → action_start 原地转正）。
+   为何只改轮廓与头部文案、不动状态点：状态点四态（loading/done/warn/reject）语义已满，
+   且 setToolCardStatus 带 loading 守卫——给骨架卡换状态点 class，这张卡此后永远落不了态。
+   虚线描边表达「尚未成形」，进度文案表达「还在涨」，两者合起来就是完整的等待反馈。 */
+.tool-card.args-streaming { border-style: dashed; }
+/* 参数体积进度文案（「生成参数中 · 1.2 KB」）：与 .tool-args / .tool-diff-stat 同档，
+   12px + 三级文字色 + 等宽数字（字节数每帧跳动时不会带着整行左右抖动）。 */
+.tool-args-progress { order: 3; color: var(--text-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .tool-expand-full { display: inline-block; margin: 8px 0 2px; padding: 4px 12px; font-size: 12px; font-family: inherit; color: var(--text-secondary); background: var(--bg-code-block, rgba(127,127,127,.08)); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; }
 .tool-expand-full:hover:not(:disabled) { color: var(--text-primary); border-color: var(--text-secondary); }
 .tool-expand-full:disabled { opacity: .6; cursor: default; }
 
-/* Per-run file changes: each run owns one messages-inner direct row; revisions update it in place.
-   呈现形态 = 按钮 + 展开列表：收起态是任务 chip 形态的「变更按钮」（图标 + 文案 + 数量徽标），
-   点击展开下方变更列表；容器本身透明，不再常驻一张整宽空卡片。 */
-.file-changes-run-row { display: flex; width: 92%; margin-bottom: 28px; animation: msg-in 0.25s ease-out; }
-.file-changes-run-row > .file-changes-card { width: 100%; margin: 0; background: transparent; border: 0; border-radius: 0; overflow: visible; }
-/* 变更按钮：小圆角胶囊 + 数字徽标，视觉与输入框上方的 .todo-chip 同族 */
-.file-changes-header { display: flex; align-items: center; gap: 8px; padding: 0; cursor: pointer; min-width: 0; }
-.file-changes-header:hover { background: none; }
-.file-changes-pill { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 5px 10px; background: var(--bg-hover); border: 1px solid var(--border-color); border-radius: 14px; font-size: 12px; color: var(--text-primary); transition: border-color 0.15s, background 0.15s; }
-.file-changes-header:hover .file-changes-pill { border-color: var(--accent); }
-.file-changes-pill .tool-type-icon { order: 0; }
-.file-changes-pill .tool-type-icon svg { width: 14px; height: 14px; display: block; color: var(--text-secondary); }
-.file-changes-pill .tool-name { order: 1; font-weight: 500; color: var(--text-primary); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.file-changes-pill .file-changes-badge { order: 2; }
-.file-changes-pill .tool-diff-stat { order: 3; }
+/* 本轮文件变更入口：输入区 chip 行中的「变更按钮」，位置紧随「任务」chip。
+   呈现形态 = 任务 chip 同族（图标 + 文案 + 数量徽标 + 增删统计）；点击在输入区上方弹出变更面板；
+   消息流不再渲染任何变更节点。容器显隐由 app-file-changes.js 置位、updateChipWrapVisibility 汇算。 */
+.file-changes-chip { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 320px; margin-left: 6px; padding: 5px 10px; background: var(--bg-hover); border: 1px solid var(--border-color); border-radius: 14px; cursor: pointer; font-size: 12px; color: var(--text-primary); transition: border-color 0.15s, background 0.15s; }
+.file-changes-chip:hover { border-color: var(--accent); }
+.file-changes-chip .tool-type-icon { order: 0; display: inline-flex; flex-shrink: 0; }
+.file-changes-chip .tool-type-icon svg { width: 16px; height: 16px; display: block; color: var(--text-secondary); }
+.file-changes-chip .tool-name { order: 1; font-weight: 500; color: var(--text-primary); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-changes-chip .tool-diff-stat { order: 3; flex-shrink: 0; }
 /* 文件数量徽标：低彩度描边数字，与任务徽标（.todo-badge）同款 */
-.file-changes-badge { background: transparent; border: 1px solid var(--border-color); border-radius: 8px; padding: 1px 5px; font-size: 10px; font-weight: 600; color: var(--text-secondary); }
-.file-changes-head-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
-/* 展开列表：独立成卡挂在按钮下方 */
-.file-changes-body { display: none; margin-top: 6px; padding: 4px 8px 8px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-card, transparent); max-height: 360px; overflow-y: auto; font-family: var(--font-sans); white-space: normal; word-break: normal; }
-.file-changes-card.expanded .file-changes-body { display: block; }
+.file-changes-badge { order: 2; flex-shrink: 0; background: transparent; border: 1px solid var(--border-color); border-radius: 8px; padding: 1px 5px; font-size: 10px; font-weight: 600; color: var(--text-secondary); }
+/* 变更面板：与任务面板（.todo-float-panel）同构，悬浮在输入区上方，独立成卡 */
+.file-changes-float-panel { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); width: calc(100% - 48px); max-width: 820px; margin-bottom: 4px; background: var(--bg-input-box); border: 1px solid var(--border-color); border-radius: 10px; box-shadow: var(--shadow-lg); max-height: 340px; overflow: hidden; display: none; z-index: 999; }
+.file-changes-float-panel.show { display: flex; flex-direction: column; }
+.file-changes-panel { display: flex; flex-direction: column; max-height: 340px; min-height: 0; }
+.file-changes-panel-header { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
+.file-changes-panel-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 13px/1.4 var(--font-sans); color: var(--text-primary); }
+.file-changes-panel-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.file-changes-panel-body { padding: 4px 8px 8px; max-height: 260px; overflow-y: auto; font-family: var(--font-sans); white-space: normal; word-break: normal; }
 .file-change-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 7px 6px; border-bottom: 1px solid var(--border-color); }
 .file-change-row:last-child { border-bottom: 0; }
 .file-change-row:hover { background: var(--bg-hover); }
@@ -382,9 +415,8 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .file-change-state { color: var(--text-tertiary); font-size: 12px; white-space: nowrap; padding: 0 4px; }
 .file-changes-warning { margin: 4px 4px 6px; padding: 7px 9px; border-left: 3px solid var(--color-warning); border-radius: 5px; background: var(--bg-hover); color: var(--text-secondary); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 @media (max-width: 680px) {
-    .file-changes-run-row { width: 100%; }
-    .file-changes-header { flex-wrap: wrap; }
-    .file-changes-head-actions { margin-left: 0; }
+    .file-changes-chip { max-width: 46vw; }
+    .file-changes-chip .tool-diff-stat { display: none; }
     .file-change-row { align-items: flex-start; flex-direction: column; }
     .file-change-main, .file-change-row-actions { width: 100%; }
     .file-change-row-actions { flex-wrap: wrap; padding-left: 26px; }
@@ -411,9 +443,14 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 /* ===== Agent Card (子代理智能体容器) ===== */
 .agent-card { margin: 10px 0; border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden; transition: border-color 0.2s; }
 .agent-card.agent-card-streaming { border-color: var(--accent); }
-.agent-card-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; font-size: 13px; overflow: hidden; background: var(--bg-hover); }
+/* contain:paint —— 把 header 及其后代（含状态点）锁在同一个绘制单元内，抗滚动/拖动时的分层残影。
+   与上方 status-dot-blink 改造配套：前者治本（不再提升合成层），此处兼防后人再往 header 内
+   加入 opacity/transform 动画时重蹈覆辙。安全性已核：三个 header 均无 absolute/fixed 后代
+   （不会意外成为包含块截断浮层）；.tool-card-header/.agent-card-header 本就带 overflow:hidden，
+   裁剪行为与现状等价。 */
+.agent-card-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; font-size: 13px; overflow: hidden; contain: paint; background: var(--bg-hover); }
 .agent-icon { order: 0; flex-shrink: 0; font-size: 15px; line-height: 1; }
-.agent-status-icon { order: 1; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; transition: all 0.3s; }
+.agent-status-icon { order: 1; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; transition: background-color 0.3s, box-shadow 0.3s; }
 .agent-status-icon.loading { background: var(--color-success, #4ac26b); animation: status-dot-blink 1s ease-in-out infinite; }
 .agent-status-icon.done { background: var(--color-success, #4ac26b); box-shadow: 0 0 4px rgba(74,194,107,0.6); }
 .agent-status-icon.reject { background: var(--color-danger, #e5534b); box-shadow: 0 0 4px rgba(229,83,75,0.6); }
@@ -526,11 +563,14 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 
 /* Thinking Block (collapsible reasoning content) */
 .thinking-block { margin: 0 0 10px; border: 1px solid var(--thinking-block-border); border-radius: 10px; overflow: hidden; background: var(--thinking-block-bg); }
-.thinking-block-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; font-size: 13px; user-select: none; transition: background 0.15s; }
+/* 同 .agent-card-header 的 contain:paint 理由。此处是三个 header 中唯一本来没有 overflow:hidden 的，
+   故 paint containment 会引入新裁剪：已核实内部唯一会溢出边界的是 .thinking-status-dot 常亮态的
+   box-shadow(blur 4px)，而 header 最小 padding 为 code-mode 的 6px 10px，4px < 6px，发光不被截。 */
+.thinking-block-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; font-size: 13px; user-select: none; transition: background 0.15s; contain: paint; }
 .thinking-block-header:hover { background: var(--bg-hover); }
 .thinking-block-label { color: var(--text-secondary); font-weight: 500; }
 /* 思考块右侧状态点：与工具卡统一的圆点。思考中绿点闪动，结束后绿点常亮。 */
-.thinking-status-dot { margin-left: auto; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: var(--color-success, #4ac26b); box-shadow: 0 0 4px rgba(74,194,107,0.6); transition: all 0.3s; }
+.thinking-status-dot { order: 6; margin-left: auto; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: var(--color-success, #4ac26b); box-shadow: 0 0 4px rgba(74,194,107,0.6); transition: background-color 0.3s, box-shadow 0.3s; }
 .thinking-block.streaming .thinking-status-dot { animation: status-dot-blink 1s ease-in-out infinite; box-shadow: none; }
 .thinking-block-body { padding: 0 14px 12px; font-size: 13px; color: var(--text-secondary); line-height: 1.7; border-top: 1px solid var(--thinking-block-border); max-height: 300px; overflow-y: auto; }
 .thinking-block-body .md-content { color: var(--text-secondary); font-size: 13px; }
@@ -571,7 +611,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .model-selector-current:hover { color: var(--text-primary); background: var(--bg-hover); }
 .model-selector-current .model-name { overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
 .model-selector-current .model-icon { width: 14px; height: 14px; flex-shrink: 0; opacity: 0.7; display: none; }
-.model-selector-current .model-arrow { font-size: 11px; transition: transform 0.2s; opacity: 0.5; }
+.model-selector-current .model-arrow { width: 11px; height: 11px; flex-shrink: 0; transition: transform 0.2s; opacity: 0.5; }
 .model-selector.open .model-arrow { transform: rotate(180deg); }
 .model-dropdown { position: absolute; bottom: 100%; left: 0; margin-bottom: 6px; background: var(--bg-input-box); border: 1px solid var(--border-color); border-radius: 10px; box-shadow: var(--shadow-lg); min-width: var(--dropdown-w-md); max-width: var(--dropdown-w-max); max-height: 280px; overflow-y: auto; display: none; z-index: 100; animation: drop-up 0.15s ease-out; }
 .model-selector.open .model-dropdown { display: block; }
@@ -2645,7 +2685,6 @@ pre:hover .code-copy-btn { opacity: 1; }
 .tool-type-icon,
 .agent-icon,
 .file-change-kind,
-.file-changes-card .tool-file,
 .tool-card .tool-file,
 .tool-batch-title,
 .tool-batch-progress,
@@ -2653,13 +2692,10 @@ pre:hover .code-copy-btn { opacity: 1; }
 .file-change-path,
 .file-change-state { color: var(--text-secondary); }
 .tool-type-icon svg,
-.agent-icon svg { width: 15px; height: 15px; display: block; stroke: currentColor; }
-.tool-card .tool-file,
-.file-changes-card .tool-file { color: var(--text-primary); }
+.agent-icon svg { width: 18px; height: 18px; display: block; stroke: currentColor; }
+.tool-card .tool-file { color: var(--text-primary); }
 .tool-diff-stat .add,
-.tool-diff-stat .del,
-.file-changes-card .tool-diff-stat .add,
-.file-changes-card .tool-diff-stat .del { color: var(--text-secondary); font-weight: 600; }
+.tool-diff-stat .del { color: var(--text-secondary); font-weight: 600; }
 .tool-card.hitl-pending,
 .agent-card.agent-card-streaming,
 .thinking-block.streaming { border-color: var(--border-color); }

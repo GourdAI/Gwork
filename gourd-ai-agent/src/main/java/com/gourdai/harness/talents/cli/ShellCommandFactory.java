@@ -21,6 +21,7 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.Method;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -31,7 +32,9 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -344,6 +347,12 @@ public final class ShellCommandFactory {
      *
      * <p>编码用无 BOM 的 UTF-8：{@code [Text.Encoding]::UTF8} 带 preamble，会让首行多出
      * {@code \uFEFF} 而破坏行标记匹配。</p>
+     *
+     * <p><b>它现在只是兜底路径</b>：{@link #ancestorCommands()} 会先尝试
+     * {@link #ancestorCommandsFast()}（反射调 {@code ProcessHandle}，零 fork、微秒级）。
+     * 只有 Java 8、反射被安全策略拦截、或整条链的映像路径都读不到（如被沙箱/完整性级别挡住
+     * OpenProcess）时才会走到这里。因此<strong>不要因为「看起来没人用」而删掉本脚本</strong>
+     * —— 删了就等于在这些环境下彻底失去自动判定能力，只能退回默认 PowerShell 方言。</p>
      */
     private static final String ANCESTOR_PROBE_SCRIPT =
             "$ErrorActionPreference='SilentlyContinue';"
@@ -368,13 +377,103 @@ public final class ShellCommandFactory {
                     + " }";
 
     /**
+     * 祖先链的「无 fork」快路径：直接用 JDK 9+ 的 {@code java.lang.ProcessHandle} 读进程表。
+     *
+     * <p><b>为何用反射</b>：本模块要求能在 Java 8 上编译、运行，而 {@code ProcessHandle} 自 JDK 9
+     * 才有。全程反射即可让两条 JDK 线共用同一份源码：类不存在时返回 {@code null}，由
+     * {@link #ancestorCommands()} 回退到外挂 PowerShell 的慢路径，行为与改造前完全一致。</p>
+     *
+     * <p><b>语义对齐</b>：与 PowerShell 脚本一样，从「JVM 的父进程」开始向上走
+     * {@value #MAX_PARENT_WALK} 层，返回映像路径（小写）。刻意**不使用** {@code commandLine()}：
+     * 那是「路径 + 参数」的拼接，参数里出现 {@code cmd.exe} 之类的字样会把判定带偏，而脚本取的
+     * 是映像路径（ExecutablePath）或进程名（Name）。</p>
+     *
+     * <p>只在 Windows 分支被调用（上游 {@link #probeWindowsParentShellName()} 已做平台闸门），
+     * 因此类 Unix 下的行为完全不受影响。</p>
+     *
+     * @return 祖先映像路径（由近及远，已转小写）；快路径不可用或一个都取不到时返回 {@code null}
+     *
+     * <p>包可见而非私有：这条路径要在「快路径可用 / 不可用」两种机器上都可断言，见
+     * {@code ShellCommandFactoryProbeTest}（与 {@link #shellNameOfCommand}、{@link #probeUnixShell}
+     * 采用同一套可测性约定）。</p>
+     */
+    static List<String> ancestorCommandsFast() {
+        try {
+            Class<?> handleType = Class.forName("java.lang.ProcessHandle");
+            Class<?> infoType = Class.forName("java.lang.ProcessHandle$Info");
+            Method current = handleType.getMethod("current");
+            Method parent = handleType.getMethod("parent");
+            Method isAlive = handleType.getMethod("isAlive");
+            Method info = handleType.getMethod("info");
+            Method command = infoType.getMethod("command");
+            // ProcessHandle.parent() 返回的是 Optional<ProcessHandle>，必须解包 ——
+            // 直接把它当 ProcessHandle 用会在反射调用处抛 IllegalArgumentException。
+            Method optIsPresent = Optional.class.getMethod("isPresent");
+            Method optGet = Optional.class.getMethod("get");
+
+            List<String> found = new ArrayList<>();
+            Object node = optionalOrNull(optIsPresent, optGet, parent.invoke(current.invoke(null)));
+            for (int i = 0; i < MAX_PARENT_WALK && node != null; i++) {
+                if (!Boolean.TRUE.equals(isAlive.invoke(node))) {
+                    break;
+                }
+                // 取不到映像路径（权限不足/进程已换像）时不中断，继续往上走一层。
+                //
+                // ⚠ 与慢路径的一处**已知差异**：PowerShell 脚本在 ExecutablePath 取不到时会退用进程名
+                // （Name）；而 ProcessHandle.Info 没有暴露进程名，只能跳过这一层。也就是说，
+                // 「某个 shell 进程的映像路径恰好读不到、但进程名可读」时两边结果可能不同
+                // （慢路径能认出 cmd，快路径会继续往上找）。实践上要读不到路径需要受保护/跨完整性
+                // 级别的进程，极罕见；且真出现了也只是退到默认的 PowerShell 方言，不会炸。
+                //
+                // 注意 Info.command() 返回的是 Optional<String>（不是 String），必须再解包一层：
+                // 直接拿 Optional 去 instanceof String 会永远为 false，快路径静默退化成「一个都
+                // 取不到」→ 回退慢路径，表现为「改了但一点没快」。
+                Object path = optionalOrNull(optIsPresent, optGet, command.invoke(info.invoke(node)));
+                if (path instanceof String && !((String) path).isEmpty()) {
+                    found.add(((String) path).toLowerCase(Locale.ROOT));
+                }
+                node = optionalOrNull(optIsPresent, optGet, parent.invoke(node));
+            }
+            // 一个都取不到 → 交回慢路径。绝不能返回空列表：那会被上游当成
+            // 「祖先链里确实没有 shell」而直接定稿为默认方案，把一次读取失败误判成结论。
+            return found.isEmpty() ? null : found;
+        } catch (Throwable e) {
+            // Java 8 无此类、或反射被安全策略拦截：静默回退，绝不抛出
+            return null;
+        }
+    }
+
+    /**
+     * 拆开 JDK 返回的 {@code Optional}；空表示父进程已退出/不可见。
+     *
+     * <p>{@code ProcessHandle.parent()} 与 {@code ProcessHandle.Info.command()} / {@code user()}
+     * 都返回 {@code Optional}，快路径上要拆三次，故抽成共用方法。</p>
+     */
+    private static Object optionalOrNull(Method isPresent, Method get, Object optional) throws Exception {
+        if (optional != null && Boolean.TRUE.equals(isPresent.invoke(optional))) {
+            return get.invoke(optional);
+        }
+        return null;
+    }
+
+    /**
      * 取「JVM 的父进程」起、最多 {@value #MAX_PARENT_WALK} 层祖先的映像路径（已转小写，由近及远）。
      * 任何失败（无 WMI、禁止创建子进程、超时）都返回空列表，绝不抛出。
+     *
+     * <p><b>先走 {@link #ancestorCommandsFast()} 的无 fork 快路径</b>：慢路径要起一个 PowerShell
+     * 并做一次全机进程 WMI 枚举，实测 ≈2.0s（超时上限 {@value #PARENT_PROBE_TIMEOUT_MS}ms），
+     * 而整段发生在 Solon 启动主线程上——探测不结束，HTTP 端口就不会绑定，直接表现为冷启动变慢
+     * （桌面端尤其明显）。快路径只读操作系统已有的进程表，微秒级，语义与慢路径一致。</p>
      *
      * <p>骨架与 {@code EnvironmentResolver.resolveWindowsPath()} 一致：独立守护线程消费输出，
      * 主线程按超时等待——同步读流会让超时形同虚设。</p>
      */
     private static List<String> ancestorCommands() {
+        List<String> fast = ancestorCommandsFast();
+        if (fast != null && !fast.isEmpty()) {
+            return fast;
+        }
+
         Process process = null;
         try {
             ProcessBuilder pb = new ProcessBuilder(defaultWindowsPowerShellCmd(),

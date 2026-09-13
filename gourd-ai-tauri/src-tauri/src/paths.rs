@@ -97,6 +97,9 @@ pub fn resources_dir_candidates() -> Vec<PathBuf> {
         // 直接从 gourd-ai-agent/target 同步到此，不再借道 Electron 模块）。
         // 仍保留 Electron 的目录作为次级候选：老工作区可能只跑过 build.ps1，
         // 此时那份产物仍然可用，没必要逼开发者重跑一遍同步。
+        // TODO(拆仓)：Tauri 独立成仓后这条回落必然落空，届时应直接删掉该候选，
+        // 让开发态只认本模块的 build/extraResources（缺失就报明确的「请先跑
+        // sync-backend.js」，好过静默用上一份陈旧产物）。
         let mut dir: Option<&Path> = Some(exe.as_path());
         while let Some(d) = dir {
             out.push(d.join("gourd-ai-tauri").join("build").join("extraResources"));

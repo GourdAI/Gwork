@@ -11,6 +11,7 @@
                       "steer_box_full":  "保留中の割り込みが多いため、キューに追加しました",
                       "steer_deferred":  "現在のステップが終了したため、キューに追加しました",
                       "steer_failed":  "割り込みの送信に失敗しました。入力内容は保持されています",
+                      "force_finished":  "実行はすでに終了しています（サーバーは待機中）。ストリームを自動的に終了しました",
                       "steer_attachment_wait":  "タスク実行中は添付ファイルを割り込みまたはキューに追加できません。完了を待つか停止してください",
                       "steer_command_queue":  "コマンドは割り込みできません。Tab でキューに追加してください",
                       "steer_dropped":  "完了前に割り込みが反映されなかったため、キューに追加しました",
@@ -89,7 +90,7 @@
                     "model_search_empty":  "一致するモデルがありません",
                     "model_group_toggle":  "このプロバイダーを折りたたむ／展開",
                     "thinking":  {
-                                     "off":  {
+                                     "auto":  {
                                                  "label":  "デフォルト",
                                                  "desc":  "モデルのデフォルト動作を使用"
                                              },
@@ -203,7 +204,8 @@
                                        "switch":  "ワークスペースを切り替え",
                                        "clear":  "選択を解除"
                                    },
-                "sidebar":  {
+                 "sidebar":  {
+                                 "load_failed_retry":  "読み込みに失敗しました。クリックして再試行",
                                  "loop_mark":  "定期タスク",
                                 "new_task":  "新規タスク",
                                 "search":  "検索",
@@ -741,7 +743,7 @@
                                  "model_none":  "まだモデルが構成されていません。まず「設定 - モデル」でモデルを追加して有効にしてください。",
                                  "model_saved":  "ACP モデルを保存しました",
                                  "model_save_failed":  "保存に失敗しました。もう一度お試しください",
-                                 "thinking_hint":  "推論の強さを制御します。オフにするとモデルのデフォルト動作を使用",
+                                 "thinking_hint":  "推論の強さを制御します。「デフォルト」を選ぶとモデル本来の動作を使用",
                                  "thinking_saved":  "思考深度設定を保存しました",
                                  "thinking_save_failed":  "保存に失敗しました。もう一度お試しください",
                                  "zed_integration_desc":  "以下の JSON 設定をエディターの ACP 設定に統合し、Agent パネルで GWork を選択してください。",
@@ -799,6 +801,7 @@
                  "phase_thinking":  "思考中",
                  "phase_text":  "出力中",
                  "phase_waiting":  "応答待ち",
+                 "args_streaming":  "引数を生成中 · {size}",
                  "rerun":  "再実行",
                  "continue_run":  "実行を続ける",
                  "need_auth":  "承認が必要です:",

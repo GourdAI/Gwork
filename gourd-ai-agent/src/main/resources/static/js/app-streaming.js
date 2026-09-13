@@ -6,18 +6,104 @@
 $(welcomeSendBtn).on('click', function() { sendMessage(); });
 $(chatSendBtn).on('click', function() {
     if (isStreaming && activeSessionId && sessionMap[activeSessionId]) {
-        var stopSess = sessionMap[activeSessionId];
-        $.post('/web/chat/interrupt', {
-            sessionId: activeSessionId,
-            runId: stopSess.activeRunId || ''
-        }).fail(function() {
-            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_failed'), 'error');
-        });
-        // 等待服务端 matched run 的 steer_cancelled + done；不在本地提前 finish，避免误启队列。
+        requestInterrupt(sessionMap[activeSessionId], false);
     } else {
         sendMessage();
     }
 });
+
+/* ===== 中断（停止）请求 =====
+   后端语义：
+   - cancelled：已取消，并会推送匹配 run 的 steer_cancelled + done（前端等 done 收敛）；
+   - not_running：当前无运行中 run；
+   - turn_changed：前端携带的 runId 已过期（例如 activeRunId 被历史回放覆写成陈旧值）。
+   旧实现只挂了 .fail()（仅弹 toast），对 not_running / turn_changed 零处理、也无本地兜底。
+   一旦命中 turn_changed，后端不会 dispose、不会下发 done，前端就永久停在流式态：
+   计时器不停狂奔、停止按钮反复点也没用——这正是“点暂停却暂停不了、一直思考”的根因之一。
+   现在：非 cancelled 一律回服务端真值（replay.running）对账，据此收尾；turn_changed 时先用 replay
+   回传的权威 runId 校准本地 activeRunId，再重试一次中断（否则重试仍带陈旧 runId，形同虚设）。 */
+function requestInterrupt(sess, isRetry) {
+    if (!sess || !sess.sessionId) return;
+    $.post('/web/chat/interrupt', {
+        sessionId: sess.sessionId,
+        runId: sess.activeRunId || ''
+    }).done(function(resp) {
+        var status = resp && resp.data && resp.data.status;
+        if (status === 'cancelled') return; // 等 steer_cancelled + done 收敛
+        reconcileSessionRunning(sess, { retryInterrupt: (status === 'turn_changed') && !isRetry, force: true });
+    }).fail(function(xhr) {
+        // Result.failure 也会走 fail 分支，语义在 responseJSON.data.status 里
+        var status = xhr && xhr.responseJSON && xhr.responseJSON.data && xhr.responseJSON.data.status;
+        if (status === 'not_running' || status === 'turn_changed') {
+            reconcileSessionRunning(sess, { retryInterrupt: (status === 'turn_changed') && !isRetry, force: true });
+            return;
+        }
+        if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_failed'), 'error');
+        // 网络层失败：请求可能已到达后端，仍以服务端真值对账，避免永久卡在思考态
+        reconcileSessionRunning(sess, { force: true });
+    });
+}
+
+/* ===== 以服务端真值对账本地流式态 =====
+   /web/chat/replay 的 running 字段来自后端 isSessionBusy（disposable 存活判定），是“本轮是否还在跑”
+   的唯一权威真值。任何“done 丢失”（runId 不匹配、连接抖动、取消竞态、死锁后的乱序）都由这里兜底收敛，
+   保证前端绝不会永久停在「思考中 + 计时器狂奔 + 停止按钮失灵」。 */
+function reconcileSessionRunning(sess, opts) {
+    opts = opts || {};
+    if (!sess || !sess.sessionId || !sess.isStreaming) return;
+    var gen = sess._reconcileGen = (sess._reconcileGen || 0) + 1;
+    var rootQ = sess.projectRoot ? '&root=' + encodeURIComponent(sess.projectRoot) : '';
+    $.get('/web/chat/replay?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ
+            + '&afterSeq=' + encodeURIComponent(sess.lastEventSeq || 0) + '&limit=1')
+        .done(function(resp) {
+            if (sess._reconcileGen !== gen || !sess.isStreaming) return;
+            var data = (resp && resp.data) || {};
+            // 用服务端权威 currentRunId 校准本地 activeRunId。本地值可能被历史回放写成陈旧值，
+            // 若不校准就直接重试中断，只会再吃一个 turn_changed（重试形同虚设）。
+            if (data.runId) sess.activeRunId = data.runId;
+            if (data.running) {
+                if (opts.retryInterrupt) requestInterrupt(sess, true);
+                return;
+            }
+            // 服务端已空闲：仅在“确已停摆”（用户主动停止，或长时间无任何事件）时才强制收尾，
+            // 避免把启动窗口内（running 尚未变 true）的新 run 误砍。
+            // 停摆判定取「最近事件时间」与「本轮流起点」的较新者：lastEventAt 可能是上一轮遗留的旧值，
+            // 若短路取到它，会把「新 run 刚发起、服务端 running 尚为 false」的启动窗口误判为停摆。
+            var lastActivity = Math.max(sess.lastEventAt || 0, sess._streamStartAt || 0);
+            var stalled = (Date.now() - lastActivity) >= STREAM_STALL_MS;
+            if (!opts.force && !stalled) return;
+            console.warn('[WebGate] reconcile: server idle, force finishStream for', sess.sessionId);
+            sess.activeRunId = null;
+            sess._pendingClientMessageId = null;
+            sess._awaitingSendAck = false;
+            // 与正常 done 路径对齐：强制收尾也必须放行消息队列派发，
+            // 否则早前因流式态被抑制的排队消息会永远不再触发。
+            sess._suppressQueueDispatch = false;
+            finishStream(sess);
+            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.force_finished'), 'warning');
+        })
+        .fail(function() { /* 对账失败：交给看门狗下一轮或后端 done */ });
+}
+
+/* ===== 流式态看门狗 =====
+   全仓此前没有任何兜底收敛：一旦 done 因任何原因丢失，前端将永久停在流式态。
+   看门狗周期性对账活跃流式会话：本地长时间无任何事件且服务端判定空闲 → 强制收尾。 */
+var STREAM_STALL_MS = 20000;
+var STREAM_WATCHDOG_INTERVAL = 15000;
+function startStreamWatchdog() {
+    if (window._streamWatchdogTimer) return;
+    window._streamWatchdogTimer = setInterval(function() {
+        for (var sid in sessionMap) {
+            if (!sessionMap.hasOwnProperty(sid)) continue;
+            var sess = sessionMap[sid];
+            if (!sess || !sess.isStreaming || sess._replaying) continue;
+            // 同对账：取较新值，避免上一轮遗留的 lastEventAt 造成误判
+            if (Date.now() - Math.max(sess.lastEventAt || 0, sess._streamStartAt || 0) < STREAM_STALL_MS) continue;
+            reconcileSessionRunning(sess, {});
+        }
+    }, STREAM_WATCHDOG_INTERVAL);
+}
+window.startStreamWatchdog = startStreamWatchdog;
 
 /* ===== Click to focus ===== */
 $('.welcome-input-box').on('click', function(e) {
@@ -343,6 +429,10 @@ function inferPhaseFromType(type) {
         case 'reason': return PHASE_THINKING;
         case 'text': return PHASE_TEXT;
         case 'action_start': return PHASE_TOOL;
+        // 骨架帧：模型已确定函数名 / 参数正在生成，语义就是「已进入工具相位」。
+        // 归入 PHASE_TOOL 后底部指示器自动让位（showPhaseIndicator 对 PHASE_TOOL 短路）——
+        // 此时骨架卡已出现并承担了进度语义，再叠一个「输出中」是误报。
+        case 'action_draft': case 'action_args': return PHASE_TOOL;
         case 'action_end': return PHASE_WAITING;
         case 'hitl': return PHASE_HITL;
         case 'retry': return PHASE_RETRY;
@@ -371,6 +461,9 @@ function onWebChunk(sess, chunk) {
             if (typeof window.onFileChangesChunk === 'function') window.onFileChangesChunk(sess, chunk);
             return;
         }
+
+        // 事件活跃时间戮：看门狗/对账用它判断“是否长时间无任何事件”
+        sess.lastEventAt = Date.now();
 
         if (sess.silenceTimer) {
             clearTimeout(sess.silenceTimer);
@@ -421,6 +514,18 @@ function onWebChunk(sess, chunk) {
                 appendActionEndChunk(sess, chunk.toolName, chunk.text, chunk.args, chunk.toolTitle, chunk.actionId, chunk.truncated ? { truncated: true, seq: chunk.seq, fullLength: chunk.fullLength } : null, endOwnerState ? endOwnerState.bodyEl : null, { batchId: chunk.batchId, batchIndex: chunk.batchIndex, batchSize: chunk.batchSize }, chunk.failed === true, chunk.durationMs);
                 if (window._todoChunkHandlers) window._todoChunkHandlers.forEach(function(h){h(chunk);});
                 break;
+            case 'action_draft': finishThinkingBlock(sess); clearRetryChunk(sess);
+                // 与 action_start 完全对齐的归属路由：子代理的骨架卡必须落在它自己的卡片内，
+                // 否则参数生成期卡片先出现在主对话、转正时又跳回卡内，会出现可见的位置跳变。
+                var draftOwnerState = resolveAgentState(sess, chunk.args);
+                if (draftOwnerState) { finishAgentThinkingBlock(sess, draftOwnerState); }
+                appendActionDraftChunk(sess, chunk.toolName, chunk.toolTitle, chunk.actionId, chunk.args);
+                break;
+            case 'action_args':
+                // 纯进度帧：不再重复做思考块/重试提示的收敛（action_draft 已做过），
+                // 只更新骨架卡头部的参数体积，把长参数期的 DOM 开销压到最低。
+                updateToolCardArgsProgress(sess, chunk.actionId, chunk.argsBytes);
+                break;
             case 'action_start': finishThinkingBlock(sess); clearRetryChunk(sess);
                 var startOwnerState = resolveAgentState(sess, chunk.args);
                 if (startOwnerState) { finishAgentThinkingBlock(sess, startOwnerState); }
@@ -450,7 +555,7 @@ function onWebChunk(sess, chunk) {
                 // 始终在主对话展示重试提示（下一 chunk 到达时自动清除），不得写入智能体卡片体
                 appendRetryChunk(sess, chunk.text);
                 break;
-            case 'hitl':   finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendHitlCard(sess, chunk.toolName, chunk.command); break;
+        case 'hitl':   finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendHitlCard(sess, chunk.toolName, chunk.command, chunk.actionId); break;
             case 'trace':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendTraceBadge(sess, chunk); break;
             case 'context_size':
                 // 快照始终写入会话（即使非活跃），保证切回该会话时能恢复；仅活跃会话刷新 DOM。
@@ -517,6 +622,11 @@ function finishStream(sess) {
     finishThinkingBlock(sess);
     finishAgentThinkingBlock(sess);
     finishPendingTool(sess);
+
+    // 孤儿骨架卡（只收到 action_draft、从未收到 action_start）直接移除，而不是标黄点。
+    // 用户点停止或模型吐参数途中出错时，留一张「只有工具名、无参数、无结果」的黄点空卡，
+    // 比什么都不显示更让人误解为「工具执行失败」。必须在下方 loading→warn 扫尾之前执行。
+    if (typeof removeOrphanArgsStreamingCards === 'function') removeOrphanArgsStreamingCards(sess);
 
     // 普通工具卡可在流结束时视为完成；批量卡需留给下方批次完整性检查，缺帧时标黄。
     if (sess.container) {
@@ -894,8 +1004,16 @@ function dispatchGateChunk(chunk) {
             sess._recovering = false;
             sess._gateBuffering = false;
         }
-        // 旧 run 的迟到 done 不得结束新 run；回放态仍按 eventSeq 重建。
-        if (!resumeInProgress && chunk.runId && sess.activeRunId && chunk.runId !== sess.activeRunId) return;
+        // 旧 run 的迟到 done 不得结束新 run；但绝不能静默丢弃：本地 activeRunId 可能被历史回放
+        // 写成陈旧值（app-history.js 回放会经 onWebChunk 覆写 activeRunId，且 replayDone 不还原），
+        // 此时新 run 的 done 会在此被吞掉，会话将永久停在流式态（计时器不停、停止按钮失灵）。
+        // 故记录并按服务端真值对账收敛（服务端仍在跑时不动，避免误杀新 run）。
+        if (!resumeInProgress && chunk.runId && sess.activeRunId && chunk.runId !== sess.activeRunId) {
+            console.warn('[WebGate] stale-run done ignored (got ' + chunk.runId + ', active ' + sess.activeRunId + '); reconciling');
+            sess._staleDoneSeen = true;
+            setTimeout(function() { reconcileSessionRunning(sess, { force: true }); }, 0);
+            return;
+        }
         sess._pendingClientMessageId = null;
         sess._awaitingSendAck = false;
         sess._sendAckConfirmed = false;
@@ -1054,6 +1172,9 @@ $(document).on('visibilitychange', function() {
 // 桌面端等后端就绪再连（冷启动期直连会立即 503 并进入退避，白等一轮）；浏览器端立即连。
 __whenBackendReady(connectWebGate);
 
+// 流式态看门狗常驻启动（依赖已加载的 sessionMap / reconcileSessionRunning）。
+startStreamWatchdog();
+
 // 桌面端（Electron）：后端就绪/失败由主进程经 IPC 通知。
 // 浏览器端 __GOURD_IPC__ 不存在，此块自动跳过。
 if (window.__GOURD_IPC__) {
@@ -1115,6 +1236,8 @@ setActiveSession = function(sid) {
         // 绑定本次切换的会话及其所属根，避免异步请求读取后续变化的全局工作区。
         var todoSess = (typeof sessionMap !== 'undefined' && sessionMap) ? sessionMap[sid] : null;
         if (window.loadTodos) window.loadTodos(sid, todoSess ? todoSess.projectRoot : '');
+        // 切换会话时把「本轮文件变更」入口切到新会话的最新一轮（chip 显隐/面板内容由 app-file-changes.js 汇算）
+        if (window.refreshFileChangesChip) window.refreshFileChangesChip(sid);
         // 切换会话时刷新消息队列 UI（列表/chip/badge）
         if (window.updateMessageQueueUI) window.updateMessageQueueUI();
         // 注：上下文指示器的恢复已由 setActiveSession 内部单点完成（app-base.js），

@@ -13,7 +13,7 @@
 //! 对外暴露 `backend_ready` watch channel，供 UI 服务器挂起/放行 /web/** 代理请求。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use anyhow::{anyhow, Context, Result};
@@ -110,6 +110,11 @@ const AUTO_RESTART_DELAYS_MS: [u64; 5] = [1000, 3000, 10000, 30000, 60000];
 static AUTO_RESTART_ATTEMPT: AtomicUsize = AtomicUsize::new(0);
 /// 重启串行锁：并发 restart（自动 + 手动）只允许一个在跑
 static RESTARTING: AtomicBool = AtomicBool::new(false);
+/// 失败纪元：每次 settle(false) 自增 1。自动重启任务在排期时捕获当前纪元，
+/// 醒来后发现纪元已变（说明有新失败接管了重试链）或状态已不再是 Failed
+/// （手动重试/另一次重启已把后端救活或正在救），就放弃本次重启，
+/// 避免把用户刚重试成功的健康后端再杀一次。
+static FAILURE_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// 订阅后端就绪状态（UI 服务器在代理 /web/** 前 `wait_for(true)`）。
 pub fn backend_ready_rx() -> watch::Receiver<bool> {
@@ -193,8 +198,12 @@ fn settle_backend_ready(ok: bool, reason: Option<&str>) {
     mgr.ready_state = if ok { ReadyState::Ready } else { ReadyState::Failed };
     if ok {
         mgr.last_error = None;
-    } else if let Some(r) = reason {
-        mgr.last_error = Some(r.to_string());
+    } else {
+        if let Some(r) = reason {
+            mgr.last_error = Some(r.to_string());
+        }
+        // 失败纪元自增：在途的自动重启任务据此判断自己触发的失败是否已被新失败取代
+        FAILURE_EPOCH.fetch_add(1, Ordering::SeqCst);
     }
     let _ = mgr.ready_tx.send(ok);
     // 同步 AppState.backend_ready —— UI 服务器实际据此决定是否放行 /web/** 代理。
@@ -880,6 +889,13 @@ fn emit_failed(app: &AppHandle, reason: &str) {
     );
 }
 
+/// 自动重启任务醒来后是否仍应执行（纯函数，便于单测）：
+/// - 状态不再是 Failed（Ready=已被手动重试/另一次重启救活；Pending=有新重启正在进行）→ 放弃
+/// - 失败纪元已变（新失败已排期新任务接管重试链）→ 旧任务放弃
+fn auto_restart_still_needed(current_state: ReadyState, current_epoch: u64, captured_epoch: u64) -> bool {
+    current_state == ReadyState::Failed && current_epoch == captured_epoch
+}
+
 /// 安排一次指数退避的自动重启；次数耗尽后停止重试并保留错误状态。
 fn schedule_auto_restart(app: AppHandle, reason: String) {
     if app.state::<AppState>().is_quitting.load(Ordering::SeqCst) {
@@ -896,6 +912,8 @@ fn schedule_auto_restart(app: AppHandle, reason: String) {
     }
     let delay = AUTO_RESTART_DELAYS_MS[attempt];
     AUTO_RESTART_ATTEMPT.store(attempt + 1, Ordering::SeqCst);
+    // 捕获当前失败纪元：调用方均先 settle(false)（纪元已自增）再排期，故本值即「本次失败」的纪元
+    let epoch = FAILURE_EPOCH.load(Ordering::SeqCst);
     warn!("{}ms 后发起第 {} 次自动重启，原因: {}", delay, attempt + 1, reason);
 
     let handle = app.clone();
@@ -904,11 +922,36 @@ fn schedule_auto_restart(app: AppHandle, reason: String) {
         if handle.state::<AppState>().is_quitting.load(Ordering::SeqCst) {
             return;
         }
+        // 醒来先校验触发本任务的失败是否仍然成立：
+        // 退避窗口内用户手动重试成功（Ready）或另有重启在进行（Pending）时，
+        // 盲目重启会把刚恢复的健康后端再杀一次（端口变化、WS 断开、进行中请求中断）。
+        {
+            let mgr = BACKEND.lock().unwrap();
+            let now_epoch = FAILURE_EPOCH.load(Ordering::SeqCst);
+            if !auto_restart_still_needed(mgr.ready_state, now_epoch, epoch) {
+                info!(
+                    "自动重启任务放弃执行：后端当前状态={}，失败纪元 {}→{}",
+                    mgr.ready_state.as_str(),
+                    epoch,
+                    now_epoch
+                );
+                return;
+            }
+        }
         let ready_tx = handle.state::<AppState>().backend_ready.clone();
         match restart_backend_inner(&handle, &ready_tx).await {
             Ok(port) => info!("自动重启成功，端口 {}", port),
-            // inner 已置 failed 并广播；这里接着排下一次退避
-            Err(e) => schedule_auto_restart(handle.clone(), format!("{:#}", e)),
+            Err(e) => {
+                let msg = format!("{:#}", e);
+                // 与并发重启（手动/自动）撞车：不消耗退避次数、不接续重试链，
+                // 由正在进行的那次重启自身的结果链决定后续重试；本任务让位退出。
+                if msg.contains("重启已在进行中") {
+                    warn!("自动重启让位给并发重启，本重试链退出: {}", msg);
+                    return;
+                }
+                // inner 已置 failed 并广播（纪元已自增）；这里接着排下一次退避
+                schedule_auto_restart(handle.clone(), msg);
+            }
         }
     });
 }
@@ -1164,6 +1207,23 @@ mod tests {
         mgr.ready_state = ReadyState::Pending;
         mgr.last_error = None;
         mgr.mirror_tx = None;
+    }
+
+    /// 回归护栏：自动重启任务醒来后，触发它的失败若已被解决/取代，必须放弃执行。
+    ///
+    /// 为什么值得钉住：退避窗口（1s/3s/10s…）内用户点「重试」并成功后，
+    /// 在途的自动重启任务若照常执行，会把刚恢复的健康后端再杀一次——
+    /// 端口变化、WS 断开、进行中的请求/工具调用全部中断，且无任何报错提示。
+    #[test]
+    fn auto_restart_skips_when_failure_resolved_or_superseded() {
+        // 手动重试已把后端救活（Ready）→ 放弃
+        assert!(!auto_restart_still_needed(ReadyState::Ready, 3, 3));
+        // 另有重启正在进行（Pending）→ 放弃，由其结果链决定后续
+        assert!(!auto_restart_still_needed(ReadyState::Pending, 3, 3));
+        // 新失败已接管重试链（纪元自增）→ 旧任务放弃，避免双重重启
+        assert!(!auto_restart_still_needed(ReadyState::Failed, 4, 3));
+        // 失败仍然成立且无新失败 → 执行
+        assert!(auto_restart_still_needed(ReadyState::Failed, 3, 3));
     }
 
     /// 初始状态为 pending，ready_tx 广播 false

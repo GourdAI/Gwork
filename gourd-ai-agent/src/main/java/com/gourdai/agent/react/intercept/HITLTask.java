@@ -35,15 +35,29 @@ public class HITLTask implements Serializable {
     private Map<String, Object> args;
     /** 触发拦截的系统理由/备注 */
     private String comment;
+    /**
+     * 触发拦截的那一次工具调用标识（同源于 ActionTask 的 actionId）。
+     *
+     * <p>供 UI 层把审批卡与参数流骨架卡精确配对，解决并发同名工具的接管歧义。</p>
+     *
+     * <p><b>可能为 null</b>：会话快照以 JSON 持久化（见 FileAgentSession#updateSnapshot），
+     * 本字段新增前落盘的挂起任务恢复后取不到值，消费方必须保留按 toolName 的降级路径。</p>
+     */
+    private String actionId;
 
     public HITLTask() {
         //用于反序列化
     }
 
     public HITLTask(String toolName, Map<String, Object> args, String comment) {
+        this(toolName, args, comment, null);
+    }
+
+    public HITLTask(String toolName, Map<String, Object> args, String comment, String actionId) {
         this.toolName = toolName;
         this.args = args;
         this.comment = comment;
+        this.actionId = actionId;
     }
 
     /**
@@ -64,12 +78,20 @@ public class HITLTask implements Serializable {
         return comment;
     }
 
+    /**
+     * 获取触发拦截的调用标识；旧快照恢复时为 {@code null}
+     */
+    public String getActionId() {
+        return actionId;
+    }
+
     @Override
     public String toString() {
         return "HITLTask{" +
                 "toolName='" + toolName + '\'' +
                 ", args=" + args +
                 ", comment='" + comment + '\'' +
+                ", actionId='" + actionId + '\'' +
                 '}';
     }
 }

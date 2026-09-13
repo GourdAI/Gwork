@@ -227,6 +227,55 @@ public class WebChunk {
     private Boolean failed;
 
     /**
+     * 工具参数已生成的累计字符数，仅 {@code action_args} 使用。
+     *
+     * <p><b>为什么只传字节数而不传内容：</b>前端在参数生成期需要的只是「还在动、
+     * 进展到哪」的进度语义；完整参数最终由 {@code action_start} 的 {@code args} 提供。
+     * 不传内容同时免去了对未闭合 JSON 片段（如 {@code '{"comm'}）的容错解析。</p>
+     */
+    private Long argsBytes;
+
+    /**
+     * 创建「动作草稿」消息块。
+     *
+     * <p>type 为 {@code action_draft}，在<b>模型刚说出函数名、参数尚在流式生成时</b>下发
+     * （来源于引擎的 ToolCallDraftEvent）。与 {@code action_start} 共享同一个 {@code actionId}，
+     * 前端据此幂等接管同一张卡片，不会重复建卡。</p>
+     *
+     * <p><b>不落盘：</b>本帧为瞬态进度帧，不写入会话历史，历史回放时由
+     * {@code action_start} + {@code action_end} 完整重建卡片，行为与改造前一致。</p>
+     *
+     * @return 不携带参数的动作草稿块（工具标识由 projectToolCommon 回填）
+     */
+    public static WebChunk ofActionDraft() {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "action_draft";
+        tmp.createdAt = Instant.now().toEpochMilli();
+
+        return tmp;
+    }
+
+    /**
+     * 创建「动作参数进度」消息块。
+     *
+     * <p>type 为 {@code action_args}，报告某个工具调用的参数已生成多少字符。
+     * 生产方已做双阈值节流（见 {@code ReasonTask}），故本帧频率可控。</p>
+     *
+     * <p><b>不落盘：</b>同 {@link #ofActionDraft()}。</p>
+     *
+     * @param argsBytes 累计已生成的参数字符数
+     * @return 携带进度的动作参数块
+     */
+    public static WebChunk ofActionArgs(long argsBytes) {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "action_args";
+        tmp.argsBytes = argsBytes;
+        tmp.createdAt = Instant.now().toEpochMilli();
+
+        return tmp;
+    }
+
+    /**
      * 创建「完成」消息块。
      * <p>type 为 {@code done}，表示当前响应流已全部发送完毕，前端收到后可结束等待状态。</p>
      *
@@ -444,10 +493,27 @@ public class WebChunk {
      * @return 携带工具名与命令内容的人机协同消息块
      */
     public static WebChunk ofHitl(String toolName, String command) {
+        return ofHitl(toolName, command, null);
+    }
+
+    /**
+     * 创建「人工审批」消息块（带调用标识）。
+     *
+     * <p>{@code actionId} 与 {@code action_draft}/{@code action_start} 同源，前端据此把审批卡
+     * 精确接管参数生成期已建的骨架卡；为 {@code null} 时（旧快照恢复的挂起任务）
+     * 前端应降级为按工具名匹配。</p>
+     *
+     * @param toolName 需要人工审批的工具名称
+     * @param command  需要人工审批的命令文本
+     * @param actionId 触发审批的调用标识（可为 null）
+     * @return 携带工具名、命令内容与调用标识的人机协同消息块
+     */
+    public static WebChunk ofHitl(String toolName, String command, String actionId) {
         WebChunk tmp = new WebChunk();
         tmp.type = "hitl";
         tmp.toolName = toolName;
         tmp.command = command;
+        tmp.actionId = actionId;
         tmp.createdAt = Instant.now().toEpochMilli();
 
         return tmp;

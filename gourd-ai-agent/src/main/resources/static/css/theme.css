@@ -94,6 +94,8 @@
     --error-border: #fca5a5;
     --error-text: #dc2626;
     --color-success: #22c55e;
+    /* 状态点闪动暗态：= --color-success 的 25% alpha，详见 app.css status-dot-blink 注释。 */
+    --color-success-dim: rgba(34,197,94,0.25);
     --color-success-hover: #16a34a;
     --color-danger: #ef4444;
     --color-danger-hover: #dc2626;
@@ -170,6 +172,8 @@
     --error-border: #4a2a2a;
     --error-text: #f87171;
     --color-success: #4ade80;
+    /* 状态点闪动暗态：= --color-success 的 25% alpha，详见 app.css status-dot-blink 注释。 */
+    --color-success-dim: rgba(74,222,128,0.25);
     --color-success-hover: #22c55e;
     --color-danger: #f87171;
     --color-danger-hover: #ef4444;
@@ -326,6 +330,9 @@
         --error-border: #4a2a2a;
         --error-text: #f87171;
         --color-success: #4ade80;
+        /* 状态点闪动的暗态：= --color-success 的 25% alpha。供 app.css 的 status-dot-blink 关键帧使用，
+           让闪动改用 background-color 插值后仍能跟随主题色（避免硬编码串色）。 */
+        --color-success-dim: rgba(74,222,128,0.25);
         --color-danger: #f87171;
         --color-warning: #fbbf24;
         --bg-danger-subtle: rgba(248, 113, 113, 0.12);

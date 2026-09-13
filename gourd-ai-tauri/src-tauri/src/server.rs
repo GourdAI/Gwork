@@ -49,7 +49,8 @@ const PROXY_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 struct UiCtx {
     /// 后端就绪 watch（来自 AppState.backend_ready 的订阅）
     ready_rx: watch::Receiver<bool>,
-    /// 后端端口（0 表示未就绪），与 AppState.backend_port 保持同步
+    /// 后端端口的唯一共享状态，直接指向 AppState.backend_port。
+    /// 不允许复制后再用定时器同步，否则 ready 广播后首批请求可能读到旧端口 0。
     backend_port: Arc<std::sync::Mutex<u16>>,
     /// UI 静态目录（绝对路径，已 canonicalize）
     ui_dir: PathBuf,
@@ -530,29 +531,9 @@ async fn proxy_ws_raw(
 pub async fn start_ui_server(app: AppHandle) -> Result<u16> {
     let state = app.state::<AppState>();
     let ready_rx = state.backend_ready.subscribe();
-    let backend_port = Arc::new(std::sync::Mutex::new(
-        state.backend_port.lock().map(|p| *p).unwrap_or(0),
-    ));
-
-    // 后台任务：把 AppState.backend_port 的变更同步到 UiCtx（重启后端端口可能变化）
-    let backend_port_sync = backend_port.clone();
-    let app_handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let p = app_handle
-                .state::<AppState>()
-                .backend_port
-                .lock()
-                .map(|v| *v)
-                .unwrap_or(0);
-            if let Ok(mut guard) = backend_port_sync.lock() {
-                if *guard != p {
-                    *guard = p;
-                }
-            }
-        }
-    });
+    // 直接共享 AppState 中的端口锁。后端在广播 ready 前写入该锁，
+    // 这样代理看到 ready 时必然也能读到新端口，不再存在 500ms 轮询窗口。
+    let backend_port = state.backend_port.clone();
 
     let ui_dir = get_ui_dir(&app);
     let ui_dir = ui_dir

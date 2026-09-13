@@ -11,6 +11,7 @@
                       "steer_box_full":  "Too many pending interjections; added to queue",
                       "steer_deferred":  "The current step has ended; added to queue",
                       "steer_failed":  "Failed to send interjection; your input has been kept",
+                      "force_finished":  "Run already ended (server idle); the stream was closed automatically",
                       "steer_attachment_wait":  "Attachments cannot be interjected or queued while a task is running. Please wait or stop the task",
                       "steer_command_queue":  "Commands cannot be interjected. Press Tab to add the command to the queue",
                       "steer_dropped":  "The interjection did not take effect before completion and has been added to the queue",
@@ -89,7 +90,7 @@
                     "model_search_empty":  "No matching models",
                     "model_group_toggle":  "Collapse / expand this provider",
                     "thinking":  {
-                                     "off":  {
+                                     "auto":  {
                                                  "label":  "Default",
                                                  "desc":  "Use the model\u0027s default behavior"
                                              },
@@ -203,7 +204,8 @@
                                        "switch":  "Switch workspace",
                                        "clear":  "Clear selection"
                                    },
-                "sidebar":  {
+                 "sidebar":  {
+                                 "load_failed_retry":  "Load failed, click to retry",
                                  "loop_mark":  "Scheduled task",
                                 "new_task":  "New Task",
                                 "search":  "Search",
@@ -741,7 +743,7 @@
                                  "model_none":  "No model configured yet. Please add and enable one under Settings - Models first.",
                                  "model_saved":  "ACP model saved",
                                  "model_save_failed":  "Failed to save, please retry",
-                                 "thinking_hint":  "Control reasoning effort; off uses model default",
+                                 "thinking_hint":  "Control reasoning effort; Default uses the model\u0027s own behavior",
                                  "thinking_saved":  "Thinking depth saved",
                                  "thinking_save_failed":  "Save failed, please retry",
                                  "zed_integration_desc":  "Merge the JSON below into your editor\u0027s ACP settings, then select GWork in the Agent panel.",
@@ -799,6 +801,7 @@
                  "phase_thinking":  "Thinking",
                  "phase_text":  "Writing",
                  "phase_waiting":  "Waiting for response",
+                 "args_streaming":  "Generating arguments · {size}",
                  "rerun":  "Re-run",
                  "continue_run":  "Continue",
                  "need_auth":  "Authorization required:",

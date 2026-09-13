@@ -11,6 +11,7 @@
                       "steer_box_full":  "Có quá nhiều nội dung xen ngang đang chờ; đã thêm vào hàng đợi",
                       "steer_deferred":  "Bước hiện tại đã kết thúc; đã thêm vào hàng đợi",
                       "steer_failed":  "Gửi nội dung xen ngang thất bại; nội dung nhập được giữ lại",
+                      "force_finished":  "Tác vụ đã kết thúc (máy chủ đang rảnh); luồng đã được đóng tự động",
                       "steer_attachment_wait":  "Không thể xen ngang hoặc xếp hàng tệp đính kèm khi tác vụ đang chạy. Hãy chờ hoặc dừng tác vụ",
                       "steer_command_queue":  "Không thể dùng lệnh làm nội dung xen ngang. Nhấn Tab để thêm vào hàng đợi",
                       "steer_dropped":  "Nội dung xen ngang chưa kịp áp dụng và đã được thêm vào hàng đợi",
@@ -89,7 +90,7 @@
                     "model_search_empty":  "Không có mô hình phù hợp",
                     "model_group_toggle":  "Thu gọn / mở rộng nhà cung cấp",
                     "thinking":  {
-                                     "off":  {
+                                     "auto":  {
                                                  "label":  "Mặc định",
                                                  "desc":  "Dùng hành vi mặc định của mô hình"
                                              },
@@ -203,7 +204,8 @@
                                        "switch":  "Chuyển không gian làm việc",
                                        "clear":  "Xóa lựa chọn"
                                    },
-                "sidebar":  {
+                 "sidebar":  {
+                                 "load_failed_retry":  "Tải thất bại, nhấp để thử lại",
                                  "loop_mark":  "Tác vụ định kỳ",
                                 "new_task":  "Tác vụ mới",
                                 "search":  "Tìm kiếm",
@@ -741,7 +743,7 @@
                                  "model_none":  "Chưa cấu hình mô hình nào. Vui lòng thêm và bật một mô hình trong Cài đặt - Mô hình trước.",
                                  "model_saved":  "Đã lưu mô hình ACP",
                                  "model_save_failed":  "Lưu thất bại, vui lòng thử lại",
-                                 "thinking_hint":  "Kiểm soát mức độ suy luận; tắt sẽ sử dụng hành vi mặc định của mô hình",
+                                 "thinking_hint":  "Kiểm soát mức độ suy luận; chọn Mặc định sẽ dùng hành vi riêng của mô hình",
                                  "thinking_saved":  "Đã lưu cài đặt độ sâu suy nghĩ",
                                  "thinking_save_failed":  "Lưu thất bại, vui lòng thử lại",
                                  "zed_integration_desc":  "Hợp nhất đoạn JSON dưới đây vào cấu hình ACP của trình soạn thảo, sau đó chọn GWork trong bảng Agent.",
@@ -799,6 +801,7 @@
                  "phase_thinking":  "Đang suy nghĩ",
                  "phase_text":  "Đang viết",
                  "phase_waiting":  "Đang chờ phản hồi",
+                 "args_streaming":  "Đang tạo tham số · {size}",
                  "rerun":  "Chạy lại",
                  "continue_run":  "Tiếp tục chạy",
                  "need_auth":  "Cần ủy quyền:",

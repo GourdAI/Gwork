@@ -185,10 +185,10 @@ function evictInactiveSessions() {
         // 未排空的实时帧缓冲（恢复失败/中途切走时可能残留整批 chunk 对象）
         sess._gateBuffer = [];
         // 文件变更摘要按 run 累积，每条都带完整 files[]，不清会随会话长期驻留；
-        // 且 DOM 已清空而高 revision 快照仍在时，重建期到达的旧 revision 会被单调门禁
-        // 直接丢弃，导致卡片再也建不回来。DOM 与快照必须同生共死。
+        // 且容器已清空而高 revision 快照仍在时，重建期到达的旧 revision 会被单调门禁
+        // 直接丢弃，入口再也建不回来。展示状态与缓存必须同生共死。
         sess._fileChangesByRun = {};
-        sess._fileChangesExpanded = {};
+        sess._fileChangesLatestRun = null;
         sess._fileChangesReconciledAt = {};
         sess._fileChangesReplayPending = null;
     }
@@ -389,10 +389,19 @@ function resetStreamState(sess) {
     try {
         if (typeof finishThinkingBlockCore === 'function') finishThinkingBlockCore(sess, sess);
         if (typeof finishAgentThinkingBlock === 'function') finishAgentThinkingBlock(sess);
+        // removeThinking 停的是消息区独立「圆点 + 相位文案 + Ns」等待行的计时器并移除元素；
+        // 旧实现只收了气泡内指示器（purgeInlineThinking），漏了它，导致不经过 finishStream 的
+        // 收尾路径（会话切换 / 中断对账）会留下永久闪动等待行与一直跳的计时器。
+        if (typeof removeThinking === 'function') removeThinking(sess);
         if (typeof purgeInlineThinking === 'function') purgeInlineThinking(sess);
     } catch (e) { /* 收敛失败不应阻断状态重置 */ }
     // 相位一并复位，避免下一轮沿用上一轮的相位误报等待语义
     sess.phase = null;
+    // 本轮进入流式的起点：看门狗在“尚无任何 chunk 事件”时用它判断是否已停摆
+    sess._streamStartAt = Date.now();
+    // lastEventAt 是上一轮遗留值，必须一并归零：停摆判定若短路取到它，
+    // 会把「新 run 刚发起、服务端 running 尚为 false」的启动窗口误判为停摆而误砍。
+    sess.lastEventAt = 0;
     // 先处置增量渲染器（取消挂起帧），再清空元素引用，避免会话切换后残留帧写入旧 DOM
     if (typeof disposeSessionStreamMd === 'function') disposeSessionStreamMd(sess);
     sess.currentBubbleEl = null;

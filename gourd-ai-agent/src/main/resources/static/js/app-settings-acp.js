@@ -107,11 +107,11 @@
 
     // 页面状态（load() 时从 /web/settings/acp/info 重建）
     var acpState = {
-        models: [],          // [{name, provider, standard}, ...]
+        models: [],          // [{name, provider, standard, thinkingLevels}, ...]
         current: '',         // 存储值 acpModel（''=未显式选择，跟随默认）
         defaultModel: '',    // 后端解析后的实际生效模型名（与会话页 selected 同口径）
-        currentStandard: '', // 当前生效模型对应的接口类型（决定思考档位选项集）
-        thinking: 'off'
+        currentStandard: '', // 当前生效模型对应的接口类型（仅供后端未下发 thinkingLevels 时的兜底档位集）
+        thinking: 'auto'
     };
 
     /* 展示用的生效模型：未显式选择时回落后端解析的默认模型。
@@ -130,6 +130,30 @@
         return '';
     }
 
+    function isArray(v) { return Object.prototype.toString.call(v) === '[object Array]'; }
+
+    /* 查模型「真正可区分的思考档位」编码表（后端能力元数据，由低到高，不含 auto）。
+     * 返回 null 有明确语义：后端未下发该字段（旧接口）→ 调用方走兜底档位集；
+     * 返回 [] 同样有明确语义：该模型无可调档位 → 调用方应隐藏整个档位选择器。
+     * 两者不可混淆，故此处不把 null 折叠成空数组。 */
+    function thinkingLevelsOfAcpModel(name) {
+        if (!name) return null;
+        for (var i = 0; i < acpState.models.length; i++) {
+            if (acpState.models[i].name === name) return acpState.models[i].thinkingLevels;
+        }
+        return null;
+    }
+
+    /* 历史落盘档位值归一（与后端 ThinkingDepth.normalize 同口径，仅影响回显、不回写）：
+     * 'off' 是 'auto' 的旧名（语义一直是「不注入参数、跟随模型默认」）；
+     * 'minimal' 档已取消，后端静默归入 'low'。 */
+    function normalizeThinking(depth) {
+        var d = String(depth == null ? '' : depth).toLowerCase();
+        if (!d || d === 'off') return 'auto';
+        if (d === 'minimal') return 'low';
+        return d;
+    }
+
     // 去掉「供应商-」前缀的展示短名（分组标题已展示供应商，选项内不再重复）
     function modelShortName(name, provider) {
         if (provider && name && name.indexOf(provider + '-') === 0) {
@@ -142,17 +166,23 @@
     function buildModelBody(info) {
         var rawModels = info.models || [];
 
-        // 归一化：models 兼容旧后端的字符串数组与新后端的 {name, provider, standard} 对象数组
+        // 归一化：models 兼容旧后端的字符串数组与新后端的 {name, provider, standard, thinkingLevels} 对象数组
         acpState.models = [];
         for (var n = 0; n < rawModels.length; n++) {
             var raw = rawModels[n];
-            if (typeof raw === 'string') acpState.models.push({ name: raw, provider: '', standard: '' });
-            else acpState.models.push({ name: raw.name || '', provider: raw.provider || '', standard: raw.standard || '' });
+            if (typeof raw === 'string') acpState.models.push({ name: raw, provider: '', standard: '', thinkingLevels: null });
+            else acpState.models.push({
+                name: raw.name || '',
+                provider: raw.provider || '',
+                standard: raw.standard || '',
+                // 字段缺失 → null（走兜底档位集）；[] → 该模型无可调档位（隐藏档位选择器）
+                thinkingLevels: isArray(raw.thinkingLevels) ? raw.thinkingLevels : null
+            });
         }
 
         acpState.current = info.acpModel || '';
         acpState.defaultModel = info.defaultModel || '';
-        acpState.thinking = info.acpThinkingDepth || 'off';
+        acpState.thinking = normalizeThinking(info.acpThinkingDepth);
         // 接口类型：优先从列表查生效模型；若该模型未在可见列表中（已启用但隐藏）则用后端解析值
         acpState.currentStandard = standardOfAcpModel(effectiveModel()) || info.acpModelStandard || '';
 
@@ -165,56 +195,56 @@
         return body;
     }
 
-    // 根据接口类型获取思考档位选项集（首项为「默认」=off，跟随模型默认行为）
-    function getThinkingOptions(standard) {
+    /* 兜底档位集（不含 auto）：仅当后端未随 models 下发 thinkingLevels 时使用。
+     * /web/settings/acp/info 目前尚未下发该字段（见文件末尾 TODO），故暂保留本表作为过渡；
+     * 后端补齐后本函数将不再被触发，可整体删除。
+     * 与统一后的档位枚举对齐：不再有 'minimal' 档（后端已将其归入 'low'）。 */
+    function fallbackThinkingLevels(standard) {
         var s = (standard || '').toLowerCase();
-        var off = { value: 'off', label: t('history.thinking.off.label') };
-
         if (s.indexOf('anthropic') >= 0 || s.indexOf('claude') >= 0) {
-            return [
-                off,
-                { value: 'low',    label: t('history.thinking.low.label') },
-                { value: 'medium', label: t('history.thinking.medium.label') },
-                { value: 'high',   label: t('history.thinking.high.label') },
-                { value: 'xhigh',  label: t('history.thinking.xhigh.label') },
-                { value: 'max',    label: t('history.thinking.max.label') }
-            ];
-        } else if (s.indexOf('gemini') >= 0 || s.indexOf('google') >= 0) {
-            return [
-                off,
-                { value: 'minimal', label: t('history.thinking.minimal.label') },
-                { value: 'low',     label: t('history.thinking.low.label') },
-                { value: 'medium', label: t('history.thinking.medium.label') },
-                { value: 'high',    label: t('history.thinking.high.label') }
-            ];
-        } else {
-            // openai / openai-responses / ollama / 其它
-            return [
-                off,
-                { value: 'minimal', label: t('history.thinking.minimal.label') },
-                { value: 'low',     label: t('history.thinking.low.label') },
-                { value: 'medium', label: t('history.thinking.medium.label') },
-                { value: 'high',    label: t('history.thinking.high.label') }
-            ];
+            return ['low', 'medium', 'high', 'xhigh', 'max'];
         }
+        // gemini / google / openai / openai-responses / ollama / 其它
+        return ['low', 'medium', 'high'];
     }
 
-    // 按钮内思考档位小标签：当前值为默认（off）或不在档位集内时不显示，其余显示短标签
+    /* 思考档位选项集（能力元数据驱动）。
+     * 首项固定为「默认」（auto：不注入参数，跟随模型默认行为）；
+     * 其余项由该模型的 thinkingLevels 动态生成 —— 后端只下发该模型「真正可区分」的档位
+     * （由低到高，不含 auto），因此用户永远选不到无效档位。
+     * 返回长度为 1（仅「默认」）即表示该模型无可调档位，调用方应隐藏整个档位选择器。 */
+    function getThinkingOptions(modelName) {
+        var opts = [{ value: 'auto', label: t('history.thinking.auto.label') }];
+        var levels = thinkingLevelsOfAcpModel(modelName);
+        // null = 后端未下发该字段 → 走兜底；[] = 明确无可调档位 → 保持为空
+        if (levels == null) levels = fallbackThinkingLevels(standardOfAcpModel(modelName) || acpState.currentStandard);
+        for (var i = 0; i < levels.length; i++) {
+            var code = levels[i];
+            if (!code || code === 'auto') continue; // auto 已固定置顶，防御后端重复下发
+            opts.push({ value: code, label: t('history.thinking.' + code + '.label') });
+        }
+        return opts;
+    }
+
+    // 按钮内思考档位小标签：当前值为默认（auto）或不在档位集内时不显示，其余显示短标签
     function acpThinkingTag() {
-        if (!acpState.thinking || acpState.thinking === 'off') return '';
-        var opts = getThinkingOptions(acpState.currentStandard);
+        if (!acpState.thinking || acpState.thinking === 'auto') return '';
+        var opts = getThinkingOptions(effectiveModel());
         for (var k = 0; k < opts.length; k++) {
             if (opts[k].value === acpState.thinking) return opts[k].label;
         }
         return '';
     }
 
-    // 关联思考档位区（内嵌在当前选中模型项下）：首项为「默认」（off，跟随模型默认行为）
-    function acpThinkingChipsHtml() {
-        var opts = getThinkingOptions(acpState.currentStandard);
+    // 关联思考档位区（内嵌在当前选中模型项下）：首项为「默认」（auto，跟随模型默认行为）
+    function acpThinkingChipsHtml(modelName) {
+        var opts = getThinkingOptions(modelName);
 
-        // 当前档位是否在本接口档位集内（切换模型后旧值可能不适用 → 视作默认）
-        var valid = 'off';
+        // 该模型无可区分档位（后端下发空数组）：只剩「默认」一项，选择器无意义 → 不渲染这一行
+        if (opts.length <= 1) return '';
+
+        // 当前档位是否在本模型档位集内（切换模型后旧值可能不适用 → 视作默认）
+        var valid = 'auto';
         for (var k = 0; k < opts.length; k++) {
             if (opts[k].value === acpState.thinking) { valid = acpState.thinking; break; }
         }
@@ -258,7 +288,7 @@
             itemHtml: function (m, active, provider) {
                 return '<div class="model-dropdown-item' + (active ? ' active' : '') + '" data-model="' + escapeHtml(m.name) + '">'
                     + '<span class="model-item-name">' + escapeHtml(modelShortName(m.name, provider)) + '</span>'
-                    + (active ? acpThinkingChipsHtml() : '')
+                    + (active ? acpThinkingChipsHtml(m.name) : '')
                     + '</div>';
             }
         });
@@ -501,6 +531,14 @@
             }
         });
     });
+
+    /* TODO(后端待补下发)：/web/settings/acp/info 的 models 项目前仅下发 {name, provider, standard}，
+     * 尚未像 /web/chat/models 一样带上 thinkingLevels。建议在
+     *   WebSettingsController#codingInfo() 的 models 循环里补一行（紧跟 item.put("standard", ...) 之后）：
+     *   item.put("thinkingLevels", ThinkingDepth.selectableCodes(
+     *           config.getStandardOrProvider(), config.getModel(), config.getCapabilities()));
+     * 补齐后本页无需再改（getThinkingOptions 已优先消费该字段），
+     * 并可直接删除上方 fallbackThinkingLevels() 及其在 getThinkingOptions 中的唯一调用。 */
 
     window._settingsAcp = { load: load };
 })();

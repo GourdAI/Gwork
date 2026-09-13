@@ -23,7 +23,7 @@
 .project-selector-current:hover { filter: brightness(0.97); }
 .project-selector-current svg { flex-shrink: 0; color: var(--text-secondary); }
 .project-selector-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.project-selector-current .layui-icon { font-size: 12px; color: var(--text-secondary); flex-shrink: 0; }
+.project-selector-current .workspace-selector-arrow { width: 12px; height: 12px; color: var(--text-secondary); flex-shrink: 0; }
 .project-dropdown {
     display: none; position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px;
     background: var(--bg-sidebar); border: 1px solid var(--border-color); border-radius: 8px;
@@ -654,19 +654,18 @@ body.code-mode #chatView .tool-file-lang { font-size: 12px; }
 body.code-mode #chatView .tool-args { font-size: 11px; }
 body.code-mode #chatView .tool-card-body { padding: 0 10px 8px; font-size: 11px; }
 
-/* 变更按钮（任务 chip 形态）：头部补零内边距（覆盖 .tool-card-header 的 6px/10px），胶囊整体收紧 */
-body.code-mode #chatView .file-changes-header { padding: 0; }
-body.code-mode #chatView .file-changes-pill { padding: 3px 8px; gap: 5px; font-size: 11px; }
-body.code-mode #chatView .file-changes-pill .tool-type-icon svg { width: 13px; height: 13px; }
+/* 变更入口 chip（任务 chip 形态）：与任务/队列 chip 同排，码模式整体收紧 */
+body.code-mode #chatView .file-changes-chip { padding: 3px 8px; gap: 5px; font-size: 11px; }
+body.code-mode #chatView .file-changes-chip .tool-type-icon svg { width: 13px; height: 13px; }
 
-body.code-mode #chatView .file-changes-body { padding: 3px 5px 6px; max-height: 280px; }
+body.code-mode #chatView .file-changes-panel-body { padding: 3px 5px 6px; max-height: 280px; }
 body.code-mode #chatView .file-change-row { gap: 5px; padding: 5px 3px; align-items: flex-start; flex-direction: column; }
 body.code-mode #chatView .file-change-main, body.code-mode #chatView .file-change-row-actions { width: 100%; }
 body.code-mode #chatView .file-change-row-actions { padding-left: 23px; flex-wrap: wrap; }
 body.code-mode #chatView .file-change-action span { display: none; }
 body.code-mode #chatView .file-change-action { width: 25px; min-width: 25px; padding: 3px; justify-content: center; }
-body.code-mode #chatView .file-changes-head-actions .file-change-action span { display: inline; }
-body.code-mode #chatView .file-changes-head-actions .file-change-action { width: auto; padding: 3px 6px; }
+body.code-mode #chatView .file-changes-panel-actions .file-change-action span { display: inline; }
+body.code-mode #chatView .file-changes-panel-actions .file-change-action { width: auto; padding: 3px 6px; }
 
 body.code-mode #chatView .tool-batch-group { margin: 6px 0; border-radius: 8px; }
 body.code-mode #chatView .tool-batch-header { padding: 6px 10px; gap: 8px; font-size: 12px; }

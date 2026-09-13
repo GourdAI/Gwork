@@ -14,12 +14,12 @@ var CONTINUE_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" 
    避免两处不同统计口径（本轮累计 vs 本次推理）并列造成歧义，详见 appendTraceBadge。 */
 var TRACE_TIME_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>';
 
-/* 思考块图标：大脑线框（经典双半球轮廓 + 中央纵缝），与工具图标同为 currentColor 线性 SVG。
-   内置 0.85 等比缩放并同步补偿描边，使视觉体量与兄弟图标（机器人/工具）一致。 */
-var THINKING_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><g transform="translate(1.2 1.2) scale(0.85)"><path d="M6.33 1.33A1.67 1.67 0 0 1 8 3v10a1.67 1.67 0 0 1-3.31.29 1.67 1.67 0 0 1-1.97-2.05 2 2 0 0 1-.23-3.72 1.67 1.67 0 0 1 .88-2.83 1.67 1.67 0 0 1 1.32-2A1.67 1.67 0 0 1 6.33 1.33Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.67 1.33A1.67 1.67 0 0 0 8 3v10a1.67 1.67 0 0 0 3.31.29 1.67 1.67 0 0 0 1.97-2.05 2 2 0 0 0 .23-3.72 1.67 1.67 0 0 0-.88-2.83 1.67 1.67 0 0 0-1.32-2A1.67 1.67 0 0 0 9.67 1.33Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></g></svg>';
+/* 思考块图标：单主体「灵感星芒」，用简洁几何表达正在形成的想法。
+   与工具/智能体图标统一为 16 网格、1.2px 线宽；不使用灯泡或双半球大脑造型。 */
+var THINKING_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2 8.9 6.1 13 7l-4.1.9L8 12 7.1 7.9 3 7l4.1-.9Z"/><path d="m12.2 10.3.3 1.2 1.2.3-1.2.3-.3 1.2-.3-1.2-1.2-.3 1.2-.3Z"/></svg>';
 
 /* 智能体卡片图标：机器人头线框（替代 emoji，保持线框风格统一）。 */
-var AGENT_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 4.4V2.9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="2.1" r=".75" fill="currentColor"/><rect x="3.2" y="4.4" width="9.6" height="7.4" rx="2.2" stroke="currentColor" stroke-width="1.2"/><circle cx="6.4" cy="8" r=".8" fill="currentColor"/><circle cx="9.6" cy="8" r=".8" fill="currentColor"/><path d="M6.6 10h2.8" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>';
+var AGENT_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 4.2V2.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="1.9" r=".8" fill="currentColor" stroke="none"/><rect x="2.6" y="4.2" width="10.8" height="8.2" rx="2.4" stroke="currentColor" stroke-width="1.2"/><circle cx="5.9" cy="8.3" r=".9" fill="currentColor" stroke="none"/><circle cx="10.1" cy="8.3" r=".9" fill="currentColor" stroke="none"/><path d="M6.5 10.6h3" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>';
 
 /* ===== Message Rendering (Session-Aware) ===== */
 function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt) {
@@ -578,7 +578,10 @@ function setToolCardStatus(cardEl, text, failed) {
 window.setToolCardStatus = setToolCardStatus;
 
 /* 展示后端下发的工具真实耗时（WebChunk.durationMs，来源 ToolCallEndEvent.getDurationMs()）。
-   旧实现从未下发该值，工具卡只能自增计时，无法反映实际执行时长。 */
+   旧实现从未下发该值，工具卡只能自增计时，无法反映实际执行时长。
+   插入位置固定在状态点之前：DOM 顺序与 CSS order（duration=5 < 状态点=6）一致。
+   不再使用 has-duration 布局覆盖调整排序——类切换会让「排序」在过渡窗口里异步变化，
+   圆点先瞬移回内容之后、再跳回行尾（实测表现为「从左侧闪一下跑到右侧」）。 */
 function setToolCardDuration(cardEl, durationMs, failed) {
     if (typeof durationMs !== 'number' || !isFinite(durationMs) || durationMs < 0) return;
     if (!cardEl) return;
@@ -589,9 +592,9 @@ function setToolCardDuration(cardEl, durationMs, failed) {
         ? (Math.round(durationMs / 100) / 10) + 's'
         : Math.round(durationMs) + 'ms';
     var span = $('<span>').addClass('tool-duration' + (failed === true ? ' failed' : '')).text(label)[0];
-    // has-duration：CSS 依此把耗时排到状态点之前（耗时吸收剩余空白、状态点贴行尾）
-    $(header).addClass('has-duration');
-    $(header).append(span);
+    var statusEl = $(header).find('.tool-status-icon').first()[0];
+    if (statusEl) $(statusEl).before(span);
+    else $(header).append(span);
 }
 window.setToolCardDuration = setToolCardDuration;
 
@@ -606,11 +609,16 @@ function markToolCardFailed(sess) {
         var pi = $(sess.pendingToolCard).find('.tool-status-icon').first()[0];
         if (pi) icons.push(pi);
     }
-    // 并行批量 / id 模式下无 pendingToolCard，兑掉容器内所有残留 loading 的卡片
+    // 并行批量 / id 模式下无 pendingToolCard，兑掉容器内所有残留 loading 的卡片。
+    // 骨架卡（data-args-streaming：参数还在生成、工具压根没开始执行）必须排除在外：
+    // 把它标红等于告诉用户「这个工具执行失败了」，而它从未被调用过。
+    // 它的正确归宿是移除（removeOrphanArgsStreamingCards），不是留一张红色空卡。
     if (!icons.length && sess.container) {
-        $(sess.container).find('.tool-status-icon.loading').each(function() { icons.push(this); });
+        $(sess.container).find('.tool-card:not([data-args-streaming]) .tool-status-icon.loading, .tool-batch-header .tool-status-icon.loading')
+            .each(function() { icons.push(this); });
     }
     icons.forEach(function(icon) { icon.className = 'tool-status-icon reject'; icon.innerHTML = ''; });
+    removeOrphanArgsStreamingCards(sess);
     sess.pendingToolCard = null;
 }
 window.markToolCardFailed = markToolCardFailed;
@@ -935,9 +943,9 @@ function appendCardToBatch(sess, card, batchMeta, insertAgentBody) {
         group.setAttribute('data-batch-id', meta.batchId);
         group.innerHTML = '<div class="tool-batch-header">'
             + '<span class="tool-type-icon"></span>'
-            + '<span class="tool-status-icon loading"></span>'
             + '<span class="tool-batch-title"></span>'
             + '<span class="tool-batch-progress"></span>'
+            + '<span class="tool-status-icon loading"></span>'
             + '</div>'
             + '<div class="batch-tool-items"></div>';
         $(group).find('.tool-batch-header').on('click', function() { $(group).toggleClass('expanded'); });
@@ -974,6 +982,200 @@ function appendCardToBatch(sess, card, batchMeta, insertAgentBody) {
 }
 window.normalizeBatchMeta = normalizeBatchMeta;
 
+/* ===== 工具卡骨架（参数流式生成期） =====
+   背景：模型生成大参数（如 write 一整篇 md）时，参数本身可以连续流 80+ 秒。
+   旧行为里这段时间屏幕零反馈（底部还错误地显示「输出中」），随后工具卡突然以完成态冒出来。
+   现由后端新增的 action_draft（刚确定函数名）/ action_args（参数进度）两种帧驱动：
+   draft 立刻建骨架卡占位，args 持续更新头部进度，action_start 到达后原地转正。
+   三者共享同一个 actionId，因此整个生命周期只有一张 DOM 卡片。 */
+
+/* 工具卡 DOM 模板的唯一构建入口（骨架卡与正式卡共用）。
+   为何必须抽取：两处各写一份 innerHTML，任何一方改了 header 结构，另一方就会漂移，
+   「原地转正」时会找不到要回填的节点（表现为参数/文件名/耗时静默丢失）。
+   argsStr 显式传入：骨架阶段后端不下发参数（此刻参数还不存在），必须传空串。
+   状态点固定在 header 末尾：视觉排序依赖它自身的 order（见 app.css），DOM 序必须与之一致，
+   否则布局重排的瞬间它会落回内容一侧（历史上表现为「从左侧闪一下跑到右侧」）。 */
+function createToolCardShell(sess, toolName, args, toolTitle, actionId, agentBody, argsStr) {
+    var argsHtml = argsStr ? '<span class="tool-args">' + escapeHtml(argsStr) + '</span>' : '';
+    var card = $('<div>').addClass('tool-card')[0];
+    if (sess.currentRunId) {
+        card.setAttribute('data-run-id', sess.currentRunId);
+    }
+    if (actionId) card.setAttribute('data-action-id', actionId);
+    if (window.cliPrintSimplified === false) $(card).addClass('expanded');
+    card.innerHTML = '<div class="tool-card-header">'
+        + '<span class="tool-type-icon"></span>'
+        + '<span class="tool-name"></span>'
+        + argsHtml
+        + '<span class="tool-status-icon loading"></span>'
+        + '</div>'
+        + '<div class="tool-card-body"></div>';
+    applyToolPresentation(card, toolName, toolTitle, toolPresentationOptions(agentBody, args));
+    updateToolHeaderMeta(card, toolName, args, null);
+
+    $(card).find('.tool-card-header').on('click', function() {
+        $(card).toggleClass('expanded');
+    });
+    return card;
+}
+window.createToolCardShell = createToolCardShell;
+
+/* 参数字节数 → 人类可读体积。骨架卡头部唯一的动态信息，必须一眼看出「还在涨」。 */
+function formatArgsBytes(bytes) {
+    var n = Number(bytes);
+    if (!isFinite(n) || n < 0) n = 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (Math.round(n / 1024 * 10) / 10) + ' KB';
+    return (Math.round(n / 1048576 * 10) / 10) + ' MB';
+}
+window.formatArgsBytes = formatArgsBytes;
+
+/* action_draft：模型刚说出函数名、参数尚未开始/正在生成时立刻建骨架卡。
+   幂等：同 actionId 已有卡片或已完成（completedActionIds）时直接返回，
+   因为骨架帧与 action_start 用的是同一个原生 ToolCall.id，重复建卡会出现两张卡且其一永久 loading。 */
+function appendActionDraftChunk(sess, toolName, toolTitle, actionId, args) {
+    // 无 actionId 就无法与后续 action_start 幂等配对，宁可不建骨架（正式帧照常建卡）
+    if (!actionId) return;
+    if (sess.completedActionIds && sess.completedActionIds[actionId]) return;
+    if (sess.toolCardsById && sess.toolCardsById[actionId]) return;
+
+    ensureAssistantBubble(sess);
+    // 子代理路由与 action_start 同机制：args.agentName 命中活跃智能体卡片时插进卡内
+    var insertAgentBody = resolveAgentCardBody(sess, args);
+    var presentation = resolveToolPresentation(toolName, toolTitle, toolPresentationOptions(insertAgentBody, args));
+    var presentationTitle = toolTitle || (presentation.source ? presentation.source + '/' + presentation.bareToolName : null);
+    var bareToolName = presentation.bareToolName;
+
+    var card = createToolCardShell(sess, bareToolName, args, presentationTitle, actionId, insertAgentBody, '');
+    // 骨架标记：供样式、孤儿清理、HITL 接管三处识别「尚未执行的卡」。
+    // 状态点必须保持 loading 原样不动——setToolCardStatus 有 loading 守卫，
+    // 一旦改了状态点 class，这张卡此后永远落不了态（永久闪烁）。
+    $(card).addClass('args-streaming');
+    card.setAttribute('data-args-streaming', '1');
+    updateToolCardArgsProgress(sess, actionId, 0, card);
+
+    if (!sess.toolCardsById) sess.toolCardsById = {};
+    sess.toolCardsById[actionId] = card;
+
+    // 骨架阶段没有批次元数据（后端此刻还不知道本轮并行几个调用），批量归组留到转正时处理
+    if (insertAgentBody) {
+        $(insertAgentBody).append(card);
+        followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
+    } else {
+        insertBeforeActions(sess, card);
+    }
+    if (sess.sessionId === activeSessionId) scrollToBottom();
+}
+window.appendActionDraftChunk = appendActionDraftChunk;
+
+/* action_args：按 actionId 更新骨架卡头部的「生成参数中 · N」。
+   后端已做 200ms / 4096 字节双阈值节流，这里再用 requestAnimationFrame 合一次帧，
+   保证同一帧内的多次进度只写一次文本，长参数期不会把主线程拖进反复重排。
+   未命中卡片（帧早于建卡、卡已转正或已被移除）时静默返回，不得抛错打断 onWebChunk。 */
+function updateToolCardArgsProgress(sess, actionId, argsBytes, cardEl) {
+    var card = cardEl || ((actionId && sess && sess.toolCardsById) ? sess.toolCardsById[actionId] : null);
+    if (!card || !card.getAttribute || !card.getAttribute('data-args-streaming')) return;
+    var header = $(card).find('.tool-card-header').first()[0];
+    if (!header) return;
+    var bytes = Number(argsBytes);
+    if (!isFinite(bytes) || bytes < 0) bytes = 0;
+    var label = GourdI18n.t('chat.args_streaming', { size: formatArgsBytes(bytes) });
+    var el = $(header).find('.tool-args-progress').first()[0];
+    if (!el) {
+        el = $('<span>').addClass('tool-args-progress')[0];
+        var nameEl = $(header).find('.tool-name').first()[0];
+        if (nameEl && nameEl.parentNode) nameEl.parentNode.insertBefore(el, nameEl.nextSibling);
+        else header.appendChild(el);
+        // 首帧同步落字：后台标签页的 rAF 会被冻结，异步写会让卡片只剩一个工具名
+        el.setAttribute('data-args-bytes', String(bytes));
+        el.textContent = label;
+        return;
+    }
+    el.setAttribute('data-args-bytes', String(bytes));
+    card._argsProgressText = label;
+    if (card._argsProgressRaf) return;
+    card._argsProgressRaf = requestAnimationFrame(function() {
+        card._argsProgressRaf = 0;
+        if (card._argsProgressText != null) el.textContent = card._argsProgressText;
+    });
+}
+window.updateToolCardArgsProgress = updateToolCardArgsProgress;
+
+/* 解除骨架态：摘标记、取消挂起的进度帧、移除进度文案。转正与 HITL 接管共用。 */
+function clearArgsStreamingMark(card) {
+    if (!card || !card.getAttribute) return;
+    card.removeAttribute('data-args-streaming');
+    $(card).removeClass('args-streaming');
+    if (card._argsProgressRaf) { cancelAnimationFrame(card._argsProgressRaf); card._argsProgressRaf = 0; }
+    card._argsProgressText = null;
+    $(card).find('.tool-args-progress').remove();
+}
+
+/* 骨架卡转正：action_start 带完整参数到达时，把 draft 建的骨架卡原地改造成正式卡。
+   状态点保持 loading 不动（语义正是「执行中」），落态仍交给 action_end。
+   非骨架卡（真正重复的 action_start）返回 false，由调用方按原样忽略，不建第二张。 */
+function adoptArgsStreamingCard(sess, card, toolName, args, presentationTitle, agentBody, batchMeta, argsStr) {
+    if (!card || !card.getAttribute || !card.getAttribute('data-args-streaming')) return false;
+    clearArgsStreamingMark(card);
+
+    applyToolPresentation(card, toolName, presentationTitle, toolPresentationOptions(agentBody, args, card));
+    updateToolHeaderMeta(card, toolName, args, null);
+    if (argsStr == null) argsStr = formatToolArgsStr(args);
+    if (argsStr) {
+        var argsEl = $(card).find('.tool-args').first()[0];
+        if (argsEl) argsEl.textContent = argsStr;
+        else $('<span>').addClass('tool-args').text(argsStr).insertAfter($(card).find('.tool-name').first());
+    }
+    // 批次元数据只在正式帧下发，故转正时才可能需要把这张卡搬进批量容器
+    if (!card.getAttribute('data-batch-key')) appendCardToBatch(sess, card, batchMeta, agentBody);
+    if (sess.sessionId === activeSessionId) scrollToBottom();
+    return true;
+}
+
+/* 取一张可被 HITL 审批卡接管的骨架卡（带 data-args-streaming）。
+   优先按 actionId 精确命中：hitl 帧与 action_draft 的 actionId 同源于原生 ToolCall.getId()，
+   故并发调用同名工具（如同时两个 bash、其中一个触发审批）也不会接管错卡片。
+   actionId 缺失时（该字段新增前落盘的挂起任务、快照恢复而来）降级按工具名匹配，歧义时取最后一张。
+   取出即解除登记与骨架标记，避免后续 action_start 再把它当骨架卡回填。 */
+function takeoverArgsStreamingCard(sess, toolName, actionId) {
+    if (!sess || !sess.container) return null;
+    var found = null;
+    if (actionId && sess.toolCardsById) {
+        var byId = sess.toolCardsById[actionId];
+        // 必须仍带骨架标记：已收到 action_start 转正的卡不能被审批卡抢走
+        if (byId && byId.getAttribute && byId.getAttribute('data-args-streaming') !== null) found = byId;
+    }
+    if (!found && toolName) {
+        $(sess.container).find('.tool-card[data-args-streaming]').each(function() {
+            if (this.getAttribute('data-tool-name') === toolName) found = this;
+        });
+    }
+    if (!found) return null;
+    var foundId = found.getAttribute('data-action-id');
+    if (foundId && sess.toolCardsById && sess.toolCardsById[foundId] === found) delete sess.toolCardsById[foundId];
+    clearArgsStreamingMark(found);
+    return found;
+}
+
+/* 移除孤儿骨架卡：只收到 action_draft、永远等不到 action_start 的卡片
+   （用户点停止、模型吐参数途中出错、连接中断）。
+   为何是移除而不是标黄：这张卡既无参数也无结果，留一个黄点空卡会被读成
+   「这个工具执行失败了」，比什么都不显示更误导。由 finishStream / endTurn / 整流异常共用。 */
+function removeOrphanArgsStreamingCards(sess) {
+    if (!sess || !sess.container) return 0;
+    var removed = 0;
+    $(sess.container).find('.tool-card[data-args-streaming]').each(function() {
+        var card = this;
+        var actionId = card.getAttribute('data-action-id');
+        if (actionId && sess.toolCardsById && sess.toolCardsById[actionId] === card) delete sess.toolCardsById[actionId];
+        if (card._argsProgressRaf) { cancelAnimationFrame(card._argsProgressRaf); card._argsProgressRaf = 0; }
+        $(card).remove();
+        removed++;
+    });
+    return removed;
+}
+window.removeOrphanArgsStreamingCards = removeOrphanArgsStreamingCards;
+
 /* action_start：工具调用前（来源引擎 ToolCallStartEvent）提前渲染 loading 卡片骨架。
    - 有 actionId（并发/并行场景）：卡片按 id 登记到 sess.toolCardsById，action_end 靠 id 精确配对，
      不再依赖到达顺序；后端下发 batchId/batchIndex/batchSize 时归入显式批量容器分组展示。
@@ -988,7 +1190,6 @@ function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agent
     toolName = presentation.bareToolName;
 
     var argsStr = formatToolArgsStr(args);
-    var argsHtml = argsStr ? '<span class="tool-args">' + escapeHtml(argsStr) + '</span>' : '';
     var approvedState = window.GourdToolPresentation.resolveActionStartCardState(!!sess.approvedToolCard, actionId);
 
     // HITL 批准后的 action_start 必须接管原审批卡：有 actionId 时登记到 id 映射，
@@ -1020,34 +1221,23 @@ function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agent
         return;
     }
 
-    var card = $('<div>').addClass('tool-card')[0];
-    if (sess.currentRunId) {
-        card.setAttribute('data-run-id', sess.currentRunId);
+    // 同 actionId 已有卡片：绝不建第二张。骨架卡（action_draft 建）在此原地转正——
+    // 摘骨架标记、清进度文案、用完整 args 回填头部；旧实现直接 return，骨架卡会永远
+    // 停在「生成参数中」。非骨架卡（真正重复的 action_start）仍旧忽略。
+    // 判定放在建卡之前，避免每个重复帧都空造一张丢弃的 DOM。
+    if (actionId && sess.toolCardsById && sess.toolCardsById[actionId]) {
+        adoptArgsStreamingCard(sess, sess.toolCardsById[actionId], toolName, args, presentationTitle,
+            insertAgentBody, batchMeta, argsStr);
+        return;
     }
-    if (actionId) card.setAttribute('data-action-id', actionId);
-    if (window.cliPrintSimplified === false) $(card).addClass('expanded');
-    card.innerHTML = '<div class="tool-card-header">'
-        + '<span class="tool-type-icon"></span>'
-        + '<span class="tool-status-icon loading"></span>'
-        + '<span class="tool-name"></span>'
-        + argsHtml
-        + '</div>'
-        + '<div class="tool-card-body"></div>';
-    applyToolPresentation(card, toolName, presentationTitle, toolPresentationOptions(insertAgentBody, args));
-    updateToolHeaderMeta(card, toolName, args, null);
 
-    $(card).find('.tool-card-header').on('click', function() {
-        $(card).toggleClass('expanded');
-    });
+    // 骨架卡与正式卡共用同一套 DOM 模板，避免两处结构漂移（见 createToolCardShell 注释）
+    var card = createToolCardShell(sess, toolName, args, presentationTitle, actionId, insertAgentBody, argsStr);
 
     if (actionId) {
         // id 模式：登记卡片，供 action_end 精确回填；后端显式批次时归入批量容器
         // （HITL 审批结果回填态例外——让位给位置配对，复用审批卡，避免多卡）
         if (!sess.toolCardsById) sess.toolCardsById = {};
-        if (sess.toolCardsById[actionId]) {
-            // 重复 action_start：忽略，不建第二张卡
-            return;
-        }
         sess.toolCardsById[actionId] = card;
 
         // 显式或降级批次：统一由共享插入器建组；缺少 batchIndex 时按到达顺序放入空槽。
@@ -1288,7 +1478,7 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         if (sess.currentRunId) fallbackCard.setAttribute('data-run-id', sess.currentRunId);
         if (actionId) fallbackCard.setAttribute('data-action-id', actionId);
         if (window.cliPrintSimplified === false) $(fallbackCard).addClass('expanded');
-        fallbackCard.innerHTML = '<div class="tool-card-header"><span class="tool-type-icon"></span><span class="tool-status-icon loading"></span><span class="tool-name"></span></div><div class="tool-card-body"></div>';
+        fallbackCard.innerHTML = '<div class="tool-card-header"><span class="tool-type-icon"></span><span class="tool-name"></span><span class="tool-status-icon loading"></span></div><div class="tool-card-body"></div>';
         var fallbackAgentBody = agentBody || resolveAgentCardBody(sess, args);
         toolName = updateToolCardContent(sess, fallbackCard, toolName, toolTitle, args, text, meta,
             toolPresentationOptions(fallbackAgentBody, args, fallbackCard));
@@ -1329,8 +1519,8 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
     if (window.cliPrintSimplified === false) $(card).addClass('expanded');
     card.innerHTML = '<div class="tool-card-header">'
         + '<span class="tool-type-icon"></span>'
-        + '<span class="tool-status-icon loading"></span>'
         + '<span class="tool-name"></span>'
+        + '<span class="tool-status-icon loading"></span>'
         + '</div>'
         + '<div class="tool-card-body"></div>';
     toolName = updateToolCardContent(sess, card, toolName, toolTitle, args, text, meta,
@@ -1811,23 +2001,34 @@ function purgeInlineThinking(sess) {
 
 
 /* ===== HITL ===== */
-function appendHitlCard(sess, toolName, command) {
+/* actionId：触发审批的那次调用标识（由后端 hitl 帧透传，同源于 action_draft）。
+   仅用于精确接管骨架卡，不登记到 sess.toolCardsById —— 审批通过后会重新走 Reason，
+   届时 action_start 携带的是【新的】actionId 并由 sess.approvedToolCard 分支接管同一张卡
+   （见 appendActionStartChunk），此处若按旧 id 登记只会留下一条永不被消费的悬挂引用。 */
+function appendHitlCard(sess, toolName, command, actionId) {
     ensureAssistantBubble(sess);
     var presentation = resolveToolPresentation(toolName, null);
     toolName = presentation.bareToolName;
 
     // 采用 tool-card 视觉体系：审批通过后原地复用为工具结果卡片
     var argsHtml = command ? '<span class="tool-args">' + escapeHtml(command) + '</span>' : '';
-    var card = $('<div>').addClass('tool-card hitl-pending expanded')[0];
-    // 存储当前 runId，用于后续删除同一运行的消息
-    if (sess.currentRunId) {
-        card.setAttribute('data-run-id', sess.currentRunId);
+    // 优先接管骨架卡（action_draft 已建、尚未收到 action_start）。不接管则同一工具会出现两张卡，
+    // 其中骨架卡永久 loading（它等不到 action_start：批准后的 action_start 会被审批卡复用分支接走）。
+    var card = takeoverArgsStreamingCard(sess, toolName, actionId);
+    if (card) {
+        $(card).addClass('hitl-pending expanded');
+    } else {
+        card = $('<div>').addClass('tool-card hitl-pending expanded')[0];
+        // 存储当前 runId，用于后续删除同一运行的消息
+        if (sess.currentRunId) {
+            card.setAttribute('data-run-id', sess.currentRunId);
+        }
     }
     card.setAttribute('data-tool-name', toolName);
     card.innerHTML = '<div class="tool-card-header">'
-        + '<span class="tool-status-icon warn"><i class="layui-icon layui-icon-tips" style="font-size:13px"></i></span>'
         + '<span class="tool-name">' + GourdI18n.t('chat.need_auth') + escapeHtml(presentation.displayName || 'unknown') + '</span>'
         + argsHtml
+        + '<span class="tool-status-icon warn"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="6" x2="12" y2="14"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg></span>'
         + '</div>'
         + '<div class="tool-card-body">' + (command ? escapeHtml(command) : GourdI18n.t('chat.waiting_auth')) + '</div>'
         + '<div class="hitl-card-actions">'
@@ -1843,7 +2044,8 @@ function appendHitlCard(sess, toolName, command) {
         $(card).toggleClass('expanded');
     });
 
-    insertBeforeActions(sess, card);
+    // 接管骨架卡时节点已在消息流中（可能在智能体卡内），重插会把它搬到主对话底部
+    if (!card.parentNode) insertBeforeActions(sess, card);
 
     var approveBtn = $(card).find('.hitl-btn-approve')[0];
     var rejectBtn = $(card).find('.hitl-btn-reject')[0];
@@ -2024,6 +2226,11 @@ function relocalizeDynamicLabels() {
         var tn = el.getAttribute('data-i18n-batch-tool');
         var c = el.getAttribute('data-i18n-batch-count') || '0';
         el.textContent = batchTitleText(tn || null, c);
+    });
+    document.querySelectorAll('.tool-args-progress[data-args-bytes]').forEach(function(el) {
+        // 骨架卡进度文案（「生成参数中 · 1.2 KB」）同样是流式写死进 DOM 的译文；
+        // 字节数存在 data-args-bytes 里，切语言时用新语言重建，否则整条漏译。
+        el.textContent = GourdI18n.t('chat.args_streaming', { size: formatArgsBytes(el.getAttribute('data-args-bytes')) });
     });
     document.querySelectorAll('.thinking-block-label[data-i18n-thinking]').forEach(function(el) {
         var st = el.getAttribute('data-i18n-thinking');

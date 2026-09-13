@@ -1,7 +1,8 @@
 /* ===== app-file-changes.js ===== */
 /* Per-run file change summaries, snapshot review, undo and reapply controls.
-   呈现形态：每 run 一个「变更按钮」（对齐任务 chip：图标 + 文案 + 数量徽标），
-   点击展开变更列表；无文件变更/新增的 run 不渲染任何节点。 */
+   呈现形态：输入区 chip 行中、紧随「任务」chip 的「变更按钮」（图标 + 文案 + 数量徽标 + 增删统计）；
+   点击在输入区上方弹出变更面板（与任务面板同构：文件列表 + 审查/打开/撤销文件 + 整轮撤销/重新应用）。
+   消息流不再渲染任何变更节点；无文件变更/新增的 run 不渲染任何内容。 */
 /* 契约对齐（后端 manifest summary）：
    summary: revision / status / ready / possiblyIncomplete / incompleteReasons[] /
             fileCount / additions / deletions / runApplyState(FULLY_APPLIED|PARTIALLY_UNDONE|FULLY_UNDONE) / files[]
@@ -275,18 +276,55 @@
         button.addEventListener('click', function (event) { event.stopPropagation(); handler(button); });
         return button;
     }
-    /* ===== 展开/折叠：JS 侧显式状态 =====
-       旧实现只把展开态存在 DOM class 上（header 点击 toggle 'expanded'），而 render() 每帧
-       把 className 重置成不含 expanded 的值 —— run 进行中用户手动展开的卡片，会被下一个
-       文件改动帧静默折叠回去。状态提升为以 runId 为 key 的显式表挂在 sess 上，重建后按它恢复。 */
-    function expandedMap(sess) {
-        if (!sess._fileChangesExpanded) sess._fileChangesExpanded = {};
-        return sess._fileChangesExpanded;
+    /* ===== 变更入口（输入区 chip 行，任务 chip 旁）+ 弹出面板 =====
+       入口形态与「任务」chip 同族：图标 + 文案 + 数量徽标 + 增删统计；
+       点击展开的变更面板与任务面板同构（点外收起、与其他工具栏面板互斥开合）。
+       DOM 位于 chat.html 模板（#chatFileChangesChip / #chatFileChangesPanel），
+       bootstrap 注入时机不保证早于本模块加载：元素一律延迟查找，节点被重挂后自动重取。 */
+    var chipEl = null, panelEl = null, panelBodyEl = null, panelActionsEl = null;
+    function ensureEls() {
+        if (!chipEl || !chipEl.isConnected) chipEl = document.getElementById('chatFileChangesChip');
+        if (!panelEl || !panelEl.isConnected) panelEl = document.getElementById('chatFileChangesPanel');
+        if (!panelBodyEl || !panelBodyEl.isConnected) panelBodyEl = document.getElementById('fileChangesPanelBody');
+        if (!panelActionsEl || !panelActionsEl.isConnected) panelActionsEl = document.getElementById('fileChangesPanelActions');
     }
-    function setRunExpanded(sess, runId, value) {
-        if (value) expandedMap(sess)[runId] = true;
-        else delete expandedMap(sess)[runId];
+    var panelOpen = false;
+    /* chip 显隐先置位、再由共享汇算函数裁决容器显隐（与 todo / queue / 键位提示同一口径） */
+    function setChipVisible(show) {
+        ensureEls();
+        window._fileChangesChipVisible = !!show;
+        if (chipEl) chipEl.style.display = show ? '' : 'none';
+        if (typeof window.updateChipWrapVisibility === 'function') window.updateChipWrapVisibility();
     }
+    function hideFileChangesPanel() {
+        ensureEls();
+        panelOpen = false;
+        if (panelEl) { panelEl.classList.remove('show'); panelEl.style.display = 'none'; }
+    }
+    window.hideFileChangesPanel = hideFileChangesPanel;
+    function showFileChangesPanel() {
+        ensureEls();
+        if (!panelEl) return;
+        panelOpen = true;
+        panelEl.style.display = '';
+        panelEl.classList.add('show');
+    }
+    /* 面板开合由 chip 点击独占（与任务面板同一套规则：互斥打开、点外收起）；
+       刻意不做「数据驱动关闭」——异步回包不得收走用户刚打开的面板。 */
+    function toggleFileChangesPanel() {
+        if (panelOpen) { hideFileChangesPanel(); return; }
+        var sess = (typeof sessionMap !== 'undefined' && sessionMap) ? sessionMap[activeSessionId] : null;
+        var runKey = sess && sess._fileChangesLatestRun;
+        var summary = (sess && runKey && sess._fileChangesByRun) ? sess._fileChangesByRun[runKey] : null;
+        if (!summary) return;
+        if (typeof window.closeAllToolbarPanels === 'function') window.closeAllToolbarPanels(); // 互斥
+        showFileChangesPanel();
+        renderPanel(sess, runKey);
+        /* 打开时对账一次（3s 节流内静默跳过），补齐被裁剪的流式帧 */
+        reconcile(sess, runKey);
+    }
+    /* 入口收敛为单 chip：同时只展示「最新一轮」的变更（见 upsert 的 updatedAt 门禁），
+       展开态即面板开合本身（面板是全局单例，不再需要按 runId 记忆展开态）。 */
     /* 行级签名：覆盖所有影响该行渲染与交互的后端字段。binary 不出现在 DOM 上，
        但决定 reviewFile 走预览还是走二进制提示，必须计入，否则复用的行会拿旧值分流。 */
     function rowSignature(file) {
@@ -294,7 +332,7 @@
             num(file && file.additions), num(file && file.deletions),
             file && file.binary ? 1 : 0].join('\u0001');
     }
-    /* 头部文本签名：计数与增删总量（含缺失时按 files 回落求和）变了才重写 header.innerHTML */
+    /* chip 文本签名：计数与增删总量（含缺失时按 files 回落求和）变了才重写 chip.innerHTML */
     function headerSignature(summary, files) {
         return [num(summary.fileCount) != null ? num(summary.fileCount) : files.length,
             num(summary.additions), num(summary.deletions),
@@ -305,19 +343,16 @@
     function headActionsSignature(stats) {
         return (stats.undone > 0 ? 'R' : '-') + (stats.applied > 0 ? 'U' : '-');
     }
-    /* 头部即变更按钮：形态对齐输入框上方的任务 chip（图标 + 文案 + 数量徽标 + 增删统计）。
-       文件数量收敛为徽标数字，点击按钮展开/收起下方变更列表。 */
-    function headerHtml(summary, files) {
+    /* chip 内容：图标 + 文案 + 数量徽标 + 增删统计，形态与「任务」chip 对齐（chip 本体即按钮）。 */
+    function chipInnerHtml(summary, files) {
         var additions = num(summary.additions);
         var deletions = num(summary.deletions);
         var count = num(summary.fileCount) != null ? num(summary.fileCount) : files.length;
-        return '<span class="file-changes-pill">'
-            + '<span class="tool-type-icon">' + FILE_SVG + '</span>'
+        return '<span class="tool-type-icon">' + FILE_SVG + '</span>'
             + '<span class="tool-name">' + t('title') + '</span>'
             + '<span class="file-changes-badge">' + count + '</span>'
             + diffStatHtml(additions != null ? additions : statSum(files, 'additions'),
-                deletions != null ? deletions : statSum(files, 'deletions'))
-            + '</span>';
+                deletions != null ? deletions : statSum(files, 'deletions'));
     }
     function fillHeadActions(sess, runId, headActions, stats) {
         headActions.innerHTML = '';
@@ -365,76 +400,53 @@
         return row;
     }
 
-    /* force=true 用于「后端字段没变但文案变了」的场景（语言切换）：签名不会变，必须绕过复用。 */
-    function render(sess, runId, summary, card, force) {
+    /* ===== 渲染：chip（常显）与面板（打开时）=====
+       chip 只在签名变化时重写 innerHTML；面板行以 path 为复用键做增量更新，
+       行缓存挂模块级（同时只有一个面板），换 run / 强制重建时整体作废。
+       force=true 用于「后端字段没变但文案变了」的场景（语言切换）：签名不会变，必须绕过复用。 */
+    var chipSig = null;
+    var renderedChip = null;   // { runKey, revision } —— chip 正在展示的快照标识
+    var panelCache = null;     // { runKey, actionsSig, warningSig, warning, rows }
+    function renderChip(runKey, summary, force) {
+        ensureEls();
+        var files = Array.isArray(summary.files) ? summary.files : [];
+        renderedChip = { runKey: runKey, revision: Number(summary.revision) || 0 };
+        if (!chipEl) return;
+        var sig = runKey + '\u0001' + headerSignature(summary, files);
+        if (sig === chipSig && !force) return;
+        chipSig = sig;
+        chipEl.innerHTML = chipInnerHtml(summary, files);
+    }
+    function renderPanel(sess, runKey, force) {
+        ensureEls();
+        if (!panelBodyEl || !panelActionsEl) return;
+        var summary = sess._fileChangesByRun ? sess._fileChangesByRun[runKey] : null;
+        if (!summary) return;
         var files = Array.isArray(summary.files) ? summary.files : [];
         var stats = undoStats(summary, files);
-        var cache = card._fileChangesCache;
-        var header, headActions, body;
-
-        card.className = 'tool-card file-changes-card';
-        /* 展开态从 JS 侧重建：用户展开的卡片不会再被后续帧折叠回去 */
-        if (expandedMap(sess)[runId]) card.classList.add('expanded');
-        card.setAttribute('data-run-id', runId);
-        card.setAttribute('data-file-changes-run', runId);
-
-        /* 骨架只在首次（或强制重建）时创建，之后复用 header / headActions / body 节点，
-           不再每帧 innerHTML='' 把整棵子树连同事件监听一起销毁重建。 */
-        if (force || !cache || !cache.header || !cache.header.parentNode) {
-            card.innerHTML = '';
-            cache = card._fileChangesCache = {
-                headerSig: null, actionsSig: null, warningSig: null,
-                warning: null, rows: {}
-            };
-            header = document.createElement('div');
-            header.className = 'tool-card-header file-changes-header';
-            headActions = document.createElement('span');
-            headActions.className = 'file-changes-head-actions';
-            header.addEventListener('click', function () {
-                var expanded = !card.classList.contains('expanded');
-                card.classList.toggle('expanded', expanded);
-                setRunExpanded(sess, runId, expanded);
-                if (expanded) reconcile(sess, runId);
-            });
-            body = document.createElement('div');
-            body.className = 'tool-card-body file-changes-body';
-            card.appendChild(header);
-            card.appendChild(body);
-            cache.header = header;
-            cache.headActions = headActions;
-            cache.body = body;
-        } else {
-            header = cache.header;
-            headActions = cache.headActions;
-            body = cache.body;
-        }
-
-        /* 头部文本：header.innerHTML 会摸掉 headActions，重写后把持久节点挂回末尾
-           （pill 内为 icon / name / 数量徽标 / 增删统计，headActions 排在其后）。 */
-        var hSig = headerSignature(summary, files);
-        if (cache.headerSig !== hSig) {
-            cache.headerSig = hSig;
-            header.innerHTML = headerHtml(summary, files);
-            header.appendChild(headActions);
+        /* 换 run 或强制重建：行复用键是 path，跨 run 复用会把旧 run 的动作错挂到新行上 */
+        if (force || !panelCache || panelCache.runKey !== runKey) {
+            panelBodyEl.innerHTML = '';
+            panelCache = { runKey: runKey, actionsSig: null, warningSig: undefined, warning: null, rows: {} };
         }
         var aSig = headActionsSignature(stats);
-        if (cache.actionsSig !== aSig) {
-            cache.actionsSig = aSig;
-            fillHeadActions(sess, runId, headActions, stats);
+        if (panelCache.actionsSig !== aSig) {
+            panelCache.actionsSig = aSig;
+            fillHeadActions(sess, runKey, panelActionsEl, stats);
         }
 
         /* 不完整提示：始终占 body 首位，行列表跟在它后面 */
         var wSig = summary.possiblyIncomplete ? incompleteText(summary) : '';
-        if (cache.warningSig !== wSig) {
-            cache.warningSig = wSig;
-            if (cache.warning && cache.warning.parentNode === body) body.removeChild(cache.warning);
-            cache.warning = null;
+        if (panelCache.warningSig !== wSig) {
+            panelCache.warningSig = wSig;
+            if (panelCache.warning && panelCache.warning.parentNode === panelBodyEl) panelBodyEl.removeChild(panelCache.warning);
+            panelCache.warning = null;
             if (wSig) {
                 var warning = document.createElement('div');
                 warning.className = 'file-changes-warning';
                 warning.textContent = wSig;
-                body.insertBefore(warning, body.firstChild);
-                cache.warning = warning;
+                panelBodyEl.insertBefore(warning, panelBodyEl.firstChild);
+                panelCache.warning = warning;
             }
         }
 
@@ -452,84 +464,93 @@
         }
         if (!reuse) {
             for (ki = 0; ki < files.length; ki++) keys[ki] = String((files[ki] && files[ki].path) || '');
-            Object.keys(cache.rows).forEach(function (oldKey) {
-                var el = cache.rows[oldKey].el;
-                if (el.parentNode === body) body.removeChild(el);
+            Object.keys(panelCache.rows).forEach(function (oldKey) {
+                var el = panelCache.rows[oldKey].el;
+                if (el.parentNode === panelBodyEl) panelBodyEl.removeChild(el);
             });
-            cache.rows = {};
+            panelCache.rows = {};
         }
 
         var nextRows = {};
-        var cursor = cache.warning || null;   // 行始终排在 warning 之后
+        var cursor = panelCache.warning || null;   // 行始终排在 warning 之后
         files.forEach(function (file, index) {
             var rowKey = keys[index];
             var sig = rowSignature(file);
-            var prev = reuse ? cache.rows[rowKey] : null;
+            var prev = reuse ? panelCache.rows[rowKey] : null;
             var row;
             if (prev && prev.sig === sig && prev.el.parentNode) {
                 row = prev.el;
             } else {
-                if (prev && prev.el.parentNode === body) body.removeChild(prev.el);
-                row = buildRow(sess, runId, file);
+                if (prev && prev.el.parentNode === panelBodyEl) panelBodyEl.removeChild(prev.el);
+                row = buildRow(sess, runKey, file);
             }
             nextRows[rowKey] = { sig: sig, el: row };
             /* 位置不对才移动：insertBefore 对已挂载节点是移动，不会重建也不会丢监听 */
-            var expected = cursor ? cursor.nextSibling : body.firstChild;
-            if (row !== expected) body.insertBefore(row, cursor ? cursor.nextSibling : body.firstChild);
+            var expected = cursor ? cursor.nextSibling : panelBodyEl.firstChild;
+            if (row !== expected) panelBodyEl.insertBefore(row, cursor ? cursor.nextSibling : panelBodyEl.firstChild);
             cursor = row;
         });
         /* 摧掉本轮不再存在的行，以及 cursor 之后的任何残留 */
-        Object.keys(cache.rows).forEach(function (oldKey) {
+        Object.keys(panelCache.rows).forEach(function (oldKey) {
             if (nextRows[oldKey]) return;
-            var el = cache.rows[oldKey].el;
-            if (el.parentNode === body) body.removeChild(el);
+            var el = panelCache.rows[oldKey].el;
+            if (el.parentNode === panelBodyEl) panelBodyEl.removeChild(el);
         });
-        if (cursor) { while (cursor.nextSibling) body.removeChild(cursor.nextSibling); }
-        else { while (body.firstChild) body.removeChild(body.firstChild); }
-        cache.rows = nextRows;
+        if (cursor) { while (cursor.nextSibling) panelBodyEl.removeChild(cursor.nextSibling); }
+        else { while (panelBodyEl.firstChild) panelBodyEl.removeChild(panelBodyEl.firstChild); }
+        panelCache.rows = nextRows;
+    }
+
+    /* 统一渲染入口：chip 常显；面板仅在打开时刷新。无任何变更时 chip 隐藏、面板收起。 */
+    function renderEverything(sess, force) {
+        var runKey = sess && sess._fileChangesLatestRun;
+        var summary = (sess && runKey && sess._fileChangesByRun) ? sess._fileChangesByRun[runKey] : null;
+        if (!summary || !Array.isArray(summary.files) || !summary.files.length) {
+            setChipVisible(false);
+            hideFileChangesPanel();
+            return;
+        }
+        setChipVisible(true);
+        renderChip(runKey, summary, force);
+        if (panelOpen) renderPanel(sess, runKey, force);
     }
 
     /* revision 单调门禁：任何来源（stream / 操作响应 / 对账）的旧 revision 一律丢弃。
-       相同 revision 已有卡片时不重复渲染；若卡片因历史重建 / DOM 淘汰而不存在，则允许按缓存快照重建。 */
+       相同 revision 已由 chip 展示时不重复渲染；「最新一轮」由 updatedAt 决定归属，
+       迟到的旧 run 对账 / 回放补帧不得把入口翻回上一轮。 */
+    function chipShows(runKey, revision) {
+        return !!renderedChip && renderedChip.runKey === runKey && renderedChip.revision === revision;
+    }
     function upsert(sess, runId, summary) {
-        if (!sess || !sess.container || !runId || !summary) return;
-        /* 空快照（没有任何文件变更/新增）不生成卡片：入口直接短路，不落缓存、不参与 revision 门禁。
-           否则空 run（或流式早期的空帧）会在对话尾部留下「0 个文件」的空壳；
+        if (!sess || !runId || !summary) return;
+        /* 空快照（没有任何文件变更/新增）不生成任何入口：直接短路，不落缓存、不参与 revision 门禁。
+           否则空 run（或流式早期的空帧）会留下「0 个文件」的空壳；
            且一旦空帧占用 revision，同 revision 的有效快照会被单调门禁误挡。 */
         if (!Array.isArray(summary.files) || !summary.files.length) return;
         if (!sess._fileChangesByRun) sess._fileChangesByRun = {};
         var runKey = String(runId);
-        var selector = '[data-file-changes-run="' + CSS.escape(runKey) + '"]';
-        var card = sess.container.querySelector(selector);
         var previous = sess._fileChangesByRun[runKey];
         var revision = Number(summary.revision) || 0;
         var previousRevision = previous ? (Number(previous.revision) || 0) : -1;
         if (previous && revision < previousRevision) return;
-        if (previous && revision === previousRevision && card) return;
+        if (previous && revision === previousRevision && chipShows(runKey, revision)) return;
         sess._fileChangesByRun[runKey] = summary;
 
-        var created = !card;
-        if (created) {
-            /* 文件变更属于 run 级持久摘要，不属于助手正文气泡。每个 run 独占一个直属行，
-               行追加到当前 session 的 messages-inner 底部；后续 revision 只更新行内原卡片。 */
-            var row = document.createElement('div');
-            row.className = 'file-changes-run-row';
-            row.setAttribute('data-run-id', runKey);
-            row.setAttribute('data-file-changes-row-run', runKey);
-            card = document.createElement('div');
-            row.appendChild(card);
-            sess.container.appendChild(row);
+        /* 「最新一轮」门禁：无 updatedAt（后端旧版）时宽松放行，否则只有不早于当前展示轮的快照能接管。 */
+        var ts = num(summary.updatedAt);
+        var latestSummary = sess._fileChangesLatestRun ? sess._fileChangesByRun[sess._fileChangesLatestRun] : null;
+        var latestTs = latestSummary ? num(latestSummary.updatedAt) : null;
+        var isLatest = (sess._fileChangesLatestRun == null) || ts == null || latestTs == null || ts >= latestTs;
+        if (isLatest) sess._fileChangesLatestRun = runKey;
+
+        var created = !previous;
+        if (isLatest && sess.sessionId === activeSessionId) renderEverything(sess);
+        /* 回放期间不发起对账：逐帧重建时逐条请求纯属浪费，登记后由 replayDone 收口统一触发
+           （仍走 reconcile 自身 3s 节流）。 */
+        if (isLatest) {
+            if (created && sess._replaying) deferReplayReconcile(sess, runKey);
+            else if (created && !sess.isStreaming) reconcile(sess, runKey);
         }
-        card.setAttribute('data-file-changes-revision', String(revision));
-        render(sess, runKey, summary, card);
-        /* 自动跟随只在用户贴底时生效。口径与命名沿用 app-base.js 的 messagesWrap scroll 守卫：
-           gap = scrollHeight - scrollTop - clientHeight，gap > 80 即 userScrolledUp = true。
-           用户一旦上滚就停止跟随，直到他自己滚回底部 80px 内；不在此另造第二套判定。
-           scrollToBottom() 无 force 调用内部也有同一守卫，这里在调用点显式化，不再隐式依赖被调方语义。 */
-        if (sess.sessionId === activeSessionId && !sess._skipScroll && !userScrolledUp) scrollToBottom();
-        /* 回放新建卡片必须等临时节点移入真实容器后再对账；普通非流式重建可立即对账。 */
-        if (created && sess._replaying) deferReplayReconcile(sess, runKey);
-        else if (created && !sess.isStreaming) reconcile(sess, runKey);
     }
 
     window.onFileChangesChunk = function (sess, chunk) {
@@ -540,19 +561,36 @@
     };
     window.__fileChangesNormalizeSummary = normalizeSummary;
     window.refreshFileChangesRun = reconcile;
-    /* 回放收口点（app-history.js replayDone）调这个把回放期新建的卡片补上一次对账 */
+    /* 回放收口点（app-history.js replayDone）调这个把回放期登记的对账补上 */
     window.flushFileChangesReplayReconcile = flushReplayReconcile;
+    /* 会话切换（app-streaming.js setActiveSession）调这个把入口切到新会话的「最新一轮」 */
+    window.refreshFileChangesChip = function (sid) {
+        var sess = (typeof sessionMap !== 'undefined' && sessionMap) ? sessionMap[sid] : null;
+        if (!sess) { setChipVisible(false); hideFileChangesPanel(); return; }
+        renderEverything(sess);
+    };
+
+    /* chip / 面板的点击交互：委托到 document，模板注入时机与重复挂载都不影响绑定。
+       chip 点击 = 开/关面板；点面板与 chip 之外收起（与任务面板同规则）。 */
+    document.addEventListener('click', function (event) {
+        var target = event.target;
+        if (!target || typeof target.closest !== 'function') return;
+        if (target.closest('#chatFileChangesChip')) {
+            toggleFileChangesPanel();
+            return;
+        }
+        if (!panelOpen) return;
+        if (target.closest('#chatFileChangesPanel')) return;
+        /* layui 确认弹层位于 body 下：确认撤销/重新应用期间不得收走面板 */
+        if (target.closest('.layui-layer')) return;
+        hideFileChangesPanel();
+    });
 
     document.addEventListener('i18n:localeChanged', function () {
-        var sessions = (typeof sessionMap !== 'undefined' && sessionMap) ? sessionMap : {};
-        Object.keys(sessions).forEach(function (sid) {
-            var sess = sessions[sid];
-            if (!sess || !sess._fileChangesByRun) return;
-            Object.keys(sess._fileChangesByRun).forEach(function (runId) {
-                var card = sess.container.querySelector('[data-file-changes-run="' + CSS.escape(String(runId)) + '"]');
-                /* force：文案变了但后端字段没变，签名不会变，必须绕过复用重建 */
-                if (card) render(sess, runId, sess._fileChangesByRun[runId], card, true);
-            });
-        });
+        /* 文案经 i18n key 渲染：签名不变也必须重建（chip 文本 + 打开中的面板行/按钮） */
+        chipSig = null;
+        if (panelCache) panelCache.runKey = null;
+        var sess = (typeof sessionMap !== 'undefined' && sessionMap && typeof activeSessionId !== 'undefined') ? sessionMap[activeSessionId] : null;
+        if (sess) renderEverything(sess, true);
     });
 })();

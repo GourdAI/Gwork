@@ -78,10 +78,8 @@ test('写操作响应统一走 revision 单调门禁，无 force 覆盖与 revis
     assert.match(source, /function upsert\(sess, runId, summary\) \{/);
     assert.doesNotMatch(source, /if \(!force &&/);
     assert.doesNotMatch(source, /summary\.revision = /);
-    assert.match(source, /if \(previous && revision === previousRevision && card\) return;/);
-    assert.match(source, /row\.className = 'file-changes-run-row';/);
-    assert.match(source, /sess\.container\.appendChild\(row\);/);
-    assert.match(source, /upsert\(sess, runId, summary\);/);
+    assert.match(source, /if \(previous && revision === previousRevision && chipShows\(runKey, revision\)\) return;/);
+    assert.match(source, /upsert\(sess, String\(runId\), summary\);/);
 });
 
 test('后端状态枚举全部映射为本地化文案且暴露 error.message', () => {
@@ -157,7 +155,6 @@ test('错误映射相关 i18n key 在 12 个语言包中齐备且占位符正确
         const block = json.file_changes;
         for (const key of required) {
             assert.ok(block[key] && block[key].trim(), `${file}: 缺少 ${key}`);
-            // 非中英文语言包不得直接照搬英文原文（en 自身除外）
         }
         assert.ok(block.error_detail.includes('{0}') && block.error_detail.includes('{1}'), `${file}: error_detail 占位符缺失`);
         assert.ok(block.possibly_incomplete_detail.includes('{0}'), `${file}: possibly_incomplete_detail 占位符缺失`);
@@ -170,20 +167,22 @@ test('错误映射相关 i18n key 在 12 个语言包中齐备且占位符正确
     }
 });
 
-test('样式复用 theme token 并包含直属行与窄窗口防溢出规则', () => {
+test('变更入口与面板样式复用 theme token、锚定输入区上方且窄窗口防溢出', () => {
     const css = read('css/app.css');
-    const block = css.slice(css.indexOf('.file-changes-run-row'), css.indexOf('/* Batch tool group'));
+    const block = css.slice(css.indexOf('.file-changes-chip'), css.indexOf('/* Batch tool group'));
     assert.ok(block.length > 0);
-    assert.match(block, /\.file-changes-run-row > \.file-changes-card \{[^}]*background:/);
-    assert.match(block, /var\(--border-color\)|var\(--bg-hover\)/);
+    assert.match(block, /\.file-changes-chip \{[^}]*background:\s*var\(--bg-hover\)/);
+    assert.match(block, /var\(--border-color\)/);
     assert.match(block, /text-overflow:\s*ellipsis/);
+    assert.match(block, /\.file-changes-float-panel \{[^}]*position:\s*absolute/);
+    assert.match(block, /\.file-changes-float-panel \{[^}]*bottom:\s*100%/);
     assert.match(block, /@media \(max-width:\s*680px\)/);
     assert.doesNotMatch(block, /background:\s*#[0-9a-f]{3,8}/i);
 });
 
 test('已撤销的行不再渲染审查/打开按钮，仅保留已撤销状态', () => {
     const source = read('js/app-file-changes.js');
-    const buildRow = source.slice(source.indexOf('function buildRow'), source.indexOf('function render('));
+    const buildRow = source.slice(source.indexOf('function buildRow'), source.indexOf('function renderChip'));
     // 审查 / 打开 / 撤销文件 三枚操作全部只在未撤销分支内渲染
     assert.equal((buildRow.match(/actionButton\(/g) || []).length, 3, 'buildRow 应只有 3 处 actionButton');
     const applied = buildRow.slice(buildRow.indexOf('if (canUndoFile(file))'), buildRow.indexOf('else {'));
@@ -203,25 +202,35 @@ test('模块可独立解析（语法自检）', () => {
     assert.doesNotThrow(() => new vm.Script(source, { filename: 'app-file-changes.js' }));
 });
 
-test('变更卡是 messages-inner 直属行，不再插进助手气泡', () => {
+test('变更入口迁至输入区 chip 行（任务 chip 旁），消息流不再渲染任何变更节点', () => {
     const source = read('js/app-file-changes.js');
     const upsert = source.slice(source.indexOf('function upsert('), source.indexOf('window.onFileChangesChunk'));
-    // 不得再借用助手正文气泡的插入路径
+    // 不得再借用助手正文气泡的插入路径，也不得再向会话容器（消息流）挂任何节点
     assert.doesNotMatch(upsert, /ensureAssistantBubble/);
     assert.doesNotMatch(upsert, /insertBeforeActions/);
-    // 直属行 append 到会话容器，按 run 分组
-    assert.match(upsert, /row\.className = 'file-changes-run-row'/);
-    assert.match(upsert, /sess\.container\.appendChild\(row\)/);
-    assert.match(upsert, /row\.setAttribute\('data-run-id', runKey\)/);
+    assert.doesNotMatch(upsert, /file-changes-run-row/);
+    assert.doesNotMatch(source, /file-changes-run-row|file-changes-card|file-changes-pill/);
+    assert.doesNotMatch(source, /sess\.container/);
+    // chip 紧跟任务 chip（同一 chip 容器内），面板位于 chip 之后
+    const html = read('chat.html');
+    const wrap = html.slice(html.indexOf('id="chatTodoChipWrap"'), html.indexOf('id="chatDropZone"'));
+    assert.ok(wrap.indexOf('id="chatTodoChip"') < wrap.indexOf('id="chatFileChangesChip"'), '变更 chip 应在任务 chip 之后');
+    assert.ok(wrap.indexOf('id="chatFileChangesChip"') < wrap.indexOf('id="chatQueueChip"'), '变更 chip 应在队列 chip 之前');
+    assert.ok(html.indexOf('id="chatFileChangesPanel"') > html.indexOf('id="chatFileChangesChip"'), '面板应位于 chip 之后');
+    assert.ok(html.includes('id="fileChangesPanelBody"'), '缺少变更面板列表容器');
+    assert.ok(html.includes('id="fileChangesPanelActions"'), '缺少变更面板操作容器');
 });
 
-test('同一 run 的后续 revision 原地更新，旧 revision 丢弃，卡片缺失时允许重建', () => {
+test('同一 run 的后续 revision 原地更新，旧 revision 丢弃，同快照不重复渲染', () => {
     const source = read('js/app-file-changes.js');
     const upsert = source.slice(source.indexOf('function upsert('), source.indexOf('window.onFileChangesChunk'));
     assert.match(upsert, /if \(previous && revision < previousRevision\) return;/);
-    // 相同 revision 只有在卡片仍在时才跳过，避免 DOM 被 LRU 清空后再也建不回来
-    assert.match(upsert, /revision === previousRevision && card\) return;/);
-    assert.match(upsert, /var created = !card;/);
+    // 相同 revision 只有在 chip 仍在展示同一快照时才跳过
+    assert.match(upsert, /revision === previousRevision && chipShows\(runKey, revision\)\) return;/);
+    assert.match(upsert, /var created = !previous;/);
+    // 「最新一轮」门禁：updatedAt 不早于当前展示轮才能接管入口
+    assert.match(upsert, /sess\._fileChangesLatestRun = runKey;/);
+    assert.match(source, /function chipShows\(runKey, revision\) \{/);
 });
 
 test('file_changes 为被动事件：不推进 activeRunId、不伪造流式状态', () => {
@@ -232,11 +241,11 @@ test('file_changes 为被动事件：不推进 activeRunId、不伪造流式状�
     assert.match(streaming, /file_changes 可能在 run 收尾后延迟到达[\s\S]{0,400}?if \(chunk\.type === 'file_changes'\)/);
 });
 
-test('会话 LRU 淘汰同时清理文件变更快照，避免 DOM 与状态不同生共死', () => {
+test('会话 LRU 淘汰同时清理文件变更快照，避免展示与状态不同生共死', () => {
     const base = read('js/app-base.js');
     const evict = base.slice(base.indexOf('function evictInactiveSessions'), base.indexOf('/* ===== Per-Session Input Draft ====='));
     assert.match(evict, /sess\._fileChangesByRun = \{\};/);
-    assert.match(evict, /sess\._fileChangesExpanded = \{\};/);
+    assert.match(evict, /sess\._fileChangesLatestRun = null;/);
     assert.match(evict, /sess\._fileChangesReconciledAt = \{\};/);
     assert.match(evict, /sess\._fileChangesReplayPending = null;/);
 });
@@ -297,7 +306,7 @@ test('openInEditor 保留 rootOverride，跨项目退回只读查看器并防重
     assert.match(code, /delete openingFiles\[openKey\]/);
 });
 
-test('无文件变更的 run 不生成卡片：空快照在 upsert 入口短路', () => {
+test('无文件变更的 run 不生成任何入口：空快照在 upsert 入口短路', () => {
     const source = read('js/app-file-changes.js');
     const upsert = source.slice(source.indexOf('function upsert('), source.indexOf('window.onFileChangesChunk'));
     assert.match(upsert, /if \(!Array\.isArray\(summary\.files\) \|\| !summary\.files\.length\) return;/);
@@ -306,22 +315,50 @@ test('无文件变更的 run 不生成卡片：空快照在 upsert 入口短路'
         '空快照守卫应在缓存写入之前');
 });
 
-test('变更按钮采用任务 chip 形态：数量徽标展示文件数，展开列表独立成卡', () => {
+test('变更入口采用任务 chip 形态：数量徽标展示文件数，点击弹出变更面板', () => {
     const source = read('js/app-file-changes.js');
-    const header = source.slice(source.indexOf('function headerHtml'), source.indexOf('function fillHeadActions'));
-    assert.match(header, /file-changes-pill/);
-    assert.match(header, /file-changes-badge/);
+    const chip = source.slice(source.indexOf('function chipInnerHtml'), source.indexOf('function fillHeadActions'));
+    assert.match(chip, /file-changes-badge/);
     // 徽标数字与文件数同源（fileCount 优先，缺失回落 files.length）
-    assert.match(header, /num\(summary\.fileCount\) != null \? num\(summary\.fileCount\) : files\.length/);
-    // 旧的「N 个文件」整句文案不再出现在头部
-    assert.doesNotMatch(header, /file-changes-summary/);
+    assert.match(chip, /num\(summary\.fileCount\) != null \? num\(summary\.fileCount\) : files\.length/);
+    // 旧的「N 个文件」整句文案不再出现在入口
+    assert.doesNotMatch(chip, /file-changes-summary/);
 
     const css = read('css/app.css');
-    const block = css.slice(css.indexOf('.file-changes-run-row'), css.indexOf('/* Batch tool group'));
-    assert.match(block, /\.file-changes-pill \{[^}]*border-radius:\s*14px/);
-    assert.match(block, /\.file-changes-pill \{[^}]*background:\s*var\(--bg-hover\)/);
-    assert.match(block, /\.file-changes-header:hover \.file-changes-pill \{[^}]*border-color:\s*var\(--accent\)/);
+    const block = css.slice(css.indexOf('.file-changes-chip'), css.indexOf('/* Batch tool group'));
+    assert.match(block, /\.file-changes-chip \{[^}]*border-radius:\s*14px/);
+    assert.match(block, /\.file-changes-chip \{[^}]*background:\s*var\(--bg-hover\)/);
+    assert.match(block, /\.file-changes-chip:hover \{[^}]*border-color:\s*var\(--accent\)/);
     assert.match(block, /\.file-changes-badge \{[^}]*border:\s*1px solid var\(--border-color\)/);
-    assert.match(block, /\.file-changes-card\.expanded \.file-changes-body \{[^}]*display:\s*block/);
+    assert.match(block, /\.file-changes-float-panel\.show \{[^}]*display:\s*flex/);
     assert.match(block, /@media \(max-width:\s*680px\)/);
+});
+
+test('chip 与面板交互接线：显隐汇算、会话切换、面板互斥、点击开合', () => {
+    const source = read('js/app-file-changes.js');
+    // chip 显隐先置位、再由共享函数汇算容器显隐
+    assert.match(source, /window\._fileChangesChipVisible = !!show;/);
+    assert.match(source, /window\.updateChipWrapVisibility/);
+    // 面板开合：show 类 + display 切换；点外收起委托到 document
+    assert.match(source, /panelEl\.classList\.add\('show'\)/);
+    assert.match(source, /function hideFileChangesPanel\(\)/);
+    assert.match(source, /target\.closest\('#chatFileChangesChip'\)/);
+    assert.match(source, /target\.closest\('#chatFileChangesPanel'\)/);
+    assert.match(source, /window\.hideFileChangesPanel = hideFileChangesPanel;/);
+    // 打开面板走统一互斥
+    assert.match(source, /window\.closeAllToolbarPanels\(\)/);
+    // 会话切换出口
+    assert.match(source, /window\.refreshFileChangesChip = function \(sid\)/);
+
+    const ui = read('js/app-ui.js');
+    assert.match(ui, /window\._fileChangesChipVisible = false;/);
+    const wrapFn = ui.slice(ui.indexOf('function updateChipWrapVisibility'), ui.indexOf('window.updateChipWrapVisibility = updateChipWrapVisibility'));
+    assert.match(wrapFn, /window\._fileChangesChipVisible/);
+
+    const streaming = read('js/app-streaming.js');
+    assert.match(streaming, /if \(window\.refreshFileChangesChip\) window\.refreshFileChangesChip\(sid\);/);
+
+    const history = read('js/app-history.js');
+    const closer = history.slice(history.indexOf('function closeAllToolbarPanels'), history.indexOf('window.closeAllToolbarPanels = closeAllToolbarPanels'));
+    assert.match(closer, /window\.hideFileChangesPanel\(\)/);
 });

@@ -1,26 +1,39 @@
 package com.gourdai.core.portal.web;
 
+import com.gourdai.core.portal.web.thinking.ModelProfiles;
+import com.gourdai.core.portal.web.thinking.ReasoningCapabilities;
+import com.gourdai.core.portal.web.thinking.ReasoningCapability;
+import com.gourdai.core.portal.web.thinking.ThinkingLevel;
+import org.noear.solon.ai.chat.ChatConfigReadonly;
+import org.noear.solon.ai.chat.ChatModel;
 import org.noear.solon.ai.chat.ModelOptionsAmend;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
- * 思考深度（推理力度）——<b>按接口类型各自的档位</b>注入，不是一套统一档位。
+ * 思考深度（推理力度）——<b>统一 5 档</b>，按模型能力翻译成各厂商的原生参数。
  *
- * <p>各接口的入口参数与取值天生不同，这里按模型的 <b>接口类型（standard）</b> 分别处理，
- * 前端也按接口展示对应的那一组档位（见 app-history.js 的 THINKING_PROFILES，与本类保持同步）：</p>
- * <ul>
- *   <li><b>openai</b>（Chat Completions）: {@code reasoning_effort} = minimal/low/medium/high（顶层透传，4 档）</li>
- *   <li><b>openai-responses</b>（Responses）: {@code reasoning.effort} = minimal/low/medium/high（4 档）</li>
- *   <li><b>gemini</b>（3.x generateContent）: {@code generationConfig.thinkingConfig.thinkingLevel} = MINIMAL/LOW/MEDIUM/HIGH（4 档）</li>
- *   <li><b>anthropic</b>（Messages）: {@code thinking.budget_tokens}（数值，3 档 low/medium/high）——
- *       solon-ai 的 Anthropic dialect 原生只拼 budget_tokens，故这一路用数值预算而非 effort 字符串。</li>
- *   <li>ollama 及其它: 与 openai 一样按 {@code reasoning_effort} 顶层透传</li>
- * </ul>
+ * <p>本类是「档位 → 请求参数」的注入门面，自身不再持有任何档位表。四层职责分工：</p>
+ * <ol>
+ *   <li>{@link ThinkingLevel}——统一档位枚举（AUTO + LOW/MEDIUM/HIGH/XHIGH/MAX）；</li>
+ *   <li>{@link ReasoningCapability}——单模型的推理能力（形态 / 值域 / 预算区间）；</li>
+ *   <li>{@link ReasoningCapabilities}——能力解析，三级回退：用户覆写 &gt; 内置规则 &gt; 接口兜底；</li>
+ *   <li>本类——按能力形态拼装 wire 结构并保证幂等。</li>
+ * </ol>
  *
- * <p>空值 / "off" 表示不注入任何思考参数（用模型默认行为）。前端发来的就是各接口对应的原始档位值，
- * 后端只负责按 standard 包成对应的请求参数形状，并在切换/关闭时清理旧键（幂等）。</p>
+ * <h3>与旧实现的关键差异</h3>
+ * <p>旧实现按<b>接口类型</b>分流并把「Anthropic 用哪种格式」写成编译期常量，
+ * 而推理能力实际是<b>按模型</b>而非按接口的——同属 anthropic 接口的
+ * {@code claude-sonnet-4-5} 只认 budget_tokens、{@code claude-sonnet-5} 只认 output_config.effort，
+ * 一刀切必然有一方 400。现改为按模型解析能力，接口类型仅作为最后兜底。</p>
+ *
+ * <h3>AUTO 语义</h3>
+ * <p>{@code AUTO} = 不注入任何思考参数，跟随厂商默认。它<b>不是</b>「关闭思考」——
+ * 本系统不提供关闭思考的能力（既定设计取舍）。</p>
  *
  * @author oisin
  */
@@ -28,100 +41,209 @@ public final class ThinkingDepth {
     private ThinkingDepth() {
     }
 
-    /** 关闭档位的编码。 */
-    public static final String OFF = "off";
+    /**
+     * 默认档位编码：不注入任何思考参数，跟随模型自身默认行为。
+     *
+     * <p>历史上此常量名为 {@code OFF}、值为 {@code "off"}，但其真实行为一直是「不注入」而非
+     * 「关闭思考」，导致命名与 i18n 文案（"默认 / 跟随模型默认行为"）长期矛盾。
+     * 现更名为 AUTO 消除歧义；历史落盘的 {@code "off"} 由
+     * {@link ThinkingLevel#from(String)} 静默迁移，存量数据零感知。</p>
+     */
+    public static final String AUTO = ThinkingLevel.AUTO.code();
+
+    /** 本类管理的请求键，切换/降级时统一清理，保证幂等。 */
+    private static final String[] MANAGED_KEYS = {"thinking", "reasoning", "reasoning_effort"};
 
     /**
-     * Anthropic 是否使用「现代」格式（adaptive thinking + output_config.effort）。
-     * <p>true（默认）：发 {@code thinking:{type:"adaptive"}} + {@code output_config:{effort:...}}，
-     * 适配现代官方 Claude（Opus 4.6+/Sonnet 4.6+/Sonnet 5/Fable 5）——这些模型已废弃 budget_tokens，传了会 400。
-     * solon-ai 的 Anthropic dialect 虽只特判老的 budget_tokens，但 adaptive 的 type 它照样透传、
-     * output_config 作为未知键也整体透传，故现代格式无需改 dialect 即可生效。</p>
-     * <p>false：回退老格式 {@code thinking:{type:"enabled", budget_tokens:N}}，用于只认老接口的中转/旧版 Claude。</p>
+     * 规范化档位编码：null / 空 / 不识别 → {@link #AUTO}；并迁移历史值。
+     *
+     * @param depth 原始档位编码
+     * @return 规范化后的编码，永不为 null
      */
-    private static final boolean ANTHROPIC_USE_EFFORT = true;
-
-    /** effort 系（openai / openai-responses）合法档位。 */
-    private static final java.util.Set<String> EFFORT_LEVELS =
-            new java.util.LinkedHashSet<>(java.util.Arrays.asList("minimal", "low", "medium", "high"));
-
-    /** Gemini thinkingLevel 合法档位（小写存储，注入时转大写）。 */
-    private static final java.util.Set<String> GEMINI_LEVELS =
-            new java.util.LinkedHashSet<>(java.util.Arrays.asList("minimal", "low", "medium", "high"));
-
-    /** Anthropic 现代 effort 合法档位（output_config.effort）。 */
-    private static final java.util.Set<String> ANTHROPIC_EFFORT_LEVELS =
-            new java.util.LinkedHashSet<>(java.util.Arrays.asList("low", "medium", "high", "xhigh", "max"));
-
-    /** Anthropic 老格式 budget_tokens 档位 → 预算（需 < max_tokens，dialect 默认 max_tokens=32000）。 */
-    private static final Map<String, Integer> ANTHROPIC_BUDGETS = new LinkedHashMap<>();
-
-    static {
-        ANTHROPIC_BUDGETS.put("low", 4000);
-        ANTHROPIC_BUDGETS.put("medium", 12000);
-        ANTHROPIC_BUDGETS.put("high", 24000);
-    }
-
-    /** 当前 Anthropic 合法档位集（随模式切换）。 */
-    private static java.util.Set<String> anthropicLevels() {
-        return ANTHROPIC_USE_EFFORT ? ANTHROPIC_EFFORT_LEVELS : ANTHROPIC_BUDGETS.keySet();
-    }
-
-    /** 规范化 standard 到小写；null → 空串。 */
-    private static String std(String standard) {
-        return standard == null ? "" : standard.trim().toLowerCase();
-    }
-
-    /** 规范化档位编码：null/空/不识别 → OFF；否则小写。 */
     public static String normalize(String depth) {
-        if (depth == null) {
-            return OFF;
-        }
-        String d = depth.trim().toLowerCase();
-        return d.isEmpty() ? OFF : d;
+        return ThinkingLevel.normalize(depth);
     }
 
     /**
-     * 校验某档位在指定接口下是否有效；无效（含 OFF）返回 false。
-     * 供 select 端点回显规范化用——切到不支持该值的接口时前端会显示为关闭。
+     * 校验档位对指定模型是否真正有效（能产生可区分的效果）。
+     *
+     * <p>供选择端点回显与前端收缩使用：切到不支持该档位的模型时应回落为 AUTO。</p>
+     *
+     * @param model 目标模型
+     * @param depth 档位编码
+     * @return 该档位在此模型上是否可用
      */
-    public static boolean isValidFor(String standard, String depth) {
-        String d = normalize(depth);
-        if (OFF.equals(d)) {
+    public static boolean isValidFor(ChatModel model, String depth) {
+        ThinkingLevel level = ThinkingLevel.from(depth);
+        if (level.isAuto()) {
             return false;
         }
-        String s = std(standard);
-        if (s.contains("anthropic") || s.contains("claude")) {
-            return anthropicLevels().contains(d);
-        }
-        if (s.contains("gemini") || s.contains("google")) {
-            return GEMINI_LEVELS.contains(d);
-        }
-        // openai / openai-responses / ollama / 其它 effort 系
-        return EFFORT_LEVELS.contains(d);
+        return capabilityOf(model).selectableLevels().contains(level);
     }
 
     /**
-     * 按接口类型把档位注入到请求选项里。
+     * 列出某模型真正可区分的档位编码——前端据此收缩档位选择器（策略 S2）。
      *
-     * <p>先清掉本类管理的所有键（幂等，切换/关闭时不残留上一轮参数），再按当前接口写对应键。
-     * 对无法识别或不适用于该接口的档位值，按关闭处理（只清理不注入）。</p>
+     * <p>返回空列表表示该模型无可调档位，前端应隐藏整个选择器（只保留"默认"）。</p>
      *
-     * @param options  本轮请求选项（{@link ModelOptionsAmend}，如 ReAct 的 options）
-     * @param standard 模型接口类型（ChatModel#getStandardOrProvider）
-     * @param depth    档位编码（各接口各自的取值，如 minimal/low/medium/high；off/空=关闭）
+     * @param model 目标模型
+     * @return 可选档位编码（不含 AUTO，AUTO 由前端固定置顶）
      */
-    @SuppressWarnings("unchecked")
+    public static List<String> selectableCodes(ChatModel model) {
+        List<String> codes = new ArrayList<>();
+        for (ThinkingLevel level : capabilityOf(model).selectableLevels()) {
+            codes.add(level.code());
+        }
+        return codes;
+    }
+
+    /**
+     * 列出某模型配置真正可区分的档位编码（无需构造 ChatModel 实例）。
+     *
+     * @param config 模型配置
+     * @return 可选档位编码
+     */
+    public static List<String> selectableCodes(String standard, String modelName,
+                                               Map<String, Object> capabilities) {
+        List<String> codes = new ArrayList<>();
+        ReasoningCapability cap = ReasoningCapabilities.resolve(standard, modelName, capabilities);
+        for (ThinkingLevel level : cap.selectableLevels()) {
+            codes.add(level.code());
+        }
+        return codes;
+    }
+
+    /**
+     * 按模型能力把档位注入到请求选项。
+     *
+     * <p>先清掉本类管理的所有键（幂等，切换/降级不残留上一轮参数），再按能力形态写对应键。
+     * 档位为 AUTO、模型不支持推理控制、或不可调档时，只清理不注入。</p>
+     *
+     * @param options 本轮请求选项
+     * @param model   目标模型（用于解析推理能力；为 null 时退化为接口兜底）
+     * @param depth   档位编码
+     */
+    public static void applyTo(ModelOptionsAmend<?, ?> options, ChatModel model, String depth) {
+        applyInternal(options, capabilityOf(model), ThinkingLevel.from(depth), maxOutputOf(model));
+    }
+
+    /**
+     * 仅凭接口类型注入（兼容入口）。
+     *
+     * <p>无模型信息时只能按接口兜底，无法规避按模型而异的格式差异，
+     * 调用方应尽量改用 {@link #applyTo(ModelOptionsAmend, ChatModel, String)}。</p>
+     *
+     * @param options  本轮请求选项
+     * @param standard 接口类型
+     * @param depth    档位编码
+     */
     public static void applyTo(ModelOptionsAmend<?, ?> options, String standard, String depth) {
+        applyInternal(options, ReasoningCapabilities.resolve(standard, null, null),
+                ThinkingLevel.from(depth), null);
+    }
+
+    // ------------------------------------------------------------------
+    // 内部实现
+    // ------------------------------------------------------------------
+
+    @SuppressWarnings("unchecked")
+    private static void applyInternal(ModelOptionsAmend<?, ?> options, ReasoningCapability cap,
+                                      ThinkingLevel level, Integer maxOutput) {
         if (options == null) {
             return;
         }
 
-        // 先清理本类管理的键，保证幂等
-        options.optionRemove("thinking");
-        options.optionRemove("reasoning");
-        options.optionRemove("reasoning_effort");
-        // 清理 Anthropic 现代格式的 output_config.effort（保留调用方可能设的其它 output_config 字段）
+        clearManagedKeys(options);
+
+        if (level.isAuto() || cap.isNone()) {
+            return;
+        }
+
+        switch (cap.shape()) {
+            case ANTHROPIC_EFFORT: {
+                String effort = cap.resolveEffort(level);
+                if (effort == null) {
+                    return;
+                }
+                // 现代 Claude：adaptive thinking + output_config.effort
+                Map<String, Object> thinking = new LinkedHashMap<>();
+                thinking.put("type", "adaptive");
+                options.optionSet("thinking", thinking);
+
+                Map<String, Object> outputConfig = new LinkedHashMap<>();
+                Object existing = options.option("output_config");
+                if (existing instanceof Map) {
+                    outputConfig.putAll((Map<String, Object>) existing);
+                }
+                outputConfig.put("effort", effort);
+                options.optionSet("output_config", outputConfig);
+                break;
+            }
+            case ANTHROPIC_BUDGET: {
+                Integer budget = cap.resolveBudget(level, maxOutput);
+                if (budget == null) {
+                    return;
+                }
+                // 经典 Claude：thinking.budget_tokens（必须严格小于 max_tokens）
+                Map<String, Object> thinking = new LinkedHashMap<>();
+                thinking.put("type", "enabled");
+                thinking.put("budget_tokens", budget);
+                options.optionSet("thinking", thinking);
+                break;
+            }
+            case RESPONSES_EFFORT: {
+                String effort = cap.resolveEffort(level);
+                if (effort == null) {
+                    return;
+                }
+                Map<String, Object> reasoning = new LinkedHashMap<>();
+                reasoning.put("effort", effort);
+                options.optionSet("reasoning", reasoning);
+                break;
+            }
+            case GEMINI_LEVEL: {
+                String effort = cap.resolveEffort(level);
+                if (effort == null) {
+                    return;
+                }
+                Map<String, Object> thinkingConfig = new LinkedHashMap<>();
+                // 必须固定 Locale.ROOT：土耳其语 Locale 下 "high".toUpperCase() 会得到 "HİGH"
+                // （带点大写 I），发给 Gemini 是非法枚举值，直接 400。
+                thinkingConfig.put("thinkingLevel", effort.toUpperCase(Locale.ROOT));
+                putGenerationConfig(options, thinkingConfig);
+                break;
+            }
+            case GEMINI_BUDGET: {
+                Integer budget = cap.resolveBudget(level, maxOutput);
+                if (budget == null) {
+                    return;
+                }
+                Map<String, Object> thinkingConfig = new LinkedHashMap<>();
+                thinkingConfig.put("thinkingBudget", budget);
+                putGenerationConfig(options, thinkingConfig);
+                break;
+            }
+            case TOGGLE:
+                // 仅支持开关的模型：这类模型默认即开启思考，且本系统不提供关闭能力，
+                // 故任何档位都等价于「跟随默认」——不注入，避免向 OpenAI 兼容口发出无效键。
+                break;
+            default:
+                // OPENAI_EFFORT 及其它 effort 系：顶层透传
+                String effort = cap.resolveEffort(level);
+                if (effort != null) {
+                    options.optionSet("reasoning_effort", effort);
+                }
+                break;
+        }
+    }
+
+    /** 清理本类管理的全部键（含嵌套在 output_config / generationConfig 里的部分）。 */
+    @SuppressWarnings("unchecked")
+    private static void clearManagedKeys(ModelOptionsAmend<?, ?> options) {
+        for (String key : MANAGED_KEYS) {
+            options.optionRemove(key);
+        }
+        // 只摘掉自己写入的 effort，保留调用方可能设置的其它 output_config 字段
         Object oc = options.option("output_config");
         if (oc instanceof Map) {
             ((Map<String, Object>) oc).remove("effort");
@@ -133,54 +255,60 @@ public final class ThinkingDepth {
         if (gc instanceof Map) {
             ((Map<String, Object>) gc).remove("thinkingConfig");
         }
+    }
 
-        String d = normalize(depth);
-        if (OFF.equals(d) || !isValidFor(standard, d)) {
-            return;
+    /** 合并写入 generationConfig.thinkingConfig，保留已有的其它生成参数。 */
+    @SuppressWarnings("unchecked")
+    private static void putGenerationConfig(ModelOptionsAmend<?, ?> options, Map<String, Object> thinkingConfig) {
+        Map<String, Object> generationConfig = new LinkedHashMap<>();
+        Object existing = options.option("generationConfig");
+        if (existing instanceof Map) {
+            generationConfig.putAll((Map<String, Object>) existing);
         }
+        generationConfig.put("thinkingConfig", thinkingConfig);
+        options.optionSet("generationConfig", generationConfig);
+    }
 
-        String s = std(standard);
-
-        if (s.contains("anthropic") || s.contains("claude")) {
-            if (ANTHROPIC_USE_EFFORT) {
-                // 现代格式：adaptive thinking + output_config.effort（现代官方 Claude；dialect 透传 type/未知键）
-                Map<String, Object> thinking = new LinkedHashMap<>();
-                thinking.put("type", "adaptive");
-                options.optionSet("thinking", thinking);
-
-                Map<String, Object> outputConfig = new LinkedHashMap<>();
-                Object existing = options.option("output_config");
-                if (existing instanceof Map) {
-                    outputConfig.putAll((Map<String, Object>) existing);
-                }
-                outputConfig.put("effort", d);
-                options.optionSet("output_config", outputConfig);
-            } else {
-                // 老格式：thinking.budget_tokens（只认老接口的中转/旧版 Claude）
-                Integer budget = ANTHROPIC_BUDGETS.get(d);
-                Map<String, Object> thinking = new LinkedHashMap<>();
-                thinking.put("type", "enabled");
-                thinking.put("budget_tokens", budget);
-                options.optionSet("thinking", thinking);
-            }
-        } else if (s.contains("responses")) {
-            Map<String, Object> reasoning = new LinkedHashMap<>();
-            reasoning.put("effort", d);
-            options.optionSet("reasoning", reasoning);
-        } else if (s.contains("gemini") || s.contains("google")) {
-            // 合并已有 generationConfig，只补 thinkingConfig.thinkingLevel（Gemini 3.x，值大写）
-            Map<String, Object> generationConfig = new LinkedHashMap<>();
-            Object existing = options.option("generationConfig");
-            if (existing instanceof Map) {
-                generationConfig.putAll((Map<String, Object>) existing);
-            }
-            Map<String, Object> thinkingConfig = new LinkedHashMap<>();
-            thinkingConfig.put("thinkingLevel", d.toUpperCase());
-            generationConfig.put("thinkingConfig", thinkingConfig);
-            options.optionSet("generationConfig", generationConfig);
-        } else {
-            // openai（Chat Completions）、ollama 及其它 effort 系接口：顶层透传
-            options.optionSet("reasoning_effort", d);
+    /**
+     * 解析模型的推理能力（模型为 null 时给出 openai 兜底）。
+     *
+     * <p><b>用户覆写必须经 {@link ModelProfiles} 查询，不能从 ChatModel 上探测。</b>
+     * solon-ai 的 {@code ChatModel} 持有的是包装器 {@code ChatConfigReadonly}，
+     * 它与本地 {@code ModelDo} 并非同一继承体系（{@code ChatConfigReadonly → Object}，
+     * 而 {@code ModelDo → ChatConfig → AiConfig → Object}），
+     * 任何 {@code instanceof} / 强转探测在运行时都恒为 false。
+     * 历史实现曾用 {@code Object} 中转「绕过编译错误」，结果是覆写分支永不执行的死代码：
+     * UI 端点直接从 {@code ModelDo} 取覆写、如实显示扩展后的档位，而这里取不到，
+     * 于是前后端不一致——用户看着生效，实际仍发兜底值。</p>
+     *
+     * @see ModelProfiles
+     */
+    private static ReasoningCapability capabilityOf(ChatModel model) {
+        if (model == null) {
+            return ReasoningCapabilities.resolve(null, null, null);
         }
+        String modelName = modelNameOf(model);
+        return ReasoningCapabilities.resolve(model.getStandardOrProvider(), modelName,
+                ModelProfiles.capabilitiesOf(modelName));
+    }
+
+    /**
+     * 模型的最大输出长度——预算换算的基数。
+     *
+     * <p>本地模型配置没有独立的 output limit 字段，故取自能力覆写里的
+     * {@code capabilities.maxOutput}；未配置时返回 null，由
+     * {@link ReasoningCapability#resolveBudget} 落到兜底基数 32000。
+     * 该兜底与旧实现的 Anthropic 预算基数完全一致（旧值
+     * low=4000/medium=12000/high=24000 正是 32000 的 12.5%/37.5%/75%），
+     * 故未配置时预算路径零回归。</p>
+     */
+    private static Integer maxOutputOf(ChatModel model) {
+        return model == null ? null : ModelProfiles.maxOutputOf(modelNameOf(model));
+    }
+
+    /** 取模型名（配置缺失时返回 null）。 */
+    private static String modelNameOf(ChatModel model) {
+        ChatConfigReadonly config = model.getConfig();
+        return (config == null) ? null : config.getModel();
     }
 }

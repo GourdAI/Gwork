@@ -1399,14 +1399,16 @@ function getFileIcon(fileName) {
 // 全局队列处理状态
 var _queueProcessing = {}; // { sessionId: boolean }
 
-/* 输入框上方的 chip 容器（#chatTodoChipWrap）同时承载 todo chip、queue chip
-   与执行中的键位提示条，三者任一可见即应显示该容器。
-   由 app-todos.js / app-base.js / 本模块分别置位后统一汇算。 */
+/* 输入框上方的 chip 容器（#chatTodoChipWrap）同时承载 todo chip、变更 chip、
+   queue chip 与执行中的键位提示条，任一可见即应显示该容器。
+   由 app-todos.js / app-file-changes.js / app-base.js / 本模块分别置位后统一汇算。 */
 window._queueChipVisible = false;
+window._fileChangesChipVisible = false;
 function updateChipWrapVisibility() {
     var $wrap = $('#chatTodoChipWrap');
     if (!$wrap.length) return;
-    var visible = !!window._queueChipVisible || !!window._todoChipVisible || !!window._runHintVisible;
+    var visible = !!window._queueChipVisible || !!window._todoChipVisible || !!window._runHintVisible
+        || !!window._fileChangesChipVisible;
     $wrap.css('display', visible ? 'flex' : 'none');
 }
 window.updateChipWrapVisibility = updateChipWrapVisibility;

@@ -27,6 +27,8 @@ import com.gourdai.agent.react.intercept.HITLTask;
 import com.gourdai.agent.react.intercept.ContextCompressionInterceptor;
 import com.gourdai.agent.event.ToolCallStartEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
+import com.gourdai.agent.event.ToolCallDraftEvent;
+import com.gourdai.agent.event.ToolCallArgsDeltaEvent;
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.react.task.ReasonTask;
 import com.gourdai.agent.event.ReasonEndEvent;
@@ -207,11 +209,10 @@ public class WebStreamBuilder {
     private Flux<WebChunk> buildTurnFlux(AgentSession session, ReActAgent agent, ChatModel chatModel, String sessionCwd, Prompt prompt, long turnStartMs,
                                          String thinkingDepthOverride) {
         // 思考深度：优先用本轮显式指定的档位（如 Loop 任务），否则回退会话选择的档位；
-        // 再结合当前模型接口类型（standard）翻译成各家 API 各自的参数
+        // 再结合当前模型的推理能力（按模型而非按接口）翻译成各家 API 各自的参数
         String thinkingDepth = thinkingDepthOverride != null
                 ? ThinkingDepth.normalize(thinkingDepthOverride)
                 : ThinkingDepth.normalize(session.getContext().getAs(HarnessEngine.CTX_THINKING_DEPTH));
-        String modelStandard = (chatModel == null) ? null : chatModel.getStandardOrProvider();
 
         // 本轮（turn）相位状态机。per-turn 局部持有：buildTurnFlux 每次订阅（Flux.defer）都会重建，
         // 因此「继续/恢复」的新一轮不会继承上一轮的相位。
@@ -233,8 +234,8 @@ public class WebStreamBuilder {
                     o.maxTurns(engine.getMaxTurns());
                     o.sessionWindowSize(engine.getSessionWindowSize());
 
-                    // 思考深度按接口类型注入（OFF/切换档位/接口不支持时会清理旧键，保证幂等）
-                    ThinkingDepth.applyTo(o, modelStandard, thinkingDepth);
+                    // 思考深度按模型推理能力注入（AUTO/切换档位/模型不支持时会清理旧键，保证幂等）
+                    ThinkingDepth.applyTo(o, chatModel, thinkingDepth);
 
                     // 把本轮生效的档位经 toolContext 透传给工具链。Loop 定时任务的 thinkingDepthOverride
                     // 刻意不写入会话上下文（避免污染用户前台选择），若不透传，TaskTalent 只能读到会话级
@@ -306,7 +307,7 @@ public class WebStreamBuilder {
                                     ? String.valueOf(task.getArgs().get("command"))
                                     : null;
 
-                            WebChunk hitlChunk = WebChunk.ofHitl(task.getToolName(), command);
+                            WebChunk hitlChunk = WebChunk.ofHitl(task.getToolName(), command, task.getActionId());
                             hitlChunk.setPhase(WebChunk.PHASE_HITL);
 
                             WebChunk doneChunk = WebChunk.ofDone();
@@ -356,6 +357,12 @@ public class WebStreamBuilder {
         }
         if (chunk instanceof ToolCallStartEvent) {
             return oneFrame(onToolCallStartEvent((ToolCallStartEvent) chunk));
+        }
+        if (chunk instanceof ToolCallDraftEvent) {
+            return oneFrame(onToolCallDraftEvent((ToolCallDraftEvent) chunk));
+        }
+        if (chunk instanceof ToolCallArgsDeltaEvent) {
+            return oneFrame(onToolCallArgsDeltaEvent((ToolCallArgsDeltaEvent) chunk));
         }
         if (chunk instanceof ToolCallEndEvent) {
             return oneFrame(onToolCallEndEvent((ToolCallEndEvent) chunk));
@@ -422,6 +429,12 @@ public class WebStreamBuilder {
             return WebChunk.PHASE_WAITING;
         }
         if (event instanceof ToolCallStartEvent) {
+            return WebChunk.PHASE_TOOL;
+        }
+        // 参数生成期已经在「弄工具」了：相位推到 tool，底部指示器随之让位（前端对 PHASE_TOOL 短路），
+        // 指示语义改由骨架卡承担。修复了旧行为：工具参数吐到一半时相位却停在 PHASE_TEXT，
+        // 底部持续显示「输出中」而屏幕零增长。
+        if (event instanceof ToolCallDraftEvent || event instanceof ToolCallArgsDeltaEvent) {
             return WebChunk.PHASE_TOOL;
         }
         if (event instanceof ToolCallEndEvent) {
@@ -563,6 +576,37 @@ public class WebStreamBuilder {
         projectToolCommon(event, startChunk);
         fillEditDiff(startChunk.getArgs());
         return startChunk;
+    }
+
+
+    /**
+     * 处理工具调用草稿事件（模型刚确定函数名、参数尚在生成）。
+     *
+     * <p>过滤规则必须与 {@link #onToolCallStartEvent} 严格一致（同用
+     * {@code isStartVisible}）：否则会给内部工具建出骨架卡，而它永远等不到
+     * 配对的 action_start / action_end。</p>
+     */
+    private WebChunk onToolCallDraftEvent(ToolCallDraftEvent event) {
+        if (!WebToolVisibilityPolicy.isStartVisible(event.getToolName())) {
+            return WebChunk.EMPTY;
+        }
+
+        WebChunk draftChunk = WebChunk.ofActionDraft();
+        projectToolCommon(event, draftChunk);
+        return draftChunk;
+    }
+
+    /**
+     * 处理工具参数生成进度事件。过滤规则同 {@link #onToolCallDraftEvent}。
+     */
+    private WebChunk onToolCallArgsDeltaEvent(ToolCallArgsDeltaEvent event) {
+        if (!WebToolVisibilityPolicy.isStartVisible(event.getToolName())) {
+            return WebChunk.EMPTY;
+        }
+
+        WebChunk argsChunk = WebChunk.ofActionArgs(event.getArgsBytes());
+        projectToolCommon(event, argsChunk);
+        return argsChunk;
     }
 
 
