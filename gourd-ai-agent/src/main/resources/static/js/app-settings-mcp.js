@@ -53,6 +53,7 @@
         var html = '';
         var tWorkspace = GourdI18n.t('settings.mounts.scope_workspace');
         var tEdit = GourdI18n.t('common.edit');
+        var tDelete = GourdI18n.t('common.delete');
         var tEnable = GourdI18n.t('settings.loop.enable');
         var tDisable = GourdI18n.t('settings.loop.disable');
         if (!list || list.length === 0) {
@@ -75,6 +76,7 @@
                     + (detail ? '<div class="mcp-server-detail">' + escapeHtml(detail) + '</div>' : '')
                     + '</div><div class="mcp-server-actions">'
                     + '<button class="mcp-action-btn edit mcp-edit-btn" data-name="' + escapeAttr(name) + '" title="' + tEdit + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>'
+                    + '<button class="mcp-action-btn delete mcp-delete-btn" data-name="' + escapeAttr(name) + '" title="' + tDelete + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>'
                     + '<label class="toggle-switch" title="' + ((item.enabled !== false) ? tDisable : tEnable) + '">'
                     + '<input type="checkbox" ' + (item.enabled !== false ? 'checked' : '') + ' data-name="' + escapeAttr(name) + '" class="mcp-toggle"/>'
                     + '<span class="toggle-slider"></span>'
@@ -91,6 +93,10 @@
             e.stopPropagation();
             var name = $(this).attr('data-name');
             if (name) mcpEditServer(name);
+        })
+        .on('click', '.mcp-delete-btn', function (e) {
+            e.stopPropagation();
+            mcpConfirmRemoveServer($(this).attr('data-name'));
         })
         .on('click', '.mcp-server-item', function (e) {
             if ($(e.target).closest('.toggle-switch').length) return;
@@ -315,6 +321,14 @@
         });
     }
 
+    // 统一的删除确认（列表行删除按钮与表单页删除按钮共用）
+    function mcpConfirmRemoveServer(name) {
+        if (!name) return;
+        layConfirm(GourdI18n.t('settings.confirm_delete') + ' MCP ' + GourdI18n.t('settings.mcp.title') + ' "' + name + '"？', function () {
+            mcpRemoveServer(name);
+        });
+    }
+
     function mcpToggleServer(name, enabled) {
         postJson('/web/settings/mcp/servers/toggle', { name: name, enabled: enabled }, function (resp) {
             if (resp.code !== 200) { showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error'); loadMcpList(); }
@@ -352,11 +366,7 @@
     });
     // MCP 表单 - 删除按钮
     $('#mcpFormDeleteBtn').on('click', function () {
-        var name = mcpEditName;
-        if (!name) return;
-        layConfirm(GourdI18n.t('settings.confirm_delete') + ' MCP ' + GourdI18n.t('settings.mcp.title') + ' "' + name + '"？', function() {
-            mcpRemoveServer(name);
-        });
+        mcpConfirmRemoveServer(mcpEditName);
     });
 
 
