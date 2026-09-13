@@ -1,6 +1,7 @@
 /* ============================================================
    GWork 官网脚本
-   - DOWNLOADS：多端下载唯一配置源（上新平台/改链接只动这里）
+   - 多端下载：读取 downloads/tauri/downloads.json（随发版与安装包同目录上传）动态渲染，
+     发新版只需上传产物，本文件与页面零改动
    - Hero 应用窗口 Agent 任务演示（时间轴动画，可重播）
    - 滚动显现 / UA 识别下载平台
    - 光标追光（背景光晕跟随鼠标，惯性平滑）
@@ -8,37 +9,42 @@
 
 'use strict';
 
-/* ================= 多端下载配置 ================= */
-const DOWNLOADS = {
-  // 安装包统一放在本站 downloads/ 目录（随整站目录一起上传服务器）。
-  // 固定文件名（不含版本号）：发新版时构建产物覆盖同名文件即可，官网代码零改动。
-  // url 为 null 的条目渲染为"即将推出"。
-  platforms: [
-    {
-      id: 'windows',
-      name: 'Windows',
-      rows: [
-        { label: 'Windows（64 位）', fmt: '.exe', url: 'downloads/GWork-Setup.exe' }
-      ]
-    },
-    {
-      id: 'macos',
-      name: 'macOS',
-      rows: [
-        { label: 'macOS（Apple 芯片）', fmt: '.dmg', url: 'downloads/GWork-arm64.dmg' },
-        { label: 'macOS（Intel 芯片）', fmt: '.dmg', url: 'downloads/GWork-x64.dmg' }
-      ]
-    },
-    {
-      id: 'linux',
-      name: 'Linux',
-      rows: [
-        { label: 'Linux x64（免安装）', fmt: '.AppImage', url: 'downloads/GWork.AppImage' },
-        { label: 'Linux x64（Debian/Ubuntu）', fmt: '.deb', url: 'downloads/GWork.deb' }
-      ]
-    }
-  ]
-};
+/* ================= 多端下载（清单驱动） ================= */
+// 下载清单 downloads.json 由发版流水线生成（gourd-ai-tauri/cmd/generate-latest-json.js
+// 的 --site-out），与安装包同放 downloads/tauri/ 并一起上传服务器。
+// 发新版 = 把产物传上去，本文件与页面零改动；清单加载失败时全部置「即将推出」，
+// 绝不产生指向不存在文件的坏链。
+const DOWNLOADS_BASE = 'downloads/tauri/';
+const DOWNLOADS_MANIFEST = DOWNLOADS_BASE + 'downloads.json';
+
+// 展示映射：把清单 files[] 里的 {os, arch, kind} 映射到下载行。
+// 上新平台 / 改产物命名时只动这里，普通发版无需任何改动。
+// （字段契约见生成器头注释；对应契约测试 gourd-ai-tauri/test/release-manifest-contract.js）
+const DOWNLOAD_PLATFORMS = [
+  {
+    id: 'windows',
+    name: 'Windows',
+    rows: [
+      { label: 'Windows（64 位）', fmt: '.exe', match: { os: 'windows', arch: 'x64', kind: 'exe' } }
+    ]
+  },
+  {
+    id: 'macos',
+    name: 'macOS',
+    rows: [
+      { label: 'macOS（Apple 芯片）', fmt: '.dmg', match: { os: 'macos', arch: 'arm64', kind: 'dmg' } },
+      { label: 'macOS（Intel 芯片）', fmt: '.dmg', match: { os: 'macos', arch: 'x64', kind: 'dmg' } }
+    ]
+  },
+  {
+    id: 'linux',
+    name: 'Linux',
+    rows: [
+      { label: 'Linux x64（免安装）', fmt: '.AppImage', match: { os: 'linux', arch: 'x64', kind: 'appimage' } },
+      { label: 'Linux x64（Debian/Ubuntu）', fmt: '.deb', match: { os: 'linux', arch: 'x64', kind: 'deb' } }
+    ]
+  }
+];
 
 /* 平台图标（单色，随 currentColor） */
 const PLATFORM_ICONS = {
@@ -55,21 +61,58 @@ function detectPlatformId() {
   return 'windows';
 }
 
-function firstAvailableRow(platform) {
-  return platform.rows.find(r => r.url) || null;
+async function loadDownloadsManifest() {
+  try {
+    // no-cache：清单要随发版即时更新，不能被浏览器缓存钉死。
+    const res = await fetch(DOWNLOADS_MANIFEST, { cache: 'no-cache' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data || !Array.isArray(data.files)) throw new Error('清单格式不符');
+    return data;
+  } catch (e) {
+    console.warn('[downloads] 下载清单加载失败:', e && e.message ? e.message : e);
+    return null;
+  }
+}
+
+function matchDownloadFile(manifest, match) {
+  if (!manifest) return null;
+  return manifest.files.find(f =>
+    f && f.os === match.os && f.arch === match.arch && f.kind === match.kind
+  ) || null;
+}
+
+function firstAvailableRow(platform, manifest) {
+  for (const row of platform.rows) {
+    const file = matchDownloadFile(manifest, row.match);
+    if (file) return { row, file };
+  }
+  return null;
 }
 
 /* ================= 下载区渲染 ================= */
-function renderDownloads() {
+function setDownloadNote(text) {
+  const el = document.getElementById('downloadNoteText');
+  if (el) el.textContent = text;
+}
+
+function renderDownloads(manifest) {
   const grid = document.getElementById('downloadGrid');
   if (!grid) return;
   grid.textContent = '';
 
-  for (const platform of DOWNLOADS.platforms) {
+  if (!manifest) {
+    setDownloadNote('下载列表暂未就绪，请稍后刷新重试。');
+  } else if (manifest.version) {
+    setDownloadNote('当前版本 v' + String(manifest.version).replace(/^v/, '') +
+      ' · 已内置自动更新，安装后始终保持在最新版本。');
+  }
+
+  for (const platform of DOWNLOAD_PLATFORMS) {
     const col = document.createElement('div');
     col.className = 'dl-col';
 
-    const hasRelease = platform.rows.some(r => r.url);
+    const hasRelease = platform.rows.some(r => matchDownloadFile(manifest, r.match));
     col.innerHTML =
       '<div class="dl-col-head">' +
         PLATFORM_ICONS[platform.id] +
@@ -81,14 +124,15 @@ function renderDownloads() {
     rows.className = 'dl-rows';
 
     for (const row of platform.rows) {
+      const file = matchDownloadFile(manifest, row.match);
       const info =
         '<span class="dl-info"><span class="dl-name">' + row.label + '</span>' +
         '<span class="fmt">' + row.fmt + '</span></span>';
 
-      if (row.url) {
+      if (file) {
         const a = document.createElement('a');
         a.className = 'dl-row';
-        a.href = row.url;
+        a.href = DOWNLOADS_BASE + file.name;
         // 新开顶层窗口触发下载：站点被嵌在 sandbox iframe 中时，
         // 同框导航会被 allow-downloads 拦截（无反应）。
         a.target = '_blank';
@@ -110,7 +154,7 @@ function renderDownloads() {
 }
 
 /* Hero 大按钮：跟随访客平台 */
-function setupHeroCta() {
+function setupHeroCta(manifest) {
   const cta = document.getElementById('heroDownload');
   const title = document.getElementById('heroCtaTitle');
   const desc = document.getElementById('heroCtaDesc');
@@ -118,23 +162,25 @@ function setupHeroCta() {
   if (!cta) return;
 
   const pid = detectPlatformId();
-  const platform = DOWNLOADS.platforms.find(p => p.id === pid) || DOWNLOADS.platforms[0];
-  const row = firstAvailableRow(platform);
-  iconBox.outerHTML = PLATFORM_ICONS[platform.id].replace('aria-hidden="true"', 'id="heroOsIcon" aria-hidden="true"');
+  const platform = DOWNLOAD_PLATFORMS.find(p => p.id === pid) || DOWNLOAD_PLATFORMS[0];
+  const hit = firstAvailableRow(platform, manifest);
+  if (iconBox) {
+    iconBox.outerHTML = PLATFORM_ICONS[platform.id].replace('aria-hidden="true"', 'id="heroOsIcon" aria-hidden="true"');
+  }
 
-  if (row) {
-    cta.href = row.url;
+  if (hit) {
+    cta.href = DOWNLOADS_BASE + hit.file.name;
     cta.target = '_blank';
     cta.rel = 'noopener';
     title.textContent = '下载 GWork';
-    desc.textContent = '适用于 ' + row.label;
+    desc.textContent = '适用于 ' + hit.row.label;
   } else {
     // 锚点跳转必须留在当前页
     cta.removeAttribute('target');
     cta.removeAttribute('rel');
     cta.href = '#downloads';
     title.textContent = '下载 GWork';
-    desc.textContent = platform.name + ' 版即将推出 · 查看全部下载';
+    desc.textContent = manifest ? platform.name + ' 版即将推出 · 查看全部下载' : '查看全部下载';
   }
 }
 
@@ -404,8 +450,13 @@ function setupNav() {
 
 /* ================= 启动 ================= */
 document.addEventListener('DOMContentLoaded', () => {
-  renderDownloads();
-  setupHeroCta();
+  // 下载区与 Hero 按钮都由下载清单驱动；清单到达前 Hero 保持锚点跳转，不会指向坏链。
+  if (document.getElementById('downloadGrid') || document.getElementById('heroDownload')) {
+    loadDownloadsManifest().then(manifest => {
+      renderDownloads(manifest);
+      setupHeroCta(manifest);
+    });
+  }
   setupReveal();
   setupSpotlight();
   setupNav();

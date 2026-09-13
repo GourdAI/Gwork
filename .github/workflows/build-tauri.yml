@@ -75,6 +75,15 @@ jobs:
         working-directory: gourd-ai-tauri
         run: node test/readonly-resource-repro.js
 
+      # 发布清单契约：latest.json / downloads.json 必须与产物真实文件名逐字一致
+      # （2026-09-13 修复的「清单名 ≠ 实际文件名」404 类 bug 的回归锚点），
+      # 且 downloads.json 的字段与官网 js/main.js 的展示映射保持同一契约。
+      # 零依赖、毫秒级，同样放在昂贵步骤之前。
+      - name: 契约测试（发布清单生成）
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: node test/release-manifest-contract.js
+
       # macOS 要出 x64 + arm64 两个 dmg，需预装两个 target；其余平台用默认宿主 target
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -332,7 +341,7 @@ jobs:
           df -h /home/runner /tmp 2>/dev/null || true
 
       # artifact 名刻意**不带** gwork-tauri- 前缀：manifest / release 两个 job 用
-      # download-artifact 的 pattern: gwork-tauri-* 拉产物，同名前缀会把这份纯日志
+      # download-artifact 拉本次 run 的全部 artifact，同名前缀会把这份纯日志
       # 也拉进 artifacts/。虽然两个消费者的过滤条件都不认 .log（实际无害），但让
       # 诊断日志混进「待发布产物」目录属于自找麻烦，前缀错开最省事。
       - name: 上传 AppImage 失败日志
@@ -425,8 +434,9 @@ jobs:
             find "$b" -maxdepth 3 -name '*.dmg' -exec cp {} "staging/$arch/" \;
             # .app.tar.gz（及 .sig）两个架构**同名**，这里就改名而不是留到发布时再改：
             # 下面的上传按文件逐个传，artifact 名就是 basename（见上传步骤注释），
-            # 同名会让两次上传撞成同一个 artifact。命名与 publish-downloads.js /
-            # generate-latest-json.js 的固定名约定（GWork-{x64,arm64}.app.tar.gz）一致。
+            # 同名会让两次上传撞成同一个 artifact。GWork-{x64,arm64}.app.tar.gz
+            # 也是 latest.json 对外引用的真实文件名（清单不再映射固定名），
+            # 与 publish-downloads.js 的改名规则保持一致。
             while IFS= read -r f; do
               base="$(basename "$f")"
               cp "$f" "staging/$arch/${base/.app.tar.gz/-$arch.app.tar.gz}"
@@ -546,8 +556,10 @@ jobs:
   # 三个平台全部构完后汇总：tauri-plugin-updater 用的是**单个** latest.json，
   # 内部 platforms 映射覆盖全平台（不像 electron-updater 每平台一个 yml），
   # 所以必须等所有平台的 .sig 齐了才能生成。
+  # 同一次扫描额外产出官网下载清单 downloads.json（官网 js/main.js 读取渲染，
+  # 发版零改站的关键）—— 它只依赖安装包、不依赖签名，与 latest.json 解耦。
   manifest:
-    name: 生成更新清单 latest.json
+    name: 生成发布清单（latest.json / downloads.json）
     needs: build
     # fail-fast: false 下允许部分平台失败；此时仍给成功的平台出清单，
     # 比整个发布卡住强（缺的平台重跑后重新生成即可）。
@@ -588,7 +600,7 @@ jobs:
           done < <(find artifacts-raw -type f | sort)
           ls -lh artifacts
 
-      - name: 生成 latest.json
+      - name: 生成发布清单（latest.json + downloads.json）
         shell: bash
         working-directory: gourd-ai-tauri
         run: |
@@ -599,15 +611,17 @@ jobs:
           else
             VERSION="${GITHUB_REF_NAME#v}"
           fi
-          ARGS=(--artifacts ../artifacts --out ../latest.json)
+          # downloads.json = 官网下载区数据源，与 latest.json 同一次扫描产出：
+          # 清单里写的就是产物真实文件名（上传服务器即生效，发版零改站）。
+          ARGS=(--artifacts ../artifacts --out ../latest.json --site-out ../downloads.json)
           [ -n "$VERSION" ] && ARGS+=(--version "$VERSION")
-          # 未配置签名密钥时本步会因「无任何带签名载荷」而非零退出，这是预期的：
-          # 宁可不产出清单，也不能产出一个缺签名、客户端装不上的清单。
-          node cmd/generate-latest-json.js "${ARGS[@]}" || {
-            echo "::warning::未生成 latest.json（通常是未配置 TAURI_SIGNING_PRIVATE_KEY）"
-            exit 0
-          }
-          cat ../latest.json
+          # 缺签名密钥 / 缺安装包时本步可能部分产出或非零退出，这是刻意的：
+          # 宁可缺清单，也不能产出缺签名、或指向不存在文件的清单。
+          # 两份清单各以「文件是否存在」为准上传（失败仅告警，不阻断 Release）。
+          node cmd/generate-latest-json.js "${ARGS[@]}" \
+            || echo "::warning::清单未完整生成（常见原因：未配置 TAURI_SIGNING_PRIVATE_KEY / 缺少安装包产物），详见上方日志"
+          if [ -f ../latest.json ]; then cat ../latest.json; fi
+          if [ -f ../downloads.json ]; then cat ../downloads.json; fi
 
       - name: 上传 latest.json
         if: hashFiles('latest.json') != ''
@@ -617,7 +631,15 @@ jobs:
           archive: false
           if-no-files-found: error
 
-  # 把全平台产物 + latest.json 发布到 GitHub Release。
+      - name: 上传 downloads.json（官网下载区清单）
+        if: hashFiles('downloads.json') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          path: downloads.json
+          archive: false
+          if-no-files-found: error
+
+  # 把全平台产物 + latest.json / downloads.json 发布到 GitHub Release。
   # 在此之前产物只存在于 Actions artifact（保留期有限、需登录才能下载），
   # Release 页面始终为空。与 build.yml 的 release job 同构，两者写入同一个 Release。
   release:
@@ -664,6 +686,8 @@ jobs:
           # Release 资产是扁平的，只认 basename。exe/dmg/AppImage/deb 的文件名自带
           # version+arch；macOS 的 .app.tar.gz（及 .sig）两个架构本来同名，已在构建腿的
           # 「归集产物」步骤改成 GWork-{x64,arm64}.app.tar.gz，此处不需再改。
+          # latest.json 供客户端自动更新、downloads.json 供官网下载区（js/main.js 读取），
+          # 两者都要随 Release 发布 —— 用户把附件原样上传 downloads/tauri/ 后官网即生效。
           # 仍保留撞名检查：静默覆盖会让用户下到错架构的包，比构建失败更难排查。
           while IFS= read -r f; do
             base="$(basename "$f")"
@@ -672,7 +696,8 @@ jobs:
             fi
             cp "$f" "release/$base"
           done < <(find artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' \
-            -o -name '*.deb' -o -name '*.sig' -o -name '*.app.tar.gz' -o -name 'latest.json' \) | sort)
+            -o -name '*.deb' -o -name '*.sig' -o -name '*.app.tar.gz' -o -name 'latest.json' \
+            -o -name 'downloads.json' \) | sort)
           ls -lh release
           [ -n "$(ls -A release)" ] || { echo "::error::没有可发布的产物"; exit 1; }
 

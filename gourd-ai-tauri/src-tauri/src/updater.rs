@@ -7,7 +7,7 @@
 //!   发现新版后由渲染层提示，updater_download/updater_install 引导浏览器打开下载页。
 //! - 开发态（debug_assertions）→ mode='none'：完全不启用。
 //!
-//! 更新源：https://www.gourdwork.com/downloads/（静态 latest.json，见 tauri.conf.json plugins.updater），
+//! 更新源：https://www.gourdwork.com/downloads/tauri/（静态 latest.json，见 tauri.conf.json plugins.updater），
 //! 可用环境变量 GWORK_UPDATE_URL 覆盖（换源/内网灰度无需改代码）。
 //!
 //! 状态机 status: idle | checking | available | not-available | downloading | downloaded | error
@@ -30,7 +30,10 @@ use tauri::AppHandle;
 use tauri_plugin_updater::{Update, UpdaterExt};
 use tracing::{info, warn};
 
-const DEFAULT_FEED_URL: &str = "https://www.gourdwork.com/downloads/";
+/// 默认更新源目录：必须与 tauri.conf.json plugins.updater 的 endpoints 指向同一目录
+/// （/downloads/tauri/，与 Electron 版的 /downloads/ 物理隔离）—— do_check 会用它
+/// 拼出 "…/latest.json" 端点，写错会让更新检查固定打到 404、自动更新不可用。
+const DEFAULT_FEED_URL: &str = "https://www.gourdwork.com/downloads/tauri/";
 const HOMEPAGE_URL: &str = "https://www.gourdwork.com/";
 /// 启动后延迟首检（避免与后端启动抢带宽），之后周期性复检
 const STARTUP_CHECK_DELAY: Duration = Duration::from_secs(15);
