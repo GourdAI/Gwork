@@ -29,8 +29,6 @@ public class ModelInfo {
 
     // Anthropic 扩展字段
     private String displayName;
-    private Long maxInputTokens;
-    private Long maxTokens;
     private Map<String, Object> capabilities;
 
     /**

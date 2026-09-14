@@ -99,16 +99,6 @@ import java.util.List;
  */
 public class WebSettingsController {
     /**
-     * {@code maxTokens} 被当作上下文窗口采信的最小阈值。
-     *
-     * <p>多数供应商的 {@code maxTokens} 语义是「单次最大输出 token」（典型 4K~8K），
-     * 而非上下文窗口。若直接写入 contextLength，会使压缩预算远小于真实窗口，
-     * 导致该模型每一轮都触发压缩、反复烧摘要调用。仅当其大到不可能是纯输出
-     * 上限时（≥ 32K）才视为供应商确实在用它表达窗口。</p>
-     */
-    private static final int MIN_TRUSTWORTHY_CONTEXT_LENGTH = 32_000;
-
-    /**
      * 日志记录器
      */
     private static final Logger LOG = LoggerFactory.getLogger(WebSettingsController.class);
@@ -336,7 +326,6 @@ public class WebSettingsController {
             item.put("apiUrl", config.getApiUrl());
             //密钥统一走脱敏口径：渲染只需要「是否已配置」与大致形状，不需要明文
             putMaskedApiKey(item, config.getApiKey());
-            item.put("contextLength", config.getContextLength());
             item.put("enabled", config.isEnabled());
             item.put("visibled", config.isVisibled());
             item.put("scope", config.getScope() != null ? config.getScope() : AgentFlags.SCOPE_USER);
@@ -389,9 +378,6 @@ public class WebSettingsController {
         if (config.getUserAgent() != null) {
             item.put("userAgent", config.getUserAgent());
         }
-        if (config.getContextLength() > 0) {
-            item.put("contextLength", String.valueOf(config.getContextLength()));
-        }
         item.put("isDefault", settings.getDefaultModel() != null && settings.getDefaultModel().equals(config.getNameOrModel()));
 
         return Result.succeed(item);
@@ -430,6 +416,11 @@ public class WebSettingsController {
     @Post
     @Mapping("/web/settings/llm/models/add")
     public Result llmModelsAdd(@Body ModelDo config, boolean isDefaultModel) throws Exception {
+        if (config == null) {
+            return Result.failure("model config is required");
+        }
+        // 兼容旧客户端但不再接受模型级上下文长度；运行时对象也必须使用中性值。
+        config.setContextLength(0);
         if (Assert.isEmpty(config.getApiUrl()) || Assert.isEmpty(config.getModel())) {
             return Result.failure("apiUrl and model are required");
         }
@@ -478,8 +469,11 @@ public class WebSettingsController {
         if (Assert.isEmpty(originalName)) {
             return Result.failure("originalName is required");
         }
-
-        // 改名撞库前置校验：目标名已被另一个模型占用时直接报错，不能静默覆盖（否则丢模型）；
+        if (config == null) {
+            return Result.failure("model config is required");
+        }
+        // 旧客户端可能仍提交该字段，更新前显式丢弃，避免进入 settings 或运行时引擎。
+        config.setContextLength(0);
         // 必须在动 engine 之前判定，避免旧模型已从引擎摘除却未能写回配置
         String targetName = config.getNameOrModel();
         if (!targetName.equals(originalName) && settings.getModels().containsKey(targetName)) {
@@ -2078,17 +2072,9 @@ public class WebSettingsController {
                     modelDo.setTimeout(provider.getTimeout());
                 }
 
-                // 设置 contextLength：优先 maxInputTokens；
-                // ⚠️ maxTokens 在多数供应商语义里是「最大输出 token」而非上下文窗口，
-                // 直接当窗口用会把 contextLength 误设为 8192 之类的小值 → 该模型每轮都触发压缩。
-                // 故仅在其大到不可能是纯输出上限时才采信；否则保持 0，回退到默认上下文长度。
-                if (modelInfo.getMaxInputTokens() != null && modelInfo.getMaxInputTokens() > 0) {
-                    modelDo.setContextLength(modelInfo.getMaxInputTokens());
-                } else if (modelInfo.getMaxTokens() != null
-                        && modelInfo.getMaxTokens() >= MIN_TRUSTWORTHY_CONTEXT_LENGTH) {
-                    modelDo.setContextLength(modelInfo.getMaxTokens());
-                }
-                
+                // 供应商返回的 token 上限只是瞬时元数据，不再映射为模型配置。
+                // 会话上下文由模型选择器统一决定，ModelDo 保持默认的中性值。
+
                 // 插入所属 provider 区块末尾，而不是追加总表末尾：使「同 provider 连续」在每一步都成立，
                 // 不依赖方法末尾的 reorderProviderModels 兵底（reorder 只负责块内排序）
                 settings.addModelInProviderBlock(modelDo);
@@ -2104,21 +2090,12 @@ public class WebSettingsController {
                     // provider 未配置 timeout 时显式恢复框架默认值。
                     Duration targetTimeout = provider.getTimeout() == null
                             ? new ModelDo().getTimeout() : provider.getTimeout();
-                    long newContextLength = 0;
-                    if (modelInfo.getMaxInputTokens() != null && modelInfo.getMaxInputTokens() > 0) {
-                        newContextLength = modelInfo.getMaxInputTokens();
-                    } else if (modelInfo.getMaxTokens() != null
-                            && modelInfo.getMaxTokens() >= MIN_TRUSTWORTHY_CONTEXT_LENGTH) {
-                        newContextLength = modelInfo.getMaxTokens();
-                    }
-                    final long targetContextLength = newContextLength;
                     boolean changed = existingModel.isVisibled() != targetVisibled
                             || !Objects.equals(newStandard, existingModel.getStandard())
                             || !Objects.equals(provider.getApiUrl(), existingModel.getApiUrl())
                             || !Objects.equals(provider.getApiKey(), existingModel.getApiKey())
                             || !Objects.equals(provider.getScope(), existingModel.getScope())
-                            || !Objects.equals(targetTimeout, existingModel.getTimeout())
-                            || existingModel.getContextLength() != targetContextLength;
+                            || !Objects.equals(targetTimeout, existingModel.getTimeout());
                     if (changed) {
                         ModelDo updated = settings.updateModel(modelName, copy -> {
                             copy.setVisibled(targetVisibled);
@@ -2127,7 +2104,6 @@ public class WebSettingsController {
                             copy.setApiKey(provider.getApiKey());
                             copy.setScope(provider.getScope());
                             copy.setTimeout(targetTimeout);
-                            copy.setContextLength(targetContextLength);
                         });
                         syncCount++;
                         if (updated.isEnabled()) engine.addModel(updated); else engine.removeModel(modelName);
@@ -2213,12 +2189,6 @@ public class WebSettingsController {
             }
             if (modelNode.hasKey("displayName")) {
                 modelInfo.setDisplayName(modelNode.get("displayName").getString());
-            }
-            if (modelNode.hasKey("maxTokens")) {
-                modelInfo.setMaxTokens(modelNode.get("maxTokens").getLong());
-            }
-            if (modelNode.hasKey("maxInputTokens")) {
-                modelInfo.setMaxInputTokens(modelNode.get("maxInputTokens").getLong());
             }
             if (modelNode.hasKey("manual")) {
                 modelInfo.setManual(modelNode.get("manual").getBoolean());

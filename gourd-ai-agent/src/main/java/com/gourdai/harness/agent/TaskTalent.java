@@ -18,6 +18,7 @@ package com.gourdai.harness.agent;
 import org.noear.snack4.ONode;
 import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.AgentSession;
+import com.gourdai.agent.ContextLengthPolicy;
 import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.event.RunEndEvent;
 import com.gourdai.agent.react.ReActOptionsAmend;
@@ -359,6 +360,9 @@ public class TaskTalent extends AbsTalent {
             //异常若从这里逸出，会丢掉 <task_result> 信封与 index，多任务下无法与请求对应
             agent = agentDefinition.builder(engine, modelSelected).build();
             session = InMemoryAgentSession.of(agent.name());
+            // 子代理用的是全新的独立会话，不会自动继承父会话的上下文窗口选择；
+            // 不显式复制，用户选了 1M 的会话里，子代理会静默回落到默认值而提前压缩。
+            ContextLengthPolicy.copy(__parentSession, session);
 
             originalPrompt = Prompt.of(task.prompt);
             originalPrompt.attrs().computeIfAbsent(ChatSession.ATTR_SESSIONID,

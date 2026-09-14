@@ -64,8 +64,6 @@ public class AnthropicModelsAdapter implements ModelsAdapter {
                             .type("chat")
                             .standard("anthropic")
                             .displayName(item.get("display_name").getString())
-                            .maxInputTokens(item.get("max_input_tokens").getLong())
-                            .maxTokens(item.get("max_tokens").getLong())
                             .capabilities(parseCapabilities(item.get("capabilities")))
                             .build();
                     result.add(modelInfo);

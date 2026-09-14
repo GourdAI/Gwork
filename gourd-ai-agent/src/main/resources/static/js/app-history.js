@@ -711,6 +711,8 @@ function selectSession(idx) {
     if (window.appMode !== 'code' && typeof closeDiffViewer === 'function') closeDiffViewer();
     if (!inChatMode) switchToChatMode();
     setActiveSession(entry.sessionId);
+    // 非 work- 前缀或尚未缓存的会话也要恢复其模型/上下文；在途请求由 refreshSessionModel 合并。
+    refreshSessionModel(entry.sessionId);
     // 记录会话所属工作空间根，供回放/删除/重命名/HITL 补发定位用
     if (sessionMap[entry.sessionId]) sessionMap[entry.sessionId].projectRoot = entry.projectRoot || '';
     updateHistoryUI();
@@ -750,6 +752,7 @@ function openSessionById(sessionId, label, root) {
     if (window.appMode !== 'code' && typeof closeDiffViewer === 'function') closeDiffViewer();
     if (!inChatMode) switchToChatMode();
     setActiveSession(sessionId);
+    refreshSessionModel(sessionId);
     if (sessionMap[sessionId]) sessionMap[sessionId].projectRoot = r;
     updateHistoryUI();
     var sess = sessionMap[sessionId];
@@ -1950,11 +1953,101 @@ $chatHistoryPanel.on('click', function(e) {
 });
 
 /* ===== Model Selector ===== */
-var modelList = [];        // [{name, desc, contextLength, standard, thinkingLevels}, ...] (shared, only loaded once)
+var modelList = [];        // [{name, desc, standard, thinkingLevels}, ...] (shared, only loaded once)
 var modelsLoaded = false;  // whether model list holds usable data（会话级模型刷新的门闸语义）
 var modelsListStale = false; // reload 失败但保留了旧列表：下次成功响应时强制重解析列表
 var sessionModelMap = {};  // { sessionId: selectedModelName }
 var sessionThinkingMap = {}; // { sessionId: thinkingDepth }  统一 5 档编码 / auto
+
+// 上下文窗口是会话级选择，不再绑定在模型配置项上。
+// 后端缺少上下文字段时始终回退到 256K，保证新旧接口的 UI 都稳定。
+var DEFAULT_CONTEXT_LENGTH = 256000;
+var CONTEXT_LENGTH_OPTIONS = [128000, 256000, 512000, 1000000];
+var CONTEXT_OPTIONS = CONTEXT_LENGTH_OPTIONS;
+var CONTEXT_LENGTH_LABELS = {
+    128000: '128K',
+    256000: '256K',
+    512000: '512K',
+    1000000: '1M'
+};
+var sessionContextMap = {}; // { sessionId: contextLength }
+var contextOptions = CONTEXT_LENGTH_OPTIONS.slice(0);
+var sessionModelRequestMap = {}; // 防止会话切换与 refreshSessionModel 并发重复请求
+
+function hasSessionValue(map, sessionId) {
+    return !!(sessionId && Object.prototype.hasOwnProperty.call(map, sessionId)
+        && map[sessionId] != null);
+}
+
+// 接受后端常见的数字、"256K"、"1M" 表示，最终统一为 token 数。
+function parseContextLengthValue(value) {
+    if (typeof value === 'number' && isFinite(value)) return Math.round(value);
+    var raw = String(value == null ? '' : value).trim().replace(/[, _]/g, '');
+    if (!raw) return 0;
+    var matchK = raw.match(/^(\d+(?:\.\d+)?)k$/i);
+    var matchM = raw.match(/^(\d+(?:\.\d+)?)m$/i);
+    if (matchK) return Math.round(parseFloat(matchK[1]) * 1000);
+    if (matchM) return Math.round(parseFloat(matchM[1]) * 1000000);
+    var parsed = Number(raw);
+    return isFinite(parsed) ? Math.round(parsed) : 0;
+}
+
+// 后端可选下发可用项；未知项不进入聊天选择器，缺失/无有效项时回退固定四档。
+function normalizeContextOptions(raw) {
+    var source = (Object.prototype.toString.call(raw) === '[object Array]' && raw.length)
+        ? raw : CONTEXT_LENGTH_OPTIONS;
+    var result = [];
+    var seen = {};
+    for (var i = 0; i < source.length; i++) {
+        var candidate = source[i];
+        if (candidate && typeof candidate === 'object') {
+            candidate = candidate.value != null ? candidate.value : candidate.contextLength;
+        }
+        var value = parseContextLengthValue(candidate);
+        var allowed = false;
+        for (var j = 0; j < CONTEXT_LENGTH_OPTIONS.length; j++) {
+            if (CONTEXT_LENGTH_OPTIONS[j] === value) { allowed = true; break; }
+        }
+        if (allowed && !seen[value]) {
+            seen[value] = true;
+            result.push(value);
+        }
+    }
+    return result.length ? result : CONTEXT_LENGTH_OPTIONS.slice(0);
+}
+
+function setContextOptions(raw) {
+    contextOptions = normalizeContextOptions(raw);
+    return contextOptions;
+}
+
+function normalizeContextLength(value, options) {
+    var parsed = parseContextLengthValue(value);
+    var opts = options || contextOptions || CONTEXT_LENGTH_OPTIONS;
+    for (var i = 0; i < opts.length; i++) {
+        if (opts[i] === parsed) return parsed;
+    }
+    // data.contextLength 缺失、为 0 或不在可选集内时，一律回退产品默认 256K。
+    return DEFAULT_CONTEXT_LENGTH;
+}
+
+function contextLengthLabel(value) {
+    var normalized = parseContextLengthValue(value);
+    return CONTEXT_LENGTH_LABELS[normalized] || String(normalized);
+}
+
+function applyContextResponse(data, sessionId) {
+    var options = setContextOptions(data && data.contextOptions);
+    var selected = normalizeContextLength(data && data.contextLength, options);
+    if (sessionId) sessionContextMap[sessionId] = selected;
+    else sessionContextMap['_default'] = selected;
+    return selected;
+}
+
+window.DEFAULT_CONTEXT_LENGTH = DEFAULT_CONTEXT_LENGTH;
+window.CONTEXT_OPTIONS = CONTEXT_OPTIONS;
+window.CONTEXT_LENGTH_OPTIONS = CONTEXT_LENGTH_OPTIONS;
+window.sessionContextMap = sessionContextMap;
 
 // 思考深度档位——全局统一 5 档，可选项由后端按「模型推理能力」下发（策略 S2）。
 //
@@ -2046,6 +2139,21 @@ function currentThinkingOptions() {
     return thinkingOptionsForModel(getSelectedModel());
 }
 
+// Get the effective context window for current context
+function getSelectedContext() {
+    if (activeSessionId && hasSessionValue(sessionContextMap, activeSessionId)) {
+        return normalizeContextLength(sessionContextMap[activeSessionId]);
+    }
+    if (typeof SESSION_ID !== 'undefined' && SESSION_ID
+            && hasSessionValue(sessionContextMap, SESSION_ID)) {
+        return normalizeContextLength(sessionContextMap[SESSION_ID]);
+    }
+    if (hasSessionValue(sessionContextMap, '_default')) {
+        return normalizeContextLength(sessionContextMap['_default']);
+    }
+    return DEFAULT_CONTEXT_LENGTH;
+}
+
 // Get the effective selected model for current context
 function getSelectedModel() {
     if (activeSessionId && sessionModelMap[activeSessionId]) {
@@ -2071,6 +2179,7 @@ function inheritSelectionToSession(newSessionId) {
     if (!newSessionId) return;
     var model = getSelectedModel();
     var depth = getSelectedThinking();
+    var contextLength = getSelectedContext();
 
     if (model) {
         sessionModelMap[newSessionId] = model;
@@ -2084,6 +2193,15 @@ function inheritSelectionToSession(newSessionId) {
                 .fail(function (err) { console.error('Failed to inherit thinking depth to new session:', err); });
         }
     }
+
+    // 上下文始终继承并落到服务端，即使当前值是默认 256K 也不能省略保存。
+    sessionContextMap[newSessionId] = contextLength;
+    $.post('/web/chat/context/select', {
+        sessionId: newSessionId,
+        contextLength: contextLength
+    }).fail(function (err) {
+        console.error('Failed to inherit context length to new session:', err);
+    });
 }
 window.inheritSelectionToSession = inheritSelectionToSession;
 
@@ -2104,6 +2222,8 @@ function loadModels(sessionId, callback) {
             }
             var data = resp.data;
             var selected = data.selected || '';
+            // 会话上下文由响应顶层提供；旧后端缺少字段时稳定回退到 256K。
+            applyContextResponse(data, sessionId);
 
             // Store selected model per session
             if (sessionId) {
@@ -2126,7 +2246,7 @@ function loadModels(sessionId, callback) {
                 modelList = [];
                 var list = data.list || [];
                 for (var i = 0; i < list.length; i++) {
-                    modelList.push({ name: list[i].name || list[i].model, model: list[i].model || list[i].name, desc: list[i].description, contextLength: list[i].contextLength || 0, standard: list[i].standard || '', provider: list[i].provider || '', thinkingLevels: (Object.prototype.toString.call(list[i].thinkingLevels) === '[object Array]') ? list[i].thinkingLevels : null });
+                    modelList.push({ name: list[i].name || list[i].model, model: list[i].model || list[i].name, desc: list[i].description, standard: list[i].standard || '', provider: list[i].provider || '', thinkingLevels: (Object.prototype.toString.call(list[i].thinkingLevels) === '[object Array]') ? list[i].thinkingLevels : null });
                 }
                 modelsLoaded = true;
                 modelsListStale = false;
@@ -2184,22 +2304,32 @@ function reloadModels(callback) {
 // Refresh model UI for a specific session using local cache (no network request)
 function refreshSessionModel(sessionId) {
     if (!sessionId) return;
-    // If we haven't seen this session's model yet, fetch it from backend
-    if (!sessionModelMap[sessionId]) {
+    // 模型与上下文分别缓存：任一缺失都要向后端恢复，避免只缓存模型时上下文仍显示旧会话值。
+    var needsFetch = !sessionModelMap[sessionId]
+        || !hasSessionValue(sessionContextMap, sessionId);
+    if (needsFetch) {
+        // setActiveSession 与显式会话切换都可能触发刷新，合并同一会话的在途请求。
+        if (sessionModelRequestMap[sessionId]) return;
+        sessionModelRequestMap[sessionId] = true;
         var url = '/web/chat/models?sessionId=' + encodeURIComponent(sessionId);
         $.get(url, function(resp) {
             try {
-                var data = resp.data;
+                var data = (resp && resp.data) || {};
                 sessionModelMap[sessionId] = data.selected || '';
                 sessionThinkingMap[sessionId] = normalizeThinkingCode(data.thinkingDepth);
+                applyContextResponse(data, sessionId);
                 renderModelUI();
             } catch (e) {
                 console.error('Failed to parse session model:', e);
+                if (!hasSessionValue(sessionContextMap, sessionId)) sessionContextMap[sessionId] = DEFAULT_CONTEXT_LENGTH;
                 renderModelUI();
             }
+            delete sessionModelRequestMap[sessionId];
         }).fail(function (xhr) {
             // 会话切换期间接口失败不能让当前模型按钮保持旧的 loading 文案。
             console.warn('Failed to load session model:', xhr && xhr.status ? ('HTTP ' + xhr.status) : 'network error');
+            if (!hasSessionValue(sessionContextMap, sessionId)) sessionContextMap[sessionId] = DEFAULT_CONTEXT_LENGTH;
+            delete sessionModelRequestMap[sessionId];
             renderModelUI();
         });
     } else {
@@ -2258,16 +2388,15 @@ function renderModelUI() {
         emptyText: GourdI18n.t('history.model_search_empty'),
         toggleTitle: GourdI18n.t('history.model_group_toggle'),
         itemHtml: function (m, active) {
-            var ctxLen = m.contextLength ? (m.contextLength >= 1000000 && m.contextLength % 1000000 === 0 ? (m.contextLength / 1000000) + 'm' : (m.contextLength >= 1000 ? (m.contextLength / 1000) + 'k' : m.contextLength)) : '';
             var shortName = modelShortName(m);
             // 描述与模型ID相同时属冗余信息（名称行已展示），不再重复渲染第二行
             var desc = m.desc || '';
             if (desc && m.model && desc === m.model) desc = '';
             return '<div class="model-dropdown-item' + (active ? ' active' : '') + '" data-model="' + escapeHtml(m.name) + '">'
-                + '<span class="model-item-name">' + escapeHtml(shortName) + (ctxLen ? '<span class="model-item-ctx">' + ctxLen + '</span>' : '') + '</span>'
+                + '<span class="model-item-name">' + escapeHtml(shortName) + '</span>'
                 + (desc ? '<span class="model-item-desc">' + escapeHtml(desc) + '</span>' : '')
-                // 关联选择：思考档位内嵌在当前选中模型项下，跟随所选模型展示
-                + (active ? thinkingChipsHtml() : '')
+                // 关联选择：思考档位与上下文窗口内嵌在当前选中模型项下，跟随所选模型展示
+                + (active ? thinkingChipsHtml() + contextChipsHtml() : '')
                 + '</div>';
         }
     });
@@ -2321,6 +2450,23 @@ function thinkingChipsHtml() {
     return html;
 }
 
+// 关联上下文窗口区（内嵌在当前模型项下）：会话级保存，固定显示可用档位
+function contextChipsHtml() {
+    var current = getSelectedContext();
+    var opts = contextOptions && contextOptions.length ? contextOptions : CONTEXT_LENGTH_OPTIONS;
+    var html = '<div class="model-context-opts"><span class="model-context-label">'
+        + escapeHtml(GourdI18n.t('app.context_label')) + '</span>';
+    for (var i = 0; i < opts.length; i++) {
+        var value = opts[i];
+        var cls = value === current ? ' active' : '';
+        html += '<span class="model-context-chip' + cls + '" data-context="' + value + '"'
+            + ' title="' + escapeHtml(contextLengthLabel(value)) + '"'
+            + '>' + escapeHtml(contextLengthLabel(value)) + '</span>';
+    }
+    html += '</div>';
+    return html;
+}
+
 // 思考档位已合并进模型下拉（关联选择）：渲染统一走 renderModelUI，此函数保留作兼容入口
 function renderThinkingUI() {
     renderModelUI();
@@ -2351,6 +2497,21 @@ function selectThinking(depth) {
         depth: depth
     }).fail(function(err) {
         console.error('Failed to select thinking depth on server:', err);
+    });
+}
+
+function selectContext(contextLength) {
+    var sid = activeSessionId || SESSION_ID;
+    var selected = normalizeContextLength(contextLength);
+    sessionContextMap[sid] = selected;
+    // 先乐观重绘两处模型下拉，再异步保存；失败只记录日志，不回滚本地选择。
+    renderModelUI();
+
+    $.post('/web/chat/context/select', {
+        sessionId: sid,
+        contextLength: selected
+    }).fail(function(err) {
+        console.error('Failed to select context length on server:', err);
     });
 }
 
@@ -2435,6 +2596,16 @@ function initModelSelector(selectorId, currentId, dropdownId) {
             return;
         }
 
+        // 关联的上下文窗口 chip：仅设置当前会话上下文，不切模型；保持下拉打开便于连续调整
+        var $contextChip = $(e.target).closest('.model-context-chip');
+        if ($contextChip.length) {
+            var contextLength = normalizeContextLength($contextChip.attr('data-context'));
+            if (contextLength !== getSelectedContext()) {
+                selectContext(contextLength);
+            }
+            return;
+        }
+
         // 关联的思考档位 chip：仅设置档位，不切模型；保持下拉打开便于连续调整
         var $chip = $(e.target).closest('.model-thinking-chip');
         if ($chip.length) {
@@ -2475,6 +2646,8 @@ initModelSelector('welcomeModelSelector', 'welcomeModelCurrent', 'welcomeModelDr
 
 window.reloadModels = reloadModels;
 window.loadModels = loadModels;
+window.getSelectedContext = getSelectedContext;
+window.selectContext = selectContext;
 // 思考深度档位单一真源：供自动化视图（app-automation.js）复用，避免重复维护档位表
 window.thinkingOptionsForModel = thinkingOptionsForModel;
 

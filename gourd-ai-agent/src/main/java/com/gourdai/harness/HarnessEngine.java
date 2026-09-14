@@ -291,15 +291,10 @@ public class HarnessEngine {
         return options.getCompressionMaxMessages();
     }
 
-    public long getCompressionDefaultContextLength() {
-        return options.getCompressionDefaultContextLength();
-    }
-
-    /** 当前实际使用的压缩回退上下文长度。 */
-    public long getEffectiveCompressionDefaultContextLength() {
-        ContextCompressionInterceptor interceptor = options.getCompressionInterceptor();
-        return interceptor == null ? options.getCompressionDefaultContextLength() : interceptor.getDefaultContextLength();
-    }
+    // 上下文窗口不再由引擎暴露：它是会话级用户选择，唯一事实源为 ContextLengthPolicy，
+    // 消费方（压缩器、Web 用量指示器、子代理）一律直接向当前会话取值。
+    // 这里刻意不保留 getCompressionDefaultContextLength()/getEffective...() 这类
+    // 恒返回常量的转发方法，避免后人误以为「引擎侧还能配置窗口」而接出第二个事实源。
 
     public String getCompressionModel() {
         return options.getCompressionModel();
@@ -472,13 +467,6 @@ public class HarnessEngine {
         if (maxMessages != null) {
             options.setCompressionMaxMessages(maxMessages);
             options.getCompressionInterceptor().setMaxMessages(maxMessages);
-        }
-    }
-
-    public void setCompressionDefaultContextLength(Long defaultContextLength) {
-        if (defaultContextLength != null && defaultContextLength > 0L) {
-            options.setCompressionDefaultContextLength(defaultContextLength);
-            options.getCompressionInterceptor().setDefaultContextLength(defaultContextLength);
         }
     }
 
@@ -860,9 +848,10 @@ public class HarnessEngine {
                     strategy));
         }
         // 无论默认或自定义实例，HarnessOptions 都是运行时配置真源。
+        // 注意：上下文窗口不在此列——它是会话级用户选择（ContextLengthPolicy），
+        // 每轮从当前会话读取，绝不由引擎全局配置或模型配置决定。
         options.getCompressionInterceptor().setMaxMessages(options.getCompressionMaxMessages());
         options.getCompressionInterceptor().setMaxRetries(options.getModelRetries());
-        options.getCompressionInterceptor().setDefaultContextLength(options.getCompressionDefaultContextLength());
         options.getCompressionInterceptor().setCompressionRatio(options.getCompressionRatio());
         options.getCompressionInterceptor().setCompressionTargetRatio(options.getCompressionTargetRatio());
         options.getCompressionInterceptor().setReservedOutputTokens(options.getCompressionReservedOutputTokens());
@@ -1295,11 +1284,6 @@ public class HarnessEngine {
 
         public Builder compressionThreshold(Integer maxMessages) {
             options.setCompressionMaxMessages(maxMessages);
-            return this;
-        }
-
-        public Builder compressionDefaultContextLength(Long defaultContextLength) {
-            options.setCompressionDefaultContextLength(defaultContextLength);
             return this;
         }
 

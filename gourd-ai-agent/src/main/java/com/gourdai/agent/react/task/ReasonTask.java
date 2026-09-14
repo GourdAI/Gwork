@@ -61,6 +61,15 @@ public class ReasonTask {
     public static final String ATTR_STREAMED_REASONING = "gourd_streamed_reasoning_prefix";
 
     /**
+     * 流式阶段累积的<b>原始</b>思考文本（未经 {@code </think>} 规范化截断），存于当前 trace。
+     *
+     * <p>与 {@link #ATTR_STREAMED_REASONING} 的区别：后者为正文剥离服务，已按末思考帧截掉
+     * {@code </think>} 之后的正文头，不再与聚合思考逐字相等；而聚合思考去重需要
+     * <b>严格同源</b>的锚，故单独保留一份未加工值。</p>
+     */
+    public static final String ATTR_STREAMED_THINKING_RAW = "gourd_streamed_thinking_raw";
+
+    /**
      * 工具参数进度下发的时间阈值（毫秒）。
      * <p>模型分片粒度极细（一篇文档可产生上千片），逐片下发会压垮传输与渲染，
      * 故按「时间或字节」双阈值合并，先到者触发。</p>
@@ -254,12 +263,22 @@ public class ReasonTask {
             return;
         }
 
-        final AssistantMessage responseMessage = response.getMessage();
+        AssistantMessage aggregatedMessage = response.getMessage();
 
-        if(responseMessage == null){
+        if(aggregatedMessage == null){
             trace.setRoute(Agent.ID_END);
             return;
         }
+
+        // 聚合思考去重：方言的「补齐未交付思考」兜底经中转后幂等失效，补发走
+        // acc.addContentItem(...) 同时灌进聚合器，使本条消息的 thinking 成为「全文 × N」
+        // （N 取决于命中哪条补发路径）。流式侧的重放抑制只能管住屏幕，管不到聚合值；
+        // 而本条消息会被原对象写入工作记忆并在下一轮全量重发，不治则重复份额全额计入
+        // 上下文压缩预算（压缩提前触发）并随会话历史落盘（详见
+        // AgentUtil#dedupeAggregatedThinking）。必须赶在拦截器/事件/历史写入之前归一，
+        // 以保证全部下游只能看到单份思考。
+        final AssistantMessage responseMessage = AgentUtil.dedupeAggregatedThinking(
+                aggregatedMessage, trace.getExtraAs(ATTR_STREAMED_THINKING_RAW));
 
         // 部分接口（openai-responses）流式聚合时把推理文本混入 content，
         // 统一在此剥离，避免下游（最终答案/历史消息/IM）与思考通道重复渲染；
@@ -482,6 +501,7 @@ public class ReasonTask {
                                     final Map<String, ArgsProgress> argsProgresses = new LinkedHashMap<>();
                                     // 每次物理重试都是独立响应，不能沿用上一尝试的思考前缀。
                                     trace.removeExtra(ATTR_STREAMED_REASONING);
+                                    trace.removeExtra(ATTR_STREAMED_THINKING_RAW);
 
                                     req.stream()
                                             .takeUntil(event -> sink.isCancelled())
@@ -548,8 +568,20 @@ public class ReasonTask {
                                                 }
 
                                                 if (event.is(ChatEventType.THINKING_DELTA) && event.hasText()) {
+                                                    String thinkingText = event.getText();
+
+                                                    // 终态重放抑制：方言在流末尾「补齐未交付思考」的兜底经中转后幂等失效，
+                                                    // 会把整段思考当成新增量再发一次（详见 AgentUtil#isThinkingReplay）。
+                                                    // 抑制既不下发也不累积：前者根治所有 portal 的思考重复输出，后者保证
+                                                    // 本前缀与真实思考严格同形（否则前缀变「全文×2」，正文剥离的定位失准）。
+                                                    if (AgentUtil.isThinkingReplay(streamedReasoningBuf, thinkingText)) {
+                                                        LOG.debug("ReActAgent [{}] thinking replay suppressed ({} chars)",
+                                                                config.getName(), thinkingText.length());
+                                                        return;
+                                                    }
+
                                                     lastThinkingFrameStart[0] = streamedReasoningBuf.length();
-                                                    streamedReasoningBuf.append(event.getText());
+                                                    streamedReasoningBuf.append(thinkingText);
                                                 }
 
                                                 AssistantMessage delta = ChatEventSupport.message(event);
@@ -560,11 +592,16 @@ public class ReasonTask {
                                     response = finalResponse[0];
 
                                     if (streamedReasoningBuf.length() > 0) {
+                                        String streamedThinkingRaw = streamedReasoningBuf.toString();
+                                        // 原始值：供聚合思考去重做锚，必须与上游 thinkingBuilder 逐字同源，不得截断
+                                        trace.setExtra(ATTR_STREAMED_THINKING_RAW, streamedThinkingRaw);
+
                                         String streamedReasoningPrefix = AgentUtil.normalizeStreamedReasoningPrefix(
-                                                streamedReasoningBuf.toString(), lastThinkingFrameStart[0]);
+                                                streamedThinkingRaw, lastThinkingFrameStart[0]);
                                         trace.setExtra(ATTR_STREAMED_REASONING, streamedReasoningPrefix);
                                     } else {
                                         trace.removeExtra(ATTR_STREAMED_REASONING);
+                                        trace.removeExtra(ATTR_STREAMED_THINKING_RAW);
                                     }
                                 } else {
                                     response = req.call();

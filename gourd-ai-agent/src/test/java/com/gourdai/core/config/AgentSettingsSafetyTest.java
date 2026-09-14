@@ -194,7 +194,17 @@ class AgentSettingsSafetyTest {
         Assertions.assertTrue(filesNamedLike("corrupt-").isEmpty(), "合法配置不得产生 .corrupt 备份");
     }
 
-    // ==================== H11：原子写 ====================
+    @Test
+    void legacyModelContextLengthIsIgnoredOnLoadAndRemovedOnSave() throws Exception {
+        writeSettings("{\"models\":{\"A-1\":{\"name\":\"A-1\",\"model\":\"a1\",\"provider\":\"A\",\"contextLength\":131072}}}");
+
+        AgentSettings loaded = AgentSettings.loadFromFile();
+
+        Assertions.assertEquals(0, loaded.getModels().get("A-1").getContextLength());
+        loaded.saveToFile();
+        String saved = Files.readString(settingsFile);
+        Assertions.assertFalse(saved.contains("contextLength"));
+    }
 
     @Test
     void saveToFileWritesCompleteJsonAndLeavesNoTempFile() throws Exception {

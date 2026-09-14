@@ -437,6 +437,12 @@ async fn find_available_port() -> Result<u16> {
 /// 2. 子进程已退出时立即失败，不再对着死端口白等满 60 秒（期间界面接口固定 503）。
 pub async fn wait_for_backend(port: u16, timeout_ms: u64) -> Result<()> {
     let client = reqwest::Client::builder()
+        // 必须显式 no_proxy：reqwest 默认 auto_sys_proxy，在 Windows 上会读注册表代理设置，
+        // 把本该直连的 127.0.0.1 探针也塞给代理。IE 的 ProxyOverride（如 `localhost;127.*`）
+        // 救不了——hyper-util 的 matcher 把 `127.*` 当域名模式收进 domains 桶，而 host 能解析成
+        // IP 时只查 ips 桶，故回环永不命中绕过规则。代理不可达时每次探针都白等满 500ms 超时，
+        // 60 秒轮询全程失败，表现为「后端启动超时」——而后端其实早已就绪。
+        .no_proxy()
         .timeout(std::time::Duration::from_millis(500))
         .build()
         .context("构建健康检查 HTTP 客户端失败")?;
@@ -822,6 +828,8 @@ async fn verify_build_identity(port: u16) -> serde_json::Value {
     };
 
     let client = match reqwest::Client::builder()
+        // 同 wait_for_backend：目标是 127.0.0.1，禁止走系统代理。
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(3))
         .build()
     {

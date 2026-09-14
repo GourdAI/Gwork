@@ -114,7 +114,6 @@ class WebSettingsControllerModelSafetyTest {
         ModelDo keep = model("P-keep", "keep");
         keep.setScope("user");
         keep.setTimeout(Duration.ofSeconds(90));
-        keep.setContextLength(128000);
         settings.addModelInProviderBlock(removed);
         settings.addModelInProviderBlock(keep);
         settings.setDefaultModel("P-remove");
@@ -135,9 +134,29 @@ class WebSettingsControllerModelSafetyTest {
         // ChatConfig 将 null 解释为恢复框架默认超时（当前为 90 秒），故验证旧自定义值已被清除，
         // 而不是错误地要求 getter 返回 null。
         Assertions.assertEquals(new ModelDo().getTimeout(), synced.getTimeout());
-        Assertions.assertEquals(0, synced.getContextLength());
+        Assertions.assertEquals(0, synced.getContextLength(),
+                "模型级上下文长度已彻底废弃，供应商同步不得再写入任何值（上下文窗口改由会话选择决定）");
         Assertions.assertEquals("P-keep", settings.getDefaultModel());
         Assertions.assertEquals("P-keep", engine.getDefaultModel());
+    }
+
+    @Test
+    void modelSettingsListAndDetailDoNotExposeContextLength() throws Exception {
+        Path workspace = Files.createTempDirectory("gwork-controller-list-test");
+        AgentSettings settings = new AgentSettings();
+        ModelDo configured = model("P-one", "one");
+        configured.setContextLength(131072);
+        settings.addModelInProviderBlock(configured);
+        HarnessEngine engine = HarnessEngine.of(workspace.toString(), ".gwork")
+                .modelAdd(configured)
+                .defaultModel("P-one")
+                .build();
+        WebSettingsController controller = new WebSettingsController(engine, settings);
+
+        Map<String, Object> listData = controller.llmModelsList().getData();
+        Map<?, ?> listItem = (Map<?, ?>) ((java.util.List<?>) listData.get("list")).get(0);
+        Assertions.assertFalse(listItem.containsKey("contextLength"));
+        Assertions.assertFalse(controller.llmModelsGet("P-one").getData().containsKey("contextLength"));
     }
 
     private static void restoreSystemProperty(String key, String value) {

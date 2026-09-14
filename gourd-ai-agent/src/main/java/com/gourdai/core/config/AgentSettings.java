@@ -137,7 +137,11 @@ public class AgentSettings implements Serializable {
     }
 
     private static ModelDo copyModel(ModelDo source) {
-        return new ONode().fill(source).toBean(ModelDo.class);
+        ModelDo copy = new ONode().fill(source).toBean(ModelDo.class);
+        // contextLength is no longer a model setting. Keep the inherited ChatConfig
+        // property at its neutral value so a legacy value cannot be revived by COW.
+        copy.setContextLength(0);
+        return copy;
     }
 
     private static ProviderDo copyProvider(ProviderDo source) {
@@ -826,10 +830,13 @@ public class AgentSettings implements Serializable {
             // COW：不在原 map 上就地 put，与其余结构性修改保持一致的发布语义
             Map<String, ModelDo> seeded = new LinkedHashMap<>();
             for (ModelDo modelDo : props.getModels()) {
-                seeded.put(modelDo.getNameOrModel(), modelDo);
+                seeded.put(modelDo.getNameOrModel(), copyModel(modelDo));
             }
             this.models = seeded;
         }
+
+        // 兼容旧的 AgentProperties/config.yml：模型级上下文长度不再是有效设置。
+        clearModelContextLengths();
 
         // 合并完成后统一兜底：如果 defaultModel 未指定，取第一个模型
         if (Assert.isEmpty(this.defaultModel) && this.models.size() > 0) {
@@ -927,6 +934,9 @@ public class AgentSettings implements Serializable {
                 }
             }
 
+            // 旧版本允许把 contextLength 写进 ModelDo。即使来源是工作区叠加或
+            // AgentProperties 回退，也必须在进入运行时前统一清零，避免旧值重新生效。
+            agentSettings.clearModelContextLengths();
             agentSettings.ensureBuiltinProviders();
 
             // 历史数据迁移：旧版增量同步把同 provider 的新模型追加到总表末尾，导致同 provider 分裂多段；
@@ -975,6 +985,7 @@ public class AgentSettings implements Serializable {
             ONode oNode = ONode.ofJson(json);
 
             normalizeModelsNode(oNode);
+            removeModelContextLengthFields(oNode);
 
             return oNode;
         } catch (Exception e) {
@@ -1018,6 +1029,36 @@ public class AgentSettings implements Serializable {
                 map.set(item.get("name").getString(), item);
             }
             oNode.set("models", map);
+        }
+    }
+
+    /** Remove the deprecated model-level context window before binding settings. */
+    private static void removeModelContextLengthFields(ONode oNode) {
+        ONode oModels = oNode.get("models");
+        if (oModels == null || oModels.isNull() || oModels.isObject() == false) {
+            return;
+        }
+        for (ONode model : oModels.getObject().values()) {
+            if (model != null && model.isObject()) {
+                model.remove("contextLength");
+            }
+        }
+    }
+
+    /** Clear legacy values while preserving the models map COW contract. */
+    private synchronized void clearModelContextLengths() {
+        Map<String, ModelDo> rebuilt = null;
+        for (Map.Entry<String, ModelDo> entry : models.entrySet()) {
+            ModelDo model = entry.getValue();
+            if (model != null && model.getContextLength() != 0) {
+                if (rebuilt == null) {
+                    rebuilt = new LinkedHashMap<>(models);
+                }
+                rebuilt.put(entry.getKey(), copyModel(model));
+            }
+        }
+        if (rebuilt != null) {
+            this.models = rebuilt;
         }
     }
 
@@ -1129,6 +1170,7 @@ public class AgentSettings implements Serializable {
                 map.getOrNew(entry.getValue().getNameOrModel()).then(item -> {
                     item.fill(entry.getValue());
                     item.remove("userAgent");
+                    item.remove("contextLength");
 
                     if (entry.getValue().getTimeout() != null) {
                         item.set("timeout", entry.getValue().getTimeout().getSeconds() + "s");
@@ -1220,6 +1262,7 @@ public class AgentSettings implements Serializable {
                 map.getOrNew(entry.getValue().getNameOrModel()).then(item -> {
                     item.fill(entry.getValue());
                     item.remove("userAgent");
+                    item.remove("contextLength");
 
                     if (entry.getValue().getTimeout() != null) {
                         item.set("timeout", entry.getValue().getTimeout().getSeconds() + "s");

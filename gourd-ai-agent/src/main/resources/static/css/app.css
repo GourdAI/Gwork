@@ -542,7 +542,10 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 
 /* Thinking */
 .inline-thinking { display: flex; align-items: center; gap: 8px; padding: 8px 0; color: var(--text-secondary); font-size: 13px; will-change: visibility; }
-.inline-thinking.hidden-reserve { display: none; }
+/* 隐藏态必须保留布局占位（visibility:hidden 而非 display:none）：
+   流式间隙等待提示反复显隐时，display:none 会直接改变气泡高度，
+   导致外层滚动位置跳动（卡片全折叠也会抖）。 */
+.inline-thinking.hidden-reserve { display: flex; visibility: hidden; pointer-events: none; }
 /* 子智能体卡片头部的等待指示器：多智能体并行时各自在卡片头部展示执行中状态。
    头部恒可见（卡片体默认折叠），margin-left:auto 靠右、flex-shrink:0 不被挤压（描述文本自行省略）。 */
 
@@ -656,9 +659,8 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .model-dropdown-item:hover { background: var(--bg-hover); }
 .model-dropdown-item.active { background: var(--accent-light); color: var(--accent); }
 .model-dropdown-item .model-item-name { font-weight: 500; font-size: 13px; display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
-/* 模型名超长时只截断名字本身，不挤跑右侧上下文长度 */
+/* 模型名超长时保持名称行可收缩 */
 .model-dropdown-item .model-item-name > :first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.model-dropdown-item .model-item-ctx { font-size: 11px; font-weight: 400; color: var(--text-tertiary); flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .model-dropdown-item .model-item-desc { font-size: 11px; color: var(--text-secondary); }
 .model-dropdown-item.active .model-item-desc { color: var(--accent); opacity: 0.7; }
 
@@ -671,6 +673,20 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .model-thinking-chip { font-size: 11px; padding: 2px 9px; border: 1px solid var(--border-color); border-radius: 12px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s; white-space: nowrap; }
 .model-thinking-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
 .model-thinking-chip.active { background: var(--accent-light); color: var(--accent); }
+
+/* 关联上下文窗口区：沿用 thinking chips 的间距、色彩令牌与交互节奏。 */
+.model-context-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 4px; padding-top: 6px; border-top: 1px dashed var(--border-color); min-width: 0; overflow-x: hidden; }
+.model-context-label { font-size: 11px; color: var(--text-secondary); margin-right: 2px; user-select: none; flex: 0 0 auto; }
+.model-context-chip { font-size: 11px; padding: 2px 9px; border: 1px solid var(--border-color); border-radius: 12px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s; white-space: nowrap; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.model-context-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
+.model-context-chip.active { background: var(--accent-light); color: var(--accent); border-color: var(--accent); }
+
+@media (max-width: 768px) {
+    .model-dropdown.has-search { width: calc(100vw - 24px); min-width: 0; max-width: calc(100vw - 24px); }
+    .model-dropdown-item { min-width: 0; }
+    .model-thinking-opts, .model-context-opts { max-width: 100%; }
+    .model-context-chip { padding-left: 7px; padding-right: 7px; }
+}
 
 /* Attachments Preview */
 .attachments-wrap { padding: 8px 14px 0; display: none; }

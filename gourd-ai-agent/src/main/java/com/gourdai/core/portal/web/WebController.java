@@ -18,6 +18,7 @@ package com.gourdai.core.portal.web;
 import org.noear.snack4.ONode;
 import org.noear.solon.Solon;
 import com.gourdai.agent.AgentSession;
+import com.gourdai.agent.ContextLengthPolicy;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.change.FileChangeService;
 import com.gourdai.harness.talents.cli.TodoTalent;
@@ -474,8 +475,6 @@ public class WebController {
                 item.put("model", config.getModel());
                 item.put("name", config.getNameOrModel());
                 item.put("description", config.getDescriptionOrModel());
-                item.put("contextLength", config.getContextLength());
-                // 接口类型：前端据此展示模型归属与调试信息
                 item.put("standard", config.getStandardOrProvider());
                 // 所属供应商：前端据此对模型下拉做分组展示
                 item.put("provider", config.getProvider());
@@ -493,6 +492,8 @@ public class WebController {
 
         // 当前会话的思考深度档位（无会话时给默认 auto），供前端初始化切换器
         String thinkingDepth = ThinkingDepth.AUTO;
+        // 当前会话的上下文窗口：与思考档位同为会话级用户选择，无会话时给固定默认
+        long contextLength = ContextLengthPolicy.DEFAULT_CONTEXT_LENGTH;
 
         if (Assert.isNotEmpty(list)) {
             if (Assert.isNotEmpty(sessionId)) {
@@ -508,6 +509,7 @@ public class WebController {
                 data.put("selected", selected);
 
                 thinkingDepth = ThinkingDepth.normalize(session.getContext().getAs(HarnessEngine.CTX_THINKING_DEPTH));
+                contextLength = ContextLengthPolicy.resolve(session);
             } else {
                 data.put("selected", engine.getModelOrDef(null).getNameOrModel());
             }
@@ -516,6 +518,10 @@ public class WebController {
         }
 
         data.put("thinkingDepth", thinkingDepth);
+        // 上下文窗口不再按模型下发：全局固定选项 + 当前会话选择 + 默认值
+        data.put("contextLength", contextLength);
+        data.put("contextLengthDefault", ContextLengthPolicy.DEFAULT_CONTEXT_LENGTH);
+        data.put("contextOptions", ContextLengthPolicy.options());
 
         return Result.succeed(data);
     }
@@ -564,6 +570,38 @@ public class WebController {
         session.updateSnapshot();
 
         return Result.succeed(normalized);
+    }
+
+    /**
+     * 切换指定会话的上下文窗口。
+     *
+     * <p>上下文窗口已从「每个模型逐个配置」改为「会话级用户选择」：模型多时无需逐个维护，
+     * 同一模型在不同会话也可用不同窗口。写入后压缩预算、单条消息截断与上下文用量指示器
+     * 共享同一个值，不存在「压缩按 A、界面显示 B」的双源不一致。</p>
+     *
+     * <p>与模型选择同理走独立端点，确保不经 {@code /web/chat/input} 的命令
+     * （如 /git、循环任务）也能感知变更。</p>
+     *
+     * @param sessionId     会话 ID
+     * @param contextLength 目标上下文窗口（必须是固定选项之一）
+     * @return 操作结果（回显生效的窗口值）
+     * @throws Exception 会话操作异常
+     */
+    @Post
+    @Mapping("/web/chat/context/select")
+    public Result context_select(@Param("sessionId") String sessionId,
+                                 @Param("contextLength") String contextLength) throws Exception {
+        Long parsed = ContextLengthPolicy.parse(contextLength);
+        if (parsed == null || !ContextLengthPolicy.isAllowed(parsed.longValue())) {
+            // 非法值一律拒绝，而不是静默写入：否则会话会停在一个前端永远渲染不出的档位上
+            return Result.failure(400, "Unsupported contextLength: " + contextLength);
+        }
+
+        AgentSession session = engine.getSession(sessionId);
+        ContextLengthPolicy.set(session, parsed.longValue());
+        session.updateSnapshot();
+
+        return Result.succeed(parsed);
     }
 
     /**

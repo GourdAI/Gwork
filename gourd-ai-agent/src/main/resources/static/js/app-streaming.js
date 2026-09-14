@@ -690,8 +690,9 @@ function finishStream(sess) {
     if (sess.sessionId === activeSessionId) {
         isStreaming = false;
         setBtnSendMode();
-        // 只有在活动会话才滚动；回放收尾（_skipScroll）时由回放层自行控制滚动
-        if (!sess._skipScroll) scrollToBottom(true);
+        // 非 force：用户若已上滚查看历史（任务运行期间常见），done 帧不得把视口抢回底部；
+        // 回放收尾（_skipScroll）时由回放层自行控制滚动
+        if (!sess._skipScroll) scrollToBottom();
         chatInput.focus();
     }
 

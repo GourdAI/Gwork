@@ -337,14 +337,53 @@ function deactivateSession() {
 }
 
 /* ===== Helpers ===== */
+/* 滚动意图判定与统一置底（唯一的 messagesWrap 外层滚动入口）
+   抖动教训（三条，缺一不可）：
+   1) 调度期预清 userScrolledUp（旧 `if (force) userScrolledUp = false;`）会让调度与落地
+      之间夹进的上滚被残留帧覆盖 → 往复抖动。复位点必须挪到「落地成功之后」。
+   2) 不要用时间窗滤除程序性 scroll 事件：连续输出时每个 chunk 都在刷新窗口，窗口恒常开启，
+      会把用户滚轮的真实事件一并吞掉，userScrolledUp 永远置不起来 → 跟随停不下来，抖动依旧。
+      程序性置底把视口放到底部，gap≈0，裸判自然得出 false，无需任何过滤。
+   3) userScrolledUp 需要一条可靠复位通道：force 置底（showThinking / Loop 注入 / 历史跳转）
+      落地后立即复位，否则标志停在 true，人在底部却不再跟随。
+   另：滚动请求带 generation，被更新一世的请求取代后，旧世代挂起帧一律作废。 */
+var _scrollGen = 0;
 $(messagesWrap).on('scroll', function() {
+    // 裸判：程序置底后 gap≈0 自然得 false，不需要来源过滤（过滤会误吞用户事件）
     var gap = messagesWrap.scrollHeight - messagesWrap.scrollTop - messagesWrap.clientHeight;
     userScrolledUp = gap > 80;
 });
+function scrollToBottom(force) {
+    if (isScrollAnchorHeld()) return;
+    if (!force && userScrolledUp) return;
+    // 同一时间只保留最新一代请求：被更新世代取代的挂起帧一律作废，
+    // 杜绝「用户上滚 → 被残留帧拉回 → 再上滚」的往复抖动
+    var gen = ++_scrollGen;
+    // 两帧共用同一守卫：落地前复查锚定锁与用户意图，
+    // 调度到落地之间发生的上滚不会被残留帧覆盖；不用 applied 去重——
+    // 第二帧若内容高度已稳定且不在底部需再次修正（同值赋值浏览器为 no-op，不产生多余 scroll 事件）
+    var applyIfAllowed = function() {
+        if (isScrollAnchorHeld() || (!force && userScrolledUp)) return;
+        messagesWrap.scrollTop = messagesWrap.scrollHeight;
+        // 落地后复位：此刻视口确实在底部，标志与实际位置保持一致。
+        // force 路径尤其依赖这里 —— 否则标志永久停在 true，后续非 force 帧全被入口挡掉。
+        userScrolledUp = false;
+    };
+    requestAnimationFrame(function() {
+        if (gen !== _scrollGen) return;
+        applyIfAllowed();
+        // 内容高度可能跨帧变化（图片/Mermaid/代码块），下一帧复查后再修正
+        requestAnimationFrame(function() {
+            if (gen !== _scrollGen) return;
+            applyIfAllowed();
+        });
+    });
+}
 /* ===== 视口锚定锁（历史向上翻页期间禁用一切自动滚动） =====
-   向上翻页时用户明确在读旧内容，而此时任务可能仍在运行：回放缓冲排空会补发实时帧，
-   其中的 done 帧走 finishStream → scrollToBottom(true)，force 语义会无视 userScrolledUp
-   直接把视口拽到底部，正是「往上拉后位置乱跳」的元凶。翻页窗口内统一挂锁屏蔽。
+   向上翻页时用户明确在读旧内容，而此时任务可能仍在运行：回放缓冲排空会补发实时帧。
+   done 帧本身已改为非 force（见 finishStream），但 force 调用者仍在（showThinking /
+   Loop 注入的 user_input / 历史跳转），force 语义会无视 userScrolledUp 直接把视口拽到底部，
+   正是「往上拉后位置乱跳」的元凶。翻页窗口内统一挂锁屏蔽。
    锁带安全阀定时器：请求失败等异常路径没走到 release 时，不会永久锁死自动滚动。 */
 var _scrollAnchorHold = false;
 var _scrollAnchorHoldTimer = null;
@@ -358,28 +397,6 @@ function releaseScrollAnchor() {
     if (_scrollAnchorHoldTimer) { clearTimeout(_scrollAnchorHoldTimer); _scrollAnchorHoldTimer = null; }
 }
 function isScrollAnchorHeld() { return _scrollAnchorHold; }
-
-var scrollRafPending = false;
-function scrollToBottom(force) {
-    if (isScrollAnchorHeld()) return;
-    if (!force && userScrolledUp) return;
-    if (force) userScrolledUp = false;
-    // 滚动与内容更新在同一次 rAF 内执行，避免跨帧跳动
-    if (scrollRafPending) return;
-    scrollRafPending = true;
-    requestAnimationFrame(function() {
-        // 挂锁可能发生在本次调度之后，落地前需再判一次，否则挂起帧仍会把视口拽走
-        if (isScrollAnchorHeld()) { scrollRafPending = false; return; }
-        // 若当前帧内有多次滚动调用，确保最终落在最底部
-        messagesWrap.scrollTop = messagesWrap.scrollHeight;
-        // 再等下一帧确认高度稳定后再次修正（始终执行，确保最终落在最底部）
-        requestAnimationFrame(function() {
-            scrollRafPending = false;
-            if (isScrollAnchorHeld()) return;
-            messagesWrap.scrollTop = messagesWrap.scrollHeight;
-        });
-    });
-}
 
 function resetStreamState(sess) {
     // R2 修复：思考块引用被清空前，必须先走正规收敛（停 setInterval + 摘 .streaming 闪烁类）。

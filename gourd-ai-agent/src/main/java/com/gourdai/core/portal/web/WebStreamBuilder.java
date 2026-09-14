@@ -18,6 +18,7 @@ package com.gourdai.core.portal.web;
 import com.gourdai.agent.event.AgentEvent;
 
 import com.gourdai.agent.AgentSession;
+import com.gourdai.agent.ContextLengthPolicy;
 import com.gourdai.harness.agent.*;
 import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.event.RunEndEvent;
@@ -342,8 +343,7 @@ public class WebStreamBuilder {
     private List<WebChunk> mapEvent(AgentSession session, ChatModel chatModel, AgentEvent chunk, long turnStartMs,
                                     boolean thinkingDeltaSinceEnd) {
         if (chunk instanceof ContextUsageEvent) {
-            // 子代理的用量不刷全局上下文指示器：其 token 来自子代理模型，而指示器分母
-            // 用的是主模型 contextLength（两者窗口可不同），且会覆盖主代理指标并随会话快照长期留存。
+            // 子代理的用量不刷全局上下文指示器：其 token 来自子代理模型，且会覆盖主代理指标并随会话快照长期留存。
             if (chunk.getMeta().containsKey("__parentAgentName")) {
                 return Collections.emptyList();
             }
@@ -490,6 +490,9 @@ public class WebStreamBuilder {
      * 处理上下文用量块（推理后依据模型真实 usage 生成，含缓存创建/读取明细）。
      * <p>据此刷新「上下文长度」指示器，展示真实输入/输出/缓存。
      * 注：推理前 jtokkit 估算的 {@code ContextSizeEvent} 不在此处理，仅供框架内部做压缩决策。
+     *
+     * <p><b>分母取会话选择而非模型配置</b>：上下文窗口已是会话级用户选择，与
+     * {@code ContextCompressionInterceptor} 的压缩预算同源，避免「压缩按 A、界面显示 B」。</p>
      */
     public WebChunk onContextUsageEvent(ChatModel chatModel, ContextUsageEvent event){
         long inputTokens = event.getInputTokens();
@@ -507,11 +510,7 @@ public class WebStreamBuilder {
         wc.setCacheRate(event.getCacheRate());
         wc.setText(String.valueOf(event.getMessageCount()));
 
-        long contextLength = chatModel != null && chatModel.getConfig() != null
-                ? chatModel.getConfig().getContextLength() : 0;
-        if(contextLength == 0){
-            contextLength = engine.getEffectiveCompressionDefaultContextLength(); // 与实际压缩回退值一致
-        }
+        long contextLength = ContextLengthPolicy.resolve(event.getSession());
 
         Map<String, Object> args = new HashMap<>();
         args.put("contextLength", contextLength);

@@ -65,9 +65,9 @@ class HarnessOptions implements Serializable {
     private volatile boolean autoRethink = true;
 
     // ========== 会话与压缩 ==========
+    // 历史窗口大小：与上下文窗口无关，压缩时始终保护最后 N 条消息完整不压缩。
     private volatile int sessionWindowSize = 8;
     private volatile int compressionMaxMessages = 30;
-    private volatile long compressionDefaultContextLength = ContextCompressionInterceptor.DEFAULT_CONTEXT_LENGTH;
     // 压缩触发比例（1~100）：作为「提前触发」的上限钳制器，与绝对阈值取 min。
     // 100 = 不额外提前，完全由「窗口 − 输出预留 − 回合缓冲」决定。
     private volatile int compressionRatio = 100;
@@ -229,16 +229,6 @@ class HarnessOptions implements Serializable {
     void setCompressionMaxMessages(Integer compressionMaxMessages) {
         if (compressionMaxMessages != null) {
             this.compressionMaxMessages = compressionMaxMessages;
-        }
-    }
-
-    long getCompressionDefaultContextLength() {
-        return compressionDefaultContextLength;
-    }
-
-    void setCompressionDefaultContextLength(Long value) {
-        if (value != null && value > 0L) {
-            this.compressionDefaultContextLength = value;
         }
     }
 

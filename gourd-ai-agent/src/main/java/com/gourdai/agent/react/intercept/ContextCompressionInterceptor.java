@@ -22,7 +22,9 @@ import com.knuddels.jtokkit.Encodings;
 import com.knuddels.jtokkit.api.Encoding;
 import com.knuddels.jtokkit.api.ModelType;
 import com.gourdai.agent.event.AgentEvent;
+import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.AgentTrace;
+import com.gourdai.agent.ContextLengthPolicy;
 import com.gourdai.agent.react.ReActInterceptor;
 import com.gourdai.agent.react.ReActStyle;
 import com.gourdai.agent.react.ReActTrace;
@@ -193,12 +195,12 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
     }
 
     /**
-     * 模型未配置 contextLength（=0）时的回退上下文窗口长度。
+     * 会话未选择上下文窗口时的回退长度。
      *
-     * <p>作为全局唯一事实源对外暴露：Web 层展示上下文占用比例时（{@code WebStreamBuilder#onContextUsageEvent}）
-     * 必须复用此常量，避免「展示用默认窗口」与「压缩决策用默认窗口」两处硬编码漂移。</p>
+     * <p>上下文窗口是<b>会话级用户选择</b>（见 {@link ContextLengthPolicy}），不再是模型配置项：
+     * 同一个模型在不同会话可用不同窗口，而模型侧 {@code contextLength} 已彻底不参与运行时。</p>
      */
-    public static final long DEFAULT_CONTEXT_LENGTH = 128_000L;
+    public static final long DEFAULT_CONTEXT_LENGTH = ContextLengthPolicy.DEFAULT_CONTEXT_LENGTH;
 
     /**
      * 分词器的惰性持有者（initialization-on-demand holder 惯用法）。
@@ -239,7 +241,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
     private int compressionTargetRatio = 45;
     // 为模型单轮输出预留的 token（绝对量，不随窗口大小线性变化）
     private int reservedOutputTokens = 20_000;
-    // 当前模型无 contextLength（=0）时的回退窗口长度（可配置，默认 DEFAULT_CONTEXT_LENGTH）
+    // 会话未选择上下文窗口时的回退长度（仅当会话不可用时生效）
     private long defaultContextLength = DEFAULT_CONTEXT_LENGTH;
     // 保留窗口的最小消息数下限（默认 maxMessages / 3，最低 3）
     // 防止 Token 维度截断导致保留窗口被压缩到只剩 1~2 条消息
@@ -263,7 +265,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
     }
 
     /**
-     * 设置模型未配置 contextLength 时的回退窗口长度。
+     * 设置会话未选择上下文窗口时的回退长度。
      *
      * <p>非正数为无意义配置（会让压缩预算恒为 0、每轮都触发压缩），故直接拒绝并保持原值。</p>
      */
@@ -392,9 +394,9 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         //    可缓存块被保留，不被压缩逻辑破坏其结构性完整性。
         markStaticContextBoundary(trace, systemPrompt);
 
-        // ⭐ 触发预算 = 当前模型上下文窗口 × 压缩比例。
-        //    拦截器是单例、跨会话/多模型共享，故每轮从 trace 动态取当前推理模型的
-        //    contextLength 计算，绝不写回实例字段（避免会话间互相污染）。
+        // ⭐ 触发预算 = 本会话选定的上下文窗口 × 压缩比例。
+        //    拦截器是单例、跨会话/多模型共享，故每轮从 trace 对应的会话动态取值，
+        //    绝不写回实例字段（避免会话间互相污染）。
         int budget = resolveBudget(trace);
 
         // 0. ⭐ 单条消息硬上限兜底（内容级截断）
@@ -446,7 +448,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         //    不再调用摘要 LLM，仅保留零成本裁剪路径。
 
         // ⭐ 压缩目标水位（与触发阈值解耦）：决定「压到多深」。
-        int targetBudget = resolveTargetBudget(resolveModel(trace), budget);
+        int targetBudget = resolveTargetBudget(resolveContextLength(trace), budget);
 
         // 0.5 ⭐ 免费清理层（先试便宜的）
         //    在调用任何 LLM 之前，先把保留窗口之外、白名单工具的旧结果替换为占位符，
@@ -826,14 +828,6 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         }
 
         return true;
-    }
-
-    private ChatModel resolveModel(ReActTrace trace) {
-        try {
-            return trace.getOptions().getChatModel();
-        } catch (Exception e) {
-            return null;
-        }
     }
 
     /** 估算单条消息的 token（不写缓存，用于临时构造的消息）。 */
@@ -1468,30 +1462,40 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
     }
 
     /**
-     * 计算本轮压缩触发/预算 = 当前推理模型上下文窗口 × 压缩比例。
+     * 计算本轮压缩触发/预算 = 本会话选定的上下文窗口 × 压缩比例。
      *
-     * <p>拦截器为单例、跨会话与多模型共享，故必须每轮从 trace 动态取"当前正在推理的
-     * 这个 agent 的模型"的 contextLength（主/子代理可用不同模型），不能缓存到实例字段。
-     * 模型未设置 contextLength（=0）时回退 {@link #DEFAULT_CONTEXT_LENGTH}。</p>
+     * <p>拦截器为单例、跨会话与多模型共享，故必须每轮从 trace 对应的会话动态取值
+     * （主/子代理各自拥有独立会话），不能缓存到实例字段。</p>
      */
     private int resolveBudget(ReActTrace trace) {
-        ChatModel model = null;
-        try {
-            model = trace.getOptions().getChatModel();
-        } catch (Exception e) {
-            if (log.isDebugEnabled()) {
-                log.debug("ReActAgent [{}] resolve contextLength failed, fallback {}: {}",
-                        trace.getAgentName(), defaultContextLength, e.getMessage());
-            }
-        }
-        return finalTokenThreshold(model);
+        return finalTokenThreshold(resolveContextLength(trace));
     }
 
-    /** 返回模型的完整 long 上下文窗口；未配置时回退可配置默认值。 */
-    private long finalContextLength(ChatModel model) {
-        if (model != null && model.getConfig() != null) {
-            long configured = model.getConfig().getContextLength();
-            if (configured > 0L) return configured;
+    /**
+     * 解析本轮生效的上下文窗口：取自当前会话的用户选择。
+     *
+     * <p><b>为什么不再读模型配置</b>：上下文窗口已从「模型配置项」改为「会话级用户选择」，
+     * 若这里还回退到 {@code model.getConfig().getContextLength()}，就会出现「压缩按一个值、
+     * 界面显示另一个值」的双源不一致。会话缺失时统一回退 {@link #defaultContextLength}。</p>
+     */
+    private long resolveContextLength(ReActTrace trace) {
+        if (trace == null) {
+            return defaultContextLength;
+        }
+        try {
+            AgentSession session = trace.getSession();
+            if (session == null) {
+                return defaultContextLength;
+            }
+            Long selected = ContextLengthPolicy.parse(session.getContext().get(ContextLengthPolicy.CONTEXT_LENGTH_KEY));
+            if (selected != null && ContextLengthPolicy.isAllowed(selected.longValue())) {
+                return selected.longValue();
+            }
+        } catch (Exception e) {
+            if (log.isDebugEnabled()) {
+                log.debug("ReActAgent [{}] resolve session contextLength failed, fallback {}: {}",
+                        trace.getAgentName(), defaultContextLength, e.getMessage());
+            }
         }
         return defaultContextLength;
     }
@@ -1515,9 +1519,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
      * <p>jtokkit {@code countTokens} 返回 int，故此处是刻意且唯一的收窄边界：
      * 先用 long 计算，再饱和钳制到 Integer.MAX_VALUE，绝不回绕为负数。</p>
      */
-    private int finalTokenThreshold(ChatModel model) {
-        long contextLength = finalContextLength(model);
-
+    private int finalTokenThreshold(long contextLength) {
         // 1. 扇出单轮输出预留（绝对量）。极小窗口下预留不得吞掉全部窗口。
         long reservedOutput = Math.min(reservedOutputTokens, Math.max(1L, contextLength / 4));
         long effectiveWindow = Math.max(1L, contextLength - reservedOutput);
@@ -1557,8 +1559,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
      * 而一条大工具结果就能把压缩成果全部吃掉 → 长会话陷入「每 1~3 轮压一次」的抖动，
      * 每次都重写消息前缀导致整窗 prompt cache 失效。</p>
      */
-    private int resolveTargetBudget(ChatModel model, int triggerBudget) {
-        long contextLength = finalContextLength(model);
+    private int resolveTargetBudget(long contextLength, int triggerBudget) {
         long reservedOutput = Math.min(reservedOutputTokens, Math.max(1L, contextLength / 4));
         long effectiveWindow = Math.max(1L, contextLength - reservedOutput);
 

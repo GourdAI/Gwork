@@ -541,6 +541,12 @@ pub async fn start_ui_server(app: AppHandle) -> Result<u16> {
         .with_context(|| format!("UI 目录不存在: {}", ui_dir.display()))?;
 
     let client = reqwest::Client::builder()
+        // 必须显式 no_proxy：本反代只打 127.0.0.1:{backend_port}，绝不能穿系统代理。
+        // reqwest 默认 auto_sys_proxy 会读 Windows 注册表，而 IE 的 ProxyOverride 对回环无效
+        // （hyper-util matcher 对 IP 形 host 只查 ips 桶，`127.*` 却被归入 domains 桶）。
+        // 漏掉此项时每个 /web/** 请求都会发往代理，代理不可达则挂到 300s 请求超时，
+        // 界面表现为「模型列表永远加载中」等全面卡死。
+        .no_proxy()
         .connect_timeout(PROXY_CONNECT_TIMEOUT)
         .pool_max_idle_per_host(32)
         .redirect(reqwest::redirect::Policy::none())

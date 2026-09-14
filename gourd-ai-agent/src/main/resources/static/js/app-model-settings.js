@@ -598,7 +598,6 @@
                 id: m.id,
                 manual: m.manual || false,
                 standard: m.standard || (provider.standard || DEFAULT_STANDARD),
-                maxInputTokens: m.maxInputTokens,
                 enabled: m.enabled !== false
             };
         }) : [];
@@ -656,29 +655,8 @@
     // ==================== 模型列表 ====================
     var llmModelsCache = {}; // 缓存 LLM 模型列表，用于判断是否已同步
 
-    // 将 token 数格式化为便于阅读的输入值（128000 -> "128k"）
-    function formatTokensInput(n) {
-        if (!n || n <= 0) return '';
-        if (n % 1000000 === 0) return (n / 1000000) + 'm';
-        if (n % 1000 === 0) return (n / 1000) + 'k';
-        return String(n);
-    }
-
-    // 解析上下文长度输入（"128k"/"1m"/数字 -> token 数），无效返回 undefined
-    function parseTokensInput(raw) {
-        var maxTokens = (raw || '').trim();
-        if (!maxTokens) return undefined;
-        var trimmed = maxTokens.replace(/[, _]/g, '');
-        var matchK = trimmed.match(/^(\d+\.?\d*)k$/i);
-        var matchM = trimmed.match(/^(\d+\.?\d*)m$/i);
-        if (matchK) return Math.round(parseFloat(matchK[1]) * 1000);
-        if (matchM) return Math.round(parseFloat(matchM[1]) * 1000000);
-        if (parseInt(trimmed, 10) > 0) return parseInt(trimmed, 10);
-        return undefined;
-    }
-
     // 添加 / 修改模型弹框（model 为 null 表示新增，否则为编辑）
-    // 结构与设置弹框完全一致（model-add-* 组件类），id 加 ms 前缀避免与设置弹框弹框冲突
+    // 结构与设置弹框完全一致（model-add-* 组件类），id 加 ms 前缀避免与设置弹框冲突
     function openModelDialog(model) {
         var isEdit = !!model;
         var curStd = isEdit ? (model.standard || DEFAULT_STANDARD) : DEFAULT_STANDARD;
@@ -687,7 +665,6 @@
             manualStdOptions += '<option value="' + opt.value + '"' + (opt.value === curStd ? ' selected' : '') + '>' + opt.label + '</option>';
         });
         var nameVal = isEdit ? escapeAttr(model.id) : '';
-        var tokensVal = isEdit ? escapeAttr(formatTokensInput(model.maxInputTokens)) : '';
         var dialogHtml = '<div class="model-add-overlay" id="msModelAddOverlay">'
             + '<div class="model-add-dialog">'
             + '<div class="model-add-header">'
@@ -703,23 +680,13 @@
              + '<label>' + GourdI18n.t('settings.providers.model_standard') + ' <span class="required">*</span></label>'
              + '<select id="msManualModelStandard" lay-filter="msManualModelStandard">' + manualStdOptions + '</select>'
             + '</div>'
-            + '<div class="form-group">'
-             + '<label>' + GourdI18n.t('settings.providers.model_context') + '</label>'
-             + '<input type="text" id="msManualModelTokens" inputmode="numeric" placeholder="' + GourdI18n.t('settings.providers.model_context') + '" list="msManualContextLengthList" autocomplete="off" value="' + tokensVal + '">'
-            + '<datalist id="msManualContextLengthList">'
-            + '<option value="128k">'
-            + '<option value="256k">'
-            + '<option value="512k">'
-            + '<option value="1m">'
-            + '</datalist>'
-            + '</div>'
             + '</div>'
             + '<div class="model-add-footer">'
              + '<button class="btn-secondary" id="msModelAddCancel">' + GourdI18n.t('common.cancel') + '</button>'
              + '<button class="btn-primary" id="msModelAddConfirm">' + (isEdit ? GourdI18n.t('common.save') + GourdI18n.t('common.edit') : GourdI18n.t('common.confirm') + GourdI18n.t('common.add')) + '</button>'
-            + '</div>'
-            + '</div>'
-            + '</div>';
+             + '</div>'
+             + '</div>'
+             + '</div>';
 
         $('body').append(dialogHtml);
 
@@ -736,7 +703,6 @@
 
         function doSave() {
             var modelId = $overlay.find('#msManualModelName').val().trim();
-            var maxInputTokens = parseTokensInput($overlay.find('#msManualModelTokens').val());
 
             if (!modelId) {
                 showToast(GourdI18n.t('settings.providers.model_name') + GourdI18n.t('common.required'), 'error');
@@ -755,15 +721,8 @@
             if (isEdit) {
                 model.id = modelId;
                 model.standard = manualStandard || DEFAULT_STANDARD;
-                if (maxInputTokens) {
-                    model.maxInputTokens = maxInputTokens;
-                } else {
-                    delete model.maxInputTokens;
-                }
             } else {
-                var newModel = { id: modelId, manual: true, standard: manualStandard || DEFAULT_STANDARD };
-                if (maxInputTokens) newModel.maxInputTokens = maxInputTokens;
-                fetchedModels.push(newModel);
+                fetchedModels.push({ id: modelId, manual: true, standard: manualStandard || DEFAULT_STANDARD });
             }
             renderModelsList();
             // 编辑模式下即时生效（新增模式仍随保存按钮一并提交）
@@ -887,9 +846,6 @@
                             if (fetchedIds[mm.id]) {
                                 fetchedIds[mm.id].manual = true;
                                 if (mm.standard) fetchedIds[mm.id].standard = mm.standard;
-                                if (mm.maxInputTokens) {
-                                    fetchedIds[mm.id].maxInputTokens = mm.maxInputTokens;
-                                }
                                 if (mm.enabled !== undefined) {
                                     fetchedIds[mm.id].enabled = mm.enabled;
                                 }
@@ -967,11 +923,6 @@
                 ? '<button class="provider-model-remove-btn" title="' + GourdI18n.t('common.delete') + '"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>'
                 : '';
 
-            // 上下文长度提示（若已配置）
-            var tokensHint = model.maxInputTokens
-                ? '<div class="provider-model-sub">' + GourdI18n.t('settings.providers.model_context') + ' ' + escapeAttr(formatTokensInput(model.maxInputTokens)) + '</div>'
-                : '';
-
             // 接口类型下拉（按模型，layui 样式）
             var curStd = model.standard || DEFAULT_STANDARD;
             var stdOptions = '';
@@ -985,7 +936,6 @@
             html += '<div class="provider-model-item' + (!enabled ? ' disabled' : '') + '" data-model-id="' + escapeAttr(model.id) + '">' +
                 '<div class="provider-model-info" title="' + GourdI18n.t('common.edit') + GourdI18n.t('settings.providers.model_management') + '">' +
                      '<div class="provider-model-name">' + escapeHtml(model.id) + manualTag + (isSynced ? ' <span class="provider-model-synced">' + GourdI18n.t('settings.providers.synced') + '</span>' : '') + '</div>' +
-                    tokensHint +
                 '</div>' +
                 '<div class="provider-model-actions">' +
                     stdSelect +
@@ -1082,11 +1032,7 @@
         var scope = $('#msProviderScope').val();
         var timeout = ($('#msProviderTimeout').val() || '').trim();
         var models = fetchedModels.map(function (m) {
-            var model = { id: m.id, manual: m.manual || false, standard: m.standard || DEFAULT_STANDARD, enabled: m.enabled !== false };
-            if (m.maxInputTokens) {
-                model.maxInputTokens = m.maxInputTokens;
-            }
-            return model;
+            return { id: m.id, manual: m.manual || false, standard: m.standard || DEFAULT_STANDARD, enabled: m.enabled !== false };
         });
 
         if (!name) {

@@ -1,5 +1,6 @@
 package com.gourdai.agent.react.intercept;
 
+import com.gourdai.agent.ContextLengthPolicy;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -8,53 +9,51 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ContextCompressionInterceptorLongTest {
     private static Method thresholdMethod() throws Exception {
-        Method m = ContextCompressionInterceptor.class.getDeclaredMethod(
-                "finalTokenThreshold", org.noear.solon.ai.chat.ChatModel.class);
+        // 上下文窗口已改为会话级选择，阈值计算不再接收 ChatModel（模型配置彻底不参与）
+        Method m = ContextCompressionInterceptor.class.getDeclaredMethod("finalTokenThreshold", long.class);
         m.setAccessible(true);
         return m;
     }
 
-    private static int thresholdOf(ContextCompressionInterceptor interceptor) throws Exception {
-        return (Integer) thresholdMethod().invoke(interceptor, new Object[]{null});
+    private static int thresholdOf(long contextLength) throws Exception {
+        return (Integer) thresholdMethod().invoke(new ContextCompressionInterceptor(), contextLength);
     }
 
-    @Test void defaultLongBudgetAndValidation() throws Exception {
+    private static int thresholdOf(ContextCompressionInterceptor interceptor, long contextLength) throws Exception {
+        return (Integer) thresholdMethod().invoke(interceptor, contextLength);
+    }
+
+    @Test void defaultWindowIsSessionDefaultAndValidationHolds() throws Exception {
         ContextCompressionInterceptor interceptor = new ContextCompressionInterceptor();
+
+        // 默认窗口 = 会话级默认 256K（用户未选择时的回落值），不再是模型配置或 128K 硬编码
+        assertEquals(ContextLengthPolicy.DEFAULT_CONTEXT_LENGTH, interceptor.getDefaultContextLength());
 
         // 触发阈值 = 窗口 − 输出预留(20K) − 回合缓冲(13K)，而非旧的「窗口 × 80%」。
         // 预留的是绝对量，因为一轮最多新增多少（模型输出 + 工具结果）不随窗口大小线性增长。
-        assertEquals(128_000 - 20_000 - 13_000, thresholdOf(interceptor));
+        assertEquals(256_000 - 20_000 - 13_000, thresholdOf(256_000L));
 
         assertThrows(IllegalArgumentException.class, () -> interceptor.setDefaultContextLength(0));
 
-        interceptor.setDefaultContextLength(Long.MAX_VALUE);
-        assertEquals(Integer.MAX_VALUE, thresholdOf(interceptor));
+        assertEquals(Integer.MAX_VALUE, thresholdOf(Long.MAX_VALUE));
     }
 
     @Test void thresholdScalesByAbsoluteReserveAcrossWindows() throws Exception {
-        ContextCompressionInterceptor interceptor = new ContextCompressionInterceptor();
-
         // 200K：effectiveWindow=180K ≥ ... < 400K → buffer 13K
-        interceptor.setDefaultContextLength(200_000L);
-        assertEquals(167_000, thresholdOf(interceptor));
+        assertEquals(167_000, thresholdOf(200_000L));
 
         // 500K：effectiveWindow=480K ≥ 400K → buffer 30K
-        interceptor.setDefaultContextLength(500_000L);
-        assertEquals(450_000, thresholdOf(interceptor));
+        assertEquals(450_000, thresholdOf(500_000L));
 
         // 1M：effectiveWindow=980K ≥ 800K → buffer 50K。
         // 旧的 80% 比例只会给到 800K，白白浪费 130K 可用窗口。
-        interceptor.setDefaultContextLength(1_000_000L);
-        assertEquals(930_000, thresholdOf(interceptor));
+        assertEquals(930_000, thresholdOf(1_000_000L));
     }
 
     @Test void smallWindowKeepsUsableFloorAndOutputHeadroom() throws Exception {
-        ContextCompressionInterceptor interceptor = new ContextCompressionInterceptor();
-
         // 32K 小窗口：输出预留被钳到 window/4，缓冲被钳到 effectiveWindow/2，
         // 且有 window/2 地板兜底 —— 既不会退化成每轮都压，也仍给一轮输出留出余量。
-        interceptor.setDefaultContextLength(32_000L);
-        int threshold = thresholdOf(interceptor);
+        int threshold = thresholdOf(32_000L);
 
         assertTrue(threshold >= 16_000, "小窗口应至少保留一半窗口可用，实际: " + threshold);
         assertTrue(threshold < 32_000, "阈值必须低于窗口本身，实际: " + threshold);
@@ -64,30 +63,28 @@ class ContextCompressionInterceptorLongTest {
 
     @Test void ratioOnlyPullsTriggerEarlierNeverLater() throws Exception {
         ContextCompressionInterceptor interceptor = new ContextCompressionInterceptor();
-        interceptor.setDefaultContextLength(200_000L);
 
-        int absolute = thresholdOf(interceptor);   // ratio 默认 100 → 纯绝对阈值
+        int absolute = thresholdOf(interceptor, 200_000L);   // ratio 默认 100 → 纯绝对阈值
 
         // ratio=50 更激进 → 触发点被拉早
         interceptor.setCompressionRatio(50);
-        assertEquals(100_000, thresholdOf(interceptor));
-        assertTrue(thresholdOf(interceptor) < absolute);
+        assertEquals(100_000, thresholdOf(interceptor, 200_000L));
+        assertTrue(thresholdOf(interceptor, 200_000L) < absolute);
 
         // ratio=90 算出 180K > 绝对阈值 167K → 取 min，不得把触发点往后推
         interceptor.setCompressionRatio(90);
-        assertEquals(absolute, thresholdOf(interceptor));
+        assertEquals(absolute, thresholdOf(interceptor, 200_000L));
     }
 
     @Test void targetBudgetIsDeeperThanTriggerToAvoidThrashing() throws Exception {
         ContextCompressionInterceptor interceptor = new ContextCompressionInterceptor();
-        interceptor.setDefaultContextLength(200_000L);
 
         Method m = ContextCompressionInterceptor.class.getDeclaredMethod(
-                "resolveTargetBudget", org.noear.solon.ai.chat.ChatModel.class, int.class);
+                "resolveTargetBudget", long.class, int.class);
         m.setAccessible(true);
 
-        int trigger = thresholdOf(interceptor);
-        int target = (Integer) m.invoke(interceptor, null, trigger);
+        int trigger = thresholdOf(interceptor, 200_000L);
+        int target = (Integer) m.invoke(interceptor, 200_000L, trigger);
 
         // 压缩后目标水位必须明显低于触发线，否则单次压缩腾出的空间会被
         // 一条大工具结果吃光，长会话陷入「压完没几轮又触发」的抖动。
@@ -96,13 +93,13 @@ class ContextCompressionInterceptorLongTest {
                 "单次压缩应腾出足够空间，实际仅腾出: " + (trigger - target));
 
         // 目标水位永不高于触发线（否则等于没压）
-        assertTrue((Integer) m.invoke(interceptor, null, 1_000) <= 1_000);
+        assertTrue((Integer) m.invoke(interceptor, 200_000L, 1_000) <= 1_000);
     }
 
     @Test void copyPreservesExplicitConfiguration() {
         ContextCompressionInterceptor interceptor = new ContextCompressionInterceptor();
         interceptor.setCompressionRatio(67);
-        interceptor.setDefaultContextLength(256_000L);
+        interceptor.setDefaultContextLength(512_000L);
         interceptor.setMinReservedMessages(25);
         interceptor.setCompressionTargetRatio(60);
         interceptor.setReservedOutputTokens(8_000);
@@ -111,7 +108,7 @@ class ContextCompressionInterceptorLongTest {
 
         ContextCompressionInterceptor copy = interceptor.copyWith(60);
 
-        assertEquals(256_000L, copy.getDefaultContextLength());
+        assertEquals(512_000L, copy.getDefaultContextLength());
         assertEquals(60, copy.getCompressionTargetRatio());
         assertEquals(8_000, copy.getReservedOutputTokens());
         assertFalse(copy.isIntentChainEnabled());

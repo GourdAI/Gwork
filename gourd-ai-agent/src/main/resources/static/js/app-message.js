@@ -338,11 +338,10 @@ function appendReasonChunkCore(sess, h, text) {
         }
         // 智能体卡体自身也是滚动容器：内层思考块滚到底不代表它在卡体视口内，需同步跟随
         followHolderBody(h);
-        if (sess.sessionId === activeSessionId) {
-            if (!userScrolledUp && messagesWrap) {
-                // 同步赋值减少跳帧
-                messagesWrap.scrollTop = messagesWrap.scrollHeight;
-            }
+        // 统一走 scrollToBottom 协调器：内部复查用户上滚/回放 _skipScroll/锚定锁，
+        // 直接同步赋值会绕开这些保护，把用户拉回底部（滚动抖动来源）
+        if (sess.sessionId === activeSessionId && !sess._skipScroll) {
+            scrollToBottom();
         }
     };
     r.append(clean);
@@ -365,9 +364,10 @@ function appendBodyContentCore(sess, h, text, append, ensureEl) {
         followHolderBody(h);
         // 流式过程中不实时高亮，等 finishStream 时再一次性处理，避免高亮引起的布局跳动
         if (sess.sessionId === activeSessionId) {
-            if (!userScrolledUp && messagesWrap && !sess._skipScroll) {
-                // 直接用同步赋值减少跳帧；scrollToBottom 的 rAF 在这里已经太晚
-                messagesWrap.scrollTop = messagesWrap.scrollHeight;
+            // 统一走 scrollToBottom 协调器（内部复查 userScrolledUp / _skipScroll / 锚定锁）：
+            // 直接同步赋值虽快一帧，但绕开了回放与锚定保护，会把用户拉回底部造成抖动
+            if (!sess._skipScroll) {
+                scrollToBottom();
             }
         }
     };
