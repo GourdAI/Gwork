@@ -93,6 +93,13 @@
             removeManualModel(modelId);
         });
 
+        // 模型列表 - 设为默认模型（星标；成功静默刷新，失败时提示原因）
+        $modelsList.on('click', '.provider-model-default-btn', function () {
+            var llmName = $(this).data('llm-name');
+            if (!llmName || llmName === llmDefaultModel) return; // 缺名或已是默认模型：幂等
+            setDefaultModel(llmName);
+        });
+
         // 模型列表 - 点击模型信息，弹出修改配置弹框
         $modelsList.on('click', '.provider-model-info', function () {
             var modelId = $(this).closest('.provider-model-item').data('model-id');
@@ -654,6 +661,9 @@
 
     // ==================== 模型列表 ====================
     var llmModelsCache = {}; // 缓存 LLM 模型列表，用于判断是否已同步
+    // 当前默认模型（后端 effectiveDefault 口径：settings 原始值空/悬空时已按引擎回落链解析为实际生效模型）。
+    // 星标高亮、页头提示均以它为准，保证展示的始终是「未选模时实际会用的模型」。
+    var llmDefaultModel = null;
 
     // 添加 / 修改模型弹框（model 为 null 表示新增，否则为编辑）
     // 结构与设置弹框完全一致（model-add-* 组件类），id 加 ms 前缀避免与设置弹框冲突
@@ -890,6 +900,10 @@
                         llmModelsCache[item.name] = item;
                     }
                 });
+                // 默认模型使用「实际生效」口径（后端已按引擎回落链解析，可能为空 = 一个模型都没配），
+                // 顺带刷新页头提示，保证星标与提示始终指向「未选模时实际会用的模型」
+                llmDefaultModel = res.data.effectiveDefault || null;
+                updateDefaultModelHint();
             }
             if (callback) callback();
         }).fail(function () {
@@ -918,6 +932,16 @@
             // 设置端点返回全量模型，enabled 已综合 visibled 与连接启用状态
             var enabled = isSynced ? syncedModel.enabled !== false : providerEnabled;
 
+            // 默认模型：以「实际生效」口径比对行内 llmName。星标按钮只在已同步且启用中的行渲染
+            //（未同步的模型后端不存在、禁用的模型不允许设为默认）；当前默认行显示高亮星标 + 「默认」徽标。
+            var isDefaultModel = isSynced && llmDefaultModel === llmName;
+            var defaultBtn = (isSynced && enabled)
+                ? '<button class="provider-model-default-btn' + (isDefaultModel ? ' active' : '') + '" data-llm-name="' + escapeAttr(llmName) + '" title="' + escapeAttr(GourdI18n.t('settings.providers.set_default_model')) + '">' +
+                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (isDefaultModel ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' +
+                  '</button>'
+                : '';
+            var defaultTag = isDefaultModel ? ' <span class="provider-model-default-tag">' + GourdI18n.t('settings.providers.default_badge') + '</span>' : '';
+
             var manualTag = model.manual ? ' <span class="provider-model-manual-tag">' + GourdI18n.t('settings.providers.model_manual') + '</span>' : '';
             var removeBtn = model.manual
                 ? '<button class="provider-model-remove-btn" title="' + GourdI18n.t('common.delete') + '"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>'
@@ -935,9 +959,10 @@
 
             html += '<div class="provider-model-item' + (!enabled ? ' disabled' : '') + '" data-model-id="' + escapeAttr(model.id) + '">' +
                 '<div class="provider-model-info" title="' + GourdI18n.t('common.edit') + GourdI18n.t('settings.providers.model_management') + '">' +
-                     '<div class="provider-model-name">' + escapeHtml(model.id) + manualTag + (isSynced ? ' <span class="provider-model-synced">' + GourdI18n.t('settings.providers.synced') + '</span>' : '') + '</div>' +
+                     '<div class="provider-model-name">' + escapeHtml(model.id) + defaultTag + manualTag + (isSynced ? ' <span class="provider-model-synced">' + GourdI18n.t('settings.providers.synced') + '</span>' : '') + '</div>' +
                 '</div>' +
                 '<div class="provider-model-actions">' +
+                    defaultBtn +
                     stdSelect +
                     removeBtn +
                      '<label class="toggle-switch">' +
@@ -991,6 +1016,42 @@
             // 未同步：即时持久化并触发后端同步生成运行时模型
             persistProvider();
         }
+    }
+
+    /**
+     * 刷新页头的「默认模型：xxx」提示；尚未解析出默认模型（一个模型都没配）时隐藏。
+     */
+    function updateDefaultModelHint() {
+        var $hint = $('#msDefaultModelHint');
+        if (!$hint.length) return;
+        if (llmDefaultModel) {
+            $('#msDefaultModelHintText').text(
+                GourdI18n.t('settings.providers.default_model_hint').replace('{0}', llmDefaultModel));
+            $hint.show();
+        } else {
+            $hint.hide();
+        }
+    }
+
+    /**
+     * 将模型设为默认（星标点击）。
+     * 成功静默——星标高亮与页头提示变化即为反馈，不弹 toast；
+     * 失败时提示原因（如模型恰在别处被禁用），避免操作无感知地失败。
+     */
+    function setDefaultModel(llmName) {
+        postJson('/web/settings/llm/models/default', { name: llmName }, function (resp) {
+            if (resp.code === 200) {
+                llmDefaultModel = llmName;
+                renderModelsList();
+                updateDefaultModelHint();
+                // 默认模型影响未选模会话/自动化/ACP 的回落，通知聊天组件刷新模型下拉
+                if (typeof window.reloadModels === 'function') {
+                    window.reloadModels();
+                }
+            } else {
+                showToast((resp && resp.description) || GourdI18n.t('settings.loop.operation_failed'), 'error');
+            }
+        });
     }
 
     // ==================== CRUD 操作 ====================
@@ -1244,6 +1305,12 @@
     window.openModelSettings = openModelSettings;
     window.closeModelSettings = closeModelSettings;
     window.isModelSettingsOpen = function () { return $view.hasClass('active'); };
+
+    // 语言切换后刷新动态文案：页头「默认模型」提示 + 模型列表（星标 title /「默认」徽标等由 JS 拼装的文本）
+    document.addEventListener('i18n:localeChanged', function () {
+        updateDefaultModelHint();
+        if ($view.hasClass('active')) renderModelsList();
+    });
 
     // Provider API Key 显示切换
     $(document).on('click', '#msProviderApiKeyToggle', function () {

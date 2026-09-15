@@ -9,6 +9,11 @@
             <div class="model-settings-header">
                 <h1 class="model-settings-title" data-i18n="settings.providers.view_title">模型设置</h1>
                 <div class="model-settings-subtitle" data-i18n="settings.providers.desc">按服务商配置 AI 模型：填写接口地址与密钥，拉取或手动添加模型，并为每个模型选择接口类型</div>
+                <!-- 当前默认模型提示：跨供应商可见（行内星标只在展开的供应商内可见）；由 app-model-settings.js 动态填充，无默认模型时隐藏 -->
+                <div class="model-settings-default-hint" id="msDefaultModelHint" style="display:none">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <span id="msDefaultModelHintText"></span>
+                </div>
             </div>
             <!-- 双栏卡片 -->
             <div class="model-settings-card">

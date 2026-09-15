@@ -19,6 +19,10 @@ body.code-mode .model-settings-view { display: none !important; }
 .model-settings-header { margin-bottom: 22px; }
 .model-settings-title { margin: 0; font-size: 26px; font-weight: 600; color: var(--text-primary); letter-spacing: .3px; }
 .model-settings-subtitle { margin-top: 6px; font-size: 13px; color: var(--text-tertiary); line-height: 1.6; }
+/* 页头「默认模型：xxx」提示（跨供应商展示当前默认；无默认模型时由脚本隐藏） */
+.model-settings-default-hint { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--text-secondary); }
+.model-settings-default-hint svg { color: var(--accent); flex-shrink: 0; }
+.model-settings-default-hint span { color: var(--text-primary); }
 
 
 /* ===== 双栏卡片 ===== */

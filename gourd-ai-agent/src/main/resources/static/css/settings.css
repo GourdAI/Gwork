@@ -1321,6 +1321,37 @@ input[type=number] { -moz-appearance: textfield; }
     color: #ef4444;
 }
 
+/* 「设为默认模型」星标按钮（仅已同步且启用中的模型行渲染；当前默认行高亮） */
+.provider-model-default-btn {
+    cursor: pointer;
+    color: var(--text-secondary);
+    padding: 2px;
+    border: none;
+    background: none;
+    display: flex;
+    align-items: center;
+}
+
+.provider-model-default-btn:hover {
+    color: var(--accent);
+}
+
+.provider-model-default-btn.active {
+    color: var(--accent);
+}
+
+/* 当前默认模型徽标（与「手动」「已同步」徽标同构） */
+.provider-model-default-tag {
+    display: inline-block;
+    font-size: 10px;
+    color: var(--accent);
+    background: rgba(79, 110, 247, 0.12);
+    padding: 1px 4px;
+    border-radius: 3px;
+    margin-left: 4px;
+    vertical-align: middle;
+}
+
 /* ==================== MCP 导入对话框 ==================== */
 .import-overlay {
     position: fixed;

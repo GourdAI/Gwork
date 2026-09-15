@@ -339,6 +339,10 @@ public class WebSettingsController {
 
         data.put("list", list);
         data.put("default", settings.getDefaultModel());
+        // 与 /web/chat/models 下发的 selected 同口径：额外下发引擎解析后的「实际生效」默认模型。
+        // settings 原始值可能为空 / 悬空 / 指向已禁用模型（此时引擎回落到模型表首项），
+        // 前端据此渲染页头默认提示与「默认」标记，保证展示的始终是「未选模时实际会用的模型」。
+        data.put("effectiveDefault", resolveEffectiveModelName(null));
 
         return Result.succeed(data);
     }
@@ -524,6 +528,36 @@ public class WebSettingsController {
         saveSettings();
         LOG.info("[Settings] Model {} {}", name, enabled ? "enabled" : "disabled");
         return Result.succeed();
+    }
+
+    /**
+     * 设置默认模型。
+     *
+     * <p>会话未显式选择模型、自动化任务留空、ACP 未指定等场合均回落到该模型；
+     * 写入后即时同步运行时引擎并持久化。仅接受存在且启用中的模型，避免默认悬空
+     * 或指向被禁用的配置。</p>
+     */
+    @Post
+    @Mapping("/web/settings/llm/models/default")
+    public Result llmModelsSetDefault(@Param("name") String name) throws Exception {
+        if (Assert.isEmpty(name)) {
+            return Result.failure("name is required");
+        }
+        ModelDo config = settings.getModels().get(name);
+        if (config == null) {
+            return Result.failure("Model not found: " + name);
+        }
+        if (config.isEnabled() == false) {
+            return Result.failure("Model is disabled: " + name);
+        }
+
+        settings.setDefaultModel(name);
+        // 即时同步运行时引擎：未显式选模的会话 / 自动化 / ACP 下一次请求即使用新默认值
+        engine.setDefaultModel(name);
+        saveSettings();
+
+        LOG.info("[Settings] Default model set to: {}", name);
+        return Result.succeed(name);
     }
 
     // ==================== 设置：MCP 服务器管理 ====================

@@ -159,6 +159,76 @@ class WebSettingsControllerModelSafetyTest {
         Assertions.assertFalse(controller.llmModelsGet("P-one").getData().containsKey("contextLength"));
     }
 
+    @Test
+    void setDefaultModelEndpointValidatesAndSyncsEngine() throws Exception {
+        Path workspace = Files.createTempDirectory("gwork-controller-default-test");
+        AgentSettings settings = new AgentSettings();
+        ModelDo first = model("P-a", "a");
+        ModelDo second = model("P-b", "b");
+        settings.addModelInProviderBlock(first);
+        settings.addModelInProviderBlock(second);
+        HarnessEngine engine = HarnessEngine.of(workspace.toString(), ".gwork")
+                .modelAdd(first)
+                .modelAdd(second)
+                .defaultModel("P-a")
+                .build();
+        WebSettingsController controller = new WebSettingsController(engine, settings);
+
+        // 空名与不存在的模型必须被拒绝
+        Assertions.assertNotEquals(200, controller.llmModelsSetDefault(null).getCode());
+        Assertions.assertNotEquals(200, controller.llmModelsSetDefault("P-none").getCode());
+
+        // 正常设置：settings 与运行时引擎同时切到新默认值
+        Result result = controller.llmModelsSetDefault("P-b");
+
+        Assertions.assertEquals(200, result.getCode());
+        Assertions.assertEquals("P-b", settings.getDefaultModel());
+        Assertions.assertEquals("P-b", engine.getDefaultModel());
+    }
+
+    @Test
+    void setDefaultModelRejectsDisabledModelWithoutSideEffect() throws Exception {
+        Path workspace = Files.createTempDirectory("gwork-controller-default-disabled-test");
+        AgentSettings settings = new AgentSettings();
+        ModelDo usable = model("P-a", "a");
+        ModelDo disabled = model("P-b", "b");
+        disabled.setEnabled(false);
+        settings.addModelInProviderBlock(usable);
+        settings.addModelInProviderBlock(disabled);
+        settings.setDefaultModel("P-a");
+        HarnessEngine engine = HarnessEngine.of(workspace.toString(), ".gwork")
+                .modelAdd(usable)
+                .defaultModel("P-a")
+                .build();
+        WebSettingsController controller = new WebSettingsController(engine, settings);
+
+        Result result = controller.llmModelsSetDefault("P-b");
+
+        Assertions.assertNotEquals(200, result.getCode(), "禁用中的模型不允许设为默认");
+        Assertions.assertEquals("P-a", settings.getDefaultModel(), "被拒绝的请求不得改动默认模型");
+        Assertions.assertEquals("P-a", engine.getDefaultModel());
+    }
+
+    @Test
+    void modelListExposesEffectiveDefaultWhenRawValueUnset() throws Exception {
+        Path workspace = Files.createTempDirectory("gwork-controller-effective-default-test");
+        AgentSettings settings = new AgentSettings();
+        ModelDo only = model("P-a", "a");
+        settings.addModelInProviderBlock(only);
+        // 不显式配置 defaultModel：模拟历史存量配置
+        settings.setDefaultModel(null);
+        HarnessEngine engine = HarnessEngine.of(workspace.toString(), ".gwork")
+                .modelAdd(only)
+                .build();
+        WebSettingsController controller = new WebSettingsController(engine, settings);
+
+        Map<String, Object> data = controller.llmModelsList().getData();
+
+        Assertions.assertNull(data.get("default"));
+        Assertions.assertEquals("P-a", data.get("effectiveDefault"),
+                "defaultModel 未配置时应下发引擎解析后的实际生效模型（模型表首项）");
+    }
+
     private static void restoreSystemProperty(String key, String value) {
         if (value == null) {
             System.clearProperty(key);
