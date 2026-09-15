@@ -221,11 +221,14 @@
                                 "time_h":  "{0}h",
                                 "time_d":  "{0}z",
                                 "expand_all":  "Extinde tot",
+                                "collapse_all":  "Restrânge tot",
                                 "clear_all":  "Șterge toate sesiunile",
                                 "confirm_clear":  "Ștergeți toate sesiunile? Această acțiune este ireversibilă.",
                                 
                                 
                                 "remove_project":  "Elimină din listă",
+                                "rename_project":  "Redenumește proiectul",
+                                "rename_failed":  "Redenumire eșuată",
                                 "model_config":  "Configurare modele",
                    "memory":  "Memorie"
                             }
@@ -480,7 +483,23 @@
                                  "import_skipped_exists":  "Omis (deja există)",
                                  "import_incomplete_config":  "Informații de configurare incomplete",
                                  "import_progress":  "Se importă {0} servere MCP...",
-                                 "import_summary":  "În total {0} servere MCP, {1} importate, {2} omise, {3} eșuate"
+                                 "import_summary":  "În total {0} servere MCP, {1} importate, {2} omise, {3} eșuate",
+                                 "import_json_file":  "Importați fișier JSON",
+                                 "import_json_str":  "Importați șir JSON",
+                                 "json_dialog_title":  "Importați șir JSON",
+                                 "json_hint":  "Lipiți șirul JSON de configurare a serverelor MCP; formate acceptate:",
+                                 "json_format_hint":  "<span class=\"import-string-code\">{\"mcpServers\": {...}}</span> Format Claude Desktop / Cursor<br/><span class=\"import-string-code\">{\"mcp\": {...}}</span> Format OpenCode<br/><span class=\"import-string-code\">{\"format\":\"mcp\",\"servers\":{...}}</span> Format standard",
+                                 "json_placeholder":  "Lipiți șirul JSON aici...",
+                                 "json_parse_hint":  "După lipire, faceți clic pe «Analizează» pentru previzualizare, apoi adăugați în bloc după confirmare",
+                                 "json_empty":  "Introduceți un șir JSON",
+                                 "json_invalid":  "Format JSON invalid; verificați și încercați din nou",
+                                 "parse_btn":  "Analizează",
+                                 "parse_failed_retry":  "Analizarea a eșuat; verificați formatul șirului JSON și încercați din nou",
+                                 "check_timeout":  "Verificarea a expirat (15 s); verificați dacă serverul este accesibil",
+                                 "empty":  "Nu există servere MCP",
+                                 "empty_desc":  "Serverele MCP extind capacitățile de instrumente ale IA, cum ar fi accesul la sistemul de fișiere, interogări de baze de date, apeluri API etc.",
+                                 "no_tools":  "Nu există instrumente",
+                                 "no_tools_desc":  "Acest server MCP nu oferă niciun instrument"
                              },
                      "openapi":  {
                                      "title":  "Servere OpenAPI",

@@ -221,11 +221,14 @@
                                 "time_h":  "{0}h",
                                 "time_d":  "{0}n",
                                 "expand_all":  "Mở rộng tất cả",
+                                "collapse_all":  "Thu gọn tất cả",
                                 "clear_all":  "Xóa tất cả phiên",
                                 "confirm_clear":  "Xóa tất cả phiên? Thao tác này không thể hoàn tác.",
                                 
                                 
                                 "remove_project":  "Xóa khỏi danh sách",
+                                "rename_project":  "Đổi tên dự án",
+                                "rename_failed":  "Đổi tên thất bại",
                                 "model_config":  "Cấu hình mô hình",
                    "memory":  "Bộ nhớ"
                             }
@@ -480,7 +483,23 @@
                                  "import_skipped_exists":  "Đã bỏ qua (đã tồn tại)",
                                  "import_incomplete_config":  "Thông tin cấu hình không đầy đủ",
                                  "import_progress":  "Đang nhập {0} máy chủ MCP...",
-                                 "import_summary":  "Tổng {0} máy chủ MCP, nhập thành công {1}, bỏ qua {2}, thất bại {3}"
+                                 "import_summary":  "Tổng {0} máy chủ MCP, nhập thành công {1}, bỏ qua {2}, thất bại {3}",
+                                 "import_json_file":  "Nhập tệp JSON",
+                                 "import_json_str":  "Nhập chuỗi JSON",
+                                 "json_dialog_title":  "Nhập chuỗi JSON",
+                                 "json_hint":  "Dán chuỗi JSON cấu hình máy chủ MCP, hỗ trợ các định dạng sau:",
+                                 "json_format_hint":  "<span class=\"import-string-code\">{\"mcpServers\": {...}}</span> Định dạng Claude Desktop / Cursor<br/><span class=\"import-string-code\">{\"mcp\": {...}}</span> Định dạng OpenCode<br/><span class=\"import-string-code\">{\"format\":\"mcp\",\"servers\":{...}}</span> Định dạng chuẩn",
+                                 "json_placeholder":  "Dán chuỗi JSON tại đây...",
+                                 "json_parse_hint":  "Sau khi dán, nhấp vào \"Phân tích\" để xem trước, xác nhận rồi thêm hàng loạt",
+                                 "json_empty":  "Vui lòng nhập chuỗi JSON",
+                                 "json_invalid":  "Định dạng JSON không hợp lệ, vui lòng kiểm tra và thử lại",
+                                 "parse_btn":  "Phân tích",
+                                 "parse_failed_retry":  "Phân tích thất bại, vui lòng kiểm tra định dạng chuỗi JSON rồi thử lại",
+                                 "check_timeout":  "Kiểm tra hết thời gian chờ (15 giây), vui lòng kiểm tra máy chủ có thể truy cập không",
+                                 "empty":  "Chưa có máy chủ MCP",
+                                 "empty_desc":  "Máy chủ MCP mở rộng khả năng công cụ của AI, như truy cập hệ thống tệp, truy vấn cơ sở dữ liệu, gọi API, v.v.",
+                                 "no_tools":  "Chưa có công cụ",
+                                 "no_tools_desc":  "Máy chủ MCP này không cung cấp công cụ nào"
                              },
                      "openapi":  {
                                      "title":  "Máy chủ OpenAPI",

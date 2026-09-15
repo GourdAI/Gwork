@@ -221,11 +221,14 @@
                                 "time_h":  "{0}ч",
                                 "time_d":  "{0}д",
                                 "expand_all":  "Развернуть все",
+                                "collapse_all":  "Свернуть все",
                                 "clear_all":  "Удалить все сессии",
                                 "confirm_clear":  "Удалить все сессии? Это действие нельзя отменить.",
                                 
                                 
                                 "remove_project":  "Убрать из списка",
+                                "rename_project":  "Переименовать проект",
+                                "rename_failed":  "Не удалось переименовать",
                                 "model_config":  "Настройки моделей",
                    "memory":  "Память"
                             }
@@ -480,7 +483,23 @@
                                  "import_skipped_exists":  "Пропущено (уже существует)",
                                  "import_incomplete_config":  "Неполная конфигурация",
                                  "import_progress":  "Импорт {0} MCP-серверов...",
-                                 "import_summary":  "Всего {0} MCP-серверов, импортировано {1}, пропущено {2}, ошибок {3}"
+                                 "import_summary":  "Всего {0} MCP-серверов, импортировано {1}, пропущено {2}, ошибок {3}",
+                                 "import_json_file":  "Импорт JSON-файла",
+                                 "import_json_str":  "Импорт JSON-строки",
+                                 "json_dialog_title":  "Импорт JSON-строки",
+                                 "json_hint":  "Вставьте JSON-строку конфигурации MCP-серверов. Поддерживаются форматы:",
+                                 "json_format_hint":  "<span class=\"import-string-code\">{\"mcpServers\": {...}}</span> формат Claude Desktop / Cursor<br/><span class=\"import-string-code\">{\"mcp\": {...}}</span> формат OpenCode<br/><span class=\"import-string-code\">{\"format\":\"mcp\",\"servers\":{...}}</span> стандартный формат",
+                                 "json_placeholder":  "Вставьте JSON-строку сюда...",
+                                 "json_parse_hint":  "После вставки нажмите «Разобрать» для предпросмотра, затем добавьте пакетно после подтверждения",
+                                 "json_empty":  "Введите JSON-строку",
+                                 "json_invalid":  "Недопустимый формат JSON, проверьте и повторите",
+                                 "parse_btn":  "Разобрать",
+                                 "parse_failed_retry":  "Не удалось разобрать — проверьте формат JSON-строки и повторите",
+                                 "check_timeout":  "Превышено время ожидания (15 с) — проверьте доступность сервера",
+                                 "empty":  "Пока нет MCP-серверов",
+                                 "empty_desc":  "MCP-серверы расширяют инструментальные возможности ИИ: доступ к файловой системе, запросы к базам данных, вызовы API и др.",
+                                 "no_tools":  "Нет инструментов",
+                                 "no_tools_desc":  "Этот MCP-сервер не предоставляет инструментов"
                              },
                      "openapi":  {
                                      "title":  "OpenAPI-серверы",

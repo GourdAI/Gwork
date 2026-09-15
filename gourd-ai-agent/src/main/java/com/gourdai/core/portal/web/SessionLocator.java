@@ -18,6 +18,8 @@ package com.gourdai.core.portal.web;
 import com.gourdai.agent.AgentSessionProvider;
 import com.gourdai.core.config.AgentFlags;
 import org.noear.snack4.ONode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.nio.file.Paths;
@@ -48,6 +50,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * @see FileService
  */
 public class SessionLocator {
+    private static final Logger LOG = LoggerFactory.getLogger(SessionLocator.class);
+
     /** 统一会话 ID 前缀（chat / code / acp 等历史前缀已废弃，不做兼容） */
     public static final String PREFIX_WORK = "work-";
 
@@ -84,6 +88,13 @@ public class SessionLocator {
      * 及无根提示的异步路径（Loop 执行、IM、流式旁路记录等）解析落盘目录；
      * 登记持久化到 {@code session-roots.json}，进程重启不丢失。</p>
      *
+     * <p><b>归属冻结：</b>会话的所属根一旦登记便不再改写——同一会话被重复登记到不同根，
+     * 会让它的数据在多个目录各写一份（分居），故第二次起仅告警忽略。重复登记同根幂等。</p>
+     *
+     * <p><b>数据位置采纳：</b>首次登记前先探测会话既有数据的实际位置——数据已落在某项目根时
+     * 采纳该根（而非请求根），数据已在全局区时保持全局语义不做登记。二者都保证
+     * 「messages/snapshot/stream 等同目录落盘」，不会因受理时的工作空间状态而把同一会话拆到两处。</p>
+     *
      * @param sessionId     会话 ID
      * @param workspaceRoot 所属工作空间根绝对路径；为空则忽略（回退到全局基准目录）
      */
@@ -91,11 +102,105 @@ public class SessionLocator {
         if (sessionId == null || workspaceRoot == null || workspaceRoot.trim().isEmpty()) {
             return;
         }
-        String root = workspaceRoot.trim();
-        String prev = boundRoots.put(sessionId, root);
-        if (prev == null || !prev.equals(root)) {
-            saveBoundRoots();
+        String root = normalizeRoot(workspaceRoot.trim());
+
+        // 归属冻结：已登记会话不再改写（防分居）。重复登记同根为幂等空操作。
+        String prev = boundRoots.get(sessionId);
+        if (prev != null) {
+            if (!sameRoot(prev, root)) {
+                LOG.warn("[SessionLocator] session {} already bound to '{}', ignore rebind to '{}'",
+                        sessionId, prev, root);
+            }
+            return;
         }
+
+        // 首次登记：家目录必须跟随既有数据位置，防止产生分居
+        String dataHome = detectDataHome(sessionId, root);
+        if (dataHome == null) {
+            // 所有已知位置均无数据：全新会话，采用请求根
+            dataHome = root;
+        } else if (sameRoot(dataHome, globalBase)) {
+            // 数据只落在全局区：保持全局语义（未登记即全局），不登记
+            return;
+        }
+
+        boundRoots.put(sessionId, dataHome);
+        saveBoundRoots();
+    }
+
+    /** 规范化根路径（绝对化 + normalize），使同一目录的不同写法收敛为统一形态。 */
+    private static String normalizeRoot(String root) {
+        try {
+            return Paths.get(root).toAbsolutePath().normalize().toString();
+        } catch (Throwable e) {
+            return root;
+        }
+    }
+
+    /** 两个根是否指向同一目录（Windows 大小写不敏感）。 */
+    private static boolean sameRoot(String a, String b) {
+        if (a == null || b == null) {
+            return false;
+        }
+        return normalizeRoot(a).equalsIgnoreCase(normalizeRoot(b));
+    }
+
+    /**
+     * 探测会话既有数据（messages/snapshot/stream/label/uploads 等任意文件）的实际所在根。
+     *
+     * <p>扫描范围为全局基准目录、全部已登记根与请求根；优先返回请求根（若其已含数据），
+     * 否则返回数据最新的根；全部无数据返回 {@code null}。</p>
+     */
+    private String detectDataHome(String sessionId, String requestedRoot) {
+        java.util.LinkedHashMap<String, File> candidates = new java.util.LinkedHashMap<>();
+        candidates.put(normalizeRoot(globalBase), new File(globalBase));
+        for (String r : registeredRoots()) {
+            candidates.putIfAbsent(normalizeRoot(r), new File(r));
+        }
+        candidates.putIfAbsent(normalizeRoot(requestedRoot), new File(requestedRoot));
+
+        String best = null;
+        long bestTime = Long.MIN_VALUE;
+        for (Map.Entry<String, File> e : candidates.entrySet()) {
+            File dir;
+            try {
+                dir = sessionDir(e.getValue().getPath(), sessionId);
+            } catch (Throwable t) {
+                continue;
+            }
+            if (!dirHasData(dir)) {
+                continue;
+            }
+            if (sameRoot(e.getKey(), requestedRoot)) {
+                return e.getKey();
+            }
+            long modified = dir.lastModified();
+            if (modified > bestTime) {
+                bestTime = modified;
+                best = e.getKey();
+            }
+        }
+        return best;
+    }
+
+    /** 目录树中是否存在任意真实数据（文件，或含文件的子目录）；空壳目录不算数据。 */
+    private static boolean dirHasData(File dir) {
+        if (dir == null || !dir.isDirectory()) {
+            return false;
+        }
+        File[] children = dir.listFiles();
+        if (children == null || children.length == 0) {
+            return false;
+        }
+        for (File c : children) {
+            if (c.isFile()) {
+                return true;
+            }
+            if (c.isDirectory() && dirHasData(c)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -123,6 +228,43 @@ public class SessionLocator {
     }
 
     /**
+     * 枚举会话的全部已知落点目录（全局区 + 显式根 + 已登记根 + 全部已登记项目根），按绝对路径去重。
+     *
+     * <p>供删除链路一次性清理历史分居产生的多份残留：同一会话的目录可能同时存在于
+     * 全局区与项目区（引擎侧与 Web 侧曾各写一份），只删解析到的那一份会遗留另一半。</p>
+     *
+     * <p>候选目录可能不存在，调用方逐项做存在性判断后再删。</p>
+     *
+     * @param sessionId    会话 ID
+     * @param explicitRoot 调用方持有的显式根提示（可为 null）
+     * @return 候选目录列表（顺序：全局区 → 显式根 → 已登记根 → 其它已登记项目根）
+     */
+    public java.util.List<File> allKnownSessionDirs(String sessionId, String explicitRoot) {
+        java.util.LinkedHashMap<String, File> out = new java.util.LinkedHashMap<>();
+        addSessionDirCandidate(out, globalBase, sessionId);
+        if (explicitRoot != null && !explicitRoot.trim().isEmpty()) {
+            addSessionDirCandidate(out, explicitRoot.trim(), sessionId);
+        }
+        String bound = boundRoots.get(sessionId);
+        if (bound != null) {
+            addSessionDirCandidate(out, bound, sessionId);
+        }
+        for (String r : registeredRoots()) {
+            addSessionDirCandidate(out, r, sessionId);
+        }
+        return new java.util.ArrayList<>(out.values());
+    }
+
+    private void addSessionDirCandidate(Map<String, File> out, String root, String sessionId) {
+        try {
+            File dir = sessionDir(root, sessionId);
+            out.putIfAbsent(dir.getAbsolutePath(), dir);
+        } catch (Throwable ignore) {
+            // 非法根/会话 ID 直接跳过
+        }
+    }
+
+    /**
      * 解析会话存储目录（不带外部项目根提示，仅用于 {@code AgentSessionProvider}）。
      *
      * @param sessionId 会话 ID
@@ -140,6 +282,19 @@ public class SessionLocator {
      * @return 该会话的存储目录（绝对、规范化）
      */
     public File resolveDir(String sessionId, String projectRoot) {
+        return sessionDir(effectiveRoot(sessionId, projectRoot), sessionId);
+    }
+
+    /**
+     * 解析会话所属的有效根目录（与 {@link #resolveDir(String, String)} 完全同口径）：
+     * 显式根 &gt; 会话已登记根 &gt; 全局基准目录。
+     *
+     * <p>供需要「会话根」而非「会话目录」的清理逻辑使用：删除会话时既要删会话目录
+     * （{@code <root>/<harnessSessions>/<sessionId>}），也要按同一根清理旧版账本残留
+     * （{@code <root>/.gwork/file-changes}），两者必须出自同一次解析——若在解绑登记后
+     * 再解析，会错误回退到全局目录。</p>
+     */
+    public String effectiveRoot(String sessionId, String projectRoot) {
         // 前置校验：null 会话 ID 按约定抛 IllegalArgumentException
         // （注册表查询不支持 null key，须在查表前拦截；越界字符由 sessionDir 统一收口）
         if (sessionId == null) {
@@ -152,7 +307,7 @@ public class SessionLocator {
             // 未登记所属根：全局会话，落全局基准目录
             root = globalBase;
         }
-        return sessionDir(root, sessionId);
+        return root;
     }
 
     /**
@@ -300,7 +455,7 @@ public class SessionLocator {
                             s = String.valueOf(v);
                         }
                         if (s != null && !s.isEmpty()) {
-                            boundRoots.put(k, s);
+                            boundRoots.put(k, normalizeRoot(s));
                         }
                     });
                 }

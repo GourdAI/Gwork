@@ -58,7 +58,7 @@
                 var badges = '<span class="settings-inline-tag">[lsp]</span>';
                 if (item.scope === 'workspace') badges += ' <span class="mounts-scope-badge scope-workspace">' + tWorkspace + '</span>';
                 if (installed) badges += ' <span class="skill-installed-badge">' + tInstalled + '</span>';
-                html += '<div class="mcp-server-item" data-name="' + escapeAttr(name) + '">'
+                html += '<div class="mcp-server-item' + (item.enabled === false ? ' disabled' : '') + '" data-name="' + escapeAttr(name) + '">'
                     + '<div class="mcp-server-icon">L</div>'
                     + '<div class="mcp-server-info">'
                     + '<div class="mcp-server-name">' + escapeHtml(name) + ' ' + badges + '</div>'
@@ -146,7 +146,9 @@
 
     function lspToggleServer(name, enabled) {
         postJson('/web/settings/lsp/servers/toggle', { name: name, enabled: enabled }, function (resp) {
-            if (resp.code !== 200) { showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error'); loadLspList(); }
+            if (resp.code !== 200) { showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error'); }
+            // 无论成败都刷新列表，确保开关状态与服务端一致
+            loadLspList();
         });
     }
 

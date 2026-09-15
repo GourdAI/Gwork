@@ -26,6 +26,7 @@ import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.event.ToolCallStartEvent;
 import com.gourdai.agent.event.ToolCallDraftEvent;
 import com.gourdai.agent.event.ToolCallArgsDeltaEvent;
+import com.gourdai.agent.event.ToolCallBatchEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.event.ReasonEndEvent;
@@ -446,6 +447,13 @@ public class TaskTalent extends AbsTalent {
                             if (chunk instanceof ContextUsageEvent) {
                                 sink.next(chunk);
                             } else if (chunk instanceof ToolCallStartEvent) {
+                                sink.next(chunk);
+                            } else if (chunk instanceof ToolCallBatchEvent) {
+                                // 批次声明帧与 ToolCallStartEvent 同等对待：子代理内部的批量工具卡组同样需要
+                                // 「先声明、后逐张转正」，否则容器在各卡 action_start 逐一到达时才懒创建，
+                                // 「单卡先出 → 逐张合并」的中间态跳变在智能体卡片内同样可见。
+                                // 归属 meta 已由上方 stampParentAgent 统一打好（__parentAgentName/__parentAgentDesc/
+                                // META_INVOCATION_ID），与 start/draft 走同一条标记路径。
                                 sink.next(chunk);
                             } else if (chunk instanceof ToolCallDraftEvent || chunk instanceof ToolCallArgsDeltaEvent) {
                                 // 参数生成期的进度帧与 ToolCallStartEvent 同等对待：子代理内部同样会发生

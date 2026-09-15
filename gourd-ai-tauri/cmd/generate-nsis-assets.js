@@ -7,7 +7,8 @@
  *      alpha 通道，透明像素必须先合成到不透明底色上，否则会渲染成黑块。
  *
  * 因此这里从 src-tauri/icons/icon.png（512x512 RGBA）离线合成：
- *   - header.bmp   150x57  ：右上角条幅，图标居中于右侧（MUI 默认 header 图靠右显示）
+ *   - header.bmp   150x57  ：左上角条幅，图标靠左、右侧留白（MUI 默认把 header 图贴在左侧，
+ *                            详见 main() 里 header 段的注释；图标若画在右端会紧贴标题文字）
  *   - sidebar.bmp  164x314 ：欢迎页/完成页左侧竖幅
  *
  * 实现不引入任何依赖：PNG 解码用 zlib + 手写 defilter，BMP 用 24bpp BI_RGB 裸写。
@@ -190,22 +191,47 @@ function encodeBmp(canvas) {
   return buf;
 }
 
-function main() {
+// header 条幅合成：白底 + 左侧图标。
+//
+// ⚠ 图标为什么必须在【左】端（2026-09-15 实测修正）：
+//   MUI2 在未定义 MUI_HEADERIMAGE_RIGHT 时用 modern_headerbmp.exe 作为 IDD_INST，把 header 图
+//   贴在对话框【左】侧（Interface.nsh:109-114 的 ChangeUI 分支；此前注释「MUI 默认 header 图靠右
+//   显示」是错的，正是这条错误认知让图标被画到了条幅右端）。而 header 标题/副标题（id 1037/1038）
+//   的坐标来自该资源，固定在条幅右侧 157px / 165px 处（本机 dump 实测，96dpi：
+//   1046=(532,341)150x53、1037=(689,348)323x15、1038=(697,365)315x24）。
+//   旧版把图标画在条幅右端 x=97..142 → 与标题文字只隔 15px，全流程每个带 header 的页面
+//   （directory/license/instfiles/维护页/卸载确认页/卸载进度页）看起来都像「图标压住文字」，
+//   即用户反馈的「文字被遮挡」。
+//   改成左端 8px 边距后：图标占 x=8..53，与标题文字之间留出约 100px 空白，
+//   且比例与 DPI 无关（条幅与文字坐标同倍缩放），任何缩放下都不会挤到文字。
+//   竖直留 6px（(57-45)/2），避免贴到 MUI 画的分隔线。
+//
+// 抽成函数（而不是内联在 main 里）的原因：test/nsis-header-asset-contract.js 要【用同一份
+//   生成器代码】重建这张图并断言「图标在左端、与标题文字留白足够」，防止有人把图标挪回右端；
+//   同时比对磁盘上的 header.bmp 与重建结果，抓住「改了生成器但忘了重生成资产」这种漏构建。
+function buildHeader() {
   const icon = decodePng(fs.readFileSync(SRC_ICON));
-  fs.mkdirSync(OUT_DIR, { recursive: true });
-
-  // header：白底 + 右侧图标。留 6px 边距，避免贴到 MUI 画的分隔线上
   const header = createCanvas(HEADER.w, HEADER.h, HEADER_BG);
   const hSize = HEADER.h - 12;
-  drawImage(header, icon, HEADER.w - hSize - 8, (HEADER.h - hSize) >> 1, hSize, hSize);
-  fs.writeFileSync(path.join(OUT_DIR, 'header.bmp'), encodeBmp(header));
+  drawImage(header, icon, 8, (HEADER.h - hSize) >> 1, hSize, hSize);
+  return header;
+}
 
-  // sidebar：深色竖向渐变 + 上部居中图标（下部留给 MUI 绘制的欢迎文案）
+// sidebar：深色竖向渐变 + 上部居中图标（下部留给 MUI 绘制的欢迎文案）
+function buildSidebar() {
+  const icon = decodePng(fs.readFileSync(SRC_ICON));
   const sidebar = createCanvas(SIDEBAR.w, SIDEBAR.h, SIDEBAR_TOP);
   fillVerticalGradient(sidebar, SIDEBAR_TOP, SIDEBAR_BOTTOM);
   const sSize = 96;
   drawImage(sidebar, icon, (SIDEBAR.w - sSize) >> 1, 48, sSize, sSize);
-  fs.writeFileSync(path.join(OUT_DIR, 'sidebar.bmp'), encodeBmp(sidebar));
+  return sidebar;
+}
+
+function main() {
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+
+  fs.writeFileSync(path.join(OUT_DIR, 'header.bmp'), encodeBmp(buildHeader()));
+  fs.writeFileSync(path.join(OUT_DIR, 'sidebar.bmp'), encodeBmp(buildSidebar()));
 
   console.log('[nsis-assets] header.bmp  %dx%d', HEADER.w, HEADER.h);
   console.log('[nsis-assets] sidebar.bmp %dx%d', SIDEBAR.w, SIDEBAR.h);
@@ -214,4 +240,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { decodePng, encodeBmp, createCanvas, drawImage };
+module.exports = { decodePng, encodeBmp, createCanvas, drawImage, buildHeader, buildSidebar, HEADER, SIDEBAR };

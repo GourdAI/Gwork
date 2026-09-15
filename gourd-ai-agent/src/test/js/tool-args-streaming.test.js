@@ -38,10 +38,10 @@ test('onWebChunk 分发新增 action_draft / action_args 两个 case，并与 ac
     assert.match(dispatch[0], /case 'action_args':/);
 });
 
-test('inferPhaseFromType 把两种新帧映射到 PHASE_TOOL，且底部指示器继续对 PHASE_TOOL 让位', () => {
+test('inferPhaseFromType 把三种新帧映射到 PHASE_TOOL，且底部指示器继续对 PHASE_TOOL 让位', () => {
     const js = readStatic('js', 'app-streaming.js');
     const infer = fnBody(js, 'inferPhaseFromType');
-    assert.match(infer, /case 'action_draft': case 'action_args': return PHASE_TOOL;/);
+    assert.match(infer, /case 'action_draft': case 'action_args': case 'action_batch': return PHASE_TOOL;/);
     // 骨架卡已承担进度语义，底部「输出中/思考中」必须继续短路，不得为了新帧解除
     const indicator = fnBody(js, 'showPhaseIndicator');
     assert.match(indicator, /if \(phase === PHASE_TOOL \|\| phase === PHASE_HITL \|\| phase === PHASE_RETRY \|\| phase === PHASE_DONE\) return;/);

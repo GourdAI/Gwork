@@ -398,17 +398,27 @@ public class WebController {
         // 文件，导致目录非空删不掉、累计空垃圾文件夹
         engine.removeSession(sessionId);
 
-        // 在解绑之前解析物理目录：root 为空的项目会话仍需依赖登记表定位项目真身；
+        // 在解绑之前枚举全部已知落点：root 为空的项目会话仍需依赖登记表定位项目真身；
         // 若先 unbind，会错误回退到全局目录，只删掉空壳而遗留项目数据。
-        File sessionDir = sessionLocator.resolveDir(sessionId, root);
+        // 历史版本曾把同一会话的数据拆到全局区与项目区两份（分居），因此按
+        // 全局区 + 显式根 + 全部已登记根逐一清理，避免「删除后仍有残留副本」。
+        java.util.List<File> sessionDirs = sessionLocator.allKnownSessionDirs(sessionId, root);
+        // 同一口径解析会话所属根：供过渡期清理旧版全局账本目录（<root>/.gwork/file-changes）
+        String sessionRoot = sessionLocator.effectiveRoot(sessionId, root);
 
         // 清除所属根登记，避免注册表残留
         sessionLocator.unbind(sessionId);
 
-        if (sessionDir.exists() && sessionDir.isDirectory()) {
-            if (!deleteDirectory(sessionDir)) {
-                LOG.warn("Delete session dir failed (may be occupied): {}", sessionDir.getAbsolutePath());
-                return Result.failure(500, "会话目录删除失败，可能被占用：" + sessionDir.getAbsolutePath());
+        // 过渡期清理：新布局账本在会话目录内（随下方递归删除一并清掉）；
+        // 旧版账本目录独立于会话之外，必须显式按会话清理，否则会留下「会话已删、账本残留」。
+        FileChangeService.getInstance().removeSession(sessionId, sessionRoot);
+
+        for (File sessionDir : sessionDirs) {
+            if (sessionDir.exists() && sessionDir.isDirectory()) {
+                if (!deleteDirectory(sessionDir)) {
+                    LOG.warn("Delete session dir failed (may be occupied): {}", sessionDir.getAbsolutePath());
+                    return Result.failure(500, "会话目录删除失败，可能被占用：" + sessionDir.getAbsolutePath());
+                }
             }
         }
 
@@ -2180,6 +2190,22 @@ public class WebController {
             path = json.get("path").getString();
         }
         return projectService.remove(path);
+    }
+
+    /**
+     * 重命名一个已登记项目的显示名（仅修改展示名，不改动磁盘目录与路径，列表顺序保持不变）。
+     */
+    @Post
+    @Mapping("/web/chat/projects/rename")
+    public Result<List<Map>> projectRename(@Body String body) {
+        String path = null;
+        String name = null;
+        if (body != null && !body.trim().isEmpty()) {
+            ONode json = ONode.ofJson(body);
+            path = json.get("path").getString();
+            name = json.get("name").getString();
+        }
+        return projectService.rename(path, name);
     }
 
     // ==================== 消息队列管理 ====================

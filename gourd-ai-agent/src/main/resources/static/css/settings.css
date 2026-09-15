@@ -248,6 +248,8 @@
 .mcp-server-item { display: flex; align-items: center; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 10px; margin-bottom: 8px; gap: 10px; transition: all 0.15s; cursor: pointer; }
 .mcp-server-item:hover { border-color: var(--accent); box-shadow: 0 1px 4px rgba(0,0,0,0.04); }
 .mcp-server-item:active { transform: scale(0.997); }
+.mcp-server-item.disabled { opacity: 0.5; }
+.mcp-server-item.disabled .mcp-server-icon { opacity: 0.5; }
 .mcp-server-icon { width: 32px; height: 32px; border-radius: 8px; background: linear-gradient(135deg, var(--bg-hover), var(--bg-primary)); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
 .mcp-server-info { flex: 1; min-width: 0; }
 .mcp-server-name { font-size: 13px; font-weight: 500; color: var(--text-primary); }
@@ -337,6 +339,49 @@
 
 /* MCP header 区域按钮组 */
 .mcp-header-actions { display: flex; gap: 6px; align-items: center; }
+
+/* MCP 导入下拉菜单 */
+.mcp-import-menu-wrap {
+    position: relative;
+    display: inline-block;
+}
+
+.mcp-import-menu {
+    display: none;
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 160px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+    z-index: 1000;
+    padding: 4px;
+}
+
+.mcp-import-menu.show {
+    display: block;
+}
+
+.mcp-import-menu-item {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+}
+
+.mcp-import-menu-item:hover {
+    background: var(--bg-hover, rgba(128,128,128,0.1));
+}
 
 /* ===== 二级面板过渡动画 ===== */
 @keyframes settings-slide-in-right {
@@ -1359,6 +1404,44 @@ input[type=number] { -moz-appearance: textfield; }
 .import-hint {
     font-size: 12px;
     color: var(--text-tertiary);
+}
+
+/* 导入 JSON 字符串对话框 */
+.import-string-textarea {
+    width: 100%;
+    min-height: 200px;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.5;
+    resize: vertical;
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color 0.2s;
+}
+.import-string-textarea:focus {
+    border-color: var(--accent, #4f6ef7);
+    box-shadow: 0 0 0 2px rgba(59,130,246,0.15);
+}
+.import-string-hint {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: 8px;
+    line-height: 1.5;
+}
+.import-string-code {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 1px 5px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    color: var(--accent);
+    border: 1px solid var(--border-color);
 }
 
 .import-format-tag {

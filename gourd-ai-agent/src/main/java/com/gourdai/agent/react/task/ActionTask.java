@@ -15,6 +15,7 @@
  */
 package com.gourdai.agent.react.task;
 
+import com.gourdai.agent.event.ToolCallBatchEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
 import com.gourdai.agent.event.ToolCallStartEvent;
 
@@ -267,6 +268,9 @@ public class ActionTask {
         Map<String, List<String>> aliasIdsByPrimaryId = new HashMap<>();
         List<ToolCall> calls = dedupeIdenticalCalls(lastReason.getToolCalls(), aliasIdsByPrimaryId);
         Map<ToolCall, BatchMetadata> batchByCall = createVisibleBatch(calls);
+        // 批次声明：整批执行前把结构一次性下发，订阅端建容器时即可收编全部骨架卡，
+        // 不再依赖各工具 start 帧逐张搬入（那是「单卡先出 → 逐张合并」跳变的根源）。
+        announceVisibleBatch(trace, batchByCall);
 
         // 是否存在可并行的只读段（≥2 个连续只读工具）；否则直接走串行快路径。
         // 并行行为恒开启：只读段（read/grep/glob/ls）并行，写工具（write/edit/bash）始终串行。
@@ -454,6 +458,47 @@ public class ActionTask {
             result.put(visibleCalls.get(i), new BatchMetadata(batchId, i, batchSize));
         }
         return result;
+    }
+
+    /**
+     * 批次声明：可见工具调用 ≥2 时，在整批执行前把批次结构一次性下发给订阅端（瞬态帧，不落盘）。
+     *
+     * <p>动机：批次元数据原本只随各工具的 start/end 帧逐一到达，而写工具串行执行，
+     * 第二张卡要等第一个工具执行完才会收到自己的 start 帧，「建容器 + 逐张搬入」会呈现
+     * 明显的中间态跳变。本帧让订阅端先拿到全量成员（按 batchIndex 排序），
+     * 建容器时一次性收编已存在的骨架卡；尚缺卡片的成员保留空槽，由后续 start/end 帧
+     * 按同样的槽位规则填充，两条路径幂等共存。</p>
+     *
+     * <p>降级：成员 actionId 与 doAction 同源（原生 ToolCall.id），文本模式无原生 id 时
+     * 该字段为 null，订阅端跳过收编；批次本身在订阅端不识别时完全退回逐张归组的旧行为。</p>
+     */
+    private void announceVisibleBatch(ReActTrace trace, Map<ToolCall, BatchMetadata> batchByCall) {
+        if (batchByCall.isEmpty() || trace.getOptions().getStreamSink() == null) {
+            return;
+        }
+
+        String batchId = null;
+        int batchSize = 0;
+        for (BatchMetadata meta : batchByCall.values()) {
+            batchId = meta.batchId;
+            batchSize = meta.batchSize;
+            break;
+        }
+
+        // 按 batchIndex 归位：batchByCall 是 IdentityHashMap，迭代无序，必须按 index 重建有序清单
+        List<Map<String, Object>> members = new ArrayList<>(batchSize);
+        for (int i = 0; i < batchSize; i++) {
+            members.add(null);
+        }
+        for (Map.Entry<ToolCall, BatchMetadata> entry : batchByCall.entrySet()) {
+            Map<String, Object> member = new LinkedHashMap<>();
+            member.put("actionId", entry.getKey().getId());
+            member.put("index", entry.getValue().batchIndex);
+            member.put("toolName", entry.getKey().getName());
+            members.set(entry.getValue().batchIndex, member);
+        }
+
+        trace.getOptions().getStreamSink().next(new ToolCallBatchEvent(trace, batchId, batchSize, members));
     }
 
     /**

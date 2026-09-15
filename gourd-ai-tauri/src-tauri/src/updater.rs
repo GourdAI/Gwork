@@ -237,6 +237,16 @@ fn normalize_feed_url(url: Option<&str>) -> String {
     u
 }
 
+/// 由更新源目录拼出 latest.json 端点：先把尾斜杠归一为恰好一个再拼接，
+/// 无论入参带不带尾斜杠，结果都是「目录/latest.json」，绝不把目录名与文件名粘连。
+///
+/// 回归背景（0.1.0~0.1.2 自动更新不可用的直接原因）：旧实现把「…/tauri/」裁掉
+/// 尾斜杠后直接拼接，得到「…/taurilatest.json」恒 404，检查更新固定报
+/// 「Could not fetch a valid release JSON from the remote」。单测锁定拼接契约。
+fn latest_json_endpoint(feed_url: &str) -> String {
+    format!("{}/latest.json", feed_url.trim_end_matches('/'))
+}
+
 fn lock() -> std::sync::MutexGuard<'static, DesktopUpdater> {
     UPDATER.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -302,7 +312,7 @@ async fn do_check(app: AppHandle, manual: bool) -> Result<()> {
     broadcast(&app);
 
     let feed_url = lock().feed_url.clone();
-    let endpoint = format!("{}latest.json", feed_url.trim_end_matches('/'));
+    let endpoint = latest_json_endpoint(&feed_url);
 
     // 早期错误（地址非法 / 更新器构建失败）也必须走 set_error。
     // 此处 status 已置 Checking、前端按钮已 disabled，若直接用 `?` 把错误抛给调用方，
@@ -365,7 +375,9 @@ async fn do_check(app: AppHandle, manual: bool) -> Result<()> {
         }
         Err(e) => {
             let msg = e.to_string();
-            warn!("[updater] 检查更新失败: {}", msg);
+            // 日志带出实际请求的 endpoint：URL 拼接错/清单缺失这类故障从错误
+            // 文本本身看不出请求打到了哪里，无 URL 会使排查非常被动。
+            warn!("[updater] 检查更新失败: {} (endpoint: {})", msg, endpoint);
             set_error(&app, msg);
         }
     }
@@ -724,5 +736,45 @@ mod tests {
     #[test]
     fn plugin_registered_defaults_to_false() {
         assert!(!PLUGIN_REGISTERED.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// URL 拼接契约：endpoint 必须是「feed 目录 + /latest.json」，绝不粘连。
+    ///
+    /// 回归背景（0.1.0~0.1.2 自动更新不可用的直接原因）：旧实现把「…/tauri/」裁掉
+    /// 尾斜杠后直接拼接，得到「…/taurilatest.json」恒 404。无论入参带不带尾斜杠，
+    /// 都必须产出同一 canonical URL。
+    #[test]
+    fn latest_json_endpoint_never_glues_dir_and_name() {
+        const CANONICAL: &str = "https://www.gourdwork.com/downloads/tauri/latest.json";
+        assert_eq!(latest_json_endpoint("https://www.gourdwork.com/downloads/tauri/"), CANONICAL);
+        assert_eq!(latest_json_endpoint("https://www.gourdwork.com/downloads/tauri"), CANONICAL);
+        assert_eq!(latest_json_endpoint("https://www.gourdwork.com/downloads/tauri///"), CANONICAL);
+    }
+
+    /// 默认更新源必须拼出产品 canonical 端点（与 tauri.conf.json endpoints 同址；
+    /// 两处漂移会表现为「检查更新打 404」，此处锁死默认值一侧）。
+    #[test]
+    fn default_feed_url_yields_canonical_endpoint() {
+        assert_eq!(normalize_feed_url(None), DEFAULT_FEED_URL);
+        assert_eq!(
+            latest_json_endpoint(DEFAULT_FEED_URL),
+            "https://www.gourdwork.com/downloads/tauri/latest.json"
+        );
+    }
+
+    /// normalize_feed_url 的尾斜杠不变量（feed_url 以目录形式展示/复用时依赖它）。
+    #[test]
+    fn normalize_feed_url_always_ends_with_slash() {
+        let cases: [Option<&str>; 5] = [
+            None,
+            Some(""),
+            Some("https://example.com/updates"),
+            Some("https://example.com/updates/"),
+            Some("example.com/updates"),
+        ];
+        for case in cases {
+            let u = normalize_feed_url(case);
+            assert!(u.ends_with('/'), "feed_url 必须以 / 结尾: {}", u);
+        }
     }
 }

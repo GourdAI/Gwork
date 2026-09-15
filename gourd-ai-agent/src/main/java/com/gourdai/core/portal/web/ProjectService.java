@@ -245,6 +245,51 @@ public class ProjectService {
         return Result.succeed(projects);
     }
 
+    /**
+     * 重命名项目的展示名（仅修改 projects.json 中的 name，不改动磁盘目录与路径）。
+     * <p>与 {@link #add(String, String)} 的区别：rename 为原地修改，保持列表顺序不变
+     * （add 会把项目置顶到「最近使用」首位，重命名动作不应污染该排序）。</p>
+     *
+     * @param path 项目目录绝对路径（须已登记）
+     * @param name 新的展示名；为空时恢复为目录名
+     * @return 更新后的项目列表；路径未登记时返回失败
+     */
+    public Result<List<Map>> rename(String path, String name) {
+        if (path == null || path.trim().isEmpty()) {
+            return Result.failure(400, "Path is required");
+        }
+        if (path.contains("..")) {
+            return Result.failure(400, "Invalid path");
+        }
+
+        Path dir = Paths.get(path.trim()).toAbsolutePath().normalize();
+        String absPath = dir.toString();
+
+        List<Map> projects = load();
+        Map target = null;
+        for (Map p : projects) {
+            if (absPath.equals(String.valueOf(p.get("path")))) {
+                target = p;
+                break;
+            }
+        }
+        if (target == null) {
+            return Result.failure(404, "Project not found");
+        }
+
+        // 展示名：非空用用户输入（长度限制与会话标签一致），为空恢复为目录名
+        String displayName = (name != null && !name.trim().isEmpty())
+                ? name.trim()
+                : (dir.getFileName() != null ? dir.getFileName().toString() : absPath);
+        if (displayName.length() > 50) {
+            displayName = displayName.substring(0, 50);
+        }
+
+        target.put("name", displayName);
+        save(projects);
+        return Result.succeed(projects);
+    }
+
     // ==================== 内部 ====================
 
     /**

@@ -47,10 +47,12 @@ public class FileAgentSession implements AgentSession {
     private static final Logger LOG = LoggerFactory.getLogger(FileAgentSession.class);
 
     private final String sessionId;
-    private final File baseDir;
-    private final File messagesFile;
-    private final File snapshotFile;
-    private final InMemoryAgentSession cache;
+    /** 会话存储目录（家目录）。构造时固化；未产生数据的会话可经 {@link #relocateIfPristine} 对齐。 */
+    private File baseDir;
+    private File messagesFile;
+    private File snapshotFile;
+    /** 内存缓存层；迁移到已含历史数据的目录时会整体重挂载。 */
+    private InMemoryAgentSession cache;
     private final ReentrantLock locker = new ReentrantLock();
 
     public FileAgentSession(String sessionId, String dir) {
@@ -63,16 +65,7 @@ public class FileAgentSession implements AgentSession {
         this.snapshotFile = new File(baseDir, sessionId + ".snapshot.json");
 
         // --- 1. 初始化快照 ---
-        FlowContext snapshot = null;
-        if (snapshotFile.exists()) {
-            try {
-                byte[] bytes = Files.readAllBytes(snapshotFile.toPath());
-                snapshot = FlowContext.fromJson(new String(bytes, StandardCharsets.UTF_8));
-            } catch (Throwable e) {
-                LOG.warn("Load snapshot failed, session: {}", sessionId, e);
-            }
-        }
-
+        FlowContext snapshot = loadSnapshotFile();
         if (snapshot == null) {
             snapshot = FlowContext.of(sessionId);
         }
@@ -85,6 +78,101 @@ public class FileAgentSession implements AgentSession {
 
         // 注入当前 FileAgentSession 到上下文，确保 updateSnapshot 触发的是当前实例
         this.cache.getContext().put(Agent.KEY_SESSION, this);
+    }
+
+    /** 会话存储目录（家目录）。 */
+    public File getBaseDir() {
+        return baseDir;
+    }
+
+    /** 读取当前快照文件（不存在/损坏时返回 null）。 */
+    private FlowContext loadSnapshotFile() {
+        if (snapshotFile.exists()) {
+            try {
+                byte[] bytes = Files.readAllBytes(snapshotFile.toPath());
+                return FlowContext.fromJson(new String(bytes, StandardCharsets.UTF_8));
+            } catch (Throwable e) {
+                LOG.warn("Load snapshot failed, session: {}", sessionId, e);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 将<b>尚未产生任何数据</b>的会话迁移到新的存储目录（家目录对齐）。
+     *
+     * <p><b>背景：</b>会话对象在构造时即固化了存储目录，而首次受理输入（登记所属根）
+     * 发生在其后；若两者不一致，messages/snapshot（引擎侧）会落一个目录、
+     * stream/label/TODO（Web 侧）落另一个目录——同一会话数据被拆到两处（分居），
+     * 重启续写还会产生双段消息。本方法允许「未落盘任何数据」的会话在受理时
+     * 一次性对齐到最终家目录，保证此后全部数据只落一个目录。</p>
+     *
+     * <p><b>安全性：</b>仅当内存无消息、且当前目录下既无消息文件也无快照文件时允许迁移——
+     * 迁移不涉及任何已有数据的搬动，绝无丢失风险；已产生数据的会话一律保持原位。</p>
+     *
+     * <p>目标目录若已有历史数据（例如登记表缺失后重新采纳数据所在根），
+     * 迁移后会把目标的消息与快照重新加载进内存，保证接续而非覆盖。</p>
+     *
+     * @param newDir 目标目录（家目录）
+     * @return true 表示已迁移；false 表示条件不满足或与当前目录相同
+     */
+    public boolean relocateIfPristine(File newDir) {
+        if (newDir == null) {
+            return false;
+        }
+        locker.lock();
+        try {
+            // 仅未产生任何数据的会话允许迁移
+            if (!cache.isEmpty() || messagesFile.exists() || snapshotFile.exists()) {
+                return false;
+            }
+            File target = newDir.getAbsoluteFile();
+            if (sameDir(target, baseDir)) {
+                return false;
+            }
+
+            File oldDir = baseDir;
+            this.baseDir = target;
+            this.messagesFile = new File(target, sessionId + ".messages.ndjson");
+            this.snapshotFile = new File(target, sessionId + ".snapshot.json");
+
+            // 目标目录已有历史数据：重新加载（消息 + 快照），保证历史不丢
+            if (messagesFile.exists() || snapshotFile.exists()) {
+                reloadFromDisk();
+            }
+
+            // 旧目录若为空壳则清掉，避免全局区残留空目录
+            try {
+                File[] left = oldDir.isDirectory() ? oldDir.listFiles() : null;
+                if (left != null && left.length == 0) {
+                    oldDir.delete();
+                }
+            } catch (Throwable ignore) {
+            }
+            return true;
+        } finally {
+            locker.unlock();
+        }
+    }
+
+    /** 从当前 {@link #baseDir} 重新加载快照与消息（迁移到已含历史数据的目录后调用）。 */
+    private void reloadFromDisk() {
+        FlowContext snapshot = loadSnapshotFile();
+        if (snapshot == null) {
+            snapshot = FlowContext.of(sessionId);
+        }
+        this.cache = new InMemoryAgentSession(snapshot);
+        this.cache.getContext().put(Agent.KEY_SESSION, this);
+        loadMessagesToCache();
+    }
+
+    /** 两个目录是否指向同一位置（Windows 大小写不敏感）。 */
+    private static boolean sameDir(File a, File b) {
+        if (a == null || b == null) {
+            return false;
+        }
+        return a.toPath().toAbsolutePath().normalize().toString()
+                .equalsIgnoreCase(b.toPath().toAbsolutePath().normalize().toString());
     }
 
     /**

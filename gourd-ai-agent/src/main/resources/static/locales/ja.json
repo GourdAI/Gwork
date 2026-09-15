@@ -221,11 +221,14 @@
                                 "time_h":  "{0}時間",
                                 "time_d":  "{0}日",
                                 "expand_all":  "すべて展開",
+                                "collapse_all":  "すべて折りたたむ",
                                 "clear_all":  "すべてのセッションを削除",
                                 "confirm_clear":  "すべてのセッションを削除しますか？この操作は元に戻せません。",
                                 
                                 
                                 "remove_project":  "リストから削除",
+                                "rename_project":  "プロジェクト名を変更",
+                                "rename_failed":  "名前の変更に失敗しました",
                                 "model_config":  "モデル設定",
                    "memory":  "メモリ"
                             }
@@ -480,7 +483,23 @@
                                  "import_skipped_exists":  "スキップ（既に存在）",
                                  "import_incomplete_config":  "設定情報が不完全です",
                                  "import_progress":  "{0} 個の MCP サーバーをインポート中...",
-                                 "import_summary":  "合計 {0} 個の MCP サーバー、{1} 個インポート、{2} 個スキップ、{3} 個失敗"
+                                 "import_summary":  "合計 {0} 個の MCP サーバー、{1} 個インポート、{2} 個スキップ、{3} 個失敗",
+                                 "import_json_file":  "JSON ファイルをインポート",
+                                 "import_json_str":  "JSON 文字列をインポート",
+                                 "json_dialog_title":  "JSON 文字列をインポート",
+                                 "json_hint":  "MCP サーバー設定の JSON 文字列を貼り付けてください。対応形式：",
+                                 "json_format_hint":  "<span class=\"import-string-code\">{\"mcpServers\": {...}}</span> Claude Desktop / Cursor 形式<br/><span class=\"import-string-code\">{\"mcp\": {...}}</span> OpenCode 形式<br/><span class=\"import-string-code\">{\"format\":\"mcp\",\"servers\":{...}}</span> 標準形式",
+                                 "json_placeholder":  "ここに JSON 文字列を貼り付け...",
+                                 "json_parse_hint":  "貼り付け後、「解析」をクリックしてプレビューし、確認後に一括追加してください",
+                                 "json_empty":  "JSON 文字列を入力してください",
+                                 "json_invalid":  "JSON 形式が無効です。確認して再試行してください",
+                                 "parse_btn":  "解析",
+                                 "parse_failed_retry":  "解析に失敗しました。JSON 文字列の形式を確認して再試行してください",
+                                 "check_timeout":  "検出がタイムアウトしました（15秒）。サーバーに到達可能か確認してください",
+                                 "empty":  "MCP サーバーがありません",
+                                 "empty_desc":  "MCP サーバーは AI のツール機能を拡張します（ファイルシステムアクセス、データベースクエリ、API 呼び出しなど）",
+                                 "no_tools":  "ツールがありません",
+                                 "no_tools_desc":  "この MCP サーバーはツールを提供していません"
                              },
                      "openapi":  {
                                      "title":  "OpenAPI サーバー",

@@ -44,6 +44,7 @@ import org.noear.solon.annotation.*;
 import com.gourdai.core.config.AgentFlags;
 import com.gourdai.core.config.AgentProperties;
 import com.gourdai.core.config.AgentSettings;
+import com.gourdai.core.config.McpTypeResolver;
 import com.gourdai.core.config.entity.GeneralGroupDo;
 import com.gourdai.core.config.entity.PermissionGroupDo;
 import com.gourdai.core.config.entity.ApiSourceDo;
@@ -76,6 +77,7 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Web 设置控制器 —— GWork Web UI 的设置管理 HTTP 入口。
@@ -541,7 +543,7 @@ public class WebSettingsController {
             item.put("type", params.getTypeOrTransport() != null ? params.getTypeOrTransport() : "stdio");
             item.put("enabled", params.isEnabled());
             item.put("scope", params.getScope() != null ? params.getScope() : AgentFlags.SCOPE_USER);
-            if ("stdio".equals(params.getTypeOrTransport())) {
+            if (McpTypeResolver.isStdio(params.getTypeOrTransport())) {
                 item.put("command", params.getCommand());
                 if (params.getArgs() != null) {
                     item.put("args", params.getArgs());
@@ -575,10 +577,16 @@ public class WebSettingsController {
     public Result mcpServersAdd(@Body String json) throws Exception {
         ONode root = ONode.ofJson(json);
         String name = root.get("name").getString();
-        String type = root.get("type").getString();
+        String rawType = root.get("type").getString();
+        String type = McpTypeResolver.standardize(rawType);
 
-        if (Assert.isEmpty(name) || Assert.isEmpty(type)) {
+        if (Assert.isEmpty(name) || type == null) {
             return Result.failure("name and type are required");
+        }
+
+        // 校验类型合法性（别名已标准化，非法类型拒绝入库）
+        if (!McpTypeResolver.isValid(type)) {
+            return Result.failure("Unsupported type: " + rawType);
         }
 
         // 检查重名
@@ -596,7 +604,7 @@ public class WebSettingsController {
         params.setType(type);
         params.setScope(scope);
 
-        if ("stdio".equals(type)) {
+        if (McpTypeResolver.isStdio(type)) {
             params.setCommand(root.get("command").getString());
             if (root.hasKey("args")) {
                 List<String> argsList = new ArrayList<>();
@@ -612,7 +620,7 @@ public class WebSettingsController {
                 }
                 params.setEnv(envMap);
             }
-        } else if ("sse".equals(type) || "streamable".equals(type)) {
+        } else if (McpTypeResolver.isHttpType(type)) {
             params.setUrl(root.get("url").getString());
             if (root.hasKey("headers")) {
                 Map<String, String> headersMap = new LinkedHashMap<>();
@@ -624,8 +632,6 @@ public class WebSettingsController {
             if (root.hasKey("timeout")) {
                 params.setTimeout(Duration.parse(root.get("timeout").getString()));
             }
-        } else {
-            return Result.failure("Unsupported type: " + type);
         }
 
         settings.getMcpServers().put(name, params);
@@ -682,6 +688,17 @@ public class WebSettingsController {
             return Result.failure("Server not found: " + lookupName);
         }
 
+        // type 兼容别名：先标准化请求值，无法识别时回落到已有配置；
+        // 合法性校验放在摘除引擎实例之前，避免「先移除后拒绝」留下半程状态
+        String rawType = root.hasKey("type") ? root.get("type").getString() : existing.getTypeOrTransport();
+        String type = McpTypeResolver.standardize(rawType);
+        if (type == null) {
+            type = McpTypeResolver.standardize(existing.getTypeOrTransport());
+        }
+        if (!McpTypeResolver.isValid(type)) {
+            return Result.failure("Unsupported type: " + rawType);
+        }
+
         // 如果名称变更，先从引擎移除旧名称
         if (!lookupName.equals(name)) {
             settings.getMcpServers().remove(lookupName);
@@ -692,7 +709,6 @@ public class WebSettingsController {
         }
 
         // 构建新参数
-        String type = root.hasKey("type") ? root.get("type").getString() : existing.getTypeOrTransport();
         boolean enabled = root.hasKey("enabled") ? root.get("enabled").getBoolean(true) : true;
         String scope = root.hasKey("scope") ? root.get("scope").getString() : (existing.getScope() != null ? existing.getScope() : AgentFlags.SCOPE_USER);
         if (Assert.isEmpty(scope) || (!AgentFlags.SCOPE_LOCAL.equals(scope))) {
@@ -703,7 +719,7 @@ public class WebSettingsController {
         params.setType(type);
         params.setScope(scope);
 
-        if ("stdio".equals(type)) {
+        if (McpTypeResolver.isStdio(type)) {
             params.setCommand(root.hasKey("command") ? root.get("command").getString() : existing.getCommand());
             if (root.hasKey("args")) {
                 List<String> argsList = new ArrayList<>();
@@ -723,7 +739,7 @@ public class WebSettingsController {
             } else {
                 params.setEnv(existing.getEnv());
             }
-        } else {
+        } else if (McpTypeResolver.isHttpType(type)) {
             params.setUrl(root.hasKey("url") ? root.get("url").getString() : existing.getUrl());
             if (root.hasKey("headers")) {
                 Map<String, String> headersMap = new LinkedHashMap<>();
@@ -791,10 +807,11 @@ public class WebSettingsController {
     public Result mcpServersCheck(Context ctx) {
         try {
             ONode root = ONode.ofJson(ctx.body());
-            String type = root.get("type").getString();
-            if (type == null || type.isEmpty()) type = "stdio";
+            String rawType = root.get("type").getString();
+            String type = McpTypeResolver.standardize(rawType);
+            if (type == null) type = McpTypeResolver.TYPE_STDIO;
 
-            if ("stdio".equals(type)) {
+            if (McpTypeResolver.isStdio(type)) {
                 String command = root.get("command").getString();
                 if (Assert.isEmpty(command)) {
                     return Result.failure("命令不能为空");
@@ -826,16 +843,14 @@ public class WebSettingsController {
                     client.close();
                 }
 
-            } else if ("sse".equals(type) || "streamable".equals(type)) {
+            } else if (McpTypeResolver.isHttpType(type)) {
                 String url = root.get("url").getString();
                 if (Assert.isEmpty(url)) {
                     return Result.failure("URL 不能为空");
                 }
 
                 // 使用 McpClientProvider 进行真实的 MCP 初始化连接测试
-                String channel = "sse".equals(type)
-                        ? McpChannel.SSE
-                        : McpChannel.STREAMABLE;
+                String channel = McpTypeResolver.toChannel(type);
 
                 McpClientProvider.Builder builder = McpClientProvider.builder()
                         .channel(channel)
@@ -848,10 +863,23 @@ public class WebSettingsController {
                 }
 
                 McpClientProvider client = builder.build();
+                AtomicReference<Throwable> errorRef = new AtomicReference<>();
                 try {
-                    // 通过 getTools() 触发 MCP 初始化握手，验证连接有效性
-                    client.getTools();
+                    // 通过 listTools() 触发 MCP 初始化握手，验证连接有效性；
+                    // 部分错误会进入反应式 doOnError 而非直接抛出，这里统一收集后重抛，保证错误信息准确
+                    client.getClient().listTools()
+                            .doOnError(err -> {
+                                errorRef.set(err);
+                            })
+                            .block();
+
                     return Result.succeed("连接成功：MCP 初始化握手完成（" + type + "）");
+                } catch (Exception e) {
+                    if (errorRef.get() != null) {
+                        throw errorRef.get();
+                    } else {
+                        throw e;
+                    }
                 } finally {
                     client.close();
                 }
@@ -864,7 +892,7 @@ public class WebSettingsController {
             return Result.failure("连接超时，请检查地址是否可达");
         } catch (java.io.IOException e) {
             return Result.failure("连接失败: " + e.getMessage());
-        } catch (Exception e) {
+        } catch (Throwable e) {
             return Result.failure("检测失败: " + e.getMessage());
         }
     }
@@ -874,8 +902,7 @@ public class WebSettingsController {
     /**
      * 解析 MCP 导入配置文件
      *
-     * <p>接受上传的 JSON 文件，使用 ONode 解析后检测格式，返回结构化数据给前端预览。
-     * 支持 OpenCode 格式（{@code $schema} 识别）和通用 {@code mcpServers} 格式。</p>
+     * <p>接受上传的 JSON 文件，调用共享解析方法 {@link #parseMcpConfigNode(ONode)} 处理。</p>
      *
      * @param ctx Solon 上下文，通过 {@code ctx.file("file")} 获取上传文件
      * @return 包含格式类型与服务器列表的结构化数据
@@ -907,8 +934,50 @@ public class WebSettingsController {
             return Result.failure("文件解析失败: " + e.getMessage());
         }
 
+        return parseMcpConfigNode(root);
+    }
+
+    /**
+     * 解析 MCP 导入 JSON 字符串
+     *
+     * <p>接收前端 POST 的 JSON 字符串 body，调用共享解析方法 {@link #parseMcpConfigNode(ONode)} 处理。
+     * 与文件导入端点复用同一套解析逻辑，避免前端维护 type 兼容性判断。</p>
+     *
+     * @param json MCP 配置 JSON 字符串
+     * @return 包含格式类型与服务器列表的结构化数据
+     */
+    @Post
+    @Mapping("/web/settings/mcp/import/parse/string")
+    public Result mcpImportParseString(@Body String json) {
+        if (Assert.isEmpty(json)) {
+            return Result.failure("JSON 字符串不能为空");
+        }
+
+        ONode root;
+        try {
+            root = ONode.ofJson(json);
+        } catch (Exception e) {
+            return Result.failure("JSON 解析失败: " + e.getMessage());
+        }
+
+        return parseMcpConfigNode(root);
+    }
+
+    /**
+     * MCP 配置解析核心逻辑（文件导入与字符串导入共享）
+     *
+     * <p>检测 OpenCode（{@code $schema} 识别）、通用 {@code mcpServers}、显式 {@code format=mcp} 三种格式，
+     * 将每个服务器配置标准化为可直接用于 {@code /mcp/servers/add} 的请求体格式
+     *（含 {@code enabled}、{@code scope}、{@code type} 等字段）。</p>
+     *
+     * <p>type 的别名标准化统一由 {@link McpTypeResolver} 处理，前端无需关心类型兼容性。</p>
+     *
+     * @param root 已通过 ONode.ofJson 解析的根节点
+     * @return 包含格式类型与服务器列表的结构化数据
+     */
+    private Result parseMcpConfigNode(ONode root) {
         if (root.isObject() == false) {
-            return Result.failure("文件内容不是有效的 JSON 对象");
+            return Result.failure("内容不是有效的 JSON 对象");
         }
 
         // 检测格式
@@ -941,7 +1010,7 @@ public class WebSettingsController {
             return Result.failure("无法识别的配置文件格式: 期望 OpenCode 或 mcpServers 格式");
         }
 
-        // 转换为统一结构返回
+        // 转换为统一结构返回（含 enabled、scope，可直接用于 /mcp/servers/add）
         List<Map<String, Object>> servers = new ArrayList<>();
         for (Map.Entry<String, ONode> entry : mcpServersNode.getObject().entrySet()) {
             String name = entry.getKey();
@@ -953,34 +1022,36 @@ public class WebSettingsController {
 
             Map<String, Object> server = new LinkedHashMap<>();
             server.put("name", name);
+            server.put("enabled", true);
+            server.put("scope", "user");
 
-            // 检测服务器类型
+            // 检测服务器类型（别名统一由 McpTypeResolver 标准化）
             String type = cfg.get("type").getString();
             String serverType;
             if (type == null || type.isEmpty()) {
                 // 根据 command/url 推断
                 if (cfg.hasKey("command")) {
-                    serverType = "stdio";
+                    serverType = McpTypeResolver.TYPE_STDIO;
                 } else if (cfg.hasKey("url")) {
-                    serverType = "sse";
+                    serverType = McpTypeResolver.TYPE_SSE;
                 } else {
                     // 无法推断类型
                     server.put("error", "无法识别服务器类型，缺少 command 或 url");
                     servers.add(server);
                     continue;
                 }
-            } else if ("local".equals(type)) {
-                serverType = "stdio";
-            } else if ("remote".equals(type)) {
-                serverType = "streamable";
             } else {
-                serverType = type;
+                serverType = McpTypeResolver.standardize(type);
+                if (serverType == null) {
+                    serverType = type; // 无法标准化时原样保留
+                }
             }
             server.put("type", serverType);
 
-            if ("stdio".equals(serverType)) {
+            if (McpTypeResolver.isStdio(serverType)) {
                 // 处理 command（可能为字符串或数组）
                 ONode cmdNode = cfg.get("command");
+                StringBuilder detailBuilder = new StringBuilder();
                 if (cmdNode.isArray()) {
                     List<String> cmdParts = new ArrayList<>();
                     for (ONode c : cmdNode.getArray()) {
@@ -988,15 +1059,20 @@ public class WebSettingsController {
                     }
                     if (!cmdParts.isEmpty()) {
                         server.put("command", cmdParts.get(0));
+                        detailBuilder.append(cmdParts.get(0));
                         if (cmdParts.size() > 1) {
                             server.put("args", new ArrayList<>(cmdParts.subList(1, cmdParts.size())));
+                            for (int i = 1; i < cmdParts.size(); i++) {
+                                detailBuilder.append(" ").append(cmdParts.get(i));
+                            }
                         }
                     }
-                    server.put("detail", String.join(" ", cmdParts));
                 } else {
                     String cmdStr = cmdNode.getString();
                     server.put("command", cmdStr);
-                    server.put("detail", cmdStr);
+                    if (cmdStr != null) {
+                        detailBuilder.append(cmdStr);
+                    }
                 }
 
                 // args（显式声明）
@@ -1007,15 +1083,16 @@ public class WebSettingsController {
                     }
                     server.put("args", args);
                     // 更新 detail 包含完整 command + args
-                    StringBuilder detail = new StringBuilder();
-                    if (server.containsKey("command")) {
-                        detail.append(server.get("command"));
+                    detailBuilder.setLength(0);
+                    Object cmdObj = server.get("command");
+                    if (cmdObj != null) {
+                        detailBuilder.append(cmdObj);
                     }
                     for (String a : args) {
-                        detail.append(" ").append(a);
+                        detailBuilder.append(" ").append(a);
                     }
-                    server.put("detail", detail.toString());
                 }
+                server.put("detail", detailBuilder.toString());
 
                 // 环境变量：兼容多种命名
                 Map<String, String> env = null;
@@ -1031,10 +1108,11 @@ public class WebSettingsController {
                 if (env != null && !env.isEmpty()) {
                     server.put("env", env);
                 }
-            } else {
-                // sse / streamable
-                server.put("url", cfg.get("url").getString());
-                server.put("detail", cfg.get("url").getString());
+            } else if (McpTypeResolver.isHttpType(serverType)) {
+                // sse / streamable / streamable_stateless
+                String url = cfg.get("url").getString();
+                server.put("url", url);
+                server.put("detail", url);
 
                 if (cfg.hasKey("headers")) {
                     server.put("headers", oNodeToStringMap(cfg.get("headers")));
@@ -1047,6 +1125,9 @@ public class WebSettingsController {
                         server.put("timeout", timeoutNode.getString());
                     }
                 }
+            } else {
+                // 未知类型
+                server.put("error", "不支持的服务器类型: " + serverType);
             }
 
             servers.add(server);
@@ -1122,13 +1203,15 @@ public class WebSettingsController {
      */
     @Post
     @Mapping("/web/settings/mcp/servers/tools/save")
-    public Result mcpServerToolsSave(@Param("serverName") String serverName, @Param("disallowedTools") String[] disallowedTools) throws IOException {
+    public Result mcpServerToolsSave(@Param("serverName") String serverName, @Param(value = "disallowedTools", required = false) String[] disallowedTools) throws IOException {
         McpServerDo serverParameters = settings.getMcpServers().get(serverName);
         if (serverParameters == null) {
             return Result.failure("Server not found: " + serverName);
         }
 
-        serverParameters.setDisallowedTools(Arrays.asList(disallowedTools));
+        serverParameters.setDisallowedTools(disallowedTools == null
+                ? Collections.emptyList()
+                : Arrays.asList(disallowedTools));
 
         // 同步到引擎 provider 并热重载
         McpClientProvider provider = engine.getMcpServer(serverName);

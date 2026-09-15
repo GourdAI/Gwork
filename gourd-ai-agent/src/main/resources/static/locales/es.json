@@ -221,11 +221,14 @@
                                 "time_h":  "{0}h",
                                 "time_d":  "{0}d",
                                 "expand_all":  "Expandir todo",
+                                "collapse_all":  "Contraer todo",
                                 "clear_all":  "Borrar todas las sesiones",
                                 "confirm_clear":  "¿Borrar todas las sesiones? Esta acción no se puede deshacer.",
                                 
                                 
                                 "remove_project":  "Quitar de la lista",
+                                "rename_project":  "Renombrar proyecto",
+                                "rename_failed":  "Error al renombrar",
                                 "model_config":  "Configuración de modelos",
                    "memory":  "Memoria"
                             }
@@ -480,7 +483,23 @@
                                  "import_skipped_exists":  "Omitido (ya existe)",
                                  "import_incomplete_config":  "Configuración incompleta",
                                  "import_progress":  "Importando {0} servidores MCP...",
-                                 "import_summary":  "Total de {0} servidores MCP, {1} importados, {2} omitidos, {3} fallidos"
+                                 "import_summary":  "Total de {0} servidores MCP, {1} importados, {2} omitidos, {3} fallidos",
+                                 "import_json_file":  "Importar archivo JSON",
+                                 "import_json_str":  "Importar cadena JSON",
+                                 "json_dialog_title":  "Importar cadena JSON",
+                                 "json_hint":  "Pegue la cadena JSON de configuración de servidores MCP. Formatos admitidos:",
+                                 "json_format_hint":  "<span class=\"import-string-code\">{\"mcpServers\": {...}}</span> Formato de Claude Desktop / Cursor<br/><span class=\"import-string-code\">{\"mcp\": {...}}</span> Formato de OpenCode<br/><span class=\"import-string-code\">{\"format\":\"mcp\",\"servers\":{...}}</span> Formato estándar",
+                                 "json_placeholder":  "Pegue aquí la cadena JSON...",
+                                 "json_parse_hint":  "Tras pegar, haga clic en «Analizar» para previsualizar y, después de confirmar, añádalos por lotes",
+                                 "json_empty":  "Introduzca una cadena JSON",
+                                 "json_invalid":  "Formato JSON no válido; compruébelo e inténtelo de nuevo",
+                                 "parse_btn":  "Analizar",
+                                 "parse_failed_retry":  "Error de análisis; compruebe el formato de la cadena JSON e inténtelo de nuevo",
+                                 "check_timeout":  "Tiempo de espera agotado (15 s); compruebe si el servidor es accesible",
+                                 "empty":  "Sin servidores MCP",
+                                 "empty_desc":  "Los servidores MCP amplían las capacidades de las herramientas de IA, como acceso al sistema de archivos, consultas a bases de datos o llamadas a API",
+                                 "no_tools":  "Sin herramientas",
+                                 "no_tools_desc":  "Este servidor MCP no proporciona ninguna herramienta"
                              },
                      "openapi":  {
                                      "title":  "Servidores OpenAPI",

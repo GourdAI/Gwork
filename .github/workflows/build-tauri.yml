@@ -84,6 +84,15 @@ jobs:
         working-directory: gourd-ai-tauri
         run: node test/release-manifest-contract.js
 
+      # 安装器品牌位图契约：header.bmp 的 logo 必须留在条幅【左】端（历史 bug：
+      # logo 画在右端 → 全流程每个 header 页都像「图标压住标题文字」），且磁盘
+      # 资产必须等于生成器当前代码的输出（CI 每次构建都会重生成，只测资产拦不住）。
+      # 零依赖、毫秒级。
+      - name: 契约测试（安装器品牌位图）
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: node test/nsis-header-asset-contract.js
+
       # macOS 要出 x64 + arm64 两个 dmg，需预装两个 target；其余平台用默认宿主 target
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable

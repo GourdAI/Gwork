@@ -432,7 +432,7 @@ function inferPhaseFromType(type) {
         // 骨架帧：模型已确定函数名 / 参数正在生成，语义就是「已进入工具相位」。
         // 归入 PHASE_TOOL 后底部指示器自动让位（showPhaseIndicator 对 PHASE_TOOL 短路）——
         // 此时骨架卡已出现并承担了进度语义，再叠一个「输出中」是误报。
-        case 'action_draft': case 'action_args': return PHASE_TOOL;
+        case 'action_draft': case 'action_args': case 'action_batch': return PHASE_TOOL;
         case 'action_end': return PHASE_WAITING;
         case 'hitl': return PHASE_HITL;
         case 'retry': return PHASE_RETRY;
@@ -525,6 +525,14 @@ function onWebChunk(sess, chunk) {
                 // 纯进度帧：不再重复做思考块/重试提示的收敛（action_draft 已做过），
                 // 只更新骨架卡头部的参数体积，把长参数期的 DOM 开销压到最低。
                 updateToolCardArgsProgress(sess, chunk.actionId, chunk.argsBytes);
+                break;
+            case 'action_batch': finishThinkingBlock(sess); clearRetryChunk(sess);
+                // 批次声明帧：整批工具执行前一次性声明批次结构，收到即把已存在的成员骨架卡
+                // 一次性收编进容器（消除「单卡先出 → 容器后到 → 逐张搬入」的中间态）。
+                // 归属路由与 action_draft/action_start 完全对齐：子代理的容器必须落进它自己的卡片。
+                var batchOwnerState = resolveAgentState(sess, chunk.args);
+                if (batchOwnerState) { finishAgentThinkingBlock(sess, batchOwnerState); }
+                applyActionBatchChunk(sess, chunk, batchOwnerState ? batchOwnerState.bodyEl : null);
                 break;
             case 'action_start': finishThinkingBlock(sess); clearRetryChunk(sess);
                 var startOwnerState = resolveAgentState(sess, chunk.args);
@@ -652,6 +660,13 @@ function finishStream(sess) {
         Object.keys(sess.toolBatchesById).forEach(function(key) {
             var b = sess.toolBatchesById[key];
             if (!b || !b.groupEl) return;
+            // 空容器（成员卡全部被孤儿清理 / 从未落卡）直接移除：空壳比不显示更误导，
+            // 与「孤儿骨架卡是移除而不是标黄」同一哲学。
+            if ($(b.groupEl).find('.tool-card').length === 0) {
+                $(b.groupEl).remove();
+                delete sess.toolBatchesById[key];
+                return;
+            }
             var present = b.slots ? b.slots.filter(Boolean).length : 0;
             var complete = (b.doneCount || 0) >= (b.batchSize || 0) && present >= (b.batchSize || 0);
             var bIcon = $(b.groupEl).find('.tool-batch-header .tool-status-icon.loading')[0];

@@ -1,6 +1,7 @@
 package com.gourdai.core.portal.web;
 
 import com.gourdai.agent.react.ReActTrace;
+import com.gourdai.agent.event.ToolCallBatchEvent;
 import com.gourdai.agent.event.ToolCallStartEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
 import org.junit.jupiter.api.Assertions;
@@ -8,7 +9,9 @@ import org.junit.jupiter.api.Test;
 import org.noear.snack4.ONode;
 import org.noear.solon.ai.chat.message.ChatMessage;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static com.gourdai.harness.agent.WebToolVisibilityPolicy.*;
@@ -116,6 +119,59 @@ class ActionBatchProtocolTest {
         Assertions.assertNull(web.getBatchId());
         Assertions.assertNull(web.getBatchIndex());
         Assertions.assertNull(web.getBatchSize());
+    }
+
+    @Test
+    void batchDeclarationFactoryCarriesOrderedMembersAndSerializes() {
+        ReActTrace trace = new ReActTrace();
+        List<Map<String, Object>> members = new ArrayList<>();
+        members.add(member("call-a", 0, "read"));
+        members.add(member("call-b", 1, "bash"));
+
+        ToolCallBatchEvent event = new ToolCallBatchEvent(trace, "batch-9", 2, members);
+
+        Assertions.assertEquals("batch-9", event.getBatchId());
+        Assertions.assertEquals(Integer.valueOf(2), event.getBatchSize());
+        Assertions.assertNull(event.getBatchIndex());
+        Assertions.assertEquals(2, event.getMembers().size());
+        Assertions.assertEquals("call-b", event.getMembers().get(1).get("actionId"));
+
+        WebChunk chunk = WebChunk.ofActionBatch(event.getBatchId(), event.getBatchSize(), event.getMembers());
+        Assertions.assertEquals("action_batch", chunk.getType());
+        Assertions.assertEquals("batch-9", chunk.getBatchId());
+        Assertions.assertEquals(Integer.valueOf(2), chunk.getBatchSize());
+        Assertions.assertNull(chunk.getBatchIndex());
+        Assertions.assertEquals(2, chunk.getBatchMembers().size());
+
+        ONode json = ONode.ofJson(ONode.serialize(chunk));
+        Assertions.assertEquals("action_batch", json.get("type").getString());
+        Assertions.assertEquals("batch-9", json.get("batchId").getString());
+        Assertions.assertEquals(2, json.get("batchSize").getInt());
+        List<ONode> memberNodes = json.get("batchMembers").getArray();
+        Assertions.assertEquals(2, memberNodes.size());
+        Assertions.assertEquals("call-a", memberNodes.get(0).get("actionId").getString());
+        Assertions.assertEquals(0, memberNodes.get(0).get("index").getInt());
+        Assertions.assertEquals("read", memberNodes.get(0).get("toolName").getString());
+    }
+
+    @Test
+    void batchDeclarationKeepsLegacyFramesUntouchedWhenMembersMissing() {
+        ReActTrace trace = new ReActTrace();
+        ToolCallBatchEvent event = new ToolCallBatchEvent(trace, "batch-10", 2, null);
+        Assertions.assertTrue(event.getMembers().isEmpty());
+
+        WebChunk chunk = WebChunk.ofActionBatch("batch-10", 2, event.getMembers());
+        Assertions.assertEquals(0, chunk.getBatchMembers().size());
+        // 非批次帧的 batchMembers 保持 null：旧帧线格式零变化
+        Assertions.assertNull(WebChunk.ofActionStart("read", "read", Map.of()).getBatchMembers());
+    }
+
+    private static Map<String, Object> member(String actionId, int index, String toolName) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("actionId", actionId);
+        m.put("index", index);
+        m.put("toolName", toolName);
+        return m;
     }
 
     private static void assertBatch(WebChunk chunk) {

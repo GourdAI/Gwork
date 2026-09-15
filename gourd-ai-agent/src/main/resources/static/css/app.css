@@ -54,6 +54,10 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .history-tab:hover { color: var(--text-primary); }
 .history-tab.active { background: var(--bg-hover); color: var(--text-primary); font-weight: 600; }
 .history-tab-actions { display: flex; gap: 2px; }
+/* 「展开全部/收起全部」按钮双态图标：存在收起项目 → 显示「展开」图标；全部展开 → 切到「收拢」图标（.collapse-mode） */
+#expandAllBtn .collapse-all-icon { display: none; }
+#expandAllBtn.collapse-mode .expand-all-icon { display: none; }
+#expandAllBtn.collapse-mode .collapse-all-icon { display: block; }
 .sidebar-rename-input {
     flex: 1;
     background: var(--color-bg-primary);
@@ -610,7 +614,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 
 /* Model Selector */
 .model-selector { position: relative; display: flex; align-items: center; }
-.model-selector-current { display: flex; align-items: center; gap: 5px; padding: 4px 10px; border: 1px solid var(--border-color); border-radius: 7px; background: var(--bg-input-box); color: var(--text-secondary); font-size: 13px; cursor: pointer; transition: all 0.2s; white-space: nowrap; max-width: 180px; }
+.model-selector-current { display: flex; align-items: center; gap: 5px; padding: 4px 10px; border: 1px solid var(--border-color); border-radius: 7px; background: var(--bg-input-box); color: var(--text-secondary); font-size: 13px; cursor: pointer; transition: all 0.2s; white-space: nowrap; max-width: 200px; }
 .model-selector-current:hover { color: var(--text-primary); background: var(--bg-hover); }
 .model-selector-current .model-name { overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
 .model-selector-current .model-icon { width: 14px; height: 14px; flex-shrink: 0; opacity: 0.7; display: none; }
@@ -666,13 +670,19 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 
 /* 按钮内思考档位小标签（非默认档位时显示在模型名旁） */
 .model-selector-current .model-thinking-tag { font-size: 11px; color: var(--accent); background: var(--accent-light); padding: 0 6px; border-radius: 4px; flex-shrink: 0; }
+/* 按钮内上下文窗口小标签：与思考标签同款。会话始终存在有效上下文值，故总是展示——
+   否则「抽屉里选了 1M、收起后按钮上完全看不出来」。 */
+.model-selector-current .model-context-tag { font-size: 11px; color: var(--accent); background: var(--accent-light); padding: 0 6px; border-radius: 4px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 
 /* 关联思考档位区：内嵌在当前模型项下，随所选模型展示 */
 .model-thinking-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; padding-top: 7px; border-top: 1px dashed var(--border-color); }
 .model-thinking-label { font-size: 11px; color: var(--text-secondary); margin-right: 2px; user-select: none; }
 .model-thinking-chip { font-size: 11px; padding: 2px 9px; border: 1px solid var(--border-color); border-radius: 12px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s; white-space: nowrap; }
 .model-thinking-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
-.model-thinking-chip.active { background: var(--accent-light); color: var(--accent); }
+/* ⚠️ 选中态必须与 .model-context-chip.active 逐条对齐（含 border-color）：两区紧邻渲染，
+   若一方多出 accent 描边，同一个「已选中」就会呈现两种视觉（曾有 1M 带蓝圈、超高只有底色）。
+   改这里必须同步改另一处，context-selector-contract.test.js 会拦截单边修改。 */
+.model-thinking-chip.active { background: var(--accent-light); color: var(--accent); border-color: var(--accent); }
 
 /* 关联上下文窗口区：沿用 thinking chips 的间距、色彩令牌与交互节奏。 */
 .model-context-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 4px; padding-top: 6px; border-top: 1px dashed var(--border-color); min-width: 0; overflow-x: hidden; }

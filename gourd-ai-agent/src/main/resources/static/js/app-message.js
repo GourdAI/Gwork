@@ -930,36 +930,50 @@ function normalizeBatchMeta(batchMeta) {
     return { batchId: batchId, batchIndex: hasIndex ? batchIndex : null, batchSize: batchSize, degraded: !hasIndex };
 }
 
+/* 批次键：同 run 内按 batchId 唯一（runId 参与键名，防止跨轮复用的 batchId 串组）。 */
+function batchKeyFor(sess, batchId) {
+    return (sess.currentRunId || '') + '|' + batchId;
+}
+
+/* 定位或创建批次容器（首次创建时插入 DOM 并登记），返回 batch 结构。
+action_start / action_end / action_batch 三条路径共用，保证分组口径唯一。 */
+function ensureBatchGroup(sess, meta, insertAgentBody) {
+    if (!sess.toolBatchesById) sess.toolBatchesById = {};
+    var batchKey = batchKeyFor(sess, meta.batchId);
+    var batch = sess.toolBatchesById[batchKey];
+    if (batch && document.contains(batch.groupEl)) return batch;
+
+    var group = $('<div>').addClass('tool-batch-group')[0];
+    if (sess.currentRunId) group.setAttribute('data-run-id', sess.currentRunId);
+    group.setAttribute('data-batch-id', meta.batchId);
+    group.innerHTML = '<div class="tool-batch-header">'
+        + '<span class="tool-type-icon"></span>'
+        + '<span class="tool-batch-title"></span>'
+        + '<span class="tool-batch-progress"></span>'
+        + '<span class="tool-status-icon loading"></span>'
+        + '</div>'
+        + '<div class="batch-tool-items"></div>';
+    $(group).find('.tool-batch-header').on('click', function() { $(group).toggleClass('expanded'); });
+    if (window.cliPrintSimplified === false) $(group).addClass('expanded');
+    if (insertAgentBody) {
+        $(insertAgentBody).append(group);
+        followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
+    } else {
+        insertBeforeActions(sess, group);
+    }
+    batch = { groupEl: group, batchSize: meta.batchSize, doneCount: 0,
+        slots: new Array(meta.batchSize), agentBody: insertAgentBody || null };
+    sess.toolBatchesById[batchKey] = batch;
+    updateBatchGroupHeaderExplicit(batch);
+    return batch;
+}
+
 /* 根据 action_start/action_end 共享的批量元数据建组并插入卡片。缺少 index 时按当前空槽顺序兜底。 */
 function appendCardToBatch(sess, card, batchMeta, insertAgentBody) {
     var meta = normalizeBatchMeta(batchMeta);
     if (!meta) return false;
-    if (!sess.toolBatchesById) sess.toolBatchesById = {};
-    var batchKey = (sess.currentRunId || '') + '|' + meta.batchId;
-    var batch = sess.toolBatchesById[batchKey];
-    if (!batch || !document.contains(batch.groupEl)) {
-        var group = $('<div>').addClass('tool-batch-group')[0];
-        if (sess.currentRunId) group.setAttribute('data-run-id', sess.currentRunId);
-        group.setAttribute('data-batch-id', meta.batchId);
-        group.innerHTML = '<div class="tool-batch-header">'
-            + '<span class="tool-type-icon"></span>'
-            + '<span class="tool-batch-title"></span>'
-            + '<span class="tool-batch-progress"></span>'
-            + '<span class="tool-status-icon loading"></span>'
-            + '</div>'
-            + '<div class="batch-tool-items"></div>';
-        $(group).find('.tool-batch-header').on('click', function() { $(group).toggleClass('expanded'); });
-        if (window.cliPrintSimplified === false) $(group).addClass('expanded');
-        if (insertAgentBody) {
-            $(insertAgentBody).append(group);
-            followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
-        } else {
-            insertBeforeActions(sess, group);
-        }
-        batch = { groupEl: group, batchSize: meta.batchSize, doneCount: 0,
-            slots: new Array(meta.batchSize), agentBody: insertAgentBody || null };
-        sess.toolBatchesById[batchKey] = batch;
-    }
+    var batch = ensureBatchGroup(sess, meta, insertAgentBody);
+    var batchKey = batchKeyFor(sess, meta.batchId);
     var slot = meta.batchIndex;
     if (slot == null || batch.slots[slot]) {
         slot = -1;
@@ -980,6 +994,34 @@ function appendCardToBatch(sess, card, batchMeta, insertAgentBody) {
     updateBatchGroupHeaderExplicit(batch);
     return true;
 }
+
+/* action_batch：后端在整批工具执行前一次性声明批次（batchId/batchSize/成员清单）。
+   收到即把成员骨架卡「同一时刻」收编进容器——消除旧行为「第一张卡先出 → 容器后到 →
+   逐张搬入」的中间态跳变。尚未建卡的成员保留空槽，由随后 action_start/action_end 帧
+   照常填充；一个卡都没收编到时不预建空容器，退化为按第一张正式卡懒建组的旧行为。 */
+function applyActionBatchChunk(sess, chunk, insertAgentBody) {
+    if (!chunk) return;
+    var meta = normalizeBatchMeta({ batchId: chunk.batchId, batchSize: chunk.batchSize });
+    if (!meta) return;
+    var members = (chunk.batchMembers && chunk.batchMembers.length) ? chunk.batchMembers : [];
+
+    for (var i = 0; i < members.length; i++) {
+        var m = members[i] || {};
+        var actionId = (m.actionId == null) ? '' : String(m.actionId);
+        if (!actionId) continue;
+        var card = sess.toolCardsById && sess.toolCardsById[actionId];
+        if (!card || !card.parentNode) continue;
+        // 已归组的卡不再搬移（重复帧/乱序防御）：直接再调 appendCardToBatch 会把同一张卡挪进第二个空槽
+        if (card.getAttribute('data-batch-key')) continue;
+        var idx = Number(m.index);
+        appendCardToBatch(sess, card, {
+            batchId: meta.batchId,
+            batchIndex: (isFinite(idx) && Math.floor(idx) === idx) ? idx : null,
+            batchSize: meta.batchSize
+        }, insertAgentBody);
+    }
+}
+window.applyActionBatchChunk = applyActionBatchChunk;
 window.normalizeBatchMeta = normalizeBatchMeta;
 
 /* ===== 工具卡骨架（参数流式生成期） =====
@@ -1154,6 +1196,22 @@ function takeoverArgsStreamingCard(sess, toolName, actionId) {
     var foundId = found.getAttribute('data-action-id');
     if (foundId && sess.toolCardsById && sess.toolCardsById[foundId] === found) delete sess.toolCardsById[foundId];
     clearArgsStreamingMark(found);
+    // 若该骨架卡已被 action_batch 批次声明帧提前收编进批量容器，接管时必须先摘出容器：
+    // 容器默认折叠、折叠态子卡 display:none，审批按钮留在里面将不可见、无法操作。
+    // 摘出时同步清槽位与批次标记，避免它继续参与该批次的完成计数。
+    var group = $(found).closest('.tool-batch-group')[0];
+    if (group) {
+        var batchKey = found.getAttribute('data-batch-key');
+        var batch = (batchKey && sess.toolBatchesById) ? sess.toolBatchesById[batchKey] : null;
+        if (batch && batch.slots) {
+            var idx = Number(found.getAttribute('data-batch-index'));
+            if (isFinite(idx) && batch.slots[idx] === found) batch.slots[idx] = null;
+        }
+        found.removeAttribute('data-batch-key');
+        found.removeAttribute('data-batch-index');
+        found.removeAttribute('data-batch-degraded');
+        $(group).before(found);
+    }
     return found;
 }
 

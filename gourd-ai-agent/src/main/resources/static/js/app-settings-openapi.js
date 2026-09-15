@@ -59,7 +59,7 @@
                 var baseUrl = item.apiBaseUrl || '';
                 var docUrl = item.docUrl || '';
                 var enabled = item.enabled !== false;
-                html += '<div class="mcp-server-item" data-name="' + escapeAttr(name) + '">'
+                html += '<div class="mcp-server-item' + (item.enabled === false ? ' disabled' : '') + '" data-name="' + escapeAttr(name) + '">'
                     + '<div class="mcp-server-icon">A</div>'
                     + '<div class="mcp-server-info">'
                     + '<div class="mcp-server-name">' + escapeHtml(name) + ' <span class="settings-inline-tag">[openapi]</span>' + (item.scope === 'workspace' ? ' <span class="mounts-scope-badge scope-workspace">' + tWorkspace + '</span>' : '') + '</div>'
@@ -237,7 +237,9 @@
 
     function openapiToggleServer(name, enabled) {
         postJson('/web/settings/openapi/servers/toggle', { name: name, enabled: enabled }, function (resp) {
-            if (resp.code !== 200) { showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error'); loadOpenapiList(); }
+            if (resp.code !== 200) { showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error'); }
+            // 无论成败都刷新列表，确保开关状态与服务端一致
+            loadOpenapiList();
         });
     }
 

@@ -221,11 +221,14 @@
                                 "time_h":  "{0}时",
                                 "time_d":  "{0}天",
                                 "expand_all":  "展开全部",
+                                "collapse_all":  "收起全部",
                                 "clear_all":  "清空所有会话",
                                 "confirm_clear":  "确定清空所有会话？此操作不可恢复。",
                                 
                                 
                                 "remove_project":  "从列表移除",
+                                "rename_project":  "重命名项目",
+                                "rename_failed":  "重命名失败",
                                 "model_config":  "模型配置",
                    "memory":  "记忆"
                             }
@@ -480,7 +483,23 @@
                                  "import_skipped_exists":  "跳过（已存在）",
                                  "import_incomplete_config":  "配置信息不完整",
                                  "import_progress":  "正在导入 {0} 个 MCP 服务器...",
-                                 "import_summary":  "共 {0} 个 MCP 服务器，成功导入 {1}，跳过 {2}，失败 {3}"
+                                 "import_summary":  "共 {0} 个 MCP 服务器，成功导入 {1}，跳过 {2}，失败 {3}",
+                                 "import_json_file":  "导入 JSON 文件",
+                                 "import_json_str":  "导入 JSON 字符串",
+                                 "json_dialog_title":  "导入 JSON 字符串",
+                                 "json_hint":  "粘贴 MCP 服务器配置 JSON 字符串，支持以下格式：",
+                                 "json_format_hint":  "<span class=\"import-string-code\">{\"mcpServers\": {...}}</span> Claude Desktop / Cursor 格式<br/><span class=\"import-string-code\">{\"mcp\": {...}}</span> OpenCode 格式<br/><span class=\"import-string-code\">{\"format\":\"mcp\",\"servers\":{...}}</span> 标准格式",
+                                 "json_placeholder":  "在此粘贴 JSON 字符串...",
+                                 "json_parse_hint":  "粘贴后点击「解析」进行预览，确认后再批量添加",
+                                 "json_empty":  "请输入 JSON 字符串",
+                                 "json_invalid":  "JSON 格式无效，请检查后重试",
+                                 "parse_btn":  "解析",
+                                 "parse_failed_retry":  "解析失败，请检查 JSON 字符串格式后重试",
+                                 "check_timeout":  "检测超时（15秒），请检查服务器是否可达",
+                                 "empty":  "暂无 MCP 服务器",
+                                 "empty_desc":  "MCP 服务器可扩展 AI 的工具能力，如文件系统访问、数据库查询、API 调用等",
+                                 "no_tools":  "暂无工具",
+                                 "no_tools_desc":  "该 MCP 服务器未提供任何工具"
                              },
                      "openapi":  {
                                      "title":  "OpenAPI 服务器",

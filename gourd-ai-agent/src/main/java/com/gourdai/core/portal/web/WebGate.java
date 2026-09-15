@@ -17,6 +17,7 @@ package com.gourdai.core.portal.web;
 
 import org.noear.snack4.ONode;
 import com.gourdai.agent.AgentSession;
+import com.gourdai.agent.session.FileAgentSession;
 import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.react.intercept.HITL;
@@ -162,6 +163,49 @@ public class WebGate extends SimpleWebSocketListener {
             return sessionCwd;
         }
         return engine.getWorkspace();
+    }
+
+    /**
+     * 受理时统一「绑定归属 + 对齐家目录」。
+     *
+     * <p><b>背景：</b>会话对象在构造时即固化了存储目录，而首次受理输入（登记所属根）发生在其后；
+     * 若以构造时的解析为准，messages/snapshot（引擎侧）会落全局区、stream/label/TODO（Web 侧）
+     * 落项目区——同一会话的数据被拆到两个目录（分居），且重启续写还会产生双段消息。</p>
+     *
+     * <p><b>绑定</b>由 {@link SessionLocator#bindSessionRoot} 统一裁决：归属冻结（一旦登记不再改写）、
+     * 数据位置采纳（不让已落盘会话换根）。<b>对齐</b>：对尚未落盘任何数据的会话，
+     * 把存储目录切换到本次生效的家目录（{@code boundRoot ?: 全局区}），保证此后
+     * messages/snapshot/stream/label/TODO/uploads 全部落在同一个目录。</p>
+     *
+     * @return 会话家根；null 表示全局区（未登记项目根）
+     */
+    private String bindAndAlignHome(AgentSession session, String sessionId, String sessionCwd) {
+        if (sessionLocator == null) {
+            return sessionCwd;
+        }
+        if (Assert.isNotEmpty(sessionCwd)) {
+            sessionLocator.bindSessionRoot(sessionId, sessionCwd);
+        }
+        String home = sessionLocator.boundRoot(sessionId);
+        alignSessionHome(sessionLocator, session);
+        return home;
+    }
+
+    /**
+     * 可测试 seam：把未落盘会话的存储目录对齐到其家目录（{@code boundRoot ?: 全局区}）。
+     * 已产生数据的会话不会被迁移（由 {@link FileAgentSession#relocateIfPristine} 保证）。
+     */
+    static void alignSessionHome(SessionLocator locator, AgentSession session) {
+        if (locator == null || !(session instanceof FileAgentSession)) {
+            return;
+        }
+        String sessionId = session.getSessionId();
+        try {
+            File homeDir = locator.resolveDir(sessionId);
+            ((FileAgentSession) session).relocateIfPristine(homeDir);
+        } catch (Throwable e) {
+            LOG.warn("[WebGate] align session home failed for {}: {}", sessionId, e.getMessage());
+        }
     }
 
     /**
@@ -397,6 +441,7 @@ public class WebGate extends SimpleWebSocketListener {
                                   UploadedFile[] attachments, String[] attachmentTypes,
                                   String hitlAction, String source, String clientMessageId) {
         AgentSession session = null;
+        String streamRoot = null;
         try {
             session = engine.getSession(sessionId);
 
@@ -405,23 +450,22 @@ public class WebGate extends SimpleWebSocketListener {
                 LOG.warn("[WebGate] chat input skipped for session {}: task in progress", sessionId);
                 return false;
             }
+
+            // 通过受理锁内的 busy 检查后才允许登记所属根，确保首次解析及后续旁路落盘一致；
+            // busy 请求不会改绑活动会话。绑定后立即对齐家目录（仅未落盘会话可迁移），
+            // 使引擎侧 messages/snapshot 与 Web 侧 stream/label/TODO 落同一目录；
+            // 对齐放在会话属性写入之前，避免（极少数采纳已有数据场景）缓存层重挂载时丢失属性。
+            streamRoot = bindAndAlignHome(session, sessionId, sessionCwd);
+
+            // busy 请求不能覆盖正在运行任务的来源；来源只在确认本次输入可受理后更新。
             if (source != null) {
                 session.attrs().put("_input_source", source);
             } else {
                 session.attrs().remove("_input_source");
             }
 
-            // 通过受理锁内的 busy 检查后才允许登记所属根，确保首次解析及后续旁路落盘一致；
-            // busy 请求不会改绑活动会话。
-            if (sessionLocator != null && Assert.isNotEmpty(sessionCwd)) {
-                sessionLocator.bindSessionRoot(sessionId, sessionCwd);
-            }
-
-            // 本会话流事件固定写入本轮所属根。后续即使另一个 busy 请求误带不同 cwd，
-            // emitToClient 也不会跟随可变注册表跳到其它项目目录。
-            String streamRoot = Assert.isNotEmpty(sessionCwd)
-                    ? sessionCwd
-                    : (sessionLocator == null ? null : sessionLocator.boundRoot(sessionId));
+            // 本会话流事件固定写入会话家目录（已登记根为权威；未登记=全局区）。
+            // 后续即使另一个 busy 请求误带不同 cwd，emitToClient 也不会跳到其它目录。
             if (Assert.isNotEmpty(streamRoot)) {
                 streamRoots.put(sessionId, streamRoot);
             } else {
@@ -476,7 +520,7 @@ public class WebGate extends SimpleWebSocketListener {
                 // 解析会话目录，作为附件存储根路径
                 java.nio.file.Path sessionDir;
                 if (sessionLocator != null) {
-                    sessionDir = sessionLocator.resolveDir(sessionId, sessionCwd).toPath();
+                    sessionDir = sessionLocator.resolveDir(sessionId, streamRoot).toPath();
                 } else {
                     // 降级：回退到工作区（兼容旧版本）
                     sessionDir = java.nio.file.Paths.get(engine.getWorkspace());
@@ -581,9 +625,9 @@ public class WebGate extends SimpleWebSocketListener {
                 if (session.isEmpty() && Assert.isNotEmpty(input)) {
                     //如果是空，可能发的是 command（还没有对话记录）
                     try {
-                        // code 会话落在所选项目目录，用 locator 解析正确落盘目录；chat 会话回退安装目录
+                        // 会话数据统一落家目录（streamRoot 即家根；busy 早退等未赋值场景传 null 走登记表/全局兜底）
                         File sessionDir = (sessionLocator != null)
-                                ? sessionLocator.resolveDir(sessionId, sessionCwd)
+                                ? sessionLocator.resolveDir(sessionId, streamRoot)
                                 : Paths.get(engine.getWorkspace(), engine.getHarnessSessions(), sessionId)
                                     .toAbsolutePath().normalize().toFile();
                         File labelFile = new File(sessionDir, "label.txt");
@@ -1020,8 +1064,9 @@ public class WebGate extends SimpleWebSocketListener {
 
     private void doSafeChatInput(String sessionId, String projectRoot, String input, String source) {
         // 活动会话的所属根不可被一个最终会 busy-skip 的异步输入改写。
+        AgentSession session;
         try {
-            AgentSession session = engine.getSession(sessionId);
+            session = engine.getSession(sessionId);
             if (isSessionBusy(session)) {
                 LOG.warn("[WebGate] {} event skipped for session {}: task in progress", source, sessionId);
                 return;
@@ -1030,9 +1075,8 @@ public class WebGate extends SimpleWebSocketListener {
             LOG.warn("[WebGate] {} event check failed for session {}: {}", source, sessionId, e.getMessage());
             return;
         }
-        if (sessionLocator != null && Assert.isNotEmpty(projectRoot)) {
-            sessionLocator.bindSessionRoot(sessionId, projectRoot);
-        }
+        // 确认空闲后登记归属并对齐家目录（仅未落盘会话可迁移）。
+        bindAndAlignHome(session, sessionId, projectRoot);
 
         // onChatInput 在同一会话受理锁内再次确认 busy，并在真正受理后推送用户气泡。
         onChatInput(sessionId, projectRoot, input, null, null, null, null, source);
@@ -1111,8 +1155,9 @@ public class WebGate extends SimpleWebSocketListener {
      */
     private LoopRunPlan doSafeChatInputAndCaptureLoopPrepare(String sessionId, String projectRoot, String worktreeRoot,
                                                              String input, String source) {
+        AgentSession existing;
         try {
-            AgentSession existing = engine.getSession(sessionId);
+            existing = engine.getSession(sessionId);
             if (isSessionBusy(existing)) {
                 LOG.warn("[WebGate] {} event skipped for session {}: task in progress", source, sessionId);
                 return null;
@@ -1123,11 +1168,9 @@ public class WebGate extends SimpleWebSocketListener {
             LOG.warn("[WebGate] {} event check failed for session {}: {}", source, sessionId, e.getMessage());
             return null;
         }
-        // 只有确认空闲后才允许更新持久化根/本轮固定流根。
-        if (sessionLocator != null && Assert.isNotEmpty(projectRoot)) {
-            sessionLocator.bindSessionRoot(sessionId, projectRoot);
-        }
-        if (Assert.isNotEmpty(projectRoot)) streamRoots.put(sessionId, projectRoot);
+        // 只有确认空闲后才允许更新持久化根/本轮固定流根；绑定后对齐家目录（仅未落盘会话可迁移）。
+        String streamRoot = bindAndAlignHome(existing, sessionId, projectRoot);
+        if (Assert.isNotEmpty(streamRoot)) streamRoots.put(sessionId, streamRoot);
         else streamRoots.remove(sessionId);
         AgentSession session;
         try {

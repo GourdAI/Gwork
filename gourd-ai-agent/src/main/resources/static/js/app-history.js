@@ -62,13 +62,43 @@ function historyScopeBaseName(p) {
     var i = Math.max(t.lastIndexOf('\\'), t.lastIndexOf('/'));
     return i >= 0 ? t.substring(i + 1) : t;
 }
-/* 渲染 tab 行：按有效视图切换两个 tab 的 .active */
+/* 渲染 tab 行：按有效视图切换两个 tab 的 .active，并同步「展开/收起全部」按钮状态 */
 function updateHistoryScopeBar() {
     var gBtn = document.getElementById('scopeGlobalBtn');
     var pBtn = document.getElementById('scopeProjectBtn');
     var scope = effectiveHistoryScope();
     if (gBtn) gBtn.classList.toggle('active', scope === 'global');
     if (pBtn) pBtn.classList.toggle('active', scope === 'project');
+    updateExpandAllBtn();
+}
+
+/* 是否存在收起状态的项目：按钮点击逻辑与图标状态共用同一判定口径 */
+function anyProjectCollapsed() {
+    var ps = (_sidebarData && _sidebarData.projects) || [];
+    for (var i = 0; i < ps.length; i++) {
+        if (!_projExpanded[ps[i].path]) return true;
+    }
+    return false;
+}
+
+/* 「展开全部/收起全部」按钮状态感知（图标 + 提示随项目树状态翻转）：
+   - 仅「项目」tab 且存在项目时显示；对话 tab / code 模式 / 空项目列表时隐藏，避免隐形空操作
+   - 存在收起项目 → 展示「展开全部」图标与提示；全部展开 → 翻转为「收起全部」 */
+function updateExpandAllBtn() {
+    var btn = document.getElementById('expandAllBtn');
+    if (!btn) return;
+    var ps = (_sidebarData && _sidebarData.projects) || [];
+    var showable = window.appMode !== 'code' && effectiveHistoryScope() === 'project' && ps.length > 0;
+    if (!showable) {
+        btn.style.display = 'none';
+        return;
+    }
+    btn.style.display = '';
+    var allExpanded = !anyProjectCollapsed();
+    btn.classList.toggle('collapse-mode', allExpanded);
+    var key = allExpanded ? 'app.sidebar.collapse_all' : 'app.sidebar.expand_all';
+    btn.setAttribute('data-i18n-title', key);
+    btn.setAttribute('title', GourdI18n.t(key));
 }
 /* tab 切换委托（新 tab 按钮保留 data-scope，选择器随类名更新） */
 $(document).on('click', '#historyScopeBar .history-tab', function () {
@@ -357,7 +387,7 @@ function sidebarItemHtml(i) {
 
 
 /* 项目文件夹行：chevron + folder 图标 + 名称（点击切换展开，见列表点击委托）。
-   右侧悬浮操作组 .proj-actions：新建任务 / 进入专注模式 / 从列表移除（样式见 app.css）。 */
+   右侧悬浮操作组 .proj-actions：新建任务 / 进入专注模式 / 重命名显示名 / 从列表移除（样式见 app.css）。 */
 function projNodeHtml(path, name, expanded) {
     return '<div class="proj-node' + (expanded ? ' expanded' : '') + '" data-proj="' + escAttr(path) + '" title="' + escAttr(path) + '">'
         + '<svg class="proj-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>'
@@ -369,6 +399,9 @@ function projNodeHtml(path, name, expanded) {
         + '</button>'
         + '<button class="proj-action-btn proj-open-code" title="' + escAttr(GourdI18n.t('app.sidebar.open_in_code')) + '">'
         + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>'
+        + '</button>'
+        + '<button class="proj-action-btn proj-rename" title="' + escAttr(GourdI18n.t('app.sidebar.rename_project')) + '">'
+        + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>'
         + '</button>'
         + '<button class="proj-action-btn proj-remove" title="' + escAttr(GourdI18n.t('app.sidebar.remove_project')) + '">'
         + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
@@ -401,6 +434,13 @@ $(historyList).on('click', function(e) {
         if (typeof window.openProjectInCodeMode === 'function') window.openProjectInCodeMode(op);
         return;
     }
+    // 项目行「重命名」：原位编辑显示名（须置于 proj-node 分支之前，避免被展开/收起吸收）
+    var $projRename = $target.closest('.proj-rename');
+    if ($projRename.length) {
+        var rnp = $projRename.closest('.proj-node').attr('data-proj');
+        if (rnp) startProjectRename(rnp);
+        return;
+    }
     // 项目行「从列表移除」：仅解除登记，不删除磁盘目录（须置于 proj-node 分支之前）
     var $projDel = $target.closest('.proj-remove');
     if ($projDel.length) {
@@ -411,6 +451,8 @@ $(historyList).on('click', function(e) {
     // 项目文件夹节点：切换展开/收起（置于 del/rename/item 分支之前）
     var $proj = $target.closest('.proj-node');
     if ($proj.length) {
+        // 重命名输入框上的点击不参与展开/收起（列表重建会打断编辑）
+        if ($target.closest('.sidebar-rename-input').length) return;
         var p = $proj.attr('data-proj');
         _projExpanded[p] = !_projExpanded[p];
         updateHistoryUI();
@@ -471,6 +513,8 @@ function updateHistoryUI() {
             // 列表重建后按当前搜索关键字重新过滤，避免过滤态丢失
             if (typeof window.reapplySidebarFilter === 'function') window.reapplySidebarFilter();
         }
+        // 「展开/收起全部」按钮：图标/提示/显隐随项目树状态同步（点按钮、单项目开合、新建任务后均经此处刷新）
+        updateExpandAllBtn();
         // Code 模式：同步右栏会话下拉
         if (window.appMode === 'code' && typeof window.renderCodeSessions === 'function') {
             window.renderCodeSessions();
@@ -601,6 +645,70 @@ function startRename(idx) {
         if (e.key === 'Enter') { e.preventDefault(); $input[0].blur(); }
         if (e.key === 'Escape') { $input.val(currentLabel); $input[0].blur(); }
     });
+}
+
+/* 项目行重命名：原位编辑显示名（复刻会话重命名交互）。
+   仅修改 projects.json 中的展示名，不改动磁盘目录与真实路径；
+   成功后即时刷新侧栏，其它界面（欢迎页、专注模式标题等）在下次加载时读取新名字。 */
+function startProjectRename(path) {
+    var $node = null;
+    $(historyList).find('.proj-node').each(function () {
+        if ($(this).attr('data-proj') === path) { $node = $(this); return false; }
+    });
+    if (!$node || !$node.length) return;
+    var $nameEl = $node.find('.proj-name');
+    if (!$nameEl.length) return;
+
+    var currentName = $nameEl.text();
+    var $input = $('<input>', {
+        type: 'text',
+        'class': 'sidebar-rename-input',
+        maxlength: 50,
+        val: currentName
+    });
+
+    $nameEl.hide();
+    $node.find('.proj-rename').hide();
+    $nameEl.before($input);
+    $input[0].focus();
+    $input[0].select();
+
+    function finishProjectRename() {
+        var newName = $input.val().trim();
+        if (newName && newName !== currentName) {
+            $.post('/web/chat/projects/rename', { path: path, name: newName }).done(function (resp) {
+                if (resp && resp.code === 200) {
+                    updateProjectDisplayName(path, newName);
+                } else {
+                    if (typeof showToast === 'function') showToast(GourdI18n.t('app.sidebar.rename_failed'), 'error');
+                }
+            }).fail(function () {
+                if (typeof showToast === 'function') showToast(GourdI18n.t('app.sidebar.rename_failed'), 'error');
+            });
+        }
+        $input.remove();
+        $nameEl.show();
+        $node.find('.proj-rename').show();
+    }
+
+    $input.on('blur', finishProjectRename);
+    $input.on('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); $input[0].blur(); }
+        if (e.key === 'Escape') { $input.val(currentName); $input[0].blur(); }
+    });
+}
+
+/* 项目显示名本地更新：改 _sidebarData 中的 name 并刷新侧栏（避免为改名重拉整个侧栏数据）。 */
+function updateProjectDisplayName(path, name) {
+    if (_sidebarData && _sidebarData.projects) {
+        for (var i = 0; i < _sidebarData.projects.length; i++) {
+            if (_sidebarData.projects[i].path === path) {
+                _sidebarData.projects[i].name = name;
+                break;
+            }
+        }
+    }
+    updateHistoryUI();
 }
 
 function deleteSession(idx) {
@@ -769,11 +877,8 @@ window.openSessionById = openSessionById;
 $(document).on('click', '#expandAllBtn', function () {
     if (!_sidebarData) return;
     var ps = _sidebarData.projects || [];
-    var anyCollapsed = false;
-    for (var i = 0; i < ps.length; i++) {
-        if (!_projExpanded[ps[i].path]) { anyCollapsed = true; break; }
-    }
     // 存在未展开 → 全展开；否则全收起
+    var anyCollapsed = anyProjectCollapsed();
     for (var j = 0; j < ps.length; j++) _projExpanded[ps[j].path] = anyCollapsed;
     updateHistoryUI();
 });
@@ -2375,6 +2480,14 @@ function renderModelUI() {
     var tagLabel = thinkingButtonTagLabel();
     $('#chatModelThinkingTag').text(tagLabel).toggle(!!tagLabel);
     $('#welcomeModelThinkingTag').text(tagLabel).toggle(!!tagLabel);
+
+    // 按钮内上下文窗口小标签：与思考标签不同，上下文**总有有效值**（默认 256K），
+    // 因此不做「默认即隐藏」处理——否则抽屉里选了 1M、收起后按钮上完全看不出来。
+    // title 给出「上下文 1M」的语义，避免与同为小标签的思考档位混淆。
+    var contextTagLabel = contextLengthLabel(getSelectedContext());
+    var contextTagTitle = GourdI18n.t('app.context_label') + ' ' + contextTagLabel;
+    $('#chatModelContextTag').text(contextTagLabel).attr('title', contextTagTitle).toggle(!!contextTagLabel);
+    $('#welcomeModelContextTag').text(contextTagLabel).attr('title', contextTagTitle).toggle(!!contextTagLabel);
 
     // 严格保持接口顺序；仅当 provider 与紧邻上一模型不同时插入标题（允许同一 provider 重复出现）
     var entries = ModelListOrder.buildEntries(modelList);

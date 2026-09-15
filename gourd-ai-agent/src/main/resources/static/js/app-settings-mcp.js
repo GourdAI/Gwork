@@ -24,6 +24,8 @@
     var $mcpToolsList = $('#mcpToolsList');
     var $mcpToolsTitle = $('#mcpToolsTitle');
     var mcpEditName = null;
+    // 当前编辑对象的原始类型（无匹配类型按钮时作为兜底，如 streamable_stateless）
+    var mcpEditType = null;
     var mcpCachedList = [];
 
     function showMcpListView() { $mcpToolsView.hide(); $mcpFormView.hide(); $mcpListView.addClass('slide-back').show(); setTimeout(function(){ $mcpListView.removeClass('slide-back'); }, 260); }
@@ -32,7 +34,8 @@
         $mcpTypeBtns.removeClass('active');
         $mcpTypeBtns.filter('[data-type="' + type + '"]').addClass('active');
         $('#mcpConfigStdio').toggle(type === 'stdio');
-        $('#mcpConfigRemote').toggle(type === 'sse' || type === 'streamable');
+        // streamable_stateless 为导入场景的合法类型，编辑时按远程配置区展示
+        $('#mcpConfigRemote').toggle(type === 'sse' || type === 'streamable' || type === 'streamable_stateless');
     }
 
     // ==================== MCP 管理 ====================
@@ -59,8 +62,8 @@
         if (!list || list.length === 0) {
             html = '<div class="mcp-empty-state">'
                 + '<div class="mcp-empty-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></div>'
-                + '<div class="mcp-empty-title">' + GourdI18n.t('common.no_data') + GourdI18n.t('settings.mcp.title') + '</div>'
-                + '<div class="mcp-empty-desc">' + GourdI18n.t('settings.mcp.desc') + '</div>'
+                + '<div class="mcp-empty-title">' + GourdI18n.t('settings.mcp.empty') + '</div>'
+                + '<div class="mcp-empty-desc">' + GourdI18n.t('settings.mcp.empty_desc') + '</div>'
                 + '</div>';
         } else {
             var iconMap = { stdio: 'S', sse: 'R', streamable: 'H' };
@@ -69,7 +72,7 @@
                 var type = item.type || 'stdio';
                 var detail = type === 'stdio' ? (item.command || '') : (item.url || '');
                 var icon = iconMap[type] || 'M';
-                html += '<div class="mcp-server-item" data-name="' + escapeAttr(name) + '">'
+                html += '<div class="mcp-server-item' + (item.enabled === false ? ' disabled' : '') + '" data-name="' + escapeAttr(name) + '">'
                     + '<div class="mcp-server-icon">' + escapeHtml(icon) + '</div>'
                     + '<div class="mcp-server-info">'
                     + '<div class="mcp-server-name">' + escapeHtml(name) + ' <span class="settings-inline-tag">[' + escapeHtml(type) + ']</span>' + (item.scope === 'workspace' ? ' <span class="mounts-scope-badge scope-workspace">' + tWorkspace + '</span>' : '') + '</div>'
@@ -158,8 +161,8 @@
             $toolbar.hide();
             $mcpToolsList.html('<div class="mcp-empty-state">'
                 + '<div class="mcp-empty-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 8h10M7 12h6M7 16h8"/></svg></div>'
-                + '<div class="mcp-empty-title">' + GourdI18n.t('common.no_data') + GourdI18n.t('settings.mcp.tools_title') + '</div>'
-                + '<div class="mcp-empty-desc">' + GourdI18n.t('settings.mcp.desc') + '</div></div>');
+                + '<div class="mcp-empty-title">' + GourdI18n.t('settings.mcp.no_tools') + '</div>'
+                + '<div class="mcp-empty-desc">' + GourdI18n.t('settings.mcp.no_tools_desc') + '</div></div>');
             return;
         }
 
@@ -234,6 +237,7 @@
 
     function resetMcpForm() {
         mcpEditName = null;
+        mcpEditType = null;
         $mcpSaveBtn.text(GourdI18n.t('common.save'));
         $('#mcpName').val('').prop('readOnly', false).removeClass('readonly-gray');
         $('#mcpCommand, #mcpArgs, #mcpEnv, #mcpRemoteUrl, #mcpHeaders, #mcpTimeout').val('');
@@ -264,7 +268,8 @@
 
     function buildMcpBodyObj() {
         var name = $('#mcpName').val().trim();
-        var type = $('#mcpAddForm .mcp-type-btn.active').attr('data-type') || 'stdio';
+        // 无匹配类型按钮时（如 streamable_stateless）回落到编辑对象的原始类型
+        var type = $('#mcpAddForm .mcp-type-btn.active').attr('data-type') || mcpEditType || 'stdio';
         var tName = GourdI18n.t('common.name');
         var tCommand = GourdI18n.t('settings.mcp.command');
         var tUrl = GourdI18n.t('settings.mcp.url');
@@ -281,7 +286,7 @@
             if (argsText) bodyObj.args = argsText.split('\n').filter(function (l) { return l.trim() !== ''; });
             var env = parseKvLines($('#mcpEnv').val().trim());
             if (Object.keys(env).length > 0) bodyObj.env = env;
-        } else if (type === 'sse' || type === 'streamable') {
+        } else if (type === 'sse' || type === 'streamable' || type === 'streamable_stateless') {
             var url = $('#mcpRemoteUrl').val().trim();
             if (!url) { showToast(tUrl + GourdI18n.t('common.required'), 'error'); return null; }
             if (!/^https?:\/\/.+/.test(url)) { showToast(tUrl + GourdI18n.t('settings.mcp.url_placeholder'), 'error'); return null; }
@@ -298,6 +303,7 @@
         var server = mcpCachedList.find(function (s) { return s.name === name; });
         if (!server) return;
         mcpEditName = name;
+        mcpEditType = server.type || 'stdio';
         showMcpFormView(GourdI18n.t('settings.mcp.edit_title'), true);
         $mcpSaveBtn.text(GourdI18n.t('settings.loop.updated'));
         $('#mcpName').val(server.name).prop('readOnly', true).addClass('readonly-gray');
@@ -308,6 +314,7 @@
         var server = mcpCachedList.find(function (s) { return s.name === name; });
         if (!server) return;
         mcpEditName = null;
+        mcpEditType = server.type || 'stdio';
         showMcpFormView(GourdI18n.t('settings.mcp.add_title'), false);
         $mcpSaveBtn.text(GourdI18n.t('common.save'));
         $('#mcpName').val(server.name + '-copy').prop('readOnly', false).removeClass('readonly-gray');
@@ -331,7 +338,9 @@
 
     function mcpToggleServer(name, enabled) {
         postJson('/web/settings/mcp/servers/toggle', { name: name, enabled: enabled }, function (resp) {
-            if (resp.code !== 200) { showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error'); loadMcpList(); }
+            if (resp.code !== 200) { showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error'); }
+            // 无论成败都刷新列表，确保开关状态与服务端一致
+            loadMcpList();
         });
     }
 
@@ -390,7 +399,7 @@
                     .css('display', 'flex');
             })
             .fail(function (jqXHR, textStatus) {
-                var msg = textStatus === 'timeout' ? GourdI18n.t('settings.network_error') : GourdI18n.t('settings.network_error');
+                var msg = textStatus === 'timeout' ? GourdI18n.t('settings.mcp.check_timeout') : GourdI18n.t('settings.network_error');
                 $mcpCheckResult.attr('class', 'mcp-check-result error').html(msg).css('display', 'flex');
             })
             .always(function () { $btn.prop('disabled', false).html(btnOriginal); });
@@ -668,13 +677,14 @@
             var tRollbackConfirm = GourdI18n.t('settings.mcp.import_rollback_confirm').replace('{0}', result.imported.length);
             var tRollbacking = GourdI18n.t('settings.mcp.import_rollbacking');
             $('#importRollbackBtn').on('click', function() {
-                if (!confirm(tRollbackConfirm)) return;
                 var $btn = $(this);
-                $btn.prop('disabled', true).text(tRollbacking);
-                rollbackImport(result.imported, function(successCount) {
-                    $overlay.remove();
-                    loadMcpList();
-                    showToast(GourdI18n.t('settings.mcp.import_rollback_done').replace('{0}', successCount), 'info');
+                layConfirm(tRollbackConfirm, function() {
+                    $btn.prop('disabled', true).text(tRollbacking);
+                    rollbackImport(result.imported, function(successCount) {
+                        $overlay.remove();
+                        loadMcpList();
+                        showToast(GourdI18n.t('settings.mcp.import_rollback_done').replace('{0}', successCount), 'info');
+                    });
                 });
             });
         }
@@ -718,11 +728,128 @@
     
     // ==================== 入口事件绑定 ====================
     
-    // 导入按钮点击事件
-    $('#mcpImportBtn').on('click', function () {
-        $('#mcpImportFileInput').trigger('click');
+    // 导入按钮 - 切换下拉菜单
+    $('#mcpImportBtn').on('click', function (e) {
+        e.stopPropagation();
+        $('#mcpImportMenu').toggleClass('show');
+    });
+
+    // 点击页面其他区域关闭下拉菜单
+    $(document).on('click', function () {
+        $('#mcpImportMenu').removeClass('show');
+    });
+
+    // 下拉菜单项点击事件
+    $('#mcpImportMenu').on('click', '.mcp-import-menu-item', function (e) {
+        e.stopPropagation();
+        $('#mcpImportMenu').removeClass('show');
+        var action = $(this).attr('data-action');
+        if (action === 'file') {
+            $('#mcpImportFileInput').trigger('click');
+        } else if (action === 'string') {
+            showImportStringDialog();
+        }
     });
     
+    /**
+     * 显示导入 JSON 字符串对话框
+     */
+    function showImportStringDialog() {
+        var tTitle = GourdI18n.t('settings.mcp.json_dialog_title');
+        var tHint = GourdI18n.t('settings.mcp.json_hint');
+        var tFormatHint = GourdI18n.t('settings.mcp.json_format_hint');
+        var tPlaceholder = GourdI18n.t('settings.mcp.json_placeholder');
+        var tParseHint = GourdI18n.t('settings.mcp.json_parse_hint');
+        var tCancel = GourdI18n.t('common.cancel');
+        var tParseBtn = GourdI18n.t('settings.mcp.parse_btn');
+
+        var dialogHtml = '<div class="import-overlay" id="importStringOverlay">'
+            + '<div class="import-dialog">'
+            + '<div class="import-dialog-header">'
+            + '<span class="import-dialog-title">' + tTitle + '</span>'
+            + '<button class="import-dialog-close" id="importStringClose">&times;</button>'
+            + '</div>'
+            + '<div class="import-dialog-body">'
+            + '<div class="import-summary">' + tHint + '</div>'
+            + '<div style="font-size:12px;color:var(--text-tertiary);margin-bottom:12px;line-height:1.8;">'
+            + tFormatHint
+            + '</div>'
+            + '<textarea class="import-string-textarea" id="importStringInput" placeholder="' + escapeAttr(tPlaceholder) + '" spellcheck="false"></textarea>'
+            + '<div class="import-string-hint">' + tParseHint + '</div>'
+            + '</div>'
+            + '<div class="import-dialog-footer">'
+            + '<button class="btn-secondary" id="importStringCancel">' + tCancel + '</button>'
+            + '<button class="btn-primary" id="importStringConfirm">' + tParseBtn + '</button>'
+            + '</div>'
+            + '</div>'
+            + '</div>';
+
+        $('body').append(dialogHtml);
+
+        var $overlay = $('#importStringOverlay');
+
+        // 关闭事件
+        $('#importStringClose, #importStringCancel').on('click', function () {
+            $overlay.remove();
+        });
+
+        // 确认 - 直接 POST JSON 字符串到后端解析接口
+        $('#importStringConfirm').on('click', function () {
+            var jsonStr = $('#importStringInput').val().trim();
+            if (!jsonStr) {
+                showToast(GourdI18n.t('settings.mcp.json_empty'), 'error');
+                return;
+            }
+
+            // 基本验证
+            try {
+                JSON.parse(jsonStr);
+            } catch (e) {
+                showToast(GourdI18n.t('settings.mcp.json_invalid'), 'error');
+                return;
+            }
+
+            // 关闭字符串对话框
+            $overlay.remove();
+
+            // 直接 POST JSON 字符串到后端解析接口（复用文件导入的同一套解析逻辑）
+            var tParsing = GourdI18n.t('settings.mcp.import_parsing');
+            var tImport = GourdI18n.t('settings.mcp.import');
+            $('#mcpImportBtn').prop('disabled', true).html('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> ' + tParsing);
+
+            $.ajax({
+                url: '/web/settings/mcp/import/parse/string',
+                method: 'POST',
+                data: jsonStr,
+                contentType: 'application/json',
+                dataType: 'json',
+                success: function(resp) {
+                    if (resp.code === 200 && resp.data && resp.data.servers) {
+                        showImportPreview(resp.data, function(selectedNames) {
+                            executeImport(selectedNames, resp.data.servers);
+                        });
+                    } else {
+                        showToast(GourdI18n.t('settings.loop.parse_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error');
+                    }
+                },
+                error: function() {
+                    showToast(GourdI18n.t('settings.mcp.parse_failed_retry'), 'error');
+                },
+                complete: function() {
+                    $('#mcpImportBtn').prop('disabled', false).html('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> ' + tImport);
+                }
+            });
+        });
+
+        // 点击遮罩关闭
+        $overlay.on('click', function (e) {
+            if (e.target === this) $overlay.remove();
+        });
+
+        // 自动聚焦
+        setTimeout(function () { $('#importStringInput').focus(); }, 100);
+    }
+
     /**
      * 文件选择变化事件 — 将文件上传到后端解析
      * 后端使用 ONode 解析，检测格式后返回结构化数据
@@ -886,7 +1013,7 @@
             if (srv.env && Object.keys(srv.env).length > 0) {
                 bodyObj.env = srv.env;
             }
-        } else if (srv.type === 'sse' || srv.type === 'streamable') {
+        } else if (srv.type === 'sse' || srv.type === 'streamable' || srv.type === 'streamable_stateless') {
             if (!srv.url) return null;
             bodyObj.url = srv.url;
             if (srv.headers && Object.keys(srv.headers).length > 0) {

@@ -26,6 +26,7 @@ import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.event.ToolCallStartEvent;
 import com.gourdai.agent.event.ToolCallDraftEvent;
 import com.gourdai.agent.event.ToolCallArgsDeltaEvent;
+import com.gourdai.agent.event.ToolCallBatchEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.event.ReasonEndEvent;
@@ -63,6 +64,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Code CLI WebSocket 网关
@@ -363,6 +365,8 @@ public class WsGate extends SimpleWebSocketListener {
             msg = onToolCallDraftEvent((ToolCallDraftEvent) chunk, sessionId);
         } else if (chunk instanceof ToolCallArgsDeltaEvent) {
             msg = onToolCallArgsDeltaEvent((ToolCallArgsDeltaEvent) chunk, sessionId);
+        } else if (chunk instanceof ToolCallBatchEvent) {
+            msg = onToolCallBatchEvent((ToolCallBatchEvent) chunk, sessionId);
         } else if (chunk instanceof ToolCallEndEvent) {
             msg = onToolCallEndEvent((ToolCallEndEvent) chunk, sessionId);
         } else if (chunk instanceof ReasonEndEvent) {
@@ -535,6 +539,46 @@ public class WsGate extends SimpleWebSocketListener {
         }
 
         copyActionMetadata(node, chunk);
+
+        return node.toJson();
+    }
+
+    /**
+     * 处理 ToolCallBatchEvent（整批工具执行前）：下发 action_batch，声明批次结构与成员清单。
+     *
+     * <p>消费方据此在整批执行前建出批量容器并一次性收编已存在的骨架卡，
+     * 消除「单卡先出 → 容器后到 → 逐张搬入」的中间态；不识别本帧的消费方
+     * 退化为按各工具 action_start/action_end 的 batchId 逐张建组，行为与改造前完全一致。</p>
+     *
+     * <p>本帧是瞬态帧，/ws 通道本就不落盘，断线重连后由 action_start/action_end 重建分组。</p>
+     */
+    private String onToolCallBatchEvent(ToolCallBatchEvent chunk, String finalSessionId) {
+        if (chunk.getMembers() == null || chunk.getMembers().isEmpty()) {
+            return null;
+        }
+
+        ONode membersNode = new ONode();
+        for (Map<String, Object> member : chunk.getMembers()) {
+            if (member == null) {
+                continue;
+            }
+            ONode item = new ONode();
+            Object actionId = member.get("actionId");
+            if (actionId != null) item.set("actionId", String.valueOf(actionId));
+            item.set("index", member.get("index"));
+            item.set("toolName", member.get("toolName"));
+            membersNode.add(item);
+        }
+
+        ONode node = new ONode().set("type", "action_batch")
+                .set("sessionId", finalSessionId)
+                .set("batchId", chunk.getBatchId())
+                .set("batchSize", chunk.getBatchSize())
+                .set("batchMembers", membersNode);
+
+        if (!engine.getName().equals(chunk.getAgentName())) {
+            node.set("agentName", chunk.getAgentName());
+        }
 
         return node.toJson();
     }

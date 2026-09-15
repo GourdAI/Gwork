@@ -9,6 +9,7 @@ import com.gourdai.harness.agent.RetryEvent;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -28,6 +29,9 @@ import java.util.Map;
  *   <tr><td>{@code reason}</td><td>推理增量，模型的中间思考/分析过程（与正文同走此通道，按 isThinking 区分）</td></tr>
  *   <tr><td>{@code action_start}</td><td>工具调用开始（来源 ToolCallStartEvent），携带工具名与参数、不含结果，前端渲染 loading 骨架</td></tr>
  *   <tr><td>{@code action_end}</td><td>工具调用结束（来源 ToolCallEndEvent），填充执行结果并将工具卡转为完成/失败态</td></tr>
+ *   <tr><td>{@code action_draft}</td><td>工具卡骨架（来源 ToolCallDraftEvent），模型刚说出函数名时下发，前端提前渲染骨架卡</td></tr>
+ *   <tr><td>{@code action_args}</td><td>参数生成进度（来源 ToolCallArgsDeltaEvent），仅报累计字节数，更新骨架卡头部</td></tr>
+ *   <tr><td>{@code action_batch}</td><td>批次声明（来源 ToolCallBatchEvent），整批工具执行前一次性下发 batchId/size/成员清单，前端据此建容器并一次性收编骨架卡</td></tr>
  *   <tr><td>{@code command}</td><td>命令文本，需前端展示或执行的命令内容</td></tr>
  *   <tr><td>{@code hitl}</td><td>人机协同中断（Human-in-the-Loop），暂停执行以等待人工审批或确认</td></tr>
  *   <tr><td>{@code rewind}</td><td>回退指令，撤销或回退之前若干步操作</td></tr>
@@ -106,7 +110,7 @@ public class WebChunk {
 
     /**
      * 消息块类型标识。
-     * 取值范围以类级文档中的「type 类型枚举」表为准（共 20 种，含 text / reason / action_start / action_end / context_size / file_changes / steer_* / user / user_input 等；已废弃 action）。
+     * 取值范围以类级文档中的「type 类型枚举」表为准（共 23 种，含 text / reason / action_start / action_end / action_draft / action_args / action_batch / context_size / file_changes / steer_* / user / user_input 等；已废弃 action）。
      */
     private String type;
 
@@ -134,6 +138,12 @@ public class WebChunk {
 
     /** 批次内实际可见工具卡数量；旧历史或单卡为 null。 */
     private Integer batchSize;
+
+    /**
+     * 批次成员清单，仅 {@code action_batch} 使用：按 batchIndex 升序的成员数组，
+     * 每项含 {@code actionId} / {@code index} / {@code toolName}（无原生 id 调用的 actionId 为 null）。
+     */
+    private List<Map<String, Object>> batchMembers;
 
     /**
      * 工具显示名，仅供前端展示。
@@ -270,6 +280,34 @@ public class WebChunk {
         WebChunk tmp = new WebChunk();
         tmp.type = "action_args";
         tmp.argsBytes = argsBytes;
+        tmp.createdAt = Instant.now().toEpochMilli();
+
+        return tmp;
+    }
+
+    /**
+     * 创建「批次声明」消息块。
+     *
+     * <p>type 为 {@code action_batch}，在<b>整批工具执行前</b>一次性下发（来源于引擎的
+     * ToolCallBatchEvent）：声明 batchId / batchSize 与按 batchIndex 升序的成员清单。
+     * 前端收到后立即建出批量容器，并把已存在的成员骨架卡一次性收编——消除旧链路
+     * 「单卡先出 → 容器后到 → 逐张搬入」的中间态跳变。尚未建卡的成员保留空槽，
+     * 由随后的 action_start / action_end 照常填充。</p>
+     *
+     * <p><b>不落盘：</b>本帧为瞬态帧，不写入会话历史；历史回放时由
+     * action_start + action_end 携带的批次元数据完整重建分组，行为与改造前一致。</p>
+     *
+     * @param batchId     批次标识
+     * @param batchSize   批次内可见工具卡数量
+     * @param members     成员清单（按 batchIndex 升序）
+     * @return 携带批次结构的动作批次声明块
+     */
+    public static WebChunk ofActionBatch(String batchId, Integer batchSize, List<Map<String, Object>> members) {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "action_batch";
+        tmp.batchId = batchId;
+        tmp.batchSize = batchSize;
+        tmp.batchMembers = members;
         tmp.createdAt = Instant.now().toEpochMilli();
 
         return tmp;

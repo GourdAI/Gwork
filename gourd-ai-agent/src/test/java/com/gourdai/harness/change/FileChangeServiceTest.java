@@ -148,7 +148,7 @@ class FileChangeServiceTest {
             Assertions.assertFalse(summaryText.contains(root.toString()));
             Assertions.assertFalse(summaryText.contains("hash="));
 
-            Path manifest = root.resolve(".gwork/file-changes/manifests/work-s5/run-5.json");
+            Path manifest = root.resolve(".gwork/sessions/work-s5/file-changes/manifests/run-5.json");
             String json = Files.readString(manifest);
             Assertions.assertTrue(json.contains("\"hash\""));
             Assertions.assertFalse(json.contains(root.toString()));
@@ -462,7 +462,7 @@ class FileChangeServiceTest {
             Assertions.assertEquals(2, number(row.get("additions")));
             Assertions.assertEquals(1, number(row.get("deletions")));
 
-            String manifest = Files.readString(root.resolve(".gwork/file-changes/manifests/work-s15/run-15.json"));
+            String manifest = Files.readString(root.resolve(".gwork/sessions/work-s15/file-changes/manifests/run-15.json"));
             Assertions.assertTrue(manifest.contains("\"charset\":\"GBK\""));
         } finally {
             delete(root);
@@ -480,7 +480,7 @@ class FileChangeServiceTest {
             service.after(capture);
 
             // 稳定 seam：暂时写入不可读 manifest 触发失败，不依赖操作系统权限语义；修复后原调用可重试。
-            Path manifest = root.resolve(".gwork/file-changes/manifests/work-s16/run-16.json");
+            Path manifest = root.resolve(".gwork/sessions/work-s16/file-changes/manifests/run-16.json");
             String validManifest = Files.readString(manifest);
             Files.writeString(manifest, "not-json");
             Assertions.assertFalse(service.finish("work-s16", "run-16", root.toString()));
@@ -498,16 +498,240 @@ class FileChangeServiceTest {
     void maintenanceFailureIsNotTreatedAsSuccessful() throws Exception {
         Path root = Files.createTempDirectory("file-changes-maintain-retry");
         try {
-            Path manifests = root.resolve(".gwork/file-changes/manifests");
-            Files.createDirectories(manifests.getParent());
-            Files.writeString(manifests, "blocked");
+            // 会话区被同名文件占位：扇描无法进行，必须返回失败（允许重试），不得标记成功
+            Path sessionsRoot = root.resolve(".gwork/sessions");
+            Files.createDirectories(sessionsRoot.getParent());
+            Files.writeString(sessionsRoot, "blocked");
             Assertions.assertFalse(service.maintainLocked(root));
 
-            Files.delete(manifests);
+            Files.delete(sessionsRoot);
             Assertions.assertTrue(service.maintainLocked(root));
         } finally {
             delete(root);
         }
+    }
+
+    /**
+     * 账本必须跟随会话目录：随会话创建，也随会话目录删除一并清掉（单一管理点）。
+     */
+    @Test
+    void storeFollowsSessionDirAndIsDeletedWithIt() throws Exception {
+        Path root = Files.createTempDirectory("file-changes-follow-session");
+        try {
+            Path file = root.resolve("a.txt");
+            Files.writeString(file, "A0");
+            FileChangeService.Capture capture = service.before("work-fs1", "run-fs1", root.toString(), "a.txt");
+            Files.writeString(file, "A1");
+            service.after(capture);
+            service.finish("work-fs1", "run-fs1", root.toString());
+
+            Path sessionDir = root.resolve(".gwork/sessions/work-fs1");
+            Assertions.assertTrue(Files.isRegularFile(
+                            sessionDir.resolve("file-changes/manifests/run-fs1.json")),
+                    "manifest 应落在会话目录内");
+            Assertions.assertFalse(Files.exists(root.resolve(".gwork/file-changes")),
+                    "不得再创建 root 级全局账本目录");
+
+            // 与 WebController.deleteSession 的递归删除同语义：删会话目录即删账本
+            delete(sessionDir);
+            Assertions.assertFalse(Files.exists(sessionDir));
+            Assertions.assertFalse(Files.exists(sessionDir.resolve("file-changes")));
+        } finally {
+            delete(root);
+        }
+    }
+
+    /**
+     * 过渡期清理：删除会话时显式清掉旧版全局账本目录中的残留（新布局随会话目录删除，无需清理）。
+     */
+    @Test
+    void removeSessionClearsLegacyGlobalStoreDir() throws Exception {
+        Path root = Files.createTempDirectory("file-changes-legacy-remove");
+        try {
+            Path legacySession = root.resolve(".gwork/file-changes/manifests/work-old");
+            Files.createDirectories(legacySession);
+            Files.writeString(legacySession.resolve("run-old.json"), "{}");
+
+            // 越界 id 静默忽略，不得越出账本目录
+            service.removeSession("../outside", root.toString());
+            Assertions.assertTrue(Files.exists(legacySession));
+
+            service.removeSession("work-old", root.toString());
+
+            Assertions.assertFalse(Files.exists(legacySession), "旧版账本目录必须随会话删除被清理");
+            Assertions.assertFalse(Files.exists(root.resolve(".gwork/file-changes")),
+                    "空了的上层目录应一并回收");
+        } finally {
+            delete(root);
+        }
+    }
+
+    /**
+     * 并发冒烟：删除链路与旧库迁移共用互斥门（STORE_MUTATION_GATE）——两操作并发时必须都能终止
+     * （无死锁、无异常），且无论交错顺序，旧库残留都必须被彻底回收、不得留下孤儿目录。
+     */
+    @Test
+    void removeSessionAndMaintenanceConcurrentlyDoNotDeadlock() throws Exception {
+        Path root = Files.createTempDirectory("file-changes-gate-concurrent");
+        try {
+            Path legacySession = root.resolve(".gwork/file-changes/manifests/work-gate");
+            java.util.concurrent.atomic.AtomicReference<Throwable> failure = new java.util.concurrent.atomic.AtomicReference<>();
+            for (int round = 0; round < 10; round++) {
+                Files.createDirectories(legacySession);
+                Files.writeString(legacySession.resolve("run-gate-" + round + ".json"), "{}");
+
+                java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+                Thread deleter = new Thread(() -> {
+                    try {
+                        start.await();
+                        service.removeSession("work-gate", root.toString());
+                    } catch (Throwable t) {
+                        failure.compareAndSet(null, t);
+                    }
+                });
+                Thread maintainer = new Thread(() -> {
+                    try {
+                        start.await();
+                        service.maintainLocked(root);
+                    } catch (Throwable t) {
+                        failure.compareAndSet(null, t);
+                    }
+                });
+                // 守护线程：即使断言失败（死锁）也不拖住测试 JVM 退出
+                deleter.setDaemon(true);
+                maintainer.setDaemon(true);
+                deleter.start();
+                maintainer.start();
+                start.countDown();
+                deleter.join(10_000);
+                maintainer.join(10_000);
+
+                Assertions.assertFalse(deleter.isAlive(), "removeSession 不得死锁");
+                Assertions.assertFalse(maintainer.isAlive(), "maintainLocked 不得死锁");
+                Assertions.assertNull(failure.get(), "并发执行不得抛出未捕获异常");
+                Assertions.assertFalse(Files.exists(root.resolve(".gwork/file-changes")),
+                        "无论交错顺序，旧库残留都必须被回收（round=" + round + "）");
+            }
+        } finally {
+            delete(root);
+        }
+    }
+
+    /**
+     * 旧布局一次性迁移：会话仍存在 → 搬进会话目录（撤销历史保留可用）；会话已删 → 丢弃；
+     * 全部有归宿后旧库整树回收。
+     */
+    @Test
+    void maintenanceMigratesLegacyManifestsIntoSessionDirsAndDiscardsDeletedSessions() throws Exception {
+        Path root = Files.createTempDirectory("file-changes-legacy-migrate");
+        try {
+            // 仍存活的会话（会话目录存在）
+            Path liveSession = root.resolve(".gwork/sessions/work-mig1");
+            Files.createDirectories(liveSession);
+
+            String h1 = sha256Hex("old-before");
+            String h2 = sha256Hex("old-after");
+            Files.createDirectories(root.resolve(".gwork/file-changes/blobs"));
+            Files.writeString(root.resolve(".gwork/file-changes/blobs/" + h1), "old-before");
+            Files.writeString(root.resolve(".gwork/file-changes/blobs/" + h2), "old-after");
+
+            long now = System.currentTimeMillis();
+            writeLegacyManifest(root, "work-mig1", "run-mig1", fileEntry("a.txt", h1, h2), now);
+            // 已删除的会话（无会话目录）→ 账本应被丢弃
+            writeLegacyManifest(root, "work-gone", "run-gone", fileEntry("b.txt", h1, h2), now);
+
+            Files.writeString(root.resolve("a.txt"), "old-after");
+
+            Assertions.assertTrue(service.maintainLocked(root));
+
+            Assertions.assertFalse(Files.exists(root.resolve(".gwork/file-changes")),
+                    "旧版全局账本目录应被完整回收");
+            Assertions.assertFalse(Files.exists(root.resolve(".gwork/sessions/work-gone")),
+                    "已删会话不得因迁移被凭空重建");
+
+            Path migratedManifest = liveSession.resolve("file-changes/manifests/run-mig1.json");
+            Assertions.assertTrue(Files.isRegularFile(migratedManifest));
+            Assertions.assertTrue(Files.isRegularFile(liveSession.resolve("file-changes/blobs/" + h1)));
+            Assertions.assertTrue(Files.isRegularFile(liveSession.resolve("file-changes/blobs/" + h2)));
+
+            // 迁移后撤销能力可用：整轮撤销把 a.txt 还原为 before 内容
+            Map<String, Object> undo = service.undoRun("work-mig1", "run-mig1", root.toString());
+            Assertions.assertEquals("OK", undo.get("status"));
+            Assertions.assertEquals("old-before", Files.readString(root.resolve("a.txt")));
+        } finally {
+            delete(root);
+        }
+    }
+
+    /**
+     * 会话内 blob 的 mark-sweep 门禁：被引用不删、本进程新建不删、无引用的旧孤儿才删。
+     */
+    @Test
+    void maintenanceSweepsOrphanBlobsInsideSessionStore() throws Exception {
+        Path root = Files.createTempDirectory("file-changes-sweep");
+        try {
+            Path store = root.resolve(".gwork/sessions/work-sweep/file-changes");
+            String live = sha256Hex("live");
+            String orphan = sha256Hex("orphan");
+            String fresh = sha256Hex("fresh");
+            Files.createDirectories(store.resolve("manifests"));
+            Files.createDirectories(store.resolve("blobs"));
+            Files.writeString(store.resolve("blobs/" + live), "live");
+            Files.writeString(store.resolve("blobs/" + orphan), "orphan");
+            Files.writeString(store.resolve("blobs/" + fresh), "fresh");
+            writeManifest(root, "work-sweep", "run-sweep", fileEntry("a.txt", live, live),
+                    System.currentTimeMillis());
+            // 只有「早于本进程启动」的孤儿才允许回收；把两个候选的 mtime 拨回过去
+            Files.setLastModifiedTime(store.resolve("blobs/" + live), java.nio.file.attribute.FileTime.fromMillis(1));
+            Files.setLastModifiedTime(store.resolve("blobs/" + orphan), java.nio.file.attribute.FileTime.fromMillis(1));
+            // fresh 保持新 mtime：防「blob 已落盘、账本未保存」窗口被误删
+
+            Assertions.assertTrue(service.maintainLocked(root));
+
+            Assertions.assertTrue(Files.exists(store.resolve("blobs/" + live)), "被引用 blob 不得被回收");
+            Assertions.assertFalse(Files.exists(store.resolve("blobs/" + orphan)), "无引用的旧孤儿 blob 应被回收");
+            Assertions.assertTrue(Files.exists(store.resolve("blobs/" + fresh)), "本进程新建的 blob 不得被回收");
+        } finally {
+            delete(root);
+        }
+    }
+
+    private static String sha256Hex(String text) throws Exception {
+        byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(text.getBytes(StandardCharsets.UTF_8));
+        StringBuilder out = new StringBuilder(64);
+        for (byte b : digest) out.append(String.format("%02x", b & 0xff));
+        return out.toString();
+    }
+
+    /** 旧布局 manifest：{@code .gwork/file-changes/manifests/<sessionId>/<runId>.json}。 */
+    private static void writeLegacyManifest(Path root, String sessionId, String runId,
+                                            String entry, long updatedAt) throws Exception {
+        Path file = root.resolve(".gwork/file-changes/manifests/" + sessionId + "/" + runId + ".json");
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, manifestJson(sessionId, runId, entry, updatedAt));
+    }
+
+    /** 新布局 manifest：{@code .gwork/sessions/<sessionId>/file-changes/manifests/<runId>.json}。 */
+    private static void writeManifest(Path root, String sessionId, String runId,
+                                      String entry, long updatedAt) throws Exception {
+        Path file = root.resolve(".gwork/sessions/" + sessionId + "/file-changes/manifests/" + runId + ".json");
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, manifestJson(sessionId, runId, entry, updatedAt));
+    }
+
+    private static String manifestJson(String sessionId, String runId, String entry, long updatedAt) {
+        return "{\"version\":\"1\",\"sessionId\":\"" + sessionId + "\",\"runId\":\"" + runId + "\","
+                + "\"revision\":1,\"ready\":true,\"possiblyIncomplete\":false,\"incompleteReasons\":[],"
+                + "\"lastStatus\":\"READY\",\"conflicts\":[],\"updatedAt\":" + updatedAt + ",\"entries\":["
+                + entry + "]}";
+    }
+
+    private static String fileEntry(String path, String beforeHash, String afterHash) {
+        return "{\"path\":\"" + path + "\","
+                + "\"before\":{\"exists\":true,\"hash\":\"" + beforeHash + "\",\"binary\":false,\"contentSkipped\":false},"
+                + "\"after\":{\"exists\":true,\"hash\":\"" + afterHash + "\",\"binary\":false,\"contentSkipped\":false},"
+                + "\"undone\":false}";
     }
 
     private static void delete(Path path) throws Exception {

@@ -6,6 +6,8 @@
  */
 package com.gourdai.harness.change;
 
+import com.gourdai.core.config.AgentFlags;
+
 import org.noear.snack4.ONode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,12 +37,20 @@ import java.util.concurrent.ConcurrentHashMap;
  * Agent 文件变更账本。只由 write/edit 工具调用驱动，不依赖 Git，也不观察编辑器或工作区。
  *
  * <p>每个 sessionId/runId 维护一份 manifest，同一路径只保留第一次修改前与最后一次修改后；
- * 内容按 SHA-256 存放为共享 blob。所有恢复操作先对整批文件做 hash 预检，预检失败时零写入。</p>
+ * 内容按 SHA-256 存放为会话内共享 blob。所有恢复操作先对整批文件做 hash 预检，预检失败时零写入。</p>
+ *
+ * <p><b>存储跟随会话（单一管理点）</b>：账本落在会话目录内
+ * {@code <root>/<harnessSessions>/<sessionId>/file-changes/}，随会话目录一起创建，
+ * 也随会话删除一并递归删除。旧版 root 级 {@code <root>/.gwork/file-changes} 由启动补偿扇描
+ * 一次性迁移：会话仍存在则搬入会话目录（保留撤销历史），会话已删则丢弃（清理残留）。</p>
  */
 public final class FileChangeService {
     private static final Logger LOG = LoggerFactory.getLogger(FileChangeService.class);
     private static final FileChangeService INSTANCE = new FileChangeService();
-    private static final String STORE_DIR = ".gwork/file-changes";
+    /** 新布局：账本跟随会话目录（{@code <root>/<harnessSessions>/<sessionId>/file-changes}）。 */
+    private static final String SESSION_STORE_DIR = "file-changes";
+    /** 旧布局：root 级全局账本目录（{@code <root>/.gwork/file-changes}），仅用于一次性迁移与过渡清理。 */
+    private static final String LEGACY_STORE_DIR = AgentFlags.getHarnessHome() + "file-changes";
 
     /**
      * 变更归属键：子代理运行在独立 AgentSession 上（sessionId = 代理名，runId = 新 uuid），
@@ -94,8 +104,8 @@ public final class FileChangeService {
     /**
      * 账本与 blob 的保留期。超期的 manifest 连同其不再被引用的 blob 在启动补偿扫描时一并回收。
      *
-     * <p>旧实现通读全类没有任何 delete/GC/expire/quota 逻辑，而 blob 跨 run 共享又无引用计数，
-     * 长期使用可达 GB 级。回收必须跟着启动补偿扫描走：那时已经遍历了整个 manifests 目录，
+     * <p>旧实现通读全类没有任何 delete/GC/expire/quota 逻辑，而 blob 会话内共享又无引用计数，
+     * 长期使用可达 GB 级。回收必须跟着启动补偿扫描走：那时已经遍历了整个会话区，
      * 顺手做 mark-sweep 几乎零额外成本，且不会在 run 进行中误删。</p>
      */
     private static final long RETENTION_MS = 30L * 24 * 60 * 60 * 1000;
@@ -135,6 +145,23 @@ public final class FileChangeService {
     private final Map<String, Long> maintenanceRetryAfter = new ConcurrentHashMap<>();
     /** 已写过 .git/info/exclude 的 root。 */
     private final Set<String> excludeWrittenRoots = ConcurrentHashMap.newKeySet();
+
+    /**
+     * 「删除链路」与「旧库一次性迁移」之间的互斥门。
+     *
+     * <p>为什么必须互斥：迁移会把仍存活会话的旧账本<b>写入该会话目录</b>，而删除会话会
+     * 递归删除会话目录。两者并发时存在窗口——删除已越过 file-changes 子树后迁移才落盘，
+     * 或迁移把刚被删掉的会话目录重新建出来，都会留下「会话已删、账本复活」的孤儿目录，
+     * 正是本次改造要消灭的两处管理残留。</p>
+     *
+     * <p>为什么用全局单门而非按 root 分锁：两个操作都极低频（迁移每 root 每进程至多一次、
+     * 删除按用户操作），争用可忽略；而按 root 分锁要求两侧对「root 归一化口径」完全一致，
+     * 删除侧拿到的是登记表原始字符串、迁移侧拿到的是 realPath，字符串键反而可能失配。
+     * 锁序固定为「分片锁 → 本门」（迁移在分片锁内取本门；removeSession 只取本门），
+     * 不存在反向获取，无死锁风险。</p>
+     */
+    private static final Object STORE_MUTATION_GATE = new Object();
+
     private volatile Listener listener;
 
     private FileChangeService() {
@@ -185,8 +212,8 @@ public final class FileChangeService {
                 if (same(before, after)) {
                     manifest.entries.remove(capture.relativePath);
                 } else {
-                    persistBlob(capture.root, before);
-                    persistBlob(capture.root, after);
+                    persistBlob(capture.root, capture.sessionId, before);
+                    persistBlob(capture.root, capture.sessionId, after);
                     manifest.entries.put(capture.relativePath, entry);
                 }
                 manifest.lastStatus = "CAPTURED";
@@ -260,10 +287,70 @@ public final class FileChangeService {
     }
 
     /**
-     * 进程启动后的一次性补偿扇描：① 解锁上一个进程遗留的未收口 run；② 回收超期账本与孤儿 blob。
+     * 删除某会话在<b>旧版全局账本目录</b>（{@code <root>/.gwork/file-changes}）下的残留。
      *
-     * <p>为何不放启动钩子：账本按 root 分目录存放（{@code <root>/.gwork/file-changes}），而 root 是
-     * 运行时才知道的（会话可绑定任意项目根），启动时无法枚举。故改为「首次访问某 root 时扫一次」，
+     * <p>新版账本已随会话目录存放，会随会话目录一并被递归删除，无需本方法；本方法只处理过渡期
+     * 历史数据：删除会话时若旧库尚未被迁移扇描处理，这里负责把该会话的旧账本目录直接清掉，
+     * 避免出现「会话删了、账本还在」的两处管理残留。旧库中跨会话共享的 blob 无法在此安全回收，
+     * 由迁移扇描统一 mark-sweep。</p>
+     *
+     * <p>任何失败只 WARN 不上抛：这只是清理辅助，绝不能反过来阻断会话删除主流程。</p>
+     *
+     * @param sessionId 会话 ID
+     * @param root      会话所属根（与 {@code SessionLocator} 的路径解析口径一致）
+     */
+    public void removeSession(String sessionId, String root) {
+        try {
+            if (sessionId == null || sessionId.isEmpty()
+                    || sessionId.indexOf('\0') >= 0
+                    || sessionId.indexOf('/') >= 0 || sessionId.indexOf('\\') >= 0
+                    || sessionId.contains("..")) {
+                return;
+            }
+            if (root == null || root.trim().isEmpty()) {
+                return;
+            }
+            Path legacyManifests = Path.of(root.trim()).toAbsolutePath().normalize()
+                    .resolve(LEGACY_STORE_DIR).resolve("manifests").normalize();
+            Path legacySessionDir = legacyManifests.resolve(safeSegment(sessionId)).normalize();
+            if (!legacySessionDir.startsWith(legacyManifests)) {
+                return;
+            }
+
+            // 与旧库迁移互斥（见 STORE_MUTATION_GATE）：删除必须与「迁移写入会话目录」串行，
+            // 否则删除越过 file-changes 子树后迁移才落盘，会把账本写回已删除的会话目录。
+            synchronized (STORE_MUTATION_GATE) {
+                if (!Files.exists(legacySessionDir)) {
+                    return;
+                }
+
+                try (java.util.stream.Stream<Path> walk = Files.walk(legacySessionDir)) {
+                    for (Path path : walk.sorted((a, b) -> b.compareTo(a))
+                            .collect(java.util.stream.Collectors.toList())) {
+                        Files.deleteIfExists(path);
+                    }
+                }
+
+                // 顺带回收已经空掉的上级目录（不影响其它会话数据）
+                if (Files.isDirectory(legacyManifests) && isEmptyDir(legacyManifests)) {
+                    Files.deleteIfExists(legacyManifests);
+                }
+                Path store = legacyManifests.getParent();
+                if (store != null && Files.isDirectory(store) && isEmptyDir(store)) {
+                    Files.deleteIfExists(store);
+                }
+            }
+        } catch (Throwable e) {
+            LOG.warn("[FileChanges] could not clean legacy store for session {}: {}", sessionId, message(e));
+        }
+    }
+
+    /**
+     * 进程启动后的一次性补偿扇描：① 迁移旧版全局账本目录（{@code <root>/.gwork/file-changes}）；
+     * ② 解锁上一个进程遗留的未收口 run；③ 回收超期账本与孤儿 blob。
+     *
+     * <p>为何不放启动钩子：账本跟随会话目录存放（{@code <root>/<harnessSessions>/<sessionId>/file-changes}），
+     * 而 root 是运行时才知道的（会话可绑定任意项目根），启动时无法枚举。故改为「首次访问某 root 时扫一次」，
      * 用 {@link #maintainedRoots} 保证每进程每 root 最多一次。</p>
      *
      * <p>解锁判据用 {@code updatedAt < PROCESS_START_MS}：早于本进程启动时刻的未收口账本，必然来自
@@ -299,36 +386,65 @@ public final class FileChangeService {
 
     /** @return true 仅表示整次扫描无读取/遍历失败，可以永久标记。包可见以便稳定验证失败后可重试。 */
     boolean maintainLocked(Path root) {
-        Path dir = root.resolve(STORE_DIR).resolve("manifests");
-        if (!Files.exists(dir)) return true;
-        if (!Files.isDirectory(dir)) {
-            LOG.warn("[FileChanges] startup maintenance path is not a directory: {}", dir);
+        long expireBefore = System.currentTimeMillis() - RETENTION_MS;
+
+        // ① 旧布局一次性迁移：会话仍存在 → 搬进会话目录；会话已删 → 丢弃；整树清空后回收。
+        //    与删除链路（removeSession）互斥：迁移会写入会话目录，必须与会话删除串行，
+        //    否则可能把已删除的会话目录重新建出来，留下孤儿账本（见 STORE_MUTATION_GATE）。
+        LegacyOutcome legacy;
+        synchronized (STORE_MUTATION_GATE) {
+            legacy = migrateLegacyStore(root, expireBefore);
+        }
+
+        boolean walkClean = legacy.clean;
+        int unlocked = 0;
+        int expired = legacy.expired;
+        int swept = 0;
+
+        // ② 新布局逐会话扇描：<sessionDir>/file-changes/manifests 逐账本处理，并按会话做 blob mark-sweep
+        Path sessionsRoot = root.resolve(AgentFlags.getHarnessSessions()).normalize();
+        if (Files.exists(sessionsRoot) && !Files.isDirectory(sessionsRoot)) {
+            // 会话区被异常文件占位：不能扫，也不做任何清理，等恢复后重试
+            LOG.warn("[FileChanges] startup maintenance path is not a directory: {}", sessionsRoot);
             return false;
         }
 
-        long expireBefore = System.currentTimeMillis() - RETENTION_MS;
-        Set<String> liveBlobs = new HashSet<>();
-        // 任何一个账本读取失败都意味着 liveBlobs 不完整，此时绝不能 sweep（会误删在用 blob）
-        boolean walkClean = true;
-        int unlocked = 0;
-        int expired = 0;
-
-        try (java.util.stream.Stream<Path> sessions = Files.list(dir)) {
-            List<Path> sessionDirs = sessions.filter(Files::isDirectory)
-                    .collect(java.util.stream.Collectors.toList());
+        if (Files.isDirectory(sessionsRoot)) {
+            List<Path> sessionDirs;
+            try (java.util.stream.Stream<Path> sessions = Files.list(sessionsRoot)) {
+                sessionDirs = sessions.filter(Files::isDirectory)
+                        .collect(java.util.stream.Collectors.toList());
+            } catch (Throwable e) {
+                LOG.warn("[FileChanges] startup maintenance failed for {}: {}", root, message(e));
+                return false;
+            }
 
             for (Path sessionDir : sessionDirs) {
+                Path fileChanges = sessionDir.resolve(SESSION_STORE_DIR);
+                Path manifests = fileChanges.resolve("manifests");
+                if (!Files.isDirectory(manifests)) {
+                    continue;
+                }
+
+                Set<String> liveBlobs = new HashSet<>();
+                // 本会话内任何一个账本读取失败都意味着 liveBlobs 不完整，此时绝不能 sweep（会误删在用 blob）
+                boolean sessionClean = true;
+
                 List<Path> files;
-                try (java.util.stream.Stream<Path> runs = Files.list(sessionDir)) {
+                try (java.util.stream.Stream<Path> runs = Files.list(manifests)) {
                     files = runs.filter(p -> p.getFileName().toString().endsWith(".json"))
                             .collect(java.util.stream.Collectors.toList());
+                } catch (Throwable e) {
+                    walkClean = false;
+                    LOG.warn("[FileChanges] startup maintenance skipped {}: {}", manifests, message(e));
+                    continue;
                 }
 
                 for (Path file : files) {
                     try {
                         Map<String, Object> map = readManifestMap(file);
                         if (map == null) {
-                            walkClean = false;
+                            sessionClean = false;
                             continue;
                         }
 
@@ -356,38 +472,270 @@ public final class FileChangeService {
                         if (finish(sessionId, runId, root.toString(), false)) {
                             unlocked++;
                         } else {
-                            walkClean = false;
+                            sessionClean = false;
                         }
                     } catch (Throwable e) {
-                        walkClean = false;
+                        sessionClean = false;
                         LOG.warn("[FileChanges] startup maintenance skipped {}: {}", file.getFileName(), message(e));
                     }
                 }
 
-                // 会话目录空了就顺手删掉，避免长期堆积空目录
-                try (java.util.stream.Stream<Path> rest = Files.list(sessionDir)) {
-                    if (rest.findAny().isEmpty()) {
-                        Files.deleteIfExists(sessionDir);
-                    }
-                } catch (Throwable ignored) {
-                    // 空目录清不掉不影响正确性
+                if (sessionClean) {
+                    swept += sweepBlobs(fileChanges.resolve("blobs"), liveBlobs);
+                    cleanupStoreIfEmpty(fileChanges);
+                } else {
+                    walkClean = false;
                 }
             }
-        } catch (Throwable e) {
-            LOG.warn("[FileChanges] startup maintenance failed for {}: {}", root, message(e));
-            return false;
         }
 
-        int swept = walkClean ? sweepBlobs(root, liveBlobs) : 0;
+        if (legacy.migrated > 0 || legacy.discarded > 0) {
+            LOG.info("[FileChanges] legacy store migration for {}: migrated={} discarded={} expired={}",
+                    root, legacy.migrated, legacy.discarded, legacy.expired);
+        }
         if (unlocked > 0 || expired > 0 || swept > 0) {
             LOG.info("[FileChanges] startup maintenance for {}: unlocked={} expired={} orphanBlobsSwept={}",
                     root, unlocked, expired, swept);
         }
         if (!walkClean) {
-            LOG.warn("[FileChanges] blob sweep skipped for {}: some manifests were unreadable, "
-                    + "sweeping now could delete in-use blobs", root);
+            LOG.warn("[FileChanges] some manifests were unreadable for {}: affected session stores left unswept, "
+                    + "will retry later", root);
         }
         return walkClean;
+    }
+
+    /**
+     * 旧布局（root 级 {@code <root>/.gwork/file-changes}）的一次性迁移。
+     *
+     * <p>目标：仍存活会话的账本连同其引用的 blob 搬进会话目录内，已删会话的残留账本直接丢弃，
+     * 整树清空后回收——彻底消除「账本与会话两处管理」的历史数据。</p>
+     *
+     * <p>安全门禁：只要出现「读不懂的账本」「blob 复制失败」「会话区被异常文件占位」，
+     * 就保留现场并标记不干净（clean=false），由调用方安排重试；只有全部账本都有了明确归宿
+     * （迁移/丢弃/超期回收）才允许清空旧 blob 目录——否则可能误删仍被引用的内容。</p>
+     */
+    private LegacyOutcome migrateLegacyStore(Path root, long expireBefore) {
+        LegacyOutcome outcome = new LegacyOutcome();
+        Path store = root.resolve(LEGACY_STORE_DIR).normalize();
+        if (!Files.exists(store)) {
+            return outcome;
+        }
+        if (!Files.isDirectory(store)) {
+            LOG.warn("[FileChanges] legacy store path is not a directory: {}", store);
+            outcome.clean = false;
+            return outcome;
+        }
+
+        Path sessionsRoot = root.resolve(AgentFlags.getHarnessSessions()).normalize();
+        if (Files.exists(sessionsRoot) && !Files.isDirectory(sessionsRoot)) {
+            // 会话区状态异常：无法判断哪些会话还活着，保守起见整个旧库都不动，等恢复后重试
+            outcome.clean = false;
+            return outcome;
+        }
+
+        Path manifests = store.resolve("manifests");
+        Path blobs = store.resolve("blobs");
+
+        if (Files.isDirectory(manifests)) {
+            List<Path> legacySessionDirs;
+            try (java.util.stream.Stream<Path> s = Files.list(manifests)) {
+                legacySessionDirs = s.filter(Files::isDirectory)
+                        .collect(java.util.stream.Collectors.toList());
+            } catch (Throwable e) {
+                LOG.warn("[FileChanges] legacy migration could not list {}: {}", manifests, message(e));
+                outcome.clean = false;
+                return outcome;
+            }
+
+            for (Path legacySessionDir : legacySessionDirs) {
+                List<Path> files;
+                try (java.util.stream.Stream<Path> s = Files.list(legacySessionDir)) {
+                    files = s.filter(p -> p.getFileName().toString().endsWith(".json"))
+                            .collect(java.util.stream.Collectors.toList());
+                } catch (Throwable e) {
+                    outcome.clean = false;
+                    LOG.warn("[FileChanges] legacy migration could not list {}: {}", legacySessionDir, message(e));
+                    continue;
+                }
+
+                for (Path file : files) {
+                    try {
+                        Map<String, Object> map = readManifestMap(file);
+                        if (map == null) {
+                            outcome.clean = false;
+                            continue;
+                        }
+
+                        long updatedAt = longValue(map.get("updatedAt"));
+                        if (updatedAt > 0 && updatedAt < expireBefore) {
+                            Files.deleteIfExists(file);
+                            outcome.expired++;
+                            continue;
+                        }
+
+                        String sessionId = stringValue(map.get("sessionId"), null);
+                        String runId = stringValue(map.get("runId"), null);
+                        if (sessionId == null || runId == null) {
+                            // 无归属信息的坏账本：无法迁移，直接丢弃
+                            Files.deleteIfExists(file);
+                            outcome.discarded++;
+                            continue;
+                        }
+
+                        Path activeSessionDir;
+                        try {
+                            activeSessionDir = sessionDir(root, sessionId);
+                        } catch (Throwable e) {
+                            // 非法会话 id：永远不会有对应会话目录，直接丢弃
+                            Files.deleteIfExists(file);
+                            outcome.discarded++;
+                            continue;
+                        }
+                        if (!Files.isDirectory(activeSessionDir)) {
+                            // 会话已删：账本随之丢弃
+                            Files.deleteIfExists(file);
+                            outcome.discarded++;
+                            continue;
+                        }
+
+                        if (migrateLegacyManifest(file, map, activeSessionDir, blobs)) {
+                            outcome.migrated++;
+                        } else {
+                            outcome.clean = false;
+                        }
+                    } catch (Throwable e) {
+                        outcome.clean = false;
+                        LOG.warn("[FileChanges] legacy migration skipped {}: {}", file.getFileName(), message(e));
+                    }
+                }
+
+                // 会话子目录空了就顺手删掉，避免长期堆积空目录
+                try (java.util.stream.Stream<Path> rest = Files.list(legacySessionDir)) {
+                    if (rest.findAny().isEmpty()) {
+                        Files.deleteIfExists(legacySessionDir);
+                    }
+                } catch (Throwable ignored) {
+                    // 空目录清不掉不影响正确性
+                }
+            }
+        }
+
+        if (outcome.clean) {
+            // 所有账本都有了归宿：旧 blob 目录整体不再被引用，可以清空回收
+            if (Files.isDirectory(blobs)) {
+                try (java.util.stream.Stream<Path> files = Files.list(blobs)) {
+                    for (Path blob : files.collect(java.util.stream.Collectors.toList())) {
+                        try {
+                            Files.deleteIfExists(blob);
+                        } catch (Throwable e) {
+                            outcome.clean = false;
+                            LOG.warn("[FileChanges] could not purge legacy blob {}: {}", blob.getFileName(), message(e));
+                        }
+                    }
+                } catch (Throwable e) {
+                    outcome.clean = false;
+                    LOG.warn("[FileChanges] could not purge legacy blobs: {}", message(e));
+                }
+            }
+        }
+        cleanupStoreIfEmpty(store);
+        return outcome;
+    }
+
+    /**
+     * 迁移单份旧账本：先把其引用的全部 blob 复制进会话目录，再原子搬运账本文件。
+     * 任一步失败都返回 false 且保留原文件（下次维护重试），保证「先搬内容、后搬索引」的顺序性。
+     */
+    private boolean migrateLegacyManifest(Path file, Map<String, Object> map, Path activeSessionDir, Path legacyBlobs) {
+        String runId = stringValue(map.get("runId"), null);
+        Path targetFile = activeSessionDir.resolve(SESSION_STORE_DIR).resolve("manifests")
+                .resolve(safeSegment(runId) + ".json").normalize();
+
+        if (Files.exists(targetFile)) {
+            // 目标已存在（上次迁移已落地但旧文件未清掉）：直接回收旧文件，避免重复搬运
+            try {
+                Files.deleteIfExists(file);
+                return true;
+            } catch (Throwable e) {
+                LOG.warn("[FileChanges] could not drop migrated legacy manifest {}: {}", file, message(e));
+                return false;
+            }
+        }
+
+        Set<String> refs = new HashSet<>();
+        collectBlobs(map, refs);
+        for (String hash : refs) {
+            if (!hash.matches("[0-9a-f]{64}")) {
+                continue; // 非法引用：内容本来就不可用，跳过
+            }
+            Path dst = activeSessionDir.resolve(SESSION_STORE_DIR).resolve("blobs").resolve(hash).normalize();
+            if (Files.exists(dst)) {
+                continue;
+            }
+            Path src = legacyBlobs.resolve(hash).normalize();
+            if (!Files.exists(src)) {
+                continue; // 旧库中已缺失：内容不可恢复，跳过（与升级前的读取行为一致）
+            }
+            try {
+                Path parent = dst.getParent();
+                Files.createDirectories(parent);
+                Path tmp = Files.createTempFile(parent, "blob-", ".tmp");
+                try {
+                    Files.copy(src, tmp, StandardCopyOption.REPLACE_EXISTING);
+                    if (!Files.exists(dst)) {
+                        moveAtomic(tmp, dst);
+                    }
+                } finally {
+                    Files.deleteIfExists(tmp);
+                }
+            } catch (Throwable e) {
+                LOG.warn("[FileChanges] could not migrate legacy blob {}: {}", hash, message(e));
+                return false;
+            }
+        }
+
+        try {
+            Path parent = targetFile.getParent();
+            Files.createDirectories(parent);
+            Path tmp = Files.createTempFile(parent, safeSegment(runId) + "-", ".tmp");
+            try {
+                Files.copy(file, tmp, StandardCopyOption.REPLACE_EXISTING);
+                moveAtomic(tmp, targetFile);
+            } finally {
+                Files.deleteIfExists(tmp);
+            }
+            Files.deleteIfExists(file);
+            return true;
+        } catch (Throwable e) {
+            LOG.warn("[FileChanges] could not migrate legacy manifest {}: {}", file, message(e));
+            return false;
+        }
+    }
+
+    /** 账本目录清空后逐级回收空目录（manifests/、blobs/、根，仅当每级确实为空）。 */
+    private static void cleanupStoreIfEmpty(Path store) {
+        try {
+            for (String child : new String[]{"manifests", "blobs"}) {
+                Path dir = store.resolve(child);
+                if (Files.isDirectory(dir) && isEmptyDir(dir)) {
+                    Files.deleteIfExists(dir);
+                }
+            }
+            if (isEmptyDir(store)) {
+                Files.deleteIfExists(store);
+            }
+        } catch (Throwable ignored) {
+            // 空目录清不掉不影响正确性
+        }
+    }
+
+    private static boolean isEmptyDir(Path dir) throws IOException {
+        if (!Files.isDirectory(dir)) {
+            return false;
+        }
+        try (java.util.stream.Stream<Path> s = Files.list(dir)) {
+            return s.findAny().isEmpty();
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -428,18 +776,17 @@ public final class FileChangeService {
     }
 
     /**
-     * mark-sweep：删除不再被任何存活账本引用的 blob。
+     * mark-sweep：删除某会话目录内不再被任何存活账本引用的 blob。
      *
      * <p>两个硬门禁，缺一不可：</p>
      * <ol>
-     *   <li>调用方必须保证 liveBlobs 完整（扇描全程无失败），否则会误删在用 blob。</li>
+     *   <li>调用方必须保证 liveBlobs 完整（该会话扇描全程无失败），否则会误删在用 blob。</li>
      *   <li>只碰 lastModifiedTime 早于本进程启动的 blob。persistBlob 在 after() 里是先写 blob
      *       再 touchAndSave 账本，两者之间存在「 blob 已落盘、账本未保存」的窗口；
      *       并发 run 此刻新建的 blob 不在 liveBlobs 里，不看时间就会把它当孤儿删掉。</li>
      * </ol>
      */
-    private int sweepBlobs(Path root, Set<String> liveBlobs) {
-        Path blobs = root.resolve(STORE_DIR).resolve("blobs");
+    private int sweepBlobs(Path blobs, Set<String> liveBlobs) {
         if (!Files.isDirectory(blobs)) {
             return 0;
         }
@@ -464,7 +811,7 @@ public final class FileChangeService {
                 }
             }
         } catch (Throwable e) {
-            LOG.warn("[FileChanges] blob sweep failed for {}: {}", root, message(e));
+            LOG.warn("[FileChanges] blob sweep failed for {}: {}", blobs, message(e));
         }
         return swept;
     }
@@ -520,15 +867,15 @@ public final class FileChangeService {
                 out.put("changeType", entry.changeType());
                 out.put("binary", entry.before.binary || entry.after.binary);
                 if (!(entry.before.binary || entry.after.binary)) {
-                    out.put("before", entry.before.exists ? decodeBlob(safeRoot, entry.before) : null);
-                    out.put("after", entry.after.exists ? decodeBlob(safeRoot, entry.after) : null);
+                    out.put("before", entry.before.exists ? decodeBlob(safeRoot, sessionId, entry.before) : null);
+                    out.put("after", entry.after.exists ? decodeBlob(safeRoot, sessionId, entry.after) : null);
                 }
                 // 单文件 diff 只回该文件的增删统计。此前这里回的是整个 run 的 summary()：
                 // 它会遍历 run 内全部 entry 并对缺统计的条目回读 blob 重算 LCS —— 一个改了几十个
                 // 文件的 run，点任意一个「审查」都要为其它文件买单，且 before/after 本身已是最大
                 // 8MiB×2 的响应，再叠加全量 summary 会明显拖慢首屏。前端 upsert 的刷新由 WebSocket
                 // file_changes 与 /changes/run 对账负责，不依赖 diff 顺带回传。
-                ensureLineStats(safeRoot, entry);
+                ensureLineStats(safeRoot, sessionId, entry);
                 out.put("additions", entry.additions);
                 out.put("deletions", entry.deletions);
                 out.put("revision", manifest.revision);
@@ -650,13 +997,13 @@ public final class FileChangeService {
                     Path target = validateRelativePath(safeRoot, entry.path);
                     FileState backupState = readState(target);
                     // 补偿也必须使用已持久化内容，不能依赖随后可能被覆盖的目标文件。
-                    persistBlob(safeRoot, backupState);
+                    persistBlob(safeRoot, sessionId, backupState);
                     completed.add(new Backup(target, backupState));
-                    writeState(safeRoot, target, direction == Direction.UNDO ? entry.before : entry.after);
+                    writeState(safeRoot, sessionId, target, direction == Direction.UNDO ? entry.before : entry.after);
                     entry.undone = direction == Direction.UNDO;
                 }
             } catch (Throwable writeFailure) {
-                boolean compensated = compensate(safeRoot, completed);
+                boolean compensated = compensate(safeRoot, sessionId, completed);
                 manifest.possiblyIncomplete = true;
                 addReason(manifest, "operation failed: " + safeMessage(writeFailure, safeRoot)
                         + (compensated ? "; changes compensated" : "; compensation incomplete"));
@@ -725,12 +1072,12 @@ public final class FileChangeService {
         return detail;
     }
 
-    private boolean compensate(Path root, List<Backup> completed) {
+    private boolean compensate(Path root, String sessionId, List<Backup> completed) {
         boolean ok = true;
         for (int i = completed.size() - 1; i >= 0; i--) {
             Backup backup = completed.get(i);
             try {
-                writeState(root, backup.path, backup.state);
+                writeState(root, sessionId, backup.path, backup.state);
             } catch (Throwable e) {
                 ok = false;
                 LOG.error("[FileChanges] compensation failed for {}: {}", backup.path, message(e));
@@ -739,13 +1086,13 @@ public final class FileChangeService {
         return ok;
     }
 
-    private void writeState(Path root, Path target, FileState state) throws IOException {
+    private void writeState(Path root, String sessionId, Path target, FileState state) throws IOException {
         if (!target.normalize().startsWith(root)) throw new SecurityException("Path escapes root");
         if (!state.exists) {
             Files.deleteIfExists(target);
             return;
         }
-        byte[] bytes = readBlob(root, state.hash);
+        byte[] bytes = readBlob(root, sessionId, state.hash);
         Path parent = target.getParent();
         if (parent != null) Files.createDirectories(parent);
         Path tmp = Files.createTempFile(parent, ".gwork-change-", ".tmp");
@@ -822,7 +1169,7 @@ public final class FileChangeService {
 
     private void touchAndSave(Manifest manifest, Path root) throws IOException {
         // 先把行数统计算完再落盘，避免将占位值 -1 归一为 0 后永不重算。
-        for (Entry entry : manifest.entries.values()) ensureLineStats(root, entry);
+        for (Entry entry : manifest.entries.values()) ensureLineStats(root, manifest.sessionId, entry);
         manifest.revision++;
         manifest.updatedAt = Instant.now().toEpochMilli();
         Path file = manifestFile(root, manifest.sessionId, manifest.runId);
@@ -882,7 +1229,7 @@ public final class FileChangeService {
         boolean anyApplied = false;
         boolean anyUndone = false;
         for (Entry entry : manifest.entries.values()) {
-            ensureLineStats(root, entry);
+            ensureLineStats(root, manifest.sessionId, entry);
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("path", entry.path);
             row.put("changeType", entry.changeType());
@@ -912,7 +1259,7 @@ public final class FileChangeService {
     }
 
     /** 惰性补齐行数统计；任何失败都记 0，绝不影响摘要发布。 */
-    private void ensureLineStats(Path root, Entry entry) {
+    private void ensureLineStats(Path root, String sessionId, Entry entry) {
         if (entry.additions >= 0 && entry.deletions >= 0) return;
         entry.additions = 0;
         entry.deletions = 0;
@@ -920,8 +1267,8 @@ public final class FileChangeService {
         if (entry.before.binary || entry.after.binary) return;
         if (entry.before.contentSkipped || entry.after.contentSkipped) return;
         try {
-            List<String> before = entry.before.exists ? splitLines(decodeBlob(root, entry.before)) : Collections.emptyList();
-            List<String> after = entry.after.exists ? splitLines(decodeBlob(root, entry.after)) : Collections.emptyList();
+            List<String> before = entry.before.exists ? splitLines(decodeBlob(root, sessionId, entry.before)) : Collections.emptyList();
+            List<String> after = entry.after.exists ? splitLines(decodeBlob(root, sessionId, entry.after)) : Collections.emptyList();
             if (!entry.before.exists) {
                 entry.additions = after.size();
                 return;
@@ -1048,9 +1395,9 @@ public final class FileChangeService {
                 decoded == null ? null : decoded.charset.name());
     }
 
-    private void persistBlob(Path root, FileState state) throws IOException {
+    private void persistBlob(Path root, String sessionId, FileState state) throws IOException {
         if (!state.exists || state.bytes == null || state.contentSkipped) return;
-        Path blob = blobFile(root, state.hash);
+        Path blob = blobFile(root, sessionId, state.hash);
         if (Files.exists(blob)) return;
         Files.createDirectories(blob.getParent());
         Path tmp = Files.createTempFile(blob.getParent(), "blob-", ".tmp");
@@ -1062,9 +1409,9 @@ public final class FileChangeService {
         }
     }
 
-    private byte[] readBlob(Path root, String hash) throws IOException {
+    private byte[] readBlob(Path root, String sessionId, String hash) throws IOException {
         if (hash == null || !hash.matches("[0-9a-f]{64}")) throw new IOException("Invalid blob reference");
-        Path blobs = root.resolve(STORE_DIR).resolve("blobs").normalize();
+        Path blobs = sessionStoreDir(root, sessionId).resolve("blobs").normalize();
         Path file = blobs.resolve(hash).normalize();
         if (!file.startsWith(blobs)) throw new SecurityException("Blob path escapes store");
         return Files.readAllBytes(file);
@@ -1076,8 +1423,8 @@ public final class FileChangeService {
      * <p>解码口径必须与写入时的文本识别完全一致：先严格 UTF-8，失败再按同一顺序试遗留编码。
      * 否则会出现「写入时判成文本、读取时却解不开」的自相矛盾——diff 接口对 GBK 文件直接报错。</p>
      */
-    private String decodeBlob(Path root, FileState state) throws IOException {
-        byte[] bytes = readBlob(root, state.hash);
+    private String decodeBlob(Path root, String sessionId, FileState state) throws IOException {
+        byte[] bytes = readBlob(root, sessionId, state.hash);
         if (state.charset != null) {
             Charset charset = charsetOrNull(state.charset);
             if (charset != null) {
@@ -1101,13 +1448,46 @@ public final class FileChangeService {
                 .decode(java.nio.ByteBuffer.wrap(bytes)).toString();
     }
 
-    private Path blobFile(Path root, String hash) {
-        return root.resolve(STORE_DIR).resolve("blobs").resolve(hash).normalize();
+    /**
+     * 会话目录 {@code <root>/<harnessSessions>/<sessionId>}。
+     *
+     * <p>校验与拒收口径与 {@code SessionLocator} 对齐（同样拒绝 {@code ..}、分隔符与空字节），
+     * 并额外拒绝空 id、把非法路径字符统一转为 IllegalArgumentException；
+     * 保证账本目录必然落在会话目录之内——会话能建出目录，账本就能落进去；反之亦然。
+     * 旧实现对不安全 id 做 hash 兜底（safeSegment），会让账本落到会话目录之外的私有目录，
+     * 与「账本跟随会话、删除一体」的单一管理点相悖。</p>
+     */
+    private Path sessionDir(Path root, String sessionId) {
+        if (sessionId == null || sessionId.isEmpty()
+                || sessionId.indexOf('\0') >= 0
+                || sessionId.indexOf('/') >= 0 || sessionId.indexOf('\\') >= 0
+                || sessionId.contains("..")) {
+            throw new IllegalArgumentException("Illegal sessionId: " + sessionId);
+        }
+        Path base = root.resolve(AgentFlags.getHarnessSessions()).normalize();
+        Path target;
+        try {
+            target = base.resolve(sessionId).normalize();
+        } catch (java.nio.file.InvalidPathException e) {
+            throw new IllegalArgumentException("Illegal sessionId: " + sessionId);
+        }
+        if (!target.startsWith(base)) {
+            throw new IllegalArgumentException("Illegal sessionId path escape: " + sessionId);
+        }
+        return target;
+    }
+
+    private Path sessionStoreDir(Path root, String sessionId) {
+        return sessionDir(root, sessionId).resolve(SESSION_STORE_DIR);
+    }
+
+    private Path blobFile(Path root, String sessionId, String hash) {
+        return sessionStoreDir(root, sessionId).resolve("blobs").resolve(hash).normalize();
     }
 
     private Path manifestFile(Path root, String sessionId, String runId) {
-        return root.resolve(STORE_DIR).resolve("manifests")
-                .resolve(safeSegment(sessionId)).resolve(safeSegment(runId) + ".json").normalize();
+        return sessionStoreDir(root, sessionId).resolve("manifests")
+                .resolve(safeSegment(runId) + ".json").normalize();
     }
 
     private Path validateRoot(String root) throws IOException {
@@ -1176,16 +1556,16 @@ public final class FileChangeService {
     }
 
     /**
-     * 把账本目录写进 {@code <root>/.git/info/exclude}（<b>不碰</b>用户的 .gitignore）。
+     * 把会话数据目录写进 {@code <root>/.git/info/exclude}（<b>不碰</b>用户的 .gitignore）。
      *
-     * <p>账本落在用户工作区根的 {@code .gwork/file-changes} 下，里面是含文件全文的 blob。
-     * 本仓库自己的 .gitignore 里有 {@code .gwork/}，但用户自己的任意项目不一定有这条规则
-     * ——于是一次 {@code git add .} 就能把撤销快照提交进用户仓库。</p>
+     * <p>会话数据落在用户工作区根（或全局区）的 {@code .gwork/sessions} 下，其中文件变更账本
+     * 还含文件全文快照。本仓库自己的 .gitignore 里有 {@code .gwork/}，但用户自己的任意项目
+     * 不一定有这条规则——于是一次 {@code git add .} 就能把会话数据与撤销快照提交进用户仓库。</p>
      *
      * <p>选 .git/info/exclude 而不是 .gitignore：效果等同于 ignore，但它是本地私有的、
      * 不会被提交、也不会污染用户版本管理中的文件。</p>
      *
-     * <p>每 root 每进程只做一次。任何失败只 WARN：这只是防呆，绝不能反过来阱断账本功能。</p>
+     * <p>每 root 每进程只做一次。任何失败只 WARN：这只是防呆，绝不能反过来阻断账本功能。</p>
      */
     private void ensureStoreExcluded(Path root) {
         if (!excludeWrittenRoots.add(root.toString())) {
@@ -1201,14 +1581,17 @@ public final class FileChangeService {
             Files.createDirectories(info);
             Path exclude = info.resolve("exclude");
 
-            String entry = STORE_DIR + "/";
+            // 保护整个会话数据区（含文件变更账本与撤销快照、消息、流事件等），而非单个子目录
+            String entry = AgentFlags.getHarnessSessions();
+            String bare = entry.endsWith("/") ? entry.substring(0, entry.length() - 1) : entry;
             List<String> lines = Files.exists(exclude)
                     ? Files.readAllLines(exclude, StandardCharsets.UTF_8)
                     : new ArrayList<>();
             for (String line : lines) {
                 String trimmed = line.trim();
                 // 已被忽略就不再写：包括用户自己写的更宽规则（.gwork/ 或 .gwork）
-                if (trimmed.equals(entry) || trimmed.equals(STORE_DIR) || trimmed.equals(".gwork/")) {
+                if (trimmed.equals(entry) || trimmed.equals(bare)
+                        || trimmed.equals(".gwork/") || trimmed.equals(".gwork")) {
                     return;
                 }
             }
@@ -1220,11 +1603,11 @@ public final class FileChangeService {
             if (out.length() > 0) {
                 out.append('\n');
             }
-            out.append("# GWork \u6587\u4ef6\u53d8\u66f4\u8d26\u672c\uff08\u64a4\u9500\u5feb\u7167\uff0c\u542b\u6587\u4ef6\u5168\u6587\uff09\uff0c\u4e0d\u5e94\u8fdb\u7248\u672c\u5e93\n");
+            out.append("# GWork \u4f1a\u8bdd\u6570\u636e\uff08\u542b\u6587\u4ef6\u53d8\u66f4\u8d26\u672c\u4e0e\u64a4\u9500\u5feb\u7167\uff09\uff0c\u4e0d\u5e94\u8fdb\u7248\u672c\u5e93\n");
             out.append(entry).append('\n');
 
             Files.writeString(exclude, out.toString(), StandardCharsets.UTF_8);
-            LOG.info("[FileChanges] added {} to {} so undo snapshots are never committed", entry, exclude);
+            LOG.info("[FileChanges] added {} to {} so GWork session data is never committed", entry, exclude);
         } catch (Throwable e) {
             LOG.warn("[FileChanges] could not update .git/info/exclude under {}: {}", root, message(e));
         }
@@ -1383,6 +1766,14 @@ public final class FileChangeService {
         if (map == null || !Boolean.TRUE.equals(map.get("exists"))) return FileState.absent();
         return new FileState(true, String.valueOf(map.get("hash")), Boolean.TRUE.equals(map.get("binary")), null,
                 Boolean.TRUE.equals(map.get("contentSkipped")), stringValue(map.get("charset"), null));
+    }
+
+    /** 旧布局迁移的统计与成功标志。 */
+    private static final class LegacyOutcome {
+        boolean clean = true;
+        int migrated;
+        int discarded;
+        int expired;
     }
 
     /** 有界缓存：超过上限时淘汰最老条目（按插入序，非访问序——幂等重放不需要 LRU 语义）。 */

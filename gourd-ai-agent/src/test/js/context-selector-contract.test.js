@@ -7,6 +7,9 @@ const staticRoot = path.resolve(__dirname, '../../main/resources/static');
 const readStatic = (...parts) => fs.readFileSync(path.join(staticRoot, ...parts), 'utf8').replace(/^\uFEFF/, '');
 const history = readStatic('js', 'app-history.js');
 const modelSettings = readStatic('js', 'app-model-settings.js');
+const chatHtml = readStatic('chat.html');
+const appCss = readStatic('css', 'app.css');
+const codeCss = readStatic('css', 'code.css');
 
 const CONTEXT_VALUES = [128000, 256000, 512000, 1000000];
 const CONTEXT_LABELS = ['128K', '256K', '512K', '1M'];
@@ -69,4 +72,38 @@ test('12 个语言包均提供 app.context_label 且 JSON 合法', () => {
         assert.equal(typeof json.app.context_label, 'string', `${lang} 缺少 app.context_label`);
         assert.ok(json.app.context_label.trim().length > 0, `${lang} 的 app.context_label 为空`);
     }
+});
+
+// 选中态样式一致性：思考 chip 与上下文 chip 在同一模型项内紧邻渲染，
+// 任一方式多出/缺少 border-color 都会让同一个「已选中」呈现两种视觉（回归 bug：1M 带蓝圈、超高只有底色）。
+function cssRuleDeclarations(css, selector) {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = css.match(new RegExp(escaped + '\\s*\\{([^}]*)\\}'));
+    assert.ok(match, `app.css 缺少规则 ${selector}`);
+    return match[1].split(';').map((s) => s.trim()).filter(Boolean).sort();
+}
+
+test('思考 chip 与上下文 chip 的选中态声明逐条一致', () => {
+    const thinking = cssRuleDeclarations(appCss, '.model-thinking-chip.active');
+    const context = cssRuleDeclarations(appCss, '.model-context-chip.active');
+    assert.deepEqual(thinking, context, '两区选中态样式必须同款，否则同一「已选中」会出现两种视觉');
+    assert.ok(thinking.includes('border-color: var(--accent)'), '选中态必须包含 accent 描边');
+});
+
+// 收起态的模型按钮必须同时展示思考档位与上下文窗口：只显示其中一个，
+// 用户就无法在收起状态判断当前会话的上下文档位（回归 bug：抽屉里选了 1M，按钮上看不出来）。
+test('模型按钮同时展示思考档位标签与上下文窗口标签', () => {
+    assert.match(chatHtml, /id="welcomeModelThinkingTag"/);
+    assert.match(chatHtml, /id="chatModelThinkingTag"/);
+    assert.match(chatHtml, /class="model-context-tag" id="welcomeModelContextTag"/);
+    assert.match(chatHtml, /class="model-context-tag" id="chatModelContextTag"/);
+
+    assert.match(history, /\$\('#chatModelContextTag'\)\.text\(contextTagLabel\)/);
+    assert.match(history, /\$\('#welcomeModelContextTag'\)\.text\(contextTagLabel\)/);
+    assert.match(history, /var contextTagLabel = contextLengthLabel\(getSelectedContext\(\)\);/);
+    assert.match(history, /app\.context_label/);
+
+    assert.match(appCss, /\.model-selector-current \.model-context-tag \{/);
+    // 标签位于按钮内模型名右侧，窄屏容器查询下与思考标签一同隐藏，避免只剩图标时溢出
+    assert.match(codeCss, /\.model-selector-current \.model-context-tag,/);
 });

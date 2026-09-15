@@ -221,11 +221,14 @@
                                 "time_h":  "{0}h",
                                 "time_d":  "{0}d",
                                 "expand_all":  "Expand all",
+                                "collapse_all":  "Collapse all",
                                 "clear_all":  "Clear all sessions",
                                 "confirm_clear":  "Clear all sessions? This cannot be undone.",
                                 
                                 
                                 "remove_project":  "Remove from list",
+                                "rename_project":  "Rename project",
+                                "rename_failed":  "Rename failed",
                                 "model_config":  "Model Config",
                    "memory":  "Memory"
                             }
@@ -480,7 +483,23 @@
                                  "import_skipped_exists":  "Skipped (Already Exists)",
                                  "import_incomplete_config":  "Incomplete configuration",
                                  "import_progress":  "Importing {0} MCP servers...",
-                                 "import_summary":  "Total {0} MCP servers, {1} imported, {2} skipped, {3} failed"
+                                 "import_summary":  "Total {0} MCP servers, {1} imported, {2} skipped, {3} failed",
+                                 "import_json_file":  "Import JSON File",
+                                 "import_json_str":  "Import JSON String",
+                                 "json_dialog_title":  "Import JSON String",
+                                 "json_hint":  "Paste the MCP server config JSON string, supported formats:",
+                                 "json_format_hint":  "<span class=\"import-string-code\">{\"mcpServers\": {...}}</span> Claude Desktop / Cursor format<br/><span class=\"import-string-code\">{\"mcp\": {...}}</span> OpenCode format<br/><span class=\"import-string-code\">{\"format\":\"mcp\",\"servers\":{...}}</span> Standard format",
+                                 "json_placeholder":  "Paste JSON string here...",
+                                 "json_parse_hint":  "After pasting, click \"Parse\" to preview, then batch add after confirmation",
+                                 "json_empty":  "Please enter a JSON string",
+                                 "json_invalid":  "Invalid JSON format, please check and retry",
+                                 "parse_btn":  "Parse",
+                                 "parse_failed_retry":  "Parse failed, please check the JSON string format and retry",
+                                 "check_timeout":  "Test timed out (15s), please check if the server is reachable",
+                                 "empty":  "No MCP servers yet",
+                                 "empty_desc":  "MCP servers extend AI tool capabilities, such as file system access, database queries, API calls, etc.",
+                                 "no_tools":  "No tools",
+                                 "no_tools_desc":  "This MCP server does not provide any tools"
                              },
                      "openapi":  {
                                      "title":  "OpenAPI Servers",

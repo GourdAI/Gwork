@@ -221,11 +221,14 @@
                                 "time_h":  "{0}h",
                                 "time_d":  "{0}T",
                                 "expand_all":  "Alle erweitern",
+                                "collapse_all":  "Alle einklappen",
                                 "clear_all":  "Alle Sitzungen löschen",
                                 "confirm_clear":  "Alle Sitzungen löschen? Dieser Vorgang kann nicht rückgängig gemacht werden.",
                                 
                                 
                                 "remove_project":  "Aus Liste entfernen",
+                                "rename_project":  "Projekt umbenennen",
+                                "rename_failed":  "Umbenennen fehlgeschlagen",
                                 "model_config":  "Modellkonfiguration",
                    "memory":  "Gedächtnis"
                             }
@@ -480,7 +483,23 @@
                                  "import_skipped_exists":  "Übersprungen (bereits vorhanden)",
                                  "import_incomplete_config":  "Konfigurationsdaten unvollständig",
                                  "import_progress":  "Importiere {0} MCP-Server...",
-                                 "import_summary":  "Insgesamt {0} MCP-Server, {1} importiert, {2} übersprungen, {3} fehlgeschlagen"
+                                 "import_summary":  "Insgesamt {0} MCP-Server, {1} importiert, {2} übersprungen, {3} fehlgeschlagen",
+                                 "import_json_file":  "JSON-Datei importieren",
+                                 "import_json_str":  "JSON-String importieren",
+                                 "json_dialog_title":  "JSON-String importieren",
+                                 "json_hint":  "Fügen Sie den JSON-String der MCP-Serverkonfiguration ein, unterstützte Formate:",
+                                 "json_format_hint":  "<span class=\"import-string-code\">{\"mcpServers\": {...}}</span> Claude-Desktop- / Cursor-Format<br/><span class=\"import-string-code\">{\"mcp\": {...}}</span> OpenCode-Format<br/><span class=\"import-string-code\">{\"format\":\"mcp\",\"servers\":{...}}</span> Standardformat",
+                                 "json_placeholder":  "JSON-String hier einfügen...",
+                                 "json_parse_hint":  "Klicken Sie nach dem Einfügen auf „Analysieren“, um eine Vorschau anzuzeigen, und fügen Sie dann nach Bestätigung in Stapeln hinzu",
+                                 "json_empty":  "Bitte einen JSON-String eingeben",
+                                 "json_invalid":  "Ungültiges JSON-Format, bitte prüfen und erneut versuchen",
+                                 "parse_btn":  "Analysieren",
+                                 "parse_failed_retry":  "Analyse fehlgeschlagen, bitte das JSON-Stringformat prüfen und erneut versuchen",
+                                 "check_timeout":  "Test-Timeout (15 s), bitte prüfen, ob der Server erreichbar ist",
+                                 "empty":  "Noch keine MCP-Server",
+                                 "empty_desc":  "MCP-Server erweitern die Tool-Fähigkeiten der KI, z. B. Dateisystemzugriff, Datenbankabfragen, API-Aufrufe usw.",
+                                 "no_tools":  "Keine Tools",
+                                 "no_tools_desc":  "Dieser MCP-Server stellt keine Tools bereit"
                              },
                      "openapi":  {
                                      "title":  "OpenAPI-Server",

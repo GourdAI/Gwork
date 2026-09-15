@@ -30,6 +30,7 @@ import com.gourdai.agent.event.ToolCallStartEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
 import com.gourdai.agent.event.ToolCallDraftEvent;
 import com.gourdai.agent.event.ToolCallArgsDeltaEvent;
+import com.gourdai.agent.event.ToolCallBatchEvent;
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.react.task.ReasonTask;
 import com.gourdai.agent.event.ReasonEndEvent;
@@ -364,6 +365,9 @@ public class WebStreamBuilder {
         if (chunk instanceof ToolCallArgsDeltaEvent) {
             return oneFrame(onToolCallArgsDeltaEvent((ToolCallArgsDeltaEvent) chunk));
         }
+        if (chunk instanceof ToolCallBatchEvent) {
+            return oneFrame(onToolCallBatchEvent((ToolCallBatchEvent) chunk));
+        }
         if (chunk instanceof ToolCallEndEvent) {
             return oneFrame(onToolCallEndEvent((ToolCallEndEvent) chunk));
         }
@@ -431,10 +435,11 @@ public class WebStreamBuilder {
         if (event instanceof ToolCallStartEvent) {
             return WebChunk.PHASE_TOOL;
         }
-        // 参数生成期已经在「弄工具」了：相位推到 tool，底部指示器随之让位（前端对 PHASE_TOOL 短路），
-        // 指示语义改由骨架卡承担。修复了旧行为：工具参数吐到一半时相位却停在 PHASE_TEXT，
+        // 参数生成期/批次声明已经在「弄工具」了：相位推到 tool，底部指示器随之让位（前端对 PHASE_TOOL 短路），
+        // 指示语义改由骨架卡/批量容器承担。修复了旧行为：工具参数吐到一半时相位却停在 PHASE_TEXT，
         // 底部持续显示「输出中」而屏幕零增长。
-        if (event instanceof ToolCallDraftEvent || event instanceof ToolCallArgsDeltaEvent) {
+        if (event instanceof ToolCallDraftEvent || event instanceof ToolCallArgsDeltaEvent
+                || event instanceof ToolCallBatchEvent) {
             return WebChunk.PHASE_TOOL;
         }
         if (event instanceof ToolCallEndEvent) {
@@ -608,6 +613,29 @@ public class WebStreamBuilder {
         return argsChunk;
     }
 
+    /**
+     * 处理批次声明事件（整批工具执行前下发，来源引擎 ToolCallBatchEvent）。
+     *
+     * <p>与 draft/args 同类，是瞬态帧：不落盘，历史回放由 start/end 帧的批次元数据重建。
+     * 成员清单为空时不上送（无成员可归组的批次无展示意义）。子代理批次按
+     * {@code __parentAgentName} 透传归属，使前端把容器建进对应智能体卡片内部，
+     * 与骨架卡/正式卡的归属路由保持一致。</p>
+     */
+    private WebChunk onToolCallBatchEvent(ToolCallBatchEvent event) {
+        if (event.getMembers() == null || event.getMembers().isEmpty()) {
+            return WebChunk.EMPTY;
+        }
+
+        WebChunk batchChunk = WebChunk.ofActionBatch(event.getBatchId(), event.getBatchSize(), event.getMembers());
+        if (event.hasMeta("__parentAgentName")) {
+            Map<String, Object> args = new LinkedHashMap<>();
+            args.put("agentName", event.getMeta().get("__parentAgentName"));
+            args.put("agentDesc", event.getMeta().get("__parentAgentDesc"));
+            copyInvocationId(event, args);
+            batchChunk.setArgs(args);
+        }
+        return batchChunk;
+    }
 
     /**
      * 处理工具调用结束事件（ToolCallEndEvent）
