@@ -110,6 +110,15 @@ jobs:
         working-directory: gourd-ai-tauri
         run: node test/nsis-title-font-contract.js
 
+      # deb control 必填字段契约：应用商店上传时先做「包格式检测」，control 缺少
+      # Section 会被拒（0.1.x 实测报错：「缺少必填字段Section」）。根因是
+      # tauri-bundler 仅在配置了 bundle.linux.deb.section 时才写出该行，此前漏配。
+      # 契约在配置层钉死，防止再被摘掉。零依赖、毫秒级。
+      - name: 契约测试（deb control 必填字段）
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: node test/deb-control-fields-contract.js
+
       # macOS 要出 x64 + arm64 两个 dmg，需预装两个 target；其余平台用默认宿主 target
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -273,6 +282,34 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run build:linux:deb
+
+      # deb control 必填字段门禁（对**真实产物**执行，与商店包格式检测同口径）：
+      # 配置层由上面「契约测试（deb control 必填字段）」防守，这里在打包完成后
+      # 直接读产物 control —— 两层任一失守（配置被改回 / bundler 行为变化）都会
+      # 当场红。完整 control 随日志输出；失败时下方「上传安装包（Linux deb）」跳过。
+      - name: 校验 deb control 必填字段（Linux）
+        id: deb-control-gate
+        if: matrix.platform == 'linux'
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: |
+          set -e
+          deb_count=0
+          for f in src-tauri/target/release/bundle/deb/*.deb; do
+            [ -f "$f" ] || continue
+            deb_count=$((deb_count+1))
+            echo "===== 检查 $f ====="
+            dpkg-deb -I "$f"
+            for field in Package Version Architecture Maintainer Section Priority Description; do
+              value="$(dpkg-deb -f "$f" "$field")"
+              if [ -z "$value" ]; then
+                echo "::error::$f 的 control 缺少必填字段 ${field}（商店包格式检测会拒绝，如「缺少必填字段Section」）"
+                exit 1
+              fi
+              echo "${field}: ${value}"
+            done
+          done
+          [ "$deb_count" -gt 0 ] || { echo "::error::未找到 deb 产物（src-tauri/target/release/bundle/deb/*.deb）"; exit 1; }
 
       # AppImage 是两条 Linux 产物里唯一要联网拉工具、也唯一长期不稳定的一条。
       #   1. LD_LIBRARY_PATH —— **`Could not find dependency: libjvm.so` 的真因**。
@@ -501,8 +538,11 @@ jobs:
           archive: false
           if-no-files-found: ignore
 
+      # 注意：deb-control-gate 判红时本步跳过 —— 缺必填字段的包会被商店拒绝，
+      # 上传只会让它混进 artifact/Release 被人误拿去上架；gate 未运行（如打包
+      # 本身失败）时照旧上传，由 if-no-files-found: error 暴露真问题。
       - name: 上传安装包（Linux deb）
-        if: ${{ !cancelled() && matrix.platform == 'linux' }}
+        if: ${{ !cancelled() && matrix.platform == 'linux' && steps.deb-control-gate.outcome != 'failure' }}
         uses: actions/upload-artifact@v7
         with:
           path: gourd-ai-tauri/src-tauri/target/release/bundle/deb/*.deb

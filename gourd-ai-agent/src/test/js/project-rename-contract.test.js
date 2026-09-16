@@ -6,7 +6,8 @@
  * - 后端：ProjectService.rename 原地改名（保持列表顺序、空名恢复目录名）；
  *   WebController 暴露 POST /web/chat/projects/rename
  * - 前端：项目行渲染重命名按钮（i18n 标题）；点击委托分支位于展开/收起分支之前；
- *   startProjectRename 原位编辑（blur/Enter 提交、Esc 取消）、成功后本地刷新
+ *   startProjectRename 原位编辑（blur/Enter 提交、Esc 取消）、成功后本地刷新；
+ *   调用姿势为 JSON 正文（与 projects/add|remove|create 同族一致，form 编码会 500）
  * - i18n：12 个语言包均提供 app.sidebar.rename_project / rename_failed（JSON 合法、行尾无裸 LF）
  */
 const test = require('node:test');
@@ -98,8 +99,12 @@ test('前端：点击委托——重命名分支位于展开/收起分支之前�
 
 test('前端：startProjectRename 原位编辑（blur/Enter 提交、Esc 取消、空值取消）', () => {
     const fn = sliceBetween(history, 'function startProjectRename(path)', '/* 项目显示名本地更新');
-    // 提交目标与参数（与会话重命名一致的交互，接口走专用 rename 端点）
-    assert.match(fn, /\$\.post\('\/web\/chat\/projects\/rename', \{ path: path, name: newName \}\)/);
+    // 提交姿势：JSON 正文（与 projects/add|remove|create 同族一致；form 编码会被后端 @Body+JSON 解析拒绝）
+    assert.match(fn, /url: '\/web\/chat\/projects\/rename'/);
+    assert.match(fn, /method: 'POST'/);
+    assert.match(fn, /contentType: 'application\/json'/);
+    assert.match(fn, /data: JSON\.stringify\(\{ path: path, name: newName \}\)/);
+    assert.doesNotMatch(fn, /\$\.post\('\/web\/chat\/projects\/rename'/, '不得回归为 $.post form 姿势（后端仅接受 JSON 正文）');
     // 空值 / 未变更不提交（关闭输入框即取消）
     assert.match(fn, /if \(newName && newName !== currentName\)/);
     // 成功 → 本地刷新；失败 → toast（done 的 else 与 fail 两条路径）

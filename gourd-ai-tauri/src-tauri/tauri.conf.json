@@ -67,7 +67,8 @@
     },
     "linux": {
       "deb": {
-        "depends": []
+        "depends": [],
+        "section": "utils"
       },
       "appimage": {
         "bundleMediaFramework": false

@@ -684,7 +684,12 @@ function startProjectRename(path) {
     function finishProjectRename() {
         var newName = $input.val().trim();
         if (newName && newName !== currentName) {
-            $.post('/web/chat/projects/rename', { path: path, name: newName }).done(function (resp) {
+            /* 与 projects/add|remove|create 同族接口一致：必须 JSON 正文调用
+               （后端 @Body + ONode.ofJson 解析；$.post 默认 form 编码会解析失败返回 500）。 */
+            $.ajax({
+                url: '/web/chat/projects/rename', method: 'POST', contentType: 'application/json',
+                data: JSON.stringify({ path: path, name: newName })
+            }).done(function (resp) {
                 if (resp && resp.code === 200) {
                     updateProjectDisplayName(path, newName);
                 } else {
