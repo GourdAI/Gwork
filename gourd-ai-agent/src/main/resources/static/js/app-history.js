@@ -72,23 +72,31 @@ function updateHistoryScopeBar() {
     updateExpandAllBtn();
 }
 
-/* 是否存在收起状态的项目：按钮点击逻辑与图标状态共用同一判定口径 */
+/* 是否存在收起状态的项目（仅统计有会话的项目）：
+   无会话项目没有可展开/收起的内容，不参与按钮状态判定——否则「隐形收起」会让按钮误显示为
+   「展开全部」，首次点击变成无感的展开。按钮点击逻辑与图标状态共用同一判定口径。 */
 function anyProjectCollapsed() {
     var ps = (_sidebarData && _sidebarData.projects) || [];
     for (var i = 0; i < ps.length; i++) {
+        if (!(ps[i].sessions && ps[i].sessions.length > 0)) continue;
         if (!_projExpanded[ps[i].path]) return true;
     }
     return false;
 }
 
 /* 「展开全部/收起全部」按钮状态感知（图标 + 提示随项目树状态翻转）：
-   - 仅「项目」tab 且存在项目时显示；对话 tab / code 模式 / 空项目列表时隐藏，避免隐形空操作
-   - 存在收起项目 → 展示「展开全部」图标与提示；全部展开 → 翻转为「收起全部」 */
+   - 仅「项目」tab 且存在「有会话的项目」时显示；对话 tab / code 模式 / 全部项目均无会话时隐藏，避免隐形空操作
+   - 存在收起（有会话的）项目 → 展示「展开全部」图标与提示；全部展开 → 翻转为「收起全部」 */
 function updateExpandAllBtn() {
     var btn = document.getElementById('expandAllBtn');
     if (!btn) return;
     var ps = (_sidebarData && _sidebarData.projects) || [];
-    var showable = window.appMode !== 'code' && effectiveHistoryScope() === 'project' && ps.length > 0;
+    /* 有会话的项目才参与展示判定：无会话项目没有可开合的内容 */
+    var hasSessions = false;
+    for (var i = 0; i < ps.length; i++) {
+        if (ps[i].sessions && ps[i].sessions.length > 0) { hasSessions = true; break; }
+    }
+    var showable = window.appMode !== 'code' && effectiveHistoryScope() === 'project' && hasSessions;
     if (!showable) {
         btn.style.display = 'none';
         return;
@@ -877,7 +885,7 @@ window.openSessionById = openSessionById;
 $(document).on('click', '#expandAllBtn', function () {
     if (!_sidebarData) return;
     var ps = _sidebarData.projects || [];
-    // 存在未展开 → 全展开；否则全收起
+    // 存在未展开（有会话的）项目 → 全展开；否则全收起
     var anyCollapsed = anyProjectCollapsed();
     for (var j = 0; j < ps.length; j++) _projExpanded[ps[j].path] = anyCollapsed;
     updateHistoryUI();
@@ -2648,7 +2656,9 @@ function initModelSelector(selectorId, currentId, dropdownId) {
             if (modelFilterText) { modelFilterText = ''; renderModelUI(); }
             $dropdown.find('.model-search-input').val('');
             $dropdown.find('.model-search-clear').hide();
-            $dropdown.find('.model-dropdown-list').scrollTop(0);
+            // 打开即定位到当前选中模型（居中）；无选中项/所在组被折叠时退回置顶
+            var listEl = $dropdown.find('.model-dropdown-list')[0];
+            if (listEl && !GourdModelDropdown.scrollToActive(listEl)) listEl.scrollTop = 0;
             setTimeout(function () { try { $dropdown.find('.model-search-input').focus(); } catch (err) {} }, 0);
         }
     });

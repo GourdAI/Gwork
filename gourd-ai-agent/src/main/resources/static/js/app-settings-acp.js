@@ -388,6 +388,9 @@
             var $dd = $('#acpModelSelector').find('.model-dropdown');
             $dd.find('.model-search-input').val('');
             $dd.find('.model-search-clear').hide();
+            // 打开即定位到当前选中模型（居中）；无选中项/所在组被折叠时退回置顶
+            var listEl = $dd.find('.model-dropdown-list')[0];
+            if (listEl && !GourdModelDropdown.scrollToActive(listEl)) listEl.scrollTop = 0;
             setTimeout(function () { try { $dd.find('.model-search-input').focus(); } catch (err) {} }, 0);
         }
     });

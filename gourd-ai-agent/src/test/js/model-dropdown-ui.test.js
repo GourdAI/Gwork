@@ -171,3 +171,72 @@ test('12 个语言包均补齐搜索/折叠文案键', () => {
         }
     }
 });
+
+/* ===================== scrollToActive：打开时定位到当前选中项 ===================== */
+
+// 鸭子类型桩：仅实现 scrollToActive 读取的几何接口，避免为契约测试引入 DOM 依赖
+function stubItem(top, height, visible) {
+    return {
+        offsetHeight: visible === false ? 0 : height,
+        getBoundingClientRect: () => ({ top: top, height: height })
+    };
+}
+
+function stubList(opts) {
+    return {
+        scrollTop: opts.scrollTop || 0,
+        scrollHeight: opts.scrollHeight || 0,
+        clientHeight: opts.clientHeight || 0,
+        querySelector: () => opts.active || null,
+        getBoundingClientRect: () => ({ top: opts.top || 0 })
+    };
+}
+
+test('scrollToActive：选中项完整可见时视觉居中', () => {
+    assert.equal(typeof md.scrollToActive, 'function');
+    const list = stubList({ scrollTop: 200, scrollHeight: 2000, clientHeight: 280, top: 100, active: stubItem(600, 40) });
+    assert.equal(md.scrollToActive(list), true);
+    // delta=500；200 + 500 - (280-40)/2 = 580
+    assert.equal(list.scrollTop, 580);
+});
+
+test('scrollToActive：越界时钳制到 [0, 最大滚动值]', () => {
+    const nearTop = stubList({ scrollTop: 10, scrollHeight: 2000, clientHeight: 280, top: 100, active: stubItem(120, 40) });
+    md.scrollToActive(nearTop);
+    assert.equal(nearTop.scrollTop, 0, '接近顶部时钳制为 0');
+
+    const nearBottom = stubList({ scrollTop: 100, scrollHeight: 560, clientHeight: 280, top: 100, active: stubItem(500, 40) });
+    md.scrollToActive(nearBottom);
+    assert.equal(nearBottom.scrollTop, 280, '接近底部时钳制为最大滚动值');
+});
+
+test('scrollToActive：项高于可视区时对齐顶部而不是中场裁切', () => {
+    const list = stubList({ scrollTop: 200, scrollHeight: 2000, clientHeight: 280, top: 100, active: stubItem(600, 320) });
+    md.scrollToActive(list);
+    assert.equal(list.scrollTop, 700); // scrollTop + delta：优先露出模型名与关联 chips
+});
+
+test('scrollToActive：无选中项 / 折叠不可见时安全降级（返回 false 且不动滚动）', () => {
+    const none = stubList({ scrollTop: 123, scrollHeight: 2000, clientHeight: 280, active: null });
+    assert.equal(md.scrollToActive(none), false);
+    assert.equal(none.scrollTop, 123);
+
+    const collapsed = stubList({ scrollTop: 123, scrollHeight: 2000, clientHeight: 280, active: stubItem(200, 40, false) });
+    assert.equal(md.scrollToActive(collapsed), false);
+    assert.equal(collapsed.scrollTop, 123);
+
+    assert.equal(md.scrollToActive(null), false);
+    assert.equal(md.scrollToActive({}), false);
+});
+
+test('三处选择器打开时统一接入打开定位，失败退回置顶（契约）', () => {
+    const history = fs.readFileSync(path.join(staticJs, 'app-history.js'), 'utf8');
+    const automation = fs.readFileSync(path.join(staticJs, 'app-automation.js'), 'utf8');
+    const acp = fs.readFileSync(path.join(staticJs, 'app-settings-acp.js'), 'utf8');
+    const openFallback = /if \(listEl && !GourdModelDropdown\.scrollToActive\(listEl\)\) listEl\.scrollTop = 0;/;
+    for (const [name, src] of [['app-history.js', history], ['app-automation.js', automation], ['app-settings-acp.js', acp]]) {
+        assert.match(src, openFallback, `${name} 的打开处理应接入 scrollToActive 并带置顶降级`);
+    }
+    // 打开路径不得回退为无条件置顶：聊天页仅剩搜索输入一处 scrollTop(0)
+    assert.equal((history.match(/scrollTop\(0\)/g) || []).length, 1);
+});

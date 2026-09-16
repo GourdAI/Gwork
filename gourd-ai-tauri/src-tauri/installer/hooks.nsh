@@ -227,7 +227,8 @@
 ; 做法：GUIInit 里按 DPI 创建微软雅黑 9pt 常规/粗体与 12pt 粗体（标题用）三把字体，
 ;   内层页面控件则由文件尾的 NSD_Create* 包装宏在创建时刻同步设字体 + 补高度：
 ;   两级遍历 $HWNDPARENT 子窗（内层对话框与底部按钮）+ 内层对话框子窗（当页控件），
-;   按原字体 weight/字号挑对应雅黑字体 WM_SETFONT（保住 header 标题的粗体与大字号）；
+;   按原字体 weight/字号挑对应雅黑字体 WM_SETFONT（≥12pt 级 → 12pt；9pt 级粗体维持 9pt——
+;   阈值随 DPI 缩放，见 GWorkUiInit 注释）；
 ;   对高度小于「字体像素高+6」的 Button 类控件（radio/checkbox；下一步/取消按钮自身
 ;   21px 足够高，天然免疫）MoveWindow 补足高度。全部幂等：字体句柄相同且高度够就
 ;   什么都不做，无闪烁；扫一遍约 20 个控件、纯轻量消息，开销可忽略。
@@ -238,6 +239,7 @@
 Var GWorkFontNormal   ; 雅黑 9pt 常规
 Var GWorkFontBold     ; 雅黑 9pt 粗体
 Var GWorkFontHeader   ; 雅黑 12pt 粗体（header/欢迎页标题）
+Var GWorkFontTitleMin ; 标题级字号阈值（负的 lfHeight；DPI 相对，14px@96dpi 等效——见 GWorkUiInit 注释）
 Var GWorkFontPx       ; 9pt 的像素高（正数），控件最小高度基准
 Var GWorkLogFontBuf   ; 复用的 92 字节 LOGFONT 缓冲
 Var GWorkRectBuf      ; 复用的 16 字节 RECT 缓冲
@@ -253,6 +255,17 @@ Function ${SUF}GWorkUiInit
   System::Call 'kernel32::MulDiv(i 9, i r1, i 72) i .r2'
   StrCpy $GWorkFontPx $2
   IntOp $2 0 - $2
+  ; ── 标题级字号的判定阈值：必须按 DPI 缩放（2026-09-16 修复「标题字号被误放大」回归）──────
+  ; 旧实现把 lfHeight≤-14px 写死为「标题级大字号」→ 套 12pt 字体。该常数只对 96dpi 成立
+  ;   （9pt=12px、12pt=16px，14px 是二者中点）；系统切到 200% 缩放后（本机 192dpi 实测），
+  ;   9pt 的 header 标题 = 24px > 14px，被误判成「大字号」升到 12pt —— 字形更大更粗、
+  ;   下缘逼近副标题（用户反馈「已安装/标题字被遮挡」，全流程每页都出现）。
+  ; 修法：阈值取 14px@96dpi 的 DPI 等效像素 MulDiv(14, dpi, 96)：96dpi→14px、192dpi→28px。
+  ;   ⇒ 9pt(12/24px) 与 12pt(16/32px) 在所有 DPI 下都映射到各自应有的目标字号：
+  ;     9pt 标题回落 9pt 粗体；welcome 页 12pt 大标题(1201) 仍走 12pt。
+  System::Call 'kernel32::MulDiv(i 14, i r1, i 96) i .r3'
+  IntOp $3 0 - $3
+  StrCpy $GWorkFontTitleMin $3
   ; charset 134 (GB2312)、输出质量 5 (CLEARTYPE)
   System::Call 'gdi32::CreateFontW(i r2, i 0, i 0, i 0, i 400, i 0, i 0, i 0, i 134, i 3, i 2, i 1, i 5, w "Microsoft YaHei") i .s'
   Pop $GWorkFontNormal
@@ -340,7 +353,7 @@ Function ${SUF}GWorkApplyOne
   System::Call '*$GWorkLogFontBuf(i .R6, i .R7, i .R7, i .R7, i .R5)'  ; R6=lfHeight, R5=lfWeight
   IntCmpU $R5 600 gwork_ao_wN gwork_ao_wN gwork_ao_chkBig
   gwork_ao_chkBig:
-  IntCmp $R6 -14 gwork_ao_wH gwork_ao_wH gwork_ao_wB          ; <=-14px 视为标题级字号
+  IntCmp $R6 $GWorkFontTitleMin gwork_ao_wH gwork_ao_wH gwork_ao_wB  ; ≤阈值（DPI 相对，见 GWorkUiInit）视为标题级字号
   gwork_ao_wH:
   StrCpy $R7 $GWorkFontHeader
   Goto gwork_ao_have

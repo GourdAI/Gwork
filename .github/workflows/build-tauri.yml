@@ -93,6 +93,23 @@ jobs:
         working-directory: gourd-ai-tauri
         run: node test/nsis-header-asset-contract.js
 
+      # 安装器维护页「已存在版本」文案契约：检出「较旧版本」时必须显示**真实版本号**
+      # （历史 bug：官方模板把 $R4 只写成「旧的」定性词 → 中文文案显示成「版本为 旧的」）。
+      # 详见 test/nsis-installed-version-contract.js 头部说明。零依赖、毫秒级。
+      - name: 契约测试（安装器版本文案）
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: node test/nsis-installed-version-contract.js
+
+      # 安装器标题字号契约：「标题级大字号」判定阈值必须按 DPI 缩放（MulDiv(14, dpi, 96)）。
+      # 历史 bug：lfHeight≤-14px 写死只对 96dpi 成立，200% 缩放下把 9pt 标题误升 12pt
+      # → 标题字形挤压/遮挡副标题，全流程每页可见。详见 test/nsis-title-font-contract.js。
+      # 零依赖、毫秒级。
+      - name: 契约测试（安装器标题字号）
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: node test/nsis-title-font-contract.js
+
       # macOS 要出 x64 + arm64 两个 dmg，需预装两个 target；其余平台用默认宿主 target
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable

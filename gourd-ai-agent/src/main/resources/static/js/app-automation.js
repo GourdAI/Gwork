@@ -977,6 +977,9 @@
                 if (modelFilterText) { modelFilterText = ''; renderModelUI(); }
                 $('#autoModelDropdown').find('.model-search-input').val('');
                 $('#autoModelDropdown').find('.model-search-clear').hide();
+                // 打开即定位到当前选中模型（居中）；无选中项/所在组被折叠时退回置顶
+                var listEl = $('#autoModelList')[0];
+                if (listEl && !GourdModelDropdown.scrollToActive(listEl)) listEl.scrollTop = 0;
                 setTimeout(function () { try { $('#autoModelDropdown').find('.model-search-input').focus(); } catch (err) {} }, 0);
             }
         });

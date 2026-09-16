@@ -86,6 +86,10 @@ public class WebController {
     /** 日志记录器 */
     private static final Logger LOG = LoggerFactory.getLogger(WebController.class);
 
+    /** 会话「最后活动」数据文件后缀：引擎消息 / 引擎快照 / Web 流式回放；取三者 mtime 最大值判定活动时间 */
+    private static final String[] ACTIVITY_FILE_SUFFIXES = {
+            ".messages.ndjson", ".snapshot.json", SessionStreamStore.STREAM_SUFFIX};
+
     /** AI Agent 执行引擎，提供会话管理、模型配置、命令注册等核心能力 */
     private final HarnessEngine engine;
 
@@ -254,7 +258,8 @@ public class WebController {
      * {@link SessionLocator#boundRoot(String)} 切分——全局视图仅留未登记，项目视图仅留已登记。</p>
      *
      * @param root 要扫描的工作空间根目录绝对路径（为空时扫全局区）
-     * @return 会话列表，每项包含 sessionId、label、time、projectRoot（仅项目会话回填）
+     * @return 会话列表，每项包含 sessionId、label、time、projectRoot（仅项目会话回填）；
+     * time 为最后活动时间（数据文件 mtime 最大值，见 {@link #lastActivityOf(File, String)}）
      * @throws Exception 文件读取异常
      */
     @Get
@@ -328,7 +333,8 @@ public class WebController {
         if (dirs == null) {
             return;
         }
-        Arrays.sort(dirs, Comparator.comparingLong(File::lastModified).reversed());
+        // 排序与列表时间同源：取「最后活动时间」（数据文件 mtime 最大值），而非目录 mtime
+        Arrays.sort(dirs, Comparator.comparingLong((File d) -> lastActivityOf(d, d.getName())).reversed());
 
         for (File dir : dirs) {
             String sid = dir.getName();
@@ -358,7 +364,7 @@ public class WebController {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("sessionId", sid);
             item.put("label", label.length() > 30 ? label.substring(0, 30) + "..." : label);
-            item.put("time", dir.lastModified());
+            item.put("time", lastActivityOf(dir, sid));
             // 回填会话所属工作空间根：前端切换到历史会话时据此恢复工作空间上下文，
             // 保证发送时 X-Session-Cwd 指向正确目录（否则回退安装目录 → 会话定位错乱）。
             // 此处 root 即本次扫描所用工作空间根（null = 全局会话，不回填）。
@@ -372,6 +378,29 @@ public class WebController {
                 loopScheduler.restore(sid, engine.getWorkspace(), engine.getHarnessSessions());
             }
         }
+    }
+
+    /**
+     * 会话「最后活动时间」：取会话数据文件（messages/snapshot/stream）最后修改时间的最大值，
+     * 均不存在时回退目录自身 mtime。
+     *
+     * <p>不能用目录自身的 mtime：向已有文件追加内容（正常聊天、跑任务落盘）不会刷新目录 mtime，
+     * 会让活跃会话显得越来越旧；而目录内新增/删除条目（传附件、建账本、改名）反而会刷新它，
+     * 让无关动作把会话伪装成「刚刚更新」。数据文件 mtime 与真实活动同源。</p>
+     *
+     * @param dir 会话目录
+     * @param sid 会话 ID
+     * @return 最新数据文件 mtime；无数据文件时回退目录 mtime
+     */
+    static long lastActivityOf(File dir, String sid) {
+        long latest = 0L;
+        for (String suffix : ACTIVITY_FILE_SUFFIXES) {
+            File f = new File(dir, sid + suffix);
+            if (f.isFile()) {
+                latest = Math.max(latest, f.lastModified());
+            }
+        }
+        return latest > 0L ? latest : dir.lastModified();
     }
 
     /**

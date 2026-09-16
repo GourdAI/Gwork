@@ -4,7 +4,9 @@
  * 覆盖：
  * - index.html：#expandAllBtn 双态图标（expand-all-icon / collapse-all-icon），初始隐藏避免闪错态
  * - app-history.js：updateExpandAllBtn 按项目树状态翻转图标与提示（collapse-mode + i18n key 切换）；
- *   对话 tab / code 模式 / 空项目列表时隐藏；点击、单项目开合、tab 切换、列表重载、语言切换均刷新
+ *   无会话项目不参与判定（防止「隐形收起」污染按钮模式，导致首次点击变无感展开）；
+ *   仅「有会话的项目」存在时显示（对话 tab / code 模式 / 全部项目无会话时隐藏）；
+ *   点击、单项目开合、tab 切换、列表重载、语言切换均刷新
  * - app.css：双态图标显隐规则
  * - 12 个语言包均提供 app.sidebar.collapse_all 且 JSON 合法、行尾无裸 LF
  */
@@ -42,7 +44,9 @@ test('app-history.js：updateExpandAllBtn 按状态翻转图标/提示，并收�
     assert.match(fn, /document\.getElementById\('expandAllBtn'\)/);
     assert.match(fn, /window\.appMode !== 'code'/);
     assert.match(fn, /effectiveHistoryScope\(\) === 'project'/);
-    assert.match(fn, /ps\.length > 0/);
+    assert.match(fn, /var hasSessions = false/);
+    assert.match(fn, /hasSessions = true; break;/);
+    assert.match(fn, /'project' && hasSessions/);
     assert.match(fn, /btn\.style\.display = 'none'/);
     assert.match(fn, /btn\.style\.display = ''/);
     assert.match(fn, /classList\.toggle\('collapse-mode', allExpanded\)/);
@@ -82,4 +86,36 @@ test('12 个语言包均提供 app.sidebar.collapse_all（JSON 合法、行尾�
         const loneLf = latin.split('\n').filter((line, i, arr) => i < arr.length - 1 && !line.endsWith('\r')).length;
         assert.equal(loneLf, 0, `${lang}.json 存在裸 LF 行，行尾被破坏`);
     }
+});
+
+test('行为：anyProjectCollapsed 仅统计有会话的项目（无会话项目不再污染按钮状态）', () => {
+    // 提取真实函数源码并在沙箱执行。真实数据场景：4 个有会话项目全展开 + 2 个无会话项目收起，
+    // 修复前返回 true → 按钮误显示「展开全部」、首次点击变成无感展开（用户反馈的「第一次点没收起来」）；
+    // 修复后必须返回 false（首次点击 = 全部收起）。
+    const fnSrc = sliceBetween(history, 'function anyProjectCollapsed()', 'function updateExpandAllBtn()');
+    const factory = new Function('_sidebarData', '_projExpanded', fnSrc + '\nreturn anyProjectCollapsed;');
+    const fn = factory;
+
+    const sidebar = {
+        projects: [
+            { path: 'P1', sessions: [{}] },
+            { path: 'P2', sessions: [{}] },
+            { path: 'E1', sessions: [] },
+            { path: 'E2', sessions: [] }
+        ]
+    };
+    // 场景1（回归锚点）：无会话项目的收起态不应计为「存在收起项目」
+    assert.equal(fn(sidebar, { P1: true, P2: true, E1: false, E2: false })(), false,
+        '无会话项目的收起态不应计为「存在收起项目」（否则首次点击变无感展开）');
+
+    // 场景2：有会话项目确实收起 → 正常返回 true（「展开全部」语义保留）
+    assert.equal(fn(sidebar, { P1: false, P2: true, E1: false, E2: false })(), true);
+
+    // 场景3：全部项目无会话 → 恒 false（配合按钮隐藏条件，避免「点不动的死循环」）
+    const empty = { projects: [{ path: 'E1', sessions: [] }] };
+    assert.equal(fn(empty, { E1: false })(), false);
+    assert.equal(fn(empty, { E1: true })(), false);
+
+    // 场景4：空项目列表
+    assert.equal(fn({ projects: [] }, {})(), false);
 });

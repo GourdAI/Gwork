@@ -32,7 +32,10 @@
 ;      （GWorkApplyFonts 由 installerHooks = installer/hooks.nsh 提供，不是模板自带；详见文件尾注释）
 ;   4) Install / Uninstall 段的 PRE hook 均移到 CheckIfAppIsRunning 之后、首个文件写入/删除之前：
 ;      交互模式先保留官方运行中确认，静默模式仍由官方宏自动停止主进程，再做锁与 CLI 清理。
-;   除以上四处外逐字未动；hooks.nsh 仍经 installerHooks 接入（模板自带的
+;   5) compare_version 段（维护页）：把读到的已安装版本号写入 $R4（$R0 为空时仍写 $(unknown)），
+;      使文案「系统中已存在版本为 $R4 的」显示真实版本号；官方原逻辑只写 $(older) 定性词，
+;      中文下会显示成「版本为 旧的」。
+;   除以上五处外逐字未动；hooks.nsh 仍经 installerHooks 接入（模板自带的
 ;   installer_hooks 条件 include 块（if installer_hooks → !include 路径 → /if）那个 include 点，
 ;   位于本文件头部 !include 群之后、所有 !define 与 Section 之前）。
 Unicode true
@@ -259,13 +262,17 @@ Function PageReinstall
   ; Compare this installar version with the existing installation
   ; and modify the messages presented to the user accordingly
   compare_version:
-  StrCpy $R4 "$(older)"
   ${If} $WixMode = 1
     ReadRegStr $R0 HKLM "$R6" "DisplayVersion"
   ${Else}
     ReadRegStr $R0 SHCTX "${UNINSTKEY}" "DisplayVersion"
   ${EndIf}
-  ${IfThen} $R0 == "" ${|} StrCpy $R4 "$(unknown)" ${|}
+  ; GWork 定制（第 5 处，见文件头注释）：读出真实版本号供 $R4 显示；读不到才退「未知」。
+  ${If} $R0 == ""
+    StrCpy $R4 "$(unknown)"
+  ${Else}
+    StrCpy $R4 $R0
+  ${EndIf}
 
   nsis_tauri_utils::SemverCompare "${VERSION}" $R0
   Pop $R0

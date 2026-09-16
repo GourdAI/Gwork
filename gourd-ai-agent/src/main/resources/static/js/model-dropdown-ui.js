@@ -1,15 +1,17 @@
-/* model-dropdown-ui.js — 模型下拉框公共能力：关键词搜索 + 服务商分组折叠
+/* model-dropdown-ui.js — 模型下拉框公共能力：关键词搜索 + 服务商分组折叠 + 打开定位
  *
  * 供三处选择器复用（聊天页 app-history.js / 定时任务 app-automation.js / ACP 设置 app-settings-acp.js）：
  *   - searchHtml()      : 吸顶搜索框骨架（带 data-i18n-placeholder，语言切换自动跟随）
  *   - render()          : 统一渲染分组 + 折叠 wrapper + 条目 + 空态，返回命中信息
  *   - toSegments()      : 把 ModelListOrder.buildEntries 的扁平 entries 折成分段（保序，不聚合）
  *   - 折叠态            : localStorage 持久化，按 provider 记录「用户显式操作」；未操作过的组走默认策略
+ *   - scrollToActive()  : 打开下拉时把滚动定位到当前选中模型（居中；项不可见时安全降级）
  *
  * 设计约定：
  *   1. 分组语义不在本模块决定 —— 调用方传入 segments，保序（聊天/定时任务）或 map 聚合（ACP）都支持。
  *   2. 搜索期间忽略折叠态，命中组一律展开，避免「搜到了但看不见」。
  *   3. provider 命中关键词时整组视为命中，方便「按服务商筛选」。
+ *   4. 打开定位由调用方在展开（open class 生效）之后调用——几何量取依赖容器已参与布局。
  */
 (function (root, factory) {
     var api = factory();
@@ -237,6 +239,36 @@
         return { html: html, matched: matched, firstModel: firstModel };
     }
 
+    /* ===================== 打开定位 ===================== */
+
+    /**
+     * 把列表滚动位置定位到当前选中模型（.model-dropdown-item.active）。
+     * 打开下拉时调用：选中项完整可见时视觉居中；项高于可视区时对齐顶部（模型名与关联 chips 优先露出）；
+     * 找不到选中项、或选中项不可见（所在组被折叠 / 容器未展开）时不做任何事并返回 false，
+     * 由调用方决定降级（三处调用点均退回置顶，保证每次打开姿态确定）。
+     * @param listEl .model-dropdown-list 滚动容器
+     * @return boolean 是否执行了定位
+     */
+    function scrollToActive(listEl) {
+        if (!listEl || typeof listEl.querySelector !== 'function') return false;
+        var active = listEl.querySelector('.model-dropdown-item.active');
+        // offsetHeight 为 0 表示项不在可视布局中（组被折叠 display:none，或下拉尚未展开）
+        if (!active || !active.offsetHeight) return false;
+        var listTop = listEl.getBoundingClientRect().top;
+        var itemRect = active.getBoundingClientRect();
+        var visibleH = listEl.clientHeight;
+        var delta = itemRect.top - listTop;
+        // 居中：目标 = 当前滚动 + 相对偏移 - 上下剩余空隙的一半；项高于可视区时退化为顶部对齐
+        var target = (itemRect.height > visibleH)
+            ? listEl.scrollTop + delta
+            : listEl.scrollTop + delta - (visibleH - itemRect.height) / 2;
+        var maxScroll = Math.max(0, listEl.scrollHeight - visibleH);
+        if (target < 0) target = 0;
+        if (target > maxScroll) target = maxScroll;
+        listEl.scrollTop = target;
+        return true;
+    }
+
     return {
         STORE_KEY: STORE_KEY,
         AUTO_COLLAPSE_THRESHOLD: AUTO_COLLAPSE_THRESHOLD,
@@ -249,6 +281,7 @@
         toSegments: toSegments,
         shortName: shortName,
         searchHtml: searchHtml,
-        render: render
+        render: render,
+        scrollToActive: scrollToActive
     };
 });
