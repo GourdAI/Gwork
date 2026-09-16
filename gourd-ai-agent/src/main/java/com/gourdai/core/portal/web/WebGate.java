@@ -22,6 +22,9 @@ import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.react.intercept.HITL;
 import com.gourdai.agent.react.intercept.HITLTask;
+import com.gourdai.agent.react.intercept.AskUser;
+import com.gourdai.agent.react.intercept.AskUserTask;
+import com.gourdai.agent.util.AskUserTool;
 import org.noear.solon.ai.chat.ChatModel;
 import org.noear.solon.ai.chat.content.Contents;
 import org.noear.solon.ai.chat.content.ImageBlock;
@@ -421,7 +424,7 @@ public class WebGate extends SimpleWebSocketListener {
                                UploadedFile[] attachments, String[] attachmentTypes,
                                String hitlAction, String source) {
         return onChatInput(sessionId, sessionCwd, input, selectedModel, attachments, attachmentTypes,
-                hitlAction, source, null);
+                hitlAction, source, null, null);
     }
 
     public boolean onChatInput(String sessionId,
@@ -429,9 +432,24 @@ public class WebGate extends SimpleWebSocketListener {
                                String input, String selectedModel,
                                UploadedFile[] attachments, String[] attachmentTypes,
                                String hitlAction, String source, String clientMessageId) {
+        return onChatInput(sessionId, sessionCwd, input, selectedModel, attachments, attachmentTypes,
+                hitlAction, source, clientMessageId, null);
+    }
+
+    /**
+     * 受理聊天输入（含结构化问答答案）。
+     *
+     * @param hitlAction     HITL 操作类型（可为 null）
+     * @param questionAnswer 结构化问答（ask_user）答案 JSON；非空时提交答案并恢复被挂起的任务（可为 null）
+     */
+    public boolean onChatInput(String sessionId,
+                               String sessionCwd,
+                               String input, String selectedModel,
+                               UploadedFile[] attachments, String[] attachmentTypes,
+                               String hitlAction, String source, String clientMessageId, String questionAnswer) {
         synchronized (inputLocks.computeIfAbsent(sessionId, k -> new Object())) {
             return doOnChatInput(sessionId, sessionCwd, input, selectedModel, attachments, attachmentTypes,
-                    hitlAction, source, clientMessageId);
+                    hitlAction, source, clientMessageId, questionAnswer);
         }
     }
 
@@ -439,14 +457,15 @@ public class WebGate extends SimpleWebSocketListener {
                                   String sessionCwd,
                                   String input, String selectedModel,
                                   UploadedFile[] attachments, String[] attachmentTypes,
-                                  String hitlAction, String source, String clientMessageId) {
+                                  String hitlAction, String source, String clientMessageId, String questionAnswer) {
         AgentSession session = null;
         String streamRoot = null;
         try {
             session = engine.getSession(sessionId);
 
             // busy 请求不能覆盖正在运行任务的来源；来源只在确认本次输入可受理后更新。
-            if (Assert.isEmpty(hitlAction) && isSessionBusy(session)) {
+            // hitlAction / questionAnswer 属于“恢复已挂起任务”的输入，不按 busy 拒绝。
+            if (Assert.isEmpty(hitlAction) && Assert.isEmpty(questionAnswer) && isSessionBusy(session)) {
                 LOG.warn("[WebGate] chat input skipped for session {}: task in progress", sessionId);
                 return false;
             }
@@ -508,6 +527,29 @@ public class WebGate extends SimpleWebSocketListener {
                     }
                 }
                 // Resume streaming after HITL decision
+                performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName);
+                return true;
+            }
+
+            // ask_user 结构化问答恢复处理：用户提交答案后回填并恢复被挂起的任务
+            if (Assert.isNotEmpty(questionAnswer)) {
+                AskUserTask task = AskUser.getPendingTask(session);
+                if (task != null) {
+                    AskUser.submit(session, questionAnswer);
+                }
+
+                // 无论是否找到挂起任务都要回帧：前端在点“提交”的瞬间就把卡片置成了已提交态，
+                // 这里不回帧（重复提交、快照缺失、多端并发等）那张卡会永久停在已提交态且不消失。
+                emitToClient(sessionId, WebChunk.ofQuestionAnswered(AskUserTool.TOOL_NAME, AskUser.parseAnswers(questionAnswer)));
+
+                if (task == null) {
+                    // 没有可恢复的挂起任务：再拉起一次 run 只会空转，或与正在进行的恢复并发双跑。
+                    // 直接补一个 done 收口，让前端停掉等待指示器。
+                    emitToClient(sessionId, WebChunk.ofDone());
+                    return true;
+                }
+
+                // Resume streaming after user answers
                 performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName);
                 return true;
             }

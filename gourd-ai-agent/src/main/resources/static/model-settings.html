@@ -94,6 +94,13 @@
                                 <div class="form-group">
                                     <div class="form-group-header">
                                         <label data-i18n="settings.providers.models_label">模型管理</label>
+                                        <!-- 模型搜索框：即时过滤当前供应商的模型列表（多词 AND、大小写不敏感，与聊天模型下拉搜索同口径）；
+                                             切换供应商/关闭视图时由脚本清空；批量全选/反选仅作用于过滤后的可见行 -->
+                                        <div class="ms-model-search">
+                                            <svg class="ms-model-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                                            <input type="text" id="msModelSearchInput" autocomplete="off" spellcheck="false" placeholder="搜索模型…" data-i18n-placeholder="settings.providers.search_placeholder"/>
+                                            <span class="ms-model-search-clear" id="msModelSearchClear" style="display:none">&#10005;</span>
+                                        </div>
                                         <div class="provider-model-header-actions">
                                             <div class="provider-model-menu-wrap">
                                                 <button class="provider-model-icon-btn" id="msProviderModelsSelectToggle" data-i18n-title="settings.providers.bulk_select_title">
@@ -118,6 +125,8 @@
                                     </div>
                                     <div class="provider-models-list layui-form" lay-filter="msModelForm" id="msProviderModelsList"></div>
                                     <div class="provider-models-empty" id="msProviderModelsEmpty" data-i18n="settings.providers.empty_hint">暂无模型，请点击添加或从 API 拉取</div>
+                                    <!-- 搜索无命中空态（有模型但关键词零匹配时显示，与「暂无模型」区分） -->
+                                    <div class="provider-models-empty" id="msProviderModelsSearchEmpty" style="display:none" data-i18n="settings.providers.search_no_result">未找到匹配的模型</div>
                                 </div>
                                 <div class="form-actions form-actions-end" id="msProviderFormSubmitRow">
                                     <button class="btn-primary" id="msProviderSaveBtn" data-i18n="settings.providers.add">添加供应商</button>

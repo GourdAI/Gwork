@@ -17,6 +17,7 @@ package com.gourdai.harness.agent;
 
 import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.react.intercept.ToolSanitizerInterceptor;
+import com.gourdai.agent.util.AskUserTool;
 import com.gourdai.harness.HarnessExtension;
 import org.noear.solon.ai.chat.ChatModel;
 import com.gourdai.harness.HarnessEngine;
@@ -31,7 +32,7 @@ import org.noear.solon.lang.Nullable;
  */
 public class AgentFactory {
     //**
-    private static String[] TOOL_ALL_FULL = {"read", "write", "edit", "glob", "grep", "ls", "bash", "bash_output", "skill", "todo", "code", "codesearch", "websearch", "webfetch", "task", "generate", "mcp", "openapi", "hitl", "lsp", "memory"};
+    private static String[] TOOL_ALL_FULL = {"read", "write", "edit", "glob", "grep", "ls", "bash", "bash_output", "skill", "todo", "code", "codesearch", "websearch", "webfetch", "task", "generate", "mcp", "openapi", "hitl", "ask_user", "lsp", "memory"};
     //*
     private static String[] TOOL_ALL_PUBLIC = {"read", "write", "edit", "glob", "grep", "ls", "bash", "bash_output", "skill", "todo", "code", "codesearch", "websearch", "webfetch", "task", "lsp"};
     //pi
@@ -241,6 +242,13 @@ public class AgentFactory {
                 engine.getHitlInterceptor().setEnabled(engine.isHitlEnabled());
 
                 builder.defaultInterceptorAdd(engine.getHitlInterceptor());
+                break;
+            }
+            case "ask_user": {
+                // 结构化问答：工具用于引导模型产出 questions 结构化参数；
+                // 真正的挂起/恢复由 AskUserInterceptor 在 onAction 阶段接管（默认启用，不加开关）。
+                builder.defaultToolAdd(AskUserTool.getTool());
+                builder.defaultInterceptorAdd(engine.getAskUserInterceptor());
                 break;
             }
         }

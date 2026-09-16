@@ -43,8 +43,9 @@ test('inferPhaseFromType 把三种新帧映射到 PHASE_TOOL，且底部指示�
     const infer = fnBody(js, 'inferPhaseFromType');
     assert.match(infer, /case 'action_draft': case 'action_args': case 'action_batch': return PHASE_TOOL;/);
     // 骨架卡已承担进度语义，底部「输出中/思考中」必须继续短路，不得为了新帧解除
+    // （question 相位同理：问答卡自带交互，随 ask_user 功能一并加入短路表）
     const indicator = fnBody(js, 'showPhaseIndicator');
-    assert.match(indicator, /if \(phase === PHASE_TOOL \|\| phase === PHASE_HITL \|\| phase === PHASE_RETRY \|\| phase === PHASE_DONE\) return;/);
+    assert.match(indicator, /if \(phase === PHASE_TOOL \|\| phase === PHASE_HITL \|\| phase === PHASE_QUESTION \|\| phase === PHASE_RETRY \|\| phase === PHASE_DONE\) return;/);
 });
 
 test('工具卡 DOM 只有一套模板：骨架卡与正式卡共用 createToolCardShell', () => {

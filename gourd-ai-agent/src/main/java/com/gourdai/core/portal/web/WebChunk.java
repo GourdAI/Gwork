@@ -34,6 +34,8 @@ import java.util.Map;
  *   <tr><td>{@code action_batch}</td><td>批次声明（来源 ToolCallBatchEvent），整批工具执行前一次性下发 batchId/size/成员清单，前端据此建容器并一次性收编骨架卡</td></tr>
  *   <tr><td>{@code command}</td><td>命令文本，需前端展示或执行的命令内容</td></tr>
  *   <tr><td>{@code hitl}</td><td>人机协同中断（Human-in-the-Loop），暂停执行以等待人工审批或确认</td></tr>
+ *   <tr><td>{@code question}</td><td>结构化提问（ask_user），任务挂起等待用户回答，args 携带 questions 数组</td></tr>
+ *   <tr><td>{@code question_answered}</td><td>用户已提交答案，args 携带 answers 数组，供前端把问答卡转为已答态</td></tr>
  *   <tr><td>{@code rewind}</td><td>回退指令，撤销或回退之前若干步操作</td></tr>
  *   <tr><td>{@code user}</td><td>IM 通道的用户消息，在 Web 端同步展示非本端发送的用户输入</td></tr>
  *   <tr><td>{@code user_input}</td><td>后端推送的自动化任务（如 Loop 定时任务）中的用户提示词，补齐对话的用户侧消息</td></tr>
@@ -85,6 +87,9 @@ public class WebChunk {
     /** 相位：等待人工审批（HITL）。 */
     public static final String PHASE_HITL = "hitl";
 
+    /** 相位：等待用户回答（ask_user 结构化问答）。 */
+    public static final String PHASE_QUESTION = "question";
+
     /** 相位：模型调用失败自动重试中。 */
     public static final String PHASE_RETRY = "retry";
 
@@ -110,7 +115,7 @@ public class WebChunk {
 
     /**
      * 消息块类型标识。
-     * 取值范围以类级文档中的「type 类型枚举」表为准（共 23 种，含 text / reason / action_start / action_end / action_draft / action_args / action_batch / context_size / file_changes / steer_* / user / user_input 等；已废弃 action）。
+     * 取值范围以类级文档中的「type 类型枚举」表为准（共 25 种，含 text / reason / action_start / action_end / action_draft / action_args / action_batch / context_size / file_changes / steer_* / user / user_input / question / question_answered 等；已废弃 action）。
      */
     private String type;
 
@@ -553,6 +558,58 @@ public class WebChunk {
         tmp.command = command;
         tmp.actionId = actionId;
         tmp.createdAt = Instant.now().toEpochMilli();
+
+        return tmp;
+    }
+
+    /**
+     * 创建「结构化提问」消息块。
+     * <p>type 为 {@code question}，表示 Agent 通过 ask_user 工具向用户发起结构化提问，
+     * 任务已挂起等待回答。args 携带完整的 questions 数组，供前端渲染问答卡。</p>
+     *
+     * <p>{@code actionId} 与触发提问的那次工具调用同源，用于识别「同一轮提问」：
+     * 前端据此对重复下发的 question 帧做幂等处理（保留已作答进度，只刷新题面），
+     * 不同 actionId 则视为新一轮提问。为 {@code null} 时（旧快照恢复的挂起任务）
+     * 前端退化为按工具名识别。</p>
+     *
+     * <p>注意：ask_user 已被 {@code WebToolVisibilityPolicy} 排除在工具卡之外，
+     * 参数生成期不会产生骨架卡，因此这里的 actionId 不承担「接管骨架卡」职责。</p>
+     *
+     * @param toolName  发起提问的工具名称（当前恒为 ask_user）
+     * @param questions 结构化问题清单（每项含 header/detail/options）
+     * @param actionId  触发提问的调用标识（可为 null）
+     * @return 携带工具名、问题清单与调用标识的结构化提问消息块
+     */
+    public static WebChunk ofQuestion(String toolName, List<Map<String, Object>> questions, String actionId) {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "question";
+        tmp.toolName = toolName;
+        tmp.actionId = actionId;
+        tmp.createdAt = Instant.now().toEpochMilli();
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("questions", questions);
+        tmp.args = args;
+
+        return tmp;
+    }
+
+    /**
+     * 创建「用户已回答」消息块。
+     * <p>type 为 {@code question_answered}，在用户提交答案、任务恢复执行时下发，
+     * args 携带 answers 数组，供前端把问答卡转为已答态。</p>
+     *
+     * @param toolName 发起提问的工具名称（当前恒为 ask_user）
+     * @param answers  用户答案列表（每项含 index/text/skipped/custom）
+     * @return 携带工具名与答案列表的已回答消息块
+     */
+    public static WebChunk ofQuestionAnswered(String toolName, List<Map<String, Object>> answers) {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "question_answered";
+        tmp.toolName = toolName;
+        tmp.createdAt = Instant.now().toEpochMilli();
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("answers", answers);
+        tmp.args = args;
 
         return tmp;
     }

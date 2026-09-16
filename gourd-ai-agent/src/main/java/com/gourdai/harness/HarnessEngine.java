@@ -27,6 +27,7 @@ import com.gourdai.harness.talents.cli.*;
 import org.noear.solon.ai.chat.message.AssistantMessage;
 import org.noear.solon.ai.chat.message.ChatMessage;
 import com.gourdai.agent.react.intercept.HITLInterceptor;
+import com.gourdai.agent.react.intercept.AskUserInterceptor;
 import com.gourdai.agent.react.intercept.ContextCompressionInterceptor;
 import com.gourdai.agent.react.intercept.CompressionStrategy;
 import com.gourdai.agent.react.intercept.StopLoopInterceptor;
@@ -145,6 +146,10 @@ public class HarnessEngine {
 
     public HITLInterceptor getHitlInterceptor() {
         return options.getHitlInterceptor();
+    }
+
+    public AskUserInterceptor getAskUserInterceptor() {
+        return options.getAskUserInterceptor();
     }
 
     public TerminalTalent getTerminalTalent() {
@@ -868,6 +873,11 @@ public class HarnessEngine {
             options.setHitlInterceptor(new HITLInterceptor().onTool("bash", new HitlStrategy()));
         }
 
+        //结构化问答拦截器默认处理（默认启用，不加开关）
+        if (options.getAskUserInterceptor() == null) {
+            options.setAskUserInterceptor(new AskUserInterceptor());
+        }
+
         this.todoTalent = new TodoTalent(options.getHarnessSessions());
         this.codeTalent = new CodeTalent(options.getWorkspace(), options.getHarnessHome());
         this.taskTalent = new TaskTalent(this);
@@ -1236,6 +1246,14 @@ public class HarnessEngine {
          */
         public Builder hitlInterceptor(HITLInterceptor hitlInterceptor) {
             options.setHitlInterceptor(hitlInterceptor);
+            return this;
+        }
+
+        /**
+         * 结构化问答拦截器
+         */
+        public Builder askUserInterceptor(AskUserInterceptor askUserInterceptor) {
+            options.setAskUserInterceptor(askUserInterceptor);
             return this;
         }
 

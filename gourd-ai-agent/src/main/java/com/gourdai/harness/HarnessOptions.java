@@ -16,6 +16,7 @@
 package com.gourdai.harness;
 
 import com.gourdai.agent.AgentSessionProvider;
+import com.gourdai.agent.react.intercept.AskUserInterceptor;
 import com.gourdai.agent.react.intercept.HITLInterceptor;
 import com.gourdai.agent.react.intercept.ContextCompressionInterceptor;
 import com.gourdai.agent.react.intercept.StopLoopInterceptor;
@@ -113,6 +114,7 @@ class HarnessOptions implements Serializable {
     private ContextCompressionInterceptor compressionInterceptor;
     private StopLoopInterceptor stopLoopInterceptor;
     private HITLInterceptor hitlInterceptor;
+    private AskUserInterceptor askUserInterceptor;
     private MemorySolutionProvider memoryProvider;
     private SkillProvider skillProvider;
 
@@ -537,6 +539,14 @@ class HarnessOptions implements Serializable {
 
     void setHitlInterceptor(HITLInterceptor hitlInterceptor) {
         this.hitlInterceptor = hitlInterceptor;
+    }
+
+    AskUserInterceptor getAskUserInterceptor() {
+        return askUserInterceptor;
+    }
+
+    void setAskUserInterceptor(AskUserInterceptor askUserInterceptor) {
+        this.askUserInterceptor = askUserInterceptor;
     }
 
     MemorySolutionProvider getMemoryProvider() {

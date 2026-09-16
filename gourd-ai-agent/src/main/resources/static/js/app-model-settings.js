@@ -27,6 +27,12 @@
     // 此时绝不能提交 apiKey 字段，否则会把脱敏值或空串写回后端污染真实密钥
     var keyTouched = false;
 
+    // 模型列表搜索：多词 AND、大小写不敏感（与聊天模型下拉搜索同口径），输入 150ms 防抖；
+    // 搜索词只在供应商真正切换（或离开视图/进入新增表单）时清空，同供应商重渲染不丢失
+    var modelSearchQuery = '';
+    var modelSearchTimer = null;
+    var modelSearchProviderKey = null;
+
     // 接口类型选项（按模型单独配置）
     var STANDARD_OPTIONS = [
         { value: 'openai', label: 'OpenAI (Chat Completions)' },
@@ -46,6 +52,10 @@
     var $formDesc = $('#msProviderFormDesc');
     var $modelsList = $('#msProviderModelsList');
     var $modelsEmpty = $('#msProviderModelsEmpty');
+    var $searchInput = $('#msModelSearchInput');
+    var $searchClear = $('#msModelSearchClear');
+    var $searchEmpty = $('#msProviderModelsSearchEmpty');
+    var $searchBox = $searchInput.closest('.ms-model-search');
 
     // ==================== 初始化 ====================
     function init() {
@@ -75,6 +85,8 @@
             var tConfirm = GourdI18n.t('settings.confirm_delete') + GourdI18n.t('settings.providers.model_management') + '？' + GourdI18n.t('settings.providers.add_model') + GourdI18n.t('common.delete');
             layConfirm(tConfirm, function () {
                 fetchedModels = [];
+                // 列表已清空，残留的搜索词没有意义（搜索框会随空列表隐藏）
+                clearModelSearch(false);
                 renderModelsList();
                 if (currentProvider) {
                     persistProvider();
@@ -303,6 +315,23 @@
             if (currentProvider) persistProvider();
         });
 
+        // 模型搜索框：输入 150ms 防抖后即时过滤列表；清除按钮一键复位（过滤口径见 parseModelSearchTerms）
+        $searchInput.on('input', function () {
+            var val = $(this).val() || '';
+            $searchClear.toggle(!!val);
+            if (modelSearchTimer) clearTimeout(modelSearchTimer);
+            modelSearchTimer = setTimeout(function () {
+                modelSearchTimer = null;
+                modelSearchQuery = val;
+                renderModelsList();
+            }, 150);
+        });
+
+        // 一键清除搜索并恢复全量列表
+        $searchClear.on('click', function () {
+            clearModelSearch(true);
+        });
+
         // 批量选择菜单
         $('#msProviderModelsSelectToggle').on('click', function (e) {
             e.stopPropagation();
@@ -392,6 +421,9 @@
         currentProvider = null;
         fetchedModels = [];
         selectedName = null;
+        // 关闭视图时清空搜索（含取消未触发的防抖任务），避免下次打开残留过滤态
+        clearModelSearch(false);
+        modelSearchProviderKey = null;
         $('#msProviderModelsActionMenu').removeClass('show');
         // 通知聊天组件刷新模型下拉
         if (typeof window.reloadModels === 'function') {
@@ -653,6 +685,14 @@
         // 编辑模式：页面内操作均即时生效，隐藏提交行（新增模式保留「添加供应商」按钮）
         $('#msProviderFormSubmitRow').toggle(!provider);
 
+        // 搜索词仅在供应商真正切换（或进入新增表单）时清空：
+        // loadProvidersList / toggleProvider 等链路会用同一供应商重渲染右栏，此时保留用户的过滤状态
+        var providerKey = provider ? provider.name : '__add__';
+        if (providerKey !== modelSearchProviderKey) {
+            clearModelSearch(false);
+            modelSearchProviderKey = providerKey;
+        }
+
         // 加载 LLM 模型缓存后渲染模型列表
         loadLlmModelsCache(function () {
             renderModelsList();
@@ -911,20 +951,73 @@
         });
     }
 
+    // ==================== 模型列表搜索（多词 AND，与聊天模型下拉搜索同口径） ====================
+
+    /** 解析搜索词：小写化 + 空格分词（「aws opus」= 两词 AND 匹配） */
+    function parseModelSearchTerms(query) {
+        var text = String(query == null ? '' : query).toLowerCase().trim();
+        if (!text) return [];
+        return text.split(/\s+/);
+    }
+
+    /** 单个模型是否命中全部搜索词（大小写不敏感；搜索范围为模型 id） */
+    function modelMatchesSearch(model, terms) {
+        if (!terms.length) return true;
+        var haystack = String((model && model.id) || '').toLowerCase();
+        for (var i = 0; i < terms.length; i++) {
+            if (haystack.indexOf(terms[i]) === -1) return false;
+        }
+        return true;
+    }
+
+    /** 当前可见模型：有关键词时为命中子集（严格保序），否则全量 */
+    function visibleModels() {
+        var terms = parseModelSearchTerms(modelSearchQuery);
+        if (!terms.length) return fetchedModels;
+        return fetchedModels.filter(function (m) { return modelMatchesSearch(m, terms); });
+    }
+
+    /**
+     * 清空搜索词并复位输入框/清除按钮。
+     * @param reRender 是否立即重绘列表：清除按钮点击传 true；
+     *        切换供应商/关闭视图等后续链路自会重绘的场景传 false，避免重复渲染
+     */
+    function clearModelSearch(reRender) {
+        modelSearchQuery = '';
+        if (modelSearchTimer) { clearTimeout(modelSearchTimer); modelSearchTimer = null; }
+        if ($searchInput.length && $searchInput.val() !== '') $searchInput.val('');
+        if ($searchClear.length) $searchClear.hide();
+        if (reRender) renderModelsList();
+    }
+
     function renderModelsList() {
+        // 无模型可言时收起搜索框（新增供应商/未拉取形态），有模型时恢复
+        $searchBox.toggle(fetchedModels.length > 0);
+
         if (fetchedModels.length === 0) {
             $modelsEmpty.show();
+            $searchEmpty.hide();
+            $modelsList.hide();
+            return;
+        }
+
+        var models = visibleModels();
+        if (models.length === 0) {
+            // 有关键词但零命中：展示「未找到」空态（与「暂无模型」区分），批量按钮仅作用于可见行故无需禁用
+            $modelsEmpty.hide();
+            $searchEmpty.show();
             $modelsList.hide();
             return;
         }
 
         $modelsEmpty.hide();
+        $searchEmpty.hide();
         $modelsList.show();
 
         var providerName = $('#msProviderName').val() || '';
         var providerEnabled = currentProvider ? currentProvider.enabled !== false : true;
         var html = '';
-        fetchedModels.forEach(function (model) {
+        models.forEach(function (model) {
             // 检查是否已同步到 LLM
             var llmName = providerName ? providerName + '-' + model.id : model.id;
             var syncedModel = llmModelsCache[llmName];

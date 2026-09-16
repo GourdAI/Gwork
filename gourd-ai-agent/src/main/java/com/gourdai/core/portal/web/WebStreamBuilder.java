@@ -25,6 +25,8 @@ import com.gourdai.agent.event.RunEndEvent;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.react.intercept.HITL;
 import com.gourdai.agent.react.intercept.HITLTask;
+import com.gourdai.agent.react.intercept.AskUser;
+import com.gourdai.agent.react.intercept.AskUserTask;
 import com.gourdai.agent.react.intercept.ContextCompressionInterceptor;
 import com.gourdai.agent.event.ToolCallStartEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
@@ -317,6 +319,19 @@ public class WebStreamBuilder {
 
                             return Flux.just(hitlChunk, doneChunk);
                         }
+                    }
+
+                    // Check ask_user state after stream completes（与 HITL 互斥；HITL 检查保持在前）
+                    AskUserTask questionTask = AskUser.getPendingTask(session);
+                    if (questionTask != null) {
+                        WebChunk questionChunk = WebChunk.ofQuestion(questionTask.getToolName(),
+                                questionTask.getQuestions(), questionTask.getActionId());
+                        questionChunk.setPhase(WebChunk.PHASE_QUESTION);
+
+                        WebChunk doneChunk = WebChunk.ofDone();
+                        doneChunk.setPhase(WebChunk.PHASE_DONE);
+
+                        return Flux.just(questionChunk, doneChunk);
                     }
 
                     WebChunk doneChunk = WebChunk.ofDone();

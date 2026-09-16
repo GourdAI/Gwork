@@ -118,6 +118,58 @@ body.code-mode .model-settings-view { display: none !important; }
 /* settings-section 在右栏内不额外撑边距（头部间距交给 .model-settings-form-wrap） */
 .model-settings-right .settings-section { padding: 0; }
 
+/* ----- 右栏「模型管理」搜索框（标题行内联，自适应宽度） ----- */
+/* 空模型时随脚本隐藏；多词 AND 过滤与聊天模型下拉搜索同口径 */
+.ms-model-search {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 150px;
+    max-width: 300px;
+    margin: 0 12px;
+}
+.ms-model-search-icon {
+    position: absolute;
+    left: 9px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 13px;
+    height: 13px;
+    color: var(--text-secondary);
+    opacity: .7;
+    pointer-events: none;
+}
+.ms-model-search input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 5px 26px 5px 28px;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1.5;
+    outline: none;
+    transition: border-color .2s;
+}
+.ms-model-search input:focus { border-color: var(--accent); }
+.ms-model-search input::placeholder { color: var(--text-secondary); opacity: .6; }
+.ms-model-search-clear {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 16px;
+    height: 16px;
+    line-height: 16px;
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-radius: 50%;
+    user-select: none;
+}
+.ms-model-search-clear:hover { background: var(--bg-hover); color: var(--text-primary); }
+
 /* 响应式：窄屏时上下堆叠 */
 @media (max-width: 860px) {
     .model-settings-inner { height: auto; display: block; }
@@ -126,4 +178,10 @@ body.code-mode .model-settings-view { display: none !important; }
     .model-settings-left-scroll { max-height: 300px; }
     .model-settings-right { overflow: visible; }
     .model-settings-form-wrap { overflow: visible; }
+}
+
+/* 极窄屏：标题行允许换行，搜索框独占一行（批量按钮与标签同行） */
+@media (max-width: 560px) {
+    .model-settings-view .form-group-header { flex-wrap: wrap; }
+    .ms-model-search { order: 3; flex-basis: 100%; min-width: 0; max-width: none; margin: 6px 0 0; }
 }

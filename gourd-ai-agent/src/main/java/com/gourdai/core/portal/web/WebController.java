@@ -1043,9 +1043,11 @@ public class WebController {
             }
 
             String hitlAction = ctx.param("hitlAction");
+            String questionAnswer = ctx.param("questionAnswer");
 
             // busy 请求不允许改变活动任务的会话根；真正的原子 busy 判定在 WebGate 输入锁内完成。
-            if (Assert.isEmpty(hitlAction) && webGate.isSessionBusy(sessionId)) {
+            // questionAnswer 与 hitlAction 一样属于“恢复已挂起任务”的输入，不按 busy 拒绝。
+            if (Assert.isEmpty(hitlAction) && Assert.isEmpty(questionAnswer) && webGate.isSessionBusy(sessionId)) {
                 return Result.succeed("busy");
             }
 
@@ -1055,7 +1057,7 @@ public class WebController {
             // 路由到 WebGate 处理（AI 结果通过 WebSocket 推送到前端）
             // 网页端手动输入：source=null，出站不回推 IM（仅当活跃会话由 IM/Loop 触发时才回推）
             boolean accepted = webGate.onChatInput(sessionId, sessionCwd, input, model, attachments, attachmentTypes,
-                    hitlAction, null, clientMessageId);
+                    hitlAction, null, clientMessageId, questionAnswer);
             if (!accepted) {
                 return Result.succeed("busy");
             }

@@ -67,6 +67,33 @@
         for (var i = 0; i < sels.length; i++) sels[i].classList.remove('open');
     }
 
+    /* 视口自适应定位：空间不足时改为向上展开（drop-up），并动态限制弹窗高度，
+       保证弹窗（含底部「打开文件夹」）始终完整落在窗口内、其余内容可滚动可达。
+       修复：下拉固定向下展开 340px，窗口矮时底部越出窗口被裁——滚动到底也看不到底部项。*/
+    function positionDropdown(selEl) {
+        var cur = selEl.querySelector('.workspace-selector-current');
+        var dd = selEl.querySelector('.workspace-dropdown');
+        if (!cur || !dd) return;
+        var GAP = 4;            // 弹窗与按钮的间距（CSS margin-top/bottom）
+        var SAFE = 8;           // 距窗口边缘的安全间距
+        var DESIGN_MAX = 340;   // 设计上限（与 CSS .project-dropdown 的 max-height 一致）
+        var MIN_BELOW = 160;    // 下方空间低于此值且上方更宽裕时，向上展开
+        var rect = cur.getBoundingClientRect();
+        var vh = window.innerHeight || document.documentElement.clientHeight;
+        var below = vh - rect.bottom - GAP - SAFE;
+        var above = rect.top - GAP - SAFE;
+        var openUp = below < MIN_BELOW && above > below;
+        var avail = openUp ? above : below;
+        selEl.classList.toggle('drop-up', openUp);
+        dd.style.maxHeight = Math.max(80, Math.min(DESIGN_MAX, avail)) + 'px';
+    }
+
+    /* 窗口尺寸变化：已打开的下拉重新定位（防止弹窗底部再次越出窗口） */
+    window.addEventListener('resize', function () {
+        var sels = document.querySelectorAll('.workspace-selector.open');
+        for (var i = 0; i < sels.length; i++) positionDropdown(sels[i]);
+    });
+
     function renderDropdown(dd) {
         dd.innerHTML = '<div class="project-dropdown-empty">' + esc(GourdI18n.t('app.loading')) + '</div>';
         $.get('/web/chat/projects', function (resp) {
@@ -149,6 +176,7 @@
             closeAll();
             if (!wasOpen) {
                 selEl.classList.add('open');
+                positionDropdown(selEl);
                 renderDropdown(selEl.querySelector('.workspace-dropdown'));
             }
             e.stopPropagation();

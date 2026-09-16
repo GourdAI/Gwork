@@ -188,6 +188,26 @@ function sendMessage(forceQueue) {
     var rawText = inputEl ? inputEl.value : '';
     var text = getInputText();
     if (!text && pendingFiles.length === 0) return;
+
+    /* 问答挂起路由：当前会话有待作答的结构化问答卡时，输入框文本等价于卡片内「其他补充」，
+       直接记为当前题的自定义答案，不得进入普通发送链路（streaming/steer/queue 行为不受影响）。
+       附件无处安放（答案协议只有 text 字段），此时一律提示并保留，绝不静默吞掉——
+       与运行中插话分支对附件的处理保持同构。 */
+    if (activeSessionId && sessionMap[activeSessionId]
+            && typeof getPendingQuestionState === 'function') {
+        var pendingQuestion = getPendingQuestionState(sessionMap[activeSessionId]);
+        if (pendingQuestion) {
+            if (pendingFiles.length > 0) {
+                if (typeof showToast === 'function') showToast(GourdI18n.t('chat.question_attachment_wait'), 'info');
+                return; // 保留文本与附件
+            }
+            if (text && typeof applyQuestionCustomAnswerByText === 'function'
+                    && applyQuestionCustomAnswerByText(sessionMap[activeSessionId], text)) {
+                return;
+            }
+        }
+    }
+
     /* Block only if the active session is currently streaming */
     // 任务执行中或队列有未处理消息，将消息加入队列
     var isBlocked = activeSessionId && sessionMap[activeSessionId] && sessionMap[activeSessionId].isStreaming;
@@ -412,6 +432,8 @@ var PHASE_THINKING = 'thinking';
 var PHASE_TEXT = 'text';
 var PHASE_TOOL = 'tool';
 var PHASE_HITL = 'hitl';
+/* 结构化问答（ask_user）等待用户作答期间的真实相位。卡片自带交互与状态展示，不叠底部指示器。 */
+var PHASE_QUESTION = 'question';
 var PHASE_RETRY = 'retry';
 var PHASE_DONE = 'done';
 
@@ -435,6 +457,10 @@ function inferPhaseFromType(type) {
         case 'action_draft': case 'action_args': case 'action_batch': return PHASE_TOOL;
         case 'action_end': return PHASE_WAITING;
         case 'hitl': return PHASE_HITL;
+        case 'question': return PHASE_QUESTION;
+        // 问答已闭环（本人提交或他端作答）：引擎在消费答案后继续执行，语义等同「引擎处理中」，
+        // 归入 PHASE_WAITING；若沿用 PHASE_QUESTION 会让底部指示器在卡片隐藏后长期缺席。
+        case 'question_answered': return PHASE_WAITING;
         case 'retry': return PHASE_RETRY;
         case 'trace': case 'done': case 'error': return PHASE_DONE;
         default: return null;
@@ -444,9 +470,10 @@ function inferPhaseFromType(type) {
 /* 静默到期时按相位决定是否、以及如何展示等待指示器 */
 function showPhaseIndicator(sess) {
     var phase = sess.phase || PHASE_WAITING;
-    // tool：工具卡自己的绿色状态点就是指示器；hitl：授权卡带按钮；retry：重试提示自带旋转圈；
-    // done：本轮已结束。这四种相位下再在主气泡底部叠一个点，会出现同屏两个闪烁指示器且语义冲突。
-    if (phase === PHASE_TOOL || phase === PHASE_HITL || phase === PHASE_RETRY || phase === PHASE_DONE) return;
+    // tool：工具卡自己的绿色状态点就是指示器；hitl：授权卡带按钮；question：问答卡自带交互；
+    // retry：重试提示自带旋转圈；done：本轮已结束。这些相位下再在主气泡底部叠一个点，
+    // 会出现同屏两个闪烁指示器且语义冲突。
+    if (phase === PHASE_TOOL || phase === PHASE_HITL || phase === PHASE_QUESTION || phase === PHASE_RETRY || phase === PHASE_DONE) return;
     // 思考块自身正在闪烁时，等待语义已由思考块头部承担，不重复显示
     if (sess.thinkingBlockEl) return;
     showInlineThinking(sess, phase);
@@ -564,6 +591,8 @@ function onWebChunk(sess, chunk) {
                 appendRetryChunk(sess, chunk.text);
                 break;
         case 'hitl':   finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendHitlCard(sess, chunk.toolName, chunk.command, chunk.actionId); break;
+        case 'question': finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendQuestionCard(sess, chunk); break;
+        case 'question_answered': handleQuestionAnsweredFrame(sess, chunk); break;
             case 'trace':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendTraceBadge(sess, chunk); break;
             case 'context_size':
                 // 快照始终写入会话（即使非活跃），保证切回该会话时能恢复；仅活跃会话刷新 DOM。

@@ -2169,6 +2169,436 @@ function handleHitlResponse(sess, action) {
     });
 }
 
+/* ===== 结构化问答卡（ask_user） =====
+   与 HITL 审批卡（消息流内、审批即放行）不同：问答卡是一张悬浮于输入框上方的交互卡片，
+   承载「一至多道带选项的提问」。用户逐题作答/补充/跳过后一次性提交，或点 X 跳过剩余直接提交
+   （防任务卡死）。状态挂在会话（sess._questionState），卡片只渲染当前活动会话的那一份：
+   切走即隐藏，切回时由 loadMessages→replaySession 对 question / question_answered 帧的顺序
+   重放自然重建（历史中问后有答则重建后随即隐藏）。
+   帧契约（冻结）：question {actionId, toolName:"ask_user", args:{questions:[{header, detail?, options?:[{label, recommended?}]}]}}；
+   question_answered {args:{answers:[...]}}，收到即隐藏。
+   提交：POST /web/chat/input（SSE_ENDPOINT），FormData questionAnswer=JSON.stringify({answers:[{index,text,skipped,custom}]})
+   + sessionId；本地流式态处理与 handleHitlResponse 同构（进入流式态→POST→失败回退）。 */
+
+/* ---- 问答卡状态机（纯函数；行为测试整段提取执行，区块内不得引用 DOM/全局） ---- */
+function normalizeQuestionArgs(args) {
+    var list = (args && args.questions) || [];
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+        var q = list[i] || {};
+        var opts = [];
+        var rawOpts = q.options || [];
+        for (var j = 0; j < rawOpts.length; j++) {
+            var o = rawOpts[j] || {};
+            opts.push({
+                label: (o.label == null) ? '' : String(o.label),
+                recommended: !!o.recommended
+            });
+        }
+        out.push({
+            header: (q.header == null) ? '' : String(q.header),
+            detail: (q.detail == null) ? '' : String(q.detail),
+            options: opts
+        });
+    }
+    return out;
+}
+
+function createQuestionCardState(actionId, questions) {
+    return {
+        actionId: actionId || '',
+        questions: questions || [],
+        answers: {},
+        drafts: {},
+        current: 0,
+        otherEditing: false,
+        submitted: false
+    };
+}
+
+function questionAnswerFor(state, index) {
+    return (state && state.answers && state.answers[index]) || null;
+}
+
+function questionOptionSelected(state, index, label) {
+    var a = questionAnswerFor(state, index);
+    return !!(a && !a.skipped && !a.custom && a.text === label);
+}
+
+function questionIsAllAnswered(state) {
+    if (!state || !state.questions || state.questions.length === 0) return false;
+    for (var i = 0; i < state.questions.length; i++) {
+        if (!state.answers[i]) return false;
+    }
+    return true;
+}
+
+function advanceQuestionCursor(state) {
+    if (!state || !state.questions) return;
+    if (state.current < state.questions.length - 1) state.current += 1;
+}
+
+function applyQuestionOptionAnswer(state, index, label) {
+    if (!state) return;
+    state.answers[index] = { index: index, text: (label == null ? '' : String(label)), skipped: false, custom: false };
+    state.otherEditing = false;
+    advanceQuestionCursor(state);
+}
+
+function applyQuestionCustomAnswer(state, index, text) {
+    if (!state) return;
+    var val = (text == null) ? '' : String(text);
+    state.answers[index] = { index: index, text: val, skipped: false, custom: true };
+    state.drafts[index] = val;
+    state.otherEditing = false;
+    advanceQuestionCursor(state);
+}
+
+function skipQuestionAnswer(state) {
+    if (!state || !state.questions || state.questions.length === 0) return;
+    var i = state.current;
+    // 已有状态（已答/已跳过）的题只推进，不覆盖
+    if (!state.answers[i]) state.answers[i] = { index: i, text: '', skipped: true, custom: false };
+    state.otherEditing = false;
+    advanceQuestionCursor(state);
+}
+
+function fillUnansweredAsSkipped(state) {
+    if (!state || !state.questions) return;
+    for (var i = 0; i < state.questions.length; i++) {
+        if (!state.answers[i]) state.answers[i] = { index: i, text: '', skipped: true, custom: false };
+    }
+}
+
+function buildQuestionAnswersPayload(state) {
+    var out = [];
+    var n = (state && state.questions) ? state.questions.length : 0;
+    for (var i = 0; i < n; i++) {
+        var a = (state && state.answers && state.answers[i]) || null;
+        if (!a) a = { index: i, text: '', skipped: true, custom: false };
+        out.push({
+            index: i,
+            text: (a.text == null) ? '' : String(a.text),
+            skipped: !!a.skipped,
+            custom: !!a.custom
+        });
+    }
+    return { answers: out };
+}
+
+/* ---- 问答卡 DOM 渲染 ---- */
+/* 卡片内联 SVG（currentColor 描边，禁止 layui 字体图标，见仓库图标硬约定） */
+var QUESTION_CARD_SVG_PREV = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>';
+var QUESTION_CARD_SVG_NEXT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
+var QUESTION_CARD_SVG_CLOSE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+var QUESTION_CARD_SVG_ARROW = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
+var QUESTION_CARD_SVG_EDIT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>';
+
+/* 宿主容器：chat.html 已内建 #questionCardHost（.input-wrap 内、输入框上方）；
+   本函数兜底自建（旧缓存页面）并保证委托事件只绑定一次。 */
+function ensureQuestionCardHost() {
+    var host = document.getElementById('questionCardHost');
+    if (!host) {
+        var wrap = document.querySelector('#chatView .input-wrap') || document.querySelector('.input-wrap');
+        if (!wrap) return null;
+        host = document.createElement('div');
+        host.className = 'question-card-host';
+        host.id = 'questionCardHost';
+        host.style.display = 'none';
+        var inputBox = wrap.querySelector('.input-box');
+        if (inputBox) wrap.insertBefore(host, inputBox);
+        else wrap.appendChild(host);
+    }
+    bindQuestionCardEvents(host);
+    return host;
+}
+
+/* 宿主上的委托事件只绑定一次（卡片内容逐次重建，委托挂在宿主上不受重建影响） */
+function bindQuestionCardEvents(host) {
+    if (!host || host._questionCardBound) return;
+    host._questionCardBound = true;
+
+    // 选项行：记录该题答案并自动推进下一题
+    $(host).on('click', '.question-card-option[data-opt-index]', function() {
+        var st = activeQuestionCardState();
+        if (!st || st.submitted) return;
+        var qi = parseInt($(this).attr('data-q-index'), 10);
+        var oi = parseInt($(this).attr('data-opt-index'), 10);
+        var q = st.questions[qi];
+        var opt = q && q.options && q.options[oi];
+        if (!opt) return;
+        applyQuestionOptionAnswer(st, qi, opt.label);
+        syncQuestionCard();
+    });
+
+    // 「其他补充」行：点击切换为输入框（编辑中不响应，避免点击输入框触发重建）
+    $(host).on('click', '.question-card-other-row:not(.is-editing)', function() {
+        var st = activeQuestionCardState();
+        if (!st || st.submitted) return;
+        st.otherEditing = true;
+        syncQuestionCard({ focusOther: true });
+    });
+
+    // 「其他补充」输入：草稿实时写入状态（重建不丢字）
+    $(host).on('input', '.question-card-other-input', function() {
+        var st = activeQuestionCardState();
+        if (!st || st.submitted) return;
+        st.drafts[st.current] = this.value;
+    });
+
+    // 「其他补充」输入：Enter 确认自定义答案并推进；Esc 收起输入
+    $(host).on('keydown', '.question-card-other-input', function(e) {
+        var st = activeQuestionCardState();
+        if (!st || st.submitted) return;
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            var val = (this.value || '').trim();
+            if (!val) return;   // 空输入不产生自定义答案
+            applyQuestionCustomAnswer(st, st.current, val);
+            syncQuestionCard();
+        } else if (e.key === 'Escape') {
+            st.otherEditing = false;
+            syncQuestionCard();
+        }
+    });
+
+    // 翻页（仅多题时渲染）
+    $(host).on('click', '.question-card-prev', function() {
+        var st = activeQuestionCardState();
+        if (!st || st.submitted) return;
+        if (st.current > 0) { st.current -= 1; st.otherEditing = false; syncQuestionCard(); }
+    });
+    $(host).on('click', '.question-card-next', function() {
+        var st = activeQuestionCardState();
+        if (!st || st.submitted) return;
+        if (st.current < st.questions.length - 1) { st.current += 1; st.otherEditing = false; syncQuestionCard(); }
+    });
+
+    // X：跳过剩余未答题并直接提交（防任务卡死）
+    $(host).on('click', '.question-card-close', function() {
+        var st = activeQuestionCardState();
+        if (!st || st.submitted) return;
+        fillUnansweredAsSkipped(st);
+        handleQuestionResponse(sessionMap[activeSessionId], st);
+    });
+
+    // 底部按钮：未全部作答 = 跳过当前题并推进；全部有状态（答/跳过）= 一次提交全部
+    $(host).on('click', '.question-card-submit', function() {
+        var st = activeQuestionCardState();
+        if (!st || st.submitted) return;
+        if (questionIsAllAnswered(st)) {
+            handleQuestionResponse(sessionMap[activeSessionId], st);
+        } else {
+            skipQuestionAnswer(st);
+            syncQuestionCard();
+        }
+    });
+}
+
+/* 当前活动会话的问答状态（DOM 事件入口统一从活动会话取，避免闭包持有已切走会话） */
+function activeQuestionCardState() {
+    var sess = activeSessionId ? sessionMap[activeSessionId] : null;
+    var st = (sess && sess._questionState) || null;
+    if (!st || !st.questions || st.questions.length === 0) return null;
+    return st;
+}
+
+/* 待作答状态：仅「存在题面且未提交」才算挂起（供 sendMessage 文本路由与卡片渲染共用） */
+function getPendingQuestionState(sess) {
+    var st = (sess && sess._questionState) || null;
+    if (!st || st.submitted) return null;
+    if (!st.questions || st.questions.length === 0) return null;
+    return st;
+}
+
+/* question 帧入口（实时与历史回放共用）：状态挂会话；仅活动会话渲染 DOM。
+   同 actionId 重复帧幂等（保留已作答进度，仅刷新题面）；不同 actionId 视为新一轮提问，替换旧状态。 */
+function appendQuestionCard(sess, chunk) {
+    if (!sess) return;
+    var actionId = (chunk && chunk.actionId) ? String(chunk.actionId) : '';
+    var prev = sess._questionState;
+    if (!prev || prev.actionId !== actionId || prev.submitted) {
+        sess._questionState = createQuestionCardState(actionId, normalizeQuestionArgs(chunk && chunk.args));
+    } else {
+        prev.questions = normalizeQuestionArgs(chunk && chunk.args);
+        if (prev.current >= prev.questions.length) prev.current = Math.max(0, prev.questions.length - 1);
+    }
+    if (sess.sessionId === activeSessionId) syncQuestionCard();
+}
+
+/* question_answered 帧入口：问答已闭环（本人提交或他端作答），清状态并隐藏卡片。
+   回放链路上「question 先建卡 → question_answered 随即隐藏」由顺序重放自然达成。 */
+function handleQuestionAnsweredFrame(sess) {
+    if (!sess) return;
+    sess._questionState = null;
+    if (sess.sessionId === activeSessionId) syncQuestionCard();
+}
+
+/* 按当前活动会话的问答状态同步卡片：无状态 → 隐藏；有状态 → 按状态重建内容。
+   调用点：帧到达、卡片交互、会话切换（setActiveSession/deactivateSession）、语言切换。 */
+function syncQuestionCard(opts) {
+    var host = ensureQuestionCardHost();
+    if (!host) return;
+    var sess = activeSessionId ? sessionMap[activeSessionId] : null;
+    var state = sess ? (sess._questionState || null) : null;
+    if (!state || !state.questions || state.questions.length === 0) {
+        host.innerHTML = '';
+        $(host).hide();
+        return;
+    }
+    renderQuestionCard(host, sess, state, opts || {});
+    $(host).show();
+}
+
+/* 渲染卡片到宿主（整卡重建；交互态与输入草稿全部来自 state，重建无损） */
+function renderQuestionCard(host, sess, state, opts) {
+    var n = state.questions.length;
+    var submitted = !!state.submitted;
+    if (!n) { host.innerHTML = ''; $(host).hide(); return; }
+    var idx = Math.min(Math.max(state.current || 0, 0), n - 1);
+    state.current = idx;
+    var q = state.questions[idx] || { header: '', detail: '', options: [] };
+    var answer = questionAnswerFor(state, idx);
+    var allAnswered = questionIsAllAnswered(state);
+
+    var html = '<div class="question-card' + (submitted ? ' submitted' : '') + '" data-action-id="' + escapeHtml(state.actionId || '') + '">';
+
+    /* 题目行：题目文本（含详情/跳过标记）｜右侧 ‹ n/N ›（仅多题）与 X */
+    html += '<div class="question-card-header">';
+    html += '<div class="question-card-heading">';
+    html += '<span class="question-card-title">' + escapeHtml(q.header || '') + '</span>';
+    if (answer && answer.skipped) {
+        html += '<span class="question-card-skip-tag">' + escapeHtml(GourdI18n.t('chat.question_skipped')) + '</span>';
+    }
+    if (q.detail) html += '<div class="question-card-detail">' + escapeHtml(q.detail) + '</div>';
+    html += '</div>';
+    if (n > 1) {
+        html += '<div class="question-card-nav">'
+            + '<button type="button" class="question-card-nav-btn question-card-prev"' + (idx <= 0 || submitted ? ' disabled' : '') + '>' + QUESTION_CARD_SVG_PREV + '</button>'
+            + '<span class="question-card-nav-count">' + (idx + 1) + '/' + n + '</span>'
+            + '<button type="button" class="question-card-nav-btn question-card-next"' + (idx >= n - 1 || submitted ? ' disabled' : '') + '>' + QUESTION_CARD_SVG_NEXT + '</button>'
+            + '</div>';
+    }
+    if (!submitted) {
+        html += '<button type="button" class="question-card-close" data-i18n-title="chat.question_close" title="' + escapeHtml(GourdI18n.t('chat.question_close')) + '">' + QUESTION_CARD_SVG_CLOSE + '</button>';
+    } else {
+        html += '<span class="question-card-close-placeholder" aria-hidden="true"></span>';
+    }
+    html += '</div>';
+
+    /* 选项区：序号圆角徽章 + 文本（含推荐标记）+ 右箭头 */
+    html += '<div class="question-card-options">';
+    var optList = q.options || [];
+    for (var oi = 0; oi < optList.length; oi++) {
+        var o = optList[oi] || {};
+        var selected = questionOptionSelected(state, idx, o.label);
+        html += '<button type="button" class="question-card-option' + (selected ? ' selected' : '') + '"'
+            + (submitted ? ' disabled' : '')
+            + ' data-q-index="' + idx + '" data-opt-index="' + oi + '">'
+            + '<span class="question-card-opt-index">' + (oi + 1) + '</span>'
+            + '<span class="question-card-opt-label">' + escapeHtml(o.label == null ? '' : o.label)
+            + (o.recommended ? '<span class="question-card-opt-reco">' + escapeHtml(GourdI18n.t('chat.question_recommended')) + '</span>' : '')
+            + '</span>'
+            + '<span class="question-card-opt-arrow">' + QUESTION_CARD_SVG_ARROW + '</span>'
+            + '</button>';
+    }
+    /* 「其他补充…」行：点击变输入框，Enter 确认；提交后仅作状态展示 */
+    var draft = (state.drafts[idx] != null)
+        ? String(state.drafts[idx])
+        : ((answer && answer.custom) ? String(answer.text || '') : '');
+    if (state.otherEditing && !submitted) {
+        html += '<div class="question-card-other-row is-editing">'
+            + '<span class="question-card-opt-index">' + QUESTION_CARD_SVG_EDIT + '</span>'
+            + '<input type="text" class="question-card-other-input" autocomplete="off" spellcheck="false" placeholder="' + escapeHtml(GourdI18n.t('chat.question_other')) + '" value="' + escapeHtml(draft) + '"/>'
+            + '</div>';
+    } else {
+        html += '<div class="question-card-other-row' + ((answer && answer.custom) ? ' selected' : '') + '"'
+            + (submitted ? '' : ' role="button" tabindex="0"')
+            + ' data-q-index="' + idx + '">'
+            + '<span class="question-card-opt-index">' + QUESTION_CARD_SVG_EDIT + '</span>'
+            + '<span class="question-card-opt-label">' + escapeHtml(GourdI18n.t('chat.question_other')) + '</span>'
+            + ((answer && answer.custom) ? '<span class="question-card-opt-answer">' + escapeHtml(answer.text || '') + '</span>' : '')
+            + '</div>';
+    }
+    html += '</div>';
+
+    /* 底部行：左状态（等待您的回答… / 已提交），右按钮（跳过 / 发送） */
+    html += '<div class="question-card-footer">';
+    html += '<span class="question-card-status">'
+        + escapeHtml(GourdI18n.t(submitted ? 'chat.question_answered' : 'chat.question_waiting'))
+        + '</span>';
+    if (!submitted) {
+        html += '<button type="button" class="question-card-submit">'
+            + escapeHtml(GourdI18n.t(allAnswered ? 'chat.question_submit' : 'chat.question_skip'))
+            + '</button>';
+    }
+    html += '</div>';
+
+    html += '</div>';
+    host.innerHTML = html;
+
+    if (opts.focusOther) {
+        var inp = host.querySelector('.question-card-other-input');
+        if (inp) { try { inp.focus(); } catch (e) {} }
+    }
+}
+
+/* 提交全部答案（镜像 handleHitlResponse 的本地状态处理：进入流式态 → POST → 失败回退）。
+   payload：questionAnswer=JSON.stringify({answers:[{index,text,skipped,custom},...]})，恢复内容走 WebSocket。 */
+function handleQuestionResponse(sess, state) {
+    if (!sess || !state || state.submitted) return;
+    state.submitted = true;
+    state.otherEditing = false;
+    if (sess.sessionId === activeSessionId) syncQuestionCard();
+
+    if (sess.eventSource) { sess.eventSource.close(); sess.eventSource = null; }
+    resetStreamState(sess);
+
+    sess.isStreaming = true;
+    if (sess.sessionId === activeSessionId) {
+        isStreaming = true;
+        setBtnStopMode();
+    }
+    showThinking(sess);
+
+    // 通过 HTTP POST 发送全部答案，结果通过 WebSocket 推送
+    var formData = new FormData();
+    formData.append('questionAnswer', JSON.stringify(buildQuestionAnswersPayload(state)));
+    formData.append('sessionId', sess.sessionId);
+
+    // 问答属当前会话的续轮：优先用会话自身记录的工作空间根，避免工作空间切换后错位
+    var questionHeaders = {};
+    var questionCwd = (sess && sess.projectRoot) ? sess.projectRoot : (typeof getSessionCwd === 'function' ? getSessionCwd() : '');
+    if (questionCwd) questionHeaders['X-Session-Cwd'] = questionCwd;
+    fetch(SSE_ENDPOINT, {
+        method: 'POST',
+        body: formData,
+        headers: questionHeaders
+    }).then(function(resp) {
+        // HTTP 响应只有 {"status":"ok"}，实际数据通过 WebSocket 推送
+    }).catch(function(err) {
+        console.error('Question answer error:', err);
+        // 失败回退：解除「已提交」锁，保留答案允许重试（否则卡片永卡禁用态而任务不会恢复）
+        state.submitted = false;
+        if (sess.sessionId === activeSessionId) syncQuestionCard();
+        // 通过回调占位调用 finishStream（由 app-streaming.js 注册）——与 handleHitlResponse 同构
+        if (onFinishStream) onFinishStream(sess);
+    });
+}
+
+/* 底部输入框路由入口：把待作答会话的输入文本记为当前题的自定义答案
+   （语义等价卡片内「其他补充」输入 + Enter；由 sendMessage 在普通发送链路之前调用）。 */
+function applyQuestionCustomAnswerByText(sess, text) {
+    var state = getPendingQuestionState(sess);
+    if (!state) return false;
+    var val = (text == null ? '' : String(text)).trim();
+    if (!val) return false;
+    applyQuestionCustomAnswer(state, state.current, val);
+    clearInput();
+    if (sess.sessionId === activeSessionId) syncQuestionCard();
+    return true;
+}
+
 /* ===== Rewind Handling ===== */
 function handleRewind(sess, count) {
     if (count <= 0) return;
@@ -2295,6 +2725,9 @@ function relocalizeDynamicLabels() {
         var suffix = el.getAttribute('data-i18n-elapsed') || '';
         el.textContent = GourdI18n.t(st === 'finished' ? 'chat.thinking_finished' : 'chat.thinking_in_progress') + suffix;
     });
+    // 结构化问答卡：题面计数（n/N）、推荐后缀、按钮等组合文案在渲染期以当时语言写死，
+    // 语言切换时按已存状态整卡重建（drafts 实时同步，输入不受损）。
+    if (typeof syncQuestionCard === 'function') syncQuestionCard();
 }
 window.relocalizeDynamicLabels = relocalizeDynamicLabels;
 document.addEventListener('i18n:localeChanged', relocalizeDynamicLabels);

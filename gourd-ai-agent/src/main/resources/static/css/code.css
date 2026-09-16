@@ -30,6 +30,9 @@
     box-shadow: 0 4px 16px rgba(0,0,0,0.15); z-index: 200; max-height: 340px; overflow-y: auto; padding: 4px;
 }
 .project-selector.open .project-dropdown { display: block; }
+/* 窗口下方空间不足时向上展开（app-workspace.js 动态切换 drop-up）：
+   锚定按钮上缘，保证弹窗完整落在窗口内、底部内容可达 */
+.project-selector.drop-up .project-dropdown { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 4px; }
 .project-dropdown-item {
     display: flex; align-items: center; gap: 6px; padding: 7px 8px; border-radius: 6px;
     cursor: pointer; font-size: 12.5px; color: var(--text-sidebar);

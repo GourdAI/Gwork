@@ -299,6 +299,8 @@ function setActiveSession(sessionId) {
     $(sess.container).show();
     sess.lastActiveAt = Date.now();
     activeSessionId = sessionId;
+    // 结构化问答卡归属活动会话：切换即按新会话状态重建/隐藏（切回时由回放重建）
+    if (typeof syncQuestionCard === 'function') syncQuestionCard();
     SESSION_ID = sessionId;
     isStreaming = sess.isStreaming;
     userScrolledUp = false;
@@ -332,6 +334,8 @@ function deactivateSession() {
         saveSessionDraft(sessionMap[activeSessionId]);
     }
     activeSessionId = null;
+    // 结构化问答卡归属活动会话：离开即隐藏（切回时由回放重建）
+    if (typeof syncQuestionCard === 'function') syncQuestionCard();
     isStreaming = false;
     setBtnSendMode();
 }
