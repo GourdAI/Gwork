@@ -165,6 +165,10 @@ public class WebChunk {
     /** 模型名称，仅在 type 为 {@code trace} 时使用，记录本次推理使用的模型标识。 */
     private String model;
 
+    /** 模型稳定 uid（统计归组锚点，{@code ModelDo#uidOf} 派生），trace 专用附加字段：
+     * 落盘进 .stream.ndjson 与月度账本，统计页按它归组，改名前后并成一条。旧事件无此字段为 null。 */
+    private String modelId;
+
     /** 输入 token 数，仅在 type 为 {@code trace} 时使用，记录本次推理消耗的输入 token 数。 */
     private Long inputTokens;
 
@@ -189,6 +193,61 @@ public class WebChunk {
 
     /** 推理耗时秒数，仅在 type 为 {@code trace} 时使用，记录从 ReAct 开始到结束的耗时。 */
     private Long elapsedSeconds;
+
+    /**
+     * 单轮耗时（毫秒），仅在 type 为 {@code trace} 时使用。
+     *
+     * <p><b>与 {@link #elapsedSeconds} 的关系</b>：同一时长的两种精度。{@code elapsedSeconds}
+     * 由 {@code Duration.getSeconds()} 向下截断，历史帧一直只有它，前端「用时 28秒」徽标继续读它；
+     * 本字段是未截断的原始毫秒值，供耗时详情卡计算输出速度（秒级分母在短轮次会退化成 0，无法作除数）。</p>
+     *
+     * <p><b>兼容性</b>：附加字段，旧历史帧反序列化为 null，前端须降级到 {@code elapsedSeconds}。</p>
+     */
+    private Long elapsedMs;
+
+    /**
+     * 首 Token 延迟 TTFT（毫秒），仅在 type 为 {@code trace} 时使用，可为 null。
+     *
+     * <p><b>口径</b>：本轮订阅时刻 → <b>第一个真正下发给用户的可见内容帧</b>（正文或思考文本）
+     * 到达时刻。含排队、首包网络往返与 prompt 预填充，是用户「等了多久才看见第一个字」的体感值。</p>
+     *
+     * <p><b>为什么必须限定「可见」</b>：空增量帧、被过滤掉的内部工具帧（task/memory/todowrite）、
+     * 以及系统在工具执行生命周期中补发的事件都不是模型吐给用户的字；把它们计入会让 TTFT
+     * 被无声提前，测出一个用户根本没看到的「首字」。</p>
+     *
+     * <p><b>为什么不由前端自行计时</b>：前端只有实时流才有起算点，历史回放拿不到；且实时与回放
+     * 两套算法必然漂移。后端在唯一出口测量并随 trace 落盘后，历史消息同样可展示。</p>
+     *
+     * <p><b>兼容性</b>：附加字段，本次改动之前的历史帧没有该值（null），前端须显示占位符而非 0。</p>
+     */
+    private Long ttftMs;
+
+    /**
+     * 模型解码时长（毫秒），仅在 type 为 {@code trace} 时使用，可为 null。
+     *
+     * <p><b>存在的理由</b>：这是 {@link #generatedTokens} 的<b>同口径分母</b>，专供输出速度（TPS）计算。
+     * 单轮总时长 {@link #elapsedMs} 里含工具执行、审批等待、子代理调度与多次模型往返的间隙，
+     * 拿它作分母算出来的既不是解码速度也不是任何可比较的吞吐量。</p>
+     *
+     * <p><b>口径</b>：本轮内所有<b>主代理</b>模型调用的解码段累加——每段从该次调用的首个可见输出帧
+     * 起算，到该次调用的用量结算（{@code ContextUsageEvent}）止，工具执行时间天然落在段与段之间，
+     * 不会被计入。</p>
+     *
+     * <p><b>兼容性</b>：附加字段，旧历史帧为 null；前端在缺失时不得退回总时长顶替，只能显示占位符。</p>
+     */
+    private Long generationMs;
+
+    /**
+     * 与 {@link #generationMs} 严格配对的输出 token 数，仅在 type 为 {@code trace} 时使用，可为 null。
+     *
+     * <p><b>为什么不能直接用 {@link #outputTokens}</b>：后者取自 {@code trace.getMetrics()}，是整轮累计值，
+     * 且 {@code Metrics.addMetrics} 会把<b>子代理</b>的产出也并进来；子代理在自己的时间线上解码
+     * （甚至并行），其 token 与主代理的解码时长没有对应关系，相除会得到虚高且不可比的数字。</p>
+     *
+     * <p>本字段只累加那些<b>解码段被成功计时的主代理调用</b>所产出的 token，与 {@code generationMs}
+     * 同增同减，保证 TPS 的分子分母统计范围完全一致。</p>
+     */
+    private Long generatedTokens;
 
     /** 最终答案正文，仅在 type 为 {@code trace} 时使用，携带 ReAct 完成时的全量最终答复，供前端复制使用。 */
     private String finalAnswer;
@@ -699,28 +758,45 @@ public class WebChunk {
      *
      * @param model          模型名称（如 "gpt-4o"）
      * @param inputTokens    输入 token 消耗数（真实值，含缓存口径已归一），可为 null（无指标时）
-     * @param outputTokens   输出 token 消耗数，可为 null（无指标时）
+     * @param outputTokens   输出 token 消耗数（整轮累计，含子代理），可为 null（无指标时）
      * @param cacheCreationTokens 缓存创建输入 token 数，可为 null
      * @param cacheReadTokens     缓存读取输入 token 数，可为 null
      * @param cacheRate      缓存命中率（百分比 0~100），可为 null
-     * @param elapsedSeconds 推理耗时（秒），可为 null（无开始时间时）
+     * @param timing         单轮耗时指标快照（总时长 / TTFT / 解码段），不得为 null，无数据时传 {@link TurnTiming#EMPTY}
      * @param finalAnswer    ReAct 完成时的全量最终答复，供前端复制使用，可为 null
      * @return 携带追踪元数据的消息块
      */
     public static WebChunk ofTrace(String model, Long inputTokens, Long outputTokens,
                                    Long cacheCreationTokens, Long cacheReadTokens,
                                    Double cacheRate,
-                                   Long elapsedSeconds, String finalAnswer) {
+                                   TurnTiming timing, String finalAnswer) {
+        return ofTrace(model, null, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens,
+                cacheRate, timing, finalAnswer);
+    }
+
+    /** {@link #ofTrace} 的完整版：额外携带模型稳定 uid（统计归组锚点）。 */
+    public static WebChunk ofTrace(String model, String modelId, Long inputTokens, Long outputTokens,
+                                   Long cacheCreationTokens, Long cacheReadTokens,
+                                   Double cacheRate,
+                                   TurnTiming timing, String finalAnswer) {
         WebChunk tmp = new WebChunk();
         tmp.type = "trace";
         tmp.model = model;
+        tmp.modelId = modelId;
         tmp.inputTokens = inputTokens;
         tmp.outputTokens = outputTokens;
         tmp.totalTokens = (inputTokens != null && outputTokens != null) ? (inputTokens + outputTokens) : null;
         tmp.cacheCreationTokens = cacheCreationTokens;
         tmp.cacheReadTokens = cacheReadTokens;
         tmp.cacheRate = cacheRate;
-        tmp.elapsedSeconds = elapsedSeconds;
+
+        TurnTiming t = (timing == null) ? TurnTiming.EMPTY : timing;
+        tmp.elapsedSeconds = t.getElapsedSeconds();
+        tmp.elapsedMs = t.getElapsedMs();
+        tmp.ttftMs = t.getTtftMs();
+        tmp.generationMs = t.getGenerationMs();
+        tmp.generatedTokens = t.getGeneratedTokens();
+
         tmp.finalAnswer = finalAnswer;
         tmp.createdAt = Instant.now().toEpochMilli();
 

@@ -28,8 +28,11 @@ test('chat and automation renderers both use the shared order-preserving entries
     const staticJs = path.resolve(__dirname, '../../main/resources/static/js');
     const historySource = fs.readFileSync(path.join(staticJs, 'app-history.js'), 'utf8');
     const automationSource = fs.readFileSync(path.join(staticJs, 'app-automation.js'), 'utf8');
+    const selectorSource = fs.readFileSync(path.join(staticJs, 'model-selector.js'), 'utf8');
 
     assert.match(historySource, /ModelListOrder\.buildEntries\(modelList\)/);
-    assert.match(automationSource, /ModelListOrder\.buildEntries\(formState\.models\)/);
+    // 自动化页经公共选择器消费同一保序分段逻辑（组件内部对 models() 结果调用 buildEntries）
+    assert.match(automationSource, /GourdModelSelector\.create\(/);
+    assert.match(selectorSource, /ModelListOrder\.buildEntries\(models\)/);
     assert.deepEqual(renderedModelNames(interleavedModels), ['A1', 'B1', 'A2']);
 });

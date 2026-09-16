@@ -16,6 +16,7 @@
 package com.gourdai.core.portal.web;
 
 import com.gourdai.core.config.AgentFlags;
+import com.gourdai.core.config.entity.ModelDo;
 import org.noear.snack4.ONode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,6 +39,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -104,8 +106,14 @@ public class UsageArchiveService {
     /** 全局基准目录（通常为 AgentFlags.getHarnessBase()），不随项目工作区变化。 */
     private final String globalBase;
 
-    /** 归档串行化：避免「打开统计页」与「启动静默归档」并发写同一账本 */
-    private final Object archiveLock = new Object();
+    /**
+     * 归档串行化（进程级共享）：避免「打开统计页」「启动静默归档」「存量回填」并发写同一账本。
+     *
+     * <p><b>必须 static（勿改回实例级）</b>：启动线程（Configurator warmup）与 Web 统计页
+     * 各自 new 了本类实例，实例级锁互相看不见——回填与并发归档交错时会互相覆盖
+     * （回填结果被旧快照覆盖后标记已写、永不重跑；并发读改写还会竞争同一 .json.tmp 临时文件）。</p>
+     */
+    private static final Object ARCHIVE_LOCK = new Object();
 
     /**
      * @param sessionLocator 会话目录定位器
@@ -126,6 +134,8 @@ public class UsageArchiveService {
         public long cacheRead;
         public long cacheCreation;
         public int rounds;
+        /** 模型稳定 uid（{@code ModelDo#uidOf} 派生）；旧数据/无 trace uid 时为 null。统计页按它归组。 */
+        public String uid;
 
         void add(ModelStat o) {
             tokens += o.tokens;
@@ -193,7 +203,7 @@ public class UsageArchiveService {
      * <p>幂等：重复调用只会处理水位之后的新事件。异常不外抛（统计页/启动流程不受影响）。</p>
      */
     public void archiveIncremental() {
-        synchronized (archiveLock) {
+        synchronized (ARCHIVE_LOCK) {
             try {
                 doArchive();
             } catch (Throwable e) {
@@ -214,7 +224,7 @@ public class UsageArchiveService {
         if (from == null || to == null || from.isAfter(to)) {
             return result;
         }
-        synchronized (archiveLock) {
+        synchronized (ARCHIVE_LOCK) {
             // 逐月遍历区间涉及的分片
             LocalDate cursor = from.withDayOfMonth(1);
             LocalDate last = to.withDayOfMonth(1);
@@ -249,7 +259,7 @@ public class UsageArchiveService {
      */
     public TreeMap<LocalDate, DayStat> loadAll() {
         TreeMap<LocalDate, DayStat> result = new TreeMap<>();
-        synchronized (archiveLock) {
+        synchronized (ARCHIVE_LOCK) {
             for (String month : listMonths()) {
                 MonthLedger ledger = readLedger(month);
                 for (Map.Entry<String, DayStat> e : ledger.days.entrySet()) {
@@ -264,6 +274,179 @@ public class UsageArchiveService {
             }
         }
         return result;
+    }
+
+    /**
+     * 一次性存量回填：给历史账本条目补「模型稳定 uid」，并统一名称。
+     *
+     * <p><b>为什么需要</b>：uid 机制上线前的账本条目只有「服务商名-模型ID」名称 key；
+     * 服务商改名后新旧条目在统计页分裂。本方法把「可解析到当前配置」的条目补上 uid
+     * （服务商改名/名称大小写差异产生的旧条目就此归并到同一 uid 组），无法解析的
+     * （渠道已删除等）保持原样、退化为按名称展示。</p>
+     *
+     * <p><b>解析优先级</b>：① 别名文件 {@code usage/merge-aliases.json}（{@code 旧key → 当前规范名}，
+     * 用于跨名改名如「黑驴AI→黑驴」，显式指定优先于一切推断）；② 当前配置精确同名；
+     * ③ 大小写不敏感唯一匹配（如「Mad-*」→「MAD-*」，存在多个候选时跳过以防误并）。</p>
+     *
+     * <p><b>性能约束（勿破坏）</b>：本方法在启动 warmup 线程执行一次，成功后写标记文件
+     * {@code usage/.uid-backfilled}，之后每次启动直接跳过（O(1) 文件存在性检查），
+     * 不给热路径（trace 写入 / 统计聚合）增加任何成本。账本无变化时不写盘。</p>
+     *
+     * @param models 当前配置的全部模型（{@code settings.getModels()}）；null 或空表时
+     *               本轮不扫描不写标记（配置不可用，避免永久错过回填）
+     * @return 是否有账本被改写
+     */
+    public boolean backfillModelUids(Map<String, ModelDo> models) {
+        synchronized (ARCHIVE_LOCK) {
+            try {
+                return doBackfillModelUids(models);
+            } catch (Throwable e) {
+                LOG.warn("[UsageArchive] uid backfill failed: {}", e.getMessage());
+                return false;
+            }
+        }
+    }
+
+    private boolean doBackfillModelUids(Map<String, ModelDo> models) {
+        File dir = usageDir();
+        File marker = new File(dir, ".uid-backfilled");
+        if (marker.isFile()) {
+            return false;
+        }
+        // 模型表不可用（配置加载失败兜底空表等）：不扫描、不写标记，等下次启动配置可用时重试。
+        // 若此刻写标记，配置恢复后将永久失去回填机会（旧账本条目持续按名称分裂）。
+        if (models == null || models.isEmpty()) {
+            return false;
+        }
+        // 无账本的全新环境（或目录尚不存在）：需要先建目录，标记文件才能落盘
+        if (!dir.exists() && !dir.mkdirs() && !dir.isDirectory()) {
+            return false;
+        }
+
+        // 当前配置索引：精确名 → uid；小写名 → 规范名（仅大小写不同的多个模型出现时置 null 防误并）
+        Map<String, String> exactUid = new HashMap<>();
+        Map<String, String> lowerName = new HashMap<>();
+        if (models != null) {
+            for (Map.Entry<String, ModelDo> me : models.entrySet()) {
+                String name = me.getKey();
+                ModelDo m = me.getValue();
+                if (name == null || name.isEmpty() || m == null) {
+                    continue;
+                }
+                exactUid.put(name, m.stableUid());
+                String low = name.toLowerCase(Locale.ROOT);
+                if (lowerName.containsKey(low)) {
+                    lowerName.put(low, null);
+                } else {
+                    lowerName.put(low, name);
+                }
+            }
+        }
+        // 别名文件（可选）：旧key → 目标规范名；目标必须仍在当前配置中才生效
+        Map<String, String> aliases = readMergeAliases(dir);
+
+        boolean anyChanged = false;
+        boolean writeFailed = false;
+        for (String month : listMonths()) {
+            MonthLedger ledger = readLedger(month);
+            boolean monthChanged = false;
+            for (DayStat day : ledger.days.values()) {
+                Map<String, ModelStat> rebuilt = new LinkedHashMap<>();
+                for (Map.Entry<String, ModelStat> e : day.models.entrySet()) {
+                    String key = e.getKey();
+                    ModelStat ms = e.getValue();
+                    String finalKey = key;
+                    if (ms.uid == null) {
+                        String target = resolveBackfillTarget(key, aliases, exactUid, lowerName);
+                        if (target != null) {
+                            ms.uid = exactUid.get(target);
+                            finalKey = target;
+                            monthChanged = true;
+                        }
+                    }
+                    ModelStat exist = rebuilt.get(finalKey);
+                    if (exist == null) {
+                        rebuilt.put(finalKey, ms);
+                    } else {
+                        exist.add(ms);
+                        monthChanged = true;
+                    }
+                }
+                if (monthChanged) {
+                    day.models.clear();
+                    day.models.putAll(rebuilt);
+                }
+            }
+            if (monthChanged) {
+                anyChanged = true;
+                if (!writeLedger(ledger)) {
+                    writeFailed = true;
+                }
+            }
+        }
+
+        // 写标记：无论是否有改写都记录「已扫描」，避免每次启动重复全量扫描；
+        // 但任一月份落盘失败时不写标记——失败月份会失去回填机会，留待下次启动重试（回填幂等）。
+        if (!writeFailed) {
+            try {
+                Files.write(marker.toPath(), ("uid-backfill done " + Instant.now()).getBytes(StandardCharsets.UTF_8));
+            } catch (Throwable e) {
+                LOG.warn("[UsageArchive] cannot write backfill marker: {}", e.getMessage());
+            }
+        } else {
+            LOG.warn("[UsageArchive] uid backfill: some month ledgers failed to persist; marker withheld for retry");
+        }
+        if (anyChanged) {
+            LOG.info("[UsageArchive] uid backfill applied: legacy model entries merged by stable uid");
+        }
+        return anyChanged;
+    }
+
+    /** 解析历史条目应归属的当前规范名；解析不到返回 null（保持原样）。 */
+    private static String resolveBackfillTarget(String key, Map<String, String> aliases,
+                                                Map<String, String> exactUid, Map<String, String> lowerName) {
+        if (key == null || key.isEmpty()) {
+            return null;
+        }
+        String aliased = aliases.get(key);
+        if (aliased != null && exactUid.containsKey(aliased)) {
+            return aliased;
+        }
+        if (exactUid.containsKey(key)) {
+            return key;
+        }
+        String canon = lowerName.get(key.toLowerCase(Locale.ROOT));
+        if (canon != null && exactUid.containsKey(canon)) {
+            return canon;
+        }
+        return null;
+    }
+
+    /** 读取别名文件（{@code usage/merge-aliases.json}，可选）：旧key → 目标规范名。缺失/损坏返回空。 */
+    private Map<String, String> readMergeAliases(File dir) {
+        Map<String, String> aliases = new HashMap<>();
+        File f = new File(dir, "merge-aliases.json");
+        if (!f.isFile()) {
+            return aliases;
+        }
+        try {
+            String json = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+            ONode root = ONode.ofJson(json);
+            if (root != null && root.isObject()) {
+                root.getObjectUnsafe().forEach((k, v) -> {
+                    if (!(v instanceof ONode)) {
+                        return;
+                    }
+                    String s = ((ONode) v).getString();
+                    if (k != null && !k.isEmpty() && s != null && !s.isEmpty()) {
+                        aliases.put(k, s);
+                    }
+                });
+            }
+        } catch (Throwable e) {
+            LOG.warn("[UsageArchive] merge-aliases.json ignored: {}", e.getMessage());
+        }
+        return aliases;
     }
 
     /**
@@ -468,6 +651,9 @@ public class UsageArchiveService {
                         total = input + output;
                     }
                     ModelStat ms = day.model(model);
+                    String traceUid = node.hasKey("modelId") ? node.get("modelId").getString() : null;
+                    if (traceUid != null && traceUid.isEmpty()) { traceUid = null; }
+                    if (traceUid != null) { ms.uid = traceUid; }
                     ms.tokens += total;
                     ms.input += input;
                     ms.output += output;
@@ -570,6 +756,8 @@ public class UsageArchiveService {
                             ms.cacheRead = longOf(mn, "cacheRead");
                             ms.cacheCreation = longOf(mn, "cacheCreation");
                             ms.rounds = (int) longOf(mn, "rounds");
+                            String u = mn.hasKey("uid") ? mn.get("uid").getString() : null;
+                            ms.uid = (u == null || u.isEmpty()) ? null : u;
                             day.models.put(model, ms);
                         });
                     }
@@ -598,13 +786,15 @@ public class UsageArchiveService {
         return ledger;
     }
 
-    /** 落盘月度账本（先写临时文件再原子替换，避免写一半损坏）。 */
-    private void writeLedger(MonthLedger ledger) {
+    /** 落盘月度账本（先写临时文件再原子替换，避免写一半损坏）。
+     *
+     * @return 是否成功落盘（调用方据此决定是否需重试，如回填的标记文件 gating） */
+    private boolean writeLedger(MonthLedger ledger) {
         try {
             File dir = usageDir();
             if (!dir.exists() && !dir.mkdirs() && !dir.isDirectory()) {
                 LOG.warn("[UsageArchive] cannot create usage dir: {}", dir);
-                return;
+                return false;
             }
 
             ONode root = new ONode().asObject();
@@ -629,6 +819,9 @@ public class UsageArchiveService {
                     mn.set("cacheRead", ms.cacheRead);
                     mn.set("cacheCreation", ms.cacheCreation);
                     mn.set("rounds", ms.rounds);
+                    if (ms.uid != null && !ms.uid.isEmpty()) {
+                        mn.set("uid", ms.uid);
+                    }
                 }
             }
 
@@ -650,8 +843,10 @@ public class UsageArchiveService {
                 Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             }
             ledger.dirty = false;
+            return true;
         } catch (Throwable e) {
             LOG.warn("[UsageArchive] write ledger failed for {}: {}", ledger.month, e.getMessage());
+            return false;
         }
     }
 

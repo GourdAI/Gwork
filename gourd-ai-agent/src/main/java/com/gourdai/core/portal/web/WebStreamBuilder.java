@@ -44,6 +44,8 @@ import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.talents.cli.TerminalTalent;
 import com.gourdai.harness.talents.cli.TodoTalent;
 import com.gourdai.harness.agent.WebToolVisibilityPolicy;
+import com.gourdai.core.config.entity.ModelDo;
+import org.noear.solon.ai.chat.ChatConfig;
 import com.gourdai.core.channel.Channel;
 import com.gourdai.core.channel.wechat.WeChatLink;
 import org.noear.solon.core.util.Assert;
@@ -52,7 +54,6 @@ import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
 import java.util.*;
 
 /**
@@ -179,7 +180,7 @@ public class WebStreamBuilder {
      * @return 映射后的 {@link WebChunk} 响应式流
      */
     public Flux<WebChunk> buildStreamFlux(AgentSession session, ReActAgent agent, ChatModel chatModel, String sessionCwd, Prompt prompt) {
-        return buildStreamFlux(session, agent, chatModel, sessionCwd, prompt, null);
+        return buildStreamFlux(session, agent, chatModel, sessionCwd, prompt, null, null);
     }
 
     /**
@@ -191,6 +192,22 @@ public class WebStreamBuilder {
      */
     public Flux<WebChunk> buildStreamFlux(AgentSession session, ReActAgent agent, ChatModel chatModel, String sessionCwd, Prompt prompt,
                                           String thinkingDepthOverride) {
+        return buildStreamFlux(session, agent, chatModel, sessionCwd, prompt, thinkingDepthOverride, null);
+    }
+
+    /**
+     * 构建流式响应管线（带思考深度与上下文窗口覆盖）。
+     *
+     * @param thinkingDepthOverride 本轮任务专用的思考深度档位；为 null 时回退会话上下文中的选择。
+     *                              用于 Loop 定时任务等「按任务而非按会话」指定档位的场景，
+     *                              不写入会话上下文，避免污染用户在前台的选择。
+     * @param contextLengthOverride 本轮任务专用的上下文窗口；为 null 时回退会话持久选择。
+     *                              用于 Loop 定时任务等「按任务而非按会话」指定窗口的场景：
+     *                              以 transient 键写入会话（压缩预算与用量指示器同源读取），
+     *                              不覆盖用户在前台的持久选择，本轮结束即清理。
+     */
+    public Flux<WebChunk> buildStreamFlux(AgentSession session, ReActAgent agent, ChatModel chatModel, String sessionCwd, Prompt prompt,
+                                          String thinkingDepthOverride, Long contextLengthOverride) {
         if (prompt == null) {
             prompt = Prompt.of();
         }
@@ -207,16 +224,25 @@ public class WebStreamBuilder {
         // 每次 buildStreamFlux 恰对应一轮任务，用 Flux.defer 在订阅时刻取时，才是「单轮耗时」。
         final Prompt promptFinal = prompt;
         return Flux.defer(() ->
-                buildTurnFlux(session, agent, chatModel, sessionCwd, promptFinal, System.currentTimeMillis(), thinkingDepthOverride));
+                buildTurnFlux(session, agent, chatModel, sessionCwd, promptFinal, System.currentTimeMillis(), thinkingDepthOverride, contextLengthOverride));
     }
 
     private Flux<WebChunk> buildTurnFlux(AgentSession session, ReActAgent agent, ChatModel chatModel, String sessionCwd, Prompt prompt, long turnStartMs,
-                                         String thinkingDepthOverride) {
+                                         String thinkingDepthOverride, Long contextLengthOverride) {
         // 思考深度：优先用本轮显式指定的档位（如 Loop 任务），否则回退会话选择的档位；
         // 再结合当前模型的推理能力（按模型而非按接口）翻译成各家 API 各自的参数
         String thinkingDepth = thinkingDepthOverride != null
                 ? ThinkingDepth.normalize(thinkingDepthOverride)
                 : ThinkingDepth.normalize(session.getContext().getAs(HarnessEngine.CTX_THINKING_DEPTH));
+
+        // 上下文窗口：Loop 任务等按「本轮」覆盖（transient 键），压缩预算与用量指示器都走
+        // resolveRuntime，二者同源；不写入持久键，避免污染用户前台选择。
+        // 每轮开头统一覆盖/清理（幂等自愈：上一轮异常残留也会在本轮开头被清掉）。
+        if (contextLengthOverride != null) {
+            ContextLengthPolicy.setTransient(session, contextLengthOverride);
+        } else {
+            ContextLengthPolicy.clearTransient(session);
+        }
 
         // 本轮（turn）相位状态机。per-turn 局部持有：buildTurnFlux 每次订阅（Flux.defer）都会重建，
         // 因此「继续/恢复」的新一轮不会继承上一轮的相位。
@@ -227,6 +253,12 @@ public class WebStreamBuilder {
         // 消失」与「已有 delta 时聚合全文重复」二者择一。
 
         final boolean[] thinkingDeltaSinceEnd = {false};
+
+        // 单轮耗时与输出速度测量器。与 phase 同为 per-turn 局部状态：Flux.defer 每次订阅重建，
+        // 「继续/恢复」的新一轮重新计时。在后端测而非前端自行计时的原因：前端只有实时流才有
+        // 起算点，历史回放拿不到，且实时/回放两套算法必然漂移；后端在唯一出口测一次，
+        // 随 trace 落盘后历史消息同样可展示。
+        final TurnTimer timer = TurnTimer.start();
 
         return agent.prompt(prompt)
                 .session(session)
@@ -272,7 +304,7 @@ public class WebStreamBuilder {
                     String candidatePhase = nextPhase(chunk, phase[0]);
 
                     List<WebChunk> out = new ArrayList<>(2);
-                    for (WebChunk webChunk : mapEvent(session, chatModel, chunk, turnStartMs, thinkingDeltaSinceEnd[0])) {
+                    for (WebChunk webChunk : mapEvent(session, chatModel, chunk, turnStartMs, timer, thinkingDeltaSinceEnd[0])) {
                         if (webChunk == null || webChunk == WebChunk.EMPTY) {
                             continue;
                         }
@@ -281,6 +313,13 @@ public class WebStreamBuilder {
                         phase[0] = candidatePhase;
                         webChunk.setPhase(candidatePhase);
                         out.add(webChunk);
+
+                        // 计时只认「真正下发给用户的主代理可见内容帧」。放在映射之后而非之前，
+                        // 才能天然排除空增量帧、被过滤的内部工具帧与子代理帧——它们都不是
+                        // 用户看得到的「首字」，计入会让 TTFT 被无声提前。
+                        if (isVisibleOutputFrame(webChunk)) {
+                            timer.onVisibleOutput();
+                        }
                     }
                     if (chunk instanceof ReasonDeltaEvent) {
                         ReasonDeltaEvent delta = (ReasonDeltaEvent) chunk;
@@ -337,7 +376,9 @@ public class WebStreamBuilder {
                     WebChunk doneChunk = WebChunk.ofDone();
                     doneChunk.setPhase(WebChunk.PHASE_DONE);
                     return Flux.just(doneChunk);
-                }));
+                }))
+                // 本轮结束时（含 cancel/异常）清理 transient 上下文窗口覆盖，回到用户持久选择
+                .doFinally(signal -> ContextLengthPolicy.clearTransient(session));
     }
 
     /**
@@ -354,15 +395,20 @@ public class WebStreamBuilder {
      * @param chatModel   当前模型（供上下文指示器取窗口大小）
      * @param chunk       引擎事件
      * @param turnStartMs 本轮任务订阅时刻（毫秒）
+     * @param timer       本轮耗时测量器（用量结算时收口解码段，轮次结束时产出快照）
      * @return 待下发的帧列表，可能为空
      */
     private List<WebChunk> mapEvent(AgentSession session, ChatModel chatModel, AgentEvent chunk, long turnStartMs,
-                                    boolean thinkingDeltaSinceEnd) {
+                                    TurnTimer timer, boolean thinkingDeltaSinceEnd) {
         if (chunk instanceof ContextUsageEvent) {
             // 子代理的用量不刷全局上下文指示器：其 token 来自子代理模型，且会覆盖主代理指标并随会话快照长期留存。
+            // 计时同理：子代理在自己的时间线上解码（甚至并行），其 token 与主代理解码时长无对应关系。
             if (chunk.getMeta().containsKey("__parentAgentName")) {
                 return Collections.emptyList();
             }
+            // 一次主代理模型调用的用量结算：收口当前解码段，并把本次调用的输出 token 与之配对。
+            // 随后的工具执行时间落在段与段之间，天然不被计入。
+            timer.onUsageSettled(((ContextUsageEvent) chunk).getOutputTokens());
             return oneFrame(onContextUsageEvent(chatModel, (ContextUsageEvent) chunk));
         }
         if (chunk instanceof ReasonDeltaEvent) {
@@ -396,7 +442,7 @@ public class WebStreamBuilder {
             return oneFrame(onAgentEndEvent((AgentEndEvent) chunk));
         }
         if (chunk instanceof RunEndEvent) {
-            return oneFrame(onRunEndEvent(session, (RunEndEvent) chunk, turnStartMs));
+            return oneFrame(onRunEndEvent(session, (RunEndEvent) chunk, turnStartMs, timer));
         }
 
         // 以下事件<b>有意</b>不映射、不上送前端：
@@ -416,6 +462,31 @@ public class WebStreamBuilder {
         return (chunk == null || chunk == WebChunk.EMPTY)
                 ? Collections.<WebChunk>emptyList()
                 : Collections.singletonList(chunk);
+    }
+
+    /**
+     * 判定一个<b>即将下发的帧</b>是否属于「主代理的可见模型输出」——即用户真的会在屏幕上
+     * 看到的、由模型逐字生成的内容。
+     *
+     * <p><b>为什么只认正文与思考</b>：TTFT 的语义是「用户等了多久才看见第一个字」。
+     * 工具骨架帧、参数分片进度帧、工具执行生命周期帧都由系统在不同时机合成，
+     * 不是模型吐给用户的字；把它们当首帧会把 TTFT 测成一个用户根本没看到的时刻。</p>
+     *
+     * <p><b>为什么在映射之后判定</b>：此时空增量帧已归一为 EMPTY 并被丢弃，子代理帧已携带
+     * {@code agentName} 标记，内部工具帧已被过滤——无需再造一套平行的过滤规则。</p>
+     *
+     * @param frame 已确认要下发的帧
+     * @return 是则该帧到达时刻可作为首字/解码段起点
+     */
+    private static boolean isVisibleOutputFrame(WebChunk frame) {
+        String type = frame.getType();
+        if (!"text".equals(type) && !"reason".equals(type)) {
+            return false;
+        }
+        // 子代理的正文/思考会被路由进智能体卡片，其解码发生在另一条时间线上，
+        // 且其 token 不计入主代理的配对累加，故不得作为主轮的计时锚点。
+        Map<String, Object> args = frame.getArgs();
+        return args == null || !args.containsKey("agentName");
     }
 
     /**
@@ -530,7 +601,7 @@ public class WebStreamBuilder {
         wc.setCacheRate(event.getCacheRate());
         wc.setText(String.valueOf(event.getMessageCount()));
 
-        long contextLength = ContextLengthPolicy.resolve(event.getSession());
+        long contextLength = ContextLengthPolicy.resolveRuntime(event.getSession());
 
         Map<String, Object> args = new HashMap<>();
         args.put("contextLength", contextLength);
@@ -972,10 +1043,11 @@ public class WebStreamBuilder {
      *
      * @param session     Agent 会话，用于获取会话ID以进行 IM 通道转发
      * @param chunk       ReAct 最终汇总 chunk，包含追踪信息和可能的异常内容
-     * @param turnStartMs 本轮任务订阅时刻（毫秒），用于计算单轮耗时
+     * @param turnStartMs 本轮任务订阅时刻（毫秒），用于判定是否有可用起始时间
+     * @param timer       本轮耗时测量器，产出总时长 / TTFT / 解码段快照
      * @return 包含追踪信息的 trace 类型 WebChunk
      */
-    private WebChunk onRunEndEvent(AgentSession session, RunEndEvent chunk, long turnStartMs) {
+    private WebChunk onRunEndEvent(AgentSession session, RunEndEvent chunk, long turnStartMs, TurnTimer timer) {
         ReActTrace trace = chunk.getTrace();
 
         if (chunk.isAbnormal()) {
@@ -1004,7 +1076,10 @@ public class WebStreamBuilder {
             cacheRate = UsageNormalizer.cacheHitRate(inputTokens, cacheRead);
         }
         // 单轮耗时：从本轮订阅起算，而非 trace.getBeginTimeMs()（跨轮复用会累计成整段对话时长）。
-        Long elapsedSeconds = turnStartMs > 0 ? Duration.ofMillis(System.currentTimeMillis() - turnStartMs).getSeconds() : null;
+        // 耗时、TTFT 与解码段均由同一个测量器产出：保证口径一致，且不会出现
+        // 「28s vs 27993ms」这类跨精度自相矛盾的展示。本轮未产出可见输出（启动即异常、
+        // 被中途停止）时，快照内的 TTFT / 解码段为 null，前端展示占位符而非 0。
+        TurnTiming timing = timer.finish(turnStartMs);
 
         // 最终答案全量文本（去除 think 标签，与正文输出保持一致），供前端复制使用
         String finalAnswer = chunk.getContent();
@@ -1012,8 +1087,16 @@ public class WebStreamBuilder {
             finalAnswer = finalAnswer.replaceAll("(?s)<\\s*/?think\\s*>", "");
         }
 
-        return WebChunk.ofTrace(model, inputTokens, outputTokens,
-                cacheCreationTokens, cacheReadTokens, cacheRate, elapsedSeconds, finalAnswer);
+        // 模型稳定 uid：按 trace 里的模型名从引擎注册表取回 ModelDo 实例，确定性派生
+        // （SHA-256(provider|model) 前16hex）。仅用于统计归组，改名前后不变。
+        String modelId = null;
+        ChatConfig mc = engine.getModelOrNil(model);
+        if (mc instanceof ModelDo) {
+            modelId = ((ModelDo) mc).stableUid();
+        }
+
+        return WebChunk.ofTrace(model, modelId, inputTokens, outputTokens,
+                cacheCreationTokens, cacheReadTokens, cacheRate, timing, finalAnswer);
     }
 
     /**

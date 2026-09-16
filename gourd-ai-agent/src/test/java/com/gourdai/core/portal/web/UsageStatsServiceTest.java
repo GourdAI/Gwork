@@ -342,6 +342,52 @@ public class UsageStatsServiceTest {
         }
     }
 
+    /** uid 归组：改名前后两个名称 key（同一 uid）必须并成一条；无 uid 条目保持独立。 */
+    @Test
+    public void testModelDistributionMergesSplitNamesByUid() throws Exception {
+        Path base = Files.createTempDirectory("usage-uid-stats");
+        try {
+            LocalDate today = LocalDate.now();
+            String month = today.toString().substring(0, 7);
+            String d1 = today.toString();
+            Path dir = base.resolve(".gwork/usage");
+            Files.createDirectories(dir);
+            String json = "{\"month\":\"" + month + "\",\"days\":{\"" + d1 + "\":{"
+                    + "\"messages\":1,\"sessions\":[\"work-x\"],"
+                    + "\"models\":{"
+                    + "\"旧名-gpt\":{\"tokens\":100,\"input\":10,\"output\":90,\"cacheRead\":0,\"cacheCreation\":0,\"rounds\":1,\"uid\":\"uuuu0001\"},"
+                    + "\"新名-gpt\":{\"tokens\":200,\"input\":20,\"output\":180,\"cacheRead\":0,\"cacheCreation\":0,\"rounds\":2,\"uid\":\"uuuu0001\"},"
+                    + "\"孤儿-gpt\":{\"tokens\":50,\"input\":5,\"output\":45,\"cacheRead\":0,\"cacheCreation\":0,\"rounds\":1}"
+                    + "}}},\"watermarks\":{}}";
+            Files.write(dir.resolve("usage-" + month + ".json"), json.getBytes(StandardCharsets.UTF_8));
+
+            Map<String, Object> result = newStatsService(base).compute(30);
+
+            List<Map<String, Object>> models = list(result, "models");
+            Map<String, Object> merged = null;
+            Map<String, Object> orphan = null;
+            for (Map<String, Object> m : models) {
+                String name = String.valueOf(m.get("model"));
+                if (name.endsWith("-gpt") && !name.equals("孤儿-gpt")) {
+                    merged = m;
+                }
+                if ("孤儿-gpt".equals(name)) {
+                    orphan = m;
+                }
+            }
+            Assertions.assertNotNull(merged, "同 uid 的改名前后条目必须合并展示");
+            Assertions.assertEquals(300L, num(merged, "tokens"), "同 uid 的 token 必须相加");
+            String disp = String.valueOf(merged.get("model"));
+            Assertions.assertTrue("新名-gpt".equals(disp) || "旧名-gpt".equals(disp),
+                    "合并条显示名应为名称而非 uid，实际=" + disp);
+            Assertions.assertNotNull(orphan, "无 uid 条目保持独立");
+            Assertions.assertEquals(50L, num(orphan, "tokens"));
+            Assertions.assertEquals(2, models.size(), "3 个原始 key 应归为 2 条（1 个合并条 + 1 个独立条）");
+        } finally {
+            deleteRecursively(base.toFile());
+        }
+    }
+
     private void deleteRecursively(File f) {
         if (f == null || !f.exists()) {
             return;

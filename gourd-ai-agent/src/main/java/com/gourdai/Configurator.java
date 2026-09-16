@@ -483,7 +483,13 @@ public class Configurator {
         Thread t = new Thread(() -> {
             try {
                 Thread.sleep(3000L);
-                new UsageArchiveService(sessionLocator, AgentFlags.getHarnessBase()).archiveIncremental();
+                UsageArchiveService archiveService = new UsageArchiveService(sessionLocator, AgentFlags.getHarnessBase());
+                // 一次性存量回填（带标记防重跑）：给历史账本条目补模型稳定 uid，
+                // 使服务商改名/大小写变化产生的旧条目与后续新条目在统计页归并。
+                if (agentSettings != null) {
+                    archiveService.backfillModelUids(agentSettings.getModels());
+                }
+                archiveService.archiveIncremental();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (Throwable e) {

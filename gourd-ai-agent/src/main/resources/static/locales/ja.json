@@ -767,6 +767,7 @@
                                  "model_none":  "まだモデルが構成されていません。まず「設定 - モデル」でモデルを追加して有効にしてください。",
                                  "model_saved":  "ACP モデルを保存しました",
                                  "model_save_failed":  "保存に失敗しました。もう一度お試しください",
+                                 "context_save_failed":  "コンテキストの保存に失敗しました",
                                  "thinking_hint":  "推論の強さを制御します。「デフォルト」を選ぶとモデル本来の動作を使用",
                                  "thinking_saved":  "思考深度設定を保存しました",
                                  "thinking_save_failed":  "保存に失敗しました。もう一度お試しください",
@@ -873,6 +874,11 @@
                  "cache_hit_rate":  "キャッシュヒット率",
                  "output_tokens":  "出力 Token",
                  "elapsed_time":  "所要時間",
+                 "turn_timing":  "今回の所要時間",
+                 "elapsed_total":  "合計時間",
+                 "output_tps":  "出力速度（TPS）",
+                 "tps_unit":  "{n} tokens/\u79d2",
+                 "ttft":  "初回トークン遅延",
                  "agent_label":  "エージェント",
                  "edit_failed":  "失敗",
                  "files":  "ファイル",
@@ -1049,7 +1055,15 @@
 },
     "context":  {
                     "length":  "コンテキスト長: {0} / {1} ({2})",
-                    "cache":  "キャッシュ"
+                    "cache":  "キャッシュ",
+                    "meter_title":  "コンテキスト使用量",
+                    "used":  "使用済み",
+                    "percent":  "使用率",
+                    "cache_read":  "キャッシュ読取",
+                    "cache_write":  "キャッシュ書込",
+                    "turn_input":  "今回の入力",
+                    "turn_output":  "今回の出力",
+                    "messages":  "メッセージ数"
                 },
     "filer":  {
                   "expand":  "ファイルツリーを展開",

@@ -767,6 +767,7 @@
                                  "model_none":  "No model configured yet. Please add and enable one under Settings - Models first.",
                                  "model_saved":  "ACP model saved",
                                  "model_save_failed":  "Failed to save, please retry",
+                                 "context_save_failed":  "Failed to save context",
                                  "thinking_hint":  "Control reasoning effort; Default uses the model\u0027s own behavior",
                                  "thinking_saved":  "Thinking depth saved",
                                  "thinking_save_failed":  "Save failed, please retry",
@@ -873,6 +874,11 @@
                  "cache_hit_rate":  "Cache Hit Rate",
                  "output_tokens":  "Output Tokens",
                  "elapsed_time":  "Elapsed",
+                 "turn_timing":  "Turn Timing",
+                 "elapsed_total":  "Total Time",
+                 "output_tps":  "Output Speed (TPS)",
+                 "tps_unit":  "{n} tokens/s",
+                 "ttft":  "First Token Latency",
                  "agent_label":  "Agent",
                  "edit_failed":  "Failed",
                  "files":  "file(s)",
@@ -1054,7 +1060,15 @@
 },
     "context":  {
                     "length":  "Context length: {0} / {1} ({2})",
-                    "cache":  "Cache"
+                    "cache":  "Cache",
+                    "meter_title":  "Context Usage",
+                    "used":  "Used",
+                    "percent":  "Utilization",
+                    "cache_read":  "Cache Read",
+                    "cache_write":  "Cache Write",
+                    "turn_input":  "Turn Input",
+                    "turn_output":  "Turn Output",
+                    "messages":  "Messages"
                 },
     "filer":  {
                   "expand":  "Expand file tree",

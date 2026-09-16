@@ -15,6 +15,7 @@
  */
 package com.gourdai.core.portal.web;
 
+import com.gourdai.agent.ContextLengthPolicy;
 import com.gourdai.core.channel.dingtalk.DingTalkAppRegistration;
 import com.gourdai.core.channel.dingtalk.DingTalkQRBindManager;
 import com.gourdai.core.channel.feishu.FeishuAppRegistration;
@@ -3075,8 +3076,10 @@ public class WebSettingsController {
         data.put("defaultModel", resolveEffectiveModelName(null));
         // 思考深度
         data.put("acpThinkingDepth", settings.getGeneral().getAcpThinkingDepth());
-        // acpModel 对应的接口类型，供前端确定思考档位选项集（置空时同样回落实际生效模型）
-        data.put("acpModelStandard", getModelStandard(settings.getGeneral().getAcpModel()));
+
+        // 上下文窗口：与 acpModel 同口径，由本页预先选定（存入 general.acpContextLength）。
+        // 下发当前值（允许 null，前端视为“跟随默认”）。
+        data.put("acpContextLength", settings.getGeneral().getAcpContextLength());
 
         // models 由纯字符串数组升级为 {name, provider} 对象数组，供前端按供应商分组展示下拉
         List<Map<String, Object>> modelItems = new ArrayList<>();
@@ -3143,6 +3146,32 @@ public class WebSettingsController {
     }
 
     /**
+     * 保存 ACP（编码工具接入）使用的上下文窗口。
+     *
+     * <p>ACP 以独立子进程运行，不共享 Web/桌面端的会话窗口选择，故其上下文窗口需在此预先
+     * 指定并持久化到 {@code general.acpContextLength}。留空表示使用默认值；非空必须是固定
+     * 选项之一。保存后 ACP 子进程下一次 prompt 即生效（每轮重读最新配置并重设会话窗口）。</p>
+     */
+    @Post
+    @Mapping("/web/settings/acp/context/save")
+    public Result codingContextSave(@Param("acpContextLength") String acpContextLength) {
+        // 允许置空（回退默认值）；非空必须是固定选项之一，避免落盘一个前端永远渲染不出的档位
+        String raw = acpContextLength == null ? null : acpContextLength.trim();
+        Long value = null;
+        if (Assert.isNotEmpty(raw)) {
+            value = ContextLengthPolicy.parse(raw);
+            if (value == null || !ContextLengthPolicy.isAllowed(value.longValue())) {
+                return Result.failure(400, "Unsupported acpContextLength: " + acpContextLength);
+            }
+        }
+
+        settings.getGeneral().setAcpContextLength(value);
+        saveSettings();
+        LOG.info("[Settings] ACP context length updated: {}", value);
+        return Result.succeed();
+    }
+
+    /**
      * 解析模型名实际生效的模型。
      *
      * <p>与 {@code /web/chat/models} 下发 {@code selected} 同口径（均走
@@ -3157,21 +3186,4 @@ public class WebSettingsController {
         return config == null ? "" : config.getNameOrModel();
     }
 
-    /**
-     * 获取模型的接口类型（standard）。
-     * 如果模型不存在或为空，则返回默认模型的接口类型。
-     */
-    private String getModelStandard(String modelName) {
-        // 与 defaultModel 同口径走引擎解析：空值、悬空或已禁用的模型名均回落到实际生效模型，
-        // 否则 defaultModel 未配置时这里会返回空串，前端思考档位选项集会退化到通用集。
-        String targetModel = resolveEffectiveModelName(modelName);
-        if (Assert.isEmpty(targetModel)) {
-            return "";
-        }
-        com.gourdai.core.config.entity.ModelDo modelConfig = settings.getModels().get(targetModel);
-        if (modelConfig != null) {
-            return modelConfig.getStandardOrProvider() != null ? modelConfig.getStandardOrProvider() : "";
-        }
-        return "";
-    }
 }

@@ -831,7 +831,7 @@ public class WebGate extends SimpleWebSocketListener {
      * Stop 会调用 {@link #interruptSession}，两者都要抢同一把会话锁，持锁等待必然死锁。</p>
      */
     private SyncRunHandle startSyncRun(AgentSession session, String sessionCwd, Prompt prompt, String selectedModel, String agentName,
-                                       boolean transientSelection, String thinkingDepthOverride) {
+                                       boolean transientSelection, String thinkingDepthOverride, Long contextLengthOverride) {
         String sessionId = session.getSessionId();
 
         if (selectedModel != null) {
@@ -857,7 +857,7 @@ public class WebGate extends SimpleWebSocketListener {
         final java.util.concurrent.atomic.AtomicReference<String> runIdSeen = new java.util.concurrent.atomic.AtomicReference<>();
         final String changeRoot = resolveChangeRoot(sessionId, sessionCwd);
         // 同异步路径：传 changeRoot 以保证「写账本的根 == 收口的根 == 前端读取的根」
-        Disposable disposable = streamBuilder.buildStreamFlux(session, agent, chatModel, changeRoot, prompt, thinkingDepthOverride)
+        Disposable disposable = streamBuilder.buildStreamFlux(session, agent, chatModel, changeRoot, prompt, thinkingDepthOverride, contextLengthOverride)
                 .subscribeOn(Schedulers.boundedElastic())
                 .doOnNext(line -> {
                     if (line.getRunId() != null) runIdSeen.compareAndSet(null, line.getRunId());
@@ -1147,14 +1147,16 @@ public class WebGate extends SimpleWebSocketListener {
      * @param projectRoot 会话所属工作空间根绝对路径（可为 null，回退默认工作区）
      */
     public String safeChatInputAndCaptureLoop(String sessionId, String projectRoot, String input, String source) {
-        return safeChatInputAndCaptureLoop(sessionId, projectRoot, null, input, source, null, null);
+        return safeChatInputAndCaptureLoop(sessionId, projectRoot, null, input, source, null, null, null);
     }
 
     /**
-     * Loop 专用：带完整执行上下文（工作空间 / 模型 / 思考档位）的安全聊天输入入口。
+     * Loop 专用：带完整执行上下文（工作空间 / 模型 / 思考档位 / 上下文窗口）的安全聊天输入入口。
      *
      * <p>模型与思考档位按「任务定义」生效且<b>不写入会话上下文</b>：定时任务可能复用
-     * 用户绑定的前台会话，若写入上下文会静默改掉用户在界面上的模型/思考选择。</p>
+     * 用户绑定的前台会话，若写入上下文会静默改掉用户在界面上的模型/思考选择。
+     * 上下文窗口同理按任务定义生效，但以「本轮」transient 键写入会话（压缩预算与用量指示器
+     * 同源读取），本轮结束即清理，同样不触碰用户的持久选择。</p>
      *
      * @param projectRoot   会话所属工作空间根绝对路径（可为 null，回退默认工作区）
      * @param worktreeRoot  本轮 worktree 绝对路径（可为 null）。非空时作为本轮 AI 工作目录，
@@ -1162,9 +1164,10 @@ public class WebGate extends SimpleWebSocketListener {
      *                      若持久化会留下指向不存在目录的所属根。
      * @param modelName     任务指定的模型名（可为 null，回退会话/默认模型）
      * @param thinkingDepth 任务指定的思考档位（可为 null，回退会话选择）
+     * @param contextLengthOverride 任务指定的上下文窗口（可为 null，回退会话持久选择）
      */
     public String safeChatInputAndCaptureLoop(String sessionId, String projectRoot, String worktreeRoot, String input, String source,
-                                              String modelName, String thinkingDepth) {
+                                              String modelName, String thinkingDepth, Long contextLengthOverride) {
         LoopRunPlan plan;
         SyncRunHandle handle;
         // 会话输入锁只在「受理准备 + 订阅登记」这一短临界区内持有。
@@ -1175,7 +1178,7 @@ public class WebGate extends SimpleWebSocketListener {
             plan = doSafeChatInputAndCaptureLoopPrepare(sessionId, projectRoot, worktreeRoot, input, source);
             if (plan == null) return null;
             if (plan.earlyResult != null) return plan.earlyResult;
-            handle = startSyncRun(plan.session, plan.cwd, Prompt.of(plan.input), modelName, plan.agentName, true, thinkingDepth);
+            handle = startSyncRun(plan.session, plan.cwd, Prompt.of(plan.input), modelName, plan.agentName, true, thinkingDepth, contextLengthOverride);
         }
         // 锁外等待：此时锁已释放，流线程可正常完成 run 注册与插话，Stop 也可即时受理。
         return handle.await();

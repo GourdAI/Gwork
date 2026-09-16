@@ -639,7 +639,15 @@ body.code-mode #chatView .run-hint-kbd-wide { min-width: 20px; }
 body.code-mode #chatView .input-wrap { padding: 6px 10px 12px; }
 body.code-mode #chatView .input-box { max-width: 100%; }
 body.code-mode #chatView .todo-chip-wrap { max-width: 100%; }
-body.code-mode #chatView .context-status { max-width: 100%; }
+/* code 模式对话栏约 440px：右区排不下「上下文环 + 模型名 + 语音 + 发送」，
+   先牵模型名（可省略）保证按钮不被挤变形；明细卡改按内容宽并限制在栏宽内，避免横向溢出。 */
+body.code-mode #chatView .toolbar-right .model-selector-current { max-width: 128px; padding-left: 7px; padding-right: 7px; }
+body.code-mode #chatView .toolbar-right .model-selector-current .model-name { max-width: 70px; }
+/* 弹层宽度：不能用 100%——百分比相对的是只有几十像素的 .context-meter / .trace-item 宿主，
+   算出来的上限比卡片内容还窄，长语言下文字会溢出背景。改用视口单位并预留边距，
+   使卡片在窄栏 code 模式下也不会被截断。 */
+body.code-mode #chatView .context-meter-pop { min-width: 0; width: max-content; max-width: min(320px, calc(100vw - 32px)); }
+body.code-mode #chatView .trace-pop { min-width: 0; width: max-content; max-width: min(320px, calc(100vw - 32px)); }
 
 /* ---- 思考块 / 工具卡 / 批量分组：code 模式紧凑化 ----
    窄对话栏里默认 13px 字号 + 10px/14px 内边距的块显得又大又占地方，

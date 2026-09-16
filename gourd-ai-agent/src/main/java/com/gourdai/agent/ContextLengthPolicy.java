@@ -35,6 +35,8 @@ import java.util.List;
 public final class ContextLengthPolicy {
     /** 会话快照中的上下文窗口键。 */
     public static final String CONTEXT_LENGTH_KEY = "_context_length";
+    /** 会话快照中的「本轮」上下文窗口键：Loop 任务等按轮覆盖，不参与持久选择。 */
+    public static final String TRANSIENT_CONTEXT_LENGTH_KEY = "_context_length_turn";
     /** 缺省上下文窗口，单位为十进制 token。 */
     public static final long DEFAULT_CONTEXT_LENGTH = 256_000L;
 
@@ -53,6 +55,24 @@ public final class ContextLengthPolicy {
     /** 从 FlowContext 读取有效上下文窗口。 */
     public static long resolve(FlowContext context) {
         return context == null ? DEFAULT_CONTEXT_LENGTH : normalize(context.get(CONTEXT_LENGTH_KEY));
+    }
+
+    /**
+     * 从 AgentSession 读取「运行中」生效的上下文窗口：本轮 transient 覆盖优先（合法时），
+     * 否则回落到持久选择 {@link #resolve(AgentSession)}。
+     *
+     * <p>压缩预算与上下文用量指示器等运行时消费者应使用本方法：Loop 任务按轮覆盖时
+     * 既不污染用户持久选择，压缩与界面显示也始终同源。</p>
+     */
+    public static long resolveRuntime(AgentSession session) {
+        if (session == null) {
+            return DEFAULT_CONTEXT_LENGTH;
+        }
+        Long transientValue = parse(session.getContext().get(TRANSIENT_CONTEXT_LENGTH_KEY));
+        if (transientValue != null && isAllowed(transientValue.longValue())) {
+            return transientValue.longValue();
+        }
+        return resolve(session);
     }
 
     /**
@@ -99,7 +119,7 @@ public final class ContextLengthPolicy {
     /** 将任意值归一化；缺失、格式错误或非固定选项统一回落默认值。 */
     public static long normalize(Object raw) {
         Long parsed = parse(raw);
-        // 显式取 longValue：避免与 isAllowed(Object) 重载共存时优先匹配到 Object 版本而重复解析一次
+        // 显式取 longValue：保持 long 口径判断（避免依赖自动拆箱）
         return parsed != null && isAllowed(parsed.longValue()) ? parsed : DEFAULT_CONTEXT_LENGTH;
     }
 
@@ -132,9 +152,37 @@ public final class ContextLengthPolicy {
         context.put(CONTEXT_LENGTH_KEY, contextLength);
     }
 
-    /** 复制父会话的有效上下文窗口；父会话缺失或非法时写入固定默认值。 */
+    /**
+     * 将合法的「本轮」上下文窗口写入 AgentSession（Loop 任务运行时覆盖，不污染持久选择）。
+     *
+     * @throws IllegalArgumentException 数值不在固定选项内时
+     */
+    public static void setTransient(AgentSession session, long contextLength) {
+        if (session == null) {
+            return;
+        }
+        if (!isAllowed(contextLength)) {
+            throw new IllegalArgumentException("contextLength must be one of " + CONTEXT_LENGTH_OPTIONS);
+        }
+        session.getContext().put(TRANSIENT_CONTEXT_LENGTH_KEY, contextLength);
+    }
+
+    /** 清除 AgentSession 上的「本轮」上下文窗口覆盖（幂等；未设置时为空操作）。 */
+    public static void clearTransient(AgentSession session) {
+        if (session == null) {
+            return;
+        }
+        session.getContext().remove(TRANSIENT_CONTEXT_LENGTH_KEY);
+    }
+
+    /**
+     * 复制父会话的有效上下文窗口；父会话缺失或非法时写入固定默认值。
+     *
+     * <p>取「运行中」生效值（含本轮 transient 覆盖）：子代理在某一轮之内创建，
+     * 应继承该轮实际生效的预算，避免主代理用覆盖值、子代理却按持久选择提前压缩。</p>
+     */
     public static long copy(AgentSession parent, AgentSession child) {
-        long contextLength = resolve(parent);
+        long contextLength = resolveRuntime(parent);
         set(child, contextLength);
         return contextLength;
     }

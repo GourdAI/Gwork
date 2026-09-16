@@ -15,6 +15,7 @@
  */
 package com.gourdai.core.command.builtin;
 
+import com.gourdai.agent.ContextLengthPolicy;
 import lombok.Getter;
 import org.noear.snack4.ONode;
 
@@ -65,6 +66,8 @@ public class LoopTask {
     private final String modelName;          // 指定模型名（null 表示跟随默认模型）
     // 思考深度档位：null = 未设置（仅旧数据，执行时跟随运行时会话的选择）；"off" = 显式关闭思考
     private final String thinkingDepth;
+    // 上下文窗口（token）：null = 未设置（执行时使用全局默认）；合法值为 ContextLengthPolicy 固定选项之一
+    private final Long contextLength;
     private final int maxIterations;         // 最大迭代次数（0 = 不限制）
     private final boolean runNow;            // 注册后立即执行首次（initialDelay=0）
 
@@ -109,7 +112,7 @@ public class LoopTask {
                      boolean enabled,
                      String goalCondition, boolean worktreeEnabled, String worktreeBranch,
                      String channelNotify, String boundSessionId, String workspace,
-                     String modelName, String thinkingDepth,
+                     String modelName, String thinkingDepth, Long contextLength,
                      int maxIterations, boolean runNow,
                      boolean cancelled, String lastResult, Instant lastExecutedAt, int currentIteration) {
         this.id = id;
@@ -128,6 +131,7 @@ public class LoopTask {
         this.workspace = blankToNull(workspace);
         this.modelName = blankToNull(modelName);
         this.thinkingDepth = blankToNull(thinkingDepth);
+        this.contextLength = normalizeContextLength(contextLength);
         this.maxIterations = maxIterations;
         this.runNow = runNow;
         this.cancelled = cancelled;
@@ -152,7 +156,7 @@ public class LoopTask {
                     String goalCondition, Boolean worktreeEnabled,
                     Integer maxIterations, boolean runNow) {
         this(prompt, intervalMinutes, cron, goalCondition, worktreeEnabled, maxIterations, runNow,
-                null, null, null, null, null);
+                null, null, null, null, null, null);
     }
 
     /**
@@ -161,13 +165,14 @@ public class LoopTask {
      * @param workspace     执行任务的工作空间根绝对路径（null 表示默认工作区）
      * @param modelName     指定模型名（null 表示跟随默认模型）
      * @param thinkingDepth 思考深度档位（null = 未设置，跟随会话选择；"off" = 显式关闭）
+     * @param contextLength 上下文窗口（null = 未设置，执行时使用全局默认；合法值为 ContextLengthPolicy 固定选项之一）
      * @param channelNotify 结果推送通道（null 表示不推送）
      * @param boundSessionId 绑定的会话 ID（null 表示使用任务自己的运行时会话）
      */
     public LoopTask(String prompt, int intervalMinutes, String cron,
                     String goalCondition, Boolean worktreeEnabled,
                     Integer maxIterations, boolean runNow,
-                    String workspace, String modelName, String thinkingDepth,
+                    String workspace, String modelName, String thinkingDepth, Long contextLength,
                     String channelNotify, String boundSessionId) {
         this.id = UUID.randomUUID().toString().substring(0, 8);
         this.prompt = prompt;
@@ -185,6 +190,7 @@ public class LoopTask {
         this.workspace = blankToNull(workspace);
         this.modelName = blankToNull(modelName);
         this.thinkingDepth = blankToNull(thinkingDepth);
+        this.contextLength = normalizeContextLength(contextLength);
         this.maxIterations = normalizeMaxIterations(maxIterations);
         this.runNow = runNow;
         this.currentIteration = 0;
@@ -211,16 +217,23 @@ public class LoopTask {
     }
 
     /**
+     * 归一上下文窗口：仅保留固定选项内的合法值，其余（含 null）一律视为未设置（跟随全局默认）。
+     */
+    private static Long normalizeContextLength(Long contextLength) {
+        return contextLength != null && ContextLengthPolicy.isAllowed(contextLength) ? contextLength : null;
+    }
+
+    /**
      * 基于当前任务复制出一份更新后的任务定义，保留任务身份和运行时状态。
      *
-     * <p>执行上下文（workspace / modelName / thinkingDepth / channelNotify / boundSessionId）沿用原值。</p>
+     * <p>执行上下文（workspace / modelName / thinkingDepth / contextLength / channelNotify / boundSessionId）沿用原值。</p>
      */
     public LoopTask copyWithUpdate(String prompt, int intervalMinutes, String cron,
                                     String goalCondition, Boolean worktreeEnabled,
                                     Integer maxIterations, Boolean runNow) {
         return copyWithUpdate(prompt, intervalMinutes, cron, goalCondition, worktreeEnabled,
                 maxIterations, runNow,
-                this.workspace, this.modelName, this.thinkingDepth,
+                this.workspace, this.modelName, this.thinkingDepth, this.contextLength,
                 this.channelNotify, this.boundSessionId);
     }
 
@@ -233,7 +246,7 @@ public class LoopTask {
     public LoopTask copyWithUpdate(String prompt, int intervalMinutes, String cron,
                                     String goalCondition, Boolean worktreeEnabled,
                                     Integer maxIterations, Boolean runNow,
-                                    String workspace, String modelName, String thinkingDepth,
+                                    String workspace, String modelName, String thinkingDepth, Long contextLength,
                                     String channelNotify, String boundSessionId) {
         LoopTask task = new LoopTask(
                 this.id,
@@ -252,6 +265,7 @@ public class LoopTask {
                 workspace,
                 modelName,
                 thinkingDepth,
+                contextLength,
                 normalizeMaxIterations(maxIterations),
                 runNow != null ? runNow : this.runNow,
                 this.cancelled,
@@ -406,6 +420,7 @@ public class LoopTask {
         if (workspace != null) node.set("workspace", workspace);
         if (modelName != null) node.set("modelName", modelName);
         if (thinkingDepth != null) node.set("thinkingDepth", thinkingDepth);
+        if (contextLength != null) node.set("contextLength", contextLength);
         if (maxIterations != DEFAULT_MAX_ITERATIONS) node.set("maxIterations", maxIterations);
         if (runNow) node.set("runNow", true);
 
@@ -448,6 +463,18 @@ public class LoopTask {
                 ? node.get("modelName").getString() : null;
         String thinkingDepthVal = node.getOrNull("thinkingDepth") != null
                 ? node.get("thinkingDepth").getString() : null;
+        // 上下文窗口：缺失或非法（非固定选项）一律视为未设置（跟随全局默认）
+        Long contextLengthVal = null;
+        if (node.getOrNull("contextLength") != null) {
+            try {
+                long raw = node.get("contextLength").getLong();
+                if (ContextLengthPolicy.isAllowed(raw)) {
+                    contextLengthVal = raw;
+                }
+            } catch (RuntimeException ignored) {
+                // 损坏值：忽略，保持未设置
+            }
+        }
         int maxIterationsVal = node.getOrNull("maxIterations") != null
                 ? node.get("maxIterations").getInt() : DEFAULT_MAX_ITERATIONS;
         int currentIterationVal = node.getOrNull("currentIteration") != null
@@ -473,6 +500,7 @@ public class LoopTask {
                 workspaceVal,
                 modelNameVal,
                 thinkingDepthVal,
+                contextLengthVal,
                 maxIterationsVal,
                 runNowVal,
                 node.getOrNull("cancelled") != null

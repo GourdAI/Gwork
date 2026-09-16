@@ -1654,9 +1654,104 @@ function clearRetryChunk(sess) {
 /* ===== Trace Badge =====
    只展示耗时。token 用量（输入/缓存/输出）故意不在此展示：
    本行数据源为 trace.getMetrics()，是「本轮累计」口径（所有 ReAct 迭代求和）；
-   而输入框上方的上下文指示条是「本次推理」口径（每轮 onReasonEnd 覆盖一次）。
+   而工具栏的上下文进度环是「本次推理」口径（每轮 onReasonEnd 覆盖一次）。
    两者分母不同，数字天然对不上（尤其缓存命中率：累计值含首次冷缓存，按输入量加权后必然低于末次），
-   并列展示会让用户误以为统计出错。故用量统一只在指示条展示一处。 */
+   并列展示会让用户误以为统计出错。故用量统一只在进度环展示一处。
+   例外：outputTokens 仅作为 TPS 的分子参与计算，不以绝对量形式显示，不构成口径歧义。 */
+
+/** HTML 转义（与 appendTraceBadge 内部 esc 同口径，供耗时详情卡复用）。 */
+function traceEsc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+}
+
+/**
+ * 耗时徽标文本。
+ * <p>优先用毫秒字段 {@code elapsedMs}（四舍五入到秒，比旧的向下截断更准：27.6s 旧显 27s、今显 28s）；
+ * 旧历史帧没有该字段，回退整秒 {@code elapsedSeconds}，行为与改动前一致。</p>
+ * @param {Object} chunk - trace 帧
+ * @param {Function} fmtSec - 秒→人读文本的格式化函数
+ * @returns {?string} 无任何耗时字段时返回 null
+ */
+function traceElapsedText(chunk, fmtSec) {
+    if (chunk.elapsedMs != null && chunk.elapsedMs >= 0) {
+        var s = Math.round(chunk.elapsedMs / 1000);
+        // 亚秒轮次不写 "0s"（会被读成「没执行」）
+        return s < 1 ? '<1s' : fmtSec(s);
+    }
+    if (chunk.elapsedSeconds != null) return fmtSec(chunk.elapsedSeconds);
+    return null;
+}
+
+/**
+ * 输出速度（TPS）文本。
+ * <p><b>口径</b>：{@code generatedTokens / generationMs}——两个值由后端成对产出，
+ * 统计范围严格一致：只计模型真正在解码的时间与那些解码段产出的 token，
+ * 工具执行、审批等待、子代理调度均不在内。所以这是真实解码速度，可用于模型间横向比较。</p>
+ * <p><b>为何不用 outputTokens 与 elapsedMs</b>：前者是整轮累计（还会并入子代理产出），
+ * 后者含大量非解码时间，二者相除既不是解码速度也不是可比的吞吐量。</p>
+ * <p><b>缺失即不展示</b>：旧历史帧没有这对字段，此时返回 null 让该行整行省略。
+ * 绝不退回用总时长顶替——那会把一个口径不同的数字伪装成同一个指标。</p>
+ * @param {Object} chunk - trace 帧
+ * @returns {?string} 数据不足时返回 null
+ */
+function traceTpsText(chunk) {
+    var tokens = chunk.generatedTokens;
+    var genMs = chunk.generationMs;
+    if (tokens == null || !(tokens > 0)) return null;
+    if (genMs == null || !(genMs > 0)) return null;
+
+    var tps = tokens / (genMs / 1000);
+    if (!isFinite(tps) || !(tps > 0)) return null;
+
+    var num = tps >= 100 ? Math.round(tps) : Math.round(tps * 10) / 10;
+    return GourdI18n.t('chat.tps_unit').replace('{n}', num);
+}
+
+/**
+ * 首 Token 延迟文本（不足 1 秒用 ms，否则用 2 位小数的秒）。
+ * <p>该字段本次改动才新增，旧历史消息恒为 null，此时该行整行省略而非显示 0。</p>
+ * @param {Object} chunk - trace 帧
+ * @returns {?string} 无值时返回 null
+ */
+function traceTtftText(chunk) {
+    if (chunk.ttftMs == null || !(chunk.ttftMs >= 0)) return null;
+    var ms = chunk.ttftMs;
+    if (ms < 1000) return Math.round(ms) + 'ms';
+    return (Math.round(ms / 10) / 100).toFixed(2) + 's';
+}
+
+/**
+ * 构建耗时详情卡 HTML（悬停/聚焦 trace 徽标展开）。
+ * <p><b>全部用 span 而非 div</b>：宿主 .trace-item 是 span，内嵌 div 会被 HTML 解析器
+ * 提前断开 span，卡片会被抛出到徽标外面；块级布局全靠 CSS display 达成。</p>
+ * <p>仅有总用时一项（TPS 与 TTFT 都缺失，如旧历史帧）时返回空串，
+ * 调用方会退回原生 title 提示——只有一行与徽标重复的卡片没有信息增量。</p>
+ * @param {Object} chunk - trace 帧
+ * @param {string} elapsedTxt - 已格式化的总用时文本
+ * @returns {string} 卡片 HTML，不值得展示时为空串
+ */
+function buildTracePop(chunk, elapsedTxt) {
+    function row(label, value) {
+        return '<span class="trace-pop-row">'
+            + '<span class="trace-pop-label">' + traceEsc(label) + '</span>'
+            + '<span class="trace-pop-value">' + traceEsc(value) + '</span>'
+            + '</span>';
+    }
+    var tps = traceTpsText(chunk);
+    var ttft = traceTtftText(chunk);
+    if (!tps && !ttft) return '';
+
+    var html = '<span class="trace-pop">'
+        + '<span class="trace-pop-title">' + TRACE_TIME_SVG
+        + traceEsc(GourdI18n.t('chat.turn_timing')) + '</span>'
+        + row(GourdI18n.t('chat.elapsed_total'), elapsedTxt);
+    if (tps) html += row(GourdI18n.t('chat.output_tps'), tps);
+    if (ttft) html += row(GourdI18n.t('chat.ttft'), ttft);
+    return html + '</span>';
+}
+
 function appendTraceBadge(sess, chunk) {
     ensureAssistantBubble(sess);
     // 后端携带的最终答案为权威复制源，写到当前 .md-content 的 data-md-raw（与历史消息统一属性名），供复制按钮读取。
@@ -1671,16 +1766,32 @@ function appendTraceBadge(sess, chunk) {
         if (s >= 60) { var m = Math.floor(s / 60), r = s % 60; return r > 0 ? m + 'min ' + r + 's' : m + 'min'; }
         return s + 's';
     }
-    // 图标化：以小图标替代"耗时"文字标签，节省横向空间；title 保留完整中文语义以便悬停理解
+    // 图标化：以小图标替代“耗时”文字标签，节省横向空间；悬停/点击展开耗时详情卡承载完整语义
     function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-    function item(icon, val, tip) {
-        return '<span class="trace-item" title="' + esc(tip) + '"><span class="trace-ic">' + icon + '</span>' + esc(val) + '</span>';
+    /**
+     * 渲染一个耗时徽标。
+     * <p>有详情卡时做成可聚焦的 disclosure（支持键盘与触屏）；无卡时退回纯展示 + 原生 title。
+     * 属性按数组拼接而非在三元表达式里接半截引号：后者漏一个引号就会静默生成破碎 HTML。</p>
+     */
+    function item(icon, val, pop) {
+        var cls = 'trace-item' + (pop ? ' has-pop' : '');
+        var attrs = ' class="' + cls + '"';
+        if (pop) {
+            // 触屏与读屏软件依赖显式语义：纯 CSS :hover 在触屏上不可靠
+            attrs += ' tabindex="0" role="button" aria-expanded="false"'
+                + ' aria-label="' + esc(GourdI18n.t('chat.turn_timing')) + '"';
+        } else {
+            attrs += ' title="' + esc(GourdI18n.t('chat.elapsed_time')) + '"';
+        }
+        return '<span' + attrs + '><span class="trace-ic" aria-hidden="true">' + icon + '</span>'
+            + esc(val) + (pop || '') + '</span>';
     }
     var parts = [];
-    if (chunk.elapsedSeconds != null) parts.push(item(TRACE_TIME_SVG, fmtSec(chunk.elapsedSeconds), GourdI18n.t('chat.elapsed_time')));
+    var elapsedTxt = traceElapsedText(chunk, fmtSec);
+    if (elapsedTxt != null) parts.push(item(TRACE_TIME_SVG, elapsedTxt, buildTracePop(chunk, elapsedTxt)));
     if (parts.length === 0) return;
 
-    // \u521b\u5efa\u6216\u66f4\u65b0 trace \u5143\u7d20
+    // 创建或更新 trace 元素
     var row = sess.currentBubbleEl ? $(sess.currentBubbleEl).closest('.msg-row')[0] : null;
     if (!row) return;
 
@@ -1689,10 +1800,10 @@ function appendTraceBadge(sess, chunk) {
 
     var traceEl = $(metaRow).find('.msg-trace')[0];
     if (traceEl) {
-        // \u5982\u679c\u5df2\u5b58\u5728\uff0c\u66f4\u65b0\u5185\u5bb9
+        // 已存在：更新内容（同一 trace 重复回放不得追加出第二个徽标）
         traceEl.innerHTML = parts.join('');
     } else {
-        // \u5982\u679c\u4e0d\u5b58\u5728\uff0c\u521b\u5efa\u65b0\u7684 trace \u5143\u7d20
+        // 不存在：创建新的 trace 元素
         var badge = $('<span>').addClass('msg-trace');
         badge[0].innerHTML = parts.join('');
         $(metaRow).append(badge[0]);
@@ -1700,6 +1811,39 @@ function appendTraceBadge(sess, chunk) {
 
     if (sess.sessionId === activeSessionId) scrollToBottom();
 }
+
+/* ---- 耗时详情卡：触屏/键盘开合 ----
+   纯 CSS :hover 在触屏设备上不可靠（需要二次点击且无法关闭），故叠加一层显式开合：
+   点击徽标切换 is-open，点击外部或按 Escape 关闭。所有绑定走 document 委托，
+   因为徽标会被流式渲染与历史回放反复重建，直接绑定会失效。 */
+function closeAllTracePops(exceptEl) {
+    $('.trace-item.has-pop.is-open').each(function () {
+        if (exceptEl && this === exceptEl) return;
+        $(this).removeClass('is-open').attr('aria-expanded', 'false');
+    });
+}
+
+$(document).on('click', '.trace-item.has-pop', function (e) {
+    // 卡片内部点击（如选中数值）不应触发关闭
+    if ($(e.target).closest('.trace-pop').length) return;
+    e.stopPropagation();
+    var willOpen = !$(this).hasClass('is-open');
+    closeAllTracePops(this);
+    $(this).toggleClass('is-open', willOpen).attr('aria-expanded', willOpen ? 'true' : 'false');
+});
+
+$(document).on('keydown', '.trace-item.has-pop', function (e) {
+    // 键盘可达：Enter/Space 开合，Escape 关闭并保留焦点
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        $(this).trigger('click');
+    } else if (e.key === 'Escape') {
+        $(this).removeClass('is-open').attr('aria-expanded', 'false');
+    }
+});
+
+$(document).on('click', function () { closeAllTracePops(null); });
+$(document).on('keydown', function (e) { if (e.key === 'Escape') closeAllTracePops(null); });
 
 /* ===== Agent Card (子代理智能体卡片 — 容器型)
    结构：

@@ -132,16 +132,21 @@ test('三处渲染均接入公共下拉模块', () => {
     const history = fs.readFileSync(path.join(staticJs, 'app-history.js'), 'utf8');
     const automation = fs.readFileSync(path.join(staticJs, 'app-automation.js'), 'utf8');
     const acp = fs.readFileSync(path.join(staticJs, 'app-settings-acp.js'), 'utf8');
-    for (const src of [history, automation, acp]) {
-        assert.match(src, /GourdModelDropdown\.render\(/);
-        assert.match(src, /GourdModelDropdown\.setCollapsed\(/);
+    const selector = fs.readFileSync(path.join(staticJs, 'model-selector.js'), 'utf8');
+    // 聊天页直接使用；自动化/ACP 经公共选择器组件（model-selector.js）间接使用（组件内集中调用）
+    assert.match(history, /GourdModelDropdown\.render\(/);
+    assert.match(history, /GourdModelDropdown\.setCollapsed\(/);
+    assert.match(selector, /GourdModelDropdown\.render\(/);
+    assert.match(selector, /GourdModelDropdown\.setCollapsed\(/);
+    for (const src of [automation, acp]) {
+        assert.match(src, /GourdModelSelector\.create\(/);
     }
     // 搜索框骨架：聊天页写在 chat.html，另两处由公共模块生成
     assert.match(automation, /GourdModelDropdown\.searchHtml\(/);
     assert.match(acp, /GourdModelDropdown\.searchHtml\(/);
 
     // ACP / 自动化已与会话页对齐：不再传 leading 首项，而是用 effectiveModel() 做展示层回落
-    for (const src of [history, automation, acp]) {
+    for (const src of [history, automation, acp, selector]) {
         assert.doesNotMatch(src, /leading\s*:/, '不应再向公共渲染器传 leading 首项');
     }
     for (const src of [automation, acp]) {
@@ -154,9 +159,13 @@ test('三处渲染均接入公共下拉模块', () => {
     assert.match(chatHtml, /id="chatModelList"/);
     assert.equal((chatHtml.match(/class="model-search-input"/g) || []).length, 2);
 
-    // 新模块必须在 app-history.js 之前加载
+    // 新模块必须在 app-history.js 之前加载；公共选择器又必须在其依赖 model-dropdown-ui.js 之后、
+    // 消费方（app-automation.js / app-settings-acp.js）之前
     const bootstrap = fs.readFileSync(path.join(staticJs, 'app-bootstrap.js'), 'utf8');
     assert.ok(bootstrap.indexOf('model-dropdown-ui.js') < bootstrap.indexOf('app-history.js'));
+    assert.ok(bootstrap.indexOf('model-dropdown-ui.js') < bootstrap.indexOf('model-selector.js'));
+    assert.ok(bootstrap.indexOf('model-selector.js') < bootstrap.indexOf('app-automation.js'));
+    assert.ok(bootstrap.indexOf('model-selector.js') < bootstrap.indexOf('app-settings-acp.js'));
 });
 
 test('12 个语言包均补齐搜索/折叠文案键', () => {
@@ -231,11 +240,14 @@ test('scrollToActive：无选中项 / 折叠不可见时安全降级（返回 fa
 
 test('三处选择器打开时统一接入打开定位，失败退回置顶（契约）', () => {
     const history = fs.readFileSync(path.join(staticJs, 'app-history.js'), 'utf8');
-    const automation = fs.readFileSync(path.join(staticJs, 'app-automation.js'), 'utf8');
-    const acp = fs.readFileSync(path.join(staticJs, 'app-settings-acp.js'), 'utf8');
+    const selector = fs.readFileSync(path.join(staticJs, 'model-selector.js'), 'utf8');
     const openFallback = /if \(listEl && !GourdModelDropdown\.scrollToActive\(listEl\)\) listEl\.scrollTop = 0;/;
-    for (const [name, src] of [['app-history.js', history], ['app-automation.js', automation], ['app-settings-acp.js', acp]]) {
-        assert.match(src, openFallback, `${name} 的打开处理应接入 scrollToActive 并带置顶降级`);
+    assert.match(history, openFallback, 'app-history.js 的打开处理应接入 scrollToActive 并带置顶降级');
+    assert.match(selector, openFallback, '公共选择器组件的打开处理应接入 scrollToActive 并带置顶降级');
+    // 自动化 / ACP 的打开定位由公共组件提供 —— 两页必须消费组件（间接获得该行为）
+    for (const name of ['app-automation.js', 'app-settings-acp.js']) {
+        const src = fs.readFileSync(path.join(staticJs, name), 'utf8');
+        assert.match(src, /GourdModelSelector\.create\(/, `${name} 应接入公共选择器`);
     }
     // 打开路径不得回退为无条件置顶：聊天页仅剩搜索输入一处 scrollTop(0)
     assert.equal((history.match(/scrollTop\(0\)/g) || []).length, 1);

@@ -1394,7 +1394,10 @@ function replaySession(sess, events, prepend, keepOpen) {
                 var hasTools = $row.find('.tool-card').length > 0;
                 var hasThinking = $row.find('.thinking-block').length > 0;
                 var hasBadge = $row.find('.agent-card, .err-bubble, .chunk-error, .hitl-card').length > 0;
-                if (!hasContent && !hasTools && !hasThinking && !hasBadge) {
+                // 耗时徽标本身就是有效内容：一轮「只调工具无正文」的对话，其助手行可能只剩 trace，
+                // 漏算它会让这些历史行在「加载更多」后被当成空壳删掉（连同耗时详情一起消失）。
+                var hasTrace = $row.find('.msg-trace').length > 0;
+                if (!hasContent && !hasTools && !hasThinking && !hasBadge && !hasTrace) {
                     $row.remove();
                 }
             }
@@ -2632,6 +2635,12 @@ function selectContext(contextLength) {
     sessionContextMap[sid] = selected;
     // 先乐观重绘两处模型下拉，再异步保存；失败只记录日志，不回滚本地选择。
     renderModelUI();
+
+    // 上下文窗口是进度环的分母：不同步就会出现「模型按钮已显 1M、环还按 256K 算占用率」
+    // 的矛盾态（甚至停在告警色），直到下一轮 context_size 帧到达才自愈。
+    if (typeof applyContextLength === 'function') {
+        applyContextLength(typeof getOrCreateSession === 'function' ? getOrCreateSession(sid) : null, selected);
+    }
 
     $.post('/web/chat/context/select', {
         sessionId: sid,

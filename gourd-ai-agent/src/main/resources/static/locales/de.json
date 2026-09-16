@@ -767,6 +767,7 @@
                                  "model_none":  "Noch kein Modell konfiguriert. Bitte fügen Sie zuerst unter Einstellungen - Modelle ein Modell hinzu und aktivieren Sie es.",
                                  "model_saved":  "ACP-Modell gespeichert",
                                  "model_save_failed":  "Speichern fehlgeschlagen, bitte erneut versuchen",
+                                 "context_save_failed":  "Kontext konnte nicht gespeichert werden",
                                  "thinking_hint":  "Steuert die Reasoning-Intensität; bei Standard wird das eigene Verhalten des Modells verwendet",
                                  "thinking_saved":  "Denktiefe-Einstellung gespeichert",
                                  "thinking_save_failed":  "Speichern fehlgeschlagen, bitte erneut versuchen",
@@ -873,6 +874,11 @@
                  "cache_hit_rate":  "Cache-Trefferquote",
                  "output_tokens":  "Ausgabe-Token",
                  "elapsed_time":  "Dauer",
+                 "turn_timing":  "Durchlaufzeit",
+                 "elapsed_total":  "Gesamtzeit",
+                 "output_tps":  "Ausgabegeschwindigkeit (TPS)",
+                 "tps_unit":  "{n} tokens/s",
+                 "ttft":  "Zeit bis zum ersten Token",
                  "agent_label":  "Agent",
                  "edit_failed":  "Fehlgeschlagen",
                  "files":  "Dateien",
@@ -1049,7 +1055,15 @@
 },
     "context":  {
                     "length":  "Kontextlänge: {0} / {1} ({2})",
-                    "cache":  "Cache"
+                    "cache":  "Cache",
+                    "meter_title":  "Kontextnutzung",
+                    "used":  "Verwendet",
+                    "percent":  "Auslastung",
+                    "cache_read":  "Cache gelesen",
+                    "cache_write":  "Cache geschrieben",
+                    "turn_input":  "Eingabe dieser Runde",
+                    "turn_output":  "Ausgabe dieser Runde",
+                    "messages":  "Nachrichten"
                 },
     "filer":  {
                   "expand":  "Dateibaum erweitern",

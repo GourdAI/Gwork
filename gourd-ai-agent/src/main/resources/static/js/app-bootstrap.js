@@ -122,6 +122,7 @@
         '/js/app-ui.js',
         '/js/model-list-order.js',
         '/js/model-dropdown-ui.js',
+        '/js/model-selector.js',
         '/js/app-history.js',
         '/js/app-workspace.js',
         '/js/app-message.js',

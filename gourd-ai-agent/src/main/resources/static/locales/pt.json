@@ -767,6 +767,7 @@
                                  "model_none":  "Nenhum modelo configurado ainda. Adicione e ative um em Configurações - Modelos primeiro.",
                                  "model_saved":  "Modelo do ACP salvo",
                                  "model_save_failed":  "Falha ao salvar, tente novamente",
+                                 "context_save_failed":  "Falha ao salvar o contexto",
                                  "thinking_hint":  "Controla o esforço de raciocínio; com Padrão, usa o comportamento próprio do modelo",
                                  "thinking_saved":  "Configuração de profundidade de raciocínio salva",
                                  "thinking_save_failed":  "Falha ao salvar, tente novamente",
@@ -873,6 +874,11 @@
                  "cache_hit_rate":  "Taxa de acerto do cache",
                  "output_tokens":  "Tokens de saída",
                  "elapsed_time":  "Tempo decorrido",
+                 "turn_timing":  "Tempo do turno",
+                 "elapsed_total":  "Tempo total",
+                 "output_tps":  "Velocidade de saída (TPS)",
+                 "tps_unit":  "{n} tokens/s",
+                 "ttft":  "Latência do primeiro token",
                  "agent_label":  "Agente",
                  "edit_failed":  "Falha",
                  "files":  "arquivo(s)",
@@ -1049,7 +1055,15 @@
 },
     "context":  {
                     "length":  "Comprimento de contexto: {0} / {1} ({2})",
-                    "cache":  "Cache"
+                    "cache":  "Cache",
+                    "meter_title":  "Uso do contexto",
+                    "used":  "Usado",
+                    "percent":  "Utilização",
+                    "cache_read":  "Cache lido",
+                    "cache_write":  "Cache gravado",
+                    "turn_input":  "Entrada do turno",
+                    "turn_output":  "Saída do turno",
+                    "messages":  "Mensagens"
                 },
     "filer":  {
                   "expand":  "Expandir árvore de arquivos",

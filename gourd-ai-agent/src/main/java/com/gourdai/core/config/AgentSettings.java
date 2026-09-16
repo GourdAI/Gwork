@@ -228,6 +228,10 @@ public class AgentSettings implements Serializable {
 
     /**
      * provider 改名时复制并更新其模型值、尽可能同步模型 key；返回实际 oldKey -> newKey。
+     *
+     * <p><b>统计身份冻结</b>：改名生效前先让每个模型的稳定 uid 按「旧 provider|model」派生
+     * （{@code stableUid()}，若尚无则现算并随副本携带）。否则本次改名后首个 trace 会按新名
+     * 现算 uid，与账本回填时按旧名派生的 uid 分裂——统计页会再次出现「改名后对不上」。</p>
      */
     public synchronized Map<String, String> renameProviderModels(String oldProvider, String newProvider) {
         String oldPrefix = oldProvider + "-";
@@ -251,6 +255,10 @@ public class AgentSettings implements Serializable {
                 }
             }
             ModelDo changed = copyModel(current);
+            // 统计身份冻结：uid 必须在 setProvider/setName 生效前派生（按旧 provider|model 算）。
+            // 若此实例尚无 uid（本会话尚未产生 trace、也未落盘），改名后首个 trace 会按新名
+            // 现算，与账本回填时按旧名派生的 uid 分裂——正是「改名后统计对不上」的复发点。
+            changed.stableUid();
             changed.setProvider(newProvider);
             if (newKey.equals(oldKey) == false) {
                 changed.setName(newKey);
@@ -429,6 +437,16 @@ public class AgentSettings implements Serializable {
         if (models.containsKey(oldKey) == false) {
             addModelInProviderBlock(newModel); // 同一把实例锁，synchronized 可重入，不会死锁
             return true;
+        }
+
+        // 统计身份延续：编辑表单不携带 uid（uid=null），若本次编辑未改 provider/model
+        // 身份字段（仅改超时/密钥/标准等），继承旧条目的 uid——否则「改名冻结」出的 uid
+        // 会被一次无关编辑抹掉、随后按当前名重算，统计再度分裂。
+        ModelDo oldEntry = models.get(oldKey);
+        if (newModel.getUid() == null && oldEntry != null && oldEntry.getUid() != null
+                && java.util.Objects.equals(oldEntry.getProvider(), newModel.getProvider())
+                && java.util.Objects.equals(oldEntry.getModel(), newModel.getModel())) {
+            newModel.setUid(oldEntry.getUid());
         }
 
         String newKey = newModel.getNameOrModel();

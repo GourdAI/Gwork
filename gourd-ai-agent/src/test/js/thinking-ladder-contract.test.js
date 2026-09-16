@@ -32,12 +32,18 @@ test('聊天页改为消费后端下发的 thinkingLevels，并导出给其它�
     assert.match(history, /thinkingLevels:\s*\(Object\.prototype\.toString\.call\(list\[i\]\.thinkingLevels\)/);
 });
 
-test('自动化页不再自带档位数组，改调聊天页导出的唯一真源', () => {
+test('自动化页不再自带档位数组，改由公共选择器从模型数据构建', () => {
     const auto = readStatic('js', 'app-automation.js');
     assert.doesNotMatch(auto, /buildThinkingProfiles|thinkingProfileKey/);
     assert.doesNotMatch(auto, /\[\s*'off'\s*,\s*'minimal'/,
         "旧兜底数组 ['off','minimal',...] 必须已删除");
-    assert.match(auto, /window\.thinkingOptionsForModel\(modelName\)/);
+    // 新架构：档位由公共选择器（model-selector.js）从模型自身 thinkingLevels 构建；
+    // 自动化页不再读聊天页私有列表（历史上的跨页数据源存在异步竞态，会给出错误档位集）
+    assert.doesNotMatch(auto, /window\.thinkingOptionsForModel/);
+    assert.match(auto, /GourdModelSelector/);
+    const selector = readStatic('js', 'model-selector.js');
+    assert.match(selector, /function thinkingOptionsFor\(/);
+    assert.match(selector, /function thinkingChipsHtml\(/);
 });
 
 test('三个页面都不再把 minimal 当可选档位（统一 5 档不含 minimal）', () => {
@@ -83,13 +89,16 @@ test('默认档位常量为 auto 且语义是「不注入参数」', () => {
 // ====================================================================
 
 test('无可调档位时必须隐藏选择器，而不是渲染出无效档位', () => {
+    // 档位行渲染已统一收归公共选择器：只剩「默认」一项时不渲染整行
+    const selector = readStatic('js', 'model-selector.js');
+    assert.match(selector, /if \(opts\.length <= 1\) return '';/);
     const acp = readStatic('js', 'app-settings-acp.js');
-    // 只剩「默认」一项说明该模型无可区分档位，此时不渲染整行
-    assert.match(acp, /if \(opts\.length <= 1\) return '';/);
+    assert.match(acp, /GourdModelSelector/);
 });
 
 test('thinkingLevels 的 null 与 [] 语义必须分离（旧接口兜底 vs 明确不可调）', () => {
-    for (const file of ['app-history.js', 'app-settings-acp.js']) {
+    // 聊天页与公共选择器（自动化/ACP 消费方）都要保持该语义分离
+    for (const file of ['app-history.js', 'model-selector.js']) {
         const src = readStatic('js', file);
         // 非数组一律归一为 null，交由调用方走兜底；不得把 null 折叠成空数组
         assert.match(src, /\?\s*[\w.\[\]]+\s*:\s*null/,

@@ -187,10 +187,11 @@ public class WebController {
                 String worktreeRoot = task != null ? task.getActiveWorktreePath() : null;
 
                 // Loop 任务可能长时间执行（数小时），使用 Loop 专用无限等待版本；
-                // 透传工作空间根保证 __cwd 与落盘目录正确，并按任务定义应用模型与思考档位
+                // 透传工作空间根保证 __cwd 与落盘目录正确，并按任务定义应用模型、思考档位与上下文窗口
                 return webGate.safeChatInputAndCaptureLoop(sessionId, projectRoot, worktreeRoot, effectiveInput, "Loop",
                         task != null ? task.getModelName() : null,
-                        task != null ? task.getThinkingDepth() : null);
+                        task != null ? task.getThinkingDepth() : null,
+                        task != null ? task.getContextLength() : null);
             });
         }
     }
@@ -1435,10 +1436,11 @@ public class WebController {
             item.put("worktreeEnabled", t.isWorktreeEnabled());
             item.put("maxIterations", t.getMaxIterations());
             item.put("runNow", t.isRunNow());
-            // 执行上下文（自动化页面的工作空间 / 模型 / 思考档位）：未设置时不输出，前端视为“跟随默认”
+            // 执行上下文（自动化页面的工作空间 / 模型 / 思考档位 / 上下文窗口）：未设置时不输出，前端视为“跟随默认”
             if (t.getWorkspace() != null) item.put("workspace", t.getWorkspace());
             if (t.getModelName() != null) item.put("modelName", t.getModelName());
             if (t.getThinkingDepth() != null) item.put("thinkingDepth", t.getThinkingDepth());
+            if (t.getContextLength() != null) item.put("contextLength", t.getContextLength());
             if (t.getChannelNotify() != null) item.put("channelNotify", t.getChannelNotify());
             if (t.getBoundSessionId() != null) item.put("boundSessionId", t.getBoundSessionId());
             // 运行时会话（执行对话）：前端据此在点击任务行时打开该任务的执行记录
@@ -1485,6 +1487,7 @@ public class WebController {
                 if (t.getWorkspace() != null) item.put("workspace", t.getWorkspace());
                 if (t.getModelName() != null) item.put("modelName", t.getModelName());
                 if (t.getThinkingDepth() != null) item.put("thinkingDepth", t.getThinkingDepth());
+                if (t.getContextLength() != null) item.put("contextLength", t.getContextLength());
                 if (t.getChannelNotify() != null) item.put("channelNotify", t.getChannelNotify());
                 if (t.getBoundSessionId() != null) item.put("boundSessionId", t.getBoundSessionId());
                 if (t.getRuntimeSessionId() != null) item.put("runtimeSessionId", t.getRuntimeSessionId());
@@ -1512,12 +1515,22 @@ public class WebController {
                           @Param(value = "modelName", required = false) String modelName,
                           @Param(value = "thinkingDepth", required = false) String thinkingDepth,
                           @Param(value = "channelNotify", required = false) String channelNotify,
-                          @Param(value = "boundSessionId", required = false) String boundSessionId) {
+                          @Param(value = "boundSessionId", required = false) String boundSessionId,
+                          @Param(value = "contextLength", required = false) String contextLength) {
         if (sessionId == null || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
             return Result.failure(400, "Invalid sessionId");
         }
         if (prompt == null || prompt.trim().isEmpty()) {
             return Result.failure(400, "prompt is required");
+        }
+
+        // 上下文窗口（可选）：空串视为未设置（跟随全局默认）；非空必须是固定选项之一
+        Long parsedContextLength = null;
+        if (contextLength != null && !contextLength.trim().isEmpty()) {
+            parsedContextLength = ContextLengthPolicy.parse(contextLength);
+            if (parsedContextLength == null || !ContextLengthPolicy.isAllowed(parsedContextLength.longValue())) {
+                return Result.failure(400, "Unsupported contextLength: " + contextLength);
+            }
         }
 
         String workspace = engine.getWorkspace();
@@ -1532,6 +1545,7 @@ public class WebController {
                 maxIterations,
                 runNow != null && runNow,
                 taskWorkspace, modelName, thinkingDepth,
+                parsedContextLength,
                 channelNotify, boundSessionId
         );
 
@@ -1566,7 +1580,8 @@ public class WebController {
                              @Param(value = "taskWorkspace", required = false) String taskWorkspace,
                              @Param(value = "modelName", required = false) String modelName,
                              @Param(value = "thinkingDepth", required = false) String thinkingDepth,
-                             @Param(value = "boundSessionId", required = false) String boundSessionId) {
+                             @Param(value = "boundSessionId", required = false) String boundSessionId,
+                             @Param(value = "contextLength", required = false) String contextLength) {
         if (sessionId == null || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
             return Result.failure(400, "Invalid sessionId");
         }
@@ -1594,13 +1609,27 @@ public class WebController {
         String effectiveChannel = channelNotify != null ? channelNotify : existing.getChannelNotify();
         String effectiveBoundSession = boundSessionId != null ? boundSessionId : existing.getBoundSessionId();
 
+        // 上下文窗口：未传（null）沿用旧值；空串清除；非空必须是固定选项之一
+        Long effectiveContextLength = existing.getContextLength();
+        if (contextLength != null) {
+            if (contextLength.trim().isEmpty()) {
+                effectiveContextLength = null;
+            } else {
+                Long parsedContext = ContextLengthPolicy.parse(contextLength);
+                if (parsedContext == null || !ContextLengthPolicy.isAllowed(parsedContext.longValue())) {
+                    return Result.failure(400, "Unsupported contextLength: " + contextLength);
+                }
+                effectiveContextLength = parsedContext;
+            }
+        }
+
         LoopTask newTask = existing.copyWithUpdate(
                 effectivePrompt, interval, effectiveCron,
                 goalCondition != null ? goalCondition : existing.getGoalCondition(),
                 worktreeEnabled != null ? worktreeEnabled : existing.isWorktreeEnabled(),
                 maxIterations != null ? maxIterations : existing.getMaxIterations(),
                 runNow != null ? runNow : existing.isRunNow(),
-                effectiveWorkspace, effectiveModelName, effectiveThinking,
+                effectiveWorkspace, effectiveModelName, effectiveThinking, effectiveContextLength,
                 effectiveChannel, effectiveBoundSession
         );
 

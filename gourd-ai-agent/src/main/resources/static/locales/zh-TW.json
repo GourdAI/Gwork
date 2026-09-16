@@ -759,6 +759,7 @@
                                  "model_none":  "尚未設定任何模型，請先在「設定 - 模型」中新增並啟用一個模型。",
                                  "model_saved":  "已儲存 ACP 模型",
                                  "model_save_failed":  "儲存失敗，請重試",
+                                 "context_save_failed":  "上下文儲存失敗",
                                  "thinking_hint":  "控制推理力度，選擇「預設」則跟隨模型自身行為",
                                  "thinking_saved":  "已儲存思考深度設定",
                                  "thinking_save_failed":  "儲存失敗，請重試",
@@ -873,6 +874,11 @@
                  "cache_hit_rate":  "快取命中率",
                  "output_tokens":  "輸出 Token",
                  "elapsed_time":  "耗時",
+                 "turn_timing":  "本輪用時",
+                 "elapsed_total":  "總用時",
+                 "output_tps":  "輸出速度（TPS）",
+                 "tps_unit":  "{n} tokens/\u79d2",
+                 "ttft":  "首 Token 延遲",
                  "agent_label":  "智能體",
                  "edit_failed":  "失敗",
                  "files":  "個檔案",
@@ -1054,7 +1060,15 @@
 },
     "context":  {
                     "length":  "上下文長度: {0} / {1} ({2})",
-                    "cache":  "快取"
+                    "cache":  "快取",
+                    "meter_title":  "上下文用量",
+                    "used":  "已用",
+                    "percent":  "佔用率",
+                    "cache_read":  "快取讀取",
+                    "cache_write":  "快取寫入",
+                    "turn_input":  "本輪輸入",
+                    "turn_output":  "本輪輸出",
+                    "messages":  "訊息條數"
                 },
     "filer":  {
                   "expand":  "展開檔案樹",

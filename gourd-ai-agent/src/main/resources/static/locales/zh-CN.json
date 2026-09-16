@@ -767,6 +767,7 @@
                                  "model_none":  "尚未配置任何模型，请先在「设置 - 模型」中添加并启用一个模型。",
                                  "model_saved":  "已保存 ACP 模型",
                                  "model_save_failed":  "保存失败，请重试",
+                                 "context_save_failed":  "上下文保存失败",
                                  "thinking_hint":  "控制推理力度，选择「默认」则跟随模型自身行为",
                                  "thinking_saved":  "已保存思考深度设置",
                                  "thinking_save_failed":  "保存失败，请重试",
@@ -873,6 +874,11 @@
                  "cache_hit_rate":  "缓存命中率",
                  "output_tokens":  "输出 Token",
                  "elapsed_time":  "耗时",
+                 "turn_timing":  "本轮用时",
+                 "elapsed_total":  "总用时",
+                 "output_tps":  "输出速度（TPS）",
+                 "tps_unit":  "{n} tokens/\u79d2",
+                 "ttft":  "首 Token 延迟",
                  "agent_label":  "智能体",
                  "edit_failed":  "失败",
                  "files":  "个文件",
@@ -1049,7 +1055,15 @@
 },
     "context":  {
                     "length":  "上下文长度: {0} / {1} ({2})",
-                    "cache":  "缓存"
+                    "cache":  "缓存",
+                    "meter_title":  "上下文用量",
+                    "used":  "已用",
+                    "percent":  "占用率",
+                    "cache_read":  "缓存读取",
+                    "cache_write":  "缓存写入",
+                    "turn_input":  "本轮输入",
+                    "turn_output":  "本轮输出",
+                    "messages":  "消息条数"
                 },
     "filer":  {
                   "expand":  "展开文件树",

@@ -767,6 +767,7 @@
                                  "model_none":  "Aucun modèle configuré pour le moment. Veuillez d\u0027abord ajouter et activer un modèle dans Paramètres - Modèles.",
                                  "model_saved":  "Modèle ACP enregistré",
                                  "model_save_failed":  "Échec de l\u0027enregistrement, veuillez réessayer",
+                                 "context_save_failed":  "Échec de l'enregistrement du contexte",
                                  "thinking_hint":  "Contrôle l\u0027effort de raisonnement ; l\u0027option Par défaut utilise le comportement natif du modèle",
                                  "thinking_saved":  "Paramètres de profondeur de réflexion enregistrés",
                                  "thinking_save_failed":  "Échec de l\u0027enregistrement, veuillez réessayer",
@@ -873,6 +874,11 @@
                  "cache_hit_rate":  "Taux de succès du cache",
                  "output_tokens":  "Tokens de sortie",
                  "elapsed_time":  "Durée",
+                 "turn_timing":  "Durée du tour",
+                 "elapsed_total":  "Temps total",
+                 "output_tps":  "Vitesse de sortie (TPS)",
+                 "tps_unit":  "{n} tokens/s",
+                 "ttft":  "Latence du premier token",
                  "agent_label":  "Agent",
                  "edit_failed":  "Échec",
                  "files":  "fichier(s)",
@@ -1049,7 +1055,15 @@
 },
     "context":  {
                     "length":  "Longueur de contexte : {0} / {1} ({2})",
-                    "cache":  "Cache"
+                    "cache":  "Cache",
+                    "meter_title":  "Utilisation du contexte",
+                    "used":  "Utilisé",
+                    "percent":  "Taux d'utilisation",
+                    "cache_read":  "Cache lu",
+                    "cache_write":  "Cache écrit",
+                    "turn_input":  "Entrée du tour",
+                    "turn_output":  "Sortie du tour",
+                    "messages":  "Messages"
                 },
     "filer":  {
                   "expand":  "Développer l\u0027arborescence",

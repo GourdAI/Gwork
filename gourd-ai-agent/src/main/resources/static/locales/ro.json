@@ -767,6 +767,7 @@
                                  "model_none":  "Niciun model configurat încă. Adăugați și activați mai întâi unul din Setări - Modele.",
                                  "model_saved":  "Modelul ACP a fost salvat",
                                  "model_save_failed":  "Salvarea a eșuat, încercați din nou",
+                                 "context_save_failed":  "Salvarea contextului a eșuat",
                                  "thinking_hint":  "Controlează efortul de raționament; opțiunea Implicit folosește comportamentul propriu al modelului",
                                  "thinking_saved":  "Setările de adâncime de raționament au fost salvate",
                                  "thinking_save_failed":  "Salvarea a eșuat, încercați din nou",
@@ -873,6 +874,11 @@
                  "cache_hit_rate":  "Rată de succes cache",
                  "output_tokens":  "Token de ieșire",
                  "elapsed_time":  "Durată",
+                 "turn_timing":  "Durata rundei",
+                 "elapsed_total":  "Timp total",
+                 "output_tps":  "Viteză de ieșire (TPS)",
+                 "tps_unit":  "{n} tokens/s",
+                 "ttft":  "Latența primului token",
                  "agent_label":  "Agent",
                  "edit_failed":  "Eșuat",
                  "files":  "fișier(e)",
@@ -1049,7 +1055,15 @@
 },
     "context":  {
                     "length":  "Lungime context: {0} / {1} ({2})",
-                    "cache":  "Cache"
+                    "cache":  "Cache",
+                    "meter_title":  "Utilizare context",
+                    "used":  "Utilizat",
+                    "percent":  "Grad de utilizare",
+                    "cache_read":  "Citire cache",
+                    "cache_write":  "Scriere cache",
+                    "turn_input":  "Intrare rundă",
+                    "turn_output":  "Ieșire rundă",
+                    "messages":  "Mesaje"
                 },
     "filer":  {
                   "expand":  "Extinde arborele de fișiere",

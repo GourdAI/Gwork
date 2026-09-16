@@ -6,6 +6,7 @@ import com.agentclientprotocol.sdk.agent.PromptContext;
 import com.agentclientprotocol.sdk.spec.AcpAgentTransport;
 import com.agentclientprotocol.sdk.spec.AcpSchema;
 import com.gourdai.agent.AgentSession;
+import com.gourdai.agent.ContextLengthPolicy;
 import com.gourdai.agent.event.RunEndEvent;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.event.ToolCallStartEvent;
@@ -153,6 +154,14 @@ public class AcpLink implements Runnable {
                     // 会静默回退到 defaultModel（表现为"模型能正常调用、唯独 ACP 报 406/模型不对"），
                     // 或找不到新模型。故每轮 prompt 重新加载最新配置，并即时补注册缺失的模型。
                     final AgentSettings latestSettings = AgentSettings.loadFromFile();
+
+                    // 上下文窗口与 acpModel 同源：每轮按最新配置重设到会话（ACP 会话专用，无用户前台
+                    // 选择冲突，直接持久写入即可；重设幂等）。留空/非法时回落固定默认值。
+                    Long acpContextParsed = ContextLengthPolicy.parse(latestSettings.getGeneral().getAcpContextLength());
+                    long acpContextLength = (acpContextParsed != null && ContextLengthPolicy.isAllowed(acpContextParsed.longValue()))
+                            ? acpContextParsed.longValue() : ContextLengthPolicy.DEFAULT_CONTEXT_LENGTH;
+                    ContextLengthPolicy.set(session, acpContextLength);
+                    session.updateSnapshot();
 
                     // ACP 走独立子进程，没有前端会话态可选模型，改由「编码设置」里配置的 acpModel 决定；
                     // 留空则回退到 defaultModel。若一个模型都没配，返回 null，需在此

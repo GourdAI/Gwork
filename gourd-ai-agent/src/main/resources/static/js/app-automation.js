@@ -12,7 +12,8 @@
  *     改用 .auto-ws-* 自有命名，只写页面局部状态；
  *  3) 指令区容器不用 .input-box / .welcome-input-box（被 app-streaming.js 抢焦点到聊天输入框）；
  *  4) 模型选择器沿用 .model-selector 视觉类但 id 唯一（#autoModelSelector），
- *     且 toggle handler 内 stopPropagation，避免被 app-history.js 的全局 open 收起器清掉。
+ *     开合/搜索/分组折叠/思考档位/上下文 chips 全部由公共组件 GourdModelSelector 驱动
+ *     （model-selector.js，行为基准为对话页），本页只提供状态存取与静态骨架。
  */
 (function () {
     'use strict';
@@ -26,6 +27,7 @@
         workspace: '',      // '' = 不选 = 全局（与聊天页语义一致）
         modelName: '',      // '' = 未显式选模，运行时跟随默认模型
         thinking: 'auto',
+        contextLength: '',  // '' = 未显式设置，运行时跟随默认（256K）/绑定会话
         channel: '',        // 推送通道（layui select 托管，值存这里避免读隐藏原生 select）
         intervalUnit: 'm',  // 间隔单位（同上）
         projects: [],       // [{name, path}]
@@ -275,13 +277,6 @@
         return baseName(formState.workspace);
     }
 
-    function standardOfModel(name) {
-        for (var i = 0; i < formState.models.length; i++) {
-            if (formState.models[i].name === name) return formState.models[i].standard || '';
-        }
-        return '';
-    }
-
     /** 历史档位值归一（与后端 ThinkingDepth.normalize 同口径）：'off' 是 'auto' 的旧名，不再有 minimal 档 */
     function normThinking(depth) {
         var d = String(depth == null ? '' : depth).toLowerCase();
@@ -290,47 +285,27 @@
         return d;
     }
 
-    /**
-     * 思考档位选项：唯一真源为聊天页 app-history.js 的 thinkingOptionsForModel()，
-     * 它按后端下发的「该模型真正可区分的档位」构建（策略 S2），故入参是模型名而非接口类型。
-     * 本页不再自行维护档位表。若加载顺序异常导致真源缺失，回退到最小内置集合以保证 UI 不崩。
-     */
-    function thinkingOptions(modelName) {
-        if (typeof window.thinkingOptionsForModel === 'function') {
-            var opts = window.thinkingOptionsForModel(modelName);
-            if (opts && opts.length) return opts;
-        }
-        var vals = ['auto', 'low', 'medium', 'high'];
-        var fallback = [];
-        for (var i = 0; i < vals.length; i++) {
-            fallback.push({ value: vals[i], label: t('history.thinking.' + vals[i] + '.label') });
-        }
-        return fallback;
-    }
-
-    /* 展示用的生效模型：任务未显式选模（modelName 为空）时回落后端解析的默认模型。
-     * 存储语义不变：保存时仍写空串，以后换全局默认模型，存量任务照样跟随。 */
+    /* 展示用的生效模型：任务未显式选模（modelName 为空）时回落后端解析的默认模型；
+     * 已保存模型被删除/禁用时同样回落——与运行时 getModelOrMain 的兜底保持一致，
+     * 避免「界面高亮失效模型、实际执行已回落默认」的不一致。
+     * 存储语义不变：保存时仍写原值（空串 = 跟随默认），换全局默认模型后存量任务照样跟随。 */
     function effectiveModel() {
-        return formState.modelName || formState.defaultModel || '';
-    }
-
-    function modelLabel() {
-        return effectiveModel();
-    }
-
-    function thinkingTagLabel() {
-        if (!formState.thinking || formState.thinking === 'auto') return '';
-        var opts = thinkingOptions(effectiveModel());
-        for (var i = 0; i < opts.length; i++) {
-            if (opts[i].value === formState.thinking) return opts[i].label;
+        var m = formState.modelName;
+        if (!m) return formState.defaultModel || '';
+        if (formState.modelsLoaded && formState.models.length) {
+            for (var i = 0; i < formState.models.length; i++) {
+                if (formState.models[i].name === m) return m;
+            }
+            return formState.defaultModel || m;
         }
-        return '';
+        return m;
     }
 
     // ===================== 列表视图 =====================
 
     function showList() {
         editId = null;
+        if (autoSelector) { autoSelector.destroy(); autoSelector = null; }
         api('list', null, function (res) {
             var items = (res && res.data) ? res.data : [];
             var html = '<div class="automation-header">';
@@ -405,6 +380,7 @@
         if (x.workspace) tags.push('<span class="auto-task-tag">' + escapeHtml(baseName(x.workspace)) + '</span>');
         if (x.modelName) tags.push('<span class="auto-task-tag">' + escapeHtml(x.modelName) + '</span>');
         if (x.thinkingDepth && normThinking(x.thinkingDepth) !== 'auto') tags.push('<span class="auto-task-tag">' + escapeHtml(x.thinkingDepth) + '</span>');
+        if (x.contextLength) tags.push('<span class="auto-task-tag">' + escapeHtml(GourdModelSelector.contextLengthLabel(x.contextLength)) + '</span>');
         if (x.goalCondition) tags.push('<span class="auto-task-tag">goal</span>');
         if (x.worktreeEnabled) tags.push('<span class="auto-task-tag">wt</span>');
         if (x.channelNotify) tags.push('<span class="auto-task-tag accent">' + escapeHtml(x.channelNotify) + '</span>');
@@ -434,6 +410,7 @@
             formState.workspace = '';
             formState.modelName = '';
             formState.thinking = 'auto';
+            formState.contextLength = '';
             formState.channel = '';
             formState.intervalUnit = 'm';
         }
@@ -530,12 +507,10 @@
         html += '<div class="model-selector-current" id="autoModelCurrent">';
         html += '<span class="model-name" id="autoModelName"></span>';
         html += '<span class="model-thinking-tag" id="autoModelThinkingTag" style="display:none"></span>';
+        html += '<span class="model-context-tag" id="autoModelContextTag" style="display:none"></span>';
         html += '<svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
         html += '</div>';
-        // 骨架重建（进表单页）：搜索框回到空白，关键词必须同步重置，
-        // 否则列表会按上次关键词过滤但输入框看上去是空的
-        modelFilterText = '';
-        modelFirstMatch = null;
+        // 骨架重建（进表单页）：搜索框与关键词状态由公共组件在每次打开时重置
         html += '<div class="model-dropdown has-search" id="autoModelDropdown">';
         html += GourdModelDropdown.searchHtml(t('history.model_search_placeholder'));
         html += '<div class="model-dropdown-list" id="autoModelList"></div>';
@@ -572,9 +547,9 @@
 
         renderSelects();
         renderWorkspaceUI();
-        renderModelUI();
+        setupAutoSelector();
         loadProjects(function () { renderWorkspaceUI(); });
-        loadModels(function () { renderModelUI(); });
+        loadModels(function () { refreshAutoSelector(); });
 
         // 模板预填（仅新建；editId 存在时由 fillForm 接管，不得被模板覆盖）
         if (!editId && tplKey) applyTemplate(tplKey);
@@ -670,62 +645,44 @@
         applySchedule({ cron: tp.cron });
     }
 
-    function thinkingChipsHtml() {
-        var opts = thinkingOptions(effectiveModel());
-        var valid = 'auto';
-        for (var k = 0; k < opts.length; k++) {
-            if (opts[k].value === formState.thinking) { valid = formState.thinking; break; }
-        }
-        var h = '<div class="model-thinking-opts"><span class="model-thinking-label">' + escapeHtml(t('app.thinking_label')) + '</span>';
-        for (var i = 0; i < opts.length; i++) {
-            h += '<span class="model-thinking-chip' + (opts[i].value === valid ? ' active' : '') + '" data-thinking="'
-                + escapeHtml(opts[i].value) + '"'
-                + (opts[i].desc ? ' title="' + escapeHtml(opts[i].desc) + '"' : '')
-                + '>' + escapeHtml(opts[i].label) + '</span>';
-        }
-        h += '</div>';
-        return h;
-    }
+    // ===================== 模型选择器（公共组件驱动） =====================
 
-    // 模型下拉搜索关键词（每次打开下拉时清空）与当前过滤首项
-    var modelFilterText = '';
-    var modelFirstMatch = null;
+    var autoSelector = null;
 
-    function providerOfModel(name) {
-        for (var i = 0; i < formState.models.length; i++) {
-            if (formState.models[i].name === name) return formState.models[i].provider || '';
-        }
-        return '';
-    }
-
-    function renderModelUI() {
-        var $sel = $('#autoModelSelector');
-        if (!$sel.length) return;
-        $('#autoModelName').text(modelLabel());
-        var tag = thinkingTagLabel();
-        $('#autoModelThinkingTag').text(tag).toggle(!!tag);
-
-        // 严格保持接口顺序；仅当 provider 与紧邻上一模型不同时插入标题
-        var entries = ModelListOrder.buildEntries(formState.models);
-        var current = effectiveModel();
-        var result = GourdModelDropdown.render({
-            segments: GourdModelDropdown.toSegments(entries),
-            query: modelFilterText,
-            currentModel: current,
-            currentProvider: providerOfModel(current),
-            otherLabel: t('history.model_group_other'),
-            emptyText: t('history.model_search_empty'),
-            toggleTitle: t('history.model_group_toggle'),
-            itemHtml: function (m, active) {
-                return '<div class="model-dropdown-item' + (active ? ' active' : '') + '" data-model="' + escapeHtml(m.name) + '">'
-                    + '<span class="model-item-name">' + escapeHtml(m.name) + '</span>'
-                    + (active ? thinkingChipsHtml() : '')
-                    + '</div>';
+    /** 创建/重建选择器实例（表单骨架重建后调用）。先销毁旧实例：document 级收起监听必须显式解绑，
+     * 否则每次进表单都会泄漏一份；同时避免旧实例指向已脱离文档的旧骨架。 */
+    function setupAutoSelector() {
+        if (autoSelector) { autoSelector.destroy(); autoSelector = null; }
+        if (!$('#autoModelSelector').length) return;
+        autoSelector = GourdModelSelector.create({
+            root: '#autoModelSelector',
+            models: function () { return formState.models; },
+            currentModel: effectiveModel,
+            onSelect: applyModelSelection,
+            onOpen: function () { $('#autoWsSelector').removeClass('open'); },
+            thinking: {
+                value: function () { return formState.thinking; },
+                onChange: function (v) { formState.thinking = v; }
+            },
+            context: {
+                value: function () { return formState.contextLength; },
+                onChange: function (v) { formState.contextLength = v; }
             }
         });
-        // 只重绘列表层，不动搜索框（否则丢焦点与已输入内容）
-        $('#autoModelList').html(result.html);
-        modelFirstMatch = result.firstModel;
+        autoSelector.update();
+    }
+
+    function refreshAutoSelector() {
+        if (autoSelector) autoSelector.update();
+    }
+
+    // 切模型：思考档位集可能变化，当前档位不在新集合内则回落「默认」（auto）
+    function applyModelSelection(name) {
+        formState.modelName = name;
+        var opts = GourdModelSelector.thinkingOptionsFor(formState.models, name);
+        var ok = false;
+        for (var i = 0; i < opts.length; i++) { if (opts[i].value === formState.thinking) { ok = true; break; } }
+        if (!ok) formState.thinking = 'auto';
     }
 
     // ===================== 编辑回填 =====================
@@ -742,10 +699,12 @@
         formState.modelName = x.modelName || '';
         // 旧任务 thinkingDepth 为 null 或历史值 "off" 时一律展示为「默认」（auto = 不传参、跟随模型默认）
         formState.thinking = normThinking(x.thinkingDepth);
+        // 任务级上下文窗口：缺省（null）表示跟随默认，表单存 '' 保持「未显式设置」语义
+        formState.contextLength = x.contextLength || '';
         formState.channel = x.channelNotify || '';
         renderSelects();
         renderWorkspaceUI();
-        renderModelUI();
+        refreshAutoSelector();
 
         applySchedule(x);
 
@@ -845,7 +804,9 @@
             channelNotify: formState.channel || '',
             taskWorkspace: formState.workspace || '',
             modelName: formState.modelName || '',
-            thinkingDepth: formState.thinking || 'auto'
+            thinkingDepth: formState.thinking || 'auto',
+            // 空串 = 清除任务级上下文（跟随默认）；后端空串归一为 null
+            contextLength: formState.contextLength || ''
         };
 
         function restore() { $saveBtn.prop('disabled', false).text(t('settings.loop.save')); }
@@ -966,114 +927,20 @@
             renderWorkspaceUI();
         });
 
-        // ---- 模型 / 思考选择器 ----
-        $view.on('click', '#autoModelCurrent', function (e) {
-            e.stopPropagation();
-            $('#autoWsSelector').removeClass('open');
-            var willOpen = !$('#autoModelSelector').hasClass('open');
-            $('#autoModelSelector').toggleClass('open');
-            // 每次打开从完整列表开始：清空关键词并聚焦搜索框
-            if (willOpen) {
-                if (modelFilterText) { modelFilterText = ''; renderModelUI(); }
-                $('#autoModelDropdown').find('.model-search-input').val('');
-                $('#autoModelDropdown').find('.model-search-clear').hide();
-                // 打开即定位到当前选中模型（居中）；无选中项/所在组被折叠时退回置顶
-                var listEl = $('#autoModelList')[0];
-                if (listEl && !GourdModelDropdown.scrollToActive(listEl)) listEl.scrollTop = 0;
-                setTimeout(function () { try { $('#autoModelDropdown').find('.model-search-input').focus(); } catch (err) {} }, 0);
-            }
-        });
+        // ---- 模型选择器：开合/搜索/分组/档位/上下文 chips 全部由公共组件接管 ----
+        // （「点开模型下拉时收起工作空间下拉」的互斥由组件 onOpen 回调处理，
+        //   组件在按钮点击上 stopPropagation 防被全局收起器关掉，故页面级委托收不到该事件）
 
-        // 搜索：输入即过滤（只重绘列表层，焦点不丢）
-        $view.on('input', '#autoModelDropdown .model-search-input', function () {
-            modelFilterText = $(this).val() || '';
-            $('#autoModelDropdown').find('.model-search-clear').toggle(!!modelFilterText);
-            renderModelUI();
-            $('#autoModelList').scrollTop(0);
-        });
-        $view.on('keydown', '#autoModelDropdown .model-search-input', function (e) {
-            if (e.key === 'Escape' || e.keyCode === 27) {
-                e.stopPropagation();
-                if (modelFilterText) {
-                    modelFilterText = '';
-                    $(this).val('');
-                    $('#autoModelDropdown').find('.model-search-clear').hide();
-                    renderModelUI();
-                } else {
-                    $('#autoModelSelector').removeClass('open');
-                }
-                return;
-            }
-            if (e.key === 'Enter' || e.keyCode === 13) {
-                e.preventDefault();
-                e.stopPropagation();
-                // 回车选中过滤结果首项；与当前生效模型相同时视为确认收起
-                if (modelFirstMatch != null && modelFirstMatch !== effectiveModel()) {
-                    applyModelSelection(modelFirstMatch);
-                } else {
-                    $('#autoModelSelector').removeClass('open');
-                }
-            }
-        });
-
-        $view.on('click', '#autoModelDropdown', function (e) {
-            // 下拉内部点击不冒泡：否则会被全局文档收起器与视图空白收起器关闭（搜索框将无法输入）
-            e.stopPropagation();
-
-            // 清空按钮
-            if ($(e.target).closest('.model-search-clear').length) {
-                modelFilterText = '';
-                $('#autoModelDropdown').find('.model-search-input').val('').focus();
-                $('#autoModelDropdown').find('.model-search-clear').hide();
-                renderModelUI();
-                return;
-            }
-
-            // 服务商组头：折叠/展开
-            var $group = $(e.target).closest('.model-dropdown-group');
-            if ($group.length) {
-                var $wrap = $group.closest('.model-dropdown-group-wrap');
-                GourdModelDropdown.setCollapsed($group.attr('data-provider') || '', !$wrap.hasClass('collapsed'));
-                renderModelUI();
-                return;
-            }
-
-            var $chip = $(e.target).closest('.model-thinking-chip');
-            if ($chip.length) {
-                // 思考档位：仅设值，保持下拉打开
-                var depth = $chip.attr('data-thinking');
-                if (depth != null) { formState.thinking = depth; renderModelUI(); }
-                return;
-            }
-            var $item = $(e.target).closest('.model-dropdown-item');
-            if (!$item.length) return;
-            var name = $item.attr('data-model');
-            if (name == null) return;
-            // 点当前生效模型：视为确认收起。此时若 modelName 为空（未显式选择）保持不写入，继续跟随默认
-            if (name === effectiveModel()) { $('#autoModelSelector').removeClass('open'); return; }
-            applyModelSelection(name);
-        });
-
-        // 切模型：思考档位集可能变化，当前档位不在新集合内则回落 off
-        function applyModelSelection(name) {
-            formState.modelName = name;
-            var opts = thinkingOptions(name);
-            var ok = false;
-            for (var i = 0; i < opts.length; i++) { if (opts[i].value === formState.thinking) { ok = true; break; } }
-            if (!ok) formState.thinking = 'auto';
-            renderModelUI();
-        }
-
-        // 视图内空白处点击：收起下拉（不影响视图外元素）
+        // 视图内空白处点击：收起工作空间下拉（模型选择器由公共组件的 document 级监听收起）
         $view.on('click', function (e) {
-            if (!$(e.target).closest('#autoModelSelector').length) $('#autoModelSelector').removeClass('open');
             if (!$(e.target).closest('#autoWsSelector').length) $('#autoWsSelector').removeClass('open');
         });
 
         // 语言切换后重绘当前页
         document.addEventListener('i18n:localeChanged', function () {
             if ($('#automationView').hasClass('active')) {
-                if (editId) { renderWorkspaceUI(); renderModelUI(); }
+                // 模型选择器文案由公共组件自行重绘，这里只补工作空间与列表
+                if (editId) { renderWorkspaceUI(); }
                 else showList();
             }
         });
@@ -1116,6 +983,7 @@
 
     /** 离开自动化视图（切回聊天/欢迎/Code 时由对应切换函数调用） */
     function closeAutomation() {
+        if (autoSelector) { autoSelector.destroy(); autoSelector = null; }
         $('#automationView').removeClass('active');
         $('#automationNavBtn').removeClass('active');
     }

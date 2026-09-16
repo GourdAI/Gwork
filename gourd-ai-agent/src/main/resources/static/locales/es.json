@@ -767,6 +767,7 @@
                                  "model_none":  "Aún no hay ningún modelo configurado. Primero añade y activa un modelo en Ajustes - Modelos.",
                                  "model_saved":  "Modelo de ACP guardado",
                                  "model_save_failed":  "Error al guardar, inténtalo de nuevo",
+                                 "context_save_failed":  "Error al guardar el contexto",
                                  "thinking_hint":  "Controla el esfuerzo de razonamiento; con Predeterminado se usa el comportamiento propio del modelo",
                                  "thinking_saved":  "Configuración de profundidad de razonamiento guardada",
                                  "thinking_save_failed":  "Error al guardar, inténtalo de nuevo",
@@ -873,6 +874,11 @@
                  "cache_hit_rate":  "Tasa de aciertos de caché",
                  "output_tokens":  "Token de salida",
                  "elapsed_time":  "Duración",
+                 "turn_timing":  "Tiempo del turno",
+                 "elapsed_total":  "Tiempo total",
+                 "output_tps":  "Velocidad de salida (TPS)",
+                 "tps_unit":  "{n} tokens/s",
+                 "ttft":  "Latencia del primer token",
                  "agent_label":  "Agente",
                  "edit_failed":  "Error",
                  "files":  "archivos",
@@ -1049,7 +1055,15 @@
 },
     "context":  {
                     "length":  "Longitud de contexto: {0} / {1} ({2})",
-                    "cache":  "Caché"
+                    "cache":  "Caché",
+                    "meter_title":  "Uso del contexto",
+                    "used":  "Usado",
+                    "percent":  "Utilización",
+                    "cache_read":  "Caché leída",
+                    "cache_write":  "Caché escrita",
+                    "turn_input":  "Entrada del turno",
+                    "turn_output":  "Salida del turno",
+                    "messages":  "Mensajes"
                 },
     "filer":  {
                   "expand":  "Expandir árbol de archivos",

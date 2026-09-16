@@ -31,6 +31,8 @@ public class GeneralGroupDo implements Serializable {
     private String acpModel;
     //ACP 思考深度（推理力度）；off 表示关闭
     private String acpThinkingDepth;
+    //ACP 上下文窗口（token，固定选项之一）；留空则使用默认值
+    private Long acpContextLength;
 
     //启用沙盒模式
     private Boolean sandboxMode;

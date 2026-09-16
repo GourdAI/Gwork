@@ -767,6 +767,7 @@
                                  "model_none":  "Chưa cấu hình mô hình nào. Vui lòng thêm và bật một mô hình trong Cài đặt - Mô hình trước.",
                                  "model_saved":  "Đã lưu mô hình ACP",
                                  "model_save_failed":  "Lưu thất bại, vui lòng thử lại",
+                                 "context_save_failed":  "Lưu ngữ cảnh thất bại",
                                  "thinking_hint":  "Kiểm soát mức độ suy luận; chọn Mặc định sẽ dùng hành vi riêng của mô hình",
                                  "thinking_saved":  "Đã lưu cài đặt độ sâu suy nghĩ",
                                  "thinking_save_failed":  "Lưu thất bại, vui lòng thử lại",
@@ -873,6 +874,11 @@
                  "cache_hit_rate":  "Tỷ lệ trúng bộ nhớ đệm",
                  "output_tokens":  "Token đầu ra",
                  "elapsed_time":  "Thời gian",
+                 "turn_timing":  "Thời gian lượt",
+                 "elapsed_total":  "Tổng thời gian",
+                 "output_tps":  "Tốc độ đầu ra (TPS)",
+                 "tps_unit":  "{n} tokens/s",
+                 "ttft":  "Độ trễ token đầu",
                  "agent_label":  "Tác nhân",
                  "edit_failed":  "Thất bại",
                  "files":  "tệp",
@@ -1049,7 +1055,15 @@
 },
     "context":  {
                     "length":  "Độ dài ngữ cảnh: {0} / {1} ({2})",
-                    "cache":  "Bộ nhớ đệm"
+                    "cache":  "Bộ nhớ đệm",
+                    "meter_title":  "Mức dùng ngữ cảnh",
+                    "used":  "Đã dùng",
+                    "percent":  "Tỷ lệ sử dụng",
+                    "cache_read":  "Đọc bộ nhớ đệm",
+                    "cache_write":  "Ghi bộ nhớ đệm",
+                    "turn_input":  "Đầu vào lượt",
+                    "turn_output":  "Đầu ra lượt",
+                    "messages":  "Số tin nhắn"
                 },
     "filer":  {
                   "expand":  "Mở rộng cây tệp",

@@ -56,6 +56,12 @@ import java.util.TreeMap;
  * 并通过 {@code granularity} 字段告知前端如何格式化坐标标签。
  * <b>卡片指标与模型分布始终基于逐日原始数据</b>，不受降维影响。</p>
  *
+ * <h3>模型归组口径（uid）</h3>
+ * <p>模型分布/趋势/缓存排行按模型稳定 uid（{@code ModelDo#uidOf} 派生，随 trace 事件落进
+ * 月度账本条目的 {@code uid} 字段）归组：服务商改名、名称大小写变化前后并成同一条；
+ * 显示名取该 uid 在统计窗口内最新一次出现的名称 key。账本条目无 uid（存量旧数据未回填）
+ * 时回退按名称 key 归组。归组映射在聚合主循环的同一次遍历内顺带维护，不增加额外 IO。</p>
+ *
  * <h3>token 口径</h3>
  * <p>{@code totalTokens = inputTokens + outputTokens}，其中 {@code inputTokens} 已由
  * {@code UsageNormalizer.normalizeInputTokens} 归一（<b>包含缓存读取与缓存创建 token</b>），
@@ -156,6 +162,8 @@ public class UsageStatsService {
         String granularity = pickGranularity(rangeDays);
 
         // ── 卡片/趋势口径：仅统计 rangeStart..today ──
+        // 归组 key（uid 优先、无 uid 回退名称 key）→ 显示名（窗口内最新一次出现的名称 key）
+        Map<String, String> uidNames = new LinkedHashMap<>();
         Map<String, Long> modelTotals = new LinkedHashMap<>();
         Map<String, Long> modelInputTotals = new LinkedHashMap<>();
         Map<String, Long> modelCacheReadTotals = new LinkedHashMap<>();
@@ -189,12 +197,14 @@ public class UsageStatsService {
             // 桶内按模型 token（趋势图堆叠用）
             for (Map.Entry<String, UsageArchiveService.ModelStat> e : b.models.entrySet()) {
                 UsageArchiveService.ModelStat ms = e.getValue();
+                String gk = (ms.uid != null && !ms.uid.isEmpty()) ? ms.uid : e.getKey();
+                uidNames.put(gk, e.getKey());
                 if (ms.tokens > 0) {
-                    cur.byModel.merge(e.getKey(), ms.tokens, Long::sum);
+                    cur.byModel.merge(gk, ms.tokens, Long::sum);
                 }
-                modelTotals.merge(e.getKey(), ms.tokens, Long::sum);
-                modelInputTotals.merge(e.getKey(), Math.max(0L, ms.input), Long::sum);
-                modelCacheReadTotals.merge(e.getKey(), Math.max(0L, ms.cacheRead), Long::sum);
+                modelTotals.merge(gk, ms.tokens, Long::sum);
+                modelInputTotals.merge(gk, Math.max(0L, ms.input), Long::sum);
+                modelCacheReadTotals.merge(gk, Math.max(0L, ms.cacheRead), Long::sum);
             }
 
             totalTokens += dayTokens;
@@ -230,7 +240,7 @@ public class UsageStatsService {
                 continue;
             }
             Map<String, Object> m = new LinkedHashMap<>();
-            m.put("model", e.getKey());
+            m.put("model", uidNames.getOrDefault(e.getKey(), e.getKey()));
             m.put("tokens", e.getValue());
             m.put("percent", totalTokens > 0 ? round1(e.getValue() * 100.0 / totalTokens) : 0.0);
             models.add(m);
@@ -246,7 +256,7 @@ public class UsageStatsService {
             long cacheRead = modelCacheReadTotals.getOrDefault(e.getKey(), 0L);
             double rate = cacheRead > 0 ? Math.min(100.0, cacheRead * 100.0 / input) : 0.0;
             Map<String, Object> c = new LinkedHashMap<>();
-            c.put("model", e.getKey());
+            c.put("model", uidNames.getOrDefault(e.getKey(), e.getKey()));
             c.put("cacheReadTokens", cacheRead);
             c.put("inputTokens", input);
             c.put("cacheRate", round1(rate));
@@ -288,7 +298,7 @@ public class UsageStatsService {
 
         List<Map<String, Object>> daily = new ArrayList<>(series.size());
         for (Bucket bk : series) {
-            daily.add(bk.toMap());
+            daily.add(bk.toMap(uidNames));
         }
 
         result.put("rangeDays", rangeDays);
@@ -353,12 +363,17 @@ public class UsageStatsService {
             this.start = start;
         }
 
-        Map<String, Object> toMap() {
+        Map<String, Object> toMap(Map<String, String> uidNames) {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("date", start.format(DATE_FMT));
             item.put("tokens", tokens);
             item.put("rounds", rounds);
-            item.put("byModel", byModel);
+            Map<String, Long> byName = new LinkedHashMap<>();
+            for (Map.Entry<String, Long> e : byModel.entrySet()) {
+                String n = uidNames.getOrDefault(e.getKey(), e.getKey());
+                byName.merge(n, e.getValue(), Long::sum);
+            }
+            item.put("byModel", byName);
             return item;
         }
     }

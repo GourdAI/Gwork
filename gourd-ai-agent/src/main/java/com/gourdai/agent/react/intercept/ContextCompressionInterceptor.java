@@ -1472,11 +1472,14 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
     }
 
     /**
-     * 解析本轮生效的上下文窗口：取自当前会话的用户选择。
+     * 解析本轮生效的上下文窗口：transient（Loop 任务本轮覆盖）优先，否则取当前会话的用户选择。
      *
      * <p><b>为什么不再读模型配置</b>：上下文窗口已从「模型配置项」改为「会话级用户选择」，
      * 若这里还回退到 {@code model.getConfig().getContextLength()}，就会出现「压缩按一个值、
      * 界面显示另一个值」的双源不一致。会话缺失时统一回退 {@link #defaultContextLength}。</p>
+     *
+     * <p>统一走 {@link ContextLengthPolicy#resolveRuntime(AgentSession)}：与上下文用量指示器
+     * （WebStreamBuilder 的 onContextUsageEvent）同源，Loop 任务按轮覆盖的窗口对压缩与显示一致生效。</p>
      */
     private long resolveContextLength(ReActTrace trace) {
         if (trace == null) {
@@ -1487,10 +1490,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
             if (session == null) {
                 return defaultContextLength;
             }
-            Long selected = ContextLengthPolicy.parse(session.getContext().get(ContextLengthPolicy.CONTEXT_LENGTH_KEY));
-            if (selected != null && ContextLengthPolicy.isAllowed(selected.longValue())) {
-                return selected.longValue();
-            }
+            return ContextLengthPolicy.resolveRuntime(session);
         } catch (Exception e) {
             if (log.isDebugEnabled()) {
                 log.debug("ReActAgent [{}] resolve session contextLength failed, fallback {}: {}",

@@ -549,11 +549,33 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 /* Msg Time */
 .msg-time { font-size: 11px; color: var(--text-secondary); opacity: 0.55; line-height: 1.2; display: inline-block; vertical-align: top; }
 .msg-row.user .msg-time { text-align: right; }
-.msg-trace { font-size: 11px; color: var(--text-secondary); opacity: 0.5; display: inline-block; line-height: 1.2; pointer-events: none; white-space: nowrap; float: right; vertical-align: top; }
-.msg-trace .trace-item { pointer-events: auto; display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; cursor: default; }
+.msg-trace { font-size: 11px; color: var(--text-secondary); display: inline-block; line-height: 1.2; pointer-events: none; white-space: nowrap; float: right; vertical-align: top; }
+/* 视觉弱化放在 .trace-item 而非 .msg-trace 容器上：opacity 会整棵子树继承，
+   若加在容器上，悬停展开的耗时详情卡也会被压成半透明且无法用子元素还原。 */
+.msg-trace .trace-item { pointer-events: auto; display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; cursor: default; opacity: 0.5; transition: opacity 0.15s; }
+.msg-trace .trace-item:hover, .msg-trace .trace-item:focus-within { opacity: 1; }
 .msg-trace .trace-item:first-child { margin-left: 0; }
 .msg-trace .trace-ic { display: inline-flex; align-items: center; opacity: 0.85; line-height: 1; }
 .msg-trace .trace-ic svg { width: 11px; height: 11px; display: block; }
+
+/* ---- 轮次耗时详情卡（悬停 trace 徽标展开）----
+   展示总用时、输出速度（TPS）与首 Token 延迟。数据源为 trace 帧的 elapsedMs/ttftMs/outputTokens，
+   均随会话落盘，历史消息回放同样可展开。 */
+.msg-trace .trace-item.has-pop { position: relative; cursor: help; }
+.trace-pop { position: absolute; bottom: 100%; right: 0; margin-bottom: 6px; display: none; z-index: 60; min-width: 214px; max-width: min(320px, calc(100vw - 32px)); padding: 9px 11px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-input-box); box-shadow: var(--shadow-lg); text-align: left; cursor: default; }
+/* 桥接 6px 间隙：缺了它，鼠标从徽标移向卡片的途中会失去 hover，卡片闪烁消失 */
+.trace-pop::after { content: ''; position: absolute; left: 0; right: 0; bottom: -6px; height: 6px; }
+/* is-open 是触屏/键盘的显式开合态：纯 :hover 在触屏上需要二次点击且无法关闭，
+   键盘用户也无法主动展开；三种触发共用同一套展现规则。 */
+.msg-trace .trace-item.has-pop:hover .trace-pop,
+.msg-trace .trace-item.has-pop:focus-within .trace-pop,
+.msg-trace .trace-item.has-pop.is-open .trace-pop { display: block; }
+.msg-trace .trace-item.has-pop.is-open { opacity: 1; }
+.trace-pop-title { display: flex; align-items: center; gap: 5px; margin-bottom: 7px; font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.trace-pop-title svg { width: 12px; height: 12px; flex-shrink: 0; }
+.trace-pop-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 3px 0; font-size: 12px; }
+.trace-pop-label { color: var(--text-secondary); }
+.trace-pop-value { color: var(--text-primary); font-variant-numeric: tabular-nums; font-weight: 600; }
 .msg-meta-row { display: block; margin-top: 4px; line-height: 1.2; min-height: 0; }
 .msg-meta-row:has(.trace-item) { min-height: 13px; }
 
@@ -665,6 +687,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .model-selector.open .model-dropdown { display: block; }
 /* 向下展开变体（设置页等面板中部场景，向上会被面板顶部裁切） */
 .model-selector.dropdown-down .model-dropdown { top: 100%; bottom: auto; margin-top: 6px; margin-bottom: 0; }
+/* 右区模型选择器（工具栏 .toolbar-right 内）：下拉面板改右对齐。
+   必要性——面板宽 320px（--dropdown-w-md），沿用默认 left:0 会从工具栏右侧向右溢出输入框边界。 */
+.toolbar-right .model-dropdown { left: auto; right: 0; }
 /* 仅保留淡入，不做位移：面板基态带 translateX(-50%) 居中，若动画关键帧写 transform，
    会覆盖居中位移，导致面板从右侧滑入并在动画结束时跳位（任务/队列悬浮面板） */
 @keyframes drop-up { from { opacity: 0; } to { opacity: 1; } }
@@ -737,6 +762,10 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     .model-dropdown-item { min-width: 0; }
     .model-thinking-opts, .model-context-opts { max-width: 100%; }
     .model-context-chip { padding-left: 7px; padding-right: 7px; }
+    /* 窄屏：右区现在同时排上下文环 + 模型选择器 + 语音 + 发送，先牵模型名避免挤死按钮 */
+    .toolbar-right .model-selector-current { max-width: 132px; padding-left: 7px; padding-right: 7px; }
+    .toolbar-right .model-selector-current .model-name { max-width: 74px; }
+    .context-meter-pop { min-width: 0; width: max-content; max-width: calc(100vw - 48px); }
 }
 
 /* Attachments Preview */
@@ -2448,19 +2477,36 @@ pre:hover .code-copy-btn { opacity: 1; }
     word-break: break-all;
 }
 
-/* ===== Context Status (above textarea) ===== */
-.context-status {
-    text-align: center;
-    font-size: 11px;
-    color: var(--text-secondary);
-    opacity: 0.5;
-    padding: 2px 0;
-    user-select: none;
-    white-space: nowrap;
-    max-width: 820px;
-    margin: 0 auto;
-    width: 100%;
-}
+/* ===== Context Meter（上下文用量进度环，位于输入框工具栏右区） =====
+   取代了旧的「输入框上方整行文本」(.context-status)：
+   · 常态只占一个图标位，省出一整行垂直空间给消息区；
+   · 悬停/键盘聚焦展开明细卡，顺带展示 inputTokens/outputTokens/cacheCreation/messageCount
+     ——这些指标后端一直在下发，旧文本行却从未展示。 */
+.context-meter { position: relative; display: flex; align-items: center; flex-shrink: 0; }
+.context-meter-btn { display: flex; align-items: center; gap: 4px; padding: 3px 5px; border: none; border-radius: 7px; background: none; color: var(--text-secondary); cursor: help; transition: background 0.15s; }
+.context-meter-btn:hover { background: var(--bg-hover); }
+.context-meter-ring { width: 18px; height: 18px; display: block; flex-shrink: 0; }
+.context-meter-track { fill: none; stroke: var(--border-color); stroke-width: 2.5; }
+/* stroke-dasharray 恒等于半径 8 的周长(2πr≈50.27)，进度由 JS 只改 stroke-dashoffset；
+   旋转 -90° 让 0% 起点落在 12 点方向（SVG 圆默认从 3 点起画）。 */
+.context-meter-fill { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 50.27; stroke-dashoffset: 50.27; transition: stroke-dashoffset 0.35s ease, stroke 0.2s; }
+/* 百分比数字平时不显示（保持工具栏清爽），仅在接近上限时主动现身提醒 */
+.context-meter-pct { display: none; font-size: 11px; font-variant-numeric: tabular-nums; }
+.context-meter.is-warn .context-meter-fill { stroke: var(--color-warning); }
+.context-meter.is-crit .context-meter-fill { stroke: var(--color-danger, #e5534b); }
+.context-meter.is-warn .context-meter-pct { display: inline; color: var(--color-warning); }
+.context-meter.is-crit .context-meter-pct { display: inline; color: var(--color-danger, #e5534b); }
+
+.context-meter-pop { position: absolute; bottom: 100%; right: 0; margin-bottom: 8px; display: none; z-index: 120; min-width: 236px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-input-box); box-shadow: var(--shadow-lg); cursor: default; animation: drop-up 0.15s ease-out; }
+/* 桥接 8px 间隙，避免鼠标移向卡片途中 hover 中断导致卡片闪烁 */
+.context-meter-pop::after { content: ''; position: absolute; left: 0; right: 0; bottom: -8px; height: 8px; }
+.context-meter:hover .context-meter-pop,
+.context-meter-btn:focus-visible ~ .context-meter-pop { display: block; }
+.context-meter-pop-title { margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.context-meter-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 3px 0; font-size: 12px; white-space: nowrap; }
+.context-meter-row.is-sep { margin-top: 5px; padding-top: 7px; border-top: 1px solid var(--border-color); }
+.context-meter-label { color: var(--text-secondary); }
+.context-meter-value { color: var(--text-primary); font-variant-numeric: tabular-nums; font-weight: 600; }
 
 /* ===== Mermaid SVG ===== */
 .mermaid-svg {
