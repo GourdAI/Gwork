@@ -251,6 +251,12 @@ public class ReasonTask {
         // 置于消息组装之前，保证本轮请求就能看到通知；也覆盖“上一回合已结束、任务在空闲期完成”的场景。
         injectBackgroundNotices(trace);
 
+        // [逻辑 2.3: 工具配对自愈] 发送前最后一道协议归一：工作记忆里若残留「已声明但无结果」的
+        // 原生工具调用（挂起/中断的历史遗留、旧快照恢复等），供应商会直接拒绝整次请求
+        // （如 400 No tool output found for tool call ...）且重试无法自愈。此处补齐合成结果；
+        // 健康流程恒为空操作。ask_user 挂起且答案已提交时，按正常恢复语义回填答案并清理现场。
+        ToolCallPairRepair.repair(trace);
+
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(ChatMessage.ofSystem(systemPromptStr));
         messages.addAll(trace.getWorkingMemory().getMessages());

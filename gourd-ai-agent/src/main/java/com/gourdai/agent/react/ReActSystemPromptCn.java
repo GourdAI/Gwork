@@ -89,7 +89,7 @@ public class ReActSystemPromptCn implements ReActSystemPrompt {
             return trace.getConfig().getRole();
         }
 
-        return "具备自主行动能力的专业任务解决专家";
+        return "GWork，具备自主行动能力的专业任务解决专家";
     }
 
     public String getInstruction(ReActTrace trace) {

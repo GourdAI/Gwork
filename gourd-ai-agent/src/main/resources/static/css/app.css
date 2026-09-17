@@ -509,7 +509,10 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    与 HITL 审批卡（消息流内）不同：它归属当前活动会话，随会话切换显隐；内部交互为「逐题作答/其他补充/跳过/发送」。
    视觉沿用输入区族系：--bg-input-box 底色 + --shadow-lg 悬浮感（同 .input-box / 浮动面板），颜色全部走主题变量，暗色自动兼容。 */
 .question-card-host { width: 100%; max-width: 820px; margin: 0 auto; padding: 0 0 8px; }
-.question-card { background: var(--bg-input-box); border: 1px solid var(--border-color); border-radius: 14px; box-shadow: var(--shadow-lg); padding: 14px 16px 12px; animation: msg-in 0.25s ease-out; }
+.question-card { background: var(--bg-input-box); border: 1px solid var(--border-color); border-radius: 14px; box-shadow: var(--shadow-lg); padding: 14px 16px 12px; }
+/* 入场动画只在首次渲染播放（首次渲染时 JS 挂 .question-card-enter）；勾选/翻页会整卡重建，
+   动画若挂在 .question-card 上会随每次重建重放，整卡闪一下。 */
+.question-card.question-card-enter { animation: msg-in 0.25s ease-out; }
 .question-card-header { display: flex; align-items: flex-start; gap: 10px; }
 .question-card-heading { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
 .question-card-title { font: 600 14px/1.5 var(--font-sans); color: var(--text-primary); word-break: break-word; }
@@ -532,7 +535,6 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .question-card-opt-label { flex: 1 1 auto; min-width: 0; word-break: break-word; }
 .question-card-opt-reco { margin-left: 4px; font-size: 12px; color: var(--text-tertiary); }
 .question-card-opt-answer { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-tertiary); }
-.question-card-opt-arrow { flex-shrink: 0; display: inline-flex; align-items: center; color: var(--text-tertiary); }
 .question-card-other-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 1px dashed var(--border-color); border-radius: 10px; color: var(--text-secondary); font: 400 13px/1.5 var(--font-sans); transition: border-color 0.15s, background 0.15s; }
 .question-card-other-row[role="button"] { cursor: pointer; }
 .question-card-other-row[role="button"]:hover { border-color: var(--accent); background: var(--bg-hover); }
@@ -2488,8 +2490,11 @@ pre:hover .code-copy-btn { opacity: 1; }
 .context-meter-ring { width: 18px; height: 18px; display: block; flex-shrink: 0; }
 .context-meter-track { fill: none; stroke: var(--border-color); stroke-width: 2.5; }
 /* stroke-dasharray 恒等于半径 8 的周长(2πr≈50.27)，进度由 JS 只改 stroke-dashoffset；
-   旋转 -90° 让 0% 起点落在 12 点方向（SVG 圆默认从 3 点起画）。 */
-.context-meter-fill { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 50.27; stroke-dashoffset: 50.27; transition: stroke-dashoffset 0.35s ease, stroke 0.2s; }
+   旋转 -90° 让 0% 起点落在 12 点方向（SVG 圆默认从 3 点起画）。
+   ⚠️ 严禁在此声明 stroke-dashoffset：样式表声明的级联优先级高于 JS 写入的
+   presentation attribute，一旦声明就会把进度锁死在初始值、弧永远画不出来（曾真实发生）。
+   空环初值由 chat.html 上的 stroke-dashoffset="50.27" attribute 提供。 */
+.context-meter-fill { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 50.27; transition: stroke-dashoffset 0.35s ease, stroke 0.2s; }
 /* 百分比数字平时不显示（保持工具栏清爽），仅在接近上限时主动现身提醒 */
 .context-meter-pct { display: none; font-size: 11px; font-variant-numeric: tabular-nums; }
 .context-meter.is-warn .context-meter-fill { stroke: var(--color-warning); }

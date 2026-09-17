@@ -36,6 +36,7 @@ import org.noear.solon.ai.chat.interceptor.ToolChain;
 import org.noear.solon.ai.chat.interceptor.ToolRequest;
 import org.noear.solon.ai.chat.message.AssistantMessage;
 import org.noear.solon.ai.chat.message.ChatMessage;
+import org.noear.solon.ai.chat.message.ToolMessage;
 import org.noear.solon.ai.chat.tool.FunctionTool;
 import org.noear.solon.ai.chat.tool.ToolCall;
 import org.noear.solon.ai.chat.tool.ToolResult;
@@ -80,6 +81,9 @@ public class ActionTask {
      */
     private static final Set<String> READONLY_TOOLS = new HashSet<>(Arrays.asList(
             "read", "grep", "glob", "ls"));
+
+    /** 挂起批次的声明 id 暂存键（trace extras）：恢复回放沿用，避免重复声明批次容器。 */
+    private static final String PENDING_BATCH_ID_KEY = "gourd_pending_batch_id";
 
     /**
      * 文本模式无原生 ToolCall id 时的兜底序号源（并发安全）。
@@ -267,16 +271,34 @@ public class ActionTask {
         // 仅首个真正执行并推一张卡，重复 id 记录别名、执行后按 id 回填结果，避免双执行与双卡片
         Map<String, List<String>> aliasIdsByPrimaryId = new HashMap<>();
         List<ToolCall> calls = dedupeIdenticalCalls(lastReason.getToolCalls(), aliasIdsByPrimaryId);
-        Map<ToolCall, BatchMetadata> batchByCall = createVisibleBatch(calls);
-        // 批次声明：整批执行前把结构一次性下发，订阅端建容器时即可收编全部骨架卡，
-        // 不再依赖各工具 start 帧逐张搬入（那是「单卡先出 → 逐张合并」跳变的根源）。
-        announceVisibleBatch(trace, batchByCall);
+
+        // 挂起恢复重放检测：凡在挂起前已执行完成、结果已回灌工作记忆的调用，回放时必须跳过——
+        // 写工具重跑会产生二次副作用；结果重复产出还会破坏 tool_calls 与 observation 的一一配对。
+        // 原调用 id 由供应商生成、全局唯一，正常新批次不可能命中，该判断对健康流程恒为假分支。
+        final Set<String> committedCallIds = collectCommittedToolIds(trace.getWorkingMemory().getMessages());
+        final boolean batchCommitted = intersectsCommitted(calls, committedCallIds);
+
+        Map<ToolCall, BatchMetadata> batchByCall;
+        if (batchCommitted) {
+            // 恢复重放：沿用挂起前已声明的批次 id（前端以 batchId 归组容器）。重复声明会凭空多出
+            // 第二只容器；沿用旧 id 时，回放新产出的帧会自然填进首轮建好的槽位（路径幂等共存）。
+            String declaredBatchId = trace.getExtraAs(PENDING_BATCH_ID_KEY);
+            trace.removeExtra(PENDING_BATCH_ID_KEY);
+            batchByCall = createVisibleBatch(calls, declaredBatchId);
+        } else {
+            // 防御性清理：未命中「恢复回放」判定时的残留声明 id 不得泄漏给后续批次
+            trace.removeExtra(PENDING_BATCH_ID_KEY);
+            batchByCall = createVisibleBatch(calls);
+            // 批次声明：整批执行前把结构一次性下发，订阅端建容器时即可收编全部骨架卡，
+            // 不再依赖各工具 start 帧逐张搬入（那是「单卡先出 → 逐张合并」跳变的根源）。
+            announceVisibleBatch(trace, batchByCall);
+        }
 
         // 是否存在可并行的只读段（≥2 个连续只读工具）；否则直接走串行快路径。
         // 并行行为恒开启：只读段（read/grep/glob/ls）并行，写工具（write/edit/bash）始终串行。
         if (!hasParallelReadonlyRun(calls)) {
-            runCallsSerial(calls, trace, toolResults, aliasIdsByPrimaryId, batchByCall);
-            flushToolResults(lastReason, trace, toolResults);
+            runCallsSerial(calls, trace, toolResults, aliasIdsByPrimaryId, batchByCall, committedCallIds);
+            flushToolResults(lastReason, trace, calls, toolResults, batchCommitted, batchByCall);
             return; // 串行路径：中止与否都已在 toolResults 落地，直接返回
         }
 
@@ -293,18 +315,18 @@ public class ActionTask {
                 }
                 List<ToolCall> segment = calls.subList(i, j);
                 if (segment.size() == 1) {
-                    aborted = !doActionInto(segment.get(0), trace, toolResults, aliasIdsByPrimaryId, batchByCall);
+                    aborted = !doActionInto(segment.get(0), trace, toolResults, aliasIdsByPrimaryId, batchByCall, committedCallIds);
                 } else {
-                    aborted = runReadonlySegmentParallel(segment, trace, toolResults, aliasIdsByPrimaryId, batchByCall);
+                    aborted = runReadonlySegmentParallel(segment, trace, toolResults, aliasIdsByPrimaryId, batchByCall, committedCallIds);
                 }
                 i = j;
             } else {
-                aborted = !doActionInto(first, trace, toolResults, aliasIdsByPrimaryId, batchByCall);
+                aborted = !doActionInto(first, trace, toolResults, aliasIdsByPrimaryId, batchByCall, committedCallIds);
                 i++;
             }
         }
 
-        flushToolResults(lastReason, trace, toolResults);
+        flushToolResults(lastReason, trace, calls, toolResults, batchCommitted, batchByCall);
     }
 
     /**
@@ -314,9 +336,10 @@ public class ActionTask {
      */
     private boolean runCallsSerial(List<ToolCall> calls, ReActTrace trace, List<ChatMessage> toolResults,
                                    Map<String, List<String>> aliasIdsByPrimaryId,
-                                   Map<ToolCall, BatchMetadata> batchByCall) {
+                                   Map<ToolCall, BatchMetadata> batchByCall,
+                                   Set<String> committedCallIds) {
         for (ToolCall call : calls) {
-            if (!doActionInto(call, trace, toolResults, aliasIdsByPrimaryId, batchByCall)) {
+            if (!doActionInto(call, trace, toolResults, aliasIdsByPrimaryId, batchByCall, committedCallIds)) {
                 return true;
             }
         }
@@ -335,7 +358,8 @@ public class ActionTask {
      */
     private boolean runReadonlySegmentParallel(List<ToolCall> segment, ReActTrace trace, List<ChatMessage> toolResults,
                                                Map<String, List<String>> aliasIdsByPrimaryId,
-                                               Map<ToolCall, BatchMetadata> batchByCall) throws Throwable {
+                                               Map<ToolCall, BatchMetadata> batchByCall,
+                                               Set<String> committedCallIds) throws Throwable {
         int n = segment.size();
         List<List<ChatMessage>> slots = new ArrayList<>(n);
         for (int k = 0; k < n; k++) {
@@ -347,7 +371,7 @@ public class ActionTask {
             final ToolCall call = segment.get(k);
             final List<ChatMessage> slot = slots.get(k);
             futures.add(CompletableFuture.runAsync(
-                    () -> doActionInto(call, trace, slot, aliasIdsByPrimaryId, batchByCall), RunUtil.io())
+                    () -> doActionInto(call, trace, slot, aliasIdsByPrimaryId, batchByCall, committedCallIds), RunUtil.io())
                     // 防挂死兑底：任务卡死/被队列饿死时以 TimeoutException 完成，
                     // 避免 allOf().join() 无限阻塞进而拖死整轮 ReAct 流（done 永不发射）。
                     // 超时后上层按异常收口，前端仍能收到 error+done 收敛。
@@ -391,7 +415,14 @@ public class ActionTask {
      */
     private boolean doActionInto(ToolCall call, ReActTrace trace, List<ChatMessage> resultsSink,
                                  Map<String, List<String>> aliasIdsByPrimaryId,
-                                 Map<ToolCall, BatchMetadata> batchByCall) {
+                                 Map<ToolCall, BatchMetadata> batchByCall,
+                                 Set<String> committedCallIds) {
+        // 挂起恢复重放：挂起前已完成并回灌结果的调用直接跳过（不重执行、不推帧、不重复回填），
+        // 其余调用（被挂起的那次及其后的调用）在本次回放中补齐执行。
+        if (call.getId() != null && committedCallIds.contains(call.getId())) {
+            return true;
+        }
+
         Map<String, Object> args = (call.getArguments() == null) ? new HashMap<>() : call.getArguments();
         List<String> aliasIds = (call.getId() != null && aliasIdsByPrimaryId != null) ? aliasIdsByPrimaryId.get(call.getId()) : null;
         ToolResult result = doAction(trace, call.getName(), args, resultsSink, call, aliasIds,
@@ -440,6 +471,13 @@ public class ActionTask {
     }
 
     private Map<ToolCall, BatchMetadata> createVisibleBatch(List<ToolCall> calls) {
+        return createVisibleBatch(calls, null);
+    }
+
+    /**
+     * 批次元数据构建；{@code fixedBatchId} 非空时沿用该 id（挂起恢复重放复用首轮声明，避免重复建容器）。
+     */
+    private Map<ToolCall, BatchMetadata> createVisibleBatch(List<ToolCall> calls, String fixedBatchId) {
         Map<ToolCall, BatchMetadata> result = new IdentityHashMap<>();
         List<ToolCall> visibleCalls = new ArrayList<>();
         for (ToolCall call : calls) {
@@ -452,7 +490,7 @@ public class ActionTask {
             return result;
         }
 
-        String batchId = UUID.randomUUID().toString();
+        String batchId = (fixedBatchId == null) ? UUID.randomUUID().toString() : fixedBatchId;
         int batchSize = visibleCalls.size();
         for (int i = 0; i < batchSize; i++) {
             result.put(visibleCalls.get(i), new BatchMetadata(batchId, i, batchSize));
@@ -524,13 +562,104 @@ public class ActionTask {
 
     /**
      * 落地工具结果：把本轮推理消息与全部观测结果「成套」写入工作记忆（顺序已保证）。
+     *
+     * <p>挂起恢复重放路径（{@code batchCommitted}）下，推理消息与挂起前已完成调用的结果已在
+     * 挂起时「成套」回灌，此处只把本次回放新产出的结果插到既有结果之后，保持配对连续。</p>
      */
-    private void flushToolResults(AssistantMessage lastReason, ReActTrace trace, List<ChatMessage> toolResults) {
-        if (toolResults.size() > 0) {
+    private void flushToolResults(AssistantMessage lastReason, ReActTrace trace, List<ToolCall> calls,
+                                  List<ChatMessage> toolResults, boolean batchCommitted,
+                                  Map<ToolCall, BatchMetadata> batchByCall) {
+        if (batchCommitted) {
+            if (toolResults.size() > 0) {
+                appendResultsAfterCommitted(trace, calls, toolResults);
+            }
+        } else if (toolResults.size() > 0) {
             //确保"成套"出现，避免错位
             trace.getWorkingMemory().addMessage(lastReason);
             trace.getWorkingMemory().addMessage(toolResults);
         }
+
+        if (trace.getSession().isPending()) {
+            // 工具调用挂起（等待用户回答/人工审批）：把恢复入口从「推理」改到「动作」——恢复时
+            // 先回放本批调用（跳过已完成者、补齐被挂起调用的结果）再进入推理；否则会直接把
+            // 「已声明但无结果」的工具调用发给供应商（400 No tool output found for tool call ...）。
+            trace.setRoute(ReActAgent.ID_ACTION);
+
+            if (!batchByCall.isEmpty()) {
+                // 固定本批已声明过的批次 id，供恢复回放沿用（重复声明会产生第二只容器）
+                for (BatchMetadata meta : batchByCall.values()) {
+                    trace.setExtra(PENDING_BATCH_ID_KEY, meta.batchId);
+                    break;
+                }
+            } else {
+                // 本批无可复用的声明（可见成员 ≤1）：清掉可能残留的上次挂起声明 id
+                trace.removeExtra(PENDING_BATCH_ID_KEY);
+            }
+        }
+    }
+
+    /**
+     * 恢复回放：把新产出的结果插到本批既有结果之后，保证 tool_calls 与其结果段连续。
+     *
+     * <p>既有结果必然紧跟在挂起时回灌的推理消息之后；取「最后一个属于本批的结果消息」之后
+     * 作为插入点，即可让整段结果连续，且与后续消息（如「等待用户回答」助手消息）保持原序。</p>
+     */
+    private void appendResultsAfterCommitted(ReActTrace trace, List<ToolCall> calls, List<ChatMessage> newResults) {
+        Set<String> batchIds = new HashSet<>();
+        for (ToolCall call : calls) {
+            if (call != null && call.getId() != null) {
+                batchIds.add(call.getId());
+            }
+        }
+
+        List<ChatMessage> messages = new ArrayList<>(trace.getWorkingMemory().getMessages());
+        int insertAt = -1;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            ChatMessage message = messages.get(i);
+            if (message instanceof ToolMessage && batchIds.contains(((ToolMessage) message).getToolCallId())) {
+                insertAt = i;
+                break;
+            }
+        }
+
+        if (insertAt < 0) {
+            // 理论不可达（已提交必有既有结果）：退化为直接追加，保证结果不丢失
+            trace.getWorkingMemory().addMessage(newResults);
+            return;
+        }
+
+        messages.addAll(insertAt + 1, newResults);
+        trace.getWorkingMemory().replaceMessages(messages);
+    }
+
+    /**
+     * 收集工作记忆中已产出结果（ToolMessage）的原生调用 id。
+     * 供挂起恢复回放跳过已完成调用：结果存在即代表该调用已执行完成并回灌（幂等）。
+     */
+    private static Set<String> collectCommittedToolIds(List<ChatMessage> messages) {
+        Set<String> ids = new HashSet<>();
+        if (messages == null) {
+            return ids;
+        }
+        for (ChatMessage message : messages) {
+            if (message instanceof ToolMessage) {
+                String toolCallId = ((ToolMessage) message).getToolCallId();
+                if (toolCallId != null && !toolCallId.isEmpty()) {
+                    ids.add(toolCallId);
+                }
+            }
+        }
+        return ids;
+    }
+
+    /** 本批调用中是否存在「已回灌结果」的调用（即本批为挂起恢复重放）。 */
+    private static boolean intersectsCommitted(List<ToolCall> calls, Set<String> committedCallIds) {
+        for (ToolCall call : calls) {
+            if (call != null && call.getId() != null && committedCallIds.contains(call.getId())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isReadonlyCall(ToolCall call) {

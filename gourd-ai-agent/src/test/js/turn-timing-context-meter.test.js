@@ -5,7 +5,7 @@
  * - chat.html：双份工具栏（欢迎页 / 对话页）左区只剩 +，模型选择器移入右区；
  *   对话页右区顺序 = 上下文环 → 模型 → 语音 → 发送；旧的 .context-status 整行已移除
  * - app.css / code.css：右区下拉改右对齐、环的 dasharray 与 JS 常量一致、
- *   悬停卡显隐与间隙桥接、窄屏与 code 模式收缩
+ *   dashoffset 不得由 CSS 声明（级联覆盖回归护栏）、悬停卡显隐与间隙桥接、窄屏与 code 模式收缩
  * - app-context.js（真实函数沙箱执行）：用量模型归一、进度圈 dashoffset 与分色档位、
  *   明细行 0 值省略、无数据时隐藏而非显示空环、旧帧时间戳门禁
  * - app-message.js（真实函数沙箱执行）：耗时毫秒优先/旧帧回退、TPS 扣除 TTFT 与除零防护、
@@ -84,6 +84,13 @@ test('chat.html：旧的上下文文本行已移除，进度圈含环/百分比/
     assert.match(meter, /id="chatContextMeterRows"/);
     assert.match(meter, /data-i18n-title="context\.meter_title"/);
     assert.match(meter, /data-i18n="context\.meter_title"/);
+
+    // CSS 不再提供 dashoffset 初值（见样式侧回归护栏），空环初态改由 attribute 保证：
+    // JS 运行前/无数据兜底都必须是一致的「空环 50.27」，否则满圆会闪一帧。
+    const initAttr = /stroke-dashoffset="([\d.]+)"/.exec(meter);
+    assert.ok(initAttr, 'fill 圆须带初始 stroke-dashoffset attribute（空环初值）');
+    const jsCirc2 = /CONTEXT_RING_CIRCUMFERENCE\s*=\s*([\d.]+)/.exec(contextJs);
+    assert.equal(initAttr[1], jsCirc2[1], '初始属性值须等于环周长常量');
 });
 
 /* ===================== 二、样式（app.css / code.css） ===================== */
@@ -98,6 +105,14 @@ test('app.css：右区下拉右对齐 + 环周长与 JS 常量一致 + 悬停卡
     const jsCirc = /CONTEXT_RING_CIRCUMFERENCE\s*=\s*([\d.]+)/.exec(contextJs);
     assert.ok(jsCirc, 'JS 须定义环周长常量');
     assert.equal(cssCirc[1], jsCirc[1], 'CSS 周长与 JS 常量必须严格相等，否则进度不准');
+
+    // 回归护栏（真实事故）：样式表里的 stroke-dashoffset 声明会按级联优先级覆盖 JS 用 .attr()
+    // 写入的 presentation attribute，把环锁死在初始值（弧永远画不出来）。进度只能由 JS 驱动，
+    // 空环初值走 chat.html 的 attribute。
+    assert.ok(!/[;{]\s*stroke-dashoffset\s*:/.test(ringRule),
+        'CSS 不得声明 stroke-dashoffset：会覆盖 JS 写入的 presentation attribute，把进度环锁死为空');
+    assert.match(ringRule, /transition:\s*stroke-dashoffset 0\.35s ease/,
+        '环的过渡声明须保留：attribute 变更可触发 transition（已实证），是进度变化的动画来源');
 
     // 悬停/键盘聚焦均可展开；伪元素桥接间隙，避免鼠标移向卡片途中 hover 中断
     assert.match(appCss, /\.context-meter:hover \.context-meter-pop/);

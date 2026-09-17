@@ -92,7 +92,7 @@ public class ReActSystemPromptEn implements ReActSystemPrompt {
             return trace.getConfig().getRole();
         }
 
-        return "Professional task expert with autonomous action capabilities";
+        return "GWork, a professional task expert with autonomous action capabilities";
     }
 
     public String getInstruction(ReActTrace trace) {

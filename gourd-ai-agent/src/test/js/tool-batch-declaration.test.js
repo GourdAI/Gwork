@@ -26,13 +26,16 @@ function fnBody(src, name) {
 
 test('ActionTask：批次声明紧随 createVisibleBatch，且整批执行前下发（成员按 batchIndex 归位）', () => {
     const action = readJava('com/gourdai/agent/react/task/ActionTask.java');
-    // 声明时机：必须紧随 createVisibleBatch（此刻模型流已结束、全部 draft 已发出），且在串行/并行执行之前
-    assert.match(action, /Map<ToolCall, BatchMetadata> batchByCall = createVisibleBatch\(calls\);\s*\n\s*\/\/ 批次声明/,
-        'announceVisibleBatch 必须紧跟 createVisibleBatch');
+    // 声明时机：fresh 批次路径必须紧随 createVisibleBatch（此刻模型流已结束、全部 draft 已发出），
+    // 且在串行/并行执行之前；挂起恢复重放路径沿用已声明批次 id、不得重复声明（否则凭空多出第二只容器）。
+    assert.match(action, /batchByCall = createVisibleBatch\(calls\);\s*\n\s*\/\/ 批次声明/,
+        'announceVisibleBatch 必须紧跟 createVisibleBatch（fresh 路径）');
+    assert.match(action, /batchByCall = createVisibleBatch\(calls, declaredBatchId\);/,
+        '恢复重放必须沿用已声明批次 id（不重复声明）');
     assert.match(action, /announceVisibleBatch\(trace, batchByCall\);/);
-    const createIdx = action.indexOf('Map<ToolCall, BatchMetadata> batchByCall = createVisibleBatch(calls);');
+    const createIdx = action.indexOf('batchByCall = createVisibleBatch(calls);');
     const announceIdx = action.indexOf('announceVisibleBatch(trace, batchByCall);');
-    const execIdx = action.indexOf('runCallsSerial(calls, trace, toolResults, aliasIdsByPrimaryId, batchByCall);');
+    const execIdx = action.indexOf('runCallsSerial(calls, trace, toolResults, aliasIdsByPrimaryId, batchByCall, committedCallIds);');
     assert.ok(createIdx >= 0 && announceIdx > createIdx && execIdx > announceIdx,
         '下发顺序必须是 createVisibleBatch → announceVisibleBatch → 执行');
 

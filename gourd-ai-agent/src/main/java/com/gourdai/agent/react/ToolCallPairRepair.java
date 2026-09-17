@@ -1,0 +1,172 @@
+/*
+ * Copyright 2017-2025 noear.org and authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.gourdai.agent.react;
+
+import com.gourdai.agent.AgentSession;
+import com.gourdai.agent.react.intercept.AskUser;
+import com.gourdai.agent.react.intercept.AskUserTask;
+import com.gourdai.agent.util.AskUserTool;
+import org.noear.solon.ai.chat.message.AssistantMessage;
+import org.noear.solon.ai.chat.message.ChatMessage;
+import org.noear.solon.ai.chat.message.ToolMessage;
+import org.noear.solon.ai.chat.prompt.Prompt;
+import org.noear.solon.ai.chat.tool.ToolCall;
+import org.noear.solon.ai.chat.tool.ToolResult;
+import org.noear.solon.core.util.Assert;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * 原生工具调用配对自愈器
+ *
+ * <p>工作记忆中的原生工具调用必须保持「Assistant(tool_calls) ↔ ToolMessage 结果」一一配对。
+ * 异常场景（工具调用挂起/中断后的历史遗留、旧快照恢复、异常恢复路径）可能残留「已声明但无结果」
+ * 的调用；OpenAI Responses / Chat 等供应商接口会直接拒绝这类请求
+ * （如 {@code 400 No tool output found for tool call call_xxx}），且重试无法自愈。</p>
+ *
+ * <p>本修复器在发送前补齐合成结果：</p>
+ * <ul>
+ * <li><b>ask_user</b>：若挂起答案仍在会话上下文（用户已作答、但恢复回放未执行到该调用），
+ * 按正常恢复语义回填答案文本，并清理挂起任务与答案键（与拦截器 onObservation 同构）。</li>
+ * <li><b>其它工具</b>：写入明确的中断标记文本，避免模型把空结果误当作真实观测。</li>
+ * </ul>
+ *
+ * <p>合成结果插入到该推理消息的已有结果段之后，保持配对连续；健康流程恒为空操作（幂等）。</p>
+ *
+ * @author oisin
+ * @since 3.9.1
+ */
+public class ToolCallPairRepair {
+    private static final Logger LOG = LoggerFactory.getLogger(ToolCallPairRepair.class);
+
+    /** 工具调用因挂起/中断未执行完成时的合成结果文案。 */
+    static final String INTERRUPTED_MARKER = "该工具调用因任务挂起/中断未执行完成，没有输出。请勿假设其结果；如需该信息请重新调用。";
+
+    /**
+     * 扫描并修复工作记忆中「已声明但无结果」的原生工具调用。
+     *
+     * @param trace 推理轨迹（工作记忆来源）
+     * @return 本次补齐的结果条数；健康流程返回 0
+     */
+    public static int repair(ReActTrace trace) {
+        if (trace == null) {
+            return 0;
+        }
+
+        Prompt workingMemory = trace.getWorkingMemory();
+        List<ChatMessage> messages = workingMemory.getMessages();
+        if (messages == null || messages.isEmpty()) {
+            return 0;
+        }
+
+        // 已有结果的调用 id（任意位置）——结果只可能由同批回灌产生，id 全局唯一
+        Set<String> resolvedIds = new HashSet<>();
+        for (ChatMessage message : messages) {
+            if (message instanceof ToolMessage) {
+                String toolCallId = ((ToolMessage) message).getToolCallId();
+                if (Assert.isNotEmpty(toolCallId)) {
+                    resolvedIds.add(toolCallId);
+                }
+            }
+        }
+
+        // 逐个推理消息找缺失结果；插入点 = 该消息及其连续结果段之后
+        Map<Integer, List<ChatMessage>> insertions = new LinkedHashMap<>();
+        int repaired = 0;
+        for (int i = 0; i < messages.size(); i++) {
+            if (!(messages.get(i) instanceof AssistantMessage)) {
+                continue;
+            }
+
+            List<ToolCall> calls = ((AssistantMessage) messages.get(i)).getToolCalls();
+            if (calls == null || calls.isEmpty()) {
+                continue;
+            }
+
+            List<ChatMessage> synthesized = new ArrayList<>();
+            for (ToolCall call : calls) {
+                if (call == null || Assert.isEmpty(call.getId()) || resolvedIds.contains(call.getId())) {
+                    continue;
+                }
+
+                synthesized.add(buildSyntheticResult(trace, call));
+                resolvedIds.add(call.getId()); //防御同批重复 id
+            }
+
+            if (synthesized.isEmpty()) {
+                continue;
+            }
+
+            int insertAt = i;
+            while (insertAt + 1 < messages.size() && messages.get(insertAt + 1) instanceof ToolMessage) {
+                insertAt++;
+            }
+            insertions.put(insertAt, synthesized);
+            repaired += synthesized.size();
+        }
+
+        if (repaired == 0) {
+            return 0;
+        }
+
+        List<ChatMessage> rebuilt = new ArrayList<>(messages.size() + repaired);
+        for (int i = 0; i < messages.size(); i++) {
+            rebuilt.add(messages.get(i));
+            List<ChatMessage> add = insertions.get(i);
+            if (add != null) {
+                rebuilt.addAll(add);
+            }
+        }
+        workingMemory.replaceMessages(rebuilt);
+
+        LOG.warn("ToolCallPairRepair: 补齐 {} 个缺失结果的原生工具调用，避免供应商因配对不完整拒绝请求", repaired);
+        return repaired;
+    }
+
+    /**
+     * 构造缺失调用的合成结果；ask_user 且答案仍在时按正常恢复语义回填真实答案。
+     */
+    private static ChatMessage buildSyntheticResult(ReActTrace trace, ToolCall call) {
+        String toolName = call.getName();
+
+        if (AskUserTool.TOOL_NAME.equals(toolName)) {
+            AgentSession session = trace.getSession();
+            if (session != null) {
+                String answer = AskUser.getAnswer(session, toolName);
+                if (Assert.isNotEmpty(answer)) {
+                    AskUserTask task = AskUser.getPendingTask(session);
+                    List<Map<String, Object>> questions = (task == null) ? null : task.getQuestions();
+
+                    // 与正常恢复路径同源：清理挂起任务与答案键（幂等），防止后续同类调用误判为“已恢复”
+                    session.getContext().remove(AskUser.TASK_KEY);
+                    session.getContext().remove(AskUser.ANSWER_PREFIX + toolName);
+
+                    return ChatMessage.ofTool(ToolResult.success(AskUser.formatAnswerText(questions, answer)),
+                            toolName, call.getId(), false);
+                }
+            }
+        }
+
+        return ChatMessage.ofTool(ToolResult.success(INTERRUPTED_MARKER), toolName, call.getId(), false);
+    }
+}

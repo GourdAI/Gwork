@@ -2435,7 +2435,6 @@ function buildQuestionAnswersPayload(state) {
 var QUESTION_CARD_SVG_PREV = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>';
 var QUESTION_CARD_SVG_NEXT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
 var QUESTION_CARD_SVG_CLOSE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-var QUESTION_CARD_SVG_ARROW = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
 var QUESTION_CARD_SVG_EDIT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>';
 
 /* 宿主容器：chat.html 已内建 #questionCardHost（.input-wrap 内、输入框上方）；
@@ -2605,7 +2604,12 @@ function renderQuestionCard(host, sess, state, opts) {
     var answer = questionAnswerFor(state, idx);
     var allAnswered = questionIsAllAnswered(state);
 
-    var html = '<div class="question-card' + (submitted ? ' submitted' : '') + '" data-action-id="' + escapeHtml(state.actionId || '') + '">';
+    /* 入场动画只在首次渲染播放（.question-card-enter）：勾选/翻页等交互会整卡重建，
+       若动画挂在 .question-card 上会随每次重建重放，整卡闪一下（msg-in 的透明度/位移过渡）。 */
+    var entering = state._entered ? '' : ' question-card-enter';
+    state._entered = true;
+
+    var html = '<div class="question-card' + (submitted ? ' submitted' : '') + entering + '" data-action-id="' + escapeHtml(state.actionId || '') + '">';
 
     /* 题目行：题目文本（含详情/跳过标记）｜右侧 ‹ n/N ›（仅多题）与 X */
     html += '<div class="question-card-header">';
@@ -2630,7 +2634,7 @@ function renderQuestionCard(host, sess, state, opts) {
     }
     html += '</div>';
 
-    /* 选项区：序号圆角徽章 + 文本（含推荐标记）+ 右箭头 */
+    /* 选项区：序号圆角徽章 + 文本（含推荐标记） */
     html += '<div class="question-card-options">';
     var optList = q.options || [];
     for (var oi = 0; oi < optList.length; oi++) {
@@ -2643,7 +2647,6 @@ function renderQuestionCard(host, sess, state, opts) {
             + '<span class="question-card-opt-label">' + escapeHtml(o.label == null ? '' : o.label)
             + (o.recommended ? '<span class="question-card-opt-reco">' + escapeHtml(GourdI18n.t('chat.question_recommended')) + '</span>' : '')
             + '</span>'
-            + '<span class="question-card-opt-arrow">' + QUESTION_CARD_SVG_ARROW + '</span>'
             + '</button>';
     }
     /* 「其他补充…」行：点击变输入框，Enter 确认；提交后仅作状态展示 */

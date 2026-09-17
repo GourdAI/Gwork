@@ -6,11 +6,10 @@
 
 一个真正能干活的开源桌面智能体 —— 给它一个目标，它还你一份结果。
 
-基于 [Solon AI](https://github.com/opensolon/solon-ai) 构建 · Java AI Agent
+Java AI Agent
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-8%20~%2026-orange.svg)](#)
-[![Solon AI](https://img.shields.io/badge/Built%20with-Solon%20AI-9cf.svg)](https://solon.noear.org/)
 [![Version](https://img.shields.io/badge/v2026.6.21-Latest-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20鸿蒙-lightgrey.svg)](#)
 
@@ -27,7 +26,7 @@ GWork 不是又一个聊天机器人，而是一套完整的 **桌面智能体�
 你下达一个目标，它会自主**规划任务 → 拆解步骤 → 读写文件 → 执行命令 → 联网检索 → 调用工具与模型 → 持续迭代**，直到把事情真正做完。从写周报、做 PPT、调研分析，到开发一个完整的项目 —— 它都能胜任。
 
 > 💡 **一句话体验它的能力：**
-> *"帮我设计一个 agent team（设计案存为 demo-dis.md），用 Solon + Java 17 开发一个经典权限管理系统，前端用 Vue3，界面要简洁好看。"*
+> *"帮我设计一个 agent team（设计案存为 demo-dis.md），用 Java 17 开发一个经典权限管理系统，前端用 Vue3，界面要简洁好看。"*
 > —— 它会自己出设计文档、建项目、写前后端代码、跑起来给你看。
 
 ---
@@ -49,9 +48,9 @@ GWork 不是又一个聊天机器人，而是一套完整的 **桌面智能体�
 
 ---
 
-## 🏗️ 基于 Solon AI 构建
+## 🏗️ 架构总览
 
-GWork 的智能体内核完全构建于 [Solon AI](https://github.com/opensolon/solon-ai) 生态之上，纯 Java 实现，兼容毕昇 JDK（华为）与鸿蒙 PC 环境：
+GWork 的智能体内核完全基于 Java 构建，兼容毕昇 JDK（华为）与鸿蒙 PC 环境：
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -65,10 +64,10 @@ GWork 的智能体内核完全构建于 [Solon AI](https://github.com/opensolon/
 │  Skills 技能 · MCP · OpenAPI 网关 · LSP · 记忆 · Web 工具   │
 ├─────────────────────────────────────────────────────────┤
 │                     安全层（Safety）                      │
-│          solon-ai-sandbox 沙箱 · 权限控制 · HITL 人工确认   │
+│             沙箱隔离 · 权限控制 · HITL 人工确认             │
 ├─────────────────────────────────────────────────────────┤
-│                     引擎层（Solon AI）                    │
-│   多协议模型适配 · 流式对话 · 函数调用 · solon-flow 编排      │
+│                     引擎层（Agent Engine）                │
+│        多协议模型适配 · 流式对话 · 函数调用 · 流程编排        │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -94,7 +93,7 @@ GWork 的智能体内核完全构建于 [Solon AI](https://github.com/opensolon/
 
 ### 沙箱隔离：大胆用，也放心用
 
-基于 `solon-ai-sandbox`，不可信代码与高危操作在隔离环境中执行；配合细粒度权限控制与 HITL（人工确认）机制，关键动作永远先问你。
+不可信代码与高危操作在隔离环境中执行；配合细粒度权限控制与 HITL（人工确认）机制，关键动作永远先问你。
 
 ### OpenAPI 接口网关：把业务系统交给它
 
@@ -152,6 +151,6 @@ GWork 的智能体内核完全构建于 [Solon AI](https://github.com/opensolon/
 ```
 你好
 用网络分析下 AI MCP 协议，然后生成个 PPT
-帮我设计一个 agent team（设计案存为 demo-dis.md），开发一个 solon + java17 的经典权限管理系统（demo-web），前端用 vue3，界面要简洁好看
+帮我设计一个 agent team（设计案存为 demo-dis.md），开发一个 java17 的经典权限管理系统（demo-web），前端用 vue3，界面要简洁好看
 ```
 

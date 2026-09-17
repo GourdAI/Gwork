@@ -11,6 +11,7 @@
  * - app-base.js：setActiveSession / deactivateSession 挂 syncQuestionCard（切会话重建/隐藏）
  * - chat.html：#questionCardHost 宿主容器在 .input-wrap 内、输入框上方
  * - app.css：.question-card 系列类与暗色兼容变量
+ * - 选项行无末尾小箭头；入场动画仅首次渲染（勾选/翻页整卡不再闪一下）
  * - 12 个语言包均提供 9 个 chat.question_* 键（JSON 合法、行尾无裸 LF）
  * - 行为：状态机（选/跳/推进/自定义/提交 payload 组装）在沙箱中提取真实源码执行
  */
@@ -154,6 +155,22 @@ test('app.css：.question-card 系列类与暗色兼容变量', () => {
     const card = sliceBetween(appCss, '.question-card {', '.question-card-header');
     assert.match(card, /var\(--bg-input-box\)/);
     assert.match(card, /var\(--border-color\)/);
+});
+
+test('app-message.js：选项行不再渲染末尾小箭头（“选完最后一个就发送”的误导已移除）', () => {
+    assert.doesNotMatch(message, /question-card-opt-arrow/);
+    assert.doesNotMatch(message, /QUESTION_CARD_SVG_ARROW/);
+    assert.doesNotMatch(appCss, /question-card-opt-arrow/);
+});
+
+test('app-message.js / app.css：入场动画仅首次渲染播放（勾选/翻页整卡不再闪一下）', () => {
+    const render = sliceBetween(message, '/* 渲染卡片到宿主', 'function handleQuestionResponse');
+    assert.match(render, /var entering = state\._entered \? '' : ' question-card-enter';/);
+    assert.match(render, /state\._entered = true;/);
+    assert.ok(render.includes("(submitted ? ' submitted' : '') + entering"), '重建时必须按首次渲染状态拼接进入类');
+    // 基类规则不得再挂动画；动画只允许挂在首次渲染标记类上
+    assert.doesNotMatch(appCss, /\.question-card \{[^}]*animation:/);
+    assert.match(appCss, /\.question-card\.question-card-enter \{ animation: msg-in 0\.25s ease-out; \}/);
 });
 
 test('12 个语言包均提供 9 个 chat.question_* 键（JSON 合法、行尾无裸 LF）', () => {
