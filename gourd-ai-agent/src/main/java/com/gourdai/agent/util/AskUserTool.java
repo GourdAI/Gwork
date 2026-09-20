@@ -16,8 +16,10 @@
 package com.gourdai.agent.util;
 
 import org.noear.snack4.ONode;
-import org.noear.solon.ai.chat.tool.FunctionTool;
-import org.noear.solon.ai.chat.tool.FunctionToolDesc;
+import com.gourdai.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.FunctionToolDesc;
+
+import java.util.Collection;
 
 /**
  * 结构化问答工具（ask_user）
@@ -32,7 +34,46 @@ import org.noear.solon.ai.chat.tool.FunctionToolDesc;
 public class AskUserTool {
     public static final String TOOL_NAME = "ask_user";
 
-    public static final String TOOL_DESCRIPTION = "当任务需要用户提供关键信息、做出选择或确认时，向用户发起结构化提问并等待回答。支持提供候选项（可标记推荐）；用户可点击选项、自由输入或跳过。任务将挂起，直到用户回答后自动恢复。使用纪律：1) 仅在确实需要用户输入才能继续时使用（能自行查询/推断的信息不要问）；2) 多个问题必须在一次调用中成组提出；3) 若有明确最佳实践，请对相应选项标记 recommended=true。";
+    public static final String TOOL_DESCRIPTION = "向用户发起结构化提问并等待回答（支持候选项，可标记推荐；用户可点击选项、自由输入或跳过）。任务将挂起，直到用户回答后自动恢复。【必须使用的场景】凡是你准备在回复正文里列出多个方案（A/B/C、方案一/方案二）让用户挑选，或以「请选择 / 请确认 / 你拍板 / 你选哪个 / 等你确认」之类措辞收尾停下时，一律改为调用本工具，把每个方案作为一个 option 传入——不要让用户自己打字复述选项。需要用户提供你无法自行查询或推断的关键信息（凭据、业务口径、目标取舍）时同样必须调用本工具。使用纪律：1) 多个问题必须在一次调用中成组提出；2) 若有明确最佳实践，请对相应选项标记 recommended=true；3) 能自行查询/推断的信息不要问。";
+
+    /**
+     * 系统提示词硬规则（中文）：由 ReAct 提示词在工具可用时条件注入。
+     *
+     * <p>不含编号前缀，由调用方按其规则列表的顺序拼接编号。</p>
+     */
+    public static final String PROMPT_RULE_CN = "**主动提问**：当需要用户在多个方案之间做出选择、拍板确认，"
+            + "或需要用户提供你无法自行查询/推断的关键信息时，【必须】调用 `ask_user` 工具发起结构化提问"
+            + "（把每个候选方案作为一个 option 传入，最佳实践项标记 recommended=true）；"
+            + "严禁仅在正文里列出 A/B/C 方案后以「请选择 / 请确认 / 你拍板」收尾、让用户自己打字作答。";
+
+    /**
+     * 系统提示词硬规则（英文）：由 ReAct 提示词在工具可用时条件注入。
+     */
+    public static final String PROMPT_RULE_EN = "**Ask The User**: When the user must choose between multiple options, "
+            + "sign off on a decision, or supply key information you cannot look up or infer, "
+            + "you MUST call the `ask_user` tool to raise a structured question "
+            + "(pass every candidate as an option; mark the best practice with recommended=true). "
+            + "NEVER list options A/B/C in your reply and stop with phrases like \"please choose\" or \"your call\" "
+            + "that force the user to type the answer.";
+
+    /**
+     * 判断当前工具集是否包含 ask_user（用于系统提示词条件注入，避免向无此工具的子代理注入幻觉指令）。
+     *
+     * @param tools 当前可用工具集（允许为 null）
+     */
+    public static boolean isAvailable(Collection<FunctionTool> tools) {
+        if (tools == null || tools.isEmpty()) {
+            return false;
+        }
+
+        for (FunctionTool tool : tools) {
+            if (tool != null && TOOL_NAME.equals(tool.name())) {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /**
      * 嵌套 JSON Schema（手写以保证 detail/options/recommended 的“可选”语义精确可表达）。

@@ -16,8 +16,8 @@
 package com.gourdai.harness.talents.crawler;
 
 import org.noear.snack4.ONode;
-import org.noear.solon.ai.annotation.ToolMapping;
-import org.noear.solon.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.annotation.ToolMapping;
+import com.gourdai.ai.chat.talent.AbsTalent;
 import org.noear.solon.annotation.Param;
 import org.noear.solon.lang.Preview;
 import org.noear.solon.net.http.HttpUtils;
@@ -74,7 +74,10 @@ public class WebCrawlerDriverTalent extends AbsTalent {
 
     // --- 驱动实现：Jina Reader (极简 GET) ---
     public static final CrawlerDriver JINA = (url, key) -> {
-        HttpUtils http = HttpUtils.http("https://r.jina.ai/" + url);
+        // 显式三段超时（单位：秒）：连接 10 / 写 10 / 读 30。
+        // Jina Reader 为单次 GET 取正文，30s 读超时足够；不设则落到底座默认 read=60s，弱网下等待翻倍。
+        HttpUtils http = HttpUtils.http("https://r.jina.ai/" + url)
+                .timeout(10, 10, 30);
 
         // 1. 必须：设置模拟浏览器的 User-Agent
         http.header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
@@ -99,6 +102,9 @@ public class WebCrawlerDriverTalent extends AbsTalent {
     public static final CrawlerDriver FIRECRAWL = (url, key) -> {
         // Firecrawl v1/v2 统一接口，明确要求 markdown 格式
         String json = HttpUtils.http("https://api.firecrawl.dev/v1/scrape")
+                // 显式三段超时（单位：秒）：连接 10 / 写 10 / 读 60。
+                // Firecrawl 服务端需渲染整页并抽取正文，属明显的大内容抓取，读超时保留 60s 以免误杀正常抓取。
+                .timeout(10, 10, 60)
                 .header("Authorization", "Bearer " + key)
                 .header("Content-Type", "application/json")
                 .bodyOfJson(new ONode()

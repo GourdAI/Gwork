@@ -20,6 +20,7 @@
 
     var CONTAINER = 'automationInner';
     var editId = null;
+    var formMode = false; // 新建表单也没有 editId，视图模式需独立维护
     var initialized = false;
 
     /** 表单态：不进 DOM 的选择值（工作空间 / 模型 / 思考档位 / layui select 值） */
@@ -266,15 +267,23 @@
         return p;
     }
 
+    /** 登记名优先，未登记（或列表未就绪）回退目录名。
+     *  重命名只改 projects.json 的展示名、不动磁盘目录，故只靠 baseName(path) 永远读不到新名字，
+     *  会出现「侧栏/欢迎页显新名、任务卡标签显旧目录名」的不一致。 */
+    function projectNameOf(path) {
+        if (!path) return '';
+        for (var i = 0; i < formState.projects.length; i++) {
+            if (formState.projects[i].path === path) {
+                return formState.projects[i].name || baseName(path);
+            }
+        }
+        return baseName(path);
+    }
+
     /** 未选 = 全局：按钮仅提示“选择项目”，不展示默认/全局信息（同聊天页 displayName） */
     function workspaceLabel() {
         if (!formState.workspace) return t('code.select_project');
-        for (var i = 0; i < formState.projects.length; i++) {
-            if (formState.projects[i].path === formState.workspace) {
-                return formState.projects[i].name || baseName(formState.workspace);
-            }
-        }
-        return baseName(formState.workspace);
+        return projectNameOf(formState.workspace);
     }
 
     /** 历史档位值归一（与后端 ThinkingDepth.normalize 同口径）：'off' 是 'auto' 的旧名，不再有 minimal 档 */
@@ -303,37 +312,44 @@
 
     // ===================== 列表视图 =====================
 
+    /* 先备齐登记项目列表再渲染：任务卡的工作空间标签需要登记名（projectNameOf），
+       否则首次打开时列表未就绪，标签会回退成目录名（重命名后与侧栏不一致）。 */
     function showList() {
+        formMode = false;
         editId = null;
         if (autoSelector) { autoSelector.destroy(); autoSelector = null; }
-        api('list', null, function (res) {
-            var items = (res && res.data) ? res.data : [];
-            var html = '<div class="automation-header">';
-            html += '<div class="automation-title">' + escapeHtml(t('automation.title')) + '</div>';
-            html += '<div class="automation-desc">' + escapeHtml(t('automation.desc')) + '</div>';
-            html += '</div>';
+        loadProjects(function () {
+            if (formMode) return; // 项目加载期间可能已打开表单
+            api('list', null, function (res) {
+                if (formMode) return; // 迟到的列表响应不得覆盖当前草稿
+                var items = (res && res.data) ? res.data : [];
+                var html = '<div class="automation-header">';
+                html += '<div class="automation-title">' + escapeHtml(t('automation.title')) + '</div>';
+                html += '<div class="automation-desc">' + escapeHtml(t('automation.desc')) + '</div>';
+                html += '</div>';
 
-            html += '<div class="automation-section">';
-            html += '<div class="automation-section-head">';
-            html += '<span class="automation-section-title">' + escapeHtml(t('automation.created_tasks')) + '</span>';
-            html += '<button class="automation-add-btn" id="autoAddBtn">+ ' + escapeHtml(t('settings.loop.add_task')) + '</button>';
-            html += '</div>';
+                html += '<div class="automation-section">';
+                html += '<div class="automation-section-head">';
+                html += '<span class="automation-section-title">' + escapeHtml(t('automation.created_tasks')) + '</span>';
+                html += '<button class="automation-add-btn" id="autoAddBtn">+ ' + escapeHtml(t('settings.loop.add_task')) + '</button>';
+                html += '</div>';
 
-            if (items.length === 0) {
-                html += '<div class="automation-empty">' + escapeHtml(t('settings.loop.empty')) + '</div>';
-            } else {
-                html += '<div class="automation-task-list">';
-                for (var i = 0; i < items.length; i++) {
-                    html += taskCardHtml(items[i]);
+                if (items.length === 0) {
+                    html += '<div class="automation-empty">' + escapeHtml(t('settings.loop.empty')) + '</div>';
+                } else {
+                    html += '<div class="automation-task-list">';
+                    for (var i = 0; i < items.length; i++) {
+                        html += taskCardHtml(items[i]);
+                    }
+                    html += '</div>';
                 }
                 html += '</div>';
-            }
-            html += '</div>';
 
-            // 模板区（点卡片 = 带预填值进新建表单）
-            html += '<div class="automation-tpl-wrap">' + templatesHtml() + '</div>';
+                // 模板区（点卡片 = 带预填值进新建表单）
+                html += '<div class="automation-tpl-wrap">' + templatesHtml() + '</div>';
 
-            $c().html(html);
+                $c().html(html);
+            });
         });
     }
 
@@ -377,7 +393,7 @@
         h += '<div class="auto-task-prompt">' + escapeHtml(x.prompt) + '</div>';
 
         var tags = [];
-        if (x.workspace) tags.push('<span class="auto-task-tag">' + escapeHtml(baseName(x.workspace)) + '</span>');
+        if (x.workspace) tags.push('<span class="auto-task-tag">' + escapeHtml(projectNameOf(x.workspace)) + '</span>');
         if (x.modelName) tags.push('<span class="auto-task-tag">' + escapeHtml(x.modelName) + '</span>');
         if (x.thinkingDepth && normThinking(x.thinkingDepth) !== 'auto') tags.push('<span class="auto-task-tag">' + escapeHtml(x.thinkingDepth) + '</span>');
         if (x.contextLength) tags.push('<span class="auto-task-tag">' + escapeHtml(GourdModelSelector.contextLengthLabel(x.contextLength)) + '</span>');
@@ -404,6 +420,7 @@
 
     /** @param tplKey 可选：模板 key，仅新建（editId 为空）时生效 */
     function showForm(tplKey) {
+        formMode = true;
         // 仅新建时重置：编辑态下真实值要等 api('get') 异步回来，
         // 若先清空会让首屏闪现“不推送 / 分钟”等错值
         if (!editId) {
@@ -987,6 +1004,17 @@
         $('#automationView').removeClass('active');
         $('#automationNavBtn').removeClass('active');
     }
+
+    /* 项目登记表变更（侧栏重命名 / 新增 / 移除）：作废缓存并重拉，
+       已打开的自动化页（任务卡标签 / 表单工作空间按钮）即时跟上新显示名。 */
+    document.addEventListener('projects:changed', function () {
+        formState.projectsLoaded = false;
+        loadProjects(function () {
+            if (!$('#automationView').hasClass('active')) return;
+            if (formMode) renderWorkspaceUI();
+            else showList();
+        });
+    });
 
     window.openAutomation = openAutomation;
     window.closeAutomation = closeAutomation;

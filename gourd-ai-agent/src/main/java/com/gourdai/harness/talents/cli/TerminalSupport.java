@@ -17,8 +17,8 @@ package com.gourdai.harness.talents.cli;
 
 import org.noear.solon.Utils;
 
-import org.noear.solon.ai.talents.mount.MountDir;
-import org.noear.solon.ai.talents.mount.MountManager;
+import com.gourdai.ai.talents.mount.MountDir;
+import com.gourdai.ai.talents.mount.MountManager;
 import org.noear.solon.core.util.Assert;
 
 import java.io.IOException;

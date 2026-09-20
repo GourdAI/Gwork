@@ -5,9 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -229,10 +227,21 @@ class SessionStreamStoreTest {
             reader.get(20, TimeUnit.SECONDS);
 
             SessionStreamStore.LoadResult loaded = store.loadAfter(sid, null, 0L, 1000);
-            Assertions.assertEquals(200, loaded.events.size());
-            Set<Long> sequences = new HashSet<>();
-            for (Map event : loaded.events) sequences.add(((Number) event.get("eventSeq")).longValue());
-            Assertions.assertEquals(200, sequences.size());
+            // 写侧 delta 合并后，同归属的连续 text 增量会被攒成若干行，事件条数不再等于帧数
+            // （合并边界取决于攒批时间阈值与并发读取触发的强制冲刷，天然不确定）。
+            // 因此这里断言「内容等价 + 序号单调 + 游标完整」——这三条才是本用例真正要守住的不变式：
+            // 读取绝不会观察到半行、不会丢帧、也不会重复。
+            StringBuilder merged = new StringBuilder();
+            long prevSeq = 0;
+            for (Map event : loaded.events) {
+                merged.append(String.valueOf(event.get("text")));
+                long seq = ((Number) event.get("eventSeq")).longValue();
+                Assertions.assertTrue(seq > prevSeq, "eventSeq 必须严格单调递增：" + seq);
+                prevSeq = seq;
+            }
+            StringBuilder expected = new StringBuilder();
+            for (int i = 0; i < 200; i++) expected.append("v").append(i);
+            Assertions.assertEquals(expected.toString(), merged.toString(), "合并后内容必须与逐帧写入完全等价");
             Assertions.assertEquals(200L, loaded.latestSeq);
         } finally {
             pool.shutdownNow();

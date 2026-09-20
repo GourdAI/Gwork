@@ -15,7 +15,7 @@
  */
 package com.gourdai.agent.trace;
 
-import org.noear.solon.ai.AiUsage;
+import com.gourdai.ai.AiUsage;
 import org.noear.solon.lang.Preview;
 
 import java.io.Serializable;

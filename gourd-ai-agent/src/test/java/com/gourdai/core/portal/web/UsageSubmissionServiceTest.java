@@ -4,7 +4,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.noear.snack4.ONode;
-import org.noear.solon.ai.AiUsage;
+import com.gourdai.ai.AiUsage;
 
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;

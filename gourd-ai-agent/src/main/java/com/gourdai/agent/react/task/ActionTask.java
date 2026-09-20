@@ -32,14 +32,14 @@ import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.react.ReActAgentConfig;
 import com.gourdai.agent.react.ReActInterceptor;
 import com.gourdai.agent.react.ReActTrace;
-import org.noear.solon.ai.chat.interceptor.ToolChain;
-import org.noear.solon.ai.chat.interceptor.ToolRequest;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.message.ToolMessage;
-import org.noear.solon.ai.chat.tool.FunctionTool;
-import org.noear.solon.ai.chat.tool.ToolCall;
-import org.noear.solon.ai.chat.tool.ToolResult;
+import com.gourdai.ai.chat.interceptor.ToolChain;
+import com.gourdai.ai.chat.interceptor.ToolRequest;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ToolMessage;
+import com.gourdai.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.ToolCall;
+import com.gourdai.ai.chat.tool.ToolResult;
 import org.noear.solon.core.exception.StatusException;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.core.util.RankEntity;
@@ -84,6 +84,26 @@ public class ActionTask {
 
     /** 挂起批次的声明 id 暂存键（trace extras）：恢复回放沿用，避免重复声明批次容器。 */
     private static final String PENDING_BATCH_ID_KEY = "gourd_pending_batch_id";
+
+    /**
+     * 文本模式挂起前「已执行并已回灌结果」的动作指纹暂存键（trace extras）。
+     *
+     * <p>用途见 {@link #processTextModeAction}：文本模式无原生调用 id，改以
+     * 「工具名 + 规范化参数」为幂等键，恢复回放时据此跳过已完成动作，防止写工具二次副作用。</p>
+     */
+    private static final String PENDING_TEXT_ACTION_KEYS = "gourd_pending_text_action_keys";
+
+    /**
+     * 文本模式回放时跳过已执行动作的交代文案。
+     *
+     * <p><b>为何必须给一条而不是静默跳过</b>：静默跳过会让模型完全看不到该动作的任何反馈，
+     * 它会判定「没执行成」并换个写法重试——参数一变指纹就失效，副作用照样发生，防护归零。</p>
+     *
+     * <p>措辞与 {@code ToolCallPairRepair#INTERRUPTED_MARKER} 同一教训：只陈述事实，不说「如需请重新调用」
+     * （那会主动诱导模型重跑，恰好抵消本保护的目的）。</p>
+     */
+    static final String TEXT_ACTION_ALREADY_EXECUTED =
+            "[该动作在本次挂起前已执行完成 · 本轮不重复执行，避免产生二次副作用]";
 
     /**
      * 文本模式无原生 ToolCall id 时的兜底序号源（并发安全）。
@@ -278,16 +298,18 @@ public class ActionTask {
         final Set<String> committedCallIds = collectCommittedToolIds(trace.getWorkingMemory().getMessages());
         final boolean batchCommitted = intersectsCommitted(calls, committedCallIds);
 
+        // 批次复用判定：PENDING_BATCH_ID_KEY 只在挂起时写入（见 flushToolResults），非空即意味着
+        // 「本次 ActionTask 是挂起后的回放」——含整批零提交的极端情形（首个可见工具即被挂起：
+        // 批次已声明、尚无任何结果落盘，上面的 committedCallIds 检测不到，但旧容器已在前端建好）。
+        // 一律沿用挂起前已声明的批次 id（前端以 batchId 归组容器）；重新声明会凭空多出第二只
+        // 空容器，沿用旧 id 时回放新产出的帧会自然填进首轮建好的槽位（路径幂等共存）。
+        String declaredBatchId = trace.getExtraAs(PENDING_BATCH_ID_KEY);
+        trace.removeExtra(PENDING_BATCH_ID_KEY);
+
         Map<ToolCall, BatchMetadata> batchByCall;
-        if (batchCommitted) {
-            // 恢复重放：沿用挂起前已声明的批次 id（前端以 batchId 归组容器）。重复声明会凭空多出
-            // 第二只容器；沿用旧 id 时，回放新产出的帧会自然填进首轮建好的槽位（路径幂等共存）。
-            String declaredBatchId = trace.getExtraAs(PENDING_BATCH_ID_KEY);
-            trace.removeExtra(PENDING_BATCH_ID_KEY);
+        if (declaredBatchId != null) {
             batchByCall = createVisibleBatch(calls, declaredBatchId);
         } else {
-            // 防御性清理：未命中「恢复回放」判定时的残留声明 id 不得泄漏给后续批次
-            trace.removeExtra(PENDING_BATCH_ID_KEY);
             batchByCall = createVisibleBatch(calls);
             // 批次声明：整批执行前把结构一次性下发，订阅端建容器时即可收编全部骨架卡，
             // 不再依赖各工具 start 帧逐张搬入（那是「单卡先出 → 逐张合并」跳变的根源）。
@@ -662,6 +684,72 @@ public class ActionTask {
         return false;
     }
 
+    /**
+     * 文本模式动作的幂等指纹：工具名 + 参数序列化。
+     *
+     * <p>与 {@link #dedupeIdenticalCalls} 的去重键同源（同一个 {@code ONode.serialize} 口径），
+     * 两处对「什么算同一次副作用」的定义保持一致，避免两套语义分岁。</p>
+     *
+     * <p>工具名为空或序列化异常时返回 {@code null}，调用方视为「无法指纹」——既不跳过也不记录，
+     * 退化为修复前行为（宁可漏跳一次重跑，不能拿不确定的键去误跳过工具）。</p>
+     */
+    private static String textActionKey(String toolName, Map<String, Object> args) {
+        if (Assert.isEmpty(toolName)) {
+            return null;
+        }
+
+        try {
+            return toolName + "\u0000" + ONode.serialize(args == null ? new HashMap<>() : args);
+        } catch (Throwable e) {
+            // 参数含不可序列化对象：放弃指纹，不阻断主流程
+            LOG.debug("Text-mode action key build failed for tool [{}]", toolName, e);
+            return null;
+        }
+    }
+
+    /**
+     * 取出并清空挂起时记录的「已执行动作指纹」（一次性语义）。
+     *
+     * <p>读取即清是故意的：本保护只针对「挂起 → 紧接着的那一次恢复回放」这一段窗口。
+     * 若让指纹长期驻留，模型日后真心想再调一次同名同参工具（如再跑一次相同命令）会被误屏蔽。</p>
+     */
+    private static Set<String> takeCommittedTextActionKeys(ReActTrace trace) {
+        List<String> keys = trace.getExtraAs(PENDING_TEXT_ACTION_KEYS);
+        trace.removeExtra(PENDING_TEXT_ACTION_KEYS);
+
+        if (keys == null || keys.isEmpty()) {
+            return new HashSet<>();
+        }
+
+        return new HashSet<>(keys);
+    }
+
+    /**
+     * 挂起时落盘本轮已执行完成的动作指纹，供下一次文本模式回放跳过。
+     *
+     * <p>只在真正挂起（{@code session.isPending()}）时写入：END 路由、拒绝、feedback 等
+     * 其它中止形态不会再回放本段 Action，写了反而成为泄漏到后续回合的脏数据。</p>
+     */
+    private static void rememberCommittedTextActionKeys(ReActTrace trace, List<String> executedActionKeys) {
+        if (!trace.getSession().isPending()) {
+            trace.removeExtra(PENDING_TEXT_ACTION_KEYS);
+            return;
+        }
+
+        List<String> keys = new ArrayList<>();
+        for (String key : executedActionKeys) {
+            if (key != null) {
+                keys.add(key);
+            }
+        }
+
+        if (keys.isEmpty()) {
+            trace.removeExtra(PENDING_TEXT_ACTION_KEYS);
+        } else {
+            trace.setExtra(PENDING_TEXT_ACTION_KEYS, keys);
+        }
+    }
+
     private boolean isReadonlyCall(ToolCall call) {
         return call != null && READONLY_TOOLS.contains(call.getName());
     }
@@ -687,6 +775,33 @@ public class ActionTask {
     /**
      * 解析并执行文本模式下的 Action 指令
      * 核心逻辑优化：从“全执行后拼接”改为“逐个执行并即时回填与反馈”
+     *
+     * <p><b>挂起恢复的重跑防护</b>（与原生模式 {@code collectCommittedToolIds} 等效）：
+     * 本方法挂起时直接 {@code return}，而写入工作记忆的语句在方法末尾——故已执行完的兄弟动作
+     * 其结果未能落盘，不能像原生模式那样从工作记忆里反推「谁已完成」。故改为在挂起那一刻
+     * 主动把已完成动作的指纹写进 {@code PENDING_TEXT_ACTION_KEYS}，回放时据此跳过。</p>
+     *
+     * <p><b>幂等键为何取「工具名 + 参数序列化」而不是步骤序号</b>：文本模式挂起后路由停在
+     * {@code ID_REASON}（见下方「路由事实」），恢复后模型会重新生成一段全新的 Action 文本，
+     * 其中动作的个数与次序都可能变（模型没收到任何 Observation，极易把整段原样重发）。
+     * 此时步骤序号毫无意义：同一下标在两次输出里可能是完全不同的工具，按序号跳过会
+     * 「误跳过本该执行的工具」——这比重跑一次更危险。而「工具名 + 参数」在语义上就是
+     * 「同一次副作用」的定义，与 {@link #dedupeIdenticalCalls} 的去重口径同源。</p>
+     *
+     * <p><b>保守边界（宁漏跳一次，不误跳一次）</b>：</p>
+     * <ul>
+     * <li>指纹集在本方法开头「读取即清」（一次性）：只保护紧接着的那一次回放，绝不泄漏到后续回合，
+     * 避免模型日后真心想重复调用同名同参工具时被永久屏蔽。</li>
+     * <li>每个指纹只能消费一次（命中即移除）：同一轮里真出现两个同名同参动作时，只抵消已完成的那一份，
+     * 第二个仍照常执行。</li>
+     * <li>跳过时仍补一条 Observation，告知模型「已执行过」：否则模型看不到反馈，会换个写法再试一遍，
+     * 副作用照样发生（指纹却因参数变了而失效）。</li>
+     * </ul>
+     *
+     * <p><b>路由事实</b>：本方法不调 {@code setRoute}，而 {@link #run} 开头已把路由置为
+     * {@code ID_REASON}（只有 {@link #flushToolResults} 会改成 {@code ID_ACTION}，而它仅由
+     * {@link #processNativeToolCall} 调用）。故文本模式挂起后恢复会进 Reason 而非 Action；
+     * 重跑路径是「模型重发同一段 Action」而非「直接重放旧文本」，但后果相同：写工具二次副作用。</p>
      */
     private void processTextModeAction(AssistantMessage lastReason, ReActTrace trace, TeamTrace parentTeamTrace) throws Throwable {
         String lastContent = lastReason.getResultContent();
@@ -697,6 +812,11 @@ public class ActionTask {
         if (LOG.isDebugEnabled()) {
             LOG.debug("Processing text mode action for agent [{}].", config.getName());
         }
+
+        // 读取即清：指纹只保护紧接着的这一次回放（见方法注释的「保守边界」）
+        final Set<String> committedActionKeys = takeCommittedTextActionKeys(trace);
+        // 本轮已完成动作的指纹：挂起时落盘，供下次回放跳过
+        final List<String> executedActionKeys = new ArrayList<>();
 
         List<ChatMessage> toolResults = new ArrayList<>();
         int actionLabelIndex = lastContent.indexOf("Action:");
@@ -723,10 +843,25 @@ public class ActionTask {
                         ONode argsNode = actionNode.get("arguments");
                         Map<String, Object> args = argsNode.isObject() ? argsNode.toBean(Map.class) : new HashMap<>();
 
+                        String actionKey = textActionKey(toolName, args);
+                        if (committedActionKeys.remove(actionKey)) {
+                            // 挂起前已执行：不重跑（防写工具二次副作用），但必须给模型一条交代
+                            toolResults.add(ChatMessage.ofUser("Observation: " + TEXT_ACTION_ALREADY_EXECUTED));
+                            executedActionKeys.add(actionKey);
+                            if (LOG.isWarnEnabled()) {
+                                LOG.warn("Agent [{}] text-mode resume: skip already executed action [{}]",
+                                        config.getName(), toolName);
+                            }
+                            continue;
+                        }
+
                         ToolResult result = doAction(trace, toolName, args, toolResults, null, null, BatchMetadata.NONE);
                         if (result == null) {
+                            // 挂起/终止：本轮 toolResults 不会落盘，故另存指纹供回放跳过
+                            rememberCommittedTextActionKeys(trace, executedActionKeys);
                             return;
                         }
+                        executedActionKeys.add(actionKey);
                     } catch (Throwable e) {
                         // 解析异常回传 (优化点 2)
                         ChatMessage observationMessage = ChatMessage.ofUser("Observation: Error parsing Action JSON: " + e.getMessage());
@@ -742,9 +877,16 @@ public class ActionTask {
                     foundAny = true;
                     Map<String, Object> args = new HashMap<>();
 
-                    ToolResult result = doAction(trace, toolName, args, toolResults, null, null, BatchMetadata.NONE);
-                    if (result == null) {
-                        return;
+                    String actionKey = textActionKey(toolName, args);
+                    if (committedActionKeys.remove(actionKey)) {
+                        toolResults.add(ChatMessage.ofUser("Observation: " + TEXT_ACTION_ALREADY_EXECUTED));
+                    } else {
+                        ToolResult result = doAction(trace, toolName, args, toolResults, null, null, BatchMetadata.NONE);
+                        if (result == null) {
+                            rememberCommittedTextActionKeys(trace, executedActionKeys);
+                            return;
+                        }
+                        executedActionKeys.add(actionKey);
                     }
                 }
             }

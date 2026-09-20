@@ -15,8 +15,8 @@
  */
 package com.gourdai.core.config;
 
-import org.noear.solon.ai.annotation.ToolMapping;
-import org.noear.solon.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.annotation.ToolMapping;
+import com.gourdai.ai.chat.talent.AbsTalent;
 import com.gourdai.harness.HarnessEngine;
 import org.noear.solon.annotation.Param;
 

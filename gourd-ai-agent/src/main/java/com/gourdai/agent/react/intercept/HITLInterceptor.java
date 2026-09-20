@@ -19,7 +19,7 @@ import com.gourdai.agent.Agent;
 import com.gourdai.agent.react.AbsReActInterceptor;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.react.task.ToolExchanger;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Nullable;
 import org.noear.solon.lang.Preview;

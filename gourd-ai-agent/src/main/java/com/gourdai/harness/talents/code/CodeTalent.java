@@ -16,8 +16,8 @@
 package com.gourdai.harness.talents.code;
 
 import com.gourdai.harness.talents.code.impl.*;
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.talent.AbsTalent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

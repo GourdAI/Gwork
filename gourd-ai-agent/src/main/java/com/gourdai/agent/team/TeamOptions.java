@@ -16,8 +16,8 @@
 package com.gourdai.agent.team;
 
 import com.gourdai.agent.event.AgentEvent;
-import org.noear.solon.ai.chat.ModelOptionsAmend;
-import org.noear.solon.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.ModelOptionsAmend;
+import com.gourdai.ai.chat.tool.FunctionTool;
 import org.noear.solon.core.util.RankEntity;
 import org.noear.solon.lang.NonSerializable;
 import org.slf4j.Logger;

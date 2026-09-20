@@ -17,10 +17,10 @@ package com.gourdai.harness.talents.lsp;
 
 import org.eclipse.lsp4j.*;
 import org.noear.snack4.ONode;
-import org.noear.solon.ai.annotation.ToolMapping;
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.talent.AbsTalent;
-import org.noear.solon.ai.rag.Document;
+import com.gourdai.ai.annotation.ToolMapping;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.rag.Document;
 import com.gourdai.harness.talents.lsp.exception.LspCommandNotFoundException;
 import com.gourdai.harness.talents.lsp.exception.LspEnvironmentException;
 import com.gourdai.harness.talents.lsp.exception.LspNoMatchException;

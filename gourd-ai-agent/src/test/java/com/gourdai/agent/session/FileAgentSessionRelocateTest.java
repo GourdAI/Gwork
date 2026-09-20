@@ -2,7 +2,7 @@ package com.gourdai.agent.session;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;

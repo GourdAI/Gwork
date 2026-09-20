@@ -15,8 +15,8 @@
  */
 package com.gourdai.harness.agent;
 
-import org.noear.solon.ai.talents.mount.AgentMd;
-import org.noear.solon.ai.talents.mount.MountManager;
+import com.gourdai.ai.talents.mount.AgentMd;
+import com.gourdai.ai.talents.mount.MountManager;
 import org.noear.solon.core.util.ResourceUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,8 +37,8 @@ import java.util.stream.Collectors;
  */
 public class AgentManager {
     private static final Logger LOG = LoggerFactory.getLogger(AgentManager.class);
-    //产品自有命名空间：harness 已 fork 为 com.gourdai 源码，不再借用上游 solon 的资源路径，
-    //避免未来重新引入 solon-ai-harness 依赖时出现同路径资源、由 classpath 顺序决定取哪份
+    //产品自有命名空间：harness 已 fork 为 com.gourdai 源码，不再借用上游的资源路径，
+    //避免未来重新引入上游 harness 依赖时出现同路径资源、由 classpath 顺序决定取哪份
     private static final String AGENT_MD_BASE = "META-INF/gourdai/agents/";
 
     private final MountManager mountManager;

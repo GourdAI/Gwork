@@ -15,7 +15,7 @@
  */
 package com.gourdai.harness.talents.cli;
 
-import org.noear.solon.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.mount.SkillDir;
 
 import java.util.Collection;
 

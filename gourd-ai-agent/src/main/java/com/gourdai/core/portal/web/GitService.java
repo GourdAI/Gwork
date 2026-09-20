@@ -16,7 +16,7 @@
 package com.gourdai.core.portal.web;
 
 import com.gourdai.agent.AgentSession;
-import org.noear.solon.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ChatModel;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.agent.react.ReActAgent;
 import org.noear.solon.core.handle.Result;

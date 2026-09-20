@@ -1,5 +1,5 @@
 /**
- * 契约测试：禁用条目置灰 + toggle 刷新全模块对齐（soloncode 上游 8ea79ac2）。
+ * 契约测试：禁用条目置灰 + toggle 刷新全模块对齐（上游 8ea79ac2）。
  *
  * 覆盖：
  * - MCP/LSP/OpenAPI/Mounts 列表项在 disabled 时添加 `disabled` 类（整行置灰）

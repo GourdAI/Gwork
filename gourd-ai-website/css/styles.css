@@ -842,6 +842,12 @@ a.dl-row:hover .arrow { transform: translateY(2px); color: var(--text); }
 /* 锚点跳转偏移（抵消固定导航高度） */
 section[id] { scroll-margin-top: 76px; }
 
+/* 嵌入模式：站点被 iframe 嵌套（或显式 ?embed=1）时隐藏顶部导航，
+   并收敛为导航预留的顶部留白与锚点偏移。标记由页面内联脚本前置写入 <html>。 */
+.is-embedded .site-header { display: none; }
+.is-embedded .hero { padding-top: 56px; }
+.is-embedded section[id] { scroll-margin-top: 16px; }
+
 /* 移动端导航 */
 @media (max-width: 767px) {
   .nav-cta { display: none; }
@@ -871,6 +877,7 @@ section[id] { scroll-margin-top: 76px; }
     pointer-events: auto;
   }
   .nav-links a { padding: 13px 8px; font-size: 15px; }
+  .is-embedded .hero { padding-top: 32px; }
 }
 
 /* ============================================================

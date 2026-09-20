@@ -22,7 +22,7 @@ import org.noear.solon.core.util.Assert;
 import java.util.Map;
 
 /**
- * Solon Code CLI 交互干预策略
+ * GWork CLI 交互干预策略
  * <p>专注于对 bash 等高危指令进行安全审计</p>
  *
  * @author oisin

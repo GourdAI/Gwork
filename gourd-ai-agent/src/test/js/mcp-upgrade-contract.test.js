@@ -1,5 +1,5 @@
 /**
- * 契约测试：MCP 模块升级包（对齐 soloncode 上游 v2026.9.15 的 MCP 增强）。
+ * 契约测试：MCP 模块升级包（对齐上游 v2026.9.15 的 MCP 增强）。
  *
  * 覆盖：
  * - A：McpTypeResolver 类型别名标准化（local/http/remote/sse-http/streamable-http、streamable_stateless）

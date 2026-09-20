@@ -57,7 +57,7 @@ public class LoopScheduler {
 
     private final HarnessEngine engine;
 
-    // Solon 原生调度管理器
+    // 框架原生调度管理器
     private final IJobManager jobManager;
 
     // 全局任务列表：所有任务存储在这里

@@ -16,9 +16,9 @@
 package com.gourdai.agent.react.intercept;
 
 import com.gourdai.agent.react.AbsReActInterceptor;
-import org.noear.solon.ai.chat.interceptor.ToolChain;
-import org.noear.solon.ai.chat.interceptor.ToolRequest;
-import org.noear.solon.ai.chat.tool.ToolResult;
+import com.gourdai.ai.chat.interceptor.ToolChain;
+import com.gourdai.ai.chat.interceptor.ToolRequest;
+import com.gourdai.ai.chat.tool.ToolResult;
 import org.noear.solon.lang.Preview;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

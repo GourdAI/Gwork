@@ -16,15 +16,15 @@
 package com.gourdai.agent.team;
 
 import com.gourdai.agent.*;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.ChatSession;
-import org.noear.solon.ai.chat.ModelOptionsAmend;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.talent.Talent;
-import org.noear.solon.ai.chat.tool.FunctionTool;
-import org.noear.solon.ai.chat.tool.ToolProvider;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ChatSession;
+import com.gourdai.ai.chat.ModelOptionsAmend;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.talent.Talent;
+import com.gourdai.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.ToolProvider;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.core.util.RankEntity;
 import org.noear.solon.flow.*;
@@ -42,7 +42,7 @@ import java.util.function.Function;
 
 /**
  * 团队协作智能体 (Team Agent)
- * * <p>核心定位：多智能体协作容器。底层依托 <b>Solon Flow</b> 状态机引擎实现复杂的协作逻辑。</p>
+ * * <p>核心定位：多智能体协作容器。底层依托流程引擎状态机实现复杂的协作逻辑。</p>
  * <ul>
  * <li><b>封装性：</b>将多个专家 Agent 封装为统一接口，屏蔽内部调度逻辑。</li>
  * <li><b>协议驱动：</b>协作模式（如 HIERARCHICAL, SWARM）由 {@link TeamProtocol} 定义并构建执行图。</li>

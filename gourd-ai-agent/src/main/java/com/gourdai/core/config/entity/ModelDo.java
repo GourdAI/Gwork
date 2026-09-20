@@ -1,6 +1,6 @@
 package com.gourdai.core.config.entity;
 
-import org.noear.solon.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.ChatConfig;
 import com.gourdai.core.config.AgentFlags;
 
 import java.util.Map;

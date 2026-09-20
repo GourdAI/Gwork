@@ -10,7 +10,7 @@ remove_path_entries() {
   local file="$1" tmp
   [ -f "$file" ] || return 0
   tmp="${file}.gwork.tmp"
-  sed -E '/^[[:space:]]*# Solon Code CLI[[:space:]]*$/d; /^[[:space:]]*export PATH="\$PATH:\$HOME\/\.gourdai\/bin"[[:space:]]*$/d; /^[[:space:]]*export PATH="\$PATH:\$HOME\/\.gwork\/bin"[[:space:]]*$/d; /^[[:space:]]*set -gx PATH.*\$HOME\/\.gourdai\/bin[[:space:]]*$/d; /^[[:space:]]*set -gx PATH.*\$HOME\/\.gwork\/bin[[:space:]]*$/d' "$file" > "$tmp"
+  sed -E '/^[[:space:]]*# GWork CLI[[:space:]]*$/d; /^[[:space:]]*export PATH="\$PATH:\$HOME\/\.gourdai\/bin"[[:space:]]*$/d; /^[[:space:]]*export PATH="\$PATH:\$HOME\/\.gwork\/bin"[[:space:]]*$/d; /^[[:space:]]*set -gx PATH.*\$HOME\/\.gourdai\/bin[[:space:]]*$/d; /^[[:space:]]*set -gx PATH.*\$HOME\/\.gwork\/bin[[:space:]]*$/d' "$file" > "$tmp"
   mv "$tmp" "$file"
 }
 for f in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zshrc" "$HOME/.config/fish/config.fish"; do remove_path_entries "$f"; done

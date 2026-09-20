@@ -53,8 +53,9 @@ public class ContinueCommand implements Command {
         ReActTrace trace = engine.resolveTrace(session, null);
 
         if (engine.canContinue(trace)) {
-            // 仅异常中断时移除最后一条失败兜底消息；正常完成时保留真实答复（否则会丢结论、损坏历史）
-            engine.prepareResume(trace, session, null, trace.isAbnormal());
+            // 仅异常中断/用户中断时移除最后一条兜底消息（失败兜底文案或「用户已取消任务.」）；
+            // 正常完成时保留真实答复（否则会丢结论、损坏历史）
+            engine.prepareResume(trace, session, null, trace.isAbnormal() || trace.isUserInterrupted());
         }
 
         ctx.runAgentTask(null, null);

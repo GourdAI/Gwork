@@ -22,9 +22,9 @@ import com.gourdai.agent.event.NodeEvent;
 import com.gourdai.agent.team.TeamInterceptor;
 import com.gourdai.agent.team.TeamTrace;
 import com.gourdai.agent.util.AgentUtil;
-import org.noear.solon.ai.chat.ChatRole;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.ChatRole;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.prompt.Prompt;
 import org.noear.solon.core.util.RankEntity;
 import org.noear.solon.core.util.SnelUtil;
 import org.noear.solon.flow.FlowContext;
@@ -38,7 +38,7 @@ import org.slf4j.LoggerFactory;
 /**
  * 智能体核心接口
  *
- * <p>定义 AI 智能体的行为契约。作为 {@link NamedTaskComponent} 接入 Solon Flow，实现分布式协作。</p>
+ * <p>定义 AI 智能体的行为契约。作为 {@link NamedTaskComponent} 接入流程引擎，实现分布式协作。</p>
  *
  * @author oisin
  * @since 3.8.1
@@ -121,7 +121,7 @@ public interface Agent<Req extends AgentRequest<Req, Resp>, Resp extends AgentRe
     AssistantMessage call(@Nullable Prompt prompt, AgentSession session) throws Throwable;
 
     /**
-     * Solon Flow 节点运行实现
+     * 流程引擎节点运行实现
      * <p>处理 Session 初始化、协议注入、推理执行及轨迹同步。</p>
      */
     @Override

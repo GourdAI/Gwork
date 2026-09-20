@@ -218,7 +218,8 @@ public class ModelscopeMarket implements Market {
     private String httpGet(String url) throws Exception {
         return HttpUtils.http(url)
                 .header("User-Agent", USER_AGENT)
-                .timeout(15000)
+                // 单位：秒（connect/write/read）
+                .timeout(10, 10, 30)
                 .get();
     }
 
@@ -371,7 +372,8 @@ public class ModelscopeMarket implements Market {
         try {
             try (HttpResponse resp = HttpUtils.http(url)
                     .header("User-Agent", USER_AGENT)
-                    .timeout(30000)
+                    // 单位：秒（connect/write/read）；技能包下载放宽 read
+                    .timeout(10, 10, 120)
                     .exec("GET")) {
                 int code = resp.code();
                 if (code < 200 || code >= 300) {

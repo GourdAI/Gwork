@@ -1,0 +1,109 @@
+/*
+ * Copyright 2017-2025 noear.org and authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.gourdai.ai.chat;
+
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.prompt.Prompt;
+import org.noear.solon.lang.NonNull;
+import org.noear.solon.lang.NonSerializable;
+import org.noear.solon.lang.Preview;
+
+import java.io.*;
+import java.util.*;
+import java.util.function.Consumer;
+
+/**
+ * 聊天会话接口
+ *
+ * <p>用于管理对话过程中的消息序列。设计上支持易持久化特性，
+ * 是构建聊天机器人或 AI 交互应用的基础存储单元。</p>
+ *
+ * @author noear
+ * @since 3.1
+ */
+@Preview("3.1")
+public interface ChatSession extends NonSerializable {
+    static String ATTR_SESSIONID = "__sessionId";
+
+    /**
+     * 获取会话id
+     */
+    String getSessionId();
+
+    /**
+     * 获取消息
+     */
+    List<ChatMessage> getMessages();
+
+    /**
+     * 获取最近消息
+     *
+     * @param windowSize 窗口大小
+     */
+    List<ChatMessage> getLatestMessages(int windowSize);
+
+    /**
+     * 移除最近消息
+     *
+     * @param windowSize 窗口大小
+     */
+    void removeLatestMessage(int windowSize);
+
+    /**
+     * 添加消息
+     */
+    default void addMessage(String userMessage) {
+        addMessage(ChatMessage.ofUser(userMessage));
+    }
+
+    /**
+     * 添加消息
+     */
+    default void addMessage(ChatMessage... messages) {
+        addMessage(Arrays.asList(messages));
+    }
+
+    /**
+     * 添加消息
+     */
+    default void addMessage(Prompt prompt) {
+        addMessage(prompt.getMessages());
+    }
+
+    /**
+     * 添加消息
+     */
+    void addMessage(Collection<? extends ChatMessage> messages);
+
+    /**
+     * 是否为空
+     */
+    boolean isEmpty();
+
+    /**
+     * 清空消息
+     */
+    void clear();
+
+
+    /// //////////////////////////////////////
+
+    /**
+     * 临时属性（不需要持久化）
+     */
+    @NonNull
+    Map<String, Object> attrs();
+}

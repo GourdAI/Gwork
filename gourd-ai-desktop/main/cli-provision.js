@@ -255,7 +255,7 @@ function uninstallPs1Content() {
  * - 启动器：靠文件内的 SENTINEL 区分（只删桌面端自己写的）；
  * - rc 里的 PATH 行：靠「marker 注释行 + 紧跟的下一行」这一成对结构精确删除。
  *   绝不能用 `grep -vF ".gwork/bin"` 整行过滤 —— 那会把独立 CLI 写的
- *   `export PATH="$PATH:$HOME/.gwork/bin"` 一并删掉，并留下孤立的 `# Solon Code CLI` 注释。
+ *   `export PATH="$PATH:$HOME/.gwork/bin"` 一并删掉，并留下孤立的 marker 注释。
  */
 function uninstallShContent() {
   const binDir = getBinDir();

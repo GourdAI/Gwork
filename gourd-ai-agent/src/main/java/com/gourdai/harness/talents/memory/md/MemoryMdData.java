@@ -19,8 +19,8 @@ import org.noear.snack4.ONode;
 import com.gourdai.harness.talents.memory.MemorySearchResult;
 import com.gourdai.harness.talents.memory.MemoryStorer;
 import com.gourdai.harness.talents.memory.MemoryTitles;
-import org.noear.solon.ai.util.Markdown;
-import org.noear.solon.ai.util.MarkdownUtil;
+import com.gourdai.ai.util.Markdown;
+import com.gourdai.ai.util.MarkdownUtil;
 import org.noear.solon.core.util.Assert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -854,7 +854,7 @@ public class MemoryMdData implements AutoCloseable {
      *
      * <p>英文：按非字母数字字符分割，长度 >1 的 token 保留。
      * <p>中文：对连续中文字符做 bi-gram（每两个相邻字组成一个 token），
-     * 提升"用户偏好使用Solon框架"这类混合文本的搜索命中率。
+     * 提升"用户偏好使用Java框架"这类混合文本的搜索命中率。
      */
     private Set<String> tokenize(String text) {
         Set<String> tokens = new HashSet<>();

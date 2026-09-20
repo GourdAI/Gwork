@@ -9,7 +9,7 @@
  * ## 为什么需要这一步
  * 前端唯一源目录是 `gourd-ai-agent/src/main/resources/static`（Maven 资源目录，
  * 同时会被打进 jar 供浏览器直连模式使用）。桌面端刻意绕开 jar，由内置 HTTP
- * 服务器从磁盘提供，以便界面外壳「秒开」，不等 JVM + Solon 启动。
+ * 服务器从磁盘提供，以便界面外壳「秒开」，不等后端 JVM 启动。
  *
  * 运行期 `src/server.rs::get_ui_dir` 的解析顺序：
  *   1. 打包后：<resource_dir>/ui        ← 由 tauri.conf.json 的 bundle.resources 注入

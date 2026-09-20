@@ -12,7 +12,7 @@ import com.gourdai.harness.agent.WebToolVisibilityPolicy;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.noear.snack4.ONode;
-import org.noear.solon.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.FunctionTool;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -86,10 +86,14 @@ class AskUserProtocolTest {
         Assertions.assertEquals("ask_user", tool.name());
         Assertions.assertEquals(AskUserTool.TOOL_NAME, tool.name());
 
-        // 描述逐字冻结：前端契约、使用纪律都写在这段文案里，改一个字都要有意识
-        Assertions.assertEquals(
-                "当任务需要用户提供关键信息、做出选择或确认时，向用户发起结构化提问并等待回答。支持提供候选项（可标记推荐）；用户可点击选项、自由输入或跳过。任务将挂起，直到用户回答后自动恢复。使用纪律：1) 仅在确实需要用户输入才能继续时使用（能自行查询/推断的信息不要问）；2) 多个问题必须在一次调用中成组提出；3) 若有明确最佳实践，请对相应选项标记 recommended=true。",
-                tool.description());
+        // 描述逐字冻结：前端契约、使用纪律都写在这段文案里，改一个字都要有意识。
+        // 此处引用常量而非重复一份字面量：两边手抄易不同步（历史上已发生过一次），
+        // 而契约的真正价值在于“它必须是工具对外暴露的那一份描述”。
+        Assertions.assertEquals(AskUserTool.TOOL_DESCRIPTION, tool.description());
+        Assertions.assertTrue(tool.description().contains("任务将挂起，直到用户回答后自动恢复"),
+                "挂起/恢复语义是前端问答卡的行为前提，不得从描述中移除");
+        Assertions.assertTrue(tool.description().contains("recommended=true"),
+                "推荐项标记是选项契约的一部分，不得从描述中移除");
 
         // questions 参数必须产出嵌套 JSON Schema（header 必填 / detail/options 可选 / label 必填 / recommended 可选）
         ONode schema = ONode.ofJson(tool.inputSchema());
@@ -224,9 +228,9 @@ class AskUserProtocolTest {
         root.put("answers", List.of(first, second));
         String answersJson = ONode.serialize(root);
 
-        // null 题面：按 answers 自身顺序裸列
+        // null 题面：按 answers 自身顺序裸列（custom=true 需带自定义标记，与主路径同口径）
         String nullText = AskUser.formatAnswerText(null, answersJson);
-        Assertions.assertEquals("用户对提问的回答如下：\n1. staging\n2. （用户跳过）\n", nullText);
+        Assertions.assertEquals("用户对提问的回答如下：\n1. （用户自定义回答）staging\n2. （用户跳过）\n", nullText);
 
         // 空列表题面：同上（而非只回一行头部说明）
         String emptyText = AskUser.formatAnswerText(new ArrayList<>(), answersJson);
@@ -332,7 +336,7 @@ class AskUserProtocolTest {
         first.put("index", 0);
         first.put("text", "staging");
         first.put("skipped", false);
-        first.put("custom", true); // 用户自由输入而非点选选项：文本照常呈现
+        first.put("custom", true); // 用户自由输入而非点选选项：带「（用户自定义回答）」标记
 
         Map<String, Object> second = new LinkedHashMap<>();
         second.put("index", 1);
@@ -348,9 +352,53 @@ class AskUserProtocolTest {
         Assertions.assertEquals(
                 "用户对提问的回答如下：\n"
                         + "1. 部署到哪个环境？（可选 dev/staging/prod）\n"
-                        + "   → staging\n"
+                        + "   → （用户自定义回答）staging\n"
                         + "2. 是否启用灰度？\n"
                         + "   → （用户跳过）\n",
+                text);
+    }
+
+    /**
+     * 「（用户自定义回答）」标记只给 custom=true 的答案：点选候选（custom=false）与旧版缺键答案
+     * 都不得加标，否则标记噪声会淹没真实语义（模型分不清用户自写与点选）。
+     */
+    @Test
+    void formatAnswerTextMarksOnlyCustomAnswers() {
+        List<Map<String, Object>> questions = new ArrayList<>();
+        questions.add(questionMap("部署到哪个环境？", null));
+        questions.add(questionMap("是否启用灰度？", null));
+        questions.add(questionMap("回滚策略？", null));
+
+        Map<String, Object> first = new LinkedHashMap<>();
+        first.put("index", 0);
+        first.put("text", "dev");
+        first.put("skipped", false);
+        first.put("custom", false); // 点选候选选项：不加自定义标记
+
+        Map<String, Object> second = new LinkedHashMap<>();
+        second.put("index", 1);
+        second.put("text", "听我的，直接全量");
+        second.put("skipped", false);
+        second.put("custom", true); // 手写回答：加「（用户自定义回答）」标记
+
+        Map<String, Object> third = new LinkedHashMap<>();
+        third.put("index", 2);
+        third.put("text", "legacy");
+        third.put("skipped", false);
+        // 旧版答案无 custom 键：按点选呈现，不加标记
+
+        Map<String, Object> root = new LinkedHashMap<>();
+        root.put("answers", List.of(first, second, third));
+
+        String text = AskUser.formatAnswerText(questions, ONode.serialize(root));
+        Assertions.assertEquals(
+                "用户对提问的回答如下：\n"
+                        + "1. 部署到哪个环境？\n"
+                        + "   → dev\n"
+                        + "2. 是否启用灰度？\n"
+                        + "   → （用户自定义回答）听我的，直接全量\n"
+                        + "3. 回滚策略？\n"
+                        + "   → legacy\n",
                 text);
     }
 

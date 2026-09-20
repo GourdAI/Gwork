@@ -16,9 +16,9 @@
 package com.gourdai.agent.event;
 
 import com.gourdai.agent.react.ReActTrace;
-import org.noear.solon.ai.chat.ChatResponse;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.tool.ToolCall;
+import com.gourdai.ai.chat.ChatResponse;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.tool.ToolCall;
 import org.noear.solon.lang.Nullable;
 import org.noear.solon.lang.Preview;
 
@@ -64,9 +64,45 @@ public class ReasonDeltaEvent extends AbsAgentEvent {
 
     /**
      * 本增量是否为思考内容（false 表示正文增量）
+     *
+     * <p>4.1.1 起 {@code AssistantMessage.isThinking()} 已移除：分片的通道归属不再由
+     * 布尔位承载，而是由「text 与 thinking 哪个通道有值」自然表达。增量分片天然是
+     * 单通道的（思考片 text 为空、正文片 thinking 为空），因此 {@code isThinkingOnly()}
+     * 在增量语境下恰好等价于旧的 {@code isThinking()}。</p>
+     *
+     * <p>注意不能简化为 {@code hasThinking()}：聚合/混合消息可能同时含 text 与 thinking，
+     * 那种情况必须判为正文，否则正文会被整段渲染进思考区。</p>
      */
     public boolean isThinking() {
-        return assistantMessage != null && assistantMessage.isThinking();
+        return assistantMessage != null && assistantMessage.isThinkingOnly();
+    }
+
+    /**
+     * 本增量是否含可下发内容（正文或思考任一通道非空）。
+     *
+     * <p><b>必须覆写</b>：基类的 {@code hasContent()} 委托到 {@code hasText()}，只看 text 通道。
+     * 而思考分片的 text 恒为空、内容在 thinking 通道，若沿用基类实现，所有出口的
+     * {@code hasContent()} 守卫都会把思考分片judged为空而静默丢弃 —— 思考区将全程无输出。</p>
+     */
+    @Override
+    public boolean hasContent() {
+        if (assistantMessage == null) {
+            return false;
+        }
+        return assistantMessage.hasText() || assistantMessage.hasThinking();
+    }
+
+    /**
+     * 获取本增量的文本内容：思考片返回思考文本，正文片返回正文。
+     *
+     * <p>同 {@link #hasContent()}，基类实现只返回 text 通道，对思考分片会返回空串。</p>
+     */
+    @Override
+    public String getContent() {
+        if (assistantMessage == null) {
+            return null;
+        }
+        return isThinking() ? assistantMessage.getThinking() : assistantMessage.getText();
     }
 
     /**

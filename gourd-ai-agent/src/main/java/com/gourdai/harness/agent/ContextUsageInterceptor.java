@@ -16,13 +16,14 @@
 package com.gourdai.harness.agent;
 
 import com.gourdai.core.portal.web.UsageSubmissionService;
-import org.noear.solon.ai.AiUsage;
+import com.gourdai.ai.AiUsage;
 import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.react.AbsReActInterceptor;
 import com.gourdai.agent.react.ReActTrace;
+import com.gourdai.agent.react.task.ReasonTask;
 import com.gourdai.agent.trace.UsageNormalizer;
-import org.noear.solon.ai.chat.ChatResponse;
-import org.noear.solon.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.ChatResponse;
+import com.gourdai.ai.chat.message.AssistantMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.FluxSink;
@@ -99,6 +100,62 @@ public class ContextUsageInterceptor extends AbsReActInterceptor {
         }
 
         pushContextUsageEvent(trace, inputTokens, outputTokens, cacheCreation, cacheRead, cacheRate, messageCount);
+
+        // 重试开销旁注：紧跟在真实（计费）用量采集点之后打出，两个数字同处一眼可见
+        logRetryOverhead(trace, inputTokens, outputTokens);
+    }
+
+    /**
+     * 把本回合的「重试额外开销」打在真实用量旁边。
+     *
+     * <p><b>为何在这里打</b>：本拦截器是真实计费用量的采集点（上一行就是写
+     * {@code events.jsonl} 的 {@code UsageSubmissionService#record}）。物理重试的失败尝试
+     * 同样被上游计费，历史上却从不进入这条采集链，于是「账本只记成功那一次」。
+     * 在同一位置把两个口径并排打出，偏差直接可对账。</p>
+     *
+     * <p><b>计量与未计量必须分开说</b>：上游在 429/5xx 时常仍返回 usage 块（可计量），
+     * 但在 400/403 这类<b>直接拒收请求</b>的确定性错误上根本不返回 usage（不可计量）。
+     * 后者不能当作「0 开销」读，否则隐形支出会被误读为免费，故额外打出
+     * {@code unmeasuredAttempts} 与 {@code estimatedPromptTokens}（估算值，带
+     * {@code estimated} 前缀，绝不与计量值混列）。</p>
+     *
+     * <p><b>不污染既有口径</b>：只读 {@link ReActTrace} extras 并打日志，<b>不</b>调
+     * {@code UsageSubmissionService}（重试用量的上报已由 {@code ReasonTask#recordRetryUsage}
+     * 在成功与终态失败两条路径上完成，此处再调会重复计入）、<b>不</b>改
+     * {@link ContextUsageEvent}（它驱动的是输入框上方的「上下文长度」指示器，
+     * 掺入重试 token 会直接扭曲展示值）、不动任何 {@code inputTokens}/{@code outputTokens} 的计算。</p>
+     */
+    private void logRetryOverhead(ReActTrace trace, long inputTokens, long outputTokens) {
+        try {
+            Number attempts = trace.getExtraAs(ReasonTask.ATTR_RETRY_ATTEMPTS);
+            Number retryPrompt = trace.getExtraAs(ReasonTask.ATTR_RETRY_PROMPT_TOKENS);
+            Number retryCompletion = trace.getExtraAs(ReasonTask.ATTR_RETRY_COMPLETION_TOKENS);
+            Number unmeasured = trace.getExtraAs(ReasonTask.ATTR_RETRY_UNMEASURED_ATTEMPTS);
+            Number estimatedPrompt = trace.getExtraAs(ReasonTask.ATTR_RETRY_ESTIMATED_PROMPT_TOKENS);
+            Number logicalRetries = trace.getExtraAs(ReasonTask.ATTR_LOGICAL_RETRIES);
+
+            boolean hasPhysical = attempts != null && attempts.intValue() > 0;
+            boolean hasLogical = logicalRetries != null && logicalRetries.intValue() > 0;
+            if (hasPhysical == false && hasLogical == false) {
+                // 健康回合（绝大多数）恒为零日志、零开销
+                return;
+            }
+
+            LOG.warn("Usage[{}] billed input={} output={}; retry overhead (already recorded to the usage ledger when measured):"
+                            + " physicalRetries={} measuredRetryPromptTokens={} measuredRetryCompletionTokens={}"
+                            + " unmeasuredAttempts={} estimatedRetryPromptTokens={} logicalRetries={}",
+                    trace.getOptions().getChatModel().getModel(), inputTokens, outputTokens,
+                    hasPhysical ? attempts.intValue() : 0,
+                    retryPrompt == null ? 0L : retryPrompt.longValue(),
+                    retryCompletion == null ? 0L : retryCompletion.longValue(),
+                    unmeasured == null ? 0 : unmeasured.intValue(),
+                    estimatedPrompt == null ? 0L : estimatedPrompt.longValue(),
+                    hasLogical ? logicalRetries.intValue() : 0);
+        } catch (Exception e) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Failed to log retry overhead: {}", e.getMessage());
+            }
+        }
     }
 
     private void pushContextUsageEvent(ReActTrace trace,

@@ -16,8 +16,8 @@
 package com.gourdai.agent.event;
 
 import com.gourdai.agent.simple.SimpleTrace;
-import org.noear.solon.ai.chat.ChatResponse;
-import org.noear.solon.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.ChatResponse;
+import com.gourdai.ai.chat.message.AssistantMessage;
 import org.noear.solon.lang.Preview;
 
 /**

@@ -16,8 +16,8 @@
 package com.gourdai.agent.team;
 
 import com.gourdai.agent.Agent;
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.tool.FunctionTool;
 import org.noear.solon.flow.FlowContext;
 import org.noear.solon.flow.GraphSpec;
 import org.noear.solon.lang.NonSerializable;

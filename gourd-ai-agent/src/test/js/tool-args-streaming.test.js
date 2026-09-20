@@ -131,7 +131,9 @@ test('重复 action_start 不再直接 return：骨架卡原地回填，非骨�
 test('孤儿骨架卡是被移除而不是标黄点（finishStream 与回放 endTurn 两条收尾路径都要）', () => {
     const msg = readStatic('js', 'app-message.js');
     const purge = fnBody(msg, 'removeOrphanArgsStreamingCards');
-    assert.match(purge, /\$\(sess\.container\)\.find\('\.tool-card\[data-args-streaming\]'\)\.each/);
+    // 扫描容器已由 sess.container 改为渲染落点 renderRoot(sess)：回放期必须扫临时容器，
+    // 否则 prepend 回放会误删真实容器里正在流式输出的骨架卡。断言意图不变。
+    assert.match(purge, /\$\(renderRoot\(sess\)\)\.find\('\.tool-card\[data-args-streaming\]'\)\.each/);
     assert.match(purge, /\$\(card\)\.remove\(\);/, '必须是移除 DOM');
     assert.doesNotMatch(purge, /tool-status-icon warn/, '不得退化成标黄点');
     assert.match(purge, /delete sess\.toolCardsById\[actionId\];/, '移除同时要摘登记，避免悬挂引用');
@@ -140,11 +142,17 @@ test('孤儿骨架卡是被移除而不是标黄点（finishStream 与回放 end
     // finishStream：清理必须发生在 loading→warn 扫尾之前，否则骨架卡会先被染黄
     const streaming = readStatic('js', 'app-streaming.js');
     const finish = fnBody(streaming, 'finishStream');
-    assert.match(finish, /removeOrphanArgsStreamingCards\(sess\);[\s\S]*?\$\(sess\.container\)\.find\('\.tool-card:not\(\[data-batch-key\]\)\ \.tool-status-icon\.loading'\)/);
+    assert.match(finish, /removeOrphanArgsStreamingCards\(sess\);[\s\S]*?\$\(finishRoot\)\.find\('\.tool-card:not\(\[data-batch-key\]\)\ \.tool-status-icon\.loading'\)/);
 
     // 回放 endTurn：同构处理，两条收尾路径语义必须一致
     const history = readStatic('js', 'app-history.js');
-    assert.match(history, /removeOrphanArgsStreamingCards\(sess\);\s*\n\s*\$\(sess\.container\)\.find\('\.tool-status-icon\.loading'\)/);
+    // 扫尾容器改为渲染落点 turnRoot（回放期＝临时容器）。顺序约束不变：
+    // 孤儿清理必须早于 loading→warn，否则骨架卡会先被染黄再被删。
+    assert.match(history, /removeOrphanArgsStreamingCards\(sess\);\s*\n\s*\$\(turnRoot\)\.find\('\.tool-status-icon\.loading'\)/,
+        '回放 endTurn 必须先清孤儿骨架卡，再按渲染落点扫 loading');
+    // 落点取值必须先于扫尾块，且扫的是落点而非真实容器
+    assert.match(history, /var turnRoot = renderRoot\(sess\);\s*\n\s*if \(turnRoot\) \{/,
+        '回放 endTurn 的扫尾容器必须是渲染落点');
 });
 
 test('markToolCardFailed 跳过骨架卡：尚未执行的调用不得被标红', () => {

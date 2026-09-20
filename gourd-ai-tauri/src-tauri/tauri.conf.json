@@ -21,7 +21,7 @@
     ],
     "publisher": "GWork",
     "homepage": "https://gourdwork.com",
-    "copyright": "Copyright © 2026 GWork",
+    "copyright": "Copyright © 2026 GWork contributors",
     "shortDescription": "GWork 桌面端",
     "createUpdaterArtifacts": true,
     "icon": [

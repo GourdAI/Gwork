@@ -16,17 +16,17 @@
 package com.gourdai.harness.talents.cli;
 
 import org.noear.solon.Utils;
-import org.noear.solon.ai.annotation.ToolMapping;
+import com.gourdai.ai.annotation.ToolMapping;
 import com.gourdai.agent.react.BackgroundNoticeCenter;
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.talent.AbsTalent;
-import org.noear.solon.ai.sandbox.SandboxManager;
-import org.noear.solon.ai.sandbox.SandboxLog;
-import org.noear.solon.ai.sandbox.SandboxViolationStore;
-import org.noear.solon.ai.sandbox.config.FilesystemConfig;
-import org.noear.solon.ai.sandbox.config.SandboxRuntimeConfig;
-import org.noear.solon.ai.talents.mount.MountDir;
-import org.noear.solon.ai.talents.mount.MountManager;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.sandbox.SandboxManager;
+import com.gourdai.ai.sandbox.SandboxLog;
+import com.gourdai.ai.sandbox.SandboxViolationStore;
+import com.gourdai.ai.sandbox.config.FilesystemConfig;
+import com.gourdai.ai.sandbox.config.SandboxRuntimeConfig;
+import com.gourdai.ai.talents.mount.MountDir;
+import com.gourdai.ai.talents.mount.MountManager;
 import org.noear.solon.annotation.Param;
 import org.noear.solon.core.util.Assert;
 
@@ -44,7 +44,7 @@ import java.util.regex.PatternSyntaxException;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import org.noear.solon.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.FunctionTool;
 import org.noear.solon.lang.Nullable;
 
 /**
@@ -102,6 +102,20 @@ public class TerminalTalent extends AbsTalent {
      */
     private static final int BACKGROUND_DEFAULT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 
+    /**
+     * 后台任务启动时的让步等待：300ms。
+     *
+     * <p>原先传 0，等于「起完进程立刻拍快照」，于是两类高频场景被系统性地报成假成功：
+     * 命令拼写错误（{@code xxx : 无法识别}）、脚本第一行就异常退出——进程其实在几十毫秒内
+     * 就死了，但响应仍写死 {@code status: running} 且不带 exit_code，模型据此认为任务已在
+     * 后台跑着，接着去等一条「完成通知」或空转轮询，真正的错误信息要到下一次 bash_output
+     * 才浮出来。给一个极短的让步窗口就能把这类「一启动就失败」当场捕获。</p>
+     *
+     * <p>不能取大：后台模式的语义就是不阻塞，这里的等待是纯成本。300ms 足够覆盖
+     * fork+立即失败，又不会让正常的长任务感知到延迟。</p>
+     */
+    private static final int BACKGROUND_START_YIELD_MS = 300;
+
     private final Set<String> ignoreDirs = new HashSet<>(Arrays.asList(
             ".gwork", ".gourdai", ".claude", ".opencode",
             ".idea", ".vscode", ".settings",
@@ -156,7 +170,7 @@ public class TerminalTalent extends AbsTalent {
 
     /**
      * 延迟初始化 SandboxManager。在 bash()/bashStart() 执行前自动调用，
-     * 确保 Solon 配置注入完毕后才初始化，避免时序问题导致的单例锁定。
+     * 确保框架配置注入完毕后才初始化，避免时序问题导致的单例锁定。
      *
      * <p>注意：文件系统路径白名单是动态构建的（每次 bash 调用时从当前挂载点重建），
      * 因此 init 时传入的 sandboxConfig 中的 filesystem 字段会被 buildDynamicCustomConfig()
@@ -734,7 +748,8 @@ public class TerminalTalent extends AbsTalent {
             final String owner = BackgroundNoticeCenter.currentOwner();
             try {
                 TerminalSessionManager.CommandSnapshot snapshot =
-                        bashSessionManager.exec(finalCommand, workPath, envs, 0, maxOutputChars,
+                        bashSessionManager.exec(finalCommand, workPath, envs,
+                                BACKGROUND_START_YIELD_MS, maxOutputChars,
                                 backgroundTimeoutMs(timeout),
                                 owner == null ? null : done -> BackgroundNoticeCenter.publish(owner,
                                         new BackgroundNoticeCenter.Notice(
@@ -783,26 +798,40 @@ public class TerminalTalent extends AbsTalent {
     }
 
     /**
-     * 格式化后台任务启动响应
+     * 格式化后台任务启动响应。
+     *
+     * <p><b>status 必须如实反映快照</b>：原先无条件写死 {@code status: running}，于是
+     * 「命令拼写错误 / 脚本第一行就异常退出」这类在让步窗口内就已经死掉的任务，也会被报成
+     * 已在后台运行且不带 exit_code——模型据此去等一条永远不会有价值的完成通知，或做无意义轮询。
+     * 现在启动即失败会当场给出 {@code status: completed} + {@code exit_code}，并把后续指引
+     * 换成「已结束，不必再查」。</p>
      *
      * @param noticeEnabled 当前上下文是否真能投递完成通知。为 false 时绝不能写“会收到通知”，
      *                      否则模型会停止查询、死等一个永远不来的消息。
      */
     private String formatBackgroundStart(TerminalSessionManager.CommandSnapshot snapshot, boolean noticeEnabled) {
+        boolean running = snapshot.running();
         StringBuilder sb = new StringBuilder();
-        sb.append("Background task started\n");
+        sb.append(running ? "Background task started\n" : "Background task already finished\n");
         sb.append("session_id: ").append(snapshot.sessionId()).append('\n');
-        sb.append("status: running\n");
+        sb.append("status: ").append(running ? "running" : "completed").append('\n');
+        if (snapshot.exitCode() != null) {
+            sb.append("exit_code: ").append(snapshot.exitCode()).append('\n');
+        }
         sb.append("command: ").append(snapshot.command()).append('\n');
         sb.append("workdir: ").append(snapshot.workdir()).append('\n');
-        if (noticeEnabled) {
+        if (running == false) {
+            // 已经结束：不要再让模型等通知或轮询。仍保留 session_id，因为输出可能超出本次返回
+            sb.append("\n该任务在启动后的让步窗口内就已结束（常见于命令拼写错误或脚本立即退出）。")
+                    .append("请直接依据下方输出判断结果；若输出被截断，可用 bash_output 继续读取。\n");
+        } else if (noticeEnabled) {
             sb.append("\n任务完成时你会自动收到一条 [后台任务完成] 消息，无需轮询等待；")
                     .append("期间若需查看进度，可用 bash_output 查询该 session_id。\n");
         } else {
             sb.append("\n请用 bash_output 查询该 session_id 获取进度与结果（当前上下文未启用完成通知）。\n");
         }
         if (Assert.isNotEmpty(snapshot.output())) {
-            sb.append("\nInitial output:\n").append(snapshot.output());
+            sb.append(running ? "\nInitial output:\n" : "\nOutput:\n").append(snapshot.output());
         }
         return sb.toString();
     }
@@ -813,7 +842,7 @@ public class TerminalTalent extends AbsTalent {
     public String bashOutput(@Param(value = "session_id", description = "bash 返回的后台任务 session_id。") String sessionId,
                              @Param(value = "action", required = false, defaultValue = "peek", description = "操作：peek=查看新增输出（默认）；write=向进程 stdin 写入 input（交互式命令用）；kill=终止该后台任务。") String action,
                              @Param(value = "input", required = false, description = "action=write 时写入 stdin 的文本，通常需以换行符结尾。") String input,
-                             @Param(value = "max_chars", required = false, defaultValue = "4000", description = "本次最多返回多少字符。返回的是自上次查看以来的新增输出；若新增量超过此值，则只保留最后 max_chars 个字符。") Integer maxChars) {
+                             @Param(value = "max_chars", required = false, defaultValue = "4000", description = "本次最多返回多少字符。返回的是自上次查看以来的新增输出；若新增量超过此值，本次先返回最前面的 max_chars 个字符，剩余部分会在下次调用时按顺序继续返回，不会丢失。") Integer maxChars) {
         String act = (action == null || action.trim().isEmpty())
                 ? "peek" : action.trim().toLowerCase(Locale.ROOT);
         try {

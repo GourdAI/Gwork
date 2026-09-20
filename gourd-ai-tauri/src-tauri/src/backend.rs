@@ -538,7 +538,7 @@ async fn start_backend(port: u16) -> Result<u32> {
     })?;
 
     // 文件日志级别：打包版仅输出 ERROR；开发版保持 app.yml 的 DEBUG 默认值；
-    // GWORK_LOG_LEVEL 可临时覆盖（-D 系统属性优先级高于 app.yml，Solon 配置覆盖规则）。
+    // GWORK_LOG_LEVEL 可临时覆盖（-D 系统属性优先级高于 app.yml，框架配置覆盖规则）。
     let file_log_level: Option<String> = std::env::var("GWORK_LOG_LEVEL")
         .ok()
         .filter(|s| !s.is_empty())

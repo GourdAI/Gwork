@@ -216,7 +216,8 @@ public class SkillhubMarket implements Market {
             try {
                 try (HttpResponse httpResp = HttpUtils.http(downloadUrl)
                         .header("User-Agent", USER_AGENT)
-                        .timeout(30000)
+                        // 单位：秒（connect/write/read）；技能包下载放宽 read
+                        .timeout(10, 10, 120)
                         .exec("GET")) {
 
                     byte[] zipBytes = httpResp.bodyAsBytes();
@@ -270,7 +271,8 @@ public class SkillhubMarket implements Market {
     private String httpGet(String url) throws Exception {
         return HttpUtils.http(url)
                 .header("User-Agent", USER_AGENT)
-                .timeout(15000)
+                // 单位：秒（connect/write/read）
+                .timeout(10, 10, 30)
                 .get();
     }
 

@@ -15,7 +15,7 @@
  */
 package com.gourdai.harness.talents.cli;
 
-import org.noear.solon.ai.util.CmdUtil;
+import com.gourdai.ai.util.CmdUtil;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.core.util.RunUtil;
 import org.noear.solon.lang.Preview;
@@ -28,8 +28,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.EnumSet;
 import java.util.List;
@@ -37,6 +39,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
@@ -62,6 +65,13 @@ public class ProcessExecutor {
     private static final int BINARY_PROBE_SAMPLE = 8_192;
     // 二进制摘要中预览的字节数
     private static final int BINARY_PREVIEW_BYTES = 32;
+
+    /** 临时文件补扫：每个 JVM 仅执行一次 */
+    private static final AtomicBoolean TEMP_SWEEP_STARTED = new AtomicBoolean(false);
+    /** 只清理「明显是残留」的文件：正常脚本寿命以秒计，24 小时远超任何在途命令 */
+    private static final long TEMP_SWEEP_MIN_AGE_MS = 24L * 60 * 60 * 1000;
+    /** 单轮删除上限：避免临时目录异常庞大时长时间占用磁盘 IO */
+    private static final int TEMP_SWEEP_MAX_DELETES = 500;
 
     private int maxOutputSize = 1024 * 1024; // 默认 1MB
     private Charset scriptCharset = StandardCharsets.UTF_8;
@@ -121,7 +131,7 @@ public class ProcessExecutor {
                 } catch (Throwable ignore) {
                     // 进程被强杀或流关闭，读取线程静默退出
                 }
-            }, "solon-ai-probe-reader");
+            }, "gwork-probe-reader");
             reader.setDaemon(true);
             reader.start();
 
@@ -225,7 +235,7 @@ public class ProcessExecutor {
     }
 
     /**
-     * 在系统临时目录创建脚本文件：前缀 solon-ai-script-，Unix 尽量收紧为 600。
+     * 在系统临时目录创建脚本文件：前缀 gwork-script-，Unix 尽量收紧为 600。
      */
     static Path createTempScript(String ext) throws IOException {
         return createTempScript(ext, true);
@@ -239,7 +249,11 @@ public class ProcessExecutor {
      *                             每次命令都注册会造成慢性内存增长。
      */
     static Path createTempScript(String ext, boolean registerDeleteOnExit) throws IOException {
-        Path tempScript = Files.createTempFile("solon-ai-script-", ext);
+        // 首次创建脚本时顺带补扫一次历史残留（异步、每个 JVM 仅一次）：
+        // 正常路径靠 finally 主动删除、异常路径靠 deleteOnExit，但「JVM 被强杀」两者都失效，
+        // 长期下来系统临时目录会堆积成千上万个 gwork-script-*/gwork-bgout-* 文件
+        sweepStaleTempFilesAsync();
+        Path tempScript = Files.createTempFile("gwork-script-", ext);
         if (registerDeleteOnExit) {
             // JVM 异常退出时的兜底清理；正常路径仍由 finally 主动删除
             tempScript.toFile().deleteOnExit();
@@ -254,6 +268,65 @@ public class ProcessExecutor {
             // 非 POSIX 文件系统（如 Windows）静默降级
         }
         return tempScript;
+    }
+
+    /**
+     * 异步触发一次「历史残留临时文件」补扫，每个 JVM 至多执行一次。
+     *
+     * <p>放在后台线程里做：临时目录可能很大，遍历不能卡住命令执行这条主路径。</p>
+     */
+    static void sweepStaleTempFilesAsync() {
+        if (TEMP_SWEEP_STARTED.compareAndSet(false, true) == false) {
+            return;
+        }
+        try {
+            Thread sweeper = new Thread(ProcessExecutor::sweepStaleTempFiles, "gwork-tempfile-sweeper");
+            sweeper.setDaemon(true);
+            sweeper.start();
+        } catch (Throwable ignored) {
+            // 线程起不来就放弃补扫：这只是卫生工作，绝不能影响命令执行
+        }
+    }
+
+    /**
+     * 清理系统临时目录里过期的 {@code gwork-script-*} / {@code gwork-bgout-*} 残留。
+     *
+     * <p><b>为什么用 24 小时而不是「立即清」</b>：同一台机器上可能并行跑着多个后端实例
+     * （桌面版 + IDE 调试），别人正在用的脚本文件只有几秒钟寿命，用一个远大于此的年龄阈值
+     * 就能在「清得干净」和「绝不误删他人在用的文件」之间取到安全边界。</p>
+     *
+     * @return 实际删除的文件数（供测试断言）
+     */
+    static int sweepStaleTempFiles() {
+        int deleted = 0;
+        String tmpDir = System.getProperty("java.io.tmpdir");
+        if (tmpDir == null || tmpDir.isEmpty()) {
+            return 0;
+        }
+        long deadline = System.currentTimeMillis() - TEMP_SWEEP_MIN_AGE_MS;
+        try (DirectoryStream<Path> stream =
+                     Files.newDirectoryStream(Paths.get(tmpDir), "gwork-{script,bgout}-*")) {
+            for (Path path : stream) {
+                if (deleted >= TEMP_SWEEP_MAX_DELETES) {
+                    break; // 单轮上限：残留极多时也不长时间占着磁盘 IO，下次启动继续清
+                }
+                try {
+                    if (Files.isRegularFile(path)
+                            && Files.getLastModifiedTime(path).toMillis() < deadline
+                            && Files.deleteIfExists(path)) {
+                        deleted++;
+                    }
+                } catch (Throwable ignored) {
+                    // 文件被他人占用/无权限：跳过，绝不让单个文件中断整轮清理
+                }
+            }
+        } catch (Throwable e) {
+            LOG.debug("Sweep stale temp files failed: {}", e.toString());
+        }
+        if (deleted > 0) {
+            LOG.debug("Swept {} stale gwork temp files", Integer.valueOf(deleted));
+        }
+        return deleted;
     }
 
     /**
@@ -376,12 +449,13 @@ public class ProcessExecutor {
             // ——那会让模型收到一句无信息量的「系统失败: null」）
             byte[] raw = awaitOutput(outputFuture, OUTPUT_DRAIN_TIMEOUT_MS);
 
-            // 二进制输出降级：在字节层探测，避免乱码塞满上下文（如 cat 某个 jar/class/图片）
-            if (isLikelyBinary(raw)) {
-                return summarizeBinaryOutput(raw);
-            }
-
-            String result = renderOutput(raw, streamDecoder, cliXmlMessages, maxOutputChars);
+            // 二进制输出降级：在字节层探测，避免乱码塞满上下文（如 cat 某个 jar/class/图片）。
+            // 【不能在此直接 return】：sizeCapped 告警与非零退出码对二进制输出同样必须送达，
+            // 否则「撞上物理上限被强杀」会退化成一段无害的 hex 摘要，模型据此把残缺结果
+            // 当成命令自然结束的完整结论——这正是 sizeCapped 机制要防的事。
+            String result = isLikelyBinary(raw)
+                    ? summarizeBinaryOutput(raw, streamDecoder, normalizeMaxOutputChars(maxOutputChars))
+                    : renderOutput(raw, streamDecoder, cliXmlMessages, maxOutputChars);
 
             if (sizeCapped[0]) {
                 result = result + "\n... [输出超过 " + maxOutputSize
@@ -573,10 +647,22 @@ public class ProcessExecutor {
      *   <li>解码后文本可读性检测：若 &gt; 60% 字节可解码为可读文本且存在较长连续段，直接降级展示</li>
      *   <li>Magic bytes 文件类型识别：对真正二进制告诉用户是什么文件类型（class/jar/png 等）</li>
      * </ul></p>
+     *
+     * @param streamDecoder   流式回调用过的解码器（可为 null）：已锁定字符集时必须复用，理由同
+     *                        {@link #renderOutput}
+     * @param maxOutputChars  调用方给定的字符预算（已归一化为正数），可读分支按它做头尾保留截断
      */
-    private static String summarizeBinaryOutput(byte[] bytes) {
-        // 尝试1：解码为文本，检查可读性
-        String decoded = new String(bytes, StandardCharsets.UTF_8);
+    private String summarizeBinaryOutput(byte[] bytes, OutputDecoder streamDecoder, int maxOutputChars) {
+        // 尝试1：解码为文本，检查可读性。
+        //
+        // 字符集必须复用流式已锁定的那一个：否则同一次执行里「实时回调输出」与「最终摘要」
+        // 会按两种字符集解码，给出互相矛盾的两份文本。未锁定时走 UTF-8 严格校验 + ANSI
+        // 代码页兜底——原先硬编码 UTF-8，会让 GBK 输出在「大部分可读」分支整片变成 U+FFFD，
+        // 白白丢掉本模块已经建好的遗留代码页兜底能力。
+        Charset locked = streamDecoder == null ? null : streamDecoder.selectedCharset();
+        String decoded = locked == null
+                ? decodeSmartly(bytes, outputCharset)
+                : new String(bytes, locked);
         int scanLen = Math.min(decoded.length(), 10000);
         int printableCount = 0;
         int maxRun = 0, curRun = 0;
@@ -598,17 +684,11 @@ public class ProcessExecutor {
 
         int printablePct = scanLen > 0 ? printableCount * 100 / scanLen : 0;
         if (printablePct > 60 && maxRun > 50) {
-            int total = decoded.length();
-            String preview;
-            if (total > 6000) {
-                preview = decoded.substring(0, 3000)
-                        + "\n... [中间省略 " + (total - 6000) + " 字符] ...\n"
-                        + decoded.substring(total - 3000);
-            } else {
-                preview = decoded;
-            }
+            // 预算必须听调用方的：原先硬编码 6000/3000，完全无视 max_output_chars——
+            // 既可能撑爆小预算，也可能在大预算下白白砍掉用户要的内容。
+            // 复用 truncateForLlm 的头尾保留策略，与文本路径保持同一套截断口径。
             return "[注意：输出中检测到二进制特征，但大部分内容可读，已尝试解码显示]\n"
-                    + preview
+                    + truncateForLlm(decoded, maxOutputChars)
                     + "\n---\n"
                     + "(原始大小: " + bytes.length + " 字节)";
         }

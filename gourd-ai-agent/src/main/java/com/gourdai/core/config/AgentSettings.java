@@ -7,7 +7,7 @@ import org.noear.solon.core.util.Assert;
 import org.noear.snack4.Feature;
 import org.noear.snack4.ONode;
 import org.noear.snack4.Options;
-import org.noear.solon.ai.talents.mount.MountType;
+import com.gourdai.ai.talents.mount.MountType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

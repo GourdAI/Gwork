@@ -711,7 +711,9 @@ function startProjectRename(path) {
     });
 }
 
-/* 项目显示名本地更新：改 _sidebarData 中的 name 并刷新侧栏（避免为改名重拉整个侧栏数据）。 */
+/* 项目显示名本地更新：改 _sidebarData 中的 name 并刷新侧栏（避免为改名重拉整个侧栏数据）。
+   同时广播 projects:changed，让其它持有项目列表副本的视图（欢迎页工作空间选择器、
+   记忆页项目选择器、自动化工作空间选择器）即时跟上新名字，而不是等下次打开才刷新。 */
 function updateProjectDisplayName(path, name) {
     if (_sidebarData && _sidebarData.projects) {
         for (var i = 0; i < _sidebarData.projects.length; i++) {
@@ -722,6 +724,7 @@ function updateProjectDisplayName(path, name) {
         }
     }
     updateHistoryUI();
+    if (typeof window.notifyProjectsChanged === 'function') window.notifyProjectsChanged();
 }
 
 function deleteSession(idx) {
@@ -753,6 +756,8 @@ function deleteSession(idx) {
             if (typeof disposeSessionStreamMd === 'function') disposeSessionStreamMd(sess);
             // 释放未发送草稿及其附件大对象（删会话后草稿永无去处）
             if (typeof releaseSessionDraft === 'function') releaseSessionDraft(sess);
+            // 容器即将被移除：先中止回放，否则分片 rAF 会继续渲染一个已被删除的会话
+            if (typeof abortReplay === 'function') abortReplay(sess);
             $(sess.container).remove();
             delete sessionMap[entry.sessionId];
             // 删除会话时清理可能残留的加载按钮
@@ -921,6 +926,7 @@ $(document).on('click', '#clearAllBtn', function () {
                         if (cs.silenceTimer) clearTimeout(cs.silenceTimer);
                         if (typeof disposeSessionStreamMd === 'function') disposeSessionStreamMd(cs);
                         if (typeof releaseSessionDraft === 'function') releaseSessionDraft(cs);
+                        if (typeof abortReplay === 'function') abortReplay(cs);
                         $(cs.container).remove();
                         delete sessionMap[entries[c].sessionId];
                     }
@@ -977,7 +983,11 @@ function loadMessages(sess) {
                 replaySession(sess, rpData.events, false, !!rpData.running);
                 return;
             } catch (e) {
-                // 回放异常：清空可能的半成品，回退纯文本加载
+                /* 回放异常：清空可能的半成品，回退纯文本加载。
+                   这里必须清真实容器——旧实现执行到此处时 sess.container 已被 replaySession
+                   换成临时容器，清空操作打在孤儿节点上，真实容器里的半成品原样留着。
+                   容器语义恒定后该问题自然消失，同时显式中止回放，释放门禁与渲染落点。*/
+                try { if (typeof abortReplay === 'function') abortReplay(sess); } catch (e3) {}
                 try { $(sess.container).html(''); } catch (e2) {}
             }
         }
@@ -1227,7 +1237,11 @@ function replaySession(sess, events, prepend, keepOpen) {
     // 初始加载（prepend=false）走原有 resumeState 逻辑，不受影响。
     var liveState = prepend ? captureLiveStreamState(sess) : null;
     var tempDiv = document.createElement('div');
-    sess.container = tempDiv;
+    /* 只切换渲染落点，不动 sess.container（见 app-base.js 的 renderRoot 注释）。
+       回放期间 sess.container 仍是文档里的真实容器，因此「加载更多」按钮的相对定位、
+       会话判空、异常兜底清空这些依赖真实容器的逻辑全程有效；而回放中断也不再可能
+       让渲染落点永久悬空——最坏情况只是落点没还原，下面的 finishReplay 会兜住。*/
+    sess.renderTarget = tempDiv;
     sess._replaying = true;
     if (!sess._gateBuffer) sess._gateBuffer = [];
     sess.isStreaming = false;
@@ -1254,23 +1268,28 @@ function replaySession(sess, events, prepend, keepOpen) {
             // 旧实现只清主线路思考块与待定工具卡，遗漏了工具卡 / 智能体卡的 loading 闪烁态，
             // 导致历史消息里固化了「绿点永久闪 + 计时器一直跳」——重开旧会话即可复现。
             // 回放路径不会再接收任何帧，故直接全量清 loading（包括批量卡，它不会再有批次完整性检查）。
-            if (sess.container) {
+            /* 扫的是本轮回放刚建出来的节点，必须用渲染落点（回放期＝临时容器）。
+               若用真实容器，prepend 回放会把文档里已有行上的 loading 态一并抹掉，
+               甚至误伤正在流式输出的卡片——这正是下方「空壳清扫只能扫本页新插入节点」
+               注释记录过的同一类教训。*/
+            var turnRoot = renderRoot(sess);
+            if (turnRoot) {
                 // 孤儿骨架卡先移除再标黄：它从未执行过，黄点空卡会被读成「工具失败」。
                 // 回放路径理论上碰不到（action_draft / action_args 不落盘），但实时流与回放共用
                 // 同一渲染管线，此处与 finishStream 保持同构，避免两条收尾路径语义不一致。
                 if (typeof removeOrphanArgsStreamingCards === 'function') removeOrphanArgsStreamingCards(sess);
-                $(sess.container).find('.tool-status-icon.loading').each(function() {
+                $(turnRoot).find('.tool-status-icon.loading').each(function() {
                     this.className = 'tool-status-icon warn';
                     this.innerHTML = '';
                 });
-                $(sess.container).find('.agent-status-icon.loading').each(function() {
+                $(turnRoot).find('.agent-status-icon.loading').each(function() {
                     this.className = 'agent-status-icon done';
                 });
-                $(sess.container).find('.agent-card-streaming').removeClass('agent-card-streaming');
-                $(sess.container).find('.thinking-block.streaming').removeClass('streaming');
+                $(turnRoot).find('.agent-card-streaming').removeClass('agent-card-streaming');
+                $(turnRoot).find('.thinking-block.streaming').removeClass('streaming');
             }
             resetStreamState(sess);
-            purgeEmptyMdBlocks(sess.container);
+            purgeEmptyMdBlocks(renderRoot(sess));
         }
     }
 
@@ -1316,15 +1335,56 @@ function replaySession(sess, events, prepend, keepOpen) {
         }
 
         if (idx < events.length) {
-            // 还有未处理的事件，下一帧继续
-            sess._replayRafId = requestAnimationFrame(replayChunk);
+            /* 还有未处理的事件，下一帧继续。
+               回调整体兜底：rAF 回调抛出的异常无人接管，会直接终止分片链，
+               replayDone 永不执行 → 门禁永不释放（与旧版 cancelAnimationFrame 同样的僵死后果）。*/
+            sess._replayRafId = requestAnimationFrame(function() {
+                try {
+                    replayChunk();
+                } catch (err) {
+                    finishReplayFallback(err);
+                }
+            });
         } else {
             // 全部事件处理完毕，执行收尾
             replayDone();
         }
     }
 
+    /* 回放收尾的统一出口。无论正常跑完还是中途抛异常，都必须还原渲染落点并释放
+       _replaying / _gateBuffering 门禁、排空实时帧缓冲——少做任何一步，后续实时帧都会
+       被永久扣在缓冲区里，表现为「后端在跑、界面不动」。 */
+    function finishReplayFallback(err) {
+        console.error('[replaySession] 回放收尾异常，执行兜底:', err);
+        try {
+            sess.renderTarget = null;
+            sess._replaying = false;
+            sess._replayClock = null;
+            sess._replayRafId = null;
+            sess._skipScroll = false;
+            sess.isStreaming = false;
+            // 半成品仍在临时容器里，直接并入真实容器尾部，避免这一页内容凭空消失
+            if (tempDiv && tempDiv.firstChild && realContainer) {
+                var salvage = document.createDocumentFragment();
+                while (tempDiv.firstChild) salvage.appendChild(tempDiv.firstChild);
+                if (prepend) realContainer.insertBefore(salvage, realContainer.firstChild);
+                else realContainer.appendChild(salvage);
+            }
+        } catch (e) { /* 兜底本身不得再抛 */ }
+        try { if (typeof releaseScrollAnchor === 'function') releaseScrollAnchor(); } catch (e) {}
+        try { drainGateBuffer(sess); } catch (e) {}
+        try { if (typeof updateLoadMoreBtn === 'function') updateLoadMoreBtn(sess); } catch (e) {}
+    }
+
     function replayDone() {
+        try {
+            replayDoneCore();
+        } catch (err) {
+            finishReplayFallback(err);
+        }
+    }
+
+    function replayDoneCore() {
         var resumeState = null;
         if (keepOpen && !prepend && (sess.currentBubbleEl || sess.thinkingBlockEl || sess.pendingToolCard)) {
             resumeState = {
@@ -1353,14 +1413,18 @@ function replaySession(sess, events, prepend, keepOpen) {
         sess._replayRafId = null;
         sess._skipScroll = false;       // 回放结束，恢复滚动管线
 
-        // 移入真实容器
-        sess.container = realContainer;
+        // 回放结束：还原渲染落点，后续一律写真实容器
+        sess.renderTarget = null;
         var fragment = document.createDocumentFragment();
         while (tempDiv.firstChild) { fragment.appendChild(tempDiv.firstChild); }
         // prepend 的空气泡清扫只能扫本页新插入的节点，故先留存引用（入 DOM 后 fragment 会被清空）
         var prependedRows = prepend ? Array.prototype.slice.call(fragment.childNodes) : null;
 
         if (prepend) {
+            // 跨页缝合必须在选锚点之前：缝合会删除真实容器里的首行（内容并入本页末行），
+            // 若锚点先选中了它，修正时读的是脱离文档的节点，视口会跳。
+            stitchPrependedRunRows(fragment, realContainer, sess);
+
             // 选锚点：当前视口顶部第一个可见消息行，以及它相对视口的偏移。
             // 不用 scrollHeight 差值：那个算法只在「高度变化全部发生在视口上方」时成立，
             // 而下面的空气泡清理会删除视口下方的行、回放期间流式内容也在长高，
@@ -1481,18 +1545,84 @@ function replaySession(sess, events, prepend, keepOpen) {
 
     }
 
-    // 启动分片回放
-    replayChunk();
+    // 启动分片回放。首帧是同步执行的，它抛异常会直接把异常抛回 loadMessages 的
+    // ajax 回调（那里只 catch 了自己的同步段），门禁同样释放不掉，故一并兜底。
+    try {
+        replayChunk();
+    } catch (err) {
+        finishReplayFallback(err);
+    }
+}
+
+/* prepend 回放的跨页同 run 缝合：后端页边界（字节预算截断、旧数据无游标等）偶尔会落在某条
+   assistant run 的中段，于是本页末行与真实容器首行属于同一个 runId——不缝合的话同一条回答
+   在 DOM 上是「上方碎片行 + 下方残段行」两行，且每次上拉都可能再切一刀。
+   缝合规则：把下方行 .msg-bubble 的内容子节点（正文/思考块/工具卡等，按原序）搬入上方行气泡，
+   下方行的耗时徽标与时间先过户再整行删除。meta-row / msg-actions 不搬（上方行自带一套，
+   搬过去会出现两份复制/重跑按钮）。 */
+function stitchPrependedRunRows(fragment, realContainer, sess) {
+    var kids = fragment.childNodes;
+    var lastRow = null;
+    for (var i = kids.length - 1; i >= 0; i--) {
+        var n = kids[i];
+        if (n.nodeType === 1 && n.classList && n.classList.contains('msg-row') && n.classList.contains('assistant')) { lastRow = n; break; }
+    }
+    if (!lastRow) return;
+    var runId = lastRow.getAttribute('data-run-id');
+    if (!runId) return;
+    var firstRow = null;
+    var rows = realContainer.children;
+    for (var j = 0; j < rows.length; j++) {
+        var r = rows[j];
+        if (r.nodeType === 1 && r.classList && r.classList.contains('msg-row') && r.classList.contains('assistant')) { firstRow = r; break; }
+    }
+    if (!firstRow || firstRow === lastRow) return;
+    if (firstRow.getAttribute('data-run-id') !== runId) return;
+    // 绝不动承载实时流式输出的行：删掉它会让 sess.currentBubbleEl 指向脱离文档的节点
+    if (sess && sess.currentBubbleEl && (firstRow === sess.currentBubbleEl || firstRow.contains(sess.currentBubbleEl))) return;
+    var srcBubble = $(firstRow).find('.msg-bubble')[0];
+    var dstBubble = $(lastRow).find('.msg-bubble')[0];
+    if (!srcBubble || !dstBubble || srcBubble === dstBubble) return;
+
+    // 徽标/时间过户：下方行是本 run 的收尾页，耗时徽标与完成时间在它身上
+    var srcMeta = $(firstRow).find('.msg-meta-row')[0];
+    var dstMeta = $(lastRow).find('.msg-meta-row')[0];
+    if (srcMeta && dstMeta) {
+        var srcTrace = $(srcMeta).find('.msg-trace')[0];
+        if (srcTrace && !$(dstMeta).find('.msg-trace')[0]) {
+            dstMeta.appendChild(srcTrace);
+        }
+        var srcTime = $(srcMeta).find('.msg-time')[0];
+        var dstTime = $(dstMeta).find('.msg-time')[0];
+        if (srcTime && dstTime && (srcTime.textContent || '').trim() && !(dstTime.textContent || '').trim()) {
+            dstTime.textContent = srcTime.textContent;
+            dstTime.style.display = srcTime.style.display;
+        }
+    }
+    // 内容按原序搬移：反复取 src 的首个子元素挂到 dst 尾部（跳过 meta/actions）
+    while (srcBubble.firstElementChild) {
+        var child = srcBubble.firstElementChild;
+        if (child.classList && (child.classList.contains('msg-meta-row') || child.classList.contains('msg-actions'))) {
+            child.parentNode.removeChild(child);
+            continue;
+        }
+        dstBubble.appendChild(child);
+    }
+    $(firstRow).remove();
 }
 
 function loadMessagesLegacy(sess, rootQ) {
     $.get('/web/chat/messages?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ, function(resp) {
+        // 声明提到 try 外：异常兜底分支要用到，放在 try 内会踩 var 提升的 undefined 陷阱
+        var realContainer = null;
+        var tempDiv = null;
         try {
             var msgs = resp.data;
-            var realContainer = sess.container;
-            // 用临时容器批量构建 DOM，避免逐条 append 触发多次 layout
-            var tempDiv = document.createElement('div');
-            sess.container = tempDiv;
+            realContainer = sess.container;
+            // 用临时容器批量构建 DOM，避免逐条 append 触发多次 layout。
+            // 同 replaySession：只切渲染落点，sess.container 始终是真实容器。
+            tempDiv = document.createElement('div');
+            sess.renderTarget = tempDiv;
             resetStreamState(sess);
             
             var idx = 0;
@@ -1529,8 +1659,8 @@ function loadMessagesLegacy(sess, rootQ) {
             }
 
             function loadDone() {
-                // 恢复真实容器，一次性移入所有子节点
-                sess.container = realContainer;
+                // 回放结束：还原渲染落点，一次性移入所有子节点
+                sess.renderTarget = null;
                 $(realContainer).html('');
                 var fragment = document.createDocumentFragment();
                 while (tempDiv.firstChild) {
@@ -1552,8 +1682,11 @@ function loadMessagesLegacy(sess, rootQ) {
 
             loadChunk();
         } catch (e) {
-            // 异常时确保容器恢复
-            if (realContainer) sess.container = realContainer;
+            /* 异常时确保渲染落点复位。
+               旧实现写的是 if (realContainer) sess.container = realContainer，而 realContainer
+               声明在 try 内部：若异常发生在赋值之前（如 resp.data 取值抛错），它是 undefined，
+               兜底整个失效、容器永久悬空。现在落点复位无条件执行，不依赖任何局部变量。*/
+            sess.renderTarget = null;
             drainGateBuffer(sess);
         }
     }).fail(function() {

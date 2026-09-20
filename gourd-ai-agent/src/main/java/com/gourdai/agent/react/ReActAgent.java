@@ -23,16 +23,16 @@ import com.gourdai.agent.react.task.ReasonTask;
 import com.gourdai.agent.team.TeamProtocol;
 import com.gourdai.agent.team.TeamTrace;
 import com.gourdai.agent.util.FeedbackTool;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.ChatSession;
-import org.noear.solon.ai.chat.ModelOptionsAmend;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.talent.Talent;
-import org.noear.solon.ai.chat.tool.FunctionTool;
-import org.noear.solon.ai.chat.tool.ToolProvider;
-import org.noear.solon.ai.chat.tool.ToolSchemaUtil;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ChatSession;
+import com.gourdai.ai.chat.ModelOptionsAmend;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.talent.Talent;
+import com.gourdai.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.ToolProvider;
+import com.gourdai.ai.chat.tool.ToolSchemaUtil;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.core.util.RankEntity;
 import org.noear.solon.flow.*;
@@ -53,7 +53,7 @@ import java.util.function.Function;
  * ReAct (Reason + Act) 协同推理智能体
  *
  * <p>该智能体实现了经典 ReAct 推理模式：通过【思考(Thought) -> 动作(Act) -> 观察(Observation)】的循环，
- * 使 LLM 能够使用外部工具解决复杂任务。其核心是一个基于 Solon Flow 构建的计算图。</p>
+ * 使 LLM 能够使用外部工具解决复杂任务。其核心是一个基于流程引擎构建的计算图。</p>
  *
  * <p>执行流程：</p>
  * <pre>

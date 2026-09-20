@@ -4,9 +4,10 @@ import com.gourdai.core.portal.web.thinking.ModelProfiles;
 import com.gourdai.core.portal.web.thinking.ReasoningCapabilities;
 import com.gourdai.core.portal.web.thinking.ReasoningCapability;
 import com.gourdai.core.portal.web.thinking.ThinkingLevel;
-import org.noear.solon.ai.chat.ChatConfigReadonly;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.ModelOptionsAmend;
+import com.gourdai.ai.chat.ChatConfigReadonly;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ModelOptionsAmend;
+import com.gourdai.ai.llm.dialect.ollama.OllamaChatDialect;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -52,7 +53,7 @@ public final class ThinkingDepth {
     public static final String AUTO = ThinkingLevel.AUTO.code();
 
     /** 本类管理的请求键，切换/降级时统一清理，保证幂等。 */
-    private static final String[] MANAGED_KEYS = {"thinking", "reasoning", "reasoning_effort"};
+    private static final String[] MANAGED_KEYS = {"thinking", "think", "reasoning", "reasoning_effort"};
 
     /**
      * 规范化档位编码：null / 空 / 不识别 → {@link #AUTO}；并迁移历史值。
@@ -124,7 +125,8 @@ public final class ThinkingDepth {
      * @param depth   档位编码
      */
     public static void applyTo(ModelOptionsAmend<?, ?> options, ChatModel model, String depth) {
-        applyInternal(options, capabilityOf(model), ThinkingLevel.from(depth), maxOutputOf(model));
+        applyInternal(options, capabilityOf(model), ThinkingLevel.from(depth), maxOutputOf(model),
+                model != null && model.getDialect() instanceof OllamaChatDialect);
     }
 
     /**
@@ -139,7 +141,7 @@ public final class ThinkingDepth {
      */
     public static void applyTo(ModelOptionsAmend<?, ?> options, String standard, String depth) {
         applyInternal(options, ReasoningCapabilities.resolve(standard, null, null),
-                ThinkingLevel.from(depth), null);
+                ThinkingLevel.from(depth), null, "ollama".equalsIgnoreCase(standard));
     }
 
     // ------------------------------------------------------------------
@@ -148,7 +150,7 @@ public final class ThinkingDepth {
 
     @SuppressWarnings("unchecked")
     private static void applyInternal(ModelOptionsAmend<?, ?> options, ReasoningCapability cap,
-                                      ThinkingLevel level, Integer maxOutput) {
+                                      ThinkingLevel level, Integer maxOutput, boolean nativeOllama) {
         if (options == null) {
             return;
         }
@@ -156,6 +158,20 @@ public final class ThinkingDepth {
         clearManagedKeys(options);
 
         if (level.isAuto() || cap.isNone()) {
+            return;
+        }
+
+        // Ollama 原生接口只使用 think；能力值域仍负责档位降级。
+        // https://docs.ollama.com/capabilities/thinking：GPT-OSS 接受 low/medium/high，非布尔。
+        if (nativeOllama) {
+            if (cap.shape() == ReasoningCapability.Shape.TOGGLE) {
+                options.optionSet("think", true);
+            } else {
+                String effort = cap.resolveEffort(level);
+                if (effort != null) {
+                    options.optionSet("think", effort);
+                }
+            }
             return;
         }
 
@@ -198,6 +214,19 @@ public final class ThinkingDepth {
                 }
                 Map<String, Object> reasoning = new LinkedHashMap<>();
                 reasoning.put("effort", effort);
+                // 不写 summary：此处曾补过 summary=auto，意图是「让服务端返回思考摘要」，
+                // 以便下一轮有东西可回传。抽离后经源码核实，该补丁既不必要也不正确：
+                //
+                // 1) 真正解决 400 的是【reasoning 多轮回放】——
+                //    OpenaiResponsesRequestBuilder#appendReasoningInputItem 把上一轮的
+                //    reasoning item 原样回传；若无官方元数据，则降级写成
+                //    {type:"reasoning_text", text:...}，恰好就是网关报错要求的那个字段
+                //    （"The `reasoning_text` in the thinking mode must be passed back"）。
+                //    该路径走的是【输入项】构建，与这里的【配置项】互相独立，
+                //    既不需要也不依赖 summary。
+                // 2) 更糟的是，写显式 reasoning 会让 applyUnifiedReasoningOptions 开头的
+                //    「root.hasKey("reasoning") -> return」提前返回，反而【挡住】了上游
+                //    自己的 summary / effort 处理逻辑。故只传 effort，其余交给方言。
                 options.optionSet("reasoning", reasoning);
                 break;
             }
@@ -273,7 +302,7 @@ public final class ThinkingDepth {
      * 解析模型的推理能力（模型为 null 时给出 openai 兜底）。
      *
      * <p><b>用户覆写必须经 {@link ModelProfiles} 查询，不能从 ChatModel 上探测。</b>
-     * solon-ai 的 {@code ChatModel} 持有的是包装器 {@code ChatConfigReadonly}，
+     * 上游的 {@code ChatModel} 持有的是包装器 {@code ChatConfigReadonly}，
      * 它与本地 {@code ModelDo} 并非同一继承体系（{@code ChatConfigReadonly → Object}，
      * 而 {@code ModelDo → ChatConfig → AiConfig → Object}），
      * 任何 {@code instanceof} / 强转探测在运行时都恒为 false。
@@ -288,7 +317,9 @@ public final class ThinkingDepth {
             return ReasoningCapabilities.resolve(null, null, null);
         }
         String modelName = modelNameOf(model);
-        return ReasoningCapabilities.resolve(model.getStandardOrProvider(), modelName,
+        String standard = model.getDialect() instanceof OllamaChatDialect
+                ? "ollama" : model.getStandardOrProvider();
+        return ReasoningCapabilities.resolve(standard, modelName,
                 ModelProfiles.capabilitiesOf(modelName));
     }
 

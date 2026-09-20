@@ -6,11 +6,11 @@ import com.gourdai.agent.react.intercept.AskUserTask;
 import com.gourdai.agent.session.FileAgentSession;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.message.ToolMessage;
-import org.noear.solon.ai.chat.tool.ToolCall;
-import org.noear.solon.ai.chat.tool.ToolResult;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ToolMessage;
+import com.gourdai.ai.chat.tool.ToolCall;
+import com.gourdai.ai.chat.tool.ToolResult;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -55,7 +55,8 @@ class ToolCallPairRepairTest {
         for (ToolCall c : calls) {
             list.add(c);
         }
-        return new AssistantMessage("", "", false, null, null, list, null);
+        // 4.1.1：raw 构造器已移除，工具调用消息改用 snapshot() 构造。
+        return AssistantMessage.snapshot("", "", list, null, null, null, null);
     }
 
     private static ToolMessage resultMessage(String id, String name, String content) {
@@ -180,7 +181,184 @@ class ToolCallPairRepairTest {
         Assertions.assertEquals(0, ToolCallPairRepair.repair(trace));
     }
 
-    // ==================== 5. 接线护栏（源码形态断言） ====================
+    // ==================== 5. 答案归属：按 actionId 精确回填 ====================
+
+    /**
+     * 核心回归（缺陷 #5）：孤儿 A 排在前、被回答的 B 排在后（跨消息布局）。
+     *
+     * <p>旧实现按「遇到的第一个孤儿 ask_user 就填」，会把 B 的答案填给 A 并随即清掉答案键，
+     * B 只能拿到「中断无输出」——用户白答一次，且模型拿到的是错位的语义。</p>
+     */
+    @Test
+    void answerGoesToOwningCallNotTheFirstOrphanAcrossMessages() throws IOException {
+        AgentSession session = newSession();
+        ReActTrace trace = newTrace(session);
+
+        // 历史遗留的孤儿提问 A（上轮被中断，无结果）
+        trace.getWorkingMemory().addMessage(callMessage(call("call-ask-OLD", "ask_user")));
+        trace.getWorkingMemory().addMessage(ChatMessage.ofAssistant("上一轮被中断"));
+        // 本轮真正发起并被回答的提问 B
+        trace.getWorkingMemory().addMessage(callMessage(call("call-ask-NEW", "ask_user")));
+
+        List<Map<String, Object>> questions = new ArrayList<>();
+        Map<String, Object> q0 = new LinkedHashMap<>();
+        q0.put("header", "采用哪个修复方式？");
+        questions.add(q0);
+        // 挂起任务明确归属于 B
+        session.getContext().put(AskUser.TASK_KEY, new AskUserTask("ask_user", questions, "call-ask-NEW"));
+        AskUser.submit(session, "{\"answers\":[{\"index\":0,\"text\":\"选方案A\",\"skipped\":false}]}");
+
+        Assertions.assertEquals(2, ToolCallPairRepair.repair(trace), "两个孤儿调用都要补齐结果");
+
+        ToolMessage forOld = findResult(trace, "call-ask-OLD");
+        ToolMessage forNew = findResult(trace, "call-ask-NEW");
+        Assertions.assertNotNull(forOld);
+        Assertions.assertNotNull(forNew);
+
+        Assertions.assertTrue(forNew.getContent().contains("选方案A"),
+                "答案必须回填给产生它的调用 B");
+        Assertions.assertEquals(ToolCallPairRepair.INTERRUPTED_MARKER, forOld.getContent(),
+                "匹配不上的孤儿 A 只能拿中断标记，不得挪用别人的答案");
+        Assertions.assertFalse(forOld.getContent().contains("选方案A"), "答案不得泄露给 A");
+
+        // 现场清理仍由真正归属的那一次完成（幂等）
+        Assertions.assertNull(session.getContext().getAs(AskUser.TASK_KEY), "挂起任务必须清理");
+        Assertions.assertNull(AskUser.getAnswer(session, "ask_user"), "答案键必须清理");
+    }
+
+    /**
+     * 同消息内布局：孤儿 A 与被回答的 B 在同一条 assistant 的 tool_calls 里，A 在前。
+     */
+    @Test
+    void answerGoesToOwningCallNotTheFirstOrphanWithinOneMessage() throws IOException {
+        AgentSession session = newSession();
+        ReActTrace trace = newTrace(session);
+
+        trace.getWorkingMemory().addMessage(
+                callMessage(call("call-ask-A", "ask_user"), call("call-ask-B", "ask_user")));
+
+        List<Map<String, Object>> questions = new ArrayList<>();
+        Map<String, Object> q0 = new LinkedHashMap<>();
+        q0.put("header", "确认继续？");
+        questions.add(q0);
+        session.getContext().put(AskUser.TASK_KEY, new AskUserTask("ask_user", questions, "call-ask-B"));
+        AskUser.submit(session, "{\"answers\":[{\"index\":0,\"text\":\"确认\",\"skipped\":false}]}");
+
+        Assertions.assertEquals(2, ToolCallPairRepair.repair(trace));
+
+        ToolMessage forA = findResult(trace, "call-ask-A");
+        ToolMessage forB = findResult(trace, "call-ask-B");
+        Assertions.assertEquals(ToolCallPairRepair.INTERRUPTED_MARKER, forA.getContent(),
+                "同消息内的前置孤儿同样不得截胡答案");
+        Assertions.assertTrue(forB.getContent().contains("确认"), "答案归 call-ask-B");
+    }
+
+    /**
+     * 降级口 1：挂起任务无 actionId（字段新增前落盘的旧快照）时，保持修复前行为：
+     * 交给首个孤儿 ask_user。否则用户的回答会凭空消失。
+     */
+    @Test
+    void legacyTaskWithoutActionIdFallsBackToFirstOrphan() throws IOException {
+        AgentSession session = newSession();
+        ReActTrace trace = newTrace(session);
+
+        trace.getWorkingMemory().addMessage(callMessage(call("call-ask-1", "ask_user")));
+
+        List<Map<String, Object>> questions = new ArrayList<>();
+        Map<String, Object> q0 = new LinkedHashMap<>();
+        q0.put("header", "旧快照提问");
+        questions.add(q0);
+        // actionId 传 null：模拟本字段新增前落盘的挂起任务
+        session.getContext().put(AskUser.TASK_KEY, new AskUserTask("ask_user", questions, null));
+        AskUser.submit(session, "{\"answers\":[{\"index\":0,\"text\":\"旧答案\",\"skipped\":false}]}");
+
+        Assertions.assertEquals(1, ToolCallPairRepair.repair(trace));
+
+        ToolMessage fixed = findResult(trace, "call-ask-1");
+        Assertions.assertTrue(fixed.getContent().contains("旧答案"),
+                "无归属信息可用时必须降级回填，不能让用户白答一次");
+    }
+
+    /**
+     * 降级口 2：挂起任务完全丢失（只剩答案键）时同样降级回填。
+     */
+    @Test
+    void missingTaskFallsBackToFirstOrphan() throws IOException {
+        AgentSession session = newSession();
+        ReActTrace trace = newTrace(session);
+
+        trace.getWorkingMemory().addMessage(callMessage(call("call-ask-x", "ask_user")));
+        AskUser.submit(session, "{\"answers\":[{\"index\":0,\"text\":\"无题面答案\",\"skipped\":false}]}");
+
+        Assertions.assertEquals(1, ToolCallPairRepair.repair(trace));
+
+        ToolMessage fixed = findResult(trace, "call-ask-x");
+        Assertions.assertTrue(fixed.getContent().contains("无题面答案"),
+                "题面丢失时走裸列降级渲染，仍不得丢答案");
+    }
+
+    /**
+     * 归属调用根本不在工作记忆里（已被压缩掉）：孤儿一律给中断标记，
+     * 且答案键与挂起任务必须原封不动——留给后续真正属于它的调用。
+     */
+    @Test
+    void unmatchedOrphanKeepsAnswerForItsRealOwner() throws IOException {
+        AgentSession session = newSession();
+        ReActTrace trace = newTrace(session);
+
+        trace.getWorkingMemory().addMessage(callMessage(call("call-ask-STALE", "ask_user")));
+
+        List<Map<String, Object>> questions = new ArrayList<>();
+        Map<String, Object> q0 = new LinkedHashMap<>();
+        q0.put("header", "归属于另一次调用");
+        questions.add(q0);
+        session.getContext().put(AskUser.TASK_KEY, new AskUserTask("ask_user", questions, "call-ask-ELSEWHERE"));
+        AskUser.submit(session, "{\"answers\":[{\"index\":0,\"text\":\"不得被挪用\",\"skipped\":false}]}");
+
+        Assertions.assertEquals(1, ToolCallPairRepair.repair(trace));
+
+        ToolMessage fixed = findResult(trace, "call-ask-STALE");
+        Assertions.assertEquals(ToolCallPairRepair.INTERRUPTED_MARKER, fixed.getContent());
+        Assertions.assertNotNull(session.getContext().getAs(AskUser.TASK_KEY),
+                "未匹配时不得清掉挂起任务（要留给真正归属的调用）");
+        Assertions.assertNotNull(AskUser.getAnswer(session, "ask_user"),
+                "未匹配时不得清掉答案键，否则用户白答一次");
+    }
+
+    /** 非 ask_user 的孤儿调用永远只给中断标记，不受答案存在与否影响。 */
+    @Test
+    void nonAskUserOrphanNeverTakesAnswer() throws IOException {
+        AgentSession session = newSession();
+        ReActTrace trace = newTrace(session);
+
+        trace.getWorkingMemory().addMessage(callMessage(call("call-write", "write"), call("call-ask", "ask_user")));
+
+        List<Map<String, Object>> questions = new ArrayList<>();
+        Map<String, Object> q0 = new LinkedHashMap<>();
+        q0.put("header", "确认写入？");
+        questions.add(q0);
+        session.getContext().put(AskUser.TASK_KEY, new AskUserTask("ask_user", questions, "call-ask"));
+        AskUser.submit(session, "{\"answers\":[{\"index\":0,\"text\":\"确认写入\",\"skipped\":false}]}");
+
+        Assertions.assertEquals(2, ToolCallPairRepair.repair(trace));
+
+        Assertions.assertEquals(ToolCallPairRepair.INTERRUPTED_MARKER,
+                findResult(trace, "call-write").getContent(), "write 不得拿到问答答案");
+        Assertions.assertTrue(findResult(trace, "call-ask").getContent().contains("确认写入"));
+    }
+
+    /** 按 toolCallId 找回填结果；找不到返回 null。 */
+    private static ToolMessage findResult(ReActTrace trace, String toolCallId) {
+        for (ChatMessage message : trace.getWorkingMemory().getMessages()) {
+            if (message instanceof ToolMessage
+                    && toolCallId.equals(((ToolMessage) message).getToolCallId())) {
+                return (ToolMessage) message;
+            }
+        }
+        return null;
+    }
+
+    // ==================== 6. 接线护栏（源码形态断言） ====================
 
     @Test
     void sourceWiringGuards() throws IOException {
@@ -193,6 +371,24 @@ class ToolCallPairRepairTest {
                 "回放新结果必须就近补插，保持 tool_calls 与结果段连续");
         Assertions.assertTrue(actionTask.contains("PENDING_BATCH_ID_KEY"),
                 "回放必须复用批次声明 id（避免重复建容器）");
+        Assertions.assertTrue(actionTask.contains("PENDING_TEXT_ACTION_KEYS"),
+                "文本模式挂起恢复同样必须跳过已执行动作（防写工具二次副作用）");
+        Assertions.assertTrue(actionTask.contains("takeCommittedTextActionKeys"),
+                "文本模式指纹必须「读取即清」，不得泄漏到后续回合");
+
+        String askUserInterceptor = readSource(
+                "gourd-ai-agent/src/main/java/com/gourdai/agent/react/intercept/AskUserInterceptor.java");
+        Assertions.assertTrue(askUserInterceptor.contains("hasRenderableQuestion"),
+                "空题面必须在挂起前被拦下（否则会话永久卡死）");
+        Assertions.assertTrue(
+                askUserInterceptor.indexOf("hasRenderableQuestion(questions)")
+                        < askUserInterceptor.indexOf("pending(true"),
+                "合法性判定必须早于 pending——一旦挂起就再无补救落点");
+
+        String pairRepair = readSource(
+                "gourd-ai-agent/src/main/java/com/gourdai/agent/react/ToolCallPairRepair.java");
+        Assertions.assertTrue(pairRepair.contains("ownsAnswer"),
+                "答案必须按 actionId 精确回填，不得按「首个孤儿」挪用");
 
         String reasonTask = readSource("gourd-ai-agent/src/main/java/com/gourdai/agent/react/task/ReasonTask.java");
         Assertions.assertTrue(reasonTask.contains("ToolCallPairRepair.repair(trace)"),

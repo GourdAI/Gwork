@@ -16,10 +16,10 @@
 package com.gourdai.agent.react;
 
 import com.gourdai.agent.event.AgentEvent;
-import org.noear.solon.ai.chat.CacheControl;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.ModelOptionsAmend;
-import org.noear.solon.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.CacheControl;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ModelOptionsAmend;
+import com.gourdai.ai.chat.tool.FunctionTool;
 import org.noear.solon.core.util.RankEntity;
 import org.noear.solon.lang.NonSerializable;
 import org.noear.solon.lang.Preview;

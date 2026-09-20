@@ -19,7 +19,7 @@ import com.gourdai.agent.react.AbsReActInterceptor;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.react.task.ToolExchanger;
 import com.gourdai.agent.util.AskUserTool;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Nullable;
 import org.noear.solon.lang.Preview;
@@ -47,6 +47,22 @@ import java.util.Map;
 @Preview("3.9.1")
 public class AskUserInterceptor extends AbsReActInterceptor {
 
+    /**
+     * 参数非法时回交模型的错误结果（{@code __ERROR__} 前缀与 {@code ActionTask#executeTool} 的
+     * Schema 自愈口径一致，模型已被训练成据此重试）。
+     *
+     * <p><b>为什么非法参数绝不能挂起</b>：题面为空时前端会隐藏问答卡，用户根本看不到、也点不到回答入口；
+     * 而挂起是「等外部事件唤醒」的单向状态，此时挂起就等于「后台无限死等 + 无人可答」——会话永久卡死，
+     * 只能重启会话解开。故改为把错误当作一次普通观测交还模型，由它自行重试或改走正文提问。</p>
+     *
+     * <p>措辞给出了正确调用形态与「无需作答就别调」的退路，避免模型拿到错误后原样重放同一份坏参数。</p>
+     */
+    static final String INVALID_QUESTIONS_RESULT = "__ERROR__ Invalid arguments for [" + AskUserTool.TOOL_NAME
+            + "]: `questions` 为空，或所有条目的 `header` 均为空白，问答卡无法渲染，任务未挂起。"
+            + " 请重新调用并至少传入一个 header 非空的问题，格式："
+            + "{\"questions\":[{\"header\":\"问题文本\",\"options\":[{\"label\":\"候选项\"}]}]}；"
+            + "若本就无需用户作答，请直接在正文中说明或继续执行，不要再调用本工具。";
+
     @Override
     public void onAction(ReActTrace trace, ToolExchanger toolExchanger) {
         // 只处理结构化问答工具，其余工具一律放行
@@ -57,11 +73,20 @@ public class AskUserInterceptor extends AbsReActInterceptor {
         // 获取会话上下文中的用户答案
         String answer = AskUser.getAnswer(trace.getSession(), toolExchanger.getToolName());
 
-        // 1. 阶段：暂无答案 —— 挂起任务
+        // 1. 阶段：暂无答案 —— 先校验参数，再决定是否挂起
         if (Assert.isEmpty(answer)) {
+            List<Map<String, Object>> questions = extractQuestions(toolExchanger.getArgs());
+
+            // 参数非法直接短路（见 INVALID_QUESTIONS_RESULT）：判定必须发生在 pending 之前——
+            // 一旦挂起，本轮执行流立即中断，后面不再有任何可以补救的落点。
+            if (!hasRenderableQuestion(questions)) {
+                toolExchanger.setResult(INVALID_QUESTIONS_RESULT);
+                return;
+            }
+
             // 带上 actionId：标识本轮提问，供前端对重复 question 帧做幂等（不丢已作答进度）
             trace.getContext().put(AskUser.TASK_KEY, new AskUserTask(toolExchanger.getToolName(),
-                    extractQuestions(toolExchanger.getArgs()), toolExchanger.getActionId()));
+                    questions, toolExchanger.getActionId()));
 
             trace.getSession().pending(true, AskUser.PENDING_REASON);
             trace.setFinalAnswer(AskUser.PENDING_REASON);
@@ -101,6 +126,32 @@ public class AskUserInterceptor extends AbsReActInterceptor {
         // 100% 闭环：现场清理（幂等），避免残留答案让下一轮同类调用误判为“已恢复”
         trace.getContext().remove(AskUser.TASK_KEY);
         trace.getContext().remove(AskUser.ANSWER_PREFIX + toolExchanger.getToolName());
+    }
+
+    /**
+     * 是否存在「可渲染」的问题：至少一条含非空白 {@code header}。
+     *
+     * <p>与前端的空卡隐藏规则同口径——前端渲染不出来的题面，后端就不该为它挂起会话。
+     * 只要有一条题面可渲染即放行：用户仍有回答入口，剩余空条目由渲染层自行忽略，
+     * 不值得为此否掉整次提问（宁可少拦，也不能把合法提问误判成非法）。</p>
+     */
+    private static boolean hasRenderableQuestion(List<Map<String, Object>> questions) {
+        if (Assert.isEmpty(questions)) {
+            return false;
+        }
+
+        for (Map<String, Object> question : questions) {
+            if (question == null) {
+                continue;
+            }
+
+            Object header = question.get("header");
+            if (header != null && !String.valueOf(header).trim().isEmpty()) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

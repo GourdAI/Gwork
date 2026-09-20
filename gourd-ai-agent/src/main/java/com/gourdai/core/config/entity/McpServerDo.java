@@ -1,6 +1,6 @@
 package com.gourdai.core.config.entity;
 
-import org.noear.solon.ai.mcp.client.McpServerParameters;
+import com.gourdai.ai.mcp.client.McpServerParameters;
 import com.gourdai.core.config.AgentFlags;
 
 /**

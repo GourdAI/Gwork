@@ -3,8 +3,8 @@ package com.gourdai;
 import com.gourdai.agent.util.AgentUtil;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.tool.ToolCall;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.tool.ToolCall;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -30,18 +30,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 灌进 {@code ChatAccumulator.thinkingBuilder}。故即使流式侧已抑制，聚合消息的
  * {@code thinking} 仍是「全文 × 2」。</p>
  *
- * <p><b>真实代价的准确口径</b>（曾误判为「白烧一倍 wire token」，已按源码核实修正）：
- * {@code OpenaiResponsesRequestBuilder} 出站时<b>优先</b>回放 {@code responses_output_items}
- * 里的原始 output item（含 reasoning、为 API 快照的单份）并直接 return，此时
- * {@code getThinking()} 根本不参与出站。故重复份额的确凿危害是：
+ * <p><b>真实代价的准确口径</b>（4.1.1 再次修正：此前「出站优先逐字回放
+ * {@code responses_output_items}、故 wire 浪费仅限边缘情形」的描述已不再成立）：
+ * 4.1.1 起协议状态只存<b>凭证与骨架</b>——reasoning 的 id / encrypted_content、function_call 的
+ * call_id / name、output_index 顺序、phase 长度锚点；思考与正文<b>不再有第二份拷贝</b>，
+ * 出站一律从语义字段补水，{@code reasoning_text} 明文兜底也已默认关闭
+ * （改由 {@code responses_reasoning_text_replay_enabled} 显式开启）。
+ * 实测该改造使 reasoning 回放从 1,036,416 字符降到 4,720 字符（219.6 倍），
+ * 单轮节省约 416,828 tokens（占真实末轮 inputTokens 的 71.9%）。故重复份额的危害收敛为：
  * <ol>
  *   <li><b>上下文压缩预算失真</b>（最普遍）：压缩器估算体积走 {@code getContent()}，
  *       工具调用轮聚合正文为空使 {@code isThinking} 为 true，该方法转而返回思考文本
  *       —— 重复份额全额计入，压缩比预期更早触发；</li>
  *   <li><b>落盘放大</b>：重复思考被写进会话历史 NDJSON；</li>
- *   <li><b>wire 浪费仅限边缘情形</b>：唯有 {@code responses_output_items} 与
- *       {@code reasoning_item_id} / {@code encrypted_content} 同时缺失、退化到
- *       {@code reasoning_text} 兜底分支时，重复份额才上到 wire。</li>
+ *   <li><b>摘要口径已分域</b>：语义摘要对凭证型协议改用身份锚点（只覆盖 toolCall 的
+ *       index / id / name），思考归一化不再使协议状态整包判废
+ *       （见 {@code MessageSemanticHasherScopeTest} 与
+ *       {@code OpenaiResponsesSingleContentAuthorityTest#thinkingDedupeMustNotVoidProtocolState}）。
+ *       因此本组用例的价值在于守住「归一化本身正确」与「metadata / 凭证存活」，
+ *       而不再是防止 wire 浪费——后者已由单一内容权威从结构上消除。</li>
  * </ol></p>
  *
  * <p><b>去重锚的合法性</b>：上游 {@code ChatRequestDescDefault#publishItem} 中
@@ -56,11 +63,8 @@ public class AggregatedThinkingDedupeTest {
 
     /** 构造聚合消息：复刻 {@code ChatResponseDefault#buildAggregationMessage} 的流式分支形态。 */
     private static AssistantMessage aggregated(String text, String thinking) {
-        return new AssistantMessage(
-                text,
-                thinking,
-                text.length() == 0 && thinking.length() > 0,
-                null, null, null, null, null);
+        // 4.1.1：isThinking 布尔位已移除，通道归属改由「text 与 thinking 哪个有值」自然表达。
+        return new AssistantMessage(text, thinking);
     }
 
     @Test
@@ -76,16 +80,16 @@ public class AggregatedThinkingDedupeTest {
     }
 
     @Test
-    @DisplayName("纯推理轮：无正文（text 为空串）时同样折叠，且 isThinking 语义保持")
+    @DisplayName("纯推理轮：无正文（text 为空串）时同样折叠，且纯思考语义保持")
     public void dedupe_pure_reasoning_turn() {
         AssistantMessage message = aggregated("", FULL + FULL);
-        assertTrue(message.isThinking(), "前提：纯推理轮聚合消息 isThinking 为 true");
+        assertTrue(message.isThinkingOnly(), "前提：纯推理轮聚合消息属于纯思考");
 
         AssistantMessage fixed = AgentUtil.dedupeAggregatedThinking(message, FULL);
 
         assertEquals(FULL, fixed.getThinkingRaw());
         assertEquals("", fixed.getTextRaw(), "空正文必须保持空串而非变 null");
-        assertTrue(fixed.isThinking(), "isThinking 标记必须原样搬运");
+        assertTrue(fixed.isThinkingOnly(), "纯思考语义必须原样保持");
     }
 
     @Test
@@ -104,35 +108,27 @@ public class AggregatedThinkingDedupeTest {
     }
 
     @Test
-    @DisplayName("工具调用/推理字段名/搜索结果等字段逐一保真")
+    @DisplayName("工具调用 / 搜索结果 / metadata 等载荷字段逐一保真")
     public void dedupe_preserves_all_payload_fields() {
         List<ToolCall> toolCalls = new ArrayList<>();
         toolCalls.add(new ToolCall("0", "call_1", "Read", null, new LinkedHashMap<>()));
 
-        List<Map> toolCallsRaw = new ArrayList<>();
-        Map<String, Object> rawCall = new LinkedHashMap<>();
-        rawCall.put("id", "call_1");
-        toolCallsRaw.add(rawCall);
-
-        List<Map> searchRaw = new ArrayList<>();
-        Map<String, Object> rawSearch = new LinkedHashMap<>();
-        rawSearch.put("title", "doc");
-        searchRaw.add(rawSearch);
-
-        AssistantMessage message = new AssistantMessage(
-                "答案", FULL + FULL, false,
-                "原始内容", toolCallsRaw, toolCalls, searchRaw, null)
-                .reasoningFieldName("reasoning_content");
+        // 4.1.1：raw 多参构造器（含 isThinking / contentRaw / toolCallsRaw /
+        // searchResultsRaw / reasoningFieldName）已整体移除，终态消息统一由
+        // snapshot() 工厂构造。原用例断言的 raw 字段已不属于公开契约，
+        // 改为验证 snapshot 确实能搬运的载荷（尤其 protocolStates）。
+        AssistantMessage message = AssistantMessage.snapshot(
+                "答案", FULL + FULL, toolCalls, null, null, null, null);
+        message.addMetadata("reasoning_item_id", "rs_keep");
 
         AssistantMessage fixed = AgentUtil.dedupeAggregatedThinking(message, FULL);
 
         assertEquals(FULL, fixed.getThinkingRaw(), "前提：本例确实触发了折叠");
-        assertSame(toolCalls, fixed.getToolCalls(), "工具调用必须原样搬运");
-        assertSame(toolCallsRaw, fixed.getToolCallsRaw());
-        assertSame(searchRaw, fixed.getSearchResultsRaw());
-        assertEquals("原始内容", fixed.getContentRaw(),
-                "contentRaw 必须显式搬运：构造器收到 null 会用 getContent() 自动回填");
-        assertEquals("reasoning_content", fixed.getReasoningFieldName());
+        assertEquals("答案", fixed.getTextRaw(), "正文必须原样搬运");
+        assertEquals(1, fixed.getToolCalls().size(), "工具调用必须原样搬运");
+        assertEquals("call_1", fixed.getToolCalls().get(0).getId());
+        assertEquals("rs_keep", fixed.getMetadata().get("reasoning_item_id"),
+                "metadata 必须搬运：丢失会让方言从「只回引用」退化为「回传整段思考」");
     }
 
     @Test

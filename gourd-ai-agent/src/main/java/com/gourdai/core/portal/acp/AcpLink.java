@@ -1,10 +1,10 @@
 package com.gourdai.core.portal.acp;
 
-import com.agentclientprotocol.sdk.agent.AcpAgent;
-import com.agentclientprotocol.sdk.agent.AcpAsyncAgent;
-import com.agentclientprotocol.sdk.agent.PromptContext;
-import com.agentclientprotocol.sdk.spec.AcpAgentTransport;
-import com.agentclientprotocol.sdk.spec.AcpSchema;
+import com.gourdai.acp.agent.AcpAgent;
+import com.gourdai.acp.agent.AcpAsyncAgent;
+import com.gourdai.acp.agent.PromptContext;
+import com.gourdai.acp.spec.AcpAgentTransport;
+import com.gourdai.acp.spec.AcpSchema;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.ContextLengthPolicy;
 import com.gourdai.agent.event.RunEndEvent;
@@ -21,12 +21,12 @@ import com.gourdai.harness.agent.AgentStartEvent;
 import com.gourdai.harness.agent.RetryEvent;
 import com.gourdai.core.portal.web.ThinkingDepth;
 import com.gourdai.core.portal.web.SessionLocator;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.content.Contents;
-import org.noear.solon.ai.chat.content.ImageBlock;
-import org.noear.solon.ai.chat.content.TextBlock;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.content.Contents;
+import com.gourdai.ai.chat.content.ImageBlock;
+import com.gourdai.ai.chat.content.TextBlock;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.agent.TaskTalent;
 import com.gourdai.core.config.AgentSettings;
@@ -531,7 +531,7 @@ public class AcpLink implements Runnable {
         Map<String, ModelDo> latestModels = settings.getModels();
 
         // 常驻 ACP 进程中的模型注册表必须跟随最新 settings：先摘除已删除/禁用的旧实例。
-        for (org.noear.solon.ai.chat.ChatConfig registered : new ArrayList<>(runtime.getModels())) {
+        for (com.gourdai.ai.chat.ChatConfig registered : new ArrayList<>(runtime.getModels())) {
             String name = registered.getNameOrModel();
             ModelDo latest = latestModels.get(name);
             if (latest == null || !latest.isEnabled()) {
@@ -561,7 +561,7 @@ public class AcpLink implements Runnable {
             }
             runtime.removeModel(candidate);
             runtime.addModel(modelDo);
-            org.noear.solon.ai.chat.ChatConfig exact = runtime.getModelOrNil(candidate);
+            com.gourdai.ai.chat.ChatConfig exact = runtime.getModelOrNil(candidate);
             return exact == null ? null : exact.toChatModel();
         }
         return null;

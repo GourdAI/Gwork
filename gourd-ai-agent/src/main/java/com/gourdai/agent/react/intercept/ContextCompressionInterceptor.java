@@ -32,11 +32,11 @@ import com.gourdai.agent.react.intercept.compress.CompositeCompressionStrategy;
 import com.gourdai.agent.react.intercept.compress.HierarchicalCompressionStrategy;
 import com.gourdai.agent.react.intercept.compress.LLMCompressionStrategy;
 import com.gourdai.agent.react.intercept.compress.VectorStoreCompressionStrategy;
-import org.noear.solon.ai.chat.CacheControl;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.message.*;
-import org.noear.solon.ai.chat.tool.FunctionTool;
-import org.noear.solon.ai.chat.tool.ToolCall;
+import com.gourdai.ai.chat.CacheControl;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.message.*;
+import com.gourdai.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.ToolCall;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Preview;
 import org.slf4j.Logger;
@@ -205,7 +205,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
     /**
      * 分词器的惰性持有者（initialization-on-demand holder 惯用法）。
      *
-     * <p><b>为什么必须惰性</b>：本类被 {@code HarnessEngine} 构造期引用，clinit 发生在 Solon 启动
+     * <p><b>为什么必须惰性</b>：本类被 {@code HarnessEngine} 构造期引用，clinit 发生在框架启动
      * 主线程、HTTP 端口绑定之前。旧写法（{@code newDefaultEncodingRegistry()} 即时初始化）会把
      * BPE 词表的构建（cl100k + o200k 两套，实测 0.8~1.7s：Base64 解码 + 十万级 HashMap put）
      * 整个压进冷启动路径 —— 桌面端每次启动都白等这段，而它在「用户发出第一条消息」之前毫无用处。</p>
@@ -889,7 +889,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
             }
 
             ToolMessage cleared = new ToolMessage(
-                    new org.noear.solon.ai.chat.tool.ToolResult(clearedPlaceholder(tm.getName())),
+                    new com.gourdai.ai.chat.tool.ToolResult(clearedPlaceholder(tm.getName())),
                     tm.getName(), tm.getToolCallId(), tm.isReturnDirect());
             copyMetadataExceptTokenSize(msg, cleared);
             cleared.addMetadata(META_SWEPT, 1);
@@ -1305,7 +1305,7 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
         if (origin instanceof ToolMessage) {
             ToolMessage tm = (ToolMessage) origin;
             ToolMessage rebuilt = new ToolMessage(
-                    new org.noear.solon.ai.chat.tool.ToolResult(newContent),
+                    new com.gourdai.ai.chat.tool.ToolResult(newContent),
                     tm.getName(),
                     tm.getToolCallId(),
                     tm.isReturnDirect());
@@ -1330,9 +1330,18 @@ public class ContextCompressionInterceptor implements ReActInterceptor {
 
             // 4.1 起 text/thinking 是两个独立通道，截断结果须回填到原消息所属的通道，
             // 否则思考消息会被降级成正文（历史重放时思考内容泄漏到答案区）。
-            AssistantMessage rebuilt = am.isThinking()
-                    ? new AssistantMessage(am.getTextRaw(), newContent, true)
-                    : new AssistantMessage(newContent, am.getThinkingRaw(), false);
+            // 4.1.1 移除了 isThinking() 布尔位，改用「哪个通道有值」判定。
+            // 混合消息（text 与 thinking 都非空）不属于任一单通道，截断后无法判定该写回
+            // 哪一边，强行重建会丢失另一通道，故保守返回原消息。
+            boolean thinkingOnly = am.isThinkingOnly();
+            boolean textOnly = !am.hasThinking() && Assert.isNotEmpty(am.getText());
+            if (!thinkingOnly && !textOnly) {
+                return null;
+            }
+
+            AssistantMessage rebuilt = thinkingOnly
+                    ? new AssistantMessage("", newContent)
+                    : new AssistantMessage(newContent);
 
             copyMetadataExceptTokenSize(origin, rebuilt);
             return rebuilt;

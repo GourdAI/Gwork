@@ -16,8 +16,8 @@
 package com.gourdai.agent.util;
 
 import org.noear.snack4.ONode;
-import org.noear.solon.ai.chat.tool.FunctionTool;
-import org.noear.solon.ai.chat.tool.FunctionToolDesc;
+import com.gourdai.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.FunctionToolDesc;
 import org.noear.solon.core.util.Assert;
 
 /**

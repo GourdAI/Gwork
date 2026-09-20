@@ -18,9 +18,9 @@ package com.gourdai.harness.talents.web;
 import com.vladsch.flexmark.html2md.converter.FlexmarkHtmlConverter;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
-import org.noear.solon.ai.annotation.ToolMapping;
-import org.noear.solon.ai.chat.talent.AbsTalent;
-import org.noear.solon.ai.util.RetryUtil;
+import com.gourdai.ai.annotation.ToolMapping;
+import com.gourdai.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.util.RetryTask;
 import org.noear.solon.annotation.Param;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.net.http.HttpResponse;
@@ -96,17 +96,52 @@ public class WebfetchTalent extends AbsTalent {
                 .header("Accept-Language", "en-US,en;q=0.9")
                 .timeout(HttpTimeout.of(timeout));
 
-        // 4. 执行请求
-        HttpResponse response = RetryUtil.callWithRetry(maxRetries, () -> {
-            HttpResponse resp = http.exec("GET");
-            if (resp.code() == 403 && "challenge".equals(resp.header("cf-mitigated"))) {
-                // Cloudflare 穿透逻辑
-                resp = http.header("User-Agent", "opencode")
-                        .exec("GET");
-            }
+        // 4. 执行请求（带总时长预算 deadline）
+        // 问题：maxRetries=3，且命中 Cloudflare 分支时每次尝试会额外再发一次请求，
+        // 最坏 6 × 单次超时（默认 30s → 180s；参数上限 120s → 720s），弱网下用户等待不可接受。
+        // 预算取值 = 单次 timeout × 2，并封顶 MAX_TIMEOUT_MS(120s)：
+        //   1) ×2 而非 ×1：保证「首次尝试 + 至少一次完整重试」的机会，弱网瞬时抖动一次重试即可自愈，
+        //      若取 ×1 则第二次尝试几乎必然被预算拒绝，等于变相废掉重试；
+        //   2) 封顶 120s：与本类 MAX_TIMEOUT_MS 同口径，是交互式工具调用可接受的等待上限。
+        // 语义说明：预算只在「准备发起下一次尝试前」裁决，不打断已在进行中的请求，
+        // 故实际最坏等待 ≈ 预算 + 一次单次超时；也不改动 maxRetries 本身的重试次数语义。
+        // 正常（快速）请求：首次尝试即成功，永不触发该判定。
+        final long totalBudgetMs = Math.min((long) finalTimeoutMs * 2L, MAX_TIMEOUT_MS);
+        final long startNanos = System.nanoTime();
+        final Throwable[] lastError = new Throwable[1];
 
-            return resp;
-        });
+        HttpResponse response = new RetryTask()
+                .maxRetries(maxRetries)
+                // 预算耗尽属终态失败：返回 false 令 RetryTask 立即抛出原始异常，不再退避等待与后续重试
+                .retryIf(e -> (e instanceof TotalBudgetExceededException) == false)
+                .callWithRetry(() -> {
+                    // lastError 非空即代表本次为「重试」尝试，首次尝试恒不受预算约束
+                    long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
+                    if (lastError[0] != null && elapsedMs >= totalBudgetMs) {
+                        throw new TotalBudgetExceededException(
+                                "Request aborted: total time budget exhausted (" + elapsedMs
+                                        + "ms elapsed, budget " + totalBudgetMs + "ms). Last error: "
+                                        + lastError[0].getMessage(), lastError[0]);
+                    }
+
+                    try {
+                        HttpResponse resp = http.exec("GET");
+                        if (resp.code() == 403 && "challenge".equals(resp.header("cf-mitigated"))) {
+                            // Cloudflare 穿透逻辑：这是一次额外的物理请求，同样纳入总预算；
+                            // 预算已耗尽时不再追加发送，直接把 403 交给后续状态码校验收尾。
+                            if ((System.nanoTime() - startNanos) / 1_000_000L < totalBudgetMs) {
+                                resp = http.header("User-Agent", "opencode")
+                                        .exec("GET");
+                            }
+                        }
+
+                        return resp;
+                    } catch (Throwable e) {
+                        // 记录已有的错误信息：预算耗尽时作为错误文案与 cause 一并带出
+                        lastError[0] = e;
+                        throw e;
+                    }
+                });
 
         if (response.code() >= 400) {
             throw new RuntimeException("Request failed with status code: " + response.code());
@@ -197,5 +232,16 @@ public class WebfetchTalent extends AbsTalent {
         }
 
         return StandardCharsets.UTF_8;
+    }
+
+    /**
+     * 总时长预算耗尽（终态异常，不可重试）。
+     *
+     * <p>与本类既有失败风格一致（RuntimeException + 英文消息），并携带最后一次真实失败原因作为 cause。</p>
+     */
+    private static class TotalBudgetExceededException extends RuntimeException {
+        TotalBudgetExceededException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 }

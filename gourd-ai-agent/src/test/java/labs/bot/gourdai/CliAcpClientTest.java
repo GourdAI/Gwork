@@ -1,11 +1,11 @@
 package labs.bot.gourdai;
 
-import com.agentclientprotocol.sdk.client.AcpClient;
-import com.agentclientprotocol.sdk.client.AcpSyncClient;
-import com.agentclientprotocol.sdk.client.transport.AgentParameters;
-import com.agentclientprotocol.sdk.client.transport.StdioAcpClientTransport;
-import com.agentclientprotocol.sdk.json.AcpJsonMapper;
-import com.agentclientprotocol.sdk.spec.AcpSchema;
+import com.gourdai.acp.client.AcpClient;
+import com.gourdai.acp.client.AcpSyncClient;
+import com.gourdai.acp.client.transport.AgentParameters;
+import com.gourdai.acp.client.transport.StdioAcpClientTransport;
+import com.gourdai.acp.json.AcpJsonMapper;
+import com.gourdai.acp.spec.AcpSchema;
 import io.modelcontextprotocol.json.McpJsonDefaults;
 import io.modelcontextprotocol.json.McpJsonMapper;
 

@@ -8,7 +8,7 @@ package com.gourdai.core.portal.web;
 import com.gourdai.agent.trace.UsageNormalizer;
 import com.gourdai.core.config.AgentFlags;
 import org.noear.snack4.ONode;
-import org.noear.solon.ai.AiUsage;
+import com.gourdai.ai.AiUsage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

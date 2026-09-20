@@ -25,18 +25,18 @@ import com.gourdai.agent.react.intercept.HITLTask;
 import com.gourdai.agent.react.intercept.AskUser;
 import com.gourdai.agent.react.intercept.AskUserTask;
 import com.gourdai.agent.util.AskUserTool;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.content.Contents;
-import org.noear.solon.ai.chat.content.ImageBlock;
-import org.noear.solon.ai.chat.content.TextBlock;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.message.UserMessage;
-import org.noear.solon.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.content.Contents;
+import com.gourdai.ai.chat.content.ImageBlock;
+import com.gourdai.ai.chat.content.TextBlock;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.UserMessage;
+import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.change.FileChangeService;
 import com.gourdai.harness.command.Command;
-import org.noear.solon.ai.util.CmdUtil;
+import com.gourdai.ai.util.CmdUtil;
 import com.gourdai.core.command.WebCommandContext;
 import com.gourdai.core.command.builtin.LoopExecutionResult;
 import org.noear.solon.core.handle.UploadedFile;
@@ -350,8 +350,15 @@ public class WebGate extends SimpleWebSocketListener {
         }
         jsonChunk.setSessionId(sessionId);
         synchronized (publishLocks.computeIfAbsent(sessionId, k -> new Object())) {
+            // 写盘是旁路职责：失败（磁盘满/文件被占用等）只记日志，不得阻断在线推送，
+            // 更不得把异常抛回同步执行此方法的模型流线程（SSE 网络线程会把整条流意外炸断）
             if (streamStore != null) {
-                streamStore.record(sessionId, streamRoots.get(sessionId), jsonChunk);
+                try {
+                    streamStore.record(sessionId, streamRoots.get(sessionId), jsonChunk);
+                } catch (Throwable e) {
+                    LOG.warn("[WebGate] Failed to record stream chunk for session {}: {}",
+                            sessionId, e.toString());
+                }
             }
             String enriched = ONode.serialize(jsonChunk);
 
@@ -418,6 +425,22 @@ public class WebGate extends SimpleWebSocketListener {
      * @return true 表示输入已被受理执行；false 表示会话繁忙（有任务在执行）被跳过，
      *         调用方应据此向前端返回 busy 状态，由前端暂存消息待当前任务完成后补发
      */
+    /**
+     * 输入受理结果。
+     *
+     * <p>旧版本只用 boolean 表达「受理/繁忙」两态，actionId 校验失败属于第三种语义：
+     * 请求本身合法、会话也不忙，但提交指向的不是当前挂起的那一次调用（旧页面/旧卡的迟到提交）。
+     * 这种请求必须【拒绝】而不能静默应用到别的任务上：HITL 误批准不可逆。</p>
+     */
+    public enum InputResult {
+        /** 已受理执行。 */
+        ACCEPTED,
+        /** 会话繁忙（有任务在执行），调用方应返回 busy。 */
+        BUSY,
+        /** actionId 与当前挂起任务不匹配，已拒绝（调用方应返回明确错误）。 */
+        ACTION_MISMATCH
+    }
+
     public boolean onChatInput(String sessionId,
                                String sessionCwd,
                                String input, String selectedModel,
@@ -447,17 +470,43 @@ public class WebGate extends SimpleWebSocketListener {
                                String input, String selectedModel,
                                UploadedFile[] attachments, String[] attachmentTypes,
                                String hitlAction, String source, String clientMessageId, String questionAnswer) {
+        return onChatInput(sessionId, sessionCwd, input, selectedModel, attachments, attachmentTypes,
+                hitlAction, source, clientMessageId, questionAnswer, null) == InputResult.ACCEPTED;
+    }
+
+    /**
+     * 受理聊天输入（含挂起任务身份校验）。
+     *
+     * <p><b>actionId 语义</b>：标识客户端「正在回应哪一次调用」。后端原本只按 sessionId 取
+     * 当前待处理任务，旧页面/旧卡的迟到提交会被静默应用到【另一次调用】上——
+     * 问答场景表现为「答错题」，HITL 场景则可能误批准 {@code rm -rf} 这类不可逆操作。</p>
+     *
+     * <p><b>向后兼容策略</b>：传了就严格校，没传则警告日志 + 按旧逻辑放行。前后端同包发布，
+     * 正常升级后不会出现旧前端；但【旧快照恢复的挂起任务】本身就可能没有 actionId
+     * （该字段新增前落盘，见 HITLTask/AskUserTask 注释），若一律严校会让这些任务永远恢复不了。
+     * 故只在【两边都有 id】时才比对。</p>
+     *
+     * @param actionId 客户端声明正在回应的调用标识（可为 null；为 null 时降级为旧行为）
+     * @return 受理结果，见 {@link InputResult}
+     */
+    public InputResult onChatInput(String sessionId,
+                                   String sessionCwd,
+                                   String input, String selectedModel,
+                                   UploadedFile[] attachments, String[] attachmentTypes,
+                                   String hitlAction, String source, String clientMessageId,
+                                   String questionAnswer, String actionId) {
         synchronized (inputLocks.computeIfAbsent(sessionId, k -> new Object())) {
             return doOnChatInput(sessionId, sessionCwd, input, selectedModel, attachments, attachmentTypes,
-                    hitlAction, source, clientMessageId, questionAnswer);
+                    hitlAction, source, clientMessageId, questionAnswer, actionId);
         }
     }
 
-    private boolean doOnChatInput(String sessionId,
-                                  String sessionCwd,
-                                  String input, String selectedModel,
-                                  UploadedFile[] attachments, String[] attachmentTypes,
-                                  String hitlAction, String source, String clientMessageId, String questionAnswer) {
+    private InputResult doOnChatInput(String sessionId,
+                                      String sessionCwd,
+                                      String input, String selectedModel,
+                                      UploadedFile[] attachments, String[] attachmentTypes,
+                                      String hitlAction, String source, String clientMessageId,
+                                      String questionAnswer, String actionId) {
         AgentSession session = null;
         String streamRoot = null;
         try {
@@ -467,7 +516,7 @@ public class WebGate extends SimpleWebSocketListener {
             // hitlAction / questionAnswer 属于“恢复已挂起任务”的输入，不按 busy 拒绝。
             if (Assert.isEmpty(hitlAction) && Assert.isEmpty(questionAnswer) && isSessionBusy(session)) {
                 LOG.warn("[WebGate] chat input skipped for session {}: task in progress", sessionId);
-                return false;
+                return InputResult.BUSY;
             }
 
             // 通过受理锁内的 busy 检查后才允许登记所属根，确保首次解析及后续旁路落盘一致；
@@ -519,6 +568,26 @@ public class WebGate extends SimpleWebSocketListener {
             // HITL approve/reject handling
             if (Assert.isNotEmpty(hitlAction)) {
                 HITLTask task = HITL.getPendingTask(session);
+                // 【严格校验】工具审批误批准不可逆（rm -rf 之类），故比问答更严：
+                // 客户端带了 actionId 时，必须真的存在挂起任务、且标识完全一致才放行；
+                // 任务不存在或标识不同一律拒绝，绝不“次好地”把决策应用到另一个待审批调用上。
+                if (Assert.isNotEmpty(actionId)) {
+                    if (task == null) {
+                        LOG.warn("[WebGate] hitl decision rejected for session {}: no pending task (actionId={})",
+                                sessionId, actionId);
+                        return InputResult.ACTION_MISMATCH;
+                    }
+                    if (!actionId.equals(task.getActionId())) {
+                        LOG.warn("[WebGate] hitl decision rejected for session {}: actionId mismatch (got {}, pending {})",
+                                sessionId, actionId, task.getActionId());
+                        return InputResult.ACTION_MISMATCH;
+                    }
+                } else if (task != null) {
+                    // 旧前端（或旧卡片）不传标识：降级按旧逻辑执行，但必须留痕——
+                    // 这正是“可能批错任务”的唐突窗口，出事时要能从日志回溯。
+                    LOG.warn("[WebGate] hitl decision without actionId for session {} (pending {}); applying legacy behavior",
+                            sessionId, task.getActionId());
+                }
                 if (task != null) {
                     if ("approve".equals(hitlAction)) {
                         HITL.approve(session, task.getToolName());
@@ -528,30 +597,49 @@ public class WebGate extends SimpleWebSocketListener {
                 }
                 // Resume streaming after HITL decision
                 performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName);
-                return true;
+                return InputResult.ACCEPTED;
             }
 
             // ask_user 结构化问答恢复处理：用户提交答案后回填并恢复被挂起的任务
             if (Assert.isNotEmpty(questionAnswer)) {
                 AskUserTask task = AskUser.getPendingTask(session);
+                // 【校验】问答的后果可逆（答错题而已），且「无挂起任务时仍须回确认帧」是卡片不死的前提，
+                // 故不像 HITL 那样把 task==null 也当失败；仅在【两边都有 id 且不同】时拒绝，
+                // 避免把 B 题的答案写到正在挂起的 A 题上。
+                if (Assert.isNotEmpty(actionId) && task != null
+                        && Assert.isNotEmpty(task.getActionId()) && !actionId.equals(task.getActionId())) {
+                    LOG.warn("[WebGate] question answer rejected for session {}: actionId mismatch (got {}, pending {})",
+                            sessionId, actionId, task.getActionId());
+                    return InputResult.ACTION_MISMATCH;
+                }
+                if (Assert.isEmpty(actionId) && task != null && Assert.isNotEmpty(task.getActionId())) {
+                    LOG.warn("[WebGate] question answer without actionId for session {} (pending {}); applying legacy behavior",
+                            sessionId, task.getActionId());
+                }
                 if (task != null) {
                     AskUser.submit(session, questionAnswer);
                 }
 
                 // 无论是否找到挂起任务都要回帧：前端在点“提交”的瞬间就把卡片置成了已提交态，
                 // 这里不回帧（重复提交、快照缺失、多端并发等）那张卡会永久停在已提交态且不消失。
-                emitToClient(sessionId, WebChunk.ofQuestionAnswered(AskUserTool.TOOL_NAME, AskUser.parseAnswers(questionAnswer)));
+                // 确认帧携带 actionId（优先取服务端任务的真值），前端据此只收【那一道题】的卡，
+                // 否则历史回放与多端并发下会误清用户正在作答的另一张卡。
+                String answeredActionId = (task != null && Assert.isNotEmpty(task.getActionId()))
+                        ? task.getActionId()
+                        : actionId;
+                emitToClient(sessionId, WebChunk.ofQuestionAnswered(AskUserTool.TOOL_NAME,
+                        AskUser.parseAnswers(questionAnswer), answeredActionId));
 
                 if (task == null) {
                     // 没有可恢复的挂起任务：再拉起一次 run 只会空转，或与正在进行的恢复并发双跑。
                     // 直接补一个 done 收口，让前端停掉等待指示器。
                     emitToClient(sessionId, WebChunk.ofDone());
-                    return true;
+                    return InputResult.ACCEPTED;
                 }
 
                 // Resume streaming after user answers
                 performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName);
-                return true;
+                return InputResult.ACCEPTED;
             }
 
             // Handle file upload - save to session directory
@@ -624,7 +712,7 @@ public class WebGate extends SimpleWebSocketListener {
                 // 命令分发
                 if (currentInput.startsWith("/") && imageBlocks.isEmpty()) {
                     if (isCommand(session, sessionCwd, currentInput, selectedModel, agentName)) {
-                        return true;
+                        return InputResult.ACCEPTED;
                     }
                 }
 
@@ -639,7 +727,7 @@ public class WebGate extends SimpleWebSocketListener {
                         engine.prepareResume(resumeTrace, session, currentInput, true, sessionCwd);
                         // 空 Prompt 触发库的恢复分支，复用已有工作记忆
                         performAgentTaskAsync(session, sessionCwd, Prompt.of(), selectedModel, agentName);
-                        return true;
+                        return InputResult.ACCEPTED;
                     }
                 }
 
@@ -687,7 +775,7 @@ public class WebGate extends SimpleWebSocketListener {
                 }
             }
         }
-        return true;
+        return InputResult.ACCEPTED;
     }
 
     /**
@@ -710,6 +798,14 @@ public class WebGate extends SimpleWebSocketListener {
             session.getContext().put(HarnessEngine.CTX_MODEL_SELECTED, selectedModel);
         } else {
             selectedModel = session.getContext().getAs(HarnessEngine.CTX_MODEL_SELECTED);
+        }
+
+        // 模型回退告警：指定了模型却未命中（被删除/改名/禁用）时，底层会静默换成
+        // defaultModel 继续跑——不报错、不记日志，用户只会看到「我选的是 A，怎么跑的是 B」。
+        // 这里不改变回退行为（保障可用性），只把它从静默变成可观测。
+        if (engine.isModelFallback(selectedModel)) {
+            LOG.warn("[WebGate] model '{}' not found or disabled for session {}, falling back to default model '{}'",
+                    selectedModel, sessionId, engine.getDefaultModel());
         }
 
         ChatModel chatModel = engine.getModelOrMain(selectedModel);
@@ -737,6 +833,11 @@ public class WebGate extends SimpleWebSocketListener {
                     if ("done".equals(line.getType())) {
                         if (line.getRunId() == null) line.setRunId(runIdSeen.get());
                         String completedRunId = line.getRunId();
+                        // 【C1-c】挂起态 done：等待作答/审批时引擎流也会正常结束并补发 done，但本轮并未真正完成。
+                        // 打上标记后前端只停等待指示器、不拆批次与工具卡索引，否则恢复后同一批会被拆成两组渲染。
+                        if (session.isPending() && line.getSuspended() == null) {
+                            line.setSuspended(true);
+                        }
                         // 旧写法是 `if (!streamFailed.get()) finish(...)`：一旦本轮出现过 error 帧就整个跳过，
                         // 账本永远停在 ready=false，而 ready 正是撤销的第一道门禁 → 撤销按钮永久 BUSY。
                         // 现在异常路径也要收口，只是以 clean=false 标记账本可能不完整。
@@ -840,6 +941,13 @@ public class WebGate extends SimpleWebSocketListener {
             }
         } else {
             selectedModel = session.getContext().getAs(HarnessEngine.CTX_MODEL_SELECTED);
+        }
+
+        // 模型回退告警（同 performAgentTaskAsync，Loop 同步链路）：指定了模型却未命中时
+        // 底层会静默回退到 defaultModel，此处把它变成可观测。
+        if (engine.isModelFallback(selectedModel)) {
+            LOG.warn("[WebGate] model '{}' not found or disabled for session {}, falling back to default model '{}'",
+                    selectedModel, sessionId, engine.getDefaultModel());
         }
 
         ChatModel chatModel = engine.getModelOrMain(selectedModel);
@@ -1336,6 +1444,8 @@ public class WebGate extends SimpleWebSocketListener {
                     Disposable orphan = (Disposable) session.attrs().get("disposable");
                     if (orphan != null && !orphan.isDisposed() && session.attrs().remove("disposable", orphan)) {
                         orphan.dispose();
+                        // 同主路径：为用户主动停止打「可续跑」标记并落盘
+                        engine.markUserInterruptedForResume(session, null);
                         session.addMessage(ChatMessage.ofAssistant("用户已取消任务."));
                         emitToClient(sessionId, WebChunk.ofDone());
                         LOG.info("[WebGate] Session {} interrupted via disposable fallback (no run state)", sessionId);
@@ -1356,6 +1466,11 @@ public class WebGate extends SimpleWebSocketListener {
                 session.attrs().remove(SteerInterceptor.ATTR_ACTIVE_RUN_ID, state.runId);
                 Disposable disposable = (Disposable) session.attrs().remove("disposable");
                 if (disposable != null) disposable.dispose();
+
+                // 用户主动停止：为未完成的任务打「可续跑」标记并立即落盘（口径与异常中断对齐）。
+                // 取消不经过库的异常兜底（abnormal 不置位），不打标则后续「继续」会被当成
+                // 全新任务、断点工作记忆被整体重置（重复消耗 token）。
+                engine.markUserInterruptedForResume(session, null);
 
                 if (!cancelled.isEmpty()) {
                     emitToClient(sessionId, WebChunk.ofSteerCancelled(state.runId, cancelled));

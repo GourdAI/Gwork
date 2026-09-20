@@ -38,14 +38,14 @@ import com.gourdai.agent.react.task.ReasonTask;
 import com.gourdai.agent.event.ReasonEndEvent;
 import com.gourdai.agent.trace.UsageNormalizer;
 import com.gourdai.agent.util.AgentUtil;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.talents.cli.TerminalTalent;
 import com.gourdai.harness.talents.cli.TodoTalent;
 import com.gourdai.harness.agent.WebToolVisibilityPolicy;
 import com.gourdai.core.config.entity.ModelDo;
-import org.noear.solon.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.ChatConfig;
 import com.gourdai.core.channel.Channel;
 import com.gourdai.core.channel.wechat.WeChatLink;
 import org.noear.solon.core.util.Assert;
@@ -433,7 +433,8 @@ public class WebStreamBuilder {
             return oneFrame(onToolCallEndEvent((ToolCallEndEvent) chunk));
         }
         if (chunk instanceof RetryEvent) {
-            return oneFrame(WebChunk.ofRetry(((RetryEvent) chunk).getAttempt(), ((RetryEvent) chunk).getMaxRetries()));
+            RetryEvent retry = (RetryEvent) chunk;
+            return oneFrame(WebChunk.ofRetry(retry.getAttempt(), retry.getMaxRetries(), retry.getReason()));
         }
         if (chunk instanceof AgentStartEvent) {
             return oneFrame(onAgentStartEvent((AgentStartEvent) chunk));
@@ -508,7 +509,7 @@ public class WebStreamBuilder {
             ReasonDeltaEvent delta = (ReasonDeltaEvent) event;
             // 与 onReasonDeltaEvent 的下发条件严格一致：只有真正产出内容的增量才代表相位
             if (!delta.isToolCalls() && delta.hasContent()) {
-                return (delta.getMessage() != null && delta.getMessage().isThinking())
+                return delta.isThinking()
                         ? WebChunk.PHASE_THINKING
                         : WebChunk.PHASE_TEXT;
             }
@@ -625,7 +626,7 @@ public class WebStreamBuilder {
      */
     private WebChunk onReasonDeltaEvent(ReasonDeltaEvent event) {
         if (!event.isToolCalls() && event.hasContent()) {
-            WebChunk webChunk = event.getMessage().isThinking()
+            WebChunk webChunk = event.isThinking()
                     ? WebChunk.ofReason(event.getContent())
                     : WebChunk.ofText(event.getContent());
 
@@ -929,8 +930,10 @@ public class WebStreamBuilder {
             List<WebChunk> frames = new ArrayList<>(2);
 
             // 思考帧：reason 通道。旧体系此处完全丢弃，导致前端智能体卡片内永远看不到思考。
-            // 能不能走到这里由 TaskTalent 的 thinkingStreamed 去重门禁决定：已逐字下发过增量就不再补发。
-            if (event.hasThinking()) {
+            // 双重防线：TaskTalent 的 thinkingStreamed 去重门禁（已逐字下发过增量就不再补发）
+            // + 可显示思考判定（与主代理补发同一判定，排除 NATIVE_TOOL 正文回退值等不可展示形态，
+            // 防止正文被重复渲染进思考通道）。
+            if (AgentUtil.isDisplayableThinking(event)) {
                 WebChunk thinkingChunk = WebChunk.ofReason(event.getThinking());
                 applyParentAgentArgs(event, thinkingChunk);
                 frames.add(thinkingChunk);
@@ -950,7 +953,7 @@ public class WebStreamBuilder {
         // 主代理同样可能只在聚合 ReasonEndEvent 中携带 thinking（部分模型/中转不发
         // THINKING_DELTA）。此时补发一帧；若本轮已有思考增量，则由增量负责展示，避免全文重复。
         List<WebChunk> fallbackFrames = new ArrayList<>(1);
-        if (!thinkingDeltaSinceEnd && displayableThinking(event)) {
+        if (!thinkingDeltaSinceEnd && AgentUtil.isDisplayableThinking(event)) {
             fallbackFrames.add(WebChunk.ofReason(event.getThinking()));
         }
 
@@ -983,21 +986,6 @@ public class WebStreamBuilder {
         }
 
         return fallbackFrames;
-    }
-
-    /**
-     * 只有真实 thinking 通道或文本 ReAct 的 Thought 段才可作为思考展示。
-     * Native tool 的普通正文回退值不能重复渲染成思考。
-     */
-    private static boolean displayableThinking(ReasonEndEvent event) {
-        if (event == null || !event.hasThinking() || event.getAssistantMessage() == null) {
-            return false;
-        }
-        if (event.getAssistantMessage().isThinking()) {
-            return true;
-        }
-        String content = event.getAssistantMessage().getContent();
-        return content != null && content.contains("Thought:");
     }
 
     /**

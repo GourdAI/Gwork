@@ -338,20 +338,85 @@ function sendCommandSilent(cmdText, onBeforeSend) {
 }
 window.sendCommandSilent = sendCommandSilent;
 
+/**
+ * 统一的 /web/chat/input 提交入口。
+ *
+ * 三条调用路径（正常发送 / 问答卡作答 / HITL 决策）原先各自手写 FormData，
+ * 字段清单靠人工记忆同步，已经造成过「续轮路径漏带 model」这类结构性隐患：
+ * 漏带后后端只能回落到会话上下文或 defaultModel，而这一回落是无声的。
+ * 此处把公共字段（sessionId / model / X-Session-Cwd）收敛到一处，
+ * 路径独有字段由 fields 传入，响应与失败语义由 hooks 决定。
+ *
+ * @param sess   会话对象
+ * @param fields 该路径独有的字段。【关键语义】只有显式出现的键才会被 append，
+ *               绝不对缺失的键补空串——后端靠 input 键的【存在性】区分「新一轮」与
+ *               「续轮」，给 HITL/问答卡凭空加一个空 input 会把续轮误判成新轮。
+ * @param files  附件数组（仅正常发送路径传），元素形如 {file, name, attachmentsType}
+ * @param hooks  { onBusy, onDone, onFail }；三条路径失败后的收尾动作各不相同，不下沉
+ */
+function postChatInput(sess, fields, files, hooks) {
+    var formData = new FormData();
+    formData.append('sessionId', sess.sessionId);
+
+    // 公共字段：当前选中模型。三条路径统一携带。
+    // （后端在缺省时会从会话 context 的已选模型回读，两者等价；显式携带是为了
+    //   消除「哪条路径带了、哪条没带」的记忆负担，以及 context 写入失败时的兑底。）
+    var model = (typeof getSelectedModel === 'function') ? getSelectedModel() : '';
+    if (model) formData.append('model', model);
+
+    // 路径独有字段：按键存在性 append，不做任何默认值补齐
+    if (fields) {
+        for (var k in fields) {
+            if (!Object.prototype.hasOwnProperty.call(fields, k)) continue;
+            var v = fields[k];
+            if (v === undefined || v === null) continue;
+            formData.append(k, v);
+        }
+    }
+
+    if (files && files.length) {
+        for (var i = 0; i < files.length; i++) {
+            formData.append('attachments', files[i].file, files[i].name);
+            formData.append('attachmentTypes', files[i].attachmentsType || 'file');
+        }
+    }
+
+    // 工作空间根：优先会话自身记录的，其次当前视图，避免工作空间切换后错位
+    var headers = {};
+    var cwd = (sess && sess.projectRoot) ? sess.projectRoot
+        : (typeof getSessionCwd === 'function' ? getSessionCwd() : '');
+    if (cwd) headers['X-Session-Cwd'] = cwd;
+
+    hooks = hooks || {};
+    // 统一用 $.ajax：fetch 的 .catch 不会因 4xx/5xx 触发，原来的两条 fetch 路径遇到
+    // 服务端错误时会静默卡死（卡片停在已提交态、流不收尾）。
+    return $.ajax({
+        url: SSE_ENDPOINT,
+        method: 'POST',
+        data: formData,
+        processData: false,
+        contentType: false,
+        headers: headers
+    }).done(function(resp) {
+        var st = resp;
+        if (typeof st === 'string') { try { st = JSON.parse(st); } catch (e) { st = null; } }
+        if (st && st.data === 'busy' && hooks.onBusy) { hooks.onBusy(st); return; }
+        if (hooks.onDone) hooks.onDone(st);
+    }).fail(function(err) {
+        if (hooks.onFail) hooks.onFail(err);
+    });
+}
+window.postChatInput = postChatInput;
+
 function sendWithFormDataGrouped(sess, text, filesToSend) {
     // 用户主动发起会话：确保底层 WebSocket 就绪（可能仍在启动或退避已耗尽）
     if (typeof ensureWebGateConnected === 'function') ensureWebGateConnected();
     if (sess.eventSource) { sess.eventSource.close(); sess.eventSource = null; }
-    var model = getSelectedModel();
-    var formData = new FormData();
-    formData.append('input', text);
-    formData.append('sessionId', sess.sessionId);
-    if (sess._pendingClientMessageId) formData.append('clientMessageId', sess._pendingClientMessageId);
-    if (model) formData.append('model', model);
-    for (var i = 0; i < filesToSend.length; i++) {
-        formData.append('attachments', filesToSend[i].file, filesToSend[i].name);
-        formData.append('attachmentTypes', filesToSend[i].attachmentsType || 'file');
-    }
+
+    // input 无条件携带（空串也发）：busy 补发纯附件消息时就是空串，
+    // 且后端靠该键存在性识别「新一轮」。
+    var fields = { input: text };
+    if (sess._pendingClientMessageId) fields.clientMessageId = sess._pendingClientMessageId;
 
     // 标记流式状态，WebSocket onmessage 会处理数据
     sess.isStreaming = true;
@@ -362,40 +427,33 @@ function sendWithFormDataGrouped(sess, text, filesToSend) {
     resetStreamState(sess);
     showThinking(sess);
 
-    $.ajax({
-        url: SSE_ENDPOINT,
-        method: 'POST',
-        data: formData,
-        processData: false,
-        contentType: false,
-        headers: sess.projectRoot
-            ? { 'X-Session-Cwd': sess.projectRoot } : {}
-    }).done(function(resp) {
-        // 正常响应为 {"code":200}；若服务端判定会话繁忙（上一条任务未结束的重复触发），
-        // 返回 data="busy"：前端暂存本条消息，待当前任务的 done 到达后自动补发，
-        // 避免并行两个 ReAct 循环的 chunk 交错导致思考/正文错位
-        var st = resp;
-        if (typeof st === 'string') { try { st = JSON.parse(st); } catch (e) { st = null; } }
-        if (st && st.data === 'busy') {
+    postChatInput(sess, fields, filesToSend, {
+        // 服务端判定会话繁忙（上一条任务未结束的重复触发）：前端暂存本条消息，
+        // 待当前任务的 done 到达后自动补发，避免并行两个 ReAct 循环的 chunk 交错
+        onBusy: function() {
             sess._awaitingSendAck = false;
             sess._queueOriginItem = null;
             handleSendBusy(sess, text, filesToSend);
-        } else if (st && st.code === 200) {
-            sess._sendAckConfirmed = true;
-            sess._awaitingSendAck = false;
-            sess._queueOriginItem = null;
+        },
+        onDone: function(st) {
+            if (st && st.code === 200) {
+                sess._sendAckConfirmed = true;
+                sess._awaitingSendAck = false;
+                sess._queueOriginItem = null;
+            }
+        },
+        onFail: function(err) {
+            console.error('Send error:', err);
+            var errMsg = GourdI18n.t('streaming.send_failed');
+            if (typeof showToast === 'function') showToast(errMsg, 'error');
+            // 请求可能已被服务端接受，只是响应在网络抖动中丢失。保留当前消息并进入 replay 确认，
+            // 不能直接 finishStream，否则后端继续生成时同一回复会再次被拆开。
+            sess._recovering = true;
+            sess._recoverGeneration = (sess._recoverGeneration || 0) + 1;
+            beginGateBuffer(sess);
+            if (webGateSocket && webGateSocket.readyState === WebSocket.OPEN) recoverStreamingSession(sess);
+            else ensureWebGateConnected();
         }
-    }).fail(function(err) {
-        console.error('Send error:', err);
-        var errMsg = GourdI18n.t('streaming.send_failed');
-        if (typeof showToast === 'function') showToast(errMsg, 'error');
-        // 请求可能已被服务端接受，只是响应在网络抖动中丢失。保留当前消息并进入 replay 确认，
-        // 不能直接 finishStream，否则后端继续生成时同一回复会再次被拆开。
-        sess._recovering = true;
-        sess._recoverGeneration = (sess._recoverGeneration || 0) + 1;
-        beginGateBuffer(sess);
-        if (webGateSocket && webGateSocket.readyState === WebSocket.OPEN) recoverStreamingSession(sess);
-        else ensureWebGateConnected();
     });
 }
 
@@ -620,7 +678,20 @@ function onWebChunk(sess, chunk) {
     } catch (e) {}
 }
 
-function finishStream(sess) {
+/* 挂起态 done：后端在等待用户作答/审批时也会发 done（WebStreamBuilder 在 question/hitl 帧之后紧跟一个 done）。
+   它表达的是「本段流先停一下」而非「本轮真的结束」：恢复后同一批工具的剩余帧还会回来。
+   若按普通 done 清掉 toolBatchesById/toolCardsById，恢复后的成员卡找不到原批次容器，同一批会被拆成两组渲染。
+   辨识方式：优先用后端显式标记 chunk.suspended（WebChunk.ofDoneSuspended 下发）；
+   旧后端无该字段时降级看本地相位——上一帧是 question/hitl 即为挂起（二者都紧跟 done）。 */
+function isSuspendedDone(sess, chunk) {
+    if (chunk && chunk.suspended === true) return true;
+    if (!sess) return false;
+    return sess.phase === PHASE_QUESTION || sess.phase === PHASE_HITL;
+}
+
+function finishStream(sess, opts) {
+    // 挂起收尾：只停 UI 等待指示，不拆批次/卡片索引（它们要等恢复后的剩余帧来认领）。
+    var keepBatchIndex = !!(opts && opts.keepBatchIndex);
     var wasStreaming = sess.isStreaming;
     sess.isStreaming = false;
     sess.phase = PHASE_DONE;
@@ -663,29 +734,34 @@ function finishStream(sess) {
     // 孤儿骨架卡（只收到 action_draft、从未收到 action_start）直接移除，而不是标黄点。
     // 用户点停止或模型吐参数途中出错时，留一张「只有工具名、无参数、无结果」的黄点空卡，
     // 比什么都不显示更让人误解为「工具执行失败」。必须在下方 loading→warn 扫尾之前执行。
-    if (typeof removeOrphanArgsStreamingCards === 'function') removeOrphanArgsStreamingCards(sess);
+    // 挂起收尾除外：参数生成期的骨架卡在恢复后会等到自己的 action_start，此刻删掉等于提前判死。
+    if (!keepBatchIndex && typeof removeOrphanArgsStreamingCards === 'function') removeOrphanArgsStreamingCards(sess);
 
     // 普通工具卡可在流结束时视为完成；批量卡需留给下方批次完整性检查，缺帧时标黄。
-    if (sess.container) {
-        $(sess.container).find('.tool-card:not([data-batch-key]) .tool-status-icon.loading').each(function() {
+    // 挂起收尾时不动 loading 态：那些工具真的还在「待执行」，标黄会谎报成执行失败。
+    // 扫的是本轮内容所在的渲染落点：回放期收尾要清临时容器里刚重建的卡片，
+    // 实时流期落点恒等于真实容器，行为与改造前一致。
+    var finishRoot = renderRoot(sess);
+    if (finishRoot && !keepBatchIndex) {
+        $(finishRoot).find('.tool-card:not([data-batch-key]) .tool-status-icon.loading').each(function() {
             this.className = 'tool-status-icon warn';
             this.innerHTML = '';
         });
         // 同时清理残留的 loading 态子智能体状态点
-        $(sess.container).find('.agent-status-icon.loading').each(function() {
+        $(finishRoot).find('.agent-status-icon.loading').each(function() {
             this.className = 'agent-status-icon done';
         });
         // 移除残留的 .agent-card-streaming 类
-        $(sess.container).find('.agent-card-streaming').removeClass('agent-card-streaming');
+        $(finishRoot).find('.agent-card-streaming').removeClass('agent-card-streaming');
         // 移除残留的 .streaming 思考块标记
-        $(sess.container).find('.thinking-block.streaming').removeClass('streaming');
+        $(finishRoot).find('.thinking-block.streaming').removeClass('streaming');
     }
 
     sess.approvedToolCard = null;
 
     // 收尾批量分组状态：完整批次标记成功；缺 start/end 或无效槽位的批次标记 warning，
     // 避免流已结束仍保留闪烁 loading，也避免把缺帧批次误报为全部成功。
-    if (sess.toolBatchesById) {
+    if (sess.toolBatchesById && !keepBatchIndex) {
         Object.keys(sess.toolBatchesById).forEach(function(key) {
             var b = sess.toolBatchesById[key];
             if (!b || !b.groupEl) return;
@@ -710,8 +786,12 @@ function finishStream(sess) {
             }
         });
     }
-    sess.toolBatchesById = {};
-    sess.toolCardsById = {};
+    // 【C1-c】挂起态 done 不得清批次/卡片索引：恢复后同一批的 action_end 要靠 batchKey/actionId
+    // 回到原容器，清掉则会另建一个批次容器，同一批被拆成两组渲染。
+    if (!keepBatchIndex) {
+        sess.toolBatchesById = {};
+        sess.toolCardsById = {};
+    }
 
     if (sess.eventSource) { sess.eventSource.close(); sess.eventSource = null; }
 
@@ -726,10 +806,14 @@ function finishStream(sess) {
     }
 
     // resetStreamState 会清空 buffer，所以必须在上面强刷完后再调
+    // 挂起收尾：completedActionIds 是「同一 actionId 不重复建卡」的幂等依据，被 resetStreamState
+    // 一并清掉后，恢复后重发的同批帧会再建一遍已有的卡。先快照再原样回填。
+    var keptCompletedActionIds = keepBatchIndex ? sess.completedActionIds : null;
     resetStreamState(sess);
+    if (keepBatchIndex) sess.completedActionIds = keptCompletedActionIds || {};
 
     // 清扫遗留的视觉为空正文容器，统一卡片间隔（指针推进遗留的空 .md-content 会撑出参差间距）
-    purgeEmptyMdBlocks(sess.container);
+    purgeEmptyMdBlocks(renderRoot(sess));
 
     if (sess.sessionId === activeSessionId) {
         isStreaming = false;
@@ -1064,7 +1148,9 @@ function dispatchGateChunk(chunk) {
         sess._sendAckConfirmed = false;
         sess.activeRunId = null;
         sess._suppressQueueDispatch = resumeInProgress;
-        finishStream(sess);
+        // 【C1-c】挂起（等待作答/审批）而发的 done 不是真结束：保留批次与卡片索引，
+        // 否则恢复后同一批工具会在新容器里重建，被拆成两组渲染。
+        finishStream(sess, { keepBatchIndex: isSuspendedDone(sess, chunk) });
         sess._suppressQueueDispatch = false;
         if (resumeInProgress) {
             // replay 分页中的中间轮次 done 不能关闭整个恢复状态；后续页和实时缓冲仍要补齐。

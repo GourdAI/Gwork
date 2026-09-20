@@ -123,7 +123,7 @@ function generate(opts = {}) {
   const buildId = build['build.id'] || 'unknown';
   if (buildId === 'unknown') {
     log('[gen-build-manifest] 警告: 未能从 ' + BUILD_INFO_PROPS + ' 读到 build-info.properties，'
-      + '清单 buildId=unknown。请先执行 Maven 打包（solon-maven-plugin 会带出被 filtering 的资源）。');
+      + '清单 buildId=unknown。请先执行 Maven 打包（构建插件会带出被 filtering 的资源）。');
   }
 
   let desktopVersion = opts.desktopVersion || 'unknown';

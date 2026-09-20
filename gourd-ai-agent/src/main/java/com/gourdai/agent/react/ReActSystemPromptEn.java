@@ -15,6 +15,7 @@
  */
 package com.gourdai.agent.react;
 
+import com.gourdai.agent.util.AskUserTool;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Preview;
 import org.slf4j.Logger;
@@ -110,7 +111,14 @@ public class ReActSystemPromptEn implements ReActSystemPrompt {
                 .append("1. **Direct Action**: If a tool is needed, trigger **Function Calling** directly.\n")
                 .append("2. **Result-Oriented**: All conclusions MUST be based on real data returned by tools (Observation).\n")
                 .append("3. **Prohibit Forgery**: Strictly forbidden to simulate tool execution or forge results in your response.\n")
-                .append("4. **Natural Response**: Once the task is finished, respond directly in natural language without tags like `Final Answer:`.\n\n");
+                .append("4. **Natural Response**: Once the task is finished, respond directly in natural language without tags like `Final Answer:`.\n");
+
+        // Conditional injection: only emit the hard rule when ask_user is actually in the toolset
+        if (AskUserTool.isAvailable(trace.getOptions().getTools())) {
+            sb.append("5. ").append(AskUserTool.PROMPT_RULE_EN).append("\n");
+        }
+
+        sb.append("\n");
 
 //        sb.append("## Code of Conduct\n")
 //                .append("1. **Tool Invocation**: If a tool is required, trigger **Function Calling** directly.\n")
@@ -154,7 +162,14 @@ public class ReActSystemPromptEn implements ReActSystemPrompt {
         sb.append("## Core Rules\n")
                 .append("1. Only use tools from the 'Available Tools' list.\n")
                 .append("2. Output ONLY one Action and STOP immediately to wait for Observation.\n")
-                .append("3. Completion is signaled ONLY by ").append(config.getFinishMarker()).append(".\n\n");
+                .append("3. Completion is signaled ONLY by ").append(config.getFinishMarker()).append(".\n");
+
+        // Conditional injection: only emit the hard rule when ask_user is actually in the toolset
+        if (AskUserTool.isAvailable(trace.getOptions().getTools())) {
+            sb.append("4. ").append(AskUserTool.PROMPT_RULE_EN).append("\n");
+        }
+
+        sb.append("\n");
 
         // D. Business instructions
         appendBusinessInstructions(sb, trace);

@@ -18,10 +18,11 @@ package com.gourdai.harness.agent;
 import com.gourdai.agent.event.AgentEvent;
 import com.gourdai.agent.react.AbsReActInterceptor;
 import com.gourdai.agent.react.ReActTrace;
-import org.noear.solon.ai.chat.ChatRequest;
-import org.noear.solon.ai.chat.event.ChatEvent;
-import org.noear.solon.ai.chat.ChatSession;
-import org.noear.solon.ai.chat.interceptor.StreamChain;
+import com.gourdai.agent.react.task.ReasonTask;
+import com.gourdai.ai.chat.ChatRequest;
+import com.gourdai.ai.chat.event.ChatEvent;
+import com.gourdai.ai.chat.ChatSession;
+import com.gourdai.ai.chat.interceptor.StreamChain;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
@@ -34,7 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * 模型重试提示拦截器。
  *
- * <p><b>背景：</b>底层框架（solon-ai 的 {@code ReasonTask.callWithRetry}）在模型调用失败时会自动重试，
+ * <p><b>背景：</b>底层框架（{@code ReasonTask.callWithRetry}）在模型调用失败时会自动重试，
  * 但重试过程只写日志、不通知前端；重试全部失败后才会把最终错误作为答复推给用户。
  * 本拦截器负责把「正在重试第 N 次」的中间状态也推送给前端，让用户可感知。</p>
  *
@@ -123,12 +124,19 @@ public class RetryNotifyInterceptor extends AbsReActInterceptor {
             FluxSink<AgentEvent> sink = trace.getOptions().getStreamSink();
             if (sink != null && !sink.isCancelled()) {
                 int maxRetries = trace.getOptions().getMaxRetries();
-                sink.next(new RetryEvent(trace, attempt, maxRetries));
+
+                // 带出上一次尝试的真实失败原因（ReasonTask 重试监听器写入），消费后即清；
+                // 未知（如旧版调用方未写）时降级为无原因文案，不影响提示本身
+                Object reasonObj = trace.getExtra(ReasonTask.ATTR_LAST_MODEL_ERROR);
+                String reason = reasonObj == null ? null : reasonObj.toString();
+                trace.removeExtra(ReasonTask.ATTR_LAST_MODEL_ERROR);
+
+                sink.next(new RetryEvent(trace, attempt, maxRetries, reason));
             }
         } catch (Exception e) {
-            if (LOG.isDebugEnabled()) {
-                LOG.debug("Failed to push RetryEvent: {}", e.getMessage());
-            }
+            // 重试提示帧丢失意味着用户对长时间无响应毫无感知（且往往伴随链路卡死事故），
+            // 必须以 warn 级留痕供排查，不能只在 debug 里静默吞掉
+            LOG.warn("Failed to push RetryEvent: {}", e.getMessage(), e);
         }
     }
 }

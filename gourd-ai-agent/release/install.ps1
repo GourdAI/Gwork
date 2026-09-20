@@ -1,4 +1,4 @@
-# Solon Code CLI installer for Windows PowerShell
+# GWork CLI installer for Windows PowerShell
 $ErrorActionPreference = "Stop"
 $SOURCE_DIR = if ($env:GOURDWORK_INSTALL_DIR -and (Test-Path $env:GOURDWORK_INSTALL_DIR)) { $env:GOURDWORK_INSTALL_DIR } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $SOURCE_BIN_DIR = Join-Path $SOURCE_DIR "bin"

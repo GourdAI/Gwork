@@ -4,7 +4,7 @@
  * ui-server.js —— 本地 UI 服务器（http://localhost:{uiPort}）：本地 UI + 后端代理
  *
  * 设计目标：把 UI（HTML/JS/CSS）从后端 jar 中解耦，改为由 Electron 主进程
- * 起一个轻量 HTTP 服务立即提供，使界面外壳「秒开」，不必等待 JVM+Solon 启动。
+ * 起一个轻量 HTTP 服务立即提供，使界面外壳「秒开」，不必等待后端 JVM 启动。
  *
  * 为什么是 http://localhost 而不是自定义 app:// 协议：
  *   - 摄像头 getUserMedia、语音识别 SpeechRecognition、剪贴板等「可信来源」能力

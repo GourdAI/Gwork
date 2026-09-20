@@ -87,7 +87,8 @@ public class ThinkingLadderTest {
                 ReasoningCapabilities.resolve("gemini", null).shape());
         assertEquals(ReasoningCapability.Shape.OPENAI_EFFORT,
                 ReasoningCapabilities.resolve("openai", null).shape());
-        assertEquals(ReasoningCapability.Shape.OPENAI_EFFORT,
+        // Ollama 原生接口不使用顶层 reasoning_effort：think 为布尔/low-medium-high 档位，兜底归为开关
+        assertEquals(ReasoningCapability.Shape.TOGGLE,
                 ReasoningCapabilities.resolve("ollama", null).shape());
         assertEquals(ReasoningCapability.Shape.OPENAI_EFFORT,
                 ReasoningCapabilities.resolve(null, null).shape());

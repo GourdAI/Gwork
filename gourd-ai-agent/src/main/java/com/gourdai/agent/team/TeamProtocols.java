@@ -30,7 +30,7 @@ import org.noear.solon.lang.Preview;
 public interface TeamProtocols {
     /**
      * 无协议模式（透明容器模式）
-     * <p>不构建内部执行图。将编排权完全交给外部（如 Solon Flow 或代码手动调用）。</p>
+     * <p>不构建内部执行图。将编排权完全交给外部（如流程引擎或代码手动调用）。</p>
      */
     TeamProtocolFactory NONE = NoneProtocol::new;
 

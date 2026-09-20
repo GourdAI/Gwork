@@ -16,7 +16,7 @@
 package com.gourdai.agent.event;
 
 import com.gourdai.agent.AgentSession;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
 import org.noear.solon.lang.NonSerializable;
 import org.noear.solon.lang.Nullable;
 import org.noear.solon.lang.Preview;
@@ -26,7 +26,7 @@ import java.util.Map;
 /**
  * 智能体事件（流式输出的事件单元）
  *
- * <p>对齐 solon-ai 4.1 的事件体系：以「事件」而非「内容块」描述智能体运行过程中
+ * <p>对齐上游 4.1 的事件体系：以「事件」而非「内容块」描述智能体运行过程中
  * 产生的一切可观测信号。相比旧的 {@code AgentChunk} 体系，事件体系具备两点关键改进：</p>
  *
  * <ul>

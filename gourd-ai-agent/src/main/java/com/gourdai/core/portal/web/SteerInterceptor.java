@@ -2,10 +2,10 @@ package com.gourdai.core.portal.web;
 
 import com.gourdai.agent.react.AbsReActInterceptor;
 import com.gourdai.agent.react.ReActTrace;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.message.ToolMessage;
-import org.noear.solon.ai.chat.tool.ToolCall;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ToolMessage;
+import com.gourdai.ai.chat.tool.ToolCall;
 import org.noear.solon.lang.Preview;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

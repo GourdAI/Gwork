@@ -1,0 +1,10 @@
+[
+  {
+    "name": "com.gourdai.ai.llm.dialect.openai.OpenaiChatDialect",
+    "allDeclaredConstructors": true
+  },
+  {
+    "name": "com.gourdai.ai.llm.dialect.openai.OpenaiResponsesDialect",
+    "allDeclaredConstructors": true
+  }
+]

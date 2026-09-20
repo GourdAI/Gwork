@@ -5,6 +5,7 @@ import com.gourdai.agent.event.ToolCallStartEvent;
 
 import lombok.Getter;
 import lombok.Setter;
+import com.gourdai.ai.chat.LlmErrorMessages;
 import com.gourdai.harness.agent.RetryEvent;
 
 import java.time.Instant;
@@ -46,7 +47,7 @@ import java.util.Map;
  *   <tr><td>{@code steer_dropped}</td><td>插话已丢弃：任务正常结束后残留插话被转入持久化队列</td></tr>
  *   <tr><td>{@code context_size}</td><td>上下文用量，推理后依据模型真实 usage 生成（输入/输出/缓存明细），刷新「上下文长度」指示器</td></tr>
  *   <tr><td>{@code trace}</td><td>追踪信息：模型名称、token 消耗与推理耗时（最终汇总时输出）</td></tr>
- *   <tr><td>{@code retry}</td><td>模型调用失败后的自动重试提示，携带当前尝试序号与最大次数</td></tr>
+ *   <tr><td>{@code retry}</td><td>模型调用失败后的自动重试提示，携带当前尝试序号、最大次数与失败原因摘要（供应商返回体真实错误）</td></tr>
  *   <tr><td>{@code file_changes}</td><td>Agent 文件变更账本事件，args 携带该 revision 的完整轻量摘要</td></tr>
  *   <tr><td>{@code done}</td><td>完成信号，当前响应流已全部发送完毕</td></tr>
  *   <tr><td>{@code error}</td><td>错误信息，处理过程中发生了异常</td></tr>
@@ -134,6 +135,16 @@ public class WebChunk {
      * 并把同一批工具归组渲染为批量卡片。HITL 批量审批时亦按此标识寻址单个调用。
      */
     private String actionId;
+
+    /**
+     * 本帧是否为「挂起态收尾」：等待用户回答（ask_user）或人工审批（HITL）时，
+     * 引擎流会正常结束并补发一个 done，但本轮任务并未真正完成——恢复后同一批工具的
+     * 剩余帧还会回来。
+     *
+     * <p>前端据此区分「真结束的 done」与「因挂起而发的 done」：后者不得清空批次/卡片索引，
+     * 否则恢复后同一批次会被拆成两组渲染。旧前端读不到该字段时按相位降级判断，行为不变。</p>
+     */
+    private Boolean suspended;
 
     /** 同一次模型聚合响应中可见工具卡的批次标识；旧历史或单卡为 null。 */
     private String batchId;
@@ -392,6 +403,21 @@ public class WebChunk {
     }
 
     /**
+     * 创建「挂起态完成」消息块。
+     * <p>等待用户回答（ask_user）或人工审批（HITL）时，引擎流正常结束并补发 done，
+     * 但本轮任务并未真正完成。本工厂额外打上 {@code suspended=true}，让前端只停等待指示器、
+     * 不拆掉批次与工具卡索引（否则恢复后同一批次会被拆成两组渲染）。</p>
+     *
+     * @return 带挂起标记的完成信号块
+     */
+    public static WebChunk ofDoneSuspended() {
+        WebChunk tmp = ofDone();
+        tmp.suspended = true;
+
+        return tmp;
+    }
+
+    /**
      * 创建「错误」消息块（基于字符串描述）。
      * <p>type 为 {@code error}，用于向前端传递处理过程中产生的错误信息。</p>
      *
@@ -409,8 +435,9 @@ public class WebChunk {
 
     /**
      * 创建「错误」消息块（基于异常对象）。
-     * <p>type 为 {@code error}，自动从异常对象中提取错误信息；
-     * 若异常消息为 {@code null}，则使用 "Unknown error" 作为兜底描述。</p>
+     * <p>type 为 {@code error}，从异常链中提取最贴近根因的可读描述
+     * （含 HTTP 错误响应体中的真实消息）；都取不到时才退化为简单类名，
+     * 不再把裸 {@code getMessage()}（可能为 null 或仅含包装层描述）直接抛给用户。</p>
      *
      * @param err 异常对象
      * @return 携带异常描述的消息块
@@ -418,7 +445,7 @@ public class WebChunk {
     public static WebChunk ofError(Throwable err) {
         WebChunk tmp = new WebChunk();
         tmp.type = "error";
-        tmp.text = (err.getMessage() == null ? "Unknown error" : err.getMessage());
+        tmp.text = LlmErrorMessages.describe(err);
         tmp.createdAt = Instant.now().toEpochMilli();
 
         return tmp;
@@ -662,9 +689,27 @@ public class WebChunk {
      * @return 携带工具名与答案列表的已回答消息块
      */
     public static WebChunk ofQuestionAnswered(String toolName, List<Map<String, Object>> answers) {
+        return ofQuestionAnswered(toolName, answers, null);
+    }
+
+    /**
+     * 创建「用户已回答」消息块（带调用标识）。
+     *
+     * <p>{@code actionId} 与触发提问的 {@code question} 帧同源，用于把确认帧精确回到「那一道题」上：
+     * 不带标识时前端只能无条件清掉当前问答卡，历史回放或多端并发下会误收【另一道题】的卡。</p>
+     *
+     * <p>为 {@code null} 时（旧快照恢复的挂起任务、旧前端不传标识）前端降级为旧行为。</p>
+     *
+     * @param toolName 发起提问的工具名称（当前恒为 ask_user）
+     * @param answers  用户答案列表（每项含 index/text/skipped/custom）
+     * @param actionId 本轮提问的调用标识（可为 null）
+     * @return 携带工具名、答案列表与调用标识的已回答消息块
+     */
+    public static WebChunk ofQuestionAnswered(String toolName, List<Map<String, Object>> answers, String actionId) {
         WebChunk tmp = new WebChunk();
         tmp.type = "question_answered";
         tmp.toolName = toolName;
+        tmp.actionId = actionId;
         tmp.createdAt = Instant.now().toEpochMilli();
         Map<String, Object> args = new LinkedHashMap<>();
         args.put("answers", answers);
@@ -683,9 +728,23 @@ public class WebChunk {
      * @return 携带重试进度文案的消息块
      */
     public static WebChunk ofRetry(int attempt, int maxRetries) {
+        return ofRetry(attempt, maxRetries, null);
+    }
+
+    /**
+     * 创建「重试」消息块（带失败原因）。
+     * <p>原因非空时文案形如「模型调用失败，正在重试 2/20：HTTP 400: xxx」，
+     * 让用户在等待重试期间就能看到供应商返回的真实错误，而非无从判断发生了什么。</p>
+     *
+     * @param attempt    当前是第几次尝试（从 1 开始）
+     * @param maxRetries 最大尝试次数（用户配置的模型重试次数）
+     * @param reason     上一次尝试的失败原因摘要，可为 null（未知）
+     * @return 携带重试进度与失败原因文案的消息块
+     */
+    public static WebChunk ofRetry(int attempt, int maxRetries, String reason) {
         WebChunk tmp = new WebChunk();
         tmp.type = "retry";
-        tmp.text = RetryEvent.formatText(attempt, maxRetries);
+        tmp.text = RetryEvent.formatText(attempt, maxRetries, reason);
         tmp.createdAt = Instant.now().toEpochMilli();
 
         return tmp;

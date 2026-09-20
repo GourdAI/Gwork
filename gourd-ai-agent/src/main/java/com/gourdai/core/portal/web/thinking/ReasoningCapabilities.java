@@ -601,9 +601,24 @@ public final class ReasoningCapabilities {
     static ReasoningCapability fromOfficialRules(String standard, String modelName) {
         ReasoningCapability.Shape interfaceShape = shapeOfStandard(standard);
         String model = canon(modelName);
+        // 原生 Ollama 的 think 不沿用云厂商 effort/budget 参数。
+        // GPT-OSS 保留三档逻辑值域，ThinkingDepth 在原生接口上写为 think。
+        // 官方：https://docs.ollama.com/capabilities/thinking
+        boolean ollama = "ollama".equals(lower(standard));
+        if (ollama && model.contains("gpt-oss")) {
+            return ReasoningCapability.ofEffort(ReasoningCapability.Shape.OPENAI_EFFORT,
+                    csv("low,medium,high"));
+        }
+        if (ollama && model.contains("deepseek-r1")) {
+            return ReasoningCapability.ofToggle();
+        }
         if (!model.isEmpty()) {
             for (Rule rule : RULES) {
                 if (rule.hits(model)) {
+                    if (ollama) {
+                        return rule.kind == Kind.NONE ? ReasoningCapability.NONE
+                                : ReasoningCapability.ofToggle();
+                    }
                     return rule.toCapability(interfaceShape);
                 }
             }
@@ -620,10 +635,13 @@ public final class ReasoningCapabilities {
      * 仅凭接口类型推断<b>形态</b>。
      *
      * <p>分流与改造前一致：anthropic → 现代 effort 格式、responses → reasoning.effort、
-     * gemini → thinkingLevel、其余 → 顶层 reasoning_effort。</p>
+     * gemini → thinkingLevel、ollama → 布尔开关、其余 → 顶层 reasoning_effort。</p>
      */
     static ReasoningCapability.Shape shapeOfStandard(String standard) {
         String s = lower(standard);
+        if ("ollama".equals(s)) {
+            return ReasoningCapability.Shape.TOGGLE;
+        }
         if (s.contains("anthropic") || s.contains("claude")) {
             return ReasoningCapability.Shape.ANTHROPIC_EFFORT;
         }

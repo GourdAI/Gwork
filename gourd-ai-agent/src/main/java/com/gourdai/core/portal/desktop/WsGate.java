@@ -31,14 +31,14 @@ import com.gourdai.agent.event.ToolCallEndEvent;
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.event.ReasonEndEvent;
 import com.gourdai.agent.util.AgentUtil;
-import org.noear.solon.ai.chat.ChatConfig;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.message.UserMessage;
-import org.noear.solon.ai.chat.content.Contents;
-import org.noear.solon.ai.chat.content.ImageBlock;
-import org.noear.solon.ai.chat.content.TextBlock;
-import org.noear.solon.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.UserMessage;
+import com.gourdai.ai.chat.content.Contents;
+import com.gourdai.ai.chat.content.ImageBlock;
+import com.gourdai.ai.chat.content.TextBlock;
+import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.agent.AgentEndEvent;
 import com.gourdai.harness.agent.AgentStartEvent;
@@ -46,7 +46,7 @@ import com.gourdai.harness.agent.RetryEvent;
 import com.gourdai.harness.agent.TaskTalent;
 import com.gourdai.harness.command.Command;
 import com.gourdai.harness.talents.memory.MemoryTalent;
-import org.noear.solon.ai.util.CmdUtil;
+import com.gourdai.ai.util.CmdUtil;
 import com.gourdai.core.command.WebCommandContext;
 import com.gourdai.core.portal.web.ThinkingDepth;
 import com.gourdai.agent.react.intercept.HITL;
@@ -149,6 +149,8 @@ public class WsGate extends SimpleWebSocketListener {
                 if (disposable != null) {
                     disposable.dispose();
                 }
+                // 用户主动停止：为未完成的任务打「可续跑」标记并立即落盘（与 WebGate/CliShell 口径一致）
+                engine.markUserInterruptedForResume(session, null);
                 session.addMessage(ChatMessage.ofAssistant("用户已取消任务."));
                 LOG.info("用户已取消任务.");
 
@@ -214,7 +216,11 @@ public class WsGate extends SimpleWebSocketListener {
             String modelName = req.getModel();
             ChatModel chatModel = engine.getModelOrMain(modelName);
 
-            session.getContext().put(HarnessEngine.CTX_MODEL_SELECTED, modelName);
+            // 与 WebGate.performAgentTaskAsync 同口径：仅在前端显式携带 model 时才覆写会话已选模型；
+            // 直接 put(null) 会把上一轮的选择清空，后续 HITL/问答恢复轮会静默回落主模型。
+            if (Assert.isNotEmpty(modelName)) {
+                session.getContext().put(HarnessEngine.CTX_MODEL_SELECTED, modelName);
+            }
 
             // 模式处理：根据前端 mode 字段配置 session 行为
             String mode = req.getMode();
@@ -409,10 +415,12 @@ public class WsGate extends SimpleWebSocketListener {
     }
 
     private String onReasonDeltaEvent(ReasonDeltaEvent chunk, String finalSessionId) {
+        // 经 ReasonDeltaEvent 取值：思考分片的内容在 thinking 通道，
+        // getMessage().getContent() 只读 text 通道，会把思考片静默丢成空串。
         if (!chunk.isToolCalls() && chunk.getMessage() != null) {
-            String content = chunk.getMessage().getContent();
+            String content = chunk.getContent();
             if (content != null && !content.isEmpty()) {
-                boolean isThinking = chunk.getMessage().isThinking();
+                boolean isThinking = chunk.isThinking();
                 String chunkTypeToSend = isThinking ? "think" : "reason";
 
                 ONode node = new ONode().set("type", chunkTypeToSend)

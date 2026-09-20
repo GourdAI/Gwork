@@ -16,8 +16,8 @@
 package com.gourdai.agent.react.intercept;
 
 import com.gourdai.agent.react.ReActTrace;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.message.ChatMessage;
 import java.util.List;
 
 /**

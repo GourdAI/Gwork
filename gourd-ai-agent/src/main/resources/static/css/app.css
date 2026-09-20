@@ -535,7 +535,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .question-card-opt-label { flex: 1 1 auto; min-width: 0; word-break: break-word; }
 .question-card-opt-reco { margin-left: 4px; font-size: 12px; color: var(--text-tertiary); }
 .question-card-opt-answer { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-tertiary); }
-.question-card-other-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 1px dashed var(--border-color); border-radius: 10px; color: var(--text-secondary); font: 400 13px/1.5 var(--font-sans); transition: border-color 0.15s, background 0.15s; }
+/* 「以上都不合适？自己输入回答…」入口行：与选项同层级的显性入口（非脚注）——
+   主文字用 primary 色并加粗（500），虚线边框保留“可编辑区”的暗示，hover/选中仍走 accent。 */
+.question-card-other-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 1px dashed var(--border-color); border-radius: 10px; color: var(--text-primary); font: 500 13px/1.5 var(--font-sans); transition: border-color 0.15s, background 0.15s; }
 .question-card-other-row[role="button"] { cursor: pointer; }
 .question-card-other-row[role="button"]:hover { border-color: var(--accent); background: var(--bg-hover); }
 .question-card-other-row.selected { border-color: var(--accent); }
@@ -2609,10 +2611,16 @@ pre:hover .code-copy-btn { opacity: 1; }
 /* ===== 消息执行队列 ===== */
 
 /* 即时插话：独立的轻量事件卡，标题与正文分层，长文本自然换行。 */
-.steer-note { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "badge text"; align-items: start; column-gap: 10px; row-gap: 4px; margin: 12px 0; padding: 11px 14px; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-color)); border-left: 3px solid var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent-light) 42%, var(--bg-card)); color: var(--text-primary); font-size: 13px; line-height: 1.6; box-shadow: 0 2px 8px rgba(79,110,247,0.06); }
+.steer-note { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "badge text"; align-items: start; column-gap: 10px; row-gap: 4px; margin: 12px 0; padding: 11px 14px; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-color)); border-left: 3px solid var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent-light) 42%, var(--bg-card, var(--bg-main))); color: var(--text-primary); font-size: 13px; line-height: 1.6; box-shadow: 0 2px 8px rgba(79,110,247,0.06); }
 .steer-note::before { content: '↳'; grid-area: badge; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 6px; background: var(--accent); color: #fff; font-size: 13px; font-weight: 700; }
 .steer-note-badge { grid-area: badge; align-self: center; margin-left: 26px; color: var(--accent); font-weight: 700; white-space: nowrap; }
 .steer-note-text { grid-area: text; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+/* 长文本折叠态（JS 超阈值时加 .collapsed）：限高 5 行（5 × 20.8px 行高）并让末段渐隐；
+   mask 作用于文字自身，不依赖卡片底色（底色为 color-mix，叠加渐变无法精确匹配）。 */
+.steer-note.collapsed .steer-note-text { max-height: 104px; overflow: hidden; -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent); mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent); }
+/* 展开/收起按钮：仅超阈值文本出现（JS 决定），置于文本列下方第二行；无按钮的卡片不产生空行。 */
+.steer-note-toggle { grid-column: 2; grid-row: 2; justify-self: start; margin-top: 2px; padding: 2px 0; border: none; background: none; color: var(--accent); font-family: inherit; font-size: 12px; font-weight: 500; line-height: 1.5; cursor: pointer; }
+.steer-note-toggle:hover { text-decoration: underline; }
 
 
 #message-queue-container {

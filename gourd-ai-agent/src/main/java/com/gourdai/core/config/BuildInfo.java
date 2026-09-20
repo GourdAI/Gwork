@@ -13,7 +13,7 @@ import java.util.Properties;
  *
  * <p>值来自构建期由 Maven filtering 生成的 classpath 资源 {@code /build-info.properties}
  * （模板见 {@code src/main/buildinfo/}，目录刻意放在 {@code src/main/resources} 之外，
- * 以免二进制前端资产被过滤、也避免 app.yml 里的 Solon 运行期占位符被误替换）。</p>
+ * 以免二进制前端资产被过滤、也避免 app.yml 里的框架运行期占位符被误替换）。</p>
  *
  * <p><b>用途</b>：桌面端覆盖安装时，若旧 jar 被进程占用导致未被真正替换，运行期可通过
  * {@code /web/chat/meta} 暴露的 buildId / buildTime 自证「当前跑的后端与桌面壳不是同一次构建」。</p>

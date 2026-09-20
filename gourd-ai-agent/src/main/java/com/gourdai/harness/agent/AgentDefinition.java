@@ -21,8 +21,8 @@ import org.noear.snack4.ONode;
 import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.permission.ToolPermission;
-import org.noear.solon.ai.util.Markdown;
-import org.noear.solon.ai.util.MarkdownUtil;
+import com.gourdai.ai.util.Markdown;
+import com.gourdai.ai.util.MarkdownUtil;
 import org.noear.solon.core.util.Assert;
 import org.yaml.snakeyaml.Yaml;
 

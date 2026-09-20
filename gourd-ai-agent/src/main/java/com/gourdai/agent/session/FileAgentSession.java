@@ -18,8 +18,9 @@ package com.gourdai.agent.session;
 import org.noear.solon.Utils;
 import com.gourdai.agent.Agent;
 import com.gourdai.agent.AgentSession;
-import org.noear.solon.ai.chat.ChatRole;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.ChatRole;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.core.compat.LegacyTypeCompat;
 import org.noear.solon.flow.FlowContext;
 import org.noear.solon.lang.Preview;
 import org.slf4j.Logger;
@@ -27,7 +28,10 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -85,17 +89,69 @@ public class FileAgentSession implements AgentSession {
         return baseDir;
     }
 
-    /** 读取当前快照文件（不存在/损坏时返回 null）。 */
+    /**
+     * 读取当前快照文件（不存在/损坏时返回 null）。
+     *
+     * <p>历史快照里的 {@code @type} 写的是迁移前的旧类名，直接解析会整份失败
+     * （日志中的 {@code Load snapshot failed}）。故读时先过一遍兼容层做定点改写；
+     * 若确实改写过且解析成功，再把新包名的内容原子回写磁盘，使该会话下次打开
+     * 不必再走兼容——即「打开会话才转换 + 自愈退场」。已迁移的快照只付一次
+     * indexOf 短路开销，不会重复回写（幂等）。兼容层可整体摘除，见 LegacyTypeCompat。</p>
+     */
     private FlowContext loadSnapshotFile() {
         if (snapshotFile.exists()) {
             try {
                 byte[] bytes = Files.readAllBytes(snapshotFile.toPath());
-                return FlowContext.fromJson(new String(bytes, StandardCharsets.UTF_8));
+                String json = new String(bytes, StandardCharsets.UTF_8);
+                String fixed = LegacyTypeCompat.rewrite(json);
+                FlowContext context = FlowContext.fromJson(fixed);
+                // 未改写时 rewrite 返回同一引用；仅在真改写且解析成功后才自愈回写
+                if (fixed != json) {
+                    rewriteSnapshotFile(fixed);
+                }
+                return context;
             } catch (Throwable e) {
                 LOG.warn("Load snapshot failed, session: {}", sessionId, e);
             }
         }
         return null;
+    }
+
+    /**
+     * 把兼容改写后的快照原子回写磁盘（自愈）。
+     *
+     * <p>回写纯属优化，<b>失败绝不能影响会话加载</b>（最坏结果只是下次打开再走一遍兼容），
+     * 故这里吞掉全部异常只记 warn——尤其注意本方法在构造函数链路上被调用，抛异常会导致会话打不开。</p>
+     *
+     * <p>走 {@link #locker} 与 {@link #updateSnapshot()} 保持同一互斥口径，避免与并发写快照互相覆盖；
+     * 并采用「临时文件 + 原子移动」，保证任何时刻磁盘上的快照都是完整内容（不支持原子移动的
+     * 文件系统降级为普通替换）。</p>
+     */
+    private void rewriteSnapshotFile(String json) {
+        locker.lock();
+        Path temp = null;
+        try {
+            Path target = snapshotFile.toPath();
+            temp = Files.createTempFile(target.getParent(), target.getFileName() + ".", ".compat.tmp");
+            Files.write(temp, json.getBytes(StandardCharsets.UTF_8));
+            try {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+            temp = null;
+            LOG.info("Snapshot legacy type rewritten, session: {}", sessionId);
+        } catch (Throwable e) {
+            LOG.warn("Rewrite legacy snapshot failed (ignored), session: {}: {}", sessionId, e.toString());
+        } finally {
+            if (temp != null) {
+                try {
+                    Files.deleteIfExists(temp);
+                } catch (Throwable ignore) {
+                }
+            }
+            locker.unlock();
+        }
     }
 
     /**

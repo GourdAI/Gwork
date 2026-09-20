@@ -1,0 +1,72 @@
+/*
+ * Copyright 2017-2025 noear.org and authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.gourdai.ai.chat.interceptor;
+
+import com.gourdai.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.ToolResult;
+import org.noear.solon.core.util.RankEntity;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+
+/**
+ * 聊天 Tool 拦截链
+ *
+ * @author noear
+ * @since 3.3
+ */
+public class ToolChain<T extends ToolInterceptor> {
+    private final List<RankEntity<T>> interceptorList;
+    private final FunctionTool lastHandler;
+    private int index;
+
+    public ToolChain(Collection<RankEntity<T>> interceptors, FunctionTool lastHandler) {
+        this.interceptorList = new ArrayList<>(interceptors);
+        if (interceptorList.size() > 1) {
+            Collections.sort(interceptorList);
+        }
+
+        this.lastHandler = lastHandler;
+        this.index = 0;
+    }
+
+    /**
+     * 获取工具
+     */
+    public FunctionTool getTool() {
+        return lastHandler;
+    }
+
+    public ToolResult doIntercept(ToolRequest req) throws Throwable {
+        // 跳过已禁用的拦截器
+        while (index < interceptorList.size() && !interceptorList.get(index).target.isEnabled()) {
+            index++;
+        }
+
+        if (index < interceptorList.size()) {
+            return interceptorList.get(index++).target.interceptTool(req, this);
+        } else {
+            // 所有拦截器都已禁用或已处理完
+            if (lastHandler != null) {
+                return lastHandler.call(req.getArgs());
+            } else {
+                throw new IllegalStateException("No handler available and all interceptors are disabled");
+            }
+        }
+    }
+}

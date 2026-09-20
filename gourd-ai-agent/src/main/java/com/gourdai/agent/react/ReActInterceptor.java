@@ -17,10 +17,10 @@ package com.gourdai.agent.react;
 
 import com.gourdai.agent.AgentInterceptor;
 import com.gourdai.agent.react.task.ToolExchanger;
-import org.noear.solon.ai.chat.ChatResponse;
-import org.noear.solon.ai.chat.interceptor.ChatInterceptor;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.ChatResponse;
+import com.gourdai.ai.chat.interceptor.ChatInterceptor;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
 import org.noear.solon.lang.Nullable;
 import org.noear.solon.lang.Preview;
 

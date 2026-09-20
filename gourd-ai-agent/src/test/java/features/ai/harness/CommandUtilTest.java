@@ -2,7 +2,7 @@ package features.ai.harness;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.noear.solon.ai.util.CmdUtil;
+import com.gourdai.ai.util.CmdUtil;
 
 import java.util.List;
 
@@ -37,9 +37,9 @@ public class CommandUtilTest {
         Assertions.assertEquals("arg2", rst.get(2));
 
         // 4. 单引号包裹与嵌套引号测试
-        rst = CmdUtil.parseArguments("/say name:'\"Solon\"' hello");
+        rst = CmdUtil.parseArguments("/say name:'\"Java\"' hello");
         Assertions.assertEquals(3, rst.size());
-        Assertions.assertEquals("name:'\"Solon\"'", rst.get(1)); // 确保内部双引号被保留
+        Assertions.assertEquals("name:'\"Java\"'", rst.get(1)); // 确保内部双引号被保留
 
         // 5. 空字符串与 null 测试
         Assertions.assertTrue(CmdUtil.parseArguments("").isEmpty());

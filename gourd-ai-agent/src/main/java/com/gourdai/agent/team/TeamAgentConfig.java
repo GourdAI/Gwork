@@ -18,7 +18,7 @@ package com.gourdai.agent.team;
 import com.gourdai.agent.Agent;
 import com.gourdai.agent.AgentProfile;
 import com.gourdai.agent.AgentSystemPrompt;
-import org.noear.solon.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ChatModel;
 import org.noear.solon.core.util.IgnoreCaseMap;
 import org.noear.solon.core.util.SnelUtil;
 import org.noear.solon.flow.FlowContext;

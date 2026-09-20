@@ -34,6 +34,22 @@
   <link rel="apple-touch-icon" href="assets/icon-512.png">
   <link rel="stylesheet" href="css/styles.css">
 
+  <!-- 嵌入模式检测：被 iframe 嵌套（或显式 ?embed=1）时给 <html> 打 is-embedded 标记，
+       CSS 据此隐藏顶部导航。必须内联前置执行，否则导航条会先渲染再消失（闪一下）。 -->
+  <script>
+    (function () {
+      var embedded = false;
+      // 跨域父页面读 window.top 会抛异常，抛异常本身就说明处在框架里
+      try { embedded = window.self !== window.top; } catch (e) { embedded = true; }
+      try {
+        var flag = new URLSearchParams(location.search).get('embed');
+        if (flag === '1' || flag === 'true') embedded = true;
+        else if (flag === '0' || flag === 'false') embedded = false;
+      } catch (e) { /* 无 URLSearchParams 的老浏览器：仅按 iframe 判定 */ }
+      if (embedded) document.documentElement.className += ' is-embedded';
+    })();
+  </script>
+
   <!-- 结构化数据：SoftwareApplication + Organization + WebSite -->
   <script type="application/ld+json">
   {

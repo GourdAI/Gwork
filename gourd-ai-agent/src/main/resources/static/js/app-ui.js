@@ -8,21 +8,6 @@ var chatAttachmentsWrap = $('#chatAttachmentsWrap');
 // 异步操作版本号：每次清空 pendingFiles 时递增，FileReader 回调中校验版本号来避免过期写入
 var _pendingFilesVersion = 0;
 
-// Generate unique image extension from MIME type
-function getImageExtension(mimeType) {
-    if (!mimeType) return 'png';
-    switch (mimeType) {
-        case 'image/jpeg': return 'jpg';
-        case 'image/png': return 'png';
-        case 'image/gif': return 'gif';
-        case 'image/webp': return 'webp';
-        case 'image/bmp': return 'bmp';
-        case 'image/svg+xml': return 'svg';
-        case 'image/tiff': return 'tiff';
-        default: return 'png';
-    }
-}
-
 // Get file extension from filename (for non-image files) or MIME type (for images)
 function getFileExtension(file) {
     if (!file) return 'dat';
@@ -87,38 +72,59 @@ function handlePaste(e) {
     var clipboard = e.clipboardData || e.originalEvent.clipboardData;
     if (!clipboard) return;
 
-    var items = clipboard.items;
+    // 先把剪贴板里的图片【全部】收齐。
+    // 旧实现在命中第一张图后直接 return，导致：多图只进一张，且因为此前已
+    // preventDefault、又跳过了下方文本分支，图文混合粘贴时文字会被静默吞掉。
+    var items = clipboard.items || [];
+    var images = [];
     for (var i = 0; i < items.length; i++) {
-        if (items[i].type.indexOf('image') !== -1) {
-            e.preventDefault();
-            var file = items[i].getAsFile();
-            if (!file) continue; // 防御：getAsFile() 可能返回 null
-            // 生成唯一文件名，避免覆盖
-            var ext = getImageExtension(items[i].type) || 'png';
-            file = generateUniqueFile(file, 'pasted-image');
-            processSelectedFile(file, 'image');
-            return;
-        }
+        if (items[i].kind !== 'file') continue;        // 排除 string 项（它们属于文本分支）
+        if (items[i].type.indexOf('image') === -1) continue;
+        var f = items[i].getAsFile();
+        if (f) images.push(f);                         // 防御：getAsFile() 可能返回 null
     }
 
-    // Handle HTML paste: convert to text preserving formatting
+    var plainText = clipboard.getData('text/plain') || '';
     var htmlData = clipboard.getData('text/html');
-    if (htmlData) {
-        e.preventDefault();
-        var text = clipboard.getData('text/plain') || '';
-        // If plain text has content, use it directly (preserves newlines/indentation)
-        // textarea.value = text already preserves formatting
-        var textarea = e.target;
-        var start = textarea.selectionStart;
-        var end = textarea.selectionEnd;
-        var before = textarea.value.substring(0, start);
-        var after = textarea.value.substring(end);
-        textarea.value = before + text + after;
-        textarea.selectionStart = textarea.selectionEnd = start + text.length;
-        autoResize(textarea);
-        // Trigger input event for command completion
-        $(textarea).trigger('input');
+
+    // 图与格式文本都没有（纯文本粘贴）→ 不接管，交还浏览器原生行为。
+    // 这是刻意保留的：原生粘贴才能维护 textarea 的 undo 栈与 IME 组合输入。
+    if (images.length === 0 && !htmlData) return;
+
+    // 确定要接管后才阻止默认行为，全函数唯一一处。
+    e.preventDefault();
+
+    // 文字先落地：即便同时带图也不能丢。
+    if (plainText) insertTextAtCursor(e.target, plainText);
+
+    if (images.length === 0) return;
+
+    // 名额提示与拖放路径（handleDrop）保持同一口径，复用现有 i18n 键。
+    if (pendingFiles.length >= MAX_ATTACHMENTS) {
+        showToast(GourdI18n.t('ui.attachment_limit', MAX_ATTACHMENTS), 'error');
+        return;
     }
+    var accepted = processSelectedFiles(images, 'image', 'pasted-image');
+    if (accepted < images.length) {
+        showToast(GourdI18n.t('ui.attachment_partial_limit', MAX_ATTACHMENTS), 'error');
+    }
+}
+
+/**
+ * 在当前光标处插入文本（保留换行与缩进），并同步高度与命令补全。
+ * 从 handlePaste 的 HTML 分支抽出，使「图文同时粘贴」与「纯格式文本粘贴」共用一套逻辑。
+ */
+function insertTextAtCursor(textarea, text) {
+    if (!textarea || typeof textarea.selectionStart !== 'number') return;
+    var start = textarea.selectionStart;
+    var end = textarea.selectionEnd;
+    var before = textarea.value.substring(0, start);
+    var after = textarea.value.substring(end);
+    textarea.value = before + text + after;
+    textarea.selectionStart = textarea.selectionEnd = start + text.length;
+    autoResize(textarea);
+    // 触发 input 事件以驱动斜杠命令补全，不可省
+    $(textarea).trigger('input');
 }
 
 function getAttachmentsWrap() {
@@ -183,7 +189,7 @@ function removeAttachment(idx) {
     }
 }
 
-function processSelectedFile(file, attachmentsType) {
+function processSelectedFile(file, attachmentsType, namePrefix) {
     if (!file) return;
     if (pendingFiles.length >= MAX_ATTACHMENTS) return;
     // 大小限制由后端配置决定，不在前端人为拦截。
@@ -192,7 +198,7 @@ function processSelectedFile(file, attachmentsType) {
     var currentVersion = _pendingFilesVersion;
 
     // 生成唯一文件名，避免服务端 uploads/ 目录同名覆盖
-    var uniqueFile = generateUniqueFile(file, 'attachment');
+    var uniqueFile = generateUniqueFile(file, namePrefix || 'attachment');
 
     if (attachmentsType === 'image') {
         // Image attachment: always treated as multimodal image
@@ -224,11 +230,25 @@ function processSelectedFile(file, attachmentsType) {
     }
 }
 
-function processSelectedFiles(fileList, attachmentsType) {
+/**
+ * 批量受理附件，返回【实际受理数】供调用方判断是否需要提示“部分未添加”。
+ *
+ * 名额必须用本地计数器累加，不能只看 pendingFiles.length：
+ * processSelectedFile 的图片分支是在 FileReader.onload 回调里才 push 的，
+ * 本循环同步执行期间 pendingFiles.length 纹丝不动。旧写法在“一次性多图”
+ * 场景下名额守卫完全失效，会把超额图片全部放行，最终在发送前被
+ * app-streaming.js 的越限兜底整体拒发，用户只能逐个手动删附件。
+ * 以前只有拖放多图会触发，改造后“粘贴多图”会让它变成高频路径。
+ */
+function processSelectedFiles(fileList, attachmentsType, namePrefix) {
+    var room = MAX_ATTACHMENTS - pendingFiles.length;
+    var taken = 0;
     for (var i = 0; i < fileList.length; i++) {
-        if (pendingFiles.length >= MAX_ATTACHMENTS) break;
-        processSelectedFile(fileList[i], attachmentsType);
+        if (taken >= room) break;
+        taken++;
+        processSelectedFile(fileList[i], attachmentsType, namePrefix);
     }
+    return taken;
 }
 
 $(welcomeInput).on('paste', handlePaste);
@@ -269,14 +289,20 @@ $(chatInput).on('paste', handlePaste);
         }
 
         // Separate files into images and non-images for proper processing
+        // 名额用本地计数器累加：图片分支的 push 在 FileReader 回调里，循环期间
+        // pendingFiles.length 不会增长，只看它会让拖放多图突破上限（与
+        // processSelectedFiles 同一类缺陷）。
+        var room = MAX_ATTACHMENTS - pendingFiles.length;
+        var taken = 0;
         for (var i = 0; i < files.length; i++) {
-            if (pendingFiles.length >= MAX_ATTACHMENTS) {
+            if (taken >= room) {
                 showToast(GourdI18n.t('ui.attachment_partial_limit', MAX_ATTACHMENTS), 'error');
                 break;
             }
             var file = files[i];
             if (!file) continue; // 防御：文件可能被移除
             var isImage = file.type.indexOf('image/') === 0;
+            taken++;
             processSelectedFile(file, isImage ? 'image' : 'file');
         }
     }
@@ -405,6 +431,72 @@ $('#chatImageInput').on('change', function(e) {
 
 /* ===== Marked ===== */
 if (typeof marked !== 'undefined') { marked.setOptions({ breaks: true, gfm: true }); }
+
+/* ===== 裸链接自动识别（修正中文语境下「链接吞掉后文」） =====
+ * marked 的 GFM autolink 以「非空白」界定 URL 结尾，而汉字与全角标点都不是空白，
+ * 于是「设计稿在这，https://a.com/x，去实现官网改版」会把 URL 之后的整段中文一起
+ * 吞进 <a>，还被 encodeURI 编进 href —— 表现为链接无限长、正文全部变蓝、点击跳错地址。
+ * 这里用「仅 RFC3986 ASCII 字符集」的内联扩展顶掉内置 url 规则（inline 扩展先于内置执行）：
+ * 汉字/全角标点天然成为边界，再按句读、引号、未闭合括号裁掉结尾噪声。
+ * 不注册 start 钩子：内置 text 规则本就在 https?:// 处断开，保留 <url> 尖括号 autolink 语义。
+ * 邮箱等其余形态仍交回 marked 内置处理；链接标签内部（state.inLink）不重复建链。 */
+/*AUTOLINK-CORE-START*/
+var AUTOLINK_RE = /^((?:https?:\/\/|ftp:\/\/|www\.)[A-Za-z0-9\-._~:\/?#\[\]@!$&'()*+,;=%]+)/;
+var AUTOLINK_TRIM_TAIL = /[.,;:!?*_'"~&]+$/;
+
+function gourdLinkBracketsBalanced(s) {
+    var pairs = [['(', ')'], ['[', ']'], ['{', '}']];
+    for (var i = 0; i < pairs.length; i++) {
+        var open = 0, close = 0;
+        for (var j = 0; j < s.length; j++) {
+            var ch = s.charAt(j);
+            if (ch === pairs[i][0]) open++;
+            else if (ch === pairs[i][1]) close++;
+        }
+        if (close > open) return false;
+    }
+    return true;
+}
+
+function trimAutoLink(url) {
+    var s = url;
+    for (var guard = 0; guard < 8; guard++) {
+        var before = s;
+        s = s.replace(AUTOLINK_TRIM_TAIL, '');
+        if (/[\)\]}]$/.test(s) && !gourdLinkBracketsBalanced(s)) s = s.slice(0, -1);
+        if (s === before) break;
+    }
+    return s;
+}
+
+function gourdAutoLinkExtension() {
+    return {
+        extensions: [{
+            name: 'gourdAutolink',
+            level: 'inline',
+            tokenizer: function(src) {
+                var state = this.lexer && this.lexer.state;
+                if (state && state.inLink) return undefined;
+                var m = AUTOLINK_RE.exec(src);
+                if (!m) return undefined;
+                var url = trimAutoLink(m[0]);
+                if (!url) return undefined;
+                return {
+                    type: 'link',
+                    raw: url,
+                    text: url,
+                    href: /^www\./i.test(url) ? 'http://' + url : url,
+                    title: null,
+                    tokens: [{ type: 'text', raw: url, text: url }]
+                };
+            }
+        }]
+    };
+}
+/*AUTOLINK-CORE-END*/
+/*AUTOLINK-REG-START*/
+if (typeof marked !== 'undefined') { marked.use(gourdAutoLinkExtension()); }
+/*AUTOLINK-REG-END*/
 var _mdCache = new Map();
 var _MD_CACHE_MAX = 100;
 var _MD_CACHE_MAX_LENGTH = 5000; // 超过此长度的文本不缓存（避免大字符串 Key 占用过多内存）
@@ -1489,10 +1581,10 @@ function renderQueueContainer($container, listSelector, countSelector, queue, se
                 if (imagePaths.length > 0 || filePaths.length > 0) {
                     contentHtml += '<span class="queue-item-attachments">';
                     if (imagePaths.length > 0) {
-                        contentHtml += '<span class="queue-attach-badge">图' + imagePaths.length + '</span>';
+                        contentHtml += '<span class="queue-attach-badge">' + GourdI18n.t('queue.images', { n: imagePaths.length }) + '</span>';
                     }
                     if (filePaths.length > 0) {
-                        contentHtml += '<span class="queue-attach-badge">文件' + filePaths.length + '</span>';
+                        contentHtml += '<span class="queue-attach-badge">' + GourdI18n.t('queue.files', { n: filePaths.length }) + '</span>';
                     }
                     contentHtml += '</span>';
                 }
@@ -1501,7 +1593,7 @@ function renderQueueContainer($container, listSelector, countSelector, queue, se
                     '<span class="queue-item-index">' + (index + 1) + '</span>' +
                     contentHtml +
                     statusHtml +
-                    (!isProcessing ? '<button class="queue-item-remove" title="移除">&times;</button>' : '')
+                    (!isProcessing ? '<button class="queue-item-remove" title="' + escapeHtml(GourdI18n.t('queue.remove')) + '">&times;</button>' : '')
                 );
 
                 if (!isProcessing) {
@@ -1511,7 +1603,7 @@ function renderQueueContainer($container, listSelector, countSelector, queue, se
                                 updateMessageQueueUI();
                             });
                         } else {
-                            showToast('请等待前面的消息发送后再移除', 'warning');
+                            showToast(GourdI18n.t('queue.remove_wait'), 'warning');
                         }
                     });
                 }
@@ -1519,7 +1611,7 @@ function renderQueueContainer($container, listSelector, countSelector, queue, se
             });
         }
         var $count = $(countSelector);
-        if ($count.length) $count.text(queue.length + ' 条');
+        if ($count.length) $count.text(GourdI18n.t('queue.count', { n: queue.length }));
     }
 }
 

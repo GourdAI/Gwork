@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * CliShell 惰性构造策略的回归护栏。
  *
  * <p>背景：CliShell 的构造会初始化 JLine 终端，而 {@code TerminalBuilder} 要反复 fork 子进程
- * 探测标准流是否接在真实终端上。这段开销发生在 Solon 启动主线程、HTTP 端口绑定之前，
+ * 探测标准流是否接在真实终端上。这段开销发生在框架启动主线程、HTTP 端口绑定之前，
  * 是桌面端（{@code web}）冷启动变慢的直接原因之一，因此除真正需要的模式外一律不构造。</p>
  *
  * <p>本类钉死「哪些 flag 需要」（漏放行 = 运行期 NPE，多放行 = 启动重新变慢），

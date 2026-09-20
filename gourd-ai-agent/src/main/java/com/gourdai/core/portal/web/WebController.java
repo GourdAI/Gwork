@@ -29,7 +29,7 @@ import com.gourdai.harness.talents.memory.MemorySolution;
 import com.gourdai.harness.talents.memory.MemorySolutionProvider;
 import com.gourdai.harness.agent.AgentDefinition;
 import com.gourdai.harness.command.Command;
-import org.noear.solon.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.mount.SkillDir;
 import org.noear.solon.annotation.*;
 import com.gourdai.core.config.AgentFlags;
 import com.gourdai.core.config.AgentSettings;
@@ -72,7 +72,7 @@ import java.util.*;
  * </ul>
  *
  * <h3>架构位置</h3>
- * <p>位于 {@code portal.web} 层，是 Solon MVC 的 Controller。
+ * <p>位于 {@code portal.web} 层，是 MVC 的 Controller。
  * 向上对接浏览器前端，向下通过 {@link WebGate}（WebSocket 推送通道）和
  * {@link HarnessEngine}（AI Agent 引擎）完成实际业务处理。</p>
  *
@@ -201,7 +201,7 @@ public class WebController {
      *
      * <p>index.html 为轻量外壳，运行时装配 chat.html / code.html / settings.html 三个界面片段。</p>
      *
-     * @param ctx Solon 请求上下文
+     * @param ctx 请求上下文
      * @throws Throwable 转发异常
      */
     @Get
@@ -423,10 +423,30 @@ public class WebController {
         // 清理 IM 通道绑定：如果此会话绑定了 IM 通道，需要解绑
         webGate.getStreamBuilder().cleanupSession(sessionId);
 
+        // 中断在途流（若正在运行）：dispose 底层订阅，避免删除后在途 run 继续把 stream 文件“复活”。
+        // 必须先于 engine.removeSession（interruptSession 需要从引擎取会话拿 disposable）；
+        // 内部自带完整异常处理，非运行态返回 not_running，不会阻断删除流程。
+        webGate.interruptSession(sessionId);
+
         // 驱逐内存中的会话缓存：必须先于删目录，否则残留的
         // FileAgentSession 会在在途轮次/循环任务等场景下重建 messages/snapshot
         // 文件，导致目录非空删不掉、累计空垃圾文件夹
         engine.removeSession(sessionId);
+
+        // 清理流式账本（长驻 Writer 句柄、待写缓冲、seq 缓存与 stream 文件本身）：必须先于删目录。
+        // ① Windows 下长驻句柄未关闭时 deleteDirectory 必失败（500「会话目录删除失败」）；
+        // ② 待写缓冲若不丢弃，清扫线程最迟 ~400ms 后会在已删目录里重建文件（writerFor 会 mkdirs）。
+        // 覆盖口径与下方 allKnownSessionDirs 一致：全局区 + 显式根 + 全部已登记项目根。
+        SessionStreamStore streamStore = webGate.getStreamStore();
+        if (streamStore != null) {
+            streamStore.delete(sessionId, null);
+            if (Assert.isNotEmpty(root)) {
+                streamStore.delete(sessionId, root);
+            }
+            for (String registeredRoot : sessionLocator.registeredRoots()) {
+                streamStore.delete(sessionId, registeredRoot);
+            }
+        }
 
         // 在解绑之前枚举全部已知落点：root 为空的项目会话仍需依赖登记表定位项目真身；
         // 若先 unbind，会错误回退到全局目录，只删掉空壳而遗留项目数据。
@@ -735,7 +755,13 @@ public class WebController {
         } else if (rounds != null || beforeSeq != null) {
             lr = store.loadRounds(sessionId, sessionRoot, beforeSeq, rounds);
         } else {
-            lr = store.loadWithMeta(sessionId, sessionRoot, tail);
+            // 无参全量分支是历史遗留的裸露后门：老前端不传任何分页参数时，会把整个 stream 文件
+            // 读进内存并一次性回传，而线上已存在 132MB 的单会话文件。此处给 tail==null 一个默认上限，
+            // 与 smart-socket 的响应体栈溢出防线（SessionStreamStore 内的字节预算）形成双保险：
+            // 前者限事件条数、避免 OOM 与长 GC，后者限响应字节、避免 StackOverflowError。
+            // 显式传 tail 的调用方行为不变。
+            lr = store.loadWithMeta(sessionId, sessionRoot,
+                    tail != null ? tail : SessionStreamStore.DEFAULT_FULL_TAIL);
         }
         Map result = new HashMap<>();
         result.put("events", lr.events);
@@ -1012,7 +1038,7 @@ public class WebController {
      * 经安全校验后委派给 {@link WebGate#onChatInput} 进行异步 AI 处理。
      * AI 处理结果通过 WebSocket 实时推送到前端，本接口仅返回简单成功响应。</p>
      *
-     * @param ctx             Solon 请求上下文，用于读取请求头
+     * @param ctx             请求上下文，用于读取请求头
      * @param input           用户输入的文本消息
      * @param attachments     上传的附件文件数组，可为 null
      * @param attachmentTypes 附件类型数组，与 attachments 一一对应
@@ -1045,6 +1071,9 @@ public class WebController {
 
             String hitlAction = ctx.param("hitlAction");
             String questionAnswer = ctx.param("questionAnswer");
+            // 挂起任务身份标识：前端提交问答/审批时声明「正在回应哪一次调用」。
+            // 不传时（旧前端）降级为旧行为，由 WebGate 记警告日志，见 WebGate#onChatInput 注释。
+            String actionId = ctx.param("actionId");
 
             // busy 请求不允许改变活动任务的会话根；真正的原子 busy 判定在 WebGate 输入锁内完成。
             // questionAnswer 与 hitlAction 一样属于“恢复已挂起任务”的输入，不按 busy 拒绝。
@@ -1057,10 +1086,16 @@ public class WebController {
 
             // 路由到 WebGate 处理（AI 结果通过 WebSocket 推送到前端）
             // 网页端手动输入：source=null，出站不回推 IM（仅当活跃会话由 IM/Loop 触发时才回推）
-            boolean accepted = webGate.onChatInput(sessionId, sessionCwd, input, model, attachments, attachmentTypes,
-                    hitlAction, null, clientMessageId, questionAnswer);
-            if (!accepted) {
+            WebGate.InputResult accepted = webGate.onChatInput(sessionId, sessionCwd, input, model, attachments, attachmentTypes,
+                    hitlAction, null, clientMessageId, questionAnswer, actionId);
+            if (accepted == WebGate.InputResult.BUSY) {
                 return Result.succeed("busy");
+            }
+            if (accepted == WebGate.InputResult.ACTION_MISMATCH) {
+                // 提交指向的不是当前挂起的那一次调用（旧页面/旧卡的迟到提交）。
+                // 必须以明确错误拒绝，绝不能静默应用到别的任务上：HITL 误批准不可逆。
+                // 用 409 而非 400：请求格式合法，是服务端状态已经变化导致的冲突。
+                return Result.failure(409, "Action mismatch: the pending task has changed");
             }
 
             // 返回简单 JSON，前端通过 WebSocket 接收 AI 结果
@@ -2283,7 +2318,7 @@ public class WebController {
         Path sessionDir = sessionLocator.resolveDir(sessionId, ctx.header("X-Session-Cwd")).toPath();
         List<ONode> items = queueHelper.read(sessionDir.toFile());
 
-        // 将 ONode 列表转换为标准 Map 列表，确保 Solon 正确序列化
+        // 将 ONode 列表转换为标准 Map 列表，确保正确序列化
         List<Map<String, Object>> itemMaps = new ArrayList<>();
         for (ONode item : items) {
             Map<String, Object> m = new LinkedHashMap<>();

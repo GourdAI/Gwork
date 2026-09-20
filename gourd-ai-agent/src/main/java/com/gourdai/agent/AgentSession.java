@@ -15,7 +15,7 @@
  */
 package com.gourdai.agent;
 
-import org.noear.solon.ai.chat.ChatSession;
+import com.gourdai.ai.chat.ChatSession;
 import org.noear.solon.flow.FlowContext;
 import org.noear.solon.flow.FlowContextInternal;
 import org.noear.solon.lang.NonSerializable;

@@ -15,9 +15,9 @@
  */
 package com.gourdai.harness.talents.memory.search;
 
-import org.noear.solon.ai.rag.Document;
-import org.noear.solon.ai.rag.RepositoryStorable;
-import org.noear.solon.ai.rag.util.QueryCondition;
+import com.gourdai.ai.rag.Document;
+import com.gourdai.ai.rag.RepositoryStorable;
+import com.gourdai.ai.rag.util.QueryCondition;
 import com.gourdai.harness.talents.memory.MemorySearcher;
 import com.gourdai.harness.talents.memory.MemorySearchResult;
 import org.slf4j.Logger;

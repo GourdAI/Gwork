@@ -8,7 +8,7 @@
 
 Java AI Agent
 
-[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-8%20~%2026-orange.svg)](#)
 [![Version](https://img.shields.io/badge/v2026.6.21-Latest-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20鸿蒙-lightgrey.svg)](#)
@@ -153,4 +153,21 @@ GWork 的智能体内核完全基于 Java 构建，兼容毕昇 JDK（华为）�
 用网络分析下 AI MCP 协议，然后生成个 PPT
 帮我设计一个 agent team（设计案存为 demo-dis.md），开发一个 java17 的经典权限管理系统（demo-web），前端用 vue3，界面要简洁好看
 ```
+
+---
+
+## 📜 开源协议
+
+GWork 采用 **GNU Affero General Public License v3.0（AGPL-3.0-only）** 开源，并附带保护性附加条款（详见 [NOTICE](NOTICE)）。
+
+**这意味着：**
+
+- ✅ **自由使用**：个人学习、修改、商用、内网部署均免费，无需授权
+- 🔄 **传染性开源**：基于 GWork 修改并分发（或以网络服务形式提供）时，衍生代码须同样以 AGPL-3.0 开源 —— 云厂商拿去改皮做 SaaS 也必须开源，这是选择 AGPL 的核心原因
+- 🏷️ **品牌保护**：修改再分发须重命名并声明非官方版本；“GWork”、“gourd-ai” 名称与 logo 不随代码授权；归属信息（Powered by GWork）须保留
+- ⚠️ **AI 输出免责**：智能体生成的内容（代码/文档/命令）可能出错，使用前请自行核验
+
+第三方组件（内置技能、运行时依赖等）保持其原始协议，详见 [NOTICE](NOTICE) 与 [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES/)。
+
+**贡献即接受**：向本仓库提交代码即表示同意以 AGPL-3.0-only 授权，版权保留为 "GWork contributors"。
 

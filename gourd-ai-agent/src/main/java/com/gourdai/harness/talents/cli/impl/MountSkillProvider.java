@@ -16,8 +16,8 @@
 package com.gourdai.harness.talents.cli.impl;
 
 import com.gourdai.harness.talents.cli.SkillProvider;
-import org.noear.solon.ai.talents.mount.MountManager;
-import org.noear.solon.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.mount.MountManager;
+import com.gourdai.ai.talents.mount.SkillDir;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;

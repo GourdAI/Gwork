@@ -1,0 +1,6 @@
+[
+  {
+    "name": "com.gourdai.ai.llm.dialect.anthropic.AnthropicChatDialect",
+    "allDeclaredConstructors": true
+  }
+]

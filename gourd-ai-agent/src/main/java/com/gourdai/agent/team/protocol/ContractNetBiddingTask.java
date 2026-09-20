@@ -20,7 +20,7 @@ import com.gourdai.agent.Agent;
 import com.gourdai.agent.team.TeamAgent;
 import com.gourdai.agent.team.TeamAgentConfig;
 import com.gourdai.agent.team.TeamTrace;
-import org.noear.solon.ai.chat.ChatRole;
+import com.gourdai.ai.chat.ChatRole;
 import org.noear.solon.flow.FlowContext;
 import org.noear.solon.flow.NamedTaskComponent;
 import org.noear.solon.flow.Node;

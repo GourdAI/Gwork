@@ -1,0 +1,107 @@
+{
+  "properties": [
+    {
+      "name": "solon.mcp.client.*.name",
+      "type": "java.lang.String",
+      "description": "客户端名称",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    },
+    {
+      "name": "solon.mcp.client.*.version",
+      "type": "java.lang.String",
+      "description": "客户端版本号",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    },
+    {
+      "name": "solon.mcp.client.*.channel",
+      "type": "java.lang.String",
+      "description": "通讯方式（或通道）",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    },
+    {
+      "name": "solon.mcp.client.*.url",
+      "type": "java.lang.String",
+      "description": "http 接口完整地址",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    },
+    {
+      "name": "solon.mcp.client.*.headers",
+      "type": "java.util.Map",
+      "description": "http 请求头"
+    },
+    {
+      "name": "solon.mcp.client.*.httpTimeout",
+      "type": "org.noear.solon.net.http.HttpTimeout",
+      "description": "http 超时",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    },
+
+    {
+      "name": "solon.mcp.client.*.command",
+      "type": "java.lang.String",
+      "description": "stdio 命令",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    },
+    {
+      "name": "solon.mcp.client.*.args",
+      "type": "java.lang.String[]",
+      "description": "stdio 命令参数",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    },
+    {
+      "name": "solon.mcp.client.*.env",
+      "type": "java.util.Map",
+      "description": "stdio 环境变量",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    },
+
+
+
+    {
+      "name": "solon.mcp.client.*.cacheSeconds",
+      "type": "java.lang.Integer",
+      "defaultValue": 30,
+      "description": "mcp 缓存秒数",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    },
+    {
+      "name": "solon.mcp.client.*.requestTimeout",
+      "type": "java.time.Duration",
+      "defaultValue": "30s",
+      "description": "mcp 请求等待超时",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    },
+    {
+      "name": "solon.mcp.client.*.initializationTimeout",
+      "type": "java.time.Duration",
+      "defaultValue": "30s",
+      "description": "mcp 初始化等待超时",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    },
+    {
+      "name": "solon.mcp.client.*.heartbeatInterval",
+      "type": "java.time.Duration",
+      "description": "mcp 心跳间隔",
+      "sourceType": "com.gourdai.ai.mcp.client.McpClientProperties"
+    }
+  ],
+  "hints": [
+    {
+      "name": "solon.mcp.client.*.channel",
+      "values": [
+        {
+          "value": "stdio",
+          "description": "stdio"
+        },
+        {
+          "value": "sse",
+          "description": "sse"
+        },
+        {
+          "value": "streamable",
+          "description": "streamable"
+        }
+      ]
+    }
+  ]
+}

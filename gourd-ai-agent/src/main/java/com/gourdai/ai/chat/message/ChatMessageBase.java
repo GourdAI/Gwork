@@ -1,0 +1,101 @@
+/*
+ * Copyright 2017-2025 noear.org and authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.gourdai.ai.chat.message;
+
+import org.noear.solon.Utils;
+import org.noear.solon.core.util.Assert;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+/**
+ * 聊天消息基类
+ *
+ * @author noear
+ * @since 3.1
+ */
+public abstract class ChatMessageBase<Slf extends ChatMessageBase> implements ChatMessage {
+    protected Long createdAt;
+    protected Map<String, Object> metadata;
+
+    @Override
+    public Long getCreatedAt() {
+        if (createdAt == null) {
+            createdAt = System.currentTimeMillis();
+        }
+
+        return createdAt;
+    }
+
+    /**
+     * 获取元数据
+     */
+    @Override
+    public Map<String, Object> getMetadata() {
+        if (metadata == null) {
+            metadata = new LinkedHashMap<>();
+        }
+
+        return metadata;
+    }
+
+    @Override
+    public <T> T getMetadataAs(String key) {
+        return (T) getMetadata().get(key);
+    }
+
+    /**
+     * 添加元数据
+     */
+    @Override
+    public Slf addMetadata(Map<String, Object> map) {
+        if (Utils.isNotEmpty(map)) {
+            getMetadata().putAll(map);
+        }
+
+        return (Slf) this;
+    }
+
+    /**
+     * 添加元数据
+     */
+    @Override
+    public Slf addMetadata(String key, Object value) {
+        if (Utils.isNotEmpty(key)) {
+            getMetadata().put(key, value);
+        }
+
+        return (Slf) this;
+    }
+
+    @Override
+    public boolean hasMetadata(String key) {
+        if (metadata == null) {
+            return false;
+        } else {
+            return metadata.containsKey(key);
+        }
+    }
+
+    /**
+     * 是否有元数据（不触发懒初始化，便于流式逐帧检查）
+     *
+     * @since 4.1
+     */
+    public boolean hasMetadata() {
+        return Assert.isNotEmpty(metadata);
+    }
+}

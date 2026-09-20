@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 分词器惰性初始化的回归护栏。
  *
  * <p>背景：{@link ContextCompressionInterceptor} 被 {@code HarnessEngine} 构造期引用，其 clinit
- * 落在 Solon 启动主线程、HTTP 端口绑定之前。旧实现在 clinit 里用
+ * 落在框架启动主线程、HTTP 端口绑定之前。旧实现在 clinit 里用
  * {@code Encodings.newDefaultEncodingRegistry()} 即时构建 BPE 词表（cl100k + o200k 两套，
  * 实测 0.8~1.7s），把整段成本压进冷启动——而它在用户发出第一条消息之前毫无用处。
  * 现在改为 holder 惰 + {@code newLazyEncodingRegistry()}。</p>

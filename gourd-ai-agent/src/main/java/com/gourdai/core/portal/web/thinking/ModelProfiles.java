@@ -9,7 +9,7 @@ import java.util.Map;
  * <p>推理能力的最高优先级来源是用户在模型配置里写的 {@code capabilities}，它存放在
  * {@code AgentSettings.models}（{@code ModelDo}）里。UI 端点（{@code /web/chat/models}）
  * 直接持有 {@code AgentSettings}，取覆写毫无障碍；但真正发请求的注入点只拿到
- * {@code ChatModel}，而 {@code ChatModel.getConfig()} 返回的是 solon-ai 的
+ * {@code ChatModel}，而 {@code ChatModel.getConfig()} 返回的是上游的
  * {@code ChatConfigReadonly} <b>包装器</b>——它与 {@code ModelDo} 并非同一继承体系
  * （{@code ChatConfigReadonly → Object}，而 {@code ModelDo → ChatConfig → AiConfig → Object}），
  * 无论怎样强转或 {@code instanceof} 探测都取不到覆写。</p>

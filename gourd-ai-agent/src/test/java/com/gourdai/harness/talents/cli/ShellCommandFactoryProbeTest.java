@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * Windows 父 shell 探测的回归护栏。
  *
  * <p>背景：原实现只走「外挂 PowerShell + WMI 全机进程枚举」，实测 ≈2.0s（超时上限 4s），
- * 且整段在 Solon 启动主线程上同步执行——探测不结束，HTTP 端口就不会绑定。现在优先走
+ * 且整段在框架启动主线程上同步执行——探测不结束，HTTP 端口就不会绑定。现在优先走
  * {@link ShellCommandFactory#ancestorCommandsFast()}（反射调 {@code ProcessHandle}，
  * 零 fork），慢路径仅作兜底。</p>
  */

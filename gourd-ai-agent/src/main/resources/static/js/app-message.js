@@ -85,32 +85,74 @@ function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt
     if (timeEl) $(timeEl).text(formatMsgTime(msgTime));
 
     addImageLightbox(bubble);
-    $(sess.container).append(row);
-    // 容器不在 DOM 树中（如 loadMessages 的临时容器阶段）时跳过滚动，避免无效回流
-    if (sess.sessionId === activeSessionId && document.contains(sess.container)) scrollToBottom(true);
+    $(renderRoot(sess)).append(row);
+    /* 渲染落点是游离的临时容器时（回放进行中）跳过滚动：节点还没进文档，滚动既无意义
+       又会把用户从正在看的位置拽走。旧实现靠「sess.container 当时被换成了临时容器、
+       因而不在文档中」这一副作用间接达到同样效果；容器语义恒定后该副作用不复存在，
+       必须改为显式判定落点。*/
+    if (sess.sessionId === activeSessionId && !isDetachedRenderTarget(sess)
+            && document.contains(sess.container)) scrollToBottom(true);
 }
 
 function appendSystemNotice(sess, text) {
     var row = $('<div>').addClass('msg-row system-notice')[0];
     row.innerHTML = '<div class="system-notice-bubble">' + escapeHtml(text) + '</div>';
-    $(sess.container).append(row);
+    $(renderRoot(sess)).append(row);
     if (sess.sessionId === activeSessionId) scrollToBottom(true);
+}
+
+/* 插话长文本折叠：超过约 6 行或 320 字时默认收起为 5 行（CSS 限高 + 末段渐隐），
+   卡片底部出现「展开全文（共 N 字）」按钮，点击展开、再点「收起」还原；短文本保持原样。
+   判定为「阈值初判 + 实际高度校正」双口径：字符数超限但视觉不足 5 行时（如超长单行
+   token），校正后不折叠，避免出现点了没变化的无效按钮；容器隐藏的会话回放测不到
+   高度，保持阈值判定。CSS 的 max-height 按 5 行（5 × 20.8px）与之对齐。 */
+var STEER_COLLAPSE_MAX_CHARS = 320;
+var STEER_COLLAPSE_MAX_LINES = 6;
+var STEER_COLLAPSE_VISIBLE_LINES = 5;
+
+function steerNoteShouldCollapse(text) {
+    var t = (text == null) ? '' : String(text);
+    if (t.length > STEER_COLLAPSE_MAX_CHARS) return true;
+    return t.split('\n').length > STEER_COLLAPSE_MAX_LINES;
 }
 
 function appendSteerNote(sess, item) {
     if (!sess || !item || !item.steerId) return;
-    if ($(sess.container).find('[data-steer-id="' + item.steerId + '"]').length) return;
+    if ($(renderRoot(sess)).find('[data-steer-id="' + item.steerId + '"]').length) return;
 
     finishThinkingBlock(sess);
     ensureAssistantBubble(sess);
 
+    var text = (item.text == null) ? '' : String(item.text);
     var note = $('<div>').addClass('steer-note')[0];
     note.setAttribute('data-steer-id', item.steerId);
     if (item.runId || sess.activeRunId) note.setAttribute('data-run-id', item.runId || sess.activeRunId);
     note.innerHTML = '<span class="steer-note-badge">' + escapeHtml(GourdI18n.t('streaming.steer_tag')) + '</span>'
         + '<span class="steer-note-text"></span>';
-    $(note).find('.steer-note-text').text(item.text || '');
+    $(note).find('.steer-note-text').text(text);
     insertBeforeActions(sess, note);
+
+    if (steerNoteShouldCollapse(text)) {
+        var steerTextEl = $(note).find('.steer-note-text')[0];
+        var steerLineH = steerTextEl ? (parseFloat(window.getComputedStyle(steerTextEl).lineHeight) || 0) : 0;
+        var steerFullH = steerTextEl ? steerTextEl.scrollHeight : 0;
+        var visuallyShort = steerLineH > 0 && steerFullH > 0
+            && steerFullH <= steerLineH * STEER_COLLAPSE_VISIBLE_LINES + 2;
+        if (!visuallyShort) {
+            $(note).addClass('collapsed');
+            var steerToggle = $('<button>').addClass('steer-note-toggle').attr('type', 'button')[0];
+            steerToggle.setAttribute('aria-expanded', 'false');
+            steerToggle.textContent = GourdI18n.t('streaming.steer_expand_full', [text.length]);
+            note.appendChild(steerToggle);
+            $(steerToggle).on('click', function() {
+                var collapsed = $(note).toggleClass('collapsed').hasClass('collapsed');
+                steerToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+                steerToggle.textContent = collapsed
+                    ? GourdI18n.t('streaming.steer_expand_full', [text.length])
+                    : GourdI18n.t('streaming.steer_collapse');
+            });
+        }
+    }
 
     // 推进正文指针，让后续 AI 正文落在插话卡片之后；不清 toolCardsById/currentBatch。
     advanceBodyPointer(sess, sess, function(freshMd) { insertBeforeActions(sess, freshMd); });
@@ -135,7 +177,7 @@ function ensureAssistantBubble(sess) {
             + '<button class="user-copy-btn rerun-btn" title="' + GourdI18n.t('chat.rerun') + '">' + RERUN_SVG + '</button>'
             + '<button class="user-copy-btn continue-btn" title="' + GourdI18n.t('chat.continue_run') + '">' + CONTINUE_SVG + '</button>'
             + '</div></div>';
-        $(sess.container).append(row);
+        $(renderRoot(sess)).append(row);
         sess.currentBubbleEl = $(row).find('.md-content')[0];
         var copyBtn = $(row).find('.copy-btn')[0];
         // 复制目标为「最终答案」：统一从 .md-content 的 data-md-raw 读取。
@@ -254,6 +296,44 @@ function followHolderBody(h) {
    （pointerEl 为当前正文容器，可能为 null）。 */
 function ensureThinkingBlockCore(sess, h, opts) {
     if (h.thinkingBlockEl) return h.thinkingBlockEl;
+    // 交错思考复用窗口：模型在同一 run 内交替产出思考与正文（interleaved thinking，
+    // 真实会话实测单 run 21 次 reason/text 切换）时，每段正文都会收敛思考块并推进正文指针，
+    // 下一段思考又新开块——UI 被撕成「N 个思考完成条 + N 段正文碎片」的交替矩阵（用户截图现象）。
+    // 同 run、中间无工具派发、且距上次收敛未超阈值时复用刚收敛的块：恢复流式外观继续追加思考，
+    // 正文指针不动，UI 收敛为「一个思考块 + 连续正文」。真轮边界（user/done/trace）与工具派发
+    // 都会打破复用条件，多轮对话与工具夹心的版式不受影响。
+    if (h._lastFinishedThinkingBlockEl && h._lastThinkingRunId
+            && h._lastThinkingRunId === sess.currentRunId
+            && !h._thinkingInterruptedByAction
+            && (sess._replayClock || Date.now()) - (h._lastFinishedThinkingAt || 0) < 5000) {
+        var reused = h._lastFinishedThinkingBlockEl;
+        h._lastFinishedThinkingBlockEl = null;
+        if (reused.parentNode) {
+            h.thinkingBlockEl = reused;
+            h.thinkingBodyWrapEl = $(reused).find('.thinking-block-body')[0];
+            // 旧体的增量渲染器已在 finish() 里全量收敛并释放 buf：再 append 会清空已渲染内容
+            // 重来（createStreamMd 的 !active 重置分支）。故新思考段落在同块体内的新 md-content：
+            // 视觉上仍是一个思考块，上段内容保留在上、新段流式续在下。
+            var reuseBody = $('<div>').addClass('md-content')[0];
+            if (h.thinkingBodyWrapEl) h.thinkingBodyWrapEl.appendChild(reuseBody);
+            h.thinkingBodyMdEl = reuseBody;
+            h.thinkingBuffer = '';
+            $(reused).addClass('streaming');
+            var rlabel = $(reused).find('.thinking-block-label')[0];
+            if (rlabel) {
+                $(rlabel).text(GourdI18n.t('chat.thinking_in_progress'));
+                rlabel.setAttribute('data-i18n-thinking', 'progress');
+                rlabel.removeAttribute('data-i18n-elapsed');
+            }
+            var rheader = $(reused).find('.thinking-block-header')[0];
+            if (rheader && !$(reused).find('.thinking-timer-wrap')[0]) {
+                rheader.insertAdjacentHTML('beforeend',
+                    '<span class="thinking-timer-wrap" style="margin-left:4px"><span class="thinking-current-timer">0s</span></span>');
+            }
+            startThinkingTimer(h, 'thinkingBlockTimerId', 'thinkingBlockStartTime', $(reused).find('.thinking-current-timer')[0]);
+            return h.thinkingBlockEl;
+        }
+    }
     var cur = h.currentBubbleEl;
     // 「已有正文」不能只看 DOM：正文经 requestAnimationFrame 异步落盘，chunk 密集到达时
     // text 的内容可能仍缓存在 reasonBuffer 里、渲染帧尚未触发，此刻 md-content 还是空的。
@@ -314,6 +394,13 @@ function finishThinkingBlockCore(sess, h) {
     }
     $(h.thinkingBlockEl).find('.thinking-block-dots').remove();
     $(h.thinkingBlockEl).find('.thinking-timer-wrap').remove();
+    // 登记复用窗口（见 ensureThinkingBlockCore 头部注释）：同 run 的交错思考在短时间内
+    // 再次到来时复用本块，而不是新开一个「思考完成」条把正文撕碎。
+    h._lastFinishedThinkingBlockEl = h.thinkingBlockEl;
+    h._lastFinishedThinkingAt = sess._replayClock || Date.now();
+    h._lastThinkingRunId = sess.currentRunId || null;
+    // 思考块收敛即代表「上次收敛之后没有工具夹心」的窗口重新开启
+    h._thinkingInterruptedByAction = false;
     h.thinkingBlockEl = null;
     h.thinkingBodyMdEl = null;
     h.thinkingBodyWrapEl = null;
@@ -401,6 +488,9 @@ function purgeEmptyMdBlocks(container) {
    而非停留在旧气泡里被卡片顶到上方。主线路与智能体卡片共用。 */
 function advanceBodyPointer(sess, h, insertFresh) {
     if (!h) return;
+    // 工具卡/插话是思考段的真实分界：派发后不得再复用上一个已收敛的思考块，
+    // 否则「工具夹心」会被折叠进旧思考块，版式语义错乱（见 ensureThinkingBlockCore 复用窗口）。
+    h._thinkingInterruptedByAction = true;
     // 换容器前必须收尾旧容器的流式渲染器：其 tail 区可能还挂着「未提交尾部」，而指针一推进，
     // 旧容器既不会再有帧驱动、也不会有人 finish 它（finishStream 只收尾当前容器），
     // 残留 tail 会与 stable 区并列固化成「重复正文」。finish() 内部取消挂起帧并全量收敛。
@@ -613,8 +703,8 @@ function markToolCardFailed(sess) {
     // 骨架卡（data-args-streaming：参数还在生成、工具压根没开始执行）必须排除在外：
     // 把它标红等于告诉用户「这个工具执行失败了」，而它从未被调用过。
     // 它的正确归宿是移除（removeOrphanArgsStreamingCards），不是留一张红色空卡。
-    if (!icons.length && sess.container) {
-        $(sess.container).find('.tool-card:not([data-args-streaming]) .tool-status-icon.loading, .tool-batch-header .tool-status-icon.loading')
+    if (!icons.length && renderRoot(sess)) {
+        $(renderRoot(sess)).find('.tool-card:not([data-args-streaming]) .tool-status-icon.loading, .tool-batch-header .tool-status-icon.loading')
             .each(function() { icons.push(this); });
     }
     icons.forEach(function(icon) { icon.className = 'tool-status-icon reject'; icon.innerHTML = ''; });
@@ -1180,7 +1270,7 @@ function adoptArgsStreamingCard(sess, card, toolName, args, presentationTitle, a
    actionId 缺失时（该字段新增前落盘的挂起任务、快照恢复而来）降级按工具名匹配，歧义时取最后一张。
    取出即解除登记与骨架标记，避免后续 action_start 再把它当骨架卡回填。 */
 function takeoverArgsStreamingCard(sess, toolName, actionId) {
-    if (!sess || !sess.container) return null;
+    if (!sess || !renderRoot(sess)) return null;
     var found = null;
     if (actionId && sess.toolCardsById) {
         var byId = sess.toolCardsById[actionId];
@@ -1188,7 +1278,7 @@ function takeoverArgsStreamingCard(sess, toolName, actionId) {
         if (byId && byId.getAttribute && byId.getAttribute('data-args-streaming') !== null) found = byId;
     }
     if (!found && toolName) {
-        $(sess.container).find('.tool-card[data-args-streaming]').each(function() {
+        $(renderRoot(sess)).find('.tool-card[data-args-streaming]').each(function() {
             if (this.getAttribute('data-tool-name') === toolName) found = this;
         });
     }
@@ -1220,9 +1310,9 @@ function takeoverArgsStreamingCard(sess, toolName, actionId) {
    为何是移除而不是标黄：这张卡既无参数也无结果，留一个黄点空卡会被读成
    「这个工具执行失败了」，比什么都不显示更误导。由 finishStream / endTurn / 整流异常共用。 */
 function removeOrphanArgsStreamingCards(sess) {
-    if (!sess || !sess.container) return 0;
+    if (!sess || !renderRoot(sess)) return 0;
     var removed = 0;
-    $(sess.container).find('.tool-card[data-args-streaming]').each(function() {
+    $(renderRoot(sess)).find('.tool-card[data-args-streaming]').each(function() {
         var card = this;
         var actionId = card.getAttribute('data-action-id');
         if (actionId && sess.toolCardsById && sess.toolCardsById[actionId] === card) delete sess.toolCardsById[actionId];
@@ -2153,7 +2243,7 @@ function showThinking(sess) {
         + '<span class="thinking-timer-wrap">'
         + '<span class="thinking-current-timer">0s</span>'
         + '</span></div>';
-    $(sess.container).append(sess.thinkingEl);
+    $(renderRoot(sess)).append(sess.thinkingEl);
     applyPhaseLabel(sess.thinkingEl, sess.phase);
     var currentTimerSpan = $(sess.thinkingEl).find('.thinking-current-timer')[0];
     startThinkingTimer(sess, 'thinkingTimerId', 'thinkingStartTime', currentTimerSpan);
@@ -2207,6 +2297,9 @@ function purgeInlineThinking(sess) {
    仅用于精确接管骨架卡，不登记到 sess.toolCardsById —— 审批通过后会重新走 Reason，
    届时 action_start 携带的是【新的】actionId 并由 sess.approvedToolCard 分支接管同一张卡
    （见 appendActionStartChunk），此处若按旧 id 登记只会留下一条永不被消费的悬挂引用。 */
+/* 审批卡待定态的警示图标：appendHitlCard 初始渲染与 restoreHitlCardPending 失败恢复共用。 */
+var HITL_WARN_SVG = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="6" x2="12" y2="14"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>';
+
 function appendHitlCard(sess, toolName, command, actionId) {
     ensureAssistantBubble(sess);
     var presentation = resolveToolPresentation(toolName, null);
@@ -2227,10 +2320,13 @@ function appendHitlCard(sess, toolName, command, actionId) {
         }
     }
     card.setAttribute('data-tool-name', toolName);
+    // 供提交失败恢复使用（restoreHitlCardPending 从属性重建上下文；不改 handleHitlResponse
+    // 签名传卡引用——契约测试锁定了该函数与 appendHitlCard 内调用点的字面形态）
+    card.setAttribute('data-hitl-action-id', actionId || '');
     card.innerHTML = '<div class="tool-card-header">'
         + '<span class="tool-name">' + GourdI18n.t('chat.need_auth') + escapeHtml(presentation.displayName || 'unknown') + '</span>'
         + argsHtml
-        + '<span class="tool-status-icon warn"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="6" x2="12" y2="14"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg></span>'
+        + '<span class="tool-status-icon warn">' + HITL_WARN_SVG + '</span>'
         + '</div>'
         + '<div class="tool-card-body">' + (command ? escapeHtml(command) : GourdI18n.t('chat.waiting_auth')) + '</div>'
         + '<div class="hitl-card-actions">'
@@ -2261,7 +2357,8 @@ function appendHitlCard(sess, toolName, command, actionId) {
         $(card).find('.hitl-card-actions').remove();
         $(card).removeClass('hitl-pending');
         sess.approvedToolCard = card;
-        handleHitlResponse(sess, 'approve');
+        sess.pendingHitlCard = card;   // 供提交失败回退恢复（见 restoreHitlCardPending）
+        handleHitlResponse(sess, 'approve', actionId);
     });
 
     $(rejectBtn).on('click', function() {
@@ -2274,13 +2371,18 @@ function appendHitlCard(sess, toolName, command, actionId) {
         $(card).find('.hitl-card-actions').remove();
         $(card).removeClass('hitl-pending expanded');
         sess.approvedToolCard = null;
-        handleHitlResponse(sess, 'reject');
+        sess.pendingHitlCard = card;   // 供提交失败回退恢复（见 restoreHitlCardPending）
+        handleHitlResponse(sess, 'reject', actionId);
     });
 
     if (sess.sessionId === activeSessionId) scrollToBottom();
 }
 
-function handleHitlResponse(sess, action) {
+/* actionId：本张审批卡所对应的那一次工具调用标识（appendHitlCard 渲染时已持有）。
+   必须随决策一起提交：后端只按 sessionId 取「当前待处理任务」，旧页面/旧卡的迟到点击
+   会被应用到【另一次】调用上。工具审批一旦误批准不可逆（rm -rf 之类），故后端对本路径的
+   校验比问答更严：带了 actionId 就必须与挂起任务完全一致，不一致直接拒绝（HTTP 409）。 */
+function handleHitlResponse(sess, action, actionId) {
     if (sess.eventSource) { sess.eventSource.close(); sess.eventSource = null; }
     resetStreamState(sess);
 
@@ -2291,25 +2393,80 @@ function handleHitlResponse(sess, action) {
     }
     showThinking(sess);
 
-    // 通过 HTTP POST 发送 HITL 决策，结果通过 WebSocket 推送
-    var formData = new FormData();
-    formData.append('hitlAction', action);
-    formData.append('sessionId', sess.sessionId);
+    // 通过统一提交入口发送 HITL 决策，结果通过 WebSocket 推送。
+    // 不带 input 键：后端靠它的存在性区分「新一轮」与「续轮」。
+    var fields = { hitlAction: action };
+    // 空值不入表：后端据「是否携带 actionId」区分【严格校验】与【旧前端降级】两种模式，
+    // 补空串会让旧快照恢复而来的无 id 审批任务也走进严格分支，永远批不动。
+    if (actionId) fields.actionId = actionId;
+    postChatInput(sess, fields, null, {
+        onFail: function(err) {
+            console.error('HITL error:', err);
+            // 通过回调占位调用 finishStream（由 app-streaming.js 注册）
+            if (onFinishStream) onFinishStream(sess);
+            // 失败回退：恢复待审批态允许重试（409 迟到点击被拒/网络错误同走此路）。
+            // 按钮已随提交移除、状态已转终态，不恢复即交互死胡同——挂起任务永远无人应答。
+            // 与问答卡路径的「失败回退」（state.submitted = false + syncQuestionCard）同构。
+            restoreHitlCardPending(sess, sess.pendingHitlCard);
+        }
+    });
+}
 
-    // HITL 属当前会话的续轮：优先用会话自身记录的工作空间根，避免工作空间切换后错位
-    var hitlHeaders = {};
-    var hitlCwd = (sess && sess.projectRoot) ? sess.projectRoot : (typeof getSessionCwd === 'function' ? getSessionCwd() : '');
-    if (hitlCwd) hitlHeaders['X-Session-Cwd'] = hitlCwd;
-    fetch(SSE_ENDPOINT, {
-        method: 'POST',
-        body: formData,
-        headers: hitlHeaders
-    }).then(function(resp) {
-        // HTTP 响应只有 {"status":"ok"}，实际数据通过 WebSocket 推送
-    }).catch(function(err) {
-        console.error('HITL error:', err);
-        // 通过回调占位调用 finishStream（由 app-streaming.js 注册）
-        if (onFinishStream) onFinishStream(sess);
+/* HITL 提交失败后把卡片恢复为待审批态：上下文（工具名/actionId）从卡片属性重建，
+   按钮绑定与 appendHitlCard 的初始绑定镜像（两处如改一处必须同步另一处）。 */
+function restoreHitlCardPending(sess, card) {
+    if (!card || !card.parentNode) return;
+
+    var toolName = card.getAttribute('data-tool-name') || 'unknown';
+    var actionId = card.getAttribute('data-hitl-action-id') || null;
+    var presentation = resolveToolPresentation(toolName, null);
+
+    var icon = $(card).find('.tool-status-icon')[0];
+    if (icon) { icon.className = 'tool-status-icon warn'; icon.innerHTML = HITL_WARN_SVG; }
+    var hn = $(card).find('.tool-name')[0];
+    if (hn) {
+        hn.setAttribute('data-i18n-hitl', 'need_auth');
+        hn.setAttribute('data-i18n-hitl-tool', toolName);
+        $(hn).text(GourdI18n.t('chat.need_auth') + (presentation.displayName || 'unknown'));
+    }
+    if (!$(card).find('.hitl-card-actions').length) {
+        $(card).append('<div class="hitl-card-actions">'
+            + '<button class="hitl-btn hitl-btn-approve" data-i18n="chat.approve">' + GourdI18n.t('chat.approve') + '</button>'
+            + '<button class="hitl-btn hitl-btn-reject" data-i18n="chat.reject">' + GourdI18n.t('chat.reject') + '</button>'
+            + '</div>');
+    }
+    $(card).addClass('hitl-pending');
+    if (sess.approvedToolCard === card) sess.approvedToolCard = null;
+    if (sess.pendingHitlCard === card) sess.pendingHitlCard = null;
+
+    var approveBtn = $(card).find('.hitl-btn-approve')[0];
+    var rejectBtn = $(card).find('.hitl-btn-reject')[0];
+
+    $(approveBtn).off('click').on('click', function() {
+        approveBtn.disabled = true;
+        rejectBtn.disabled = true;
+        // 转为"执行中"，标记后续 action 结果复用此卡片
+        var ic = $(card).find('.tool-status-icon')[0];
+        if (ic) { ic.className = 'tool-status-icon loading'; ic.innerHTML = ''; }
+        $(card).find('.hitl-card-actions').remove();
+        $(card).removeClass('hitl-pending');
+        sess.approvedToolCard = card;
+        sess.pendingHitlCard = card;
+        handleHitlResponse(sess, 'approve', actionId);
+    });
+
+    $(rejectBtn).off('click').on('click', function() {
+        approveBtn.disabled = true;
+        rejectBtn.disabled = true;
+        var ic = $(card).find('.tool-status-icon')[0];
+        if (ic) { ic.className = 'tool-status-icon reject'; ic.innerHTML = ''; }
+        $(card).find('.tool-name').text(GourdI18n.t('chat.rejected') + (presentation.displayName || 'unknown'));
+        (function() { var h = $(card).find('.tool-name')[0]; if (h) { h.setAttribute('data-i18n-hitl', 'rejected'); h.setAttribute('data-i18n-hitl-tool', toolName); } })();
+        $(card).find('.hitl-card-actions').remove();
+        $(card).removeClass('hitl-pending expanded');
+        sess.approvedToolCard = null;
+        sess.pendingHitlCard = card;
+        handleHitlResponse(sess, 'reject', actionId);
     });
 }
 
@@ -2364,9 +2521,26 @@ function questionAnswerFor(state, index) {
     return (state && state.answers && state.answers[index]) || null;
 }
 
+/* 选项高亮判定：以 selectedLabel 为准（text 可能已拼入补充，不再等于纯标签）。
+   旧状态无 selectedLabel 字段时退回 text 比对，保证已落盘/已渲染的卡不闪失高亮。 */
 function questionOptionSelected(state, index, label) {
     var a = questionAnswerFor(state, index);
-    return !!(a && !a.skipped && !a.custom && a.text === label);
+    if (!a || a.skipped) return false;
+    var want = (label == null) ? '' : String(label);
+    if (a.selectedLabel != null) return a.selectedLabel === want;
+    return !a.custom && a.text === want;
+}
+
+/* 出站文本组装：点选选项与额外补充并存时拼成一段。
+   答案协议只有 text 一个载荷字段（已冻结，后端与测试都依赖），故拼接在客户端完成；
+   采用单行「选项（补充：XXX）」形态，与后端 formatAnswerText 既有的
+   「（用户自定义回答）」括号风格一致，模型侧读起来是完整一句而非断裂的多行。 */
+function composeQuestionAnswerText(selectedLabel, supplement) {
+    var sel = (selectedLabel == null) ? '' : String(selectedLabel).trim();
+    var sup = (supplement == null) ? '' : String(supplement).trim();
+    if (!sel) return sup;
+    if (!sup) return sel;
+    return sel + '（补充：' + sup + '）';
 }
 
 function questionIsAllAnswered(state) {
@@ -2384,15 +2558,65 @@ function advanceQuestionCursor(state) {
 
 function applyQuestionOptionAnswer(state, index, label) {
     if (!state) return;
-    state.answers[index] = { index: index, text: (label == null ? '' : String(label)), skipped: false, custom: false };
+    var sel = (label == null) ? '' : String(label);
+    // 改选别的选项时保留已写的补充：用户先补一句再换选项，补充不该被顶掉
+    var prev = questionAnswerFor(state, index);
+    var sup = (prev && prev.supplement) ? String(prev.supplement) : '';
+    state.answers[index] = {
+        index: index,
+        text: composeQuestionAnswerText(sel, sup),
+        selectedLabel: sel,
+        supplement: sup,
+        skipped: false,
+        custom: false
+    };
     state.otherEditing = false;
     advanceQuestionCursor(state);
 }
 
+/* 追加/更新补充说明：只写 supplement，绝不触碰已点选的选项。
+   也不推进光标——补充是对当前题的注解，不是「这题答完了」的信号，
+   推进会让用户补一句话就被翻到下一题。 */
+function applyQuestionSupplement(state, index, text) {
+    if (!state) return;
+    var sup = (text == null) ? '' : String(text).trim();
+    var prev = questionAnswerFor(state, index);
+    var sel = (prev && prev.selectedLabel) ? String(prev.selectedLabel) : '';
+    state.drafts[index] = sup;
+    if (!sup && !sel) {
+        // 既没选项也没补充：撤掉这道题的答案，回到未作答态（允许用户反悔清空）
+        delete state.answers[index];
+        state.otherEditing = false;
+        return;
+    }
+    state.answers[index] = {
+        index: index,
+        text: composeQuestionAnswerText(sel, sup),
+        selectedLabel: sel,
+        supplement: sup,
+        skipped: false,
+        // 没点任何选项、纯手写 = 用户自定义回答；已点选项则 custom 保持 false
+        custom: !sel && !!sup
+    };
+    state.otherEditing = false;
+}
+
+/* 手写文本统一入口（卡片内补充行 Enter 与底部主输入框共用）：
+   当前题已点选选项 → 作为补充追加，选项保留（这是本次修复的核心：
+   旧实现无条件整条覆盖 answers[index]，用户选完选项再补一句，选项会被静默顶掉，
+   后端只看到 custom=true 的补充文本，模型完全不知道用户选过什么）；
+   当前题未点选 → 作为自定义答案替代（原语义不变）。 */
 function applyQuestionCustomAnswer(state, index, text) {
     if (!state) return;
+    var prev = questionAnswerFor(state, index);
+    if (prev && !prev.skipped && prev.selectedLabel) {
+        applyQuestionSupplement(state, index, text);
+        return;
+    }
     var val = (text == null) ? '' : String(text);
-    state.answers[index] = { index: index, text: val, skipped: false, custom: true };
+    state.answers[index] = {
+        index: index, text: val, selectedLabel: '', supplement: '', skipped: false, custom: true
+    };
     state.drafts[index] = val;
     state.otherEditing = false;
     advanceQuestionCursor(state);
@@ -2402,24 +2626,31 @@ function skipQuestionAnswer(state) {
     if (!state || !state.questions || state.questions.length === 0) return;
     var i = state.current;
     // 已有状态（已答/已跳过）的题只推进，不覆盖
-    if (!state.answers[i]) state.answers[i] = { index: i, text: '', skipped: true, custom: false };
+    if (!state.answers[i]) state.answers[i] = skippedAnswer(i);
     state.otherEditing = false;
     advanceQuestionCursor(state);
+}
+
+function skippedAnswer(index) {
+    return { index: index, text: '', selectedLabel: '', supplement: '', skipped: true, custom: false };
 }
 
 function fillUnansweredAsSkipped(state) {
     if (!state || !state.questions) return;
     for (var i = 0; i < state.questions.length; i++) {
-        if (!state.answers[i]) state.answers[i] = { index: i, text: '', skipped: true, custom: false };
+        if (!state.answers[i]) state.answers[i] = skippedAnswer(i);
     }
 }
 
+/* 出站 payload 严格保持四键 {index,text,skipped,custom}：
+   selectedLabel / supplement 只是本地渲染与「不覆盖」判定用的语义位，绝不入表——
+   后端 AskUser.parseAnswers / formatAnswerText 与两份契约测试都按这四个字段冻结。 */
 function buildQuestionAnswersPayload(state) {
     var out = [];
     var n = (state && state.questions) ? state.questions.length : 0;
     for (var i = 0; i < n; i++) {
         var a = (state && state.answers && state.answers[i]) || null;
-        if (!a) a = { index: i, text: '', skipped: true, custom: false };
+        if (!a) a = skippedAnswer(i);
         out.push({
             index: i,
             text: (a.text == null) ? '' : String(a.text),
@@ -2555,11 +2786,17 @@ function getPendingQuestionState(sess) {
 }
 
 /* question 帧入口（实时与历史回放共用）：状态挂会话；仅活动会话渲染 DOM。
-   同 actionId 重复帧幂等（保留已作答进度，仅刷新题面）；不同 actionId 视为新一轮提问，替换旧状态。 */
+   同 actionId 重复帧幂等（保留已作答进度，仅刷新题面）；不同 actionId 视为新一轮提问，替换旧状态。
+
+   【回放隔离】回放期的历史 question 帧同样不得抢占当前活跃卡：用户正在作答 B 时上拉加载历史，
+   历史里的问题 A 会先把状态改写成 A（随后的应答帧再把它清掉），结果同样是 B 的卡消失。
+   故回放中遇到「已有未提交且 actionId 不同」的活跃状态时直接跳过；其余情形（无状态/同题/已提交）
+   行为不变，初始加载时「切回会话重建待答卡」的回放路径照常生效。 */
 function appendQuestionCard(sess, chunk) {
     if (!sess) return;
     var actionId = (chunk && chunk.actionId) ? String(chunk.actionId) : '';
     var prev = sess._questionState;
+    if (sess._replaying && prev && !prev.submitted && prev.actionId !== actionId) return;
     if (!prev || prev.actionId !== actionId || prev.submitted) {
         sess._questionState = createQuestionCardState(actionId, normalizeQuestionArgs(chunk && chunk.args));
     } else {
@@ -2570,9 +2807,25 @@ function appendQuestionCard(sess, chunk) {
 }
 
 /* question_answered 帧入口：问答已闭环（本人提交或他端作答），清状态并隐藏卡片。
-   回放链路上「question 先建卡 → question_answered 随即隐藏」由顺序重放自然达成。 */
-function handleQuestionAnsweredFrame(sess) {
+   回放链路上「question 先建卡 → question_answered 随即隐藏」由顺序重放自然达成。
+
+   【回放隔离】历史帧不得改写当前活跃会话的问答状态：用户正等待回答问题 B 时向上翻页，
+   历史里问题 A 的 question_answered 会把 B 的卡直接清掉且回放结束后不恢复（卡永久消失）。
+   按 actionId 区分而不是简单地「回放期一律不清」：同一道题的历史应答帧仍应收卡（他端已作答的真实闭环）。
+   旧帧无 actionId（字段新增前落盘）：实时帧维持旧行为（无条件清），回放帧则不清——
+   宁可多留一瞬已答卡，也好过把用户正在作答的当前卡弄没。 */
+function handleQuestionAnsweredFrame(sess, chunk) {
     if (!sess) return;
+    var st = sess._questionState;
+    if (!st) return;
+    var frameActionId = (chunk && chunk.actionId) ? String(chunk.actionId) : '';
+    if (sess._replaying) {
+        // 回放上下文：只允许清「同一道题」的卡；无法比对身份时一律不动当前状态。
+        if (!frameActionId || !st.actionId || st.actionId !== frameActionId) return;
+    } else if (frameActionId && st.actionId && st.actionId !== frameActionId) {
+        // 实时帧也不得跨题清卡：另一道题的闭环帧与当前待答卡无关。
+        return;
+    }
     sess._questionState = null;
     if (sess.sessionId === activeSessionId) syncQuestionCard();
 }
@@ -2580,9 +2833,17 @@ function handleQuestionAnsweredFrame(sess) {
 /* 按当前活动会话的问答状态同步卡片：无状态 → 隐藏；有状态 → 按状态重建内容。
    调用点：帧到达、卡片交互、会话切换（setActiveSession/deactivateSession）、语言切换。 */
 function syncQuestionCard(opts) {
+    /* 问答挂起标志（app-base.js applyChatPlaceholder 消费）：活动会话存在未提交待答题时，
+       主输入框 placeholder 切换为「输入想法即作答」指引——挂起期打字会被记为当前题答案，
+       但入口零提示用户根本不知道这条路。host 缺失等异常路径不影响标志结算，故先于 host 取值。 */
+    var sess = activeSessionId ? sessionMap[activeSessionId] : null;
+    var pendingHint = !!getPendingQuestionState(sess);
+    if (window._questionPendingHint !== pendingHint) {
+        window._questionPendingHint = pendingHint;
+        if (typeof applyChatPlaceholder === 'function') applyChatPlaceholder();
+    }
     var host = ensureQuestionCardHost();
     if (!host) return;
-    var sess = activeSessionId ? sessionMap[activeSessionId] : null;
     var state = sess ? (sess._questionState || null) : null;
     if (!state || !state.questions || state.questions.length === 0) {
         host.innerHTML = '';
@@ -2592,6 +2853,12 @@ function syncQuestionCard(opts) {
     renderQuestionCard(host, sess, state, opts || {});
     $(host).show();
 }
+
+/* 属性上下文转义：全局 escapeHtml 只覆盖 &<>，属性值里的引号会截断属性（自注入面）。
+   与 app-model-settings.js 的 escapeAttr 同口径。 */
+var escapeAttr = function (s) {
+    return escapeHtml(s).replace(/"/g, '&quot;');
+};
 
 /* 渲染卡片到宿主（整卡重建；交互态与输入草稿全部来自 state，重建无损） */
 function renderQuestionCard(host, sess, state, opts) {
@@ -2609,7 +2876,7 @@ function renderQuestionCard(host, sess, state, opts) {
     var entering = state._entered ? '' : ' question-card-enter';
     state._entered = true;
 
-    var html = '<div class="question-card' + (submitted ? ' submitted' : '') + entering + '" data-action-id="' + escapeHtml(state.actionId || '') + '">';
+    var html = '<div class="question-card' + (submitted ? ' submitted' : '') + entering + '" data-action-id="' + escapeAttr(state.actionId || '') + '">';
 
     /* 题目行：题目文本（含详情/跳过标记）｜右侧 ‹ n/N ›（仅多题）与 X */
     html += '<div class="question-card-header">';
@@ -2628,7 +2895,7 @@ function renderQuestionCard(host, sess, state, opts) {
             + '</div>';
     }
     if (!submitted) {
-        html += '<button type="button" class="question-card-close" data-i18n-title="chat.question_close" title="' + escapeHtml(GourdI18n.t('chat.question_close')) + '">' + QUESTION_CARD_SVG_CLOSE + '</button>';
+        html += '<button type="button" class="question-card-close" data-i18n-title="chat.question_close" title="' + escapeAttr(GourdI18n.t('chat.question_close')) + '">' + QUESTION_CARD_SVG_CLOSE + '</button>';
     } else {
         html += '<span class="question-card-close-placeholder" aria-hidden="true"></span>';
     }
@@ -2649,22 +2916,30 @@ function renderQuestionCard(host, sess, state, opts) {
             + '</span>'
             + '</button>';
     }
-    /* 「其他补充…」行：点击变输入框，Enter 确认；提交后仅作状态展示 */
+    /* 「补充说明」行：点击变输入框，Enter 确认；提交后仅作状态展示。
+       文案随本题状态切换：已点选选项时是「再补充一句」（补充与选项并存），
+       未点选时是「以上都不合适？自己输入回答」（手写替代所有选项）。
+       两个分支都保留字面量 GourdI18n.t('chat.question_other'…) 调用，契约测试按字面量计数。 */
+    var selLabel = (answer && answer.selectedLabel) ? String(answer.selectedLabel) : '';
+    var hasSel = !!selLabel;
+    var supText = (answer && !answer.skipped)
+        ? String(answer.supplement || (answer.custom ? (answer.text || '') : '') || '')
+        : '';
     var draft = (state.drafts[idx] != null)
         ? String(state.drafts[idx])
-        : ((answer && answer.custom) ? String(answer.text || '') : '');
+        : supText;
     if (state.otherEditing && !submitted) {
         html += '<div class="question-card-other-row is-editing">'
             + '<span class="question-card-opt-index">' + QUESTION_CARD_SVG_EDIT + '</span>'
-            + '<input type="text" class="question-card-other-input" autocomplete="off" spellcheck="false" placeholder="' + escapeHtml(GourdI18n.t('chat.question_other')) + '" value="' + escapeHtml(draft) + '"/>'
+            + '<input type="text" class="question-card-other-input" autocomplete="off" spellcheck="false" placeholder="' + escapeAttr(hasSel ? GourdI18n.t('chat.question_supplement_placeholder') : GourdI18n.t('chat.question_other_placeholder')) + '" value="' + escapeAttr(draft) + '"/>'
             + '</div>';
     } else {
-        html += '<div class="question-card-other-row' + ((answer && answer.custom) ? ' selected' : '') + '"'
+        html += '<div class="question-card-other-row' + (supText ? ' selected' : '') + '"'
             + (submitted ? '' : ' role="button" tabindex="0"')
             + ' data-q-index="' + idx + '">'
             + '<span class="question-card-opt-index">' + QUESTION_CARD_SVG_EDIT + '</span>'
-            + '<span class="question-card-opt-label">' + escapeHtml(GourdI18n.t('chat.question_other')) + '</span>'
-            + ((answer && answer.custom) ? '<span class="question-card-opt-answer">' + escapeHtml(answer.text || '') + '</span>' : '')
+            + '<span class="question-card-opt-label">' + escapeHtml(hasSel ? GourdI18n.t('chat.question_supplement') : GourdI18n.t('chat.question_other')) + '</span>'
+            + (supText ? '<span class="question-card-opt-answer">' + escapeHtml(supText) + '</span>' : '')
             + '</div>';
     }
     html += '</div>';
@@ -2694,6 +2969,9 @@ function renderQuestionCard(host, sess, state, opts) {
    payload：questionAnswer=JSON.stringify({answers:[{index,text,skipped,custom},...]})，恢复内容走 WebSocket。 */
 function handleQuestionResponse(sess, state) {
     if (!sess || !state || state.submitted) return;
+    // 先把「已打字但未回车」的卡片草稿与底部输入框文本收进答案，再置提交锁
+    //（否则收割函数会被 submitted / getPendingQuestionState 拦住）
+    harvestQuestionInputOnSubmit(sess, state);
     state.submitted = true;
     state.otherEditing = false;
     if (sess.sessionId === activeSessionId) syncQuestionCard();
@@ -2708,33 +2986,29 @@ function handleQuestionResponse(sess, state) {
     }
     showThinking(sess);
 
-    // 通过 HTTP POST 发送全部答案，结果通过 WebSocket 推送
-    var formData = new FormData();
-    formData.append('questionAnswer', JSON.stringify(buildQuestionAnswersPayload(state)));
-    formData.append('sessionId', sess.sessionId);
-
-    // 问答属当前会话的续轮：优先用会话自身记录的工作空间根，避免工作空间切换后错位
-    var questionHeaders = {};
-    var questionCwd = (sess && sess.projectRoot) ? sess.projectRoot : (typeof getSessionCwd === 'function' ? getSessionCwd() : '');
-    if (questionCwd) questionHeaders['X-Session-Cwd'] = questionCwd;
-    fetch(SSE_ENDPOINT, {
-        method: 'POST',
-        body: formData,
-        headers: questionHeaders
-    }).then(function(resp) {
-        // HTTP 响应只有 {"status":"ok"}，实际数据通过 WebSocket 推送
-    }).catch(function(err) {
-        console.error('Question answer error:', err);
-        // 失败回退：解除「已提交」锁，保留答案允许重试（否则卡片永卡禁用态而任务不会恢复）
-        state.submitted = false;
-        if (sess.sessionId === activeSessionId) syncQuestionCard();
-        // 通过回调占位调用 finishStream（由 app-streaming.js 注册）——与 handleHitlResponse 同构
-        if (onFinishStream) onFinishStream(sess);
+    // 通过统一提交入口发送全部答案，结果通过 WebSocket 推送。
+    // 不带 input 键：后端靠它的存在性区分「新一轮」与「续轮」。
+    var fields = {
+        questionAnswer: JSON.stringify(buildQuestionAnswersPayload(state))
+    };
+    // 携带本张卡所属的调用标识：后端只按 sessionId 取待处理任务，旧页面/旧卡的迟到提交
+    // 会把答案写到【另一道题】上。空值不入表（旧快照恢复的挂起任务可能本就没有 actionId）。
+    if (state.actionId) fields.actionId = String(state.actionId);
+    postChatInput(sess, fields, null, {
+        onFail: function(err) {
+            console.error('Question answer error:', err);
+            // 失败回退：解除「已提交」锁，保留答案允许重试（否则卡片永卡禁用态而任务不会恢复）
+            state.submitted = false;
+            if (sess.sessionId === activeSessionId) syncQuestionCard();
+            // 通过回调占位调用 finishStream（由 app-streaming.js 注册）——与 handleHitlResponse 同构
+            if (onFinishStream) onFinishStream(sess);
+        }
     });
 }
 
 /* 底部输入框路由入口：把待作答会话的输入文本记为当前题的自定义答案
-   （语义等价卡片内「其他补充」输入 + Enter；由 sendMessage 在普通发送链路之前调用）。 */
+   （语义等价卡片内「其他补充」输入 + Enter；由 sendMessage 在普通发送链路之前调用）。
+   已点选选项时由 applyQuestionCustomAnswer 内部转为「追加补充」，选项不会被顶掉。 */
 function applyQuestionCustomAnswerByText(sess, text) {
     var state = getPendingQuestionState(sess);
     if (!state) return false;
@@ -2746,16 +3020,59 @@ function applyQuestionCustomAnswerByText(sess, text) {
     return true;
 }
 
+/* 提交前收割「用户已经打了但没回车」的两处文字，全部折进当前题答案。
+
+   【为什么必须有这一步】两个真实丢字路径：
+   ① 卡片内补充行打了字但直接去点「发送」（没按 Enter）—— 草稿只在 drafts 里，不入 answers；
+   ② 选完选项后在底部主输入框补一句，然后点卡片「发送」—— 这条路径不经 sendMessage，
+      文字既不在 answers 里也没被清空，静静留在输入框（看起来像发出去了），模型完全收不到。
+   这正是「选了选项，下面输入的内容没携带给模型」的根因。
+
+   两处同时存在时合并为一段（卡片草稿优先，再接输入框文本），不互相覆盖。
+   只收当前活动会话的输入框（输入框全局共享，卡片属于 sess）；附件无处安放
+   （答案协议只有 text 字段），保持原有暂存不动，与 sendMessage 的附件口径一致。
+   光标位置收割后还原：提交失败回退（submitted=false）时不给重试引入额外差异。 */
+function harvestQuestionInputOnSubmit(sess, state) {
+    if (!sess || !state || sess.sessionId !== activeSessionId) return;
+
+    var idx = state.current;
+    var applied = questionAnswerFor(state, idx);
+    // 当前题已被标记跳过（如点 X「跳过剩余直接提交」先走 fillUnansweredAsSkipped）：
+    // 尊重用户的放弃意图，输入框残留不得把一道已跳过的题偷偷改成自定义答案。
+    if (applied && applied.skipped) return;
+    var appliedSup = (applied && applied.supplement) ? String(applied.supplement).trim() : '';
+
+    /* ① 卡片内补充行的未确认草稿：它是该字段的编辑缓冲（input 事件实时回写），
+          比已入库值更新，故直接取代——不得拼接，否则同一段话会写两遍。 */
+    var sup = appliedSup;
+    if (state.drafts && Object.prototype.hasOwnProperty.call(state.drafts, idx)) {
+        var draft = String(state.drafts[idx] == null ? '' : state.drafts[idx]).trim();
+        if (draft) sup = draft;
+    }
+
+    /* ② 底部主输入框的文本：它是【另一个输入面】，追加到补充末尾（不覆盖已确认的） */
+    var boxText = (typeof getInputText === 'function') ? (getInputText() || '').trim() : '';
+    if (boxText) sup = sup ? (sup + ' ' + boxText) : boxText;
+
+    if (!sup || sup === appliedSup) return;   // 无新内容，不动答案
+
+    var savedCursor = state.current;
+    // 统一走 applyQuestionSupplement：已点选项→追加为补充（选项保留），未点选项→记为自定义回答
+    applyQuestionSupplement(state, idx, sup);
+    state.current = savedCursor;
+    if (boxText && typeof clearInput === 'function') clearInput();
+}
+
 /* ===== Rewind Handling ===== */
 function handleRewind(sess, count) {
     if (count <= 0) return;
     // count = 要删除的消息条数，从末尾倒序删除
     var toRemove = count;
-    var rows = $(sess.container).find('.msg-row');
+    var rows = $(renderRoot(sess)).find('.msg-row');
     var actual = Math.min(toRemove, rows.length);
     for (var i = 0; i < actual; i++) {
         $(rows[rows.length - 1]).remove();
-        rows = $(sess.container).find('.msg-row');
+        rows = $(renderRoot(sess)).find('.msg-row');
     }
     resetStreamState(sess);
     if (sess.sessionId === activeSessionId) scrollToBottom(true);

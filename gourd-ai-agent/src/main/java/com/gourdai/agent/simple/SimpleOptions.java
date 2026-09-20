@@ -1,7 +1,7 @@
 package com.gourdai.agent.simple;
 
 import com.gourdai.agent.event.AgentEvent;
-import org.noear.solon.ai.chat.ModelOptionsAmend;
+import com.gourdai.ai.chat.ModelOptionsAmend;
 import org.noear.solon.lang.Preview;
 import reactor.core.publisher.FluxSink;
 

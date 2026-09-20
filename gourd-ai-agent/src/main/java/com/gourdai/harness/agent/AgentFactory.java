@@ -19,7 +19,7 @@ import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.react.intercept.ToolSanitizerInterceptor;
 import com.gourdai.agent.util.AskUserTool;
 import com.gourdai.harness.HarnessExtension;
-import org.noear.solon.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ChatModel;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.talents.cli.TerminalTalentProxy;
 import org.noear.solon.core.util.Assert;

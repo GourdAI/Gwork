@@ -1,0 +1,86 @@
+/*
+ * Copyright 2017-2025 noear.org and authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.gourdai.ai.chat.message;
+
+import org.noear.solon.Utils;
+import com.gourdai.ai.chat.content.ContentBlock;
+import org.noear.solon.core.util.Assert;
+import org.noear.solon.expression.snel.SnEL;
+import org.noear.solon.lang.Preview;
+
+import java.util.*;
+
+/**
+ * 聊天用户消息模板
+ *
+ * @author noear
+ * @since 3.1
+ */
+@Preview("3.1")
+public class UserMessageTemplate {
+    private final String tmpl;
+    private final Map<String, Object> params = new HashMap<>();
+    private List<ContentBlock> blocks;
+
+
+    /**
+     * @param tmpl '${question} \r\n context: ${context}'
+     */
+    public UserMessageTemplate(String tmpl) {
+        Assert.notNull(tmpl, "tmpl is null");
+        this.tmpl = tmpl;
+    }
+
+    /**
+     * 配置参数
+     */
+    public UserMessageTemplate paramAdd(String name, Object value) {
+        params.put(name, value);
+        return this;
+    }
+
+    /**
+     * 配置参数
+     */
+    public UserMessageTemplate paramAdd(Map<String, Object> args) {
+        if (Utils.isNotEmpty(args)) {
+            params.putAll(args);
+        }
+
+        return this;
+    }
+
+    /**
+     * 添加多模态内容块
+     *
+     * @since 3.9.2
+     */
+    public UserMessageTemplate blockAdd(ContentBlock block) {
+        if (blocks == null) {
+            blocks = new ArrayList<>();
+        }
+        blocks.add(block);
+        return this;
+    }
+
+    /**
+     * 生成
+     */
+    public UserMessage generate() {
+        String content = SnEL.evalTmpl(tmpl, params);
+        return ChatMessage.ofUser(content, blocks);
+    }
+}

@@ -1,11 +1,11 @@
 package com.gourdai.agent.react.intercept;
 
 import org.junit.jupiter.api.Test;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.message.ToolMessage;
-import org.noear.solon.ai.chat.tool.ToolCall;
-import org.noear.solon.ai.chat.tool.ToolResult;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ToolMessage;
+import com.gourdai.ai.chat.tool.ToolCall;
+import com.gourdai.ai.chat.tool.ToolResult;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -36,8 +36,8 @@ class ToolResultSweepTest {
             // ToolCall(uuid, index, name, argumentsStr, arguments)
             calls.add(new ToolCall(id, null, "read", "{}", new LinkedHashMap<>()));
         }
-        // 4.1：AssistantMessage 改为 text/thinking 双通道，构造签名新增 thinking 位
-        return new AssistantMessage("", "", false, null, null, calls, null);
+        // 4.1.1：raw 构造器（含 isThinking 布尔位）已移除，改用 snapshot() 工厂。
+        return AssistantMessage.snapshot("", "", calls, null, null, null, null);
     }
 
     private static ToolMessage resultOf(String id, String tool, String content) {

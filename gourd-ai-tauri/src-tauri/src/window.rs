@@ -186,6 +186,13 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .maximizable(true)
         .minimizable(true)
         .closable(true)
+        // Tauri v2 的原生拖放处理器默认开启（dragDropEnabled=true），会在 OS 层
+        // RegisterDragDrop 抢占拖放，使 WebView 内的 HTML5 drop 事件永不触发——
+        // 表现为「拖进来遮罩会亮（dragenter 仍走 WebView），松手却没反应」。
+        // 前端 app-ui.js 的落区靠 dataTransfer.files 收文件，故必须把拖放交还前端。
+        // 注意：不能改 tauri.conf.json 的 dragDropEnabled——本工程 app.windows 是空数组，
+        // 窗口全部由此处运行时创建（URL 依赖动态分配的 UI 端口），配置项不会生效。
+        .disable_drag_drop_handler()
         .fullscreen(false);
 
     // ── 窗口装饰策略（详见 titlebar_ui.rs 模块文档）──

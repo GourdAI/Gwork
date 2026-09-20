@@ -19,7 +19,7 @@ public interface ModelProvider {
         String[] suffixes = {"/api/anthropic/v1/messages","/api/paas/v4/chat/completions",
                 "/api/coding/paas/v4/chat/completions",
                 "/api/anthropic","/chat/completions", "/images/generations", "/embeddings",
-                "/completions",  };
+                "/completions", "/api/chat/", "/api/chat",  };
         String url = apiUrl;
         for (String suffix : suffixes) {
             if (url.endsWith(suffix)) {

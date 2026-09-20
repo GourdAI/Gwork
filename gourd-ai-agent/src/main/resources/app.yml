@@ -15,7 +15,7 @@ solon.logging.appender:
   file:
     level: DEBUG
     # 默认值兜底：仅 App.main 会注入 gwork.log.dir（见 App.java）。任何不经过 App.main 的
-    # Solon 启动路径（单测、未来新入口）若解析不到该占位符，最坏会在磁盘上建出名为
+    # 框架启动路径（单测、未来新入口）若解析不到该占位符，最坏会在磁盘上建出名为
     # "${gwork.log.dir}" 的字面量目录。
     name: "${gwork.log.dir:.gwork/logs}/${solon.app.name}"
 

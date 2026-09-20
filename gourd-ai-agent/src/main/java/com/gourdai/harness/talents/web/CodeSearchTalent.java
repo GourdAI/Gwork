@@ -16,12 +16,12 @@
 package com.gourdai.harness.talents.web;
 
 import org.noear.solon.Utils;
-import org.noear.solon.ai.annotation.ToolMapping;
-import org.noear.solon.ai.chat.talent.AbsTalent;
-import org.noear.solon.ai.chat.tool.ToolResult;
-import org.noear.solon.ai.mcp.McpChannel;
-import org.noear.solon.ai.mcp.client.McpClientProvider;
-import org.noear.solon.ai.util.RetryUtil;
+import com.gourdai.ai.annotation.ToolMapping;
+import com.gourdai.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.chat.tool.ToolResult;
+import com.gourdai.ai.mcp.McpChannel;
+import com.gourdai.ai.mcp.client.McpClientProvider;
+import com.gourdai.ai.util.RetryUtil;
 import org.noear.solon.annotation.Param;
 
 import java.time.Duration;
@@ -83,7 +83,7 @@ public class CodeSearchTalent extends AbsTalent {
                     "- 可调节 Token 数量 (1000-50000) 以获得精确或详尽的结果\n" +
                     "- 默认 5000 Token 为大多数查询提供均衡的上下文\n" +
                     "- 支持关于框架、库、API 以及编程概念的查询\n" +
-                    "- 示例：'React 状态管理'、'Spring Boot 响应式编程'、'Solon 插件开发'")
+                    "- 示例：'React 状态管理'、'Spring Boot 响应式编程'、'Node.js 插件开发'")
     public String codesearch(@Param(name = "query", description = "搜索查询词，用于查找 API、库和 SDK 的相关上下文。 " +
                                  "例如：'React useState 钩子示例'、'Python pandas 数据框过滤'、" +
                                  "'Express.js 中间件'、'Next.js 局部预渲染配置'")

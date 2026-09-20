@@ -18,7 +18,8 @@ package com.gourdai.agent.util;
 import org.noear.snack4.ONode;
 import com.gourdai.agent.Agent;
 import com.gourdai.agent.AgentProfile;
-import org.noear.solon.ai.chat.message.AssistantMessage;
+import com.gourdai.agent.event.ReasonEndEvent;
+import com.gourdai.ai.chat.message.AssistantMessage;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.flow.FlowContext;
 
@@ -115,11 +116,18 @@ public class AgentUtil {
      * @return 纯净正文；message 为 null 或无内容时为空串
      */
     public static String getResultContentWithoutReasoning(AssistantMessage message, String streamedReasoningPrefix) {
-        if (message == null || !message.hasContent()) {
+        if (message == null) {
             return "";
         }
 
-        String content = message.getContent();
+        // 4.1.1：hasContent()/getContent() 只看 text 通道。而思考帧的 text 恒为空、
+        // 内容在 thinking 通道，若沿用 hasContent() 守卫会把思考帧当成空消息直接
+        // 返回空串，下游的思考展示与去重全部失效。故这里按「哪个通道有值」取文本：
+        // 纯思考消息取 thinking，其余（含混合态）取 text。
+        String content = message.isThinkingOnly() ? message.getThinking() : message.getText();
+        if (Assert.isEmpty(content)) {
+            return "";
+        }
 
         // 1) 精确前缀剥离：前缀由流式帧序拼接而来，与聚合 content 前缀严格相等时无标签歧义
         if (Assert.isNotEmpty(streamedReasoningPrefix)
@@ -142,7 +150,7 @@ public class AgentUtil {
     }
 
     /**
-     * 获取聚合响应的纯净正文（Solon AI 4.1 双通道优先）。
+     * 获取聚合响应的纯净正文（双通道优先，对齐上游 4.1）。
      *
      * <p><b>4.1 变更</b>：{@code AssistantMessage} 拆成 {@code text} / {@code thinking}
      * 两个独立通道，方言侧已在 {@code AbstractChatDialect} 的状态机里剥掉
@@ -277,6 +285,30 @@ public class AgentUtil {
     }
 
     /**
+     * 只有真实 thinking 通道或文本 ReAct 的 Thought 段才可作为思考展示。
+     *
+     * <p>Native tool 的普通正文回退值不能重复渲染成思考：{@code ReasonTask.extractThought}
+     * 在原生工具模式下会把整段正文当作思考回退值返回，此时 {@code ReasonEndEvent.getThinking()}
+     * 与 {@code getText()} 装着同一份正文。消费端若无此护栏，会把同一段正文同时灌进思考通道与
+     * 正文通道（同文三帧/重复记录），故补发门禁与各端补发逻辑都必须先过这道判定。</p>
+     *
+     * <p>单点收敛到本方法：Web 流构建器（主代理补发）与 TaskTalent 子代理门禁共用同一判定，
+     * 防止两处语义漂移。</p>
+     *
+     * @since 4.1
+     */
+    public static boolean isDisplayableThinking(ReasonEndEvent event) {
+        if (event == null || !event.hasThinking() || event.getAssistantMessage() == null) {
+            return false;
+        }
+        if (event.getAssistantMessage().isThinkingOnly()) {
+            return true;
+        }
+        String content = event.getAssistantMessage().getContent();
+        return content != null && content.contains("Thought:");
+    }
+
+    /**
      * 折叠聚合思考里的「终态重放」副本，返回思考与真实增量同形的助手消息。
      *
      * <p><b>为何流式抑制还不够</b>：{@link #isThinkingReplay} 只拦住了下发通道，而方言
@@ -393,21 +425,24 @@ public class AgentUtil {
     /**
      * 以新的思考文本重建助手消息，其余字段逐一搬运。
      *
-     * <p>{@code contentRaw} 必须显式传入：构造器在收到 null 时会用 {@code getContent()}
-     * 自动回填，直接影响方言回传的原始内容。</p>
+     * <p>4.1.1 起改用 {@code snapshot()} 工厂：原来的多参 raw 构造器（含 isThinking
+     * 布尔位与 contentRaw）已移除。snapshot 能完整搬运 searchResults / citations /
+     * protocolStates / metadata，比旧构造器覆盖面更广——protocolStates 承载着
+     * Responses 协议的 reasoning 回放数据，丢失会直接导致多轮思考回传失败。</p>
+     *
+     * <p>{@code reasoningFieldName} 在 4.1.1 已无 setter（仅存 @Deprecated getter），
+     * 该语义现由方言层自行决定，故不再搬运。</p>
      */
     private static AssistantMessage rebuildWithThinking(AssistantMessage source, String thinking) {
-        AssistantMessage rebuilt = new AssistantMessage(
+        AssistantMessage rebuilt = AssistantMessage.snapshot(
                 source.getTextRaw(),
                 thinking,
-                source.isThinking(),
-                source.getContentRaw(),
-                source.getToolCallsRaw(),
                 source.getToolCalls(),
-                source.getSearchResultsRaw(),
-                source.getBlocks());
+                source.getBlocks(),
+                source.getSearchResults(),
+                source.getCitations(),
+                source.getProtocolStates());
 
-        rebuilt.reasoningFieldName(source.getReasoningFieldName());
         rebuilt.addMetadata(source.getMetadata());
 
         return rebuilt;

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Solon Code CLI installer (Linux / macOS / Git Bash)
+# GWork CLI installer (Linux / macOS / Git Bash)
 set -e
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
@@ -70,14 +70,14 @@ PATH_FILES=("$HOME/.profile" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zshrc
 for file in "${PATH_FILES[@]}"; do
   [ -f "$file" ] || continue
   tmp="${file}.gwork.tmp"
-  sed -E '/^[[:space:]]*# Solon Code CLI[[:space:]]*$/d; /^[[:space:]]*export PATH="\$PATH:\$HOME\/\.gourdai\/bin"[[:space:]]*$/d; /^[[:space:]]*export PATH="\$PATH:\$HOME\/\.gwork\/bin"[[:space:]]*$/d' "$file" > "$tmp"
-  printf '\n# Solon Code CLI\nexport PATH="$PATH:$HOME/.gwork/bin"\n' >> "$tmp"
+  sed -E '/^[[:space:]]*# (GWork|Solon Code) CLI[[:space:]]*$/d; /^[[:space:]]*export PATH="\$PATH:\$HOME\/\.gourdai\/bin"[[:space:]]*$/d; /^[[:space:]]*export PATH="\$PATH:\$HOME\/\.gwork\/bin"[[:space:]]*$/d' "$file" > "$tmp"
+  printf '\n# GWork CLI\nexport PATH="$PATH:$HOME/.gwork/bin"\n' >> "$tmp"
   mv "$tmp" "$file"
 done
 FISH_CONFIG="$HOME/.config/fish/config.fish"
 if [ -f "$FISH_CONFIG" ]; then
-  tmp="${FISH_CONFIG}.gwork.tmp"; sed -E '/^[[:space:]]*# Solon Code CLI[[:space:]]*$/d; /^[[:space:]]*set -gx PATH.*\$HOME\/\.gourdai\/bin[[:space:]]*$/d; /^[[:space:]]*set -gx PATH.*\$HOME\/\.gwork\/bin[[:space:]]*$/d' "$FISH_CONFIG" > "$tmp"
-  printf '\n# Solon Code CLI\nset -gx PATH $PATH $HOME/.gwork/bin\n' >> "$tmp"; mv "$tmp" "$FISH_CONFIG"
+  tmp="${FISH_CONFIG}.gwork.tmp"; sed -E '/^[[:space:]]*# (GWork|Solon Code) CLI[[:space:]]*$/d; /^[[:space:]]*set -gx PATH.*\$HOME\/\.gourdai\/bin[[:space:]]*$/d; /^[[:space:]]*set -gx PATH.*\$HOME\/\.gwork\/bin[[:space:]]*$/d' "$FISH_CONFIG" > "$tmp"
+  printf '\n# GWork CLI\nset -gx PATH $PATH $HOME/.gwork/bin\n' >> "$tmp"; mv "$tmp" "$FISH_CONFIG"
 fi
 
 echo -e "${GREEN}Installation complete: $TARGET_DIR${NC}"

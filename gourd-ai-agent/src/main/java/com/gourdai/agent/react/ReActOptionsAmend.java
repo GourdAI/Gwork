@@ -15,8 +15,8 @@
  */
 package com.gourdai.agent.react;
 
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.ModelOptionsAmend;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ModelOptionsAmend;
 import org.noear.solon.core.util.Assert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

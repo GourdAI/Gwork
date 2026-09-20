@@ -16,8 +16,8 @@
 package com.gourdai.core.command.builtin;
 
 import com.gourdai.agent.AgentSession;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.message.UserMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.UserMessage;
 import com.gourdai.harness.command.Command;
 import com.gourdai.harness.command.CommandContext;
 

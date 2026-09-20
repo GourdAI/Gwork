@@ -3,12 +3,12 @@ package demo.ai.harness;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.session.InMemoryAgentSession;
-import org.noear.solon.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.ChatConfig;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.agent.AgentDefinition;
-import org.noear.solon.ai.talents.mount.MountDir;
+import com.gourdai.ai.talents.mount.MountDir;
 import com.gourdai.harness.permission.ToolPermission;
-import org.noear.solon.ai.talents.mount.MountType;
+import com.gourdai.ai.talents.mount.MountType;
 
 public class DemoApp {
     public static void main(String[] arg) throws Throwable {

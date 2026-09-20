@@ -21,15 +21,15 @@ import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.AgentTrace;
 import com.gourdai.agent.team.TeamProtocol;
 import com.gourdai.agent.trace.Metrics;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.message.ToolMessage;
-import org.noear.solon.ai.chat.message.UserMessage;
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.prompt.PromptImpl;
-import org.noear.solon.ai.chat.talent.TalentUtil;
-import org.noear.solon.ai.chat.tool.FunctionTool;
-import org.noear.solon.ai.chat.tool.ToolCall;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ToolMessage;
+import com.gourdai.ai.chat.message.UserMessage;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.prompt.PromptImpl;
+import com.gourdai.ai.chat.talent.TalentUtil;
+import com.gourdai.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.ToolCall;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.flow.FlowContext;
 import org.noear.solon.lang.Preview;
@@ -138,6 +138,30 @@ public class ReActTrace implements AgentTrace {
     private final List<String> plans = new CopyOnWriteArrayList<>();
     private int planIndex;
 
+    /**
+     * extras 键：本回合注入过「用户实时补充（插话）」时记录的回合号（Integer）。
+     *
+     * <p>插话以普通 user 消息注入工作记忆，模型极易把它当成一次对话提问：只回一句
+     * 「收到」而不带任何工具调用，于是被 ReasonTask 的隐式结束分支判为「任务已完成」，
+     * 整个 run 直接 END——表现就是「插一句话，任务自己停了」。</p>
+     *
+     * <p>该键只在「注入插话的那一个回合」有效，且在结束判定处读取即消费（限一次），
+     * 用于把这一次隐式 END 改判为「继续执行原任务」。健康流程（无插话）恒不存在此键。</p>
+     */
+    public static final String EXTRA_STEER_CONTINUE_TURN = "_steer_continue_turn";
+
+    /**
+     * extras 键：用户主动停止（interrupt）且任务未完成时置位（Boolean.TRUE）。
+     *
+     * <p>用户取消不经过库的异常兜底（abnormal 不会置位），执行流最终停在 route=END
+     * 但 abnormal=false——若不单独打标，随后发来的「继续」会被判为新任务、断点工作记忆
+     * （推理 + 工具结果）被整体重置，此前消耗的上下文无法复用。置位后由
+     * {@code HarnessEngine.canResume} 与 abnormal 一并作为可续跑依据；续跑消费
+     * （prepareResume）或新任务重置（reset 清空 extras）时清除。该键随快照落盘，
+     * 进程重启后仍可判定。</p>
+     */
+    public static final String EXTRA_USER_INTERRUPTED = "_user_interrupted";
+
     private final Map<String, Object> extras = new ConcurrentHashMap<>();
 
     public Map<String, Object> getExtras() {
@@ -162,6 +186,21 @@ public class ReActTrace implements AgentTrace {
 
     public void removeExtra(String key) {
         extras.remove(key);
+    }
+
+    /** 是否被用户主动停止且可续跑（见 {@link #EXTRA_USER_INTERRUPTED}）。 */
+    public boolean isUserInterrupted() {
+        return Boolean.TRUE.equals(extras.get(EXTRA_USER_INTERRUPTED));
+    }
+
+    /** 置位「用户主动停止」续跑标记（由 HarnessEngine.markUserInterruptedForResume 统一调用）。 */
+    public void markUserInterrupted() {
+        extras.put(EXTRA_USER_INTERRUPTED, Boolean.TRUE);
+    }
+
+    /** 清除「用户主动停止」续跑标记（续跑已消费或新任务重置）。 */
+    public void clearUserInterrupted() {
+        extras.remove(EXTRA_USER_INTERRUPTED);
     }
 
     public ReActTrace() {

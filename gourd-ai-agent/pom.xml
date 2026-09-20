@@ -17,15 +17,23 @@
         - com.gourdai.agent   —— 智能体核心抽象（Agent、ReAct、Team、Session 等）
         - com.gourdai.harness —— 引擎与工具（HarnessEngine、talents.*、command 框架、permission、hitl）
         - com.gourdai.core    —— 门户与配置（portal.*、channel.*、config.*、command.*、memory）
-      版本随 gourdai（继承 parent 2026.6.21）。第三方依赖版本由 solon-parent 的 dependencyManagement 统一管理。
+      版本随 gourdai（继承 parent 2026.6.21）。第三方依赖版本由 parent 的 dependencyManagement 统一管理。
     -->
     <artifactId>gourd-ai-agent</artifactId>
     <name>${project.artifactId}</name>
     <packaging>jar</packaging>
 
+    <licenses>
+        <license>
+            <name>GNU Affero General Public License v3.0 only</name>
+            <url>https://www.gnu.org/licenses/agpl-3.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
     <!--
       对齐 Jackson 各子模块版本。
-      solon-parent 将 jackson-databind / jackson-core 管理到 2.21.4，但传递依赖
+      parent 将 jackson-databind / jackson-core 管理到 2.21.4，但传递依赖
       （swagger-parser、mcp-json-jackson2 等）会带入旧的 jackson-annotations 2.19.0，
       而 databind 2.21.4 的 JacksonAnnotationIntrospector 静态初始化需要 JsonSerializeAs
       注解类（2.20+ 才引入）。版本错配导致 ACP 进程启动即抛 NoClassDefFoundError
@@ -62,10 +70,12 @@
 
     <dependencies>
         <!-- ============ agent 层 ============ -->
-        <dependency>
-            <groupId>org.noear</groupId>
-            <artifactId>solon-ai</artifactId>
-        </dependency>
+        <!--
+          上游 AI 聚合依赖已移除：其下 core / 各方言 / mcp / sandbox / talent-mount
+          均已抽离为源码（com.gourdai.ai.*）由本模块自行维护。
+          仍保留框架本体依赖（solon-lib / solon-flow / solon-expression /
+          solon-net-httputils 等），这些是运行底座，不属于本次抽离范围。
+        -->
 
         <dependency>
             <groupId>org.noear</groupId>
@@ -89,24 +99,52 @@
             <version>${okhttp.version}</version>
         </dependency>
 
+        <!--
+            MCP 客户端：上游 mcp 依赖已移除，其 client 侧封装（McpClientProvider 等 5 个类）
+            已抽离为源码 com.gourdai.ai.mcp.*；server 侧本项目零引用，整体剔除。
+
+            改为直接依赖官方 mcp-core。注意：WebRxSseClientTransport 与
+            WebRxStreamableHttpTransport 是自定义的基于 HttpUtils 的传输实现，
+            官方 mcp-core 中不存在（官方只提供 HttpClient* 系列），已随本次抽离一并
+            移植到 com.gourdai.ai.mcp.client.transport。
+            这两个类的 HTTP 底座即 okhttp：HttpUtilsFactoryDefault 在 classpath 存在
+            okhttp3.OkHttpClient 时选用 OkHttpUtilsFactory（否则退回 JDK HttpClient），
+            本项目已显式依赖 okhttp，故 SSE / Streamable 两个通道实际均走 okhttp。
+        -->
+        <!--
+            HTTP 底座：原由上游 AI 模块传递引入。抽离后相关 jar 全部移除，
+            而 com.gourdai.ai.* 源码（ChatDialect / ChatOptions / AiConfig 等）直接使用 HttpUtils，
+            故必须显式声明。同理补上上游 core 声明过的 rx / jsonschema / 分词器等底座依赖。
+        -->
         <dependency>
             <groupId>org.noear</groupId>
-            <artifactId>solon-ai-core</artifactId>
+            <artifactId>solon-net-httputils</artifactId>
         </dependency>
 
         <dependency>
             <groupId>org.noear</groupId>
-            <artifactId>solon-ai-sandbox</artifactId>
+            <artifactId>solon-rx</artifactId>
         </dependency>
 
         <dependency>
             <groupId>org.noear</groupId>
-            <artifactId>solon-ai-mcp</artifactId>
+            <artifactId>solon-web-rx</artifactId>
         </dependency>
 
         <dependency>
             <groupId>org.noear</groupId>
-            <artifactId>solon-ai-talent-mount</artifactId>
+            <artifactId>snack4-jsonschema</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.knuddels</groupId>
+            <artifactId>jtokkit</artifactId>
+            <version>1.1.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.noear</groupId>
+            <artifactId>mcp-core</artifactId>
         </dependency>
 
         <dependency>
@@ -182,21 +220,14 @@
         </dependency>
 
         <!-- ============ core 层（应用/门户） ============ -->
-        <dependency>
-            <groupId>org.noear</groupId>
-            <artifactId>solon-ai-acp</artifactId>
-            <!--
-              排除 acp 传递引入的 solon-ai-agent jar：agent 已作为源码（com.gourdai.agent.*）直接编入本模块，
-              acp 传递来的上游 solon-ai-agent jar 会引入无用/重复的上游实现，需排除。
-            -->
-            <exclusions>
-                <exclusion>
-                    <groupId>org.noear</groupId>
-                    <artifactId>solon-ai-agent</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-
+        <!--
+            上游 acp 依赖已移除（至此上游 AI 系 jar 全部抽离完毕）：
+            1) 本项目实际使用的是 acp-core 的 com.agentclientprotocol.sdk.*（已抽离为
+               源码 com.gourdai.acp.*，37 个类），而非该 jar 自身的类；
+            2) 该 jar 仅提供 Agent 端 / Client 端两个 WebSocket 传输实现，本项目零引用
+               （我们走 StdioAcpAgentTransport），故整体剔除；
+            3) 原来为排除 acp 传递 jar 而写的 exclusions 也随之失效。
+        -->
         <dependency>
             <groupId>org.noear</groupId>
             <artifactId>solon-scheduling-simple</artifactId>
@@ -204,8 +235,8 @@
 
         <!--
           HTTP/WebSocket 服务器插件：smarthttp（国产轻量引擎，单插件自带 HTTP + WebSocket 同端口支持）。
-          替代原 solon-server-jetty + solon-server-jetty-add-websocket 组合（包体约 0.8MB vs 2.7MB）。
-          注意：Solon 本体不带网络监听能力，必须存在某个 server 插件，否则 enableHttp 后无人绑定端口。
+          替代原 jetty server 组合（包体约 0.8MB vs 2.7MB）。
+          注意：框架本体不带网络监听能力，必须存在某个 server 插件，否则 enableHttp 后无人绑定端口。
         -->
         <dependency>
             <groupId>org.noear</groupId>
@@ -287,7 +318,7 @@
 
           【为什么不对 src/main/resources 开 filtering】
           1. static/ 下含 monaco、字体等二进制资产，被当文本做编码往返会损坏，且构建显著变慢；
-          2. app.yml 里有 Solon 运行期占位符 ${gwork.log.dir:.gwork/logs}/${solon.app.name}，
+          2. app.yml 里有框架运行期占位符 ${gwork.log.dir:.gwork/logs}/${solon.app.name}，
              被 Maven filtering 扫到会被替换成空值，直接破坏日志路径解析。
           故把待替换的模板单独放在 resources 之外的 src/main/buildinfo/ 目录，只对它开 filtering；
           两者都输出到 classes 根，产物即 classpath 下的 /build-info.properties。

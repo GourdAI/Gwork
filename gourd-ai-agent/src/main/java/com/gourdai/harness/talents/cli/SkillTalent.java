@@ -15,13 +15,13 @@
  */
 package com.gourdai.harness.talents.cli;
 
-import org.noear.solon.ai.annotation.ToolMapping;
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.talent.AbsTalent;
-import org.noear.solon.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.annotation.ToolMapping;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.chat.tool.FunctionTool;
 import com.gourdai.harness.talents.cli.impl.MountSkillProvider;
-import org.noear.solon.ai.talents.mount.MountManager;
-import org.noear.solon.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.mount.MountManager;
+import com.gourdai.ai.talents.mount.SkillDir;
 import org.noear.solon.annotation.Param;
 
 import java.io.IOException;

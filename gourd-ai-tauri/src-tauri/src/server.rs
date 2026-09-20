@@ -1,7 +1,7 @@
 //! server.rs - 本地 UI 服务器 + 反向代理（Rust 版，对应 Electron 版 main/ui-server.js）
 //!
 //! 设计目标：把 UI（HTML/JS/CSS）从后端 jar 中解耦，由 Tauri 进程起一个轻量 HTTP
-//! 服务立即提供，使界面外壳「秒开」，不必等待 JVM+Solon 启动。
+//! 服务立即提供，使界面外壳「秒开」，不必等待后端 JVM 启动。
 //!
 //! 路由规则（页面加载于 http://127.0.0.1:{uiPort}/）：
 //!   - /web/**、/chat/channel/**  → 反向代理到 http://127.0.0.1:{backendPort}（jar）

@@ -19,6 +19,8 @@ var DOTS_HTML = '<span class="thinking-dots"><span></span><span></span><span></s
 function SessionState(sessionId) {
     this.sessionId = sessionId;
     this.container = $('<div>')[0];
+    // 渲染落点：null 表示新节点直接落进真实容器；回放期指向游离的临时容器（见 renderRoot）
+    this.renderTarget = null;
     $(this.container).addClass('messages-inner');
     $(this.container).hide();
     $(messagesWrap).append(this.container);
@@ -112,6 +114,14 @@ function getSessionCwd() {
 }
 window.getSessionCwd = getSessionCwd;
 
+/* 项目登记表（projects.json）变更广播：重命名 / 新增 / 移除 / 新建 成功后调用。
+   各持有项目列表副本的视图（欢迎页工作空间选择器、记忆页项目选择器、自动化工作空间选择器）
+   监听 'projects:changed' 重拉列表即可即时跟上新显示名，无需刷新页面或手动点刷新。 */
+function notifyProjectsChanged() {
+    document.dispatchEvent(new CustomEvent('projects:changed'));
+}
+window.notifyProjectsChanged = notifyProjectsChanged;
+
 var SESSION_ID = newSessionId();
 var isStreaming = false;
 var inChatMode = false;
@@ -163,7 +173,11 @@ function evictInactiveSessions() {
     alive.sort(function (a, b) { return (b.lastActiveAt || 0) - (a.lastActiveAt || 0); });
     for (var i = KEEP_ALIVE_SESSIONS; i < alive.length; i++) {
         var sess = alive[i];
-        // 先清理增量渲染器/挂起帧与 DOM 引用，再清空容器，避免残留帧写入已摘除的节点
+        // 先清理增量渲染器/挂起帧与 DOM 引用，再清空容器，避免残留帧写入已摘除的节点。
+        // 本函数要清空会话 DOM，与回放冲突，故显式中止回放并完整收尾。
+        // 注：上方过滤已跳过 _replaying 的会话，因此这里通常是 no-op——保留调用是防御性的
+        // （过滤条件将来若放宽，这里仍能兜住），并顺带清理可能残留的回放 rAF 句柄。
+        if (typeof abortReplay === 'function') abortReplay(sess);
         if (typeof resetStreamState === 'function') resetStreamState(sess);
         $(sess.container).empty();
         // 重置回放分页状态：下次进入走完整 loadMessages 重新拉取
@@ -402,6 +416,59 @@ function releaseScrollAnchor() {
 }
 function isScrollAnchorHeld() { return _scrollAnchorHold; }
 
+/* ===== 渲染落点（render target） =====
+   sess.container 的语义恒定：永远是该会话挂在文档里的真实消息容器。任何时候都可以安全地
+   用它做滚动计算、相对定位（「加载更多」按钮是它的前兄弟节点）、存在性检查与整体清空。
+
+   历史回放需要先把大批 DOM 建在游离的临时容器里、再一次性移入真实容器（避免逐条 append
+   触发几百次 layout）。旧实现的做法是回放期间把 sess.container 整个替换成临时 div、结束再
+   换回，这让「容器」在一段时间内既不是真实容器、也不在文档中，代价是两类严重缺陷：
+     1) 回放一旦被打断（分片 rAF 被 resetStreamState 取消、或回放中途抛异常），替换永不回滚，
+        sess.container 就永久指向那个孤儿节点。此后所有渲染都写进看不见的地方，后端照常推流，
+        界面却再也不更新——即「任务一直在执行中，但没有后续消息展示」。
+     2) 依赖真实容器语义的逻辑（updateLoadMoreBtn 的 document.contains 与 .prev()、会话判空、
+        异常兜底清空半成品）在整个回放窗口内静默失效。
+
+   现在容器字段不动，另设 sess.renderTarget 显式表达「这一刻新节点该落在哪」：回放期指向临时
+   容器，平时为 null。渲染类代码一律经 renderRoot(sess) 取落点，真实容器语义的代码继续直接用
+   sess.container。两种语义不再共用一个字段，回放中断也就不可能再让界面僵死。*/
+function renderRoot(sess) {
+    if (!sess) return null;
+    return sess.renderTarget || sess.container;
+}
+
+/* 当前是否正在把内容渲染进游离的临时容器（即回放进行中）。
+   面向用户可见区域的副作用（滚动跟随等）在这种时候必须跳过：节点还没进文档，
+   滚动既无意义又会打断用户正在看的位置。 */
+function isDetachedRenderTarget(sess) {
+    return !!(sess && sess.renderTarget && sess.renderTarget !== sess.container);
+}
+
+/* 中止进行中的历史回放并完整收尾。
+   注意 resetStreamState 已不再负责取消回放分片（见其内注释）：只有真正要销毁或重建会话 DOM
+   的路径（LRU 淘汰、删除会话）才应调用本函数。收尾必须同时做三件事，缺任何一件都会留下
+   「后端在跑、界面不动」的僵死态：还原渲染落点、释放回放/缓冲门禁、排空已堆积的实时帧。
+   半成品随临时容器一起丢弃——调用方本就要重建 DOM，下次进入会重新拉取。 */
+function abortReplay(sess) {
+    if (!sess) return false;
+    /* rAF 句柄的清理放在门禁判定之前，且不受 _replaying 约束：正常收尾路径
+       （replayDoneCore / finishReplayFallback）都是「释放门禁」与「清句柄」同步成对，
+       但那是约定而非结构保证。将来若有路径只释放门禁却漏清句柄，残留的挂起帧会在容器
+       被清空后继续往已摘除的节点渲染。提前无条件清理即可覆盖该情形，代价为零。 */
+    if (sess._replayRafId) { cancelAnimationFrame(sess._replayRafId); sess._replayRafId = null; }
+    // 返回值只表示「是否真的中止了一次进行中的回放」：非回放态必须原样返回 false，
+    // 尤其不得误排空 _gateBuffer（那会把尚未轮到的实时帧提前喂给一个没有落点的会话）。
+    if (!sess._replaying) return false;
+    sess._replaying = false;
+    sess._replayClock = null;
+    sess._skipScroll = false;
+    sess.renderTarget = null;
+    sess._replayLoadingMore = false;
+    if (typeof releaseScrollAnchor === 'function') releaseScrollAnchor();
+    if (typeof drainGateBuffer === 'function') drainGateBuffer(sess);
+    return true;
+}
+
 function resetStreamState(sess) {
     // R2 修复：思考块引用被清空前，必须先走正规收敛（停 setInterval + 摘 .streaming 闪烁类）。
     // 旧实现直接把 thinkingBlockEl 置 null，DOM 上的闪烁动画与计时器就此失联：
@@ -434,10 +501,21 @@ function resetStreamState(sess) {
         sess.thinkingBodyWrapEl = null;
         sess.thinkingBuffer = '';
         sess.thinkingUserScrolledUp = false;
+    // 交错思考复用窗口一并清零：跨轮/跨会话不得复用旧 run 的思考块（见 app-message.js ensureThinkingBlockCore）
+    sess._lastFinishedThinkingBlockEl = null;
+    sess._lastFinishedThinkingAt = 0;
+    sess._lastThinkingRunId = null;
+    sess._thinkingInterruptedByAction = false;
     if (sess.contentRafId) { cancelAnimationFrame(sess.contentRafId); sess.contentRafId = null; }
     if (sess.reasonRafId) { cancelAnimationFrame(sess.reasonRafId); sess.reasonRafId = null; }
-    // 取消可能正在进行的回放分片（切换会话时清理）
-    if (sess._replayRafId) { cancelAnimationFrame(sess._replayRafId); sess._replayRafId = null; }
+    /* 回放分片链不能在这里取消——这正是「任务执行中但界面停止更新」的直接成因。
+       回放按帧分片执行（每帧 50 事件，上万事件的会话要跑几百帧、十几秒），而本函数会被
+       发送消息、静默命令、问答卡作答等多条路径无条件调用。旧实现在此
+       cancelAnimationFrame(sess._replayRafId)，回放链一旦被掐断，replayDone 永不执行 →
+       _replaying/_gateBuffering 门禁永不释放 → 后续实时帧全被扣在 _gateBuffer 里：
+       后端照常推流、底部任务计数照常跳动，消息区却定格在最后一条。
+       渲染落点与真实容器解耦后（见 renderRoot），回放继续跑不会污染实时流——它写进自己的
+       临时容器，结束时整体移入。确需销毁回放的路径请显式调用 abortReplay。*/
     // 清除智能体输出标记
     if (typeof clearAgentState === 'function') clearAgentState(sess);
 }
@@ -462,6 +540,9 @@ function setBtnSendMode() {
    1) 输入框 placeholder 切为执行态文案；
    2) chip 行内的键位提示条（用户已开始打字、placeholder 消失后依然可见）。 */
 window._runHintVisible = false;
+/* 问答挂起标志：app-message.js syncQuestionCard 按活动会话维护（存在未提交待答题 = true）。
+   优先级高于运行态提示——问答挂起期会话不在 streaming，主输入框打字会被记为当前题答案。 */
+window._questionPendingHint = false;
 function setRunHintVisible(show) {
     show = !!show;
     window._runHintVisible = show;
@@ -472,12 +553,15 @@ function setRunHintVisible(show) {
     applyChatPlaceholder();
 }
 
-/* 按当前运行状态回填对话输入框 placeholder。
+/* 按当前状态回填对话输入框 placeholder，优先级：问答挂起 > 任务执行中 > 空闲。
    注：data-i18n-placeholder 会在语言包就绪/切语言时被 i18n 无条件重写，
    所以这里不改 data-i18n-placeholder 属性，而是在 localeChanged 之后再跡一次。 */
 function applyChatPlaceholder() {
     if (!chatInput || !window.GourdI18n) return;
-    chatInput.placeholder = GourdI18n.t(window._runHintVisible ? 'app.placeholder_chat_running' : 'app.placeholder_chat');
+    var key = 'app.placeholder_chat';
+    if (window._questionPendingHint) key = 'app.placeholder_chat_question';
+    else if (window._runHintVisible) key = 'app.placeholder_chat_running';
+    chatInput.placeholder = GourdI18n.t(key);
 }
 
 // 语言包就绪 / 用户切语言后，i18n 会把 placeholder 重置回空闲态文案，在其之后重新应用执行态文案

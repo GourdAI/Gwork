@@ -15,6 +15,8 @@
                       "steer_attachment_wait":  "Anhänge können während einer laufenden Aufgabe nicht eingeworfen oder eingereiht werden. Bitte warten oder stoppen",
                       "steer_command_queue":  "Befehle können nicht eingeworfen werden. Mit Tab zur Warteschlange hinzufügen",
                       "steer_dropped":  "Der Zwischenruf wurde vor Abschluss nicht wirksam und zur Warteschlange hinzugefügt",
+                      "steer_expand_full":  "Alle anzeigen ({0} Zeichen)",
+                      "steer_collapse":  "Einklappen",
                       "long_input_converted":  "Langer Text wurde als TXT-Anhang gefaltet ({0}): {1}",
                       "long_input_prompt":  "Bitte lesen und verarbeiten Sie die angehängte Langtext-TXT-Datei",
                       "long_input_too_large":  "Die Eingabe ist zu groß. Maximale TXT-Anhangsgröße: {0}",
@@ -24,7 +26,7 @@
                       "connected":  "Verbunden",
                       "wechat_bound":  "WeChat gebunden",
                       "wechat_bind":  "WeChat binden",
-                      "wechat_unbind_confirm":  "Möchten Sie WeChat wirklich löse?",
+                      "wechat_unbind_confirm":  "Möchten Sie WeChat wirklich lösen?",
                       "wechat_qr_title":  "WeChat QR-Code",
                       "wechat_qr_subtitle":  "Scannen, um WeChat zu binden",
                       "loading":  "Wird geladen…",
@@ -142,6 +144,7 @@
                 "placeholder_welcome":  "Beschreiben Sie Ihre Aufgabe, Datei-Anhänge werden unterstützt…",
                 "placeholder_chat":  "Nachricht eingeben, Shift+Enter für neue Zeile…",
                 "placeholder_chat_running":  "Enter für Zwischenruf · Tab für Warteschlange · Shift+Enter für neue Zeile…",
+                "placeholder_chat_question":  "Eigene Antwort eingeben – Enter beantwortet die offene Frage…",
                 "run_hint_steer":  "Zwischenruf",
                 "run_hint_queue":  "In Warteschlange",
                 "run_hint_newline":  "Neue Zeile",
@@ -224,8 +227,6 @@
                                 "collapse_all":  "Alle einklappen",
                                 "clear_all":  "Alle Sitzungen löschen",
                                 "confirm_clear":  "Alle Sitzungen löschen? Dieser Vorgang kann nicht rückgängig gemacht werden.",
-                                
-                                
                                 "remove_project":  "Aus Liste entfernen",
                                 "rename_project":  "Projekt umbenennen",
                                 "rename_failed":  "Umbenennen fehlgeschlagen",
@@ -833,7 +834,8 @@
                  "waiting_auth":  "Warten auf Autorisierung zur Tool-Ausführung",
                  "rejected":  "Abgelehnt:",
                  "question_waiting":  "Warten auf Ihre Antwort…",
-                 "question_other":  "Sonstiges…",
+                 "question_other":  "Nichts davon passt? Eigene Antwort eingeben…",
+                 "question_other_placeholder":  "Eigene Antwort eingeben, Enter zum Bestätigen…",
                  "question_skip":  "Überspringen",
                  "question_submit":  "Senden",
                  "question_recommended":  "(Empfohlen)",
@@ -841,6 +843,8 @@
                  "question_skipped":  "Übersprungen",
                  "question_close":  "Schließen",
                  "question_attachment_wait":  "Anhänge können nicht gesendet werden, solange eine Frage offen ist. Bitte zuerst antworten oder überspringen",
+                 "question_supplement":  "Anmerkung hinzufügen… (bleibt bei Ihrer Auswahl)",
+                 "question_supplement_placeholder":  "Anmerkung eingeben, Enter zum Bestätigen…",
                  "batch_tool":  "Stapel",
                  "tools":  "Werkzeuge",
                  "batch_tool_title":  "Stapel {name} · {count} Elemente",
@@ -1122,7 +1126,12 @@
                    },
     "queue":  {
                   "title":  "Nachrichten-Warteschlange",
-                  "clear":  "Löschen"
+                  "clear":  "Löschen",
+                  "images":  "Bilder {n}",
+                  "files":  "Dateien {n}",
+                  "remove":  "Entfernen",
+                  "remove_wait":  "Bitte warten Sie, bis die vorherigen Nachrichten gesendet wurden, bevor Sie entfernen",
+                  "count":  "{n} in Warteschlange"
               },
     "memory":  {
                    "tab_workspace":  "Arbeitsbereich",

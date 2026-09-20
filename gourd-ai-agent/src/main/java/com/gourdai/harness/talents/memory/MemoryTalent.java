@@ -17,10 +17,10 @@ package com.gourdai.harness.talents.memory;
 
 import org.noear.snack4.ONode;
 import org.noear.solon.Utils;
-import org.noear.solon.ai.annotation.ToolMapping;
-import org.noear.solon.ai.chat.ChatSession;
-import org.noear.solon.ai.chat.talent.AbsTalent;
-import org.noear.solon.ai.chat.prompt.Prompt;
+import com.gourdai.ai.annotation.ToolMapping;
+import com.gourdai.ai.chat.ChatSession;
+import com.gourdai.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.chat.prompt.Prompt;
 import org.noear.solon.annotation.Param;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Preview;

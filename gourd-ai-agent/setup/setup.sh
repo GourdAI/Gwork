@@ -7,7 +7,7 @@
 set -e
 
 VERSION="v2026.6.21"
-PACKAGE_URL="https://gitee.com/opensolon/gourdai/releases/download/${VERSION}/gourd-ai-agent-bin-${VERSION}.tar.gz"
+PACKAGE_URL="https://github.com/GourdAI/gourdai/releases/download/${VERSION}/gourd-ai-agent-bin-${VERSION}.tar.gz"
 TEMP_DIR="/tmp/gourdai-install"
 
 # Colors

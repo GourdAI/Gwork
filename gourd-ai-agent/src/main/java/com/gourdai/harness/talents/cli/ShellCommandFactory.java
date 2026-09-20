@@ -462,7 +462,7 @@ public final class ShellCommandFactory {
      *
      * <p><b>先走 {@link #ancestorCommandsFast()} 的无 fork 快路径</b>：慢路径要起一个 PowerShell
      * 并做一次全机进程 WMI 枚举，实测 ≈2.0s（超时上限 {@value #PARENT_PROBE_TIMEOUT_MS}ms），
-     * 而整段发生在 Solon 启动主线程上——探测不结束，HTTP 端口就不会绑定，直接表现为冷启动变慢
+     * 而整段发生在框架启动主线程上——探测不结束，HTTP 端口就不会绑定，直接表现为冷启动变慢
      * （桌面端尤其明显）。快路径只读操作系统已有的进程表，微秒级，语义与慢路径一致。</p>
      *
      * <p>骨架与 {@code EnvironmentResolver.resolveWindowsPath()} 一致：独立守护线程消费输出，
@@ -756,7 +756,7 @@ public final class ShellCommandFactory {
          * 删除临时脚本（幂等）。无临时脚本时为空操作。
          *
          * <p>删除失败则临时文件会残留在系统临时目录（未注册 {@code deleteOnExit}：其钩子集合只增不减，
-         * 长驻进程里每条命令都注册会造成慢性内存增长）。文件名前缀为 {@code solon-ai-script-}。</p>
+         * 长驻进程里每条命令都注册会造成慢性内存增长）。文件名前缀为 {@code gwork-script-}。</p>
          */
         public void cleanup() {
             if (tempScript != null) {

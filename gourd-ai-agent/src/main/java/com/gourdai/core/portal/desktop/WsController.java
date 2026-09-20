@@ -1,7 +1,7 @@
 package com.gourdai.core.portal.desktop;
 
 import org.noear.snack4.ONode;
-import org.noear.solon.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.ChatConfig;
 import com.gourdai.harness.HarnessEngine;
 import org.noear.solon.annotation.*;
 import com.gourdai.core.config.AgentFlags;
@@ -76,11 +76,12 @@ public class WsController {
             item.put("ownedBy", mi.getOwnedBy());
 
             ChatConfig config = new ChatConfig();
-            config.setName(mi.getObject());
+            config.setName(mi.getId());
             config.setApiUrl(apiUrl);
             config.setApiKey(apiKey);
-            config.setModel(mi.getObject());
-            engine.removeModel(mi.getObject());
+            config.setModel(mi.getId());
+            config.setStandard(Assert.isNotEmpty(provider) ? provider : mi.getStandard());
+            engine.removeModel(mi.getId());
             engine.addModel(config);
             list.add(item);
         }
@@ -115,6 +116,7 @@ public class WsController {
         config.setApiUrl(apiUrl);
         config.setApiKey(apiKey);
         config.setModel(model);
+        config.setStandard(Assert.isNotEmpty(provider) ? provider : null);
 
         // timeout
         String timeout = root.get("timeout").getString();

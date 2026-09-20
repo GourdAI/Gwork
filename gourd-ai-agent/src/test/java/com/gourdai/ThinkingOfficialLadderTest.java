@@ -8,7 +8,7 @@ import com.gourdai.core.portal.web.thinking.ThinkingLevel;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.noear.solon.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ChatModel;
 
 import java.util.Arrays;
 import java.util.HashMap;

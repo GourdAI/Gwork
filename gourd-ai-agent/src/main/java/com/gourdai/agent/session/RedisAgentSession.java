@@ -20,10 +20,11 @@ import org.noear.redisx.plus.RedisList;
 import org.noear.solon.Utils;
 import com.gourdai.agent.Agent;
 import com.gourdai.agent.AgentSession;
-import org.noear.solon.ai.chat.ChatRole;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.ChatRole;
+import com.gourdai.ai.chat.message.ChatMessage;
 import org.noear.solon.flow.FlowContext;
 import org.noear.solon.lang.Preview;
+import com.gourdai.core.compat.LegacyTypeCompat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,13 +59,20 @@ public class RedisAgentSession implements AgentSession {
         this.snapshotKey = sessionId + ":snapshot";
         this.redisClient = redisClient;
 
-        // --- 1. 严格遵循原逻辑加载快照 (使用 instanceId 读取) ---
+        // --- 1. 加载快照（读侧接入旧包名兼容改写；坏数据降级新建，构造链路不得抛出） ---
+        // 上游源码化后 @type 已改写为 com.gourdai.ai.*：Redis 里迁移前写出的旧快照
+        // 若不丝 LegacyTypeCompat.rewrite，反序列化会直接抛 CodecException 使构造失败。
         FlowContext snapshot = null;
         String json = redisClient.getBucket().get(sessionId);
         if (json != null) {
-            snapshot = FlowContext.fromJson(json);
-            if (LOG.isDebugEnabled()) {
-                LOG.debug("Session [{}] loaded from Redis.", sessionId);
+            try {
+                snapshot = FlowContext.fromJson(LegacyTypeCompat.rewrite(json));
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Session [{}] loaded from Redis.", sessionId);
+                }
+            } catch (Throwable e) {
+                LOG.warn("Session [{}] snapshot from Redis is unreadable, fallback to fresh: {}",
+                        sessionId, e.getMessage());
             }
         }
 

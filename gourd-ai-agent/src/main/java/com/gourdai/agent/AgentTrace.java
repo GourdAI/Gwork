@@ -16,7 +16,7 @@
 package com.gourdai.agent;
 
 import com.gourdai.agent.trace.Metrics;
-import org.noear.solon.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.prompt.Prompt;
 import org.noear.solon.lang.Preview;
 
 /**

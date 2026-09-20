@@ -8,6 +8,22 @@
   <link rel="icon" href="assets/favicon.ico">
   <link rel="stylesheet" href="css/styles.css">
   <link rel="stylesheet" href="css/models.css">
+
+  <!-- 嵌入模式检测（与 index.html 同源逻辑）：被 iframe 嵌套或 ?embed=1 时隐藏顶部导航。
+       必须内联前置，避免导航条先渲染再消失。 -->
+  <script>
+    (function () {
+      var embedded = false;
+      try { embedded = window.self !== window.top; } catch (e) { embedded = true; }
+      try {
+        var flag = new URLSearchParams(location.search).get('embed');
+        if (flag === '1' || flag === 'true') embedded = true;
+        else if (flag === '0' || flag === 'false') embedded = false;
+      } catch (e) { /* 老浏览器：仅按 iframe 判定 */ }
+      if (embedded) document.documentElement.className += ' is-embedded';
+    })();
+  </script>
+
   <script src="js/models.js" defer></script>
 </head>
 <body>

@@ -2,17 +2,17 @@ package com.gourdai.harness.talents.gateway;
 
 import org.noear.snack4.codec.TypeRef;
 import org.noear.solon.Utils;
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.talent.AbsTalent;
-import org.noear.solon.ai.chat.tool.AbsTool;
-import org.noear.solon.ai.chat.tool.FunctionTool;
-import org.noear.solon.ai.chat.tool.ToolResult;
-import org.noear.solon.ai.mcp.client.McpClientProvider;
-import org.noear.solon.ai.mcp.client.McpClientProviders;
-import org.noear.solon.ai.mcp.client.McpServerParameters;
-import org.noear.solon.ai.util.RetryUtil;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.chat.tool.AbsTool;
+import com.gourdai.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.ToolResult;
+import com.gourdai.ai.mcp.client.McpClientProvider;
+import com.gourdai.ai.mcp.client.McpClientProviders;
+import com.gourdai.ai.mcp.client.McpServerParameters;
+import com.gourdai.ai.util.RetryUtil;
 import org.noear.solon.annotation.Param;
-import org.noear.solon.ai.annotation.ToolMapping;
+import com.gourdai.ai.annotation.ToolMapping;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

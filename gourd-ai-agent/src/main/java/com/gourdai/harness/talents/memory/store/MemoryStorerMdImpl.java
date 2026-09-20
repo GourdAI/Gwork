@@ -40,7 +40,7 @@ import com.gourdai.harness.talents.memory.md.MemoryMdData;
  * stored_at: "2026-05-08 21:24:30"
  * ---
  *
- * 用户偏好使用 Solon 框架进行后端开发
+ * 用户偏好使用 Java 进行后端开发
  * </pre>
  *
  * @author oisin

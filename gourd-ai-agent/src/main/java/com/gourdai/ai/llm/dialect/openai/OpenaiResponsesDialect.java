@@ -1,0 +1,271 @@
+/*
+ * Copyright 2017-2025 noear.org and authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.gourdai.ai.llm.dialect.openai;
+
+import org.noear.snack4.ONode;
+import org.noear.solon.Utils;
+import com.gourdai.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.ChatOptions;
+import com.gourdai.ai.chat.ChatAccumulator;
+import com.gourdai.ai.chat.content.ContentBlock;
+import com.gourdai.ai.chat.content.TextBlock;
+import com.gourdai.ai.chat.dialect.AbstractChatDialect;
+import com.gourdai.ai.chat.event.ChatEventType;
+import com.gourdai.ai.chat.event.ChatStreamContext;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.MessageProtocolState;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.tool.ToolCall;
+import com.gourdai.ai.chat.tool.ToolCallBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * OpenAI Responses 接口方言
+ * @author oisin lu
+ * @date 2026年1月28日
+ * 支持 OpenAI 的 /v1/responses 接口
+ * 通过 provider: "openai-responses" 来使用
+ */
+public class OpenaiResponsesDialect extends AbstractChatDialect {
+    private static final Logger log = LoggerFactory.getLogger(OpenaiResponsesDialect.class);
+
+    private static final OpenaiResponsesDialect instance = new OpenaiResponsesDialect();
+    public static OpenaiResponsesDialect getInstance() {
+        return instance;
+    }
+
+    private final OpenaiResponsesResponseParser responseParser;
+    private final OpenaiResponsesRequestBuilder requestBuilder;
+
+    public OpenaiResponsesDialect() {
+        this.responseParser = new OpenaiResponsesResponseParser();
+        this.requestBuilder = new OpenaiResponsesRequestBuilder();
+    }
+
+    @Override
+    protected String getApiUrl(ChatConfig config) {
+        return OpenaiDialectSupport.buildApiUrl(config.getApiUrl(), "responses");
+    }
+
+    /**
+     * 匹配检测
+     *
+     * @param config 聊天配置
+     */
+    @Override
+    public boolean matched(ChatConfig config) {
+        String standard = config.getStandardOrProvider();
+
+        // 先规范化 URL（去尾斜杠/查询串/#后缀）再做 endsWith，避免 https://host/v1/responses/?x 失配
+        return "openai-responses".equals(standard) ||
+                (Utils.isEmpty(standard)
+                        && OpenaiDialectSupport.normalizeApiUrl(config.getApiUrl()).endsWith("/responses"));
+    }
+
+    /**
+     * 解析响应 JSON
+     */
+    @Override
+    public void parseResponseJson(ChatStreamContext ctx, String data) {
+        //有些中转会直接输出："error xxx" 内容
+        //与 Chat Completions 方言对齐：命中纯文本错误时同步发射 ERROR 事件，订阅方无需等核心层收尾透出
+        if (tryParseErrorText(ctx.getAccumulator(), data)) {
+            emitError(ctx, ctx.getAccumulator(), null);
+            return;
+        }
+
+        responseParser.parseResponse(ctx, data);
+    }
+
+    /**
+     * 发射错误事件（与 OpenaiChatDialect 同构）
+     *
+     * @since 4.1
+     */
+    private void emitError(ChatStreamContext ctx, ChatAccumulator acc, ONode raw) {
+        ctx.emit(ctx.event(ChatEventType.ERROR)
+                .rawType("error")
+                .error(acc.getError())
+                .raw(raw)
+                .build());
+    }
+
+    /**
+     * Responses API 使用 text.format.json_schema 而非 response_format
+     */
+    @Override
+    public void prepareOutputFormatOptions(ChatOptions options) {
+        String outputSchema = options.outputSchema();
+        if (Utils.isNotEmpty(outputSchema)) {
+            ONode formatNode = new ONode();
+            try {
+                ONode schemaNode = ONode.ofJson(outputSchema);
+                if (!schemaNode.isObject()) {
+                    throw new IllegalArgumentException("outputSchema must be a JSON object");
+                }
+                applyStrictSchema(schemaNode);
+
+                formatNode.set("type", "json_schema");
+                formatNode.set("name", "output_schema");
+                formatNode.set("schema", schemaNode);
+                formatNode.set("strict", true);
+            } catch (Exception e) {
+                // schema 无法解析时不能使用 json_schema；退回 Responses 支持的旧式 JSON mode，
+                // 至少保留“输出为合法 JSON”的协议保证。
+                log.warn("Failed to parse outputSchema as JSON, falling back to json_object format", e);
+                formatNode.set("type", "json_object");
+            }
+
+            ONode textNode = new ONode();
+            textNode.set("format", formatNode);
+            options.optionSet("text", textNode);
+        }
+    }
+
+    /**
+     * 递归为 strict 模式补充 additionalProperties 和 required
+     * <p>已知边界：仅覆盖 object.properties 与 array.items 内的子 schema；
+     * anyOf / oneOf / allOf 等组合子内的 object 子 schema 不会补全（官方 strict
+     * 对组合子的支持本身受限，需要时应改用扁平结构重写 schema）。</p>
+     */
+    private void applyStrictSchema(ONode node) {
+        if (node == null || !node.isObject()) {
+            return;
+        }
+
+        ONode typeNode = node.getOrNull("type");
+        if (typeNode != null && "object".equals(typeNode.getString())) {
+            node.set("additionalProperties", false);
+
+            ONode propsNode = node.getOrNull("properties");
+            if (propsNode != null && propsNode.isObject()) {
+                // strict 模式要求 properties 的每个键都在 required 中；统一重建以修复 partial required。
+                ONode newRequired = new ONode().asArray();
+                for (String key : propsNode.getObject().keySet()) {
+                    newRequired.add(key);
+                }
+                node.set("required", newRequired);
+
+                // 递归处理嵌套的 properties
+                for (Map.Entry<String, ONode> entry : propsNode.getObject().entrySet()) {
+                    applyStrictSchema(entry.getValue());
+                }
+            }
+        }
+
+        // 处理 array 的 items
+        ONode itemsNode = node.getOrNull("items");
+        if (itemsNode != null && itemsNode.isObject()) {
+            applyStrictSchema(itemsNode);
+        }
+    }
+
+    /**
+     * 构建 Responses 规范的请求体
+     *
+     * @param config   聊天配置
+     * @param options  聊天选项
+     * @param messages 对话消息列表
+     * @param isStream 是否使用流式模式
+     * @return Responses 请求体
+     * @author oisin lu
+     * @date 2026年1月28日
+     */
+    @Override
+    public ONode buildRequestJson(ChatConfig config, ChatOptions options, List<ChatMessage> messages, boolean isStream) {
+        return requestBuilder.build(config, options, messages, isStream);
+    }
+
+    /**
+     * 解析助手消息（流式工具调用轮的聚合出口）。
+     * <p>Responses 的 thinking / text 分帧由 {@link OpenaiResponsesResponseParser} 直接产出内容项，
+     * 从不经过父类的 think 标签状态机；本方法实际只被
+     * {@code ChatRequestDescDefault#buildStreamToolCallMessage} 调用，用于把
+     * {@link #buildAssistantToolCallMessageNode} 的聚合结果落成会话消息。</p>
+     * <p>故不再委派父类：父类会把「同帧双通道（正文 + reasoning_content）」拆成
+     * 多条思考信号消息 + 正文消息，导致</p>
+     * <ol>
+     *   <li>{@code messages.get(0)} 不是携带 tool_calls 的那条 → 工具不被执行，
+     *       下一轮 input 只有 function_call 而无 function_call_output，官方端点会 400；</li>
+     *   <li>reasoning 元数据被挂到多条消息上 → 下一轮 input 出现多个同 id 的 reasoning 项。</li>
+     * </ol>
+     *
+     * @since 4.1
+     */
+    @Override
+    public List<AssistantMessage> parseAssistantMessage(ChatAccumulator acc, ONode oMessage) {
+        String text = oMessage.get("content").getString();
+        String thinking = oMessage.get("reasoning_content").getString();
+
+        ONode toolCallsNode = oMessage.getOrNull("tool_calls");
+        List<ToolCall> toolCalls = parseToolCalls(acc, toolCallsNode);
+
+        // 流式聚合的媒体块（如 image_generation_call）随消息带上，多轮才能按 id 回传
+        List<ContentBlock> blocksForMsg = null;
+        if (Utils.isNotEmpty(acc.getMediaBlocks())) {
+            blocksForMsg = new ArrayList<>();
+            if (Utils.isNotEmpty(text)) {
+                blocksForMsg.add(TextBlock.of(text));
+            }
+            blocksForMsg.addAll(acc.getMediaBlocks());
+        }
+
+        if (Utils.isEmpty(text) && Utils.isEmpty(thinking)
+                && Utils.isEmpty(toolCalls) && blocksForMsg == null) {
+            return Collections.emptyList();
+        }
+
+        // Responses 的 reasoning/output item 属于协议回放状态，不污染应用 metadata。
+        // 完成帧已把工作区提升到 terminalProtocolStates 并清理内部键；工具递归必须优先复用该状态。
+        MessageProtocolState replayState = acc.getTerminalProtocolStates() == null ? null
+                : acc.getTerminalProtocolStates().get(OpenaiResponsesMessageStateSupport.PROTOCOL_ID);
+        if (replayState == null) {
+            replayState = OpenaiResponsesMessageStateSupport.fromAggregation(acc.getAggregationMetadata());
+        }
+
+        Map<String, MessageProtocolState> protocolStates = replayState == null ? null
+                : Collections.singletonMap(OpenaiResponsesMessageStateSupport.PROTOCOL_ID, replayState);
+        AssistantMessage message = AssistantMessage.snapshot(
+                text == null ? "" : text,
+                thinking == null ? "" : thinking,
+                toolCalls,
+                blocksForMsg,
+                null,
+                null,
+                protocolStates);
+
+        acc.in_thinking = false; //本方言不走父类思考状态机，统一复位
+
+        return Collections.singletonList(message);
+    }
+
+    /**
+     * 构建助手消息（用于工具调用）
+     *
+     * @author oisin lu
+     * @date 2026年1月28日
+     */
+    @Override
+    public ONode buildAssistantToolCallMessageNode(ChatAccumulator acc, Map<String, ToolCallBuilder> toolCallBuilders) {
+        return requestBuilder.buildAssistantToolCallMessageNode(acc, toolCallBuilders);
+    }
+}

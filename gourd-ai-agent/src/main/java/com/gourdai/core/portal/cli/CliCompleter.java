@@ -19,11 +19,11 @@ import org.jline.reader.Candidate;
 import org.jline.reader.Completer;
 import org.jline.reader.LineReader;
 import org.jline.reader.ParsedLine;
-import org.noear.solon.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.ChatConfig;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.agent.AgentDefinition;
 import com.gourdai.harness.command.Command;
-import org.noear.solon.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.mount.SkillDir;
 
 import java.util.HashSet;
 import java.util.List;

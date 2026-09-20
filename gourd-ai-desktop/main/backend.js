@@ -496,7 +496,7 @@ async function startBackend(port) {
 
   // 文件日志级别：打包版仅输出 ERROR（DEBUG 日志量约百兆/天，配合 7 天滚动上限会膨胀到 ~700MB 撑爆磁盘）；
   // 开发版保持 app.yml 的 DEBUG 默认值便于排障；GWORK_LOG_LEVEL 环境变量可临时覆盖（如 GWORK_LOG_LEVEL=DEBUG）。
-  // -D 系统属性优先级高于 app.yml（Solon 配置覆盖规则）。
+  // -D 系统属性优先级高于 app.yml（框架配置覆盖规则）。
   const fileLogLevel = process.env.GWORK_LOG_LEVEL || (app.isPackaged ? 'ERROR' : null);
 
   // JVM 内存参数：不设置时 JDK 按物理内存推导（32G 机器上 InitialHeap=528M / MaxHeap=8.4G，

@@ -1,0 +1,1877 @@
+/*
+ * Copyright 2017-2025 noear.org and authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.gourdai.ai.chat.dialect;
+
+import org.noear.snack4.Feature;
+import org.noear.snack4.ONode;
+import org.noear.snack4.Options;
+import org.noear.snack4.json.JsonReader;
+import org.noear.snack4.json.util.FormatUtil;
+import org.noear.solon.Utils;
+import com.gourdai.ai.chat.content.AbsMedia;
+import com.gourdai.ai.chat.content.ContentBlock;
+import com.gourdai.ai.chat.content.AudioBlock;
+import com.gourdai.ai.chat.*;
+import com.gourdai.ai.chat.event.ChatEventType;
+import com.gourdai.ai.chat.event.ChatStreamContext;
+import com.gourdai.ai.chat.tool.*;
+import com.gourdai.ai.chat.message.*;
+import com.gourdai.ai.chat.source.SearchResult;
+import com.gourdai.ai.chat.content.ImageBlock;
+import com.gourdai.ai.chat.content.TextBlock;
+import com.gourdai.ai.chat.content.VideoBlock;
+import org.noear.solon.net.http.HttpTimeout;
+import org.noear.solon.net.http.HttpUtils;
+import org.noear.solon.net.http.impl.HttpSslSupplierAny;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Duration;
+import java.util.*;
+
+/**
+ * 聊天模型方言虚拟类
+ *
+ * @author noear
+ * @since 3.1
+ */
+public abstract class AbstractChatDialect implements ChatDialect {
+    private static final Logger LOG = LoggerFactory.getLogger(AbstractChatDialect.class);
+
+    /** LLM 端点建连超时（DNS + TCP + TLS 握手）：弱网下建连卡死不应占用整个模型超时预算 */
+    protected static final Duration LLM_CONNECT_TIMEOUT = Duration.ofSeconds(10);
+
+    /** 读写超时下限：与流层帧间空闲下限对齐（ChatRequestDescDefault#STREAM_IDLE_FLOOR） */
+    protected static final Duration LLM_IO_TIMEOUT_FLOOR = Duration.ofSeconds(15);
+
+    /**
+     * 构建 LLM HTTP 三段式超时（弱网优化，2026-09-18）。
+     *
+     * <p>建连固定 10s；写（请求体上行）与读（帧间兜底）取「配置值与 15s 下限」中的较大者。
+     * 旧实现把配置值整体下放到 connect/read/write 三处（且 getSeconds() 截断）：
+     * 建连要陪跑 120s，弱网「连不上」表现为前端干等两分钟；&lt;1s 配置更会被截断成 0
+     * （彻底禁用 HTTP 层超时）。拆分后建连失败 10s 即暴露，交由上层重试。</p>
+     *
+     * <p>读写设 15s 下限的原因：断流主防线在流层（见 ChatRequestDescDefault 帧间空闲拆分，
+     * 帧间下限 15s 防误杀），若 socket 层读超时比流层下限更严，慢流会被 HTTP 层先杀，
+     * 防误杀设计被绕过。读写 ≥ 流层下限保证超时判定权始终在流层。</p>
+     *
+     * <p>注意：{@code HttpTimeout.of(Duration, Duration, Duration)} 的参数顺序是
+     * {@code (connect, write, read)}——write 在 read 之前，与直觉相反（字节码实证）。</p>
+     */
+    protected HttpTimeout buildHttpTimeout(ChatConfig config) {
+        Duration total = config.getTimeout();
+        Duration io = LLM_IO_TIMEOUT_FLOOR.compareTo(total) > 0 ? LLM_IO_TIMEOUT_FLOOR : total;
+        return HttpTimeout.of(LLM_CONNECT_TIMEOUT, io, io);
+    }
+
+    protected String getApiUrl(ChatConfig config) {
+        return config.getApiUrl();
+    }
+
+    @Override
+    public HttpUtils createHttpUtils(ChatConfig config, boolean isStream) {
+        HttpUtils httpUtils = HttpUtils.http(getApiUrl(config))
+                .ssl(HttpSslSupplierAny.getInstance())
+                .timeout(buildHttpTimeout(config));
+
+        if (config.getProxy() != null) {
+            httpUtils.proxy(config.getProxy());
+        }
+
+        if (Utils.isNotEmpty(config.getApiKey())) {
+            httpUtils.header("Authorization", "Bearer " + config.getApiKey());
+        }
+
+        if (Utils.isNotEmpty(config.getUserAgent())) {
+            httpUtils.userAgent(config.getUserAgent());
+        }
+
+        httpUtils.headers(config.getHeaders());
+
+        return httpUtils;
+    }
+
+    @Override
+    public void prepareOutputSchemaInstruction(String outputSchema, StringBuilder instructionBuilder) {
+        instructionBuilder.append("\n\n## [IMPORTANT: OUTPUT FORMAT]\n")
+                .append("Format your response as a JSON object strictly following this schema:\n")
+                .append("<output_schema>\n").append(outputSchema).append("\n</output_schema>\n")
+                .append("Output only the raw JSON, beginning with '{' and ending with '}'.");
+    }
+
+    @Override
+    public void prepareOutputFormatOptions(ChatOptions options) {
+        options.optionSet("response_format", Utils.asMap("type", "json_object"));
+    }
+
+    protected void buildAssistantMessageNodeDo(ChatConfig config, ONode oNode, AssistantMessage msg) {
+        oNode.set("role", msg.getRole().name().toLowerCase());
+        List<Map> outboundToolCalls = ToolCallJsonSanitizer.buildOpenAiCompatibleToolCalls(
+                msg.getToolCalls(), msg.getToolCallsRaw());
+
+        if (msg.isMultiModal() == false) {
+            // 单模态：保持原有 string content 行为
+            if (Utils.isNotEmpty(msg.getText())) {
+                oNode.set("content", msg.getText());
+            } else if (Utils.isNotEmpty(outboundToolCalls)) {
+                // 有 tool_calls 但无文本内容（如 reasoning-only 后调工具）时，显式设 content=null
+                // OpenAI 规范要求 assistant message 含 tool_calls 时 content 字段存在（可为 null）
+                oNode.set("content", (String) null);
+            } else {
+                // 无答案、也无 tool_calls（如纯推理轮：只有 <think> 没给结论）时，仍需写出 content 键；
+                // 否则出站就是 {"role":"assistant"}（或仅带 reasoning_content）的空消息，会被 OpenAI 兼容服务端拒绝（会话中毒）。
+                // 这里只做协议占位：思考内容不回灌 content（与多模态分支 stripThinkTags 的语义保持一致，避免上下文污染）
+                oNode.set("content", "");
+            }
+        } else {
+            // 多模态：OpenAI 兼容 content 数组
+            oNode.getOrNew("content").then(n1 -> {
+                for (ContentBlock block1 : msg.getBlocks()) {
+                    if (block1 instanceof TextBlock) {
+                        TextBlock m1Text = (TextBlock) block1;
+                        String text = AssistantMessage.stripThinkTags(m1Text.getContent());
+                        if (Utils.isNotEmpty(text)) {
+                            n1.addNew().set("type", "text").set("text", text);
+                        }
+                    } else if (block1 instanceof ImageBlock) {
+                        // Session 截断后 data 为空且无 url/id 时跳过，避免写出空 media
+                        if (!isMediaBlockPlayable(block1)) {
+                            continue;
+                        }
+                        String imageData = block1.toDataString(true);
+                        if (Utils.isNotEmpty(imageData)) {
+                            ONode oNode1 = n1.addNew();
+                            oNode1.set("type", "image_url");
+                            oNode1.getOrNew("image_url").set("url", imageData);
+                        }
+                    } else if (block1 instanceof AudioBlock) {
+                        // OpenAI 多轮音频优先侧车 audio.id；无 id 时降级 audio_url
+                        Object audioId = getBlockMeta(block1, "audio_id");
+                        if (audioId == null) {
+                            audioId = getBlockMeta(block1, "id");
+                        }
+                        if (audioId != null && Utils.isNotEmpty(String.valueOf(audioId))) {
+                            oNode.getOrNew("audio").set("id", String.valueOf(audioId));
+                        } else if (isMediaBlockPlayable(block1)) {
+                            // 占位 audio://id 不应作为 url 回传
+                            String audioData = block1.toDataString(true);
+                            if (Utils.isNotEmpty(audioData) && !audioData.startsWith("audio://")) {
+                                ONode oNode1 = n1.addNew();
+                                oNode1.set("type", "audio_url");
+                                oNode1.getOrNew("audio_url").set("url", audioData);
+                            }
+                        }
+                    } else if (block1 instanceof VideoBlock) {
+                        if (!isMediaBlockPlayable(block1)) {
+                            continue;
+                        }
+                        String videoData = block1.toDataString(true);
+                        if (Utils.isNotEmpty(videoData)) {
+                            ONode oNode1 = n1.addNew();
+                            oNode1.set("type", "video_url");
+                            oNode1.getOrNew("video_url").set("url", videoData);
+                        }
+                    }
+
+                    // 不再把内部 meta（audio_id/source_type 等）写入 OpenAI content item，避免协议污染
+                }
+            });
+
+            // 若 content 数组为空（仅侧车 audio / 媒体已被截断），补文本投影避免协议缺 content
+            if (oNode.get("content").isArray() && oNode.get("content").getArray().isEmpty()) {
+                if (Utils.isNotEmpty(msg.getText())) {
+                    oNode.set("content", msg.getText());
+                }
+            }
+        }
+
+        if (Utils.isNotEmpty(msg.getThinking())) {
+            String thinkingField = resolveAssistantThinkingField(config, msg);
+            if (thinkingField != null) {
+                oNode.set(thinkingField, msg.getThinking());
+            }
+        }
+
+        if (Utils.isNotEmpty(outboundToolCalls)) {
+            oNode.set("tool_calls", ONode.ofBean(outboundToolCalls));
+        }
+    }
+
+    /**
+     * 目标方言用于回放历史思考的出站 JSON 字段名（无则返回 null）。
+     *
+     * <p>供 {@link #applyThinkingReplayWindow} 定位并剥离历史轮思考明文。子类若改用其它
+     * 字段名（如 Ollama 固定 {@code thinking}），必须一并重写本方法，否则历史轮明文剥不掉。</p>
+     *
+     * @since 4.1.1
+     */
+    protected String outboundThinkingFieldName(ChatConfig config, AssistantMessage msg) {
+        return resolveAssistantThinkingField(config, msg);
+    }
+
+    /**
+     * 目标是否要求带 {@code tool_calls} 的 assistant 消息必须携带思考字段（可为空串）。
+     *
+     * <p>DeepSeek thinking 模式如此：缺字段直接
+     * 「The reasoning_content in the thinking mode must be passed back to the API」400，
+     * 且该消息已在历史里，每次重试精确复现，会话就此死锁。实测空串即可满足，
+     * 故历史轮用空串占位既消除膨胀又不触发拒绝。</p>
+     *
+     * @since 4.1.1
+     */
+    protected boolean requiresThinkingFieldOnToolCallMessages(ChatConfig config) {
+        if (config == null) {
+            return false;
+        }
+        String model = config.getModel() == null ? "" : config.getModel().toLowerCase(Locale.ROOT);
+        String provider = config.getProvider() == null ? "" : config.getProvider().toLowerCase(Locale.ROOT);
+        String apiUrl = config.getApiUrl() == null ? "" : config.getApiUrl().toLowerCase(Locale.ROOT);
+        return containsAny(model, "deepseek")
+                || containsAny(provider, "deepseek")
+                || containsAny(apiUrl, "deepseek");
+    }
+
+    /**
+     * 对已构建好的 assistant 节点施加思考回放窗口（历史轮剥离明文）。
+     *
+     * <p>采用<b>后置处理</b>而非在构建时分支：这样子类对
+     * {@code buildAssistantMessageNodeDo} 的重写仍然照常生效，不会被静默绕过。</p>
+     *
+     * @since 4.1.1
+     */
+    protected void applyThinkingReplayWindow(ChatConfig config, ONode oNode, AssistantMessage msg) {
+        String thinkingField = outboundThinkingFieldName(config, msg);
+        if (thinkingField == null || !oNode.hasKey(thinkingField)) {
+            return;
+        }
+
+        // 字段必填的目标：带 tool_calls 时降为空串占位，其余直接移除。
+        if (requiresThinkingFieldOnToolCallMessages(config)
+                && Utils.isNotEmpty(ToolCallJsonSanitizer.resolveToolCalls(
+                        msg.getToolCalls(), msg.getToolCallsRaw()))) {
+            oNode.set(thinkingField, "");
+        } else {
+            oNode.remove(thinkingField);
+        }
+    }
+
+    protected void buildSystemMessageNodeDo(ChatConfig config, ONode oNode, SystemMessage msg) {
+        oNode.set("role", msg.getRole().name().toLowerCase());
+        oNode.set("content", msg.getContent());
+    }
+
+    protected void buildToolMessageNodeDo(ChatConfig config, ONode oNode, ToolMessage msg) {
+        oNode.set("role", msg.getRole().name().toLowerCase());
+
+        if (Utils.isNotEmpty(msg.getName())) {
+            oNode.set("name", msg.getName());
+        }
+
+        if (Utils.isNotEmpty(msg.getToolCallId())) {
+            oNode.set("tool_call_id", msg.getToolCallId());
+        }
+
+        if (msg.isMultiModal() == false) {
+            oNode.set("content", msg.getContent());
+        } else {
+            oNode.getOrNew("content").then(n1 -> {
+                for (ContentBlock m1 : msg.getBlocks()) {
+                    appendOpenAiCompatibleMediaOrText(n1, m1);
+                    // 与 Assistant 一致：不把内部 meta 写入 OpenAI content item，避免协议污染
+                }
+            });
+
+            // Session 截断后媒体全不可播时，避免写出空 content 数组
+            if (oNode.get("content").isArray() && oNode.get("content").getArray().isEmpty()) {
+                oNode.set("content", msg.getContent() == null ? "" : msg.getContent());
+            }
+        }
+    }
+
+    protected void buildUserMessageNodeDo(ChatConfig config, ONode oNode, UserMessage msg) {
+        oNode.set("role", msg.getRole().name().toLowerCase());
+
+        if (msg.isMultiModal() == false) {
+            //单模态
+            oNode.set("content", msg.getContent());
+        } else {
+            //多模态
+            oNode.getOrNew("content").then(n1 -> {
+                for (ContentBlock block1 : msg.getBlocks()) {
+                    appendOpenAiCompatibleMediaOrText(n1, block1);
+                    // 与 Assistant 一致：不把内部 meta 写入 OpenAI content item，避免协议污染
+                }
+            });
+
+            // Session 截断后媒体全不可播时，避免写出空 content 数组
+            if (oNode.get("content").isArray() && oNode.get("content").getArray().isEmpty()) {
+                oNode.set("content", msg.getContent() == null ? "" : msg.getContent());
+            }
+        }
+    }
+
+    /**
+     * 追加 OpenAI 兼容的 text/media content item；空/已截断媒体跳过。
+     *
+     * @since 3.9
+     */
+    protected void appendOpenAiCompatibleMediaOrText(ONode contentArray, ContentBlock block) {
+        if (block == null) {
+            return;
+        }
+
+        if (block instanceof TextBlock) {
+            TextBlock textBlock = (TextBlock) block;
+            if (Utils.isNotEmpty(textBlock.getContent())) {
+                contentArray.addNew().set("type", "text").set("text", textBlock.getContent());
+            }
+            return;
+        }
+
+        if (!isMediaBlockPlayable(block)) {
+            return;
+        }
+
+        String data = block.toDataString(true);
+        if (Utils.isEmpty(data)) {
+            return;
+        }
+
+        if (block instanceof ImageBlock) {
+            ONode item = contentArray.addNew();
+            item.set("type", "image_url");
+            item.getOrNew("image_url").set("url", data);
+        } else if (block instanceof AudioBlock) {
+            // 占位 audio://id 不应作为 url 回传
+            if (data.startsWith("audio://")) {
+                return;
+            }
+            ONode item = contentArray.addNew();
+            item.set("type", "audio_url");
+            item.getOrNew("audio_url").set("url", data);
+        } else if (block instanceof VideoBlock) {
+            ONode item = contentArray.addNew();
+            item.set("type", "video_url");
+            item.getOrNew("video_url").set("url", data);
+        }
+    }
+
+    /**
+     * 尝试拦截中转网关直接输出的纯文本错误（如 "error xxx"，非 JSON）。
+     * <p>命中时设置错误并返回 true（表示已处理），避免后续 JSON 解析报出误导性格式错误。</p>
+     *
+     * @since 4.0.5
+     */
+    protected boolean tryParseErrorText(ChatAccumulator acc, String json) {
+        if (json != null && json.startsWith("error ")) {
+            acc.setError(new ChatException(json));
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 判断媒体块是否可回传。
+     * <p>Session 压缩后 data 为空且无 url/id 时不可播，应跳过避免写出空 media。</p>
+     *
+     * @since 3.9
+     */
+    protected boolean isMediaBlockPlayable(ContentBlock block) {
+        if (block == null) {
+            return false;
+        }
+        if (!(block instanceof AbsMedia)) {
+            return true;
+        }
+
+        AbsMedia<?> media = (AbsMedia<?>) block;
+        if (Utils.isNotEmpty(media.getData()) || Utils.isNotEmpty(media.getUrl())) {
+            return true;
+        }
+
+        // 仅侧车 id 也可回传（如 OpenAI audio.id / Responses image_generation_id）
+        if (media.metas() != null) {
+            for (String key : new String[]{"audio_id", "id", "image_generation_id"}) {
+                Object value = media.metas().get(key);
+                if (value != null && Utils.isNotEmpty(String.valueOf(value))) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+
+    public ONode buildChatMessageNode(ChatConfig config, ChatMessage chatMessage) {
+        ONode oNode = new ONode();
+        if (chatMessage instanceof AssistantMessage) {
+            buildAssistantMessageNodeDo(config, oNode, (AssistantMessage) chatMessage);
+        } else if (chatMessage instanceof SystemMessage) {
+            buildSystemMessageNodeDo(config, oNode, (SystemMessage) chatMessage);
+        } else if (chatMessage instanceof ToolMessage) {
+            buildToolMessageNodeDo(config, oNode, (ToolMessage) chatMessage);
+        } else if (chatMessage instanceof UserMessage) {
+            buildUserMessageNodeDo(config, oNode, (UserMessage) chatMessage);
+        } else {
+            throw new IllegalArgumentException("Unsupported chat message type: " + chatMessage.getClass());
+        }
+
+        return oNode;
+    }
+
+    /**
+     * 构建请求工具节点
+     */
+    protected void buildReqToolsNode(ONode n, ChatConfig config, ChatOptions options, ChatMessage lastMessage) {
+        //buildReqToolsNodeDo(n, config.getDefaultTools());
+        buildReqToolsNodeDo(n, options.tools());
+    }
+
+    protected void buildReqToolsNodeDo(ONode n, Collection<FunctionTool> tools) {
+        if (Utils.isEmpty(tools)) {
+            return;
+        }
+
+        n.getOrNew("tools").then(n1 -> {
+            for (FunctionTool func : tools) {
+                n1.addNew().then(n2 -> {
+                    n2.set("type", "function");
+                    n2.getOrNew("function").then(toolNode -> {
+                        toolNode.set("name", func.name());
+                        toolNode.set("description", func.descriptionAndMeta());
+                        String inputSchema = func.inputSchema();
+                        ONode schemaNode = null;
+                        if (Utils.isNotEmpty(inputSchema)) {
+                            try {
+                                ONode candidate = ONode.ofJson(inputSchema);
+                                if (candidate.isObject()) {
+                                    schemaNode = candidate;
+                                }
+                            } catch (Exception ignored) {
+                                // 下方统一回退空参数 schema
+                            }
+                        }
+                        if (schemaNode == null) {
+                            schemaNode = newEmptyToolParameters();
+                        }
+                        if (Boolean.TRUE.equals(func.strict())) {
+                            ToolSchemaUtil.validateOpenAiStrictSchema(schemaNode, func.name());
+                        }
+                        toolNode.set("parameters", schemaNode);
+                        if (func.strict() != null) {
+                            // Chat Completions 的 strict 位于 tools[].function 内层
+                            toolNode.set("strict", func.strict());
+                        }
+                    });
+                });
+            }
+        });
+    }
+
+    private ONode newEmptyToolParameters() {
+        ONode schema = new ONode();
+        schema.set("type", "object");
+        schema.getOrNew("properties").asObject();
+        return schema;
+    }
+
+    /**
+     * 解析目标 Chat Completions 协议用于回放历史思考的消息字段。
+     * <p>字段由目标配置决定，禁止把历史消息的任意 {@code reasoningFieldName} 直接作为 JSON key。
+     * 未知目标默认不回放；DeepSeek-compatible 使用 {@code reasoning_content}，OpenRouter 使用 {@code reasoning}。</p>
+     *
+     * @since 4.1
+     */
+    protected String resolveAssistantThinkingField(ChatConfig config, AssistantMessage message) {
+        if (message == null || Utils.isEmpty(message.getThinking()) || config == null) {
+            return null;
+        }
+        if (isOpenRouterEndpoint(config)) {
+            return "reasoning";
+        }
+
+        String model = config.getModel() == null ? "" : config.getModel().toLowerCase(Locale.ROOT);
+        String provider = config.getProvider() == null ? "" : config.getProvider().toLowerCase(Locale.ROOT);
+        String apiUrl = config.getApiUrl() == null ? "" : config.getApiUrl().toLowerCase(Locale.ROOT);
+        return containsAny(model, "deepseek")
+                || containsAny(provider, "deepseek")
+                || containsAny(apiUrl, "deepseek") ? "reasoning_content" : null;
+    }
+
+    /**
+     * 是否可在请求回放时跳过纯思考消息。
+     * <p>只有目标方言能把通用 thinking 重建为合法协议字段时才保留。应用 metadata、foreign state、
+     * legacy raw 和源响应字段名都不能单独让无关目标产生空 assistant 消息。</p>
+     *
+     * @since 4.1
+     */
+    protected boolean isSkippableThinkingOnlyMessage(ChatConfig config, ChatMessage message) {
+        if (!(message instanceof AssistantMessage)) {
+            return false;
+        }
+
+        AssistantMessage assistant = (AssistantMessage) message;
+        return assistant.isThinkingOnly()
+                && resolveAssistantThinkingField(config, assistant) == null;
+    }
+
+    /** @deprecated 4.1 使用带目标配置的重载。 */
+    @Deprecated
+    protected boolean isSkippableThinkingOnlyMessage(ChatMessage message) {
+        return isSkippableThinkingOnlyMessage(null, message);
+    }
+
+    @Override
+    public ONode buildRequestJson(ChatConfig config, ChatOptions options, List<ChatMessage> messages, boolean isStream) {
+        return new ONode().then(n -> {
+            if (Utils.isNotEmpty(config.getModel())) {
+                n.set("model", config.getModel());
+            }
+
+            n.getOrNew("messages").then(n1 -> {
+                int lastUserIdx = ThinkingReplayWindow.lastUserIndex(messages);
+                for (int i = 0; i < messages.size(); i++) {
+                    ChatMessage m1 = messages.get(i);
+                    if (isSkippableThinkingOnlyMessage(config, m1)) {
+                        continue;
+                    }
+                    ONode messageNode = buildChatMessageNode(config, m1);
+                    // 思考回放窗口：跨 user 轮边界的思考明文不再上行（逐轮累加即上下文膨胀）。
+                    if (m1 instanceof AssistantMessage
+                            && !ThinkingReplayWindow.isWithinCurrentTurn(lastUserIdx, i, messages.size())) {
+                        applyThinkingReplayWindow(config, messageNode, (AssistantMessage) m1);
+                    }
+                    n1.add(messageNode);
+                }
+            });
+
+            n.set("stream", isStream);
+
+            // ⭐ 支持 prompt_cache_key（OpenAI 兼容协议字段，DeepSeek 等提供商使用此键复用前缀缓存）
+            CacheControl cacheControl = options.cacheControl();
+            if (cacheControl != null && Utils.isNotEmpty(cacheControl.getPromptCacheKey())) {
+                n.set("prompt_cache_key", cacheControl.getPromptCacheKey());
+            }
+
+            for (Map.Entry<String, Object> kv : options.options().entrySet()) {
+                String key = kv.getKey();
+                Object value = kv.getValue();
+
+                // 统一推理水平 → 顶层 reasoning_effort（Chat Completions / 兼容协议）
+                // 仅归一化本字段后写出；非法值不落库，避免污染请求
+                // 国产模型族（qwen/kimi/glm/minimax）默认不写顶层 effort（对齐 OpenCode variants 空）
+                // OpenRouter：嵌套 reasoning.effort
+                // 注意：effort 字段本身不在此开启 thinking；循环结束后按 OpenCode 语义隐式开启
+                if ("reasoning_effort".equals(key)) {
+                    if (shouldSkipChatCompletionsReasoningEffort(config)) {
+                        continue;
+                    }
+                    // Gemini：显式 thinking_config 互斥守卫（双发会 400）；
+                    // thinking(false) 已先行写出关闭/降级标记时不再覆盖（options 迭代顺序不定，关闭优先）
+                    if (isGeminiChatCompletionsModel(config)
+                            && (hasExplicitGeminiThinkingConfig(options) || hasGeminiThinkingDisableMark(n))) {
+                        continue;
+                    }
+                    String effort = clampChatCompletionsEffort(value, config);
+                    if (effort != null) {
+                        if (isOpenRouterEndpoint(config)) {
+                            n.getOrNew("reasoning").set("effort", effort);
+                        } else {
+                            n.set("reasoning_effort", effort);
+                        }
+                    }
+                    continue;
+                }
+
+                // 统一思考开关：按 model（辅以 provider/apiUrl）单写对应字段，避免双写触发严格网关 400
+                // 非 Boolean（Map 等）仍按原 key 透传，供供应商原生配置与逃生舱使用
+                if ("thinking".equals(key)) {
+                    if (value instanceof Boolean) {
+                        applyChatCompletionsThinkingSwitch(n, config, options, (Boolean) value);
+                    } else if (value != null) {
+                        n.set(key, ONode.ofBean(value));
+                    }
+                    continue;
+                }
+
+                n.set(key, ONode.ofBean(value));
+            }
+
+            // 对齐 OpenCode variants：选了 effort 档位时，对需要显式开关的模型隐式开启 thinking
+            // thinking(false) / 显式 Map thinking 优先，不覆盖
+            maybeEnableThinkingFromReasoningEffort(n, config, options);
+
+            ChatMessage lastMessage = messages.get(messages.size() - 1);
+            buildReqToolsNode(n, config, options, lastMessage);
+        });
+    }
+
+    @Override
+    public ONode buildAssistantToolCallMessageNode(ChatAccumulator acc, Map<String, ToolCallBuilder> toolCallBuilders) {
+        ONode oNode = new ONode();
+        oNode.set("role", "assistant");
+        oNode.set("content", acc.getAggregationText());
+        if (Utils.isNotEmpty(acc.getAggregationThinking())) {
+            String field = "reasoning".equals(acc.reasoning_field_name)
+                    ? "reasoning" : "reasoning_content";
+            oNode.set(field, acc.getAggregationThinking());
+        }
+        oNode.getOrNew("tool_calls").asArray().then(n1 -> {
+            for (Map.Entry<String, ToolCallBuilder> kv : toolCallBuilders.entrySet()) {
+                //有可能没有
+                n1.addNew().set("id", kv.getValue().idBuilder.toString())
+                        .set("type", "function")
+                        .getOrNew("function").then(n2 -> {
+                            n2.set("name", kv.getValue().nameBuilder.toString());
+                            // 流式聚合出口净化：输出被截断（finish_reason=length）时 arguments 可能是非法 JSON，禁止原样入历史
+                            n2.set("arguments", ToolCallJsonSanitizer.sanitizeArguments(
+                                    kv.getValue().argumentsBuilder.toString(),
+                                    kv.getValue().nameBuilder.toString()));
+                        });
+            }
+        });
+
+        return oNode;
+    }
+
+    @Override
+    public AssistantMessage buildAssistantMessageByToolMessages(AssistantMessage toolCallMessage, List<ToolMessage> toolMessages) {
+        //要求直接返回（转为新的响应消息）
+        StringBuffer buf = new StringBuffer();
+        List<ContentBlock> mergedBlocks = new ArrayList<>();
+
+        for (ToolMessage toolMessage : toolMessages) {
+            if (buf.length() > 0) {
+                buf.append('\n');
+            }
+            if (Utils.isNotEmpty(toolMessage.getContent())) {
+                buf.append(toolMessage.getContent());
+            }
+
+            // 合并工具结果中的多模态内容块（如截图）
+            // 注意：ToolMessage.blocks 常已含对应 TextBlock，勿再与 content 重复拼接
+            if (Utils.isNotEmpty(toolMessage.getBlocks())) {
+                for (ContentBlock block : toolMessage.getBlocks()) {
+                    if (block != null && !(block instanceof TextBlock)) {
+                        mergedBlocks.add(block);
+                    }
+                }
+            }
+        }
+
+        AssistantMessage assistantMessage;
+        if (Utils.isEmpty(mergedBlocks)) {
+            assistantMessage = ChatMessage.ofAssistant(buf.toString());
+        } else {
+            assistantMessage = ChatMessage.ofAssistant(buf.toString(), mergedBlocks);
+        }
+
+        assistantMessage.addMetadata("reason", "tool")
+                .addMetadata("source", toolCallMessage.getText());
+
+        for (ToolMessage toolMessage : toolMessages) {
+            assistantMessage.addMetadata(toolMessage.getMetadata());
+        }
+
+        return assistantMessage;
+    }
+
+    /**
+     * 解析工具调用
+     */
+    protected List<ToolCall> parseToolCalls(ChatAccumulator acc, ONode toolCallsNode) {
+        if (toolCallsNode == null) {
+            return null;
+        }
+
+        List<ToolCall> toolCalls = new ArrayList<>();
+
+        for (ONode n1 : toolCallsNode.getArray()) {
+            toolCalls.add(parseToolCall(acc, n1));
+        }
+
+        return toolCalls;
+    }
+
+    protected ToolCall parseToolCall(ChatAccumulator acc, ONode n1) {
+        String callId = n1.get("id").getString();
+
+        // 官方流式协议（ChatCompletionMessageToolCallChunk）：id 仅首分片携带，index 字段才是分片聚合主键
+        // 以 index 为主键可避免多个工具并行流式分片时串号；非流式/无 index 的端点退回 id 键
+        String chunkIndexKey = null;
+        ONode idxNode = n1.getOrNull("index");
+        if (idxNode != null && idxNode.isValue()) {
+            int idx = idxNode.getInt(-1);
+            if (idx >= 0) {
+                chunkIndexKey = "idx:" + idx;
+            }
+        }
+
+        if (Utils.isNotEmpty(callId)) {
+            acc.lastToolCallId = callId;
+        }
+
+        String index = chunkIndexKey != null ? chunkIndexKey
+                : (Utils.isNotEmpty(callId) ? callId : acc.lastToolCallId);
+
+        ONode n1f = n1.get("function");
+        String name = n1f.get("name").getString(); //可能是空的
+        ONode n1fArgs = n1f.get("arguments");
+        String argStr = n1fArgs.getString();
+
+        if (n1fArgs.isString()) {
+            //有可能是 json string（还可能只是流的中间消息）
+            if (hasNestedJsonBlock(argStr)) {
+                JsonReader reader = new JsonReader(argStr, Options.of(Feature.Read_AutoRepair));
+                n1fArgs = reader.readLast();
+
+                if (n1fArgs == null) {
+                    //流式分片本就是不完整的 JSON 片段，解析失败属预期，降级为 debug 避免刷日志
+                    if (acc.isStream()) {
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("Parse tool arguments chunk skipped: {}", argStr);
+                        }
+                    } else {
+                        LOG.warn("Parse tool arguments failed: {}", argStr);
+                    }
+                }
+            }
+        }
+
+        Map<String, Object> argMap = new HashMap<>();
+        if (n1fArgs != null) {
+            if (n1fArgs.isObject()) {
+                argMap = n1fArgs.toBean(Map.class);
+            }
+        }
+
+        return new ToolCall(index, callId, name, argStr, argMap);
+    }
+
+    /**
+     * 将内容块投影为文本（拼接所有 TextBlock）
+     *
+     * @since 3.9
+     */
+    protected String projectTextContent(List<ContentBlock> blocks) {
+        if (Utils.isEmpty(blocks)) {
+            return null;
+        }
+
+        StringBuilder buf = new StringBuilder();
+        for (ContentBlock block : blocks) {
+            if (block instanceof TextBlock) {
+                String text = block.getContent();
+                if (Utils.isNotEmpty(text)) {
+                    if (buf.length() > 0) {
+                        buf.append('\n');
+                    }
+                    buf.append(text);
+                }
+            }
+        }
+
+        // 纯媒体：不再把 base64/data 投影进 content，避免 Session/token/Agent 被污染。
+        // 仅在存在可展示的短 URL 时做轻量文本投影，便于日志与兼容旧消费方。
+        if (buf.length() == 0) {
+            for (ContentBlock block : blocks) {
+                if (block instanceof TextBlock) {
+                    continue;
+                }
+                if (block instanceof AbsMedia) {
+                    AbsMedia<?> media = (AbsMedia<?>) block;
+                    // 有 url 时优先用短 URL 投影；纯 base64 返回 null（媒体只在 blocks）
+                    if (Utils.isNotEmpty(media.getUrl())) {
+                        return media.getUrl();
+                    }
+                }
+            }
+            return null;
+        }
+
+        return buf.toString();
+    }
+
+    /**
+     * 解析助理消息 content 为内容块列表
+     *
+     * @param oMessage 可选，用于解析侧车字段（如 OpenAI message.audio）
+     * @since 3.9
+     */
+    protected List<ContentBlock> parseAssistantContentBlocks(ChatAccumulator acc, ONode oContent, ONode oMessage) {
+        List<ContentBlock> blocks = new ArrayList<>();
+
+        if (oContent != null && !oContent.isNull()) {
+            if (oContent.isValue()) {
+                // 一般输出都是单值文本
+                String text = oContent.getValueAs();
+                if (text != null) {
+                    blocks.add(TextBlock.of(text));
+                }
+            } else if (oContent.isArray()) {
+                // 多模态 content 数组：遍历全部，避免只取第一项丢块
+                for (ONode contentItem : oContent.getArray()) {
+                    ContentBlock block = parseAssistantContentItem(contentItem);
+                    if (block != null) {
+                        blocks.add(block);
+                    }
+                }
+            } else if (oContent.isObject()) {
+                ContentBlock block = parseAssistantContentItem(oContent);
+                if (block != null) {
+                    blocks.add(block);
+                }
+            }
+        }
+
+        // OpenAI Chat Completions 侧车 audio 字段
+        if (oMessage != null && oMessage.hasKey("audio")) {
+            ONode oAudio = oMessage.get("audio");
+            if (oAudio != null && oAudio.isObject()) {
+                ContentBlock audioBlock = parseAssistantAudioSidecar(oAudio);
+                if (audioBlock != null) {
+                    blocks.add(audioBlock);
+
+                    // transcript 并入文本投影
+                    String transcript = oAudio.get("transcript").getString();
+                    if (Utils.isNotEmpty(transcript)) {
+                        boolean hasSameText = false;
+                        for (ContentBlock b : blocks) {
+                            if (b instanceof TextBlock && transcript.equals(b.getContent())) {
+                                hasSameText = true;
+                                break;
+                            }
+                        }
+                        if (!hasSameText) {
+                            blocks.add(0, TextBlock.of(transcript));
+                        }
+                    }
+                }
+            }
+        }
+
+        // OpenAI refusal 侧车字段（拒答时正文为空、refusal 有值）：作为文本投影，避免空消息难以定位
+        if (oMessage != null && oMessage.hasKey("refusal")) {
+            String refusal = oMessage.get("refusal").getString();
+            if (Utils.isNotEmpty(refusal)) {
+                boolean hasText = false;
+                for (ContentBlock b : blocks) {
+                    if (b instanceof TextBlock && Utils.isNotEmpty(b.getContent())) {
+                        hasText = true;
+                        break;
+                    }
+                }
+                if (!hasText) {
+                    blocks.add(TextBlock.of(refusal));
+                }
+            }
+        }
+
+        return blocks;
+    }
+
+    /**
+     * 解析单个 content item 为 ContentBlock
+     *
+     * @since 3.9
+     */
+    protected ContentBlock parseAssistantContentItem(ONode contentItem) {
+        if (contentItem == null || contentItem.isNull()) {
+            return null;
+        }
+
+        if (contentItem.isValue()) {
+            String text = contentItem.getValueAs();
+            return text == null ? null : TextBlock.of(text);
+        }
+
+        if (!contentItem.isObject()) {
+            return null;
+        }
+
+        String type = contentItem.get("type").getString();
+
+        // 文本类
+        if (contentItem.hasKey("text") || "text".equals(type) || "output_text".equals(type) || "refusal".equals(type)) {
+            String text = contentItem.get("text").getValueAs();
+            if (text == null && contentItem.hasKey("refusal")) {
+                text = contentItem.get("refusal").getValueAs();
+            }
+            if (text != null) {
+                return TextBlock.of(text);
+            }
+        }
+
+        // image / image_url
+        if (contentItem.hasKey("image") || contentItem.hasKey("image_url") || "image".equals(type) || "image_url".equals(type)) {
+            return parseMediaFromContentItem(contentItem, "image", "image_url");
+        }
+
+        // audio / audio_url / input_audio
+        if (contentItem.hasKey("audio") || contentItem.hasKey("audio_url") || contentItem.hasKey("input_audio")
+                || "audio".equals(type) || "audio_url".equals(type) || "input_audio".equals(type)) {
+            return parseMediaFromContentItem(contentItem, "audio", "audio_url", "input_audio");
+        }
+
+        // video / video_url
+        if (contentItem.hasKey("video") || contentItem.hasKey("video_url") || "video".equals(type) || "video_url".equals(type)) {
+            return parseMediaFromContentItem(contentItem, "video", "video_url");
+        }
+
+        return null;
+    }
+
+    /**
+     * 从 content item 解析媒体块（兼容字符串 / {url} / {data,format}）
+     *
+     * @since 3.9
+     */
+    protected ContentBlock parseMediaFromContentItem(ONode contentItem, String... mediaKeys) {
+        String mediaType = mediaKeys[0]; // image / audio / video
+
+        for (String key : mediaKeys) {
+            if (!contentItem.hasKey(key)) {
+                continue;
+            }
+
+            ONode mediaNode = contentItem.get(key);
+            if (mediaNode.isValue()) {
+                return createMediaBlock(mediaType, mediaNode.getValueAs(), null, null);
+            }
+
+            if (mediaNode.isObject()) {
+                String url = mediaNode.get("url").getString();
+                String data = mediaNode.get("data").getString();
+                if (data == null) {
+                    data = mediaNode.get("b64_json").getString();
+                }
+                String mime = mediaNode.get("mime_type").getString();
+                if (Utils.isEmpty(mime)) {
+                    mime = mediaNode.get("format").getString();
+                    if (Utils.isNotEmpty(mime) && !mime.contains("/")) {
+                        // OpenAI input_audio.format = wav/mp3
+                        mime = mediaType + "/" + mime;
+                    }
+                }
+
+                ContentBlock block = createMediaBlock(mediaType, url, data, mime);
+                if (block != null && mediaNode.hasKey("id")) {
+                    String id = mediaNode.get("id").getString();
+                    if (Utils.isNotEmpty(id) && block instanceof AbsMedia) {
+                        ((AbsMedia<?>) block).metaAdd("id", id);
+                        if ("audio".equals(mediaType)) {
+                            ((AbsMedia<?>) block).metaAdd("audio_id", id);
+                        }
+                    }
+                }
+                return block;
+            }
+        }
+
+        // type=image_url 但结构在根级 url
+        if (contentItem.hasKey("url")) {
+            return createMediaBlock(mediaType, contentItem.get("url").getString(), null, null);
+        }
+
+        return null;
+    }
+
+    /**
+     * 解析 OpenAI message.audio 侧车
+     *
+     * @since 3.9
+     */
+    protected ContentBlock parseAssistantAudioSidecar(ONode oAudio) {
+        String id = oAudio.get("id").getString();
+        String data = oAudio.get("data").getString();
+        String mime = oAudio.get("mime_type").getString();
+        if (Utils.isEmpty(mime)) {
+            String format = oAudio.get("format").getString();
+            if (Utils.isNotEmpty(format)) {
+                mime = format.contains("/") ? format : "audio/" + format;
+            }
+        }
+
+        AudioBlock block;
+        if (Utils.isNotEmpty(data)) {
+            block = Utils.isEmpty(mime) ? AudioBlock.ofBase64(data) : AudioBlock.ofBase64(data, mime);
+        } else if (Utils.isNotEmpty(id)) {
+            // 仅有 id：占位，回传时写 audio.id
+            block = AudioBlock.ofUrl("audio://" + id);
+        } else {
+            return null;
+        }
+
+        if (Utils.isNotEmpty(id)) {
+            block.metaAdd("id", id);
+            block.metaAdd("audio_id", id);
+        }
+        if (oAudio.hasKey("expires_at")) {
+            block.metaAdd("expires_at", oAudio.get("expires_at").getValue());
+        }
+        if (oAudio.hasKey("transcript")) {
+            String transcript = oAudio.get("transcript").getString();
+            if (Utils.isNotEmpty(transcript)) {
+                block.metaAdd("transcript", transcript);
+            }
+        }
+
+        return block;
+    }
+
+    /**
+     * 创建媒体块
+     *
+     * @since 3.9
+     */
+    protected ContentBlock createMediaBlock(String mediaType, String url, String data, String mime) {
+        boolean hasData = Utils.isNotEmpty(data);
+        boolean hasUrl = Utils.isNotEmpty(url);
+
+        if (!hasData && !hasUrl) {
+            return null;
+        }
+
+        // data:image/png;base64,xxxx
+        if (hasUrl && url.startsWith("data:") && url.contains(";base64,")) {
+            int comma = url.indexOf(',');
+            String header = url.substring(5, url.indexOf(';'));
+            String b64 = url.substring(comma + 1);
+            data = b64;
+            if (Utils.isEmpty(mime)) {
+                mime = header;
+            }
+            hasData = true;
+            hasUrl = false;
+        }
+
+        if ("image".equals(mediaType)) {
+            if (hasData) {
+                return Utils.isEmpty(mime) ? ImageBlock.ofBase64(data) : ImageBlock.ofBase64(data, mime);
+            }
+            return Utils.isEmpty(mime) ? ImageBlock.ofUrl(url) : ImageBlock.ofUrl(url, mime);
+        }
+
+        if ("audio".equals(mediaType)) {
+            if (hasData) {
+                return Utils.isEmpty(mime) ? AudioBlock.ofBase64(data) : AudioBlock.ofBase64(data, mime);
+            }
+            return Utils.isEmpty(mime) ? AudioBlock.ofUrl(url) : AudioBlock.ofUrl(url, mime);
+        }
+
+        if ("video".equals(mediaType)) {
+            if (hasData) {
+                return Utils.isEmpty(mime) ? VideoBlock.ofBase64(data) : VideoBlock.ofBase64(data, mime);
+            }
+            return Utils.isEmpty(mime) ? VideoBlock.ofUrl(url) : VideoBlock.ofUrl(url, mime);
+        }
+
+        return null;
+    }
+
+    /**
+     * 将传统结构化解析结果立即发布为 Event-first 事件。
+     *
+     * <p>该辅助方法只供复用 {@link AssistantMessage} 作为解析中间结构的方言使用：它分别检查
+     * thinkingRaw / textRaw 并直接发出增量事件；空边界消息不发增量。消息中的工具调用、搜索结果、
+     * metadata、媒体及 protocolStates 会先合并到终态载体。</p>
+     *
+     * <p>工具调用按 index 优先、id 兜底识别；同一调用只发一次 START，参数事件只携带当前分片的
+     * argumentsStr。TOOL_CALL_END 由核心在所有参数聚合完成后统一发出。</p>
+     *
+     * @since 4.1
+     */
+    protected void publishAssistantMessageEvents(ChatStreamContext ctx, AssistantMessage message) {
+        if (ctx == null || message == null) {
+            return;
+        }
+
+        ChatAccumulator acc = ctx.getAccumulator();
+        acc.mergeTerminalMessage(message);
+
+        if (Utils.isNotEmpty(message.getThinkingRaw())) {
+            ctx.emit(ctx.event(ChatEventType.THINKING_DELTA)
+                    .text(message.getThinkingRaw())
+                    .build());
+        }
+        if (Utils.isNotEmpty(message.getTextRaw())) {
+            ctx.emit(ctx.event(ChatEventType.TEXT_DELTA)
+                    .text(message.getTextRaw())
+                    .build());
+        }
+
+        if (Utils.isNotEmpty(message.getToolCalls())) {
+            Set<String> started = ctx.attrIfAbsent("__startedToolCalls", k -> new LinkedHashSet<String>());
+            for (ToolCall call : message.getToolCalls()) {
+                String key = toolCallEventKey(call);
+                if (key == null || started.add(key)) {
+                    ToolCall startCall = new ToolCall(call.getIndex(), call.getId(), call.getName(), null, null);
+                    ctx.emit(toolCallEvent(ctx, ChatEventType.TOOL_CALL_START, startCall, null));
+                }
+
+                if (Utils.isNotEmpty(call.getArgumentsStr())) {
+                    ctx.emit(toolCallEvent(ctx, ChatEventType.TOOL_CALL_ARGS_DELTA,
+                            call, call.getArgumentsStr()));
+                }
+            }
+        }
+
+        if (Utils.isNotEmpty(message.getBlocks())) {
+            for (ContentBlock block : message.getBlocks()) {
+                if (block == null || block instanceof TextBlock) {
+                    continue;
+                }
+                ctx.emit(ctx.event(ChatEventType.MEDIA_DONE).block(block).build());
+            }
+        }
+    }
+
+    private com.gourdai.ai.chat.event.ChatEvent toolCallEvent(ChatStreamContext ctx,
+                                                                  ChatEventType type,
+                                                                  ToolCall call,
+                                                                  String text) {
+        com.gourdai.ai.chat.event.ChatEventDefault.Builder event = ctx.event(type)
+                .toolCall(call)
+                .toolCallId(call == null ? null : call.getId())
+                .text(text);
+        int index = toolCallEventIndex(call);
+        if (index >= 0) {
+            event.index(index);
+        }
+        return event.build();
+    }
+
+    private int toolCallEventIndex(ToolCall call) {
+        if (call == null || Utils.isEmpty(call.getIndex())) {
+            return -1;
+        }
+        String index = call.getIndex();
+        if (index.startsWith("idx:")) {
+            index = index.substring(4);
+        }
+        try {
+            return Integer.parseInt(index);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    private String toolCallEventKey(ToolCall call) {
+        if (call == null) {
+            return null;
+        }
+        if (Utils.isNotEmpty(call.getIndex())) {
+            return "index:" + call.getIndex();
+        }
+        if (Utils.isNotEmpty(call.getId())) {
+            return "id:" + call.getId();
+        }
+        return null;
+    }
+
+
+    public List<AssistantMessage> parseAssistantMessage(ChatAccumulator acc, ONode oMessage) {
+        List<AssistantMessage> messageList = new ArrayList<>();
+
+        ONode oContent = oMessage.get("content");
+
+        List<ContentBlock> contentBlocks = parseAssistantContentBlocks(acc, oContent, oMessage);
+        String content = projectTextContent(contentBlocks);
+
+        // 纯文本且非多模态时，blocks 置空以保持旧序列化形态
+        List<ContentBlock> blocksForMsg = null;
+        if (Utils.isNotEmpty(contentBlocks)) {
+            boolean multi = contentBlocks.size() > 1
+                    || !(contentBlocks.get(0) instanceof TextBlock);
+            if (multi) {
+                blocksForMsg = contentBlocks;
+            }
+        }
+
+        ONode toolCallsNode = oMessage.getOrNull("tool_calls");
+        ONode searchResultsNode = oMessage.getOrNull("search_results");
+
+        List<ToolCall> toolCalls = parseToolCalls(acc, toolCallsNode);
+        List<SearchResult> searchResults = parseSearchResults(searchResultsNode);
+
+        if (Utils.isNotEmpty(toolCalls)) {
+            // 流式分片（ChatCompletionMessageToolCallChunk）的 arguments 是 JSON 片段（如 'la'、'{"comm'），
+            // 分片期只保存在 ToolCall.argumentsStr，并由事件/聚合器累积；不得逐帧净化。
+            // 新消息不再重复生成 toolCallsRaw，旧字段只用于历史 JSON 兼容。
+            if (acc.in_thinking && acc.isStream()) {
+                //思考通道由事件类型表达，不再创建空 AssistantMessage 边界项。
+            }
+            acc.in_thinking = false; //重置状态
+        }
+
+
+        /**
+         * 情况：
+         * 有可能一直有：reasoning_content 或 reasoning
+         * 有可能时有时无：reasoning_content 或 reasoning
+         * 有可能一直无：...
+         * 也可能和内容都为空: ...
+         * */
+
+        final String reasoning_content;
+        if (oMessage.hasKey("reasoning_content")) {
+            reasoning_content = oMessage.get("reasoning_content").getValueAs();
+            acc.reasoning_field_name = "reasoning_content";
+        } else if (oMessage.hasKey("reasoning")) {
+            reasoning_content = oMessage.get("reasoning").getValueAs();
+            acc.reasoning_field_name = "reasoning";
+        } else {
+            reasoning_content = null;
+        }
+
+        //非流式：随正文一起双字段构造的思考内容（不再缝合 <think> 标签进 content）
+        String pendingThinking = null;
+        //同一帧内的思考与正文合并进一条终态消息，不再拆成多条
+        String splitThinking = null;
+
+        if (Utils.isNotEmpty(reasoning_content)) {
+            acc.has_reasoning_field = true;
+            //有思考专属内容的协议
+            if (acc.isStream()) {
+                if (Utils.isEmpty(content)) {
+                    //只有思考：内容通道承载思考增量，等待后续帧补正文
+                    content = reasoning_content;
+                    acc.in_thinking = true;
+                } else {
+                    //思考与正文同帧：思考进入聚合消息的 thinking 字段，正文继续走 content
+                    splitThinking = reasoning_content;
+                    acc.in_thinking = false;
+                }
+            } else {
+                //如果是单次返回：思考单独存放，不再缝合进 content
+                pendingThinking = reasoning_content;
+            }
+        } else if (Utils.isNotEmpty(content)) {
+            if (acc.has_reasoning_field) { //有些情况，后面就没字段了
+                //有推理字段的
+                if (acc.in_thinking) {
+                        //正文事件会由归一化器自动闭合 thinking 通道。
+
+                    acc.in_thinking = false;
+                }
+            } else {
+                //分析 think 状态（无推理字段的）
+                if (acc.isStream()) {
+                    //如果是流返回
+                    if (content.startsWith("<think>")) {
+                        acc.in_thinking = true;
+                        //剥离开标签：纯标签帧剥后为空（相当于信号帧），前缀粘连时正文不混入 thinking
+                        content = content.substring("<think>".length());
+                    } else {
+                        if (acc.in_thinking) {
+                            int thinkEnd = content.indexOf("</think>");
+                            if (thinkEnd >= 0) {
+                                //闭合标签可能与思考尾巴/正文头粘连在同一分片：思考进 thinking 字段，
+                                //正文进 content，二者与 tool_calls 同属这一条聚合消息
+                                acc.in_thinking = false;
+
+                                splitThinking = content.substring(0, thinkEnd);
+                                content = content.substring(thinkEnd + "</think>".length());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 有文本 / 思考 / 工具调用 / 多模态媒体 / 搜索结果时都需要产出消息。
+        // 一帧只产出一条聚合消息：思考、正文与工具调用同属同一轮模型输出，
+        // 拆成多条会让“终态消息”与“携带工具调用的消息”变成两个对象，下游只能靠位置猜测。
+        if (content != null || pendingThinking != null || splitThinking != null || Utils.isNotEmpty(toolCalls)
+                || Utils.isNotEmpty(blocksForMsg) || Utils.isNotEmpty(searchResults)) {
+            String textOut = acc.in_thinking ? "" : (content == null ? "" : content);
+            String thinkingOut;
+            if (acc.in_thinking) {
+                thinkingOut = content == null ? "" : content;
+            } else if (splitThinking != null) {
+                //同帧思考优先于纯思考通道（非流式双字段构造的 pendingThinking）
+                thinkingOut = splitThinking;
+            } else {
+                thinkingOut = pendingThinking == null ? "" : pendingThinking;
+            }
+            // 通用方言只保存可跨协议重建的语义字段；供应商精确回放数据应写入有命名空间的 protocolStates。
+            AssistantMessage message = AssistantMessage.snapshot(
+                    textOut, thinkingOut, toolCalls, blocksForMsg,
+                    searchResults, null, null);
+
+            messageList.add(message);
+        }
+
+        return messageList;
+    }
+
+    /** 将 OpenAI-compatible/DashScope 风格搜索结果投影为通用语义。 */
+    protected List<SearchResult> parseSearchResults(ONode searchResultsNode) {
+        if (searchResultsNode == null || !searchResultsNode.isArray() || searchResultsNode.size() == 0) {
+            return null;
+        }
+
+        List<SearchResult> results = new ArrayList<>();
+        for (ONode item : searchResultsNode.getArray()) {
+            if (item == null || !item.isObject()) {
+                continue;
+            }
+            SearchResult result = new SearchResult();
+            if (item.hasKey("index")) result.setIndex(item.get("index").getInt());
+            if (item.hasKey("id")) result.setId(item.get("id").getString());
+            if (item.hasKey("title")) result.setTitle(item.get("title").getString());
+            if (item.hasKey("url")) result.setUrl(item.get("url").getString());
+            if (item.hasKey("snippet")) {
+                result.setSnippet(item.get("snippet").getString());
+            } else if (item.hasKey("summary")) {
+                result.setSnippet(item.get("summary").getString());
+            }
+            results.add(result);
+        }
+        return results.isEmpty() ? null : results;
+    }
+
+    /**
+     * 安全读取 ContentBlock meta（metas 未初始化时不强制创建）。
+     *
+     * @since 3.9
+     */
+    protected Object getBlockMeta(ContentBlock block, String key) {
+        if (block == null || Utils.isEmpty(key)) {
+            return null;
+        }
+        Map<String, Object> metas = block.metas();
+        if (Utils.isEmpty(metas)) {
+            return null;
+        }
+        return metas.get(key);
+    }
+
+    protected boolean hasNestedJsonBlock(String str) {
+        return FormatUtil.hasNestedJsonBlock(str);
+    }
+
+    /**
+     * Chat Completions 思考开关写出形态（按模型族单写，避免多余字段）。
+     *
+     * @since 4.0.4
+     */
+    protected enum ThinkingSwitchWire {
+        /**
+         * Qwen / DashScope 兼容 / 多数中转：{@code enable_thinking}
+         */
+        ENABLE_THINKING,
+        /**
+         * DeepSeek / Kimi / 火山等：{@code thinking.type=enabled|disabled}
+         */
+        THINKING_TYPE,
+        /**
+         * 智谱：{@code thinking.type} + {@code clear_thinking=false}（开启时）
+         */
+        THINKING_TYPE_CLEAR,
+        /**
+         * MiniMax：开启 {@code adaptive}，关闭 {@code disabled}
+         */
+        THINKING_TYPE_ADAPTIVE,
+        /**
+         * 无标准布尔开关（如 OpenAI 官方）：不写出，仅保留 Map 逃生舱
+         */
+        NONE
+    }
+
+    /**
+     * 按 model 为主、provider/apiUrl 为辅，解析思考开关写出形态。
+     * <p>中转站（DashScope / ModelScope / SiliconFlow 等）即使模型名是 deepseek，
+     * 也优先走 {@code enable_thinking}。</p>
+     *
+     * @since 4.0.4
+     */
+    protected ThinkingSwitchWire resolveThinkingSwitchWire(ChatConfig config) {
+        String model = config == null || config.getModel() == null ? "" : config.getModel().toLowerCase(Locale.ROOT);
+        String provider = config == null || config.getProvider() == null ? "" : config.getProvider().toLowerCase(Locale.ROOT);
+        String apiUrl = config == null || config.getApiUrl() == null ? "" : config.getApiUrl().toLowerCase(Locale.ROOT);
+        String hint = model + ' ' + provider + ' ' + apiUrl;
+
+        // 已知“enable_thinking 中转站”：同一 deepseek 模型在中转口也走布尔开关
+        if (containsAny(hint, "dashscope", "modelscope", "aliyuncs", "aliyun", "bailian",
+                "siliconflow", "together.ai", "together.xyz")) {
+            if (containsAny(model, "minimax")) {
+                return ThinkingSwitchWire.THINKING_TYPE_ADAPTIVE;
+            }
+            return ThinkingSwitchWire.ENABLE_THINKING;
+        }
+
+        // 模型族（主信号）
+        if (containsAny(model, "minimax") || containsAny(provider, "minimax")) {
+            return ThinkingSwitchWire.THINKING_TYPE_ADAPTIVE;
+        }
+        if (containsAny(model, "glm", "zhipu", "zai-") || containsAny(provider, "zhipu", "zai", "glm")) {
+            return ThinkingSwitchWire.THINKING_TYPE_CLEAR;
+        }
+        if (containsAny(model, "deepseek", "kimi", "moonshot", "doubao", "seed-")
+                || containsAny(provider, "deepseek", "moonshot", "kimi", "volc", "doubao", "ark")) {
+            return ThinkingSwitchWire.THINKING_TYPE;
+        }
+        if (containsAny(model, "qwen", "qwq") || containsAny(provider, "qwen", "dashscope")) {
+            return ThinkingSwitchWire.ENABLE_THINKING;
+        }
+        // Gemini 经 OpenAI 兼容端点（官方 / 中转站 / OpenRouter）：无布尔开关字段。
+        // 开启：默认即思考，无需写字段；关闭：由 {@link #applyGeminiChatCompletionsThinkingSwitch} 落地
+        if (isGeminiChatCompletionsModel(config)) {
+            return ThinkingSwitchWire.NONE;
+        }
+        // OpenAI 官方系列：无 enable_thinking / thinking.type 标准开关
+        if (containsAny(model, "gpt-", "gpt4", "gpt5", "chatgpt", "o1-", "o1", "o3-", "o3", "o4-", "o4")
+                || "openai".equals(provider)) {
+            return ThinkingSwitchWire.NONE;
+        }
+
+        // 未知模型：不臆造字段，避免严格网关 400；用户可用 optionSet 显式配置
+        return ThinkingSwitchWire.NONE;
+    }
+
+    /**
+     * 将统一 {@code thinking(Boolean)} 映射为 Chat Completions 供应商字段（单写）。
+     *
+     * @since 4.0.4
+     */
+    protected void applyChatCompletionsThinkingSwitch(ONode n, ChatConfig config, boolean enabled) {
+        applyChatCompletionsThinkingSwitch(n, config, null, enabled);
+    }
+
+    /**
+     * 带 options 的重载：Gemini 互斥守卫（显式 extra_body.thinking_config 优先，避免与 effort 双发 400）。
+     *
+     * @since 4.0.5
+     */
+    protected void applyChatCompletionsThinkingSwitch(ONode n, ChatConfig config, ChatOptions options, boolean enabled) {
+        // Gemini 经 OpenAI 兼容端点：无 enable_thinking/thinking.type 开关，单独落地
+        if (isGeminiChatCompletionsModel(config)) {
+            if (hasExplicitGeminiThinkingConfig(options)) {
+                return; // 显式 thinking_config 优先，不双发（Google 端点互斥会 400）
+            }
+            applyGeminiChatCompletionsThinkingSwitch(n, config, enabled);
+            return;
+        }
+
+        ThinkingSwitchWire wire = resolveThinkingSwitchWire(config);
+        switch (wire) {
+            case ENABLE_THINKING:
+                n.set("enable_thinking", enabled);
+                break;
+            case THINKING_TYPE:
+                n.getOrNew("thinking").set("type", enabled ? "enabled" : "disabled");
+                break;
+            case THINKING_TYPE_CLEAR:
+                n.getOrNew("thinking").then(t -> {
+                    t.set("type", enabled ? "enabled" : "disabled");
+                    if (enabled) {
+                        // 智谱官方示例常带 clear_thinking=false
+                        t.set("clear_thinking", false);
+                    }
+                });
+                break;
+            case THINKING_TYPE_ADAPTIVE:
+                n.getOrNew("thinking").set("type", enabled ? "adaptive" : "disabled");
+                break;
+            case NONE:
+            default:
+                // 无标准布尔开关：不写出，保留 optionSet("thinking", map) 逃生舱
+                break;
+        }
+    }
+
+    /**
+     * 对齐 OpenCode：用户设置 {@code reasoning_effort} 时，对需要显式思考开关的模型隐式开启 thinking。
+     * <p>优先级：{@code thinking(false)} 关闭优先；显式 Map/对象 {@code thinking} 不覆盖；
+     * 已写出 {@code enable_thinking}/{@code thinking.type} 时不重复写。</p>
+     * <p>OpenAI 系（wire=NONE）effort 本身即推理控制，无需额外开关。</p>
+     *
+     * @since 4.0.4
+     */
+    protected void maybeEnableThinkingFromReasoningEffort(ONode n, ChatConfig config, ChatOptions options) {
+        if (n == null || options == null) {
+            return;
+        }
+        Object effortObj = options.options().get("reasoning_effort");
+        if (effortObj == null) {
+            return;
+        }
+        // 无有效 effort 档位时不隐式开启（auto/空/非法已被 API 层移除或 clamp 为 null）
+        String effort = String.valueOf(effortObj).trim().toLowerCase(Locale.ROOT);
+        if (effort.isEmpty() || "auto".equals(effort) || "none".equals(effort)) {
+            return;
+        }
+
+        Object thinkingOpt = options.options().get("thinking");
+        // 显式关闭优先
+        if (Boolean.FALSE.equals(thinkingOpt)) {
+            return;
+        }
+        // 显式 Map/对象 thinking 逃生舱：不覆盖
+        if (thinkingOpt != null && !(thinkingOpt instanceof Boolean)) {
+            return;
+        }
+        // 已有开关字段则不重复写（thinking(true) 或 Map 已写出）
+        if (n.hasKey("enable_thinking")) {
+            return;
+        }
+        if (n.hasKey("thinking")) {
+            return;
+        }
+
+        ThinkingSwitchWire wire = resolveThinkingSwitchWire(config);
+        if (wire == ThinkingSwitchWire.NONE) {
+            // OpenAI 等：reasoning_effort 本身即控制，无需 enable 位
+            return;
+        }
+        // 仅对需要显式开关的模型族开启（qwen/deepseek/kimi/glm/minimax/中转）
+        applyChatCompletionsThinkingSwitch(n, config, true);
+    }
+
+    /**
+     * 是否抑制 Chat Completions 顶层 reasoning_effort。
+     * <p>对齐 OpenCode：qwen / deepseek / kimi / glm / minimax 等不做 effort 变体，
+     * 仅靠 thinking 开关；显式 optionSet 其它供应商字段仍可用。</p>
+     * <p>例外：DeepSeek 官方认 high/max，仍写出；GLM-5.2 支持 high/max effort 变体，仍写出；
+     * OpenRouter 走嵌套不走本抑制。</p>
+     *
+     * @since 4.0.4
+     */
+    protected boolean shouldSkipChatCompletionsReasoningEffort(ChatConfig config) {
+        if (config == null) {
+            return false;
+        }
+        // OpenRouter 单独嵌套写出，不在此抑制
+        if (isOpenRouterEndpoint(config)) {
+            return false;
+        }
+        // DeepSeek 官方支持 reasoning_effort high/max，保留
+        if (isDeepSeekOfficialEffort(config)) {
+            return false;
+        }
+        // GLM-5.2：OpenCode variants 有 high/max（openai-compatible / openrouter），不抑制
+        if (isGlm52EffortModel(config)) {
+            return false;
+        }
+
+        String model = config.getModel() == null ? "" : config.getModel().toLowerCase(Locale.ROOT);
+        String provider = config.getProvider() == null ? "" : config.getProvider().toLowerCase(Locale.ROOT);
+        String apiUrl = config.getApiUrl() == null ? "" : config.getApiUrl().toLowerCase(Locale.ROOT);
+        String hint = model + ' ' + provider + ' ' + apiUrl;
+
+        // 与 OpenCode variants() 空表一致：这些模型族不写顶层 effort（glm-5.2 已在上方豁免）
+        return containsAny(model, "qwen", "qwq", "minimax", "glm", "zhipu", "kimi", "moonshot", "k2p",
+                "deepseek", "doubao", "seed-")
+                || containsAny(provider, "qwen", "dashscope", "minimax", "zhipu", "zai", "glm",
+                "moonshot", "kimi", "deepseek", "volc", "doubao", "ark")
+                || containsAny(hint, "dashscope", "modelscope", "aliyuncs", "aliyun", "bailian",
+                "siliconflow");
+    }
+
+    /**
+     * GLM-5.2 支持 effort 变体（对齐 OpenCode：high/max 或 OpenRouter 的 high/xhigh）。
+     *
+     * @since 4.0.4
+     */
+    protected boolean isGlm52EffortModel(ChatConfig config) {
+        if (config == null) {
+            return false;
+        }
+        String model = config.getModel() == null ? "" : config.getModel().toLowerCase(Locale.ROOT);
+        // glm-5.2 / glm-5-2 / glm-5p2
+        return containsAny(model, "glm-5.2", "glm-5-2", "glm-5p2");
+    }
+
+    /**
+     * 规范化 Chat Completions 顶层 reasoning_effort。
+     * <p>默认保留官方常见档位；统一语义 {@code max} → {@code xhigh}，{@code min} → {@code low}。
+     * DeepSeek 官方形态仅认 {@code high}/{@code max}（{@code max} 不转 xhigh）。
+     * GLM-5.2：high/max（OpenRouter 上将 max 映为 xhigh）。
+     * 无法识别时返回 null（不写出，避免污染请求）。</p>
+     *
+     * @since 4.0.4
+     */
+    protected String clampChatCompletionsEffort(Object value, ChatConfig config) {
+        if (value == null) {
+            return null;
+        }
+        String effort = String.valueOf(value).trim().toLowerCase(Locale.ROOT);
+        if (effort.isEmpty() || "auto".equals(effort)) {
+            return null;
+        }
+
+        // DeepSeek 官方：high / max；low/medium → high；xhigh → max
+        if (isDeepSeekOfficialEffort(config)) {
+            if ("max".equals(effort) || "xhigh".equals(effort)) {
+                return "max";
+            }
+            if ("high".equals(effort) || "medium".equals(effort) || "low".equals(effort)
+                    || "minimal".equals(effort) || "min".equals(effort)) {
+                return "high";
+            }
+            if ("none".equals(effort)) {
+                return null; // 关闭请用 thinking(false)
+            }
+            return null;
+        }
+
+        // GLM-5.2：openai-compatible 用 high/max；OpenRouter 用 high/xhigh
+        if (isGlm52EffortModel(config)) {
+            if ("high".equals(effort) || "medium".equals(effort) || "low".equals(effort)
+                    || "minimal".equals(effort) || "min".equals(effort)) {
+                return "high";
+            }
+            if ("max".equals(effort) || "xhigh".equals(effort)) {
+                // OpenRouter 将 xhigh 映射到 GLM-5.2 的 max；嵌套写出时用 xhigh
+                return isOpenRouterEndpoint(config) ? "xhigh" : "max";
+            }
+            if ("none".equals(effort)) {
+                return null;
+            }
+            return null;
+        }
+
+        // Gemini 经 OpenAI 兼容端点（官方 / 中转 / OpenRouter）：收敛到 Google 值域 minimal|low|medium|high；
+        // none 仅可关模型（2.5 非 Pro）；max/xhigh 不在值域，降级 high
+        if (isGeminiChatCompletionsModel(config)) {
+            return clampGeminiChatCompletionsEffort(effort, config);
+        }
+
+        if ("none".equals(effort)
+                || "minimal".equals(effort)
+                || "low".equals(effort)
+                || "medium".equals(effort)
+                || "high".equals(effort)
+                || "xhigh".equals(effort)) {
+            return effort;
+        }
+        if ("max".equals(effort)) {
+            // 官方 ReasoningEffort 枚举原生含 max（xhigh 仅部分模型接受），不再改写为 xhigh
+            return "max";
+        }
+        if ("min".equals(effort)) {
+            return "low";
+        }
+        // 非法值不写出
+        return null;
+    }
+
+    /**
+     * Gemini 模型经 OpenAI 兼容协议调用（非原生 Gemini 方言路径）。
+     * <p>原生 Gemini 方言已覆写 {@code buildRequestJson}，不会进入 Chat Completions 路径；
+     * 此处仅覆盖中转场景：model 含 gemini 或 provider 为 google/gemini。</p>
+     *
+     * @since 4.0.5
+     */
+    protected boolean isGeminiChatCompletionsModel(ChatConfig config) {
+        if (config == null) {
+            return false;
+        }
+        String model = config.getModel() == null ? "" : config.getModel().toLowerCase(Locale.ROOT);
+        String provider = config.getProvider() == null ? "" : config.getProvider().toLowerCase(Locale.ROOT);
+        return containsAny(model, "gemini") || containsAny(provider, "google", "gemini");
+    }
+
+    /**
+     * Gemini 2.5 非 Pro 系（flash / flash-lite）支持 {@code reasoning_effort=none} 关闭思考；
+     * 2.5 Pro 与 3.x 不能关闭（Google OpenAI 兼容官方文档约束）。
+     *
+     * @since 4.0.5
+     */
+    protected boolean canDisableGeminiThinking(ChatConfig config) {
+        String model = config == null || config.getModel() == null ? "" : config.getModel().toLowerCase(Locale.ROOT);
+        boolean is25 = model.contains("2.5") || model.contains("2-5");
+        if (!is25) {
+            return false; // 3.x 及其它：不能关
+        }
+        boolean isPro = model.contains("pro") && !model.contains("flash");
+        return !isPro;
+    }
+
+    /**
+     * Gemini Chat Completions 的 effort 值域收敛。
+     * <p>Google 官方 OpenAI 兼容值域：{@code minimal|low|medium|high}；
+     * {@code none} 仅可关模型（2.5 非 Pro）允许，其余降级 {@code low}；
+     * {@code max}/{@code xhigh} 不在值域，降级 {@code high}。</p>
+     *
+     * @since 4.0.5
+     */
+    protected String clampGeminiChatCompletionsEffort(String effort, ChatConfig config) {
+        if ("none".equals(effort)) {
+            if (canDisableGeminiThinking(config)) {
+                return "none"; // OpenRouter 嵌套与 Google 顶层均接受 none
+            }
+            LOG.warn("ai: gemini model '{}' cannot disable thinking via OpenAI-compat endpoint, effort degraded to low", config.getModel());
+            return "low";
+        }
+        if ("min".equals(effort) || "minimal".equals(effort)) {
+            return "minimal";
+        }
+        if ("low".equals(effort) || "medium".equals(effort) || "high".equals(effort)) {
+            return effort;
+        }
+        if ("max".equals(effort) || "xhigh".equals(effort)) {
+            LOG.warn("ai: gemini model '{}' does not accept effort '{}' via OpenAI-compat endpoint, degraded to high", config.getModel(), effort);
+            return "high";
+        }
+        // 非法值不写出
+        return null;
+    }
+
+    /**
+     * Gemini 经 OpenAI 兼容端点的思考开关落地（无 enable_thinking/thinking.type 字段）。
+     * <p>开启：默认即思考，无需写字段；
+     * 关闭（可关模型）：Google 顶层 {@code reasoning_effort=none}；OpenRouter 嵌套 {@code reasoning.enabled=false}；
+     * 关闭（不可关模型）：降级 {@code low} 并告警，不静默丢弃用户意图。</p>
+     *
+     * @since 4.0.5
+     */
+    protected void applyGeminiChatCompletionsThinkingSwitch(ONode n, ChatConfig config, boolean enabled) {
+        if (enabled) {
+            return;
+        }
+        if (canDisableGeminiThinking(config)) {
+            if (isOpenRouterEndpoint(config)) {
+                n.getOrNew("reasoning").set("enabled", false);
+            } else {
+                n.set("reasoning_effort", "none");
+            }
+            return;
+        }
+
+        LOG.warn("ai: gemini model '{}' cannot disable thinking via OpenAI-compat endpoint, fallback to effort=low", config.getModel());
+        if (isOpenRouterEndpoint(config)) {
+            n.getOrNew("reasoning").set("effort", "low");
+        } else {
+            n.set("reasoning_effort", "low");
+        }
+    }
+
+    /**
+     * 用户经 options 逃生舱显式配置了 Gemini 思考参数（Google OpenAI 兼容层与 effort 互斥，双发会 400）。
+     *
+     * @since 4.0.5
+     */
+    protected boolean hasExplicitGeminiThinkingConfig(ChatOptions options) {
+        if (options == null) {
+            return false;
+        }
+        Object extra = options.options().get("extra_body");
+        if (extra instanceof Map && ((Map<?, ?>) extra).get("thinking_config") != null) {
+            return true;
+        }
+        if (options.options().get("thinking_config") != null) {
+            return true;
+        }
+        Object gc = options.options().get("generationConfig");
+        if (gc instanceof Map && ((Map<?, ?>) gc).get("thinkingConfig") != null) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Gemini 关闭标记已先行写出（options 迭代顺序不定，thinking(false) 优先不被 effort 覆盖）。
+     *
+     * @since 4.0.5
+     */
+    protected boolean hasGeminiThinkingDisableMark(ONode n) {
+        if (n == null) {
+            return false;
+        }
+        if (n.hasKey("reasoning_effort")) {
+            String v = n.get("reasoning_effort").getString();
+            if ("none".equals(v) || "low".equals(v)) {
+                return true;
+            }
+        }
+        ONode r = n.get("reasoning");
+        if (r != null) {
+            if (r.hasKey("enabled") && !r.get("enabled").getBoolean()) {
+                return true;
+            }
+            if (r.hasKey("effort") && "low".equals(r.get("effort").getString())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * DeepSeek 官方 effort 语义（非 DashScope/SiliconFlow 等 enable_thinking 中转）。
+     *
+     * @since 4.0.4
+     */
+    protected boolean isDeepSeekOfficialEffort(ChatConfig config) {
+        if (config == null) {
+            return false;
+        }
+        String model = config.getModel() == null ? "" : config.getModel().toLowerCase(Locale.ROOT);
+        String provider = config.getProvider() == null ? "" : config.getProvider().toLowerCase(Locale.ROOT);
+        String apiUrl = config.getApiUrl() == null ? "" : config.getApiUrl().toLowerCase(Locale.ROOT);
+        String hint = model + ' ' + provider + ' ' + apiUrl;
+
+        if (!containsAny(model, "deepseek") && !containsAny(provider, "deepseek") && !containsAny(apiUrl, "deepseek")) {
+            return false;
+        }
+        // 中转站走通用 OpenAI effort（或忽略），不按官方 high/max 改写
+        if (containsAny(hint, "dashscope", "modelscope", "aliyuncs", "aliyun", "bailian",
+                "siliconflow", "together.ai", "together.xyz")) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * OpenRouter：effort 应写在 {@code reasoning.effort} 嵌套对象，而非顶层 reasoning_effort。
+     *
+     * @since 4.0.4
+     */
+    protected boolean isOpenRouterEndpoint(ChatConfig config) {
+        if (config == null) {
+            return false;
+        }
+        String provider = config.getProvider() == null ? "" : config.getProvider().toLowerCase(Locale.ROOT);
+        String apiUrl = config.getApiUrl() == null ? "" : config.getApiUrl().toLowerCase(Locale.ROOT);
+        return containsAny(provider, "openrouter") || containsAny(apiUrl, "openrouter");
+    }
+
+    /**
+     * @since 4.0.4
+     */
+    protected static boolean containsAny(String text, String... tokens) {
+        if (text == null || text.isEmpty() || tokens == null) {
+            return false;
+        }
+        for (String token : tokens) {
+            if (token != null && !token.isEmpty() && text.contains(token)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @since 4.0.4
+     * @deprecated 使用 {@link #clampChatCompletionsEffort(Object, ChatConfig)}
+     */
+    protected String clampChatCompletionsEffort(Object value) {
+        return clampChatCompletionsEffort(value, null);
+    }
+}

@@ -25,22 +25,22 @@ import org.noear.snack4.codec.TypeRef;
 import org.noear.solon.core.handle.UploadedFile;
 
 import java.nio.charset.StandardCharsets;
-import org.noear.solon.ai.chat.ChatConfig;
-import org.noear.solon.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.ChatModel;
 import com.gourdai.harness.HarnessEngine;
-import org.noear.solon.ai.chat.tool.FunctionTool;
-import org.noear.solon.ai.mcp.McpChannel;
-import org.noear.solon.ai.mcp.client.McpClientProvider;
-import org.noear.solon.ai.mcp.client.McpClientProviders;
-import org.noear.solon.ai.mcp.client.McpServerParameters;
-import org.noear.solon.ai.talents.mount.MountDir;
-import org.noear.solon.ai.talents.mount.MountType;
-import org.noear.solon.ai.talents.mount.AgentMd;
-import org.noear.solon.ai.talents.mount.SkillDir;
+import com.gourdai.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.mcp.McpChannel;
+import com.gourdai.ai.mcp.client.McpClientProvider;
+import com.gourdai.ai.mcp.client.McpClientProviders;
+import com.gourdai.ai.mcp.client.McpServerParameters;
+import com.gourdai.ai.talents.mount.MountDir;
+import com.gourdai.ai.talents.mount.MountType;
+import com.gourdai.ai.talents.mount.AgentMd;
+import com.gourdai.ai.talents.mount.SkillDir;
 import com.gourdai.harness.talents.gateway.openapi.ApiSource;
 import com.gourdai.harness.talents.gateway.openapi.ApiSourceClient;
 import com.gourdai.harness.talents.gateway.openapi.ApiTool;
-import org.noear.solon.ai.util.CmdUtil;
+import com.gourdai.ai.util.CmdUtil;
 import org.noear.solon.annotation.*;
 import com.gourdai.core.config.AgentFlags;
 import com.gourdai.core.config.AgentProperties;
@@ -939,7 +939,7 @@ public class WebSettingsController {
      *
      * <p>接受上传的 JSON 文件，调用共享解析方法 {@link #parseMcpConfigNode(ONode)} 处理。</p>
      *
-     * @param ctx Solon 上下文，通过 {@code ctx.file("file")} 获取上传文件
+     * @param ctx 上下文，通过 {@code ctx.file("file")} 获取上传文件
      * @return 包含格式类型与服务器列表的结构化数据
      */
     @Post

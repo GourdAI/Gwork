@@ -75,8 +75,8 @@ import java.util.TreeMap;
  * <h3>增量水位</h3>
  * <p>每个会话记录已归档到的最大 {@code createdAt}（{@code ts}）与当时的文件字节数（{@code size}）：
  * 重扫时只累加 {@code createdAt > ts} 的事件，杜绝重复计数；{@code size} 用于快速跳过<b>完全未增长</b>
- * 的会话文件，避免无谓 IO。水位按会话记在<b>当月</b>账本里；跨月的会话在新月账本中水位重新登记，
- * 但由于比对的是绝对时间戳，不会重复累加。</p>
+ * 的会话文件，避免无谓 IO。水位按会话记在<b>当月</b>账本里；月份翻页后当月账本查不到旧会话水位时，
+ * 会从<b>历史分片</b>继承（取时间戳最大的一条）并登记到当月，因此跨月/长期休眠都不会退化成全量重扫。</p>
  *
  * <h3>历史保留语义</h3>
  * <p>项目取消登记或目录被删除后，扫描阶段自然扫不到它的会话，账本中既有的历史天<b>原样保留</b>，
@@ -487,10 +487,12 @@ public class UsageArchiveService {
 
         // 已加载的月度分片（按需加载，最后统一落盘）
         Map<String, MonthLedger> ledgers = new LinkedHashMap<>();
+        // 账本目录下已存在的分片月份：本轮只列一次目录，供水位跨月继承复用
+        List<String> historyMonths = listMonths();
 
         for (SessionFile sf : targets) {
             try {
-                archiveOne(sf, zone, ledgers);
+                archiveOne(sf, zone, ledgers, historyMonths);
             } catch (Throwable e) {
                 LOG.warn("[UsageArchive] archive failed for {}: {}", sf.sid, e.getMessage());
             }
@@ -571,7 +573,8 @@ public class UsageArchiveService {
     }
 
     /** 归档单个会话：只处理水位之后的新事件。 */
-    private void archiveOne(SessionFile sf, ZoneId zone, Map<String, MonthLedger> ledgers) {
+    private void archiveOne(SessionFile sf, ZoneId zone, Map<String, MonthLedger> ledgers,
+                            List<String> historyMonths) {
         long fileSize = sf.stream.length();
         if (fileSize <= 0) {
             return;
@@ -579,26 +582,42 @@ public class UsageArchiveService {
 
         // 以「当前月」账本承载该会话的水位。
         //
-        // 【跨月回落·勿删】水位只登记在写入当时的「当前月」账本里，因此每逢月份翻页，
+        // 【跨月继承·勿删】水位只登记在写入当时的「当前月」账本里，因此每逢月份翻页，
         // 新月账本里必然查不到旧会话的水位。若就此按 wm == null 处理，sinceTs 会退化为
-        // Long.MIN_VALUE，整个流文件被从头重扫，而事件按各自日期落回<b>上月账本</b>，
-        // 在已有历史上再加一遍 —— 每个自然月的第一次归档都会让存活会话的历史翻倍，
-        // 跨 N 个月的长会话被叠加 N 次。已由 UsageArchiveRolloverProbeTest 实测复现（1000→2000）。
+        // Long.MIN_VALUE，整个流文件被从头重扫，而事件按各自日期落回<b>历史月账本</b>，
+        // 叠在回读出来的旧值上再加一遍（下方是 ms.tokens += / day.messages += 的累加语义，
+        // 落盘又是整分片覆盖写）—— 存活会话的历史就此翻倍，跨 N 次断链被叠加 N 遍。
+        // 已由 UsageArchiveRolloverTest 实测复现（1000→2000）。
         //
-        // 故当月查不到时向前回落一个月继承：水位比对的是<b>绝对时间戳</b>，与月份无关，
-        // 直接沿用即可。回落一个月足以覆盖翻页场景（归档至少每月跑到一次）；更久未归档的
-        // 会话回落不到，退化为重扫，那是「少归档一次」而非「重复累加」，方向安全。
+        // 故当月查不到时必须继承历史水位：比对的是<b>绝对时间戳</b>，与分片月份无关，可直接沿用。
+        //
+        // 【只回落一个月不够·勿改回去】旧实现只回落上一个月，仍有两条真实翻倍路径：
+        //   ① 会话休眠（字节数不变）时命中下方 fileSize == wm.size 的提前 return，继承到的水位
+        //      没被登记进当月账本；再翻一页连「上月」也查不到 → 断链 → 全量重扫 → 翻倍；
+        //   ② 连续两个自然月没跑过归档（关机 / 没打开统计页），上月分片根本不存在 → 同样断链。
+        // 因此继承范围扩到<b>全部历史分片</b>（仅在当月+上月都未命中时才多读几个几十 KB 小文件，
+        // 且分片经 ledger(..) 缓存），并在提前 return 前把水位写回当月账本，让断链自愈。
         String currentMonth = LocalDate.now(zone).format(MONTH_FMT);
         MonthLedger current = ledger(ledgers, currentMonth);
         Watermark wm = current.watermarks.get(sf.sid);
+        boolean inherited = false;
         if (wm == null) {
-            MonthLedger prev = ledger(ledgers, LocalDate.now(zone).minusMonths(1).format(MONTH_FMT));
-            wm = prev.watermarks.get(sf.sid);
+            wm = inheritWatermark(ledgers, historyMonths, currentMonth,
+                    LocalDate.now(zone).minusMonths(1).format(MONTH_FMT), sf.sid);
+            inherited = (wm != null);
         }
         long sinceTs = wm == null ? Long.MIN_VALUE : wm.ts;
 
         // 文件未增长且已归档过：直接跳过（省掉整轮 IO）
         if (wm != null && fileSize == wm.size) {
+            if (inherited) {
+                // 继承来的水位必须落到当月账本，否则下个月又查不到（上述路径①的根因）
+                Watermark cw = new Watermark();
+                cw.ts = wm.ts;
+                cw.size = wm.size;
+                current.watermarks.put(sf.sid, cw);
+                current.dirty = true;
+            }
             return;
         }
 
@@ -681,6 +700,38 @@ public class UsageArchiveService {
         if (changed || wm == null || wm.size != fileSize) {
             current.dirty = true;
         }
+    }
+
+    /**
+     * 当月账本查不到水位时，从历史分片继承该会话「已归档到哪」。
+     *
+     * <p>先查上一个月（月份翻页的常见情形，命中率最高），未命中再扫其余历史分片并取
+     * {@code ts} <b>最大</b>的一条（防御分片间时间戳非单调的极端情况）。</p>
+     *
+     * <p><b>性能</b>：只有「当月 + 上月都没有水位」的会话才会触发其余分片的读取，且分片由
+     * {@link #ledger(Map, String)} 缓存，单轮归档内每个分片最多读一次；水位就在当月的
+     * 正常增量路径完全不受影响。</p>
+     *
+     * @return 继承到的水位；整个账本都没有（真正的新会话）时返回 null
+     */
+    private Watermark inheritWatermark(Map<String, MonthLedger> ledgers, List<String> historyMonths,
+                                       String currentMonth, String prevMonth, String sid) {
+        Watermark prev = ledger(ledgers, prevMonth).watermarks.get(sid);
+        if (prev != null) {
+            return prev;
+        }
+        Watermark best = null;
+        for (int i = historyMonths.size() - 1; i >= 0; i--) {
+            String month = historyMonths.get(i);
+            if (month.equals(currentMonth) || month.equals(prevMonth)) {
+                continue;
+            }
+            Watermark w = ledger(ledgers, month).watermarks.get(sid);
+            if (w != null && (best == null || w.ts > best.ts)) {
+                best = w;
+            }
+        }
+        return best;
     }
 
     private static long longOf(ONode node, String key) {

@@ -496,6 +496,13 @@
     $(document).on('keydown', function (e) {
         if (e.key === 'Escape' && $view.hasClass('memory-overlay') && $view.hasClass('active')) closeMemoryView();
     });
+    /* 项目登记表变更（侧栏重命名 / 新增 / 移除）：重拉项目列表，
+       让已打开的记忆页（尤其专注模式弹层常驻）即时跟上新显示名，而不是等重开或手动点刷新。
+       未打开时不请求：下次 openMemoryView 会自行拉取。 */
+    document.addEventListener('projects:changed', function () {
+        if (!$view.hasClass('active')) return;
+        loadMemoryProjects();
+    });
     document.addEventListener('i18n:localeChanged', function () {
         renderProjectSelector();
         if (lastListData && lastListSnapshot && isCurrentSnapshot(lastListSnapshot)) {

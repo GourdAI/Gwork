@@ -16,7 +16,7 @@
 package com.gourdai.agent.simple;
 
 import com.gourdai.agent.AgentInterceptor;
-import org.noear.solon.ai.chat.interceptor.ChatInterceptor;
+import com.gourdai.ai.chat.interceptor.ChatInterceptor;
 import org.noear.solon.lang.Preview;
 
 /**

@@ -1,6 +1,6 @@
 package com.gourdai.core.config;
 
-import org.noear.solon.ai.mcp.McpChannel;
+import com.gourdai.ai.mcp.McpChannel;
 
 import java.util.*;
 
@@ -24,7 +24,7 @@ import java.util.*;
  *   "streamable_stateless"     → "streamable_stateless"
  * </pre>
  *
- * <p>移植自 soloncode 上游同源实现（对齐其 McpTypeResolver）。</p>
+ * <p>移植自上游同源实现（对齐其 McpTypeResolver）。</p>
  *
  * @author noear 2026/7/23
  */

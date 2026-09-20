@@ -126,7 +126,8 @@ public class AskUser {
      * 格式化答案文本（供模型阅读）
      *
      * <p>按 questions 顺序逐题输出：题号、问题文本（含补充说明）与用户回答；
-     * 跳过的题输出「（用户跳过）」，index 越界的回答项直接忽略（不参与渲染）。
+     * 跳过的题输出「（用户跳过）」，自定义回答输出「（用户自定义回答）」前缀，
+     * index 越界的回答项直接忽略（不参与渲染）。
      * 坏 JSON 或结构不符时原文透传，保证模型至少能看到原始内容而不丢信息。</p>
      *
      * <p><b>题面缺失时不丢答案</b>：questions 为空（旧快照丢失且本次调用参数也没带 questions）时，
@@ -206,6 +207,9 @@ public class AskUser {
             if (Assert.isEmpty(text)) {
                 // 未标记 skipped 但内容为空：等同于用户未给出有效回答，按跳过呈现
                 sb.append("   → （用户跳过）\n");
+            } else if (customAnswer(answer)) {
+                // 自定义输入未点选候选项：加标记让模型知道用户否决了所有选项、给出的是自己的想法
+                sb.append("   → （用户自定义回答）").append(text).append("\n");
             } else {
                 sb.append("   → ").append(text).append("\n");
             }
@@ -234,6 +238,9 @@ public class AskUser {
             if (skipped || Assert.isEmpty(text)) {
                 sb.append("（用户跳过）");
             } else {
+                if (customAnswer(item)) {
+                    sb.append("（用户自定义回答）");
+                }
                 sb.append(text);
             }
             sb.append("\n");
@@ -280,5 +287,14 @@ public class AskUser {
 
     private static String asString(Object value) {
         return value == null ? "" : String.valueOf(value);
+    }
+
+    /**
+     * 判定答案项是否为用户自定义输入（未点选候选项，直接手写回答）。
+     * 缺失或非真值一律视为点选/旧版答案，不加标记。
+     */
+    private static boolean customAnswer(ONode answer) {
+        ONode customNode = valueOf(answer, "custom");
+        return customNode != null && Boolean.TRUE.equals(customNode.getBoolean(false));
     }
 }

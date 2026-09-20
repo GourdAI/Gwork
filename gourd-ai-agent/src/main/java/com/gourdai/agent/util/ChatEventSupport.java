@@ -2,14 +2,14 @@ package com.gourdai.agent.util;
 
 import com.gourdai.agent.event.AgentEvent;
 
-import org.noear.solon.ai.chat.event.ChatEvent;
-import org.noear.solon.ai.chat.event.ChatEventType;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.tool.ToolCall;
+import com.gourdai.ai.chat.event.ChatEvent;
+import com.gourdai.ai.chat.event.ChatEventType;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.tool.ToolCall;
 import org.noear.solon.lang.Nullable;
 
 /**
- * Solon AI 4.1 ChatEvent 适配工具。
+ * ChatEvent 适配工具（对齐上游 4.1）。
  *
  * <p>底层模型流从 4.1 起以 ChatEvent 为唯一订阅面；项目内部 AgentEvent
  * 仍然保持原有 AssistantMessage 契约，因此事件到内部块的投影集中在这里，
@@ -37,11 +37,12 @@ public final class ChatEventSupport {
         }
 
         if (event.is(ChatEventType.THINKING_DELTA)) {
-            return new AssistantMessage("", event.getTextOrEmpty(), true);
+            // 4.1.1 起分片通道由「哪个字段有值」表达：思考片只填 thinking、text 留空。
+            return new AssistantMessage("", event.getTextOrEmpty());
         }
 
         if (event.is(ChatEventType.TEXT_DELTA)) {
-            return new AssistantMessage(event.getTextOrEmpty(), "", false);
+            return new AssistantMessage(event.getTextOrEmpty(), "");
         }
 
         return null;

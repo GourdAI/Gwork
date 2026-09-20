@@ -1,7 +1,7 @@
 package com.gourdai;
 
-import com.agentclientprotocol.sdk.agent.transport.StdioAcpAgentTransport;
-import com.agentclientprotocol.sdk.spec.AcpAgentTransport;
+import com.gourdai.acp.agent.transport.StdioAcpAgentTransport;
+import com.gourdai.acp.spec.AcpAgentTransport;
 import com.gourdai.core.command.builtin.*;
 import com.gourdai.core.portal.WorkspaceWatcher;
 import com.gourdai.core.portal.web.*;
@@ -11,11 +11,11 @@ import com.gourdai.agent.AgentSessionProvider;
 import com.gourdai.agent.react.BackgroundNoticeCenter;
 import com.gourdai.agent.session.FileAgentSession;
 import com.gourdai.agent.session.LruSessionCache;
-import org.noear.solon.ai.chat.CacheControl;
+import com.gourdai.ai.chat.CacheControl;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.HarnessExtension;
-import org.noear.solon.ai.talents.mount.MountDir;
-import org.noear.solon.ai.talents.mount.MountType;
+import com.gourdai.ai.talents.mount.MountDir;
+import com.gourdai.ai.talents.mount.MountType;
 import org.noear.solon.annotation.Bean;
 import org.noear.solon.annotation.Configuration;
 import org.noear.solon.annotation.Init;
@@ -85,7 +85,7 @@ public class Configurator {
 
     @Bean
     public HarnessEngine agentRuntime(AgentSettings settings) throws Exception {
-        // 全局 HTTP 出站 UA 兜底（对齐 soloncode v2026.8.7 同源修复）：
+        // 全局 HTTP 出站 UA 兜底（对齐上游 v2026.8.7 同源修复）：
         // 所有 HttpUtils 实例（含 MCP 客户端、市场下载等库代码内部创建的）在构造期
         // 自动带上设置里的 userAgent，避免默认 UA（如 Java/17）被 CDN/WAF 拦截导致
         // websearch 等出站请求失败。onInit 先于业务代码执行，显式设置的 UA 仍可覆盖。
@@ -164,10 +164,6 @@ public class Configurator {
                 .cacheControl(CacheControl.ofEphemeral())
                 .build();
 
-
-        // Gemini 思考深度补丁：以更高优先级注册，修复上游 generateContent 丢弃 thinkingConfig 的问题
-        org.noear.solon.ai.chat.dialect.ChatDialectManager.register(
-                new GeminiThinkingChatDialect(), -1);
 
         engine.setDefaultModel(settings.getDefaultModel());
         for (ModelDo model : agentSettings.getModels().values()) {
@@ -269,7 +265,7 @@ public class Configurator {
         // 按 flag 惰性构造 CliShell —— 此前只有 ACP 模式跳过，导致桌面端（web）也在启动主线程上
         // 付了 JLine 终端的初始化成本：TerminalBuilder 要反复 fork 子进程探测标准流是否接在真实
         // 终端上（Windows 实测 0.5~1.9s；PATH 里存在 msys sh.exe 时更慢），而这段完全发生在
-        // Solon 启动主线程、HTTP 端口绑定之前，直接表现为冷启动变慢。
+        // 框架启动主线程、HTTP 端口绑定之前，直接表现为冷启动变慢。
         //
         // 各分支的真实用法：run 自己另建一个；web / acp 全程不使用；serve 只用到 printWelcome；
         // 只有 cli（交互式命令行）真正需要它。故除这三者外一律不构造。

@@ -3,7 +3,7 @@ package com.gourdai.harness.talents.cli;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.noear.solon.ai.talents.mount.MountManager;
+import com.gourdai.ai.talents.mount.MountManager;
 
 import java.io.IOException;
 import java.nio.file.Path;

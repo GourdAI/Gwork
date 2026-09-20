@@ -9,7 +9,7 @@
 //! 本应用的前端并非由 Tauri 的 `tauri://` 协议提供，而是由内置的本地 HTTP
 //! 服务器（见 `src/server.rs`）以 `http://localhost:{随机端口}` 提供
 //! —— 这样做是为了继承 Electron 版的两个硬性要求：
-//!   1. 界面外壳「秒开」，不等 JVM + Solon 启动；
+//!   1. 界面外壳「秒开」，不等后端 JVM 启动；
 //!   2. `http://localhost` 属于浏览器「可信来源」，`getUserMedia`、
 //!      SpeechRecognition、剪贴板等能力才不会被禁用。
 //!

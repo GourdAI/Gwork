@@ -215,7 +215,8 @@ public class SkillsShMarket implements Market {
     protected String httpGet(String url) throws Exception {
         return HttpUtils.http(url)
                 .header("User-Agent", USER_AGENT)
-                .timeout(15000)
+                // 单位：秒（connect/write/read）
+                .timeout(10, 10, 30)
                 .get();
     }
 
@@ -223,7 +224,8 @@ public class SkillsShMarket implements Market {
         try {
             return HttpUtils.http(url)
                     .header("User-Agent", USER_AGENT)
-                    .timeout(30000)
+                    // 单位：秒（connect/write/read）；技能包下载放宽 read
+                    .timeout(10, 10, 120)
                     .get();
         } catch (Exception e) {
             LOG.warn("SkillsShMarket.httpGetString error: {}", e.getMessage());

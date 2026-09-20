@@ -37,15 +37,15 @@ import com.gourdai.harness.agent.AgentEndEvent;
 import com.gourdai.agent.react.intercept.HITL;
 import com.gourdai.agent.react.intercept.HITLDecision;
 import com.gourdai.agent.react.intercept.HITLTask;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.agent.TaskTalent;
 import com.gourdai.harness.command.Command;
 import com.gourdai.harness.talents.cli.TodoTalent;
 import com.gourdai.harness.talents.memory.MemoryTalent;
-import org.noear.solon.ai.util.CmdUtil;
+import com.gourdai.ai.util.CmdUtil;
 import com.gourdai.core.command.CliCommandContext;
 import com.gourdai.core.config.AgentFlags;
 import com.gourdai.core.command.builtin.LoopScheduler;
@@ -439,6 +439,8 @@ public class CliShell implements Runnable {
             if (isInterrupted.get()) {
                 terminal.writer().println(DIM + "[Task interrupted]" + RESET);
                 terminal.flush();
+                // 用户主动停止：为未完成的任务打「可续跑」标记并立即落盘（与 WebGate/WsGate 口径一致）
+                engine.markUserInterruptedForResume(session, agentName);
                 session.addMessage(ChatMessage.ofAssistant("用户已取消任务."));
                 LOG.info("用户已取消任务.");
                 return finalAnswer.get();
@@ -582,7 +584,7 @@ public class CliShell implements Runnable {
         if (!reason.isToolCalls() && reason.hasContent()) {
             String delta = clearThink(reason.getContent());
 
-            if (reason.getMessage().isThinking()) {
+            if (reason.isThinking()) {
                 if (agentProps.getGeneral().getCliThinkPrinted()) {
                     writeReasonDelta(DIM + delta + RESET, isFirstReasonDeltaChunk, isFirstConversation);
                 }

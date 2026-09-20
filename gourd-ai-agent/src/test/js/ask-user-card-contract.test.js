@@ -29,9 +29,9 @@ const chatHtml = readStatic('chat.html');
 const appCss = readStatic('css', 'app.css');
 
 const LOCALES = ['de', 'el', 'en', 'es', 'fr', 'ja', 'pt', 'ro', 'ru', 'vi', 'zh-CN', 'zh-TW'];
-const QUESTION_KEYS = ['question_waiting', 'question_other', 'question_skip', 'question_submit',
-    'question_recommended', 'question_answered', 'question_skipped', 'question_close',
-    'question_attachment_wait'];
+const QUESTION_KEYS = ['question_waiting', 'question_other', 'question_other_placeholder', 'question_skip',
+    'question_submit', 'question_recommended', 'question_answered', 'question_skipped', 'question_close',
+    'question_attachment_wait', 'question_supplement', 'question_supplement_placeholder'];
 
 function sliceBetween(source, startMarker, endMarker) {
     const start = source.indexOf(startMarker);
@@ -52,6 +52,9 @@ const sm = new Function(smBlock + '\nreturn {' +
     'advanceQuestionCursor: advanceQuestionCursor, ' +
     'applyQuestionOptionAnswer: applyQuestionOptionAnswer, ' +
     'applyQuestionCustomAnswer: applyQuestionCustomAnswer, ' +
+    'applyQuestionSupplement: applyQuestionSupplement, ' +
+    'composeQuestionAnswerText: composeQuestionAnswerText, ' +
+    'skippedAnswer: skippedAnswer, ' +
     'skipQuestionAnswer: skipQuestionAnswer, ' +
     'fillUnansweredAsSkipped: fillUnansweredAsSkipped, ' +
     'buildQuestionAnswersPayload: buildQuestionAnswersPayload' +
@@ -92,15 +95,19 @@ test('app-streaming.js：sendMessage 顶部问答挂起路由位于 streaming �
 test('app-message.js：问答卡函数齐全且提交契约冻结（questionAnswer/answers/index/text/skipped/custom）', () => {
     assert.match(message, /function appendQuestionCard\(sess, chunk\)/);
     assert.match(message, /function handleQuestionResponse\(sess, state\)/);
-    assert.match(message, /function handleQuestionAnsweredFrame\(sess\)/);
+    assert.match(message, /function handleQuestionAnsweredFrame\(sess, chunk\)/);
     assert.match(message, /function syncQuestionCard\(opts\)/);
     assert.match(message, /function getPendingQuestionState\(sess\)/);
     assert.match(message, /function applyQuestionCustomAnswerByText\(sess, text\)/);
 
     const submit = sliceBetween(message, 'function handleQuestionResponse', 'function applyQuestionCustomAnswerByText');
-    assert.match(submit, /formData\.append\('questionAnswer', JSON\.stringify\(buildQuestionAnswersPayload\(state\)\)\);/);
-    assert.match(submit, /formData\.append\('sessionId', sess\.sessionId\);/);
-    assert.match(submit, /'X-Session-Cwd'/);
+    // 提交已统一走 postChatInput（公共入口负责 sessionId / model / X-Session-Cwd），
+    // 这里只冻结【数据契约】：字段名与取值方式不变；不再锁定「怎么发」这一实现细节
+    // （fields 已提为局部变量，以便按存在性追加 actionId，见 pending-task-identity-contract.test.js）。
+    assert.match(submit, /postChatInput\(sess, fields, null, \{/);
+    assert.match(submit, /questionAnswer: JSON\.stringify\(buildQuestionAnswersPayload\(state\)\)/);
+    // 续轮路径绝不能带 input 键：后端靠它的存在性区分新一轮与续轮
+    assert.ok(!/input\s*:/.test(submit), '问答卡提交不得携带 input 键');
     assert.match(submit, /resetStreamState\(sess\);/);
     assert.match(submit, /setBtnStopMode\(\);/);
     assert.match(submit, /showThinking\(sess\);/);
@@ -108,6 +115,11 @@ test('app-message.js：问答卡函数齐全且提交契约冻结（questionAnsw
     const resetIdx = submit.indexOf('resetStreamState(sess)');
     const streamIdx = submit.indexOf('sess.isStreaming = true');
     assert.ok(resetIdx >= 0 && streamIdx > resetIdx, '提交必须先重置再进入流式态（镜像 handleHitlResponse）');
+
+    // sessionId 与工作空间根的保障下沉到公共入口，在那里断言
+    const post = sliceBetween(streaming, 'function postChatInput', 'function sendWithFormDataGrouped');
+    assert.match(post, /formData\.append\('sessionId', sess\.sessionId\);/);
+    assert.match(post, /'X-Session-Cwd'/);
 
     const payload = sliceBetween(message, 'function buildQuestionAnswersPayload', '/* ---- 问答卡 DOM 渲染');
     assert.match(payload, /index: i,/);
@@ -173,7 +185,7 @@ test('app-message.js / app.css：入场动画仅首次渲染播放（勾选/翻�
     assert.match(appCss, /\.question-card\.question-card-enter \{ animation: msg-in 0\.25s ease-out; \}/);
 });
 
-test('12 个语言包均提供 9 个 chat.question_* 键（JSON 合法、行尾无裸 LF）', () => {
+test('12 个语言包均提供 12 个 chat.question_* 键与问答挂起 placeholder 键（JSON 合法、行尾无裸 LF）', () => {
     for (const lang of LOCALES) {
         const raw = readStatic('locales', `${lang}.json`);
         const json = JSON.parse(raw);
@@ -181,10 +193,38 @@ test('12 个语言包均提供 9 个 chat.question_* 键（JSON 合法、行尾�
             assert.equal(typeof json.chat[key], 'string', `${lang} 缺少 chat.${key}`);
             assert.ok(json.chat[key].trim().length > 0, `${lang} 的 chat.${key} 为空`);
         }
+        assert.equal(typeof json.app.placeholder_chat_question, 'string', `${lang} 缺少 app.placeholder_chat_question`);
+        assert.ok(json.app.placeholder_chat_question.trim().length > 0, `${lang} 的 app.placeholder_chat_question 为空`);
         const latin = fs.readFileSync(path.join(staticRoot, 'locales', `${lang}.json`), 'latin1');
         const loneLf = latin.split('\n').filter((line, i, arr) => i < arr.length - 1 && !line.endsWith('\r')).length;
         assert.equal(loneLf, 0, `${lang}.json 存在裸 LF 行，行尾被破坏`);
     }
+});
+
+test('app-message.js / app-base.js：问答挂起期主输入框 placeholder 联动（question > running > idle）', () => {
+    /* syncQuestionCard 是挂起标志的唯一漏斗：所有问答状态变更（帧到达/交互/提交/切会话）
+       都汇入此处，标志变更时触发 app-base.js 的 applyChatPlaceholder 重算。 */
+    const sync = sliceBetween(message, 'function syncQuestionCard', '/* 渲染卡片到宿主');
+    assert.match(sync, /getPendingQuestionState\(sess\)/, '挂起判定必须复用 getPendingQuestionState 口径');
+    assert.match(sync, /window\._questionPendingHint = pendingHint;/);
+    assert.match(sync, /applyChatPlaceholder\(\)/, '标志变更必须触发 placeholder 重算');
+
+    const apply = sliceBetween(base, 'function applyChatPlaceholder', 'function autoResize');
+    assert.match(apply, /_questionPendingHint/);
+    assert.match(apply, /'app\.placeholder_chat_question'/);
+    const qIdx = apply.indexOf('_questionPendingHint');
+    const rIdx = apply.indexOf('_runHintVisible');
+    assert.ok(qIdx >= 0 && rIdx > qIdx, '问答挂起提示必须优先于运行态提示判断');
+
+    const decl = sliceBetween(base, 'window._runHintVisible = false;', 'function setRunHintVisible');
+    assert.match(decl, /window\._questionPendingHint = false;/, '挂起标志声明须与运行态标志并列，默认关闭');
+});
+
+test('app-message.js：卡片内「自己输入」编辑态 placeholder 用专用键，静态入口行文案用 question_other', () => {
+    const render = sliceBetween(message, '/* 渲染卡片到宿主', 'function handleQuestionResponse');
+    assert.match(render, /GourdI18n\.t\('chat\.question_other_placeholder'\)/, '编辑态输入框必须用 question_other_placeholder');
+    const otherKeyUses = render.match(/GourdI18n\.t\('chat\.question_other'\)/g) || [];
+    assert.equal(otherKeyUses.length, 1, 'question_other 仅用于静态入口行文案，不得再用作输入框 placeholder');
 });
 
 test('行为：状态机区块为纯函数（不引用 DOM/全局）', () => {
@@ -205,14 +245,18 @@ test('行为：选项/自定义/跳过推进状态机（选自动推进、跳过
 
     // 1. 点选项：记录 + 自动推进
     sm.applyQuestionOptionAnswer(state, state.current, 'B');
-    assert.deepEqual(state.answers[0], { index: 0, text: 'B', skipped: false, custom: false });
+    assert.equal(state.answers[0].text, 'B');
+    assert.equal(state.answers[0].selectedLabel, 'B', '选项标签必须单独留档，供高亮与补充共存判定');
+    assert.equal(state.answers[0].custom, false);
+    assert.equal(state.answers[0].skipped, false);
     assert.equal(sm.questionOptionSelected(state, 0, 'B'), true);
     assert.equal(sm.questionOptionSelected(state, 0, 'A'), false);
     assert.equal(state.current, 1);
 
     // 2. 跳过：记录 skipped + 推进
     sm.skipQuestionAnswer(state);
-    assert.deepEqual(state.answers[1], { index: 1, text: '', skipped: true, custom: false });
+    assert.deepEqual(state.answers[1], sm.skippedAnswer(1));
+    assert.equal(state.answers[1].skipped, true);
     assert.equal(state.current, 2);
 
     // 3. 跳过已有答案的题：仅推进，不覆盖
@@ -222,12 +266,95 @@ test('行为：选项/自定义/跳过推进状态机（选自动推进、跳过
     assert.equal(state.answers[0].skipped, false);
     assert.equal(state.current, 1);
 
-    // 4. 自定义答案（其他补充）
+    // 4. 自定义答案（本题无任何选项）
     state.current = 2;
     sm.applyQuestionCustomAnswer(state, state.current, '自定义文本');
-    assert.deepEqual(state.answers[2], { index: 2, text: '自定义文本', skipped: false, custom: true });
+    assert.equal(state.answers[2].text, '自定义文本');
+    assert.equal(state.answers[2].custom, true, '未点选项的纯手写仍须标记 custom');
     assert.equal(state.current, 2, '最后一题答完停留在本题');
     assert.equal(sm.questionIsAllAnswered(state), true);
+});
+
+/* 核心回归：用户选完选项后再补一句，选项不得被静默顶掉（原实现用整条覆盖 answers[index]，
+   导致 custom=true + text=补充，模型只看到补充、完全不知道用户选过什么）。 */
+test('行为：已选选项后补充 → 选项与补充共存，custom 保持 false', () => {
+    const state = sm.createQuestionCardState('s1', sm.normalizeQuestionArgs({
+        questions: [{ header: '部署到哪个环境？', options: [{ label: 'staging' }, { label: 'prod' }] }]
+    }));
+
+    sm.applyQuestionOptionAnswer(state, 0, 'staging');
+    sm.applyQuestionCustomAnswer(state, 0, '但先别动数据库');
+
+    const a = state.answers[0];
+    assert.equal(a.custom, false, '已点选项时补充不得把答案变成「自定义回答」');
+    assert.equal(a.selectedLabel, 'staging', '选项必须原样保留');
+    assert.equal(a.supplement, '但先别动数据库');
+    assert.equal(a.text, 'staging（补充：但先别动数据库）');
+    assert.equal(sm.questionOptionSelected(state, 0, 'staging'), true,
+        'text 已拼入补充，选项高亮不得因此丢失');
+
+    // 出站仍是四键，后端协议零改动
+    assert.deepEqual(sm.buildQuestionAnswersPayload(state), {
+        answers: [{ index: 0, text: 'staging（补充：但先别动数据库）', skipped: false, custom: false }]
+    });
+    assert.deepEqual(Object.keys(sm.buildQuestionAnswersPayload(state).answers[0]).sort(),
+        ['custom', 'index', 'skipped', 'text'], 'payload 不得泄漏 selectedLabel/supplement 等本地语义位');
+});
+
+test('行为：补充可反复修改且不推进光标；清空补充回到「只选选项」', () => {
+    const state = sm.createQuestionCardState('s2', sm.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }, { header: 'Q2' }]
+    }));
+    sm.applyQuestionOptionAnswer(state, 0, 'A');
+    assert.equal(state.current, 1);
+
+    state.current = 0;
+    sm.applyQuestionSupplement(state, 0, '第一版');
+    assert.equal(state.current, 0, '补充是对当前题的注解，不是「答完了」，不得推进光标');
+
+    sm.applyQuestionSupplement(state, 0, '改过一版');
+    assert.equal(state.answers[0].supplement, '改过一版', '补充必须被替换而非无限累加');
+    assert.equal(state.answers[0].text, 'A（补充：改过一版）');
+
+    sm.applyQuestionSupplement(state, 0, '');
+    assert.equal(state.answers[0].supplement, '');
+    assert.equal(state.answers[0].text, 'A', '清空补充后回到纯选项文本');
+    assert.equal(state.answers[0].custom, false);
+});
+
+test('行为：未选选项时清空补充 = 撤回本题作答（允许反悔）', () => {
+    const state = sm.createQuestionCardState('s3', sm.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }, { header: 'Q2' }]
+    }));
+    sm.applyQuestionCustomAnswer(state, 0, '先随便写点');
+    assert.equal(state.answers[0].custom, true);
+
+    sm.applyQuestionSupplement(state, 0, '');
+    assert.equal(state.answers[0], undefined, '既无选项也无补充时必须回到未作答态');
+    assert.equal(sm.questionIsAllAnswered(state), false);
+});
+
+test('行为：改选另一个选项时已写的补充不被顶掉', () => {
+    const state = sm.createQuestionCardState('s4', sm.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }, { label: 'B' }] }]
+    }));
+    sm.applyQuestionOptionAnswer(state, 0, 'A');
+    sm.applyQuestionSupplement(state, 0, '注意兼容旧版');
+    sm.applyQuestionOptionAnswer(state, 0, 'B');
+    assert.equal(state.answers[0].selectedLabel, 'B');
+    assert.equal(state.answers[0].supplement, '注意兼容旧版', '用户先补一句再换选项，补充不该丢');
+    assert.equal(state.answers[0].text, 'B（补充：注意兼容旧版）');
+    assert.equal(sm.questionOptionSelected(state, 0, 'A'), false);
+});
+
+test('行为：composeQuestionAnswerText 四种组合形态（空值不产生空括号）', () => {
+    assert.equal(sm.composeQuestionAnswerText('A', 'note'), 'A（补充：note）');
+    assert.equal(sm.composeQuestionAnswerText('A', ''), 'A');
+    assert.equal(sm.composeQuestionAnswerText('A', null), 'A');
+    assert.equal(sm.composeQuestionAnswerText('', 'note'), 'note');
+    assert.equal(sm.composeQuestionAnswerText(null, 'note'), 'note');
+    assert.equal(sm.composeQuestionAnswerText('', ''), '');
+    assert.equal(sm.composeQuestionAnswerText('  A  ', '  note  '), 'A（补充：note）', '两端空白必须归一');
 });
 
 test('行为：提交 payload 组装（X 跳过剩余 + 字段名冻结）', () => {
@@ -254,4 +381,151 @@ test('行为：提交 payload 组装（X 跳过剩余 + 字段名冻结）', () 
     }
     assert.deepEqual(sm.normalizeQuestionArgs({ questions: [{ header: 'H', detail: 'D' }] }),
         [{ header: 'H', detail: 'D', options: [] }]);
+});
+/* ===== 提交收割：用户打了字但没按 Enter，点卡片「发送」时一个字都不能丢 =====
+   这是本次修复的核心症状：选完选项后在底部输入框补一句，再点卡片上的「发送」，
+   旧实现不经 sendMessage，那段文字既不入 answers 也不清空，模型完全收不到。 */
+
+function loadHarvest(boxText) {
+    const harvestSrc = sliceBetween(message, 'function harvestQuestionInputOnSubmit', '/* ===== Rewind Handling');
+    const calls = { cleared: 0 };
+    const api = new Function('activeSessionId', 'getInputText', 'clearInput',
+        smBlock + '\n' + harvestSrc + '\nreturn {'
+        + 'harvestQuestionInputOnSubmit: harvestQuestionInputOnSubmit, '
+        + 'createQuestionCardState: createQuestionCardState, '
+        + 'normalizeQuestionArgs: normalizeQuestionArgs, '
+        + 'applyQuestionOptionAnswer: applyQuestionOptionAnswer, '
+        + 'applyQuestionCustomAnswer: applyQuestionCustomAnswer, '
+        + 'applyQuestionSupplement: applyQuestionSupplement, '
+        + 'questionAnswerFor: questionAnswerFor, '
+        + 'buildQuestionAnswersPayload: buildQuestionAnswersPayload'
+        + '};')('s1', function () { return boxText; }, function () { calls.cleared++; });
+    return { api: api, calls: calls };
+}
+
+test('行为：提交收割——已选选项 + 底部输入框打字未回车 → 选项与补充一并出站', () => {
+    const { api, calls } = loadHarvest('但先别动数据库');
+    const state = api.createQuestionCardState('a', api.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'staging' }] }]
+    }));
+    api.applyQuestionOptionAnswer(state, 0, 'staging');
+    state.current = 0;
+
+    api.harvestQuestionInputOnSubmit({ sessionId: 's1' }, state);
+
+    assert.equal(state.answers[0].selectedLabel, 'staging', '选项必须保留');
+    assert.equal(state.answers[0].supplement, '但先别动数据库');
+    assert.equal(state.answers[0].custom, false, '已点选项时不得退化成自定义回答');
+    assert.equal(api.buildQuestionAnswersPayload(state).answers[0].text,
+        'staging（补充：但先别动数据库）');
+    assert.equal(calls.cleared, 1, '收割后必须清空输入框，否则文字残留误导用户');
+    assert.equal(state.current, 0, '收割不得移动光标');
+});
+
+test('行为：提交收割——未选选项时输入框文本记为自定义回答', () => {
+    const { api } = loadHarvest('我自己写一个环境');
+    const state = api.createQuestionCardState('b', api.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'staging' }] }]
+    }));
+
+    api.harvestQuestionInputOnSubmit({ sessionId: 's1' }, state);
+
+    assert.equal(state.answers[0].text, '我自己写一个环境');
+    assert.equal(state.answers[0].custom, true);
+    assert.equal(state.answers[0].selectedLabel, '');
+});
+
+test('行为：提交收割——卡片内补充行打了字但直接点「发送」（未 Enter）', () => {
+    const { api, calls } = loadHarvest('');
+    const state = api.createQuestionCardState('c', api.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }]
+    }));
+    api.applyQuestionOptionAnswer(state, 0, 'A');
+    state.current = 0;
+    state.drafts[0] = '草稿没回车';
+
+    api.harvestQuestionInputOnSubmit({ sessionId: 's1' }, state);
+
+    assert.equal(state.answers[0].text, 'A（补充：草稿没回车）', '未确认草稿必须折进答案');
+    assert.equal(calls.cleared, 0, '输入框无内容时不得调用 clearInput');
+});
+
+test('行为：提交收割——卡片草稿与输入框文本合并，不互相覆盖', () => {
+    const { api } = loadHarvest('来自输入框');
+    const state = api.createQuestionCardState('d', api.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }]
+    }));
+    api.applyQuestionOptionAnswer(state, 0, 'A');
+    state.current = 0;
+    state.drafts[0] = '来自卡片';
+
+    api.harvestQuestionInputOnSubmit({ sessionId: 's1' }, state);
+
+    assert.equal(state.answers[0].supplement, '来自卡片 来自输入框');
+    assert.equal(state.answers[0].text, 'A（补充：来自卡片 来自输入框）');
+});
+
+test('行为：提交收割——已 Enter 确认过的补充不被后来的输入框文本覆盖', () => {
+    const { api } = loadHarvest('再补一句');
+    const state = api.createQuestionCardState('e', api.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }]
+    }));
+    api.applyQuestionOptionAnswer(state, 0, 'A');
+    state.current = 0;
+    api.applyQuestionCustomAnswer(state, 0, '第一句');
+
+    api.harvestQuestionInputOnSubmit({ sessionId: 's1' }, state);
+
+    assert.equal(state.answers[0].supplement, '第一句 再补一句', '追加而非替换');
+});
+
+test('行为：提交收割——无新内容时不动答案、不清输入框', () => {
+    const { api, calls } = loadHarvest('');
+    const state = api.createQuestionCardState('f', api.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }]
+    }));
+    api.applyQuestionOptionAnswer(state, 0, 'A');
+    state.current = 0;
+    const before = JSON.stringify(state.answers[0]);
+
+    api.harvestQuestionInputOnSubmit({ sessionId: 's1' }, state);
+
+    assert.equal(JSON.stringify(state.answers[0]), before, '幂等：无输入不得改写答案');
+    assert.equal(calls.cleared, 0);
+});
+
+test('行为：提交收割——非活动会话不得读走全局输入框内容', () => {
+    const { api, calls } = loadHarvest('别的会话不该看到这句');
+    const state = api.createQuestionCardState('g', api.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }]
+    }));
+
+    api.harvestQuestionInputOnSubmit({ sessionId: 'other' }, state);
+
+    assert.equal(state.answers[0], undefined);
+    assert.equal(calls.cleared, 0, '输入框全局共享，只能收割活动会话自己的');
+});
+
+test('行为：提交收割——当前题已跳过时不得收割（X「跳过剩余直接提交」语义不被输入框残留破坏）', () => {
+    const { api, calls } = loadHarvest('输入框里的残留文本');
+    const state = api.createQuestionCardState('h', api.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }]
+    }));
+    // 模拟 X 按钮路径：fillUnansweredAsSkipped 先跳过未答题，再提交
+    state.answers[0] = sm.skippedAnswer(0);
+
+    api.harvestQuestionInputOnSubmit({ sessionId: 's1' }, state);
+
+    assert.equal(state.answers[0].skipped, true, '已跳过的题不得被改成自定义答案');
+    assert.equal(state.answers[0].custom, false);
+    assert.equal(state.answers[0].text, '');
+    assert.equal(calls.cleared, 0, '未收割时不得动用户的输入框');
+});
+
+test('提交路径：handleQuestionResponse 必须在置 submitted 之前收割输入', () => {
+    const submit = sliceBetween(message, 'function handleQuestionResponse', 'function applyQuestionCustomAnswerByText');
+    assert.match(submit, /harvestQuestionInputOnSubmit\(sess, state\);/);
+    const h = submit.indexOf('harvestQuestionInputOnSubmit');
+    const s = submit.indexOf('state.submitted = true');
+    assert.ok(h >= 0 && s > h, '收割必须早于提交锁，否则会被 submitted 拦住');
 });

@@ -31,12 +31,13 @@ import com.gourdai.agent.event.ToolCallEndEvent;
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.event.ReasonEndEvent;
 import com.gourdai.agent.session.InMemoryAgentSession;
+import com.gourdai.agent.util.AgentUtil;
 import com.gourdai.core.portal.web.ThinkingDepth;
-import org.noear.solon.ai.annotation.ToolMapping;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.ChatSession;
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.annotation.ToolMapping;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ChatSession;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.talent.AbsTalent;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.change.FileChangeService;
 import org.noear.solon.annotation.Body;
@@ -499,7 +500,11 @@ public class TaskTalent extends AbsTalent {
                                 // delta 的模型时卡片内正文恒空。归属一律用 META_SUBAGENT 标记，
                                 // 各端（Web/ACP/CLI/WS）按同一个键识别，不再区分 task 与 multitask。
                                 ReasonEndEvent re = (ReasonEndEvent) chunk;
-                                boolean needThinking = thinkingStreamed.getAndSet(false) == false && re.hasThinking();
+                                // 思考载荷还须过「可显示思考」判定（AgentUtil#isDisplayableThinking）：NATIVE_TOOL
+                                // 的正文回退值等不可展示形态不得触发补发，否则整个事件被放行后，下游会把正文
+                                // 重复渲染进思考通道（与主代理补发同一判定，单点收敛防语义漂移）。
+                                boolean needThinking = thinkingStreamed.getAndSet(false) == false
+                                        && AgentUtil.isDisplayableThinking(re);
                                 boolean needBody = bodyStreamed.getAndSet(false) == false && re.hasText();
 
                                 if (needThinking || needBody) {

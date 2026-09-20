@@ -17,9 +17,9 @@ package com.gourdai.agent.team;
 
 import com.gourdai.agent.Agent;
 import com.gourdai.agent.AgentInterceptor;
-import org.noear.solon.ai.chat.ChatRequestDesc;
-import org.noear.solon.ai.chat.ChatResponse;
-import org.noear.solon.ai.chat.interceptor.ChatInterceptor;
+import com.gourdai.ai.chat.ChatRequestDesc;
+import com.gourdai.ai.chat.ChatResponse;
+import com.gourdai.ai.chat.interceptor.ChatInterceptor;
 import org.noear.solon.flow.intercept.FlowInterceptor;
 import org.noear.solon.lang.Preview;
 

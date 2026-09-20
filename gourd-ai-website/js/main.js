@@ -189,7 +189,7 @@ const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matc
 
 const DEMO_STEPS = [
   { kind: 'agent', html: '收到，我将以深色科技风重构官网，并突出多端下载。先分析现有页面结构。' },
-  { kind: 'tool', icon: 'search', label: '已探索', meta: 'gourd-ai-website · 12 个文件' },
+  { kind: 'tool', icon: 'search', label: '已探索', meta: 'GWork 官网 · 12 个文件' },
   { kind: 'tool', icon: 'pencil', label: '已编辑', meta: 'index.html / styles.css', add: '+1,286' },
   { kind: 'checklist', items: ['页面结构分析', '深色主题与动效实现', '多端下载区接入'] },
   { kind: 'terminal', lines: [
@@ -393,7 +393,15 @@ function setupSpotlight() {
 }
 
 /* ================= 顶部导航条 ================= */
+/* 嵌入模式标记由页面内联脚本前置写入 <html>（被 iframe 嵌套或 ?embed=1）。
+   此时导航条已被 CSS 隐藏，滚动高亮与移动端菜单都无需接线。 */
+function isEmbedded() {
+  const cls = document.documentElement && document.documentElement.className;
+  return typeof cls === 'string' && /\bis-embedded\b/.test(cls);
+}
+
 function setupNav() {
+  if (isEmbedded()) return;
   const header = document.getElementById('siteHeader');
   const toggle = document.getElementById('navToggle');
   const links = document.getElementById('navLinks');

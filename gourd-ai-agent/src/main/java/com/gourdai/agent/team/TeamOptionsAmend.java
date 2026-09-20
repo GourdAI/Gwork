@@ -15,7 +15,7 @@
  */
 package com.gourdai.agent.team;
 
-import org.noear.solon.ai.chat.ModelOptionsAmend;
+import com.gourdai.ai.chat.ModelOptionsAmend;
 
 import java.util.function.Function;
 

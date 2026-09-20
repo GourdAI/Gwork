@@ -15,7 +15,7 @@
  */
 package com.gourdai.core.command.builtin;
 
-import org.noear.solon.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.ChatConfig;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.command.Command;
 import com.gourdai.harness.command.CommandContext;

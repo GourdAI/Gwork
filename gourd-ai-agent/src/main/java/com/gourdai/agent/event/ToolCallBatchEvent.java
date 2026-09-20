@@ -16,7 +16,7 @@
 package com.gourdai.agent.event;
 
 import com.gourdai.agent.react.ReActTrace;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
 import org.noear.solon.lang.Preview;
 
 import java.util.Collections;

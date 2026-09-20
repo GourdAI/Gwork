@@ -15,8 +15,8 @@
  */
 package com.gourdai.harness.command;
 
-import org.noear.solon.ai.util.Markdown;
-import org.noear.solon.ai.util.MarkdownUtil;
+import com.gourdai.ai.util.Markdown;
+import com.gourdai.ai.util.MarkdownUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

@@ -25,18 +25,18 @@ class MemoryMdDataTest {
     void persistsTitleAndExpirationMetadata() {
         MemoryMdData data = new MemoryMdData(tempDir);
         String value = ONode.serialize(Map.of(
-                "title", "用户偏好 Solon 框架",
+                "title", "用户偏好 Spring 框架",
                 "content", "用户偏好使用 Solon 框架开发后端。",
                 "time", "2026-01-01 10:00:00",
                 "importance", 7));
 
         data.put("shared", "user_pref_framework", value, 2592000);
-        data.updateIndex("shared", "user_pref_framework", "用户偏好 Solon 框架",
+        data.updateIndex("shared", "user_pref_framework", "用户偏好 Spring 框架",
                 "用户偏好使用 Solon 框架开发后端。", 7, "2026-01-01 10:00:00");
 
         List<MemorySearchResult> items = data.listAll("shared", 10);
         assertEquals(1, items.size());
-        assertEquals("用户偏好 Solon 框架", items.get(0).getTitle());
+        assertEquals("用户偏好 Spring 框架", items.get(0).getTitle());
         assertEquals(2592000, items.get(0).getTtl());
         assertNotNull(items.get(0).getStoredTime());
         assertTrue(data.get("shared", "user_pref_framework").contains("\"title\""));

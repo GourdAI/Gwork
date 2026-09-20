@@ -15,8 +15,8 @@
  */
 package com.gourdai.harness.talents.cli;
 
-import org.noear.solon.ai.annotation.ToolMapping;
-import org.noear.solon.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.annotation.ToolMapping;
+import com.gourdai.ai.chat.talent.AbsTalent;
 import org.noear.solon.lang.Preview;
 
 import java.time.ZonedDateTime;

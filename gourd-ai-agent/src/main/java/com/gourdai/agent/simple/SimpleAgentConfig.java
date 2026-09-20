@@ -18,7 +18,7 @@ package com.gourdai.agent.simple;
 import com.gourdai.agent.AgentHandler;
 import com.gourdai.agent.AgentProfile;
 import com.gourdai.agent.AgentSystemPrompt;
-import org.noear.solon.ai.chat.ChatModel;
+import com.gourdai.ai.chat.ChatModel;
 import org.noear.solon.core.util.SnelUtil;
 import org.noear.solon.flow.FlowContext;
 import org.slf4j.Logger;

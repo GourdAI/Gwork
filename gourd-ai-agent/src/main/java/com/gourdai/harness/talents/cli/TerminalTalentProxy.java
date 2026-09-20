@@ -1,9 +1,9 @@
 package com.gourdai.harness.talents.cli;
 
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.talent.Talent;
-import org.noear.solon.ai.chat.talent.TalentMetadata;
-import org.noear.solon.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.talent.Talent;
+import com.gourdai.ai.chat.talent.TalentMetadata;
+import com.gourdai.ai.chat.tool.FunctionTool;
 
 import java.util.ArrayList;
 import java.util.Collection;

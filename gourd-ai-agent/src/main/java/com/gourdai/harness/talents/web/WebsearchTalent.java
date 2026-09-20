@@ -16,12 +16,12 @@
 package com.gourdai.harness.talents.web;
 
 import org.noear.solon.Utils;
-import org.noear.solon.ai.annotation.ToolMapping;
-import org.noear.solon.ai.chat.talent.AbsTalent;
-import org.noear.solon.ai.chat.tool.ToolResult;
-import org.noear.solon.ai.mcp.McpChannel;
-import org.noear.solon.ai.mcp.client.McpClientProvider;
-import org.noear.solon.ai.util.RetryUtil;
+import com.gourdai.ai.annotation.ToolMapping;
+import com.gourdai.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.chat.tool.ToolResult;
+import com.gourdai.ai.mcp.McpChannel;
+import com.gourdai.ai.mcp.client.McpClientProvider;
+import com.gourdai.ai.util.RetryUtil;
 import org.noear.solon.annotation.Param;
 
 import java.time.Duration;
@@ -29,7 +29,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Web 搜索工具 (基于 Solon MCP Client 实现)
+ * Web 搜索工具 (基于 MCP Client 实现)
  *
  * @author oisin
  * @since 3.9.6

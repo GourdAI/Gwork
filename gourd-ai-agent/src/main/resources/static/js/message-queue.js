@@ -42,7 +42,7 @@ class MessageQueue {
             data: { sessionId: sessionId },
             headers: this._getHeaders(sessionId)
         }).then(function(resp) {
-            // 后端 Solon Result.succeed() 返回 code:200（非 0）
+            // 后端 Result.succeed() 返回 code:200（非 0）
             if (resp && resp.code === 200 && resp.data) {
                 return resp.data.items || [];
             }
@@ -70,7 +70,7 @@ class MessageQueue {
             }),
             headers: this._getHeaders(sessionId)
         }).then(function(resp) {
-            // 后端 Solon Result.succeed() 返回 code:200（非 0）
+            // 后端 Result.succeed() 返回 code:200（非 0）
             if (resp && resp.code === 200) {
                 // 删除缓存，下次 getQueue 时重新拉取
                 delete self.caches[sessionId];
@@ -93,7 +93,7 @@ class MessageQueue {
             data: { sessionId: sessionId },
             headers: this._getHeaders(sessionId)
         }).then(function(resp) {
-            // 后端 Solon Result.succeed() 返回 code:200（非 0）
+            // 后端 Result.succeed() 返回 code:200（非 0）
             if (resp && resp.code === 200 && resp.data && resp.data.item) {
                 // 删除缓存，下次 getQueue 时重新拉取
                 delete self.caches[sessionId];

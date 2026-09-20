@@ -7,6 +7,11 @@
 (function () {
     var LS_CHAT_WS = 'gourdai-chat-workspace';
 
+    /* 已登记项目缓存（[{name, path}]）：按钮显示名必须用登记名（projects.json 的 name），
+       否则侧栏改名后这里仍按路径末段渲染，出现「侧栏 gost-test / 按钮 gost」的永久性不一致
+       （重命名只改展示名、不动磁盘目录，故靠 baseName(path) 永远读不到新名字）。 */
+    var projectsCache = [];
+
     /* 解析期同步恢复选择（localStorage 同步可读），保证 app-history 启动加载会话列表时即带上正确 root */
     try {
         window.currentChatWorkspace = localStorage.getItem(LS_CHAT_WS) || '';
@@ -44,10 +49,42 @@
         return i >= 0 ? t.substring(i + 1) : t;
     }
 
+    /* 路径比较键：Windows 盘符路径大小写不敏感且分隔符可混用，与 app-memory.js pathKey 同口径 */
+    function pathKey(p) {
+        var t = trimTrail(String(p == null ? '' : p));
+        var win = /^[a-zA-Z]:[\\/]/.test(t) || /^[\\/]{2}[^\\/]/.test(t);
+        return win ? t.replace(/\//g, '\\').toLowerCase() : t;
+    }
+
+    /* 登记名优先，未登记（或列表尚未就绪）回退目录名：
+       与侧栏项目行、下拉列表项、code 模式选择器口径一致。 */
+    function nameOf(path) {
+        var key = pathKey(path);
+        for (var i = 0; i < projectsCache.length; i++) {
+            var p = projectsCache[i];
+            if (p && pathKey(p.path) === key && p.name) return p.name;
+        }
+        return baseName(path);
+    }
+
     function displayName() {
         /* 不选工作空间 = 全局（默认）：按钮仅提示「选择项目」，不展示全局信息 */
         if (!window.currentChatWorkspace) return GourdI18n.t('code.select_project');
-        return baseName(window.currentChatWorkspace);
+        return nameOf(window.currentChatWorkspace);
+    }
+
+    /* 拉取登记项目列表并刷新缓存；成功/失败都回调（失败时缓存保持旧值，按钮回退目录名） */
+    function loadProjects(cb) {
+        $.get('/web/chat/projects', function (resp) {
+            var list = (resp && resp.data) ? resp.data : [];
+            projectsCache = [];
+            for (var i = 0; i < list.length; i++) {
+                if (list[i] && list[i].path) projectsCache.push(list[i]);
+            }
+        }).always(function () {
+            renderSelectors();
+            if (typeof cb === 'function') cb(projectsCache);
+        });
     }
 
     function renderSelectors() {
@@ -94,10 +131,18 @@
         for (var i = 0; i < sels.length; i++) positionDropdown(sels[i]);
     });
 
+    /* 下拉列表与按钮显示名同源：统一走 loadProjects 刷新 projectsCache，
+       避免「列表显示新名、收起来按钮又变旧名」的双数据源不一致。 */
     function renderDropdown(dd) {
         dd.innerHTML = '<div class="project-dropdown-empty">' + esc(GourdI18n.t('app.loading')) + '</div>';
-        $.get('/web/chat/projects', function (resp) {
-            var list = (resp && resp.data) ? resp.data : [];
+        loadProjects(function (list) {
+            if (!list.length) {
+                dd.innerHTML = '<div class="project-dropdown-empty">' + esc(GourdI18n.t('code.no_projects')) + '</div>'
+                    + '<div class="project-dropdown-add workspace-add-btn">'
+                    + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
+                    + esc(GourdI18n.t('code.open_folder')) + '</div>';
+                return;
+            }
             var def = defaultWorkspace();
             var defKey = trimTrail(def).toLowerCase();
             var cur = window.currentChatWorkspace;
@@ -120,8 +165,6 @@
                 + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
                 + esc(GourdI18n.t('code.open_folder')) + '</div>';
             dd.innerHTML = html;
-        }).fail(function () {
-            dd.innerHTML = '<div class="project-dropdown-empty">' + esc(GourdI18n.t('code.no_projects')) + '</div>';
         });
     }
 
@@ -192,6 +235,7 @@
                     url: '/web/chat/projects/remove', method: 'POST', contentType: 'application/json',
                     data: JSON.stringify({ path: delPath })
                 }).always(function () {
+                    if (typeof window.notifyProjectsChanged === 'function') window.notifyProjectsChanged(); // 移除登记：同步其它持有项目列表的视图
                     var dd = del.closest('.workspace-dropdown');
                     if (dd) renderDropdown(dd);
                     if (window.currentChatWorkspace === delPath) selectChatWorkspace('', true);
@@ -209,6 +253,7 @@
                         url: '/web/chat/projects/add', method: 'POST', contentType: 'application/json',
                         data: JSON.stringify({ path: picked })
                     }).done(function () {
+                        if (typeof window.notifyProjectsChanged === 'function') window.notifyProjectsChanged(); // 新增登记：同步记忆页/自动化等持有项目列表的视图
                         selectChatWorkspace(picked);
                     }).fail(function () {
                         if (typeof showToast === 'function') showToast(GourdI18n.t('code.dir_access_failed'), 'error');
@@ -231,7 +276,9 @@
         // meta 就绪后把选择态归一（默认工作区路径 → ''）并渲染
         window.currentChatWorkspace = toSelection(window.currentChatWorkspace);
         persist();
-        renderSelectors();
+        renderSelectors(); // 先用回退名即时上屏，避免白屏/闪空
+        // 选了工作空间时预拉登记列表，把按钮文案换成登记名（不选时文案恒为「选择项目」，无需请求）
+        if (window.currentChatWorkspace) loadProjects();
         if (window.currentChatWorkspace && typeof window.notifyWatchRoot === 'function') {
             window.notifyWatchRoot(window.currentChatWorkspace);
         }
@@ -244,6 +291,10 @@
             boot();
         }).catch(function () { boot(); });
     });
+
+    /* 项目登记表变更（侧栏重命名 / 新增 / 移除 / 新建）：重拉缓存并刷新按钮显示名，
+       使欢迎页无需刷新页面即可跟上新名字。 */
+    document.addEventListener('projects:changed', function () { loadProjects(); });
 
     /* 语言切换后重渲染选择器文案 */
     document.addEventListener('i18n:localeChanged', function () { renderSelectors(); });

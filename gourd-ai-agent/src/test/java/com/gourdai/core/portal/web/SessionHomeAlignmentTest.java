@@ -3,7 +3,7 @@ package com.gourdai.core.portal.web;
 import com.gourdai.agent.session.FileAgentSession;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
 
 import java.nio.file.Files;
 import java.nio.file.Path;

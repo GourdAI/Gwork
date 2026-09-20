@@ -20,8 +20,8 @@ import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.AgentTrace;
 import com.gourdai.agent.team.TeamProtocol;
 import com.gourdai.agent.trace.Metrics;
-import org.noear.solon.ai.chat.prompt.Prompt;
-import org.noear.solon.ai.chat.prompt.PromptImpl;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.prompt.PromptImpl;
 import org.noear.solon.flow.FlowContext;
 
 /**

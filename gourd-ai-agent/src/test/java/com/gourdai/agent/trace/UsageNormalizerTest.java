@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * {@link UsageNormalizer} 用量口径归一测试。
  *
- * <p>核心红线：无论上游（solon-ai 各版本 / 各方言）是否已把缓存并入 promptTokens，
+ * <p>核心红线：无论上游（各版本 / 各方言）是否已把缓存并入 promptTokens，
  * 归一结果都必须等于「含缓存的真实输入」，绝不重复计入缓存。</p>
  */
 public class UsageNormalizerTest {

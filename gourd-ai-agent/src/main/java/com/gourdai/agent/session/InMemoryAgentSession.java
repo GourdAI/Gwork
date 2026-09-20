@@ -18,9 +18,9 @@ package com.gourdai.agent.session;
 import org.noear.solon.Utils;
 import com.gourdai.agent.Agent;
 import com.gourdai.agent.AgentSession;
-import org.noear.solon.ai.chat.ChatRole;
-import org.noear.solon.ai.chat.message.ChatMessage;
-import org.noear.solon.ai.chat.session.InMemoryChatSession;
+import com.gourdai.ai.chat.ChatRole;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.session.InMemoryChatSession;
 import org.noear.solon.flow.FlowContext;
 import org.noear.solon.lang.Preview;
 

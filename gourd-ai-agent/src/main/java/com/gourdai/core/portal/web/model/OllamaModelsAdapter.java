@@ -53,7 +53,7 @@ public class OllamaModelsAdapter implements ModelsAdapter {
                     ONode item = models.get(i);
                     String name = item.get("name").getString();
                     long created = System.currentTimeMillis() / 1000;
-                    if (item.exists("modified_at")) {
+                    if (item.hasKey("modified_at")) {
                         try {
                             created = java.time.Instant.parse(item.get("modified_at").getString()).getEpochSecond();
                         } catch (Exception ignored) {
@@ -64,6 +64,7 @@ public class OllamaModelsAdapter implements ModelsAdapter {
                             .object("model")
                             .created(created)
                             .ownedBy("ollama")
+                            .standard("ollama")
                             .type("chat")
                             .build());
             }

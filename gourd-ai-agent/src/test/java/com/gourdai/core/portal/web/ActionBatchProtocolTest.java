@@ -7,7 +7,7 @@ import com.gourdai.agent.event.ToolCallEndEvent;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.noear.snack4.ONode;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;

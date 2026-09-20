@@ -16,7 +16,7 @@
 package com.gourdai.agent.event;
 
 import com.gourdai.agent.AgentSession;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
 import org.noear.solon.lang.Nullable;
 import org.noear.solon.lang.Preview;
 

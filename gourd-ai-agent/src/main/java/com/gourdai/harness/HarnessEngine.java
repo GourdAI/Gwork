@@ -24,32 +24,32 @@ import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.react.ReActRequest;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.harness.talents.cli.*;
-import org.noear.solon.ai.chat.message.AssistantMessage;
-import org.noear.solon.ai.chat.message.ChatMessage;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
 import com.gourdai.agent.react.intercept.HITLInterceptor;
 import com.gourdai.agent.react.intercept.AskUserInterceptor;
 import com.gourdai.agent.react.intercept.ContextCompressionInterceptor;
 import com.gourdai.agent.react.intercept.CompressionStrategy;
 import com.gourdai.agent.react.intercept.StopLoopInterceptor;
 import com.gourdai.agent.react.intercept.compress.UnifiedCompressionStrategy;
-import org.noear.solon.ai.chat.CacheControl;
-import org.noear.solon.ai.chat.ChatConfig;
-import org.noear.solon.ai.chat.ChatModel;
-import org.noear.solon.ai.chat.prompt.Prompt;
+import com.gourdai.ai.chat.CacheControl;
+import com.gourdai.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.harness.command.CommandRegistry;
 import com.gourdai.harness.hitl.HitlStrategy;
-import org.noear.solon.ai.mcp.client.McpClientProvider;
+import com.gourdai.ai.mcp.client.McpClientProvider;
 import com.gourdai.harness.talents.memory.MemorySolutionProvider;
-import org.noear.solon.ai.talents.mount.AgentMd;
-import org.noear.solon.ai.talents.mount.MountDir;
+import com.gourdai.ai.talents.mount.AgentMd;
+import com.gourdai.ai.talents.mount.MountDir;
 import com.gourdai.harness.permission.ToolPermission;
 import com.gourdai.harness.talents.code.CodeTalent;
 import com.gourdai.harness.talents.lsp.LspManager;
 import com.gourdai.harness.talents.lsp.LspServerParameters;
 import com.gourdai.harness.talents.lsp.LspTalent;
-import org.noear.solon.ai.mcp.client.McpServerParameters;
+import com.gourdai.ai.mcp.client.McpServerParameters;
 import com.gourdai.harness.talents.memory.MemoryTalent;
-import org.noear.solon.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.mount.SkillDir;
 import com.gourdai.harness.talents.gateway.openapi.ApiSource;
 import com.gourdai.harness.talents.gateway.openapi.ApiSourceClient;
 import com.gourdai.harness.talents.gateway.OpenApiGatewayTalent;
@@ -391,6 +391,14 @@ public class HarnessEngine {
 
     public ChatConfig getModelOrDef(String name) {
         return options.getModelOrDef(name);
+    }
+
+    /**
+     * 判断指定模型名是否会被静默回退到默认模型（未命中或已禁用）。
+     * 供入口层在真正发起模型调用前做告警，避免用户在无感知的情况下被换模型。
+     */
+    public boolean isModelFallback(String name) {
+        return options.isModelFallback(name);
     }
 
     public String getDefaultModel() {
@@ -1058,11 +1066,16 @@ public class HarnessEngine {
      * <p>依据持久化且语义精确的信号：trace 路由停在 END 且被标记为 abnormal。
      * abnormal 由库在模型调用失败/超时/达到最大回合时置位（{@code setFinalAnswer(msg)} 单参重载），
      * 正常完成则为 false。该状态随快照落盘，进程重启后仍可判定。</p>
+     *
+     * <p>用户主动停止（interrupt）且任务未完成的场景同样视为可续跑：取消不会经过库的
+     * 异常兜底（abnormal 不置位），改由 {@link ReActTrace#EXTRA_USER_INTERRUPTED} 标记
+     * （见 {@link #markUserInterruptedForResume}）。否则用户随后发「继续」会被当成
+     * 全新任务、断点工作记忆被整体重置，重复消耗 token。</p>
      */
     public boolean canResume(ReActTrace trace) {
         return trace != null
                 && Agent.ID_END.equals(trace.getRoute())
-                && trace.isAbnormal();
+                && (trace.isAbnormal() || trace.isUserInterrupted());
     }
 
     /**
@@ -1081,6 +1094,35 @@ public class HarnessEngine {
      */
     public boolean canContinue(ReActTrace trace) {
         return trace != null && Agent.ID_END.equals(trace.getRoute());
+    }
+
+    /**
+     * 用户主动停止（interrupt/取消）任务时，为「未完成的任务」打上可续跑标记并立即落盘。
+     *
+     * <p>取消路径不会经过库的异常兜底（abnormal 不置位），执行流最终停在 route=END
+     * 但 abnormal=false——若不打标，用户随后发「继续」会被 {@link #canResume} 判为
+     * 新任务，断点工作记忆（推理 + 工具结果）被整体重置，此前消耗的上下文无法复用。
+     * 打标后「继续」与「异常中断续跑」行为完全对齐：保留工作记忆并把新输入追加进去
+     * 接着执行。</p>
+     *
+     * <p>仅当任务尚未结束（route 非 END）时打标；打完立即落盘，覆盖「流程收尾前进程
+     * 退出」的场景（重启后仍可判定）。异常只记日志，绝不影响停止主流程。</p>
+     *
+     * @param session   会话
+     * @param agentName 指定 agent 名（为空则主 agent，与取消入口口径一致）
+     */
+    public void markUserInterruptedForResume(AgentSession session, String agentName) {
+        try {
+            ReActTrace trace = resolveTrace(session, agentName);
+            if (trace == null || Agent.ID_END.equals(trace.getRoute())) {
+                return;
+            }
+            trace.markUserInterrupted();
+            session.updateSnapshot();
+        } catch (Throwable e) {
+            org.slf4j.LoggerFactory.getLogger(HarnessEngine.class)
+                    .warn("mark user-interrupted for resume failed (ignored): {}", e.getMessage());
+        }
     }
 
     /**
@@ -1108,9 +1150,10 @@ public class HarnessEngine {
      * @param cwd 会话工作目录（用于定位 TODO.md）。传 null 时依次回退会话属性 ATTR_CWD、工作区根目录。
      */
     public void prepareResume(ReActTrace trace, AgentSession session, String newUserInput, boolean removeLastAnswer, String cwd) {
-        // ① 回到思考节点，清掉最终答案标记并复位 abnormal
+        // ① 回到思考节点，清掉最终答案标记并复位 abnormal；同时消费「用户中断」续跑标记
         trace.setRoute(ReActAgent.ID_REASON);
         trace.setFinalAnswer(null, false);
+        trace.clearUserInterrupted();
 
         // ② 仅在异常兜底场景移除最后一条 Assistant 消息（正常完成的真实答复要保留）
         if (removeLastAnswer) {

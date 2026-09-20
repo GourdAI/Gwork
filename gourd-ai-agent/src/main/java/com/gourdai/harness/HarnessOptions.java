@@ -20,14 +20,14 @@ import com.gourdai.agent.react.intercept.AskUserInterceptor;
 import com.gourdai.agent.react.intercept.HITLInterceptor;
 import com.gourdai.agent.react.intercept.ContextCompressionInterceptor;
 import com.gourdai.agent.react.intercept.StopLoopInterceptor;
-import org.noear.solon.ai.chat.CacheControl;
-import org.noear.solon.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.CacheControl;
+import com.gourdai.ai.chat.ChatConfig;
 import com.gourdai.harness.permission.ToolPermission;
-import org.noear.solon.ai.mcp.client.McpServerParameters;
+import com.gourdai.ai.mcp.client.McpServerParameters;
 import com.gourdai.harness.talents.cli.SkillProvider;
 import com.gourdai.harness.talents.lsp.LspServerParameters;
 import com.gourdai.harness.talents.memory.MemorySolutionProvider;
-import org.noear.solon.ai.talents.mount.MountManager;
+import com.gourdai.ai.talents.mount.MountManager;
 import com.gourdai.harness.talents.gateway.openapi.ApiSource;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Preview;
@@ -456,6 +456,27 @@ class HarnessOptions implements Serializable {
 
     boolean hasModel(String modelName) {
         return models.containsKey(modelName);
+    }
+
+    /**
+     * 判断给定模型名是否会触发「静默回退到默认模型」。
+     *
+     * <p>{@link #getModelOrDef(String)} 把「传空求默认」与「指定了模型却未命中/已被禁用」
+     * 合并到同一条返回路径，返回值本身不携带任何信号，调用方无从区分两者——
+     * 用户因此可能在毫不知情的情况下被换到 defaultModel（曾导致「明明选了 A 却跑了 B」
+     * 且全程无日志可查）。此方法把后一种情况单独暴露出来，供入口层告警，
+     * 而不改变 {@code getModelOrDef} 自身行为与全部既有调用点。</p>
+     *
+     * @param modelName 显式指定的模型名；空值表示「本就要默认模型」，不算回退
+     * @return true 表示指定了模型但它不存在或已被禁用，实际会回退到默认模型
+     */
+    boolean isModelFallback(String modelName) {
+        if (models.isEmpty() || Assert.isEmpty(modelName)) {
+            return false;
+        }
+
+        ChatConfig c = models.get(modelName);
+        return c == null || c.isEnabled() == false;
     }
 
     ChatConfig getModelOrNil(String modelName) {

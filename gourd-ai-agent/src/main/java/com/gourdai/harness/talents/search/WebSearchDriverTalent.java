@@ -16,8 +16,8 @@
 package com.gourdai.harness.talents.search;
 
 import org.noear.snack4.ONode;
-import org.noear.solon.ai.annotation.ToolMapping;
-import org.noear.solon.ai.chat.talent.AbsTalent;
+import com.gourdai.ai.annotation.ToolMapping;
+import com.gourdai.ai.chat.talent.AbsTalent;
 import org.noear.solon.annotation.Param;
 import org.noear.solon.lang.Preview;
 import org.noear.solon.net.http.HttpUtils;
@@ -107,6 +107,8 @@ public class WebSearchDriverTalent extends AbsTalent {
     public static final SearchDriver SERPER = new SearchDriver() {
         public String executeRequest(String q, int n, String k) throws Exception {
             return HttpUtils.http("https://google.serper.dev/search")
+                    // 显式三段超时（单位：秒）：连接 10 / 写 10 / 读 30；搜索接口返回体小，30s 足够
+                    .timeout(10, 10, 30)
                     .header("X-API-KEY", k)
                     .header("Content-Type", "application/json")
                     .bodyOfJson(new ONode().set("q", q).set("num", n).toJson())
@@ -128,6 +130,8 @@ public class WebSearchDriverTalent extends AbsTalent {
     public static final SearchDriver BING = new SearchDriver() {
         public String executeRequest(String q, int n, String k) throws Exception {
             return HttpUtils.http("https://api.bing.microsoft.com/v7.0/search")
+                    // 显式三段超时（单位：秒）：连接 10 / 写 10 / 读 30；搜索接口返回体小，30s 足够
+                    .timeout(10, 10, 30)
                     .header("Ocp-Apim-Subscription-Key", k)
                     .data("q", q)
                     .data("count", String.valueOf(n))
@@ -150,6 +154,8 @@ public class WebSearchDriverTalent extends AbsTalent {
         public String executeRequest(String q, int n, String k) throws Exception {
             // 注意：AppBuilder 的端点通常带有 /v2/ 前缀
             return HttpUtils.http("https://gw.alinesno.com/api/baidu/appbuilder/v2/ai_search/web_search")
+                    // 显式三段超时（单位：秒）：连接 10 / 写 10 / 读 30；搜索接口返回体小，30s 足够
+                    .timeout(10, 10, 30)
                     .header("Authorization", "Bearer " + k)
                     .header("Content-Type", "application/json")
                     // 百度 AppBuilder 接收的是 messages 数组，且 top_k 在 resource_type_filter 中定义

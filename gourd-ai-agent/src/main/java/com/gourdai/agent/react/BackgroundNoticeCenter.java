@@ -24,7 +24,7 @@ import org.noear.solon.flow.FlowContext;
  * 归属区分，A 会话会收到 B 会话的后台任务完成消息。故所有通知按 ownerKey（每个 agent 运行实例
  * 一个，存放于 FlowContext）分桶投递与消费。</p>
  *
- * <p>线程模型：投递方是命令等待线程（solon-ai-command-waiter-*），消费方是推理线程，故用并发容器。
+ * <p>线程模型：投递方是命令等待线程（gwork-command-waiter-*），消费方是推理线程，故用并发容器。
  * {@link #CURRENT_OWNER} 为工具执行期间的归属传递通道——工具方法签名里拿不到 trace，只能借由
  * ThreadLocal 从 ActionTask 透传；bash 属于写工具，恒在 ActionTask 当前线程串行执行，
  * 不会落到并行只读段的线程池上，故 ThreadLocal 可靠。</p>

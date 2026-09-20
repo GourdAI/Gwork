@@ -4,7 +4,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.noear.snack4.Feature;
 import org.noear.snack4.ONode;
-import org.noear.solon.ai.chat.tool.FunctionTool;
+import com.gourdai.ai.chat.tool.FunctionTool;
 import com.gourdai.harness.agent.TaskTalent;
 
 import java.util.List;

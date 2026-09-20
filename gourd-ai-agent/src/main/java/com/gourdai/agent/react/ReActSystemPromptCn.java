@@ -15,6 +15,7 @@
  */
 package com.gourdai.agent.react;
 
+import com.gourdai.agent.util.AskUserTool;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Preview;
 import org.slf4j.Logger;
@@ -107,7 +108,14 @@ public class ReActSystemPromptCn implements ReActSystemPrompt {
                 .append("1. **工具调用**：如果需要调用工具，请【直接】触发函数调用（Function Calling）。\n")
                 .append("2. **结果导向**：所有结论必须基于工具返回的真实数据（Observation）。\n")
                 .append("3. **严禁伪造**：禁止在回复中模拟或伪造工具的执行过程。\n")
-                .append("4. **自然回复**：任务完成后，请以自然语言直接回复，无需输出 `Final Answer:` 等标签。\n\n");
+                .append("4. **自然回复**：任务完成后，请以自然语言直接回复，无需输出 `Final Answer:` 等标签。\n");
+
+        // 条件注入：仅当 ask_user 在当前工具集内才下发硬规则（否则会诱导模型幻觉调用不存在的工具）
+        if (AskUserTool.isAvailable(trace.getOptions().getTools())) {
+            sb.append("5. ").append(AskUserTool.PROMPT_RULE_CN).append("\n");
+        }
+
+        sb.append("\n");
 
 //        sb.append("## 行为准则\n")
 //                .append("1. **工具调用**：如果需要调用工具，请【直接】触发函数调用（Function Calling）。\n")
@@ -151,7 +159,14 @@ public class ReActSystemPromptCn implements ReActSystemPrompt {
         sb.append("## 核心规则\n")
                 .append("1. 每次仅输出一个 Action，输出后立即停止等待 Observation。\n")
                 .append("2. 严禁伪造 Observation，严禁调用‘可用工具’之外的工具。\n")
-                .append("3. 最终回答未带上 ").append(config.getFinishMarker()).append(" 将被视为无效。\n\n");
+                .append("3. 最终回答未带上 ").append(config.getFinishMarker()).append(" 将被视为无效。\n");
+
+        // 条件注入：仅当 ask_user 在当前工具集内才下发硬规则
+        if (AskUserTool.isAvailable(trace.getOptions().getTools())) {
+            sb.append("4. ").append(AskUserTool.PROMPT_RULE_CN).append("\n");
+        }
+
+        sb.append("\n");
 
         // D. 业务指令注入
         appendBusinessInstructions(sb, trace);
