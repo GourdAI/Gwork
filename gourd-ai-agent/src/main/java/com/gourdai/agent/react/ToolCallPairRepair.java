@@ -174,9 +174,11 @@ public class ToolCallPairRepair {
                     if (ownsAnswer(task, call)) {
                         List<Map<String, Object>> questions = (task == null) ? null : task.getQuestions();
 
-                        // 与正常恢复路径同源：清理挂起任务与答案键（幂等），防止后续同类调用误判为“已恢复”
+                        // 与正常恢复路径同源：清理挂起任务与答案现场（幂等），防止后续同类调用误判为“已恢复”。
+                        // 必须走 AskUser.clear 而非手写 remove：答案归属键与答案同生同灭，
+                        // 漏清会留下孤儿归属，让下一份答案背上旧归属而被 ownsAnswer 误判丢弃。
                         session.getContext().remove(AskUser.TASK_KEY);
-                        session.getContext().remove(AskUser.ANSWER_PREFIX + toolName);
+                        AskUser.clear(session, toolName);
 
                         return ChatMessage.ofTool(ToolResult.success(AskUser.formatAnswerText(questions, answer)),
                                 toolName, call.getId(), false);

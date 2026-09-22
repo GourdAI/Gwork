@@ -85,6 +85,36 @@ public class ChatRequestDescDefault implements ChatRequestDesc {
     /** 非流式总时长（wall-clock）绝对上限：非流式期间用户零反馈，可容忍的沉默时长远小于流式 */
     private static final Duration CALL_TOTAL_CAP = Duration.ofMinutes(10);
 
+    /**
+     * TTFT 上下文放大的计量单位（字符）。
+     *
+     * <p>取 100K 字符（≈25K~30K token）作为「常规请求」的上界：在此以内 TTFT 预算<b>逐字保持</b>
+     * 配置值，既有行为零变化；超过才按上行规模线性放宽。</p>
+     */
+    private static final int TTFT_SCALE_UNIT_CHARS = 100_000;
+
+    /** TTFT 相对配置值的最大放大倍数：防止超大上下文把预算放大到失去兜底意义 */
+    private static final int TTFT_MAX_SCALE = 4;
+
+    /** TTFT 绝对上限：无论上下文多大，首帧等待不超过此值（与非流式 CALL_TOTAL_CAP 同量级） */
+    private static final Duration TTFT_ABSOLUTE_CAP = Duration.ofMinutes(10);
+
+    /** 流式单次调用总时长（wall-clock）相对配置值的放大倍数：总预算必须远宽于单段预算 */
+    private static final int STREAM_TOTAL_SCALE = 10;
+
+    /** 流式单次调用总时长下限：正常的深度思考长回答可达数分钟，下限必须明显宽于它 */
+    private static final Duration STREAM_TOTAL_FLOOR = Duration.ofMinutes(10);
+
+    /**
+     * 流式单次调用总时长（wall-clock）绝对上限。
+     *
+     * <p><b>刻意小于</b> {@code ReasonTask.STREAM_TOTAL_CAP}（30 分钟，{@code blockLast} 兜底）：
+     * 超时判定权必须留在流层——流层触发能沿正常错误路径传播并走到 {@code sink.onDispose}，
+     * 关闭 reader 与连接（上游随之中止生成、停止计费）；而 {@code blockLast} 超时只解放调用线程，
+     * 是调度器饥饿时的最后兜底，不应成为常规触发者。</p>
+     */
+    private static final Duration STREAM_TOTAL_CAP = Duration.ofMinutes(25);
+
     private final ChatConfig config;
     private final ChatDialect dialect;
     private final Prompt originalPrompt;
@@ -661,19 +691,117 @@ public class ChatRequestDescDefault implements ChatRequestDesc {
 
         // 弱网优化（2026-09-18）：首帧与帧间空闲拆分为两个独立预算。
         // 旧行为：两段共用 config.timeout（默认 120s）——供应商断流后前端要干等 2 分钟才有反应。
-        // 拆分后：TTFT 仍用配置值（排队 + 慢网 + 推理模型首 token 慢，不宜收紧）；
+        // 拆分后：TTFT 以配置值为基准并按上行上下文规模放宽（见 resolveTtftTimeout）；
         // 帧间空闲收紧到 [15s, 60s]（活跃流 chunk 间隔通常 <1s，超窗口无帧即判定断流），
         // 断流发现时间从 120s 压到 1 分钟内，交由上层 RetryTask 按原逻辑重试自愈。
-        Duration ttftTimeout = config.getTimeout();
+        Duration ttftTimeout = resolveTtftTimeout(config.getTimeout(), req);
         Duration idleTimeout = resolveStreamIdleTimeout(config.getTimeout());
 
-        return chain.doIntercept(req)
-                .timeout(Mono.delay(ttftTimeout), item -> Mono.delay(idleTimeout))
+        // 空转止损（2026-09-21）：TTFT 与帧间预算都只约束「一段间隔」，二者都拦不住
+        // 「持续有帧、但永远不结束」的半死流——每帧都会重置帧间计时器，单次调用因此无上界，
+        // 上游则一直在生成并计费。这里补上单次调用的 wall-clock 总封顶，见 resolveStreamTotalTimeout。
+        Duration totalCap = resolveStreamTotalTimeout(config.getTimeout());
+
+        return withTimeoutBudgets(chain.doIntercept(req), ttftTimeout, idleTimeout, totalCap)
                 .doOnError(e -> {
                     if (e instanceof TimeoutException) {
                         log.error("LLM stream request timeout!");
                     }
                 });
+    }
+
+    /**
+     * 给流式调用套上三项超时预算：首帧（TTFT）、帧间空闲，以及<b>单次调用总时长</b>（wall-clock）。
+     *
+     * <p><b>为何把总封顶接进同一个 {@code timeout} 算子，而不是另套一层</b>：
+     * 止损的关键不是「把调用方放出来」，而是「<b>取消上游订阅</b>」——只有取消才会触发
+     * {@code sink.onDispose} → 关闭 reader 与连接 → 上游中止生成 → 停止计费。
+     * 实测（{@code StreamTotalCapTest}）：{@code takeUntilOther} 会把截止信号的错误传下去，
+     * 却<b>不取消主源</b>（源仍在持续发射、仅被 onNextDropped 丢弃），用它做封顶会得到
+     * 「界面报超时、后台继续烧钱」的假止损；而 {@code FluxTimeout} 在超时时确实会先
+     * {@code cancel()} 上游。因此把总预算折算进每一次超时伴生体的等待时长：
+     * {@code 实际等待 = min(当段预算, 总预算剩余)}。</p>
+     *
+     * <p>副作用：总预算耗尽时抛出的仍是 {@link TimeoutException}（{@code FluxTimeout} 统一语义），
+     * 上层按超时分流文案与重试的逻辑无需任何改动；两者的区分写在日志里。</p>
+     *
+     * <p>包级可见仅为可测；{@code totalCap} 为 null/非正时退化为原有的两段式超时，行为逐字不变。</p>
+     */
+    static <T> Flux<T> withTimeoutBudgets(Flux<T> source, Duration firstTimeout,
+                                          Duration itemTimeout, Duration totalCap) {
+        if (totalCap == null || totalCap.isZero() || totalCap.isNegative()) {
+            return source.timeout(Mono.delay(firstTimeout), item -> Mono.delay(itemTimeout));
+        }
+
+        //总预算必须在「订阅时」起算：同一个 Flux 可被重复订阅，在组装时取基准会让第二次订阅一上来就超时
+        return Flux.defer(() -> {
+            final long deadlineNanos = System.nanoTime() + totalCap.toNanos();
+
+            return source.timeout(
+                    boundedByDeadline(firstTimeout, deadlineNanos, totalCap),
+                    item -> boundedByDeadline(itemTimeout, deadlineNanos, totalCap));
+        });
+    }
+
+    /**
+     * 构造一个受总截止时刻约束的超时伴生体：等待时长取「当段预算」与「总预算剩余」的较小者。
+     *
+     * <p>发射即视为超时（{@code FluxTimeout} 语义），由它取消上游并抛出 {@link TimeoutException}。</p>
+     */
+    private static Mono<Long> boundedByDeadline(Duration budget, long deadlineNanos, Duration totalCap) {
+        long remainingNanos = deadlineNanos - System.nanoTime();
+
+        if (remainingNanos <= 0L) {
+            //总预算已耗尽：立即触发（伴生体订阅即发射）
+            return Mono.just(0L).doOnNext(tick -> logTotalCapReached(totalCap));
+        }
+
+        if (remainingNanos >= budget.toNanos()) {
+            //剩余预算足够：逐字保持原有的分段超时行为
+            return Mono.delay(budget);
+        }
+
+        return Mono.delay(Duration.ofNanos(remainingNanos))
+                .doOnNext(tick -> logTotalCapReached(totalCap));
+    }
+
+    private static void logTotalCapReached(Duration totalCap) {
+        log.error("LLM stream exceeded the total time cap {}s for a single attempt;"
+                + " cancelling the upstream subscription to close the connection and stop billing.",
+                totalCap.getSeconds());
+    }
+
+    /**
+     * 解析流式<b>单次调用</b>的总时长（wall-clock）上限。
+     *
+     * <p>推导：{@code clamp(config.timeout × 10, 10min, 25min)}。默认 120s → 20 分钟。
+     * <ul>
+     *     <li><b>×10 而非 ×1</b>：config.timeout 的既有语义是「单段间隔」，总时长必须远宽于单段，
+     *     否则正常的深度思考长回答会被拦腰截断；</li>
+     *     <li><b>10 分钟下限</b>：长任务的单次回答（含长工具参数生成）可达数分钟，下限必须明显宽于它；</li>
+     *     <li><b>25 分钟封顶</b>：刻意小于上层 {@code ReasonTask.STREAM_TOTAL_CAP}（30 分钟），
+     *     保证由流层先判定，见 {@link #STREAM_TOTAL_CAP}。</li>
+     * </ul>
+     * 只在「持续有帧却永不收口」这一种形态下才会触发——正常流早已由 RESPONSE_END 结束，
+     * 断流形态则由帧间预算（≤60s）先行拦截。
+     */
+    static Duration resolveStreamTotalTimeout(Duration configured) {
+        Duration base = (configured == null || configured.isZero() || configured.isNegative())
+                ? CALL_TIMEOUT_DEFAULT : configured;
+
+        Duration derived;
+        try {
+            derived = base.multipliedBy(STREAM_TOTAL_SCALE);
+        } catch (ArithmeticException e) {
+            //配置值荒谬地大导致溢出，等价于直接封顶
+            return STREAM_TOTAL_CAP;
+        }
+
+        if (STREAM_TOTAL_FLOOR.compareTo(derived) > 0) {
+            derived = STREAM_TOTAL_FLOOR;
+        }
+
+        return STREAM_TOTAL_CAP.compareTo(derived) < 0 ? STREAM_TOTAL_CAP : derived;
     }
 
     /**
@@ -691,6 +819,101 @@ public class ChatRequestDescDefault implements ChatRequestDesc {
     static Duration resolveStreamIdleTimeout(Duration configured) {
         Duration capped = STREAM_IDLE_CAP.compareTo(configured) < 0 ? STREAM_IDLE_CAP : configured;
         return STREAM_IDLE_FLOOR.compareTo(capped) > 0 ? STREAM_IDLE_FLOOR : capped;
+    }
+
+    /**
+     * 解析首帧（TTFT）超时：以配置值为基准，按<b>上行上下文规模</b>线性放宽。
+     *
+     * <p><b>为何需要：</b>TTFT 覆盖的是上游的 prefill 阶段（读完整个提示词才能吐出第一个 token），
+     * 而 prefill 耗时与上行上下文长度<b>正相关</b>。固定 120s 对短请求绰绰有余，对长会话
+     * （本项目实测单轮上行到过 57 万 token）则是系统性误杀：模型本来就要算那么久，却被当成
+     * 断流杀掉并重试——而重试又会把同样大的上下文重新上行，形成「越大越杀、越杀越费」的正反馈。</p>
+     *
+     * <p><b>取值：</b>{@code configured × ceil(请求体字符数 / 100K)}，倍数封顶 {@link #TTFT_MAX_SCALE}，
+     * 结果再封顶 {@link #TTFT_ABSOLUTE_CAP}。关键性质：
+     * <ul>
+     *   <li><b>100K 字符以内逐字不变</b>——绝大多数请求落在此区间，既有行为零变化，不引入回归；</li>
+     *   <li>只会<b>放宽</b>不会收紧，不会把原本能跑通的请求变成超时；</li>
+     *   <li>放宽后仍有 {@code TTFT_ABSOLUTE_CAP} 与孤儿关闭机制兜底，不会退化成「永不超时」。</li>
+     * </ul>
+     *
+     * @param configured 模型配置的超时；null/非正时回落 {@link #CALL_TIMEOUT_DEFAULT}
+     * @param req        本次请求（用于估算上行规模）；null 或估算失败时退化为基准值
+     */
+    static Duration resolveTtftTimeout(Duration configured, ChatRequest req) {
+        Duration base = (configured == null || configured.isZero() || configured.isNegative())
+                ? CALL_TIMEOUT_DEFAULT : configured;
+
+        int chars = estimateRequestChars(req);
+        if (chars <= TTFT_SCALE_UNIT_CHARS) {
+            //常规规模：逐字保持配置值（含估算失败的 chars<=0 退化分支）
+            return base;
+        }
+
+        //向上取整的倍数：100K 以内 = 1（已在上方短路），100K~200K = 2，以此类推，封顶 TTFT_MAX_SCALE
+        int scale = (chars + TTFT_SCALE_UNIT_CHARS - 1) / TTFT_SCALE_UNIT_CHARS;
+        if (scale > TTFT_MAX_SCALE) {
+            scale = TTFT_MAX_SCALE;
+        }
+
+        Duration scaled;
+        try {
+            scaled = base.multipliedBy(scale);
+        } catch (ArithmeticException e) {
+            //溢出（配置值荒谬地大）等价于直接封顶
+            return TTFT_ABSOLUTE_CAP;
+        }
+
+        return TTFT_ABSOLUTE_CAP.compareTo(scaled) < 0 ? TTFT_ABSOLUTE_CAP : scaled;
+    }
+
+    /**
+     * 估算本次请求的上行字符规模（仅用于 TTFT 预算推导，不要求精确）。
+     *
+     * <p>取消息文本长度之和而非序列化整个请求体：后者会把 base64 图片等大块二进制算进来，
+     * 而图片对 prefill 耗时的贡献远不正比于其字节数；且本方法处于热路径，应避免额外序列化开销。
+     * 任何异常一律返回 0（让调用方退化为基准值）——超时推导绝不得成为请求失败的原因。</p>
+     *
+     * @return 估算字符数；无法估算时返回 0
+     */
+    private static int estimateRequestChars(ChatRequest req) {
+        if (req == null) {
+            return 0;
+        }
+
+        try {
+            Prompt finalPrompt = req.getFinalPrompt();
+            if (finalPrompt == null) {
+                return 0;
+            }
+
+            List<ChatMessage> messages = finalPrompt.getMessages();
+            if (messages == null || messages.isEmpty()) {
+                return 0;
+            }
+
+            long total = 0L;
+            for (ChatMessage m : messages) {
+                if (m == null) {
+                    continue;
+                }
+
+                String content = m.getContent();
+                if (content != null) {
+                    total += content.length();
+                }
+
+                //已足够越过封顶阈值时提前退出：后续累加不再影响结果
+                if (total >= (long) TTFT_SCALE_UNIT_CHARS * TTFT_MAX_SCALE) {
+                    return TTFT_SCALE_UNIT_CHARS * TTFT_MAX_SCALE;
+                }
+            }
+
+            return (int) Math.min(total, Integer.MAX_VALUE);
+        } catch (Throwable e) {
+            //估算是纯辅助逻辑，宁可退化也不能影响请求
+            return 0;
+        }
     }
 
     /**
@@ -718,8 +941,54 @@ public class ChatRequestDescDefault implements ChatRequestDesc {
             log.debug("llm-request[{}]: {}", req.getAgentAndModel(), reqJson);
         }
 
-        return Mono.fromFuture(httpUtils.bodyOfJson(reqJson).execAsync("POST"))
+        final CompletableFuture<HttpResponse> respFuture = httpUtils.bodyOfJson(reqJson).execAsync("POST");
+
+        // 「已放弃」标记：一旦置位，说明下游已取消（TTFT 超时 / 用户停止 / 上层 dispose），
+        // 此后到达的响应永远不会被消费，必须立刻关闭。
+        final AtomicBoolean abandoned = new AtomicBoolean(false);
+
+        // 【孤儿请求泄漏修复】2026-09-21
+        //
+        // 病灶：bodyOfJson(...).execAsync("POST") 内部是 OkHttp 的 newCall(req).enqueue(callback)，
+        // 它只返回一个普通 CompletableFuture，**okhttp3.Call 引用当场丢弃**。因此：
+        //   1) 取消该 future 只能把它置为 CANCELLED，**传递不到 HTTP 层**，上游继续跑完整个生成；
+        //   2) 取消后 flatMapMany 永不订阅，迟到的 HttpResponse **没有任何人 close**，
+        //      body 流与连接一直挂着，直到上游生成完毕并**完成计费**。
+        // 泄漏窗口恰好是「响应头还没回来」那一段，而这正是 TTFT 超时最常命中的窗口，
+        // 于是形成「界面空转重试 / 后台每一次都真实生成并扣费」。
+        // （对照组：一旦进入 parseResp，sink.onDispose 会关 reader 与 socket，那条路径本来就是干净的。）
+        //
+        // 修复：给 future 挂一个 whenComplete 回调——无论下游是否还在，它都会在响应到达时触发。
+        // 若届时已被放弃，就把这个没人要的响应 close 掉：掐断连接 → 上游停止生成 → 不再白扣费。
+        //
+        // 【关键隔离】2026-09-21：下游拿到的是派生的 guardedFuture，原始 future 上只挂我们的 whenComplete。
+        // 必须如此：CompletableFuture 一旦进入 CANCELLED，后续的 complete(resp) 会被直接忽略，
+        // whenComplete 只能拿到 resp==null——也就是说，只要有任何人（我们自己或 Reactor 内部）
+        // 取消了原始 future，那个真正到达的响应就再也拿不到，关连接无从谈起。
+        // （这正是 OrphanResponseClosureTest 实测到的失败形态：服务端写入永远阻塞、连接一直挂着。）
+        final CompletableFuture<HttpResponse> guardedFuture = new CompletableFuture<>();
+        respFuture.whenComplete((resp, err) -> {
+            if (err != null) {
+                guardedFuture.completeExceptionally(err);
+                return;
+            }
+
+            // 已被放弃，或下游已不再接收（guardedFuture 被取消 → complete 返回 false）：
+            // 这个响应永远不会被消费，必须由我们关闭。
+            if (abandoned.get() || guardedFuture.complete(resp) == false) {
+                closeQuietly(resp, "abandoned-response");
+            }
+        });
+
+        return Mono.fromFuture(guardedFuture)
                 .flatMapMany(resp -> {
+                    // 竞态补啄：whenComplete 与本处可能并发，若取消恰好发生在两者之间，
+                    // 这里再检一次，确保不会把一个已被放弃的响应交给 parseResp 去建长连接。
+                    if (abandoned.get()) {
+                        closeQuietly(resp, "abandoned-response-late");
+                        return Flux.empty();
+                    }
+
                     try {
                         if (resp.code() < 400) {
                             return parseResp(req, resp, streamSession, lastRespRef, currentAccRef);
@@ -732,8 +1001,47 @@ public class ChatRequestDescDefault implements ChatRequestDesc {
                     } catch (Throwable e) {
                         return Flux.error(e);
                     }
-                });
+                })
+                // 下游取消（TTFT 超时 / 用户停止 / 上层 dispose）是孤儿泄漏的唯一入口，在此打标。
+                //
+                // 【刻意不取消 respFuture】取消它恰恰会造成泄漏：CANCELLED 会让后续的
+                // complete(resp) 被忽略，whenComplete 只能拿到 null，那个真正到达的响应
+                // 就永远没人关了。反正取消也传递不到 HTTP 层（Call 引用早已丢弃），
+                // 真正能掐断上游的只有拿到 resp 后的 close。
+                //
+                // 【为何不需要 doOnDiscard 兼底】2026-09-21 code review 实测结论：
+                // 曾怀疑还有一个窗口——reactor-core 3.8.5 的 MonoCompletionStageSubscription.cancel()
+                // 先置 cancelled=true、后调 future.cancel()，而它的完成回调判到 cancelled 为真就会
+                // 走 Operators.onDiscard 把值静默丢弃、mapper 不再执行。但那不构成泄漏：
+                // Reactor 的 cancelled 与本处的 abandoned 是两套独立标记，而 doOnCancel 处于链路末端，
+                // **取消信号必先经过这里、再向上传到 Mono**，故 abandoned 的置位早于 Reactor 取消；
+                // 等 whenComplete 拿到响应时它必然已是 true，响应在那里就被关掉了。
+                // 实测（同构管线 2000 轮取消/完成交错）：响应关闭率 2000/2000。
+                // 另实测：doOnDiscard 无论放在 flatMapMany 之前还是之后都收不到该值
+                // （onDiscard 取的是 actual.currentContext()），加了反而是无效代码。
+                .doOnCancel(() -> abandoned.set(true));
+    }
 
+    /**
+     * 关闭一个不再被消费的响应，吸掉全部异常。
+     *
+     * <p>调用时机均为「清理孤儿资源」，此时业务上已无人关心结果，
+     * 关闭失败也无处可报；若向上抛反而会污染 whenComplete 回调链。</p>
+     */
+    private static void closeQuietly(HttpResponse resp, String reason) {
+        if (resp == null) {
+            return;
+        }
+
+        try {
+            resp.close();
+
+            if (log.isDebugEnabled()) {
+                log.debug("LLM stream response closed early ({}): upstream generation aborted to stop billing.", reason);
+            }
+        } catch (Throwable e) {
+            log.debug("Failed to close abandoned LLM response ({}): {}", reason, e.toString());
+        }
     }
 
     private Flux<ChatEvent> parseResp(ChatRequest req, HttpResponse httpResp, ChatStreamSession streamSession,

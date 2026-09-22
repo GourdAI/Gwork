@@ -178,7 +178,9 @@ function evictInactiveSessions() {
         // 注：上方过滤已跳过 _replaying 的会话，因此这里通常是 no-op——保留调用是防御性的
         // （过滤条件将来若放宽，这里仍能兜住），并顺带清理可能残留的回放 rAF 句柄。
         if (typeof abortReplay === 'function') abortReplay(sess);
-        if (typeof resetStreamState === 'function') resetStreamState(sess);
+        // destroying：紧接着就要 empty() 掉整个容器，子代理状态必须全量回收（停计时器 + 释放
+        // 增量渲染器），否则 agentStates 会钉住已摘除的卡片子树，表现为「清了 DOM 内存却不降」。
+        if (typeof resetStreamState === 'function') resetStreamState(sess, { destroying: true });
         $(sess.container).empty();
         // 重置回放分页状态：下次进入走完整 loadMessages 重新拉取
         sess._replayHasMore = false;
@@ -193,6 +195,9 @@ function evictInactiveSessions() {
         sess.toolBatchesById = {};
         sess.completedActionIds = {};
         sess.agentCards = {};
+        // 与 agentCards 同生共死：上面的 resetStreamState({destroying:true}) 已做过正规回收，
+        // 这里是防御性兜底（将来若有人改动上方调用，两张表也不会只清一张而失配）。
+        sess.agentStates = {};
         sess.pendingToolCard = null;
         sess.approvedToolCard = null;
         sess.retryEl = null;
@@ -444,6 +449,56 @@ function isDetachedRenderTarget(sess) {
     return !!(sess && sess.renderTarget && sess.renderTarget !== sess.container);
 }
 
+/* ===== 流式管线异常留痕 =====
+   帧分发链路（onmessage → applySequencedGateChunk → dispatchGateChunk → onWebChunk）上
+   原本散布着数个 `catch (e) {}` 空捕获。它们的本意是「单帧出错不拖垮整条流」，方向没错，
+   但空捕获把证据一起销毁了，于是留下一类无法排查的事故：
+
+     done 帧在 dispatchGateChunk 的前置分支里处理完即 return，根本不经过 onWebChunk；
+     而正文/思考/工具帧全部走 onWebChunk。一旦某个渲染状态损坏使 onWebChunk 稳定抛异常，
+     内容帧被逐条静默丢弃，done 却畅通无阻 —— 界面定格在中途、停止按钮却正常复位成发送态，
+     控制台一行日志都没有。事故会话 work-mub8ph5g 即是此形态：后端跑完 12 分钟约 370 帧，
+     界面停在一个空白思考框上。
+
+   故统一走本函数：仍然不让异常上抛（保持「不崩主流程」语义不变），但必须留下现场。
+   同一 where 只详细打印首次（含堆栈），其后仅累加计数，避免高频帧把控制台刷爆。 */
+var streamPipelineErrorStats = {};
+function reportStreamPipelineError(where, err, chunk) {
+    try {
+        var stat = streamPipelineErrorStats[where];
+        if (!stat) stat = streamPipelineErrorStats[where] = { count: 0, firstAt: Date.now(), lastErr: null };
+        stat.count++;
+        stat.lastAt = Date.now();
+        stat.lastErr = err;
+        // 帧身份信息是定位的关键：出事那一帧的 type/seq 决定了该去看哪条渲染分支
+        var id = chunk
+            ? (chunk.type || '?') + ' seq=' + (chunk.eventSeq || '-')
+                + (chunk.toolName ? ' tool=' + chunk.toolName : '')
+                + (chunk.runId ? ' run=' + String(chunk.runId).slice(0, 8) : '')
+            : '(no chunk)';
+        if (stat.count === 1) {
+            console.error('[stream-pipeline] ' + where + ' 处理帧失败: ' + id, err);
+            if (err && err.stack) console.error(err.stack);
+        } else if (stat.count === 5 || stat.count % 50 === 0) {
+            console.error('[stream-pipeline] ' + where + ' 已累计失败 ' + stat.count + ' 帧（最近: ' + id + '）', err);
+        }
+    } catch (e) { /* 留痕本身绝不能成为新的故障源 */ }
+}
+
+/* 控制台自查入口：卡住时执行 gourdStreamDiag() 即可看到各环节的失败计数与最近一次异常。 */
+function gourdStreamDiag() {
+    var out = {};
+    for (var k in streamPipelineErrorStats) {
+        if (!streamPipelineErrorStats.hasOwnProperty(k)) continue;
+        var s = streamPipelineErrorStats[k];
+        out[k] = { count: s.count, firstAt: new Date(s.firstAt).toLocaleString(), lastAt: new Date(s.lastAt).toLocaleString(), lastErr: String(s.lastErr) };
+    }
+    if (!Object.keys(out).length) console.log('[stream-pipeline] 无异常记录');
+    else console.table(out);
+    return out;
+}
+if (typeof window !== 'undefined') window.gourdStreamDiag = gourdStreamDiag;
+
 /* 中止进行中的历史回放并完整收尾。
    注意 resetStreamState 已不再负责取消回放分片（见其内注释）：只有真正要销毁或重建会话 DOM
    的路径（LRU 淘汰、删除会话）才应调用本函数。收尾必须同时做三件事，缺任何一件都会留下
@@ -469,7 +524,9 @@ function abortReplay(sess) {
     return true;
 }
 
-function resetStreamState(sess) {
+/* opts.destroying=true：调用方紧接着就要销毁会话 DOM（evictInactiveSessions 的 $(container).empty()），
+   此时必须全量清理子代理状态，不得保留任何活跃卡——理由见下方 clearAgentState 调用处的注释。 */
+function resetStreamState(sess, opts) {
     // R2 修复：思考块引用被清空前，必须先走正规收敛（停 setInterval + 摘 .streaming 闪烁类）。
     // 旧实现直接把 thinkingBlockEl 置 null，DOM 上的闪烁动画与计时器就此失联：
     // 会话切换 / 中断等不经过 finishStream 的路径下，思考块会永久闪烁且计时器永久持有。
@@ -516,8 +573,26 @@ function resetStreamState(sess) {
        后端照常推流、底部任务计数照常跳动，消息区却定格在最后一条。
        渲染落点与真实容器解耦后（见 renderRoot），回放继续跑不会污染实时流——它写进自己的
        临时容器，结束时整体移入。确需销毁回放的路径请显式调用 abortReplay。*/
-    // 清除智能体输出标记
-    if (typeof clearAgentState === 'function') clearAgentState(sess);
+    /* 清除智能体输出标记——但必须保留【卡片仍在文档中】的活跃子代理。
+       本函数会被发消息、静默命令、问答卡作答等多条路径无条件调用，而这些动作都可能发生在
+       子代理正跑的时候（子代理动辄跑几分钟）。旧实现在此全量清空 agentStates/agentCards，
+       后果是两重的：
+         1) resolveAgentState 对后续所有子代理帧返回 null → 内容全部漏进主对话，
+            卡片内部再也不增加任何消息；
+         2) agent_end 因 agentCards[agentId] 已不存在而进不了收卡分支，改去新建第二张卡，
+            原卡的 .agent-status-icon.loading （infinite 动画）永远闪烁。
+       合起来就是「只有状态标在闪、子智能体内部不再加载任何消息，而后台接口一直在调」。
+
+       【destroying 必须由销毁方显式传入，不能靠「卡片已离开文档」自动兜底】
+       evictInactiveSessions 的顺序是 resetStreamState() → $(container).empty()：调用本函数时
+       卡片仍挂在文档上（会话容器即便 hide() 也在 document 内），isAgentStateAlive 恒为真 →
+       活跃状态被留下；而 empty() 之后该会话不会再有第二次调用来回收它们，agentStates 就会
+       长期钉住已摘除的卡片子树（连带 _streamMd.buf 全文）且思考计时器不停——正是
+       clearAgentState 注释里警告的那类「清了 DOM 内存却不降」。
+       回放路径无需在此传参：clearAgentState 内部按 sess._replaying 另行否决（见该函数注释）。 */
+    if (typeof clearAgentState === 'function') {
+        clearAgentState(sess, null, { keepActive: !(opts && opts.destroying) });
+    }
 }
 
 function setBtnStopMode() {

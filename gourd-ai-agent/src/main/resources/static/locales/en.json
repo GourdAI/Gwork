@@ -839,6 +839,7 @@
                  "question_other":  "None of these fit? Type your own answer…",
                  "question_other_placeholder":  "Type your answer, press Enter to confirm…",
                  "question_skip":  "Skip",
+                 "question_next":  "Next",
                  "question_submit":  "Send",
                  "question_recommended":  "(Recommended)",
                  "question_answered":  "Submitted",

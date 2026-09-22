@@ -839,6 +839,7 @@
                  "question_other":  "以上都不合適？自己輸入回答…",
                  "question_other_placeholder":  "輸入你的想法，Enter 確認…",
                  "question_skip":  "跳過",
+                 "question_next":  "下一步",
                  "question_submit":  "傳送",
                  "question_recommended":  "（推薦）",
                  "question_answered":  "已提交",

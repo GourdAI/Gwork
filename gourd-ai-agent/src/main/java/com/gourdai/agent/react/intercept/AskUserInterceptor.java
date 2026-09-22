@@ -73,6 +73,16 @@ public class AskUserInterceptor extends AbsReActInterceptor {
         // 获取会话上下文中的用户答案
         String answer = AskUser.getAnswer(trace.getSession(), toolExchanger.getToolName());
 
+        /* 归属校验：答案键是会话级全局单键，而它未必能在产生它的那次提问里被消费掉
+           （如用户作答后会话已不可恢复，恢复轮空转，本拦截器根本没被执行）。残留的答案会变成
+           「幽灵答案」：下一次模型真的提问时被当作本次回答直接回填，用户连卡片都看不到
+           就被替作了答。不归属则丢弃，按「无答案」正常挂起提问。 */
+        if (Assert.isNotEmpty(answer)
+                && !AskUser.ownsAnswer(trace.getSession(), toolExchanger.getToolName(), toolExchanger.getActionId())) {
+            AskUser.clear(trace.getSession(), toolExchanger.getToolName());
+            answer = null;
+        }
+
         // 1. 阶段：暂无答案 —— 先校验参数，再决定是否挂起
         if (Assert.isEmpty(answer)) {
             List<Map<String, Object>> questions = extractQuestions(toolExchanger.getArgs());
@@ -124,8 +134,9 @@ public class AskUserInterceptor extends AbsReActInterceptor {
         }
 
         // 100% 闭环：现场清理（幂等），避免残留答案让下一轮同类调用误判为“已恢复”
+        // （含答案归属标识：它与答案同生同灭，漏清会让下一份答案背上旧归属而被误判丢弃）
         trace.getContext().remove(AskUser.TASK_KEY);
-        trace.getContext().remove(AskUser.ANSWER_PREFIX + toolExchanger.getToolName());
+        AskUser.clear(trace.getSession(), toolExchanger.getToolName());
     }
 
     /**

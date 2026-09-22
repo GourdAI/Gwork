@@ -24,7 +24,6 @@ import com.gourdai.agent.react.intercept.HITL;
 import com.gourdai.agent.react.intercept.HITLTask;
 import com.gourdai.agent.react.intercept.AskUser;
 import com.gourdai.agent.react.intercept.AskUserTask;
-import com.gourdai.agent.util.AskUserTool;
 import com.gourdai.ai.chat.ChatModel;
 import com.gourdai.ai.chat.content.Contents;
 import com.gourdai.ai.chat.content.ImageBlock;
@@ -603,6 +602,20 @@ public class WebGate extends SimpleWebSocketListener {
             // ask_user 结构化问答恢复处理：用户提交答案后回填并恢复被挂起的任务
             if (Assert.isNotEmpty(questionAnswer)) {
                 AskUserTask task = AskUser.getPendingTask(session);
+
+                /* 【可恢复性闸门】挂起任务实体还在，不等于它真的还能被恢复。用户在提问帧到达前
+                   抢先发了一条普通消息时，新一轮任务会重置挂起态并把路由推到 END 正常结束，
+                   留下「任务实体还在、会话却已不挂起」的僵尸组合。此时若仍走恢复，那一轮会因
+                   路由停在 END 而空转（0 token/十几毫秒），拦截器一次都不执行、现场永不清理，
+                   于是「重发提问帧 → 用户作答 → 空转 → 再重发」无限自激，表现为问答卡不停闪烁且
+                   永不自愈（只能换会话）。这里将其降级为一次普通发言：清掉僵尸现场、回确认帧收卡，
+                   再把用户的答案当作一条普通消息发起新一轮——用户的回答不白答，模型照样能看到。 */
+                if (task != null && !session.isPending()) {
+                    LOG.warn("[WebGate] stale ask_user pending task for session {} (actionId={}): "
+                            + "session is not suspended, degrading to a normal turn", sessionId, task.getActionId());
+                    return recoverFromStaleQuestion(session, sessionId, sessionCwd, selectedModel, agentName,
+                            questionAnswer, task);
+                }
                 // 【校验】问答的后果可逆（答错题而已），且「无挂起任务时仍须回确认帧」是卡片不死的前提，
                 // 故不像 HITL 那样把 task==null 也当失败；仅在【两边都有 id 且不同】时拒绝，
                 // 避免把 B 题的答案写到正在挂起的 A 题上。
@@ -627,7 +640,7 @@ public class WebGate extends SimpleWebSocketListener {
                 String answeredActionId = (task != null && Assert.isNotEmpty(task.getActionId()))
                         ? task.getActionId()
                         : actionId;
-                emitToClient(sessionId, WebChunk.ofQuestionAnswered(AskUserTool.TOOL_NAME,
+                emitToClient(sessionId, WebChunk.ofQuestionAnswered(AskUser.toolNameOf(task),
                         AskUser.parseAnswers(questionAnswer), answeredActionId));
 
                 if (task == null) {
@@ -716,6 +729,27 @@ public class WebGate extends SimpleWebSocketListener {
                     }
                 }
 
+                /* 【放弃作答 = 收卡】走到这里说明用户选择了发一条普通消息，而不是回答那张问答卡。
+                   此刻必须就地清掉挂起的提问，否则它会变成僵尸：会话挂起态要等到新一轮任务开跑时
+                   才被重置（ReActTrace#prepare，发生在本方法之后），而【没有任何一处会清理挂起任务
+                   实体】——于是留下「实体还在、会话已不挂起」的组合，被 WebStreamBuilder 在轮末当成
+                   待答提问重新下发，凭空冒出一张题面早已过时的卡；用户点它则触发「空转 → 重发」的
+                   自激循环，表现为问答卡不停闪烁且永不自愈。
+
+                   注意：这里不能加 !session.isPending() 之类的守卫。挂起态此刻通常仍为 true
+                   （重置在本方法之后），加了等于让清理在最主要的场景里恒不执行。
+
+                   位置讲究：放在命令分发之后，因为命令（/xxx）不发起新一轮，那张卡仍可正常作答，
+                   不该被收掉；放在附件与空输入判定之内，确保确实要发言才收卡，空输入不白丢卡片。
+                   带 actionId 下发确认帧：前端据此只收那一道题的卡；不下发则卡片永远停在待答态。 */
+                AskUserTask abandonedTask = AskUser.discardPending(session);
+                if (abandonedTask != null) {
+                    LOG.warn("[WebGate] discarded pending ask_user task for session {} (actionId={}): "
+                            + "user sent a normal message instead of answering", sessionId, abandonedTask.getActionId());
+                    emitToClient(sessionId, WebChunk.ofQuestionAnswered(AskUser.toolNameOf(abandonedTask),
+                            Collections.emptyList(), abandonedTask.getActionId()));
+                }
+
                 // 中断续跑：上次任务异常中断（如模型调用失败）时，用户再发消息不从头重跑，
                 // 而是保留断点工作记忆（推理 + 工具结果），把新消息追加进去接着执行，避免浪费 token。
                 // 仅纯文本场景启用（含图片的复合消息维持新任务语义）。
@@ -775,6 +809,42 @@ public class WebGate extends SimpleWebSocketListener {
                 }
             }
         }
+        return InputResult.ACCEPTED;
+    }
+
+    /**
+     * 僵尸提问的降级恢复：把一次「已不可恢复的作答」转为一次普通发言。
+     *
+     * <p>三步：① 清掉僵尸现场（挂起任务 + 答案 + 归属标识），断开自激循环的根；
+     * ② 回确认帧让前端收卡（不回帧那张卡会永远停在已提交态）；
+     * ③ 把用户的答案文本当作一条普通消息发起新一轮——回答不白答，模型能看到它。</p>
+     *
+     * <p>用户若只是跳过/关卡（无实质内容），则只清现场并补 done 收口，不再发起模型调用：
+     * 既尊重放弃作答的意图，也不白烧 token。</p>
+     *
+     * @param staleTask 已失效的挂起任务（非 null）
+     * @return 始终为 {@code ACCEPTED}：本次提交已被受理，只是语义从「恢复」降为「新一轮」
+     */
+    private InputResult recoverFromStaleQuestion(AgentSession session, String sessionId, String sessionCwd,
+                                                 String selectedModel, String agentName,
+                                                 String questionAnswer, AskUserTask staleTask) {
+        List<Map<String, Object>> questions = staleTask.getQuestions();
+        AskUser.discardPending(session);
+
+        emitToClient(sessionId, WebChunk.ofQuestionAnswered(AskUser.toolNameOf(staleTask),
+                AskUser.parseAnswers(questionAnswer), staleTask.getActionId()));
+
+        if (!AskUser.hasMeaningfulAnswer(questionAnswer)) {
+            // 用户只是想把卡关掉：收口即可，不必为空答案再跑一轮模型
+            session.updateSnapshot();
+            emitToClient(sessionId, WebChunk.ofDone());
+            return InputResult.ACCEPTED;
+        }
+
+        // 用户确实作了答：连同题面一并渲染成文本，模型才知道这是在回答哪一道问题
+        String answerText = AskUser.formatAnswerText(questions, questionAnswer);
+        session.updateSnapshot();
+        performAgentTaskAsync(session, sessionCwd, Prompt.of(answerText), selectedModel, agentName);
         return InputResult.ACCEPTED;
     }
 

@@ -507,6 +507,11 @@ PHASE_I18N_KEY[PHASE_WAITING] = 'chat.phase_waiting';
 function inferPhaseFromType(type) {
     switch (type) {
         case 'reason': return PHASE_THINKING;
+        // 思考已开始但内容尚未到达（甚至永远不来：Claude 等模型会屏蔽思维链明文，
+        // 思考真实发生、计费与耗时照常，但思考文本全程为空）。该帧不携带内容、不建任何 DOM，
+        // 唯一作用就是把相位从 waiting 推到 thinking —— 否则整段思考期零帧，底部指示器
+        // 会一直显示「等待响应」并从头累加计时，可后端其实早已开始响应。
+        case 'reason_start': return PHASE_THINKING;
         case 'text': return PHASE_TEXT;
         case 'action_start': return PHASE_TOOL;
         // 骨架帧：模型已确定函数名 / 参数正在生成，语义就是「已进入工具相位」。
@@ -561,6 +566,15 @@ function onWebChunk(sess, chunk) {
         var nextPhase = chunk.phase || inferPhaseFromType(chunk.type);
         if (nextPhase) sess.phase = nextPhase;
 
+        // 相位变化后，同步刷新「已经挂在页面上」的独立等待指示器（.thinking-row）文案。
+        // 它在发送时就被创建（showThinking），文案取当时的相位（waiting），此后只有内容帧
+        // 到达时才会被 removeThinking 整个移除 —— 于是一旦本轮不产出任何内容帧（如思维链被
+        // 屏蔽的模型：思考真实发生但文本全空），它就会长期停在「等待响应」并持续累加计时。
+        // 气泡内指示器（.inline-thinking）不在此处理：它每次显示都会重新 applyPhaseLabel。
+        if (nextPhase && sess.thinkingEl && typeof applyPhaseLabel === 'function') {
+            applyPhaseLabel(sess.thinkingEl, nextPhase);
+        }
+
         // 存储当前 chunk 的 runId，用于后续消息渲染；主 run 单独追踪，防子代理 runId 覆盖插话目标。
         if (chunk.runId) {
             sess.currentRunId = chunk.runId;
@@ -597,7 +611,10 @@ function onWebChunk(sess, chunk) {
                 var endOwnerState = resolveAgentState(sess, chunk.args);
                 if (endOwnerState) { finishAgentThinkingBlock(sess, endOwnerState); }
                 appendActionEndChunk(sess, chunk.toolName, chunk.text, chunk.args, chunk.toolTitle, chunk.actionId, chunk.truncated ? { truncated: true, seq: chunk.seq, fullLength: chunk.fullLength } : null, endOwnerState ? endOwnerState.bodyEl : null, { batchId: chunk.batchId, batchIndex: chunk.batchIndex, batchSize: chunk.batchSize }, chunk.failed === true, chunk.durationMs);
-                if (window._todoChunkHandlers) window._todoChunkHandlers.forEach(function(h){h(chunk);});
+                // 外部处理器逐个隔离：否则单个处理器抛异常会让整个 onWebChunk 进入异常分支，后续渲染全停
+                if (window._todoChunkHandlers) window._todoChunkHandlers.forEach(function(h){
+                    try { h(chunk); } catch (e) { reportStreamPipelineError('todoChunkHandler', e, chunk); }
+                });
                 break;
             case 'action_draft': finishThinkingBlock(sess); clearRetryChunk(sess);
                 // 与 action_start 完全对齐的归属路由：子代理的骨架卡必须落在它自己的卡片内，
@@ -675,7 +692,13 @@ function onWebChunk(sess, chunk) {
         }, 1000);
         // 回放态：纯历史重建，不应触发「思考中」等待指示器（它依赖真实的流间隙）
         if (sess._replaying && sess.silenceTimer) { clearTimeout(sess.silenceTimer); sess.silenceTimer = null; }
-    } catch (e) {}
+    } catch (e) {
+        /* 不上抛（单帧出错不得拖垮整条流），但必须留痕。
+           这里原本是个空捕获：一旦某个状态损坏让本函数稳定抛异常，内容帧会被逐条静默
+           丢弃，而 done 帧走 dispatchGateChunk 前置分支不经过这里、照常收尾 —— 表现为
+           「内容定格在中途、停止按钮却正常变回发送态」且零日志，无从排查。 */
+        reportStreamPipelineError('onWebChunk', e, chunk);
+    }
 }
 
 /* 挂起态 done：后端在等待用户作答/审批时也会发 done（WebStreamBuilder 在 question/hitl 帧之后紧跟一个 done）。
@@ -906,8 +929,17 @@ function applySequencedGateChunk(sess, chunk) {
     if (!sess) return false;
     var seq = Number(chunk && chunk.eventSeq || 0);
     if (seq && seq <= (sess.lastEventSeq || 0)) return false;
-    dispatchGateChunk(chunk);
-    if (seq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, seq);
+    /* 游标推进必须包在 finally 里：旧实现把推进写在 dispatch 之后，一旦 dispatch 抛异常
+       （异常又被上层捕获），游标就停在原地：同一帧会被后续恢复/排空路径反复重放，
+       每次重放又抛在同一处，形成原地死循环；而它之后的帧永远轮不上。
+       帧已经消费过就算数（成败都算），否则一个损坏帧能卡死整条流。 */
+    try {
+        dispatchGateChunk(chunk);
+    } catch (e) {
+        reportStreamPipelineError('applySequencedGateChunk', e, chunk);
+    } finally {
+        if (seq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, seq);
+    }
     return true;
 }
 
@@ -1098,7 +1130,11 @@ function connectWebGate() {
 
             dispatchGateChunk(chunk);
         } catch(e) {
-            // 非 JSON 消息忽略
+            /* 非 JSON 消息（心跳等）正常忽略；但 JSON.parse 成功后的异常是真故障，必须留痕。
+               二者原本被同一个空捕获吞掉，使「帧已送达但渲染失败」与「根本不是业务帧」无法区分。 */
+            if (raw && typeof raw === 'string' && raw.charAt(0) === '{') {
+                reportStreamPipelineError('webGateSocket.onmessage', e, null);
+            }
         }
     };
 
@@ -1222,7 +1258,12 @@ function dispatchGateChunk(chunk) {
     // 即使 sess2 不存在，也优先处理 todowrite 动作（用于更新左侧 Sidebar 的 todo 进度）
     if (chunk.type === 'action_end' && chunk.toolName === 'todowrite') {
         if (window._todoChunkHandlers) {
-            window._todoChunkHandlers.forEach(function(h) { h(chunk); });
+            /* 外部注册的处理器必须逐个隔离：这里位于会话初始化之前且原为裸调用，
+               任一处理器抛异常都会把整个 dispatchGateChunk 打断，该帧后续的渲染全部停摆。
+               而 todowrite 后端只发 action_end（无配对 action_start），该分支每次都会跑到。 */
+            window._todoChunkHandlers.forEach(function(h) {
+                try { h(chunk); } catch (e) { reportStreamPipelineError('todoChunkHandler', e, chunk); }
+            });
         }
     }
 

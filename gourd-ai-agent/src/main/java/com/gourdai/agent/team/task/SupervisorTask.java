@@ -19,6 +19,7 @@ import com.gourdai.agent.exception.LlmNoReturnException;
 import com.gourdai.agent.util.FeedbackTool;
 import com.gourdai.agent.util.AgentUtil;
 import com.gourdai.agent.util.ChatEventSupport;
+import com.gourdai.agent.react.PendingNoticeFilter;
 import com.gourdai.agent.team.TeamAgent;
 import com.gourdai.agent.team.TeamAgentConfig;
 import com.gourdai.agent.team.TeamInterceptor;
@@ -163,9 +164,11 @@ public class SupervisorTask implements NamedTaskComponent {
             LOG.debug("TeamAgent SystemPrompt rendered for agent [{}]:\n{}", trace.getAgentName(), finalSystemPrompt);
         }
 
+        // 剔除挂起通知（控制信号，非模型回答），口径与 ReasonTask 一致：本路径末尾额外追加 user 消息，
+        // 不会触发 assistant prefill 的 400，但挂起文案同样会污染语义并逐轮重发。
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(ChatMessage.ofSystem(finalSystemPrompt));
-        messages.addAll(trace.getWorkingMemory().getMessages());
+        messages.addAll(PendingNoticeFilter.filter(trace.getWorkingMemory().getMessages()));
         messages.add(ChatMessage.ofUser(userContent.toString()));
 
 

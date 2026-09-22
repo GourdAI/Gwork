@@ -724,6 +724,20 @@ public class AnthropicResponseParser {
                         acc.reasoning_field_name = REASONING_FIELD_THINKING;
                         acc.in_thinking = true;
                         hasContent = true;
+
+                        // 思考块开启：先发边界事件，再发（可能为空的）首片内容。
+                        // Claude 系可屏蔽思维链明文：thinking / thinking_delta 全程为空，只有
+                        // signature 与计费证明思考真实发生。若只在有文本时才发事件，订阅方
+                        // 就完全看不到「已进入思考」这一事实，界面只能停在等待态（详见
+                        // {@code ReasonStartEvent}）。边界与内容解耦后，空思考链同样能推进相位；
+                        // 有内容时，本事件与随后的 THINKING_DELTA 块标识全等（group+itemId+index），
+                        // ChatEventNormalizer 会将其视为同一个块，不会重复开块。
+                        ctx.emit(ctx.event(ChatEventType.THINKING_START)
+                                .rawType(eventType)
+                                .index(oResp.get("index").getInt())
+                                .raw(oResp)
+                                .build());
+
                         String thinking = contentBlock.get("thinking").getString();
                         if (Utils.isNotEmpty(thinking)) {
                             ctx.emit(ctx.event(ChatEventType.THINKING_DELTA)

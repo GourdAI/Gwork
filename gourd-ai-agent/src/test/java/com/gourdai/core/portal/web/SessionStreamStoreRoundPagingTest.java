@@ -18,8 +18,19 @@ import java.util.Map;
  */
 class SessionStreamStoreRoundPagingTest {
 
-    /** 单轮正文即超字节预算（32700 字符 ≈ 98.6KB > 96KB 预算，且 < PREVIEW_CHARS 不被预览截断）。 */
-    private static final String BIG = "x".repeat(32700);
+    /**
+     * 单轮正文即超字节预算。
+     *
+     * <p><b>必须用多字节字符而非 ASCII</b>：预算计量器 {@code approxJsonBytes} 已改为按
+     * 真实 UTF-8 字节计长（旧实现一律按最坏 3 字节/字符估算，使预算利用率只有 1/3，
+     * 实测导致 2191 行的会话要翻 176 页）。若继续用 32700 个 ASCII 字符，按新口径只算
+     * 33KB，根本进不了截断分支，本用例就从「验证超预算轮」退化成「三轮全进一页」。</p>
+     *
+     * <p>中文字符在 UTF-8 下恒为 3 字节，故 32700 个中文字同时满足两个边界：
+     * 32700 × 3 + 512 = 98612 &gt; 98304（96KB 预算）✓ 触发截断；
+     * 32700 &lt; 32768（PREVIEW_CHARS）✓ 不被预览截断。</p>
+     */
+    private static final String BIG = "中".repeat(32700);
 
     @Test
     void pageHeadAlwaysAlignsToRoundBoundaryAndCursorConverges() throws Exception {
@@ -51,7 +62,7 @@ class SessionStreamStoreRoundPagingTest {
             // 吸附失败（保留段内无边界）是允许的极端情形，但游标必须仍收敛、计数不得多算。
             SessionStreamStore.LoadResult p2 = store.loadRounds(sid, null, p1.firstSeq, 5);
             Assertions.assertEquals(1, p2.events.size(), "超预算轮一页只应返回该轮的正文组");
-            Assertions.assertTrue(((String) p2.events.get(0).get("text")).startsWith("xxxx"),
+            Assertions.assertTrue(((String) p2.events.get(0).get("text")).startsWith("中中中中"),
                     "返回的应是第 2 轮的长正文");
             Assertions.assertEquals(4L, p2.firstSeq, "游标应推进到被保留组的 seqFrom");
             Assertions.assertTrue(p2.hasMore, "第 1 轮仍未加载");

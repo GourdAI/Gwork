@@ -50,7 +50,8 @@ test('app-message.js：交错思考复用窗口三件套齐备（复用条件/�
 });
 
 test('app-base.js：resetStreamState 清零交错思考复用窗口', () => {
-    const reset = sliceBetween(baseJs, 'function resetStreamState(sess)', 'function setBtnStopMode()');
+    // 不写死形参表（曾因新增 opts 参数而整条用例失配报「未找到起始标记」）：这里关心的是函数体行为。
+    const reset = sliceBetween(baseJs, 'function resetStreamState(', 'function setBtnStopMode()');
     assert.match(reset, /_lastFinishedThinkingBlockEl\s*=\s*null/, '跨轮/跨会话不得复用旧 run 的思考块');
     assert.match(reset, /_lastThinkingRunId\s*=\s*null/);
     assert.match(reset, /_thinkingInterruptedByAction\s*=\s*false/);

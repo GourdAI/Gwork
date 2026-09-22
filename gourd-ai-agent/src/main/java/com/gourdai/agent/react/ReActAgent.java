@@ -304,6 +304,14 @@ public class ReActAgent implements Agent<ReActRequest, ReActResponse> {
         AssistantMessage assistantMessage = ChatMessage.ofAssistant(result);
         assistantMessage.addMetadata(AgentTrace.META_RUN_ID, trace.getRunId());
 
+        // 挂起（等待用户回答/等待人工审批）时的 result 是控制信号文案，不是模型说的话。
+        // 仍然落盘：它是前端历史气泡的唯一数据源，删掉会让回看历史时问答卡凭空出现、前后文断裂。
+        // 但打上标记，由 PendingNoticeFilter 在组装出站消息时剔除——避免出站 messages 以纯文本
+        // assistant 结尾被网关拒绝（400 assistant message prefill），也避免模型误读成自己的回答。
+        if (session.isPending()) {
+            assistantMessage.addMetadata(AgentTrace.META_PENDING_NOTICE, 1);
+        }
+
         if (Assert.isNotEmpty(result)) {
             if (parentTeamTrace == null) {
                 session.addMessage(assistantMessage);

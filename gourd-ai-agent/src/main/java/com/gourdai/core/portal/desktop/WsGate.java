@@ -30,6 +30,7 @@ import com.gourdai.agent.event.ToolCallBatchEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.event.ReasonEndEvent;
+import com.gourdai.agent.event.ReasonStartEvent;
 import com.gourdai.agent.util.AgentUtil;
 import com.gourdai.ai.chat.ChatConfig;
 import com.gourdai.ai.chat.ChatModel;
@@ -361,7 +362,9 @@ public class WsGate extends SimpleWebSocketListener {
         }
 
         String msg = null;
-        if (chunk instanceof ReasonDeltaEvent) {
+        if (chunk instanceof ReasonStartEvent) {
+            msg = onReasonStartEvent((ReasonStartEvent) chunk, sessionId);
+        } else if (chunk instanceof ReasonDeltaEvent) {
             msg = onReasonDeltaEvent((ReasonDeltaEvent) chunk, sessionId);
         } else if (chunk instanceof ToolCallStartEvent) {
             msg = onToolCallStartEvent((ToolCallStartEvent) chunk, sessionId);
@@ -412,6 +415,25 @@ public class WsGate extends SimpleWebSocketListener {
                 .set("elapsedMs", elapsed).toJson();
 
         socket.send(msg2);
+    }
+
+    /**
+     * 处理「思考已开始」信号：下发不带内容的 {@code reason_start} 帧。
+     *
+     * <p>屏蔽思维链的模型（如 Claude 系）思考期零帧，桌面端同样会长时间停在等待态；
+     * 该帧让它能与 Web 端一致地推进到思考相位。与 {@link #onReasonDeltaEvent} 一致地带上
+     * 非主代理的 {@code agentName}，使旧版前端（不认该 type）只是忽略本帧，行为不变。</p>
+     */
+    private String onReasonStartEvent(ReasonStartEvent chunk, String finalSessionId) {
+        ONode node = new ONode().set("type", "reason_start")
+                .set("sessionId", finalSessionId);
+
+        String agentName = chunk.getTrace().getAgentName();
+        if (!engine.getName().equals(agentName)) {
+            node.set("agentName", agentName);
+        }
+
+        return node.toJson();
     }
 
     private String onReasonDeltaEvent(ReasonDeltaEvent chunk, String finalSessionId) {

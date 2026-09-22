@@ -38,6 +38,7 @@ import org.noear.solon.lang.Preview;
 public interface AgentTrace {
     public final static String META_RUN_ID = "_runId"; //跟踪ID
     public final static String META_FIRST = "_first"; //初心标记
+    public final static String META_PENDING_NOTICE = "_pendingNotice"; //挂起通知标记（控制信号，不得随工作记忆发给模型）
 
     /**
      * 获取运行 Id

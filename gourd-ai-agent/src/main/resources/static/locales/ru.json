@@ -839,6 +839,7 @@
                  "question_other":  "Ничего не подходит? Введите свой ответ…",
                  "question_other_placeholder":  "Введите свой ответ и нажмите Enter…",
                  "question_skip":  "Пропустить",
+                 "question_next":  "Далее",
                  "question_submit":  "Отправить",
                  "question_recommended":  "(Рекомендуется)",
                  "question_answered":  "Отправлено",

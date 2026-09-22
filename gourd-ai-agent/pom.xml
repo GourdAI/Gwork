@@ -147,6 +147,25 @@
             <artifactId>mcp-core</artifactId>
         </dependency>
 
+        <!--
+            MCP 的 JSON 实现（SPI）。缺它必错，且是运行期才炸、编译期毫无征兆：
+
+            mcp-core 只给出 JSON 抽象（McpJsonMapper 接口 + McpJsonMapperSupplier SPI 接口），
+            自身不含任何实现、也不在 pom 里依赖实现；McpJsonDefaults.getMapper() 是在运行期用
+            ServiceLoader 去找 META-INF/services/io.modelcontextprotocol.json.McpJsonMapperSupplier。
+            该服务声明文件只存在于 mcp-json-jackson2。一旦 classpath 上没有它，任何一次 MCP 调用
+            （websearch / codesearch / mcp / openapi 等全部走 McpClientProvider 的工具）都会抛
+            ServiceConfigurationError: No McpJsonMapperSupplier available for creating McpJsonMapper。
+
+            历史：它原本由上游 solon-ai-mcp 聚合包传递带入；改为直接依赖 mcp-core 后传递链断裂，
+            而 javac 只认 mcp-core 里的接口，编译照样通过，故回归一直潜伏到运行期。
+            版本由 solon-parent 统一管理，勿写死；jackson 子模块版本由本 pom 上方的 jackson-bom 锁定。
+        -->
+        <dependency>
+            <groupId>org.noear</groupId>
+            <artifactId>mcp-json-jackson2</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.noear</groupId>
             <artifactId>solon-serialization-snack4</artifactId>

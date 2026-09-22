@@ -552,10 +552,18 @@ async fn start_backend(port: u16) -> Result<u32> {
 
     // JVM 内存参数与 Electron 版严格一致：SerialGC + FreeRatio，GC 后按比例收缩并归还 OS。
     // 注意：仅设 -Xms/-Xmx 而不配 MinHeapFreeRatio/MaxHeapFreeRatio 是负优化。
+    //
+    // -Xmx 从 512m 上调到 1024m：512m 曾在打开大会话时稳定 OOM（实测 84MB/24 万行的
+    // stream.ndjson，历史加载路径把整个文件读进内存后仅此一项就占 180MB+，叠加 agent
+    // 工作记忆与 LLM 上下文直接打爆堆，后端随即半死——表现为「发对话一直转圈 + 历史消息空白」）。
+    // 该内存放大已在 SessionStreamStore 侧改为流式读取根治，此处上调是第二道保险：
+    // 留出余量应对更大的会话与并发请求，避免单个大文件再次把整个后端拖垮。
+    // 常驻占用不会因此变大——MinHeapFreeRatio/MaxHeapFreeRatio 仍会在 GC 后把空闲内存还给 OS，
+    // -Xmx 只是上限而非预分配。
     let runtime_home = paths::runtime_home_dir();
     let mut args: Vec<String> = vec![
         "-Xms48m".into(),
-        "-Xmx512m".into(),
+        "-Xmx1024m".into(),
         "-Xss512k".into(),
         "-XX:+UseSerialGC".into(),
         "-XX:MinHeapFreeRatio=10".into(),

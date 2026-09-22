@@ -1033,7 +1033,13 @@ function switchToWelcomeMode() {
 
 /* ===== Auto-resize ===== */
 $(welcomeInput).on('input', function() { autoResize(this); });
-$(chatInput).on('input', function() { autoResize(this); });
+/* 问答挂起期，主输入框也是合法的作答入口（打字 Enter 会记为当前题答案），
+   故这里打字需联动问答卡底部按钮（「跳过」→「下一步/发送」），否则用户填了字却看到
+   一个写着「跳过」的按钮。实现侧只改按钮 textContent，不重建卡片，不干扰输入。 */
+$(chatInput).on('input', function() {
+    autoResize(this);
+    if (typeof window.refreshQuestionSubmitLabel === 'function') window.refreshQuestionSubmitLabel();
+});
 
 /* ===== Input box height drag adjustment (top drag bar: min = current default height, max = 320px, double-click to restore) ===== */
 var INPUT_RESIZE_MAX = 320;

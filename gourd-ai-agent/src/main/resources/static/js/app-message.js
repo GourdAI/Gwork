@@ -277,7 +277,9 @@ function createThinkingBlockEl(sess) {
 }
 
 /* 卡体跟随底部：智能体卡体（.agent-card-body）是限高滚动容器，流式内容到达时需主动置底，
-   否则新内容会隐在卡体视口下方（用户看不到正在输出什么）。用户在卡内主动向上翻看时停止跟随。 */
+   否则新内容会隐在卡体视口下方（用户看不到正在输出什么）。用户在卡内主动向上翻看时停止跟随。
+
+   停跟随的判据必须是【滚动方向】而非【距底部距离】，原因见下方 scroll 监听的注释。 */
 function followAgentCardBody(bodyEl, st) {
     if (!bodyEl) return;
     if (st && st.bodyUserScrolledUp) return;
@@ -2068,10 +2070,30 @@ $(document).on('keydown', function (e) { if (e.key === 'Escape') closeAllTracePo
         thinkingBlockStartTime: null
     };
     // 监听卡体滚动：用户主动向上翻看时停止自动跟随（写入各智能体自身状态，并行互不污染，
-    // 与思考块 thinkingUserScrolledUp 同口径）
+    // 与思考块 thinkingUserScrolledUp 同口径）。
+    //
+    // 必须只认【真实的向上滚动】。旧实现用「gap > 60 即视为用户上翻」，会被两类非用户行为误触发：
+    //   1) followAgentCardBody 的置底赋值也会触发本监听，而 scroll 事件是异步派发的；等回调真正
+    //      执行时，卡体内的异步渲染（highlightCodeBlocks / processMermaidBlocks / 工具卡展开）
+    //      往往已把 scrollHeight 撑大，gap 凭空超阈；
+    //   2) 流式追加内容本身就会拉大 gap（scrollTop 不变、scrollHeight 变大）。
+    // 而 bodyUserScrolledUp 一旦置 true，除非用户手动滚回底部否则永不复位（跟随已停，卡体再也不会
+    // 自己走到底部）→ 自锁。表现为「子智能体卡片只有状态点在闪、内部不再加载任何消息」，
+    // 而实际 DOM 一直在增长、后端也一直在推流，只是视口定格在锁死那一刻。
+    //
+    // 方向判据天然免疫于上述两类误触发：置底与内容增长都不会让 scrollTop 变小，只有用户上翻会。
+    // 不用「程序置底标记 + 监听器消费」的方案：浏览器会合并 scroll 事件，且置底时位置未变则
+    // 根本不派发事件，残留标记会吞掉用户的下一次真实滚动。
     $(agentCardBody).on('scroll', function() {
-        var gap = agentCardBody.scrollHeight - agentCardBody.scrollTop - agentCardBody.clientHeight;
-        agentState.bodyUserScrolledUp = gap > 60;
+        var top = agentCardBody.scrollTop;
+        var prev = agentState._lastBodyScrollTop == null ? top : agentState._lastBodyScrollTop;
+        agentState._lastBodyScrollTop = top;
+        var gap = agentCardBody.scrollHeight - top - agentCardBody.clientHeight;
+        // 已在底部附近（含用户主动滚回底部）：无条件恢复跟随。
+        // 内容被移除（purgeEmptyMdBlocks）导致浏览器回调 scrollTop 的场景也在此处被先行拦下。
+        if (gap <= 60) { agentState.bodyUserScrolledUp = false; return; }
+        // 仅当位置真的往上走了，才认定为用户在翻看历史内容。
+        if (top < prev) agentState.bodyUserScrolledUp = true;
     });
 
     if (!sess.agentStates) sess.agentStates = {};
@@ -2089,8 +2111,23 @@ $(document).on('keydown', function (e) { if (e.key === 'Escape') closeAllTracePo
     }
 }
 
-/* 清理子智能体相关状态。传入 st 时仅清理该智能体（并行场景互不影响）；不传则全量清理。 */
-function clearAgentState(sess, st) {
+/* 清理子智能体相关状态。传入 st 时仅清理该智能体（并行场景互不影响）；不传则全量清理。
+   opts.keepActive=true 时保留【卡片仍在文档中】的活跃子代理（见 isAgentStateAlive）：
+   供 resetStreamState 这类「重置主线路流式状态、但不销毁会话 DOM」的路径使用。
+
+   【回放期间强制不保留】sess._replaying 为真时 keepActive 一律失效，原因有二：
+     1) 回放不需要它——prepend 回放自己会在开始前 captureLiveStreamState 快照 agentCards/
+        agentStates/_agentStateLast，并在 replayDone 里整体写回（见 app-history.js），
+        实时卡的存活由那条路径负责，比在这里逐个甄别可靠；
+     2) 保留反而有害——回放期间 sess.container 仍是文档里的真实容器（只切 renderTarget），
+        被保留的实时卡因此始终「在文档中」。回放正文走的是同一个 resolveAgentState，
+        一旦历史帧与实时卡撞键（无 invocationId 的旧帧退化成 agentName+':'+desc，
+        重复跑同名同描述的子代理即可撞上），历史内容会被写进正在跑的那张实时卡里。 */
+function isAgentStateAlive(st) {
+    return !!(st && st.card && document.contains(st.card));
+}
+
+function clearAgentState(sess, st, opts) {
     if (st) {
         if (st.currentBubbleEl && st.currentBubbleEl._streamMd) st.currentBubbleEl._streamMd.dispose();
         if (st.thinkingBodyMdEl && st.thinkingBodyMdEl._streamMd) st.thinkingBodyMdEl._streamMd.dispose();
@@ -2099,22 +2136,45 @@ function clearAgentState(sess, st) {
         if (sess._agentStateLast === st) sess._agentStateLast = null;
         return;
     }
+    var keepActive = !!(opts && opts.keepActive) && !(sess && sess._replaying);
     // 全量清理（流重置/会话切换）
     if (sess.agentStates) {
+        var kept = {};
         for (var k in sess.agentStates) {
             var s = sess.agentStates[k];
+            // 活跃子代理（卡片仍挂在文档里、agent_end 尚未到达）不得被主线路重置误伤：
+            // 清掉它会让后续帧全部失去归属（漏进主对话）且卡片永远收不掉。
+            if (keepActive && isAgentStateAlive(s)) { kept[k] = s; continue; }
             if (s.currentBubbleEl && s.currentBubbleEl._streamMd) s.currentBubbleEl._streamMd.dispose();
             if (s.thinkingBodyMdEl && s.thinkingBodyMdEl._streamMd) s.thinkingBodyMdEl._streamMd.dispose();
             stopThinkingTimer(s, 'thinkingBlockTimerId', 'thinkingBlockStartTime');
         }
-        sess.agentStates = {};
+        sess.agentStates = kept;
     }
-    // agentCards 必须与 agentStates 同步清空：它以 agentName+':'+desc 为键持有 .agent-card DOM 强引用，
-    // 而 desc 每次任务都不同（不会覆盖旧键），仅在配对 agent_end 到达时才 delete（见本文件 agent_end 分支）。
+    // agentCards 必须与 agentStates 同步清空：它以 invocationId（旧帧为 agentName+':'+desc）为键
+    // 持有 .agent-card DOM 强引用，仅在配对 agent_end 到达时才 delete（见本文件 agent_end 分支）。
     // 中断/报错/丢帧时条目永久残留，会钉住已被 evictInactiveSessions 的 $(container).empty() 摘除的
     // 卡片子树，使其无法 GC（连带卡片内各 .md-content 上的 _streamMd.buf 全文），
     // 表现为「清了 DOM 内存却不降」。注意：断线恢复路径会先保存再回填 agentCards
     // （app-history.js 的 resumeState），此处清空不影响该路径。
+    // keepActive 时只保留上方存活的那几张卡，两张表口径必须严格一致：
+    // 漏留 agentCards 会造成「有卡无态」（resolveAgentState 拿到 null 但又进不了新建分支），
+    // 漏留 agentStates 则会让 resolveAgentState 的 agentCards 存在性检查直接失败。
+    if (keepActive && sess.agentCards) {
+        var keptCards = {};
+        for (var ck in sess.agentCards) {
+            if (sess.agentStates && sess.agentStates[ck]) keptCards[ck] = sess.agentCards[ck];
+        }
+        sess.agentCards = keptCards;
+        // _agentStateLast 是归属兜底（见下方 resolveAgentStateWithFallback 与 app-streaming.js），
+        // 必须指向【两表都真的留下了】的状态：光判 isAgentStateAlive 不够——状态虽存活，
+        // 但若它是无对应卡片的孤儿而被上方裁掉，再拿它兜底就会把内容写进一张已不再登记的卡。
+        var lastId = sess._agentStateLast && sess._agentStateLast.id;
+        if (!lastId || sess.agentStates[lastId] !== sess._agentStateLast || !keptCards[lastId]) {
+            sess._agentStateLast = null;
+        }
+        return;
+    }
     sess.agentCards = {};
     sess._agentStateLast = null;
 }
@@ -2551,9 +2611,70 @@ function questionIsAllAnswered(state) {
     return true;
 }
 
+/* 除 index 以外的题是否都已有着落（已答或已跳过）：用于判断「确认当前题之后能否直接提交」。
+   单题场景下恒为真——所以单题打完字，按钮显示「发送」而不是无处可去的「下一步」。 */
+function questionOthersAllAnswered(state, index) {
+    if (!state || !state.questions || state.questions.length === 0) return false;
+    for (var i = 0; i < state.questions.length; i++) {
+        if (i !== index && !state.answers[i]) return false;
+    }
+    return true;
+}
+
+/* 当前题是否存在「已经打了字、但还没确认成答案」的输入。两个输入面各查一处：
+   ① 卡片内补充行的草稿（input 事件实时回写 drafts，Enter 之前不进 answers）；
+   ② 底部主输入框的文本（由调用方读出后以 boxText 传入，本区块保持纯函数）。
+   与已入库 supplement 完全相同的草稿不算新输入（幂等，与 harvestQuestionInputOnSubmit 同口径）。
+   已明确跳过的题一律返回 false：与收割函数「尊重放弃意图」的口径一致，
+   不让输入框里的残留文本把一道已跳过的题复活。 */
+function questionHasPendingInput(state, boxText) {
+    if (!state || !state.questions || state.questions.length === 0) return false;
+    var idx = state.current;
+    var applied = questionAnswerFor(state, idx);
+    if (applied && applied.skipped) return false;
+    if (String(boxText == null ? '' : boxText).trim()) return true;
+    if (!state.drafts || !Object.prototype.hasOwnProperty.call(state.drafts, idx)) return false;
+    var draft = String(state.drafts[idx] == null ? '' : state.drafts[idx]).trim();
+    if (!draft) return false;
+    var appliedSup = (applied && applied.supplement) ? String(applied.supplement).trim() : '';
+    return draft !== appliedSup;
+}
+
+/* 底部按钮三态判定：submit = 提交全部；next = 确认本题后翻到下一题；skip = 本题记为跳过后翻页。
+   文案与点击行为共用这一个判据，二者永不脱节。
+
+   【为什么不能只看 questionIsAllAnswered】旧实现两态（全答=发送，否则=跳过）漏掉了两种情形：
+   ① 用户在输入框打了字但没按 Enter —— 答案还没入库，按钮写着「跳过」，点下去走
+      skipQuestionAnswer 把本题标记为 skipped，而收割函数遇到 skipped 会早退，
+      那段文字彻底丢失（用户看到的症状就是「填了文本框按钮还是跳过」）；
+   ② 当前题已点选选项、只是别的题还没答 —— 按钮同样写「跳过」，但点下去并不会跳过
+      已答的题（skipQuestionAnswer 只对无答案的题置 skipped），实际只是翻页，文案骗人。 */
+function questionSubmitMode(state, boxText) {
+    if (questionIsAllAnswered(state)) return 'submit';
+    if (!state || !state.questions || state.questions.length === 0) return 'skip';
+    var idx = state.current;
+    if (!questionAnswerFor(state, idx) && !questionHasPendingInput(state, boxText)) return 'skip';
+    return questionOthersAllAnswered(state, idx) ? 'submit' : 'next';
+}
+
 function advanceQuestionCursor(state) {
     if (!state || !state.questions) return;
     if (state.current < state.questions.length - 1) state.current += 1;
+}
+
+/* 从 index 之后开始环绕查找第一道【尚无任何状态】的题，找不到返回 -1。
+   「下一步」必须用它而不是 advanceQuestionCursor：后者只会 +1 且在末题是空操作，
+   若用户先跳到最后一题作答（前面还空着），点「下一步」光标原地不动 = 按钮点了没反应，
+   且此时 mode 恒为 next（本题已有答案、别题未答）→ 永远点不动，只能走 X 放弃剩余题。
+   环绕查找保证「下一步」始终落到真正待办的那道题上。 */
+function nextUnansweredQuestionIndex(state, index) {
+    if (!state || !state.questions || state.questions.length === 0) return -1;
+    var n = state.questions.length;
+    for (var step = 1; step <= n; step++) {
+        var i = (index + step) % n;
+        if (!state.answers[i]) return i;
+    }
+    return -1;
 }
 
 function applyQuestionOptionAnswer(state, index, label) {
@@ -2668,6 +2789,39 @@ var QUESTION_CARD_SVG_NEXT = '<svg width="12" height="12" viewBox="0 0 24 24" fi
 var QUESTION_CARD_SVG_CLOSE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
 var QUESTION_CARD_SVG_EDIT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>';
 
+/* 底部按钮三态 → 文案键。源头在 questionSubmitMode，渲染与点击共用。 */
+var QUESTION_SUBMIT_MODE_KEYS = {
+    skip: 'chat.question_skip',
+    next: 'chat.question_next',
+    submit: 'chat.question_submit'
+};
+
+/* 底部主输入框当前文本（仅活动会话）。输入框全局共享，非活动会话的卡不得读走别人正在打的字，
+   与 harvestQuestionInputOnSubmit 的归属口径一致（否则按钮会显示「下一步」但收割时早退，文案与行为脱节）。 */
+function currentInputBoxText(sess) {
+    if (!sess || sess.sessionId !== activeSessionId) return '';
+    if (typeof getInputText !== 'function') return '';
+    try { return getInputText() || ''; } catch (e) { return ''; }
+}
+
+/* 轻量刷新底部按钮文案（不重建整卡）。
+   主输入框的每次敲键都会调到这里；若走 syncQuestionCard 整卡重建，卡内补充框会被重建而
+   丢焦点与光标（用户正在卡内打字时直接被打断），故只改按钮的 textContent 与 data-mode。 */
+function refreshQuestionSubmitLabel() {
+    var host = document.getElementById('questionCardHost');
+    if (!host) return;
+    var btn = host.querySelector('.question-card-submit');
+    if (!btn) return;
+    var sess = activeSessionId ? sessionMap[activeSessionId] : null;
+    var state = sess ? (sess._questionState || null) : null;
+    if (!state || state.submitted) return;
+    var mode = questionSubmitMode(state, currentInputBoxText(sess));
+    if (btn.getAttribute('data-mode') === mode) return;
+    btn.setAttribute('data-mode', mode);
+    btn.textContent = GourdI18n.t(QUESTION_SUBMIT_MODE_KEYS[mode] || QUESTION_SUBMIT_MODE_KEYS.skip);
+}
+window.refreshQuestionSubmitLabel = refreshQuestionSubmitLabel;
+
 /* 宿主容器：chat.html 已内建 #questionCardHost（.input-wrap 内、输入框上方）；
    本函数兜底自建（旧缓存页面）并保证委托事件只绑定一次。 */
 function ensureQuestionCardHost() {
@@ -2713,11 +2867,13 @@ function bindQuestionCardEvents(host) {
         syncQuestionCard({ focusOther: true });
     });
 
-    // 「其他补充」输入：草稿实时写入状态（重建不丢字）
+    // 「其他补充」输入：草稿实时写入状态（重建不丢字），并联动底部按钮文案
+    //（打下第一个字就从「跳过」变成「下一步/发送」；只改按钮不重建卡，不打断输入）
     $(host).on('input', '.question-card-other-input', function() {
         var st = activeQuestionCardState();
         if (!st || st.submitted) return;
         st.drafts[st.current] = this.value;
+        refreshQuestionSubmitLabel();
     });
 
     // 「其他补充」输入：Enter 确认自定义答案并推进；Esc 收起输入
@@ -2756,12 +2912,26 @@ function bindQuestionCardEvents(host) {
         handleQuestionResponse(sessionMap[activeSessionId], st);
     });
 
-    // 底部按钮：未全部作答 = 跳过当前题并推进；全部有状态（答/跳过）= 一次提交全部
+    /* 底部按钮：严格按 questionSubmitMode 的实时结果执行，做到「看到什么就做什么」。
+       这里实时重算而不读 data-mode：后者只是上一次渲染/刷新的快照，若刷新钩子未触发会与
+       当下真实状态不符；宁可与文案差一拍，也不能按陈旧快照把用户刚打的字当成「跳过」丢掉。
+       next：先把已打的字收割成本题答案（复用提交路径同一函数），再跳到下一道待办题；
+       skip：本题确实无答案也无输入，记为跳过并推进（原语义）。 */
     $(host).on('click', '.question-card-submit', function() {
         var st = activeQuestionCardState();
         if (!st || st.submitted) return;
-        if (questionIsAllAnswered(st)) {
-            handleQuestionResponse(sessionMap[activeSessionId], st);
+        var sess = sessionMap[activeSessionId];
+        var mode = questionSubmitMode(st, currentInputBoxText(sess));
+        if (mode === 'submit') {
+            handleQuestionResponse(sess, st);
+        } else if (mode === 'next') {
+            harvestQuestionInputOnSubmit(sess, st);
+            // 收割后本题已有答案，环绕找下一道真正待办的题（不能用 +1：末题会原地卡死）；
+            // 极端情况下收割未产生答案（如纯空白输入）则退回原有递进，保证按钮总有反馈。
+            var nextIdx = nextUnansweredQuestionIndex(st, st.current);
+            if (nextIdx >= 0) st.current = nextIdx; else advanceQuestionCursor(st);
+            st.otherEditing = false;
+            syncQuestionCard();
         } else {
             skipQuestionAnswer(st);
             syncQuestionCard();
@@ -2869,7 +3039,6 @@ function renderQuestionCard(host, sess, state, opts) {
     state.current = idx;
     var q = state.questions[idx] || { header: '', detail: '', options: [] };
     var answer = questionAnswerFor(state, idx);
-    var allAnswered = questionIsAllAnswered(state);
 
     /* 入场动画只在首次渲染播放（.question-card-enter）：勾选/翻页等交互会整卡重建，
        若动画挂在 .question-card 上会随每次重建重放，整卡闪一下（msg-in 的透明度/位移过渡）。 */
@@ -2944,14 +3113,17 @@ function renderQuestionCard(host, sess, state, opts) {
     }
     html += '</div>';
 
-    /* 底部行：左状态（等待您的回答… / 已提交），右按钮（跳过 / 发送） */
+    /* 底部行：左状态（等待您的回答… / 已提交），右按钮（跳过 / 下一步 / 发送）。
+       按钮文案与 data-mode 同时由 questionSubmitMode 决定，点击处理器直接读 data-mode，
+       保证「看到什么就执行什么」——不会出现写着「跳过」却在翻页、或写着「跳过」却丢字。 */
     html += '<div class="question-card-footer">';
     html += '<span class="question-card-status">'
         + escapeHtml(GourdI18n.t(submitted ? 'chat.question_answered' : 'chat.question_waiting'))
         + '</span>';
     if (!submitted) {
-        html += '<button type="button" class="question-card-submit">'
-            + escapeHtml(GourdI18n.t(allAnswered ? 'chat.question_submit' : 'chat.question_skip'))
+        var mode = questionSubmitMode(state, currentInputBoxText(sess));
+        html += '<button type="button" class="question-card-submit" data-mode="' + escapeAttr(mode) + '">'
+            + escapeHtml(GourdI18n.t(QUESTION_SUBMIT_MODE_KEYS[mode] || QUESTION_SUBMIT_MODE_KEYS.skip))
             + '</button>';
     }
     html += '</div>';

@@ -751,6 +751,19 @@ public class OpenaiResponsesResponseParser {
                         state.currentReasoningId = Utils.isEmpty(addedId) ? null : addedId;
                         state.currentReasoningEncryptedContent = Utils.isEmpty(addedEncrypted) ? null : addedEncrypted;
 
+                        // 思考项已开启（与 Anthropic content_block_start 同位语义，详见 {@code ReasonStartEvent}）：
+                        // 屏蔽思维链的端点与部分中转会全程不给 summary / reasoning_text 增量，
+                        // 此时只有边界事件能表达「模型已开始思考」。块标识与 {@link #emitThinkingDelta}
+                        // 同口径（item_id 缺失时同样回落到当前 reasoning/output item），故有内容时
+                        // ChatEventNormalizer 会把两者归为同一个块，不会重复开块。
+                        ctx.emit(withResponseEventAttrs(ctx.event(ChatEventType.THINKING_START)
+                                .rawType(eventType)
+                                .itemId(Utils.isNotEmpty(state.currentReasoningId)
+                                        ? state.currentReasoningId : state.currentItemId)
+                                .index(optionalIndex(oResp, "output_index"))
+                                .raw(oResp), oResp)
+                                .build());
+
                     } else if ("function_call".equals(state.currentItemType)) {
                         state.currentFunctionCallId = item.get("call_id").getString();
                         state.currentFunctionName = item.get("name").getString();

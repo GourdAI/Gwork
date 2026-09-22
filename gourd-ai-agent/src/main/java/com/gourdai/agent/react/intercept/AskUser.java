@@ -51,6 +51,15 @@ public class AskUser {
      */
     public static final String ANSWER_PREFIX = "_ask_user_answer_";
     /**
+     * 答案归属标识存储前缀（完整键 = 前缀 + toolName），值为产生该答案的那次提问的 actionId
+     *
+     * <p>答案键是会话级全局单键，而挂起任务可能在答案被消费前就消失（用户改发普通消息、
+     * 会话被新一轮任务冲掉等）。此时残留的答案会变成「幽灵答案」——下一次模型真的提问时
+     * 被当作本次回答直接回填，用户根本看不到卡片就被替模型作了答。记录归属后，
+     * 消费方可判定「这份答案是不是属于这一次提问」，不属于就丢弃并正常挂起。</p>
+     */
+    public static final String ANSWER_OWNER_PREFIX = "_ask_user_answer_owner_";
+    /**
      * 挂起原因文案
      */
     public static final String PENDING_REASON = "等待用户回答";
@@ -65,6 +74,27 @@ public class AskUser {
     }
 
     /**
+     * 判定当前挂起的提问是否「真的还能被恢复」
+     *
+     * <p><b>为什么只有任务实体在还不够</b>：挂起任务是会话上下文里的普通键，而会话的挂起态
+     * （{@code stopped}）由执行引擎维护。用户在提问帧到达前抢先发了一条普通消息时，新一轮任务会
+     * {@code ReActTrace#prepare} 重置挂起态并把路由推到 END 正常结束，但<b>没有任何一处清理过
+     * 挂起任务实体</b>——于是留下「任务实体还在、会话却早已不挂起」的僵尸组合。</p>
+     *
+     * <p>此时若仍按「有任务实体就能恢复」行事，恢复出来的那一轮会因路由停在 END 而空转
+     * （0 token、十几毫秒直接结束），拦截器的 onAction/onObservation 一次都不会执行，
+     * 现场自然也不会被清理，于是「重发提问帧 → 用户作答 → 空转 → 再重发」无限自激，
+     * 表现为问答卡不停闪烁且永不自愈。</p>
+     *
+     * <p>会话挂起态随快照持久化（快照顶层 {@code stopped} 字段），故重启后判定依然可靠。</p>
+     *
+     * @return 存在挂起任务且会话确实处于挂起态时为 true
+     */
+    public static boolean isResumable(AgentSession session) {
+        return session != null && getPendingTask(session) != null && session.isPending();
+    }
+
+    /**
      * 提交用户答案
      *
      * <p>写入 {@code ANSWER_PREFIX + task.getToolName()} 键；无挂起任务时按工具名常量兜底，
@@ -75,11 +105,29 @@ public class AskUser {
      */
     public static void submit(AgentSession session, String answersJson) {
         AskUserTask task = getPendingTask(session);
-        String toolName = (task != null && Assert.isNotEmpty(task.getToolName()))
-                ? task.getToolName()
-                : AskUserTool.TOOL_NAME;
+        submit(session, answersJson, (task == null) ? null : task.getActionId());
+    }
+
+    /**
+     * 提交用户答案并记录归属
+     *
+     * <p>归属标识即产生该答案的那次提问的 {@code actionId}（同源于工具调用 id）。
+     * 恢复回放时消费的是同一个工具调用，故标识可原样比对；为 null 时（旧快照无该字段）
+     * 不写归属键，消费方按兼容口径放行。</p>
+     *
+     * @param actionId 产生该答案的提问的调用标识，可为 null
+     */
+    public static void submit(AgentSession session, String answersJson, String actionId) {
+        String toolName = toolNameOf(getPendingTask(session));
 
         session.getContext().put(ANSWER_PREFIX + toolName, answersJson);
+
+        if (Assert.isNotEmpty(actionId)) {
+            session.getContext().put(ANSWER_OWNER_PREFIX + toolName, actionId);
+        } else {
+            // 归属未知：显式清掉上一次的归属，避免旧标识张冠李戴到这份新答案上
+            session.getContext().remove(ANSWER_OWNER_PREFIX + toolName);
+        }
     }
 
     /**
@@ -92,10 +140,95 @@ public class AskUser {
     }
 
     /**
-     * 清理指定工具的答案（幂等）
+     * 判定已提交的答案是否归属于指定的那次调用
+     *
+     * <p><b>两个向后兼容的放行口</b>（宁可保守，也不能让用户白答一次）：归属键缺失
+     * （旧快照/旧版本提交的答案）、或本次调用没有标识时，一律放行按旧行为处理。
+     * 仅在<b>两边都有标识且不相等</b>时判定为不归属。</p>
+     *
+     * @param actionId 本次工具调用的标识
+     */
+    public static boolean ownsAnswer(AgentSession session, String toolName, String actionId) {
+        String owner = session.getContext().getAs(ANSWER_OWNER_PREFIX + toolName);
+        if (Assert.isEmpty(owner) || Assert.isEmpty(actionId)) {
+            return true;
+        }
+        return owner.equals(actionId);
+    }
+
+    /**
+     * 清理指定工具的答案与其归属标识（幂等）
      */
     public static void clear(AgentSession session, String toolName) {
         session.getContext().remove(ANSWER_PREFIX + toolName);
+        session.getContext().remove(ANSWER_OWNER_PREFIX + toolName);
+    }
+
+    /**
+     * 丢弃当前挂起的提问现场（幂等）
+     *
+     * <p>用于「这次提问已经不可能再被恢复」的场景：清理挂起任务实体、答案与归属标识，
+     * 使会话回到干净状态。返回被清掉的任务实体，供调用方取 {@code actionId} 通知前端收卡——
+     * 不通知的话，那张卡会永远停在等待作答态。</p>
+     *
+     * @return 被清理掉的挂起任务；本就没有挂起任务时返回 null
+     */
+    public static AskUserTask discardPending(AgentSession session) {
+        if (session == null) {
+            return null;
+        }
+
+        AskUserTask task = getPendingTask(session);
+        session.getContext().remove(TASK_KEY);
+        clear(session, toolNameOf(task));
+        return task;
+    }
+
+    /**
+     * 取任务的工具名，缺失时回退到默认工具名
+     *
+     * <p>{@code toolName} 随会话快照持久化，旧快照或异常写入都可能取不到值。而它同时是
+     * 答案存储键的组成部分与下发前端的帧字段：前者取空会让清理打在错误的键上（残留答案变幽灵），
+     * 后者取空会让落盘的历史帧缺字段。故读取一律经由本方法兜底，不在调用处各写一份。</p>
+     *
+     * @param task 挂起任务，可为 null
+     * @return 任务的工具名；缺失时为 {@link AskUserTool#TOOL_NAME}
+     */
+    public static String toolNameOf(AskUserTask task) {
+        return (task != null && Assert.isNotEmpty(task.getToolName()))
+                ? task.getToolName()
+                : AskUserTool.TOOL_NAME;
+    }
+
+    /**
+     * 判定这份答案里是否存在「用户真的给出了内容」的条目（非跳过且文本非空）
+     *
+     * <p>用于区分「用户确实回答了」与「用户只是想把卡片关掉」：后者不应再为它发起
+     * 一轮模型调用（既浪费 token，也不符合用户放弃作答的意图）。坏 JSON 一律视为无内容。</p>
+     */
+    public static boolean hasMeaningfulAnswer(String answersJson) {
+        ONode arrayNode = parseAnswersArray(answersJson);
+        if (arrayNode == null) {
+            return false;
+        }
+
+        for (ONode item : arrayNode.getArray()) {
+            if (item == null || !item.isObject()) {
+                continue;
+            }
+
+            ONode skippedNode = valueOf(item, "skipped");
+            if (skippedNode != null && Boolean.TRUE.equals(skippedNode.getBoolean(false))) {
+                continue;
+            }
+
+            ONode textNode = valueOf(item, "text");
+            if (textNode != null && Assert.isNotEmpty(textNode.getString())) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

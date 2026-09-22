@@ -27,11 +27,12 @@ const message = readStatic('js', 'app-message.js');
 const base = readStatic('js', 'app-base.js');
 const chatHtml = readStatic('chat.html');
 const appCss = readStatic('css', 'app.css');
+const ui = readStatic('js', 'app-ui.js');
 
 const LOCALES = ['de', 'el', 'en', 'es', 'fr', 'ja', 'pt', 'ro', 'ru', 'vi', 'zh-CN', 'zh-TW'];
 const QUESTION_KEYS = ['question_waiting', 'question_other', 'question_other_placeholder', 'question_skip',
-    'question_submit', 'question_recommended', 'question_answered', 'question_skipped', 'question_close',
-    'question_attachment_wait', 'question_supplement', 'question_supplement_placeholder'];
+    'question_next', 'question_submit', 'question_recommended', 'question_answered', 'question_skipped',
+    'question_close', 'question_attachment_wait', 'question_supplement', 'question_supplement_placeholder'];
 
 function sliceBetween(source, startMarker, endMarker) {
     const start = source.indexOf(startMarker);
@@ -49,7 +50,11 @@ const sm = new Function(smBlock + '\nreturn {' +
     'questionAnswerFor: questionAnswerFor, ' +
     'questionOptionSelected: questionOptionSelected, ' +
     'questionIsAllAnswered: questionIsAllAnswered, ' +
+    'questionOthersAllAnswered: questionOthersAllAnswered, ' +
+    'questionHasPendingInput: questionHasPendingInput, ' +
+    'questionSubmitMode: questionSubmitMode, ' +
     'advanceQuestionCursor: advanceQuestionCursor, ' +
+    'nextUnansweredQuestionIndex: nextUnansweredQuestionIndex, ' +
     'applyQuestionOptionAnswer: applyQuestionOptionAnswer, ' +
     'applyQuestionCustomAnswer: applyQuestionCustomAnswer, ' +
     'applyQuestionSupplement: applyQuestionSupplement, ' +
@@ -185,7 +190,7 @@ test('app-message.js / app.css：入场动画仅首次渲染播放（勾选/翻�
     assert.match(appCss, /\.question-card\.question-card-enter \{ animation: msg-in 0\.25s ease-out; \}/);
 });
 
-test('12 个语言包均提供 12 个 chat.question_* 键与问答挂起 placeholder 键（JSON 合法、行尾无裸 LF）', () => {
+test('12 个语言包均提供 13 个 chat.question_* 键与问答挂起 placeholder 键（JSON 合法、行尾无裸 LF）', () => {
     for (const lang of LOCALES) {
         const raw = readStatic('locales', `${lang}.json`);
         const json = JSON.parse(raw);
@@ -528,4 +533,184 @@ test('提交路径：handleQuestionResponse 必须在置 submitted 之前收割�
     const h = submit.indexOf('harvestQuestionInputOnSubmit');
     const s = submit.indexOf('state.submitted = true');
     assert.ok(h >= 0 && s > h, '收割必须早于提交锁，否则会被 submitted 拦住');
+});
+
+/* ===== 底部按钮三态：「跳过 / 下一步 / 发送」=====
+   用户报的症状：在文本框里填了字、没点选项时，底部按钮一直写「跳过」而不是「下一步」。
+   旧实现只看 questionIsAllAnswered（是否所有题都有答案），完全不看用户正在打的字。
+   这不只是文案问题——点那个「跳过」会走 skipQuestionAnswer 把本题置 skipped，
+   而收割函数遇到 skipped 会早退，用户打的那段字彻底丢失。 */
+
+function mode(state, boxText) {
+    return sm.questionSubmitMode(state, boxText);
+}
+
+function threeQ() {
+    return sm.createQuestionCardState('m', sm.normalizeQuestionArgs({
+        questions: [
+            { header: 'Q1', options: [{ label: 'A' }] },
+            { header: 'Q2' },
+            { header: 'Q3' }
+        ]
+    }));
+}
+
+test('行为：按钮三态——本题无答案且无输入 = skip', () => {
+    const state = threeQ();
+    assert.equal(mode(state, ''), 'skip', '什么都没填时才允许显示「跳过」');
+    assert.equal(mode(state, '   '), 'skip', '纯空白不算输入');
+    assert.equal(mode(state, null), 'skip');
+});
+
+test('行为：按钮三态——主输入框打了字（未回车）即脱离 skip（用户报的症状）', () => {
+    const state = threeQ();
+    assert.equal(mode(state, '我想这样做'), 'next',
+        '填了文本框就不该再显示「跳过」——点下去会丢字');
+    // 单题场景：确认本题即可提交，直接给「发送」而不是无处可去的「下一步」
+    const single = sm.createQuestionCardState('s', sm.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }]
+    }));
+    assert.equal(mode(single, '我想这样做'), 'submit');
+});
+
+test('行为：按钮三态——卡片内补充框草稿同样触发联动', () => {
+    const state = threeQ();
+    state.drafts[0] = '草稿';
+    assert.equal(mode(state, ''), 'next', '卡内补充框的未确认草稿也是「已经打了字」');
+
+    state.drafts[0] = '   ';
+    assert.equal(mode(state, ''), 'skip', '纯空白草稿不算输入');
+});
+
+test('行为：按钮三态——与已入库补充相同的草稿不算新输入（幂等，与收割同口径）', () => {
+    const state = threeQ();
+    sm.applyQuestionOptionAnswer(state, 0, 'A');
+    state.current = 0;
+    sm.applyQuestionSupplement(state, 0, '已确认过的话');
+    // applyQuestionSupplement 会把 drafts 同步成已入库值；此时无「未确认的新输入」
+    assert.equal(sm.questionHasPendingInput(state, ''), false);
+    // 但本题已有答案，仍应是 next（不是 skip）
+    assert.equal(mode(state, ''), 'next');
+
+    state.drafts[0] = '改了一版还没回车';
+    assert.equal(sm.questionHasPendingInput(state, ''), true, '草稿与已入库值不同 = 有未确认输入');
+});
+
+test('行为：按钮三态——本题已点选项但别的题没答 = next（旧实现误显示「跳过」）', () => {
+    const state = threeQ();
+    sm.applyQuestionOptionAnswer(state, 0, 'A');
+    state.current = 0;
+    assert.equal(mode(state, ''), 'next',
+        '已答的题点「跳过」并不会真跳过（skipQuestionAnswer 只对无答案的题置 skipped），文案必须改');
+});
+
+test('行为：按钮三态——所有题有着落 = submit', () => {
+    const state = threeQ();
+    sm.applyQuestionOptionAnswer(state, 0, 'A');
+    sm.applyQuestionCustomAnswer(state, 1, 'x');
+    sm.skipQuestionAnswer(state);          // Q3 跳过
+    assert.equal(sm.questionIsAllAnswered(state), true);
+    assert.equal(mode(state, ''), 'submit');
+    assert.equal(mode(state, '还想再说一句'), 'submit', '全部有着落时输入框内容不改变 submit 终态');
+});
+
+test('行为：按钮三态——确认最后一道未答题时直接给 submit 而非 next', () => {
+    const state = threeQ();
+    sm.applyQuestionOptionAnswer(state, 0, 'A');
+    sm.applyQuestionCustomAnswer(state, 1, 'x');
+    state.current = 2;                      // 只剩 Q3 没答
+    assert.equal(mode(state, '最后一句'), 'submit',
+        '别的题都有着落时，确认本题就能提交，不该再显示「下一步」');
+    assert.equal(mode(state, ''), 'skip', '最后一题什么都没填仍是「跳过」');
+});
+
+test('行为：按钮三态——已跳过的题不因输入框残留而复活（尊重放弃意图）', () => {
+    const state = threeQ();
+    state.answers[0] = sm.skippedAnswer(0);
+    state.current = 0;
+    assert.equal(sm.questionHasPendingInput(state, '输入框里的残留'), false,
+        '已明确跳过的题，输入框残留不得被视作待确认输入（与收割函数早退口径一致）');
+    // 本题已有状态（skipped），故不是 skip 态；Q2/Q3 未答故为 next
+    assert.equal(mode(state, '输入框里的残留'), 'next');
+});
+
+test('行为：questionOthersAllAnswered 只检查除当前题外的其它题', () => {
+    const state = threeQ();
+    assert.equal(sm.questionOthersAllAnswered(state, 0), false);
+    sm.applyQuestionCustomAnswer(state, 1, 'x');
+    sm.applyQuestionCustomAnswer(state, 2, 'y');
+    assert.equal(sm.questionOthersAllAnswered(state, 0), true, '本题无答案不影响「其它题都已有着落」的判定');
+    assert.equal(sm.questionIsAllAnswered(state), false);
+});
+
+test('行为：「下一步」在末题作答时不得卡死（环绕找下一道待办题）', () => {
+    const state = threeQ();
+    // 用户直接翻到最后一题作答，Q1/Q2 还空着
+    state.current = 2;
+    sm.applyQuestionOptionAnswer(state, 2, 'C');
+    assert.equal(state.current, 2, 'advanceQuestionCursor 在末题是空操作（卡死的前提）');
+    assert.equal(sm.questionSubmitMode(state, ''), 'next', '本题已答、别题未答 → next');
+    assert.equal(sm.nextUnansweredQuestionIndex(state, state.current), 0,
+        '必须环绕回到 Q1，否则「下一步」永远点不动');
+});
+
+test('行为：nextUnansweredQuestionIndex 跳过已有状态的题，全有着落时返回 -1', () => {
+    const state = threeQ();
+    assert.equal(sm.nextUnansweredQuestionIndex(state, 0), 1, '相邻待办题');
+    state.answers[1] = sm.skippedAnswer(1);          // 已跳过也算「有着落」，不得回头
+    assert.equal(sm.nextUnansweredQuestionIndex(state, 0), 2);
+    sm.applyQuestionCustomAnswer(state, 2, 'y');
+    sm.applyQuestionCustomAnswer(state, 0, 'x');
+    assert.equal(sm.nextUnansweredQuestionIndex(state, 0), -1, '全部有着落 → -1（此时 mode 已是 submit）');
+});
+
+test('渲染/点击：按钮文案与 data-mode 同源于 questionSubmitMode，点击按 mode 分派', () => {
+    const render = sliceBetween(message, '/* 渲染卡片到宿主', 'function handleQuestionResponse');
+    assert.match(render, /questionSubmitMode\(state, currentInputBoxText\(sess\)\)/,
+        '渲染必须用三态判定，不得退回 allAnswered 二元式');
+    assert.match(render, /data-mode="/, '按钮须落 data-mode 供点击处理器读取');
+    assert.match(render, /QUESTION_SUBMIT_MODE_KEYS\[mode\]/);
+    assert.doesNotMatch(render, /allAnswered \? 'chat\.question_submit' : 'chat\.question_skip'/,
+        '旧的两态文案三元式必须已移除');
+
+    const keys = sliceBetween(message, 'var QUESTION_SUBMIT_MODE_KEYS', 'function currentInputBoxText');
+    assert.match(keys, /skip: 'chat\.question_skip'/);
+    assert.match(keys, /next: 'chat\.question_next'/);
+    assert.match(keys, /submit: 'chat\.question_submit'/);
+
+    const click = sliceBetween(message, "$(host).on('click', '.question-card-submit'", '/* 当前活动会话的问答状态');
+    assert.match(click, /questionSubmitMode\(st, currentInputBoxText\(sess\)\)/,
+        '点击须实时重算，不能只信可能过期的 data-mode 快照');
+    assert.match(click, /mode === 'submit'/);
+    assert.match(click, /mode === 'next'/);
+    // next 分支必须先收割再推进，否则「下一步」会把用户刚打的字丢在输入框里
+    const nextIdx = click.indexOf("mode === 'next'");
+    const harvestIdx = click.indexOf('harvestQuestionInputOnSubmit', nextIdx);
+    const advanceIdx = click.indexOf('advanceQuestionCursor', nextIdx);
+    assert.ok(nextIdx >= 0 && harvestIdx > nextIdx && advanceIdx > harvestIdx,
+        'next 分支必须「先收割输入、再推进光标」');
+});
+
+test('联动：两个输入面都刷新按钮文案，且只改按钮不重建卡片', () => {
+    // ① 卡片内补充框
+    const cardInput = sliceBetween(message, "$(host).on('input', '.question-card-other-input'", "$(host).on('keydown'");
+    assert.match(cardInput, /refreshQuestionSubmitLabel\(\)/);
+
+    // ② 底部主输入框（app-ui.js）
+    const chatBind = sliceBetween(ui, "$(chatInput).on('input'", '/* ===== Input box height drag adjustment');
+    assert.match(chatBind, /refreshQuestionSubmitLabel/,
+        '主输入框也是合法作答入口，打字必须联动按钮文案');
+    assert.match(chatBind, /typeof window\.refreshQuestionSubmitLabel === 'function'/,
+        '须做存在性判定，避免脚本加载顺序造成报错');
+
+    // 刷新函数只改按钮，不得整卡重建（否则用户在卡内打字时焦点与光标会被打断）
+    const refresh = sliceBetween(message, 'function refreshQuestionSubmitLabel', 'window.refreshQuestionSubmitLabel =');
+    assert.match(refresh, /\.question-card-submit/);
+    assert.match(refresh, /btn\.textContent =/);
+    assert.doesNotMatch(refresh, /syncQuestionCard|renderQuestionCard|innerHTML/,
+        '轻量刷新不得重建卡片，否则会打断正在输入的用户');
+
+    // 主输入框全局共享：非活动会话的卡不得读走别人正在打的字
+    const boxText = sliceBetween(message, 'function currentInputBoxText', 'function refreshQuestionSubmitLabel');
+    assert.match(boxText, /sess\.sessionId !== activeSessionId/);
 });

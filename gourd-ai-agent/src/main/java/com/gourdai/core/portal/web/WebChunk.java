@@ -484,6 +484,28 @@ public class WebChunk {
         return tmp;
     }
 
+    /**
+     * 创建「思考已开始」信号块（不携带内容）。
+     *
+     * <p>type 为 {@code reason_start}。部分模型（如 Claude 系）会屏蔽思维链明文：思考真实发生、
+     * 计费与耗时照常，但思考文本全程为空。而 {@code reason} 帧以「有内容」为下发前提，
+     * 于是整段思考期零帧，相位停在 {@link #PHASE_WAITING}、前端持续显示「等待响应」并从头
+     * 累加计时，直到正文首字才跳变——可后端早已开始响应。本帧把「思考已开始」独立于
+     * 「思考有无内容」表达出来，使空思考链下相位同样能推进到 {@link #PHASE_THINKING}。</p>
+     *
+     * <p><b>刻意不携带 text</b>：它是纯相位信号，不是可渲染内容。前端据此切换等待指示器文案，
+     * 不得据此向会话追加任何 DOM（否则历史回放会凭空多出空思考块）。</p>
+     *
+     * @return 不带内容的思考开始信号块
+     */
+    public static WebChunk ofReasonStart() {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "reason_start";
+        tmp.createdAt = Instant.now().toEpochMilli();
+
+        return tmp;
+    }
+
 
     /**
      * 创建「动作结束」消息块。

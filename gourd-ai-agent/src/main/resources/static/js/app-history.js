@@ -1088,6 +1088,9 @@ function updateLoadMoreBtn(sess) {
         $btn.find('.chat-load-more-btn').on('click', function() {
             var $this = $(this);
             if ($this.hasClass('loading')) return;
+            // 显式点击是明确用户意图：重新充满预取配额，否则用户停在顶部连点几下会发现
+            // 配额耗尽后自动加载哑火（按钮路径本身不走配额，但不重置会让后续滚动失效）。
+            _loadMoreScrollBudget = LOAD_MORE_PREFETCH_PAGES;
             $this.addClass('loading').html(loadMoreLoadingHtml());
             loadMoreMessages(sess);
         });
@@ -1113,12 +1116,31 @@ function setLoadMoreBtnLoading(sess) {
 }
 
 /* 向上滚动到顶部附近时自动加载上一页（按钮保留作为显式入口与加载态提示）。
-   仅在已渲染完当前页、且不处于回放/缓冲态时触发，避免与 prepend 的滚动补偿打架。 */
+   仅在已渲染完当前页、且不处于回放/缓冲态时触发，避免与 prepend 的滚动补偿打架。
+
+   【一次滚动预取 N 页】_loadMoreScrollBudget 配额：
+   原实现无任何连发护栏。prepend 后的锚点修正会执行 scrollTop += 新增内容高度
+   （见 replayDone），而浏览器对 scrollTop 赋值会<b>同步再派发一次 scroll</b>。若新增高度
+   不足阈值，修正后 scrollTop 仍 ≤ 240，立即触发下一页——自激闭环。实测（抽真实
+   源码跑探针）：每页高 40px 时单次滚动连发 7 次，60px 时 5 次，120px 时 3 次。
+
+   但「一次滚动只兑一页」同样不可取：后端单页受 96KB 响应预算硬约束
+   （smart-socket 按 128 字节递归写出，>130KB 响应必栈溢出，框架不可配），
+   7.6MB 的会话除下来就是 ~80 页，每次滚动只给一页等于要求用户拉 80 次。
+
+   故取中道：每次「真实的用户滚动」发放 PREFETCH_PAGES 个配额，自激链最多连拉这么多页
+   后就偷停；用户把视口主动移出阈值区（> 240）即重新充满。这样一次轻推能看到大段内容，
+   又不会把整个会话一口气拉完（那会把浏览器压垮，也违背懒加载初衷）。
+   显式点击按钮不受配额约束并重置它（用户明确意图优先）。 */
+var LOAD_MORE_PREFETCH_PAGES = 5;
+var _loadMoreScrollBudget = LOAD_MORE_PREFETCH_PAGES;
 $(messagesWrap).on('scroll', function() {
-    if (messagesWrap.scrollTop > 240) return;
+    if (messagesWrap.scrollTop > 240) { _loadMoreScrollBudget = LOAD_MORE_PREFETCH_PAGES; return; }
+    if (_loadMoreScrollBudget <= 0) return;
     var sess = activeSessionId && sessionMap ? sessionMap[activeSessionId] : null;
     if (!sess || !sess._replayHasMore) return;
     if (sess._replayLoadingMore || sess._replaying || sess._gateBuffering) return;
+    _loadMoreScrollBudget--;
     setLoadMoreBtnLoading(sess);
     loadMoreMessages(sess);
 });
@@ -1178,7 +1200,10 @@ function drainGateBuffer(sess) {
                 if (sess._replayCoverage && replayCoverageHas(sess._replayCoverage, c)) continue;
                 dispatchGateChunk(c);
             }
-        } catch (e) {}
+        } catch (e) {
+            // 不中断排空（剩余缓冲帧必须继续喂完），但不得静默：排空期的异常同样会表现为「界面少了一段」
+            reportStreamPipelineError('drainGateBuffer', e, c);
+        }
     }
     sess._recovering = recoveringBefore;
     sess._gateBuffering = false;

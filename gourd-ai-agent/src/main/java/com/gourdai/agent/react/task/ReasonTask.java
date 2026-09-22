@@ -17,6 +17,7 @@ package com.gourdai.agent.react.task;
 
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.event.ReasonEndEvent;
+import com.gourdai.agent.event.ReasonStartEvent;
 import com.gourdai.agent.event.ToolCallArgsDeltaEvent;
 import com.gourdai.agent.event.ToolCallDraftEvent;
 
@@ -35,6 +36,7 @@ import com.gourdai.ai.chat.event.ChatEventType;
 import com.gourdai.ai.chat.message.AssistantMessage;
 import com.gourdai.ai.chat.message.ChatMessage;
 import com.gourdai.ai.chat.tool.ToolCall;
+import com.gourdai.ai.util.LlmRetryPolicy;
 import com.gourdai.ai.util.RetryTask;
 import com.gourdai.core.portal.web.UsageSubmissionService;
 import org.noear.solon.core.util.Assert;
@@ -191,6 +193,24 @@ public class ReasonTask {
      * </ol>
      */
     private static final Duration REASON_RETRY_TOTAL_DEADLINE = Duration.ofMinutes(45);
+
+    /**
+     * 「超时类」失败在<b>单个回合</b>内允许发生的次数上限（达到即终止重试，不再消耗剩余预算）。
+     *
+     * <p><b>为何要与普通重试分开限次：</b>两者的成本结构截然不同。429/5xx 是上游<b>拒收</b>请求，
+     * 重试几乎不产生 token 开销；而超时意味着请求<b>已被受理</b>——上游正在（或已经）完整生成并计费，
+     * 只是结果没按时回来。此时每重试一次，就把完整上下文重新上行一次、让上游重新生成一次，
+     * 而<b>大上下文恰恰更容易超时</b>，于是形成「越超时越重试、越重试越贵」的正反馈。
+     * 实测事故会话 {@code work-mua28gy6}：34 次重试烧穿 5 个阶梯、空转 67.6 分钟，界面全程无进展。</p>
+     *
+     * <p><b>取 2 的理由：</b>瞬时抖动（偶发断流、网关瞬断）一次重试即可自愈，这是重试的主要价值；
+     * 连续两次都超时，说明是<b>系统性</b>原因（上下文过大 / 上游持续不健康），第三次同样会超时，
+     * 只是再白烧一遍钱。此时尽快把真实错误交还用户，远优于继续空转。</p>
+     *
+     * <p>非超时类失败（429 限流、5xx、解析不出状态码的未知错误）<b>完全不受本限制影响</b>，
+     * 仍按 {@code maxRetries} 的既有预算重试。</p>
+     */
+    private static final int TIMEOUT_FAILURE_LIMIT = 2;
 
     /**
      * 单个工具调用的参数生成进度跟踪器（仅存活于一次流式请求内）。
@@ -511,9 +531,13 @@ public class ReasonTask {
         // 置于消息组装之前，保证本轮请求就能看到通知；也覆盖“上一回合已结束、任务在空闲期完成”的场景。
         injectBackgroundNotices(trace);
 
+        // [逻辑 2.4: 挂起通知剔除] 挂起文案（等待用户回答/等待审批）是控制信号而非模型的回答，
+        // 但它会作为本轮「最终答案」落盘以支撑前端历史气泡。此处在出站前剔除：留在消息里会让
+        // 出站 messages 以纯文本 assistant 结尾，部分网关直接拒绝整次请求（400 assistant message
+        // prefill），且模型会把它误读成自己上一轮的回答。详见 PendingNoticeFilter。
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(ChatMessage.ofSystem(systemPromptStr));
-        messages.addAll(trace.getWorkingMemory().getMessages());
+        messages.addAll(PendingNoticeFilter.filter(trace.getWorkingMemory().getMessages()));
 
         // [逻辑 3: 模型交互] 执行物理请求并触发模型响应相关的拦截器
         long startMs = System.currentTimeMillis();
@@ -755,11 +779,34 @@ public class ReasonTask {
         // 先清上一回合的注记：累计量必须严格对应单个回合，不得残留
         clearRetryCostExtras(trace);
 
+        // 超时类失败的独立计数（随本回合的方法栈生存，天然不跨回合）。
+        // 只由 retryPredicate 单线程读写（RetryTask 的 catch 块内），用 int[] 而非原子类型已足够。
+        final int[] timeoutFailures = {0};
+
         try {
             ChatResponse result = new RetryTask()
                     .maxRetries(maxRetries)
                     .initialDelayMs(trace.getOptions().getRetryDelayMs())
                     .totalDeadline(REASON_RETRY_TOTAL_DEADLINE)
+                    // 空转止损（2026-09-21）：超时类失败另设更严的次数上限（理由见 TIMEOUT_FAILURE_LIMIT）。
+                    // 返回 false 会让 RetryTask 原样抛出真实异常，不包装不换型，
+                    // 故 handleLastException 仍能识别出 TimeoutException 并给出「响应超时」文案。
+                    .retryIf(e -> {
+                        if (LlmRetryPolicy.isTimeoutLike(e) == false) {
+                            return true;
+                        }
+
+                        timeoutFailures[0]++;
+                        if (timeoutFailures[0] < TIMEOUT_FAILURE_LIMIT) {
+                            return true;
+                        }
+
+                        LOG.warn("ReActAgent [{}] aborting retries: {} timeout-like failure(s) reached the limit;"
+                                        + " each retry re-uploads the full context and makes the upstream"
+                                        + " generate (and bill) again. Last error: {}",
+                                config.getName(), timeoutFailures[0], e.toString());
+                        return false;
+                    })
                     .onRetry((attempt,e)->{
                         LOG.warn("ReActAgent [{}] retry {}/{} due to: {}",
                                 config.getName(), attempt, maxRetries, e.toString());
@@ -784,6 +831,11 @@ public class ReasonTask {
                                     final StringBuilder streamedReasoningBuf = new StringBuilder();
                                     final int[] lastThinkingFrameStart = {-1};
                                     final ChatResponse[] finalResponse = {null};
+                                    // 本次物理尝试是否已下发过「思考开始」信号。与 streamedReasoningBuf 同生命周期
+                                    // （lambda 内局部，每次重试重建），故重试后会重新下发一次，符合「新的一次响应」语义。
+                                    // 一次响应内含多个思考块时只认第一次：本信号表达的是「模型已开始思考」这一相位事实，
+                                    // 重复下发不会带来新信息，反而会让订阅方多次开块。
+                                    final boolean[] thinkingStartSignaled = {false};
                                     // 工具参数生成进度：按「分片聚合键」跟踪。本 Map 随 lambda 每次物理重试重建，
                                     // 无需手动清理（与 streamedReasoningBuf 同理）。
                                     final Map<String, ArgsProgress> argsProgresses = new LinkedHashMap<>();
@@ -884,6 +936,20 @@ public class ReasonTask {
                                                     if (progress != null && progress.bytes > progress.lastEmitBytes) {
                                                         sink.next(new ToolCallArgsDeltaEvent(trace, progress.toolName,
                                                                 progress.actionId, progress.bytes));
+                                                    }
+                                                    return;
+                                                }
+
+                                                // 思考块开启（内容尚未到达，甚至可能永远不来）。
+                                                // Claude 等模型会屏蔽思维链明文：思考真实发生、计费与耗时照常，但
+                                                // THINKING_DELTA 全程为空文本。链路上每一层都以「有内容」为下发前提，
+                                                // 于是整段思考期零事件，前端相位停在 waiting、持续显示「等待响应」，
+                                                // 而后端其实早已开始响应。此信号把「思考已开始」独立于「思考有无内容」
+                                                // 表达出来，使空思考链下相位同样能推进。
+                                                if (event.is(ChatEventType.THINKING_START)) {
+                                                    if (thinkingStartSignaled[0] == false) {
+                                                        thinkingStartSignaled[0] = true;
+                                                        sink.next(new ReasonStartEvent(trace));
                                                     }
                                                     return;
                                                 }

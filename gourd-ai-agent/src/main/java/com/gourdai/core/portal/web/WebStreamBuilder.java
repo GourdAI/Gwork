@@ -36,6 +36,7 @@ import com.gourdai.agent.event.ToolCallBatchEvent;
 import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.react.task.ReasonTask;
 import com.gourdai.agent.event.ReasonEndEvent;
+import com.gourdai.agent.event.ReasonStartEvent;
 import com.gourdai.agent.trace.UsageNormalizer;
 import com.gourdai.agent.util.AgentUtil;
 import com.gourdai.ai.chat.ChatModel;
@@ -360,8 +361,17 @@ public class WebStreamBuilder {
                         }
                     }
 
-                    // Check ask_user state after stream completes（与 HITL 互斥；HITL 检查保持在前）
-                    AskUserTask questionTask = AskUser.getPendingTask(session);
+                    /* Check ask_user state after stream completes（与 HITL 互斥；HITL 检查保持在前）
+
+                       【必须同时要求会话确实挂起】挂起任务实体只是上下文里的一个键，它的存在不代表
+                       本轮真的停在等待作答上：用户抢在提问帧之前发了普通消息时，新一轮任务会重置挂起态
+                       并正常跑到 END，而实体仍残留。此时若照发 question 帧，就会凭空冒出一张题面早已
+                       过时的僵尸卡；用户点它 → 恢复轮因路由停在 END 而空转（0 token）→ 现场永不清理
+                       → 再次重发 question → 卡片收了又建，表现为无限闪烁且永不自愈。
+                       多加这一道判据后，空转轮不再重发提问，循环从源头被掐断。 */
+                    AskUserTask questionTask = AskUser.isResumable(session)
+                            ? AskUser.getPendingTask(session)
+                            : null;
                     if (questionTask != null) {
                         WebChunk questionChunk = WebChunk.ofQuestion(questionTask.getToolName(),
                                 questionTask.getQuestions(), questionTask.getActionId());
@@ -410,6 +420,9 @@ public class WebStreamBuilder {
             // 随后的工具执行时间落在段与段之间，天然不被计入。
             timer.onUsageSettled(((ContextUsageEvent) chunk).getOutputTokens());
             return oneFrame(onContextUsageEvent(chatModel, (ContextUsageEvent) chunk));
+        }
+        if (chunk instanceof ReasonStartEvent) {
+            return oneFrame(onReasonStartEvent((ReasonStartEvent) chunk));
         }
         if (chunk instanceof ReasonDeltaEvent) {
             return oneFrame(onReasonDeltaEvent((ReasonDeltaEvent) chunk));
@@ -505,6 +518,11 @@ public class WebStreamBuilder {
      * @return 推进后的相位；无变化时原样返回 {@code current}
      */
     private static String nextPhase(AgentEvent event, String current) {
+        if (event instanceof ReasonStartEvent) {
+            // 思考已开始，内容可能永远不来（屏蔽思维链的模型）。此信号存在的唯一目的
+            // 就是把相位从 waiting 推到 thinking，故不像 ReasonDeltaEvent 那样需要内容守卫。
+            return WebChunk.PHASE_THINKING;
+        }
         if (event instanceof ReasonDeltaEvent) {
             ReasonDeltaEvent delta = (ReasonDeltaEvent) event;
             // 与 onReasonDeltaEvent 的下发条件严格一致：只有真正产出内容的增量才代表相位
@@ -609,6 +627,23 @@ public class WebStreamBuilder {
         wc.setArgs(args);
         wc.setCreatedAt(java.time.Instant.now().toEpochMilli());
         return wc;
+    }
+
+    /**
+     * 处理「思考已开始」信号（方言给出思考块边界、内容尚未到达时下发）。
+     *
+     * <p>只管主代理：子代理的思考展示在它自己的智能体卡片内，而本帧不携带归属信息（它是
+     * 主气泡底部指示器的相位信号）。且 {@code TaskTalent} 本就不转发本事件，此处的
+     * 守卫仅作双重保险：若将来开启转发，子代理的思考开始不得把主相位误推成 thinking。</p>
+     *
+     * @param event 思考开始信号事件
+     * @return {@code reason_start} 帧；子代理事件返回 {@link WebChunk#EMPTY}
+     */
+    private WebChunk onReasonStartEvent(ReasonStartEvent event) {
+        if (event.hasMeta("__parentAgentName")) {
+            return WebChunk.EMPTY;
+        }
+        return WebChunk.ofReasonStart();
     }
 
     /**

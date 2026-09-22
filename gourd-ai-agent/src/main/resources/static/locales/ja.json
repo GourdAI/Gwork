@@ -839,6 +839,7 @@
                  "question_other":  "当てはまるものがない場合は自分で入力…",
                  "question_other_placeholder":  "自分の回答を入力し、Enter で確定…",
                  "question_skip":  "スキップ",
+                 "question_next":  "次へ",
                  "question_submit":  "送信",
                  "question_recommended":  "（推奨）",
                  "question_answered":  "送信済み",

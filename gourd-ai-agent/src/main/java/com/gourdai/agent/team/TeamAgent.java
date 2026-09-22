@@ -303,6 +303,12 @@ public class TeamAgent implements Agent<TeamRequest, TeamResponse> {
 
             AssistantMessage assistantMessage = ChatMessage.ofAssistant(result);
             assistantMessage.addMetadata(AgentTrace.META_RUN_ID, trace.getRunId());
+
+            // 与 ReActAgent 同构：挂起文案保留落盘供前端回放，但打标记后不随工作记忆出站。
+            if (session.isPending()) {
+                assistantMessage.addMetadata(AgentTrace.META_PENDING_NOTICE, 1);
+            }
+
             if (Assert.isNotEmpty(result)) {
                 if (parentTeamTrace == null) {
                     session.addMessage(assistantMessage);

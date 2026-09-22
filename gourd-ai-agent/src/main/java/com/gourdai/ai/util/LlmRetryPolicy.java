@@ -121,6 +121,39 @@ public final class LlmRetryPolicy {
     }
 
     /**
+     * 判定该异常是否为<b>超时类</b>失败（沿因果链测量）。
+     *
+     * <p><b>为何要把它单独识别出来：</b>超时与其它可重试错误（429/5xx）的<b>成本结构截然不同</b>。
+     * 429/5xx 是上游<b>拒收</b>请求，重试几乎不产生 token 开销；而超时意味着请求<b>已被受理</b>、
+     * 上游正在（或已经）完整生成并计费，只是结果没有按时回来。每重试一次，就把完整上下文
+     * 重新上行一次、让上游重新生成一次——且越是大上下文越容易超时，形成「越杀越费」的正反馈。
+     * 故调用方应对这类失败另设<b>更严的次数上限</b>（见 {@code ReasonTask} 的 {@code retryIf} 接线），
+     * 而不是跟 429 共用同一个大预算。</p>
+     *
+     * <p><b>只认类型，不做消息匹配：</b>「timeout」这个词会出现在各种不相干的网关文案里
+     * （如模型参数名、配置提示），按文本匹配会把无关错误误判为超时并提前放弃重试。</p>
+     *
+     * <p><b>刻意不包含</b> {@code InterruptedIOException}：它在本项目表达的是「用户取消/线程中断」
+     * （见 {@code ChatRequestDescDefault#execWithTotalCap}），与超时语义正交，且已由 {@code RetryTask}
+     * 的中断分支先行终止。</p>
+     *
+     * @param e 待判定异常，可为 null
+     * @since 4.1
+     */
+    public static boolean isTimeoutLike(Throwable e) {
+        Throwable cur = e;
+        for (int depth = 0; cur != null && depth < MAX_CAUSE_DEPTH; depth++) {
+            if (cur instanceof java.util.concurrent.TimeoutException
+                    || cur instanceof java.net.SocketTimeoutException
+                    || cur instanceof java.net.http.HttpTimeoutException) {
+                return true;
+            }
+            cur = cur.getCause();
+        }
+        return false;
+    }
+
+    /**
      * {@link #isNonRetryable(Throwable)} 的反向表达，供 {@code retryIf} 谓词直接使用。
      *
      * <p>注意：本方法<b>不</b>判断「这个异常一定可以重试成功」，只判断「没有被认定为确定性失败」，

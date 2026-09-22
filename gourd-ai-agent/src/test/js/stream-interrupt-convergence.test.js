@@ -59,7 +59,8 @@ test('事件活跃时间戳在 onWebChunk 内推进（看门狗据此判断停�
 
 test('resetStreamState 补齐 removeThinking 并记录流式起点', () => {
     const base = readStatic('js', 'app-base.js');
-    const reset = base.match(/function resetStreamState\(sess\) \{[\s\S]*?\n\}/);
+    // 形参表不写死（曾因新增 opts 参数而整条用例失配）；本用例验的是函数体内容。
+    const reset = base.match(/function resetStreamState\([^)]*\) \{[\s\S]*?\n\}/);
     assert.ok(reset, 'resetStreamState 应存在');
     assert.match(reset[0], /if \(typeof removeThinking === 'function'\) removeThinking\(sess\);/, '必须停掉消息区独立等待行的计时器');
     assert.match(reset[0], /sess\._streamStartAt = Date\.now\(\);/);

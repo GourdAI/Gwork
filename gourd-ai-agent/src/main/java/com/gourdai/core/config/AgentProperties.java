@@ -71,7 +71,7 @@ public class AgentProperties implements Serializable {
     private boolean openApiEnabled = true;
     private boolean lspEnabled = true;
 
-    private String userAgent = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GWork/1.0 like claude-code; +https://www.gourd-ai.cn/)";
+    private String userAgent = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GWork; +https://www.gourdwork.com)";
     //defaultModel
     private String defaultModel;
 
