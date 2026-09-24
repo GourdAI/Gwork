@@ -12,7 +12,13 @@
                       "steer_deferred":  "Der aktuelle Schritt ist beendet; zur Warteschlange hinzugefügt",
                       "steer_failed":  "Zwischenruf konnte nicht gesendet werden; die Eingabe bleibt erhalten",
                       "force_finished":  "Lauf bereits beendet (Server inaktiv); der Stream wurde automatisch geschlossen",
-                      "steer_attachment_wait":  "Anhänge können während einer laufenden Aufgabe nicht eingeworfen oder eingereiht werden. Bitte warten oder stoppen",
+                      "attachment_uploading":  "Anhänge werden hochgeladen, bitte warten",
+                      "attachment_upload_failed":  "Hochladen der Anhänge fehlgeschlagen. Ihre Eingabe wurde behalten, bitte erneut versuchen",
+                      "attachment_changed":  "Eingabe während des Hochladens geändert. Dieser Versand wurde abgebrochen, bitte erneut senden",
+                      "queued_with_attachments":  "Zur Warteschlange hinzugefügt (mit Anhängen)",
+                      "steer_accepted_with_attachments":  "Zwischenruf empfangen (mit Anhängen) und wird im nächsten Schritt wirksam",
+                      "queue_failed":  "Hinzufügen zur Warteschlange fehlgeschlagen. Ihre Eingabe wurde behalten, bitte erneut versuchen",
+                      "command_attachment_unsupported":  "Befehle können keine Anhänge enthalten. Entfernen Sie sie und drücken Sie Tab, um sie zur Warteschlange hinzuzufügen",
                       "steer_command_queue":  "Befehle können nicht eingeworfen werden. Mit Tab zur Warteschlange hinzufügen",
                       "steer_dropped":  "Der Zwischenruf wurde vor Abschluss nicht wirksam und zur Warteschlange hinzugefügt",
                       "steer_expand_full":  "Alle anzeigen ({0} Zeichen)",
@@ -134,7 +140,26 @@
                  "confirm":  "Bestätigen"
              },
     "app":  {
-                "boot_error":  "Start fehlgeschlagen",
+                                "access_title":  "Zugriffsrechte",
+                "access_default":  "Standardzugriff",
+                "access_full":  "Vollzugriff",
+                "access_default_desc":  "Bereich isoliert; riskante Befehle brauchen Freigabe",
+                "access_full_desc":  "Bereich und Befehle freigegeben (auf eigenes Risiko)",
+                "access_confirm_title":  "Vollzugriff erlauben?",
+                "access_confirm_desc":  "Im Vollzugriffsmodus entfallen Bereichs-Isolierung und Befehlsfreigabe; die KI kann Folgendes mit Ihren Geräten und Daten tun:",
+                "access_risk_file":  "Dateizugriffe",
+                "access_risk_file_desc":  "Beliebige Dateien außerhalb des Projektbereichs lesen und schreiben, inkl. Systemdateien",
+                "access_risk_cmd":  "Terminalbefehle",
+                "access_risk_cmd_desc":  "Befehle laufen ohne Einzelfreigabe; Löschen oder Überschreiben wirkt sofort",
+                "access_risk_net":  "Internetzugang",
+                "access_risk_net_desc":  "Beliebige Netzwerkadressen erreichbar; Risiko von Datenabfluss oder unbekannten Downloads",
+                "access_ack":  "Ich verstehe die Risiken und übernehme die Verantwortung für die Sicherheit meiner Daten",
+                "access_allow":  "Vollzugriff erlauben",
+                "access_cancel":  "Abbrechen",
+                "access_toast_default":  "Auf Standardzugriff umgestellt",
+                "access_toast_full":  "Auf Vollzugriff umgestellt",
+                "access_failed":  "Umschalten fehlgeschlagen; vorheriger Modus wiederhergestellt",
+"boot_error":  "Start fehlgeschlagen",
                 "project_view":  "Projektansicht",
                 "review_view":  "Code-Review",
                 "terminal_shortcut":  "Terminal-Verknüpfung",
@@ -152,7 +177,6 @@
                 "history_scope_global":  "Globale Chats",
                 "history_scope_project":  "Projekt-Chats",
                 "welcome_title":  "Hallo, ich bin GWork!",
-                "welcome_sub":  "Wie kann ich helfen?",
                 "drop_attach":  "Loslassen, um Anhang hinzuzufügen",
                 "thinking_label":  "Denken",
                 "context_label":  "Kontext",
@@ -231,11 +255,38 @@
                                 "rename_project":  "Projekt umbenennen",
                                 "rename_failed":  "Umbenennen fehlgeschlagen",
                                 "model_config":  "Modellkonfiguration",
-                   "memory":  "Gedächtnis"
+                   "memory":  "Gedächtnis",
+                   "update_now":  "Aktualisieren",
+                   "update_download":  "Download",
+                   "update_downloading":  "Lädt herunter…",
+                   "update_install":  "Installieren",
+                   "update_tooltip":  "Neue Version {0} verfügbar – zum Aktualisieren klicken",
+                   "update_tooltip_downloading":  "Neue Version {0} wird heruntergeladen",
+                   "update_tooltip_downloaded":  "Version {0} bereit – klicken zum Installieren und Neustarten"
                             }
             },
     "settings":  {
-                     "common":  {
+                     "appearance": {
+                         "title": "Erscheinungsbild",
+                         "desc": "Hell-/Dunkelmodus und Farbschema. Änderungen wirken sofort und werden lokal gespeichert",
+                         "mode": {
+                             "title": "Hell-/Dunkelmodus",
+                             "system": "System",
+                             "light": "Hell",
+                             "dark": "Dunkel"
+                         },
+                         "themes": {
+                             "title": "Alle Themes"
+                         },
+                         "theme": {
+                             "graphite": "Graphit",
+                             "teal": "Jade",
+                             "clay": "Ton",
+                             "sky": "Himmel",
+                             "indigo": "Indigo-Klassik"
+                         }
+                     },
+"common":  {
                                     "back":  "Zurück",
                                     "close":  "Schließen",
                                     "delete":  "Löschen",
@@ -246,8 +297,8 @@
                      "title":  "Einstellungen",
                      "tabs":  {
                                   "general":  "Allgemein",
+                                  "appearance": "Erscheinungsbild",
                                   "permission":  "Berechtigungen",
-                                  "mounts":  "Mount-Bereich",
                                   "mcp":  "MCP-Konfiguration",
                                   "openapi":  "OpenAPI-Konfiguration",
                                   "lsp":  "LSP-Konfiguration",
@@ -294,11 +345,6 @@
                                                       "desc":  "Anzeigesprache der Oberfläche wählen",
                                                       "name":  "Oberflächensprache"
                                                   },
-                                     "appearance":  {
-                                                        "title":  "Aussehen",
-                                                        "theme_name":  "Themenfarbe",
-                                                        "theme_desc":  "Oberflächenthema zwischen dunkel und hell wechseln"
-                                                    },
                                      "conversation":  {
                                                           "title":  "Kontextkomprimierung",
                                                           "history_window":  "Größe des Historienfensters",
@@ -313,12 +359,6 @@
                                                           "intent_chain_desc":  "Behält beim Komprimieren einen kompakten Index früherer Nutzeranfragen (sehr geringe Kosten), damit der Agent nicht auf bereits erledigte Ziele zurückfällt",
                                                           "hint":  "Historienfenster: Wie viele der letzten Nachrichten stets unkomprimiert bleiben.\nReservierte Ausgabe: absoluter Spielraum für die nächste Antwort des Modells; Auslösepunkt = Modellfenster − Reserve − Runden-Puffer.\nKomprimierungs-Auslöser: löst nur FRÜHER aus (der kleinere der beiden Werte gilt); 100 bedeutet keine zusätzliche Vorverlegung.\nKomprimierungsziel: wie tief jede Komprimierung geht — höhere Werte komprimieren flacher und lösen häufiger aus"
                                                       },
-                                     "sandbox":  {
-                                                     "title":  "Sandbox-Modus",
-                                                     "desc":  "Von AI ausgeführte Befehle laufen in einer eingeschränkten Sandbox-Umgebung (nur Lesen/Schreiben von Dateien in \u0027Arbeitsbereich\u0027 und \u0027Mounts\u0027)",
-                                                     "allow_home":  "Zugriff auf das Benutzer-Home-Verzeichnis im Sandbox-Modus erlauben (`~/` Verzeichnis, z.B. `~/.m2`)",
-                                                     "system_restrict":  "Striktere System-Kernel-Sandbox-Beschränkungen anwenden; Deaktivierung lockert die Beschränkungen (zum Testen)"
-                                                 },
                                      "memory":  {
                                                     "title":  "Kognitive Erinnerung",
                                                     "enabled_desc":  "Langzeitgedächtnis über Sitzungen hinweg beibehalten; Deaktivierung reduziert Kontextverbrauch",
@@ -388,48 +428,9 @@
                                     "installed_tab":  "Installiert",
                                     "uninstall":  "Deinstallieren",
                                     "uninstall_confirm":  "Skill \"{0}\" deinstallieren? Der lokale Skill-Ordner wird gelöscht.",
+                                    "scope_global":  "Global",
+                                    "scope_workspace":  "This Project",
                                     "market_tab":  "Skill-Markt"
-                                },
-                     "mounts":  {
-                                    "title":  "Mount-Space",
-                                    "desc":  "Lokale Verzeichnis-Mappings verwalten, Pfad für AI-Skills und Ressourcen bereitstellen",
-                                    "add":  "Mount hinzufügen",
-                                    "add_title":  "Mount hinzufügen",
-                                    "edit_title":  "Mount bearbeiten",
-                                    "alias":  "Name",
-                                    "alias_placeholder":  "@my-mount",
-                                    "scope":  "Bereich",
-                                    "scope_workspace":  "Arbeitsbereich (lokal)",
-                                    "type":  "Inhaltstyp",
-                                    "type_skills":  "Skills (SKILLS)",
-                                    "type_agents":  "Agenten (AGENTS)",
-                                    "type_files":  "Dateien (FILES)",
-                                    "path":  "Mapping-Pfad",
-                                    "path_placeholder":  "~/.myapp/skills/",
-                                    "path_hint":  "Lokaler Verzeichnispfad der Dateien (unterstützt \u0027./\u0027 Arbeitsbereich-Pfad und \u0027~/\u0027 Benutzer-Verzeichnis)",
-                                    "writeable":  "Schreibberechtigung öffnen",
-                                    "description":  "Beschreibung (optional)",
-                                    "description_placeholder":  "Kurze Beschreibung des Mount-Zwecks",
-                                    "presets_label":  "Häufige Mount-Auswahlen",
-                                    "skills_list_title":  "Skill-Paketliste",
-                                    "agents_list_title":  "Unteragentenliste",
-                                    "files_list_title":  "Dateiliste",
-                                    "system":  "System",
-                                    "skill_pkg":  "Skill-Paket",
-                                    "content_list":  "Inhaltsliste",
-                                    "open_dir":  "Verzeichnis öffnen",
-                                    "preset_skills":  "Workspace-Skills",
-                                    "preset_skillhub":  "Skill-Hub",
-                                    "preset_agents_skills":  "Subagent-Skills",
-                                    "preset_opencode_skills":  "OpenCode-Skills",
-                                    "preset_claude_skills":  "Claude-Skills",
-                                    "alias_label":  "Name",
-                                    "scope_label":  "Geltungsbereich",
-                                    "type_label":  "Inhaltstyp",
-                                    "path_label":  "Zuordnungspfad",
-                                    "writeable_label":  "Schreibzugriff",
-                                    "description_label":  "Beschreibung",
-                                    "skills_list":  "Fertigkeitenliste"
                                 },
                      "mcp":  {
                                  "title":  "MCP-Server",
@@ -575,8 +576,6 @@
                                        "model_list_api_label":  "Modelllisten-API",
                                        "api_url_label":  "API-URL",
                                        "api_key_label":  "API-Schlüssel",
-                                       "get_api_key_link":  "API-Schlüssel abrufen",
-                                       "api_key_hint_suffix":  "Besuchen Sie die offizielle Website, um den API-Schlüssel zu erhalten",
                                        "timeout_label":  "Zeitlimit",
                                        "models_label":  "Modelle",
                                        "empty_hint":  "Keine Modelle verfügbar, klicken Sie zum Hinzufügen oder Abrufen",
@@ -612,7 +611,6 @@
                                        "name_label":  "Name",
                                         "scope_label":  "Geltungsbereich",
                                         "view_title":  "Modell-Einstellungen",
-                                        "builtin_group":  "Integriert",
                                         "custom_group":  "Eigene Anbieter",
                                         "add_provider_title":  "Modellanbieter hinzufügen",
                                         "add_provider_desc":  "Konfigurieren Sie einen vollständig eigenen API-Endpunkt und ein Startmodell"
@@ -839,11 +837,15 @@
                  "question_skip":  "Überspringen",
                  "question_next":  "Weiter",
                  "question_submit":  "Senden",
-                 "question_recommended":  "(Empfohlen)",
+                 "question_recommended":  "Empfohlen",
+                 "question_detail_expand":  "Ausklappen",
+                 "question_detail_collapse":  "Einklappen",
+                 "question_record_title":  "Meine Antwort",
                  "question_answered":  "Gesendet",
                  "question_skipped":  "Übersprungen",
                  "question_close":  "Schließen",
                  "question_attachment_wait":  "Anhänge können nicht gesendet werden, solange eine Frage offen ist. Bitte zuerst antworten oder überspringen",
+                 "question_attachment_queued":  "Antwort eingetragen. Anhänge wurden in die Warteschlange gestellt und nach diesem Durchgang gesendet",
                  "question_supplement":  "Anmerkung hinzufügen… (bleibt bei Ihrer Auswahl)",
                  "question_supplement_placeholder":  "Anmerkung eingeben, Enter zum Bestätigen…",
                  "batch_tool":  "Stapel",
@@ -1171,6 +1173,11 @@
                         "saved_desc":  "Zwischen Arbeitsbereich und global wechseln, um gespeicherte Erinnerungen anzuzeigen"
                     },
     "file_changes": {
+        "edited_files": "{count} Dateien bearbeitet",
+        "show_more_files": "{count} weitere Dateien anzeigen",
+        "collapse_files": "Einklappen",
+        "run_list_title": "Geänderte Dateien in diesem Lauf",
+        "back_to_list": "Zurück zur Liste",
         "title": "Dateiänderungen dieses Laufs",
         "summary": "{count} Dateien",
         "review": "Prüfen",

@@ -116,10 +116,10 @@ public class GenerateTalent extends AbsTalent {
                         + "' 未加载，请勿重试本工具，改由自己直接完成任务。";
             }
 
-            //一律不允许覆盖已存在的代理（含内置、已缓存与挂载代理）。
+            //一律不允许覆盖已存在的代理（含内置、已缓存与注册表扫描的代理）。
             //新定义是从 general 复制的，覆盖会把目标原有的 tools 白名单与 disallowedTools
-            //换成模型自填的宽松权限，构成权限抹除与代理身份劫持；且 copy() 不带 mountAlias，
-            //覆盖后 clearCustomAgents/removeByMountAlias 都回收不掉，进程内无法恢复
+            //换成模型自填的宽松权限，构成权限抹除与代理身份劫持；且 copy() 不复制 scope，
+            //生成的子代理 scope=null，clearCustomAgents 按 scope!=null 回收时漏掉它们，进程内无法恢复
             if (engine.getAgentManager().hasAgent(name)) {
                 return "ERROR: 子代理 '" + name + "' 已存在，不可覆盖，请改用其它标识符。";
             }

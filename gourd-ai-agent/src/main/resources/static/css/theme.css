@@ -1,10 +1,19 @@
 /*
  * Global Theme Variables
- * Shared across all pages. Switch theme via <body data-theme="light|dark">.
+ * Shared across all pages. Switch theme via <body data-theme="light|dark">,
+ * accent preset via <body data-accent="teal|graphite|clay|sky|indigo">.
  *
  * Usage:
  *   <link rel="stylesheet" href="/css/theme.css"/>
- *   <body data-theme="light">
+ *   <body data-theme="light" data-accent="teal">
+ *
+ * 色彩治理约定（勿破坏）：
+ *   1. 全站颜色字面量只允许出现在本文件；其它 CSS 一律引用 token 变量。
+ *   2. 中性色阶为真中性（zinc 系），禁止再引入带蓝底的灰（#f5f6fa 一类）。
+ *   3. accent 派生 token 必须成套定义：--accent / --accent-hover / --accent-light /
+ *      --accent-rgb / --accent-contrast。漏一个就会出现硬编码兜底串色。
+ *   4. --accent-contrast 是「accent 作背景时的文字色」。暗色主题 accent 提亮后
+ *      白字对比度会掉到 2:1 以下，必须用深色 contrast，不能写死 #fff。
  */
 
 /* ===== Common ===== */
@@ -15,7 +24,7 @@
     /* Scrollbar —— 全局唯一的滚动条视觉规范。
        原生滚动条（*::-webkit-scrollbar）与 Monaco 自绘滚动条
        （code.css 覆盖）共用此组变量，保证 code 编辑器 / diff / 其它区域观感一致。
-       thumb 高度半透明蓝灰，透光不压内容（模拟毛玻璃），大圆角。
+       thumb 高度半透明灰，透光不压内容（模拟毛玻璃），大圆角。
        明暗主题下均协调，无需分主题赋值。
 
        ——「细看着好看，但点不到」的两个根因（已实测确认，勿回退）——
@@ -34,8 +43,8 @@
     --scrollbar-thumb-inset-hover: 2px;
     --scrollbar-thumb-min: 36px;
     --scrollbar-radius: 8px;
-    --scrollbar-thumb: rgba(160, 170, 195, 0.32);
-    --scrollbar-thumb-hover: rgba(160, 170, 195, 0.6);
+    --scrollbar-thumb: rgba(150, 152, 158, 0.35);
+    --scrollbar-thumb-hover: rgba(150, 152, 158, 0.65);
 
     /* Dropdown —— 全站悬浮下拉/菜单面板的统一宽度档位。
        改造前各处散落 160/170/220/248/260/280/320 七种宽度，同一产品里
@@ -51,42 +60,48 @@
     --dropdown-w-max: 380px;
 }
 
-/* ===== Light Theme ===== */
+/* ===== Light Theme =====
+   中性色阶为真中性 zinc 系（不带蓝底）。accent 默认值 = 青玉预设，
+   与 [data-accent="teal"] 块同值；body 未带 data-accent 时由此兜底。 */
 [data-theme="light"] {
     /* Background */
-    --bg-body: #f5f6fa;
+    --bg-body: #fafafa;
     --bg-sidebar: #ffffff;
     --bg-main: #ffffff;
     --bg-input-box: #ffffff;
-    --bg-hover: #f0f1f5;
-    --bg-code: #f6f8fa;
-    --bg-code-block: #f6f8fa;
+    --bg-hover: #f2f2f3;
+    --bg-code: #f4f4f5;
+    --bg-code-block: #f6f6f7;
     --bg-primary: #ffffff;
-    --bg-secondary: #f5f6fa;
+    --bg-secondary: #f4f4f5;
+    --bg-card: #ffffff;
 
     /* Message */
-    --bg-user-msg: #EDF3FE;
+    --bg-user-msg: #f4f4f5;
     --bg-action: #f0f7f0;
 
     /* Text */
-    --text-primary: #1a1a2e;
-    --text-secondary: #6b7280;
-    --text-user-msg: #1a1a2e;
-    --text-user-msg-link: #4f6ef7;
-    --text-user-msg-link-hover: #3b5de7;
-    --text-ai-msg: #1a1a2e;
-    --text-sidebar: #374151;
+    --text-primary: #18181b;
+    --text-secondary: #71717a;
+    --text-user-msg: #18181b;
+    --text-user-msg-link: var(--accent);
+    --text-user-msg-link-hover: var(--accent-hover);
+    --text-ai-msg: #18181b;
+    --text-sidebar: #3f3f46;
     --text-code: #24292e;
-    --text-tertiary: #999999;
+    --text-tertiary: #a1a1aa;
 
     /* Border */
-    --border-color: #e5e7eb;
-    --border-input: #d1d5db;
+    --border-color: #e4e4e7;
+    --border-input: #d4d4d8;
 
-    /* Accent */
-    --accent: #4f6ef7;
-    --accent-hover: #3b5de7;
-    --accent-light: #eef1fe;
+    /* Accent（默认 = 石墨 graphite：高级黑灰路线，去品牌色；
+       白字 on accent = 17.7:1。可选预设见下方 Accent Presets） */
+    --accent: #18181b;
+    --accent-hover: #27272a;
+    --accent-light: #ececee;
+    --accent-rgb: 24, 24, 27;
+    --accent-contrast: #ffffff;
 
     /* Functional */
     --action-border: #86b886;
@@ -106,6 +121,7 @@
     --color-dingtalk: #0089FF;
     --color-dingtalk-hover: #0070dd;
     --bg-danger-subtle: rgba(239, 68, 68, 0.1);
+    --bg-warning-subtle: rgba(245, 158, 11, 0.12);
 
     /* Git */
     --git-line-add-bg: rgba(46, 160, 67, 0.15);
@@ -122,49 +138,53 @@
     /* Effects */
     --shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
     --shadow-lg: 0 4px 24px rgba(0, 0, 0, 0.08);
-    --thinking-dot: #4f6ef7;
-    --tag-bg: #f3f4f8;
-    --tag-border: #e5e7eb;
-    --thinking-block-bg: #f8f9fc;
-    --thinking-block-border: #e0e3eb;
+    --thinking-dot: var(--accent);
+    --tag-bg: #f4f4f5;
+    --tag-border: #e4e4e7;
+    --thinking-block-bg: #f6f6f7;
+    --thinking-block-border: #e4e4e7;
 }
 
 /* ===== Dark Theme ===== */
 [data-theme="dark"] {
     /* Background */
-    --bg-body: #141416;
-    --bg-sidebar: #111113;
-    --bg-main: #1a1b1e;
-    --bg-input-box: #1e2024;
-    --bg-hover: #26282d;
+    --bg-body: #131315;
+    --bg-sidebar: #0f0f11;
+    --bg-main: #17171a;
+    --bg-input-box: #1c1c20;
+    --bg-hover: #232327;
     --bg-code: rgba(255, 255, 255, 0.07);
-    --bg-code-block: #0d1117;
-    --bg-primary: #1a1b1e;
-    --bg-secondary: #111113;
+    --bg-code-block: #0f0f11;
+    --bg-primary: #17171a;
+    --bg-secondary: #101012;
+    --bg-card: #1c1c20;
 
-    /* Message */
-    --bg-user-msg: #4f6ef7;
+    /* Message（用户气泡为中性抬升面，不再铺实心 accent） */
+    --bg-user-msg: #232327;
     --bg-action: #1a2a1a;
 
     /* Text */
-    --text-primary: #dcdde1;
-    --text-secondary: #8b909a;
-    --text-user-msg: #ffffff;
-    --text-user-msg-link: #ffffff;
-    --text-user-msg-link-hover: #d0d8ff;
-    --text-ai-msg: #dcdde1;
-    --text-sidebar: #b8bcc8;
+    --text-primary: #e4e4e7;
+    --text-secondary: #8f8f96;
+    --text-user-msg: #e4e4e7;
+    --text-user-msg-link: var(--accent);
+    --text-user-msg-link-hover: var(--accent-hover);
+    --text-ai-msg: #e4e4e7;
+    --text-sidebar: #b5b5bb;
     --text-code: #d4d4d4;
-    --text-tertiary: #606470;
+    --text-tertiary: #66666d;
 
     /* Border */
-    --border-color: #2a2d35;
-    --border-input: #32363f;
+    --border-color: #27272a;
+    --border-input: #3f3f46;
 
-    /* Accent */
-    --accent: #6b8aff;
-    --accent-hover: #5a75e6;
-    --accent-light: #1c2140;
+    /* Accent（默认 = 石墨 graphite；暗色下主操作为近白底 + 深字，
+       contrast 必须深色：白字 on #e4e4e7 仅 1.16:1） */
+    --accent: #e4e4e7;
+    --accent-hover: #f4f4f5;
+    --accent-light: #2a2a2e;
+    --accent-rgb: 228, 228, 231;
+    --accent-contrast: #18181b;
 
     /* Functional */
     --action-border: #2a4a2a;
@@ -184,6 +204,7 @@
     --color-dingtalk: #3ea6ff;
     --color-dingtalk-hover: #2b96f0;
     --bg-danger-subtle: rgba(248, 113, 113, 0.12);
+    --bg-warning-subtle: rgba(251, 191, 36, 0.12);
 
     /* Git */
     --git-line-add-bg: rgba(46, 160, 67, 0.2);
@@ -200,11 +221,67 @@
     /* Effects */
     --shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
     --shadow-lg: 0 4px 24px rgba(0, 0, 0, 0.4);
-    --thinking-dot: #6b8aff;
-    --tag-bg: #26282d;
-    --tag-border: #32363f;
-    --thinking-block-bg: #1a1c20;
-    --thinking-block-border: #2a2d35;
+    --thinking-dot: var(--accent);
+    --tag-bg: #232327;
+    --tag-border: #2e2e33;
+    --thinking-block-bg: #1a1a1d;
+    --thinking-block-border: #27272a;
+}
+
+/* ===== Accent Presets =====
+   每套预设明暗各一组。选择器同时匹配「body 自身带 data-accent」与
+   「[data-theme] 后代中带 data-accent 的节点」——后者是给设置页主题网格用的：
+   每张卡片挂 data-accent="<id>" 即可在当前明暗模式下预览该预设的成色，
+   无需在 JS/其它 CSS 里重复任何色值。 */
+
+/* 石墨 graphite（默认）：去品牌色路线，主操作近黑/近白 */
+[data-theme="light"][data-accent="graphite"], [data-theme="light"] [data-accent="graphite"] {
+    --accent: #18181b; --accent-hover: #27272a; --accent-light: #ececee;
+    --accent-rgb: 24, 24, 27; --accent-contrast: #ffffff;
+}
+[data-theme="dark"][data-accent="graphite"], [data-theme="dark"] [data-accent="graphite"] {
+    --accent: #e4e4e7; --accent-hover: #f4f4f5; --accent-light: #2a2a2e;
+    --accent-rgb: 228, 228, 231; --accent-contrast: #18181b;
+}
+
+/* 青玉 teal */
+[data-theme="light"][data-accent="teal"], [data-theme="light"] [data-accent="teal"] {
+    --accent: #0f766e; --accent-hover: #0c5f58; --accent-light: #e6f2f0;
+    --accent-rgb: 15, 118, 110; --accent-contrast: #ffffff;
+}
+[data-theme="dark"][data-accent="teal"], [data-theme="dark"] [data-accent="teal"] {
+    --accent: #2dd4bf; --accent-hover: #5eead4; --accent-light: #12312e;
+    --accent-rgb: 45, 212, 191; --accent-contrast: #04302c;
+}
+
+/* 陶土 clay */
+[data-theme="light"][data-accent="clay"], [data-theme="light"] [data-accent="clay"] {
+    --accent: #9a3412; --accent-hover: #7c2d12; --accent-light: #f6ebe3;
+    --accent-rgb: 154, 52, 18; --accent-contrast: #ffffff;
+}
+[data-theme="dark"][data-accent="clay"], [data-theme="dark"] [data-accent="clay"] {
+    --accent: #fb923c; --accent-hover: #fdba74; --accent-light: #33200f;
+    --accent-rgb: 251, 146, 60; --accent-contrast: #431407;
+}
+
+/* 天青 sky：保留一点蓝，但远离蓝紫轴 */
+[data-theme="light"][data-accent="sky"], [data-theme="light"] [data-accent="sky"] {
+    --accent: #0369a1; --accent-hover: #075985; --accent-light: #e4f0f7;
+    --accent-rgb: 3, 105, 161; --accent-contrast: #ffffff;
+}
+[data-theme="dark"][data-accent="sky"], [data-theme="dark"] [data-accent="sky"] {
+    --accent: #38bdf8; --accent-hover: #7dd3fc; --accent-light: #0f2937;
+    --accent-rgb: 56, 189, 248; --accent-contrast: #082f49;
+}
+
+/* 蓝紫 indigo：旧版默认色，留作可回退选项 */
+[data-theme="light"][data-accent="indigo"], [data-theme="light"] [data-accent="indigo"] {
+    --accent: #4f6ef7; --accent-hover: #3b5de7; --accent-light: #eef1fe;
+    --accent-rgb: 79, 110, 247; --accent-contrast: #ffffff;
+}
+[data-theme="dark"][data-accent="indigo"], [data-theme="dark"] [data-accent="indigo"] {
+    --accent: #6b8aff; --accent-hover: #5a75e6; --accent-light: #1c2140;
+    --accent-rgb: 107, 138, 255; --accent-contrast: #0d1330;
 }
 
 /* ===== Global Scrollbar =====
@@ -276,7 +353,7 @@
 .kd-confirm-btns { display: flex; gap: 8px; justify-content: flex-end; }
 .kd-btn { height: 32px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 13px; cursor: pointer; transition: all .15s; background: var(--bg-hover); color: var(--text-primary); }
 .kd-btn:hover { filter: brightness(0.95); }
-.kd-btn-ok { background: var(--accent); color: #fff; border-color: var(--accent); }
+.kd-btn-ok { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
 .kd-btn-ok:hover { opacity: .88; filter: none; }
 
 /* layer.msg */
@@ -285,65 +362,3 @@
 
 /* old dark override kept for any stray usage */
 [data-theme="dark"] .layui-layer-msg { background: #2a2d33; border-color: #444; color: var(--text-primary); }
-
-/* System dark preference fallback */
-@media (prefers-color-scheme: dark) {
-    :root:not([data-theme]) {
-        /* Background */
-        --bg-body: #141416;
-        --bg-sidebar: #111113;
-        --bg-main: #1a1b1e;
-        --bg-input-box: #1e2024;
-        --bg-hover: #26282d;
-        --bg-code: rgba(255, 255, 255, 0.07);
-        --bg-code-block: #0d1117;
-        --bg-primary: #1a1b1e;
-        --bg-secondary: #111113;
-
-        /* Message */
-        --bg-user-msg: #4f6ef7;
-        --bg-action: #1a2a1a;
-
-        /* Text */
-        --text-primary: #dcdde1;
-        --text-secondary: #8b909a;
-        --text-user-msg: #ffffff;
-        --text-user-msg-link: #ffffff;
-        --text-user-msg-link-hover: #d0d8ff;
-        --text-ai-msg: #dcdde1;
-        --text-sidebar: #b8bcc8;
-        --text-code: #d4d4d4;
-        --text-tertiary: #606470;
-
-        /* Border */
-        --border-color: #2a2d35;
-        --border-input: #32363f;
-
-        /* Accent */
-        --accent: #6b8aff;
-        --accent-hover: #5a75e6;
-        --accent-light: #1c2140;
-
-        /* Functional */
-        --action-border: #2a4a2a;
-        --error-bg: #261a1a;
-        --error-border: #4a2a2a;
-        --error-text: #f87171;
-        --color-success: #4ade80;
-        /* 状态点闪动的暗态：= --color-success 的 25% alpha。供 app.css 的 status-dot-blink 关键帧使用，
-           让闪动改用 background-color 插值后仍能跟随主题色（避免硬编码串色）。 */
-        --color-success-dim: rgba(74,222,128,0.25);
-        --color-danger: #f87171;
-        --color-warning: #fbbf24;
-        --bg-danger-subtle: rgba(248, 113, 113, 0.12);
-
-        /* Effects */
-        --shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-        --shadow-lg: 0 4px 24px rgba(0, 0, 0, 0.4);
-        --thinking-dot: #6b8aff;
-        --tag-bg: #26282d;
-        --tag-border: #32363f;
-        --thinking-block-bg: #1a1c20;
-        --thinking-block-border: #2a2d35;
-    }
-}

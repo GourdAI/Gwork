@@ -625,14 +625,14 @@
                     } else if (dataUrl) {
                         qrEl.innerHTML = '<img src="' + dataUrl + '" width="180" height="180" style="display:block;"/>';
                     } else {
-                        qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--color-primary)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
+                        qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--accent)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
                     }
                 }, 100);
             } catch(e) {
-                qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--color-primary)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
+                qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--accent)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
             }
         } else {
-            qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--color-primary)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
+            qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--accent)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
         }
 
         // 轮询扫码状态
@@ -654,7 +654,7 @@
                             } else if (st === 'failed') {
                                 clearInterval(pollInterval);
                                 removePollTimer(pollInterval);
-                                section.innerHTML = '<div class="channel-qr-hint" style="color:var(--color-error)">✗ ' + escapeHtml(resp.data.message || GourdI18n.t('settings.channel.auth_failed')) + '</div>' +
+                                section.innerHTML = '<div class="channel-qr-hint" style="color:var(--color-danger)">✗ ' + escapeHtml(resp.data.message || GourdI18n.t('settings.channel.auth_failed')) + '</div>' +
                                     '<button class="channel-config-action" data-action="config-dingtalk-qr" style="margin-top:12px;">' + GourdI18n.t('settings.channel.rescan') + '</button>';
                                 bindDetailEvents(section);
                             }
@@ -690,7 +690,7 @@
                     section.innerHTML = '<div class="channel-qr-hint" style="color:var(--color-success)">' + GourdI18n.t('settings.channel.connect_success_dingtalk') + '</div>';
                     pollDingtalkStatusAfterBind(section);
                 } else {
-                    section.innerHTML = '<div class="channel-qr-hint" style="color:var(--color-error)">' + GourdI18n.t('settings.channel.connect_failed_retry') + '</div>' +
+                    section.innerHTML = '<div class="channel-qr-hint" style="color:var(--color-danger)">' + GourdI18n.t('settings.channel.connect_failed_retry') + '</div>' +
                         '<button class="channel-config-action" data-action="config-dingtalk-qr" style="margin-top:12px;">' + GourdI18n.t('settings.channel.rescan') + '</button>';
                     bindDetailEvents(section);
                 }
@@ -787,14 +787,14 @@
                     } else if (dataUrl) {
                         qrEl.innerHTML = '<img src="' + dataUrl + '" width="180" height="180" style="display:block;"/>';
                     } else {
-                        qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--color-primary)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
+                        qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--accent)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
                     }
                 }, 100);
             } catch(e) {
-                qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--color-primary)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
+                qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--accent)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
             }
         } else {
-            qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--color-primary)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
+            qrEl.innerHTML = '<a href="' + escapeHtml(data.qrUrl) + '" target="_blank" style="font-size:12px;color:var(--accent)">' + GourdI18n.t('settings.channel.open_auth_page') + '</a>';
         }
 
         // 轮询扫码状态
@@ -816,7 +816,7 @@
                             } else if (st === 'failed') {
                                 clearInterval(pollInterval);
                                 removePollTimer(pollInterval);
-                                section.innerHTML = '<div class="channel-qr-hint" style="color:var(--color-error)">✗ ' + escapeHtml(resp.data.message || GourdI18n.t('settings.channel.auth_failed')) + '</div>' +
+                                section.innerHTML = '<div class="channel-qr-hint" style="color:var(--color-danger)">✗ ' + escapeHtml(resp.data.message || GourdI18n.t('settings.channel.auth_failed')) + '</div>' +
                                     '<button class="channel-config-action" data-action="config-feishu-qr" style="margin-top:12px;">' + GourdI18n.t('settings.channel.rescan') + '</button>';
                                 bindDetailEvents(section);
                             }
@@ -854,7 +854,7 @@
                         setTimeout(function() { renderChannelCards(); }, 1000);
                     });
                 } else {
-                    section.innerHTML = '<div class="channel-qr-hint" style="color:var(--color-error)">' + GourdI18n.t('settings.channel.connect_failed_retry') + '</div>' +
+                    section.innerHTML = '<div class="channel-qr-hint" style="color:var(--color-danger)">' + GourdI18n.t('settings.channel.connect_failed_retry') + '</div>' +
                         '<button class="channel-config-action" data-action="config-feishu-qr" style="margin-top:12px;">' + GourdI18n.t('settings.channel.rescan') + '</button>';
                     bindDetailEvents(section);
                 }

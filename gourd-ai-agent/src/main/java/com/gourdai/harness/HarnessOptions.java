@@ -27,7 +27,8 @@ import com.gourdai.ai.mcp.client.McpServerParameters;
 import com.gourdai.harness.talents.cli.SkillProvider;
 import com.gourdai.harness.talents.lsp.LspServerParameters;
 import com.gourdai.harness.talents.memory.MemorySolutionProvider;
-import com.gourdai.ai.talents.mount.MountManager;
+import com.gourdai.ai.talents.registry.TalentRegistry;
+import com.gourdai.core.config.AgentFlags;
 import com.gourdai.harness.talents.gateway.openapi.ApiSource;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Preview;
@@ -85,11 +86,16 @@ class HarnessOptions implements Serializable {
     private volatile boolean memoryEnabled = true;
 
     // ========== 安全与模式 ==========
+    // 以下三项不再来自用户设置（原「沙盒模式」设置卡片已移除），而是由会话级访问控制档位
+    // （AccessMode / AccessPolicy）逐次决定。这里保留字段是给嵌入方做全局兜底用：
+    // 置为更严的值可以整体收紧，但档位为「完全访问」时仍以档位为准。
+    //
+    // sandboxSystemRestrict 此前默认 true，与 AgentProperties/TerminalTalent 的 false 不一致，
+    // 仅因启动时总被设置值覆盖才没暴露。设置注入移除后这里就是唯一来源，故改回 false 与其余两处对齐。
     private volatile boolean sandboxEnabled = true;
     private volatile boolean sandboxAllowUserHome = true;
-    private volatile boolean sandboxSystemRestrict = true;
+    private volatile boolean sandboxSystemRestrict = false;
 
-    private volatile boolean hitlEnabled = false;
     private volatile boolean subagentEnabled = true;
 
     // ========== 重试配置 ==========
@@ -101,7 +107,7 @@ class HarnessOptions implements Serializable {
     private volatile CacheControl cacheControl;
 
     // ========== 集合类配置 ==========
-    private final MountManager mountManager;
+    private final TalentRegistry talentRegistry;
     private volatile String defaultModel;
     private final Map<String, ChatConfig> models = new ConcurrentHashMap<>();
     private final Map<String, McpServerParameters> mcpServers = new ConcurrentHashMap<>();
@@ -125,9 +131,35 @@ class HarnessOptions implements Serializable {
             harnessHome = harnessHome + "/";
         }
 
+        // harnessHome 为绝对路径时（测试用 @TempDir 隔离全局区、嵌入式显式指定数据根），
+        // 拆成「父目录作 globalBase + 末段作 home 名」再落字段：
+        // - 全局区四个扫描目录落在 <绝对home>/ 之下（与调用方意图一致）；
+        // - workspace 侧与 engine 派生路径（sessions/commands/…）落在 <workspace>/<末段名>/
+        //   之下（保持相对拼接语义，不产生「workspace + 绝对路径」的双盘符非法路径）。
+        //
+        // 重写必须发生在字段赋值之前：this.harnessHome 存的是重写后的相对名，
+        // getHarnessSessions() 等派生路径才不会拼出「workspace + 绝对路径」；
+        // 直接把绝对路径塞进字段会在 TalentRegistry.resolveDir 与 Paths.get(workspace, …)
+        // 各拼一次，Windows 上得到 InvalidPath。
+        String globalBase = AgentFlags.getHarnessBase();
+        if (java.nio.file.Paths.get(harnessHome).isAbsolute()) {
+            java.nio.file.Path absoluteHome = java.nio.file.Paths.get(harnessHome);
+            java.nio.file.Path parent = absoluteHome.getParent();
+            String name = absoluteHome.getFileName() == null
+                    ? ".gwork"
+                    : absoluteHome.getFileName().toString();
+            harnessHome = name + "/";
+            if (parent != null) {
+                globalBase = parent.toString();
+            }
+        }
+
         this.workspace = workspace;
         this.harnessHome = harnessHome;
-        this.mountManager = new MountManager(workspace);
+        // 技能/子代理发现目录固定为「全局区 + 工作区」两处，不再支持自定义挂载点。
+        // globalBase 由 AgentFlags 解析（与 Configurator 传给 SessionLocator 的同一个值），
+        // TalentRegistry 自身不依赖产品层，只接收算好的路径。
+        this.talentRegistry = new TalentRegistry(workspace, globalBase, harnessHome);
     }
 
     // ========== 派生路径属性 ==========
@@ -138,14 +170,6 @@ class HarnessOptions implements Serializable {
 
     String getHarnessSessions() {
         return harnessHome + "sessions/";
-    }
-
-    String getHarnessSkills() {
-        return harnessHome + "skills/";
-    }
-
-    String getHarnessAgents() {
-        return harnessHome + "agents/";
     }
 
     String getHarnessCommands() {
@@ -336,16 +360,6 @@ class HarnessOptions implements Serializable {
         }
     }
 
-    boolean isHitlEnabled() {
-        return hitlEnabled;
-    }
-
-    void setHitlEnabled(Boolean hitlEnabled) {
-        if (hitlEnabled != null) {
-            this.hitlEnabled = hitlEnabled;
-        }
-    }
-
     boolean isSubagentEnabled() {
         return subagentEnabled;
     }
@@ -412,8 +426,8 @@ class HarnessOptions implements Serializable {
         this.defaultModel = defaultModel;
     }
 
-    public MountManager getMountManager() {
-        return mountManager;
+    public TalentRegistry getTalentRegistry() {
+        return talentRegistry;
     }
 
     Map<String, McpServerParameters> getMcpServers() {

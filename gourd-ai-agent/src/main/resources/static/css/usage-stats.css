@@ -135,19 +135,21 @@ body.code-mode .usage-view { display: none !important; }
 }
 
 /* ── 活跃热力图 ───────────────────────────────────────── */
-#usageView .usage-heat-wrap {
+/* 本区块为两页共用（使用统计 + 欢迎页活跃卡）：选择器不带 #usageView 前缀，
+   避免欢迎页复用时复制第二份样式；使用统计页仍由外层 #usageView 提供天然隔离。 */
+.usage-heat-wrap {
     display: flex;
     flex-direction: column;
     gap: 12px;
 }
-#usageView .usage-heat-grid {
+.usage-heat-grid {
     display: grid;
     grid-auto-flow: column;
     grid-template-rows: repeat(7, 1fr);
     gap: 3px;
     width: 100%;
 }
-#usageView .usage-heat-cell {
+.usage-heat-cell {
     aspect-ratio: 1 / 1;
     min-height: 10px;
     border-radius: 2px;
@@ -155,13 +157,13 @@ body.code-mode .usage-view { display: none !important; }
 }
 /* 未来日：与「零活跃」同色，保证整块热力图始终是完整矩形。
    若留空透明，末列尚未到来的那几天会透出卡面底色，在暗色主题下形成突兀的黑洞。 */
-#usageView .usage-heat-empty { background: var(--bg-hover); }
-#usageView .usage-heat-cell[data-level="0"] { background: var(--bg-hover); }
-#usageView .usage-heat-cell[data-level="1"] { background: var(--accent); opacity: .3; }
-#usageView .usage-heat-cell[data-level="2"] { background: var(--accent); opacity: .5; }
-#usageView .usage-heat-cell[data-level="3"] { background: var(--accent); opacity: .75; }
-#usageView .usage-heat-cell[data-level="4"] { background: var(--accent); opacity: 1; }
-#usageView .usage-heat-legend {
+.usage-heat-empty { background: var(--bg-hover); }
+.usage-heat-cell[data-level="0"] { background: var(--bg-hover); }
+.usage-heat-cell[data-level="1"] { background: var(--accent); opacity: .3; }
+.usage-heat-cell[data-level="2"] { background: var(--accent); opacity: .5; }
+.usage-heat-cell[data-level="3"] { background: var(--accent); opacity: .75; }
+.usage-heat-cell[data-level="4"] { background: var(--accent); opacity: 1; }
+.usage-heat-legend {
     display: flex;
     align-items: center;
     gap: 5px;
@@ -169,13 +171,31 @@ body.code-mode .usage-view { display: none !important; }
     color: var(--text-secondary);
     justify-content: flex-end;
 }
-#usageView .usage-heat-legend-cell {
+.usage-heat-legend-cell {
     width: 13px;
     height: 13px;
     aspect-ratio: auto;
     min-height: 0;
     flex: none;
 }
+/* 紧凑变体（欢迎页调用方传 legend:false 并套 .usage-heat-compact）：
+   方形格 + 更窄间隙；图例信息由悬停提示承载。
+   历史教训：曾用 aspect-ratio: 2/1 压扁高度，26 列铺满 680px 时每格变成
+   「长条」（用户截图点名丑）；方形格才是热力图的可读形态，高度交给列宽自然推导。 */
+.usage-heat-compact .usage-heat-grid { gap: 2px; }
+.usage-heat-compact .usage-heat-cell { aspect-ratio: 1 / 1; min-height: 0; }
+/* 紧凑变体整体铺满容器宽（欢迎卡与输入框同宽 max-width 680px，两边缘对齐才协调）：
+   53 列窗口下列宽 ≈ 680/53 ≈ 12.8px、格 ≈ 10.9px、整块高 ≈ 7×10.9+6×2 ≈ 88px。
+   历史教训：曾用 fit-content + 8px 固定格宽把整块缩成 528×68 的小条，与输入框宽度
+   错位（用户截图点名「不协调、太小」）；也曾用 aspect-ratio: 2/1 压扁高度变「长条」。
+   列宽与 app-heatmap.js renderMonths 的 LABEL_W=2.6 / MIN_GAP=3.0 互为契约，改任一须同步。 */
+.usage-heat-compact { width: 100%; gap: 6px; }
+/* 月份时间轴：标签绝对定位，left% 以「列」为单位由 renderMonths 算好（含让位/回拉）；
+   宽度随 wrap = 网格宽，保证 left% 与列严格对齐。
+   字号 11px：「10月/Oct」约 33px ≈ 2.6 列（欢迎页列宽 ≈ 12.8px），与 renderMonths 的
+   LABEL_W=2.6 / MIN_GAP=3.0 常量互为契约，改字号必须同步改 JS 常量。 */
+.usage-heat-months { position: relative; height: 14px; font-size: 11px; line-height: 14px; color: var(--text-secondary); }
+.usage-heat-months span { position: absolute; top: 0; white-space: nowrap; }
 
 /* ── 按天 Token 趋势 ─────────────────────────────────── */
 #usageView .usage-trend-wrap {

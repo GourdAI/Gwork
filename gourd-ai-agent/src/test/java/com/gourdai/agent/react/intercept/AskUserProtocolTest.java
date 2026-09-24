@@ -115,6 +115,11 @@ class AskUserProtocolTest {
         Assertions.assertEquals("boolean", optionItem.get("properties").get("recommended").get("type").getString());
         Assertions.assertTrue(optionItem.get("required").getArray().stream()
                 .anyMatch(n -> "label".equals(n.getString())), "label 必须为必填字段");
+        // description：选项一句话说明（前端渲染为短标题后的灰色小字）。必须可选——旧模型不传时
+        // 前端按 label 兜底拆分展示，改成必填会让存量调用直接参数校验失败
+        Assertions.assertEquals("string", optionItem.get("properties").get("description").get("type").getString());
+        Assertions.assertFalse(optionItem.get("required").getArray().stream()
+                .anyMatch(n -> "description".equals(n.getString())), "description 必须为可选字段");
 
         // 工具函数体：正常情况下被拦截器在 onAction 短路，永不执行；兜底返回值按 FeedbackTool 挂起语义
         Object suspended = tool.handle(new LinkedHashMap<>());
@@ -461,7 +466,7 @@ class AskUserProtocolTest {
                 json.get("args").get("questions").getArray().get(0).get("header").getString());
 
         WebChunk answered = WebChunk.ofQuestionAnswered("ask_user", AskUser.parseAnswers(
-                "{\"answers\":[{\"index\":0,\"text\":\"staging\",\"skipped\":false,\"custom\":true}]}"));
+                "{\"answers\":[{\"index\":0,\"text\":\"staging\",\"skipped\":false,\"custom\":true}]}"), "call-7");
 
         Assertions.assertEquals("question_answered", answered.getType());
         Assertions.assertEquals("ask_user", answered.getToolName());

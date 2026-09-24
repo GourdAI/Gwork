@@ -54,8 +54,8 @@ class PendingTaskIdentityTest {
         Assertions.assertEquals("staging",
                 json.get("args").get("answers").getArray().get(0).get("text").getString());
 
-        // 旧两参工厂必须保留并委托：既有调用方与旧快照恢复路径不得被破坏
-        WebChunk legacy = WebChunk.ofQuestionAnswered("ask_user", answers);
+        // 旧两参工厂已删除：旧行为等价于 3 参工厂传 null，前端降级语义不变
+        WebChunk legacy = WebChunk.ofQuestionAnswered("ask_user", answers, null);
         Assertions.assertEquals("question_answered", legacy.getType());
         Assertions.assertEquals("ask_user", legacy.getToolName());
         Assertions.assertNull(legacy.getActionId(), "不传 actionId 时必须为 null，供前端降级");
@@ -71,7 +71,8 @@ class PendingTaskIdentityTest {
         Assertions.assertNull(normal.getSuspended(),
                 "普通 done 不得带挂起标记，否则前端永远不清批次索引（跨轮串组 + 内存滞留）");
 
-        WebChunk suspended = WebChunk.ofDoneSuspended();
+        WebChunk suspended = WebChunk.ofDone();
+        suspended.setSuspended(true);
         Assertions.assertEquals("done", suspended.getType());
         Assertions.assertEquals(Boolean.TRUE, suspended.getSuspended());
         Assertions.assertNotNull(suspended.getCreatedAt(), "挂起 done 仍是正常 done，时间戳不得缺失");

@@ -18,7 +18,9 @@
    修复：不改变「单帧出错不拖垮整条流」的语义，但所有分发环节的异常必须留痕
    （reportStreamPipelineError），且游标在异常时照常推进。
 
-   本文件断言的是**真实行为**（在受控沙箱里驱动真实函数体），而非源码字符串匹配。 */
+   测试形态：第一至三节在受控沙箱里**驱动真实函数体/真实源码语句**断言行为；
+   第四节是显式的结构护栏（源码形态断言），用于锁住「不得回退成空捕获」这类
+   无法用行为直接表达的约束，不当作行为证据。 */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -149,34 +151,63 @@ test('游标推进：异常被吞但必定上报（不得静默）', () => {
     assert.equal(reported[0].chunk.eventSeq, 5, '留痕须带上出事的那一帧');
 });
 
-/* ===== 三、外部处理器隔离：todowrite 分支每帧必经 ===== */
+/* ===== 三、外部处理器隔离：todowrite 分支每帧必经 =====
 
-test('处理器隔离：单个 _todoChunkHandlers 抛异常不得打断整帧分发', () => {
-    // 取 dispatchGateChunk 里的 todowrite 片段，验证其隔离结构
-    const body = stripComments(fnBody(streamingJs, 'dispatchGateChunk'));
-    const idx = body.indexOf('_todoChunkHandlers');
-    assert.ok(idx >= 0, '未找到 todowrite 处理分支');
-    const seg = body.slice(idx, idx + 400);
-    assert.ok(/try\s*\{[^}]*h\(chunk\)/.test(seg),
-        '处理器调用必须包在 try 内，否则外部处理器异常会打断后续渲染');
+   _todoChunkHandlers 是对外开放的注册点（app-todos.js 等注册），其实现不在本模块控制之下，
+   因此「一个处理器抛异常不得影响其它处理器、更不得打断整帧渲染」必须是结构保证。
 
-    // 真实行为：一个处理器炸了，其余仍须执行
-    const ran = [];
-    const handlers = [
-        () => { ran.push('a'); },
-        () => { throw new Error('第三方处理器炸了'); },
-        () => { ran.push('c'); }
-    ];
-    const reported = [];
-    const report = (where, err, chunk) => reported.push(where);
-    assert.doesNotThrow(() => {
-        handlers.forEach(function (h) {
-            try { h({ type: 'action_end' }); } catch (e) { report('todoChunkHandler', e, null); }
-        });
+   调用点有两处且语境不同，必须分别覆盖：
+     · dispatchGateChunk —— 位于会话初始化之前，异常会打断该帧后续的全部分发；
+     · onWebChunk 的 case 'action_end' —— 异常会被本函数的外层 catch 吞掉，
+       导致该帧剩余渲染（break 之后的收尾）静默跳过。
+
+   下面不另写一个「形状相似」的循环来自证（那只能证明测试里新写的循环没问题），
+   而是把两处**真实源码语句**原样抠出来在沙箱里执行。 */
+
+/* 抠出指定函数内的 `window._todoChunkHandlers.forEach(...)` 完整语句（按圆括号配平） */
+function extractTodoDispatchStmt(fnName) {
+    const body = fnBody(streamingJs, fnName);
+    const start = body.indexOf('window._todoChunkHandlers.forEach(');
+    assert.ok(start >= 0, fnName + ' 内未找到 _todoChunkHandlers 分发语句');
+    let depth = 0, seen = false;
+    for (let i = start; i < body.length; i++) {
+        const ch = body[i];
+        if (ch === '(') { depth++; seen = true; }
+        else if (ch === ')') { depth--; if (seen && depth === 0) return body.slice(start, i + 1) + ';'; }
+    }
+    assert.fail(fnName + ' 的 forEach 语句圆括号未配平');
+}
+
+/* 执行真实语句：三个处理器，中间那个抛异常 */
+function driveRealTodoDispatch(fnName) {
+    const stmt = extractTodoDispatchStmt(fnName);
+    const ran = [], reported = [];
+    const env = {
+        window: {
+            _todoChunkHandlers: [
+                function () { ran.push('a'); },
+                function () { throw new Error('第三方处理器炸了'); },
+                function () { ran.push('c'); }
+            ]
+        },
+        chunk: { type: 'action_end', toolName: 'todowrite', eventSeq: 4242 },
+        reportStreamPipelineError: (where, err, c) => reported.push({ where, err, chunk: c })
+    };
+    const run = () => new Function('__env', 'with(__env){ ' + stmt + ' }')(env);
+    return { run, ran, reported };
+}
+
+for (const fnName of ['dispatchGateChunk', 'onWebChunk']) {
+    test('处理器隔离（' + fnName + ' 真实语句）：单个处理器抛异常不得打断整帧分发', () => {
+        const d = driveRealTodoDispatch(fnName);
+        assert.doesNotThrow(d.run, fnName + ' 的处理器调用未做隔离：异常会上抛并打断该帧后续处理');
+        assert.deepEqual(d.ran, ['a', 'c'], '异常处理器不得影响其它处理器的执行');
+        assert.equal(d.reported.length, 1, '被吞掉的处理器异常必须留痕');
+        assert.equal(d.reported[0].where, 'todoChunkHandler', '留痕须标明出错环节');
+        assert.equal(d.reported[0].chunk && d.reported[0].chunk.eventSeq, 4242,
+            '留痕须带上出事的那一帧，否则现场仍无法定位');
     });
-    assert.deepEqual(ran, ['a', 'c'], '异常处理器不得影响其它处理器');
-    assert.equal(reported.length, 1);
-});
+}
 
 /* ===== 四、契约护栏：关键路径不得回退成空捕获 ===== */
 

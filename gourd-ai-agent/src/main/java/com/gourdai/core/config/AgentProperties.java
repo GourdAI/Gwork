@@ -54,17 +54,12 @@ public class AgentProperties implements Serializable {
     //启用会话意图链（防多轮对话意图漂移）
     private boolean intentChainEnabled = true;
     //意图链 token 上限
-    private int intentChainMaxTokens = 2000;
+    private int intentChainMaxTokens = 3000;
     private String summaryModel; //摘要大模型
 
     private boolean memoryIsolation = true;
     private boolean memoryEnabled = true;
 
-    private boolean sandboxMode = true;
-    private boolean sandboxAllowUserHome = true;
-    private boolean sandboxSystemRestrict = false;
-
-    private boolean hitlEnabled = false;
     private boolean subagentEnabled = true;
 
     private boolean mcpEnabled = true;
@@ -87,16 +82,6 @@ public class AgentProperties implements Serializable {
 
     //大模型
     private List<ModelDo> models = new ArrayList<>();
-    /**
-     * @deprecated 4.0.0
-     */
-    @Deprecated
-    private Map<String, String> skillPools = new LinkedHashMap<>();
-    /**
-     * @deprecated 4.0.0
-     */
-    @Deprecated
-    private List<String> agentPools = new ArrayList<>();
     //mcp集
     private Map<String, McpServerDo> mcpServers = new LinkedHashMap<>();
     //api集
@@ -109,16 +94,6 @@ public class AgentProperties implements Serializable {
 
 
     //---------------
-
-    /**
-     * @deprecated 4.0.0
-     *
-     */
-    @Deprecated
-    public Map<String, String> getSkillPools() {
-        return skillPools;
-    }
-
 
     public List<ModelDo> getModels() {
         return models;

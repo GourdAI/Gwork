@@ -139,9 +139,9 @@ class AgentSettingsSafetyTest {
         // 2) 原文件不被加载流程改动（加载阶段一律不写盘）
         Assertions.assertArrayEquals(before, Files.readAllBytes(settingsFile));
 
-        // 3) 内存降级为空配置，但内置连接仍常驻
+        // 3) 内存降级为空配置（内置连接机制已移除，providers 一并为空）
         Assertions.assertTrue(keys(loaded).isEmpty(), "损坏文件的模型不得进入内存");
-        Assertions.assertTrue(loaded.getProviders().containsKey(AgentSettings.BUILTIN_PROVIDER_NAME));
+        Assertions.assertTrue(loaded.getProviders().isEmpty(), "损坏文件的供应商不得进入内存");
 
         // 4) 打上加载失败标志，供 saveToFile 拒绝回写
         Assertions.assertTrue(loaded.isLoadFailed());
@@ -504,5 +504,45 @@ class AgentSettingsSafetyTest {
         Assertions.assertEquals("LATEST", AgentSettings.loadFromFile().getDefaultModel(),
                 "最后完成的保存必须成为最终落盘状态");
         Assertions.assertTrue(filesNamedLike("tmp-").isEmpty());
+    }
+
+    // ==================== 内置服务商移除：存量兼容与无注入 ====================
+
+    @Test
+    void legacyBuiltinFieldInProviderJsonIsIgnoredOnLoad() throws Exception {
+        // 存量 settings.json：GWork 条目带 "builtin": true（ProviderDo 已删除该字段）。
+        // 「存量不清理」的前提：bindTo 必须静默忽略未知字段，绝不能把整份配置打成 loadFailed
+        writeSettings("{\"defaultModel\":\"gpt-5.6-sol\",\"providers\":{"
+                + "\"GWork\":{\"name\":\"GWork\",\"standard\":\"openai\",\"apiUrl\":\"https:\\/\\/www.gourd-ai.cn\","
+                + "\"apiKey\":\"sk-legacy\",\"enabled\":true,\"builtin\":true}},"
+                + "\"models\":{\"gpt-5.6-sol\":{\"name\":\"gpt-5.6-sol\",\"model\":\"gpt-5.6-sol\",\"provider\":\"GWork\"}}}");
+
+        AgentSettings loaded = AgentSettings.loadFromFile();
+
+        Assertions.assertFalse(loaded.isLoadFailed(),
+                "存量 builtin 字段必须被静默忽略，不得让整份配置加载失败");
+        Assertions.assertTrue(filesNamedLike("corrupt-").isEmpty(),
+                "合法的存量配置不得产生损坏备份");
+        ProviderDo gwork = loaded.getProviders().get("GWork");
+        Assertions.assertNotNull(gwork, "存量 GWork 条目必须作为普通供应商保留");
+        Assertions.assertEquals("https://www.gourd-ai.cn", gwork.getApiUrl());
+        Assertions.assertEquals("sk-legacy", gwork.getApiKey());
+        Assertions.assertTrue(gwork.isEnabled());
+        Assertions.assertEquals(Arrays.asList("gpt-5.6-sol"), keys(loaded));
+    }
+
+    @Test
+    void loadFromFileInjectsNoProvider() throws Exception {
+        // 只有用户自己配置的供应商：加载后不得凭空注入任何内置条目（GWork 注入机制已删除）
+        writeSettings("{\"defaultModel\":\"M-1\",\"providers\":{"
+                + "\"P\":{\"name\":\"P\",\"standard\":\"openai\",\"apiUrl\":\"https:\\/\\/example.com\",\"apiKey\":\"sk\",\"enabled\":true}},"
+                + "\"models\":{\"M-1\":{\"name\":\"M-1\",\"model\":\"m1\",\"provider\":\"P\"}}}");
+
+        AgentSettings loaded = AgentSettings.loadFromFile();
+
+        Assertions.assertFalse(loaded.isLoadFailed());
+        Assertions.assertEquals(new ArrayList<>(Arrays.asList("P")),
+                new ArrayList<>(loaded.getProviders().keySet()),
+                "供应商必须原样等于用户配置，不得注入内置条目");
     }
 }

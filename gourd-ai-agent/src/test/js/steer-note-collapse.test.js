@@ -230,7 +230,13 @@ test('12 个语言包均提供 steer_expand_full（含 {0}）与 steer_collapse'
 });
 
 test('gourd-ai-tauri/ui 发布副本与 static 源保持同步（js/css/12 语言包）', () => {
-    const mirrorRoot = path.resolve(__dirname, '../../../gourd-ai-tauri/ui');
+    /* mirrorRoot 必须从 test/js 向上四级才到仓库根：__dirname = gourd-ai-agent/src/test/js，
+       ../../../ 只到 gourd-ai-agent/（拼出 gourd-ai-agent/gourd-ai-tauri/ui，不存在）。
+       旧写法配 existsSync 的早退 → 本用例恒空跑、从没真正比对过（假绿灯），
+       镜像不同步时也不会报错。路径修正后护栏才真正生效。
+       镜像（gourd-ai-tauri/ui）被 .gitignore 忽略，CI 干净检出时不存在 → 保留「不在则跳过」
+       的容错；但路径基准必须是四级，否则本地有镜像时也会被误判为不存在而空跑。 */
+    const mirrorRoot = path.resolve(__dirname, '../../../../gourd-ai-tauri/ui');
     if (!fs.existsSync(mirrorRoot)) return;
     for (const parts of [['js', 'app-message.js'], ['css', 'app.css']]) {
         const src = fs.readFileSync(path.join(staticRoot, ...parts), 'utf8').replace(/^\uFEFF/, '');

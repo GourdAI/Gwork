@@ -91,8 +91,8 @@ class HitlActionIdPairingTest {
         Assertions.assertEquals("bash", json.get("toolName").getString());
         Assertions.assertEquals("ls -la", json.get("command").getString());
 
-        // 旧两参重载保持兼容
-        WebChunk legacy = WebChunk.ofHitl("bash", "ls -la");
+        // 旧两参重载已删除：旧行为等价于 3 参重载传 null，前端降级语义不变
+        WebChunk legacy = WebChunk.ofHitl("bash", "ls -la", null);
         Assertions.assertNull(legacy.getActionId());
     }
 

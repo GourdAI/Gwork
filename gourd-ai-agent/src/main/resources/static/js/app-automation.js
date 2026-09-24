@@ -559,7 +559,7 @@
 
         // 时间选择器（laydate 只对存在的元素渲染；DOM 每次重建，无残留实例问题）
         if (typeof layui !== 'undefined' && layui.laydate) {
-            layui.laydate.render({ elem: '#autoDailyTime', type: 'time', format: 'HH:mm', theme: '#6366f1' });
+            layui.laydate.render({ elem: '#autoDailyTime', type: 'time', format: 'HH:mm', theme: (getComputedStyle(document.body).getPropertyValue('--accent') || '#18181b').trim() });
         }
 
         renderSelects();

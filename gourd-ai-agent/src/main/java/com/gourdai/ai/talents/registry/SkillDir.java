@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-2025 noear.org and authors
+ * Copyright 2017-2026 noear.org and authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * https://www.apache.org/licenses/LICENSE-2.0
+ *      https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,30 +13,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.gourdai.ai.talents.mount;
+package com.gourdai.ai.talents.registry;
 
 import org.noear.solon.core.util.Assert;
 
 import java.nio.file.Path;
 
 /**
- * 技能目录
+ * 技能目录（扫描产物）。
+ *
+ * <p>原位于 {@code com.gourdai.ai.talents.mount}，随挂载点功能移除迁至本包。
+ * 变化：{@code mountAlias} / {@code aliasPath} 两个字段被 {@link TalentScope} 取代——
+ * 技能发现目录只有「全局区」与「工作区」两处，不再需要挂载别名这层间接。</p>
  *
  * @author noear
  * @since 3.11.0
  */
 public class SkillDir {
     private final String name;
-    private final String mountAlias;
-    private final String aliasPath;
+    private final TalentScope scope;
     private final Path realPath;
     private final String description;
     private final String version;
 
-    SkillDir(String name, String mountAlias, String aliasPath, Path realPath, String description, String version) {
+    public SkillDir(String name, TalentScope scope, Path realPath, String description, String version) {
         this.name = name;
-        this.mountAlias = mountAlias;
-        this.aliasPath = aliasPath;
+        this.scope = scope;
         this.realPath = realPath;
 
         if (Assert.isEmpty(description)) {
@@ -57,14 +59,10 @@ public class SkillDir {
     }
 
     /**
-     * 持载别名
+     * 归属作用域（全局区 / 工作区）。
      */
-    public String getMountAlias() {
-        return mountAlias;
-    }
-
-    public String getAliasPath() {
-        return aliasPath;
+    public TalentScope getScope() {
+        return scope;
     }
 
     public Path getRealPath() {

@@ -20,6 +20,7 @@ import org.noear.solon.Solon;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.ContextLengthPolicy;
 import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.permission.AccessMode;
 import com.gourdai.harness.change.FileChangeService;
 import com.gourdai.harness.talents.cli.TodoTalent;
 import com.gourdai.harness.talents.memory.MemorySearchResult;
@@ -29,7 +30,7 @@ import com.gourdai.harness.talents.memory.MemorySolution;
 import com.gourdai.harness.talents.memory.MemorySolutionProvider;
 import com.gourdai.harness.agent.AgentDefinition;
 import com.gourdai.harness.command.Command;
-import com.gourdai.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.registry.SkillDir;
 import org.noear.solon.annotation.*;
 import com.gourdai.core.config.AgentFlags;
 import com.gourdai.core.config.AgentSettings;
@@ -554,6 +555,8 @@ public class WebController {
         String thinkingDepth = ThinkingDepth.AUTO;
         // 当前会话的上下文窗口：与思考档位同为会话级用户选择，无会话时给固定默认
         long contextLength = ContextLengthPolicy.DEFAULT_CONTEXT_LENGTH;
+        // 当前会话的访问控制档位（无会话时给默认 default），供前端初始化档位切换器
+        String accessMode = AccessMode.DEFAULT.code();
 
         if (Assert.isNotEmpty(list)) {
             if (Assert.isNotEmpty(sessionId)) {
@@ -570,6 +573,7 @@ public class WebController {
 
                 thinkingDepth = ThinkingDepth.normalize(session.getContext().getAs(HarnessEngine.CTX_THINKING_DEPTH));
                 contextLength = ContextLengthPolicy.resolve(session);
+                accessMode = AccessMode.normalize(session.getContext().getAs(AccessMode.CTX_KEY)).code();
             } else {
                 data.put("selected", engine.getModelOrDef(null).getNameOrModel());
             }
@@ -582,6 +586,8 @@ public class WebController {
         data.put("contextLength", contextLength);
         data.put("contextLengthDefault", ContextLengthPolicy.DEFAULT_CONTEXT_LENGTH);
         data.put("contextOptions", ContextLengthPolicy.options());
+        // 会话级访问控制档位（default / full），供前端初始化档位切换器
+        data.put("accessMode", accessMode);
 
         return Result.succeed(data);
     }
@@ -651,6 +657,12 @@ public class WebController {
     @Mapping("/web/chat/context/select")
     public Result context_select(@Param("sessionId") String sessionId,
                                  @Param("contextLength") String contextLength) throws Exception {
+        // sessionId 安全校验：空/含路径分隔符或 .. 的直接拒绝，不进入会话解析
+        if (Assert.isEmpty(sessionId)
+                || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
+            return Result.failure("invalid_session");
+        }
+
         Long parsed = ContextLengthPolicy.parse(contextLength);
         if (parsed == null || !ContextLengthPolicy.isAllowed(parsed.longValue())) {
             // 非法值一律拒绝，而不是静默写入：否则会话会停在一个前端永远渲染不出的档位上
@@ -662,6 +674,42 @@ public class WebController {
         session.updateSnapshot();
 
         return Result.succeed(parsed);
+    }
+
+    /**
+     * 切换指定会话的访问控制档位。
+     *
+     * <p>与模型/思考档位/上下文窗口同理走独立端点，确保不经 {@code /web/chat/input} 的命令
+     * （如 /git、循环任务）也能感知变更；档位写入会话上下文并随快照持久化。</p>
+     *
+     * @param sessionId  会话 ID
+     * @param accessMode 目标档位（default / full，必须为合法码值）
+     * @return 操作结果（回显规范化后的档位）
+     * @throws Exception 会话操作异常
+     */
+    @Post
+    @Mapping("/web/chat/access/select")
+    public Result access_select(@Param("sessionId") String sessionId,
+                                @Param("accessMode") String accessMode) throws Exception {
+        // sessionId 安全校验：与 context_select 同款，不进入会话解析
+        if (Assert.isEmpty(sessionId)
+                || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
+            return Result.failure("invalid_session");
+        }
+
+        if (!AccessMode.isAllowed(accessMode)) {
+            // 非法值一律拒绝，而不是静默写入：否则会话会停在一个前端永远渲染不出的档位上。
+            // 【口径钉死】本端点是「主动切换」语义，拼错必须可感知；
+            // 而 /web/chat/input 携带的 accessMode 不校验（非法即回落默认档），
+            // 与「未声明者一律默认档」同语义——两处取向相反是刻意的，勿对齐。
+            return Result.failure(400, "Unsupported accessMode: " + accessMode);
+        }
+
+        AgentSession session = engine.getSession(sessionId);
+        session.getContext().put(AccessMode.CTX_KEY, AccessMode.normalize(accessMode).code());
+        session.updateSnapshot();
+
+        return Result.succeed(AccessMode.normalize(accessMode).code());
     }
 
     /**
@@ -833,6 +881,9 @@ public class WebController {
      * 接收一条即时插话请求。
      *
      * <p>HTTP 200 + accepted 仅表示已进入邮箱，实际生效须等待 steer_applied 或 steer_dropped 事件。</p>
+     *
+     * <p>附件以【会话内相对路径】传递，须先经 {@code /web/chat/attachment/upload} 落盘：
+     * 插话协议是纯文本表单，承载不了 File 对象，而邮箱可能滞留多条插话，也不适合缓存 base64。</p>
      */
     @Post
     @Mapping("/web/chat/steer")
@@ -847,17 +898,24 @@ public class WebController {
         if (sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
             return Result.failure("INVALID_SESSION");
         }
-        // 参数校验
-        if (Assert.isEmpty(text) || text.trim().isEmpty()) {
+        // 附件路径是重复表单键，用 paramValues 显式取全量（@Param 数组绑定不保证同口径）
+        String[] imagePaths = ctx.paramValues("imagePaths");
+        String[] filePaths = ctx.paramValues("filePaths");
+        boolean hasAttachments = (imagePaths != null && imagePaths.length > 0)
+                || (filePaths != null && filePaths.length > 0);
+        // 参数校验：纯附件插话（只贴图不打字）同样合法，与发送主链路的空输入兜底一致
+        if ((Assert.isEmpty(text) || text.trim().isEmpty()) && !hasAttachments) {
             return Result.failure("EMPTY_TEXT");
         }
-        if (text.codePointCount(0, text.length()) > SteerInterceptor.MAX_TEXT_LENGTH) {
+        if (text != null && text.codePointCount(0, text.length()) > SteerInterceptor.MAX_TEXT_LENGTH) {
             return Result.failure("TEXT_TOO_LONG");
         }
         if (Assert.isEmpty(steerId)) {
             return Result.failure("MISSING_STEER_ID");
         }
-        String result = webGate.steer(sessionId, runId, steerId, text);
+        String result = webGate.steer(sessionId, runId, steerId, text,
+                Arrays.asList(imagePaths == null ? new String[0] : imagePaths),
+                Arrays.asList(filePaths == null ? new String[0] : filePaths));
         Map<String, Object> resp = new java.util.LinkedHashMap<>();
         resp.put("status", result);
         if ("accepted".equals(result) || "duplicate".equals(result)) {
@@ -1024,7 +1082,6 @@ public class WebController {
             Map<String, String> item = new LinkedHashMap<>();
             item.put("name", skill.getName());
             item.put("description", desc);
-            item.put("mountAlias", skill.getMountAlias());
             item.put("type", "skill");
             data.add(item);
         }
@@ -1044,10 +1101,14 @@ public class WebController {
      * @param attachmentTypes 附件类型数组，与 attachments 一一对应
      * @param model           指定的 AI 模型名称，可为 null（使用默认模型）
      * @param sessionId       会话 ID，若为空则从请求头 X-Session-Id 获取
+     * @param attachmentPaths 已落盘附件的会话内相对路径（{@code uploads/xxx}），可为 null；
+     *                        供队列出队与插话降级重发使用——这两条通道手里只有路径没有 File
+     * @param attachmentPathTypes 与 attachmentPaths 一一对应的类型声明（{@code image} / {@code file}）
      * @return 操作结果（AI 结果通过 WebSocket 推送）
      */
     @Mapping("/web/chat/input")
-    public Result chat_input(Context ctx, String input, UploadedFile[] attachments, String attachmentTypes[], String model, String sessionId) {
+    public Result chat_input(Context ctx, String input, UploadedFile[] attachments, String attachmentTypes[], String model, String sessionId,
+                             String[] attachmentPaths, String[] attachmentPathTypes) {
         try {
             if (sessionId == null || sessionId.isEmpty()) {
                 sessionId = ctx.headerOrDefault("X-Session-Id", "web");
@@ -1074,6 +1135,7 @@ public class WebController {
             // 挂起任务身份标识：前端提交问答/审批时声明「正在回应哪一次调用」。
             // 不传时（旧前端）降级为旧行为，由 WebGate 记警告日志，见 WebGate#onChatInput 注释。
             String actionId = ctx.param("actionId");
+            String accessMode = ctx.param("accessMode");
 
             // busy 请求不允许改变活动任务的会话根；真正的原子 busy 判定在 WebGate 输入锁内完成。
             // questionAnswer 与 hitlAction 一样属于“恢复已挂起任务”的输入，不按 busy 拒绝。
@@ -1087,7 +1149,9 @@ public class WebController {
             // 路由到 WebGate 处理（AI 结果通过 WebSocket 推送到前端）
             // 网页端手动输入：source=null，出站不回推 IM（仅当活跃会话由 IM/Loop 触发时才回推）
             WebGate.InputResult accepted = webGate.onChatInput(sessionId, sessionCwd, input, model, attachments, attachmentTypes,
-                    hitlAction, null, clientMessageId, questionAnswer, actionId);
+                    hitlAction, null, clientMessageId, questionAnswer, actionId, accessMode,
+                    Arrays.asList(attachmentPaths == null ? new String[0] : attachmentPaths),
+                    Arrays.asList(attachmentPathTypes == null ? new String[0] : attachmentPathTypes));
             if (accepted == WebGate.InputResult.BUSY) {
                 return Result.succeed("busy");
             }
@@ -1102,6 +1166,49 @@ public class WebController {
             return Result.succeed();
         } catch (Throwable e) {
             LOG.error("[Web] chat_input error: {}", e.getMessage());
+            return Result.failure(500, e.getMessage());
+        }
+    }
+
+    /**
+     * 附件预上传：把浏览器内存里的 File 落盘到会话 uploads 目录，返回可延后引用的相对路径。
+     *
+     * <p>存在的理由：插话协议是纯文本表单、队列协议存的是相对路径，两者都表达不了 File 对象。
+     * 任务执行中用户带着附件按 Enter/Tab 时，先把附件落盘、再用路径走原有通道，
+     * 附件才不会在「排队/插话」这一跳被静默丢掉。落盘不发起模型调用，运行中调用是安全的。</p>
+     *
+     * <p>与发送主链路共用 {@link WebGate#saveAttachments}，目录、命名与安全校验完全一致，
+     * 因此「立即发送」与「延后发送」读到的是同一份文件。</p>
+     *
+     * @param attachments     待落盘的附件
+     * @param attachmentTypes 与 attachments 一一对应的类型声明（{@code image} / {@code file}）
+     * @return {@code items: [{path, type, name, size}]}，顺序与上传顺序一致
+     */
+    @Post
+    @Mapping("/web/chat/attachment/upload")
+    public Result<Map<String, Object>> attachmentUpload(Context ctx, UploadedFile[] attachments,
+                                                        String[] attachmentTypes, String sessionId) {
+        try {
+            sessionId = getSessionId(ctx, sessionId);
+            Assert.notNull(sessionId, "sessionId is required");
+            validateSessionId(sessionId);
+
+            if (attachments == null || attachments.length == 0) {
+                return Result.failure("EMPTY_ATTACHMENT");
+            }
+
+            List<Map<String, Object>> items = webGate.saveAttachments(sessionId,
+                    ctx.header("X-Session-Cwd"), attachments, attachmentTypes);
+            if (items.isEmpty()) {
+                // 文件名全部非法：必须明确失败，让前端保留输入与附件，不能静默当成上传成功
+                return Result.failure("INVALID_ATTACHMENT_NAME");
+            }
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("items", items);
+            return Result.succeed(resp);
+        } catch (Throwable e) {
+            LOG.error("[Web] attachment upload error: {}", e.getMessage(), e);
             return Result.failure(500, e.getMessage());
         }
     }

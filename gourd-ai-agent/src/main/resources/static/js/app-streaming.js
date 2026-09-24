@@ -129,13 +129,155 @@ $(newChatBtn).on('click', function() {
 });
 
 /* ===== Send ===== */
-function queueRunningText(sess, text) {
+/* 运行中入队。imagePaths / filePaths 是【已落盘】的会话内相对路径（uploads/xxx），
+   纯文本入队时省略。文本与附件都为空时不入队——旧实现只判文本，纯附件消息会被静默丢弃。 */
+function queueRunningText(sess, text, imagePaths, filePaths, toastKey) {
     var queueText = (text || '').trim();
-    if (!queueText || !window.messageQueue) return;
-    window.messageQueue.add(sess.sessionId, queueText, [], []).then(function() {
+    var images = imagePaths || [];
+    var files = filePaths || [];
+    if (!window.messageQueue) return;
+    if (!queueText && images.length === 0 && files.length === 0) return;
+    window.messageQueue.add(sess.sessionId, queueText, images, files).then(function() {
         updateMessageQueueUI();
         clearInput();
-        if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.queued'), 'info');
+        clearAttachmentPreview();
+        var key = toastKey
+            || ((images.length || files.length) ? 'streaming.queued_with_attachments' : 'streaming.queued');
+        if (typeof showToast === 'function') showToast(GourdI18n.t(key), 'info');
+    }, function() {
+        // 入队失败绝不清空：文本与附件都还留在输入框里，用户看得见、也能重试。
+        if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.queue_failed'), 'error');
+    });
+}
+
+/* ===== 附件预上传 =====
+   插话（/web/chat/steer）是纯文本表单、队列（queue.json）存的是相对路径，两条通道都表达不了
+   浏览器内存里的 File。所以运行中带附件时必须先落盘，再用路径走原有通道。
+   落盘目录与正常发送完全一致（<sessionDir>/uploads/），延后发送读到的是同一份文件。
+   resolve: { imagePaths, filePaths, items }；reject: 上传失败（调用方须保留输入与附件） */
+function uploadPendingAttachments(sess, files) {
+    var formData = new FormData();
+    formData.append('sessionId', sess.sessionId);
+    for (var i = 0; i < files.length; i++) {
+        formData.append('attachments', files[i].file, files[i].name);
+        formData.append('attachmentTypes', files[i].attachmentsType || 'file');
+    }
+    var headers = {};
+    var cwd = sess.projectRoot || (typeof getSessionCwd === 'function' ? getSessionCwd() : '');
+    if (cwd) headers['X-Session-Cwd'] = cwd;
+
+    return $.ajax({
+        url: '/web/chat/attachment/upload',
+        method: 'POST',
+        data: formData,
+        processData: false,
+        contentType: false,
+        headers: headers
+    }).then(function(resp) {
+        var st = resp;
+        if (typeof st === 'string') { try { st = JSON.parse(st); } catch (e) { st = null; } }
+        var items = (st && st.code === 200 && st.data && st.data.items) || [];
+        if (!items.length) return $.Deferred().reject(new Error('upload_failed')).promise();
+        // 图片/文件的归类以服务端为准：它按扩展名与声明类型共同判定，
+        // 与发送主链路同一口径，避免同一张图在两条路径上被当成不同东西。
+        var imagePaths = [], filePaths = [];
+        for (var k = 0; k < items.length; k++) {
+            if (items[k].type === 'image') imagePaths.push(items[k].path);
+            else filePaths.push(items[k].path);
+        }
+        return { imagePaths: imagePaths, filePaths: filePaths, items: items };
+    });
+}
+
+/* 上传输入框里的附件，成功后把引用交给 onUploaded。
+   两条铁律：
+   ① 任何一步失败都不清空输入框与附件预览——附件已落盘不算丢，但用户视角里
+      「我按了发送却什么都没发生」比一条失败提示糟糕得多；
+   ② 上传是异步的，回来时必须确认输入区没被用户改过，否则会把用户刚删掉的附件发出去。 */
+function withUploadedAttachments(sess, text, onUploaded) {
+    if (sess._attachmentUploading) {
+        if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.attachment_uploading'), 'info');
+        return;
+    }
+    if (pendingFiles.length > MAX_ATTACHMENTS) {
+        showToast(GourdI18n.t('ui.attachment_limit', MAX_ATTACHMENTS), 'error');
+        return;
+    }
+
+    // 独立快照：clearAttachmentPreview 只释放 pendingFiles 中的原对象，
+    // 上传期间用户切走会话（草稿 stash）也不会让这些引用失效。
+    var files = [];
+    var names = [];
+    for (var i = 0; i < pendingFiles.length; i++) {
+        files.push($.extend({}, pendingFiles[i]));
+        names.push(pendingFiles[i].name);
+    }
+    var version = _pendingFilesVersion;
+
+    /* 输入区是否仍是按下发送键时的样子。附件名是全局唯一的（app-ui.js 生成唯一名防覆盖），
+       按名字逐个比对即可发现「上传期间删了/加了附件」；文本与版本号一起兜住改写与清空。 */
+    function inputUnchanged() {
+        if (_pendingFilesVersion !== version) return false;
+        if (getInputText() !== text) return false;
+        if (pendingFiles.length !== names.length) return false;
+        for (var n = 0; n < names.length; n++) {
+            var found = false;
+            for (var m = 0; m < pendingFiles.length; m++) {
+                if (pendingFiles[m].name === names[n]) { found = true; break; }
+            }
+            if (!found) return false;
+        }
+        return true;
+    }
+
+    sess._attachmentUploading = true;
+    uploadPendingAttachments(sess, files).then(function(refs) {
+        if (!inputUnchanged()) {
+            // 用户在上传期间动了输入区：放弃本次提交，保留现场让他重新确认后再发。
+            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.attachment_changed'), 'info');
+            return;
+        }
+        onUploaded(refs);
+    }, function() {
+        if (!inputUnchanged()) return;
+        if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.attachment_upload_failed'), 'error');
+    }).always(function() {
+        sess._attachmentUploading = false;
+    });
+}
+
+/* 运行中带附件的提交：附件落盘后按 Enter/Tab 的语义分流到插话或队列。 */
+function sendBlockedWithAttachments(sess, text, forceQueue) {
+    withUploadedAttachments(sess, text, function(refs) {
+        if (forceQueue === true) {
+            queueRunningText(sess, text, refs.imagePaths, refs.filePaths);
+            return;
+        }
+        sendSteer(sess, text, refs.imagePaths, refs.filePaths);
+    });
+}
+
+/* 问答卡挂起时带附件：文本照常填进当前题的答案，附件单独排入队列（content 为空），
+   等本轮作答恢复的任务结束后由队列链路带附件发送。
+   顺序讲究：必须先落答案、再传附件。applyQuestionCustomAnswerByText 内部会 clearInput()，
+   而 queueRunningText 入队成功后也会 clearInput()——若先入队再填答案，一旦答案落空
+   （卡片已被别处收起），那段文字就被 clearInput 抹掉且无处可去；反过来先填答案，
+   上传失败时答案已在卡片里、附件仍在输入框，两边都不丢，用户重按 Enter 即可续上。 */
+function queueQuestionAttachments(sess, text) {
+    var answer = (text || '').trim();
+    if (answer) {
+        if (typeof applyQuestionCustomAnswerByText !== 'function'
+                || !applyQuestionCustomAnswerByText(sess, answer)) {
+            // 答案无处安放：原地保留文本与附件，提示用户先回答或跳过这道题。
+            if (typeof showToast === 'function') showToast(GourdI18n.t('chat.question_attachment_wait'), 'info');
+            return;
+        }
+    }
+    // 答案已落位（输入框随之被清空）：以清空后的输入区为基准做「未变」校验，
+    // 否则守卫会拿旧文本比对而必然失配，把刚传好的附件白白丢掉。
+    withUploadedAttachments(sess, getInputText(), function(refs) {
+        queueRunningText(sess, '', refs.imagePaths, refs.filePaths,
+            answer ? 'chat.question_attachment_queued' : 'streaming.queued_with_attachments');
     });
 }
 
@@ -143,19 +285,26 @@ function makeSteerId() {
     return 'steer-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
 }
 
-function sendSteer(sess, text) {
+function sendSteer(sess, text, imagePaths, filePaths) {
     if (!sess || sess._steerSending) return;
     var steerId = makeSteerId();
     var snapshot = (text || '').trim();
+    var images = imagePaths || [];
+    var files = filePaths || [];
+    var hasAttachments = images.length > 0 || files.length > 0;
     var runId = sess.activeRunId || '';
-    var pending = { steerId: steerId, text: snapshot, runId: runId, createdAt: Date.now(), state: 'sending' };
+    var pending = { steerId: steerId, text: snapshot, runId: runId, createdAt: Date.now(), state: 'sending',
+        imagePaths: images, filePaths: files };
     sess.steerPending[steerId] = pending; // 先登记，处理 WS applied 早于 HTTP 200 的竞态
     sess._steerSending = true;
 
     $.ajax({
         url: '/web/chat/steer',
         method: 'POST',
-        data: { sessionId: sess.sessionId, runId: runId, steerId: steerId, text: snapshot },
+        // traditional：数组序列化成 imagePaths=a&imagePaths=b，后端按重复表单键取全量
+        traditional: true,
+        data: { sessionId: sess.sessionId, runId: runId, steerId: steerId, text: snapshot,
+            imagePaths: images, filePaths: files },
         headers: sess.projectRoot ? { 'X-Session-Cwd': sess.projectRoot } : {}
     }).done(function(resp) {
         var status = resp && resp.data && resp.data.status;
@@ -164,19 +313,29 @@ function sendSteer(sess, text) {
                 sess.steerPending[steerId].state = 'accepted';
             }
             clearInput();
-            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_accepted'), 'info');
+            clearAttachmentPreview();
+            if (typeof showToast === 'function') {
+                showToast(GourdI18n.t(hasAttachments
+                    ? 'streaming.steer_accepted_with_attachments' : 'streaming.steer_accepted'), 'info');
+            }
             return;
         }
         delete sess.steerPending[steerId];
-        // run 已切换/刚结束或邮箱已满：可靠降级为已有持久化队列。
-        queueRunningText(sess, snapshot);
-        if (typeof showToast === 'function') {
-            var key = status === 'box_full' ? 'streaming.steer_box_full' : 'streaming.steer_deferred';
-            showToast(GourdI18n.t(key), 'info');
+        // 服务端判定这条插话没有可执行内容（空文本 + 附件路径全被判非法）：
+        // 不能谎报「已加入队列」，如实提示失败并保留输入与附件。
+        if (!snapshot && images.length === 0 && files.length === 0) {
+            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_failed'), 'error');
+            return;
         }
+        // run 已切换/刚结束或邮箱已满：可靠降级为已有持久化队列，附件路径一并带过去，
+        // 否则「插话 → 转队列」这一跳会把用户刚上传的图片静默丢掉。
+        // 提示语走 toastKey 传进去：box_full / deferred 两句本身已含「已加入队列」，
+        // 再叠一条 queued 就是重复提示。
+        queueRunningText(sess, snapshot, images, files,
+            status === 'box_full' ? 'streaming.steer_box_full' : 'streaming.steer_deferred');
     }).fail(function() {
         delete sess.steerPending[steerId];
-        // 网络失败不清空输入，不自动重试，避免是否已受理不确定时重复执行。
+        // 网络失败不清空输入与附件，不自动重试，避免是否已受理不确定时重复执行。
         if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_failed'), 'error');
     }).always(function() {
         sess._steerSending = false;
@@ -191,15 +350,15 @@ function sendMessage(forceQueue) {
 
     /* 问答挂起路由：当前会话有待作答的结构化问答卡时，输入框文本等价于卡片内「其他补充」，
        直接记为当前题的自定义答案，不得进入普通发送链路（streaming/steer/queue 行为不受影响）。
-       附件无处安放（答案协议只有 text 字段），此时一律提示并保留，绝不静默吞掉——
-       与运行中插话分支对附件的处理保持同构。 */
+       附件不能进答案（答案协议只有 text 字段）：先落盘再排入队列，等本轮作答恢复的任务结束后
+       由队列链路带附件发送——既不阻塞作答，也不静默吞掉附件。 */
     if (activeSessionId && sessionMap[activeSessionId]
             && typeof getPendingQuestionState === 'function') {
         var pendingQuestion = getPendingQuestionState(sessionMap[activeSessionId]);
         if (pendingQuestion) {
             if (pendingFiles.length > 0) {
-                if (typeof showToast === 'function') showToast(GourdI18n.t('chat.question_attachment_wait'), 'info');
-                return; // 保留文本与附件
+                queueQuestionAttachments(sessionMap[activeSessionId], text);
+                return;
             }
             if (text && typeof applyQuestionCustomAnswerByText === 'function'
                     && applyQuestionCustomAnswerByText(sessionMap[activeSessionId], text)) {
@@ -214,18 +373,28 @@ function sendMessage(forceQueue) {
     
     if (isBlocked) {
         var blockedSess = sessionMap[activeSessionId];
-        // 当前队列只持久化附件名，不持久化 File；禁止伪排队后静默丢附件。
-        if (pendingFiles.length > 0) {
-            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_attachment_wait'), 'info');
+        var isCommand = text && text.trim().charAt(0) === '/';
+        if (isCommand && pendingFiles.length > 0) {
+            // 命令是纯文本协议：带附件排队会被后端当普通消息发给模型（附件让命令判定失效），
+            // 把 "/rerun" 变成一句提示词。明确拦下，而不是让用户事后发现命令没执行。
+            if (typeof showToast === 'function') {
+                showToast(GourdI18n.t('streaming.command_attachment_unsupported'), 'info');
+            }
             return; // 保留文本与附件
+        }
+        // 运行中 Enter：非命令即时插话；斜杠命令需 Tab 显式排队。
+        if (isCommand && forceQueue !== true) {
+            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_command_queue'), 'info');
+            return;
+        }
+        // 附件只存在于浏览器内存，插话与队列两条通道都只能表达会话内相对路径：
+        // 先落盘再走原有通道，任何一步失败都保留输入与附件。
+        if (pendingFiles.length > 0) {
+            sendBlockedWithAttachments(blockedSess, text, forceQueue === true);
+            return;
         }
         if (forceQueue === true) {
             queueRunningText(blockedSess, text);
-            return;
-        }
-        // 运行中 Enter：纯文本非命令即时插话；斜杠命令需 Tab 显式排队。
-        if (text && text.trim().charAt(0) === '/') {
-            if (typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_command_queue'), 'info');
             return;
         }
         sendSteer(blockedSess, text);
@@ -271,7 +440,8 @@ function sendMessage(forceQueue) {
         saveChatToHistory(displayText);
     }
 
-    if (!inChatMode) switchToChatMode();
+    var fromWelcome = !inChatMode;
+    if (fromWelcome) switchToChatMode();
     setActiveSession(SESSION_ID);
 
     var sess = sessionMap[SESSION_ID];
@@ -303,7 +473,7 @@ function sendMessage(forceQueue) {
     // otherwise releaseAttachmentData() would null out dataUrl/file in the
     // shallow-copied filesToSend snapshot (filesToSend = pendingFiles.slice()),
     // causing broken image icons and empty file uploads.
-    clearInput();
+    clearInput(fromWelcome);
     clearAttachmentPreview();
 }
 
@@ -351,7 +521,9 @@ window.sendCommandSilent = sendCommandSilent;
  * @param fields 该路径独有的字段。【关键语义】只有显式出现的键才会被 append，
  *               绝不对缺失的键补空串——后端靠 input 键的【存在性】区分「新一轮」与
  *               「续轮」，给 HITL/问答卡凭空加一个空 input 会把续轮误判成新轮。
- * @param files  附件数组（仅正常发送路径传），元素形如 {file, name, attachmentsType}
+ * @param files  附件数组（仅正常发送路径传）。两种形态：{file, name, attachmentsType} 走 multipart
+ *               上传；{path, attachmentsType} 引用会话内已落盘的附件——队列出队与 busy 补发
+ *               手里只有相对路径，拿不到 File 对象
  * @param hooks  { onBusy, onDone, onFail }；三条路径失败后的收尾动作各不相同，不下沉
  */
 function postChatInput(sess, fields, files, hooks) {
@@ -374,10 +546,23 @@ function postChatInput(sess, fields, files, hooks) {
         }
     }
 
+    // 访问控制档位（会话级）：三条发送路径（正常发送/续轮/续答）统一携带，
+    // 否则档位不会随消息生效。取值按会话查（可能晚于 send 触发的会话切换不被错误带入）。
+    if (window.GourdAccessMode && typeof window.GourdAccessMode.modeForSession === 'function') {
+        formData.append('accessMode', window.GourdAccessMode.modeForSession(sess.sessionId));
+    }
+
     if (files && files.length) {
         for (var i = 0; i < files.length; i++) {
-            formData.append('attachments', files[i].file, files[i].name);
-            formData.append('attachmentTypes', files[i].attachmentsType || 'file');
+            if (files[i].file) {
+                // 浏览器内存中的 File：multipart 上传，后端落盘到 <sessionDir>/uploads/
+                formData.append('attachments', files[i].file, files[i].name);
+                formData.append('attachmentTypes', files[i].attachmentsType || 'file');
+            } else if (files[i].path) {
+                // 已落盘附件（队列出队 / busy 补发）：只传会话内相对路径，后端读回同一份文件
+                formData.append('attachmentPaths', files[i].path);
+                formData.append('attachmentPathTypes', files[i].attachmentsType || 'file');
+            }
         }
     }
 
@@ -704,7 +889,7 @@ function onWebChunk(sess, chunk) {
 /* 挂起态 done：后端在等待用户作答/审批时也会发 done（WebStreamBuilder 在 question/hitl 帧之后紧跟一个 done）。
    它表达的是「本段流先停一下」而非「本轮真的结束」：恢复后同一批工具的剩余帧还会回来。
    若按普通 done 清掉 toolBatchesById/toolCardsById，恢复后的成员卡找不到原批次容器，同一批会被拆成两组渲染。
-   辨识方式：优先用后端显式标记 chunk.suspended（WebChunk.ofDoneSuspended 下发）；
+   辨识方式：优先用后端显式标记 chunk.suspended（WebGate 出站补打，见 line.setSuspended(true)）；
    旧后端无该字段时降级看本地相位——上一帧是 question/hitl 即为挂起（二者都紧跟 done）。 */
 function isSuspendedDone(sess, chunk) {
     if (chunk && chunk.suspended === true) return true;
@@ -821,6 +1006,9 @@ function finishStream(sess, opts) {
     // 显示助手消息时间戳
     setAssistantTime(sess, sess._lastCreatedAt || Date.now());
     sess._lastCreatedAt = null;
+
+    // 轮末收敛：把该轮变更卡片定位到本轮节点组末尾（流式中新节点可能晚于卡片到达）
+    if (typeof window.repositionFileChangeCards === 'function') window.repositionFileChangeCards(sess);
 
     // 流式结束，显示复制按钮（流式过程中被隐藏）
     if (sess.currentBubbleEl) {
@@ -1408,8 +1596,8 @@ setActiveSession = function(sid) {
         // 绑定本次切换的会话及其所属根，避免异步请求读取后续变化的全局工作区。
         var todoSess = (typeof sessionMap !== 'undefined' && sessionMap) ? sessionMap[sid] : null;
         if (window.loadTodos) window.loadTodos(sid, todoSess ? todoSess.projectRoot : '');
-        // 切换会话时把「本轮文件变更」入口切到新会话的最新一轮（chip 显隐/面板内容由 app-file-changes.js 汇算）
-        if (window.refreshFileChangesChip) window.refreshFileChangesChip(sid);
+        // 切换会话时补齐该会话的每轮变更卡片（帧早于容器创建到达的卡片在此补渲染；幂等）
+        if (window.renderSessionFileChangeCards) window.renderSessionFileChangeCards(todoSess);
         // 切换会话时刷新消息队列 UI（列表/chip/badge）
         if (window.updateMessageQueueUI) window.updateMessageQueueUI();
         // 注：上下文指示器的恢复已由 setActiveSession 内部单点完成（app-base.js），

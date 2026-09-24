@@ -45,9 +45,7 @@
 
     // ==================== DOM 元素 ====================
     var $view = $('#modelSettingsView');
-    var $groupBuiltin = $('#msGroupBuiltin');
     var $customGroup = $('#msGroupCustom');
-    var $builtinList = $('#msBuiltinList');
     var $customList = $('#msCustomList');
     var $formTitle = $('#msProviderFormTitle');
     var $formDesc = $('#msProviderFormDesc');
@@ -61,10 +59,6 @@
     // ==================== 初始化 ====================
     function init() {
         bindEvents();
-        // 后端启动失败时仍会释放门闸，但模型配置页不能因此渲染任何内置内容。
-        // 先清空并隐藏内置分组，避免静态 HTML 在接口失败/后端未启动期间短暂露出。
-        $groupBuiltin.hide();
-        $builtinList.empty();
         // 静默预载：此时界面停在首页，拉不到供应商不应该弹窗打扰
         __whenBackendReady(function () { loadProvidersListIfBackendReady(true); });
     }
@@ -442,15 +436,13 @@
         } catch (e) { return []; }
     }
 
-    /** 按本地保存顺序重排 providers（内置组保持后端原顺序且恒在上方） */
+    /** 按本地保存顺序重排 providers（未保存过顺序的排到末尾） */
     function applyProviderOrder() {
         var saved = readProviderOrder();
         if (!saved.length) return;
         var rank = {};
         saved.forEach(function (n, i) { rank[n] = i; });
         providers.sort(function (a, b) {
-            if (!!a.builtin !== !!b.builtin) return a.builtin ? -1 : 1;
-            if (a.builtin) return 0;
             return (rank[a.name] !== undefined ? rank[a.name] : 9999) - (rank[b.name] !== undefined ? rank[b.name] : 9999);
         });
     }
@@ -464,13 +456,13 @@
         try { localStorage.setItem(LS_PROVIDER_ORDER, JSON.stringify(order)); } catch (e) { /* 存储不可用时忽略 */ }
     }
 
-    /** 持久化展示顺序：裁剪已删除的名称，并追加新增的自定义供应商 */
+    /** 持久化展示顺序：裁剪已删除的名称，并追加新增的供应商 */
     function saveProviderOrder(names) {
         var valid = {};
-        providers.forEach(function (p) { if (!p.builtin) valid[p.name] = true; });
+        providers.forEach(function (p) { valid[p.name] = true; });
         var pruned = (names || []).filter(function (n) { return valid[n]; });
         providers.forEach(function (p) {
-            if (!p.builtin && pruned.indexOf(p.name) === -1) pruned.push(p.name);
+            if (pruned.indexOf(p.name) === -1) pruned.push(p.name);
         });
         try { localStorage.setItem(LS_PROVIDER_ORDER, JSON.stringify(pruned)); } catch (e) { /* 存储不可用时忽略 */ }
     }
@@ -502,10 +494,10 @@
             success: function (res) {
                 if (res.code === 200) {
                     providers = res.data || [];
-                    // 若当前选中项仍存在于新列表（且未被屏蔽）中则保持选中，否则回落到「添加供应商」表单
+                    // 若当前选中项仍存在于新列表中则保持选中，否则回落到「添加供应商」表单
                     if (selectedName !== '__add__') {
                         var stillExists = false;
-                        providers.forEach(function (p) { if (p.name === selectedName && !p.builtin) stillExists = true; });
+                        providers.forEach(function (p) { if (p.name === selectedName) stillExists = true; });
                         if (!stillExists) {
                             selectedName = '__add__';
                         }
@@ -537,40 +529,27 @@
 
     function renderProviderList() {
         applyProviderOrder();
-        var builtinHtml = '';
         var customHtml = '';
-        var hasBuiltin = false;
         var hasCustom = false;
 
         providers.forEach(function (provider) {
-            // 内置供应商始终屏蔽：不渲染、不计入分组。
-            // 产品要求内置相关内容不出现在模型配置页，不能只依赖后端成功返回后的 CSS 状态。
-            if (provider.builtin) return;
             var item = renderProviderItem(provider);
-            if (provider.builtin) {
-                builtinHtml += item;
-                hasBuiltin = true;
-            } else {
-                customHtml += item;
-                hasCustom = true;
-            }
+            customHtml += item;
+            hasCustom = true;
         });
 
-        $groupBuiltin.toggle(hasBuiltin);
         $customGroup.toggle(hasCustom);
-        $builtinList.html(builtinHtml);
         $customList.html(customHtml);
     }
 
     function renderProviderItem(provider) {
         var modelsCount = (provider.models || []).length;
         var selected = (selectedName === provider.name) ? ' selected' : '';
-        // 拖拽手柄：仅自定义供应商渲染（内置项不可排序）
-        var dragHandle = provider.builtin ? '' :
-            '<span class="ms-provider-drag-handle"><svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor"><circle cx="2.5" cy="2.5" r="1.4"/><circle cx="7.5" cy="2.5" r="1.4"/><circle cx="2.5" cy="7" r="1.4"/><circle cx="7.5" cy="7" r="1.4"/><circle cx="2.5" cy="11.5" r="1.4"/><circle cx="7.5" cy="11.5" r="1.4"/></svg></span>';
+        // 拖拽手柄：供应商可拖拽排序
+        var dragHandle = '<span class="ms-provider-drag-handle"><svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor"><circle cx="2.5" cy="2.5" r="1.4"/><circle cx="7.5" cy="2.5" r="1.4"/><circle cx="2.5" cy="7" r="1.4"/><circle cx="7.5" cy="7" r="1.4"/><circle cx="2.5" cy="11.5" r="1.4"/><circle cx="7.5" cy="11.5" r="1.4"/></svg></span>';
         return '<div class="ms-provider-item' + selected + (provider.enabled === false ? ' disabled' : '') + '" data-name="' + escapeAttr(provider.name) + '">' +
             dragHandle +
-            '<div class="ms-provider-icon' + (provider.builtin ? ' builtin' : ' custom') + '">' + escapeHtml((provider.name || 'B')[0].toUpperCase()) + '</div>' +
+            '<div class="ms-provider-icon custom">' + escapeHtml((provider.name || 'B')[0].toUpperCase()) + '</div>' +
             '<div class="ms-provider-info">' +
                 '<div class="ms-provider-name">' + escapeHtml(provider.name) + '</div>' +
                 '<div class="ms-provider-count">' + modelsCount + ' ' + GourdI18n.t('settings.providers.title') + '</div>' +
@@ -652,14 +631,12 @@
         }
 
         // 填充表单
-        var isBuiltin = !!(provider && provider.builtin);
-        // 名称：仅内置连接锁定；自定义供应商可改名（后端 update 支持 originalName 迁移）
-        $('#msProviderName').val(provider ? provider.name : '').prop('readonly', isBuiltin);
+        // 名称：可改名（后端 update 支持 originalName 迁移）
+        $('#msProviderName').val(provider ? provider.name : '');
         var stdVal = provider ? (provider.standard || DEFAULT_STANDARD) : DEFAULT_STANDARD;
         $('input[name="msProviderStandard"]').prop('checked', false)
             .filter('[value="' + stdVal + '"]').prop('checked', true);
-        // 内置连接：API 地址锁定只读（名称已在编辑态 readonly）
-        $('#msProviderApiUrl').val(provider ? provider.apiUrl : '').prop('readonly', isBuiltin);
+        $('#msProviderApiUrl').val(provider ? provider.apiUrl : '');
         // 密钥不回显到输入框：后端返回的 provider.apiKey 是脱敏值（如 sk-a****wxyz），
         // 一旦进入输入框就会被即时保存当成真实密钥写回，污染配置。改用 placeholder 提示「已配置」，
         // 输入框保持空；用户真正输入过才提交 apiKey（见 persistProvider）
@@ -667,11 +644,8 @@
         $('#msProviderTimeout').val(provider && provider.timeout ? provider.timeout : '');
         $('#msProviderScope').val(provider ? (provider.scope || 'user') : 'user');
 
-        // 内置连接不可删除：隐藏删除按钮（其余字段照常可编辑）
-        $('#msProviderFormActions').toggle(!!provider && !isBuiltin);
-
-        // 仅内置服务商（GWork 官方托管）显示"访问官网获取 API 密钥"提示，其它自定义服务商不显示
-        $('#msProviderBuiltinKeyHint').toggle(isBuiltin);
+        // 编辑态显示删除按钮（新增态隐藏）
+        $('#msProviderFormActions').toggle(!!provider);
 
         // 设置作用域按钮状态
         var scope = provider ? (provider.scope || 'user') : 'user';

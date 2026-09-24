@@ -869,34 +869,6 @@ public class WsGate extends SimpleWebSocketListener {
      */
     private void saveConfigToFile(String apiUrl, String apiKey, String model) {
         //todo: 这块要根据 AppSetttings 类重新进行设计。noear,2026.6
-//        try {
-//            String home = System.getProperty("user.home");
-//            Path configDir = Paths.get(home, ".gwork");
-//            Files.createDirectories(configDir);
-//
-//            Path configFile = configDir.resolve("chat-model.yml");
-//
-//            // 读取已有配置，保留未更新的字段
-//            String existApiUrl = agentPros.getChatModel() != null ? agentPros.getChatModel().getApiUrl() : null;
-//            String existApiKey = agentPros.getChatModel() != null ? agentPros.getChatModel().getApiKey() : null;
-//            String existModel = agentPros.getChatModel() != null ? agentPros.getChatModel().getNameOrModel() : null;
-//
-//            String finalApiUrl = apiUrl != null ? apiUrl : existApiUrl;
-//            String finalApiKey = apiKey != null ? apiKey : existApiKey;
-//            String finalModel = model != null ? model : existModel;
-//
-//            StringBuilder yaml = new StringBuilder();
-//            yaml.append("gourdai:\n");
-//            yaml.append("  chatModel:\n");
-//            if (finalApiUrl != null) yaml.append("    apiUrl: \"").append(escapeYaml(finalApiUrl)).append("\"\n");
-//            if (finalApiKey != null) yaml.append("    apiKey: \"").append(escapeYaml(finalApiKey)).append("\"\n");
-//            if (finalModel != null) yaml.append("    model: \"").append(escapeYaml(finalModel)).append("\"\n");
-//
-//            Files.write(configFile, yaml.toString().getBytes(StandardCharsets.UTF_8));
-//            LOG.info("[WS] Config persisted to: {}", configFile);
-//        } catch (Exception e) {
-//            LOG.error("[WS] Failed to persist config to YAML", e);
-//        }
     }
 
     private String escapeYaml(String value) {

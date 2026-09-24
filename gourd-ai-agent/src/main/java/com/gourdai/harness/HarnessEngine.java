@@ -24,6 +24,7 @@ import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.react.ReActRequest;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.harness.talents.cli.*;
+import com.gourdai.harness.talents.cli.impl.RegistrySkillProvider;
 import com.gourdai.ai.chat.message.AssistantMessage;
 import com.gourdai.ai.chat.message.ChatMessage;
 import com.gourdai.agent.react.intercept.HITLInterceptor;
@@ -40,8 +41,10 @@ import com.gourdai.harness.command.CommandRegistry;
 import com.gourdai.harness.hitl.HitlStrategy;
 import com.gourdai.ai.mcp.client.McpClientProvider;
 import com.gourdai.harness.talents.memory.MemorySolutionProvider;
-import com.gourdai.ai.talents.mount.AgentMd;
-import com.gourdai.ai.talents.mount.MountDir;
+import com.gourdai.ai.talents.registry.AgentMd;
+import com.gourdai.ai.talents.registry.TalentRegistry;
+import com.gourdai.ai.talents.registry.TalentScope;
+import com.gourdai.harness.permission.AccessMode;
 import com.gourdai.harness.permission.ToolPermission;
 import com.gourdai.harness.talents.code.CodeTalent;
 import com.gourdai.harness.talents.lsp.LspManager;
@@ -49,7 +52,7 @@ import com.gourdai.harness.talents.lsp.LspServerParameters;
 import com.gourdai.harness.talents.lsp.LspTalent;
 import com.gourdai.ai.mcp.client.McpServerParameters;
 import com.gourdai.harness.talents.memory.MemoryTalent;
-import com.gourdai.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.registry.SkillDir;
 import com.gourdai.harness.talents.gateway.openapi.ApiSource;
 import com.gourdai.harness.talents.gateway.openapi.ApiSourceClient;
 import com.gourdai.harness.talents.gateway.OpenApiGatewayTalent;
@@ -58,7 +61,7 @@ import com.gourdai.harness.talents.web.CodeSearchTalent;
 import com.gourdai.harness.talents.web.WebfetchTalent;
 import com.gourdai.harness.talents.web.WebsearchTalent;
 import org.noear.solon.core.util.Assert;
-import org.noear.solon.lang.Nullable;
+
 import org.noear.solon.lang.Preview;
 
 import java.util.*;
@@ -87,6 +90,34 @@ public class HarnessEngine {
      * <p>下划线前缀参数由框架注入且不进入 JSON schema，与 {@link #ATTR_CWD} 同机制。</p>
      */
     public final static String ATTR_THINKING_DEPTH = "__thinkingDepth";
+
+    /**
+     * 会话级访问控制档位（用户在输入框工具栏上的选择，随快照持久化）。
+     *
+     * <p>值为 {@link com.gourdai.harness.permission.AccessMode} 的 code。
+     * 这是档位的<b>权威存储位</b>——{@link #ATTR_ACCESS_MODE} 与 Prompt 属性都由它派生。</p>
+     */
+    public final static String CTX_ACCESS_MODE = AccessMode.CTX_KEY;
+
+    /**
+     * 本轮生效的访问控制档位（per-turn，经 toolContext 透传给工具方法）。
+     *
+     * <p>必须透传而不能让 TerminalTalent 读自身字段：TerminalTalent 是引擎级<b>单例</b>
+     * （HarnessEngine 构造时创建、全会话共用），把档位写进它的字段会让 A 会话开启完全访问的
+     * 同时解除 B 会话的隔离。下划线前缀参数由框架注入且不进入 JSON schema，
+     * 与 {@link #ATTR_CWD} 同机制。</p>
+     */
+    public final static String ATTR_ACCESS_MODE = AccessMode.ATTR_KEY;
+
+    /**
+     * 构建系统提示词时携带的档位（经 Prompt 属性透传）。
+     *
+     * <p>与 {@link #ATTR_ACCESS_MODE} 并存而非二选一：工具执行走 toolContext，而
+     * {@code TerminalTalent.getInstruction} 拿到的只有 Prompt。两处若不同源，会出现
+     * 「提示词说严禁绝对路径、实际却已放行」的自相矛盾——模型据错误先验自我设限，
+     * 完全访问档等于白开。</p>
+     */
+    public final static String PROMPT_ATTR_ACCESS_MODE = AccessMode.PROMPT_ATTR_KEY;
 
     private final ReentrantLock agentLock = new ReentrantLock();
 
@@ -230,14 +261,6 @@ public class HarnessEngine {
         return options.getHarnessSessions();
     }
 
-    public String getHarnessSkills() {
-        return options.getHarnessSkills();
-    }
-
-    public String getHarnessAgents() {
-        return options.getHarnessAgents();
-    }
-
     public String getHarnessCommands() {
         return options.getHarnessCommands();
     }
@@ -313,10 +336,6 @@ public class HarnessEngine {
         return options.isSandboxEnabled();
     }
 
-    public boolean isHitlEnabled() {
-        return options.isHitlEnabled();
-    }
-
     public boolean isSubagentEnabled() {
         return options.isSubagentEnabled();
     }
@@ -345,28 +364,26 @@ public class HarnessEngine {
         return Collections.unmodifiableCollection(options.getExtensions());
     }
 
-    public Collection<MountDir> getMounts() {
-        return options.getMountManager().getMounts();
-    }
-
-    public MountDir getMount(String alias) {
-        return options.getMountManager().getMount(alias);
+    /**
+     * 技能与子代理的发现器。
+     *
+     * <p>取代已移除的 {@code getMounts()} / {@code getMount(alias)} 一族：技能与子代理的
+     * 发现目录固定为「全局区 + 工作区」，不再存在可配置、可增删的挂载点。</p>
+     */
+    public TalentRegistry getTalentRegistry() {
+        return options.getTalentRegistry();
     }
 
     public Collection<SkillDir> getSkills() {
-        return options.getMountManager().getSkills();
+        return options.getTalentRegistry().getSkills();
     }
 
-    public Collection<SkillDir> getSkillsByMount(String alias) {
-        return options.getMountManager().getSkillsByMount(alias);
+    public Collection<SkillDir> getSkillsByScope(TalentScope scope) {
+        return options.getTalentRegistry().getSkillsByScope(scope);
     }
 
     public Collection<AgentMd> getAgents() {
-        return options.getMountManager().getAgents();
-    }
-
-    public Collection<AgentMd> getAgentsByMount(String alias) {
-        return options.getMountManager().getAgentsByMount(alias);
+        return options.getTalentRegistry().getAgents();
     }
 
     public Map<String, McpServerParameters> getMcpServers() {
@@ -455,14 +472,6 @@ public class HarnessEngine {
     public void setSandboxSystemRestrict(Boolean sandboxSystemRestrict) {
         options.setSandboxSystemRestrict(sandboxSystemRestrict);
         terminalTalent.setSandboxSystemRestrict(sandboxSystemRestrict);
-    }
-
-    public void setHitlEnabled(Boolean hitlEnabled) {
-        options.setHitlEnabled(hitlEnabled);
-
-        if (options.getHitlInterceptor() != null) {
-            options.getHitlInterceptor().setEnabled(hitlEnabled);
-        }
     }
 
     public void setSubagentEnabled(Boolean subagentEnabled) {
@@ -683,28 +692,18 @@ public class HarnessEngine {
     }
 
 
-    public void addMount(MountDir mount) {
-        options.getMountManager().register(mount);
-    }
-
-    public void removeMount(String alias) {
-        String key = alias.startsWith("@") ? alias : "@" + alias;
-        agentManager.removeByMountAlias(key);
-        options.getMountManager().remove(alias);
-    }
-
-    public boolean hasMount(String alias) {
-        return options.getMountManager().hasMount(alias);
-    }
-
-    public void refreshMount(@Nullable String alias) {
-        if (alias != null) {
-            String key = alias.startsWith("@") ? alias : "@" + alias;
-            agentManager.removeByMountAlias(key);
-        } else {
-            agentManager.clearCustomAgents();
-        }
-        options.getMountManager().refresh(alias);
+    /**
+     * 重扫技能与子代理目录，并回收已缓存的自定义代理定义。
+     *
+     * <p>取代原 {@code refreshMount(alias)}：没有挂载点后就不存在「刷哪个」的问题，
+     * 四个目录全量重扫（规模是几十个量级，全量比增量更不易错）。</p>
+     *
+     * <p>必须先回收缓存再重扫：{@code AgentManager} 把解析结果缓存在自己的 map 里，
+     * 不先清掉的话，已删除的代理会继续从缓存里被解析出来。</p>
+     */
+    public void refreshTalents() {
+        agentManager.clearCustomAgents();
+        options.getTalentRegistry().refresh();
     }
 
 
@@ -931,15 +930,17 @@ public class HarnessEngine {
             }
         }
 
-        terminalTalent = new TerminalTalent(options.getMountManager());
+        TalentRegistry talentRegistry = options.getTalentRegistry();
+
+        terminalTalent = new TerminalTalent(talentRegistry);
 
         if (options.getSkillProvider() == null) {
-            skillTalent = new SkillTalent(options.getMountManager());
+            skillTalent = new SkillTalent(new RegistrySkillProvider(talentRegistry));
         } else {
             skillTalent = new SkillTalent(options.getSkillProvider());
         }
 
-        agentManager = new AgentManager(options.getMountManager());
+        agentManager = new AgentManager(talentRegistry);
 
         terminalTalent.setSandboxEnabled(options.isSandboxEnabled());
         terminalTalent.setSandboxAllowUserHome(options.isSandboxAllowUserHome());
@@ -1413,11 +1414,6 @@ public class HarnessEngine {
             return this;
         }
 
-        public Builder hitlEnabled(Boolean hitlEnabled) {
-            options.setHitlEnabled(hitlEnabled);
-            return this;
-        }
-
         public Builder subagentEnabled(Boolean subagentEnabled) {
             options.setSubagentEnabled(subagentEnabled);
             return this;
@@ -1477,10 +1473,7 @@ public class HarnessEngine {
             return this;
         }
 
-        public Builder mountAdd(MountDir mount) {
-            options.getMountManager().register(mount);
-            return this;
-        }
+
 
         public Builder mcpServerAdd(String name, McpServerParameters params) {
             options.getMcpServers().put(name, params);

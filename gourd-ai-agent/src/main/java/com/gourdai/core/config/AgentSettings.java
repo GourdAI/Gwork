@@ -7,7 +7,7 @@ import org.noear.solon.core.util.Assert;
 import org.noear.snack4.Feature;
 import org.noear.snack4.ONode;
 import org.noear.snack4.Options;
-import com.gourdai.ai.talents.mount.MountType;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -78,9 +78,6 @@ public class AgentSettings implements Serializable {
     /** 损坏配置备份文件名的时间戳后缀格式：{@code settings.json.corrupt-20260910153000} */
     private static final DateTimeFormatter CORRUPT_BACKUP_STAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
 
-    //挂载
-    private Map<String, MountDo> mountPools = new LinkedHashMap<>();
-
     //mcp集
     private Map<String, McpServerDo> mcpServers = new LinkedHashMap<>();
     //api集
@@ -89,52 +86,6 @@ public class AgentSettings implements Serializable {
     private Map<String, LspServerDo> lspServers = new LinkedHashMap<>();
     //供应商集（与 models 相同，结构和值修改均通过封装方法 COW 发布）
     private volatile Map<String, ProviderDo> providers = new LinkedHashMap<>();
-
-    /** 内置连接：官方托管入口名称（锁定，不可改名/删除） */
-    public static final String BUILTIN_PROVIDER_NAME = "GWork";
-    /** 内置连接：品牌升级前的旧名称（仅用于存量配置迁移："Gourd AI" → "GWork"） */
-    public static final String LEGACY_BUILTIN_PROVIDER_NAME = "Gourd AI";
-    /** 内置连接：官方托管入口 API 地址（锁定，不可修改） */
-    public static final String BUILTIN_PROVIDER_API_URL = "https://www.gourd-ai.cn";
-
-    /**
-     * 确保内置连接常驻：不存在则注入，存在则强制回写锁定字段（名称/地址/builtin 标记），
-     * 同时保留用户可改字段（密钥、超时、作用域、启停、模型列表）。
-     *
-     * <p>密钥默认留空，由用户自行填写。每次启动加载后调用，实现"内置常驻、自动重建"。</p>
-     */
-    public synchronized void ensureBuiltinProviders() {
-        Map<String, ProviderDo> rebuilt = new LinkedHashMap<>(providers);
-        ProviderDo legacy = rebuilt.get(LEGACY_BUILTIN_PROVIDER_NAME);
-        if (legacy != null) {
-            if (rebuilt.containsKey(BUILTIN_PROVIDER_NAME) == false) {
-                rebuilt.remove(LEGACY_BUILTIN_PROVIDER_NAME);
-                ProviderDo migrated = copyProvider(legacy);
-                migrated.setName(BUILTIN_PROVIDER_NAME);
-                rebuilt.put(BUILTIN_PROVIDER_NAME, migrated);
-            } else {
-                ProviderDo ordinary = copyProvider(legacy);
-                ordinary.setBuiltin(false);
-                rebuilt.put(LEGACY_BUILTIN_PROVIDER_NAME, ordinary);
-            }
-        }
-
-        ProviderDo existing = rebuilt.get(BUILTIN_PROVIDER_NAME);
-        if (existing == null) {
-            existing = new ProviderDo();
-            existing.setStandard("openai");
-            existing.setApiKey("");
-            existing.setEnabled(true);
-            existing.setScope(AgentFlags.SCOPE_USER);
-        } else {
-            existing = copyProvider(existing);
-        }
-        existing.setName(BUILTIN_PROVIDER_NAME);
-        existing.setApiUrl(BUILTIN_PROVIDER_API_URL);
-        existing.setBuiltin(true);
-        rebuilt.put(BUILTIN_PROVIDER_NAME, existing);
-        this.providers = rebuilt;
-    }
 
     private static ModelDo copyModel(ModelDo source) {
         ModelDo copy = new ONode().fill(source).toBean(ModelDo.class);
@@ -748,18 +699,6 @@ public class AgentSettings implements Serializable {
             general.setSummaryModel(props.getSummaryModel());
         }
 
-        if (general.getSandboxMode() == null) {
-            general.setSandboxMode(props.isSandboxMode());
-        }
-
-        if (general.getSandboxAllowUserHome() == null) {
-            general.setSandboxAllowUserHome(props.isSandboxAllowUserHome());
-        }
-
-        if (general.getSandboxSystemRestrict() == null) {
-            general.setSandboxSystemRestrict(props.isSandboxSystemRestrict());
-        }
-
         if (general.getApiRetries() == null) {
             general.setApiRetries(props.getApiRetries());
         }
@@ -806,10 +745,6 @@ public class AgentSettings implements Serializable {
 
         if(general.getAutoRethink() == null){
             general.setAutoRethink(props.isAutoRethink());
-        }
-
-        if(general.getHitlEnabled() == null){
-            general.setHitlEnabled(props.isHitlEnabled());
         }
 
         if(general.getSubagentEnabled() == null){
@@ -869,12 +804,6 @@ public class AgentSettings implements Serializable {
             this.apiServers.putAll(props.getApiServers());
         }
 
-        if (this.mountPools.size() == 0) {
-            for (Map.Entry<String, String> entry : props.getSkillPools().entrySet()) {
-                this.mountPools.put(entry.getKey(), new MountDo(AgentFlags.SCOPE_USER, "", MountType.SKILLS, entry.getValue(), false, true, false));
-            }
-        }
-
         if (this.lspServers.size() == 0) {
             this.lspServers.putAll(props.getLspServers());
         }
@@ -886,7 +815,7 @@ public class AgentSettings implements Serializable {
      * <p>两级配置：<b>全局</b>（{@link AgentFlags#getHarnessBase()}，安装目录）与
      * <b>工作区</b>（{@link AgentFlags#getUserDir()}）。当二者不同一路径时，先加载全局，
      * 再让工作区<b>按存在的键覆盖标量/general/permission</b>；对集合类
-     * （models/providers/mcpServers/apiServers/mountPools/lspServers）采用<b>叠加合并</b>：
+     * （models/providers/mcpServers/apiServers/lspServers）采用<b>叠加合并</b>：
      * 工作区同名键覆盖，其余保留全局条目。</p>
      *
      * <p>此举修复：ACP 子进程 cwd=工作区，若工作区 {@code settings.json} 的 {@code models} 为空
@@ -927,7 +856,6 @@ public class AgentSettings implements Serializable {
                         //工作区配置：先快照全局集合，bind 覆盖标量/general/permission 后再叠加合并集合，
                         //避免工作区空集合（如 "models": {}）抹掉全局条目
                         Map<String, ModelDo> gModels = new LinkedHashMap<>(agentSettings.models);
-                        Map<String, MountDo> gMountPools = new LinkedHashMap<>(agentSettings.mountPools);
                         Map<String, McpServerDo> gMcpServers = new LinkedHashMap<>(agentSettings.mcpServers);
                         Map<String, ApiSourceDo> gApiServers = new LinkedHashMap<>(agentSettings.apiServers);
                         Map<String, LspServerDo> gLspServers = new LinkedHashMap<>(agentSettings.lspServers);
@@ -938,7 +866,6 @@ public class AgentSettings implements Serializable {
 
                         //集合：以全局为底，工作区同名键覆盖、其余保留全局（叠加，不清空）
                         mergeMissing(agentSettings.models, gModels);
-                        mergeMissing(agentSettings.mountPools, gMountPools);
                         mergeMissing(agentSettings.mcpServers, gMcpServers);
                         mergeMissing(agentSettings.apiServers, gApiServers);
                         mergeMissing(agentSettings.lspServers, gLspServers);
@@ -955,7 +882,6 @@ public class AgentSettings implements Serializable {
             // 旧版本允许把 contextLength 写进 ModelDo。即使来源是工作区叠加或
             // AgentProperties 回退，也必须在进入运行时前统一清零，避免旧值重新生效。
             agentSettings.clearModelContextLengths();
-            agentSettings.ensureBuiltinProviders();
 
             // 历史数据迁移：旧版增量同步把同 provider 的新模型追加到总表末尾，导致同 provider 分裂多段；
             // 此处做一次稳定归组（组间=首次出现顺序、组内=原相对顺序），接口与前端原样展示内存顺序即可。
@@ -980,7 +906,6 @@ public class AgentSettings implements Serializable {
             LOG.error("[Settings] Failed to load settings from file, falling back to an empty in-memory config: {}",
                     e.getMessage(), e);
             AgentSettings fallback = new AgentSettings();
-            fallback.ensureBuiltinProviders();
             // 连兜底加载都异常（多为 IO 层问题）：内存里是空配置，一律禁止回写，
             // 否则一次 saveSettings() 就把用户全部模型与 apiKey 清空
             fallback.loadFailed = true;
@@ -1229,16 +1154,6 @@ public class AgentSettings implements Serializable {
             }
         });
 
-        oNode.getOrNew("mountPools").asObject().then(map -> {
-            for (Map.Entry<String, MountDo> entry : mountPools.entrySet()) {
-                if (isLocalAsGlobal == false && AgentFlags.SCOPE_LOCAL.equals(entry.getValue().getScope())) {
-                    continue;
-                }
-
-                map.getOrNew(entry.getKey()).fill(entry.getValue());
-            }
-        });
-
         oNode.getOrNew("lspServers").asObject().then(map -> {
             for (Map.Entry<String, LspServerDo> entry : lspServers.entrySet()) {
                 if (isLocalAsGlobal == false && AgentFlags.SCOPE_LOCAL.equals(entry.getValue().getScope())) {
@@ -1318,16 +1233,6 @@ public class AgentSettings implements Serializable {
                         item.set("timeout", entry.getValue().getTimeout().getSeconds() + "s");
                     }
                 });
-            }
-        });
-
-        oNode.getOrNew("mountPools").asObject().then(map -> {
-            for (Map.Entry<String, MountDo> entry : mountPools.entrySet()) {
-                if (AgentFlags.SCOPE_LOCAL.equals(entry.getValue().getScope()) == false) {
-                    continue;
-                }
-
-                map.getOrNew(entry.getKey()).fill(entry.getValue());
             }
         });
 

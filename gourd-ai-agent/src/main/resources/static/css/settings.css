@@ -47,6 +47,8 @@
 .settings-inline-tag { font-size: 10px; color: var(--text-secondary); font-weight: 400; }
 .settings-accent-text { color: var(--accent); }
 .settings-muted-text { color: var(--text-secondary); opacity: 0.75; }
+/* 作用域徽章：MCP/LSP/OpenAPI 列表项上的「工作区」标记，外观对齐 skills.css 的 skill-installed-badge（中性灰） */
+.settings-scope-badge { font-size: 10px; font-weight: 500; color: var(--text-secondary); background: var(--tag-bg); border: 1px solid var(--tag-border); padding: 1px 6px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
 
 /* Backward compatible aliases */
 .llm-model-item, .mcp-server-item { display: flex; align-items: center; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 10px; margin-bottom: 8px; gap: 10px; transition: all 0.15s; cursor: pointer; }
@@ -61,7 +63,7 @@
 /* ===== Segmented scope selector ===== */
 .settings-scope-toggle { display: flex; border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; background: var(--bg-input-box); }
 .settings-scope-btn { flex: 1; padding: 7px 14px; border: none; background: none; color: var(--text-secondary); font-size: 12px; cursor: pointer; transition: all 0.15s; font-family: inherit; }
-.settings-scope-btn.active { background: var(--accent); color: #fff; }
+.settings-scope-btn.active { background: var(--accent); color: var(--accent-contrast); }
 .settings-scope-btn.disabled, .settings-scope-toggle.disabled .settings-scope-btn { opacity: 0.55; cursor: not-allowed; pointer-events: none; }
 .settings-scope-toggle.readonly-gray { background: var(--bg-hover, #f5f5f5) !important; opacity: 0.85; }
 
@@ -125,9 +127,9 @@
     width: 100%;
 }
 .form-select-custom:hover { border-color: var(--accent); }
-.form-select-custom:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb, 59,130,246), 0.15); }
+.form-select-custom:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.15); }
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
-.btn-primary { padding: 8px 20px; border: none; border-radius: 8px; background: var(--accent); color: #fff; font-size: 13px; cursor: pointer; transition: opacity 0.15s; }
+.btn-primary { padding: 8px 20px; border: none; border-radius: 8px; background: var(--accent); color: var(--accent-contrast); font-size: 13px; cursor: pointer; transition: opacity 0.15s; }
 .btn-primary:hover { opacity: 0.85; }
 .btn-secondary { padding: 8px 20px; border: 1px solid var(--border-color); border-radius: 8px; background: none; color: var(--text-secondary); font-size: 13px; cursor: pointer; transition: all 0.15s; }
 .btn-secondary:hover { background: var(--bg-hover); color: var(--text-primary); }
@@ -165,7 +167,7 @@
 
 
 /* LLM 操作按钮悬停色 */
-.llm-action-btn.edit:hover { background: rgba(59,130,246,0.08); color: #3b82f6; }
+.llm-action-btn.edit:hover { background: rgba(var(--accent-rgb),0.08); color: var(--accent); }
 .llm-edit-btn { height: 22px; display: flex; align-items: center; justify-content: center; }
 .llm-action-btn.copy:hover { background: rgba(16,185,129,0.08); color: #10b981; }
 
@@ -211,13 +213,13 @@
 }
 .toggle-switch input:checked + .toggle-slider {
     background: var(--accent);
-    box-shadow: 0 0 0 2px rgba(var(--accent-rgb, 59,130,246), 0.15);
+    box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.15);
 }
 .toggle-switch input:checked + .toggle-slider::before {
     transform: translateX(14px);
 }
 .toggle-switch:hover .toggle-slider {
-    box-shadow: inset 0 1px 3px rgba(0,0,0,0.15), 0 0 0 1px rgba(var(--accent-rgb, 59,130,246), 0.2);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.15), 0 0 0 1px rgba(var(--accent-rgb), 0.2);
 }
 
 /* LLM 连接测试结果 */
@@ -242,7 +244,7 @@
 
 .mcp-type-toggle { display: flex; border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; }
 .mcp-type-btn { flex: 1; padding: 6px 16px; border: none; background: none; color: var(--text-secondary); font-size: 12px; cursor: pointer; transition: all 0.15s; }
-.mcp-type-btn.active { background: var(--accent); color: #fff; }
+.mcp-type-btn.active { background: var(--accent); color: var(--accent-contrast); }
 .mcp-type-btn.disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
 
 .mcp-server-item { display: flex; align-items: center; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 10px; margin-bottom: 8px; gap: 10px; transition: all 0.15s; cursor: pointer; }
@@ -267,8 +269,8 @@
 .mcp-action-btn { background: none; border: none; cursor: pointer; color: var(--text-secondary); padding: 6px; border-radius: 6px; transition: all 0.15s; display: flex; align-items: center; }
 .mcp-action-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 .mcp-action-btn.delete:hover { background: rgba(239,68,68,0.08); color: #ef4444; }
-.mcp-action-btn.edit:hover { background: rgba(59,130,246,0.08); color: #3b82f6; }
-.mcp-action-btn.browse:hover { background: rgba(59,130,246,0.08); color: #3b82f6; }
+.mcp-action-btn.edit:hover { background: rgba(var(--accent-rgb),0.08); color: var(--accent); }
+.mcp-action-btn.browse:hover { background: rgba(var(--accent-rgb),0.08); color: var(--accent); }
 
 /* MCP 检测连接 */
 .mcp-check-result { display: flex; align-items: center; gap: 6px; margin-top: 10px; padding: 8px 12px; border-radius: 8px; font-size: 12px; line-height: 1.5; }
@@ -399,18 +401,9 @@
 .settings-back-btn { background: none; border: none; cursor: pointer; color: var(--text-secondary); padding: 4px 6px; border-radius: 6px; display: inline-flex; align-items: center; transition: all 0.15s; }
 .settings-back-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 
-/* ===== 挂载 ===== */
-.mounts-pool-item { cursor: pointer; }
-.mounts-pool-item:hover { border-color: var(--accent); }
-.mounts-pool-item.mounts-system { opacity: 0.85; }
-.mounts-system-badge { font-size: 10px; background: var(--bg-accent-subtle, rgba(59,130,246,0.1)); color: var(--accent); padding: 1px 6px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
-.mounts-writeable-badge { font-size: 10px; background: rgba(34,197,94,0.1); color: #22c55e; padding: 1px 6px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
-.mounts-scope-badge { font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
-.mounts-scope-badge.scope-user { background: rgba(99,102,241,0.1); color: #6366f1; }
-.mounts-scope-badge.scope-workspace { background: rgba(245,158,11,0.1); color: #f59e0b; }
+/* ===== 表单徽章与提示 ===== */
 .llm-default-badge { font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-left: 6px; vertical-align: middle; background: rgba(16,185,129,0.1); color: #10b981; }
 
-.mounts-skills-count { font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; padding: 0 4px; }
 .form-hint { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
 .form-hint a { color: var(--accent); text-decoration: none; }
 .form-hint a:hover { text-decoration: underline; }
@@ -432,7 +425,7 @@
     /* 不设 overflow:hidden：内部无贴角背景元素，且 hidden 会裁切 layui 下拉面板 */
 }
 .general-card:hover {
-    border-color: rgba(var(--accent-rgb, 79,110,247), 0.35);
+    border-color: rgba(var(--accent-rgb), 0.35);
     box-shadow: 0 2px 12px rgba(0,0,0,0.04);
 }
 .general-card-header {
@@ -506,7 +499,7 @@
 }
 .general-input:focus {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px rgba(var(--accent-rgb, 79,110,247), 0.12);
+    box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.12);
 }
 .general-input::placeholder {
     color: var(--text-secondary);
@@ -581,43 +574,6 @@
     border-color: #ef4444;
 }
 
-/* ===== 挂载表单 - 分割线与预设按钮 ===== */
-.mounts-divider {
-    height: 1px;
-    background: var(--border-color);
-    margin: 16px 0;
-}
-.mounts-presets-label {
-    font-size: 11px;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-    font-weight: 500;
-}
-.mounts-presets-btns {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-.mounts-preset-btn {
-    padding: 6px 12px;
-    border: 1px dashed var(--border-color);
-    border-radius: 6px;
-    background: none;
-    color: var(--text-secondary);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all 0.15s;
-    font-family: inherit;
-    white-space: nowrap;
-}
-.mounts-preset-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: var(--accent-light, rgba(59,130,246,0.08));
-}
-.mounts-preset-btn:active {
-    transform: scale(0.97);
-}
 
 /* 只读输入控件浅灰底色 */
 input.readonly-gray, select.readonly-gray, textarea.readonly-gray {
@@ -693,7 +649,6 @@ select[disabled] {
 
 /* ===== Settings common overrides ===== */
 .mcp-tool-item { cursor: default; }
-.mounts-skill-item { cursor: pointer; }
 
 /* LLM 默认模型方块勾选框 */
 .llm-default-checkbox {
@@ -1069,7 +1024,7 @@ input[type=number] { -moz-appearance: textfield; }
 
 .provider-model-chip.selected {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-contrast);
     border-color: var(--accent);
 }
 
@@ -1167,7 +1122,7 @@ input[type=number] { -moz-appearance: textfield; }
 }
 
 .provider-model-info:hover .provider-model-name {
-    color: var(--accent-color);
+    color: var(--accent);
 }
 
 .provider-model-sub {
@@ -1277,8 +1232,8 @@ input[type=number] { -moz-appearance: textfield; }
 }
 
 .provider-model-icon-btn:hover {
-    color: var(--accent-color);
-    border-color: var(--accent-color);
+    color: var(--accent);
+    border-color: var(--accent);
     background: var(--bg-hover);
 }
 
@@ -1345,7 +1300,7 @@ input[type=number] { -moz-appearance: textfield; }
     display: inline-block;
     font-size: 10px;
     color: var(--accent);
-    background: rgba(79, 110, 247, 0.12);
+    background: var(--accent-light);
     padding: 1px 4px;
     border-radius: 3px;
     margin-left: 4px;
@@ -1455,8 +1410,8 @@ input[type=number] { -moz-appearance: textfield; }
     transition: border-color 0.2s;
 }
 .import-string-textarea:focus {
-    border-color: var(--accent, #4f6ef7);
-    box-shadow: 0 0 0 2px rgba(59,130,246,0.15);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(var(--accent-rgb),0.15);
 }
 .import-string-hint {
     font-size: 12px;
@@ -1480,8 +1435,8 @@ input[type=number] { -moz-appearance: textfield; }
     font-size: 10px;
     padding: 1px 6px;
     border-radius: 4px;
-    background: var(--accent-bg, rgba(59,130,246,0.1));
-    color: var(--accent, #3b82f6);
+    background: var(--accent-light);
+    color: var(--accent);
     font-weight: 500;
     vertical-align: middle;
     margin-left: 4px;
@@ -1574,7 +1529,7 @@ input[type=number] { -moz-appearance: textfield; }
 }
 .import-progress-fill {
     height: 100%;
-    background: linear-gradient(90deg, #3b82f6, #2563eb);
+    background: var(--accent);
     border-radius: 3px;
     transition: width 0.3s ease;
 }
@@ -1939,3 +1894,43 @@ input[type=number] { -moz-appearance: textfield; }
 .about-notes-label { margin-top: 14px; font-size: 12px; color: var(--text-secondary); }
 .about-notes { margin: 6px 0 0; padding: 10px 12px; font-size: 12px; line-height: 1.6; color: var(--text-primary); background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto; font-family: inherit; }
 
+
+/* ===== Appearance tab =====
+   预览横幅为「迷你应用窗口」：全部颜色取自 theme token，
+   因此切换明暗/强调色时预览自动实时跟随，无需额外 JS。 */
+.appearance-preview { padding: 18px; border-radius: 12px; background: var(--bg-hover); border: 1px solid var(--border-color); margin-bottom: 16px; display: flex; justify-content: center; }
+.apv-window { width: 100%; max-width: 560px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border-color); background: var(--bg-main); box-shadow: var(--shadow-lg); }
+.apv-titlebar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--bg-sidebar); border-bottom: 1px solid var(--border-color); }
+.apv-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-input); }
+.apv-title { margin-left: 6px; font-size: 11px; color: var(--text-tertiary); }
+.apv-body { display: flex; height: 168px; }
+.apv-side { width: 108px; flex-shrink: 0; background: var(--bg-sidebar); border-right: 1px solid var(--border-color); padding: 10px 8px; display: flex; flex-direction: column; gap: 6px; }
+.apv-side-item { height: 14px; border-radius: 4px; background: var(--bg-hover); }
+.apv-side-item.active { background: var(--accent-light); box-shadow: inset 2px 0 0 var(--accent); }
+.apv-main { flex: 1; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.apv-msg { border-radius: 8px; height: 22px; }
+.apv-msg-user { width: 62%; align-self: flex-end; background: var(--bg-user-msg); border: 1px solid var(--border-color); }
+.apv-msg-ai { width: 84%; background: transparent; border: 1px solid var(--border-color); }
+.apv-msg-short { width: 46%; }
+.apv-input { margin-top: auto; display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--border-input); border-radius: 8px; padding: 6px 8px; background: var(--bg-input-box); }
+.apv-plus { color: var(--text-tertiary); font-size: 12px; line-height: 1; }
+.apv-send { width: 18px; height: 18px; border-radius: 50%; background: var(--accent); }
+
+/* 明暗模式分段控件 */
+.appearance-mode-row { display: flex; gap: 8px; }
+.appearance-mode-btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; height: 34px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-main); color: var(--text-secondary); font-size: 13px; cursor: pointer; transition: border-color .15s, background-color .15s, color .15s; }
+.appearance-mode-btn:hover { border-color: var(--border-input); color: var(--text-primary); }
+.appearance-mode-btn.active { border-color: var(--accent); background: var(--accent-light); color: var(--text-primary); font-weight: 500; }
+
+/* 主题网格：卡片挂 data-accent，色板由 theme.css 预设规则按当前明暗自动取色 */
+.appearance-theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 12px; }
+.appearance-theme-card { display: flex; flex-direction: column; gap: 8px; padding: 8px; border-radius: 10px; border: 1px solid var(--border-color); background: var(--bg-main); cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.appearance-theme-card:hover { border-color: var(--border-input); }
+.appearance-theme-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.atc-swatch { display: flex; height: 56px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border-color); }
+.atc-sw { flex: 1; }
+.atc-sw-accent { flex: 1.4; background: var(--accent); }
+.atc-sw-soft { background: var(--accent-light); }
+.atc-sw-bg { background: var(--bg-body); }
+.atc-name { font-size: 12px; color: var(--text-secondary); text-align: center; }
+.appearance-theme-card.selected .atc-name { color: var(--text-primary); font-weight: 500; }

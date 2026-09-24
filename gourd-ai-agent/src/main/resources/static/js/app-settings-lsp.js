@@ -37,7 +37,7 @@
 
     function renderLspList(list) {
         var html = '';
-        var tWorkspace = GourdI18n.t('settings.mounts.scope_workspace');
+        var tWorkspace = GourdI18n.t('settings.general.scope_workspace');
         var tInstalled = GourdI18n.t('settings.skills.installed');
         var tEdit = GourdI18n.t('common.edit');
         var tEnable = GourdI18n.t('settings.loop.enable');
@@ -56,7 +56,7 @@
                 var enabled = item.enabled !== false;
                 var installed = item.installed !== false;
                 var badges = '<span class="settings-inline-tag">[lsp]</span>';
-                if (item.scope === 'workspace') badges += ' <span class="mounts-scope-badge scope-workspace">' + tWorkspace + '</span>';
+                if (item.scope === 'workspace') badges += ' <span class="settings-scope-badge">' + tWorkspace + '</span>';
                 if (installed) badges += ' <span class="skill-installed-badge">' + tInstalled + '</span>';
                 html += '<div class="mcp-server-item' + (item.enabled === false ? ' disabled' : '') + '" data-name="' + escapeAttr(name) + '">'
                     + '<div class="mcp-server-icon">L</div>'

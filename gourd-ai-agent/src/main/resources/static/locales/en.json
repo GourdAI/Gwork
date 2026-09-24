@@ -12,7 +12,13 @@
                       "steer_deferred":  "The current step has ended; added to queue",
                       "steer_failed":  "Failed to send interjection; your input has been kept",
                       "force_finished":  "Run already ended (server idle); the stream was closed automatically",
-                      "steer_attachment_wait":  "Attachments cannot be interjected or queued while a task is running. Please wait or stop the task",
+                      "attachment_uploading":  "Uploading attachments, please wait",
+                      "attachment_upload_failed":  "Attachment upload failed. Your input has been kept, please try again",
+                      "attachment_changed":  "Input changed during upload. This send was cancelled, please send again",
+                      "queued_with_attachments":  "Added to queue (with attachments)",
+                      "steer_accepted_with_attachments":  "Interjection received (with attachments) and will take effect at the next step",
+                      "queue_failed":  "Failed to add to queue. Your input has been kept, please try again",
+                      "command_attachment_unsupported":  "Commands cannot carry attachments. Remove them and press Tab to add to the queue",
                       "steer_command_queue":  "Commands cannot be interjected. Press Tab to add the command to the queue",
                       "steer_dropped":  "The interjection did not take effect before completion and has been added to the queue",
                       "steer_expand_full":  "Show full text ({0} chars)",
@@ -134,7 +140,26 @@
                  "confirm":  "Confirm"
              },
     "app":  {
-                "boot_error":  "Startup Failed",
+                                "access_title":  "Access Permission",
+                "access_default":  "Default Access",
+                "access_full":  "Full Access",
+                "access_default_desc":  "Space isolated; risky commands need approval",
+                "access_full_desc":  "Space and commands unrestricted (at your own risk)",
+                "access_confirm_title":  "Allow full access?",
+                "access_confirm_desc":  "With full access, the AI is no longer bound by space isolation or command approval, and can do the following on your device and data:",
+                "access_risk_file":  "File operations",
+                "access_risk_file_desc":  "Read and write any file outside the project space, including system files",
+                "access_risk_cmd":  "Terminal commands",
+                "access_risk_cmd_desc":  "Commands no longer need individual approval; deletions and overwrites take effect immediately",
+                "access_risk_net":  "Internet access",
+                "access_risk_net_desc":  "Any network address can be reached, risking data leaks or unknown downloads",
+                "access_ack":  "I understand the risks and take responsibility for my own data security",
+                "access_allow":  "Allow Full Access",
+                "access_cancel":  "Cancel",
+                "access_toast_default":  "Switched to default access",
+                "access_toast_full":  "Switched to full access",
+                "access_failed":  "Permission switch failed; previous mode restored",
+"boot_error":  "Startup Failed",
                 "project_view":  "Project View",
                 "review_view":  "Code Review",
                 "terminal_shortcut":  "Terminal Shortcut",
@@ -152,7 +177,6 @@
                 "history_scope_global":  "Global sessions",
                 "history_scope_project":  "Project sessions",
                 "welcome_title":  "Hello, I\u0027m GWork!",
-                "welcome_sub":  "How can I help you?",
                 "drop_attach":  "Release to attach files",
                 "thinking_label":  "Thinking",
                 "context_label":  "Context",
@@ -233,11 +257,38 @@
                                 "rename_project":  "Rename project",
                                 "rename_failed":  "Rename failed",
                                 "model_config":  "Model Config",
-                   "memory":  "Memory"
+                   "memory":  "Memory",
+                   "update_now":  "Update now",
+                   "update_download":  "Download",
+                   "update_downloading":  "Downloading…",
+                   "update_install":  "Install now",
+                   "update_tooltip":  "New version {0} available — click to update",
+                   "update_tooltip_downloading":  "Downloading new version {0}",
+                   "update_tooltip_downloaded":  "Version {0} is ready — click to install and restart"
                             }
             },
     "settings":  {
-                     "common":  {
+                     "appearance": {
+                         "title": "Appearance",
+                         "desc": "Light/dark mode and theme palette. Changes apply instantly and are saved locally",
+                         "mode": {
+                             "title": "Light/Dark Mode",
+                             "system": "System",
+                             "light": "Light",
+                             "dark": "Dark"
+                         },
+                         "themes": {
+                             "title": "All Themes"
+                         },
+                         "theme": {
+                             "graphite": "Graphite",
+                             "teal": "Jade",
+                             "clay": "Clay",
+                             "sky": "Sky",
+                             "indigo": "Indigo Classic"
+                         }
+                     },
+"common":  {
                                     "back":  "Back",
                                     "close":  "Close",
                                     "delete":  "Delete",
@@ -248,8 +299,8 @@
                      "title":  "Settings",
                      "tabs":  {
                                   "general":  "General",
+                                  "appearance": "Appearance",
                                   "permission":  "Permissions",
-                                  "mounts":  "Mounts",
                                   "mcp":  "MCP",
                                   "openapi":  "OpenAPI",
                                   "lsp":  "LSP",
@@ -296,11 +347,6 @@
                                                       "desc":  "Select interface display language",
                                                       "name":  "Interface Language"
                                                   },
-                                     "appearance":  {
-                                                        "title":  "Appearance",
-                                                        "theme_name":  "Theme",
-                                                        "theme_desc":  "Switch between dark and light theme"
-                                                    },
                                      "conversation":  {
                                                           "title":  "Context Compression",
                                                           "history_window":  "History Window Size",
@@ -315,12 +361,6 @@
                                                           "intent_chain_desc":  "Keeps a compact index of the user\u0027s earlier requests when compressing (very low cost), so the agent stops circling back to goals that were already completed",
                                                           "hint":  "History window: how many trailing messages always stay uncompressed.\nReserved output: absolute headroom for the model\u0027s next reply; trigger point = model window − reserved output − turn buffer.\nCompression trigger: only fires the trigger EARLIER (the smaller of the two applies); 100 means no extra earlying.\nCompression target: how deep each compaction goes — higher means shallower compaction and more frequent triggers"
                                                       },
-                                     "sandbox":  {
-                                                     "title":  "Sandbox Mode",
-                                                     "desc":  "AI commands run in restricted sandbox (read/write in workspace and mounts only)",
-                                                     "allow_home":  "Allow access to user home directory (~/) in sandbox",
-                                                     "system_restrict":  "Strict kernel-level sandbox restrictions; disable to relax (testing)"
-                                                 },
                                      "memory":  {
                                                     "title":  "Memory",
                                                     "enabled_desc":  "Retain long-term memory across sessions; disable to reduce context usage",
@@ -390,48 +430,9 @@
                                     "installed_tab":  "Installed",
                                     "uninstall":  "Uninstall",
                                     "uninstall_confirm":  "Uninstall skill \"{0}\"? The local skill directory will be removed.",
+                                    "scope_global":  "Global",
+                                    "scope_workspace":  "This Project",
                                     "market_tab":  "Skill Market"
-                                },
-                     "mounts":  {
-                                    "title":  "Mounts",
-                                    "desc":  "Manage local directory mappings for AI skills and resources",
-                                    "add":  "Add Mount",
-                                    "add_title":  "Add Mount",
-                                    "edit_title":  "Edit Mount",
-                                    "alias":  "Name",
-                                    "alias_placeholder":  "@my-mount",
-                                    "scope":  "Scope",
-                                    "scope_workspace":  "Workspace (Local)",
-                                    "type":  "Content Type",
-                                    "type_skills":  "Skills",
-                                    "type_agents":  "Agents",
-                                    "type_files":  "Files",
-                                    "path":  "Path",
-                                    "path_placeholder":  "~/.myapp/skills/",
-                                    "path_hint":  "Local directory path (supports \u0027./\u0027 workspace and \u0027~/\u0027 home paths)",
-                                    "writeable":  "Write Access",
-                                    "description":  "Description (Optional)",
-                                    "description_placeholder":  "Brief description of this mount",
-                                    "presets_label":  "Common Mounts",
-                                    "skills_list_title":  "Skill Packs",
-                                    "open_dir":  "Open Directory",
-                                    "preset_skills":  "Workspace Skills",
-                                    "preset_skillhub":  "Skill Hub",
-                                    "preset_agents_skills":  "Subagent Skills",
-                                    "preset_opencode_skills":  "OpenCode Skills",
-                                    "preset_claude_skills":  "Claude Skills",
-                                    "alias_label":  "Name",
-                                    "scope_label":  "Scope",
-                                    "type_label":  "Content Type",
-                                    "path_label":  "Mapped Path",
-                                    "writeable_label":  "Write Access",
-                                    "description_label":  "Description",
-                                    "skills_list":  "Skills List",
-                                    "agents_list_title":  "Subagent List",
-                                    "files_list_title":  "File List",
-                                    "system":  "System",
-                                    "skill_pkg":  "Skill Pack",
-                                    "content_list":  "Content List"
                                 },
                      "mcp":  {
                                  "title":  "MCP Servers",
@@ -575,8 +576,6 @@
                                        "model_list_api_label":  "Model List API",
                                        "api_url_label":  "API URL",
                                        "api_key_label":  "API Key",
-                                       "get_api_key_link":  "Get API Key",
-                                       "api_key_hint_suffix":  "Visit official site to get API key",
                                        "timeout_label":  "Timeout",
                                        "models_label":  "Models",
                                        "empty_hint":  "No models yet, click to add or fetch from API",
@@ -614,7 +613,6 @@
                                         "set_default_model":  "Set as default model",
                                         "default_badge":  "Default",
                                         "view_title":  "Model Settings",
-                                        "builtin_group":  "Built-in",
                                         "custom_group":  "Custom Providers",
                                         "add_provider_title":  "Add Model Provider",
                                         "add_provider_desc":  "Configure a fully custom API endpoint and initial model"
@@ -841,11 +839,15 @@
                  "question_skip":  "Skip",
                  "question_next":  "Next",
                  "question_submit":  "Send",
-                 "question_recommended":  "(Recommended)",
+                 "question_recommended":  "Recommended",
+                 "question_detail_expand":  "Expand",
+                 "question_detail_collapse":  "Collapse",
+                 "question_record_title":  "My answer",
                  "question_answered":  "Submitted",
                  "question_skipped":  "Skipped",
                  "question_close":  "Close",
                  "question_attachment_wait":  "Attachments cannot be sent while a question is pending. Please answer or skip first",
+                 "question_attachment_queued":  "Answer filled in. Attachments queued and will be sent after this turn",
                  "question_supplement":  "Add a note… (kept together with your choice)",
                  "question_supplement_placeholder":  "Add a note, press Enter to confirm…",
                  "batch_tool":  "Batch",
@@ -1173,6 +1175,11 @@
                         "saved_desc":  "Switch between workspace and global scopes to view saved memories"
                     },
     "file_changes": {
+        "edited_files": "Edited {count} files",
+        "show_more_files": "Show {count} more files",
+        "collapse_files": "Collapse",
+        "run_list_title": "Files changed in this run",
+        "back_to_list": "Back to list",
         "title": "Files changed in this run",
         "summary": "{count} files",
         "review": "Review",

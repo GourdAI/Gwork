@@ -50,12 +50,6 @@
         if (p > 0 && p < 0.1) return '0.1';
         return trimZero(p);
     }
-    function fmtDateMd(dateStr) {
-        // dateStr: yyyy-MM-dd
-        var parts = String(dateStr).split('-');
-        if (parts.length < 3) return dateStr;
-        return t('settings.usage.date_md', [String(Number(parts[1])), String(Number(parts[2]))]);
-    }
 
     /* 趋势图坐标标签：按天/按周用「8月3日」，按月用「2026年8月」。
      * date_ym 约定传 [年, 补零月, 不补零月]：英文系取 {1} 得 2026-08，
@@ -241,32 +235,10 @@
      * 采用 CSS Grid（列主序，7 行、列数自适应 1fr），方块 aspect-ratio:1，铺满整卡宽度，
      * 无前导空位错位问题；未来日（future=true）渲染为透明空格。 */
     function renderHeatmapCard(heatmap) {
-        var maxTok = 0;
-        heatmap.forEach(function (d) { if (!d.future && d.tokens > maxTok) maxTok = d.tokens; });
-
-        var weeks = Math.max(1, Math.ceil(heatmap.length / 7));
-        var grid = '<div class="usage-heat-grid" style="grid-template-columns:repeat(' + weeks + ',1fr)">';
-        heatmap.forEach(function (d) {
-            if (d.future) {
-                grid += '<div class="usage-heat-cell usage-heat-empty"></div>';
-                return;
-            }
-            var lv = 0;
-            if (d.tokens > 0 && maxTok > 0) {
-                lv = Math.min(4, Math.max(1, Math.ceil(d.tokens / maxTok * 4)));
-            }
-            var tip = t('settings.usage.tooltip', [fmtDateMd(d.date), fmtNum(d.tokens), String(d.rounds)]);
-            grid += '<div class="usage-heat-cell" data-level="' + lv + '" title="' + escapeHtml(tip) + '"></div>';
-        });
-        grid += '</div>';
-
-        var legend = '<div class="usage-heat-legend"><span>' + escapeHtml(t('settings.usage.heat_less')) + '</span>';
-        for (var l = 0; l <= 4; l++) {
-            legend += '<span class="usage-heat-cell usage-heat-legend-cell" data-level="' + l + '"></span>';
-        }
-        legend += '<span>' + escapeHtml(t('settings.usage.heat_more')) + '</span></div>';
-
-        return card(t('settings.usage.heatmap_title'), '<div class="usage-heat-wrap">' + grid + legend + '</div>');
+        // 渲染委托给共享组件（app-heatmap.js），与欢迎页「活跃热力图」卡同口径；
+        // 禁止在本文件复制第二份网格渲染，避免两处口径分叉。
+        // months:true：底部月份时间轴（锚点=月首个周日，间距自然均匀），与欢迎页同算法。
+        return card(t('settings.usage.heatmap_title'), window.GourdHeatmap.renderGrid(heatmap || [], { months: true }));
     }
 
     /* ── Token 趋势（SVG 堆叠柱，粒度自适应） ─────────────── */

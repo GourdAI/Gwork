@@ -15,8 +15,9 @@
  */
 package com.gourdai.harness.agent;
 
-import com.gourdai.ai.talents.mount.AgentMd;
-import com.gourdai.ai.talents.mount.MountManager;
+import com.gourdai.ai.talents.registry.AgentMd;
+import com.gourdai.ai.talents.registry.TalentRegistry;
+import com.gourdai.ai.talents.registry.TalentScope;
 import org.noear.solon.core.util.ResourceUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,15 +42,15 @@ public class AgentManager {
     //避免未来重新引入上游 harness 依赖时出现同路径资源、由 classpath 顺序决定取哪份
     private static final String AGENT_MD_BASE = "META-INF/gourdai/agents/";
 
-    private final MountManager mountManager;
+    private final TalentRegistry talentRegistry;
     private final Map<String, AgentDefinition> agentMap = new ConcurrentHashMap<>();
 
 
     /**
-     * 完整构造（支持从 MountManager 加载自定义代理）
+     * 完整构造（支持从 {@link TalentRegistry} 加载自定义代理）
      */
-    public AgentManager(MountManager mountManager) {
-        this.mountManager = mountManager;
+    public AgentManager(TalentRegistry talentRegistry) {
+        this.talentRegistry = talentRegistry;
         loadBuiltinAgents();
     }
 
@@ -73,15 +74,15 @@ public class AgentManager {
      * 获取指定名称的代理（支持自定义代理）
      */
     public AgentDefinition getAgent(String agentName) {
-        // 1. 优先从缓存取（含内置 + 已解析的挂载代理）
+        // 1. 优先从缓存取（含内置 + 注册表扫描解析的代理）
         AgentDefinition cached = agentMap.get(agentName);
         if (cached != null) {
             return cached;
         }
 
-        // 2. 从 MountManager 的 AgentMd 按需解析
-        if (mountManager != null) {
-            AgentMd agentMd = mountManager.getAgent(agentName);
+        // 2. 从 TalentRegistry 的 AgentMd 按需解析
+        if (talentRegistry != null) {
+            AgentMd agentMd = talentRegistry.getAgent(agentName);
             if (agentMd != null) {
                 AgentDefinition definition = loadFromAgentMd(agentMd);
                 agentMap.put(agentName, definition);
@@ -99,8 +100,8 @@ public class AgentManager {
         if (agentMap.containsKey(agentName)) {
             return true;
         }
-        if (mountManager != null) {
-            return mountManager.getAgent(agentName) != null;
+        if (talentRegistry != null) {
+            return talentRegistry.getAgent(agentName) != null;
         }
         return false;
     }
@@ -111,9 +112,9 @@ public class AgentManager {
     public Collection<AgentDefinition> getAgents() {
         Map<String, AgentDefinition> all = new LinkedHashMap<>(agentMap);
 
-        // 补充挂载代理（未被缓存的）
-        if (mountManager != null) {
-            for (AgentMd agentMd : mountManager.getAgents()) {
+        // 补充扫描到的自定义代理（未被缓存的）
+        if (talentRegistry != null) {
+            for (AgentMd agentMd : talentRegistry.getAgents()) {
                 if (!all.containsKey(agentMd.getName())) {
                     AgentDefinition def = loadFromAgentMd(agentMd);
                     all.put(agentMd.getName(), def);
@@ -136,19 +137,12 @@ public class AgentManager {
 
     /**
      * 仅清除自定义代理（保留内置代理）
+     *
+     * <p>内置代理的 scope 为 {@code null}（由 classpath 资源加载），扫描来的必有 scope，
+     * 据此区分。原实现比较的是挂载别名字符串，语义等价。</p>
      */
     public void clearCustomAgents() {
-        agentMap.entrySet().removeIf(e -> e.getValue().getMountAlias() != null);
-    }
-
-    /**
-     * 按挂载别名清理已缓存的代理定义
-     */
-    public synchronized void removeByMountAlias(String mountAlias) {
-        if (mountAlias == null) {
-            return;
-        }
-        agentMap.entrySet().removeIf(e -> mountAlias.equals(e.getValue().getMountAlias()));
+        agentMap.entrySet().removeIf(e -> e.getValue().getScope() != null);
     }
 
     /**
@@ -164,7 +158,7 @@ public class AgentManager {
                 name = agentMd.getName();
             }
 
-            definition.setMountAlias(agentMd.getMountAlias());
+            definition.setScope(agentMd.getScope());
             return definition;
         } catch (IOException e) {
             LOG.error("Load agent failed from AgentMd: {}", agentMd.getFilePath(), e);
@@ -174,25 +168,27 @@ public class AgentManager {
 
     /**
      * 从 URL 加载代理定义（内置代理用）
+     *
+     * @param scope 归属作用域；内置代理传 {@code null}
      */
-    public void loadAgentFile(String fileName, URL url, String mountAlias) {
+    public void loadAgentFile(String fileName, URL url, TalentScope scope) {
         if (url == null) {
             //资源缺失时必须告警：静默跳过会让子代理清单悄悄变空，主代理将无代理可委派
-            LOG.warn("Load agent skipped, resource not found: {}{} (mountAlias={})",
-                    AGENT_MD_BASE, fileName.endsWith(".md") ? fileName : fileName + ".md", mountAlias);
+            LOG.warn("Load agent skipped, resource not found: {}{} (scope={})",
+                    AGENT_MD_BASE, fileName.endsWith(".md") ? fileName : fileName + ".md", scope);
             return;
         }
 
         try {
             String[] fullContent = ResourceUtil.getResourceAsString(url).split("\n");
 
-            loadAgentFile(fileName, Arrays.asList(fullContent), mountAlias);
+            loadAgentFile(fileName, Arrays.asList(fullContent), scope);
         } catch (IOException e) {
             LOG.error("Load agent failed, file: {}", url, e);
         }
     }
 
-    public void loadAgentFile(String fileName, List<String> fullContent, String mountAlias) {
+    public void loadAgentFile(String fileName, List<String> fullContent, TalentScope scope) {
         AgentDefinition definition = AgentDefinition.fromMarkdown(fullContent);
 
         String agentTypeName = definition.getName();
@@ -204,8 +200,8 @@ public class AgentManager {
                     : fileName;
         }
 
-        if (mountAlias != null) {
-            definition.setMountAlias(mountAlias);
+        if (scope != null) {
+            definition.setScope(scope);
         }
 
         agentMap.put(agentTypeName, definition);

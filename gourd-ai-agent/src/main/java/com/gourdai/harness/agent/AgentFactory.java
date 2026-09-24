@@ -239,7 +239,10 @@ public class AgentFactory {
                 break;
             }
             case "hitl": {
-                engine.getHitlInterceptor().setEnabled(engine.isHitlEnabled());
+                // 拦截器恒启用，是否真的弹审批由会话档位在 onAction 里决定（见 HITLInterceptor）。
+                // 不允许任何引擎级全局开关在装配期把拦截器置为 disabled：档位是每个会话一个值，
+                // 装配期关掉，默认档会话的审批就永远不会触发。
+                engine.getHitlInterceptor().setEnabled(true);
 
                 builder.defaultInterceptorAdd(engine.getHitlInterceptor());
                 break;

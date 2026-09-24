@@ -305,20 +305,6 @@ public class AgentFlags {
     }
 
     /**
-     * 马具技能存放区
-     */
-    public static final String getHarnessSkills() {
-        return getHarnessHome() + "skills/";
-    }
-
-    /**
-     * 马具子代理描述存放区
-     */
-    public static final String getHarnessAgents() {
-        return getHarnessHome() + "agents/";
-    }
-
-    /**
      * 马具命令描述存放区
      */
     public static final String getHarnessCommands() {

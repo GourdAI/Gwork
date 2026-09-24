@@ -12,7 +12,13 @@
                       "steer_deferred":  "Bước hiện tại đã kết thúc; đã thêm vào hàng đợi",
                       "steer_failed":  "Gửi nội dung xen ngang thất bại; nội dung nhập được giữ lại",
                       "force_finished":  "Tác vụ đã kết thúc (máy chủ đang rảnh); luồng đã được đóng tự động",
-                      "steer_attachment_wait":  "Không thể xen ngang hoặc xếp hàng tệp đính kèm khi tác vụ đang chạy. Hãy chờ hoặc dừng tác vụ",
+                      "attachment_uploading":  "Đang tải tệp đính kèm, vui lòng đợi",
+                      "attachment_upload_failed":  "Tải tệp đính kèm thất bại. Nội dung đã được giữ lại, vui lòng thử lại",
+                      "attachment_changed":  "Nội dung đã thay đổi trong khi tải. Lần gửi này đã bị hủy, vui lòng gửi lại",
+                      "queued_with_attachments":  "Đã thêm vào hàng đợi (kèm tệp đính kèm)",
+                      "steer_accepted_with_attachments":  "Đã nhận nội dung xen ngang (kèm tệp đính kèm) và sẽ áp dụng ở bước tiếp theo",
+                      "queue_failed":  "Thêm vào hàng đợi thất bại. Nội dung đã được giữ lại, vui lòng thử lại",
+                      "command_attachment_unsupported":  "Lệnh không thể kèm tệp đính kèm. Hãy xóa chúng rồi nhấn Tab để thêm vào hàng đợi",
                       "steer_command_queue":  "Không thể dùng lệnh làm nội dung xen ngang. Nhấn Tab để thêm vào hàng đợi",
                       "steer_dropped":  "Nội dung xen ngang chưa kịp áp dụng và đã được thêm vào hàng đợi",
                       "steer_expand_full":  "Hiển thị toàn bộ ({0} ký tự)",
@@ -134,7 +140,26 @@
                  "confirm":  "Xác nhận"
              },
     "app":  {
-                "boot_error":  "Khởi động thất bại",
+                                "access_title":  "Quyền truy cập",
+                "access_default":  "Quyền mặc định",
+                "access_full":  "Toàn quyền truy cập",
+                "access_default_desc":  "Không gian cách ly; lệnh nguy hiểm cần phê duyệt",
+                "access_full_desc":  "Mở không gian và lệnh (tự chịu rủi ro)",
+                "access_confirm_title":  "Cho phép toàn quyền truy cập?",
+                "access_confirm_desc":  "Ở chế độ toàn quyền, AI không còn bị ràng buộc bởi cách ly không gian hay phê duyệt lệnh:",
+                "access_risk_file":  "Thao tác tệp",
+                "access_risk_file_desc":  "Đọc, ghi mọi tệp ngoài không gian dự án, gồm cả tệp hệ thống",
+                "access_risk_cmd":  "Lệnh terminal",
+                "access_risk_cmd_desc":  "Lệnh không còn phê duyệt từng lần; xóa, ghi đè có hiệu lực ngay",
+                "access_risk_net":  "Truy cập internet",
+                "access_risk_net_desc":  "Truy cập mọi địa chỉ mạng; nguy cơ rò rỉ dữ liệu hoặc tải tệp không rõ nguồn gốc",
+                "access_ack":  "Tôi hiểu rõ các rủi ro và tự chịu trách nhiệm về an toàn dữ liệu của mình",
+                "access_allow":  "Cho phép toàn quyền",
+                "access_cancel":  "Hủy",
+                "access_toast_default":  "Đã chuyển sang quyền mặc định",
+                "access_toast_full":  "Đã chuyển sang toàn quyền truy cập",
+                "access_failed":  "Chuyển quyền thất bại; đã khôi phục chế độ trước đó",
+"boot_error":  "Khởi động thất bại",
                 "project_view":  "Chế độ xem dự án",
                 "review_view":  "Kiểm tra mã",
                 "terminal_shortcut":  "Phím tắt terminal",
@@ -152,7 +177,6 @@
                 "history_scope_global":  "Hội thoại toàn cục",
                 "history_scope_project":  "Hội thoại dự án",
                 "welcome_title":  "Chào bạn, tôi là GWork!",
-                "welcome_sub":  "Bạn cần hỗ trợ gì?",
                 "drop_attach":  "Thả để thêm tệp đính kèm",
                 "thinking_label":  "Suy nghĩ",
                 "context_label":  "Ngữ cảnh",
@@ -233,11 +257,38 @@
                                 "rename_project":  "Đổi tên dự án",
                                 "rename_failed":  "Đổi tên thất bại",
                                 "model_config":  "Cấu hình mô hình",
-                   "memory":  "Bộ nhớ"
+                   "memory":  "Bộ nhớ",
+                   "update_now":  "Cập nhật",
+                   "update_download":  "Tải về",
+                   "update_downloading":  "Đang tải…",
+                   "update_install":  "Cài đặt",
+                   "update_tooltip":  "Có phiên bản mới {0} — nhấp để cập nhật",
+                   "update_tooltip_downloading":  "Đang tải phiên bản {0}",
+                   "update_tooltip_downloaded":  "Phiên bản {0} đã sẵn sàng — nhấp để cài đặt và khởi động lại"
                             }
             },
     "settings":  {
-                     "common":  {
+                     "appearance": {
+                         "title": "Giao diện",
+                         "desc": "Chế độ sáng/tối và bảng màu chủ đề. Thay đổi có hiệu lực ngay và được lưu cục bộ",
+                         "mode": {
+                             "title": "Chế độ sáng/tối",
+                             "system": "Hệ thống",
+                             "light": "Sáng",
+                             "dark": "Tối"
+                         },
+                         "themes": {
+                             "title": "Tất cả chủ đề"
+                         },
+                         "theme": {
+                             "graphite": "Than chì",
+                             "teal": "Ngọc lục",
+                             "clay": "Đất nung",
+                             "sky": "Xanh trời",
+                             "indigo": "Chàm cổ điển"
+                         }
+                     },
+"common":  {
                                     "back":  "Quay lại",
                                     "close":  "Đóng",
                                     "delete":  "Xóa",
@@ -248,8 +299,8 @@
                      "title":  "Cài đặt",
                      "tabs":  {
                                   "general":  "Chung",
+                                  "appearance": "Giao diện",
                                   "permission":  "Quyền",
-                                  "mounts":  "Gắn",
                                   "mcp":  "Cấu hình MCP",
                                   "openapi":  "Cấu hình OpenAPI",
                                   "lsp":  "Cấu hình LSP",
@@ -296,11 +347,6 @@
                                                       "desc":  "Chọn ngôn ngữ hiển thị giao diện, thay đổi sẽ có hiệu lực sau khi làm mới trang",
                                                       "name":  "Ngôn ngữ giao diện"
                                                   },
-                                     "appearance":  {
-                                                        "title":  "Giao diện",
-                                                        "theme_name":  "Màu chủ đề",
-                                                        "theme_desc":  "Chuyển đổi giao diện giữa tối và sáng"
-                                                    },
                                      "conversation":  {
                                                           "title":  "Nén ngữ cảnh",
                                                           "history_window":  "Kích thước cửa sổ lịch sử",
@@ -315,12 +361,6 @@
                                                           "intent_chain_desc":  "Khi nén vẫn giữ lại chỉ mục rút gọn các yêu cầu trước đó của người dùng (chi phí rất thấp), tránh việc tác nhân quay lại các mục tiêu đã hoàn thành",
                                                           "hint":  "Cửa sổ lịch sử: bao nhiêu tin nhắn cuối luôn được giữ nguyên không nén.\nDự trữ đầu ra: khoảng trống tuyệt đối cho lượt trả lời kế tiếp của mô hình; điểm kích hoạt = cửa sổ mô hình − phần dự trữ − bộ đệm lượt.\nNgưỡng nén: chỉ kích hoạt SỚM HƠN (lấy giá trị nhỏ hơn trong hai); 100 nghĩa là không kích hoạt sớm thêm.\nMục tiêu nén: mỗi lần nén sâu đến đâu — giá trị càng cao thì nén càng nông và kích hoạt càng thường xuyên"
                                                       },
-                                     "sandbox":  {
-                                                     "title":  "Chế độ Sandbox",
-                                                     "desc":  "Các lệnh AI thực thi trong môi trường sandbox hạn chế (chỉ đọc/ghi tệp trong \u0027Không gian làm việc\u0027 và \u0027Gắn\u0027)",
-                                                     "allow_home":  "Cho phép truy cập thư mục home của người dùng trong sandbox (`~/`, ví dụ `~/.m2`)",
-                                                     "system_restrict":  "Áp dụng hạn chế sandbox nghiêm ngặt hơn ở cấp kernel; tắt để nới lỏng hạn chế (cho kiểm tra)"
-                                                 },
                                      "memory":  {
                                                     "title":  "Bộ nhớ nhận thức",
                                                     "enabled_desc":  "Giữ bộ nhớ dài hạn giữa các phiên; tắt để giảm tiêu thụ ngữ cảnh",
@@ -390,48 +430,9 @@
                                     "installed_tab":  "Đã cài đặt",
                                     "uninstall":  "Gỡ cài đặt",
                                     "uninstall_confirm":  "Gỡ cài đặt kỹ năng \"{0}\"? Thư mục kỹ năng cục bộ sẽ bị xóa.",
+                                    "scope_global":  "Global",
+                                    "scope_workspace":  "This Project",
                                     "market_tab":  "Chợ kỹ năng"
-                                },
-                     "mounts":  {
-                                    "title":  "Không gian gắn",
-                                    "desc":  "Quản lý ánh xạ thư mục cục bộ để tải kỹ năng và tài nguyên AI",
-                                    "add":  "Thêm gắn",
-                                    "add_title":  "Thêm gắn",
-                                    "edit_title":  "Chỉnh sửa gắn",
-                                    "alias":  "Tên",
-                                    "alias_placeholder":  "@my-mount",
-                                    "scope":  "Phạm vi",
-                                    "scope_workspace":  "Không gian làm việc (cục bộ)",
-                                    "type":  "Loại nội dung",
-                                    "type_skills":  "Kỹ năng (SKILLS)",
-                                    "type_agents":  "Agent (AGENTS)",
-                                    "type_files":  "Tệp (FILES)",
-                                    "path":  "Đường dẫn ánh xạ",
-                                    "path_placeholder":  "~/.myapp/skills/",
-                                    "path_hint":  "Đường dẫn cục bộ của tệp (hỗ trợ \u0027./\u0027 không gian làm việc và \u0027~/\u0027 thư mục người dùng)",
-                                    "writeable":  "Mở quyền ghi",
-                                    "description":  "Mô tả (tùy chọn)",
-                                    "description_placeholder":  "Mô tả ngắn mục đích gắn này",
-                                    "presets_label":  "Tùy chọn gắn phổ biến",
-                                    "skills_list_title":  "Danh sách gói kỹ năng",
-                                    "agents_list_title":  "Danh sách Subagent",
-                                    "files_list_title":  "Danh sách tệp",
-                                    "system":  "Hệ thống",
-                                    "skill_pkg":  "Gói kỹ năng",
-                                    "content_list":  "Danh sách nội dung",
-                                    "open_dir":  "Mở thư mục",
-                                    "preset_skills":  "Kỹ năng không gian làm việc",
-                                    "preset_skillhub":  "Trung tâm kỹ năng",
-                                    "preset_agents_skills":  "Kỹ năng Subagent",
-                                    "preset_opencode_skills":  "Kỹ năng OpenCode",
-                                    "preset_claude_skills":  "Kỹ năng Claude",
-                                    "alias_label":  "Tên",
-                                    "scope_label":  "Phạm vi",
-                                    "type_label":  "Loại nội dung",
-                                    "path_label":  "Đường dẫn ánh xạ",
-                                    "writeable_label":  "Mở quyền ghi",
-                                    "description_label":  "Mô tả",
-                                    "skills_list":  "Danh sách kỹ năng"
                                 },
                      "mcp":  {
                                  "title":  "Máy chủ MCP",
@@ -577,8 +578,6 @@
                                        "model_list_api_label":  "Giao diện danh sách mô hình",
                                        "api_url_label":  "URL API",
                                        "api_key_label":  "Khóa API",
-                                       "get_api_key_link":  "Lấy khóa API",
-                                       "api_key_hint_suffix":  "（hạn mức đăng ký miễn phí 10$ mỗi tháng）",
                                        "timeout_label":  "Thời gian chờ",
                                        "models_label":  "Mô hình",
                                        "empty_hint":  "Chưa có mô hình, vui lòng nhấp để thêm hoặc tải từ API",
@@ -614,7 +613,6 @@
                                        "name_label":  "Tên",
                                         "scope_label":  "Phạm vi",
                                         "view_title":  "Cài đặt mô hình",
-                                        "builtin_group":  "Nội xây dựng",
                                         "custom_group":  "Nhà cung cấp tùy chỉnh",
                                         "add_provider_title":  "Thêm nhà cung cấp mô hình",
                                         "add_provider_desc":  "Cấu hình điểm cuối API hoàn toàn tùy chỉnh và mô hình ban đầu"
@@ -841,11 +839,15 @@
                  "question_skip":  "Bỏ qua",
                  "question_next":  "Tiếp theo",
                  "question_submit":  "Gửi",
-                 "question_recommended":  "(Đề xuất)",
+                 "question_recommended":  "Khuyến nghị",
+                 "question_detail_expand":  "Mở rộng",
+                 "question_detail_collapse":  "Thu gọn",
+                 "question_record_title":  "Câu trả lời của tôi",
                  "question_answered":  "Đã gửi",
                  "question_skipped":  "Đã bỏ qua",
                  "question_close":  "Đóng",
                  "question_attachment_wait":  "Không thể gửi tệp đính kèm khi đang chờ trả lời câu hỏi. Vui lòng trả lời hoặc bỏ qua trước",
+                 "question_attachment_queued":  "Đã điền câu trả lời. Tệp đính kèm đã vào hàng đợi và sẽ được gửi sau lượt này",
                  "question_supplement":  "Bổ sung thêm… (được giữ cùng lựa chọn của bạn)",
                  "question_supplement_placeholder":  "Nhập nội dung bổ sung, nhấn Enter để xác nhận…",
                  "batch_tool":  "Hàng loạt",
@@ -1173,6 +1175,11 @@
                         "saved_desc":  "Chuyển giữa không gian làm việc và toàn cục để xem ký ức đã lưu"
                     },
     "file_changes": {
+        "edited_files": "Đã chỉnh sửa {count} tệp",
+        "show_more_files": "Hiển thị thêm {count} tệp",
+        "collapse_files": "Thu gọn",
+        "run_list_title": "Tệp thay đổi trong lượt này",
+        "back_to_list": "Quay lại danh sách",
         "title": "Thay đổi tệp trong lượt này",
         "summary": "{count} tệp",
         "review": "Xem lại",

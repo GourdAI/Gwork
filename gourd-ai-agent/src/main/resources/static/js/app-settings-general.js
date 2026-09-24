@@ -64,9 +64,6 @@
                 return (v != null && v >= 1000) ? v : null;
             })(),
             intentChainEnabled: $('#generalIntentChainEnabled').is(':checked'),
-            sandboxMode: $('#generalSandboxMode').is(':checked'),
-            sandboxAllowUserHome: $('#generalSandboxAllowUserHome').is(':checked'),
-            sandboxSystemRestrict: $('#generalSandboxSystemRestrict').is(':checked'),
             apiRetries: parseNumStr($('#generalApiRetries').val().trim()),
             mcpRetries: parseNumStr($('#generalMcpRetries').val().trim()),
             modelRetries: parseNumStr($('#generalModelRetries').val().trim()),
@@ -74,9 +71,7 @@
             openApiEnabled: $('#generalOpenApiEnabled').is(':checked'),
             subagentEnabled: $('#generalSubagentEnabled').is(':checked'),
             lspEnabled: $('#generalLspEnabled').is(':checked'),
-            cliPrintSimplified: $('#generalCliPrintSimplified').is(':checked'),
-            darkMode: $('#generalDarkMode').is(':checked'),
-            locale: $('#generalLocale').val()
+            cliPrintSimplified: $('#generalCliPrintSimplified').is(':checked')
         };
     }
 
@@ -104,21 +99,12 @@
             });
     }
 
-    // =========================================================
-    // layui form 初始化（事件监听 + 模块就绪标记）
-    // =========================================================
-    var formReady = false;
-    var layuiForm = null;
-
     // ===== 开关类（switch）：变化即保存（即时，无防抖）=====
     // 这些开关是自定义 .toggle-switch 样式的原生 checkbox：既不在 .layui-form 容器内、
     // 也没有 lay-filter 属性，layui 不会渲染它们，form.on('switch(...)') 事件永不触发
     // （此前 bug 根因：关闭开关后根本没有发起保存）。改用原生 change 事件委托。
+    // 注：明暗模式与界面语言已迁至外观设置（app-settings-appearance.js）。
     var switchIds = [
-        'generalDarkMode',
-        'generalSandboxMode',
-        'generalSandboxAllowUserHome',
-        'generalSandboxSystemRestrict',
         'generalCliPrintSimplified',
         'generalSubagentEnabled',
         'generalMcpEnabled',
@@ -130,23 +116,6 @@
     $(document).on('change', '#' + switchIds.join(', #'), function () {
         saveGeneralSettings(true); // 即时保存
     });
-
-    function ensureFormReady(done) {
-        if (formReady && done) { done(); return; }
-        layui.use('form', function () {
-            layuiForm = layui.form;
-            formReady = true;
-
-            // ===== 语言选择：变化即保存（即时）=====
-            layuiForm.on('select(generalLocale)', function (data) {
-                var newLocale = data.value;
-                if (window.GourdI18n) { GourdI18n.setLocale(newLocale); }
-                saveGeneralSettings(true); // 即时保存
-            });
-
-            if (done) done();
-        });
-    }
 
     // ===== 数字输入框：input 事件 + 防抖 =====
     $(document).on('input', '#generalHistoryWindowSize, #generalCompressionRatio, #generalCompressionTargetRatio, #generalCompressionReservedOutputTokens, #generalModelRetries, #generalMcpRetries, #generalApiRetries', function () {
@@ -162,9 +131,6 @@
                 $('#generalCompressionTargetRatio').val(d.compressionTargetRatio != null ? d.compressionTargetRatio : '');
                 $('#generalCompressionReservedOutputTokens').val(d.compressionReservedOutputTokens != null ? d.compressionReservedOutputTokens : '');
                 $('#generalIntentChainEnabled').prop('checked', d.intentChainEnabled !== false);
-                $('#generalSandboxMode').prop('checked', !!d.sandboxMode);
-                $('#generalSandboxAllowUserHome').prop('checked', d.sandboxAllowUserHome !== false);
-                $('#generalSandboxSystemRestrict').prop('checked', !!d.sandboxSystemRestrict);
                 $('#generalApiRetries').val(d.apiRetries != null ? d.apiRetries : '');
                 $('#generalMcpRetries').val(d.mcpRetries != null ? d.mcpRetries : '');
                 $('#generalModelRetries').val(d.modelRetries != null ? d.modelRetries : '');
@@ -173,21 +139,7 @@
                 $('#generalSubagentEnabled').prop('checked', d.subagentEnabled !== false);
                 $('#generalLspEnabled').prop('checked', !!d.lspEnabled);
                 $('#generalCliPrintSimplified').prop('checked', d.cliPrintSimplified !== false);
-                $('#generalDarkMode').prop('checked', !!d.darkMode);
                 window.cliPrintSimplified = d.cliPrintSimplified !== false;
-
-                // 语言选择：优先取 localStorage，后端有值才覆盖
-                var currentLocale = GourdI18n ? GourdI18n.getLocale() : 'zh-CN';
-                if (d.locale) {
-                    currentLocale = d.locale;
-                    if (window.GourdI18n) GourdI18n.setLocale(d.locale);
-                }
-
-                // 确保 form 模块就绪后赋值 + 渲染
-                ensureFormReady(function () {
-                    $('#generalLocale').val(currentLocale);
-                    layuiForm.render('select');
-                });
             }
         }).fail(function () { console.error('[Settings] Failed to load general settings'); });
     }

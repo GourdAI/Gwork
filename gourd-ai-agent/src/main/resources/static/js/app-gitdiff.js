@@ -28,6 +28,8 @@
     var gitViewerFile = document.getElementById('gitViewerFile');
     var gitViewerContent = document.getElementById('gitViewerContent');
     var gitViewerClose = document.getElementById('gitViewerClose');
+    var chatReviewResizeHandle = document.getElementById('chatReviewResizeHandle');
+    var mainArea = document.querySelector('.main-area');
     // main-area 子视图引用
     var welcomeView = document.getElementById('welcomeView');
     var chatView = document.getElementById('chatView');
@@ -356,6 +358,221 @@
     function beginViewerRequest() { return ++viewerGeneration; }
     function viewerStale(gen) { return gen !== viewerGeneration; }
 
+    // chat 模式审查分栏：左右两侧各保留 300px，7px 手柄计入可用宽度。
+    var CHAT_REVIEW_MIN_WIDTH = 300;
+    var CHAT_REVIEW_HANDLE_WIDTH = 7;
+    var CHAT_REVIEW_MIN_TOTAL_WIDTH = CHAT_REVIEW_MIN_WIDTH * 2 + CHAT_REVIEW_HANDLE_WIDTH;
+    var CHAT_REVIEW_WIDTH_STORAGE_KEY = 'chat-review-chat-width';
+    var chatReviewPreferredWidth = null;
+    var chatReviewResizeActive = false;
+    var chatReviewResizeObserver = null;
+    var chatReviewDrag = null;
+
+    function readChatReviewPreferredWidth() {
+        if (chatReviewPreferredWidth != null) return chatReviewPreferredWidth;
+        try {
+            var stored = localStorage.getItem(CHAT_REVIEW_WIDTH_STORAGE_KEY);
+            var parsed = stored == null ? NaN : Number(stored);
+            if (isFinite(parsed) && parsed > 0) chatReviewPreferredWidth = parsed;
+        } catch (e) {}
+        return chatReviewPreferredWidth;
+    }
+
+    function chatReviewSplit(containerWidth, requestedChatWidth) {
+        var width = Number(containerWidth);
+        if (!isFinite(width) || width < 0) width = 0;
+        if (width < CHAT_REVIEW_MIN_TOTAL_WIDTH) {
+            return { narrow: true, chatWidth: 0, viewerWidth: width, maxChatWidth: 0 };
+        }
+        var maxChatWidth = width - CHAT_REVIEW_MIN_WIDTH - CHAT_REVIEW_HANDLE_WIDTH;
+        var requested = Number(requestedChatWidth);
+        if (!isFinite(requested)) requested = (width - CHAT_REVIEW_HANDLE_WIDTH) / 2;
+        var chatWidth = Math.max(CHAT_REVIEW_MIN_WIDTH, Math.min(maxChatWidth, requested));
+        return {
+            narrow: false,
+            chatWidth: chatWidth,
+            viewerWidth: width - chatWidth - CHAT_REVIEW_HANDLE_WIDTH,
+            maxChatWidth: maxChatWidth
+        };
+    }
+
+    function getChatReviewMainAreaWidth() {
+        if (!mainArea) return 0;
+        var width = Number(mainArea.clientWidth);
+        if ((!isFinite(width) || width <= 0) && typeof mainArea.getBoundingClientRect === 'function') {
+            var rect = mainArea.getBoundingClientRect();
+            if (rect && isFinite(Number(rect.width))) width = Number(rect.width);
+        }
+        return isFinite(width) && width > 0 ? width : 0;
+    }
+
+    function applyChatReviewSplit(split) {
+        if (!split) return;
+        if (document.body && document.body.classList) {
+            document.body.classList.toggle('chat-review-narrow', split.narrow);
+        }
+        var rootStyle = document.documentElement && document.documentElement.style;
+        if (!split.narrow && rootStyle && typeof rootStyle.setProperty === 'function') {
+            rootStyle.setProperty('--chat-review-chat-width', split.chatWidth + 'px');
+        }
+        if (chatReviewResizeHandle) {
+            chatReviewResizeHandle.setAttribute('aria-valuemin', CHAT_REVIEW_MIN_WIDTH);
+            chatReviewResizeHandle.setAttribute('aria-valuemax', split.narrow ? CHAT_REVIEW_MIN_WIDTH : split.maxChatWidth);
+            chatReviewResizeHandle.setAttribute('aria-valuenow', split.narrow ? CHAT_REVIEW_MIN_WIDTH : split.chatWidth);
+        }
+    }
+
+    function syncChatReviewLayout() {
+        if (!diffViewerActive || window.appMode === 'code') return null;
+        var width = getChatReviewMainAreaWidth();
+        var preferred = readChatReviewPreferredWidth();
+        var requested = preferred == null ? (width - CHAT_REVIEW_HANDLE_WIDTH) / 2 : preferred;
+        var split = chatReviewSplit(width, requested);
+        applyChatReviewSplit(split);
+        return split;
+    }
+
+    function persistChatReviewPreferredWidth() {
+        if (chatReviewPreferredWidth == null || !isFinite(chatReviewPreferredWidth)) return;
+        try { localStorage.setItem(CHAT_REVIEW_WIDTH_STORAGE_KEY, String(chatReviewPreferredWidth)); } catch (e) {}
+    }
+
+    function handleChatReviewPointerDown(event) {
+        if (!event || (event.button != null && event.button !== 0) || event.isPrimary === false
+            || !diffViewerActive || window.appMode === 'code' || !chatView
+            || !chatView.classList.contains('active')) return;
+        var split = syncChatReviewLayout();
+        if (!split || split.narrow) return;
+        if (event.preventDefault) event.preventDefault();
+        if (event.stopPropagation) event.stopPropagation();
+
+        var pointerId = typeof event.pointerId === 'number' ? event.pointerId : null;
+        chatReviewDrag = {
+            pointerId: pointerId,
+            startX: Number(event.clientX) || 0,
+            startWidth: split.chatWidth
+        };
+        chatReviewResizeHandle.classList.add('dragging');
+        document.body.classList.add('chat-review-resizing');
+        document.addEventListener('pointermove', handleChatReviewPointerMove, true);
+        document.addEventListener('pointerup', handleChatReviewPointerEnd, true);
+        document.addEventListener('pointercancel', handleChatReviewPointerEnd, true);
+        window.addEventListener('blur', handleChatReviewWindowBlur);
+        if (pointerId != null && typeof chatReviewResizeHandle.setPointerCapture === 'function') {
+            try { chatReviewResizeHandle.setPointerCapture(pointerId); } catch (e) {}
+        }
+    }
+
+    function handleChatReviewPointerMove(event) {
+        if (!chatReviewDrag || (chatReviewDrag.pointerId != null && event.pointerId != null
+            && event.pointerId !== chatReviewDrag.pointerId)) return;
+        if (event.preventDefault) event.preventDefault();
+        if (event.stopPropagation) event.stopPropagation();
+        var clientX = Number(event.clientX);
+        if (!isFinite(clientX)) return;
+        var width = getChatReviewMainAreaWidth();
+        var requested = chatReviewDrag.startWidth + clientX - chatReviewDrag.startX;
+        var split = chatReviewSplit(width, requested);
+        applyChatReviewSplit(split);
+        if (split.narrow) {
+            finishChatReviewDrag(false);
+            return;
+        }
+        chatReviewPreferredWidth = split.chatWidth;
+    }
+
+    function handleChatReviewPointerEnd(event) {
+        if (!chatReviewDrag || (event && chatReviewDrag.pointerId != null && event.pointerId != null
+            && event.pointerId !== chatReviewDrag.pointerId)) return;
+        if (event && event.preventDefault) event.preventDefault();
+        if (event && event.stopPropagation) event.stopPropagation();
+        finishChatReviewDrag(true);
+    }
+
+    function handleChatReviewWindowBlur() {
+        finishChatReviewDrag(true);
+    }
+
+    function finishChatReviewDrag(persist) {
+        if (!chatReviewDrag) return;
+        var pointerId = chatReviewDrag.pointerId;
+        chatReviewDrag = null;
+        document.removeEventListener('pointermove', handleChatReviewPointerMove, true);
+        document.removeEventListener('pointerup', handleChatReviewPointerEnd, true);
+        document.removeEventListener('pointercancel', handleChatReviewPointerEnd, true);
+        window.removeEventListener('blur', handleChatReviewWindowBlur);
+        if (chatReviewResizeHandle) {
+            chatReviewResizeHandle.classList.remove('dragging');
+            if (pointerId != null && typeof chatReviewResizeHandle.releasePointerCapture === 'function') {
+                try { chatReviewResizeHandle.releasePointerCapture(pointerId); } catch (e) {}
+            }
+        }
+        if (document.body && document.body.classList) document.body.classList.remove('chat-review-resizing');
+        if (persist) persistChatReviewPreferredWidth();
+    }
+
+    function handleChatReviewKeyDown(event) {
+        if (!event || !diffViewerActive || window.appMode === 'code' || !chatView
+            || !chatView.classList.contains('active')) return;
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight'
+            && event.key !== 'Home' && event.key !== 'End') return;
+        var split = syncChatReviewLayout();
+        if (!split || split.narrow) return;
+        var step = event.shiftKey ? 100 : 24;
+        var requested = split.chatWidth;
+        if (event.key === 'ArrowLeft') requested -= step;
+        else if (event.key === 'ArrowRight') requested += step;
+        else if (event.key === 'Home') requested = CHAT_REVIEW_MIN_WIDTH;
+        else if (event.key === 'End') requested = split.maxChatWidth;
+        split = chatReviewSplit(getChatReviewMainAreaWidth(), requested);
+        if (split.narrow) return;
+        chatReviewPreferredWidth = split.chatWidth;
+        applyChatReviewSplit(split);
+        persistChatReviewPreferredWidth();
+        if (event.preventDefault) event.preventDefault();
+        if (event.stopPropagation) event.stopPropagation();
+    }
+
+    function handleChatReviewAreaResize() {
+        var split = syncChatReviewLayout();
+        if (chatReviewDrag && (!split || split.narrow)) finishChatReviewDrag(false);
+    }
+
+    function startChatReviewResize() {
+        if (window.appMode === 'code' || !mainArea || !chatReviewResizeHandle) return;
+        if (!chatReviewResizeActive) {
+            chatReviewResizeHandle.addEventListener('pointerdown', handleChatReviewPointerDown);
+            chatReviewResizeHandle.addEventListener('keydown', handleChatReviewKeyDown);
+            window.addEventListener('resize', handleChatReviewAreaResize);
+            var Observer = window.ResizeObserver;
+            if (typeof Observer === 'function') {
+                try {
+                    chatReviewResizeObserver = new Observer(handleChatReviewAreaResize);
+                    chatReviewResizeObserver.observe(mainArea);
+                } catch (e) { chatReviewResizeObserver = null; }
+            }
+            chatReviewResizeActive = true;
+        }
+        syncChatReviewLayout();
+    }
+
+    function stopChatReviewResize() {
+        finishChatReviewDrag(true);
+        if (chatReviewResizeActive) {
+            if (chatReviewResizeHandle) {
+                chatReviewResizeHandle.removeEventListener('pointerdown', handleChatReviewPointerDown);
+                chatReviewResizeHandle.removeEventListener('keydown', handleChatReviewKeyDown);
+            }
+            window.removeEventListener('resize', handleChatReviewAreaResize);
+            if (chatReviewResizeObserver) chatReviewResizeObserver.disconnect();
+            chatReviewResizeObserver = null;
+            chatReviewResizeActive = false;
+        }
+        if (document.body && document.body.classList) document.body.classList.remove('chat-review-narrow');
+        var rootStyle = document.documentElement && document.documentElement.style;
+        if (rootStyle && typeof rootStyle.removeProperty === 'function') rootStyle.removeProperty('--chat-review-chat-width');
+    }
+
     // model 释放助手：必须先 setModel(null) 再 dispose，避免编辑器短暂引用已销毁 model。
     function releaseFileViewerModel() {
         if (fileViewerEditor) { try { fileViewerEditor.setModel(null); } catch (e) {} }
@@ -460,11 +677,15 @@
         if (welcomeView) welcomeView.style.display = 'none';
         // code 模式：diff 浮层占据中间列，与右侧对话栏(#chatView, order:3)是正交的两列，
         // 不能隐藏对话栏（否则新开/切换对话会连带把中间 diff 顶掉）。仅 chat 模式下
-        // diff 是全屏覆盖，才需要隐藏聊天视图。
-        if (chatView && window.appMode !== 'code') chatView.style.display = 'none';
+        // viewer 改为与聊天区并排的右侧分栏（内容区 | 审查区），不再整页遮挡聊天内容。
+        if (window.appMode !== 'code') {
+            if (chatView) chatView.style.display = '';
+            try { document.body.classList.add('chat-review-open'); } catch (e) {}
+        }
         try { document.body.classList.add('viewer-open'); } catch (e) {}
         gitDiffViewer.style.display = 'flex';
         diffViewerActive = true;
+        if (window.appMode !== 'code') startChatReviewResize();
     }
 
     function openFileViewer(path, name, rootOverride) {
@@ -820,6 +1041,7 @@
     // ---- Diff Viewer：关闭，恢复原始视图 ----
     function closeDiffViewer() {
         if (!gitDiffViewer) return;
+        stopChatReviewResize();
         gitDiffViewer.style.display = 'none';
         diffViewerActive = false;
 
@@ -836,6 +1058,9 @@
 
         // 解除对编辑器列的接管（code 模式下让 #codeEditorPane 重新显示）
         try { document.body.classList.remove('viewer-open'); } catch (e) {}
+
+        // 解除对聊天区的接管（chat 模式并排分栏态）
+        try { document.body.classList.remove('chat-review-open'); } catch (e) {}
 
         // 关键：必须先清除两个视图的内联 display 样式
         // 因为 chatView 的可见性由 CSS .active 类控制（.chat-view.active { display: flex }）
@@ -861,13 +1086,12 @@
         gitViewerClose.addEventListener('click', closeDiffViewer);
     }
 
-    // ESC 关闭 diff viewer
+    // ESC 关闭 diff viewer（仅审查接管态：chat 模式并排分栏时不枪 Escape——聊天区自己也在用）
     document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape' && diffViewerActive) {
+        if (e.key === 'Escape' && diffViewerActive && !document.body.classList.contains('chat-review-open')) {
             closeDiffViewer();
         }
     });
-
     // ---- AI 生成变更摘要（专用 HTTP 接口）----
     var gitSummaryBtn = document.getElementById('gitSummaryBtn');
     var isGeneratingSummary = false;
@@ -1089,11 +1313,110 @@
     });
     if (!document.hidden) startGitPoll();
 
+    // ---- 轮变更列表模式：变更卡片头部「审查」入口，列该轮变更文件，点行切 Monaco 详情 ----
+    var runListContext = null; // { sess, runId, summary }
+    var RUN_KIND_BY_CHANGE_TYPE = { ADDED: 'A', MODIFIED: 'M', DELETED: 'D' };
+    function runKindOf(file) {
+        return RUN_KIND_BY_CHANGE_TYPE[String((file && file.changeType) || '').toUpperCase()] || 'M';
+    }
+    function runStatHtml(file) {
+        var add = Number(file && file.additions), del = Number(file && file.deletions);
+        add = isFinite(add) && add > 0 ? add : 0;
+        del = isFinite(del) && del > 0 ? del : 0;
+        if (!add && !del) return '';
+        return '<span class="tool-diff-stat"><span class="add">+' + add + '</span><span class="del">-' + del + '</span></span>';
+    }
+    function clearViewerActions() {
+        var old = gitDiffViewer ? gitDiffViewer.querySelector('.git-viewer-actions') : null;
+        if (old) old.remove();
+    }
+    function renderRunList() {
+        if (!runListContext || !gitViewerMsg) return;
+        var files = Array.isArray(runListContext.summary.files) ? runListContext.summary.files : [];
+        var html = '<div class="run-changes-list"><div class="run-changes-list-head">'
+            + escapeHtml(GourdI18n.t('file_changes.run_list_title')) + '</div>';
+        files.forEach(function (file, idx) {
+            var kind = runKindOf(file);
+            html += '<div class="file-change-row run-changes-row" data-idx="' + idx + '">'
+                + '<div class="file-change-main"><span class="file-change-kind kind-' + kind + '">' + kind + '</span>'
+                + '<span class="file-change-path">' + escapeHtml(file.path || '') + '</span>'
+                + runStatHtml(file) + '</div></div>';
+        });
+        html += '</div>';
+        clearViewerActions();
+        gitViewerMsg.innerHTML = html;
+        gitViewerMsg.style.display = 'block';
+        if (gitViewerInfoBar) gitViewerInfoBar.style.display = 'none';
+        if (gitViewerFileHost) gitViewerFileHost.style.display = 'none';
+        if (gitViewerDiffHost) gitViewerDiffHost.style.display = 'none';
+    }
+    function showRunListBackAction() {
+        clearViewerActions();
+        var actionBar = document.createElement('div');
+        actionBar.className = 'git-viewer-actions';
+        var backBtn = document.createElement('button');
+        backBtn.className = 'git-action-btn';
+        backBtn.textContent = GourdI18n.t('file_changes.back_to_list');
+        backBtn.addEventListener('click', function () {
+            viewerMode = 'run';
+            if (gitViewerLabel) gitViewerLabel.textContent = GourdI18n.t('file_changes.run_list_title');
+            releaseDiffViewerModels();
+            releaseFileViewerModel();
+            renderRunList();
+        });
+        actionBar.appendChild(backBtn);
+        var content = gitDiffViewer.querySelector('.git-viewer-content');
+        if (content) gitDiffViewer.insertBefore(actionBar, content);
+    }
+    /* Monaco 详情打开后由 reviewFileChange 的 onOpened 回调挂返回按钮（仅列表入口传） */
+    if (gitViewerMsg) {
+        gitViewerMsg.addEventListener('click', function (event) {
+            var target = event.target;
+            var row = (target && typeof target.closest === 'function') ? target.closest('.run-changes-row') : null;
+            if (!row || !runListContext) return;
+            var files = runListContext.summary.files || [];
+            var file = files[Number(row.getAttribute('data-idx'))];
+            if (!file) return;
+            if (typeof window.reviewFileChange === 'function') {
+                window.reviewFileChange(runListContext.sess, runListContext.runId, file, null, showRunListBackAction);
+            }
+        });
+    }
+    function openRunChangesViewer(sess, runId) {
+        if (!gitDiffViewer) return;
+        viewerMode = 'run';
+        showViewer();
+        if (gitViewerLabel) gitViewerLabel.textContent = GourdI18n.t('file_changes.run_list_title');
+        if (gitViewerFile) gitViewerFile.textContent = '';
+        showViewerMsg(GourdI18n.t('git.loading'));
+        var url = '/web/chat/changes/run?sessionId=' + encodeURIComponent(sess.sessionId)
+            + '&runId=' + encodeURIComponent(runId)
+            + (sess.projectRoot ? '&root=' + encodeURIComponent(sess.projectRoot) : '');
+        fetch(url).then(function (response) { return response.json().catch(function () { return null; }); })
+            .then(function (result) {
+                if (viewerMode !== 'run') return;
+                var data = result && result.data;
+                var summary = (data && data.summary) || data;
+                if (!result || (result.code != null && result.code !== 200)
+                    || !summary || !Array.isArray(summary.files) || !summary.files.length) {
+                    runListContext = null;
+                    showViewerMsg(GourdI18n.t('git.no_diff'));
+                    return;
+                }
+                runListContext = { sess: sess, runId: String(runId), summary: summary };
+                renderRunList();
+            })
+            .catch(function () {
+                if (viewerMode === 'run') { runListContext = null; showViewerMsg(GourdI18n.t('git.no_diff')); }
+            });
+    }
+
     // 暴露全局（供 app-filer.js / app-message.js / app-file-changes.js 调用）
     window.loadGitStatus = loadGitStatus;
     window.openFileViewer = openFileViewer;
     window.openSnapshotDiffViewer = openSnapshotDiffViewer;
     window.openUnifiedDiffViewer = openUnifiedDiffViewer;
+    window.openRunChangesViewer = openRunChangesViewer;
     window.closeDiffViewer = closeDiffViewer;
     window.guessLang = guessLang;
 })();

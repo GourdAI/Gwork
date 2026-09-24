@@ -12,9 +12,9 @@
  *   GET  /web/settings/skills/markets                     — 获取可用市场列表
  *   GET  /web/settings/skills/proxy?action=trending[&cursor=xx]       — 热门技能列表（cursor 游标分页）
  *   GET  /web/settings/skills/proxy?action=search&q=xxx[&cursor=xx]   — 搜索技能（cursor 游标分页）
- *   GET  /web/settings/skills/installed                   — 已安装技能列表（全部挂载池）
- *   POST /web/settings/skills/install  {slug, marketName, mountAlias}  — 安装技能
- *   POST /web/settings/mounts/skills/remove {alias, skillName}         — 卸载技能
+ *   GET  /web/settings/skills/installed                   — 已安装技能列表（全部作用域）
+ *   POST /web/settings/skills/install    {slug, marketName, scope}     — 安装技能（scope=global|workspace）
+ *   POST /web/settings/skills/uninstall  {scope, skillName}            — 卸载技能
  */
 (function () {
     'use strict';
@@ -45,7 +45,11 @@
     var _installedSkillsCache = null;
     var _currentView = VIEW_INSTALLED;  // 当前视图：默认已安装
     var _currentMarketName = '';  // 当前选中的市场名称
-    var _mountPoolsCache = null;  // SKILLS 类型挂载缓存 [{alias, path}, ...]
+    // 安装作用域固定两档（与后端 TalentScope 对应），无远端状态可缓存
+    var _installScopes = [
+        { scope: 'workspace', label: null },  // label 延迟取 i18n
+        { scope: 'global', label: null }
+    ];
     var _currentQuery = null;     // 当前搜索关键词
     var _nextCursor = null;       // 下一页游标（后端返回）；null 表示从第一页加载
     var _pageLimit = 20;         // 每页条数
@@ -65,36 +69,6 @@
     function escapeAttr(str) {
         if (!str) return '';
         return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
-    // ==================== 挂载预加载 ====================
-
-    /** 加载 SKILLS 类型挂载列表（带缓存） */
-    function loadMountPools(callback) {
-        if (_mountPoolsCache) {
-            callback(_mountPoolsCache);
-            return;
-        }
-        $.ajax({
-            url: '/web/settings/mounts',
-            method: 'GET',
-            timeout: 5000,
-            dataType: 'json'
-        }).done(function (resp) {
-            var pools = (resp && resp.code === 200 && resp.data) ? resp.data : [];
-            _mountPoolsCache = pools.filter(function (p) {
-                return p.type === 'SKILLS' || !p.type;
-            }).map(function (p) {
-                return { alias: p.alias || '', path: p.path || '' };
-            });
-            if (!_mountPoolsCache.length) {
-                _mountPoolsCache = [{ alias: '@skills', path: '' }];
-            }
-            callback(_mountPoolsCache);
-        }).fail(function () {
-            _mountPoolsCache = [{ alias: '@skills', path: '' }];
-            callback(_mountPoolsCache);
-        });
     }
 
     // ==================== 市场选择器初始化 ====================
@@ -461,7 +435,7 @@
         });
     }
 
-    /** 渲染已安装技能列表（含卸载按钮与所属挂载池标识） */
+    /** 渲染已安装技能列表（含卸载按钮与所属作用域标识） */
     function renderInstalledSkillsList(skills) {
         if (!skills || skills.length === 0) {
             $skillsList.html(
@@ -480,7 +454,10 @@
         skills.forEach(function (skill) {
             var name = skill.name || '';
             var desc = skill.description || '';
-            var mountAlias = skill.mountAlias || '';
+            var scope = skill.scope || 'workspace';
+            var scopeLabel = (scope === 'global')
+                ? GourdI18n.t('settings.skills.scope_global')
+                : GourdI18n.t('settings.skills.scope_workspace');
             var iconText = name ? name.substring(0, 2).toUpperCase() : 'SK';
             var shortDesc = desc.length > 60 ? desc.substring(0, 60) + '...' : desc;
 
@@ -489,10 +466,10 @@
                 + '<div class="skill-item-info">'
                 + '<div class="skill-item-name" title="' + escapeAttr(name) + '">' + escapeHtml(name) + '</div>'
                 + (shortDesc ? '<div class="skill-item-desc" title="' + escapeAttr(desc) + '">' + escapeHtml(shortDesc) + '</div>' : '')
-                + (mountAlias ? '<div class="skill-item-meta"><span>' + escapeHtml(mountAlias) + '</span></div>' : '')
+                + '<div class="skill-item-meta"><span>' + escapeHtml(scopeLabel) + '</span></div>'
                 + '</div>'
                 + '<div class="skill-item-actions">'
-                + '<button class="skill-uninstall-btn" data-name="' + escapeAttr(name) + '" data-mount="' + escapeAttr(mountAlias) + '" title="' + tUninstall + '">'
+                + '<button class="skill-uninstall-btn" data-name="' + escapeAttr(name) + '" data-scope="' + escapeAttr(scope) + '" title="' + tUninstall + '">'
                 + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>'
                 + '</button>'
                 + '</div></div>';
@@ -505,14 +482,14 @@
         e.stopPropagation();
         var $btn = $(this);
         var name = $btn.attr('data-name') || '';
-        var alias = $btn.attr('data-mount') || '';
+        var scope = $btn.attr('data-scope') || 'workspace';
 
         layConfirm(GourdI18n.t('settings.skills.uninstall_confirm', [name]), function () {
             $btn.prop('disabled', true).addClass('removing');
             $.ajax({
-                url: '/web/settings/mounts/skills/remove',
+                url: '/web/settings/skills/uninstall',
                 method: 'POST',
-                data: { alias: alias, skillName: name },
+                data: { scope: scope, skillName: name },
                 timeout: 30000,
                 dataType: 'json'
             })
@@ -608,23 +585,28 @@
     // 下拉菜单延时关闭管理（防止鼠标在按钮和下拉之间移动时闪烁）
     var _dropdownCloseTimer = null;
 
+    function renderScopeOptions($dropdown) {
+        var html = '';
+        _installScopes.forEach(function (s) {
+            var label = (s.scope === 'global')
+                ? GourdI18n.t('settings.skills.scope_global')
+                : GourdI18n.t('settings.skills.scope_workspace');
+            html += '<div class="skill-install-scope-option" data-scope="' + escapeAttr(s.scope) + '">'
+                + escapeHtml(label)
+                + '</div>';
+        });
+        $dropdown.html(html).addClass('active');
+    }
+
     function openDropdown($wrap) {
         clearTimeout(_dropdownCloseTimer);
         var $dropdown = $wrap.find('.skill-install-dropdown');
         // 已有选项直接显示
-        if ($dropdown.find('.skill-install-mount-option').length) {
+        if ($dropdown.find('.skill-install-scope-option').length) {
             $dropdown.addClass('active');
             return;
         }
-        loadMountPools(function (pools) {
-            var html = '';
-            pools.forEach(function (p) {
-                html += '<div class="skill-install-mount-option" data-alias="' + escapeAttr(p.alias) + '">'
-                    + escapeHtml(p.alias)
-                    + '</div>';
-            });
-            $dropdown.html(html).addClass('active');
-        });
+        renderScopeOptions($dropdown);
     }
 
     function closeDropdown($wrap) {
@@ -657,30 +639,22 @@
         // 关闭其他下拉
         $('.skill-install-dropdown').not($dropdown).removeClass('active');
         // 如果还没填充过选项，先填充
-        if (!$dropdown.find('.skill-install-mount-option').length) {
-            loadMountPools(function (pools) {
-                var html = '';
-                pools.forEach(function (p) {
-                    html += '<div class="skill-install-mount-option" data-alias="' + escapeAttr(p.alias) + '">'
-                        + escapeHtml(p.alias)
-                        + '</div>';
-                });
-                $dropdown.html(html).toggleClass('active');
-            });
+        if (!$dropdown.find('.skill-install-scope-option').length) {
+            renderScopeOptions($dropdown);
         } else {
             $dropdown.toggleClass('active');
         }
     });
 
-    // 点击挂载选项，执行安装
-    $skillsList.on('click', '.skill-install-mount-option', function (e) {
+    // 点击作用域选项，执行安装
+    $skillsList.on('click', '.skill-install-scope-option', function (e) {
         e.stopPropagation();
         var $option = $(this);
         var $dropdown = $option.closest('.skill-install-dropdown');
         var slug = $dropdown.attr('data-slug');
         var displayName = $dropdown.attr('data-display') || slug;
         var marketUrl = $dropdown.attr('data-market') || '';
-        var mountAlias = $option.attr('data-alias');
+        var installScope = $option.attr('data-scope') || 'workspace';
 
         var $btn = $dropdown.closest('.skill-install-wrap').find('.skill-install-btn');
 
@@ -688,7 +662,7 @@
         $btn.addClass('installing').html('<svg class="skill-install-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>').prop('disabled', true);
         $dropdown.removeClass('active');
 
-        var postData = { slug: slug, mountAlias: mountAlias };
+        var postData = { slug: slug, scope: installScope };
         if (marketUrl) postData.marketName = marketUrl;
 
         $.ajax({
@@ -818,7 +792,6 @@
     /** 重置缓存并加载技能列表（进入视图时默认展示已安装） */
     function resetAndLoad() {
         _installedSkillsCache = null;
-        _mountPoolsCache = null;
         _nextCursor = null;
         _currentQuery = null;
         _hasMore = true;

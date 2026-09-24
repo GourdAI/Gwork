@@ -19,9 +19,9 @@ import com.gourdai.ai.annotation.ToolMapping;
 import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.ai.chat.talent.AbsTalent;
 import com.gourdai.ai.chat.tool.FunctionTool;
-import com.gourdai.harness.talents.cli.impl.MountSkillProvider;
-import com.gourdai.ai.talents.mount.MountManager;
-import com.gourdai.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.registry.SkillDir;
+import com.gourdai.ai.talents.registry.TalentRegistry;
+import com.gourdai.harness.talents.cli.impl.RegistrySkillProvider;
 import org.noear.solon.annotation.Param;
 
 import java.io.IOException;
@@ -42,8 +42,8 @@ public class SkillTalent extends AbsTalent {
     private int listThreshold = 30;
     private int searchThreshold = 100;
 
-    public SkillTalent(MountManager mountManager) {
-        this.skillProvider = new MountSkillProvider(mountManager);
+    public SkillTalent(TalentRegistry talentRegistry) {
+        this.skillProvider = new RegistrySkillProvider(talentRegistry);
     }
 
     public SkillTalent(SkillProvider skillProvider) {
@@ -73,7 +73,7 @@ public class SkillTalent extends AbsTalent {
 
     @Override
     public String description() {
-        return "技能管理器。支持从本地或挂载点发现并加载技能 (SKILL.md)。";
+        return "技能管理器。支持从全局区与工作区发现并加载技能 (SKILL.md)。";
     }
 
     @Override
@@ -139,7 +139,7 @@ public class SkillTalent extends AbsTalent {
         return getToolAry();
     }
 
-    @ToolMapping(name = "skilllist", description = "列出本地所有挂载点中的可用技能清单。")
+    @ToolMapping(name = "skilllist", description = "列出本地所有可用的技能清单。")
     public String skilllist() {
         Collection<SkillDir> skillList = skillProvider.getSkillAll();
         if (skillList.isEmpty()) {
@@ -161,7 +161,7 @@ public class SkillTalent extends AbsTalent {
         return sb.toString();
     }
 
-    @ToolMapping(name = "skillsearch", description = "在所有挂载点中搜索技能关键字。支持空格分隔多个词。")
+    @ToolMapping(name = "skillsearch", description = "在本地技能库中搜索关键字。支持空格分隔多个词。")
     public String skillsearch(@Param("query") String query) {
         Collection<SkillDir> matches = skillProvider.searchSkill(query);
 
@@ -188,7 +188,7 @@ public class SkillTalent extends AbsTalent {
         return "Error: " + name + " 不是有效的技能目录 (缺少 SKILL.md)";
     }
 
-    @ToolMapping(name = "skillrefresh", description = "重新扫描所有挂载点，更新技能列表。")
+    @ToolMapping(name = "skillrefresh", description = "重新扫描技能目录，更新技能列表。")
     public String skillrefresh() {
         skillProvider.refresh();
         return "技能库已刷新，当前可用技能数：" + skillProvider.getSkillCount();

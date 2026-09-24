@@ -17,6 +17,19 @@
         }
     }
 
+    /* 自定义主题：以 vs / vs-dark 为底，仅覆盖代码区背景为应用主题背景色，
+       其余 token 色沿用底座。背景色运行时从 CSS token 读取——写死色值会在
+       theme.css 改色后串色（此前硬编码 #ffffff / #1a1b1e 即为此类漂移点）。 */
+    function defineGworkThemes(m) {
+        var cs = getComputedStyle(document.body);
+        function tok(name, fb) {
+            var v = cs.getPropertyValue(name);
+            return (v && v.trim()) ? v.trim() : fb;
+        }
+        m.editor.defineTheme('gwork-light', { base: 'vs', inherit: true, rules: [], colors: { 'editor.background': tok('--bg-primary', '#ffffff') } });
+        m.editor.defineTheme('gwork-dark', { base: 'vs-dark', inherit: true, rules: [], colors: { 'editor.background': tok('--bg-main', '#17171a') } });
+    }
+
     function load(cb) {
         if (monaco) { if (cb) cb(monaco); return; }
         if (typeof cb === 'function') callbacks.push(cb);
@@ -32,10 +45,13 @@
             require(['vs/editor/editor.main'], function () {
                 monaco = window.monaco || null;
                 if (monaco && monaco.editor && monaco.editor.defineTheme) {
-                    // 自定义主题：以 vs / vs-dark 为底，仅覆盖代码区背景为应用主题背景色
-                    // （light --bg-primary #ffffff；dark --bg-main #1a1b1e），其余 token 色沿用底座。
-                    monaco.editor.defineTheme('gwork-light', { base: 'vs', inherit: true, rules: [], colors: { 'editor.background': '#ffffff' } });
-                    monaco.editor.defineTheme('gwork-dark', { base: 'vs-dark', inherit: true, rules: [], colors: { 'editor.background': '#1a1b1e' } });
+                    defineGworkThemes(monaco);
+                    // 主题/强调色切换后 token 变化，旧 defineTheme 的背景色会残留：
+                    // 重建两个底座主题并全局 setTheme（app-code.js 的 data-theme 监听也会再 set 一次，幂等）
+                    window.__refreshMonacoTheme = function () {
+                        defineGworkThemes(monaco);
+                        monaco.editor.setTheme(window.__monacoThemeName());
+                    };
                 }
                 if (monaco && monaco.editor && monaco.editor.tokenize) {
                     initBalanceChecker(monaco);

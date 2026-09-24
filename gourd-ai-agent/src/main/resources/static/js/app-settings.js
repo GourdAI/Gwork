@@ -102,8 +102,7 @@
     function mod(name) { return window[name]; }
 
     function resetCurrentTabView(targetTab) {
-        if (targetTab === 'mounts' && mod('_settingsMounts')) { mod('_settingsMounts').showList(); mod('_settingsMounts').reset(); }
-        else if (targetTab === 'mcp' && mod('_settingsMcp')) { mod('_settingsMcp').showList(); mod('_settingsMcp').reset(); $('#mcpToolsToolbar').hide(); }
+        if (targetTab === 'mcp' && mod('_settingsMcp')) { mod('_settingsMcp').showList(); mod('_settingsMcp').reset(); $('#mcpToolsToolbar').hide(); }
         else if (targetTab === 'openapi' && mod('_settingsOpenapi')) { mod('_settingsOpenapi').showList(); mod('_settingsOpenapi').reset(); }
         else if (targetTab === 'lsp' && mod('_settingsLsp')) { mod('_settingsLsp').showList(); mod('_settingsLsp').reset(); }
     }
@@ -126,7 +125,6 @@
         if (mod('_settingsMcp')) mod('_settingsMcp').showList();
         if (mod('_settingsOpenapi')) mod('_settingsOpenapi').showList();
         if (mod('_settingsLsp')) mod('_settingsLsp').showList();
-        if (mod('_settingsMounts')) mod('_settingsMounts').showList();
         $('#mcpFormActions, #openapiFormActions, #lspFormActions').hide();
     }
 
@@ -161,12 +159,12 @@
         if (targetTab === 'general') {
             $('#settingsTabGeneral').addClass('active');
             if (mod('_settingsGeneral')) mod('_settingsGeneral').load();
+        } else if (targetTab === 'appearance') {
+            $('#settingsTabAppearance').addClass('active');
+            if (mod('_settingsAppearance')) mod('_settingsAppearance').load();
         } else if (targetTab === 'permission') {
             $('#settingsTabPermission').addClass('active');
             if (mod('_settingsPermission')) mod('_settingsPermission').load();
-        } else if (targetTab === 'mounts') {
-            $('#settingsTabMounts').addClass('active');
-            if (mod('_settingsMounts')) mod('_settingsMounts').load();
         } else if (targetTab === 'mcp') {
             $('#settingsTabMcp').addClass('active');
             if (mod('_settingsMcp')) mod('_settingsMcp').load();
@@ -190,8 +188,8 @@
         if (!$active.length) return;
         var targetTab = $active.attr('data-tab');
         if (targetTab === 'general') { if (mod('_settingsGeneral')) mod('_settingsGeneral').load(); }
+        else if (targetTab === 'appearance') { if (mod('_settingsAppearance')) mod('_settingsAppearance').load(); }
         else if (targetTab === 'permission') { if (mod('_settingsPermission')) mod('_settingsPermission').load(); }
-        else if (targetTab === 'mounts') { if (mod('_settingsMounts')) mod('_settingsMounts').load(); }
         else if (targetTab === 'mcp') { if (mod('_settingsMcp')) mod('_settingsMcp').load(); }
         else if (targetTab === 'openapi') { if (mod('_settingsOpenapi')) mod('_settingsOpenapi').load(); }
         else if (targetTab === 'lsp') { if (mod('_settingsLsp')) mod('_settingsLsp').load(); }

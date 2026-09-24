@@ -2,13 +2,14 @@
  * 契约测试：禁用条目置灰 + toggle 刷新全模块对齐（上游 8ea79ac2）。
  *
  * 覆盖：
- * - MCP/LSP/OpenAPI/Mounts 列表项在 disabled 时添加 `disabled` 类（整行置灰）
+ * - MCP/LSP/OpenAPI 列表项在 disabled 时添加 `disabled` 类（整行置灰）
  * - CSS：.mcp-server-item.disabled 与 .mcp-server-icon 变体规则
- * - LSP/OpenAPI/Mounts toggle 后刷新列表（无论成败，确保与服务端一致）
- * - tauri/ui 发布副本与 static 源同步（4 个 JS + settings.css）
+ * - LSP/OpenAPI toggle 后刷新列表（无论成败，确保与服务端一致）
+ * - tauri/ui 发布副本与 static 源同步（3 个 JS + settings.css）
  *
  * 背景：上游 8ea79ac2「为禁用的MCP/LSP/Mounts/OpenAPI条目添加disabled样式并在toggle成功后
  * 重新加载列表」在 MCP 升级包（方案一 F 组）中仅完成了 MCP 的 toggle 刷新，本测试锁定补齐后的契约。
+ * Mounts 模块已随挂载点功能整体移除（TalentRegistry 改造），相关用例同步删除。
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -49,13 +50,6 @@ test('LSP / OpenAPI：列表项渲染支持 disabled 置灰', () => {
     assert.match(openapi, needle);
 });
 
-test('Mounts：列表项渲染支持 disabled 置灰（保留 mounts-system 组合类）', () => {
-    const js = readStatic('js', 'app-settings-mounts.js');
-    assert.match(
-        js,
-        /html \+= '<div class="mcp-server-item mounts-pool-item' \+ \(isSystem \? ' mounts-system' : ''\) \+ \(item\.enabled === false \? ' disabled' : ''\) \+ '" data-alias="'/
-    );
-});
 
 test('CSS：.mcp-server-item.disabled 置灰规则存在（含图标变体）', () => {
     const css = readStatic('css', 'settings.css');
@@ -64,7 +58,7 @@ test('CSS：.mcp-server-item.disabled 置灰规则存在（含图标变体）', 
 });
 
 // ====================================================================
-// toggle 刷新（LSP / OpenAPI / Mounts）
+// toggle 刷新（LSP / OpenAPI）
 // ====================================================================
 
 test('LSP：toggle 无论成败都刷新列表', () => {
@@ -83,12 +77,6 @@ test('OpenAPI：toggle 无论成败都刷新列表', () => {
     assert.doesNotMatch(fn, /'error'\); loadOpenapiList\(\);/, '不应回到「仅失败时刷新」旧写法');
 });
 
-test('Mounts：toggle 无论成败都刷新列表', () => {
-    const js = readStatic('js', 'app-settings-mounts.js');
-    const fn = sliceBetween(js, "url: '/web/settings/mounts/toggle'", '// 池内容加载与渲染');
-    assert.match(fn, /\/\/ 无论成败都刷新列表，确保开关状态与服务端一致/);
-    assert.match(fn, /complete: function \(\) \{ loadMountsList\(\); \}/);
-});
 
 // ====================================================================
 // tauri/ui 发布副本同步
@@ -99,7 +87,6 @@ test('tauri/ui 发布副本与 static 源保持同步（本批 5 个文件）', 
         ['js', 'app-settings-mcp.js'],
         ['js', 'app-settings-lsp.js'],
         ['js', 'app-settings-openapi.js'],
-        ['js', 'app-settings-mounts.js'],
         ['css', 'settings.css']
     ];
     for (const segs of files) {

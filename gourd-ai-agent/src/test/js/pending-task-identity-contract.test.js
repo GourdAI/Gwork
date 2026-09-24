@@ -189,7 +189,7 @@ test('C1-b：后端读取 actionId 并在不匹配时以明确错误拒绝（不
     const askBranch = sliceBetween(gate, '// ask_user 结构化问答恢复处理', '// Handle file upload');
     assert.match(askBranch, /Assert\.isNotEmpty\(actionId\) && task != null[\s\S]*?!actionId\.equals\(task\.getActionId\(\)\)/,
         '问答仅在两边都有 id 且不同时拒绝');
-    assert.match(askBranch, /WebChunk\.ofQuestionAnswered\(AskUserTool\.TOOL_NAME,[\s\S]*?answeredActionId\)/,
+    assert.match(askBranch, /WebChunk\.ofQuestionAnswered\(AskUser\.toolNameOf\([\s\S]*?answeredActionId\)/,
         '确认帧必须回传 actionId 形成闭环');
     assert.match(askBranch, /WebChunk\.ofDone\(\)/, '无挂起任务时仍需补 done 收口');
 });
@@ -204,14 +204,14 @@ test('C1-b：向后兼容——不传 actionId 时降级按旧逻辑执行，但
     assert.match(hitlBranch, /\} else if \(task != null\) \{/, '不传 id 时走降级分支而非拒绝');
 });
 
-test('C1-b：question_answered 帧新增带 actionId 的工厂，旧两参工厂保留并委托', () => {
+test('C1-b：question_answered 帧工厂必须携带 actionId 形参（旧两参委托工厂已移除）', () => {
     const chunk = readJava('com/gourdai/core/portal/web/WebChunk.java');
     assert.match(chunk,
-        /public static WebChunk ofQuestionAnswered\(String toolName, List<Map<String, Object>> answers\) \{\s*\n\s*return ofQuestionAnswered\(toolName, answers, null\);\s*\n\s*\}/,
-        '旧两参工厂必须保留并委托，既有调用方与反序列化不受影响');
-    assert.match(chunk,
         /public static WebChunk ofQuestionAnswered\(String toolName, List<Map<String, Object>> answers, String actionId\) \{[\s\S]*?tmp\.actionId = actionId;/,
-        '新工厂必须把 actionId 投影到帧上');
+        '工厂必须把 actionId 投影到帧上');
+    // 旧两参工厂已删除：生产调用点一律携带 actionId（旧快照恢复场景由 WebGate 出站补标记兑底）
+    assert.ok(!chunk.match(/public static WebChunk ofQuestionAnswered\(String toolName, List<Map<String, Object>> answers\) \{/),
+        '不得残留旧两参委托工厂');
 });
 
 /* ===== C1-c：挂起 done 不清批次索引 ===== */
@@ -278,7 +278,8 @@ test('C1-c：done 分发按挂起与否决定是否保留批次索引', () => {
 test('C1-c：后端 done 帧在会话挂起时打上 suspended 标记', () => {
     const chunk = readJava('com/gourdai/core/portal/web/WebChunk.java');
     assert.match(chunk, /private Boolean suspended;/, 'WebChunk 需要可辨识的挂起标记字段');
-    assert.match(chunk, /public static WebChunk ofDoneSuspended\(\) \{[\s\S]*?tmp\.suspended = true;/);
+    assert.match(chunk, /public static WebChunk ofDone\(\) \{[\s\S]*?return tmp;\s*\n\s*\}\s*\n\s*\/\*\*\s*\n\s*\* 创建「错误」消息块/,
+        'ofDone 后不得残留 ofDoneSuspended 工厂（已删，挂起标记由 WebGate 出站补打）');
 
     const gate = readJava('com/gourdai/core/portal/web/WebGate.java');
     assert.match(gate, /if \(session\.isPending\(\) && line\.getSuspended\(\) == null\) \{\s*\n\s*line\.setSuspended\(true\);/,

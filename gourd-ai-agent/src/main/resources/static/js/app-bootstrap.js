@@ -131,13 +131,16 @@
         '/js/app-gitdiff.js',
         '/js/app-file-changes.js',
         '/js/app-streaming.js',
+        '/js/app-access-mode.js',
         '/js/app-todos.js',
         '/js/app-memory.js',
         '/js/app-context.js',
+        '/js/app-heatmap.js',          // 活跃热力图共享渲染（使用统计 + 欢迎页卡片复用同一实现）
+        '/js/app-welcome-activity.js',  // 欢迎页活跃热力图卡片：拉取 /web/chat/usage/stats 渲染
         '/js/app-settings.js',
         '/js/app-settings-general.js',
+        '/js/app-settings-appearance.js',
         '/js/app-settings-permission.js',
-        '/js/app-settings-mounts.js',
         '/js/app-settings-mcp.js',
         '/js/app-settings-openapi.js',
         '/js/app-settings-lsp.js',
@@ -147,6 +150,7 @@
         '/js/app-channel-config.js',
         '/js/app-settings-acp.js',
         '/js/app-settings-about.js',
+        '/js/app-update-badge.js',   // 侧边栏底部「更新」按钮（桌面端专属，订阅 updater-state）
         '/js/app-settings-usage.js',
         '/js/app-code.js',
         '/js/app-terminal.js'

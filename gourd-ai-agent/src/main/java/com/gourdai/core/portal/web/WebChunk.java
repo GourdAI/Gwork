@@ -403,21 +403,6 @@ public class WebChunk {
     }
 
     /**
-     * 创建「挂起态完成」消息块。
-     * <p>等待用户回答（ask_user）或人工审批（HITL）时，引擎流正常结束并补发 done，
-     * 但本轮任务并未真正完成。本工厂额外打上 {@code suspended=true}，让前端只停等待指示器、
-     * 不拆掉批次与工具卡索引（否则恢复后同一批次会被拆成两组渲染）。</p>
-     *
-     * @return 带挂起标记的完成信号块
-     */
-    public static WebChunk ofDoneSuspended() {
-        WebChunk tmp = ofDone();
-        tmp.suspended = true;
-
-        return tmp;
-    }
-
-    /**
      * 创建「错误」消息块（基于字符串描述）。
      * <p>type 为 {@code error}，用于向前端传递处理过程中产生的错误信息。</p>
      *
@@ -635,19 +620,6 @@ public class WebChunk {
     }
 
     /**
-     * 创建「人机协同中断」消息块。
-     * <p>type 为 {@code hitl}（Human-in-the-Loop），表示执行流程暂停，
-     * 等待人工对指定工具调用进行审批或确认后才会继续执行。</p>
-     *
-     * @param toolName 需要人工审批的工具名称
-     * @param command  需要人工审批的命令文本
-     * @return 携带工具名与命令内容的人机协同消息块
-     */
-    public static WebChunk ofHitl(String toolName, String command) {
-        return ofHitl(toolName, command, null);
-    }
-
-    /**
      * 创建「人工审批」消息块（带调用标识）。
      *
      * <p>{@code actionId} 与 {@code action_draft}/{@code action_start} 同源，前端据此把审批卡
@@ -699,19 +671,6 @@ public class WebChunk {
         tmp.args = args;
 
         return tmp;
-    }
-
-    /**
-     * 创建「用户已回答」消息块。
-     * <p>type 为 {@code question_answered}，在用户提交答案、任务恢复执行时下发，
-     * args 携带 answers 数组，供前端把问答卡转为已答态。</p>
-     *
-     * @param toolName 发起提问的工具名称（当前恒为 ask_user）
-     * @param answers  用户答案列表（每项含 index/text/skipped/custom）
-     * @return 携带工具名与答案列表的已回答消息块
-     */
-    public static WebChunk ofQuestionAnswered(String toolName, List<Map<String, Object>> answers) {
-        return ofQuestionAnswered(toolName, answers, null);
     }
 
     /**
@@ -945,6 +904,10 @@ public class WebChunk {
                 row.put("text", item.getText());
                 row.put("runId", item.getRunId());
                 row.put("createdAt", item.getCreatedAt());
+                // 附件路径随事件下发：前端据此在插话卡上显示数量徽标，历史回放同样能还原。
+                // 只传路径不传内容，卡片本身不回显缩略图。
+                row.put("imagePaths", item.getImagePaths());
+                row.put("filePaths", item.getFilePaths());
                 serialized.add(row);
             }
         }

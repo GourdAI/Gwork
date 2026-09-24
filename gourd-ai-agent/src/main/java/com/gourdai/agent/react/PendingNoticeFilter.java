@@ -56,9 +56,9 @@ public class PendingNoticeFilter {
     /**
      * 历史兜底文案：标记引入前落盘的挂起消息没有 metadata，只能按正文识别。
      *
-     * <p>{@code ask_user} 用固定常量，故可精确枚举；HITL 的文案由审批策略动态产出
-     * （{@code HITLSensitiveStrategy} 的默认值只是其中之一），无法穷举——这是兜底路径的已知边界：
-     * 自定义策略文案的历史数据仍会漏网，但新数据一律带标记，不受影响。</p>
+     * <p>{@code ask_user} 用固定常量，故可精确枚举；HITL 的文案由审批策略动态产出，无法穷举——这是兜底路径的已知边界：
+     * 自定义策略文案的历史数据仍会漏网，但新数据一律带标记，不受影响。数组里的常量是历史上
+     * 内置敏感策略的默认文案（该策略类已移除），仅为旧会话落盘数据兜底而保留。</p>
      */
     private static final String[] LEGACY_PENDING_TEXTS = {
             AskUser.PENDING_REASON,

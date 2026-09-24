@@ -20,6 +20,9 @@ import com.gourdai.agent.react.AbsReActInterceptor;
 import com.gourdai.agent.react.ReActTrace;
 import com.gourdai.agent.react.task.ToolExchanger;
 import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.permission.AccessMode;
+import com.gourdai.harness.permission.AccessPolicy;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Nullable;
 import org.noear.solon.lang.Preview;
@@ -52,18 +55,32 @@ public class HITLInterceptor extends AbsReActInterceptor {
     }
 
     /**
-     * 快速注册敏感工具（使用默认敏感策略）
+     * 读取本会话的访问控制档位。
+     *
+     * <p>以会话上下文为准而非 toolContext：档位的权威存储位是 FlowContext，
+     * toolContext 只是给工具方法的投影。读不到时 {@code normalize} 会 fail-safe 到最严的一档。
+     * 子代理会话由 {@code TaskTalent} 在创建时写入同一键，故子代理与父会话同档——
+     * 空间与审批两路消费点不会在子代理里各说各话。</p>
      */
-    public HITLInterceptor onSensitiveTool(String... toolNames) {
-        HITLSensitiveStrategy toolDesc = new HITLSensitiveStrategy();
-        for (String name : toolNames) onTool(name, toolDesc);
-        return this;
+    static AccessMode accessModeOf(ReActTrace trace) {
+        if (trace.getContext() == null) {
+            return AccessMode.DEFAULT;
+        }
+
+        return AccessMode.normalize(trace.getContext().get(HarnessEngine.CTX_ACCESS_MODE));
     }
 
     @Override
     public void onAction(ReActTrace trace, ToolExchanger toolExchanger) {
         InterventionStrategy strategy = strategyMap.get(toolExchanger.getToolName());
         if (strategy == null) {
+            return;
+        }
+
+        // 完全访问档：用户已在前端明确确认过风险并承担后果，不再逐条弹审批。
+        // 注意这里放行的只是「审批」；杀宿主进程、exit、根目录删除仍由
+        // TerminalSupport.validateCommandNoKill 硬拦，那是不可关闭的自保护，不受档位影响。
+        if (!AccessPolicy.isCommandApprovalRequired(accessModeOf(trace))) {
             return;
         }
 
@@ -140,26 +157,5 @@ public class HITLInterceptor extends AbsReActInterceptor {
          * @return 拦截理由文案（触发拦截）；null（不拦截，直接执行）
          */
         String evaluate(ReActTrace trace, Map<String, Object> args);
-    }
-
-    public static class HITLSensitiveStrategy implements InterventionStrategy {
-        private String comment;
-
-        /**
-         * 设置拦截理由文案
-         */
-        public HITLSensitiveStrategy comment(String comment) {
-            this.comment = comment;
-            return this;
-        }
-
-        @Override
-        public String evaluate(ReActTrace trace, Map<String, Object> args) {
-            if (Assert.isEmpty(comment)) {
-                return "敏感操作，需要人工介入确认";
-            } else {
-                return comment;
-            }
-        }
     }
 }

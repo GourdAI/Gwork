@@ -34,13 +34,6 @@ public class GeneralGroupDo implements Serializable {
     //ACP 上下文窗口（token，固定选项之一）；留空则使用默认值
     private Long acpContextLength;
 
-    //启用沙盒模式
-    private Boolean sandboxMode;
-    //沙盒允许访问用户主目录
-    private Boolean sandboxAllowUserHome;
-    //沙盒使用系统接口限制
-    private Boolean sandboxSystemRestrict;
-
     //api 重试次数
     private Integer apiRetries;
     //Mcp 重试次数
@@ -73,8 +66,6 @@ public class GeneralGroupDo implements Serializable {
     //自我反思
     private Boolean autoRethink; //true
 
-    //是否启用人工审核危险操作
-    private Boolean hitlEnabled; //false
     //是否启用子代理模式
     private Boolean subagentEnabled; // true
 

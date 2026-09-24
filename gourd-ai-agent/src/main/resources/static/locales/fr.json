@@ -12,7 +12,13 @@
                       "steer_deferred":  "L’étape en cours est terminée ; ajout à la file",
                       "steer_failed":  "Échec de l’envoi de l’intervention ; la saisie a été conservée",
                       "force_finished":  "L’exécution est déjà terminée (serveur inactif) ; le flux a été fermé automatiquement",
-                      "steer_attachment_wait":  "Les pièces jointes ne peuvent pas être envoyées ni mises en file pendant une tâche. Attendez ou arrêtez-la",
+                      "attachment_uploading":  "Téléversement des pièces jointes, veuillez patienter",
+                      "attachment_upload_failed":  "Échec du téléversement des pièces jointes. Votre saisie a été conservée, veuillez réessayer",
+                      "attachment_changed":  "La saisie a changé pendant le téléversement. Cet envoi a été annulé, veuillez renvoyer",
+                      "queued_with_attachments":  "Ajouté à la file (avec pièces jointes)",
+                      "steer_accepted_with_attachments":  "Intervention reçue (avec pièces jointes) et appliquée à la prochaine étape",
+                      "queue_failed":  "Échec de l’ajout à la file. Votre saisie a été conservée, veuillez réessayer",
+                      "command_attachment_unsupported":  "Les commandes ne peuvent pas comporter de pièces jointes. Retirez-les puis appuyez sur Tab pour les mettre en file",
                       "steer_command_queue":  "Les commandes ne peuvent pas servir d’intervention. Appuyez sur Tab pour les mettre en file",
                       "steer_dropped":  "L’intervention n’a pas pris effet avant la fin et a été ajoutée à la file",
                       "steer_expand_full":  "Tout afficher ({0} caractères)",
@@ -134,7 +140,26 @@
                  "confirm":  "Confirmer"
              },
     "app":  {
-                "boot_error":  "Échec du démarrage",
+                                "access_title":  "Droits d’accès",
+                "access_default":  "Accès par défaut",
+                "access_full":  "Accès complet",
+                "access_default_desc":  "Espace isolé ; commandes dangereuses à approuver",
+                "access_full_desc":  "Espace et commandes libres (sous votre responsabilité)",
+                "access_confirm_title":  "Autoriser l’accès complet ?",
+                "access_confirm_desc":  "En accès complet, l’IA n’est plus limitée par l’isolation de l’espace ni l’approbation des commandes :",
+                "access_risk_file":  "Opérations sur les fichiers",
+                "access_risk_file_desc":  "Lire et écrire tout fichier hors de l’espace du projet, y compris les fichiers système",
+                "access_risk_cmd":  "Commandes du terminal",
+                "access_risk_cmd_desc":  "Les commandes ne sont plus approuvées une par une ; suppression ou écrasement immédiat",
+                "access_risk_net":  "Accès à Internet",
+                "access_risk_net_desc":  "Toute adresse réseau accessible ; risque de fuite de données ou de téléchargements inconnus",
+                "access_ack":  "Je comprends les risques et assume la responsabilité de la sécurité de mes données",
+                "access_allow":  "Autoriser l’accès complet",
+                "access_cancel":  "Annuler",
+                "access_toast_default":  "Passé à l’accès par défaut",
+                "access_toast_full":  "Passé à l’accès complet",
+                "access_failed":  "Échec du changement de droits ; mode précédent restauré",
+"boot_error":  "Échec du démarrage",
                 "project_view":  "Vue du projet",
                 "review_view":  "Revue de code",
                 "terminal_shortcut":  "Raccourci terminal",
@@ -152,7 +177,6 @@
                 "history_scope_global":  "Conversations globales",
                 "history_scope_project":  "Conversations de projet",
                 "welcome_title":  "Bonjour, je suis GWork !",
-                "welcome_sub":  "De quelle aide avez-vous besoin ?",
                 "drop_attach":  "Relâchez pour ajouter une pièce jointe",
                 "thinking_label":  "Réflexion",
                 "context_label":  "Contexte",
@@ -233,11 +257,38 @@
                                 "rename_project":  "Renommer le projet",
                                 "rename_failed":  "Échec du renommage",
                                 "model_config":  "Configuration des modèles",
-                   "memory":  "Mémoire"
+                   "memory":  "Mémoire",
+                   "update_now":  "Mettre à jour",
+                   "update_download":  "Télécharger",
+                   "update_downloading":  "Téléchargement",
+                   "update_install":  "Installer",
+                   "update_tooltip":  "Nouvelle version {0} disponible — cliquez pour mettre à jour",
+                   "update_tooltip_downloading":  "Téléchargement de la version {0}",
+                   "update_tooltip_downloaded":  "La version {0} est prête — cliquez pour installer et redémarrer"
                             }
             },
     "settings":  {
-                     "common":  {
+                     "appearance": {
+                         "title": "Apparence",
+                         "desc": "Mode clair/sombre et palette du thème. Les changements s’appliquent immédiatement et sont enregistrés localement",
+                         "mode": {
+                             "title": "Mode clair/sombre",
+                             "system": "Système",
+                             "light": "Clair",
+                             "dark": "Sombre"
+                         },
+                         "themes": {
+                             "title": "Tous les thèmes"
+                         },
+                         "theme": {
+                             "graphite": "Graphite",
+                             "teal": "Jade",
+                             "clay": "Argile",
+                             "sky": "Ciel",
+                             "indigo": "Indigo classique"
+                         }
+                     },
+"common":  {
                                     "back":  "Retour",
                                     "close":  "Fermer",
                                     "delete":  "Supprimer",
@@ -248,8 +299,8 @@
                      "title":  "Paramètres",
                      "tabs":  {
                                   "general":  "Général",
+                                  "appearance": "Apparence",
                                   "permission":  "Autorisations",
-                                  "mounts":  "Montages",
                                   "mcp":  "Configuration MCP",
                                   "openapi":  "Configuration OpenAPI",
                                   "lsp":  "Configuration LSP",
@@ -296,11 +347,6 @@
                                                       "desc":  "Sélectionner la langue d\u0027affichage de l\u0027interface",
                                                       "name":  "Langue de l\u0027interface"
                                                   },
-                                     "appearance":  {
-                                                        "title":  "Apparence",
-                                                        "theme_name":  "Couleur du thème",
-                                                        "theme_desc":  "Basculer le thème de l\u0027interface entre sombre et clair"
-                                                    },
                                      "conversation":  {
                                                           "title":  "Compression du contexte",
                                                           "history_window":  "Taille de la fenêtre d\u0027historique",
@@ -315,12 +361,6 @@
                                                           "intent_chain_desc":  "Conserve lors de la compression un index compact des demandes précédentes de l\u0027utilisateur (coût très faible), afin d\u0027éviter que l\u0027agent ne revienne sur des objectifs déjà accomplis",
                                                           "hint":  "Fenêtre d\u0027historique : combien de derniers messages restent toujours non compressés.\nSortie réservée : marge absolue pour la prochaine réponse du modèle ; point de déclenchement = fenêtre du modèle − réserve − tampon de tour.\nSeuil de compression : ne fait que déclencher PLUS TÔT (la plus petite des deux valeurs s\u0027applique) ; 100 signifie aucune anticipation supplémentaire.\nCible de compression : profondeur de chaque compression — plus la valeur est élevée, plus la compression est légère et les déclenchements fréquents"
                                                       },
-                                     "sandbox":  {
-                                                     "title":  "Mode bac à sable",
-                                                     "desc":  "Les commandes exécutées par l\u0027IA s\u0027exécutent dans un environnement sandbox restreint (lecture/écriture uniquement dans \u0027Espace de travail\u0027 et \u0027Montages\u0027)",
-                                                     "allow_home":  "Autoriser l\u0027accès au répertoire personnel de l\u0027utilisateur dans le sandbox (`~/`, ex. `~/.m2`)",
-                                                     "system_restrict":  "Appliquer des restrictions sandbox plus strictes au niveau noyau ; désactiver les relâche (pour test)"
-                                                 },
                                      "memory":  {
                                                     "title":  "Mémoire cognitive",
                                                     "enabled_desc":  "Conserver la mémoire à long terme entre les sessions ; désactiver réduit la consommation de contexte",
@@ -390,48 +430,9 @@
                                     "installed_tab":  "Installées",
                                     "uninstall":  "Désinstaller",
                                     "uninstall_confirm":  "Désinstaller le skill « {0} » ? Le dossier local du skill sera supprimé.",
+                                    "scope_global":  "Global",
+                                    "scope_workspace":  "This Project",
                                     "market_tab":  "Marché de Skills"
-                                },
-                     "mounts":  {
-                                    "title":  "Espace de montage",
-                                    "desc":  "Gérer le mappage des répertoires locaux pour le chargement des compétences et ressources de l\u0027IA",
-                                    "add":  "Ajouter un montage",
-                                    "add_title":  "Ajouter un montage",
-                                    "edit_title":  "Modifier un montage",
-                                    "alias":  "Nom",
-                                    "alias_placeholder":  "@my-mount",
-                                    "scope":  "Portée",
-                                    "scope_workspace":  "Espace de travail (local)",
-                                    "type":  "Type de contenu",
-                                    "type_skills":  "Compétences (SKILLS)",
-                                    "type_agents":  "Agents (AGENTS)",
-                                    "type_files":  "Fichiers (FILES)",
-                                    "path":  "Chemin de mappage",
-                                    "path_placeholder":  "~/.myapp/skills/",
-                                    "path_hint":  "Chemin local des fichiers (supporte \u0027./\u0027 espace de travail et \u0027~/\u0027 répertoire utilisateur)",
-                                    "writeable":  "Ouvrir les droits d\u0027écriture",
-                                    "description":  "Description (optionnel)",
-                                    "description_placeholder":  "Description brève de l\u0027usage de ce montage",
-                                    "presets_label":  "Options de montage courantes",
-                                    "skills_list_title":  "Liste des paquets de compétences",
-                                    "agents_list_title":  "Liste des sous-agents",
-                                    "files_list_title":  "Liste des fichiers",
-                                    "system":  "Système",
-                                    "skill_pkg":  "Paquet de compétences",
-                                    "content_list":  "Liste du contenu",
-                                    "open_dir":  "Ouvrir le répertoire",
-                                    "preset_skills":  "Compétences de l\u0027espace de travail",
-                                    "preset_skillhub":  "Centre de compétences",
-                                    "preset_agents_skills":  "Compétences des sous-agents",
-                                    "preset_opencode_skills":  "Compétences OpenCode",
-                                    "preset_claude_skills":  "Compétences Claude",
-                                    "alias_label":  "Nom",
-                                    "scope_label":  "Portée",
-                                    "type_label":  "Type de contenu",
-                                    "path_label":  "Chemin de mappage",
-                                    "writeable_label":  "Droits d\u0027écriture",
-                                    "description_label":  "Description",
-                                    "skills_list":  "Liste des compétences"
                                 },
                      "mcp":  {
                                  "title":  "Serveurs MCP",
@@ -577,8 +578,6 @@
                                        "model_list_api_label":  "API de liste de modèles",
                                        "api_url_label":  "URL de l\u0027API",
                                        "api_key_label":  "Clé API",
-                                       "get_api_key_link":  "Obtenir la clé API",
-                                       "api_key_hint_suffix":  "（crédit d\u0027abonnement gratuit de 10$ par mois）",
                                        "timeout_label":  "Délai d\u0027attente",
                                        "models_label":  "Modèles",
                                        "empty_hint":  "Aucun modèle pour l\u0027instant, cliquez pour ajouter ou extraire depuis l\u0027API",
@@ -614,7 +613,6 @@
                                        "name_label":  "Nom",
                                         "scope_label":  "Portée",
                                         "view_title":  "Paramètres des modèles",
-                                        "builtin_group":  "Integrés",
                                         "custom_group":  "Fournisseurs personnalisés",
                                         "add_provider_title":  "Ajouter un fournisseur de modèles",
                                         "add_provider_desc":  "Configurez un point d'entrée API entièrement personnalisé et un modèle initial"
@@ -841,11 +839,15 @@
                  "question_skip":  "Ignorer",
                  "question_next":  "Suivant",
                  "question_submit":  "Envoyer",
-                 "question_recommended":  "(Recommandé)",
+                 "question_recommended":  "Recommandé",
+                 "question_detail_expand":  "Déplier",
+                 "question_detail_collapse":  "Replier",
+                 "question_record_title":  "Ma réponse",
                  "question_answered":  "Envoyé",
                  "question_skipped":  "Ignoré",
                  "question_close":  "Fermer",
                  "question_attachment_wait":  "Impossible d’envoyer des pièces jointes tant qu’une question est en attente. Répondez ou passez d’abord",
+                 "question_attachment_queued":  "Réponse renseignée. Les pièces jointes sont en file et seront envoyées après ce tour",
                  "question_supplement":  "Ajouter une note… (conservée avec votre choix)",
                  "question_supplement_placeholder":  "Saisissez une note, Entrée pour confirmer…",
                  "batch_tool":  "Lot",
@@ -1173,6 +1175,11 @@
                         "saved_desc":  "Basculer entre espace de travail et global pour voir les souvenirs enregistrés"
                     },
     "file_changes": {
+        "edited_files": "{count} fichiers modifiés",
+        "show_more_files": "Afficher {count} fichiers de plus",
+        "collapse_files": "Replier",
+        "run_list_title": "Fichiers modifiés dans ce run",
+        "back_to_list": "Retour à la liste",
         "title": "Fichiers modifiés pendant cette exécution",
         "summary": "{count} fichiers",
         "review": "Examiner",

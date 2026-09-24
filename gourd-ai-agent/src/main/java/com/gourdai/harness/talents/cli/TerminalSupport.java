@@ -17,8 +17,7 @@ package com.gourdai.harness.talents.cli;
 
 import org.noear.solon.Utils;
 
-import com.gourdai.ai.talents.mount.MountDir;
-import com.gourdai.ai.talents.mount.MountManager;
+import com.gourdai.ai.talents.registry.TalentRegistry;
 import org.noear.solon.core.util.Assert;
 
 import java.io.IOException;
@@ -54,12 +53,12 @@ public class TerminalSupport {
     }
     static final int MAX_CHARACTER_LIMIT = 128 * 1024;
 
-    private final MountManager mountManager;
+    private final TalentRegistry talentRegistry;
     private final Set<String> ignoreDirs;
     private final ShellMode shellMode;
 
-    TerminalSupport(MountManager mountManager, Set<String> ignoreDirs, ShellMode shellMode) {
-        this.mountManager = mountManager;
+    TerminalSupport(TalentRegistry talentRegistry, Set<String> ignoreDirs, ShellMode shellMode) {
+        this.talentRegistry = talentRegistry;
         this.ignoreDirs = ignoreDirs;
         this.shellMode = shellMode;
     }
@@ -506,13 +505,6 @@ public class TerminalSupport {
         return -1;
     }
 
-    Path resolveCommandWorkPath(Path workPath, String workdir, boolean sandboxEnabled, boolean sandboxAllowUserHome) throws IOException {
-        if (Assert.isEmpty(workdir) || ".".equals(workdir)) {
-            return workPath;
-        }
-        return resolveSafePath(workPath, workdir, false, sandboxEnabled, sandboxAllowUserHome);
-    }
-
     /** 类 Unix 的进程终止动词（PowerShell 里 {@code kill} 也是 Stop-Process 的别名，故不分平台都查） */
     private static final Pattern UNIX_KILL_VERB =
             Pattern.compile("\\b(?:kill|pkill|killall)\\b", Pattern.CASE_INSENSITIVE);
@@ -719,64 +711,16 @@ public class TerminalSupport {
         return WINDOWS_KILL_JAVA_BY_NAME.matcher(command).find();
     }
 
-    /**
-     * 构建允许在沙盒 bash 命令中使用的绝对路径前缀列表。
-     * 这些路径对应 OS 级沙盒也已放行的写/读区域，确保 Java 层校验与 OS 级沙盒一致。
-     */
-    public Collection<String> buildAllowedAbsolutePrefixes(boolean sandboxAllowUserHome) {
-        Set<String> prefixes = new HashSet<>();
-
-        // 系统临时目录（surefire 等构建工具依赖）
-        prefixes.add("/tmp");
-        prefixes.add("/private/tmp");
-        String tmpdir = System.getProperty("java.io.tmpdir");
-        if (Assert.isNotEmpty(tmpdir)) {
-            String normalized = tmpdir.replace("\\", "/");
-            if (!normalized.equals("/tmp")) {
-                prefixes.add(normalized);
-                if (normalized.startsWith("/var/")) {
-                    prefixes.add("/private" + normalized);
-                }
-            }
-        }
-
-        // 用户主目录（Maven/Gradle/npm 缓存等构建工具）
-        if (sandboxAllowUserHome) {
-            String home = System.getProperty("user.home");
-            if (Assert.isNotEmpty(home)) {
-                prefixes.add(home);
-            }
-        }
-
-        // 设备节点
-        prefixes.add("/dev/null");
-        prefixes.add("/dev/tty");
-        prefixes.add("/dev/stdout");
-        prefixes.add("/dev/stderr");
-        prefixes.add("/dev/zero");
-        prefixes.add("/dev/random");
-        prefixes.add("/dev/urandom");
-        prefixes.add("/dev/dtracehelper");
-
-        return prefixes;
-    }
-
-    /**
-     * 检测给定的绝对路径是否在允许列表内（前缀匹配）
-     */
-    private boolean isAllowedAbsolutePath(String absPath, java.util.List<String> allowedPrefixes) {
-        for (String prefix : allowedPrefixes) {
-            if (absPath.equals(prefix) || absPath.startsWith(prefix + "/") || absPath.startsWith(prefix + File.separator)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private String preprocessUserHome(String pStr) {
         if (pStr == null) return null;
 
-        // 支持 ~/ 或 ~ 转换为用户主目录
+        // 支持 ~/ 或 ~ 转换为用户主目录。
+        // <b>展开 ≠ 豁免</b>：展开后是绝对路径，仍要过下方边界检查；工作区之外的唯一读取豁免
+        // 是受信只读目录（见 {@code TalentRegistry#getTrustedReadRoots}）。旧实现对 ~ 前缀路径
+        // 整体放行（跳过越界检查与敏感文件名单），导致默认档下 read("~/.ssh/id_rsa")、
+        // write("~/.bashrc") 均能成功——那是文件工具最大的越权洞，已移除。
+        // ~ 的正当需求（mvn 读 ~/.m2、npm 读 ~/.npm）属于 bash 构建链，
+        // 由 {@link #translateCommandToEnv} 承担，与本方法无关。
         if (pStr.equals("~") || pStr.startsWith("~/") || pStr.startsWith("~\\")) {
             String userHome = System.getProperty("user.home");
             if (pStr.length() == 1) {
@@ -788,7 +732,21 @@ public class TerminalSupport {
         return pStr;
     }
 
-    Path resolveSafePath(Path workPath, String pStr, boolean writeMode, boolean sandboxEnabled, boolean sandboxAllowUserHome) throws IOException {
+    /**
+     * 解析工具路径并执行空间隔离边界。
+     *
+     * <p>隔离生效时的三级规则：</p>
+     * <ol>
+     *   <li>工作区内：放行（real-to-real 比对，防符号链接逃逸）；</li>
+     *   <li>工作区外但落在受信只读目录内、且为读操作：放行
+     *       （全局技能自带的 scripts/ 必须可读，否则 skillread 公示的路径是死路）；</li>
+     *   <li>其余一律拒绝。绝对路径与 ~ 路径不再特判——统一由边界检查裁决，
+     *       规则只有一条，也就只有一个漂移点。</li>
+     * </ol>
+     *
+     * <p>写操作无任何豁免：受信目录是只读的。</p>
+     */
+    Path resolveSafePath(Path workPath, String pStr, boolean writeMode, boolean sandboxEnabled) throws IOException {
         if (Assert.isEmpty(pStr) || ".".equals(pStr)) {
             return workPath;
         }
@@ -797,80 +755,51 @@ public class TerminalSupport {
             pStr = pStr.substring(2);
         }
 
-        // 1. 如果是逻辑路径（@开头），走 mountManager 逻辑
-        if (pStr.startsWith("@")) {
-            Path target = mountManager.resolve(workPath, pStr);
-            String alias = pStr.split("[/\\\\]")[0];
-            MountDir mount = mountManager.getMount(alias);
-
-            if (mount == null || !mount.isEnabled()) {
-                throw new SecurityException("权限拒绝：未知的挂载点 " + pStr);
-            }
-
-            if (writeMode && !mount.isWriteable()) {
-                throw new SecurityException(
-                        "权限拒绝：路径 " + pStr + " 属于只读挂载点，禁止写入。请将结果写入工作区的相对路径。");
-            }
-
-            // 符号链接防护：解析真实路径
-            if (sandboxEnabled) {
-                Path realMountPath = mount.getRealPath().toRealPath();
-                Path realTarget;
-                try {
-                    realTarget = target.toRealPath();
-                } catch (NoSuchFileException e) {
-                    realTarget = resolveExistingAncestor(target).toRealPath();
-                }
-                if (!realTarget.startsWith(realMountPath)) {
-                    throw new SecurityException("权限拒绝：符号链接越界（沙盒模式已开启）。");
-                }
-            }
-
-            enforceFilesystemPolicy(mount.getRealPath(), target, writeMode, sandboxEnabled);
-
-            return target;
-        }
-
-        // 2. 处理物理路径
         String pStr2 = preprocessUserHome(pStr);
         Path p = Paths.get(pStr2);
         Path target;
 
         if (p.isAbsolute()) {
-            // 【沙盒模式】拦截绝对路径
-            if (sandboxEnabled) {
-                // sandboxAllowUserHome=true 且原始输入以 /Users/noear 开头 → 放行
-                if (!(sandboxAllowUserHome && pStr.startsWith("~"))) {
-                    throw new SecurityException("权限拒绝：沙盒模式下禁止使用绝对路径。");
-                }
-            }
             target = p.normalize();
         } else {
-            // 相对路径
             target = workPath.resolve(pStr2).normalize();
         }
 
-        // 3. 越界检查（沙盒模式）
         if (sandboxEnabled) {
-            boolean isUserHomeAccess = sandboxAllowUserHome && pStr.startsWith("~");
-            if (!isUserHomeAccess) {
-                // 符号链接防护：先解析真实路径再判断
+            // 符号链接防护：先解析真实路径再判断；目标不存在时退化为
+            // 「最近存在祖先的真实路径 + 剩余词法段」，与 isSandboxBoundaryDenied 同构
+            Path realTarget;
+            boolean lexicalFallback = false;
+            try {
+                if (Files.exists(target)) {
+                    realTarget = target.toRealPath();
+                } else {
+                    Path ancestor = resolveExistingAncestor(target);
+                    Path relative = ancestor.relativize(target.normalize());
+                    realTarget = ancestor.toRealPath().resolve(relative).normalize();
+                }
+            } catch (IOException | IllegalArgumentException e) {
+                // 目标及其所有祖先都不存在（如不存在的盘符）：回退词法检查
+                realTarget = target;
+                lexicalFallback = true;
+            }
+
+            Path workAnchor;
+            if (lexicalFallback) {
+                workAnchor = workPath;
+            } else {
                 try {
-                    Path realTarget;
-                    try {
-                        realTarget = target.toRealPath();
-                    } catch (NoSuchFileException e) {
-                        realTarget = resolveExistingAncestor(target).toRealPath();
-                    }
-                    Path realWorkPath = workPath.toRealPath();
-                    if (!realTarget.startsWith(realWorkPath)) {
-                        throw new SecurityException("权限拒绝：路径越界（沙盒模式已开启）。");
-                    }
-                } catch (NoSuchFileException e) {
-                    // 目标路径及其已存在祖先均不存在，回退到字符串检查。
-                    if (!target.startsWith(workPath)) {
-                        throw new SecurityException("权限拒绝：路径越界（沙盒模式已开启）。");
-                    }
+                    workAnchor = workPath.toRealPath();
+                } catch (IOException e) {
+                    workAnchor = workPath;
+                }
+            }
+
+            if (!realTarget.startsWith(workAnchor)) {
+                boolean trustedRead = !writeMode && talentRegistry.isTrustedReadPath(realTarget);
+                if (!trustedRead) {
+                    throw new SecurityException(
+                            "权限拒绝：路径越界（沙盒模式已开启）。仅工作区与框架受信只读目录可访问。");
                 }
             }
         }
@@ -1026,68 +955,49 @@ public class TerminalSupport {
     }
 
 
-    String formatDisplayPath(Path workPath, String inputPath, Path targetDir, Path file, boolean sandboxEnabled) {
-        if (inputPath != null && inputPath.startsWith("@")) {
-            String prefix = inputPath.split("[/\\\\]")[0];
-            return prefix + "/" + targetDir.relativize(file).toString().replace("\\", "/");
-        }
-
-
+    String formatDisplayPath(Path workPath, Path file, boolean sandboxEnabled) {
         // 开放模式下，如果文件不在 workPath 内部，返回绝对路径字符串
         if (!sandboxEnabled && !file.startsWith(workPath)) {
             return file.toAbsolutePath().toString().replace("\\", "/");
         }
 
         try {
-            return workPath.relativize(file).toString().replace("\\", "/");
+            String relative = workPath.relativize(file).toString().replace("\\", "/");
+            // 受信只读目录（如全局技能）内的文件在工作区外：relativize 会得到 .. 开头的
+            // 无用路径，直接给绝对路径，模型才能据此 read / 执行
+            if (relative.startsWith("..")) {
+                return file.toAbsolutePath().normalize().toString().replace("\\", "/");
+            }
+            return relative;
         } catch (IllegalArgumentException e) {
             return file.toAbsolutePath().toString().replace("\\", "/");
         }
     }
 
-    String toMountEnvKey(String alias) {
-        String raw = alias.startsWith("@") ? alias.substring(1) : alias;
-        String envKey = raw.toUpperCase().replaceAll("[^A-Z0-9_]", "_");
-        if (envKey.isEmpty() || Character.isDigit(envKey.charAt(0))) {
-            envKey = "MOUNT_" + envKey;
-        }
-        return envKey;
+    boolean containsUserHomePath(String command) {
+        return command != null && command.matches("(?s).*(^|[\\s=:\\(\\[\\{;|&<>])~(?=$|[/\\\\\\s'\"`)\\]\\};|&<>]).*");
     }
 
-    String translateCommandToEnv(String command, Map<String, String> envs, boolean sandboxEnabled, boolean sandboxAllowUserHome) {
+    /**
+     * bash 命令的 ~ 展开（统一所有 shell 模式）。
+     *
+     * <p><b>这是 ~ 豁免的唯一合法去处</b>：mvn 读 {@code ~/.m2}、npm 读 {@code ~/.npm}、
+     * cargo 读 {@code ~/.cargo} 都发生在 bash 子进程里，属于构建链而非文件工具。
+     * 结构化文件工具（read/write/edit/ls/glob/grep）不再享有任何 ~ 豁免，
+     * 见 {@link #resolveSafePath}。</p>
+     *
+     * <p>原实现还会把 {@code @alias} 替换成挂载点环境变量——挂载点已移除，
+     * 该翻译随之删除。命令里若再出现 {@code @xxx/} 路径，shell 会自行报「路径不存在」，
+     * 模型一轮即可自纠。</p>
+     */
+    String translateCommandToEnv(String command, Map<String, String> envs) {
         String result = command;
-        for (MountDir mount : mountManager.getMounts()) {
-            if (mount.isEnabled()) {
-                String alias = mount.getAlias(); // 例如 @pool1
-                String envKey = toMountEnvKey(alias); // POOL1
 
-                // 仅注入命令中实际使用的环境变量（减少污染）
-                if (result.contains(alias)) {
-                    envs.put(envKey, mount.getRealPath().toString());
-                    String placeholder = getEnvPlaceholder(envKey);
-
-                    // 精确替换：仅替换作为路径前缀出现的 @alias（后跟 / 或 \\ 或在行尾）
-                    result = result.replaceAll(
-                            java.util.regex.Pattern.quote(alias) + "(?=[/\\\\\\s]|$)",
-                            java.util.regex.Matcher.quoteReplacement(placeholder)
-                    );
-                }
-            }
-        }
-
-        // ~ 路径处理（统一所有 shell 模式）
         if (containsUserHomePath(result)) {
-            if (sandboxEnabled && !sandboxAllowUserHome) {
-                throw new SecurityException("权限拒绝：沙盒模式下禁止使用 ~ 路径（sandboxAllowUserHome 已关闭）。");
-            }
             result = expandUserHomePaths(result);
         }
 
         return result;
-    }
-
-    boolean containsUserHomePath(String command) {
-        return command != null && command.matches("(?s).*(^|[\\s=:\\(\\[\\{;|&<>])~(?=$|[/\\\\\\s'\"`)\\]\\};|&<>]).*");
     }
 
     private String expandUserHomePaths(String command) {
@@ -1123,12 +1033,25 @@ public class TerminalSupport {
         throw new NoSuchFileException(String.valueOf(target));
     }
 
-    Path getSandboxPolicyRoot(Path workPath, String inputPath) {
-        if (inputPath != null && inputPath.startsWith("@")) {
-            String alias = inputPath.split("[/\\\\]")[0];
-            MountDir mount = mountManager.getMount(alias);
-            if (mount != null && mount.getRealPath() != null) {
-                return mount.getRealPath();
+    /**
+     * 列举边界根：跟随已解析的 target。
+     *
+     * <p>工作区内为工作区根；落在受信只读目录内则为该目录根——否则
+     * {@link #isSandboxBoundaryDenied} 会以工作区为根，把受信目录里的每一项都过滤掉，
+     * 使 grep/glob/ls 在技能目录内静默返回空。</p>
+     */
+    Path getSandboxPolicyRoot(Path workPath, Path target) {
+        if (target != null) {
+            Path probe = target;
+            try {
+                probe = target.toRealPath();
+            } catch (IOException | IllegalArgumentException ignored) {
+                // 保留词法路径：与受信根的比较退化为词法对词法，方向保守
+            }
+            for (Path root : talentRegistry.getTrustedReadRoots()) {
+                if (probe.startsWith(root) || target.startsWith(root)) {
+                    return root;
+                }
             }
         }
         return workPath;
@@ -1164,7 +1087,7 @@ public class TerminalSupport {
         }
     }
 
-    String flatListLogic(Path workPath, Path policyRoot, Path target, String inputPath, boolean showHidden, boolean sandboxEnabled) throws IOException {
+    String flatListLogic(Path workPath, Path policyRoot, Path target, boolean showHidden, boolean sandboxEnabled) throws IOException {
         try (Stream<Path> stream = Files.list(target)) {
             List<String> lines = stream
                     .filter(p -> !isIgnored(workPath, p))
@@ -1172,7 +1095,7 @@ public class TerminalSupport {
                     .filter(p -> showHidden || !p.getFileName().toString().startsWith("."))
                     .map(p -> {
                         boolean isDir = Files.isDirectory(p);
-                        String displayPath = formatDisplayPath(workPath, inputPath, target, p, sandboxEnabled);
+                        String displayPath = formatDisplayPath(workPath, p, sandboxEnabled);
                         return (isDir ? "[DIR] " : "[FILE] ") + displayPath + (isDir ? "/" : "");
                     }).sorted().collect(Collectors.toList());
             return lines.isEmpty() ? "(目录为空)" : String.join("\n", lines);

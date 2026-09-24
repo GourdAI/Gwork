@@ -6,9 +6,7 @@ import com.gourdai.agent.session.InMemoryAgentSession;
 import com.gourdai.ai.chat.ChatConfig;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.agent.AgentDefinition;
-import com.gourdai.ai.talents.mount.MountDir;
 import com.gourdai.harness.permission.ToolPermission;
-import com.gourdai.ai.talents.mount.MountType;
 
 public class DemoApp {
     public static void main(String[] arg) throws Throwable {
@@ -18,12 +16,6 @@ public class DemoApp {
                 .sessionProvider(InMemoryAgentSession::of)
                 .toolsAdd(ToolPermission.TOOL_ALL_FULL) //设定工具权限
                 .disallowedToolsAdd(ToolPermission.TOOL_ALL_FULL)
-                .mountAdd(MountDir.builder()
-                        .alias("@global-agents")
-                        .type(MountType.AGENTS)
-                        .path("~/.gwork/agents/")
-                        .primary(true)
-                        .build())
                 .modelAdd(new ChatConfig().then(slf -> {
                     slf.setApiUrl("https://api.deepseek.com");
                     slf.setApiKey("sk-***");

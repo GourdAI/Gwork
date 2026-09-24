@@ -37,13 +37,38 @@ public class ToolRequest {
         this.request = request;
         this.toolsContext = toolsContext;
 
+        // 安全边界：args 来自模型输出，toolsContext 来自框架注入。以 "__" 开头的键是框架
+        // 私有通道（如 __cwd / __accessMode），模型传来的同名键必须全部剔除——否则模型可以
+        // 伪造 __accessMode=full 之类直接抬高自己的权限档位。注入方向只有 toolsContext -> args。
+        Map<String, Object> safeArgs = stripPrivateArgs(args);
+
         if (Utils.isEmpty(toolsContext)) {
-            this.args = args;
+            this.args = safeArgs;
         } else {
-            Map<String, Object> tmp = new LinkedHashMap<>(args);
+            Map<String, Object> tmp = new LinkedHashMap<>(safeArgs);
             tmp.putAll(toolsContext);
             this.args = tmp;
         }
+    }
+
+    /**
+     * 剔除模型参数中以 {@code __} 开头的私有键（防御性拷贝，不改原 map）。
+     *
+     * <p>工具方法签名中的 {@code String __cwd} / {@code String __accessMode} 等尾参只应
+     * 由框架的 toolsContext 填充；args 里出现同形键即视为越权注入，直接丢弃。</p>
+     */
+    private static Map<String, Object> stripPrivateArgs(Map<String, Object> args) {
+        if (args == null || args.isEmpty()) {
+            return new LinkedHashMap<>();
+        }
+        Map<String, Object> result = new LinkedHashMap<>(args.size());
+        for (Map.Entry<String, Object> entry : args.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().startsWith("__")) {
+                continue;
+            }
+            result.put(entry.getKey(), entry.getValue());
+        }
+        return result;
     }
 
     /**

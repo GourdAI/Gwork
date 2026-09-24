@@ -12,7 +12,13 @@
                       "steer_deferred":  "当前步骤已结束，已加入队列",
                       "steer_failed":  "插话发送失败，输入内容已保留",
                       "force_finished":  "本轮已结束（服务端已空闲），已自动收尾",
-                      "steer_attachment_wait":  "任务执行中不能插话或排队附件，请等待任务完成或先停止任务",
+                      "attachment_uploading":  "附件上传中，请稍候",
+                      "attachment_upload_failed":  "附件上传失败，内容已保留，请重试",
+                      "attachment_changed":  "输入内容已变更，本次发送已取消，请重新发送",
+                      "queued_with_attachments":  "已加入队列（含附件）",
+                      "steer_accepted_with_attachments":  "插话已接收（含附件），将在下一步生效",
+                      "queue_failed":  "加入队列失败，内容已保留，请重试",
+                      "command_attachment_unsupported":  "命令不能携带附件，请移除附件后按 Tab 加入队列",
                       "steer_command_queue":  "命令不能作为插话，请按 Tab 加入队列",
                       "steer_dropped":  "插话未能在任务结束前生效，已加入队列",
                       "steer_expand_full":  "展开全文（共 {0} 字）",
@@ -134,7 +140,26 @@
                  "confirm":  "确定"
              },
     "app":  {
-                "boot_error":  "启动失败",
+                                "access_title":  "访问权限",
+                "access_default":  "默认权限",
+                "access_full":  "完全访问",
+                "access_default_desc":  "空间隔离，危险命令需审批",
+                "access_full_desc":  "空间与命令放行（风险自担）",
+                "access_confirm_title":  "确认允许完全访问？",
+                "access_confirm_desc":  "开启后，AI 将不再受空间隔离与命令审批约束，可执行以下操作：",
+                "access_risk_file":  "文件操作",
+                "access_risk_file_desc":  "可读写项目空间外的任意文件（含系统文件）",
+                "access_risk_cmd":  "终端命令",
+                "access_risk_cmd_desc":  "命令不再逐条审批，高危操作直接生效",
+                "access_risk_net":  "访问互联网",
+                "access_risk_net_desc":  "可访问任意网络地址，可能外发数据或下载不明文件",
+                "access_ack":  "我已了解风险，并对自己的数据安全负责",
+                "access_allow":  "允许完全访问",
+                "access_cancel":  "取消",
+                "access_toast_default":  "已切换为默认权限",
+                "access_toast_full":  "已切换为完全访问",
+                "access_failed":  "权限切换失败，已恢复原档位",
+"boot_error":  "启动失败",
                 "project_view":  "项目视图",
                 "review_view":  "代码审查",
                 "terminal_shortcut":  "终端快捷键",
@@ -152,7 +177,6 @@
                 "history_scope_global":  "全局会话",
                 "history_scope_project":  "项目会话",
                 "welcome_title":  "你好，我是 GWork！",
-                "welcome_sub":  "需要什么帮助吗？",
                 "drop_attach":  "松开以添加附件",
                 "thinking_label":  "思考",
                 "context_label":  "上下文",
@@ -233,11 +257,38 @@
                                 "rename_project":  "重命名项目",
                                 "rename_failed":  "重命名失败",
                                 "model_config":  "模型配置",
-                   "memory":  "记忆"
+                   "memory":  "记忆",
+                   "update_now":  "立即更新",
+                   "update_download":  "下载更新",
+                   "update_downloading":  "下载中…",
+                   "update_install":  "立即安装",
+                   "update_tooltip":  "发现新版本 {0}，点击即可更新",
+                   "update_tooltip_downloading":  "新版本 {0} 正在下载",
+                   "update_tooltip_downloaded":  "新版本 {0} 已下载完成，点击安装并重启"
                             }
             },
     "settings":  {
-                     "common":  {
+                     "appearance": {
+                         "title": "外观",
+                         "desc": "明暗模式与主题配色，选择后立即生效并本地保存",
+                         "mode": {
+                             "title": "明暗模式",
+                             "system": "系统",
+                             "light": "浅色",
+                             "dark": "深色"
+                         },
+                         "themes": {
+                             "title": "全部主题"
+                         },
+                         "theme": {
+                             "graphite": "石墨",
+                             "teal": "青玉",
+                             "clay": "陶土",
+                             "sky": "天青",
+                             "indigo": "蓝紫经典"
+                         }
+                     },
+"common":  {
                                     "back":  "返回",
                                     "close":  "关闭",
                                     "delete":  "删除",
@@ -248,8 +299,8 @@
                      "title":  "设置",
                      "tabs":  {
                                   "general":  "通用设置",
+                                  "appearance": "外观",
                                   "permission":  "工具权限",
-                                  "mounts":  "挂载空间",
                                   "mcp":  "MCP配置",
                                   "openapi":  "接口配置",
                                   "lsp":  "LSP配置",
@@ -296,11 +347,6 @@
                                                       "desc":  "选择界面显示语言，修改后刷新页面生效",
                                                       "name":  "界面语言"
                                                   },
-                                     "appearance":  {
-                                                        "title":  "外观",
-                                                        "theme_name":  "主题颜色",
-                                                        "theme_desc":  "切换界面主题为深色或浅色"
-                                                    },
                                      "conversation":  {
                                                           "title":  "上下文压缩策略",
                                                           "history_window":  "历史窗口大小",
@@ -315,12 +361,6 @@
                                                           "intent_chain_desc":  "压缩时保留用户历轮提问的精简索引（成本极低），防止多轮对话中围着早已完成的旧目标打转",
                                                           "hint":  "历史窗口：压缩时始终保护最后多少条消息完整不压缩\n单轮输出预留：为模型下一轮回复预留的绝对空间，触发点 =「模型窗口 − 该预留 − 回合缓冲」\n压缩触发比例：仅用于「提前」触发（取两者较小值），100 表示不额外提前\n压缩目标水位：决定一次压到多深，值越高压得越浅、触发越频繁"
                                                       },
-                                     "sandbox":  {
-                                                     "title":  "沙盒模式",
-                                                     "desc":  "AI 执行的命令将在受限沙盒环境中运行（只能读写\u0027工作区\u0027和\u0027挂载\u0027内的文件）",
-                                                     "allow_home":  "在沙盒中允许访问用户主目录（`~/` 目录，如：`~/.m2`）",
-                                                     "system_restrict":  "采用更严格的系统内核级沙盒限制；关闭则放宽限制（测试）"
-                                                 },
                                      "memory":  {
                                                     "title":  "心智记忆",
                                                     "enabled_desc":  "跨会话保留长期记忆；关闭可减少上下文消耗",
@@ -390,48 +430,9 @@
                                     "installed_tab":  "已安装",
                                     "uninstall":  "卸载",
                                     "uninstall_confirm":  "确定要卸载技能「{0}」吗？本地技能目录将被删除。",
+                                    "scope_global":  "全局（跨项目）",
+                                    "scope_workspace":  "本项目",
                                     "market_tab":  "技能市场"
-                                },
-                     "mounts":  {
-                                    "title":  "挂载空间",
-                                    "desc":  "管理本地目录映射，为 AI 提供技能与资源的加载路径",
-                                    "add":  "添加挂载",
-                                    "add_title":  "添加挂载",
-                                    "edit_title":  "编辑挂载",
-                                    "alias":  "名称",
-                                    "alias_placeholder":  "@my-mount",
-                                    "scope":  "作用域",
-                                    "scope_workspace":  "工作区（本地）",
-                                    "type":  "内容类型",
-                                    "type_skills":  "技能 (SKILLS)",
-                                    "type_agents":  "子代理 (AGENTS)",
-                                    "type_files":  "文件 (FILES)",
-                                    "path":  "映射路径",
-                                    "path_placeholder":  "~/.myapp/skills/",
-                                    "path_hint":  "文件所在的本地目录路径（支持 \u0027./\u0027 工作区路径和 \u0027~/\u0027 用户目录路径）",
-                                    "writeable":  "开放写权限",
-                                    "description":  "描述（可选）",
-                                    "description_placeholder":  "简要描述此挂载用途",
-                                    "presets_label":  "常见挂载选择",
-                                    "skills_list_title":  "技能包列表",
-                                    "agents_list_title":  "子代理列表",
-                                    "files_list_title":  "文件列表",
-                                    "system":  "系统",
-                                    "skill_pkg":  "技能包",
-                                    "content_list":  "内容列表",
-                                    "open_dir":  "打开目录",
-                                    "preset_skills":  "工作区技能",
-                                    "preset_skillhub":  "技能中心",
-                                    "preset_agents_skills":  "子代理技能",
-                                    "preset_opencode_skills":  "OpenCode 技能",
-                                    "preset_claude_skills":  "Claude 技能",
-                                    "alias_label":  "名称",
-                                    "scope_label":  "作用域",
-                                    "type_label":  "内容类型",
-                                    "path_label":  "映射路径",
-                                    "writeable_label":  "开放写权限",
-                                    "description_label":  "描述",
-                                    "skills_list":  "技能列表"
                                 },
                      "mcp":  {
                                  "title":  "MCP 服务器",
@@ -577,8 +578,6 @@
                                        "model_list_api_label":  "模型列表接口",
                                        "api_url_label":  "API 地址",
                                        "api_key_label":  "API 密钥",
-                                       "get_api_key_link":  "获取 API 密钥",
-                                       "api_key_hint_suffix":  "（每月 10$ 免费订阅额度）",
                                        "timeout_label":  "超时时间",
                                        "models_label":  "模型管理",
                                        "empty_hint":  "暂无模型，请点击添加或从 API 拉取",
@@ -614,7 +613,6 @@
                                        "name_label":  "名称",
                                         "scope_label":  "作用域",
                                         "view_title":  "模型设置",
-                                        "builtin_group":  "内置",
                                         "custom_group":  "自定义供应商",
                                         "add_provider_title":  "添加模型供应商",
                                         "add_provider_desc":  "配置一个完全自定义的 API 端点和初始模型"
@@ -841,11 +839,15 @@
                  "question_skip":  "跳过",
                  "question_next":  "下一步",
                  "question_submit":  "发送",
-                 "question_recommended":  "（推荐）",
+                 "question_recommended":  "推荐",
+                 "question_detail_expand":  "展开",
+                 "question_detail_collapse":  "收起",
+                 "question_record_title":  "我的回答",
                  "question_answered":  "已提交",
                  "question_skipped":  "已跳过",
                  "question_close":  "关闭",
                  "question_attachment_wait":  "问答等待回答时不能发送附件，请先回答或跳过问题",
+                 "question_attachment_queued":  "答案已填入，附件已排入队列，将在本轮结束后发送",
                  "question_supplement":  "再补充一句…（与已选选项一起提交）",
                  "question_supplement_placeholder":  "补充说明，Enter 确认…",
                  "batch_tool":  "批量",
@@ -1173,6 +1175,11 @@
                         "saved_desc":  "切换工作区与全局域，查看已保存的记忆"
                     },
     "file_changes": {
+        "edited_files": "已编辑 {count} 个文件",
+        "show_more_files": "再显示 {count} 个文件",
+        "collapse_files": "收起",
+        "run_list_title": "本轮变更文件",
+        "back_to_list": "返回列表",
         "title": "本轮文件变更",
         "summary": "{count} 个文件",
         "review": "审查",

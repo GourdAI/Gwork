@@ -35,14 +35,28 @@
 </head>
 <body data-theme="light">
 <script>
-    // 主题预置：在首帧绘制前用 localStorage 的主题覆盖 body 默认值，消除“亮→暗”闪烁。
+    // 主题预置：在首帧绘制前用 localStorage 的模式/强调色覆盖 body 默认值，消除“亮→暗”闪烁。
     // 必须放在 body 首个节点——此时 body 已存在、遮罩等可见元素尚未解析绘制，内联脚本同步
-    // 执行完再绘制首帧，故不闪。app-ui.js 稍后按同一值再设一次是幂等的。
+    // 执行完再绘制首帧，故不闪。app-ui.js 稍后按同一规则再设一次是幂等的。
+    // 规则与 app-ui.js 的 getThemeMode/getAccent 保持一致：
+    //   'chat-theme-mode' = system|light|dark（缺省 system，跟随 OS）；
+    //   'chat-theme' 为旧版本/解析值；'chat-accent' 为强调色预设。
     // JS 失败时退回 body 上硬编码的 data-theme="light" 兜底。
     (function () {
         try {
-            var t = localStorage.getItem('chat-theme');
-            if (t && t !== 'light') document.body.setAttribute('data-theme', t);
+            var mode = localStorage.getItem('chat-theme-mode');
+            var t;
+            if (mode === 'light' || mode === 'dark') {
+                t = mode;
+            } else if (mode === 'system') {
+                t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+            } else {
+                t = localStorage.getItem('chat-theme');
+                if (t !== 'light' && t !== 'dark') t = 'light';
+            }
+            document.body.setAttribute('data-theme', t);
+            var a = localStorage.getItem('chat-accent');
+            if (a) document.body.setAttribute('data-accent', a);
         } catch (e) {}
     })();
 </script>
@@ -132,6 +146,18 @@
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
             </svg>
             <span class="sidebar-text" style="margin-left:6px;font-size:12px;" data-i18n="settings.title">设置</span>
+        </button>
+        <!-- 桌面端「更新」按钮：仅在检测到新版的三种状态（可下载 / 下载中 / 待重启）下出现，
+             默认隐藏（样式见 app.css .sidebar-update-btn），状态驱动逻辑见 app-update-badge.js。
+             刻意不写 data-i18n：文案由 JS 按状态机实时赋值，静态翻译属性会被覆盖。
+             【顺序纪律】必须排在 settingsBtn 之后。底栏布局是 justify-content:space-between：
+             首子项恒贴左端（设置位置不随「有无更新」跳变）、末子项贴右端（更新出现即靠右）。
+             顺序若调换，设置会在有/无更新之间左右跳位（真浏览器实测 x=14 → x=201）。
+             此约束由 sidebar-update-badge.test.js 锁定，勿调换。 -->
+        <button class="sidebar-update-btn" id="sidebarUpdateBtn" type="button" data-state="idle">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M4 21h16"/></svg>
+            <span class="sidebar-update-btn-label" id="sidebarUpdateLabel"></span>
+            <span class="sidebar-update-dot" aria-hidden="true"></span>
         </button>
     </div>
 </div>

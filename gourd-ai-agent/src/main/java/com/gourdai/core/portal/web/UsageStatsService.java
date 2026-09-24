@@ -76,7 +76,7 @@ public class UsageStatsService {
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
 
     /** 热力图固定窗口周数（GitHub 贡献图风格，与时间范围选择器解耦，始终铺满整卡宽度）。 */
-    private static final int HEATMAP_WEEKS = 26;
+    private static final int HEATMAP_WEEKS = 53;
 
     /** days 参数取值：0 = 累计至今（账本中全部历史，起点取最早有数据的那天）。 */
     public static final int RANGE_ALL = 0;
@@ -115,7 +115,7 @@ public class UsageStatsService {
         ZoneId zone = ZoneId.systemDefault();
         LocalDate today = LocalDate.now(zone);
 
-        // 热力图窗口：按周对齐（周日为列首）的固定 26 周，与范围选择器解耦
+        // 热力图窗口：按周对齐（周日为列首）的固定 53 周（≈一年，月份时间轴可铺满 12+ 个月），与范围选择器解耦
         int offsetToSunday = today.getDayOfWeek() == DayOfWeek.SUNDAY ? 0 : today.getDayOfWeek().getValue();
         LocalDate currentSunday = today.minusDays(offsetToSunday);
         LocalDate heatmapStart = currentSunday.minusWeeks(HEATMAP_WEEKS - 1L);

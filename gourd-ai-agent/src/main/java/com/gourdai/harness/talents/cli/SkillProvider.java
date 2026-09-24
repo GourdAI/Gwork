@@ -15,7 +15,7 @@
  */
 package com.gourdai.harness.talents.cli;
 
-import com.gourdai.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.registry.SkillDir;
 
 import java.util.Collection;
 
@@ -45,11 +45,6 @@ public interface SkillProvider {
      * 查找技能包
      */
     Collection<SkillDir> searchSkill(String query);
-
-    /**
-     * 获取 Skill 包
-     */
-    SkillDir getSkill(String name);
 
     /**
      * 读取 Skill 内容

@@ -33,10 +33,9 @@ import com.gourdai.ai.mcp.McpChannel;
 import com.gourdai.ai.mcp.client.McpClientProvider;
 import com.gourdai.ai.mcp.client.McpClientProviders;
 import com.gourdai.ai.mcp.client.McpServerParameters;
-import com.gourdai.ai.talents.mount.MountDir;
-import com.gourdai.ai.talents.mount.MountType;
-import com.gourdai.ai.talents.mount.AgentMd;
-import com.gourdai.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.registry.AgentMd;
+import com.gourdai.ai.talents.registry.SkillDir;
+import com.gourdai.ai.talents.registry.TalentScope;
 import com.gourdai.harness.talents.gateway.openapi.ApiSource;
 import com.gourdai.harness.talents.gateway.openapi.ApiSourceClient;
 import com.gourdai.harness.talents.gateway.openapi.ApiTool;
@@ -53,7 +52,6 @@ import com.gourdai.harness.talents.lsp.LspServerParameters;
 import com.gourdai.core.config.entity.LspServerDo;
 import com.gourdai.core.config.entity.McpServerDo;
 import com.gourdai.core.config.entity.ModelDo;
-import com.gourdai.core.config.entity.MountDo;
 import com.gourdai.core.config.entity.ProviderDo;
 import com.gourdai.core.portal.web.model.ModelInfo;
 import com.gourdai.core.portal.web.model.ModelsAdapter;
@@ -73,8 +71,10 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.util.*;
 import java.util.List;
@@ -243,10 +243,6 @@ public class WebSettingsController {
             engine.setModelRetries(settings.getGeneral().getModelRetries());
             engine.setMcpRetries(settings.getGeneral().getMcpRetries());
             engine.setApiRetries(settings.getGeneral().getApiRetries());
-
-            engine.setSandboxEnabled(settings.getGeneral().getSandboxMode());
-            engine.setSandboxAllowUserHome(settings.getGeneral().getSandboxAllowUserHome());
-            engine.setSandboxSystemRestrict(settings.getGeneral().getSandboxSystemRestrict());
 
             engine.setMemoryEnabled(settings.getGeneral().getMemoryEnabled());
             engine.setSubagentEnabled(settings.getGeneral().getSubagentEnabled());
@@ -1845,7 +1841,6 @@ public class WebSettingsController {
             }
             item.put("enabled", provider.isEnabled());
             item.put("scope", provider.getScope() != null ? provider.getScope() : AgentFlags.SCOPE_USER);
-            item.put("builtin", provider.isBuiltin());
             item.put("models", provider.getModels());
             list.add(item);
         }
@@ -1881,7 +1876,6 @@ public class WebSettingsController {
         }
         item.put("enabled", provider.isEnabled());
         item.put("scope", provider.getScope() != null ? provider.getScope() : AgentFlags.SCOPE_USER);
-        item.put("builtin", provider.isBuiltin());
         item.put("models", provider.getModels());
         return Result.succeed(item);
     }
@@ -1944,11 +1938,6 @@ public class WebSettingsController {
             return Result.failure("Provider not found: " + lookupName);
         }
 
-        // 内置连接：名称与 API 地址锁定，忽略前端传入的改名/改址，强制沿用原值
-        if (existing.isBuiltin()) {
-            name = existing.getName();
-        }
-
         // 改名冲突校验：新名称不能与其他供应商重名
         if (!lookupName.equals(name) && settings.getProviders().containsKey(name)) {
             return Result.failure("Provider name already exists: " + name);
@@ -1957,15 +1946,12 @@ public class WebSettingsController {
         ProviderDo provider = new ProviderDo();
         provider.setName(name);
         provider.setStandard(root.hasKey("standard") ? root.get("standard").getString() : existing.getStandard());
-        provider.setApiUrl(existing.isBuiltin()
-                ? existing.getApiUrl()
-                : (root.hasKey("apiUrl") ? root.get("apiUrl").getString() : existing.getApiUrl()));
+        provider.setApiUrl(root.hasKey("apiUrl") ? root.get("apiUrl").getString() : existing.getApiUrl());
         // 密钥缺省（前端在详情未回填、真实密钥未知时不提交该字段）保留原值；显式传空串=用户主动清空
         provider.setApiKey(root.hasKey("apiKey") ? root.get("apiKey").getString() : existing.getApiKey());
         provider.setEnabled(root.hasKey("enabled") ? root.get("enabled").getBoolean(true) : existing.isEnabled());
         provider.setScope(root.hasKey("scope") ? root.get("scope").getString() : (existing.getScope() != null ? existing.getScope() : AgentFlags.SCOPE_USER));
         provider.setTimeout(parseTimeout(root, existing.getTimeout()));
-        provider.setBuiltin(existing.isBuiltin());
 
         // 解析模型列表（直接存储 ModelInfo）
         if (root.hasKey("models") && root.get("models").isArray()) {
@@ -2008,11 +1994,6 @@ public class WebSettingsController {
     public Result providersRemove(@Param("name") String name) throws Exception {
         if (Assert.isEmpty(name)) {
             return Result.failure("name is required");
-        }
-
-        ProviderDo existing = settings.getProviders().get(name);
-        if (existing != null && existing.isBuiltin()) {
-            return Result.failure("内置连接不可删除");
         }
 
         // 级联删除：连带摘除该 provider 名下的所有 ModelDo 与运行时引擎实例。
@@ -2400,46 +2381,48 @@ public class WebSettingsController {
     /**
      * 安装技能 — 委派给 Market 适配器完成下载、解压，然后刷新技能池。
      *
+     * <p>挂载点已移除：安装目标只有「全局区」与「当前工作区」两个固定目录，
+     * 由 {@code scope} 参数二选一，默认 {@code workspace}。</p>
+     *
      * @param slug       技能 slug（必填）
      * @param marketName 市场名称（可选）
-     * @param mountAlias 挂载点别名（可选，默认安装到 workspace/skills）
+     * @param scope      安装作用域：{@code global}（全局区，跨项目共享）或 {@code workspace}（仅当前项目）
      */
     @Post
     @Mapping("/web/settings/skills/install")
     public Result skillsInstall(Context ctx, @Param("slug") String slug,
                                 @Param(value = "marketName", defaultValue = "") String marketName,
-                                @Param(value = "mountAlias", defaultValue = "") String mountAlias) {
+                                @Param(value = "scope", defaultValue = "workspace") String scope) {
         if (Assert.isEmpty(slug)) {
             return Result.failure("slug is required");
         }
 
         Market market = marketManager.getMarketByName(marketName);
 
-        // 确定安装目标目录：若指定了挂载别名，则安装到对应池目录；否则默认 workspace/skills
-        Path skillsDir;
-        if (!Assert.isEmpty(mountAlias)) {
-            MountDir poolDir = engine.getMount(mountAlias);
-            if (poolDir == null) {
-                return Result.failure("挂载池不存在: " + mountAlias);
-            }
+        TalentScope targetScope = TalentScope.of(scope);
+        if (targetScope == null) {
+            // 非法 scope 不得静默落盘：getSkillsDir(null) 会走 else 分支返回全局目录，
+            // 技能会被装到用户未曾选择的作用域里去
+            return Result.failure(400, "Unsupported scope: " + scope);
+        }
 
-            skillsDir = poolDir.getRealPath();
-        } else {
-            skillsDir = Paths.get(engine.getWorkspace(), "skills");
+        Path skillsDir = engine.getTalentRegistry().getSkillsDir(targetScope);
+        if (skillsDir == null) {
+            return Result.failure("技能目录不可用（scope=" + targetScope + "）");
         }
 
         Result<String> result = market.install(slug, skillsDir);
 
-        // 安装成功后刷新技能池
+        // 安装成功后重新扫描技能目录
         if (result.getCode() == 200) {
-            engine.refreshMount(mountAlias);
+            engine.refreshTalents();
         }
 
         return result;
     }
 
     /**
-     * 获取已安装技能列表 — 汇总所有挂载池中的技能（按名称去重，保留首次出现）。
+     * 获取已安装技能列表 — 汇总全局区与工作区的技能（按名称去重，工作区压过全局）。
      * <p>供技能市场「已安装」视图展示，字段与 /web/chat/hints 中的技能项保持一致。</p>
      */
     @Get
@@ -2468,280 +2451,64 @@ public class WebSettingsController {
             Map<String, String> item = new LinkedHashMap<>();
             item.put("name", skill.getName());
             item.put("description", desc != null ? desc : "");
-            item.put("mountAlias", skill.getMountAlias() != null ? skill.getMountAlias() : "");
+            item.put("scope", skill.getScope() != null ? skill.getScope().code() : "");
             skills.add(item);
         }
 
         return Result.succeed(skills);
     }
 
-    // ==================== 设置：挂载池管理 ====================
 
     /**
-     * 获取所有挂载池列表（含系统池标记）
-     */
-    @Get
-    @Mapping("/web/settings/mounts")
-    public Result mountsList(Context ctx) {
-        List<Map<String, Object>> list = new ArrayList<>();
-
-        for (MountDir entry : engine.getMounts()) {
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("alias", entry.getAlias());
-            item.put("type", entry.getType());
-            item.put("path", entry.getPath());
-            item.put("enabled", entry.isEnabled());
-            item.put("system", entry.isPrimary());
-            item.put("writeable", entry.isWriteable());
-            item.put("realPath", entry.getRealPath() != null ? entry.getRealPath().toString() : "");
-            item.put("description", entry.getDescription());
-
-
-            MountDo mountDo = settings.getMountPools().get(entry.getAlias());
-            if (mountDo == null) {
-                item.put("scope", AgentFlags.SCOPE_USER);
-            } else {
-                item.put("scope", mountDo.getScope());
-            }
-
-            list.add(item);
-        }
-
-        sortByName(list, "alias");
-
-        return Result.succeed(list);
-    }
-
-    /**
-     * 添加挂载池
+     * 卸载技能 — 按作用域与技能名定位目录并删除。
+     *
+     * <p>取代原 {@code /web/settings/mounts/skills/remove}（挂载点已移除）。
+     * 仅允许删除全局区 / 工作区技能目录之内的目录，且目录名必须来自注册表扫描到的
+     * 技能名（前端由已安装列表传入），不接受任意路径。</p>
      */
     @Post
-    @Mapping("/web/settings/mounts/add")
-    public Result mountsAdd(Context ctx, @Param("description") String description, @Param("alias") String alias, @Param("path") String path, @Param("type") MountType type, @Param("writeable") boolean writeable, @Param("scope") String scope) {
-        if (Assert.isEmpty(alias) || Assert.isEmpty(path)) return Result.failure("参数不完整");
-
-        if (alias.startsWith("@") == false) {
-            alias = "@" + alias;
+    @Mapping("/web/settings/skills/uninstall")
+    public Result skillsUninstall(@Param("scope") String scope, @Param("skillName") String skillName) {
+        if (Assert.isEmpty(skillName)) {
+            return Result.failure("skillName is required");
         }
 
-        if (engine.hasMount(alias)) return Result.failure("别名已存在");
-
-
-        if (type == null) {
-            type = MountType.SKILLS;
+        TalentScope targetScope = TalentScope.of(scope);
+        if (targetScope == null) {
+            // 与 skillsInstall 同口径：非法 scope 明确 400，而不是静默按全局区反查/删除
+            return Result.failure(400, "Unsupported scope: " + scope);
         }
 
-        if (Assert.isEmpty(scope) || (!AgentFlags.SCOPE_LOCAL.equals(scope))) {
-            scope = AgentFlags.SCOPE_USER;
+        // 目录名安全校验：技能名来自扫描产物，但仍是外部输入——
+        // 含 ".." 的一律拒绝，防止拼出越界目录。
+        // 注：不再拦含 "/" 的名字——TalentRegistry 支持两级组织（分类/技能名），
+        // 注册名本身含 "/"（如 "分类/skill-x"）；目标目录由下方「注册表 scope+name
+        // 反查 + startsWith 双保险」锁定，不存在路径拼造空间。
+        if (skillName.contains("..") || skillName.contains("\\")) {
+            return Result.failure("非法技能名");
         }
 
-        MountDo mountDo = new MountDo(
-                scope,
-                description,
-                type,
-                path,
-                false, true, writeable);
-        settings.getMountPools().put(alias, mountDo);
-        saveSettings();
-        engine.addMount(MountDir.builder()
-                .alias(alias)
-                .type(type)
-                .path(path)
-                .writeable(writeable)
-                .build());
-        return Result.succeed("添加成功");
-    }
-
-    /**
-     * 更新挂载池（只允许修改描述和可写属性）
-     */
-    @Post
-    @Mapping("/web/settings/mounts/update")
-    public Result mountsUpdate(Context ctx, @Param("alias") String alias, @Param("description") String description, @Param("writeable") boolean writeable) {
-        if (Assert.isEmpty(alias)) return Result.failure("参数不完整");
-
-        if (alias.startsWith("@") == false) {
-            alias = "@" + alias;
-        }
-
-        if (!engine.hasMount(alias)) return Result.failure("挂载池不存在");
-
-        // 更新配置中的数据
-        MountDo mountDo = settings.getMountPools().get(alias);
-        if (mountDo != null) {
-            mountDo.setDescription(description);
-            mountDo.setWriteable(writeable);
-        }
-
-        // 更新运行时挂载
-        for (MountDir entry : engine.getMounts()) {
-            if (alias.equals(entry.getAlias())) {
-                entry.setDescription(description);
-                entry.setWriteable(writeable);
+        // 从注册表按 scope+name 反查真实目录：不存在即失败，不猜路径
+        SkillDir target = null;
+        for (SkillDir skill : engine.getSkillsByScope(targetScope)) {
+            if (skillName.equals(skill.getName())) {
+                target = skill;
                 break;
             }
         }
-
-        saveSettings();
-        return Result.succeed("更新成功");
-    }
-
-    /**
-     * 切换挂载池启用/停用
-     */
-    @Post
-    @Mapping("/web/settings/mounts/toggle")
-    public Result mountsToggle(@Param("alias") String alias, @Param("enabled") Boolean enabled) {
-        if (Assert.isEmpty(alias)) {
-            return Result.failure("alias is required");
+        if (target == null || target.getRealPath() == null) {
+            return Result.failure("技能不存在: " + skillName + "（scope=" + targetScope + "）");
         }
 
-        MountDir mountDir = engine.getMount(alias);
-        if (mountDir == null) {
-            return Result.failure("挂载池不存在: " + alias);
-        } else {
-            mountDir.setEnabled(enabled);
-        }
-
-        // 更新配置
-        MountDo mountDo = settings.getMountPools().get(alias);
-        if (mountDo != null) {
-            mountDo.setEnabled(enabled);
-        }
-
-        saveSettings();
-        LOG.info("[Settings] Mount toggled: {} -> {}", alias, enabled);
-        return Result.succeed();
-    }
-
-    /**
-     * 移除挂载池
-     */
-    @Post
-    @Mapping("/web/settings/mounts/remove")
-    public Result mountsRemove(@Param("alias") String alias) {
-        MountDir mountDir = engine.getMount(alias);
-        if (mountDir == null) {
-            return Result.failure("挂载池不存在");
-        }
-
-        if (mountDir.isPrimary()) {
-            return Result.failure("系统挂载池不可移除");
-        }
-
-        settings.getMountPools().remove(alias);
-        saveSettings();
-        engine.removeMount(alias);
-        return Result.succeed("移除成功");
-    }
-
-    /**
-     * 获取某挂载池内的内容列表（根据类型分发）
-     */
-    @Get
-    @Mapping("/web/settings/mounts/content")
-    public Result mountsContent(@Param("alias") String alias, @Param("type") String type) {
-        if (engine.hasMount(alias) == false) {
-            return Result.failure("挂载池不存在: " + alias);
-        }
-
-        if ("AGENTS".equals(type)) {
-            return loadAgentsContent(alias);
-        } else if ("FILES".equals(type)) {
-            return Result.succeed(Collections.emptyList());
-        } else {
-            return loadSkillsContent(alias);
-        }
-    }
-
-    private Result loadSkillsContent(String alias) {
-        Collection<SkillDir> skillDirList = engine.getSkillsByMount(alias);
-        List<Map<String, String>> skills = new ArrayList<>();
-
-        for (SkillDir subDir : skillDirList) {
-            Map<String, String> skillItem = new LinkedHashMap<>();
-            skillItem.put("name", subDir.getName());
-            skillItem.put("description", subDir.getDescription());
-            skillItem.put("realPath", subDir.getRealPath() != null ? subDir.getRealPath().toString() : "");
-            skills.add(skillItem);
-        }
-
-        return Result.succeed(skills);
-    }
-
-    private Result loadAgentsContent(String alias) {
-        Collection<AgentMd> agentList = engine.getAgentsByMount(alias);
-        List<Map<String, String>> agents = new ArrayList<>();
-
-        for (AgentMd agent : agentList) {
-            Map<String, String> agentItem = new LinkedHashMap<>();
-            agentItem.put("name", agent.getName());
-            agentItem.put("filePath", agent.getFilePath() != null ? agent.getFilePath().toString() : "");
-            agents.add(agentItem);
-        }
-
-        return Result.succeed(agents);
-    }
-
-    /**
-     * 打开挂载池的真实目录
-     */
-    @Get
-    @Mapping("/web/settings/mounts/open")
-    public Result mountsOpen(@Param("path") String path) {
-        if (Assert.isEmpty(path)) return Result.failure("路径为空");
-        try {
-            File dir = new File(path);
-            if (!dir.exists()) return Result.failure("目录不存在: " + path);
-
-            // 优先尝试 Desktop.open，失败时 fallback 到系统命令
-            try {
-                if (Desktop.isDesktopSupported()) {
-                    Desktop.getDesktop().open(dir);
-                    return Result.succeed("已打开");
-                }
-            } catch (Exception ignored) {
-                // Desktop.open 失败，尝试 fallback
-            }
-
-            // Fallback: 使用系统命令打开目录
-            String os = System.getProperty("os.name", "").toLowerCase();
-            String[] cmd;
-            if (os.contains("mac")) {
-                cmd = new String[]{"open", dir.getAbsolutePath()};
-            } else if (os.contains("win")) {
-                cmd = new String[]{"explorer", dir.getAbsolutePath()};
-            } else {
-                cmd = new String[]{"xdg-open", dir.getAbsolutePath()};
-            }
-            new ProcessBuilder(cmd).start();
-            return Result.succeed("已打开");
-        } catch (Exception e) {
-            return Result.failure("打开失败: " + e.getMessage());
-        }
-    }
-
-    /**
-     * 删除挂载池内的技能包
-     */
-    @Post
-    @Mapping("/web/settings/mounts/skills/remove")
-    public Result mountsSkillsRemove(@Param("alias") String alias, @Param("skillName") String skillName) {
-        MountDir mountDir = engine.getMount(alias);
-        if (mountDir == null) return Result.failure("挂载池不存在: " + alias);
-
-
-        Path skillDir = mountDir.getRealPath().resolve(skillName);
-        if (!Files.exists(skillDir)) return Result.failure("技能包不存在: " + skillName);
-
-        // 安全校验：防止路径穿越
-        if (!skillDir.normalize().startsWith(mountDir.getRealPath())) {
+        // 双保险：解析后的目录必须仍在对应技能根目录之内
+        Path skillsRoot = engine.getTalentRegistry().getSkillsDir(targetScope);
+        if (skillsRoot != null && !target.getRealPath().normalize().startsWith(skillsRoot.normalize())) {
             return Result.failure("非法路径");
         }
 
         try {
-            deleteRecursively(skillDir);
-            engine.refreshMount(alias);
+            deleteRecursively(target.getRealPath());
+            engine.refreshTalents();
             return Result.succeed("删除成功");
         } catch (Exception e) {
             LOG.warn("[Settings] Failed to delete skill: {}", e.getMessage());
@@ -2750,90 +2517,37 @@ public class WebSettingsController {
     }
 
     /**
-     * 从供应商生成模型配置
+     * 递归删除目录（不跟随符号链接/junction）。
+     *
+     * <p>市场 zip 解压器可能产出指向技能根之外的 symlink/junction——跟随链接递归会
+     * 先删掉链接目标的全部内容再删链接本身，等于越界删除任意目录。因此：</p>
+     * <ul>
+     *   <li>目录判定用 NOFOLLOW_LINKS：链接节点不会被当作目录展开；</li>
+     *   <li>符号链接与 junction 统一按「链接节点」处理——只删节点本身不递归。
+     *       Windows junction 的 {@code Files.isSymbolicLink()} 返回 false 且
+     *       {@code isDirectory(path, NOFOLLOW_LINKS)} 返回 true，必须靠
+     *       {@code isOther()} 才能兜住（已实测：cmd /c mklink /J 产物）。</li>
+     * </ul>
      */
-    @Post
-    @Mapping("/web/settings/providers/generate")
-    public Result providersGenerate(@Body String json) throws Exception {
-        ONode root = ONode.ofJson(json);
-        String providerName = root.get("providerName").getString();
-        String standard = root.get("standard").getString("openai");
-        String apiUrl = root.get("apiUrl").getString();
-        String apiKey = root.get("apiKey").getString();
-        String scope = root.get("scope").getString(AgentFlags.SCOPE_USER);
-        
-        // 解析模型列表
-        ONode modelsNode = root.get("models");
-        if (!modelsNode.isArray() || modelsNode.getArrayUnsafe().isEmpty()) {
-            return Result.failure("请选择要生成的模型");
+    private void deleteRecursively(Path path) throws Exception {
+        BasicFileAttributes attrs;
+        try {
+            attrs = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        } catch (java.nio.file.NoSuchFileException e) {
+            // 与旧实现一致：并发删除/残留消失时不报错，静默跳过
+            return;
         }
-        
-        // 解析生成选项
-        ONode optionsNode = root.get("options");
-        String prefix = optionsNode.get("prefix").getString(providerName + "-");
-        int timeout = optionsNode.get("timeout").getInt(120);
-        boolean setDefault = optionsNode.get("setDefault").getBoolean(false);
-        
-        // 生成模型配置
-        List<Map<String, Object>> generatedModels = new ArrayList<>();
-        for (ONode modelNode : modelsNode.getArray()) {
-            String modelId = modelNode.get("id").getString();
-            if (Assert.isEmpty(modelId)) {
-                continue;
-            }
-            
-            // 生成模型名称
-            String modelName = prefix + modelId;
-            
-            // 检查是否已存在同名模型
-            if (settings.getModels().containsKey(modelName)) {
-                LOG.warn("[Settings] Model already exists, skipping: {}", modelName);
-                continue;
-            }
-            
-            // 创建模型配置
-            ModelDo modelDo = new ModelDo();
-            modelDo.setName(modelName);
-            modelDo.setModel(modelId);
-            modelDo.setStandard(standard);
-            modelDo.setApiUrl(apiUrl);
-            modelDo.setApiKey(apiKey);
-            modelDo.setScope(scope);
-            modelDo.setProvider(providerName);  // 设置所属供应商
-            
-            // 设置超时时间
-            if (timeout > 0) {
-                modelDo.setTimeout(java.time.Duration.ofSeconds(timeout));
-            }
-            
-            // 保存模型配置：插入所属 provider 区块末尾，避免劈裂已有区块
-            settings.addModelInProviderBlock(modelDo);
-            
-            // 注入运行时引擎（即时生效，无需重启）
-            engine.addModel(modelDo);
-            
-            // 记录生成的模型信息
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("name", modelName);
-            item.put("model", modelId);
-            item.put("standard", standard);
-            item.put("scope", scope);
-            generatedModels.add(item);
-            
-            LOG.info("[Settings] Model generated: {} (from provider: {})", modelName, providerName);
+        if (attrs.isSymbolicLink() || attrs.isOther()) {
+            // 符号链接 / junction / 其它非常规节点：只删节点本身，绝不递归进链接目标
+            Files.deleteIfExists(path);
+            return;
         }
-        
-        // 如果设置了默认模型，更新默认模型
-        if (setDefault && !generatedModels.isEmpty()) {
-            String firstModelName = (String) generatedModels.get(0).get("name");
-            settings.setDefaultModel(firstModelName);
-            LOG.info("[Settings] Default model set to: {}", firstModelName);
+        if (attrs.isDirectory()) {
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(path)) {
+                for (Path child : stream) deleteRecursively(child);
+            }
         }
-        
-        // 保存配置
-        saveSettings();
-        
-        return Result.succeed(generatedModels);
+        Files.deleteIfExists(path);
     }
 
     /**
@@ -2845,18 +2559,6 @@ public class WebSettingsController {
             String nameB = (String) b.getOrDefault(key, "");
             return nameA.compareToIgnoreCase(nameB);
         });
-    }
-
-    /**
-     * 递归删除目录
-     */
-    private void deleteRecursively(Path path) throws Exception {
-        if (Files.isDirectory(path)) {
-            try (DirectoryStream<Path> stream = Files.newDirectoryStream(path)) {
-                for (Path child : stream) deleteRecursively(child);
-            }
-        }
-        Files.deleteIfExists(path);
     }
 
     // ==================== 设置：钉钉扫码绑定 ====================

@@ -1,6 +1,6 @@
 <!-- model-settings.html — 模型配置独立主视图片段（与自动化/技能/远控通道同构），由 app-bootstrap.js 装配到 .main-area -->
-<!-- 双栏 Master-Detail 布局：左栏供应商列表（内置/自定义分组 + 状态圆点），右栏详情/表单常驻；
-     表单组件与样式复用 settings.css 组件类（form-group / provider-model-* / settings-scope-toggle 等），DOM id 统一 ms 前缀 -->
+<!-- 双栏 Master-Detail 布局：左栏供应商列表（自定义分组 + 状态圆点），右栏详情/表单常驻；
+      表单组件与样式复用 settings.css 组件类（form-group / provider-model-* / settings-scope-toggle 等），DOM id 统一 ms 前缀 -->
 <template data-mount=".main-area">
 <div class="model-settings-view" id="modelSettingsView">
     <div class="model-settings-scroll">
@@ -20,10 +20,6 @@
                 <!-- 左栏：供应商列表 -->
                 <div class="model-settings-left">
                     <div class="model-settings-left-scroll">
-                        <div class="model-settings-group" id="msGroupBuiltin" style="display:none">
-                            <div class="model-settings-group-label" data-i18n="settings.providers.builtin_group">内置</div>
-                            <div class="model-settings-group-list" id="msBuiltinList"></div>
-                        </div>
                         <div class="model-settings-group" id="msGroupCustom">
                             <div class="model-settings-group-label" data-i18n="settings.providers.custom_group">自定义供应商</div>
                             <div class="model-settings-group-list" id="msCustomList"></div>
@@ -82,9 +78,6 @@
                                         <button class="password-toggle" id="msProviderApiKeyToggle" data-i18n-title="settings.providers.toggle_visibility">
                                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                                         </button>
-                                    </div>
-                                    <div class="form-hint" id="msProviderBuiltinKeyHint" style="display:none">
-                                        <a href="https://www.gourdwork.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.providers.get_api_key_link">访问官网获取 API 密钥</a><span data-i18n="settings.providers.api_key_hint_suffix">（每月 10$ 免费订阅额度）</span>
                                     </div>
                                 </div>
                                 <div class="form-group">

@@ -12,7 +12,13 @@
                       "steer_deferred":  "現在のステップが終了したため、キューに追加しました",
                       "steer_failed":  "割り込みの送信に失敗しました。入力内容は保持されています",
                       "force_finished":  "実行はすでに終了しています（サーバーは待機中）。ストリームを自動的に終了しました",
-                      "steer_attachment_wait":  "タスク実行中は添付ファイルを割り込みまたはキューに追加できません。完了を待つか停止してください",
+                      "attachment_uploading":  "添付ファイルをアップロードしています。しばらくお待ちください",
+                      "attachment_upload_failed":  "添付ファイルのアップロードに失敗しました。入力内容は保持されています。もう一度お試しください",
+                      "attachment_changed":  "アップロード中に入力内容が変更されたため、今回の送信は取り消されました。もう一度送信してください",
+                      "queued_with_attachments":  "キューに追加しました（添付ファイルを含む）",
+                      "steer_accepted_with_attachments":  "割り込みを受け付けました（添付ファイルを含む）。次のステップで反映されます",
+                      "queue_failed":  "キューへの追加に失敗しました。入力内容は保持されています。もう一度お試しください",
+                      "command_attachment_unsupported":  "コマンドに添付ファイルは付けられません。削除してから Tab でキューに追加してください",
                       "steer_command_queue":  "コマンドは割り込みできません。Tab でキューに追加してください",
                       "steer_dropped":  "完了前に割り込みが反映されなかったため、キューに追加しました",
                       "steer_expand_full":  "全文を表示（全 {0} 文字）",
@@ -134,7 +140,26 @@
                  "confirm":  "確認"
              },
     "app":  {
-                "boot_error":  "起動に失敗しました",
+                                "access_title":  "アクセス権限",
+                "access_default":  "既定の権限",
+                "access_full":  "完全アクセス",
+                "access_default_desc":  "空間を分離し、危険なコマンドは要承認",
+                "access_full_desc":  "空間とコマンドを開放（自己責任）",
+                "access_confirm_title":  "完全アクセスを許可しますか？",
+                "access_confirm_desc":  "完全アクセスでは、空間分離とコマンド承認が解除され、次の操作が可能になります：",
+                "access_risk_file":  "ファイル操作",
+                "access_risk_file_desc":  "空間外の任意のファイル（システムファイル等）を読み書きできます",
+                "access_risk_cmd":  "ターミナルコマンド",
+                "access_risk_cmd_desc":  "承認なしでコマンドを実行、削除や上書きも即時に有効になります",
+                "access_risk_net":  "インターネットアクセス",
+                "access_risk_net_desc":  "任意のネットワークアドレスにアクセス可能、データ流出や不明ファイルのDLの恐れ",
+                "access_ack":  "リスクを理解し、自分のデータの安全に責任を持ちます",
+                "access_allow":  "完全アクセスを許可",
+                "access_cancel":  "キャンセル",
+                "access_toast_default":  "既定の権限に切り替えました",
+                "access_toast_full":  "完全アクセスに切り替えました",
+                "access_failed":  "権限の切り替えに失敗しました。元のモードに戻しました",
+"boot_error":  "起動に失敗しました",
                 "project_view":  "プロジェクトビュー",
                 "review_view":  "コードレビュー",
                 "terminal_shortcut":  "ターミナルショートカット",
@@ -152,7 +177,6 @@
                 "history_scope_global":  "グローバル会話",
                 "history_scope_project":  "プロジェクト会話",
                 "welcome_title":  "こんにちは、GWork です！",
-                "welcome_sub":  "どんなお手伝いが必要ですか？",
                 "drop_attach":  "離してファイルを添付",
                 "thinking_label":  "思考",
                 "context_label":  "コンテキスト",
@@ -233,11 +257,38 @@
                                 "rename_project":  "プロジェクト名を変更",
                                 "rename_failed":  "名前の変更に失敗しました",
                                 "model_config":  "モデル設定",
-                   "memory":  "メモリ"
+                   "memory":  "メモリ",
+                   "update_now":  "今すぐ更新",
+                   "update_download":  "ダウンロード",
+                   "update_downloading":  "ダウンロード中",
+                   "update_install":  "インストール",
+                   "update_tooltip":  "新しいバージョン {0} があります。クリックで更新",
+                   "update_tooltip_downloading":  "新しいバージョン {0} をダウンロード中",
+                   "update_tooltip_downloaded":  "バージョン {0} の準備完了 — クリックでインストールして再起動"
                             }
             },
     "settings":  {
-                     "common":  {
+                     "appearance": {
+                         "title": "外観",
+                         "desc": "ライト/ダークモードとテーマ配色。選択後すぐに反映され、ローカルに保存されます",
+                         "mode": {
+                             "title": "ライト/ダークモード",
+                             "system": "システム",
+                             "light": "ライト",
+                             "dark": "ダーク"
+                         },
+                         "themes": {
+                             "title": "すべてのテーマ"
+                         },
+                         "theme": {
+                             "graphite": "グラファイト",
+                             "teal": "青玉",
+                             "clay": "粘土",
+                             "sky": "空青",
+                             "indigo": "インディゴクラシック"
+                         }
+                     },
+"common":  {
                                     "back":  "戻る",
                                     "close":  "閉じる",
                                     "delete":  "削除",
@@ -248,8 +299,8 @@
                      "title":  "設定",
                      "tabs":  {
                                   "general":  "全般",
+                                  "appearance": "外観",
                                   "permission":  "権限",
-                                  "mounts":  "マウント",
                                   "mcp":  "MCP 設定",
                                   "openapi":  "API 設定",
                                   "lsp":  "LSP 設定",
@@ -296,11 +347,6 @@
                                                       "desc":  "インターフェースの表示言語を選択",
                                                       "name":  "インターフェース言語"
                                                   },
-                                     "appearance":  {
-                                                        "title":  "外観",
-                                                        "theme_name":  "テーマカラー",
-                                                        "theme_desc":  "インターフェースのテーマをダークまたはライトに切り替え"
-                                                    },
                                      "conversation":  {
                                                           "title":  "コンテキスト圧縮戦略",
                                                           "history_window":  "履歴ウィンドウサイズ",
@@ -315,12 +361,6 @@
                                                           "intent_chain_desc":  "圧縮時にユーザーの過去の質問の簡潔なインデックスを保持し（コストは極小）、完了済みの古い目標に固執するのを防ぎます",
                                                           "hint":  "履歴ウィンドウ：圧縮時に最後の何件のメッセージを常に完全保護するか\n1ターン出力予約：モデルの次の応答のために確保する絶対的な余白、トリガー点 =「モデルウィンドウ − この予約 − ターンバッファ」\n圧縮トリガー率：「前倒し」トリガーのみに使用（両者の小さい方を採用）、100 は追加の前倒しなし\n圧縮目標水位：1 回でどこまで圧縮するかを決定、値が高いほど圧縮は浅くトリガーは頻繁になります"
                                                       },
-                                     "sandbox":  {
-                                                     "title":  "サンドボックスモード",
-                                                     "desc":  "AI が実行するコマンドは制限されたサンドボックス環境で実行されます（「ワークスペース」と「マウント」内のファイルのみ読み書き可能）",
-                                                     "allow_home":  "サンドボックス内でのユーザーホームディレクトリ（`~/` ディレクトリ、例：`~/.m2`）へのアクセスを許可",
-                                                     "system_restrict":  "より厳格なシステムカーネルレベルのサンドボックス制限を採用；オフにすると制限が緩和されます（テスト用）"
-                                                 },
                                      "memory":  {
                                                     "title":  "メンタルメモリ",
                                                     "enabled_desc":  "セッション間で長期メモリを保持；オフにするとコンテキスト消費を削減できます",
@@ -390,48 +430,9 @@
                                     "installed_tab":  "インストール済み",
                                     "uninstall":  "アンインストール",
                                     "uninstall_confirm":  "スキル「{0}」をアンインストールしますか？ローカルのスキルディレクトリが削除されます。",
+                                    "scope_global":  "Global",
+                                    "scope_workspace":  "This Project",
                                     "market_tab":  "スキルマーケット"
-                                },
-                     "mounts":  {
-                                    "title":  "マウントスペース",
-                                    "desc":  "ローカルディレクトリのマッピングを管理し、AI にスキルとリソースの読み込みパスを提供",
-                                    "add":  "マウントを追加",
-                                    "add_title":  "マウントを追加",
-                                    "edit_title":  "マウントを編集",
-                                    "alias":  "名前",
-                                    "alias_placeholder":  "@my-mount",
-                                    "scope":  "スコープ",
-                                    "scope_workspace":  "ワークスペース（ローカル）",
-                                    "type":  "コンテンツタイプ",
-                                    "type_skills":  "スキル (SKILLS)",
-                                    "type_agents":  "エージェント (AGENTS)",
-                                    "type_files":  "ファイル (FILES)",
-                                    "path":  "マッピングパス",
-                                    "path_placeholder":  "~/.myapp/skills/",
-                                    "path_hint":  "ファイルがあるローカルディレクトリパス（\u0027./\u0027 ワークスペースパスと \u0027~/\u0027 ユーザーディレクトリパスをサポート）",
-                                    "writeable":  "書き込み権限を開放",
-                                    "description":  "説明（オプション）",
-                                    "description_placeholder":  "このマウントの用途を簡潔に説明",
-                                    "presets_label":  "一般的なマウント選択",
-                                    "skills_list_title":  "スキルパッケージ一覧",
-                                    "agents_list_title":  "サブエージェント一覧",
-                                    "files_list_title":  "ファイル一覧",
-                                    "system":  "システム",
-                                    "skill_pkg":  "スキルパッケージ",
-                                    "content_list":  "コンテンツ一覧",
-                                    "open_dir":  "ディレクトリを開く",
-                                    "preset_skills":  "ワークスペーススキル",
-                                    "preset_skillhub":  "スキルセンター",
-                                    "preset_agents_skills":  "サブエージェントスキル",
-                                    "preset_opencode_skills":  "OpenCode スキル",
-                                    "preset_claude_skills":  "Claude スキル",
-                                    "alias_label":  "名前",
-                                    "scope_label":  "スコープ",
-                                    "type_label":  "コンテンツタイプ",
-                                    "path_label":  "マッピングパス",
-                                    "writeable_label":  "書込み許可",
-                                    "description_label":  "説明",
-                                    "skills_list":  "スキル一覧"
                                 },
                      "mcp":  {
                                  "title":  "MCP サーバー",
@@ -577,8 +578,6 @@
                                        "model_list_api_label":  "モデルリストAPI",
                                        "api_url_label":  "API アドレス",
                                        "api_key_label":  "API キー",
-                                       "get_api_key_link":  "API キーを取得",
-                                       "api_key_hint_suffix":  "公式サイトで API キーを取得",
                                        "timeout_label":  "タイムアウト",
                                        "models_label":  "モデル",
                                        "empty_hint":  "モデルなし、追加または API から取得",
@@ -614,7 +613,6 @@
                                        "name_label":  "名前",
                                         "scope_label":  "スコープ",
                                         "view_title":  "モデル設定",
-                                        "builtin_group":  "内蔵",
                                         "custom_group":  "カスタムプロバイダー",
                                         "add_provider_title":  "モデルプロバイダーを追加",
                                         "add_provider_desc":  "完全にカスタマイズされた API エンドポイントと初期モデルを設定します"
@@ -841,11 +839,15 @@
                  "question_skip":  "スキップ",
                  "question_next":  "次へ",
                  "question_submit":  "送信",
-                 "question_recommended":  "（推奨）",
+                 "question_recommended":  "おすすめ",
+                 "question_detail_expand":  "展開",
+                 "question_detail_collapse":  "折りたたむ",
+                 "question_record_title":  "私の回答",
                  "question_answered":  "送信済み",
                  "question_skipped":  "スキップ済み",
                  "question_close":  "閉じる",
                  "question_attachment_wait":  "質問への回答待ちの間は添付ファイルを送信できません。先に回答またはスキップしてください",
+                 "question_attachment_queued":  "回答を入力しました。添付ファイルはキューに追加され、今回のターン終了後に送信されます",
                  "question_supplement":  "補足を追加…（選択した項目と一緒に送信）",
                  "question_supplement_placeholder":  "補足を入力し、Enter で確定…",
                  "batch_tool":  "一括",
@@ -1173,6 +1175,11 @@
                         "saved_desc":  "ワークスペースとグローバルを切り替えて保存済みのメモリを表示"
                     },
     "file_changes": {
+        "edited_files": "{count} 個のファイルを編集",
+        "show_more_files": "ほか {count} 個のファイルを表示",
+        "collapse_files": "折りたたむ",
+        "run_list_title": "この実行の変更ファイル",
+        "back_to_list": "リストに戻る",
         "title": "今回のファイル変更",
         "summary": "{count} ファイル",
         "review": "レビュー",

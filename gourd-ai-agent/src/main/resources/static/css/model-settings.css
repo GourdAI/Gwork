@@ -80,7 +80,6 @@ body.code-mode .model-settings-view { display: none !important; }
     font-size: 13px; font-weight: 700; color: #fff;
     background: var(--accent);
 }
-.ms-provider-icon.builtin { background: var(--text-secondary); }
 .ms-provider-icon.custom { background: var(--bg-main); border: 1px solid var(--border-color); color: var(--text-primary); }
 
 .ms-provider-info { flex: 1; min-width: 0; }

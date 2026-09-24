@@ -54,7 +54,7 @@
 
     function renderMcpList(list) {
         var html = '';
-        var tWorkspace = GourdI18n.t('settings.mounts.scope_workspace');
+        var tWorkspace = GourdI18n.t('settings.general.scope_workspace');
         var tEdit = GourdI18n.t('common.edit');
         var tDelete = GourdI18n.t('common.delete');
         var tEnable = GourdI18n.t('settings.loop.enable');
@@ -75,7 +75,7 @@
                 html += '<div class="mcp-server-item' + (item.enabled === false ? ' disabled' : '') + '" data-name="' + escapeAttr(name) + '">'
                     + '<div class="mcp-server-icon">' + escapeHtml(icon) + '</div>'
                     + '<div class="mcp-server-info">'
-                    + '<div class="mcp-server-name">' + escapeHtml(name) + ' <span class="settings-inline-tag">[' + escapeHtml(type) + ']</span>' + (item.scope === 'workspace' ? ' <span class="mounts-scope-badge scope-workspace">' + tWorkspace + '</span>' : '') + '</div>'
+                    + '<div class="mcp-server-name">' + escapeHtml(name) + ' <span class="settings-inline-tag">[' + escapeHtml(type) + ']</span>' + (item.scope === 'workspace' ? ' <span class="settings-scope-badge">' + tWorkspace + '</span>' : '') + '</div>'
                     + (detail ? '<div class="mcp-server-detail">' + escapeHtml(detail) + '</div>' : '')
                     + '</div><div class="mcp-server-actions">'
                     + '<button class="mcp-action-btn edit mcp-edit-btn" data-name="' + escapeAttr(name) + '" title="' + tEdit + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>'

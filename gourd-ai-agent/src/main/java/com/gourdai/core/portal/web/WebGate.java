@@ -33,6 +33,7 @@ import com.gourdai.ai.chat.message.ChatMessage;
 import com.gourdai.ai.chat.message.UserMessage;
 import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.permission.AccessMode;
 import com.gourdai.harness.change.FileChangeService;
 import com.gourdai.harness.command.Command;
 import com.gourdai.ai.util.CmdUtil;
@@ -494,9 +495,53 @@ public class WebGate extends SimpleWebSocketListener {
                                    UploadedFile[] attachments, String[] attachmentTypes,
                                    String hitlAction, String source, String clientMessageId,
                                    String questionAnswer, String actionId) {
+        return onChatInput(sessionId, sessionCwd, input, selectedModel, attachments, attachmentTypes,
+                hitlAction, source, clientMessageId, questionAnswer, actionId, null);
+    }
+
+    /**
+     * 受理聊天输入（含访问控制档位声明）。
+     *
+     * <p>accessMode 的语义与 selectedModel 一致：非空则以本轮声明为准（写入会话上下文权威存储位），
+     * 为空则回退会话已存档位。Web 前端每次输入可携带最新档位；Loop/IM 等不携带的调用方
+     * 走 null 分支，两者最终收敛到同一存储位（{@link AccessMode#CTX_KEY}）。</p>
+     *
+     * @param accessMode 本轮输入声明的访问控制档位（default / full；可为 null，回退会话已存档位）
+     * @return 受理结果，见 {@link InputResult}
+     */
+    public InputResult onChatInput(String sessionId,
+                                   String sessionCwd,
+                                   String input, String selectedModel,
+                                   UploadedFile[] attachments, String[] attachmentTypes,
+                                   String hitlAction, String source, String clientMessageId,
+                                   String questionAnswer, String actionId, String accessMode) {
+        return onChatInput(sessionId, sessionCwd, input, selectedModel, attachments, attachmentTypes,
+                hitlAction, source, clientMessageId, questionAnswer, actionId, accessMode, null, null);
+    }
+
+    /**
+     * 受理聊天输入（含已落盘附件引用）。
+     *
+     * <p>队列出队与插话降级重发这两条通道，手里只有会话内的相对路径而没有 File 对象——
+     * 附件早在「决定排队/插话」的那一刻就已落盘到 {@code <sessionDir>/uploads/}。
+     * 这里按路径把附件读回来，与 multipart 上传的附件汇入同一批 {@code imageBlocks} /
+     * {@code fileAttachments}，后续构建 Prompt 的逻辑完全共用，不存在第二套附件语义。</p>
+     *
+     * @param attachmentPaths     会话内相对路径清单（{@code uploads/xxx}），可为 null
+     * @param attachmentPathTypes 与路径一一对应的类型声明（{@code image} / {@code file}），可为 null
+     * @return 受理结果，见 {@link InputResult}
+     */
+    public InputResult onChatInput(String sessionId,
+                                   String sessionCwd,
+                                   String input, String selectedModel,
+                                   UploadedFile[] attachments, String[] attachmentTypes,
+                                   String hitlAction, String source, String clientMessageId,
+                                   String questionAnswer, String actionId, String accessMode,
+                                   List<String> attachmentPaths, List<String> attachmentPathTypes) {
         synchronized (inputLocks.computeIfAbsent(sessionId, k -> new Object())) {
             return doOnChatInput(sessionId, sessionCwd, input, selectedModel, attachments, attachmentTypes,
-                    hitlAction, source, clientMessageId, questionAnswer, actionId);
+                    hitlAction, source, clientMessageId, questionAnswer, actionId, accessMode,
+                    attachmentPaths, attachmentPathTypes);
         }
     }
 
@@ -505,7 +550,8 @@ public class WebGate extends SimpleWebSocketListener {
                                       String input, String selectedModel,
                                       UploadedFile[] attachments, String[] attachmentTypes,
                                       String hitlAction, String source, String clientMessageId,
-                                      String questionAnswer, String actionId) {
+                                      String questionAnswer, String actionId, String accessMode,
+                                      List<String> attachmentPaths, List<String> attachmentPathTypes) {
         AgentSession session = null;
         String streamRoot = null;
         try {
@@ -595,7 +641,7 @@ public class WebGate extends SimpleWebSocketListener {
                     }
                 }
                 // Resume streaming after HITL decision
-                performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName);
+                performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName, accessMode);
                 return InputResult.ACCEPTED;
             }
 
@@ -614,7 +660,7 @@ public class WebGate extends SimpleWebSocketListener {
                     LOG.warn("[WebGate] stale ask_user pending task for session {} (actionId={}): "
                             + "session is not suspended, degrading to a normal turn", sessionId, task.getActionId());
                     return recoverFromStaleQuestion(session, sessionId, sessionCwd, selectedModel, agentName,
-                            questionAnswer, task);
+                            questionAnswer, task, accessMode);
                 }
                 // 【校验】问答的后果可逆（答错题而已），且「无挂起任务时仍须回确认帧」是卡片不死的前提，
                 // 故不像 HITL 那样把 task==null 也当失败；仅在【两边都有 id 且不同】时拒绝，
@@ -651,7 +697,7 @@ public class WebGate extends SimpleWebSocketListener {
                 }
 
                 // Resume streaming after user answers
-                performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName);
+                performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName, accessMode);
                 return InputResult.ACCEPTED;
             }
 
@@ -659,16 +705,16 @@ public class WebGate extends SimpleWebSocketListener {
             List<ImageBlock> imageBlocks = new ArrayList<>();
             List<String> fileAttachments = new ArrayList<>();
 
+            // 附件根目录只解析一次：multipart 上传与「按路径引用已落盘附件」两条通道必须指向同一目录，
+            // 否则队列/插话延后发送时会读不到早先上传的那份文件。
+            File attachSessionDir = (sessionLocator != null)
+                    ? sessionLocator.resolveDir(sessionId, streamRoot)
+                    : new File(engine.getWorkspace());
+
             if (attachments != null) {
                 // 解析会话目录，作为附件存储根路径
-                java.nio.file.Path sessionDir;
-                if (sessionLocator != null) {
-                    sessionDir = sessionLocator.resolveDir(sessionId, streamRoot).toPath();
-                } else {
-                    // 降级：回退到工作区（兼容旧版本）
-                    sessionDir = java.nio.file.Paths.get(engine.getWorkspace());
-                }
-                
+                java.nio.file.Path sessionDir = attachSessionDir.toPath();
+
                 // 在会话目录下创建 uploads 子目录用于存放上传的文件
                 java.nio.file.Path uploadsDir = sessionDir.resolve("uploads");
                 try {
@@ -705,6 +751,13 @@ public class WebGate extends SimpleWebSocketListener {
                 }
             }
 
+            // 已落盘附件（队列出队 / 插话降级重发）：只有会话内相对路径，读回后与上传附件汇入同一批，
+            // 之后的 Prompt 构建、命令分发、空输入兜底全部共用，不存在第二套附件语义。
+            if (attachmentPaths != null && !attachmentPaths.isEmpty()) {
+                resolveAttachmentRefs(attachSessionDir, attachmentPaths, attachmentPathTypes,
+                        imageBlocks, fileAttachments);
+            }
+
             // Build input text with file attachment prefix
             if (!fileAttachments.isEmpty()) {
                 String filePrefix = fileAttachments.stream()
@@ -724,7 +777,7 @@ public class WebGate extends SimpleWebSocketListener {
 
                 // 命令分发
                 if (currentInput.startsWith("/") && imageBlocks.isEmpty()) {
-                    if (isCommand(session, sessionCwd, currentInput, selectedModel, agentName)) {
+                    if (isCommand(session, sessionCwd, currentInput, selectedModel, agentName, accessMode)) {
                         return InputResult.ACCEPTED;
                     }
                 }
@@ -760,7 +813,7 @@ public class WebGate extends SimpleWebSocketListener {
                         // 传入 sessionCwd 供恢复校准定位 TODO.md
                         engine.prepareResume(resumeTrace, session, currentInput, true, sessionCwd);
                         // 空 Prompt 触发库的恢复分支，复用已有工作记忆
-                        performAgentTaskAsync(session, sessionCwd, Prompt.of(), selectedModel, agentName);
+                        performAgentTaskAsync(session, sessionCwd, Prompt.of(), selectedModel, agentName, accessMode);
                         return InputResult.ACCEPTED;
                     }
                 }
@@ -778,7 +831,7 @@ public class WebGate extends SimpleWebSocketListener {
                 }
 
                 // 流式处理：输出通过 WebSocket 推送
-                performAgentTaskAsync(session, sessionCwd, prompt, selectedModel, agentName);
+                performAgentTaskAsync(session, sessionCwd, prompt, selectedModel, agentName, accessMode);
             }
         } catch (Exception e) {
             LOG.error("Task fail: {}", e.getMessage(), e);
@@ -823,11 +876,12 @@ public class WebGate extends SimpleWebSocketListener {
      * 既尊重放弃作答的意图，也不白烧 token。</p>
      *
      * @param staleTask 已失效的挂起任务（非 null）
+     * @param accessMode 本轮声明的访问控制档位（可为 null，回退会话已存档位）
      * @return 始终为 {@code ACCEPTED}：本次提交已被受理，只是语义从「恢复」降为「新一轮」
      */
     private InputResult recoverFromStaleQuestion(AgentSession session, String sessionId, String sessionCwd,
                                                  String selectedModel, String agentName,
-                                                 String questionAnswer, AskUserTask staleTask) {
+                                                 String questionAnswer, AskUserTask staleTask, String accessMode) {
         List<Map<String, Object>> questions = staleTask.getQuestions();
         AskUser.discardPending(session);
 
@@ -844,7 +898,7 @@ public class WebGate extends SimpleWebSocketListener {
         // 用户确实作了答：连同题面一并渲染成文本，模型才知道这是在回答哪一道问题
         String answerText = AskUser.formatAnswerText(questions, questionAnswer);
         session.updateSnapshot();
-        performAgentTaskAsync(session, sessionCwd, Prompt.of(answerText), selectedModel, agentName);
+        performAgentTaskAsync(session, sessionCwd, Prompt.of(answerText), selectedModel, agentName, accessMode);
         return InputResult.ACCEPTED;
     }
 
@@ -860,14 +914,29 @@ public class WebGate extends SimpleWebSocketListener {
      * @param prompt       用户输入的 Prompt（为 null 时表示 HITL 恢复等无需新 Prompt 的场景）
      * @param selectedModel 用户选择的 AI 模型标识
      * @param agentName    指定 Agent 名称（可为 null，表示使用默认 Agent）
+     * @param accessMode   本轮声明的访问控制档位（可为 null，回退会话已存档位）
      */
-    private void performAgentTaskAsync(AgentSession session, String sessionCwd, Prompt prompt, String selectedModel, String agentName) {
+    private void performAgentTaskAsync(AgentSession session, String sessionCwd, Prompt prompt, String selectedModel, String agentName, String accessMode) {
         String sessionId = session.getSessionId();
 
         if (selectedModel != null) {
             session.getContext().put(HarnessEngine.CTX_MODEL_SELECTED, selectedModel);
         } else {
             selectedModel = session.getContext().getAs(HarnessEngine.CTX_MODEL_SELECTED);
+        }
+
+        // 档位双通道（与上面 model 同逻辑）：传入非空则以本轮声明为准，写入权威存储位
+        // （会话上下文，随快照持久化）；为空则从会话上下文回读。
+        // 写入前统一 normalize：脏值 / 历史快照缺字段一律回落默认档（fail-safe）。
+        // 必须落库而非仅本地持有：WebStreamBuilder 会从会话上下文读取后经 toolContext 透传给工具链。
+        //
+        // 【口径钉死】这里<b>不校验</b> accessMode 合法性：非法值会被 normalize 回落默认档，
+        // 与「新会话/未声明者一律默认档」同语义，无需报错；显式拒绝只发生在
+        // /web/chat/access/select（用户主动切换档位却拼错时必须可感知，见 WebController#access_select）。
+        if (accessMode != null) {
+            session.getContext().put(AccessMode.CTX_KEY, AccessMode.normalize(accessMode).code());
+        } else {
+            accessMode = session.getContext().getAs(AccessMode.CTX_KEY);
         }
 
         // 模型回退告警：指定了模型却未命中（被删除/改名/禁用）时，底层会静默换成
@@ -1108,10 +1177,11 @@ public class WebGate extends SimpleWebSocketListener {
      * @param input        用户输入的完整文本（以 "/" 开头）
      * @param selectedModel 用户选择的 AI 模型标识
      * @param agentName    指定 Agent 名称
+     * @param accessMode   本轮声明的访问控制档位（透传给命令触发的 Agent 任务，可为 null）
      * @return true 表示输入已被识别为命令并执行，false 表示非命令输入
      * @throws Exception 命令执行过程中可能抛出的异常
      */
-    private boolean isCommand(AgentSession session, String sessionCwd, String input, String selectedModel, String agentName) throws Exception {
+    private boolean isCommand(AgentSession session, String sessionCwd, String input, String selectedModel, String agentName, String accessMode) throws Exception {
         if (!input.startsWith("/")) {
             return false;
         }
@@ -1137,7 +1207,7 @@ public class WebGate extends SimpleWebSocketListener {
                             model = selectedModel;
                         }
 
-                        performAgentTaskAsync(session, sessionCwd, Prompt.of(prompt), model, agentName);
+                        performAgentTaskAsync(session, sessionCwd, Prompt.of(prompt), model, agentName, accessMode);
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
@@ -1304,31 +1374,6 @@ public class WebGate extends SimpleWebSocketListener {
 
 
     /**
-     * Loop 专用：安全聊天输入入口，无限等待捕获本轮响应文本。
-     *
-     * <p>
-     * 适用于可能长时间执行的 Loop goal 任务。
-     * 该方法仍会向前端推送完整流式消息，同时等待响应流结束。
-     *
-     * @param sessionId  会话标识
-     * @param input      用户输入文本
-     * @param source     调用来源标识
-     * @return 捕获到的 AI 文本；会话繁忙或无文本时返回 null
-     */
-    public String safeChatInputAndCaptureLoop(String sessionId, String input, String source) {
-        return safeChatInputAndCaptureLoop(sessionId, null, input, source);
-    }
-
-    /**
-     * Loop 专用：带所属工作空间根的安全聊天输入入口。
-     *
-     * @param projectRoot 会话所属工作空间根绝对路径（可为 null，回退默认工作区）
-     */
-    public String safeChatInputAndCaptureLoop(String sessionId, String projectRoot, String input, String source) {
-        return safeChatInputAndCaptureLoop(sessionId, projectRoot, null, input, source, null, null, null);
-    }
-
-    /**
      * Loop 专用：带完整执行上下文（工作空间 / 模型 / 思考档位 / 上下文窗口）的安全聊天输入入口。
      *
      * <p>模型与思考档位按「任务定义」生效且<b>不写入会话上下文</b>：定时任务可能复用
@@ -1448,17 +1493,143 @@ public class WebGate extends SimpleWebSocketListener {
     //  工具方法 —— 附件类型判断与 MIME 映射
     // ═══════════════════════════════════════════════════════════════
 
+    /** 附件在会话目录内的存放子目录名，也是相对路径的唯一合法前缀。 */
+    static final String UPLOADS_DIR = "uploads";
+
     /** 支持的图片扩展名集合 */
     private static final Set<String> IMAGE_EXTENSIONS = org.noear.solon.Utils.asSet(".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg");
 
     /**
+     * 校验并规范化「会话内附件相对路径」。
+     *
+     * <p>只接受 {@code uploads/<简单文件名>} 这一种形态：文件名里出现任何目录分隔符或 {@code ..}
+     * 都直接判非法，因此不存在穿出会话目录的可能，也无需再做 startsWith 兜底比对。
+     * 队列（queue.json）与插话（steer）两条延后通道都要拿用户可控的字符串去读盘，统一走这里。</p>
+     *
+     * @param path 待校验的相对路径
+     * @return 合法时原样返回，非法时返回 null
+     */
+    static String sanitizeAttachmentPath(String path) {
+        if (path == null) return null;
+        String p = path.trim();
+        String prefix = UPLOADS_DIR + "/";
+        if (!p.startsWith(prefix)) return null;
+        String name = p.substring(prefix.length());
+        if (name.isEmpty() || name.contains("/") || name.contains("\\") || name.contains("..")) return null;
+        return p;
+    }
+
+    /**
+     * 把上传的附件落盘到会话 uploads 目录，返回可供队列与插话引用的相对路径清单。
+     *
+     * <p>与发送主链路（{@link #doOnChatInput}）共用同一目录、同一命名与安全校验，
+     * 因此「先落盘再延后发送」与「立即发送」最终读到的是同一个文件。落盘本身不发起模型调用，
+     * 任务执行中也能安全调用。</p>
+     *
+     * @return 与入参顺序一致的清单，元素含 path / type / name / size；非法文件名的条目直接跳过
+     */
+    List<Map<String, Object>> saveAttachments(String sessionId, String sessionCwd,
+                                              UploadedFile[] files, String[] types) throws java.io.IOException {
+        List<Map<String, Object>> saved = new ArrayList<>();
+        if (files == null || files.length == 0) return saved;
+
+        java.nio.file.Path uploadsDir = resolveSessionDir(sessionId, sessionCwd).toPath().resolve(UPLOADS_DIR);
+        try {
+            java.nio.file.Files.createDirectories(uploadsDir);
+        } catch (java.io.IOException e) {
+            LOG.warn("[WebGate] failed to create uploads directory: {}", uploadsDir, e);
+            uploadsDir = uploadsDir.getParent();
+        }
+
+        java.nio.file.Path uploadsRoot = uploadsDir.toAbsolutePath().normalize();
+        for (int i = 0; i < files.length; i++) {
+            UploadedFile file = files[i];
+            if (file == null) continue;
+            String fileName = file.getName();
+            if (fileName == null || fileName.contains("..") || fileName.contains("/") || fileName.contains("\\")) {
+                LOG.warn("[WebGate] rejected unsafe attachment name for session {}: {}", sessionId, fileName);
+                continue;
+            }
+            String type = (types != null && i < types.length) ? types[i] : null;
+            String ext = "." + file.getExtension();
+            java.nio.file.Path savePath = uploadsRoot.resolve(fileName);
+            if (!savePath.startsWith(uploadsRoot)) {
+                LOG.warn("[WebGate] attachment escaped uploads dir for session {}: {}", sessionId, fileName);
+                continue;
+            }
+            java.nio.file.Files.copy(file.getContent(), savePath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+
+            boolean image = isImageAttachment(ext, type);
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("path", UPLOADS_DIR + "/" + fileName);
+            item.put("type", image ? "image" : "file");
+            item.put("name", fileName);
+            item.put("size", java.nio.file.Files.size(savePath));
+            saved.add(item);
+        }
+        return saved;
+    }
+
+    /**
+     * 解析「已落盘附件」引用：按声明类型分流为图片块与路径引用。
+     *
+     * <p>供三条延后通道复用（队列出队、插话注入、按路径重发）：它们手里只有相对路径，
+     * 拿不到浏览器内存中的 File 对象。类型必须由调用方声明而不能按扩展名猜——
+     * 前端允许把一张 png 当普通文件引用发送（{@code attachmentsType='file'}），
+     * 按扩展名判定会把这种附件错误升级成多模态图片。</p>
+     *
+     * <p>读盘失败或文件已被清理时只跳过该附件并留痕，不整条失败：文本部分对用户仍然有效。</p>
+     *
+     * @param sessionDir  会话目录
+     * @param paths       相对路径清单（{@code uploads/xxx}）
+     * @param types       与 paths 一一对应的类型声明（{@code image} / {@code file}），可为 null（全按文件处理）
+     * @param imageBlocks 输出参数：图片块按序追加
+     * @param fileRefs    输出参数：按路径引用的附件相对路径按序追加
+     */
+    static void resolveAttachmentRefs(File sessionDir, List<String> paths, List<String> types,
+                                      List<ImageBlock> imageBlocks, List<String> fileRefs) {
+        if (paths == null || paths.isEmpty() || sessionDir == null) return;
+        java.nio.file.Path uploadsRoot = sessionDir.toPath().resolve(UPLOADS_DIR).toAbsolutePath().normalize();
+
+        for (int i = 0; i < paths.size(); i++) {
+            String path = sanitizeAttachmentPath(paths.get(i));
+            if (path == null) {
+                LOG.warn("[WebGate] skipped malformed attachment path: {}", paths.get(i));
+                continue;
+            }
+            java.nio.file.Path file = uploadsRoot.resolve(path.substring(UPLOADS_DIR.length() + 1));
+            if (!file.startsWith(uploadsRoot) || !java.nio.file.Files.exists(file)) {
+                LOG.warn("[WebGate] attachment missing under uploads dir, skipped: {}", path);
+                continue;
+            }
+            String declared = (types != null && i < types.size()) ? types.get(i) : null;
+            String name = file.getFileName().toString();
+            String ext = name.contains(".") ? name.substring(name.lastIndexOf('.')).toLowerCase() : "";
+
+            if (!isImageAttachment(ext, declared)) {
+                fileRefs.add(path);
+                continue;
+            }
+            try {
+                byte[] bytes = java.nio.file.Files.readAllBytes(file);
+                imageBlocks.add(ImageBlock.ofBase64(Base64.getEncoder().encodeToString(bytes), extensionToMime(ext)));
+            } catch (java.io.IOException e) {
+                LOG.warn("[WebGate] failed to read attachment {}, skipped: {}", path, e.getMessage());
+            }
+        }
+    }
+
+    /**
      * 判断附件是否为图片类型。
+     *
+     * <p>包内可见：独立上传端点与插话注入要与发送主链路用同一口径判定，
+     * 否则同一张图在「立即发送」与「排队后发送」两条路径上会被分别当成图片和文件。</p>
      *
      * @param ext             文件扩展名（含点号，如 ".png"）
      * @param attachmentsType 前端传递的附件类型标识（如 "image"）
      * @return true 表示该附件应作为图片处理
      */
-    private static boolean isImageAttachment(String ext, String attachmentsType) {
+    static boolean isImageAttachment(String ext, String attachmentsType) {
         return "image".equals(attachmentsType) && IMAGE_EXTENSIONS.contains(ext);
     }
 
@@ -1468,7 +1639,7 @@ public class WebGate extends SimpleWebSocketListener {
      * @param ext 文件扩展名（含点号，如 ".jpg"）
      * @return 对应的 MIME 类型字符串，未匹配时默认返回 "image/png"
      */
-    private static String extensionToMime(String ext) {
+    static String extensionToMime(String ext) {
         switch (ext) {
             case ".jpg":
             case ".jpeg":
@@ -1564,17 +1735,33 @@ public class WebGate extends SimpleWebSocketListener {
     }
 
     /**
-     * 受理一条即时插话请求。
+     * 受理一条即时插话请求（纯文本）。
+     *
+     * @see #steer(String, String, String, String, java.util.List, java.util.List)
+     */
+    public String steer(String sessionId, String expectedRunId, String steerId, String text) {
+        return steer(sessionId, expectedRunId, steerId, text, null, null);
+    }
+
+    /**
+     * 受理一条即时插话请求（可带已落盘附件）。
      *
      * <p>必须在 {@link #inputLocks} 下调用，保证 busy 检查与 offer 原子。</p>
+     *
+     * <p>附件在这里只存【相对路径】而不读字节：插话邮箱最多滞留 {@code MAX_BOX_SIZE} 条，
+     * 缓存 base64 图片会有内存风险；真正读盘发生在 {@link SteerInterceptor} 注入工作记忆的那一刻，
+     * 读不到的附件由那里跳过并留痕。</p>
      *
      * @param sessionId 会话 ID
      * @param expectedRunId 前端期望的当前 runId（防迟到插话进入下一 run）
      * @param steerId 客户端幂等 ID
-     * @param text 插话文本（已校验非空且长度不超限）
-     * @return 语义结果："accepted" / "not_running" / "turn_changed" / "box_full" / "duplicate"
+     * @param text 插话文本（可为空，此时必须带附件）
+     * @param imagePaths 作为多模态图片注入的附件路径（{@code uploads/xxx}），可为 null
+     * @param filePaths  作为路径引用的附件路径，可为 null
+     * @return 语义结果："accepted" / "not_running" / "turn_changed" / "box_full" / "duplicate" / "empty"
      */
-    public String steer(String sessionId, String expectedRunId, String steerId, String text) {
+    public String steer(String sessionId, String expectedRunId, String steerId, String text,
+                        java.util.List<String> imagePaths, java.util.List<String> filePaths) {
         synchronized (inputLocks.computeIfAbsent(sessionId, k -> new Object())) {
             try {
                 AgentSession session = engine.getSession(sessionId);
@@ -1589,13 +1776,40 @@ public class WebGate extends SimpleWebSocketListener {
                 }
                 if (state.pending.containsKey(steerId)) return "duplicate";
                 if (state.pending.size() >= SteerInterceptor.MAX_BOX_SIZE) return "box_full";
-                state.pending.put(steerId, new SteerEnvelope(steerId, text, activeRunId, System.currentTimeMillis()));
+
+                java.util.List<String> images = sanitizePaths(sessionId, imagePaths);
+                java.util.List<String> files = sanitizePaths(sessionId, filePaths);
+                boolean hasText = text != null && !text.trim().isEmpty();
+                if (!hasText && images.isEmpty() && files.isEmpty()) return "empty";
+
+                state.pending.put(steerId, new SteerEnvelope(steerId, hasText ? text : "",
+                        activeRunId, System.currentTimeMillis(), images, files));
                 return "accepted";
             } catch (Exception e) {
-                LOG.error("[WebGate] steer failed for session {}: {}", sessionId, e.getMessage());
+                LOG.error("[WebGate] steer failed for session {}: {}", sessionId, e.getMessage(), e);
                 return "not_running";
             }
         }
+    }
+
+    /**
+     * 过滤并规范化插话携带的附件路径。
+     *
+     * <p>非法路径（非 {@code uploads/<简单文件名>} 形态）直接丢弃并留痕，不整条拒绝插话——
+     * 文本部分对用户仍然有效，为一条坏路径吞掉整句插话得不偿失。</p>
+     */
+    private static java.util.List<String> sanitizePaths(String sessionId, java.util.List<String> paths) {
+        if (paths == null || paths.isEmpty()) return java.util.Collections.emptyList();
+        java.util.List<String> ok = new ArrayList<>(paths.size());
+        for (String raw : paths) {
+            String path = sanitizeAttachmentPath(raw);
+            if (path == null) {
+                LOG.warn("[WebGate] steer attachment path rejected for session {}: {}", sessionId, raw);
+                continue;
+            }
+            ok.add(path);
+        }
+        return ok;
     }
 
     /** 注册新 run；旧 run 残留被明确 cancelled，且旧回调之后无法清理新 run。 */
@@ -1648,23 +1862,34 @@ public class WebGate extends SimpleWebSocketListener {
     }
 
     /**
+     * 解析会话存储目录（Web 侧旁路落盘的权威口径）。
+     *
+     * <p>优先用本轮已登记的流根 {@link #streamRoots}（run 进行中它就是附件与 queue.json 的落点），
+     * 其次用调用方透传的工作空间根，最后交给 {@link SessionLocator} 的持久化登记表兜底。</p>
+     */
+    File resolveSessionDir(String sessionId, String sessionCwd) {
+        String root = streamRoots.get(sessionId);
+        if (Assert.isEmpty(root)) root = sessionCwd;
+        if (sessionLocator != null) {
+            return sessionLocator.resolveDir(sessionId, root);
+        }
+        return java.nio.file.Paths.get(engine.getWorkspace(), engine.getHarnessSessions(), sessionId)
+                .toAbsolutePath().normalize().toFile();
+    }
+
+    /**
      * 把未生效的插话原子、幂等地降级为持久化队列消息。
      */
     void persistDroppedSteers(String sessionId, java.util.List<SteerEnvelope> items) {
         if (items == null || items.isEmpty()) return;
         try {
-            java.io.File sessionDir;
-            String root = streamRoots.get(sessionId);
-            if (sessionLocator != null) {
-                sessionDir = sessionLocator.resolveDir(sessionId, root);
-            } else {
-                sessionDir = java.nio.file.Paths.get(engine.getWorkspace(), engine.getHarnessSessions(), sessionId)
-                        .toAbsolutePath().normalize().toFile();
-            }
+            java.io.File sessionDir = resolveSessionDir(sessionId, null);
             QueueFileHelper helper = new QueueFileHelper();
             for (SteerEnvelope item : items) {
-                helper.add(sessionDir, item.getText(), java.util.Collections.emptyList(),
-                        java.util.Collections.emptyList(), item.getSteerId());
+                // 附件路径随插话一起降级：插话没赶上任务结束时，队列消费仍能带上原附件，
+                // 否则用户上传的图片会在「插话 → 转队列」这一跳里静默消失。
+                helper.add(sessionDir, item.getText(), item.getImagePaths(),
+                        item.getFilePaths(), item.getSteerId());
             }
         } catch (Throwable e) {
             LOG.error("[WebGate] persist dropped steer failed for session {}: {}", sessionId, e.getMessage(), e);

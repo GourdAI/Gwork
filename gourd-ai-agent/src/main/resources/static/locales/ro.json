@@ -12,7 +12,13 @@
                       "steer_deferred":  "Pasul curent s-a încheiat; adăugat în coadă",
                       "steer_failed":  "Trimiterea intervenției a eșuat; textul a fost păstrat",
                       "force_finished":  "Execuția s-a încheiat deja (server inactiv); fluxul a fost închis automat",
-                      "steer_attachment_wait":  "Atașamentele nu pot fi intervenite sau puse în coadă în timpul unei sarcini. Așteptați sau opriți sarcina",
+                      "attachment_uploading":  "Se încarcă atașamentele, așteptați",
+                      "attachment_upload_failed":  "Încărcarea atașamentelor a eșuat. Textul a fost păstrat, încercați din nou",
+                      "attachment_changed":  "Textul s-a modificat în timpul încărcării. Această trimitere a fost anulată, trimiteți din nou",
+                      "queued_with_attachments":  "Adăugat în coadă (cu atașamente)",
+                      "steer_accepted_with_attachments":  "Intervenția a fost primită (cu atașamente) și va fi aplicată la pasul următor",
+                      "queue_failed":  "Adăugarea în coadă a eșuat. Textul a fost păstrat, încercați din nou",
+                      "command_attachment_unsupported":  "Comenzile nu pot avea atașamente. Eliminați-le și apăsați Tab pentru a le adăuga în coadă",
                       "steer_command_queue":  "Comenzile nu pot fi folosite ca intervenție. Apăsați Tab pentru a le adăuga în coadă",
                       "steer_dropped":  "Intervenția nu s-a aplicat înainte de final și a fost adăugată în coadă",
                       "steer_expand_full":  "Afișează tot ({0} caractere)",
@@ -134,7 +140,26 @@
                  "confirm":  "Confirmare"
              },
     "app":  {
-                "boot_error":  "Eșec la pornire",
+                                "access_title":  "Permisiuni de acces",
+                "access_default":  "Acces implicit",
+                "access_full":  "Acces complet",
+                "access_default_desc":  "Spațiu izolat; comenzile periculoase necesită aprobare",
+                "access_full_desc":  "Spațiu și comenzi libere (pe răspunderea dvs.)",
+                "access_confirm_title":  "Permiteți accesul complet?",
+                "access_confirm_desc":  "În accesul complet, IA nu mai este limitată de izolarea spațiului sau aprobarea comenzilor:",
+                "access_risk_file":  "Operații cu fișiere",
+                "access_risk_file_desc":  "Citirea/scrierea oricărui fișier din afara spațiului, inclusiv fișiere de sistem",
+                "access_risk_cmd":  "Comenzi de terminal",
+                "access_risk_cmd_desc":  "Comenzi fără aprobare individuală; ștergerea sau suprascrierea e imediată",
+                "access_risk_net":  "Acces la internet",
+                "access_risk_net_desc":  "Orice adresă de rețea accesibilă; risc de scurgere de date sau descărcări necunoscute",
+                "access_ack":  "Înțeleg riscurile și îmi asum responsabilitatea pentru securitatea datelor mele",
+                "access_allow":  "Permite accesul complet",
+                "access_cancel":  "Anulează",
+                "access_toast_default":  "Comutat la acces implicit",
+                "access_toast_full":  "Comutat la acces complet",
+                "access_failed":  "Comutarea a eșuat; modul anterior a fost restaurat",
+"boot_error":  "Eșec la pornire",
                 "project_view":  "Vizualizare proiect",
                 "review_view":  "Recenzie cod",
                 "terminal_shortcut":  "Scurtătură terminal",
@@ -152,7 +177,6 @@
                 "history_scope_global":  "Conversații globale",
                 "history_scope_project":  "Conversații de proiect",
                 "welcome_title":  "Bună, sunt GWork!",
-                "welcome_sub":  "Cum vă pot ajuta?",
                 "drop_attach":  "Eliberați pentru a atașa fișiere",
                 "thinking_label":  "Gândește",
                 "context_label":  "Context",
@@ -233,11 +257,38 @@
                                 "rename_project":  "Redenumește proiectul",
                                 "rename_failed":  "Redenumire eșuată",
                                 "model_config":  "Configurare modele",
-                   "memory":  "Memorie"
+                   "memory":  "Memorie",
+                   "update_now":  "Actualizează",
+                   "update_download":  "Descarcă",
+                   "update_downloading":  "Se descarcă",
+                   "update_install":  "Instalează",
+                   "update_tooltip":  "Versiune nouă {0} disponibilă — click pentru a actualiza",
+                   "update_tooltip_downloading":  "Se descarcă versiunea nouă {0}",
+                   "update_tooltip_downloaded":  "Versiunea {0} este gata — click pentru a instala și reporni"
                             }
             },
     "settings":  {
-                     "common":  {
+                     "appearance": {
+                         "title": "Aspect",
+                         "desc": "Mod luminos/întunecat și paleta temei. Modificările se aplică imediat și se salvează local",
+                         "mode": {
+                             "title": "Mod luminos/întunecat",
+                             "system": "Sistem",
+                             "light": "Luminos",
+                             "dark": "Întunecat"
+                         },
+                         "themes": {
+                             "title": "Toate temele"
+                         },
+                         "theme": {
+                             "graphite": "Grafit",
+                             "teal": "Jad",
+                             "clay": "Argilă",
+                             "sky": "Cer",
+                             "indigo": "Indigo clasic"
+                         }
+                     },
+"common":  {
                                     "back":  "Înapoi",
                                     "close":  "Închide",
                                     "delete":  "Șterge",
@@ -248,8 +299,8 @@
                      "title":  "Setări",
                      "tabs":  {
                                   "general":  "Setări generale",
+                                  "appearance": "Aspect",
                                   "permission":  "Permisiuni",
-                                  "mounts":  "Montări",
                                   "mcp":  "Configurare MCP",
                                   "openapi":  "Configurare OpenAPI",
                                   "lsp":  "Configurare LSP",
@@ -296,11 +347,6 @@
                                                       "desc":  "Selectați limba de afișare a interfeței, modificările devin active după reîmprospătare",
                                                       "name":  "Limba interfeței"
                                                   },
-                                     "appearance":  {
-                                                        "title":  "Aspect",
-                                                        "theme_name":  "Culoarea temei",
-                                                        "theme_desc":  "Comutare tema interfeței între întunecat și luminos"
-                                                    },
                                      "conversation":  {
                                                           "title":  "Comprimarea contextului",
                                                           "history_window":  "Dimensiunea ferestrei de istoric",
@@ -315,12 +361,6 @@
                                                           "intent_chain_desc":  "Păstrează la comprimare un index compact al cererilor anterioare ale utilizatorului (cost foarte mic), pentru ca agentul să nu revină la obiective deja finalizate",
                                                           "hint":  "Fereastra de istoric: câte mesaje finale rămân mereu necomprimate.\nIeșire rezervată: spațiul absolut pentru următorul răspuns al modelului; punct de declanșare = fereastra modelului − rezerva − bufferul de tură.\nPrag de compresie: doar declanșează MAI DEVREME (se aplică cea mai mică dintre cele două); 100 înseamnă fără devansare suplimentară.\nȚintă de compresie: cât de adânc comprimă o dată — cu cât valoarea e mai mare, cu atât compresia e mai superficială și declanșările mai frecvente"
                                                       },
-                                     "sandbox":  {
-                                                     "title":  "Mod sandbox",
-                                                     "desc":  "Comenzile executate de IA rulează într-un mediu sandbox restricționat (doar citire/scriere de fișiere în \u0027Spațiu de lucru\u0027 și \u0027Montări\u0027)",
-                                                     "allow_home":  "Permiteți accesul la directorul home al utilizatorului în sandbox (`~/`, ex. `~/.m2`)",
-                                                     "system_restrict":  "Aplicați restricții sandbox mai stricte la nivel de kernel; dezactivarea le slăbește (pentru teste)"
-                                                 },
                                      "memory":  {
                                                     "title":  "Memorie cognitivă",
                                                     "enabled_desc":  "Păstrarea memoriei pe termen lung între sesiuni; dezactivarea reduce consumul de context",
@@ -390,48 +430,9 @@
                                     "installed_tab":  "Instalate",
                                     "uninstall":  "Dezinstalează",
                                     "uninstall_confirm":  "Dezinstalezi skill-ul \"{0}\"? Directorul local al skill-ului va fi șters.",
+                                    "scope_global":  "Global",
+                                    "scope_workspace":  "This Project",
                                     "market_tab":  "Piața de Skills"
-                                },
-                     "mounts":  {
-                                    "title":  "Spațiu de montare",
-                                    "desc":  "Gestionarea mapării directoarelor locale pentru încărcarea abilităților și resurselor IA",
-                                    "add":  "Adăugare montare",
-                                    "add_title":  "Adăugare montare",
-                                    "edit_title":  "Editare montare",
-                                    "alias":  "Nume",
-                                    "alias_placeholder":  "@my-mount",
-                                    "scope":  "Domeniu",
-                                    "scope_workspace":  "Spațiu de lucru (local)",
-                                    "type":  "Tip conținut",
-                                    "type_skills":  "Abilități (SKILLS)",
-                                    "type_agents":  "Agenți (AGENTS)",
-                                    "type_files":  "Fișiere (FILES)",
-                                    "path":  "Cale de mapare",
-                                    "path_placeholder":  "~/.myapp/skills/",
-                                    "path_hint":  "Calea locală a fișierelor (suportă \u0027./\u0027 spațiu de lucru și \u0027~/\u0027 director utilizator)",
-                                    "writeable":  "Deschidere permisiune scriere",
-                                    "description":  "Descriere (opțional)",
-                                    "description_placeholder":  "Descriere scurtă a scopului acestei montări",
-                                    "presets_label":  "Opțiuni comune de montare",
-                                    "skills_list_title":  "Listă pachete de abilități",
-                                    "agents_list_title":  "Listă sub-agenți",
-                                    "files_list_title":  "Listă fișiere",
-                                    "system":  "Sistem",
-                                    "skill_pkg":  "Pachet de abilități",
-                                    "content_list":  "Listă de conținut",
-                                    "open_dir":  "Deschidere director",
-                                    "preset_skills":  "Abilități spațiu de lucru",
-                                    "preset_skillhub":  "Centru de abilități",
-                                    "preset_agents_skills":  "Abilități sub-agents",
-                                    "preset_opencode_skills":  "Abilități OpenCode",
-                                    "preset_claude_skills":  "Abilități Claude",
-                                    "alias_label":  "Nume",
-                                    "scope_label":  "Domeniu",
-                                    "type_label":  "Tip conținut",
-                                    "path_label":  "Cale de mapare",
-                                    "writeable_label":  "Permisiune de scriere",
-                                    "description_label":  "Descriere",
-                                    "skills_list":  "Listă de abilități"
                                 },
                      "mcp":  {
                                  "title":  "Servere MCP",
@@ -577,8 +578,6 @@
                                        "model_list_api_label":  "Interfață listă modele",
                                        "api_url_label":  "Adresă API",
                                        "api_key_label":  "Cheie API",
-                                       "get_api_key_link":  "Obținere cheie API",
-                                       "api_key_hint_suffix":  "（10$ credit gratuit de abonament lunar）",
                                        "timeout_label":  "Timp de așteptare",
                                        "models_label":  "Modele",
                                        "empty_hint":  "Niciun model deocamdată, faceți clic pentru a adăuga sau extrageți din API",
@@ -614,7 +613,6 @@
                                        "name_label":  "Nume",
                                         "scope_label":  "Domeniu",
                                         "view_title":  "Setări modele",
-                                        "builtin_group":  "Integrate",
                                         "custom_group":  "Furnizori personalizați",
                                         "add_provider_title":  "Adăugare furnizor de modele",
                                         "add_provider_desc":  "Configurați un endpoint API complet personalizat și un model inițial"
@@ -841,11 +839,15 @@
                  "question_skip":  "Omite",
                  "question_next":  "Următorul",
                  "question_submit":  "Trimite",
-                 "question_recommended":  "(Recomandat)",
+                 "question_recommended":  "Recomandat",
+                 "question_detail_expand":  "Extinde",
+                 "question_detail_collapse":  "Restrânge",
+                 "question_record_title":  "Răspunsul meu",
                  "question_answered":  "Trimis",
                  "question_skipped":  "Omis",
                  "question_close":  "Închide",
                  "question_attachment_wait":  "Nu pot fi trimise atașamente cât timp există o întrebare în așteptare. Răspundeți sau omiteți mai întâi",
+                 "question_attachment_queued":  "Răspunsul a fost completat. Atașamentele au fost puse în coadă și vor fi trimise după acest tur",
                  "question_supplement":  "Adaugă o precizare… (păstrată împreună cu alegerea ta)",
                  "question_supplement_placeholder":  "Scrie o precizare, apasă Enter pentru a confirma…",
                  "batch_tool":  "Lot",
@@ -1173,6 +1175,11 @@
                         "saved_desc":  "Comută între spațiul de lucru și global pentru a vedea amintirile salvate"
                     },
     "file_changes": {
+        "edited_files": "{count} fișiere editate",
+        "show_more_files": "Afișează încă {count} fișiere",
+        "collapse_files": "Pliază",
+        "run_list_title": "Fișiere modificate în această rulare",
+        "back_to_list": "Înapoi la listă",
         "title": "Fișiere modificate în această rulare",
         "summary": "{count} fișiere",
         "review": "Revizuire",

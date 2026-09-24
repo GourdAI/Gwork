@@ -2,6 +2,8 @@ package com.gourdai.core.portal.web;
 
 import com.gourdai.agent.react.AbsReActInterceptor;
 import com.gourdai.agent.react.ReActTrace;
+import com.gourdai.ai.chat.content.ContentBlock;
+import com.gourdai.ai.chat.content.ImageBlock;
 import com.gourdai.ai.chat.message.AssistantMessage;
 import com.gourdai.ai.chat.message.ChatMessage;
 import com.gourdai.ai.chat.message.ToolMessage;
@@ -10,6 +12,9 @@ import org.noear.solon.lang.Preview;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -52,12 +57,68 @@ public final class SteerInterceptor extends AbsReActInterceptor {
         // WebGate 在 session inputLock 内完成 RUNNING 校验、摘取、注入和 applied 事件发布。
         // Stop/结束与该操作共享同一锁，因此不会出现 Stop 后仍 applied。
         webGate.applySteers(trace.getSession(), trace.getRunId(), items -> {
+            // 会话目录只在确有附件时解析一次：纯文本插话是高频路径，不该为它做文件系统探测。
+            File sessionDir = null;
             for (SteerEnvelope item : items) {
-                trace.getWorkingMemory().addMessage(ChatMessage.ofUser(STEER_PREFIX + item.getText()));
-                LOG.info("[Steer] applied: session={}, runId={}, steerId={}",
-                        trace.getSession().getSessionId(), trace.getRunId(), item.getSteerId());
+                if (item.hasAttachments()) {
+                    sessionDir = webGate.resolveSessionDir(trace.getSession().getSessionId(), null);
+                    break;
+                }
+            }
+            for (SteerEnvelope item : items) {
+                ChatMessage message = buildSteerMessage(sessionDir, item);
+                if (message == null) {
+                    // 无文本且附件全部读失败：注入一条空消息只会污染工作记忆，跳过。
+                    // applied 事件照常发布，否则前端会一直等这条插话的结果。
+                    LOG.warn("[Steer] skipped empty injection: session={}, steerId={}",
+                            trace.getSession().getSessionId(), item.getSteerId());
+                    continue;
+                }
+                trace.getWorkingMemory().addMessage(message);
+                LOG.info("[Steer] applied: session={}, runId={}, steerId={}, images={}, files={}",
+                        trace.getSession().getSessionId(), trace.getRunId(), item.getSteerId(),
+                        item.getImagePaths().size(), item.getFilePaths().size());
             }
         });
+    }
+
+    /**
+     * 把一条插话信封组装成待注入的用户消息（可含图片块）。
+     *
+     * <p>组装口径与发送主链路一致：文件附件以 {@code [附件: 路径]} 前缀呈现，图片走多模态块；
+     * 文本为空时沿用主链路的图片兜底文案，避免出现一条只有前缀没有内容的插话。</p>
+     *
+     * @return 可注入的消息；文本为空且附件全部不可读时返回 null
+     */
+    private ChatMessage buildSteerMessage(File sessionDir, SteerEnvelope item) {
+        List<ImageBlock> images = new ArrayList<>();
+        List<String> fileRefs = new ArrayList<>();
+        if (sessionDir != null && item.hasAttachments()) {
+            WebGate.resolveAttachmentRefs(sessionDir, item.getImagePaths(),
+                    Collections.nCopies(item.getImagePaths().size(), "image"), images, fileRefs);
+            WebGate.resolveAttachmentRefs(sessionDir, item.getFilePaths(),
+                    Collections.nCopies(item.getFilePaths().size(), "file"), images, fileRefs);
+        }
+
+        StringBuilder buf = new StringBuilder();
+        for (String ref : fileRefs) {
+            buf.append("[附件: ").append(ref).append("]\n");
+        }
+        String text = item.getText();
+        if (text != null) {
+            buf.append(text.trim());
+        }
+
+        String content = buf.toString().trim();
+        if (content.isEmpty()) {
+            if (images.isEmpty()) return null;
+            content = images.size() > 1 ? "请描述这些图片" : "请描述这张图片";
+        }
+        if (images.isEmpty()) {
+            return ChatMessage.ofUser(STEER_PREFIX + content);
+        }
+        List<ContentBlock> blocks = new ArrayList<>(images);
+        return ChatMessage.ofUser(STEER_PREFIX + content, blocks);
     }
 
     @Override

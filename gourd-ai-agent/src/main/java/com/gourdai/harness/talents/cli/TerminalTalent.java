@@ -25,8 +25,9 @@ import com.gourdai.ai.sandbox.SandboxLog;
 import com.gourdai.ai.sandbox.SandboxViolationStore;
 import com.gourdai.ai.sandbox.config.FilesystemConfig;
 import com.gourdai.ai.sandbox.config.SandboxRuntimeConfig;
-import com.gourdai.ai.talents.mount.MountDir;
-import com.gourdai.ai.talents.mount.MountManager;
+import com.gourdai.ai.talents.registry.TalentRegistry;
+import com.gourdai.harness.permission.AccessMode;
+import com.gourdai.harness.permission.AccessPolicy;
 import org.noear.solon.annotation.Param;
 import org.noear.solon.core.util.Assert;
 
@@ -65,7 +66,7 @@ public class TerminalTalent extends AbsTalent {
     private final ShellMode shellMode;
     private final TerminalSupport support;
 
-    //沙盒模式：只能访问相对路径或逻辑路径；（否则为）开放模式：可以访问绝对路径
+    //沙盒模式：只能访问相对路径（及框架受信只读目录）；（否则为）开放模式：可以访问绝对路径
     private boolean sandboxEnabled = true;
     //允许访问用户主目录（~ 路径）。仅在 sandboxEnabled=true 时有意义；默认 true 保持向后兼容
     private boolean sandboxAllowUserHome = true;
@@ -73,7 +74,7 @@ public class TerminalTalent extends AbsTalent {
     //关闭后仅依赖 Java 层自保护 + 系统提示词软约束，可减少误伤（如构建工具被拦截）。
     //仅在 sandboxEnabled=true 时有意义；默认 false（轻量模式）
     private boolean sandboxSystemRestrict = false;
-    private final MountManager mountManager; // 引入挂载管理器
+    private final TalentRegistry talentRegistry; // 技能/代理注册表（取代已移除的挂载管理器）
     private @Nullable SandboxRuntimeConfig sandboxConfig;
     private final ReentrantLock sandboxInitLock = new ReentrantLock();
     private final SandboxViolationStore violationStore = new SandboxViolationStore(Collections.emptyMap());
@@ -160,6 +161,50 @@ public class TerminalTalent extends AbsTalent {
         }
     }
 
+    /**
+     * 折算本轮的空间隔离开关（是否强制限制在工作区之内）。
+     *
+     * <p>档位与「本类的沙盒开关」是<b>与</b>关系：档位是会话级的用户选择，
+     * 字段是嵌入方的全局兜底。任一方要求隔离，隔离就生效（fail-safe）。</p>
+     */
+    boolean spaceIsolated(String __accessMode) {
+        return AccessPolicy.isSpaceIsolated(AccessMode.normalize(__accessMode)) && sandboxEnabled;
+    }
+
+    /**
+     * 折算本轮的主目录可达性（{@code ~} 路径）。
+     */
+    boolean userHomeAllowed(String __accessMode) {
+        return AccessPolicy.isUserHomeAllowed(AccessMode.normalize(__accessMode)) && sandboxAllowUserHome;
+    }
+
+    /**
+     * 折算本轮的内核级沙盒开关（是否用 OS 内核强制隔离）。
+     *
+     * <p>与 {@link #spaceIsolated(String)} 同构：档位与嵌入方全局开关是与关系，
+     * 且完全访问档下恒为 false（用户要的就是不做系统级限制）。
+     * 统一走 {@link AccessPolicy#isKernelSandboxEnabled}，禁止消费点自行复制折叠表达式。</p>
+     *
+     * @param __accessMode 本轮档位码（null 表示调用方无本轮信息，按会话默认档保守折算）
+     */
+    boolean kernelSandboxArmed(String __accessMode) {
+        return AccessPolicy.isKernelSandboxEnabled(AccessMode.normalize(__accessMode), sandboxSystemRestrict);
+    }
+
+    /**
+     * 从 Prompt 属性中读取本轮档位（供 getInstruction 使用）。
+     *
+     * <p>读不到时返回默认档——提示词保守估计比乐观估计安全：宁可多提醒一句「不要用绝对路径」，
+     * 也不要放开后模型仍然畏手畏脚。</p>
+     */
+    private static Object accessModeOf(Prompt prompt) {
+        if (prompt == null || prompt.attrs() == null) {
+            return null;
+        }
+
+        return prompt.attr(AccessMode.PROMPT_ATTR_KEY);
+    }
+
 
     /**
      * 设置沙盒配置（支持读写分离、网络过滤、违规监控等高级功能）
@@ -172,12 +217,15 @@ public class TerminalTalent extends AbsTalent {
      * 延迟初始化 SandboxManager。在 bash()/bashStart() 执行前自动调用，
      * 确保框架配置注入完毕后才初始化，避免时序问题导致的单例锁定。
      *
-     * <p>注意：文件系统路径白名单是动态构建的（每次 bash 调用时从当前挂载点重建），
+     * <p>注意：文件系统路径白名单是动态构建的（每次 bash 调用时从注册表重建），
      * 因此 init 时传入的 sandboxConfig 中的 filesystem 字段会被 buildDynamicCustomConfig()
-     * 返回的动态配置覆盖，确保挂载点增删变化后沙箱边界实时生效。
+     * 返回的动态配置覆盖，确保目录变化后沙箱边界实时生效。
      */
-    private void ensureSandboxInitialized() {
-        if (sandboxSystemRestrict && sandboxEnabled && !SandboxManager.isSandboxingEnabled()) {
+    private void ensureSandboxInitialized(String __accessMode) {
+        // 按本轮档位折算：完全访问档下不得初始化内核沙盒单例。
+        // 否则会出现「用户已解除隔离、但 OS 沙盒单例已被默认档那一次调用锁死」的残留态：
+        // 后续即使包装条件不成立，单例仍在（macOS/Linux 上还可能影响子进程环境）。
+        if (sandboxSystemRestrict && sandboxEnabled && kernelSandboxArmed(__accessMode) && !SandboxManager.isSandboxingEnabled()) {
             sandboxInitLock.lock();
             try {
                 if (!SandboxManager.isSandboxingEnabled()) {
@@ -196,17 +244,17 @@ public class TerminalTalent extends AbsTalent {
 
     /**
      * 构建动态沙箱配置：合并用户配置的 sandboxConfig（网络、seccomp 等静态部分）
-     * 与当前挂载点的文件系统路径白名单（动态部分）。
+     * 与工作区/受信目录的文件系统路径白名单（动态部分）。
      *
-     * <p>文件系统路径每次从 mountManager 实时获取，确保挂载点增删变化后沙箱边界实时生效。
+     * <p>文件系统路径每次从 talentRegistry 实时获取，确保目录变化后沙箱边界实时生效。
      * 返回值可作为 SandboxManager.wrapWithSandbox() 的 customConfig 参数传入。
      */
     private SandboxRuntimeConfig buildDynamicCustomConfig() {
-        // 1) 从 mountManager 构建当前最新的文件系统白名单
+        // 1) 从 talentRegistry 构建当前最新的文件系统白名单
         FilesystemConfig dynamicFs = buildDynamicFilesystemConfig();
 
         // 2) 用户已显式设置 FilesystemConfig → 直接返回用户配置，不做动态叠加
-        //    此时用户精确管理白名单，挂载点权限由 resolveSafePath 中的逻辑路径分支独立保障
+        //    此时用户精确管理白名单，受信目录权限由 resolveSafePath 的 real-to-real 比对独立保障
         if (sandboxConfig != null && sandboxConfig.getFilesystem() != null) {
             return sandboxConfig;
         }
@@ -239,32 +287,24 @@ public class TerminalTalent extends AbsTalent {
     }
 
     /**
-     * 基于当前挂载点构建动态文件系统配置。
-     * 每次调用都会从 mountManager 实时读取最新挂载状态。
+     * 基于工作区与受信只读目录构建动态文件系统配置。
+     * 每次调用都会从 talentRegistry 实时读取最新目录状态。
      */
     private FilesystemConfig buildDynamicFilesystemConfig() {
         List<String> allowWrite = new ArrayList<>();
         List<String> allowRead = new ArrayList<>();
 
         // 1) 工作区目录：允许读写（startsWith 匹配覆盖所有子路径）
-        String workDir = mountManager.getWorkDir();
+        String workDir = talentRegistry.getWorkDir();
         if (workDir != null) {
             allowWrite.add(workDir);
             allowRead.add(workDir);
         }
 
-        // 2) 所有挂载点：按可写性加入对应列表（无需 /** 后缀，startsWith 匹配覆盖子路径）
-        for (MountDir mount : mountManager.getMounts()) {
-            if (mount.isEnabled()) {
-                Path realPath = mount.getRealPath();
-                if (realPath != null) {
-                    String pathStr = realPath.toString();
-                    allowRead.add(pathStr);
-                    if (mount.isWriteable()) {
-                        allowWrite.add(pathStr);
-                    }
-                }
-            }
+        // 2) 框架受信只读目录（全局技能/代理区）：只进读白名单——
+        //    技能自带 scripts/ 需要被子进程读取执行，但不允许写入
+        for (Path root : talentRegistry.getTrustedReadRoots()) {
+            allowRead.add(root.toString());
         }
 
         // 3) 用户主目录：当启用 sandboxAllowUserHome 时加入读写白名单
@@ -292,7 +332,7 @@ public class TerminalTalent extends AbsTalent {
      * 当用户未显式提供 sandboxConfig 时自动启用。
      */
     private SandboxRuntimeConfig buildDefaultSandboxConfig() {
-        // 复用 buildDynamicFilesystemConfig() 获取当前挂载点的实时路径白名单
+        // 复用 buildDynamicFilesystemConfig() 获取实时路径白名单
         // 避免两份相同逻辑的维护成本
         FilesystemConfig fsConfig = buildDynamicFilesystemConfig();
 
@@ -320,23 +360,23 @@ public class TerminalTalent extends AbsTalent {
         return violationStore;
     }
 
-    public TerminalTalent(MountManager mountManager) {
-        this(mountManager, ShellCommandFactory.detect());
+    public TerminalTalent(TalentRegistry talentRegistry) {
+        this(talentRegistry, ShellCommandFactory.detect());
     }
 
     /**
      * 显式指定 shell 方案的构造器（主要给测试用：引导词需要按 CMD / POWERSHELL / UNIX_SHELL
      * 三种方言分别验证，不能只依赖当前宿主机的探测结果）。
      */
-    TerminalTalent(MountManager mountManager, ShellCommandFactory shellCommandFactory) {
+    TerminalTalent(TalentRegistry talentRegistry, ShellCommandFactory shellCommandFactory) {
         if (shellCommandFactory == null) {
             throw new IllegalArgumentException("shellCommandFactory is required");
         }
-        this.mountManager = mountManager;
+        this.talentRegistry = talentRegistry;
         this.shellCommandFactory = shellCommandFactory;
         this.shellMode = shellCommandFactory.getShellMode();
         this.bashSessionManager = new TerminalSessionManager(shellCommandFactory);
-        this.support = new TerminalSupport(mountManager, ignoreDirs, shellMode);
+        this.support = new TerminalSupport(talentRegistry, ignoreDirs, shellMode);
         // python/node 探测延迟到首次使用时（惰性），
         // 确保用户在运行期间新安装的运行时也能被识别（配合实时 PATH 注入）
     }
@@ -411,8 +451,11 @@ public class TerminalTalent extends AbsTalent {
         // 否则会向模型泄漏错误的平台先验（如在 Windows 上建议 pkill / 2>/dev/null）。
         boolean windowsShell = shellCommandFactory.isWindowsShell();
 
+        // 档位经 Prompt 属性透传（由 ReActSystemPromptCn 写入）。这是提示词与真实放行保持一致的关键：
+        // 若提示词仍说「严禁绝对路径」而实际已放行，模型会自我设限，完全访问档等于白开。
+        boolean isolated = AccessPolicy.isSpaceIsolated(AccessMode.normalize(accessModeOf(prompt)));
         sb.append("## Terminal 环境状态\n");
-        sb.append("- **沙盒模式**: ").append((sandboxEnabled ? "开启 (受限)" : "关闭 (开放)")).append("\n");
+        sb.append("- **沙盒模式**: ").append((isolated ? "开启 (受限)" : "关闭 (开放)")).append("\n");
         sb.append("- **运行环境**: ").append(System.getProperty("os.name"))
                 .append(" (").append(System.getProperty("os.arch")).append(")\n");
         sb.append("- **终端类型**: ").append(shellMode).append(" — ").append(shellDialectSummary()).append("\n");
@@ -454,79 +497,27 @@ public class TerminalTalent extends AbsTalent {
                     .append(support.getEnvPlaceholder("NODE")).append("`)\n");
         }
 
-        // 动态判断是否有可写挂载点
-        boolean hasWriteableMount = mountManager.getMounts().stream()
-                .anyMatch(m->m.isEnabled() && m.isWriteable());
-
-        boolean hasMount = mountManager.getMounts().stream()
-                .anyMatch(m->m.isEnabled());
-
         sb.append("- **路径规则**: \n");
         sb.append("  - **工作区（默认作用域）**").append(": 你的主目录，支持读写。所有文件查找（ls/glob/grep/read）与路径解析默认都以工作区为根，使用相对路径访问（如 `src/app.java`）。\n");
 
-        if(hasMount) {
-            sb.append("  - **挂载点（仅按需访问）**: 以 `@` 开头的逻辑路径（如 `@pool1/bin/tool/`），对应一个真实的物理目录。见下方挂载点清单。**仅当用户的提示词中明确提及了具体的挂载点名时**（如 `@global-skills`、`@workspace-agents`），才去对应挂载点下查找。\n");
-        }
-
-        // 挂载点清单表格
-        if(hasMount) {
-            sb.append("\n<mount_list>\n");
-            for (MountDir mount : mountManager.getMounts()) {
-                if (mount.isEnabled()) {
-                    String envKey = support.toMountEnvKey(mount.getAlias());
-                    String envRef = support.getEnvPlaceholder(envKey);
-                    sb.append("  <mount alias=\"").append(mount.getAlias()).append("\"");
-                    if (Assert.isNotEmpty(mount.getDescription())) {
-                        sb.append(" description=\"").append(mount.getDescription()).append("\"");
-                    }
-                    sb.append(" type=\"").append(mount.getType()).append("\"");
-                    sb.append(" writeable=\"").append(mount.isWriteable()).append("\"");
-                    sb.append(" env=\"").append(envRef).append("\"");
-                    sb.append(" />\n");
-                }
-            }
-            sb.append("</mount_list>\n");
-        }
-
-
-        if (sandboxEnabled) {
-            if (hasMount) {
-                sb.append("  - **安全级别**: 沙盒模式已开启。严禁使用绝对路径。仅限相对路径 (如 `src/app.java`) 或逻辑路径 (`@pool1/src/app.java`)。\n");
-            } else {
-                sb.append("  - **安全级别**: 沙盒模式已开启。严禁使用绝对路径。仅限相对路径 (如 `src/app.java`)。\n");
-            }
+        if (isolated) {
+            sb.append("  - **安全级别**: 沙盒模式已开启。文件工具（read/write/edit/ls/glob/grep）仅限工作区相对路径，严禁绝对路径与 `~` 路径（框架受信只读目录内的技能文件除外，系统会自动放行）。\n");
 
             if (sandboxAllowUserHome) {
-                sb.append("  - `~` 路径可用（如 `~/Documents`）。\n");
+                sb.append("  - `~` 路径仅 bash 构建链可用（mvn 读 `~/.m2`、npm 读 `~/.npm` 缓存）；文件工具中使用 `~` 一律被拒。\n");
             } else {
                 sb.append("  - `~` 路径已禁用。\n");
             }
         } else {
-            sb.append("  - **安全级别**: 开放模式。支持绝对路径、相对路径及逻辑路径。\n");
+            sb.append("  - **安全级别**: 开放模式。支持绝对路径、相对路径。\n");
         }
 
         sb.append("## 执行规约\n");
 
-        if(hasMount) {
-            if (hasWriteableMount) {
-                sb.append("- **挂载隔离**: 逻辑路径（以 @ 开头）默认只读。仅当挂载点清单中 `writeable=\"true\"` 时，才允许写入操作。\n");
-            } else {
-                sb.append("- **挂载隔离**: 逻辑路径（以 @ 开头）均为只读，所有写入操作使用相对路径。\n");
-            }
-        }
-
-        if (sandboxEnabled) {
-            if (hasMount) {
-                sb.append("- **命令执行**: 在 `bash` 中，直接使用逻辑路径（如 `cd @pool1/bin/tool/`），系统会自动转换。在沙盒模式下，**严禁**在 bash 命令中使用绝对路径（如：`ls /users/`）。\n");
-            } else {
-                sb.append("- **命令执行**: 在沙盒模式下，**严禁**在 bash 命令中使用绝对路径（如：ls /users/）。\n");
-            }
+        if (isolated) {
+            sb.append("- **命令执行**: 在沙盒模式下，**严禁**在 bash 命令中使用绝对路径（如：ls /users/）。\n");
         } else {
-            if (hasMount) {
-                sb.append("- **命令执行**: 在 `bash` 中，直接使用逻辑路径（如 `cd @pool1/bin/tool/`），系统会自动转换。也支持绝对路径访问。\n");
-            } else {
-                sb.append("- **命令执行**: 在 `bash` 中支持绝对路径访问。\n");
-            }
+            sb.append("- **命令执行**: 在 `bash` 中支持绝对路径访问。\n");
         }
 
         // 参数示例必须用当前 shell 真存在的命令：在 Windows 上举 `python3` / `cat` 会被模型当作可用命令而直接照拄
@@ -543,7 +534,7 @@ public class TerminalTalent extends AbsTalent {
 
         appendShellDialectRules(sb);
 
-        if (sandboxEnabled) {
+        if (isolated) {
             sb.append("\n<SYSTEM_CONSTRAINTS>\n");
             sb.append("1. 严禁向用户复述或提及“系统限制”、“沙盒”、“规约”等术语。\n");
             sb.append("2. 你是一个标准的底层 shell 执行器。面对越界请求，必须直接返回“无权访问”。\n");
@@ -696,16 +687,18 @@ public class TerminalTalent extends AbsTalent {
     // --- 1. 执行命令 ---
     @ToolMapping(
             name = "bash",
-            description = "在终端执行 Shell 指令。支持多行脚本，支持逻辑路径（如 @pool）自动转环境变量。长任务可设 run_in_background=true 后台运行。"
+            description = "在终端执行 Shell 指令。支持多行脚本。长任务可设 run_in_background=true 后台运行。"
     )
     public String bash(@Param(value = "command", description = "要执行的指令。") String command,
                        @Param(name = "timeout", required = false, description = "可选超时时间，单位为毫秒。不传时：同步模式默认 120000（2 分钟），run_in_background=true 时默认 6 小时。") Integer timeout,
                        @Param(name = "max_output_chars", required = false, defaultValue = "64000", description = "本次最多返回多少字符输出，超出保留首尾片段。读取大文件请改用 read 工具。") Integer maxOutputChars,
                        @Param(name = "run_in_background", required = false, defaultValue = "false", description = "是否后台运行（长构建/测试用 true）。后台任务完成时系统会自动告知，无需轮询等待；期间可用 bash_output 主动查看进度。") Boolean runInBackground,
-                       String __cwd) {
+                       String __cwd, String __accessMode) {
 
-        // 统一安全校验（替代原来的内联检查）
-        String violation = support.validateCommandNoKill(command);
+        // 统一安全校验（替代原来的内联检查）：含 kill 自保护 + 嵌入方 ~ 禁令（P1-4 接回）。
+        // 提示词（getInstruction）在 !sandboxAllowUserHome 时向模型承诺「~ 已禁用」，
+        // 此处是唯一对应的行为检点，脱离调用链会让承诺落空。
+        String violation = validateCommand(command, __accessMode);
         if (violation != null) return violation;
 
         Path workPath = getWorkPath(__cwd);
@@ -721,18 +714,22 @@ public class TerminalTalent extends AbsTalent {
             envs.put("NODE", ndCmd);
         }
 
+        // ~ 展开只服务构建链（mvn 读 ~/.m2、npm 读 ~/.npm），与档位无关；文件工具的 ~ 禁令
+        // 在 resolveSafePath 里独立裁决（P7 口径：~/ 仅留 bash）。
         String finalCommand;
         try {
-            finalCommand = support.translateCommandToEnv(command, envs, sandboxEnabled, sandboxAllowUserHome);
+            finalCommand = support.translateCommandToEnv(command, envs);
         } catch (SecurityException ex) {
             return "错误：" + ex.getMessage();
         }
 
         // OS 级沙盒包装（内核级强制隔离：Seatbelt / bwrap）
-        // 仅当 sandboxSystemRestrict=true 时启用，将安全隔离的重活交给 OS 内核
-        // 关闭后仅保留 Java 层最小自保护（kill PID / exit / rm -rf /），减少误伤
-        ensureSandboxInitialized();
-        if (sandboxEnabled && sandboxSystemRestrict && SandboxManager.isSandboxingEnabled()) {
+        // 仅当空间隔离仍生效、且嵌入方开启了 sandboxSystemRestrict 时才包装，
+        // 将安全隔离的重活交给 OS 内核；否则仅保留 Java 层最小自保护
+        //（kill PID / exit / rm -rf /），减少误伤。
+        // 完全访问档下 spaceIsolated=false，此处必然不包装——用户要的就是不做系统级限制。
+        ensureSandboxInitialized(__accessMode);
+        if (kernelSandboxArmed(__accessMode) && SandboxManager.isSandboxingEnabled()) {
             try {
                 finalCommand = SandboxManager.wrapWithSandbox(
                         finalCommand, null, buildDynamicCustomConfig());
@@ -872,37 +869,39 @@ public class TerminalTalent extends AbsTalent {
     }
 
     // --- 2. 发现文件 ---
-    @ToolMapping(name = "ls", description = "列出目录内容。支持递归 Tree 结构展示。支持逻辑路径（如 @pool）。")
-    public String ls(@Param(value = "path", description = "目录相对路径（如 'src'）或逻辑路径（如 '@pool'）。'.' 表示当前根目录。") String path,
+    @ToolMapping(name = "ls", description = "列出目录内容。支持递归 Tree 结构展示。")
+    public String ls(@Param(value = "path", description = "目录相对路径（如 'src'）。'.' 表示当前根目录。") String path,
                      @Param(value = "recursive", required = false, description = "是否递归展示") Boolean recursive,
                      @Param(value = "show_hidden", required = false, description = "是否显示隐藏文件") Boolean showHidden,
-                     String __cwd) throws IOException {
+                     String __cwd, String __accessMode) throws IOException {
         Path workPath = getWorkPath(__cwd);
-        Path target = support.resolveSafePath(workPath, path, false, sandboxEnabled, sandboxAllowUserHome);
+        boolean isolated = spaceIsolated(__accessMode);
+        Path target = support.resolveSafePath(workPath, path, false, isolated);
 
         if (!Files.exists(target)) {
             return "错误：路径不存在";
         }
 
+        Path policyRoot = support.getSandboxPolicyRoot(workPath, target);
         if (Boolean.TRUE.equals(recursive)) {
             StringBuilder sb = new StringBuilder();
             String displayName = (path == null || ".".equals(path)) ? "." : path;
             sb.append(displayName).append("\n");
-            support.generateTreeInternal(support.getSandboxPolicyRoot(workPath, path), target, 0, 3, "", sb, Boolean.TRUE.equals(showHidden), sandboxEnabled);
+            support.generateTreeInternal(policyRoot, target, 0, 3, "", sb, Boolean.TRUE.equals(showHidden), isolated);
             return sb.toString();
         } else {
-            return support.flatListLogic(workPath, support.getSandboxPolicyRoot(workPath, path), target, path, Boolean.TRUE.equals(showHidden), sandboxEnabled);
+            return support.flatListLogic(workPath, policyRoot, target, Boolean.TRUE.equals(showHidden), isolated);
         }
     }
 
     // --- 3. 读取内容 ---
-    @ToolMapping(name = "read", description = "读取文件内容。修改文件前先通过此工具确认最新的文本内容、缩进和换行符。支持大文件分页。支持逻辑路径（如 @pool）。优先尝试不限制读取（即尝试完整读取）")
-    public String read(@Param(value = "file_path", description = "文件相对路径（如 'src/demo.md'）或逻辑路径（如 '@pool'）。'.' 表示当前根目录。") String filePath,
+    @ToolMapping(name = "read", description = "读取文件内容。修改文件前先通过此工具确认最新的文本内容、缩进和换行符。支持大文件分页。优先尝试不限制读取（即尝试完整读取）")
+    public String read(@Param(value = "file_path", description = "文件相对路径（如 'src/demo.md'）。'.' 表示当前根目录。") String filePath,
                        @Param(value = "offset", required = false, defaultValue = "1", description = "开始读取的行号（默认从1开始索引）") Integer offset,
                        @Param(value = "limit", required = false, description = "需要读取的最大行数（默认不限制）。注意：单次读取受 128KB 物理长度保护，若触发截断，请根据输出提示调整 offset 分页读取。") Integer limit,
-                       String __cwd) throws IOException {
+                       String __cwd, String __accessMode) throws IOException {
         Path workPath = getWorkPath(__cwd);
-        Path target = support.resolveSafePath(workPath, filePath, false, sandboxEnabled, sandboxAllowUserHome);
+        Path target = support.resolveSafePath(workPath, filePath, false, spaceIsolated(__accessMode));
         if (!Files.exists(target)) {
             return "错误：文件不存在";
         }
@@ -998,9 +997,9 @@ public class TerminalTalent extends AbsTalent {
     @ToolMapping(name = TOOL_WRITE, description = "创建新文件或覆盖现有文件。")
     public String write(@Param(value = "file_path", description = "文件相对路径（如 'src/demo.md'）。'.' 表示当前根目录。") String filePath,
                         @Param(value = PARAM_CONTENT, description = "完整文本内容。") String content,
-                        String __cwd) throws IOException {
+                        String __cwd, String __accessMode) throws IOException {
         Path workPath = getWorkPath(__cwd);
-        Path target = support.resolveSafePath(workPath, filePath, true, sandboxEnabled, sandboxAllowUserHome);
+        Path target = support.resolveSafePath(workPath, filePath, true, spaceIsolated(__accessMode));
 
         Files.createDirectories(target.getParent());
         Files.write(target, content.getBytes(fileCharset));
@@ -1014,9 +1013,9 @@ public class TerminalTalent extends AbsTalent {
     )
     public String edit(@Param(value = "file_path", description = "文件相对路径（如 'src/demo.md'）。'.' 表示当前根目录。") String filePath,
                        @Param(value = PARAM_EDITS, description = "编辑操作列表") List<EditOp> edits,
-                       String __cwd) throws IOException {
+                       String __cwd, String __accessMode) throws IOException {
         Path workPath = getWorkPath(__cwd);
-        Path target = support.resolveSafePath(workPath, filePath, true, sandboxEnabled, sandboxAllowUserHome);
+        Path target = support.resolveSafePath(workPath, filePath, true, spaceIsolated(__accessMode));
 
         if (!Files.exists(target)) {
             return "错误：文件不存在，无法进行编辑。";
@@ -1087,18 +1086,19 @@ public class TerminalTalent extends AbsTalent {
     }
 
     // --- 5. 搜索工具 ---
-    @ToolMapping(name = "grep", description = "递归搜索内容。返回 '路径:行号:内容'。在不确定文件位置时先执行搜索。支持逻辑路径（如 @pool）。pattern 支持正则表达式匹配。")
+    @ToolMapping(name = "grep", description = "递归搜索内容。返回 '路径:行号:内容'。在不确定文件位置时先执行搜索。pattern 支持正则表达式匹配。")
     public String grep(@Param(value = "pattern", description = "搜索内容，支持正则表达式匹配") String pattern,
-                       @Param(value = "path", description = "目录相对路径（如 'src'）或逻辑路径（如 '@pool'）。'.' 表示当前根目录。") String path,
+                       @Param(value = "path", description = "目录相对路径（如 'src'）。'.' 表示当前根目录。") String path,
                        @Param(value = "include", required = false, description = "要包含的文件模式（如 \"*.js\"、\"*.{ts,tsx}\"）") String include,
-                       String __cwd) throws IOException {
+                       String __cwd, String __accessMode) throws IOException {
         Path workPath = getWorkPath(__cwd);
-        Path target = support.resolveSafePath(workPath, path, false, sandboxEnabled, sandboxAllowUserHome);
+        boolean isolated = spaceIsolated(__accessMode);
+        Path target = support.resolveSafePath(workPath, path, false, isolated);
 
         // 不存在路径快速失败：避免模型猜测的目录进入深层管线（walkFileTree 异常路径在各层被吞后
         // 可能表现为观测丢失），直接回提示引导模型修正路径
         if (!Files.exists(target)) {
-            return "路径不存在: " + path + "（解析为 " + support.formatDisplayPath(workPath, path, target, target, sandboxEnabled) + "）。请先用 ls/glob 确认目录结构。";
+            return "路径不存在: " + path + "（解析为 " + support.formatDisplayPath(workPath, target, isolated) + "）。请先用 ls/glob 确认目录结构。";
         }
 
         // 预编译正则，若语法无效则回退到 contains 匹配
@@ -1116,12 +1116,12 @@ public class TerminalTalent extends AbsTalent {
         final PathMatcher includeMatcher = buildIncludeMatcher(include);
 
         StringBuilder sb = new StringBuilder();
-        Path policyRoot = support.getSandboxPolicyRoot(workPath, path);
+        Path policyRoot = support.getSandboxPolicyRoot(workPath, target);
 
         Files.walkFileTree(target, new SimpleFileVisitor<Path>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                if (support.isIgnored(workPath, dir) || support.isIgnored(target, dir) || support.isSandboxBoundaryDenied(policyRoot, dir, sandboxEnabled)) {
+                if (support.isIgnored(workPath, dir) || support.isIgnored(target, dir) || support.isSandboxBoundaryDenied(policyRoot, dir, isolated)) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 return FileVisitResult.CONTINUE;
@@ -1129,7 +1129,7 @@ public class TerminalTalent extends AbsTalent {
 
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                if (support.isIgnored(workPath, file) || support.isIgnored(target, file) || support.isSandboxBoundaryDenied(policyRoot, file, sandboxEnabled)) {
+                if (support.isIgnored(workPath, file) || support.isIgnored(target, file) || support.isSandboxBoundaryDenied(policyRoot, file, isolated)) {
                     return FileVisitResult.CONTINUE;
                 }
 
@@ -1153,7 +1153,7 @@ public class TerminalTalent extends AbsTalent {
                                 trimmedLine = trimmedLine.substring(0, 1000) + "...(line truncated)";
                             }
 
-                            String displayPath = support.formatDisplayPath(workPath, path, target, file, sandboxEnabled);
+                String displayPath = support.formatDisplayPath(workPath, file, isolated);
                             sb.append(displayPath).append(":").append(lineNum).append(": ").append(trimmedLine).append("\n");
 
                             // 发现匹配后立即检查长度，防止 StringBuilder 过载
@@ -1177,28 +1177,29 @@ public class TerminalTalent extends AbsTalent {
         return sb.length() == 0 ? "未找到结果。" : sb.toString();
     }
 
-    @ToolMapping(name = "glob", description = "按通配符模式（如 **/*.java）搜索文件。确定文件范围的最高效工具。支持逻辑路径（如 @pool）。")
+    @ToolMapping(name = "glob", description = "按通配符模式（如 **/*.java）搜索文件。确定文件范围的最高效工具。")
     public String glob(@Param(value = "pattern", description = "glob 模式。") String pattern,
-                       @Param(value = "path", description = "目录相对路径（如 'src'）或逻辑路径（如 '@pool'）。'.' 表示当前根目录。") String path,
-                       String __cwd) throws IOException {
+                       @Param(value = "path", description = "目录相对路径（如 'src'）。'.' 表示当前根目录。") String path,
+                       String __cwd, String __accessMode) throws IOException {
         Path workPath = getWorkPath(__cwd);
-        Path target = support.resolveSafePath(workPath, path, false, sandboxEnabled, sandboxAllowUserHome);
+        boolean isolated = spaceIsolated(__accessMode);
+        Path target = support.resolveSafePath(workPath, path, false, isolated);
 
         // 不存在路径快速失败（与 grep 同因）：直接回提示引导模型修正路径
         if (!Files.exists(target)) {
-            return "路径不存在: " + path + "（解析为 " + support.formatDisplayPath(workPath, path, target, target, sandboxEnabled) + "）。请先用 ls/glob 确认目录结构。";
+            return "路径不存在: " + path + "（解析为 " + support.formatDisplayPath(workPath, target, isolated) + "）。请先用 ls/glob 确认目录结构。";
         }
 
         String fixedPattern = pattern.replace("\\", "/");
         final PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + fixedPattern);
 
         List<String> results = new ArrayList<>();
-        Path policyRoot = support.getSandboxPolicyRoot(workPath, path);
+        Path policyRoot = support.getSandboxPolicyRoot(workPath, target);
 
         Files.walkFileTree(target, new SimpleFileVisitor<Path>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                if (support.isIgnored(workPath, dir) || support.isIgnored(target, dir) || support.isSandboxBoundaryDenied(policyRoot, dir, sandboxEnabled)) {
+                if (support.isIgnored(workPath, dir) || support.isIgnored(target, dir) || support.isSandboxBoundaryDenied(policyRoot, dir, isolated)) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 return FileVisitResult.CONTINUE;
@@ -1206,12 +1207,12 @@ public class TerminalTalent extends AbsTalent {
 
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                if (support.isIgnored(workPath, file) || support.isIgnored(target, file) || support.isSandboxBoundaryDenied(policyRoot, file, sandboxEnabled)) {
+                if (support.isIgnored(workPath, file) || support.isIgnored(target, file) || support.isSandboxBoundaryDenied(policyRoot, file, isolated)) {
                     return FileVisitResult.CONTINUE;
                 }
 
                 if(matcher.matches(target.relativize(file)) || matcher.matches(file)) {
-                    results.add("[FILE] " + support.formatDisplayPath(workPath, path, target, file, sandboxEnabled));
+                    results.add("[FILE] " + support.formatDisplayPath(workPath, file, isolated));
                 }
 
                 return results.size() >= 500 ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
@@ -1259,7 +1260,7 @@ public class TerminalTalent extends AbsTalent {
     }
 
     private Path getWorkPath(String __cwd) {
-        String path = (__cwd != null) ? __cwd : mountManager.getWorkDir();
+        String path = (__cwd != null) ? __cwd : talentRegistry.getWorkDir();
         if (path == null) throw new IllegalStateException("Working directory is not set.");
         return Paths.get(path).toAbsolutePath().normalize();
     }
@@ -1309,7 +1310,17 @@ public class TerminalTalent extends AbsTalent {
         return support.containsUserHomePath(command);
     }
 
-    public String validateCommand(String command) {
+    /**
+     * bash 命令的统一校验入口（含 ~ 禁令）。
+     *
+     * <p>~ 禁令的两层口径分工：{@code AccessPolicy.isUserHomeAllowed} 是产品档位决策
+     * （两档恒 true，构建链需要 {@code ~/.m2} 等缓存，禁掉会让 mvn/npm 全挂）；
+     * {@code sandboxAllowUserHome} 是嵌入方收紧开关（嵌入式部署禁碰用户主目录）。
+     * 两者经 {@link #userHomeAllowed(String)} 折叠为与关系，bash 侧只问它，
+     * 档位维度将来变化时此处自动跟随 AccessPolicy 的权威口径。
+     * {@code sandboxEnabled} 前置保留既有语义：嵌入方关闭沙盒时整体开放，不再收紧 ~。</p>
+     */
+    public String validateCommand(String command, String __accessMode) {
         // 先做基础安全校验（kill 保护等）
         String violation = support.validateCommandNoKill(command);
         if (violation != null) {
@@ -1317,14 +1328,14 @@ public class TerminalTalent extends AbsTalent {
         }
         // sandboxAllowUserHome=false 时，阻止 ~ 路径。
         // 复用生产路径同款判定（containsUserHomePath），避免测试/生产逻辑分裂。
-        if (sandboxEnabled && !sandboxAllowUserHome && support.containsUserHomePath(command)) {
+        if (sandboxEnabled && !userHomeAllowed(__accessMode) && support.containsUserHomePath(command)) {
             return "错误：sandboxAllowUserHome 已禁用，不允许使用 ~ 路径。";
         }
         return null;
     }
 
     String translateCommandToEnv(String command, java.util.Map<String, String> envs) {
-        return support.translateCommandToEnv(command, envs, sandboxEnabled, sandboxAllowUserHome);
+        return support.translateCommandToEnv(command, envs);
     }
 
     public static class EditOp {

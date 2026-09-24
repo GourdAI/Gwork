@@ -107,6 +107,20 @@ class AskUserPromptRuleTest {
                 "工具实例描述必须与常量同源");
     }
 
+    @Test
+    void toolDescriptionCarriesPresentationDiscipline() {
+        // 真实会话取证：414 个选项里 90% 把「标题：解释」整段塞进 label（中位 41 字、最长 321 字），
+        // 另有 80 个 label 自带「推荐」字样——问答卡因此难以扫读。描述与硬规则必须讲清分工。
+        String desc = AskUserTool.TOOL_DESCRIPTION;
+        Assertions.assertTrue(desc.contains("短标题"), "描述必须要求 label 只写短标题");
+        Assertions.assertTrue(desc.contains("写进 description"), "描述必须指明解释写进 description");
+        Assertions.assertTrue(desc.contains("不要写进 label"), "描述必须禁止把「推荐」字样写进 label");
+        Assertions.assertTrue(desc.contains("不要塞进 detail"), "描述必须约束 detail 不放长篇分析");
+
+        Assertions.assertTrue(AskUserTool.PROMPT_RULE_CN.contains("description"), "中文硬规则同样要点明 description 分工");
+        Assertions.assertTrue(AskUserTool.PROMPT_RULE_EN.contains("description"), "英文硬规则同样要点明 description 分工");
+    }
+
     // ==================== 2. 工具可用性判定 ====================
 
     @Test

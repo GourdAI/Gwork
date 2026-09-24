@@ -132,6 +132,9 @@ function getAttachmentsWrap() {
 }
 
 function renderAttachments() {
+    // 欢迎页输入区可见期间 pendingFiles 归属欢迎页草稿（模式切换边界据此 stash/restore，
+    // 见 app-base.js welcomeDraftFiles 注释）；添加附件的各异步回调统一经这里登记归属
+    if (!inChatMode && pendingFiles.length > 0) welcomeFilesActive = true;
     // Render both wraps to keep them in sync when switching views
     renderAttachmentsWrap(welcomeAttachmentsWrap);
     renderAttachmentsWrap(chatAttachmentsWrap);
@@ -148,17 +151,16 @@ function renderAttachmentsWrap(wrap) {
         var item = pendingFiles[i];
         var el = document.createElement('div');
         el.className = 'attachment-item';
-        var typeTag = '<span class="attachment-type-tag ' + (item.attachmentsType || 'file') + '">' + (item.attachmentsType === 'image' ? GourdI18n.t('ui.multimodal') : GourdI18n.t('ui.file')) + '</span>';
+        // 文件与图片统一为 60px 方形瓦片（样式见 .attachment-item-file）；名称/类型不再加徽标，
+        // 全名走 title 悬浮提示
         if (item.type === 'image') {
-            $(el).html('<img src="' + item.dataUrl + '"/>'
-                + typeTag
+            $(el).html('<img src="' + item.dataUrl + '" title="' + escapeHtml(item.name) + '"/>'
                 + '<button class="attachment-item-remove" data-idx="' + i + '">&times;</button>');
         } else {
-            $(el).html('<div class="attachment-item-file">'
-                + '<span class="file-icon">📎</span>'
+            $(el).html('<div class="attachment-item-file" title="' + escapeHtml(item.name) + '">'
+                + '<span class="file-icon">' + fileIconSvg(18) + '</span>'
                 + '<span class="file-name">' + escapeHtml(item.name) + '</span>'
                 + '</div>'
-                + typeTag
                 + '<button class="attachment-item-remove" data-idx="' + i + '">&times;</button>');
         }
         wrap.append(el);
@@ -829,12 +831,7 @@ function __mermaidLoad(cb) {
         __mermaidState = (typeof window.mermaid !== 'undefined') ? 2 : 3;
         if (__mermaidState === 2) {
             // 原先在 app-ui.js 顶层执行的初始化，移到加载完成时（主题取当前值，与 applyTheme 一致）
-            window.mermaid.initialize({
-                startOnLoad: false,
-                theme: currentTheme === 'dark' ? 'dark' : 'default',
-                securityLevel: 'loose',
-                fontFamily: 'var(--font-sans)',
-            });
+            window.mermaid.initialize(mermaidInitOptions());
         }
         __mermaidFlush();
     };
@@ -904,19 +901,71 @@ function applyHljsTheme(theme) {
     }
 }
 
-/* ===== Theme ===== */
-// 首帧已由 index.html <body> 顶部的内联脚本按 localStorage 预置主题（防闪烁）；
-// 这里再读一次作为常规初始化，与预置值一致，幂等。
-var currentTheme = localStorage.getItem('chat-theme') || 'light';
+/* ===== Theme =====
+   明暗为三态模式：system | light | dark，存 localStorage 'chat-theme-mode'；
+   'chat-theme' 只存「解析后的值」，兼容旧版本读取与 index.html 首帧预置（防闪烁）。
+   强调色预设存 'chat-accent'（teal|graphite|clay|sky|indigo），映射到 body[data-accent]。
+   首帧由 index.html <body> 顶部内联脚本按同一规则预置；这里再读一次作为常规初始化，幂等。 */
+var THEME_MODE_KEY = 'chat-theme-mode';
+var THEME_ACCENT_KEY = 'chat-accent';
+var THEME_ACCENTS = ['graphite', 'teal', 'clay', 'sky', 'indigo'];
+
+function resolveSystemTheme() {
+    return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+}
+
+function getThemeMode() {
+    var m = localStorage.getItem(THEME_MODE_KEY);
+    if (m === 'system' || m === 'light' || m === 'dark') return m;
+    // 旧版本迁移：'chat-theme' 里只有解析值，视为用户曾显式选择
+    var t = localStorage.getItem('chat-theme');
+    return (t === 'dark' || t === 'light') ? t : 'system';
+}
+
+function getAccent() {
+    var a = localStorage.getItem(THEME_ACCENT_KEY);
+    return THEME_ACCENTS.indexOf(a) >= 0 ? a : 'graphite';
+}
+
+/* Mermaid 初始化参数：主题底座 + 从 CSS token 取色的 themeVariables，
+   使图表跟随应用主题与强调色（此前用官方 default/dark 预设，与主题完全脱钩）。 */
+function mermaidInitOptions() {
+    var dark = currentTheme === 'dark';
+    var cs = getComputedStyle(document.body);
+    function tok(name, fb) {
+        var v = cs.getPropertyValue(name);
+        return (v && v.trim()) ? v.trim() : fb;
+    }
+    return {
+        startOnLoad: false,
+        theme: dark ? 'dark' : 'default',
+        securityLevel: 'loose',
+        fontFamily: 'var(--font-sans)',
+        themeVariables: {
+            primaryColor: tok('--accent-light', dark ? '#2a2a2e' : '#ececee'),
+            primaryTextColor: tok('--text-primary', dark ? '#e4e4e7' : '#18181b'),
+            primaryBorderColor: tok('--border-input', dark ? '#3f3f46' : '#d4d4d8'),
+            secondaryColor: tok('--bg-hover', dark ? '#232327' : '#f2f2f3'),
+            tertiaryColor: tok('--bg-main', dark ? '#17171a' : '#ffffff'),
+            lineColor: tok('--text-secondary', dark ? '#8f8f96' : '#71717a'),
+            textColor: tok('--text-primary', dark ? '#e4e4e7' : '#18181b')
+        }
+    };
+}
+
+var currentTheme = getThemeMode() === 'system' ? resolveSystemTheme() : getThemeMode();
 $('body').attr('data-theme', currentTheme);
+$('body').attr('data-accent', getAccent());
 applyHljsTheme(currentTheme);
 
 /* ===== Mermaid Init =====
    已移至 __mermaidLoad 的 onload 回调（按需加载后才初始化），此处不再预初始化。 */
 
-// 启动时从后端同步主题（清空 localStorage 后仍能恢复）。
+// 启动时从后端同步主题：仅当本地无任何记录（如清空 localStorage）时兜底恢复；
+// 有本地记录时以本地为准，避免后端镜像值覆盖用户的 system 模式选择。
 // 桌面端延后到后端就绪再拉，避免冷启动期占用连接；此前已由上面的 localStorage 值先行生效，无闪烁。
 __whenBackendReady(function () {
+    if (localStorage.getItem(THEME_MODE_KEY) || localStorage.getItem('chat-theme')) return;
     $.get('/web/settings/general', function(resp) {
         if (resp.code === 200 && resp.data && resp.data.darkMode != null) {
             applyTheme(resp.data.darkMode ? 'dark' : 'light');
@@ -924,34 +973,62 @@ __whenBackendReady(function () {
     });
 });
 
-function applyTheme(theme) {
+// system 模式跟随 OS 明暗实时切换
+if (window.matchMedia) {
+    var __sysThemeMq = window.matchMedia('(prefers-color-scheme: dark)');
+    var __onSysThemeChange = function () {
+        if (getThemeMode() === 'system') applyTheme(resolveSystemTheme(), { mirror: false });
+    };
+    if (__sysThemeMq.addEventListener) __sysThemeMq.addEventListener('change', __onSysThemeChange);
+    else if (__sysThemeMq.addListener) __sysThemeMq.addListener(__onSysThemeChange);
+}
+
+/**
+ * 应用解析后的明暗主题。
+ * @param {'light'|'dark'} theme
+ * @param {{mirror?:boolean}} [opts] mirror=false 时不向后端回写 darkMode 镜像
+ *   （system 跟随 OS 的高频切换不回写，避免请求噪音；后端值仅作冷启动兜底）
+ */
+function applyTheme(theme, opts) {
+    opts = opts || {};
     currentTheme = theme;
     $('body').attr('data-theme', theme);
     localStorage.setItem('chat-theme', theme);
     applyHljsTheme(theme);
     // 仅在 mermaid 已按需加载后才重设主题；未加载时不触发加载（加载后会读 currentTheme 自行初始化）
     if (__mermaidState === 2 && typeof window.mermaid !== 'undefined') {
-        window.mermaid.initialize({ theme: theme === 'dark' ? 'dark' : 'default' });
+        window.mermaid.initialize(mermaidInitOptions());
     }
-    // sync checkbox if settings panel is open
-    var cb = document.getElementById('generalDarkMode');
-    if (cb) cb.checked = (theme === 'dark');
+    if (typeof window.__refreshMonacoTheme === 'function') window.__refreshMonacoTheme();
+    document.dispatchEvent(new CustomEvent('theme:changed', { detail: { theme: theme, mode: getThemeMode() } }));
+    if (opts.mirror !== false) {
+        $.ajax({ url: '/web/settings/general/save', method: 'POST', data: JSON.stringify({ darkMode: theme === 'dark' }), contentType: 'application/json', dataType: 'json' });
+    }
 }
 
-// Init dark mode checkbox when settings opens
-$(document).on('change', '#generalDarkMode', function() {
-    var isDark = this.checked;
-    applyTheme(isDark ? 'dark' : 'light');
-    $.ajax({ url: '/web/settings/general/save', method: 'POST', data: JSON.stringify({darkMode: isDark}), contentType: 'application/json', dataType: 'json' });
-});
+/** 切换明暗模式（system|light|dark）并持久化 */
+function applyThemeMode(mode) {
+    localStorage.setItem(THEME_MODE_KEY, mode);
+    applyTheme(mode === 'system' ? resolveSystemTheme() : mode);
+}
 
-// Sync checkbox state when settings panel opens
-$(document).on('click', '#settingsBtn', function() {
-    setTimeout(function() {
-        var cb = document.getElementById('generalDarkMode');
-        if (cb) cb.checked = (currentTheme === 'dark');
-    }, 50);
-});
+/** 切换强调色预设并持久化 */
+function applyAccent(name) {
+    if (THEME_ACCENTS.indexOf(name) < 0) return;
+    localStorage.setItem(THEME_ACCENT_KEY, name);
+    $('body').attr('data-accent', name);
+    document.dispatchEvent(new CustomEvent('accent:changed', { detail: { accent: name } }));
+}
+
+window.__themeApi = {
+    applyTheme: applyTheme,
+    applyThemeMode: applyThemeMode,
+    applyAccent: applyAccent,
+    getThemeMode: getThemeMode,
+    getAccent: getAccent,
+    resolveSystemTheme: resolveSystemTheme,
+    accents: THEME_ACCENTS
+};
 
 /* 「自动化 / 技能」均为独立主视图，不再走设置浮层 */
 $(document).on('click', '#automationNavBtn', function() {
@@ -972,6 +1049,9 @@ $(document).on('click', '#modelConfigNavBtn', function() {
 
 /* ===== View Switch ===== */
 function switchToChatMode() {
+    // 离开欢迎页前先 stash 欢迎页附件草稿：随后的 setActiveSession 草稿交换会把
+    // pendingFiles 存进临时会话 draftFiles 孤儿化（见 app-base.js welcomeDraftFiles 注释）
+    if (typeof stashWelcomeDraftFiles === 'function') stashWelcomeDraftFiles();
     // 自动化视图占据主区时，即便 inChatMode 仍为 true 也必须走完整恢复流程，
     // 否则 chatView 拿不回 .active（防御未来又出现只改 DOM 不同步标志的入口）
     var fromAutomation = (typeof window.isAutomationOpen === 'function') && window.isAutomationOpen();
@@ -994,6 +1074,9 @@ function switchToChatMode() {
     chatInput.focus();
 }
 function switchToWelcomeMode() {
+    // 仍在欢迎页上下文时（含技能/自动化等覆盖视图返回、欢迎页上直接点新建对话），
+    // pendingFiles 还挂着欢迎页附件，须在 setActiveSession 草稿交换前 stash 进槽
+    if (!inChatMode && typeof stashWelcomeDraftFiles === 'function') stashWelcomeDraftFiles();
     if (typeof window.closeAutomation === 'function') window.closeAutomation();
     if (typeof window.closeSkills === 'function') window.closeSkills();
     if (typeof window.closeChannel === 'function') window.closeChannel();
@@ -1001,10 +1084,9 @@ function switchToWelcomeMode() {
     if (typeof window.closeMemoryView === 'function') window.closeMemoryView();
     if (typeof window.closeUsage === 'function') window.closeUsage();
     inChatMode = false;
-    // 欢迎页输入框不参与按会话草稿：每次回欢迎页都会另开新 sessionId（见下一行），
-    // 旧内容无处可归；不清就会被所有「新建对话」入口（侧栏新建/项目新建任务/Ctrl+N/
-    // 删会话回退/切工作空间）带到下一个新对话里。
-    if (welcomeInput) { welcomeInput.value = ''; autoResize(welcomeInput); }
+    // 欢迎页文本草稿保留：输入框是常驻 DOM，hide/show 不丢值，此处不再无条件清空
+    // （该清空曾是「主页输入切页再回来就丢」的唯一根因）；已发送内容在发送时由
+    // clearInput(fromWelcome) 清掉，不会复活。
     if (typeof forgetActiveSession === 'function') forgetActiveSession();
     SESSION_ID = (typeof newSessionId === 'function') ? newSessionId() : ('work-' + Date.now().toString(36));
     // 新会话落盘跟随工作空间选择（getSessionCwd→X-Session-Cwd）：选了工作空间即落该项目区。
@@ -1029,6 +1111,12 @@ function switchToWelcomeMode() {
     if (typeof modelsLoaded !== 'undefined' && modelsLoaded) renderModelUI();
     // 切欢迎页时清空附件预览，避免跨视图残留
     if (typeof clearAttachmentPreview === 'function') clearAttachmentPreview();
+    // 恢复欢迎页附件草稿：须在 setActiveSession / clearAttachmentPreview 之后，
+    // 否则刚恢复的附件会被会话草稿交换再次清空
+    if (typeof restoreWelcomeDraftFiles === 'function') restoreWelcomeDraftFiles();
+
+    // 欢迎页活跃热力图：回欢迎页时刷新一次（会话数据可能刚变化）
+    if (typeof window.refreshWelcomeActivity === 'function') window.refreshWelcomeActivity();
 }
 
 /* ===== Auto-resize ===== */
@@ -1497,16 +1585,14 @@ function getFileIcon(fileName) {
 // 全局队列处理状态
 var _queueProcessing = {}; // { sessionId: boolean }
 
-/* 输入框上方的 chip 容器（#chatTodoChipWrap）同时承载 todo chip、变更 chip、
+/* 输入框上方的 chip 容器（#chatTodoChipWrap）同时承载 todo chip、
    queue chip 与执行中的键位提示条，任一可见即应显示该容器。
-   由 app-todos.js / app-file-changes.js / app-base.js / 本模块分别置位后统一汇算。 */
+   由 app-todos.js / app-base.js / 本模块分别置位后统一汇算。 */
 window._queueChipVisible = false;
-window._fileChangesChipVisible = false;
 function updateChipWrapVisibility() {
     var $wrap = $('#chatTodoChipWrap');
     if (!$wrap.length) return;
-    var visible = !!window._queueChipVisible || !!window._todoChipVisible || !!window._runHintVisible
-        || !!window._fileChangesChipVisible;
+    var visible = !!window._queueChipVisible || !!window._todoChipVisible || !!window._runHintVisible;
     $wrap.css('display', visible ? 'flex' : 'none');
 }
 window.updateChipWrapVisibility = updateChipWrapVisibility;
@@ -1657,16 +1743,39 @@ async function processNextQueuedMessage(sessionId) {
     updateMessageQueueUI();
 
     var text = item.content || '';
+    var imagePaths = item.imagePaths || [];
+    var filePaths = item.filePaths || [];
+
+    // 队列条目持久化的是【已落盘】的会话内相对路径（附件在入队那一刻就传到了 uploads/），
+    // 这里合成按路径引用的附件条目，postChatInput 走 attachmentPaths 分支，
+    // 后端从会话目录读回同一份文件——与立即发送共用同一套附件语义。
+    var queuedFiles = [];
+    for (var qi = 0; qi < imagePaths.length; qi++) {
+        queuedFiles.push({ path: imagePaths[qi], attachmentsType: 'image' });
+    }
+    for (var qf = 0; qf < filePaths.length; qf++) {
+        queuedFiles.push({ path: filePaths[qf], attachmentsType: 'file' });
+    }
+
+    // 纯附件条目 content 为空：气泡上补一个与正常发送同口径的占位文案，
+    // 否则气泡是空的，用户看不出这条队列项到底发了什么。发给后端的仍是原始 text，
+    // 空输入的兜底文案由后端统一生成，两条路径不各说一套。
+    var displayText = text;
+    if (!displayText && queuedFiles.length > 0) {
+        displayText = imagePaths.length > 0
+            ? GourdI18n.t('streaming.describe_images')
+            : GourdI18n.t('streaming.process_files');
+    }
+
     // 队列用户气泡也要乐观渲染；recovery 按 clientMessageId 跳过 user 回放的前提就是本地已展示。
-    appendUserMessage(guardSess, text, null, null);
+    appendUserMessage(guardSess, displayText, null, null, null,
+        { images: imagePaths.length, files: filePaths.length });
     guardSess._pendingClientMessageId = 'msg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
     guardSess._requestStartSeq = guardSess.lastEventSeq || 0;
     guardSess._awaitingSendAck = true;
     guardSess._sendAckConfirmed = false;
     guardSess._queueOriginItem = item;
-    // 队列目前持久化的是附件文件名而非 File/服务端 token，不能伪装成已携带附件；
-    // 文本占位会保留原有提示语义，附件可靠续发需后续单独升级队列协议。
-    sendWithFormDataGrouped(guardSess, text, []);
+    sendWithFormDataGrouped(guardSess, text, queuedFiles);
 
     // 等待目标会话发送完成（不能看全局 isStreaming，它属于当前活动会话）。
     await new Promise(function(resolve) {

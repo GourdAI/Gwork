@@ -42,7 +42,7 @@ body.code-mode .skills-view { display: none !important; }
 .skills-search-input-wrap { position: relative; display: flex; align-items: center; flex: 1; }
 .skills-search-icon { position: absolute; left: 10px; color: var(--text-secondary); pointer-events: none; }
 .skills-search-input-wrap input { width: 100%; padding: 7px 32px 7px 30px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-primary); color: var(--text-primary); font-size: 13px; outline: none; box-sizing: border-box; transition: border-color 0.2s, box-shadow 0.2s; }
-.skills-search-input-wrap input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb, 59,130,246), 0.15); }
+.skills-search-input-wrap input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.15); }
 .skills-search-input-wrap input::placeholder { color: var(--text-secondary); opacity: 0.6; }
 .skills-search-clear { position: absolute; right: 6px; background: none; border: none; color: var(--text-secondary); font-size: 16px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: color 0.15s; }
 .skills-search-clear:hover { color: var(--text-primary); background: var(--bg-hover); }
@@ -63,7 +63,7 @@ body.code-mode .skills-view { display: none !important; }
 .skill-item-meta { font-size: 10px; color: var(--text-secondary); margin-top: 3px; display: flex; gap: 10px; }
 .skill-item-actions { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
 .skill-install-btn { padding: 5px 14px; border-radius: 6px; font-size: 11px; font-weight: 500; cursor: pointer; border: 1px solid var(--accent); background: transparent; color: var(--accent); transition: all 0.2s; }
-.skill-install-btn:hover { background: var(--accent); color: #fff; transform: translateY(-1px); box-shadow: 0 2px 6px rgba(var(--accent-rgb, 59,130,246), 0.3); }
+.skill-install-btn:hover { background: var(--accent); color: var(--accent-contrast); transform: translateY(-1px); box-shadow: 0 2px 6px rgba(var(--accent-rgb), 0.3); }
 .skill-install-btn.installed { border-color: var(--color-success); color: var(--color-success); cursor: default; background: transparent; }
 .skill-install-btn.installed:hover { background: transparent; color: var(--color-success); transform: none; box-shadow: none; }
 .skill-install-btn.installing { opacity: 0.6; cursor: wait; }
@@ -85,6 +85,6 @@ body.code-mode .skills-view { display: none !important; }
 .skill-install-dropdown { position: absolute; right: 0; top: 100%; min-width: var(--dropdown-w-sm); background: var(--bg-sidebar); border: 1px solid var(--border-color); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.15); z-index: 100; padding: 4px 0; opacity: 0; visibility: hidden; transform: translateY(-4px); transition: opacity 0.12s ease, transform 0.12s ease, visibility 0s 0.12s; pointer-events: none; }
 .skill-install-dropdown.active { opacity: 1; visibility: visible; transform: translateY(0); transition: opacity 0.12s ease, transform 0.12s ease, visibility 0s 0s; pointer-events: auto; }
 .skill-install-dropdown-loading { padding: 8px 14px; font-size: 11px; color: var(--text-secondary); }
-.skill-install-mount-option { padding: 7px 14px; font-size: 12px; color: var(--text-primary); cursor: pointer; transition: background 0.1s; white-space: nowrap; }
-.skill-install-mount-option:hover { background: var(--bg-hover); color: var(--accent); }
+.skill-install-scope-option { padding: 7px 14px; font-size: 12px; color: var(--text-primary); cursor: pointer; transition: background 0.1s; white-space: nowrap; }
+.skill-install-scope-option:hover { background: var(--bg-hover); color: var(--accent); }
 

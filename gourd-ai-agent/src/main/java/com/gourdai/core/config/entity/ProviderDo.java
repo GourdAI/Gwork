@@ -49,12 +49,6 @@ public class ProviderDo implements Serializable {
     private boolean enabled = true;
 
     /**
-     * 是否为内置连接（如官方托管入口 GWork）。
-     * 内置连接不可删除，名称与 API 地址锁定不可修改；密钥、超时、作用域、模型列表等仍可编辑。
-     */
-    private boolean builtin = false;
-
-    /**
      * 作用域：global（全局）/ local（工作区）
      */
     private String scope = AgentFlags.SCOPE_USER;

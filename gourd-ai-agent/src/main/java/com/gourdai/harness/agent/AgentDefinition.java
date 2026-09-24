@@ -21,6 +21,7 @@ import org.noear.snack4.ONode;
 import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.permission.ToolPermission;
+import com.gourdai.ai.talents.registry.TalentScope;
 import com.gourdai.ai.util.Markdown;
 import com.gourdai.ai.util.MarkdownUtil;
 import org.noear.solon.core.util.Assert;
@@ -45,9 +46,12 @@ public class AgentDefinition {
     protected String systemPrompt;
 
     /**
-     * 所属挂载别名（用于按挂载批量移除），null 表示内置代理
+     * 所属作用域（全局区 / 工作区），null 表示内置代理（由 classpath 资源加载）。
+     *
+     * <p>原为「所属挂载别名」字符串；挂载点功能移除后改为 {@link TalentScope}。
+     * 用途不变：区分内置与扫描来的自定义代理，刷新时只回收后者。</p>
      */
-    private String mountAlias;
+    private TalentScope scope;
 
     /**
      * 复制
@@ -97,12 +101,12 @@ public class AgentDefinition {
         this.systemPrompt = systemPrompt;
     }
 
-    public String getMountAlias() {
-        return mountAlias;
+    public TalentScope getScope() {
+        return scope;
     }
 
-    public void setMountAlias(String mountAlias) {
-        this.mountAlias = mountAlias;
+    public void setScope(TalentScope scope) {
+        this.scope = scope;
     }
 
     /**

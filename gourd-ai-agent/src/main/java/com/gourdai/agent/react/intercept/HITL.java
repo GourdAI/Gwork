@@ -42,14 +42,6 @@ public class HITL {
     public static final String LAST_INTERVENED = "_last_intervened_";
 
     /**
-     * 清理状态
-     */
-    public static void clear(AgentSession session, HITLTask task) {
-        session.getContext().remove(LAST_INTERVENED);
-        session.getContext().remove(DECISION_PREFIX + task.getToolName());
-    }
-
-    /**
      * 提交人工决策
      *
      * @param session  Agent 会话

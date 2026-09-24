@@ -7,6 +7,10 @@
     <button class="code-chat-expand-btn" id="codeChatExpandBtn" title="展开对话栏" data-i18n-title="code.expandChat">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
+    <!-- chat 模式：聊天与审查查看器之间的独立分隔手柄（仅 viewer-open 时显示） -->
+    <div class="chat-review-resize-handle" id="chatReviewResizeHandle"
+         role="separator" aria-orientation="vertical" aria-label="调整聊天区和审查查看器宽度"
+         aria-valuemin="300" aria-valuemax="300" aria-valuenow="300" tabindex="0"></div>
     <!-- Code 模式：中间编辑器列（Git diff/文件浮层 + 编辑器 + 底部终端共享一列）。
          chat 模式下该容器为 display:contents（浮层仍直接铺满 main-area，行为与改造前一致）。 -->
     <div class="code-editor-col">

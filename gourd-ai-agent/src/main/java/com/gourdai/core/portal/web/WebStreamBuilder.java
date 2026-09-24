@@ -42,6 +42,7 @@ import com.gourdai.agent.util.AgentUtil;
 import com.gourdai.ai.chat.ChatModel;
 import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.permission.AccessMode;
 import com.gourdai.harness.talents.cli.TerminalTalent;
 import com.gourdai.harness.talents.cli.TodoTalent;
 import com.gourdai.harness.agent.WebToolVisibilityPolicy;
@@ -278,6 +279,12 @@ public class WebStreamBuilder {
                     // 刻意不写入会话上下文（避免污染用户前台选择），若不透传，TaskTalent 只能读到会话级
                     // 旧值，于是主代理用 override（如 high）、子代理读到 null→OFF 而静默降档。
                     o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, thinkingDepth);
+
+                    // 访问控制档位（会话级）同样经 toolContext 透传给工具链：TerminalTalent 的空间隔离
+                    // 与命令审批都按它折算。该键与 Prompt 属性键同值（__accessMode），ReActTrace 激活
+                    // Talent 时会把 toolContext 合并进 Prompt.attrs，故提示词与真实放行天然同源。
+                    // 读不到 / 脏值一律由 normalize 回落默认档（fail-safe）。
+                    o.toolContextPut(AccessMode.ATTR_KEY, AccessMode.normalize(session.getContext().getAs(AccessMode.CTX_KEY)).code());
 
                     // TerminalTalent 在 cwd 为空时本就回退 engine workspace；显式注入可让文件变更账本
                     // 与工具使用完全相同的规范根，并覆盖 Web 主 Agent 的全局会话。

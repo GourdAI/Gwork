@@ -210,6 +210,7 @@ function evictInactiveSessions() {
         sess._fileChangesLatestRun = null;
         sess._fileChangesReconciledAt = {};
         sess._fileChangesReplayPending = null;
+        sess._fchRenderPending = null;
     }
 }
 
@@ -217,8 +218,10 @@ function evictInactiveSessions() {
    输入框与附件区都是全局单例 DOM，而会话是多路的：不按会话存取草稿，在 A 输入到一半切到 B，
    内容会跟着显示在 B，且切回 A 也回不来。
    约定：chatInput 始终持有 activeSessionId 的草稿——切走时存回原会话，切入时取出目标会话的。
-   欢迎页输入框不参与：每次回欢迎页都会生成全新 sessionId（switchToWelcomeMode），草稿无处可归，
-   由 clearInput / switchToWelcomeMode 统一清空。
+   欢迎页文本不走按会话草稿：输入框是常驻 DOM，hide/show 不丢值，未发送内容天然保留，
+   只在发送消费后清空（clearInput(fromWelcome)）。
+   欢迎页附件另走全局槽 welcomeDraftFiles：pendingFiles 是全局单例，切会话时会被存进
+   「欢迎页临时会话」的 draftFiles 孤儿化，故在模式切换边界显式 stash/restore（见下）。
 
    注：不能按 inChatMode 判断该读哪个输入框——switchToWelcomeMode 先置 inChatMode=false 再调
    setActiveSession，此时读到的会是欢迎框而非离开会话的真实草稿。 */
@@ -269,6 +272,42 @@ function releaseSessionDraft(sess) {
     if (!sess) return;
     releaseSessionDraftFiles(sess);
     sess.draft = '';
+}
+
+/* ===== Welcome-page Attachment Draft =====
+   欢迎页输入区可见期间（welcomeFilesActive），pendingFiles 归属欢迎页；离开欢迎页
+   （切会话/发送/新建对话）前 stash 进槽，回欢迎页时 restore，避免被 setActiveSession
+   存进临时会话 draftFiles 后孤儿化回收。
+   槽仅在「已 stash」态非空（此时 welcomeFilesActive 必为 false），两态互斥，保证同一批
+   附件对象不同时被槽与某会话 draftFiles 持有而被 pruneSessionDrafts 误释放。 */
+var welcomeDraftFiles = null;
+var welcomeFilesActive = false;
+
+function stashWelcomeDraftFiles() {
+    if (!welcomeFilesActive) return;
+    welcomeFilesActive = false;
+    if (pendingFiles.length === 0) return;
+    releaseWelcomeDraftFiles();
+    welcomeDraftFiles = pendingFiles.slice();
+    pendingFiles.length = 0;
+    if (typeof renderAttachments === 'function') renderAttachments();
+}
+
+function restoreWelcomeDraftFiles() {
+    if (!welcomeDraftFiles) return;
+    pendingFiles.length = 0;
+    for (var i = 0; i < welcomeDraftFiles.length; i++) pendingFiles.push(welcomeDraftFiles[i]);
+    welcomeDraftFiles = null;
+    welcomeFilesActive = true;
+    if (typeof renderAttachments === 'function') renderAttachments();
+}
+
+function releaseWelcomeDraftFiles() {
+    if (!welcomeDraftFiles) return;
+    for (var i = 0; i < welcomeDraftFiles.length; i++) {
+        if (typeof releaseAttachmentData === 'function') releaseAttachmentData(welcomeDraftFiles[i]);
+    }
+    welcomeDraftFiles = null;
 }
 
 /* 草稿 LRU 回收：与 evictInactiveSessions 分开实现，因为后者会跳过「容器为空」的会话
@@ -360,6 +399,15 @@ function deactivateSession() {
 }
 
 /* ===== Helpers ===== */
+/* 文件线性图标：内联 SVG 以 currentColor 跟随主题色；📎 emoji 在深色主题/无 emoji 字体下
+   渲染为黑框轮廓字形，与芯片样式冲突，故弃用 */
+function fileIconSvg(size) {
+    var s = size || 14;
+    return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 16 16" fill="none" aria-hidden="true">'
+        + '<path d="M4 1.5h4.75L12.5 5.75V13.5a1 1 0 01-1 1H4a1 1 0 01-1-1V2.5a1 1 0 011-1z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>'
+        + '<path d="M8.75 1.5v4.25H12.5" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+}
+
 /* 滚动意图判定与统一置底（唯一的 messagesWrap 外层滚动入口）
    抖动教训（三条，缺一不可）：
    1) 调度期预清 userScrolledUp（旧 `if (force) userScrolledUp = false;`）会让调度与落地
@@ -683,15 +731,20 @@ function getInputText() {
     if (inChatMode) return chatInput.value.trim();
     return welcomeInput.value.trim();
 }
-function clearInput() {
-    // 两个输入框都要清：从欢迎页发出的首条消息会先 switchToChatMode() 把 inChatMode 置为 true，
-    // 只按当前模式清就会漏掉 welcomeInput，其原文一直残留到下次回欢迎页
-    // （表现为「新建对话带上了上次的内容」）。
+function clearInput(fromWelcome) {
+    // chatInput 必清；welcomeInput 仅在本次发送源自欢迎页时清：
+    // 欢迎页草稿现在要跨页保留，会话模式发送若连带清空，会把欢迎页未发送的草稿一起丢掉。
+    // 欢迎页发送会先 switchToChatMode() 把 inChatMode 置为 true，按当前模式判断不了来源，
+    // 须由调用方显式传入（sendMessage 在切换前捕获）。
     // Go through autoResize uniformly: if there is no manual height, revert to the default min-height; if there is, preserve the height selected by the user
     chatInput.value = '';
     autoResize(chatInput);
-    welcomeInput.value = '';
-    autoResize(welcomeInput);
+    if (fromWelcome) {
+        welcomeInput.value = '';
+        autoResize(welcomeInput);
+        // 发送已消费欢迎页附件（switchToChatMode 将其 stash 进槽），同步释放槽内大对象
+        releaseWelcomeDraftFiles();
+    }
     // 同步清掉当前会话的草稿，否则发送后切走再切回，已发送的内容会被再恢复出来
     if (activeSessionId && sessionMap[activeSessionId]) {
         sessionMap[activeSessionId].draft = '';

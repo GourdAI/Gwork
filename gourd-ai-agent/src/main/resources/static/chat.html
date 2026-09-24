@@ -1,26 +1,16 @@
 <!-- chat.html — Chat 模式界面片段（欢迎页 + 对话视图）。由 index.html 的 bootstrap 注入到 .main-area。 -->
 <template data-mount=".main-area">
     <!-- Welcome View -->
-    <div class="welcome-view" id="welcomeView">
+    <div class="welcome-view welcome-compact" id="welcomeView">
         <a class="welcome-avatar" href="https://www.gourdwork.com/" target="_blank" rel="noopener noreferrer" title="了解更多关于 GWork" data-i18n-title="app.learn_more">
             <img src="/img/favicon.png" alt="GWork" />
         </a>
         <div class="welcome-title" id="welcomeTitle" data-i18n="app.welcome_title">你好，我是 GWork ！</div>
-        <div class="welcome-sub" data-i18n="app.welcome_sub">需要什么帮助吗?</div>
-        <!-- Chat 模式工作空间选择器（会话按所选工作空间隔离存储；不选 = 默认工作区） -->
-        <div class="workspace-selector-row">
-            <div class="project-selector workspace-selector">
-                <div class="project-selector-current workspace-selector-current" data-i18n-title="app.chat_workspace.switch">
-                    <svg class="workspace-folder-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                    <button type="button" class="workspace-selector-clear" title="清除选择" data-i18n-title="app.chat_workspace.clear">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                    </button>
-                    <span class="project-selector-name workspace-selector-name"></span>
-                    <!-- 箭头用内联 SVG：layui 图标字体首帧未就绪时会渲染成缺字方块（Tauri/WebView2 首启可见） -->
-                    <svg class="workspace-selector-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
-                </div>
-                <div class="project-dropdown workspace-dropdown"></div>
-            </div>
+        <!-- 活跃热力图卡片（与「使用统计」同口径，固定 26 周窗口）：位于 hero 与输入框之间；
+             数据由 app-welcome-activity.js 拉取 /web/chat/usage/stats 渲染，全零或失败时整卡隐藏 -->
+        <!-- 无标题无图例：欢迎页视觉重心是输入框与品牌标识，热力图只做安静的背景条 -->
+        <div class="welcome-activity-card" id="welcomeActivityCard" style="display:none">
+            <div class="welcome-activity-body" id="welcomeActivityBody"></div>
         </div>
         <div class="welcome-input-box" id="welcomeDropZone">
             <div class="drop-overlay" id="welcomeDropOverlay">
@@ -101,6 +91,35 @@
                     </button>
                 </div>
             </div>
+            <!-- 输入框托盘条（参照稿形态）：项目选择 + 权限档位两个「无边框文本按钮」并排，
+                 挂在输入框正下方、与输入框同宽同圆角，视觉上像输入框的底座。
+                 项目选择器：会话按所选工作空间隔离存储；不选 = 默认工作区（code.css 的
+                 .workspace-selector-* 基础样式仍复用，仅外壳从独立行改为托盘内联）。
+                 权限档位：会话级 default/full，切到完全访问需二次确认（app-access-mode.js）；
+                 两套 DOM（欢迎页/对话页）id 不同，避免同页重复 id。 -->
+            <div class="composer-tray">
+                <div class="project-selector workspace-selector composer-tray-item">
+                    <div class="project-selector-current workspace-selector-current" data-i18n-title="app.chat_workspace.switch">
+                        <svg class="workspace-folder-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        <button type="button" class="workspace-selector-clear" title="清除选择" data-i18n-title="app.chat_workspace.clear">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        </button>
+                        <span class="project-selector-name workspace-selector-name"></span>
+                        <!-- 箭头用内联 SVG：layui 图标字体首帧未就绪时会渲染成缺字方块（Tauri/WebView2 首启可见） -->
+                        <svg class="workspace-selector-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                    </div>
+                    <div class="project-dropdown workspace-dropdown"></div>
+                </div>
+                <div class="access-selector composer-tray-item" id="welcomeAccessSelector">
+                    <div class="access-selector-current" id="welcomeAccessCurrent" data-i18n-title="app.access_title">
+                        <svg class="access-icon access-icon-shield" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        <svg class="access-icon access-icon-alert" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                        <span class="access-label" data-i18n="app.access_default">默认权限</span>
+                        <svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                    </div>
+                    <div class="access-dropdown" id="welcomeAccessDropdown"></div>
+                </div>
+            </div>
         </div>
         <!-- 消息执行队列 -->
         <div id="welcome-message-queue-container" style="display:none;">
@@ -143,9 +162,6 @@
                     <span class="todo-chip-label" data-i18n="app.tasks">任务</span>
                     <span class="todo-badge" id="todoBadge" style="display:none">0</span>
                 </button>
-                <!-- 本轮文件变更：点击查看变更列表；无变更时隐藏（由 app-file-changes.js 控制显隐）。
-                     位置紧随「任务」chip，形态同族（图标 + 文案 + 数量徽标 + 增删统计）。 -->
-                <button class="file-changes-chip" id="chatFileChangesChip" style="display:none" data-i18n-title="file_changes.title"></button>
                 <button class="queue-chip" id="chatQueueChip" style="display:none" data-i18n-title="app.view_queue">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
                     <span class="queue-chip-label" data-i18n="app.queue">队列</span>
@@ -222,6 +238,16 @@
                                 </button>
                             </div>
                         </div>
+                        <!-- 访问控制档位（会话级）：结构同欢迎页 .access-selector，id 前缀换为 chat；见 composer-tray 注释。 -->
+                        <div class="access-selector" id="chatAccessSelector">
+                            <div class="access-selector-current" id="chatAccessCurrent" data-i18n-title="app.access_title">
+                                <svg class="access-icon access-icon-shield" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                <svg class="access-icon access-icon-alert" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                                <span class="access-label" data-i18n="app.access_default">默认权限</span>
+                                <svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                            </div>
+                            <div class="access-dropdown" id="chatAccessDropdown"></div>
+                        </div>
                         <input type="file" class="attach-input" id="chatAttachInput" multiple accept="*/*"/>
                         <input type="file" class="attach-input" id="chatImageInput" multiple accept="image/*"/>
                     </div>
@@ -278,16 +304,6 @@
                     </div>
                     <div class="todo-list" id="todoList"></div>
                     <div class="todo-empty" id="todoEmpty" style="display:none" data-i18n="app.no_tasks">当前会话暂无任务清单</div>
-                </div>
-            </div>
-            <!-- 本轮文件变更面板（悬浮在 chip 按钮上方；点击变更 chip 展开，DOM 靠后=最上层） -->
-            <div class="file-changes-float-panel" id="chatFileChangesPanel" style="display:none">
-                <div class="file-changes-panel">
-                    <div class="file-changes-panel-header">
-                        <div class="file-changes-panel-title" data-i18n="file_changes.title">本轮文件变更</div>
-                        <span class="file-changes-panel-actions" id="fileChangesPanelActions"></span>
-                    </div>
-                    <div class="file-changes-panel-body" id="fileChangesPanelBody"></div>
                 </div>
             </div>
             <!-- 消息执行队列（悬浮在 chip 按钮上方，DOM 最后=最上层） -->

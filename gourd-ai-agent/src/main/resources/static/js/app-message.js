@@ -22,7 +22,9 @@ var THINKING_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stro
 var AGENT_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 4.2V2.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="1.9" r=".8" fill="currentColor" stroke="none"/><rect x="2.6" y="4.2" width="10.8" height="8.2" rx="2.4" stroke="currentColor" stroke-width="1.2"/><circle cx="5.9" cy="8.3" r=".9" fill="currentColor" stroke="none"/><circle cx="10.1" cy="8.3" r=".9" fill="currentColor" stroke="none"/><path d="M6.5 10.6h3" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>';
 
 /* ===== Message Rendering (Session-Aware) ===== */
-function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt) {
+/* attachCounts：{images, files} 数量徽标。队列出队与插话降级重发手里只有会话内相对路径，
+   本地没有 File/dataUrl，渲染不出缩略图；显示数量即可让用户确认附件确实带上了。 */
+function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt, attachCounts) {
     var row = $('<div>').addClass('msg-row user')[0];
     row.setAttribute('data-user-msg-idx', sess.userMsgCounter++);
     row.innerHTML = '<div class="user-msg-col"><div class="msg-bubble"></div><div class="user-msg-footer"><span class="msg-time user-msg-time"></span><button class="user-copy-btn" title="' + GourdI18n.t('chat.copy') + '">' + COPY_SVG + '</button></div></div>';
@@ -43,11 +45,25 @@ function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt
     if (fileAttachments && fileAttachments.length > 0) {
         for (var j = 0; j < fileAttachments.length; j++) {
             var tag = $('<div>').addClass('user-attach-file')[0];
-            tag.innerHTML = '<span>📎</span>'
+            tag.innerHTML = '<span class="user-attach-file-icon">' + fileIconSvg(14) + '</span>'
                 + '<span class="user-attach-file-name">' + escapeHtml(fileAttachments[j].name) + '</span>'
                 + '<span class="user-attach-file-size">(' + formatFileSize(fileAttachments[j].size) + ')</span>';
             $(bubble).append(tag);
         }
+    }
+
+    // 已落盘附件的数量徽标（队列出队等只有相对路径的场景）
+    if (attachCounts && (attachCounts.images || attachCounts.files)) {
+        var countsWrap = $('<div>').addClass('user-attach-counts')[0];
+        if (attachCounts.images) {
+            countsWrap.appendChild($('<span>').addClass('user-attach-badge')
+                .text(GourdI18n.t('queue.images', { n: attachCounts.images }))[0]);
+        }
+        if (attachCounts.files) {
+            countsWrap.appendChild($('<span>').addClass('user-attach-badge')
+                .text(GourdI18n.t('queue.files', { n: attachCounts.files }))[0]);
+        }
+        $(bubble).append(countsWrap);
     }
 
     var span = $('<span>').addClass('user-msg-text md-content')[0];
@@ -130,6 +146,24 @@ function appendSteerNote(sess, item) {
     note.innerHTML = '<span class="steer-note-badge">' + escapeHtml(GourdI18n.t('streaming.steer_tag')) + '</span>'
         + '<span class="steer-note-text"></span>';
     $(note).find('.steer-note-text').text(text);
+
+    // 插话携带的附件：后端只回传相对路径，本地没有 File，显示数量徽标（与队列出队气泡同口径）。
+    // 历史回放走同一个 steer_applied 事件，因此刷新后徽标依然能还原。
+    var steerImgs = (item.imagePaths || []).length;
+    var steerFiles = (item.filePaths || []).length;
+    if (steerImgs || steerFiles) {
+        var attachWrap = $('<div>').addClass('steer-note-attachments')[0];
+        if (steerImgs) {
+            attachWrap.appendChild($('<span>').addClass('user-attach-badge')
+                .text(GourdI18n.t('queue.images', { n: steerImgs }))[0]);
+        }
+        if (steerFiles) {
+            attachWrap.appendChild($('<span>').addClass('user-attach-badge')
+                .text(GourdI18n.t('queue.files', { n: steerFiles }))[0]);
+        }
+        note.appendChild(attachWrap);
+    }
+
     insertBeforeActions(sess, note);
 
     if (steerNoteShouldCollapse(text)) {
@@ -536,6 +570,7 @@ function insertBeforeActions(sess, el) {
     var bubble = sess.currentBubbleEl.parentNode;
     var footer = $(bubble).find('.msg-meta-row').first()[0] || $(bubble).find('.msg-actions').first()[0];
     if (footer) $(footer).before(el);
+    else $(bubble).append(el);
 }
 
 function finishThinkingBlock(sess) {
@@ -2542,6 +2577,130 @@ function restoreHitlCardPending(sess, card) {
    + sessionId；本地流式态处理与 handleHitlResponse 同构（进入流式态→POST→失败回退）。 */
 
 /* ---- 问答卡状态机（纯函数；行为测试整段提取执行，区块内不得引用 DOM/全局） ---- */
+
+/* 选项呈现整形阈值与词表。
+
+   取证（146 个会话 / 66 张卡 / 142 题 / 419 个选项）：label 中位 40 字、p90 111、最长 321，
+   379/419（90%）是「标题：解释」整段塞一起的形态，另有 80 个 label 自带「推荐」字样而
+   recommended 又同时为真；detail 中位 115 字、p90 280、最长 794。原样渲染就是一屏长段落，
+   用户「选个选项得看半天」，推荐标记还会重复出现两次。
+
+   整形只作用于展示：出站答案与选中判定一律用【原始 label】（见 applyQuestionOptionAnswer
+   写入的 selectedLabel），故答案协议、后端 formatAnswerText 与既有契约测试全部不受影响。 */
+/* 标题长度区间（码点）。下限取 2 而不是 4：取证里「方案A——…」「A｜…」是高频形态，
+   「方案A」只有 3 字却是有意义的标题，下限过大会把它们整段不拆地渲染成长行。
+   单字标题仍不合格（劈出「A」等于没有标题），序号徽章已经承担编号职责。 */
+var QUESTION_LABEL_TITLE_MIN = 2;
+var QUESTION_LABEL_TITLE_MAX = 24;
+/* 候选分隔符：冒号、竖线、破折号、" - "。逗号/分号刻意不入表——它们常出现在标题内部
+   （如「方案一 · 止血（最小改动，约 2 个文件）」），按逗号劈会把标题切碎。 */
+var QUESTION_LABEL_SEPARATORS = ['：', ':', '｜', '|', '——', '—', ' - '];
+/* 标题里自带的推荐字样：只认「推荐/推薦/recommended/rec」，不认「建议」——
+   后者常是正文语义（如「采纳建议」），剥掉会改变含义。仅在 recommended 为真时才剥。 */
+var QUESTION_RECO_LEAD_RE = /^[\s|｜·•\-\u2014\u2013]*[(\[【（]?\s*(?:推荐|推薦|recommended|rec(?![a-z]))\s*[)\]】）]?[\s:：|｜·•\-\u2014\u2013]*/i;
+var QUESTION_RECO_TAIL_RE = /[\s,，、|｜·•\-\u2014\u2013]*[(\[【（]?\s*(?:推荐|推薦|recommended|rec(?![a-z]))\s*[)\]】）]?[\s.。!！?？]*$/i;
+/* detail 折叠阈值：超过任一即默认收起（取证 p50=115，阈值取 120 让约半数长说明收起）。 */
+var QUESTION_DETAIL_COLLAPSE_CHARS = 120;
+var QUESTION_DETAIL_COLLAPSE_LINES = 3;
+
+/* 字数按码点计（CJK 一字一计），与 String.length 在代理对上不同；仅用于阈值判定。 */
+function questionTextLen(text) {
+    var s = (text == null) ? '' : String(text);
+    return (typeof Array.from === 'function') ? Array.from(s).length : s.length;
+}
+
+/* 把「标题：解释」形态的长 label 拆成短标题 + 说明。
+   取【最靠前的、能让标题落在 4~24 字区间】的分隔点：最靠前保证标题尽量短（可扫读），
+   区间下限避免劈出「A」这种无意义标题，上限避免把长句从中间截断。
+   找不到合格分隔点时整段作标题——短 label 本就不需要拆。 */
+function splitQuestionLabel(label) {
+    var text = (label == null) ? '' : String(label);
+    var bestAt = -1;
+    var bestSep = '';
+    for (var i = 0; i < QUESTION_LABEL_SEPARATORS.length; i++) {
+        var sep = QUESTION_LABEL_SEPARATORS[i];
+        var at = text.indexOf(sep);
+        if (at <= 0) continue;
+        var headLen = questionTextLen(text.slice(0, at));
+        if (headLen < QUESTION_LABEL_TITLE_MIN || headLen > QUESTION_LABEL_TITLE_MAX) continue;
+        if (bestAt < 0 || at < bestAt) { bestAt = at; bestSep = sep; }
+    }
+    if (bestAt < 0) return { title: text, desc: '' };
+    // 说明开头若紧跟破折号/空白（「标题：—— 说明」形态），一并吃掉
+    var desc = text.slice(bestAt + bestSep.length).replace(/^[\s\-\u2014\u2013]+/, '');
+    return { title: text.slice(0, bestAt), desc: desc };
+}
+
+/* 剥掉标题里自带的推荐字样（配合 recommended 胶囊去重）。
+   剥完为空则回退原标题（整段只有「推荐」二字时不能把标题剥没）；
+   剥完可能留下悬空分隔符（如「B｜推荐」→「B｜」），末尾统一清理。 */
+function stripQuestionRecoWord(title) {
+    var raw = (title == null) ? '' : String(title);
+    var out = raw.replace(QUESTION_RECO_LEAD_RE, '');
+    if (!out.trim()) out = raw;
+    out = out.replace(QUESTION_RECO_TAIL_RE, '');
+    if (!out.trim()) out = raw;
+    out = out.replace(/[\s:：|｜·•\-\u2014\u2013]+$/, '');
+    return out.trim() || raw.trim();
+}
+
+/* 选项的展示视图：{title, desc, label}。label 始终是原始值（出站与选中判定用它）。
+   模型已给 description（或旧字段 detail）时直接采用、绝不改动 label；否则按分隔符兜底拆分，
+   保证旧模型/存量会话的长 label 同样能扫读。 */
+function questionOptionView(option) {
+    var o = option || {};
+    var label = (o.label == null) ? '' : String(o.label);
+    var rawDesc = (o.description == null) ? o.detail : o.description;
+    var desc = (rawDesc == null) ? '' : String(rawDesc).trim();
+    var title = label;
+    if (!desc) {
+        var split = splitQuestionLabel(label);
+        title = split.title;
+        desc = split.desc;
+    }
+    if (o.recommended) {
+        title = stripQuestionRecoWord(title);
+        /* 剥推荐字样可能把标题剥塌（真实形态「B｜推荐：提示词硬规则 + A」→ 拆出「B｜推荐」
+           → 剥完只剩「B」），一个字的标题等于没有标题。此时真正的标题在说明的第一句里，
+           取过来顶上，剩余说明继续作 desc —— 编号信息不丢（序号徽章 + 出站 label 原文都在）。 */
+        if (questionTextLen(title) < QUESTION_LABEL_TITLE_MIN && desc) {
+            var lifted = liftFirstSentence(desc);
+            if (questionTextLen(lifted.head) >= QUESTION_LABEL_TITLE_MIN) {
+                title = lifted.head;
+                desc = lifted.rest;
+            }
+        }
+        /* 说明末尾的推荐字样也要剥（真实形态「方案B：补齐信号源，根治（推荐）」拆分后
+           desc 仍以「（推荐）」收尾）。推荐已由强调色胶囊统一表达一次，重复出现既冗余
+           又让胶囊失去意义。只剥末尾括号形态，不动句中的「推荐」（那可能是正文语义）。 */
+        if (desc) {
+            var trimmedDesc = desc.replace(/[\s,，、]*[(\[【（]\s*(?:推荐|推薦|recommended|rec(?![a-z]))\s*[)\]】）][\s.。!！?？]*$/i, '');
+            if (trimmedDesc.trim()) desc = trimmedDesc.trim();
+        }
+    }
+    return { title: title, desc: desc, label: label };
+}
+
+/* 取出第一句作标题，其余作说明。按句末标点切；第一句仍超长时（说明没有句子结构）
+   返回空 rest 由调用方按长度复核，绝不硬截断语义。 */
+function liftFirstSentence(desc) {
+    var text = (desc == null) ? '' : String(desc).trim();
+    var m = text.match(/^(.*?[。．.！!？?；;\n])\s*([\s\S]*)$/);
+    if (m && m[1]) {
+        // 句末标点保留在标题里会显得冗余，去掉后不影响语义
+        return { head: m[1].replace(/[。．.！!？?；;\n]+$/, '').trim(), rest: (m[2] || '').trim() };
+    }
+    return { head: text, rest: '' };
+}
+
+/* 题面补充说明是否需要折叠（默认收起 + 「展开」按钮）。空说明不折叠。 */
+function questionDetailShouldCollapse(detail) {
+    var t = (detail == null) ? '' : String(detail);
+    if (!t.trim()) return false;
+    if (questionTextLen(t) > QUESTION_DETAIL_COLLAPSE_CHARS) return true;
+    return t.split('\n').length > QUESTION_DETAIL_COLLAPSE_LINES;
+}
+
 function normalizeQuestionArgs(args) {
     var list = (args && args.questions) || [];
     var out = [];
@@ -2551,8 +2710,13 @@ function normalizeQuestionArgs(args) {
         var rawOpts = q.options || [];
         for (var j = 0; j < rawOpts.length; j++) {
             var o = rawOpts[j] || {};
+            /* description 为可选新增字段；detail 是模型自发用过的别名（取证：419 个选项里
+               7 个传 description、3 个传 detail），一并收下——旧实现只取 label/recommended，
+               这些已经带上说明的选项反而被丢掉，等于惩罚了写得最规范的调用。 */
+            var rawDesc = (o.description == null) ? o.detail : o.description;
             opts.push({
                 label: (o.label == null) ? '' : String(o.label),
+                description: (rawDesc == null) ? '' : String(rawDesc).trim(),
                 recommended: !!o.recommended
             });
         }
@@ -2565,14 +2729,16 @@ function normalizeQuestionArgs(args) {
     return out;
 }
 
+/* detailOpen：按题号记录「补充说明是否展开」（默认收起，长 detail 不该把选项顶到屏外）。
+   纯展示态，不入出站 payload；整卡重建时由它还原展开状态，不会因勾选/翻页而丢失。 */
 function createQuestionCardState(actionId, questions) {
     return {
         actionId: actionId || '',
         questions: questions || [],
         answers: {},
         drafts: {},
+        detailOpen: {},
         current: 0,
-        otherEditing: false,
         submitted: false
     };
 }
@@ -2691,7 +2857,6 @@ function applyQuestionOptionAnswer(state, index, label) {
         skipped: false,
         custom: false
     };
-    state.otherEditing = false;
     advanceQuestionCursor(state);
 }
 
@@ -2707,7 +2872,6 @@ function applyQuestionSupplement(state, index, text) {
     if (!sup && !sel) {
         // 既没选项也没补充：撤掉这道题的答案，回到未作答态（允许用户反悔清空）
         delete state.answers[index];
-        state.otherEditing = false;
         return;
     }
     state.answers[index] = {
@@ -2719,7 +2883,6 @@ function applyQuestionSupplement(state, index, text) {
         // 没点任何选项、纯手写 = 用户自定义回答；已点选项则 custom 保持 false
         custom: !sel && !!sup
     };
-    state.otherEditing = false;
 }
 
 /* 手写文本统一入口（卡片内补充行 Enter 与底部主输入框共用）：
@@ -2739,7 +2902,6 @@ function applyQuestionCustomAnswer(state, index, text) {
         index: index, text: val, selectedLabel: '', supplement: '', skipped: false, custom: true
     };
     state.drafts[index] = val;
-    state.otherEditing = false;
     advanceQuestionCursor(state);
 }
 
@@ -2748,7 +2910,6 @@ function skipQuestionAnswer(state) {
     var i = state.current;
     // 已有状态（已答/已跳过）的题只推进，不覆盖
     if (!state.answers[i]) state.answers[i] = skippedAnswer(i);
-    state.otherEditing = false;
     advanceQuestionCursor(state);
 }
 
@@ -2782,12 +2943,47 @@ function buildQuestionAnswersPayload(state) {
     return { answers: out };
 }
 
+/* 把一条答案整形为「内容区问答记录」的展示视图（纯函数）。
+   答案 text 可能是：① 点选选项 → 原始 label（可能拼了「（补充：…）」）；② 自定义 → 用户手写文本。
+   记录要可读，故对 ① 反查选项、用 questionOptionView 的短标题+说明呈现，并把补充单独拎出来；
+   ② 原样呈现。反查不到（旧数据/文本被改）时退回原文，绝不丢信息。 */
+function formatQuestionAnswerForRecord(question, answerItem) {
+    var a = answerItem || {};
+    var text = (a.text == null) ? '' : String(a.text);
+    if (a.skipped || !text.trim()) {
+        return { skipped: true, title: '', desc: '', supplement: '', custom: false };
+    }
+    var opts = (question && question.options) || [];
+    var supPrefix = '（补充：';
+    for (var i = 0; i < opts.length; i++) {
+        var label = (opts[i].label == null) ? '' : String(opts[i].label);
+        if (!label) continue;
+        var supplement = '';
+        if (text === label) {
+            supplement = '';
+        } else if (text.indexOf(label + supPrefix) === 0 && text.charAt(text.length - 1) === '）') {
+            supplement = text.slice(label.length + supPrefix.length, -1);
+        } else {
+            continue;
+        }
+        var view = questionOptionView(opts[i]);
+        return { skipped: false, title: view.title, desc: view.desc, supplement: supplement, custom: false };
+    }
+    // 自定义回答（或反查失败）：原样呈现
+    return { skipped: false, title: text, desc: '', supplement: '', custom: true };
+}
+
 /* ---- 问答卡 DOM 渲染 ---- */
 /* 卡片内联 SVG（currentColor 描边，禁止 layui 字体图标，见仓库图标硬约定） */
 var QUESTION_CARD_SVG_PREV = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>';
 var QUESTION_CARD_SVG_NEXT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
 var QUESTION_CARD_SVG_CLOSE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
 var QUESTION_CARD_SVG_EDIT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>';
+/* 下尖角：detail 展开/收起切换，展开态由 CSS 旋转 180° */
+var QUESTION_CARD_SVG_CHEVRON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+/* 内容区问答记录的图标：对话气泡 + 已确认对勾（表达「问答已闭环」，与 HITL 审批卡同层级）。
+   线框风格与全局图标约定一致：24 网格、1.6~2px 描边、currentColor。 */
+var QUESTION_RECORD_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/><polyline points="8.5 12.2 10.8 14.5 15.3 10"/></svg>';
 
 /* 底部按钮三态 → 文案键。源头在 questionSubmitMode，渲染与点击共用。 */
 var QUESTION_SUBMIT_MODE_KEYS = {
@@ -2859,12 +3055,15 @@ function bindQuestionCardEvents(host) {
         syncQuestionCard();
     });
 
-    // 「其他补充」行：点击切换为输入框（编辑中不响应，避免点击输入框触发重建）
-    $(host).on('click', '.question-card-other-row:not(.is-editing)', function() {
+    // detail 展开/收起：长补充说明默认收起（取证 p50=115 字），点「展开」看全文。
+    // 只重建当前卡，展开态记在 state.detailOpen[idx]，不受整卡重建影响。
+    $(host).on('click', '.question-card-detail-toggle', function() {
         var st = activeQuestionCardState();
-        if (!st || st.submitted) return;
-        st.otherEditing = true;
-        syncQuestionCard({ focusOther: true });
+        if (!st) return;
+        var qi = parseInt($(this).attr('data-q-index'), 10);
+        if (isNaN(qi)) return;
+        st.detailOpen[qi] = !st.detailOpen[qi];
+        syncQuestionCard();
     });
 
     // 「其他补充」输入：草稿实时写入状态（重建不丢字），并联动底部按钮文案
@@ -2887,8 +3086,9 @@ function bindQuestionCardEvents(host) {
             applyQuestionCustomAnswer(st, st.current, val);
             syncQuestionCard();
         } else if (e.key === 'Escape') {
-            st.otherEditing = false;
-            syncQuestionCard();
+            /* 输入框常驻后已无「收起」语义，Esc 改为失焦：让用户离开卡片内输入、
+               回到主输入框或键盘导航，同时不必为此白白整卡重建一次。 */
+            try { this.blur(); } catch (e2) {}
         }
     });
 
@@ -2896,12 +3096,12 @@ function bindQuestionCardEvents(host) {
     $(host).on('click', '.question-card-prev', function() {
         var st = activeQuestionCardState();
         if (!st || st.submitted) return;
-        if (st.current > 0) { st.current -= 1; st.otherEditing = false; syncQuestionCard(); }
+        if (st.current > 0) { st.current -= 1; syncQuestionCard(); }
     });
     $(host).on('click', '.question-card-next', function() {
         var st = activeQuestionCardState();
         if (!st || st.submitted) return;
-        if (st.current < st.questions.length - 1) { st.current += 1; st.otherEditing = false; syncQuestionCard(); }
+        if (st.current < st.questions.length - 1) { st.current += 1; syncQuestionCard(); }
     });
 
     // X：跳过剩余未答题并直接提交（防任务卡死）
@@ -2930,7 +3130,6 @@ function bindQuestionCardEvents(host) {
             // 极端情况下收割未产生答案（如纯空白输入）则退回原有递进，保证按钮总有反馈。
             var nextIdx = nextUnansweredQuestionIndex(st, st.current);
             if (nextIdx >= 0) st.current = nextIdx; else advanceQuestionCursor(st);
-            st.otherEditing = false;
             syncQuestionCard();
         } else {
             skipQuestionAnswer(st);
@@ -2976,7 +3175,69 @@ function appendQuestionCard(sess, chunk) {
     if (sess.sessionId === activeSessionId) syncQuestionCard();
 }
 
-/* question_answered 帧入口：问答已闭环（本人提交或他端作答），清状态并隐藏卡片。
+/* 内容区问答记录：作答闭环后在对话流里落一条「问 + 答」记录。
+
+   【为何必需】问答卡是悬浮在输入框上方的弹层，收到 question_answered 就整体消失——
+   用户回看历史时根本看不出自己当时选了什么（取证：92 条 answered 帧全部只带 answers，
+   题面不在帧里），模型后续引用「你选了方案 A」时用户无法对账。
+   HITL 审批卡本来就留在消息流里，问答反而消失，两者语义不对等。
+
+   【题面从哪来】question_answered 帧的 args 只有 answers（帧契约冻结），故题面取自
+   先前 question 帧建立的 _questionState。回放时 appendQuestionCard 可能因隔离规则跳过
+   （已有不同 actionId 的活跃卡），此时 state 与帧不同题——所以必须校验 actionId 一致
+   才用其 questions；不一致则只渲染答案（宁可少题面，不可张冠李戴）。
+
+   【幂等】按 actionId 去重：回放、他端作答、提交失败重试都可能重复触发同一帧。 */
+function appendQuestionAnswerRecord(sess, state, chunk) {
+    if (!sess) return;
+    var answers = (chunk && chunk.args && chunk.args.answers) || null;
+    if (!Array.isArray(answers) || answers.length === 0) return;
+
+    var actionId = (chunk && chunk.actionId) ? String(chunk.actionId)
+        : ((state && state.actionId) ? String(state.actionId) : '');
+    var root = renderRoot(sess);
+    if (!root) return;
+    if (actionId && $(root).find('.qa-record[data-action-id="' + actionId.replace(/"/g, '\\"') + '"]').length) return;
+
+    // 题面只在身份对得上时才可用（见上）
+    var questions = (state && actionId && state.actionId === actionId) ? state.questions : null;
+
+    ensureAssistantBubble(sess);
+    var el = $('<div>').addClass('qa-record')[0];
+    if (actionId) el.setAttribute('data-action-id', actionId);
+    if (sess.currentRunId) el.setAttribute('data-run-id', sess.currentRunId);
+
+    var html = '<div class="qa-record-head">'
+        + '<span class="qa-record-icon">' + QUESTION_RECORD_SVG + '</span>'
+        + '<span class="qa-record-label">' + escapeHtml(GourdI18n.t('chat.question_record_title')) + '</span>'
+        + '</div>';
+    html += '<div class="qa-record-items">';
+    for (var i = 0; i < answers.length; i++) {
+        var item = answers[i] || {};
+        var idxNum = (item.index == null) ? i : Number(item.index);
+        var q = (questions && questions[idxNum]) || null;
+        var rec = formatQuestionAnswerForRecord(q, item);
+        html += '<div class="qa-record-item">';
+        if (q && q.header) html += '<div class="qa-record-q">' + escapeHtml(q.header) + '</div>';
+        html += '<div class="qa-record-a' + (rec.skipped ? ' skipped' : '') + '">'
+            + escapeHtml(rec.skipped ? GourdI18n.t('chat.question_skipped') : rec.title)
+            + (rec.desc ? '<span class="qa-record-a-desc">' + escapeHtml(rec.desc) + '</span>' : '')
+            + (rec.supplement ? '<span class="qa-record-a-sup">' + escapeHtml(rec.supplement) + '</span>' : '')
+            + '</div>';
+        html += '</div>';
+    }
+    html += '</div>';
+    el.innerHTML = html;
+
+    insertBeforeActions(sess, el);
+    // 推进正文指针：记录之后的 AI 正文应落在它下方，不得回灌进上一个气泡
+    advanceBodyPointer(sess, sess, function(freshMd) { insertBeforeActions(sess, freshMd); });
+    if (sess.sessionId === activeSessionId && !isDetachedRenderTarget(sess)
+            && document.contains(sess.container)) scrollToBottom(true);
+}
+window.appendQuestionAnswerRecord = appendQuestionAnswerRecord;
+
+/* question_answered 帧入口：问答已闭环（本人提交或他端作答），落一条内容区记录后清状态并隐藏卡片。
    回放链路上「question 先建卡 → question_answered 随即隐藏」由顺序重放自然达成。
 
    【回放隔离】历史帧不得改写当前活跃会话的问答状态：用户正等待回答问题 B 时向上翻页，
@@ -2996,13 +3257,15 @@ function handleQuestionAnsweredFrame(sess, chunk) {
         // 实时帧也不得跨题清卡：另一道题的闭环帧与当前待答卡无关。
         return;
     }
+    // 先落内容区记录再清状态：记录需要从 state 取题面（帧里没有）
+    try { appendQuestionAnswerRecord(sess, st, chunk); } catch (e) { console.error('[question] 问答记录渲染失败', e); }
     sess._questionState = null;
     if (sess.sessionId === activeSessionId) syncQuestionCard();
 }
 
 /* 按当前活动会话的问答状态同步卡片：无状态 → 隐藏；有状态 → 按状态重建内容。
    调用点：帧到达、卡片交互、会话切换（setActiveSession/deactivateSession）、语言切换。 */
-function syncQuestionCard(opts) {
+function syncQuestionCard() {
     /* 问答挂起标志（app-base.js applyChatPlaceholder 消费）：活动会话存在未提交待答题时，
        主输入框 placeholder 切换为「输入想法即作答」指引——挂起期打字会被记为当前题答案，
        但入口零提示用户根本不知道这条路。host 缺失等异常路径不影响标志结算，故先于 host 取值。 */
@@ -3020,7 +3283,7 @@ function syncQuestionCard(opts) {
         $(host).hide();
         return;
     }
-    renderQuestionCard(host, sess, state, opts || {});
+    renderQuestionCard(host, sess, state);
     $(host).show();
 }
 
@@ -3031,7 +3294,7 @@ var escapeAttr = function (s) {
 };
 
 /* 渲染卡片到宿主（整卡重建；交互态与输入草稿全部来自 state，重建无损） */
-function renderQuestionCard(host, sess, state, opts) {
+function renderQuestionCard(host, sess, state) {
     var n = state.questions.length;
     var submitted = !!state.submitted;
     if (!n) { host.innerHTML = ''; $(host).hide(); return; }
@@ -3047,14 +3310,15 @@ function renderQuestionCard(host, sess, state, opts) {
 
     var html = '<div class="question-card' + (submitted ? ' submitted' : '') + entering + '" data-action-id="' + escapeAttr(state.actionId || '') + '">';
 
-    /* 题目行：题目文本（含详情/跳过标记）｜右侧 ‹ n/N ›（仅多题）与 X */
+    /* 题目行：题目文本（含可折叠详情/跳过标记）｜右侧 ‹ n/N ›（仅多题）与 X。
+       detail 取证中位 115 字、p90 280：超阈值默认收起为两行（CSS 限高），「展开」按钮切换；
+       展开态记在 state.detailOpen[idx]，整卡重建（勾选/翻页）不丢。 */
     html += '<div class="question-card-header">';
     html += '<div class="question-card-heading">';
     html += '<span class="question-card-title">' + escapeHtml(q.header || '') + '</span>';
     if (answer && answer.skipped) {
         html += '<span class="question-card-skip-tag">' + escapeHtml(GourdI18n.t('chat.question_skipped')) + '</span>';
     }
-    if (q.detail) html += '<div class="question-card-detail">' + escapeHtml(q.detail) + '</div>';
     html += '</div>';
     if (n > 1) {
         html += '<div class="question-card-nav">'
@@ -3070,25 +3334,42 @@ function renderQuestionCard(host, sess, state, opts) {
     }
     html += '</div>';
 
-    /* 选项区：序号圆角徽章 + 文本（含推荐标记） */
+    if (q.detail) {
+        var collapsible = questionDetailShouldCollapse(q.detail);
+        var detailOpen = !!state.detailOpen[idx];
+        html += '<div class="question-card-detail' + ((collapsible && !detailOpen) ? ' collapsed' : '') + '">' + escapeHtml(q.detail) + '</div>';
+        if (collapsible) {
+            html += '<button type="button" class="question-card-detail-toggle" data-q-index="' + idx + '" aria-expanded="' + (detailOpen ? 'true' : 'false') + '">'
+                + escapeHtml(GourdI18n.t(detailOpen ? 'chat.question_detail_collapse' : 'chat.question_detail_expand'))
+                + QUESTION_CARD_SVG_CHEVRON + '</button>';
+        }
+    }
+
+    /* 选项区：单行可扫读形态 —— 序号徽章 + 粗体短标题 + 推荐胶囊 + 灰色说明。
+       整形只影响展示（questionOptionView）：选中判定与出站答案仍用原始 label，
+       答案协议零改动。选项多时由 CSS 限高滚动，不把输入框顶出屏幕。 */
     html += '<div class="question-card-options">';
     var optList = q.options || [];
     for (var oi = 0; oi < optList.length; oi++) {
         var o = optList[oi] || {};
-        var selected = questionOptionSelected(state, idx, o.label);
+        var view = questionOptionView(o);
+        var selected = questionOptionSelected(state, idx, view.label);
         html += '<button type="button" class="question-card-option' + (selected ? ' selected' : '') + '"'
             + (submitted ? ' disabled' : '')
             + ' data-q-index="' + idx + '" data-opt-index="' + oi + '">'
             + '<span class="question-card-opt-index">' + (oi + 1) + '</span>'
-            + '<span class="question-card-opt-label">' + escapeHtml(o.label == null ? '' : o.label)
+            + '<span class="question-card-opt-main">'
+            + '<span class="question-card-opt-title">' + escapeHtml(view.title)
             + (o.recommended ? '<span class="question-card-opt-reco">' + escapeHtml(GourdI18n.t('chat.question_recommended')) + '</span>' : '')
+            + '</span>'
+            + (view.desc ? '<span class="question-card-opt-desc">' + escapeHtml(view.desc) + '</span>' : '')
             + '</span>'
             + '</button>';
     }
-    /* 「补充说明」行：点击变输入框，Enter 确认；提交后仅作状态展示。
-       文案随本题状态切换：已点选选项时是「再补充一句」（补充与选项并存），
-       未点选时是「以上都不合适？自己输入回答」（手写替代所有选项）。
-       两个分支都保留字面量 GourdI18n.t('chat.question_other'…) 调用，契约测试按字面量计数。 */
+    /* 常驻输入框：总是以编辑态呈现（旧版「点击才变输入框」多一步操作且入口不显眼，
+       取证显示用户经常选完选项还想补一句）。placeholder 随本题状态切换：
+       已点选选项时是「补充说明」（与选项一起提交），未点选时是「自己输入回答」（替代选项）。
+       提交后转为只读展示行（已入库的补充文本）。 */
     var selLabel = (answer && answer.selectedLabel) ? String(answer.selectedLabel) : '';
     var hasSel = !!selLabel;
     var supText = (answer && !answer.skipped)
@@ -3097,18 +3378,16 @@ function renderQuestionCard(host, sess, state, opts) {
     var draft = (state.drafts[idx] != null)
         ? String(state.drafts[idx])
         : supText;
-    if (state.otherEditing && !submitted) {
+    if (!submitted) {
         html += '<div class="question-card-other-row is-editing">'
             + '<span class="question-card-opt-index">' + QUESTION_CARD_SVG_EDIT + '</span>'
             + '<input type="text" class="question-card-other-input" autocomplete="off" spellcheck="false" placeholder="' + escapeAttr(hasSel ? GourdI18n.t('chat.question_supplement_placeholder') : GourdI18n.t('chat.question_other_placeholder')) + '" value="' + escapeAttr(draft) + '"/>'
             + '</div>';
-    } else {
-        html += '<div class="question-card-other-row' + (supText ? ' selected' : '') + '"'
-            + (submitted ? '' : ' role="button" tabindex="0"')
-            + ' data-q-index="' + idx + '">'
+    } else if (supText) {
+        html += '<div class="question-card-other-row selected" data-q-index="' + idx + '">'
             + '<span class="question-card-opt-index">' + QUESTION_CARD_SVG_EDIT + '</span>'
-            + '<span class="question-card-opt-label">' + escapeHtml(hasSel ? GourdI18n.t('chat.question_supplement') : GourdI18n.t('chat.question_other')) + '</span>'
-            + (supText ? '<span class="question-card-opt-answer">' + escapeHtml(supText) + '</span>' : '')
+            + '<span class="question-card-opt-label">' + escapeHtml(GourdI18n.t('chat.question_supplement')) + '</span>'
+            + '<span class="question-card-opt-answer">' + escapeHtml(supText) + '</span>'
             + '</div>';
     }
     html += '</div>';
@@ -3129,12 +3408,88 @@ function renderQuestionCard(host, sess, state, opts) {
     html += '</div>';
 
     html += '</div>';
+    /* 重建前先取现场：整卡是 innerHTML 全量重建，聚焦元素与滚动位置都会随之销毁。
+       「输入框常驻化」后这是真实回归——旧版靠 focusOther 显式补焦，但其唯一调用方
+       （点击入口行才渲染 input 的那条路径）已被本次改造删除，于是敲 Enter 提交补充、
+       或点选任一选项后，焦点掉回 body：用户既不能接着打字，也失去了键盘导航能力。 */
+    var focusKey = questionCardFocusKeyIn(host);
+    var caret = questionCardCaretIn(host);
+    var scroll = questionCardScrollSnapshot(host);
+
     host.innerHTML = html;
 
-    if (opts.focusOther) {
-        var inp = host.querySelector('.question-card-other-input');
-        if (inp) { try { inp.focus(); } catch (e) {} }
+    questionCardRestoreView(host, focusKey, caret, scroll);
+}
+
+/* 焦点元素的稳定标识 = 标签名 + 非状态类名 + 全部 data-* 属性。
+   刻意排除 selected / is-editing / collapsed 等状态类：点选选项后该类会被加上，
+   若算进 key 就永远匹配不上，焦点恢复恰好在其最该生效的场景失效。
+   用属性而非「第几个子元素」定位：detail 折叠/选项增减都不影响匹配。 */
+var QUESTION_CARD_VOLATILE_CLASS = { selected: 1, 'is-editing': 1, collapsed: 1, disabled: 1, 'question-card-enter': 1 };
+
+function questionCardFocusKeyOf(el) {
+    if (!el || el.nodeType !== 1) return '';
+    var parts = [el.tagName];
+    var cls = (typeof el.className === 'string') ? el.className.trim().split(/\s+/) : [];
+    for (var i = 0; i < cls.length; i++) {
+        if (cls[i] && !QUESTION_CARD_VOLATILE_CLASS[cls[i]]) parts.push('.' + cls[i]);
     }
+    var attrs = el.attributes || [];
+    for (var j = 0; j < attrs.length; j++) {
+        if (attrs[j].name.indexOf('data-') === 0) parts.push('[' + attrs[j].name + '="' + attrs[j].value + '"]');
+    }
+    return parts.join('');
+}
+
+/* 当前聚焦元素的 key（不在卡内则返回空，表示无需恢复） */
+function questionCardFocusKeyIn(host) {
+    if (!host || typeof document === 'undefined') return '';
+    var el = document.activeElement;
+    if (!el || el === document.body || !host.contains(el)) return '';
+    return questionCardFocusKeyOf(el);
+}
+
+/* 光标区间：只有文本输入才有意义；部分 input 类型读 selectionStart 会抛错，整体兜底。 */
+function questionCardCaretIn(host) {
+    if (!host || typeof document === 'undefined') return null;
+    var el = document.activeElement;
+    if (!el || el === document.body || !host.contains(el)) return null;
+    if (typeof el.selectionStart !== 'number') return null;
+    try { return { start: el.selectionStart, end: el.selectionEnd }; } catch (e) { return null; }
+}
+
+/* 滚动现场：整卡与选项区都是限高滚动容器。用户滚到第 5 个长选项时点选，重建会把
+   滚动条弹回顶部——焦点恢复只能救回焦点元素本身，救不回用户主动滚出的视野。 */
+function questionCardScrollSnapshot(host) {
+    if (!host) return null;
+    var card = host.querySelector('.question-card');
+    var list = host.querySelector('.question-card-options');
+    return { card: card ? card.scrollTop : 0, list: list ? list.scrollTop : 0 };
+}
+
+/* 重建后还原视野：焦点 → 光标 → 滚动。顺序有意为之——focus() 自带滚动副作用，
+   故滚动放在最后，让用户重建前看到的位置最终生效。 */
+function questionCardRestoreView(host, key, caret, scroll) {
+    if (!host) return;
+    if (key) {
+        var cands = host.querySelectorAll('input, textarea, button, [tabindex]');
+        for (var i = 0; i < cands.length; i++) {
+            if (questionCardFocusKeyOf(cands[i]) !== key) continue;
+            try {
+                cands[i].focus();
+                if (caret && typeof cands[i].selectionStart === 'number') {
+                    var max = (cands[i].value || '').length;
+                    cands[i].setSelectionRange(Math.min(caret.start, max), Math.min(caret.end, max));
+                }
+            } catch (e2) {}
+            break;
+        }
+    }
+    if (!scroll) return;
+    var card = host.querySelector('.question-card');
+    var list = host.querySelector('.question-card-options');
+    if (card && scroll.card) card.scrollTop = scroll.card;
+    if (list && scroll.list) list.scrollTop = scroll.list;
 }
 
 /* 提交全部答案（镜像 handleHitlResponse 的本地状态处理：进入流式态 → POST → 失败回退）。
@@ -3145,7 +3500,6 @@ function handleQuestionResponse(sess, state) {
     //（否则收割函数会被 submitted / getPendingQuestionState 拦住）
     harvestQuestionInputOnSubmit(sess, state);
     state.submitted = true;
-    state.otherEditing = false;
     if (sess.sessionId === activeSessionId) syncQuestionCard();
 
     if (sess.eventSource) { sess.eventSource.close(); sess.eventSource = null; }
@@ -3201,8 +3555,9 @@ function applyQuestionCustomAnswerByText(sess, text) {
    这正是「选了选项，下面输入的内容没携带给模型」的根因。
 
    两处同时存在时合并为一段（卡片草稿优先，再接输入框文本），不互相覆盖。
-   只收当前活动会话的输入框（输入框全局共享，卡片属于 sess）；附件无处安放
-   （答案协议只有 text 字段），保持原有暂存不动，与 sendMessage 的附件口径一致。
+   只收当前活动会话的输入框（输入框全局共享，卡片属于 sess）；附件不在收割范围内
+   （答案协议只有 text 字段），保持原有暂存不动——附件留在输入框里，用户随后按 Enter
+   会由 sendMessage 的问答分支落盘并排入队列（见 queueQuestionAttachments），不会丢。
    光标位置收割后还原：提交失败回退（submitted=false）时不给重试引入额外差异。 */
 function harvestQuestionInputOnSubmit(sess, state) {
     if (!sess || !state || sess.sessionId !== activeSessionId) return;

@@ -39,6 +39,7 @@ import com.gourdai.ai.chat.ChatSession;
 import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.ai.chat.talent.AbsTalent;
 import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.permission.AccessMode;
 import com.gourdai.harness.change.FileChangeService;
 import org.noear.solon.annotation.Body;
 import org.noear.solon.annotation.Param;
@@ -299,6 +300,25 @@ public class TaskTalent extends AbsTalent {
     }
 
     /**
+     * 解析本轮生效的访问控制档位。
+     *
+     * <p>与思考档位同构的缺口：档位只在主代理的 toolContext 与主会话上下文里，子代理是新会话、
+     * 新 Prompt，读不到就会回落默认档。后果是用户开了完全访问、主代理放行的目录，子代理却仍受限，
+     * 表现为子任务莫名报「路径越界」——而用户刚确认过可以访问。</p>
+     *
+     * <p>取值以<b>父会话上下文</b>为准（权威存储位，随快照持久化），而不是父代理的 toolContext：
+     * 后者在嵌套委派（子代理再调 task）时逐层丢失，前者对任意深度都可靠。解析结果由调用方同时
+     * 写入子会话上下文与子代理 toolContext，使拦截器与工具两路消费点同源同档。</p>
+     */
+    private static String resolveAccessMode(AgentSession parentSession) {
+        if (parentSession == null) {
+            return AccessMode.DEFAULT.code();
+        }
+
+        return AccessMode.normalize(parentSession.getContext().getAs(AccessMode.CTX_KEY)).code();
+    }
+
+    /**
      * 给事件打上父代理归属标记，供下游把内容路由进对应智能体卡片。
      *
      * <p>包一层 try/catch 是纵深防御：{@link AgentEvent#getMeta()} 的接口契约并未强制「可变」，
@@ -378,6 +398,12 @@ public class TaskTalent extends AbsTalent {
         final String[] changeOwner = resolveChangeOwner(__parentTrace, __sessionId, __changeSessionId, __changeRunId);
         // 本轮生效的思考档位；同时写回子代理 toolContext，使嵌套委派（子代理再调 task）逐层继承
         final String thinkingDepth = resolveThinkingDepth(__parentSession, __thinkingDepth);
+        // 本轮生效的访问档位（同思考档位机制；同样写回以使嵌套委派逐层继承）
+        final String accessMode = resolveAccessMode(__parentSession);
+        // 档位同时写入子会话上下文（权威存储位）：HITLInterceptor 读的是会话上下文而非
+        // toolContext，只写 toolContext 会让子代理「空间已放行、审批仍弹」——正是
+        // AccessPolicy 要消灭的漂移症状。嵌套委派时本子会话成为下一层的父会话，逐层继承。
+        session.getContext().put(AccessMode.CTX_KEY, accessMode);
 
         try {
             AtomicReference<Throwable> errRef = new AtomicReference<>();
@@ -390,6 +416,7 @@ public class TaskTalent extends AbsTalent {
                             o.toolContextPut(HarnessEngine.ATTR_CWD, __cwd);
                             o.toolContextPut(ChatSession.ATTR_SESSIONID, __sessionId);
                             o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, thinkingDepth);
+                            o.toolContextPut(AccessMode.ATTR_KEY, accessMode);
                             applyChangeOwner(o, changeOwner);
                             applyThinkingDepth(o, agent, thinkingDepth);
                         })
@@ -434,6 +461,7 @@ public class TaskTalent extends AbsTalent {
                             o.toolContextPut(HarnessEngine.ATTR_CWD, __cwd);
                             o.toolContextPut(ChatSession.ATTR_SESSIONID, __sessionId);
                             o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, thinkingDepth);
+                            o.toolContextPut(AccessMode.ATTR_KEY, accessMode);
                             applyChangeOwner(o, changeOwner);
                             applyThinkingDepth(o, agent, thinkingDepth);
                         })
@@ -576,8 +604,8 @@ public class TaskTalent extends AbsTalent {
         StringBuilder buf = new StringBuilder();
         buf.append("ERROR: 未知的子代理类型 '").append(agentName).append("'。");
 
-        //本方法会在 catch 块里被调用，自身绝不能再抛：getAgents() 会触发 MountManager 解析，
-        //挂载定义被删除/无权限时 loadFromAgentMd 会抛 RuntimeException，届时异常将逃出 taskDo
+        //本方法会在 catch 块里被调用，自身绝不能再抛：getAgents() 会触发 TalentRegistry 扫描，
+        //代理定义文件损坏/无权限时 loadFromAgentMd 会抛 RuntimeException，届时异常将逃出 taskDo
         StringBuilder names = new StringBuilder();
         try {
             for (AgentDefinition definition : engine.getAgentManager().getAgents()) {

@@ -23,7 +23,7 @@ import com.gourdai.ai.chat.ChatConfig;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.agent.AgentDefinition;
 import com.gourdai.harness.command.Command;
-import com.gourdai.ai.talents.mount.SkillDir;
+import com.gourdai.ai.talents.registry.SkillDir;
 
 import java.util.HashSet;
 import java.util.List;

@@ -14,8 +14,7 @@ import com.gourdai.agent.session.LruSessionCache;
 import com.gourdai.ai.chat.CacheControl;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.HarnessExtension;
-import com.gourdai.ai.talents.mount.MountDir;
-import com.gourdai.ai.talents.mount.MountType;
+
 import org.noear.solon.annotation.Bean;
 import org.noear.solon.annotation.Configuration;
 import org.noear.solon.annotation.Init;
@@ -28,7 +27,7 @@ import com.gourdai.core.config.entity.ApiSourceDo;
 import com.gourdai.core.config.entity.McpServerDo;
 import com.gourdai.core.config.entity.ModelDo;
 import com.gourdai.core.config.entity.LspServerDo;
-import com.gourdai.core.config.entity.MountDo;
+
 import com.gourdai.core.memory.MemoryProvider;
 import com.gourdai.core.portal.acp.AcpLink;
 import com.gourdai.core.portal.cli.CliShell;
@@ -151,11 +150,7 @@ public class Configurator {
                 .compressionModel(settings.getGeneral().getSummaryModel())
                 .memoryEnabled(settings.getGeneral().getMemoryEnabled())
                 .memoryProvider(new MemoryProvider(agentSettings))
-                .sandboxEnabled(settings.getGeneral().getSandboxMode())
-                .sandboxAllowUserHome(settings.getGeneral().getSandboxAllowUserHome())
-                .sandboxSystemRestrict(settings.getGeneral().getSandboxSystemRestrict())
                 .subagentEnabled(settings.getGeneral().getSubagentEnabled())
-                .hitlEnabled(settings.getGeneral().getHitlEnabled())
                 .apiRetries(settings.getGeneral().getApiRetries())
                 .modelRetries(settings.getGeneral().getModelRetries())
                 .mcpRetries(settings.getGeneral().getModelRetries())
@@ -170,26 +165,8 @@ public class Configurator {
             engine.addModel(model);
         }
 
-        for (Map.Entry<String, MountDo> entry : agentSettings.getMountPools().entrySet()) {
-            MountDo mount = entry.getValue();
-            engine.addMount(MountDir.builder()
-                    .alias(entry.getKey())
-                    .description(mount.getDescription())
-                    .type(mount.getType())
-                    .path(mount.getPath())
-                    .primary(mount.isPrimary())
-                    .enabled(mount.isEnabled())
-                    .writeable(mount.isWriteable())
-                    .build());
-        }
-
-        // 全局区技能/子代理：统一落全局基准目录。
-        // 保留 @global-* 别名（UI/提示词/测试均按别名引用）。
-        engine.addMount(MountDir.builder().alias("@global-skills").type(MountType.SKILLS).path(Paths.get(globalBase, engine.getHarnessSkills()).toString()).primary(true).build());
-        engine.addMount(MountDir.builder().alias("@workspace-skills").type(MountType.SKILLS).path("./" + engine.getHarnessSkills()).primary(true).build());
-
-        engine.addMount(MountDir.builder().alias("@global-agents").type(MountType.AGENTS).path(Paths.get(globalBase, engine.getHarnessAgents()).toString()).primary(true).build());
-        engine.addMount(MountDir.builder().alias("@workspace-agents").type(MountType.AGENTS).path("./" + engine.getHarnessAgents()).primary(true).build());
+        // 技能与子代理的发现目录固定为「全局区 + 工作区」，由 TalentRegistry 自行扫描，
+        // 不再需要在此注册挂载点（原四个 @global-* / @workspace-* 内置挂载已全部移除）。
 
 
         engine.getCommandRegistry().load(Paths.get(AgentFlags.getHarnessBase(), engine.getHarnessCommands()));
