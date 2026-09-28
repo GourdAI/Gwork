@@ -426,7 +426,7 @@ public class WebStreamBuilder {
             // 一次主代理模型调用的用量结算：收口当前解码段，并把本次调用的输出 token 与之配对。
             // 随后的工具执行时间落在段与段之间，天然不被计入。
             timer.onUsageSettled(((ContextUsageEvent) chunk).getOutputTokens());
-            return oneFrame(onContextUsageEvent(chatModel, (ContextUsageEvent) chunk));
+            return oneFrame(onContextUsageEvent(chatModel, (ContextUsageEvent) chunk, turnStartMs));
         }
         if (chunk instanceof ReasonStartEvent) {
             return oneFrame(onReasonStartEvent((ReasonStartEvent) chunk));
@@ -610,8 +610,16 @@ public class WebStreamBuilder {
      *
      * <p><b>分母取会话选择而非模型配置</b>：上下文窗口已是会话级用户选择，与
      * {@code ContextCompressionInterceptor} 的压缩预算同源，避免「压缩按 A、界面显示 B」。</p>
+     *
+     * <p><b>为何随帧下发 {@code turnStartMs}</b>：明细卡需要「当前任务总耗时」的<b>实时</b>展示，
+     * 而 {@link TurnTimer#finish} 产出的精确 {@code elapsedMs} 只在轮次收口（trace 帧）时才有。
+     * 把本轮订阅时刻随帧下发，前端即可在 run 进行中自行 tick 出实时耗时，轮次收口后
+     * 再由 trace 的 {@code elapsedMs} 定格为同一口径的精确值——两者同源（同一个
+     * {@code turnStartMs}），不会出现「环上显示 12s、徒标显示 14s」的矛盾态。</p>
+     *
+     * @param turnStartMs 本轮订阅时刻（墙钟毫秒），供前端计算实时耗时
      */
-    public WebChunk onContextUsageEvent(ChatModel chatModel, ContextUsageEvent event){
+    public WebChunk onContextUsageEvent(ChatModel chatModel, ContextUsageEvent event, long turnStartMs){
         long inputTokens = event.getInputTokens();
         long outputTokens = event.getOutputTokens();
 
@@ -631,6 +639,8 @@ public class WebStreamBuilder {
 
         Map<String, Object> args = new HashMap<>();
         args.put("contextLength", contextLength);
+        // 本轮起点（与 trace.elapsedMs 同源）：前端据此在 run 进行中每秒 tick 出实时耗时
+        args.put("turnStartMs", turnStartMs);
         wc.setArgs(args);
         wc.setCreatedAt(java.time.Instant.now().toEpochMilli());
         return wc;

@@ -83,6 +83,12 @@ function makeEl(tag, className) {
             for (let k = i + 1; k < sibs.length; k++) if (sibs[k].nodeType !== 3) return sibs[k];
             return null;
         },
+        get nextSibling() {
+            if (!this.parentNode) return null;
+            const sibs = this.parentNode.childNodes;
+            const i = sibs.indexOf(this);
+            return i >= 0 && i < sibs.length - 1 ? sibs[i + 1] : null;
+        },
         get previousSibling() {
             if (!this.parentNode) return null;
             const i = this.parentNode.childNodes.indexOf(this);
@@ -132,7 +138,31 @@ function loadModule(opts) {
         fetch: (opts && opts.fetch) || function () { return new Promise(function () {}); },
         Map: Map,
         Date: Date,
-        $: function (el) { return { find: function () { return { first: function () { return [null]; }, text: function () { return ''; } }; }, closest: function () { return { attr: function () { return null; } }; } }; },
+        $: function (el) {
+            /* 数组语义：runBubbleOf 慢路径用 $(rows[i]).find('.msg-bubble')[0] 取子节点。
+               桩必须支持 [0] 索引与 first()，否则慢路径整体失效。 */
+            const wrap = (list) => {
+                const arr = Array.prototype.slice.call(list || []);
+                arr.first = function () { return arr; };
+                return arr;
+            };
+            return {
+                find: function (sel) {
+                    const cls = String(sel || '').replace(/^\./, '');
+                    let found = [];
+                    if (el && el.childNodes) {
+                        (function walk(node) {
+                            (node.childNodes || []).forEach(function (c) {
+                                if (c.nodeType !== 3 && String(c.className || '').indexOf(cls) >= 0) found.push(c);
+                                walk(c);
+                            });
+                        })(el);
+                    }
+                    return wrap(found);
+                },
+                closest: function () { return { attr: function () { return null; } }; }
+            };
+        },
         navigator: {},
         escapeHtml: function (str) { return String(str).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); },
         layConfirm: function () {},
@@ -142,6 +172,11 @@ function loadModule(opts) {
     };
     sandbox.window = sandbox;
     sandbox.escapeHtml = sandbox.escapeHtml;
+    /* renderRoot 必须可注入：模块内 `typeof renderRoot` 查的是 vm 上下文的自由变量，
+       挂在 sandbox 对象上根本到不了它——曾因未注入导致慢路径（runBubbleOf 的
+       querySelectorAll 反查）从未被执行，未定义的 attrValueEscape 逃过全部测试。
+       注入方式：作为 wrapper 形参传入，与生产页面（全局函数）语义一致。 */
+    sandbox.renderRoot = (opts && opts.renderRoot) || function (sess) { return (sess && sess.renderTarget) || (sess && sess.container) || null; };
     sandbox.innerWidth = (opts && opts.innerWidth) || 1200;
     sandbox.innerHeight = (opts && opts.innerHeight) || 800;
     sandbox.document = {
@@ -150,8 +185,8 @@ function loadModule(opts) {
         createElement: function (tag) { return makeEl(tag); }
     };
     const source = read('js/app-file-changes.js');
-    const wrapper = '(function(window,document,$,GourdI18n,setTimeout,clearTimeout,fetch,AbortController,Date,Map,escapeHtml,layConfirm,navigator){' + source + '})';
-    vm.runInThisContext(wrapper, { filename: 'app-file-changes.js' })(sandbox.window, sandbox.document, sandbox.$, sandbox.GourdI18n, setTimeout, clearTimeout, sandbox.fetch, undefined, Date, Map, sandbox.escapeHtml, sandbox.layConfirm, sandbox.navigator);
+    const wrapper = '(function(window,document,$,GourdI18n,setTimeout,clearTimeout,fetch,AbortController,Date,Map,escapeHtml,layConfirm,navigator,renderRoot){' + source + '})';
+    vm.runInThisContext(wrapper, { filename: 'app-file-changes.js' })(sandbox.window, sandbox.document, sandbox.$, sandbox.GourdI18n, setTimeout, clearTimeout, sandbox.fetch, undefined, Date, Map, sandbox.escapeHtml, sandbox.layConfirm, sandbox.navigator, sandbox.renderRoot);
     return sandbox;
 }
 
@@ -428,7 +463,9 @@ test('对账刷新命中 changes/run 且失败静默', () => {
     assert.match(block, /\.catch\(function \(\) \{/);
     // 回放期不即时对账：登记待回放收口统一触发（replayPending 机制）
     assert.match(source, /if \(sess\._replaying\) deferReplayReconcile\(sess, runKey\);/);
-    assert.match(source, /else if \(!sess\.isStreaming\) reconcile\(sess, runKey\);/);
+    // 运行中/挂起态也不即时对账：对账响应会回填 upsert，未收口的轮次不该出现在界面上
+    assert.match(source, /else if \(runSettled\(sess, runKey\)\) reconcile\(sess, runKey\);/);
+    assert.match(source, /else markReconcilePending\(sess, runKey\);/);
 });
 
 test('Diff 查看器暴露 snapshot 入口且不通过 Git HEAD 获取快照', () => {
@@ -489,6 +526,30 @@ test('变更卡片复用主题 token：边框/背景/折叠/滚动不硬编码',
     // 折叠态至少 3 行高度，不塌成细条
     assert.match(block, /\.fch-body \{[^}]*min-height:\s*74px/);
     assert.doesNotMatch(block, /background:\s*#[0-9a-f]{3,8}/i);
+});
+
+/* ===== 盒式形态护栏（不得被线性化）=====
+   工具卡/思考块/智能体卡是【过程注脚】，已统一改为「透明底 + 左 2px 竖条」的线性形态；
+   但变更卡是【结果汇总 + 操作入口】（审查/整轮撤销/重新应用都在此），与问答卡、HITL 卡同级，
+   必须是视觉上闭合、可一眼认出的单元。曾误按过程卡口径改成左竖条 + 透明边框 + 无圆角，
+   实测后果：白底(--bg-card)直接压在正文白底上（light 对比度 1.0），失去外轮廓，中间文件行
+   像散落在正文里的裸文本，头部按钮也失去归属边界。本护栏锁死盒式形态，防回退。 */
+test('变更卡片保持盒式形态：四周边框 + 圆角 + 头部淡底，不得线性化为左竖条', () => {
+    const css = read('css/app.css');
+    const cardRule = (css.match(/\.msg-run-changes-card \{[^}]*\}/) || [])[0];
+    assert.ok(cardRule, '未找到 .msg-run-changes-card 规则');
+    // 四周可见边框（不是透明），且四角圆角
+    assert.match(cardRule, /border:\s*1px solid var\(--border-color\)/, '必须四周可见边框（不是 border:1px solid transparent）');
+    assert.match(cardRule, /border-radius:\s*10px/, '必须 10px 圆角');
+    // 不得出现「左 2px 竖条」这种线性化特征（工具卡才有）
+    assert.doesNotMatch(cardRule, /border-left:\s*2px solid/, '变更卡不得线性化为左竖条');
+    assert.doesNotMatch(cardRule, /border-radius:\s*0 6px 6px 0/, '变更卡不得用线性化的单侧圆角');
+    // 头部淡底：盒式下它是标题栏，去掉底色会与下方文件列表连成一片
+    const headRule = (css.match(/\.fch-head \{[^}]*\}/) || [])[0];
+    assert.ok(headRule, '未找到 .fch-head 规则');
+    assert.match(headRule, /background:\s*var\(--bg-hover\)/, '头部必须有淡底（不是 transparent）');
+    // 折叠按钮上分隔线：与卡体分隔，盒式闭合的一部分
+    assert.match(css, /\.fch-toggle \{[^}]*border-top:\s*1px solid var\(--border-color\)/);
 });
 
 
@@ -566,19 +627,22 @@ test('模块可独立解析（语法自检）', () => {
     assert.doesNotThrow(() => new vm.Script(source, { filename: 'app-file-changes.js' }));
 });
 
-test('卡片宿主锚在助手气泡最底部：正文 → 结束时间 → 操作按钮 → 变更卡片', () => {
+test('卡片宿主锚在页脚之前：正文 → 变更卡片 → 时长徽章 → 操作按钮', () => {
     const source = read('js/app-file-changes.js');
-    // 审查内容不参与正文流：宿主追加到气泡末尾，不得再锚在 meta 行/等待指示器之前
+    // 审查内容不参与正文流，但它不是气泡的尾注：总时长是整轮收尾总结，必须在卡片之后。
+    // 宿主锚定页脚（meta/actions）之前，不得再追加到气泡末尾（曾导致时长徽章跑到卡片上方）。
     assert.match(source, /function runHostOf\(sess, runKey\)/);
     assert.doesNotMatch(source, /function bubbleTailAnchor\(sess, bubble\)/,
         'bubbleTailAnchor 已废弃：卡片不再插在气泡内容尾部');
-    assert.match(source, /if \(bubble\) bubble\.appendChild\(host\);/);
-    assert.match(source, /if \(bubble && \(host\.parentNode !== bubble \|\| host\.nextSibling\)\) bubble\.appendChild\(host\);/,
-        'positionCard 必须把宿主收敛到气泡最后一个子节点');
+    assert.match(source, /function bubbleFooterOf\(bubble\)/, '必须有页脚锚点函数（meta/actions 首个出现者）');
+    assert.match(source, /if \(footer\) \{[\s\S]*?bubble\.insertBefore\(host, footer\)/,
+        '宿主必须插到页脚之前，不得 appendChild 到气泡末尾');
+    assert.doesNotMatch(source, /if \(bubble && \(host\.parentNode !== bubble \|\| host\.nextSibling\)\) bubble\.appendChild\(host\);/,
+        '旧「收敛到气泡最后一个子节点」写法不得复活');
     // 卡片挂宿主，不直接挂消息容器根（否则被顶到容器全宽、比正文还宽）
     assert.match(source, /if \(el\.parentNode !== host\) host\.appendChild\(el\);/);
     assert.doesNotMatch(source, /if \(el\.parentNode !== root\) root\.appendChild\(el\);/);
-    // 每轮各持一张卡：run-1 的卡片不得被 run-2 顶掉（上拉回上一轮结尾仍可查）
+    // 行为验证：宿主落在 meta 行之前，卡片在宿主内 —— 时长徽章必然在卡片下方
     const sandbox = loadModule();
     const root = makeRoot();
     const run1 = makeRunBubble(root, 'run-1');
@@ -602,24 +666,36 @@ test('卡片宿主锚在助手气泡最底部：正文 → 结束时间 → 操�
     assert.notEqual(host1, host2, 'run-2 不得复用/顶掉 run-1 的宿主');
     assert.equal(host1.parentNode, run1.bubble, 'run-1 宿主应在其所属气泡内');
     assert.equal(host2.parentNode, run2.bubble, 'run-2 宿主应在其所属气泡内');
-    assert.equal(run1.bubble.childNodes[run1.bubble.childNodes.length - 1], host1,
-        'run-1 宿主应是其气泡的最后一个子节点（位于 meta 行与操作按钮之后）');
+    assert.equal(host1.nextSibling, run1.meta, 'run-1 宿主应紧跟在 meta 行之前（时长徽章在卡片下方）');
     const card1 = host1.children[0];
     assert.ok(card1 && String(card1.className).indexOf('msg-run-changes-card') >= 0, '卡片应在宿主内');
 });
 
 test('渲染时机：流式/回放期只登记，收口后才落卡', () => {
     const source = read('js/app-file-changes.js');
-    assert.match(source, /function renderAllowed\(sess\) \{ return !sess\.isStreaming && !sess\._replaying; \}/,
-        '流式与回放期不得渲染');
-    assert.match(source, /if \(renderAllowed\(sess\)\) renderCard\(sess, runKey\);/);
+    assert.match(source, /function runSettled\(sess, runKey\) \{/,
+        '门禁必须是 run 级（runSettled）：会话级 isStreaming 无法区分挂起/历史轮/活跃轮');
+    assert.doesNotMatch(source, /function renderAllowed\(/, '旧的会话级门禁已废弃，不得复活');
+    assert.match(source, /if \(sess\._replaying\) return false;/, '回放期一律延后');
+    assert.match(source, /if \(sess\._runSuspended\) return false;/, '挂起态（等作答/审批）视为未收口');
+    assert.match(source, /if \(!isActiveRun\) return true;/, '历史轮已收口，必须放行（否则回放回归）');
+    assert.match(source, /if \(runSettled\(sess, runKey\)\) \{/, 'upsert 走 run 级门禁');
     assert.match(source, /else markRenderPending\(sess, runKey\);/);
+    // flushPendingRenders 内部也必须逐个 run 过门禁：它的三个调用点里有两个（回放 replayDone /
+    // 会话切换）并不保证任务已结束，无条件 renderCard 正是「运行中就展示」的直接成因
+    const flushFn = source.slice(source.indexOf('function flushPendingRenders'), source.indexOf('function renderCard'));
+    assert.match(flushFn, /if \(runSettled\(sess, runKey\)\) \{/, 'flush 路径不得绕过 run 级门禁');
+    assert.match(flushFn, /else markRenderPending\(sess, runKey\);/, '未收口必须重新登记，不得丢卡');
     // 两个收口点都必须补渲染，否则卡片永不出现
     assert.match(source, /window\.flushFileChangesReplayRender = function \(sess\)/);
     assert.match(read('js/app-history.js'), /window\.flushFileChangesReplayRender === 'function'/);
     assert.match(read('js/app-streaming.js'), /window\.repositionFileChangeCards === 'function'/);
     // 待渲染登记必须随会话淘汰一起清理
     assert.match(read('js/app-base.js'), /sess\._fchRenderPending = null;/);
+    assert.match(read('js/app-base.js'), /sess\._fchReconcilePending = null;/, '延后对账登记同样随会话淘汰清理');
+    // 挂起标记由 finishStream 按 keepBatchIndex 落盘：runSettled 的判据来源，缺它挂起态无法识别
+    assert.match(read('js/app-streaming.js'), /sess\._runSuspended = keepBatchIndex;/);
+    assert.match(read('js/app-base.js'), /this\._runSuspended = false;/, '字段必须在会话构造器里声明');
     // 行为验证：流式期间 upsert 不产生卡片，收口后出现
     const sandbox = loadModule();
     const root = makeRoot();
@@ -642,7 +718,7 @@ test('渲染时机：流式/回放期只登记，收口后才落卡', () => {
     const host = sess._fchHosts && sess._fchHosts['run-1'];
     assert.ok(host, '收口后应补渲染出卡片宿主');
     assert.equal(host.parentNode, run.bubble, '宿主应在助手气泡内');
-    assert.equal(run.bubble.childNodes[run.bubble.childNodes.length - 1], host, '宿主应在气泡最底部');
+    assert.equal(host.nextSibling, run.meta, '宿主应在页脚之前（时长徽章在卡片下方）');
 });
 
 test('同一 run 的后续 revision 原地更新，旧 revision 丢弃', () => {
@@ -903,4 +979,197 @@ test('关闭 viewer 或切出 active chat 会清理拖动监听，未开会话�
         assert.equal((sandbox._windowListeners.resize || []).length, initialResizeListeners);
         assert.equal((handle._listeners.pointerdown || []).length, 0);
     }
+});
+
+
+/* ===== run 级收口门禁的行为验证（源码字符串断言抓不到粒度错配）=====
+   背景：卡片是 run 级产物，而 isStreaming 是会话级旗标。旧实现用
+   renderAllowed(sess) = !isStreaming && !_replaying 做门禁，实测有四条泄漏路径，
+   表现为用户报的「任务还在运行中就展示了变更」。以下逐条锁死。
+   判定口径用 cardBuilt（宿主里是否已构建卡片节点）而非遍历容器：
+   卡片宿主在气泡未建时会先落容器根，遍历口径会把「已构建但未挂载」误判为未渲染。 */
+function cardBuiltOf(sess, runKey) {
+    const host = sess._fchHosts && sess._fchHosts[runKey];
+    return !!(host && host.children && host.children.some(
+        (c) => String(c.className || '').indexOf('msg-run-changes-card') >= 0));
+}
+function gateSandbox(runIds, opts) {
+    opts = opts || {};
+    const sandbox = loadModule();
+    const root = makeRoot();
+    sandbox.renderRoot = function () { return root; };
+    const bubbles = {};
+    runIds.forEach((rid) => {
+        bubbles[rid] = makeRunBubble(root, rid);
+        bubbles[rid].bubble.querySelector = function () { return null; };
+    });
+    const first = runIds[0];
+    const sess = {
+        sessionId: 's1', projectRoot: '', container: root,
+        isStreaming: opts.isStreaming !== false, _replaying: !!opts.replaying,
+        currentBubbleEl: bubbles[first].md,
+        currentRunId: opts.currentRunId === undefined ? first : opts.currentRunId,
+        inlineThinkingEl: null, phase: opts.phase || 'tool'
+    };
+    /* root 的 querySelectorAll 必须能按 data-run-id 反查：曾因桩返回空数组导致慢路径
+       （runBubbleOf 的属性选择器反查）永远落空——测试成了绿色假象，未定义的
+       attrValueEscape 由此漏网。 */
+    root.querySelectorAll = function (sel) {
+        const m = /^\.msg-row\.assistant\[data-run-id="(.*)"\]$/.exec(sel);
+        if (!m) return [];
+        const wanted = m[1];
+        const found = [];
+        (function walk(node) {
+            (node.childNodes || []).forEach(function (c) {
+                if (c.nodeType !== 3
+                    && String(c.className || '').indexOf('msg-row') >= 0
+                    && c.getAttribute && c.getAttribute('data-run-id') === wanted) found.push(c);
+                walk(c);
+            });
+        })(this || root);
+        /* 数组语义：runBubbleOf 用 rows.length 与 rows[i] */
+        found.find = function () { return []; };
+        return found;
+    };
+    return { sandbox, root, sess, bubbles };
+}
+
+test('门禁场景1：挂起态（等作答/审批）不得出卡，恢复后真收口必须出卡', () => {
+    const { sandbox, sess } = gateSandbox(['run-1'], { isStreaming: true, phase: 'question' });
+    const onChunk = sandbox.window.onFileChangesChunk;
+    onChunk(sess, { runId: 'run-1', args: SUMMARY });
+    assert.equal(cardBuiltOf(sess, 'run-1'), false, '流式期只登记不渲染');
+
+    // 挂起态 done：finishStream 置 isStreaming=false、_runSuspended=true，随后收口点 flush
+    sess.isStreaming = false;
+    sess._runSuspended = true;
+    sess.phase = 'question';
+    sandbox.window.repositionFileChangeCards(sess);
+    assert.equal(cardBuiltOf(sess, 'run-1'), false, '挂起期出卡 = 任务还在运行中就展示（用户报的缺陷）');
+    assert.equal(sess._fchRenderPending && sess._fchRenderPending['run-1'], true, '必须重新登记，否则恢复后永不补卡');
+
+    // 用户作答后引擎带同一 runId 继续跑完 → 真收口 done（_runSuspended 被清）
+    sess._runSuspended = false;
+    sess.phase = 'done';
+    sandbox.window.repositionFileChangeCards(sess);
+    assert.equal(cardBuiltOf(sess, 'run-1'), true, '真收口必须出卡（不得修过头）');
+});
+
+test('门禁场景2：切回仍在运行的会话不得出卡（setActiveSession 补渲染路径）', () => {
+    const { sandbox, sess } = gateSandbox(['run-1'], { isStreaming: true });
+    sandbox.window.onFileChangesChunk(sess, { runId: 'run-1', args: SUMMARY });
+    // setActiveSession 的 setTimeout 会无条件调 renderSessionFileChangeCards
+    sandbox.window.renderSessionFileChangeCards(sess);
+    assert.equal(cardBuiltOf(sess, 'run-1'), false, '会话切换补渲染不得绕过门禁');
+});
+
+test('门禁场景3：回放仍在运行的会话——历史轮必须出卡、活跃轮不得出卡', () => {
+    const { sandbox, sess } = gateSandbox(['run-old', 'run-live'], {
+        isStreaming: false, replaying: true, currentRunId: 'run-live'
+    });
+    sandbox.window.onFileChangesChunk(sess, { runId: 'run-old', args: SUMMARY });
+    sandbox.window.onFileChangesChunk(sess, { runId: 'run-live', args: SUMMARY });
+    assert.equal(cardBuiltOf(sess, 'run-old'), false, '回放期 DOM 在临时容器，一律只登记');
+    assert.equal(cardBuiltOf(sess, 'run-live'), false, '回放期一律只登记');
+
+    // replayDone：_replaying=false，该会话仍在跑 → isStreaming 恢复为 true
+    sess._replaying = false;
+    sess.isStreaming = true;
+    sandbox.window.flushFileChangesReplayRender(sess);
+    assert.equal(cardBuiltOf(sess, 'run-old'), true, '历史轮已收口，不出卡就是回归');
+    assert.equal(cardBuiltOf(sess, 'run-live'), false, '活跃轮仍在跑，不得出卡');
+});
+
+test('门禁场景4：currentRunId 为 null 时保守视为活跃轮（Loop/后端推送首帧即 file_changes）', () => {
+    // file_changes 走被动分支不推进 currentRunId，故首帧就可能是它且无从判定归属
+    const running = gateSandbox(['run-1'], { isStreaming: true, currentRunId: null });
+    running.sandbox.window.onFileChangesChunk(running.sess, { runId: 'run-x', args: SUMMARY });
+    assert.equal(cardBuiltOf(running.sess, 'run-x'), false, '运行中且归属未知，不得抢跑出卡');
+
+    // 收口后迟到帧（isStreaming=false 且非挂起）必须直接出卡：既有语义不得回归
+    const settled = gateSandbox(['run-1'], { isStreaming: false, currentRunId: null, phase: 'done' });
+    settled.sandbox.window.onFileChangesChunk(settled.sess, { runId: 'run-x', args: SUMMARY });
+    assert.equal(cardBuiltOf(settled.sess, 'run-x'), true, '收口后迟到帧应直接渲染，不进 pending');
+    assert.equal(settled.sess._fchRenderPending, undefined, '已渲染不得残留待渲染登记');
+});
+
+test('门禁场景5：真收口（非挂起 done）必须出卡并落在页脚之前', () => {
+    const { sandbox, sess, bubbles } = gateSandbox(['run-1'], { isStreaming: true });
+    sandbox.window.onFileChangesChunk(sess, { runId: 'run-1', args: SUMMARY });
+    sess.isStreaming = false;
+    sess._runSuspended = false;
+    sess.phase = 'done';
+    sandbox.window.repositionFileChangeCards(sess);
+    assert.equal(cardBuiltOf(sess, 'run-1'), true, '真收口必须出卡');
+    const host = sess._fchHosts['run-1'];
+    assert.equal(host.parentNode, bubbles['run-1'].bubble, '宿主应在该轮助手气泡内');
+    const meta = bubbles['run-1'].meta;
+    assert.equal(host.nextSibling, meta, '宿主应紧跟在 meta 行（时长徽章）之前：时长在卡片下方');
+});
+
+/* ===== 慢路径回归（重启/切换后卡片消失缺陷，曾因 attrValueEscape 未定义整体爆炸）=====
+   真实链路：回放完成时 resetStreamState 已清 currentBubbleEl，快路径失效，
+   runBubbleOf 必须按 data-run-id 反查气泡。曾因引用未定义的 attrValueEscape
+   在此抛 ReferenceError，卡片永远进不了 DOM。 */
+test('慢路径：currentBubbleEl 为空时按 data-run-id 反查气泡并出卡（重启/切换后）', () => {
+    const { sandbox, sess, bubbles } = gateSandbox(['run-a', 'run-b'], { isStreaming: false, currentRunId: 'run-b' });
+    sess.currentBubbleEl = null;
+    sandbox.window.onFileChangesChunk(sess, { runId: 'run-a', args: SUMMARY });
+    assert.equal(cardBuiltOf(sess, 'run-a'), true, '历史轮慢路径必须出卡（attrValueEscape 已定义）');
+    const hostA = sess._fchHosts['run-a'];
+    assert.equal(hostA.parentNode, bubbles['run-a'].bubble, '慢路径宿主应落在 run-a 自己的气泡里');
+    /* run-b 是当前轮（currentRunId 相同）但已收口 → 也走慢路径出卡 */
+    sess.currentBubbleEl = null;
+    sandbox.window.onFileChangesChunk(sess, { runId: 'run-b', args: SUMMARY });
+    assert.equal(cardBuiltOf(sess, 'run-b'), true, '当前轮收口后慢路径必须出卡');
+    const hostB = sess._fchHosts['run-b'];
+    assert.equal(hostB.parentNode, bubbles['run-b'].bubble, '不得因快路径失效落到容器根');
+});
+
+test('慢路径：气泡不在 DOM 时宿主落容器根，气泡出现后迁入（不丢卡）', () => {
+    const { sandbox, sess } = gateSandbox(['run-x'], { isStreaming: false, currentRunId: null });
+    sess.currentBubbleEl = null;
+    sandbox.window.onFileChangesChunk(sess, { runId: 'run-x', args: SUMMARY });
+    const host = sess._fchHosts['run-x'];
+    assert.ok(host, '宿主应被创建');
+    /* renderRoot 指向容器（无该 run 气泡）：宿主落容器根，等下一次 positionCard 迁移 */
+    const { root } = gateSandbox._lastCtx || {};
+    const inContainer = host.parentNode && String(host.parentNode.className || '') !== '';
+    assert.ok(host.parentNode, '宿主必须被挂载（容器根或气泡），不得悬空');
+});
+
+test('慢路径：runId 含特殊字符时属性选择器不抛错（转义正确性）', () => {
+    const { sandbox, sess, bubbles } = gateSandbox(['we"ird\\run'], { isStreaming: false, currentRunId: 'other' });
+    sess.currentBubbleEl = null;
+    let threw = null;
+    try {
+        sandbox.window.onFileChangesChunk(sess, { runId: 'we"ird\\run', args: SUMMARY });
+    } catch (e) { threw = e; }
+    assert.equal(threw, null, '特殊字符 runId 不得抛错: ' + (threw && threw.message));
+});
+
+test('位置自愈：宿主被挤到页脚之后时，positionCard 重建「正文 → 卡片 → 页脚」序', () => {
+    /* 场景：收口后新节点（如迟到正文块/inline 指示器清理）可能把宿主顶到页脚之后，
+       这正是老实现「宿主恒在气泡末尾」注释里的前提。新实现必须在下一次 positionCard
+       （repositionFileChangeCards / 迟到帧 / 会话切换补渲染）把宿主收回页脚之前。 */
+    const sandbox = loadModule();
+    const root = makeRoot();
+    const run = makeRunBubble(root, 'run-1');
+    const sess = {
+        sessionId: 's1', projectRoot: '', container: root, isStreaming: false, _replaying: false,
+        currentBubbleEl: run.md, currentRunId: 'run-1', inlineThinkingEl: null
+    };
+    sandbox.renderRoot = function () { return root; };
+    run.bubble.querySelector = function () { return null; };
+    const onChunk = sandbox.window.onFileChangesChunk || sandbox.onFileChangesChunk;
+    onChunk(sess, { runId: 'run-1', args: SUMMARY });
+    const host = sess._fchHosts['run-1'];
+    assert.equal(host.nextSibling, run.meta, '初始落位：宿主在页脚之前');
+    /* 模拟漂移：外部把宿主搬到气泡末尾（老 bug 形态 / 迟到节点插入） */
+    run.bubble.appendChild(host);
+    assert.notEqual(host.nextSibling, run.meta, '漂移已注入（否则后续断言无意义）');
+    sandbox.window.repositionFileChangeCards(sess);
+    assert.equal(host.nextSibling, run.meta, 'positionCard 必须把宿主收回页脚之前（时长徽章在卡片下方）');
+    const kids = run.bubble.childNodes;
+    assert.equal(kids[kids.length - 1], run.meta, 'meta 行应回到气泡末尾（时长徽章在卡片下方）');
 });

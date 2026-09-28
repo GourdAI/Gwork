@@ -68,4 +68,12 @@ test('app-history.js：prepend 回放在选锚点之前缝合跨页同 run 行',
     assert.match(stitch, /getAttribute\('data-run-id'\)/, '缝合必须按 runId 配对首尾行');
     assert.match(stitch, /msg-meta-row|msg-actions/, '缝合须显式处理 meta/actions（不得搬出两份按钮）');
     assert.match(stitch, /currentBubbleEl/, '缝合不得触碰承载实时流式输出的行');
+    // 缝合内容必须插到 dst 页脚之前：直接 appendChild 会把缝合内容压到时长徽章之后，
+    // 与 positionCard 同源产生「时长在上、卡片在下」错序
+    assert.match(stitch, /dstFooter/, '缝合必须先定位 dst 页脚锚点');
+    assert.match(stitch, /dstBubble\.insertBefore\(child, dstFooter\)/, '缝合内容必须插到页脚之前');
+    // 只允许「页脚不存在」的异常兕底 appendChild，不得退回无条件追加：
+    // 正常路径（dst 有页脚）下追加到尾部 = 时长徽章被压到卡片上方
+    assert.match(stitch, /if \(dstFooter\) dstBubble\.insertBefore\(child, dstFooter\);\s*\r?\n\s*else dstBubble\.appendChild\(child\);/,
+        'append 只能作为无页脚的兕底分支，不得成为主路径');
 });

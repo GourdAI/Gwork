@@ -26,6 +26,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.io.RandomAccessFile;
 import java.io.Writer;
 import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
@@ -221,11 +222,17 @@ public class SessionStreamStore {
      */
     private final Map<String, Object> locks = new ConcurrentHashMap<>();
 
-    /**
-     * 会话内下一事件序号缓存。Key 同时包含 sessionId 与实际存储目录，避免不同工作区
+    /** 会话内下一事件序号缓存。Key 同时包含 sessionId 与实际存储目录，避免不同工作区
      * 使用相同 sessionId 时共享序号状态。
      */
     private final Map<String, Long> nextSequences = new ConcurrentHashMap<>();
+
+    /**
+     * 会话累计用量缓存（供上下文指示器「累计输入/输出/消息数」用，见 {@link UsageSum}）。
+     * Key 与 {@link #locks} 同口径（规范化绝对路径）。只在 {@code synchronized(lockFor(file))}
+     * 内读写，无需额外同步。
+     */
+    private final Map<String, UsageSum> usageSums = new ConcurrentHashMap<>();
 
     /**
      * 长驻追加 Writer 缓存（A1）。Key 与 {@link #locks} 同口径（规范化绝对路径），所有访问均在
@@ -1807,6 +1814,7 @@ public class SessionStreamStore {
 
                 if (retainedUserCount <= 0 || userBounds.isEmpty()) {
                     Files.deleteIfExists(file.toPath());
+                    usageSums.remove(pathKey(file));
                     return;
                 }
 
@@ -1820,6 +1828,9 @@ public class SessionStreamStore {
                     return; // 全部现有轮次均有对应 assistant，stream 无需裁剪
                 }
                 replaceWithPrefix(file.toPath(), lines, cutExclusive);
+                // 回退即字节水位作废：文件被重写后旧 offset 会落进新内容中部，若继续增量续扫
+                // 累计值将静默漂移（rewind 后重新增长越过旧长度时 offset>length 守卫也无法覆盖）。
+                usageSums.remove(pathKey(file));
             }
         } catch (Throwable e) {
             LOG.warn("[StreamStore] rewindToMessageState failed for session {}: {}", sessionId, e.getMessage());
@@ -1915,9 +1926,239 @@ public class SessionStreamStore {
                 nextSequences.remove(sequenceKey(sessionId, projectRoot));
                 lastWriteAt.remove(key);
                 compacted.remove(key);
+                usageSums.remove(key);
             }
         } catch (Throwable e) {
             LOG.warn("[StreamStore] delete failed for session {}: {}", sessionId, e.getMessage());
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  会话累计用量（供上下文指示器「累计消耗」展示）
+    // ═══════════════════════════════════════════════════════════════
+
+    /** 会话累计用量汇总（不可变值对象，见 {@link #sumUsage}）。 */
+    public static final class UsageSum {
+        /** 已被末轮 trace 收口的累计输入（全部 trace 帧之和，历史轮次稳定不变） */
+        final long confirmedInput;
+        /** 已被末轮 trace 收口的累计输出 */
+        final long confirmedOutput;
+        /** 最后一条 trace 之后的 context_size 帧累计输入（当前进行中 run 的逐次调用量） */
+        final long pendingInput;
+        /** 最后一条 trace 之后的 context_size 帧累计输出 */
+        final long pendingOutput;
+        /** 已被末轮 trace 收口的累计缓存创建令牌（全部 trace 帧之和） */
+        final long confirmedCacheCreation;
+        /** 最后一条 trace 之后的 context_size 帧累计缓存创建令牌 */
+        final long pendingCacheCreation;
+        /** 已被末轮 trace 收口的累计缓存读取令牌 */
+        final long confirmedCacheRead;
+        /** 最后一条 trace 之后的 context_size 帧累计缓存读取令牌 */
+        final long pendingCacheRead;
+        /** 对话总条数：user/user_input 帧（用户轮）+ trace 帧（AI 轮） */
+        final long messages;
+        /** 扫描水位（文件字节偏移，下次续扫起点） */
+        final long offset;
+
+        UsageSum(long confirmedInput, long confirmedOutput,
+                 long pendingInput, long pendingOutput,
+                 long confirmedCacheCreation, long pendingCacheCreation,
+                 long confirmedCacheRead, long pendingCacheRead,
+                 long messages, long offset) {
+            this.confirmedInput = confirmedInput;
+            this.confirmedOutput = confirmedOutput;
+            this.pendingInput = pendingInput;
+            this.pendingOutput = pendingOutput;
+            this.confirmedCacheCreation = confirmedCacheCreation;
+            this.pendingCacheCreation = pendingCacheCreation;
+            this.confirmedCacheRead = confirmedCacheRead;
+            this.pendingCacheRead = pendingCacheRead;
+            this.messages = messages;
+            this.offset = offset;
+        }
+
+        /** 对外口径：累计输入 = 已收口 + 进行中。 */
+        public long inputTokens() {
+            return confirmedInput + pendingInput;
+        }
+
+        /** 对外口径：累计输出 = 已收口 + 进行中。 */
+        public long outputTokens() {
+            return confirmedOutput + pendingOutput;
+        }
+
+        /** 对外口径：累计缓存创建令牌 = 已收口 + 进行中。 */
+        public long cacheCreationTokens() {
+            return confirmedCacheCreation + pendingCacheCreation;
+        }
+
+        /** 对外口径：累计缓存读取令牌 = 已收口 + 进行中。 */
+        public long cacheReadTokens() {
+            return confirmedCacheRead + pendingCacheRead;
+        }
+
+        /** 对外口径：对话总条数。 */
+        public long messageCount() {
+            return messages;
+        }
+    }
+
+    /**
+     * 汇总某会话至今的<b>累计消耗</b>（全部轮次的输入/输出 token + 消息条数），
+     * 供上下文指示器悬停明细卡的「累计输入/累计输出/消息条数」行展示。
+     *
+     * <h3>口径（与设置页「使用统计」同源，但多了“进行中 run”的实时部分）</h3>
+     * <ul>
+     *   <li><b>已收口的轮次</b>：每个 run 结束时会落盘一条 {@code trace} 帧，携带该轮的
+     *       整轮累计 usage（含子代理，已由 {@code Metrics} 归一）。取全部 {@code trace} 帧之和。</li>
+     *   <li><b>进行中的 run</b>：run 内每次主代理模型调用结束会落盘一条 {@code context_size} 帧
+     *       （当轮单次调用的真实用量），且这些帧排在最后一个 {@code trace} 之后；run 结束后它们
+     *       的用量会被随后的 {@code trace} 收编。故累加「最后一条 {@code trace} 之后」的
+     *       {@code context_size} 帧，既不遗漏进行中的消耗，也不会与 {@code trace} 重复计费。</li>
+     *   <li><b>消息条数</b>：user / user_input 帧（用户轮次）+ trace 帧（AI 轮次）计数之和，
+     *       即“对话总条数”（用户消息 + AI 回复各算一条），与上下文压缩无关，不会随压缩变小。</li>
+     * </ul>
+     *
+     * <h3>增量缓存</h3>
+     * <p>按文件字节长度做水位：文件增长则从缓存位置继续扫描（长期会话摊到 O(1)）；
+     * 文件长度小于水位（重新生成/回退/删除重建导致的截断）则全量重扫，自动自愈。
+     * 缓存 Key 为规范化绝对路径，与 {@link #locks} 同口径；全部读写都在
+     * {@code synchronized(lockFor(file))} 内完成。rewind / 懒压缩等<b>重写文件</b>的
+     * 路径会主动移除缓存项，保证字节水位绝不落在新内容中部。</p>
+     *
+     * @param sessionId   会话标识
+     * @param projectRoot 项目根（全局会话传 null）
+     * @return 累计汇总；无文件/扫描失败时返回全零（展示层降级，不阻断推流）
+     */
+    public UsageSum sumUsage(String sessionId, String projectRoot) {
+        File file = streamFile(sessionId, projectRoot);
+        if (file == null) {
+            return EMPTY_SUM;
+        }
+        try {
+            synchronized (lockFor(file)) {
+                // flush 纪律：与读取路径一致，先让攒批中的增量可见（否则进行中 run 的尾部帧不可见）
+                ensureVisible(file);
+                long length = file.exists() ? file.length() : -1L;
+                String key = pathKey(file);
+                if (length < 0) {
+                    usageSums.remove(key);
+                    return EMPTY_SUM;
+                }
+                UsageSum cached = usageSums.get(key);
+                if (cached != null && cached.offset > length) {
+                    // 防御兜底：常规 rewind/压缩/delete 已主动移除缓存项；此处再拦一道
+                    // 「外部截断」（文件被本类之外改写）导致的 offset 越界。
+                    cached = null;
+                }
+                UsageSum sum = scanUsage(file, cached);
+                usageSums.put(key, sum);
+                return sum;
+            }
+        } catch (Throwable e) {
+            LOG.warn("[StreamStore] sum usage failed for session {}: {}", sessionId, e.getMessage());
+            return EMPTY_SUM;
+        }
+    }
+
+    /** 无数据/降级时返回的全零汇总（展示层据此回退旧口径，不阻断推流）。 */
+    private static final UsageSum EMPTY_SUM = new UsageSum(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+    /**
+     * 从缓存水位起扫描用量相关帧并累加，返回新的缓存快照。
+     *
+     * <p><b>帧语义回顾</b>：trace = run 收口时的整轮累计 usage；context_size = run 内每次
+     * 主代理模型调用的当次用量，且 run 结束后会被下一条 trace 收编。因此：遇 trace 帧
+     * 累加到 confirmed 并把 pending 清零（防同 run 的 context_size 双重计入）；遇
+     * context_size 帧累加到 pending（它尚未被任何 trace 收编）。</p>
+     *
+     * <p><b>增量续扫为何正确</b>：水位恰在上一行行尾，续扫只会见到新帧；pending/confirmed
+     * 的状态机在帧粒度上是局部的（trace 清零 pending、context_size 加 pending），
+     * 与扫描起点无关，故从任意水位续扫结果都与全量扫描一致。</p>
+     *
+     * <p><b>为何不计入历史中间帧</b>：旧 run 中间的 context_size 帧会被后续 trace 清零
+     * ——但那是“新 trace 到达时清零”而非“回溯清除”；由于水位缓存只前进不回退，
+     * 已扫过的旧 context_size 在它们当时的 pending 里计入过，随本 run 的 trace 到达被
+     * 清零，不存在残留。</p>
+     *
+     * <p>未命中的行直接跳过不反序列化（与 {@code UsageArchiveService} 同优化：海量
+     * text/reason 增量行只用 {@code indexOf} 粗筛）。</p>
+     */
+    private UsageSum scanUsage(File file, UsageSum cached) {
+        long confirmedInput = 0, confirmedOutput = 0;
+        long pendingInput = 0, pendingOutput = 0;
+        long confirmedCacheCreation = 0, pendingCacheCreation = 0;
+        long confirmedCacheRead = 0, pendingCacheRead = 0;
+        long messages = 0;
+        long startOffset = 0;
+        if (cached != null) {
+            confirmedInput = cached.confirmedInput;
+            confirmedOutput = cached.confirmedOutput;
+            pendingInput = cached.pendingInput;
+            pendingOutput = cached.pendingOutput;
+            confirmedCacheCreation = cached.confirmedCacheCreation;
+            pendingCacheCreation = cached.pendingCacheCreation;
+            confirmedCacheRead = cached.confirmedCacheRead;
+            pendingCacheRead = cached.pendingCacheRead;
+            messages = cached.messages;
+            startOffset = cached.offset;
+        }
+        long offset = startOffset;
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            raf.seek(startOffset);
+            String line;
+            while ((line = raf.readLine()) != null) {
+                offset = raf.getFilePointer();
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                boolean trace = trimmed.indexOf("\"type\":\"trace\"") >= 0;
+                boolean contextSize = trimmed.indexOf("\"type\":\"context_size\"") >= 0;
+                boolean user = trimmed.indexOf("\"type\":\"user\"") >= 0
+                        || trimmed.indexOf("\"type\":\"user_input\"") >= 0;
+                if (!trace && !contextSize && !user) {
+                    continue;
+                }
+                ONode node;
+                try {
+                    node = ONode.ofJson(trimmed);
+                } catch (Throwable ignore) {
+                    continue;
+                }
+                String type = node.hasKey("type") ? node.get("type").getString() : null;
+                if ("trace".equals(type)) {
+                    confirmedInput         += longOf(node, "inputTokens");
+                    confirmedOutput        += longOf(node, "outputTokens");
+                    confirmedCacheCreation += longOf(node, "cacheCreationTokens");
+                    confirmedCacheRead     += longOf(node, "cacheReadTokens");
+                    messages += 1;
+                    pendingInput         = 0;
+                    pendingOutput        = 0;
+                    pendingCacheCreation = 0;
+                    pendingCacheRead     = 0;
+                } else if ("context_size".equals(type)) {
+                    pendingInput         += longOf(node, "inputTokens");
+                    pendingOutput        += longOf(node, "outputTokens");
+                    pendingCacheCreation += longOf(node, "cacheCreationTokens");
+                    pendingCacheRead     += longOf(node, "cacheReadTokens");
+                } else if ("user".equals(type) || "user_input".equals(type)) {
+                    messages += 1;
+                }
+            }
+        } catch (Throwable e) {
+            LOG.warn("[StreamStore] scan usage failed for {}: {}", file.getName(), e.getMessage());
+        }
+        return new UsageSum(confirmedInput, confirmedOutput, pendingInput, pendingOutput,
+                confirmedCacheCreation, pendingCacheCreation, confirmedCacheRead, pendingCacheRead,
+                messages, offset);
+    }
+
+    private static long longOf(ONode node, String key) {
+        try {
+            return node.hasKey(key) ? node.get(key).getLong() : 0L;
+        } catch (Throwable e) {
+            return 0L;
         }
     }
 
@@ -2059,6 +2300,8 @@ public class SessionStreamStore {
                     Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
                 }
                 moved = true;
+                // 压缩重写整个文件后旧字节水位同样作废（行合并改变了每一行的物理偏移）。
+                usageSums.remove(key);
             } finally {
                 if (!moved) {
                     Files.deleteIfExists(temp);

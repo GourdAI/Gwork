@@ -350,6 +350,34 @@ public class WebGate extends SimpleWebSocketListener {
         }
         jsonChunk.setSessionId(sessionId);
         synchronized (publishLocks.computeIfAbsent(sessionId, k -> new Object())) {
+            // 上下文指示器累计口径：context_size 帧出站前把「会话累计消耗」写进 args（totalInputTokens/
+            // totalOutputTokens/totalMessages）。必须放在 record 之前——落盘帧自带累计值后，
+            // 历史回放无需任何重建，前端直接读 args 即可（旧帧无此字段则回退当轮口径展示）。
+            // 子代理的 context_size 不落盘（TaskTalent 不转发），不会重复注入。
+            if ("context_size".equals(jsonChunk.getType()) && streamStore != null) {
+                try {
+                    SessionStreamStore.UsageSum sum = streamStore.sumUsage(sessionId, streamRoots.get(sessionId));
+                    if (sum != null && (sum.inputTokens() > 0 || sum.outputTokens() > 0 || sum.messageCount() > 0)) {
+                        Map<String, Object> args = jsonChunk.getArgs();
+                        if (args == null) {
+                            args = new LinkedHashMap<>();
+                            jsonChunk.setArgs(args);
+                        }
+                        args.put("totalInputTokens", sum.inputTokens());
+                        args.put("totalOutputTokens", sum.outputTokens());
+                        args.put("totalMessages", sum.messageCount());
+                        if (sum.cacheCreationTokens() > 0) {
+                            args.put("totalCacheCreation", sum.cacheCreationTokens());
+                        }
+                        if (sum.cacheReadTokens() > 0) {
+                            args.put("totalCacheRead", sum.cacheReadTokens());
+                        }
+                    }
+                } catch (Throwable e) {
+                    // 累计口径仅为展示增强，失败降级为旧口径，绝不阻断推流
+                    LOG.debug("[WebGate] enrich session usage failed for {}: {}", sessionId, e.toString());
+                }
+            }
             // 写盘是旁路职责：失败（磁盘满/文件被占用等）只记日志，不得阻断在线推送，
             // 更不得把异常抛回同步执行此方法的模型流线程（SSE 网络线程会把整条流意外炸断）
             if (streamStore != null) {

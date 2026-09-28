@@ -12,7 +12,7 @@
  * - chat.html：#questionCardHost 宿主容器在 .input-wrap 内、输入框上方
  * - app.css：.question-card 系列类与暗色兼容变量
  * - 选项行无末尾小箭头；入场动画仅首次渲染（勾选/翻页整卡不再闪一下）
- * - 12 个语言包均提供 9 个 chat.question_* 键（JSON 合法、行尾无裸 LF）
+ * - 12 个语言包均提供 17 个 chat.question_* 键（JSON 合法、行尾无裸 LF）
  * - 行为：状态机（选/跳/推进/自定义/提交 payload 组装）在沙箱中提取真实源码执行
  */
 const test = require('node:test');
@@ -36,7 +36,8 @@ const LOCALES = ['de', 'el', 'en', 'es', 'fr', 'ja', 'pt', 'ro', 'ru', 'vi', 'zh
 const QUESTION_KEYS = ['question_waiting', 'question_other_placeholder', 'question_skip',
     'question_next', 'question_submit', 'question_recommended', 'question_answered', 'question_skipped',
     'question_close', 'question_attachment_wait', 'question_supplement', 'question_supplement_placeholder',
-    'question_detail_expand', 'question_detail_collapse', 'question_record_title'];
+    'question_detail_expand', 'question_detail_collapse', 'question_record_title',
+    'question_unselect_hint', 'question_clear_answer'];
 
 function sliceBetween(source, startMarker, endMarker) {
     const start = source.indexOf(startMarker);
@@ -66,6 +67,7 @@ const sm = new Function(smBlock + '\nreturn {' +
     'advanceQuestionCursor: advanceQuestionCursor, ' +
     'nextUnansweredQuestionIndex: nextUnansweredQuestionIndex, ' +
     'applyQuestionOptionAnswer: applyQuestionOptionAnswer, ' +
+    'unselectQuestionOption: unselectQuestionOption, ' +
     'applyQuestionCustomAnswer: applyQuestionCustomAnswer, ' +
     'applyQuestionSupplement: applyQuestionSupplement, ' +
     'composeQuestionAnswerText: composeQuestionAnswerText, ' +
@@ -101,7 +103,14 @@ test('app-streaming.js：sendMessage 顶部问答挂起路由位于 streaming �
        且该检查须早于把文本记为答案的分支，否则附件会随 clearInput 一起被清掉。 */
     const route = send.slice(routeIdx, blockedIdx);
     assert.match(route, /pendingFiles\.length > 0/, '问答挂起期必须检查附件');
-    assert.match(route, /chat\.question_attachment_wait/, '带附件时必须给出明确提示文案');
+    /* 附件不被吞的实现形态（2026-09 重构）：路由把「文本 + 附件」交给 queueQuestionAttachments
+       —— 先落答案、再落盘并排入既有队列；答案无处安放与排入成功各有明确提示文案。
+       断言跟随实现搬家，原不变量（必须有明确提示、附件不得被吞）保持不变。 */
+    assert.match(route, /queueQuestionAttachments\(sessionMap\[activeSessionId\], text\)/,
+        '问答挂起期带附件必须交给 queueQuestionAttachments 落盘排队，不得静默吞掉');
+    const queueFn = sliceBetween(streaming, 'function queueQuestionAttachments', 'function makeSteerId');
+    assert.match(queueFn, /chat\.question_attachment_wait/, '答案无处安放时必须给出明确提示文案');
+    assert.match(queueFn, /chat\.question_attachment_queued/, '附件排入队列后必须给出明确提示文案');
     const filesIdx = route.indexOf('pendingFiles.length > 0');
     const applyIdx = route.indexOf('applyQuestionCustomAnswerByText');
     assert.ok(filesIdx >= 0 && applyIdx > filesIdx, '附件检查必须早于文本记为答案的分支');
@@ -200,7 +209,7 @@ test('app-message.js / app.css：入场动画仅首次渲染播放（勾选/翻�
     assert.match(appCss, /\.question-card\.question-card-enter \{ animation: msg-in 0\.25s ease-out; \}/);
 });
 
-test('12 个语言包均提供 15 个 chat.question_* 键与问答挂起 placeholder 键（JSON 合法、行尾无裸 LF）', () => {
+test('12 个语言包均提供 17 个 chat.question_* 键与问答挂起 placeholder 键（JSON 合法、行尾无裸 LF）', () => {
     for (const lang of LOCALES) {
         const raw = readStatic('locales', `${lang}.json`);
         const json = JSON.parse(raw);
@@ -1236,4 +1245,135 @@ test('行为：焦点不在卡内时不得乱聚焦（会话切换/他端作答�
 
     /* 防御：host 为空 / scroll 为空均不得抛错 */
     sb.api.questionCardRestoreView(null, 'X', { start: 0, end: 0 }, { card: 1, list: 1 });
+});
+
+/* ===== 本轮修复：问答卡「选中后无法取消」 =====
+   旧状态机只有「写入 / 改选」两条出路：applyQuestionOptionAnswer 无条件覆写 answers[index]，
+   再点已选中的那一项等于把同一份答案原样重写一遍（视觉与状态都无变化）；而卡片内输入框
+   清空后按 Enter 被「空输入不产生答案」早退。用户看到的症状就是「选完只能换不能撤」。 */
+
+test('行为：再点已选中的选项 = 取消选择，回到未作答态且不推进光标', () => {
+    const state = sm.createQuestionCardState('u1', sm.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }, { label: 'B' }] }, { header: 'Q2' }]
+    }));
+    sm.applyQuestionOptionAnswer(state, 0, 'A');
+    assert.equal(state.current, 1, '选中后自动推进（原语义保持）');
+
+    // 用户翻回本题、再点一次刚选的那一项 → 取消
+    state.current = 0;
+    sm.applyQuestionOptionAnswer(state, 0, 'A');
+    assert.equal(state.answers[0], undefined, '再点已选项必须把本题撤回未作答态');
+    assert.equal(state.current, 0, '取消表达「还没定」，不得被弹到下一题');
+    assert.equal(sm.questionIsAllAnswered(state), false);
+    assert.equal(sm.questionSubmitMode(state, ''), 'skip', '撤回后底部按钮回到「跳过」');
+});
+
+test('行为：取消选择不得误伤别的选项/未选状态（点未选项仍是正常选中）', () => {
+    const state = sm.createQuestionCardState('u2', sm.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }, { label: 'B' }] }, { header: 'Q2' }]
+    }));
+    sm.applyQuestionOptionAnswer(state, 0, 'A');
+    state.current = 0;
+    sm.applyQuestionOptionAnswer(state, 0, 'B');   // 改选：不是 toggle，是换答案
+    assert.equal(state.answers[0].selectedLabel, 'B');
+    assert.equal(sm.questionOptionSelected(state, 0, 'A'), false);
+    assert.equal(sm.questionOptionSelected(state, 0, 'B'), true);
+    assert.equal(state.current, 1, '改选照常推进（与「取消不推进」区分开）');
+});
+
+test('行为：取消选项时已写的补充降级为自定义答案，一个字都不丢', () => {
+    const state = sm.createQuestionCardState('u3', sm.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }, { label: 'B' }] }]
+    }));
+    sm.applyQuestionOptionAnswer(state, 0, 'A');
+    sm.applyQuestionSupplement(state, 0, '但先别动数据库');
+    state.current = 0;
+    sm.applyQuestionOptionAnswer(state, 0, 'A');   // 再点已选项 → 取消
+
+    const a = state.answers[0];
+    assert.ok(a, '补充文字仍在，不得随选项取消一起被丢掉');
+    assert.equal(a.selectedLabel, '', '选项位必须清空');
+    assert.equal(a.custom, true, '只剩手写内容 → 语义上是自定义回答');
+    assert.equal(a.text, '但先别动数据库', '不得残留「A（补充：…）」的拼接痕迹');
+    assert.equal(sm.questionOptionSelected(state, 0, 'A'), false, '取消后 A 不得还高亮');
+    // 出站 payload 仍只有四键，协议零改动
+    assert.deepEqual(Object.keys(sm.buildQuestionAnswersPayload(state).answers[0]).sort(),
+        ['custom', 'index', 'skipped', 'text']);
+});
+
+test('行为：已跳过的题不得被「取消选择」悄悄复活（尊重 X 的放弃语义）', () => {
+    const state = sm.createQuestionCardState('u4', sm.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }, { header: 'Q2' }]
+    }));
+    sm.skipQuestionAnswer(state);                       // 第 1 题记为 skipped
+    assert.deepEqual(state.answers[0], sm.skippedAnswer(0));
+    sm.unselectQuestionOption(state, 0);
+    assert.deepEqual(state.answers[0], sm.skippedAnswer(0),
+        '跳过态必须原样保留：X 已表达放弃，取消动作不得把它复活成待答态');
+    assert.equal(sm.questionOptionSelected(state, 0, 'A'), false);
+});
+
+test('行为：清空本行 = 只撤补充/自定义答案，已选选项保持', () => {
+    const state = sm.createQuestionCardState('u5', sm.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }]
+    }));
+    // ① 有选项时清空补充：回到「只选选项」
+    sm.applyQuestionOptionAnswer(state, 0, 'A');
+    sm.applyQuestionSupplement(state, 0, '随手补一句');
+    sm.applyQuestionSupplement(state, 0, '');
+    assert.equal(state.answers[0].selectedLabel, 'A', '清空补充行不得顺手取消选项');
+    assert.equal(state.answers[0].text, 'A');
+
+    // ② 纯自定义答案时清空：整条撤回（既有能力，锁定不被本轮改动破坏）
+    const s2 = sm.createQuestionCardState('u5b', sm.normalizeQuestionArgs({
+        questions: [{ header: 'Q1', options: [{ label: 'A' }] }, { header: 'Q2' }]
+    }));
+    sm.applyQuestionCustomAnswer(s2, 0, '先随便写点');
+    assert.equal(s2.answers[0].custom, true);
+    sm.applyQuestionSupplement(s2, 0, '');
+    assert.equal(s2.answers[0], undefined, '无选项时清空本行须回到未作答态');
+});
+
+test('渲染/事件：已选中项挂取消提示，补充行按内容出现清空按钮', () => {
+    const render = sliceBetween(message, '/* 渲染卡片到宿主', 'function handleQuestionResponse');
+    assert.match(render, /question_unselect_hint/, '选中项必须有可发现的取消提示（否则用户不知道能撤）');
+    assert.ok(render.includes("!submitted && selected ? ' title=\"'"),
+        '取消提示只挂在【已选中项】上：未选项挂提示是噪声');
+    assert.ok(render.includes('aria-pressed="\' + (selected ? \'true\' : \'false\')'),
+        '选中态须以 aria-pressed 对外暴露，键盘/读屏用户同样要能判断再点会取消');
+    assert.ok(render.includes("var showClear = !!String(draft || '').trim();"),
+        '清空按钮只在行内有内容时出现（空行旁挂 X 会让人误以为清的是选项）');
+    assert.match(render, /question-card-other-clear/, '须渲染清空按钮');
+    assert.match(render, /GourdI18n\.t\('chat\.question_clear_answer'\)/);
+
+    const events = sliceBetween(message, 'function bindQuestionCardEvents', 'function activeQuestionCardState');
+    const clear = sliceBetween(events, "$(host).on('click', '.question-card-other-clear'", '// 翻页（仅多题时渲染）');
+    assert.ok(clear.includes("applyQuestionSupplement(st, st.current, '')"),
+        '清空按钮必须复用 applyQuestionSupplement 空串语义（本题文本的唯一写入口）');
+    assert.match(clear, /syncQuestionCard\(\)/);
+    // 清空后按钮自己就消失了（通用焦点恢复按 key 找不到宿主），必须手动把焦点交还输入框
+    assert.ok(clear.includes("host.querySelector('.question-card-other-input')") && clear.includes('focus()'),
+        '清空后必须补焦输入框，否则焦点掉回 body，用户接着不了字');
+
+    // 空输入按 Enter 也要接手「清空本行」（旧实现一律早退，已入库的补充撤不掉）
+    const keydown = sliceBetween(events, "$(host).on('keydown', '.question-card-other-input'",
+        "$(host).on('click', '.question-card-other-clear'");
+    assert.ok(keydown.includes("if (e.key !== 'Enter' || e.shiftKey) return;"),
+        'Esc 分支须先 return，Enter 的两种情形再分流');
+    const emptyIdx = keydown.indexOf('if (val) {');
+    const clearIdx = keydown.indexOf("applyQuestionSupplement(st, st.current, '')");
+    assert.ok(emptyIdx >= 0 && clearIdx > emptyIdx, '空输入分支必须走「清空本行」而非一律早退');
+    assert.ok(keydown.includes("cur.supplement || cur.custom"),
+        '只有本行确有内容时才拦下 Enter，避免无谓的整卡重建');
+    assert.ok(!keydown.includes('if (!val) return;'),
+        '旧的「空输入一律早退」必须移除（它就是「补充撤不掉」的成因）');
+});
+
+test('app.css：清空按钮与选中项的可点击取消有样式承载', () => {
+    assert.match(appCss, /\.question-card-other-clear \{/, '清空按钮须有独立样式（图标尺寸/悬停反馈）');
+    const clearRule = (appCss.match(/\.question-card-other-clear\s*\{[^}]*\}/) || [''])[0];
+    assert.match(clearRule, /cursor:\s*pointer/);
+    assert.match(clearRule, /border:\s*none/, '按钮态须抹掉默认边框，只留图标');
+    assert.match(appCss, /\.question-card-option\.selected:hover:not\(:disabled\) \{[^}]*background:/,
+        '选中项须有比常项更强的 hover 反馈：它现在还能再点取消，不能看起来像已锁定');
 });

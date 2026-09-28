@@ -1612,12 +1612,13 @@ function updateQueueChip(queue) {
     updateChipWrapVisibility();
 }
 
-async function updateMessageQueueUI() {
+async function updateMessageQueueUI(opts) {
     if (!window.messageQueue) return;
     var sessionId = activeSessionId || SESSION_ID || 'chat-default';
+    var force = !!(opts && opts.force);
 
     try {
-        var queue = await window.messageQueue.getQueue(sessionId);
+        var queue = await window.messageQueue.getQueue(sessionId, force);
         queue = queue || [];
 
         // chat 模式（对话视图）

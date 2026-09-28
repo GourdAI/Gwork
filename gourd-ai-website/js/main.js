@@ -393,68 +393,8 @@ function setupSpotlight() {
 }
 
 /* ================= 顶部导航条 ================= */
-/* 嵌入模式标记由页面内联脚本前置写入 <html>（被 iframe 嵌套或 ?embed=1）。
-   此时导航条已被 CSS 隐藏，滚动高亮与移动端菜单都无需接线。 */
-function isEmbedded() {
-  const cls = document.documentElement && document.documentElement.className;
-  return typeof cls === 'string' && /\bis-embedded\b/.test(cls);
-}
-
-function setupNav() {
-  if (isEmbedded()) return;
-  const header = document.getElementById('siteHeader');
-  const toggle = document.getElementById('navToggle');
-  const links = document.getElementById('navLinks');
-  const navSectionIds = ['features', 'quickstart', 'downloads'];
-
-  // 滚动：头部背景 + 当前区块高亮
-  function updateActive() {
-    if (!links) return;
-    const probe = window.scrollY + 120;
-    let currentId = '';
-    for (const id of navSectionIds) {
-      const sec = document.getElementById(id);
-      if (!sec) continue;
-      if (sec.getBoundingClientRect().top + window.scrollY <= probe) currentId = id;
-    }
-    const atBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
-    if (atBottom) currentId = 'downloads';
-
-    links.querySelectorAll('a').forEach(a => {
-      const target = a.getAttribute('href') || '';
-      a.classList.toggle('active', target === '#' + currentId);
-    });
-  }
-
-  function onScroll() {
-    if (header) header.classList.toggle('scrolled', window.scrollY > 8);
-    updateActive();
-  }
-  window.addEventListener('scroll', onScroll, { passive: true });
-  onScroll();
-
-  // 移动端菜单开合
-  if (!toggle || !links) return;
-  const close = () => {
-    toggle.classList.remove('open');
-    links.classList.remove('open');
-    toggle.setAttribute('aria-expanded', 'false');
-    toggle.setAttribute('aria-label', '打开菜单');
-  };
-  toggle.addEventListener('click', () => {
-    const open = links.classList.toggle('open');
-    toggle.classList.toggle('open', open);
-    toggle.setAttribute('aria-expanded', String(open));
-    toggle.setAttribute('aria-label', open ? '关闭菜单' : '打开菜单');
-  });
-  links.querySelectorAll('a').forEach(a => a.addEventListener('click', close));
-  document.addEventListener('click', e => {
-    if (links.classList.contains('open') && !e.target.closest('.site-header')) close();
-  });
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') close();
-  });
-}
+/* 导航实现已抽取到 js/site-nav.js（index.html 与 models.html 共用一份），
+   本文件仅在启动处按本页参数调用，见下方 setupNav 调用点。 */
 
 /* ================= 启动 ================= */
 document.addEventListener('DOMContentLoaded', () => {
@@ -467,7 +407,11 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   setupReveal();
   setupSpotlight();
-  setupNav();
+  // 本页导航为页内锚点，且头部背景由滚动接管（首屏透明、下滚加 scrolled）。
+  window.GourdSiteNav.setupNav({
+    sectionIds: ['features', 'quickstart', 'downloads'],
+    scrolledOnScroll: true,
+  });
 
   const win = document.querySelector('.app-window');
   if (win && 'IntersectionObserver' in window) {

@@ -141,7 +141,8 @@ document.addEventListener('DOMContentLoaded', () => {
     document.querySelectorAll('[data-period]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
     loadStats(button.dataset.period);
   }));
-  const toggle = $('navToggle'), links = $('navLinks');
-  if (toggle && links) toggle.addEventListener('click', () => { const open = links.classList.toggle('open'); toggle.classList.toggle('open', open); toggle.setAttribute('aria-expanded', String(open)); });
+  // 导航条由 js/site-nav.js 统一装配：本页导航项指向其它页面，不做页内锚点高亮；
+  // 且 header 在 models.html 里写定常驻 scrolled，因此不接管滚动头部背景。
+  window.GourdSiteNav.setupNav({ sectionIds: [], scrolledOnScroll: false });
   loadStats('24h');
 });

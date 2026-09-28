@@ -46,8 +46,12 @@ test('流式态看门狗常驻启动，长时无事件且服务端空闲时强�
     assert.match(js, /function startStreamWatchdog\(\)/);
     assert.match(js, /window\._streamWatchdogTimer = setInterval\(function\(\) \{/);
     assert.match(js, /var STREAM_STALL_MS = \d+;/);
-    // 看门狗必须只扫活跃流式会话，且跳过正在回放的会话
-    assert.match(js, /if \(!sess \|\| !sess\.isStreaming \|\| sess\._replaying\) continue;/);
+    // 看门狗必须只对活跃流式会话发起对账，且跳过正在回放的会话；
+    // 已结束会话另走「状态背离校正」分支（isStreaming=false 但全局按钮卡停止态时直接同步复位）；
+    // 回放守卫必须先于背离校正（回放期间会话态由回放机制临时编排，不得误杀，详见 send-button 专项）
+    assert.match(js, /if \(sess\._replaying\) continue;/);
+    assert.doesNotMatch(js, /if \(!sess \|\| !sess\.isStreaming \|\| sess\._replaying\) continue;/);
+    assert.match(js, /reconcileSessionRunning\(sess, \{\}\);/);
     // 必须在模块顶层（行首无缩进）无参调用，才算“常驻启动”
     assert.match(js, /^startStreamWatchdog\(\);$/m, '看门狗应在模块加载时顶层启动');
 });

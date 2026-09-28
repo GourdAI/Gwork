@@ -96,7 +96,24 @@ function startStreamWatchdog() {
         for (var sid in sessionMap) {
             if (!sessionMap.hasOwnProperty(sid)) continue;
             var sess = sessionMap[sid];
-            if (!sess || !sess.isStreaming || sess._replaying) continue;
+            if (!sess) continue;
+            /* 回放守卫必须先于一切介入：回放机制会临时编排 sess.isStreaming
+             * （replaySession 入口置 false、逐事件 true/false 切换、replayDone 按快照恢复），
+             * 期间「全局 true + 会话 false」是合法瞬态——典型如流式进行中触发加载更多的
+             * prepend 回放；分片回放跨多个 rAF 帧，后台标签页 rAF 暂停时窗口可持续数分钟。
+             * 在此窗口内做背离校正会把正在流式输出的会话按钮误复位成发送态。 */
+            if (sess._replaying) continue;
+            /* 状态背离校正（按钮未复位专项）：会话已结束（sess.isStreaming=false）但全局
+             * 按钮仍停在停止态——finishStream 中段异常、渲染管线半路崩溃等历史残留。
+             * 看门狗原本以 isStreaming 为门槛直接跳过这类会话，形成永久卡死。
+             * 校正动作幂等且零 DOM 代价：只同步全局态到会话真值。 */
+            if (!sess.isStreaming) {
+                if (sess.sessionId === activeSessionId && isStreaming) {
+                    console.warn('[WebGate] watchdog: button/state divergence corrected for', sid);
+                    syncSendButtonToSessionState(sess);
+                }
+                continue;
+            }
             // 同对账：取较新值，避免上一轮遗留的 lastEventAt 造成误判
             if (Date.now() - Math.max(sess.lastEventAt || 0, sess._streamStartAt || 0) < STREAM_STALL_MS) continue;
             reconcileSessionRunning(sess, {});
@@ -463,6 +480,7 @@ function sendMessage(forceQueue) {
 
     sess.isStreaming = true;
     isStreaming = true;
+    ensureSidebarRefreshTimer();
     setBtnStopMode();
     resetStreamState(sess);
     showThinking(sess);
@@ -500,6 +518,7 @@ function sendCommandSilent(cmdText, onBeforeSend) {
 
     sess.isStreaming = true;
     isStreaming = true;
+    ensureSidebarRefreshTimer();
     setBtnStopMode();
     resetStreamState(sess);
     showThinking(sess);
@@ -605,6 +624,7 @@ function sendWithFormDataGrouped(sess, text, filesToSend) {
 
     // 标记流式状态，WebSocket onmessage 会处理数据
     sess.isStreaming = true;
+    ensureSidebarRefreshTimer();
     if (sess.sessionId === activeSessionId) {
         isStreaming = true;
         setBtnStopMode();
@@ -853,7 +873,15 @@ function onWebChunk(sess, chunk) {
         case 'hitl':   finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendHitlCard(sess, chunk.toolName, chunk.command, chunk.actionId); break;
         case 'question': finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendQuestionCard(sess, chunk); break;
         case 'question_answered': handleQuestionAnsweredFrame(sess, chunk); break;
-            case 'trace':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendTraceBadge(sess, chunk); break;
+            case 'trace':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendTraceBadge(sess, chunk);
+                // 任务耗时定格：trace 帧携带 TurnTimer 用单调时钟测得的权威 elapsedMs，
+                // 与徒标显示的值同源。收口后停掉前端 tick，避免“已结束的轮还在走表”。
+                // 必须晚于 appendTraceBadge：两者读同一个 chunk，顺序不影响数值，但保持
+                // “先渲染徒标、后定格环”使异常时徒标（主展示）不会被连带拖垮。
+                if (chunk.elapsedMs != null && typeof settleContextElapsed === 'function') {
+                    settleContextElapsed(sess, chunk.elapsedMs);
+                }
+                break;
             case 'context_size':
                 // 快照始终写入会话（即使非活跃），保证切回该会话时能恢复；仅活跃会话刷新 DOM。
                 // 两分支均遵循单调时间戳门禁（回放旧帧不得覆盖新帧）
@@ -891,10 +919,46 @@ function onWebChunk(sess, chunk) {
    若按普通 done 清掉 toolBatchesById/toolCardsById，恢复后的成员卡找不到原批次容器，同一批会被拆成两组渲染。
    辨识方式：优先用后端显式标记 chunk.suspended（WebGate 出站补打，见 line.setSuspended(true)）；
    旧后端无该字段时降级看本地相位——上一帧是 question/hitl 即为挂起（二者都紧跟 done）。 */
+
+/* 全局发送按钮态与活动会话流式态的一致性收敛。所有「会话流式态翻转点」都必须经过这里：
+ * finishStream 的真正收尾要经过上百行 DOM 清理（强刷渲染/高亮/批次扫尾/resetStreamState），
+ * 若把按钮复位留在函数末尾，中段任何一步抛异常（异常被上层吞掉只留痕）都会让复位永远执行不到——
+ * 表现为「任务已结束，按钮却停在停止态」，直到用户切换会话（setActiveSession 重置）才恢复。
+ * 现约定：翻转点先同步全局态（本函数，零 DOM、不抛异常），DOM 收尾链再包异常防护。 */
+function syncSendButtonToSessionState(sess) {
+    if (!sess || !sess.sessionId || sess.sessionId !== activeSessionId) return;
+    isStreaming = !!sess.isStreaming;
+    if (isStreaming) setBtnStopMode();
+    else setBtnSendMode();
+}
+
 function isSuspendedDone(sess, chunk) {
     if (chunk && chunk.suspended === true) return true;
     if (!sess) return false;
     return sess.phase === PHASE_QUESTION || sess.phase === PHASE_HITL;
+}
+
+// 侧边栏流式状态刷新定时器：streaming 期间每 30s 触发一次 updateHistoryUI，
+// 保持时间小字与 spinner 的显示准确；无会话在 streaming 时自动停止。
+var _sidebarRefreshTimer = null;
+function ensureSidebarRefreshTimer() {
+    if (_sidebarRefreshTimer) return;
+    _sidebarRefreshTimer = setInterval(function() {
+        if (typeof updateHistoryUI === 'function') updateHistoryUI();
+    }, 30000);
+}
+function clearSidebarRefreshTimerIfIdle() {
+    if (!_sidebarRefreshTimer) return;
+    var _anyStreaming = false;
+    if (window.sessionMap) {
+        for (var _k in window.sessionMap) {
+            if (window.sessionMap[_k] && window.sessionMap[_k].isStreaming) { _anyStreaming = true; break; }
+        }
+    }
+    if (!_anyStreaming) {
+        clearInterval(_sidebarRefreshTimer);
+        _sidebarRefreshTimer = null;
+    }
 }
 
 function finishStream(sess, opts) {
@@ -902,8 +966,18 @@ function finishStream(sess, opts) {
     var keepBatchIndex = !!(opts && opts.keepBatchIndex);
     var wasStreaming = sess.isStreaming;
     sess.isStreaming = false;
+    clearSidebarRefreshTimerIfIdle();
     sess.phase = PHASE_DONE;
+    /* 【挂起标记】本次 done 是「等用户作答/审批」而非真结束：引擎随时会带【同一个 runId】继续跑。
+       必须落盘给下游区分「收口」与「挂起」——变更卡片靠它避免在任务运行中就展示（见
+       app-file-changes.js 的 runSettled）。isStreaming 单独不够用：挂起后它同样是 false。
+       真收口时置 false（恢复后的那一轮 done 会重新走到这里）。 */
+    sess._runSuspended = keepBatchIndex;
     if (sess.silenceTimer) { clearTimeout(sess.silenceTimer); sess.silenceTimer = null; }
+    /* 按钮复位前置：本函数其余部分是一长段 DOM 收尾链，任何一步抛异常都会让原本排在
+     * 末尾的复位永远执行不到（上层 onmessage/applySequencedGateChunk/drainGateBuffer 只
+     * 留痕不上抛）。状态落盘与按钮复位必须原子化：状态一落盘，全局态立刻跟随。 */
+    syncSendButtonToSessionState(sess);
 
     // 清除可能残留的重试提示（如所有重试失败、最终错误已作为答复展示）
     if (typeof clearRetryChunk === 'function') clearRetryChunk(sess);
@@ -1023,16 +1097,22 @@ function finishStream(sess, opts) {
     resetStreamState(sess);
     if (keepBatchIndex) sess.completedActionIds = keptCompletedActionIds || {};
 
-    // 清扫遗留的视觉为空正文容器，统一卡片间隔（指针推进遗留的空 .md-content 会撑出参差间距）
-    purgeEmptyMdBlocks(renderRoot(sess));
+    /* DOM 收尾链异常防护：本段（purgeEmptyMdBlocks 起至函数末尾）任何一步抛异常，
+     * 都不得再让全局按钮态与会话态背离——异常只留痕，尾部不再有必须执行的复位。 */
+    try {
+        // 清扫遗留的视觉为空正文容器，统一卡片间隔（指针推进遗留的空 .md-content 会撑出参差间距）
+        purgeEmptyMdBlocks(renderRoot(sess));
+    } catch (e) { reportStreamPipelineError('finishStream:purge', e, null); }
 
     if (sess.sessionId === activeSessionId) {
         isStreaming = false;
         setBtnSendMode();
         // 非 force：用户若已上滚查看历史（任务运行期间常见），done 帧不得把视口抢回底部；
         // 回放收尾（_skipScroll）时由回放层自行控制滚动
-        if (!sess._skipScroll) scrollToBottom();
-        chatInput.focus();
+        try {
+            if (!sess._skipScroll) scrollToBottom();
+            chatInput.focus();
+        } catch (e) { reportStreamPipelineError('finishStream:tail', e, null); }
     }
 
     // 刷新侧边栏，清除该会话的 spinner
@@ -1212,6 +1292,7 @@ function recoverStreamingSession(sess) {
         // 若已结束则此时才允许触发消息队列。
         if (data.running) {
             sess.isStreaming = true;
+            ensureSidebarRefreshTimer();
             if (sess.sessionId === activeSessionId) { isStreaming = true; setBtnStopMode(); }
         } else if (sess.isStreaming || sess._suppressQueueDispatch) {
             sess._suppressQueueDispatch = false;
@@ -1347,7 +1428,16 @@ function dispatchGateChunk(chunk) {
     if (chunk.type === 'done') {
         if (!sid) return;
         var sess = sessionMap[sid];
-        if (!sess) return;
+        if (!sess) {
+            /* 会话已被删除/淘汰：done 无处收尾。若它恰是活动会话且全局按钮卡在停止态，
+             * 补一次最小复位——此时已无会话态可依，直接回发送态（幂等、零副作用）。 */
+            if (sid === activeSessionId && isStreaming) {
+                console.warn('[WebGate] done for missing session, resetting stuck stop-mode button');
+                isStreaming = false;
+                setBtnSendMode();
+            }
+            return;
+        }
         // 保存 done 消息的时间戳，用于 finishStream 显示
         if (chunk.createdAt) sess._lastCreatedAt = chunk.createdAt;
         // 本轮结束：清除回放快照覆盖集（使命完成，避免误拦后续轮次帧）
@@ -1435,9 +1525,10 @@ function dispatchGateChunk(chunk) {
             }
         }
         if (chunk.type === 'steer_dropped') {
-            // 后端已按 originSteerId 原子、幂等入 queue.json；前端只失效缓存并刷新 UI。
+            // 后端已按 originSteerId 原子、幂等入 queue.json；前端失效缓存并强制刷新 UI（绕过缓存，
+            // 否则同会话后续 getQueue 命中旧快照，chip 计数不动直到下一次 add/shift）。
             if (window.messageQueue && window.messageQueue.caches) delete window.messageQueue.caches[sid];
-            if (sid === activeSessionId && typeof updateMessageQueueUI === 'function') updateMessageQueueUI();
+            if (sid === activeSessionId && typeof updateMessageQueueUI === 'function') updateMessageQueueUI({ force: true });
             if (!steerSess._replaying && typeof showToast === 'function') showToast(GourdI18n.t('streaming.steer_dropped'), 'info');
         }
         return;
@@ -1479,6 +1570,7 @@ function dispatchGateChunk(chunk) {
     var sess2 = getOrCreateSession(sid);
     if (!sess2.isStreaming) {
         sess2.isStreaming = true;
+        ensureSidebarRefreshTimer();
         if (sess2.sessionId === activeSessionId) {
             isStreaming = true;
             setBtnStopMode();

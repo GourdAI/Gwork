@@ -954,7 +954,7 @@ $(document).on('click', '#clearAllBtn', function () {
    不能用事件行数分页：text/reason 是 token 级增量，实测占全部事件的 ~92%
    （某会话 15383 行里 14190 行是增量，真实用户消息只有 11 条），
    按行分页时「一页 150 行」实际连半轮对话都不到，用户点一次几乎看不到新内容。 */
-var REPLAY_PAGE_ROUNDS = 5;
+var REPLAY_PAGE_ROUNDS = 10;
 var REPLAY_PAGE_REQUEST_TIMEOUT_MS = 30000;
 // 锚锁沿用 app-base.js 的 8 秒安全阀，由短周期续期覆盖请求/异步回放的整个活动窗口。
 var REPLAY_PAGE_SCROLL_HOLD_REFRESH_MS = 4000;
@@ -1267,7 +1267,11 @@ function updateLoadMoreBtn(sess) {
     // 容器必须已在 DOM 树中
     if (!sess.container || !document.contains(sess.container)) return;
 
-    // 只移除当前会话容器前的加载按钮
+    // 只移除当前会话容器前的加载按钮；先断开旧观察器，防止孤立回调触发加载
+    if (sess._loadMoreObserver) {
+        sess._loadMoreObserver.disconnect();
+        sess._loadMoreObserver = null;
+    }
     $(sess.container).prev('.chat-load-more-wrapper').remove();
 
     if (sess._replayHasMore) {
@@ -1295,10 +1299,29 @@ function updateLoadMoreBtn(sess) {
             loadMoreMessages(sess);
         });
         if (sess._replayLoadingMore) setLoadMoreBtnLoading(sess);
+        if (typeof IntersectionObserver !== 'undefined' && !sess._replayLoadingMore) {
+            // 防无限自激：按钮被程序性插入视口时不自动触发。
+            // 必须先离开视口（_hasBeenHidden）再回来，才判定为用户主动滚到此处。
+            // _triggered 一次性保护防止边界情况下的重复触发。
+            var _triggered = false, _hasBeenHidden = false;
+            var obs = new IntersectionObserver(function(entries) {
+                var e = entries[0];
+                if (!e.isIntersecting) {
+                    _hasBeenHidden = true;
+                } else if (_hasBeenHidden && !_triggered) {
+                    _triggered = true;
+                    obs.disconnect();
+                    sess._loadMoreObserver = null;
+                    loadMoreMessages(sess);
+                }
+            }, { threshold: 0.5 });
+            obs.observe($btn[0]);
+            sess._loadMoreObserver = obs;
+        }
     }
 }
 
-/* 加载更多分页只有上方按钮这一种入口；页面滚动仅用于视口/跟随状态，不触发历史请求。 */
+/* 加载更多分页主入口：IntersectionObserver 监听按钮进入视口自动触发；也保留手动点击。 */
 function loadMoreLoadingHtml() {
     return '<svg class="load-more-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">' +
                '<circle cx="12" cy="12" r="9" stroke-opacity="0.25"></circle>' +
@@ -1639,7 +1662,8 @@ function replaySession(sess, events, prepend, keepOpen) {
                 if (rect.bottom > wrapTop) { anchorEl = rows[ai]; anchorOffset = rect.top - wrapTop; break; }
             }
 
-            // prepend 插入到现有内容之前
+            // prepend 插入到现有内容之前；先记录 scrollHeight，供 anchorEl 缺席时兜底修正视口。
+            var scrollHeightBefore = messagesWrap.scrollHeight;
             realContainer.insertBefore(fragment, realContainer.firstChild);
 
             // 清理回放过程中产生的空白助手消息（无内容、无工具卡、无思考块），
@@ -1678,6 +1702,10 @@ function replaySession(sess, events, prepend, keepOpen) {
             if (anchorEl) {
                 var newTop = anchorEl.getBoundingClientRect().top - messagesWrap.getBoundingClientRect().top;
                 messagesWrap.scrollTop += (newTop - anchorOffset);
+            } else {
+                // anchorEl 选取失败（所有旧行都滚出了视口）：
+                // scrollHeight 增量就是 prepend 内容的高度，同步补偿 scrollTop 让视口不跳。
+                messagesWrap.scrollTop += (messagesWrap.scrollHeight - scrollHeightBefore);
             }
         } else {
             // 初始加载模式：清空后移入
@@ -1813,14 +1841,22 @@ function stitchPrependedRunRows(fragment, realContainer, sess) {
             dstTime.style.display = srcTime.style.display;
         }
     }
-    // 内容按原序搬移：反复取 src 的首个子元素挂到 dst 尾部（跳过 meta/actions）
+    // 内容按原序搬移：反复取 src 的首个子元素插到 dst 页脚之前（跳过 meta/actions）。
+    // 页脚（时长徽章/操作按钮）必须永远在正文流末端——直接 appendChild 会把缝合内容
+    // 压到页脚之后，出现「时长徽章在上、卡片在下」的错序（与 positionCard 同源的缺陷）。
+    var dstFooter = null;
+    for (var fi = 0; fi < dstBubble.childNodes.length; fi++) {
+        var fn = dstBubble.childNodes[fi];
+        if (fn && fn.classList && (fn.classList.contains('msg-meta-row') || fn.classList.contains('msg-actions'))) { dstFooter = fn; break; }
+    }
     while (srcBubble.firstElementChild) {
         var child = srcBubble.firstElementChild;
         if (child.classList && (child.classList.contains('msg-meta-row') || child.classList.contains('msg-actions'))) {
             child.parentNode.removeChild(child);
             continue;
         }
-        dstBubble.appendChild(child);
+        if (dstFooter) dstBubble.insertBefore(child, dstFooter);
+        else dstBubble.appendChild(child);
     }
     $(firstRow).remove();
 }

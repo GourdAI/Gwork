@@ -338,7 +338,11 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 
 .msg-bubble { max-width: 75%; line-height: 1.75; word-break: break-word; }
 .msg-row.user .msg-bubble { max-width: 100%; background: var(--bg-user-msg); color: var(--text-user-msg); padding: 12px 18px; border-radius: 20px 20px 4px 20px; font-size: 14px; }
-.msg-row.assistant .msg-bubble { max-width: 92%; min-width: 92%; }
+/* 助手气泡通栏 100%：右边界必须与用户消息的右边界（user-msg-col 100% 处）严格同线。
+   卡片头部状态点 margin-left:auto 钉在气泡最右，若气泡窄于用户列（曾为 92%），
+   两条右边界差约 60px，整列状态点悬在半空形成游离竖列；加宽后同线对齐。
+   min-width 同步 100%：保证短内容时状态点仍贴行尾而非跟随内容收缩。 */
+.msg-row.assistant .msg-bubble { max-width: 100%; min-width: 100%; }
 /* 宽度约束放在列容器上，避免气泡百分比相对塌缩列计算导致被挤成窄高条 */
 .msg-row.user .user-msg-col { max-width: 75%; }
 .msg-row.user.wide-user .user-msg-col { max-width: 92%; }
@@ -373,10 +377,25 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .md-content img { max-width: 100%; border-radius: 8px; }
 .md-content hr { border: none; border-top: 1px solid var(--border-color); margin: 14px 0; }
 
-/* Tool Card */
-.tool-card { margin: 10px 0; border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden; transition: border-color 0.2s; }
-.tool-card-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; transition: background 0.15s; font-size: 13px; overflow: hidden; contain: paint; }
-.tool-card-header:hover { background: var(--bg-hover); }
+/* Tool Card —— 过程轨迹的线性化呈现（不再是「盒子套盒子」）
+   设计口径：工具调用是主对话的【过程注脚】，不是内容主体。旧形态（1px 边框 + 10px 圆角 +
+   10px 14px 内边距）让每次调用都成为一个独立盒子，一轮 20 次调用就是 20 个盒子首尾相接，
+    把正文挤成盒间缝隙，浏览时必须逐个「拆盒」——这正是参照 Codex/ZCode 的 HistoryCell
+    与 Qoder 对话流要消除的噪音。新形态：透明底 + 左侧 2px 竖条 + 对称 6px 圆角 + 紧凑单行，
+    视觉降级为文档流里的一行轨迹，正文重新成为主体。
+    保留 border（透明）而非删除：.args-streaming 的 dashed 语义依赖 border 存在，
+    且 box-sizing:border-box 下删边框会让折叠/展开两态高度差 2px（跳动）。 */
+/* 左竖条颜色为何不用 --border-color：实测其对比度仅 1.27(light)/1.2(dark)，
+    与各过程卡的极淡底色叠加等于「没有任何结构线索」——去盒后竖条是唯一的分组标识，必须够深。
+    --text-tertiary 实测 2.56(light)/3.14(dark)，属结构辅助线的合适区间
+    （<1.2 不可见，>3 开始与正文争视觉权重）。 */
+.tool-card { margin: 2px 0; border: 1px solid transparent; border-left: 2px solid var(--text-tertiary); border-radius: 6px; background: transparent; overflow: hidden; transition: border-color 0.2s, background 0.15s; }
+/* 悬停才浮出底色：静止态与正文同底，需要定位某次调用时才被「点亮」
+   （竖条已是 text-tertiary，悬停不再改它——否则两处同时变会显得跳动） */
+.tool-card:hover { background: var(--bg-hover); }
+/* contain:paint 必须保留——把 header 及其后代（含状态点）锁在同一绘制单元，抗滚动分层残影（见下方 agent-card 注释） */
+.tool-card-header { display: flex; align-items: center; gap: 8px; padding: 5px 10px; cursor: pointer; transition: background 0.15s; font-size: 13px; overflow: hidden; contain: paint; }
+.tool-card-header:hover { background: transparent; }
 /* 左侧工具类型图标 */
 .tool-type-icon { order: 0; flex-shrink: 0; font-size: 14px; line-height: 1; }
 /* 文件名（带语言图标） */
@@ -422,8 +441,27 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .tool-card.hitl-pending { border-color: var(--color-warning); }
 .tool-card .hitl-card-actions { display: flex; gap: 10px; padding: 0 14px 14px; }
 .tool-name { order: 1; font-weight: 600; color: var(--text-primary); white-space: nowrap; flex-shrink: 0; }
-/* 头部参数串默认隐藏：与已单独展示的工具名/文件名重复，显得杂乱；详细参数仍可在展开的卡片体中查看。 */
- .tool-args { display: none; order: 3; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* 头部参数摘要：折叠态下这是整张卡唯一的语义承载位，不得隐藏。
+   【已修正的设计缺陷】旧规则为 `display:none`，注释理由是「与工具名/文件名重复」——
+   这对 read/edit 成立，但 bash 的 command、grep 的 pattern、websearch 的 query、task 的 prompt
+   只存在于参数里，隐藏等于这些调用在界面上没有任何可辨识信息，用户必须逐条点开，
+   而卡体内只有输出、没得回命令。重复问题已由 formatToolArgsStr 的 ARG_SUPPRESSED
+   在源头消除（file_path/path 不进入参数串，与 .tool-file 不再重叠）。 */
+ .tool-args { display: block; order: 3; flex: 0 1 auto; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* 预览摘要：并入标题行（与图标/工具名同一条行）。
+   【为何不再独立成行】旧实现是卡体里的独立 div（padding 0 10px 5px 32px）：
+   流式过程中预览随内容增删反复出现/移除，卡片高度忽高忽低。
+   并入 header 后恒定单行高度，视觉上「内容直接跟在图标那一行显示」。
+   顺序：order 4 钉在参数摘要（3）之后、耗时（5）/状态点（6）之前；
+   【必须用整数】flex order 规范只接受 <integer>，曾写 3.5 被浏览器直接丢弃、
+   回退为 0，预览因此窜到工具名之前（用户实测的「展示乱」即源于此），勿再改回小数。
+   弹性收缩 + 省略号：超长时让位给工具名，绝不换行。
+   三级文字色 + 小字号（视觉降级为注脚，不与正文争权重）。 */
+.tool-card-header .preview-inline, .thinking-block-header .preview-inline { order: 4; flex: 1 1 0; min-width: 0; color: var(--text-tertiary); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 思考预览用等宽字体：与旧独立行一致，推理内容多为代码/路径类等宽文本 */
+.thinking-block-header .preview-inline { font-family: var(--font-mono); font-size: 11.5px; }
+/* 展开态隐藏预览（卡体全文已可见，避免重复）；仍在 header 内，两态高度均不变 */
+.tool-card.expanded .tool-card-header .tool-card-preview, .thinking-block.expanded .thinking-block-header .thinking-block-preview { display: none; }
 /* 工具真实耗时（后端 WebChunk.durationMs 下发，来源 ToolCallEndEvent.getDurationMs()）。
    顺序恒为「耗时（order 5）在前、状态点（order 6）收尾」：JS 把耗时直接插到状态点之前，
    排序不随「耗时出现」变化，状态点因此全程不动、稳定贴行尾。
@@ -432,13 +470,15 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .tool-duration { order: 5; color: var(--text-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; opacity: 0.75; }
 .tool-duration.failed { color: var(--color-danger, #e5484d); opacity: 1; }
 .tool-label { color: var(--text-secondary); font-size: 12px; }
-.tool-card-body { display: none; padding: 0 14px 12px; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; border-top: 1px solid var(--border-color); }
+/* 展开的结果体：以顶部细分隔线归属到本行，而非再套一层盒子边框 */
+.tool-card-body { display: none; padding: 0 10px 8px; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; border-top: 1px solid var(--border-color); }
 .tool-card.expanded .tool-card-body { display: block; }
 /* 参数流式生成中的骨架卡（action_draft 建卡 → action_start 原地转正）。
    为何只改轮廓与头部文案、不动状态点：状态点四态（loading/done/warn/reject）语义已满，
    且 setToolCardStatus 带 loading 守卫——给骨架卡换状态点 class，这张卡此后永远落不了态。
    虚线描边表达「尚未成形」，进度文案表达「还在涨」，两者合起来就是完整的等待反馈。 */
-.tool-card.args-streaming { border-style: dashed; }
+/* 骨架态：透明边框在 dashed + 着色后才显形为虚线盒，表达「参数还在生成、尚未成形」 */
+.tool-card.args-streaming { border-style: dashed; border-color: var(--border-color); }
 /* 参数体积进度文案（「生成参数中 · 1.2 KB」）：与 .tool-args / .tool-diff-stat 同档，
    12px + 三级文字色 + 等宽数字（字节数每帧跳动时不会带着整行左右抖动）。 */
 .tool-args-progress { order: 3; color: var(--text-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -448,11 +488,18 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 
 /* 每轮文件变更卡片：消息流中该轮（data-run-id）节点组末尾，见 app-file-changes.js。
    头部 = 图标 + 「已编辑 N 个文件」+ 增删统计 + 审查/整轮撤销/重新应用；
-   body = 文件行（默认 3 行、其余折叠）；行悬停出轻量 diff 预览气泡，行点击开 Monaco 详情。 */
+   body = 文件行（默认 3 行、其余折叠）；行悬停出轻量 diff 预览气泡，行点击开 Monaco 详情。
+   【不参与线性化，必须保留盒式形态】工具卡/思考块/智能体卡是【过程注脚】，去盒降级为一行轨迹是对的；
+   但本卡是【结果汇总 + 操作入口】（审查 / 整轮撤销 / 重新应用都挂在这里），语义与问答卡、HITL 卡同级，
+   必须是一个视觉上闭合、可被一眼认出的单元。曾误按过程卡口径改成「左竖条 + 透明边框 + 无圆角」，
+   实测后果：卡片失去外轮廓，白底(--bg-card)直接压在正文白底上（light 主题对比度 1.0），
+   只剩一条 2px 竖条 + 一根 toggle 上分隔线，中间三行文件列表像散落在正文里的裸文本，
+   头部的「审查/整轮撤销」按钮也失去归属边界 —— 故整体回滚为四周边框 + 10px 圆角 + 头部淡底。 */
 .msg-run-changes-card { margin: 10px 0 2px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-card, transparent); overflow: hidden; }
 /* 变更卡片宿主：该轮助手气泡的内容尾部（页脚 meta 行之前）——随气泡宽度与正文对齐；
    下方紧随气泡固有的 meta 行（结束时间），形成「正文 → 变更卡片 → 结束时间」节奏 */
 .fch-host { display: block; }
+/* 头部淡底：盒式形态下它是「这一格的标题栏」，去掉底色会让标题与下方文件列表连成一片 */
 .fch-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--bg-hover); }
 .fch-head-icon { display: inline-flex; flex-shrink: 0; }
 .fch-head-icon svg { width: 15px; height: 15px; display: block; color: var(--text-secondary); }
@@ -501,32 +548,47 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     .file-change-action { min-width: 26px; }
 }
 
-/* Batch tool group: single outer shell with flat rows; no nested card borders. */
-.tool-batch-group { margin: 10px 0; border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden; background: var(--bg-card, transparent); transition: border-color 0.2s, box-shadow 0.2s; }
-.tool-batch-group:hover { border-color: rgba(var(--accent-rgb), 0.32); }
-.tool-batch-header { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 10px 14px; cursor: pointer; transition: background 0.15s; font-size: 13px; background: var(--bg-hover); }
-.tool-batch-header:hover { background: var(--accent-light); }
+/* Batch tool group: 线性化的并行调用容器。
+   与 .tool-card 同口径去盒：左竖条用 accent 淡色区分「这是一个分组」而不是单次调用，
+   悬停时加深。保留透明 border（box-sizing 下高度一致）。 */
+/* 分组竖条为何不用 accent 派生（已实算否决）：
+   --accent 在 light 主题是近黑 #18181b、dark 主题是近白 #e4e4e7，
+   任何 alpha 都无法让双主题同时落在结构辅助线区间 [1.5, 3.5]：
+   α=0.5 时 light 3.36（逼上界）、dark 4.42（已超）；α 再降则 light 跌破下界。
+   纯 accent 更达 17.72——竖条会跳到与正文同等权重，违背「过程注脚」定位。
+   故统一用 --text-tertiary（2.56/3.14，双主题均合格）；分组与单次调用的层级区分
+   交给语义（分组有标题行 + 成员缩进）而非颜色。hover 也不再改竖条颜色（瞬态反馈用底色足够）。 */
+.tool-batch-group { margin: 2px 0; border: 1px solid transparent; border-left: 2px solid var(--text-tertiary); border-radius: 6px; overflow: hidden; background: transparent; transition: background 0.15s; }
+.tool-batch-group:hover { background: var(--bg-hover); }
+.tool-batch-header { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 5px 10px; cursor: pointer; transition: background 0.15s; font-size: 13px; background: transparent; }
+.tool-batch-header:hover { background: transparent; }
 .tool-batch-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; color: var(--text-primary); white-space: nowrap; }
 .tool-batch-progress { color: var(--text-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
-.batch-tool-items { display: none; padding: 2px 10px 6px; }
+/* 分组内的成员行：不再叠一层分隔线，靠自身 padding 与悬停底色分行（线性化后全流统一） */
+.batch-tool-items { display: none; padding: 0 0 2px; }
 .tool-batch-group.expanded .batch-tool-items { display: block; }
-.batch-tool-items > .tool-card { margin: 0; border: 0; border-radius: 0; border-bottom: 1px solid var(--border-color); background: transparent; }
-.batch-tool-items > .tool-card:last-child { border-bottom: 0; }
-.batch-tool-items > .tool-card .tool-card-header { padding: 9px 4px; }
-.batch-tool-items > .tool-card .tool-card-body { border-top: 0; padding-left: 4px; padding-right: 4px; }
+.batch-tool-items > .tool-card { margin: 0; border: 0; border-left: 0; border-radius: 0; background: transparent; }
+.batch-tool-items > .tool-card .tool-card-header { padding: 4px 10px 4px 14px; }
+.batch-tool-items > .tool-card .tool-card-body { border-top: 0; padding-left: 14px; padding-right: 10px; }
 .batch-tool-items > .tool-card:hover { background: var(--bg-hover); }
 .batch-tool-items > .tool-card[data-batch-degraded="1"] .tool-card-header::after { content: '•'; color: var(--text-tertiary); margin-left: 2px; }
 
 
-/* ===== Agent Card (子代理智能体容器) ===== */
-.agent-card { margin: 10px 0; border: 1px solid var(--border-color); border-radius: 10px; overflow: hidden; transition: border-color 0.2s; }
-.agent-card.agent-card-streaming { border-color: var(--accent); }
+/* ===== Agent Card (子代理智能体容器) =====
+   子代理卡承载【嵌套的执行过程】（思考块 + 工具卡 + 正文），比单次工具调用高一级，
+   但与其它过程卡同口径：透明底 + 左竖条 + 对称 6px 圆角，hover 才浮出灰底
+   （非硬编码 rgba，明暗主题均可控）；流式进行中竖条转 accent（原为整圈边框变色）。
+   【旧常驻淡底 --bg-hover 已废除】与工具卡/思考卡统一，消除三种卡底色深浅不一的拼盘感；
+   「子任务作用域」的视觉锚点由左竖条 + 卡体内缩进承担。 */
+.agent-card { margin: 2px 0; border: 1px solid transparent; border-left: 2px solid var(--text-tertiary); border-radius: 6px; overflow: hidden; background: transparent; transition: border-color 0.2s, background 0.15s; }
+.agent-card:not(.agent-card-streaming):hover { background: var(--bg-hover); }
+.agent-card.agent-card-streaming { border-left-color: var(--accent); }
 /* contain:paint —— 把 header 及其后代（含状态点）锁在同一个绘制单元内，抗滚动/拖动时的分层残影。
    与上方 status-dot-blink 改造配套：前者治本（不再提升合成层），此处兼防后人再往 header 内
    加入 opacity/transform 动画时重蹈覆辙。安全性已核：三个 header 均无 absolute/fixed 后代
    （不会意外成为包含块截断浮层）；.tool-card-header/.agent-card-header 本就带 overflow:hidden，
    裁剪行为与现状等价。 */
-.agent-card-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; font-size: 13px; overflow: hidden; contain: paint; background: var(--bg-hover); }
+.agent-card-header { display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 13px; overflow: hidden; contain: paint; background: transparent; }
 .agent-icon { order: 0; flex-shrink: 0; font-size: 15px; line-height: 1; }
 .agent-status-icon { order: 1; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; transition: background-color 0.3s, box-shadow 0.3s; }
 .agent-status-icon.loading { background: var(--color-success, #4ac26b); animation: status-dot-blink 1s ease-in-out infinite; }
@@ -542,7 +604,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    卡片会一路向下撑开、把主对话顶出视口。与 .tool-card-body(200px) / .thinking-block-body(300px)
    同口径，卡体自身成为滚动容器。不加 overscroll-behavior：保留默认滚动链，卡体触底后继续滚
    会自然传给消息区，避免鼠标停在卡上时页面滚动被卡体“吃掉”。 */
-.agent-card-body { display: none; padding: 10px 14px; font-size: 14px; color: var(--text-primary); line-height: 1.7; min-height: 0; max-height: 420px; overflow-y: auto; }
+.agent-card-body { display: none; padding: 4px 10px 8px; font-size: 14px; color: var(--text-primary); line-height: 1.7; min-height: 0; max-height: 420px; overflow-y: auto; }
 .agent-card.expanded .agent-card-body { display: block; }
 /* 空结果体不占空间 */
 .agent-card.expanded .agent-card-body:empty { display: none; }
@@ -671,6 +733,13 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .question-card-other-row.is-editing { border-style: solid; border-color: var(--accent); cursor: text; }
 .question-card-other-input { flex: 1 1 auto; min-width: 0; border: none; outline: none; background: transparent; font: 400 13px/1.5 var(--font-sans); color: var(--text-primary); padding: 0; }
 .question-card-other-input::placeholder { color: var(--text-tertiary); }
+/* 补充行内的清空按钮：仅在行内有内容时渲染（见 renderQuestionCard 的 showClear）。
+   尺寸沿用卡内其它图标按钮（X / 翻页），不抢输入区焦点。 */
+.question-card-other-clear { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--text-tertiary); cursor: pointer; flex-shrink: 0; transition: background 0.15s, color 0.15s; }
+.question-card-other-clear:hover { background: var(--bg-hover); color: var(--text-primary); }
+/* 选中项仍可点击取消：hover 给一个比常项更强的 accent 反馈，让「这一项还能再点一下」看得出来。
+   （基类已有 cursor:pointer，此处不再重复声明无效规则。） */
+.question-card-option.selected:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.1); }
 .question-card-footer { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
 .question-card-status { font-size: 12px; color: var(--text-secondary); }
 .question-card-submit { margin-left: auto; padding: 7px 18px; border: none; border-radius: 8px; background: var(--accent); color: var(--accent-contrast); font-size: 13px; font-weight: 500; cursor: pointer; transition: background 0.2s; }
@@ -785,18 +854,29 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
 @keyframes dot-bounce { 0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); } 40% { opacity: 1; transform: scale(1.15); } }
 
-/* Thinking Block (collapsible reasoning content) */
-.thinking-block { margin: 0 0 10px; border: 1px solid var(--thinking-block-border); border-radius: 10px; overflow: hidden; background: var(--thinking-block-bg); }
+/* Thinking Block (collapsible reasoning content)
+   线性化：思考内容是【次要信息】，不应以盒子形态与正文争视觉权重。
+   与工具卡同口径：透明底（hover 才浮出灰底）+ 左竖条；流式进行中竖条转 accent（见文件尾部低彩度块）。
+   保留透明 border：box-sizing:border-box 下删边框会让折叠/展开两态高度差 2px。
+   【旧淡底 token 已废除】三种过程卡统一透明底，
+   「思考不是正文」的可辨识信号由竖条 + 展开后的卡体分隔线承担。 */
+.thinking-block { margin: 2px 0; border: 1px solid transparent; border-left: 2px solid var(--text-tertiary); border-radius: 6px; overflow: hidden; background: transparent; }
 /* 同 .agent-card-header 的 contain:paint 理由。此处是三个 header 中唯一本来没有 overflow:hidden 的，
    故 paint containment 会引入新裁剪：已核实内部唯一会溢出边界的是 .thinking-status-dot 常亮态的
-   box-shadow(blur 4px)，而 header 最小 padding 为 code-mode 的 6px 10px，4px < 6px，发光不被截。 */
-.thinking-block-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; font-size: 13px; user-select: none; transition: background 0.15s; contain: paint; }
+   box-shadow(blur 4px)，而 header 最小 padding 为线性化后的 5px（code-mode 覆盖为 6px 10px），
+   4px < 5px，发光不被截。 */
+.thinking-block-header { display: flex; align-items: center; gap: 8px; padding: 5px 10px; cursor: pointer; font-size: 13px; user-select: none; transition: background 0.15s; contain: paint; }
 .thinking-block-header:hover { background: var(--bg-hover); }
+.thinking-block:not(.streaming):hover { background: var(--bg-hover); }
 .thinking-block-label { color: var(--text-secondary); font-weight: 500; }
 /* 思考块右侧状态点：与工具卡统一的圆点。思考中绿点闪动，结束后绿点常亮。 */
 .thinking-status-dot { order: 6; margin-left: auto; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: var(--color-success, #4ac26b); box-shadow: 0 0 4px rgba(74,194,107,0.6); transition: background-color 0.3s, box-shadow 0.3s; }
 .thinking-block.streaming .thinking-status-dot { animation: status-dot-blink 1s ease-in-out infinite; box-shadow: none; }
-.thinking-block-body { padding: 0 14px 12px; font-size: 13px; color: var(--text-secondary); line-height: 1.7; border-top: 1px solid var(--thinking-block-border); max-height: 300px; overflow-y: auto; }
+/* 思考块底部也补 hover 灰底：header 自带 hover 但卡体区域没有，
+   整卡悬停体验与工具卡对齐；streaming 态除外（与工具卡同口径，避免流式中底色闪烁）。 */
+.thinking-block-body { padding: 0 10px 8px; font-size: 13px; color: var(--text-secondary); line-height: 1.7; border-top: 1px solid var(--thinking-block-border); max-height: 300px; overflow-y: auto; }
+/* 收起态的「此刻在想什么」：取末条非空行（同 ZCode 收起态摘要），
+   展开后隐藏。已并入 header（见 .preview-inline），不再是独立一行。 */
 .thinking-block-body .md-content { color: var(--text-secondary); font-size: 13px; }
 .thinking-block:not(.expanded) .thinking-block-body { display: none; }
 .thinking-block.streaming { border-color: var(--accent); }
@@ -3064,14 +3144,21 @@ pre:hover .code-copy-btn { opacity: 1; }
 .tool-card .tool-file { color: var(--text-primary); }
 .tool-diff-stat .add,
 .tool-diff-stat .del { color: var(--text-secondary); font-weight: 600; }
-.tool-card.hitl-pending,
-.agent-card.agent-card-streaming,
-.thinking-block.streaming { border-color: var(--border-color); }
+/* 流式/挂起态的边框着色。注意：
+   - .tool-card.hitl-pending 需要【整圈可见边框】（等用户拍板，不能弱化），故保留 border-color；
+   - .agent-card.agent-card-streaming / .thinking-block.streaming 在线性化后只靠【左竖条】标识，
+     此处不得再用 border-color 简写——它会把上方声明的 border-left-color 一并盖掉，
+     流式强调直接失效（已踩过的坑：简写覆盖长写）。 */
+.tool-card.hitl-pending { border-color: var(--border-color); }
+.agent-card.agent-card-streaming { border-left-color: var(--accent); }
+/* 思考进行中：左竖条转 accent（与子代理卡同口径）。必须用长写 border-left-color，
+   用简写会把基础规则的左竖条颜色一并盖成中性色，「思考中」的强调直接看不见。 */
+.thinking-block.streaming { border-left-color: var(--accent); }
 .thinking-block.streaming .thinking-block-label,
 .thinking-block .tool-type-icon { color: var(--text-secondary); }
-.tool-batch-group:hover { border-color: var(--border-color); box-shadow: none; }
-.tool-batch-header:hover,
-.tool-batch-group:hover .tool-batch-header { background: var(--bg-hover); }
+/* 分组悬停：底色已由上方 .tool-batch-group:hover 统一提供，此处只关掉阴影。
+   不得再写 border-color（简写会盖掉 border-left-color）也不得给 header 单独铺底（会与整组底色叠加变深）。 */
+.tool-batch-group:hover { box-shadow: none; }
 .file-change-kind.kind-A,
 .file-change-kind.kind-D,
 .file-change-kind.kind-M { color: var(--text-secondary); }

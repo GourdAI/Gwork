@@ -268,14 +268,19 @@ test('进度文案参与语言切换重译（否则切语言后整条漏译）',
 
 test('CSS：骨架卡与进度文案复用既有设计令牌，四态状态点语义不变', () => {
     const css = readStatic('css', 'app.css');
-    assert.match(css, /\.tool-card\.args-streaming \{ border-style: dashed; \}/);
+    /* 骨架态契约（验行为，不锁属性顺序）：.tool-card 静止态边框是【透明】的（线性化后无盒框），
+       因此骨架卡必须同时具备 dashed 与一个可见 border-color，否则虚线盒根本不会显形。
+       旧断言写死 `border-style: dashed; ` 全串，把「首属性必须是 border-style」误当契约。 */
+    const skeletonRuleBody = css.match(/\.tool-card\.args-streaming \{([^}]*)\}/);
+    assert.ok(skeletonRuleBody, '.tool-card.args-streaming 规则应存在');
+    assert.match(skeletonRuleBody[1], /border-style:\s*dashed/, '骨架态必须是虚线');
+    assert.match(skeletonRuleBody[1], /border-color:\s*var\(/, '静止边框透明，骨架态必须显式着色否则虚线不可见');
     assert.match(css, /\.tool-args-progress \{ order: 3; color: var\(--text-tertiary\); font-size: 12px; font-variant-numeric: tabular-nums;/);
     // 不得引入硬编码颜色
     const progressRule = css.match(/\.tool-args-progress \{[^}]*\}/);
     assert.ok(progressRule);
     assert.doesNotMatch(progressRule[0], /#[0-9a-fA-F]{3,8}|rgba?\(/, '进度文案样式不得硬编码颜色');
-    const skeletonRule = css.match(/\.tool-card\.args-streaming \{[^}]*\}/);
-    assert.doesNotMatch(skeletonRule[0], /#[0-9a-fA-F]{3,8}|rgba?\(/, '骨架卡样式不得硬编码颜色');
+    assert.doesNotMatch(skeletonRuleBody[0], /#[0-9a-fA-F]{3,8}|rgba?\(/, '骨架卡样式不得硬编码颜色');
     // 现有四态不得被改动
     assert.match(css, /\.tool-status-icon\.loading \{ background: var\(--color-success, #4ac26b\); border: none; animation: status-dot-blink 1s ease-in-out infinite; \}/);
     assert.match(css, /\.tool-status-icon\.done \{ background: var\(--color-success, #4ac26b\); border: none; animation: none; box-shadow: 0 0 4px rgba\(74,194,107,0\.6\); \}/);

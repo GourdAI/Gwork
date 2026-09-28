@@ -310,6 +310,178 @@ function createThinkingBlockEl(sess) {
     return block;
 }
 
+/* ===== 折叠态单行摘要（零点击可读）=====
+   为何必要：默认简化模式下卡体是折叠的，且折叠时卡体根本不构建 DOM（见 setToolBodyPending），
+   于是「点开才知道这条调用干了什么/输出了什么」，一轮 50 次工具调用 = 50 次点击。
+   对标 Codex 主消息流（一行语义摘要 + PREVIEW_LINES 头部预览 + 「… +N lines」计数）
+   与 ZCode 收起态摘要（resolveReasoningStreamingSummary 取末条非空行）：
+   在标题行内常驻一段极窄的文本预览（与图标/工具名同一条行，见 .preview-inline），
+   不构建卡体、不参与 diff 着色，成本仅一个 span。
+   取行口径分两类：工具输出看【首行】（结果概览，与 Codex 一致）；
+   连续思考看【末行】（最新进展才有意义，与 ZCode 一致）。 */
+var PREVIEW_MAX_CHARS = 160;
+function pickPreviewLine(text, fromEnd) {
+    if (!text) return null;
+    var lines = text.split('\n');
+    var hit = null, hitIdx = -1;
+    if (fromEnd) {
+        for (var i = lines.length - 1; i >= 0; i--) {
+            if (lines[i].trim() !== '') { hit = lines[i]; hitIdx = i; break; }
+        }
+    } else {
+        for (var j = 0; j < lines.length; j++) {
+            if (lines[j].trim() !== '') { hit = lines[j]; hitIdx = j; break; }
+        }
+    }
+    if (hit === null) return null;
+    var rest = fromEnd ? hitIdx : lines.length - 1 - hitIdx;
+    var c = clipPreview(hit.trim());
+    return { text: c.text, full: c.full, more: rest > 0 ? rest : 0 };
+}
+/* 写/更新/清空某宿主的预览摘要（空文本时移除节点，不留占位）。
+   取行口径两类：工具输出取首行（结果概览）、思考取末行（最新进展），
+   由 fromEnd 决定；两者落盘规则一致（都在 header 内）。 */
+function setPreviewLine(hostEl, cls, text, fromEnd) {
+    if (!hostEl) return;
+    applyPreviewLine(hostEl, cls, pickPreviewLine(text, fromEnd));
+}
+/* DOM 落盘唯一入口：全量版与增量版共用，避免两条路径的落点/清理规则漂移。
+   【落点 = header 内（与图标同一条行）】预览不再是卡体里的独立一行：
+   独立行会随流式内容增删反复出现/移除，卡片高度随之忽高忽低
+   （用户实测抱怨的「忽高忽低」即源于此）；并入 header 后折叠态恒定单行高度。
+   视觉顺序不由 DOM 位置决定：.preview-inline 的 CSS order 把它钉在参数摘要之后、
+   耗时/状态点之前（见 app.css），故统一 appendChild 到 header 末尾即可。
+   header 查找按类名映射 + 首子元素校验（两种宿主的 header 恰都是首个子元素，
+   但不写死这一脆弱前提，找不到时静默返回，维持旧约定「宿主结构异常就不渲染」）。 */
+var PREVIEW_HEADER_CLASS = {
+    'tool-card-preview': 'tool-card-header',
+    'thinking-block-preview': 'thinking-block-header'
+};
+function applyPreviewLine(hostEl, cls, p) {
+    if (!hostEl) return;
+    var headerCls = PREVIEW_HEADER_CLASS[cls];
+    var header = null;
+    if (headerCls) {
+        var first = hostEl.firstElementChild;
+        if (first && String(first.className || '').split(/\s+/).indexOf(headerCls) >= 0) {
+            header = first;
+        }
+    }
+    if (!header) return;
+    /* 仍限 header 的直接子元素：预览与卡内其它元素同层不嵌套；
+       后代选择器会抓到嵌套子卡的预览（agent 卡体内嵌子工具卡），不得回退。 */
+    var el = header.querySelector(':scope > .' + cls);
+    if (!p) { if (el) el.parentNode.removeChild(el); return; }
+    if (!el) {
+        el = document.createElement('span');
+        /* 双类名：语义类（tool-card-preview / thinking-block-preview）供测试与排查定位，
+           .preview-inline 承载「并入标题行」的统一样式与 CSS 契约。 */
+        el.className = cls + ' preview-inline';
+        header.appendChild(el);
+    }
+    el.textContent = p.more > 0 ? p.text + ' \u00b7 +' + p.more : p.text;
+    /* title 存未裁切全文：被省略号截掉的尾部只能靠悬停读到。
+       full 缺失时（旧调用方）退回可见文本，保证不出现 undefined 字面量。 */
+    el.title = p.full || p.text;
+}
+
+/* ===== 末行预览的增量跟踪器（流式路径专用）=====
+   【为何不能直接复用 pickPreviewLine(…, true)】思考块每来一帧都会触发一次 afterRender，
+   而 thinkingBuffer 是持续追加的：每帧对【全文】split('\n') 会分配「整行数组 + 每行一个字符串」，
+   单帧 O(n)、整轮累计 O(n²)。实测（.tmp/preview_gc_bench.js）：
+     19KB 思考 / 2000 帧 → 累计临时分配 44.8MB（增量版 0.58MB，77×）
+     88KB 思考 / 8000 帧 → 累计临时分配 666MB（增量版 2.3MB，296×）
+   注意这【不是掉帧问题】：CPU 维度 8000 帧累计 494ms ≈ 每帧 0.062ms，只占 16.7ms 帧预算 0.37%。
+   真正的代价是分配速率（88KB 思考下平均 83KB/帧的垃圾），会显著抬高 minor GC 频率——
+   为「一行摘要」这种低价值 UI 付出这个量级不划算，故做增量。
+
+   【为何工具输出路径不做增量】它是 action_end 的单次调用（无流式工具输出帧），
+   实测 1MB 输出 split 仅 0.508ms；而零分配 indexOf 扫描在回放批量场景反而更慢
+   （60 卡：0.487ms/卡 vs split 0.324ms/卡）。单次调用 + 更简单 = 保持 split，不做过度优化。
+
+   【生命周期】跟踪器状态必须与 thinkingBuffer 严格同步：buffer 被重置的三处
+   （新建块 / 复用块 / 收敛）都要一并重置，否则 scanned 与实际内容错位。
+   另有兜底：text.length < scanned 时自行全量重扫（防漏重置导致永久错位）。
+   收敛帧（finishThinkingBlockCore）刻意走全量 pickPreviewLine 而非跟踪器——
+   单次调用成本可忽略，却能把定稿摘要校正到权威值，等于给增量路径上了一道自检。 */
+function createEndLineTracker() {
+    return { scanned: 0, partial: '', lineIdx: 0, lastText: '', lastFull: '', lastIdx: -1 };
+}
+/* 增量推进并返回与 pickPreviewLine(text, true) 等价的结果（实测 2000 帧文本与 more 计数零差异）。
+   more 口径：命中末行之前已完成的行数（与全量版的 hitIdx 一致，partial 行本身不计入）。 */
+function trackEndLine(st, text) {
+    if (!st) return pickPreviewLine(text, true);
+    if (!text) { resetEndLineTracker(st); return null; }
+    /* 兜底：文本比已扫描长度还短 = buffer 被外部重置过，跟踪器作废，从 0 重扫。
+       （不做这个兜底的话，一次漏重置就会让 scanned 永久大于实际长度，
+       之后每帧 slice 出空串、摘要永远定格在错位那一刻。） */
+    if (text.length < st.scanned) resetEndLineTracker(st);
+
+    var delta = text.slice(st.scanned);
+    st.scanned = text.length;
+
+    /* 快路径：本帧不含换行 → 行结构未变，只需把 delta 并入未完成的 partial 行。
+       绝大多数流式帧走这里（token 粒度追加，换行是少数），成本从 O(全文) 降到 O(delta)。 */
+    if (delta.indexOf('\n') < 0) {
+        st.partial += delta;
+        return endLineResult(st);
+    }
+
+    /* 慢路径：本帧跨了行边界，需把 partial+delta 里已完成的行结算进 lastText/lastIdx */
+    var buf = st.partial + delta;
+    var pos = 0, nl;
+    while ((nl = buf.indexOf('\n', pos)) >= 0) {
+        var done = buf.slice(pos, nl).trim();
+        pos = nl + 1;
+        if (done !== '') { var cd = clipPreview(done); st.lastText = cd.text; st.lastFull = cd.full; st.lastIdx = st.lineIdx; }
+        st.lineIdx++;
+    }
+    st.partial = buf.slice(pos);
+    return endLineResult(st);
+}
+function resetEndLineTracker(st) {
+    st.scanned = 0; st.partial = ''; st.lineIdx = 0; st.lastText = ''; st.lastFull = ''; st.lastIdx = -1;
+}
+/* 由跟踪器当前状态产出与 pickPreviewLine(text, true) 等价的结果：
+   优先取「正在输入的 partial 行」，为空则回退到最近一条已完成行。 */
+function endLineResult(st) {
+    /* 必须 .trim()（双端）：全量版 pickPreviewLine 对命中行做 .trim()，
+       只去尾空白会让行首缩进保留下来，两条路径结果不一致（思考文本常有缩进列表）。 */
+    var cur = st.partial.trim();
+    if (cur !== '') {
+        var c = clipPreview(cur);
+        return { text: c.text, full: c.full, more: st.lineIdx };
+    }
+    if (st.lastIdx >= 0) return { text: st.lastText, full: st.lastFull, more: st.lastIdx };
+    return null;
+}
+/* 超长行裁切。返回【裁切后的可见文本】与【未裁切的全文】两份：
+   全文用于 title（悬停读到完整行），否则 title 与可见文本信息重复、毫无价值。
+   （这是我实现时真实写出过的缺陷：title 直接存 clip 后的文本，
+   而 textContent 还多了「· +N」后缀，结果 title 比可见文本还短——注释却声称「可悬停读全文」。） */
+function clipPreview(s) {
+    if (s.length <= PREVIEW_MAX_CHARS) return { text: s, full: s };
+    return { text: s.substring(0, PREVIEW_MAX_CHARS - 1) + '…', full: s };
+}
+/* 增量写入预览行：与 setPreviewLine 同一套 DOM 规则（共用 applyPreviewLine），仅取行方式换成跟踪器。 */
+function setPreviewLineIncremental(hostEl, cls, text, st) {
+    if (!hostEl) return;
+    applyPreviewLine(hostEl, cls, trackEndLine(st, text), false);
+}
+/* 思考预览跟踪器：挂在 holder 上，与 thinkingBuffer 同生命周期。
+   为何不写进 app-base.js / 智能体 holder 的字面量初始化：惰创建即可，
+   避免为两个 holder 定义各加一个字段（字段漏初始化比 undefined 更难查）。 */
+function thinkingPreviewTracker(h) {
+    if (!h._endLineTracker) h._endLineTracker = createEndLineTracker();
+    return h._endLineTracker;
+}
+/* 与 thinkingBuffer 的重置严格配对：buffer 归零而跟踪器不归零，
+   就会让 scanned 永久大于实际长度，之后每帧 slice 出空串、摘要定格在错位那一刻。
+   （trackEndLine 内还有 text.length < scanned 的兜底重扫，两处一道防线。） */
+function resetThinkingPreview(h) {
+    if (h._endLineTracker) resetEndLineTracker(h._endLineTracker);
+}
+
 /* 卡体跟随底部：智能体卡体（.agent-card-body）是限高滚动容器，流式内容到达时需主动置底，
    否则新内容会隐在卡体视口下方（用户看不到正在输出什么）。用户在卡内主动向上翻看时停止跟随。
 
@@ -354,6 +526,7 @@ function ensureThinkingBlockCore(sess, h, opts) {
             if (h.thinkingBodyWrapEl) h.thinkingBodyWrapEl.appendChild(reuseBody);
             h.thinkingBodyMdEl = reuseBody;
             h.thinkingBuffer = '';
+            resetThinkingPreview(h);   // 与上一行严格配对：复用块重开一段思考，跟踪器必须归零
             $(reused).addClass('streaming');
             var rlabel = $(reused).find('.thinking-block-label')[0];
             if (rlabel) {
@@ -404,6 +577,7 @@ function ensureThinkingBlockCore(sess, h, opts) {
         h.thinkingUserScrolledUp = gap > 60;
     });
     h.thinkingBuffer = '';
+    resetThinkingPreview(h);   // 与上一行严格配对：新建思考块，跟踪器从空开始
     var currentTimerSpan = $(block).find('.thinking-current-timer')[0];
     startThinkingTimer(h, 'thinkingBlockTimerId', 'thinkingBlockStartTime', currentTimerSpan);
     return h.thinkingBlockEl;
@@ -430,6 +604,10 @@ function finishThinkingBlockCore(sess, h) {
     }
     $(h.thinkingBlockEl).find('.thinking-block-dots').remove();
     $(h.thinkingBlockEl).find('.thinking-timer-wrap').remove();
+    /* 收敛后不再刷 afterRender，补写一次把摘要定在最后一行（否则停在收敛前那一帧）。
+       此处刻意用【全量】setPreviewLine 而非跟踪器：单次调用成本可忽略，却能把定稿摘要
+       校正到权威值——相当于给整轮流式增量路径上了一道自检（增量若有累积偏差，定稿即纠正）。 */
+    setPreviewLine(h.thinkingBlockEl, 'thinking-block-preview', h.thinkingBuffer, true);
     // 登记复用窗口（见 ensureThinkingBlockCore 头部注释）：同 run 的交错思考在短时间内
     // 再次到来时复用本块，而不是新开一个「思考完成」条把正文撕碎。
     h._lastFinishedThinkingBlockEl = h.thinkingBlockEl;
@@ -441,6 +619,7 @@ function finishThinkingBlockCore(sess, h) {
     h.thinkingBodyMdEl = null;
     h.thinkingBodyWrapEl = null;
     h.thinkingBuffer = '';
+    resetThinkingPreview(h);   // 与上一行严格配对：收敛后 holder 可被复用，跟踪器必须归零
 }
 
 /* 思考 chunk 增量渲染（holder 的思考块体），主线路与智能体卡片共用 */
@@ -453,6 +632,10 @@ function appendReasonChunkCore(sess, h, text) {
     var r = getStreamMd(mdEl);
     r.afterRender = function() {
         if (!h.thinkingBlockEl) return;
+        /* 收起态也要能看到「现在在想什么」：取末条非空行。思考是连续文本，
+           首行往往是十几秒前的旧内容，故与工具输出相反口径取【末行】（同 ZCode）。
+           流式高频路径，必须用增量跟踪器：每帧只处理新增片段，避免对全文 split 的 O(n²) 分配。 */
+        setPreviewLineIncremental(h.thinkingBlockEl, 'thinking-block-preview', h.thinkingBuffer, thinkingPreviewTracker(h));
         if (h.thinkingBodyWrapEl) {
             // 仅当用户未主动向上滚动时才自动跟随底部
             if (!h.thinkingUserScrolledUp) {
@@ -959,14 +1142,36 @@ function renderToolBody(bodyEl, toolName, text, args) {
     return false;
 }
 
-/* 抽取：把 args 对象格式化为短字符串（供所有工具卡创建与更新路径复用）。 */
+/* 头部参数摘要的可见字符上限。原为 80 且被 key= 前缀吃掉大半，导致 bash 长命令
+   在界面上读不到命令本体；内容键现在独占前缀位，可放宽到 120。 */
+var ARG_MAX_CHARS = 120;
+/* 抽取：把 args 对象格式化为短字符串（供所有工具卡创建与更新路径复用）。
+
+   【为何不能按 Object.keys 原序拼、也不能一律加 key= 前缀】
+   头部是整张卡唯一的语义承载位（折叠态看不到卡体），必须把「这条调用到底做了什么」
+   放在最前。原序拼接会让 bash 的 command 被同级的 timeout/run_in_background 挤到
+   截断线之后，用户读到的就是「timeout=120000」这种无意义前缀——正是「不点开就看不懂」的成因。
+   故按 ARG_PRIORITY 语义优先级排序，且单键时省略 key= 前缀（bash 只剩命令本体，
+   等价于 Codex 主消息流里的 `Ran npm test`）。 */
+var ARG_PRIORITY = ['command', 'cmd', 'pattern', 'query', 'url', 'prompt', 'description',
+    'question', 'skill', 'text', 'message', 'name', 'key', 'agent_name'];
+/* 已由头部其他元素或卡体专门展示，重复出现只会挤掉有效信息：
+   file_path/path → .tool-file（updateToolHeaderMeta 无条件建）；diff/content/todos → 卡体渲染器。 */
+var ARG_SUPPRESSED = { file_path: 1, path: 1, diff: 1, content: 1, todos: 1 };
 function formatToolArgsStr(args) {
     function formatArgValue(v) {
         if (v === null) return 'null';
         if (v === undefined) return 'undefined';
-        if (typeof v === 'string') return v.replace(/\n/g, ' ');
+        if (typeof v === 'string') return v.replace(/\n/g, ' ').trim();
         if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-        if (Array.isArray(v)) return '[' + v.length + GourdI18n.t('chat.items') + ']';
+        if (Array.isArray(v)) {
+            /* 字符串数组（如 files/globs）是「改了哪些文件」这类调用的本体，
+               只报个数等于什么都没显示；故展开内容，超出再计数收尾。 */
+            var strs = v.map(function(x) { return (x !== null && typeof x === 'object') ? null : String(x); });
+            if (strs.some(function(x) { return x === null; })) return '[' + v.length + GourdI18n.t('chat.items') + ']';
+            var head = strs.slice(0, 3).join(', ');
+            return strs.length > 3 ? head + ' +' + (strs.length - 3) + GourdI18n.t('chat.items') : head;
+        }
         if (typeof v === 'object') {
             var keys = Object.keys(v);
             if (keys.length === 0) return '{}';
@@ -979,12 +1184,22 @@ function formatToolArgsStr(args) {
         return String(v);
     }
     if (!args || typeof args !== 'object') return '';
+    var all = Object.keys(args).filter(function(k) { return !ARG_SUPPRESSED[k]; });
+    /* 语义优先级排序：优先级表内的按表序在前，其余按键名原序附后 */
+    var rank = function(k) {
+        var i = ARG_PRIORITY.indexOf(k);
+        return i < 0 ? ARG_PRIORITY.length : i;
+    };
+    var keys = all.slice().sort(function(a, b) { return rank(a) - rank(b); });
+    var showKey = keys.length > 1;   // 多键才加 key= 前缀消歧，单键让本体占满可见宽度
     var parts = [];
-    // 跳过大体积字段（由 body 渲染器专门展示），避免头部塞入整段 diff/内容
-    var skip = { diff: 1, content: 1, todos: 1 };
-    Object.keys(args).forEach(function(k) { if (skip[k]) return; parts.push(k + '=' + formatArgValue(args[k])); });
-    var argsStr = parts.join(' ');
-    if (argsStr.length > 80) argsStr = argsStr.substring(0, 77) + '...';
+    for (var i = 0; i < keys.length; i++) {
+        var val = formatArgValue(args[keys[i]]);
+        if (val === '' || val === null) continue;
+        parts.push(showKey ? keys[i] + '=' + val : val);
+    }
+    var argsStr = parts.join('  ');
+    if (argsStr.length > ARG_MAX_CHARS) argsStr = argsStr.substring(0, ARG_MAX_CHARS - 1) + '…';
     return argsStr;
 }
 
@@ -1023,7 +1238,7 @@ function toolPresentationOptions(agentBody, args, cardEl) {
    否则 description 缺省时会因 "name:null" ≠ "name:" 而归属失配、内容漏进主对话。 */
 function resolveAgentState(sess, args) {
     var agentName = args && args.agentName;
-    var agentDesc = (args && args.agentDesc != null) ? args.agentDesc : '';
+    var agentDesc = (args && args.description != null) ? args.description : ((args && args.agentDesc != null) ? args.agentDesc : '');
     var invocationId = args && args.invocationId;
     var key = invocationId || (agentName ? agentName + ':' + agentDesc : '');
     if (key && sess.agentCards && sess.agentCards[key] && sess.agentStates) {
@@ -1182,9 +1397,7 @@ function createToolCardShell(sess, toolName, args, toolTitle, actionId, agentBod
     applyToolPresentation(card, toolName, toolTitle, toolPresentationOptions(agentBody, args));
     updateToolHeaderMeta(card, toolName, args, null);
 
-    $(card).find('.tool-card-header').on('click', function() {
-        $(card).toggleClass('expanded');
-    });
+    bindToolCardToggle(card);
     return card;
 }
 window.createToolCardShell = createToolCardShell;
@@ -1545,6 +1758,64 @@ function fillToolBody(sess, bodyEl, toolName, text, args, meta) {
     }
 }
 
+/* ===== 折叠态卡体延迟构建 =====
+   为何必要：实测折叠工具卡【100% 已把结果体构建进 DOM】
+   （work-mtsg8z30：20/20；work-muck13j8：25/25），仅靠 .tool-card-body { display:none } 隐藏。
+   display:none 确实不参与 layout/paint，但节点创建、diff 逐行着色、innerHTML 解析成本全额付出，
+   而绝大多数卡用户从不点开。
+
+   做法：渲染参数暂存到卡片元素（_pendingToolBody），首次展开时才真正构建。
+   为何暂存在元素上而不用 WeakMap：元素被 rerun / 容器清空删除时暂存数据随之可回收，
+   无需额外清理；元素生命周期就是暂存数据的生命周期。
+
+   【顺序陷阱】不得只靠 expanded 类判定：HITL 复用分支先调 updateToolCardContent、
+   之后才 addClass('expanded')（见 appendActionEndChunk 的 approvedToolCard 分支），
+   光判类会让那张卡停在「已展开但空体」。因此 setToolBodyPending 写完暂存后无条件调一次
+   ensureToolCardBody（已展开则立即构建），且切换 expanded 类的调用点必须补调一次。 */
+function ensureToolCardBody(cardEl) {
+    if (!cardEl || !cardEl._pendingToolBody) return false;
+    if (!cardEl.classList || !cardEl.classList.contains('expanded')) return false;
+    var bodyEl = $(cardEl).find('.tool-card-body').first()[0];
+    if (!bodyEl) return false;
+    var p = cardEl._pendingToolBody;
+    /* 先清暂存再构建：渲染器抛错时不得让卡体永远停在「待构建」而反复重试 */
+    cardEl._pendingToolBody = null;
+    /* 变量名保持 sess / bareToolName：tool-presentation.test.js 锁定的是
+       「所有 action_end 路径复用同一个公共更新入口」这个契约，不是字面量，
+       但用同名变量能让护栏继续生效（改成 p.sess 会让断言失配而静默退化）。 */
+    var sess = p.sess, bareToolName = p.toolName;
+    bodyEl.removeAttribute('style');
+    bodyEl.innerHTML = '';
+    fillToolBody(sess, bodyEl, bareToolName, p.text, p.args, p.meta);
+    /* 【必须补】回放时 highlightCodeBlocks(realContainer) 只能高亮当时已存在的卡体；
+       懒构建后卡体是展开才建的，不补这一步，todowrite/todoread 渲染器产出的
+       <pre><code class="hljs language-markdown"> 会永远停在无高亮的裸代码。
+       该函数自带 data-hljs-collected 幂等守卫，重复调用不会双重高亮。 */
+    if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(bodyEl);
+    return true;
+}
+window.ensureToolCardBody = ensureToolCardBody;
+function setToolBodyPending(cardEl, sess, toolName, text, args, meta) {
+    if (!cardEl) return;
+    cardEl._pendingToolBody = { sess: sess, toolName: toolName, text: text, args: args, meta: meta };
+    /* 折叠态也要有一条可读的输出摘要：取首行，不构建卡体（展开时由 CSS 隐掉本行）。
+       传完整 text 而非预览裁切片段——摘要函数自己取行，卡体将来展开仍是全文。 */
+    setPreviewLine(cardEl, 'tool-card-preview', text, false);
+    ensureToolCardBody(cardEl);
+}
+
+/* 工具卡折叠开关的统一绑定：切类后必须补一次构建，否则懒构建的卡展开是空的。
+   为何抽函数：四处建卡路径（骨架卡 / 批量兜底卡 / 正式卡 / HITL 卡）原本各写一份内联 toggle，
+   任一处漏补 ensureToolCardBody 就会出现「点开是空的」，且漏的那处很难被测到。
+   注：本函数是【定义在 updateToolCardContent 之后】的普通函数声明，而 createToolCardShell
+   在它之前就调用了——同属一个 IIFE 作用域，函数声明整体提升，运行期安全。 */
+function bindToolCardToggle(card) {
+    $(card).find('.tool-card-header').on('click', function() {
+        $(card).toggleClass('expanded');
+        ensureToolCardBody(card);
+    });
+}
+
 /* action_end 各配对/兜底路径共用：展示模型、参数、头部元数据与结果体一次回填。 */
 function updateToolCardContent(sess, cardEl, toolName, toolTitle, args, text, meta, options) {
     var presentation = applyToolPresentation(cardEl, toolName, toolTitle, options);
@@ -1556,12 +1827,9 @@ function updateToolCardContent(sess, cardEl, toolName, toolTitle, args, text, me
         if (argsEl) argsEl.textContent = argsStr;
         else $('<span>').addClass('tool-args').text(argsStr).insertAfter($(cardEl).find('.tool-name').first());
     }
-    var bodyEl = $(cardEl).find('.tool-card-body').first()[0];
-    if (bodyEl) {
-        bodyEl.removeAttribute('style');
-        bodyEl.innerHTML = '';
-        fillToolBody(sess, bodyEl, bareToolName, text, args, meta);
-    }
+    /* 结果体不再无条件构建：折叠态只暂存参数，首次展开才渲染（见 setToolBodyPending）。
+       展开态（cliPrintSimplified=false 或 HITL 复用）由 ensureToolCardBody 立即构建，观感不变。 */
+    setToolBodyPending(cardEl, sess, bareToolName, text, args, meta);
     return bareToolName;
 }
 
@@ -1669,7 +1937,7 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
             toolPresentationOptions(fallbackAgentBody, args, fallbackCard));
         setToolCardStatus(fallbackCard, text, failed);
         setToolCardDuration(fallbackCard, durationMs, failed);
-        $(fallbackCard).find('.tool-card-header').on('click', function() { $(fallbackCard).toggleClass('expanded'); });
+        bindToolCardToggle(fallbackCard);
         if (appendCardToBatch(sess, fallbackCard, endBatchMeta, fallbackAgentBody)) markBatchCardDone(sess, fallbackCard);
         else if (fallbackAgentBody) $(fallbackAgentBody).append(fallbackCard);
         else insertBeforeActions(sess, fallbackCard);
@@ -1689,6 +1957,9 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         setToolCardDuration(rc, durationMs, failed);
         if (window.cliPrintSimplified === false) $(rc).addClass('expanded');
         else $(rc).removeClass('expanded');
+        /* 必须放在 expanded 类切换【之后】：updateToolCardContent 时这张卡还没拿到 expanded，
+           光靠它内部那次 ensureToolCardBody 会漏构建，表现为「展开档下卡体是空的」。 */
+        ensureToolCardBody(rc);
         sess.pendingToolCard = rc;
         advanceBodyPointer(sess, sess, function(el) { insertBeforeActions(sess, el); });
         if (sess.sessionId === activeSessionId) scrollToBottom();
@@ -1715,9 +1986,7 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
     setToolCardStatus(card, text, failed);
     setToolCardDuration(card, durationMs, failed);
 
-    $(card).find('.tool-card-header').on('click', function() {
-        $(card).toggleClass('expanded');
-    });
+    bindToolCardToggle(card);
 
     // 归属守卫：子代理的工具结果（无 action_start 前置建卡时）同样插入智能体卡片内部
     if (fallbackOwner) {
@@ -1980,6 +2249,27 @@ $(document).on('keydown', function (e) { if (e.key === 'Escape') closeAllTracePo
   
    agent_start 创建容器并登记到 sess.agentCards，agent_end 更新状态并追加 resultSummary。
    子代理内部复用外部主智能体的渲染流程，所有内容都插入到 .agent-card-body 内。 */
+
+/* 把 agent_end 的 resultSummary 追加到卡体末尾，两条路径共用：
+   1) 正常结束（agent_start 登记过容器，命中上方 update 分支）——由去重守卫决定是否追加；
+   2) 孤儿 agent_end（agent_start 被回放分页裁剪丢弃，见创建分支注释）——必须追加：
+      否则卡体为空，被 `.agent-card-body:empty { display: none }` 挡死，
+      点击展开在视觉上毫无反应（实测复现的「智能体点击展开打不开」直接成因）。
+   返回是否确实追加了内容；无 summary / 无卡体时静默返回 false。 */
+function appendAgentResultSummary(cardEl, chunk) {
+    var summary = chunk && chunk.args && chunk.args.resultSummary;
+    if (!summary || !cardEl) return false;
+    var bodyEl = $(cardEl).find('.agent-card-body')[0];
+    if (!bodyEl) return false;
+    var summaryMd = $('<div>').addClass('md-content').addClass('agent-result-summary')[0];
+    summaryMd.innerHTML = renderMd(summary);
+    if (typeof addCodeBlockButtons === 'function') addCodeBlockButtons(summaryMd);
+    if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(summaryMd);
+    if (typeof processMermaidBlocks === 'function') processMermaidBlocks(summaryMd);
+    bodyEl.appendChild(summaryMd);
+    return true;
+}
+
     function appendAgentBadge(sess, chunk, isStart) {
     var agentName = chunk.toolName || (chunk.args && chunk.args.agentName) || 'agent';
     var desc = chunk.text || (chunk.args && chunk.args.description) || '';
@@ -2021,19 +2311,13 @@ $(document).on('keydown', function (e) { if (e.key === 'Escape') closeAllTracePo
             // 确保摘要落在卡体真正的末尾。此时该智能体的增量渲染器已在上方强刷收敛，不会误删带内容的容器。
             purgeEmptyMdBlocks(existCard);
 
-            // resultSummary 作为独立的 .md-content 块追加到 .agent-card-body 末尾。
+            // resultSummary 追加到卡体末尾（与孤儿 end 兜底共用同一 helper，防两条路径规则漂移）。
             // 去重守卫：卡片已有流式正文时（单任务 ReasonDeltaEvent 增量 / multitask ReasonEndEvent 结果），
             // resultSummary 与其同文，成功时不再追加，避免卡片内同一段内容出现两次；
             // 失败（success=false）时 summary 承载错误信息，仍需追加。
             var hasStreamedBody = !!(endState && endState.bodyText && endState.bodyText.trim());
-            if (chunk.args && chunk.args.resultSummary && (!success || !hasStreamedBody)) {
-                var summaryMd = $('<div>').addClass('md-content').addClass('agent-result-summary')[0];
-                summaryMd.innerHTML = renderMd(chunk.args.resultSummary);
-                if (typeof addCodeBlockButtons === 'function') addCodeBlockButtons(summaryMd);
-                if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(summaryMd);
-                if (typeof processMermaidBlocks === 'function') processMermaidBlocks(summaryMd);
-                var agentCardBody = $(existCard).find('.agent-card-body')[0];
-                if (agentCardBody) agentCardBody.appendChild(summaryMd);
+            if (!success || !hasStreamedBody) {
+                appendAgentResultSummary(existCard, chunk);
             }
 
             $(existCard).removeClass('agent-card-streaming');
@@ -2084,6 +2368,15 @@ $(document).on('keydown', function (e) { if (e.key === 'Escape') closeAllTracePo
     insertBeforeActions(sess, card);
 
     var agentCardBody = $(card).find('.agent-card-body')[0];
+
+    /* 孤儿 agent_end 兜底：agent_start 因回放分页的字节预算裁剪被丢（保尾丢头），
+       到达此处时没有已登记的容器可复用，上面刚建出的卡体是空的。空卡体会被
+       `.agent-card.expanded .agent-card-body:empty { display: none; }` 挡死——
+       用户点击后 expanded 类切换成功但视觉上毫无反应（实测复现的「点不开」）。
+       把 resultSummary 落进卡体，保证展开必有内容可读；无 summary 的旧格式帧保持原状。 */
+    if (!isStart) {
+        appendAgentResultSummary(card, chunk);
+    }
 
     // 每个智能体一份独立输出状态（支持并行 multitask，避免多卡片内容互串）。
     // 字段名与主线路 sess 完全同名（currentBubbleEl=正文指针、thinkingBlockEl/thinkingBlockTimerId 等），
@@ -2433,9 +2726,7 @@ function appendHitlCard(sess, toolName, command, actionId) {
         if (hn) { hn.setAttribute('data-i18n-hitl', 'need_auth'); hn.setAttribute('data-i18n-hitl-tool', toolName || 'unknown'); }
     })();
 
-    $(card).find('.tool-card-header').on('click', function() {
-        $(card).toggleClass('expanded');
-    });
+    bindToolCardToggle(card);
 
     // 接管骨架卡时节点已在消息流中（可能在智能体卡内），重插会把它搬到主对话底部
     if (!card.parentNode) insertBeforeActions(sess, card);
@@ -2843,9 +3134,17 @@ function nextUnansweredQuestionIndex(state, index) {
     return -1;
 }
 
+/* 点选项 = 单选钮语义，可反悔：再点【已选中的那一项】即取消选择（见 unselectQuestionOption）。
+   旧实现只有「写入 / 改选」两条出路，点已选项等于把同一份答案原样重写一遍 —— 用户看到的
+   就是「选中后取消不了」，只能被迫改选别的选项或提交。 */
 function applyQuestionOptionAnswer(state, index, label) {
     if (!state) return;
     var sel = (label == null) ? '' : String(label);
+    // 空 label 的选项规定上不存在（退数据），不参与 toggle，免得误碰「未选定」判定
+    if (sel && questionOptionSelected(state, index, sel)) {
+        unselectQuestionOption(state, index);
+        return;
+    }
     // 改选别的选项时保留已写的补充：用户先补一句再换选项，补充不该被顶掉
     var prev = questionAnswerFor(state, index);
     var sup = (prev && prev.supplement) ? String(prev.supplement) : '';
@@ -2860,9 +3159,33 @@ function applyQuestionOptionAnswer(state, index, label) {
     advanceQuestionCursor(state);
 }
 
+/* 取消本题的选项选择：这是「已点选项」唯一的撤回出口。
+   【为什么不推进光标】取消表达的是「这题我反悔了、还没定」，与「答完了往前翻」相反；
+   推进会让用户一点取消就被弹到下一题，回到本题还得手动翻页。
+   【为什么保留补充】用户可能先写了「但先别动数据库」再决定不选任何一项：那段文字本身就是
+   一个完整的自定义回答，撤选项不该顺手把字丢掉 → 降级为 custom 答案（与
+   applyQuestionCustomAnswer 产出的形状一致：text 存正文、supplement 置空）。
+   【已跳过的题】不动它的 skipped 标记：X 已经表达过放弃，此处不该把它复活成待答态。 */
+function unselectQuestionOption(state, index) {
+    if (!state) return;
+    var prev = questionAnswerFor(state, index);
+    if (!prev || prev.skipped) return;
+    var sup = (prev.supplement == null) ? '' : String(prev.supplement);
+    if (!sup) {
+        // 纯选项答案：整条撤回，回到未作答态
+        delete state.answers[index];
+        return;
+    }
+    state.answers[index] = {
+        index: index, text: sup, selectedLabel: '', supplement: '', skipped: false, custom: true
+    };
+}
+
 /* 追加/更新补充说明：只写 supplement，绝不触碰已点选的选项。
    也不推进光标——补充是对当前题的注解，不是「这题答完了」的信号，
-   推进会让用户补一句话就被翻到下一题。 */
+   推进会让用户补一句话就被翻到下一题。
+   它同时是「清空本行」的实现入口（卡片内清空按钮与空输入按 Enter 都传空串）：
+   已选选项时降级为「只选选项」，无选项时本题直接回到未作答态（允许反悔）。 */
 function applyQuestionSupplement(state, index, text) {
     if (!state) return;
     var sup = (text == null) ? '' : String(text).trim();
@@ -3075,21 +3398,48 @@ function bindQuestionCardEvents(host) {
         refreshQuestionSubmitLabel();
     });
 
-    // 「其他补充」输入：Enter 确认自定义答案并推进；Esc 收起输入
+    // 「其他补充」输入：Enter 确认自定义答案并推进（空输入则清空本行）；Esc 失焦
     $(host).on('keydown', '.question-card-other-input', function(e) {
         var st = activeQuestionCardState();
         if (!st || st.submitted) return;
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            var val = (this.value || '').trim();
-            if (!val) return;   // 空输入不产生自定义答案
-            applyQuestionCustomAnswer(st, st.current, val);
-            syncQuestionCard();
-        } else if (e.key === 'Escape') {
+        if (e.key === 'Escape') {
             /* 输入框常驻后已无「收起」语义，Esc 改为失焦：让用户离开卡片内输入、
                回到主输入框或键盘导航，同时不必为此白白整卡重建一次。 */
             try { this.blur(); } catch (e2) {}
+            return;
         }
+        if (e.key !== 'Enter' || e.shiftKey) return;
+        var val = (this.value || '').trim();
+        if (val) {
+            e.preventDefault();
+            applyQuestionCustomAnswer(st, st.current, val);
+            syncQuestionCard();
+            return;
+        }
+        /* 空输入按 Enter：旧实现一律早退（「空输入不产生自定义答案」），于是用户把补充分
+           全选删掉再回车，什么也不会发生 —— 已入库的那段补充根本撤不掉。现在把它当作
+           「清空本行」：只清补充（选项另有自己的取消入口，即再点一次该选项）。 */
+        var cur = questionAnswerFor(st, st.current);
+        if (cur && !cur.skipped && (cur.supplement || cur.custom)) {
+            e.preventDefault();
+            applyQuestionSupplement(st, st.current, '');
+            syncQuestionCard();
+        }
+    });
+
+    /* 清空补充行：补上「已写自定义答案 / 已入库补充」的撤回出口。
+       旧形态里改答案只有两条路（再选一个别的选项、再写一段补充盖掉），想让这一行回到
+       空白根本没有入口 —— 输入框清空后按 Enter 会被旧的「空输入不产生答案」早退。 */
+    $(host).on('click', '.question-card-other-clear', function() {
+        var st = activeQuestionCardState();
+        if (!st || st.submitted) return;
+        applyQuestionSupplement(st, st.current, '');
+        syncQuestionCard();
+        /* 必须手动补焦：本按钮重建后自己就不存在了（空行不再渲染它），
+           而通用焦点恢复只能「按 key 找回同一个元素」，找不到宿主时焦点就掉回 body
+           —— 用户刚清完内容却接着不了字（与上一轮「输入框常驻化」丢焦同构的回归）。 */
+        var input = host.querySelector('.question-card-other-input');
+        if (input) { try { input.focus(); } catch (e) {} }
     });
 
     // 翻页（仅多题时渲染）
@@ -3123,6 +3473,7 @@ function bindQuestionCardEvents(host) {
         var sess = sessionMap[activeSessionId];
         var mode = questionSubmitMode(st, currentInputBoxText(sess));
         if (mode === 'submit') {
+            harvestQuestionInputOnSubmit(sess, st);
             handleQuestionResponse(sess, st);
         } else if (mode === 'next') {
             harvestQuestionInputOnSubmit(sess, st);
@@ -3356,6 +3707,10 @@ function renderQuestionCard(host, sess, state) {
         var selected = questionOptionSelected(state, idx, view.label);
         html += '<button type="button" class="question-card-option' + (selected ? ' selected' : '') + '"'
             + (submitted ? ' disabled' : '')
+            /* 只在【已选中项】上挂取消提示：否则「再点一下就取消」这个能力只有知道内情的
+               开发者看得见，用户依旧以为选中就撤不回（未选项挂提示反而是噪声）。 */
+            + (!submitted && selected ? ' title="' + escapeAttr(GourdI18n.t('chat.question_unselect_hint')) + '"' : '')
+            + ' aria-pressed="' + (selected ? 'true' : 'false') + '"'
             + ' data-q-index="' + idx + '" data-opt-index="' + oi + '">'
             + '<span class="question-card-opt-index">' + (oi + 1) + '</span>'
             + '<span class="question-card-opt-main">'
@@ -3379,9 +3734,15 @@ function renderQuestionCard(host, sess, state) {
         ? String(state.drafts[idx])
         : supText;
     if (!submitted) {
+        /* 清空入口只在「这一行确实有内容」时出现（已入库补充/自定义答案或未确认草稿）：
+           空行旁挂个 X 是噪声，还会让人误以为它清的是上面的选项。 */
+        var showClear = !!String(draft || '').trim();
         html += '<div class="question-card-other-row is-editing">'
             + '<span class="question-card-opt-index">' + QUESTION_CARD_SVG_EDIT + '</span>'
             + '<input type="text" class="question-card-other-input" autocomplete="off" spellcheck="false" placeholder="' + escapeAttr(hasSel ? GourdI18n.t('chat.question_supplement_placeholder') : GourdI18n.t('chat.question_other_placeholder')) + '" value="' + escapeAttr(draft) + '"/>'
+            + (showClear
+                ? '<button type="button" class="question-card-other-clear" data-q-index="' + idx + '" title="' + escapeAttr(GourdI18n.t('chat.question_clear_answer')) + '">' + QUESTION_CARD_SVG_CLOSE + '</button>'
+                : '')
             + '</div>';
     } else if (supText) {
         html += '<div class="question-card-other-row selected" data-q-index="' + idx + '">'

@@ -714,15 +714,14 @@ body.code-mode #chatView .trace-pop { min-width: 0; width: max-content; max-widt
 
 /* ---- 思考块 / 工具卡 / 批量分组：code 模式紧凑化 ----
    窄对话栏里默认 13px 字号 + 10px/14px 内边距的块显得又大又占地方，
-   统一收敛字号到 12px、内边距压到 6px/10px，圆角略收、外边距减半，贴合紧凑风格。 */
-body.code-mode #chatView .thinking-block { margin: 6px 0; border-radius: 8px; }
+   统一收敛字号到 12px、内边距压到 6px/10px，贴合紧凑风格。
+   【margin/border-radius 不再覆盖】过程卡四族已统一 2px 0 / 6px，
+   再写 6px 0 / 8px 覆盖会重新制造「同族两种间距两种圆角」的不一致。 */
 body.code-mode #chatView .thinking-block-header { padding: 6px 10px; font-size: 12px; }
 body.code-mode #chatView .thinking-block-label { font-size: 12px; }
 body.code-mode #chatView .thinking-block-body { padding: 0 10px 8px; font-size: 12px; line-height: 1.6; }
 body.code-mode #chatView .thinking-block-body .md-content { font-size: 12px; }
 
-body.code-mode #chatView .thinking-block { margin: 0 0 6px; }
-body.code-mode #chatView .tool-card { margin: 6px 0; border-radius: 8px; }
 body.code-mode #chatView .tool-card-header { padding: 6px 10px; gap: 6px; font-size: 12px; }
 body.code-mode #chatView .tool-type-icon { font-size: 13px; }
 body.code-mode #chatView .tool-file-lang { font-size: 12px; }
@@ -736,15 +735,13 @@ body.code-mode #chatView .file-change-row-actions { padding-left: 23px; flex-wra
 body.code-mode #chatView .file-change-action span { display: none; }
 body.code-mode #chatView .file-change-action { width: 25px; min-width: 25px; padding: 3px; justify-content: center; }
 
-body.code-mode #chatView .tool-batch-group { margin: 6px 0; border-radius: 8px; }
 body.code-mode #chatView .tool-batch-header { padding: 6px 10px; gap: 8px; font-size: 12px; }
 body.code-mode #chatView .tool-batch-progress { font-size: 11px; }
 body.code-mode #chatView .batch-tool-items { padding: 2px 6px 6px; }
 body.code-mode #chatView .batch-tool-items > .tool-card { margin: 3px 0; }
 
 /* 子智能体卡片：code 模式紧凑化。对话栏被压窄到 ~440px，卡体限高同步收窄，
-   避免单张子代理卡就占满整个可视对话区。 */
-body.code-mode #chatView .agent-card { margin: 6px 0; border-radius: 8px; }
+   避免单张子代理卡就占满整个可视对话区。margin/圆角不再覆盖（基线已统一）。 */
 body.code-mode #chatView .agent-card-header { padding: 6px 10px; gap: 6px; font-size: 12px; }
 body.code-mode #chatView .agent-card-body { padding: 6px 10px; font-size: 12px; line-height: 1.6; max-height: 300px; }
 body.code-mode #chatView .agent-card-body > .md-content { font-size: 12px; line-height: 1.6; }

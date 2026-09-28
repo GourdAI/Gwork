@@ -116,8 +116,9 @@
         var reasons = summary && summary.incompleteReasons;
         var list = (Array.isArray(reasons) ? reasons : (reasons ? [reasons] : []))
             .map(function (item) { return item == null ? '' : String(item).trim(); })
-            .filter(Boolean);
-        return list.length ? t('possibly_incomplete_detail', [list.join('; ')]) : t('possibly_incomplete');
+            .filter(Boolean)
+            .filter(function(r) { return r !== 'bash was invoked and may have changed untracked files'; });
+        return list.length ? t('possibly_incomplete_detail', [list.join('; ')]) : '';
     }
     function notify(key, type, params) {
         if (typeof window.showToast === 'function') window.showToast(t(key, params), type || 'info');
@@ -276,6 +277,20 @@
         sess._fileChangesReplayPending = null;
         Object.keys(pending).forEach(function (runId) { reconcile(sess, runId); });
     }
+    /* 未收口轮次的对账延后登记（与 _fileChangesReplayPending 刻意分开）：
+       后者在 replayDone 无条件清空并全量对账，若把「仍在跑的轮次」混进去，
+       回放一个运行中会话时活跃轮会被提前对账→提前回填→提前出卡。 */
+    function markReconcilePending(sess, runKey) {
+        if (!sess._fchReconcilePending) sess._fchReconcilePending = {};
+        sess._fchReconcilePending[runKey] = true;
+    }
+    /* 轮次收口时补做被延后的对账（仍受 reconcile 自身 3s 节流） */
+    function flushReconcilePending(sess, runKey) {
+        var pending = sess && sess._fchReconcilePending;
+        if (!pending || !pending[runKey]) return;
+        delete pending[runKey];
+        reconcile(sess, runKey);
+    }
 
     function actionButton(css, label, svg, handler) {
         var button = document.createElement('button');
@@ -356,6 +371,15 @@
         cache.toggleEl = toggle;
         return el;
     }
+    /* 属性选择器值转义（CSS.escape 不覆盖引号语义）：runId 是 UUID 恒安全，但本函数
+       不应依赖任何未声明的全局——曾因引用未定义的 attrValueEscape 导致回放/切换后
+       慢路径整体抛 ReferenceError，变更卡片在重启后永久消失（快路径 currentBubbleEl
+       命中时永不执行，流式期看不出来）。 */
+    function attrValueEscape(value) {
+        return String(value == null ? '' : value)
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"');
+    }
     /* 该 run 的助手气泡：快路径用 currentBubbleEl（流式中就是当前气泡），
        慢路径（回放/迟到帧/会话切换）按 data-run-id 反查该 run 的最后一行气泡。 */
     function runBubbleOf(sess, runKey) {
@@ -368,13 +392,39 @@
         if (!rows.length) return null;
         return $(rows[rows.length - 1]).find('.msg-bubble')[0] || rows[rows.length - 1];
     }
-    /* ===== 卡片定位：该轮气泡的最底部 =====
-       审查内容不参与正文流：卡片宿主恒为该轮助手气泡的最后一个子节点，位于 meta 行
-       （结束时间）与操作按钮（复制/重跑/继续）之后——气泡内顺序固定为
-       「正文 → 结束时间 → 操作按钮 → 变更卡片」。每轮各自持有一张卡，因此上拉到
-       上一轮对话结尾时，那一轮的变更记录仍在原处可查，不会被后一轮替换。
+    /* ===== 卡片定位：页脚（时长徽章/操作按钮）之上、正文之下 =====
+       审查内容不参与正文流：卡片宿主锚定在该轮助手气泡的页脚之前——气泡内顺序固定为
+       「正文 → 变更卡片 → 时长徽章 → 操作按钮」。总时长是整轮的收尾性总结，必须出现在
+       卡片之后（此前曾把宿主追加到气泡末尾，导致时长徽章跑到审查卡片上方、按钮与卡片
+       之间夹出一段空白）。每轮各自持有一张卡，因此上拉到上一轮对话结尾时，那一轮的
+       变更记录仍在原处可查，不会被后一轮替换。
        快路径：流式中 currentBubbleEl 就是该 run 的气泡；慢路径：回放/迟到帧/会话切换
        按 data-run-id 反查该 run 的最后一行气泡，不依赖 currentBubbleEl 指向。 */
+    /* 页脚锚点：气泡内首个 meta/actions 节点（ensureAssistantBubble 固定产出
+       「正文 → msg-meta-row → msg-actions」）。页脚之前 = 正文流的末端。
+       不用 jQuery $(bubble).find：路径性能无关紧要（收口期一次），且避免测试沙箱的 $ 桩
+       find 实现差异导致宿主定位在沙箱与浏览器两套行为。 */
+    function bubbleFooterOf(bubble) {
+        if (!bubble) return null;
+        for (var ci = 0; ci < bubble.childNodes.length; ci++) {
+            var n = bubble.childNodes[ci];
+            /* 用 classList 判别（真实 DOM 文本节点与沙箱桩文本节点都无 classList）：
+               不能用 nodeType===1——测试沙箱桩元素不带 nodeType，会把页脚误判为不存在 */
+            if (!n || !n.classList || !n.classList.contains) continue;
+            if (n.classList.contains('msg-meta-row') || n.classList.contains('msg-actions')) return n;
+        }
+        return null;
+    }
+    /* 宿主入位：插到页脚之前；无页脚（异常结构）时退回气泡末尾。返回实际插入引用节点。 */
+    function placeHostInBubble(bubble, host) {
+        var footer = bubbleFooterOf(bubble);
+        if (footer) {
+            if (host.parentNode !== bubble || host.nextSibling !== footer) bubble.insertBefore(host, footer);
+            return footer;
+        }
+        if (host.parentNode !== bubble || host.nextSibling) bubble.appendChild(host);
+        return null;
+    }
     function runHostOf(sess, runKey) {
         if (!sess._fchHosts) sess._fchHosts = {};
         var host = sess._fchHosts[runKey];
@@ -383,7 +433,7 @@
         host.className = 'fch-host';
         sess._fchHosts[runKey] = host;
         var bubble = runBubbleOf(sess, runKey);
-        if (bubble) bubble.appendChild(host);
+        if (bubble) placeHostInBubble(bubble, host);
         else {
             /* 气泡向未建（帧早于正文）：先落消息容器根，下次 positionCard 再迁入气泡 */
             var root0 = (typeof renderRoot === 'function') ? renderRoot(sess) : null;
@@ -391,7 +441,8 @@
         }
         return host;
     }
-    /* 定位：卡片入宿主；宿主恒在气泡末尾（收口后新节点可能晚于卡片插入，需重建末尾序）。 */
+    /* 定位：卡片入宿主；宿主恒在页脚（时长徽章/操作按钮）之前（收口后新节点可能晚于
+       卡片插入，需重建「正文 → 卡片 → 页脚」序）。 */
     function positionCard(sess, runKey) {
         var cache = cardsOf(sess)[runKey];
         var el = cache && cache.el;
@@ -399,8 +450,7 @@
         var host = runHostOf(sess, runKey);
         if (el.parentNode !== host) host.appendChild(el);
         var bubble = runBubbleOf(sess, runKey);
-        /* 已在末尾时 appendChild 虽是空操作，但会触发一次无谓的重排，故先判后搬 */
-        if (bubble && (host.parentNode !== bubble || host.nextSibling)) bubble.appendChild(host);
+        if (bubble) placeHostInBubble(bubble, host);
     }
 
     window.repositionFileChangeCards = function (sess) {
@@ -452,24 +502,63 @@
     }
 
     /* 卡片渲染：头部/操作区/警告/行/折叠按钮各自签名增量更新，流式帧不全量重建 DOM。
-       force=true 用于「后端字段没变但文案变了」的场景（语言切换）：签名不会变，必须绕过复用。 */
-    /* 渲染时机：任务收口后才落卡。
-       流式/回放期间只更新数据快照——中途变更会让卡片在正文底部反复增删跳动，且此刻用户
-       关心的是模型在做什么，不是改了哪些文件。收口点 = finishStream / 回放 replayDone /
-       会话切换补渲染。注意 file_changes 帧常在 run 收尾后才延迟到达（那时 isStreaming
-       已是 false），此时直接渲染，不进待渲染登记。 */
-    function renderAllowed(sess) { return !sess.isStreaming && !sess._replaying; }
+        force=true 用于「后端字段没变但文案变了」的场景（语言切换）：签名不会变，必须绕过复用。 */
+    /* 渲染时机：【该轮真收口】后才落卡。
+        流式/回放期间只更新数据快照——中途变更会让卡片在正文底部反复增删跳动，且此刻用户
+        关心的是模型在做什么，不是改了哪些文件。收口点 = finishStream / 回放 replayDone /
+        会话切换补渲染。注意 file_changes 帧常在 run 收尾后才延迟到达（那时 isStreaming
+        已是 false），此时直接渲染，不进待渲染登记。
+
+        【为何不能只看 isStreaming（已实证的四条泄漏路径）】
+        isStreaming 是「会话级」旗标，而卡片是「run 级」产物，两者粒度不匹配就会漏：
+        1) 挂起态：ask_user 问答卡 / HITL 审批卡挂起时后端也发 done，finishStream 已把
+           isStreaming 置 false，但引擎只是等用户拍板、随时会带同一 runId 继续跑。
+           此时出卡 = 「任务还在运行中就展示了变更」（用户实际看到的缺陷）。
+        2) 切回运行中的会话：setActiveSession → renderSessionFileChangeCards 无条件 flush，
+           而该会话 isStreaming 仍为 true。
+        3) 回放一个「仍在运行」的会话：replayDone 把 isStreaming 恢复为 true，但同一批
+           flush 里既有已收口的历史轮（必须出卡，否则回归）、又有活跃轮（不得出卡）——
+           会话级旗标无论怎么取都会顾此失彼。
+        4) 首个帧就是 file_changes（Loop 定时任务 / 后端推送）：它走被动分支不推进
+           currentRunId，currentRunId 仍为 null，无法区分它是不是当前活跃轮。
+        故门禁下沉到 run 级（runSettled）：先问「这一轮还是不是活跃轮」，再问「活跃轮到底
+        收没收口」。 */
+    function runSettled(sess, runKey) {
+        if (!sess || !runKey) return false;
+        /* 回放中 DOM 写在临时容器里，一律延到 replayDone 收口后统一渲染 */
+        if (sess._replaying) return false;
+        /* 当前活跃轮未知（currentRunId 为空）时保守归为活跃轮：
+           对应上面泄漏路径 4——file_changes 不推进 currentRunId，首个帧就可能是它。 */
+        var current = String(sess.currentRunId || '');
+        var isActiveRun = !current || current === String(runKey);
+        if (!isActiveRun) return true;   /* 历史轮：已收口，不会再收到新帧 */
+        if (sess.isStreaming) return false;
+        /* 挂起态（等用户作答/审批）：isStreaming 已被 finishStream 置 false，但任务未结束。
+           标记由 finishStream 按 keepBatchIndex 落盘（同一 runId 恢复后真收口时会被清掉）。 */
+        if (sess._runSuspended) return false;
+        return true;
+    }
     function markRenderPending(sess, runKey) {
         if (!sess._fchRenderPending) sess._fchRenderPending = {};
         sess._fchRenderPending[runKey] = true;
     }
-    /* 收口：把流式/回放期登记的 run 一次性补渲染并定位（幂等，重复调用无副作用） */
+    /* 收口：把流式/回放期登记的 run 一次性补渲染并定位（幂等，重复调用无副作用）。
+        【必须逐个 run 过 runSettled 门禁】本函数会被三个收口点调用，其中两个（回放 replayDone /
+        会话切换）并不能保证任务已结束；无条件 renderCard 正是「运行中就展示」的直接成因。
+        未收口的 run 重新登记，等下一个收口点重试（不丢卡）。 */
     function flushPendingRenders(sess) {
         if (!sess || !sess._fileChangesByRun) return;
         var pending = sess._fchRenderPending;
         if (pending) sess._fchRenderPending = {};
         Object.keys(sess._fileChangesByRun).forEach(function (runKey) {
-            if (pending && pending[runKey]) renderCard(sess, runKey);
+            if (pending && pending[runKey]) {
+                if (runSettled(sess, runKey)) {
+                    renderCard(sess, runKey);
+                    flushReconcilePending(sess, runKey);
+                } else markRenderPending(sess, runKey);
+            }
+            /* 定位不受门禁限制：已渲染过的卡片（历史轮）仍需要收敛到气泡末尾；
+               未渲染的 run 在 positionCard 内部因 el 为空自行短路。 */
             positionCard(sess, runKey);
         });
     }
@@ -629,13 +718,20 @@
         if (previous && revision <= previousRevision) return;
         sess._fileChangesByRun[runKey] = summary;
 
-        if (renderAllowed(sess)) renderCard(sess, runKey);
-        else markRenderPending(sess, runKey);
+        if (runSettled(sess, runKey)) {
+            renderCard(sess, runKey);
+            /* 本次帧到达即收口：若之前因未收口而延后过对账，这里补上。
+               不放在 flushPendingRenders 里等：那里只在 pending 登记存在时才跑，
+               而「迟到帧直接渲染」这条路根本没进过 pending。 */
+            flushReconcilePending(sess, runKey);
+        } else markRenderPending(sess, runKey);
         /* 回放期间不发起对账：逐帧重建时逐条请求纯属浪费，登记后由 replayDone 收口统一触发
-           （仍走 reconcile 自身 3s 节流）。 */
+            （仍走 reconcile 自身 3s 节流）。运行中也不对账：对账响应会回填 upsert，
+            而未收口的轮次此时根本不该出现在界面上。 */
         if (!previous) {
             if (sess._replaying) deferReplayReconcile(sess, runKey);
-            else if (!sess.isStreaming) reconcile(sess, runKey);
+            else if (runSettled(sess, runKey)) reconcile(sess, runKey);
+            else markReconcilePending(sess, runKey);
         }
     }
 

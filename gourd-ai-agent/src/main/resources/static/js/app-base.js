@@ -79,6 +79,10 @@ function SessionState(sessionId) {
     // 即时插话（steer）状态：activeRunId 仅追踪主代理运行，不能被子代理 chunk 覆盖。
     this.currentRunId = null;
     this.activeRunId = null;
+    /* 本轮 done 是「挂起」（等用户作答/审批，引擎会带同一 runId 继续跑）而非真结束。
+       由 finishStream 按 keepBatchIndex 落盘，供变更卡片区分「收口」与「挂起」（runSettled）。
+       isStreaming 单独不够用：挂起后它同样是 false，卡片会在任务运行中就冒出来。 */
+    this._runSuspended = false;
     this.steerPending = {};   // steerId -> {text, runId, createdAt, state}
     this.steerResolved = {};  // 已收到 applied/dropped/cancelled 的短期幂等集合
     this._steerSending = false;
@@ -211,6 +215,7 @@ function evictInactiveSessions() {
         sess._fileChangesReconciledAt = {};
         sess._fileChangesReplayPending = null;
         sess._fchRenderPending = null;
+        sess._fchReconcilePending = null;
     }
 }
 
@@ -362,6 +367,11 @@ function setActiveSession(sessionId) {
     SESSION_ID = sessionId;
     isStreaming = sess.isStreaming;
     userScrolledUp = false;
+    // 队列 chip/面板的渲染归属活动会话：切走后残留的是上一会话的队列数，
+    // 必须按新会话重新拉取渲染（否则「幽灵计数」跨会话显示，误以为每个对话都有队列）。
+    // force 绕过 messageQueue.caches——缓存里可能还是上一个会话或本会话的过期快照。
+    // app-ui.js 晚于本文件加载，运行期已就绪；typeof 守卫对齐 syncQuestionCard 的调用模式。
+    if (typeof window.updateMessageQueueUI === 'function') window.updateMessageQueueUI({ force: true });
     // 切会话必须释放可能残留的视口锚锁（上一个会话的翻页还在飞行中就切走），
     // 否则新会话的自动滚到底部会被锁死，表现为流式输出不跟随。
     if (typeof releaseScrollAnchor === 'function') releaseScrollAnchor();

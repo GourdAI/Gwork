@@ -5,31 +5,55 @@
  * 通过 HTTP API 与后端交互，支持服务重启后恢复。
  */
 class MessageQueue {
+    /** 缓存自愈上限：超过则强制重拉（跨实例 stale 快照的最长存活期） */
+    static CACHE_TTL_MS = 30000;
+
     constructor() {
         /** 本地缓存，避免频繁请求 */
-        this.caches = {}; // { sessionId: { items: [], loading: false } }
+        this.caches = {}; // { sessionId: { items: [], loading: false, fetchedAt: 0 } }
     }
 
-    /**
-     * 获取会话队列（带缓存）
+    /*
+     * 获取会话队列（带缓存）。
+     *
+     * force：绕过缓存直接请求服务端。两个消费方依赖它：
+     * 1) 切换会话时的全量重渲染（setActiveSession）——此时缓存里是上一个会话
+     *    或过期的本会话数据，直接复用会把幽灵计数渲染到新会话；
+     * 2) 跨实例场景（桌面版与 dev 同时在线、共享同一批会话目录）：
+     *    另一实例 shift/clear 后本实例缓存不会失效，只有强制拉取才能看到真值。
      */
-    getQueue(sessionId) {
+    getQueue(sessionId, force) {
         var self = this;
         var cache = this.caches[sessionId];
 
-        if (cache && !cache.loading && cache.items !== undefined) {
-            return Promise.resolve(cache.items);
+        // 飞行中复用：正在拉取的请求落定后就是服务端最新值。force 的语义是
+        // 「绕过已落地的过期缓存」，不是「打断在飞的请求」——loading 期间
+        // 无论 force 与否都复用同一个 Promise，避免同会话并发重复请求。
+        if (cache && cache.loading && cache._inflight) {
+            return cache._inflight;
         }
 
-        cache = cache || { items: [], loading: false };
-        cache.loading = true;
-        this.caches[sessionId] = cache;
+        if (!force && cache && cache.items !== undefined) {
+            // TTL 自愈：跨实例共享会话目录时另一实例的 shift/clear 不会使本缓存失效，
+            // 陈旧快照最多存活 CACHE_TTL_MS，到期后自动重新拉取。TTL 不参与 loading 竞态，
+            // 仅在命中缓存那一刻判定，不会中断进行中的请求。
+            if (!cache.fetchedAt || (Date.now() - cache.fetchedAt) < MessageQueue.CACHE_TTL_MS) {
+                return Promise.resolve(cache.items);
+            }
+        }
 
-        return this._fetchQueue(sessionId).then(function(items) {
+        cache = cache || { items: [], loading: false, fetchedAt: 0 };
+        cache.loading = true;
+        var inflight = this._fetchQueue(sessionId).then(function(items) {
             cache.items = items;
             cache.loading = false;
+            cache.fetchedAt = Date.now();
             return items;
         });
+        cache._inflight = inflight;
+        this.caches[sessionId] = cache;
+
+        return inflight;
     };
 
     /**
