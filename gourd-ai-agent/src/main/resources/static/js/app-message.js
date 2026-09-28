@@ -1283,7 +1283,10 @@ function ensureBatchGroup(sess, meta, insertAgentBody) {
     if (!sess.toolBatchesById) sess.toolBatchesById = {};
     var batchKey = batchKeyFor(sess, meta.batchId);
     var batch = sess.toolBatchesById[batchKey];
-    if (batch && document.contains(batch.groupEl)) return batch;
+    // 回放时渲染落点是 sess.renderTarget（tempDiv，不挂 document），必须用实际容器根检查，
+    // 否则 document.contains 恒 false → 同一 batchKey 每帧重建新组 → 空白空组 + 卡片无法合并。
+    var renderRoot = sess.renderTarget || document;
+    if (batch && renderRoot.contains(batch.groupEl)) return batch;
 
     var group = $('<div>').addClass('tool-batch-group')[0];
     if (sess.currentRunId) group.setAttribute('data-run-id', sess.currentRunId);

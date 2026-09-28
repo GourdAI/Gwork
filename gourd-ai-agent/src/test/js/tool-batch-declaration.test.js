@@ -135,7 +135,10 @@ test('ensureBatchGroup 抽取：三条归组路径（start/end/batch）共用同
     const msg = readStatic('js', 'app-message.js');
     assert.match(msg, /function batchKeyFor\(sess, batchId\) \{\s*\n\s*return \(sess\.currentRunId \|\| ''\) \+ '\|' \+ batchId;\s*\n\}/);
     const ensure = fnBody(msg, 'ensureBatchGroup');
-    assert.match(ensure, /if \(batch && document\.contains\(batch\.groupEl\)\) return batch;/);
+    // renderRoot = sess.renderTarget || document，回放时渲染落点是 tempDiv（不挂 document），
+    // 必须用实际容器根检查，否则回放期 document.contains 恒 false → 同一 batchKey 每帧重建新组。
+    assert.match(ensure, /var renderRoot = sess\.renderTarget \|\| document;/);
+    assert.match(ensure, /if \(batch && renderRoot\.contains\(batch\.groupEl\)\) return batch;/);
     assert.match(ensure, /sess\.toolBatchesById\[batchKey\] = batch;/);
     assert.match(ensure, /updateBatchGroupHeaderExplicit\(batch\);/);
     // appendCardToBatch 必须走 ensureBatchGroup，不得保留第二份建组代码
