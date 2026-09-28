@@ -110,6 +110,18 @@ jobs:
         working-directory: gourd-ai-tauri
         run: node test/nsis-title-font-contract.js
 
+      # NSIS 冻结模板与 CLI 钉版对齐契约（2026-09-28 事故门禁）：template.nsi 是整份
+      # 覆盖官方模板的冻结副本，而 CI 的 npm install 曾靠浮动 ^2 装到刚发布的 2.12.0，
+      # 其 CheckIfAppIsRunning 改用 Restart Manager 宏 → 冻结模板缺 Win\RestartManager.nsh
+      # 的 include，makensis 报 "macro named RestartManager_StartSession not found" 整腿红。
+      # 本契约钉死：依赖精确版本 / 模板头部标记与钉版一致 / include 与全路径参数在位。
+      # 零依赖、毫秒级，放在昂贵步骤之前。npm install 之后会再跑一次以激活
+      # 「实装版本 == 钉版」那条断言（见下一步）。
+      - name: 契约测试（NSIS 模板与 CLI 钉版对齐）
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: node test/nsis-template-cli-version-contract.js
+
       # deb control 必填字段契约：应用商店上传时先做「包格式检测」，control 缺少
       # Section 会被拒（0.1.x 实测报错：「缺少必填字段Section」）。根因是
       # tauri-bundler 仅在配置了 bundle.linux.deb.section 时才写出该行，此前漏配。
@@ -251,6 +263,14 @@ jobs:
         shell: bash
         working-directory: gourd-ai-tauri
         run: npm install
+
+      # npm install 之后复跑钉版契约：此时 node_modules/@tauri-apps/cli 已存在，
+      # 「实装版本 == package.json 钉版」断言被激活。早期批次那条跑的时候
+      # node_modules 还不存在，该条是 SKIP 的；两道合起来才闭环。
+      - name: 复验 CLI 实装版本与钉版一致
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: node test/nsis-template-cli-version-contract.js
 
       # 决定本次构建是否产出更新包（.sig）由 npm scripts 的 preflight 步骤完成
       # （build:win / build:mac / build:linux 均已内联 configure-updater.js + -c overlay），

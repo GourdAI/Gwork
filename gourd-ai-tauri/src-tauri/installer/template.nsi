@@ -13,10 +13,11 @@
 ;     需要提及占位符时，一律写成不带花括号的形式（例：installer_hooks 条件 include 块）。
 ;     注：installer/hooks.nsh 不经 handlebars（由 NSIS 直接 !include），不受此约束。
 ;   接入方式 : tauri.conf.json → bundle.windows.nsis.template = "installer/template.nsi"
-;   对应版本 : @tauri-apps/cli 2.11.4
-;              （取自 gourd-ai-tauri/package-lock.json 里 node_modules/@tauri-apps/cli 的 version，
-;               即当前【实际锁定】值；package.json 的 devDependencies 写的是浮动范围 "^2"，
-;               两者不一致时一律以 package-lock.json 为准）
+;   对应版本 : @tauri-apps/cli 2.12.0
+;              （2026-09-28 起 package.json 的 devDependencies 已把 @tauri-apps/cli 钉为精确版本，
+;               不再浮动 "^2"；package-lock.json 不入库，CI 的 npm install 以 package.json 为准。
+;               三方对齐由 test/nsis-template-cli-version-contract.js 钉死：package.json 精确版本、
+;               本文件头部标记、模板内容特征（RestartManager include 等）任一漂移即红。）
 ;
 ;   ⇒ 升级 @tauri-apps/cli 时【必须】重新提取官方模板并 diff，再重新套用下面列出的定制点：
 ;      · 官方模板后续的 bugfix / 新特性【不会】自动进入本文件 —— 整份覆盖等于主动放弃上游更新；
@@ -25,6 +26,13 @@
 ;      · 是否把 "^2" 钉死到具体版本属于依赖策略变更，需单独决策，本注释只陈述现状、不改依赖。
 ;
 ; GWork 定制 NSIS 模板：2026-09-09 从本仓库锁定版本的 @tauri-apps/cli 原生二进制中逐字提取（CRLF 保留）。
+; 2026-09-28 重新同步到官方 2.12.0（CI 浮动 ^2 撞上刚发布的 2.12.0，其 utils.nsh 的
+;   CheckIfAppIsRunning 改用 Windows Restart Manager 宏，旧冻结模板缺 Win\RestartManager.nsh
+;   的 include 导致 makensis 报 "macro named RestartManager_StartSession not found"）。
+;   相对 2.11.4 基线官方共三处差异，均已套用：① include 群补 Win\RestartManager.nsh；
+;   ② 两处 CheckIfAppIsRunning 首参由进程名改为全路径 "$INSTDIR\${MAINBINARYNAME}.exe"
+;     （RM 按文件路径登记锁，传进程名会静默失效）；③ compare_version 的 $(older) 兜底行
+;     （本文件定制点 5 已全链覆盖 $R4，语义不受影响，故不引入该行）。
 ; 相对官方模板的定制点（升级 tauri 时重新提取并逐条重新套用）：
 ;   1) MUI_PAGE_DIRECTORY / MUI_PAGE_FINISH 前各加一行 !define MUI_PAGE_CUSTOMFUNCTION_SHOW GWorkNativePageShow
 ;   2) 文件尾追加 Function GWorkNativePageShow（原生页 show 时同步扫内层控件：雅黑字体 + 按行wrap实测补高度）
@@ -67,6 +75,7 @@ ManifestDPIAwareness PerMonitorV2
 !include "FileAssociation.nsh"
 !include "Win\COM.nsh"
 !include "Win\Propkey.nsh"
+!include "Win\RestartManager.nsh"
 !include "StrFunc.nsh"
 ${StrCase}
 ${StrLoc}
@@ -686,7 +695,9 @@ Section Install
 
   ; Preserve Tauri's interaction contract: prompt first in interactive mode;
   ; CheckIfAppIsRunning automatically stops the main process in silent mode.
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  ; 2.12.0 起首参是【可执行文件全路径】（Restart Manager 按路径登记锁文件）；
+  ; 传旧式进程名不会报错但 RM 登记不到任何锁，运行中检查静默失效。
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
   ; Release path-scoped orphan JVM/file locks only after the check above succeeds.
   !ifmacrodef NSIS_HOOK_PREINSTALL
@@ -826,7 +837,8 @@ Section Uninstall
 
   ; Do not remove CLI launchers or PATH entries until the user has confirmed;
   ; silent uninstall remains automatic through the official macro.
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  ; 首参全路径口径同 Section Install（2.12.0 Restart Manager 语义）。
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
   ; The hook runs after confirmation but before the first application file is deleted.
   !ifmacrodef NSIS_HOOK_PREUNINSTALL
