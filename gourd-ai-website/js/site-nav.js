@@ -6,7 +6,7 @@
 'use strict';
 
 (function () {
-  /* 嵌入模式标记由页面内联脚本前置写入 <html>（被 iframe 嵌套或 ?embed=1）。
+  /* 嵌入模式标记由页面内联脚本前置写入 <html>（地址栏携带 ?embed 参数时）。
      此时导航条已被 CSS 隐藏，滚动高亮与移动端菜单都无需接线。 */
   function isEmbedded() {
     const cls = document.documentElement && document.documentElement.className;

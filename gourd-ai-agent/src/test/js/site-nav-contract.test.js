@@ -5,7 +5,8 @@
  * （点链接 / 点外部 / Esc + aria-label 同步），models.js 只绑了开合，导致模型页点导航项后
  * 菜单残留在展开态。现合并为单份实现，本测试锁住两类事实：
  *   A. 行为：三种关闭路径 + aria 同步 + 滚动接管，全部在真实源码沙箱里执行（不是正则扫描）；
- *   B. 形态：单一实现、两页加载顺序、两页参数差异（尤其 models 的常驻 scrolled 不得被夺走）。
+ *   B. 形态：单一实现、两页加载顺序、两页参数差异（尤其 models 的常驻 scrolled 不得被夺走）；
+ *   C. 嵌入判定：只认地址栏 embed 参数，iframe 嵌套不再自动隐藏导航（默认一律展示）。
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -274,12 +275,97 @@ test('外链导航项永不被页内高亮标记为 active', () => {
   assert.ok(hit.length === 0 || hit.every(h => h.startsWith('#')), `active 只应落在锚点项上，实得 ${JSON.stringify(hit)}`);
 });
 
-test('嵌入模式（iframe / ?embed=1）下完全短路，不注册任何监听', () => {
+test('嵌入模式（<html> 带 is-embedded 标记）下完全短路，不注册任何监听', () => {
   const p = mount({ embedded: true, nav: INDEX_NAV });
   assert.equal(p.winListenerCount, 0, '嵌入模式不应注册 window 监听');
   assert.equal(p.docListenerCount, 0, '嵌入模式不应注册 document 监听');
   p.openMenu();
   assert.equal(p.state().menu, false, '嵌入模式汉堡按钮不应接线生效');
+});
+
+/* ============ C. 内联嵌入判定脚本：只认地址栏参数（iframe 不再参与） ============ */
+
+// 提取页面中第一段无 src 的内联脚本（即嵌入判定脚本）
+function extractInlineEmbedScript(html) {
+  const m = html.match(/<script>([\s\S]*?)<\/script>/);
+  assert.ok(m, '页面应保留无 src 的内联嵌入判定脚本');
+  return m[1];
+}
+
+// 执行真实的内联脚本；nested=true 模拟被 iframe 嵌套（window.self !== window.top），
+// noUSP=true 模拟无 URLSearchParams 的老浏览器（走脚本自带的容错分支）。
+function runEmbedScript(src, opts) {
+  const o = opts || {};
+  const htmlEl = { className: '' };
+  const win = {};
+  win.self = win;
+  win.top = o.nested ? { parent: null } : win;
+  const doc = { documentElement: htmlEl };
+  const loc = { search: o.search === undefined ? '' : o.search };
+  const USP = o.noUSP ? undefined : URLSearchParams;
+  new Function('window', 'document', 'location', 'URLSearchParams', src)(win, doc, loc, USP);
+  return /\bis-embedded\b/.test(' ' + htmlEl.className);
+}
+
+const PAGES = [['index.html', indexHtml], ['models.html', modelsHtml]];
+
+test('内联脚本只认地址栏 embed 参数：无参数默认展示，参数真值隐藏、显式否定保持展示', () => {
+  const cases = [
+    ['', false], ['?other=1', false],
+    ['?embed', true], ['?embed=1', true], ['?embed=true', true], ['?embed=TRUE', true], ['?x=1&embed=1', true],
+    ['?embed=0', false], ['?embed=false', false], ['?embed=FALSE', false],
+  ];
+  for (const [label, html] of PAGES) {
+    const src = extractInlineEmbedScript(html);
+    for (const [search, want] of cases) {
+      const got = runEmbedScript(src, { search });
+      assert.equal(got, want, `${label}${search || '(无参数)'} → 应${want ? '隐藏' : '展示'}导航，实得${got ? '隐藏' : '展示'}`);
+    }
+  }
+});
+
+test('iframe 嵌套不再影响导航展示（本次改造核心）：嵌套+无参数照常展示，嵌套+显式参数仍受控', () => {
+  for (const [label, html] of PAGES) {
+    const src = extractInlineEmbedScript(html);
+    assert.equal(runEmbedScript(src, { nested: true, search: '' }), false,
+      `${label}：被 iframe 嵌套且无参数时，导航必须照常展示（不再自动隐藏）`);
+    assert.equal(runEmbedScript(src, { nested: true, search: '?embed=1' }), true,
+      `${label}：嵌套 + 显式 ?embed=1 时才隐藏`);
+    assert.equal(runEmbedScript(src, { nested: true, search: '?embed=0' }), false,
+      `${label}：嵌套 + 显式 ?embed=0 保持展示`);
+  }
+});
+
+test('两页内联脚本同源一致、前置在 <head> 内，且不含任何 iframe 判定残留', () => {
+  const srcs = PAGES.map(([label, html]) => [label, extractInlineEmbedScript(html)]);
+  const normalize = s => s.replace(/\r\n/g, '\n');
+  assert.equal(normalize(srcs[0][1]), normalize(srcs[1][1]), '两页嵌入判定脚本必须逐字一致（防漂移）');
+
+  for (const [label, html] of PAGES) {
+    const at = html.indexOf('<script>');
+    const headEnd = html.indexOf('</head>');
+    assert.ok(at >= 0 && at < headEnd, `${label} 内联脚本必须前置在 <head> 内（否则导航条会先渲染再消失）`);
+  }
+  for (const [label, src] of srcs) {
+    assert.doesNotMatch(src, /window\.self|window\.top|frameElement/, `${label}：不得残留任何 iframe 自动判定`);
+  }
+});
+
+test('标记类名跨处一致：内联脚本写入 is-embedded，site-nav.js 与 CSS 同步消费', () => {
+  for (const [label, html] of PAGES) {
+    assert.match(extractInlineEmbedScript(html), /className \+= ' is-embedded'/, `${label} 应写 is-embedded 标记`);
+  }
+  assert.match(siteNavSrc, /is-embedded/, 'site-nav.js 应短路消费该标记');
+  assert.match(readSite('css', 'styles.css'), /\.is-embedded \.site-header/, 'styles.css 应消费该标记隐藏导航');
+  assert.match(readSite('css', 'models.css'), /\.is-embedded \.models-page/, 'models.css 应消费该标记收敛留白');
+});
+
+test('老浏览器兜底：无 URLSearchParams 时保持默认展示，脚本不得整体抛错', () => {
+  for (const [label, html] of PAGES) {
+    const src = extractInlineEmbedScript(html);
+    assert.equal(runEmbedScript(src, { search: '?embed=1', noUSP: true }), false,
+      `${label}：无 URLSearchParams 时应保持默认展示（容错分支）`);
+  }
 });
 
 /* ============ 卫生 ============ */
