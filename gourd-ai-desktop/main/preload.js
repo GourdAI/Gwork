@@ -32,6 +32,11 @@ contextBridge.exposeInMainWorld('__GOURD_IPC__', {
   },
   // 定制窗口标题（如 Code 模式显示当前项目名）。
   setWindowTitle: (title) => ipcRenderer.send('window-title-update', String(title || '')),
+  // 系统原生文件夹选择对话框（工作区「打开文件夹」）：返回所选目录绝对路径，
+  // 用户取消返回 null（前端静默忽略）。桌面端必须走这里——网页侧 webkitdirectory
+  // 兜底会在桌面弹出「将 N 个文件上传到此网站？」确认条与「选择要上传的文件夹」
+  // 文案，均不可接受（用户实测）。
+  pickDirectory: () => ipcRenderer.invoke('pick-directory'),
 
   // ─── 自动更新（main/updater.js；仅打包态有效，开发/浏览器环境无事件）──────
   // 桌面端版本号（package.json version，区别于 jar 后端版本）

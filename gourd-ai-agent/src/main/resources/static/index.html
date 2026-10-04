@@ -134,7 +134,7 @@
     <div class="sidebar-search-bar" id="sidebarSearchBar" style="display:none;">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input type="text" id="sidebarSearchInput" data-i18n-placeholder="app.search_history" autocomplete="off"/>
-        <button class="sidebar-search-clear" id="sidebarSearchClear" style="display:none;" title="清除" data-i18n-title="common.clear">
+        <button class="sidebar-search-clear" id="sidebarSearchClear" style="display:none;">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
     </div>
@@ -171,6 +171,15 @@
 <!-- Main（chat.html 的欢迎/对话视图与 code.html 的编辑器/差异视图注入此容器）-->
 <div class="main-area">
     <div class="titlebar-drag-region"></div>
+    <!-- 主内容区拖放遮罩：覆盖整个 .main-area（原落区只有输入框，占视口 8%）。
+         文件树面板与设置浮层是 body 级（在本容器之外），天然不受影响；
+         Monaco 编辑器区在 app-ui.js 里按选择器排除，保留「拖文件到编辑器=打开文件」语义。 -->
+    <div class="drop-overlay" id="mainDropOverlay">
+        <div class="drop-overlay-content">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <span data-i18n="app.drop_attach">松开以添加附件</span>
+        </div>
+    </div>
 </div>
 
 <!-- code.html 的文件树面板、settings.html 的设置浮层注入到 body 级（此处之后） -->

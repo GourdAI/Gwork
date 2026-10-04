@@ -230,7 +230,11 @@
                 "memory_view":  "Trí nhớ",
                 "chat_workspace":  {
                                        "switch":  "Chuyển không gian làm việc",
-                                       "clear":  "Xóa lựa chọn"
+                                       "clear":  "Xóa lựa chọn",
+                                       "search_placeholder":  "Tìm kiếm dự án…",
+                                       "search_no_results":  "Không có dự án phù hợp",
+                                       "remote_connect":  "Kết nối từ xa",
+                                       "locate_multiple":  "Tìm thấy nhiều thư mục trùng tên, hãy chọn một:"
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "Tải thất bại, nhấp để thử lại",
@@ -842,6 +846,8 @@
                  "question_recommended":  "Khuyến nghị",
                  "question_detail_expand":  "Mở rộng",
                  "question_detail_collapse":  "Thu gọn",
+                  "question_collapse":  "Thu gọn",
+                  "question_expand":  "Mở rộng",
                  "question_record_title":  "Câu trả lời của tôi",
                  "question_answered":  "Đã gửi",
                  "question_skipped":  "Đã bỏ qua",
@@ -876,6 +882,13 @@
                  "tool_openapi":  "Gọi API",
                  "tool_lsp":  "Phân tích mã",
                  "tool_memory":  "Bộ nhớ",
+                 "tool_recall":  "Truy hồi lịch sử",
+                 "tool_ask_user":  "Hỏi người dùng",
+                 "tool_config":  "Cấu hình mở rộng",
+                 "tool_clock":  "Thời gian hiện tại",
+                 "tool_plan":  "Kế hoạch",
+                 "tool_plan_progress":  "Triển khai kế hoạch",
+                 "tool_plan_revise":  "Sửa đổi kế hoạch",
                  "expand_full":  "Mở rộng đầy đủ",
                  "expand_full_size":  "Mở rộng đầy đủ (tổng {0}KB)",
                  "loading_dots":  "Đang tải…",

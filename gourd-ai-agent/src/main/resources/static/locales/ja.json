@@ -230,7 +230,11 @@
                 "memory_view":  "メンタルメモリ",
                 "chat_workspace":  {
                                        "switch":  "ワークスペースを切り替え",
-                                       "clear":  "選択を解除"
+                                       "clear":  "選択を解除",
+                                       "search_placeholder":  "プロジェクトを検索…",
+                                       "search_no_results":  "一致するプロジェクトがありません",
+                                       "remote_connect":  "リモート接続",
+                                       "locate_multiple":  "同名のディレクトリが複数見つかりました。選択してください："
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "読み込みに失敗しました。クリックして再試行",
@@ -842,6 +846,8 @@
                  "question_recommended":  "おすすめ",
                  "question_detail_expand":  "展開",
                  "question_detail_collapse":  "折りたたむ",
+                  "question_collapse":  "折りたたむ",
+                  "question_expand":  "展開",
                  "question_record_title":  "私の回答",
                  "question_answered":  "送信済み",
                  "question_skipped":  "スキップ済み",
@@ -876,6 +882,13 @@
                  "tool_openapi":  "API呼び出し",
                  "tool_lsp":  "コード解析",
                  "tool_memory":  "メモリ",
+                 "tool_recall":  "履歴想起",
+                 "tool_ask_user":  "ユーザーに質問",
+                 "tool_config":  "拡張設定",
+                 "tool_clock":  "現在時刻",
+                 "tool_plan":  "計画",
+                 "tool_plan_progress":  "計画の進捗",
+                 "tool_plan_revise":  "計画の修正",
                  "expand_full":  "全文展開",
                  "expand_full_size":  "全文展開（{0}KB 計）",
                  "loading_dots":  "読み込み中…",

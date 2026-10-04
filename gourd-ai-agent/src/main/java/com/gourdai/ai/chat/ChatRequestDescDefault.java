@@ -70,8 +70,20 @@ import java.util.function.Consumer;
 public class ChatRequestDescDefault implements ChatRequestDesc {
     private static final Logger log = LoggerFactory.getLogger(ChatRequestDescDefault.class);
 
-    /** 流式帧间空闲上限：断流发现速度的直接决定者（弱网优化，2026-09-18） */
-    private static final Duration STREAM_IDLE_CAP = Duration.ofSeconds(60);
+    /**
+     * 流式帧间空闲的绝对上限：配置值再大，断流发现窗口也不得失去兜底意义。
+     *
+     * <p>帧间空闲预算 = clamp(configured, [{@link #STREAM_IDLE_FLOOR}, 本上限])：config.timeout 的
+     * 既有语义就是「单段 socket 沉默」的预算，帧间隔正是这样一段沉默，故预算与配置值等宽；
+     * 本上限只防荒谬大配置让断流发现窗口失去意义。</p>
+     *
+     * <p>取 10 分钟：推理型模型的单段沉默（深度思考、工具链等待）以分钟计，10 分钟窗口远宽于任何
+     * 合法帧间隔；同时它远小于单次调用总封顶 {@link #STREAM_TOTAL_CAP}（下限 10 分钟 / 上限 25 分钟），
+     * 真正断流的流仍会先被本层拦截。历史上此处是固定 60s 上限（弱网优化 2026-09-18），它把帧间隔
+     * 合法超过 60s 的推理型模型慢流误杀：后台请求实际成功完成并计费，前端却判为断流报超时重试，
+     * 形成「白扣费 + 任务失败」，故改为按配置值推导。</p>
+     */
+    private static final Duration STREAM_IDLE_CAP_ABSOLUTE = Duration.ofMinutes(10);
 
     /** 流式帧间空闲下限：防极端短配置误杀合法慢流 */
     private static final Duration STREAM_IDLE_FLOOR = Duration.ofSeconds(15);
@@ -692,8 +704,10 @@ public class ChatRequestDescDefault implements ChatRequestDesc {
         // 弱网优化（2026-09-18）：首帧与帧间空闲拆分为两个独立预算。
         // 旧行为：两段共用 config.timeout（默认 120s）——供应商断流后前端要干等 2 分钟才有反应。
         // 拆分后：TTFT 以配置值为基准并按上行上下文规模放宽（见 resolveTtftTimeout）；
-        // 帧间空闲收紧到 [15s, 60s]（活跃流 chunk 间隔通常 <1s，超窗口无帧即判定断流），
-        // 断流发现时间从 120s 压到 1 分钟内，交由上层 RetryTask 按原逻辑重试自愈。
+        // 帧间空闲按配置值推导断流发现窗口（见 resolveStreamIdleTimeout：原为固定 [15s, 60s]，
+        // 2026-09-30 改为 clamp(configured, [15s, 10min])——固定 60s 上限会误杀
+        // 帧间隔合法 >60s 的推理型模型慢流，造成「后台成功、前端报超时重试」的白扣费），
+        // 超窗口无帧即判定断流，交由上层 RetryTask 按原逻辑重试自愈。
         Duration ttftTimeout = resolveTtftTimeout(config.getTimeout(), req);
         Duration idleTimeout = resolveStreamIdleTimeout(config.getTimeout());
 
@@ -783,7 +797,7 @@ public class ChatRequestDescDefault implements ChatRequestDesc {
      *     保证由流层先判定，见 {@link #STREAM_TOTAL_CAP}。</li>
      * </ul>
      * 只在「持续有帧却永不收口」这一种形态下才会触发——正常流早已由 RESPONSE_END 结束，
-     * 断流形态则由帧间预算（≤60s）先行拦截。
+     * 断流形态则由帧间预算先行拦截（上限见 {@link #resolveStreamIdleTimeout(Duration)}，≤10min）。
      */
     static Duration resolveStreamTotalTimeout(Duration configured) {
         Duration base = (configured == null || configured.isZero() || configured.isNegative())
@@ -807,18 +821,26 @@ public class ChatRequestDescDefault implements ChatRequestDesc {
     /**
      * 解析流式帧间空闲超时（首帧之外，相邻两帧之间的无活动上限）。
      *
-     * <p>取「用户配置超时」与 60s 上限中的较小值，并设 15s 下限保护：
+     * <p>误杀修复（2026-09-30）：旧策略夹取到固定 [15s, 60s]，60s 上限与模型配置超时无关——
+     * 推理型模型在长思考静默 / 大上下文缓存命中 prefill 期间的帧间隔可合法超过 60s，后台请求
+     * 实际成功完成（并已计费），前端却判为断流、报超时并重试，形成「白扣费 + 任务失败」。
+     * 现改为与配置值等宽（config.timeout 的语义本就是单段 socket 沉默的预算），仅两侧夹取：
      * <ul>
-     *     <li>默认 120s 配置 → 收紧到 60s（断流快速发现，弱网体验主要收益项）；</li>
-     *     <li>用户显式配置了更短超时（如 30s）→ 尊重用户，不做放松；</li>
-     *     <li>极端短配置（如 5s）→ 抬到 15s 下限，避免对合法慢流误杀。</li>
+     *     <li>上限 {@link #STREAM_IDLE_CAP_ABSOLUTE}（10min）：防荒谬大配置让断流发现失去意义；</li>
+     *     <li>下限 {@link #STREAM_IDLE_FLOOR}（15s）：极端短配置（如 5s）不误杀合法慢流；</li>
+     *     <li>区间内配置原值直通：更短者被尊重（不放松），更长者获得与之相称的窗口；</li>
+     *     <li>null / 零 / 负 → 按基准 {@link #CALL_TIMEOUT_DEFAULT}（120s）推导。</li>
      * </ul>
-     * 合法模型流极少出现 60s 无帧（SSE 心跳 / 思考增量帧会持续到达）；
-     * 超过该窗口仍无帧，按断流处理并抛 {@link TimeoutException} 交由上层重试。
+     * 典型取值：配置 120s → 120s（旧策略为 60s）；配置 300s → 300s；配置 500s → 500s；
+     * 配置 ≥10min → 封顶 10min。真正断流（完全无帧）的流仍会在该窗口内被拦截，
+     * 抛 {@link TimeoutException} 交由上层重试。</p>
      */
     static Duration resolveStreamIdleTimeout(Duration configured) {
-        Duration capped = STREAM_IDLE_CAP.compareTo(configured) < 0 ? STREAM_IDLE_CAP : configured;
-        return STREAM_IDLE_FLOOR.compareTo(capped) > 0 ? STREAM_IDLE_FLOOR : capped;
+        Duration base = (configured == null || configured.isZero() || configured.isNegative())
+                ? CALL_TIMEOUT_DEFAULT : configured;
+
+        Duration result = STREAM_IDLE_CAP_ABSOLUTE.compareTo(base) < 0 ? STREAM_IDLE_CAP_ABSOLUTE : base;
+        return STREAM_IDLE_FLOOR.compareTo(result) > 0 ? STREAM_IDLE_FLOOR : result;
     }
 
     /**

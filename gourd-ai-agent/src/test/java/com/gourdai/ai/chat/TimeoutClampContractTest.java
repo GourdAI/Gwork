@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *     <li>{@link ChatRequestDescDefault#resolveCallTotalTimeout(Duration)}：非流式总时长
  *     {@code min(max(configured × 3, 60s), 10min)}；</li>
  *     <li>{@link ChatRequestDescDefault#resolveStreamIdleTimeout(Duration)}：流式帧间空闲
- *     夹取到 [15s, 60s]；</li>
+ *     与配置值等宽，夹取到 [15s, 10min]（2026-09-30 前为固定 [15s, 60s]）；</li>
  *     <li>{@code AiConfig#resolveIoTimeout()}：HTTP 读写段 15s 下限（超时判定权归流层）。</li>
  * </ul>
  *
@@ -93,36 +93,45 @@ class TimeoutClampContractTest {
     }
 
     @Test
-    @DisplayName("流式帧间空闲：15s 下限 / 原值直通 / 60s 封顶")
-    void streamIdleTimeout_isClampedToFifteenToSixtySeconds() {
+    @DisplayName("流式帧间空闲：15s 下限 / 配置原值直通 / 10min 封顶")
+    void streamIdleTimeout_isClampedToFifteenSecondsToTenMinutes() {
         assertEquals(Duration.ofSeconds(15),
                 ChatRequestDescDefault.resolveStreamIdleTimeout(Duration.ofMillis(500)), "极端短配置抬到 15s 下限");
         assertEquals(Duration.ofSeconds(30),
                 ChatRequestDescDefault.resolveStreamIdleTimeout(Duration.ofSeconds(30)), "更严的用户配置不被放松");
-        assertEquals(Duration.ofSeconds(60),
-                ChatRequestDescDefault.resolveStreamIdleTimeout(Duration.ofSeconds(120)), "宽松配置收紧到 60s 上限");
+        assertEquals(Duration.ofSeconds(120),
+                ChatRequestDescDefault.resolveStreamIdleTimeout(Duration.ofSeconds(120)), "配置原值直通（旧策略误收紧到 60s）");
+        assertEquals(Duration.ofSeconds(500),
+                ChatRequestDescDefault.resolveStreamIdleTimeout(Duration.ofSeconds(500)), "长超时路由必须获得等宽窗口");
+        assertEquals(Duration.ofMinutes(10),
+                ChatRequestDescDefault.resolveStreamIdleTimeout(Duration.ofHours(1)), "荒谬大配置封顶 10min");
     }
 
     @Test
-    @DisplayName("流式帧间空闲：任意输入结果恒落在 [15s, 60s] 内，且 floor ≤ cap 无反转")
+    @DisplayName("流式帧间空闲：任意输入结果恒落在 [15s, 10min] 内，且等于 clamp(配置, 下限, 上限)")
     void streamIdleTimeout_hasNoBoundaryInversion() throws Exception {
         Duration floor = readStaticDuration("com.gourdai.ai.chat.ChatRequestDescDefault", "STREAM_IDLE_FLOOR");
-        Duration cap = readStaticDuration("com.gourdai.ai.chat.ChatRequestDescDefault", "STREAM_IDLE_CAP");
+        Duration cap = readStaticDuration("com.gourdai.ai.chat.ChatRequestDescDefault", "STREAM_IDLE_CAP_ABSOLUTE");
 
         assertEquals(Duration.ofSeconds(15), floor);
-        assertEquals(Duration.ofSeconds(60), cap);
+        assertEquals(Duration.ofMinutes(10), cap);
         assertTrue(floor.compareTo(cap) <= 0, "边界反转：floor(" + floor + ") > cap(" + cap + ")");
 
         Duration[] inputs = {
                 Duration.ofMillis(1), Duration.ofMillis(500), Duration.ofSeconds(5),
                 Duration.ofSeconds(15), Duration.ofSeconds(30), Duration.ofSeconds(60),
-                Duration.ofSeconds(90), Duration.ofSeconds(120), Duration.ofHours(1)
+                Duration.ofSeconds(90), Duration.ofSeconds(120), Duration.ofSeconds(300),
+                Duration.ofSeconds(500), Duration.ofMinutes(10), Duration.ofHours(1)
         };
 
         for (Duration in : inputs) {
             Duration out = ChatRequestDescDefault.resolveStreamIdleTimeout(in);
             assertTrue(out.compareTo(floor) >= 0, "低于下限: in=" + in + " out=" + out);
             assertTrue(out.compareTo(cap) <= 0, "高于上限: in=" + in + " out=" + out);
+
+            Duration expected = cap.compareTo(in) < 0 ? cap : in;
+            expected = floor.compareTo(expected) > 0 ? floor : expected;
+            assertEquals(expected, out, "必须等于 clamp(配置, 下限, 上限): in=" + in);
         }
     }
 

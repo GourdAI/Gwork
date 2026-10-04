@@ -87,6 +87,44 @@
 .workspace-selector.ws-has-selection .workspace-selector-current:hover .workspace-folder-icon { display: none; }
 /* 托盘条仅存在于欢迎页（code 模式隐藏整个 .welcome-view），无需单独隐藏规则 */
 
+/* ---- 工作区下拉新布局：搜索框（固定）+ 列表（滚动）+ 操作按钮（固定）----
+   显示开关必须由 .open 控制：本元素同时带 .project-dropdown（display:none）与本类，
+   若在此无条件写 display:flex 会凭「同特异性·源序在后」覆盖隐藏规则 → 下拉常显、
+   点了外部/再点按钮都关不掉（用户实测严重缺陷）。故基础规则只写布局属性，
+   display:flex 仅挂在 .project-selector.open 下（与 .open .project-dropdown 同特异性且源序在后）。 */
+.workspace-dropdown { flex-direction: column; padding: 0; overflow: hidden; }
+.project-selector.open .workspace-dropdown { display: flex; }
+.workspace-search-box {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-bottom: 1px solid var(--border-color); flex-shrink: 0;
+}
+.workspace-search-icon { color: var(--text-tertiary); flex-shrink: 0; }
+.workspace-search-input {
+    flex: 1; border: none; background: none; outline: none;
+    font-size: 12.5px; color: var(--text-primary); font-family: inherit;
+}
+.workspace-search-input::placeholder { color: var(--text-tertiary); }
+.workspace-list-scroll { overflow-y: auto; max-height: 210px; padding: 4px 6px; }
+/* 列表项与搜索框视觉同档：单行（图标+名称）、同字号同内边距量级，
+   避免「搜索框小而选项块大」的比例失调（参照稿即单行条目）。
+   完整路径改挂 title 悬停查看，不再占第二行。 */
+.workspace-dropdown .project-dropdown-item { padding: 6px 8px; gap: 8px; }
+.workspace-item-icon { color: var(--text-secondary); flex-shrink: 0; }
+.workspace-actions {
+    border-top: 1px solid var(--border-color);
+    padding: 4px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px;
+}
+.workspace-action-btn {
+    display: flex; align-items: center; gap: 6px; padding: 7px 8px; border-radius: 6px;
+    background: none; border: none; cursor: pointer;
+    font-size: 12.5px; width: 100%; text-align: left; font-family: inherit;
+}
+.workspace-add-btn { color: var(--accent); }
+.workspace-add-btn:hover { background: var(--bg-hover); }
+.workspace-remote-btn { color: var(--text-secondary); }
+.workspace-remote-btn:disabled { cursor: not-allowed; opacity: 0.45; }
+.workspace-remote-btn:disabled:hover { background: none; }
+
 /* Chat 模式：文件树是 Code 模式专属，chat 模式完全隐藏面板、悬浮展开按钮与拖拽手柄，
    保持与原纯对话界面一致，不引入新的入口 */
 body:not(.code-mode) .filer-panel,
@@ -411,6 +449,10 @@ body.viewer-open:not(.code-mode).chat-review-narrow .git-diff-viewer,
 body.viewer-open:not(.code-mode).chat-review-narrow .chat-view:not(.active) ~ .code-editor-col .git-diff-viewer {
     grid-area: 2 / 1 / 3 / 2;
 }
+/* 聊天列被压缩后 input-box 的 max-width:820px 会超出列宽，send-btn(flex-shrink:0) 因此溢出容器
+   漂到输入框右下角外部；同 code-mode 的修法：限宽 100% + 收紧横向 padding。 */
+body.viewer-open:not(.code-mode) #chatView .input-wrap { padding: 6px 10px 12px; }
+body.viewer-open:not(.code-mode) #chatView .input-box  { max-width: 100%; }
 
 /* ---- 中间编辑器列：编辑器面板 + diff/文件浮层 + 底部终端共享一列 ----
    chat 模式：容器 display:contents（透明），diff/文件浮层仍直接铺满 main-area，与改造前一致；

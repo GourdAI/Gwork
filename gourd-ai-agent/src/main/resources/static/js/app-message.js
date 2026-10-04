@@ -22,12 +22,13 @@ var THINKING_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stro
 var AGENT_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 4.2V2.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="1.9" r=".8" fill="currentColor" stroke="none"/><rect x="2.6" y="4.2" width="10.8" height="8.2" rx="2.4" stroke="currentColor" stroke-width="1.2"/><circle cx="5.9" cy="8.3" r=".9" fill="currentColor" stroke="none"/><circle cx="10.1" cy="8.3" r=".9" fill="currentColor" stroke="none"/><path d="M6.5 10.6h3" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>';
 
 /* ===== Message Rendering (Session-Aware) ===== */
-/* attachCounts：{images, files} 数量徽标。队列出队与插话降级重发手里只有会话内相对路径，
-   本地没有 File/dataUrl，渲染不出缩略图；显示数量即可让用户确认附件确实带上了。 */
-function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt, attachCounts) {
+/* attachPaths：{imagePaths, filePaths} 会话内相对路径。它会异步经
+   /web/chat/attachment/meta 换取 dataUrl 升级为真实缩略图；拉取失败/文件缺失时
+   降级回数量徽标（renderUserAttachmentMeta 内实现），绝不留下破图标。 */
+function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt, attachPaths) {
     var row = $('<div>').addClass('msg-row user')[0];
     row.setAttribute('data-user-msg-idx', sess.userMsgCounter++);
-    row.innerHTML = '<div class="user-msg-col"><div class="msg-bubble"></div><div class="user-msg-footer"><span class="msg-time user-msg-time"></span><button class="user-copy-btn" title="' + GourdI18n.t('chat.copy') + '">' + COPY_SVG + '</button></div></div>';
+    row.innerHTML = '<div class="user-msg-col"><div class="msg-bubble"></div><div class="user-msg-footer"><span class="msg-time user-msg-time"></span><button class="user-copy-btn">' + COPY_SVG + '</button></div></div>';
     var bubble = $(row).find('.msg-bubble')[0];
 
     // Multiple images
@@ -52,18 +53,10 @@ function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt
         }
     }
 
-    // 已落盘附件的数量徽标（队列出队等只有相对路径的场景）
-    if (attachCounts && (attachCounts.images || attachCounts.files)) {
-        var countsWrap = $('<div>').addClass('user-attach-counts')[0];
-        if (attachCounts.images) {
-            countsWrap.appendChild($('<span>').addClass('user-attach-badge')
-                .text(GourdI18n.t('queue.images', { n: attachCounts.images }))[0]);
-        }
-        if (attachCounts.files) {
-            countsWrap.appendChild($('<span>').addClass('user-attach-badge')
-                .text(GourdI18n.t('queue.files', { n: attachCounts.files }))[0]);
-        }
-        $(bubble).append(countsWrap);
+    // 已落盘附件的缩略图升级：先占位（文件瓦片/加载位），meta 回来后替换为真实图片；
+    // 失败则把占位降级为与上方同口径的数量徽标。
+    if (attachPaths && ((attachPaths.imagePaths || []).length || (attachPaths.filePaths || []).length)) {
+        renderUserAttachmentPaths(sess, bubble, attachPaths.imagePaths || [], attachPaths.filePaths || []);
     }
 
     var span = $('<span>').addClass('user-msg-text md-content')[0];
@@ -79,21 +72,7 @@ function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt
     var isLongUserText = text && text.length > 100;
     if (hasCodeBlock || isLongUserText) $(row).addClass('wide-user');
 
-    var copyBtn = $(row).find('.user-copy-btn')[0];
-    $(copyBtn).on('click', function() {
-        var txtEl = $(bubble).find('.user-msg-text')[0];
-        var md = txtEl ? (txtEl.getAttribute('data-md-raw') || txtEl.innerText) : '';
-        if (navigator.clipboard) {
-            navigator.clipboard.writeText(md).then(function() {
-                $(copyBtn).addClass('copied');
-                copyBtn.innerHTML = OK_SVG;
-                setTimeout(function() {
-                    $(copyBtn).removeClass('copied');
-                    copyBtn.innerHTML = COPY_SVG;
-                }, 1500);
-            });
-        }
-    });
+    bindUserMsgCopyBtn($(row).find('.user-copy-btn')[0], bubble);
 
     // 时间戳（实时发送不传 createdAt 时兜底为当前时间，与历史加载行为一致）
     var msgTime = createdAt || Date.now();
@@ -110,6 +89,231 @@ function appendUserMessage(sess, text, imageDataUrls, fileAttachments, createdAt
             && document.contains(sess.container)) scrollToBottom(true);
 }
 
+/* 用户消息气泡的复制按钮绑定：正文来源统一为 .user-msg-text 的 data-md-raw（原始 Markdown），
+   无该属性时（旧数据/异常）回退到渲染后的 innerText。appendUserMessage 与 appendSteerNote 共用。 */
+function bindUserMsgCopyBtn(btn, bubble) {
+    if (!btn || !bubble) return;
+    $(btn).on('click', function() {
+        var txtEl = $(bubble).find('.user-msg-text')[0];
+        var md = txtEl ? (txtEl.getAttribute('data-md-raw') || txtEl.innerText) : '';
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(md).then(function() {
+                $(btn).addClass('copied');
+                btn.innerHTML = OK_SVG;
+                setTimeout(function() {
+                    $(btn).removeClass('copied');
+                    btn.innerHTML = COPY_SVG;
+                }, 1500);
+            }).catch(function() {});
+        }
+    });
+}
+window.bindUserMsgCopyBtn = bindUserMsgCopyBtn;
+
+/* 从会话内相对路径（uploads/xxx）取展示名：去掉目录前缀，非法形态原样返回。
+   反斜杠兜底：路径可能来自 Windows 端上报或后端拼接，只按 '/' 切会带出整段目录。 */
+function userAttachNameFromPath(path) {
+    var p = String(path || '');
+    var i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+    return i >= 0 ? p.slice(i + 1) : p;
+}
+
+/* 已落盘附件占位渲染：文件直接出瓦片（名称即可读），图片先出加载位，
+   等 /web/chat/attachment/meta 的 dataUrl 回来再替换。每个占位带 data-attach-path，
+   供 meta 回调精确定位替换/降级。 */
+function renderUserAttachmentPaths(sess, bubble, imagePaths, filePaths) {
+    var i;
+    if (filePaths.length) {
+        var fileWrap = $('<div>').addClass('user-attach-files')[0];
+        for (i = 0; i < filePaths.length; i++) {
+            var tag = $('<div>').addClass('user-attach-file')[0];
+            tag.setAttribute('data-attach-path', filePaths[i]);
+            tag.innerHTML = '<span class="user-attach-file-icon">' + fileIconSvg(14) + '</span>'
+                + '<span class="user-attach-file-name">' + escapeHtml(userAttachNameFromPath(filePaths[i])) + '</span>';
+            fileWrap.appendChild(tag);
+        }
+        $(bubble).append(fileWrap);
+    }
+    if (imagePaths.length) {
+        var imgWrap = $('<div>').addClass('user-attach-imgs')[0];
+        for (i = 0; i < imagePaths.length; i++) {
+            var ph = $('<div>').addClass('user-attach-thumb loading')[0];
+            ph.setAttribute('data-attach-path', imagePaths[i]);
+            imgWrap.appendChild(ph);
+        }
+        $(bubble).append(imgWrap);
+        fetchAttachmentMeta(sess, imagePaths).then(function(items) {
+            renderUserAttachmentMeta(bubble, items);
+        });
+    }
+}
+
+/* meta 回调：有 dataUrl 的替换为 <img>（复用 .user-attach-imgs 的 lightbox 绑定）；
+   缺失/超大/读盘失败的全部占位合并为一个「图 N」数量徽标，与旧版观感一致，
+   不留下永远转圈的加载位，也不给每张失败图各发一个「图 1」。 */
+function renderUserAttachmentMeta(bubble, items) {
+    var byPath = {};
+    var okImages = [];
+    for (var i = 0; i < (items || []).length; i++) {
+        var it = items[i];
+        if (!it || !it.path) continue;
+        byPath[it.path] = it;
+        if (it.dataUrl) okImages.push(it);
+    }
+    var failed = [];
+    $(bubble).find('.user-attach-thumb[data-attach-path]').each(function() {
+        var path = this.getAttribute('data-attach-path');
+        var meta = byPath[path];
+        if (meta && meta.dataUrl) {
+            var img = $('<img>').attr('src', meta.dataUrl)
+                .attr('alt', meta.name || userAttachNameFromPath(path))[0];
+            this.parentNode.replaceChild(img, this);
+        } else {
+            failed.push(this);
+        }
+    });
+    if (failed.length) {
+        var badge = $('<span>').addClass('user-attach-badge')
+            .text(GourdI18n.t('queue.images', { n: failed.length }))[0];
+        if (failed[0].parentNode) {
+            failed[0].parentNode.replaceChild(badge, failed[0]);
+        }
+        for (var f = 1; f < failed.length; f++) {
+            if (failed[f].parentNode) failed[f].parentNode.removeChild(failed[f]);
+        }
+    }
+    // 新插入的 <img> 补绑 lightbox（addImageLightbox 自带幂等守卫，重复调用安全）
+    if (okImages.length && typeof addImageLightbox === 'function') addImageLightbox(bubble);
+}
+
+/* ===== 会话附件元信息拉取（缓存 + in-flight 合并 + 分批） =====
+   同一组路径会被多处并发请求：队列面板在 chat / welcome 两个容器各调一次
+   upgradeQueueThumbs，回放与实时渲染也可能重取同一附件。旧实现每次都发一个全量
+   请求，且把所有路径逗号拼进 URL（多图时极易撞 URL 长度上限）。现在：
+   - attachMetaCache：成功结果按 sessionId+path 常驻，重复渲染零请求；
+   - attachMetaInflight：同 key 的在途请求合并，后到者直接复用同一个 Promise；
+   - 每批 ≤ ATTACH_META_BATCH_SIZE 个路径，paths 按重复键传参（traditional）；
+   - 失败/缺失的路径不写缓存，下次渲染可重试；in-flight 在 settle 时删除；
+   - 返回值恒为与入参同序、同长的数组，缺失项为 null，调用方按 null 走降级链路。
+
+   首个参数可传会话对象（root 取会话所属工作空间根，与回放/删除同口径）
+   或直接传 sessionId 字符串（队列面板等只有 id 的场景，root 取当前工作目录）；
+   请求失败时 resolve 全 null 数组，由调用方统一降级，绝不抛异常打断渲染。 */
+var ATTACH_META_BATCH_SIZE = 12;
+var attachMetaCache = {};
+var attachMetaInflight = {};
+
+function attachMetaKey(sid, path) {
+    return sid + '\u0001' + path;
+}
+
+function fetchAttachmentMeta(sessOrId, paths) {
+    var isSess = !!(sessOrId && typeof sessOrId === 'object');
+    var sid = isSess ? (sessOrId.sessionId || activeSessionId || SESSION_ID) : (sessOrId || activeSessionId || SESSION_ID);
+    var root = isSess
+        ? ((typeof rootFor === 'function') ? rootFor(sessOrId) : (sessOrId.projectRoot || ''))
+        : ((typeof getSessionCwd === 'function') ? (getSessionCwd() || '') : '');
+
+    var list = paths || [];
+    var total = list.length;
+    var results = new Array(total);
+    if (!total) return Promise.resolve(results);
+
+    function fill(slot, item) {
+        for (var n = 0; n < slot.idxs.length; n++) results[slot.idxs[n]] = item || null;
+    }
+
+    var jobs = [];
+    var slots = [];           // 待处理路径（已去重）
+    var slotByPath = {};
+    for (var k = 0; k < total; k++) {
+        var path = (list[k] == null) ? '' : String(list[k]);
+        if (!path) { results[k] = null; continue; }
+        var key = attachMetaKey(sid, path);
+        if (Object.prototype.hasOwnProperty.call(attachMetaCache, key)) {
+            results[k] = attachMetaCache[key];
+            continue;
+        }
+        var slot = slotByPath[path];
+        if (!slot) {
+            slot = { path: path, key: key, idxs: [], inflight: attachMetaInflight[key] || null };
+            slotByPath[path] = slot;
+            slots.push(slot);
+        }
+        slot.idxs.push(k);
+    }
+
+    var needRequest = [];
+    for (var s = 0; s < slots.length; s++) {
+        var cur = slots[s];
+        if (cur.inflight) {
+            // 同路径已有在途请求（另一面板/另一条消息刚发起）：直接挂到它的结果上
+            (function(s2) {
+                jobs.push(s2.inflight.then(function(item) { fill(s2, item); }));
+            })(cur);
+        } else {
+            needRequest.push(cur);
+        }
+    }
+
+    for (var b = 0; b < needRequest.length; b += ATTACH_META_BATCH_SIZE) {
+        (function(group) {
+            var batchPaths = [];
+            for (var gi = 0; gi < group.length; gi++) batchPaths.push(group[gi].path);
+            // 后端按重复键（paramValues）读 paths，不再手工逗号拼接
+            var settled = $.ajax({
+                url: '/web/chat/attachment/meta',
+                data: { sessionId: sid, root: root || '', paths: batchPaths },
+                traditional: true,
+                dataType: 'json'
+            }).then(function(resp) {
+                var items = (resp && resp.data && resp.data.items) || [];
+                var byKey = {};
+                for (var m = 0; m < items.length; m++) {
+                    var it = items[m];
+                    if (!it || !it.path) continue;
+                    byKey[attachMetaKey(sid, it.path)] = it;
+                }
+                var out = [];
+                for (var n = 0; n < group.length; n++) {
+                    var got = byKey[group[n].key] || null;
+                    // 带 error 的（invalid/missing/read）不写缓存，下次渲染可重试
+                    if (got && !got.error) attachMetaCache[group[n].key] = got;
+                    out.push(got);
+                }
+                return out;
+            }, function() {
+                // 整批失败：全部记为 null（不缓存），由调用方降级为数量徽标
+                var out = [];
+                for (var n = 0; n < group.length; n++) out.push(null);
+                return out;
+            });
+            // 每个路径登记独立的 in-flight Promise，后到者复用同一个，settle 时释放
+            for (var gj = 0; gj < group.length; gj++) {
+                (function(slot, pos) {
+                    var p = settled.then(function(o) { return o[pos] || null; });
+                    attachMetaInflight[slot.key] = p;
+                    slot.inflight = p;
+                    function release() {
+                        if (attachMetaInflight[slot.key] === p) delete attachMetaInflight[slot.key];
+                    }
+                    p.then(release, release);
+                })(group[gj], gj);
+            }
+            jobs.push(settled.then(function(o) {
+                for (var n = 0; n < group.length; n++) fill(group[n], o[n]);
+            }));
+        })(needRequest.slice(b, b + ATTACH_META_BATCH_SIZE));
+    }
+
+    if (!jobs.length) return Promise.resolve(results);
+    return Promise.all(jobs).then(function() {
+        return results;
+    }, function() {
+        return results;
+    });
+}
+
 function appendSystemNotice(sess, text) {
     var row = $('<div>').addClass('msg-row system-notice')[0];
     row.innerHTML = '<div class="system-notice-bubble">' + escapeHtml(text) + '</div>';
@@ -118,10 +322,11 @@ function appendSystemNotice(sess, text) {
 }
 
 /* 插话长文本折叠：超过约 6 行或 320 字时默认收起为 5 行（CSS 限高 + 末段渐隐），
-   卡片底部出现「展开全文（共 N 字）」按钮，点击展开、再点「收起」还原；短文本保持原样。
+   气泡底部出现「展开全文（共 N 字）」按钮，点击展开、再点「收起」还原；短文本保持原样。
    判定为「阈值初判 + 实际高度校正」双口径：字符数超限但视觉不足 5 行时（如超长单行
-   token），校正后不折叠，避免出现点了没变化的无效按钮；容器隐藏的会话回放测不到
-   高度，保持阈值判定。CSS 的 max-height 按 5 行（5 × 20.8px）与之对齐。 */
+   token），校正后不折叠，避免出现点了没变化的无效按钮；渲染落点在游离临时容器的会话回放
+   测不到高度，只能先按阈值初判，入真实容器后由 steerCollapseRemeasure 补测校正。
+   CSS 的 max-height 按 5 行（5 × 1.75em，14px 字号下 24.5px/行）与之对齐。 */
 var STEER_COLLAPSE_MAX_CHARS = 320;
 var STEER_COLLAPSE_MAX_LINES = 6;
 var STEER_COLLAPSE_VISIBLE_LINES = 5;
@@ -132,65 +337,148 @@ function steerNoteShouldCollapse(text) {
     return t.split('\n').length > STEER_COLLAPSE_MAX_LINES;
 }
 
+/* 折叠落地：阈值初判 + （可测量时）实际高度校正。
+   canMeasure=false 对应回放期节点还在游离临时容器里：getComputedStyle/scrollHeight 测不到
+   真实高度，此时只按阈值初判（宁可先折，入真实容器后由 steerCollapseRemeasure 补测纠正），
+   否则会因「量到的 scrollHeight 恒为 0」把每条长插话都判成视觉不足而不折叠。 */
+function steerCollapseApply(row, text, canMeasure) {
+    if (!row) return;
+    var t = (text == null) ? '' : String(text);
+    if (!steerNoteShouldCollapse(t)) return;
+    var bubble = $(row).find('.msg-bubble')[0];
+    if (!bubble) return;
+    if (canMeasure) {
+        var textEl = $(row).find('.user-msg-text')[0];
+        var lineH = textEl ? (parseFloat(window.getComputedStyle(textEl).lineHeight) || 0) : 0;
+        var fullH = textEl ? textEl.scrollHeight : 0;
+        // 字符数超限但视觉不足 5 行（如超长单行 token）：校正后不折叠
+        if (lineH > 0 && fullH > 0 && fullH <= lineH * STEER_COLLAPSE_VISIBLE_LINES + 2) return;
+    }
+    $(row).addClass('collapsed');
+    // 存在性守卫：补测路径可能重复进来，绝不能建出两个按钮或给同一按钮绑两次点击
+    if ($(row).find('.steer-note-toggle').length) return;
+    var toggle = $('<button>').addClass('steer-note-toggle').attr('type', 'button')[0];
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.textContent = GourdI18n.t('streaming.steer_expand_full', [t.length]);
+    $(bubble).append(toggle);
+    $(toggle).on('click', function() {
+        var collapsed = $(row).toggleClass('collapsed').hasClass('collapsed');
+        toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        toggle.textContent = collapsed
+            ? GourdI18n.t('streaming.steer_expand_full', [t.length])
+            : GourdI18n.t('streaming.steer_collapse');
+    });
+}
+
+/* 回放补测：节点已移入真实容器后按可见高度重判一次。
+   视觉确实不足 5 行 → 撤掉初判强加的 collapsed 与展开按钮；仍超长 → 补加。
+   由 app-history.js replayDoneCore 在收尾时逐行调用（带 typeof 守卫）。 */
+function steerCollapseRemeasure(row) {
+    if (!row) return;
+    var textEl = $(row).find('.user-msg-text')[0];
+    var text = textEl ? (textEl.getAttribute('data-md-raw') || textEl.innerText || '') : '';
+    var lineH = textEl ? (parseFloat(window.getComputedStyle(textEl).lineHeight) || 0) : 0;
+    var fullH = textEl ? textEl.scrollHeight : 0;
+    var visuallyShort = lineH > 0 && fullH > 0
+        && fullH <= lineH * STEER_COLLAPSE_VISIBLE_LINES + 2;
+    if (visuallyShort) {
+        if ($(row).hasClass('collapsed')) {
+            $(row).removeClass('collapsed');
+            $(row).find('.steer-note-toggle').remove();
+        }
+        return;
+    }
+    if (!$(row).hasClass('collapsed') && steerNoteShouldCollapse(text)) {
+        steerCollapseApply(row, text, true);
+    }
+}
+window.steerCollapseRemeasure = steerCollapseRemeasure;
+
+/* 插话以【用户消息气泡】形态呈现：插话本质是用户在任务运行中补发的一句话，与正常发送、
+   队列出队同属用户输入族系（右对齐用户气泡 + 附件真实缩略图），仅多一枚「插话」身份徽标
+   区别于空闲期发送。旧的独立事件卡形态把附件降级为数量徽标、且视觉不像用户说的话，已废弃。
+   轮次边界：先收敛进行中的思考块并清掉等待指示器，再插入用户气泡，最后推进正文指针——
+   后续 AI 正文落在插话气泡之后的新正文块里，不会与插话前的气泡混排。 */
 function appendSteerNote(sess, item) {
     if (!sess || !item || !item.steerId) return;
     if ($(renderRoot(sess)).find('[data-steer-id="' + item.steerId + '"]').length) return;
 
+    removeThinking(sess);
+    purgeInlineThinking(sess);
     finishThinkingBlock(sess);
-    ensureAssistantBubble(sess);
 
     var text = (item.text == null) ? '' : String(item.text);
-    var note = $('<div>').addClass('steer-note')[0];
-    note.setAttribute('data-steer-id', item.steerId);
-    if (item.runId || sess.activeRunId) note.setAttribute('data-run-id', item.runId || sess.activeRunId);
-    note.innerHTML = '<span class="steer-note-badge">' + escapeHtml(GourdI18n.t('streaming.steer_tag')) + '</span>'
-        + '<span class="steer-note-text"></span>';
-    $(note).find('.steer-note-text').text(text);
+    var row = $('<div>').addClass('msg-row user steer-note')[0];
+    row.setAttribute('data-steer-id', item.steerId);
+    // 输入历史面板按 data-user-msg-idx 定位与回填，插话也是用户输入，必须同口径消耗计数器，
+    // 否则它既无法被「定位到消息」命中，也会让后续正常发送的序号出现空洞
+    row.setAttribute('data-user-msg-idx', String(sess.userMsgCounter++));
+    if (item.runId || sess.activeRunId) row.setAttribute('data-run-id', item.runId || sess.activeRunId);
+    row.innerHTML = '<div class="user-msg-col"><div class="msg-bubble"></div>'
+        + '<div class="user-msg-footer"><span class="msg-time user-msg-time"></span>'
+        + '<button class="user-copy-btn">' + COPY_SVG + '</button>'
+        + '</div></div>';
+    var bubble = $(row).find('.msg-bubble')[0];
 
-    // 插话携带的附件：后端只回传相对路径，本地没有 File，显示数量徽标（与队列出队气泡同口径）。
-    // 历史回放走同一个 steer_applied 事件，因此刷新后徽标依然能还原。
-    var steerImgs = (item.imagePaths || []).length;
-    var steerFiles = (item.filePaths || []).length;
-    if (steerImgs || steerFiles) {
-        var attachWrap = $('<div>').addClass('steer-note-attachments')[0];
-        if (steerImgs) {
-            attachWrap.appendChild($('<span>').addClass('user-attach-badge')
-                .text(GourdI18n.t('queue.images', { n: steerImgs }))[0]);
-        }
-        if (steerFiles) {
-            attachWrap.appendChild($('<span>').addClass('user-attach-badge')
-                .text(GourdI18n.t('queue.files', { n: steerFiles }))[0]);
-        }
-        note.appendChild(attachWrap);
+    // 身份徽标：标明这条用户气泡是运行中插话，而非空闲期发送。
+    var badge = $('<span>').addClass('steer-note-badge')
+        .text(GourdI18n.t('streaming.steer_tag'))[0];
+    $(bubble).append(badge);
+
+    // 插话携带的附件：后端只回传会话内相对路径，经 meta 端点升级为真实缩略图/文件瓦片；
+    // 拉取失败自动降级为数量徽标（renderUserAttachmentMeta 同口径），绝不留下破图标。
+    // 历史回放由 app-history.js replayChunk 的 steer_applied 专用分支还原（不经 onWebChunk/steerResolved），
+    // 因此刷新后缩略图依然能还原。
+    var steerImgs = item.imagePaths || [];
+    var steerFiles = item.filePaths || [];
+    if (steerImgs.length || steerFiles.length) {
+        renderUserAttachmentPaths(sess, bubble, steerImgs, steerFiles);
     }
 
-    insertBeforeActions(sess, note);
+    var span = $('<span>').addClass('user-msg-text md-content')[0];
+    span.setAttribute('data-md-raw', text);
+    span.innerHTML = renderMd(text);
+    $(bubble).append(span);
+    if (typeof addCodeBlockButtons === 'function') addCodeBlockButtons(span);
+    if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(span);
+    if (typeof processMermaidBlocks === 'function') processMermaidBlocks(span);
 
-    if (steerNoteShouldCollapse(text)) {
-        var steerTextEl = $(note).find('.steer-note-text')[0];
-        var steerLineH = steerTextEl ? (parseFloat(window.getComputedStyle(steerTextEl).lineHeight) || 0) : 0;
-        var steerFullH = steerTextEl ? steerTextEl.scrollHeight : 0;
-        var visuallyShort = steerLineH > 0 && steerFullH > 0
-            && steerFullH <= steerLineH * STEER_COLLAPSE_VISIBLE_LINES + 2;
-        if (!visuallyShort) {
-            $(note).addClass('collapsed');
-            var steerToggle = $('<button>').addClass('steer-note-toggle').attr('type', 'button')[0];
-            steerToggle.setAttribute('aria-expanded', 'false');
-            steerToggle.textContent = GourdI18n.t('streaming.steer_expand_full', [text.length]);
-            note.appendChild(steerToggle);
-            $(steerToggle).on('click', function() {
-                var collapsed = $(note).toggleClass('collapsed').hasClass('collapsed');
-                steerToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-                steerToggle.textContent = collapsed
-                    ? GourdI18n.t('streaming.steer_expand_full', [text.length])
-                    : GourdI18n.t('streaming.steer_collapse');
-            });
-        }
+    // 长消息或含代码块时放宽气泡宽度，与正常用户发送同口径
+    if (text.length > 100 || $(span).find('pre').length > 0) $(row).addClass('wide-user');
+
+    var msgTime = item.createdAt || Date.now();
+    var timeEl = $(row).find('.user-msg-time')[0];
+    if (timeEl) $(timeEl).text(formatMsgTime(msgTime));
+
+    // 复制按钮与正常发送同口径：取 .user-msg-text 的 data-md-raw
+    bindUserMsgCopyBtn($(row).find('.user-copy-btn')[0], bubble);
+
+    addImageLightbox(bubble);
+    $(renderRoot(sess)).append(row);
+
+    var canMeasure = !isDetachedRenderTarget(sess);
+    steerCollapseApply(row, text, canMeasure);
+    // 回放落点在游离容器里量不到高度：打待补测标记，由 replayDoneCore 入真实容器后校正
+    if (!canMeasure) row.setAttribute('data-steer-collapse-pending', '1');
+
+    // 轮次边界：插话气泡必须是新旧正文的分界。不能直接调 advanceBodyPointer：①旧正文块
+    // 视觉为空时它会先把旧块 remove，随后 insertBeforeActions 的页脚锚点（从旧指针取
+    // parentNode）为 null，新块静默成孤儿，后续正文全部写进游离子树；②旧正文块非空时新块
+    // 会被插进旧气泡内部（页脚之前），即插话气泡上方，顺序颠倒。正确语义是插话之后开一条
+    // 全新助手气泡：先收尾旧块的流式渲染器，清指针并清扫指针遗留空壳，再强制新建气泡。
+    var prevSteerMd = sess.currentBubbleEl;
+    if (prevSteerMd && prevSteerMd._streamMd && prevSteerMd._streamMd.active) {
+        prevSteerMd._streamMd.finish();
+        if (typeof addCodeBlockButtons === 'function') addCodeBlockButtons(prevSteerMd);
+        if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(prevSteerMd);
     }
-
-    // 推进正文指针，让后续 AI 正文落在插话卡片之后；不清 toolCardsById/currentBatch。
-    advanceBodyPointer(sess, sess, function(freshMd) { insertBeforeActions(sess, freshMd); });
-    if (sess.sessionId === activeSessionId) scrollToBottom(true);
+    sess.currentBubbleEl = null;
+    purgeEmptyMdBlocks(renderRoot(sess));
+    sess._thinkingInterruptedByAction = true;
+    ensureAssistantBubble(sess);
+    // 与 appendUserMessage 同口径：回放到游离容器 / 容器不在文档时不抢滚动
+    if (sess.sessionId === activeSessionId && !sess._skipScroll && !isDetachedRenderTarget(sess)
+            && document.contains(sess.container)) scrollToBottom(true);
 }
 window.appendSteerNote = appendSteerNote;
 
@@ -207,9 +495,9 @@ function ensureAssistantBubble(sess) {
             + '<div class="msg-time" style="display:none"></div>'
             + '</div>'
             + '<div class="msg-actions">'
-            + '<button class="user-copy-btn copy-btn" title="' + GourdI18n.t('chat.copy') + '">' + COPY_SVG + '</button>'
-            + '<button class="user-copy-btn rerun-btn" title="' + GourdI18n.t('chat.rerun') + '">' + RERUN_SVG + '</button>'
-            + '<button class="user-copy-btn continue-btn" title="' + GourdI18n.t('chat.continue_run') + '">' + CONTINUE_SVG + '</button>'
+            + '<button class="user-copy-btn copy-btn">' + COPY_SVG + '</button>'
+            + '<button class="user-copy-btn rerun-btn">' + RERUN_SVG + '</button>'
+            + '<button class="user-copy-btn continue-btn">' + CONTINUE_SVG + '</button>'
             + '</div></div>';
         $(renderRoot(sess)).append(row);
         sess.currentBubbleEl = $(row).find('.md-content')[0];
@@ -239,7 +527,7 @@ function ensureAssistantBubble(sess) {
                         $(copyBtn).removeClass('copied');
                         copyBtn.innerHTML = COPY_SVG;
                     }, 1500);
-                });
+                }).catch(function() {});
             }
         });
         // 重新运行 / 继续运行：复用后端已有的 /rerun、/continue 命令。
@@ -248,6 +536,7 @@ function ensureAssistantBubble(sess) {
         var rerunBtn = $(row).find('.rerun-btn')[0];
         var continueBtn = $(row).find('.continue-btn')[0];
         function triggerCommand(cmd, removeRow) {
+            if (sess.sessionId !== activeSessionId) return;
             if (sess.isStreaming) return;
             if (typeof sendCommandSilent !== 'function') return;
             sendCommandSilent(cmd, function() {
@@ -380,9 +669,7 @@ function applyPreviewLine(hostEl, cls, p) {
         header.appendChild(el);
     }
     el.textContent = p.more > 0 ? p.text + ' \u00b7 +' + p.more : p.text;
-    /* title 存未裁切全文：被省略号截掉的尾部只能靠悬停读到。
-       full 缺失时（旧调用方）退回可见文本，保证不出现 undefined 字面量。 */
-    el.title = p.full || p.text;
+
 }
 
 /* ===== 末行预览的增量跟踪器（流式路径专用）=====
@@ -748,6 +1035,23 @@ function insertBeforeActions(sess, el) {
     // 若存在常驻的内联等待指示器，新内容应插在其上方，保证指示器始终在气泡底部。
     var anchor = (sess.inlineThinkingEl && sess.inlineThinkingEl.parentNode) ? sess.inlineThinkingEl : null;
     if (anchor) { $(anchor).before(el); return; }
+    /* currentBubbleEl 兜底重建：空闲态（finishStream 后）与回放态（replaySession 遇 done 后
+       都会 resetStreamState 把 currentBubbleEl 置 null）下，任何需要插入内容块的调用方
+       （appendAgentBadge 建智能体卡、问答记录、HITL 卡等）都会在下一行裸解引用
+       currentBubbleEl.parentNode 时抛 TypeError，并被 onWebChunk 的 try/catch 静默吞掉——
+       表现为「卡片根本不出现」且控制台无有效报错。在这里统一兜底，覆盖实时与回放两条路径
+       及全部调用方，比在每个 case 里各自补 ensureAssistantBubble 更不易漏。 */
+    if (!sess.currentBubbleEl || !sess.currentBubbleEl.parentNode) {
+        if (typeof ensureAssistantBubble === 'function') {
+            ensureAssistantBubble(sess);
+        }
+        // 仍拿不到（极端异常）：退回容器直接 append，保证内容至少可见，绝不静默丢弃
+        if (!sess.currentBubbleEl || !sess.currentBubbleEl.parentNode) {
+            var fallbackRoot = (typeof renderRoot === 'function') ? renderRoot(sess) : sess.container;
+            if (fallbackRoot) $(fallbackRoot).append(el);
+            return;
+        }
+    }
     // 否则插到「页脚」之上。页脚 = meta 行（时间/用量）+ 操作按钮，二者固定在气泡底部，
     // 正文一律累积在 meta 行之上。（曾有 bug：meta 行停在首个内容块之后，被后续流式内容顶到消息顶部。）
     var bubble = sess.currentBubbleEl.parentNode;
@@ -836,7 +1140,7 @@ function updateToolHeaderMeta(cardEl, toolName, args, text) {
             nameEl.parentNode.insertBefore(fileEl, nameEl.nextSibling);
         }
         fileEl.innerHTML = '<span class="tool-file-lang">' + langIconEmoji(fp) + '</span>' + escapeHtml(base);
-        fileEl.title = fp;
+
     }
     var stat = computeDiffStat(args, text);
     if (stat && (stat.add || stat.del)) {
@@ -2273,6 +2577,49 @@ function appendAgentResultSummary(cardEl, chunk) {
     return true;
 }
 
+/* 后台子代理的进度心跳：把「当前正在调用哪个工具」写进卡片头部的一行状态文本。
+
+   刻意放在 header 而非 body：body 默认折叠（.agent-card-body），心跳若写进折叠区就完全不可见，
+   与「卡片卡死」无法区分。header 常驻可见，一行「· 搜索」足以让用户确认子代理在动。
+
+   卡片不存在时（agent_start 被回放分页裁剪丢弃，或空闲态非活跃会话被丢帧）静默忽略，
+   绝不新建卡片：心跳帧不含成败位，据此建出的卡会永远停在 loading 态。归属键复用
+   resolveAgentState（invocationId 优先），与 agent_start/end 完全同源，不会因并行同名代理串卡。 */
+
+/* 心跳文案的唯一样式出口：前缀中点与展示名的拼接只在此处发生，
+   让「流式写入」与「语言切换重译」两条路径不可能各自漂开一个格式。 */
+function agentProgressHintText(displayName) {
+    return '· ' + displayName;
+}
+
+function updateAgentProgress(sess, chunk) {
+    var toolName = chunk && chunk.args && chunk.args.toolName;
+    if (!toolName) return;
+    var st = resolveAgentState(sess, chunk.args);
+    if (!st || !st.card) return;
+    var header = $(st.card).find('.agent-card-header').first()[0];
+    if (!header) return;
+    // 复用同一行（按类名查找而非缓存 DOM 引用）：卡片可能在 agent_end 后被重建，
+    // 缓存的旧元素会写进已脱离文档的节点上，看起来「更新无效」。
+    var hint = $(header).find('.agent-progress-hint').first()[0];
+    if (!hint) {
+        hint = $('<span>').addClass('agent-progress-hint')[0];
+        // 追加到 header 末尾（在描述之后）：描述是任务语义、心跳是瞬时状态，语义上应居后
+        header.appendChild(hint);
+    }
+    /* 展示名必须走公共展示模型（与工具卡同源），不能直接写后端回传的技术标识：
+       ToolCallStartEvent.getToolName() 给的是 grep / read / skillread 这类「注册名」，
+       裸拼到界面上就是中文界面里混入英文术语。未知名（MCP/OpenAPI 的动态工具）由
+       resolveToolPresentation 兜底回退裸名，不会显示成空。
+       nested: 心跳来自子代理内部工具，与 .agent-card-body 里的工具卡同口径，
+       不加「来源/」前缀（前缀对同一个子代理的每张卡都是噪声）。 */
+    var presentation = resolveToolPresentation(toolName, null, { nested: true });
+    hint.textContent = agentProgressHintText(presentation.displayName);
+    /* 存原始数据供语言切换重译：译文在此刻写死进 DOM 文本节点，translateDOM 的静态 key
+       扫描覆盖不到；不存则切语言后这一行会停在旧语言（与工具卡同一类缺陷）。 */
+    tagToolName(hint, presentation);
+}
+
     function appendAgentBadge(sess, chunk, isStart) {
     var agentName = chunk.toolName || (chunk.args && chunk.args.agentName) || 'agent';
     var desc = chunk.text || (chunk.args && chunk.args.description) || '';
@@ -2314,6 +2661,11 @@ function appendAgentResultSummary(cardEl, chunk) {
             // 确保摘要落在卡体真正的末尾。此时该智能体的增量渲染器已在上方强刷收敛，不会误删带内容的容器。
             purgeEmptyMdBlocks(existCard);
 
+            /* 收卡时必须清掉进度心跳行：它展示的是「当前正在调用哪个工具」，任务已结束
+               后留着就是一行陈旧的「· grep」，会让用户以为子代理还在跑——而状态点已转
+               done/reject，两者语义直接矛盾。 */
+            $(existCard).find('.agent-progress-hint').remove();
+
             // resultSummary 追加到卡体末尾（与孤儿 end 兜底共用同一 helper，防两条路径规则漂移）。
             // 去重守卫：卡片已有流式正文时（单任务 ReasonDeltaEvent 增量 / multitask ReasonEndEvent 结果），
             // resultSummary 与其同文，成功时不再追加，避免卡片内同一段内容出现两次；
@@ -2327,11 +2679,22 @@ function appendAgentResultSummary(cardEl, chunk) {
             delete sess.agentCards[agentId];
             if (sess.agentStates) delete sess.agentStates[agentId];
             
-            // 恢复 currentBubbleEl：在卡片后创建新的 md-content，让主代理后续正文不跑进智能体容器
-            var newMdAfter = $('<div>').addClass('md-content')[0];
-            insertBeforeActions(sess, newMdAfter);
-            sess.currentBubbleEl = newMdAfter;
-            sess.reasonBuffer = '';
+            /* 恢复 currentBubbleEl：在卡片后创建新的 md-content，让主代理后续正文不跑进智能体容器。
+
+               <b>后台帧必须跳过这一段</b>：前台子代理期间主代理阻塞在 ACTION 段，它的正文指针
+               确实被「借走」了（内容渲染进卡片），收卡后重建是必要的。而后台 agent_end 到达时，
+               主代理可能<b>正在往自己的 currentBubbleEl 里流式输出正文</b>（这正是 background 模式的
+               目的：主代理提交后继续推进）。此时重建指针会造成三重破坏：
+               ① sess.reasonBuffer 被清空，已累积但尚未 flush 的增量丢失；
+               ② getStreamMd 的增量渲染器仍绑在旧元素上，指针一换，下一个 text 帧会用新元素
+                  另建一个渲染器实例，旧实例的未 flush 缓冲永久丢失；
+               ③ 主代理的一段连续正文被撕裂成「旧 div + 新 div」两块。 */
+            if ((chunk.args && chunk.args.background) !== true) {
+                var newMdAfter = $('<div>').addClass('md-content')[0];
+                insertBeforeActions(sess, newMdAfter);
+                sess.currentBubbleEl = newMdAfter;
+                sess.reasonBuffer = '';
+            }
 
             // 清除该智能体的活跃状态（仅清自己，不影响并行的其他智能体；
             // endState 为 null 时不降级为全量清理，避免误伤并行中的其他智能体）
@@ -3033,7 +3396,8 @@ function createQuestionCardState(actionId, questions) {
         drafts: {},
         detailOpen: {},
         current: 0,
-        submitted: false
+        submitted: false,
+        collapsed: false
     };
 }
 
@@ -3304,6 +3668,9 @@ function formatQuestionAnswerForRecord(question, answerItem) {
 var QUESTION_CARD_SVG_PREV = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>';
 var QUESTION_CARD_SVG_NEXT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
 var QUESTION_CARD_SVG_CLOSE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+/* 折叠/展开：卡片整体收放，让用户在「看上下文」与「作答」之间快速切换 */
+var QUESTION_CARD_SVG_COLLAPSE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>';
+var QUESTION_CARD_SVG_EXPAND = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
 var QUESTION_CARD_SVG_EDIT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>';
 /* 下尖角：detail 展开/收起切换，展开态由 CSS 旋转 180° */
 var QUESTION_CARD_SVG_CHEVRON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
@@ -3455,6 +3822,14 @@ function bindQuestionCardEvents(host) {
         var st = activeQuestionCardState();
         if (!st || st.submitted) return;
         if (st.current < st.questions.length - 1) { st.current += 1; syncQuestionCard(); }
+    });
+
+    // 折叠/展开：收起后只留头部（标题 + 操作按钮），再点展开继续作答
+    $(host).on('click', '.question-card-collapse', function() {
+        var st = activeQuestionCardState();
+        if (!st) return;
+        st.collapsed = !st.collapsed;
+        syncQuestionCard();
     });
 
     // X：跳过剩余未答题并直接提交（防任务卡死）
@@ -3662,11 +4037,18 @@ function renderQuestionCard(host, sess, state) {
     var entering = state._entered ? '' : ' question-card-enter';
     state._entered = true;
 
-    var html = '<div class="question-card' + (submitted ? ' submitted' : '') + entering + '" data-action-id="' + escapeAttr(state.actionId || '') + '">';
+    /* collapsed 记在 state.collapsed：收起后只留头部，想看上下文再展开选择。
+       两个变量都必须先声明后使用：html 是整卡字符串累加器（声明一旦丢失，+= 会读未定义变量，
+       卡片渲染直接抛 ReferenceError）；collapsed 参与根 div 类名三元，若放到后面声明，
+       var 提升使此处取到 undefined，根节点永远挂不上 collapsed 类（CSS 折叠态兜底隐藏随之失效）。 */
+    var collapsed = !!state.collapsed;
+    var html = '<div class="question-card' + (submitted ? ' submitted' : '') + (collapsed ? ' collapsed' : '') + entering + '" data-action-id="' + escapeAttr(state.actionId || '') + '">';
 
-    /* 题目行：题目文本（含可折叠详情/跳过标记）｜右侧 ‹ n/N ›（仅多题）与 X。
+    /* 题目行：题目文本（含可折叠详情/跳过标记）｜右侧折叠钮、‹ n/N ›（仅多题）与 X。
        detail 取证中位 115 字、p90 280：超阈值默认收起为两行（CSS 限高），「展开」按钮切换；
        展开态记在 state.detailOpen[idx]，整卡重建（勾选/翻页）不丢。 */
+    var collapseTitle = collapsed ? GourdI18n.t('chat.question_expand') : GourdI18n.t('chat.question_collapse');
+    var collapseSvg = collapsed ? QUESTION_CARD_SVG_EXPAND : QUESTION_CARD_SVG_COLLAPSE;
     html += '<div class="question-card-header">';
     html += '<div class="question-card-heading">';
     html += '<span class="question-card-title">' + escapeHtml(q.header || '') + '</span>';
@@ -3674,6 +4056,7 @@ function renderQuestionCard(host, sess, state) {
         html += '<span class="question-card-skip-tag">' + escapeHtml(GourdI18n.t('chat.question_skipped')) + '</span>';
     }
     html += '</div>';
+    html += '<button type="button" class="question-card-collapse" aria-expanded="' + (collapsed ? 'false' : 'true') + '" title="' + escapeAttr(collapseTitle) + '">' + collapseSvg + '</button>';
     if (n > 1) {
         html += '<div class="question-card-nav">'
             + '<button type="button" class="question-card-nav-btn question-card-prev"' + (idx <= 0 || submitted ? ' disabled' : '') + '>' + QUESTION_CARD_SVG_PREV + '</button>'
@@ -3688,7 +4071,8 @@ function renderQuestionCard(host, sess, state) {
     }
     html += '</div>';
 
-    if (q.detail) {
+    if (!collapsed) {
+        if (q.detail) {
         var collapsible = questionDetailShouldCollapse(q.detail);
         var detailOpen = !!state.detailOpen[idx];
         html += '<div class="question-card-detail' + ((collapsible && !detailOpen) ? ' collapsed' : '') + '">' + escapeHtml(q.detail) + '</div>';
@@ -3697,7 +4081,7 @@ function renderQuestionCard(host, sess, state) {
                 + escapeHtml(GourdI18n.t(detailOpen ? 'chat.question_detail_collapse' : 'chat.question_detail_expand'))
                 + QUESTION_CARD_SVG_CHEVRON + '</button>';
         }
-    }
+        }
 
     /* 选项区：单行可扫读形态 —— 序号徽章 + 粗体短标题 + 推荐胶囊 + 灰色说明。
        整形只影响展示（questionOptionView）：选中判定与出站答案仍用原始 label，
@@ -3770,6 +4154,7 @@ function renderQuestionCard(host, sess, state) {
             + '</button>';
     }
     html += '</div>';
+    }
 
     html += '</div>';
     /* 重建前先取现场：整卡是 innerHTML 全量重建，聚焦元素与滚动位置都会随之销毁。
@@ -3996,10 +4381,11 @@ function addCodeBlockButtons(container) {
 }
 
 /* ===== Image Lightbox ===== */
-/* 附件图片挂在 .user-attach-imgs 下（气泡直接子节点），正文图片在 .md-content 下，两者都要可点开 */
+/* 附件图片挂在 .user-attach-imgs 下（气泡直接子节点），正文图片在 .md-content 下，
+   队列面板的 22px 缩略图（.queue-attach-img）同样应可点开看大图；三者都要可点开 */
 function addImageLightbox(container) {
     if (!container) return;
-    var imgs = $(container).find('.user-attach-imgs img, .md-content img');
+    var imgs = $(container).find('.user-attach-imgs img, .queue-attach-img, .md-content img');
     for (var i = 0; i < imgs.length; i++) {
         if ($(imgs[i]).data('lightbox')) continue;
         $(imgs[i]).data('lightbox', '1');
@@ -4064,6 +4450,17 @@ function relocalizeDynamicLabels() {
         var hitlTool = el.getAttribute('data-i18n-hitl-tool') || 'unknown';
         var hitlPresentation = resolveToolPresentation(hitlTool, null);
         el.textContent = GourdI18n.t('chat.' + el.getAttribute('data-i18n-hitl')) + hitlPresentation.displayName;
+    });
+    /* 后台子代理的进度心跳行（「· 搜索」）：渲染时同样把译文写死进文本节点，且它不在
+       .tool-name 里（在 .agent-progress-hint），上面的选择器摸不到。nested 必须与渲染时
+       一致取 true，否则切一次语言就会凭空多出「来源/」前缀。 */
+    document.querySelectorAll('.agent-progress-hint[data-i18n-tool]').forEach(function(el) {
+        var progressPresentation = resolveToolPresentation(
+            el.getAttribute('data-i18n-tool'),
+            el.getAttribute('data-i18n-tooltitle') || null,
+            { nested: true }
+        );
+        el.textContent = agentProgressHintText(progressPresentation.displayName);
     });
     document.querySelectorAll('.tool-batch-title[data-i18n-batch-tool]').forEach(function(el) {
         var tn = el.getAttribute('data-i18n-batch-tool');

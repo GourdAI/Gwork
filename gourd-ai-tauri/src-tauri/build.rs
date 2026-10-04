@@ -78,6 +78,8 @@ const COMMANDS: &[&str] = &[
     "updater_check",
     "updater_download",
     "updater_install",
+    // 原生文件夹选择对话框（工作区「打开文件夹」）
+    "pick_directory",
 ];
 
 /// `tauri.conf.json` 的 `bundle.resources` 里每个条目的**目标目录名**（映射的值）。

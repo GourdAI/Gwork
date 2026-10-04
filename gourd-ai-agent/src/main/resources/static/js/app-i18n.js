@@ -181,7 +181,7 @@
 
         document.querySelectorAll('[data-i18n-title]').forEach(function (el) {
             var key = el.getAttribute('data-i18n-title');
-            el.title = getMessage(key);
+            el.setAttribute('aria-label', getMessage(key));
         });
 
         document.dispatchEvent(new CustomEvent('i18n:localeChanged', { detail: { locale: currentLocale } }));

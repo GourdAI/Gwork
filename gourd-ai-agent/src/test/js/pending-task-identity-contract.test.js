@@ -186,7 +186,9 @@ test('C1-b：后端读取 actionId 并在不匹配时以明确错误拒绝（不
     assert.ok(strictIdx >= 0 && approveIdx > strictIdx, '校验必须早于 approve/reject 的执行');
 
     // 问答：仅在两边都有 id 且不同时拒绝（无挂起任务时仍需回确认帧，避免卡片永久卡死）
-    const askBranch = sliceBetween(gate, '// ask_user 结构化问答恢复处理', '// Handle file upload');
+    // 问答分支的结束锚点用「附件落盘上移」注释（问答块之后、输入文本拼装之前的稳定分界）；
+    // 旧锚点 '// Handle file upload' 已随附件落盘前移改造删除，继续用它会让切片抛错（假失败）。
+    const askBranch = sliceBetween(gate, '// ask_user 结构化问答恢复处理', '// 附件落盘与引用解析已上移到 user 帧落盘之前');
     assert.match(askBranch, /Assert\.isNotEmpty\(actionId\) && task != null[\s\S]*?!actionId\.equals\(task\.getActionId\(\)\)/,
         '问答仅在两边都有 id 且不同时拒绝');
     assert.match(askBranch, /WebChunk\.ofQuestionAnswered\(AskUser\.toolNameOf\([\s\S]*?answeredActionId\)/,

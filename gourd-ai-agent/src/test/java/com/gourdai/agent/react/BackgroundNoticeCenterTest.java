@@ -258,4 +258,118 @@ public class BackgroundNoticeCenterTest {
         assertFalse(n.timedOut());
         assertFalse(n.terminated());
     }
+
+    // ---------------- 子代理通知（O-H） ----------------
+
+    /**
+     * 子代理通知的渲染口径：必须带 token/代理名/状态/摘要 + await_tasks 指引。
+     *
+     * <p><b>为何必须同时断言「不含 bash 专属字段」</b>：若 render() 漏了 kind 分支，
+     * 子代理通知会被渲染成 bash 形式——带 {@code exit_code=null} 并指引模型去调
+     * {@code bash_output}（对子代理 token 完全无效，模型会拿到一连串无效查询）。
+     * 只断言「含 token」无法排除这种串台。</p>
+     */
+    @Test
+    public void subagentNoticeRendersTokenAndAwaitHintWithoutBashFields() {
+        BackgroundNoticeCenter.Notice n = BackgroundNoticeCenter.Notice.ofSubagent(
+                "tok_1", Integer.valueOf(2), "explore", "搜索三处用法", true, "<task_result>OK</task_result>");
+        String text = n.render();
+
+        assertEquals(BackgroundNoticeCenter.Notice.KIND_SUBAGENT, n.kind());
+        assertTrue(text.contains("[后台子代理完成]"), text);
+        assertTrue(text.contains("token=tok_1"), text);
+        assertTrue(text.contains("index=2"), text);
+        assertTrue(text.contains("agent_name=explore"), text);
+        assertTrue(text.contains("status=finished"), text);
+        assertTrue(text.contains("搜索三处用法"), text);
+        assertTrue(text.contains("<task_result>OK</task_result>"), text);
+        assertTrue(text.contains("await_tasks"), text);
+        // 不得串台到 bash 口径
+        assertFalse(text.contains("[后台任务完成]"), "不得沿用 bash 标题: " + text);
+        assertFalse(text.contains("exit_code"), "子代理无退出码概念: " + text);
+        assertFalse(text.contains("bash_output"), "不得指引模型去调对 token 无效的 bash_output: " + text);
+        assertFalse(text.contains("wall_time_ms"), text);
+    }
+
+    /**
+     * 单任务提交（index 传 null）不得渲染 index：否则模型会误以为还有兄弟任务。
+     */
+    @Test
+    public void subagentNoticeOmitsIndexWhenNull() {
+        String text = BackgroundNoticeCenter.Notice.ofSubagent(
+                "tok_s", null, "general", "单任务", true, "done").render();
+        assertFalse(text.contains("index="), text);
+        assertTrue(text.contains("token=tok_s"), text);
+    }
+
+    /**
+     * 失败通知：success=false 渲染 status=failed；空摘要不得产出裸空行。
+     */
+    @Test
+    public void subagentNoticeMarksFailureAndEmptyResult() {
+        String failed = BackgroundNoticeCenter.Notice.ofSubagent(
+                "tok_f", Integer.valueOf(1), "explore", "失败任务", false,
+                "ERROR: 后台任务异常终止: boom").render();
+        assertTrue(failed.contains("status=failed"), failed);
+        assertTrue(failed.contains("boom"), failed);
+
+        String empty = BackgroundNoticeCenter.Notice.ofSubagent(
+                "tok_e", null, "explore", "无输出任务", true, "").render();
+        assertTrue(empty.contains("(无结果内容)"), empty);
+        // 空摘要仍须给出取回结果的途径，否则模型无从判断任务是否真完成
+        assertTrue(empty.contains("await_tasks"), empty);
+    }
+
+    /**
+     * 子代理通知的字段往返：载荷必须可被消费方完整读回（不只靠 render 文本）。
+     */
+    @Test
+    public void subagentNoticeAccessorsRoundTrip() {
+        BackgroundNoticeCenter.Notice n = BackgroundNoticeCenter.Notice.ofSubagent(
+                "tok_a", Integer.valueOf(3), "plan", "拆解", true, "summary");
+        assertEquals("tok_a", n.token());
+        assertEquals(Integer.valueOf(3), n.index());
+        assertEquals("plan", n.agentName());
+        assertEquals("拆解", n.description());
+        assertTrue(n.success());
+        assertEquals("summary", n.resultSummary());
+        // bash 载荷在子代理通知上恒为默认值，不得泄漏成有意义内容
+        assertEquals(BackgroundNoticeCenter.Notice.KIND_SUBAGENT, n.kind());
+        assertNull(n.sessionId());
+        assertNull(n.command());
+        assertEquals(0L, n.wallTimeMs());
+    }
+
+    /**
+     * 向后兼容护栏：原 bash 构造器签名与默认 kind 不得被改动。
+     *
+     * <p>TerminalTalent:683 与上方 5 处既有测试都用这个 7 参构造器。一旦它被改成需要传 kind，
+     * 或默认 kind 不是 bash，render() 就会把 bash 通知渲染成子代理形式。</p>
+     */
+    @Test
+    public void bashNoticeKeepsLegacyConstructorAndKind() {
+        BackgroundNoticeCenter.Notice n = notice("cmd_legacy");
+        assertEquals(BackgroundNoticeCenter.Notice.KIND_BASH, n.kind());
+        assertEquals("cmd_legacy", n.sessionId());
+        assertNull(n.token());
+        assertNull(n.agentName());
+        assertFalse(n.success());
+        assertTrue(n.render().contains("bash_output"), n.render());
+    }
+
+    /**
+     * 子代理通知可正常投递与消费（走的是与 bash 完全相同的队列）。
+     */
+    @Test
+    public void subagentNoticePublishesAndDrainsLikeBash() {
+        BackgroundNoticeCenter.publish("owner-sub", BackgroundNoticeCenter.Notice.ofSubagent(
+                "tok_q", Integer.valueOf(1), "explore", "查询", true, "res"));
+        BackgroundNoticeCenter.publish("owner-sub", notice("cmd_q"));
+
+        List<BackgroundNoticeCenter.Notice> drained = BackgroundNoticeCenter.drain("owner-sub");
+        assertEquals(2, drained.size());
+        assertEquals(BackgroundNoticeCenter.Notice.KIND_SUBAGENT, drained.get(0).kind());
+        assertEquals(BackgroundNoticeCenter.Notice.KIND_BASH, drained.get(1).kind());
+        assertTrue(BackgroundNoticeCenter.drain("owner-sub").isEmpty());
+    }
 }

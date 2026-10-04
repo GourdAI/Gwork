@@ -246,7 +246,7 @@ test('渲染：available 显示按钮、写 data-state/文案/title；转 not-av
     assert.ok(h.btn.classList.contains('is-visible'), '检测到新版必须可见');
     assert.equal(h.btn.getAttribute('data-state'), 'available');
     assert.equal(h.label.textContent, '立即更新');
-    assert.equal(h.btn.getAttribute('title'), '发现新版本 0.2.0', 'title 必须带版本号，与 tooltip 契约一致');
+    assert.ok(!h.btn.getAttribute('title'));
     // 状态回退（复检发现已升级/无新版）→ 收起并清理，不留残余文案与进度变量
     ui.render({ mode: 'auto', status: 'not-available' });
     assert.equal(h.btn.classList.contains('is-visible'), false);
@@ -263,7 +263,7 @@ test('渲染：downloading 就地写百分比到 --gwork-update-pct 与文案；
     assert.equal(h.btn.getAttribute('data-state'), 'downloading');
     assert.equal(h.btn.styleProps['--gwork-update-pct'], '42.5%', 'CSS 变量宽度必须与百分比同步');
     assert.equal(h.label.textContent, '42.5%');
-    assert.equal(h.btn.getAttribute('title'), '新版本 0.2.0 正在下载', '下载中 title 走专属文案');
+    assert.ok(!h.btn.getAttribute('title'));
 
     ui.render({ mode: 'auto', status: 'downloading', version: '0.2.0', progress: { percent: 0, total: 0, transferred: 4096 } });
     assert.equal(h.btn.styleProps['--gwork-update-pct'], undefined, 'total=0 不得写入宽度，否则进度线恒 0 像卡死');
@@ -309,7 +309,7 @@ test('事件驱动：onUpdaterState 注册的回调即渲染入口，广播新�
     assert.ok(h.btn.classList.contains('is-visible'), '广播 available 后必须点亮');
     assert.equal(h.btn.getAttribute('data-state'), 'available');
     assert.equal(h.label.textContent, '立即更新');
-    assert.equal(h.btn.getAttribute('title'), '发现新版本 0.4.0');
+    assert.ok(!h.btn.getAttribute('title'));
     h.listeners.dom[0]({ mode: 'auto', status: 'downloaded', version: '0.4.0' });
     assert.equal(h.btn.getAttribute('data-state'), 'downloaded', '广播 downloaded 后须切到安装态');
     assert.equal(h.label.textContent, '立即安装');
@@ -327,7 +327,7 @@ test('语言切换：按上一次快照重渲染，文案与 title 随 locale �
         dict.set('app.sidebar.update_tooltip', 'Update available: {0}');
         handlers.forEach(fn => fn());
         assert.equal(h.label.textContent, 'Update now', '切语言后按钮文案必须刷新');
-        assert.equal(h.btn.getAttribute('title'), 'Update available: 0.2.0', '切语言后 title 也必须刷新');
+    assert.ok(!h.btn.getAttribute('title'));
     } finally {
         // 本文件各用例共享同一份 dict，改完必须复原，否则顺序耦合
         dict.set('app.sidebar.update_now', oriNow);

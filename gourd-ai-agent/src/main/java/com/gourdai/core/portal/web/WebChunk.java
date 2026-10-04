@@ -271,6 +271,16 @@ public class WebChunk {
     /** 客户端输入幂等标识，仅 user 事件使用；用于回放时识别已在本地渲染的用户气泡。 */
     private String clientMessageId;
 
+    /**
+     * 用户消息携带的图片附件会话内相对路径（{@code uploads/xxx}，仅 {@code user} 帧填充）。
+     * <p>落盘帧与实时帧同构：前端据此把气泡里的数量徽标升级为真实缩略图（经
+     * {@code /web/chat/attachment/meta} 换取 dataUrl），历史回放自动还原。</p>
+     */
+    private List<String> imagePaths;
+
+    /** 用户消息携带的文件附件会话内相对路径（{@code uploads/xxx}，仅 {@code user} 帧填充）。 */
+    private List<String> filePaths;
+
     /** 消息块创建时间戳（ epoch 毫秒），由工厂方法自动填充。 */
     private Long createdAt;
 
@@ -745,6 +755,19 @@ public class WebChunk {
     }
 
     public static WebChunk ofAgentStart(String agentName, String description, String invocationId) {
+        return ofAgentStart(agentName, description, invocationId, false);
+    }
+
+    /**
+     * @param background 是否为 background=true 的<b>后台</b>子代理帧。
+     *
+     * <p><b>为何必须打标</b>：前台子代理帧经父 sink 下发，此时主代理正阻塞在 ACTION 段等它，
+     * 前端把主代理的思考块收敛掉是正确的；而后台子代理帧由 WebGate 旁路推送，
+     * 会与主代理自己的流式帧<b>交错</b>（这正是「主代理提交后继续推进」的直接后果）。
+     * 不打标的话，每来一个后台 start/end 帧，前端就会把主代理<b>正在输出</b>的思考块
+     * 强制收敛（改文案为「思考完成」、清计时器、清空 buffer），表现为思考块反复被打断。</p>
+     */
+    public static WebChunk ofAgentStart(String agentName, String description, String invocationId, boolean background) {
         WebChunk tmp = new WebChunk();
         tmp.type = "agent_start";
         tmp.toolName = agentName;
@@ -755,6 +778,7 @@ public class WebChunk {
         args.put("agentName", agentName);
         args.put("description", description);
         if (invocationId != null) args.put("invocationId", invocationId);
+        if (background) args.put("background", true);
         tmp.args = args;
         return tmp;
     }
@@ -775,6 +799,12 @@ public class WebChunk {
     }
 
     public static WebChunk ofAgentEnd(String agentName, String description, boolean success, String result, String invocationId) {
+        return ofAgentEnd(agentName, description, success, result, invocationId, false);
+    }
+
+    /** @param background 含义同 {@link #ofAgentStart(String, String, String, boolean)}。 */
+    public static WebChunk ofAgentEnd(String agentName, String description, boolean success, String result,
+                                      String invocationId, boolean background) {
         WebChunk tmp = new WebChunk();
         tmp.type = "agent_end";
         tmp.toolName = agentName;
@@ -787,7 +817,47 @@ public class WebChunk {
         args.put("success", success);
         args.put("resultSummary", result != null ? result : "");
         if (invocationId != null) args.put("invocationId", invocationId);
+        if (background) args.put("background", true);
         tmp.args = args;
+        return tmp;
+    }
+
+    /**
+     * 创建「子代理进度心跳」消息块。
+     *
+     * <p>type 为 {@code agent_progress}，仅用于 <b>background=true</b> 的后台子代理：
+     * 它的内部事件不走父代理的 streamSink，前端无从得知它此刻在做什么，
+     * 一张只有 loading 状态点的卡片与「子代理卡死」在视觉上无法区分。</p>
+     *
+     * <p><b>载荷刻意极简</b>：只携带工具名，不带正文/思考 delta。后台任务可能长时间运行，
+     * 转发全量 delta 会让帧量与历史体积失控。</p>
+     *
+     * <p><b>为何是瞬态帧</b>（见 {@code SessionStreamStore.isEphemeralType}）：它的全部信息
+     * 都能由随后的 {@code agent_end} 重建，落盘只会让历史文件按工具调用次数膨胀。</p>
+     *
+     * @param agentName    子代理名称
+     * @param description  任务描述
+     * @param invocationId 关联标识，与 {@code ofAgentStart} 同值，供前端定位到具体卡片
+     * @param toolName     当前正在调用的工具名
+     */
+    public static WebChunk ofAgentProgress(String agentName, String description,
+                                           String invocationId, String toolName) {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "agent_progress";
+        tmp.toolName = agentName;
+        tmp.toolTitle = agentName;
+        tmp.text = description;
+        tmp.createdAt = Instant.now().toEpochMilli();
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("agentName", agentName);
+        args.put("description", description);
+        args.put("toolName", toolName);
+        if (invocationId != null) args.put("invocationId", invocationId);
+        // 进度帧只可能来自后台子代理（前台子代理的工具卡已由父 sink 完整转发），恒为 true
+        args.put("background", true);
+        tmp.args = args;
+        // 刻意不设 phase：后台帧可能在本轮 done 之后、下一轮开始之前的空闲窗口到达，
+        // 带 phase 会改写主会话的相位状态机（前端 sess.phase），污染主对话的指示器文案。
         return tmp;
     }
 
@@ -905,7 +975,9 @@ public class WebChunk {
                 row.put("runId", item.getRunId());
                 row.put("createdAt", item.getCreatedAt());
                 // 附件路径随事件下发：前端据此在插话卡上显示数量徽标，历史回放同样能还原。
-                // 只传路径不传内容，卡片本身不回显缩略图。
+                // 只传路径不传内容；卡片本身并不因此就没有缩略图——前端会拿这些路径经
+                // /web/chat/attachment/meta 换成 dataUrl，把徽标升级为真实缩略图；
+                // 历史回放时则由 replayChunk 的 steer_applied 分支还原同一条路径清单，再走同一个升级链路。
                 row.put("imagePaths", item.getImagePaths());
                 row.put("filePaths", item.getFilePaths());
                 serialized.add(row);

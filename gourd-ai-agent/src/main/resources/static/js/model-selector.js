@@ -298,7 +298,7 @@
             var $ctxTag = $root.find('.model-selector-current .model-context-tag');
             if (cfg.context) {
                 var label = contextLengthLabel(contextValue());
-                $ctxTag.text(label).attr('title', t('app.context_label') + ' ' + label).toggle(!!label);
+                $ctxTag.text(label).toggle(!!label);
             } else {
                 $ctxTag.hide();
             }

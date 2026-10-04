@@ -105,7 +105,7 @@
             var collapsed = $panel.hasClass('collapsed');
             $toggleBtn.toggleClass('collapsed', collapsed);
             $toggleBtn.html(collapsed ? '\u2039' : '\u203A');
-            $toggleBtn.attr('title', collapsed ? GourdI18n.t('filer.expand') : GourdI18n.t('filer.collapse'));
+
             localStorage.setItem('filer-collapsed', collapsed ? '1' : '0');
             syncHeaderPadding(collapsed);
             syncToggleBtnPosition();
@@ -119,7 +119,7 @@
         $panel.removeClass('collapsed');
         $toggleBtn.removeClass('collapsed');
         $toggleBtn.html('\u203A');
-        $toggleBtn.attr('title', GourdI18n.t('filer.collapse'));
+
         syncHeaderPadding(false);
     } else {
         syncHeaderPadding(true);

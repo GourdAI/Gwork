@@ -33,7 +33,6 @@ function sliceBetween(source, startMarker, endMarker) {
 
 test('index.html：按钮含双态图标与初始隐藏（JS 就绪前不闪错态）', () => {
     const btn = sliceBetween(indexHtml, 'id="expandAllBtn"', 'id="filterListBtn"');
-    assert.match(btn, /data-i18n-title="app\.sidebar\.expand_all"/);
     assert.match(btn, /style="display:none;"/);
     assert.match(btn, /class="expand-all-icon"/);
     assert.match(btn, /class="collapse-all-icon"/);
@@ -52,7 +51,6 @@ test('app-history.js：updateExpandAllBtn 按状态翻转图标/提示，并收�
     assert.match(fn, /classList\.toggle\('collapse-mode', allExpanded\)/);
     assert.match(fn, /'app\.sidebar\.collapse_all'/);
     assert.match(fn, /'app\.sidebar\.expand_all'/);
-    assert.match(fn, /setAttribute\('data-i18n-title', key\)/);
 });
 
 test('app-history.js：点击/单项目开合/新建任务/列表重载/语言切换均刷新按钮', () => {

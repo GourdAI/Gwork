@@ -405,43 +405,6 @@ test('more>0 时文本带「· +N」计数，more=0 时不带（Codex 的 lines-
     assert.equal(previewOf(card2, 'tool-card-preview').textContent, '只有一行', '单行不得出现「+0」');
 });
 
-test('title 挂【未裁切的全文】：截断后仍可悬停读到完整行', () => {
-    const card = makeCardHost();
-    const long = 'y'.repeat(api.PREVIEW_MAX_CHARS + 100) + '\n第二行';
-    api.setPreviewLine(card, 'tool-card-preview', long, false);
-    const el = previewOf(card, 'tool-card-preview');
-    assert.equal(el.textContent.length, api.PREVIEW_MAX_CHARS + ' · +1'.length,
-        '可见文本应为裁切后的长度 + more 后缀');
-    assert.ok(el.textContent.endsWith('… · +1'), '可见文本以省略号与计数收尾');
-    assert.equal(el.title, 'y'.repeat(api.PREVIEW_MAX_CHARS + 100),
-        'title 必须是未裁切的整行全文，否则悬停读不到被省略的尾部');
-    assert.ok(el.title.length > el.textContent.length, 'title 应比可见文本更长');
-});
-
-test('title 全文在增量路径同样成立（两条路径不得一条有全文一条没有）', () => {
-    const blk = makeThinkingHost();
-    const st = api.createEndLineTracker();
-    const longLine = 'k'.repeat(api.PREVIEW_MAX_CHARS + 60);
-    api.setPreviewLineIncremental(blk, 'thinking-block-preview', '首行\n' + longLine, st);
-    const el = previewOf(blk, 'thinking-block-preview');
-    assert.equal(el.title, longLine, '增量路径的 title 也必须是整行全文');
-});
-
-test('跨帧喂入的长行：title 仍是整行全文（partial 累积不得丢前缀）', () => {
-    const blk = makeThinkingHost();
-    const st = api.createEndLineTracker();
-    const longLine = 'm'.repeat(api.PREVIEW_MAX_CHARS + 40);
-    let acc = '';
-    /* 逐 10 字符喂入，模拟 token 粒度到达 */
-    for (let i = 0; i < longLine.length; i += 10) {
-        acc = longLine.slice(0, i + 10);
-        api.setPreviewLineIncremental(blk, 'thinking-block-preview', acc, st);
-    }
-    const el = previewOf(blk, 'thinking-block-preview');
-    assert.equal(el.title, longLine, '分帧累积后 title 必须等于完整行');
-    assert.equal(el.textContent.length, api.PREVIEW_MAX_CHARS);
-});
-
 test('宿主为 null 时静默返回（流式早期 thinkingBlockEl 可能尚未建）', () => {
     assert.doesNotThrow(() => api.setPreviewLine(null, 'tool-card-preview', 'x', false));
     assert.doesNotThrow(() => api.setPreviewLineIncremental(null, 'thinking-block-preview', 'x', api.createEndLineTracker()));
@@ -701,4 +664,84 @@ test('思考卡专属淡底 token 不再被 app.css 引用（防死 token 复活
     /* --thinking-block-border 仍被思考卡体分隔线使用，仅淡底 token 应消失。 */
     const uses = [...appCss.matchAll(/--thinking-block-bg/g)].length;
     assert.equal(uses, 0, '淡底 token 不应再被 app.css 引用（透明底后已死，复活意味着回退）');
+});
+
+/* =====================================================================
+   8. 过程卡头部标签字重 / 字体族统一契约（2026-09-29 用户反馈：
+      「执行命令」粗、「思考完成」细，且思考行预览是等宽字体，相邻行来回切换看着怪）
+   统一口径：四族标签一律 500（思考卡原本就是 500，改的是另外三族）；
+   头部次要文字（标签 + 预览注脚）一律 sans，等宽只保留给卡体代码内容。
+   ===================================================================== */
+const PROCESS_LABELS = ['.tool-name', '.thinking-block-label', '.tool-batch-title', '.agent-label'];
+test('四族过程卡头部标签统一字重 500（不得回退 600 粗体墙，也不得跌到 400）', () => {
+    for (const sel of PROCESS_LABELS) {
+        const block = ruleBlockStandalone(appCss, sel);
+        assert.ok(/font-weight:\s*500/.test(block), sel + ' 应为 500（与思考卡同口径）');
+        assert.ok(!/font-weight:\s*(600|700)/.test(block), sel + ' 不得回退半粗/粗体');
+    }
+});
+
+test('头部预览注脚不独用等宽字体（相邻工具行/思考行 mono↔sans 切换是「怪」的来源）', () => {
+    /* 共享规则不得写 font-family（继承 header 的 sans）；
+       思考行也不得再有一条独立的 font-family 覆盖规则（旧实现是 mono 11.5px）。 */
+    const shared = ruleBlockLoose(appCss, '.tool-card-header .preview-inline');
+    assert.ok(!/font-family:/.test(shared), '共享预览规则不应指定 font-family');
+    const m = new RegExp('(^|\\r?\\n)[ \\t]*\\.thinking-block-header \\.preview-inline[ \\t]*\\{([^}]*)\\}').exec(appCss);
+    assert.ok(!m || !/font-family:/.test(m[2]),
+        '思考行预览不得独立覆盖 font-family（行首锚定，避免匹到共享规则里的同名片段）');
+});
+
+test('等宽字体保留给卡体（统一字体族不得误伤代码内容的可读性）', () => {
+    const body = ruleBlockStandalone(appCss, '.tool-card-body');
+    assert.ok(/font-family:\s*var\(--font-mono\)/.test(body), '工具卡体仍应等宽');
+    const thinkBody = ruleBlockStandalone(appCss, '.thinking-block-body');
+    assert.ok(!/font-family:/.test(thinkBody), '思考卡体继承正文 sans（现状如此，防误加 mono）');
+});
+
+/* =====================================================================
+   9. 流式强调与四族标签色契约（2026-09-29 自审发现三处不一致后补锁）：
+      - 思考流式态不得用 border-color 简写（简写染四周 = 全周框回潮，
+        与线性化「流式仅靠左竖条」冲突，且与 agent 卡不对称）；
+      - 思考流式标签色不得在主体区独立声明（尾部同特异性规则源码序在后会覆盖，
+        写在主体区 = 永远不生效的死规则）；
+      - 四族标签色必须同口径（低彩度块统一 --text-secondary，
+        agent 族曾漏降仍是 --text-primary，三浅一深）。
+   ===================================================================== */
+test('思考流式态不得用 border-color 简写染四周（流式仅靠左竖条标识）', () => {
+    const m = new RegExp('(^|\\r?\\n)[ \\t]*\\.thinking-block\\.streaming[ \\t]*\\{([^}]*)\\}').exec(appCss);
+    assert.ok(!m || !/border-color:/.test(m[2]),
+        'border-color 简写会把四周都染 accent（全周框回潮）；竖条着色必须用长写 border-left-color（见尾部低彩度块）');
+});
+
+test('思考流式标签色不在主体区独立声明（防死规则：尾部同特异性规则源码序在后必覆盖）', () => {
+    const m = new RegExp('(^|\\r?\\n)[ \\t]*\\.thinking-block\\.streaming \\.thinking-block-label[ \\t]*\\{').exec(appCss);
+    const idx = m ? m.index : -1;
+    assert.ok(idx < 0 || idx > appCss.indexOf('低彩度视觉'),
+        '该规则若存在必须在低彩度块之后（同特异性源码序决胜）；写在主体区 = accent 永远不生效的死规则');
+});
+
+/* 取某选择器「生效色」：源码序中最后一个【选择器恰为其本身】（特异性 0,1,0，
+   含低彩度块列表成员形态）且声明了 color 的规则。更高特异性的流式态规则
+   （如 .thinking-block.streaming .thinking-block-label）行首不锚定该选择器，自然排除。 */
+function lastExactRuleColor(css, sel) {
+    const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp('(^|\\r?\\n)[ \\t]*' + esc + '[ \\t]*(,|\\r?\\n|\\{)', 'g');
+    let m, last = null;
+    while ((m = re.exec(css)) !== null) {
+        const open = css.indexOf('{', m.index);
+        if (open < 0) continue;
+        const body = css.slice(open + 1, css.indexOf('}', open));
+        const cm = /(?<![-\w])color:\s*([^;}]+)/.exec(body);
+        if (cm) last = cm[1].trim();
+    }
+    return last;
+}
+test('四族过程卡标签生效色同口径 --text-secondary（不得三浅一深；agent 族曾漏降）', () => {
+    /* 锁视觉契约而非实现机制：思考族色在基础规则自带 secondary，
+       其余三族基础规则是 primary、靠尾部低彩度块覆盖——两种机制都合法，
+       但生效色必须一致。任一族回退 primary（如把 .agent-label 移出低彩度块）即红。 */
+    for (const sel of PROCESS_LABELS) {
+        assert.equal(lastExactRuleColor(appCss, sel), 'var(--text-secondary)',
+            sel + ' 生效色应为 --text-secondary（四族同口径）');
+    }
 });

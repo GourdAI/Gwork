@@ -67,6 +67,19 @@ public class TodoTalent extends AbsTalent {
 
     @Override
     public String getInstruction(Prompt prompt) {
+        // 短寒暄且无任务延续语义时不注入规划指南（约 500 字），省常驻 token。
+        // 阈值必须极小，理由见 SHORT_INPUT_MAX 的 javadoc：中文密度高，长度不等于复杂度。
+        //
+        // 【为何不能用 isSupported 实现这个开关】TalentUtil.activeTalents 对 isSupported()==false
+        // 的才能是整体 continue（L46-54），连后面的 onAttach / injectTalentInstruction / toolAdd
+        // 一并跳过——工具会直接从本轮可用集中消失。后果比省下的几百字严重得多：模型想更新
+        // 清单时发现 todowrite 不存在，要么卡住要么改用其他方式表达进度。
+        // 而 getInstruction 返回 null 只走 injectTalentInstruction 的空指令分支（TalentUtil L81），
+        // 工具仍然挂载，Talent 标题块也会保留（L97 的 tools 非空分支），仅省掉指南正文。
+        if (shouldSkipInstruction(prompt)) {
+            return null;
+        }
+
         return "## 任务规划指南 (Task Planning Guide)\n" +
                 "1. **启动机制**: 超过3步以上的复杂任务，要通过 `todowrite` 创建计划；任务边界或目标发生重大变化时，用 `todowrite` 重构完整计划。\n" +
                 "2. **状态感知（恢复优先）**: 凡是你对当前进度没有十足把握时，必须 **先** `todoread` 再行动，禁止凭记忆推断。以下场景一律强制先读：上下文被压缩/截断后、用户说“继续/接着做/还有吗”、开启新一轮对话、或任务中途被打断后恢复。**注意：中断恢复后清单状态可能滞后于实际进度（中断时刻可能未及时 todowrite）**，对未完成项要先核对历史 Observation 中是否已有对应执行证据，确已完成的直接用 `todowrite` 确认状态即可，禁止盲目重做。\n" +
@@ -75,6 +88,51 @@ public class TodoTalent extends AbsTalent {
                 "5. **改造门禁（先方案后动手）**: 对现有代码、配置或架构做复杂改造（如多文件修改、跨模块重构、破坏性/不可逆变更、涉及多种可行实现路径）时，**禁止未经用户确认直接动手**。必须先完成调研，产出 ≥2 个可行实施方案（含实现思路、改动范围、优缺点对比）及推荐项，停下等待用户选择；用户拍板后，再据此创建或更新清单并执行。用户已明确指定实现方式、或仅为单点小修（如改文案、修明显 Bug）时可豁免。\n" +
                 "6. **以返回为准**: `todoread`/`todowrite` 的返回值会附带 [进度] 与 [继续]/[完成] 提示，请以该提示作为“是否可以收尾”的判定依据。\n" +
                 "7. **适用边界**: 不要为常识性提问、简单计算或单次工具创建计划。";
+    }
+
+    /**
+     * 短寒暄的最大字符阈值（超过则一律注入指南）。
+     *
+     * <p><b>为何必须这么小：</b>首版取 20，实测误伤严重——
+     * 「帮我把这个类的注释补齐并跑一遍测试」只有 <b>17 个字符</b>，却是一个明确的
+     * 「改代码 + 跑验证」多步任务，恰恰是指南第 1 条要求建计划的场景。中文信息密度高，
+     * 20 字 ≈ 英文 40-60 token 的语义量，足以描述完整任务。而「是否需要计划」的真实依据是
+     * <b>任务复杂度</b>，不是输入长度，用长度做启发式判据本身就不可靠。</p>
+     *
+     * <p>降到 6 后，只有「你好 / hi / 谢谢 / 好的 / 1+1」这类纯寒暄与单行确认会跳过；
+     * 6 字中文不可能表达一个需要建计划的多步任务，误伤风险接近于零。收益也随之变小
+     * （只在寒暄轮省 ~350 token），但这正是可接受的取舍：本优化的目标是省上下文，
+     * 而不是用行为不确定性去换那几百 token。</p>
+     */
+    private static final int SHORT_INPUT_MAX = 6;
+
+    /**
+     * 判定本轮能否略过规划指南。
+     *
+     * <p>只看用户输入的启发式，不查 TODO.md 落盘状态：指南的价值在于「何时该建计划」，
+     * 而纯寒暄（如「你好」「谢谢」「1+1」）本就属于指南第 7 条自己划出的适用边界之外。
+     * 但必须把恢复语义的短输入排除在外：「继续」「接着做」「还有吗」这类话短却是
+     * 指南第 2 条（状态感知）的触发条件，跳过后模型会在有未完成清单时直接凭记忆行动。</p>
+     */
+    private static boolean shouldSkipInstruction(Prompt prompt) {
+        if (prompt == null) {
+            return false;
+        }
+        String userContent = prompt.getUserContent();
+        if (userContent == null || userContent.length() > SHORT_INPUT_MAX) {
+            return false;
+        }
+        String lc = userContent.toLowerCase();
+        return !(lc.contains("继续") || lc.contains("接着") || lc.contains("还有")
+                || lc.contains("continue") || lc.contains("todo")
+                || lc.contains("任务") || lc.contains("计划"));
+    }
+
+    /**
+     * 暴露跳过判定供契约测试直接验证（避免测试反向依赖 getInstruction 的全文内容）。
+     */
+    static boolean shouldSkipInstructionForTest(Prompt prompt) {
+        return shouldSkipInstruction(prompt);
     }
 
     protected Path getWorkPath(String __cwd, String __sessionId) {

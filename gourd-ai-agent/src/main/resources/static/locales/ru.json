@@ -230,7 +230,11 @@
                 "memory_view":  "Ментальная память",
                 "chat_workspace":  {
                                        "switch":  "Сменить рабочую область",
-                                       "clear":  "Сбросить выбор"
+                                       "clear":  "Сбросить выбор",
+                                       "search_placeholder":  "Поиск проектов…",
+                                       "search_no_results":  "Подходящих проектов нет",
+                                       "remote_connect":  "Удалённое подключение",
+                                       "locate_multiple":  "Найдено несколько одноимённых папок, выберите одну:"
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "Ошибка загрузки, нажмите, чтобы повторить",
@@ -842,6 +846,8 @@
                  "question_recommended":  "Рекомендуется",
                  "question_detail_expand":  "Развернуть",
                  "question_detail_collapse":  "Свернуть",
+                  "question_collapse":  "Свернуть",
+                  "question_expand":  "Развернуть",
                  "question_record_title":  "Мой ответ",
                  "question_answered":  "Отправлено",
                  "question_skipped":  "Пропущено",
@@ -876,6 +882,13 @@
                  "tool_openapi":  "Вызов API",
                  "tool_lsp":  "Анализ кода",
                  "tool_memory":  "Память",
+                 "tool_recall":  "Восстановление истории",
+                 "tool_ask_user":  "Вопрос пользователю",
+                 "tool_config":  "Настройка расширений",
+                 "tool_clock":  "Текущее время",
+                 "tool_plan":  "План",
+                 "tool_plan_progress":  "Ход плана",
+                 "tool_plan_revise":  "Правка плана",
                  "expand_full":  "Развернуть полностью",
                  "expand_full_size":  "Развернуть полностью ({0}KB всего)",
                  "loading_dots":  "Загрузка…",

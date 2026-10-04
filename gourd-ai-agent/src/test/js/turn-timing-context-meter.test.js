@@ -27,6 +27,16 @@ const appCss = readStatic('css', 'app.css');
 const codeCss = readStatic('css', 'code.css');
 const contextJs = readStatic('js', 'app-context.js');
 const messageJs = readStatic('js', 'app-message.js');
+const streamingJs = readStatic('js', 'app-streaming.js');
+// WebStreamBuilder.java 是后端源（双 cwd 兼容：surefire 工作目录可能是仓库根或模块目录）
+const wsbJava = (() => {
+    const rel = path.join('src', 'main', 'java', 'com', 'gourdai', 'core', 'portal', 'web', 'WebStreamBuilder.java');
+    for (const base of [path.resolve(__dirname, '../../..'), path.resolve(__dirname, '../../../..')]) {
+        const p = path.join(base, rel);
+        if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+    }
+    return '';
+})();
 
 const LOCALES = ['de', 'el', 'en', 'es', 'fr', 'ja', 'pt', 'ro', 'ru', 'vi', 'zh-CN', 'zh-TW'];
 const CHAT_KEYS = ['turn_timing', 'elapsed_total', 'output_tps', 'ttft'];
@@ -83,7 +93,6 @@ test('chat.html：旧的上下文文本行已移除，进度圈含环/百分比/
     assert.match(meter, /transform="rotate\(-90 10 10\)"/, '0% 起点须落在 12 点方向');
     assert.match(meter, /id="chatContextMeterPct"/);
     assert.match(meter, /id="chatContextMeterRows"/);
-    assert.match(meter, /data-i18n-title="context\.meter_title"/);
     assert.match(meter, /data-i18n="context\.meter_title"/);
 
     // CSS 不再提供 dashoffset 初值（见样式侧回归护栏），空环初态改由 attribute 保证：
@@ -176,7 +185,7 @@ function loadContextApi($, opts) {
         return { buildContextModel, buildContextRows, renderContextMeter, restoreContextIndicator,
                  updateContextIndicator, applyContextLength, ctxFmtK, ctxFmtElapsed,
                  ctxLocalTurnAnchor, isContextRunLive, stopContextElapsedTick, settleContextElapsed,
-                 settledContextElapsed, syncContextElapsedTick,
+                 settledContextElapsed, syncContextElapsedTick, noteContextTurnStart,
                  __setActive: function (id) { activeSessionId = id; },
                  CONTEXT_RING_CIRCUMFERENCE };`);
     const api = factory($, i18n, fakeSetInterval);
@@ -426,7 +435,6 @@ test('app-message.js：详情卡只用 span、三行齐备；数据不足时退�
     const badge = sliceBetween(messageJs, 'function item(icon, val, pop)', 'var parts = []');
     assert.match(badge, /tabindex="0" role="button" aria-expanded="false"/,
         '触屏与读屏软件依赖显式语义，不能只靠 CSS :hover');
-    assert.match(badge, /title="' \+ esc\(GourdI18n\.t\('chat\.elapsed_time'\)\)/);
     assert.ok(!/has-pop" tabindex/.test(badge),
         '属性拼接不得再用「三元表达式接半截引号」的写法，漏一个引号就生成破碎 HTML');
     const assemble = sliceBetween(messageJs, 'var parts = [];', 'if (parts.length === 0) return;');
@@ -680,6 +688,63 @@ test('app-context.js：新轮自动作废旧定格值；切会话/无数据时�
     api.restoreContextIndicator(null);
     assert.equal(api.isContextRunLive(null), false);
     api.stopContextElapsedTick();
+});
+
+test('app-context.js：reason_start 提前作废旧定格值（新一轮起步阶段耗时行不再卡旧值）', () => {
+    // 回归护栏（真实事故）：context_size 帧要等新一轮第一次模型调用结束（onReasonEnd）才下发，
+    // 在此之前耗时行一直停在上一轮 trace 帧定格的旧值上。reason_start 携带 turnStartMs，
+    // 是「新一轮已开始」的最早信号，必须在起步阶段就作废旧定格值。
+    const { $, state } = makeMeterStub();
+    const api = loadContextApi($, { activeSessionId: 's1' });
+    const sess = { sessionId: 's1', isStreaming: true };
+
+    // 第 1 轮定格 52min18s（=3138000ms）
+    const turn1 = { totalTokens: 5000, createdAt: 1000, args: { contextLength: 256000, turnStartMs: 1000 } };
+    api.settleContextElapsed(sess, 3138000);
+    sess.lastContextChunk = turn1;
+    api.renderContextMeter(turn1, sess);
+    assert.ok(String(state.htmls['.context-meter-pop-body']).includes('52min'), '第 1 轮定格后显示 52min');
+    assert.ok(!sess._ctxElapsedTimer, '定格后 tick 已停');
+
+    // 第 2 轮发起：reason_start 到达（context_size 还没到）→ 耗时行必须立即重置走表
+    const newStart = Date.now() - 2000;
+    assert.equal(sess._ctxElapsedMs, 3138000, '调用前定格值仍在');
+    api.noteContextTurnStart(sess, newStart);
+    assert.equal(sess._ctxElapsedMs, undefined, '跨轮后定格值必须作废（由 renderContextMeter 内 settledContextElapsed 清除）');
+    const html = String(state.htmls['.context-meter-pop-body']);
+    assert.ok(!html.includes('52min'), 'reason_start 后不得再显示上一轮定格值 52min');
+    assert.ok(/(1s|2s|3s|<1s)/.test(html), 'reason_start 后按新起点重新走表，实际=' + html);
+    assert.ok(sess._ctxElapsedTimer, 'reason_start 后必须重建 tick');
+
+    // 幂等：同轮再次 reason_start（turnStartMs 不变）不得把已推进的值拉回起点
+    api.noteContextTurnStart(sess, newStart);
+    // 不同轮（turnStartMs 再变）应再次重置
+    api.noteContextTurnStart(sess, Date.now() - 500);
+    assert.ok(!String(state.htmls['.context-meter-pop-body']).includes('52min'));
+
+    // 越界保护：turnStartMs 非法时静默返回，不动现有状态
+    api.settleContextElapsed(sess, 3138000);
+    sess.lastContextChunk = turn1;
+    api.noteContextTurnStart(sess, 0);
+    api.noteContextTurnStart(null, newStart);
+    assert.ok(String(state.htmls['.context-meter-pop-body']).length >= 0, '非法入参不得抛错');
+    api.stopContextElapsedTick();
+});
+
+test('app-streaming.js：reason_start case 调用 noteContextTurnStart 并传 turnStartMs', () => {
+    // 结构契约：前端必须在 reason_start 时调用重置，否则修复链路断裂
+    assert.match(streamingJs, /case 'reason_start':[\s\S]{0,400}noteContextTurnStart\(sess, chunk\.args\.turnStartMs\)/,
+        'reason_start case 必须调用 noteContextTurnStart(sess, chunk.args.turnStartMs)');
+});
+
+test('WebStreamBuilder.java：reason_start 帧注入 args.turnStartMs', () => {
+    // 结构契约：后端必须给 reason_start 帧注入 turnStartMs，前端才能拿到新轮起点
+    assert.match(wsbJava, /onReasonStartEvent\(\(ReasonStartEvent\) chunk, turnStartMs\)/,
+        'mapEvent 必须把 turnStartMs 传给 onReasonStartEvent');
+    assert.match(wsbJava, /private WebChunk onReasonStartEvent\(ReasonStartEvent event, long turnStartMs\)/,
+        'onReasonStartEvent 签名必须接受 turnStartMs');
+    assert.match(wsbJava, /WebChunk wc = WebChunk\.ofReasonStart\(\);[\s\S]{0,300}args\.put\("turnStartMs", turnStartMs\)/,
+        'reason_start 帧必须注入 args.turnStartMs');
 });
 
 /* ===================== 五、新增行为：触屏开合 / 分母同步 / 历史清理 ===================== */

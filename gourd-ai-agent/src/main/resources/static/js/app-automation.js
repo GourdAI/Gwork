@@ -628,7 +628,7 @@
         var $sel = $('#autoWsSelector');
         if (!$sel.length) return;
         // 未选时 title 置空（不展示默认工作区路径），与聊天页 renderSelectors 一致
-        $('#autoWsName').text(workspaceLabel()).attr('title', formState.workspace || '');
+        $('#autoWsName').text(workspaceLabel());
         // 已选时才开启 hover 清除按钮（CSS 门控）
         $sel.toggleClass('ws-has-selection', !!formState.workspace);
 

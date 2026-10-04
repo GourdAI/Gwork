@@ -213,6 +213,50 @@ public class ReasonTask {
     private static final int TIMEOUT_FAILURE_LIMIT = 2;
 
     /**
+     * 收敛门禁把「隐式 END」改判为「继续执行」的次数上限。
+     *
+     * <p>背景（用户实测 work-mupc5nd0）：循环提醒/自我反思注入后，模型顺从指令字面输出
+     * 一句过渡性意图声明（无工具调用），被 NATIVE_TOOL 隐式结束分支判为最终答案——
+     * TODO 0/10 未完成 Loop 却「正常」结束。门禁在此类场景注入完成校验提示并续跑，
+     * 但必须设上限：若模型连续多次坚持纯文本回复（或上游持续异常导致每轮都无工具调用），
+     * 无上限的门禁会变成「模型想结束却永远结束不了」的新死循环。取 2：一次校验提示
+     * 足以纠正意图声明误判；两次仍不改，说明模型确实认为任务已到终点，尊重其回复。</p>
+     */
+    private static final int MAX_CONVERGE_DEFERRALS = 2;
+
+    /**
+     * 收敛门禁判定：隐式结束分支的纯文本回复是否应改判继续执行。
+     *
+     * <p>命中条件：① 注入过收敛导向指令且未消费（EXTRA_CONVERGE_PENDING）；② 改判次数
+     * 未达上限；③ 回复不含 finishMarker（显式完成语义直通）。抽为包级静态纯函数：
+     * 依赖 ReActAgent 实例的 run() 分支难以行为测试（源码扫描只能验结构验不了执行，
+     * 「if (false && …)」型变异会假绿），纯函数可直接驱动全部边界。</p>
+     */
+    static boolean shouldDeferImplicitEnd(ReActTrace trace, String clearContent, String finishMarker) {
+        return trace.isConvergePending()
+                && trace.getConvergeDeferredCount() < MAX_CONVERGE_DEFERRALS
+                && (finishMarker == null || !clearContent.contains(finishMarker));
+    }
+
+    /**
+     * 完成校验提示文案（第 deferred 次改判时注入工作记忆）。
+     *
+     * <p>抽为方法以便行为测试直接断言文案语义：必须同时引导「未完成则继续」与
+     * 「已完成则输出完整总结」两条出路，不得使用「直接输出 Final Answer」类
+     * 绝对化收敛指令（见 EXTRA_CONVERGE_PENDING 的背景说明）。</p>
+     */
+    static String completionCheckPromptFor(int deferred) {
+        return String.format(
+                "【系统提示：任务完成校验 (Completion Check)】\n" +
+                "检测到您输出了不含任何工具调用的纯文本回复，但这可能只是过渡性意图声明而非最终回答。请核验：\n" +
+                "1. **任务清单状态**：若仍有未完成事项（TODO / 计划未全部完成），请继续执行它们，不要停止；\n" +
+                "2. **若确已全部完成**：请重新输出面向用户的完整总结报告（已完成内容、验证结果与遗留事项）作为最终回答，不要只写一句意图声明。\n" +
+                "（第 %d/%d 次校验，之后将按普通最终回答处理）",
+                deferred, MAX_CONVERGE_DEFERRALS
+        );
+    }
+
+    /**
      * 单个工具调用的参数生成进度跟踪器（仅存活于一次流式请求内）。
      *
      * <p>分片协议只在首片携带 {@code id}/{@code name}，后续分片会退化，
@@ -427,6 +471,11 @@ public class ReasonTask {
                 );
 
                 trace.getWorkingMemory().addMessage(ChatMessage.ofUser(rethinkPrompt));
+                // 自我反思指令同样是收敛导向注入：打门禁标记，防止「反思后确认继续…」
+                // 这类意图声明被当作最终答案（实测 work-mupc5nd0 第二次提前终止正是此形态：
+                // 模型回复「反思后确认：继续读文件是有效收敛动作…然后一次性提交修改」，无工具调用，
+                // 被隐式 END 分支判完）。与 StopLoopInterceptor 注入同一标记、同一消费点。
+                trace.markConvergePending();
                 LOG.info("ReActAgent [{}] auto-rethink triggered at turn {}", config.getName(), currentTurn);
             }
         } else {
@@ -673,6 +722,26 @@ public class ReasonTask {
         // [逻辑 5: 路由判断 - 文本 ReAct 协议解析]
         if (trace.getConfig().getStyle() == ReActStyle.NATIVE_TOOL) {
             if (Assert.isNotEmpty(clearContent)) {
+                // [收敛门禁] 注入过收敛导向指令（循环提醒/自我反思）后，模型的纯文本回复
+                // 可能只是顺从指令的过渡性意图声明（「取证够了，直接修两个 P0」），并非
+                // 面向用户的最终回答。此时不立即判 END：注入完成校验提示并续跑，让模型
+                // 要么继续执行未完成事项，要么输出完整总结（详见 EXTRA_CONVERGE_PENDING）。
+                // 上限防真死循环：模型坚持纯文本 MAX 次后尊重其回复按最终答案处理。
+                if (shouldDeferImplicitEnd(trace, clearContent, config.getFinishMarker())) {
+                    int deferred = trace.consumeConvergePending();
+                    // 意图声明进历史（否则校验提示紧跟上一条 user 消息，模型看不到自己说过什么）
+                    trace.getWorkingMemory().addMessage(responseMessage);
+                    trace.getWorkingMemory().addMessage(ChatMessage.ofUser(completionCheckPromptFor(deferred)));
+                    // 重新置位：下一次纯文本回复仍受门禁约束，直到改判次数达上限
+                    trace.markConvergePending();
+                    trace.setRoute(ReActAgent.ID_REASON);
+                    LOG.warn("ReActAgent [{}] converge gate deferred implicit END ({}), intent-declaration "
+                            + "suspected, completion check injected (deferred {}/{}).",
+                            config.getName(), clearContent.length() > 60
+                                    ? clearContent.substring(0, 60) : clearContent,
+                            deferred, MAX_CONVERGE_DEFERRALS);
+                    return;
+                }
                 trace.setRoute(Agent.ID_END);
                 trace.setFinalAnswer(clearContent, false);
                 return;
@@ -1168,19 +1237,27 @@ public class ReasonTask {
             LOG.warn("ReActAgent [{}] call failed", config.getName(), lastException);
         }
 
-        // 设置故障状态并终止路由
+        // 设置故障状态并终止路由（abnormal 由 setFinalAnswer 单参重载置位，
+        // 是 canResume 续跑判定的既有信号，保留不动）
         trace.setRoute(Agent.ID_END);
         trace.removeExtra(ATTR_LAST_MODEL_ERROR);
 
+        // 文案口径：必须告知「已保留断点、发消息即可续跑」。
+        // 旧文案「请稍后重试」会误导用户重述整个任务：实际上三端（Web/Ws/Cli）已实现
+        // 中断续跑（canResume→prepareResume 保留断点工作记忆），用户只要再发任意消息
+        // （如「继续」）即可从断点接着跑，不丢已消耗的上下文。
+        // 另一个分支口径不变：子代理同理（TaskTalent 委派的子代理同受本方法保护）。
+        String resumeHint = "任务已中断并保留断点。直接发送任意消息（如“继续”）即可从断点继续，无需重述任务。";
+
         if (lastException instanceof LlmNoReturnException) {
-            trace.setFinalAnswer("抱歉，模型服务没有内容返回。请稍后重试。");
+            trace.setFinalAnswer("抱歉，模型服务没有内容返回。" + resumeHint);
         } else if (lastException instanceof TimeoutException ||
                 lastException.getCause() instanceof TimeoutException) {
-            trace.setFinalAnswer("抱歉，模型服务响应超时。请稍后重试。");
+            trace.setFinalAnswer("抱歉，模型服务响应超时。" + resumeHint);
         } else {
             // 直接展示供应商返回的真实错误（状态码 + 返回体 error.message），
             // 替代原先携带异常类全名与 URL 的裸异常串
-            trace.setFinalAnswer("抱歉，模型服务调用失败：" + LlmErrorMessages.describe(lastException) + "。请稍后重试。");
+            trace.setFinalAnswer("抱歉，模型服务调用失败：" + LlmErrorMessages.describe(lastException) + "。" + resumeHint);
         }
 
         return null;

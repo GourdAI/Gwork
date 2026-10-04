@@ -151,6 +151,30 @@ public class ReActTrace implements AgentTrace {
     public static final String EXTRA_STEER_CONTINUE_TURN = "_steer_continue_turn";
 
     /**
+     * extras 键：注入过收敛导向指令（循环提醒 / 自我反思）且未被消费时置位（Boolean.TRUE）。
+     *
+     * <p>背景（用户实测 work-mupc5nd0）：循环检测误判后注入的软提醒含「直接输出 Final Answer
+     * 结束任务」指令，模型顺从地回了一句过渡性意图声明（如「取证够了，直接修两个 P0」）而
+     * 无任何工具调用；NATIVE_TOOL 模式下 ReasonTask 对「有正文 + 无工具调用」无条件判 END，
+     * 引擎把意图声明当成最终答案——TODO 0/10 未完成 Loop 却「正常」结束。</p>
+     *
+     * <p>置位时机：StopLoopInterceptor 注入循环提醒、ReasonTask 注入 auto-rethink 自我反思。
+     * 消费时机：ReasonTask 的隐式结束分支——若模型首个纯文本回复无完成语义，改判「继续执行」
+     * 并注入完成校验提示（消费即清零，次数上限防真死循环）。健康流程（无注入）恒不存在此键，
+     * 不改变任何现有行为。该键随快照落盘。</p>
+     */
+    public static final String EXTRA_CONVERGE_PENDING = "_converge_pending";
+
+    /**
+     * extras 键：收敛门禁已改判继续的次数（Integer，AtomicInteger 不可序列化）。
+     *
+     * <p>与 {@link #EXTRA_CONVERGE_PENDING} 配套：门禁每次把隐式 END 改判为继续时 +1，
+     * 达到上限后不再拦截（防止「模型坚持想结束但门禁不放行」的真死循环——上限后尊重模型
+     * 的文本回复，按正常最终答案处理）。</p>
+     */
+    public static final String EXTRA_CONVERGE_DEFERRED_COUNT = "_converge_deferred_count";
+
+    /**
      * extras 键：用户主动停止（interrupt）且任务未完成时置位（Boolean.TRUE）。
      *
      * <p>用户取消不经过库的异常兜底（abnormal 不会置位），执行流最终停在 route=END
@@ -201,6 +225,35 @@ public class ReActTrace implements AgentTrace {
     /** 清除「用户主动停止」续跑标记（续跑已消费或新任务重置）。 */
     public void clearUserInterrupted() {
         extras.remove(EXTRA_USER_INTERRUPTED);
+    }
+
+    /** 是否存在待消费的收敛导向注入（见 {@link #EXTRA_CONVERGE_PENDING}）。 */
+    public boolean isConvergePending() {
+        return Boolean.TRUE.equals(extras.get(EXTRA_CONVERGE_PENDING));
+    }
+
+    /** 置位收敛门禁标记（循环提醒 / 自我反思注入时调用）。 */
+    public void markConvergePending() {
+        extras.put(EXTRA_CONVERGE_PENDING, Boolean.TRUE);
+    }
+
+    /**
+     * 消费收敛门禁标记并累加改判次数。
+     *
+     * @return 本次消费后累计的改判次数（1 起步）
+     */
+    public int consumeConvergePending() {
+        extras.remove(EXTRA_CONVERGE_PENDING);
+        Integer count = (Integer) extras.get(EXTRA_CONVERGE_DEFERRED_COUNT);
+        int next = (count == null ? 0 : count) + 1;
+        extras.put(EXTRA_CONVERGE_DEFERRED_COUNT, next);
+        return next;
+    }
+
+    /** 收敛门禁累计改判次数（未改判过为 0）。 */
+    public int getConvergeDeferredCount() {
+        Integer count = (Integer) extras.get(EXTRA_CONVERGE_DEFERRED_COUNT);
+        return count == null ? 0 : count;
     }
 
     public ReActTrace() {

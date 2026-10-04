@@ -230,7 +230,11 @@
                 "memory_view":  "心智记忆",
                 "chat_workspace":  {
                                        "switch":  "切换工作空间",
-                                       "clear":  "清除选择"
+                                       "clear":  "清除选择",
+                                       "search_placeholder":  "搜索项目…",
+                                       "search_no_results":  "未找到匹配的项目",
+                                       "remote_connect":  "远程连接",
+                                       "locate_multiple":  "找到多个同名目录，请选择："
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "加载失败，点击重试",
@@ -842,6 +846,8 @@
                  "question_recommended":  "推荐",
                  "question_detail_expand":  "展开",
                  "question_detail_collapse":  "收起",
+                  "question_collapse":  "收起",
+                  "question_expand":  "展开",
                  "question_record_title":  "我的回答",
                  "question_answered":  "已提交",
                  "question_skipped":  "已跳过",
@@ -876,6 +882,13 @@
                  "tool_openapi":  "接口调用",
                  "tool_lsp":  "代码分析",
                  "tool_memory":  "记忆",
+                 "tool_recall":  "回溯历史",
+                 "tool_ask_user":  "向用户提问",
+                 "tool_config":  "扩展配置",
+                 "tool_clock":  "当前时间",
+                 "tool_plan":  "制定计划",
+                 "tool_plan_progress":  "推进计划",
+                 "tool_plan_revise":  "修订计划",
                  "expand_full":  "展开全文",
                  "expand_full_size":  "展开全文（共 {0}KB）",
                  "loading_dots":  "加载中…",

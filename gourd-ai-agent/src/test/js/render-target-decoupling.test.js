@@ -178,10 +178,13 @@ test('回放只切换渲染落点，绝不替换 sess.container', () => {
 
 test('渲染落点覆盖全部建节点入口（append / find 新建节点）', () => {
     // 这些函数会在回放期被调用，必须落在临时容器，否则回放内容直接写进真实容器造成错乱
+    /* appendSteerNote 入列：插话回放走 app-history.js replayChunk 的 steer_applied 专用分支，
+       回放期同样会在游离临时容器里被调用；若它直接往 sess.container 建节点，
+       插话气泡会绕过回放分页/锤点机制直接插进真实容器。 */
     const mustUseRoot = [
         'appendUserMessage', 'appendSystemNotice', 'ensureAssistantBubble',
         'showThinking', 'takeoverArgsStreamingCard', 'removeOrphanArgsStreamingCards',
-        'handleRewind'
+        'handleRewind', 'appendSteerNote'
     ];
     for (const name of mustUseRoot) {
         const body = fnBody(messageJs, name);
@@ -219,6 +222,19 @@ test('appendUserMessage：回放期必须靠落点判定跳过滚动', () => {
     assert.match(body, /!isDetachedRenderTarget\(sess\)/,
         '容器语义恒定后 document.contains 恒为真，必须显式判定落点是否游离，否则回放期每条消息都会抢滚视口');
     assert.match(body, /document\.contains\(sess\.container\)/, '真实容器的存在性检查仍需保留');
+});
+
+test('appendSteerNote：滚动守卫与 appendUserMessage 同口径（四条件全齐）', () => {
+    /* 插话气泡同样在回放期创建：守卫少写一项就会在回放中抢滚视口，
+       或者把非活动会话的插话滚到用户眼前。 */
+    const body = fnBody(messageJs, 'appendSteerNote');
+    assert.match(body, /sess\.sessionId === activeSessionId/, '必须限定活动会话');
+    assert.match(body, /!sess\._skipScroll/, '必须尊重回放的静默滚动开关');
+    assert.match(body, /!isDetachedRenderTarget\(sess\)/, '落点游离时不得滚动');
+    assert.match(body, /document\.contains\(sess\.container\)/, '真实容器的存在性检查仍需保留');
+    // 四个条件必须在同一个 if 里以 && 串联，拆开成嵌套或遗漏任一都会造成抢滚
+    assert.match(body, /if \(sess\.sessionId === activeSessionId && !sess\._skipScroll && !isDetachedRenderTarget\(sess\)\s*\n?\s*&& document\.contains\(sess\.container\)\) scrollToBottom\(true\);/,
+        '四条件必须合为一个滚动守卫表达式');
 });
 
 /* ===== 五、异常兜底：任何失败都不得留下僵死态 ===== */

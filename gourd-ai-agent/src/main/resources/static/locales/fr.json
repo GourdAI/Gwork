@@ -230,7 +230,11 @@
                 "memory_view":  "Mémoire mentale",
                 "chat_workspace":  {
                                        "switch":  "Changer d\u0027espace de travail",
-                                       "clear":  "Effacer la sélection"
+                                       "clear":  "Effacer la sélection",
+                                       "search_placeholder":  "Rechercher des projets…",
+                                       "search_no_results":  "Aucun projet correspondant",
+                                       "remote_connect":  "Connexion distante",
+                                       "locate_multiple":  "Plusieurs dossiers homonymes trouvés, sélectionnez-en un :"
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "Échec du chargement, cliquez pour réessayer",
@@ -842,6 +846,8 @@
                  "question_recommended":  "Recommandé",
                  "question_detail_expand":  "Déplier",
                  "question_detail_collapse":  "Replier",
+                  "question_collapse":  "Réduire",
+                  "question_expand":  "Développer",
                  "question_record_title":  "Ma réponse",
                  "question_answered":  "Envoyé",
                  "question_skipped":  "Ignoré",
@@ -876,6 +882,13 @@
                  "tool_openapi":  "Appel API",
                  "tool_lsp":  "Analyse de code",
                  "tool_memory":  "Mémoire",
+                 "tool_recall":  "Rappel d’historique",
+                 "tool_ask_user":  "Demander à l’utilisateur",
+                 "tool_config":  "Config. extensions",
+                 "tool_clock":  "Heure actuelle",
+                 "tool_plan":  "Plan",
+                 "tool_plan_progress":  "Avancer le plan",
+                 "tool_plan_revise":  "Réviser le plan",
                  "expand_full":  "Développer tout",
                  "expand_full_size":  "Développer tout ({0} Ko)",
                  "loading_dots":  "Chargement…",

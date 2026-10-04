@@ -17,7 +17,7 @@
  * 语音识别、剪贴板等能力可用（自定义协议 app:// 会禁用这些）。详见 ui-server.js。
  */
 
-const { app, BrowserWindow, screen, Menu, Tray, ipcMain, nativeImage, session, shell } = require('electron');
+const { app, BrowserWindow, screen, Menu, Tray, dialog, ipcMain, nativeImage, session, shell } = require('electron');
 const path = require('path');
 
 // 主进程日志落盘必须最先安装：backend.js 里的端口分配 / java 探测明细 /
@@ -561,6 +561,26 @@ ipcMain.handle('restart-backend', async () => {
     autoRestartTimer = null;
   }
   return restartBackend('manual');
+});
+
+// 系统原生文件夹选择对话框（工作区「打开文件夹」主路径，见 preload.js pickDirectory）。
+// 必须走主进程 dialog.showOpenDialog：网页侧任何 input/showDirectoryPicker 方案在桌面
+// 都会带出浏览器语义的「上传」文案与确认条，与原生应用体验不符。
+// 取消（canceled）或异常一律返回 null，前端静默忽略，不弹任何提示。
+ipcMain.handle('pick-directory', async (event) => {
+  try {
+    const win = senderWindow(event);
+    const res = await dialog.showOpenDialog(win, {
+      title: '选择工作区文件夹',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (res && res.canceled) return null;
+    const p = res && res.filePaths && res.filePaths[0];
+    return typeof p === 'string' && p ? p : null;
+  } catch (e) {
+    console.error('[gourd-ai-desktop] pick-directory 失败', e);
+    return null;
+  }
 });
 
 /**

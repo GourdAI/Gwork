@@ -280,8 +280,29 @@ public final class BackgroundNoticeCenter {
 
     /**
      * 一条后台任务完成通知。
+     *
+     * <p>两类载荷共用本类型，由 {@link #kind()} 区分渲染口径与后续指引：</p>
+     * <ul>
+     *   <li>{@link #KIND_BASH}：bash {@code run_in_background=true} 的进程结束事件，
+     *       载荷是命令/退出码/尾部输出，后续指引指向 {@code bash_output}。</li>
+     *   <li>{@link #KIND_SUBAGENT}：{@code task}/{@code multitask} 以 {@code background=true}
+     *       提交的子代理完成事件，载荷是 token/代理名/结果摘要，后续指引指向 {@code await_tasks}。</li>
+     * </ul>
+     *
+     * <p>消费端（{@code ReasonTask#injectBackgroundNotices}）只调 {@link #render()}、不读任何字段，
+     * 故新增种类无需改动推理链路。</p>
      */
     public static final class Notice {
+
+        /** 通知种类：bash 后台命令。 */
+        public static final String KIND_BASH = "bash";
+
+        /** 通知种类：后台子代理任务。 */
+        public static final String KIND_SUBAGENT = "subagent";
+
+        private final String kind;
+
+        // ---- bash 载荷（子代理通知恒为默认值）----
         private final String sessionId;
         private final String command;
         private final Integer exitCode;
@@ -290,8 +311,19 @@ public final class BackgroundNoticeCenter {
         private final long wallTimeMs;
         private final String tailOutput;
 
-        public Notice(String sessionId, String command, Integer exitCode, boolean timedOut,
-                      boolean terminated, long wallTimeMs, String tailOutput) {
+        // ---- 子代理载荷（bash 通知恒为 null/false）----
+        private final String token;
+        private final Integer index;
+        private final String agentName;
+        private final String description;
+        private final boolean success;
+        private final String resultSummary;
+
+        private Notice(String kind, String sessionId, String command, Integer exitCode, boolean timedOut,
+                       boolean terminated, long wallTimeMs, String tailOutput,
+                       String token, Integer index, String agentName, String description,
+                       boolean success, String resultSummary) {
+            this.kind = kind;
             this.sessionId = sessionId;
             this.command = command;
             this.exitCode = exitCode;
@@ -299,6 +331,45 @@ public final class BackgroundNoticeCenter {
             this.terminated = terminated;
             this.wallTimeMs = wallTimeMs;
             this.tailOutput = tailOutput;
+            this.token = token;
+            this.index = index;
+            this.agentName = agentName;
+            this.description = description;
+            this.success = success;
+            this.resultSummary = resultSummary;
+        }
+
+        /**
+         * 构造 bash 后台命令完成通知。
+         *
+         * <p>签名与引入子代理通知之前<b>逐字一致</b>：调用方（TerminalTalent）与既有测试无需改动。</p>
+         */
+        public Notice(String sessionId, String command, Integer exitCode, boolean timedOut,
+                      boolean terminated, long wallTimeMs, String tailOutput) {
+            this(KIND_BASH, sessionId, command, exitCode, timedOut, terminated, wallTimeMs, tailOutput,
+                    null, null, null, null, false, null);
+        }
+
+        /**
+         * 构造后台子代理完成通知。
+         *
+         * @param token         await_tasks 收取完整结果所需的凭证，不可为空（缺了它模型无从取回结果）
+         * @param index         批量提交时的任务序号；单任务提交传 null（渲染时省略该字段，
+         *                      避免把非批量任务误报成「第 1 个」）
+         * @param agentName     子代理名称
+         * @param description   任务摘要
+         * @param success       future 是否正常完成（异常完成为 false）
+         * @param resultSummary 结果摘要，<b>调用方必须已截断</b>：本消息会随历史被后续每轮重发，
+         *                      未截断的长结果会为省一次轮询而放大数倍 token
+         */
+        public static Notice ofSubagent(String token, Integer index, String agentName, String description,
+                                        boolean success, String resultSummary) {
+            return new Notice(KIND_SUBAGENT, null, null, null, false, false, 0L, null,
+                    token, index, agentName, description, success, resultSummary);
+        }
+
+        public String kind() {
+            return kind;
         }
 
         public String sessionId() {
@@ -329,13 +400,41 @@ public final class BackgroundNoticeCenter {
             return tailOutput;
         }
 
+        public String token() {
+            return token;
+        }
+
+        public Integer index() {
+            return index;
+        }
+
+        public String agentName() {
+            return agentName;
+        }
+
+        public String description() {
+            return description;
+        }
+
+        public boolean success() {
+            return success;
+        }
+
+        public String resultSummary() {
+            return resultSummary;
+        }
+
         /**
          * 渲染为注入工作记忆的文本。
          *
          * <p>刻意保持精简：这条消息会随历史被后续每轮重发，冗长的输出会持续放大 token 成本。
-         * 只给「结论 + 少量尾部输出」，需要完整内容时模型可自行调用 bash_output。</p>
+         * 只给「结论 + 少量内容」，需要完整内容时模型可自行调用对应查询工具。</p>
          */
         public String render() {
+            return KIND_SUBAGENT.equals(kind) ? renderSubagent() : renderBash();
+        }
+
+        private String renderBash() {
             StringBuilder sb = new StringBuilder();
             sb.append("[后台任务完成] session_id=").append(sessionId);
             if (timedOut) {
@@ -358,6 +457,37 @@ public final class BackgroundNoticeCenter {
                 sb.append("(无输出)\n");
             }
             sb.append("如需完整输出，可用 bash_output 查询该 session_id。");
+            return sb.toString();
+        }
+
+        /**
+         * 子代理通知的渲染。
+         *
+         * <p>{@code status} 只表达「future 是否正常完成」，不表达业务成败——业务成败在
+         * {@code resultSummary} 里的 {@code <result_status>} 中，由 taskDo 如实填写。
+         * 此处不试图解析摘要去推断业务状态：字符串解析脆弱，且会与摘要自相矛盾。</p>
+         */
+        private String renderSubagent() {
+            StringBuilder sb = new StringBuilder();
+            sb.append("[后台子代理完成] token=").append(token);
+            if (index != null) {
+                sb.append(" index=").append(index);
+            }
+            sb.append(" agent_name=").append(agentName == null ? "unknown" : agentName);
+            sb.append(" status=").append(success ? "finished" : "failed");
+            sb.append('\n');
+            if (description != null && description.isEmpty() == false) {
+                sb.append("description: ").append(description).append('\n');
+            }
+            if (resultSummary != null && resultSummary.isEmpty() == false) {
+                sb.append("result:\n").append(resultSummary);
+                if (resultSummary.endsWith("\n") == false) {
+                    sb.append('\n');
+                }
+            } else {
+                sb.append("(无结果内容)\n");
+            }
+            sb.append("如需完整结果，可用 await_tasks 传入该 token 收取；无需轮询。");
             return sb.toString();
         }
     }

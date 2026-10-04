@@ -4,7 +4,7 @@
     <!-- Code 模式：编辑器与右侧对话栏之间的拖拽手柄（改变对话栏宽度）。靠 flex order 夹在二者之间 -->
     <div class="code-chat-resize-handle" id="codeChatResizeHandle"></div>
     <!-- Code 模式：对话栏收起后，右侧边缘的悬浮展开按钮 -->
-    <button class="code-chat-expand-btn" id="codeChatExpandBtn" title="展开对话栏" data-i18n-title="code.expandChat">
+    <button class="code-chat-expand-btn" id="codeChatExpandBtn">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
     <!-- chat 模式：聊天与审查查看器之间的独立分隔手柄（仅 viewer-open 时显示） -->
@@ -22,7 +22,7 @@
                     <span class="git-viewer-sep">/</span>
                     <span class="git-viewer-file" id="gitViewerFile"></span>
                 </div>
-                <button class="git-viewer-close" id="gitViewerClose" title="关闭 (Esc)" data-i18n-title="git.close">
+                <button class="git-viewer-close" id="gitViewerClose">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                 </button>
             </div>
@@ -88,13 +88,13 @@
                     <span data-i18n="code.terminal.title">终端</span>
                 </div>
                 <div class="code-terminal-actions">
-                    <button class="code-terminal-act-btn" id="codeTerminalClearBtn" title="清屏" data-i18n-title="code.terminal.clear">
+                    <button class="code-terminal-act-btn" id="codeTerminalClearBtn">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                     </button>
-                    <button class="code-terminal-act-btn" id="codeTerminalRestartBtn" title="重启终端" data-i18n-title="code.terminal.restart">
+                    <button class="code-terminal-act-btn" id="codeTerminalRestartBtn">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                     </button>
-                    <button class="code-terminal-act-btn" id="codeTerminalCloseBtn" title="隐藏终端" data-i18n-title="code.terminal.hide">
+                    <button class="code-terminal-act-btn" id="codeTerminalCloseBtn">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                     </button>
                 </div>
@@ -106,7 +106,7 @@
 </template>
 <template data-mount="body">
 <!-- File Tree Panel (chat 模式在右侧；code 模式移到左侧) -->
-    <button class="filer-panel-toggle-btn collapsed" id="filerToggleBtn" title="展开文件树" data-i18n-title="code.project.expandTree">‹</button>
+    <button class="filer-panel-toggle-btn collapsed" id="filerToggleBtn">‹</button>
     <div class="filer-resize-handle" id="filerResizeHandle"></div>
     <div class="filer-panel collapsed" id="filerPanel">
         <div class="filer-content">
@@ -147,7 +147,7 @@
             <div class="filer-search-bar">
                 <svg class="filer-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                 <input type="text" class="filer-search-input" id="filerSearchInput" placeholder="搜索文件..." data-i18n-placeholder="code.project.search" />
-                <button class="filer-search-clear" id="filerSearchClear" title="清除" style="display:none" data-i18n-title="code.project.clearSearch">
+                <button class="filer-search-clear" id="filerSearchClear" style="display:none">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                 </button>
             </div>
@@ -208,7 +208,7 @@
             <div class="git-diff-panel" id="gitDiffPanel" style="display:none">
                 <div class="git-diff-header">
                     <div class="git-header-left">
-                        <label class="git-select-all-label" title="全选/取消全选" data-i18n-title="git.selectAll">
+                        <label class="git-select-all-label">
                             <input type="checkbox" id="gitSelectAll" checked/>
                         </label>
                     </div>
@@ -216,7 +216,7 @@
                         <span class="git-branch" id="gitBranch">--</span>
                     </div>
                     <div class="git-header-right">
-                        <button class="git-refresh-btn" id="gitRefreshBtn" title="刷新变更列表" data-i18n-title="git.refresh">
+                        <button class="git-refresh-btn" id="gitRefreshBtn">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                         </button>
                     </div>
@@ -226,7 +226,7 @@
                     <div class="input-resize-handle" data-i18n-title="app.resize_input"></div>
                     <textarea class="git-commit-input" id="gitCommitMsg" placeholder="审查摘要..." rows="1" data-i18n-placeholder="git.commitSummary"></textarea>
                     <div class="git-commit-actions">
-                        <button class="git-summary-btn" id="gitSummaryBtn" title="AI 生成变更摘要" data-i18n-title="git.summaryAI" data-i18n="git.generateSummary">
+                        <button class="git-summary-btn" id="gitSummaryBtn" data-i18n="git.generateSummary">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8L19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2L19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2L11 5"/></svg>
                             生成摘要
                         </button>

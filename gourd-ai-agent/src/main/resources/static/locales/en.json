@@ -230,7 +230,11 @@
                 "memory_view":  "Mental Memory",
                 "chat_workspace":  {
                                        "switch":  "Switch workspace",
-                                       "clear":  "Clear selection"
+                                       "clear":  "Clear selection",
+                                       "search_placeholder":  "Search projects…",
+                                       "search_no_results":  "No matching projects",
+                                       "remote_connect":  "Remote connect",
+                                       "locate_multiple":  "Multiple folders with the same name found, pick one:"
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "Load failed, click to retry",
@@ -842,6 +846,8 @@
                  "question_recommended":  "Recommended",
                  "question_detail_expand":  "Expand",
                  "question_detail_collapse":  "Collapse",
+                  "question_collapse":  "Collapse",
+                  "question_expand":  "Expand",
                  "question_record_title":  "My answer",
                  "question_answered":  "Submitted",
                  "question_skipped":  "Skipped",
@@ -876,6 +882,13 @@
                  "tool_openapi":  "API Call",
                  "tool_lsp":  "Code Analysis",
                  "tool_memory":  "Memory",
+                 "tool_recall":  "Recall History",
+                 "tool_ask_user":  "Ask User",
+                 "tool_config":  "Extension Setup",
+                 "tool_clock":  "Current Time",
+                 "tool_plan":  "Plan",
+                 "tool_plan_progress":  "Advance Plan",
+                 "tool_plan_revise":  "Revise Plan",
                  "expand_full":  "Expand All",
                  "expand_full_size":  "Expand All ({0}KB total)",
                  "loading_dots":  "Loading…",

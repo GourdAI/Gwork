@@ -216,6 +216,11 @@ function evictInactiveSessions() {
         sess._fileChangesReplayPending = null;
         sess._fchRenderPending = null;
         sess._fchReconcilePending = null;
+        // 插话幂等/在途登记表必须随 DOM 一起清空：容器已被 empty()，但 steerResolved 里的旧
+        // steerId 仍会拦住重新进入会话时回放还原出的同一插话（表现为「刷新后插话气泡消失」）；
+        // steerPending 则是已随 DOM 消失的待受理项，留着只会让迟到的 HTTP 回调改写幽灵状态。
+        sess.steerResolved = {};
+        sess.steerPending = {};
     }
 }
 

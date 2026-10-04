@@ -285,8 +285,9 @@ class StreamStallRecoveryTest {
 
     /** 契约 4（2026-09-18 弱网拆分）：帧间空闲独立预算——帧间隔超过配置超时、
      *  但在帧间下限（15s）内的慢流不再被误杀。旧实现 TTFT 与帧间共用配置值，
-     *  帧间隔 400ms > 配置 300ms 必杀；拆分后 TTFT=配置值、帧间=clamp(15s,60s)，
-     *  慢流放行交由上层按真实完成处理。 */
+     *  帧间隔 400ms > 配置 300ms 必杀；拆分后 TTFT=配置值、帧间=clamp(配置, [15s, 10min])
+     *  （2026-09-30 误杀修复：原为固定 [15s, 60s]，60s 上限会误杀帧间隔合法 >60s 的
+     *  推理型模型慢流），慢流放行交由上层按真实完成处理。 */
     @Test
     void interFrameGapBeyondConfiguredTimeoutMustNotBeKilled() throws Exception {
         try (SseMock mock = new SseMock((ex, hit) -> {

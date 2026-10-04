@@ -22,7 +22,6 @@ import com.gourdai.ai.chat.ChatSession;
 import com.gourdai.ai.chat.talent.AbsTalent;
 import com.gourdai.ai.chat.prompt.Prompt;
 import org.noear.solon.annotation.Param;
-import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Preview;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -105,6 +104,19 @@ public class MemoryTalent extends AbsTalent {
 
     /**
      * 充当 Designer 引导逻辑，动态加载心智模型
+     *
+     * <p><b>为何必须在 getInstruction 里注入，而不能改到 onAttach：</b>
+     * 曾尝试把记忆预览改为 {@code onAttach} 内 {@code prompt.addMessage(ChatMessage.ofSystem(...))}，
+     * 目的是让 getInstruction 保持静态以命中 API 前缀缓存。<b>该方案会静默丢功能</b>：
+     * ReActAgent.call 的顺序是「先把 prompt.getMessages() 拷进 workingMemory/session（L224-232），
+     * 再调 trace.activeTalents() 触发 onAttach（L244）」，而 ReasonTask 组装出站消息只用
+     * {@code ofSystem(systemPromptBuf)} + {@code workingMemory.getMessages()}，从不重读 originalPrompt。
+     * 故 onAttach 补的那条消息拷贝时已错过，既不进 workingMemory 也不落 session，模型永远看不到记忆。</p>
+     *
+     * <p>另一个前提是错的：ReActAgent 的 system prompt 本身每轮都在重组（计划看板、
+     * currentStepNum、HITL 上下文均为动态内容），前缀缓存在该架构下本就不可能命中，
+     * 「移出动态内容以支持缓存」无从谈起。若将来真要做前缀缓存，必须连同 ReasonTask 的
+     * 动态块一并重新设计，而不是单把记忆搬走。</p>
      */
     @Override
     public String getInstruction(Prompt prompt) {
@@ -153,27 +165,21 @@ public class MemoryTalent extends AbsTalent {
         return "## 长期记忆与心智演进指南 (存储域: " + scope + ")\n" +
                 "你拥有自主维护用户心智模型的能力。请实时提取对话中的价值点，并维持认知的一致性。\n\n" +
                 "### 1. 当前核心认知预览：\n" +
-                (Assert.isEmpty(mentalModel) ? "- (暂无核心认知，请通过交流逐步构建用户画像)" : mentalModel) +
+                (Utils.isEmpty(mentalModel) ? "- (暂无核心认知，请通过交流逐步构建用户画像)" : mentalModel) +
                 "\n\n### 2. 记忆提取评分标准 (importance)：\n" +
-                "- **1-3 (琐碎事实)**：临时的任务细节、单次提及的背景（如：当前处理的文件名）。\n" +
-                "- **4-6 (行为偏好)**：用户展现出的习惯、常用的工具偏好、反复提及的关注点。\n" +
-                "- **7-9 (核心规约)**：项目的架构定义、长期的技术选型、用户明确要求的行为准则。\n" +
-                "- **10 (生命周期关键点)**：足以改变后续所有对话逻辑的重大发现或用户身份定论。\n\n" +
+                "- 1-3 琐碎事实；4-6 偏好习惯；7-9 核心规约；10 生命周期定论。\n\n" +
                 "### 3. 立即写入触发清单（无需用户提示，当轮就调用 `memory_extract`）：\n" +
-                "以下情形一旦出现，**不要等用户开口**，立即把它固化为记忆；判断只有一个：这条是否跨会话仍有用。\n" +
-                "- **用户否决/撤回了你的做法** → 写 Imp 7-9：记清「他否决了什么、原话要点、正确做法」，避免下次重犯。\n" +
-                "- **用户纠正了你的结论或操作**（“不对，应该…”“你在瞎改”“这个之前说过”）→ 写 Imp 7-9。\n" +
-                "- **踩坑复盘：定位到一个非显而易见的根因**，或推翻了“以为能 X 其实不能/反之”的认知 → 写 Imp 6-8。\n" +
-                "- **跨会话要接着做的事**：设计契约、待办、当前进度、被否决而不可重做的方案 → 写 Imp 6-8。\n" +
-                "- **用户明确表达偏好**（工具、风格、流程、技术选型）→ 写 Imp 4-6。\n" +
-                "- 拿不准算不算“教训/噪音”时，只问一句“这条我记进记忆，要不要”，不要停下手里的活。\n" +
-                "- 已被否决/撤回的旧记忆：不要删证据，改为在内容前标注状态（如“【已撤回】”）并追加教训，再 `memory_extract` 覆盖同 Key。\n\n" +
-                "### 4. 认知维护指令：\n" +
-                "- **发现冲突时**：若新事实与“核心认知预览”冲突，必须调用 `memory_extract` 更新，并根据返回的 `[认知对比]` 向用户确认或在回复中体现认知的修正。\n" +
-                "- **碎片过多时**：当你发现检索到多个关于同一主题的低分记录（Imp < 5），应主动调用 `memory_consolidate` 将其升维为一条高分偏好（Imp >= 7）。\n" +
-                "- **标题规约**：每条新记忆必须提供 `title`：用自然语言概括核心事实，具体、可独立理解，建议 8-30 字；不要复制内部 Key、不要使用 snake_case、不要添加“记忆/关于”等空泛前缀。\n" +
-                "- **列出全部时**：当用户问“记住了哪些/有哪些记忆”时，调用 `memory_search('*')` 获取全部条目索引（标题 + Key + 摘要），需要细节再用 `memory_recall` 按 Key 召回。\n" +
-                "- **时效性原则**：永远以时间戳（Time）最近的认知记录为准。";
+                "- 用户否决/纠正你的做法 → Imp 7-9，记清否决内容与正确做法，避免重犯。\n" +
+                "- 踩坑根因（非显而易见）、推翻认知 → Imp 6-8。\n" +
+                "- 跨会话要接着做的事（待办/进度/设计契约）→ Imp 6-8。\n" +
+                "- 用户明确表达偏好（工具/风格/选型）→ Imp 4-6。\n" +
+                "- 已否决旧记忆：标注【已撤回】后追加教训，memory_extract 覆盖同 Key。\n\n" +
+                "### 4. 认知维护：\n" +
+                "- 新事实与预览冲突时调用 `memory_extract` 更新（根据返回的[认知对比]在回复中体现修正）。\n" +
+                "- 同主题低分记录（Imp<5）超过2条时调用 `memory_consolidate` 升维。\n" +
+                "- title 须自然语言短标题（8-30字），不复制 Key，不用 snake_case。\n" +
+                "- 用户问\"有哪些记忆\"时调用 `memory_search('*')`，需细节再 `memory_recall`。\n" +
+                "- 时效性原则：永远以时间戳最近的记录为准。";
     }
 
 

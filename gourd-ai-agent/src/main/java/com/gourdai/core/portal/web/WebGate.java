@@ -33,6 +33,7 @@ import com.gourdai.ai.chat.message.ChatMessage;
 import com.gourdai.ai.chat.message.UserMessage;
 import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.agent.TaskTalent;
 import com.gourdai.harness.permission.AccessMode;
 import com.gourdai.harness.change.FileChangeService;
 import com.gourdai.harness.command.Command;
@@ -124,6 +125,32 @@ public class WebGate extends SimpleWebSocketListener {
         this.streamBuilder = new WebStreamBuilder(engine, this);
         FileChangeService.getInstance().setListener((sessionId, runId, summary) ->
                 emitToClient(sessionId, WebChunk.ofFileChanges(runId, summary)));
+
+        // 后台子代理（task/multitask 的 background=true）走 detached 分支，不读写父 trace 的
+        // streamSink（父 sink 在本轮结束时就已 complete，往里 next 是静默 no-op）。若不在此处
+        // 反向注册，后台子代理在前端<b>完全隐形</b>——连卡片都不出现，用户无从得知有任务在跑。
+        // 这里用 emitToClient 而非 broadcastRaw：前者一次调用同时获得「广播 + 落盘 + eventSeq」，
+        // agent_start/agent_end 不在瞬态帧名单内，故历史回放零成本自动生效；后者不落盘，
+        // 会造成「实时能看到、刷新就消失」。
+        engine.getTaskTalent().setBackgroundAgentListener(new TaskTalent.BackgroundAgentListener() {
+            @Override
+            public void onStart(String sessionId, String agentName, String description, String invocationId) {
+                // background=true：告知前端这是旁路推送的后台帧，不得去收敛主代理正在输出的思考块
+                emitToClient(sessionId, WebChunk.ofAgentStart(agentName, description, invocationId, true));
+            }
+
+            @Override
+            public void onProgress(String sessionId, String agentName, String description,
+                                   String invocationId, String toolName) {
+                emitToClient(sessionId, WebChunk.ofAgentProgress(agentName, description, invocationId, toolName));
+            }
+
+            @Override
+            public void onEnd(String sessionId, String agentName, String description,
+                              boolean success, String resultSummary, String invocationId) {
+                emitToClient(sessionId, WebChunk.ofAgentEnd(agentName, description, success, resultSummary, invocationId, true));
+            }
+        });
     }
 
     /**
@@ -613,11 +640,110 @@ public class WebGate extends SimpleWebSocketListener {
                 streamRoots.remove(sessionId);
             }
 
+            // 附件落盘必须在 user 帧落盘【之前】完成：帧里记录的相对路径就是「字节实际所在位置」，
+            // 先落盘、再按落盘结果记录，才不会出现「记录路径 ≠ 字节位置」的分叉——那种分叉会让
+            // 历史回放与 meta 端点拿着一个永远读不到的路径去回显附件。
+            List<ImageBlock> imageBlocks = new ArrayList<>();
+            List<String> fileAttachments = new ArrayList<>();
+            // 实际落盘成功的 multipart 附件相对路径（按声明类型分流），供 user 帧回显使用
+            List<String> savedImagePaths = new ArrayList<>();
+            List<String> savedFilePaths = new ArrayList<>();
+            // 「恢复已挂起任务」的两类请求（工具审批 / 问答作答）在下方各自分支里直接 return，
+            // 既不记 user 帧也不构建新一轮 Prompt；原实现中附件落盘发生在那些 return 之后，
+            // 因此这类请求从不落盘。落盘前移后必须显式保留这一语义，否则会凭空多出磁盘写入。
+            boolean resumeOnly = Assert.isNotEmpty(hitlAction) || Assert.isNotEmpty(questionAnswer);
+
+            // 附件根目录只解析一次：multipart 上传与「按路径引用已落盘附件」两条通道必须指向同一目录，
+            // 否则队列/插话延后发送时会读不到早先上传的那份文件。
+            File attachSessionDir = (sessionLocator != null)
+                    ? sessionLocator.resolveDir(sessionId, streamRoot)
+                    : new File(engine.getWorkspace());
+
+            if (attachments != null && !resumeOnly) {
+                // 在会话目录下创建 uploads 子目录用于存放上传的文件
+                java.nio.file.Path uploadsRoot = null;
+                java.nio.file.Path uploadsDir = attachSessionDir.toPath().resolve(UPLOADS_DIR);
+                try {
+                    java.nio.file.Files.createDirectories(uploadsDir);
+                    uploadsRoot = uploadsDir.toAbsolutePath().normalize();
+                } catch (java.io.IOException e) {
+                    // 不再回退到会话目录本身：回退后字节落在 <sessionDir>/<name>，而记录与引用
+                    // 用的都是 uploads/<name>，前端（meta/回放/延后发送）永远读不到那份文件。
+                    // 明确失败：本批 multipart 附件整体跳过并留痕，文本与「按路径引用」的附件不受影响。
+                    LOG.warn("[WebGate] uploads dir unavailable, multipart attachments skipped for session {}: {}",
+                            sessionId, uploadsDir, e);
+                }
+
+                if (uploadsRoot != null) {
+                    for (int i = 0; i < attachments.length; i++) {
+                        UploadedFile attachment = attachments[i];
+                        if (attachment == null) continue;
+                        String fileName = attachment.getName();
+                        if (fileName == null || fileName.contains("..") || fileName.contains("/") || fileName.contains("\\")) {
+                            LOG.warn("[WebGate] rejected unsafe attachment name for session {}: {}", sessionId, fileName);
+                            continue;
+                        }
+                        String ext = extOf(attachment);
+                        String relPath = UPLOADS_DIR + "/" + fileName;
+                        // 安全校验：确保保存路径仍在 uploads 目录内（文件名已排除分隔符，此处为兜底）
+                        java.nio.file.Path savePath = uploadsRoot.resolve(fileName);
+                        if (!savePath.startsWith(uploadsRoot)) {
+                            LOG.warn("[WebGate] attachment escaped uploads dir for session {}: {}", sessionId, fileName);
+                            continue;
+                        }
+                        boolean image = isImageAttachment(ext,
+                                attachmentTypes != null && i < attachmentTypes.length ? attachmentTypes[i] : null);
+                        try {
+                            // 保存到会话空间内的 uploads 目录，实现 session 间隔离
+                            java.nio.file.Files.copy(attachment.getContent(), savePath,
+                                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                        } catch (java.io.IOException e) {
+                            // 单条落盘失败 = 该附件明确失败：不注入 ImageBlock、不拼 [附件:] 文本、
+                            // 不记入 user 帧，其余附件与文本部分照常受理（绝不整批 500）。
+                            LOG.warn("[WebGate] failed to save attachment {} for session {}: {}",
+                                    fileName, sessionId, e.getMessage());
+                            continue;
+                        }
+                        // 字节确实落在 relPath 之后，才允许把它记进帧里
+                        (image ? savedImagePaths : savedFilePaths).add(relPath);
+                        if (image) {
+                            try {
+                                byte[] bytes = java.nio.file.Files.readAllBytes(savePath);
+                                imageBlocks.add(ImageBlock.ofBase64(Base64.getEncoder().encodeToString(bytes),
+                                        extensionToMime(ext)));
+                            } catch (java.io.IOException e) {
+                                // 已落盘但读不回：模型这一轮看不到该图，但路径真实存在，
+                                // 记录它不算分叉（前端回显仍可能成功），故保留在 savedImagePaths 中。
+                                LOG.warn("[WebGate] failed to read back saved attachment {}: {}", relPath, e.getMessage());
+                            }
+                        } else {
+                            // 对于非图片文件，传递相对路径便于在会话内引用
+                            fileAttachments.add(relPath);
+                        }
+                    }
+                }
+            }
+
+            // 已落盘附件（队列出队 / 插话降级重发）：只有会话内相对路径，读回后与上传附件汇入同一批，
+            // 之后的 Prompt 构建、命令分发、空输入兜底全部共用，不存在第二套附件语义。
+            if (!resumeOnly && attachmentPaths != null && !attachmentPaths.isEmpty()) {
+                resolveAttachmentRefs(attachSessionDir, attachmentPaths, attachmentPathTypes,
+                        imageBlocks, fileAttachments);
+            }
+
             // 网页手动输入只有在本次受理锁内通过 busy 检查后才落盘；这样既保证 user 在首个
             // AI chunk 之前，又避免竞态失败请求留下幽灵 user。IM/Loop 自己通过 emitToClient 记录用户事件。
+            // 附件路径随帧落盘：历史回放时前端才能把数量徽标还原为真实缩略图（见 recordUser 七参重载）。
             if (clientMessageId != null && Assert.isEmpty(hitlAction) && Assert.isNotEmpty(input)
                     && !input.startsWith("/") && streamStore != null) {
-                streamStore.recordUser(sessionId, streamRoot, input, System.currentTimeMillis(), clientMessageId);
+                // multipart 部分只记「确实落盘成功」的路径；按路径引用的部分（字节早已在盘上）
+                // 沿用 collectAttachmentPaths 的原口径，两者汇入同一对清单。
+                List<String> recImagePaths = new ArrayList<>(savedImagePaths);
+                List<String> recFilePaths = new ArrayList<>(savedFilePaths);
+                collectAttachmentPaths(null, null, attachmentPaths, attachmentPathTypes,
+                        recImagePaths, recFilePaths);
+                streamStore.recordUser(sessionId, streamRoot, input, System.currentTimeMillis(), clientMessageId,
+                        recImagePaths, recFilePaths);
             }
             if (source != null && Assert.isEmpty(hitlAction)) {
                 emitToClient(sessionId, WebChunk.ofUser(input, source));
@@ -729,62 +855,9 @@ public class WebGate extends SimpleWebSocketListener {
                 return InputResult.ACCEPTED;
             }
 
-            // Handle file upload - save to session directory
-            List<ImageBlock> imageBlocks = new ArrayList<>();
-            List<String> fileAttachments = new ArrayList<>();
-
-            // 附件根目录只解析一次：multipart 上传与「按路径引用已落盘附件」两条通道必须指向同一目录，
-            // 否则队列/插话延后发送时会读不到早先上传的那份文件。
-            File attachSessionDir = (sessionLocator != null)
-                    ? sessionLocator.resolveDir(sessionId, streamRoot)
-                    : new File(engine.getWorkspace());
-
-            if (attachments != null) {
-                // 解析会话目录，作为附件存储根路径
-                java.nio.file.Path sessionDir = attachSessionDir.toPath();
-
-                // 在会话目录下创建 uploads 子目录用于存放上传的文件
-                java.nio.file.Path uploadsDir = sessionDir.resolve("uploads");
-                try {
-                    java.nio.file.Files.createDirectories(uploadsDir);
-                } catch (java.io.IOException e) {
-                    LOG.warn("Failed to create uploads directory: {}", uploadsDir, e);
-                    // 创建失败则回退到会话目录本身
-                    uploadsDir = sessionDir;
-                }
-                
-                for (int i = 0; i < attachments.length; i++) {
-                    UploadedFile attachment = attachments[i];
-                    String fileName = attachment.getName();
-                    if (fileName != null && !fileName.contains("..") && !fileName.contains("/") && !fileName.contains("\\")) {
-                        String ext = "." + attachment.getExtension();
-                        // 保存到会话空间内的 uploads 目录，实现 session 间隔离
-                        java.nio.file.Path savePath = uploadsDir.resolve(fileName).toAbsolutePath().normalize();
-
-                        // 安全校验：确保保存路径仍在 uploads 目录内
-                        if (savePath.startsWith(uploadsDir.toAbsolutePath().normalize())) {
-                            java.nio.file.Files.copy(attachment.getContent(), savePath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-
-                            if (isImageAttachment(ext, attachmentTypes != null && i < attachmentTypes.length ? attachmentTypes[i] : null)) {
-                                byte[] bytes = java.nio.file.Files.readAllBytes(savePath);
-                                String base64 = Base64.getEncoder().encodeToString(bytes);
-                                String mime = extensionToMime(ext);
-                                imageBlocks.add(ImageBlock.ofBase64(base64, mime));
-                            } else {
-                                // 对于非图片文件，传递相对路径便于在会话内引用
-                                fileAttachments.add("uploads/" + fileName);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 已落盘附件（队列出队 / 插话降级重发）：只有会话内相对路径，读回后与上传附件汇入同一批，
-            // 之后的 Prompt 构建、命令分发、空输入兜底全部共用，不存在第二套附件语义。
-            if (attachmentPaths != null && !attachmentPaths.isEmpty()) {
-                resolveAttachmentRefs(attachSessionDir, attachmentPaths, attachmentPathTypes,
-                        imageBlocks, fileAttachments);
-            }
+            // Handle file upload
+            // 附件落盘与引用解析已上移到 user 帧落盘之前（见本方法上方 savedImagePaths 段落），
+            // 此处只负责把结果拼进输入文本。
 
             // Build input text with file attachment prefix
             if (!fileAttachments.isEmpty()) {
@@ -1532,19 +1605,71 @@ public class WebGate extends SimpleWebSocketListener {
      *
      * <p>只接受 {@code uploads/<简单文件名>} 这一种形态：文件名里出现任何目录分隔符或 {@code ..}
      * 都直接判非法，因此不存在穿出会话目录的可能，也无需再做 startsWith 兜底比对。
-     * 队列（queue.json）与插话（steer）两条延后通道都要拿用户可控的字符串去读盘，统一走这里。</p>
+     * 队列（queue.json）、插话（steer）与 meta 端点三条通道都要拿用户可控的字符串去读盘，统一走这里。</p>
+     *
+     * <p>附加拒绝（防止畸形名把上层解析/读盘拖成 500，也防 Windows 设备名之类的特殊语义）：
+     * 含 {@code \0}、等于 {@code .}、以 {@code .} 开头（隐藏文件/目录语义）、以及 Windows 保留设备名
+     * （CON/PRN/AUX/NUL/COM1-9/LPT1-9，忽略大小写与尾随点/空格）。</p>
      *
      * @param path 待校验的相对路径
-     * @return 合法时原样返回，非法时返回 null
+     * @return 合法时原样返回（trim 后），非法时返回 null
      */
     static String sanitizeAttachmentPath(String path) {
         if (path == null) return null;
         String p = path.trim();
+        if (p.indexOf('\0') >= 0) return null;
         String prefix = UPLOADS_DIR + "/";
         if (!p.startsWith(prefix)) return null;
         String name = p.substring(prefix.length());
         if (name.isEmpty() || name.contains("/") || name.contains("\\") || name.contains("..")) return null;
+        if (name.startsWith(".")) return null; // "." / ".." / 隐藏名一律拒绝
+        if (isWindowsReservedName(name)) return null;
         return p;
+    }
+
+    /** Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9），忽略大小写、扩展名与尾随点/空格。 */
+    private static final Set<String> WINDOWS_RESERVED_NAMES = org.noear.solon.Utils.asSet(
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9");
+
+    /**
+     * 判定文件名是否为 Windows 保留设备名。
+     *
+     * <p>Windows 会在任意目录下把 {@code CON}、{@code NUL.txt} 这类名字解释为设备而非普通文件，
+     * 于是「落盘成功」与「能读回来」两件事在此类名字上并不等价；直接判非法比事后调试便宜。</p>
+     */
+    private static boolean isWindowsReservedName(String name) {
+        if (name == null || name.isEmpty()) return false;
+        String base = name;
+        int dot = base.indexOf('.');
+        if (dot >= 0) base = base.substring(0, dot);
+        base = base.trim();
+        // 尾随点/空格在 Windows 上会被文件名语义吞掉（"CON." 仍是 CON）
+        while (!base.isEmpty() && (base.endsWith(".") || base.endsWith(" "))) {
+            base = base.substring(0, base.length() - 1);
+        }
+        if (base.isEmpty()) return false;
+        return WINDOWS_RESERVED_NAMES.contains(base.toUpperCase(Locale.ROOT));
+    }
+
+    /**
+     * 取上传件的小写扩展名（含点号），供全链路统一判定附件类型。
+     *
+     * <p>为何需要它：三处调用原本各自写 {@code "." + file.getExtension()}，而
+     * {@link #IMAGE_EXTENSIONS} 存的是小写。大写扩展名（如 {@code .PNG}）会因大小写分叉而被
+     * 判成普通文件：同一张图在「立即发送」与「排队后发送」两条路径上得到不同处理。</p>
+     *
+     * @param uploadedFile 上传件，可为 null
+     * @return 小写的 {@code .ext} 形态；无扩展名（null/空）时返回空串
+     */
+    static String extOf(UploadedFile uploadedFile) {
+        if (uploadedFile == null) return "";
+        String ext = uploadedFile.getExtension();
+        if (ext == null) return "";
+        String e = ext.trim().toLowerCase(Locale.ROOT);
+        if (e.isEmpty()) return "";
+        return e.startsWith(".") ? e : "." + e;
     }
 
     /**
@@ -1554,7 +1679,8 @@ public class WebGate extends SimpleWebSocketListener {
      * 因此「先落盘再延后发送」与「立即发送」最终读到的是同一个文件。落盘本身不发起模型调用，
      * 任务执行中也能安全调用。</p>
      *
-     * @return 与入参顺序一致的清单，元素含 path / type / name / size；非法文件名的条目直接跳过
+     * @return 与入参顺序一致的清单，元素含 path / type / name / size；非法文件名的条目直接跳过；
+     *         目录不可用或单条写盘失败的条目回 {@code error} 错误项（不静默当成成功）
      */
     List<Map<String, Object>> saveAttachments(String sessionId, String sessionCwd,
                                               UploadedFile[] files, String[] types) throws java.io.IOException {
@@ -1562,14 +1688,32 @@ public class WebGate extends SimpleWebSocketListener {
         if (files == null || files.length == 0) return saved;
 
         java.nio.file.Path uploadsDir = resolveSessionDir(sessionId, sessionCwd).toPath().resolve(UPLOADS_DIR);
+        java.nio.file.Path uploadsRoot;
         try {
             java.nio.file.Files.createDirectories(uploadsDir);
+            uploadsRoot = uploadsDir.toAbsolutePath().normalize();
         } catch (java.io.IOException e) {
-            LOG.warn("[WebGate] failed to create uploads directory: {}", uploadsDir, e);
-            uploadsDir = uploadsDir.getParent();
+            // 不再回退到会话目录（uploadsDir.getParent()）：回退后字节落在 <sessionDir>/<name>，
+            // 而清单里记的仍是 uploads/<name>，后续插话/队列/meta 全部读不到。目录不可用
+            // 就整批明确失败：每条回一个 error 项，调用方（WebController）可据此拒绝并让前端保留输入。
+            LOG.warn("[WebGate] failed to create uploads directory, all attachments rejected: {}", uploadsDir, e);
+            for (int i = 0; i < files.length; i++) {
+                UploadedFile file = files[i];
+                if (file == null) continue;
+                String fileName = file.getName();
+                if (fileName == null || fileName.contains("..") || fileName.contains("/") || fileName.contains("\\")) {
+                    LOG.warn("[WebGate] rejected unsafe attachment name for session {}: {}", sessionId, fileName);
+                    continue;
+                }
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("path", UPLOADS_DIR + "/" + fileName);
+                item.put("name", fileName);
+                item.put("error", "dir_unavailable");
+                saved.add(item);
+            }
+            return saved;
         }
 
-        java.nio.file.Path uploadsRoot = uploadsDir.toAbsolutePath().normalize();
         for (int i = 0; i < files.length; i++) {
             UploadedFile file = files[i];
             if (file == null) continue;
@@ -1579,20 +1723,26 @@ public class WebGate extends SimpleWebSocketListener {
                 continue;
             }
             String type = (types != null && i < types.length) ? types[i] : null;
-            String ext = "." + file.getExtension();
+            String ext = extOf(file);
+            String relPath = UPLOADS_DIR + "/" + fileName;
             java.nio.file.Path savePath = uploadsRoot.resolve(fileName);
             if (!savePath.startsWith(uploadsRoot)) {
                 LOG.warn("[WebGate] attachment escaped uploads dir for session {}: {}", sessionId, fileName);
                 continue;
             }
-            java.nio.file.Files.copy(file.getContent(), savePath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-
             boolean image = isImageAttachment(ext, type);
             Map<String, Object> item = new LinkedHashMap<>();
-            item.put("path", UPLOADS_DIR + "/" + fileName);
-            item.put("type", image ? "image" : "file");
+            item.put("path", relPath);
             item.put("name", fileName);
-            item.put("size", java.nio.file.Files.size(savePath));
+            try {
+                java.nio.file.Files.copy(file.getContent(), savePath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                item.put("type", image ? "image" : "file");
+                item.put("size", java.nio.file.Files.size(savePath));
+            } catch (java.io.IOException e) {
+                // 单条写盘失败：该附件明确失败（回 error 项），其余附件与本次请求照常处理
+                LOG.warn("[WebGate] failed to save attachment {} for session {}: {}", fileName, sessionId, e.getMessage());
+                item.put("error", "save_failed");
+            }
             saved.add(item);
         }
         return saved;
@@ -1632,7 +1782,7 @@ public class WebGate extends SimpleWebSocketListener {
             }
             String declared = (types != null && i < types.size()) ? types.get(i) : null;
             String name = file.getFileName().toString();
-            String ext = name.contains(".") ? name.substring(name.lastIndexOf('.')).toLowerCase() : "";
+            String ext = extOfName(name);
 
             if (!isImageAttachment(ext, declared)) {
                 fileRefs.add(path);
@@ -1657,8 +1807,170 @@ public class WebGate extends SimpleWebSocketListener {
      * @param attachmentsType 前端传递的附件类型标识（如 "image"）
      * @return true 表示该附件应作为图片处理
      */
+    /**
+     * 汇总一次输入携带的附件路径（multipart 新上传 + 按路径引用已落盘），供 user 帧落盘回显。
+     *
+     * <p>multipart 附件的文件名由 {@link #generateUniqueFile} 保证全局唯一，落盘名与入参名一致，
+     * 故可直接拼出 {@code uploads/<name>} 相对路径；非法文件名（含 {@code ..} 或分隔符）与主链路同口径跳过。</p>
+     *
+     * <p><b>调用约束：</b>multipart 部分必须在附件<b>已落盘之后</b>再调用本方法（见
+     * {@link #doOnChatInput} 的落盘前移），否则帧里会记下从未写入成功的路径。</p>
+     *
+     * @param attachments      multipart 上传的附件，可为 null
+     * @param attachmentTypes  与 attachments 一一对应的类型声明，可为 null
+     * @param attachmentPaths  已落盘附件的相对路径，可为 null
+     * @param attachmentPathTypes 与 attachmentPaths 一一对应的类型声明，可为 null
+     * @param imageOut         输出参数：图片附件路径按序追加
+     * @param fileOut          输出参数：文件附件路径按序追加
+     */
+    static void collectAttachmentPaths(UploadedFile[] attachments, String[] attachmentTypes,
+                                       List<String> attachmentPaths, List<String> attachmentPathTypes,
+                                       List<String> imageOut, List<String> fileOut) {
+        if (attachments != null) {
+            for (int i = 0; i < attachments.length; i++) {
+                String name = attachments[i] == null ? null : attachments[i].getName();
+                if (name == null || name.contains("..") || name.contains("/") || name.contains("\\")) continue;
+                String ext = extOf(attachments[i]);
+                boolean image = isImageAttachment(ext, attachmentTypes != null && i < attachmentTypes.length
+                        ? attachmentTypes[i] : null);
+                (image ? imageOut : fileOut).add(UPLOADS_DIR + "/" + name);
+            }
+        }
+        if (attachmentPaths != null) {
+            for (int i = 0; i < attachmentPaths.size(); i++) {
+                String path = sanitizeAttachmentPath(attachmentPaths.get(i));
+                if (path == null) continue;
+                String name = path.substring(UPLOADS_DIR.length() + 1);
+                String ext = extOfName(name);
+                boolean image = isImageAttachment(ext, attachmentPathTypes != null && i < attachmentPathTypes.size()
+                        ? attachmentPathTypes.get(i) : null);
+                (image ? imageOut : fileOut).add(path);
+            }
+        }
+    }
+
     static boolean isImageAttachment(String ext, String attachmentsType) {
         return "image".equals(attachmentsType) && IMAGE_EXTENSIONS.contains(ext);
+    }
+
+    /** meta 端点单张图片内联上限：8MB（base64 后约 10.7MB），超出只回名称与大小，前端降级为文件瓦片。 */
+    private static final long META_IMAGE_MAX_BYTES = 8L * 1024 * 1024;
+
+    /**
+     * meta 端点单次响应的 dataUrl 累计字节预算：24MB。
+     *
+     * <p>单张上限只约束「一张图」，批量请求仍可用 4 张 8MB 图凑出 40MB+ 的 base64 响应体
+     * （编码期间还会同时持有原始字节 + base64 字符串 + 序列化缓冲区）。超预算的条目只回
+     * 元信息 + {@code error:"budget"}，<b>不读文件也不编码</b>，因此响应体积与堆内存均有硬上限。</p>
+     *
+     * <p>前端对无 {@code dataUrl} 的条目已有逐条降级链路（见 app-message.js 的 meta 回调：
+     * 有 dataUrl 才替换成 &lt;img&gt;，否则保留占位并降级为数量徽标/文件瓦片），
+     * 因此这里返回 budget 不会造成前端异常，也不会污染缓存（带 error 的条目不写缓存，可重试）。</p>
+     */
+    private static final long META_DATAURL_BUDGET_BYTES = 24L * 1024 * 1024;
+
+    /**
+     * 按相对路径读取会话附件元信息，供前端回显缩略图。
+     *
+     * <p>与 {@link #resolveAttachmentRefs} 同口径的安全校验：非法路径与越界路径一律以 error 条目
+     * 返回（不整批失败），前端据此降级为数量徽标。图片在大小上限内返回 dataUrl，否则只回元信息。</p>
+     *
+     * <p><b>鲁棒性约束：</b>单条处理的任何异常（包括路径解析抛出的 {@code InvalidPathException}、
+     * 读盘 IO 异常）都被收在本条内，以 {@code error:"invalid"} 返回；绝不因一条畸形 path 而让整批 500。
+     * 每个条目（无论成败失败）都必带 {@code path} 字段，且等于请求时的原始字符串——
+     * 前端按 {@code item.path} 建缓存键回填，缺字段会使占位图永远等不到结果。</p>
+     *
+     * @param sessionDir 会话目录
+     * @param paths      相对路径清单（{@code uploads/xxx}）
+     * @return 与入参同序的元信息条目（path/type/name/size，图片另有 dataUrl，失败另有 error）
+     */
+    List<Map<String, Object>> attachmentMeta(File sessionDir, List<String> paths) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (sessionDir == null || paths == null) return out;
+        java.nio.file.Path uploadsRoot = sessionDir.toPath().resolve(UPLOADS_DIR).toAbsolutePath().normalize();
+        // 累计已编码的 dataUrl 字节数（base64 均为 ASCII，字符数即字节数）
+        long dataUrlBytes = 0L;
+
+        for (String raw : paths) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            // path 先置：即使下方任意一步抛出，条目也能被前端正确归位
+            row.put("path", raw);
+            out.add(row);
+            try {
+                String path = sanitizeAttachmentPath(raw);
+                if (path == null) {
+                    row.put("error", "invalid");
+                    continue;
+                }
+                java.nio.file.Path file = uploadsRoot.resolve(path.substring(UPLOADS_DIR.length() + 1));
+                // isRegularFile 而非 exists：目录/设备/失效链接都归为 missing，后续读取不会抛怪异常
+                if (!file.startsWith(uploadsRoot) || !java.nio.file.Files.isRegularFile(file)) {
+                    LOG.warn("[WebGate] attachment meta missing: {} under {}", path, uploadsRoot);
+                    row.put("error", "missing");
+                    continue;
+                }
+                String name = file.getFileName().toString();
+                String ext = extOfName(name);
+                long size;
+                try {
+                    size = java.nio.file.Files.size(file);
+                } catch (java.io.IOException e) {
+                    LOG.warn("[WebGate] attachment meta size read failed {}: {}", path, e.getMessage());
+                    size = -1;
+                }
+                row.put("name", name);
+                row.put("size", size);
+                if (!IMAGE_EXTENSIONS.contains(ext)) {
+                    row.put("type", "file");
+                    continue;
+                }
+                row.put("type", "image");
+                // size 读不到（-1）时 fail-closed：不估算、不读取，直接归为 too_large
+                if (size < 0 || size > META_IMAGE_MAX_BYTES) {
+                    row.put("error", "too_large");
+                    continue;
+                }
+                String prefix = "data:" + extensionToMime(ext) + ";base64,";
+                // base64 长度预估（向上取整到 4 的倍数），用于在<b>读文件之前</b>完成预算判定
+                long estimated = prefix.length() + ((size + 2) / 3) * 4;
+                if (dataUrlBytes + estimated > META_DATAURL_BUDGET_BYTES) {
+                    // 超预算：不读文件、不编码，只回元信息，前端降级为文件瓦片
+                    row.put("error", "budget");
+                    continue;
+                }
+                // 带上限的流式读：不再「先 Files.size 再 readAllBytes」两步（TOCTOU：两步之间文件
+                // 可能被追写/替换）。readNBytes(上限+1) 既不会把超限文件读进内存，又能确实判出超限。
+                byte[] bytes;
+                try (java.io.InputStream in = java.nio.file.Files.newInputStream(file)) {
+                    bytes = in.readNBytes((int) Math.min(META_IMAGE_MAX_BYTES + 1, Integer.MAX_VALUE));
+                }
+                if (bytes.length > META_IMAGE_MAX_BYTES) {
+                    row.put("error", "too_large");
+                    continue;
+                }
+                String dataUrl = prefix + Base64.getEncoder().encodeToString(bytes);
+                row.put("dataUrl", dataUrl);
+                dataUrlBytes += dataUrl.length();
+            } catch (RuntimeException | java.io.IOException e) {
+                // 单条畸形 path / 读盘异常不得波及整批：清空本条已写入的部分字段，统一归为 invalid
+                LOG.warn("[WebGate] attachment meta failed for {}: {}", raw, e.toString());
+                row.put("error", "invalid");
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 从文件名取小写扩展名（含点号），与 {@link #extOf(UploadedFile)} 同口径。
+     *
+     * <p>供「手里只有路径/文件名」的三处（{@link #resolveAttachmentRefs}、
+     * {@link #collectAttachmentPaths}、{@link #attachmentMeta}）使用，确保图片判定口径全链路一致。</p>
+     */
+    static String extOfName(String name) {
+        if (name == null) return "";
+        int dot = name.lastIndexOf('.');
+        if (dot < 0 || dot == name.length() - 1) return "";
+        return name.substring(dot).toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -1716,8 +2028,15 @@ public class WebGate extends SimpleWebSocketListener {
                         // 同主路径：为用户主动停止打「可续跑」标记并落盘
                         engine.markUserInterruptedForResume(session, null);
                         session.addMessage(ChatMessage.ofAssistant("用户已取消任务."));
+                        cancelBackgroundTasksQuietly(sessionId);
                         emitToClient(sessionId, WebChunk.ofDone());
                         LOG.info("[WebGate] Session {} interrupted via disposable fallback (no run state)", sessionId);
+                        return "cancelled";
+                    }
+                    // 主 run 已不在跑，但后台子代理可能仍在（background=true 的任务生命周期
+                    // 恰恰跨越主 run 边界）。此时不能直接回 not_running：用户点 Stop 的意图是
+                    // 「别跑了」，而后台任务仍在烧 token，且用户以为已经停了。
+                    if (cancelBackgroundTasksQuietly(sessionId) > 0) {
                         return "cancelled";
                     }
                     return "not_running";
@@ -1745,6 +2064,9 @@ public class WebGate extends SimpleWebSocketListener {
                     emitToClient(sessionId, WebChunk.ofSteerCancelled(state.runId, cancelled));
                 }
                 session.addMessage(ChatMessage.ofAssistant("用户已取消任务."));
+                // 后台子代理不在主 disposable 的管辖范围内（detached 分支跑的是独立的同步流），
+                // 必须显式置取消位，否则用户点 Stop 后主对话停了、后台任务仍把模型调完。
+                cancelBackgroundTasksQuietly(sessionId);
                 WebChunk done = WebChunk.ofDone();
                 done.setRunId(state.runId);
                 emitToClient(sessionId, done);
@@ -1757,9 +2079,48 @@ public class WebGate extends SimpleWebSocketListener {
         }
     }
 
+    /**
+     * 取消该会话的后台子代理，返回置位数。
+     *
+     * <p><b>为何包 try/catch</b>：取消后台任务是中断流程的<b>附带</b>职责，不得因它抛异常
+     * 而让整个 interruptSession 走进 catch 分支回 {@code not_running}——那会让主 run 的 dispose
+     * 与补发 done 一并丢失，前端永久停在思考态。失败只记日志。</p>
+     */
+    private int cancelBackgroundTasksQuietly(String sessionId) {
+        try {
+            int n = engine.getTaskTalent().cancelBackgroundTasks(sessionId);
+            if (n > 0) {
+                LOG.info("[WebGate] Session {} cancelled {} background subagent task(s)", sessionId, n);
+            }
+            return n;
+        } catch (Throwable e) {
+            LOG.warn("[WebGate] cancel background tasks failed for session {}: {}", sessionId, e.toString());
+            return 0;
+        }
+    }
+
     /** 兼容非 Web 调用方；仅取消当前活跃 run。 */
     public void interruptSession(String sessionId) {
         interruptSession(sessionId, null);
+    }
+
+    /**
+     * 清理已删除会话残留的锁对象与根路径缓存，防止 Map 无限增长。
+     * 应在 engine.removeSession 完成后调用。
+     */
+    public void cleanupSession(String sessionId) {
+        if (sessionId == null) return;
+        inputLocks.remove(sessionId);
+        publishLocks.remove(sessionId);
+        streamRoots.remove(sessionId);
+        // 后台子代理的取消标记桶同样按会话分桶，会话删除后必须一并摘掉，否则随历史会话无限增长。
+        // 刻意<b>不</b>取消这些任务：会话被删除不等于用户要停止任务，置取消位会让在途的
+        // write/edit 停在半路留下损坏文件（口径同 TaskTalent.registerBackgroundTask 的说明）。
+        try {
+            engine.getTaskTalent().discardBackgroundTasks(sessionId);
+        } catch (Throwable e) {
+            LOG.warn("[WebGate] discard background tasks failed for session {}: {}", sessionId, e.toString());
+        }
     }
 
     /**

@@ -11,18 +11,86 @@ import java.util.List;
 import java.util.Map;
 
 public class JsonSchemaTest {
+    /**
+     * task / multitask 的入参契约。
+     *
+     * <p><b>本用例为何必须用 JUnit 断言而不能用 Java {@code assert}：</b>原先两条断言写的是
+     * {@code assert "...".equals(schema)}，而 pom 里未给 surefire 配 {@code enableAssertions}/
+     * {@code -ea}，JVM 默认关闭断言 → 整条用例<b>恒绿且什么都没验证</b>。后果在本轮真实发生：
+     * background 字段被错标为必填，以及 multitask 项里多出一个无意义的 background，
+     * 都在「966/966 全绿」下溜过去了。测试基建的隐性失效比断言写错更难发现。</p>
+     */
     @Test
     public void case1() {
         TaskTalent taskTalent = new TaskTalent(null);
 
         FunctionTool functionTool = ((List<FunctionTool>) taskTalent.getToolAry("multitask")).get(0);
-        System.out.println(functionTool.inputSchema());
-        assert "{\"type\":\"object\",\"properties\":{\"tasks\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"agent_name\":{\"type\":\"string\",\"description\":\"子代理名称\"},\"description\":{\"type\":\"string\",\"description\":\"任务内容的极简摘要（如：'重构用户认证逻辑'）。该描述将作为标签出现在执行日志和结果摘要中，用于快速识别任务意图。\"},\"index\":{\"type\":\"integer\",\"description\":\"任务唯一序号，每个任务分配唯一的递增整数（从1开始），以便匹配返回结果\",\"default\":1},\"prompt\":{\"type\":\"string\",\"description\":\"发给子代理的详细指令。由于子代理是无状态的（上下文隔离），必须在此提供任务所需的所有背景信息、具体要求及预期输出格式。\"}},\"required\":[\"index\",\"agent_name\",\"prompt\",\"description\"]},\"description\":\"任务列表\"}},\"required\":[\"tasks\"]}".equals(functionTool.inputSchema());
+        ONode multiSchema = ONode.ofJson(functionTool.inputSchema());
+        Assertions.assertEquals("object", multiSchema.get("type").getString());
+        Assertions.assertTrue(multiSchema.get("required").getArray().stream()
+                .anyMatch(n -> "tasks".equals(n.getString())), "tasks 必须为必填参数");
 
+        ONode item = multiSchema.get("properties").get("tasks").get("items");
+        ONode itemProps = item.get("properties");
+        Assertions.assertEquals("string", itemProps.get("agent_name").get("type").getString());
+        Assertions.assertEquals("string", itemProps.get("prompt").get("type").getString());
+        Assertions.assertEquals("string", itemProps.get("description").get("type").getString());
+        Assertions.assertEquals("integer", itemProps.get("index").get("type").getString());
+
+        // background 在 multitask 中已支持（O-E 按任务粒度混批），但必须保持可选：
+        // 必填会迫使模型每次并行派发都多吐一个无意义字段，与省 token 的主题自相矛盾。
+        assertBackgroundIsOptional(item, "multitask.tasks[]");
 
         functionTool = ((List<FunctionTool>) taskTalent.getToolAry("task")).get(0);
-        System.out.println(functionTool.inputSchema());
-        assert "{\"type\":\"object\",\"properties\":{\"agent_name\":{\"type\":\"string\",\"description\":\"子代理名称\"},\"description\":{\"type\":\"string\",\"description\":\"任务内容的极简摘要（如：'重构用户认证逻辑'）。该描述将作为标签出现在执行日志和结果摘要中，用于快速识别任务意图。\"},\"prompt\":{\"type\":\"string\",\"description\":\"发给子代理的详细指令。由于子代理是无状态的（上下文隔离），必须在此提供任务所需的所有背景信息、具体要求及预期输出格式。\"}},\"required\":[\"agent_name\",\"prompt\",\"description\"]}".equals(functionTool.inputSchema());
+        ONode taskSchema = ONode.ofJson(functionTool.inputSchema());
+        ONode taskProps = taskSchema.get("properties");
+        Assertions.assertEquals("string", taskProps.get("agent_name").get("type").getString());
+        Assertions.assertEquals("string", taskProps.get("prompt").get("type").getString());
+        Assertions.assertEquals("string", taskProps.get("description").get("type").getString());
+        Assertions.assertTrue(taskSchema.get("required").getArray().stream()
+                .anyMatch(n -> "agent_name".equals(n.getString())), "agent_name 必须为必填参数");
+
+        assertBackgroundIsOptional(taskSchema, "task");
+    }
+
+    /**
+     * 断言 background 为「可选 + boolean + 默认 false」。
+     *
+     * <p>必填会直接损害上下文成本：这是本次优化的主题就是省 token，却给每次
+     * task 调用都强加一个模型并不关心的字段（且字段描述本身也进了 schema）。</p>
+     */
+    private static void assertBackgroundIsOptional(ONode schemaNode, String where) {
+        ONode bg = schemaNode.get("properties").get("background");
+        Assertions.assertNotNull(bg, where + " 应暴露 background 参数");
+        Assertions.assertEquals("boolean", bg.get("type").getString(), where + " 的 background 应为 boolean");
+        Assertions.assertFalse(schemaNode.get("required").getArray().stream()
+                        .anyMatch(n -> "background".equals(n.getString())),
+                where + " 的 background 必须是可选参数（带 defaultValue 的开关不得进 required）");
+    }
+
+    /** await_tasks 必须被注册为工具，且三个参数中只有 tokens 必填。 */
+    @Test
+    public void awaitTasksSchemaShouldExposeOnlyTokensAsRequired() {
+        TaskTalent taskTalent = new TaskTalent(null);
+
+        List<FunctionTool> tools = (List<FunctionTool>) taskTalent.getToolAry(TaskTalent.TOOL_AWAIT_TASKS);
+        Assertions.assertEquals(1, tools.size(), "await_tasks 应被注册为工具");
+
+        FunctionTool tool = tools.get(0);
+        ONode schema = ONode.ofJson(tool.inputSchema());
+        ONode props = schema.get("properties");
+
+        Assertions.assertEquals("array", props.get("tokens").get("type").getString());
+        Assertions.assertEquals("integer", props.get("max_result_chars").get("type").getString());
+        Assertions.assertEquals("integer", props.get("timeout_seconds").get("type").getString());
+
+        List<String> required = schema.get("required").getArray().stream()
+                .map(ONode::getString).collect(java.util.stream.Collectors.toList());
+        Assertions.assertTrue(required.contains("tokens"), "tokens 必须为必填");
+        Assertions.assertFalse(required.contains("max_result_chars"), "max_result_chars 必须可选（否则 0=不限制 的默认值无法生效）");
+        Assertions.assertFalse(required.contains("timeout_seconds"), "timeout_seconds 必须可选");
+        // 框架注入的下划线参数不得泄到 schema 里
+        Assertions.assertNull(props.getOrNull("__sessionId"), "__sessionId 是框架注入参数，不得进 JSON schema");
     }
 
     @Test

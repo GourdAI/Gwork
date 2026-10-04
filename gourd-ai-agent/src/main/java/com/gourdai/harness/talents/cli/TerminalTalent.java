@@ -584,104 +584,35 @@ public class TerminalTalent extends AbsTalent {
     private void appendShellDialectRules(StringBuilder sb) {
         if (shellMode == ShellMode.POWERSHELL) {
             boolean core = shellCommandFactory.isPowerShellCore();
-            sb.append("- **PowerShell 方言（必须遵守）**: 当前 shell 是 PowerShell，以下 Unix 写法在此**不存在**，用后必报错，须按右侧改写：\n");
-            sb.append("  - 丢弃全部输出：`| Out-Null`（只丢 stderr 的写法见下方 stderr 规约）。\n");
+            sb.append("- **PowerShell 方言（必须遵守）**：\n");
             if (core) {
-                sb.append("  - 命令串联：`&&` / `||` 可用（PowerShell 7+），`;` 也可用；需要「前一步失败就停」时请用 `&&` 而不是 `;`。\n");
+                sb.append("  - 命令串联：`&&`/`||` 可用（PS 7+）；`;` 不中断失败步骤，多步构建用 `&&`。\n");
             } else {
-                sb.append("  - 命令串联：`&&` / `||` → `;`（Windows PowerShell 5.1 不支持 `&&`、`||`）。\n");
-                // `;` 不等于 `&&`：换写后丢的是「失败即停」语义，而整条命令的退出码只反映最后一步，
-                // 前面的编译/测试失败会被后面一步的成功掩盖（模型会据此误判为构建通过）。
-                // 替代写法一律不用 `exit`：上面的「严禁指令」已禁止 exit，且 validateCommandNoKill 会
-                // 按 `(^|[;|&])\s*exit\b` 拦截，示范带 exit 的写法会让模型照抄后撞上自家护栏。
-                sb.append("    - 注意 `;` 不等于 `&&`：前一步失败不会中断后续步骤，且返回的 `[exit_code]` 只反映最后一步。")
-                        .append("多步骤构建/测试请拆成多次 `bash` 调用，或写 `cmd1; if ($LASTEXITCODE -eq 0) { cmd2 }`（不要用 `exit`）。\n");
+                sb.append("  - 命令串联：`&&`/`||` **不可用**（PS 5.1），改用 `;` 或 `if ($LASTEXITCODE -eq 0) { cmd2 }`；注意 `;` 前一步失败不中断。\n");
             }
-            // 「命令不存在」类映射（head/cat/grep/find/uname/pwd/which/export）模型看到
-            // CommandNotFoundException 一轮即可自纠，故压成一行速查表而非逐条展开：既省常驻 token，
-            // 又不丢信息。真正不可自纠的（别名参数陷阱、2>&1、`;` 语义）仍单独成条。
-            sb.append("  - 常用等价（一次报错即可自纠，此处仅作速查）：`head/tail -n N` → `Select-Object -First/-Last N`；`cat` → `Get-Content`；`grep` → `Select-String`；`find` → `Get-ChildItem -Recurse -Filter`；`uname -a`、`cat /etc/os-release` → `Get-ComputerInfo`、`$PSVersionTable`；`pwd` → `Get-Location`；`which x` → `Get-Command x`；`export A=B` → `$env:A='B'`（读环境变量用 `$env:NAME`，不是 `$NAME`）。\n");
-            // 「无 Unix 路径」一条已由「终端类型」里的「**不是** bash/sh，POSIX 命令与语法一律不可用」覆盖，
-            // `\` 分隔符与 $env:TEMP 属常识，删掉以免同一件事在一份提示里说第三遍。
-            appendPowerShellAliasTrapRule(sb, core);
-            appendMergedStderrRule(sb);
-            appendEncodingRules(sb, core);
+            sb.append("  - 常用等价速查：`head/tail -n N`→`Select-Object -First/-Last N`；`cat`→`Get-Content`；`grep`→`Select-String`；`find`→`Get-ChildItem -Recurse -Filter`；`which x`→`Get-Command x`；`export A=B`→`$env:A='B'`（读用 `$env:NAME`，不是 `$NAME`）；`pwd`→`Get-Location`；丢弃输出用 `| Out-Null`。\n");
+            sb.append("  - Unix 别名陷阱：`ls/rm/cp/mv/ps/cat` 在 PS 中是 cmdlet 别名，**不接受 Unix 短参数**（`ls -la`、`rm -rf dir`、`cp -r a b` 均报错）。等价：`Get-ChildItem -Force`、`Remove-Item -Recurse -Force`、`Copy-Item -Recurse`。\n");
+            if (!core) {
+                sb.append("  - `curl`/`wget` 是 Invoke-WebRequest 别名，真 curl 请写 `curl.exe -s <url>`。\n");
+            }
+            sb.append("  - **禁止写 `2>&1`**：stderr 已自动合并；PS 下多写会注入 NativeCommandError 噪声并使 exit_code 变 1。只丢 stderr 用 `2>$null`。\n");
+            sb.append("  - 编码已统一 UTF-8，无需 chcp / `-Encoding UTF8` / `$OutputEncoding`；GBK 文件显式加 `-Encoding Default`。输出仍乱码时多为第三方程序按 ANSI 打印，勿反复调编码，读文件改用 `read`/`grep` 工具。\n");
+            if (!core) {
+                sb.append("  - PS 5.1 UTF-8 写入带 BOM，`read`/`edit`/`grep` 工具自动忽略。\n");
+            }
         } else if (shellMode == ShellMode.CMD) {
-            sb.append("- **CMD 方言（必须遵守）**: 当前 shell 是 cmd.exe，以下 Unix 写法在此**不存在**，用后必报错，须按右侧改写：\n");
-            // 同 PowerShell 分支：`2>nul` 由下方 stderr 规约给出，「无 Unix 路径」由「不是 bash/sh」覆盖，此处不再重复。
-            sb.append("  - 常用等价（一次报错即可自纠，此处仅作速查）：`cat` → `type`；`grep` → `findstr`；`ls` → `dir`；`uname -a` → `ver`、`systeminfo`；`which x` → `where x`；`export A=B` → `set A=B`（读环境变量用 `%NAME%`，不是 `$NAME`）。没有 `head` / `tail`（取前 N 行用 `more +N`）。\n");
-            // 跨盘符切目录是 CMD 特有的陷：`cd D:\x` 不报错、也不切，后续命令全在错的目录里执行
-            sb.append("  - 跨盘符切目录必须写 `cd /d D:\\proj`（或 `pushd D:\\proj`）：`cd D:\\proj` 既不报错也不会切过去，后续命令会静默地在原目录执行。\n");
-            sb.append("  - 多步骤串联：`&&`（失败即停）可用；用 `&` 串联则前一步失败不会中断，且返回的 `[exit_code]` 只反映最后一步。\n");
-            appendMergedStderrRule(sb);
-            // 多行命令会以批处理脚本形式执行，% 语义与单行命令不同，需向模型说明
-            sb.append("  - `%` 的语义差异：单行命令按命令行语义（`for %i in (...) do ...`）；多行命令按批处理脚本语义执行，循环变量需写成 `%%i`，字面百分号需写成 `%%`。不确定时优先拆成单行命令执行。\n");
-            sb.append("  - **读文件会乱码**：`type` / `findstr` 按当前代码页（非 UTF-8）解析文件，读含中文/日韩文/emoji 的 UTF-8 文件必乱码，**且无法在命令里可靠地修正**。读文件一律改用 `read` 工具，检索一律改用 `grep` 工具。\n");
+            sb.append("- **CMD 方言（必须遵守）**：\n");
+            sb.append("  - 常用等价：`cat`→`type`；`grep`→`findstr`；`ls`→`dir`；`which x`→`where x`；`export A=B`→`set A=B`（读用 `%NAME%`）。无 `head`/`tail`（取前 N 行用 `more +N`）。\n");
+            // 跨盘符切目录不报错也不切：后续命令全部静默地在原目录执行，模型无法从输出自纠
+            sb.append("  - 跨盘符切目录必须 `cd /d D:\\proj`（或 `pushd`）：`cd D:\\proj` 不报错也不切，后续命令静默在原目录执行。\n");
+            sb.append("  - 串联：`&&`（失败即停）可用；`&` 前一步失败不中断，且 `[exit_code]` 只反映最后一步。\n");
+            // Java 层已 redirectErrorStream(true)；CMD 侧的丢弃写法与 PS 不同，缺失会让模型退回 Unix 的 2>/dev/null
+            sb.append("  - 无需写 `2>&1`（stderr 已自动合并）；只丢 stderr 用 `2>nul`。\n");
+            // 多行命令按批处理脚本执行，`%` 语义与单行不同，属无法从报错推导的陷阱
+            sb.append("  - `%` 语义差异：单行按命令行（`for %i in (...)`）；多行按批处理脚本，循环变量写 `%%i`、字面百分号写 `%%`。不确定时拆成单行执行。\n");
+            sb.append("  - `type`/`findstr` 按当前代码页解析，读 UTF-8 中文/日韩文必乱码且无法在命令里可靠修正；读文件一律用 `read`、检索用 `grep` 工具。\n");
         }
     }
-
-
-    /**
-     * PowerShell 下的「Unix 别名陷阱」规约。
-     *
-     * <p>这一类错误比「命令不存在」更难自教：{@code ls}、{@code rm}、{@code cp}、{@code ps}
-     * 在 PowerShell 里确实存在（都是 cmdlet 别名），模型看到命令能识别会认为自己写对了，
-     * 但它们一律不接受 Unix 风格的短参数：{@code ls -la} / {@code rm -rf x} 报的是参数绑定错误，
-     * 而不是「未知命令」。不明说就会反复重试同一写法。</p>
-     *
-     * <p>{@code curl} / {@code wget} 需分版本：Windows PowerShell 5.1 把两者别名到
-     * {@code Invoke-WebRequest}（所以 {@code curl -s <url>} 必报错）；PowerShell 7+ 已移除这两个别名，
-     * {@code curl} 直接指向系统自带的 {@code curl.exe}。</p>
-     */
-    private void appendPowerShellAliasTrapRule(StringBuilder sb, boolean powerShellCore) {
-        sb.append("  - **Unix 别名是陷阱（命令存在但参数不兼容）**：`ls`、`rm`、`cp`、`mv`、`ps`、`cat` 在此都是 cmdlet 别名，")
-                .append("不接受 Unix 短参数：`ls -la`、`rm -rf dir`、`cp -r a b`、`ps aux` 全部报参数绑定错误（不是命令不存在，重试同写法也不会好）。")
-                .append("等价写法：`Get-ChildItem -Force`、`Remove-Item -Recurse -Force dir`、`Copy-Item -Recurse a b`、`Get-Process`。\n");
-        if (powerShellCore) {
-            sb.append("    - `curl` / `wget` 在 PowerShell 7+ 已不再是别名，指向真实的 `curl.exe`，Unix 参数可用。\n");
-        } else {
-            sb.append("    - `curl` / `wget` 在 Windows PowerShell 5.1 是 `Invoke-WebRequest` 的别名，`curl -s <url>` 必报错；要用真 curl 请写 `curl.exe -s <url>`。\n");
-        }
-    }
-
-    /**
-     * 「stderr 已合流」规约（仅 Windows 系 shell 输出）。
-     *
-     * <p>本工具在 Java 层已经 {@code redirectErrorStream(true)}，命令里再写 {@code 2>&1} 完全多余；
-     * 而在 PowerShell 下它还有实实在在的危害：一旦把原生程序的 stderr 重定向进 PowerShell 的流，
-     * 引擎会把每一行 stderr 包成 {@code NativeCommandError} 错误记录（额外输出「所在位置 行:1 字符:1」
-     * 等四五行噪声），并且使整个 PowerShell 进程的退出码变成 1。实测：`mvn test` 明明 BUILD SUCCESS，
-     * 只因为命令里写了 {@code 2>&1}，结果就带上了 {@code [exit_code=1]}——模型会据此误判为失败并无意义地重试。</p>
-     */
-    private void appendMergedStderrRule(StringBuilder sb) {
-        sb.append("  - **不要在命令里写 `2>&1`**：stderr 已由系统自动合并到输出里，无需任何重定向。");
-        if (shellMode == ShellMode.POWERSHELL) {
-            sb.append("在 PowerShell 下额外写 `2>&1` 还会把原生程序的 stderr 转成错误记录，凭空多出「所在位置 行:1 字符:1 / NativeCommandError」几行噪声，")
-                    .append("并让整条命令的退出码变成 1（成功也会被报成 `[exit_code=1]`）。只想丢弃 stderr 时用 `2>$null`。\n");
-        } else {
-            sb.append("只想丢弃 stderr 时用 `2>nul`。\n");
-        }
-    }
-
-    /**
-     * 追加编码规约（仅 PowerShell）。
-     *
-     * <p>必须告知模型「已经做了什么」，而不是只说「注意编码」：启动时已注入 UTF-8 前置
-     * （参见 {@code ShellCommandFactory.POWERSHELL_PREAMBLE}），若模型不知道，就会自己叠一层
-     * {@code chcp 65001} 或 {@code -Encoding UTF8}，反而引入新问题；更重要的是得告知它唯一的
-     * 例外（真正的 GBK 文件需 {@code -Encoding Default}），否则遇到 GBK 文件时它无从下手。</p>
-     */
-    private void appendEncodingRules(StringBuilder sb, boolean powerShellCore) {
-        sb.append("  - **编码（系统已前置处理，按此书写）**：本次会话的输入/输出/文件读写默认编码已统一为 UTF-8（包括 `Get-Content`、`Select-String`、`Import-Csv` 的读，以及 `Set-Content`、`Add-Content`、`Out-File` 和 `>` / `>>` 的写）。无需自行 `chcp`、设置 `$OutputEncoding` 或反复加 `-Encoding UTF8`。\n");
-        sb.append("    - 例外：若已确认某文件是 GBK/ANSI 编码，必须显式写 `-Encoding Default` 才能读对。\n");
-        if (powerShellCore == false) {
-            sb.append("    - Windows PowerShell 5.1 的 UTF-8 写入带 BOM，本工具的 `read` / `edit` / `grep` 会自动忽略它，无需特殊处理。\n");
-        }
-        sb.append("    - 若输出仍有乱码，几乎一定是被调用的第三方程序自己按 ANSI 输出的，不要在命令里反复调编码；读文件内容请直接用 `read` / `grep` 工具。\n");
-    }
-
-
-
 
 
     // --- 1. 执行命令 ---

@@ -122,12 +122,16 @@ function startStreamWatchdog() {
 }
 window.startStreamWatchdog = startStreamWatchdog;
 
-/* ===== Click to focus ===== */
+/* ===== Click to focus =====
+   豁免 .workspace-selector：工作区下拉（搜索框/项目列表）渲染在 composer 托盘内，
+   点击其中的 INPUT 搜索框若被抢回聊天输入框，搜索将永远打不进字（实测 FOCUSIN 序列证实）。 */
 $('.welcome-input-box').on('click', function(e) {
-    if (!$(e.target).closest('button').length && !$(e.target).closest('.loop-panel').length) welcomeInput.focus();
+    if (!$(e.target).closest('button').length && !$(e.target).closest('.loop-panel').length
+        && !$(e.target).closest('.workspace-selector').length) welcomeInput.focus();
 });
 $('.input-box').on('click', function(e) {
-    if (!$(e.target).closest('button').length && !$(e.target).closest('.history-panel').length && !$(e.target).closest('.loop-panel').length && !$(e.target).closest('.todo-float-panel').length) chatInput.focus();
+    if (!$(e.target).closest('button').length && !$(e.target).closest('.history-panel').length && !$(e.target).closest('.loop-panel').length && !$(e.target).closest('.todo-float-panel').length
+        && !$(e.target).closest('.workspace-selector').length) chatInput.focus();
 });
 
 /* ===== New Chat ===== */
@@ -757,6 +761,19 @@ function onWebChunk(sess, chunk) {
             return;
         }
 
+        /* 后台子代理进度心跳：与 file_changes 同级的纯被动帧，只改卡片头部的一行状态文本。
+           必须在此短路，不得走下方的完整路径，否则会连带三件事：
+           ① removeInlineThinking 会<b>闪掉主代理正在显示的内联思考指示器</b>（后台心跳频率
+              极高，每个工具调用一次），主代理下一个帧到达才重建 → 可见的视觉抖动；
+           ② 刷新 lastEventAt / 重置 silenceTimer：那是主流停滞检测的依据，而心跳反映的是
+              <b>后台任务</b>的活性，拿它去喂主流的看门狗会掉真正的停滞信号；
+           ③ 相位推进：心跳帧刻意不携带 phase（见 WebChunk.ofAgentProgress），但完整路径的
+              inferPhaseFromType 降级推断仍可能改写 sess.phase，污染主对话指示器文案。 */
+        if (chunk.type === 'agent_progress') {
+            updateAgentProgress(sess, chunk);
+            return;
+        }
+
         // 事件活跃时间戮：看门狗/对账用它判断“是否长时间无任何事件”
         sess.lastEventAt = Date.now();
 
@@ -792,6 +809,13 @@ function onWebChunk(sess, chunk) {
         switch (chunk.type) {
             case 'command': finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendCommandOutput(sess, chunk.text); break;
             case 'rewind': finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); handleRewind(sess, parseInt(chunk.text) || 1); break;
+            case 'reason_start':
+                // 新一轮模型调用开始：凭帧携带的 turnStartMs 提前作废旧一轮的定格耗时，
+                // 让耗时行在本轮起步阶段就重新走表，而非停在上一轮定格值直到首个 context_size
+                if (chunk.args && chunk.args.turnStartMs && typeof noteContextTurnStart === 'function') {
+                    noteContextTurnStart(sess, chunk.args.turnStartMs);
+                }
+                break;
             case 'reason': finishPendingTool(sess); clearRetryChunk(sess);
                 // 归属路由：chunk.args.agentName 指向活跃智能体卡片时进卡片内，否则归主对话
                 var reasonOwner = resolveAgentState(sess, chunk.args);
@@ -855,8 +879,22 @@ function onWebChunk(sess, chunk) {
                     appendContentChunk(sess, chunk.text, false);
                 }
                 break;
-            case 'agent_start': finishThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendAgentBadge(sess, chunk, true); break;
-            case 'agent_end': finishThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendAgentBadge(sess, chunk, false); break;
+    /* agent_start / agent_end 的收敛动作（finishThinkingBlock / finishPendingTool / clearRetryChunk）
+       对<b>前台</b>子代理帧是正确的：它经父 sink 下发，此刻主代理正阻塞在 ACTION 段等它，
+       主代理的思考/工具帧不可能同时到达，收敛不会误伤任何在途内容。
+       但<b>后台</b>帧（args.background，由 WebGate 旁路推送）与主代理自己的流式帧必然交错——
+       这正是「主代理提交后台任务后继续推进」的直接后果。此时若仍收敛，每来一个后台
+       start/end 帧就会把主代理<b>正在输出</b>的思考块强制定稿（文案改「思考完成」、清计时器、
+       清空 buffer），用户看到的是思考块被反复打断、内容撕裂成多条。 */
+    case 'agent_start':
+    case 'agent_end': {
+        var isBgAgentFrame = !!(chunk.args && chunk.args.background);
+        if (!isBgAgentFrame) {
+            finishThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess);
+        }
+        appendAgentBadge(sess, chunk, chunk.type === 'agent_start');
+        break;
+    }
             case 'error':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); clearRetryChunk(sess); if (typeof markToolCardFailed === 'function') markToolCardFailed(sess);
                 // 统一以红色错误块渲染，不再写入智能体卡片体：
                 // 后端 WebChunk.ofError 不携带 sessionId/agentName，无法可靠归属；
@@ -1140,6 +1178,8 @@ function finishStream(sess, opts) {
 var webGateSocket = null;
 var webGateReconnectAttempts = 0;
 var webGateHeartbeatTimer = null;
+/* 僵尸连接检测：连续未收到 pong 的心跳周期数（见 startWebGateHeartbeat 的注释）。 */
+var webGatePongMisses = 0;
 // 重复推送去重的指纹滑窗（最近 N 条；相邻与交错到达的重复帧均可命中；
 // 旧版单变量 lastGateFp 仅能去重相邻同帧，双连接非相邻送达的重复帧会漏网）
 var GATE_FP_WINDOW = 200;
@@ -1363,9 +1403,15 @@ function connectWebGate() {
         // 被退役旧连接的残帧直接丢弃（新旧连接并存的重复推送残留通路）
         if (event.target && webGateSocket && event.target !== webGateSocket) return;
         var raw = event.data;
-        if (raw === 'pong') return; // 心跳回复
+        if (raw === 'pong') {
+            // 心跳回复：连接健康，重置僵尸检测计数（见 startWebGateHeartbeat）
+            webGatePongMisses = 0;
+            return;
+        }
         try {
             var chunk = JSON.parse(raw);
+            // 任何业务帧同样证明连接活着，一并清零（防止高频帧期 pong 交错导致误判）
+            webGatePongMisses = 0;
 
             // 重复推送兜底去重：多连接并存时同一事件可能送达两次（payload 完全一致），
             // 滑窗内重复帧丢弃（相邻与交错重复均覆盖）；仅带 createdAt 的业务帧参与，心跳/系统帧原样放行。
@@ -1421,6 +1467,47 @@ function connectWebGate() {
 }
 
 /* gate 帧业务分发体（模块级全局：onmessage 与 app-history.js 的 drainGateBuffer 回放缓冲排空共用） */
+/* 空闲态下的后台子代理帧安全消费。
+
+   返回 true  = 已就地处理，调用方应 return；
+   返回 false = 交回原路径（会话未建 / 流式中 / 回放中，原路径工作正常）。
+
+   存在理由：background=true 的子代理帧由 WebGate 直连 WebSocket 推送，可能落在本轮 done
+   之后的空闲窗口。此时走通用分支会伪造一轮永无 done 收尾的流（20s 后看门狗强制
+   finishStream + 弹「强制结束」toast），用户会误以为后台任务出错。 */
+function handleIdleAgentChunk(chunk, sid) {
+    var sess = sessionMap[sid];
+    // 会话尚未创建：交回通用分支按既有逻辑建会话。此时不存在「已被 finishStream 清空」
+    // 的 currentBubbleEl 空指针问题，而通用分支的 resetStreamState + showThinking 反而是必要的。
+    if (!sess) return false;
+    if (sess._replaying || sess.isStreaming) return false;
+
+    /* 非当前会话：直接丢弃，绝不渲染。
+       这不是「少显示一点」，而是防历史消息丢失：evictInactiveSessions 只清空非活跃会话的容器，
+       而重新进入时的重建判据是 container.children.length === 0（见 app-base.js 的 LRU 注释）。
+       往非活跃会话容器里新建气泡会让 children.length !== 0 → selectSession 不再触发
+       loadMessages → 用户切过去只看到一张孤儿卡，整个历史消息消失。
+       帧已落盘（emitToClient 旁路），用户切回该会话时由回放完整重建，故丢弃无损失。 */
+    if (sid !== activeSessionId) return true;
+
+    // 两张表必须存在（与 clearAgentState 的「两表口径一致」约束同源）：漏建任一张都会让
+    // resolveAgentState 直接失败，agent_end 因 agentCards 无登记而进不了收卡分支，
+    // 改去新建第二张卡，原卡的 .agent-status-icon.loading 就永远闪。
+    if (!sess.agentCards) sess.agentCards = {};
+    if (!sess.agentStates) sess.agentStates = {};
+
+    // 空闲态渲染：不进流式态、不置停止按钮、不弹思考气泡，只把卡片挂进消息流。
+    // currentBubbleEl 的空指针由 insertBeforeActions 内部兜底重建。
+    try {
+        onWebChunk(sess, chunk);
+        // 进度心跳频率高（每个工具调用一次），不逐次滚底，避免用户正在往上翻阅时被抢滚动条
+        if (chunk.type !== 'agent_progress') scrollToBottom(true);
+    } catch (e) {
+        reportStreamPipelineError('handleIdleAgentChunk', e, chunk);
+    }
+    return true;
+}
+
 function dispatchGateChunk(chunk) {
     var sid = chunk.sessionId;
 
@@ -1461,6 +1548,11 @@ function dispatchGateChunk(chunk) {
         sess._awaitingSendAck = false;
         sess._sendAckConfirmed = false;
         sess.activeRunId = null;
+        /* 插话幂等集合只服务实时竞态（WS 的 steer_applied 早于 HTTP 200 到达），轮结束即过期。
+           不清会在会话被 LRU 淘汰重建（evictInactiveSessions 清空容器）后继续拦住回放：
+           旧 steerResolved 键仍在，重新进入会话时回放还原出的同一 steerId 会被当成已处理
+           而静默丢弃，表现为「插话气泡刷新后消失」。 */
+        sess.steerResolved = {};
         sess._suppressQueueDispatch = resumeInProgress;
         // 【C1-c】挂起（等待作答/审批）而发的 done 不是真结束：保留批次与卡片索引，
         // 否则恢复后同一批工具会在新容器里重建，被拆成两组渲染。
@@ -1509,6 +1601,20 @@ function dispatchGateChunk(chunk) {
         var fileChangesSess = getOrCreateSession(sid);
         if (typeof window.onFileChangesChunk === 'function') window.onFileChangesChunk(fileChangesSess, chunk);
         return;
+    }
+
+    /* 后台子代理（task/multitask 的 background=true）的可视化帧由 WebGate 直连 WebSocket 推送，
+       可能落在本轮 done 之后的<b>空闲窗口</b>（后台任务的生命周期恰恰跨越主 run 边界）。
+       空闲态下绝不能走下方通用分支，否则会踩两个实测确定的坑：
+       ① 伪造流：通用分支无条件置 isStreaming=true + 停止按钮 + showThinking，而后台帧没有
+          配对的 done 收尾 → 20s 后看门狗查到服务端 running=false → 强制 finishStream 并弹
+          「强制结束」toast，用户会以为后台任务出错了。
+       ② 空指针：通用分支的 resetStreamState 会把 sess.currentBubbleEl 置 null，而
+          appendAgentBadge → insertBeforeActions 裸解引用 currentBubbleEl.parentNode → 抛
+          TypeError 被 onWebChunk 的 try/catch 静默吞掉，<b>卡片根本建不出来</b>。
+       返回 true 表示已就地消费；返回 false 表示应交回原路径（流式中/回放中，原路径一切正常）。 */
+    if (chunk.type === 'agent_start' || chunk.type === 'agent_end' || chunk.type === 'agent_progress') {
+        if (handleIdleAgentChunk(chunk, sid)) return;
     }
 
     // 插话协议事件必须在「自动进入 streaming 态」之前处理：历史回放 dropped/cancelled 不应制造假流。
@@ -1587,6 +1693,25 @@ function startWebGateHeartbeat() {
     webGateHeartbeatTimer = setInterval(function() {
         if (webGateSocket && webGateSocket.readyState === WebSocket.OPEN) {
             webGateSocket.send('ping');
+            /* 【僵尸连接检测】ping 只发不校验的旧实现挡不住「半开 TCP」：
+               后端进程重启/Tauri 代理透传任务死亡/系统休眠唤醒等场景下，浏览器侧
+               readyState 恒为 OPEN、onclose/onerror 永不触发，后端所有流式帧静默
+               丢失——界面表现为「发送消息后长时间不动，切换会话再切回才能看到内容」
+               （切回走 HTTP replay 重建，HTTP 每次新建连接不受影响）。
+               对策：每个周期未收到 pong 则计数，连续 3 个周期（约 45s）未响应即判定
+               僵尸，主动 close 触发既有 onclose 恢复链路（重连 + 按 eventSeq 游标
+               replay 补流，正在流式的会话无感自愈）。收到 pong 时清零。 */
+            webGatePongMisses = (webGatePongMisses || 0) + 1;
+            if (webGatePongMisses >= 3) {
+                console.warn('[WebGate] no pong for ' + (webGatePongMisses * 15) + 's, treating as dead connection, forcing reconnect');
+                var dead = webGateSocket;
+                webGatePongMisses = 0;
+                try { dead.close(); } catch (e) {}
+                /* close() 不保证同步触发 onclose（半开连接可能连 FIN 都发不出去），
+                   兜底：摘回调后立即主动走一次重连（与 onclose 同构，幂等安全）。
+                   不直接 close 旧引用的回调，让 onclose 自然执行 markStreamingSessionsForRecovery。 */
+                scheduleWebGateReconnect();
+            }
         }
     }, 15000);
 }
@@ -1596,6 +1721,7 @@ function stopWebGateHeartbeat() {
         clearInterval(webGateHeartbeatTimer);
         webGateHeartbeatTimer = null;
     }
+    webGatePongMisses = 0;
 }
 
 function scheduleWebGateReconnect() {
@@ -1663,7 +1789,6 @@ function updateWechatUI() {
             var bound = resp.data && resp.data.bound;
             wechatHeaderBtn.toggleClass('bound', !!bound);
             wechatHeaderLabel.text(bound ? GourdI18n.t('streaming.connected') : '');
-            wechatHeaderBtn.attr('title', bound ? GourdI18n.t('streaming.wechat_bound') : GourdI18n.t('streaming.wechat_bind'));
         } catch(e) {}
     }, 'json');
 }
@@ -1821,7 +1946,6 @@ function updateFeishuUI() {
             var bound = !!data.bound;
             feishuHeaderBtn.toggleClass('bound', bound);
             feishuHeaderLabel.text(bound ? GourdI18n.t('streaming.connected') : '');
-            feishuHeaderBtn.attr('title', bound ? GourdI18n.t('streaming.feishu_bound') : GourdI18n.t('streaming.feishu_bind'));
         } catch(e) {}
     }, 'json');
 }
@@ -1989,7 +2113,6 @@ function updateDingTalkUI() {
             var bound = !!data.bound;
             dingtalkHeaderBtn.toggleClass('bound', bound);
             dingtalkHeaderLabel.text(bound ? GourdI18n.t('streaming.connected') : '');
-            dingtalkHeaderBtn.attr('title', bound ? GourdI18n.t('streaming.dingtalk_bound') : GourdI18n.t('streaming.dingtalk_bind'));
         } catch(e) {}
     }, 'json');
 }

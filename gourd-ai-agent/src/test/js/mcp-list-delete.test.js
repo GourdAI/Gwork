@@ -28,7 +28,7 @@ test('列表行渲染出删除按钮（含 data-name 与 i18n 标题）', () => 
     assert.match(renderer, /var tDelete = GourdI18n\.t\('common\.delete'\);/);
     assert.match(
         renderer,
-        /class="mcp-action-btn delete mcp-delete-btn" data-name="' \+ escapeAttr\(name\) \+ '" title="' \+ tDelete \+ '"/
+        /class="mcp-action-btn delete mcp-delete-btn" data-name="' \+ escapeAttr\(name\) \+ '"/
     );
     // 删除按钮必须位于操作区内（与编辑按钮同容器、开关之前）
     const actions = renderer.indexOf('mcp-server-actions');

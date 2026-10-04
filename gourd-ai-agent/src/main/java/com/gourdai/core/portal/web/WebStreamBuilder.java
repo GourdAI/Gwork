@@ -429,7 +429,7 @@ public class WebStreamBuilder {
             return oneFrame(onContextUsageEvent(chatModel, (ContextUsageEvent) chunk, turnStartMs));
         }
         if (chunk instanceof ReasonStartEvent) {
-            return oneFrame(onReasonStartEvent((ReasonStartEvent) chunk));
+            return oneFrame(onReasonStartEvent((ReasonStartEvent) chunk, turnStartMs));
         }
         if (chunk instanceof ReasonDeltaEvent) {
             return oneFrame(onReasonDeltaEvent((ReasonDeltaEvent) chunk));
@@ -653,14 +653,25 @@ public class WebStreamBuilder {
      * 主气泡底部指示器的相位信号）。且 {@code TaskTalent} 本就不转发本事件，此处的
      * 守卫仅作双重保险：若将来开启转发，子代理的思考开始不得把主相位误推成 thinking。</p>
      *
+     * <p>顺带注入 {@code args.turnStartMs}：新一轮模型调用开始是「新一轮任务已开始」的最早信号，
+     * 远早于 {@code context_size}（后者要等本次模型调用结束的 {@code onReasonEnd} 才下发）。
+     * 前端凭它在任务起步阶段就作废旧一轮的定格耗时、重新走表——否则在新一轮首个
+     * {@code context_size} 帧到达前的窗口期（流式输出已开始、模型尚未结算），耗时行会一直
+     * 停留在上一轮 trace 帧定格的旧值上不动。</p>
+     *
      * @param event 思考开始信号事件
+     * @param turnStartMs 本轮订阅时刻（毫秒），与 {@code context_size} / {@code trace} 同源
      * @return {@code reason_start} 帧；子代理事件返回 {@link WebChunk#EMPTY}
      */
-    private WebChunk onReasonStartEvent(ReasonStartEvent event) {
+    private WebChunk onReasonStartEvent(ReasonStartEvent event, long turnStartMs) {
         if (event.hasMeta("__parentAgentName")) {
             return WebChunk.EMPTY;
         }
-        return WebChunk.ofReasonStart();
+        WebChunk wc = WebChunk.ofReasonStart();
+        Map<String, Object> args = new HashMap<>();
+        args.put("turnStartMs", turnStartMs);
+        wc.setArgs(args);
+        return wc;
     }
 
     /**

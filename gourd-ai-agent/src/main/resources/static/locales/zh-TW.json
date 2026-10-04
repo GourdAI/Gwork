@@ -230,7 +230,11 @@
                 "memory_view":  "心智記憶",
                 "chat_workspace":  {
                                        "switch":  "切換工作空間",
-                                       "clear":  "清除選擇"
+                                       "clear":  "清除選擇",
+                                       "search_placeholder":  "搜尋專案…",
+                                       "search_no_results":  "未找到相符的專案",
+                                       "remote_connect":  "遠端連線",
+                                       "locate_multiple":  "找到多個同名目錄，請選擇："
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "載入失敗，點擊重試",
@@ -842,6 +846,8 @@
                  "question_recommended":  "推薦",
                  "question_detail_expand":  "展開",
                  "question_detail_collapse":  "收起",
+                  "question_collapse":  "收合",
+                  "question_expand":  "展開",
                  "question_record_title":  "我的回答",
                  "question_answered":  "已提交",
                  "question_skipped":  "已跳過",
@@ -876,6 +882,13 @@
                  "tool_openapi":  "介面呼叫",
                  "tool_lsp":  "程式碼分析",
                  "tool_memory":  "記憶",
+                 "tool_recall":  "回溯歷史",
+                 "tool_ask_user":  "向使用者提問",
+                 "tool_config":  "擴充設定",
+                 "tool_clock":  "目前時間",
+                 "tool_plan":  "制定計劃",
+                 "tool_plan_progress":  "推進計劃",
+                 "tool_plan_revise":  "修訂計劃",
                  "expand_full":  "展開全文",
                  "expand_full_size":  "展開全文（共 {0}KB）",
                  "loading_dots":  "載入中…",

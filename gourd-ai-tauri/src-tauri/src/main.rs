@@ -114,6 +114,10 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_process::init())
+        // 原生文件夹选择对话框（工作区「打开文件夹」，见 ipc_bridge::pick_directory）。
+        // 不注册该插件，桌面端会跌入网页 webkitdirectory 兜底，弹出浏览器语义的
+        // 「上传」文案与确认条（用户实测回归）。
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             backend::get_backend_state,
@@ -131,6 +135,7 @@ fn main() {
             titlebar_ui::window_close,
             titlebar_ui::window_get_chrome,
             window::set_window_title,
+            ipc_bridge::pick_directory,
         ])
         // log_path 要被 setup 闭包持有（闭包要求 'static），故用 move 转移所有权
         .setup(move |app| {

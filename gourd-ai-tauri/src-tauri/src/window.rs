@@ -119,8 +119,27 @@ fn current_ui_port() -> u16 {
 /// 进而使 `is_internal_url` 把所有本地地址误判为外部、全部抛给系统浏览器。
 static UI_PORT_CACHE: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
+/// 是否允许把该 URL 交给系统打开。
+///
+/// 只放行 http/https，与 Electron 端 `openExternalSafe` 的 `/^https?:\/\//i` 守卫对齐。
+///
+/// 为什么必须有这道守卫：`is_internal_url` 对未列举的 scheme（含 `file:`）返回 false，
+/// 于是导航被拦截后直接送进 `open_external`。Windows 分支用
+/// `rundll32 url.dll,FileProtocolHandler` 打开，它**不限于浏览器**——拿到 file:// 会用
+/// 系统默认关联程序把该文件直接打开（.xlsx 弹 Excel、.exe 直接执行）。
+/// 触发路径真实存在：把文件拖到落区之外（侧栏/消息区）时浏览器默认行为就是导航到 file://。
+pub fn is_external_openable(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+}
+
 /// 用系统浏览器打开外部链接。
+///
+/// 非 http(s) 的 scheme 一律不打开（见 `is_external_openable`），仅记日志。
 fn open_external(url: &Url) {
+    if !is_external_openable(url) {
+        warn!("拒绝交给系统打开非 http(s) 地址: {}", url);
+        return;
+    }
     let s = url.to_string();
     // 优先使用 opener 插件未配置时的系统默认方式
     #[cfg(target_os = "windows")]
@@ -389,5 +408,64 @@ mod tests {
         assert_eq!(clamp_to_work_area(None), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
         // 异常尺寸（远程桌面会话初始化中可能报 0）同样走默认
         assert_eq!(clamp_to_work_area(Some((0.0, 0.0))), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
+    }
+
+    // ── open_external 的 scheme 守卫 ────────────────────────────────
+    // 触发场景：把文件拖到落区之外 → 浏览器默认导航到 file:// → on_navigation 判定为
+    // 外部 → 交给系统打开。Windows 分支的 rundll32 FileProtocolHandler 会直接用关联程序
+    // 打开该文件（.xlsx 弹 Excel、.exe 执行），属于不可接受的副作用。
+
+    /// file:// 必须被拒（本次修复的核心：拖放到落区外不得让系统打开文件）。
+    #[test]
+    fn rejects_file_scheme() {
+        let u = Url::parse("file:///D:/tmp/dropped.xlsx").unwrap();
+        assert!(!is_external_openable(&u), "file:// 不得交给系统打开");
+    }
+
+    /// http/https 正常放行（外链交给系统浏览器的既有能力不得回归）。
+    #[test]
+    fn allows_http_and_https() {
+        assert!(is_external_openable(&Url::parse("https://example.com/a").unwrap()));
+        assert!(is_external_openable(&Url::parse("http://example.com/a").unwrap()));
+    }
+
+    /// 其它危险 scheme 一律拒绝（可执行/脚本/协议处理器劫持面）。
+    #[test]
+    fn rejects_other_schemes() {
+        for s in [
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "about:blank",
+            "blob:https://example.com/uuid",
+            "ms-settings:about",
+            "cmd:/c calc",
+        ] {
+            if let Ok(u) = Url::parse(s) {
+                assert!(!is_external_openable(&u), "应拒绝: {}", s);
+            }
+        }
+    }
+
+    /// 守卫与 is_internal_url 不得同时放行同一地址（互斥，避免双开）。
+    /// 内部地址（本地 UI 端口 / tauri 协议）由 WebView 自行处理，不走系统打开。
+    #[test]
+    fn guard_is_disjoint_from_internal() {
+        for s in ["tauri://localhost/x", "asset://localhost/x", "about:blank", "data:text/plain,hi"] {
+            if let Ok(u) = Url::parse(s) {
+                assert!(
+                    !(is_internal_url(&u) && is_external_openable(&u)),
+                    "内部地址不应同时可交系统打开: {}",
+                    s
+                );
+            }
+        }
+    }
+
+    /// file:// 必须被 is_internal_url 判为外部（否则不会被拦截，守卫也就形同虚设）。
+    /// 这条锁住两个函数的配合关系：拦截发生 → 守卫兜底。
+    #[test]
+    fn file_scheme_is_not_internal() {
+        let u = Url::parse("file:///D:/tmp/dropped.xlsx").unwrap();
+        assert!(!is_internal_url(&u));
     }
 }

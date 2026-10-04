@@ -230,7 +230,11 @@
                 "memory_view":  "Memorie mentală",
                 "chat_workspace":  {
                                        "switch":  "Comută spațiul de lucru",
-                                       "clear":  "Șterge selecția"
+                                       "clear":  "Șterge selecția",
+                                       "search_placeholder":  "Căutare proiecte…",
+                                       "search_no_results":  "Niciun proiect potrivit",
+                                       "remote_connect":  "Conectare la distanță",
+                                       "locate_multiple":  "Mai multe foldere cu același nume, alegeți unul:"
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "Încărcare eșuată, faceți clic pentru reîncercare",
@@ -842,6 +846,8 @@
                  "question_recommended":  "Recomandat",
                  "question_detail_expand":  "Extinde",
                  "question_detail_collapse":  "Restrânge",
+                  "question_collapse":  "Restrânge",
+                  "question_expand":  "Extinde",
                  "question_record_title":  "Răspunsul meu",
                  "question_answered":  "Trimis",
                  "question_skipped":  "Omis",
@@ -876,6 +882,13 @@
                  "tool_openapi":  "Apel API",
                  "tool_lsp":  "Analiză cod",
                  "tool_memory":  "Memorie",
+                 "tool_recall":  "Rechemare istoric",
+                 "tool_ask_user":  "Întreabă utilizatorul",
+                 "tool_config":  "Config. extensii",
+                 "tool_clock":  "Ora curentă",
+                 "tool_plan":  "Plan",
+                 "tool_plan_progress":  "Derulare plan",
+                 "tool_plan_revise":  "Revizuire plan",
                  "expand_full":  "Expandare completă",
                  "expand_full_size":  "Expandare completă ({0}KB total)",
                  "loading_dots":  "Se încarcă…",

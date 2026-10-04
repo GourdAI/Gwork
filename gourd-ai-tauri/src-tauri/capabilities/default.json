@@ -48,6 +48,7 @@
     "allow-updater-get-state",
     "allow-updater-check",
     "allow-updater-download",
-    "allow-updater-install"
+    "allow-updater-install",
+    "allow-pick-directory"
   ]
 }

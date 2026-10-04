@@ -118,7 +118,7 @@
             }
             btn.classList.add('is-visible');
             btn.setAttribute('data-state', view.state);
-            btn.setAttribute('title', t(view.tipKey, view.tipArgs));
+
             if (labelEl) labelEl.textContent = view.label;
             if (view.percent !== null) {
                 btn.style.setProperty('--gwork-update-pct', view.percent + '%');

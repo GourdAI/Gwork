@@ -289,7 +289,6 @@ function automationHarness() {
             assert.equal($('#' + id).val(), value, id + ' 草稿被修改');
         }
         assert.equal($('#autoWorktree').prop('checked'), true);
-        assert.equal($('#autoWsName').attr('title'), '/work/repo');
         if (renamed) {
             assert.equal($('#autoWsName').text(), '新登记名');
             assert.match($('#autoWsDropdown').html(), /新登记名/);

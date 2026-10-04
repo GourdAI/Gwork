@@ -69,43 +69,60 @@ function foldLongInputToAttachment(rawText) {
 window.foldLongInputToAttachment = foldLongInputToAttachment;
 
 function handlePaste(e) {
-    var clipboard = e.clipboardData || e.originalEvent.clipboardData;
+    // originalEvent 可能不存在（直接用原生 addEventListener/dispatchEvent 绑定、
+    // 或未来新增非 jQuery 调用路径）；旧写法 e.originalEvent.clipboardData 会抛
+    // TypeError，把整个粘贴处理中断掉。
+    var clipboard = e.clipboardData || (e.originalEvent && e.originalEvent.clipboardData);
     if (!clipboard) return;
 
-    // 先把剪贴板里的图片【全部】收齐。
-    // 旧实现在命中第一张图后直接 return，导致：多图只进一张，且因为此前已
-    // preventDefault、又跳过了下方文本分支，图文混合粘贴时文字会被静默吞掉。
-    var items = clipboard.items || [];
+    // 收齐剪贴板里的全部文件：图片走 image 路径，其余（XLS/PDF/ZIP 等）走
+    // file 路径，与 handleDrop 保持一致。旧实现只收 image/* 导致非图片文件被
+    // 静默丢弃。
     var images = [];
+    var otherFiles = [];
+    function bucket(f) {
+        if (!f) return;                            // 防御：getAsFile() 可能返回 null
+        if ((f.type || '').indexOf('image/') === 0) { images.push(f); } else { otherFiles.push(f); }
+    }
+
+    var items = clipboard.items || [];
     for (var i = 0; i < items.length; i++) {
-        if (items[i].kind !== 'file') continue;        // 排除 string 项（它们属于文本分支）
-        if (items[i].type.indexOf('image') === -1) continue;
-        var f = items[i].getAsFile();
-        if (f) images.push(f);                         // 防御：getAsFile() 可能返回 null
+        if (items[i].kind !== 'file') continue;   // 排除 string 项（属于文本分支）
+        bucket(items[i].getAsFile());
+    }
+
+    // items 一个文件都没收上来时回退到 clipboard.files：Safari 与部分旧 WebView 的
+    // DataTransferItem 支持不完整（items 为空但 files 有值），只读 items 会整批吞掉
+    // 用户粘贴的文件。二者同时有值时以 items 为准，避免同一文件重复入队。
+    if (images.length === 0 && otherFiles.length === 0) {
+        var fallback = clipboard.files || [];
+        for (var j = 0; j < fallback.length; j++) bucket(fallback[j]);
     }
 
     var plainText = clipboard.getData('text/plain') || '';
     var htmlData = clipboard.getData('text/html');
 
-    // 图与格式文本都没有（纯文本粘贴）→ 不接管，交还浏览器原生行为。
-    // 这是刻意保留的：原生粘贴才能维护 textarea 的 undo 栈与 IME 组合输入。
-    if (images.length === 0 && !htmlData) return;
+    // 无任何文件且无格式文本 → 纯文本粘贴，不接管，交还浏览器原生行为。
+    // 原生粘贴才能维护 textarea 的 undo 栈与 IME 组合输入。
+    if (images.length === 0 && otherFiles.length === 0 && !htmlData) return;
 
     // 确定要接管后才阻止默认行为，全函数唯一一处。
     e.preventDefault();
 
-    // 文字先落地：即便同时带图也不能丢。
+    // 文字先落地：即便同时带文件也不能丢。
     if (plainText) insertTextAtCursor(e.target, plainText);
 
-    if (images.length === 0) return;
+    if (images.length === 0 && otherFiles.length === 0) return;
 
     // 名额提示与拖放路径（handleDrop）保持同一口径，复用现有 i18n 键。
     if (pendingFiles.length >= MAX_ATTACHMENTS) {
         showToast(GourdI18n.t('ui.attachment_limit', MAX_ATTACHMENTS), 'error');
         return;
     }
-    var accepted = processSelectedFiles(images, 'image', 'pasted-image');
-    if (accepted < images.length) {
+    // 非图片同步入队，先处理确保名额计算准确；图片走 FileReader 异步。
+    var acceptedOther  = otherFiles.length > 0 ? processSelectedFiles(otherFiles, 'file', 'pasted-file') : 0;
+    var acceptedImages = images.length > 0 ? processSelectedFiles(images, 'image', 'pasted-image') : 0;
+    if (acceptedOther + acceptedImages < otherFiles.length + images.length) {
         showToast(GourdI18n.t('ui.attachment_partial_limit', MAX_ATTACHMENTS), 'error');
     }
 }
@@ -257,15 +274,55 @@ $(welcomeInput).on('paste', handlePaste);
 $(chatInput).on('paste', handlePaste);
 
 /* ===== Drag & Drop File Upload ===== */
+
+/**
+ * 拖放载荷是否携带文件。
+ *
+ * 必须先看 types 再看 files：dragover 阶段浏览器出于安全考虑拿不到 files，
+ * 但 types 可读。同时该判断也是「不误伤文本拖放」的关键——在 textarea 里
+ * 拖选中文本时 types 是 ['text/plain']，若无条件 preventDefault 会直接破坏
+ * 原生文本拖放（真实回归）。
+ */
+function dragCarriesFiles(e) {
+    var dt = e.dataTransfer || (e.originalEvent && e.originalEvent.dataTransfer);
+    if (!dt || !dt.types) return false;
+    for (var i = 0; i < dt.types.length; i++) {
+        // 必须大小写无关：Chrome 对 OS 文件拖放给 'Files'，但 HTML 规范规定
+        // types 应返回小写，且 setData('Files') 实测会归一为 'files'。
+        // 严格比较 'Files' 会在小写实现上整体失效（含 document 护栏 → 又会导航 file://）。
+        if (String(dt.types[i]).toLowerCase() === 'files') return true;
+    }
+    return false;
+}
+
+/**
+ * 拖放目标是否在主内容区可受理范围内。
+ *
+ * 排除项：
+ *  - .code-editor-col / .monaco-editor：code 模式的编辑器与 Git diff 查看器。
+ *    Monaco 自带「拖文件进编辑器 = 插入路径文本」语义，在祖先层 preventDefault
+ *    会把它打断，故整列排除。
+ *  - 侧栏 / 文件树面板 / 设置浮层：它们是 body 级元素，本就不是 .main-area 后代，
+ *    closest('.main-area') 自然为 false，无需单独列举。
+ */
+function isMainAreaDropTarget(target) {
+    if (!target || typeof target.closest !== 'function') return false;
+    if (target.closest('.code-editor-col, .monaco-editor')) return false;
+    return !!target.closest('.main-area');
+}
+
 (function() {
     var welcomeDropZone = $('#welcomeDropZone');
     var chatDropZone = $('#chatDropZone');
     var welcomeDropOverlay = $('#welcomeDropOverlay');
     var chatDropOverlay = $('#chatDropOverlay');
+    var mainArea = $('.main-area');
+    var mainDropOverlay = $('#mainDropOverlay');
 
     // Counter to track nested enter/leave events (child elements fire their own events)
     var welcomeDragCounter = 0;
     var chatDragCounter = 0;
+    var mainDragCounter = { val: 0 };
 
     function showOverlay(overlay) {
         overlay.addClass('active');
@@ -275,14 +332,14 @@ $(chatInput).on('paste', handlePaste);
         overlay.removeClass('active');
     }
 
-    function handleDrop(e, overlay, counterReset) {
-        e.preventDefault();
-        e.stopPropagation();
-        counterReset.val = 0;
-        hideOverlay(overlay);
-
-        var dt = e.dataTransfer || (e.originalEvent && e.originalEvent.dataTransfer);
-        var files = dt && dt.files;
+    /**
+     * 受理一批拖放文件（输入框落区与主内容区落区共用）。
+     *
+     * 名额必须用本地计数器累加：图片分支的 push 在 FileReader 回调里，循环期间
+     * pendingFiles.length 不会增长，只看它会让拖放多图突破上限（与
+     * processSelectedFiles 同一类缺陷）。
+     */
+    function acceptDroppedFiles(files) {
         if (!files || files.length === 0) return;
 
         if (pendingFiles.length >= MAX_ATTACHMENTS) {
@@ -291,9 +348,6 @@ $(chatInput).on('paste', handlePaste);
         }
 
         // Separate files into images and non-images for proper processing
-        // 名额用本地计数器累加：图片分支的 push 在 FileReader 回调里，循环期间
-        // pendingFiles.length 不会增长，只看它会让拖放多图突破上限（与
-        // processSelectedFiles 同一类缺陷）。
         var room = MAX_ATTACHMENTS - pendingFiles.length;
         var taken = 0;
         for (var i = 0; i < files.length; i++) {
@@ -303,15 +357,32 @@ $(chatInput).on('paste', handlePaste);
             }
             var file = files[i];
             if (!file) continue; // 防御：文件可能被移除
-            var isImage = file.type.indexOf('image/') === 0;
+            var isImage = (file.type || '').indexOf('image/') === 0;
             taken++;
             processSelectedFile(file, isImage ? 'image' : 'file');
         }
     }
 
+    function filesOf(e) {
+        var dt = e.dataTransfer || (e.originalEvent && e.originalEvent.dataTransfer);
+        return (dt && dt.files) || null;
+    }
+
+    function handleDrop(e, overlay, counterReset) {
+        e.preventDefault();
+        e.stopPropagation();
+        counterReset.val = 0;
+        hideOverlay(overlay);
+        acceptDroppedFiles(filesOf(e));
+    }
+
+    /* 四个事件都以 dragCarriesFiles(e) 为门。旧实现在 dragover/drop 上无条件
+       preventDefault，会直接杀死 textarea 内「拖选中文本→拖到光标处插入」的原生
+       能力（实测：types 仅 ['text/plain'] 时 defaultPrevented 仍为 true）。
+       只有真携带文件时才接管，文本拖放与内部 DnD（供应商排序等）均不受影响。 */
     function bindDropZone(zone, overlay, counter) {
-        // Prevent default browser behavior (opening the file)
         zone.on('dragenter', function(e) {
+            if (!dragCarriesFiles(e)) return;
             e.preventDefault();
             e.stopPropagation();
             counter.val++;
@@ -319,12 +390,14 @@ $(chatInput).on('paste', handlePaste);
         });
 
         zone.on('dragover', function(e) {
+            if (!dragCarriesFiles(e)) return;
             e.preventDefault();
             e.stopPropagation();
             // Keep overlay visible during drag over
         });
 
         zone.on('dragleave', function(e) {
+            if (!dragCarriesFiles(e)) return;
             e.preventDefault();
             e.stopPropagation();
             counter.val--;
@@ -335,12 +408,68 @@ $(chatInput).on('paste', handlePaste);
         });
 
         zone.on('drop', function(e) {
+            if (!dragCarriesFiles(e)) return;
             handleDrop(e, overlay, counter);
         });
     }
 
     bindDropZone(welcomeDropZone, welcomeDropOverlay, { val: welcomeDragCounter });
     bindDropZone(chatDropZone, chatDropOverlay, { val: chatDragCounter });
+
+    /* ── 主内容区落区 ──────────────────────────────────────────
+       原落区只有两个输入框（实测仅占视口 8.25%），拖到消息区/空白处一律静默
+       无反应。此处把 .main-area 整体接管为落区，并排除 Monaco 编辑器列。
+
+       输入框落区（bindDropZone）在 dragenter/dragover/drop 上都已 stopPropagation，
+       故拖到输入框时不会冒泡到这里，两层不会重复受理、也不会双遮罩叠加。 */
+    if (mainArea.length) {
+        mainArea.on('dragenter', function(e) {
+            if (!dragCarriesFiles(e) || !isMainAreaDropTarget(e.target)) return;
+            e.preventDefault();
+            mainDragCounter.val++;
+            showOverlay(mainDropOverlay);
+        });
+
+        mainArea.on('dragover', function(e) {
+            if (!dragCarriesFiles(e) || !isMainAreaDropTarget(e.target)) return;
+            e.preventDefault();
+        });
+
+        mainArea.on('dragleave', function(e) {
+            if (!dragCarriesFiles(e)) return;
+            mainDragCounter.val--;
+            if (mainDragCounter.val <= 0) {
+                mainDragCounter.val = 0;
+                hideOverlay(mainDropOverlay);
+            }
+        });
+
+        mainArea.on('drop', function(e) {
+            mainDragCounter.val = 0;
+            hideOverlay(mainDropOverlay);
+            if (!dragCarriesFiles(e) || !isMainAreaDropTarget(e.target)) return;
+            e.preventDefault();
+            acceptDroppedFiles(filesOf(e));
+        });
+    }
+
+    /* ── 全局拖放导航护栏 ────────────────────────────────────────
+       落区之外（侧栏、文件树、设置浮层、Monaco）松手时，浏览器默认行为是导航到
+       file:// 该文件。桌面壳层的导航守卫又会把它交给系统：Tauri 的 open_external
+       无 scheme 白名单，会用 rundll32 直接以系统默认程序打开该文件。
+       这里在 document 层对「携带文件的拖放」统一 preventDefault，从源头消灭导航。
+
+       只拦文件不拦文本（dragCarriesFiles），故 textarea 内的文本拖放、
+       模型设置页的供应商拖拽排序（内部 DnD，types 不含 Files）均不受影响。 */
+    $(document).on('dragover.dropguard drop.dropguard', function(e) {
+        if (!dragCarriesFiles(e)) return;
+        e.preventDefault();
+    });
+    // dragend / 窗口失焦时兜底收起遮罩，避免计数器因异常路径未归零而卡住
+    $(document).on('dragend.dropguard dragexit.dropguard', function() {
+        mainDragCounter.val = 0;
+        hideOverlay(mainDropOverlay);
+    });
 })();
 
 // Attachment remove buttons / image zoom - use event delegation on both wraps
@@ -1297,7 +1426,7 @@ function startVoiceRecording(inputEl) {
     // 更新按钮状态
     var btn = (inputEl === welcomeInput) ? welcomeVoiceBtn : chatVoiceBtn;
     btn.addClass('recording');
-    btn.prop('title', GourdI18n.t('ui.release_to_stop'));
+
 }
 
 function stopVoiceRecording() {
@@ -1308,8 +1437,7 @@ function stopVoiceRecording() {
     // 更新按钮状态
     welcomeVoiceBtn.removeClass('recording');
     chatVoiceBtn.removeClass('recording');
-    welcomeVoiceBtn.prop('title', GourdI18n.t('ui.hold_to_speak'));
-    chatVoiceBtn.prop('title', GourdI18n.t('ui.hold_to_speak'));
+
 
     // 保留识别到的文本，重置基线以便下次追加
     if (voiceTargetInput) {
@@ -1673,9 +1801,8 @@ function renderQueueContainer($container, listSelector, countSelector, queue, se
                 var filePaths = item.filePaths || [];
                 if (imagePaths.length > 0 || filePaths.length > 0) {
                     contentHtml += '<span class="queue-item-attachments">';
-                    if (imagePaths.length > 0) {
-                        contentHtml += '<span class="queue-attach-badge">' + GourdI18n.t('queue.images', { n: imagePaths.length }) + '</span>';
-                    }
+                    // 图片先出加载占位，upgradeQueueThumbs 拉 meta 后升级为真实缩略图；
+                    // 失败降级为「图 N」徽标（与旧版同观感）。
                     if (filePaths.length > 0) {
                         contentHtml += '<span class="queue-attach-badge">' + GourdI18n.t('queue.files', { n: filePaths.length }) + '</span>';
                     }
@@ -1688,6 +1815,23 @@ function renderQueueContainer($container, listSelector, countSelector, queue, se
                     statusHtml +
                     (!isProcessing ? '<button class="queue-item-remove" title="' + escapeHtml(GourdI18n.t('queue.remove')) + '">&times;</button>' : '')
                 );
+
+                /* 图片占位改用 DOM 构建：路径直接拼进 HTML 字符串属性属于注入面
+                   （含引号/尖括号的文件名会撕开标签结构）。位置与旧版一致：
+                   排在 .queue-item-attachments 内文件计数之前。 */
+                if (imagePaths.length > 0) {
+                    var attachWrap = $item.find('.queue-item-attachments')[0];
+                    if (attachWrap) {
+                        var attachAnchor = $(attachWrap).children('.queue-attach-badge')[0] || null;
+                        for (var ip = 0; ip < imagePaths.length; ip++) {
+                            var thumbEl = document.createElement('span');
+                            thumbEl.className = 'queue-attach-thumb';
+                            thumbEl.setAttribute('data-attach-path', imagePaths[ip]);
+                            if (attachAnchor) attachWrap.insertBefore(thumbEl, attachAnchor);
+                            else attachWrap.appendChild(thumbEl);
+                        }
+                    }
+                }
 
                 if (!isProcessing) {
                     $item.find('.queue-item-remove').on('click', function() {
@@ -1702,10 +1846,60 @@ function renderQueueContainer($container, listSelector, countSelector, queue, se
                 }
                 $list.append($item);
             });
+            upgradeQueueThumbs($list, sessionId);
         }
         var $count = $(countSelector);
         if ($count.length) $count.text(GourdI18n.t('queue.count', { n: queue.length }));
     }
+}
+
+/* 队列面板图片缩略图升级：整列一次 meta 请求（内部自带缓存 / 在途合并 / 分批），
+   有 dataUrl 的占位替换为 22px 缩略图；失败的同组占位合并为一个「图 N」徽标。
+   请求失败（fetchAttachmentMeta 内部已兜底为全 null）→ 全部降级徽标，面板不残加载位。 */
+function upgradeQueueThumbs($list, sessionId) {
+    var $thumbs = $list.find('.queue-attach-thumb[data-attach-path]');
+    if (!$thumbs.length) return;
+    var paths = [];
+    $thumbs.each(function() { paths.push(this.getAttribute('data-attach-path')); });
+    fetchAttachmentMeta(sessionId, paths).then(function(items) {
+        var byPath = {};
+        (items || []).forEach(function(it) { if (it && it.path) byPath[it.path] = it; });
+        var failedGroups = [];
+        $thumbs.each(function() {
+            var el = this;
+            var parent = el.parentNode;
+            if (!parent) return;
+            var meta = byPath[el.getAttribute('data-attach-path')];
+            if (meta && meta.dataUrl) {
+                var img = document.createElement('img');
+                img.className = 'queue-attach-img';
+                img.src = meta.dataUrl;
+                img.alt = meta.name || '';
+                img.title = meta.name || '';
+                parent.replaceChild(img, el);
+                // 队列里的 22px 缩略图也要可点开看大图；addImageLightbox 自带 data('lightbox')
+                // 幂等守卫，同容器被多张图重复调用安全
+                if (typeof addImageLightbox === 'function') addImageLightbox(parent);
+            } else {
+                var group = null;
+                for (var g = 0; g < failedGroups.length; g++) {
+                    if (failedGroups[g].parent === parent) { group = failedGroups[g]; break; }
+                }
+                if (!group) { group = { parent: parent, els: [] }; failedGroups.push(group); }
+                group.els.push(el);
+            }
+        });
+        for (var gi = 0; gi < failedGroups.length; gi++) {
+            var els = failedGroups[gi].els;
+            var badge = document.createElement('span');
+            badge.className = 'queue-attach-badge';
+            badge.textContent = GourdI18n.t('queue.images', { n: els.length });
+            failedGroups[gi].parent.replaceChild(badge, els[0]);
+            for (var e = 1; e < els.length; e++) {
+                if (els[e].parentNode) els[e].parentNode.removeChild(els[e]);
+            }
+        }
+    });
 }
 
 async function processMessageQueue(targetSessionId) {
@@ -1769,8 +1963,10 @@ async function processNextQueuedMessage(sessionId) {
     }
 
     // 队列用户气泡也要乐观渲染；recovery 按 clientMessageId 跳过 user 回放的前提就是本地已展示。
+    // 附件路径同时交给气泡：内部会经 meta 端点升级为真实缩略图，
+    // 拉取失败自动降级为数量徽标（与 renderUserAttachmentMeta 同观感）。
     appendUserMessage(guardSess, displayText, null, null, null,
-        { images: imagePaths.length, files: filePaths.length });
+        { imagePaths: imagePaths, filePaths: filePaths });
     guardSess._pendingClientMessageId = 'msg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
     guardSess._requestStartSeq = guardSess.lastEventSeq || 0;
     guardSess._awaitingSendAck = true;

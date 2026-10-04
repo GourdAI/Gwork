@@ -138,11 +138,50 @@ public class ToolSanitizerInterceptor extends AbsReActInterceptor {
                 log.debug("Tool [{}] output truncated: {} -> {} chars",
                         chain.getTool().name(), result.getContent().length(), cap);
             }
-            // 拼接截断说明，告知模型数据不完整，引导其调整请求（如分页）
-            result = new ToolResult(result.getContent().substring(0, cap)
-                    + "... [Content Truncated due to length. Use pagination/offset to fetch the rest.]");
+            result = new ToolResult(truncateKeepHeadTail(result.getContent(), cap));
         }
 
         return result;
+    }
+
+    /** 头部占 cap 的比例：尾部权重大，因为关键结论几乎都在输出末尾。 */
+    private static final double HEAD_RATIO = 0.4d;
+
+    /**
+     * 超长工具输出截断：保留头 {@value #HEAD_RATIO} + 尾部其余，中间插省略标记。
+     *
+     * <p><b>为何不能只保留头部：</b>旧实现是 {@code substring(0, cap)}，而本工程工具的关键结论
+     * 几乎全在末尾——{@code [exit_code=N]}、{@code BUILD SUCCESS/FAILURE}、
+     * {@code Tests run: x, Failures: y}、堆栈的 {@code Caused by}。全截掉后模型看到的是
+     * 「一堆日志 + 没有结果」，典型后果是把已成功的构建当未知状态重跑一遍，或把失败当通过。</p>
+     *
+     * <p><b>为何切点要内缩：</b>中文/emoji 在 UTF-16 下占两个 char，按固定下标硬切会产生孤立
+     * 代理项，序列化成 JSON 发给模型时变 U+FFFD 或直接被判非法字符。</p>
+     *
+     * <p>抽成 static 是为了可测：本拦截器依赖 ToolChain/ReActTrace，原先这段逻辑无任何测试覆盖，
+     * 改坏了也全绿。</p>
+     *
+     * @param raw 原始输出（调用方已保证 length &gt; cap）
+     * @param cap 本次允许的上限（resolveCap 按上下文压力动态调档）
+     */
+    static String truncateKeepHeadTail(String raw, int cap) {
+        if (raw == null || cap <= 0 || raw.length() <= cap) {
+            return raw;
+        }
+        int head = (int) (cap * HEAD_RATIO);
+        int tail = cap - head;
+
+        if (head > 0 && Character.isHighSurrogate(raw.charAt(head - 1))) {
+            head--; // 不把高代理项留在头部末尾
+        }
+        int tailStart = raw.length() - tail;
+        if (tailStart < raw.length() && Character.isLowSurrogate(raw.charAt(tailStart))) {
+            tailStart++; // 不把低代理项留在尾部开头
+        }
+        // 无需处理窗口重叠：前提是 raw.length() > cap = head + tail，故 tailStart - head >= 1
+        return raw.substring(0, head)
+                + "\n... [" + (tailStart - head) + " chars truncated — head and tail preserved."
+                + " Use pagination/offset to fetch the middle content.] ...\n"
+                + raw.substring(tailStart);
     }
 }

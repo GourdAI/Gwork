@@ -354,6 +354,42 @@ function syncContextElapsedTick(chunk, sess, m, live) {
 }
 
 /**
+ * 新一轮模型调用开始（reason_start 帧）：若 turnStartMs 已变（新一轮），作废旧一轮的
+ * 定格耗时并让耗时行重新走表。
+ *
+ * <p><b>为何需要这个提前重置</b>：{@code context_size} 帧要等新一轮第一次模型调用结束
+ * （{@code onReasonEnd}）才下发。在新一轮起步阶段（流式输出已开始、模型尚未结算）的窗口期，
+ * 没有任何帧触发 {@link settledContextElapsed} 作废旧值，耗时行会一直停在上一轮 trace
+ * 帧定格的旧值上不动——用户看到「任务耗时卡在上一轮的值」。切会话回放正常只是因为
+ * 回放时新一轮的 {@code context_size} 已落盘。</p>
+ *
+ * <p>以 {@code turnStartMs} 为轮身份判据，与 {@link settledContextElapsed} 同口径，幂等：
+ * 同一轮内多次 reason_start（工具调用后续跑）turnStartMs 不变，不重复清。</p>
+ *
+ * @param {Object} sess - 所属会话
+ * @param {number} turnStartMs - reason_start 帧携带的本轮订阅时刻
+ */
+function noteContextTurnStart(sess, turnStartMs) {
+    if (!sess || !(turnStartMs > 0)) return;
+    // 无卡可绘时无需任何动作（新一轮 context_size 到达后自然建立）
+    if (typeof activeSessionId !== 'undefined' && sess.sessionId !== activeSessionId) return;
+    if (!sess.lastContextChunk) return;
+    // 用「新轮起点」驱动一次重绘：renderContextMeter → settledContextElapsed 检测到
+    // turnStartMs 跨轮后亲自作废旧定格值，耗时行随即按新起点重新走表，不再停在上一轮定格值。
+    // 其余行（累计输入/输出等）沿用 lastContextChunk 的最新值，直到新一轮 context_size 帧
+    // 到达后被权威值覆盖。绝不写回 sess.lastContextChunk——否则会用旧轮的 createdAt 顶掉它，
+    // 破坏 updateContextIndicator 的单调时间戳门禁。
+    var c = sess.lastContextChunk;
+    var args = {};
+    for (var k in (c.args || {})) { args[k] = c.args[k]; }
+    args.turnStartMs = turnStartMs;
+    renderContextMeter({ args: args, text: c.text, totalTokens: c.totalTokens,
+        inputTokens: c.inputTokens, outputTokens: c.outputTokens,
+        cacheReadTokens: c.cacheReadTokens, cacheCreationTokens: c.cacheCreationTokens,
+        cacheRate: c.cacheRate, createdAt: Date.now() }, sess);
+}
+
+/**
  * 轮次收口：用 trace 帧的权威 elapsedMs 定格耗时行（与徒标同源同值）。
  * <p>由 app-streaming.js 的 {@code case 'trace'} 调用。无耗时字段（旧历史帧）时静默返回，
  * 不得用 0 或推算值顶替。</p>

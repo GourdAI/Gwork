@@ -59,8 +59,9 @@ test('handlePaste 必须在处理图片前先落地纯文本', () => {
 
 test('纯文本粘贴仍交还浏览器原生行为（保住 undo 栈与 IME）', () => {
     const body = sliceFunction(readJs('app-ui.js'), 'function handlePaste(');
-    assert.ok(/images\.length === 0 && !htmlData[\s\S]{0,40}return/.test(body),
-        '无图且无 text/html 时应直接 return，不接管粘贴');
+    // 早退条件：无图片 && 无其他文件 && 无 htmlData（含非图片文件如 XLS 后新增 otherFiles 桶）
+    assert.ok(/images\.length === 0 && otherFiles\.length === 0 && !htmlData[\s\S]{0,60}return/.test(body),
+        '无图、无其他文件且无 text/html 时应直接 return，不接管粘贴');
 });
 
 test('processSelectedFiles 必须用本地计数器控名额（图片 push 是异步的）', () => {
@@ -73,10 +74,21 @@ test('processSelectedFiles 必须用本地计数器控名额（图片 push 是�
         '应返回实际受理数，供调用方判断是否提示「部分未添加」');
 });
 
+/* 名额逻辑已从 handleDrop 抽到共享入口 acceptDroppedFiles（主内容区落区与输入框
+   落区共用一份）。本用例曾因切片锚点仍指向 handleDrop 而在重构后永久失败——
+   后果不只是变红：它会顶掉变异验证里的全部真实信号，20 个变异全被它冒充为 KILLED。 */
 test('拖放路径同样不得依赖 pendingFiles.length 控名额', () => {
-    const body = sliceFunction(readJs('app-ui.js'), 'function handleDrop(');
+    const source = readJs('app-ui.js');
+    const body = sliceFunction(source, 'function acceptDroppedFiles(');
     assert.ok(/taken\s*>=\s*room/.test(body),
-        'handleDrop 的循环名额判断应使用本地计数器，与 processSelectedFiles 同构');
+        'acceptDroppedFiles 的循环名额判断应使用本地计数器，与 processSelectedFiles 同构');
+
+    // 名额守卫全局只能有一份：handleDrop 必须委派，不得自己再写一套循环
+    const dropBody = sliceFunction(source, 'function handleDrop(');
+    assert.ok(/acceptDroppedFiles\(/.test(dropBody),
+        'handleDrop 应委派给 acceptDroppedFiles，避免两份名额逻辑分叉');
+    assert.ok(!/taken\s*>=\s*room/.test(dropBody),
+        'handleDrop 内不得再存一份名额循环（应集中在 acceptDroppedFiles）');
 });
 
 test('getImageExtension 死函数已移除', () => {

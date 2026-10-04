@@ -230,7 +230,11 @@
                 "memory_view":  "Mentales Gedächtnis",
                 "chat_workspace":  {
                                        "switch":  "Arbeitsbereich wechseln",
-                                       "clear":  "Auswahl aufheben"
+                                       "clear":  "Auswahl aufheben",
+                                       "search_placeholder":  "Projekte suchen…",
+                                       "search_no_results":  "Keine passenden Projekte",
+                                       "remote_connect":  "Remote-Verbindung",
+                                       "locate_multiple":  "Mehrere gleichnamige Ordner gefunden, bitte auswählen:"
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "Laden fehlgeschlagen, klicken zum Wiederholen",
@@ -840,6 +844,8 @@
                  "question_recommended":  "Empfohlen",
                  "question_detail_expand":  "Ausklappen",
                  "question_detail_collapse":  "Einklappen",
+                  "question_collapse":  "Einklappen",
+                  "question_expand":  "Aufklappen",
                  "question_record_title":  "Meine Antwort",
                  "question_answered":  "Gesendet",
                  "question_skipped":  "Übersprungen",
@@ -874,6 +880,13 @@
                  "tool_openapi":  "API-Aufruf",
                  "tool_lsp":  "Codeanalyse",
                  "tool_memory":  "Speicher",
+                 "tool_recall":  "Verlauf abrufen",
+                 "tool_ask_user":  "Benutzer fragen",
+                 "tool_config":  "Erweiterung einrichten",
+                 "tool_clock":  "Aktuelle Zeit",
+                 "tool_plan":  "Plan",
+                 "tool_plan_progress":  "Plan fortsetzen",
+                 "tool_plan_revise":  "Plan überarbeiten",
                  "expand_full":  "Volltext erweitern",
                  "expand_full_size":  "Volltext erweitern (insgesamt {0}KB)",
                  "loading_dots":  "Wird geladen…",

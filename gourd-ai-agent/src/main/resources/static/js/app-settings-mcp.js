@@ -78,9 +78,9 @@
                     + '<div class="mcp-server-name">' + escapeHtml(name) + ' <span class="settings-inline-tag">[' + escapeHtml(type) + ']</span>' + (item.scope === 'workspace' ? ' <span class="settings-scope-badge">' + tWorkspace + '</span>' : '') + '</div>'
                     + (detail ? '<div class="mcp-server-detail">' + escapeHtml(detail) + '</div>' : '')
                     + '</div><div class="mcp-server-actions">'
-                    + '<button class="mcp-action-btn edit mcp-edit-btn" data-name="' + escapeAttr(name) + '" title="' + tEdit + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>'
-                    + '<button class="mcp-action-btn delete mcp-delete-btn" data-name="' + escapeAttr(name) + '" title="' + tDelete + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>'
-                    + '<label class="toggle-switch" title="' + ((item.enabled !== false) ? tDisable : tEnable) + '">'
+                    + '<button class="mcp-action-btn edit mcp-edit-btn" data-name="' + escapeAttr(name) + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>'
+                    + '<button class="mcp-action-btn delete mcp-delete-btn" data-name="' + escapeAttr(name) + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>'
+                    + '<label class="toggle-switch">'
                     + '<input type="checkbox" ' + (item.enabled !== false ? 'checked' : '') + ' data-name="' + escapeAttr(name) + '" class="mcp-toggle"/>'
                     + '<span class="toggle-slider"></span>'
                     + '</label>'
@@ -182,7 +182,7 @@
             var toolName = tool.name || '';
             var isEnabled = !disallowedMap[toolName];
             html += '<div class="mcp-server-item mcp-tool-item" data-tool="' + escapeAttr(toolName) + '">'
-                + '<label class="mcp-tool-checkbox" title="' + (isEnabled ? tDisable : tEnable) + '">'
+                + '<label class="mcp-tool-checkbox">'
                 + '<input type="checkbox" ' + (isEnabled ? 'checked' : '') + ' data-tool="' + escapeAttr(toolName) + '" class="mcp-tool-toggle"/>'
                 + '<span class="mcp-tool-checkmark"></span>'
                 + '</label>'
@@ -466,12 +466,12 @@
             
             var exists = mcpCachedList.some(function(s) { return s.name === name; });
             var statusBadge = exists
-                ? '<span class="import-preview-badge badge-exists" title="' + tExists + '，' + GourdI18n.t('settings.mcp.import') + GourdI18n.t('settings.mcp.import_skipped') + '">' + tExists + '</span>'
+                ? '<span class="import-preview-badge badge-exists">' + tExists + '</span>'
                 : '<span class="import-preview-badge badge-new">' + tNew + '</span>';
             var disabled = exists ? ' disabled' : '';
             
             var errorBadge = srv.error
-                ? '<span class="import-preview-badge badge-error" title="' + escapeAttr(srv.error) + '">' + tFormatError + '</span>'
+                ? '<span class="import-preview-badge badge-error">' + tFormatError + '</span>'
                 : '';
             
             previewItems += '<div class="import-preview-item">'

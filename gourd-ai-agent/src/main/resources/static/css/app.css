@@ -227,7 +227,8 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 }
 
 /* ===== Main ===== */
-.main-area { flex: 1; display: flex; flex-direction: column; height: 100vh; min-width: 0; background: var(--bg-main); transition: background 0.3s; }
+/* position:relative 为 #mainDropOverlay 提供定位上下文（遮罩 absolute inset:0 铺满本容器） */
+.main-area { flex: 1; display: flex; flex-direction: column; height: 100vh; min-width: 0; background: var(--bg-main); transition: background 0.3s; position: relative; }
 
 /* Header */
 .main-header { padding: 18px 28px 14px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-shrink: 0; transition: padding-right 0.25s ease; }
@@ -440,7 +441,10 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 }
 .tool-card.hitl-pending { border-color: var(--color-warning); }
 .tool-card .hitl-card-actions { display: flex; gap: 10px; padding: 0 14px 14px; }
-.tool-name { order: 1; font-weight: 600; color: var(--text-primary); white-space: nowrap; flex-shrink: 0; }
+/* 过程卡四族头部标签统一字重 500（与思考卡 .thinking-block-label 同口径，2026-09-29 用户反馈）：
+   过程轨迹是次要信息，600 半粗在高频调用下形成「粗体墙」，且与思考行来回跳字重；
+   颜色已由尾部低彩度块统一降为 --text-secondary，字重在此补齐最后一项统一。 */
+.tool-name { order: 1; font-weight: 500; color: var(--text-primary); white-space: nowrap; flex-shrink: 0; }
 /* 头部参数摘要：折叠态下这是整张卡唯一的语义承载位，不得隐藏。
    【已修正的设计缺陷】旧规则为 `display:none`，注释理由是「与工具名/文件名重复」——
    这对 read/edit 成立，但 bash 的 command、grep 的 pattern、websearch 的 query、task 的 prompt
@@ -458,8 +462,10 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    弹性收缩 + 省略号：超长时让位给工具名，绝不换行。
    三级文字色 + 小字号（视觉降级为注脚，不与正文争权重）。 */
 .tool-card-header .preview-inline, .thinking-block-header .preview-inline { order: 4; flex: 1 1 0; min-width: 0; color: var(--text-tertiary); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* 思考预览用等宽字体：与旧独立行一致，推理内容多为代码/路径类等宽文本 */
-.thinking-block-header .preview-inline { font-family: var(--font-mono); font-size: 11.5px; }
+/* 【字体族统一 2026-09-29】思考预览不再独用等宽：头部次要文字是单行注脚，
+   相邻工具行/思考行 mono↔sans 来回切换正是「怪」的来源；等宽只保留给卡体
+   （.tool-card-body / .thinking-block-body）等真正承载代码内容的位置。
+   字号随之回到共享规则的 12px（11.5px 是等宽时代的视觉补偿）。 */
 /* 展开态隐藏预览（卡体全文已可见，避免重复）；仍在 header 内，两态高度均不变 */
 .tool-card.expanded .tool-card-header .tool-card-preview, .thinking-block.expanded .thinking-block-header .thinking-block-preview { display: none; }
 /* 工具真实耗时（后端 WebChunk.durationMs 下发，来源 ToolCallEndEvent.getDurationMs()）。
@@ -562,7 +568,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .tool-batch-group:hover { background: var(--bg-hover); }
 .tool-batch-header { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 5px 10px; cursor: pointer; transition: background 0.15s; font-size: 13px; background: transparent; }
 .tool-batch-header:hover { background: transparent; }
-.tool-batch-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; color: var(--text-primary); white-space: nowrap; }
+.tool-batch-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 500; color: var(--text-primary); white-space: nowrap; }
 .tool-batch-progress { color: var(--text-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
 /* 分组内的成员行：不再叠一层分隔线，靠自身 padding 与悬停底色分行（线性化后全流统一） */
 .batch-tool-items { display: none; padding: 0 0 2px; }
@@ -594,9 +600,18 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .agent-status-icon.loading { background: var(--color-success, #4ac26b); animation: status-dot-blink 1s ease-in-out infinite; }
 .agent-status-icon.done { background: var(--color-success, #4ac26b); box-shadow: 0 0 4px rgba(74,194,107,0.6); }
 .agent-status-icon.reject { background: var(--color-danger, #e5534b); box-shadow: 0 0 4px rgba(229,83,75,0.6); }
-.agent-label { order: 2; font-weight: 600; color: var(--text-primary); flex-shrink: 0; }
+.agent-label { order: 2; font-weight: 500; color: var(--text-primary); flex-shrink: 0; }
 .agent-name { order: 3; color: var(--text-secondary); font-size: 12px; flex-shrink: 0; }
 .agent-card .tool-args { display: inline; order: 4; color: var(--text-tertiary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* 后台子代理的进度心跳（由 JS 动态追加到 header 末尾，见 app-message.js updateAgentProgress）。
+   展示「· 当前工具名」，让一张只有状态点在闪的卡变得可区分于「卡死」。
+   —— flex-shrink: 0 刻意不让它被描述挤压：描述本就带 ellipsis 可截断，而心跳是唯一的
+   「子代理还活着」信号，被挤没就失去全部价值。max-width + ellipsis 防止超长工具名反撑
+   header（header 带 overflow:hidden，撑破会被硬裁掉尾巴）。
+   —— 颜色用 --text-tertiary 中性 token（与 .tool-args 同）而非 --accent 派生：accent 在
+   light 下近黑、dark 下近白，任何 alpha 都无法同时适配两个主题，且会把弱状态抬到与正文同权重。 */
+.agent-progress-hint { order: 5; flex-shrink: 0; max-width: 11em; color: var(--text-tertiary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.85; }
 
 
 /* 子智能体块内容体（默认隐藏，展开后显示；复用外部主智能体 md-content 样式）。
@@ -687,6 +702,15 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .question-card-close { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; flex-shrink: 0; transition: background 0.15s, color 0.15s; }
 .question-card-close:hover { background: var(--bg-hover); color: var(--text-primary); }
 .question-card-close-placeholder { width: 22px; height: 22px; flex-shrink: 0; }
+/* 折叠钮：收起后只留头部（标题 + 操作按钮），让用户在「看上下文」与「作答」之间快速切换；
+   尺寸/交互与卡内其它图标按钮（X / 翻页）保持一致。 */
+.question-card-collapse { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; flex-shrink: 0; transition: background 0.15s, color 0.15s; }
+.question-card-collapse:hover { background: var(--bg-hover); color: var(--text-primary); }
+/* 折叠态：选项/detail/底部按钮全部隐藏，只保留头部信息；用户想看内容再展开选择。 */
+.question-card.collapsed .question-card-detail,
+.question-card.collapsed .question-card-detail-toggle,
+.question-card.collapsed .question-card-options,
+.question-card.collapsed .question-card-footer { display: none !important; }
 /* 选项区：限高滚动（配合整卡限高，避免 5 个带说明的选项把输入框顶出屏幕） */
 .question-card-options { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; overscroll-behavior: contain; }
 /* 选项行改为「序号 + 主区」：主区内标题在上、说明在下，让短标题成为扫读锚点。
@@ -879,8 +903,13 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    展开后隐藏。已并入 header（见 .preview-inline），不再是独立一行。 */
 .thinking-block-body .md-content { color: var(--text-secondary); font-size: 13px; }
 .thinking-block:not(.expanded) .thinking-block-body { display: none; }
-.thinking-block.streaming { border-color: var(--accent); }
-.thinking-block.streaming .thinking-block-label { color: var(--accent); }
+/* 【流式强调归位尾部低彩度块 2026-09-29 自审修复】此处旧有两条规则均已删除：
+   1) `.thinking-block.streaming { border-color: var(--accent); }` —— border-color 是简写，
+      会把【四周】都染成 accent（light 主题近黑），「思考中」整行回到全周框，
+      与线性化「流式仅靠左竖条标识」冲突，且与只有竖条的 .agent-card-streaming 不对称；
+   2) `.thinking-block.streaming .thinking-block-label { color: var(--accent); }` ——
+      被尾部同特异性规则（源码序在后）覆盖，accent 永远不生效的死规则。
+   流式竖条与标签色现统一由尾部低彩度块的长写 border-left-color / color 承担。 */
 .thinking-block-dots { display: inline-flex; gap: 4px; margin-left: 4px; vertical-align: middle; }
 .thinking-block-dots span { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: none; }
 .thinking-block-dots span:nth-child(2) { animation-delay: 0.2s; }
@@ -1165,6 +1194,41 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     background: rgba(127,127,127,0.12);
     border: 1px solid rgba(127,127,127,0.2);
 }
+
+/* 已落盘附件缩略图（队列出队/历史回放）：meta 端点回 dataUrl 前的加载占位，
+   与 .user-attach-badge 同底同框，降级回徽标时视觉无跳变。 */
+.user-attach-files {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+.user-attach-files .user-attach-file { margin-bottom: 0; }
+.user-attach-thumb {
+    width: 60px;
+    height: 60px;
+    border-radius: 8px;
+    background: rgba(127,127,127,0.12);
+    border: 1px solid rgba(127,127,127,0.2);
+    position: relative;
+    flex-shrink: 0;
+}
+.user-attach-thumb.loading::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px solid rgba(127,127,127,0.3);
+    border-top-color: rgba(127,127,127,0.75);
+    animation: spin 0.8s linear infinite;
+}
+/* meta 端点升级出的 <img> 没有内联尺寸约束（dataUrl 直传路径有内联 max-height:120px），
+   不补统一规则大图会撑爆气泡；与直传路径同口径限高限宽 + 同样 8px 圆角，
+   否则同一气泡里直传图是圆角、升级图是直角，两条路径观感不一致。 */
+.user-attach-imgs img { max-height: 120px; max-width: 200px; object-fit: cover; border-radius: 8px; }
 
 /* Task chip above chat input (JS toggles display to 'flex') */
 .todo-chip-wrap { padding: 0 2px 6px; display: none; align-items: center; max-width: 820px; margin: 0 auto; width: 100%; }
@@ -2928,21 +2992,24 @@ pre:hover .code-copy-btn { opacity: 1; }
 
 /* ===== 消息执行队列 ===== */
 
-/* 即时插话：独立的轻量事件卡，标题与正文分层，长文本自然换行。 */
-.steer-note { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "badge text"; align-items: start; column-gap: 10px; row-gap: 4px; margin: 12px 0; padding: 11px 14px; border: 1px solid rgba(var(--accent-rgb), 0.28); border-left: 3px solid var(--accent); border-radius: 10px; background: rgba(var(--accent-rgb), 0.05); color: var(--text-primary); font-size: 13px; line-height: 1.6; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
-.steer-note::before { content: '↳'; grid-area: badge; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 6px; background: var(--accent); color: var(--accent-contrast); font-size: 13px; font-weight: 700; }
-.steer-note-badge { grid-area: badge; align-self: center; margin-left: 26px; color: var(--accent); font-weight: 700; white-space: nowrap; }
-.steer-note-text { grid-area: text; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
-/* 长文本折叠态（JS 超阈值时加 .collapsed）：限高 5 行（5 × 20.8px 行高）并让末段渐隐；
-   mask 作用于文字自身，不依赖卡片底色（底色为 accent 半透明叠底，叠加渐变无法精确匹配）。 */
-.steer-note.collapsed .steer-note-text { max-height: 104px; overflow: hidden; -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent); mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent); }
-/* 展开/收起按钮：仅超阈值文本出现（JS 决定），置于文本列下方第二行；无按钮的卡片不产生空行。 */
-.steer-note-toggle { grid-column: 2; grid-row: 2; justify-self: start; margin-top: 2px; padding: 2px 0; border: none; background: none; color: var(--accent); font-family: inherit; font-size: 12px; font-weight: 500; line-height: 1.5; cursor: pointer; }
+/* ===== 即时插话（steer） =====
+   插话与正常发送/队列出队共用用户消息气泡形态（见 app-message.js appendSteerNote）：
+   右对齐气泡 + 附件真实缩略图，仅多一枚身份徽标。旧的独立事件卡（grid 卡片 + ↳ 图标）
+   已废弃，此处只保留徽标与长文本折叠两类样式。 */
+/* 气泡改纵向 flex：身份徽标 / 附件 / 正文 / 展开按钮各自成行且左对齐。
+   正常用户气泡无此规则（子元素按块级自然堆叠），插话因新增徽标与按钮需要显式列布局。 */
+.steer-note .msg-bubble { display: flex; flex-direction: column; align-items: flex-start; }
+.steer-note-badge { display: inline-flex; align-self: flex-start; align-items: center; padding: 2px 8px; margin-bottom: 6px; border-radius: 999px; background: rgba(var(--accent-rgb), 0.14); color: var(--accent); font-size: 11px; font-weight: 600; line-height: 1.5; }
+/* 长文本折叠态（JS 超阈值时给气泡行加 .collapsed）：限高 5 行，并让末段渐隐。
+   行高口径：.msg-bubble 的 line-height:1.75 × 14px 字号 = 24.5px/行，故 5 行写成
+   calc(5 * 1.75em)——em 相对自身字号自适应，字号一改限高与行高同步缩放，
+   不会再出现旧值 104px（按 20.8px/行 估算）少露一截正文的偏差。
+   mask 与 max-height 同规则生效（元素高度已被限住），百分比基准安全；
+   渐隐区同样换成 em 口径（22px ÷ 14px ≈ 1.57em，约 0.9 行），保证渐隐始终落在第 5 行底部。 */
+.steer-note.collapsed .user-msg-text { max-height: calc(5 * 1.75em); overflow: hidden; -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 1.57em), transparent); mask-image: linear-gradient(180deg, #000 calc(100% - 1.57em), transparent); }
+/* 展开/收起按钮：仅超阈值文本出现（JS 决定），置于正文下方；无按钮的气泡不产生空行。 */
+.steer-note-toggle { align-self: flex-start; margin-top: 2px; padding: 2px 0; border: none; background: none; color: var(--accent); font-family: inherit; font-size: 12px; font-weight: 500; line-height: 1.5; cursor: pointer; }
 .steer-note-toggle:hover { text-decoration: underline; }
-/* 插话携带的附件数量徽标。只声明列不声明行，交给网格自动放置：
-   有「展开全文」按钮时它落在按钮下一行，没有时紧接正文，两种情况都不会重叠。
-   折叠态只裁剪 .steer-note-text，徽标始终可见——附件是否存在不该被折叠藏起来。 */
-.steer-note-attachments { grid-column: 2; display: flex; flex-wrap: wrap; gap: 6px; }
 
 
 #message-queue-container {
@@ -3070,6 +3137,35 @@ pre:hover .code-copy-btn { opacity: 1; }
     white-space: nowrap;
 }
 
+/* 队列行图片缩略图：占位与成图同尺寸，替换时行高不跳。 */
+.queue-attach-thumb {
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    background: var(--bg-hover);
+    position: relative;
+    flex-shrink: 0;
+}
+.queue-attach-thumb::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1.5px solid rgba(127,127,127,0.3);
+    border-top-color: rgba(127,127,127,0.75);
+    animation: spin 0.8s linear infinite;
+}
+.queue-attach-img {
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
 .queue-item-status {
     flex-shrink: 0;
     width: 11px;
@@ -3132,6 +3228,7 @@ pre:hover .code-copy-btn { opacity: 1; }
    状态点保留语义色（执行中闪动 / 成功 / 失败 / 等待），真正的错误提示保留原有语义颜色。 */
 .tool-type-icon,
 .agent-icon,
+.agent-label,
 .file-change-kind,
 .tool-card .tool-file,
 .tool-batch-title,

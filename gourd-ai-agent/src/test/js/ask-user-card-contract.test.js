@@ -12,7 +12,7 @@
  * - chat.html：#questionCardHost 宿主容器在 .input-wrap 内、输入框上方
  * - app.css：.question-card 系列类与暗色兼容变量
  * - 选项行无末尾小箭头；入场动画仅首次渲染（勾选/翻页整卡不再闪一下）
- * - 12 个语言包均提供 17 个 chat.question_* 键（JSON 合法、行尾无裸 LF）
+ * - 12 个语言包均提供 19 个 chat.question_* 键（JSON 合法、行尾无裸 LF）
  * - 行为：状态机（选/跳/推进/自定义/提交 payload 组装）在沙箱中提取真实源码执行
  */
 const test = require('node:test');
@@ -37,7 +37,7 @@ const QUESTION_KEYS = ['question_waiting', 'question_other_placeholder', 'questi
     'question_next', 'question_submit', 'question_recommended', 'question_answered', 'question_skipped',
     'question_close', 'question_attachment_wait', 'question_supplement', 'question_supplement_placeholder',
     'question_detail_expand', 'question_detail_collapse', 'question_record_title',
-    'question_unselect_hint', 'question_clear_answer'];
+    'question_unselect_hint', 'question_clear_answer', 'question_collapse', 'question_expand'];
 
 function sliceBetween(source, startMarker, endMarker) {
     const start = source.indexOf(startMarker);
@@ -203,13 +203,18 @@ test('app-message.js / app.css：入场动画仅首次渲染播放（勾选/翻�
     const render = sliceBetween(message, '/* 渲染卡片到宿主', 'function handleQuestionResponse');
     assert.match(render, /var entering = state\._entered \? '' : ' question-card-enter';/);
     assert.match(render, /state\._entered = true;/);
-    assert.ok(render.includes("(submitted ? ' submitted' : '') + entering"), '重建时必须按首次渲染状态拼接进入类');
+    // entering（含空格前缀）与 submitted/collapsed 都须拼入 class 字符串；
+    // 不锁死源码拼接顺序，只断言首次渲染标记确实参与 class 组装。
+    const cardLine = render.split('\n').find(l => l.includes('question-card') && l.includes('data-action-id'));
+    assert.ok(cardLine, '卡片行必须存在');
+    assert.ok(cardLine.includes('entering'), '卡片 class 必须包含 entering（入场动画标记）');
+    assert.ok(cardLine.includes('collapsed'), '卡片 class 必须包含 collapsed（折叠态标记）');
     // 基类规则不得再挂动画；动画只允许挂在首次渲染标记类上
     assert.doesNotMatch(appCss, /\.question-card \{[^}]*animation:/);
     assert.match(appCss, /\.question-card\.question-card-enter \{ animation: msg-in 0\.25s ease-out; \}/);
 });
 
-test('12 个语言包均提供 17 个 chat.question_* 键与问答挂起 placeholder 键（JSON 合法、行尾无裸 LF）', () => {
+test('12 个语言包均提供 19 个 chat.question_* 键与问答挂起 placeholder 键（JSON 合法、行尾无裸 LF）', () => {
     for (const lang of LOCALES) {
         const raw = readStatic('locales', `${lang}.json`);
         const json = JSON.parse(raw);
@@ -1376,4 +1381,83 @@ test('app.css：清空按钮与选中项的可点击取消有样式承载', () =
     assert.match(clearRule, /border:\s*none/, '按钮态须抹掉默认边框，只留图标');
     assert.match(appCss, /\.question-card-option\.selected:hover:not\(:disabled\) \{[^}]*background:/,
         '选中项须有比常项更强的 hover 反馈：它现在还能再点取消，不能看起来像已锁定');
+});
+
+test('app-message.js：整卡折叠按钮——collapsed 只留头部，detail/选项/底部隐藏，事件与 aria 齐全', () => {
+    const render = sliceBetween(message, '/* 渲染卡片到宿主', 'function handleQuestionResponse');
+    assert.match(render, /question-card-collapse/, '渲染层必须生成折叠按钮');
+    assert.match(render, /aria-expanded="' \+ \(collapsed \? 'false' : 'true'\) \+ '"/, '折叠按钮须带 aria-expanded 供读屏识别');
+    assert.match(render, /question_collapse/, '折叠 tooltip 须用 question_collapse');
+    assert.match(render, /question_expand/, '展开 tooltip 须用 question_expand');
+    assert.match(render, /\(collapsed \? ' collapsed' : ''\)/, '卡片须按 collapsed 态加 collapsed 类');
+
+    const events = sliceBetween(message, 'function bindQuestionCardEvents', 'function activeQuestionCardState');
+    assert.match(events, /question-card-collapse/, '事件委托必须绑定折叠按钮');
+    assert.match(events, /st\.collapsed = !st\.collapsed/, '点击折叠按钮必须切换 collapsed 状态');
+    assert.match(events, /syncQuestionCard\(\)/, '切换后必须同步重建卡片');
+
+    // CSS 必须按 collapsed 隐藏内容区
+    assert.match(appCss, /\.question-card\.collapsed \.question-card-detail/);
+    assert.match(appCss, /\.question-card\.collapsed \.question-card-options/);
+    assert.match(appCss, /\.question-card\.collapsed \.question-card-footer/);
+});
+
+test('app.css：折叠按钮有独立样式承载（尺寸与卡内其它图标按钮一致）', () => {
+    assert.match(appCss, /\.question-card-collapse \{/, '折叠按钮须有独立样式规则');
+    const rule = (appCss.match(/\.question-card-collapse\s*\{[^}]*\}/) || [''])[0];
+    assert.match(rule, /cursor:\s*pointer/);
+    assert.match(rule, /border:\s*none/, '按钮态须抹掉默认边框，只留图标');
+    assert.match(appCss, /\.question-card-collapse:hover \{[^}]*var\(--bg-hover\)/);
+});
+
+/* 【沙箱执行型契约】真实调用 renderQuestionCard 并断言产物。
+   背景：上一版折叠按钮测试全是文本匹配（正则扫源码字符串），结果 renderQuestionCard 里
+   `var html` 声明被改丢、`var collapsed` 被挪到使用之后（var 提升取到 undefined），
+   函数一调用就抛 ReferenceError / 根节点永远挂不上 collapsed 类——但文本匹配全绿。
+   本用例把真实函数体切出来在沙箱里跑，直接看 host.innerHTML，杜绝「源码看着对、运行即炸」。 */
+test('app-message.js：renderQuestionCard 沙箱执行——展开/折叠两态产物正确，不抛异常', () => {
+    const renderFn = sliceBetween(message, 'function renderQuestionCard(host, sess, state) {', '/* 焦点元素的稳定标识');
+    const stubs = [
+        'var escapeAttr = function(s){ return String(s==null?"":s).replace(/"/g, "&quot;"); };',
+        'var escapeHtml = function(s){ return String(s==null?"":s); };',
+        'var GourdI18n = { t: function(k){ return k; } };',
+        'var questionAnswerFor = function(st,i){ return (st&&st.answers&&st.answers[i])||null; };',
+        'var questionOptionSelected = function(){ return false; };',
+        'var questionOptionView = function(o){ o=o||{}; return {label:o.label||"",title:o.label||"",desc:o.description||""}; };',
+        'var questionDetailShouldCollapse = function(){ return false; };',
+        'var questionSubmitMode = function(){ return "skip"; };',
+        'var currentInputBoxText = function(){ return ""; };',
+        'var QUESTION_SUBMIT_MODE_KEYS = {skip:"chat.question_skip",next:"chat.question_next",submit:"chat.question_submit"};',
+        'var QUESTION_CARD_SVG_PREV="<svg></svg>", QUESTION_CARD_SVG_NEXT="<svg></svg>", QUESTION_CARD_SVG_CLOSE="<svg></svg>", QUESTION_CARD_SVG_COLLAPSE="<svg></svg>", QUESTION_CARD_SVG_EXPAND="<svg></svg>", QUESTION_CARD_SVG_EDIT="<svg></svg>", QUESTION_CARD_SVG_CHEVRON="<svg></svg>";',
+        'var questionCardFocusKeyIn = function(){ return ""; };',
+        'var questionCardCaretIn = function(){ return null; };',
+        'var questionCardScrollSnapshot = function(){ return null; };',
+        'var questionCardRestoreView = function(){};',
+        'var $ = function(){ return { hide:function(){}, show:function(){} }; };'
+    ].join('\n');
+    const factory = new Function(stubs + '\n' + renderFn + '\nreturn renderQuestionCard;');
+    const renderQuestionCard = factory();
+
+    const mkHost = () => ({ innerHTML: '', querySelector: () => null, querySelectorAll: () => [] });
+    const mkState = () => ({ actionId: 'a', questions: [{ header: 'Q', detail: '', options: [{ label: 'o1' }] }], answers: {}, drafts: {}, detailOpen: {}, current: 0, submitted: false, collapsed: false });
+
+    // 展开态：不抛异常，含折叠按钮与选项区，根节点无 collapsed 类
+    let host = mkHost();
+    let state = mkState();
+    renderQuestionCard(host, {}, state);
+    assert.ok(host.innerHTML.length > 0, '展开态必须产出非空 HTML');
+    assert.match(host.innerHTML, /question-card-collapse/, '展开态必须渲染折叠按钮');
+    assert.match(host.innerHTML, /question-card-options/, '展开态必须渲染选项区');
+    assert.doesNotMatch(host.innerHTML, /class="question-card[^"]*collapsed/, '展开态根节点不得带 collapsed 类');
+    assert.match(host.innerHTML, /aria-expanded="true"/, '展开态折叠按钮 aria-expanded 须为 true');
+
+    // 折叠态：根节点必须挂 collapsed 类，且选项/底部不再渲染（双保险：类 + 结构）
+    host = mkHost();
+    state = mkState();
+    state.collapsed = true;
+    renderQuestionCard(host, {}, state);
+    assert.match(host.innerHTML, /class="question-card[^"]*collapsed/, '折叠态根节点必须挂 collapsed 类（CSS 隐藏依赖它）');
+    assert.equal(host.innerHTML.indexOf('question-card-options'), -1, '折叠态不得再渲染选项区');
+    assert.equal(host.innerHTML.indexOf('question-card-footer'), -1, '折叠态不得再渲染底部按钮');
+    assert.match(host.innerHTML, /aria-expanded="false"/, '折叠态折叠按钮 aria-expanded 须为 false');
 });

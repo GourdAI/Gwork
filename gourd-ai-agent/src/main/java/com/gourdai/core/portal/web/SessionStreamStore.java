@@ -436,9 +436,14 @@ public class SessionStreamStore {
      * {@code action_draft} / {@code action_args} 只携带工具名与参数字节数，
      * 而这两者在随后的 {@code action_start} 中都有（且参数是完整的）；
      * {@code action_batch} 声明的成员清单同样由随后各 start/end 帧的批次元数据重建。</p>
+     *
+     * <p>{@code agent_progress} 同理：它只是后台子代理「当前在调哪个工具」的心跳，
+     * 终态由随后的 {@code agent_end} 完整承载（成败 + 摘要）。后台任务一次可能调用上百次工具，
+     * 落盘会让历史文件按工具调用次数线性膨胀，而回放时这些中间态毫无价值。</p>
      */
     private static boolean isEphemeralType(String type) {
-        return "action_draft".equals(type) || "action_args".equals(type) || "action_batch".equals(type);
+        return "action_draft".equals(type) || "action_args".equals(type) || "action_batch".equals(type)
+                || "agent_progress".equals(type);
     }
 
     /**
@@ -911,10 +916,28 @@ public class SessionStreamStore {
      * 直接记录一条用户输入事件（网页手动输入不走 emitToClient）。
      */
     public void recordUser(String sessionId, String projectRoot, String text, long createdAt) {
-        recordUser(sessionId, projectRoot, text, createdAt, null);
+        recordUser(sessionId, projectRoot, text, createdAt, null, null, null);
     }
 
     public void recordUser(String sessionId, String projectRoot, String text, long createdAt, String clientMessageId) {
+        recordUser(sessionId, projectRoot, text, createdAt, clientMessageId, null, null);
+    }
+
+    /**
+     * 记录用户输入事件并携带附件路径清单。
+     *
+     * <p>附件路径随 user 帧落盘：历史回放时前端才能把「图 N」数量徽标还原为真实缩略图。
+     * 只存相对路径不存字节，帧体积不变；文件缺失时前端自行降级为徽标。</p>
+     *
+     * <p><b>空清单归一为 null：</b>序列化器（{@code ONode.serialize}）对 null 字段不输出键，
+     * 但会把空 List 写成 {@code "imagePaths":[]}。不归一的话，无附件的普通发言会凭空多出两个
+     * 空数组键，与旧格式（无附件时无此字段）逐字节不一致，白占磁盘且使新旧帧无法直接对比。</p>
+     *
+     * @param imagePaths 图片附件会话内相对路径（{@code uploads/xxx}），可为 null 或空
+     * @param filePaths  文件附件会话内相对路径（{@code uploads/xxx}），可为 null 或空
+     */
+    public void recordUser(String sessionId, String projectRoot, String text, long createdAt,
+                           String clientMessageId, List<String> imagePaths, List<String> filePaths) {
         if (text == null) {
             return;
         }
@@ -928,6 +951,8 @@ public class SessionStreamStore {
                 uc.setSessionId(sessionId);
                 uc.setCreatedAt(createdAt);
                 uc.setClientMessageId(clientMessageId);
+                uc.setImagePaths(imagePaths == null || imagePaths.isEmpty() ? null : imagePaths);
+                uc.setFilePaths(filePaths == null || filePaths.isEmpty() ? null : filePaths);
                 uc.setEventSeq(nextEventSeq(sessionId, projectRoot));
                 // user 是轮边界（loadRounds 依赖它分页），必须先把攒批组落盘，
                 // 否则合并行会排到用户消息之后，翻页时上一轮的正文会跑到下一轮开头。

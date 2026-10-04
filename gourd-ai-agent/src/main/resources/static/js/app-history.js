@@ -105,8 +105,7 @@ function updateExpandAllBtn() {
     var allExpanded = !anyProjectCollapsed();
     btn.classList.toggle('collapse-mode', allExpanded);
     var key = allExpanded ? 'app.sidebar.collapse_all' : 'app.sidebar.expand_all';
-    btn.setAttribute('data-i18n-title', key);
-    btn.setAttribute('title', GourdI18n.t(key));
+
 }
 /* tab 切换委托（新 tab 按钮保留 data-scope，选择器随类名更新） */
 $(document).on('click', '#historyScopeBar .history-tab', function () {
@@ -1526,7 +1525,13 @@ function replaySession(sess, events, prepend, keepOpen) {
                         if (chunk.type === 'user' || chunk.type === 'user_input') {
                             endTurn();
                             resetStreamState(sess);
-                            appendUserMessage(sess, chunk.text, null, null, chunk.createdAt);
+                            // user 帧携带的附件路径（新落盘帧才有）：回放时还原为真实缩略图，
+                            // 旧帧无该字段则保持纯文本气泡，与改前一致。
+                            var rpImages = chunk.imagePaths || [];
+                            var rpFiles = chunk.filePaths || [];
+                            appendUserMessage(sess, chunk.text, null, null, chunk.createdAt,
+                                (rpImages.length || rpFiles.length)
+                                    ? { imagePaths: rpImages, filePaths: rpFiles } : null);
                             continue;
                         }
                         if (chunk.type === 'done') { endTurn(); resetStreamState(sess); continue; }
@@ -1534,6 +1539,23 @@ function replaySession(sess, events, prepend, keepOpen) {
                            isStreaming=true，否则对账与流状态语义会被元数据事件污染。 */
                         if (chunk.type === 'file_changes') {
                             onWebChunk(sess, chunk);
+                            continue;
+                        }
+
+                        /* steer_applied 回放专用分支：不得把它交给 onWebChunk。
+                           ①幂等：onWebChunk 会先查/写 sess.steerResolved，而回放路径上该集合可能
+                              残留着已淘汰会话/上一轮的旧键，会把本该渲染的插话吞掉；回放的去重
+                              靠 appendSteerNote 内部的 data-steer-id DOM 判定（同一容器内已存在即跳过）。
+                           ②相位：onWebChunk 会用帧上的 phase/runId 覆写会话状态，而 steer 帧不属于正文
+                              推进，让它改 activeRunId/phase 会污染本轮流式语义（done 对账也会跟着偏）。
+                           故在本分支就地还原插话气泡，不进入通用路径。 */
+                        if (chunk.type === 'steer_applied') {
+                            sess.isStreaming = true;
+                            var sItems = (chunk.args && chunk.args.items) || [];
+                            for (var sk = 0; sk < sItems.length; sk++) {
+                                if (sItems[sk] && sItems[sk].steerId) appendSteerNote(sess, sItems[sk]);
+                            }
+                            sess.isStreaming = false;
                             continue;
                         }
 
@@ -1716,6 +1738,23 @@ function replaySession(sess, events, prepend, keepOpen) {
         // 代码高亮和 mermaid 也分片执行，避免阻塞
         if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(realContainer);
         if (typeof processMermaidBlocks === 'function') processMermaidBlocks(realContainer);
+
+        /* 插话折叠补测：回放期节点在游离临时容器里测不到高度（getComputedStyle/scrollHeight 均为 0），
+           只能按阈值初判并打上 data-steer-collapse-pending。现在 fragment 已移入真实容器，
+           逐行真实测量一次：视觉不足 5 行的撤掉折叠与展开按钮（否则留下「点了没变化」的
+           无效按钮），仍超长的补上。必须在下方滚动收尾之前：补测会改变行高，先滚后量会错位。 */
+        if (typeof steerCollapseRemeasure === 'function') {
+            var pendingSteerRows = $(realContainer).find('.steer-note[data-steer-collapse-pending]');
+            for (var psi = 0; psi < pendingSteerRows.length; psi++) {
+                var pendingSteerRow = pendingSteerRows[psi];
+                pendingSteerRow.removeAttribute('data-steer-collapse-pending');
+                try {
+                    steerCollapseRemeasure(pendingSteerRow);
+                } catch (steerErr) {
+                    console.error('[replaySession] 插话折叠补测失败:', steerErr);
+                }
+            }
+        }
 
         // 回放结束，清空 Markdown 缓存并清理临时流状态。
         if (typeof clearMdCache === 'function') clearMdCache();
@@ -2887,11 +2926,9 @@ function renderModelUI() {
 
     // 按钮内上下文窗口小标签：与思考标签不同，上下文**总有有效值**（默认 256K），
     // 因此不做「默认即隐藏」处理——否则抽屉里选了 1M、收起后按钮上完全看不出来。
-    // title 给出「上下文 1M」的语义，避免与同为小标签的思考档位混淆。
     var contextTagLabel = contextLengthLabel(getSelectedContext());
-    var contextTagTitle = GourdI18n.t('app.context_label') + ' ' + contextTagLabel;
-    $('#chatModelContextTag').text(contextTagLabel).attr('title', contextTagTitle).toggle(!!contextTagLabel);
-    $('#welcomeModelContextTag').text(contextTagLabel).attr('title', contextTagTitle).toggle(!!contextTagLabel);
+    $('#chatModelContextTag').text(contextTagLabel).toggle(!!contextTagLabel);
+    $('#welcomeModelContextTag').text(contextTagLabel).toggle(!!contextTagLabel);
 
     // 严格保持接口顺序；仅当 provider 与紧邻上一模型不同时插入标题（允许同一 provider 重复出现）
     var entries = ModelListOrder.buildEntries(modelList);

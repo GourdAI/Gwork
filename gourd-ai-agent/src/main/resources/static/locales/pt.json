@@ -230,7 +230,11 @@
                 "memory_view":  "Memória mental",
                 "chat_workspace":  {
                                        "switch":  "Alternar espaço de trabalho",
-                                       "clear":  "Limpar seleção"
+                                       "clear":  "Limpar seleção",
+                                       "search_placeholder":  "Buscar projetos…",
+                                       "search_no_results":  "Nenhum projeto correspondente",
+                                       "remote_connect":  "Conexão remota",
+                                       "locate_multiple":  "Várias pastas homônimas encontradas, escolha uma:"
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "Falha ao carregar, clique para tentar novamente",
@@ -842,6 +846,8 @@
                  "question_recommended":  "Recomendado",
                  "question_detail_expand":  "Expandir",
                  "question_detail_collapse":  "Recolher",
+                  "question_collapse":  "Recolher",
+                  "question_expand":  "Expandir",
                  "question_record_title":  "Minha resposta",
                  "question_answered":  "Enviado",
                  "question_skipped":  "Pulado",
@@ -876,6 +882,13 @@
                  "tool_openapi":  "Chamada de API",
                  "tool_lsp":  "Análise de código",
                  "tool_memory":  "Memória",
+                 "tool_recall":  "Resgatar histórico",
+                 "tool_ask_user":  "Perguntar ao usuário",
+                 "tool_config":  "Config. de extensões",
+                 "tool_clock":  "Hora atual",
+                 "tool_plan":  "Plano",
+                 "tool_plan_progress":  "Avançar plano",
+                 "tool_plan_revise":  "Revisar plano",
                  "expand_full":  "Expandir tudo",
                  "expand_full_size":  "Expandir tudo ({0} KB)",
                  "loading_dots":  "Carregando…",

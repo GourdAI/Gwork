@@ -230,7 +230,11 @@
                 "memory_view":  "Memoria mental",
                 "chat_workspace":  {
                                        "switch":  "Cambiar espacio de trabajo",
-                                       "clear":  "Borrar selección"
+                                       "clear":  "Borrar selección",
+                                       "search_placeholder":  "Buscar proyectos…",
+                                       "search_no_results":  "Sin proyectos coincidentes",
+                                       "remote_connect":  "Conexión remota",
+                                       "locate_multiple":  "Se encontraron varias carpetas homónimas, elige una:"
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "Error al cargar, haz clic para reintentar",
@@ -842,6 +846,8 @@
                  "question_recommended":  "Recomendado",
                  "question_detail_expand":  "Expandir",
                  "question_detail_collapse":  "Contraer",
+                  "question_collapse":  "Contraer",
+                  "question_expand":  "Expandir",
                  "question_record_title":  "Mi respuesta",
                  "question_answered":  "Enviado",
                  "question_skipped":  "Omitido",
@@ -876,6 +882,13 @@
                  "tool_openapi":  "Llamada API",
                  "tool_lsp":  "Análisis de código",
                  "tool_memory":  "Memoria",
+                 "tool_recall":  "Recuperar historial",
+                 "tool_ask_user":  "Preguntar al usuario",
+                 "tool_config":  "Config. de extensiones",
+                 "tool_clock":  "Hora actual",
+                 "tool_plan":  "Plan",
+                 "tool_plan_progress":  "Avanzar plan",
+                 "tool_plan_revise":  "Revisar plan",
                  "expand_full":  "Expandir texto completo",
                  "expand_full_size":  "Expandir texto completo ({0}KB en total)",
                  "loading_dots":  "Cargando…",

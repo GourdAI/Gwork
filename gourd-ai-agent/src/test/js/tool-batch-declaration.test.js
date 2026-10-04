@@ -95,8 +95,24 @@ test('WsGate 双通道对等：/ws 同样下发 action_batch（含 batchMembers 
 
 test('SessionStreamStore：action_batch 与 draft/args 同为瞬态帧，不落盘', () => {
     const store = readJava('com/gourdai/core/portal/web/SessionStreamStore.java');
-    assert.match(store, /return "action_draft"\.equals\(type\) \|\| "action_args"\.equals\(type\) \|\| "action_batch"\.equals\(type\);/,
+    /* 提取 isEphemeralType 的 Java 方法体后逐个断言必需类型，而非正则锁死「必须写成一行」。
+       旧断言把源码字面形态当成契约：任何人把该表达式换行（如新增一种瞬态帧）都会误报，
+       而真正的回归（从白名单里删掉 action_batch）反而不一定能抓到。
+       改后对格式变化免疫，仍能锁定「四种类型均必须在白名单内」这个真实语义。
+       注：本文件顶部的 fnBody 只能提取 JS 函数（正则锁 `function name(`），
+       Java 方法没有 function 关键字，故此处就地用「方法签名 → 列 4 缩进闭合括号」配平提取。 */
+    const m = store.match(/boolean isEphemeralType\(String type\)\s*\{[\s\S]*?\n {4}\}/);
+    assert.ok(m, 'isEphemeralType 方法体应能被提取到（若本断言失败，说明方法签名或缩进已变，请同步修正正则）');
+    const fn = m[0];
+    assert.match(fn, /"action_draft"\.equals\(type\)/,
+        'action_draft 必须留在瞬态帧白名单（其信息全由后续 action_start 重建）');
+    assert.match(fn, /"action_args"\.equals\(type\)/,
+        'action_args 必须留在瞬态帧白名单');
+    assert.match(fn, /"action_batch"\.equals\(type\)/,
         'action_batch 必须加入瞬态帧白名单，否则历史文件与回放规模失控');
+    // 新增瞬态帧时同样不得落盘：后台子代理的进度心跳频率等于工具调用次数
+    assert.match(fn, /"agent_progress"\.equals\(type\)/,
+        'agent_progress 必须在瞬态帧白名单（终态由 agent_end 完整承载）');
 });
 
 test('TaskTalent：子代理批次声明帧与 start 同等放行（归属由 stampParentAgent 统一加盖）', () => {

@@ -26,7 +26,28 @@
 
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
+use tauri_plugin_dialog::DialogExt;
 use tracing::debug;
+
+/// 系统原生文件夹选择对话框（工作区「打开文件夹」主路径，前端 __GOURD_IPC__.pickDirectory）。
+///
+/// 必须走主进程原生对话框：网页侧任何 input/showDirectoryPicker 方案在桌面都会带出
+/// 「选择要上传的文件夹」「将 N 个文件上传到此网站？」等浏览器语义弹框，与原生应用
+/// 体验不符（用户实测回归）。取消或异常一律返回 Ok(None)，前端静默忽略不弹提示。
+///
+/// 用 blocking API：本命令在 async 命令上下文（非主线程）执行，官方推荐 blocking_*；
+/// 内部会自行把对话框调度回主线程，不会冻住事件循环。
+#[tauri::command]
+pub async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
+    let folder = app
+        .dialog()
+        .file()
+        .set_title("选择工作区文件夹")
+        .blocking_pick_folder();
+    Ok(folder
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned()))
+}
 
 /// 当前平台标识，与 Electron 的 `process.platform` 取值保持一致
 /// （`win32` / `darwin` / `linux`），前端 `electronAPI.platform` 依赖此格式。
@@ -181,6 +202,11 @@ const BRIDGE_JS: &str = r#"
     setWindowTitle: function (title) {
       send('set_window_title', { title: String(title || '') });
     },
+    /* 系统原生文件夹选择对话框（工作区「打开文件夹」）：返回所选目录绝对路径，
+       取消返回 null（前端静默忽略）。桌面端必须走这里——网页侧 webkitdirectory
+       兜底会在桌面弹出「将 N 个文件上传到此网站？」确认条与「选择要上传的文件夹」
+       文案，均不可接受（用户实测）。 */
+    pickDirectory: function () { return invoke('pick_directory'); },
     getAppVersion: function () { return invoke('updater_get_version'); },
     updaterGetState: function () { return invoke('updater_get_state'); },
     updaterCheck: function () { return invoke('updater_check'); },

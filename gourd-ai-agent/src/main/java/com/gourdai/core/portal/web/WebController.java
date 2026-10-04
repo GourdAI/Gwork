@@ -91,6 +91,14 @@ public class WebController {
     private static final String[] ACTIVITY_FILE_SUFFIXES = {
             ".messages.ndjson", ".snapshot.json", SessionStreamStore.STREAM_SUFFIX};
 
+    /**
+     * {@code /web/chat/attachment/meta} 单次请求的路径条数上限。
+     *
+     * <p>该端点逐条读盘并对图片做 base64 内联，条数无上限时一次请求即可放大成大量磁盘 IO
+     * 与巨型响应体。前端按 {@code ATTACH_META_BATCH_SIZE}(12) 分批请求，32 已留出裕量。</p>
+     */
+    private static final int ATTACHMENT_META_MAX_PATHS = 32;
+
     /** AI Agent 执行引擎，提供会话管理、模型配置、命令注册等核心能力 */
     private final HarnessEngine engine;
 
@@ -281,10 +289,12 @@ public class WebController {
         }
 
         // 标记定时任务占用的会话（运行时会话/绑定会话）：前端侧栏据此在条目名前渲染时钟小图标
-        Set<String> loopSids = loopScheduler.loopSessionIds();
-        if (!loopSids.isEmpty()) {
-            for (Map item : data) {
-                if (loopSids.contains(item.get("sessionId"))) item.put("loop", true);
+        if (loopScheduler != null) {
+            Set<String> loopSids = loopScheduler.loopSessionIds();
+            if (!loopSids.isEmpty()) {
+                for (Map item : data) {
+                    if (loopSids.contains(item.get("sessionId"))) item.put("loop", true);
+                }
             }
         }
 
@@ -376,7 +386,7 @@ public class WebController {
             data.add(item);
 
             //恢复定时任务（仅统一前缀 web 会话，扫描安装目录）
-            if (sid.startsWith(SessionLocator.PREFIX_WORK)) {
+            if (loopScheduler != null && sid.startsWith(SessionLocator.PREFIX_WORK)) {
                 loopScheduler.restore(sid, engine.getWorkspace(), engine.getHarnessSessions());
             }
         }
@@ -417,7 +427,7 @@ public class WebController {
     @Mapping("/web/chat/sessions/delete")
     public Result deleteSession(@Param("sessionId") String sessionId,
                                 @Param(value = "root", required = false) String root) throws Exception {
-        if (sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
+        if (sessionId == null || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
             return Result.failure();
         }
 
@@ -433,6 +443,7 @@ public class WebController {
         // FileAgentSession 会在在途轮次/循环任务等场景下重建 messages/snapshot
         // 文件，导致目录非空删不掉、累计空垃圾文件夹
         engine.removeSession(sessionId);
+        webGate.cleanupSession(sessionId);
 
         // 清理流式账本（长驻 Writer 句柄、待写缓冲、seq 缓存与 stream 文件本身）：必须先于删目录。
         // ① Windows 下长驻句柄未关闭时 deleteDirectory 必失败（500「会话目录删除失败」）；
@@ -489,7 +500,7 @@ public class WebController {
     @Mapping("/web/chat/sessions/rename")
     public Result renameSession(@Param("sessionId") String sessionId, @Param("label") String label,
                                 @Param(value = "root", required = false) String root) throws Exception {
-        if (sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
+        if (sessionId == null || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
             return Result.failure();
         }
         if (label == null || label.trim().isEmpty()) {
@@ -940,7 +951,7 @@ public class WebController {
     @Mapping("/web/chat/rewind")
     public Result rewindSession(@Param("sessionId") String sessionId, @Param(value = "count", required = false) Integer count,
                                 @Param(value = "root", required = false) String root) throws Exception {
-        if (sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
+        if (sessionId == null || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
             return Result.failure();
         }
         if (count == null || count <= 0) {
@@ -1209,6 +1220,81 @@ public class WebController {
             return Result.succeed(resp);
         } catch (Throwable e) {
             LOG.error("[Web] attachment upload error: {}", e.getMessage(), e);
+            return Result.failure(500, e.getMessage());
+        }
+    }
+
+    /**
+     * 会话附件元信息：按相对路径返回 dataUrl / 名称 / 大小，供前端把附件数量徽标升级为真实缩略图。
+     *
+     * <p>队列出队与历史回放手里只有 {@code uploads/xxx} 相对路径，拿不到浏览器内存里的 File；
+     * 本端点是它们回显附件内容的唯一通道。只接受 {@code uploads/<简单文件名>} 形态（复用
+     * {@code sanitizeAttachmentPath} 的越界校验），图片返回 base64 dataUrl，非图片只回名称与大小。</p>
+     *
+     * @param sessionId 会话 ID
+     * @param root      可选项目根提示（code 模式）
+     * @return items 数组，顺序与入参一致；读盘失败的条目带 error 字段，前端自行降级。
+     *         paths 是重复表单键（前端 jQuery traditional 传参），故用 {@code paramValues}
+     *         显式取全量——@Param 单值绑定只会拿到其中一个，多图时会静默丢附件。
+     */
+    @Get
+    @Mapping("/web/chat/attachment/meta")
+    public Result<Map<String, Object>> attachmentMeta(Context ctx,
+                                                      @Param("sessionId") String sessionId,
+                                                      @Param(value = "root", required = false) String root) {
+        try {
+            sessionId = getSessionId(ctx, sessionId);
+            Assert.notNull(sessionId, "sessionId is required");
+            validateSessionId(sessionId);
+
+            String[] pathParams = ctx.paramValues("paths");
+            List<String> wanted = new ArrayList<>();
+            if (pathParams != null) {
+                for (String p : pathParams) {
+                    if (p == null) continue;
+                    String t = p.trim();
+                    if (!t.isEmpty()) wanted.add(t);
+                }
+            }
+            if (wanted.isEmpty()) {
+                Map<String, Object> empty = new LinkedHashMap<>();
+                empty.put("items", Collections.emptyList());
+                return Result.succeed(empty);
+            }
+            // 批量上限：本端点按条读盘并对图片做 base64 内联，无上限时一次超大请求即可放大成
+            // 长时间磁盘 IO 与巨型响应体。前端本就按 ATTACH_META_BATCH_SIZE(12) 分批，
+            // 32 已留出裕量；超限直接 400，让调用方看到明确契约而不是被静默截断。
+            if (wanted.size() > ATTACHMENT_META_MAX_PATHS) {
+                return Result.failure(400, "TOO_MANY_PATHS");
+            }
+
+            // 与 /web/chat/replay 同口径解析工作空间根：resolveSessionRoot 会校验请求根与
+            // 会话登记根一致，不一致（返回 null 且调用方确实传了 root）必须明确拒绝，
+            // 否则会退化成「拿别人工作空间下的会话目录」去读附件。
+            String sessionRoot = resolveSessionRoot(sessionId, root);
+            if (sessionRoot == null && Assert.isNotEmpty(root)) {
+                return Result.failure(400, "Workspace root does not match the session binding");
+            }
+            // 读取专用解析（带历史落点兜底），使数据落在 legacy workspace 目录的分叉会话也能读到附件。
+            // 注意 resolveDirForRead 的 probe 走 isFile() 判定，而 uploads 是目录、probe 恒不命中，
+            // 故此处按目录级自行回探：primary 无 uploads 目录时，在全部已知落点中找第一个有的，
+            // 都无则回 primary（保持与写入侧同目录，missing 语义不变）。
+            File sessionDir = sessionLocator.resolveDir(sessionId, sessionRoot);
+            if (!new File(sessionDir, "uploads").isDirectory()) {
+                for (File candidate : sessionLocator.allKnownSessionDirs(sessionId, sessionRoot)) {
+                    if (new File(candidate, "uploads").isDirectory()) {
+                        sessionDir = candidate;
+                        break;
+                    }
+                }
+            }
+            List<Map<String, Object>> items = webGate.attachmentMeta(sessionDir, wanted);
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("items", items);
+            return Result.succeed(resp);
+        } catch (Throwable e) {
+            LOG.error("[Web] attachment meta error: {}", e.getMessage(), e);
             return Result.failure(500, e.getMessage());
         }
     }
@@ -2408,6 +2494,26 @@ public class WebController {
             name = json.get("name").getString();
         }
         return projectService.rename(path, name);
+    }
+
+    /**
+     * 同机目录定位：浏览器原生文件夹对话框（webkitdirectory / IPC）只给目录名与含文件的子目录名，
+     * 由后端先比对已登记项目表（免扫描），未命中再在本机受限扫描内把「名称+子目录指纹」解析回绝对路径候选。
+     */
+    @Post
+    @Mapping("/web/chat/projects/locate")
+    public Result<Map> projectLocate(@Body String body) {
+        String name = null;
+        List<String> children = new ArrayList<>();
+        if (body != null && !body.trim().isEmpty()) {
+            ONode json = ONode.ofJson(body);
+            name = json.get("name").getString();
+            ONode arr = json.get("children");
+            if (arr != null && arr.isArray()) {
+                for (ONode c : arr.getArrayUnsafe()) children.add(c.getString());
+            }
+        }
+        return projectService.locate(name, children);
     }
 
     // ==================== 消息队列管理 ====================

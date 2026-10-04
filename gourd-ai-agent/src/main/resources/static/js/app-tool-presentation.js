@@ -7,16 +7,59 @@
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this), function() {
     'use strict';
 
+    /* TOOL_I18N_KEY 必须覆盖「所有会在工具卡 / 子代理进度心跳里出现的注册名」。
+       漏一个，对应位置就退化成显示裸英文名（resolveToolPresentation 的 localized 兜底是
+       bareToolName 本身）——用户看到的是 grep / create_plan 这样的技术标识而不是「搜索 / 制定计划」。
+
+       【为什么不能只盯“会建工具卡”的工具】WebToolVisibilityPolicy 只把 task / multitask /
+       memory_* / ask_user 排除在 action_start/action_end 之外；但后台子代理的心跳帧由
+       TaskTalent.emitBackgroundProgress 直接透传 ToolCallStartEvent.getToolName()，那条链路
+       不读可见性策略。于是同一批工具「卡上不出现、心跳里出现」，仍需要映射。
+
+       【注册名的三种写法】@ToolMapping 的 name 可以写字面量、写常量（如 TOOL_AWAIT_TASKS）、
+       或干脆省略——省略时 MethodFunctionTool 走 Utils.valueOr(name, 方法名)，真实名字就是 Java
+       方法名（PlanTalent 的 create_plan / update_plan_progress / revise_plan 正是这种）。靠人工
+       记忆必然漏，所以由 tools-name-coverage 契约测试从 Java 源码反向穷举核对（见
+       test/js/tools-name-coverage.test.js），三种写法都要求被提取到。
+       分组原则：同一能力的别名共用一个 key（skillread/skillrefresh 都算「技能」），语义不同才新增 key。 */
     var TOOL_I18N_KEY = {
         read: 'chat.tool_read', write: 'chat.tool_write', edit: 'chat.tool_edit',
         glob: 'chat.tool_glob', grep: 'chat.tool_grep', ls: 'chat.tool_ls',
         bash: 'chat.tool_bash', bash_output: 'chat.tool_bash_output',
+        // 技能族：skill 是 ToolGateway 聚合入口，其余 4 个是 SkillTalent 的具体动作
         skill: 'chat.tool_skill',
+        skilllist: 'chat.tool_skill', skillsearch: 'chat.tool_skill',
+        skillread: 'chat.tool_skill', skillrefresh: 'chat.tool_skill',
         todo: 'chat.tool_todo', todowrite: 'chat.tool_todo', todoread: 'chat.tool_todo',
         code: 'chat.tool_code', codesearch: 'chat.tool_codesearch',
-        websearch: 'chat.tool_websearch', webfetch: 'chat.tool_webfetch',
-        task: 'chat.tool_task', multitask: 'chat.tool_multitask', generate: 'chat.tool_generate',
-        mcp: 'chat.tool_mcp', openapi: 'chat.tool_openapi', lsp: 'chat.tool_lsp', memory: 'chat.tool_memory'
+        websearch: 'chat.tool_websearch', web_search: 'chat.tool_websearch',
+        webfetch: 'chat.tool_webfetch', crawl_url: 'chat.tool_webfetch',
+        // 子代理族：await_tasks 是同一套子代理机制的取结果动作，归「子代理」
+        task: 'chat.tool_task', multitask: 'chat.tool_multitask', await_tasks: 'chat.tool_task',
+        generate: 'chat.tool_generate',
+        // MCP 网关：search_tools/get_tool_detail 是该网关自身的动作，与具体 mcp 工具同族
+        mcp: 'chat.tool_mcp', search_tools: 'chat.tool_mcp', get_tool_detail: 'chat.tool_mcp',
+        // OpenAPI 网关同理（call_api 等三个是网关动作）
+        openapi: 'chat.tool_openapi', search_apis: 'chat.tool_openapi',
+        get_api_detail: 'chat.tool_openapi', call_api: 'chat.tool_openapi',
+        lsp: 'chat.tool_lsp',
+        // 记忆族：MemoryTalent 的 5 个动作
+        memory: 'chat.tool_memory', memory_extract: 'chat.tool_memory',
+        memory_search: 'chat.tool_memory', memory_recall: 'chat.tool_memory',
+        memory_consolidate: 'chat.tool_memory', memory_prune: 'chat.tool_memory',
+        recall_history: 'chat.tool_recall',
+        // 交互与配置族
+        ask_user: 'chat.tool_ask_user',
+        add_model: 'chat.tool_config', add_mcp_server: 'chat.tool_config',
+        add_api_server: 'chat.tool_config',
+        now: 'chat.tool_clock',
+        // 计划族：PlanTalent 的三个工具（注解未写 name=，注册名 == Java 方法名），
+        // 只对子代理（planningMode）开放，会渲染进子代理卡体与进度心跳行。
+        // 三个动作语义互不相同（制定 / 推进 / 修订），而心跳行的价值就是告知「此刻在做什么」，
+        // 共用一个 key 会把「推进进度」显示成「制定计划」，那比裸英文名更容易误导。
+        create_plan: 'chat.tool_plan',
+        update_plan_progress: 'chat.tool_plan_progress',
+        revise_plan: 'chat.tool_plan_revise'
     };
 
     /* 工具图标统一采用 currentColor 的线性 SVG，不使用 emoji：emoji 在不同系统上会

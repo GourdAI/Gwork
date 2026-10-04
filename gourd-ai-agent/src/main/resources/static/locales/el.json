@@ -230,7 +230,11 @@
                 "memory_view":  "Μνημονικό",
                 "chat_workspace":  {
                                        "switch":  "Αλλαγή χώρου εργασίας",
-                                       "clear":  "Καθαρισμός επιλογής"
+                                       "clear":  "Καθαρισμός επιλογής",
+                                       "search_placeholder":  "Αναζήτηση έργων…",
+                                       "search_no_results":  "Δεν βρέθηκαν έργα",
+                                       "remote_connect":  "Απομακρυσμένη σύνδεση",
+                                       "locate_multiple":  "Βρέθηκαν nhiều ομόνυμοι φάκελοι, επιλέξτε έναν:"
                                    },
                  "sidebar":  {
                                  "load_failed_retry":  "Αποτυχία φόρτωσης, κάντε κλικ για επανάληψη",
@@ -842,6 +846,8 @@
                  "question_recommended":  "Προτεινόμενο",
                  "question_detail_expand":  "Ανάπτυξη",
                  "question_detail_collapse":  "Σύμπτυξη",
+                  "question_collapse":  "Σύμπτυξη",
+                  "question_expand":  "Ανάπτυξη",
                  "question_record_title":  "Η απάντησή μου",
                  "question_answered":  "Υποβλήθηκε",
                  "question_skipped":  "Παραλείφθηκε",
@@ -876,6 +882,13 @@
                  "tool_openapi":  "Κλήση API",
                  "tool_lsp":  "Ανάλυση κώδικα",
                  "tool_memory":  "Μνήμη",
+                 "tool_recall":  "Άνακληση ιστορικού",
+                 "tool_ask_user":  "Ερωτηση χρήστη",
+                 "tool_config":  "Ρύθμιση επεκτάσεων",
+                 "tool_clock":  "Τρέχουσα ώρα",
+                 "tool_plan":  "Σχέδιο",
+                 "tool_plan_progress":  "Πρόοδος σχεδίου",
+                 "tool_plan_revise":  "Αναθεώρηση σχεδίου",
                  "expand_full":  "Επέκταση πλήρους κειμένου",
                  "expand_full_size":  "Επέκταση πλήρους κειμένου (σύνολο {0}KB)",
                  "loading_dots":  "Φόρτωση…",
