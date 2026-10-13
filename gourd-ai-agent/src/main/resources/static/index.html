@@ -184,6 +184,10 @@
 
 <!-- code.html 的文件树面板、settings.html 的设置浮层注入到 body 级（此处之后） -->
 
+<!-- 远程工作区连接向导（P1 SSH 骨架）：app-remote.js 的挂载容器。body 级浮层，
+     默认无 open 类不占位；面板/表单/连接日志由 app-remote.js renderWizard 动态注入。 -->
+<div class="remote-wizard-backdrop" id="remoteWizard"></div>
+
 <!-- 此处原为启动遮罩 #appBootLoading，已移除：打开即展示首页，不再经过转圈缓冲页。
      后端启动失败同样不做任何提示（无感，界面自行降级为空态）；右下角非阻塞错误条
      仅保留给界面片段装配失败这一种情况（见 app-bootstrap.js showBootError）。 -->

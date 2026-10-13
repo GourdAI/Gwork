@@ -215,7 +215,7 @@ class MessageQueue {
         } else if (typeof window.getSessionCwd === 'function') {
             root = window.getSessionCwd();
         }
-        if (root) headers['X-Session-Cwd'] = root;
+        if (root) headers['X-Session-Cwd'] = encodeSessionCwdHeader(root);
         return headers;
     };
 }

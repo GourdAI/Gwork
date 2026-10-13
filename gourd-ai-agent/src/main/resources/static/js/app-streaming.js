@@ -185,7 +185,7 @@ function uploadPendingAttachments(sess, files) {
     }
     var headers = {};
     var cwd = sess.projectRoot || (typeof getSessionCwd === 'function' ? getSessionCwd() : '');
-    if (cwd) headers['X-Session-Cwd'] = cwd;
+    if (cwd) headers['X-Session-Cwd'] = encodeSessionCwdHeader(cwd);
 
     return $.ajax({
         url: '/web/chat/attachment/upload',
@@ -326,7 +326,7 @@ function sendSteer(sess, text, imagePaths, filePaths) {
         traditional: true,
         data: { sessionId: sess.sessionId, runId: runId, steerId: steerId, text: snapshot,
             imagePaths: images, filePaths: files },
-        headers: sess.projectRoot ? { 'X-Session-Cwd': sess.projectRoot } : {}
+        headers: sess.projectRoot ? { 'X-Session-Cwd': encodeSessionCwdHeader(sess.projectRoot) } : {}
     }).done(function(resp) {
         var status = resp && resp.data && resp.data.status;
         if ((resp && resp.code === 200) && (status === 'accepted' || status === 'duplicate')) {
@@ -593,7 +593,7 @@ function postChatInput(sess, fields, files, hooks) {
     var headers = {};
     var cwd = (sess && sess.projectRoot) ? sess.projectRoot
         : (typeof getSessionCwd === 'function' ? getSessionCwd() : '');
-    if (cwd) headers['X-Session-Cwd'] = cwd;
+    if (cwd) headers['X-Session-Cwd'] = encodeSessionCwdHeader(cwd);
 
     hooks = hooks || {};
     // 统一用 $.ajax：fetch 的 .catch 不会因 4xx/5xx 触发，原来的两条 fetch 路径遇到
@@ -617,8 +617,10 @@ function postChatInput(sess, fields, files, hooks) {
 window.postChatInput = postChatInput;
 
 function sendWithFormDataGrouped(sess, text, filesToSend) {
-    // 用户主动发起会话：确保底层 WebSocket 就绪（可能仍在启动或退避已耗尽）
-    if (typeof ensureWebGateConnected === 'function') ensureWebGateConnected();
+    /* 用户主动发起会话：确保【该会话所属环境】的 WebSocket 就绪（可能仍在启动或
+       退避已耗尽）。传会话归属而非当前视图：队补发/后台任务的会话可能属于另一个桶，
+       拿当前视图推导会把连接建到错的上游（事件流回不到本会话）。 */
+    if (typeof ensureWebGateConnected === 'function') ensureWebGateConnected(sessionGateScopeKey(sess));
     if (sess.eventSource) { sess.eventSource.close(); sess.eventSource = null; }
 
     // input 无条件携带（空串也发）：busy 补发纯附件消息时就是空串，
@@ -660,8 +662,12 @@ function sendWithFormDataGrouped(sess, text, filesToSend) {
             sess._recovering = true;
             sess._recoverGeneration = (sess._recoverGeneration || 0) + 1;
             beginGateBuffer(sess);
-            if (webGateSocket && webGateSocket.readyState === WebSocket.OPEN) recoverStreamingSession(sess);
-            else ensureWebGateConnected();
+            /* 按【该会话所属环境】取连接（不再看全局单例）：发送失败的会话可能属于
+               远端桶，而当前视图在本地——用全局当前桶判定会把「远端连接其实还活着」
+               误判成死，白白走一次 replay。 */
+            var failScope = sessionGateScopeKey(sess);
+            if (gateSocketAlive(failScope)) recoverStreamingSession(sess);
+            else ensureWebGateConnected(failScope);
         }
     });
 }
@@ -752,8 +758,19 @@ function showPhaseIndicator(sess) {
 }
 
 /* ===== WebChunk Handling (Session-Aware) ===== */
+/* 帧入口双保险过滤（契约 §3.3）：只在 gateRxScopeKey 非空（= 帧来自 WS onmessage）
+   时生效。HTTP 回放路径（app-history.js 的 loadMessages/replay）直接调本函数，
+   此时 gateRxScopeKey 为 null → 不参与过滤，回放主链语义零改动（契约 §3.6）。 */
+function gateFrameScopeMismatch(chunk) {
+    if (!gateRxScopeKey) return false;
+    var k = gateChunkScopeKey(chunk);
+    // null = 归属未知（会话未建/全局会话无登记表）：一律放行，误杀帧 = 内容永久缺失
+    return (k !== null && k !== gateRxScopeKey);
+}
+
 function onWebChunk(sess, chunk) {
     try {
+        if (gateFrameScopeMismatch(chunk)) return;
         /* file_changes 是 run 级被动快照：只更新独立持久卡，不得清等待指示器、推进
            currentRunId / activeRunId / phase，也不得重置静默计时。历史回放仍复用此入口。 */
         if (chunk.type === 'file_changes') {
@@ -1174,11 +1191,36 @@ function finishStream(sess, opts) {
 
 }
 
-/* ===== WebSocket 单连接 ===== */
-var webGateSocket = null;
+/* ===== WebSocket 连接池（多远端并发，契约 §3） =====
+
+   为什么必须是池而不是单例：旧实现全站只有一个 webGateSocket，且 connectWebGate
+   在重建前会 close 旧连接。用户「选本地工作区跑一个长任务、同时选远端工作区跑另一个」
+   时，切工作区就把仍在收帧的旧连接掐了——旧任务的事件流当场断掉（只能靠 HTTP replay
+   补，而 replay 只补历史、补不上正在实时产生的帧的连续性）。并发的核心就是
+   【切工作区不关旧 socket】，每个环境各留一条自己的长连接。
+
+   key = scopeKey：'local'（本地后端）| 'id:<connectionId>'（某条远程连接的隧道上游）。
+   Rust 侧 route_for 第 2 级 ?__scope=id:<rid> 对 WS 升级面同样生效（server.rs:232-251+769），
+   凭据注入（server.rs:812-834）已就绪，故前端只需把归属拼进 URL。 */
+var gateSockets = new Map();
+/* 池上限 4 条：每条连接在后端都占一个 WebSocket 注册项与一份心跳开销，
+   而用户同时真正在跑任务的环境极少超过 3 个（本地 + 两台远端）。
+   超出按 LRU 关最久无帧者（契约 §3.4）。 */
+var GATE_POOL_MAX = 4;
+/* 空闲回收阈值：该 scope 无 running 会话、又不是当前选中环境、且 90s 没收到任何帧
+   → 回收（契约 §3.4 的防泄漏定时器）。90s 远大于单帧间隔，不会误杀活跃流。 */
+var GATE_IDLE_RECLAIM_MS = 90000;
+/* 回收巡检周期：30s 一轮（与侧栏刷新定时器同档，开销可忽略）。 */
+var GATE_RECLAIM_TICK_MS = 30000;
 var webGateReconnectAttempts = 0;
 var webGateHeartbeatTimer = null;
-/* 僵尸连接检测：连续未收到 pong 的心跳周期数（见 startWebGateHeartbeat 的注释）。 */
+var webGateReclaimTimer = null;
+/* 僵尸连接检测：连续未收到 pong 的心跳周期数（见 startWebGateHeartbeat 的注释）。
+
+   池化后真实计数按桶存 entry.pongMisses（各桶的半开状态互不相干，用全局单计数会
+   互相清零：A 桶回了 pong 就把 B 桶的僵尸证据抹掉，B 桶永不重连）。
+   本全局变量保留为【local 桶的全局镜像】：诊断出口 window.__gourdGateDiag() 读它，
+   且既有僵尸检测契约测试（zombie-conn-detection.test.js）锁的是这些字面量。 */
 var webGatePongMisses = 0;
 // 重复推送去重的指纹滑窗（最近 N 条；相邻与交错到达的重复帧均可命中；
 // 旧版单变量 lastGateFp 仅能去重相邻同帧，双连接非相邻送达的重复帧会漏网）
@@ -1209,23 +1251,315 @@ var WEBGATE_MAX_RECONNECT = 10;
 // 恢复期实时帧缓冲区容量上限（防止 replay 长期失败时无限堆积 chunk 对象）
 var GATE_BUFFER_MAX = 3000;
 
-// 用户主动发起会话时确保连接就绪：若连接已断且退避已停止，则重置计数并立即重连。
-function ensureWebGateConnected() {
-    if (webGateSocket &&
-        (webGateSocket.readyState === WebSocket.OPEN || webGateSocket.readyState === WebSocket.CONNECTING)) {
-        return;
+/* ---------- 归属（scope）推导：池的 key 从哪来 ---------- */
+
+/* 多连接读口（契约 §2.2，由 app-remote.js 暴露）。取不到返回 null：
+   浏览器直开（gwork web 0）与无壳环境下 __GOURD_REMOTE__ 根本不存在，此时全站
+   降级为「只有 local 一个桶」= 改造前的单 socket 行为，不报错也不误路由。 */
+function gateRemoteRegistry() {
+    var r = window.__GOURD_REMOTE__;
+    return (r && typeof r.list === 'function') ? r : null;
+}
+
+/* 归一化 scopeKey：'local' | 'id:<rid>'。
+   入参容忍三种形态（调用方历史包袱）：'id:x' / '?__scope=id:x' / '&__scope=id:x' /
+   'local' / 空。空与 local 都归 'local'。 */
+function gateScopeKeyOf(scopeQ) {
+    var s = String(scopeQ == null ? '' : scopeQ).trim();
+    if (!s) return 'local';
+    var at = s.indexOf('__scope=');
+    if (at >= 0) s = s.slice(at + '__scope='.length);
+    s = s.split('&')[0].split('?')[0];
+    if (!s || s === 'local') return 'local';
+    if (s.indexOf('id:') === 0) return 'id:' + decodeURIComponent(s.slice(3));
+    /* 裸 connectionId（无 id: 前缀）也接住：调用方可能直接传 rid。 */
+    return 'id:' + s;
+}
+
+/* scopeKey → 拼进 gate URL 的 query 段（'local' 不拼：Rust route_for 对无 scope 的
+   WS 走 ?cwd= 归属分流，与改造前逐字节一致，老壳/浏览器直开零行为差）。 */
+function gateScopeQueryOf(scopeKey) {
+    if (!scopeKey || scopeKey === 'local') return '';
+    return '?__scope=id:' + encodeURIComponent(scopeKey.slice(3));
+}
+
+/* 该连接是否仍在线（契约 §2.2 的 list()）。降级：无注册表时一律视为在线
+   ——local 桶本就与远程连接无关；而拿不到 list() 也无从判定，保守留活。 */
+function gateScopeAlive(scopeKey) {
+    if (!scopeKey || scopeKey === 'local') return true;
+    var reg = gateRemoteRegistry();
+    if (!reg) return true;
+    var rid = scopeKey.slice(3);
+    var arr = [];
+    try { arr = reg.list() || []; } catch (e) { return true; }
+    for (var i = 0; i < arr.length; i++) {
+        if (arr[i] && arr[i].connectionId === rid) return true;
     }
-    webGateReconnectAttempts = 0;
-    connectWebGate();
+    return false;
+}
+
+/* 真子目录判定：child 是否位于 parent 目录【之内】（不含相等，相等由调用方另行 OR）。
+   WHY 必须判分隔符边界：裸 indexOf 前缀匹配会把 d:\work\proj2 误判成 d:\work\proj
+   的子目录——两个毫不相干的项目归到同一个桶，帧过滤与空闲回收判定会跟着一起错。 */
+function gatePathUnderDir(child, parent) {
+    if (!child || !parent || child.indexOf(parent) !== 0) return false;
+    var sep = child.charAt(parent.length);
+    return sep === '\\' || sep === '/';
+}
+
+/* 路径 → 桶归属的自足推导（权威接口不可用时的兜底）：按池里各桶【建连时的 cwd 快照】
+   做目录边界前缀匹配。
+
+   onlyRemote=true（帧过滤用）时跳过 local 桶。WHY：两台机器上存在同名路径是真实场景
+   （契约 §4.3 专门为此把去重键叠了 scope），此时「路径落在 local 桶的 cwd 之下」是
+   弱证据，拿它去否掉一条从 id:<rid> 桶收到的帧 = 远端内容永久缺失且无从复现；
+   而漏过滤只是多一帧重复，有滑窗指纹去重兜底。宁可漏过滤，绝不误杀。 */
+function gateScopeKeyByCwd(path, onlyRemote) {
+    var pk = (typeof pathScopeKey === 'function') ? pathScopeKey(path) : String(path == null ? '' : path);
+    if (!pk) return null;
+    var it = gateSockets.entries ? gateSockets.entries() : null;
+    if (!it) return null;
+    var step = it.next();
+    while (!step.done) {
+        var e = step.value[1];
+        var k = step.value[0];
+        if (e && e.cwdKey && !(onlyRemote && k === 'local')
+                && (pk === e.cwdKey || gatePathUnderDir(pk, e.cwdKey))) return k;
+        step = it.next();
+    }
+    return null;
+}
+
+/* 当前视图应落在哪个桶（= 用户此刻选中的环境）。
+
+   优先级：① 契约 §8 的两个 strict 归属读口（code 模式 __currentProjectScope /
+   chat 模式 __currentChatWorkspaceScope，查不到返回 null 或 'local'，绝不回落激活连接）；
+   ② 自足推导（池内 cwd 快照匹配）；③ 'local'。
+
+   WHY 不用 app-workspace 的 scopeOfPath：它是 IIFE 闭包内的私有函数，全仓从未挂到
+   window 上（只有 §8 的 __currentChatWorkspaceScope 是导出面）。按它取归属恒为
+   undefined，于是远端工作区被判成本地 → 所有环境共用一个 'local' 桶 → per-scope
+   池退化成单例，正是本契约要消灭的形态。
+
+   WHY code 与 chat 两个读口互斥、不串用：二者读的是不同变量（currentProjectRoot /
+   currentChatWorkspace），code 模式下 currentChatWorkspace 可能是上一次 chat 的残留，
+   串用会把终端与事件流指到另一台机器。
+
+   为什么不能直接拿 __GOURD_REMOTE_ACTIVE_ID__()：它回答的是「有没有连着远端」，
+   而并存语义下用户完全可能连着远端却在本地工作区干活——拿它当归属会把本地会话的
+   事件流打到远端隧道（跳机聊）。查不到一律回 local（默认环境就是本地）。 */
+function currentGateScopeKey() {
+    /* 降级门（契约 §3：无多连接读口时优雅退回单 socket 旧行为）。
+       WHY 必须前置：浏览器直开/无壳环境下 __GOURD_REMOTE__ 根本不存在，此时若某个
+       scope 读口给出残留的远端 id（app-workspace 的项目缓存未清、页面重载前写入的
+       localStorage 选择），建出的 id:<rid> 桶会带上代理无从路由的 __scope 参数，
+       结果是长连接落到错误上游或直接建不起来——而这类环境本就只可能有本地后端。 */
+    if (!gateRemoteRegistry()) return 'local';
+    var cwd = (typeof getSessionCwd === 'function') ? (getSessionCwd() || '') : '';
+    if (!cwd) return 'local';
+    if (window.appMode === 'code') {
+        /* ① code 模式：当前项目根的 strict 归属（app-code 暴露，列表未加载时返回 null） */
+        if (typeof window.__currentProjectScope === 'function') {
+            var cs = null;
+            try { cs = window.__currentProjectScope(); } catch (e) { cs = null; }
+            if (cs && cs !== 'local') return 'id:' + cs;
+            if (cs === 'local') return 'local';
+        }
+    } else if (typeof window.__currentChatWorkspaceScope === 'function') {
+        /* ① chat 模式：当前选中工作区的 strict 归属（app-workspace 暴露，契约 §8） */
+        var ws = null;
+        try { ws = window.__currentChatWorkspaceScope(); } catch (e) { ws = null; }
+        if (ws && ws !== 'local') return 'id:' + ws;
+        if (ws === 'local') return 'local';
+    }
+    /* ② 自足推导：项目登记表还没加载完（① 返回 null）时，按池内 cwd 快照兜住。
+       这里允许匹配 local 桶——判定对象是【用户当前选中的目录】，不存在跨机同名歧义。 */
+    var byCwd = gateScopeKeyByCwd(cwd, false);
+    if (byCwd) return byCwd;
+    /* ③ 无注册表（浏览器直开/无壳）：恒 local —— 单桶 = 改造前的单 socket 行为。 */
+    return 'local';
+}
+
+/* 帧的归属（契约 §3.3 双保险）：sessionId → sessionMap[sid].projectRoot → scope。
+   返回 null 表示【归属未知】——调用方必须放行而非丢弃：
+   各 socket 本就只收自己 scope 的帧（Rust 按 __scope/cwd 分流），此处只是双保险；
+   而误杀帧的代价（内容永久缺失）远高于漏过滤（滑窗指纹去重会吃掉重复帧）。 */
+function gateChunkScopeKey(chunk) {
+    if (!chunk) return null;
+    var sid = chunk.sessionId;
+    if (!sid) return null;                      // 系统级广播（filer_change 等）无归属，放行
+    var sess = sessionMap[sid];
+    if (!sess) return null;                     // 会话未建：交回原路径建会话，不在此拦
+    /* ① 会话自带归属标记：确定事实，直接采信（契约 §3.3） */
+    if (sess._scope) return (sess._scope !== 'local') ? 'id:' + sess._scope : 'local';
+    var root = sess.projectRoot || '';
+    /* ② 无 projectRoot = 全局区会话。此处绝不能断言 'local'：远端同样有全局会话
+       （契约 §5.3「不选工作区的远端对话」），它们的帧恰恰只从 id:<rid> 桶来；
+       断言 local 会把这些帧全部当异源丢掉，表现为「远端全局对话一个字都不出」。 */
+    if (!root) return null;
+    /* ③ 该会话正是当前选中的工作区/项目：用 ① 级权威口径判定（发送链路与它同源，
+       判定结果与帧的实际来源桶必然一致）。 */
+    var cur = (typeof getSessionCwd === 'function') ? (getSessionCwd() || '') : '';
+    if (cur) {
+        var same = (typeof pathScopeKey === 'function')
+            ? (pathScopeKey(root) === pathScopeKey(cur))
+            : (root === cur);
+        if (same) return currentGateScopeKey();
+    }
+    /* ④ 其它历史会话：登记表在 app-workspace/app-code 的闭包里，本模块拿不到逐路径
+       归属，只能靠池内 cwd 快照兜（且只认远端桶，理由见 gateScopeKeyByCwd）。
+       匹配不上就返回 null 放行——双保险宁可不生效，也不能反向误杀。 */
+    return gateScopeKeyByCwd(root, true);
+}
+
+/* 该桶是否有正在跑的会话（回收判定用）：按 projectRoot 归属比对。 */
+function gateScopeHasRunningSession(scopeKey) {
+    for (var sid in sessionMap) {
+        if (!sessionMap.hasOwnProperty(sid)) continue;
+        var sess = sessionMap[sid];
+        if (!sess || !sess.isStreaming) continue;
+        var k = gateChunkScopeKey({ sessionId: sid });
+        if (k === null) {
+            /* 归属未知：保守当作「本桶可能在跑」，绝不回收（宁可多留一条连接，
+               也不能把正在收帧的通道掐了）。 */
+            if (scopeKey === currentGateScopeKey()) return true;
+            continue;
+        }
+        if (k === scopeKey) return true;
+    }
+    return false;
+}
+
+function gateEntry(scopeKey) {
+    return gateSockets.get(scopeKey) || null;
+}
+
+function gateSocketOf(scopeKey) {
+    var e = gateEntry(scopeKey);
+    return e ? e.socket : null;
+}
+
+function gateSocketAlive(scopeKey) {
+    var s = gateSocketOf(scopeKey);
+    return !!(s && (s.readyState === WebSocket.OPEN || s.readyState === WebSocket.CONNECTING));
+}
+
+// 用户主动发起会话时确保【该会话所属环境】的连接就绪：若已断且退避已停止，
+// 则重置该桶计数并立即重连。scopeQ 可选（不传按当前视图归属推导）。
+function ensureWebGateConnected(scopeQ) {
+    var scopeKey = gateScopeKeyOf(scopeQ) || currentGateScopeKey();
+    if (gateSocketAlive(scopeKey)) return;
+    var e = gateEntry(scopeKey);
+    if (e) e.reconnectAttempts = 0;
+    else webGateReconnectAttempts = 0;
+    connectWebGate(scopeQ);
 }
 window.ensureWebGateConnected = ensureWebGateConnected;
+/* 远程工作区（P0-2 修复）：远程连接建立/断开时，本地 UI 服务器的 WS 代理上游
+   已切换（远端隧道 ⇄ 本地后端），指向已失效上游的那条连接必须重建。
+   由 app-remote.js 的 applyConnection/doDisconnect 调用（远程徽标/菜单同链路）。
+
+   池化后的语义变化（契约 §3.4）：connectWebGate 只保证【目标桶】连接就绪，
+   绝不动其它桶——切工作区不关旧 socket 正是并发的核心。真正会 close 的只有
+   三处：连接死亡（remote:connections-changed）、空闲回收、LRU 超限，
+   全部收敛在 closeGateSocket 这一个出口里。 */
+window.connectWebGate = connectWebGate;
+/* 诊断出口：现场自查连接池形态（每桶的 readyState / 最近帧时间 / pong 缺失数）。 */
+window.__gourdGateDiag = function() {
+    var out = { poolMax: GATE_POOL_MAX, pongMisses: webGatePongMisses, entries: [] };
+    var it = gateSockets.values ? gateSockets.values() : null;
+    if (!it) return out;
+    var step = it.next();
+    while (!step.done) {
+        var e = step.value;
+        out.entries.push({
+            scopeKey: e.scopeKey,
+            readyState: e.socket ? e.socket.readyState : -1,
+            pongMisses: e.pongMisses || 0,
+            reconnectAttempts: e.reconnectAttempts || 0,
+            idleMs: e.lastFrameAt ? (Date.now() - e.lastFrameAt) : -1
+        });
+        step = it.next();
+    }
+    return out;
+};
+
+/* 建桶（幂等）：每个 scopeKey 一份连接台账。 */
+function ensureGateEntry(scopeKey) {
+    var e = gateSockets.get(scopeKey);
+    if (!e) {
+        e = {
+            scopeKey: scopeKey,
+            socket: null,
+            cwd: '',
+            cwdKey: '',
+            createdAt: Date.now(),
+            lastFrameAt: Date.now(),   // LRU 与空闲回收的依据（最久无帧者先汰）
+            lastUsedAt: Date.now(),
+            pongMisses: 0,
+            reconnectAttempts: 0,
+            reconnectTimer: null,
+            reclaiming: false
+        };
+        gateSockets.set(scopeKey, e);
+    }
+    return e;
+}
+
+/* 摧销连接对象：先摘全部回调再 close。
+   为什么要先摘回调：新旧连接并存期间，旧连接的残帧会继续进入 onmessage（重复推送），
+   旧 onclose 还会误终结新连接的流并触发一次多余重连。
+   全文件只有本函数与僵尸分支的 dead.close() 两个 close 出口（契约 §6：
+   close 调用点仅得出现在回收/断连分支）——切工作区绝不经过这里。 */
+function retireGateSocket(entry) {
+    var s = entry ? entry.socket : null;
+    if (entry) entry.socket = null;
+    if (!s) return;
+    try {
+        s.onopen = null;
+        s.onmessage = null;
+        s.onclose = null;
+        s.onerror = null;
+        s.close();
+    } catch (e) { /* 退役异常忽略 */ }
+}
+
+/* 关连接的唯一业务出口（契约 §3.4 的三个时机均经此）：
+   ① 连接死亡（remote:connections-changed 的 detail.ids 不含该 id）；
+   ② 空闲 >90s 且无 running 会话且非当前选中；③ 池超上限 4 条的 LRU。
+   先摘池再 close：使该 socket 的 onclose 里「仍在池中」判定失效，
+   否则被回收的连接会被自己的 onclose 立刻重建（泄漏 + 与 LRU 打架）。 */
+function closeGateSocket(scopeKey, reason) {
+    var entry = gateSockets.get(scopeKey);
+    gateSockets.delete(scopeKey);
+    if (!entry) return;
+    entry.reclaiming = true;
+    if (entry.reconnectTimer) { clearTimeout(entry.reconnectTimer); entry.reconnectTimer = null; }
+    retireGateSocket(entry);
+    stopWebGateHeartbeatIfIdle();
+    console.log('[WebGate:' + scopeKey + '] closed (' + (reason || 'reclaim') + ')');
+}
+window.__gourdCloseGateSocket = closeGateSocket;   // 诊断/测试出口
+
+/* 会话 → 所属桶（发送/恢复/重连均按它取连接，不再看全局当前视图）。
+   为什么必需：发消息的 cwd 取 sess.projectRoot（而非当前视图），而事件流必须
+   回到同一个上游，否则就是「发消息到远端、事件流回本地」的断链。 */
+function sessionGateScopeKey(sess) {
+    if (!sess) return currentGateScopeKey();
+    var k = gateChunkScopeKey({ sessionId: sess.sessionId });
+    return (k === null) ? currentGateScopeKey() : k;
+}
 
 // 连接断开时保留当前消息 DOM 和流式状态，重连后按 eventSeq 补回缺失事件。
-function markStreamingSessionsForRecovery() {
+/* scopeKey（可选）：只标记属于该桶的会话。为什么必须过滤：池化后一条远端连接断开
+   不得把本地会话一并标成 _recovering——那会让本地会话的实时帧全被压进 _gateBuffer
+   等一个永不会来的 replay（UI 当场停摆）。不传 = 全量（与改造前逐字一致）。 */
+function markStreamingSessionsForRecovery(scopeKey) {
     for (var sid in sessionMap) {
         if (!sessionMap.hasOwnProperty(sid)) continue;
         var sess = sessionMap[sid];
         if (sess && sess.isStreaming) {
+            if (scopeKey && sessionGateScopeKey(sess) !== scopeKey) continue;
             sess._recovering = true;
             sess._recoverGeneration = (sess._recoverGeneration || 0) + 1;
             beginGateBuffer(sess);
@@ -1260,7 +1594,7 @@ function scheduleStreamingRecovery(sess, generation) {
         sess._recoverRetryTimer = null;
         if (sessionMap[sess.sessionId] === sess && sess._recovering
                 && sess._recoverGeneration === generation
-                && webGateSocket && webGateSocket.readyState === WebSocket.OPEN) {
+                && gateSocketAlive(sessionGateScopeKey(sess))) {
             recoverStreamingSession(sess);
         }
     }, delay);
@@ -1349,69 +1683,214 @@ function recoverStreamingSession(sess) {
     });
 }
 
-function recoverStreamingSessions() {
+/* scopeKey（可选）：只恢复属于该桶的会话。onopen 传本桶 key：远端桶重连不该给本地
+   会话发 replay（反之亦然），否则两边互相触发无用请求且可能交错推进游标。
+   不传 = 全量（与改造前一致）。recoverStreamingSession 的 HTTP replay 本体零改动（契约 §3.6）。 */
+function recoverStreamingSessions(scopeKey) {
     for (var sid in sessionMap) {
         if (!sessionMap.hasOwnProperty(sid)) continue;
-        recoverStreamingSession(sessionMap[sid]);
+        var sess = sessionMap[sid];
+        if (scopeKey && sessionGateScopeKey(sess) !== scopeKey) continue;
+        recoverStreamingSession(sess);
     }
 }
 
-function connectWebGate() {
+/* 连接池上限守门（契约 §3.4）：超过 4 条时按 LRU 关最久无帧者。
+   两条硬红线：刚建的桶（protectScopeKey）绝不汰；有 running 会话的桶绝不汰
+   （正在收帧的通道掐了就是丢内容，宁可瞬时超限也不能杀活流）。 */
+function enforceGatePoolLimit(protectScopeKey) {
+    if (gateSockets.size <= GATE_POOL_MAX) return;
+    var current = currentGateScopeKey();
+    var cands = [];
+    gateSockets.forEach(function(e, k) {
+        if (!e || k === protectScopeKey) return;
+        if (gateScopeHasRunningSession(k)) return;
+        // 当前选中环境排到最后（加一个远超时间戳量级的偏置），但不绝对豁免：
+        // 若只剩它可汰且仍超限，宁可关它也不能让池无限长（它下次发送会自建）。
+        var bias = (k === current) ? 1e15 : 0;
+        cands.push({ k: k, score: (e.lastFrameAt || e.createdAt || 0) + bias });
+    });
+    cands.sort(function(a, b) { return a.score - b.score; });   // 最久无帧者在前
+    var over = gateSockets.size - GATE_POOL_MAX;
+    for (var i = 0; i < over && i < cands.length; i++) closeGateSocket(cands[i].k, 'pool-limit');
+}
+
+/* 空闲回收（契约 §3.4 第二个时机）：该桶无 running 会话 + 非当前选中 + 空闲 >90s。
+   存在的理由：并发池只开不关会泄漏——用户依次选过 4 个环境后即使都不再跑任务，
+   4 条连接与 4 份心跳会常驻到刷新页面。 */
+function reclaimIdleGateSockets() {
+    var now = Date.now();
+    var current = currentGateScopeKey();
+    var victims = [];
+    gateSockets.forEach(function(e, k) {
+        if (!e || k === current) return;
+        if (gateScopeHasRunningSession(k)) return;
+        var idle = now - (e.lastFrameAt || e.createdAt || now);
+        if (idle < GATE_IDLE_RECLAIM_MS) return;
+        victims.push(k);
+    });
+    for (var i = 0; i < victims.length; i++) closeGateSocket(victims[i], 'idle>' + GATE_IDLE_RECLAIM_MS + 'ms');
+}
+
+/* 连接死亡摘除（契约 §3.4 第一个时机）。
+   aliveIds 传数组时以事件载荷为准（remote:connections-changed 的 detail.ids）；
+   不传时走 __GOURD_REMOTE__.list() 交叉（定时兽底，防事件丢失）。
+   降级：无注册表时 gateScopeAlive 恒 true → 一条也不摘（浏览器直开本就只有 local 桶）。
+   local 桶与远程连接生死无关，永不在此摘除。 */
+function pruneDeadGateScopes(aliveIds) {
+    var victims = [];
+    gateSockets.forEach(function(e, k) {
+        if (!k || k === 'local') return;
+        var rid = k.slice(3);
+        var alive = aliveIds ? (aliveIds.indexOf(rid) >= 0) : gateScopeAlive(k);
+        if (!alive) victims.push(k);
+    });
+    for (var i = 0; i < victims.length; i++) closeGateSocket(victims[i], 'connection-dead');
+}
+window.addEventListener('remote:connections-changed', function(ev) {
+    try {
+        pruneDeadGateScopes((ev && ev.detail && ev.detail.ids) || null);
+    } catch (e) { /* 摘除失败不得影响其它监听者 */ }
+});
+
+/* 回收巡检定时器（首个连接建立时启动，幂等）：兼做三件事。
+   为何需要定时兽底而不只靠事件：半开连接的 close() 可能连 onclose 都触发不了，
+   而 remote:connections-changed 也可能因页面隐藏期间的事件丢失而错过。 */
+function startGateReclaimTimer() {
+    if (webGateReclaimTimer) return;
+    webGateReclaimTimer = setInterval(function() {
+        try {
+            reclaimIdleGateSockets();
+            pruneDeadGateScopes(null);
+            scheduleWebGateReconnect();   // 无参 = 全池口径：为已无活连接的桶各自补一次退避
+        } catch (e) { reportStreamPipelineError('gateReclaimTick', e, null); }
+        if (!gateSockets.size && webGateReclaimTimer) {
+            clearInterval(webGateReclaimTimer);
+            webGateReclaimTimer = null;   // 池空自停，不留空转定时器
+        }
+    }, GATE_RECLAIM_TICK_MS);
+}
+
+/* 当前帧的来源桶（onmessage 分发前设置，分发后复位）。
+   为何用模块变量而不改签名：onWebChunk(sess, chunk) 的签名被 app-history.js 的
+   HTTP 回放路径共用（回放帧不经 WS，此值为 null → 不参与过滤），改签名会连带
+   回放主链语义（契约 §3.6 禁止）。 */
+var gateRxScopeKey = null;
+
+function connectWebGate(scopeQ) {
+    /* scopeQ（可选，契约 §3.2）：'id:<rid>' / '?__scope=id:<rid>' / '&__scope=id:<rid>' / 'local'。
+       不传时按【当前视图归属】推导（currentGateScopeKey）：无多连接注册表（浏览器直开/
+       无壳环境）时它恒返回 'local' → 全站只有一个桶 + 现 cwd 逻辑 = 改造前的单连接行为。 */
+    var scopeKey = (scopeQ == null || scopeQ === '')
+        ? currentGateScopeKey()
+        : gateScopeKeyOf(scopeQ);
+    var entry = gateSockets.get(scopeKey) || null;
     // 已连接或正在连接则跳过，避免重复建连。
     // （桌面端就绪时 __whenBackendReady 与 onBackendReady 会同一时刻各触发一次，
     //   此刻 socket 处于 CONNECTING 而非 OPEN，必须一并拦住，否则会建出两个连接。）
-    if (webGateSocket &&
-        (webGateSocket.readyState === WebSocket.OPEN || webGateSocket.readyState === WebSocket.CONNECTING)) return;
-    // 退役 CLOSING/CLOSED 的旧连接：先摘掉全部回调再 close，杜绝新旧连接并存期间
-    // 旧连接继续收帧造成重复推送、或旧 onclose 误终结新连接的流。
-    if (webGateSocket) {
-        try {
-            webGateSocket.onopen = null;
-            webGateSocket.onmessage = null;
-            webGateSocket.onclose = null;
-            webGateSocket.onerror = null;
-            webGateSocket.close();
-        } catch (e) { /* 退役异常忽略 */ }
-        webGateSocket = null;
+    if (entry && entry.socket &&
+        (entry.socket.readyState === WebSocket.OPEN || entry.socket.readyState === WebSocket.CONNECTING)) {
+        entry.lastUsedAt = Date.now();
+        return;
     }
+    /* 【池化后的关键语义变化】此处只退役【本桶】已死（CLOSING/CLOSED）的 socket，
+       绝不关其它桶——切工作区不关旧 socket 正是并发的核心（契约 §3.4）：
+       旧环境里正在跑的长任务靠它那条连接持续收帧，关掉就只能靠 HTTP replay 补历史。 */
+    if (entry && entry.socket) retireGateSocket(entry);
+    var socket;
+    /* cwd 取值分两种情形（池化后新增的关键约束）：
+       · 本桶就是【当前视图】：照旧取 getSessionCwd()（与改造前逐字一致）。
+       · 本桶是后台桶（用户已切到别的环境，这条连接靠心跳/退避自行重连）：沿用建桶时的
+         cwd 快照。WHY：getSessionCwd() 读的是单值当前视图，此刻它属于另一个环境；
+         拿它当本桶的 cwd 会把【别的机器/别的目录】的路径写进本桶的 cwdKey 快照，而 cwdKey
+         正是 gateScopeKeyByCwd 的帧过滤依据——污染后本地会话的 projectRoot 会匹配上
+         这个远端桶，帧被判成异源而永久丢弃（远端内容消失且无从复现）。 */
+    var isCurrentScope = (scopeKey === currentGateScopeKey());
+    var gateCwd = '';
     try {
         // 同源 WebSocket：
         // - 浏览器模式（gwork web 0）：直连 jar 自身。
         // - 桌面端（Electron）：页面来自本地 UI 服务器 http://localhost:{uiPort}，
         //   该服务器把 /web/gate 反向代理到后端 jar，故同样用同源地址即可。
-        var protocol = (window.location.protocol === 'https:') ? 'wss:' : 'ws:';
-        var wsUrl = protocol + '//' + window.location.host + '/web/gate';
-        webGateSocket = new WebSocket(wsUrl);
+            var protocol = (window.location.protocol === 'https:') ? 'wss:' : 'ws:';
+            // 后台桶沿用快照，当前桶取实时 cwd（WHY 见本函数开头的 cwd 取值说明）
+            gateCwd = (!isCurrentScope && entry && entry.cwd) ? entry.cwd
+                : ((typeof getSessionCwd === 'function') ? (getSessionCwd() || '') : '');
+            var wsUrl = protocol + '//' + window.location.host + '/web/gate'
+                + (gateCwd ? ('?cwd=' + encodeURIComponent(gateCwd)) : '');
+            /* 再叠一层显式归属（契约 §3.2）：Rust route_for 第 2 级 ?__scope=id:<rid>
+               对 WS 升级面同样生效（server.rs:232-251 + 769），优先级高于 cwd 归属分流。
+               为何不能只靠 ?cwd=：远端【全局会话】（未选工作区）无 cwd 可带，只能落到
+               代理的激活 scope 兑底——而激活会随用户选择漂移，同一会话的帧会在两台机器
+               之间跳。local 桶不拼 scope 段：保持无参形态，URL 与改造前逐字节相同。 */
+            var scopeSeg = gateScopeQueryOf(scopeKey);
+            if (scopeSeg) wsUrl += (wsUrl.indexOf('?') >= 0 ? '&' : '?') + scopeSeg.slice(1);
+        socket = new WebSocket(wsUrl);
     } catch(e) {
-        console.error('[WebGate] create failed:', e);
-        scheduleWebGateReconnect();
+        console.error('[WebGate:' + scopeKey + '] create failed:', e);
+        scheduleWebGateReconnect(scopeKey);
         return;
     }
 
-    webGateSocket.onopen = function() {
-        console.log('[WebGate] connected');
-        webGateReconnectAttempts = 0;
+    entry = ensureGateEntry(scopeKey);
+    entry.socket = socket;
+    /* 快照只在【当前视图】时刷新：后台桶重连沿用它自己的历史 cwd（理由见上）。
+       gateCwd 为空时不清空既有快照——全局区建桶本就没有 cwd，但用户先选了工作区
+       再回到全局区时，清掉快照会让帧过滤失去唯一的兜底依据。 */
+    if (isCurrentScope || !entry.cwdKey) {
+        entry.cwd = gateCwd;
+        entry.cwdKey = gateCwd ? ((typeof pathScopeKey === 'function') ? pathScopeKey(gateCwd) : gateCwd) : '';
+    }
+    entry.createdAt = Date.now();
+    entry.lastFrameAt = Date.now();
+    entry.lastUsedAt = Date.now();
+    entry.pongMisses = 0;
+    entry.reclaiming = false;
+    if (scopeKey === 'local') webGatePongMisses = 0;
+    enforceGatePoolLimit(scopeKey);
+    startGateReclaimTimer();
+
+    socket.onopen = function() {
+        if (gateSockets.get(scopeKey) !== entry) return;   // 建连期间已被回收：不接管
+        console.log('[WebGate:' + scopeKey + '] connected');
+        entry.reconnectAttempts = 0;
+        if (scopeKey === 'local') webGateReconnectAttempts = 0;
+        entry.lastFrameAt = Date.now();
         startWebGateHeartbeat();
-        // 重连后刷新文件树
-        if (typeof loadTree === 'function') {
+        /* 重连后刷新文件树——但只当本桶就是【当前选中环境】：池化后后台桶也会连上，
+           而文件树只展示当前工作区，让远端桶的 onopen 去刷会把本地目录顶掉。 */
+        if (scopeKey === currentGateScopeKey() && typeof loadTree === 'function') {
             loadTree();
         }
-        recoverStreamingSessions();
+        recoverStreamingSessions(scopeKey);
     };
 
-    webGateSocket.onmessage = function(event) {
+    socket.onmessage = function(event) {
         // 被退役旧连接的残帧直接丢弃（新旧连接并存的重复推送残留通路）
-        if (event.target && webGateSocket && event.target !== webGateSocket) return;
+        if (event.target && entry.socket && event.target !== entry.socket) return;
+        // 本桶已被回收/顶替：连接对象还在飞但已不属于池，残帧一律丢弃
+        if (gateSockets.get(scopeKey) !== entry) return;
         var raw = event.data;
+        entry.lastFrameAt = Date.now();
         if (raw === 'pong') {
             // 心跳回复：连接健康，重置僵尸检测计数（见 startWebGateHeartbeat）
+            entry.pongMisses = 0;
             webGatePongMisses = 0;
             return;
         }
         try {
             var chunk = JSON.parse(raw);
             // 任何业务帧同样证明连接活着，一并清零（防止高频帧期 pong 交错导致误判）
+            entry.pongMisses = 0;
             webGatePongMisses = 0;
+
+            /* 【契约 §3.3 双保险】按 sessionId → sessionMap[sid].projectRoot → scope 过滤：
+               与本桶归属不符的帧忽略。各 socket 本就只收自己 scope 的帧（Rust 按
+               __scope/cwd 分流），此处防的是同一后端被两条连接覆盖时的串流。
+               返回 null = 归属未知（会话未建 / 无 projectRoot / 无 scopeOfPath 接口），必须放行：
+               误杀帧 = 内容永久缺失，而重复帧有下方滑窗指纹去重兑底。 */
+            var chunkScope = gateChunkScopeKey(chunk);
+            if (chunkScope !== null && chunkScope !== scopeKey) return;
 
             // 重复推送兜底去重：多连接并存时同一事件可能送达两次（payload 完全一致），
             // 滑窗内重复帧丢弃（相邻与交错重复均覆盖）；仅带 createdAt 的业务帧参与，心跳/系统帧原样放行。
@@ -1438,31 +1917,54 @@ function connectWebGate() {
                 return;
             }
             if (chunk && chunk.eventSeq && chunk.sessionId) {
-                applySequencedGateChunk(gateSess || getOrCreateSession(chunk.sessionId), chunk);
+                /* 标记帧的来源桶：onWebChunk 入口的双保险过滤读它。用模块变量而不改
+                   onWebChunk 签名：那个签名被 app-history.js 的 HTTP 回放路径共用，
+                   回放帧不经 WS（此值为 null → 不参与过滤），改签名会连带回放主链语义。 */
+                gateRxScopeKey = scopeKey;
+                try {
+                    applySequencedGateChunk(gateSess || getOrCreateSession(chunk.sessionId), chunk);
+                } finally {
+                    gateRxScopeKey = null;
+                }
                 return;
             }
             if (gateSess && gateSess._replayCoverage && replayCoverageHas(gateSess._replayCoverage, chunk)) return;
 
-            dispatchGateChunk(chunk);
+            gateRxScopeKey = scopeKey;
+            try {
+                dispatchGateChunk(chunk);
+            } finally {
+                gateRxScopeKey = null;
+            }
         } catch(e) {
             /* 非 JSON 消息（心跳等）正常忽略；但 JSON.parse 成功后的异常是真故障，必须留痕。
-               二者原本被同一个空捕获吞掉，使「帧已送达但渲染失败」与「根本不是业务帧」无法区分。 */
-            if (raw && typeof raw === 'string' && raw.charAt(0) === '{') {
+               二者原本被同一个空捕获吞掉，使「帧已送达但渲染失败」与「根本不是业务帧」无法区分。
+               首字符判定用 charCodeAt(0)===123 而不用 ===左花括号字面量：本函数会被仓库里
+               多处「花括号配对切片器」（如契约测试的 cutFn）按字符扫描提取函数体，
+               函数体内出现裸的左花括号字符串字面量会让配对计数失衡（净多一个开括号），
+               切片器就找不到函数结尾——这是既有约定，凡被切片的函数体都不得含裸花括号字面量。 */
+            if (raw && typeof raw === 'string' && raw.charCodeAt(0) === 123) {
                 reportStreamPipelineError('webGateSocket.onmessage', e, null);
             }
         }
     };
 
-    webGateSocket.onclose = function() {
-        console.log('[WebGate] closed');
-        stopWebGateHeartbeat();
-        // 保留流式上下文，等待新连接通过 replay 精确补流。
-        markStreamingSessionsForRecovery();
-        scheduleWebGateReconnect();
+    socket.onclose = function() {
+        /* 本桶已摘池（主动回收/退役）或已被新连接顶替：不得再走重连与恢复标记，
+           否则被回收的连接会被自己的 onclose 立刻重建（泄漏 + 与 LRU 打架）。 */
+        if (gateSockets.get(scopeKey) !== entry || entry.socket !== socket) return;
+        console.log('[WebGate:' + scopeKey + '] closed');
+        entry.socket = null;
+        entry.pongMisses = 0;
+        if (scopeKey === 'local') webGatePongMisses = 0;
+        stopWebGateHeartbeatIfIdle();
+        // 保留流式上下文（仅本桶所属会话），等待新连接通过 replay 精确补流。
+        markStreamingSessionsForRecovery(scopeKey);
+        scheduleWebGateReconnect(scopeKey);
     };
 
-    webGateSocket.onerror = function(err) {
-        console.error('[WebGate] error:', err);
+    socket.onerror = function(err) {
+        console.error('[WebGate:' + scopeKey + '] error:', err);
     };
 }
 
@@ -1688,11 +2190,15 @@ function dispatchGateChunk(chunk) {
     onWebChunk(sess2, chunk);
 }
 
+/* 心跳（池化后一个定时器巡检所有桶）。
+   为何不每桶一个定时器：N 条连接就是 N 个 15s 定时器，页面隐藏/唤醒时的
+   漂移与开销都成倍；单定时器里逐桶发 ping 同样能完成僵尸检测。 */
 function startWebGateHeartbeat() {
     stopWebGateHeartbeat();
     webGateHeartbeatTimer = setInterval(function() {
-        if (webGateSocket && webGateSocket.readyState === WebSocket.OPEN) {
-            webGateSocket.send('ping');
+        gateSockets.forEach(function(entry, scopeKey) {
+        if (entry && entry.socket && entry.socket.readyState === WebSocket.OPEN) {
+            try { entry.socket.send('ping'); } catch (e) { /* 发送失败交由下方僵尸计数判定 */ }
             /* 【僵尸连接检测】ping 只发不校验的旧实现挡不住「半开 TCP」：
                后端进程重启/Tauri 代理透传任务死亡/系统休眠唤醒等场景下，浏览器侧
                readyState 恒为 OPEN、onclose/onerror 永不触发，后端所有流式帧静默
@@ -1700,19 +2206,35 @@ function startWebGateHeartbeat() {
                （切回走 HTTP replay 重建，HTTP 每次新建连接不受影响）。
                对策：每个周期未收到 pong 则计数，连续 3 个周期（约 45s）未响应即判定
                僵尸，主动 close 触发既有 onclose 恢复链路（重连 + 按 eventSeq 游标
-               replay 补流，正在流式的会话无感自愈）。收到 pong 时清零。 */
+               replay 补流，正在流式的会话无感自愈）。收到 pong 时清零。
+
+               【池化后的关键】计数必须按桶存：共用一个全局计数时，A 桶回了 pong
+               会把 B 桶的僵尸证据清零，B 桶的半开连接就永远检测不到。local 桶额外
+               镜像到全局 webGatePongMisses（诊断出口与既有僵尸检测契约读的是它）。 */
+            if (scopeKey === 'local') {
             webGatePongMisses = (webGatePongMisses || 0) + 1;
             if (webGatePongMisses >= 3) {
                 console.warn('[WebGate] no pong for ' + (webGatePongMisses * 15) + 's, treating as dead connection, forcing reconnect');
-                var dead = webGateSocket;
+                var dead = entry.socket;
                 webGatePongMisses = 0;
                 try { dead.close(); } catch (e) {}
                 /* close() 不保证同步触发 onclose（半开连接可能连 FIN 都发不出去），
                    兜底：摘回调后立即主动走一次重连（与 onclose 同构，幂等安全）。
                    不直接 close 旧引用的回调，让 onclose 自然执行 markStreamingSessionsForRecovery。 */
-                scheduleWebGateReconnect();
+                scheduleWebGateReconnect(scopeKey);
+            }
+            return;
+            }
+            entry.pongMisses = (entry.pongMisses || 0) + 1;
+            if (entry.pongMisses >= 3) {
+                console.warn('[WebGate:' + scopeKey + '] no pong for ' + (entry.pongMisses * 15) + 's, treating as dead connection, forcing reconnect');
+                var deadR = entry.socket;
+                entry.pongMisses = 0;
+                try { deadR.close(); } catch (e) {}
+                scheduleWebGateReconnect(scopeKey);
             }
         }
+        });
     }, 15000);
 }
 
@@ -1724,17 +2246,56 @@ function stopWebGateHeartbeat() {
     webGatePongMisses = 0;
 }
 
-function scheduleWebGateReconnect() {
-    if (webGateReconnectAttempts >= WEBGATE_MAX_RECONNECT) {
-        console.warn('[WebGate] reconnect attempts continuing at capped interval');
-        webGateReconnectAttempts = WEBGATE_MAX_RECONNECT - 1;
+/* 池里再没有任何 OPEN/CONNECTING 连接时才停心跳定时器。
+   旧实现在单一 socket 的 onclose 里无条件停——池化后一条远端桶断开
+   会把本地桶的心跳一并停掉，本地僵尸连接从此检测不到（新形态回归）。 */
+function stopWebGateHeartbeatIfIdle() {
+    var anyLive = false;
+    gateSockets.forEach(function(e) {
+        if (e && e.socket && (e.socket.readyState === WebSocket.OPEN || e.socket.readyState === WebSocket.CONNECTING)) {
+            anyLive = true;
+        }
+    });
+    if (!anyLive) stopWebGateHeartbeat();
+}
+
+/* scopeKey（可选）：只给该桶排退避重连；不传 = 全池口径（回收巡检用）。
+
+   为什么必须按桶分账：共用一个全局 attempts 时，一条远端隧道断开会把退避计数拉高，
+   本地那条的重连间隔跟着指数膨胀——用户看到的是「本地也不动了」。 */
+function scheduleWebGateReconnect(scopeKey) {
+    if (!scopeKey) {
+        /* 全池口径：只遍历【已在池中】的桶。被回收的桶已摘池，绝不能在此重建
+           （否则空闲回收与 LRU 永远关不掉连接，回收形同虚设）。 */
+        gateSockets.forEach(function(e, k) { scheduleBucketReconnect(k); });
+        return;
     }
-    var delay = Math.min(1000 * Math.pow(2, webGateReconnectAttempts), 30000);
-    webGateReconnectAttempts++;
-    console.log('[WebGate] reconnecting in ' + delay + 'ms (attempt ' + webGateReconnectAttempts + ')');
+    scheduleBucketReconnect(scopeKey);
+}
+
+function scheduleBucketReconnect(scopeKey) {
+    if (gateSocketAlive(scopeKey)) return;                 // 活连接无需重连
+    var entry = ensureGateEntry(scopeKey);
+    if (entry.reconnectTimer) return;                      // 已在退避中（幂等）
+    /* 远端桶：连接已从注册表消失（用户断开/探活掉线）则不再重连——重建由
+       下一次发送（ensureWebGateConnected）或重新连接后的 connectWebGate 触发；
+       无注册表（浏览器直开）时 gateScopeAlive 恒 true，行为退回无条件重连。 */
+    if (scopeKey !== 'local' && !gateScopeAlive(scopeKey)) return;
+    if (entry.reconnectAttempts >= WEBGATE_MAX_RECONNECT) {
+        console.warn('[WebGate:' + scopeKey + '] reconnect attempts continuing at capped interval');
+        entry.reconnectAttempts = WEBGATE_MAX_RECONNECT - 1;
+    }
+    var delay = Math.min(1000 * Math.pow(2, entry.reconnectAttempts), 30000);
+    entry.reconnectAttempts++;
+    if (scopeKey === 'local') webGateReconnectAttempts = entry.reconnectAttempts;   // 全局镜像（诊断）
+    console.log('[WebGate:' + scopeKey + '] reconnecting in ' + delay + 'ms (attempt ' + entry.reconnectAttempts + ')');
     // 静默后台重连，不弹横幅
-    setTimeout(function() {
-        connectWebGate();
+    entry.reconnectTimer = setTimeout(function() {
+        entry.reconnectTimer = null;
+        /* 桶可能已在退避期间被回收（空闲/LRU/连接死亡）：不重建，
+           下一次发送或切回该工作区时 connectWebGate 会自建。 */
+        if (gateSockets.get(scopeKey) !== entry) return;
+        connectWebGate(scopeKey);
     }, delay);
 }
 
@@ -1748,6 +2309,8 @@ $(document).on('visibilitychange', function() {
 
 // 页面加载后建立 WebSocket 连接。
 // 桌面端等后端就绪再连（冷启动期直连会立即 503 并进入退避，白等一轮）；浏览器端立即连。
+/* 注：connectWebGate 无参调用 → scopeKey 由 currentGateScopeKey() 推导。无多连接注册表
+   （浏览器直开/无壳环境）时它恒为 'local'，即改造前的单连接行为（降级路径）。 */
 __whenBackendReady(connectWebGate);
 
 // 流式态看门狗常驻启动（依赖已加载的 sessionMap / reconcileSessionRunning）。

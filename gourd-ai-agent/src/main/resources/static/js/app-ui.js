@@ -1592,6 +1592,13 @@ initVoice();
 
     var SIDEBAR_MIN_WIDTH = 180;
     var SIDEBAR_MAX_WIDTH = 600;
+    // 低于该宽度时给 .sidebar 加 .sidebar-narrow：「对话/项目」pill 隐藏文字只留图标，
+    // 避免与右侧展开/搜索/清空按钮互相覆盖（阈值留出按钮总宽余量）。
+    var NARROW_THRESHOLD = 280;
+    var applyNarrowState = function(w) {
+        $sidebar.toggleClass('sidebar-narrow', w < NARROW_THRESHOLD);
+    };
+    var currentWidth = function() { return $sidebar[0].offsetWidth; };
 
     // Init resize dragging
     (function initResize() {
@@ -1613,6 +1620,7 @@ initVoice();
             var dx = e.clientX - startX;
             var newWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, startWidth + dx));
             $sidebar.css('width', newWidth + 'px');
+            applyNarrowState(newWidth);
             localStorage.setItem('sidebar-width', newWidth);
         });
 
@@ -1631,6 +1639,9 @@ initVoice();
             var w = parseInt(savedWidth, 10);
             if (w >= SIDEBAR_MIN_WIDTH && w <= SIDEBAR_MAX_WIDTH) {
                 $sidebar.css('width', w + 'px');
+                applyNarrowState(w);
+            } else {
+                applyNarrowState(currentWidth());
             }
         }
     })();

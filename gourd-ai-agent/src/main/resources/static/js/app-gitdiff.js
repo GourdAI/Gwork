@@ -908,7 +908,9 @@
                 addBtn.textContent = GourdI18n.t('git.adding');
                 fetch('/web/chat/git/stage', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    /* body 里的 root 代理看不到（分流只认 header/query 的 cwd）：远端
+                       仓库的写操作必须经 X-Session-Cwd 声明归属，否则打到本地后端 */
+                    headers: { 'Content-Type': 'application/json', 'X-Session-Cwd': encodeSessionCwdHeader(gitRoot()) },
                     body: JSON.stringify({ path: path, root: gitRoot() })
                 })
                 .then(function(r) { return r.json(); })
@@ -938,7 +940,8 @@
                 unstageBtn.textContent = GourdI18n.t('git.unstaging');
                 fetch('/web/chat/git/unstage', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    /* 同 stage：远端仓库写操作经 X-Session-Cwd 分流 */
+                    headers: { 'Content-Type': 'application/json', 'X-Session-Cwd': encodeSessionCwdHeader(gitRoot()) },
                     body: JSON.stringify({ path: path, root: gitRoot() })
                 })
                 .then(function(r) { return r.json(); })
@@ -1118,7 +1121,8 @@
 
             fetch('/web/chat/git/summary', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                /* 表单 body 的 root 代理同样看不到：补 X-Session-Cwd 分流（远端仓库） */
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Session-Cwd': encodeSessionCwdHeader(gitRoot()) },
                 body: 'sessionId=' + encodeURIComponent(currentSessionId)
                     + '&paths=' + encodeURIComponent(JSON.stringify(files))
                     + (gitRoot() ? '&root=' + encodeURIComponent(gitRoot()) : '')
@@ -1184,7 +1188,9 @@
 
             fetch('/web/chat/git/commit', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                /* 提交是最高危写操作：远端仓库必须经 X-Session-Cwd 分流（body root
+                   代理不可见，打错机器就是把代码提交到错误的仓库） */
+                headers: { 'Content-Type': 'application/json', 'X-Session-Cwd': encodeSessionCwdHeader(gitRoot()) },
                 body: JSON.stringify({ message: msg, files: files, root: gitRoot() })
             })
                 .then(function(r) { return r.json(); })
@@ -1240,6 +1246,7 @@
             gitInitBtn.textContent = GourdI18n.t('git.initializing');
 
             var doCommit = gitInitCommit && gitInitCommit.checked;
+            /* git init：query 已带 root=（代理可读，按 by_cwd 分流），无需额外头 */
             fetch('/web/chat/git/init?initialCommit=' + (doCommit ? 'true' : 'false') + gitRootQ(), { method: 'POST' })
                 .then(function(r) { return r.json(); })
                 .then(function(res) {

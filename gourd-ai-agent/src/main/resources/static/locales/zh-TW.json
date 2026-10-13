@@ -1,4 +1,123 @@
 {
+    "remote":  {
+
+        "group_local":  "本地",
+
+        "group_empty":  "暫無專案（連線線上）",
+
+        "badge_count":  "{n} 台",
+
+        "pick_connection":  "選擇遠端連線",
+    "connect_in_progress": "已有連線正在進行中，請稍候",
+
+        "group_global":  "全域工作階段",
+
+        "title":  "遠端工作區",
+
+        "unsupported":  "當前環境不支援遠端連線（需要桌面端）",
+
+        "saved_hosts":  "最近連線",
+
+        "no_saved_hosts":  "暫無已儲存的主機",
+
+        "new_connection":  "新建連線",
+
+        "host_placeholder":  "主機位址（如 192.168.1.10）",
+
+        "user_placeholder":  "使用者名稱",
+
+        "auth_password":  "密碼",
+
+        "auth_key":  "私鑰",
+
+        "password_placeholder":  "SSH 密碼",
+
+        "keypath_placeholder":  "私鑰路徑（如 ~/.ssh/id_rsa）",
+
+        "passphrase_placeholder":  "私鑰口令（可選）",
+
+        "remember_secret":  "記住密碼（存入系統憑據庫）",
+
+        "reconnecting":  "遠程連接斷開，正在重連（第 {attempt}/{max} 次）…",
+
+        "reconnected":  "遠程連接已恢復",
+
+        "reconnect_giveup":  "自動重連失敗，請手動重連（遠程選單 → 重連）",
+
+        "reconnect_menu":  "重新連接遠程",
+
+        "jump_add":  "+ 跳板機（可選）",
+
+        "jump_remove":  "− 移除跳板機",
+
+        "jump_title":  "經跳板機連接目標主機",
+
+        "jump_host_placeholder":  "跳板機地址",
+
+        "jump_password_placeholder":  "跳板機 SSH 密碼",
+
+        "jump_user_required":  "請填寫跳板機用戶名",
+
+        "wsl_root_warn":  "預設用戶是 root：以 root 運行會讓部署檔案歸 root 所有，建議用普通用戶連接",
+
+        "browse":  "瀏覽",
+
+        "connect_btn":  "連線",
+
+        "connecting_to":  "正在連線 {host}:{port} …",
+
+        "connected_ok":  "遠端工作區已連線",
+
+        "connect_failed":  "連線失敗：",
+        "forget_host_btn":  "忘記此主機指紋並重連",
+        "forget_failed":  "忘記主機指紋失敗：",
+
+        "host_user_required":  "請填寫主機位址和使用者名稱",
+
+        "remove_host":  "移除",
+
+        "badge":  "遠端",
+
+        "badge_title":  "遠端工作區：{host}（點擊開啟遠端選單）",
+
+        "mirror_sync_menu":  "同步模型配置到遠程",
+
+        "disconnect_menu":  "斷開遠程連接",
+
+        "mirror_synced":  "模型配置已同步到遠程（記憶體鏡像）",
+
+        "mirror_sync_failed":  "模型配置同步失敗（遠端仍使用自身配置）",
+
+        "mirror_unavailable":  "遠程連接未激活，無法同步",
+
+        "mirror_auto_failed":  "模型配置未能同步到遠端（遠端將使用自身配置），可在遠端選單中重試",
+
+        "scope_bind_failed":  "遠端歸屬登記失敗，該工作區仍按本地處理",
+
+        "channel_ssh":  "SSH 主機",
+
+        "channel_wsl":  "WSL",
+
+        "channel_preinstalled":  "CLI 預裝",
+
+        "connecting_wsl":  "正在連線 WSL {distro}（使用者 {user}）…",
+
+        "wsl_user_placeholder":  "使用者名稱（預設發行版使用者）",
+
+        "wsl_hint":  "WSL2 發行版；資料面經 localhost 直連，無需認證。發行版內沒有 java 時會自動安裝 JRE 17。",
+
+        "wsl_loading":  "正在取得發行版清單…",
+
+        "wsl_none":  "未發現 WSL 發行版",
+
+        "wsl_none_v2":  "未發現 WSL2 發行版（WSL1 不支援 localhost 直連）",
+
+        "preinstalled_hint":  "連線已預裝 gwork CLI 的伺服器：命中則跳過部署直接啟動（憑證經環境變數注入，不進命令列）；未命中自動回退標準部署。",
+        "runtime_pkg_label":  "離線執行階段套件（選填，runtime-*.tar.gz）",
+        "runtime_pkg_hint":  "內網／離線且無 Java 的伺服器：優先上傳此套件；留空則使用安裝包內建執行階段，再缺則回退遠端自裝。"
+
+    },
+
     "streaming":  {
                       "describe_images":  "描述圖片",
                       "process_files":  "處理檔案中",
@@ -234,8 +353,9 @@
                                        "search_placeholder":  "搜尋專案…",
                                        "search_no_results":  "未找到相符的專案",
                                        "remote_connect":  "遠端連線",
-                                       "locate_multiple":  "找到多個同名目錄，請選擇："
-                                   },
+                                       "locate_multiple":  "找到多個同名目錄，請選擇：",
+                                       "open_remote_folder":  "開啟遠端目錄",
+                                       "remote_item":  "遠端工作區"                                   },
                  "sidebar":  {
                                  "load_failed_retry":  "載入失敗，點擊重試",
                                  "loop_mark":  "定時任務",
@@ -426,9 +546,17 @@
                                     "installed_tab":  "已安裝",
                                     "uninstall":  "解除安裝",
                                     "uninstall_confirm":  "確定要解除安裝技能「{0}」嗎？本機技能目錄將被刪除。",
-                                    "scope_global":  "全域（跨專案）",
-                                    "scope_workspace":  "本專案",
-                                    "market_tab":  "技能市場"
+                                    "market_tab":  "技能市場",
+                                     "category_all":  "全部分類",
+                                     "downloads":  "下載量",
+                                     "stars":  "星標",
+                                     "version":  "版本",
+                                     "enable":  "啟用",
+                                     "disable":  "停用",
+                                     "source_local":  "本地自訂",
+                                     "installed_ok":  "安裝成功",
+                                     "scroll_prev":  "向左捲動",
+                                     "scroll_next":  "向右捲動"
                                 },
                      "mcp":  {
                                  "title":  "MCP 伺服器",

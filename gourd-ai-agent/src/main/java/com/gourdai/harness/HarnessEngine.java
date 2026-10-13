@@ -378,6 +378,11 @@ public class HarnessEngine {
         return options.getTalentRegistry().getSkills();
     }
 
+    /** 全部已扫描技能（含禁用）— 仅供管理视图使用。 */
+    public Collection<SkillDir> getSkillsAll() {
+        return options.getTalentRegistry().getSkillsAll();
+    }
+
     public Collection<SkillDir> getSkillsByScope(TalentScope scope) {
         return options.getTalentRegistry().getSkillsByScope(scope);
     }

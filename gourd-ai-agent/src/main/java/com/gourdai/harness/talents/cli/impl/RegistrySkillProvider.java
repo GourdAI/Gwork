@@ -72,7 +72,10 @@ public class RegistrySkillProvider implements SkillProvider {
         return skillList.stream()
                 .filter(s -> Arrays.stream(keys).anyMatch(k ->
                         s.getName().toLowerCase().contains(k) ||
-                                s.getDescription().toLowerCase().contains(k)))
+                                s.getDescription().toLowerCase().contains(k) ||
+                                // 「何时使用」里的触发短语往往比 description 更接近用户的原话
+                                // （如「用户提到蓝湖设计稿 URL」），不纳入检索就等于白存。
+                                s.getWhenToUse().toLowerCase().contains(k)))
                 .limit(15)
                 .collect(Collectors.toList());
     }
@@ -80,6 +83,10 @@ public class RegistrySkillProvider implements SkillProvider {
     @Override
     public String readSkill(String name) {
         SkillDir cachedSkill = registry.getSkill(name);
+        // 禁用技能不得经 skillread 进入模型上下文（与 getSkillAll 过滤口径一致）
+        if (cachedSkill != null && !cachedSkill.isEnabled()) {
+            return null;
+        }
         if (cachedSkill != null) {
             return renderSkillXml(cachedSkill, true);
         }

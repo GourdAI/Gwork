@@ -30,7 +30,7 @@
     }
     function sessionHeaders(cwdSnapshot) {
         var headers = {};
-        if (cwdSnapshot) headers['X-Session-Cwd'] = cwdSnapshot;
+        if (cwdSnapshot) headers['X-Session-Cwd'] = encodeSessionCwdHeader(cwdSnapshot);
         return headers;
     }
 

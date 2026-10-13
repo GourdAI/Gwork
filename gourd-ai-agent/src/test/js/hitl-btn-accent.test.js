@@ -5,7 +5,7 @@
  * 背景：这两个按钮曾各自铺 --color-success / --color-danger 高饱和实底并写死 #fff。
  * 全站中性色阶已收敛为 zinc 系（accent 默认=石墨黑灰）后，这一对红绿成了消息流里
  * 唯一的强彩色块，与灰阶卡片明显脱节。本次改为与全站主/次操作同构：
- *   approve = accent 实心主操作（同 .kd-btn-ok / 侧栏「立即安装」按钮族）
+ *   approve = accent 实心主操作（同 .kd-btn-ok / 发送按钮族）
  *   reject  = 透明底 + 描边 + 二级文字的次操作，危险色只在 hover 现身
  *
  * 覆盖：
@@ -218,7 +218,7 @@ test('按钮引用的每个令牌必须在 theme.css 明暗两套主题都成套
 
 test('对比度门禁：5 accent × 2 主题 × 4 态文字对比度 ≥ WCAG AA 4.5', () => {
     /* 【已知基线偏差】indigo 预设自身 accent token 的既有不足（非本按钮引入，
-       .kd-btn-ok / 侧栏「立即安装」按钮同值同红，属主题预设色板的待办）：
+       .kd-btn-ok / 发送按钮同值同红，属主题预设色板的待办）：
        light/indigo #4f6ef7 + 白字 = 4.28；dark/indigo accent-hover #5a75e6 + 深字 = 4.44。
        登记在此而非静默放宽阈值：新增偏差必须显式记账，修好预设后应把本表清空。 */
     const KNOWN_BASELINE = {
@@ -273,12 +273,14 @@ test('对比度门禁：5 accent × 2 主题 × 4 态文字对比度 ≥ WCAG AA
 
 test('approve 与既有 accent 实底主按钮同 token（口径一致，不出现两套主按钮色）', () => {
     const ok = declMap(ruleBody(themeCss, '.kd-btn-ok'));
-    const dl = declMap(ruleBody(appCss, '.sidebar-update-btn[data-state="downloaded"]'));
     assert.equal(ok['background'], 'var(--accent)', '.kd-btn-ok 参照失效，本测试的对照前提已变');
-    assert.equal(dl['background'], 'var(--accent)', '侧栏下载按钮参照失效，本测试的对照前提已变');
     const appr = declMap(ruleBody(appCss, APPROVE));
     assert.equal(appr['background'], ok['background'], 'approve 必须与 .kd-btn-ok 同底色 token');
     assert.equal(appr['color'], ok['color'], 'approve 必须与 .kd-btn-ok 同文字色 token');
+    // 侧栏「立即安装」已于 2026-10-08 收敛为 accent 淡底 chip（暗色下实底近白块
+    // 是全侧栏最亮元素的用户投诉源），不再属实心族；此处防它退回实底。
+    const dl = declMap(ruleBody(appCss, '.sidebar-update-btn[data-state="downloaded"]'));
+    assert.equal(dl['background'], 'var(--accent-light)', '侧栏安装按钮必须保持 accent 淡底，不得退回实心 --accent');
 });
 
 test('两处建卡仍复用同一对按钮类名（样式与 JS 不得漂移）', () => {

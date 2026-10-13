@@ -128,23 +128,36 @@ var _sidebarLoadFailed = false;
 
 
 /* 后端会话列表 → 本地条目（projectRoot 由后端回填，切换历史会话时据此恢复所属根，
-   保证发送时 X-Session-Cwd 指向该会话真实目录） */
-function toSessionEntries(list) {
+   保证发送时 X-Session-Cwd 指向该会话真实目录）。scope：调用方声明的归属（'local' 或
+   connectionId）——合并列表后删/改/回放都必须按它路由，代理对无 root 的全局会话
+   无键可查。 */
+function toSessionEntries(list, scope) {
     var arr = [];
     for (var i = 0; i < (list || []).length; i++) {
-        arr.push({ label: list[i].label, sessionId: list[i].sessionId, projectRoot: list[i].projectRoot || '', time: list[i].time || 0, loop: !!list[i].loop });
+        arr.push({ label: list[i].label, sessionId: list[i].sessionId, projectRoot: list[i].projectRoot || '', time: list[i].time || 0, loop: !!list[i].loop, _scope: scope || 'local' });
     }
     return arr;
 }
 
-/* 汇总完成：写入 _sidebarData，重建平铺（chatHistory），再尝试恢复活动会话 */
-function finalizeSidebar(myToken, projects, globalSessions) {
+/* 汇总完成：写入 _sidebarData，重建平铺（chatHistory），再尝试恢复活动会话。
+   extra = 本轮扇出的分组上下文 { conns, globalByScope }：
+   - conns：连接表快照，组序与在线态（dot 颜色）都以它为准；
+   - globalByScope：全局会话按 scope 分桶，项目 tab 组顶「全局对话」子节按桶取。
+   WHY 存快照而不是渲染时再查读口：数据是按快照扇出拉的，渲染时重新 list() 会在
+   连接刚断的瞬间出现「有数据的组画不出来 / 画出来的组没有数据」的错位。
+   加载失败兜底路径没有 extra，按空处理（只渲染全局会话）。 */
+function finalizeSidebar(myToken, projects, globalSessions, extra) {
     if (myToken !== _sidebarReqToken) return;
     for (var j = 0; j < projects.length; j++) {
         var p = projects[j].path;
         if (_projExpanded[p] === undefined) _projExpanded[p] = projects[j].sessions.length > 0;
     }
-    _sidebarData = { projects: projects, global: globalSessions };
+    _sidebarData = {
+        projects: projects,
+        global: globalSessions,
+        globalByScope: (extra && extra.globalByScope) || {},
+        conns: (extra && extra.conns) || []
+    };
     chatHistory = []; // 由渲染重建
     buildSidebar();   // 同步重建 chatHistory/currentChatIndex，供下方 restoreActiveSession 遍历
     updateHistoryUI();
@@ -154,15 +167,29 @@ function finalizeSidebar(myToken, projects, globalSessions) {
 
 function loadSessionHistory() {
     if (window.appMode === 'code') {
-        // code 模式保持原单根逻辑：扫当前项目根
+        // code 模式：扫当前项目根，归属 = 【当前项目】的归属。
         var root = window.currentProjectRoot || '';
-        var q = root ? ('?root=' + encodeURIComponent(root)) : '';
+        /* 【归属为何不能用 __GOURD_REMOTE_ACTIVE_ID__】它只回答「有没有连着远端」。
+           选着【本地】项目时它仍返回连接 id，而显式 __scope 在 route_for 里的优先级
+           【高于 cwd 安全栏】——于是本属本地的会话请求被强制打到远端，本地会话列表
+           被远端那份整个覆盖。改用当前项目的真实归属（查不到保守当本地）。 */
+        var codeScope = (typeof window.__currentProjectScope === 'function')
+            ? window.__currentProjectScope() : null;
+        /* 【单一 __scope】route_for 按 query 顺序扫到第一个命中即返回，重复参数会让
+           后一个永远无效：旧实现在 root 为空时拼出 `?__scope=local&__scope=id:RID`，
+           local 先命中 → 远端全局会话永远拉不到。 */
+        var qParts = [];
+        if (root) qParts.push('root=' + encodeURIComponent(root));
+        qParts.push(codeScope
+            ? ('__scope=id:' + encodeURIComponent(codeScope))
+            : '__scope=local');
+        var q = '?' + qParts.join('&');
         var myToken = ++_sessionsReqToken;
         $.get('/web/chat/sessions' + q, function(resp) {
             try {
                 // 已有更新的加载请求发出 → 本次响应过期，丢弃
                 if (myToken !== _sessionsReqToken) return;
-                chatHistory = toSessionEntries(resp.data);
+                chatHistory = toSessionEntries(resp.data, codeScope || 'local');
                 updateHistoryUI();
                 updateHistoryScopeBar();
                 restoreActiveSession();
@@ -170,34 +197,142 @@ function loadSessionHistory() {
         });
         return;
     }
-    // chat 模式：先拉已登记项目列表，再对 global（不带 root）与每个 project.path 并行发会话请求，
-    // 全部完成后汇总（任一路失败记为空数组，不阻塞其它路）。
+    // chat 模式（并存语义：本地+远端双源合并）：先拉本地登记表（__scope=local 恒本地），
+    // 连着远端时再拉远端那份（__scope=id:<rid>）；两份合并后，对 global（不带 root）与
+    // 每个 project.path 并行发会话请求——远端项目的请求带 __scope=id 让代理路由到该
+    // 连接（root= 参数代理本就按 by_cwd 分流，双保险）。全部完成后汇总（任一路失败
+    // 记为空数组，不阻塞其它路）。
     var myToken2 = ++_sidebarReqToken;
-    $.get('/web/chat/projects', function (resp) {
+    /* 在线连接 id 列表（方案B 扇出）：旧版只拉单个 activeId，连第二台后第一台的
+       项目/会话从侧栏整个消失（用户看到的「同时只能有一台」）。无 __GOURD_REMOTE__
+       时降级单 activeId（无壳/浏览器/旧壳不退化）。 */
+    var connIds = [];
+    /* 本轮连接表快照：扇出拉数据与分组渲染（组序/在线态）必须用同一份，否则连接刚断
+       的瞬间会出现「有数据的组画不出来 / 画出来的组没有数据」。变化交给
+       connections-changed 触发新一轮加载，令牌会把本轮响应整个丢弃。 */
+    var connSnap = [];
+    var remoteApi = window.__GOURD_REMOTE__;
+    if (remoteApi && typeof remoteApi.list === 'function') {
+        var conns = remoteApi.list() || [];
+        for (var ci = 0; ci < conns.length; ci++) {
+            var cid = conns[ci] && conns[ci].connectionId;
+            if (!cid || connIds.indexOf(cid) >= 0) continue;
+            connIds.push(cid);
+            /* 只认 connected：探活掉线/重连中一律按 down 画（红点 + 条目置灰保留） */
+            connSnap.push({
+                id: cid,
+                state: (conns[ci].state === 'connected') ? 'connected' : 'down',
+                label: conns[ci].label || remoteHostLabel(cid)
+            });
+        }
+    } else {
+        /* 读口不存在（旧桌面壳 / 浏览器直开）降级单 activeId = 本次改造前的形态。
+           WHY 不直接空表：读口缺失只说明壳旧，不代表没连远端；空表会让远端项目整片
+           从侧栏消失，比少画一个分组严重得多。 */
+        var onlyRid = (typeof window.__GOURD_REMOTE_ACTIVE_ID__ === 'function')
+            ? window.__GOURD_REMOTE_ACTIVE_ID__() : null;
+        if (onlyRid) {
+            connIds.push(onlyRid);
+            connSnap.push({ id: onlyRid, state: 'connected', label: remoteHostLabel(onlyRid) });
+        }
+    }
+    $.get('/web/chat/projects?__scope=local', function (resp) {
         if (myToken2 !== _sidebarReqToken) return;
         _sidebarLoadFailed = false;
         var plist = (resp && resp.data) ? resp.data : [];
-        var projects = [];
-        for (var i = 0; i < plist.length; i++) {
-            projects.push({ name: plist[i].name || historyScopeBaseName(plist[i].path || ''), path: plist[i].path || '', sessions: [] });
-        }
-        var globalSessions = [];
-        var pending = 1 + projects.length; // global 一路 + 每项目一路
-        var onOneDone = function () {
-            if (--pending === 0) finalizeSidebar(myToken2, projects, globalSessions);
+        var startMerge = function (extraLists) {
+            if (myToken2 !== _sidebarReqToken) return;
+            var projects = [];
+            var seen = {};
+            var i, pkey;
+            var pushList = function (list, scope) {
+                var label = remoteHostLabel(scope);   // 本地 scope 返回空串
+                for (var k = 0; k < list.length; k++) {
+                    if (!list[k] || !list[k].path) continue;
+                    // 归一必须走全局 pathScopeKey（仅 Windows 路径降大小写）：无条件
+                    // lower 会把 /home/u/Proj（本地）与 /home/u/proj（远端）当作同一个
+                    // 去重掉，两个真实存在的不同目录就少了一个（Linux/macOS）
+                    // 【方案B】去重键叠加 scope：同路径跨来源并存（两台同名目录是
+                    // 两个真实工作区，选中时按条目 _scope 精确绑定，不再二选一）。
+                    pkey = pathScopeKey(list[k].path) + '@' + (scope || 'local');
+                    if (seen[pkey]) continue;   // 同一来源内重复路径去重
+                    seen[pkey] = true;
+                    projects.push({
+                        name: list[k].name || historyScopeBaseName(list[k].path || ''),
+                        path: list[k].path || '',
+                        sessions: [],
+                        _scope: scope,
+                        /* 主机展示名：项目行 title 靠它区分同屏的本地/远端条目
+                           （_scope 是 rc-host:port:user 内部键，不能直接给用户看）。 */
+                        _scopeHost: label
+                    });
+                }
+            };
+            pushList(plist, 'local');
+            for (var xi = 0; xi < extraLists.length; xi++) pushList(extraLists[xi].list, extraLists[xi].scope);
+            var globalSessions = [];
+            /* 全局会话分桶（契约 §5.3）：按 scope 各存一份，项目 tab 组顶「全局对话」
+               子节按桶渲染。桶里与 globalSessions 装的是同一批对象引用，删/改一处两处同步。 */
+            var globalByScope = {};
+            /* 全局会话扇出：本地一路 + 每在线连接一路（对话 tab 的合并数据源）。
+               pending 动态化：1(global 本地) + connIds.length(global 远端) + projects.length。 */
+            var pending = 1 + connIds.length + projects.length;
+            var onOneDone = function () {
+                if (--pending === 0) {
+                    /* 合并后全局会话按时间倒序（多源各自有序，合并后需重排）；
+                       必须在 finalize 消费前同步排好（异步排会晚于渲染）。 */
+                    globalSessions.sort(function (a, b) { return (b.time || 0) - (a.time || 0); });
+                    finalizeSidebar(myToken2, projects, globalSessions, {
+                        conns: connSnap,
+                        globalByScope: globalByScope
+                    });
+                }
+            };
+            $.get('/web/chat/sessions?__scope=local', function (resp) {
+                if (myToken2 === _sidebarReqToken) {
+                    var arrLocal = toSessionEntries(resp && resp.data, 'local');
+                    globalByScope[wsScopeKey('local')] = arrLocal;
+                    globalSessions = globalSessions.concat(arrLocal);
+                }
+                onOneDone();
+            }).fail(onOneDone);
+            for (var gi = 0; gi < connIds.length; gi++) {
+                (function (gid) {
+                    $.get('/web/chat/sessions?__scope=id:' + encodeURIComponent(gid), function (r2) {
+                        if (myToken2 === _sidebarReqToken) {
+                            var arrRemote = toSessionEntries(r2 && r2.data, gid);
+                            globalByScope[wsScopeKey(gid)] = arrRemote;
+                            globalSessions = globalSessions.concat(arrRemote);
+                        }
+                        onOneDone();
+                    }).fail(onOneDone);
+                })(connIds[gi]);
+            }
+            for (var pi = 0; pi < projects.length; pi++) {
+                (function (proj) {
+                    var scopeQ = (proj._scope && proj._scope !== 'local')
+                        ? '&__scope=id:' + encodeURIComponent(proj._scope) : '&__scope=local';
+                    $.get('/web/chat/sessions?root=' + encodeURIComponent(proj.path) + scopeQ, function (resp) {
+                        if (myToken2 === _sidebarReqToken) proj.sessions = toSessionEntries(resp && resp.data, proj._scope);
+                        onOneDone();
+                    }).fail(onOneDone);
+                })(projects[pi]);
+            }
         };
-        // 全局会话（不带 root，后端扫安装目录）
-        $.get('/web/chat/sessions', function (resp) {
-            if (myToken2 === _sidebarReqToken) globalSessions = toSessionEntries(resp && resp.data);
-            onOneDone();
-        }).fail(onOneDone);
-        for (var pi = 0; pi < projects.length; pi++) {
-            (function (proj) {
-                $.get('/web/chat/sessions?root=' + encodeURIComponent(proj.path), function (resp) {
-                    if (myToken2 === _sidebarReqToken) proj.sessions = toSessionEntries(resp && resp.data);
-                    onOneDone();
-                }).fail(onOneDone);
-            })(projects[pi]);
+        if (!connIds.length) { startMerge([]); return; }
+        /* 每在线连接一路补拉项目登记表（某路失败只少那台条目） */
+        var extras = [];
+        var remDone = 0;
+        var onRemDone = function () {
+            if (++remDone === connIds.length) startMerge(extras);
+        };
+        for (var ri = 0; ri < connIds.length; ri++) {
+            (function (rid2) {
+                $.get('/web/chat/projects?__scope=id:' + encodeURIComponent(rid2), function (r2) {
+                    if (myToken2 === _sidebarReqToken) extras.push({ scope: rid2, list: (r2 && r2.data) ? r2.data : [] });
+                    onRemDone();
+                }).fail(function () { extras.push({ scope: rid2, list: [] }); onRemDone(); });
+            })(connIds[ri]);
         }
     }).fail(function () {
         // 项目列表获取失败：降级为仅渲染全局会话
@@ -247,6 +382,16 @@ function removeSidebarEntry(sessionId) {
     var g = _sidebarData.global || [];
     for (var i = g.length - 1; i >= 0; i--) {
         if (g[i].sessionId === sessionId) g.splice(i, 1);
+    }
+    /* 分组桶必须同步删：项目 tab 组顶的「全局对话」子节从桶渲染，只删合并列表的话
+       已删会话会在项目 tab 上继续挂着（用户看到「明明删了还在」，再点进去就是 404）。 */
+    var byScope = _sidebarData.globalByScope || {};
+    for (var bkey in byScope) {
+        if (!Object.prototype.hasOwnProperty.call(byScope, bkey)) continue;
+        var bucket = byScope[bkey] || [];
+        for (var b = bucket.length - 1; b >= 0; b--) {
+            if (bucket[b].sessionId === sessionId) bucket.splice(b, 1);
+        }
     }
     var ps = _sidebarData.projects || [];
     for (var p = 0; p < ps.length; p++) {
@@ -338,7 +483,24 @@ function sessionRootOf(entry) {
 }
 function sessionRootQ(entry) {
     var r = sessionRootOf(entry);
-    return r ? '&root=' + encodeURIComponent(r) : '';
+    /* 归属 scope：远端项目的会话必须打到登记它的连接（代理按 by_cwd 的 root 分流
+       本可自动命中，但全局会话（无 root）无键可查——远端全局会话必须显式声明；
+       本地侧一律 __scope=local，防激活 scope 指向远端时误路由）。 */
+    var scope = sessionScopeOf(entry);
+    var scopeQ = (scope && scope !== 'local')
+        ? '&__scope=id:' + encodeURIComponent(scope) : '&__scope=local';
+    return (r ? '&root=' + encodeURIComponent(r) : '') + scopeQ;
+}
+/* 会话条目的归属连接（'local' 或 connectionId）：侧栏合并列表后条目带 _scope；
+   查不到（全局会话未带/旧数据）时保守视为本地。
+
+   【已删死引用 __scopeOfRemoteRoot】旧实现在 _scope 缺失时调它反查归属，但全仓
+   从未定义过该函数（只写不定义的幽灵接口，与上轮抓到的 refreshRemoteBadge 同型）。
+   typeof 守卫使它不报错，但这条分支永远进不去：看起来「查不到还能再救一下」，
+   实际什么都没做。保守回本地是唯一真实语义（且侧栏条目本就都带 _scope）。 */
+function sessionScopeOf(entry) {
+    if (entry && entry._scope) return entry._scope;
+    return 'local';
 }
 
 /* ===== Chat 侧栏条目渲染（tab 视图：项目树 / 对话平铺；code 模式平铺）===== */
@@ -363,8 +525,11 @@ function sidebarItemHtml(i) {
     var sess = sessionMap[chatHistory[i].sessionId];
     var streaming = sess && sess.isStreaming;
     var cls = 'sidebar-item' + (i === currentChatIndex ? ' active' : '') + (streaming ? ' streaming' : '');
+    /* 远端会话标识（并存语义）：合并列表后远端条目打 data-remote（CSS 小徽） */
+    var isRemote = !!(chatHistory[i]._scope && chatHistory[i]._scope !== 'local');
+    if (isRemote) cls += ' remote';
 
-    var html = '<div class="' + cls + '" data-idx="' + i + '">';
+    var html = '<div class="' + cls + '" data-idx="' + i + '"' + (isRemote ? ' data-remote="1"' : '') + '>';
     // 定时任务执行会话：条目名前时钟小图标（与旧任务行同款 feather clock）
     if (chatHistory[i].loop) {
         html += '<span class="sidebar-item-loop" title="' + escAttr(GourdI18n.t('app.sidebar.loop_mark')) + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>';
@@ -396,7 +561,11 @@ function sidebarItemHtml(i) {
 /* 项目文件夹行：chevron + folder 图标 + 名称（点击切换展开，见列表点击委托）。
    右侧悬浮操作组 .proj-actions：新建任务 / 进入专注模式 / 重命名显示名 / 从列表移除（样式见 app.css）。 */
 function projNodeHtml(path, name, expanded) {
-    return '<div class="proj-node' + (expanded ? ' expanded' : '') + '" data-proj="' + escAttr(path) + '" title="' + escAttr(path) + '">'
+    /* 远端项目行同样打 data-remote 小徽（buildSidebar 按 _scope 判断后传入）；
+       title 附主机名，使「同名目录分属两台机器」在悬停时可区分。 */
+    var hostLabel = projNodeHostLabel(path);
+    var nodeTitle = path + (hostLabel ? (' · ' + hostLabel) : '');
+    return '<div class="proj-node' + (expanded ? ' expanded' : '') + '" data-proj="' + escAttr(path) + '"' + (projNodeIsRemote(path) ? ' data-remote="1"' : '') + ' title="' + escAttr(nodeTitle) + '">'
         + '<svg class="proj-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>'
         + '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
         + '<span class="proj-name">' + escapeHtml(name || '') + '</span>'
@@ -415,6 +584,52 @@ function projNodeHtml(path, name, expanded) {
         + '</button>'
         + '</span>'
         + '</div>';
+}
+
+/* 项目行是否远端（buildSidebar 的 _sidebarData.projects 带 _scope；查不到视为本地） */
+function projNodeIsRemote(path) {
+    if (!_sidebarData || !_sidebarData.projects) return false;
+    for (var i = 0; i < _sidebarData.projects.length; i++) {
+        if (_sidebarData.projects[i].path === path) {
+            return !!(_sidebarData.projects[i]._scope && _sidebarData.projects[i]._scope !== 'local');
+        }
+    }
+    return false;
+}
+
+/* 项目行 title 的主机名后缀（同屏双源时的区分线索，对标 ZCode 的
+   formatRemoteWorkspaceDisplayLabel）。合并列表时就已把 _scopeHost 算好存在
+   _sidebarData 上，这里只取；拿不到回空串（不展示 connectionId 内部键）。 */
+function projNodeHostLabel(path) {
+    if (!_sidebarData || !_sidebarData.projects) return '';
+    for (var i = 0; i < _sidebarData.projects.length; i++) {
+        if (_sidebarData.projects[i].path === path) {
+            return _sidebarData.projects[i]._scopeHost || '';
+        }
+    }
+    return '';
+}
+
+/* 项目行的归属连接（'local' / connectionId）：供同族写操作（rename / remove）显式
+   声明分流。侧栏渲染的项目必定在 _sidebarData 里且带 _scope（pushList 无条件设），
+   故查不到只可能是异常态——保守回本地（宁可不改远端，也不把写操作打到错机器）。 */
+function projNodeScopeOf(path) {
+    if (!_sidebarData || !_sidebarData.projects) return 'local';
+    for (var i = 0; i < _sidebarData.projects.length; i++) {
+        if (_sidebarData.projects[i].path === path) {
+            var s = _sidebarData.projects[i]._scope;
+            return (s && s !== 'local') ? s : 'local';
+        }
+    }
+    return 'local';
+}
+
+/* 归属 → 路由 query（与 app-code.scopeQueryFor 同口径）：写操作一律显式声明，
+   不声明就落到代理的「激活 scope 兑底」，而它随用户选择漂移。 */
+function projScopeQuery(scope) {
+    return (scope && scope !== 'local')
+        ? '?__scope=id:' + encodeURIComponent(scope)
+        : '?__scope=local';
 }
 
 /* Sidebar event delegation — single listener instead of per-item binding */
@@ -452,7 +667,9 @@ $(historyList).on('click', function(e) {
     var $projDel = $target.closest('.proj-remove');
     if ($projDel.length) {
         var dp = $projDel.closest('.proj-node').attr('data-proj');
-        if (typeof window.removeProjectFromList === 'function') window.removeProjectFromList(dp);
+        /* 传入本侧栏已知的归属（_sidebarData 的 _scope）：app-code 的 projects 副本
+           在从未进过 code 模式时尚未加载，它会回落激活环境——删本地项目却打到远端。 */
+        if (typeof window.removeProjectFromList === 'function') window.removeProjectFromList(dp, projNodeScopeOf(dp));
         return;
     }
     // 项目文件夹节点：切换展开/收起（置于 del/rename/item 分支之前）
@@ -545,6 +762,151 @@ function sortSidebarEntries(entries) {
     return decorated.map(function (item) { return item.entry; });
 }
 
+/* ================= 分组树辅助（契约 §5） ================= */
+
+/* scope（'local' | connectionId）→ DOM data-scope 与持久化共用的 scope 串。
+   契约 §5.1 明确远端组用 'id:<rid>' 形态（与 WS 池 scopeKey、__scope=id: 同口径）；
+   写裸 connectionId 会让「分组键」与全站其它归属键不同型，跨模块比对必然踩空。 */
+function wsScopeKey(scope) {
+    return (!scope || scope === 'local') ? 'local' : ('id:' + scope);
+}
+/* data-scope 串 → connectionId（'local' 返回 null） */
+function wsScopeId(scopeKey) {
+    return (!scopeKey || scopeKey === 'local') ? null : scopeKey.replace(/^id:/, '');
+}
+
+/* 组标题：本地组用 remote.group_local；远端组用连接展示名（user@host）。
+   拿不到展示名时回落 remote.badge（「远程」）——绝不回落 connectionId：
+   那是 rc-host:port:user 形态的内部键，给用户看等于没给信息。 */
+function wsGroupLabelOf(conn) {
+    if (!conn) return GourdI18n.t('remote.group_local');
+    return conn.label || remoteHostLabel(conn.id) || GourdI18n.t('remote.badge');
+}
+
+var LS_WS_GROUP_COLLAPSED = 'gourdai-wsgroup-collapsed';
+/* 折叠态持久化（契约 §5.2）：JSON 数组 of scope 串。记「已折叠」而不是「已展开」——
+   默认展开是常态，数组里只留用户手动收起的少数组，新连接进来天然是展开态，无需补记录。 */
+function wsGroupCollapsedSet() {
+    try {
+        var v = JSON.parse(localStorage.getItem(LS_WS_GROUP_COLLAPSED) || '[]');
+        return Object.prototype.toString.call(v) === '[object Array]' ? v : [];
+    } catch (e) { return []; }
+}
+function wsGroupCollapsed(scopeKey) {
+    return wsGroupCollapsedSet().indexOf(scopeKey) >= 0;
+}
+function wsGroupToggle(scopeKey) {
+    var set = wsGroupCollapsedSet();
+    var i = set.indexOf(scopeKey);
+    if (i >= 0) set.splice(i, 1); else set.push(scopeKey);
+    try { localStorage.setItem(LS_WS_GROUP_COLLAPSED, JSON.stringify(set)); } catch (e) {}
+}
+
+/* 组序（契约 §5.1）：本地组恒第一（哪怕本地一个项目都没有——它是常驻组，藏掉会让
+   侧栏空掉）→ 在线连接按 list() 序 → 仍有项目残留的掉线连接（dot=down，置灰保留）。
+   WHY 掉线组保留：连接抖一下就让整台机器的工作区凭空消失，用户会以为登记丢了；
+   置灰 + 红点表达的是「暂时不可达」，语义完全不同。
+   返回 [{ scopeKey, conn, state, label, items:[project], globals:[entry], meta:[] }] */
+function wsGroupOrder(projects) {
+    var conns = (_sidebarData && _sidebarData.conns && _sidebarData.conns.length !== undefined)
+        ? _sidebarData.conns : [];
+    var byScope = (_sidebarData && _sidebarData.globalByScope) || {};
+    var groups = [];
+    var indexOf = {};
+    var addGroup = function (scopeKey, conn) {
+        var g = {
+            scopeKey: scopeKey,
+            conn: conn,
+            state: conn ? (conn.state === 'connected' ? 'connected' : 'down') : 'local',
+            label: wsGroupLabelOf(conn),
+            items: [],
+            /* 「全局对话」子节只给远端组：本地全局对话已由「对话」tab 承载，再进分组树
+               就是同一批条目在两个 tab 各画一遍（用户拍板：全局对话还是对话）。 */
+            globals: conn ? (byScope[scopeKey] || []) : [],
+            meta: [],
+            globalStart: 0,
+            globalCount: 0
+        };
+        indexOf[scopeKey] = g;
+        groups.push(g);
+        return g;
+    };
+    addGroup('local', null);
+    for (var c = 0; c < conns.length; c++) addGroup(wsScopeKey(conns[c].id), conns[c]);
+    for (var p = 0; p < projects.length; p++) {
+        var key = wsScopeKey(projects[p]._scope);
+        var g2 = indexOf[key];
+        if (!g2) {
+            /* 项目归属的连接已不在本轮快照里（刚断开、重载还没跑完）：兜进本地组会把它
+               标成「本机目录」，后续写操作会打到错的机器上——宁可单立一个 down 组。 */
+            g2 = addGroup(key, { id: wsScopeId(key), state: 'down', label: remoteHostLabel(wsScopeId(key)) });
+        }
+        g2.items.push(projects[p]);
+    }
+    return groups;
+}
+
+/* 组顶「全局对话」子节（契约 §5.3）：这台远端上「没选工作区」的对话。
+   与「对话」tab 的全局列表互不影响——那边是本地+远端合并态，这边只装该连接那份。 */
+function wsGroupGlobalHtml(g) {
+    if (!g.conn || !g.globalCount) return '';
+    /* 子节折叠态只存内存：契约只要求分组本身持久化，子节默认展开。 */
+    var collapsed = !!_wsGlobalCollapsed[g.scopeKey];
+    var html = '<div class="ws-group-global' + (collapsed ? ' ws-group-global-collapsed' : '') + '"'
+        + ' data-scope="' + escAttr(g.scopeKey) + '">'
+        + '<button type="button" class="ws-group-global-head" aria-expanded="' + (collapsed ? 'false' : 'true') + '">'
+        + '<span class="ws-group-caret"></span>'
+        + '<span class="ws-group-global-label">' + escapeHtml(GourdI18n.t('remote.group_global')) + '</span>'
+        + '<span class="ws-group-count">' + g.globalCount + '</span>'
+        + '</button>'
+        + '<div class="ws-group-global-body">';
+    for (var i = g.globalStart; i < g.globalStart + g.globalCount; i++) html += sidebarItemHtml(i);
+    return html + '</div></div>';
+}
+
+/* 分组 DOM（契约 §5.1 逐字对齐）：
+   .ws-group[data-scope] > button.ws-group-head[aria-expanded] >
+       .ws-group-caret + .ws-group-dot[data-state] + .ws-group-label + .ws-group-count
+   后接 .ws-group-body（组顶「全局对话」子节 + 现有项目行）。
+   head 用 <button> 而不是 <div>：开合在可访问性语义上就是按钮（键盘可达 + 读屏播报），
+   aria-expanded 必须与折叠态同步——读屏与契约测试都只认这个属性。
+   count 报项目数：这一行回答的是「这台机器上我登记了几个工作区」。 */
+function wsGroupHtml(g) {
+    var isLocal = !g.conn;
+    var isDown = !isLocal && g.state === 'down';
+    var collapsed = wsGroupCollapsed(g.scopeKey);
+    var html = '<div class="ws-group' + (collapsed ? ' ws-group-collapsed' : '')
+        + (isDown ? ' ws-group-down' : '') + '"'
+        + ' data-scope="' + escAttr(g.scopeKey) + '"'
+        + (isDown ? ' data-state="down"' : '') + '>'
+        + '<button type="button" class="ws-group-head" aria-expanded="' + (collapsed ? 'false' : 'true') + '"'
+        + ' title="' + escAttr(g.label) + '">'
+        + '<span class="ws-group-caret"></span>'
+        + '<span class="ws-group-dot" data-state="' + escAttr(g.state) + '"></span>'
+        + '<span class="ws-group-label">' + escapeHtml(g.label) + '</span>'
+        + '<span class="ws-group-count">' + g.items.length + '</span>'
+        + '</button>'
+        + '<div class="ws-group-body">';
+    html += wsGroupGlobalHtml(g);
+    for (var i = 0; i < g.meta.length; i++) {
+        var pm = g.meta[i];
+        html += projNodeHtml(pm.path, pm.name, !!_projExpanded[pm.path]);
+        // 子列表始终入 DOM（收起态由 CSS 控制），保证搜索可过滤折叠项目的会话
+        if (pm.count > 0) {
+            html += '<div class="proj-sessions">';
+            for (var j = pm.start; j < pm.start + pm.count; j++) html += sidebarItemHtml(j);
+            html += '</div>';
+        }
+    }
+    /* 在线但 0 项目的远端组：留占位而不是整组消失，否则用户分不清「这台没有工作区」
+       与「这台没连上/渲染挂了」（契约 §5.1）。本地组不占位：改造前本地空列表本就
+       什么都不画，凭空多一行灰字反而是新噪声。 */
+    if (!isLocal && !g.meta.length && !g.globalCount) {
+        html += '<div class="ws-group-empty">' + escapeHtml(GourdI18n.t('remote.group_empty')) + '</div>';
+    }
+    return html + '</div></div>';
+}
+
 /* 构建 chat 聚合视图，返回 html 字符串。
    副作用：按渲染顺序重建 chatHistory 平铺并按 sessionId 修正 currentChatIndex——
    必须先于 HTML 生成完成，sidebarItemHtml 依赖 currentChatIndex 判定 active 样式
@@ -554,20 +916,35 @@ function buildSidebar() {
     var scope = effectiveHistoryScope();
     var projects = (_sidebarData && _sidebarData.projects) || [];
     var global = (_sidebarData && _sidebarData.global) || [];
-    var projMeta = [];
-    var i, j;
+    var groups = [];
+    var i, j, k;
 
     // —— 第一遍：按渲染顺序构建平铺（仅会话条目）——
     if (scope === 'project') {
-        // 项目 tab：项目内执行中的任务置顶，其余按最近活动时间倒序
-        for (i = 0; i < projects.length; i++) {
-            var start = flat.length;
-            var ss = sortSidebarEntries(projects[i].sessions || []);
-            for (j = 0; j < ss.length; j++) flat.push(ss[j]);
-            projMeta.push({ path: projects[i].path, name: projects[i].name, start: start, count: ss.length });
+        /* 项目 tab = 分组树（契约 §5.1）：组序本地第一、远端按连接表序；组内顺序 =
+           组顶「全局对话」子节在前（§5.3），其后是该 scope 的项目行。
+           平铺必须包含子节里的会话：selectSession/deleteSession/startRename 全部按
+           chatHistory 下标定位，漏进去就等于那些会话点不开、也删不掉。 */
+        groups = wsGroupOrder(projects);
+        for (i = 0; i < groups.length; i++) {
+            var g = groups[i];
+            g.globalStart = flat.length;
+            var gl = sortSidebarEntries(g.globals || []);
+            for (j = 0; j < gl.length; j++) flat.push(gl[j]);
+            g.globals = gl;
+            g.globalCount = gl.length;
+            for (j = 0; j < g.items.length; j++) {
+                var proj = g.items[j];
+                var start = flat.length;
+                // 项目内执行中的任务置顶，其余按最近活动时间倒序
+                var ss = sortSidebarEntries(proj.sessions || []);
+                for (k = 0; k < ss.length; k++) flat.push(ss[k]);
+                g.meta.push({ path: proj.path, name: proj.name, start: start, count: ss.length });
+            }
         }
     } else {
-        // 对话 tab：仅全局会话（非工作空间下），执行中的任务置顶，其余按 time 倒序
+        /* 对话 tab：仅全局会话（非工作空间下），执行中的任务置顶，其余按 time 倒序。
+           【零改动 · 契约 §5.4】分组树只组织项目/工作区，全局对话仍在这里平铺。 */
         for (i = 0; i < global.length; i++) flat.push(global[i]);
         flat = sortSidebarEntries(flat);
     }
@@ -583,18 +960,9 @@ function buildSidebar() {
     // —— 第二遍：生成 HTML ——
     var html = '';
     if (scope === 'project') {
-        html += '<div class="sidebar-section-title">' + GourdI18n.t('app.sidebar.section_projects') + '</div>';
-        for (i = 0; i < projMeta.length; i++) {
-            var pm = projMeta[i];
-            var expanded = !!_projExpanded[pm.path];
-            html += projNodeHtml(pm.path, pm.name, expanded);
-            // 子列表始终入 DOM（收起态由 CSS 控制），保证搜索可过滤折叠项目的会话
-            if (pm.count > 0) {
-                html += '<div class="proj-sessions">';
-                for (j = pm.start; j < pm.start + pm.count; j++) html += sidebarItemHtml(j);
-                html += '</div>';
-            }
-        }
+        /* 2026-10-11 用户反馈：「这个项目不要，本身上面就有项目了，下面这个重复了。
+           tab 名就叫「项目」，组头又全是机器名/本地，这行 section-title 纯重复占位，删。 */
+        for (i = 0; i < groups.length; i++) html += wsGroupHtml(groups[i]);
     } else {
         for (i = 0; i < flat.length; i++) html += sidebarItemHtml(i);
     }
@@ -608,6 +976,126 @@ function buildSidebar() {
     }
     return html;
 }
+
+/* ===== 分组交互：折叠 / 子节折叠 / 搜索协同 ===== */
+/* 组顶「全局对话」子节折叠态：只存内存（契约只要求分组本身持久化），默认展开 */
+var _wsGlobalCollapsed = {};
+
+/* 组头点击：折叠/展开 + aria-expanded 同步（契约 §5.2）。
+   就地改属性而不整表重渲染：body 显隐与 caret 旋转全部由 CSS 按 [aria-expanded] 驱动，
+   省掉一次 innerHTML 重建（也就不会冲掉当前搜索过滤态与滚动位置）。
+   委托绑定在 document 上：列表 innerHTML 重建后不丢事件。 */
+$(document).on('click', '.ws-group-head', function (e) {
+    if ($(e.target).closest('.proj-node').length) return;
+    var scopeKey = $(this).closest('.ws-group').attr('data-scope');
+    if (!scopeKey) return;
+    var expanded = $(this).attr('aria-expanded') === 'true';
+    $(this).attr('aria-expanded', expanded ? 'false' : 'true');
+    $(this).closest('.ws-group').toggleClass('ws-group-collapsed', expanded);
+    wsGroupToggle(scopeKey);
+});
+/* 组顶「全局对话」子节：同款就地开合（内存态，不持久化） */
+$(document).on('click', '.ws-group-global-head', function () {
+    var $sec = $(this).closest('.ws-group-global');
+    var scopeKey = $sec.attr('data-scope');
+    if (!scopeKey) return;
+    var collapsed = !_wsGlobalCollapsed[scopeKey];
+    _wsGlobalCollapsed[scopeKey] = collapsed;
+    $(this).attr('aria-expanded', collapsed ? 'false' : 'true');
+    $sec.toggleClass('ws-group-global-collapsed', collapsed);
+});
+
+/* 搜索过滤 × 分组（契约 §5.7）：过滤器本体在 app-ui.js（不在本模块所有权范围内），
+   它只认 .sidebar-item/.proj-node，过滤后整组可能一条不剩却仍留着 head；清空关键字
+   与关闭搜索条时它又只恢复条目、不认分组容器。这里在同样的入口上再收敛一层组/子节显隐。
+
+   WHY 不用 :visible / offsetParent 判定——折叠组的 body 是 CSS 级隐藏，offsetParent
+   对组内所有行恒为 null，一搜索就把用户手动收起的组连 head 一起藏掉。改用「过滤器
+   唯一会写的 inline display」为准，与折叠态彻底解耦。
+   WHY 挂捕获阶段 + setTimeout(0)：app-ui.js 的处理器绑在输入框元素本身，捕获阶段
+   document 先于它执行，同步读到的会是上一轮过滤结果；让一拍再判定即为当轮结果。 */
+function wsRowFilteredOut(el) {
+    var node = el;
+    while (node && node !== historyList) {
+        if (node.style && node.style.display === 'none') return true;
+        node = node.parentNode;
+    }
+    return false;
+}
+function wsAnyRowVisible(container, selector) {
+    var rows = container.querySelectorAll(selector);
+    for (var i = 0; i < rows.length; i++) {
+        if (!wsRowFilteredOut(rows[i])) return true;
+    }
+    return false;
+}
+function syncWsGroupFilterVisibility() {
+    if (!historyList) return;
+    var groups = historyList.querySelectorAll('.ws-group');
+    if (!groups.length) return;
+    /* 「过滤中」= 过滤器已在某些行上写了 inline display:none（清空/关闭搜索条时 app-ui
+       会 show() 掉它们，此时本函数把组显隐一并复原，不会误判成过滤态）。 */
+    var filtering = historyList.querySelectorAll(
+        '.sidebar-item[style*="display: none"], .proj-node[style*="display: none"]').length > 0;
+    for (var i = 0; i < groups.length; i++) {
+        var keep = !filtering || wsAnyRowVisible(groups[i], '.sidebar-item, .proj-node');
+        groups[i].style.display = keep ? '' : 'none';
+        // 组顶「全局对话」子节同口径：过滤后无命中就整节隐藏，别留一个空标题
+        var secs = groups[i].querySelectorAll('.ws-group-global');
+        for (var s = 0; s < secs.length; s++) {
+            var hit = !filtering || wsAnyRowVisible(secs[s], '.sidebar-item');
+            secs[s].style.display = hit ? '' : 'none';
+        }
+    }
+}
+document.addEventListener('input', function (e) {
+    if (!e.target || e.target.id !== 'sidebarSearchInput') return;
+    setTimeout(syncWsGroupFilterVisibility, 0);
+}, true);
+/* 过滤器的另外两个直接入口（清空按钮 / 搜索条开关）也要跟着复原组显隐：
+   app-ui.js 的 restoreSidebarFilter 只恢复 .sidebar-item/.proj-node，不认分组容器——
+   不补这一层，用户关一次搜索条，被过滤隐藏的组就永久回不来了。 */
+$(document).on('click', '#filterListBtn, #sidebarSearchClear', function () {
+    setTimeout(syncWsGroupFilterVisibility, 0);
+});
+/* 列表重建（updateHistoryUI）后按当前关键字重新过滤，分组收敛必须紧随其后，
+   否则重建瞬间空组 head 会闪回来。app-ui.js 先于本模块加载（见 app-bootstrap.js
+   APP_SCRIPTS 顺序），此处取到的一定是它的原实现；它没装时退化为纯分组收敛。 */
+var _reapplySidebarFilterBase = window.reapplySidebarFilter;
+window.reapplySidebarFilter = function () {
+    if (typeof _reapplySidebarFilterBase === 'function') _reapplySidebarFilterBase();
+    syncWsGroupFilterVisibility();
+};
+
+/* 连接表变化（连上/断开/探活掉线/恢复完成）→ 重拉侧栏：分组数、组内在线态、
+   各组的项目与「全局对话」全部以连接表为准，不订阅就只能等下次手动刷新才对得上
+   （典型漏网场景：探活把某条连接判掉线，只改 state 不走 applyConnection/doDisconnect，
+   不订阅则分组红点永远不亮）。
+   两条通道都接：
+   - window 事件（契约 §2.3）：与脚本加载序无关。app-remote.js 在本模块之后加载，
+     首屏时读口还不存在，事件是唯一可靠的兜底；
+   - 读口回调 onConnectionsChanged（契约 §2.2）：读口已就位时用它，语义更直接。
+   两条同时到达由 rAF 合并成一轮加载（令牌还会丢弃过期响应）。 */
+var _wsConnReloadQueued = false;
+function scheduleSidebarReloadForConnections() {
+    if (_wsConnReloadQueued) return;
+    _wsConnReloadQueued = true;
+    requestAnimationFrame(function () {
+        _wsConnReloadQueued = false;
+        /* code 模式侧栏是「当前项目根平铺」，没有分组树，不参与重拉
+           （它由 app-code 的项目切换自行驱动）。 */
+        if (window.appMode === 'code') return;
+        loadSessionHistory();
+    });
+}
+(function subscribeConnectionsChanged() {
+    var R = window.__GOURD_REMOTE__;
+    if (R && typeof R.onConnectionsChanged === 'function') {
+        try { R.onConnectionsChanged(scheduleSidebarReloadForConnections); } catch (e) {}
+    }
+    window.addEventListener('remote:connections-changed', scheduleSidebarReloadForConnections);
+})();
+
 
 function startRename(idx) {
     var $item = $(historyList).find('.sidebar-item[data-idx="' + idx + '"]');
@@ -686,7 +1174,8 @@ function startProjectRename(path) {
             /* 与 projects/add|remove|create 同族接口一致：必须 JSON 正文调用
                （后端 @Body + ONode.ofJson 解析；$.post 默认 form 编码会解析失败返回 500）。 */
             $.ajax({
-                url: '/web/chat/projects/rename', method: 'POST', contentType: 'application/json',
+                url: '/web/chat/projects/rename' + projScopeQuery(projNodeScopeOf(path)),
+                method: 'POST', contentType: 'application/json',
                 data: JSON.stringify({ path: path, name: newName })
             }).done(function (resp) {
                 if (resp && resp.code === 200) {

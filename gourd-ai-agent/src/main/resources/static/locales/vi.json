@@ -1,4 +1,123 @@
 {
+    "remote":  {
+
+        "group_local":  "Cục bộ",
+
+        "group_empty":  "Chưa có dự án (kết nối trực tuyến)",
+
+        "badge_count":  "{n}",
+
+        "pick_connection":  "Chọn kết nối từ xa",
+    "connect_in_progress": "Đã có một kết nối đang được thực hiện, vui lòng chờ",
+
+        "group_global":  "Phiên toàn cục",
+
+        "title":  "Không gian làm việc từ xa",
+
+        "unsupported":  "Kết nối từ xa cần ứng dụng máy tính để bàn",
+
+        "saved_hosts":  "Kết nối gần đây",
+
+        "no_saved_hosts":  "Chưa có máy chủ nào được lưu",
+
+        "new_connection":  "Kết nối mới",
+
+        "host_placeholder":  "Máy chủ (vd: 192.168.1.10)",
+
+        "user_placeholder":  "Tên đăng nhập",
+
+        "auth_password":  "Mật khẩu",
+
+        "auth_key":  "Khóa riêng",
+
+        "password_placeholder":  "Mật khẩu SSH",
+
+        "keypath_placeholder":  "Đường dẫn khóa (vd: ~/.ssh/id_rsa)",
+
+        "passphrase_placeholder":  "Cụm mật khẩu (không bắt buộc)",
+
+        "remember_secret":  "Ghi nhớ mật khẩu (kho thông tin hệ thống)",
+
+        "reconnecting":  "Mất kết nối từ xa, đang kết nối lại (lần {attempt}/{max})…",
+
+        "reconnected":  "Đã khôi phục kết nối từ xa",
+
+        "reconnect_giveup":  "Tự động kết nối lại thất bại, hãy kết nối thủ công",
+
+        "reconnect_menu":  "Kết nối lại từ xa",
+
+        "jump_add":  "+ Máy nhảy (tùy chọn)",
+
+        "jump_remove":  "− Bỏ máy nhảy",
+
+        "jump_title":  "Kết nối qua máy nhảy",
+
+        "jump_host_placeholder":  "Địa chỉ máy nhảy",
+
+        "jump_password_placeholder":  "Mật khẩu SSH máy nhảy",
+
+        "jump_user_required":  "Cần tên người dùng máy nhảy",
+
+        "wsl_root_warn":  "Người dùng mặc định là root: tệp sẽ thuộc sở hữu của root. Nên dùng người dùng thường",
+
+        "browse":  "Duyệt",
+
+        "connect_btn":  "Kết nối",
+
+        "connecting_to":  "Đang kết nối tới {host}:{port} …",
+
+        "connected_ok":  "Đã kết nối không gian làm việc từ xa",
+
+        "connect_failed":  "Kết nối thất bại:",
+        "forget_host_btn":  "Quên vân tay máy chủ và kết nối lại",
+        "forget_failed":  "Không thể quên vân tay máy chủ: ",
+
+        "host_user_required":  "Cần máy chủ và tên đăng nhập",
+
+        "remove_host":  "Xóa",
+
+        "badge":  "Từ xa",
+
+        "badge_title":  "Không gian làm việc từ xa: {host} (nhấp để mở menu từ xa)",
+
+        "mirror_sync_menu":  "Đồng bộ cấu hình mô hình sang máy từ xa",
+
+        "disconnect_menu":  "Ngắt kết nối từ xa",
+
+        "mirror_synced":  "Đã đồng bộ cấu hình mô hình (ảnh bộ nhớ)",
+
+        "mirror_sync_failed":  "Đồng bộ cấu hình mô hình thất bại (máy từ xa vẫn dùng cấu hình riêng)",
+
+        "mirror_unavailable":  "Kết nối từ xa không hoạt động, không thể đồng bộ",
+
+        "mirror_auto_failed":  "Chồng cấu hình mô hình không thành công (máy từ xa dùng cấu hình riêng). Thử lại từ menu từ xa.",
+
+        "scope_bind_failed":  "Không đăng ký được quyền sở hữu từ xa; không gian này vẫn xử lý như cục bộ",
+
+        "channel_ssh":  "Máy chủ SSH",
+
+        "channel_wsl":  "WSL",
+
+        "channel_preinstalled":  "CLI cài sẵn",
+
+        "connecting_wsl":  "Đang kết nối WSL {distro} (người dùng {user})…",
+
+        "wsl_user_placeholder":  "Tên người dùng (người dùng mặc định của distro)",
+
+        "wsl_hint":  "Distro WSL2; mặt dữ liệu qua localhost trực tiếp, không cần xác thực. Nếu distro không có java, JRE 17 sẽ được tự động cài đặt.",
+
+        "wsl_loading":  "Đang tải danh sách distro…",
+
+        "wsl_none":  "Không tìm thấy distro WSL",
+
+        "wsl_none_v2":  "Không tìm thấy distro WSL2 (WSL1 không hỗ trợ chuyển localhost)",
+
+        "preinstalled_hint":  "Kết nối tới máy chủ đã cài sẵn gwork CLI: nếu phát hiện sẽ bỏ qua triển khai (thông tin đăng nhập chèn qua biến môi trường, không nằm trên dòng lệnh); nếu không sẽ quay về triển khai chuẩn.",
+        "runtime_pkg_label":  "Gói runtime ngoại tuyến (tùy chọn, runtime-*.tar.gz)",
+        "runtime_pkg_hint":  "Cho máy chủ intranet/ngoại tuyến không có Java: tải gói này lên trước; để trống = runtime kèm bản cài, nếu không sẽ tự cài từ xa."
+
+    },
+
     "streaming":  {
                       "describe_images":  "Mô tả những hình ảnh này",
                       "process_files":  "Xin vui lòng xử lý những tệp này",
@@ -234,8 +353,9 @@
                                        "search_placeholder":  "Tìm kiếm dự án…",
                                        "search_no_results":  "Không có dự án phù hợp",
                                        "remote_connect":  "Kết nối từ xa",
-                                       "locate_multiple":  "Tìm thấy nhiều thư mục trùng tên, hãy chọn một:"
-                                   },
+                                       "locate_multiple":  "Tìm thấy nhiều thư mục trùng tên, hãy chọn một:",
+                                       "open_remote_folder":  "Mở thư mục từ xa",
+                                       "remote_item":  "Không gian làm việc từ xa"                                   },
                  "sidebar":  {
                                  "load_failed_retry":  "Tải thất bại, nhấp để thử lại",
                                  "loop_mark":  "Tác vụ định kỳ",
@@ -434,9 +554,17 @@
                                     "installed_tab":  "Đã cài đặt",
                                     "uninstall":  "Gỡ cài đặt",
                                     "uninstall_confirm":  "Gỡ cài đặt kỹ năng \"{0}\"? Thư mục kỹ năng cục bộ sẽ bị xóa.",
-                                    "scope_global":  "Global",
-                                    "scope_workspace":  "This Project",
-                                    "market_tab":  "Chợ kỹ năng"
+                                    "market_tab":  "Chợ kỹ năng",
+                                     "category_all":  "Tất cả",
+                                     "downloads":  "Lượt tải",
+                                     "stars":  "Sao",
+                                     "version":  "Phiên bản",
+                                     "enable":  "Bật",
+                                     "disable":  "Tắt",
+                                     "source_local":  "Cục bộ",
+                                     "installed_ok":  "đã cài đặt thành công",
+                                     "scroll_prev":  "Cuộn sang trái",
+                                     "scroll_next":  "Cuộn sang phải"
                                 },
                      "mcp":  {
                                  "title":  "Máy chủ MCP",

@@ -36,7 +36,8 @@
     "resources": {
       "../ui/": "ui/",
       "../build/extraResources/gourd-ai-agent.jar": "extraResources/gourd-ai-agent.jar",
-      "../build/extraResources/jre/": "extraResources/jre/"
+      "../build/extraResources/jre/": "extraResources/jre/",
+      "../build/extraResources/runtimes/": "extraResources/runtimes/"
     },
     "externalBin": [],
     "windows": {

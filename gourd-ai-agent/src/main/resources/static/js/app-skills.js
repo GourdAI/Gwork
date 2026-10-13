@@ -1,20 +1,26 @@
 /**
- * app-skills.js — 技能管理独立主视图（已安装视图 + 技能市场视图，市场 API 均走后端代理）
+ * app-skills.js — 技能管理独立主视图（2026-10 重构版）
  *
- * 由设置浮层的「技能管理」tab 迁移而来（原 app-settings-skill.js）：
- *  - 独立主视图 #skillsView，与自动化视图（app-automation.js）同构；
- *  - 打开时与聊天 / 欢迎 / 自动化视图互斥，侧栏「技能」入口直达。
+ * 形态对齐 WorkBuddy 技能页：
+ *  - 顶栏标签页：已安装 + 各市场（skillhub / clawhub / modelscope，来自 /web/settings/skills/markets）；
+ *  - 市场视图：分类筛选 chips + 卡片网格（图标/名称/描述/下载量），卡片点击开详情弹窗；
+ *  - 详情弹窗：图标 + 名称 + 安装按钮 + 描述 + 标签 + 版本/下载量统计；
+ *  - 安装统一落全局区（不再选作用域），卡片「+」与弹窗「安装」均一键安装；
+ *  - 已安装视图：卡片带启禁用开关（改写 SKILL.md frontmatter enabled）与悬浮卸载按钮。
+ *
+ * 后端接口：
+ *   GET  /web/settings/skills/markets                      — 市场列表（标签页）
+ *   GET  /web/settings/skills/categories?marketName=       — 市场分类（筛选 chips）
+ *   GET  /web/settings/skills/proxy?action=&q=&cursor=&limit=&marketName=&category= — 列表/搜索
+ *   GET  /web/settings/skills/detail?slug=&marketName=     — 技能详情（弹窗）
+ *   GET  /web/settings/skills/installed                    — 已安装列表（含 enabled/icon/market）
+ *   GET  /web/settings/skills/icon?url=                    — 市场图标代理
+ *   POST /web/settings/skills/install    {slug, marketName}         — 安装（统一全局区）
+ *   POST /web/settings/skills/uninstall  {scope, skillName}         — 卸载
+ *   POST /web/settings/skills/toggle     {skillName, enabled, scope} — 启禁用
  *
  * 依赖：layui.js（jQuery）、app-base.js、app-i18n.js（GourdI18n）
  * 协同：app-history.js（commandList / loadCommands）
- *
- * 后端接口：
- *   GET  /web/settings/skills/markets                     — 获取可用市场列表
- *   GET  /web/settings/skills/proxy?action=trending[&cursor=xx]       — 热门技能列表（cursor 游标分页）
- *   GET  /web/settings/skills/proxy?action=search&q=xxx[&cursor=xx]   — 搜索技能（cursor 游标分页）
- *   GET  /web/settings/skills/installed                   — 已安装技能列表（全部作用域）
- *   POST /web/settings/skills/install    {slug, marketName, scope}     — 安装技能（scope=global|workspace）
- *   POST /web/settings/skills/uninstall  {scope, skillName}            — 卸载技能
  */
 (function () {
     'use strict';
@@ -22,45 +28,49 @@
     // ==================== 常量 ====================
 
     var SKILLS_API_BASE = '/web/settings/skills/proxy';
-
-    /** 视图标识：已安装技能（本地数据） / 技能市场（远程代理） */
     var VIEW_INSTALLED = 'installed';
-    var VIEW_MARKET = 'market';
+
+    /** 市场名 → 标签页展示名（市场 name 是域名，直接展示不友好） */
+    var MARKET_LABELS = {
+        'skillhub.cn': 'SkillHub',
+        'clawhub.ai': 'ClawHub',
+        'modelscope.cn': 'ModelScope'
+    };
 
     // ==================== DOM 引用 ====================
 
     var $skillsViewTabs = $('#skillsViewTabs');
-    var $skillsMarketWrap = $('#skillsMarketWrap');
-    var $skillsMarketSelect = $('#skillsMarketSelect');
+    var $skillsViewTabsWrap = $('.skills-tabs-wrap');
     var $skillsSearchInput = $('#skillsSearchInput');
     var $skillsSearchClear = $('#skillsSearchClear');
     var $skillsList = $('#skillsList');
     var $skillsLoading = $('#skillsLoading');
     var $skillsError = $('#skillsError');
     var $skillsStatus = $('#skillsStatus');
-    var $skillsSearchBar = $('.skills-search-bar');
+    var $skillsCategoryBar = $('#skillsCategoryBar');
+    var $skillsCategoryBarWrap = $('#skillsCategoryBarWrap');
+    var $detailOverlay = $('#skillDetailOverlay');
 
     // ==================== 状态 ====================
 
-    var _installedSkillsCache = null;
-    var _currentView = VIEW_INSTALLED;  // 当前视图：默认已安装
-    var _currentMarketName = '';  // 当前选中的市场名称
-    // 安装作用域固定两档（与后端 TalentScope 对应），无远端状态可缓存
-    var _installScopes = [
-        { scope: 'workspace', label: null },  // label 延迟取 i18n
-        { scope: 'global', label: null }
-    ];
-    var _currentQuery = null;     // 当前搜索关键词
-    var _nextCursor = null;       // 下一页游标（后端返回）；null 表示从第一页加载
-    var _pageLimit = 20;         // 每页条数
-    var _hasMore = true;          // 是否还有更多数据
-    var _isLoadingMore = false;   // 是否正在加载更多
-    var _loadSeq = 0;             // 加载请求序号：仅最新一次请求的响应允许落地，防止旧响应污染新列表
-    var _seenSlugs = {};          // 当前列表会话已渲染的 slug 集合：追加加载去重（部分市场 API 忽略 page 参数、恒返回首页）
+    var _markets = [];              // [{name, description}]
+    var _currentView = VIEW_INSTALLED; // 'installed' 或市场 name
+    var _categories = [];           // 当前市场的分类列表
+    var _currentCategory = '';      // 当前分类 key（'' = 全部）
+    var _installedAll = [];         // 已安装技能完整列表（/installed 原始数据）
+    var _installedIndex = null;     // 已安装索引：localName -> item；marketKey -> item
+    var _currentQuery = null;
+    var _nextCursor = null;
+    var _pageLimit = 20;
+    var _hasMore = true;
+    var _isLoadingMore = false;
+    var _loadSeq = 0;
+    var _seenSlugs = {};
+    var _detailCtx = null;          // 弹窗上下文 {slug, market, installed}
+    var _marketsLoadFailed = false; // markets 端点失败标记：错误条可点击重试
 
     // ==================== 工具函数 ====================
 
-    /** HTML 转义（与 app-settings.js 共享同一个闭包作用域不可用，自备一份） */
     function escapeHtml(str) {
         if (!str) return '';
         return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -71,78 +81,177 @@
         return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
-    // ==================== 市场选择器初始化 ====================
+    function marketLabel(name) {
+        return MARKET_LABELS[name] || name || '';
+    }
+
+    /** 数字紧凑展示：12345 -> 12.3k */
+    function compactNum(n) {
+        if (!n || n <= 0) return '';
+        if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+        if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+        return String(n);
+    }
+
+    /** 图标 HTML：有 iconUrl 时走后端代理 <img>，加载失败自毁露出首字母底 */
+    function iconHtml(iconUrl, displayName, cls) {
+        var letter = (displayName || 'SK').substring(0, 2).toUpperCase();
+        var img = iconUrl
+            ? '<img src="/web/settings/skills/icon?url=' + encodeURIComponent(iconUrl) + '" alt="" onerror="this.remove()">'
+            : '';
+        return '<div class="' + cls + '"><span>' + escapeHtml(letter) + '</span>' + img + '</div>';
+    }
+
+    // ==================== 已安装索引 ====================
 
     /**
-     * 从后端加载可用市场列表并填充下拉框
+     * 拉取已安装列表并重建索引。
+     * 索引键：本地技能名、以及「市场|市场slug」，供市场卡片判断已安装。
      */
-    function loadMarketOptions() {
+    function loadInstalledIndex(callback) {
+        $.ajax({
+            url: '/web/settings/skills/installed',
+            method: 'GET',
+            timeout: 15000,
+            dataType: 'json'
+        }).done(function (resp) {
+            var skills = (resp && resp.code === 200 && resp.data) ? resp.data : [];
+            _installedAll = skills;
+            _installedIndex = {};
+            skills.forEach(function (s) {
+                _installedIndex['name:' + s.name] = s;
+                if (s.market && s.marketSlug) {
+                    _installedIndex['market:' + s.market + '|' + s.marketSlug] = s;
+                }
+            });
+            updateInstalledCount();
+            if (callback) callback();
+        }).fail(function () {
+            _installedAll = [];
+            _installedIndex = {};
+            updateInstalledCount();
+            if (callback) callback();
+        });
+    }
+
+    function updateInstalledCount() {
+        var n = _installedAll.length;
+        // 徒标渲染在「已安装」标签内（renderTabs 产出），不另设右上角入口按钮：
+        // 旧结构的「已安装」按钮与标签页功能完全重复，且在已安装视图下又多一行返回条，
+        // 实测头部高 104px = 两行，第二行仅约 100px 内容、右侧约 1200px 整行空白。
+        $('.skills-tab-count').text(n > 0 ? String(n) : '');
+    }
+
+    /** 市场条目是否已安装（优先市场元数据精确匹配，回退目录名候选） */
+    function findInstalledForMarket(marketName, slug) {
+        if (!_installedIndex) return null;
+        var hit = _installedIndex['market:' + marketName + '|' + slug];
+        if (hit) return hit;
+        var candidates = [
+            slug,
+            String(slug).replace(/[@/]/g, '_'),
+            String(slug).replace(/[^a-zA-Z0-9._-]/g, '')
+        ];
+        for (var i = 0; i < candidates.length; i++) {
+            hit = _installedIndex['name:' + candidates[i]];
+            if (hit) return hit;
+        }
+        return null;
+    }
+
+    // ==================== 标签页与分类 ====================
+
+    function loadMarkets(callback) {
         $.ajax({
             url: '/web/settings/skills/markets',
             method: 'GET',
             timeout: 5000,
             dataType: 'json'
         }).done(function (resp) {
-            var markets = (resp && resp.data) ? resp.data : [];
-
-            var html = '';
-            markets.forEach(function (m) {
-                var label = escapeHtml(m.name || '');
-                html += '<option value="' + escapeAttr(m.name || '') + '">' + label + '</option>';
-            });
-            $skillsMarketSelect.html(html);
-
-            // 默认选中第一个市场
-            _currentMarketName = markets.length ? (markets[0].name || '') : '';
-            $skillsMarketSelect.val(_currentMarketName);
-
-            // 渲染 layui 表单
-            if (typeof layui !== 'undefined' && layui.form) {
-                layui.form.render('select');
-            }
+            _markets = (resp && resp.data) ? resp.data : [];
+            renderTabs();
+            if (callback) callback();
         }).fail(function () {
-            $skillsMarketSelect.html('<option value="">ClawHub</option>');
-            _currentMarketName = '';
-
-            // 渲染 layui 表单
-            if (typeof layui !== 'undefined' && layui.form) {
-                layui.form.render('select');
-            }
+            _markets = [];
+            renderTabs();
+            if (callback) callback();
         });
     }
 
+    function renderTabs() {
+        var installedCount = _installedAll.length;
+        var html = '<button type="button" class="skills-view-tab' + (_currentView === VIEW_INSTALLED ? ' active' : '') + '" data-view="' + VIEW_INSTALLED + '">'
+            + '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>'
+            + '<span>' + escapeHtml(GourdI18n.t('settings.skills.installed_tab')) + '</span>'
+            + '<span class="skills-tab-count">' + (installedCount > 0 ? installedCount : '') + '</span></button>';
+        _markets.forEach(function (m) {
+            html += '<button type="button" class="skills-view-tab' + (_currentView === m.name ? ' active' : '') + '" data-view="' + escapeAttr(m.name) + '">'
+                + '<span>' + escapeHtml(marketLabel(m.name)) + '</span></button>';
+        });
+        $skillsViewTabs.html(html);
+    }
 
-    // ==================== 已安装技能 ====================
-
-    function getInstalledSkills(callback) {
-        if (typeof commandList !== 'undefined' && commandList.length > 0) {
-            if (!_installedSkillsCache) {
-                _installedSkillsCache = {};
-                commandList.forEach(function (item) {
-                    if (item.type === 'skill') _installedSkillsCache[item.name] = true;
-                });
-            }
-            callback(_installedSkillsCache);
+    function loadCategories() {
+        if (_currentView === VIEW_INSTALLED) {
+            hideCategoryBar();
+            _categories = [];
+            _currentCategory = '';
             return;
         }
-        $.get('/web/chat/hints', function (resp) {
-            _installedSkillsCache = {};
-            (resp.data || []).forEach(function (item) {
-                if (item.type === 'skill') _installedSkillsCache[item.name] = true;
-            });
-            callback(_installedSkillsCache);
+        $.ajax({
+            url: '/web/settings/skills/categories?marketName=' + encodeURIComponent(_currentView),
+            method: 'GET',
+            timeout: 5000,
+            dataType: 'json'
+        }).done(function (resp) {
+            _categories = (resp && resp.code === 200 && resp.data) ? resp.data : [];
+            renderCategoryBar();
         }).fail(function () {
-            _installedSkillsCache = {};
-            callback(_installedSkillsCache);
+            _categories = [];
+            renderCategoryBar();
         });
     }
 
-    // ==================== 数据加载 ====================
+    function renderCategoryBar() {
+        if (_currentView === VIEW_INSTALLED || !_categories.length) {
+            hideCategoryBar();
+            return;
+        }
+        var zh = (GourdI18n.getLocale() || '').indexOf('zh') === 0;
+        var html = '<button type="button" class="skills-category-chip' + (_currentCategory === '' ? ' active' : '') + '" data-cat="">'
+            + escapeHtml(GourdI18n.t('settings.skills.category_all')) + '</button>';
+        _categories.forEach(function (c) {
+            var label = (zh && c.nameZh) ? c.nameZh : (c.name || c.key);
+            html += '<button type="button" class="skills-category-chip' + (_currentCategory === c.key ? ' active' : '') + '" data-cat="' + escapeAttr(c.key) + '">'
+                + escapeHtml(label) + '</button>';
+        });
+        $skillsCategoryBar.html(html);
+        showCategoryBar();
+    }
 
     /**
-     * 在列表末尾追加底部指示器（先移除已有指示器，避免残留在列表中间）
-     * @param {'loading'|'error'|'end'} type - 加载动画 / 失败点击重试 / 已加载全部
+     * 显示分类栏。
+     * 只显 wrap，不动内层 bar：bar 始终 display:flex，
+     * 否则隐过一次的 bar 会被留在 display:none 上再也回不来。
+     * 新 chips 渲染后宽度变了，必须重算溢出态（左右箭头与渐隐才不会停在旧状态）。
      */
+    function showCategoryBar() {
+        $skillsCategoryBarWrap.show();
+        syncHScrollState($skillsCategoryBar[0]);
+    }
+
+    /**
+     * 隐藏分类栏：必须隐 wrap（只隐内层 chips 会留下一条空的渐隐带与两个孤箭头），
+     * 同时清掉溢出态（含箭头显隐）；内层 bar 仅清空内容、不切 display。
+     */
+    function hideCategoryBar() {
+        $skillsCategoryBar.empty();
+        $skillsCategoryBarWrap.hide();
+        syncHScrollState($skillsCategoryBar[0]);
+    }
+
+    // ==================== 列表加载 ====================
+
     function appendListFooter(type) {
         $('.skills-list-footer').remove();
         var html = '';
@@ -159,21 +268,15 @@
         if (html) $skillsList.append(html);
     }
 
-    /**
-     * 加载技能列表
-     * @param {string|null} query - 搜索关键词，null 时加载热门技能
-     * @param {boolean} append  - 是否追加到现有列表（true=加载更多，false=重置）
-     */
     function loadSkillsList(query, append) {
         var isAppend = append === true;
 
-        // 已安装视图：本地数据，无分页，追加加载直接忽略
         if (_currentView === VIEW_INSTALLED) {
             if (!isAppend) {
-                _loadSeq++;  // 使在途的市场请求失效，防止旧响应回来覆盖已安装列表
+                _loadSeq++;
                 _hasMore = false;
                 $('.skills-list-footer').remove();
-                loadInstalledSkills(query);
+                renderInstalledList(query);
             }
             return;
         }
@@ -181,16 +284,16 @@
         if (!isAppend) {
             _nextCursor = null;
             _hasMore = true;
-            _seenSlugs = {};  // 新列表会话，重置去重集合
-            $skillsList.empty();  // 清空列表（含可能残留的底部指示器）
+            _seenSlugs = {};
+            $skillsList.empty();
         }
 
-        if (_isLoadingMore) return; // 防止重复请求
+        if (_isLoadingMore) return;
         _isLoadingMore = true;
-        var mySeq = ++_loadSeq;     // 本次请求序号，回调内校验是否仍为最新
+        var mySeq = ++_loadSeq;
+        var viewAtRequest = _currentView;
 
         if (isAppend) {
-            // 追加加载：底部指示器切换为加载动画
             appendListFooter('loading');
         } else {
             $skillsStatus.show();
@@ -199,12 +302,14 @@
         }
 
         var url;
-        var marketParam = _currentMarketName ? '&marketName=' + encodeURIComponent(_currentMarketName) : '';
-        var cursorParam = (isAppend && _nextCursor) ? '&cursor=' + encodeURIComponent(_nextCursor) : '';
+        var params = 'limit=' + _pageLimit
+            + '&marketName=' + encodeURIComponent(viewAtRequest)
+            + ((isAppend && _nextCursor) ? '&cursor=' + encodeURIComponent(_nextCursor) : '')
+            + (_currentCategory ? '&category=' + encodeURIComponent(_currentCategory) : '');
         if (query) {
-            url = SKILLS_API_BASE + '?action=search&q=' + encodeURIComponent(query) + '&limit=' + _pageLimit + cursorParam + marketParam;
+            url = SKILLS_API_BASE + '?action=search&q=' + encodeURIComponent(query) + '&' + params;
         } else {
-            url = SKILLS_API_BASE + '?action=trending&limit=' + _pageLimit + cursorParam + marketParam;
+            url = SKILLS_API_BASE + '?action=trending&' + params;
         }
 
         $.ajax({
@@ -214,46 +319,30 @@
             dataType: 'json'
         })
             .done(function (resp) {
-                // 已有更新的请求发出（如用户切市场/搜索），旧响应直接丢弃，避免数据串列表
                 if (mySeq !== _loadSeq) return;
-                // 请求期间用户可能已切回已安装视图，市场响应不得覆盖已安装列表
-                if (_currentView !== VIEW_MARKET) return;
-                // 后端返回 Result 包装：{code:200, data:[...], description:""}
-                // code !== 200 时为业务错误，展示后端返回的具体提示
+                if (_currentView !== viewAtRequest || _currentView === VIEW_INSTALLED) return;
                 if (resp && resp.code !== undefined && resp.code !== 200) {
                     $skillsLoading.hide();
                     $('.skills-list-footer').remove();
-                    var errMsg = (resp.description || GourdI18n.t('settings.save_failed') + GourdI18n.t('app.loading'));
-                    $skillsError.text(errMsg).show();
-                    if (isAppend) appendListFooter('error'); // 失败时显示点击重试
+                    $skillsError.text(resp.description || GourdI18n.t('settings.operation_failed')).show();
+                    if (isAppend) appendListFooter('error');
                     _isLoadingMore = false;
                     return;
                 }
 
-                var payload = resp;
-                if (resp && resp.code !== undefined && resp.data !== undefined) {
-                    payload = resp.data;
-                }
-
-                // 后端 Market 适配器统一返回 {items:[...], nextCursor:"..."}（cursor 游标分页）
+                var payload = (resp && resp.code !== undefined && resp.data !== undefined) ? resp.data : resp;
                 var skills = [];
                 var nextCursor = null;
                 if (payload && payload.items !== undefined) {
                     skills = Array.isArray(payload.items) ? payload.items : [];
                     nextCursor = payload.nextCursor || null;
                 } else if (Array.isArray(payload)) {
-                    // 兼容旧式数组返回（防御性兜底）：视为单页数据，不再翻页
                     skills = payload;
-                    nextCursor = null;
                 }
 
-                // 是否还有更多：以后端返回的游标为准（clawhub 等市场会忽略 page 参数，不能再按返回条数推断）
                 _hasMore = !!nextCursor && skills.length > 0;
                 _nextCursor = nextCursor;
 
-                // 客户端去重保护：skillhub.cn 的 search API 忽略 page/cursor 恒返回首页数据；
-                // clawhub 不同作者可能存在同名 slug。追加加载时过滤已渲染条目（键=slug|ownerHandle），
-                // 若全部重复则终止无限滚动，避免重复内容无限追加。
                 if (isAppend) {
                     skills = skills.filter(function (s) {
                         var key = dedupeKey(s);
@@ -268,221 +357,342 @@
                     _seenSlugs[dedupeKey(s)] = true;
                 });
 
-                getInstalledSkills(function (installedMap) {
-                    // 异步回调期间可能已发起新请求，二次校验序号
-                    if (mySeq !== _loadSeq) return;
-                    try {
-                        renderMarketSkillsList(skills, installedMap, isAppend);
-
-                        // 移除"加载中"提示
-                        $('.skills-list-footer').remove();
-                        if (!isAppend) {
-                            $skillsStatus.hide();
-                            $skillsError.hide();  // 重置加载成功，清掉上次残留的错误横幅
-                        }
-
-                        // 底部指示器：还有数据→加载动画（等待触底自动加载）；否则→已加载全部
-                        if (_hasMore) {
-                            appendListFooter('loading');
-                        } else if (isAppend) {
-                            appendListFooter('end');
-                        }
-                    } finally {
-                        _isLoadingMore = false;  // 无论渲染是否异常，必须释放锁
+                try {
+                    renderMarketCards(skills, isAppend);
+                    $('.skills-list-footer').remove();
+                    if (!isAppend) {
+                        $skillsStatus.hide();
+                        $skillsError.hide();
                     }
-                    maybeAutoFill();
-                });
+                    if (_hasMore) {
+                        appendListFooter('loading');
+                    } else if (isAppend) {
+                        appendListFooter('end');
+                    }
+                } finally {
+                    _isLoadingMore = false;
+                }
+                maybeAutoFill();
             })
             .fail(function (jqXHR, textStatus) {
                 if (mySeq !== _loadSeq) return;
-                if (_currentView !== VIEW_MARKET) return;
+                if (_currentView !== viewAtRequest) return;
                 $('.skills-list-footer').remove();
                 if (!isAppend) $skillsLoading.hide();
-                if (isAppend) appendListFooter('error'); // 失败时显示点击重试
-                var msg;
-                if (textStatus === 'timeout') {
-                    msg = GourdI18n.t('settings.network_error');
-                } else if (jqXHR.status === 0) {
-                    msg = GourdI18n.t('settings.network_error');
-                } else if (jqXHR.status === 429) {
-                    msg = GourdI18n.t('settings.operation_failed');
-                } else if (jqXHR.status >= 500) {
-                    msg = GourdI18n.t('settings.operation_failed') + '（HTTP ' + jqXHR.status + '）';
-                } else {
-                    msg = GourdI18n.t('settings.network_error') + '（HTTP ' + (jqXHR.status || '?') + '）';
-                }
+                if (isAppend) appendListFooter('error');
+                var msg = (textStatus === 'timeout' || jqXHR.status === 0)
+                    ? GourdI18n.t('settings.network_error')
+                    : GourdI18n.t('settings.operation_failed') + '（HTTP ' + (jqXHR.status || '?') + '）';
                 $skillsError.text(msg).show();
                 _isLoadingMore = false;
             });
     }
 
-    // ==================== 渲染 ====================
-
-    /** 去重键：slug + ownerHandle 组合（clawhub 不同作者可能存在同名 slug，仅按 slug 去重会误删） */
     function dedupeKey(s) {
         var slug = (s && (s.slug || s.name)) || '';
         var owner = (s && (s.ownerHandle || (s.owner && s.owner.handle))) || '';
         return slug ? (slug + '|' + owner) : '';
     }
 
-    function renderMarketSkillsList(skills, installedMap, append) {
+    // ==================== 渲染：市场卡片 ====================
+
+    function renderMarketCards(skills, append) {
         if (!skills || skills.length === 0) {
-            if (!append) {
-                $skillsList.html(
-                    '<div class="skill-empty-state">'
-                    + '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.5">'
-                    + '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>'
-                    + '</svg>'
-                    + '<div style="font-size:13px;margin-top:12px;">' + GourdI18n.t('common.no_data') + '</div>'
-                    + '</div>'
-                );
-            }
+            if (!append) renderEmpty();
             return;
         }
 
         var html = '';
-        var tInstalled = GourdI18n.t('settings.skills.installed');
-        var tInstall = GourdI18n.t('settings.skills.install');
-        var tLoading = GourdI18n.t('settings.skills.loading');
         skills.forEach(function (skill) {
-            var name = skill.slug || skill.name || '';
-            var displayName = skill.displayName || name;
+            var slug = skill.slug || skill.name || '';
+            var displayName = skill.displayName || slug;
             var desc = skill.summary || skill.description || '';
             var owner = skill.ownerHandle || (skill.owner && skill.owner.handle) || '';
+            var installs = skill.installs || 0;
+            var stars = skill.stars || 0;
+            var installed = findInstalledForMarket(_currentView, slug);
 
-            var installs = skill.installs || (skill.stats && skill.stats.installsCurrent) || 0;
-            var stars = skill.stars || (skill.stats && skill.stats.stars) || 0;
-            var isInstalled = !!installedMap[name];
-            var iconText = displayName ? displayName.substring(0, 2).toUpperCase() : 'SK';
-            var shortDesc = desc && desc.length > 60 ? desc.substring(0, 60) + '...' : desc;
-
-            var skillUrl = skill.url || '';
-
-            html += '<div class="skill-item" data-url="' + escapeAttr(skillUrl) + '">'
-                + '<div class="skill-item-icon">' + escapeHtml(iconText) + '</div>'
-                + '<div class="skill-item-info">'
-                + '<div class="skill-item-name" title="' + escapeAttr(name) + '">' + escapeHtml(displayName) + (isInstalled ? '<span class="skill-installed-badge">' + tInstalled + '</span>' : '') + '</div>'
-                + (shortDesc ? '<div class="skill-item-desc" title="' + escapeAttr(desc) + '">' + escapeHtml(shortDesc) + '</div>' : '')
-                + '<div class="skill-item-meta">'
-                + (installs > 0 ? '<span>' + (installs >= 1000 ? (installs / 1000).toFixed(1) + 'k' : installs) + ' ' + tInstall + '</span>' : '')
-                + (stars > 0 ? '<span>⭐ ' + (stars >= 1000 ? (stars / 1000).toFixed(1) + 'k' : stars) + '</span>' : '')
-                + (owner ? '<span>' + escapeHtml(owner) + '</span>' : '')
-                + (skillUrl ? '<span class="skill-item-detail-link" title="' + GourdI18n.t('settings.skills.detail') + '">↗</span>' : '')
-                + '</div></div>'
-                + '<div class="skill-item-actions">'
-                + (isInstalled
-                    ? ''
-                    : '<div class="skill-install-wrap">'
-                    +   '<button class="skill-install-btn" data-slug="' + escapeAttr(name) + '" data-display="' + escapeAttr(displayName) + '" data-market="' + escapeAttr(_currentMarketName) + '" title="' + tInstall + '"><svg class="skill-install-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>'
-                    +   '<div class="skill-install-dropdown" data-slug="' + escapeAttr(name) + '" data-display="' + escapeAttr(displayName) + '" data-market="' + escapeAttr(_currentMarketName) + '">'
-                    +     '<div class="skill-install-dropdown-loading">' + tLoading + '</div>'
-                    +   '</div>'
-                    + '</div>')
-                + '</div></div>';
-        });
-
-        if (append) {
-            $skillsList.append(html);
-        } else {
-            $skillsList.html(html);
-        }
-    }
-
-    // ==================== 已安装视图 ====================
-
-    /**
-     * 加载并渲染已安装技能列表（本地数据，支持关键词过滤）
-     * @param {string|null} query - 过滤关键词，null 时展示全部
-     */
-    function loadInstalledSkills(query) {
-        $skillsStatus.show();
-        $skillsLoading.css('display', 'flex');
-        $skillsError.hide();
-
-        $.ajax({
-            url: '/web/settings/skills/installed',
-            method: 'GET',
-            timeout: 15000,
-            dataType: 'json'
-        })
-        .done(function (resp) {
-            // 请求期间用户可能已切回市场视图，旧响应不得覆盖市场列表
-            if (_currentView !== VIEW_INSTALLED) return;
-            if (resp && resp.code !== undefined && resp.code !== 200) {
-                $skillsLoading.hide();
-                $skillsError.text(resp.description || GourdI18n.t('settings.operation_failed')).show();
-                return;
-            }
-            var skills = (resp && resp.data) ? resp.data : [];
-            if (query) {
-                var kw = query.toLowerCase();
-                skills = skills.filter(function (s) {
-                    return (s.name || '').toLowerCase().indexOf(kw) !== -1
-                        || (s.description || '').toLowerCase().indexOf(kw) !== -1;
-                });
-            }
-            try {
-                renderInstalledSkillsList(skills);
-            } finally {
-                $skillsLoading.hide();
-                $skillsStatus.hide();
-            }
-        })
-        .fail(function () {
-            if (_currentView !== VIEW_INSTALLED) return;
-            $skillsLoading.hide();
-            $skillsError.text(GourdI18n.t('settings.network_error')).show();
-        });
-    }
-
-    /** 渲染已安装技能列表（含卸载按钮与所属作用域标识） */
-    function renderInstalledSkillsList(skills) {
-        if (!skills || skills.length === 0) {
-            $skillsList.html(
-                '<div class="skill-empty-state">'
-                + '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.5">'
-                + '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>'
-                + '</svg>'
-                + '<div style="font-size:13px;margin-top:12px;">' + GourdI18n.t('common.no_data') + '</div>'
+            html += '<div class="skill-card" data-slug="' + escapeAttr(slug) + '" data-market="' + escapeAttr(_currentView) + '">'
+                + iconHtml(skill.iconUrl, displayName, 'skill-card-icon')
+                + '<div class="skill-card-body">'
+                + '<div class="skill-card-title"><span class="skill-card-name" title="' + escapeAttr(displayName) + '">' + escapeHtml(displayName) + '</span>'
+                + (installed ? '<span class="skill-installed-badge">' + escapeHtml(GourdI18n.t('settings.skills.installed')) + '</span>' : '')
                 + '</div>'
-            );
+                + '<div class="skill-card-desc" title="' + escapeAttr(desc) + '">' + escapeHtml(desc) + '</div>'
+                + '<div class="skill-card-meta">'
+                + (installs > 0 ? '<span title="' + escapeAttr(GourdI18n.t('settings.skills.downloads')) + '"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' + compactNum(installs) + '</span>' : '')
+                + (stars > 0 ? '<span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' + compactNum(stars) + '</span>' : '')
+                + (owner ? '<span>' + escapeHtml(owner) + '</span>' : '')
+                + '</div></div>'
+                + (installed ? '' :
+                    '<div class="skill-card-actions"><button type="button" class="skill-card-add" data-slug="' + escapeAttr(slug) + '" data-market="' + escapeAttr(_currentView) + '" title="' + escapeAttr(GourdI18n.t('settings.skills.install')) + '">'
+                    + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>'
+                    + '</button></div>')
+                + '</div>';
+        });
+
+        if (append) $skillsList.append(html);
+        else $skillsList.html(html);
+    }
+
+    // ==================== 渲染：已安装卡片 ====================
+
+    function renderInstalledList(query) {
+        var skills = _installedAll;
+        if (query) {
+            var kw = query.toLowerCase();
+            skills = skills.filter(function (s) {
+                return (s.name || '').toLowerCase().indexOf(kw) !== -1
+                    || (s.description || '').toLowerCase().indexOf(kw) !== -1;
+            });
+        }
+
+        if (!skills || skills.length === 0) {
+            renderEmpty();
             return;
         }
 
         var html = '';
-        var tUninstall = GourdI18n.t('settings.skills.uninstall');
         skills.forEach(function (skill) {
             var name = skill.name || '';
             var desc = skill.description || '';
-            var scope = skill.scope || 'workspace';
-            var scopeLabel = (scope === 'global')
-                ? GourdI18n.t('settings.skills.scope_global')
-                : GourdI18n.t('settings.skills.scope_workspace');
-            var iconText = name ? name.substring(0, 2).toUpperCase() : 'SK';
-            var shortDesc = desc.length > 60 ? desc.substring(0, 60) + '...' : desc;
+            var enabled = skill.enabled !== false;
+            var scope = skill.scope || 'global';
+            var sourceLabel = skill.market ? marketLabel(skill.market) : GourdI18n.t('settings.skills.source_local');
 
-            html += '<div class="skill-item skill-item-installed">'
-                + '<div class="skill-item-icon">' + escapeHtml(iconText) + '</div>'
-                + '<div class="skill-item-info">'
-                + '<div class="skill-item-name" title="' + escapeAttr(name) + '">' + escapeHtml(name) + '</div>'
-                + (shortDesc ? '<div class="skill-item-desc" title="' + escapeAttr(desc) + '">' + escapeHtml(shortDesc) + '</div>' : '')
-                + '<div class="skill-item-meta"><span>' + escapeHtml(scopeLabel) + '</span></div>'
+            html += '<div class="skill-card skill-card-installed' + (enabled ? '' : ' skill-card-disabled') + '" data-name="' + escapeAttr(name) + '" data-scope="' + escapeAttr(scope) + '">'
+                + iconHtml(skill.iconUrl, name, 'skill-card-icon')
+                + '<div class="skill-card-body">'
+                + '<div class="skill-card-title"><span class="skill-card-name" title="' + escapeAttr(name) + '">' + escapeHtml(name) + '</span>'
+                + (skill.version ? '<span class="skill-installed-badge" style="color:var(--text-secondary);background:var(--bg-hover)">v' + escapeHtml(skill.version) + '</span>' : '')
                 + '</div>'
-                + '<div class="skill-item-actions">'
-                + '<button class="skill-uninstall-btn" data-name="' + escapeAttr(name) + '" data-scope="' + escapeAttr(scope) + '" title="' + tUninstall + '">'
-                + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>'
+                + '<div class="skill-card-desc" title="' + escapeAttr(desc) + '">' + escapeHtml(desc) + '</div>'
+                + '<div class="skill-card-meta"><span>' + escapeHtml(sourceLabel) + '</span></div>'
+                + '</div>'
+                + '<div class="skill-card-side">'
+                + '<button type="button" class="skill-uninstall-btn" data-name="' + escapeAttr(name) + '" data-scope="' + escapeAttr(scope) + '" title="' + escapeAttr(GourdI18n.t('settings.skills.uninstall')) + '">'
+                + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>'
                 + '</button>'
+                + '<button type="button" class="skill-toggle' + (enabled ? ' on' : '') + '" data-name="' + escapeAttr(name) + '" data-scope="' + escapeAttr(scope) + '" data-enabled="' + (enabled ? '1' : '0') + '" title="' + escapeAttr(enabled ? GourdI18n.t('settings.skills.disable') : GourdI18n.t('settings.skills.enable')) + '" aria-pressed="' + (enabled ? 'true' : 'false') + '"></button>'
                 + '</div></div>';
         });
         $skillsList.html(html);
     }
 
-    // 点击卸载按钮 → 确认后删除本地技能目录
+    function renderEmpty() {
+        $skillsList.html(
+            '<div class="skill-empty-state">'
+            + '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.5">'
+            + '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>'
+            + '</svg>'
+            + '<div style="font-size:13px;margin-top:12px;">' + GourdI18n.t('common.no_data') + '</div>'
+            + '</div>'
+        );
+    }
+
+    // ==================== 视图切换 ====================
+
+    function switchView(view) {
+        if (view !== VIEW_INSTALLED && !_markets.some(function (m) { return m.name === view; })) return;
+        if (_currentView === view) return;
+        _currentView = view;
+
+        renderTabs();
+
+        _currentQuery = null;
+        $skillsSearchInput.val('');
+        $skillsSearchClear.hide();
+        _nextCursor = null;
+        _hasMore = true;
+        _isLoadingMore = false;
+
+        if (view === VIEW_INSTALLED) {
+            _currentCategory = '';
+            hideCategoryBar();
+            loadInstalledIndex(function () {
+                renderInstalledList(null);
+            });
+        } else {
+            _currentCategory = '';
+            loadCategories();
+            loadSkillsList(null, false);
+        }
+    }
+
+    // ==================== 安装 ====================
+
+    var SPIN_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>';
+    var PLUS_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+
+    /**
+     * 一键安装（统一全局区，不再选作用域）。
+     * @param {jQuery} $btn 触发按钮（卡片 + 或弹窗安装按钮）
+     */
+    function installSkill(slug, marketName, $btn) {
+        if ($btn) $btn.addClass('installing').prop('disabled', true);
+
+        $.ajax({
+            url: '/web/settings/skills/install',
+            method: 'POST',
+            data: { slug: slug, marketName: marketName },
+            timeout: 60000,
+            dataType: 'json'
+        })
+        .done(function (resp) {
+            var ok = resp && resp.code === 200 && resp.data;
+            if (ok) {
+                var skillName = (resp.data || slug) + '';
+                // 卡片态：加已安装徽标、移除 + 按钮
+                var $card = $btn ? $btn.closest('.skill-card') : $();
+                if ($card.length) {
+                    if (!$card.find('.skill-installed-badge').length) {
+                        $card.find('.skill-card-title').append('<span class="skill-installed-badge">' + escapeHtml(GourdI18n.t('settings.skills.installed')) + '</span>');
+                    }
+                    $card.find('.skill-card-actions').remove();
+                }
+                if (_detailCtx && _detailCtx.slug === slug && _detailCtx.market === marketName) {
+                    _detailCtx.installed = true;
+                    var $db = $('#skillDetailInstallBtn');
+                    $db.addClass('done').prop('disabled', true).text(GourdI18n.t('settings.skills.installed'));
+                }
+                loadInstalledIndex(function () {
+                    if (typeof loadCommands === 'function') loadCommands();
+                });
+                if (typeof window.showToast === 'function') {
+                    // 动词用技能域的 installed_ok（「安装成功」），不借 loop.created（「已创建」）——
+                    // 安装不是创建，错配动词会让用户以为新建了个什么东西
+                    window.showToast(GourdI18n.t('app.skills') + '「' + escapeHtml(skillName) + '」' + GourdI18n.t('settings.skills.installed_ok'), 'success');
+                }
+            } else {
+                if ($btn) $btn.removeClass('installing').prop('disabled', false);
+                resetDetailInstallBtn(slug, marketName);
+                if (typeof window.showToast === 'function') {
+                    window.showToast((resp && resp.description) || GourdI18n.t('settings.operation_failed'), 'error');
+                }
+            }
+        })
+        .fail(function (jqXHR) {
+            if ($btn) $btn.removeClass('installing').prop('disabled', false);
+            resetDetailInstallBtn(slug, marketName);
+            var msg = GourdI18n.t('settings.loop.create_failed');
+            try {
+                var err = JSON.parse(jqXHR.responseText);
+                if (err && err.description) msg = err.description;
+            } catch (e) { /* 非 JSON 响应保留兜底文案 */ }
+            if (typeof window.showToast === 'function') window.showToast(msg, 'error');
+        });
+    }
+
+    /** 安装失败时把弹窗安装按钮从 loading 态恢复（成功态由 _detailCtx 分支处理） */
+    function resetDetailInstallBtn(slug, marketName) {
+        if (_detailCtx && _detailCtx.slug === slug && _detailCtx.market === marketName && !_detailCtx.installed) {
+            $('#skillDetailInstallBtn').removeClass('installing done').prop('disabled', false)
+                .text(GourdI18n.t('settings.skills.install'));
+        }
+    }
+
+    // ==================== 详情弹窗 ====================
+
+    function openDetail(slug, marketName) {
+        _detailCtx = { slug: slug, market: marketName, installed: !!findInstalledForMarket(marketName, slug) };
+
+        $detailOverlay.show();
+        $('#skillDetailName').text(slug);
+        $('#skillDetailOwner').text(marketLabel(marketName));
+        $('#skillDetailIcon').html('<span>' + escapeHtml(slug.substring(0, 2).toUpperCase()) + '</span>');
+        $('#skillDetailBody').text(GourdI18n.t('settings.skills.loading'));
+        $('#skillDetailTags').empty();
+        $('#skillDetailStats').empty();
+        var $btn = $('#skillDetailInstallBtn');
+        $btn.removeClass('done installing').prop('disabled', false).text(GourdI18n.t('settings.skills.install'));
+        if (_detailCtx.installed) {
+            $btn.addClass('done').prop('disabled', true).text(GourdI18n.t('settings.skills.installed'));
+        }
+
+        $.ajax({
+            url: '/web/settings/skills/detail?slug=' + encodeURIComponent(slug) + '&marketName=' + encodeURIComponent(marketName),
+            method: 'GET',
+            timeout: 15000,
+            dataType: 'json'
+        }).done(function (resp) {
+            if (!_detailCtx || _detailCtx.slug !== slug || _detailCtx.market !== marketName) return;
+            if (!resp || resp.code !== 200 || !resp.data) {
+                $('#skillDetailBody').text((resp && resp.description) || GourdI18n.t('settings.operation_failed'));
+                return;
+            }
+            var d = resp.data;
+            var displayName = d.displayName || slug;
+            $('#skillDetailName').text(displayName);
+            $('#skillDetailOwner').text((d.ownerHandle ? d.ownerHandle + ' · ' : '') + marketLabel(marketName));
+            $('#skillDetailIcon').html((d.iconUrl
+                ? '<img src="/web/settings/skills/icon?url=' + encodeURIComponent(d.iconUrl) + '" alt="" onerror="this.remove()">'
+                : '') + '<span>' + escapeHtml(displayName.substring(0, 2).toUpperCase()) + '</span>');
+            $('#skillDetailBody').text(d.description || d.summary || '');
+
+            var tags = Array.isArray(d.tags) ? d.tags : [];
+            if (d.category) tags = [d.category].concat(tags);
+            if (tags.length) {
+                var th = '';
+                tags.slice(0, 12).forEach(function (t) {
+                    th += '<span class="skill-detail-tag">' + escapeHtml(String(t)) + '</span>';
+                });
+                $('#skillDetailTags').html(th);
+            }
+
+            var sh = '';
+            if (d.version) sh += '<div class="skill-detail-stat"><b>v' + escapeHtml(d.version) + '</b><span>' + escapeHtml(GourdI18n.t('settings.skills.version')) + '</span></div>';
+            if (d.installs) sh += '<div class="skill-detail-stat"><b>' + compactNum(d.installs) + '</b><span>' + escapeHtml(GourdI18n.t('settings.skills.downloads')) + '</span></div>';
+            if (d.stars) sh += '<div class="skill-detail-stat"><b>' + compactNum(d.stars) + '</b><span>' + escapeHtml(GourdI18n.t('settings.skills.stars')) + '</span></div>';
+            $('#skillDetailStats').html(sh);
+        }).fail(function () {
+            if (!_detailCtx || _detailCtx.slug !== slug) return;
+            $('#skillDetailBody').text(GourdI18n.t('settings.network_error'));
+        });
+    }
+
+    function closeDetail() {
+        _detailCtx = null;
+        $detailOverlay.hide();
+    }
+
+    // ==================== 启禁用 / 卸载 ====================
+
+    function toggleSkill($btn) {
+        var name = $btn.attr('data-name');
+        var scope = $btn.attr('data-scope') || 'global';
+        var next = $btn.attr('data-enabled') !== '1';
+
+        $btn.prop('disabled', true);
+        $.ajax({
+            url: '/web/settings/skills/toggle',
+            method: 'POST',
+            data: { skillName: name, enabled: next ? 'true' : 'false', scope: scope },
+            timeout: 15000,
+            dataType: 'json'
+        }).done(function (resp) {
+            $btn.prop('disabled', false);
+            if (resp && resp.code === 200) {
+                $btn.toggleClass('on', next).attr('data-enabled', next ? '1' : '0')
+                    .attr('title', next ? GourdI18n.t('settings.skills.disable') : GourdI18n.t('settings.skills.enable'))
+                    .attr('aria-pressed', next ? 'true' : 'false');
+                $btn.closest('.skill-card').toggleClass('skill-card-disabled', !next);
+                loadInstalledIndex(function () {
+                    if (typeof loadCommands === 'function') loadCommands();
+                });
+            } else if (typeof window.showToast === 'function') {
+                window.showToast((resp && resp.description) || GourdI18n.t('settings.operation_failed'), 'error');
+            }
+        }).fail(function () {
+            $btn.prop('disabled', false);
+            if (typeof window.showToast === 'function') window.showToast(GourdI18n.t('settings.operation_failed'), 'error');
+        });
+    }
+
     $skillsList.on('click', '.skill-uninstall-btn', function (e) {
         e.stopPropagation();
         var $btn = $(this);
         var name = $btn.attr('data-name') || '';
-        var scope = $btn.attr('data-scope') || 'workspace';
+        var scope = $btn.attr('data-scope') || 'global';
 
         layConfirm(GourdI18n.t('settings.skills.uninstall_confirm', [name]), function () {
             $btn.prop('disabled', true).addClass('removing');
@@ -494,14 +704,14 @@
                 dataType: 'json'
             })
             .done(function (resp) {
-                var ok = resp && resp.code === 200;
-                if (ok) {
-                    _installedSkillsCache = null;
-                    if (typeof loadCommands === 'function') loadCommands();
+                if (resp && resp.code === 200) {
+                    loadInstalledIndex(function () {
+                        if (typeof loadCommands === 'function') loadCommands();
+                        renderInstalledList(_currentQuery);
+                    });
                     if (typeof window.showToast === 'function') {
                         window.showToast(GourdI18n.t('app.skills') + '「' + escapeHtml(name) + '」' + GourdI18n.t('settings.loop.deleted') + '！', 'success');
                     }
-                    loadInstalledSkills(_currentQuery);
                 } else {
                     $btn.prop('disabled', false).removeClass('removing');
                     if (typeof window.showToast === 'function') {
@@ -511,217 +721,222 @@
             })
             .fail(function () {
                 $btn.prop('disabled', false).removeClass('removing');
-                if (typeof window.showToast === 'function') {
-                    window.showToast(GourdI18n.t('settings.operation_failed'), 'error');
-                }
+                if (typeof window.showToast === 'function') window.showToast(GourdI18n.t('settings.operation_failed'), 'error');
             });
         });
     });
 
-    // ==================== 视图切换（已安装 / 技能市场） ====================
-
-    /**
-     * 切换"已安装"与"技能市场"视图
-     * @param {string} view - VIEW_INSTALLED / VIEW_MARKET
-     */
-    function switchView(view) {
-        if (view !== VIEW_INSTALLED && view !== VIEW_MARKET) return;
-        if (_currentView === view) return;
-        _currentView = view;
-
-        // Tab 高亮
-        $skillsViewTabs.find('.skills-view-tab').removeClass('active')
-            .filter('[data-view="' + view + '"]').addClass('active');
-
-        // 市场下拉仅在市场视图显示
-        if (view === VIEW_MARKET) {
-            $skillsMarketWrap.show();
-            if (typeof layui !== 'undefined' && layui.form) {
-                layui.form.render('select');
-            }
-        } else {
-            $skillsMarketWrap.hide();
-        }
-
-        // 重置搜索状态并加载对应视图列表
-        _currentQuery = null;
-        $skillsSearchInput.val('');
-        $skillsSearchClear.hide();
-        _nextCursor = null;
-        _hasMore = true;
-        _isLoadingMore = false;
-        loadSkillsList(null, false);
-    }
-
     // ==================== 事件绑定 ====================
 
-    // 视图 Tab 切换
+    /* ---------- 横向滚轮带：让分类栏/标签栏能被鼠标滚动 ----------
+     * 根因（Playwright 实测）：原生 overflow-x 只响应 deltaX 与 shift+wheel，
+     * 鼠标滚轮的 deltaY 不会让容器横向滚动（scrollLeft 恒 0），而滚动条又被隐藏，
+     * 鼠标用户既滚不动也拖不到 → chips 只能看见前几个。
+     * 对策：① deltaY 转横向；② 按住拖拽平移；③ 溢出时给右缘渐隐 + hover 细滚动条。 */
+
+    /**
+     * 溢出态同步：一次性驱动【左右箭头可用性 + 箭头显隐 + 左右渐隐】。
+     *
+     * 为何不用原生 overflow-x：滚轮 deltaY 不产生横滚（实测 scrollLeft 恒 0）、
+     * 滚动条又被刻意隐藏（占位会让分类栏高度突增、与顶栏错位），
+     * 鼠标用户无路可走 → 必须给出可发现的左右箭头作为主入口。
+     * 三个态必须同源计算：各自算一遍会在「刚好滚到底」「窗口缩放到不溢出」等
+     * 边界上彼此矛盾（例如箭头已 disabled 但渐隐还挂着）。
+     */
+    function syncHScrollState(el) {
+        if (!el) return;
+        var wrap = el.closest ? el.closest('.skills-hscroll-wrap') : null;
+        if (!wrap) return;
+        var max = el.scrollWidth - el.clientWidth;
+        var overflow = max > 1;
+        var canLeft = overflow && el.scrollLeft > 1;
+        var canRight = overflow && el.scrollLeft < max - 1;
+        wrap.classList.toggle('can-scroll-right', canRight);
+        wrap.classList.toggle('can-scroll-left', canLeft);
+        // 不溢出时整组箭头隐掉（不占位），避免「两个灰色禁用箭头」长期占着布局宽度
+        wrap.classList.toggle('has-overflow', overflow);
+        var prev = wrap.querySelector('.skills-hscroll-nav.prev');
+        var next = wrap.querySelector('.skills-hscroll-nav.next');
+        if (prev) prev.disabled = !canLeft;
+        if (next) next.disabled = !canRight;
+    }
+
+    /**
+     * 箭头点击：按「一屏可见宽度的 80%」平移，保留 20% 上下文避免完全断层。
+     * 不用 scrollBy({behavior:'smooth'})：在「点到底部后立即点另一头」等快速操作下
+     * 平滑动画会与后续点击互相覆盖，且 scroll 事件高频触发会反复重算溢出态。
+     * 直接赋值 scrollLeft 由浏览器自行 clamp 到 [0, max]，无需手写边界判断。
+     */
+    function bindHScrollNav(el) {
+        if (!el || el.__hScrollNavBound) return;
+        var wrap = el.closest ? el.closest('.skills-hscroll-wrap') : null;
+        if (!wrap) return;
+        el.__hScrollNavBound = true;
+        var step = function () {
+            return Math.max(60, Math.round(el.clientWidth * 0.8));
+        };
+        var prev = wrap.querySelector('.skills-hscroll-nav.prev');
+        var next = wrap.querySelector('.skills-hscroll-nav.next');
+        if (prev) prev.addEventListener('click', function () {
+            el.scrollLeft -= step();
+            syncHScrollState(el);
+        });
+        if (next) next.addEventListener('click', function () {
+            el.scrollLeft += step();
+            syncHScrollState(el);
+        });
+    }
+
+    /**
+     * 给一个横向溢出容器绑上「滚轮转横向 + 按住拖拽 + 溢出态」。
+     * 拖拽与 chip 点击共存：位移超 4px 阈值才当作拖拽，并在捕获阶段
+     * 抑制后续的 click，避免「拖完松手顺手选中一个分类」。
+     * @param {HTMLElement} el .skills-hscroll 元素
+     */
+    function bindHScroll(el) {
+        if (!el || el.__hScrollBound) return;
+        el.__hScrollBound = true;
+
+        // ① 滚轮：deltaY 转横向（触控板原生 deltaX 仍优先生效）
+        el.addEventListener('wheel', function (e) {
+            var max = el.scrollWidth - el.clientWidth;
+            if (max <= 0) return;
+            var delta = e.deltaX !== 0 ? e.deltaX : e.deltaY;
+            if (!delta) return;
+            // 已到头则不拦截，让滚轮回归外层（列表继续竖向滚）
+            var next = el.scrollLeft + delta;
+            if (next <= 0 || next >= max) return;
+            e.preventDefault();
+            el.scrollLeft = next;
+        }, { passive: false });
+
+        el.addEventListener('scroll', function () { syncHScrollState(el); }, { passive: true });
+
+        // ② 按住拖拽平移（鼠标为主；触控/笔走原生滚动不干预）
+        var drag = null;
+        el.addEventListener('pointerdown', function (e) {
+            if (e.pointerType !== 'mouse' || e.button !== 0) return;
+            if (el.scrollWidth - el.clientWidth <= 0) return;
+            drag = { x: e.clientX, left: el.scrollLeft, moved: false, id: e.pointerId };
+        });
+        el.addEventListener('pointermove', function (e) {
+            if (!drag || e.pointerId !== drag.id) return;
+            var dx = e.clientX - drag.x;
+            if (!drag.moved && Math.abs(dx) < 4) return;   // 4px 阈值：纯点击不算拖拽
+            drag.moved = true;
+            el.classList.add('is-dragging');
+            el.scrollLeft = drag.left - dx;
+        });
+
+        /* 拖拽结束后必须抑制随之而来的 click，否则会选中「拖拽终点下的那个 chip」。
+         * suppressClick 在 pointerup（捕获阶段，早于 click）置位；
+         * click 处理器也在捕获阶段，所以能在业务委托（$skillsCategoryBar.on('click', ...)）
+         * 之前 stopPropagation 拦下。setTimeout 兜底：若浏览器未派发 click（拖出容器松手），
+         * 标记也必须自行过期，否则下一次正常点击会被误吞。 */
+        var suppressClick = false;
+        el.addEventListener('pointerup', function (e) {
+            if (!drag || e.pointerId !== drag.id) return;
+            var moved = drag.moved;
+            drag = null;
+            el.classList.remove('is-dragging');
+            if (!moved) return;
+            suppressClick = true;
+            syncHScrollState(el);
+            setTimeout(function () { suppressClick = false; }, 0);
+        }, true);
+        el.addEventListener('pointercancel', function () {
+            drag = null;
+            el.classList.remove('is-dragging');
+        });
+        el.addEventListener('pointerleave', function () {
+            // 拖出容器：结束拖拽（不抑制 click，因为松手点已不在 chips 上）
+            if (!drag) return;
+            drag = null;
+            el.classList.remove('is-dragging');
+        });
+        el.addEventListener('click', function (e) {
+            if (!suppressClick) return;
+            suppressClick = false;
+            e.preventDefault();
+            e.stopPropagation();
+        }, true);
+
+        syncHScrollState(el);
+    }
+
+    // 容器尺寸变化（窗口缩放/侧栏折叠/语言切换）后重算溢出态
+    if (typeof ResizeObserver === 'function') {
+        var _hScrollRO = new ResizeObserver(function (entries) {
+            entries.forEach(function (en) { syncHScrollState(en.target); });
+        });
+        ['#skillsCategoryBar', '#skillsViewTabs'].forEach(function (sel) {
+            var el = document.querySelector(sel);
+            if (el) { bindHScroll(el); bindHScrollNav(el); _hScrollRO.observe(el); }
+        });
+    } else {
+        ['#skillsCategoryBar', '#skillsViewTabs'].forEach(function (sel) {
+            var el = document.querySelector(sel);
+            if (el) { bindHScroll(el); bindHScrollNav(el); }
+        });
+        $(window).on('resize', function () {
+            syncHScrollState(document.querySelector('#skillsCategoryBar'));
+            syncHScrollState(document.querySelector('#skillsViewTabs'));
+        });
+    }
+
+    // 视图标签页（已安装 + 各市场）
     $skillsViewTabs.on('click', '.skills-view-tab', function () {
         switchView($(this).attr('data-view'));
     });
 
-    // 市场切换 - 同时支持原生和 layui 事件
-    $skillsMarketSelect.on('change', function () {
-        _currentMarketName = $(this).val() || '';
-        _installedSkillsCache = null;
-        _currentQuery = null;  // 市场切换后回到热门列表，避免触底时误用旧搜索词
-        _nextCursor = null;
-        _hasMore = true;
-        loadSkillsList(null, false);
+    // 分类 chips
+    $skillsCategoryBar.on('click', '.skills-category-chip', function () {
+        var cat = $(this).attr('data-cat') || '';
+        if (cat === _currentCategory) return;
+        _currentCategory = cat;
+        $skillsCategoryBar.find('.skills-category-chip').removeClass('active');
+        $(this).addClass('active');
+        loadSkillsList(_currentQuery, false);
     });
 
-    // layui 表单监听
-    if (typeof layui !== 'undefined' && layui.form) {
-        layui.form.on('select(skillsMarketSelect)', function (data) {
-            _currentMarketName = data.value || '';
-            _installedSkillsCache = null;
-            _currentQuery = null;  // 市场切换后回到热门列表，避免触底时误用旧搜索词
-            _nextCursor = null;
-            _hasMore = true;
-            loadSkillsList(null, false);
-        });
-    }
-
-    // 下拉菜单延时关闭管理（防止鼠标在按钮和下拉之间移动时闪烁）
-    var _dropdownCloseTimer = null;
-
-    function renderScopeOptions($dropdown) {
-        var html = '';
-        _installScopes.forEach(function (s) {
-            var label = (s.scope === 'global')
-                ? GourdI18n.t('settings.skills.scope_global')
-                : GourdI18n.t('settings.skills.scope_workspace');
-            html += '<div class="skill-install-scope-option" data-scope="' + escapeAttr(s.scope) + '">'
-                + escapeHtml(label)
-                + '</div>';
-        });
-        $dropdown.html(html).addClass('active');
-    }
-
-    function openDropdown($wrap) {
-        clearTimeout(_dropdownCloseTimer);
-        var $dropdown = $wrap.find('.skill-install-dropdown');
-        // 已有选项直接显示
-        if ($dropdown.find('.skill-install-scope-option').length) {
-            $dropdown.addClass('active');
-            return;
-        }
-        renderScopeOptions($dropdown);
-    }
-
-    function closeDropdown($wrap) {
-        clearTimeout(_dropdownCloseTimer);
-        _dropdownCloseTimer = setTimeout(function () {
-            $wrap.find('.skill-install-dropdown').removeClass('active');
-        }, 150);
-    }
-
-    // 鼠标进入按钮区域 → 打开下拉
-    $skillsList.on('mouseenter', '.skill-install-wrap', function () {
-        openDropdown($(this));
-    });
-
-    // 鼠标进入下拉菜单本身 → 取消关闭
-    $skillsList.on('mouseenter', '.skill-install-dropdown', function () {
-        clearTimeout(_dropdownCloseTimer);
-    });
-
-    // 鼠标离开整个 wrap 区域 → 延时关闭下拉
-    $skillsList.on('mouseleave', '.skill-install-wrap', function () {
-        closeDropdown($(this));
-    });
-
-    // 触屏设备降级：点击按钮切换下拉
-    $skillsList.on('click', '.skill-install-btn:not(.installed)', function (e) {
+    // 卡片「+」一键安装
+    $skillsList.on('click', '.skill-card-add', function (e) {
         e.stopPropagation();
-        var $wrap = $(this).closest('.skill-install-wrap');
-        var $dropdown = $wrap.find('.skill-install-dropdown');
-        // 关闭其他下拉
-        $('.skill-install-dropdown').not($dropdown).removeClass('active');
-        // 如果还没填充过选项，先填充
-        if (!$dropdown.find('.skill-install-scope-option').length) {
-            renderScopeOptions($dropdown);
-        } else {
-            $dropdown.toggleClass('active');
-        }
+        var $btn = $(this);
+        if ($btn.hasClass('installing')) return;
+        $btn.html(SPIN_SVG);
+        installSkill($btn.attr('data-slug'), $btn.attr('data-market'), $btn);
     });
 
-    // 点击作用域选项，执行安装
-    $skillsList.on('click', '.skill-install-scope-option', function (e) {
+    // 启禁用开关
+    $skillsList.on('click', '.skill-toggle', function (e) {
         e.stopPropagation();
-        var $option = $(this);
-        var $dropdown = $option.closest('.skill-install-dropdown');
-        var slug = $dropdown.attr('data-slug');
-        var displayName = $dropdown.attr('data-display') || slug;
-        var marketUrl = $dropdown.attr('data-market') || '';
-        var installScope = $option.attr('data-scope') || 'workspace';
-
-        var $btn = $dropdown.closest('.skill-install-wrap').find('.skill-install-btn');
-
-        // 开始安装
-        $btn.addClass('installing').html('<svg class="skill-install-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>').prop('disabled', true);
-        $dropdown.removeClass('active');
-
-        var postData = { slug: slug, scope: installScope };
-        if (marketUrl) postData.marketName = marketUrl;
-
-        $.ajax({
-            url: '/web/settings/skills/install',
-            method: 'POST',
-            data: postData,
-            timeout: 60000,
-            dataType: 'json'
-        })
-        .done(function (resp) {
-            var isSuccess = resp && resp.code === 200 && resp.data;
-            if (isSuccess) {
-                var skillName = (resp.data || slug) + '';
-                var $item = $btn.closest('.skill-item');
-                var $nameEl = $item.find('.skill-item-name');
-                if (!$nameEl.find('.skill-installed-badge').length) {
-                    $nameEl.append('<span class="skill-installed-badge">' + GourdI18n.t('settings.skills.installed') + '</span>');
-                }
-                $btn.closest('.skill-install-wrap').remove();
-                if (!_installedSkillsCache) _installedSkillsCache = {};
-                _installedSkillsCache[slug] = true;
-                if (typeof loadCommands === 'function') loadCommands();
-                if (typeof window.showToast === 'function') {
-                    window.showToast(GourdI18n.t('app.skills') + '「' + escapeHtml(skillName) + '」' + GourdI18n.t('settings.loop.created') + '！', 'success');
-                }
-            } else {
-                var msg = (resp && resp.description) ? resp.description : GourdI18n.t('settings.loop.create_failed') + '，' + GourdI18n.t('settings.skills.loading');
-                $btn.removeClass('installing').html('<svg class="skill-install-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>').prop('disabled', false);
-                if (typeof window.showToast === 'function') window.showToast(msg, 'error');
-            }
-        })
-        .fail(function (jqXHR) {
-            $btn.removeClass('installing').html('<svg class="skill-install-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>').prop('disabled', false);
-            var msg = GourdI18n.t('settings.loop.create_failed') + '，' + GourdI18n.t('settings.skills.loading');
-            try {
-                var err = JSON.parse(jqXHR.responseText);
-                if (err && err.description) msg = err.description;
-                else if (err && err.data) msg = err.data;
-            } catch (e) {
-                if (jqXHR.status) msg = GourdI18n.t('settings.loop.create_failed') + ' (HTTP ' + jqXHR.status + ')';
-            }
-            if (typeof window.showToast === 'function') window.showToast(msg, 'error');
-        });
+        toggleSkill($(this));
     });
 
-    // 点击页面其他区域关闭所有下拉
-    $(document).on('click', function () {
-        $('.skill-install-dropdown').removeClass('active');
+    // 市场卡片点击 → 详情弹窗
+    $skillsList.on('click', '.skill-card:not(.skill-card-installed)', function () {
+        openDetail($(this).attr('data-slug'), $(this).attr('data-market'));
     });
 
-    // 点击技能行打开详情页（新窗口）
-    $skillsList.on('click', '.skill-item', function () {
-        var url = $(this).attr('data-url');
-        if (url) {
-            window.open(url, '_blank');
-        }
+    // 详情弹窗
+    $('#skillDetailClose').on('click', closeDetail);
+    $detailOverlay.on('click', function (e) {
+        if (e.target === this) closeDetail();
+    });
+    $(document).on('keydown', function (e) {
+        if (e.key === 'Escape' && $detailOverlay.is(':visible')) closeDetail();
+    });
+    $('#skillDetailInstallBtn').on('click', function () {
+        if (!_detailCtx || _detailCtx.installed) return;
+        var $btn = $(this);
+        $btn.addClass('installing').text(GourdI18n.t('settings.skills.loading'));
+        installSkill(_detailCtx.slug, _detailCtx.market, null);
+        // installSkill 的 $btn 态由 _detailCtx 分支处理弹窗按钮
+        $btn.prop('disabled', true);
     });
 
-    // 搜索输入（按回车键搜索）
+    // 搜索（回车触发；已安装视图本地过滤）
     $skillsSearchInput.on('input', function () {
         var val = $(this).val().trim();
         $skillsSearchClear.toggle(val.length > 0);
@@ -730,39 +945,48 @@
             e.preventDefault();
             var val = $(this).val().trim();
             _currentQuery = val || null;
-            loadSkillsList(_currentQuery, false);
+            if (_currentView === VIEW_INSTALLED) {
+                renderInstalledList(_currentQuery);
+            } else {
+                loadSkillsList(_currentQuery, false);
+            }
         }
     });
-
-    // 清除搜索
     $skillsSearchClear.on('click', function () {
         $skillsSearchInput.val('').focus();
         $(this).hide();
         _currentQuery = null;
-        loadSkillsList(null, false);
+        if (_currentView === VIEW_INSTALLED) renderInstalledList(null);
+        else loadSkillsList(null, false);
     });
 
-    // 底部"加载失败，点击重试"（事件委托；失败不递增页码，重试仍请求原页）
+    // 底部"加载失败，点击重试"
     $skillsList.on('click', '.skills-list-footer.error', function (e) {
         e.stopPropagation();
         loadSkillsList(_currentQuery, true);
     });
 
-    // ==================== 无限滚动：触底自动加载下一页 ====================
+    // markets 端点失败时的顶部错误条：点击整体重拉（列表级失败走上面的 footer 重试）
+    $skillsError.on('click', function () {
+        if (_marketsLoadFailed) {
+            _marketsLoadFailed = false;
+            resetAndLoad();
+        }
+    });
 
-    /** 技能主视图当前是否可见（避免隐藏状态下误触发加载） */
+    // ==================== 无限滚动 ====================
+
     function isSkillsViewActive() {
         return $('#skillsView').hasClass('active');
     }
 
-    /** 触发下一页加载（仅在还有数据、未在加载、视图可见时；下一页游标由 _nextCursor 承载） */
     function tryLoadNextPage() {
         if (!_hasMore || _isLoadingMore) return;
         if (!isSkillsViewActive()) return;
+        if (_currentView === VIEW_INSTALLED) return;
         loadSkillsList(_currentQuery, true);
     }
 
-    // 滚动触底检测：滚动容器接近底部（阈值 120px）时自动加载下一页，rAF 节流
     var _scrollTick = false;
     $('#skillsScroll').on('scroll', function () {
         if (_scrollTick) return;
@@ -777,7 +1001,6 @@
         });
     });
 
-    /** 内容未撑满容器（无滚动条）时自动补载下一页，保证滚动触底可用 */
     function maybeAutoFill() {
         if (!_hasMore || _isLoadingMore) return;
         if (!isSkillsViewActive()) return;
@@ -789,28 +1012,36 @@
 
     // ==================== 视图入口 ====================
 
-    /** 重置缓存并加载技能列表（进入视图时默认展示已安装） */
     function resetAndLoad() {
-        _installedSkillsCache = null;
-        _nextCursor = null;
         _currentQuery = null;
+        _nextCursor = null;
         _hasMore = true;
-        _isLoadingMore = false;  // 重置加载锁，避免上次的锁残留导致无法重新加载
-        // 进入时默认展示已安装视图
-        _currentView = VIEW_INSTALLED;
-        $skillsViewTabs.find('.skills-view-tab').removeClass('active')
-            .filter('[data-view="' + VIEW_INSTALLED + '"]').addClass('active');
-        $skillsMarketWrap.hide();
-        $skillsSearchBar.show();
-        $skillsList.show();
-        loadMountPools(function () {});
-        loadMarketOptions();
-        loadSkillsList(null, false);
+        _isLoadingMore = false;
+        _currentCategory = '';
+        closeDetail();
+
+        loadMarkets(function () {
+            if (!_markets.length) {
+                // markets 端点失败：不能留白屏——渲染标签页骨架（仅已安装）并给出错误态，
+                // 用户仍可进已安装视图管理技能，或点错误条重试
+                _marketsLoadFailed = true;
+                renderTabs();
+                $skillsList.empty();
+                $skillsLoading.hide();
+                $skillsStatus.show();
+                $skillsError.text(GourdI18n.t('settings.skills.load_failed_retry')).show();
+                return;
+            }
+            _marketsLoadFailed = false;
+            // 默认进入第一个市场标签页（市场浏览是主场景；已安装是同级的第一个标签）
+            var target = _markets[0].name;
+            _currentView = VIEW_INSTALLED; // 先置回，保证 switchView 不短路
+            switchView(target);
+        });
+        loadInstalledIndex(null);
     }
 
-    /** 打开技能视图（由左侧栏「技能」导航触发） */
     function openSkills() {
-        // 与聊天/欢迎/自动化视图互斥：隐藏它们，显示本视图
         if (typeof window.exitCodeMode === 'function' && window.appMode === 'code') {
             window.exitCodeMode();
         }
@@ -825,18 +1056,14 @@
         $('.main-nav-item').removeClass('active');
         $('#skillsNavBtn').addClass('active');
 
-        // 独立视图既不属于 chat 也不属于 welcome，必须让出 inChatMode（与 automation 一致），
-        // 否则切回聊天时 #chatView 拿不回 .active（主区停留白屏）
         window.inChatMode = false;
 
-        // 关掉可能打开的设置浮层（浮层为高 z-index 遮罩，会盖住本视图）
         if (typeof window.closeSettings === 'function') window.closeSettings();
         else if ($('#settingsOverlay').is(':visible')) $('#settingsCloseBtn').trigger('click');
 
         resetAndLoad();
     }
 
-    /** 离开技能视图（切回聊天/欢迎/自动化时由对应切换函数调用） */
     function closeSkills() {
         $('#skillsView').removeClass('active');
         $('#skillsNavBtn').removeClass('active');
@@ -850,6 +1077,9 @@
     document.addEventListener('i18n:localeChanged', function () {
         if ($('#skillsView').hasClass('active')) {
             resetAndLoad();
+        } else {
+            renderTabs();
+            renderCategoryBar();
         }
     });
 

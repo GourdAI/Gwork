@@ -165,7 +165,7 @@ test('viewFor：仅 available / downloading / downloaded 显示，且逐态口�
     const notifyAvail = api.viewFor({ mode: 'notify', status: 'available', version: '0.2.0' });
     assert.equal(notifyAvail.label, '下载更新', 'notify 模式点击是打开下载页，动词必须是下载');
 
-    // downloaded：文案「立即安装」，红点让位给强调色底色
+    // downloaded：文案「立即安装」，红点让位给 accent 淡底 chip
     const dl = api.viewFor({ mode: 'auto', status: 'downloaded', version: '0.2.0' });
     assert.equal(dl.state, 'downloaded');
     assert.equal(dl.label, '立即安装');
@@ -371,8 +371,10 @@ test('app.css：默认隐藏 + 显现 + 三态样式 + 角标 + 就地进度条�
     // 默认 display:none 是「无新版不占位」的唯一保证
     assert.match(appCss, /\.sidebar-update-btn \{[^}]*display: none/);
     assert.match(appCss, /\.sidebar-update-btn\.is-visible \{[^}]*display: flex/);
-    assert.match(appCss, /\.sidebar-update-btn\[data-state="downloaded"\] \{[^}]*background: var\(--accent\)/);
-    assert.match(appCss, /\.sidebar-update-btn\[data-state="downloaded"\][^}]*color: var\(--accent-contrast\)/);
+    assert.match(appCss, /\.sidebar-update-btn\[data-state="downloaded"\] \{[^}]*background: var\(--accent-light\)/);
+    assert.match(appCss, /\.sidebar-update-btn\[data-state="downloaded"\][^}]*color: var\(--text-primary\)/);
+    // accent 身份由淡底/描边/图标承载：图标必须染 accent（图形对象门槛 3:1，实测最低 3.80）
+    assert.match(appCss, /\.sidebar-update-btn\[data-state="downloaded"\] svg \{[^}]*color: var\(--accent\)/);
     assert.match(appCss, /\.sidebar-update-dot \{[^}]*border-radius: 50%[^}]*\}/);
     assert.match(appCss, /\.sidebar-update-btn\[data-state="downloading"\]::after \{[^}]*width: var\(--gwork-update-pct/);
     // 动效必须可被系统「减少动态」偏好关掉

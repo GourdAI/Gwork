@@ -123,6 +123,43 @@
     --bg-danger-subtle: rgba(239, 68, 68, 0.1);
     --bg-warning-subtle: rgba(245, 158, 11, 0.12);
 
+    /* On-solid 前景色 —— 高饱和功能色/品牌色做实心底时的前景。
+       禁止写死白字：这些底色在浅色主题上白字本就不达标（实测 2.28–4.28），
+       暗色主题功能色进一步提亮后白字崩到 1.74–2.97（实测）。
+       前景必须与底色成套；对比度门禁见 dark-theme-token-contract。 */
+    --on-danger: #200404;
+    /* hover 底色是更深的 #dc2626：纯黑压其上也仅 4.35，深色前景走不通，
+       只有白字达标（4.83）——与 --on-danger 相反，故单独成套。 */
+    --on-danger-hover: #ffffff;
+    /* 实心危险钮（图形口径）—— 停止方块/录音麦克风等【纯图形】前景专用。
+       上方 on-* 系按文本 AA 4.5 选深色前景，套到无文字的图形上会把停止按钮
+       中心变成黑方块（用户实测报告）；图形对象走 WCAG 1.4.11 门槛 3:1，
+       白图形在 #ef4444 上 3.76 达标。底色明暗同值不提亮：提亮档 #f87171 上
+       白图形仅 2.77 不达门槛，且提亮本是为暗底红文字服务，实心块自身对
+       暗背景 4.71 足够醒目。门禁见 dark-theme-token-contract 图形口径组。 */
+    --color-danger-solid: #ef4444;
+    --color-danger-solid-hover: #dc2626;
+    --on-danger-icon: #ffffff;
+    --on-success: #052e16;
+    --on-feishu: #05070d;
+    --on-dingtalk: #031625;
+    --on-warning: #1a1b1e;
+    /* hover 底色更深（#2960e6/#0070dd），深色前景压其上仅 3.75/3.81 不达 AA；
+       白字 5.37/4.81 达标——与 --on-danger-hover 同理，hover 态前景必须随底色成套切换。 */
+    --on-feishu-hover: #ffffff;
+    --on-dingtalk-hover: #ffffff;
+    /* 品牌色块前景：图标属图形对象（WCAG 1.4.11 门槛 3:1），但白字在微信绿上
+       实测仅 2.38:1、在暗色提亮后的飞书/钉钉蓝上 2.97:1 —— 连图形门槛都不够。
+       故每个品牌色配自己的深色前景（与文本同口径，一套值明暗通用）。 */
+    --on-wechat: #052e16;
+    --on-feishu-icon: #05070d;
+    --on-dingtalk-icon: #031625;
+    /* 品牌色（主题不变：品牌识别不随明暗漂移，与 logo 同理）。
+       原先硬编码在 app.css 的 .channel-card-icon.* 里，违反色彩治理约定第 1 条。 */
+    --brand-wechat: #07c160;
+    --brand-feishu: #3370ff;
+    --brand-dingtalk: #0089ff;
+
     /* Git */
     --git-line-add-bg: rgba(46, 160, 67, 0.15);
     --git-line-add-text: #22863a;
@@ -143,6 +180,11 @@
     --tag-border: #e4e4e7;
     --thinking-block-bg: #f6f6f7;
     --thinking-block-border: #e4e4e7;
+
+    /* Overlay —— 模态遮罩底色。此前只有各浮层各自内联 rgba(0,0,0,.4/.45/.5)，
+       新代码若引用 --overlay 会因「未定义」静默回落到浅色字面量（深色模式翻车根因之一），
+       故正式建立成对 token：明暗各一值，遮罩深度按各自主题底色分别校准。 */
+    --overlay: rgba(0, 0, 0, 0.45);
 }
 
 /* ===== Dark Theme ===== */
@@ -206,6 +248,33 @@
     --bg-danger-subtle: rgba(248, 113, 113, 0.12);
     --bg-warning-subtle: rgba(251, 191, 36, 0.12);
 
+    /* On-solid 前景色 —— 与浅色主题成套（取值经双主题实测：同一前景在明暗两档
+       底色上均 ≥ AA 4.5；暗色功能色提亮后白字仅 1.74–2.97，故用深色前景）。 */
+    --on-danger: #200404;
+    /* 暗色 hover 底色 = #ef4444（提亮档），深色前景 5.16 达标；白字仅 3.76。 */
+    --on-danger-hover: #200404;
+    /* 实心危险钮（图形口径）—— 与浅色主题同值：白图形需 ≥3:1，提亮档 #f87171 上
+       白仅 2.77 不达标，未提亮 #ef4444 上 3.76 达标；实心红块对暗背景 4.71 醒目，
+       无需随文字档提亮（提亮是给暗底红文字用的）。停止/录音等纯图形按钮用这套，
+       文本类（断网条/审批按钮）继续用上方 on-* 深色前景。 */
+    --color-danger-solid: #ef4444;
+    --color-danger-solid-hover: #dc2626;
+    --on-danger-icon: #ffffff;
+    --on-success: #052e16;
+    --on-feishu: #05070d;
+    --on-dingtalk: #031625;
+    --on-warning: #1a1b1e;
+    /* 暗色 hover 底色是提亮档（#4a80f0/#2b96f0），白字仅 2.79/2.51；
+       深色前景 6.20/6.00 达标——与浅色相反，故 hover 令牌明暗各取各值。 */
+    --on-feishu-hover: #05070d;
+    --on-dingtalk-hover: #031625;
+    --on-wechat: #052e16;
+    --on-feishu-icon: #05070d;
+    --on-dingtalk-icon: #031625;
+    --brand-wechat: #07c160;
+    --brand-feishu: #3370ff;
+    --brand-dingtalk: #0089ff;
+
     /* Git */
     --git-line-add-bg: rgba(46, 160, 67, 0.2);
     --git-line-add-text: #56d364;
@@ -226,6 +295,10 @@
     --tag-border: #2e2e33;
     --thinking-block-bg: #1a1a1d;
     --thinking-block-border: #27272a;
+
+    /* Overlay —— 暗色下页面底色本身已近黑（#131315/#17171a），沿用明度的 0.45 黑遮罩
+       等于什么都没盖住（浮层与背景不分离）。加深到 0.62 才拉得出层次。 */
+    --overlay: rgba(0, 0, 0, 0.62);
 }
 
 /* ===== Accent Presets =====

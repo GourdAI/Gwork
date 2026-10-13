@@ -1,4 +1,123 @@
 {
+    "remote":  {
+
+        "group_local":  "Local",
+
+        "group_empty":  "Sin proyectos (conexión en línea)",
+
+        "badge_count":  "{n}",
+
+        "pick_connection":  "Elegir conexión remota",
+    "connect_in_progress": "Ya hay una conexión en curso, espere un momento",
+
+        "group_global":  "Sesiones globales",
+
+        "title":  "Espacio de trabajo remoto",
+
+        "unsupported":  "La conexión remota requiere la aplicación de escritorio",
+
+        "saved_hosts":  "Conexiones recientes",
+
+        "no_saved_hosts":  "Aún no hay equipos guardados",
+
+        "new_connection":  "Nueva conexión",
+
+        "host_placeholder":  "Host (p. ej. 192.168.1.10)",
+
+        "user_placeholder":  "Usuario",
+
+        "auth_password":  "Contraseña",
+
+        "auth_key":  "Clave privada",
+
+        "password_placeholder":  "Contraseña SSH",
+
+        "keypath_placeholder":  "Ruta de la clave (p. ej. ~/.ssh/id_rsa)",
+
+        "passphrase_placeholder":  "Frase de contraseña (opcional)",
+
+        "remember_secret":  "Recordar contraseña (almacén del sistema)",
+
+        "reconnecting":  "Conexión remota perdida, reconectando (intento {attempt}/{max})…",
+
+        "reconnected":  "Conexión remota restablecida",
+
+        "reconnect_giveup":  "Reconexión automática fallida, reconecta manualmente",
+
+        "reconnect_menu":  "Reconectar remoto",
+
+        "jump_add":  "+ Host de salto (opcional)",
+
+        "jump_remove":  "− Quitar host de salto",
+
+        "jump_title":  "Conectar vía host de salto",
+
+        "jump_host_placeholder":  "Dirección del host de salto",
+
+        "jump_password_placeholder":  "Contraseña SSH del host de salto",
+
+        "jump_user_required":  "Se requiere usuario del host de salto",
+
+        "wsl_root_warn":  "El usuario predeterminado es root: los archivos pertenecerán a root. Use un usuario normal",
+
+        "browse":  "Examinar",
+
+        "connect_btn":  "Conectar",
+
+        "connecting_to":  "Conectando a {host}:{port} …",
+
+        "connected_ok":  "Espacio remoto conectado",
+
+        "connect_failed":  "Conexión fallida:",
+        "forget_host_btn":  "Olvidar huella del host y reconectar",
+        "forget_failed":  "No se pudo olvidar la huella del host: ",
+
+        "host_user_required":  "Se requieren host y usuario",
+
+        "remove_host":  "Quitar",
+
+        "badge":  "Remoto",
+
+        "badge_title":  "Espacio de trabajo remoto: {host} (clic para abrir el menú remoto)",
+
+        "mirror_sync_menu":  "Sincronizar config de modelos al remoto",
+
+        "disconnect_menu":  "Desconectar remoto",
+
+        "mirror_synced":  "Config de modelos sincronizada (espejo en memoria)",
+
+        "mirror_sync_failed":  "Error al sincronizar la configuración de modelos (el remoto usa la suya)",
+
+        "mirror_unavailable":  "Conexión remota inactiva, no se puede sincronizar",
+
+        "mirror_auto_failed":  "No se sincronizó la configuración de modelos (el remoto usa la suya). Reintenta desde el menú remoto.",
+
+        "scope_bind_failed":  "No se registró la pertenencia remota; este espacio sigue siendo local",
+
+        "channel_ssh":  "Host SSH",
+
+        "channel_wsl":  "WSL",
+
+        "channel_preinstalled":  "CLI preinstalado",
+
+        "connecting_wsl":  "Conectando a WSL {distro} (usuario {user})…",
+
+        "wsl_user_placeholder":  "Nombre de usuario (usuario predeterminado de la distro)",
+
+        "wsl_hint":  "Distro WSL2; plano de datos por localhost directo, sin autenticación. Si la distro no tiene java, se instala JRE 17 automáticamente.",
+
+        "wsl_loading":  "Cargando lista de distros…",
+
+        "wsl_none":  "No se encontró distro WSL",
+
+        "wsl_none_v2":  "No se encontró distro WSL2 (WSL1 sin paso localhost)",
+
+        "preinstalled_hint":  "Conexión a un servidor con gwork CLI preinstalado: si se detecta, se omite el despliegue (credenciales mediante variable de entorno, nunca en la línea de comandos); si no, despliegue estándar.",
+        "runtime_pkg_label":  "Paquete de runtime sin conexión (opcional, runtime-*.tar.gz)",
+        "runtime_pkg_hint":  "Para servidores intranet/sin conexión sin Java: subir este paquete primero; vacío = runtime incluido, si no, autoinstalación remota."
+
+    },
+
     "streaming":  {
                       "describe_images":  "Describiendo imágenes",
                       "process_files":  "Procesando archivos",
@@ -234,8 +353,9 @@
                                        "search_placeholder":  "Buscar proyectos…",
                                        "search_no_results":  "Sin proyectos coincidentes",
                                        "remote_connect":  "Conexión remota",
-                                       "locate_multiple":  "Se encontraron varias carpetas homónimas, elige una:"
-                                   },
+                                       "locate_multiple":  "Se encontraron varias carpetas homónimas, elige una:",
+                                       "open_remote_folder":  "Abrir carpeta remota",
+                                       "remote_item":  "Espacio de trabajo remoto"                                   },
                  "sidebar":  {
                                  "load_failed_retry":  "Error al cargar, haz clic para reintentar",
                                  "loop_mark":  "Tarea programada",
@@ -434,9 +554,17 @@
                                     "installed_tab":  "Instaladas",
                                     "uninstall":  "Desinstalar",
                                     "uninstall_confirm":  "¿Desinstalar el skill \"{0}\"? Se eliminará la carpeta local del skill.",
-                                    "scope_global":  "Global",
-                                    "scope_workspace":  "This Project",
-                                    "market_tab":  "Mercado de Skills"
+                                    "market_tab":  "Mercado de Skills",
+                                     "category_all":  "Todo",
+                                     "downloads":  "Descargas",
+                                     "stars":  "Estrellas",
+                                     "version":  "Versión",
+                                     "enable":  "Activar",
+                                     "disable":  "Desactivar",
+                                     "source_local":  "Local",
+                                     "installed_ok":  "instalada correctamente",
+                                     "scroll_prev":  "Desplazar a la izquierda",
+                                     "scroll_next":  "Desplazar a la derecha"
                                 },
                      "mcp":  {
                                  "title":  "Servidores MCP",

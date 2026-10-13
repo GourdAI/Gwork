@@ -40,7 +40,7 @@ public class WorkspaceWatcher {
     /** 需要排除的目录名（不监听、不同步）；与 FileService 的排除清单保持一致 */
     private static final Set<String> EXCLUDED_DIRS = new HashSet<>(Arrays.asList(
             // 项目元数据 & IDE
-                ".gwork", ".gourdai", ".claude", ".opencode",
+                ".gwork", ".gwork-remote", ".gourdai", ".claude", ".opencode",
             ".idea", ".vscode", ".settings",
             // 版本控制 & 构建工具
             ".git", ".gradle", ".mvn",

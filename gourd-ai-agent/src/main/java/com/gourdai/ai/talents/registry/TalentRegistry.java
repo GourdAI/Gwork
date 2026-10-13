@@ -201,7 +201,24 @@ public class TalentRegistry {
 
     // ========== 技能 ==========
 
+    /**
+     * 对模型/运行时可见的技能（已排除 {@code enabled: false} 的禁用技能）。
+     */
     public Collection<SkillDir> getSkills() {
+        List<SkillDir> list = new ArrayList<>();
+        for (SkillDir skill : skillMap.values()) {
+            if (skill.isEnabled()) {
+                list.add(skill);
+            }
+        }
+        return list;
+    }
+
+    /**
+     * 全部已扫描技能（含禁用）— 仅供管理视图（已安装列表/启禁用开关）使用，
+     * 不得进入提示词或工具面。
+     */
+    public Collection<SkillDir> getSkillsAll() {
         return skillMap.values();
     }
 
@@ -273,7 +290,9 @@ public class TalentRegistry {
                         // 支持两级组织（分类/技能名）：名字保留相对路径，与原实现一致
                         String name = root.relativize(dir).toString().replace("\\", "/");
                         Markdown markdown = parseMarkdown(dir);
-                        out.put(name, new SkillDir(name, scope, dir, markdown.getDescription(), markdown.getVersion()));
+                        boolean enabled = markdown.isEnabled();
+                        out.put(name, new SkillDir(name, scope, dir, markdown.getDescription(), markdown.getVersion(),
+                                enabled, markdown.resolveWhenToUse()));
                         return FileVisitResult.SKIP_SUBTREE;
                     }
                     if (dir.getFileName().toString().startsWith(".")) {

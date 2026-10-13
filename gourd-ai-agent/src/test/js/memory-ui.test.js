@@ -71,7 +71,9 @@ test('工作空间请求使用局部项目路径，全局请求明确忽略项�
     const readyLoad = functionBlock('loadWorkspaceMemoriesWhenReady');
     const canOperate = functionBlock('canOperateSnapshot');
     assert.match(snapshot, /currentScope === SCOPE_WORKSPACE \? memorySelectedCwd : ''/);
-    assert.match(headers, /headers\['X-Session-Cwd'\] = cwdSnapshot/);
+    // 【中文路径修复】头值必须经 encodeSessionCwdHeader 编码：HTTP 头只允许
+    // ISO-8859-1，原始中文路径会让浏览器直接抛异常（请求发不出去）
+    assert.match(headers, /headers\['X-Session-Cwd'\] = encodeSessionCwdHeader\(cwdSnapshot\)/);
     assert.match(guardedLoad, /if \(!canOperateSnapshot\(snapshot\)\) return;/);
     assert.match(canOperate, /memoryProjectsLoaded && !!snapshot\.cwd && !!registeredProject\(snapshot\.cwd\)/);
     assert.match(readyLoad, /if \(!memoryProjectsLoaded\)/);

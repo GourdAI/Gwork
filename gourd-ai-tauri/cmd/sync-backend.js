@@ -43,6 +43,11 @@ const JAR_SOURCE = path.join(REPO_ROOT, 'gourd-ai-agent', 'target', 'gourd-ai-ag
 const EXTRA_DIR = path.join(ROOT, 'build', 'extraResources');
 const JAR_DEST = path.join(EXTRA_DIR, 'gourd-ai-agent.jar');
 const JRE_DIR = path.join(EXTRA_DIR, 'jre');
+// 远端运行时资产目录（离线/内网改造一期）：runtime-linux-<arch>.tar.gz +
+// gwork-runtime.json。CI 三腿产出；本地开发态可缺（Rust 侧 bundled_runtime_asset
+// 返回 None 即回退 L4 远端自装），但目录本身必须存在——tauri bundler 对
+// resources 里不存在的目录会报错。
+const RUNTIMES_DIR = path.join(EXTRA_DIR, 'runtimes');
 
 // 与 gourd-ai-desktop/generate-jre.js、build.ps1、build.sh、两条 workflow 完全一致。
 // 少一个模块的典型症状是运行期才抛 ClassNotFoundException，构建期完全看不出来。
@@ -266,6 +271,18 @@ function main() {
   const skipJre = process.argv.includes('--skip-jre') || process.env.GWORK_SKIP_JRE === '1';
 
   syncJar();
+
+  // runtimes 目录就位（资产可缺、目录不可缺）；有资产则逐件报体积
+  fs.mkdirSync(RUNTIMES_DIR, { recursive: true });
+  const rtAssets = fs.readdirSync(RUNTIMES_DIR).filter((n) => n.endsWith('.tar.gz'));
+  if (rtAssets.length === 0) {
+    log('远端运行时资产缺失（runtimes/ 为空）：内网远端将回退 L4 远端自装或用户离线包。'
+      + ' 发版构建由 CI 产出 runtime-linux-x64.tar.gz；本地可用 node cmd/make-runtime-linux.js 生成。');
+  } else {
+    for (const n of rtAssets) {
+      log('远端运行时资产: ' + n + ' (' + mb(fs.statSync(path.join(RUNTIMES_DIR, n)).size) + ')');
+    }
+  }
 
   if (jarOnly) {
     // CI 在 jlink 之前调用：此时 JRE 尚未生成，任何校验都会误报。

@@ -49,6 +49,39 @@ pub async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
         .map(|p| p.to_string_lossy().into_owned()))
 }
 
+/// 系统原生**文件**选择对话框（前端 __GOURD_IPC__.pickFile）。
+///
+/// 为何需要它（远程工作区向导的私钥路径「浏览」）：私钥是文件而非目录，
+/// `pick_directory` 选完目录再手填文件名不是可用交互；而原前端里
+/// `#remoteKeyBrowse` 按钮干脆零绑定——点了什么都不会发生（死 UI）。
+///
+/// 起始位置预选 `~/.ssh`（三平台同一约定），并把默认文件名置为 id_ed25519
+/// 能少用户两步操作。
+///
+/// 【API 口径】插件 v2.7 无 `set_path`（那是 rfd 自己/旧版的名），起始目录用
+/// `set_directory`、默认文件名用 `set_file_name`——写错直接 E0599 编译失败。
+/// 取消或异常一律 Ok(None)，前端静默忽略。
+#[tauri::command]
+pub async fn pick_file(app: AppHandle) -> Result<Option<String>, String> {
+    let mut builder = app
+        .dialog()
+        .file()
+        .set_title("选择私钥文件");
+    // 只在目录真实存在时设起始目录：rfd 对不存在的起始路径行为随平台而异
+    //（Windows 回“上次位置”、macOS 回“最近使用”），与其依赖那些差异不如不预设。
+    if let Some(ssh_dir) = dirs::home_dir().map(|h| h.join(".ssh")) {
+        if ssh_dir.is_dir() {
+            builder = builder
+                .set_directory(ssh_dir)
+                .set_file_name("id_ed25519");
+        }
+    }
+    let file = builder.blocking_pick_file();
+    Ok(file
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned()))
+}
+
 /// 当前平台标识，与 Electron 的 `process.platform` 取值保持一致
 /// （`win32` / `darwin` / `linux`），前端 `electronAPI.platform` 依赖此格式。
 pub fn platform_tag() -> &'static str {
@@ -207,6 +240,101 @@ const BRIDGE_JS: &str = r#"
        兜底会在桌面弹出「将 N 个文件上传到此网站？」确认条与「选择要上传的文件夹」
        文案，均不可接受（用户实测）。 */
     pickDirectory: function () { return invoke('pick_directory'); },
+    /* 原生文件选择对话框（远程向导「私钥路径 · 浏览」）：返回所选文件绝对路径，
+       取消返回 null。私钥是文件不是目录，不能复用 pickDirectory。 */
+    pickFile: function () { return invoke('pick_file'); },
+    /* ───── 远程工作区（P1 SSH / P2 WSL / P3 CLI 预装）─────
+       连接/断开/状态由 Rust 侧 remote 模块承载（russh/wsl.exe + 部署链 + 隧道/直连）。
+       连接过程可能数十秒（首次上传 jar），进度经 remote-connect-progress 事件推送
+       （需先 onRemoteProgress 注册监听，再发起连接）。
+       channel："ssh"（默认，P1 老前端兼容）| "wsl"（P2，仅 Windows 宿主）| "preinstalled"（P3） */
+    remoteConnect: function (cfg) {
+      return invoke('remote_connect', {
+        channel: (cfg && cfg.channel) ? String(cfg.channel) : null,
+        host: String(cfg && cfg.host || ''),
+        port: cfg && cfg.port ? Number(cfg.port) : null,
+        user: String(cfg && cfg.user || ''),
+        authType: String(cfg && cfg.authType || 'password'),
+        password: (cfg && cfg.password) ? String(cfg.password) : null,
+        keyPath: (cfg && cfg.keyPath) ? String(cfg.keyPath) : null,
+        passphrase: (cfg && cfg.passphrase) ? String(cfg.passphrase) : null,
+        rememberSecret: !!(cfg && cfg.rememberSecret),
+        jumpHost: (cfg && cfg.jumpHost) ? String(cfg.jumpHost) : null,
+        jumpPort: (cfg && cfg.jumpPort) ? Number(cfg.jumpPort) : null,
+        jumpUser: (cfg && cfg.jumpUser) ? String(cfg.jumpUser) : null,
+        jumpPassword: (cfg && cfg.jumpPassword) ? String(cfg.jumpPassword) : null,
+        jumpKeyPath: (cfg && cfg.jumpKeyPath) ? String(cfg.jumpKeyPath) : null,
+        jumpPassphrase: (cfg && cfg.jumpPassphrase) ? String(cfg.jumpPassphrase) : null,
+        /* 离线运行时包（可选）：内网/气隙远端无 Java 时优先上传该本地 tar.gz */
+        runtimePkgPath: (cfg && cfg.runtimePkgPath) ? String(cfg.runtimePkgPath) : null
+      });
+    },
+    remoteDisconnect: function (connectionId, releaseAll) {
+      return invoke('remote_disconnect', {
+        connectionId: String(connectionId || ''),
+        releaseAll: releaseAll === true
+      });
+    },
+    remoteState: function (connectionId) {
+      return invoke('remote_state', { connectionId: String(connectionId || '') });
+    },
+    /* 方案B：枚举全部在线连接（契约 §1.1）。元素形状 = remoteState 减去 authHeader
+       （枚举面脱敏，凭据不得散给徽标/分组树/扇出拉取这些读列表的调用点）。
+       启动恢复链靠它与本地持久化的 id 列表交叉：桌面进程重启后远端后端已销毁，
+       LS 里残留的 id 必须据本列表丢弃。异常/非数组一律降级为空数组（与
+       remoteWslList 同口径）：恢复链拿到空数组 = 「无在线连接」，不该把启动弄挂。 */
+    remoteList: function () {
+      return invoke('remote_list').then(function (v) {
+        return Array.isArray(v) ? v : [];
+      }, function () {
+        return []; // 旧壳未登记该命令 / ACL 拒绝：静默降级，调用方走单 id 回退链
+      });
+    },
+    /* P2：WSL 发行版列表（仅 Windows 宿主；无 WSL 返回空数组，前端隐藏 WSL 通道） */
+    remoteWslList: function () {
+      return invoke('remote_wsl_list').then(function (v) {
+        return Array.isArray(v) ? v : [];
+      }, function () {
+        return []; // 非 Windows 宿主 / wsl.exe 缺失：静默降级为空列表
+      });
+    },
+    /* P4：手动重推模型镜像（远端方案 A 内存镜像；本地改完配置后无需重连）。
+       返回 { connectionId, synced, lines }；进度行同步走 remote-connect-progress 事件 */
+    remoteMirrorSync: function (connectionId) {
+      return invoke('remote_mirror_sync', { connectionId: String(connectionId || '') });
+    },
+    /* P4：断线重连（复用上次连接参数；退避重试由本层控制，见 app-remote.js）。
+       方案B（契约 §1.2）：可选 connectionId 透传——传了就重连指定连接（多连接并发时
+       不会重错目标），不传则为「重连最近一台」（旧调用点行为不变，Rust 侧同语义）。 */
+    remoteReconnect: function (connectionId) {
+      return invoke('remote_reconnect', {
+        connectionId: (connectionId === undefined || connectionId === null || connectionId === '')
+          ? null
+          : String(connectionId)
+      });
+    },
+    /* 指纹拒绝后「忘记该主机」：清除该 host:port 全部指纹记录，返回 { removed }。
+       服务器确认换钥（重装等）后用；清完重连回到首连自动信任流程 */
+    remoteForgetHost: function (host, port) {
+      return invoke('remote_forget_host', {
+        host: String(host || ''),
+        port: (port === undefined || port === null || port === '') ? null : Number(port)
+      });
+    },
+    /* 按工作区分流：选中工作区时声明它的归属环境。cwd 来自哪个后端就绑哪个：
+       远程期间选中本地目录必须传 null（否则会被误绑到远端 = 跳机读写），
+       选中远端目录必须传该连接的 connectionId（否则回本地而后端无此路径）。 */
+    remoteBindScope: function (cwd, connectionId) {
+      return invoke('remote_bind_scope', {
+        cwd: String(cwd || ''),
+        connectionId: connectionId ? String(connectionId) : null
+      });
+    },
+    onRemoteProgress: function (cb) { on('remote-connect-progress', cb); },
+    onRemoteState: function (cb) { on('remote-connection-state', cb); },
+    /* 模型镜像进度/终态（与连接日志分开）：镜像推送发生在向导已关闭之后，
+       remote-connect-progress 那时已无消费者，降级必须另走一条事件才能被看见 */
+    onRemoteMirror: function (cb) { on('remote-mirror-state', cb); },
     getAppVersion: function () { return invoke('updater_get_version'); },
     updaterGetState: function () { return invoke('updater_get_state'); },
     updaterCheck: function () { return invoke('updater_check'); },

@@ -1,4 +1,123 @@
 {
+    "remote":  {
+
+        "group_local":  "Lokal",
+
+        "group_empty":  "Keine Projekte (Verbindung online)",
+
+        "badge_count":  "{n}",
+
+        "pick_connection":  "Remote-Verbindung wählen",
+    "connect_in_progress": "Eine Verbindung wird bereits hergestellt, bitte warten",
+
+        "group_global":  "Globale Sitzungen",
+
+        "title":  "Remote-Arbeitsbereich",
+
+        "unsupported":  "Remote-Verbindung erfordert die Desktop-App",
+
+        "saved_hosts":  "Letzte Verbindungen",
+
+        "no_saved_hosts":  "Noch keine gespeicherten Hosts",
+
+        "new_connection":  "Neue Verbindung",
+
+        "host_placeholder":  "Host (z.B. 192.168.1.10)",
+
+        "user_placeholder":  "Benutzername",
+
+        "auth_password":  "Passwort",
+
+        "auth_key":  "Privater Schlüssel",
+
+        "password_placeholder":  "SSH-Passwort",
+
+        "keypath_placeholder":  "Schlüsselpfad (z.B. ~/.ssh/id_rsa)",
+
+        "passphrase_placeholder":  "Passphrase (optional)",
+
+        "remember_secret":  "Passwort merken (System-Zugangsdatenspeicher)",
+
+        "reconnecting":  "Remote-Verbindung verloren, verbinde neu (Versuch {attempt}/{max})…",
+
+        "reconnected":  "Remote-Verbindung wiederhergestellt",
+
+        "reconnect_giveup":  "Auto-Reconnect fehlgeschlagen, bitte manuell neu verbinden",
+
+        "reconnect_menu":  "Remote neu verbinden",
+
+        "jump_add":  "+ Sprungserver (optional)",
+
+        "jump_remove":  "− Sprungserver entfernen",
+
+        "jump_title":  "Über Sprungserver verbinden",
+
+        "jump_host_placeholder":  "Sprungserver-Adresse",
+
+        "jump_password_placeholder":  "SSH-Passwort des Sprungservers",
+
+        "jump_user_required":  "Benutzername des Sprungservers erforderlich",
+
+        "wsl_root_warn":  "Standardbenutzer ist root: Dateien gehören dann root. Regulären Benutzer empfehlen",
+
+        "browse":  "Durchsuchen",
+
+        "connect_btn":  "Verbinden",
+
+        "connecting_to":  "Verbinde mit {host}:{port} …",
+
+        "connected_ok":  "Remote-Arbeitsbereich verbunden",
+
+        "connect_failed":  "Verbindung fehlgeschlagen:",
+        "forget_host_btn":  "Host-Fingerabdruck vergessen & neu verbinden",
+        "forget_failed":  "Fingerabdruck konnte nicht entfernt werden: ",
+
+        "host_user_required":  "Host und Benutzername erforderlich",
+
+        "remove_host":  "Entfernen",
+
+        "badge":  "Remote",
+
+        "badge_title":  "Remote-Arbeitsbereich: {host} (klicken für das Remote-Menü)",
+
+        "mirror_sync_menu":  "Modellkonfiguration remote synchronisieren",
+
+        "disconnect_menu":  "Remote-Verbindung trennen",
+
+        "mirror_synced":  "Modellkonfiguration remote synchronisiert (In-Memory-Spiegel)",
+
+        "mirror_sync_failed":  "Synchronisation der Modellkonfiguration fehlgeschlagen (Remote nutzt eigene Einstellungen)",
+
+        "mirror_unavailable":  "Remote-Verbindung inaktiv, Synchronisierung nicht möglich",
+
+        "mirror_auto_failed":  "Modellkonfiguration wurde nicht gespiegelt (Remote nutzt eigene Einstellungen). Über das Remote-Menü erneut versuchen.",
+
+        "scope_bind_failed":  "Remote-Zuordnung nicht registriert; dieser Arbeitsbereich bleibt lokal",
+
+        "channel_ssh":  "SSH-Host",
+
+        "channel_wsl":  "WSL",
+
+        "channel_preinstalled":  "CLI vorinstalliert",
+
+        "connecting_wsl":  "Verbinde mit WSL {distro} (Benutzer {user})…",
+
+        "wsl_user_placeholder":  "Benutzername (Standardbenutzer der Distro)",
+
+        "wsl_hint":  "WSL2-Distribution; Datenebene per Localhost-Durchleitung, ohne Authentifizierung. Ohne java in der Distro wird JRE 17 automatisch installiert.",
+
+        "wsl_loading":  "Distributionsliste wird geladen…",
+
+        "wsl_none":  "Keine WSL-Distribution gefunden",
+
+        "wsl_none_v2":  "Keine WSL2-Distribution gefunden (WSL1 ohne Localbox-Durchleitung)",
+
+        "preinstalled_hint":  "Verbindung zu einem Server mit vorinstalliertem gwork CLI: bei Treffer Deployment übersprungen (Zugangsdaten per Umgebungsvariable, nie in der Befehlszeile); sonst Rückfall auf Standard-Deployment.",
+        "runtime_pkg_label":  "Offline-Laufzeitpaket (optional, runtime-*.tar.gz)",
+        "runtime_pkg_hint":  "Für Intranet-/Offline-Server ohne Java: dieses Paket zuerst hochladen; leer = mitgelieferte Laufzeit, sonst Selbstinstallation auf dem Server."
+
+    },
+
     "streaming":  {
                       "describe_images":  "Bilder beschreiben",
                       "process_files":  "Dateien verarbeiten",
@@ -234,8 +353,9 @@
                                        "search_placeholder":  "Projekte suchen…",
                                        "search_no_results":  "Keine passenden Projekte",
                                        "remote_connect":  "Remote-Verbindung",
-                                       "locate_multiple":  "Mehrere gleichnamige Ordner gefunden, bitte auswählen:"
-                                   },
+                                       "locate_multiple":  "Mehrere gleichnamige Ordner gefunden, bitte auswählen:",
+                                       "open_remote_folder":  "Remote-Ordner öffnen",
+                                       "remote_item":  "Remote-Arbeitsbereich"                                   },
                  "sidebar":  {
                                  "load_failed_retry":  "Laden fehlgeschlagen, klicken zum Wiederholen",
                                  "loop_mark":  "Geplante Aufgabe",
@@ -432,9 +552,17 @@
                                     "installed_tab":  "Installiert",
                                     "uninstall":  "Deinstallieren",
                                     "uninstall_confirm":  "Skill \"{0}\" deinstallieren? Der lokale Skill-Ordner wird gelöscht.",
-                                    "scope_global":  "Global",
-                                    "scope_workspace":  "This Project",
-                                    "market_tab":  "Skill-Markt"
+                                    "market_tab":  "Skill-Markt",
+                                     "category_all":  "Alle",
+                                     "downloads":  "Downloads",
+                                     "stars":  "Sterne",
+                                     "version":  "Version",
+                                     "enable":  "Aktivieren",
+                                     "disable":  "Deaktivieren",
+                                     "source_local":  "Lokal",
+                                     "installed_ok":  "erfolgreich installiert",
+                                     "scroll_prev":  "Nach links scrollen",
+                                     "scroll_next":  "Nach rechts scrollen"
                                 },
                      "mcp":  {
                                  "title":  "MCP-Server",

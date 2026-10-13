@@ -131,12 +131,18 @@ public class ClawhubMarket implements Market {
                     .summary(getStringValue(skillNode, "summary"))
                     .description(getStringValue(skillNode, "description"))
                     .ownerHandle(getStringValue(skillNode, "ownerHandle"))
+                    .iconUrl(getStringValue(skillNode, "icon"))
                     .installSlug(getStringValue(skillNode, "slug"));
 
             ONode statsNode = skillNode.get("stats");
             if (statsNode != null && !statsNode.isNull()) {
                 detail.installs(getLongValue(statsNode, "installsCurrent"));
                 detail.stars(getLongValue(statsNode, "stars"));
+            }
+
+            ONode lvNode = root.get("latestVersion");
+            if (lvNode != null && !lvNode.isNull()) {
+                detail.version(getStringValue(lvNode, "version"));
             }
 
             return Result.succeed(detail);
@@ -245,7 +251,8 @@ public class ClawhubMarket implements Market {
                     .summary(getStringValue(node, "summary"))
                     .description(getStringValue(node, "description"))
                     .ownerHandle(getStringValue(node, "ownerHandle"))
-                    .url(detailUrl);
+                    .url(detailUrl)
+                    .version(extractLatestVersion(node));
 
             ONode statsNode = node.get("stats");
             if (statsNode != null && !statsNode.isNull()) {
@@ -256,6 +263,28 @@ public class ClawhubMarket implements Market {
             result.add(item);
         }
         return result;
+    }
+
+    /**
+     * 提取最新版本号：优先 {@code latestVersion.version}，回退 {@code tags.latest}。
+     * <p>实测 clawhub 列表项 tags 形如 {@code {"latest":"1.1.2"}}，与 latestVersion.version 同值。</p>
+     */
+    static String extractLatestVersion(ONode node) {
+        ONode lv = node.get("latestVersion");
+        if (lv != null && !lv.isNull()) {
+            String v = lv.get("version").getString();
+            if (v != null && !v.isEmpty()) {
+                return v;
+            }
+        }
+        ONode tags = node.get("tags");
+        if (tags != null && !tags.isNull()) {
+            String v = tags.get("latest").getString();
+            if (v != null && !v.isEmpty()) {
+                return v;
+            }
+        }
+        return null;
     }
 
     private String getStringValue(ONode node, String key) {

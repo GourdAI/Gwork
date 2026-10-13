@@ -146,6 +146,10 @@ function generate(opts = {}) {
     // 复用同源校验里已经算过的摘要，避免把整个 jar 再读一遍
     jarSha256,
     desktopVersion,
+    // 远端运行时资产清单（离线/内网改造一期）：Rust 侧 bundled_runtime_asset
+    // 按名取 runtime-linux-<arch>.tar.gz；清单记录 sha256 供用户/CI 自证。
+    // 本地开发态可空数组（内网回退 L4/用户离线包），不阻断打包。
+    runtimes: listRuntimes(extraDir, log),
     generatedAt: new Date().toISOString(),
   };
 
@@ -158,7 +162,29 @@ function generate(opts = {}) {
   return { manifest, file };
 }
 
-module.exports = { generate, parseSimpleProps, BUILD_INFO_PROPS, JAR_NAME };
+/**
+ * 扫 runtimes/ 目录产出清单条目（name/size/sha256）。目录或资产缺失返回空数组。
+ */
+function listRuntimes(extraDir, log) {
+  const dir = path.join(extraDir, 'runtimes');
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const name of fs.readdirSync(dir).sort()) {
+    if (!name.endsWith('.tar.gz')) continue;
+    const buf = fs.readFileSync(path.join(dir, name));
+    out.push({
+      name,
+      size: buf.length,
+      sha256: crypto.createHash('sha256').update(buf).digest('hex'),
+    });
+  }
+  if (out.length === 0) {
+    log('[gen-build-manifest] 提示: runtimes/ 无资产（内网远端将回退 L4/用户离线包）');
+  }
+  return out;
+}
+
+module.exports = { generate, parseSimpleProps, BUILD_INFO_PROPS, JAR_NAME, listRuntimes };
 
 // ── CLI 入口 ─────────────────────────────────────────────────────────────────
 if (require.main === module) {

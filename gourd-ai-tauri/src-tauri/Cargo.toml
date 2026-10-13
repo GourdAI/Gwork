@@ -47,8 +47,38 @@ dirs = "5"
 regex = "1"
 lazy_static = "1"
 rand = "0.8"
+# ─── 远程工作区（P1 SSH 骨架）──────────────────────────────────────────
+# russh：进程内 SSH 客户端（三平台同构，弃用外部 ssh.exe，见 远程工作区方案.md §四）。
+# 版本锁 0.54 线：russh 0.63 要求 rust-version 1.89，超出本仓 rust-version = "1.77.2"；
+# 0.54 线（1.75+）为满足 MSRV 的最新稳定线。default features 含 aws-lc-rs（C 构建链
+# 在 Windows 上需要 NASM/CLink，缺了会编译失败），改用 ring 后端（纯 Rust 汇编）。
+russh = { version = "0.54", default-features = false, features = ["ring"] }
+# SHA-256 内容寻址指纹（部署物版本化安装根的目录名）
+sha2 = "0.10"
+# 指纹 hex 编码（不引入完整 hex crate 也可手写，但已有依赖生态常用）
+hex = "0.4"
+# 远端输出解码 GBK 兜底（遗留中文系统 shell/JVM 输出非 UTF-8；from_utf8_lossy 逐字节
+# U+FFFD 会打成替换符方块串——2026-10-09 用户实机「乱码」回归的治理点）
+encoding_rs = "0.8"
+# 隧道取消令牌（Tunnel 生命周期管理）
+tokio-util = "0.7"
+# 部署 tar.gz 内存打包（russh 的 flate2 feature 只启用其 zlib 面向压缩协商，
+# 这里需要 GzEncoder/GzDecoder 做部署物压缩）
+flate2 = "1"
+# P2/P3 通道抽象：ExecChannel trait 的 async 方法在 trait 中需要 async-trait
+# （russh 0.54 线的时代 edition 2021 + rust 1.77 还没有原生 async fn in trait 的
+# dyn 兼容形态；dyn ExecChannel 必须走 async_trait 宏）
+async-trait = "0.1"
+# P4：SSH 凭据记忆（OS 凭据库：Windows Credential Manager / macOS Keychain /
+# Linux Secret Service）。v3 无默认 feature 必须显式指定平台库；keyring 全同步
+# API，异步上下文用 spawn_blocking 包裹。Linux 无 libdbus 的环境（无桌面）
+# 在 available() 探测处优雅降级。版本锁 3.6.x：4.0 要求 rustc 1.88 超 MSRV。
+# sync-secret-service 需要 crypto：默认启 crypto-rust（纯 Rust，无 OpenSSL 链）。
+keyring = { version = "3.6", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
 
 [target.'cfg(windows)'.dependencies]
+# WSL 默认用户探测（Lxss 注册表 DefaultUid → root 特判；远程工作区 P4）
+winreg = "0.52"
 windows = { version = "0.58", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading", "Win32_Graphics_Dwm"] }
 
 # backend.rs 在 Unix 下用 libc::setsid / libc::kill 做进程组管理（对齐 Electron 的 tree-kill）。
@@ -79,6 +109,10 @@ objc2-app-kit = { version = "0.3", features = [
     "NSButton",
 ] }
 objc2-foundation = "0.3"
+
+# 测试用 mock 凭据库（keyring v3 的 mock store 默认内置，无需 feature 声明）
+[dev-dependencies]
+keyring = "3.6"
 
 [profile.release]
 panic = "abort"

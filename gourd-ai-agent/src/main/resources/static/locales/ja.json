@@ -1,4 +1,123 @@
 {
+    "remote":  {
+
+        "group_local":  "ローカル",
+
+        "group_empty":  "プロジェクトなし（接続オンライン）",
+
+        "badge_count":  "{n}",
+
+        "pick_connection":  "リモート接続を選択",
+    "connect_in_progress": "接続処理が進行中です。しばらくお待ちください",
+
+        "group_global":  "グローバルセッション",
+
+        "title":  "リモートワークスペース",
+
+        "unsupported":  "リモート接続にはデスクトップ版が必要です",
+
+        "saved_hosts":  "最近の接続",
+
+        "no_saved_hosts":  "保存されたホストはありません",
+
+        "new_connection":  "新規接続",
+
+        "host_placeholder":  "ホスト（例: 192.168.1.10）",
+
+        "user_placeholder":  "ユーザー名",
+
+        "auth_password":  "パスワード",
+
+        "auth_key":  "秘密鍵",
+
+        "password_placeholder":  "SSHパスワード",
+
+        "keypath_placeholder":  "鍵パス（例: ~/.ssh/id_rsa）",
+
+        "passphrase_placeholder":  "パスフレーズ（任意）",
+
+        "remember_secret":  "パスワードを記憶（システム資格情報ストア）",
+
+        "reconnecting":  "リモート接続が切断されました。再接続中（{attempt}/{max} 回目）…",
+
+        "reconnected":  "リモート接続が復旧しました",
+
+        "reconnect_giveup":  "自動再接続に失敗しました。手動で再接続してください",
+
+        "reconnect_menu":  "リモートに再接続",
+
+        "jump_add":  "+ 踏み台ホスト（任意）",
+
+        "jump_remove":  "− 踏み台ホストを削除",
+
+        "jump_title":  "踏み台ホスト経由で接続",
+
+        "jump_host_placeholder":  "踏み台ホストアドレス",
+
+        "jump_password_placeholder":  "踏み台ホストの SSH パスワード",
+
+        "jump_user_required":  "踏み台ホストのユーザー名を入力してください",
+
+        "wsl_root_warn":  "デフォルトユーザーは root です：root で実行するとファイルが root 所有になります。一般ユーザーを推奨",
+
+        "browse":  "参照",
+
+        "connect_btn":  "接続",
+
+        "connecting_to":  "{host}:{port} に接続中 …",
+
+        "connected_ok":  "リモートワークスペースに接続しました",
+
+        "connect_failed":  "接続失敗：",
+        "forget_host_btn":  "このホストの指紋を忘れて再接続",
+        "forget_failed":  "ホスト指紋の削除に失敗しました：",
+
+        "host_user_required":  "ホストとユーザー名を入力してください",
+
+        "remove_host":  "削除",
+
+        "badge":  "リモート",
+
+        "badge_title":  "リモートワークスペース: {host}（クリックでリモートメニュー）",
+
+        "mirror_sync_menu":  "モデル設定をリモートへ同期",
+
+        "disconnect_menu":  "リモート接続を切断",
+
+        "mirror_synced":  "モデル設定をリモートへ同期しました（メモリミラー）",
+
+        "mirror_sync_failed":  "モデル設定の同期に失敗（リモートは自身の設定を継続使用）",
+
+        "mirror_unavailable":  "リモート接続が無効のため同期できません",
+
+        "mirror_auto_failed":  "モデル設定をリモートへ同期できませんでした（リモートは自身の設定を使用します）。リモートメニューから再試行できます。",
+
+        "scope_bind_failed":  "リモート帰属の登録に失敗しました。このワークスペースはローカル扱いのままです",
+
+        "channel_ssh":  "SSH ホスト",
+
+        "channel_wsl":  "WSL",
+
+        "channel_preinstalled":  "CLI 導入済み",
+
+        "connecting_wsl":  "WSL {distro} に接続中（ユーザー {user}）…",
+
+        "wsl_user_placeholder":  "ユーザー名（ディストロの既定ユーザー）",
+
+        "wsl_hint":  "WSL2 ディストロ。データ面は localhost 直結で認証不要。ディストロ内に java がなければ JRE 17 を自動インストールします。",
+
+        "wsl_loading":  "ディストロ一覧を取得中…",
+
+        "wsl_none":  "WSL ディストロが見つかりません",
+
+        "wsl_none_v2":  "WSL2 ディストロが見つかりません（WSL1 は localhost 直結非対応）",
+
+        "preinstalled_hint":  "gwork CLI 導入済みサーバーへ接続：検出時はデプロイをスキップし直接起動（資格情報は環境変数で注入し、コマンドラインには載せません）。未検出時は標準デプロイへフォールバック。",
+        "runtime_pkg_label":  "オフラインランタイムパック（任意、runtime-*.tar.gz）",
+        "runtime_pkg_hint":  "Java のないイントラネット／オフラインサーバー向け：このパックを優先アップロード；空欄ならインストーラ同梱ランタイム、それでも無ければリモート自己インストール。"
+
+    },
+
     "streaming":  {
                       "describe_images":  "画像の説明中",
                       "process_files":  "ファイル処理中",
@@ -234,8 +353,9 @@
                                        "search_placeholder":  "プロジェクトを検索…",
                                        "search_no_results":  "一致するプロジェクトがありません",
                                        "remote_connect":  "リモート接続",
-                                       "locate_multiple":  "同名のディレクトリが複数見つかりました。選択してください："
-                                   },
+                                       "locate_multiple":  "同名のディレクトリが複数見つかりました。選択してください：",
+                                       "open_remote_folder":  "リモートフォルダを開く",
+                                       "remote_item":  "リモートワークスペース"                                   },
                  "sidebar":  {
                                  "load_failed_retry":  "読み込みに失敗しました。クリックして再試行",
                                  "loop_mark":  "定期タスク",
@@ -434,9 +554,17 @@
                                     "installed_tab":  "インストール済み",
                                     "uninstall":  "アンインストール",
                                     "uninstall_confirm":  "スキル「{0}」をアンインストールしますか？ローカルのスキルディレクトリが削除されます。",
-                                    "scope_global":  "Global",
-                                    "scope_workspace":  "This Project",
-                                    "market_tab":  "スキルマーケット"
+                                    "market_tab":  "スキルマーケット",
+                                     "category_all":  "すべて",
+                                     "downloads":  "ダウンロード数",
+                                     "stars":  "スター",
+                                     "version":  "バージョン",
+                                     "enable":  "有効化",
+                                     "disable":  "無効化",
+                                     "source_local":  "ローカル",
+                                     "installed_ok":  "インストールしました",
+                                     "scroll_prev":  "左へスクロール",
+                                     "scroll_next":  "右へスクロール"
                                 },
                      "mcp":  {
                                  "title":  "MCP サーバー",

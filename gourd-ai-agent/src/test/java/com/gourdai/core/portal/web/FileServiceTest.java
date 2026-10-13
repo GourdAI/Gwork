@@ -63,6 +63,42 @@ public class FileServiceTest {
     }
 
     /**
+     * 【2026-10-10 154 事故修复】远端后端家目录 .gwork-remote 必须被排除：
+     * 后端日志目录若被 watcher 监听会形成自激循环（日志写 → inotify 事件 →
+     * push + DEBUG 日志 → 更多事件），风暴期拖垮远端使探活整窗误判。
+     * 行为级：文件树不展示；契约级：FileService 与 WorkspaceWatcher 两份
+     * 清单必须同时含 .gwork-remote（防单边漂移）。
+     */
+    @Test
+    public void testGworkRemoteDirExcluded() throws Exception {
+        Path root = Files.createTempDirectory("filer-gworkremote-test");
+        try {
+            Files.createDirectory(root.resolve(".gwork-remote"));
+            Files.createFile(root.resolve(".gwork-remote").resolve("server.log"));
+            Files.createDirectory(root.resolve(".gwork"));
+
+            FileService service = new FileService(root.toString());
+            Result<List<Map>> rst = service.tree("", 1, root.toString());
+            List<String> names = rst.getData().stream()
+                    .map(m -> String.valueOf(m.get("name")))
+                    .collect(Collectors.toList());
+            Assertions.assertFalse(names.contains(".gwork-remote"), ".gwork-remote 应被隐藏");
+            Assertions.assertFalse(names.contains(".gwork"), ".gwork 应被隐藏");
+        } finally {
+            deleteRecursively(root.toFile());
+        }
+
+        // 双清单防漂移：两份源码的排除清单必须同时含 .gwork-remote
+        String fs = new String(Files.readAllBytes(Path.of(
+                "src/main/java/com/gourdai/core/portal/web/FileService.java")), "UTF-8");
+        String ww = new String(Files.readAllBytes(Path.of(
+                "src/main/java/com/gourdai/core/portal/WorkspaceWatcher.java")), "UTF-8");
+        String token = "\"" + ".gwork-remote" + "\"";
+        Assertions.assertTrue(fs.contains(token), "FileService 排除清单缺 .gwork-remote");
+        Assertions.assertTrue(ww.contains(token), "WorkspaceWatcher 排除清单缺 .gwork-remote");
+    }
+
+    /**
      * read() 二进制探测：含 NUL 字节的文件返回 binary 标记而非乱码内容；
      * 纯文本文件仍正常返回 content（无回归）。
      */

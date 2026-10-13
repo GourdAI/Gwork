@@ -84,7 +84,11 @@ public class SkillTalent extends AbsTalent {
         int total = skillList.size();
         StringBuilder sb = new StringBuilder();
 
-        sb.append("优先使用合适的技能解决问题（不确定用什么技能时，可通过 skillsearch 搜索）。**注意：在执行任务中，请务必通过 `skillread` 读取或回顾规约。**\n\n");
+        // 本行是三档共用的前言，因此绝不能绑定具体工具名：
+        // skillsearch 只在 >searchThreshold 档才开放（见 getTools），在此处推荐它
+        // 会让 SUMMARY / LIST 两档的模型去调一个不存在的工具。
+        // 各档自己的「不确定时怎么办」已由下方分档文案分别交代。
+        sb.append("优先使用合适的技能解决问题。**注意：在执行任务中，请务必通过 `skillread` 读取或回顾规约。**\n\n");
 
         sb.append("## 技能库执行规约 (当前可用技能: " + total + ")\n");
 
@@ -95,17 +99,29 @@ public class SkillTalent extends AbsTalent {
 
             sb.append("<skill_list>\n");
             for (SkillDir s : skillList) {
-                sb.append("  <skill name=\"").append(s.getName()).append("\">").append(s.getDescription()).append("</skill>\n");
+                sb.append("  <skill name=\"").append(s.getName()).append("\">").append(s.getDescription());
+                appendWhenToUse(sb, s);
+                sb.append("</skill>\n");
             }
             sb.append("</skill_list>");
         } else if (total <= searchThreshold) {
             // --- 模式 2: LIST ---
             sb.append("### 运行模式: 路径导航\n");
-            sb.append("当前技能较多，仅展示路径索引（没有描述）。请推断功能并调用 `skillread`。如果不确定，请使用 `skillsearch` 检索：\n");
+            // 此处必须推荐 skilllist 而非 skillsearch：本档的 getTools 刻意过滤掉了 skillsearch
+            // （它只在 >searchThreshold 时才有意义 —— 那时全量清单太大，skilllist 会主动拒绝）。
+            // 而 skilllist 在本档可用且一次就能拿回全部描述，是「不确定时」的正确出路。
+            // 曾经这里写的是 skillsearch，模型照着调必然得到「工具不存在」。
+            sb.append("当前技能较多，仅展示路径索引（没有描述）。请推断功能并调用 `skillread`；若无法判断，先用 `skilllist` 取回带描述的完整清单：\n");
 
             sb.append("<skill_list>\n");
             for (SkillDir s : skillList) {
-                sb.append("  <skill name=\"").append(s.getName()).append("\" />\n");
+                sb.append("  <skill name=\"").append(s.getName()).append("\"");
+                if (s.hasWhenToUse()) {
+                    // 本档刻意丢了 description 以控体积，但「何时使用」是唯一的路由线索，
+                    // 一并丢掉会让模型只能看名字猜功能 —— 保留它，并截到与其他档一致的上限。
+                    sb.append(" when_to_use=\"").append(clipWhenToUse(s.getWhenToUse())).append("\"");
+                }
+                sb.append(" />\n");
             }
             sb.append("</skill_list>");
         } else {
@@ -154,7 +170,9 @@ public class SkillTalent extends AbsTalent {
 
         sb.append("<skill_list>\n");
         for (SkillDir s : skillList) {
-            sb.append("  <skill name=\"").append(s.getName()).append("\">").append(s.getDescription()).append("</skill>\n");
+            sb.append("  <skill name=\"").append(s.getName()).append("\">").append(s.getDescription());
+            appendWhenToUse(sb, s);
+            sb.append("</skill>\n");
         }
         sb.append("</skill_list>");
 
@@ -169,7 +187,9 @@ public class SkillTalent extends AbsTalent {
 
         StringBuilder sb = new StringBuilder("<skill_list>\n");
         for (SkillDir s : matches) {
-            sb.append("  <skill name=\"").append(s.getName()).append("\">").append(s.getDescription()).append("</skill>\n");
+            sb.append("  <skill name=\"").append(s.getName()).append("\">").append(s.getDescription());
+            appendWhenToUse(sb, s);
+            sb.append("</skill>\n");
         }
         sb.append("</skill_list>");
 
@@ -192,5 +212,52 @@ public class SkillTalent extends AbsTalent {
     public String skillrefresh() {
         skillProvider.refresh();
         return "技能库已刷新，当前可用技能数：" + skillProvider.getSkillCount();
+    }
+
+    // --- 「何时使用」提示的渲染 ---
+
+    /**
+     * 进入清单的「何时使用」字符上限。
+     *
+     * <p>对齐 Agent Skills 生态：Pi 与 Zcode 都把 description 上限设在 1024，
+     * Claude Code 则把 description + when_to_use 合并后截到 1536。本字段是
+     * 附加在 description 之外的路由线索，取同一量级的一半即可：足以放下几个
+     * 触发短语，又不至于让一个写了几千字触发条件的技能把每轮提示词撑大。</p>
+     */
+    static final int WHEN_TO_USE_MAX_CHARS = 512;
+
+    /**
+     * 有声明就追加 {@code [何时使用: ...]} 片段；未声明则什么都不加。
+     *
+     * <p>刻意不写成独立 XML 属性：本方法的三个调用点都是
+     * {@code <skill name="x">描述</skill>} 这种「描述在元素体内」的形态，
+     * 追加到体内比改成属性对现有提示词结构扰动更小。</p>
+     */
+    private static void appendWhenToUse(StringBuilder sb, SkillDir skill) {
+        if (!skill.hasWhenToUse()) {
+            return;
+        }
+
+        sb.append(" [何时使用: ").append(clipWhenToUse(skill.getWhenToUse())).append("]");
+    }
+
+    /**
+     * 截断 + XML 转义。
+     *
+     * <p>截断是兵家必争之地：该文本是用户数据（技能作者写的），不截就等于把
+     * 提示词体积交给外部文件控制。转义则是因为它要落进 XML 属性值，
+     * 描述里的 {@code "} 或 {@code <} 会直接产出畸形标签。</p>
+     */
+    private static String clipWhenToUse(String raw) {
+        String text = raw.trim().replaceAll("\\s+", " ");
+
+        if (text.length() > WHEN_TO_USE_MAX_CHARS) {
+            text = text.substring(0, WHEN_TO_USE_MAX_CHARS - 1) + "…";
+        }
+
+        return text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;");
     }
 }

@@ -257,6 +257,23 @@ jobs:
           chmod -R u+w "$OUT_X64" "$OUT_ARM"
           chmod +x "$OUT_X64/bin/"* "$OUT_ARM/bin/"*
 
+      # 远端运行时资产（离线/内网改造一期 L1）：runtime-linux-x64.tar.gz 进安装包，
+      # 内网/断网远端无 Java 时由桌面端经 SSH 上传部署（~20MB gz）。
+      # - Linux 腿：复用 setup-java 的 JDK（--jdk-x64，零下载）
+      # - Windows/macOS 腿：脚本自动下载 Temurin linux-x64 jmods 到 .cache 跨架构 jlink
+      # 资产缺失不阻断打包（Rust 侧回退 L4 远端自装/用户离线包），但 CI 必须产出。
+      - name: 生成远端运行时资产（runtime-linux-x64）
+        shell: bash
+        working-directory: gourd-ai-tauri
+        run: |
+          set -e
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            node cmd/make-runtime-linux.js --jdk-x64 "$JAVA_HOME"
+          else
+            node cmd/make-runtime-linux.js
+          fi
+          ls -la build/extraResources/runtimes/
+
       # 只装 @tauri-apps/cli；ui/ 与 NSIS 位图由 tauri.conf.json 的 beforeBuildCommand
       # （prepare-ui.js + generate-nsis-assets.js）在 build 时现生成，无需入库
       - name: 安装前端依赖

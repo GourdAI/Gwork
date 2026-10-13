@@ -85,9 +85,22 @@ test('欢迎页工作空间按钮用登记名（不得回归 baseName(currentCha
 test('欢迎页：按钮与下拉列表同源（统一经 loadProjects 刷新 projectsCache）', () => {
     assert.match(workspace, /var projectsCache = \[\];/);
     const loader = sliceBetween(workspace, 'function loadProjects(cb)', 'function renderSelectors()');
-    assert.match(loader, /\$\.get\('\/web\/chat\/projects'/);
-    assert.match(loader, /projectsCache = \[\];/);
+    /* 主拉取恒本地（显式 __scope=local，不随激活 scope 漂移——并存语义）；
+       远端那份经 __scope=id 补拉，两份合并后按条目 _scope 绑定归属。 */
+    assert.match(loader, /\$\.get\('\/web\/chat\/projects\?__scope=local'\)/,
+        '主拉取必须显式 __scope=local（恒本地）');
+    assert.match(loader, /\?__scope=id:' \+ encodeURIComponent\(activeId\)/,
+        '远端拉取必须带 __scope=id 且 encodeURIComponent');
+    /* 【等强度迁移】旧断言锁 `projectsCache = [];` 后逐项 push。分流改造后改成
+       「先由 pick() 构新数组、再整表赋值 projectsCache = fetched」——同样保证不残留
+       陈旧项（本条断言的真正意图），但不是那行字面量。改锁行为等价物：
+       必须是整表赋值（=），不得往旧缓存上 push（那才是真的陈旧残留）。 */
+    assert.match(loader, /projectsCache = fetched;/, '必须整表重建（不往旧缓存上追加）');
+    assert.doesNotMatch(loader, /projectsCache\.push\(/, '不得向旧缓存增量 push（会残留已删除项目）');
     assert.match(loader, /renderSelectors\(\);/, '列表刷新后须同步重绘按钮文案');
+    /* 主拉取失败不得与本地项合并（陈旧缓存 + 本地项 = 重复条目） */
+    assert.match(loader, /if \(!primaryOk\) \{[\s\S]{0,200}return;/,
+        '主拉取失败时必须提前返回，不得做本地项合并');
     // 下拉渲染不得再自行发请求（双数据源会出现「列表新名/按钮旧名」）
     const dropdown = sliceBetween(workspace, 'function renderDropdown(dd)', '/* 切换 chat 工作空间');
     assert.match(dropdown, /loadProjects\(function \(list\)/);

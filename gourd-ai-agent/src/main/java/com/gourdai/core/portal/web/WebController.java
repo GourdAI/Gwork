@@ -241,6 +241,9 @@ public class WebController {
         data.put("homeDir", AgentFlags.getUserHome());
         data.put("buildId", BuildInfo.getBuildId());
         data.put("buildTime", BuildInfo.getBuildTime());
+        // 远端部署模式标记：桌面端 SSH 部署链注入 -Dgwork.remote=true（远程工作区 P1）。
+        // 前端据此渲染远程徽标；本地后端永远为 false，不影响既有行为。
+        data.put("remote", AgentFlags.isRemoteDeployed());
         return Result.succeed(data);
     }
 
@@ -1124,7 +1127,7 @@ public class WebController {
             if (sessionId == null || sessionId.isEmpty()) {
                 sessionId = ctx.headerOrDefault("X-Session-Id", "web");
             }
-            String sessionCwd = ctx.header("X-Session-Cwd");
+            String sessionCwd = SessionCwdCodec.decode(ctx.header("X-Session-Cwd"));
             String clientMessageId = ctx.param("clientMessageId");
 
             if (sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
@@ -1209,7 +1212,7 @@ public class WebController {
             }
 
             List<Map<String, Object>> items = webGate.saveAttachments(sessionId,
-                    ctx.header("X-Session-Cwd"), attachments, attachmentTypes);
+                    SessionCwdCodec.decode(ctx.header("X-Session-Cwd")), attachments, attachmentTypes);
             if (items.isEmpty()) {
                 // 文件名全部非法：必须明确失败，让前端保留输入与附件，不能静默当成上传成功
                 return Result.failure("INVALID_ATTACHMENT_NAME");
@@ -1361,7 +1364,7 @@ public class WebController {
      * 所有比较均使用 real path，避免符号链接、大小写或 {@code ..} 形式绕过。
      */
     private String resolveChangeRoot(Context ctx, String sessionId, String root) {
-        String headerCwd = ctx == null ? null : ctx.header("X-Session-Cwd");
+        String headerCwd = SessionCwdCodec.decode(ctx == null ? null : ctx.header("X-Session-Cwd"));
         try {
             return resolveChangeRoot(sessionLocator == null ? null : sessionLocator.boundRoot(sessionId), root, headerCwd,
                     engine.getWorkspace(), projectService::resolveRegisteredDirectory);
@@ -1942,7 +1945,7 @@ public class WebController {
         if (global) {
             return Paths.get(AgentFlags.getHarnessBase()).toAbsolutePath().normalize().toString();
         }
-        String sessionCwd = ctx.header(AgentFlags.X_SESSION_CWD);
+        String sessionCwd = SessionCwdCodec.decode(ctx.header(AgentFlags.X_SESSION_CWD));
         if (Assert.isEmpty(sessionCwd)) {
             return Paths.get(engine.getWorkspace()).toAbsolutePath().normalize().toString();
         }
@@ -2026,7 +2029,7 @@ public class WebController {
         // 与 chat_input 同一套逻辑：chat / code 会话均读其所属工作空间根
         // （X-Session-Cwd 透传 + 注册表兜底）。此前 chat 会话固定读 engine.getWorkspace()，
         // 导致带工作空间的 chat 会话的任务清单（落在工作空间目录下）永远查不到 → 任务面板恒为空。
-        String sessionCwd = ctx.header("X-Session-Cwd");
+        String sessionCwd = SessionCwdCodec.decode(ctx.header("X-Session-Cwd"));
         if (sessionCwd != null && sessionCwd.contains("..")) {
             return Result.failure(400, "Invalid Session Cwd");
         }
@@ -2528,7 +2531,7 @@ public class WebController {
         Assert.notNull(sessionId, "sessionId is required");
         validateSessionId(sessionId);
 
-        Path sessionDir = sessionLocator.resolveDir(sessionId, ctx.header("X-Session-Cwd")).toPath();
+        Path sessionDir = sessionLocator.resolveDir(sessionId, SessionCwdCodec.decode(ctx.header("X-Session-Cwd"))).toPath();
         List<ONode> items = queueHelper.read(sessionDir.toFile());
 
         // 将 ONode 列表转换为标准 Map 列表，确保正确序列化
@@ -2572,7 +2575,7 @@ public class WebController {
             for (ONode n : filePathsNode.getArray()) filePaths.add(n.getString());
         }
 
-        Path sessionDir = sessionLocator.resolveDir(sessionId, ctx.header("X-Session-Cwd")).toPath();
+        Path sessionDir = sessionLocator.resolveDir(sessionId, SessionCwdCodec.decode(ctx.header("X-Session-Cwd"))).toPath();
         int size = queueHelper.add(sessionDir.toFile(), content, imagePaths, filePaths);
 
         Map<String, Object> resp = new LinkedHashMap<>();
@@ -2590,7 +2593,7 @@ public class WebController {
         Assert.notNull(sessionId, "sessionId is required");
         validateSessionId(sessionId);
 
-        Path sessionDir = sessionLocator.resolveDir(sessionId, ctx.header("X-Session-Cwd")).toPath();
+        Path sessionDir = sessionLocator.resolveDir(sessionId, SessionCwdCodec.decode(ctx.header("X-Session-Cwd"))).toPath();
         ONode item = queueHelper.shift(sessionDir.toFile());
 
         Map<String, Object> resp = new LinkedHashMap<>();
@@ -2617,7 +2620,7 @@ public class WebController {
         Assert.notNull(sessionId, "sessionId is required");
         validateSessionId(sessionId);
 
-        Path sessionDir = sessionLocator.resolveDir(sessionId, ctx.header("X-Session-Cwd")).toPath();
+        Path sessionDir = sessionLocator.resolveDir(sessionId, SessionCwdCodec.decode(ctx.header("X-Session-Cwd"))).toPath();
         queueHelper.clear(sessionDir.toFile());
 
         Map<String, Object> resp = new LinkedHashMap<>();

@@ -805,7 +805,7 @@ input[type=number] { -moz-appearance: textfield; }
 
 .layui-laydate .layui-this {
     background-color: var(--accent) !important;
-    color: #fff !important;
+    color: var(--accent-contrast) !important;
 }
 
 .layui-laydate .layui-laydate-footer {

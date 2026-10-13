@@ -1,4 +1,123 @@
 {
+    "remote":  {
+
+        "group_local":  "Local",
+
+        "group_empty":  "Aucun projet (connexion en ligne)",
+
+        "badge_count":  "{n}",
+
+        "pick_connection":  "Choisir une connexion distante",
+    "connect_in_progress": "Une connexion est déjà en cours, veuillez patienter",
+
+        "group_global":  "Sessions globales",
+
+        "title":  "Espace de travail distant",
+
+        "unsupported":  "La connexion à distance nécessite l'application de bureau",
+
+        "saved_hosts":  "Connexions récentes",
+
+        "no_saved_hosts":  "Aucun hôte enregistré",
+
+        "new_connection":  "Nouvelle connexion",
+
+        "host_placeholder":  "Hôte (ex. 192.168.1.10)",
+
+        "user_placeholder":  "Nom d'utilisateur",
+
+        "auth_password":  "Mot de passe",
+
+        "auth_key":  "Clé privée",
+
+        "password_placeholder":  "Mot de passe SSH",
+
+        "keypath_placeholder":  "Chemin de la clé (ex. ~/.ssh/id_rsa)",
+
+        "passphrase_placeholder":  "Phrase secrète (facultatif)",
+
+        "remember_secret":  "Mémoriser le mot de passe (coffre système)",
+
+        "reconnecting":  "Connexion distante perdue, reconnexion (tentative {attempt}/{max})…",
+
+        "reconnected":  "Connexion distante rétablie",
+
+        "reconnect_giveup":  "Reconnexion auto échouée, reconnectez-vous manuellement",
+
+        "reconnect_menu":  "Reconnecter le distant",
+
+        "jump_add":  "+ Hôte de rebond (optionnel)",
+
+        "jump_remove":  "− Retirer l hôte de rebond",
+
+        "jump_title":  "Connexion via hôte de rebond",
+
+        "jump_host_placeholder":  "Adresse de l hôte de rebond",
+
+        "jump_password_placeholder":  "Mot de passe SSH de l hôte de rebond",
+
+        "jump_user_required":  "Nom d utilisateur du serveur de rebond requis",
+
+        "wsl_root_warn":  "L utilisateur par défaut est root : les fichiers appartiendront à root. Utilisez un utilisateur normal",
+
+        "browse":  "Parcourir",
+
+        "connect_btn":  "Connecter",
+
+        "connecting_to":  "Connexion à {host}:{port} …",
+
+        "connected_ok":  "Espace distant connecté",
+
+        "connect_failed":  "Échec de connexion :",
+        "forget_host_btn":  "Oublier l'empreinte de l'hôte et reconnecter",
+        "forget_failed":  "Échec de l'oubli de l'empreinte : ",
+
+        "host_user_required":  "Hôte et nom d'utilisateur requis",
+
+        "remove_host":  "Supprimer",
+
+        "badge":  "Distant",
+
+        "badge_title":  "Espace de travail distant : {host} (cliquer pour ouvrir le menu distant)",
+
+        "mirror_sync_menu":  "Synchroniser la config des modèles vers le distant",
+
+        "disconnect_menu":  "Déconnecter le distant",
+
+        "mirror_synced":  "Config des modèles synchronisée (miroir en mémoire)",
+
+        "mirror_sync_failed":  "Échec de la synchronisation des modèles (le distant utilise les siens)",
+
+        "mirror_unavailable":  "Connexion distante inactive, synchronisation impossible",
+
+        "mirror_auto_failed":  "Configuration des modèles non copiée (le distant utilise la sienne). Réessayez via le menu distant.",
+
+        "scope_bind_failed":  "Appartenance distante non enregistrée ; cet espace reste local",
+
+        "channel_ssh":  "Hôte SSH",
+
+        "channel_wsl":  "WSL",
+
+        "channel_preinstalled":  "CLI préinstallé",
+
+        "connecting_wsl":  "Connexion WSL {distro} (utilisateur {user})…",
+
+        "wsl_user_placeholder":  "Nom d'utilisateur (utilisateur par défaut de la distro)",
+
+        "wsl_hint":  "Distro WSL2 ; plan de données en localhost direct, sans authentification. Sans java dans la distro, JRE 17 est installé automatiquement.",
+
+        "wsl_loading":  "Chargement de la liste des distros…",
+
+        "wsl_none":  "Aucune distro WSL trouvée",
+
+        "wsl_none_v2":  "Aucune distro WSL2 trouvée (WSL1 sans passage localhost)",
+
+        "preinstalled_hint":  "Connexion à un serveur avec gwork CLI préinstallé : déploiement ignoré si détecté (identifiants via variable d'environnement, jamais en ligne de commande) ; sinon repli sur le déploiement standard.",
+        "runtime_pkg_label":  "Paquet runtime hors-ligne (optionnel, runtime-*.tar.gz)",
+        "runtime_pkg_hint":  "Pour serveurs intranet/hors-ligne sans Java : téléverser ce paquet d'abord ; vide = runtime fourni, sinon auto-installation distante."
+
+    },
+
     "streaming":  {
                       "describe_images":  "Veuillez décrire ces images",
                       "process_files":  "Veuillez m\u0027aider à traiter ces fichiers",
@@ -234,8 +353,9 @@
                                        "search_placeholder":  "Rechercher des projets…",
                                        "search_no_results":  "Aucun projet correspondant",
                                        "remote_connect":  "Connexion distante",
-                                       "locate_multiple":  "Plusieurs dossiers homonymes trouvés, sélectionnez-en un :"
-                                   },
+                                       "locate_multiple":  "Plusieurs dossiers homonymes trouvés, sélectionnez-en un :",
+                                       "open_remote_folder":  "Ouvrir le dossier distant",
+                                       "remote_item":  "Espace de travail distant"                                   },
                  "sidebar":  {
                                  "load_failed_retry":  "Échec du chargement, cliquez pour réessayer",
                                  "loop_mark":  "Tâche planifiée",
@@ -434,9 +554,17 @@
                                     "installed_tab":  "Installées",
                                     "uninstall":  "Désinstaller",
                                     "uninstall_confirm":  "Désinstaller le skill « {0} » ? Le dossier local du skill sera supprimé.",
-                                    "scope_global":  "Global",
-                                    "scope_workspace":  "This Project",
-                                    "market_tab":  "Marché de Skills"
+                                    "market_tab":  "Marché de Skills",
+                                     "category_all":  "Tout",
+                                     "downloads":  "Téléchargements",
+                                     "stars":  "Étoiles",
+                                     "version":  "Version",
+                                     "enable":  "Activer",
+                                     "disable":  "Désactiver",
+                                     "source_local":  "Local",
+                                     "installed_ok":  "installée avec succès",
+                                     "scroll_prev":  "Faire défiler vers la gauche",
+                                     "scroll_next":  "Faire défiler vers la droite"
                                 },
                      "mcp":  {
                                  "title":  "Serveurs MCP",

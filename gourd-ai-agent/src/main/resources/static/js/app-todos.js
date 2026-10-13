@@ -35,7 +35,7 @@
         var root = resolveTodoRoot(sid, targetRoot);
         var requestVersion = (todoRequestVersions[sid] || 0) + 1;
         todoRequestVersions[sid] = requestVersion;
-        var headers = root ? { 'X-Session-Cwd': root } : {};
+        var headers = root ? { 'X-Session-Cwd': encodeSessionCwdHeader(root) } : {};
 
         return fetch('/web/chat/todos?sessionId=' + encodeURIComponent(sid), { headers: headers })
             .then(function(r) {

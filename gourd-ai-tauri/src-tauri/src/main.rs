@@ -7,6 +7,7 @@ mod ipc_bridge;
 mod logging;
 mod migration;
 mod paths;
+mod remote;
 mod server;
 mod titlebar;
 mod titlebar_ui;
@@ -123,6 +124,18 @@ fn main() {
             backend::get_backend_state,
             backend::get_backend_detail,
             backend::restart_backend,
+            remote::remote_connect,
+            remote::remote_disconnect,
+            remote::remote_state,
+            // 方案B：枚举全部在线连接（前端启动恢复/分组树的真相源，不带 authHeader）
+            remote::remote_list,
+            remote::remote_forget_host,
+            remote::remote_mirror_sync,
+    remote::remote_reconnect,
+    // 按工作区分流：选中工作区时声明其归属环境（本地 / 某连接）
+    remote::remote_bind_scope,
+            #[cfg(target_os = "windows")]
+            remote::remote_wsl_list,
             updater::updater_get_version,
             updater::updater_get_state,
             updater::updater_check,
@@ -135,7 +148,9 @@ fn main() {
             titlebar_ui::window_close,
             titlebar_ui::window_get_chrome,
             window::set_window_title,
-            ipc_bridge::pick_directory,
+    ipc_bridge::pick_directory,
+    // 原生文件选择对话框（远程向导私钥路径「浏览」，见 ipc_bridge::pick_file）
+    ipc_bridge::pick_file,
         ])
         // log_path 要被 setup 闭包持有（闭包要求 'static），故用 move 转移所有权
         .setup(move |app| {
@@ -271,10 +286,15 @@ fn main() {
                     }
                 }
                 RunEvent::Exit => {
-                    // 退出前清理
-                    let app_handle = app_handle.clone();
+                    // 退出前清理：本地后端 + 远程工作区的远端后端进程。
+                    // 后者必须在此收尾：否则用户关应用后，远端那个 java 进程
+                    // 会持续常驻直到服务器重启（方案 §四「随连接销毁」语义）。
+                    // 清理不需要 AppHandle，所以这里不 clone 它（旧的 `let app_handle =
+                    // app_handle.clone();` 是写完后没用的残留，已删——退出路径上的
+                    // 无用 clone 会误让人以为清理依赖窗口句柄）。
                     tauri::async_runtime::block_on(async move {
                         backend::stop_backend().await;
+                        remote::shutdown_all().await;
                     });
                 }
                 _ => {}

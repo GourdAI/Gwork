@@ -396,20 +396,66 @@ function setupSpotlight() {
 /* 导航实现已抽取到 js/site-nav.js（index.html 与 models.html 共用一份），
    本文件仅在启动处按本页参数调用，见下方 setupNav 调用点。 */
 
+/* ================= 落点校正 ================= */
+/**
+ * 下载清单是异步 fetch 回来才填充的：浏览器完成 hash 跳转时 #downloadGrid 还是空的，
+ * 清单渲染后它撑高（实测桌面 174px、窄屏 527px），把位于它下方的区块整体推走，
+ * 而浏览器不做补偿（原生 scroll anchoring 在 navigate-to 引发的平滑滚动期间被规范禁用）。
+ * 下载区上方的区块不受影响，所以这个缺陷一直潜伏，直到新增位于下载区下方的 #contact 才暴露。
+ *
+ * 后果不是「偏一点」而是「看不见」：窄屏下面板高 691 > 视口 667，
+ * 被推走后只有 9% 进入视口，够不着 reveal 观察器的 threshold 0.12，
+ * .contact-panel 就永远停在 opacity:0 —— 用户点「联系」看到的是一片空白。
+ *
+ * 故在清单落地、布局稳定后按原 hash 重新对齐一次。不做区块特判：这是「异步撑高区域
+ * 下方的所有区块」的通用问题，以后再加区块同样依赖它。用户自己滚过就不再劫持。
+ */
+function setupHashRealign() {
+  const rawHash = (location.hash || '').slice(1);
+  if (!rawHash || rawHash === 'top') return null;
+  let id;
+  try {
+    // 畸形百分号编码（例如手动改地址栏留下的 #%zz）会让 decodeURIComponent 抛 URIError。
+    // 本函数在 DOMContentLoaded 回调首行调用，一旦抛出会连带打断 reveal / 导航接线 / 下载区
+    // 渲染等全部启动逻辑（实测：#%zz 时 downloadGrid 子节点停在 1、reveal.in 为 0）。
+    // 解不开就放弃这次重对齐，退化成修复前的行为即可，绝不能再拖垮整页。
+    id = decodeURIComponent(rawHash);
+  } catch (e) {
+    return null;
+  }
+
+  let userScrolled = false;
+  const mark = () => { userScrolled = true; };
+  for (const evt of ['wheel', 'touchstart', 'keydown', 'pointerdown']) {
+    window.addEventListener(evt, mark, { once: true, passive: true });
+  }
+
+  return function realign() {
+    if (userScrolled) return;
+    const el = document.getElementById(id);
+    // 不带参数：继承全局 scroll-behavior: smooth，并与 scroll-margin-top、scrollIntoView 原生行为一致
+    if (el) el.scrollIntoView();
+  };
+}
+
 /* ================= 启动 ================= */
 document.addEventListener('DOMContentLoaded', () => {
+  // 守卫必须在首次滚动发生前绑好，此时下载清单还没回来。
+  const realignAfterDownloads = setupHashRealign();
   // 下载区与 Hero 按钮都由下载清单驱动；清单到达前 Hero 保持锚点跳转，不会指向坏链。
   if (document.getElementById('downloadGrid') || document.getElementById('heroDownload')) {
     loadDownloadsManifest().then(manifest => {
       renderDownloads(manifest);
       setupHeroCta(manifest);
+      if (realignAfterDownloads) realignAfterDownloads();
     });
   }
   setupReveal();
   setupSpotlight();
   // 本页导航为页内锚点，且头部背景由滚动接管（首屏透明、下滚加 scrolled）。
+  // contact 必须一并列入：新增区块后若漏登记，滚到联系区时导航项会集体失去高亮。
   window.GourdSiteNav.setupNav({
-    sectionIds: ['features', 'quickstart', 'downloads'],
+    sectionIds: ['features', 'quickstart', 'downloads', 'contact'],
     scrolledOnScroll: true,
   });
 

@@ -45,6 +45,23 @@
 .project-dropdown-item-del { flex-shrink: 0; border: none; background: none; cursor: pointer; color: var(--text-secondary); opacity: 0; padding: 2px; border-radius: 4px; display: flex; }
 .project-dropdown-item:hover .project-dropdown-item-del { opacity: 0.7; }
 .project-dropdown-item-del:hover { opacity: 1; background: var(--bg-danger-subtle); color: var(--color-danger); }
+/* 远端工作区条目标识：名称后一枚云形小徽（远程项与本地项同屏时唯一可区分线索）。
+   与 --workspace-item-icon 同尺寸（14px），颜色用 --text-tertiary（结构辅助信息量级，
+   勿用 accent：那是选中态专属语义）。 */
+.project-dropdown-item[data-remote="1"] .project-dropdown-item-name::after {
+    content: "⌁"; margin-left: 5px; font-size: 11px; color: var(--text-tertiary);
+    vertical-align: 1px;
+}
+/* 侧栏会话行同理：远端会话名后同款小徽（app-history 渲染时按 _scope 打 data-remote） */
+.sidebar-item[data-remote="1"] .sidebar-item-label::after {
+    content: "⌁"; margin-left: 5px; font-size: 11px; color: var(--text-tertiary);
+    vertical-align: 1px;
+}
+/* 项目文件夹行（侧栏项目树）：远端项目同款小徽 */
+.proj-node[data-remote="1"] .proj-name::after {
+    content: "⌁"; margin-left: 5px; font-size: 11px; color: var(--text-tertiary);
+    vertical-align: 1px;
+}
 .project-dropdown-add {
     display: flex; align-items: center; gap: 6px; padding: 8px; margin-top: 4px;
     border-top: 1px solid var(--border-color); cursor: pointer; font-size: 12.5px; color: var(--accent);
@@ -118,10 +135,16 @@
     display: flex; align-items: center; gap: 6px; padding: 7px 8px; border-radius: 6px;
     background: none; border: none; cursor: pointer;
     font-size: 12.5px; width: 100%; text-align: left; font-family: inherit;
+    /* 文字色必须由基类承载：<button> 的 UA 默认色是 ButtonText（本页未声明
+       color-scheme，恒为近黑），靠各按钮自行声明 color 时漏一个就在暗色主题
+       黑字黑底（实测「打开远程目录」项暗色不可见、亮色黑字白底反而正常故长期
+       未发现）；图标 stroke=currentColor 随文字色，漏声明会连图标一起黑掉。 */
+    color: var(--accent);
 }
-.workspace-add-btn { color: var(--accent); }
-.workspace-add-btn:hover { background: var(--bg-hover); }
-.workspace-remote-btn { color: var(--text-secondary); }
+/* 底部动作项同权重（并列可选动作，不分主次）：文字色与 hover 底色统一挂在基类，
+   个别类不得再自定文字色（两套色 = 看起来像禁用残留；漏色 = 暗色不可见）。
+   hover 底色同挂基类，保证所有动作项悬停反馈对称。 */
+.workspace-action-btn:hover { background: var(--bg-hover); }
 .workspace-remote-btn:disabled { cursor: not-allowed; opacity: 0.45; }
 .workspace-remote-btn:disabled:hover { background: none; }
 

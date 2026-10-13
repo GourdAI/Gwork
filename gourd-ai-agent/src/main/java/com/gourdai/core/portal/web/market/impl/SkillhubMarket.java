@@ -2,6 +2,7 @@ package com.gourdai.core.portal.web.market.impl;
 
 import org.noear.snack4.ONode;
 import com.gourdai.core.portal.web.market.Market;
+import com.gourdai.core.portal.web.market.MarketCategory;
 import com.gourdai.core.portal.web.market.MarketDetail;
 import com.gourdai.core.portal.web.market.MarketItem;
 import com.gourdai.core.portal.web.market.MarketPageResult;
@@ -39,6 +40,22 @@ public class SkillhubMarket implements Market {
     /** 上游 /api/skills 的 pageSize 实测上限（100 可用，200 返回 400） */
     private static final int UPSTREAM_MAX_PAGE_SIZE = 100;
 
+    /**
+     * 官网分类体系（实测 GET /api/skills?category=xxx 服务端真过滤，
+     * 如 dev-programming 返回 total=20699 < 全量 192324）。
+     */
+    private static final List<MarketCategory> CATEGORIES = Arrays.asList(
+            new MarketCategory("ai-agent", "AI Agent", "AI 智能体"),
+            new MarketCategory("dev-programming", "Development", "开发编程"),
+            new MarketCategory("office-efficiency", "Office Efficiency", "办公效率"),
+            new MarketCategory("content-creation", "Content Creation", "内容创作"),
+            new MarketCategory("data-analysis", "Data Analysis", "数据分析"),
+            new MarketCategory("design-media", "Design & Media", "设计媒体"),
+            new MarketCategory("business-ops", "Business Ops", "商业运营"),
+            new MarketCategory("it-ops-security", "IT Ops & Security", "运维安全"),
+            new MarketCategory("professional", "Professional", "专业服务"),
+            new MarketCategory("life-service", "Life Service", "生活服务"));
+
     @Override
     public String name() {
         return "skillhub.cn";
@@ -49,35 +66,52 @@ public class SkillhubMarket implements Market {
         return "专为中国用户优化的技能社区";
     }
 
+    @Override
+    public Result<List<MarketCategory>> categories() {
+        return Result.succeed(CATEGORIES);
+    }
+
     // ==================== 列表与搜索 ====================
 
     @Override
     public Result<MarketPageResult> trending(String cursor, int limit) {
-        return fetchPaged(null, cursor, limit, "获取热门技能失败: ");
+        return trending(cursor, limit, null);
+    }
+
+    @Override
+    public Result<MarketPageResult> trending(String cursor, int limit, String category) {
+        return fetchPaged(null, cursor, limit, category, "获取热门技能失败: ");
     }
 
     @Override
     public Result<MarketPageResult> search(String query, String cursor, int limit) {
+        return search(query, cursor, limit, null);
+    }
+
+    @Override
+    public Result<MarketPageResult> search(String query, String cursor, int limit, String category) {
         if (Assert.isEmpty(query)) {
-            return trending(cursor, limit);
+            return trending(cursor, limit, category);
         }
-        return fetchPaged(query, cursor, limit, "搜索技能失败: ");
+        return fetchPaged(query, cursor, limit, category, "搜索技能失败: ");
     }
 
     /**
      * 真分页入口 — 对接官网"全部技能"端点 GET /api/skills。
      *
      * <p>该端点支持服务端翻页（page 从 1 起、pageSize 上限 {@link #UPSTREAM_MAX_PAGE_SIZE}）、
-     * 关键词搜索（keyword）与排序（sortBy），响应 data.total 为真实总量（10 万+）。
+     * 关键词搜索（keyword）、分类过滤（category，服务端真过滤）与排序（sortBy），
+     * 响应 data.total 为真实总量（10 万+）。
      * cursor 语义 = 上游页码字符串；nextCursor 由真实总量计算，末页返回 null。</p>
      *
      * <p>注：旧的 /api/v1/search 端点忽略所有翻页参数且 limit 上限 100，已弃用。</p>
      */
-    private Result<MarketPageResult> fetchPaged(String query, String cursor, int limit, String errPrefix) {
+    private Result<MarketPageResult> fetchPaged(String query, String cursor, int limit, String category, String errPrefix) {
         try {
             int pageSize = (limit > 0 && limit <= UPSTREAM_MAX_PAGE_SIZE) ? limit : 20;
             int page = parsePageFromCursor(cursor);
             boolean isSearch = query != null && !query.isEmpty();
+            boolean hasCategory = category != null && !category.isEmpty();
 
             StringBuilder url = new StringBuilder(BASE_URL).append("/api/skills")
                     .append("?page=").append(page)
@@ -85,6 +119,9 @@ public class SkillhubMarket implements Market {
                     .append("&sortBy=").append(isSearch ? "score" : "downloads");
             if (isSearch) {
                 url.append("&keyword=").append(URLEncoder.encode(query, "UTF-8"));
+            }
+            if (hasCategory) {
+                url.append("&category=").append(URLEncoder.encode(category, "UTF-8"));
             }
 
             String body = httpGet(url.toString());
@@ -104,7 +141,8 @@ public class SkillhubMarket implements Market {
             // nextCursor 由真实总量计算：当前页未满总量且本页非空才有下一页，杜绝伪造游标
             boolean hasMore = !items.isEmpty() && (long) page * pageSize < total;
             String nextCursor = hasMore ? String.valueOf(page + 1) : null;
-            return Result.succeed(new MarketPageResult(items, nextCursor));
+            // 分类由上游服务端过滤，控制器不得再二次过滤
+            return Result.succeed(new MarketPageResult(items, nextCursor, hasCategory));
         } catch (Exception e) {
             LOG.warn("SkillhubMarket.fetchPaged error: {}", e.getMessage());
             return Result.failure(errPrefix + e.getMessage());
@@ -169,10 +207,15 @@ public class SkillhubMarket implements Market {
                     .slug(resolvedSlug)
                     .displayName(displayName)
                     .summary(summary)
-                    .description(summary)
+                    .description(getStringValue(skillNode, "overviewMd") != null
+                            ? getStringValue(skillNode, "overviewMd") : summary)
                     .ownerHandle(ownerHandle)
                     .installs(installs)
                     .stars(stars)
+                    .iconUrl(getStringValue(skillNode, "iconUrl"))
+                    .category(getStringValue(skillNode, "category"))
+                    .version(latestVersion)
+                    .tags(parseTags(skillNode.get("tags")))
                     .installSlug(resolvedSlug);
 
             return Result.succeed(detail);
@@ -321,11 +364,46 @@ public class SkillhubMarket implements Market {
                             getStringValue(node, "homepage"),
                             "https://skillhub.cn/skills/" + slug))
                     .installs(installs > 0 ? installs : downloads)
-                    .stars(getLongValue(node, "stars"));
+                    .stars(getLongValue(node, "stars"))
+                    .iconUrl(getStringValue(node, "iconUrl"))
+                    .category(getStringValue(node, "category"))
+                    .version(getStringValue(node, "version"));
 
             result.add(item);
         }
         return result;
+    }
+
+    /**
+     * 解析 tags 节点为字符串列表。
+     *
+     * <p>上游 tags 形态不稳定：实测出现过空对象 {@code {}}、字符串数组、
+     * 键值映射三种。统一收敛为「字符串值列表」：数组取元素字符串，
+     * 对象取 value 字符串，其余忽略——标签只用于详情弹窗展示，不值得为它抛错。</p>
+     */
+    static List<String> parseTags(ONode tagsNode) {
+        List<String> tags = new ArrayList<>();
+        if (tagsNode == null || tagsNode.isNull()) {
+            return tags;
+        }
+        if (tagsNode.isArray()) {
+            for (ONode n : tagsNode.getArray()) {
+                String v = n.getString();
+                if (v != null && !v.isEmpty() && !tags.contains(v)) {
+                    tags.add(v);
+                }
+            }
+            return tags;
+        }
+        if (tagsNode.isObject()) {
+            for (Map.Entry<String, ONode> e : tagsNode.getObject().entrySet()) {
+                String v = e.getValue() == null ? null : e.getValue().getString();
+                if (v != null && !v.isEmpty() && !tags.contains(v)) {
+                    tags.add(v);
+                }
+            }
+        }
+        return tags;
     }
 
     private String getStringValue(ONode node, String key) {

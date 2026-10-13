@@ -1,90 +1,223 @@
 /* skills.css — 技能管理独立主视图
  * 原位于 settings.css，现迁移为独立主视图样式。
+ * 2026-10 重构：市场标签页 + 分类筛选 + 卡片网格 + 详情弹窗 + 启禁用开关。
  */
 
 /* ===== 视图容器 ===== */
-.skills-view { flex: 1; display: none; flex-direction: column; min-height: 0; overflow: hidden; }
+.skills-view { flex: 1; display: none; flex-direction: column; min-height: 0; overflow: clip; overflow-clip-margin: 6px; }
 .skills-view.active { display: flex; }
 body.code-mode .skills-view { display: none !important; }
 
-.skills-scroll { flex: 1; overflow-y: auto; padding: 28px 24px 40px; }
-.skills-inner { max-width: 860px; margin: 0 auto; }
+/* 头部固定区：不随列表滚动（flex 列布局中不参与伸缩），
+   底色与主区一致（--bg-main）+ 下边框分隔，滚动时列表从其下方穿过。
 
-/* ===== 页头 ===== */
-.skills-header { margin-bottom: 22px; }
-.skills-title { font-size: 26px; font-weight: 600; color: var(--text-primary); letter-spacing: .3px; }
-.skills-desc { margin-top: 6px; font-size: 13px; color: var(--text-tertiary); }
+   桌面壳（electron/tauri）下 .main-area 首子元素 .titlebar-drag-region 会占位 36px，
+   chat/code 视图有内容盖住它，而本视图此前被整体压下 → 顶部多出一条空白带。
+   修法：把该 strip 隐藏（display:none，不占位），头部自身承担窗口拖拽。
 
-/* ===== 内容区块 ===== */
-.skills-section {
-    background: var(--bg-card, var(--bg-main)); border: 1px solid var(--border-color);
-    border-radius: 12px; padding: 18px 20px;
-}
+   ⚠ 两个已踩过的坑，勿再回退：
+   1) 不要给 .skills-head 加 margin-top:-36px。strip 隐藏后已不占位，负 margin 是
+      「双重补偿」——Playwright 实测 head.y = -36，顶部被 body overflow:hidden 裁掉。
+   2) 不要把 .skills-inner 的 padding-top 清零。Electron 主窗口是
+      titleBarStyle:'hidden' + titleBarOverlay{height:36}，原生窗口按钮由系统框架层
+      绘制、永远压在 web 内容之上（gourd-ai-desktop/main/titlebar.js 注释）。
+      head.y=0 时顶栏内容必须落在 36px 之下，否则右上角被窗口按钮遮挡。
+      实测旧值 48px 配 -36px margin → 内容实际在 y=12px，正好被压住 24px。
 
-/* ===== 视图 Tab ===== */
-.skills-view-tabs { display: flex; gap: 4px; padding: 0 0 0 0; border-bottom: 1px solid var(--border-color); margin-bottom: 12px; }
-.skills-view-tab { padding: 6px 14px 8px; border: none; background: transparent; color: var(--text-secondary); font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color 0.15s, border-color 0.15s; }
-.skills-view-tab:hover { color: var(--text-primary); }
-.skills-view-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 500; }
+   3) 底色必须用 --bg-main（与主区同源），禁止用 --bg-body。
+      暗色主题下 --bg-body(#131315) 比 --bg-main(#17171A) 更暗，而 resize handle、
+      列表区、其它所有视图的顶栏全部是 --bg-main —— 头部会在「侧栏右缘 → 头部
+      内容区」之间形成一条竖直色带（用户多轮反馈的「交接处/头左侧空隙」）。
+      Playwright 逐像素扫描：修复前 x=285 处 #17171A -> #131315 突变，与其它
+      视图（同位置无突变）对照即为技能页独有缺陷。 */
+.skills-head { flex-shrink: 0; position: relative; background: var(--bg-main); border-bottom: 1px solid var(--border-color); }
+/* 下边框左端补齐（用户反馈「线左侧空、右侧连到窗口边」）：
+   布局是 [.sidebar(含 1px 右边框)][.sidebar-resize-handle(5px)][.main-area]，
+   .skills-head 的 border-bottom 只从主区左缘画起，左侧恰好留下 handle 宽度的空白缺口
+   （浏览器 2x 像素扫描：缺口 5px = handle 宽度；右端直达窗口边所以显得「只断左边」）。
+   修法：左下角叠一段与 handle 同宽的贴线补住缺口 ——
+    - bottom:-1px 与下边框同一行（绝对定位参照 head 的 padding box）；
+    - pointer-events:none 不吃指针事件（实测拖拽 handle 调整侧栏宽度仍生效）；
+    - z-index:120 高于 handle 的 99，压在条带之上可见；
+    - .skills-view 必须以 overflow:clip + overflow-clip-margin 放行盒外 5px 绘制，
+      回退成 overflow:hidden 会把补齐线重新裁掉（勿改）。 */
+.skills-head::before { content: ""; position: absolute; left: -5px; bottom: -1px; width: 5px; height: 1px; background: var(--border-color); pointer-events: none; z-index: 120; }
 
-/* ===== 搜索栏 ===== */
-.skills-search-bar { padding: 0 0 14px 0; display: flex; gap: 6px; align-items: stretch; }
-.skills-market-wrap { position: relative; flex-shrink: 0; }
-.skills-market-wrap .layui-form-select,
-.skills-market-wrap .layui-form-select.layui-form-selected,
-.skills-market-wrap .layui-form-select .layui-select-title,
-.skills-market-wrap .layui-unselect {
-    border: none !important;
-    box-shadow: none !important;
-    outline: none !important;
-}
-.skills-market-icon { position: absolute; left: 12px; color: var(--text-secondary); pointer-events: none; z-index: 10; }
-.skills-search-input-wrap { position: relative; display: flex; align-items: center; flex: 1; }
+body.is-electron .skills-head { -webkit-app-region: drag; }
+body.is-electron .skills-head button,
+body.is-electron .skills-head input { -webkit-app-region: no-drag; }
+/* 分类栏/标签栏需要按住拖动平移，必须整体豁免拖拽，否则桌面壳下拖它会拖动窗口 */
+body.is-electron .skills-category-bar,
+body.is-electron .skills-view-tabs { -webkit-app-region: no-drag; }
+body.is-electron .main-area > .titlebar-drag-region { display: none; }
+.skills-head .skills-inner { padding: 14px 28px 10px; }
+/* 桌面壳：36px 让开原生窗口控件 + 4px 呼吸，比旧值 48px 紧凑 */
+body.is-electron .skills-head .skills-inner { padding-top: 40px; }
+.skills-scroll { flex: 1; overflow-y: auto; padding: 16px 28px 48px; min-height: 0; }
+/* 通栏：不限宽居中。
+   此前 max-width:1080px 使头部与卡片在宽屏下两侧各留大片空白
+   （Playwright 实测 1638px 视口下「已安装」按钮距视口右缘 164.5px，
+    而用户参考图同宽度下仅 24px）→ 用户感知为「头部右侧有间隔」。
+   卡片是 auto-fill 网格，通栏后列数随宽度自适应增加，单卡不会被拉宽。 */
+.skills-inner { width: 100%; }
+
+/* ===== 顶栏：视图 Tab（已安装标签自带数量徽标） + 搜索 ===== */
+.skills-topbar { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; flex-wrap: nowrap; min-width: 0; }
+/* 标签组不再 flex:1 撑满：Playwright 实测旧写法下 wrap 宽 951.9px，而 4 个标签内容仅约 352px，
+   标签与右侧搜索框之间出现约 600px 纯空洞（用户所指「头和右侧栏目中间有空隙」）。
+   改为标签组按内容宽、搜索框 flex:1 吸收剩余宽度 → 整行无空洞。 */
+.skills-tabs-wrap { flex: 0 1 auto; min-width: 0; }
+.skills-view-tabs { display: flex; gap: 2px; align-items: center; }
+.skills-view-tab { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border: none; background: transparent; color: var(--text-secondary); font-size: 13px; font-weight: 500; cursor: pointer; border-radius: 8px; white-space: nowrap; transition: color 0.15s, background 0.15s; flex-shrink: 0; }
+.skills-view-tab:hover { color: var(--text-primary); background: var(--bg-hover); }
+.skills-view-tab.active { color: var(--text-primary); background: var(--bg-hover); font-weight: 600; }
+/* 已安装数量徽标：嵌在标签内，不再另设右上角入口按钮（两者功能完全重复；
+   旧结构在已安装视图下还会多渲染一行返回条 → 头部 104px 两行、右侧约 1200px 空白） */
+.skills-tab-count { font-size: 11px; font-weight: 600; line-height: 1; color: var(--text-tertiary, var(--text-secondary)); background: var(--bg-hover); padding: 3px 6px; border-radius: 999px; min-width: 8px; text-align: center; }
+.skills-tab-count:empty { display: none; }
+.skills-view-tab.active .skills-tab-count { color: var(--text-primary); }
+.skills-topbar-actions { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
+
+/* ===== 搜索框（flex:1 吸收顶栏剩余宽度，消除标签与右侧之间的空洞） ===== */
+.skills-search-input-wrap { position: relative; display: flex; align-items: center; flex: 1 1 auto; min-width: 180px; }
 .skills-search-icon { position: absolute; left: 10px; color: var(--text-secondary); pointer-events: none; }
-.skills-search-input-wrap input { width: 100%; padding: 7px 32px 7px 30px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-primary); color: var(--text-primary); font-size: 13px; outline: none; box-sizing: border-box; transition: border-color 0.2s, box-shadow 0.2s; }
+.skills-search-input-wrap input { width: 100%; padding: 6px 28px 6px 30px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-primary); color: var(--text-primary); font-size: 13px; outline: none; box-sizing: border-box; transition: border-color 0.2s, box-shadow 0.2s; }
 .skills-search-input-wrap input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.15); }
 .skills-search-input-wrap input::placeholder { color: var(--text-secondary); opacity: 0.6; }
 .skills-search-clear { position: absolute; right: 6px; background: none; border: none; color: var(--text-secondary); font-size: 16px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: color 0.15s; }
 .skills-search-clear:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+/* ===== 横向滚动条带（分类栏 / 视图标签栏共用） =====
+ * 溢出时的可发现性问题：原生 overflow-x 只响应 deltaX 与 shift+wheel，
+ * 鼠标滚轮的 deltaY 不产生任何滚动（Playwright 实测 scrollLeft 恒 0），
+ * 而滚动条又被隐藏 → 鼠标用户既滚不动也拖不到，chips 只能看见前几个。
+ * 四管齐下：
+ *  1) 左右切换箭头（主入口）：仅溢出时出现，到头自动 disabled；
+ *  2) JS 把滚轮 deltaY 转成横向滚动（app-skills.js bindHScroll）；
+ *  3) JS 支持按住拖拽平移（4px 阈值区分点击）；
+ *  4) CSS 给出溢出线索：左/右缘渐隐提示还有内容（滚到头自动收起）。
+ *
+ * 结构：wrap(flex) = [prev 箭头][viewport(渐隐宿主) > .skills-hscroll(溢出宿主)][next 箭头]
+ * 渐隐伪元素必须挂在【不滚动的 viewport】上：挂在 overflow 元素自身会随内容一起滚走，
+ * 挂在 wrap 上又会被箭头盖住。
+ *
+ * ⚠ 滚动条刻意完全不占位（scrollbar-width:none + display:none）：
+ *   若改成 thin/6px 高，它会在容器底部常驻占位 → 分类栏高度突增 6px、
+ *   与顶栏错位，且 hover 才显色的设计意图落空。交互线索由 1)~4) 承担。 */
+.skills-hscroll { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -ms-overflow-style: none; }
+.skills-hscroll::-webkit-scrollbar { display: none; width: 0; height: 0; }
+/* overflow-y 必须显式 hidden：CSS 规定一轴非 visible 时，另一轴的 visible 会被计算成 auto，
+   不写会凭空多出竖向滚动条占位。 */
+.skills-hscroll-wrap { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.skills-hscroll-viewport { position: relative; flex: 1 1 auto; min-width: 0; }
+/* 左右渐隐：仅在对应方向「可滚且未到头」时出现，且不吃指针事件。
+   class 由 syncHScrollState 打在 wrap 上，用后代选择器驱动 viewport 伪元素。 */
+.skills-hscroll-wrap.can-scroll-right .skills-hscroll-viewport::after,
+.skills-hscroll-wrap.can-scroll-left .skills-hscroll-viewport::before {
+    content: ""; position: absolute; top: 0; bottom: 0; width: 40px;
+    pointer-events: none;
+}
+.skills-hscroll-wrap.can-scroll-right .skills-hscroll-viewport::after {
+    right: 0; border-radius: 0 8px 8px 0;
+    background: linear-gradient(to right, transparent, var(--bg-main) 78%);
+}
+.skills-hscroll-wrap.can-scroll-left .skills-hscroll-viewport::before {
+    left: 0; border-radius: 8px 0 0 8px;
+    background: linear-gradient(to left, transparent, var(--bg-main) 78%);
+}
+/* 左右切换箭头：默认完全不占位，仅 has-overflow（chips 真的溢出）时才出现，
+   否则两个灰色禁用箭头会常年占着布局宽度、把 chips 挤窄。 */
+.skills-hscroll-nav { display: none; align-items: center; justify-content: center; width: 22px; height: 22px; flex-shrink: 0; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; padding: 0; transition: background 0.15s, color 0.15s; }
+.skills-hscroll-wrap.has-overflow .skills-hscroll-nav { display: flex; }
+.skills-hscroll-nav:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.skills-hscroll-nav:disabled { opacity: 0.28; cursor: default; }
+.skills-hscroll.is-dragging { cursor: grabbing; }
+.skills-hscroll.is-dragging .skills-category-chip,
+.skills-hscroll.is-dragging .skills-view-tab { cursor: grabbing; }
+/* 拖动平移期间禁止文本选中拖影 */
+.skills-hscroll.is-dragging * { user-select: none; }
+
+/* ===== 分类筛选栏 ===== */
+.skills-category-bar { display: flex; gap: 6px; align-items: center; margin-bottom: 2px; padding-bottom: 2px; }
+/* chips/标签不得被压缩：flex 默认 shrink:1 会把文字挤成重叠，而不是触发溢出滚动 */
+.skills-category-chip { padding: 5px 12px; border: none; border-radius: 8px; background: transparent; color: var(--text-secondary); font-size: 13px; cursor: pointer; white-space: nowrap; transition: color 0.15s, background 0.15s; flex-shrink: 0; }
+.skills-category-chip:hover { color: var(--text-primary); }
+.skills-category-chip.active { background: var(--bg-hover); color: var(--text-primary); font-weight: 600; }
+
+/* ===== 状态区 ===== */
 .skills-status { text-align: center; padding: 16px; color: var(--text-secondary); font-size: 13px; }
 .skills-loading { display: flex; align-items: center; justify-content: center; gap: 8px; }
 .skills-error { color: #ef4444; }
 
-/* ===== 技能列表 ===== */
-.skills-list { display: flex; flex-direction: column; gap: 6px; }
-.skill-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }
-.skill-item:hover { border-color: var(--accent); box-shadow: 0 1px 6px rgba(0,0,0,0.08); }
-.skill-item:active { transform: scale(0.997); }
-.skill-item-icon { width: 36px; height: 36px; border-radius: 8px; background: linear-gradient(135deg, var(--bg-hover), var(--bg-primary)); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: var(--text-secondary); flex-shrink: 0; }
-.skill-item-info { flex: 1; min-width: 0; }
-.skill-item-name { font-size: 13px; font-weight: 500; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 6px; }
-.skill-installed-badge { font-size: 10px; font-weight: 500; color: #22c55e; background: rgba(34,197,94,0.1); padding: 1px 6px; border-radius: 3px; margin-left: 6px; vertical-align: middle; flex-shrink: 0; }
-.skill-item-desc { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
-.skill-item-meta { font-size: 10px; color: var(--text-secondary); margin-top: 3px; display: flex; gap: 10px; }
-.skill-item-actions { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
-.skill-install-btn { padding: 5px 14px; border-radius: 6px; font-size: 11px; font-weight: 500; cursor: pointer; border: 1px solid var(--accent); background: transparent; color: var(--accent); transition: all 0.2s; }
-.skill-install-btn:hover { background: var(--accent); color: var(--accent-contrast); transform: translateY(-1px); box-shadow: 0 2px 6px rgba(var(--accent-rgb), 0.3); }
-.skill-install-btn.installed { border-color: var(--color-success); color: var(--color-success); cursor: default; background: transparent; }
-.skill-install-btn.installed:hover { background: transparent; color: var(--color-success); transform: none; box-shadow: none; }
-.skill-install-btn.installing { opacity: 0.6; cursor: wait; }
-.skill-install-btn.installing .skill-install-spin { animation: skills-spin 0.8s linear infinite; }
-.skill-item-installed { cursor: default; }
-.skill-item-installed:hover { border-color: var(--border-color); box-shadow: none; }
-.skill-uninstall-btn { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--color-danger, #ef4444); background: transparent; color: var(--color-danger, #ef4444); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; flex-shrink: 0; }
-.skill-uninstall-btn:hover { background: rgba(239,68,68,0.1); }
-.skill-uninstall-btn.removing { opacity: 0.5; cursor: wait; }
+/* ===== 技能卡片网格 ===== */
+.skills-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; align-items: stretch; }
+.skill-card { position: relative; display: flex; gap: 11px; padding: 13px 14px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-card, var(--bg-main)); cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; min-width: 0; }
+.skill-card:hover { border-color: var(--accent); box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
+.skill-card:active { transform: scale(0.997); }
+
+.skill-card-icon { position: relative; width: 38px; height: 38px; border-radius: 9px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; overflow: hidden; background: var(--bg-hover); color: var(--text-secondary); }
+.skill-card-icon img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.skill-card-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.skill-card-title { display: flex; align-items: center; gap: 6px; min-width: 0; padding-right: 30px; }
+.skill-card-name { font-size: 13px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.skill-installed-badge { font-size: 10px; font-weight: 500; color: #22c55e; background: rgba(34,197,94,0.1); padding: 1px 6px; border-radius: 3px; flex-shrink: 0; }
+.skill-card-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 17px; }
+.skill-card-meta { display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-tertiary, var(--text-secondary)); margin-top: auto; padding-top: 3px; }
+.skill-card-meta span { display: inline-flex; align-items: center; gap: 4px; }
+
+.skill-card-actions { position: absolute; top: 10px; right: 10px; display: flex; align-items: center; gap: 6px; }
+.skill-card-add { width: 26px; height: 26px; border: none; border-radius: 7px; background: var(--bg-hover); color: var(--text-primary); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s, color 0.15s; }
+.skill-card-add:hover { background: var(--accent); color: var(--accent-contrast); }
+.skill-card-add.installing { opacity: 0.6; cursor: wait; }
+.skill-card-add.installing svg { animation: skills-spin 0.8s linear infinite; }
 @keyframes skills-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.skill-empty-state { text-align: center; padding: 40px 20px; color: var(--text-secondary); }
-.skills-list-footer { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 14px 0 6px; font-size: 12px; color: var(--text-secondary); }
+
+/* ===== 已安装卡片 ===== */
+.skill-card-installed { cursor: default; }
+.skill-card-installed:hover { border-color: var(--border-color); box-shadow: none; }
+.skill-card-disabled .skill-card-icon,
+.skill-card-disabled .skill-card-name,
+.skill-card-disabled .skill-card-desc { opacity: 0.55; }
+.skill-card-side { position: absolute; top: 10px; right: 10px; display: flex; align-items: center; gap: 8px; }
+.skill-uninstall-btn { width: 26px; height: 26px; border-radius: 6px; border: none; background: transparent; color: var(--text-tertiary, var(--text-secondary)); cursor: pointer; display: none; align-items: center; justify-content: center; transition: color 0.15s, background 0.15s; flex-shrink: 0; }
+.skill-card-installed:hover .skill-uninstall-btn { display: flex; }
+.skill-uninstall-btn:hover { color: var(--color-danger, #ef4444); background: rgba(239,68,68,0.1); }
+.skill-uninstall-btn.removing { opacity: 0.5; cursor: wait; }
+
+/* ===== 启禁用开关 ===== */
+.skill-toggle { position: relative; width: 36px; height: 20px; border-radius: 10px; border: none; background: var(--bg-hover); cursor: pointer; flex-shrink: 0; transition: background 0.18s; padding: 0; }
+.skill-toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--bg-card, #fff); box-shadow: 0 1px 3px rgba(0,0,0,0.25); transition: transform 0.18s; }
+.skill-toggle.on { background: var(--color-success); }
+.skill-toggle.on::after { transform: translateX(16px); }
+.skill-toggle:disabled { opacity: 0.5; cursor: wait; }
+
+/* ===== 列表底部指示器 / 空态 ===== */
+.skills-list-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 14px 0 6px; font-size: 12px; color: var(--text-secondary); }
 .skills-list-footer.error { cursor: pointer; color: var(--accent); }
 .skills-list-footer.error:hover { text-decoration: underline; }
 .skills-list-footer.end { color: var(--text-secondary); opacity: 0.7; }
+.skill-empty-state { grid-column: 1 / -1; text-align: center; padding: 40px 20px; color: var(--text-secondary); }
 
-/* ===== 安装下拉菜单 ===== */
-.skill-install-wrap { position: relative; flex-shrink: 0; padding-bottom: 8px; margin-bottom: -8px; }
-.skill-install-dropdown { position: absolute; right: 0; top: 100%; min-width: var(--dropdown-w-sm); background: var(--bg-sidebar); border: 1px solid var(--border-color); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.15); z-index: 100; padding: 4px 0; opacity: 0; visibility: hidden; transform: translateY(-4px); transition: opacity 0.12s ease, transform 0.12s ease, visibility 0s 0.12s; pointer-events: none; }
-.skill-install-dropdown.active { opacity: 1; visibility: visible; transform: translateY(0); transition: opacity 0.12s ease, transform 0.12s ease, visibility 0s 0s; pointer-events: auto; }
-.skill-install-dropdown-loading { padding: 8px 14px; font-size: 11px; color: var(--text-secondary); }
-.skill-install-scope-option { padding: 7px 14px; font-size: 12px; color: var(--text-primary); cursor: pointer; transition: background 0.1s; white-space: nowrap; }
-.skill-install-scope-option:hover { background: var(--bg-hover); color: var(--accent); }
-
+/* ===== 详情弹窗 ===== */
+.skill-detail-overlay { position: fixed; inset: 0; z-index: 1200; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; padding: 24px; }
+.skill-detail-modal { position: relative; width: 560px; max-width: 100%; max-height: 82vh; overflow-y: auto; background: var(--bg-card, var(--bg-main)); border: 1px solid var(--border-color); border-radius: 14px; padding: 22px; box-shadow: 0 18px 50px rgba(0,0,0,0.25); }
+.skill-detail-close { position: absolute; top: 14px; right: 14px; width: 30px; height: 30px; border: none; border-radius: 8px; background: transparent; color: var(--text-secondary); font-size: 20px; line-height: 1; cursor: pointer; transition: background 0.15s, color 0.15s; }
+.skill-detail-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+.skill-detail-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; padding-right: 34px; }
+.skill-detail-icon { position: relative; width: 52px; height: 52px; border-radius: 12px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 700; overflow: hidden; background: var(--bg-hover); color: var(--text-secondary); }
+.skill-detail-icon img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.skill-detail-headinfo { flex: 1; min-width: 0; }
+.skill-detail-name { font-size: 16px; font-weight: 700; color: var(--text-primary); word-break: break-all; }
+.skill-detail-owner { font-size: 12px; color: var(--text-secondary); margin-top: 3px; }
+.skill-detail-install-btn { padding: 6px 18px; border: none; border-radius: 8px; background: var(--accent); color: var(--accent-contrast); font-size: 13px; font-weight: 600; cursor: pointer; flex-shrink: 0; transition: opacity 0.15s; }
+.skill-detail-install-btn:hover { opacity: 0.88; }
+.skill-detail-install-btn.installing { opacity: 0.6; cursor: wait; }
+.skill-detail-install-btn.done { background: var(--color-success); cursor: default; }
+.skill-detail-body { font-size: 13px; color: var(--text-primary); line-height: 1.65; white-space: pre-wrap; word-break: break-word; max-height: 36vh; overflow-y: auto; }
+.skill-detail-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.skill-detail-tag { padding: 3px 9px; border-radius: 6px; background: var(--bg-hover); color: var(--text-secondary); font-size: 11px; }
+.skill-detail-stats { display: flex; gap: 36px; justify-content: center; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-color); }
+.skill-detail-stat { text-align: center; }
+.skill-detail-stat b { display: block; font-size: 14px; color: var(--text-primary); font-weight: 700; }
+.skill-detail-stat span { display: block; font-size: 12px; color: var(--text-secondary); margin-top: 3px; }

@@ -1,4 +1,123 @@
 {
+    "remote":  {
+
+        "group_local":  "本地",
+
+        "group_empty":  "暂无项目（连接在线）",
+
+        "badge_count":  "{n} 台",
+
+        "pick_connection":  "选择远程连接",
+    "connect_in_progress": "已有连接正在进行中，请稍候",
+
+        "group_global":  "全局会话",
+
+        "title":  "远程工作区",
+
+        "unsupported":  "当前环境不支持远程连接（需要桌面端）",
+
+        "saved_hosts":  "最近连接",
+
+        "no_saved_hosts":  "暂无已保存的主机",
+
+        "new_connection":  "新建连接",
+
+        "host_placeholder":  "主机地址（如 192.168.1.10）",
+
+        "user_placeholder":  "用户名",
+
+        "auth_password":  "密码",
+
+        "auth_key":  "私钥",
+
+        "password_placeholder":  "SSH 密码",
+
+        "keypath_placeholder":  "私钥路径（如 C:/Users/LUZW/.ssh/id_rsa）",
+
+        "passphrase_placeholder":  "私钥口令（可选）",
+
+        "remember_secret":  "记住密码（存入系统凭据库）",
+
+        "reconnecting":  "远程连接断开，正在重连（第 {attempt}/{max} 次）…",
+
+        "reconnected":  "远程连接已恢复",
+
+        "reconnect_giveup":  "自动重连失败，请手动重连（远程菜单 → 重连）",
+
+        "reconnect_menu":  "重新连接远程",
+
+        "jump_add":  "+ 跳板机（可选）",
+
+        "jump_remove":  "− 移除跳板机",
+
+        "jump_title":  "经跳板机连接目标主机",
+
+        "jump_host_placeholder":  "跳板机地址",
+
+        "jump_password_placeholder":  "跳板机 SSH 密码",
+
+        "jump_user_required":  "请填写跳板机用户名",
+
+        "wsl_root_warn":  "默认用户是 root：以 root 运行会让部署文件归 root 所有，建议用普通用户连接",
+
+        "browse":  "浏览",
+
+        "connect_btn":  "连接",
+
+        "connecting_to":  "正在连接 {host}:{port} …",
+
+        "connected_ok":  "远程工作区已连接",
+
+        "connect_failed":  "连接失败：",
+        "forget_host_btn":  "忘记此主机指纹并重连",
+        "forget_failed":  "忘记主机指纹失败：",
+
+        "host_user_required":  "请填写主机地址和用户名",
+
+        "remove_host":  "移除",
+
+        "badge":  "远程",
+
+        "badge_title":  "远程工作区：{host}（点击打开远程菜单）",
+
+        "mirror_sync_menu":  "同步模型配置到远程",
+
+        "disconnect_menu":  "断开远程连接",
+
+        "mirror_synced":  "模型配置已同步到远程（内存镜像）",
+
+        "mirror_sync_failed":  "模型配置同步失败（远端仍使用自身配置）",
+
+        "mirror_unavailable":  "远程连接未激活，无法同步",
+
+        "mirror_auto_failed":  "模型配置未能同步到远程（远端将使用自身配置），可在远程菜单中重试",
+
+        "scope_bind_failed":  "远程归属登记失败，该工作区仍按本地处理",
+
+        "channel_ssh":  "SSH 主机",
+
+        "channel_wsl":  "WSL",
+
+        "channel_preinstalled":  "CLI 预装",
+
+        "connecting_wsl":  "正在连接 WSL {distro}（用户 {user}）…",
+
+        "wsl_user_placeholder":  "用户名（默认发行版用户）",
+
+        "wsl_hint":  "WSL2 发行版；数据面经 localhost 直连，无需认证。发行版内没有 java 时会自动安装 JRE 17。",
+
+        "wsl_loading":  "正在获取发行版列表…",
+
+        "wsl_none":  "未发现 WSL 发行版",
+
+        "wsl_none_v2":  "未发现 WSL2 发行版（WSL1 不支持 localhost 直连）",
+
+        "preinstalled_hint":  "连接已预装 gwork CLI 的服务器：命中则跳过部署直接启动（凭据经环境变量注入，不进命令行）；未命中自动回退标准部署。",
+        "runtime_pkg_label":  "离线运行时包（可选，runtime-*.tar.gz）",
+        "runtime_pkg_hint":  "内网/离线且无 Java 的服务器：优先上传此包；留空则用安装包内置运行时，再缺回退远端自装。"
+
+    },
+
     "streaming":  {
                       "describe_images":  "请描述这些图片",
                       "process_files":  "请帮我处理这些文件",
@@ -234,8 +353,9 @@
                                        "search_placeholder":  "搜索项目…",
                                        "search_no_results":  "未找到匹配的项目",
                                        "remote_connect":  "远程连接",
-                                       "locate_multiple":  "找到多个同名目录，请选择："
-                                   },
+                                       "locate_multiple":  "找到多个同名目录，请选择：",
+                                       "open_remote_folder":  "打开远程目录",
+                                       "remote_item":  "远程工作区"                                   },
                  "sidebar":  {
                                  "load_failed_retry":  "加载失败，点击重试",
                                  "loop_mark":  "定时任务",
@@ -434,9 +554,17 @@
                                     "installed_tab":  "已安装",
                                     "uninstall":  "卸载",
                                     "uninstall_confirm":  "确定要卸载技能「{0}」吗？本地技能目录将被删除。",
-                                    "scope_global":  "全局（跨项目）",
-                                    "scope_workspace":  "本项目",
-                                    "market_tab":  "技能市场"
+                                    "market_tab":  "技能市场",
+                                     "category_all":  "全部分类",
+                                     "downloads":  "下载量",
+                                     "stars":  "星标",
+                                     "version":  "版本",
+                                     "enable":  "启用",
+                                     "disable":  "禁用",
+                                     "source_local":  "本地自定义",
+                                     "installed_ok":  "安装成功",
+                                     "scroll_prev":  "向左滚动",
+                                     "scroll_next":  "向右滚动"
                                 },
                      "mcp":  {
                                  "title":  "MCP 服务器",

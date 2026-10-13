@@ -80,6 +80,22 @@ const COMMANDS: &[&str] = &[
     "updater_install",
     // 原生文件夹选择对话框（工作区「打开文件夹」）
     "pick_directory",
+    // 原生文件选择对话框（远程向导「私钥路径 · 浏览」）
+    "pick_file",
+    // 远程工作区（P1 SSH 骨架）：连接/断开/状态
+    "remote_connect",
+    "remote_disconnect",
+    "remote_state",
+    // 方案B：枚举全部在线连接（多连接徒标/分组树/启动恢复的真相源；不含凭据）
+    "remote_list",
+    // P4：手动重推模型镜像（本地改完配置后无需重连）
+    "remote_mirror_sync",
+    // P4：断线重连（复用上次连接参数 + keyring 凭据回填；退避由前端控制）
+    "remote_reconnect",
+    // 按工作区分流：选中工作区时声明其归属环境（本地 / 某连接）
+    "remote_bind_scope",
+    // P2：WSL 发行版列表（仅 Windows 宿主；cfg 属性在 main.rs 侧，清单登记恒存在）
+    "remote_wsl_list",
 ];
 
 /// `tauri.conf.json` 的 `bundle.resources` 里每个条目的**目标目录名**（映射的值）。

@@ -2,6 +2,7 @@ package com.gourdai.core.portal.web.market.impl;
 
 import org.noear.snack4.ONode;
 import com.gourdai.core.portal.web.market.Market;
+import com.gourdai.core.portal.web.market.MarketCategory;
 import com.gourdai.core.portal.web.market.MarketDetail;
 import com.gourdai.core.portal.web.market.MarketItem;
 import com.gourdai.core.portal.web.market.MarketPageResult;
@@ -46,6 +47,33 @@ public class ModelscopeMarket implements Market {
     /** 上游 page_size 保守上限（与前端 limit 上限一致） */
     private static final int UPSTREAM_MAX_PAGE_SIZE = 100;
 
+    /**
+     * 官网分类体系 — 取自 OpenAPI 列表项 {@code category} 字段实测全集
+     * （400 样本聚合，12 个取值）。
+     *
+     * <p>上游对 category/tags 查询参数一律忽略（total 恒为 83383），服务端过滤
+     * 不可用，故分类过滤由 {@link #filterByCategory} 在适配器内客户端完成，
+     * 并置 {@code filtered=true} 阻止控制器二次过滤。</p>
+     */
+    private static final List<MarketCategory> CATEGORIES = Arrays.asList(
+            new MarketCategory("ai-media", "AI Media", "AI 多媒体"),
+            new MarketCategory("developer-tools", "Developer Tools", "开发工具"),
+            new MarketCategory("marketing-seo", "Marketing & SEO", "营销 SEO"),
+            new MarketCategory("skill-management", "Skill Management", "技能管理"),
+            new MarketCategory("cloud-devops", "Cloud & DevOps", "云与运维"),
+            new MarketCategory("frontend-development", "Frontend Dev", "前端开发"),
+            new MarketCategory("scientific-tool", "Scientific Tools", "科研工具"),
+            new MarketCategory("code-quality-testing", "Code Quality & Testing", "代码质量与测试"),
+            new MarketCategory("mobile-development", "Mobile Dev", "移动开发"),
+            new MarketCategory("doc-processing", "Doc Processing", "文档处理"),
+            new MarketCategory("ai-automation", "AI Automation", "AI 自动化"),
+            new MarketCategory("other", "Other", "其他"));
+
+    @Override
+    public Result<List<MarketCategory>> categories() {
+        return Result.succeed(CATEGORIES);
+    }
+
     @Override
     public String name() {
         return "modelscope.cn";
@@ -56,19 +84,49 @@ public class ModelscopeMarket implements Market {
         return "魔搭社区技能广场";
     }
 
+    /**
+     * {@code @owner/name} → {@code _owner_name}，与 {@link #install} 的目录名口径逐字一致。
+     */
+    @Override
+    public String installDirName(String slug) {
+        if (slug == null) {
+            return "";
+        }
+        String safeSlug = slug.replaceAll("[^a-zA-Z0-9@._/-]", "");
+        return safeSlug.replaceAll("[@/]", "_");
+    }
+
     // ==================== 列表与搜索 ====================
 
     @Override
     public Result<MarketPageResult> trending(String cursor, int limit) {
-        return fetchPaged(null, cursor, limit, "获取热门技能失败: ");
+        return trending(cursor, limit, null);
+    }
+
+    @Override
+    public Result<MarketPageResult> trending(String cursor, int limit, String category) {
+        Result<MarketPageResult> page = fetchPaged(null, cursor, limit, "获取热门技能失败: ");
+        if (page.getCode() == 200 && page.getData() != null) {
+            filterByCategory(page.getData(), category);
+        }
+        return page;
     }
 
     @Override
     public Result<MarketPageResult> search(String query, String cursor, int limit) {
+        return search(query, cursor, limit, null);
+    }
+
+    @Override
+    public Result<MarketPageResult> search(String query, String cursor, int limit, String category) {
         if (Assert.isEmpty(query)) {
-            return trending(cursor, limit);
+            return trending(cursor, limit, category);
         }
-        return fetchPaged(query, cursor, limit, "搜索技能失败: ");
+        Result<MarketPageResult> page = fetchPaged(query, cursor, limit, "搜索技能失败: ");
+        if (page.getCode() == 200 && page.getData() != null) {
+            filterByCategory(page.getData(), category);
+        }
+        return page;
     }
 
     /**
@@ -138,6 +196,8 @@ public class ModelscopeMarket implements Market {
                     .ownerHandle(getStringValue(data, "developer"))
                     .installs(getLongValue(data, "downloads"))
                     .stars(getLongValue(data, "view_count"))
+                    .iconUrl(getStringValue(data, "logo_url"))
+                    .category(getStringValue(data, "category"))
                     .installSlug(skillId);
 
             return Result.succeed(detail);
@@ -299,9 +359,34 @@ public class ModelscopeMarket implements Market {
                     .ownerHandle(getStringValue(node, "developer"))
                     .url(detailUrl)
                     .installs(getLongValue(node, "downloads"))
-                    .stars(getLongValue(node, "view_count")));
+                    .stars(getLongValue(node, "view_count"))
+                    .iconUrl(getStringValue(node, "logo_url"))
+                    .category(getStringValue(node, "category")));
         }
         return result;
+    }
+
+    /**
+     * 按分类过滤分页结果（客户端过滤）。
+     *
+     * <p>实测 modelscope OpenAPI 对 {@code category}/{@code tags}/{@code skill_category} 等
+     * 参数一律忽略（total 恒为 83382），服务端过滤不可用；只能拉一页滤一页。
+     * 副作用：过滤后单页可能不足 limit，且 total 不再对应——前端以 nextCursor 为准
+     * 继续翻页即可，分类视图不承诺精确总量。</p>
+     */
+    static MarketPageResult filterByCategory(MarketPageResult page, String category) {
+        if (category == null || category.isEmpty() || page == null || page.getItems() == null) {
+            return page;
+        }
+        List<MarketItem> kept = new ArrayList<>();
+        for (MarketItem item : page.getItems()) {
+            if (category.equals(item.getCategory())) {
+                kept.add(item);
+            }
+        }
+        page.setItems(kept);
+        page.setFiltered(true);
+        return page;
     }
 
     /** 描述取值：locales.zh.description 优先，缺失时回退 description */

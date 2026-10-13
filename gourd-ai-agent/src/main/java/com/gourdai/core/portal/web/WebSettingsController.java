@@ -59,7 +59,12 @@ import com.gourdai.core.portal.web.model.ModelsAdapterManager;
 import com.gourdai.core.portal.web.model.ModelsFetchException;
 import com.gourdai.core.portal.web.model.ModelsFetchReason;
 import com.gourdai.core.portal.web.market.Market;
+import com.gourdai.core.portal.web.market.MarketCategory;
+import com.gourdai.core.portal.web.market.MarketDetail;
+import com.gourdai.core.portal.web.market.MarketItem;
 import com.gourdai.core.portal.web.market.MarketManager;
+import com.gourdai.core.portal.web.market.MarketPageResult;
+import com.gourdai.ai.talents.registry.SkillMdFrontmatter;
 import org.noear.solon.core.handle.Context;
 import org.noear.solon.core.handle.Result;
 import org.noear.solon.core.util.Assert;
@@ -2242,6 +2247,60 @@ public class WebSettingsController {
         return Result.succeed(syncCount);
     }
 
+    // ==================== 远端模型镜像（远程工作区 P4，方案 A 内存镜像） ====================
+
+    /**
+     * 桌面端推送本机模型镜像（仅远端模式）。
+     *
+     * <p>远程工作区方案 A：连接建立时，桌面端读本机 {@code ~/.gwork/settings.json} 的
+     * providers/models/defaultModel，经加密隧道（SSH direct-tcpip / WSL localhost）
+     * POST 到本端点；后端把镜像载入内存（{@link AgentSettings#applyRemoteMirror}）并同步
+     * 运行时引擎。镜像数据<b>不落盘</b>（applyRemoteMirror 置 mirrored 后 saveToFile 拒绝回写），
+     * 随远端进程销毁即消失——apiKey 在远端磁盘上零残留。</p>
+     *
+     * <p>访问面：远端模式由 WebAuthFilter 用注入的随机 Basic Auth 凭据保护所有路径；
+     * 非远端模式（本地/CLI）直接拒绝——本地 settings 已在进程里，镜像无意义且白开放接口。</p>
+     *
+     * <p>幂等性：推送方每次发完整快照，重复推送结果是最后一次生效（替换语义）。</p>
+     */
+    @Post
+    @Mapping("/web/settings/overlay")
+    public Result settingsOverlayImport(@Body String json) throws Exception {
+        if (AgentFlags.isRemoteDeployed() == false) {
+            return Result.failure("settings overlay is only available in remote-deployed mode");
+        }
+        if (json == null || json.trim().isEmpty()) {
+            // 不用 Assert.isEmpty：它不 trim，纯空白载荷会直透到 JSON 解析抛裸异常
+            return Result.failure("empty overlay payload");
+        }
+
+        // 快照旧模型键集：镜像替换后，把已被镜像淘汰、但运行时引擎仍持有的旧模型逐一摘除
+        Set<String> previousModelKeys = new HashSet<>(settings.getModels().keySet());
+
+        settings.applyRemoteMirror(json);
+
+        int added = 0;
+        for (Map.Entry<String, ModelDo> entry : settings.getModels().entrySet()) {
+            ModelDo model = entry.getValue();
+            engine.removeModel(entry.getKey());
+            if (model != null && model.isEnabled()) {
+                engine.addModel(model);
+                added++;
+            }
+        }
+        for (String stale : previousModelKeys) {
+            if (settings.getModels().containsKey(stale) == false) {
+                engine.removeModel(stale);
+            }
+        }
+        engine.setDefaultModel(settings.getDefaultModel());
+
+        // 镜像模式下禁用落盘：这里绝不调 saveSettings()。
+        LOG.info("[Settings] Remote overlay imported: {} provider(s), {} model(s), {} enabled, default={}",
+                settings.getProviders().size(), settings.getModels().size(), added, settings.getDefaultModel());
+        return Result.succeed();
+    }
+
     /**
      * 解析请求超时（形如 "120s"），无值时返回 fallback。
      */
@@ -2359,6 +2418,8 @@ public class WebSettingsController {
      * @param cursor     上一页返回的游标（首次加载不传）
      * @param limit      每页返回数量限制（默认 20）
      * @param marketName 市场名字（可选，默认使用 Skillhub）
+     * @param category   市场原生分类 key（可选；空=全部。适配器支持服务端过滤时已过滤，
+     *                   否则由本方法做通用客户端过滤）
      */
     @Get
     @Mapping("/web/settings/skills/proxy")
@@ -2366,59 +2427,127 @@ public class WebSettingsController {
                               @Param(value = "q", defaultValue = "") String query,
                               @Param(value = "cursor", defaultValue = "") String cursor,
                               @Param(value = "limit", defaultValue = "20") int limit,
-                              @Param(value = "marketName", defaultValue = "") String marketName) {
+                              @Param(value = "marketName", defaultValue = "") String marketName,
+                              @Param(value = "category", defaultValue = "") String category) {
         if (limit < 1) limit = 20;
         if (limit > 100) limit = 100;
 
         Market market = marketManager.getMarketByName(marketName);
+        boolean hasCategory = category != null && !category.isEmpty();
+        Result<MarketPageResult> result;
         if ("search".equals(action) && query != null && !query.isEmpty()) {
-            return market.search(query, cursor, limit);
+            result = market.search(query, cursor, limit, category);
         } else {
-            return market.trending(cursor, limit);
+            result = market.trending(cursor, limit, category);
         }
+
+        // 通用客户端过滤兑底：适配器未自行过滤（filtered=false）时才做，
+        // 避免对已服务端过滤的页二次过滤（会把补偿过的页再砍一刀）
+        if (hasCategory && result != null && result.getCode() == 200 && result.getData() != null
+                && !result.getData().isFiltered() && result.getData().getItems() != null) {
+            List<MarketItem> kept = new ArrayList<>();
+            for (MarketItem item : result.getData().getItems()) {
+                if (category.equals(item.getCategory())) {
+                    kept.add(item);
+                }
+            }
+            result.getData().setItems(kept);
+            result.getData().setFiltered(true);
+        }
+        return result;
     }
 
     /**
      * 安装技能 — 委派给 Market 适配器完成下载、解压，然后刷新技能池。
      *
-     * <p>挂载点已移除：安装目标只有「全局区」与「当前工作区」两个固定目录，
-     * 由 {@code scope} 参数二选一，默认 {@code workspace}。</p>
+     * <p>安装目标统一为「全局区」：技能对 agent 全局可见，由运行时自行发现，
+     * 不再区分项目作用域（{@code scope} 参数保留仅为兼容旧前端，一律忽略）。
+     * 安装成功后在技能目录写入 {@code .skill-market.json} 元数据（市场名/slug/图标），
+     * 供已安装视图展示来源与图标。</p>
      *
      * @param slug       技能 slug（必填）
      * @param marketName 市场名称（可选）
-     * @param scope      安装作用域：{@code global}（全局区，跨项目共享）或 {@code workspace}（仅当前项目）
      */
     @Post
     @Mapping("/web/settings/skills/install")
     public Result skillsInstall(Context ctx, @Param("slug") String slug,
                                 @Param(value = "marketName", defaultValue = "") String marketName,
-                                @Param(value = "scope", defaultValue = "workspace") String scope) {
+                                @Param(value = "scope", defaultValue = "global") String scope) {
         if (Assert.isEmpty(slug)) {
             return Result.failure("slug is required");
         }
 
         Market market = marketManager.getMarketByName(marketName);
 
-        TalentScope targetScope = TalentScope.of(scope);
-        if (targetScope == null) {
-            // 非法 scope 不得静默落盘：getSkillsDir(null) 会走 else 分支返回全局目录，
-            // 技能会被装到用户未曾选择的作用域里去
-            return Result.failure(400, "Unsupported scope: " + scope);
-        }
-
-        Path skillsDir = engine.getTalentRegistry().getSkillsDir(targetScope);
+        Path skillsDir = engine.getTalentRegistry().getSkillsDir(TalentScope.GLOBAL);
         if (skillsDir == null) {
-            return Result.failure("技能目录不可用（scope=" + targetScope + "）");
+            return Result.failure("技能目录不可用（scope=global）");
         }
 
         Result<String> result = market.install(slug, skillsDir);
 
-        // 安装成功后重新扫描技能目录
+        // 安装成功后写入市场元数据并重新扫描技能目录
         if (result.getCode() == 200) {
+            writeMarketMeta(skillsDir, market, slug);
             engine.refreshTalents();
         }
 
         return result;
+    }
+
+    /**
+     * 在已安装技能目录写入 {@code .skill-market.json}（市场名/市场 slug/图标 URL）。
+     *
+     * <p>失败只记日志不影响安装结果：元数据仅用于展示，写坏了不应让安装回滚。</p>
+     */
+    private void writeMarketMeta(Path skillsDir, Market market, String slug) {
+        try {
+            String dirName = market.installDirName(slug);
+            if (dirName == null || dirName.isEmpty()) {
+                return;
+            }
+            Path target = skillsDir.resolve(dirName);
+            if (!Files.isDirectory(target)) {
+                return;
+            }
+            String iconUrl = null;
+            try {
+                Result<MarketDetail> detail = market.detail(slug);
+                if (detail != null && detail.getCode() == 200 && detail.getData() != null) {
+                    iconUrl = detail.getData().getIconUrl();
+                }
+            } catch (Exception ignore) {
+                // 图标取不到就算了，元数据其余字段仍要写
+            }
+            ONode meta = new ONode();
+            meta.set("market", market.name());
+            meta.set("slug", slug);
+            if (iconUrl != null && !iconUrl.isEmpty()) {
+                meta.set("iconUrl", iconUrl);
+            }
+            Files.write(target.resolve(".skill-market.json"),
+                    meta.toJson().getBytes(StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            LOG.warn("[Settings] Failed to write skill market meta: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 读取技能目录的市场元数据（{@code .skill-market.json}），不存在返回 null。
+     */
+    private ONode readMarketMeta(Path skillDir) {
+        if (skillDir == null) {
+            return null;
+        }
+        Path meta = skillDir.resolve(".skill-market.json");
+        if (!Files.isRegularFile(meta)) {
+            return null;
+        }
+        try {
+            return ONode.ofJson(new String(Files.readAllBytes(meta), StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
@@ -2428,10 +2557,11 @@ public class WebSettingsController {
     @Get
     @Mapping("/web/settings/skills/installed")
     public Result skillsInstalled(Context ctx) {
-        List<Map<String, String>> skills = new ArrayList<>();
+        List<Map<String, Object>> skills = new ArrayList<>();
         Set<String> added = new HashSet<>();
 
-        for (SkillDir skill : engine.getSkills()) {
+        // 用 getSkillsAll：禁用技能也要出现在管理视图（否则无法重新启用）
+        for (SkillDir skill : engine.getSkillsAll()) {
             if (!added.add(skill.getName())) {
                 continue;
             }
@@ -2448,14 +2578,271 @@ public class WebSettingsController {
                 }
             }
 
-            Map<String, String> item = new LinkedHashMap<>();
+            Map<String, Object> item = new LinkedHashMap<>();
             item.put("name", skill.getName());
             item.put("description", desc != null ? desc : "");
             item.put("scope", skill.getScope() != null ? skill.getScope().code() : "");
+            item.put("enabled", skill.isEnabled());
+            item.put("version", skill.getVersion());
+
+            ONode meta = readMarketMeta(skill.getRealPath());
+            if (meta != null) {
+                item.put("market", meta.get("market").getString());
+                item.put("marketSlug", meta.get("slug").getString());
+                String iconUrl = meta.get("iconUrl").getString();
+                if (iconUrl != null && !iconUrl.isEmpty()) {
+                    item.put("iconUrl", iconUrl);
+                }
+            }
             skills.add(item);
         }
 
+        // 稳定顺序：注册表底层是 ConcurrentHashMap，values() 顺序随哈希漂移，
+        // 不排序会让已安装列表每次刷新都换位置（用户视角=列表在跳）
+        skills.sort(Comparator.comparing(m -> String.valueOf(m.get("name")), String.CASE_INSENSITIVE_ORDER));
+
         return Result.succeed(skills);
+    }
+
+    /**
+     * 技能详情 — 委派给市场适配器的 detail，供详情弹窗展示。
+     *
+     * @param slug       市场技能 slug（必填）
+     * @param marketName 市场名称（可选，默认市场）
+     */
+    @Get
+    @Mapping("/web/settings/skills/detail")
+    public Result skillsDetail(Context ctx, @Param("slug") String slug,
+                               @Param(value = "marketName", defaultValue = "") String marketName) {
+        if (Assert.isEmpty(slug)) {
+            return Result.failure("slug is required");
+        }
+        Market market = marketManager.getMarketByName(marketName);
+        return market.detail(slug);
+    }
+
+    /**
+     * 市场分类列表 — 供市场标签页下的分类筛选栏渲染；空列表 = 该市场无分类能力。
+     */
+    @Get
+    @Mapping("/web/settings/skills/categories")
+    public Result skillsCategories(Context ctx, @Param(value = "marketName", defaultValue = "") String marketName) {
+        Market market = marketManager.getMarketByName(marketName);
+        Result<List<MarketCategory>> result = market.categories();
+        if (result == null || result.getCode() != 200 || result.getData() == null) {
+            return Result.succeed(Collections.emptyList());
+        }
+        return result;
+    }
+
+    /**
+     * 启用/禁用已安装技能 — 改写 SKILL.md frontmatter 的 {@code enabled} 字段后刷新技能池。
+     *
+     * <p>禁用不删文件：技能仍留在磁盘与已安装列表，仅从模型可见面（getSkills /
+     * /web/chat/hints / skillread）摘除。scope 缺省 global。</p>
+     */
+    @Post
+    @Mapping("/web/settings/skills/toggle")
+    public Result skillsToggle(@Param("skillName") String skillName,
+                               @Param("enabled") Boolean enabled,
+                               @Param(value = "scope", defaultValue = "global") String scope) {
+        if (Assert.isEmpty(skillName)) {
+            return Result.failure("skillName is required");
+        }
+        if (enabled == null) {
+            return Result.failure("enabled is required");
+        }
+        if (skillName.contains("..") || skillName.contains("\\")) {
+            return Result.failure("非法技能名");
+        }
+
+        SkillDir target = resolveInstalledSkill(skillName, scope);
+        if (target == null || target.getRealPath() == null) {
+            return Result.failure("技能不存在: " + skillName);
+        }
+
+        try {
+            boolean written = SkillMdFrontmatter.setEnabled(target.getRealPath(), enabled);
+            if (!written) {
+                return Result.failure("技能缺少 SKILL.md: " + skillName);
+            }
+            engine.refreshTalents();
+            LOG.info("[Settings] Skill {} -> {}", skillName, enabled ? "enabled" : "disabled");
+            return Result.succeed(enabled);
+        } catch (Exception e) {
+            LOG.warn("[Settings] Failed to toggle skill {}: {}", skillName, e.getMessage());
+            return Result.failure("操作失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 技能图标代理 — 前端不直连市场图床（跨域/防盗链/隐私），由后端拉取后回传。
+     *
+     * <p>安全门禁（本端点是用户可控 URL 的服务端 fetch，即 SSRF 面）：</p>
+     * <ul>
+     *   <li>仅接受 http/https 绝对地址；</li>
+     *   <li>逐跳校验主机：回环/私网/链路本地/组播/ULA 一律拒绝（含重定向目标），
+     *       防止借本端点探测内网；</li>
+     *   <li>不信任客户端自动跟跳：手动限 3 跳，每跳重新校验 scheme+host；</li>
+     *   <li>响应体限 2MB，超限丢弃——图标不该是任意大文件，也防内存放大。</li>
+     * </ul>
+     *
+     * <p>刻意不用 {@code HttpUtils}（okhttp 底座）：其重定向跟随不可关闭，
+     * 无法对重定向目标做逐跳校验；JDK HttpURLConnection 可精确控制。</p>
+     */
+    @Get
+    @Mapping("/web/settings/skills/icon")
+    public void skillsIcon(Context ctx, @Param("url") String url) throws IOException {
+        IconFetch fetch = fetchIcon(url);
+        if (fetch == null) {
+            ctx.status(404);
+            ctx.output("");
+            return;
+        }
+        ctx.contentType(fetch.contentType != null && fetch.contentType.startsWith("image/")
+                ? fetch.contentType : "image/png");
+        ctx.headerSet("Cache-Control", "public, max-age=86400");
+        ctx.output(fetch.bytes);
+    }
+
+    /** 图标拉取上限：2MB（图标体积的宽松上界，兼防内存放大） */
+    static final int ICON_MAX_BYTES = 2 * 1024 * 1024;
+    /** 重定向最大跳数（CDN 一跳足够，3 跳是宽松上界） */
+    static final int ICON_MAX_REDIRECTS = 3;
+
+    /** 图标拉取结果（字节 + 内容类型）；null 表示拒绝或失败 */
+    static final class IconFetch {
+        final byte[] bytes;
+        final String contentType;
+
+        IconFetch(byte[] bytes, String contentType) {
+            this.bytes = bytes;
+            this.contentType = contentType;
+        }
+    }
+
+    /**
+     * 拉取图标：逐跳校验 scheme/host、手动限跳、限体积。
+     *
+     * @return 成功返回 {@link IconFetch}；任何一环不合规或失败返回 null
+     */
+    static IconFetch fetchIcon(String url) {
+        String current = url;
+        for (int hop = 0; hop <= ICON_MAX_REDIRECTS; hop++) {
+            if (current == null || current.isEmpty()) {
+                return null;
+            }
+            java.net.URI uri;
+            try {
+                uri = new java.net.URI(current);
+            } catch (Exception e) {
+                return null;
+            }
+            String scheme = uri.getScheme();
+            if (!"https".equalsIgnoreCase(scheme) && !"http".equalsIgnoreCase(scheme)) {
+                return null;
+            }
+            if (isPrivateHost(uri.getHost())) {
+                return null;
+            }
+
+            java.net.HttpURLConnection conn = null;
+            try {
+                conn = (java.net.HttpURLConnection) uri.toURL().openConnection();
+                conn.setInstanceFollowRedirects(false);
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(15000);
+                conn.setRequestProperty("User-Agent", "GWork/1.0");
+                int code = conn.getResponseCode();
+                if (code >= 300 && code < 400) {
+                    String location = conn.getHeaderField("Location");
+                    current = (location == null) ? null : uri.resolve(location).toString();
+                    continue;
+                }
+                if (code < 200 || code >= 300) {
+                    return null;
+                }
+                byte[] body = readCapped(conn.getInputStream(), ICON_MAX_BYTES);
+                if (body == null) {
+                    return null;
+                }
+                return new IconFetch(body, conn.getContentType());
+            } catch (Exception e) {
+                return null;
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 主机是否落在不可代理范围（回环/私网/链路本地/组播/任意地址/IPv6 ULA）。
+     *
+     * <p>解析失败一律按不可代理处理：名字解不出来本就不该去连。</p>
+     */
+    static boolean isPrivateHost(String host) {
+        if (host == null || host.isEmpty()) {
+            return true;
+        }
+        java.net.InetAddress addr;
+        try {
+            addr = java.net.InetAddress.getByName(host);
+        } catch (java.net.UnknownHostException e) {
+            return true;
+        }
+        if (addr.isLoopbackAddress() || addr.isSiteLocalAddress() || addr.isLinkLocalAddress()
+                || addr.isAnyLocalAddress() || addr.isMulticastAddress()) {
+            return true;
+        }
+        byte[] raw = addr.getAddress();
+        if (raw != null && raw.length == 16) {
+            int b0 = raw[0] & 0xff;
+            // IPv6 ULA fc00::/7（JDK 的 isSiteLocalAddress 只认已废弃的 fec0::/10）
+            if (b0 == 0xfc || b0 == 0xfd) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 限体积读取：超过 max 返回 null（不返回截断体——半张图标没有意义） */
+    private static byte[] readCapped(java.io.InputStream in, int max) throws IOException {
+        java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        int total = 0;
+        int n;
+        while ((n = in.read(chunk)) > 0) {
+            total += n;
+            if (total > max) {
+                return null;
+            }
+            buf.write(chunk, 0, n);
+        }
+        return buf.toByteArray();
+    }
+
+    /**
+     * 按名称反查已安装技能：scope 合法时限定作用域，否则全局优先、工作区兑底。
+     */
+    private SkillDir resolveInstalledSkill(String skillName, String scope) {
+        TalentScope targetScope = TalentScope.of(scope);
+        if (targetScope != null) {
+            for (SkillDir skill : engine.getSkillsByScope(targetScope)) {
+                if (skillName.equals(skill.getName())) {
+                    return skill;
+                }
+            }
+            return null;
+        }
+        for (SkillDir skill : engine.getSkillsAll()) {
+            if (skillName.equals(skill.getName())) {
+                return skill;
+            }
+        }
+        return null;
     }
 
 
@@ -2468,15 +2855,9 @@ public class WebSettingsController {
      */
     @Post
     @Mapping("/web/settings/skills/uninstall")
-    public Result skillsUninstall(@Param("scope") String scope, @Param("skillName") String skillName) {
+    public Result skillsUninstall(@Param(value = "scope", defaultValue = "") String scope, @Param("skillName") String skillName) {
         if (Assert.isEmpty(skillName)) {
             return Result.failure("skillName is required");
-        }
-
-        TalentScope targetScope = TalentScope.of(scope);
-        if (targetScope == null) {
-            // 与 skillsInstall 同口径：非法 scope 明确 400，而不是静默按全局区反查/删除
-            return Result.failure(400, "Unsupported scope: " + scope);
         }
 
         // 目录名安全校验：技能名来自扫描产物，但仍是外部输入——
@@ -2488,17 +2869,13 @@ public class WebSettingsController {
             return Result.failure("非法技能名");
         }
 
-        // 从注册表按 scope+name 反查真实目录：不存在即失败，不猜路径
-        SkillDir target = null;
-        for (SkillDir skill : engine.getSkillsByScope(targetScope)) {
-            if (skillName.equals(skill.getName())) {
-                target = skill;
-                break;
-            }
-        }
+        // 从注册表反查真实目录：不存在即失败，不猜路径（scope 缺省时全局优先、工作区兑底）
+        SkillDir target = resolveInstalledSkill(skillName, scope);
         if (target == null || target.getRealPath() == null) {
-            return Result.failure("技能不存在: " + skillName + "（scope=" + targetScope + "）");
+            return Result.failure("技能不存在: " + skillName);
         }
+
+        TalentScope targetScope = target.getScope();
 
         // 双保险：解析后的目录必须仍在对应技能根目录之内
         Path skillsRoot = engine.getTalentRegistry().getSkillsDir(targetScope);

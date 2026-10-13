@@ -53,7 +53,12 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .history-tab { display: flex; align-items: center; gap: 6px; padding: 5px 10px; border: none; border-radius: 999px; background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
 .history-tab:hover { color: var(--text-primary); }
 .history-tab.active { background: var(--bg-hover); color: var(--text-primary); font-weight: 600; }
-.history-tab-actions { display: flex; gap: 2px; }
+ .history-tab-actions { display: flex; gap: 2px; }
+ /* 侧边栏被拖窄时（JS 在 app-ui.js 拖拽/恢复宽度时切换 .sidebar-narrow），
+    「对话/项目」pill 收缩为仅图标，避免与右侧展开/搜索/清空三个按钮互相覆盖。
+    注意不能用 media query：侧边栏宽度与窗口宽度无关。 */
+ .sidebar.sidebar-narrow .history-tab { padding: 5px 7px; gap: 0; }
+ .sidebar.sidebar-narrow .history-tab span { display: none; }
 /* 「展开全部/收起全部」按钮双态图标：存在收起项目 → 显示「展开」图标；全部展开 → 切到「收拢」图标（.collapse-mode） */
 #expandAllBtn .collapse-all-icon { display: none; }
 #expandAllBtn.collapse-mode .expand-all-icon { display: none; }
@@ -84,19 +89,26 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    【尺寸纪律】按钮 flex:0 1 auto + min-width:0，截断交给 label 自己 overflow，
    绝不在按钮上写 overflow:hidden —— 红点定在 top/right 负偏移，会被裁掉；
    也不给固定宽度 —— 德语/俄语这类长文案会撑宽底栏或溢出被切。 */
-.sidebar-update-btn { position: relative; display: none; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 100%; padding: 6px 10px; background: none; border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-secondary); font-size: 12px; line-height: 1; white-space: nowrap; cursor: pointer; transition: all 0.2s; }
+.sidebar-update-btn { position: relative; display: none; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 100%; padding: 5px 10px; background: none; border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-secondary); font-size: 12px; line-height: 1; white-space: nowrap; cursor: pointer; transition: all 0.2s; }
 .sidebar-update-btn.is-visible { display: flex; }
 .sidebar-update-btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--accent); }
 .sidebar-update-btn:active { transform: scale(0.97); }
-.sidebar-update-btn svg { flex-shrink: 0; }
+.sidebar-update-btn svg { flex-shrink: 0; width: 14px; height: 14px; }
 /* 省略号只发生在 label 上：窄侧栏/长语种下文案截断，而不是整个按钮溢出 */
 .sidebar-update-btn-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* 下载中：百分比用等宽数字，避免 9% → 10% → 100% 跳宽把按钮撑得一抽一抽 */
 .sidebar-update-btn[data-state="downloading"] .sidebar-update-btn-label { font-variant-numeric: tabular-nums; }
-/* 下载完成：升格为强调色主按钮（底栏里唯一的行动号召），红点让位给底色 */
-.sidebar-update-btn[data-state="downloaded"] { background: var(--accent); border-color: transparent; color: var(--accent-contrast); font-weight: 600; }
-.sidebar-update-btn[data-state="downloaded"]:hover { background: var(--accent-hover); color: var(--accent-contrast); }
+/* 下载完成：收敛为 accent 淡底 chip（--accent-light 底 + rgba accent 描边 + accent 色图标），
+   文字走 --text-primary。历史教训：此态曾是 --accent 实底 + font-weight:600 —— 它是底栏
+   唯一实心色块，暗色主题（graphite accent=近白）下成为全侧栏最亮白斑（与侧栏底 ~15:1），
+   既显「大一号」又与底栏安静语境脱节；且实底白字在 indigo 预设 light/dark 仅 4.28/4.44，
+   曾被迫登记基线偏差。改淡底族后实测 5 预设 × 2 主题文字对比度全部 ≥ 4.5（零偏差）：
+   文字用 primary（≥11:1），accent 身份由淡底/描边/图标承载（图标属图形对象，门槛 3:1，
+   实测最低 3.80）。hover 仅把描边锐化为实 accent 提供 affordance，不引入新颜色。 */
+.sidebar-update-btn[data-state="downloaded"] { background: var(--accent-light); border-color: rgba(var(--accent-rgb), 0.35); color: var(--text-primary); font-weight: 500; }
+.sidebar-update-btn[data-state="downloaded"]:hover { background: var(--accent-light); border-color: var(--accent); color: var(--text-primary); }
 .sidebar-update-btn[data-state="downloaded"] .sidebar-update-dot { display: none; }
+.sidebar-update-btn[data-state="downloaded"] svg { color: var(--accent); }
 /* 红点角标：「有新版待处理」的视觉锚，独立元素承载以便 downloaded 态整体隐藏 */
 .sidebar-update-dot { position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--error-text); box-shadow: 0 0 0 2px var(--bg-sidebar); pointer-events: none; animation: gworkUpdateDotPulse 2s ease-in-out infinite; }
 /* 就地进度条：JS 把百分比写进 --gwork-update-pct，文字之外再给一条底部细线，
@@ -114,7 +126,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .sidebar-footer .settings-btn { flex-shrink: 0; white-space: nowrap; }
 .sidebar-footer .settings-btn .sidebar-text { white-space: nowrap; }
 /* 极窄侧栏兜底：空间不够时整块收起文字、只留图标。不用 JS 测宽：进图标态后，
-   红点（待更新）+ 底边进度条（下载中）+ 强调色实心（可安装）仍完整传达状态，
+   红点（待更新）+ 底边进度条（下载中）+ 强调色淡底 chip（可安装）仍完整传达状态，
    文字降级到 title；而“百分比被省略号截成 4…”会让进度信息直接失效，比不显示更糟。
 
    阈值 234px 由浏览器实测标定（.tmp/probe_de_band.js，12 语言 × 多状态逐宽扫描）：
@@ -124,7 +136,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    ~262px 以下才退图标态（可拖至最窄 180px，见 app-ui.js SIDEBAR_MIN_WIDTH）。 */
 @container (max-width: 234px) {
     .sidebar-update-btn .sidebar-update-btn-label { display: none; }
-    .sidebar-update-btn { padding: 6px 8px; }
+    .sidebar-update-btn { padding: 5px 8px; }
 }
 /* Chat 聚合视图：小节标题（项目 / 任务） */
 .sidebar-section-title { padding: 10px 8px 6px; font-size: 11px; color: var(--text-tertiary); font-weight: 600; letter-spacing: 1px; }
@@ -287,10 +299,10 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .im-bind-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.08); }
 .im-bind-input::placeholder { color: var(--text-secondary); }
 .im-bind-confirm-btn { padding: 10px 0; width: 100%; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; margin-top: 4px; }
-.im-bind-confirm-btn.feishu { background: var(--color-feishu); color: #fff; }
-.im-bind-confirm-btn.feishu:hover { background: var(--color-feishu-hover); }
-.im-bind-confirm-btn.dingtalk { background: var(--color-dingtalk); color: #fff; }
-.im-bind-confirm-btn.dingtalk:hover { background: var(--color-dingtalk-hover); }
+.im-bind-confirm-btn.feishu { background: var(--color-feishu); color: var(--on-feishu); }
+.im-bind-confirm-btn.feishu:hover { background: var(--color-feishu-hover); color: var(--on-feishu-hover); }
+.im-bind-confirm-btn.dingtalk { background: var(--color-dingtalk); color: var(--on-dingtalk); }
+.im-bind-confirm-btn.dingtalk:hover { background: var(--color-dingtalk-hover); color: var(--on-dingtalk-hover); }
 .im-bind-hint { font-size: 12px; color: var(--text-secondary); margin-top: 12px; line-height: 1.6; text-align: left; }
 
 /* ===== Welcome ===== */
@@ -936,8 +948,11 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 /* 禁用态不用整按钮 opacity：暗色下近白 accent 圆被压成灰团、图标更糊；
    改中性底 + 三级文字色，明暗两套都清晰表达「不可用」。 */
 .send-btn:disabled { background: var(--bg-hover); color: var(--text-tertiary); cursor: not-allowed; }
-.send-btn.stop-mode { background: var(--color-danger); color: #fff; }
-.send-btn.stop-mode:hover { background: var(--color-danger-hover); }
+/* 停止按钮是纯图形（setBtnStopMode 只塞 .stop-icon 方块，无文字）：按图形对象口径
+   WCAG 1.4.11（3:1）用 danger-solid 成套令牌，红底白方块（业界惯例）；
+   文本口径的 --on-danger（深色前景）套在方块上会把它变黑点。 */
+.send-btn.stop-mode { background: var(--color-danger-solid); color: var(--on-danger-icon); }
+.send-btn.stop-mode:hover { background: var(--color-danger-solid-hover); }
 .send-btn.stop-mode .stop-icon { width: 12px; height: 12px; background: currentColor; border-radius: 2px; }
 
 /* Model Selector */
@@ -1041,8 +1056,8 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .attachment-item-file { width: 60px; height: 60px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 4px; background: var(--bg-hover); border: 1px solid var(--border-color); border-radius: 6px; }
 .attachment-item-file .file-icon { display: inline-flex; align-items: center; color: var(--accent); flex-shrink: 0; }
 .attachment-item-file .file-name { font-size: 9px; font-weight: 500; color: var(--text-primary); width: 100%; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.attachment-item-remove { position: absolute; top: -5px; right: -5px; width: 18px; height: 18px; border-radius: 50%; background: var(--color-danger); color: #fff; border: 2px solid var(--bg-input-box); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px; line-height: 1; }
-.attachment-item-remove:hover { background: var(--color-danger-hover); }
+.attachment-item-remove { position: absolute; top: -5px; right: -5px; width: 18px; height: 18px; border-radius: 50%; background: var(--color-danger); color: var(--on-danger); border: 2px solid var(--bg-input-box); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px; line-height: 1; }
+.attachment-item-remove:hover { background: var(--color-danger-hover); color: var(--on-danger-hover); }
 
 .attach-input { display: none; }
 /* Plus 聚合菜单：原一排圆钮（附加文件/图片/快捷命令/技能/子代理/定时任务/历史消息）
@@ -1124,8 +1139,8 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .access-ack-text { font-size: 12px; color: var(--text-primary); line-height: 1.5; }
 .access-confirm-btns { display: flex; gap: 8px; justify-content: flex-end; }
 /* 「允许完全访问」= 危险色实底按钮 + 内嵌警示图标：这是弹窗里唯一的不可逆动作，须取警示语义。 */
-.access-confirm-btns .access-allow-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--color-danger); border-color: var(--color-danger); color: #fff; }
-.access-confirm-btns .access-allow-btn:hover { background: var(--color-danger-hover); border-color: var(--color-danger-hover); }
+.access-confirm-btns .access-allow-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--color-danger); border-color: var(--color-danger); color: var(--on-danger); }
+.access-confirm-btns .access-allow-btn:hover { background: var(--color-danger-hover); border-color: var(--color-danger-hover); color: var(--on-danger-hover); }
 /* 未勾选风险确认时置灰禁用 */
 .access-confirm-btns .kd-btn[disabled] { opacity: 0.45; cursor: not-allowed; filter: grayscale(0.6); }
 
@@ -1275,8 +1290,10 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .voice-btn { width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--accent); color: var(--accent-contrast); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; flex-shrink: 0; }
 .voice-btn:hover { background: var(--accent-hover); transform: scale(1.05); }
 .voice-btn svg { width: 18px; height: 18px; fill: currentColor; }
-.voice-btn.recording { background: var(--color-danger); color: #fff; animation: voice-pulse 1.2s ease-in-out infinite; }
-.voice-btn.recording:hover { background: var(--color-danger-hover); color: #fff; }
+/* 录音态是纯图形（内为麦克风 svg，无文字）：与停止按钮同用 danger-solid 图形口径令牌，
+   白麦克风在 #ef4444 上 3.76 ≥ WCAG 1.4.11（3:1）；深色前景会显成黑麦克风。 */
+.voice-btn.recording { background: var(--color-danger-solid); color: var(--on-danger-icon); animation: voice-pulse 1.2s ease-in-out infinite; }
+.voice-btn.recording:hover { background: var(--color-danger-solid-hover); color: var(--on-danger-icon); }
 .voice-btn.hidden { display: none; }
 @keyframes voice-pulse { 0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239,68,68,0.4); } 50% { transform: scale(1.08); box-shadow: 0 0 0 8px rgba(239,68,68,0); } }
 
@@ -2418,11 +2435,11 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .network-bar.show { display: block; }
 .network-bar.disconnected {
     background: var(--color-danger);
-    color: #fff;
+    color: var(--on-danger);
 }
 .network-bar.reconnecting {
     background: var(--color-warning);
-    color: #1a1b1e;
+    color: var(--on-warning);
 }
 @keyframes bar-slide-down {
     from { transform: translateY(-100%); }
@@ -2537,7 +2554,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 pre { position: relative; }
 pre:hover .code-copy-btn { opacity: 1; }
 .code-copy-btn:hover { background: var(--accent-light); color: var(--accent); border-color: var(--accent); }
-.code-copy-btn.copied { background: var(--color-success); color: #fff; border-color: var(--color-success); }
+.code-copy-btn.copied { background: var(--color-success); color: var(--on-success); border-color: var(--color-success); }
 
 /* ===== Toast Notification ===== */
 .toast-container {
@@ -2603,7 +2620,9 @@ pre:hover .code-copy-btn { opacity: 1; }
     padding: 6px 0;
     text-align: center;
     font-size: 12px;
-    color: #fff;
+    /* 基类无底色（背景由 .disconnected/.reconnecting 给，且各自带成套前景色），
+       此处文字色只服务于隐藏态，取正文色而非写死白。 */
+    color: var(--text-primary);
     transform: translateY(-100%);
     transition: transform 0.3s ease;
 }
@@ -2617,10 +2636,10 @@ pre:hover .code-copy-btn { opacity: 1; }
 .channel-card { border: 1px solid var(--border-color); border-radius: 10px; padding: 16px; background: var(--bg-body); transition: box-shadow 0.15s; display: flex; flex-direction: column; }
 .channel-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
 .channel-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.channel-card-icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; }
-.channel-card-icon.wechat { background: #07c160; }
-.channel-card-icon.feishu { background: #3370ff; }
-.channel-card-icon.dingtalk { background: #0089ff; }
+.channel-card-icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; }
+.channel-card-icon.wechat { background: var(--brand-wechat); color: var(--on-wechat); }
+.channel-card-icon.feishu { background: var(--brand-feishu); color: var(--on-feishu-icon); }
+.channel-card-icon.dingtalk { background: var(--brand-dingtalk); color: var(--on-dingtalk-icon); }
 .channel-card-name { font-weight: 600; font-size: 14px; }
 .channel-card-badge { font-size: 10px; padding: 1px 5px; border-radius: 4px; background: var(--accent); color: var(--accent-contrast); }
 .channel-card-desc { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; line-height: 1.5; flex: 1; }
@@ -3273,3 +3292,246 @@ pre:hover .code-copy-btn { opacity: 1; }
 .edit-result.is-ok .edit-result-label,
 .edit-result.is-error .edit-result-label { color: var(--text-secondary); }
 
+
+/* ============ 远程工作区（P1 SSH 骨架） ============ */
+/* 连接向导：body 级浮层，与设置浮层同范式（backdrop 遮罩 + 居中面板） */
+/* 【深色模式修复 · 勿回退】本块原先遍地是 var(--token, #浅色字面量) 写法，后果有两层：
+   1) token 当时不存在（--overlay / --bg-panel / --danger 在 theme.css 从未定义）时永远取
+      第二个参数 —— 那是**浅色**值，深色主题下直接串色，且不报错、静默降级；
+   2) 即使 token 存在，一旦某主题忘了赋值，同样掉到浅色兜底。
+   色彩治理约定（theme.css 头）第 1 条要求字面量只允许出现在 theme.css，本块当初
+   整片违反。现全部收敛为纯 token 引用（缺 token 的已补进 theme.css）。
+   另：accent 实心按钮的文字必须走 --accent-contrast，不能写死 #fff ——
+   默认 accent 为石墨系，深色主题下 --accent = 近白 #e4e4e7，白字压在近白底上
+   实测对比度 **1.27:1**（等于文字隐形），而 --accent-contrast 在深色下是深字 #18181b。
+   全站其余主操作按钮（.send-btn / .kd-btn-ok / .hitl-btn-approve 等 44 处）早已这么写。*/
+.remote-wizard-backdrop { display: none; position: fixed; inset: 0; z-index: 2100; background: var(--overlay); align-items: center; justify-content: center; }
+.remote-wizard-backdrop.open { display: flex; }
+.remote-wizard-panel { width: min(440px, 92vw); max-height: min(640px, 86vh); display: flex; flex-direction: column; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; box-shadow: var(--shadow-lg); overflow: hidden; }
+.remote-wizard-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; font-weight: 600; border-bottom: 1px solid var(--border-color); }
+.remote-wizard-close { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; }
+.remote-wizard-close:hover { color: var(--text-primary); background: var(--bg-hover); }
+.remote-wizard-body { padding: 14px 16px; overflow-y: auto; }
+.remote-section-label { font-size: 12px; color: var(--text-secondary); margin: 10px 0 6px; }
+.remote-section-label:first-child { margin-top: 0; }
+.remote-host-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; }
+.remote-host-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.remote-host-item:hover { background: var(--bg-hover); border-color: var(--border-color); }
+.remote-host-info { flex: 1; min-width: 0; }
+.remote-host-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-host-meta { font-size: 11px; color: var(--text-secondary); margin-top: 1px; }
+.remote-host-remove { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; opacity: 0; }
+.remote-host-item:hover .remote-host-remove { opacity: 1; }
+/* 危险动作文字统一走 --error-text（轻 #dc2626 / 暗 #f87171），不用 --color-danger：
+   后者在浅色主题是 #ef4444，白底实测仅 3.76:1；--error-text 与全站错误文字同口径。*/
+.remote-host-remove:hover { color: var(--error-text); background: var(--bg-danger-subtle); }
+.remote-host-empty { font-size: 12px; color: var(--text-secondary); padding: 8px 2px; }
+.remote-form-row { margin-bottom: 10px; }
+/* 通用输入框样式必须排除 checkbox：否则 13px 的勾选框会被 width:100% 拉成
+   整行长的扁平长条，把「记住凭据」文案挤到换行（实测 label 高 48px = 三行）。 */
+.remote-form-row input:not([type="checkbox"]) { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border-input); border-radius: 6px; background: var(--bg-input-box); color: var(--text-primary); font-size: 13px; }
+.remote-form-row input:not([type="checkbox"]):focus { outline: none; border-color: var(--accent); }
+.remote-form-grid2 { display: grid; grid-template-columns: 1fr 96px; gap: 8px; }
+.remote-auth-switch { display: flex; border: 1px solid var(--border-input); border-radius: 6px; overflow: hidden; }
+.remote-auth-tab { flex: 1; padding: 7px 0; background: none; border: none; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+.remote-auth-tab.active { background: var(--accent); color: var(--accent-contrast); }
+#remoteKeyRow { display: flex; flex-direction: column; gap: 0; }
+/* 私钥浏览按钮的独立样式已并入 .remote-file-row .remote-key-browse（下方）：
+   向导里两个「浏览」按钮（私钥/离线包）必须视觉同族，不允许各写一套。 */
+.remote-connect-btn { width: 100%; padding: 9px 0; margin-top: 4px; background: var(--accent); color: var(--accent-contrast); border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; }
+.remote-connect-btn:hover { background: var(--accent-hover); }
+/* 连接日志文字走 --text-primary：它是排错时唯一的事实来源（隧道/部署阶段输出），
+   不能降为次要色——实测 --text-secondary 落在 --bg-secondary(#f4f4f5) 上仅 4.4:1，
+   低于 AA 4.5（由 dark-theme-token-contract 对比度门禁实测抓出）。 */
+.remote-connect-log { display: none; flex-direction: column; gap: 1px; padding: 10px 16px 14px; max-height: 200px; overflow-y: auto; background: var(--bg-secondary); border-top: 1px solid var(--border-color); font: 11px/1.7 ui-monospace, Consolas, monospace; color: var(--text-primary); white-space: pre-wrap; word-break: break-all; }
+.remote-wizard-panel .remote-connect-log[style*="block"] { display: block; }
+.remote-forget-row { margin-top: 6px; }
+.remote-forget-btn { padding: 4px 10px; background: transparent; color: var(--text-secondary); border: 1px solid var(--border-color); border-radius: 5px; font: 11px/1.6 ui-monospace, Consolas, monospace; cursor: pointer; }
+.remote-forget-btn:hover { color: var(--text-primary); border-color: var(--text-tertiary); }
+.remote-forget-btn:disabled { opacity: .55; cursor: default; }
+/* 远程状态徽标：由 app-remote.js 注入侧栏头部右侧（.sidebar-header-top）。
+
+   【为什么不是 document.body】P4 初版写的 appendChild(document.body)：徽标拿到
+   display:inline-flex 却没有任何定位属性，于是它落在页面流末尾（.main-area 之后），
+   既看不见也点不着——而注释当时声称「注入 workspace 选择器区」，与实现不符。
+   侧栏头部本来就是 space-between 的双槽结构（左 logo），右边那个槽天然是状态位。
+
+   底色走 --accent-light（全站 active 态同范式，与 .sidebar-item.active 一致）：
+   这是「当前生效的运行环境」标识，需要与主色同族以
+   区别于普通次要文本。【对比度由测试门禁实测】11px 属普通文本，
+   5 套 accent 预设 × 明暗两主题均须 ≥ WCAG AA 4.5（旧注释拍脑袋写「均≥​4.5」，
+   现由 dark-theme-token-contract 测试守这条，不再靠注释保证）。*/
+/* 2026-10-11 用户反馈「徽标有点丑」重构：旧形态 = accent 药丸 + currentColor 圆点。
+   问题：①圆点跟文字同色（accent），看起来像个装饰点而非状态灯；②药丸底色
+   抢眼但信息量低（「远程」二字每天都一样）。新形态 = 素底胶囊 + 真实状态灯
+   （绿=在线）+ 计数下标式，信息密度不降、视觉重量降一档，与侧栏 chrome 区
+   其它胶囊（更新徽标）同语言。门禁 CASES 里的 badge 对比度断言底色同步改
+   （dark-theme-token-contract.test.js:303 已同步更新为 --bg-hover）。 */
+.remote-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px; font-size: 11px; background: var(--bg-card); color: var(--text-secondary); cursor: pointer; border: 1px solid var(--border-color); }
+.remote-badge:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--text-tertiary); }
+/* 状态灯：真实语义色（在线绿），不再跟文字色走 */
+.remote-badge .remote-badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-success); flex-shrink: 0; box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-success) 18%, transparent); }
+/* 主机名长到一定程度必须截断而不是把 logo 文字挤没：侧栏可拖到 180px，
+   user@host 完整展示不现实。省略号只发生在 .remote-badge-text 上（与
+   .sidebar-update-btn-label 同一手法），完整值在 title 里。 */
+.remote-badge .remote-badge-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-header-top .remote-badge { flex: 0 1 auto; max-width: 58%; min-width: 0; }
+/* P4：远程徽标动作菜单（同步模型配置 / 断开） */
+.remote-menu { position: fixed; z-index: 10060; min-width: 172px; padding: 4px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; box-shadow: var(--shadow-lg); }
+.remote-menu-item { display: block; width: 100%; padding: 7px 10px; border: 0; background: none; text-align: left; font-size: 12px; color: var(--text-primary); border-radius: 6px; cursor: pointer; }
+.remote-menu-item:hover { background: var(--bg-hover); }
+.remote-menu-item.remote-menu-danger { color: var(--error-text); }
+.remote-menu-item.remote-menu-danger:hover { background: var(--bg-danger-subtle); }
+/* P4：记住密码勾选行（必须单行：勾选框贴左、文案紧随，文案不得换行错乱） */
+.remote-remember-row { display: flex; align-items: center; flex-wrap: nowrap; }
+.remote-remember { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer; user-select: none; white-space: nowrap; }
+.remote-remember input[type="checkbox"] { flex: none; width: 14px; height: 14px; margin: 0; cursor: pointer; accent-color: var(--accent); }
+/* P4：跳板机（ProxyJump）折叠盒 */
+.remote-jump-toggle { padding: 2px 0; border: 0; background: none; font-size: 12px; color: var(--accent); cursor: pointer; }
+.remote-jump-toggle:hover { text-decoration: underline; }
+.remote-jump-box { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px dashed var(--border-input); border-radius: 8px; }
+.remote-jump-title { font-size: 11px; font-weight: 600; color: var(--text-secondary); }
+/* 跳板机盒自身带 .remote-form-row，盒内输入框已由上面的通用规则（含 :not(checkbox)）
+   拿到全宽与边框；原先重复写的 .remote-jump-box input{width:100%} 与之完全同值，属冗余，已删。 */
+/* P2/P3：向导通道切换（SSH / WSL / CLI 预装） */
+.remote-channel-switch { display: flex; border: 1px solid var(--border-input); border-radius: 6px; overflow: hidden; margin-bottom: 10px; }
+.remote-channel-tab { flex: 1; padding: 7px 0; background: none; border: none; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+.remote-channel-tab + .remote-channel-tab { border-left: 1px solid var(--border-input); }
+.remote-channel-tab.active { background: var(--accent); color: var(--accent-contrast); }
+/* WSL 发行版下拉：layui select 统一范式（与定时任务「推送通道」同款，见 app-automation.js
+   的 .layui-form 包层 + lay-filter + form.render('select')）。原生 <select> 的展开面板由
+   系统绘制，暗色下是灰底系统菜单，与全站自绘面板不统一（用户实测反馈「好丑」）；
+   layui 面板（dl/dd）样式由 settings.css「全局 layui 组件主题适配」明暗两套接管。
+   盒高 34px / 字号 13px / 圆角 6px 对齐远程向导输入框口径（.remote-form-row input 同值），
+   避免下拉比旁边输入框高出一截。
+   底色/文字/描边在此**同值复述** settings.css 全局（--bg-input-box / --text-primary /
+   --border-input）：对比度门禁只从远程区块源码派生 fg/bg，依赖跨文件全局会算不到；
+   同时也把向导输入框口径锁在本区块，不被全局 layui 调整（如设置页改高度）静默带走。
+   选择器带 .remote-wizard-body 前缀抬一层特异性（0,3,0 > 全局 .layui-form .layui-input
+   的 0,2,0）：index.html 里 app.css 先于 settings.css 加载，同特异性会被全局覆盖
+   （浏览器实测抓到盒高 38px 而非 34px 就是这么来的；automation.css 赢是靠加载序在后，
+   本块不能赌顺序）。 */
+.remote-select-wrap { width: 100%; }
+.remote-select-wrap .layui-form-select { min-width: 0; }
+.remote-wizard-body .remote-select-wrap .layui-input { height: 34px; line-height: 34px; padding: 0 30px 0 10px; font-size: 13px; border-radius: 6px; background: var(--bg-input-box); color: var(--text-primary); border: 1px solid var(--border-input); }
+.remote-wizard-body .remote-select-wrap .layui-edge { top: 50%; }
+.remote-wsl-hint { font-size: 11px; color: var(--text-secondary); line-height: 1.6; padding: 2px 0; }
+/* 可选能力行（离线运行时包）视觉减权：它是「内网/气隙才需要」的可选输入，
+   旧形态与必填输入框同权重（同字号 placeholder + 同字号说明 + 浏览按钮独占一行），
+   三行堆叠在向导里喧宾夺主（用户实测反馈「好丑」）。
+   减权口径：placeholder 降为 --text-secondary（AA 实测 light 4.81 / dark 5.92，
+   均过 4.5），说明行再降一档字号与颜色。输入框本体边框/底色不动——
+   填了值后文字仍是 --text-primary，可读性不受减权影响。 */
+.remote-optional-row input::placeholder { color: var(--text-secondary); opacity: 1; }
+.remote-optional-hint { font-size: 11px; line-height: 1.55; color: var(--text-secondary); opacity: .85; padding: 3px 1px 0; }
+/* 路径输入 + 浏览按钮并排成组：与「用户名+端口」的 .remote-form-grid2 同语言
+   （grid + gap 8px）。旧形态按钮独占一行，输入与按钮视觉脱节。
+   高度同高用 align-items:stretch 自适配（按钮 height:auto 跟随行高），
+   不硬编码 px：实测硬锁 34px 与输入框实际 33px 差 1px（字体度量随平台/缩放
+   浮动，硬编码必裂）。行内只有单行输入，stretch 无多行拉高风险。 */
+.remote-file-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: stretch; }
+.remote-file-row .remote-key-browse { margin: 0; height: auto; padding: 0 14px; font-size: 12px; white-space: nowrap; background: var(--bg-hover); border: 1px solid var(--border-input); border-radius: 6px; color: var(--text-secondary); cursor: pointer; }
+.remote-file-row .remote-key-browse:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+
+/* ========== §MULTI-REMOTE（多远端并发·方案B，2026-10-10） ==========
+   侧栏分组树 + 多连接徽标 + 连接选择浮层。
+   暗色纪律：全部走 theme token，禁硬编码色；所有 button 显式 color
+   （暗色漏色教训：.workspace-action-btn 基类漏 color 曾致「打开远程目录」
+   暗色黑字黑底不可见）。 */
+
+/* ---- 分组树（项目 tab：本地组 + 每在线连接一组） ---- */
+.ws-group { margin: 2px 0; }
+.ws-group-head {
+    display: flex; align-items: center; gap: 6px; width: 100%;
+    padding: 5px 8px; border: none; background: none; cursor: pointer;
+    /* 基类显式 color：button 的 UA 默认色在暗色主题黑字黑底（漏色教训） */
+    color: var(--text-primary);
+    font-size: 12px; font-weight: 600; font-family: inherit; text-align: left;
+    border-radius: 6px;
+}
+.ws-group-head:hover { background: var(--bg-hover); }
+.ws-group-caret {
+    width: 0; height: 0; flex-shrink: 0;
+    border-left: 4px solid var(--text-tertiary);
+    border-top: 3px solid transparent;
+    border-bottom: 3px solid transparent;
+    transition: transform 0.15s ease;
+}
+.ws-group-head[aria-expanded="true"] .ws-group-caret { transform: rotate(90deg); }
+.ws-group-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--text-tertiary); }
+.ws-group-dot[data-state="connected"] { background: var(--color-success); }
+.ws-group-dot[data-state="down"] { background: var(--color-danger); }
+.ws-group-dot[data-state="local"] { background: var(--text-tertiary); }
+/* 本地组不画状态点（2026-10-11 用户反馈「本地那个圆点丑」）：点只表达「远端连接的
+   在线/掉线」状态，本地没有连接状态可言，灰色圆圈是纯噪声。整组隐藏而非 JS 不渲染：
+   契约测试只认 wsGroupHtml 模板里的 class 形态，CSS 层隐藏让两侧各自成立。 */
+.ws-group[data-scope="local"] .ws-group-dot { display: none; }
+/* 本地组标题同步减权：它不是「一台机器」，只是来源标记，与远端组头（user@host）
+   同权重会误导用户以为也是台机器。降为次要色；字体粗细保持一致维持扫读节奏。 */
+.ws-group[data-scope="local"] .ws-group-label { color: var(--text-secondary); }
+.ws-group-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-group-count { color: var(--text-tertiary); font-weight: 400; font-size: 11px; flex-shrink: 0; }
+.ws-group-body { padding-left: 10px; }
+.ws-group-head[aria-expanded="false"] + .ws-group-body { display: none; }
+/* 掉线连接组：条目置灰但保留可见（用户能看到「这台掉线了」而非凭空消失） */
+.ws-group[data-state="down"] .ws-group-body { opacity: 0.5; }
+.ws-group-empty { padding: 4px 8px 4px 24px; color: var(--text-tertiary); font-size: 11.5px; }
+/* 组内全局会话子节（该远端上「不选工作区」的对话；对话 tab 不受影响） */
+.ws-group-global { margin: 2px 0 4px; }
+.ws-group-global-head {
+    display: flex; align-items: center; gap: 5px; width: 100%;
+    padding: 3px 8px; border: none; background: none; cursor: pointer;
+    color: var(--text-secondary); font-size: 11.5px; font-family: inherit; text-align: left;
+}
+.ws-group-global-head:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* ---- 多连接徽标（≥2 条在线：计数胶囊 + 按连接分组菜单）。
+   计数下标同步减权（随新徽标形态）：底色从 accent-light 降为 border 混合，
+   与素底胶囊同语言不抢眼；文字色跟宿主 secondary。 */
+.remote-badge[data-multi] .remote-badge-count {
+    margin-left: 2px; padding: 0 5px; border-radius: 999px;
+    background: var(--bg-card); color: var(--text-secondary);
+    font-size: 10px; font-weight: 700; line-height: 15px;
+}
+.remote-menu .rbm-conn { padding: 2px 0; }
+.remote-menu .rbm-conn + .rbm-conn { border-top: 1px solid var(--border-color); margin-top: 2px; padding-top: 4px; }
+.remote-menu .rbm-conn-head {
+    display: flex; align-items: center; gap: 6px; padding: 3px 10px;
+    color: var(--text-primary); font-size: 12px; font-weight: 600;
+}
+.remote-menu .rbm-conn-head .rbm-state-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--text-tertiary); }
+.remote-menu .rbm-conn-head .rbm-state-dot[data-state="connected"] { background: var(--color-success); }
+.remote-menu .rbm-conn-head .rbm-state-dot[data-state="down"] { background: var(--color-danger); }
+.remote-menu .rbm-conn-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-menu .rbm-conn-acts { display: flex; flex-direction: column; }
+
+/* ---- 连接选择浮层（多条在线时「打开远程目录/登记」先选哪台） ---- */
+.remote-conn-pick {
+    min-width: 220px; max-width: 320px; padding: 6px;
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    border-radius: 10px; box-shadow: var(--shadow-lg);
+}
+.remote-conn-pick .rcp-title {
+    padding: 4px 8px 6px; color: var(--text-secondary); font-size: 11.5px; font-weight: 600;
+}
+.remote-conn-pick .rcp-item {
+    display: flex; align-items: center; gap: 7px; width: 100%;
+    padding: 7px 8px; border: none; background: none; cursor: pointer;
+    color: var(--text-primary); font-size: 12.5px; font-family: inherit; text-align: left;
+    border-radius: 6px;
+}
+.remote-conn-pick .rcp-item:hover { background: var(--bg-hover); }
+.remote-conn-pick .rcp-item .rbm-state-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--color-success); }
+.remote-conn-pick .rcp-item .rbm-state-dot[data-state="down"] { background: var(--color-danger); }
+.remote-conn-pick .rcp-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-conn-pick .rcp-cancel { color: var(--text-secondary); }
+
+/* 组内「全局对话」子节的折叠与缩进（补齐契约 §5.3 渲染所需）：
+   WHY 补——app-history.js 点击子节 head 会切 aria-expanded 与 .ws-group-global-collapsed，
+   但上面只给了 head 的排布样式，没有 body 的隐藏规则：折叠点击会「没反应」（body 常驻展开）。
+   caret 同样需要与分组头一致的旋转过渡，否则子节开合缺视觉反馈。
+   相邻兄弟选择器依赖 wsGroupGlobalHtml 生成的 head→body 紧邻结构（与 .ws-group 同手法）。 */
+.ws-group-global-head[aria-expanded="true"] .ws-group-caret { transform: rotate(90deg); }
+.ws-group-global-head[aria-expanded="false"] + .ws-group-global-body { display: none; }
+.ws-group-global-body { margin: 1px 0 3px 14px; border-left: 1px solid var(--border-color); padding-left: 6px; }
+.ws-group-global-body .sidebar-item { padding: 6px 8px; }

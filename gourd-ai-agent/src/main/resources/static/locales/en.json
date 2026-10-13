@@ -1,4 +1,123 @@
 {
+    "remote":  {
+
+        "group_local":  "Local",
+
+        "group_empty":  "No projects (connection online)",
+
+        "badge_count":  "{n}",
+
+        "pick_connection":  "Pick a remote connection",
+    "connect_in_progress": "A connection is already in progress, please wait",
+
+        "group_global":  "Global sessions",
+
+        "title":  "Remote Workspace",
+
+        "unsupported":  "Remote connection requires the desktop app",
+
+        "saved_hosts":  "Recent connections",
+
+        "no_saved_hosts":  "No saved hosts yet",
+
+        "new_connection":  "New connection",
+
+        "host_placeholder":  "Host (e.g. 192.168.1.10)",
+
+        "user_placeholder":  "Username",
+
+        "auth_password":  "Password",
+
+        "auth_key":  "Private key",
+
+        "password_placeholder":  "SSH password",
+
+        "keypath_placeholder":  "Key path (e.g. ~/.ssh/id_rsa)",
+
+        "passphrase_placeholder":  "Passphrase (optional)",
+
+        "remember_secret":  "Remember password (system credential store)",
+
+        "reconnecting":  "Remote connection lost, reconnecting (attempt {attempt}/{max})…",
+
+        "reconnected":  "Remote connection restored",
+
+        "reconnect_giveup":  "Auto-reconnect failed. Please reconnect manually (remote menu)",
+
+        "reconnect_menu":  "Reconnect remote",
+
+        "jump_add":  "+ Jump host (optional)",
+
+        "jump_remove":  "− Remove jump host",
+
+        "jump_title":  "Connect via jump host",
+
+        "jump_host_placeholder":  "Jump host address",
+
+        "jump_password_placeholder":  "Jump host SSH password",
+
+        "jump_user_required":  "Jump host username is required",
+
+        "wsl_root_warn":  "Default user is root: files will be owned by root. Consider connecting as a regular user",
+
+        "browse":  "Browse",
+
+        "connect_btn":  "Connect",
+
+        "connecting_to":  "Connecting to {host}:{port} …",
+
+        "connected_ok":  "Remote workspace connected",
+
+        "connect_failed":  "Connection failed:",
+        "forget_host_btn":  "Forget host fingerprint & reconnect",
+        "forget_failed":  "Failed to forget host fingerprint: ",
+
+        "host_user_required":  "Host and username are required",
+
+        "remove_host":  "Remove",
+
+        "badge":  "Remote",
+
+        "badge_title":  "Remote workspace: {host} (click to open the remote menu)",
+
+        "mirror_sync_menu":  "Sync model config to remote",
+
+        "disconnect_menu":  "Disconnect remote",
+
+        "mirror_synced":  "Model config synced to remote (in-memory mirror)",
+
+        "mirror_sync_failed":  "Model config sync failed (remote still uses its own settings)",
+
+        "mirror_unavailable":  "Remote connection inactive, cannot sync",
+
+        "mirror_auto_failed":  "Model config was not mirrored to the remote (it falls back to its own settings). Retry from the remote menu.",
+
+        "scope_bind_failed":  "Failed to register remote ownership; this workspace stays local",
+
+        "channel_ssh":  "SSH Host",
+
+        "channel_wsl":  "WSL",
+
+        "channel_preinstalled":  "CLI Preinstalled",
+
+        "connecting_wsl":  "Connecting WSL {distro} (user {user})…",
+
+        "wsl_user_placeholder":  "Username (distro default user)",
+
+        "wsl_hint":  "WSL2 distro; data plane via localhost passthrough, no auth needed. If the distro has no java, JRE 17 is installed automatically.",
+
+        "wsl_loading":  "Loading distro list…",
+
+        "wsl_none":  "No WSL distro found",
+
+        "wsl_none_v2":  "No WSL2 distro found (WSL1 lacks localhost passthrough)",
+
+        "preinstalled_hint":  "Connect to a server with gwork CLI preinstalled: skip deploy on match (credentials injected via an environment variable, never on the command line); fall back to standard deploy otherwise.",
+        "runtime_pkg_label":  "Offline runtime package (optional, runtime-*.tar.gz)",
+        "runtime_pkg_hint":  "For intranet/offline servers without Java: upload this package first; if empty, the runtime bundled in the installer is used, then remote self-install as last resort."
+
+    },
+
     "streaming":  {
                       "describe_images":  "Describing images",
                       "process_files":  "Processing files",
@@ -234,8 +353,9 @@
                                        "search_placeholder":  "Search projects…",
                                        "search_no_results":  "No matching projects",
                                        "remote_connect":  "Remote connect",
-                                       "locate_multiple":  "Multiple folders with the same name found, pick one:"
-                                   },
+                                       "locate_multiple":  "Multiple folders with the same name found, pick one:",
+                                       "open_remote_folder":  "Open Remote Folder",
+                                       "remote_item":  "Remote workspace"                                   },
                  "sidebar":  {
                                  "load_failed_retry":  "Load failed, click to retry",
                                  "loop_mark":  "Scheduled task",
@@ -434,9 +554,17 @@
                                     "installed_tab":  "Installed",
                                     "uninstall":  "Uninstall",
                                     "uninstall_confirm":  "Uninstall skill \"{0}\"? The local skill directory will be removed.",
-                                    "scope_global":  "Global",
-                                    "scope_workspace":  "This Project",
-                                    "market_tab":  "Skill Market"
+                                    "market_tab":  "Skill Market",
+                                     "category_all":  "All",
+                                     "downloads":  "Downloads",
+                                     "stars":  "Stars",
+                                     "version":  "Version",
+                                     "enable":  "Enable",
+                                     "disable":  "Disable",
+                                     "source_local":  "Local",
+                                     "installed_ok":  "installed successfully",
+                                     "scroll_prev":  "Scroll left",
+                                     "scroll_next":  "Scroll right"
                                 },
                      "mcp":  {
                                  "title":  "MCP Servers",

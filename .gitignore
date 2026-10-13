@@ -50,3 +50,7 @@ work
 .gwork/
 downloads/
 _scratch/
+# Local build cache & scratch output (never commit; regenerated on demand)
+gourd-ai-tauri/.cache/
+.tmp/
+.tmp-*

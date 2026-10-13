@@ -367,12 +367,175 @@
     }
 
     // ---------- 项目选择器 ----------
+    /* 请求纪元：并发重拉（新增/移除/重命名 与 projects:changed 广播、断连重拉可能
+       重叠）时，晚发早到的旧响应不得覆盖新结果。app-history 侧栏用同一手法
+       （_sidebarReqToken），code 侧原本没有——加监听后必须补上，否则会出现
+       「删完项目又被旧响应补回来」的幽灵条目。 */
+    var _projectsReqToken = 0;
+
     function loadProjects(cb) {
-        $.get('/web/chat/projects', function (resp) {
-            projects = (resp && resp.data) ? resp.data : [];
-            renderWelcomeRecent();
+        /* 并存语义 + 多远端并发（契约 §4.1/4.5）：本地恒主拉（__scope=local），
+           【每个在线连接各补拉一路】（__scope=id:<rid>）。code 模式的项目下拉/自动恢复
+           都吃这份合并列表；selectProject 时按 _scope 声明归属（scopeOfProjectPath，见下）。
+           WHY 扇出（旧实现只补拉单个 activeId）：连上第二台后第一台的登记项目从
+           下拉与欢迎页「最近项目」里整个消失（用户看到的形态就是「同时只能有一台」），
+           且它的选中项在列表里查不到归属 → scopeOfProjectPath 兜底 → 跨机误绑。 */
+        var myToken = ++_projectsReqToken;
+        /* 在线连接 id 列表：走 __GOURD_REMOTE__.list()（全站唯一多连接读口，契约 §2.2）。
+           WHY 降级：无壳/浏览器/旧壳没有该读口时用 __GOURD_REMOTE_ACTIVE_ID__ 兜一条，
+           行为退回改造前的单连接形态，绝不能因为读口缺失就把远端项目全丢掉。 */
+        var rids = [];
+        var remoteApi = window.__GOURD_REMOTE__;
+        if (remoteApi && typeof remoteApi.list === 'function') {
+            var conns = remoteApi.list() || [];
+            for (var ci = 0; ci < conns.length; ci++) {
+                var cid = conns[ci] && conns[ci].connectionId;
+                if (cid && rids.indexOf(cid) < 0) rids.push(cid);
+            }
+        } else {
+            var rid = (typeof window.__GOURD_REMOTE_ACTIVE_ID__ === 'function')
+                ? window.__GOURD_REMOTE_ACTIVE_ID__() : null;
+            if (rid) rids.push(rid);
+        }
+        /* 去重键叠加归属（契约 §4.3）：键 = 归一路径 + '@' + (_scope||'local')。
+           WHY：旧键只有路径，/srv/proj 在 A、B 两台同时存在时被当成同一条去重掉——
+           用户永远选不到 B 的那份，而两台上的同名目录是两个真实不同的工作区。
+           现在只在【同一来源内】合并重复路径（同一份列表里的脏数据），跨来源并存。 */
+        function dedupeKey(entry) {
+            return pathKey(entry && entry.path) + '@' + ((entry && entry._scope) || 'local');
+        }
+        $.get('/web/chat/projects?__scope=local', function (resp) {
+            if (myToken !== _projectsReqToken) { return; }   // 已有更新的拉取：丢弃过期响应
+            var list = (resp && resp.data) ? resp.data : [];
+            for (var i = 0; i < list.length; i++) if (list[i] && list[i].path) list[i]._scope = 'local';
+            var finish = function (merged) {
+                if (myToken !== _projectsReqToken) { return; }
+                projects = merged;
+                renderWelcomeRecent();
+                if (cb) cb();
+            };
+            if (!rids.length) { finish(list); return; }
+            /* 每台各拉一路（真并发，不是串行等待）；结算计数动态化 pending=rids.length，
+               全部结算后才 finish。某路失败只少那台的条目（按空表计入结算），
+               既不卡住列表刷新也不破坏本地与其它连接。 */
+            var remoteResults = [];
+            var pending = rids.length;
+            function onOne(idx, rid, r2) {
+                if (myToken !== _projectsReqToken) { return; }
+                var remote = (r2 && r2.data) ? r2.data : [];
+                var out = [];
+                for (var j = 0; j < remote.length; j++) {
+                    if (!remote[j] || !remote[j].path) continue;
+                    remote[j]._scope = rid;   // 来源标记：这条登记于哪台连接（确定事实）
+                    out.push(remote[j]);
+                }
+                remoteResults[idx] = out;
+                if (--pending > 0) return;
+                /* 合并：本地在前、远端各连接按 list() 顺序在后（「默认环境是本地」的心智） */
+                var seen = {};
+                var merged = [];
+                for (var m = 0; m < list.length; m++) {
+                    var lk = dedupeKey(list[m]);
+                    if (seen[lk]) continue;
+                    seen[lk] = true;
+                    merged.push(list[m]);
+                }
+                for (var n = 0; n < remoteResults.length; n++) {
+                    var part = remoteResults[n] || [];
+                    for (var q = 0; q < part.length; q++) {
+                        var rk = dedupeKey(part[q]);
+                        if (seen[rk]) continue;   // 同来源内重复路径才丢；跨来源同路径必须并存
+                        seen[rk] = true;
+                        merged.push(part[q]);
+                    }
+                }
+                finish(merged);
+            }
+            for (var k = 0; k < rids.length; k++) {
+                /* 立即执行函数固定 idx/rid：var 无块级作用域，循环里直接闭包会全拿到末位值 */
+                (function (idx, oneRid) {
+                    $.get('/web/chat/projects?__scope=id:' + encodeURIComponent(oneRid), function (r2) {
+                        onOne(idx, oneRid, r2);
+                    }).fail(function () { onOne(idx, oneRid, null); });
+                })(k, rids[k]);
+            }
+        }).fail(function () {
+            /* 主拉失败：保持旧缓存原样（与 app-workspace.loadProjects 同口径），
+                但必须调 cb：调用方（remove/add）靠它把界面恢复到真实状态。 */
+            if (myToken !== _projectsReqToken) { return; }
             if (cb) cb();
-        }).fail(function () { if (cb) cb(); });
+        });
+    }
+
+    /* 路径归一（归属比对键）：必须与 app-workspace 的 pathKey、Rust 侧 scope_key
+       三方同口径——只有 Windows 风格路径（盘符/UNC）才转小写。
+
+       【P1 修复：为何不能无条件 lower】上一轮把 Rust 侧改成「POSIX 保留大小写」
+       时漏了这里。Linux/macOS 上 `/home/u/Proj` 与 `/home/u/proj` 是两个真实目录：
+       lower 后两者相等 → 本地 Proj 会被误归到远端 proj（跳机读写），合并列表也会
+       把两个不同目录当同一个去重掉。现统一走 app-base 的全局 pathScopeKey。 */
+    function pathKey(p) { return pathScopeKey(p); }
+
+    /* 项目路径的归属连接（'local' 或 connectionId）：从合并列表查 _scope；查不到返回 null。
+       WHY null（不再回落激活环境）：多连接下 activeId 只是「当前选中那台」，与待查项目
+       的归属无关——连上第二台后，旧兜底会把第一台项目的写操作/删除打到新连接（跨机
+       误操作，与 app-workspace 的 scopeOfPath 同款根因）。调用方一律把 null 当 local
+       处理（scopeQueryFor(null) → ?__scope=local；bindId=null → 解绑回本地）。
+       过渡期（刚登记、列表尚未重拉）由登记分支补一条带 _scope 的临时记录兑底，
+       不靠回落拿归属。 */
+    function scopeOfProjectPath(path) {
+        var pk = pathKey(path);
+        for (var i = 0; i < projects.length; i++) {
+            if (projects[i] && pathKey(projects[i].path) === pk && projects[i]._scope) {
+                return projects[i]._scope;
+            }
+        }
+        /* 查不到归属回 null（调用方按 local 处理）：旧版兜底回 activeId 会在
+           连第二台后把第一台已选项目的写操作/删除打到新连接（跨机误操作，
+           与 app-workspace scopeOfPath 同款根因，方案B 一并清除）。 */
+        return null;
+    }
+
+    /* 「当前正在操作的环境」（写操作与目录浏览用）：取【选中项目】的归属，而不是
+       「是否存在远程连接」。
+
+       为什么不能直接用 __GOURD_REMOTE_ACTIVE_ID__()：它只回答「有没有连着远端」，
+       而用户完全可能连着远端却在本地项目里干活（并存语义）。拿它当归属会让本地
+       项目的写操作跑到远端去（跳机读写）。
+       为什么无选中时一律回本地：默认环境就是本地；宁可让用户多点一次，也不能
+       静默往远端机器写东西（误写远端比误写本地危险得多）。 */
+    function activeScope() {
+        var root = window.currentProjectRoot || '';
+        if (!root) return null;
+        var pk = pathKey(root);
+        for (var i = 0; i < projects.length; i++) {
+            if (projects[i] && pathKey(projects[i].path) === pk) {
+                var s = projects[i]._scope;
+                return (s && s !== 'local') ? s : null;
+            }
+        }
+        return null;   // 列表里查不到 = 保守当本地（不把「存在连接」当归属）
+    }
+
+    /* 归属 → 代理可识别的 query 前缀。一律显式声明（连 local 也写出来）：
+       不声明就会落到代理的「激活 scope 兑底」，而激活 scope 随选择漂移，
+       结果就是「同一行代码在不同时机打到不同机器」——最难查的一类缺陷。 */
+    function scopeQueryFor(scope) {
+        return (scope && scope !== 'local')
+            ? '?__scope=id:' + encodeURIComponent(scope)
+            : '?__scope=local';
+    }
+
+    /* 按归一后的路径在合并列表里找回【服务端认可的完整路径】：刚登记/新建的项目
+       不能直接用本地拼的字串去 selectProject（分隔符/尾斜杠可能与登记值不一致，
+       导致选中后 scope 查不到而回落激活环境）。 */
+    function findProjectPath(path) {
+        if (!path) return '';
+        var pk = pathKey(path);
+        for (var i = 0; i < projects.length; i++) {
+            if (projects[i] && pathKey(projects[i].path) === pk) return projects[i].path;
+        }
+        return '';
     }
 
 
@@ -382,13 +545,42 @@
         if (path !== window.currentProjectRoot && !confirmDiscardUnsavedIfAny()) return;
         var previous = window.currentProjectRoot;
         window.currentProjectRoot = path;
-        // 同步项目相关视图 + 持久化项目根（名称/下拉/文件树/已开文件/Git/终端）
-        syncProjectContext(path);
+        /* 并存语义：项目选择即环境声明——远端项目绑到对应连接（代理 by_cwd + 激活
+           scope 跟随），本地项目解绑。长连接（gate/terminal 带 ?cwd=）也要跟着重建，
+           否则 HTTP 打到新环境而事件流仍在旧环境。 */
+        var projScope = path ? scopeOfProjectPath(path) : null;
+        var ipc = window.__GOURD_IPC__;
+        if (ipc && typeof ipc.remoteBindScope === 'function' && path) {
+            var bindId = (projScope && projScope !== 'local') ? projScope : null;
+            try {
+                Promise.resolve(ipc.remoteBindScope(path, bindId)).then(function (ok) {
+                    if (ok === false && bindId && typeof showToast === 'function') {
+                        showToast(GourdI18n.t('remote.scope_bind_failed'), 'error');
+                    }
+                }, function () {});
+            } catch (e) {}
+        }
+        /* 【activeId 同步（自查 P2，与 app-workspace.selectChatWorkspace 同款）】远端项目
+           选中 = 前端「当前环境」切到该连接。旧壳/无 __GOURD_REMOTE_SET_ACTIVE__ 静默跳过。 */
+        if (typeof window.__GOURD_REMOTE_SET_ACTIVE__ === 'function') {
+            try {
+                window.__GOURD_REMOTE_SET_ACTIVE__((projScope && projScope !== 'local') ? projScope : null);
+            } catch (e) {}
+        }
         if (path !== previous) {
+            /* 切了项目（可能跨环境）→ 长连接重指向上游（?cwd= 变了） */
+            if (typeof window.connectWebGate === 'function') {
+                try { window.connectWebGate(); } catch (e) {}
+            }
+            if (typeof window.onCodeProjectChanged === 'function') {
+                try { window.onCodeProjectChanged(); } catch (e) {}   // 终端若开着则重连
+            }
             document.dispatchEvent(new CustomEvent('workspace:changed', {
                 detail: { mode: 'code', cwd: path, previousCwd: previous }
             }));
         }
+        // 同步项目相关视图 + 持久化项目根（名称/下拉/文件树/已开文件/Git/终端）
+        syncProjectContext(path);
         // 刷新 code 会话列表（按该项目）——仅项目选择器主动切项目时需要；
         // 从「会话切换」间接触发时不重载列表（避免把当前历史列表刷掉）。
         if (!silent) reloadSessionsForMode();
@@ -436,26 +628,52 @@
         projName.textContent = p ? p.name : GourdI18n.t('code.select_project');
     });
 
+    /* 登记表变更广播：重拉合并列表。
+
+       为什么 code 模式也必须听：其它四个持有项目列表副本的视图
+       （app-workspace / app-memory / app-automation / app-history）都听了，只有 code
+       没听——于是「断开远端连接」时 app-remote 发的重拉只刷新了 chat 侧视图，code
+       模式的项目下拉与欢迎页仍残留远端条目；用户再选它就去 bind 一个已销毁的连接
+       （提示绑定失败，但目录仍在列表里“看着能用”）。 */
+    document.addEventListener('projects:changed', function () { loadProjects(); });
+
     function addProject() {
+        /* 归属在【打开选择器那一刻】就锁定（与 openDirPicker 传同一个 scopeQ）：
+           浏览的是哪台机器的磁盘，登记就必须打到哪台。不能等 done 时再取激活环境——
+           选择器开着期间用户可能切了工作区，active 漂移会把本地路径登记到远端
+           （远端无此路径 → 必然失败）。 */
+        var scope = activeScope();
+        var scopeQ = scopeQueryFor(scope);
         var doAdd = function (path) {
             if (!path) return;
             $.ajax({
-                url: '/web/chat/projects/add', method: 'POST', contentType: 'application/json',
+                url: '/web/chat/projects/add' + scopeQ, method: 'POST', contentType: 'application/json',
                 data: JSON.stringify({ path: path })
             }).done(function (resp) {
                 if (resp && resp.code === 200) {
-                    projects = resp.data || [];
-                    renderWelcomeRecent();
-                    // 新加的项目：直接在本窗口打开
-                    if (projects.length) {
-                        var addedPath = '';
-                        for (var j = 0; j < projects.length; j++) {
-                            if (projects[j].path === path) { addedPath = path; break; }
-                        }
-                        if (!addedPath) addedPath = projects[0].path;
-                        if (addedPath !== window.currentProjectRoot) selectProject(addedPath);
-                    }
+                    /* 【不得用 resp.data 覆盖 projects】后端返回的是【单一上游的完整
+                       列表】，直接赋值会：① 把另一环境的条目全部抹掉（本地项目从下拉
+                       与欢迎页「最近项目」消失——正是「远程覆盖本地」的形态）；
+                       ② 丢掉 _scope 标记，使 scopeOfProjectPath 查不到而回落激活环境，
+                       本地项目被误绑到远端（跳机读写）。
+                       统一改走 loadProjects（本地主拉 + 远端补拉 + 去重合并 + 打 _scope）。 */
                     if (typeof showToast === 'function') showToast(GourdI18n.t('code.project_added'), 'success');
+                    loadProjects(function () {
+                        /* 新加的项目：直接在本窗口打开。findProjectPath 优先（拿服务端
+                           认可的完整路径 + 正确 _scope）；若重拉失败查不到，兜底用【刚登记的
+                           path 本身】而不是 projects[0]——add 已回 200，登记确实成功，选中它
+                           才是用户意图；回落 projects[0] 会在重拉失败时选中一个【无关项目】。 */
+                        var addedPath = findProjectPath(path);
+                        if (!addedPath) {
+                            /* 重拉失败（罕见）：补一条带正确 _scope 的临时记录再选中。
+                               否则 selectProject 内部 scopeOfProjectPath 查不到会回落【激活
+                               连接】，把刚登记的本地新目录误绑远端（跳机读写）——与
+                               app-workspace 消歧候选处补临时记录同款处理。 */
+                            projects.push({ path: path, name: path.split(/[\\/]/).pop() || path, _scope: scope || 'local' });
+                            addedPath = path;
+                        }
+                        if (addedPath !== window.currentProjectRoot) selectProject(addedPath);
+                    });
                 } else {
                     if (typeof showToast === 'function') showToast((resp && resp.description) || GourdI18n.t('code.add_failed_no_dir'), 'error');
                 }
@@ -463,12 +681,17 @@
                 if (typeof showToast === 'function') showToast(GourdI18n.t('code.add_failed'), 'error');
             });
         };
-        openDirPicker(doAdd);
+        openDirPicker(doAdd, scopeQ);
     }
 
     // ---------- 新建项目（在父目录下建一个新目录并登记为项目）----------
     function newProject() {
         var defaultParent = homeDir ? joinPath(homeDir, 'gourdai-projects') : '';
+        /* 与 addProject 同理：归属在【打开对话框那一刻】锁定，浏览按钮与 create 请求
+           用同一个 scopeQ——保证「浏览哪台机器的父目录」与「在哪台机器上建目录」
+           是同一台。对话框开着期间切了工作区也不会跨机建目录（那会直接建失败）。 */
+        var npScope = activeScope();          // 存下来：create 成功后补临时 _scope 记录要用
+        var npScopeQ = scopeQueryFor(npScope);
         var html = ''
             + '<div class="new-project-dialog">'
             + '  <div class="new-project-row">'
@@ -501,7 +724,9 @@
 
                 // 浏览父目录（复用服务端目录选择器）
                 layero.find('#npBrowse').on('click', function () {
-                    openDirPicker(function (picked) { if (picked) $parent.val(picked); });
+                    /* 必须传 npScopeQ：不传就是「浏览激活上游」，而激活上游随选择漂移，
+                       会出现「父目录选的是远端磁盘、create 却打到本地」这种跨机拼接。 */
+                    openDirPicker(function (picked) { if (picked) $parent.val(picked); }, npScopeQ);
                 });
 
                 function submit() {
@@ -509,15 +734,28 @@
                     var name = $name.val().trim();
                     if (!name) { if (typeof showToast === 'function') showToast(GourdI18n.t('code.please_input_project_name'), 'error'); return; }
                     $.ajax({
-                        url: '/web/chat/projects/create', method: 'POST', contentType: 'application/json',
+                        url: '/web/chat/projects/create' + npScopeQ, method: 'POST', contentType: 'application/json',
                         data: JSON.stringify({ parent: parent, name: name })
                     }).done(function (resp) {
                         if (resp && resp.code === 200) {
                             layer.close(idx);
-                            projects = resp.data || [];
-                            renderWelcomeRecent();
-                            if (projects.length) selectProject(projects[0].path);
                             if (typeof showToast === 'function') showToast(GourdI18n.t('code.project_created'), 'success');
+                            /* 同 addProject：不得用单上游列表覆盖合并结果（会抹掉另一环境
+                               的条目并丢 _scope）。改走 loadProjects 重拉合并。
+                               选中目标按 parent+name 精确定位，而不是原实现的 projects[0]——
+                               合并列表里第一条可能是另一个环境的项目（打开错项目）。 */
+                            var createdPath = parent ? joinPath(parent, name) : name;
+                            loadProjects(function () {
+                                /* 同 addProject：兜底用刚创建的 createdPath 而非 projects[0]；
+                                   且重拉失败时补临时 _scope 记录，防 selectProject 回落激活连接
+                                   把本地新目录误绑远端。 */
+                                var target = findProjectPath(createdPath);
+                                if (!target) {
+                                    projects.push({ path: createdPath, name: name, _scope: npScope || 'local' });
+                                    target = createdPath;
+                                }
+                                if (target !== window.currentProjectRoot) selectProject(target);
+                            });
                         } else {
                             if (typeof showToast === 'function') showToast((resp && resp.description) || GourdI18n.t('code.create_failed'), 'error');
                         }
@@ -534,7 +772,25 @@
     }
 
     // ---------- 服务端目录选择器（浏览器无法直接拿本地绝对路径，改由后端浏览）----------
-    function openDirPicker(onPick) {
+    /* scopeQ（可选）：拼到 browse 请求后的路由参数（'&__scope=id:<rid>' / '&__scope=local'）。
+       并存语义下远程目录浏览必须显式指定归属——openDirPicker 本身是「浏览激活上游」
+       的语义，但激活 scope 跟随用户选择漂移（可能指向本地），不传 scope 就会
+       「想浏览远端磁盘却列出了本机目录」。旧调用不传 = 沿用激活上游（零回归）。 */
+    /* 目录浏览请求的 query 拼装：scopeQ 以 `&` 起头（调用方沿用既有写法），但**首次
+       浏览 p 为空**时 URL 里没有 `?`，直接拼接会得到 `/browse&__scope=id:x`——
+       既不是合法 query（服务端按 `?` 切分取不到 scope，代理回落激活上游），
+       路径本身也多出一段（404）。统一在这里保证 `?` 存在。 */
+    function browseQuery(p, scopeQ) {
+        var parts = [];
+        if (p) parts.push('path=' + encodeURIComponent(p));
+        if (scopeQ) {
+            var s = String(scopeQ).replace(/^[&?]/, '');
+            if (s) parts.push(s);
+        }
+        return parts.length ? ('?' + parts.join('&')) : '';
+    }
+
+    function openDirPicker(onPick, scopeQ) {
         var state = { current: '', parent: null, sep: '\\' };
 
         var html = ''
@@ -565,7 +821,7 @@
 
                 function browse(p) {
                     $list.html('<div class="dir-picker-loading">' + GourdI18n.t('code.dir_loading') + '</div>');
-                    $.get('/web/chat/projects/browse' + (p ? '?path=' + encodeURIComponent(p) : ''), function (resp) {
+                    $.get('/web/chat/projects/browse' + browseQuery(p, scopeQ), function (resp) {
                         if (!resp || resp.code !== 200) {
                             $list.html('<div class="dir-picker-empty">' + GourdI18n.t('code.dir_access_failed') + '</div>');
                             return;
@@ -620,28 +876,68 @@
         });
     }
 
-    function removeProject(path) {
+    /* declaredScope（可选）：调用方已知的归属。chat 侧栏项目行自己渲染时就拿着
+       _scope（确定事实），而本模块的 projects 可能尚未加载（从未进过 code 模式），
+       此时 scopeOfProjectPath 查不到会回 null（按本地）——宁可少删不可错删。
+       优先用调用方声明的值，避免两个列表副本不同步导致归属判错。 */
+    function removeProject(path, declaredScope) {
+        /* 归属必须按【这条记录来自哪个后端】查，不能用激活环境：
+           合并列表里同时有本地与远端条目，激活指向远端时删本地条目会打到远端——
+           远端登记被误删（本地那条纹丝不动，用户以为「删不掉」），而本地那条仍在，
+           下次列表刷新又出现。这是「本地内容被远端动作影响」的反向形态。 */
+        var scope = (declaredScope && declaredScope !== 'local')
+            ? declaredScope
+            : scopeOfProjectPath(path);
         $.ajax({
-            url: '/web/chat/projects/remove', method: 'POST', contentType: 'application/json',
+            url: '/web/chat/projects/remove' + scopeQueryFor(scope),
+            method: 'POST', contentType: 'application/json',
             data: JSON.stringify({ path: path })
-        }).done(function (resp) {
-            projects = (resp && resp.data) ? resp.data : [];
-            // 任务侧栏的项目行取自同一列表：移除后刷新任务视图列表
-            if (window.appMode !== 'code' && typeof loadSessionHistory === 'function') loadSessionHistory();
-            if (path === window.currentProjectRoot) {
-                if (projects.length) selectProject(projects[0].path);
-                else {
-                    window.currentProjectRoot = '';
-                if (projName) projName.textContent = GourdI18n.t('code.select_project');
-                    if (typeof window.clearFilerTree === 'function') window.clearFilerTree();
-                    closeAllFiles();
+        }).always(function () {
+            /* 同 add/create：不用 resp.data 覆盖（单上游列表会抹掉另一环境条目并丢
+               _scope）。always 而非 done：移除失败也要重拉一次，让列表回到真实状态
+               （原实现失败时什么都不做，界面停留在「已删」的错觉里）。 */
+            loadProjects(function () {
+                // 任务侧栏的项目行取自同一列表：移除后刷新任务视图列表
+                if (window.appMode !== 'code' && typeof loadSessionHistory === 'function') loadSessionHistory();
+                if (path === window.currentProjectRoot) {
+                    if (projects.length) selectProject(projects[0].path);
+                    else {
+                        window.currentProjectRoot = '';
+                        if (projName) projName.textContent = GourdI18n.t('code.select_project');
+                        if (typeof window.clearFilerTree === 'function') window.clearFilerTree();
+                        closeAllFiles();
+                    }
                 }
-            }
+            });
         });
     }
 
 
-    // ---------- 编辑器：打开 / 标签 / 保存 ----------
+    /* 远程工作区通道切换后的 code 模式项目复位（app-remote.js 调用）。
+       背景：远程覆盖（REMOTE_OVERRIDE）是进程级全局开关，连上远端后 /web/** 全部打到
+       远端后端，而 currentProjectRoot、已打开文件、文件树仍指向本地磁盘的那套路径——
+       继续留在这种状态下，保存动作会按同一路径字符串写进远端文件系统（跨机串写）。
+       所以这里复用「无项目」分支的既有语义（见 boot 内 loadProjects 回调的 else 分支、
+       以及 removeProject 删空后的分支）：清选中 + 关所有编辑器文档 + 清文件树。
+       刻意不弹确认：这是上游已经变了的事后收尾，不是用户主动的破坏性操作；未保存内容
+       由 closeAllFiles 直接释放（与既有两处分支同口径），要保数据请回本地再改。 */
+    function resetCodeProjectForChannel(connectionId) {
+        /* 参数化（契约 §4.5）：多连接下断开/掉线 B 不得误清 A 仍在用的项目选择。
+           无参调用保持旧全清语义（兼容旧调用点）。 */
+        if (connectionId) {
+            var curScope = window.currentProjectRoot ? scopeOfProjectPath(window.currentProjectRoot) : null;
+            /* currentProjectRoot 归属查不到（null=local 语义）时不动：
+               本地项目与任何远程连接的断开无关。 */
+            if (curScope !== connectionId) return;
+        }
+        window.currentProjectRoot = '';
+        if (typeof window.clearFilerTree === 'function') window.clearFilerTree();
+        closeAllFiles();   // 末尾已调 refreshCenterPane（回欢迎面板），不重复调
+        if (projName) projName.textContent = GourdI18n.t('code.select_project');
+    }
+    window.resetCodeProjectForChannel = resetCodeProjectForChannel;
+
+// ---------- 编辑器：打开 / 标签 / 保存 ----------
     // 中间区三态：未选项目→欢迎面板；已选项目未开文件→空态提示；开了文件→编辑器
     // Git 审查视图：隐藏上述编辑器三态，改显示审查占位（点变更文件仍走 #gitDiffViewer 浮层）
     function refreshCenterPane() {
@@ -958,6 +1254,9 @@
         _saving = true;
         $.ajax({
             url: '/web/chat/filer/write', method: 'POST', contentType: 'application/json',
+            /* 保存是高危写操作：远端项目的文件必须经 X-Session-Cwd 分流（body 的 root
+               代理不可见，打错机器就是「按同一路径写进另一台机器的磁盘」跨机串写） */
+            headers: { 'X-Session-Cwd': encodeSessionCwdHeader(window.currentProjectRoot) },
             data: JSON.stringify({ path: path, content: content, root: window.currentProjectRoot || '' })
         }).done(function (resp) {
             _saving = false;
@@ -986,6 +1285,9 @@
         if (!root) return;
         $.ajax({
             url: '/web/chat/filer/watch', method: 'POST', contentType: 'application/json',
+            /* 监听根注册也要分流：远端目录的监听必须注册到远端后端（filer_change 事件
+               才会从远端 gate 推来），body root 代理不可见 */
+            headers: { 'X-Session-Cwd': encodeSessionCwdHeader(root) },
             data: JSON.stringify({ root: root })
         });
     }
@@ -1277,6 +1579,18 @@
         else enterCodeMode({ projectRoot: path });
     };
     window.startFreshCodeSession = startFreshSession;
+    /* 【当前项目根的严格归属】（供 app-history 的 code 模式会话列表分流用）。
+
+       为什么不用 scopeOfProjectPath：它查不到时会【回落到激活连接】（为「刚登记的
+       过渡期」而设）。写操作回落可接受，但读列表回落会把归属判错：项目列表尚未
+       加载完时，一个【本地】项目会被当成远端 → 会话请求打到远端 → 本地会话列表
+       被远端那份覆盖。读路径必须保守：查不到就当本地（宁可空列表也不能展现
+       另一台机器的会话，且列表加载完会自愈）。
+
+       为什么要暴露：合并列表 projects 与 _scope 标记都在本模块闭包里，app-history
+       看不到；而它若不靠这个接口就只能拿 __GOURD_REMOTE_ACTIVE_ID__（「是否存在
+       远程连接」）当归属——那就是本缺陷本身。 */
+    window.__currentProjectScope = activeScope;
     // 任务侧栏项目行「从列表移除」入口复用
     window.removeProjectFromList = removeProject;
     // chat 工作空间选择器复用：目录浏览弹窗 + watch 根登记

@@ -75,6 +75,22 @@ public class AgentSettings implements Serializable {
      */
     private volatile boolean loadFailed;
 
+    /**
+     * 远端镜像标记（远程工作区 P4，方案 A 内存镜像）。
+     *
+     * <p>当远端后端以 {@code -Dgwork.remote=true} 启动且桌面端经隧道推送了本机模型配置
+     * （providers/models/defaultModel，见 WebSettingsController#settingsOverlayImport）时置位。
+     * 置位后 {@link #saveToFile()} 一律拒绝回写——镜像数据只活在远端进程内存，
+     * 绝不落盘（磁盘上永远是远端用户自己的 settings.json，apiKey 不残留）；
+     * 远端进程随连接销毁，镜像随之消失。</p>
+     *
+     * <p>与 {@link #loadFailed} 的关系：两者都会阻止回写，但语义不同——loadFailed 是
+     * 「读不出磁盘配置，回写会破坏用户数据」；mirrored 是「内存配置来自桌面端镜像，
+     * 回写会把桌面端凭证泄漏到远端磁盘」。修复场景也不同：loadFailed 要等用户修文件，
+     * mirrored 在非远端模式下永远为 false，本地/CLI 行为零变化。</p>
+     */
+    private volatile boolean mirrored;
+
     /** 损坏配置备份文件名的时间戳后缀格式：{@code settings.json.corrupt-20260910153000} */
     private static final DateTimeFormatter CORRUPT_BACKUP_STAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
 
@@ -1018,6 +1034,64 @@ public class AgentSettings implements Serializable {
     }
 
     /**
+     * 远端镜像载入（远程工作区 P4，方案 A 内存镜像）：把桌面端推送的 JSON 叠加到内存。
+     *
+     * <p>仅在远端模式（{@code AgentFlags#isRemoteDeployed()}）下允许调用，由
+     * WebSettingsController 的 overlay 端点（受隧道 Basic Auth 保护）触发。只覆盖镜像的
+     * 三类内容：{@code providers} / {@code models} / {@code defaultModel}；其余段
+     * （general/permission/mcp/api/lsp）属于远端机器自己的环境配置，不参与镜像。</p>
+     *
+     * <p>替换语义而非合并：镜像的意图是「远端与本机配置一致」，残缺推送会造成新旧混合
+     * （旧 provider 残留 + 新模型半套）反而更难排查；推送方（桌面端）负责发送完整快照。</p>
+     *
+     * <p>生效链：本方法完成后置 {@link #mirrored}（此后 {@link #saveToFile()} 拒绝回写），
+     * 调用方负责后续 addModel/removeModel 运行时引擎同步。COW 发布语义与 putProvider 等
+     * 既有方法一致：先复制、再改副本、最后整体替换引用。</p>
+     *
+     * @param json 桌面端推送的镜像 JSON（与 getGlobalJson 同形态：providers/models/defaultModel）
+     */
+    public synchronized void applyRemoteMirror(String json) {
+        if (AgentFlags.isRemoteDeployed() == false) {
+            throw new IllegalStateException("applyRemoteMirror is only allowed in remote-deployed mode");
+        }
+
+        ONode oNode = ONode.ofJson(json);
+
+        Map<String, ProviderDo> newProviders = new LinkedHashMap<>();
+        ONode oProviders = oNode.get("providers");
+        if (oProviders != null && oProviders.isObject()) {
+            for (Map.Entry<String, ONode> entry : oProviders.getObject().entrySet()) {
+                newProviders.put(entry.getKey(), entry.getValue().toBean(ProviderDo.class));
+            }
+        }
+
+        Map<String, ModelDo> newModels = new LinkedHashMap<>();
+        ONode oModels = oNode.get("models");
+        if (oModels != null && oModels.isObject()) {
+            for (Map.Entry<String, ONode> entry : oModels.getObject().entrySet()) {
+                newModels.put(entry.getKey(), entry.getValue().toBean(ModelDo.class));
+            }
+        }
+
+        // snack4 契约：get(缺键) 返回空 ONode（非 null），getString() 在空节点上返回
+        // null —— 不会 NPE，null 经 Assert.isEmpty 归一为「无默认模型」。
+        String newDefaultModel = oNode.get("defaultModel").getString();
+
+        this.providers = newProviders;
+        this.models = newModels;
+        this.defaultModel = Assert.isEmpty(newDefaultModel) ? null : newDefaultModel;
+        this.mirrored = true;
+
+        LOG.info("[Settings] Remote mirror applied in memory: {} provider(s), {} model(s), defaultModel={}",
+                providers.size(), models.size(), defaultModel);
+    }
+
+    /** 是否已载入桌面端镜像（仅远端模式可为 true；供端点回告与测试断言）。 */
+    public boolean isMirrored() {
+        return mirrored;
+    }
+
+    /**
      * 保存配置到文件。
      *
      * <p>两道保护：</p>
@@ -1046,6 +1120,17 @@ public class AgentSettings implements Serializable {
                                 + "restore a valid settings.json from the settings.json.corrupt-* backup in {} (or delete "
                                 + "that backup if the config can be discarded), then restart.",
                         globalFile.getParent());
+                return;
+            }
+
+            //远端镜像保护（远程工作区 P4，方案 A 内存镜像）：内存里的 providers/models/apiKey
+            //是桌面端经隧道推送的镜像，仅限当前远端进程内存使用；一旦回写就会把桌面端
+            //凭证以明文落到远端磁盘，断连后仍永久残留——镜像生命周期必须与远端进程
+            //严格同尽（进程随连接销毁，镜像随之消失）。磁盘上那份永远属于远端用户自己。
+            if (mirrored) {
+                LOG.warn("[Settings] Refusing to save: this session holds a desktop-mirrored config "
+                        + "(remote mode); writing would leak provider apiKeys to the remote disk. "
+                        + "The mirror lives only in this process's memory and dies with it.");
                 return;
             }
 

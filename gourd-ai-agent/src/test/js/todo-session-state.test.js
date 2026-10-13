@@ -36,6 +36,9 @@ function createContext() {
         console,
         Promise,
         encodeURIComponent,
+        /* 【中文路径修复】app-todos 的 X-Session-Cwd 写点经此函数编码：沙箱需注入
+           app-base.js 的同名实现（浏览器里它随 app-base 全局存在，vm 沙箱里没有） */
+        encodeSessionCwdHeader(v) { return v ? encodeURIComponent(String(v)) : ''; },
         setTimeout,
         clearTimeout,
         SESSION_ID: 'session-a',
@@ -88,7 +91,10 @@ test('任务查询优先使用会话保存的 projectRoot，而不是当前全�
     const loading = context.window.loadTodos('session-a');
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, '/web/chat/todos?sessionId=session-a');
-    assert.equal(requests[0].options.headers['X-Session-Cwd'], 'D:\\workspace-a');
+    // 【中文路径修复】头值经 encodeSessionCwdHeader 编码（component 语义）：
+    // HTTP 头只允许 ISO-8859-1，原始中文路径会让浏览器抛异常、请求发不出去。
+    // 断言编码后的字面量 = 行为级锁死新契约（后端读侧 SessionCwdCodec 负责还原）。
+    assert.equal(requests[0].options.headers['X-Session-Cwd'], encodeURIComponent('D:\\workspace-a'));
 
     respond(requests[0], { exists: false, items: [], stats: {} });
     await loading;

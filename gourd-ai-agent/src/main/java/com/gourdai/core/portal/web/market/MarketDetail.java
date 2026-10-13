@@ -14,6 +14,10 @@ public class MarketDetail {
     private long installs;
     private long stars;
     private String installSlug; // 用于安装时的实际 slug（如 owner/repo/skill-name）
+    private String iconUrl;     // 技能图标 URL（市场提供时才有）
+    private String category;    // 市场原生分类 key
+    private String version;     // 最新版本号
+    private java.util.List<String> tags; // 标签（详情弹窗展示）
 
     public MarketDetail() {
     }
@@ -26,6 +30,10 @@ public class MarketDetail {
     public MarketDetail installs(long installs) { this.installs = installs; return this; }
     public MarketDetail stars(long stars) { this.stars = stars; return this; }
     public MarketDetail installSlug(String installSlug) { this.installSlug = installSlug; return this; }
+    public MarketDetail iconUrl(String iconUrl) { this.iconUrl = iconUrl; return this; }
+    public MarketDetail category(String category) { this.category = category; return this; }
+    public MarketDetail version(String version) { this.version = version; return this; }
+    public MarketDetail tags(java.util.List<String> tags) { this.tags = tags; return this; }
 
     public String getSlug() { return slug; }
     public void setSlug(String slug) { this.slug = slug; }
@@ -43,4 +51,12 @@ public class MarketDetail {
     public void setStars(long stars) { this.stars = stars; }
     public String getInstallSlug() { return installSlug; }
     public void setInstallSlug(String installSlug) { this.installSlug = installSlug; }
+    public String getIconUrl() { return iconUrl; }
+    public void setIconUrl(String iconUrl) { this.iconUrl = iconUrl; }
+    public String getCategory() { return category; }
+    public void setCategory(String category) { this.category = category; }
+    public String getVersion() { return version; }
+    public void setVersion(String version) { this.version = version; }
+    public java.util.List<String> getTags() { return tags; }
+    public void setTags(java.util.List<String> tags) { this.tags = tags; }
 }

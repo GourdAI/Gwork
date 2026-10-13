@@ -1,40 +1,88 @@
 <!-- skills.html — 技能管理独立主视图片段，由 app-bootstrap.js 装配到 .main-area -->
 <template data-mount=".main-area">
     <div class="skills-view" id="skillsView">
-        <div class="skills-scroll" id="skillsScroll">
-            <div class="skills-inner" id="skillsInner">
-                <div class="skills-header">
-                    <div class="skills-header-titles">
-                        <div class="skills-title" data-i18n="settings.skills.title">技能管理</div>
-                        <div class="skills-desc" data-i18n="settings.skills.desc">管理已安装技能，浏览和安装技能包，扩展 AI 的能力边界</div>
-                    </div>
-                </div>
-                <div class="skills-section">
-                    <div class="skills-view-tabs" id="skillsViewTabs">
-                        <button type="button" class="skills-view-tab active" data-view="installed" data-i18n="settings.skills.installed_tab">已安装</button>
-                        <button type="button" class="skills-view-tab" data-view="market" data-i18n="settings.skills.market_tab">技能市场</button>
-                    </div>
-                    <div class="skills-search-bar">
-                        <div class="form-group" id="skillsMarketWrap" style="margin-bottom: 0; display: none;">
-                            <div class="layui-form">
-                                <select id="skillsMarketSelect" lay-filter="skillsMarketSelect"></select>
+        <!-- 头部固定区：顶栏与分类栏不随列表滚动（用户诉求：滚动时头部不动） -->
+        <div class="skills-head" id="skillsHead">
+            <div class="skills-inner">
+                <!-- 顶栏：视图 Tab（已安装标签自带数量徽标） + 搜索
+                     ⚠ 头部必须保持单行：不要再加「已安装返回条」这类独占一行的标题区。
+                     旧结构在已安装视图下额外渲染一行 `← 已安装`，Playwright 实测头部
+                     高 104px = 两行，该行内容仅约 100px、右侧约 1200px 整行空白（用户所指「空隙」）。
+                     标签页始终可见，点市场标签即可离开已安装视图，返回条与右上角入口按钮都是冗余。 -->
+                <div class="skills-topbar">
+                    <div class="skills-tabs-wrap skills-hscroll-wrap">
+                        <button type="button" class="skills-hscroll-nav prev" disabled tabindex="-1" aria-label="向左滚动标签页" data-i18n-title="settings.skills.scroll_prev">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                        </button>
+                        <div class="skills-hscroll-viewport">
+                            <div class="skills-view-tabs skills-hscroll" id="skillsViewTabs">
+                                <!-- 标签页（已安装 + 各市场）全部由 JS 依据 /web/settings/skills/markets 动态生成；
+                                     已安装数量徽标随「已安装」标签一起渲染，不再另设右上角入口按钮（两者功能完全重复）。 -->
                             </div>
                         </div>
+                        <button type="button" class="skills-hscroll-nav next" disabled tabindex="-1" aria-label="向右滚动标签页" data-i18n-title="settings.skills.scroll_next">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                        </button>
+                    </div>
+                    <div class="skills-topbar-actions">
                         <div class="skills-search-input-wrap">
-                            <svg class="skills-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                            <svg class="skills-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                             <input type="text" id="skillsSearchInput" placeholder="搜索技能..." data-i18n-placeholder="settings.skills.search_placeholder" autocomplete="off"/>
                             <button class="skills-search-clear" id="skillsSearchClear" style="display:none" data-i18n-title="settings.skills.clear">&times;</button>
                         </div>
                     </div>
-                    <div class="skills-status" id="skillsStatus" style="display:none">
-                        <div class="skills-loading" id="skillsLoading" style="display:none">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-                            <span data-i18n="settings.skills.loading">加载中…</span>
-                        </div>
-                        <div class="skills-error" id="skillsError" style="display:none"></div>
-                    </div>
-                    <div class="skills-list" id="skillsList"></div>
                 </div>
+
+                <!-- 市场视图：分类筛选栏
+                     结构 [← 箭头][viewport(chips 滚动区)][→ 箭头]：
+                      - viewport 承载左右渐隐：伪元素必须挂在不滚动的宿主上，挂在 overflow
+                        元素自身会随内容一起滚走，渐隐位置就错了；
+                      - 箭头仅在 chips 溢出时出现（wrap.has-overflow），不溢出完全不占位；
+                      - 滚到头自动 disabled，与滚轮/拖拽/渐隐共用同一套溢出态同步。
+                     显隐统一由 JS 切 wrap（showCategoryBar/hideCategoryBar），
+                     #skillsCategoryBar 仍是 chips 宿主，.html()/.find()/事件委托不变。 -->
+                <div class="skills-category-bar-wrap skills-hscroll-wrap" id="skillsCategoryBarWrap" style="display:none">
+                    <button type="button" class="skills-hscroll-nav prev" id="skillsCatPrev" disabled aria-label="向左滚动分类" data-i18n-title="settings.skills.scroll_prev">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                    </button>
+                    <div class="skills-hscroll-viewport">
+                        <div class="skills-category-bar skills-hscroll" id="skillsCategoryBar"></div>
+                    </div>
+                    <button type="button" class="skills-hscroll-nav next" id="skillsCatNext" disabled aria-label="向右滚动分类" data-i18n-title="settings.skills.scroll_next">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="skills-scroll" id="skillsScroll">
+            <div class="skills-inner" id="skillsInner">
+                <div class="skills-status" id="skillsStatus" style="display:none">
+                    <div class="skills-loading" id="skillsLoading" style="display:none">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                        <span data-i18n="settings.skills.loading">加载中…</span>
+                    </div>
+                    <div class="skills-error" id="skillsError" style="display:none"></div>
+                </div>
+                <div class="skills-list" id="skillsList"></div>
+            </div>
+        </div>
+
+        <!-- 技能详情弹窗 -->
+        <div class="skill-detail-overlay" id="skillDetailOverlay" style="display:none">
+            <div class="skill-detail-modal" role="dialog" aria-modal="true">
+                <button type="button" class="skill-detail-close" id="skillDetailClose">&times;</button>
+                <div class="skill-detail-head">
+                    <div class="skill-detail-icon" id="skillDetailIcon"></div>
+                    <div class="skill-detail-headinfo">
+                        <div class="skill-detail-name" id="skillDetailName"></div>
+                        <div class="skill-detail-owner" id="skillDetailOwner"></div>
+                    </div>
+                    <button type="button" class="skill-detail-install-btn" id="skillDetailInstallBtn" data-i18n="settings.skills.install">安装</button>
+                </div>
+                <div class="skill-detail-body" id="skillDetailBody"></div>
+                <div class="skill-detail-tags" id="skillDetailTags"></div>
+                <div class="skill-detail-stats" id="skillDetailStats"></div>
             </div>
         </div>
     </div>

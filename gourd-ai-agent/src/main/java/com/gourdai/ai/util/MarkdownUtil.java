@@ -47,11 +47,20 @@ public class MarkdownUtil {
             return markdown;
         }
 
+        // BOM 剥离后再做边界判定：Files.readAllLines 不剥 BOM，带 BOM 的 SKILL.md
+        // 首行是 "\uFEFF---"，trim() 后仍不等于 "---" → 整份 frontmatter 被静默丢弃
+        // （description/enabled/when_to_use 全丢，且无任何报错）。只剥首行首字符，
+        // 不改调用方传入的 list，行下标语义保持不变。
+        String firstLine = markdownLines.get(0);
+        if (firstLine.startsWith("\uFEFF")) {
+            firstLine = firstLine.substring(1);
+        }
+
         int endSeparatorIndex = -1;
 
         // 1. 尝试寻找 Frontmatter 边界
         // 必须以 --- 开头，且至少有 3 行（---, 内容, ---）
-        if (markdownLines.size() > 2 && "---".equals(markdownLines.get(0).trim())) {
+        if (markdownLines.size() > 2 && "---".equals(firstLine.trim())) {
             for (int i = 1; i < markdownLines.size(); i++) {
                 if ("---".equals(markdownLines.get(i).trim())) {
                     endSeparatorIndex = i;

@@ -49,6 +49,15 @@
     "allow-updater-check",
     "allow-updater-download",
     "allow-updater-install",
-    "allow-pick-directory"
+    "allow-pick-directory",
+    "allow-pick-file",
+    "allow-remote-connect",
+    "allow-remote-disconnect",
+    "allow-remote-state",
+    "allow-remote-mirror-sync",
+    "allow-remote-reconnect",
+    "allow-remote-bind-scope",
+    "allow-remote-list",
+    "allow-remote-wsl-list"
   ]
 }

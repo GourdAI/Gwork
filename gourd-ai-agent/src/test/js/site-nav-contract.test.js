@@ -23,6 +23,21 @@ const modelsSrc = readSite('js', 'models.js');
 const indexHtml = readSite('index.html');
 const modelsHtml = readSite('models.html');
 
+/**
+ * Derive the nav href list from real page markup, so the fixture cannot drift
+ * from production again (the hand-written 4-item array stopped covering the 5th item).
+ */
+function navHrefsFromHtml(html) {
+  const at = html.indexOf('id="navLinks"');
+  if (at < 0) throw new Error('navLinks not found in page HTML');
+  const nav = html.slice(at, html.indexOf('</nav>', at));
+  return (nav.match(/<a\b[^>]*href="([^"]+)"[^>]*>[^<]*<\/a>/g) || [])
+    .map(t => t.match(/href="([^"]+)"/)[1]);
+}
+
+const INDEX_HREFS = navHrefsFromHtml(indexHtml);
+const MODELS_HREFS = navHrefsFromHtml(modelsHtml);
+
 /* ---------------- 最小 DOM / 浏览器桩 ---------------- */
 
 function classList(el) {
@@ -79,12 +94,12 @@ function mount(opts) {
   const header = el('siteHeader', o.headerClass || 'site-header');
   const toggle = el('navToggle');
   const links = el('navLinks');
-  links.children = [
-    anchor('#features', true),
-    anchor('#quickstart', true),
-    anchor('#downloads', true),
-    anchor('https://api.gourdwork.com', true),
-  ].map(a => { a._header = header; return a; });
+  // Items come from the page markup (o.hrefs), never a hand-written copy.
+  links.children = (o.hrefs || INDEX_HREFS).map(href => {
+    const a = anchor(href, true);
+    a._header = header;
+    return a;
+  });
 
   const byId = { siteHeader: header, navToggle: toggle, navLinks: links };
   const docListeners = Object.create(null);
@@ -126,8 +141,8 @@ function mount(opts) {
   };
 }
 
-const INDEX_NAV = { sectionIds: ['features', 'quickstart', 'downloads'], scrolledOnScroll: true };
-const MODELS_NAV = { sectionIds: [], scrolledOnScroll: false };
+const INDEX_NAV = { sectionIds: ['features', 'quickstart', 'downloads', 'contact'], scrolledOnScroll: true, hrefs: INDEX_HREFS };
+const MODELS_NAV = { sectionIds: [], scrolledOnScroll: false, hrefs: MODELS_HREFS };
 
 /* ============ B. 形态：单一实现 + 两页接线 ============ */
 
@@ -187,7 +202,26 @@ test('汉堡开合：展开同步 aria-expanded/aria-label，再点复位', () =
   assert.deepEqual(p.state(), { menu: false, burger: false, expanded: 'false', label: '打开菜单', scrolled: false });
 });
 
-test('关闭路径 1：点击任意导航项即收起 —— 四个项（含外链模型网关）逐个走真实点击链', () => {
+
+test('夹具与真实页面同构：项数与顺序不得漂移（新增导航项必须被收起链覆盖）', () => {
+  // 历史缺陷：夹具自己 new 了 4 个 anchor，而页面已有 5 项；「联系」的收起行为零覆盖，
+  // 且 `anchors[3]` 是按位置猜外链项。现改为从真实 HTML 派生，这条用例守住派生结果本身。
+  assert.ok(INDEX_HREFS.length >= 5, `index 顶栏应至少 5 项，实得 ${INDEX_HREFS.length}`);
+  assert.ok(MODELS_HREFS.length >= 5, `models 顶栏应至少 5 项，实得 ${MODELS_HREFS.length}`);
+  assert.equal(INDEX_HREFS.filter(h => h.startsWith('#')).length, INDEX_NAV.sectionIds.length,
+    'index 顶栏页内锚点数必须等于 setupNav 登记的 sectionIds 数（否则某项永远不会高亮）');
+
+  const gi = INDEX_HREFS.findIndex(h => h.startsWith('https://'));
+  assert.ok(gi >= 0, 'index 顶栏应有外链项');
+  assert.equal(INDEX_HREFS[gi + 1], '#contact', '「联系」必须紧随外链「模型网关」之后（用户指定顺序）');
+  const mg = MODELS_HREFS.findIndex(h => h.startsWith('https://'));
+  assert.equal(MODELS_HREFS[mg + 1], 'index.html#contact', 'models 页须保持同一顺序，防两页漂移');
+
+  // 有牙的一条：若夹具退回硬编码数组，anchors.length(4) != 真实项数(5) 会直接红
+  const p = mount({ nav: INDEX_NAV });
+  assert.equal(p.anchors.length, INDEX_HREFS.length, '夹具项数应等于真实页面项数');
+});
+test('关闭路径 1：点击任意导航项即收起 —— 项数取自眞实页面 HTML（含外链模型网关）逐个走真实点击链', () => {
   for (const [label, nav, headerClass] of [['index', INDEX_NAV, 'site-header'], ['models', MODELS_NAV, 'site-header scrolled']]) {
     const p = mount({ nav, headerClass });
     p.anchors.forEach((a, i) => {
@@ -266,7 +300,8 @@ test('index 页（接管滚动）：>8px 加 scrolled，回顶移除', () => {
 
 test('外链导航项永不被页内高亮标记为 active', () => {
   const p = mount({ nav: INDEX_NAV });
-  const ext = p.anchors[3];
+  const ext = p.anchors.find(a => a.getAttribute('href').startsWith('https://'));
+  assert.ok(ext, 'fixture should include the external gateway item');
   assert.equal(ext.classList.contains('active'), false, '「模型网关」外链初始不应 active');
   p.scrollTo(400);
   p.scrollTo(19996); // 触底分支：currentId 取最后一个 sectionId

@@ -15,6 +15,9 @@ public class MarketItem {
     private String url;        // 技能市场详情页 URL
     private long installs;
     private long stars;
+    private String iconUrl;    // 技能图标 URL（市场提供时才有，空则前端用首字母占位）
+    private String category;   // 市场原生分类 key（用于分类筛选与展示）
+    private String version;    // 最新版本号（市场提供时才有）
 
     public MarketItem() {
     }
@@ -28,6 +31,9 @@ public class MarketItem {
     public MarketItem url(String url) { this.url = url; return this; }
     public MarketItem installs(long installs) { this.installs = installs; return this; }
     public MarketItem stars(long stars) { this.stars = stars; return this; }
+    public MarketItem iconUrl(String iconUrl) { this.iconUrl = iconUrl; return this; }
+    public MarketItem category(String category) { this.category = category; return this; }
+    public MarketItem version(String version) { this.version = version; return this; }
 
     public String getSlug() { return slug; }
     public void setSlug(String slug) { this.slug = slug; }
@@ -47,4 +53,10 @@ public class MarketItem {
     public void setInstalls(long installs) { this.installs = installs; }
     public long getStars() { return stars; }
     public void setStars(long stars) { this.stars = stars; }
+    public String getIconUrl() { return iconUrl; }
+    public void setIconUrl(String iconUrl) { this.iconUrl = iconUrl; }
+    public String getCategory() { return category; }
+    public void setCategory(String category) { this.category = category; }
+    public String getVersion() { return version; }
+    public void setVersion(String version) { this.version = version; }
 }

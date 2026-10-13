@@ -1188,6 +1188,22 @@ async fn restart_backend_serialized(
 mod tests {
     use super::*;
 
+    /// 碰全局 `BACKEND` 的用例共用这把锁。
+    ///
+    /// 【为什么需要】cargo test 默认多线程，而 `settle_backend_ready` 写的是进程级
+    /// watch channel：一个用例刚 `settle(true)` 还没收尾，另一个用例就 subscribe 拿到
+    /// true——「初始状态为 pending」的用例随机失败（本地实测：并行跑 FAILED，
+    /// `--test-threads=1` 全绿，即典型全局态竞态而不是真缺陷）。server.rs 的同名
+    /// 守卫（route_test_guard）已验证这套做法；用例 panic 会把锁打成 poisoned，
+    /// 取回内部值继续跑，否则一个失败会连带挂掉其余全部。
+    fn backend_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        match GUARD.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     #[test]
     fn ready_state_str() {
         assert_eq!(ReadyState::Pending.as_str(), "pending");
@@ -1203,6 +1219,7 @@ mod tests {
     /// 放行请求，用户看到的是每个接口 502 而非可读的 503。这类错误不会报错，只能靠测试抦住。
     #[test]
     fn settle_mirrors_to_app_ready_channel() {
+        let _g = backend_test_guard();
         let (tx, rx) = watch::channel(false);
         bind_app_ready_tx(tx);
 
@@ -1245,14 +1262,28 @@ mod tests {
     /// 初始状态为 pending，ready_tx 广播 false
     #[test]
     fn initial_state_is_pending() {
+        let _g = backend_test_guard();
+        // 前置复位：全局 watch channel 在同一测试进程内被多个用例共享，不先清场
+        // 本用例读到的就是上一个用例留下的值（并行时随机失败）。
+        {
+            let mut mgr = BACKEND.lock().unwrap();
+            mgr.ready_state = ReadyState::Pending;
+            mgr.last_error = None;
+            mgr.mirror_tx = None;
+            let _ = mgr.ready_tx.send(false);
+        }
         let rx = backend_ready_rx();
         assert!(!*rx.borrow());
     }
 
     /// PATH 搜索逻辑：在临时目录放入假 java，应能被 find_java 步骤 4 命中。
-    /// 注：修改进程级 PATH 有并发风险，单线程测试环境可接受。
+    /// 注：修改进程级 PATH 有并发风险（旧注释写「单线程测试环境可接受」，但那
+    /// 只是口头约定、无人执行）——纳入同一把串行守卫，至少本模块内不再交错改写
+    /// PATH/JAVA_HOME。跳模块的污染（其它用例真读 java 路径）仍靠不上这把锁，
+    /// 属既有基建局限（进一歩需 serial 插件或 CI 固定 `--test-threads=1`）。
     #[test]
     fn find_java_searches_path() {
+        let _g = backend_test_guard();
         let dir = std::env::temp_dir().join(format!("gourd-test-jdk-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let java_name = if cfg!(windows) { "javaw.exe" } else { "java" };

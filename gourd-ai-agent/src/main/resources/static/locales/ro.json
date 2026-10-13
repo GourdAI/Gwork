@@ -1,4 +1,123 @@
 {
+    "remote":  {
+
+        "group_local":  "Local",
+
+        "group_empty":  "Fără proiecte (conexiune online)",
+
+        "badge_count":  "{n}",
+
+        "pick_connection":  "Alege conexiunea la distanță",
+    "connect_in_progress": "O conexiune este deja în curs, așteptați puțin",
+
+        "group_global":  "Sesiuni globale",
+
+        "title":  "Spațiu de lucru la distanță",
+
+        "unsupported":  "Conexiunea la distanță necesită aplicația desktop",
+
+        "saved_hosts":  "Conexiuni recente",
+
+        "no_saved_hosts":  "Nicio gazdă salvată încă",
+
+        "new_connection":  "Conexiune nouă",
+
+        "host_placeholder":  "Gazdă (ex. 192.168.1.10)",
+
+        "user_placeholder":  "Utilizator",
+
+        "auth_password":  "Parolă",
+
+        "auth_key":  "Cheie privată",
+
+        "password_placeholder":  "Parolă SSH",
+
+        "keypath_placeholder":  "Calea cheii (ex. ~/.ssh/id_rsa)",
+
+        "passphrase_placeholder":  "Frază secretă (opțional)",
+
+        "remember_secret":  "Reține parola (depozitul sistem)",
+
+        "reconnecting":  "Conexiune remote pierdută, reconectare (încercarea {attempt}/{max})…",
+
+        "reconnected":  "Conexiunea remote a fost restabilită",
+
+        "reconnect_giveup":  "Reconectarea automată a eșuat, reconectați manual",
+
+        "reconnect_menu":  "Reconectare remote",
+
+        "jump_add":  "+ Host de salt (opțional)",
+
+        "jump_remove":  "− Elimină hostul de salt",
+
+        "jump_title":  "Conectare prin host de salt",
+
+        "jump_host_placeholder":  "Adresa hostului de salt",
+
+        "jump_password_placeholder":  "Parolă SSH host de salt",
+
+        "jump_user_required":  "Numele de utilizator al hostului de salt este obligatoriu",
+
+        "wsl_root_warn":  "Utilizatorul implicit este root: fișierele vor aparține lui root. Recomandat utilizator normal",
+
+        "browse":  "Răsfoire",
+
+        "connect_btn":  "Conectare",
+
+        "connecting_to":  "Se conectează la {host}:{port} …",
+
+        "connected_ok":  "Spațiul la distanță conectat",
+
+        "connect_failed":  "Conectare eșuată:",
+        "forget_host_btn":  "Uită amprenta gazdei și reconectează",
+        "forget_failed":  "Nu s-a putut uita amprenta gazdei: ",
+
+        "host_user_required":  "Gazdă și utilizator obligatorii",
+
+        "remove_host":  "Elimină",
+
+        "badge":  "La distanță",
+
+        "badge_title":  "Spațiu de lucru remote: {host} (click pentru meniul remote)",
+
+        "mirror_sync_menu":  "Sincronizează configul modelelor spre remote",
+
+        "disconnect_menu":  "Deconectează remote",
+
+        "mirror_synced":  "Configul modelelor sincronizat (oglindă în memorie)",
+
+        "mirror_sync_failed":  "Sincronizarea configurației de modele a eșuat (remote-ul folosește propriile setări)",
+
+        "mirror_unavailable":  "Conexiune remote inactivă, nu se poate sincroniza",
+
+        "mirror_auto_failed":  "Configurația modelelor nu a fost sincronizată (remote-ul folosește propriile setări). Reîncercați din meniul remote.",
+
+        "scope_bind_failed":  "Inregistrarea apartenentei remote a esuat; acest spatiu ramane local",
+
+        "channel_ssh":  "Gazdă SSH",
+
+        "channel_wsl":  "WSL",
+
+        "channel_preinstalled":  "CLI preinstalat",
+
+        "connecting_wsl":  "Conectare la WSL {distro} (utilizator {user})…",
+
+        "wsl_user_placeholder":  "Nume utilizator (utilizatorul implicit al distro)",
+
+        "wsl_hint":  "Distro WSL2; planul de date prin localhost direct, fără autentificare. Dacă distro nu are java, JRE 17 se instalează automat.",
+
+        "wsl_loading":  "Se încarcă lista de distro…",
+
+        "wsl_none":  "Niciun distro WSL găsit",
+
+        "wsl_none_v2":  "Niciun distro WSL2 găsit (WSL1 fără trecere localhost)",
+
+        "preinstalled_hint":  "Conectare la un server cu gwork CLI preinstalat: la detectare, implementarea se omite (datele de acreditare printr-o variabilă de mediu, niciodată în linia de comandă); altfel, implementare standardă.",
+        "runtime_pkg_label":  "Pachet runtime offline (opțional, runtime-*.tar.gz)",
+        "runtime_pkg_hint":  "Pentru servere intranet/offline fără Java: încărcați acest pachet mai întâi; gol = runtime inclus, altfel autoinstalare la distanță."
+
+    },
+
     "streaming":  {
                       "describe_images":  "Descriți aceste imagini",
                       "process_files":  "Vă rog să procesați aceste fișiere",
@@ -234,8 +353,9 @@
                                        "search_placeholder":  "Căutare proiecte…",
                                        "search_no_results":  "Niciun proiect potrivit",
                                        "remote_connect":  "Conectare la distanță",
-                                       "locate_multiple":  "Mai multe foldere cu același nume, alegeți unul:"
-                                   },
+                                       "locate_multiple":  "Mai multe foldere cu același nume, alegeți unul:",
+                                       "open_remote_folder":  "Deschide dosarul la distanță",
+                                       "remote_item":  "Spațiu de lucru la distanță"                                   },
                  "sidebar":  {
                                  "load_failed_retry":  "Încărcare eșuată, faceți clic pentru reîncercare",
                                  "loop_mark":  "Sarcină programată",
@@ -434,9 +554,17 @@
                                     "installed_tab":  "Instalate",
                                     "uninstall":  "Dezinstalează",
                                     "uninstall_confirm":  "Dezinstalezi skill-ul \"{0}\"? Directorul local al skill-ului va fi șters.",
-                                    "scope_global":  "Global",
-                                    "scope_workspace":  "This Project",
-                                    "market_tab":  "Piața de Skills"
+                                    "market_tab":  "Piața de Skills",
+                                     "category_all":  "Toate",
+                                     "downloads":  "Descărcări",
+                                     "stars":  "Stele",
+                                     "version":  "Versiune",
+                                     "enable":  "Activare",
+                                     "disable":  "Dezactivare",
+                                     "source_local":  "Local",
+                                     "installed_ok":  "instalată cu succes",
+                                     "scroll_prev":  "Derulează la stânga",
+                                     "scroll_next":  "Derulează la dreapta"
                                 },
                      "mcp":  {
                                  "title":  "Servere MCP",

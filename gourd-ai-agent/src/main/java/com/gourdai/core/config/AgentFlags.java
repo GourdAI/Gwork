@@ -37,6 +37,23 @@ public class AgentFlags {
     public final static String FLAG_WEB = "web";
     public final static String FLAG_CLI = "cli";
 
+    /** 远端部署模式标记（见 远程工作区方案.md 方案 A）：桌面端 SSH 部署链启动远端 jar 时注入
+     * {@code -Dgwork.remote=true}。meta 接口据此回告前端「当前后端跑在远程主机」，前端可渲染远程徽标。 */
+    public final static String PROP_REMOTE = "gwork.remote";
+
+    /** 远端模式 Web Basic Auth 凭据（优先 {@code GWORK_WEB_AUTH} 环境变量，回退
+     * {@code -Dgwork.web.auth} 系统属性）。
+     * 由桌面端在每次连接时随机生成注入。环境变量优先的原因（P1-3 修复）：命令行
+     * -D 参数在远端 ps -ef 下对同机所有用户可见，JAVA_TOOL_OPTIONS 还会把内容整行
+     * 写进 "Picked up …" 日志；环境变量仅 /proc/PID/environ（属主可读）。
+     * 仅存远端进程内存，不落盘；优先级高于 settings.json 的 webAuthUser/webAuthPass
+     * （远端机器的 settings 属于远端用户，桌面端不应写入；且凭据随连接生成、
+     * 断连即换，落盘无意义）。 */
+    public final static String PROP_REMOTE_WEB_AUTH = "gwork.web.auth";
+
+    /** 凭据注入的环境变量名（见 {@link #PROP_REMOTE_WEB_AUTH}，优先生效）。 */
+    public final static String ENV_REMOTE_WEB_AUTH = "GWORK_WEB_AUTH";
+
     public final static String SCOPE_USER = "user"; //作用域：用户（用局）
     public final static String SCOPE_LOCAL = "workspace"; //作用域：本地
 
@@ -131,6 +148,34 @@ public class AgentFlags {
         }
         String result = value.trim();
         return result.isEmpty() ? null : result;
+    }
+
+    /**
+     * 远端部署模式的 Basic Auth 凭据（环境变量 {@code GWORK_WEB_AUTH} 优先，回退
+     * {@code -Dgwork.web.auth} 系统属性）。
+     *
+     * <p>仅在远端部署模式下由桌面端注入（见 {@link #PROP_REMOTE_WEB_AUTH}）。返回
+     * {@code [user, pass]}；未注入/格式非法（缺冒号、空用户名、空密码）一律返回 null
+     * ——解析失败降级为「未配置」，走 settings.json 原有路径，而不是拿着畸形凭据拒掉所有请求。</p>
+     */
+    public static String[] getRemoteWebAuth() {
+        String raw = trimmed(System.getenv(ENV_REMOTE_WEB_AUTH));
+        if (raw == null) {
+            raw = trimmed(System.getProperty(PROP_REMOTE_WEB_AUTH));
+        }
+        if (raw == null) {
+            return null;
+        }
+        int idx = raw.indexOf(':');
+        if (idx <= 0 || idx >= raw.length() - 1) {
+            return null;
+        }
+        return new String[]{raw.substring(0, idx), raw.substring(idx + 1)};
+    }
+
+    /** 远端部署模式标记（桌面端 SSH 部署链注入 {@code -Dgwork.remote=true}）。 */
+    public static boolean isRemoteDeployed() {
+        return Boolean.parseBoolean(trimmed(System.getProperty(PROP_REMOTE)));
     }
 
     /**

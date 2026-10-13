@@ -118,6 +118,55 @@ function getSessionCwd() {
 }
 window.getSessionCwd = getSessionCwd;
 
+/* 【中文路径修复】HTTP 头值只允许 ISO-8859-1 字符：工作区路径含中文/emoji 等非 ASCII
+   字符时，浏览器对 setRequestHeader/Headers 构造直接抛异常（Chromium 实测:
+   "String contains non ISO-8859-1 code point"），请求根本发不出去，用户侧表现为
+   「消息发送失败」。因此 X-Session-Cwd 头必须经本函数 encodeURIComponent 后再携带。
+   后端读到 %XX 序列会同步解码（Java SessionCwdCodec / Rust proxy_http），纯 ASCII
+   路径不受影响；空值返回空串，与「空 cwd 不带头」的既有约定一致。
+   写点收敛清单见各调用处：发送/附件上传/插话（app-streaming）、代码保存与监听注册
+   （app-code）、git 四操作（app-gitdiff）、记忆（app-memory）、todos、队列补发
+   （message-queue）——新代码带 X-Session-Cwd 时必须走本函数，不得再裸放路径。 */
+function encodeSessionCwdHeader(cwd) {
+    var t = (cwd == null) ? '' : String(cwd);
+    if (!t) return '';
+    try { return encodeURIComponent(t); } catch (e) { return t; }
+}
+window.encodeSessionCwdHeader = encodeSessionCwdHeader;
+
+
+/* 工作区路径归一（归属比对键）：**全站唯一口径**，与 Rust 侧 server.rs::scope_key 对齐。
+
+   为什么必须全局共享而不是各模块各写一份：这个键是「这个目录属于本地还是哪台远端」
+   的比对依据（双拉去重、选中时声明归属），一旦两处口径不一致就会错配。实测踩过：
+   上一轮把 Rust 侧改成「POSIX 保留大小写」时，app-code.js 的无条件 lower 没跟着改，
+   于是 Linux 上 `/home/u/Proj`（本地）与 `/home/u/proj`（远端）归一后相等 → 本地目录
+   被误归到远端（跳机读写）。
+
+   规则：仅 Windows 风格路径（盘符 `C:\` `C:/` 或 UNC `\\host\share`）转小写并把
+   分隔符归一为反斜杠（NTFS 大小写不敏感）；POSIX 路径保留大小写（Linux/macOS 上
+   仅大小写不同的两个目录是真实存在的不同目录）。 */
+function pathScopeKey(p) {
+    var t = String(p == null ? '' : p).replace(/[\\/]+$/, '');
+    var win = /^[a-zA-Z]:[\\/]/.test(t) || /^[\\/]{2}[^\\/]/.test(t);
+    return win ? t.replace(/\//g, '\\').toLowerCase() : t;
+}
+window.pathScopeKey = pathScopeKey;
+
+/* 远端归属 → 主机展示名（列表条目 title 用）。对标 ZCode 的
+   formatRemoteWorkspaceDisplayLabel（远端条目带 `[SSH: alias]` 后缀）。
+
+   为何放 app-base（无 IIFE、最先加载）：app-workspace 与 app-history 两处合并列表
+   都要给远端条目补主机名，各写一份 typeof 守卫必漏。查不到（未连远端/旧壳
+   无此函数）返回空串，调用方自行回退到通用文案——绝不把 connectionId
+   （rc-host:port:user 内部键）当主机名展示。 */
+function remoteHostLabel(scope) {
+    if (!scope || scope === 'local') return '';
+    if (typeof window.__remoteHostLabel !== 'function') return '';
+    return window.__remoteHostLabel(scope) || '';
+}
+window.remoteHostLabel = remoteHostLabel;
+
 /* 项目登记表（projects.json）变更广播：重命名 / 新增 / 移除 / 新建 成功后调用。
    各持有项目列表副本的视图（欢迎页工作空间选择器、记忆页项目选择器、自动化工作空间选择器）
    监听 'projects:changed' 重拉列表即可即时跟上新显示名，无需刷新页面或手动点刷新。 */

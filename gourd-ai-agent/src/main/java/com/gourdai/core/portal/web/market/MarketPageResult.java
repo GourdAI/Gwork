@@ -19,12 +19,27 @@ public class MarketPageResult {
     /** 下一页游标；null 或空字符串表示没有更多数据 */
     private String nextCursor;
 
+    /**
+     * 适配器是否已自行完成分类过滤（含分页补偿）。
+     *
+     * <p>为 true 时 {@link com.gourdai.core.portal.web.WebSettingsController} 不再做
+     * 通用客户端过滤（避免二次过滤把已补偿的页再砍一刀）；默认 false 表示
+     * 返回项未过滤，由控制器按 {@code category} 统一过滤。</p>
+     */
+    private boolean filtered;
+
     public MarketPageResult() {
     }
 
     public MarketPageResult(List<MarketItem> items, String nextCursor) {
         this.items = items;
         this.nextCursor = nextCursor;
+    }
+
+    public MarketPageResult(List<MarketItem> items, String nextCursor, boolean filtered) {
+        this.items = items;
+        this.nextCursor = nextCursor;
+        this.filtered = filtered;
     }
 
     public List<MarketItem> getItems() {
@@ -41,5 +56,13 @@ public class MarketPageResult {
 
     public void setNextCursor(String nextCursor) {
         this.nextCursor = nextCursor;
+    }
+
+    public boolean isFiltered() {
+        return filtered;
+    }
+
+    public void setFiltered(boolean filtered) {
+        this.filtered = filtered;
     }
 }

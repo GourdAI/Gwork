@@ -125,6 +125,7 @@
         '/js/model-selector.js',
         '/js/app-history.js',
         '/js/app-workspace.js',
+    '/js/app-remote.js',   // 远程工作区：连接向导 + 连接态管理（P1；必须在 app-workspace 之后——共享下拉 UI 挂载点事件）。【注释修正】“请求分流”是 P1 旧架构的说法，P0 修复后前端不改写任何请求地址（上游切换由 Rust 侧反代承担），此处只负责向导与状态。
         '/js/app-message.js',
         '/js/app-filer.js',
         '/js/app-monaco.js',

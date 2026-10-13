@@ -709,6 +709,122 @@ a.dl-row:hover {
 .dl-row .arrow { width: 14px; height: 14px; color: var(--text-faint); flex: none; transition: transform 0.25s, color 0.25s; }
 a.dl-row:hover .arrow { transform: translateY(2px); color: var(--text); }
 
+/* ---------- 联系方式 ----------
+   两张二维码（客服 QQ / 官方 QQ 群）都必须坐在「不透的纯白卡片」上。
+   原因有两层，都不只是观感：
+     1) 深色站上直接贴图，白块边缘生硬、像渲染事故；
+     2) 扫码依赖亮暗差。卡片 padding 兼作 QR 规范要求的静区（quiet zone，>=4 模块），
+      两张原图图内自带静区都不足 4 模块，必须由 padding 补齐；
+      任何半透明底色 / 毛玻璃 / 滤镜都会让深色透进来吃掉对比度，码直接扫不出来。
+   群码原图原本是「深灰底 + 浅蓝码点」的极性反转码（扫码器默认深码浅底，反转码会被拒识），
+   已做单调亮度重映射转为纯白底 + 中性深码；映射单调故二值位图与原图精确互补，信息无损。
+   两张码的模块数不同（客服 41、群 45），故显示宽统一，实测静区仍均 >=4 模块。 */
+.contact-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 40px 56px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.032);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  padding: 44px 46px;
+}
+.contact-copy { min-width: 0; }
+.contact-copy h2 {
+  font-size: clamp(24px, 3vw, 34px);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.28;
+}
+.contact-desc {
+  margin-top: 14px;
+  max-width: 480px;
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--text-dim);
+}
+.contact-list { margin-top: 26px; display: grid; gap: 13px; }
+.contact-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-dim);
+}
+/* 标题必须独占一行：写成 inline 时「使用答疑」会和后面的说明连读成一句话
+   （实测 textContent = 「使用答疑安装、模型接入、技能与 MCP 配置」），既难看也难读。 */
+.contact-item b { display: block; color: var(--text); font-weight: 600; margin-bottom: 2px; }
+.ci-icon {
+  flex: none;
+  width: 22px; height: 22px;
+  margin-top: 1px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  display: flex; align-items: center; justify-content: center;
+}
+.ci-icon svg { width: 12px; height: 12px; color: var(--text); }
+
+.contact-qr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 26px 30px;
+}
+.qr-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.qr-card {
+  /* 白底必须不透：扫码靠亮暗差识别，任何深色叠色都会拉低可扫性 */
+  background: var(--white);
+  border-radius: 16px;
+  padding: 16px;
+  box-shadow: 0 22px 60px -22px rgba(255, 255, 255, 0.3),
+              0 0 0 1px rgba(255, 255, 255, 0.14);
+  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.3s;
+}
+.qr-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 30px 70px -22px rgba(255, 255, 255, 0.38),
+              0 0 0 1px rgba(255, 255, 255, 0.22);
+}
+.qr-card img {
+  display: block;
+  width: 190px;
+  height: auto;
+  /* 图本身已是白底，不再叠色；缩放由浏览器平滑采样，避免码点锄齿 */
+  background: var(--white);
+}
+.qr-cap {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+.qr-cap-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; }
+
+@media (max-width: 1023px) {
+  .contact-panel { grid-template-columns: 1fr; gap: 34px; padding: 36px 32px; }
+  .contact-desc { max-width: none; }
+}
+@media (max-width: 767px) {
+  .contact-panel { padding: 30px 22px; }
+  .qr-card { padding: 13px; }
+  .qr-card img { width: 184px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .qr-card { transition: none; }
+  .qr-card:hover { transform: none; }
+}
+
 /* ---------- Footer ---------- */
 .footer { padding: 44px 0 54px; }
 .footer hr { border: none; border-top: 1px solid var(--border); margin-bottom: 30px; }
