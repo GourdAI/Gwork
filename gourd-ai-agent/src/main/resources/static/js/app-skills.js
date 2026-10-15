@@ -415,10 +415,10 @@
             html += '<div class="skill-card" data-slug="' + escapeAttr(slug) + '" data-market="' + escapeAttr(_currentView) + '">'
                 + iconHtml(skill.iconUrl, displayName, 'skill-card-icon')
                 + '<div class="skill-card-body">'
-                + '<div class="skill-card-title"><span class="skill-card-name" title="' + escapeAttr(displayName) + '">' + escapeHtml(displayName) + '</span>'
+                + '<div class="skill-card-title"><span class="skill-card-name">' + escapeHtml(displayName) + '</span>'
                 + (installed ? '<span class="skill-installed-badge">' + escapeHtml(GourdI18n.t('settings.skills.installed')) + '</span>' : '')
                 + '</div>'
-                + '<div class="skill-card-desc" title="' + escapeAttr(desc) + '">' + escapeHtml(desc) + '</div>'
+                + '<div class="skill-card-desc">' + escapeHtml(desc) + '</div>'
                 + '<div class="skill-card-meta">'
                 + (installs > 0 ? '<span title="' + escapeAttr(GourdI18n.t('settings.skills.downloads')) + '"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' + compactNum(installs) + '</span>' : '')
                 + (stars > 0 ? '<span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' + compactNum(stars) + '</span>' : '')
@@ -463,10 +463,10 @@
             html += '<div class="skill-card skill-card-installed' + (enabled ? '' : ' skill-card-disabled') + '" data-name="' + escapeAttr(name) + '" data-scope="' + escapeAttr(scope) + '">'
                 + iconHtml(skill.iconUrl, name, 'skill-card-icon')
                 + '<div class="skill-card-body">'
-                + '<div class="skill-card-title"><span class="skill-card-name" title="' + escapeAttr(name) + '">' + escapeHtml(name) + '</span>'
+                + '<div class="skill-card-title"><span class="skill-card-name">' + escapeHtml(name) + '</span>'
                 + (skill.version ? '<span class="skill-installed-badge" style="color:var(--text-secondary);background:var(--bg-hover)">v' + escapeHtml(skill.version) + '</span>' : '')
                 + '</div>'
-                + '<div class="skill-card-desc" title="' + escapeAttr(desc) + '">' + escapeHtml(desc) + '</div>'
+                + '<div class="skill-card-desc">' + escapeHtml(desc) + '</div>'
                 + '<div class="skill-card-meta"><span>' + escapeHtml(sourceLabel) + '</span></div>'
                 + '</div>'
                 + '<div class="skill-card-side">'

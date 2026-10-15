@@ -175,6 +175,17 @@ public class ReActTrace implements AgentTrace {
     public static final String EXTRA_CONVERGE_DEFERRED_COUNT = "_converge_deferred_count";
 
     /**
+     * extras 键：后台门禁把「隐式 END」改判为「继续执行」的次数（Integer）。
+     *
+     * <p>后台门禁：会话仍有运行中后台任务（bash 后台命令/后台子代理）时，模型不含工具调用的
+     * 纯文本回复很可能是「启动后台任务后即收尾」的虚假承诺——回合结束即无执行体，完成通知
+     * 将落入无人消费的队列。门禁注入校验提示并续跑，上限后尊重模型回复（防真死循环，
+     * 语义与 {@link #EXTRA_CONVERGE_DEFERRED_COUNT} 同构，但触发条件独立：本门禁看后台任务
+     * 运行态，不看是否注入过收敛指令）。</p>
+     */
+    public static final String EXTRA_BG_GATE_DEFERRED_COUNT = "_bg_gate_deferred_count";
+
+    /**
      * extras 键：用户主动停止（interrupt）且任务未完成时置位（Boolean.TRUE）。
      *
      * <p>用户取消不经过库的异常兜底（abnormal 不会置位），执行流最终停在 route=END
@@ -254,6 +265,21 @@ public class ReActTrace implements AgentTrace {
     public int getConvergeDeferredCount() {
         Integer count = (Integer) extras.get(EXTRA_CONVERGE_DEFERRED_COUNT);
         return count == null ? 0 : count;
+    }
+
+    /** 后台门禁累计改判次数（未改判过为 0，见 {@link #EXTRA_BG_GATE_DEFERRED_COUNT}）。 */
+    public int getBgGateDeferredCount() {
+        Integer count = (Integer) extras.get(EXTRA_BG_GATE_DEFERRED_COUNT);
+        return count == null ? 0 : count;
+    }
+
+    /**
+     * 后台门禁改判次数 +1 并返回新值（门禁每次把隐式 END 改判为继续时调用）。
+     */
+    public int incrementBgGateDeferrals() {
+        int next = getBgGateDeferredCount() + 1;
+        extras.put(EXTRA_BG_GATE_DEFERRED_COUNT, next);
+        return next;
     }
 
     public ReActTrace() {

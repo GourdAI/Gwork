@@ -15,6 +15,7 @@
  */
 package com.gourdai.core.portal.web;
 
+import com.gourdai.harness.talents.cli.OutputDecoder;
 import org.noear.snack4.ONode;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.net.websocket.WebSocket;
@@ -183,6 +184,11 @@ public class TerminalGate extends SimpleWebSocketListener {
     /**
      * 采集 Windows 版本 banner（无参 cmd 首两行输出），供 /K 会话首帧补发。
      * 限时 2 秒：采集进程不等待其退出，读完即弃（daemon 语义由 JVM 回收）。
+     *
+     * <p><b>解码不得硬编码 UTF-8</b>：采集进程是裸 cmd（未 chcp 65001），中文 Windows 上
+     * 版本横幅按系统 ANSI 代码页（GBK）写入管道——「版本/版权所有」的 GBK 字节按 UTF-8
+     * 解码必现替换符乱码（用户实测首帧两行乱码即此）。故先收原始字节，统一交
+     * {@link OutputDecoder}（UTF-8 严格校验 + 遗留代码页兜底）解码。</p>
      */
     String windowsBanner() {
         if (bannerProbed) {
@@ -193,11 +199,11 @@ public class TerminalGate extends SimpleWebSocketListener {
             ProcessBuilder pb = new ProcessBuilder("cmd.exe");
             pb.redirectErrorStream(true);
             Process p = pb.start();
-            StringBuilder sb = new StringBuilder();
+            java.io.ByteArrayOutputStream rawBytes = new java.io.ByteArrayOutputStream();
             try (InputStream in = p.getInputStream()) {
                 byte[] buf = new byte[2048];
                 long deadline = System.currentTimeMillis() + 2000;
-                while (System.currentTimeMillis() < deadline && sb.length() < 512) {
+                while (System.currentTimeMillis() < deadline && rawBytes.size() < 512) {
                     if (in.available() <= 0) {
                         Thread.sleep(50);
                         continue;
@@ -206,12 +212,12 @@ public class TerminalGate extends SimpleWebSocketListener {
                     if (n < 0) {
                         break;
                     }
-                    sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
+                    rawBytes.write(buf, 0, n);
                 }
             } finally {
                 p.destroyForcibly();
             }
-            String raw = sb.toString();
+            String raw = OutputDecoder.decodeAll(rawBytes.toByteArray(), StandardCharsets.UTF_8);
             int idx = raw.indexOf('\n');
             if (idx > 0 && idx + 1 < raw.length() && raw.charAt(idx + 1) != '\n') {
                 int idx2 = raw.indexOf('\n', idx + 1);
@@ -306,16 +312,31 @@ public class TerminalGate extends SimpleWebSocketListener {
             }
         }
 
+        /**
+         * 流式推送子进程输出。
+         *
+         * <p>解码不得逐块硬编码 UTF-8：一个多字节字符（中文 UTF-8 三字节、GBK 两字节）
+         * 可能正好被 4096 读取边界切断，逐块解码会在切口产生替换符；且会话内若存在未
+         * 切 UTF-8 代码页的输出（GBK），整流都会乱码。{@link OutputDecoder} 流式路径持有
+         * 残字节与字符集锁定，两个问题一并解决（与 bash 工具会话同一解码器）。</p>
+         */
         private void pump(InputStream in) {
             byte[] buf = new byte[4096];
+            OutputDecoder decoder = new OutputDecoder(StandardCharsets.UTF_8);
             try {
                 int n;
                 while ((n = in.read(buf)) != -1) {
                     if (closed) {
                         break;
                     }
-                    String chunk = new String(buf, 0, n, StandardCharsets.UTF_8);
-                    sendJson(socket, new ONode().set("type", "output").set("data", chunk));
+                    String chunk = decoder.decode(buf, n);
+                    if (!chunk.isEmpty()) {
+                        sendJson(socket, new ONode().set("type", "output").set("data", chunk));
+                    }
+                }
+                String tail = decoder.flush();
+                if (!closed && !tail.isEmpty()) {
+                    sendJson(socket, new ONode().set("type", "output").set("data", tail));
                 }
             } catch (IOException e) {
                 // 进程结束或流关闭，正常退出。

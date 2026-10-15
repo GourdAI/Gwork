@@ -165,6 +165,10 @@ class TerminalGateShellSessionTest {
         assertNotNull(banner, "banner 采集失败（超时/异常）不应在 Windows 上发生");
         assertTrue(banner.contains("Microsoft Windows"), "首行应为版本行: " + banner);
         assertTrue(banner.endsWith("\n"), "banner 应以换行收尾便于与后续输出拼接");
+        // 中文 Windows 上裸 cmd 横幅按系统代码页（GBK）输出：硬编码 UTF-8 解码会把
+        // 「版本/版权所有」解成替换符乱码（用户实测首帧乱码），解码必须走 OutputDecoder 兜底
+        assertFalse(banner.indexOf('\uFFFD') >= 0, "banner 不得含替换符（GBK 误按 UTF-8 解码）: " + banner);
+        assertTrue(banner.contains("版本"), "中文系统横幅应正确解出「版本」: " + banner);
         // 缓存幂等：二次调用同值（不重复起进程）
         assertEquals(banner, gate.windowsBanner());
     }
@@ -188,6 +192,7 @@ class TerminalGateShellSessionTest {
                 assertNotNull(first, "应收到首帧输出");
                 assertTrue(first.contains("Microsoft Windows"), "首帧应为版本 banner: " + first);
                 assertFalse(first.contains("chcp"), "不得回显 chcp 幽灵命令: " + first);
+                assertFalse(first.indexOf('\uFFFD') >= 0, "首帧 banner 不得含替换符乱码: " + first);
             }
             // 空闲不忙：轮询等 shell 就绪后断言
             assertBusyEventually(gate, socket, false, 6000);

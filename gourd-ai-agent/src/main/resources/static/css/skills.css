@@ -14,6 +14,10 @@ body.code-mode .skills-view { display: none !important; }
    桌面壳（electron/tauri）下 .main-area 首子元素 .titlebar-drag-region 会占位 36px，
    chat/code 视图有内容盖住它，而本视图此前被整体压下 → 顶部多出一条空白带。
    修法：把该 strip 隐藏（display:none，不占位），头部自身承担窗口拖拽。
+   【作用域纪律】隐藏规则必须只在本视图激活时生效（见下方 :has(> .skills-view.active)
+   门控）。strip 是 .main-area 的共享骨架：曾写成全局 body.is-electron 规则，把
+   chat/code 等所有视图的 36px 标题条一并移除——桌面壳下对话内容直接顶到窗口顶
+   （用户报障回归），故严禁无门控的全局隐藏。
 
    ⚠ 两个已踩过的坑，勿再回退：
    1) 不要给 .skills-head 加 margin-top:-36px。strip 隐藏后已不占位，负 margin 是
@@ -49,7 +53,7 @@ body.is-electron .skills-head input { -webkit-app-region: no-drag; }
 /* 分类栏/标签栏需要按住拖动平移，必须整体豁免拖拽，否则桌面壳下拖它会拖动窗口 */
 body.is-electron .skills-category-bar,
 body.is-electron .skills-view-tabs { -webkit-app-region: no-drag; }
-body.is-electron .main-area > .titlebar-drag-region { display: none; }
+body.is-electron .main-area:has(> .skills-view.active) > .titlebar-drag-region { display: none; }
 .skills-head .skills-inner { padding: 14px 28px 10px; }
 /* 桌面壳：36px 让开原生窗口控件 + 4px 呼吸，比旧值 48px 紧凑 */
 body.is-electron .skills-head .skills-inner { padding-top: 40px; }

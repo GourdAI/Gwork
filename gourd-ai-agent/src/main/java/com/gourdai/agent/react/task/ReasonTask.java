@@ -257,6 +257,54 @@ public class ReasonTask {
     }
 
     /**
+     * 后台门禁把「隐式 END」改判为「继续执行」的次数上限。
+     *
+     * <p>与收敛门禁上限同构：一次校验提示足以纠正「启动后台任务后即收尾」的误判；
+     * 两次仍坚持纯文本，说明模型已明确交代后续安排（或确实无可执行动作），尊重其回复。
+     * 无上限会变成「模型想结束却永远结束不了」的新死循环。</p>
+     */
+    static final int MAX_BG_GATE_DEFERRALS = 2;
+
+    /**
+     * 后台门禁核心武装条件：本归属下仍有运行中后台任务且改判次数未达上限。
+     *
+     * <p>背景（用户实测）：模型启动后台长任务后输出「构建完成后我会自动收到通知并校验产物」
+     * 即结束回合——但回合结束即无执行体，完成通知落入无人消费的队列，用户视角是
+     * 「任务目标未完成但整个任务结束了」。通知是拉取式（下一轮推理开头才注入），
+     * 无人发起下一轮则永远无人消费；本门禁在结束前拦住虚假承诺，逼模型当场核实
+     * （bash_output / await_tasks）或如实交代后续安排。</p>
+     *
+     * <p>统一用于三个模型自主 END 判定点（NATIVE 隐式 / 显式 Finish / 文本兜底），
+     * 不豁免 finishMarker：Finish 只表达模型主观认为完成，表达不了「后台任务还在跑」
+     * 的客观事实。NATIVE 隐式分支曾在此带 finishMarker 豁免而形成绕过——NATIVE 风格下
+     * 非空 clearContent 必然在隐式分支 return、永远到不了显式 Finish 分支，回复一旦含
+     * marker 门禁即被绕过直通 END（恰是用户投诉形态）；2026-10-15 review 后三处统一为本判定。</p>
+     */
+    static boolean bgGateArmed(ReActTrace trace) {
+        String owner = BackgroundNoticeCenter.peekOwner(trace.getContext());
+        return BackgroundNoticeCenter.hasRunning(owner)
+                && trace.getBgGateDeferredCount() < MAX_BG_GATE_DEFERRALS;
+    }
+
+    /**
+     * 后台门禁校验提示文案（第 deferred 次改判时注入工作记忆）。
+     *
+     * <p>必须同时给出两条出路（当场核实 / 如实交代后结束），不得绝对化禁止结束：
+     * 模型确实可能已无事可做（如后台任务只是旁路日志），此时应允许其交代后收尾。</p>
+     */
+    static String backgroundGatePromptFor(int deferred, int runningCount) {
+        return String.format(
+                "【系统提示：后台任务收尾校验 (Background Task Gate)】\n" +
+                "检测到您准备结束回合，但本会话仍有 %d 个运行中的后台任务（bash 后台命令或后台子代理）。\n" +
+                "回合一旦结束就没有执行体能消费它们的完成通知，「结束后会自动收到通知并继续」这类承诺无法兑现。请二选一：\n" +
+                "1. **当场核实**：用 bash_output / await_tasks 查询后台任务状态与结果，拿到结论后再决定是否结束；\n" +
+                "2. **如实交代后结束**：在最终回答中明确告知用户哪些后台任务仍在运行、用户下一步应如何让你继续（如发送「继续」），不得暗示你会自动跟进。\n" +
+                "（第 %d/%d 次校验，之后将按普通最终回答处理）",
+                runningCount, deferred, MAX_BG_GATE_DEFERRALS
+        );
+    }
+
+    /**
      * 单个工具调用的参数生成进度跟踪器（仅存活于一次流式请求内）。
      *
      * <p>分片协议只在首片携带 {@code id}/{@code name}，后续分片会退化，
@@ -742,6 +790,24 @@ public class ReasonTask {
                             deferred, MAX_CONVERGE_DEFERRALS);
                     return;
                 }
+                // [后台门禁] 仍有运行中后台任务时的纯文本收尾视为可疑虚假承诺（详见 bgGateArmed）：
+                // 先于 END 判定拦截，注入收尾校验续跑。用不豁免 finishMarker 的 bgGateArmed——
+                // NATIVE 风格下非空 clearContent 必然在本分支 return、到不了显式 Finish 分支，
+                // 豁免会让含 marker 的回复绕过门禁直通 END（2026-10-15 review 发现的绕过形态）。
+                if (bgGateArmed(trace)) {
+                    int deferred = trace.incrementBgGateDeferrals();
+                    String owner = BackgroundNoticeCenter.peekOwner(trace.getContext());
+                    int running = BackgroundNoticeCenter.runningCount(owner);
+                    trace.getWorkingMemory().addMessage(responseMessage);
+                    trace.getWorkingMemory().addMessage(ChatMessage.ofUser(backgroundGatePromptFor(deferred, running)));
+                    trace.setRoute(ReActAgent.ID_REASON);
+                    LOG.warn("ReActAgent [{}] background gate deferred implicit END ({}), {} background task(s) "
+                            + "still running, gate check injected (deferred {}/{}).",
+                            config.getName(), clearContent.length() > 60
+                                    ? clearContent.substring(0, 60) : clearContent,
+                            running, deferred, MAX_BG_GATE_DEFERRALS);
+                    return;
+                }
                 trace.setRoute(Agent.ID_END);
                 trace.setFinalAnswer(clearContent, false);
                 return;
@@ -754,8 +820,23 @@ public class ReasonTask {
 
         // 1. 优先判断任务是否结束（Finish）
         if (clearContent.contains(config.getFinishMarker())) {
-            trace.setRoute(Agent.ID_END);
-            trace.setFinalAnswer(extractFinalAnswer(clearContent), false);
+            // [后台门禁] 显式 Finish 同样拦截：finishMarker 只表达模型主观认为完成，
+            // 表达不了「后台任务还在跑」这一客观事实（文本协议分支与 NATIVE_TOOL 分支同权）。
+            // 此处用 bgGateArmed（不排除 finishMarker），否则门禁在本分支恒不命中。
+            if (bgGateArmed(trace) == false) {
+                trace.setRoute(Agent.ID_END);
+                trace.setFinalAnswer(extractFinalAnswer(clearContent), false);
+                return;
+            }
+            int deferred = trace.incrementBgGateDeferrals();
+            String owner = BackgroundNoticeCenter.peekOwner(trace.getContext());
+            int running = BackgroundNoticeCenter.runningCount(owner);
+            trace.getWorkingMemory().addMessage(responseMessage);
+            trace.getWorkingMemory().addMessage(ChatMessage.ofUser(backgroundGatePromptFor(deferred, running)));
+            trace.setRoute(ReActAgent.ID_REASON);
+            LOG.warn("ReActAgent [{}] background gate deferred explicit Finish, {} background task(s) still "
+                    + "running, gate check injected (deferred {}/{}).",
+                    config.getName(), running, deferred, MAX_BG_GATE_DEFERRALS);
             return;
         }
 
@@ -769,6 +850,19 @@ public class ReasonTask {
         }
 
         // 3. 兜底逻辑：既无明确工具调用也无完成标识，视为直接回复 Final Answer
+        // [后台门禁] 兜底 END 同样受后台门禁约束（文本协议下最常见的收尾路径）。
+        if (bgGateArmed(trace)) {
+            int deferred = trace.incrementBgGateDeferrals();
+            String owner = BackgroundNoticeCenter.peekOwner(trace.getContext());
+            int running = BackgroundNoticeCenter.runningCount(owner);
+            trace.getWorkingMemory().addMessage(responseMessage);
+            trace.getWorkingMemory().addMessage(ChatMessage.ofUser(backgroundGatePromptFor(deferred, running)));
+            trace.setRoute(ReActAgent.ID_REASON);
+            LOG.warn("ReActAgent [{}] background gate deferred fallback END, {} background task(s) still "
+                    + "running, gate check injected (deferred {}/{}).",
+                    config.getName(), running, deferred, MAX_BG_GATE_DEFERRALS);
+            return;
+        }
         trace.setRoute(Agent.ID_END);
         trace.setFinalAnswer(extractFinalAnswer(clearContent), false);
     }

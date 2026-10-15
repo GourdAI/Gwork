@@ -14,7 +14,11 @@
 
     刷新时机：打开时、会话/工作区变化时、打开期间 6s 轮询。
     【无头部】不设标题与刷新钮（用户参照稿形态）：开合由标题栏监控按钮承担，
-    轮询 + 事件重拉已覆盖实时性，手动刷新钮属冗余控件。 */
+    轮询 + 事件重拉已覆盖实时性，手动刷新钮属冗余控件。
+
+    【默认显示策略】进入会话（对话视图）默认展示监控右栏；欢迎页（新建任务首页）
+    没有执行中的任务，展示监控不合理——回欢迎页自动收起，且欢迎页上点按钮也不开
+    （用户明确反馈）。偏好持久化在 localStorage 'tm-default-open'（'1'/'0'，缺省开）。 */
 (function () {
     'use strict';
 
@@ -219,20 +223,52 @@
 
     // ---------- 开合 ----------
     function isOpen() { return document.body.classList.contains('task-monitor-open'); }
-    function openMonitor() {
+    /* 欢迎页（新建任务首页）无执行任务：监控右栏无意义，禁止展示。
+       判定口径与 app-ui.js 视图切换同源：chatView 带 .active 才是对话视图。 */
+    function isWelcomePage() {
+        var cv = document.getElementById('chatView');
+        return !(cv && cv.classList.contains('active'));
+    }
+    function defaultOpenPref() {
+        try { return localStorage.getItem('tm-default-open') !== '0'; } catch (e) { return true; }
+    }
+    function openMonitor(opts) {
+        // 欢迎页门禁：手动点击与默认策略都不放行（用户：首页没执行任务，展示监控不合理）
+        if (isWelcomePage()) return;
         document.body.classList.add('task-monitor-open');
         drawer.setAttribute('aria-hidden', 'false');
+        if (opts && opts.user) { try { localStorage.setItem('tm-default-open', '1'); } catch (e) {} }
         loadAll();
         if (!pollTimer) pollTimer = setInterval(function () { if (isOpen()) loadAll(); }, POLL_MS);
     }
-    function closeMonitor() {
+    function closeMonitor(opts) {
         document.body.classList.remove('task-monitor-open');
         drawer.setAttribute('aria-hidden', 'true');
+        if (opts && opts.user) { try { localStorage.setItem('tm-default-open', '0'); } catch (e) {} }
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     }
-    function toggleMonitor() { if (isOpen()) closeMonitor(); else openMonitor(); }
+    function toggleMonitor() { if (isOpen()) closeMonitor({ user: true }); else openMonitor({ user: true }); }
     window.toggleTaskMonitor = toggleMonitor;
     window.closeTaskMonitor = closeMonitor;
+    window.openTaskMonitor = openMonitor;
+
+    /* 默认显示：进入会话自动开（偏好可关）；回欢迎页自动收起。
+       视图切换由 app-ui.js 的 switchToChatMode/switchToWelcomeMode 驱动，二者都会
+       增删 chatView 的 .active 类——以该类为唯一真源观察，不依赖调用顺序。 */
+    function syncWithView() {
+        if (isWelcomePage()) {
+            if (isOpen()) closeMonitor();   // 回首页：收起（不写偏好，属场景门禁而非用户选择）
+        } else if (!isOpen() && defaultOpenPref()) {
+            openMonitor();
+        }
+    }
+    var chatViewEl = document.getElementById('chatView');
+    if (chatViewEl && window.MutationObserver) {
+        new MutationObserver(syncWithView).observe(chatViewEl, {
+            attributes: true, attributeFilter: ['class']
+        });
+    }
+    syncWithView(); // 脚本装载时已在会话视图（如刷新页面）：补一次默认开
 
     // 关闭路径：标题栏按钮 toggle + Esc（无头部关闭钮：参照稿形态，头部已整体移除）
     document.addEventListener('keydown', function (e) {

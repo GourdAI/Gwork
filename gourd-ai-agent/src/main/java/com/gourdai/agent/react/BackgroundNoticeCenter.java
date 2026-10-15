@@ -60,6 +60,19 @@ public final class BackgroundNoticeCenter {
 
     private static final ConcurrentMap<String, Bucket> NOTICES = new ConcurrentHashMap<>();
 
+    /**
+     * 运行中后台任务登记：taskKey（bash sessionId / 子代理 token）-> owner。
+     *
+     * <p>为何通知队列之外还需要这张表：队列只能回答「有什么已完成」，回答不了「还有什么在跑」。
+     * 结束门禁（ReasonTask 隐式 END 分支）要判断的恰恰是后者——回合结束那一刻任务仍在跑，
+     * 队列必然是空的，只看队列会把「还有活没干完」误判成「没有未完成事项」放行结束，
+     * 完成通知随之落入无人消费的队列（用户视角：任务没结束但整个任务结束了）。</p>
+     *
+     * <p>键用任务唯一标识而非 owner 计数：登记/注销以同一键幂等配对，重复注销不会把计数
+     * 打穿成负数（计数型登记一旦配对错位就永久漂移，门禁会永远看到「在跑」不放行结束）。</p>
+     */
+    private static final ConcurrentMap<String, String> RUNNING_TASKS = new ConcurrentHashMap<>();
+
     private static final ThreadLocal<String> CURRENT_OWNER = new ThreadLocal<>();
 
     private BackgroundNoticeCenter() {
@@ -192,7 +205,62 @@ public final class BackgroundNoticeCenter {
     public static void discard(String owner) {
         if (owner != null && owner.isEmpty() == false) {
             NOTICES.remove(owner);
+            RUNNING_TASKS.values().removeIf(owner::equals);
         }
+    }
+
+    // ---------------- 运行中后台任务探针（结束门禁用） ----------------
+
+    /**
+     * 登记一个运行中的后台任务。
+     *
+     * <p>调用时机：bash 后台命令启动前（TerminalTalent）、后台子代理提交后（TaskTalent）。
+     * 必须先于「进程/future 可能结束」的时刻登记：后台任务可能在让步窗口内就跑完，
+     * 若结束后才登记，注销已随完成回调执行过，登记将残留成永不注销的「在跑」。</p>
+     *
+     * @param owner   归属键；为空不登记（无归属即无门禁消费方）
+     * @param taskKey 任务唯一标识（bash sessionId / 子代理 token）
+     */
+    public static void registerRunning(String owner, String taskKey) {
+        if (owner == null || owner.isEmpty() || taskKey == null || taskKey.isEmpty()) {
+            return;
+        }
+        RUNNING_TASKS.put(taskKey, owner);
+    }
+
+    /**
+     * 注销一个后台任务（进程结束 / future 完成回调里调用，与 {@link #registerRunning} 配对）。
+     */
+    public static void unregisterRunning(String taskKey) {
+        if (taskKey != null && taskKey.isEmpty() == false) {
+            RUNNING_TASKS.remove(taskKey);
+        }
+    }
+
+    /**
+     * 该归属下是否仍有运行中的后台任务（结束门禁的判定依据）。
+     */
+    public static boolean hasRunning(String owner) {
+        if (owner == null || owner.isEmpty()) {
+            return false;
+        }
+        return RUNNING_TASKS.containsValue(owner);
+    }
+
+    /**
+     * 该归属下运行中后台任务的数量（门禁提示文案用）。
+     */
+    public static int runningCount(String owner) {
+        if (owner == null || owner.isEmpty()) {
+            return 0;
+        }
+        int count = 0;
+        for (String value : RUNNING_TASKS.values()) {
+            if (owner.equals(value)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /**
@@ -212,6 +280,7 @@ public final class BackgroundNoticeCenter {
      */
     static void resetForTest() {
         NOTICES.clear();
+        RUNNING_TASKS.clear();
         CURRENT_OWNER.remove();
     }
 

@@ -42,10 +42,14 @@ import java.nio.charset.StandardCharsets;
  * 两条路径，应通过 {@link #selectedCharset()} 让最终解码复用流式已锁定的字符集，避免实时输出与
  * 最终返回值不一致。</p>
  *
+ * <p><b>跨包复用</b>：Web 终端网关（{@code com.gourdai.core.portal.web.TerminalGate}）同样用它
+ * 解码 shell 子进程输出——中文 Windows 上裸 cmd 的版本横幅按系统 ANSI 代码页（GBK）输出，
+ * 硬编码 UTF-8 解码会把「版本/版权所有」变成替换符乱码。</p>
+ *
  * @author noear
  * @since 4.0.4
  */
-final class OutputDecoder {
+public final class OutputDecoder {
     /** ASCII 快速通道的编码：字节全 &lt; 0x80 时任意 ASCII 兼容字符集结果一致 */
     private static final Charset ASCII_FAST = StandardCharsets.ISO_8859_1;
     private static final byte[] EMPTY = new byte[0];
@@ -59,7 +63,7 @@ final class OutputDecoder {
     private Charset selected;       // 已锁定的字符集；未锁定时为 null
     private byte[] pending = EMPTY; // 上次未消费的字节（不完整多字节序列，或样本不足未判定的尾部）
 
-    OutputDecoder(Charset primary) {
+    public OutputDecoder(Charset primary) {
         this(primary, legacyCharset(primary));
     }
 
@@ -78,7 +82,7 @@ final class OutputDecoder {
     /**
      * 增量解码一段输出。非线程安全：只能由单一读取线程调用。
      */
-    String decode(byte[] buf, int len) {
+    public String decode(byte[] buf, int len) {
         if (buf == null || len <= 0) {
             return "";
         }
@@ -126,7 +130,7 @@ final class OutputDecoder {
     /**
      * 输出结束：把尾部残字节按替换符收尾。
      */
-    String flush() {
+    public String flush() {
         if (pending.length == 0) {
             return "";
         }
@@ -153,7 +157,7 @@ final class OutputDecoder {
     /**
      * 一次性解码完整字节输出：合法则按 primary，非法则按平台遗留代码页。
      */
-    static String decodeAll(byte[] raw, Charset primary) {
+    public static String decodeAll(byte[] raw, Charset primary) {
         if (raw == null || raw.length == 0) {
             return "";
         }

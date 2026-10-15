@@ -623,7 +623,7 @@ public class TerminalTalent extends AbsTalent {
     public String bash(@Param(value = "command", description = "要执行的指令。") String command,
                        @Param(name = "timeout", required = false, description = "可选超时时间，单位为毫秒。不传时：同步模式默认 120000（2 分钟），run_in_background=true 时默认 6 小时。") Integer timeout,
                        @Param(name = "max_output_chars", required = false, defaultValue = "64000", description = "本次最多返回多少字符输出，超出保留首尾片段。读取大文件请改用 read 工具。") Integer maxOutputChars,
-                       @Param(name = "run_in_background", required = false, defaultValue = "false", description = "是否后台运行（长构建/测试用 true）。后台任务完成时系统会自动告知，无需轮询等待；期间可用 bash_output 主动查看进度。") Boolean runInBackground,
+    @Param(name = "run_in_background", required = false, defaultValue = "false", description = "是否后台运行（长构建/测试用 true）。后台任务完成时系统会在你发起的下一轮推理开始时自动注入通知，无需轮询等待；期间可用 bash_output 主动查看进度。注意：通知只在回合内被消费，不得以「等通知」为由结束回合——要么本轮内核实结果，要么如实告知用户任务仍在后台运行。") Boolean runInBackground,
                        String __cwd, String __accessMode) {
 
         // 统一安全校验（替代原来的内联检查）：含 kill 自保护 + 嵌入方 ~ 禁令（P1-4 接回）。
@@ -679,11 +679,23 @@ public class TerminalTalent extends AbsTalent {
                         bashSessionManager.exec(finalCommand, workPath, envs,
                                 BACKGROUND_START_YIELD_MS, maxOutputChars,
                                 backgroundTimeoutMs(timeout),
-                                owner == null ? null : done -> BackgroundNoticeCenter.publish(owner,
-                                        new BackgroundNoticeCenter.Notice(
-                                                done.sessionId(), done.command(), done.exitCode(),
-                                                done.timedOut(), done.terminated(), done.wallTimeMs(),
-                                                done.output())));
+                                owner == null ? null : done -> {
+                                    // 先注销运行登记再投递通知：结束门禁看的是「还有什么在跑」，
+                                    // 注销必须先于通知可见，否则门禁会把已完成的任务仍算在跑
+                                    BackgroundNoticeCenter.unregisterRunning(done.sessionId());
+                                    BackgroundNoticeCenter.publish(owner,
+                                            new BackgroundNoticeCenter.Notice(
+                                                    done.sessionId(), done.command(), done.exitCode(),
+                                                    done.timedOut(), done.terminated(), done.wallTimeMs(),
+                                                    done.output()));
+                                });
+                // 登记运行中后台任务（结束门禁的判定依据）。仅当快照仍在跑时登记：
+                // 让步窗口内已结束的任务其完成回调已执行过注销，此时登记会残留成永不注销的「在跑」。
+                // 极端竞态（快照后、登记前进程恰好退出且回调先跑）会残留一条陈旧登记，
+                // 影响有界：后台门禁改判上限 2 次后即尊重模型回复，会话删除时 discard 一并清理。
+                if (owner != null && snapshot.running()) {
+                    BackgroundNoticeCenter.registerRunning(owner, snapshot.sessionId());
+                }
                 return formatBackgroundStart(snapshot, owner != null);
             } catch (IOException ex) {
                 return "错误：后台任务启动失败: " + ex.getMessage();
@@ -753,8 +765,11 @@ public class TerminalTalent extends AbsTalent {
             sb.append("\n该任务在启动后的让步窗口内就已结束（常见于命令拼写错误或脚本立即退出）。")
                     .append("请直接依据下方输出判断结果；若输出被截断，可用 bash_output 继续读取。\n");
         } else if (noticeEnabled) {
-            sb.append("\n任务完成时你会自动收到一条 [后台任务完成] 消息，无需轮询等待；")
-                    .append("期间若需查看进度，可用 bash_output 查询该 session_id。\n");
+            sb.append("\n任务完成时你会自动收到一条 [后台任务完成] 消息（在下一轮推理开始时注入），无需轮询等待；")
+                    .append("期间若需查看进度，可用 bash_output 查询该 session_id。")
+                    .append("注意：通知只在你发起的回合内被消费，回合结束即无执行体消费它——")
+                    .append("不要以「等通知」为由结束回合：要么本轮内用 bash_output 核实结果，")
+                    .append("要么在回答中如实告知用户任务仍在后台运行及后续如何继续。\n");
         } else {
             sb.append("\n请用 bash_output 查询该 session_id 获取进度与结果（当前上下文未启用完成通知）。\n");
         }

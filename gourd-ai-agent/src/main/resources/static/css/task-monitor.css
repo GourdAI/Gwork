@@ -47,11 +47,17 @@
 :root { --task-monitor-width: 320px; }
 .task-monitor-drawer {
     position: fixed;
-    top: var(--titlebar-strip-h, 0px);
+    /* 顶缘恒 0：与主区顶行色带（桌面壳 36px 拖拽条，透明露 body 底色）齐平。
+       曾用标题条高度变量把右栏下移 36px，桌面壳下右栏头顶露出一段 body 底色
+       （--bg-body）色带，与栏身不同色——即用户所指「头部色差」的一半根因。 */
+    top: 0;
     right: 0; bottom: 0;
     width: var(--task-monitor-width); z-index: 1400;
     display: flex; flex-direction: column;
-    background: var(--bg-sidebar); border-left: 1px solid var(--border-color);
+    /* 底色与内容区一致（--bg-main），不用 --bg-sidebar：右栏是主区的并排栏，
+       侧栏色只属于左侧导航；用侧栏色会让右栏看起来像第二根侧栏（用户反馈
+       「底色不对，要和内容区保持一致」）。 */
+    background: var(--bg-main); border-left: 1px solid var(--border-color);
     visibility: hidden; opacity: 0; pointer-events: none;
     transition: opacity 0.15s ease, visibility 0.15s;
 }
@@ -62,8 +68,18 @@ body.task-monitor-open .task-monitor-drawer {
 /* 打开时主区让宽：内容被压缩而非被盖（不遮挡的核心机制）。
     .main-area 是 body flex 的子项（flex:1），margin-right 直接参与 flex 分配。 */
 body.task-monitor-open .main-area { margin-right: var(--task-monitor-width); }
-/* 桌面壳顶行 36px 标题条（与 app.css .titlebar-drag-region 同口径） */
-body.is-electron { --titlebar-strip-h: 36px; }
+/* 顶行色带：桌面壳顶行 36px 是透明拖拽条，它位于 .main-area 内部，透出的是
+   .main-area 的底色 --bg-main（app.css:243），【不是】body 的 --bg-body——
+   曾误铺 --bg-body 色带（暗 #131315 / 亮 #fafafa），与左列顶行的 --bg-main
+   （暗 #17171a / 亮 #fff）反而形成新色差缝（code review 抓出）。故色带必须与
+   栏身同用 --bg-main：右栏顶行=栏身=左列顶行，三处同源无色差。
+   色带只占标题条高度，不侵入内容区；浏览器直连无标题条、顶行即内容（--bg-main），
+   右栏本就 top:0 同色，无需色带。色带兼作右栏顶行拖拽区（带内无按钮）。 */
+body.is-electron .task-monitor-drawer::before {
+    content: ""; flex-shrink: 0; height: 36px;
+    background: var(--bg-main);
+    -webkit-app-region: drag;
+}
 /* 窄屏：右栏退化为全宽浮层（主区已无并排空间），仍不盖终端 */
 @media (max-width: 900px) {
     body.task-monitor-open .main-area { margin-right: 0; }

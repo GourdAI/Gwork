@@ -231,6 +231,19 @@ test('监控是版式内右栏而非遮罩抽屉：主区让宽 + 底缘 dock �
     assert.match(base, /right: 0; bottom: 0;/, '右缘锚定 + 定宽：左缘与主区让宽后右缘同变量天然对齐');
     assert.doesNotMatch(base, /(^|[\s;])left\s*:/,
         '基准规则不得设 left 属性：left+right+width 同设时 LTR 下 right 被忽略（过约束），右栏会漂到侧栏右缘（border-left 不算）');
+    // 【头部色差回归护栏】顶缘恒 0（与主区顶行齐平）+ 栏身/顶行色带底色均与内容区同源。
+    // 曾用 top:var(--titlebar-strip-h,36px) 下移：桌面壳下右栏头顶露底色色带；
+    // 曾用 --bg-sidebar：右栏像第二根侧栏，与内容区色差（用户两轮报障）。
+    // 色带还曾误铺 --bg-body：strip 透明段在 .main-area 内、透出的是 --bg-main，
+    // --bg-body（暗 #131315/亮 #fafafa）与 --bg-main（暗 #17171a/亮 #fff）不同色，
+    // 色带自身即成新色差缝（code review 抓出），故色带必须与栏身同用 --bg-main。
+    assert.match(base, /top: 0;/, '顶缘必须恒 0：下移会在桌面壳下露出底色头部色带');
+    assert.doesNotMatch(monitorCss, /--titlebar-strip-h/, '下移变量已废弃，不得回归');
+    assert.match(base, /background: var\(--bg-main\);/, '底色必须与内容区一致（--bg-main），不得用 --bg-sidebar');
+    assert.match(monitorCss, /body\.is-electron \.task-monitor-drawer::before \{[\s\S]{0,200}?height: 36px;[\s\S]{0,80}?background: var\(--bg-main\);/,
+        '桌面壳顶行色带必须与栏身/内容区同源（--bg-main）：strip 透出的是 .main-area 底色而非 body 底色');
+    assert.doesNotMatch(monitorCss, /\.task-monitor-drawer::before \{[\s\S]{0,200}?--bg-body/,
+        '色带严禁 --bg-body：与左列顶行透出的 --bg-main 不同色，会自造色差缝');
     assert.match(monitorCss, /body\.terminal-open \.task-monitor-drawer \{ bottom: var\(--code-terminal-height, 0px\); \}/,
         'dock 必须门控 terminal-open：关终端后高度变量仍在，无门控右栏会悬空 240px');
     assert.doesNotMatch(monitorCss, /translateX\(100%\)/, '滑出抽屉形态已废弃（浮层会遮挡内容）');
@@ -271,6 +284,21 @@ test('监控数据走五个后端端点，且带版本防覆盖与 X-Session-Cwd
     assert.match(monJs, /POLL_MS = 6000/, '打开期间轮询刷新');
     assert.match(monJs, /e\.key === 'Escape'/, 'Esc 关闭右栏');
     assert.match(monJs, /window\.toggleTaskMonitor = toggleMonitor/, '标题栏按钮的调用面');
+});
+
+// 【默认显示 + 首页门禁】用户反馈两轮：监控默认要显示；但新建任务首页没有执行
+// 任务，展示监控不合理。契约：会话视图默认开（偏好可关）、欢迎页禁开且自动收起。
+test('监控默认显示：会话内默认开，欢迎页门禁禁开且自动收起', () => {
+    assert.match(monJs, /function isWelcomePage\(\)/, '欢迎页判定必须显式建模');
+    assert.match(monJs, /getElementById\('chatView'\)[\s\S]{0,120}?classList\.contains\('active'\)/,
+        '欢迎页判定以 chatView.active 为唯一真源（与 app-ui.js 视图切换同源）');
+    assert.match(monJs, /if \(isWelcomePage\(\)\) return;/, 'openMonitor 必须有欢迎页门禁（手动点击也不放行）');
+    assert.match(monJs, /new MutationObserver\(syncWithView\)\.observe\(chatViewEl/,
+        '视图切换必须观察 chatView 的 class 变化（不依赖调用顺序）');
+    assert.match(monJs, /if \(isOpen\(\)\) closeMonitor\(\);/, '回欢迎页自动收起');
+    assert.match(monJs, /defaultOpenPref\(\)/, '进入会话默认开受偏好控制');
+    assert.match(monJs, /tm-default-open/, '偏好持久化键');
+    assert.match(monJs, /window\.openTaskMonitor = openMonitor/, '默认开入口对外暴露');
 });
 
 test('产出行点击必须透传会话根，否则跨工作区必 404', () => {

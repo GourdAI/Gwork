@@ -63,8 +63,10 @@ test('桌面壳拖拽区：头部自身承担拖拽，不双重补偿，且让�
         '桌面壳下头部自身承担拖拽');
     assert.ok(!/body\.is-electron \.skills-head \{[^}]*margin-top:\s*-36px/.test(css),
         '严禁 margin-top:-36px 双重补偿（strip 已 display:none 不占位，负 margin 会把头部顶出容器）');
-    assert.match(css, /body\.is-electron \.main-area > \.titlebar-drag-region \{ display: none; \}/,
+    assert.match(css, /body\.is-electron \.main-area:has\(> \.skills-view\.active\) > \.titlebar-drag-region \{ display: none; \}/,
         '冗余的占位 strip 必须隐藏（避免双 36px 叠加）');
+    assert.ok(!/body\.is-electron \.main-area > \.titlebar-drag-region \{/.test(css),
+        'strip 隐藏必须门控在 skills 视图激活时：全局隐藏会把 chat/code 的 36px 标题条一并移除，内容顶到窗口顶（用户报障回归）');
     // padding-top 必须 >= 36px 才能让开原生窗口控件（titleBarOverlay height:36）
     const pt = css.match(/body\.is-electron \.skills-head \.skills-inner \{ padding-top:\s*(\d+)px; \}/);
     assert.ok(pt, '桌面壳下头部必须补回 padding-top 让开原生窗口控件');

@@ -119,6 +119,7 @@ public class TaskTalent extends AbsTalent {
         sb.append("1. **主动拆分 + 并行**：遇到可拆解的复杂任务，优先用 `multitask` 并行派发；互相依赖时才串行用 `task`。\n");
         sb.append("2. **上下文自足**：子代理无状态，`prompt` 必须包含任务所需的全部背景、要求与预期输出格式。\n");
         sb.append("3. **后台模式（默认优先）**：除非某子任务的结果是你**下一步立即必需**的输入，否则一律设 `background=true`（`task` 与 `multitask` 均支持，按任务粒度，可与前台任务混批）。后台提交会立即返回 token，让你**不必干等就能继续推进其他工作**；每个任务完成时你会自动收到一条 [后台子代理完成] 消息（含 token 与结果摘要），无需轮询；确需完整结果时再用 `await_tasks` 传入 token 收取（可一次传多个）。反之，阻塞模式（`background=false`）会把主流程**卡死到子代理跑完**——长耗时子任务用它会让你这段时间完全无法推进别的事，只有拿到结果才能继续时才用它。\n");
+        sb.append("4. **后台收尾纪律**：完成通知只在你发起的回合开始时被注入消费。仍有后台任务在跑时，不得以「等通知/收到通知后继续」为由结束回合——回合结束即无执行体消费通知；要么本轮内继续其他工作或用 await_tasks 核实，要么在最终回答中如实告知用户哪些任务仍在运行、如何让你继续。\n");
 
         return sb.toString();
     }
@@ -168,8 +169,9 @@ public class TaskTalent extends AbsTalent {
             return "BACKGROUND_TASK_SUBMITTED: token=" + token
                     + "\n后台任务已提交" + backgroundProgressHint() + "."
                     + (noticeEnabled
-                        ? "任务完成时你会自动收到一条 [后台子代理完成] 消息，无需轮询；"
+                        ? "任务完成时你会自动收到一条 [后台子代理完成] 消息（在下一轮推理开始时注入），无需轮询；"
                           + "请先继续其他工作，确需完整结果时再用 await_tasks 传入该 token 收取。"
+                          + "注意：不得以「等通知」为由结束回合——回合结束即无执行体消费通知。"
                         : "请先继续其他工作，再用 await_tasks 工具传入该 token 收取结果。"
                           + BACKGROUND_NO_NOTICE_HINT);
         }
@@ -933,9 +935,11 @@ public class TaskTalent extends AbsTalent {
      */
     private static final String BACKGROUND_SUBMITTED_REMINDER_WITH_NOTICE =
             "\n[提醒] 以上后台任务已提交并开始执行。"
-            + "每个任务完成时你会自动收到一条 [后台子代理完成] 消息（含 token 与结果摘要），无需轮询；"
+            + "每个任务完成时你会自动收到一条 [后台子代理完成] 消息（含 token 与结果摘要，在下一轮推理开始时注入），无需轮询；"
             + "请先继续其他不依赖其结果的工作，确需完整结果时再用 await_tasks 传入相应 token；"
-            + "不要在提交后立刻 await，那会退化为阻塞等待。";
+            + "不要在提交后立刻 await，那会退化为阻塞等待；"
+            + "也不得以「等通知」为由结束回合——回合结束即无执行体消费通知，"
+            + "要么本轮内继续工作，要么如实告知用户任务仍在运行及后续如何继续。";
 
     /**
      * 如实告知用户能否看到后台子代理的过程。
@@ -1024,11 +1028,20 @@ public class TaskTalent extends AbsTalent {
             return token;
         }
 
-        future.thenAccept(result -> BackgroundNoticeCenter.publish(owner,
-                        BackgroundNoticeCenter.Notice.ofSubagent(token, index, task.agent_name, task.description,
-                                isFailureResult(result) == false,
-                                truncateTaskResult(result, NOTICE_SUMMARY_MAX_CHARS))))
+        // 登记运行中后台任务（结束门禁的判定依据）。先于挂完成回调：future 可能已近乎完成，
+        // 回调先跑而登记后补会残留成永不注销的「在跑」。
+        BackgroundNoticeCenter.registerRunning(owner, token);
+
+        future.thenAccept(result -> {
+                    // 先注销运行登记再投递通知：结束门禁看「还有什么在跑」，注销必须先于通知可见
+                    BackgroundNoticeCenter.unregisterRunning(token);
+                    BackgroundNoticeCenter.publish(owner,
+                            BackgroundNoticeCenter.Notice.ofSubagent(token, index, task.agent_name, task.description,
+                                    isFailureResult(result) == false,
+                                    truncateTaskResult(result, NOTICE_SUMMARY_MAX_CHARS)));
+                })
                 .exceptionally(ex -> {
+                    BackgroundNoticeCenter.unregisterRunning(token);
                     notifyFailure(owner, token, task, index, ex);
                     return null;
                 });
@@ -1367,7 +1380,7 @@ public class TaskTalent extends AbsTalent {
     @ToolMapping(name = TOOL_AWAIT_TASKS, description =
             "等待一或多个 background=true 提交的后台任务完成并返回结果。" +
             "传入 task() 返回的 token 列表；max_result_chars 控制单条结果最大字符数（头尾各半保留，默认 0 = 不限制）。" +
-            "注：后台任务完成时已自动推送通知（含结果摘要），若摘要已足够作答则无需调用本工具；仅在需要完整结果或摘要缺失时使用。")
+            "注：后台任务完成时已自动推送通知（含结果摘要，在下一轮推理开始时注入消费），若摘要已足够作答则无需调用本工具；仅在需要完整结果或摘要缺失时使用。")
     public String awaitTasks(
             @Param(name = "tokens", description = "要等待的后台任务 token 列表")
             List<String> tokens,
