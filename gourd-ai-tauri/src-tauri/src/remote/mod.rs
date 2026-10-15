@@ -2600,10 +2600,25 @@ mod tests {
             bridge_src.contains(&reconnect_js_anchor),
             "JS 桥的 remoteReconnect 必须接受可选 connectionId"
         );
-        let reconnect_cmd_anchor = ["pub async fn remote_", "reconnect(\n    app: tauri::AppHandle,\n    connection_id: Option<String>,"].concat();
+        // 【CRLF 假红修正（2026-10-14）】旧锚点把多行签名写成含字面 `\n` 的单串：
+        // `include_str!` 读的是**工作树字节**，而本仓 git 配置为 `i/lf w/crlf`，
+        // Windows 开发机上源码全是 CRLF → 锚点永远失配、测试恒红（而真实签名
+        // 一直是对的）。Rust 侧此前从未编译过，所以这个假红一直没人看到。
+        // 纪律同 JS 契约测试：锚点必须**不含换行与固定缩进**，按行分别钉。
+        let mod_src = include_str!("mod.rs");
+        let sig_fn = ["pub async fn remote_", "reconnect("].concat();
+        let sig_opt = ["connection_id: Option<", "String>,"].concat();
         assert!(
-            include_str!("mod.rs").contains(&reconnect_cmd_anchor),
+            mod_src.contains(&sig_fn) && mod_src.contains(&sig_opt),
             "remote_reconnect 必须接受 Option<String> 入参（None = 旧行为）"
+        );
+        // 且入参真的被消费（防「签名对了但形同虚设」的反向漂移）。
+        // 拆串构造：include_str! 会把本测试源码自身含进去，不拆则测试恒自匹配、
+        // 守卫永不失败（恒假绿）——同函数 sig_fn/sig_opt 的纪律，此处不得例外。
+        let uses_arg = ["reconnect_params(connection_", "id)"].concat();
+        assert!(
+            mod_src.contains(&uses_arg),
+            "connection_id 必须透传给 reconnect_params（不得接了参数却回落「最近一台」）"
         );
     }
 
@@ -3091,5 +3106,269 @@ mod tests {
         tunnel.stop();
         session.disconnect().await;
         sink(format!("[e2e] 清理完成（PID {} 已停，测试目录已删）", pid));
+    }
+
+    // ─── WSL 通道真机端到端验收（2026-10-14 补齐）───
+    //
+    // 【为何必需】上面那条 SSH e2e 只覆盖 SSH 传输层；WSL 通道此前**从未被真机
+    // 走完全链**，而它独有的一个缺陷只在「Windows 宕主 + 真 wsl.exe」形态下
+    // 发作（Linux CI 根本没有 wsl.exe，测不出来）：
+    //   - **数据面 P0**：JVM 通配 bind 走 AF_INET6（bindv6only=0 → 监听 `*:port`），
+    //     而 WSL2 localhostForwarding 按地址族分别建转发 → Windows 侧只有
+    //     `[::1]:port` 有 relay，数据面全链硬编码的 `127.0.0.1:port` 恒
+    //     ECONNREFUSED → 向导卡满 180s 报「远端后端未就绪」。
+    //
+    // 本用例同时充当全链回归网：detect → 运行时解析 → 部署上传 → 端口分配
+    // → 启动 → 就绪探活 → 数据面读写 → 镜像推送 → 清理与孤儿回收，
+    // 全部走生产函数（非复刻脚本），任一环回退都会在这里当场报错。
+    //
+    // 门控：GWORK_E2E_WSL_DISTRO 未设即跳过（CI / 日常 cargo test 零影响）。
+    // 部署产物（~/.gwork/remote/<fingerprint>）不删：它是生产行为的指纹缓存，
+    // 留着重跑直接走「已部署跳过上传」分支，反而能验证幂等。
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn e2e_wsl_connect_deploy_dataplane_roundtrip() {
+        let distro = match std::env::var("GWORK_E2E_WSL_DISTRO") {
+            Ok(d) if !d.trim().is_empty() => d,
+            _ => {
+                eprintln!("[e2e-wsl] GWORK_E2E_WSL_DISTRO 未设置，跳过真机验收");
+                return;
+            }
+        };
+        let user = std::env::var("GWORK_E2E_WSL_USER").unwrap_or_else(|_| "root".into());
+
+        let mut logs: Vec<String> = Vec::new();
+        let mut sink = |line: String| {
+            eprintln!("[e2e-wsl] {}", line);
+            logs.push(line);
+        };
+
+        // 1. 会话构造（WslSession::new 不 spawn 任何进程，零副作用）
+        let session = WslSession::new(&distro, &user);
+        sink(format!("连接 WSL 发行版 {}（用户 {}）…", distro, user));
+
+        // 2. detect：走真实 exec 链（-e /bin/bash -ls，无 bash 则回退 /bin/sh）
+        let mut env = session.detect().await.expect("WSL detect 必须成功");
+        sink(format!(
+            "远端 {} {} java={:?} major={:?} libc={:?} home={}",
+            env.platform, env.arch, env.java, env.java_major, env.libc, env.home
+        ));
+        assert_eq!(env.platform, "Linux", "WSL 发行版必须是 Linux");
+
+        // 3. 运行时解析链（系统 java 可用即跳过；不可用时才走 L4 自装）
+        ensure_remote_runtime(&session, &mut env, None, &mut sink)
+            .await
+            .expect("运行时解析链必须成功");
+        assert!(env.java.is_some(), "解析链必须回填 java");
+
+        // 4. 部署：指纹比对跳过；首次则真上传 ~50MB（走 UNC 直拷或 cat 回退，
+        //    root 家目录 0700 经 9P 无权 → 必走 cat，顺带验收 P2 分流）
+        let root = deploy_and_switch(&session, &env, &mut sink)
+            .await
+            .expect("部署链必须成功");
+        sink(format!("部署根 {}", root));
+
+        // 5. 启动远端后端（命令体含 -Djava.net.preferIPv4Stack=true）
+        let (auth_user, auth_pass) = random_credentials();
+        // allocate_remote_port 的命令体是那个跨行 raw string（内层 bash -c
+        // 探随机口，失败回退 python3 / echo 0）。它在 Ubuntu（有 bash）上
+        // 直接拿到合法端口；这里只锁「分配成功且落在脚本声明区间」。
+        let remote_port = allocate_remote_port(&session)
+            .await
+            .expect("端口分配必须成功");
+        assert!(
+            (20000..40000).contains(&remote_port),
+            "分配到的端口应在脚本声明的区间内，实际 {}",
+            remote_port
+        );
+        sink(format!("远端端口 {}", remote_port));
+
+        let start_cmd = deploy::backend_start_command(&env, &root, remote_port, &auth_user, &auth_pass)
+            .expect("启动命令必须可构造");
+        let start_res = session.exec(&start_cmd).await.expect("启动命令必须可执行");
+        let pid = parse_pid(&start_res, "e2e-wsl start backend").expect("必须拿到 PID");
+        sink(format!("远端后端 PID={} port={}", pid, remote_port));
+
+        // 5b. 保活（与生产同序）：WSL2 idle-stop 看的是 Windows 侧有无活跃 wsl.exe
+        //     客户端，就绪探活是 Windows 侧 HTTP，不保活则发行版 ~15s 被关、java 陪葬。
+        let ka = Arc::new(WslSession::new(&distro, &user));
+        let ka_task = tokio::spawn(async move {
+            for _ in 0..60 {
+                ka.keepalive_ping().await;
+                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+            }
+        });
+
+        // 6. 【P0 核心判据】就绪探活走 Windows 侧 http://127.0.0.1:<port>
+        //    ——修复前此处恒 ECONNREFUSED，卡满窗口后报「远端后端未就绪」。
+        let ready = wait_backend_ready_with_cap(
+            remote_port,
+            &auth_user,
+            &auth_pass,
+            &mut sink,
+            e2e_wait_cap_secs(),
+        )
+        .await;
+        if let Err(e) = ready {
+            kill_started_backend_best_effort(&session, pid, &mut sink).await;
+            ka_task.abort();
+            panic!("{}", attach_remote_diagnostics(&session, e).await);
+        }
+
+        // 6b. 机制层验证：远端必须是 IPv4 监听（`ss -4` 看得到）。
+        //     不锁这条，下次有人去掉 preferIPv4Stack 就只会在用户机上复发。
+        let listen = session
+            .exec(&format!(
+                "ss -4 -lnt 2>/dev/null | grep ':{}' ; echo '---v6---'; ss -6 -lnt 2>/dev/null | grep ':{}'",
+                remote_port, remote_port
+            ))
+            .await
+            .expect("监听形态探测必须可执行");
+        sink(format!("远端监听形态:\n{}", listen.stdout.trim()));
+        let (v4_part, _v6_part) = match listen.stdout.split_once("---v6---") {
+            Some((a, b)) => (a.to_string(), b.to_string()),
+            None => (listen.stdout.clone(), String::new()),
+        };
+        assert!(
+            v4_part.contains(&format!(":{}", remote_port)),
+            "后端必须以 IPv4 监听（否则 Windows 侧 127.0.0.1 不可达）。ss -4 输出: {}",
+            v4_part.trim()
+        );
+
+        // 7. 数据面业务请求（Basic Auth 注入，与本地反代同口径）
+        let auth_header = basic_auth_value(&auth_user, &auth_pass);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap();
+        let base = format!("http://127.0.0.1:{}", remote_port);
+
+        let list = client
+            .get(format!("{}/web/chat/projects", base))
+            .header("Authorization", auth_header.clone())
+            .send()
+            .await
+            .expect("项目列表必须可达（127.0.0.1 数据面）");
+        assert_eq!(list.status(), 200, "项目列表必须 200");
+        let list_body = list.text().await.unwrap_or_default();
+        sink(format!("项目列表: {}", &list_body[..list_body.len().min(200)]));
+
+        // 7b. 写路径（创建工作区）：证明 POST + JSON 体也过得了数据面
+        let ws_parent = format!("{}/.gwork-e2e-ws", env.home.trim_end_matches('/'));
+        session
+            .exec(&format!("mkdir -p {}", ssh::shell_quote(&ws_parent)))
+            .await
+            .expect("测试工作区父目录必须可建");
+        let create = client
+            .post(format!("{}/web/chat/projects/create", base))
+            .header("Authorization", auth_header.clone())
+            .json(&serde_json::json!({ "parent": ws_parent, "name": "e2e-wsl-ws" }))
+            .send()
+            .await
+            .expect("创建工作区必须可达");
+        let create_status = create.status();
+        let create_body = create.text().await.unwrap_or_default();
+        sink(format!("create 状态 {} body: {}", create_status, &create_body[..create_body.len().min(300)]));
+        assert_eq!(create_status, 200, "create 必须 200");
+        let created: serde_json::Value = serde_json::from_str(&create_body).unwrap_or(serde_json::json!({}));
+        assert_eq!(
+            created.get("code").and_then(|c| c.as_i64()),
+            Some(200),
+            "create 业务码必须 200: {}",
+            create_body
+        );
+        let ws_path = format!("{}/e2e-wsl-ws", ws_parent);
+
+        // 7c. 模型镜像推送（与生产同口径：失败只降级不阻断，故不断言结果）。
+        //     重点是它走同一个 127.0.0.1 数据面：修复前必报连接被拒。
+        let mirrored = mirror::push_with_progress(remote_port, &auth_user, &auth_pass, &mut sink).await;
+        sink(format!("模型镜像推送结果: {}", if mirrored { "已镜像" } else { "跳过/降级（连接仍成立）" }));
+
+        // 8. 清理：注销工作区 + 删目录 + 停后端（与生产 disconnect 同语义）
+        let rm = client
+            .post(format!("{}/web/chat/projects/remove", base))
+            .header("Authorization", auth_header.clone())
+            .json(&serde_json::json!({ "path": ws_path }))
+            .send()
+            .await;
+        if let Ok(r) = rm {
+            sink(format!("工作区注销状态 {}", r.status()));
+        }
+        let _ = session.exec(&format!("rm -rf {}", ssh::shell_quote(&ws_parent))).await;
+        let _ = session.exec(&deploy::backend_stop_command(pid)).await;
+        ka_task.abort();
+
+        // 8b. 孤儿回收验证：2026-10-10 的 154 事故就是失败路径遗留 java 吃内存
+        let after = session
+            .exec(&format!("ps -p {} -o pid= 2>/dev/null | wc -l", pid))
+            .await;
+        if let Ok(r) = after {
+            let alive = r.stdout.trim().parse::<u32>().unwrap_or(0);
+            assert_eq!(alive, 0, "停止后远端后端不得残留（PID {}）", pid);
+        }
+        sink(format!("清理完成（PID {} 已停且无残留，测试目录已删）", pid));
+    }
+
+    /// P1 真机验收：无 bash 的发行版（Alpine/busybox ash 系，如 docker-desktop）
+    /// 必须能通过 `/bin/sh` 回退跑完整份 detect 脚本。
+    ///
+    /// 【为何单独一条】回退判据曾写成 `exit_code == 126 || 127`，而真机实测
+    /// `-e /bin/bash` 在无 bash 的发行版上是 **wsl.exe 自身 exit=1 + stderr
+    /// `execvpe(/bin/bash) failed`**（126/127 是 shell 已起来后 execvp 失败的语义），
+    /// 于是回退根本不触发 → ash 系发行版全通道灭。前端「过滤 docker-desktop」
+    /// 只是部分掩盖，任何 ash 系发行版都会中招。
+    ///
+    /// 门控：GWORK_E2E_WSL_NOBASH_DISTRO（需真无 bash 的发行版，否则测不到回退）。
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn e2e_wsl_no_bash_distro_falls_back_to_sh() {
+        let distro = match std::env::var("GWORK_E2E_WSL_NOBASH_DISTRO") {
+            Ok(d) if !d.trim().is_empty() => d,
+            _ => {
+                eprintln!("[e2e-wsl-nobash] GWORK_E2E_WSL_NOBASH_DISTRO 未设置，跳过");
+                return;
+            }
+        };
+        let user = std::env::var("GWORK_E2E_WSL_NOBASH_USER").unwrap_or_else(|_| "root".into());
+        let session = WslSession::new(&distro, &user);
+
+        // 前置事实：该发行版确实无 bash（否则本用例测不到回退路径，形同虚设）
+        let probe = session
+            .exec("command -v bash >/dev/null 2>&1 && echo HAS_BASH || echo NO_BASH")
+            .await
+            .expect("探测 bash 存在性必须可执行");
+        eprintln!("[e2e-wsl-nobash] {} bash 探测: {}", distro, probe.stdout.trim());
+        assert!(
+            probe.stdout.contains("NO_BASH"),
+            "本用例需要一个真无 bash 的发行版才有意义（当前 {} 有 bash）",
+            distro
+        );
+
+        // 真实源码路径：exec 先试 /bin/bash，shell_unavailable 命中后回退 /bin/sh，
+        // 然后跑完 detect_script（十字段）并解析成 RemoteEnv。
+        let env = session
+            .detect()
+            .await
+            .expect("无 bash 的发行版 detect 仍须成功（靠 /bin/sh 回退）");
+        eprintln!(
+            "[e2e-wsl-nobash] detect OK: {} {} libc={:?} java={:?} home={}",
+            env.platform, env.arch, env.libc, env.java, env.home
+        );
+        assert_eq!(env.platform, "Linux");
+        assert!(!env.home.trim().is_empty(), "home 必须解析出来（十字段未错位）");
+        // ash 系发行版的典型特征：musl libc（不是回退错乱的副产品，而是真环境）
+        if env.libc.as_deref() == Some("musl") {
+            eprintln!("[e2e-wsl-nobash] libc=musl（Alpine 系，符合预期）");
+        }
+
+        // 回退通道上的基本 exec 冒烟（POSIX）：detect 全脚本已在上面走过 sh 回退链，
+        // 这里再验证回退后的通道跑基本命令仍正常（非端口分配测试——allocate_remote_port
+        // 的脚本内层显式 bash -c，ash 无 bash 时会落到 python3/echo 0 分支，
+        // ash 且无 python3 的发行版端口分配会失败，那是已知生产缺口，不在此锁）。
+        let port_res = session
+            .exec("echo PORT_PROBE_OK")
+            .await
+            .expect("ash 下基本命令必须可执行");
+        assert!(port_res.stdout.contains("PORT_PROBE_OK"));
     }
 }

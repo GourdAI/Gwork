@@ -132,15 +132,25 @@ impl WslSession {
     /// **整通道退出码被屏蔽**，ok_or_error 报错失效。-e 直接 execvp 参数表
     /// （默认 shell 不参与），退出码即 shell 自身退出码。
     ///
-    /// **bash 缺失回退**：Alpine/docker-desktop 等发行版无 bash，-e /bin/bash
-    /// 返回 126/127 → 重试 /bin/sh -ls。命令体一律 POSIX 书写（deploy/detect/
+    /// **bash 缺失回退**：Alpine/docker-desktop 等发行版无 bash，`-e /bin/bash`
+    /// 失败 → 重试 `/bin/sh -ls`。命令体一律 POSIX 书写（deploy/detect/
     /// 启动脚本无 bashism），ash 下安全；代价仅是这些发行版丢登录 shell PATH
     /// （内置 JRE 链不依赖系统 PATH，无影响）。
+    ///
+    /// **失败判据不能只看退出码（2026-10-13 真机修正）**：原实现判
+    /// `exit_code == 126 || 127`。真机实测（WSL 2.7.14 / docker-desktop 无 bash）：
+    /// `-e /bin/bash` 时 **wsl.exe 自身报 exit=1**，stderr 为
+    /// `<3>WSL (pid - Relay) ERROR: CreateProcessCommon:818: execvpe(/bin/bash) failed: No such file or directory`。
+    /// 126/127 是 **shell 已起来后** execvp 失败的语义；而 `-e` 直 exec 是 wsl.exe 自己
+    /// 去 execvp，失败归到 wsl.exe 进程退出码 1。因此只看 126/127 会漏掉
+    /// 真正的无-bash 场景 → 回退不触发 → ash 系发行版全通道灭。
+    /// 判据改为：退出码 126/127 **或** stderr 命中 `execvpe(<shell>) failed`
+    /// （锚定 shell 路径，避免把命令体里自己 execvp 失败的业务错误误当「无 shell」）。
     pub async fn exec(&self, command: &str) -> Result<ExecResult> {
         let res = self.exec_with_shell("/bin/bash", command).await?;
-        if res.exit_code == 126 || res.exit_code == 127 {
+        if shell_unavailable(&res, "/bin/bash") {
             tracing::debug!(
-                "[wsl] distro {} 无 bash（exit={}），回退 /bin/sh",
+                "[wsl] distro {} 无 bash（exit={}，判据：126/127 或 stderr 命中 execvpe 失败），回退 /bin/sh",
                 self.distro,
                 res.exit_code
             );
@@ -236,33 +246,48 @@ impl WslSession {
         progress: &mut (dyn FnMut(u64, u64) + Send),
     ) -> Result<()> {
         let total = data.len() as u64;
-        // 1. UNC 直拷
+        // 1. UNC 直拷（走 9P）。**先探父目录可达性再决定路径**（2026-10-13 真机修正）：
+        //    root 家目录（/root 权限 0700）经 9P 无权访问，UNC 开文件必 EPERM。
+        //    而「root 连接」是向导明确支持的场景（list_distros 还专门做了
+        //    DefaultUid==0 → root 特判 + 弹提示），于是这条路径每次部署都会：
+        //    ① 白跑一轮注定失败的 UNC 写；② 刷一条 `warn` 级「UNC 直拷失败」——
+        //    用户/排障者看到 warn 会当成真故障（实际是预期内的权限限制）。
+        //    改为 create_dir_all 探路：成功才走 UNC；失败直接 cat 流式，
+        //    且只记 info（带原因），不再用 warn 污染日志。
         let unc = self.unc_of(wsl_path);
-        if let Some(parent) = unc.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
+        let unc_reachable = match unc.parent() {
+            Some(parent) => tokio::fs::create_dir_all(parent).await.is_ok(),
+            None => false,
+        };
         // **分块写 + 逐块进度**（真机缺陷，用户报「上传进度一直 0」）：旧实现
         // tokio::fs::write 整块一次写——23MB jar 经 9P 写数秒期间 progress 一次
         // 都不回调，向导日志全程停 0%（末尾才补一帧 100%）。分块粒度与 cat
         // 回退路径一致（64KB），两路径进度语义统一；任一块失败 → 整体判失败
         // 回退 cat 流式（残留半截文件会被 cat 截断覆盖，无脏状态）。
         const UNC_CHUNK: usize = 64 * 1024;
-        let unc_write = async {
-            use tokio::io::AsyncWriteExt;
-            let mut f = tokio::fs::File::create(&unc).await?;
-            let mut done = 0u64;
-            progress(0, total);
-            for chunk in data.chunks(UNC_CHUNK) {
-                f.write_all(chunk).await?;
-                done += chunk.len() as u64;
-                progress(done, total);
+        if unc_reachable {
+            let unc_write = async {
+                use tokio::io::AsyncWriteExt;
+                let mut f = tokio::fs::File::create(&unc).await?;
+                let mut done = 0u64;
+                progress(0, total);
+                for chunk in data.chunks(UNC_CHUNK) {
+                    f.write_all(chunk).await?;
+                    done += chunk.len() as u64;
+                    progress(done, total);
+                }
+                f.flush().await?;
+                Ok::<(), std::io::Error>(())
+            };
+            match unc_write.await {
+                Ok(()) => return Ok(()),
+                Err(e) => tracing::warn!("[wsl] UNC 直拷失败，回退 cat 流式: {}", e),
             }
-            f.flush().await?;
-            Ok::<(), std::io::Error>(())
-        };
-        match unc_write.await {
-            Ok(()) => return Ok(()),
-            Err(e) => tracing::warn!("[wsl] UNC 直拷失败，回退 cat 流式: {}", e),
+        } else {
+            tracing::info!(
+                "[wsl] UNC 路径不可达（{}；常见于 root 家目录 0700 经 9P 无权访问），直接走 cat 流式",
+                unc.display()
+            );
         }
         // 2. cat 流式（保底）。与 exec 同走 -e 直 exec（绕默认 shell 预解析）；
         //    cat 重定向是 POSIX 语义，ash 回退路径同样安全。
@@ -299,6 +324,7 @@ impl WslSession {
         }
         Ok(())
     }
+
     /// host 身份键（连接注册表用）：`wsl:<distro>:<user>`。
     pub fn host_key(&self) -> String {
         format!("wsl:{}:{}", self.distro, self.user)
@@ -334,6 +360,24 @@ impl WslSession {
         )
         .await;
     }
+}
+
+/// 判定「目标 shell 本身不可用」（触发 /bin/bash → /bin/sh 回退）。
+///
+/// 两类形态都要认（真机取证，WSL 2.7.14）：
+/// 1. **wsl.exe 自己 execvp 失败**（`-e` 直 exec 路径）：exit=1，stderr 形如
+///    `<3>WSL (1682310 - Relay) ERROR: CreateProcessCommon:818: execvpe(/bin/bash) failed: No such file or directory`
+/// 2. **shell 起来后 execvp 失败**（旧判据）：exit=126/127
+///
+/// 形态 1 必须锚定 shell 路径：命令体里业务命令自己 not found 也会让 bash 报
+/// `/bin/bash: line 1: xxx: No such file or directory`（exit=127），那种情况回退
+/// /bin/sh 毫无意义（sh 下同样 not found），不能误判为「无 bash」。
+fn shell_unavailable(res: &ExecResult, shell: &str) -> bool {
+    if res.exit_code == 126 || res.exit_code == 127 {
+        return true;
+    }
+    let needle = format!("execvpe({}) failed", shell);
+    res.stderr.contains(&needle)
 }
 
 /// 解码 wsl.exe 输出：UTF-16LE 判别（buffer 含 \0 → utf16le，ZCode 同款）。
@@ -562,12 +606,21 @@ mod tests {
         // ② 命令体走 stdin（参数表零命令内容，wsl.exe 转义坑）
         let anchor_stdin = String::from("stdin.write_all(command.as_by") + "tes())";
         assert!(src.contains(&anchor_stdin), "命令体必须经 stdin 喂入");
-        // ③ bash 缺失（126/127）回退 /bin/sh（Alpine 系无 bash 发行版）
+        // ③ bash 缺失必须回退 /bin/sh（Alpine 系无 bash 发行版）。
+        //    判据在 shell_unavailable 里：旧的 126/127（shell 起来后 execvp 失败）
+        //    + 真机形态（wsl.exe 自身 exit=1 + stderr execvpe(<shell>) failed）。
         let anchor_126 = String::from("res.exit_code == 126 || res.exit_code == 12") + "7";
+        let anchor_execvpe = String::from("execvpe({}) fai") + "led";
+        let anchor_gate = String::from("if shell_unavail") + "able(&res, \"/bin/bash\")";
         let anchor_sh = String::from("exec_with_shell(\"/bin/sh\", comma") + "nd)";
         assert!(
             src.contains(&anchor_126) && src.contains(&anchor_sh),
             "bash 缺失（126/127）必须回退 /bin/sh"
+        );
+        assert!(
+            src.contains(&anchor_execvpe) && src.contains(&anchor_gate),
+            "exec 必须用 shell_unavailable 做回退判据（真机：wsl.exe exit=1 + stderr \
+             execvpe(/bin/bash) failed；只看 126/127 会漏掉真正的无-bash 场景）"
         );
         // ④ 旧包装器的 bashism（PIPESTATUS 数组下标）不得回归——ash 系发行版下
         //    它报 bad substitution 全通道灭、bash 系下屏蔽退出码
@@ -616,5 +669,79 @@ mod tests {
         );
         let unc_loop = String::from("for chunk in data.chunks(UNC_CHU") + "NK)";
         assert!(src.contains(&unc_loop), "UNC 直拷必须分块写");
+    }
+
+    /// UNC 不可达时不得白跑一轮必失败的写（root 家目录 0700 经 9P 无权，
+    /// 旧实现每次都 EPERM + 刷 warn，看起来像真故障）。必须先探路再选路径，
+    /// 且不可达只记 info。
+    ///
+    /// 锚点一律拼接构造且**不含换行/缩进**：include_str! 读的是工作树字节，
+    /// CRLF 检出下任何含 `\n` + 固定缩进的锚点都会假红（同 JS 契约测试教训）。
+    #[test]
+    fn wsl_unc_upload_probes_reachability_before_writing() {
+        let src = include_str!("wsl.rs");
+        let anchor_probe = String::from("let unc_reachable = match unc.par") + "ent() {";
+        assert!(
+            src.contains(&anchor_probe),
+            "UNC 写前必须探父目录可达性（root 家目录 0700 经 9P 无权，不得白跑必败的写）"
+        );
+        let anchor_gate = String::from("if unc_reach") + "able {";
+        assert!(
+            src.contains(&anchor_gate),
+            "UNC 分块写必须被可达性门控（不可达直接走 cat 流式）"
+        );
+        let anchor_info = String::from("tracing::inf") + "o!(";
+        let anchor_msg = String::from("[wsl] UNC 路径不可达");
+        assert!(
+            src.contains(&anchor_info) && src.contains(&anchor_msg),
+            "不可达是预期内权限限制，必须 info 级（不得用 warn 污染日志误导排障）"
+        );
+    }
+
+    /// bash 缺失回退判据（2026-10-13 真机修正）：`-e /bin/bash` 在无 bash 的发行版
+    /// 上是 **wsl.exe 自身 exit=1 + stderr execvpe 失败**，不是 shell 层的 126/127。
+    /// 只看退出码 → 回退不触发 → ash 系发行版全通道灭。
+    #[test]
+    fn shell_unavailable_matches_real_wsl_execvpe_failure() {
+        let real = ExecResult {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "<3>WSL (1682310 - Relay) ERROR: CreateProcessCommon:818: \
+                     execvpe(/bin/bash) failed: No such file or directory\n"
+                .to_string(),
+        };
+        assert!(
+            shell_unavailable(&real, "/bin/bash"),
+            "真机形态（exit=1 + execvpe(/bin/bash) failed）必须判为无 bash"
+        );
+        // 旧判据（shell 起来后 execvp 失败）仍须认
+        for code in [126, 127] {
+            let r = ExecResult { exit_code: code, stdout: String::new(), stderr: String::new() };
+            assert!(shell_unavailable(&r, "/bin/bash"), "exit={} 必须回退", code);
+        }
+        // 业务命令自己 not found（bash 正常）不得误判：回退 /bin/sh 毫无意义
+        //（sh 下同样 not found），那种情况应把真实错误交给 ok_or_error 报出去。
+        let biz = ExecResult {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "/bin/bash: line 1: nope: No such file or directory\n".to_string(),
+        };
+        assert!(
+            !shell_unavailable(&biz, "/bin/bash"),
+            "exit=1 且 stderr 无 execvpe(<shell>) 时不得误判为无 bash"
+        );
+        // execvpe 锚定的是 shell 路径：其它程序的 execvpe 失败不算
+        let other = ExecResult {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "execvpe(/bin/zsh) failed: No such file or directory".to_string(),
+        };
+        assert!(
+            !shell_unavailable(&other, "/bin/bash"),
+            "execvpe 判定必须锚定目标 shell 路径"
+        );
+        // 正常成功不受影响
+        let ok = ExecResult { exit_code: 0, stdout: "out".into(), stderr: String::new() };
+        assert!(!shell_unavailable(&ok, "/bin/bash"));
     }
 }

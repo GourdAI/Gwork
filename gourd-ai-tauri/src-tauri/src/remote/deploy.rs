@@ -595,6 +595,41 @@ async fn switch_current(
 ///   仅进程属主可读）。Java 侧 AgentFlags 按「环境变量 → 系统属性」顺序回退消费。
 /// - java 取远端探测到的可执行文件（env.java）
 /// - 端口由调用方分配（远端 127.0.0.1 随机端口，find_available_port 语义）
+/// - **`-Djava.net.preferIPv4Stack=true`（WSL 数据面 P0；2026-10-14 真机四组对照定案）**：
+///   不加此参数时 WSL 通道 100% 连不上——后端进程活着、日志正常，向导却卡满 180s
+///   报「远端后端未就绪」。根因是**两件事叠加**，缺一不可：
+///
+///   ① JVM 在 Linux 上的通配 bind（`new InetSocketAddress(port)`）走 AF_INET6：
+///      `net.ipv6.bindv6only=0` 下实际监听 IPv6 通配 `*:port`，`ss -4 -lntp` 查无
+///      IPv4 监听，只有 `ss -6` 看得到。**与 /etc/hosts 无关**——实测 WSL 生成的
+///      hosts 里 `localhost` 映射的是 `127.0.0.1`，`::1` 那行映射的是
+///      `ip6-localhost ip6-loopback`；JVM 里 `getAllByName("localhost")` 返回的也是
+///      `127.0.0.1`。（早期修复注释误写成「hosts 把 localhost 解析成 ::1 导致绑
+///      IPv6」，方向错了：绑 IPv6 是 socket 族选择，不是名字解析结果。）
+///
+///   ② WSL2 的 localhostForwarding **按地址族分别建立转发**，且只为「与监听族匹配」
+///      的回环地址建 relay。四组对照实测（Windows 侧 netstat + HTTP 探测）：
+///
+///      | JVM bind 形态                        | Windows relay | 127.0.0.1 | [::1] |
+///      |--------------------------------------|---------------|-----------|-------|
+///      | A 通配，默认双栈 `[::]:p`            | 仅 `[::1]:p`  | REFUSED   | 200   |
+///      | B 通配，preferIPv4Stack `0.0.0.0:p`  | 仅 `127.0.0.1:p` | **200** | REFUSED |
+///      | C bind `localhost` + preferIPv4Stack | 仅 `127.0.0.1:p` | 200     | REFUSED |
+///      | D bind `localhost`，默认双栈         | **无**        | REFUSED   | REFUSED |
+///
+///      即：JVM 用 IPv6 socket 监听 → Windows 侧只有 `[::1]` 通；而本项目数据面
+///      （就绪探活 / 健康探活 / 镜像推送 / 本地反代）**全部硬编码 `127.0.0.1`**。
+///
+///   D 组是「为什么不能改用显式 bind localhost 绕过」的答案：双栈下 JVM 仍用
+///   AF_INET6 socket，`localhost` 被绑成 IPv4-mapped IPv6 地址
+///   `[::ffff:127.0.0.1]:p`——localhostForwarding 对这种形态**两个族都不建 relay**，
+///   比 A 组更糟（A 至少 `[::1]` 可达）。所以 `-Dsolon.server.address=127.0.0.1`
+///   之类「只改 bind 地址」的办法无效，必须从 socket 族下手（即本参数）。
+///
+///   加此参数后 JVM 只绑 IPv4 `0.0.0.0:port`，Windows 侧 `127.0.0.1:port` 即可达
+///   （B 组实测 HTTP 200）。SSH 通道同命令体一并受益、无副作用：远端后端本就只服务
+///   回环，不需要 IPv6 监听面；且 SSH 数据面走 direct-tcpip（远端视角），不依赖
+///   localhostForwarding，原本就不受本问题影响。
 pub fn backend_start_command(
     env: &RemoteEnv,
     root: &str,
@@ -611,6 +646,7 @@ pub fn backend_start_command(
     Ok(format!(
         "mkdir -p {home_remote}; \
          GWORK_WEB_AUTH={auth} nohup {java} -Xms48m -Xmx1024m -Xss512k \
+             -Djava.net.preferIPv4Stack=true \
              -XX:+UseSerialGC -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=25 \
              -XX:MaxMetaspaceSize=192m -XX:CompressedClassSpaceSize=64m \
              -XX:ReservedCodeCacheSize=96m -XX:InitialCodeCacheSize=4m -XX:-UsePerfData \
@@ -673,6 +709,10 @@ pub async fn detect_preinstalled(session: &dyn ExecChannel) -> Result<Option<(St
 ///   `~/.gwork` 全局区不动，会话/凭证互不污染）
 /// - `-Dgwork.remote=true` + GWORK_WEB_AUTH：同 SSH 模式（WebAuthFilter 同一消费链）
 /// - 端口：同远端随机分配逻辑（调用方传参）
+/// - `-Djava.net.preferIPv4Stack=true`：同 backend_start_command（JVM 通配 bind
+///   走 AF_INET6 → WSL2 localhostForwarding 只在 Windows 侧建 `[::1]` relay，
+///   数据面硬编码的 127.0.0.1 恒不可达的 P0；四组对照实测见该函数注释）。
+///   两模式命令必须齐——历史上「部署模式漏 mkdir -p」就是两模式不齐造成的。
 pub fn preinstalled_start_command(
     env: &RemoteEnv,
     port: u16,
@@ -687,7 +727,10 @@ pub fn preinstalled_start_command(
          echo $! > {pidfile}; sleep 1; cat {pidfile}",
         home_r = sh(&format!("{}/.gwork-remote", home)),
         auth = sh(&format!("{}:{}", auth_user, auth_pass)),
-        tool_opts = sh(&format!("-Dgwork.home={}/.gwork-remote -Dgwork.remote=true", home)),
+        tool_opts = sh(&format!(
+            "-Dgwork.home={}/.gwork-remote -Dgwork.remote=true -Djava.net.preferIPv4Stack=true",
+            home
+        )),
         port = port,
         log = sh(&format!("{}/.gwork-remote/server.log", home)),
         pidfile = sh(&format!("{}/.gwork-remote/server.pid", home)),
@@ -885,6 +928,21 @@ mod tests {
             "后台启动后必须 sleep 1 缓冲再取 PID（WSL 会话清理竞态）: {}",
             cmd
         );
+        // 【WSL 数据面 P0 回归（2026-10-14 真机四组对照定案）】必须强制 IPv4 栈：
+        // JVM 在 Linux 上的通配 bind 走 AF_INET6（bindv6only=0 → 实际监听 IPv6
+        // 通配 `*:port`，`ss -4 -lntp` 查无），而 WSL2 localhostForwarding 按地址族
+        // 分别建转发 → Windows 侧只有 `[::1]:port` 有 relay，数据面全链硬编码的
+        // `127.0.0.1:port` 恒 ECONNREFUSED，不加此参数 WSL 通道 100% 卡满 180s
+        // 报「远端后端未就绪」。两模式命令必须齐。
+        // 注意与 /etc/hosts 无关（实测 hosts 里 localhost→127.0.0.1，::1 那行映射的
+        // 是 ip6-localhost），也不能改用「显式 bind localhost」绕过：双栈下 JVM 仍用
+        // AF_INET6 socket，localhost 会被绑成 `[::ffff:127.0.0.1]`，实测 relay
+        // 两个族都不建（比通配更糟）。详见 backend_start_command 文档注释的对照表。
+        assert!(
+            cmd.contains("-Djava.net.preferIPv4Stack=true"),
+            "启动命令必须强制 IPv4 栈（JVM 通配 bind 走 IPv6 致 Windows 侧 127.0.0.1 不可达）: {}",
+            cmd
+        );
         // 日志重定向（诊断远端启动失败的关键，ZCode 教训）
         assert!(cmd.contains(">"));
         assert!(cmd.contains("2>&1"));
@@ -968,6 +1026,14 @@ mod tests {
         assert!(cmd.contains("JAVA_TOOL_OPTIONS="), "{}", cmd);
         assert!(cmd.contains("-Dgwork.home=/home/dev/.gwork-remote"), "{}", cmd);
         assert!(cmd.contains("-Dgwork.remote=true"), "{}", cmd);
+        // 同 backend_start_command：WSL2 双栈 P0 的修复必须两模式齐（预装模式走
+        // JAVA_TOOL_OPTIONS 注入，gwork wrapper 是 `exec java ${JAVA_OPTS[@]}`，
+        // 环境变量对 exec 语义透明，同样生效）
+        assert!(
+            cmd.contains("-Djava.net.preferIPv4Stack=true"),
+            "预装模式也必须强制 IPv4 栈（WSL2 双栈 P0，两模式命令不得分叉）: {}",
+            cmd
+        );
         // gwork wrapper 本体 + web 子命令 + 端口
         assert!(cmd.contains("gwork web 18081"), "{}", cmd);
         // PID 回传两段式（避开 JAVA_TOOL_OPTIONS 的 Picked up 输出污染）

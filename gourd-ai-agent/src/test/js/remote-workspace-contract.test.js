@@ -29,12 +29,24 @@ const workspace = fs.readFileSync(path.join(STATIC, 'js', 'app-workspace.js'), '
 const bootstrap = fs.readFileSync(path.join(STATIC, 'js', 'app-bootstrap.js'), 'utf8');
 const indexHtml = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
 
+/** 行尾归一：工作树是 CRLF（git `i/lf w/crlf` + core.autocrlf），而源码里写死的
+ *  切片标记常含裸 `\n`（如 `'PREINSTALLED_CHANNEL_ENABLED\n'`、`'}\n    }'`）。
+ *  CRLF 文本里不存在 `"}\n"`，这类标记会恒失配并报「标记必须存在」——看起来
+ *  像实现缺失/回归，实际只是行尾风格差异造成的假红（2026-10-13 实测 2 例）。
+ *  统一在切片前归一到 LF：标记与源码同口径，行尾风格不再影响契约判定。 */
+function lf(s) {
+  return String(s).replace(/\r\n/g, '\n');
+}
+
 function sliceBetween(src, startMark, endMark) {
-  const s = src.indexOf(startMark);
+  const s0 = lf(src);
+  const start = lf(startMark);
+  const end = lf(endMark);
+  const s = s0.indexOf(start);
   assert.ok(s >= 0, '起始标记必须存在: ' + startMark);
-  const e = src.indexOf(endMark, s + startMark.length);
+  const e = s0.indexOf(end, s + start.length);
   assert.ok(e > s, '结束标记必须存在: ' + endMark);
-  return src.slice(s, e);
+  return s0.slice(s, e);
 }
 
 test('app-remote.js 注册进加载序列，且在 app-workspace 之后', () => {
@@ -583,7 +595,16 @@ test('分流：选中工作区必须声明归属并重连长连接（时序硬�
 
   // 时序：声明归属必须在 currentChatWorkspace 赋值之前（后续拉取都依赖它）；
   // 而 gate 重连必须在赋值之后（否则带的是旧 cwd）。
-  const sel = workspace.split('function selectChatWorkspace')[1].split('\n    }\n')[0];
+  /* 切片前先 lf() 归一：结束标记含裸 `\n` + 固定缩进，CRLF 工作树下永远切不开，
+     `[0]` 会退化成「函数头之后整个文件」——indexOf 到后面别的函数里也能命中，
+     时序断言因此假绿（看起来在锁顺序，实际什么都没锁）。 */
+  const sel = lf(workspace).split('function selectChatWorkspace')[1].split('\n    }\n')[0];
+  /* 真切开守卫：旧写法 `sel.length < lf(workspace).length` 是恒真式（split[1]
+     已剥掉标记前的非空内容，[0] 必然短于全文）——切不开时它也过。真守卫应
+     针对退化形态本身：切开后若还含下一个顶层函数定义，说明结束标记未命中、
+     sel 实际是「函数头之后的整个文件」，此时序断言无意义，直接失败。 */
+  assert.ok(!/^function /m.test(sel) && !/^async function /m.test(sel),
+    '函数体切片必须真切开（sel 里不得再含顶层 function 定义，否则时序断言无意义）');
   const atBind = sel.indexOf('bindWorkspaceScope(sel)');
   const atAssign = sel.indexOf('window.currentChatWorkspace = sel;');
   const atGate = sel.indexOf('connectWebGate');
@@ -679,8 +700,14 @@ test('分流：既有整机切换语义作为兜底保留（零回归）', () =>
     '激活 scope 兜底必须仍在（兼容整机切换 + 旧行为）');
   /* 【P0 回归】本地分支不得回读激活覆盖：旧断言锁的是「本地端口解析必须优先读
      覆盖」，那条要求本身就是缺陷（route_for 判出 Local 又被拽回远端 → 本地
-     列表/设置被远端顶掉），故翻转：决策只能有一个真相源（route_for）。 */
-  const decision = serverRs.split('fn upstream_for(')[1].split('\n}\n')[0];
+     列表/设置被远端顶掉），故翻转：决策只能有一个真相源（route_for）。
+     切片前 lf() 归一（同上：CRLF 下 `\n}\n` 切不开，负向断言的范围会失真）。 */
+  const decision = lf(serverRs).split('fn upstream_for(')[1].split('\n}\n')[0];
+  /* 真切开守卫：旧写法与 sel 处同理是恒真式。决策函数体里切开后若还含
+     下一个顶层 fn 定义，说明 `\n}\n` 未命中、decision 是「函数头后的整个
+     文件」，负向断言 !/remote_[Oo]verride/ 的范围就失真了（去扫到别的函数）。 */
+  assert.ok(!/^fn |^async fn |^pub fn /m.test(decision),
+    '决策函数体必须真切开（decision 里不得再含顶层 fn 定义，否则范围失真）');
   assert.ok(decision.includes('route_for('), '上游必须由 route_for 单一入口决定');
   assert.ok(!/remote_[Oo]verride/.test(decision),
     '决策函数的本地分支不得回读激活覆盖（否则强制本地的请求被拽回远端）');
@@ -1019,6 +1046,42 @@ test('WSL：exec 必须 -e 直 exec（默认 shell 预解析 bad substitution �
     'bash 缺失（126/127）必须回退 /bin/sh（Alpine 系发行版无 bash）');
   assert.doesNotMatch(wsl, /\$\{PIPESTATUS\[0\]\}/,
     '旧包装器 bashism 不得复活（ash 系 bad substitution 全通道灭 / bash 系屏蔽退出码）');
+});
+
+test('WSL：bash 缺失回退必须认 wsl.exe 的 execvpe 失败（真机 exit=1，只看 126/127 会漏）', () => {
+  /* 【P1 真机取证 2026-10-13】docker-desktop（Alpine/ash，无 bash）下
+     `wsl.exe -d docker-desktop -e /bin/bash -ls` 实测返回 **exit=1**，stderr 为
+     `<3>WSL (pid - Relay) ERROR: CreateProcessCommon:818: execvpe(/bin/bash) failed: ...`。
+     126/127 是「shell 已起来后 execvp 失败」的语义，而 -e 直 exec 是 wsl.exe 自己
+     去 execvp，失败归到 wsl.exe 进程退出码 1 —— 旧判据因此漏掉真正的无-bash
+     场景，回退永不触发，ash 系发行版全通道灭。 */
+  const wsl = readTauri(path.join('remote', 'wsl.rs'));
+  assert.match(wsl, /fn shell_unavailable\(res: &ExecResult, shell: &str\) -> bool/,
+    '必须有独立的 shell 不可用判据函数（可单测，不内联在 exec 里）');
+  const body = sliceBetween(wsl, 'fn shell_unavailable(', 'res.stderr.contains(&needle)');
+  assert.match(body, /execvpe\(\{\}\) failed/,
+    '判据必须匹配 wsl.exe 的 execvpe(<shell>) failed 形态（真机 exit=1 的唯一线索）');
+  assert.match(body, /format!\("execvpe/,
+    'execvpe 判定必须锚定目标 shell 路径（否则业务命令的 not found 会被误判成无 bash，回退毫无意义）');
+  assert.match(wsl, /if shell_unavailable\(&res, "\/bin\/bash"\)/,
+    'exec 回退分支必须走该判据（不得回退到只看退出码）');
+});
+
+test('WSL：UNC 上传必须先探可达性（root 家目录 0700 经 9P 无权，不得白跑必败的写 + 刷 warn）', () => {
+  const wsl = readTauri(path.join('remote', 'wsl.rs'));
+  /* 切片要含到 cat 保底段为止（旧写法定在 `// 2. cat 流式` 注释之前，正好把
+     要校的 cat 路径排除在外，自己把自己的断言判红了）。 */
+  const seg = sliceBetween(wsl, 'pub async fn upload', 'let output = child.wait_with_output()');
+  assert.match(seg, /let unc_reachable = match unc\.parent\(\)/,
+    '必须先探 UNC 父目录可达性（create_dir_all 探路）');
+  assert.match(seg, /if unc_reachable \{/,
+    'UNC 分块写必须被可达性门控（不可达直接走 cat 流式保底）');
+  assert.match(seg, /tracing::info!/,
+    '不可达是预期内权限限制，必须 info 级（warn 会让排障者误当真故障）');
+  assert.match(seg, /UNC 路径不可达/,
+    '不可达日志必须带可读原因（常见于 root 家目录）');
+  // cat 保底路径必须仍在（探路判错也不能丢上传能力）
+  assert.match(seg, /cat > /, 'cat 流式保底路径不得因门控而消失');
 });
 
 test('WSL 向导：Docker Desktop 内部发行版不得进下拉与预选', () => {
