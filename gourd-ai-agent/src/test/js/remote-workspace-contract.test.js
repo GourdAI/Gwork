@@ -992,6 +992,14 @@ test('离线包链：运行时资产名三处一致（Rust 取件名 = 制作脚
   assert.match(mod, /if platform != "Linux"/, '内置资产只服务 Linux 远端');
   const make = fs.readFileSync(path.join(TAURI_ROOT, 'cmd', 'make-runtime-linux.js'), 'utf8');
   assert.match(make, /runtime-linux-' \+ archTag \+ '\.tar\.gz/, '制作脚本产出名必须与 Rust 取件名同构');
+  // Windows 下必须钉死 System32 bsdtar：CI 的 shell: bash 把 Git Bash 的 /usr/bin
+  // 前置到 PATH，裸 'tar'/'tar.exe' 命中的是 GNU tar，它把 D:\a\... 盘符冒号解析为
+  // 「远程主机 D」（tar (child): Cannot connect to D: resolve failed），曾阻断 CI 打包。
+  assert.match(make, /function resolveTar\(\)\s*\{[\s\S]*?System32/, 'Windows 下必须用 resolveTar() 钉死 System32 bsdtar');
+  assert.ok((make.match(/resolveTar\(\)/g) || []).length >= 4,
+    'resolveTar 必须覆盖全部 tar 调用点（定义 1 处 + 解宿主 zip + 解 jmods + 打包 ≥3 处）');
+  assert.doesNotMatch(make, /execFileSync\((?:'tar'|"tar")/, '禁止裸 tar：Windows/PATH 解析会命中 Git Bash GNU tar');
+  assert.doesNotMatch(make, /\bprocess\.platform === 'win32' \? 'tar\.exe' : 'tar'/, '禁止三元回退裸 tar.exe：PATH 上前置的是 GNU tar');
   // tauri.conf resources 映射 runtimes/ 目录（资产进安装包）
   const conf = JSON.parse(fs.readFileSync(path.join(TAURI_ROOT, 'src-tauri', 'tauri.conf.json'), 'utf8'));
   const res = Object.keys(conf.bundle.resources).join('|');

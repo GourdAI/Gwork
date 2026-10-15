@@ -28,7 +28,7 @@
  *   node cmd/make-runtime-linux.js --out <dir>         # 缺省 build/extraResources/runtimes
  *
  * 产物：runtime-linux-<arch>.tar.gz + 同名 .sha256 旁车（CI 上传/用户校验用）。
- * tar 用系统 tar（Windows 10+ 自带 tar.exe；POSIX 自带 tar）。
+ * tar：Windows 钉死 System32 bsdtar（见 resolveTar），POSIX 用系统 tar。
  * Windows 宿主产出的条目可能丢可执行位——远端部署脚本解包后有 chmod +x bin/* 兜底。
  */
 
@@ -119,6 +119,22 @@ function hostAdoptTag() {
   return { os, arch };
 }
 
+/**
+ * Windows 下绝不能信 PATH 命中的 tar：GitHub Actions 的 shell: bash 会把
+ * Git Bash 的 /usr/bin 前置，命中的是 GNU tar——它把 "D:\\a\\..." 盘符冒号
+ * 解析为「远程主机 D」的归档语法，报
+ *   tar (child): Cannot connect to D: resolve failed
+ * 再连锁 gzip: unexpected end of file（下载本身是完整的）。
+ * 故钉死 System32 的 bsdtar（Win10+ 自带，无远程归档语法歧义，
+ * 支持 -z 与 --strip-components，还能解 zip）。
+ */
+function resolveTar() {
+  if (process.platform !== 'win32') return 'tar';
+  const sys = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+  if (!fs.existsSync(sys)) fail('未找到系统 bsdtar: ' + sys);
+  return sys;
+}
+
 function ensureHostJdk17() {
   const { os, arch } = hostAdoptTag();
   const dir = path.join(CACHE, 'jdk-host');
@@ -133,11 +149,10 @@ function ensureHostJdk17() {
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   if (os === 'windows') {
-    // Windows 包是 zip：用 tar.exe 解 zip（Win10+ bsdtar 支持）或 PowerShell Expand-Archive
-    const tar = 'tar.exe';
-    execFileSync(tar, ['-xf', tgz, '-C', dir, '--strip-components=1'], { stdio: 'inherit' });
+    // Windows 包是 zip：bsdtar 可直接解 zip（Win10+），且不受 PATH 里 GNU tar 干扰
+    execFileSync(resolveTar(), ['-xf', tgz, '-C', dir, '--strip-components=1'], { stdio: 'inherit' });
   } else {
-    execFileSync('tar', ['-xzf', tgz, '-C', dir, '--strip-components=1'], { stdio: 'inherit' });
+    execFileSync(resolveTar(), ['-xzf', tgz, '-C', dir, '--strip-components=1'], { stdio: 'inherit' });
   }
   if (!fs.existsSync(jlink)) fail('宿主 JDK 17 解包后无 jlink: ' + jlink);
   return jlink;
@@ -168,7 +183,7 @@ function ensureLinuxJdk(archTag) {
   execFileSync(curl, ['-fSL', '--ssl-no-revoke', '-o', tgz, adoptiumJdkUrl(adoptArch)], { stdio: 'inherit' });
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
-  const tar = process.platform === 'win32' ? 'tar.exe' : 'tar';
+  const tar = resolveTar();
   execFileSync(tar, ['-xzf', tgz, '-C', dir, '--strip-components=1'], { stdio: 'inherit' });
   if (!fs.existsSync(marker)) fail('解包后无 jmods 目录: ' + dir);
   return dir;
@@ -219,7 +234,7 @@ function buildRuntime(jlink, jmodsHome, archTag, outDir) {
 
   fs.mkdirSync(outDir, { recursive: true });
   const tarPath = path.join(outDir, 'runtime-linux-' + archTag + '.tar.gz');
-  const tar = process.platform === 'win32' ? 'tar.exe' : 'tar';
+  const tar = resolveTar();
   // flat 布局：-C work . → 条目 ./bin/java …（远端布局归一也兼容单层顶目录）
   execFileSync(tar, ['-czf', tarPath, '-C', work, '.'], { stdio: 'inherit' });
   const sha = crypto.createHash('sha256').update(fs.readFileSync(tarPath)).digest('hex');
