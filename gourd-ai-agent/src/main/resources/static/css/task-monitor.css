@@ -1,0 +1,136 @@
+/* ===== task-monitor.css =====
+   标题栏动作组（终端 / 任务监控按钮）+ 任务监控右侧抽屉。
+   markup 在 index.html 的 body 级；逻辑在 app-titlebar-actions.js / app-task-monitor.js。 */
+
+/* ---------- 标题栏动作组 ----------
+   fixed 贴窗口顶行右端、原生窗口按钮左侧。为何不放进 .titlebar-drag-region：
+   该拖拽条在 skills 视图与浏览器 code 模式被整体隐藏（skills.css / code.css），
+   塞进去的按钮会随之消失；body 级 fixed 与所有视图布局解耦。
+   右偏移由 app-titlebar-actions.js 按平台运行时写入 --titlebar-actions-right：
+   - Tauri（自绘控件层 3×46=138px）→ 138px + 6px 间距；
+   - Electron（原生 titleBarOverlay 不可覆盖、无横向预留）→ 138px + 6px；
+   - mac（红绿灯在左上，右侧无控件）→ 6px；
+   - 浏览器直连（无窗口按钮）→ 6px。
+   CSS 里的 144px 只是无 JS 时的缺省值（Win 桌面壳最常见形态）。 */
+.titlebar-actions {
+    position: fixed; top: 0; right: var(--titlebar-actions-right, 144px);
+    height: 36px; z-index: 1500;
+    display: flex; align-items: center; gap: 2px; padding: 0 4px;
+    /* 顶行是拖拽区：按钮组容器本身保持可拖（no-drag 只给 button 元素，
+       与 preload.js / ipc_bridge.rs 的通用元素白名单口径一致）。 */
+    -webkit-app-region: drag;
+}
+.titlebar-action-btn {
+    -webkit-app-region: no-drag;
+    display: flex; align-items: center; justify-content: center;
+    width: 30px; height: 26px; border: none; border-radius: 6px;
+    background: transparent; color: var(--text-secondary); cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+.titlebar-action-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.titlebar-action-btn.active { background: var(--bg-hover); color: var(--accent); }
+/* 窄屏顶行空间紧张时仍保留（功能入口），但压缩间距 */
+@media (max-width: 768px) {
+    .titlebar-actions { gap: 0; padding: 0 2px; }
+}
+
+/* ---------- 任务监控右栏 ----------
+   版式内右栏而非浮层抽屉：打开时 .main-area 让出 --task-monitor-width（见下方
+   body.task-monitor-open 规则），对话/查看器内容被压缩而非被盖住——
+   参照稿形态：监控栏与内容并排，互不遮挡。
+   右缘锚定 + 定宽：左缘 = 视口宽 - 宽度，与主区让宽后的右缘【同变量天然对齐】。
+   【过约束陷阱】left+right+width 三者同设时 LTR 下 right 被忽略（CSS 2.1 §10.3.7），
+   曾致右栏漂到侧栏右缘而非贴窗口右缘——故基准规则不得设 left。
+   底缘：终端打开时 dock 到终端顶缘（参照稿互不重叠）；终端关闭贴窗口底。
+   --code-terminal-height 由 app-terminal.js setHeight 写入，关终端后变量仍在，
+   故 dock 必须门控在 body.terminal-open 下，否则关终端后右栏悬空 240px。 */
+:root { --task-monitor-width: 320px; }
+.task-monitor-drawer {
+    position: fixed;
+    top: var(--titlebar-strip-h, 0px);
+    right: 0; bottom: 0;
+    width: var(--task-monitor-width); z-index: 1400;
+    display: flex; flex-direction: column;
+    background: var(--bg-sidebar); border-left: 1px solid var(--border-color);
+    visibility: hidden; opacity: 0; pointer-events: none;
+    transition: opacity 0.15s ease, visibility 0.15s;
+}
+body.terminal-open .task-monitor-drawer { bottom: var(--code-terminal-height, 0px); }
+body.task-monitor-open .task-monitor-drawer {
+    visibility: visible; opacity: 1; pointer-events: auto;
+}
+/* 打开时主区让宽：内容被压缩而非被盖（不遮挡的核心机制）。
+    .main-area 是 body flex 的子项（flex:1），margin-right 直接参与 flex 分配。 */
+body.task-monitor-open .main-area { margin-right: var(--task-monitor-width); }
+/* 桌面壳顶行 36px 标题条（与 app.css .titlebar-drag-region 同口径） */
+body.is-electron { --titlebar-strip-h: 36px; }
+/* 窄屏：右栏退化为全宽浮层（主区已无并排空间），仍不盖终端 */
+@media (max-width: 900px) {
+    body.task-monitor-open .main-area { margin-right: 0; }
+    .task-monitor-drawer { left: 0; width: auto; }
+}
+
+.task-monitor-body { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 0 12px; }
+
+/* ---------- 分区 ---------- */
+.tm-section { padding: 4px 0; }
+.tm-sec-head {
+    display: flex; align-items: center; gap: 4px; width: 100%;
+    padding: 6px 16px; border: none; background: none; cursor: pointer;
+    color: var(--text-secondary); font-size: 12.5px; font-weight: 600; text-align: left;
+}
+.tm-sec-head:hover { color: var(--text-primary); }
+.tm-sec-arrow { transition: transform 0.15s; }
+.tm-section.collapsed .tm-sec-arrow { transform: rotate(-90deg); }
+.tm-sec-body { padding: 2px 12px 6px; }
+.tm-section.collapsed .tm-sec-body { display: none; }
+
+/* 条目行：图标块 + 文本（参照稿形态：32px 圆角图标底 + 单行文本） */
+.tm-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 5px 4px; border-radius: 7px; min-width: 0;
+}
+.tm-row:hover { background: var(--bg-hover); }
+.tm-row-icon {
+    display: flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 7px; flex-shrink: 0;
+    background: var(--bg-hover); color: var(--text-secondary);
+}
+.tm-row-icon.tm-icon-image { color: #4caf7d; }
+.tm-row-icon.tm-icon-doc { color: #5b9cf6; }
+.tm-row-text {
+    flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-primary);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tm-row-sub { color: var(--text-tertiary); font-size: 11px; margin-left: 6px; }
+.tm-row-action {
+    border: none; background: none; cursor: pointer; color: var(--text-secondary);
+    display: flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; border-radius: 5px; flex-shrink: 0;
+}
+.tm-row-action:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* 空态 / 加载态 / 错误态 */
+.tm-empty { padding: 6px 8px; font-size: 12px; color: var(--text-tertiary); }
+.tm-error { padding: 6px 8px; font-size: 12px; color: var(--danger, #d9534f); }
+
+/* ---------- 记忆行（固定底部） ---------- */
+.tm-memory-row {
+    display: flex; align-items: center; gap: 8px;
+    margin: 6px 16px 0; padding: 8px 4px 0;
+    border-top: 1px solid var(--border-color);
+    font-size: 12.5px; color: var(--text-secondary);
+}
+.tm-memory-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--text-tertiary); flex-shrink: 0;
+}
+/* 本会话更新过记忆：强调色圆点（参照稿的蓝点） */
+.tm-memory-row.updated .tm-memory-dot { background: var(--accent); }
+.tm-memory-row.updated .tm-memory-label { color: var(--text-primary); }
+.tm-memory-jump {
+    margin-left: auto; border: none; background: none; cursor: pointer;
+    color: var(--text-secondary); display: flex; align-items: center;
+    justify-content: center; width: 24px; height: 24px; border-radius: 5px;
+}
+.tm-memory-jump:hover { background: var(--bg-hover); color: var(--text-primary); }

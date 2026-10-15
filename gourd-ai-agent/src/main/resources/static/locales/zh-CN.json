@@ -1115,6 +1115,7 @@
                    "save":  "保存",
                    "add":  "添加",
                    "back":  "返回",
+                   "close": "关闭",
                    "refresh":  "刷新",
                    "loading":  "加载中…",
                    "no_data":  "暂无数据",
@@ -1184,7 +1185,12 @@
                      "restarting":  "正在重启终端...",
                      "restart_timeout":  "重启超时，请重试",
                      "restarted":  "终端已重启",
-                     "restart_failed":  "终端重启失败"
+                     "restart_failed":  "终端重启失败",
+                     "new_tab":  "新建终端",
+                     "tab_close_confirm":  "该终端仍在运行，关闭将终止其中的进程，确定关闭？",
+                     "tab_limit":  "终端数量已达上限（{0} 个）",
+                     "tab_conn_recycled":  "连接已被回收（终端数超限），切回时将自动重连",
+                     "scope_adopted":  "原远程连接已断开，已切换到当前环境"
                  },
     "ui":  {
                "multimodal":  "多模态",
@@ -1356,5 +1362,30 @@
         "error_partial": "危险：操作仅部分完成，工作区可能处于不一致状态，请立即人工核对相关文件",
         "error_compensated": "操作失败，已自动回滚到操作前的状态",
         "error_generic": "操作未完成，请稍后重试"
+    }
+,
+    "monitor": {
+        "title": "任务监控",
+        "env": "环境信息",
+        "outputs": "产出",
+        "sources": "来源",
+        "skills": "技能调用",
+        "memory_updated": "记忆已更新",
+        "memory_not_updated": "记忆未更新",
+        "open_memory": "打开记忆视图",
+        "no_changes": "无变更",
+        "changes_count": "{0} 处变更",
+        "no_git": "非 Git 仓库",
+        "no_remote": "未配置远程",
+        "no_upstream": "未关联上游分支",
+        "synced": "已同步",
+        "ahead_behind": "领先 {0} / 落后 {1}",
+        "env_local": "本地",
+        "env_remote": "远程",
+        "empty_env": "暂无环境信息",
+        "empty_outputs": "暂无产出数据 :)",
+        "empty_sources": "暂无来源数据 :)",
+        "no_skills": "本会话未调用技能",
+        "load_failed": "监控数据加载失败"
     }
 }

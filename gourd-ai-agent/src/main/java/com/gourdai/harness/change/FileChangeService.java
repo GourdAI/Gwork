@@ -93,6 +93,16 @@ public final class FileChangeService {
     private static final int MAX_INCOMPLETE_REASONS = 20;
 
     /**
+     * 会话级清单单次最多展开的 run 数（按 updatedAt 取最近的若干个）。
+     *
+     * <p>WHY：{@link #summary} 对缺行数统计的条目会回读 blob 重算 LCS，而一个长寿命会话
+     * 可以积累上百个 run。无上限时一次面板刷新就能放大成成百次 blob 读盘，而监控面板
+     * 只关心「这个会话改了什么」，最旧的几十个 run 对结论几乎无贡献。超限只取最新的，
+     * 并在响应里标 {@code truncated=true} 告知调用方结果被截断（不静默丢数据）。</p>
+     */
+    private static final int MAX_SESSION_RUNS = 200;
+
+    /**
      * UTF-8 严格解码失败后按序尝试的遗留文本编码。
      *
      * <p>只收录<b>多字节</b>编码：它们对字节序列有真实的结构约束，解不开就会报错，可当判据用。
@@ -161,6 +171,17 @@ public final class FileChangeService {
      * 不存在反向获取，无死锁风险。</p>
      */
     private static final Object STORE_MUTATION_GATE = new Object();
+
+    /**
+     * 会话级清单（{@link #listSession}）在分片锁表里的 runId 占位值。
+     *
+     * <p>WHY：分片锁的 key 是 {@code root + sessionId + runId}，而会话级查询没有单一 runId。
+     * 用固定占位值参与 {@link #lockFor} 取模，既能复用现有锁表（禁止新建锁表的约束），
+     * 又保证同一会话的清单查询彼此串行，不会读到半写的 manifest。
+     * 代价是与真实 run 的锁不同片：但清单只做只读快照，不参与 load→改→save 事务，
+     * 与单 run 写操作互不干涉（写侧靠 touchAndSave 的原子 move 保证读到的是完整文件）。</p>
+     */
+    private static final String SESSION_LIST_LOCK_RUN = "__listSession__";
 
     private volatile Listener listener;
 
@@ -849,6 +870,197 @@ public final class FileChangeService {
         } catch (Throwable e) {
             return errorResult("INVALID_REQUEST", message(e));
         }
+    }
+
+    /**
+     * 会话级变更清单：跨该会话全部 run 合并文件级变更（只读，供任务监控面板展示）。
+     *
+     * <p><b>WHY</b>：{@link #getRun} 只能按 runId 查单轮，而面板需要回答「这个会话至今改过
+     * 哪些文件」。同一个文件常在多轮被反复修改，若把各 run 的增删行直接相加会重复计数，
+     * 因此按 path 归并：<b>状态类字段</b>（changeType/state/additions/deletions）取
+     * updatedAt 最大那一轮的快照（它描述的是「相对该轮修改前」的差异，取最新一轮最贴近现状），
+     * <b>归属类字段</b>（runIds）累加，使前端能从文件行反查到具体 run 再调 {@code /changes/diff}。</p>
+     *
+     * <p>锁序与 {@link #getRun} 完全一致：先 {@link #maintain}（内部会为其它 run 取锁，
+     * 持锁再进会交叉死锁）再取分片锁；锁对象复用 {@link #lockStripes}，不新建锁表。</p>
+     *
+     * @param sessionId 会话 ID（越界字符一律拒收，见 {@link #sessionDir}）
+     * @param root      工作区根（与 getRun 同口径校验）
+     * @return 含 sessionId/files/fileCount/additions/deletions/runs/updatedAt 的摘要；
+     *         目录不存在时回结构化空态（不是 NOT_FOUND），入参非法时回 INVALID_REQUEST
+     */
+    public Map<String, Object> listSession(String sessionId, String root) {
+        try {
+            Path safeRoot = validateRoot(root);
+            // 与 getRun 同序：补偿扇描必须在取任何 per-run 锁之前（见 maintain 的注释）
+            maintain(safeRoot);
+            synchronized (lockFor(sessionId, SESSION_LIST_LOCK_RUN, safeRoot)) {
+                return listSessionLocked(sessionId, safeRoot);
+            }
+        } catch (Throwable e) {
+            return errorResult("INVALID_REQUEST", safeMessage(e, null));
+        }
+    }
+
+    /** 会话级清单的实际合并逻辑；必须在 {@link #SESSION_LIST_LOCK_RUN} 分片锁内调用。 */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> listSessionLocked(String sessionId, Path safeRoot) {
+        // sessionStoreDir → sessionDir 会拒收 ../、\ 与空字节，非法 id 在此抛出并由外层归为 INVALID_REQUEST
+        Path manifestsDir = sessionStoreDir(safeRoot, sessionId).resolve("manifests");
+
+        List<String> unreadable = new ArrayList<>();
+        List<Map<String, Object>> runMetas = new ArrayList<>();
+        boolean truncated = false;
+
+        if (Files.isDirectory(manifestsDir)) {
+            List<Path> files;
+            try (java.util.stream.Stream<Path> stream = Files.list(manifestsDir)) {
+                files = stream.filter(p -> p.getFileName().toString().endsWith(".json"))
+                        .collect(java.util.stream.Collectors.toList());
+            } catch (Throwable e) {
+                LOG.warn("[FileChanges] session ledger listing failed, session={}: {}", sessionId, message(e));
+                return sessionLedgerResult(sessionId, runMetas, Collections.emptyMap(), unreadable, false);
+            }
+
+            // 第一遍只读 run 级元信息（不碰 blob）：updatedAt 用于排序与截断，避免为被淘汰的
+            // 旧 run 白白付一次 blob 回读 + LCS 重算的代价。
+            for (Path file : files) {
+                String fileName = file.getFileName().toString();
+                String baseName = fileName.substring(0, fileName.length() - ".json".length());
+                Map<String, Object> map = readManifestMap(file);
+                if (map == null) {
+                    unreadable.add(baseName);
+                    LOG.warn("[FileChanges] session ledger skipped unreadable manifest: {}", file.getFileName());
+                    continue;
+                }
+                // runId 以账本内容为准：IM 等通道的 runId 可能含 ':' 等字符，落盘文件名是
+                // safeSegment 后的形态；用文件名去 load 会被身份校验判为 mismatch。
+                Object rawRunId = map.get("runId");
+                String runId = rawRunId == null ? baseName : String.valueOf(rawRunId);
+                if (!sessionId.equals(stringValue(map.get("sessionId"), null))) {
+                    // 被搬错位置的账本：宁可不展示也不能把别的会话的变更归到本会话名下
+                    unreadable.add(runId);
+                    LOG.warn("[FileChanges] session ledger skipped foreign manifest: {}", file.getFileName());
+                    continue;
+                }
+                Map<String, Object> meta = new LinkedHashMap<>();
+                meta.put("runId", runId);
+                meta.put("updatedAt", longValue(map.get("updatedAt")));
+                meta.put("possiblyIncomplete", Boolean.TRUE.equals(map.get("possiblyIncomplete")));
+                Object entries = map.get("entries");
+                meta.put("fileCount", entries instanceof List ? ((List<Object>) entries).size() : 0);
+                runMetas.add(meta);
+            }
+
+            // 按 updatedAt 升序（同刻按 runId）：升序合并时「后来者胜」即「最新者胜」，结果与
+            // Files.list 的遍历顺序无关，保证同一份账本每次返回同一份清单。
+            runMetas.sort(java.util.Comparator
+                    .comparingLong((Map<String, Object> m) -> (Long) m.get("updatedAt"))
+                    .thenComparing(m -> String.valueOf(m.get("runId"))));
+            if (runMetas.size() > MAX_SESSION_RUNS) {
+                truncated = true;
+                runMetas = new ArrayList<>(runMetas.subList(runMetas.size() - MAX_SESSION_RUNS, runMetas.size()));
+            }
+        }
+
+        // 第二遍：逐 run load + summary（复用既有私有方法），把文件行归并进按 path 索引的累加器
+        Map<String, Map<String, Object>> merged = new LinkedHashMap<>();
+        for (Map<String, Object> meta : runMetas) {
+            String runId = String.valueOf(meta.get("runId"));
+            long runUpdatedAt = (Long) meta.get("updatedAt");
+            Map<String, Object> summary;
+            try {
+                summary = summary(load(sessionId, runId, safeRoot));
+            } catch (Throwable e) {
+                unreadable.add(runId);
+                LOG.warn("[FileChanges] session ledger could not load run {}, session={}: {}",
+                        runId, sessionId, message(e));
+                continue;
+            }
+            // 以 summary 为准回填 run 级统计：load 会惰性补齐行数统计，fileCount 也可能因
+            // 净零条目被移除而与第一遍的原始 entries 数不同。
+            meta.put("fileCount", summary.get("fileCount"));
+            meta.put("possiblyIncomplete", Boolean.TRUE.equals(summary.get("possiblyIncomplete")));
+            Object rows = summary.get("files");
+            if (!(rows instanceof List)) continue;
+            for (Object value : (List<Object>) rows) {
+                if (!(value instanceof Map)) continue;
+                Map<String, Object> row = (Map<String, Object>) value;
+                String path = stringValue(row.get("path"), null);
+                if (path == null) continue;
+                Map<String, Object> acc = merged.get(path);
+                if (acc == null) {
+                    acc = new LinkedHashMap<>();
+                    acc.put("path", path);
+                    acc.put("runIds", new ArrayList<String>());
+                    acc.put("lastUpdatedAt", -1L);
+                    merged.put(path, acc);
+                }
+                ((List<String>) acc.get("runIds")).add(runId);
+                // 升序遍历 + >= 判定：updatedAt 更大的那一轮覆盖状态类字段
+                if (runUpdatedAt >= (Long) acc.get("lastUpdatedAt")) {
+                    acc.put("changeType", row.get("changeType"));
+                    acc.put("binary", row.get("binary"));
+                    acc.put("state", row.get("state"));
+                    acc.put("additions", row.get("additions"));
+                    acc.put("deletions", row.get("deletions"));
+                    acc.put("lastUpdatedAt", runUpdatedAt);
+                }
+            }
+        }
+
+        return sessionLedgerResult(sessionId, runMetas, merged, unreadable, truncated);
+    }
+
+    /**
+     * 组装会话级清单响应。单独抽出是为了让「目录不存在」与「正常合并」两条路径共用同一份
+     * 字段骨架——空态也必须字段齐备，否则前端要对每个字段做 undefined 判定。
+     */
+    private Map<String, Object> sessionLedgerResult(String sessionId, List<Map<String, Object>> runMetas,
+                                                    Map<String, Map<String, Object>> merged,
+                                                    List<String> unreadable, boolean truncated) {
+        List<Map<String, Object>> files = new ArrayList<>(merged.values());
+        // 按 path 排序：merged 的插入顺序取决于 run 与文件的遍历顺序，排序后输出稳定可对比
+        files.sort(java.util.Comparator.comparing(m -> String.valueOf(m.get("path"))));
+        long additions = 0;
+        long deletions = 0;
+        long updatedAt = 0;
+        boolean possiblyIncomplete = false;
+        for (Map<String, Object> row : files) {
+            additions += Math.max(0, intValue(row.get("additions"), 0));
+            deletions += Math.max(0, intValue(row.get("deletions"), 0));
+        }
+        List<Map<String, Object>> runs = new ArrayList<>();
+        // 面板按时间倒序展示，故这里倒着输出（runMetas 本身是升序）
+        for (int i = runMetas.size() - 1; i >= 0; i--) {
+            Map<String, Object> meta = runMetas.get(i);
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("runId", meta.get("runId"));
+            row.put("updatedAt", meta.get("updatedAt"));
+            row.put("fileCount", meta.get("fileCount"));
+            row.put("possiblyIncomplete", meta.get("possiblyIncomplete"));
+            runs.add(row);
+            long metaUpdatedAt = longValue(meta.get("updatedAt"));
+            if (metaUpdatedAt > updatedAt) updatedAt = metaUpdatedAt;
+            if (Boolean.TRUE.equals(meta.get("possiblyIncomplete"))) possiblyIncomplete = true;
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("status", "OK");
+        out.put("sessionId", sessionId);
+        out.put("files", files);
+        out.put("fileCount", files.size());
+        out.put("additions", additions);
+        out.put("deletions", deletions);
+        out.put("runs", runs);
+        out.put("runCount", runs.size());
+        out.put("updatedAt", updatedAt);
+        // 透传「bash 产出不被追踪」的既有语义：任一轮不完整即会话级不完整，面板据此提示
+        out.put("possiblyIncomplete", possiblyIncomplete);
+        out.put("truncated", truncated);
+        // 不可读账本数：只报告数量与 runId，不把服务端绝对路径泄给前端
+        out.put("unreadableRuns", new ArrayList<>(unreadable));
+        return out;
     }
 
     public Map<String, Object> diff(String sessionId, String runId, String root, String filePath) {

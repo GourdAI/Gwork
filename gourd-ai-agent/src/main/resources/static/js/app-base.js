@@ -854,15 +854,27 @@ function hideNetworkBar() {
 }
 
 /* ===== Layer Dialog Helpers ===== */
-/* 统一用 layui layer 替代原生 confirm/alert，自动跟随主题 */
-function layConfirm(msg, yesFn) {
+/* 统一用 layui layer 替代原生 confirm/alert，自动跟随主题。
+   【桌面端规约】原生 confirm/alert/prompt 带浏览器来源抬头（如「localhost:4808 显示」），
+   在桌面壳里是明显违和的网页语义，全仓禁用：layer 缺失（极端时序）时走下方 DOM 兜底，
+   绝不回落原生对话框。 */
+function getLayerRef() {
+    if (typeof layer !== 'undefined' && layer) return layer;
+    if (typeof layui !== 'undefined' && layui && layui.layer) return layui.layer;
+    return null;
+}
+
+/* yesFn=确认回调；noFn=取消回调（可选，含 Esc/遮罩点击）。 */
+function layConfirm(msg, yesFn, noFn) {
+    var lay = getLayerRef();
+    if (!lay) { fallbackConfirm(msg, yesFn, noFn); return; }
     var html = '<div class="kd-confirm">'
         + '<div class="kd-confirm-msg">' + escapeHtml(msg) + '</div>'
         + '<div class="kd-confirm-btns">'
          + '<button class="kd-btn kd-btn-cancel">' + GourdI18n.t('base.cancel') + '</button>'
          + '<button class="kd-btn kd-btn-ok">' + GourdI18n.t('base.confirm') + '</button>'
         + '</div></div>';
-    var idx = layer.open({
+    var idx = lay.open({
         type: 1,
         content: html,
         title: false,
@@ -873,16 +885,81 @@ function layConfirm(msg, yesFn) {
         area: 'auto',
         success: function(layero) {
             layero.find('.kd-btn-ok').on('click', function() {
-                layer.close(idx);
+                lay.close(idx);
                 yesFn();
             });
             layero.find('.kd-btn-cancel').on('click', function() {
-                layer.close(idx);
+                lay.close(idx);
+                if (typeof noFn === 'function') noFn();
             });
         }
     });
 }
 
 function layAlert(msg) {
-    layer.msg(msg, { icon: 2, time: 3000, skin: 'kd-layer-msg' });
+    var lay = getLayerRef();
+    if (!lay) { fallbackAlert(msg); return; }
+    lay.msg(msg, { icon: 2, time: 3000, skin: 'kd-layer-msg' });
+}
+
+/* ===== 无 layer 兜底（DOM 自建，样式复用 .kd-confirm / .kd-layer 令牌，跟随主题） =====
+   单实例语义：同时只保留一个兜底确认框（后开者顶替前者，前者按取消处理），
+   避免 layer 缺失时连点堆积多层遮罩。 */
+var _fallbackConfirmEl = null;
+
+function fallbackConfirm(msg, yesFn, noFn) {
+    if (_fallbackConfirmEl) {
+        var old = _fallbackConfirmEl;
+        _fallbackConfirmEl = null;
+        if (old && old.parentNode) old.parentNode.removeChild(old);
+    }
+    var overlay = document.createElement('div');
+    overlay.className = 'kd-fallback-overlay';
+    var box = document.createElement('div');
+    box.className = 'kd-confirm';
+    var msgEl = document.createElement('div');
+    msgEl.className = 'kd-confirm-msg';
+    msgEl.textContent = msg;
+    var btns = document.createElement('div');
+    btns.className = 'kd-confirm-btns';
+    var cancelBtn = document.createElement('button');
+    cancelBtn.className = 'kd-btn kd-btn-cancel';
+    cancelBtn.textContent = GourdI18n.t('base.cancel');
+    var okBtn = document.createElement('button');
+    okBtn.className = 'kd-btn kd-btn-ok';
+    okBtn.textContent = GourdI18n.t('base.confirm');
+    btns.appendChild(cancelBtn);
+    btns.appendChild(okBtn);
+    box.appendChild(msgEl);
+    box.appendChild(btns);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    _fallbackConfirmEl = overlay;
+    function dismiss(run) {
+        if (_fallbackConfirmEl === overlay) _fallbackConfirmEl = null;
+        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        document.removeEventListener('keydown', onKey, true);
+        if (run) { if (typeof yesFn === 'function') yesFn(); }
+        else if (typeof noFn === 'function') noFn();
+    }
+    function onKey(e) {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); dismiss(false); }
+        else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); dismiss(true); }
+    }
+    document.addEventListener('keydown', onKey, true);
+    okBtn.addEventListener('click', function () { dismiss(true); });
+    cancelBtn.addEventListener('click', function () { dismiss(false); });
+    overlay.addEventListener('mousedown', function (e) {
+        if (e.target === overlay) dismiss(false);
+    });
+    okBtn.focus();
+}
+
+function fallbackAlert(msg) {
+    if (typeof window.showToast === 'function') { window.showToast(msg, 'error'); return; }
+    var el = document.createElement('div');
+    el.className = 'kd-fallback-toast';
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 3000);
 }

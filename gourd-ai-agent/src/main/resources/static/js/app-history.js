@@ -1302,10 +1302,22 @@ function selectSession(idx) {
     var switchProject = (window.appMode === 'code' && entry.projectRoot && entry.projectRoot !== window.currentProjectRoot);
     // 跨项目切换会关闭全部打开文件；有未保存改动时先确认，用户取消则整体中止本次会话切换
     // （保持当前会话/项目/文件不变），避免静默丢弃编辑器里未保存的改动。
-    if (switchProject && typeof window.confirmDiscardUnsavedIfAny === 'function'
-            && !window.confirmDiscardUnsavedIfAny()) {
+    // 确认是异步的（应用内弹窗）→ 续体包进 proceed 回调，取消回调为空。
+    if (switchProject && typeof window.confirmDiscardUnsavedIfAny === 'function') {
+        window.confirmDiscardUnsavedIfAny(function () { doSwitchSession(idx, switchProject); }, function () {});
         return;
     }
+    doSwitchSession(idx, switchProject);
+}
+
+/* WHY switchProject 必须显式传参：doSwitchSession 是顶层函数，其作用域链只有全局，
+   不含 selectSession 的局部变量。上一轮把同步 confirm 包成异步回调时漏传该参 →
+   函数体 if (switchProject) 抛 ReferenceError → 点击侧栏会话静默失败（用户报障根因）。
+   回调里能直接写 switchProject 是因为回调是 selectSession 作用域内的闭包，
+   但被调用的 doSwitchSession 不是——两者作用域链不同，必须传参。 */
+function doSwitchSession(idx, switchProject) {
+    var entry = chatHistory[idx];
+    if (!entry) return;
 
     currentChatIndex = idx;
     SESSION_ID = entry.sessionId;

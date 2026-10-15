@@ -381,9 +381,8 @@
                         + (error && error.message ? '：' + error.message : ''));
                 });
         };
-        /* 与对话删除一致：统一 layConfirm 弹框（自动跟随主题），layer 缺失时兜底原生 confirm */
+        /* 与对话删除一致：统一 layConfirm 弹框（自动跟随主题；内置无 layer 兜底，禁原生 confirm） */
         if (typeof window.layConfirm === 'function') window.layConfirm(t('memory.delete_confirm'), doDelete);
-        else if (window.confirm(t('memory.delete_confirm'))) doDelete();
     });
 
     /* ===================== 当前作用域清空 ===================== */
@@ -423,7 +422,6 @@
         var message = text('memory.clear_confirm', '确定清空“{scope}”中的全部记忆？此操作无法恢复。')
             .replace('{scope}', scopeLabel);
         if (typeof window.layConfirm === 'function') window.layConfirm(message, doClear);
-        else if (window.confirm(message)) doClear();
     });
 
     /* ===================== tab / 项目切换 / 刷新 / 入口绑定 ===================== */

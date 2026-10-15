@@ -1115,6 +1115,7 @@
                    "save":  "儲存",
                    "add":  "新增",
                    "back":  "返回",
+                   "close": "關閉",
                    "refresh":  "重新整理",
                    "loading":  "載入中…",
                    "no_data":  "暫無資料",
@@ -1242,7 +1243,12 @@
                      "restarting":  "正在重新啟動終端機...",
                      "restart_timeout":  "重新啟動逾時，請重試",
                      "restarted":  "終端機已重新啟動",
-                     "restart_failed":  "終端機重新啟動失敗"
+                     "restart_failed":  "終端機重新啟動失敗",
+                     "new_tab":  "新建終端",
+                     "tab_close_confirm":  "該終端仍在運行，關閉將終止其中的進程，確定關閉？",
+                     "tab_limit":  "終端數量已達上限（{0} 個）",
+                     "tab_conn_recycled":  "連線已被回收（終端數超限），切回時將自動重連",
+                     "scope_adopted":  "原遠端連線已中斷，已切換到當前環境"
                  },
     "automation":  {
                        "title":  "自動化",
@@ -1356,5 +1362,30 @@
         "error_partial": "危險：操作僅部分完成，工作區可能處於不一致狀態，請立即人工核對相關檔案",
         "error_compensated": "操作失敗，已自動回復到操作前的狀態",
         "error_generic": "操作未完成，請稍後重試"
+    }
+,
+    "monitor": {
+        "title": "任務監控",
+        "env": "環境資訊",
+        "outputs": "產出",
+        "sources": "來源",
+        "skills": "技能呼叫",
+        "memory_updated": "記憶已更新",
+        "memory_not_updated": "記憶未更新",
+        "open_memory": "開啟記憶檢視",
+        "no_changes": "無變更",
+        "changes_count": "{0} 處變更",
+        "no_git": "非 Git 倉庫",
+        "no_remote": "未設定遠端",
+        "no_upstream": "未關聯上游分支",
+        "synced": "已同步",
+        "ahead_behind": "領先 {0} / 落後 {1}",
+        "env_local": "本地",
+        "env_remote": "遠端",
+        "empty_env": "暫無環境資訊",
+        "empty_outputs": "暫無產出資料 :)",
+        "empty_sources": "暫無來源資料 :)",
+        "no_skills": "本工作階段未呼叫技能",
+        "load_failed": "監控資料載入失敗"
     }
 }

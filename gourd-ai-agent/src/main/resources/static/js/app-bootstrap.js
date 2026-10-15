@@ -154,7 +154,9 @@
         '/js/app-update-badge.js',   // 侧边栏底部「更新」按钮（桌面端专属，订阅 updater-state）
         '/js/app-settings-usage.js',
         '/js/app-code.js',
-        '/js/app-terminal.js'
+        '/js/app-terminal.js',
+        '/js/app-titlebar-actions.js',  // 标题栏动作组（终端/任务监控按钮）：依赖 app-terminal 的 toggleCodeTerminal
+        '/js/app-task-monitor.js'       // 任务监控抽屉：body 级 markup 在 index.html，依赖 app-gitdiff 的 openFileViewer
     ];
 
     // 欢迎语：从 i18n 语言包 app.welcome_greeting.0~19 读取。

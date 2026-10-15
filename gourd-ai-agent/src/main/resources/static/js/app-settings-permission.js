@@ -47,8 +47,8 @@
     function showToast(msg, type) {
         if (typeof layer !== 'undefined' && layer.msg) {
             layer.msg(msg, { icon: type === 'error' ? 2 : 1, time: 2500, offset: '120px' });
-        } else {
-            alert(msg);
+        } else if (typeof window.layAlert === 'function') {
+            window.layAlert(msg);   // 桌面端规约禁原生 alert
         }
     }
 

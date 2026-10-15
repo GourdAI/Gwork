@@ -79,29 +79,8 @@
                 <div class="code-preview-host" id="codePreviewHost" style="display:none"></div>
             </div>
         </div>
-        <!-- Code 模式：底部本地终端（独立于编辑器面板：diff 浮层打开时隐藏的是编辑器面板，终端不受影响）-->
-        <div class="code-terminal-resize-handle" id="codeTerminalResizeHandle"></div>
-        <div class="code-terminal-pane" id="codeTerminalPane">
-            <div class="code-terminal-tabbar">
-                <div class="code-terminal-title">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                    <span data-i18n="code.terminal.title">终端</span>
-                </div>
-                <div class="code-terminal-actions">
-                    <button class="code-terminal-act-btn" id="codeTerminalClearBtn">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                    </button>
-                    <button class="code-terminal-act-btn" id="codeTerminalRestartBtn">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                    </button>
-                    <button class="code-terminal-act-btn" id="codeTerminalCloseBtn">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                    </button>
-                </div>
-            </div>
-            <!-- 内联命令行：输出与输入同处一个可滚动区，输入光标直接贴在 shell 提示符后 -->
-            <div class="code-terminal-body" id="codeTerminalBody"><span class="code-terminal-output" id="codeTerminalOutput"></span><input type="text" class="code-terminal-input" id="codeTerminalInput" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
-        </div>
+        <!-- 底部本地终端已全局化：markup 移至 index.html 的 body 级 fixed 底栏
+             （chat/code 全视图可用），连接与渲染逻辑仍在 app-terminal.js。 -->
     </div>
 </template>
 <template data-mount="body">

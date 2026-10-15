@@ -1115,6 +1115,7 @@
                    "save":  "Guardar",
                    "add":  "Añadir",
                    "back":  "Atrás",
+                   "close": "Cerrar",
                    "refresh":  "Actualizar",
                    "loading":  "Cargando…",
                    "no_data":  "Sin datos",
@@ -1184,7 +1185,12 @@
                      "restarting":  "Reiniciando terminal...",
                      "restart_timeout":  "Tiempo de reinicio agotado",
                      "restarted":  "Terminal reiniciado",
-                     "restart_failed":  "Error al reiniciar terminal"
+                     "restart_failed":  "Error al reiniciar terminal",
+                     "new_tab":  "Nueva terminal",
+                     "tab_close_confirm":  "Esta terminal sigue en ejecución; cerrarla terminará su proceso. ¿Cerrar de todos modos?",
+                     "tab_limit":  "Límite de terminales alcanzado ({0})",
+                     "tab_conn_recycled":  "Conexión reciclada (límite de terminales); se reconectará al volver",
+                     "scope_adopted":  "Conexión remota original perdida; se adoptó el entorno actual"
                  },
     "ui":  {
                "multimodal":  "Multimodal",
@@ -1356,5 +1362,30 @@
         "error_partial": "Advertencia: la operación solo se completó parcialmente y el espacio de trabajo puede quedar inconsistente. Revise ahora los archivos afectados",
         "error_compensated": "La operación falló y se revirtió al estado anterior",
         "error_generic": "La operación no se completó; inténtelo de nuevo"
+    }
+,
+    "monitor": {
+        "title": "Monitor de tareas",
+        "env": "Entorno",
+        "outputs": "Productos",
+        "sources": "Fuentes",
+        "skills": "Llamadas de habilidades",
+        "memory_updated": "Memoria actualizada",
+        "memory_not_updated": "Memoria sin actualizar",
+        "open_memory": "Abrir vista de memoria",
+        "no_changes": "Sin cambios",
+        "changes_count": "{0} cambios",
+        "no_git": "No es un repositorio Git",
+        "no_remote": "Sin remoto configurado",
+        "no_upstream": "Sin rama upstream",
+        "synced": "Sincronizado",
+        "ahead_behind": "{0} por delante / {1} por detrás",
+        "env_local": "Local",
+        "env_remote": "Remoto",
+        "empty_env": "Sin información de entorno aún",
+        "empty_outputs": "Sin productos aún :)",
+        "empty_sources": "Sin fuentes aún :)",
+        "no_skills": "Sin llamadas de habilidades en esta sesión",
+        "load_failed": "Error al cargar datos del monitor"
     }
 }

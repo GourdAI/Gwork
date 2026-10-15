@@ -630,28 +630,71 @@ body.code-mode.viewer-open .code-editor-pane { display: none; }
 
 /* 底部状态栏已移除（视觉从未启用，DOM/JS/CSS 一并清理，保存走 Ctrl+S） */
 
-/* ---- 本地终端面板（编辑器区底部，body.terminal-open 时显示）---- */
+/* ---- 本地终端面板（全局化：body 级 fixed 底栏，chat/code 等全视图可用）----
+   markup 已从 code.html 编辑器列上移到 index.html 的 body 级（标题栏终端按钮的全局入口）。
+   为何 fixed 而非流内：.main-area 底部形态随视图变化（chat 输入框 / code 编辑器列），
+   流内挂载需要每个视图各注入一份容器；fixed 钉在窗口底缘，一份布局覆盖全视图，
+   且不与任何视图的 flex 高度计算耦合（code 模式编辑器列不再被终端挤占）。 */
 :root { --code-terminal-height: 240px; }
-.code-terminal-pane { display: none; }
-.code-terminal-resize-handle { display: none; }
-body.code-mode.terminal-open .code-terminal-pane {
-    display: flex; flex-direction: column; flex-shrink: 0;
+.code-terminal-pane {
+    display: none;
+    /* 左缘让开主侧栏（参照稿：终端在主区底部，不盖侧栏）。
+       --terminal-left 由 app-terminal.js 实测 .sidebar 宽度写入（侧栏可拖拽改宽，
+       CSS 变量算不出 offsetWidth）；无 JS 时回退 --sidebar-width；
+       窄屏侧栏退为浮层不占位，媒体块内归零。 */
+    position: fixed; left: var(--terminal-left, var(--sidebar-width)); right: 0; bottom: 0; z-index: 1200;
+    flex-direction: column;
     height: var(--code-terminal-height); min-height: 120px;
     border-top: 1px solid var(--border-color); background: var(--bg-main);
+    box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.18);
 }
-body.code-mode.terminal-open .code-terminal-resize-handle {
-    display: block; height: 5px; flex-shrink: 0; cursor: row-resize;
-    background: transparent; margin-top: -3px; position: relative; z-index: 5;
+body.terminal-open .code-terminal-pane { display: flex; }
+/* 【P1 遮挡修复】终端是 fixed 覆盖层，主区不会自动让位：.main-area 定高 100vh
+   （app.css:243），终端打开后 chat 输入区/发送按钮（视口底部）会被整块盖住——
+   实测 chatInput bottom=832 vs pane top=660，elementFromPoint 返回终端体。
+   监控右栏用 margin-right 让宽有效，是因为 body 是横向 flex（主轴=水平）；
+   高度在交叉轴上，margin 不参与分配，必须直接压 height。
+   为何不用 margin-bottom：.main-area 的 height:100vh 是显式定高，盒高不变，
+   margin 只会把盒子推出视口（底部内容更不可见），不产生让位效果。
+   calc 减法对任何定高都成立（viewer-open 的 grid 行 minmax(0,1fr) 同样随容器收缩）。 */
+body.terminal-open .main-area { height: calc(100vh - var(--code-terminal-height, 240px)); }
+/* 调高手柄贴在面板顶缘外侧（bottom 跟随 --code-terminal-height，JS setHeight 改变量即联动）；
+   左缘与面板同口径让开侧栏 */
+.code-terminal-resize-handle {
+    display: none;
+    position: fixed; left: var(--terminal-left, var(--sidebar-width)); right: 0; bottom: calc(var(--code-terminal-height) - 3px); z-index: 1200;
+    height: 6px; cursor: row-resize; background: transparent;
 }
-body.code-mode.terminal-open .code-terminal-resize-handle:hover { background: var(--accent); opacity: 0.5; }
+body.terminal-open .code-terminal-resize-handle { display: block; }
+.code-terminal-resize-handle:hover { background: var(--accent); opacity: 0.5; }
 
 .code-terminal-tabbar {
-    display: flex; align-items: center; justify-content: space-between; height: 32px;
-    padding: 0 10px; flex-shrink: 0; border-bottom: 1px solid var(--border-color); background: var(--bg-sidebar);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 34px;
+    padding: 0 10px 0 6px; flex-shrink: 0; border-bottom: 1px solid var(--border-color); background: var(--bg-sidebar);
 }
-.code-terminal-title { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
-.code-terminal-title svg { color: var(--text-secondary); }
-.code-terminal-actions { display: flex; align-items: center; gap: 2px; }
+/* 多实例标签栏：chip 横排可横滚（tab 多了不挤压）；actions 不收缩 */
+.code-terminal-tabs {
+    display: flex; align-items: center; gap: 4px; flex: 1 1 auto; min-width: 0;
+    overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+.code-terminal-tabs::-webkit-scrollbar { display: none; }
+.code-terminal-tab {
+    display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+    height: 24px; padding: 0 6px 0 8px; max-width: 180px;
+    border: none; border-radius: 6px; background: transparent; cursor: pointer;
+    color: var(--text-secondary); font-size: 12px; font-family: inherit;
+}
+.code-terminal-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
+.code-terminal-tab.active { background: var(--bg-hover); color: var(--text-primary); }
+.code-terminal-tab svg { flex-shrink: 0; }
+.code-terminal-tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-terminal-tab-close {
+    display: flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; border-radius: 4px; flex-shrink: 0;
+    color: var(--text-secondary); opacity: 0.7;
+}
+.code-terminal-tab-close:hover { background: var(--border-color); color: var(--text-primary); opacity: 1; }
+.code-terminal-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 .code-terminal-act-btn {
     display: flex; align-items: center; justify-content: center; width: 26px; height: 24px;
     border: none; background: none; border-radius: 5px; cursor: pointer; color: var(--text-secondary);
@@ -659,14 +702,22 @@ body.code-mode.terminal-open .code-terminal-resize-handle:hover { background: va
 }
 .code-terminal-act-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 
-/* 内联命令行：整个 body 为一块可滚动区，输出与输入行内相接 */
+/* 内联命令行：整个 body 为一块可滚动区，输出与输入行内相接。
+   多实例：每个 tab 的输出缓冲是 .code-terminal-tabbuf 块级子树（切走时 detach
+   保留），激活 tab 的 buf + input 挂载进 body；旧单实例的内联输出 span 样式
+   已随 markup 一并移除（输出节点改由 JS 按 tab 动态创建）。 */
 .code-terminal-body {
     flex: 1; min-height: 0; overflow-y: auto; cursor: text;
     background: var(--bg-main); padding: 6px 12px 8px;
     font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55;
     color: var(--text-primary);
 }
-.code-terminal-output {
+/* 【必须 inline】输出缓冲与输入框同在 #codeTerminalBody 里行内相接（提示符后紧跟光标）。
+   多实例重构时曾把缓冲从 <span> 改成块级 <div>：输入框被挤到下一行，
+   视觉上「命令行换行」——用户实测报障。块级语义（每 tab 一棵子树、detach 保留）
+   与行内排布不冲突：inline 元素同样可以是容器节点。 */
+.code-terminal-tabbuf {
+    display: inline;
     white-space: pre-wrap; word-break: break-word;
 }
 .code-terminal-sys { color: var(--text-secondary); }
@@ -682,10 +733,9 @@ body.code-mode.terminal-open .code-terminal-resize-handle:hover { background: va
 /* 移动端：code 模式退化，隐藏编辑器，仅保留树+对话 */
 @media (max-width: 900px) {
     body.code-mode .code-editor-pane { display: none; }
-    /* 编辑器列退化为透明容器（diff 浮层仍可全宽显示）；窄屏不提供底部终端 */
+    /* 编辑器列退化为透明容器（diff 浮层仍可全宽显示）；窄屏不提供底部终端
+       （终端已全局化为 fixed 底栏，窄屏隐藏规则见下方独立媒体块） */
     body.code-mode .code-editor-col { display: contents; }
-    body.code-mode .code-terminal-pane,
-    body.code-mode .code-terminal-resize-handle { display: none !important; }
     body.code-mode .chat-view { flex: 1; }
     body.code-mode .filer-panel { position: fixed; left: 0; top: 0; z-index: 300; box-shadow: 2px 0 12px rgba(0,0,0,0.2); }
     /* 窄屏对话栏占满，拖拽/收起无意义 */
@@ -694,6 +744,16 @@ body.code-mode.terminal-open .code-terminal-resize-handle:hover { background: va
     body.code-mode .code-chat-collapse-btn,
     body.code-mode.chat-collapsed .code-chat-expand-btn { display: none !important; }
     body.code-mode.chat-collapsed .chat-view { display: flex !important; }
+}
+
+/* 窄屏（<=900px）隐藏全局终端：底部空间不足以容纳终端 + 输入框，与改造前 code 模式窄屏行为一致 */
+@media (max-width: 900px) {
+    /* 窄屏侧栏退为浮层不占位：左缘归零与隐藏同条规则，避免两条同选择器规则歧义 */
+    .code-terminal-pane,
+    .code-terminal-resize-handle { display: none !important; left: 0; }
+    /* 窄屏终端隐藏：让高规则必须同步归位，否则主区白白矮 240px（底部留空白带）。
+       与上方隐藏同媒体块同列，保证「隐藏」与「不让高」永远同生同死。 */
+    body.terminal-open .main-area { height: 100vh; }
 }
 
 /* ========== 服务端目录选择器（添加项目弹窗）========== */

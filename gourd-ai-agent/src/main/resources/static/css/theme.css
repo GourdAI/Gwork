@@ -175,6 +175,9 @@
     /* Effects */
     --shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
     --shadow-lg: 0 4px 24px rgba(0, 0, 0, 0.08);
+    /* 模态弹窗专用：比 --shadow-lg 更深更散，让卡片从遮罩里「浮」出来。
+       不能用 --shadow-lg：弹窗背景遮罩本身就压暗了一层，同量级阴影会糊成一块。 */
+    --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.14), 0 2px 8px rgba(0, 0, 0, 0.06);
     --thinking-dot: var(--accent);
     --tag-bg: #f4f4f5;
     --tag-border: #e4e4e7;
@@ -290,6 +293,8 @@
     /* Effects */
     --shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
     --shadow-lg: 0 4px 24px rgba(0, 0, 0, 0.4);
+    /* 暗色必须比明色重得多：底色近黑时弱阴影完全不可见，卡片与遮罩会糊成一块。 */
+    --shadow-modal: 0 20px 56px rgba(0, 0, 0, 0.64), 0 2px 8px rgba(0, 0, 0, 0.44);
     --thinking-dot: var(--accent);
     --tag-bg: #232327;
     --tag-border: #2e2e33;
@@ -416,22 +421,98 @@
     outline-offset: 2px;
 }
 
-/* ===== Custom layer dialogs ===== */
-.kd-layer.layui-layer { border-radius: 12px !important; border: 1px solid var(--border-color) !important; box-shadow: 0 8px 32px rgba(0,0,0,.14) !important; background: var(--bg-primary) !important; padding: 0 !important; }
+/* ===== Custom layer dialogs =====
+   桌面端应用内弹窗（规约禁原生 confirm/alert）。两条渲染路径必须【观感完全一致】：
+   A. layui layer 存在 → .kd-layer.layui-layer 外壳 + .kd-confirm 内容；
+   B. layer 缺失 → app-base.js fallbackConfirm 自建 .kd-fallback-overlay + .kd-confirm。
+   色彩治理：本块不得出现颜色/阴影字面量（一律走 theme.css 令牌）——
+   旧实现把阴影写死 rgba(0,0,0,.14)、遮罩写死 rgba(0,0,0,.3)，两主题同值，
+   暗色下阴影几乎不可见（底色近黑）、卡片与遮罩糊成一块。 */
+.kd-layer.layui-layer {
+    border-radius: 14px !important;
+    border: 1px solid var(--border-color) !important;
+    box-shadow: var(--shadow-modal) !important;
+    background: var(--bg-primary) !important;
+    padding: 0 !important;
+    /* 入场动效：用微幅上浮+缩放取代 layui 默认的弹跳（bounceIn）。
+       弹跳在桌面端确认框上显得轻浮，且与全站其它面板的冷静节奏不一致。 */
+    animation: kd-dialog-in .18s cubic-bezier(.2, .8, .24, 1) both !important;
+}
 .kd-layer .layui-layer-content { background: transparent !important; padding: 0 !important; }
 .kd-layer .layui-layer-setwin { display: none !important; }
+/* layui 遮罩：inline 写了 opacity（来自 shade: 0.3），必须两属性一起覆盖，
+   只改 background 会被 inline opacity 再乘一道 → 暗色仍偏浅。 */
+.layui-layer-shade { background: var(--overlay) !important; opacity: 1 !important; }
 
-.kd-confirm { padding: 24px 24px 20px; min-width: 260px; max-width: 340px; }
-.kd-confirm-msg { font-size: 14px; color: var(--text-primary); line-height: 1.6; margin-bottom: 20px; }
+@keyframes kd-dialog-in {
+    from { opacity: 0; transform: translateY(6px) scale(.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes kd-overlay-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* 卡片：定宽使两条路径宽度一致（旧实现内容撑宽，短句 302px / 长句 340px，
+   不同弹窗宽窄不一看上去很随意）；窄屏不溢出视口。 */
+.kd-confirm { padding: 22px 22px 18px; width: 340px; max-width: calc(100vw - 32px); box-sizing: border-box; }
+.kd-confirm-msg {
+    font-size: 14px; color: var(--text-primary); line-height: 1.65;
+    margin-bottom: 22px; word-break: break-word;
+}
 .kd-confirm-btns { display: flex; gap: 8px; justify-content: flex-end; }
-.kd-btn { height: 32px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 13px; cursor: pointer; transition: all .15s; background: var(--bg-hover); color: var(--text-primary); }
-.kd-btn:hover { filter: brightness(0.95); }
-.kd-btn-ok { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
-.kd-btn-ok:hover { opacity: .88; filter: none; }
 
-/* layer.msg */
-.kd-layer-msg.layui-layer { border-radius: 8px !important; background: var(--bg-primary) !important; border: 1px solid var(--border-color) !important; box-shadow: 0 4px 16px rgba(0,0,0,.12) !important; color: var(--text-primary) !important; }
+/* 按钮基类 = 次操作（取消）：【透明底 + 描边】的 ghost 样式，不与主操作抢视觉权重。
+   旧实现给取消钮也铺了 --bg-hover 实底，两个按钮一样重 → 主次不分。
+   hover 不得用 filter: brightness(0.95)：它在暗色下等于【变暗】
+   （底色 #232327 本来就接近页面底），hover 反而更难辨认 → 改走令牌切背景。 */
+.kd-btn {
+    height: 34px; min-width: 72px; padding: 0 16px;
+    border-radius: 9px; border: 1px solid var(--border-color);
+    font-size: 13px; font-weight: 500; font-family: inherit;
+    cursor: pointer; background: transparent; color: var(--text-primary);
+    transition: background-color .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease;
+}
+.kd-btn:hover { background: var(--bg-hover); border-color: var(--border-input); }
+.kd-btn:active { background: var(--bg-secondary); }
+/* 焦点环：双层 box-shadow（内层用卡片底色隔出一圈间隙）——
+   单靠 outline 在主按钮（accent 实底）上几乎看不出边界。
+   必须显式给：旧实现依赖全局 *:focus-visible，键盘用户开弹窗时看不清焦点在哪。 */
+.kd-btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--accent);
+}
+/* 主操作：background/color 不得改——hitl-btn-accent.test.js 拿它当
+   HITL approve 按钮的【参照基准】（断言两者同 token），改了会连带打破那份契约。 */
+.kd-btn-ok { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
+.kd-btn-ok:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-contrast); }
+.kd-btn-ok:active { background: var(--accent-hover); }
+
+/* 无 layer 兜底确认框（app-base.js fallbackConfirm）：layer 缺失时的应用内弹窗，
+   桌面端规约禁止回落原生 confirm。内容复用 .kd-confirm 卡片规格，遮罩/阴影/入场
+   必须与 layui 路径逐项对齐，否则同一产品内两种弹窗观感不一致。 */
+.kd-fallback-overlay {
+    position: fixed; inset: 0; z-index: 10001;
+    background: var(--overlay);
+    display: flex; align-items: center; justify-content: center;
+    animation: kd-overlay-in .18s ease both;
+}
+.kd-fallback-overlay .kd-confirm {
+    background: var(--bg-primary); border: 1px solid var(--border-color);
+    border-radius: 14px; box-shadow: var(--shadow-modal);
+    animation: kd-dialog-in .18s cubic-bezier(.2, .8, .24, 1) both;
+}
+.kd-fallback-toast {
+    position: fixed; top: 120px; left: 50%; transform: translateX(-50%); z-index: 10001;
+    background: var(--bg-primary); color: var(--text-primary);
+    border: 1px solid var(--border-color); border-radius: 10px;
+    box-shadow: var(--shadow-lg); padding: 10px 16px; font-size: 13px; max-width: 420px;
+}
+
+/* layer.msg（轻提示） */
+.kd-layer-msg.layui-layer { border-radius: 10px !important; background: var(--bg-primary) !important; border: 1px solid var(--border-color) !important; box-shadow: var(--shadow-lg) !important; color: var(--text-primary) !important; }
 .kd-layer-msg .layui-layer-content { color: var(--text-primary) !important; background: transparent !important; }
 
-/* old dark override kept for any stray usage */
-[data-theme="dark"] .layui-layer-msg { background: #2a2d33; border-color: #444; color: var(--text-primary); }
+/* 旧遗留覆盖：原写死 #2a2d33 / #444（非全站 zinc 色阶）→ 改走令牌，
+   否则暗色下这一类 msg 与其余弹窗不同色系。 */
+[data-theme="dark"] .layui-layer-msg { background: var(--bg-card); border-color: var(--border-color); color: var(--text-primary); }

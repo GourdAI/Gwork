@@ -1302,6 +1302,104 @@ public class WebController {
         }
     }
 
+    /**
+     * 会话附件清单（只读）：列出 uploads 目录下的全部附件及其大小/时间，供任务监控面板展示。
+     *
+     * <p><b>WHY 不复用 {@code /web/chat/attachment/meta}</b>：meta 是「按已知路径回显内容」，
+     * 会对图片做 base64 内联（单张最大 8MB、整批预算 24MB），且必须由调用方先提供 paths。
+     * 面板需要的是「这个会话到底传过哪些附件」的目录级清单：若沿用 meta 会把整个 uploads
+     * 目录编码成数十 MB 响应体。故本端点只回元信息（name/size/image/updatedAt），
+     * <b>绝不内联 base64/dataUrl</b>；前端要缩略图时再拿 name 去调 meta。</p>
+     *
+     * <p>目录解析与 meta 完全同口径（含 L1285-1293 的历史落点回探）：数据落在 legacy
+     * workspace 目录的分叉会话同样能列出来。</p>
+     *
+     * @param sessionId 会话 ID
+     * @param root      可选项目根提示（code 模式）
+     * @return {@code {items:[{name,size,image,updatedAt}], total}}；目录不存在时回 {@code {items:[],total:0}}
+     */
+    @Get
+    @Mapping("/web/chat/attachment/list")
+    public Result<Map<String, Object>> attachmentList(Context ctx,
+                                                      @Param(value = "sessionId", required = false) String sessionId,
+                                                      @Param(value = "root", required = false) String root) {
+        try {
+            sessionId = getSessionId(ctx, sessionId);
+            Assert.notNull(sessionId, "sessionId is required");
+            validateSessionId(sessionId);
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("sessionId", sessionId);
+            resp.put("items", Collections.emptyList());
+            resp.put("total", 0);
+
+            // 与 attachmentMeta 同口径的根校验：不一致（返回 null 且确实传了 root）必须明确拒绝，
+            // 否则会退化成「拿别人工作空间下的会话目录」去枚举附件名。
+            String sessionRoot = resolveSessionRoot(sessionId, root);
+            if (sessionRoot == null && Assert.isNotEmpty(root)) {
+                return Result.failure(400, "Workspace root does not match the session binding");
+            }
+            File sessionDir = resolveAttachmentSessionDir(sessionId, sessionRoot);
+            File uploadsDir = new File(sessionDir, WebGate.UPLOADS_DIR);
+            if (!uploadsDir.isDirectory()) {
+                // 空态而非 404：新会话尚未上传过附件是常态，面板据此显示「暂无附件」
+                return Result.succeed(resp);
+            }
+
+            List<Map<String, Object>> items = new ArrayList<>();
+            try (java.util.stream.Stream<Path> stream = Files.list(uploadsDir.toPath())) {
+                stream.filter(Files::isRegularFile).forEach(file -> {
+                    try {
+                        String name = file.getFileName().toString();
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        item.put("name", name);
+                        // 与 meta 同口径的相对路径：前端可直接把它喂回 /attachment/meta 取缩略图
+                        item.put("path", WebGate.UPLOADS_DIR + "/" + name);
+                        item.put("size", Files.size(file));
+                        // isImageAttachment 的语义是「声明为 image 且扩展名在图片白名单内」；
+                        // 清单场景没有浏览器声明的类型，传 "image" 使其退化为纯扩展名判定，
+                        // 保证与 meta/发送链路的图片口径一致（传 null 会恒判 false）。
+                        item.put("image", WebGate.isImageAttachment(WebGate.extOfName(name), "image"));
+                        item.put("updatedAt", Files.getLastModifiedTime(file).toMillis());
+                        items.add(item);
+                    } catch (Exception e) {
+                        // 单条读取失败（文件正被写入/权限）不得波及整批：跳过即可，目录枚举仍返回其余项
+                        LOG.warn("[Web] attachment list skipped {}: {}", file, e.getMessage());
+                    }
+                });
+            }
+            // 按修改时间倒序：面板关心「最近传的」，倒序让最新附件直接落在首屏
+            items.sort(java.util.Comparator.comparingLong(
+                    (Map<String, Object> m) -> ((Number) m.getOrDefault("updatedAt", 0L)).longValue()).reversed());
+
+            resp.put("items", items);
+            resp.put("total", items.size());
+            return Result.succeed(resp);
+        } catch (Throwable e) {
+            LOG.error("[Web] attachment list error: {}", e.getMessage(), e);
+            return Result.failure(500, e.getMessage());
+        }
+    }
+
+    /**
+     * 解析「附件所在」的会话目录：primary 无 uploads 目录时，在全部已知落点里回探第一个有的。
+     *
+     * <p>与 {@link #attachmentMeta} 内联的回探逻辑同口径，抽成方法供两个端点复用：
+     * {@code resolveDirForRead} 的 probe 走 {@code isFile()} 判定，而 uploads 是目录、probe 恒不命中，
+     * 因此必须按目录级自行回探；都无则回 primary（保持与写入侧同目录，missing 语义不变）。</p>
+     */
+    private File resolveAttachmentSessionDir(String sessionId, String sessionRoot) {
+        File sessionDir = sessionLocator.resolveDir(sessionId, sessionRoot);
+        if (!new File(sessionDir, WebGate.UPLOADS_DIR).isDirectory()) {
+            for (File candidate : sessionLocator.allKnownSessionDirs(sessionId, sessionRoot)) {
+                if (new File(candidate, WebGate.UPLOADS_DIR).isDirectory()) {
+                    return candidate;
+                }
+            }
+        }
+        return sessionDir;
+    }
+
 
     // ==================== Agent 文件变更（非 Git） ====================
 
@@ -1324,6 +1422,30 @@ public class WebController {
                                                     @Param("path") String path) {
         return changeQueryResult(FileChangeService.getInstance()
                 .diff(sessionId, runId, resolveChangeRoot(ctx, sessionId, root), path));
+    }
+
+    /**
+     * 会话级文件变更清单（只读）：跨该会话全部 run 合并出「至今改过哪些文件」，供任务监控面板展示。
+     *
+     * <p><b>WHY</b>：{@code /changes/run} 只能按 runId 查单轮，而面板的入口是会话——
+     * 用户想知道「这次任务一共动了哪些文件」，不该被迫先枚举 runId 再逐轮请求。
+     * 合并口径与降级语义都在 {@link FileChangeService#listSession} 里，控制器只做根解析。</p>
+     *
+     * <p>root 走 {@link #resolveChangeRoot(Context, String, String)}：与 changesRun/changesDiff
+     * 完全同源，客户端参数只作一致性断言，不能选择任意目录。</p>
+     *
+     * @param sessionId 会话 ID
+     * @param root      可选项目根提示（code 模式）
+     * @return {@code {sessionId,files[],fileCount,additions,deletions,runs[],updatedAt,...}}；
+     *         账本目录不存在时回结构化空态而非 404
+     */
+    @Get
+    @Mapping("/web/chat/changes/session")
+    public Result<Map<String, Object>> changesSession(Context ctx,
+                                                      @Param("sessionId") String sessionId,
+                                                      @Param(value = "root", required = false) String root) {
+        return changeQueryResult(FileChangeService.getInstance()
+                .listSession(sessionId, resolveChangeRoot(ctx, sessionId, root)));
     }
 
     @Post
@@ -1470,6 +1592,27 @@ public class WebController {
     @Mapping("/web/chat/git/status")
     public Result<Map> gitStatus(@Param(value = "root", required = false) String root) throws Exception {
         return gitService.inRoot(root, gitService::status);
+    }
+
+    /**
+     * Git 远端与上游同步状态（只读，供任务监控面板展示）。
+     *
+     * <p><b>WHY</b>：{@code /git/status} 只覆盖本地工作区变更，面板还需要知道「有没有远端、
+     * 落后/领先多少提交」。本端点只读本地已有的远端配置与 ref 计数，不发起 fetch/pull，
+     * 因此离线环境同样安全；拿不到信息时回结构化降级字段而不是 500（见
+     * {@link GitService#remoteInfo()}）。</p>
+     *
+     * <p>root 解析与 {@link #gitStatus} 完全同构：同一个 {@code inRoot} ThreadLocal 覆盖机制，
+     * 支持 Code 模式按所选项目重定向。</p>
+     *
+     * @param root 可选项目根
+     * @return {@code {gitAvailable, hasRemote, remoteUrl, upstream, ahead, behind, degraded}}
+     * @throws Exception Git 命令执行异常
+     */
+    @Get
+    @Mapping("/web/chat/git/remote")
+    public Result<Map> gitRemote(@Param(value = "root", required = false) String root) throws Exception {
+        return Result.succeed(gitService.inRoot(root, gitService::remoteInfo));
     }
 
     /**
@@ -2120,6 +2263,62 @@ public class WebController {
         } catch (Exception e) {
             LOG.error("Failed to read TODO for session {}: {}", sessionId, e.getMessage());
             return Result.failure(500, e.getMessage());
+        }
+    }
+
+    // ==================== 会话工具用量（任务监控面板） ====================
+
+    /**
+     * 会话工具用量统计（只读）：从会话消息文件里统计记忆与技能的调用情况。
+     *
+     * <p><b>WHY</b>：任务监控面板需要回答「这一轮 AI 有没有真的用上记忆/技能」。
+     * 这份事实只存在于 {@code <sessionDir>/<sid>.messages.ndjson} 的 assistant 消息
+     * {@code toolCalls} 里，而 {@link #messages} 只取 role/content/createdAt。
+     * 统计逻辑全部在 {@link SessionToolUsageService}（无状态纯函数，可独立单测），
+     * 本端点只负责会话目录解析与安全校验。</p>
+     *
+     * <p>目录解析用 {@code resolveDirForRead} + 以消息文件名为 probe：与 {@link #todos}
+     * 同一套历史落点回探口径。旧版本在无所属根会话上把消息写进了 workspace（user.dir），
+     * 而标准读取位置是 globalBase（user.home）；不回探的话这批存量会话的统计会直接「消失」。</p>
+     *
+     * @param sessionId 会话 ID（参数缺失时回退 X-Session-Id 头）
+     * @param root      可选项目根提示（code 模式）
+     * @return {@code {sessionId, exists, memory{updated,extractCount,totalCount,names},
+     *         skills[{name,toolName,count}], skillCount, toolCallCount, degradedLines}}；
+     *         消息文件不存在时回结构化空态（exists=false）而非 404
+     */
+    @Get
+    @Mapping("/web/chat/session/tool-usage")
+    public Result<Map<String, Object>> sessionToolUsage(Context ctx,
+                                                        @Param(value = "sessionId", required = false) String sessionId,
+                                                        @Param(value = "root", required = false) String root) {
+        try {
+            sessionId = getSessionId(ctx, sessionId);
+            Assert.notNull(sessionId, "sessionId is required");
+            validateSessionId(sessionId);
+
+            // 与 attachmentMeta/replay 同口径的根校验：不一致（返回 null 且确实传了 root）
+            // 必须明确拒绝，否则会退化成「拿别人工作空间下的会话目录」去读消息文件。
+            String sessionRoot = resolveSessionRoot(sessionId, root);
+            if (sessionRoot == null && Assert.isNotEmpty(root)) {
+                return Result.failure(400, "Workspace root does not match the session binding");
+            }
+
+            final String messageFileName = sessionId + ".messages.ndjson";
+            File sessionDir = sessionLocator.resolveDirForRead(sessionId, sessionRoot, messageFileName);
+            return Result.succeed(SessionToolUsageService.usage(sessionDir, sessionId));
+        } catch (Throwable e) {
+            // 只读统计端点不得抛 500：解析失败一律回空态，面板降级为「暂无统计」
+            LOG.warn("[Web] session tool usage failed: {}", e.getMessage());
+            Map<String, Object> empty = new LinkedHashMap<>();
+            empty.put("sessionId", sessionId);
+            empty.put("exists", false);
+            empty.put("memory", Collections.emptyMap());
+            empty.put("skills", Collections.emptyList());
+            empty.put("skillCount", 0);
+            empty.put("toolCallCount", 0);
+            empty.put("degradedLines", 0);
+            return Result.succeed(empty);
         }
     }
 

@@ -893,8 +893,8 @@
                         }
                     });
                 };
+                // layConfirm 内置无 layer 兜底（app-base.js），不再回落原生 confirm
                 if (typeof window.layConfirm === 'function') window.layConfirm(t('settings.loop.confirm_delete'), run);
-                else if (window.confirm(t('settings.loop.confirm_delete'))) run();
             } else if (action === 'edit') {
                 editId = id;
                 showForm();

@@ -173,8 +173,10 @@
 
         var layer = getLayer();
         if (!layer) {
-            // 极端兜底（layer 未就绪）：用原生 confirm 保证功能不丢
-            if (window.confirm(t('app.access_confirm_title') + '\n' + t('app.access_ack'))) applyMode(MODE_FULL);
+            // 极端兜底（layer 未就绪）：降级为应用内通用确认框（桌面端规约禁原生 confirm）
+            if (typeof window.layConfirm === 'function') {
+                window.layConfirm(t('app.access_confirm_title') + '\n' + t('app.access_ack'), function () { applyMode(MODE_FULL); });
+            }
             return;
         }
 

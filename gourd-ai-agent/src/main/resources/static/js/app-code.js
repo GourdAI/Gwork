@@ -542,7 +542,15 @@
     function selectProject(path, silent) {
         // 切项目会关闭全部打开文件；有未保存改动时先确认，取消则中止切换、保留文件与当前项目。
         // 启动期无打开文件，hasUnsavedFiles() 为假，不会打断自动恢复流程。
-        if (path !== window.currentProjectRoot && !confirmDiscardUnsavedIfAny()) return;
+        // 确认异步 → 续体整体包进 proceed 回调。
+        if (path !== window.currentProjectRoot) {
+            confirmDiscardUnsavedIfAny(function () { doSelectProject(path, silent); }, function () {});
+            return;
+        }
+        doSelectProject(path, silent);
+    }
+
+    function doSelectProject(path, silent) {
         var previous = window.currentProjectRoot;
         window.currentProjectRoot = path;
         /* 并存语义：项目选择即环境声明——远端项目绑到对应连接（代理 by_cwd + 激活
@@ -1191,11 +1199,23 @@
         if (tab) tab.classList.toggle('dirty', dirty);
     }
 
+    /* 关标签：有未保存改动时先应用内确认（桌面端规约禁原生 confirm）。
+       确认异步 → 释放/移除逻辑拆到 doCloseFile，取消则什么都不做。 */
     function closeFile(path) {
         var st = docs[path];
         if (st && st.dirty) {
-            if (!window.confirm(GourdI18n.t('code.unsaved_confirm', baseName(path)))) return;
+            if (typeof window.layConfirm === 'function') {
+                window.layConfirm(GourdI18n.t('code.unsaved_confirm', baseName(path)), function () { doCloseFile(path); });
+            } else {
+                doCloseFile(path);
+            }
+            return;
         }
+        doCloseFile(path);
+    }
+
+    function doCloseFile(path) {
+        var st = docs[path];
         // 释放内容监听与 model（大文件标签必须释放，避免内存泄漏）
         if (st && st.contentSub) { try { st.contentSub.dispose(); } catch (e) {} st.contentSub = null; }
         if (st && st.model) st.model.dispose();
@@ -1236,10 +1256,14 @@
     }
 
     // 切换项目（含跨项目切历史会话）会关闭全部打开文件。若有未保存改动，先聚合确认一次；
-    // 用户取消则返回 false，调用方据此中止切换、保留文件。无未保存改动时直接放行。
-    function confirmDiscardUnsavedIfAny() {
-        if (!hasUnsavedFiles()) return true;
-        return window.confirm(GourdI18n.t('code.unsaved_switch_confirm'));
+    // 应用内确认是异步的 → 回调式：proceed=放行（含无未保存改动的直接放行），cancel=用户取消。
+    function confirmDiscardUnsavedIfAny(proceed, cancel) {
+        if (!hasUnsavedFiles()) { proceed(); return; }
+        if (typeof window.layConfirm === 'function') {
+            window.layConfirm(GourdI18n.t('code.unsaved_switch_confirm'), proceed, cancel);
+        } else {
+            proceed();
+        }
     }
     window.confirmDiscardUnsavedIfAny = confirmDiscardUnsavedIfAny;
 
@@ -1375,8 +1399,9 @@
             var p = tab.getAttribute('data-path');
             var st = docs[p];
             if (st && st.diskChanged && st.dirty) {
-                if (window.confirm(GourdI18n.t('code.disk_changed_confirm', baseName(p)))) {
-                    reloadFileFromDisk(p);
+                // 应用内确认（异步）：确认才放弃本地未保存改动、重载磁盘内容
+                if (typeof window.layConfirm === 'function') {
+                    window.layConfirm(GourdI18n.t('code.disk_changed_confirm', baseName(p)), function () { reloadFileFromDisk(p); });
                 }
             }
         }, true);

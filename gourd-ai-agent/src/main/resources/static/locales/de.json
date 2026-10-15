@@ -1113,6 +1113,7 @@
                    "save":  "Speichern",
                    "add":  "Hinzufügen",
                    "back":  "Zurück",
+                   "close": "Schließen",
                    "refresh":  "Aktualisieren",
                    "loading":  "Laden…",
                    "no_data":  "Keine Daten",
@@ -1182,7 +1183,12 @@
                      "restarting":  "Terminal wird neu gestartet...",
                      "restart_timeout":  "Neustart-Timeout, bitte erneut versuchen",
                      "restarted":  "Terminal neu gestartet",
-                     "restart_failed":  "Terminal-Neustart fehlgeschlagen"
+                     "restart_failed":  "Terminal-Neustart fehlgeschlagen",
+                     "new_tab":  "Neues Terminal",
+                     "tab_close_confirm":  "Dieses Terminal läuft noch. Beim Schließen wird dessen Prozess beendet. Trotzdem schließen?",
+                     "tab_limit":  "Terminal-Limit erreicht ({0})",
+                     "tab_conn_recycled":  "Verbindung wurde recycelt (Terminal-Limit); wird beim Zurückwechseln neu verbunden",
+                     "scope_adopted":  "Ursprüngliche Remote-Verbindung getrennt; aktuelle Umgebung übernommen"
                  },
     "ui":  {
                "multimodal":  "Multimodal",
@@ -1354,5 +1360,30 @@
         "error_partial": "Warnung: Der Vorgang wurde nur teilweise abgeschlossen und der Arbeitsbereich ist möglicherweise inkonsistent. Prüfen Sie die betroffenen Dateien sofort",
         "error_compensated": "Der Vorgang ist fehlgeschlagen und wurde auf den vorherigen Stand zurückgesetzt",
         "error_generic": "Der Vorgang wurde nicht abgeschlossen, bitte erneut versuchen"
+    }
+,
+    "monitor": {
+        "title": "Aufgabenmonitor",
+        "env": "Umgebung",
+        "outputs": "Ausgaben",
+        "sources": "Quellen",
+        "skills": "Skill-Aufrufe",
+        "memory_updated": "Speicher aktualisiert",
+        "memory_not_updated": "Speicher nicht aktualisiert",
+        "open_memory": "Speicheransicht öffnen",
+        "no_changes": "Keine Änderungen",
+        "changes_count": "{0} Änderungen",
+        "no_git": "Kein Git-Repository",
+        "no_remote": "Kein Remote konfiguriert",
+        "no_upstream": "Kein Upstream-Branch",
+        "synced": "Synchronisiert",
+        "ahead_behind": "{0} voraus / {1} zurück",
+        "env_local": "Lokal",
+        "env_remote": "Remote",
+        "empty_env": "Noch keine Umgebungsinformationen",
+        "empty_outputs": "Noch keine Ausgaben :)",
+        "empty_sources": "Noch keine Quellen :)",
+        "no_skills": "Keine Skill-Aufrufe in dieser Sitzung",
+        "load_failed": "Monitor-Daten konnten nicht geladen werden"
     }
 }

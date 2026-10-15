@@ -1115,6 +1115,7 @@
                    "save":  "Enregistrer",
                    "add":  "Ajouter",
                    "back":  "Retour",
+                   "close": "Fermer",
                    "refresh":  "Rafraîchir",
                    "loading":  "Chargement…",
                    "no_data":  "Aucune donnée",
@@ -1184,7 +1185,12 @@
                      "restarting":  "Redémarrage du terminal...",
                      "restart_timeout":  "Délai de redémarrage dépassé",
                      "restarted":  "Terminal redémarré",
-                     "restart_failed":  "Échec du redémarrage du terminal"
+                     "restart_failed":  "Échec du redémarrage du terminal",
+                     "new_tab":  "Nouveau terminal",
+                     "tab_close_confirm":  "Ce terminal est encore en cours d’exécution ; le fermer terminera son processus. Fermer quand même ?",
+                     "tab_limit":  "Limite de terminaux atteinte ({0})",
+                     "tab_conn_recycled":  "Connexion recyclée (limite de terminaux) ; reconnexion au retour",
+                     "scope_adopted":  "Connexion distante d’origine perdue ; environnement actuel adopté"
                  },
     "ui":  {
                "multimodal":  "Multimodal",
@@ -1356,5 +1362,30 @@
         "error_partial": "Attention : l’opération n’est que partiellement terminée et l’espace de travail peut être incohérent. Vérifiez immédiatement les fichiers concernés",
         "error_compensated": "L’opération a échoué et a été annulée pour revenir à l’état précédent",
         "error_generic": "L’opération n’a pas abouti, veuillez réessayer"
+    }
+,
+    "monitor": {
+        "title": "Moniteur des tâches",
+        "env": "Environnement",
+        "outputs": "Produits",
+        "sources": "Sources",
+        "skills": "Appels de compétences",
+        "memory_updated": "Mémoire mise à jour",
+        "memory_not_updated": "Mémoire non mise à jour",
+        "open_memory": "Ouvrir la vue mémoire",
+        "no_changes": "Aucun changement",
+        "changes_count": "{0} changements",
+        "no_git": "Pas un dépôt Git",
+        "no_remote": "Aucun distant configuré",
+        "no_upstream": "Aucune branche upstream",
+        "synced": "Synchronisé",
+        "ahead_behind": "{0} en avance / {1} en retard",
+        "env_local": "Local",
+        "env_remote": "Distant",
+        "empty_env": "Pas encore d'infos d'environnement",
+        "empty_outputs": "Pas encore de produits :)",
+        "empty_sources": "Pas encore de sources :)",
+        "no_skills": "Aucun appel de compétence dans cette session",
+        "load_failed": "Échec du chargement des données du moniteur"
     }
 }

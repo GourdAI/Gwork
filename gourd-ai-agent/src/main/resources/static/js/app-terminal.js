@@ -1,13 +1,26 @@
 /* ===== app-terminal.js =====
-   Code 模式本地终端：底部可切换的终端面板 + WebSocket 双向流。
-   依赖：app-base.js（window.currentProjectRoot）、jQuery（layui.$）。
+   全局本地终端：底部可切换的终端面板 + WebSocket 双向流（chat/code 等全视图可用），
+   支持多实例（标签页）：每个 tab 一个独立 shell、独立输出缓冲与命令历史。
+   依赖：app-base.js（window.currentProjectRoot / getSessionCwd）、jQuery（layui.$）。
    后端网关：/web/terminal（见 TerminalGate.java）。
 
    设计：
    - 常驻 shell 子进程由后端按连接维持，cd 等状态天然保留。
-   - 输出块原样追加到 #codeTerminalOutput（做 HTML 转义，保留换行）。
-   - 命令输入走单行 input（回车发送），支持 ↑↓ 历史。
-    - 未开终端时通过文件树面板顶部入口切换；Ctrl+` 快捷切换。 */
+   - 多实例模型（参照 VSCode/Qoder 集成终端）：
+     · 每个 tab 在【创建时】固定 cwd 与 scope（termCwd/termScopeKey 快照）。
+       切项目/切会话不劫持已有 tab（一个 shell 一个工作目录是终端语义；
+       要新 cwd 就新建 tab），避免正在跑的构建被静默换目录。
+     · tab 的输出缓冲是 detached DOM 子树（tab.bufEl），切走不丢、不重建；
+       切换只是把 bufEl + inEl 挂回 #codeTerminalBody。
+     · 连接（shell 子进程）比 tab 贵：socket 池上限 TERM_POOL_MAX，超限按
+       lastUsedAt LRU 回收【后台 tab】的连接（tab 与输出保留，切回懒重连）。
+     · 关闭 tab 时若 shell 仍连接需 confirm（子进程随连接终止，防误杀长任务）；
+       关闭最后一个 tab = 关闭面板。面板隐藏只断连、不丢 tab（重开即回现场）。
+   - 命令输入走单行 input（回车发送），支持 ↑↓ 历史（每 tab 独立）。
+   - 入口：标题栏终端按钮（app-titlebar-actions.js）/ code 模式文件树顶栏 / Ctrl+`。
+   - 面板 markup 在 index.html 的 body 级 fixed 底栏（全局化，不再随 code 视图生灭）。
+   - cwd 归属：code 模式用项目根；chat 模式用会话工作区根（getSessionCwd）；
+     两者皆空（全局区新会话）用 ''，后端回退默认工作区。 */
 (function () {
     'use strict';
 
@@ -19,36 +32,36 @@
     // ---------- DOM ----------
     var pane = document.getElementById('codeTerminalPane');
     var handle = document.getElementById('codeTerminalResizeHandle');
-    var output = document.getElementById('codeTerminalOutput');
-    var input = document.getElementById('codeTerminalInput');
     var body = document.getElementById('codeTerminalBody');
+    var tabsEl = document.getElementById('codeTerminalTabs');
+    var newBtn = document.getElementById('codeTerminalNewBtn');
     var clearBtn = document.getElementById('codeTerminalClearBtn');
     var restartBtn = document.getElementById('codeTerminalRestartBtn');
     var closeBtn = document.getElementById('codeTerminalCloseBtn');
     var filerTerminalBtn = document.getElementById('filerTerminalBtn');
 
-    if (!pane) return; // code.html 片段未注入则跳过
+    if (!pane) return; // index.html 片段未注入则跳过
 
     // ---------- 状态 ----------
-    /* 终端连接池（契约 §3.5）：与 app-streaming 的 gateSockets 同款 Map 化。
-
-       为什么终端也要池：旧实现全站一个 socket，切项目就 disconnect + 重建——
-       而 code 模式下两个环境的项目可能同时在跑长命令（本地构建 + 远端部署），
-       切一下就把另一边的 shell 杀了（子进程随连接关闭而终止，输出丢失）。
-       池化后：每个环境各留一条 shell，面板展示当前 activeScope 那一条的输出。
-
-       key = scopeKey：'local' | 'id:<connectionId>'（与 gate 池同口径）。 */
-    var termSockets = new Map();
-    var activeScope = 'local';
-    /* 上限 4 条：与 gate 池同档（后台常驻 shell 占的是远端/本地两侧的子进程，比 WS 更贵）。 */
-    var TERM_POOL_MAX = 4;
-    var connected = false;
+    /* tab 列表：[{id, name, cwd, scopeKey, socket, connected, dead,
+                   bufEl, inEl, history, historyIdx, pendingDraft, restartToken, lastUsedAt}]
+       socket 为 null 表示该 tab 当前无连接（未连/被回收/已断开），切回时懒重建。 */
+    var tabs = [];
+    var activeTab = null;
+    var tabSeq = 0;
     var opened = false;
-    var history = [];
-    var historyIdx = -1;      // -1 表示当前未浏览历史
-    var pendingDraft = '';    // 浏览历史时暂存正在输入的内容
-    var reconnectTimer = null;
-    var restartToken = 0;     // 重启代次：每次重启递增，用于作废旧一轮的回调/超时
+
+    /* 连接池上限：每条连接 = 一个常驻 shell 子进程（可能在远端机器上），
+       不封顶就是逐次点「+」泄漏一批进程。超限回收后台 tab 的连接而非拒建新 tab
+       （tab 本身很便宜：只是 DOM 缓冲）。 */
+    var TERM_POOL_MAX = 4;
+    /* tab 上限：防误连点产出几十个空壳标签（标签栏会挤成不可读的一条）。 */
+    var TERM_MAX_TABS = 8;
+
+    /* 终端回滚缓冲上限（单 tab 子节点个数）。
+       输出区原本只追加不裁剪，跑一次 mvn build 就是数万个节点常驻，只能手动点「清空」释放。
+       注：TERM_MAX_HEIGHT 是面板像素高度，与回滚量无关，不能当上限用。 */
+    var TERM_MAX_NODES = 4000;
 
     // ---------- 归属（scope）----------
     /* 当前项目根属于哪个环境（'local' | 'id:<rid>'）。
@@ -59,7 +72,6 @@
        WHY 不再回退到 app-workspace 的 scopeOfPath：那是个 IIFE 闭包内的私有函数，
        全仓从未挂到 window 上（导出面只有契约 §8 的 __currentChatWorkspaceScope），
        拿它当兜底恒为 undefined，只会把「查不到」伪装成「已查过且属本地」。
-       终端只服务 code 模式，__currentProjectScope 已是该模式下的权威 strict 口径。
 
        为何不直接拿 __GOURD_REMOTE_ACTIVE_ID__()：它只回答「有没有连着远端」，
        而用户完全可能连着远端却在本地项目里开终端——拿它当归属会把本地命令
@@ -103,10 +115,27 @@
         return false;
     }
 
-    // ---------- WebSocket ----------
-    function wsUrl(scopeKey) {
+    /* 终端 cwd 归属（全局化后）：code 模式的项目根优先（终端语义=一个 shell 一个工作目录）；
+       chat 模式无项目根概念，用会话工作区根；皆空（全局区未选工作区的新会话）返回 ''，
+       后端回退默认工作区。
+       【会话根优先于工作区选择器】getSessionCwd 只读 currentChatWorkspace（工作区选择器），
+       而会话可以带着自己的根（sessionMap[sid].projectRoot，与 app-todos/app-task-monitor
+       同口径）：切到一个属于 gourdai 的会话但选择器未联动时，只读选择器会让新 tab
+       落在默认工作区、tab 名退化成语言包键。故先取当前会话根，再退选择器。 */
+    function termCwd() {
+        if (window.currentProjectRoot) return window.currentProjectRoot;
+        var sid = (typeof SESSION_ID !== 'undefined') ? SESSION_ID : null;
+        if (sid && typeof sessionMap !== 'undefined' && sessionMap) {
+            var sess = sessionMap[sid];
+            if (sess && typeof sess.projectRoot === 'string' && sess.projectRoot) return sess.projectRoot;
+        }
+        if (typeof getSessionCwd === 'function') return getSessionCwd() || '';
+        return '';
+    }
+
+    function wsUrl(scopeKey, cwd) {
         var protocol = (window.location.protocol === 'https:') ? 'wss:' : 'ws:';
-        var root = window.currentProjectRoot || '';
+        var root = cwd || '';
         /* 无 root（全局区）时 URL 里没有 '?'，直接拼 '&__scope=' 会得到
            '/web/terminal&__scope=id:x' —— 代理读不到任何 query，归属静默丢失。 */
         var q = root ? ('?cwd=' + encodeURIComponent(root)) : '';
@@ -118,183 +147,11 @@
         return protocol + '//' + window.location.host + '/web/terminal' + q;
     }
 
-    function connect(onReady) {
-        // onReady(ok): WebSocket 打开成功回调 true，连接失败回调 false（仅触发一次）
-        var scopeKey = termScopeKey();
-        activeScope = scopeKey;
-        var readyFired = false;
-        function fireReady(ok) {
-            if (readyFired) return;
-            readyFired = true;
-            if (typeof onReady === 'function') onReady(ok);
-        }
-        var socket = termSockets.get(scopeKey) || null;
-        if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-            connected = true;
-            fireReady(true);
-            return;
-        }
-        /* 退役本桶已死的旧 socket（CLOSING/CLOSED）：先摘回调再 close，
-           否则旧 onmessage 会把残帧写进当前面板、旧 onclose 会误标 connected=false。
-           其它桶一律不动（并发的核心）。 */
-        if (socket) {
-            try {
-                socket.onopen = null;
-                socket.onmessage = null;
-                socket.onclose = null;
-                socket.onerror = null;
-                socket.close();
-            } catch (e) {}
-            termSockets.delete(scopeKey);
-        }
-        try {
-            socket = new WebSocket(wsUrl(scopeKey));
-        } catch (e) {
-            appendSystem(GourdI18n.t('terminal.connect_failed') + ' ' + (e && e.message ? e.message : e));
-            fireReady(false);
-            return;
-        }
-        termSockets.set(scopeKey, socket);
-        enforceTermPoolLimit(scopeKey);
-        socket.onopen = function () {
-            if (termSockets.get(scopeKey) !== socket) return;   // 已被回收/顶替：不接管
-            connected = (activeScope === scopeKey);
-            fireReady(true);
-        };
-        socket.onmessage = function (ev) {
-            /* 非当前展示桶的输出不得写进面板：池化后另一个环境的 shell 仍可能吐帧，
-               写进来就是「本地终端里混进远端构建日志」（无法区分且无法回溯）。 */
-            if (termSockets.get(scopeKey) !== socket || scopeKey !== activeScope) return;
-            var msg;
-            try { msg = JSON.parse(ev.data); } catch (e) { return; }
-            if (msg.type === 'output') {
-                appendOutput(msg.data || '');
-            } else if (msg.type === 'exit') {
-                appendSystem('\n' + GourdI18n.t('terminal.process_exit', msg.code));
-                connected = false;
-            }
-        };
-        socket.onclose = function () {
-            if (termSockets.get(scopeKey) !== socket) return;   // 主动回收/顶替引发：不连带改全局态
-            termSockets.delete(scopeKey);
-            if (scopeKey === activeScope) connected = false;
-            fireReady(false);
-        };
-        socket.onerror = function () {
-            if (scopeKey === activeScope) connected = false;
-            fireReady(false);
-        };
-    }
-
-    /* 池上限守门：超 4 条时关最早入池且非当前展示者（LRU）。
-       终端比 WS 更贵：每条对应一个常驻 shell 子进程（可能在远端机器上），
-       不封顶就是逐个项目切一轮就泄漏一批进程。 */
-    function enforceTermPoolLimit(protectScope) {
-        if (termSockets.size <= TERM_POOL_MAX) return;
-        var keys = [];
-        termSockets.forEach(function (s, k) {
-            if (k !== protectScope && k !== activeScope) keys.push(k);
-        });
-        var over = termSockets.size - TERM_POOL_MAX;
-        for (var i = 0; i < over && i < keys.length; i++) closeScope(keys[i]);
-    }
-
-    function closeScope(scopeKey) {
-        var s = termSockets.get(scopeKey);
-        termSockets.delete(scopeKey);
-        if (!s) return;
-        try {
-            s.onopen = null;
-            s.onmessage = null;
-            s.onclose = null;
-            s.onerror = null;
-            s.close();
-        } catch (e) {}
-        if (scopeKey === activeScope) connected = false;
-    }
-
-    /* 连接死亡摘除（与 gate 池同时机）：'remote:connections-changed' 的 detail.ids
-       不含该 id 就关该桶。若关的正是当前展示桶，面板回落到 local 并重连（开着才重）。 */
-    function pruneDeadScopes(aliveIds) {
-        var victims = [];
-        termSockets.forEach(function (s, k) {
-            if (!k || k === 'local') return;
-            var rid = k.slice(3);
-            var alive = aliveIds ? (aliveIds.indexOf(rid) >= 0) : scopeAlive(k);
-            if (!alive) victims.push(k);
-        });
-        for (var i = 0; i < victims.length; i++) closeScope(victims[i]);
-        return victims.indexOf(activeScope) >= 0;
-    }
-
-    window.addEventListener('remote:connections-changed', function (ev) {
-        try {
-            var activeDied = pruneDeadScopes((ev && ev.detail && ev.detail.ids) || null);
-            if (activeDied && opened) {
-                output.innerHTML = '';
-                appendSystem(GourdI18n.t('terminal.not_connected'));
-                connect();
-            }
-        } catch (e) { /* 摘除失败不得影响其它监听者 */ }
-    });
-
-    function disconnect() {
-        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        /* 关全部桶（不只当前）：本函数只在【面板隐藏/重启】时调用，
-           语义是「终端不再存在」——后台常驻 shell 必须随之收尾（防泄漏），
-           与改造前一致。并发保留是【切项目】的事（那条路径不调 disconnect）。 */
-        var keys = [];
-        termSockets.forEach(function (s, k) { keys.push(k); });
-        for (var i = 0; i < keys.length; i++) closeScope(keys[i]);
-        connected = false;
-    }
-
-    function sendInput(text) {
-        var socket = termSockets.get(activeScope) || null;
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-            appendSystem(GourdI18n.t('terminal.not_connected'));
-            return;
-        }
-        try {
-            socket.send(JSON.stringify({ type: 'input', data: text }));
-        } catch (e) {
-            appendSystem(GourdI18n.t('terminal.send_failed') + ' ' + (e && e.message ? e.message : e));
-        }
-    }
-
-    // ---------- 输出渲染 ----------
+    // ---------- 输出渲染（per-tab 缓冲）----------
     function escHtml(s) {
         var d = document.createElement('div');
         d.textContent = s == null ? '' : String(s);
         return d.innerHTML;
-    }
-
-    /* 终端回滚缓冲上限（子节点个数）。
-       输出区原本只追加不裁剪，跑一次 mvn build 就是数万个节点常驻，只能手动点「清空」释放。
-       注：TERM_MAX_HEIGHT 是面板像素高度，与回滚量无关，不能当上限用。 */
-    var TERM_MAX_NODES = 4000;
-    function trimOutputBuffer() {
-        // 超限时从头部成批移除，保留最新输出（终端语义：旧输出可丢）
-        while (output.childNodes.length > TERM_MAX_NODES) {
-            output.removeChild(output.firstChild);
-        }
-    }
-
-    // 追加原始输出（保留换行/空白，做 HTML 转义，剥离常见 ANSI 转义序列）
-    function appendOutput(text) {
-        var clean = stripAnsi(text);
-        var atBottom = isScrolledToBottom();
-        output.insertAdjacentHTML('beforeend', escHtml(clean));
-        trimOutputBuffer();
-        if (atBottom) scrollToBottom();
-    }
-
-    function appendSystem(text) {
-        var atBottom = isScrolledToBottom();
-        output.insertAdjacentHTML('beforeend',
-            '<span class="code-terminal-sys">' + escHtml(text) + '\n</span>');
-        trimOutputBuffer();
-        if (atBottom) scrollToBottom();
     }
 
     // 剥离最常见的 ANSI CSI 序列（颜色/光标），保留可读文本。
@@ -306,7 +163,14 @@
             .replace(/\r(?!\n)/g, '');
     }
 
-    // 滚动容器为 body（output 现为内联 span，不单独滚动）
+    function trimBuf(tab) {
+        // 超限时从头部成批移除，保留最新输出（终端语义：旧输出可丢）
+        while (tab.bufEl.childNodes.length > TERM_MAX_NODES) {
+            tab.bufEl.removeChild(tab.bufEl.firstChild);
+        }
+    }
+
+    // 滚动容器为 body（各 tab 的 bufEl 现为块级子树，不单独滚动）
     function isScrolledToBottom() {
         return body.scrollHeight - body.scrollTop - body.clientHeight < 24;
     }
@@ -314,9 +178,358 @@
         body.scrollTop = body.scrollHeight;
     }
 
+    /* 追加原始输出（保留换行/空白，做 HTML 转义，剥离常见 ANSI 转义序列）。
+       写入目标恒为 tab 自己的 bufEl：非激活 tab 收到帧时不碰面板 DOM
+       （切回时挂回即见），激活 tab 且在底时才自动滚底。 */
+    function appendOutputTo(tab, text) {
+        var clean = stripAnsi(text);
+        var atBottom = (tab === activeTab) ? isScrolledToBottom() : true;
+        tab.bufEl.insertAdjacentHTML('beforeend', escHtml(clean));
+        trimBuf(tab);
+        if (tab === activeTab && atBottom) scrollToBottom();
+    }
+
+    function appendSystemTo(tab, text) {
+        var atBottom = (tab === activeTab) ? isScrolledToBottom() : true;
+        tab.bufEl.insertAdjacentHTML('beforeend',
+            '<span class="code-terminal-sys">' + escHtml(text) + '\n</span>');
+        trimBuf(tab);
+        if (tab === activeTab && atBottom) scrollToBottom();
+    }
+
     // 让输入框宽度随内容自适应，使光标紧贴提示符（等宽字体按字符数估算）
-    function syncInputWidth() {
-        if (input) input.size = Math.max(1, input.value.length + 1);
+    function syncInputWidth(el) {
+        if (el) el.size = Math.max(1, el.value.length + 1);
+    }
+
+    function moveCaretEnd(el) {
+        setTimeout(function () {
+            try { var v = el.value; el.value = ''; el.value = v; } catch (e) {}
+        }, 0);
+    }
+
+    // ---------- tab 生命周期 ----------
+    function baseNameOf(cwd) {
+        /* 无 cwd（全局区）用 i18n 标题。键必须是 code.terminal.title：
+           terminal.title 在 12 语言包都不存在，写错会让 tab 名直接显示裸键
+           「terminal.title」（用户实测报障）。 */
+        if (!cwd) return GourdI18n.t('code.terminal.title');
+        var parts = String(cwd).replace(/\\/g, '/').split('/');
+        for (var i = parts.length - 1; i >= 0; i--) {
+            if (parts[i]) return parts[i];
+        }
+        return cwd;
+    }
+
+    function buildInput(tab) {
+        var el = document.createElement('input');
+        el.type = 'text';
+        el.className = 'code-terminal-input';
+        el.autocomplete = 'off';
+        el.autocapitalize = 'off';
+        el.spellcheck = false;
+        el.addEventListener('input', function () { syncInputWidth(el); });
+        el.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                var cmd = el.value;
+                // 不本地回显：cmd/bash 会自行回显命令行（避免重复两次）
+                if (cmd.trim()) {
+                    tab.history.push(cmd);
+                    if (tab.history.length > 200) tab.history.shift();
+                }
+                tab.historyIdx = -1;
+                tab.pendingDraft = '';
+                sendInputTo(tab, cmd + '\n');
+                el.value = '';
+                syncInputWidth(el);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (tab.history.length === 0) return;
+                if (tab.historyIdx === -1) { tab.pendingDraft = el.value; tab.historyIdx = tab.history.length; }
+                if (tab.historyIdx > 0) tab.historyIdx--;
+                el.value = tab.history[tab.historyIdx] || '';
+                syncInputWidth(el);
+                moveCaretEnd(el);
+            } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (tab.historyIdx === -1) return;
+                tab.historyIdx++;
+                if (tab.historyIdx >= tab.history.length) {
+                    tab.historyIdx = -1;
+                    el.value = tab.pendingDraft;
+                } else {
+                    el.value = tab.history[tab.historyIdx] || '';
+                }
+                syncInputWidth(el);
+                moveCaretEnd(el);
+            } else if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
+                // Ctrl+C：无选中文本时向子进程发送中断信号（ETX）
+                if (!window.getSelection || String(window.getSelection()) === '') {
+                    e.preventDefault();
+                    sendInputTo(tab, '\x03');
+                    el.value = '';
+                    syncInputWidth(el);
+                }
+            }
+        });
+        return el;
+    }
+
+    function createTab() {
+        var tab = {
+            id: ++tabSeq,
+            cwd: termCwd(),
+            scopeKey: termScopeKey(),
+            socket: null,
+            connected: false,
+            dead: false,          // 原远端归属已断开：下次激活时采纳当前归属
+            bufEl: document.createElement('div'),
+            inEl: null,
+            history: [],
+            historyIdx: -1,
+            pendingDraft: '',
+            restartToken: 0,
+            lastUsedAt: Date.now()
+        };
+        tab.name = baseNameOf(tab.cwd);
+        tab.bufEl.className = 'code-terminal-tabbuf';
+        tab.inEl = buildInput(tab);
+        tabs.push(tab);
+        return tab;
+    }
+
+    function socketLive(tab) {
+        return !!tab.socket &&
+            (tab.socket.readyState === WebSocket.OPEN || tab.socket.readyState === WebSocket.CONNECTING);
+    }
+
+    function killSocket(tab) {
+        if (!tab.socket) return;
+        var s = tab.socket;
+        tab.socket = null;
+        tab.connected = false;
+        try {
+            s.onopen = null;
+            s.onmessage = null;
+            s.onclose = null;
+            s.onerror = null;
+            s.close();
+        } catch (e) {}
+    }
+
+    function connectTab(tab, onReady) {
+        // onReady(ok): WebSocket 打开成功回调 true，连接失败回调 false（仅触发一次）
+        var readyFired = false;
+        function fireReady(ok) {
+            if (readyFired) return;
+            readyFired = true;
+            if (typeof onReady === 'function') onReady(ok);
+        }
+        /* 退役本 tab 已死的旧 socket（CLOSING/CLOSED）：先摘回调再 close，
+           否则旧 onmessage 会把残帧写进缓冲、旧 onclose 会误标 connected=false。
+           其它 tab 一律不动（并发的核心）。 */
+        if (tab.socket) killSocket(tab);
+        var socket;
+        try {
+            socket = new WebSocket(wsUrl(tab.scopeKey, tab.cwd));
+        } catch (e) {
+            appendSystemTo(tab, GourdI18n.t('terminal.connect_failed') + ' ' + (e && e.message ? e.message : e));
+            fireReady(false);
+            return;
+        }
+        tab.socket = socket;
+        enforcePoolLimit(tab);
+        socket.onopen = function () {
+            if (tab.socket !== socket) return;   // 已被回收/顶替：不接管
+            tab.connected = true;
+            fireReady(true);
+        };
+        socket.onmessage = function (ev) {
+            if (tab.socket !== socket) return;
+            var msg;
+            try { msg = JSON.parse(ev.data); } catch (e) { return; }
+            if (msg.type === 'output') {
+                appendOutputTo(tab, msg.data || '');
+            } else if (msg.type === 'exit') {
+                appendSystemTo(tab, '\n' + GourdI18n.t('terminal.process_exit', msg.code));
+                tab.connected = false;
+            }
+        };
+        socket.onclose = function () {
+            if (tab.socket !== socket) return;   // 主动回收/顶替引发：不连带改态
+            tab.socket = null;
+            tab.connected = false;
+            fireReady(false);
+        };
+        socket.onerror = function () {
+            tab.connected = false;
+            fireReady(false);
+        };
+    }
+
+    /* 连接池守门：超上限时回收最久未用【后台 tab】的连接（LRU）。
+       保护两者：传入的 protectTab（正在新建/重连者）与 activeTab（用户眼前的）。
+       被回收的 tab 保留输出与身份，切回时懒重连（socket=null 即该语义）。 */
+    function enforcePoolLimit(protectTab) {
+        function liveCount() {
+            var n = 0;
+            for (var i = 0; i < tabs.length; i++) if (socketLive(tabs[i])) n++;
+            return n;
+        }
+        while (liveCount() > TERM_POOL_MAX) {
+            var victim = null;
+            for (var i = 0; i < tabs.length; i++) {
+                var tb = tabs[i];
+                if (tb === protectTab || tb === activeTab) continue;
+                if (!socketLive(tb)) continue;
+                if (!victim || tb.lastUsedAt < victim.lastUsedAt) victim = tb;
+            }
+            if (!victim) return;   // 只剩受保护者：不再强杀（上限语义让位于眼前体验）
+            killSocket(victim);
+            appendSystemTo(victim, GourdI18n.t('terminal.tab_conn_recycled'));
+        }
+    }
+
+    /* 滚动位置 per-tab 保存：body 是共享滚动容器，切走前不存就会把 A 的
+       滚动位置带给 B（且 A 切回时永远回顶部，长输出翻不回去）。 */
+    function mountTabBody(tab) {
+        if (activeTab && activeTab !== tab) activeTab.scrollTop = body.scrollTop;
+        body.innerHTML = '';
+        body.appendChild(tab.bufEl);
+        body.appendChild(tab.inEl);
+        syncInputWidth(tab.inEl);
+        body.scrollTop = (typeof tab.scrollTop === 'number') ? tab.scrollTop : body.scrollHeight;
+    }
+
+    function renderTabs() {
+        if (!tabsEl) return;
+        tabsEl.innerHTML = '';
+        for (var i = 0; i < tabs.length; i++) {
+            (function (tab) {
+                var chip = document.createElement('button');
+                chip.type = 'button';
+                chip.className = 'code-terminal-tab' + (tab === activeTab ? ' active' : '');
+                chip.setAttribute('data-tab-id', String(tab.id));
+                chip.title = tab.cwd || tab.name;
+                chip.innerHTML =
+                    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>' +
+                    '<span class="code-terminal-tab-name"></span>' +
+                    '<span class="code-terminal-tab-close" role="button" data-i18n-title="code.close">' +
+                    '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>' +
+                    '</span>';
+                chip.querySelector('.code-terminal-tab-name').textContent = tab.name;
+                var closeEl = chip.querySelector('.code-terminal-tab-close');
+                closeEl.setAttribute('aria-label', GourdI18n.t('code.close'));
+                chip.addEventListener('click', function (e) {
+                    var t = e.target;
+                    if (t && typeof t.closest === 'function' && t.closest('.code-terminal-tab-close')) return;
+                    switchTab(tab);
+                });
+                closeEl.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    requestCloseTab(tab);
+                });
+                tabsEl.appendChild(chip);
+            })(tabs[i]);
+        }
+    }
+
+    function activateTab(tab, opts) {
+        if (!tab) return;
+        activeTab = tab;
+        tab.lastUsedAt = Date.now();
+        /* 原远端归属已断开：采纳当前归属再连（旧 scope 的连接永远等不到对端）。 */
+        if (tab.dead) {
+            tab.dead = false;
+            tab.scopeKey = termScopeKey();
+            appendSystemTo(tab, GourdI18n.t('terminal.scope_adopted'));
+        }
+        mountTabBody(tab);
+        renderTabs();
+        if (opened && !socketLive(tab)) connectTab(tab);
+        if (!opts || opts.focus !== false) {
+            setTimeout(function () { if (activeTab === tab && tab.inEl) tab.inEl.focus(); }, 30);
+        }
+    }
+
+    function switchTab(tab) {
+        if (tab && tab !== activeTab) activateTab(tab);
+    }
+
+    function newTab() {
+        if (tabs.length >= TERM_MAX_TABS) {
+            if (activeTab) appendSystemTo(activeTab, GourdI18n.t('terminal.tab_limit', TERM_MAX_TABS));
+            return null;
+        }
+        var tab = createTab();
+        activateTab(tab);
+        return tab;
+    }
+
+    /* 向本 tab 的 shell 查询忙闲：后端以「shell 是否存在存活后代进程」判定。
+       cb(busy)：连接不可用/超时按空闲处理（宁可少问一次，不卡死关闭路径）。 */
+    function queryBusy(tab, cb) {
+        if (!tab || !tab.socket || tab.socket.readyState !== WebSocket.OPEN) { cb(false); return; }
+        var id = 'bq' + Date.now() + Math.floor(Math.random() * 1e6);
+        var done = false;
+        function finish(busy) {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            if (tab.socket === s) s.onmessage = prev;
+            cb(busy);
+        }
+        var s = tab.socket;
+        var prev = s.onmessage;
+        var timer = setTimeout(function () { finish(false); }, 1500);
+        s.onmessage = function (ev) {
+            var msg;
+            try { msg = JSON.parse(ev.data); } catch (e) { return; }
+            if (msg && msg.type === 'busy' && msg.id === id) { finish(!!msg.busy); return; }
+            if (typeof prev === 'function') prev(ev);
+        };
+        try {
+            s.send(JSON.stringify({ type: 'busyQuery', id: id }));
+        } catch (e) {
+            finish(false);
+        }
+    }
+
+    /* 关 tab：仅当 shell 正在跑命令（busyQuery 命中存活后代进程）才确认——
+       子进程随连接终止，正在跑的构建/部署会被一并杀掉（比丢输出严重得多）。
+       空闲 shell 静默关闭：常驻 cmd/bash 永远「活着」，拿连接存活当判据会把
+       什么都没跑的终端误报成「仍在运行」。确认框走应用内 layConfirm
+       （桌面端规约禁原生 confirm）。 */
+    function requestCloseTab(tab) {
+        if (!tab) return;
+        if (!socketLive(tab)) { closeTab(tab); return; }
+        queryBusy(tab, function (busy) {
+            if (!busy) { closeTab(tab); return; }
+            if (typeof window.layConfirm === 'function') {
+                window.layConfirm(GourdI18n.t('terminal.tab_close_confirm'), function () { closeTab(tab); });
+            } else {
+                closeTab(tab);
+            }
+        });
+    }
+
+    function closeTab(tab) {
+        var idx = tabs.indexOf(tab);
+        if (idx < 0) return;
+        killSocket(tab);
+        tabs.splice(idx, 1);
+        if (tab === activeTab) {
+            if (tabs.length === 0) {
+                activeTab = null;   // 防悬空引用：重开面板时不得复活已关闭的 tab
+                renderTabs();       // DOM 同步清空：面板隐藏期间不留幽灵 chip
+                closeTerminal();   // 最后一个 tab 关闭 = 面板关闭
+                return;
+            }
+            activateTab(tabs[Math.min(idx, tabs.length - 1)]);
+        } else {
+            renderTabs();
+        }
     }
 
     // ---------- 打开 / 关闭 ----------
@@ -324,17 +537,20 @@
         opened = true;
         document.body.classList.add('terminal-open');
         try { localStorage.setItem(LS_OPEN, '1'); } catch (e) {}
-        connect();
+        syncTerminalLeft();
+        if (tabs.length === 0) createTab();
+        activateTab(activeTab || tabs[0], { focus: focus });
         if (typeof window.refreshCodeEditor === 'function') window.refreshCodeEditor();
-        if (focus !== false) setTimeout(function () { if (input) input.focus(); }, 30);
     }
 
     function closeTerminal() {
         opened = false;
+        if (activeTab) activeTab.scrollTop = body.scrollTop;   // 隐藏前存滚动位，重开回现场
         document.body.classList.remove('terminal-open');
         try { localStorage.setItem(LS_OPEN, '0'); } catch (e) {}
-        // 隐藏即断开子进程，避免后台常驻 shell 泄漏
-        disconnect();
+        /* 隐藏即断开全部子进程，避免后台常驻 shell 泄漏。
+           tab 与输出缓冲保留：重开面板即回现场（连接懒重建）。 */
+        for (var i = 0; i < tabs.length; i++) killSocket(tabs[i]);
         if (typeof window.refreshCodeEditor === 'function') window.refreshCodeEditor();
     }
 
@@ -343,145 +559,115 @@
     }
     window.toggleCodeTerminal = toggleTerminal;
 
-    /* 重启只重建【当前展示桶】的 shell：池化后 disconnect() 会把另一环境
-       正在跑的构建/部署一并杀掉，而用户点「重启」的意图只是重启眼前这个。 */
+    /* 重启只重建【当前 tab】的 shell：多实例下其它 tab 的子进程与本页无关，
+       用户点「重启」的意图只是重启眼前这个。 */
     function restartTerminal() {
-        closeScope(activeScope);
-        connected = false;
-        output.innerHTML = '';
-        appendSystem(GourdI18n.t('terminal.restarting'));
-        var myToken = ++restartToken;   // 本轮代次；后续任何一轮重启都会使它过期
+        var tab = activeTab;
+        if (!tab) return;
+        killSocket(tab);
+        tab.bufEl.innerHTML = '';
+        appendSystemTo(tab, GourdI18n.t('terminal.restarting'));
+        var myToken = ++tab.restartToken;   // 本轮代次；后续任何一轮重启都会使它过期
         var timer = setTimeout(function () {
-            if (myToken !== restartToken) return;   // 已被新一轮重启接管
-            closeScope(activeScope);
-            connected = false;
-            appendSystem(GourdI18n.t('terminal.restart_timeout'));
+            if (myToken !== tab.restartToken) return;   // 已被新一轮重启接管
+            if (tabs.indexOf(tab) < 0) return;          // tab 已关闭：不向孤儿缓冲写提示
+            killSocket(tab);
+            appendSystemTo(tab, GourdI18n.t('terminal.restart_timeout'));
         }, 8000);
-        connect(function (ok) {
-            if (myToken !== restartToken) return;   // 过期回调，丢弃
+        connectTab(tab, function (ok) {
+            if (myToken !== tab.restartToken) return;   // 过期回调，丢弃
             clearTimeout(timer);
-            appendSystem(ok ? GourdI18n.t('terminal.restarted') : GourdI18n.t('terminal.restart_failed'));
+            appendSystemTo(tab, ok ? GourdI18n.t('terminal.restarted') : GourdI18n.t('terminal.restart_failed'));
         });
-        setTimeout(function () { if (input) input.focus(); }, 30);
+        setTimeout(function () { if (tab.inEl) tab.inEl.focus(); }, 30);
     }
 
-    /* 切项目时若终端开着：切到【新项目所属环境】的桶，旧桶保留。
-       为什么不再 disconnect()：那是单例时代的「一个 shell 换一个 cwd」做法，
-       池化后 disconnect 会把另一环境正在跑的构建/部署一并杀掉（子进程随连接终止）。
-       旧桶的去向：要么被 LRU（>4 条）汰，要么随面板隐藏（disconnect）收尾。 */
-    window.onCodeProjectChanged = function () {
-        if (opened) {
-            var next = termScopeKey();
-            output.innerHTML = '';
-            activeScope = next;
-            var s = termSockets.get(next) || null;
-            /* 同环境切项目（cwd 变了但 scope 未变）：旧 shell 的 cwd 仍是旧项目，
-               必须重建（终端语义：一个 shell 一个工作目录）。跳环境切则保留旧桶。 */
-            if (s) closeScope(next);
-            connected = false;
-            connect();
-        }
-    };
+    /* 切项目/切会话：已有 tab 的 cwd 是创建时快照，不劫持（一个 shell 一个工作目录，
+       正在跑的构建不能被静默换目录；要新 cwd 请新建 tab——标签栏「+」）。
+       保留空实现以维持外部调用点（app-code 等）的既有契约。 */
+    window.onCodeProjectChanged = function () { /* tabs 固定归属，无需重建 */ };
 
     // 远程工作区（P0-2 修复）：远程连接建立/断开时，本地 UI 服务器的 WS 代理
-    // 上游已切换（远端 ⇄ 本地），旧终端连接指向已失效上游。面板打开着才重建
-    // （隐藏时 socket 本就断开，openTerminal 会自行重连）。
-    /* 池化后只重建【当前展示桶】：另一环境的 shell 并未因本连接变化而失效，
-       杀它只会白丢一个正在跑的子进程。连接真正死亡时的整桶摘除由
-       'remote:connections-changed' 监听器负责（pruneDeadScopes）。 */
+    // 上游已切换（远端 ⇄ 本地），旧终端连接指向已失效上游。
+    /* 多实例下：全部 tab 的旧连接都失效（上游换了），统一摘除；
+       眼前 tab 立即重连恢复体验，后台 tab 懒重连（不白烧子进程）。 */
     window.onRemoteChannelChanged = function () {
-        if (opened) {
-            closeScope(activeScope);   // 只重建当前展示桶（其余桶的上游未变）
-            connected = false;
-            output.innerHTML = '';
-            connect();
-        }
+        for (var i = 0; i < tabs.length; i++) killSocket(tabs[i]);
+        if (opened && activeTab) connectTab(activeTab);
     };
 
-    // ---------- 输入交互 ----------
-    if (input) {
-        input.addEventListener('input', syncInputWidth);
-        input.addEventListener('keydown', function (e) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                var cmd = input.value;
-                // 不本地回显：cmd/bash 会自行回显命令行（避免重复两次）
-                if (cmd.trim()) {
-                    history.push(cmd);
-                    if (history.length > 200) history.shift();
-                }
-                historyIdx = -1;
-                pendingDraft = '';
-                sendInput(cmd + '\n');
-                input.value = '';
-                syncInputWidth();
-            } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                if (history.length === 0) return;
-                if (historyIdx === -1) { pendingDraft = input.value; historyIdx = history.length; }
-                if (historyIdx > 0) historyIdx--;
-                input.value = history[historyIdx] || '';
-                syncInputWidth();
-                moveCaretEnd();
-            } else if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                if (historyIdx === -1) return;
-                historyIdx++;
-                if (historyIdx >= history.length) {
-                    historyIdx = -1;
-                    input.value = pendingDraft;
-                } else {
-                    input.value = history[historyIdx] || '';
-                }
-                syncInputWidth();
-                moveCaretEnd();
-            } else if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
-                // Ctrl+C：无选中文本时向子进程发送中断信号（ETX）
-                if (!window.getSelection || String(window.getSelection()) === '') {
-                    e.preventDefault();
-                    sendInput('\x03');
-                    input.value = '';
-                    syncInputWidth();
-                }
+    /* 连接死亡摘除（与 gate 池同时机）：'remote:connections-changed' 的 detail.ids
+       不含该 id 就把对应 tab 标记 dead（摘连接、留身份）。
+       dead tab 下次激活时采纳当前归属重连（activateTab 内处理）。 */
+    function markDeadScopes(aliveIds) {
+        for (var i = 0; i < tabs.length; i++) {
+            var tab = tabs[i];
+            if (!tab.scopeKey || tab.scopeKey === 'local') continue;
+            var rid = tab.scopeKey.slice(3);
+            var alive = aliveIds ? (aliveIds.indexOf(rid) >= 0) : scopeAlive(tab.scopeKey);
+            if (alive) continue;
+            killSocket(tab);
+            tab.dead = true;
+            if (tab === activeTab && opened) {
+                appendSystemTo(tab, GourdI18n.t('terminal.not_connected'));
             }
-        });
-        syncInputWidth();
+        }
     }
 
-    function moveCaretEnd() {
-        setTimeout(function () {
-            try { var v = input.value; input.value = ''; input.value = v; } catch (e) {}
-        }, 0);
+    window.addEventListener('remote:connections-changed', function (ev) {
+        try {
+            markDeadScopes((ev && ev.detail && ev.detail.ids) || null);
+        } catch (e) { /* 摘除失败不得影响其它监听者 */ }
+    });
+
+    /* 发送目标显式绑定到输入框所属 tab（而非 activeTab）：
+       挂载关系保证二者此刻相同，但显式传参让「输入进 A 却发给 B」这类
+       串线在结构上不可能发生。 */
+    function sendInputTo(tab, text) {
+        if (!tab) return;
+        if (!tab.socket || tab.socket.readyState !== WebSocket.OPEN) {
+            appendSystemTo(tab, GourdI18n.t('terminal.not_connected'));
+            return;
+        }
+        tab.lastUsedAt = Date.now();
+        try {
+            tab.socket.send(JSON.stringify({ type: 'input', data: text }));
+        } catch (e) {
+            appendSystemTo(tab, GourdI18n.t('terminal.send_failed') + ' ' + (e && e.message ? e.message : e));
+        }
     }
+
+    // ---------- 按钮 ----------
+    if (filerTerminalBtn) filerTerminalBtn.addEventListener('click', function () { toggleTerminal(); });
+    if (closeBtn) closeBtn.addEventListener('click', closeTerminal);
+    if (newBtn) newBtn.addEventListener('click', function () { newTab(); });
+    if (clearBtn) clearBtn.addEventListener('click', function () {
+        if (activeTab) activeTab.bufEl.innerHTML = '';
+        if (activeTab && activeTab.inEl) activeTab.inEl.focus();
+    });
+    if (restartBtn) restartBtn.addEventListener('click', restartTerminal);
+
+    // Ctrl+` 全局快捷键（全视图生效：终端已全局化，不再限 code 模式）
+    document.addEventListener('keydown', function (e) {
+        if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === '`' || e.code === 'Backquote')) {
+            e.preventDefault();
+            toggleTerminal();
+        }
+    });
 
     // 点击输出区自动聚焦输入框，模拟终端体验
     if (body) {
         body.addEventListener('mousedown', function (e) {
-            if (e.target === output || e.target === body) {
-                // 有文本选中时不抢焦点，方便复制
-                if (!window.getSelection || String(window.getSelection()) === '') {
-                    setTimeout(function () { if (input) input.focus(); }, 0);
-                }
+            var tab = activeTab;
+            if (!tab) return;
+            if (e.target === tab.inEl) return;
+            if (!(e.target === body || tab.bufEl.contains(e.target))) return;
+            // 有文本选中时不抢焦点，方便复制
+            if (!window.getSelection || String(window.getSelection()) === '') {
+                setTimeout(function () { if (activeTab === tab && tab.inEl) tab.inEl.focus(); }, 0);
             }
         });
     }
-
-    // ---------- 按钮 ----------
-
-    if (filerTerminalBtn) filerTerminalBtn.addEventListener('click', function () { toggleTerminal(); });
-    if (closeBtn) closeBtn.addEventListener('click', closeTerminal);
-    if (clearBtn) clearBtn.addEventListener('click', function () { output.innerHTML = ''; if (input) input.focus(); });
-    if (restartBtn) restartBtn.addEventListener('click', restartTerminal);
-
-    // Ctrl+` 全局快捷键（仅 code 模式生效）
-    document.addEventListener('keydown', function (e) {
-        if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === '`' || e.code === 'Backquote')) {
-            if (document.body.classList.contains('code-mode')) {
-                e.preventDefault();
-                toggleTerminal();
-            }
-        }
-    });
 
     // ---------- 拖拽调高 ----------
     function setHeight(px) {
@@ -489,6 +675,22 @@
         document.documentElement.style.setProperty('--code-terminal-height', h + 'px');
         return h;
     }
+
+    /* ---------- 终端左缘：让开主侧栏 ----------
+       终端/监控右栏都是 body 级 fixed，左缘需等于侧栏右缘。侧栏宽度可被
+       #sidebarResizeHandle 拖拽改写内联 style（app-ui.js），CSS 变量算不出
+       offsetWidth，故在此实测写入 --terminal-left（终端面板与调高手柄、
+       监控右栏三处共用该变量）。
+       同步时机：启动 + 窗口 resize + 打开终端时；侧栏拖拽结束由 document mouseup
+       与 window resize 兜底补一次（拖拽期间不跟随：侧栏宽度只在 mouseup 落定）。 */
+    function syncTerminalLeft() {
+        var sb = document.querySelector('.sidebar');
+        var w = (sb && sb.offsetWidth > 0) ? sb.offsetWidth : 0;
+        document.documentElement.style.setProperty('--terminal-left', w + 'px');
+    }
+    syncTerminalLeft();
+    window.addEventListener('resize', syncTerminalLeft);
+    document.addEventListener('mouseup', syncTerminalLeft);   // 侧栏拖拽结束兑底
     (function initHeight() {
         try {
             var saved = parseInt(localStorage.getItem(LS_HEIGHT), 10);
@@ -522,11 +724,11 @@
         });
     }
 
-    // ---------- 启动：恢复上次开关态（仅 code 模式）----------
+    // ---------- 启动：恢复上次开关态（全视图；面板已全局化不再限 code 模式）----------
     setTimeout(function () {
         var wasOpen = false;
         try { wasOpen = localStorage.getItem(LS_OPEN) === '1'; } catch (e) {}
-        if (wasOpen && document.body.classList.contains('code-mode')) {
+        if (wasOpen) {
             openTerminal(false);
         }
     }, 300);

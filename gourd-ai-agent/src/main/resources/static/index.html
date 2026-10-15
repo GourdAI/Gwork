@@ -21,6 +21,7 @@
     <link rel="stylesheet" href="/css/model-settings.css"/>
     <link rel="stylesheet" href="/css/memory-view.css"/>
     <link rel="stylesheet" href="/css/usage-stats.css"/>
+    <link rel="stylesheet" href="/css/task-monitor.css"/>
     <link rel="stylesheet" href="/highlight/github.min.css" media="(prefers-color-scheme: light)" id="hljs-light-theme"/>
     <link rel="stylesheet" href="/highlight/github-dark.min.css" media="(prefers-color-scheme: dark)" id="hljs-dark-theme" disabled/>
     <!-- 编辑器样式由 Monaco editor.main.js 运行时自动注入（vs/editor/editor.main.css） -->
@@ -187,6 +188,97 @@
 <!-- 远程工作区连接向导（P1 SSH 骨架）：app-remote.js 的挂载容器。body 级浮层，
      默认无 open 类不占位；面板/表单/连接日志由 app-remote.js renderWizard 动态注入。 -->
 <div class="remote-wizard-backdrop" id="remoteWizard"></div>
+
+<!-- ============ 标题栏动作组（终端 / 任务监控）============
+     body 级 fixed 贴顶行右端、原生窗口按钮左侧：不放进 .titlebar-drag-region，
+     因为该拖拽条在 skills 视图与浏览器 code 模式会被整体隐藏（skills.css:52 /
+     code.css:323），塞进去的按钮会随之消失。右偏移由 app-titlebar-actions.js
+     按平台运行时计算（Tauri 自绘控件 138px / Electron 原生 overlay 不可覆盖 /
+     mac 红绿灯在左不占右侧），CSS 只给无桌面壳浏览器的缺省值。 -->
+<div class="titlebar-actions" id="titlebarActions">
+    <button class="titlebar-action-btn" id="titlebarTerminalBtn" type="button" data-i18n-title="code.terminal.title" aria-pressed="false">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/></svg>
+    </button>
+    <button class="titlebar-action-btn" id="titlebarMonitorBtn" type="button" data-i18n-title="monitor.title" aria-expanded="false">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg>
+    </button>
+</div>
+
+<!-- 任务监控右栏：版式内右栏（.main-area 打开时让出宽度），不遮挡对话/查看器内容。
+     展示当前会话的环境信息 / 产出 / 来源 / 技能调用 / 记忆更新。数据与渲染见
+     app-task-monitor.js；默认无 open 类不占位。
+     【无头部纪律】不设「任务监控」标题与刷新钮（用户参照稿即无头部）：开合与高亮
+     由标题栏监控按钮承担，数据靠打开时拉取 + 6s 轮询 + 会话/工作区变化重拉。
+     契约测试锁定 head/close 两件不得回归。 -->
+<div class="task-monitor-drawer" id="taskMonitorDrawer" aria-hidden="true">
+    <div class="task-monitor-body" id="taskMonitorBody">
+        <section class="tm-section" id="tmSecEnv">
+            <button class="tm-sec-head" type="button" data-tm-sec="env" aria-expanded="true">
+                <span class="tm-sec-title" data-i18n="monitor.env">环境信息</span>
+                <svg class="tm-sec-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div class="tm-sec-body" id="tmEnvBody"></div>
+        </section>
+        <section class="tm-section" id="tmSecOutputs">
+            <button class="tm-sec-head" type="button" data-tm-sec="outputs" aria-expanded="true">
+                <span class="tm-sec-title" data-i18n="monitor.outputs">产出</span>
+                <svg class="tm-sec-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div class="tm-sec-body" id="tmOutputsBody"></div>
+        </section>
+        <section class="tm-section" id="tmSecSources">
+            <button class="tm-sec-head" type="button" data-tm-sec="sources" aria-expanded="true">
+                <span class="tm-sec-title" data-i18n="monitor.sources">来源</span>
+                <svg class="tm-sec-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div class="tm-sec-body" id="tmSourcesBody"></div>
+        </section>
+        <section class="tm-section" id="tmSecSkills">
+            <button class="tm-sec-head" type="button" data-tm-sec="skills" aria-expanded="true">
+                <span class="tm-sec-title" data-i18n="monitor.skills">技能调用</span>
+                <svg class="tm-sec-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div class="tm-sec-body" id="tmSkillsBody"></div>
+        </section>
+        <!-- 记忆行固定在最底部（参照稿形态）：状态点 + 跳转记忆视图 -->
+        <div class="tm-memory-row" id="tmMemoryRow">
+            <span class="tm-memory-label" id="tmMemoryLabel" data-i18n="monitor.memory_not_updated">记忆未更新</span>
+            <span class="tm-memory-dot" id="tmMemoryDot" aria-hidden="true"></span>
+            <button class="tm-memory-jump" id="tmMemoryJumpBtn" type="button" data-i18n-title="monitor.open_memory">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- 全局终端面板：原 code.html 编辑器列内的底部终端上移为 body 级 fixed 底栏，
+     使 chat 等非 code 模式同样可用（标题栏终端按钮的全局入口）。连接/池/渲染
+     逻辑仍全部在 app-terminal.js，markup 仅换挂载层级。 -->
+<div class="code-terminal-resize-handle" id="codeTerminalResizeHandle"></div>
+<div class="code-terminal-pane" id="codeTerminalPane">
+    <div class="code-terminal-tabbar">
+        <!-- 多实例标签栏：每个 tab 一个独立 shell（输出/历史/连接各自隔离），
+             由 app-terminal.js renderTabs 动态填充；静态仅留空容器。 -->
+        <div class="code-terminal-tabs" id="codeTerminalTabs"></div>
+        <div class="code-terminal-actions">
+            <button class="code-terminal-act-btn" id="codeTerminalNewBtn" data-i18n-title="terminal.new_tab">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+            <button class="code-terminal-act-btn" id="codeTerminalClearBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+            <button class="code-terminal-act-btn" id="codeTerminalRestartBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            </button>
+            <button class="code-terminal-act-btn" id="codeTerminalCloseBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </div>
+    </div>
+    <!-- 内联命令行：输出与输入同处一个可滚动区，输入光标直接贴在 shell 提示符后。
+         多实例：容器静态留空，激活 tab 的输出缓冲与输入框由 app-terminal.js 挂载。 -->
+    <div class="code-terminal-body" id="codeTerminalBody"></div>
+</div>
 
 <!-- 此处原为启动遮罩 #appBootLoading，已移除：打开即展示首页，不再经过转圈缓冲页。
      后端启动失败同样不做任何提示（无感，界面自行降级为空态）；右下角非阻塞错误条

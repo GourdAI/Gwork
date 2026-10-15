@@ -1115,6 +1115,7 @@
                    "save":  "Salvare",
                    "add":  "Adăugare",
                    "back":  "Înapoi",
+                   "close": "Închide",
                    "refresh":  "Reîmprospătare",
                    "loading":  "Se încarcă…",
                    "no_data":  "Fără date",
@@ -1184,7 +1185,12 @@
                      "restarting":  "Restartare terminal...",
                      "restart_timeout":  "Timp de restart depășit",
                      "restarted":  "Terminal restartat",
-                     "restart_failed":  "Eșec la restartarea terminalului"
+                     "restart_failed":  "Eșec la restartarea terminalului",
+                     "new_tab":  "Terminal nou",
+                     "tab_close_confirm":  "Acest terminal rulează încă; închiderea îi va termina procesul. Închizi oricum?",
+                     "tab_limit":  "Limita de terminale atinsă ({0})",
+                     "tab_conn_recycled":  "Conexiune reciclată (limită depășită); se va reconecta la revenire",
+                     "scope_adopted":  "Conexiunea remote originală s-a pierdut; s-a adoptat mediul curent"
                  },
     "ui":  {
                "multimodal":  "Multimodal",
@@ -1356,5 +1362,30 @@
         "error_partial": "Atenție: operațiunea s-a finalizat doar parțial și spațiul de lucru poate fi inconsistent. Verificați imediat fișierele afectate",
         "error_compensated": "Operațiunea a eșuat și a fost readusă la starea anterioară",
         "error_generic": "Operațiunea nu s-a finalizat, încercați din nou"
+    }
+,
+    "monitor": {
+        "title": "Monitor de sarcini",
+        "env": "Mediu",
+        "outputs": "Produse",
+        "sources": "Surse",
+        "skills": "Apeluri de competențe",
+        "memory_updated": "Memorie actualizată",
+        "memory_not_updated": "Memorie neactualizată",
+        "open_memory": "Deschide vizualizarea memoriei",
+        "no_changes": "Fără modificări",
+        "changes_count": "{0} modificări",
+        "no_git": "Nu este un depozit Git",
+        "no_remote": "Niciun remote configurat",
+        "no_upstream": "Fără ramură upstream",
+        "synced": "Sincronizat",
+        "ahead_behind": "{0} înainte / {1} în urmă",
+        "env_local": "Local",
+        "env_remote": "La distanță",
+        "empty_env": "Încă fără informații de mediu",
+        "empty_outputs": "Încă fără produse :)",
+        "empty_sources": "Încă fără surse :)",
+        "no_skills": "Fără apeluri de competențe în această sesiune",
+        "load_failed": "Încărcarea datelor monitorului a eșuat"
     }
 }

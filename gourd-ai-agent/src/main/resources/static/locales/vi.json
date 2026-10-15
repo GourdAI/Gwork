@@ -1115,6 +1115,7 @@
                    "save":  "Lưu",
                    "add":  "Thêm",
                    "back":  "Quay lại",
+                   "close": "Đóng",
                    "refresh":  "Làm mới",
                    "loading":  "Đang tải…",
                    "no_data":  "Không có dữ liệu",
@@ -1184,7 +1185,12 @@
                      "restarting":  "Đang khởi động lại terminal...",
                      "restart_timeout":  "Khởi động lại quá thời gian",
                      "restarted":  "Terminal đã khởi động lại",
-                     "restart_failed":  "Khởi động lại terminal thất bại"
+                     "restart_failed":  "Khởi động lại terminal thất bại",
+                     "new_tab":  "Terminal mới",
+                     "tab_close_confirm":  "Terminal này vẫn đang chạy; đóng sẽ kết thúc tiến trình của nó. Vẫn đóng?",
+                     "tab_limit":  "Đã đạt giới hạn terminal ({0})",
+                     "tab_conn_recycled":  "Kết nối được thu hồi (vượt giới hạn); sẽ kết nối lại khi quay lại",
+                     "scope_adopted":  "Mất kết nối remote gốc; đã chuyển sang môi trường hiện tại"
                  },
     "ui":  {
                "multimodal":  "Đa phương thức",
@@ -1356,5 +1362,30 @@
         "error_partial": "Cảnh báo: thao tác chỉ hoàn tất một phần và không gian làm việc có thể không nhất quán. Hãy kiểm tra ngay các tệp liên quan",
         "error_compensated": "Thao tác thất bại và đã được hoàn nguyên về trạng thái trước đó",
         "error_generic": "Thao tác chưa hoàn tất, vui lòng thử lại"
+    }
+,
+    "monitor": {
+        "title": "Giám sát tác vụ",
+        "env": "Môi trường",
+        "outputs": "Sản phẩm",
+        "sources": "Nguồn",
+        "skills": "Lời gọi kỹ năng",
+        "memory_updated": "Bộ nhớ đã cập nhật",
+        "memory_not_updated": "Bộ nhớ chưa cập nhật",
+        "open_memory": "Mở khung bộ nhớ",
+        "no_changes": "Không có thay đổi",
+        "changes_count": "{0} thay đổi",
+        "no_git": "Không phải kho Git",
+        "no_remote": "Chưa cấu hình remote",
+        "no_upstream": "Không có nhánh upstream",
+        "synced": "Đã đồng bộ",
+        "ahead_behind": "Trước {0} / Sau {1}",
+        "env_local": "Cục bộ",
+        "env_remote": "Từ xa",
+        "empty_env": "Chưa có thông tin môi trường",
+        "empty_outputs": "Chưa có sản phẩm :)",
+        "empty_sources": "Chưa có nguồn :)",
+        "no_skills": "Không có lời gọi kỹ năng trong phiên này",
+        "load_failed": "Tải dữ liệu giám sát thất bại"
     }
 }

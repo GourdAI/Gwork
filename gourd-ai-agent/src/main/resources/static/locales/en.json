@@ -1115,6 +1115,7 @@
                    "save":  "Save",
                    "add":  "Add",
                    "back":  "Back",
+                   "close": "Close",
                    "refresh":  "Refresh",
                    "loading":  "Loading…",
                    "no_data":  "No data",
@@ -1242,7 +1243,12 @@
                      "restarting":  "Restarting terminal...",
                      "restart_timeout":  "Restart timed out, please retry",
                      "restarted":  "Terminal restarted",
-                     "restart_failed":  "Terminal restart failed"
+                     "restart_failed":  "Terminal restart failed",
+                     "new_tab":  "New Terminal",
+                     "tab_close_confirm":  "This terminal is still running. Closing it will terminate its process. Close anyway?",
+                     "tab_limit":  "Terminal limit reached ({0})",
+                     "tab_conn_recycled":  "Connection recycled (terminal limit exceeded); it will reconnect when switched back",
+                     "scope_adopted":  "Original remote connection lost; adopted the current environment"
                  },
     "automation":  {
                        "title":  "Automation",
@@ -1356,5 +1362,30 @@
         "error_partial": "Warning: the operation only partially completed and the workspace may be inconsistent. Verify the affected files now",
         "error_compensated": "The operation failed and was rolled back to the previous state",
         "error_generic": "The operation did not complete; please try again"
+    }
+,
+    "monitor": {
+        "title": "Task Monitor",
+        "env": "Environment",
+        "outputs": "Outputs",
+        "sources": "Sources",
+        "skills": "Skill Calls",
+        "memory_updated": "Memory updated",
+        "memory_not_updated": "Memory not updated",
+        "open_memory": "Open memory view",
+        "no_changes": "No changes",
+        "changes_count": "{0} changes",
+        "no_git": "Not a Git repository",
+        "no_remote": "No remote configured",
+        "no_upstream": "No upstream branch",
+        "synced": "Synced",
+        "ahead_behind": "Ahead {0} / Behind {1}",
+        "env_local": "Local",
+        "env_remote": "Remote",
+        "empty_env": "No environment info yet",
+        "empty_outputs": "No outputs yet :)",
+        "empty_sources": "No sources yet :)",
+        "no_skills": "No skill calls in this session",
+        "load_failed": "Failed to load monitor data"
     }
 }

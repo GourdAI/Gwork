@@ -1115,6 +1115,7 @@
                    "save":  "保存",
                    "add":  "追加",
                    "back":  "戻る",
+                   "close": "閉じる",
                    "refresh":  "更新",
                    "loading":  "読み込み中…",
                    "no_data":  "データなし",
@@ -1184,7 +1185,12 @@
                      "restarting":  "ターミナル再起動中...",
                      "restart_timeout":  "再起動タイムアウト、再試行してください",
                      "restarted":  "ターミナル再起動完了",
-                     "restart_failed":  "ターミナル再起動失敗"
+                     "restart_failed":  "ターミナル再起動失敗",
+                     "new_tab":  "新しいターミナル",
+                     "tab_close_confirm":  "このターミナルは実行中です。閉じるとプロセスが終了します。閉じますか？",
+                     "tab_limit":  "ターミナル数の上限に達しました（{0}）",
+                     "tab_conn_recycled":  "接続が回収されました（上限超過）。切り替え時に再接続します",
+                     "scope_adopted":  "元のリモート接続が切断されました。現在の環境に切り替えました"
                  },
     "ui":  {
                "multimodal":  "マルチモーダル",
@@ -1356,5 +1362,30 @@
         "error_partial": "警告: 操作が一部しか完了せず、ワークスペースが不整合の可能性があります。対象ファイルを直ちに確認してください",
         "error_compensated": "操作は失敗し、実行前の状態に自動的に戻しました",
         "error_generic": "操作が完了しませんでした。しばらくしてから再試行してください"
+    }
+,
+    "monitor": {
+        "title": "タスクモニター",
+        "env": "環境情報",
+        "outputs": "産出物",
+        "sources": "ソース",
+        "skills": "スキル呼び出し",
+        "memory_updated": "メモリを更新済み",
+        "memory_not_updated": "メモリ未更新",
+        "open_memory": "メモリビューを開く",
+        "no_changes": "変更なし",
+        "changes_count": "{0} 件の変更",
+        "no_git": "Git リポジトリではありません",
+        "no_remote": "リモート未設定",
+        "no_upstream": "上流ブランチなし",
+        "synced": "同期済み",
+        "ahead_behind": "{0} 先行 / {1} 遅延",
+        "env_local": "ローカル",
+        "env_remote": "リモート",
+        "empty_env": "環境情報はまだありません",
+        "empty_outputs": "産出物はまだありません :)",
+        "empty_sources": "ソースはまだありません :)",
+        "no_skills": "このセッションでスキル呼び出しなし",
+        "load_failed": "モニターデータの読み込みに失敗"
     }
 }

@@ -290,6 +290,205 @@ public class GitService {
         return m;
     }
 
+    /** ahead/behind 不可用时的哨兵值：用 -1 而不是 null，保证响应体字段恒定存在，前端无需判 undefined。 */
+    private static final int REV_COUNT_UNKNOWN = -1;
+
+    /**
+     * 远端与上游同步状态（只读，供任务监控面板展示）。
+     *
+     * <p><b>WHY</b>：{@link #status()} 只覆盖本地工作区变更，面板还需要知道「有没有远端、
+     * 落后/领先多少提交」。本方法只读本地已有的远端配置与 ref 计数，<b>绝不</b>发起
+     * fetch/pull 等网络操作，因此离线环境下同样安全（{@link #runGitCommand} 已统一注入
+     * {@code GIT_TERMINAL_PROMPT=0}，不会弹出凭据输入框把请求挂住）。</p>
+     *
+     * <p>降级口径与 {@link #status()} 一致：任何进程异常或输出解析失败都只 WARN 并回结构化
+     * 空字段，绝不抛出——只读面板拿不到远端信息时显示「无远端」即可，不该变成 500。
+     * {@code degraded=true} 用于告诉调用方「本次结果可能不完整」（例如无上游分支、
+     * 或计数输出畸形），字段本身仍然存在。</p>
+     *
+     * @return LinkedHashMap{gitAvailable, hasRemote, remoteUrl, upstream, ahead, behind, degraded}；
+     *         ahead/behind 无法判定时为 {@value #REV_COUNT_UNKNOWN}
+     */
+    public Map<String, Object> remoteInfo() {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("gitAvailable", false);
+        data.put("hasRemote", false);
+        data.put("remoteUrl", null);
+        data.put("upstream", null);
+        data.put("ahead", REV_COUNT_UNKNOWN);
+        data.put("behind", REV_COUNT_UNKNOWN);
+        data.put("degraded", false);
+
+        // 1. git 可用性：不可用即整体空态（与 status() 的降级顺序一致，先挡进程异常）
+        try {
+            if (runGitCommand("git", "--version").exitCode != 0) {
+                return data;
+            }
+        } catch (Exception e) {
+            LOG.warn("[Web] git remoteInfo: git unavailable: {}", e.getMessage());
+            return data;
+        }
+        data.put("gitAvailable", true);
+
+        boolean degraded = false;
+
+        // 2. 是否 git 仓库：不是仓库时没有远端可言，标记 degraded 让面板显示「未初始化」而不是「无远端」
+        try {
+            if (runGitCommand("git", "rev-parse", "--is-inside-work-tree").exitCode != 0) {
+                data.put("degraded", true);
+                return data;
+            }
+        } catch (Exception e) {
+            LOG.warn("[Web] git remoteInfo: repo check failed: {}", e.getMessage());
+            data.put("degraded", true);
+            return data;
+        }
+
+        // 3. 远端地址：无输出即 hasRemote=false（本地仓库尚未 add remote 是最常见的正常状态）
+        try {
+            ProcessResult remote = runGitCommand("git", "remote", "-v");
+            String url = parseRemoteUrl(Arrays.asList(remote.stdout.split("\n")));
+            data.put("hasRemote", url != null);
+            data.put("remoteUrl", url);
+        } catch (Exception e) {
+            degraded = true;
+            LOG.warn("[Web] git remoteInfo: remote listing failed: {}", e.getMessage());
+        }
+
+        // 4. 上游分支：rev-parse 失败（无上游/分离 HEAD）是正常业务状态，不是错误
+        String upstream = null;
+        try {
+            ProcessResult up = runGitCommand("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}");
+            if (up.exitCode == 0) {
+                String value = up.stdout.trim();
+                if (!value.isEmpty() && !"HEAD".equals(value)) {
+                    upstream = value;
+                } else {
+                    // 分离 HEAD 下 git 可能回 HEAD，它不是可用的上游名，按不可用处理
+                    degraded = true;
+                }
+            } else {
+                degraded = true;
+            }
+        } catch (Exception e) {
+            degraded = true;
+            LOG.warn("[Web] git remoteInfo: upstream lookup failed: {}", e.getMessage());
+        }
+        data.put("upstream", upstream);
+
+        // 5. 领先/落后计数：仅在有上游时才有意义
+        if (upstream != null) {
+            try {
+                ProcessResult count = runGitCommand("git", "rev-list", "--left-right", "--count", "@{u}...HEAD");
+                int[] aheadBehind = count.exitCode == 0 ? parseAheadBehind(count.stdout) : null;
+                if (aheadBehind != null) {
+                    data.put("behind", aheadBehind[0]);
+                    data.put("ahead", aheadBehind[1]);
+                } else {
+                    degraded = true;
+                    LOG.warn("[Web] git remoteInfo: unparsable rev-list output: {}", count.stdout);
+                }
+            } catch (Exception e) {
+                degraded = true;
+                LOG.warn("[Web] git remoteInfo: ahead/behind count failed: {}", e.getMessage());
+            }
+        }
+
+        data.put("degraded", degraded);
+        return data;
+    }
+
+    /**
+     * 解析 {@code git remote -v} 输出，取第一个远端的 fetch 地址。
+     *
+     * <p><b>WHY 抽成独立方法</b>：这是纯字符串逻辑，抽出来后无需 spawn 真 git 即可覆盖
+     * 「多远端 / 只有 push 地址 / 空输出 / 畸形行」等分支。</p>
+     *
+     * <p>只认 {@code (fetch)} 行：git 对每个远端输出 fetch 与 push 两行，而面板关心的是
+     * 「代码从哪来」；push 地址可能与 fetch 不同（只读镜像 + 私有推送地址的场景）。
+     * 全部行都没有 fetch 标记时退回第一行的地址，保证 push-only 配置也不至于显示为空。</p>
+     *
+     * @param lines {@code git remote -v} 的逐行输出（可含空行）
+     * @return 第一个可用远端地址；无任何远端时返回 null
+     */
+    static String parseRemoteUrl(List<String> lines) {
+        if (lines == null || lines.isEmpty()) {
+            return null;
+        }
+        String fallback = null;
+        for (String raw : lines) {
+            if (raw == null) continue;
+            String line = raw.trim();
+            if (line.isEmpty()) continue;
+            String url = remoteUrlOfLine(line);
+            if (fallback == null && url != null) {
+                fallback = url;
+            }
+            if (line.endsWith("(fetch)") && url != null) {
+                return url;
+            }
+        }
+        return fallback;
+    }
+
+    /** 从单行 {@code <name><TAB><url> (fetch|push)} 中取地址；畸形行返回 null。 */
+    private static String remoteUrlOfLine(String line) {
+        String body = line;
+        int paren = body.lastIndexOf('(');
+        if (paren > 0 && body.endsWith(")")) {
+            body = body.substring(0, paren).trim();
+        }
+        int tab = body.indexOf('\t');
+        String rest;
+        if (tab >= 0) {
+            rest = body.substring(tab + 1).trim();
+        } else {
+            // 少数 git 版本/配置用空格分隔：退化为「第一段是远端名，其余是地址」
+            String[] parts = body.split("\\s+");
+            rest = parts.length >= 2 ? parts[1] : "";
+        }
+        return rest.isEmpty() ? null : rest;
+    }
+
+    /**
+     * 解析 {@code git rev-list --left-right --count @{u}...HEAD} 的输出。
+     *
+     * <p>输出形如 {@code "2\t3"}：左值是仅上游有的提交数（落后 behind），
+     * 右值是仅本地有的提交数（领先 ahead）。顺序写反会让面板把「落后 3」显示成「领先 3」，
+     * 故单独抽方法锁定语义。</p>
+     *
+     * @param stdout 命令标准输出
+     * @return {@code int[]{behind, ahead}}；空输入或畸形输入返回 null（由调用方置 degraded）
+     */
+    static int[] parseAheadBehind(String stdout) {
+        if (stdout == null) {
+            return null;
+        }
+        String firstLine = stdout.trim();
+        int nl = firstLine.indexOf('\n');
+        if (nl >= 0) {
+            firstLine = firstLine.substring(0, nl).trim();
+        }
+        if (firstLine.isEmpty()) {
+            return null;
+        }
+        String[] parts = firstLine.split("\\s+");
+        if (parts.length < 2) {
+            return null;
+        }
+        try {
+            int behind = Integer.parseInt(parts[0]);
+            int ahead = Integer.parseInt(parts[1]);
+            // 计数不可能为负；负值说明输出不是本命令的产物，按畸形处理
+            if (behind < 0 || ahead < 0) {
+                return null;
+            }
+            return new int[]{behind, ahead};
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     /**
      * 初始化 Git 仓库。
      * <p>在工作区执行 git init，自动生成 .gitignore 文件（仅当文件不存在时），
