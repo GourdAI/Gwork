@@ -41,6 +41,8 @@ import com.gourdai.ai.chat.content.ImageBlock;
 import com.gourdai.ai.chat.content.TextBlock;
 import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.permission.AccessMode;
+import com.gourdai.agent.ContextLengthPolicy;
 import com.gourdai.harness.agent.AgentEndEvent;
 import com.gourdai.harness.agent.AgentStartEvent;
 import com.gourdai.harness.agent.RetryEvent;
@@ -698,14 +700,54 @@ public class WsGate extends SimpleWebSocketListener {
                 HITL.reject(session, task.getToolName());
             }
 
-            // 审批后恢复流执行
-            String modelName = (String) session.getContext().get(HarnessEngine.CTX_MODEL_SELECTED);
+            // 审批后恢复流执行。
+            // 【Loop 取证还原（2026-10-17 review 修复，与 Web 链路同语义）】桌面端审批是 HITL 恢复的
+            // 第二条真实入口：旧实现只读会话级模型/档位自建流，Loop 任务被挂起后在桌面端审批，
+            // 恢复轮会静默换回会话旧模型，且不写/不清取证键——还会破坏「会话上有取证 ⇒ 挂起轮
+            // 属于 Loop 执行」的不变量。现统一经 HarnessEngine.loopRunEvidence 还原 per-turn
+            // override（不写回会话持久键），并在轮首/轮末写清取证与 transient 窗口键。
+            java.util.Map<String, Object> loopResume = HarnessEngine.loopRunEvidence(session);
+            String modelName = null;
+            String thinkingOverride = null;
+            Long contextOverride = null;
+            String accessOverride = null;
+            String loopLabel = null;
+            if (loopResume != null) {
+                String evModel = String.valueOf(loopResume.getOrDefault("model", ""));
+                if (Assert.isNotEmpty(evModel)) modelName = evModel;
+                String evThinking = String.valueOf(loopResume.getOrDefault("thinkingDepth", ""));
+                if (Assert.isNotEmpty(evThinking)) thinkingOverride = evThinking;
+                Object evCtx = loopResume.get("contextLength");
+                if (evCtx instanceof Number && ((Number) evCtx).longValue() > 0) contextOverride = ((Number) evCtx).longValue();
+                String evAccess = String.valueOf(loopResume.getOrDefault("accessMode", ""));
+                if (Assert.isNotEmpty(evAccess)) accessOverride = AccessMode.normalize(evAccess).code();
+                String evName = String.valueOf(loopResume.getOrDefault("name", ""));
+                if (Assert.isNotEmpty(evName)) loopLabel = evName;
+            }
+            if (modelName == null) {
+                modelName = session.getContext().getAs(HarnessEngine.CTX_MODEL_SELECTED);
+            }
             ChatModel chatModel = engine.getModelOrMain(modelName);
             String cwd = session.attrs().getOrDefault(HarnessEngine.ATTR_CWD, ".").toString();
 
             Prompt hitlPrompt = Prompt.of();
 
             final long turnStartMs = System.currentTimeMillis();
+            // 轮次归属 token：transient 窗口键的写/清同值比对，防旧订阅 doFinally 误清新轮
+            final String turnToken = java.util.UUID.randomUUID().toString();
+            final String thinkingOverrideFinal = thinkingOverride;
+            final String accessOverrideFinal = accessOverride;
+            final String loopLabelFinal = loopLabel;
+            final String modelNameFinal = modelName;
+            if (contextOverride != null) {
+                ContextLengthPolicy.setTransient(session, contextOverride, turnToken);
+            } else {
+                ContextLengthPolicy.clearTransient(session, turnToken);
+            }
+            // 取证刷新/清除（与 WebStreamBuilder.recordLoopRunEvidence 同语义）：
+            // Loop 恢复轮刷新 at 保持提示条「最近一次 Loop 执行」语义；无取证时清除残留。
+            recordDesktopLoopEvidence(session, loopLabelFinal, modelName,
+                    thinkingOverrideFinal, contextOverride, accessOverrideFinal, turnStartMs);
             Disposable disposable = engine.prompt(hitlPrompt)
                     .session(session)
                     .options(o -> {
@@ -713,10 +755,21 @@ public class WsGate extends SimpleWebSocketListener {
                         if (Assert.isNotEmpty(cwd)) {
                             o.toolContextPut(HarnessEngine.ATTR_CWD, cwd);
                         }
-                        applyThinkingDepth(o, chatModel, session);
+                        applyThinkingDepth(o, chatModel, session, thinkingOverrideFinal);
+                        // 与 WebStreamBuilder 同口径：本轮生效的模型/档位经 toolContext 透传给工具链，
+                        // 否则 TaskTalent/HITLInterceptor 在恢复轮读不到任务级 override
+                        o.toolContextPut(HarnessEngine.ATTR_MODEL_OVERRIDE,
+                                Assert.isEmpty(modelNameFinal) ? "" : modelNameFinal);
+                        String effectiveAccess = accessOverrideFinal != null
+                                ? accessOverrideFinal
+                                : AccessMode.normalize(session.getContext().getAs(AccessMode.CTX_KEY)).code();
+                        o.toolContextPut(AccessMode.ATTR_KEY, effectiveAccess);
                     })
                     .stream()
-                    .doFinally(signal -> session.attrs().remove("disposable"))
+                    .doFinally(signal -> {
+                        session.attrs().remove("disposable");
+                        ContextLengthPolicy.clearTransient(session, turnToken);
+                    })
                     .doOnNext(chunk -> projectAndSend(chunk, sessionId, socket, turnStartMs))
                     .doOnError(err -> socket.send(new ONode().set("type", "error")
                             .set("sessionId", sessionId).set("text", err.getMessage()).toJson()))
@@ -978,9 +1031,49 @@ public class WsGate extends SimpleWebSocketListener {
     }
 
     private void applyThinkingDepth(com.gourdai.agent.react.ReActOptionsAmend o, ChatModel model, AgentSession session) {
-        String depth = ThinkingDepth.normalize(session.getContext().getAs(HarnessEngine.CTX_THINKING_DEPTH));
+        applyThinkingDepth(o, model, session, null);
+    }
+
+    /**
+     * 思考档位注入（per-turn override 优先）。
+     *
+     * <p>override 非空时以它为准（Loop 恢复轮还原的任务级档位），否则回退会话已存档位；
+     * 与 WebStreamBuilder 同口径把本轮生效值经 toolContext 透传。</p>
+     */
+    private void applyThinkingDepth(com.gourdai.agent.react.ReActOptionsAmend o, ChatModel model, AgentSession session,
+                                    String thinkingOverride) {
+        String depth = Assert.isNotEmpty(thinkingOverride)
+                ? ThinkingDepth.normalize(thinkingOverride)
+                : ThinkingDepth.normalize(session.getContext().getAs(HarnessEngine.CTX_THINKING_DEPTH));
         ThinkingDepth.applyTo(o, model, depth);
         o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, depth);
+    }
+
+    /**
+     * 桌面端恢复轮的 Loop 取证写/清（与 WebStreamBuilder.recordLoopRunEvidence 同语义）。
+     *
+     * <p>有取证（本次恢复属于 Loop 执行）：以本轮生效值重写取证并刷新 at，保持提示条
+     * 「最近一次 Loop 执行」语义；无取证：清除残留键（幂等自愈），避免桌面端普通审批轮
+     * 留下过期取证误导 Web 端提示条与后续恢复。</p>
+     */
+    private static void recordDesktopLoopEvidence(AgentSession session,
+                                                  String loopLabel, String model, String thinkingDepth,
+                                                  Long contextLength, String accessMode, long turnStartMs) {
+        if (session == null) {
+            return;
+        }
+        if (Assert.isEmpty(loopLabel)) {
+            session.getContext().remove(HarnessEngine.CTX_LOOP_RUN);
+            return;
+        }
+        java.util.Map<String, Object> next = new java.util.LinkedHashMap<>();
+        next.put("name", loopLabel);
+        next.put("model", Assert.isNotEmpty(model) ? model : "");
+        next.put("thinkingDepth", thinkingDepth == null ? "" : thinkingDepth);
+        next.put("contextLength", contextLength == null ? 0L : contextLength.longValue());
+        next.put("accessMode", accessMode == null ? "" : accessMode);
+        next.put("at", turnStartMs);
+        session.getContext().put(HarnessEngine.CTX_LOOP_RUN, next);
     }
 
     private static boolean isVisibleTool(String toolName) {

@@ -114,28 +114,51 @@ body.code-mode .automation-view { display: none !important; }
 .auto-sched-pane { margin-top: 10px; }
 .auto-interval-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-primary); }
 
-/* ===== 指令区（composer 形态；不用 .input-box / .welcome-input-box，避免被抢焦点） ===== */
+/* ===== 指令区（完全对齐首页 composer） =====
+ * 容器 class 刻意不写 .input-box / .welcome-input-box：app-streaming.js 在这两个 class 上
+ * 绑了「点击容器即聚焦聊天输入框」，套上会把焦点从表单抢走。
+ * 因此视觉靠本块【抄 .input-box 的值】实现（app.css:958-960）：底色 --bg-input-box、
+ * 边框 --border-input、圆角 12px、投影 --shadow，聚焦态换成 --accent 边框。
+ * 内层元素（.attachments-wrap / .attachment-item* / .input-toolbar / .toolbar-left|right /
+ * .plus-menu* / .cmd-complete / .model-selector* / .access-* / .composer-tray）全部复用全局类，
+ * 这里只补自动化页特有的尺寸差。 */
 .auto-composer {
     position: relative; display: flex; flex-direction: column;
-    background: var(--bg-main); border: 1px solid var(--border-color); border-radius: 12px;
-    transition: border-color .15s, box-shadow .15s;
+    background: var(--bg-input-box); border: 1px solid var(--border-input);
+    border-radius: 12px; box-shadow: var(--shadow);
+    transition: all 0.25s;
 }
-.auto-composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-light); }
-.auto-composer-input-wrap { position: relative; }
+.auto-composer:focus-within {
+    border-color: var(--accent);
+    box-shadow: var(--shadow), 0 0 0 3px rgba(var(--accent-rgb), 0.06);
+}
+/* textarea 字号/行高/内边距对齐首页 .input-box textarea（app.css:960），
+   仅保留自动化页原有的 92px 最小高度（表单里指令通常更长）与 resize:none */
 .auto-composer-textarea {
-    width: 100%; min-height: 92px; max-height: 320px; padding: 12px 14px 6px;
-    font-size: 13px; line-height: 1.65; font-family: inherit;
+    width: 100%; min-height: 92px; max-height: 320px; padding: 12px 14px 4px;
+    font-size: 14px; line-height: 1.6; font-family: var(--font-sans);
     background: transparent; color: var(--text-primary);
     border: none; outline: none; box-sizing: border-box;
     /* resize:none —— 原生手柄会在圆角边框右下角露出一个灰色小三角，
        且与下方 toolbar 视觉冲突；高度改由 JS autoGrowPrompt() 自适应 */
     resize: none; overflow-y: hidden;
 }
-.auto-composer-toolbar {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 6px; padding: 5px 8px;
+.auto-composer-textarea::placeholder { color: var(--text-secondary); }
+/* 附件条：全局 .attachments-wrap 的内边距是 8px 14px 0，与本页容器内边距一致，无需覆写 */
+/* 工具条：沿用全局 .input-toolbar 的 flex/space-between/padding，本页仅收紧左区间距
+   （+菜单 / 工作空间 / 模型选择器三者并排，全局 gap 在窄表单里偏松） */
+.auto-composer-toolbar .toolbar-left { gap: 4px; flex-wrap: wrap; }
+/* 托盘条：全局 .composer-tray 自带 max-width:680px 与 --bg-secondary 底色，
+   但它在首页是「输入框外的底座」（与输入框分离）；本页它嵌在 .auto-composer 内部，
+   故取消宽度上限、去掉底色与上外边距，改用一条分隔线作为「输入框底座」视觉。 */
+.auto-composer-tray {
+    max-width: none; margin-top: 0; padding: 4px 8px;
+    background: transparent; border-radius: 0;
+    border-top: 1px solid var(--border-color);
 }
-.auto-composer-toolbar-left { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* 权限气泡向上弹出（全局 .access-dropdown 已是 bottom:100%），托盘在最底行，
+   向上弹刚好落在输入区内，不会被表单下缘裁切 */
+.auto-composer-tray .access-dropdown { left: 0; right: auto; }
 
 /* ---- 工作空间选择器（自有命名，规避 app-workspace.js 的 document 委托） ---- */
 .auto-ws-selector { position: relative; display: flex; }

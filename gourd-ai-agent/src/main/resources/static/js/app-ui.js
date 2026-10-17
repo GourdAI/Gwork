@@ -23,13 +23,17 @@ function getFileExtension(file) {
     return 'dat';
 }
 
-// Generate unique file name with timestamp + random
+/* 生成落盘用的短唯一名：<kind>-<随机 6 位 base36>.<ext>。
+   WHY 弃用「长前缀 + 13 位毫秒戳」（2026-10-15 用户反馈 pasted-image-… 又长又没意义）：
+   ① 时间戳对唯一性零贡献——同毫秒并发也靠随机段区分，它只是把名字撑到 36+ 字符，
+   在「来源」清单/附件瓦片里必被截断；② pasted-/attachment- 前缀无任何消费方
+   （发送语义由 attachmentsType 承担），属纯噪声。random 6 位 base36 ≈ 2.2e9 组合，
+   单会话 uploads 目录（几十个文件）碰撞概率可忽略。kind 仅为磁盘侧可读性保留。 */
 function generateUniqueFile(originalFile, prefix) {
     if (!originalFile) return null;
-    var timestamp = Date.now();
     var random = Math.random().toString(36).substring(2, 8);
     var ext = getFileExtension(originalFile);
-    var newName = prefix + '-' + timestamp + '-' + random + '.' + ext;
+    var newName = prefix + '-' + random + '.' + ext;
     return new File([originalFile], newName, { type: originalFile.type, lastModified: Date.now() });
 }
 
@@ -120,8 +124,10 @@ function handlePaste(e) {
         return;
     }
     // 非图片同步入队，先处理确保名额计算准确；图片走 FileReader 异步。
-    var acceptedOther  = otherFiles.length > 0 ? processSelectedFiles(otherFiles, 'file', 'pasted-file') : 0;
-    var acceptedImages = images.length > 0 ? processSelectedFiles(images, 'image', 'pasted-image') : 0;
+    // 落盘名不再区分「粘贴/拖放」来源（pasted- 前缀无消费方，2026-10-15 移除）：
+    // kind 由 attachmentsType 在 processSelectedFile 内派生（file-<随机>.<ext> / image-<随机>.<ext>）。
+    var acceptedOther  = otherFiles.length > 0 ? processSelectedFiles(otherFiles, 'file') : 0;
+    var acceptedImages = images.length > 0 ? processSelectedFiles(images, 'image') : 0;
     if (acceptedOther + acceptedImages < otherFiles.length + images.length) {
         showToast(GourdI18n.t('ui.attachment_partial_limit', MAX_ATTACHMENTS), 'error');
     }
@@ -216,8 +222,9 @@ function processSelectedFile(file, attachmentsType, namePrefix) {
     // 捕获当前版本号，用于后续异步回调校验
     var currentVersion = _pendingFilesVersion;
 
-    // 生成唯一文件名，避免服务端 uploads/ 目录同名覆盖
-    var uniqueFile = generateUniqueFile(file, namePrefix || 'attachment');
+    // 生成唯一文件名，避免服务端 uploads/ 目录同名覆盖（kind 前缀仅为磁盘可读性，
+    // 发送语义由 attachmentsType 承担；不传前缀时按 kind 派生）。
+    var uniqueFile = generateUniqueFile(file, namePrefix || (attachmentsType === 'image' ? 'image' : 'file'));
 
     if (attachmentsType === 'image') {
         // Image attachment: always treated as multimodal image

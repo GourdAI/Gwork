@@ -443,10 +443,116 @@ function setActiveSession(sessionId) {
     // 按会话恢复上下文指示器（该会话有历史用量则回填，否则清空）
     if (typeof restoreContextIndicator === 'function') restoreContextIndicator(sess);
     else if (typeof resetContextIndicator === 'function') resetContextIndicator();
+    // 任务执行会话的运行参数提示条（loop 任务）：按新活动会话重建/隐藏
+    if (typeof renderLoopRunBanner === 'function') renderLoopRunBanner();
     // 切换完成后回收较早会话的 DOM 与草稿（当前会话已置为 active，不会被误淘汰）
     evictInactiveSessions();
     pruneSessionDrafts();
 }
+
+/* ===== 任务执行会话的运行参数提示条 =====
+   背景：定时任务的模型/思考/上下文/权限是 transient 的，仅为该任务的自动执行生效，
+   刻意不写入会话上下文（避免污染用户前台选择）。因此执行会话的 composer 展示的是
+   会话自己的值，用户会误以为「任务参数没生效/对不上」。本提示条在打开执行会话时
+   显式展示任务运行参数，并注明“仅任务自动执行使用”。
+
+   数据由 app-automation.js 打开执行对话时经 setLoopRunBanner 注入；按 sessionId 存储，
+   切走再切回仍能恢复；会话本身在侧栏直接打开时未注入则不显示。 */
+var loopRunBannerBySession = {};
+
+/** 登记某会话的任务运行参数（覆盖式），若该会话正活动则立即重绘。 */
+function setLoopRunBanner(sessionId, info) {
+    if (!sessionId || !info) return;
+    loopRunBannerBySession[sessionId] = info;
+    if (typeof activeSessionId !== 'undefined' && activeSessionId === sessionId) {
+        renderLoopRunBanner();
+    }
+}
+
+/** 清除某会话的提示条（会话删除/任务删除后由调用方决定是否清理；幂等）。 */
+function clearLoopRunBanner(sessionId) {
+    if (sessionId && loopRunBannerBySession[sessionId]) {
+        delete loopRunBannerBySession[sessionId];
+        if (typeof activeSessionId !== 'undefined' && activeSessionId === sessionId) {
+            renderLoopRunBanner();
+        }
+    }
+}
+
+/** 按当前活动会话渲染提示条（无数据则隐藏）。 */
+function renderLoopRunBanner() {
+    var host = document.getElementById('loopRunBanner');
+    if (!host) return;
+    var info = (typeof activeSessionId !== 'undefined' && activeSessionId) ? loopRunBannerBySession[activeSessionId] : null;
+    if (!info) {
+        host.style.display = 'none';
+        host.innerHTML = '';
+        return;
+    }
+    var tFn = (window.GourdI18n && typeof window.GourdI18n.t === 'function') ? window.GourdI18n.t : null;
+    function tt(key, fallback) {
+        var v = tFn ? tFn.call(window.GourdI18n, key) : null;
+        return (v && v !== key) ? v : fallback;
+    }
+    function esc(s) { return (typeof escapeHtml === 'function') ? escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s); }
+
+    var html = '';
+    // 任务名（取证数据携带；旧注入路径无 name 时仅显示通用标题）
+    var titleText = tt('settings.loop.run_banner_title', '任务运行参数');
+    if (info.name) titleText += ' · ' + info.name;
+    html += '<span class="loop-run-banner-title">'
+        + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>'
+        + esc(titleText) + '</span>';
+
+    // 模型：任务指定优先，未指定显示「默认模型」。
+    // 【字段契约 2026-10-17 review 修复】取证端点 /web/chat/loop-run 输出键是 model
+    // （WebController#loopRunEvidenceFromContext 与旧快照派生路径同键）；旧实现误读
+    // 早期任务定义注入链路的残留字段名 modelName → 模型栏恒显「默认模型」。
+    html += '<span class="loop-run-tag">' + esc(tt('settings.loop.run_banner_model', '模型')) + ': <b>'
+        + esc(info.model || tt('history.default_model', '默认模型')) + '</b></span>';
+
+    // 思考：未指定显示「默认」
+    if (info.thinkingDepth && String(info.thinkingDepth).toLowerCase() !== 'auto') {
+        html += '<span class="loop-run-tag">' + esc(tt('settings.loop.run_banner_thinking', '思考')) + ': <b>'
+            + esc(info.thinkingDepth) + '</b></span>';
+    } else {
+        html += '<span class="loop-run-tag">' + esc(tt('settings.loop.run_banner_thinking', '思考')) + ': <b>'
+            + esc(tt('settings.loop.run_banner_default', '默认')) + '</b></span>';
+    }
+
+    // 上下文：未指定显示「默认」
+    var ctxLabel = '';
+    if (info.contextLength && typeof window.GourdModelSelector !== 'undefined' && GourdModelSelector.contextLengthLabel) {
+        ctxLabel = GourdModelSelector.contextLengthLabel(info.contextLength);
+    } else if (info.contextLength) {
+        ctxLabel = String(info.contextLength);
+    }
+    html += '<span class="loop-run-tag">' + esc(tt('settings.loop.run_banner_context', '上下文')) + ': <b>'
+        + esc(ctxLabel || tt('settings.loop.run_banner_default', '默认')) + '</b></span>';
+
+    // 权限：null=跟随会话（未见即显“默认权限”同款文案前缀）；full 高亮警示
+    var mode = info.accessMode ? String(info.accessMode).toLowerCase() : '';
+    var modeLabel, modeCls = '';
+    if (mode === 'full') {
+        modeLabel = tt('settings.loop.access_full', '完全访问');
+        modeCls = ' is-full';
+    } else if (mode === 'default') {
+        modeLabel = tt('settings.loop.access_default', '默认权限');
+    } else {
+        modeLabel = tt('settings.loop.access_mode_default', '默认（跟随会话）');
+    }
+    html += '<span class="loop-run-tag' + modeCls + '">' + esc(tt('settings.loop.access_mode', '权限档位')) + ': <b>'
+        + esc(modeLabel) + '</b></span>';
+
+    html += '<span class="loop-run-banner-note">' + esc(tt('settings.loop.run_banner_desc', '仅用于该任务的自动执行，不影响本会话手动对话')) + '</span>';
+
+    host.innerHTML = html;
+    host.style.display = 'flex';
+}
+
+window.setLoopRunBanner = setLoopRunBanner;
+window.clearLoopRunBanner = clearLoopRunBanner;
+window.renderLoopRunBanner = renderLoopRunBanner;
 
 function deactivateSession() {
     if (activeSessionId && sessionMap[activeSessionId]) {

@@ -92,6 +92,56 @@ public class HarnessEngine {
     public final static String ATTR_THINKING_DEPTH = "__thinkingDepth";
 
     /**
+     * 本轮生效的模型（per-turn，经 toolContext 透传）。
+     *
+     * <p>与 {@link #ATTR_THINKING_DEPTH} 同构的缺口：{@link #CTX_MODEL_SELECTED} 是<b>会话级</b>的
+     * 用户前台选择，而 Loop 定时任务等场景需要「按任务而非按会话」指定模型（WebStreamBuilder /
+     * startSyncRun 的 selectedModel + transientSelection=true），该 override 刻意<b>不写入</b>
+     * 会话上下文以免污染用户选择。若不另行透传，TaskTalent 构建于代理时只能读到会话级值，
+     * 于是主代理用任务模型、子代理静默换成会话旧模型/默认模型——这正是「定时任务设定的模型
+     * 未生效、跑成了别的模型」的根因。下划线前缀参数由框架注入且不进入 JSON schema，
+     * 与 {@link #ATTR_CWD} 同机制。</p>
+     */
+    public final static String ATTR_MODEL_OVERRIDE = "__modelOverride";
+
+    /**
+     * Loop 执行取证标记（会话级，随快照持久化）。
+     *
+     * <p>存在的理由：Loop 定时任务的模型/思考/上下文/权限是 per-turn transient 的，刻意不写入
+     * 会话上下文（避免污染用户前台选择），于是执行会话的 composer 回显的永远是会话自己的旧值，
+     * 用户看到「执行视图与自动化表单显示不一致」会误判参数没生效。本键在 Loop 轮开头把
+     * 「本轮实际生效的参数」以取证形态写入会话（值为本轮生效值而非任务定义值，任务随后被删除
+     * 也不影响回看），供执行视图的「任务运行参数」提示条经 /web/chat/loop-run 端点恢复。</p>
+     *
+     * <p>前台对话轮开头清除本键（幂等自愈）：该会话恢复手动对话后，提示条不应继续声称
+     * 「本会话正在按任务参数运行」。值为 Map：name/model/thinkingDepth/contextLength/accessMode/at。</p>
+     */
+    public final static String CTX_LOOP_RUN = "_loop_run";
+
+    /**
+     * 读取会话上的 Loop 执行取证标记（供各恢复入口还原任务级 override）。
+     *
+     * <p>统一口径（2026-10-17 review）：Web 与桌面两条恢复链路都必须经本方法读取证，
+     * 避免两处各自解析再次漂移。形态兼容：内存写入的 Map 直用；快照恢复的会话
+     * 理论上经 FlowContext 反序列化后恒为 Map，ONode 分支仅作防御（防 snack4 行为
+     * 变化时取证被静默丢弃）。读不到/形态不符一律返回 null（按普通发言语义处理）。</p>
+     */
+    @SuppressWarnings("unchecked")
+    public static java.util.Map<String, Object> loopRunEvidence(AgentSession session) {
+        if (session == null) {
+            return null;
+        }
+        Object raw = session.getContext().get(CTX_LOOP_RUN);
+        if (raw instanceof java.util.Map) {
+            return (java.util.Map<String, Object>) raw;
+        }
+        if (raw instanceof org.noear.snack4.ONode && !((org.noear.snack4.ONode) raw).isNull()) {
+            return ((org.noear.snack4.ONode) raw).toBean(java.util.Map.class);
+        }
+        return null;
+    }
+
+    /**
      * 会话级访问控制档位（用户在输入框工具栏上的选择，随快照持久化）。
      *
      * <p>值为 {@link com.gourdai.harness.permission.AccessMode} 的 code。

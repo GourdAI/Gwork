@@ -150,6 +150,10 @@
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
             </button>
         </div>
+        <!-- 任务执行会话的「运行参数」提示条：打开定时任务的执行对话时由 JS 填充并显显。
+             内容为该任务的 transient 运行参数（模型/思考/上下文/权限）；刻意标识「仅本任务自动执行使用」，
+             因为执行会话的 composer 展示的是会话自己的选择，两者按设计不互通（避免任务污染用户会话）。 -->
+        <div class="loop-run-banner" id="loopRunBanner" style="display:none"></div>
         <div class="messages-wrap" id="messagesWrap">
             <!-- Per-session containers are added here dynamically -->
         </div>

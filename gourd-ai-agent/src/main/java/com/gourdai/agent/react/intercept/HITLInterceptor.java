@@ -55,14 +55,28 @@ public class HITLInterceptor extends AbsReActInterceptor {
     }
 
     /**
-     * 读取本会话的访问控制档位。
+     * 读取本轮生效的访问控制档位。
      *
-     * <p>以会话上下文为准而非 toolContext：档位的权威存储位是 FlowContext，
-     * toolContext 只是给工具方法的投影。读不到时 {@code normalize} 会 fail-safe 到最严的一档。
-     * 子代理会话由 {@code TaskTalent} 在创建时写入同一键，故子代理与父会话同档——
-     * 空间与审批两路消费点不会在子代理里各说各话。</p>
+     * <p>优先读 toolContext 的 per-turn 投影（{@link AccessMode#ATTR_KEY}）：Loop 定时任务的
+     * 任务级档位刻意不写入会话上下文（避免污染用户前台选择），只经 toolContext 透传；
+     * 只读会话上下文会让「任务级完全访问」在审批闸门这里静默失效——空间已放行、审批仍弹，
+     * 正是 AccessPolicy 要消灭的漂移症状。</p>
+     *
+     * <p>投影缺省时回退会话上下文（权威存储位，随快照持久化）。两路读到的都是框架注入值：
+     * 工具参数里的同形键由 ToolRequest 统一剥离，模型无法伪造。读不到档位时 {@code normalize}
+     * 会 fail-safe 到最严的一档。子代理会话由 {@code TaskTalent} 在创建时写入同一键，
+     * 故子代理与父会话同档——空间与审批两路消费点不会在子代理里各说各话。</p>
      */
     static AccessMode accessModeOf(ReActTrace trace) {
+        if (trace.getOptions() != null && trace.getOptions().getToolContext() != null) {
+            Object perTurn = trace.getOptions().getToolContext().get(AccessMode.ATTR_KEY);
+            if (perTurn != null) {
+                String text = String.valueOf(perTurn).trim();
+                if (!text.isEmpty()) {
+                    return AccessMode.normalize(text);
+                }
+            }
+        }
         if (trace.getContext() == null) {
             return AccessMode.DEFAULT;
         }

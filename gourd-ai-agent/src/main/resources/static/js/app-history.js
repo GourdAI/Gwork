@@ -2523,6 +2523,10 @@ var $welcomeCmdComplete = $('#welcomeCmdComplete');
 var $chatCmdComplete = $('#chatCmdComplete');
 var cmdActiveIndex = -1;
 var cmdVisibleItems = [];
+// 当前展示候选集的面板元素（欢迎页 / 对话页 / 自动化页共用同一份全局状态）。
+// 多宿主复用后必须记住「这份状态属于谁」：否则自动化页收起自己的面板时
+// 会把聊天页正在展示的候选集一并清空（反之亦然）。
+var cmdActivePanel = null;
 
 function getActiveCmdComplete() {
     return inChatMode ? $chatCmdComplete[0] : $welcomeCmdComplete[0];
@@ -2572,12 +2576,13 @@ function showCmdComplete(inputEl, completeEl, prefix) {
     }
 
     if (cmdVisibleItems.length === 0) {
-        hideCmdComplete();
+        hideCmdCompleteFor(completeEl);
         return;
     }
 
     cmdTrigger = trigger;
     cmdActiveIndex = -1;
+    cmdActivePanel = completeEl;
     $(completeEl).html(html).addClass('show');
 }
 
@@ -2587,6 +2592,26 @@ function hideCmdComplete() {
     cmdActiveIndex = -1;
     cmdVisibleItems = [];
     cmdTrigger = null;
+    cmdActivePanel = null;
+}
+
+/**
+ * 参数化收起：只收起指定面板，并在全局候选集确属该面板时一并清空。
+ *
+ * 供其它宿主页（自动化表单的 #autoCmdComplete）复用命令补全时调用：
+ * 直接调 hideCmdComplete() 会漏收这些非聊天页面板（它只认两个固定 id），
+ * 而无条件清空全局状态又会误伤聊天页正在展示的候选集。
+ * 不传 el 时等同 hideCmdComplete()。
+ */
+function hideCmdCompleteFor(el) {
+    if (!el) { hideCmdComplete(); return; }
+    $(el).removeClass('show');
+    if (!cmdActivePanel || cmdActivePanel === el) {
+        cmdActiveIndex = -1;
+        cmdVisibleItems = [];
+        cmdTrigger = null;
+        cmdActivePanel = null;
+    }
 }
 
 function applyCmdSelection(inputEl, completeEl) {
@@ -2633,7 +2658,8 @@ function applyCmdSelection(inputEl, completeEl) {
         
         autoResize(inputEl);
     }
-    hideCmdComplete();
+    // 按面板收起：同一函数既服务聊天页两个面板，也服务自动化页面板
+    hideCmdCompleteFor(completeEl);
 }
 
 function navigateCmdComplete(e, inputEl, completeEl) {
@@ -2670,7 +2696,7 @@ function navigateCmdComplete(e, inputEl, completeEl) {
     }
 
     if (e.key === 'Escape') {
-        hideCmdComplete();
+        hideCmdCompleteFor(completeEl);
         return true;
     }
 
@@ -3367,6 +3393,10 @@ function refreshSessionModel(sessionId) {
                 if (window.GourdAccessMode && typeof window.GourdAccessMode.applyServerMode === 'function') {
                     window.GourdAccessMode.applyServerMode(sessionId, data.accessMode);
                 }
+                // Loop 执行取证提示条恢复：执行会话 composer 回显的是会话自己的旧值（任务参数
+                // transient 不写会话），刷新后/任意入口打开执行会话都靠这里从 /web/chat/loop-run
+                // 拉「最近一次 Loop 执行的实际生效参数」重建提示条；无取证则清除。
+                restoreLoopRunBanner(sessionId);
                 renderModelUI();
             } catch (e) {
                 console.error('Failed to parse session model:', e);
@@ -3386,6 +3416,21 @@ function refreshSessionModel(sessionId) {
         renderModelUI();
     }
 }
+
+// 从后端取证端点恢复「任务运行参数」提示条（刷新后/任意入口打开执行会话的唯一恢复路径）。
+// 数据源是会话快照里的 Loop 轮取证键（本轮实际生效值），任务被删除也不影响回看。
+function restoreLoopRunBanner(sessionId) {
+    if (!sessionId) return;
+    $.get('/web/chat/loop-run?sessionId=' + encodeURIComponent(sessionId), function (resp) {
+        var info = (resp && resp.code === 200) ? resp.data : null;
+        if (info && typeof window.setLoopRunBanner === 'function') {
+            window.setLoopRunBanner(sessionId, info);
+        } else if (typeof window.clearLoopRunBanner === 'function') {
+            window.clearLoopRunBanner(sessionId);
+        }
+    });
+}
+window.restoreLoopRunBanner = restoreLoopRunBanner;
 
 // 去掉「供应商-」前缀的展示短名：模型名由供应商同步生成时为 provider + '-' + modelId，
 // 分组标题已展示供应商，选项内不再重复该前缀
@@ -3713,6 +3758,20 @@ window.getSelectedContext = getSelectedContext;
 window.selectContext = selectContext;
 // 思考深度档位单一真源：供自动化视图（app-automation.js）复用，避免重复维护档位表
 window.thinkingOptionsForModel = thinkingOptionsForModel;
+
+/* 命令补全（/ 命令、@ 子代理、$ 技能）对外接口：供自动化表单的指令区完整复用，
+   避免在 app-automation.js 里再实现一份候选集过滤/键盘导航（两份必然漂移）。
+   宿主需自备面板元素并自行处理「点击候选项」与「点击外部收起」（见 app-automation.js）。 */
+window.GourdCmdComplete = {
+    show: showCmdComplete,
+    hide: hideCmdCompleteFor,
+    apply: applyCmdSelection,
+    navigate: navigateCmdComplete,
+    trigger: triggerCmdComplete,
+    // 供外部宿主在「点击候选项」时先定位再 apply（cmdActiveIndex 是本模块私有，
+    // 无法从外部直接赋值；与 app-history.js 自己的面板点击处理同范式）
+    setIndex: function (i) { cmdActiveIndex = i; }
+};
 
 // Initial load (no specific session, get default selected)
 __whenBackendReady(function () { loadModels(null); });

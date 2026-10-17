@@ -141,7 +141,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 /* Chat 聚合视图：小节标题（项目 / 任务） */
 .sidebar-section-title { padding: 10px 8px 6px; font-size: 11px; color: var(--text-tertiary); font-weight: 600; letter-spacing: 1px; }
 /* 项目文件夹节点（可展开/收起，展开态箭头旋转 90°），其会话嵌套在下方缩进区 */
-.proj-node { position: relative; display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 8px; cursor: pointer; color: var(--text-sidebar); font-size: 13px; transition: all 0.15s; }
+.proj-node { position: relative; display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 8px; cursor: pointer; color: var(--text-sidebar); font-size: 13px; line-height: 20px; transition: all 0.15s; }
 .proj-node:hover { background: var(--bg-hover); }
 .proj-node svg { flex-shrink: 0; }
 .proj-chevron { color: var(--text-tertiary); transition: transform 0.15s; }
@@ -158,7 +158,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .proj-action-btn:hover, .item-action-btn:hover { background: rgba(127,127,127,0.15); color: var(--text-primary); }
 .proj-new-chat:hover { background: rgba(127,127,127,0.15); color: var(--accent); }
 .proj-remove:hover { background: rgba(127,127,127,0.15); color: var(--color-danger); }
-.proj-sessions .sidebar-item { padding: 6px 8px; }
+.proj-sessions .sidebar-item { padding: 6px 8px; border-radius: 8px; }
 /* 会话行右侧相对时间小字 */
 .sidebar-item-time { font-size: 11px; color: var(--text-tertiary); flex-shrink: 0; margin-left: 8px; }
 /* 定时任务会话标记：条目名前时钟小图标（悬停提示「定时任务」），选中态随主题色 */
@@ -339,6 +339,33 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .chat-view.active { display: flex; }
 .messages-wrap { flex: 1; overflow-y: auto; }
 .messages-inner { max-width: 820px; margin: 0 auto; padding: 28px 24px 12px; }
+
+/* 任务执行会话的「运行参数」提示条（loop 任务运行时参数；与 composer 的会话选择互不干扰）。
+   颜色走主题变量；is-full 走强调态，提醒完全访问风险。 */
+.loop-run-banner {
+    flex-shrink: 0;
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
+    margin: 10px 24px 0; padding: 8px 14px;
+    max-width: 820px;
+    align-self: center; width: calc(100% - 48px);
+    background: var(--bg-code, var(--bg-hover)); border: 1px solid var(--border-color);
+    border-radius: 10px; font-size: 12px; color: var(--text-secondary);
+}
+.loop-run-banner .loop-run-banner-title {
+    display: inline-flex; align-items: center; gap: 5px;
+    color: var(--text-primary); font-weight: 600;
+}
+.loop-run-banner .loop-run-banner-title svg { color: var(--text-tertiary); }
+.loop-run-banner .loop-run-tag {
+    display: inline-flex; align-items: center; gap: 3px;
+    padding: 1px 8px; border-radius: 999px; line-height: 18px;
+    background: var(--bg-main); border: 1px solid var(--border-color);
+    color: var(--text-secondary); white-space: nowrap;
+}
+.loop-run-banner .loop-run-tag b { color: var(--text-primary); font-weight: 500; }
+.loop-run-banner .loop-run-tag.is-full { border-color: var(--error-border); color: var(--error-text); }
+.loop-run-banner .loop-run-tag.is-full b { color: var(--error-text); }
+.loop-run-banner .loop-run-banner-note { color: var(--text-tertiary); }
 
 /* Message */
 .msg-row { display: flex; margin-bottom: 28px; gap: 0; animation: msg-in 0.25s ease-out; }
@@ -1117,6 +1144,13 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .access-option.active .access-option-check { opacity: 1; }
 .access-option.active.is-full .access-option-check { color: var(--color-warning, #e8a33d); }
 /* 窄屏：气泡不得超出视口右边界 */
+
+/* 定时任务表单指令区（composer-tray）内的权限档位选择器：与首页托盘同构 ——
+   无边框文本按钮 + 气泡向上弹出。旧形态（高级区内的整宽输入框视觉、气泡向下）已废弃：
+   档位选择器迁到了指令区底座托盘，再占满表单宽度会与托盘语言冲突。 */
+.auto-composer-tray .auto-access-selector { flex: 0 0 auto; }
+    .auto-composer-tray .auto-access-selector .access-selector-current { max-width: none; }
+
 @media (max-width: 768px) {
     .access-dropdown { min-width: 0; max-width: calc(100vw - 24px); }
     .access-selector-current { max-width: 132px; padding-left: 7px; padding-right: 7px; }
@@ -3439,7 +3473,13 @@ pre:hover .code-copy-btn { opacity: 1; }
    （暗色漏色教训：.workspace-action-btn 基类漏 color 曾致「打开远程目录」
    暗色黑字黑底不可见）。 */
 
-/* ---- 分组树（项目 tab：本地组 + 每在线连接一组） ---- */
+/* ---- 分组树（项目 tab：本地组 + 每在线连接一组） ----
+   行高统一口径（2026-10-15 用户反馈「高度不一致看着怪」）：组头 / 项目行 /
+   组内会话行统一 34px 盒高 + 8px 圆角。三类实测曾为 26 / 34.8 / 34px：
+   - 组头：内容行盒仅约 16px，padding 5px 撑不到 34 → min-height 补足；
+   - 项目行：line-height 承袭全局 1.6（13px 字 → 20.8px 行盒 = 34.8）→ 锁 20px；
+   - 会话行：padding 6px×2 + label 22px 行盒 = 34，已是目标值（仅圆角对齐 8px）。
+   高度口径禁止在单行上改 padding 凑数（会连带文字上下留白变化、视觉密度不齐）。 */
 .ws-group { margin: 2px 0; }
 .ws-group-head {
     display: flex; align-items: center; gap: 6px; width: 100%;
@@ -3447,7 +3487,8 @@ pre:hover .code-copy-btn { opacity: 1; }
     /* 基类显式 color：button 的 UA 默认色在暗色主题黑字黑底（漏色教训） */
     color: var(--text-primary);
     font-size: 12px; font-weight: 600; font-family: inherit; text-align: left;
-    border-radius: 6px;
+    min-height: 34px;
+    border-radius: 8px;
 }
 .ws-group-head:hover { background: var(--bg-hover); }
 .ws-group-caret {
@@ -3482,6 +3523,9 @@ pre:hover .code-copy-btn { opacity: 1; }
     display: flex; align-items: center; gap: 5px; width: 100%;
     padding: 3px 8px; border: none; background: none; cursor: pointer;
     color: var(--text-secondary); font-size: 11.5px; font-family: inherit; text-align: left;
+    /* 与组头/项目行/会话行同口径：34px 盒高 + 8px 圆角（行高统一纪律） */
+    min-height: 34px;
+    border-radius: 8px;
 }
 .ws-group-global-head:hover { background: var(--bg-hover); color: var(--text-primary); }
 
@@ -3534,4 +3578,4 @@ pre:hover .code-copy-btn { opacity: 1; }
 .ws-group-global-head[aria-expanded="true"] .ws-group-caret { transform: rotate(90deg); }
 .ws-group-global-head[aria-expanded="false"] + .ws-group-global-body { display: none; }
 .ws-group-global-body { margin: 1px 0 3px 14px; border-left: 1px solid var(--border-color); padding-left: 6px; }
-.ws-group-global-body .sidebar-item { padding: 6px 8px; }
+.ws-group-global-body .sidebar-item { padding: 6px 8px; border-radius: 8px; }

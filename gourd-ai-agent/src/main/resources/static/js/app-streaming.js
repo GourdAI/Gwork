@@ -628,6 +628,15 @@ function sendWithFormDataGrouped(sess, text, filesToSend) {
     var fields = { input: text };
     if (sess._pendingClientMessageId) fields.clientMessageId = sess._pendingClientMessageId;
 
+    // 【乐观清除「任务运行参数」提示条（2026-10-17 review M1 修复）】正常发言轮是前台对话轮，
+    // 后端轮首会清取证键；但前端内存缓存（loopRunBannerBySession）无失效时机，
+    // 横幅会停在陈旧态继续声称「按任务参数运行」，且切走再切回命中缓存跳过拉取、永不自愈。
+    // 命令（/xxx）不发起新一轮，不清；busy/fail 时本条未真正开轮，用 restore 回补后端权威态。
+    var isPlainTurn = !(typeof text === 'string' && text.indexOf('/') === 0);
+    if (isPlainTurn && typeof window.clearLoopRunBanner === 'function') {
+        window.clearLoopRunBanner(sess.sessionId);
+    }
+
     // 标记流式状态，WebSocket onmessage 会处理数据
     sess.isStreaming = true;
     ensureSidebarRefreshTimer();
@@ -644,6 +653,10 @@ function sendWithFormDataGrouped(sess, text, filesToSend) {
         onBusy: function() {
             sess._awaitingSendAck = false;
             sess._queueOriginItem = null;
+            // busy = 本条未开新轮（上一任务仍在跑）：回补乐观清除，与后端权威态对齐
+            if (isPlainTurn && typeof window.restoreLoopRunBanner === 'function') {
+                window.restoreLoopRunBanner(sess.sessionId);
+            }
             handleSendBusy(sess, text, filesToSend);
         },
         onDone: function(st) {
@@ -655,6 +668,10 @@ function sendWithFormDataGrouped(sess, text, filesToSend) {
         },
         onFail: function(err) {
             console.error('Send error:', err);
+            // 请求可能未达服务端（未开轮）：回补乐观清除，以取证端点权威态为准
+            if (isPlainTurn && typeof window.restoreLoopRunBanner === 'function') {
+                window.restoreLoopRunBanner(sess.sessionId);
+            }
             var errMsg = GourdI18n.t('streaming.send_failed');
             if (typeof showToast === 'function') showToast(errMsg, 'error');
             // 请求可能已被服务端接受，只是响应在网络抖动中丢失。保留当前消息并进入 replay 确认，

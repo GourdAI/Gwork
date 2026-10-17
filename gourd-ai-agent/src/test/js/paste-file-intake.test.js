@@ -136,7 +136,7 @@ test('粘贴非图片文件（xlsx）必须入队为 file 附件 —— 原始 b
     assert.strictEqual(sb.__pendingFiles.length, 1, `应入队 1 个附件，实际 ${sb.__pendingFiles.length}`);
     assert.strictEqual(sb.__pendingFiles[0].type, 'file');
     assert.strictEqual(sb.__pendingFiles[0].attachmentsType, 'file');
-    assert.match(sb.__pendingFiles[0].name, /^pasted-file-\d+-\w+\.xlsx$/, '文件名应带 pasted-file 前缀与 xlsx 后缀');
+    assert.match(sb.__pendingFiles[0].name, /^file-\w+\.xlsx$/, '文件名应为短随机名 file-<随机>.xlsx（2026-10-15 起去掉 pasted 前缀与毫秒时间戳）');
 });
 
 test('粘贴 PDF 同样入队（不得只认 image/*）', async () => {
@@ -202,7 +202,7 @@ test('多个非图片文件全部入队（不得只取第一个）', async () =>
     })));
     await tick();
     assert.strictEqual(sb.__pendingFiles.length, 3, '3 个文件应全部入队');
-    // 入队后文件会被 generateUniqueFile 改名为 pasted-file-<时间戳>-<随机>.<后缀>，
+    // 入队后文件会被 generateUniqueFile 改名为 file-<随机>.<后缀>，
     // 原名不保留 → 只能断言后缀与顺序，不能断言原名。
     const exts = sb.__pendingFiles.map(x => x.name.split('.').pop());
     assert.deepStrictEqual(exts, ['xlsx', 'pdf', 'zip'], '后缀应与源文件一致且保持顺序');
@@ -340,8 +340,8 @@ test('非图片但 MIME 含 "image" 字样的类型（如 application/x-image）
     assert.strictEqual(sb.__pendingFiles.length, 1);
     assert.strictEqual(sb.__pendingFiles[0].attachmentsType, 'file',
         'application/x-image 不得被当成多模态图片发送（attachmentsType 应为 file）');
-    assert.match(sb.__pendingFiles[0].name, /^pasted-file-/,
-        '应走 file 桶的 pasted-file 命名，而非 pasted-image');
+    assert.match(sb.__pendingFiles[0].name, /^file-/,
+        '应走 file 桶的 file- 命名，而非 image-');
 });
 
 test('preventDefault 只在确定接管后调用一次（全函数唯一）', () => {
@@ -352,4 +352,17 @@ test('preventDefault 只在确定接管后调用一次（全函数唯一）', ()
     const pdIdx = body.indexOf('preventDefault()');
     const firstReturn = body.indexOf('&& !htmlData) return');
     assert.ok(firstReturn > 0 && firstReturn < pdIdx, 'preventDefault 必须在纯文本早退之后');
+});
+
+/* 【短随机名纪律（2026-10-15 用户需求：去掉 pasted 前缀、缩短长名）】
+   名字从 <prefix>-<13位毫秒戳>-<随机>.<ext>（36+ 字符，UI 必被截断）
+   缩为 <prefix>-<随机6位base36>.<ext>。唯一性靠随机段（同毫秒并发也靠它），
+   时间戳零贡献；pasted-* 前缀无任何消费方，已从调用点移除。 */
+test('generateUniqueFile：短随机名纪律（不得回潮毫秒时间戳/pasted 前缀）', () => {
+    const body = sliceFunction(SRC, 'function generateUniqueFile(');
+    assert.doesNotMatch(body, /Date\.now\(\)[\s\S]{0,80}random/, '名称不得再拼接毫秒时间戳');
+    assert.match(body, /prefix \+ '-' \+ random \+ '\.' \+ ext/, '名称形状必须是 <prefix>-<随机>.<ext>');
+    assert.doesNotMatch(SRC, /'pasted-image'|'pasted-file'/, 'pasted-* 前缀不得回潮（无消费方，纯噪声）');
+    assert.match(SRC, /namePrefix \|\| \(attachmentsType === 'image' \? 'image' : 'file'\)/,
+        '无显式前缀时必须按附件类型派生 image-/file-（磁盘侧可读性）');
 });

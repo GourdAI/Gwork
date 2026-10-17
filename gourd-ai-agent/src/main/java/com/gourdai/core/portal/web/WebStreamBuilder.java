@@ -210,6 +210,45 @@ public class WebStreamBuilder {
      */
     public Flux<WebChunk> buildStreamFlux(AgentSession session, ReActAgent agent, ChatModel chatModel, String sessionCwd, Prompt prompt,
                                           String thinkingDepthOverride, Long contextLengthOverride) {
+        return buildStreamFlux(session, agent, chatModel, sessionCwd, prompt, thinkingDepthOverride, contextLengthOverride, null, null);
+    }
+
+    /**
+     * 构建流式响应管线（带思考深度、上下文窗口与模型覆盖）。
+     *
+     * @param modelOverride 本轮任务专用的模型名；为 null 时回退会话上下文中的选择。
+     *                      用于 Loop 定时任务等「按任务而非按会话」指定模型的场景，
+     *                      经 toolContext 透传给 TaskTalent，避免子代理静默用回会话旧模型
+     *                      （正是「定时任务设定的模型未生效」的根因）。不写入会话上下文。
+     */
+    public Flux<WebChunk> buildStreamFlux(AgentSession session, ReActAgent agent, ChatModel chatModel, String sessionCwd, Prompt prompt,
+                                      String thinkingDepthOverride, Long contextLengthOverride, String modelOverride,
+                                      String accessModeOverride) {
+        return buildStreamFlux(session, agent, chatModel, sessionCwd, prompt, thinkingDepthOverride, contextLengthOverride,
+                modelOverride, accessModeOverride, null);
+    }
+
+    /**
+     * 构建流式响应管线（Loop 取证标记重载）。
+     *
+     * @param loopRunLabel Loop 任务名；非空表示本轮是定时任务执行，轮首把「本轮实际生效的
+     *                     模型/思考/上下文/权限 + 任务名 + 时刻」以取证形态写入会话
+     *                     （{@link HarnessEngine#CTX_LOOP_RUN}，随快照持久化），供执行视图的
+     *                     「任务运行参数」提示条经 /web/chat/loop-run 恢复——任务参数是 transient 的，
+     *                     不写会话上下文，执行会话 composer 回显的永远是会话自己的旧值，
+     *                     没有取证提示条用户会误判「参数没生效」。为 null（前台对话）时轮首清除
+     *                     该键：会话恢复手动对话后提示条不应继续声称按任务参数运行。
+     */
+    public Flux<WebChunk> buildStreamFlux(AgentSession session, ReActAgent agent, ChatModel chatModel, String sessionCwd, Prompt prompt,
+                                      String thinkingDepthOverride, Long contextLengthOverride, String modelOverride,
+                                      String accessModeOverride, String loopRunLabel) {
+    // 本轮生效的权限档位：优先用本轮显式指定的档位（如 Loop 任务），否则回退会话已存档位；
+    // 脏值由 normalize 回落默认档（fail-safe）。与模型/思考深度同构：不写入会话上下文，
+    // 避免定时任务污染用户绑定的前台会话的持久选择。
+    String effectiveAccessMode = accessModeOverride != null
+            ? AccessMode.normalize(accessModeOverride).code()
+            : AccessMode.normalize(session.getContext().getAs(AccessMode.CTX_KEY)).code();
+
         if (prompt == null) {
             prompt = Prompt.of();
         }
@@ -225,12 +264,45 @@ public class WebStreamBuilder {
         // 「继续/恢复」时不会重置，其 beginTimeMs 停留在最初任务起点，导致耗时累计成整段对话时长。
         // 每次 buildStreamFlux 恰对应一轮任务，用 Flux.defer 在订阅时刻取时，才是「单轮耗时」。
         final Prompt promptFinal = prompt;
+        final String effectiveAccessModeFinal = effectiveAccessMode;
+        final String loopRunLabelFinal = loopRunLabel;
         return Flux.defer(() ->
-                buildTurnFlux(session, agent, chatModel, sessionCwd, promptFinal, System.currentTimeMillis(), thinkingDepthOverride, contextLengthOverride));
+                buildTurnFlux(session, agent, chatModel, sessionCwd, promptFinal, System.currentTimeMillis(), thinkingDepthOverride, contextLengthOverride, modelOverride, effectiveAccessModeFinal, loopRunLabelFinal));
+    }
+
+    /**
+     * 写/清 Loop 执行取证标记（{@link HarnessEngine#CTX_LOOP_RUN}）。
+     *
+     * <p>模型名优先取本轮 override（Loop 任务指定），否则回退会话已选模型——与 startSyncRun 的
+     * 回退口径一致，保证取证值 == 本轮真实生效值。思考档位取已归一化的本轮生效值
+     * （override 优先、会话选择兜底，由调用方算好传入）。</p>
+     */
+    private static void recordLoopRunEvidence(AgentSession session, String loopRunLabel, String modelOverride,
+                                              String effectiveThinkingDepth, Long contextLengthOverride,
+                                              String effectiveAccessMode, long turnStartMs) {
+        if (session == null) {
+            return;
+        }
+        if (Assert.isEmpty(loopRunLabel)) {
+            session.getContext().remove(HarnessEngine.CTX_LOOP_RUN);
+            return;
+        }
+        String model = Assert.isNotEmpty(modelOverride)
+                ? modelOverride
+                : session.getContext().getAs(HarnessEngine.CTX_MODEL_SELECTED);
+        java.util.Map<String, Object> evidence = new java.util.LinkedHashMap<>();
+        evidence.put("name", loopRunLabel);
+        evidence.put("model", Assert.isNotEmpty(model) ? model : "");
+        evidence.put("thinkingDepth", effectiveThinkingDepth == null ? "" : effectiveThinkingDepth);
+        evidence.put("contextLength", contextLengthOverride == null ? 0L : contextLengthOverride.longValue());
+        evidence.put("accessMode", effectiveAccessMode == null ? "" : effectiveAccessMode);
+        evidence.put("at", turnStartMs);
+        session.getContext().put(HarnessEngine.CTX_LOOP_RUN, evidence);
     }
 
     private Flux<WebChunk> buildTurnFlux(AgentSession session, ReActAgent agent, ChatModel chatModel, String sessionCwd, Prompt prompt, long turnStartMs,
-                                         String thinkingDepthOverride, Long contextLengthOverride) {
+                                         String thinkingDepthOverride, Long contextLengthOverride, String modelOverride, String effectiveAccessMode,
+                                         String loopRunLabel) {
         // 思考深度：优先用本轮显式指定的档位（如 Loop 任务），否则回退会话选择的档位；
         // 再结合当前模型的推理能力（按模型而非按接口）翻译成各家 API 各自的参数
         String thinkingDepth = thinkingDepthOverride != null
@@ -240,11 +312,19 @@ public class WebStreamBuilder {
         // 上下文窗口：Loop 任务等按「本轮」覆盖（transient 键），压缩预算与用量指示器都走
         // resolveRuntime，二者同源；不写入持久键，避免污染用户前台选择。
         // 每轮开头统一覆盖/清理（幂等自愈：上一轮异常残留也会在本轮开头被清掉）。
+        // 轮次归属 token（2026-10-17 加固）：恢复轮/重复审批下旧订阅的 doFinally 可能晚于
+        // 新轮轮首执行，无归属的 clear 会清掉新轮刚写的覆盖；清除时同值比对只清自己那一轮。
+        final String turnToken = java.util.UUID.randomUUID().toString();
         if (contextLengthOverride != null) {
-            ContextLengthPolicy.setTransient(session, contextLengthOverride);
+            ContextLengthPolicy.setTransient(session, contextLengthOverride, turnToken);
         } else {
-            ContextLengthPolicy.clearTransient(session);
+            ContextLengthPolicy.clearTransient(session, turnToken);
         }
+
+        // Loop 执行取证标记：与上下文 transient 键同一时机写/清（幂等自愈）。
+        // 写入的是「本轮实际生效值」而非任务定义值：任务随后被编辑/删除也不影响回看本轮用了什么；
+        // 前台对话轮（loopRunLabel 为 null）清除，保证提示条语义永远是「最近一次 Loop 执行」。
+        recordLoopRunEvidence(session, loopRunLabel, modelOverride, thinkingDepth, contextLengthOverride, effectiveAccessMode, turnStartMs);
 
         // 本轮（turn）相位状态机。per-turn 局部持有：buildTurnFlux 每次订阅（Flux.defer）都会重建，
         // 因此「继续/恢复」的新一轮不会继承上一轮的相位。
@@ -280,11 +360,19 @@ public class WebStreamBuilder {
                     // 旧值，于是主代理用 override（如 high）、子代理读到 null→OFF 而静默降档。
                     o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, thinkingDepth);
 
-                    // 访问控制档位（会话级）同样经 toolContext 透传给工具链：TerminalTalent 的空间隔离
-                    // 与命令审批都按它折算。该键与 Prompt 属性键同值（__accessMode），ReActTrace 激活
-                    // Talent 时会把 toolContext 合并进 Prompt.attrs，故提示词与真实放行天然同源。
-                    // 读不到 / 脏值一律由 normalize 回落默认档（fail-safe）。
-                    o.toolContextPut(AccessMode.ATTR_KEY, AccessMode.normalize(session.getContext().getAs(AccessMode.CTX_KEY)).code());
+                    // 本轮生效的模型同样经 toolContext 透传：Loop 定时任务的 modelOverride 刻意不写入
+                    // 会话上下文（transientSelection，避免污染用户前台选择），若不透传，TaskTalent 构建
+                    // 子代理时只能读到会话级旧模型，主代理用任务模型、子代理静默换回旧模型/默认模型。
+                    // 前台路径（modelOverride 为 null）写入空串以清理残留，与 thinkingDepth 的 AUTO 语义对齐。
+                    o.toolContextPut(HarnessEngine.ATTR_MODEL_OVERRIDE,
+                            Assert.isEmpty(modelOverride) ? "" : modelOverride);
+
+                    // 访问控制档位同样经 toolContext 透传给工具链：TerminalTalent 的空间隔离、
+                    // HITL 的审批闸门（优先读本键、回退会话档）与 Prompt 属性都按它折算。
+                    // 该键与 Prompt 属性键同值（__accessMode），ReActTrace 激活 Talent 时会把
+                    // toolContext 合并进 Prompt.attrs，故提示词与真实放行天然同源。
+                    // 本轮 override（Loop 任务）优先，否则回退会话已存档位；读不到/脏值一律回落默认档。
+                    o.toolContextPut(AccessMode.ATTR_KEY, effectiveAccessMode);
 
                     // TerminalTalent 在 cwd 为空时本就回退 engine workspace；显式注入可让文件变更账本
                     // 与工具使用完全相同的规范根，并覆盖 Web 主 Agent 的全局会话。
@@ -394,8 +482,9 @@ public class WebStreamBuilder {
                     doneChunk.setPhase(WebChunk.PHASE_DONE);
                     return Flux.just(doneChunk);
                 }))
-                // 本轮结束时（含 cancel/异常）清理 transient 上下文窗口覆盖，回到用户持久选择
-                .doFinally(signal -> ContextLengthPolicy.clearTransient(session));
+                // 本轮结束时（含 cancel/异常）清理 transient 上下文窗口覆盖，回到用户持久选择。
+                // 带轮次归属：只清自己那一轮写的覆盖，被取代的旧订阅不得清掉新轮刚设置的键。
+                .doFinally(signal -> ContextLengthPolicy.clearTransient(session, turnToken));
     }
 
     /**

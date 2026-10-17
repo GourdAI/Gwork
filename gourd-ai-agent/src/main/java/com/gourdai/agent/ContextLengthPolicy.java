@@ -37,6 +37,14 @@ public final class ContextLengthPolicy {
     public static final String CONTEXT_LENGTH_KEY = "_context_length";
     /** 会话快照中的「本轮」上下文窗口键：Loop 任务等按轮覆盖，不参与持久选择。 */
     public static final String TRANSIENT_CONTEXT_LENGTH_KEY = "_context_length_turn";
+    /**
+     * 「本轮」覆盖的轮次归属键（2026-10-17 review 加固）。
+     *
+     * <p>存的是写入该覆盖的那一轮的 turn token。恢复轮/重复审批等场景下旧订阅的
+     * doFinally 会晚于新轮轮首执行，无归属的 clear 会把新轮刚写入的覆盖清掉
+     * （本轮压缩预算静默回退会话持久选择）。清除时同值比对，只清自己那一轮的。</p>
+     */
+    public static final String TRANSIENT_TURN_TOKEN_KEY = "_context_length_turn_token";
     /** 缺省上下文窗口，单位为十进制 token。 */
     public static final long DEFAULT_CONTEXT_LENGTH = 256_000L;
 
@@ -155,7 +163,22 @@ public final class ContextLengthPolicy {
     /**
      * 将合法的「本轮」上下文窗口写入 AgentSession（Loop 任务运行时覆盖，不污染持久选择）。
      *
+     * @param turnToken 轮次归属标识（订阅实例唯一）；清除时同值比对，防旧轮 doFinally 误清新轮
      * @throws IllegalArgumentException 数值不在固定选项内时
+     */
+    public static void setTransient(AgentSession session, long contextLength, Object turnToken) {
+        if (session == null) {
+            return;
+        }
+        if (!isAllowed(contextLength)) {
+            throw new IllegalArgumentException("contextLength must be one of " + CONTEXT_LENGTH_OPTIONS);
+        }
+        session.getContext().put(TRANSIENT_CONTEXT_LENGTH_KEY, contextLength);
+        session.getContext().put(TRANSIENT_TURN_TOKEN_KEY, String.valueOf(turnToken));
+    }
+
+    /**
+     * 无归属写入（兼容旧调用方）：不写轮次 token，任何 clear（含带 token 的）都可清除它。
      */
     public static void setTransient(AgentSession session, long contextLength) {
         if (session == null) {
@@ -165,14 +188,32 @@ public final class ContextLengthPolicy {
             throw new IllegalArgumentException("contextLength must be one of " + CONTEXT_LENGTH_OPTIONS);
         }
         session.getContext().put(TRANSIENT_CONTEXT_LENGTH_KEY, contextLength);
+        session.getContext().remove(TRANSIENT_TURN_TOKEN_KEY);
     }
 
-    /** 清除 AgentSession 上的「本轮」上下文窗口覆盖（幂等；未设置时为空操作）。 */
-    public static void clearTransient(AgentSession session) {
+    /**
+     * 清除 AgentSession 上的「本轮」上下文窗口覆盖（幂等；未设置时为空操作）。
+     *
+     * @param turnToken 轮次归属标识；仅当与写入时的 token 相同才清除（防跨轮误清），
+     *                  传 null 表示无条件清除（兼容无归属的旧调用方）
+     */
+    public static void clearTransient(AgentSession session, Object turnToken) {
         if (session == null) {
             return;
         }
+        if (turnToken != null) {
+            Object owner = session.getContext().get(TRANSIENT_TURN_TOKEN_KEY);
+            if (owner != null && !String.valueOf(turnToken).equals(String.valueOf(owner))) {
+                return; // 覆盖已属于更新的轮次：旧轮的收尾不得清除它
+            }
+        }
         session.getContext().remove(TRANSIENT_CONTEXT_LENGTH_KEY);
+        session.getContext().remove(TRANSIENT_TURN_TOKEN_KEY);
+    }
+
+    /** 无归属清除（等价 {@link #clearTransient(AgentSession, Object)} 传 null）。 */
+    public static void clearTransient(AgentSession session) {
+        clearTransient(session, null);
     }
 
     /**

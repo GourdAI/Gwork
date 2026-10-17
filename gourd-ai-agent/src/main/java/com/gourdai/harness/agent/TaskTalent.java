@@ -404,6 +404,43 @@ public class TaskTalent extends AbsTalent {
     }
 
     /**
+     * 解析本轮生效的模型（供子代理构建时使用）。
+     *
+     * <p>优先用 toolContext 透传的 per-turn override（{@link HarnessEngine#ATTR_MODEL_OVERRIDE}），
+     * 其次回退会话上下文里用户在前台的选择。</p>
+     *
+     * <p><b>为什么必须有 override 这一路：</b>WebStreamBuilder 支持「按任务而非按会话」指定模型
+     * （Loop 定时任务，startSyncRun 的 transientSelection=true），且该 override 刻意<b>不写入</b>
+     * 会话上下文以免污染用户选择。旧实现只读会话上下文，于是主代理用任务模型（如 A）、
+     * 子代理读到会话旧值（甚至默认模型）而<b>静默换模</b>——这正是「定时任务设定的模型未生效、
+     * 跑成了别的模型」的根因。</p>
+     *
+     * <p>取值口在<b>父 trace 的 toolContext</b>而非工具形参：模型 override 不需要模型自行指定，
+     * 从 trace 读取可避免 task/multitask/await_tasks 三处签名变更；父 trace 在同一 run 内稳定，
+     * 且 ReasonTask 会把父 toolContext 整体继承给子代理 run，嵌套委派时该键随 toolContext
+     * 写回（见 taskDo 内 o.toolContextPut）而逐层可靠。</p>
+     *
+     * @return 有效的模型名；无 override 且会话无选择时返回 null（回退默认模型）
+     */
+    private static String resolveModelOverride(ReActTrace parentTrace, AgentSession parentSession) {
+        if (parentTrace != null && parentTrace.getOptions() != null && parentTrace.getOptions().getToolContext() != null) {
+            Object value = parentTrace.getOptions().getToolContext().get(HarnessEngine.ATTR_MODEL_OVERRIDE);
+            if (value != null) {
+                String text = String.valueOf(value).trim();
+                if (!text.isEmpty()) {
+                    return text;
+                }
+            }
+            // 空串是「前台路径的显式清理标记」：表示本轮无任务级 override，不得再从会话上下文
+            // 之外寻找其它来源，直接落到会话级选择。
+        }
+        if (parentSession == null) {
+            return null;
+        }
+        return parentSession.getContext().getAs(HarnessEngine.CTX_MODEL_SELECTED);
+    }
+
+    /**
      * 解析本轮生效的思考档位。
      *
      * <p>优先用 toolContext 透传的 per-turn override（{@link HarnessEngine#ATTR_THINKING_DEPTH}），
@@ -456,11 +493,25 @@ public class TaskTalent extends AbsTalent {
      * 新 Prompt，读不到就会回落默认档。后果是用户开了完全访问、主代理放行的目录，子代理却仍受限，
      * 表现为子任务莫名报「路径越界」——而用户刚确认过可以访问。</p>
      *
-     * <p>取值以<b>父会话上下文</b>为准（权威存储位，随快照持久化），而不是父代理的 toolContext：
-     * 后者在嵌套委派（子代理再调 task）时逐层丢失，前者对任意深度都可靠。解析结果由调用方同时
-     * 写入子会话上下文与子代理 toolContext，使拦截器与工具两路消费点同源同档。</p>
+     * <p>取值优先父代理 toolContext 的 per-turn override（{@link AccessMode#ATTR_KEY}）：
+     * Loop 定时任务的任务级档位刻意不写入会话上下文（避免污染用户前台选择），只经 toolContext
+     * 透传；若只读父会话上下文，子代理会静默回落到会话旧档——与「模型 override」同一根因
+     * （见 {@link #resolveModelOverride}）。override 缺省/为空时回退父会话上下文的已存档位
+     * （权威存储位，随快照持久化）。</p>
+     *
+     * <p>解析结果由调用方同时写入子会话上下文与子代理 toolContext，使拦截器与工具两路消费点
+     * 同源同档；嵌套委派时本子会话成为下一层的父会话，逐档继承。</p>
      */
-    private static String resolveAccessMode(AgentSession parentSession) {
+    private static String resolveAccessMode(ReActTrace parentTrace, AgentSession parentSession) {
+        if (parentTrace != null && parentTrace.getOptions() != null && parentTrace.getOptions().getToolContext() != null) {
+            Object value = parentTrace.getOptions().getToolContext().get(AccessMode.ATTR_KEY);
+            if (value != null) {
+                String text = String.valueOf(value).trim();
+                if (!text.isEmpty()) {
+                    return AccessMode.normalize(text).code();
+                }
+            }
+        }
         if (parentSession == null) {
             return AccessMode.DEFAULT.code();
         }
@@ -530,12 +581,19 @@ public class TaskTalent extends AbsTalent {
         final ReActAgent agent;
         final AgentSession session;
         final Prompt originalPrompt;
+        // 方法级持有：三处 options 写回点（后台/同步/流式分支）都在上方 try 块的作用域之外，
+        // 需要把解析出的模型 override 提升出来供 toolContextPut 嵌套继承。
+        String modelSelected;
         try {
             if (LOG.isDebugEnabled()) {
                 LOG.debug("任务开始[{}/{} - {}]: {}", task.index, count, task.agent_name, ONode.serialize(task));
             }
 
-            String modelSelected = __parentSession.getContext().getAs(HarnessEngine.CTX_MODEL_SELECTED);
+            // 旧实现只读会话上下文的 CTX_MODEL_SELECTED，但 Loop 定时任务的模型是 transient 选择
+            // （不写入会话上下文，见 WebGate.startSyncRun），导致主代理用任务模型、子代理静默
+            // 换回会话旧模型/默认模型——「定时任务设定的模型未生效」的根因。
+            // 现优先从父 trace 的 toolContext 读 per-turn override（resolveModelOverride）。
+            modelSelected = resolveModelOverride(__parentTrace, __parentSession);
 
             //模型未配置时 getModelOrMain 返回 null，AgentFactory 随后 ReActAgent.of(null)。
             //异常若从这里逸出，会丢掉 <task_result> 信封与 index，多任务下无法与请求对应
@@ -561,8 +619,8 @@ public class TaskTalent extends AbsTalent {
         final String[] changeOwner = resolveChangeOwner(__parentTrace, __sessionId, __changeSessionId, __changeRunId);
         // 本轮生效的思考档位；同时写回子代理 toolContext，使嵌套委派（子代理再调 task）逐层继承
         final String thinkingDepth = resolveThinkingDepth(__parentSession, __thinkingDepth);
-        // 本轮生效的访问档位（同思考档位机制；同样写回以使嵌套委派逐层继承）
-        final String accessMode = resolveAccessMode(__parentSession);
+        // 本轮生效的访问档位（同模型/思考档位机制；同样写回以使嵌套委派逐层继承）
+        final String accessMode = resolveAccessMode(__parentTrace, __parentSession);
         // 档位同时写入子会话上下文（权威存储位）：HITLInterceptor 读的是会话上下文而非
         // toolContext，只写 toolContext 会让子代理「空间已放行、审批仍弹」——正是
         // AccessPolicy 要消灭的漂移症状。嵌套委派时本子会话成为下一层的父会话，逐层继承。
@@ -590,6 +648,11 @@ public class TaskTalent extends AbsTalent {
                                 o.toolContextPut(ChatSession.ATTR_SESSIONID, __sessionId);
                                 o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, thinkingDepth);
                                 o.toolContextPut(AccessMode.ATTR_KEY, accessMode);
+                                // 模型 override 同步写回：嵌套委派（子代理再调 task）时本子 run 的
+                                // toolContext 即下一层的父 trace，不写回则嵌套层 resolveModelOverride 落回会话级旧值。
+                                if (Assert.isNotEmpty(modelSelected)) {
+                                    o.toolContextPut(HarnessEngine.ATTR_MODEL_OVERRIDE, modelSelected);
+                                }
                                 applyChangeOwner(o, changeOwner);
                                 applyThinkingDepth(o, agent, thinkingDepth);
                             })
@@ -652,6 +715,9 @@ public class TaskTalent extends AbsTalent {
                             o.toolContextPut(ChatSession.ATTR_SESSIONID, __sessionId);
                             o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, thinkingDepth);
                             o.toolContextPut(AccessMode.ATTR_KEY, accessMode);
+                            if (Assert.isNotEmpty(modelSelected)) {
+                                o.toolContextPut(HarnessEngine.ATTR_MODEL_OVERRIDE, modelSelected);
+                            }
                             applyChangeOwner(o, changeOwner);
                             applyThinkingDepth(o, agent, thinkingDepth);
                         })
@@ -700,6 +766,9 @@ public class TaskTalent extends AbsTalent {
                             o.toolContextPut(ChatSession.ATTR_SESSIONID, __sessionId);
                             o.toolContextPut(HarnessEngine.ATTR_THINKING_DEPTH, thinkingDepth);
                             o.toolContextPut(AccessMode.ATTR_KEY, accessMode);
+                            if (Assert.isNotEmpty(modelSelected)) {
+                                o.toolContextPut(HarnessEngine.ATTR_MODEL_OVERRIDE, modelSelected);
+                            }
                             applyChangeOwner(o, changeOwner);
                             applyThinkingDepth(o, agent, thinkingDepth);
                         })

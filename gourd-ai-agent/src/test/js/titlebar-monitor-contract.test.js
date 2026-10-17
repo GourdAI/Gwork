@@ -7,8 +7,8 @@
      chat 模式点标题栏按钮无面板）；fixed 底栏 + 窄屏隐藏。
    - 标题栏按钮：body 级 fixed 容器（不得塞进 .titlebar-drag-region——该条在
      skills/浏览器 code 模式隐藏，按钮会消失）；右偏移按平台分流。
-   - 监控抽屉：五区 + 记忆行 + 五端点 + 版本防覆盖 + Esc 关闭。
-   - i18n：12 语言包 monitor.* 22 键齐全非空。
+   - 监控抽屉：五区 + 记忆行 + 五端点 + 版本防覆盖 + Esc 关闭（灯箱 Esc 层级见下）。
+   - i18n：12 语言包 monitor.* 23 键齐全非空。
    - 镜像同步：新增/修改文件与 gourd-ai-tauri/ui 逐字节一致（镜像存在才比对）。 */
 'use strict';
 const test = require('node:test');
@@ -33,6 +33,7 @@ const baseJs = read('js', 'app-base.js');
 const codeJs = read('js', 'app-code.js');
 const histJs = read('js', 'app-history.js');
 const gateJava = fs.readFileSync(path.resolve(__dirname, '../../main/java/com/gourdai/core/portal/web/TerminalGate.java'), 'utf8');
+const msgJs = read('js', 'app-message.js');
 
 // ---------- 终端全局化 ----------
 test('终端面板 markup 在 index.html 的 body 级，且已从 code.html 移除', () => {
@@ -316,6 +317,52 @@ test('记忆行：updated 类驱动圆点与文案，跳转走 openMemoryView', 
         '更新态圆点必须强调色（参照稿蓝点语义）');
 });
 
+/* 【来源区：缩略图 + 友好名 + 点击预览（2026-10-15 用户改进需求）】
+   机器长名（pasted-image-<毫秒戳>-<随机>.png）直接展示必被截断；图片行现改展示
+   「monitor.image · 相对时间」+ meta 拉回的真实缩略图，点击走全站灯箱。
+   本组用例锁：① 图片行不再以存储名做主文案；② meta 结果为异步升级且带
+   版本守卫（旧响应不得回写新 DOM）；③ 点击链路（fetchAttachmentMeta → openLightbox）
+   与降级 toast；④ 缩略图容器 CSS 不得溢出 30px 图标盒。 */
+test('来源区图片行：友好名 + 缩略图升级 + 点击灯箱预览（含降级提示）', () => {
+    const src = monJs.slice(monJs.indexOf('function renderSources('), monJs.indexOf('function renderSkills('));
+    /* ① 图片行文案用 i18n 键 monitor.image，不再 esc(it.name) 做正文（title 仍保留原名） */
+    assert.match(src, /t\('monitor\.image'\)/, '图片行主文案必须是 monitor.image（不得直接展示机器存储名）');
+    assert.match(src, /tm-row-preview/, '图片行必须带可预览标记类（供点击委托/可选光标样式命中）');
+    assert.match(src, /data-tm-source=/, '图片行必须带 data-tm-source 路径锚点（meta 结果指向替换）');
+    assert.match(src, /title="' \+ esc\(it\.name\)/, '原存储名必须收进 title（悬停可见，不可直接丢弃）');
+    /* ② 缩略图异步升级：版本号守卫（轮询重渲染后旧 meta 结果必须丢弃） */
+    assert.match(src, /upgradeSourceThumbs\(imagePaths\)/, '渲染后必须启动缩略图异步升级');
+    assert.match(src, /srcThumbSeq/, '必须有版本号守卫（6s 轮询重渲染覆盖旧行后，旧响应不得回写）');
+    assert.match(src, /mySeq !== srcThumbSeq/, '守卫比较必须真实存在（只声明不比较是死变量）');
+    assert.match(src, /tm-src-thumb/, '缩略图 img 必须带 tm-src-thumb 类（CSS 尺寸口径）');
+    /* ③ 点击链路：fetchAttachmentMeta（复用常驻缓存）→ openLightbox；失败 toast */
+    assert.match(src, /fetchAttachmentMeta/, '点击必须复用 fetchAttachmentMeta（缓存/在途合并在此层复用）');
+    assert.match(src, /openLightbox/, '必须走全站灯箱（对话区附件同款交互）');
+    assert.match(src, /preview_load_failed/, '拉不到 dataUrl 时必须 toast 提示（不得静默）');
+    assert.match(src, /addEventListener\('click'/, '点击委托必须挂载');
+    /* ④ CSS：缩略图不得溢出 30px 图标盒 */
+    assert.match(monitorCss, /\.tm-row-icon \{[^}]*overflow: hidden;/, '图标盒必须 overflow:hidden（缩略图裁切不外溢）');
+    assert.match(monitorCss, /\.tm-row-icon \.tm-src-thumb \{ width: 100%; height: 100%; object-fit: cover;/, '缩略图必须铺满图标盒并 object-fit 裁切');
+    assert.match(monitorCss, /\.tm-row-preview \{ cursor: zoom-in; \}/, '可预览行光标必须 zoom-in（点击 affordance）');
+});
+
+/* 【Esc 层级纪律（2026-10-15 实测缺陷修复）】
+   CDP 实测复现：从监控「来源」区点开图片灯箱后按 Esc，灯箱与整个监控抽屉
+   被同一发事件一起关闭（旧实现 jQuery 冒泡监听与抽屉的 document Esc 监听竞跑）。
+   契约：openLightbox 必须在【捕获阶段】消费 Esc 并 stopPropagation —— 最顶层模态
+   先关，不得穿透到下层（抽屉/diff viewer/向导）。同时开放层不得再冒出冒泡版监听。 */
+test('Esc 层级：灯箱捕获阶段消费（防穿透关闭下层抽屉）', () => {
+    const lb = msgJs.slice(msgJs.indexOf('function openLightbox('), msgJs.indexOf('window.openLightbox'));
+    assert.ok(lb.length > 100, 'openLightbox 切片必须真实命中的函数（而非空段）');
+    assert.match(lb, /document\.addEventListener\('keydown', onKey, true\)/,
+        '灯箱 Esc 监听必须注册在【捕获阶段】（第三参 true）——否则同发与抽屉竞跑');
+    assert.match(lb, /e\.stopPropagation\(\)/, '捕获命中后必须 stopPropagation，阻止穿透到下层消费者');
+    assert.match(lb, /document\.removeEventListener\('keydown', onKey, true\)/,
+        'close 必须在同一捕获相位移除监听（第三参必须一致，否则监听泄漏累积）');
+    assert.doesNotMatch(lb, /\$\(document\)\.on\('keydown', onKey\)/,
+        '不得回退为冒泡版 jQuery 监听（本次缺陷形态）');
+});
+
 // ---------- 装配 ----------
 test('APP_SCRIPTS 登记：新脚本在 app-terminal.js 之后', () => {
     const list = bootJs.slice(bootJs.indexOf('var APP_SCRIPTS = ['), bootJs.indexOf('];', bootJs.indexOf('var APP_SCRIPTS = [')));
@@ -331,10 +378,10 @@ test('index.html 必须 link task-monitor.css', () => {
 });
 
 // ---------- i18n ----------
-const MONITOR_KEYS = ['title','env','outputs','sources','skills','memory_updated','memory_not_updated','open_memory',
+const MONITOR_KEYS = ['title','env','outputs','sources','skills','image','memory_updated','memory_not_updated','open_memory',
     'no_changes','changes_count','no_git','no_remote','no_upstream','synced','ahead_behind',
     'env_local','env_remote','empty_env','empty_outputs','empty_sources','no_skills','load_failed'];
-test('12 语言包 monitor.* 22 键齐全非空', () => {
+test('12 语言包 monitor.* 23 键齐全非空', () => {
     const dir = path.join(STATIC, 'locales');
     const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
     assert.strictEqual(files.length, 12, '语言包数量');
@@ -529,7 +576,8 @@ test('新增/修改文件与 tauri 镜像逐字节一致', () => {
     const files = ['index.html', 'code.html', 'css/code.css', 'css/task-monitor.css', 'css/theme.css',
         'js/app-terminal.js', 'js/app-titlebar-actions.js', 'js/app-task-monitor.js', 'js/app-bootstrap.js',
         'js/app-base.js', 'js/app-code.js', 'js/app-history.js', 'js/app-access-mode.js',
-        'js/app-automation.js', 'js/app-memory.js', 'js/app-settings-permission.js'];
+        'js/app-automation.js', 'js/app-memory.js', 'js/app-settings-permission.js',
+        'js/app-message.js', 'js/app-ui.js'];
     for (const rel of files) {
         const a = fs.readFileSync(path.join(STATIC, rel));
         const b = fs.readFileSync(path.join(mirrorRoot, rel));

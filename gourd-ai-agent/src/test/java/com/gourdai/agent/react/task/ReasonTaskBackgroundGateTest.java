@@ -150,8 +150,9 @@ class ReasonTaskBackgroundGateTest {
     @DisplayName("用户实测场景复现：后台任务在跑 + 纯文本收尾承诺 → 必须改判继续")
     void gateDefersWhenBackgroundTaskRunning() {
         ReActTrace trace = armedTrace();
-        assertTrue(ReasonTask.shouldDeferImplicitEndForBackground(
-                        trace, "Rust 全量编译预计 10 分钟以上，构建完成后我会自动收到通知并立即校验产物。", "Final Answer"),
+        // 2026-10-15 review 后三处 END 判定统一为 bgGateArmed（不豁免 finishMarker）：
+        // 旧带豁免的 bgGateArmed 已被移除，隐式分支同口径拦截。
+        assertTrue(ReasonTask.bgGateArmed(trace),
                 "后台任务在跑时的纯文本收尾是虚假承诺，门禁必须改判继续");
     }
 
@@ -159,18 +160,16 @@ class ReasonTaskBackgroundGateTest {
     @DisplayName("无运行中后台任务：门禁不得改变任何现有结束行为")
     void gateReleasesWhenNoRunningTask() {
         ReActTrace trace = newTrace();
-        assertFalse(ReasonTask.shouldDeferImplicitEndForBackground(trace, "任何正常的最终回答", "Final Answer"),
+        assertFalse(ReasonTask.bgGateArmed(trace),
                 "健康流程（无后台任务）门禁必须恒不命中");
-        assertFalse(ReasonTask.bgGateArmed(trace));
     }
 
     @Test
-    @DisplayName("隐式分支豁免 finishMarker：显式完成语义直通")
-    void implicitBranchExemptsFinishMarker() {
+    @DisplayName("三处 END 判定统一不豁免 finishMarker：含完成标识的收尾同样被拦")
+    void gateDoesNotExemptFinishMarker() {
         ReActTrace trace = armedTrace();
-        assertFalse(ReasonTask.shouldDeferImplicitEndForBackground(
-                        trace, "Final Answer: 任务全部完成，以下是总结。", "Final Answer"),
-                "隐式分支含 finishMarker 时直通（显式 Finish 分支另有 bgGateArmed 兜底）");
+        assertTrue(ReasonTask.bgGateArmed(trace),
+                "含 finishMarker 不得豁免：三处 END 判定统一用 bgGateArmed（2026-10-15 review 口径）");
     }
 
     @Test
@@ -193,7 +192,6 @@ class ReasonTaskBackgroundGateTest {
 
         assertEquals(2, trace.incrementBgGateDeferrals());
         assertFalse(ReasonTask.bgGateArmed(trace), "达上限后必须放行，防「永远结束不了」的新死循环");
-        assertFalse(ReasonTask.shouldDeferImplicitEndForBackground(trace, "任何回复", "Final Answer"));
     }
 
     @Test
@@ -240,8 +238,8 @@ class ReasonTaskBackgroundGateTest {
     void threeEndBranchesWiredToGate() throws IOException {
         String src = lf(new String(Files.readAllBytes(REASON_SOURCE), StandardCharsets.UTF_8));
 
-        assertEquals(2, countOccurrences(src, "shouldDeferImplicitEndForBackground(trace, clearContent, config.getFinishMarker())"),
-                "隐式分支与兜底分支必须各调一次带 finishMarker 豁免的门禁判定\n" + src.length());
+        assertEquals(2, countOccurrences(src, "if (bgGateArmed(trace))"),
+                "隐式分支与兜底分支必须各调一次 if (bgGateArmed(trace))；显式 Finish 分支用 == false 判定，由下一断言守护");
         assertEquals(1, countOccurrences(src, "bgGateArmed(trace) == false"),
                 "显式 Finish 分支必须用不排除 finishMarker 的 bgGateArmed");
         assertEquals(3, countOccurrences(src, "trace.incrementBgGateDeferrals()"),

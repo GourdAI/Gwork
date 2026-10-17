@@ -29,6 +29,7 @@
         modelName: '',      // '' = 未显式选模，运行时跟随默认模型
         thinking: 'auto',
         contextLength: '',  // '' = 未显式设置，运行时跟随默认（256K）/绑定会话
+        accessMode: '',     // '' = 未设置（跟随会话已存档位）；'default' / 'full'
         channel: '',        // 推送通道（layui select 托管，值存这里避免读隐藏原生 select）
         intervalUnit: 'm',  // 间隔单位（同上）
         projects: [],       // [{name, path}]
@@ -397,6 +398,11 @@
         if (x.modelName) tags.push('<span class="auto-task-tag">' + escapeHtml(x.modelName) + '</span>');
         if (x.thinkingDepth && normThinking(x.thinkingDepth) !== 'auto') tags.push('<span class="auto-task-tag">' + escapeHtml(x.thinkingDepth) + '</span>');
         if (x.contextLength) tags.push('<span class="auto-task-tag">' + escapeHtml(GourdModelSelector.contextLengthLabel(x.contextLength)) + '</span>');
+        // 附件数：无专用 i18n key（不新增），直接用回形针 + 数字，与列表其它 tag 同款轻量形态
+        if (x.attachmentPaths && x.attachmentPaths.length > 0) {
+            tags.push('<span class="auto-task-tag">\ud83d\udcce' + x.attachmentPaths.length + '</span>');
+        }
+        if (x.accessMode) tags.push('<span class="auto-task-tag">' + escapeHtml(t(x.accessMode === 'full' ? 'settings.loop.access_full' : 'settings.loop.access_default')) + '</span>');
         if (x.goalCondition) tags.push('<span class="auto-task-tag">goal</span>');
         if (x.worktreeEnabled) tags.push('<span class="auto-task-tag">wt</span>');
         if (x.channelNotify) tags.push('<span class="auto-task-tag accent">' + escapeHtml(x.channelNotify) + '</span>');
@@ -428,9 +434,17 @@
             formState.modelName = '';
             formState.thinking = 'auto';
             formState.contextLength = '';
+            formState.accessMode = '';
             formState.channel = '';
             formState.intervalUnit = 'm';
         }
+        // 附件一律先清空（不分新建/编辑）：它是本页局部态，不进 formState。
+        // 编辑态看似应「等 api('get') 回来再填」，但残留的是【上一个任务】的 chips，
+        // 闪一下错附件比闪一下空附件条糟糕得多；空行本身就是正确的加载态，
+        // 真值由 fillForm → restoreAutoAttachments(x) 按服务端响应重建。
+        // 版本号递增：让上一份附件的 FileReader 回调作废，不得写进新表单。
+        autoAttachVersion++;
+        autoAttachments.length = 0;
 
         var days = [];
         for (var i = 1; i <= 7; i++) days.push(t('settings.loop.weekday_' + i));
@@ -495,17 +509,52 @@
         html += '</div>';
         html += '</div>';
 
-        // ===== 指令区（composer 形态） =====
+        // ===== 指令区（完全对齐首页 composer：附件条 + 命令补全 + 工具条 + 托盘） =====
+        // 注意：外层容器绝不用 .input-box / .welcome-input-box —— app-streaming.js 在这两个
+        // class 上绑了「点击容器即聚焦聊天输入框」，套上会把焦点抢走（见文件头注释第 3 条）。
+        // 视觉靠 css/automation.css 的 .auto-composer 抄 .input-box 的边框/圆角/底色实现。
         html += '<div class="auto-form-group"><label>' + escapeHtml(t('automation.instruction')) + ' <span class="auto-required">*</span></label>';
         html += '<div class="auto-composer" id="autoComposer">';
-        html += '<div class="auto-composer-input-wrap">';
+        // 已选附件（结构与首页 .attachments-wrap 同构，chip 类名直接复用全局样式）
+        html += '<div class="attachments-wrap" id="autoAttachmentsWrap"></div>';
+        html += '<div style="position:relative">';
+        // 命令补全面板（/ 命令、@ 子代理、$ 技能）：由 app-history.js 导出的 GourdCmdComplete 驱动
+        html += '<div class="cmd-complete" id="autoCmdComplete"></div>';
         // 不写 rows：rows=4 算出的初始高度（≈104px）大于 CSS min-height(92px)，
         // 用户删空文本后 autoGrowPrompt 会钳到 92px 造成不可逆的高度塌陷。高度全交 CSS + JS
         html += '<textarea id="autoPrompt" class="auto-composer-textarea" placeholder="'
             + escapeHtml(t('settings.loop.task_prompt_placeholder')) + '"></textarea>';
         html += '</div>';
-        html += '<div class="auto-composer-toolbar">';
-        html += '<div class="auto-composer-toolbar-left">';
+        html += '<div class="input-toolbar auto-composer-toolbar">';
+        html += '<div class="toolbar-left">';
+        // + 聚合菜单（与首页同构；开关由本页自绑——app-ui.js 的绑定是初始化时的 DOM 快照）
+        html += '<div class="plus-menu-wrap" id="autoPlusWrap">';
+        html += '<button type="button" class="plus-btn" id="autoPlusBtn" title="' + escapeHtml(t('app.plus_more')) + '">';
+        html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+        html += '</button>';
+        html += '<div class="plus-menu">';
+        html += '<button type="button" class="plus-menu-item" id="autoAttachBtn">';
+        html += '<svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
+        html += '<span>' + escapeHtml(t('app.attach_file')) + '</span></button>';
+        html += '<button type="button" class="plus-menu-item" id="autoImageBtn">';
+        html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
+        html += '<span>' + escapeHtml(t('app.attach_image')) + '</span></button>';
+        html += '<div class="plus-menu-sep"></div>';
+        html += '<button type="button" class="plus-menu-item" id="autoCmdBtn">';
+        html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20L16 4"/><circle cx="8" cy="12" r="2"/><circle cx="16" cy="12" r="2"/></svg>';
+        html += '<span>' + escapeHtml(t('app.cmd_commands')) + '</span></button>';
+        html += '<button type="button" class="plus-menu-item" id="autoSkillBtn">';
+        html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><text x="4" y="18" font-size="18" font-weight="bold" font-family="monospace" fill="currentColor" stroke="none">$</text></svg>';
+        html += '<span>' + escapeHtml(t('app.skills')) + '</span></button>';
+        html += '<button type="button" class="plus-menu-item" id="autoAgentBtn">';
+        html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/><line x1="19" y1="2" x2="19" y2="6"/><line x1="17" y1="4" x2="21" y2="4"/></svg>';
+        html += '<span>' + escapeHtml(t('app.subagent')) + '</span></button>';
+        html += '<div class="plus-menu-sep"></div>';
+        // 历史消息：任务指令无会话上下文可取，与欢迎页同款置灰
+        html += '<button type="button" class="plus-menu-item" id="autoHistoryBtn" disabled>';
+        html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+        html += '<span>' + escapeHtml(t('app.history_msg')) + '</span></button>';
+        html += '</div></div>';
         // 工作空间（自有 class，避免被 app-workspace.js 全局委托接管）
         // 结构与聊天页对齐：文件夹图标 + 清除按钮（hover 互换）+ 名称 + 箭头
         html += '<div class="auto-ws-selector" id="autoWsSelector">';
@@ -519,6 +568,10 @@
         html += '</div>';
         html += '<div class="auto-ws-dropdown" id="autoWsDropdown"></div>';
         html += '</div>';
+        html += '<input type="file" class="attach-input" id="autoAttachInput" multiple accept="*/*"/>';
+        html += '<input type="file" class="attach-input" id="autoImageInput" multiple accept="image/*"/>';
+        html += '</div>';   // toolbar-left
+        html += '<div class="toolbar-right">';
         // 模型 + 思考（沿用 .model-selector 视觉类，id 唯一）
         html += '<div class="model-selector auto-model-selector" id="autoModelSelector">';
         html += '<div class="model-selector-current" id="autoModelCurrent">';
@@ -533,7 +586,19 @@
         html += '<div class="model-dropdown-list" id="autoModelList"></div>';
         html += '</div>';
         html += '</div>';
-        html += '</div></div>';   // toolbar-left / toolbar
+        html += '</div>';   // toolbar-right
+        html += '</div>';   // input-toolbar
+        // 托盘条：权限档位从「高级设置」移到这里，与首页 composer-tray 同构（第三档「跟随会话」保留）
+        html += '<div class="composer-tray auto-composer-tray">';
+        html += '<div class="access-selector auto-access-selector" id="autoAccessSelector">';
+        html += '<div class="access-selector-current" id="autoAccessCurrent" title="' + escapeHtml(t('app.access_title')) + '">';
+        html += '<svg class="access-icon access-icon-shield" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>';
+        html += '<svg class="access-icon access-icon-alert" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+        html += '<span class="access-label" id="autoAccessLabel"></span>';
+        html += '<svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+        html += '</div>';
+        html += '<div class="access-dropdown" id="autoAccessDropdown"></div>';
+        html += '</div></div>';
         html += '</div></div>';   // composer / form-group
 
         // 高级
@@ -546,7 +611,9 @@
         html += '<input type="number" id="autoMaxIter" class="auto-input" value="" min="1" placeholder="' + escapeHtml(t('settings.loop.max_iter_unlimited')) + '"/></div>';
         html += '<div class="auto-form-group auto-form-group-check">';
         html += '<label><input type="checkbox" id="autoWorktree"/> ' + escapeHtml(t('settings.loop.worktree_isolation')) + '</label></div>';
-        html += '</div></div>';
+        html += '</div>';
+        // 权限档位已迁至指令区下方的 composer-tray（与首页托盘同构），高级区不再重复渲染
+        html += '</div>';
 
         html += '<div class="auto-form-actions">';
         html += '<button class="auto-btn-secondary" id="autoTriggerBtn" style="display:' + (editId ? 'inline-flex' : 'none') + '">'
@@ -565,6 +632,10 @@
         renderSelects();
         renderWorkspaceUI();
         setupAutoSelector();
+        bindAccessEvents();
+        renderAccessUI();
+        renderAutoAttachments();
+        bindComposerEvents();
         loadProjects(function () { renderWorkspaceUI(); });
         loadModels(function () { refreshAutoSelector(); });
 
@@ -603,8 +674,146 @@
         el.style.overflowY = el.scrollHeight > 320 ? 'auto' : 'hidden';
     }
 
-    /**
-     * layui select 渲染 + 回写 formState。
+    // ===================== 指令区附件（与首页 composer 同构） =====================
+
+    /* 本页局部附件数组（不复用首页的 pendingFiles：那是会话草稿态，
+       被 app-base/app-ui/app-streaming 的发送链路共享，混用会把任务附件误发到当前会话）。
+       元素形态：
+         新选：{ name, size, type:'image'|'file', file:File, dataUrl?:string }
+         回填（已保存的旧附件，无本地字节）：{ name, size, type, keptPath:string }
+       keptPath 存在 = 旧附件，保存时走 attachmentKeepPaths 而非重新上传。 */
+    var autoAttachments = [];
+    var AUTO_MAX_ATTACHMENTS = 8;
+    // 图片 FileReader 回调的版本号：清空/重建表单后递增，让过期回调作废
+    var autoAttachVersion = 0;
+
+    function autoAttachIconSvg() {
+        // fileIconSvg 是 app-base.js 的全局（线性图标，📎 emoji 在深色主题下渲染为黑框）；
+        // typeof 守卫：契约测试的 vm 沙箱不注入该全局
+        if (typeof fileIconSvg === 'function') return fileIconSvg(18);
+        return '';
+    }
+
+    function autoAttachSize(bytes) {
+        if (!bytes) return '';
+        if (typeof formatFileSize === 'function') return formatFileSize(bytes);
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / 1048576).toFixed(1) + ' MB';
+    }
+
+    /** 渲染附件 chips（类名与 DOM 结构与首页 renderAttachmentsWrap 一致，样式直接复用全局规则）。
+     *  用 html() 整体重建而非逐个 append：表单 DOM 每次重建，残留节点无处可去；
+     *  且删除按钮走视图级委托（data-idx），不需要逐元素绑事件。 */
+    function renderAutoAttachments() {
+        var $wrap = $('#autoAttachmentsWrap');
+        if (!$wrap.length) return;
+        if (autoAttachments.length === 0) {
+            $wrap.removeClass('has-items').html('');
+            return;
+        }
+        var html = '';
+        for (var i = 0; i < autoAttachments.length; i++) {
+            var item = autoAttachments[i];
+            var label = escapeHtml(item.name);
+            var sizeStr = autoAttachSize(item.size);
+            var title = escapeHtml(sizeStr ? (item.name + ' · ' + sizeStr) : item.name);
+            html += '<div class="attachment-item">';
+            if (item.type === 'image' && item.dataUrl) {
+                html += '<img src="' + item.dataUrl + '" title="' + title + '"/>';
+            } else {
+                // 非图片（以及尚未存缩略图的旧图片附件）一律走方形文件瓦片
+                html += '<div class="attachment-item-file" title="' + title + '">'
+                    + '<span class="file-icon">' + autoAttachIconSvg() + '</span>'
+                    + '<span class="file-name">' + label + '</span>'
+                    + '</div>';
+            }
+            html += '<button type="button" class="attachment-item-remove" data-idx="' + i + '">&times;</button>';
+            html += '</div>';
+        }
+        $wrap.addClass('has-items').html(html);
+    }
+
+    /** 受理一批文件（kind = 'image' | 'file'）。
+     *  名额用本地计数器累加，不能只看 autoAttachments.length：图片分支的 push 在
+     *  FileReader.onload 里，循环同步执行期间 length 纹丝不动（与首页 processSelectedFiles 同一类缺陷）。 */
+    function acceptAutoAttachments(fileList, kind) {
+        if (!fileList || !fileList.length) return;
+        var room = AUTO_MAX_ATTACHMENTS - autoAttachments.length;
+        if (room <= 0) {
+            toast(t('ui.attachment_limit', [AUTO_MAX_ATTACHMENTS]), 'error');
+            return;
+        }
+        var taken = 0;
+        var version = autoAttachVersion;
+        for (var i = 0; i < fileList.length; i++) {
+            if (taken >= room) {
+                toast(t('ui.attachment_partial_limit', [AUTO_MAX_ATTACHMENTS]), 'error');
+                break;
+            }
+            var file = fileList[i];
+            if (!file) continue;
+            taken++;
+            // 类型以受理入口为准（与首页一致：「附加文件」选中的图片仍作 file 上传，但展示缩略图）
+            var isImageKind = (kind === 'image');
+            var hasImageBytes = String(file.type || '').indexOf('image/') === 0;
+            if (isImageKind || hasImageBytes) {
+                var entry = { name: file.name, size: file.size, type: 'image', file: file, dataUrl: '' };
+                autoAttachments.push(entry);
+                if (typeof FileReader === 'function') {
+                    (function (ent) {
+                        var reader = new FileReader();
+                        reader.onload = function (evt) {
+                            if (autoAttachVersion !== version) return; // 过期回调，丢弃
+                            ent.dataUrl = evt.target.result;
+                            renderAutoAttachments();
+                        };
+                        reader.readAsDataURL(ent.file);
+                    })(entry);
+                }
+            } else {
+                autoAttachments.push({ name: file.name, size: file.size, type: 'file', file: file });
+            }
+        }
+        renderAutoAttachments();
+    }
+
+    function removeAutoAttachment(idx) {
+        if (isNaN(idx) || idx < 0 || idx >= autoAttachments.length) return;
+        autoAttachments.splice(idx, 1);
+        renderAutoAttachments();
+    }
+
+    /** 清空附件（进新建表单 / 保存成功后调用） */
+    function clearAutoAttachments() {
+        autoAttachVersion++;
+        autoAttachments.length = 0;
+        renderAutoAttachments();
+    }
+
+    /** 编辑回填：后端只给路径/类型/大小，没有本地字节，因此渲染为无缩略图的文件瓦片 */
+    function restoreAutoAttachments(x) {
+        autoAttachVersion++;
+        autoAttachments.length = 0;
+        var paths = x.attachmentPaths || [];
+        var types = x.attachmentTypes || [];
+        var sizes = x.attachmentSizes || [];
+        for (var i = 0; i < paths.length; i++) {
+            var p = paths[i];
+            if (!p) continue;
+            autoAttachments.push({
+                name: baseName(p),
+                size: (typeof sizes[i] === 'number') ? sizes[i] : 0,
+                // 旧图片附件也按 file 渲染（无 dataUrl 可预览），但类型仍如实上报，
+                // 保存时 attachmentKeepPaths 不携带类型，故类型仅供展示/提交新附件使用
+                type: (types[i] === 'image') ? 'image' : 'file',
+                keptPath: p
+            });
+        }
+        renderAutoAttachments();
+    }
+
+    /** layui select 渲染 + 回写 formState。
      * layui 会隐藏原生 <select>（.layui-form select{display:none}）并另建面板，
      * 故值以 formState 为准；事件回调只能绑一次（DOM 每次重建，重复 bind 会叠加）。
      */
@@ -676,7 +885,9 @@
             models: function () { return formState.models; },
             currentModel: effectiveModel,
             onSelect: applyModelSelection,
-            onOpen: function () { $('#autoWsSelector').removeClass('open'); },
+            // 开模型下拉时收起本页其余浮层（浮层互斥；组件已在按钮点击上 stopPropagation，
+            // 页面级委托收不到该事件，只能靠这个回调）
+            onOpen: function () { closeAutoPanels('model'); },
             thinking: {
                 value: function () { return formState.thinking; },
                 onChange: function (v) { formState.thinking = v; }
@@ -691,6 +902,105 @@
 
     function refreshAutoSelector() {
         if (autoSelector) autoSelector.update();
+    }
+
+    // ===================== 权限档位选择器（与前台 access-selector 同构） =====================
+
+    /** 任务级权限档位渲染：'' = 跟随会话；default / full 见后端 AccessMode。
+     *  下拉每次全量重建；选 full 需风险确认（与聊天页 openFullConfirm 同范式，此处简化为 layConfirm）。
+     *  optionHtml 结构抄 app-access-mode.js（含 access-option-check svg）；
+     *  「跟随会话」无 desc 行时不渲染 desc span（避免空行）。 */
+    function accessOptionHtml(mode) {
+        var nameKey = mode === 'full' ? 'settings.loop.access_full'
+            : (mode === 'default' ? 'settings.loop.access_default' : 'settings.loop.access_mode_default');
+        // desc 仅 default/full 两档有（复用 app.access_default_desc / app.access_full_desc）；跟随会话无 desc
+        var descKey = mode === 'full' ? 'app.access_full_desc'
+            : (mode === 'default' ? 'app.access_default_desc' : '');
+        var active = formState.accessMode === mode;
+        var h = '<button type="button" class="access-option' + (active ? ' active' : '')
+            + (mode === 'full' ? ' is-full' : '') + '" data-mode="' + mode + '"'
+            + (active ? ' aria-current="true"' : '') + '>'
+            + '<div class="access-option-body">'
+            + '<span class="access-option-name">' + escapeHtml(t(nameKey)) + '</span>';
+        if (descKey) {
+            h += '<span class="access-option-desc">' + escapeHtml(t(descKey)) + '</span>';
+        }
+        h += '</div>'
+            + '<svg class="access-option-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>'
+            + '</button>';
+        return h;
+    }
+
+    function renderAccessUI() {
+        var $sel = $('#autoAccessSelector');
+        if (!$sel.length) return;
+        var isFull = formState.accessMode === 'full';
+        var hasChoice = !!formState.accessMode;
+        var labelKey = !hasChoice ? 'settings.loop.access_mode_default'
+            : (isFull ? 'settings.loop.access_full' : 'settings.loop.access_default');
+        $sel.toggleClass('is-full', isFull);
+        $('#autoAccessLabel').attr('data-i18n', labelKey).text(t(labelKey));
+        $('#autoAccessDropdown').html(
+            accessOptionHtml('') + accessOptionHtml('default') + accessOptionHtml('full'));
+    }
+
+    /** 收起本页所有浮层（+菜单 / 工作空间 / 模型 / 权限 / 命令补全），except 除外。
+     *  浮层互斥统一走这里：权限下拉在托盘条、+菜单在工作条，彼此不能同时展开。 */
+    function closeAutoPanels(except) {
+        if (except !== 'plus') $('#autoPlusWrap').removeClass('open');
+        if (except !== 'ws') $('#autoWsSelector').removeClass('open');
+        if (except !== 'model') $('#autoModelSelector').removeClass('open');
+        if (except !== 'access') $('#autoAccessSelector').removeClass('open');
+        if (except !== 'cmd') {
+            // 传真实面板元素：hide(null) 会退化成全局 hideCmdComplete()，误伤聊天页面板
+            var completeEl = document.getElementById('autoCmdComplete');
+            if (completeEl && window.GourdCmdComplete) window.GourdCmdComplete.hide(completeEl);
+        }
+    }
+
+    /** 绑定权限选择器事件（委托到 #automationView，表单骨架重建后依然有效；只绑一次）。
+     *
+     *  为何不能委托到 document（重要，勿改回）：app-access-mode.js 在 document 上以
+     *  bubble 委托接管了 `.access-option`（会话级权限），且它在 app-bootstrap.js 里
+     *  先于本文件加载 —— 同一元素上的 handler 按绑定顺序执行，本页的 stopPropagation()
+     *  根本挡不住它：点任务档位会被误当成切会话权限（甚至弹会话级完全访问确认框）。
+     *  委托到 #automationView（document 的后代）后，本页 handler 在 bubble 上行到该节点
+     *  时先执行，再 stopPropagation() 就能真正断流。这也是文件头设计原则第 1 条。 */
+    var accessEventsBound = false;
+    function bindAccessEvents() {
+        if (accessEventsBound) return;
+        accessEventsBound = true;
+        var $view = $('#automationView');
+        $view.on('click', '#autoAccessCurrent', function (e) {
+            e.stopPropagation();
+            var opening = !$('#autoAccessSelector').hasClass('open');
+            closeAutoPanels(opening ? 'access' : null);
+            if (opening) renderAccessUI();
+            $('#autoAccessSelector').toggleClass('open', opening);
+        });
+        $view.on('click', '#autoAccessDropdown .access-option', function (e) {
+            e.stopPropagation();
+            var mode = $(this).attr('data-mode') || '';
+            $('#autoAccessSelector').removeClass('open');
+            if (mode === formState.accessMode) return; // 选当前档：只收起，不弹确认
+            if (mode === 'full' && typeof window.layConfirm === 'function') {
+                // 与聊天页同款风险确认：完全访问需用户显式确认
+                window.layConfirm(t('app.access_confirm_title') + '\n' + t('app.access_ack'), function () {
+                    formState.accessMode = 'full';
+                    renderAccessUI();
+                }, function () { /* 取消：保持原选择 */ });
+                return;
+            }
+            formState.accessMode = mode;
+            renderAccessUI();
+        });
+        // 点击外部 / Esc 收起（与其它浮层同款；document 级只读不写全局状态，不会与首页互扰）
+        $(document).on('mousedown', function (e) {
+            if (!$(e.target).closest('#autoAccessSelector')[0]) $('#autoAccessSelector').removeClass('open');
+        });
+        $(document).on('keydown', function (e) {
+            if (e.key === 'Escape') $('#autoAccessSelector').removeClass('open');
+        });
     }
 
     // 切模型：思考档位集可能变化，当前档位不在新集合内则回落「默认」（auto）
@@ -718,14 +1028,19 @@
         formState.thinking = normThinking(x.thinkingDepth);
         // 任务级上下文窗口：缺省（null）表示跟随默认，表单存 '' 保持「未显式设置」语义
         formState.contextLength = x.contextLength || '';
+        // 权限档位：缺省（null）表示跟随会话已存档位，表单存 '' 保持同语义
+        formState.accessMode = x.accessMode || '';
         formState.channel = x.channelNotify || '';
         renderSelects();
         renderWorkspaceUI();
+        renderAccessUI();
+        // 旧附件回填（无本地字节：chip 显示图标 + 名称 + 大小，删除 = 从保留清单移除）
+        restoreAutoAttachments(x);
         refreshAutoSelector();
 
         applySchedule(x);
 
-        if (x.worktreeEnabled || x.maxIterations > 0) {
+        if (x.worktreeEnabled || x.maxIterations > 0 || x.accessMode) {
             $('#autoAdvanced').show();
             $('#autoAdvancedToggle').removeClass('collapsed');
         }
@@ -789,6 +1104,64 @@
 
     // ===================== 保存 =====================
 
+    /**
+     * multipart 提交（loop/add 与 loop/update）。
+     *
+     * 带附件时必须走 FormData（File 无法进普通表单编码）；为保持「无附件也走同一条路径」
+     * （后端只认一种 Content-Type 口径，两条分支会造成字段序列化差异），有 FormData 就一律用。
+     * 同名键多次 append = 数组：attachments / attachmentTypes / attachmentKeepPaths 三者按序一一对应。
+     *
+     * 无 FormData 环境（如契约测试的 vm 沙箱）降级为 api() 普通表单提交：
+     * 此时附件不可能存在（受理入口同样依赖浏览器 File API），字段语义完全等价。
+     */
+    function apiPostForm(action, params, cb) {
+        var sessionId = sid();
+        if (!sessionId) { if (cb) cb(null); return; }
+        if (typeof FormData !== 'function') { api(action, params, cb); return; }
+
+        var fd = new FormData();
+        fd.append('sessionId', sessionId);
+        for (var k in params) {
+            if (!Object.prototype.hasOwnProperty.call(params, k)) continue;
+            var v = params[k];
+            // null（如 intervalMinutes 缺省）不 append：后端 @Param 缺参即 null，
+            // 而 append('k', null) 会传字面量 "null" 字符串
+            if (v === null || v === undefined) continue;
+            fd.append(k, v);
+        }
+        var keepSent = false;
+        for (var i = 0; i < autoAttachments.length; i++) {
+            var item = autoAttachments[i];
+            if (item.keptPath) {
+                // 编辑态保留的旧附件：不重传字节，只告知后端「这个路径留着」
+                fd.append('attachmentKeepPaths', item.keptPath);
+                keepSent = true;
+                continue;
+            }
+            if (!item.file) continue;
+            fd.append('attachments', item.file, item.name);
+            fd.append('attachmentTypes', item.type === 'image' ? 'image' : 'file');
+        }
+        // 编辑态 keep 清单必须显式发送：后端「未声明(null)=全部保留」，缺省会把
+        // 「清空全部旧附件」的意图静默吞掉。无保留项时发哨兵 '.'——
+        // 后端 normalizeNames 会把它判为非法名丢弃，得到空清单=显式清空。
+        if (action === 'update' && !keepSent) fd.append('attachmentKeepPaths', '.');
+
+        $.ajax({
+            url: '/web/chat/loop/' + action,
+            method: 'POST',
+            data: fd,
+            processData: false,
+            contentType: false,
+            dataType: 'json',
+            success: function (r) { if (cb) cb(r); },
+            error: function () {
+                toast(t('settings.loop.operation_failed'), 'error');
+                if (cb) cb(null);
+            }
+        });
+    }
+
     function doSave() {
         var $saveBtn = $('#autoSaveBtn');
         if ($saveBtn.prop('disabled')) return;
@@ -823,16 +1196,19 @@
             modelName: formState.modelName || '',
             thinkingDepth: formState.thinking || 'auto',
             // 空串 = 清除任务级上下文（跟随默认）；后端空串归一为 null
-            contextLength: formState.contextLength || ''
+            contextLength: formState.contextLength || '',
+            // 空串 = 清除任务级权限（跟随会话已存档位）；后端空串归一为 null
+            accessMode: formState.accessMode || ''
         };
 
         function restore() { $saveBtn.prop('disabled', false).text(t('settings.loop.save')); }
 
         if (editId) {
             params.taskId = editId;
-            api('update', params, function (r) {
+            apiPostForm('update', params, function (r) {
                 if (r && r.code === 200) {
                     toast(t('settings.loop.updated'), 'success');
+                    clearAutoAttachments();
                     showList();
                 } else {
                     restore();
@@ -840,9 +1216,10 @@
                 }
             });
         } else {
-            api('add', params, function (r) {
+            apiPostForm('add', params, function (r) {
                 if (r && r.code === 200) {
                     toast(t('settings.loop.created'), 'success');
+                    clearAutoAttachments();
                     showList();
                 } else {
                     restore();
@@ -850,6 +1227,151 @@
                 }
             });
         }
+    }
+
+    // ===================== 指令区事件（+菜单 / 命令补全 / 附件受理） =====================
+
+    /**
+     * 命令补全（/ 命令、@ 子代理、$ 技能）：完整复用 app-history.js 导出的 GourdCmdComplete，
+     * 本页只提供宿主元素与事件接线（候选集过滤/键盘导航/插入语义不在这里重写一份，避免两份漂移）。
+     */
+    function autoPromptEl() { return document.getElementById('autoPrompt'); }
+    function autoCmdEl() { return document.getElementById('autoCmdComplete'); }
+
+    function triggerAutoCmd(prefix) {
+        var inputEl = autoPromptEl();
+        var completeEl = autoCmdEl();
+        if (!inputEl || !completeEl || !window.GourdCmdComplete) return;
+        closeAutoPanels();
+        window.GourdCmdComplete.trigger(inputEl, completeEl, prefix);
+        // trigger 内部改了 value 但不触发 input，高度需自己跟上
+        autoGrowPrompt();
+    }
+
+    /** textarea input：除自适应高度外，接命令补全（口径同 app-history.js handleInputForCommands）。
+     *  仅在「以 / @ $ 开头且光标前无空格」时展示面板，其余情况收起本页面板（不动聊天页面板）。 */
+    function autoCmdCompleteOnInput() {
+        var inputEl = autoPromptEl();
+        var completeEl = autoCmdEl();
+        if (!inputEl || !completeEl || !window.GourdCmdComplete) return;
+        var val = inputEl.value;
+        if (val.indexOf('/') === 0 || val.indexOf('@') === 0 || val.indexOf('$') === 0) {
+            var textBeforeCursor = val.substring(0, inputEl.selectionStart);
+            if (textBeforeCursor.indexOf(' ') === -1) {
+                window.GourdCmdComplete.show(inputEl, completeEl, textBeforeCursor);
+                return;
+            }
+        }
+        window.GourdCmdComplete.hide(completeEl);
+    }
+
+    /** 指令区事件绑定。
+     *
+     *  一律委托到 #automationView（而非 document）：表单 DOM 每次重建，委托才能免重绑；
+     *  更关键的是 #automationView 是 document 的后代，本页 handler 在 bubble 上行时先于
+     *  app-history.js / app-ui.js 的 document 级委托执行，stopPropagation() 才真能断流
+     *  （否则 app-history 的 document click 会 hideCmdComplete() 清掉刚弹出的候选集）。
+     *  只绑一次（composerEventsBound），不持有已脱离文档的旧节点。 */
+    var composerEventsBound = false;
+    function bindComposerEvents() {
+        if (composerEventsBound) return;
+        // 沙箱/骨架未就绪时不绑（契约测试的 vm 沙箱只驱动保存与渲染路径）
+        if (!$('#autoComposer').length) return;
+        composerEventsBound = true;
+        var $view = $('#automationView');
+
+        // ---- + 菜单开合 ----
+        // app-ui.js 的 closePlusMenus 是初始化时对 $('.plus-menu-wrap') 的快照绑定，
+        // 自动化页 DOM 后建（且每次重建），不在那份快照里，必须本页自绑。
+        $view.on('click', '#autoPlusBtn', function (e) {
+            e.stopPropagation();
+            var opening = !$('#autoPlusWrap').hasClass('open');
+            closeAutoPanels(opening ? 'plus' : null);
+            $('#autoPlusWrap').toggleClass('open', opening);
+        });
+        // 菜单项点击后统一收起（setTimeout 保证晚于同一元素上的动作处理器）
+        $view.on('click', '#autoPlusWrap .plus-menu-item', function () {
+            setTimeout(function () { $('#autoPlusWrap').removeClass('open'); }, 0);
+        });
+
+        // ---- 附件：+菜单项 → 隐藏 file input → change 受理 ----
+        $view.on('click', '#autoAttachBtn', function (e) {
+            e.stopPropagation();
+            var el = document.getElementById('autoAttachInput');
+            if (el) el.click();
+        });
+        $view.on('click', '#autoImageBtn', function (e) {
+            e.stopPropagation();
+            var el = document.getElementById('autoImageInput');
+            if (el) el.click();
+        });
+        $view.on('change', '#autoAttachInput', function (e) {
+            if (e.target.files && e.target.files.length > 0) acceptAutoAttachments(e.target.files, 'file');
+            e.target.value = '';
+        });
+        $view.on('change', '#autoImageInput', function (e) {
+            if (e.target.files && e.target.files.length > 0) acceptAutoAttachments(e.target.files, 'image');
+            e.target.value = '';
+        });
+        // 附件删除（委托回本页数组；data-idx 为渲染时的下标）
+        $view.on('click', '#autoAttachmentsWrap .attachment-item-remove', function (e) {
+            e.stopPropagation();
+            removeAutoAttachment(parseInt($(this).attr('data-idx'), 10));
+        });
+
+        // ---- 命令 / 技能 / 子代理：插入前缀并开面板 ----
+        // stopPropagation 必须保留：否则事件继续上到 document，app-history.js 的外部收起器
+        // 会 hideCmdComplete() 把刚 show 出来的候选集清空（面板还在、导航已死）。
+        $view.on('click', '#autoCmdBtn', function (e) { e.stopPropagation(); triggerAutoCmd('/'); });
+        $view.on('click', '#autoSkillBtn', function (e) { e.stopPropagation(); triggerAutoCmd('$'); });
+        $view.on('click', '#autoAgentBtn', function (e) { e.stopPropagation(); triggerAutoCmd('@'); });
+        // #autoHistoryBtn 置灰，无动作
+
+        // ---- textarea：命令补全接线 ----
+        // 刻意不在这里另绑一个 input：initEvents 已在 #automationView 上绑了同选择器的
+        // input 委托（autoGrowPrompt），同一宿主同一选择器重复绑会让两个处理器争高度/面板。
+        // 高度与补全统一由那一处串行调用（见 initEvents）。
+        $view.on('keydown', '#autoPrompt', function (e) {
+            if (!window.GourdCmdComplete) return;
+            // 补全面板导航优先；刻意不加 Enter 发送语义（保存走底部按钮）
+            window.GourdCmdComplete.navigate(e, autoPromptEl(), autoCmdEl());
+        });
+
+        // ---- 补全面板候选项点击（同 app-history.js 的面板点击范式） ----
+        $view.on('click', '#autoCmdComplete .cmd-complete-item', function (e) {
+            e.stopPropagation();
+            if (!window.GourdCmdComplete) return;
+            window.GourdCmdComplete.setIndex(parseInt($(this).attr('data-index'), 10));
+            window.GourdCmdComplete.apply(autoPromptEl(), autoCmdEl());
+            // apply 内部调 autoResize（只改 height，不管 overflowY），高度语义收回本页
+            autoGrowPrompt();
+            var el = autoPromptEl();
+            if (el && el.focus) el.focus();
+        });
+
+        // ---- 点击外部 / Esc 收起（+菜单与补全面板；权限气泡由 bindAccessEvents 自管） ----
+        // 这三个留在 document：它们是「点哪儿都要收」的全局语义，且只读不写共享状态
+        $(document).on('mousedown.autoComposer', function (e) {
+            if (!$(e.target).closest('#autoPlusWrap').length) $('#autoPlusWrap').removeClass('open');
+        });
+        $(document).on('keydown.autoComposer', function (e) {
+            if (e.key !== 'Escape') return;
+            $('#autoPlusWrap').removeClass('open');
+            // 仅在自动化表单真的挂着时才收面板：表单未挂载时 autoCmdEl() 为 null，
+            // 而 hide(null) 会退化成全局 hideCmdComplete() —— 那会把聊天页正在用的
+            // 命令补全面板一并关掉（跨视图误伤）。
+            var completeEl = autoCmdEl();
+            if (completeEl && window.GourdCmdComplete) window.GourdCmdComplete.hide(completeEl);
+        });
+        $(document).on('click.autoComposer', function (e) {
+            var completeEl = autoCmdEl();
+            // 同上：表单未挂载时完全不介入，把聊天页面板的收起权留给 app-history.js
+            // （它的外部收起器排除了所有 textarea，而本处只认 #autoPrompt）。
+            if (!completeEl || !window.GourdCmdComplete) return;
+            var $target = $(e.target);
+            if ($target.closest('#autoCmdComplete').length || $target.closest('#autoPrompt').length) return;
+            window.GourdCmdComplete.hide(completeEl);
+        });
     }
 
     // ===================== 事件（仅绑定在本视图容器内） =====================
@@ -902,7 +1424,11 @@
                 var sessId = $(this).attr('data-sid');
                 var sessRoot = $(this).attr('data-root') || '';
                 var sessLabel = $(this).closest('.auto-task-item').find('.auto-task-name').text();
-                if (sessId && typeof window.openSessionById === 'function') window.openSessionById(sessId, sessLabel, sessRoot);
+                if (!sessId || typeof window.openSessionById !== 'function') return;
+                // 提示条不再由这里注入任务定义参数：任务可能被删除/编辑，定义值 ≠ 本轮实际生效值。
+                // 恢复改由 app-history.js refreshSessionModel → /web/chat/loop-run 取证端点统一负责
+                // （刷新后/任意入口打开执行会话都能恢复，数据源是会话快照里的本轮生效值）。
+                window.openSessionById(sessId, sessLabel, sessRoot);
             }
         });
 
@@ -920,8 +1446,12 @@
         });
         $view.on('click', '#autoSaveBtn', doSave);
 
-        // ---- 指令输入框：自适应高度（代替原生 resize 手柄） ----
-        $view.on('input', '#autoPrompt', autoGrowPrompt);
+        // ---- 指令输入框：自适应高度（代替原生 resize 手柄）+ 命令补全 ----
+        // 两者必须串在同一处理器里：同一宿主同一选择器重复绑 input 会互相覆盖/竞争
+        $view.on('input', '#autoPrompt', function () {
+            autoGrowPrompt();
+            autoCmdCompleteOnInput();
+        });
 
         // ---- 工作空间选择器（局部委托 + stopPropagation） ----
         // 清除按钮必须先于 #autoWsCurrent 处理：它是 current 的子元素，
@@ -934,8 +1464,9 @@
         });
         $view.on('click', '#autoWsCurrent', function (e) {
             e.stopPropagation();
-            $('#autoModelSelector').removeClass('open');
-            $('#autoWsSelector').toggleClass('open');
+            var opening = !$('#autoWsSelector').hasClass('open');
+            closeAutoPanels(opening ? 'ws' : null);
+            $('#autoWsSelector').toggleClass('open', opening);
         });
         $view.on('click', '#autoWsDropdown .auto-ws-item', function (e) {
             e.stopPropagation();

@@ -795,7 +795,7 @@ public class WebGate extends SimpleWebSocketListener {
                     }
                 }
                 // Resume streaming after HITL decision
-                performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName, accessMode);
+                performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName, accessMode, loopResumeEvidence(session));
                 return InputResult.ACCEPTED;
             }
 
@@ -851,7 +851,7 @@ public class WebGate extends SimpleWebSocketListener {
                 }
 
                 // Resume streaming after user answers
-                performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName, accessMode);
+                performAgentTaskAsync(session, sessionCwd, null, selectedModel, agentName, accessMode, loopResumeEvidence(session));
                 return InputResult.ACCEPTED;
             }
 
@@ -914,7 +914,7 @@ public class WebGate extends SimpleWebSocketListener {
                         // 传入 sessionCwd 供恢复校准定位 TODO.md
                         engine.prepareResume(resumeTrace, session, currentInput, true, sessionCwd);
                         // 空 Prompt 触发库的恢复分支，复用已有工作记忆
-                        performAgentTaskAsync(session, sessionCwd, Prompt.of(), selectedModel, agentName, accessMode);
+                        performAgentTaskAsync(session, sessionCwd, Prompt.of(), selectedModel, agentName, accessMode, loopResumeEvidence(session));
                         return InputResult.ACCEPTED;
                     }
                 }
@@ -999,7 +999,8 @@ public class WebGate extends SimpleWebSocketListener {
         // 用户确实作了答：连同题面一并渲染成文本，模型才知道这是在回答哪一道问题
         String answerText = AskUser.formatAnswerText(questions, questionAnswer);
         session.updateSnapshot();
-        performAgentTaskAsync(session, sessionCwd, Prompt.of(answerText), selectedModel, agentName, accessMode);
+        // stale 降级 = 普通发言语义（Loop 执行早已结束）：不还原任务参数，且按前台轮清除取证
+        performAgentTaskAsync(session, sessionCwd, Prompt.of(answerText), selectedModel, agentName, accessMode, null);
         return InputResult.ACCEPTED;
     }
 
@@ -1018,9 +1019,58 @@ public class WebGate extends SimpleWebSocketListener {
      * @param accessMode   本轮声明的访问控制档位（可为 null，回退会话已存档位）
      */
     private void performAgentTaskAsync(AgentSession session, String sessionCwd, Prompt prompt, String selectedModel, String agentName, String accessMode) {
+        performAgentTaskAsync(session, sessionCwd, prompt, selectedModel, agentName, accessMode, null);
+    }
+
+    /**
+     * 读取会话上的 Loop 执行取证标记（供恢复轮还原任务级 override）。
+     *
+     * <p>存在理由（2026-10-17 实锤）：Loop 轮被 ask_user/HITL 挂起后，用户作答/审批触发的
+     * 恢复轮走本类异步链路，旧实现只带会话级选择 → 恢复轮静默换回会话旧模型/旧档位
+     * （stream trace 实测：同一 run 内挂起轮 qwen、恢复轮 gpt-6-luna）。取证键在 Loop 轮首
+     * 写入、前台新轮首清除，故「会话上有取证」即「被恢复的挂起轮属于 Loop 执行」。</p>
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> loopResumeEvidence(AgentSession session) {
+        // 统一口径：与桌面端恢复链路共用 HarnessEngine.loopRunEvidence（2026-10-17 review 收敛，
+        // 防两处解析口径再次漂移）
+        return HarnessEngine.loopRunEvidence(session);
+    }
+
+    /**
+     * 异步执行一轮对话（带 Loop 恢复取证）。
+     *
+     * @param loopResume 非空时本轮是「Loop 执行挂起后的恢复轮」：模型/思考/上下文/权限
+     *                   按取证还原为 per-turn override（不写回会话，与 transientSelection 同语义），
+     *                   并经 loopRunLabel 刷新取证时刻；为 null 时维持旧口径（会话级选择）。
+     */
+    private void performAgentTaskAsync(AgentSession session, String sessionCwd, Prompt prompt, String selectedModel, String agentName, String accessMode,
+                                       Map<String, Object> loopResume) {
         String sessionId = session.getSessionId();
 
-        if (selectedModel != null) {
+        // Loop 恢复轮：任务级参数以 per-turn override 还原（取证值优先），不写回会话上下文
+        String modelOverride = null;
+        String thinkingOverride = null;
+        Long contextOverride = null;
+        String accessOverride = null;
+        String loopLabel = null;
+        if (loopResume != null) {
+            String evModel = String.valueOf(loopResume.getOrDefault("model", ""));
+            if (Assert.isNotEmpty(evModel)) modelOverride = evModel;
+            String evThinking = String.valueOf(loopResume.getOrDefault("thinkingDepth", ""));
+            if (Assert.isNotEmpty(evThinking)) thinkingOverride = evThinking;
+            Object evCtx = loopResume.get("contextLength");
+            if (evCtx instanceof Number && ((Number) evCtx).longValue() > 0) contextOverride = ((Number) evCtx).longValue();
+            String evAccess = String.valueOf(loopResume.getOrDefault("accessMode", ""));
+            if (Assert.isNotEmpty(evAccess)) accessOverride = AccessMode.normalize(evAccess).code();
+            String evName = String.valueOf(loopResume.getOrDefault("name", ""));
+            if (Assert.isNotEmpty(evName)) loopLabel = evName;
+        }
+
+        if (modelOverride != null) {
+            // Loop 恢复轮：用任务模型但不写会话（与 startSyncRun 的 transientSelection 同语义）
+            selectedModel = modelOverride;
+        } else if (selectedModel != null) {
             session.getContext().put(HarnessEngine.CTX_MODEL_SELECTED, selectedModel);
         } else {
             selectedModel = session.getContext().getAs(HarnessEngine.CTX_MODEL_SELECTED);
@@ -1034,7 +1084,10 @@ public class WebGate extends SimpleWebSocketListener {
         // 【口径钉死】这里<b>不校验</b> accessMode 合法性：非法值会被 normalize 回落默认档，
         // 与「新会话/未声明者一律默认档」同语义，无需报错；显式拒绝只发生在
         // /web/chat/access/select（用户主动切换档位却拼错时必须可感知，见 WebController#access_select）。
-        if (accessMode != null) {
+        if (accessOverride != null) {
+            // Loop 恢复轮：任务档位仅本轮生效，不写会话权威存储位
+            accessMode = accessOverride;
+        } else if (accessMode != null) {
             session.getContext().put(AccessMode.CTX_KEY, AccessMode.normalize(accessMode).code());
         } else {
             accessMode = session.getContext().getAs(AccessMode.CTX_KEY);
@@ -1065,7 +1118,8 @@ public class WebGate extends SimpleWebSocketListener {
         final String changeRoot = resolveChangeRoot(sessionId, sessionCwd);
         // 传 changeRoot 而不是 sessionCwd：ActionTask 用 ATTR_CWD（由 buildStreamFlux 根据本参注入）
         // 作为写账本的根，必须与下面 finishFileChanges 用的根完全一致，否则账本写一份、收口另一份。
-        Disposable disposable = streamBuilder.buildStreamFlux(session, agent, chatModel, changeRoot, prompt)
+        Disposable disposable = streamBuilder.buildStreamFlux(session, agent, chatModel, changeRoot, prompt,
+                        thinkingOverride, contextOverride, modelOverride, accessOverride, loopLabel)
                 .subscribeOn(Schedulers.boundedElastic())
                 .doOnNext(line -> {
                     if (line.getRunId() != null) runIdSeen.compareAndSet(null, line.getRunId());
@@ -1172,7 +1226,8 @@ public class WebGate extends SimpleWebSocketListener {
      * Stop 会调用 {@link #interruptSession}，两者都要抢同一把会话锁，持锁等待必然死锁。</p>
      */
     private SyncRunHandle startSyncRun(AgentSession session, String sessionCwd, Prompt prompt, String selectedModel, String agentName,
-                                       boolean transientSelection, String thinkingDepthOverride, Long contextLengthOverride) {
+                                       boolean transientSelection, String thinkingDepthOverride, Long contextLengthOverride,
+                                       String accessModeOverride, String loopRunLabel) {
         String sessionId = session.getSessionId();
 
         if (selectedModel != null) {
@@ -1205,7 +1260,7 @@ public class WebGate extends SimpleWebSocketListener {
         final java.util.concurrent.atomic.AtomicReference<String> runIdSeen = new java.util.concurrent.atomic.AtomicReference<>();
         final String changeRoot = resolveChangeRoot(sessionId, sessionCwd);
         // 同异步路径：传 changeRoot 以保证「写账本的根 == 收口的根 == 前端读取的根」
-        Disposable disposable = streamBuilder.buildStreamFlux(session, agent, chatModel, changeRoot, prompt, thinkingDepthOverride, contextLengthOverride)
+        Disposable disposable = streamBuilder.buildStreamFlux(session, agent, chatModel, changeRoot, prompt, thinkingDepthOverride, contextLengthOverride, transientSelection ? selectedModel : null, accessModeOverride, loopRunLabel)
                 .subscribeOn(Schedulers.boundedElastic())
                 .doOnNext(line -> {
                     if (line.getRunId() != null) runIdSeen.compareAndSet(null, line.getRunId());
@@ -1491,7 +1546,34 @@ public class WebGate extends SimpleWebSocketListener {
      * @param contextLengthOverride 任务指定的上下文窗口（可为 null，回退会话持久选择）
      */
     public String safeChatInputAndCaptureLoop(String sessionId, String projectRoot, String worktreeRoot, String input, String source,
-                                              String modelName, String thinkingDepth, Long contextLengthOverride) {
+                                              String modelName, String thinkingDepth, Long contextLengthOverride,
+                                              String accessModeOverride) {
+        return safeChatInputAndCaptureLoop(sessionId, projectRoot, worktreeRoot, input, source,
+                modelName, thinkingDepth, contextLengthOverride, accessModeOverride, null, null, null, null);
+    }
+
+    /**
+     * Loop 专用（带任务级附件）：每轮执行都把任务附件注入本轮 Prompt。
+     *
+     * <p>附件语义与前台 {@code /web/chat/input} 同构：图片读成 {@link ImageBlock} 走多模态，
+     * 普通文件以 {@code [附件: <绝对路径>]} 文本前缀引用。差异仅在存储位置：任务附件住在
+     * {@code <stateDir>/attachments/}（生命周期跟随任务定义，每轮重新注入），不在会话 uploads 里。</p>
+     *
+     * <p>单条附件读失败只跳过并留痕，不整轮失败：定时任务无人值守，因一张图读不回来而丢弃
+     * 整轮执行，代价远大于「这轮少一个附件」。</p>
+     *
+     * @param attachmentsDir  任务附件目录（可为 null，表示本轮无附件）
+     * @param attachmentPaths 附件目录内的文件名清单（可为 null）
+     * @param attachmentTypes 与 attachmentPaths 同序的类型声明（{@code image} / {@code file}，可为 null）
+     * @param loopRunLabel    Loop 任务名（可为 null）：非空时本轮轮首把实际生效参数写入会话取证键
+     *                        （{@link HarnessEngine#CTX_LOOP_RUN}），供执行视图提示条恢复
+     */
+    public String safeChatInputAndCaptureLoop(String sessionId, String projectRoot, String worktreeRoot, String input, String source,
+                                              String modelName, String thinkingDepth, Long contextLengthOverride,
+                                              String accessModeOverride,
+                                              java.nio.file.Path attachmentsDir,
+                                              List<String> attachmentPaths, List<String> attachmentTypes,
+                                              String loopRunLabel) {
         LoopRunPlan plan;
         SyncRunHandle handle;
         // 会话输入锁只在「受理准备 + 订阅登记」这一短临界区内持有。
@@ -1499,10 +1581,14 @@ public class WebGate extends SimpleWebSocketListener {
         // onAgentStart→registerSteerRun 与 Stop 的 interruptSession 都要抢同一把会话锁，
         // 持锁等待会造成永久死锁（现象：点暂停无反应、一直显示“思考中”且计时器不停）。
         synchronized (inputLocks.computeIfAbsent(sessionId, k -> new Object())) {
-            plan = doSafeChatInputAndCaptureLoopPrepare(sessionId, projectRoot, worktreeRoot, input, source);
+            plan = doSafeChatInputAndCaptureLoopPrepare(sessionId, projectRoot, worktreeRoot, input, source,
+                    attachmentsDir, attachmentPaths, attachmentTypes);
             if (plan == null) return null;
             if (plan.earlyResult != null) return plan.earlyResult;
-            handle = startSyncRun(plan.session, plan.cwd, Prompt.of(plan.input), modelName, plan.agentName, true, thinkingDepth, contextLengthOverride);
+            // plan.prompt 非 null 表示本轮携带图片附件（多模态），必须整体替换纯文本 Prompt；
+            // 为 null 时维持旧口径 Prompt.of(plan.input)（此时 plan.input 已含文件附件前缀）。
+            Prompt prompt = plan.prompt != null ? plan.prompt : Prompt.of(plan.input);
+            handle = startSyncRun(plan.session, plan.cwd, prompt, modelName, plan.agentName, true, thinkingDepth, contextLengthOverride, accessModeOverride, loopRunLabel);
         }
         // 锁外等待：此时锁已释放，流线程可正常完成 run 注册与插话，Stop 也可即时受理。
         return handle.await();
@@ -1515,15 +1601,30 @@ public class WebGate extends SimpleWebSocketListener {
         String cwd;
         String input;
         String agentName;
+        /** 本轮最终 Prompt：仅当携带图片附件（多模态）时非 null，否则由调用方用 {@code Prompt.of(input)}。 */
+        Prompt prompt;
     }
 
     /**
-     * 在会话输入锁内执行的 Loop 受理准备：busy 检查、所属根绑定、目标达成短路、用户气泡推送。
-     *
-     * <p>准备阶段不阻塞，故可安全地在锁内执行；真正的流式执行（会阻塞至本轮结束）由调用方在锁外发起。</p>
+     * 在会话输入锁内执行的 Loop 受理准备（无任务级附件）。
      */
     private LoopRunPlan doSafeChatInputAndCaptureLoopPrepare(String sessionId, String projectRoot, String worktreeRoot,
                                                              String input, String source) {
+        return doSafeChatInputAndCaptureLoopPrepare(sessionId, projectRoot, worktreeRoot, input, source, null, null, null);
+    }
+
+    /**
+     * 在会话输入锁内执行的 Loop 受理准备：busy 检查、所属根绑定、目标达成短路、任务级附件解析、用户气泡推送。
+     *
+     * <p>准备阶段不阻塞，故可安全地在锁内执行；真正的流式执行（会阻塞至本轮结束）由调用方在锁外发起。</p>
+     *
+     * <p>附件解析也在本阶段完成（而不是丢给 startSyncRun）：用户气泡文本、{@code [附件:]} 前缀与
+     * 图片块必须出自同一份解析结果，否则会出现「气泡里写着附件、模型本轮却没看到」的分叉。</p>
+     */
+    private LoopRunPlan doSafeChatInputAndCaptureLoopPrepare(String sessionId, String projectRoot, String worktreeRoot,
+                                                             String input, String source,
+                                                             java.nio.file.Path attachmentsDir,
+                                                             List<String> attachmentPaths, List<String> attachmentTypes) {
         AgentSession existing;
         try {
             existing = engine.getSession(sessionId);
@@ -1566,7 +1667,34 @@ public class WebGate extends SimpleWebSocketListener {
             }
         }
 
-        emitToClient(sessionId, WebChunk.ofUserInput(input, source, projectRoot));
+        // 任务级附件：在推用户气泡之前解析，气泡文本与模型本轮看到的文本才一致。
+        // 只解析出「图片块 + 文件绝对路径」两批素材，前缀拼接与多模态 Prompt 构建在下方完成。
+        List<ImageBlock> loopImageBlocks = new ArrayList<>();
+        List<String> loopFileRefs = new ArrayList<>();
+        if (attachmentsDir != null && attachmentPaths != null && !attachmentPaths.isEmpty()) {
+            try {
+                com.gourdai.core.command.builtin.LoopAttachments.resolveRefs(attachmentsDir,
+                        attachmentPaths, attachmentTypes, loopImageBlocks, loopFileRefs);
+            } catch (RuntimeException e) {
+                // 附件目录整体不可读：本轮退化为纯文本执行，不因附件而放弃整轮定时任务
+                LOG.warn("[WebGate] loop attachments unavailable for session {}: {}", sessionId, e.toString());
+            }
+        }
+        // 文件附件前缀（与前台 doOnChatInput 同范式）：图片走多模态不进文本，避免把 base64 写进气泡与历史
+        String loopFilePrefix = null;
+        if (!loopFileRefs.isEmpty()) {
+            loopFilePrefix = loopFileRefs.stream()
+                    .map(f -> "[附件: " + f + "]")
+                    .collect(java.util.stream.Collectors.joining("\n"));
+        }
+
+        String bubbleInput = input;
+        if (loopFilePrefix != null) {
+            bubbleInput = (bubbleInput == null || bubbleInput.isEmpty())
+                    ? loopFilePrefix + "\n请帮我处理这些附件"
+                    : loopFilePrefix + "\n" + bubbleInput;
+        }
+        emitToClient(sessionId, WebChunk.ofUserInput(bubbleInput, source, projectRoot));
 
         String agentName = null;
         String currentInput = input;
@@ -1580,12 +1708,31 @@ public class WebGate extends SimpleWebSocketListener {
             }
         }
 
+        // 前缀必须加在 @agentName 剥离之后：否则 "@agent" 不再是行首，路由会失效。
+        if (loopFilePrefix != null) {
+            currentInput = (currentInput == null || currentInput.isEmpty())
+                    ? loopFilePrefix + "\n请帮我处理这些附件"
+                    : loopFilePrefix + "\n" + currentInput;
+        }
+
         LoopRunPlan plan = new LoopRunPlan();
         plan.session = session;
         // 工作目录：worktree 优先（隔离执行），否则用任务工作空间根
         plan.cwd = Assert.isNotEmpty(worktreeRoot) ? worktreeRoot : projectRoot;
         plan.input = currentInput;
         plan.agentName = agentName;
+        if (!loopImageBlocks.isEmpty()) {
+            // 多模态：文本块 + 图片块（与前台 doOnChatInput 构建 Prompt 的范式一致）
+            String text = Assert.isNotEmpty(currentInput)
+                    ? currentInput
+                    : (loopImageBlocks.size() > 1 ? "请描述这些图片" : "请描述这张图片");
+            Contents contents = new Contents();
+            contents.addBlock(TextBlock.of(text));
+            for (ImageBlock block : loopImageBlocks) {
+                contents.addBlock(block);
+            }
+            plan.prompt = Prompt.of(new UserMessage(contents));
+        }
         return plan;
     }
 
@@ -1810,7 +1957,8 @@ public class WebGate extends SimpleWebSocketListener {
     /**
      * 汇总一次输入携带的附件路径（multipart 新上传 + 按路径引用已落盘），供 user 帧落盘回显。
      *
-     * <p>multipart 附件的文件名由 {@link #generateUniqueFile} 保证全局唯一，落盘名与入参名一致，
+     * <p>multipart 附件的文件名由前端 generateUniqueFile 保证全局唯一（形如
+     * {@code image-a1b2c3.png} / {@code file-d4e5f6.pdf}），落盘名与入参名一致，
      * 故可直接拼出 {@code uploads/<name>} 相对路径；非法文件名（含 {@code ..} 或分隔符）与主链路同口径跳过。</p>
      *
      * <p><b>调用约束：</b>multipart 部分必须在附件<b>已落盘之后</b>再调用本方法（见

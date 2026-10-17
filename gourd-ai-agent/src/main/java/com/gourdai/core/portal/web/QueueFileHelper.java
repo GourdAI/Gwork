@@ -80,8 +80,8 @@ public class QueueFileHelper {
      *
      * @param sessionDir  会话存储目录
      * @param content     消息文本
-     * @param imagePaths  图片附件路径列表（相对于会话目录，如 "uploads/pasted-image-xxx.png"）
-     * @param filePaths   文件附件路径列表（相对于会话目录，如 "uploads/attachment-xxx.pdf"）
+     * @param imagePaths  图片附件路径列表（相对于会话目录，如 "uploads/image-a1b2c3.png"）
+     * @param filePaths   文件附件路径列表（相对于会话目录，如 "uploads/file-d4e5f6.pdf"）
      * @return 追加后的队列总长度
      */
     public int add(File sessionDir, String content, List<String> imagePaths, List<String> filePaths) {

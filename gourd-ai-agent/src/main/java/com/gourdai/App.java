@@ -21,6 +21,7 @@ import com.gourdai.core.config.AgentFlags;
 import com.gourdai.core.config.AgentProperties;
 import com.gourdai.core.config.AgentSettings;
 import com.gourdai.core.config.entity.ModelDo;
+import com.gourdai.core.portal.web.GworkStaticResourceHandler;
 import com.gourdai.core.portal.web.WebAuthFilter;
 import com.gourdai.core.portal.web.thinking.ModelProfiles;
 import org.noear.solon.core.util.Assert;
@@ -71,6 +72,16 @@ public class App {
 
         Solon.start(App.class, args, app -> {
             initAgentProperties(app, agentProps);
+
+            // 静态资源缓存修复（详见 GworkStaticResourceHandler 类注释）：
+            // 框架自带的 StaticResourceHandler 用「类加载时刻」作为所有静态资源的 Last-Modified，
+            // 导致浏览器缓存后恒 304、前端改动刷新不可见。这里在所有插件启动完成后
+            // （AppPluginLoadEndEvent，此时 WebStaticfilesPlugin 已把旧 handler 插入 pipeline），
+            // 把「文件真实 mtime」版 handler 前插到 pipeline 首部——它命中并处理文件后旧 handler
+            // 不再执行，从而将旧 handler 完全替换。事件注册必须在发布之前（本回调先于 run() 执行）。
+            app.onEvent(org.noear.solon.core.event.AppPluginLoadEndEvent.class, e -> {
+                e.app().handler().prev(new GworkStaticResourceHandler());
+            });
         });
     }
 

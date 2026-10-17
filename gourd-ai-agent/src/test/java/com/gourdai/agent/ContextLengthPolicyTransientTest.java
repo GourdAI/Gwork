@@ -105,4 +105,32 @@ class ContextLengthPolicyTransientTest {
         assertEquals(1_000_000L, copied);
         assertEquals(1_000_000L, ContextLengthPolicy.resolve(child));
     }
+
+    @Test
+    void clearTransientWithTokenShouldNotClearNewerTurnOverride() {
+        // 2026-10-17 加固护栏：恢复轮/重复审批下旧订阅的 doFinally 可能晚于新轮轮首执行，
+        // 无归属的 clear 会把新轮刚写的覆盖清掉（本轮压缩预算静默回退会话持久选择）。
+        AgentSession session = InMemoryAgentSession.of("ctx-policy-token");
+        ContextLengthPolicy.set(session, 128_000L);
+
+        ContextLengthPolicy.setTransient(session, 512_000L, "turn-1");
+        ContextLengthPolicy.setTransient(session, 1_000_000L, "turn-2"); // 新轮覆盖
+
+        ContextLengthPolicy.clearTransient(session, "turn-1"); // 旧轮收尾：不得动新轮的键
+        assertEquals(1_000_000L, ContextLengthPolicy.resolveRuntime(session));
+
+        ContextLengthPolicy.clearTransient(session, "turn-2"); // 同值才清
+        assertEquals(128_000L, ContextLengthPolicy.resolveRuntime(session));
+    }
+
+    @Test
+    void ownerlessTransientShouldBeClearableByAnyToken() {
+        // 无归属写入（兼容旧调用方）：任何 clear 都可清除，不得因 token 不匹配而残留
+        AgentSession session = InMemoryAgentSession.of("ctx-policy-ownerless");
+        ContextLengthPolicy.set(session, 128_000L);
+        ContextLengthPolicy.setTransient(session, 512_000L);
+
+        ContextLengthPolicy.clearTransient(session, "any-token");
+        assertEquals(128_000L, ContextLengthPolicy.resolveRuntime(session));
+    }
 }

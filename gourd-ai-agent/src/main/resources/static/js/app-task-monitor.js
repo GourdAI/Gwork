@@ -142,22 +142,98 @@
         outputsBody.innerHTML = html;
     }
 
+    /* 来源区（本会话上传过的附件清单）。
+       2026-10-15 用户反馈：机器长名（pasted-image-1792059457204-k3x9q.png）必被截断
+       且无从辨识，且要点开看大图。改造：
+       ① 图片行显示「图片 · <相对时间>」+ 真实缩略图（meta 拉回 dataUrl 后替换图标位），
+          不再展示存储名（原存储名收进 title，悬停可见；新上传已是短随机名 image-<随机>.png）；
+       ② 点击图片行 → 复用全站灯箱 openLightbox 看大图（对话区附件同款交互）；
+          点击时按需拉 meta（fetchAttachmentMeta 带常驻缓存，重复点击零网络开销），
+          拉不到（缺失/超限/读盘失败）toast 明确提示，不静默；
+       ③ 文件行保持纯展示（名称 + 大小）；uploads/ 路径不在工作区文件树内，不可跳文件查看器。 */
     function renderSources(data) {
         if (!sourcesBody) return;
         if (data === undefined) { sourcesBody.innerHTML = errorRow(); return; }
         var items = (data && data.items) || [];
         if (!items.length) { sourcesBody.innerHTML = emptyRow('monitor.empty_sources'); return; }
+        var imagePaths = [];
         var html = '';
         for (var i = 0; i < items.length; i++) {
             var it = items[i];
-            // 来源行不可点击跳转查看器：uploads/ 路径不在工作区文件树内，
-            // openFileViewer 解析不到（附件预览走对话气泡内的缩略图链路）。
-            html += '<div class="tm-row" title="' + esc(it.name) + '">' +
-                '<span class="tm-row-icon ' + (it.image ? 'tm-icon-image' : 'tm-icon-doc') + '">' +
-                (it.image ? ICONS.image : ICONS.doc) + '</span>' +
-                '<span class="tm-row-text">' + esc(it.name) + '</span></div>';
+            var sizeSub = (it.size > 0)
+                ? '<span class="tm-row-sub">' + esc(formatFileSize(it.size)) + '</span>' : '';
+            if (it.image) {
+                imagePaths.push(it.path);
+                /* 「图片 · <相对时间>」：不用存储名做主文案（机器名无可读性）；
+                   原存储名与大小收进 title。时间口径与侧栏会话行 formatRelTime 同源。 */
+                var when = (it.updatedAt && typeof formatRelTime === 'function')
+                    ? '<span class="tm-row-sub">' + esc(formatRelTime(it.updatedAt)) + '</span>' : sizeSub;
+                html += '<div class="tm-row tm-row-preview" data-tm-source="' + esc(it.path) + '" title="' + esc(it.name) + '">' +
+                    '<span class="tm-row-icon tm-icon-image">' + ICONS.image + '</span>' +
+                    '<span class="tm-row-text">' + esc(t('monitor.image')) + ' ' + when + '</span></div>';
+            } else {
+                html += '<div class="tm-row" title="' + esc(it.name) + '">' +
+                    '<span class="tm-row-icon tm-icon-doc">' + ICONS.doc + '</span>' +
+                    '<span class="tm-row-text">' + esc(it.name) + ' ' + sizeSub + '</span></div>';
+            }
         }
         sourcesBody.innerHTML = html;
+        upgradeSourceThumbs(imagePaths);
+    }
+
+    /* 缩略图异步升级：meta 结果晚于下一次轮询重渲染时必须丢弃（版本号守卫，
+       与 loadAll 的 reqVersions 同一纪律——旧行已被新 DOM 取代）。 */
+    var srcThumbSeq = 0;
+    function upgradeSourceThumbs(paths) {
+        if (!paths || !paths.length) return;
+        if (typeof fetchAttachmentMeta !== 'function') return;
+        var sid = currentSessionId();
+        if (!sid) return;
+        srcThumbSeq++;
+        var mySeq = srcThumbSeq;
+        fetchAttachmentMeta({ sessionId: sid, projectRoot: resolveRoot(sid) }, paths).then(function (results) {
+            if (mySeq !== srcThumbSeq) return;
+            var byPath = {};
+            for (var i = 0; i < (results || []).length; i++) {
+                var r = results[i];
+                if (r && r.path && r.dataUrl) byPath[r.path] = r;
+            }
+            var rows = sourcesBody.querySelectorAll('.tm-row-preview');
+            for (var j = 0; j < rows.length; j++) {
+                var meta = byPath[rows[j].getAttribute('data-tm-source')];
+                if (!meta) continue;
+                var icon = rows[j].querySelector('.tm-row-icon');
+                if (!icon) continue;
+                var img = document.createElement('img');
+                img.className = 'tm-src-thumb';
+                img.src = meta.dataUrl;
+                img.alt = '';
+                icon.textContent = '';
+                icon.appendChild(img);
+            }
+        });
+    }
+
+    /* 点击图片行 → 灯箱看大图。meta 未命中就现拉一次；仍无 dataUrl（缺失/超限/读盘
+       失败）toast 提示。openLightbox 由 app-message.js 暴露，做存在性守卫，
+       宁可不打开也不抛。 */
+    if (sourcesBody) {
+        sourcesBody.addEventListener('click', function (e) {
+            var rowEl = e.target.closest ? e.target.closest('.tm-row-preview') : null;
+            if (!rowEl) return;
+            var path = rowEl.getAttribute('data-tm-source');
+            if (!path) return;
+            var sid = currentSessionId();
+            if (!sid || typeof fetchAttachmentMeta !== 'function') return;
+            fetchAttachmentMeta({ sessionId: sid, projectRoot: resolveRoot(sid) }, [path]).then(function (results) {
+                var r = results && results[0];
+                if (r && r.dataUrl && typeof window.openLightbox === 'function') {
+                    window.openLightbox(r.dataUrl);
+                } else if (typeof window.showToast === 'function') {
+                    window.showToast(t('code.preview_load_failed'), 'error');
+                }
+            });
+        });
     }
 
     function renderSkills(data) {

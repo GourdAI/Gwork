@@ -4402,16 +4402,23 @@ function openLightbox(src) {
     var overlay = $('<div>').addClass('lightbox-overlay')[0];
     var img = $('<img>').attr('src', src)[0];
     $(overlay).append(img);
-    // 点遮罩与 Esc 两条关闭路径共用 close，避免点遮罩关闭后 keydown 监听残留累积
+    /* 点遮罩与 Esc 两条关闭路径共用 close，避免点遮罩关闭后 keydown 监听残留累积。
+       【Esc 层级纪律 2026-10-15 实测缺陷修复】灯箱是最顶层模态：Esc 必须在
+       【捕获阶段】消费并 stopPropagation。旧实现用 jQuery 冒泡监听，与页面其他
+       Esc 消费者（任务监控抽屉 / diff viewer / 向导）同发竞跑——实测：从监控
+       「来源」区点开图片灯箱后按 Esc，灯箱与整个监控抽屉被同一发事件一起关闭。
+       捕获消费后语义正确：Esc 先关最上层（灯箱），再按一次才轮到下层。 */
     function onKey(e) {
-        if (e.key === 'Escape') close();
+        if (e.key !== 'Escape') return;
+        e.stopPropagation();
+        close();
     }
     function close() {
         $(overlay).remove();
-        $(document).off('keydown', onKey);
+        document.removeEventListener('keydown', onKey, true);
     }
     $(overlay).on('click', close);
-    $(document).on('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);
     $(document.body).append(overlay);
 }
 window.openLightbox = openLightbox;

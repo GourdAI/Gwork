@@ -16,11 +16,15 @@
 package com.gourdai.core.command.builtin;
 
 import com.gourdai.agent.ContextLengthPolicy;
+import com.gourdai.harness.permission.AccessMode;
 import lombok.Getter;
 import org.noear.snack4.ONode;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -68,6 +72,13 @@ public class LoopTask {
     private final String thinkingDepth;
     // 上下文窗口（token）：null = 未设置（执行时使用全局默认）；合法值为 ContextLengthPolicy 固定选项之一
     private final Long contextLength;
+    // 访问控制档位：null = 未设置（执行时回退会话已存档位）；"default" / "full" 见 AccessMode
+    private final String accessMode;
+    // 任务级附件：附件目录（<stateDir>/attachments/）内的简单文件名清单，与 attachmentTypes 同序一一对应。
+    // 每次定时执行都会把它们注入本轮 Prompt（image → 多模态图片块，file → "[附件: 绝对路径]" 文本前缀），
+    // 语义与前台 /web/chat/input 的附件一致。始终为非 null 的不可变视图（无附件时为空 list）。
+    private final List<String> attachmentPaths;
+    private final List<String> attachmentTypes;
     private final int maxIterations;         // 最大迭代次数（0 = 不限制）
     private final boolean runNow;            // 注册后立即执行首次（initialDelay=0）
 
@@ -112,7 +123,8 @@ public class LoopTask {
                      boolean enabled,
                      String goalCondition, boolean worktreeEnabled, String worktreeBranch,
                      String channelNotify, String boundSessionId, String workspace,
-                     String modelName, String thinkingDepth, Long contextLength,
+                     String modelName, String thinkingDepth, Long contextLength, String accessMode,
+                     List<String> attachmentPaths, List<String> attachmentTypes,
                      int maxIterations, boolean runNow,
                      boolean cancelled, String lastResult, Instant lastExecutedAt, int currentIteration) {
         this.id = id;
@@ -132,6 +144,9 @@ public class LoopTask {
         this.modelName = blankToNull(modelName);
         this.thinkingDepth = blankToNull(thinkingDepth);
         this.contextLength = normalizeContextLength(contextLength);
+        this.accessMode = normalizeAccessMode(accessMode);
+        this.attachmentPaths = immutableCopy(attachmentPaths);
+        this.attachmentTypes = immutableCopy(attachmentTypes);
         this.maxIterations = maxIterations;
         this.runNow = runNow;
         this.cancelled = cancelled;
@@ -174,6 +189,40 @@ public class LoopTask {
                     Integer maxIterations, boolean runNow,
                     String workspace, String modelName, String thinkingDepth, Long contextLength,
                     String channelNotify, String boundSessionId) {
+        this(prompt, intervalMinutes, cron, goalCondition, worktreeEnabled, maxIterations, runNow,
+                workspace, modelName, thinkingDepth, contextLength, null,
+                channelNotify, boundSessionId);
+    }
+
+    /**
+     * 便捷构造（全执行上下文 + 权限档位）。
+     *
+     * @param accessMode 访问控制档位（null = 回退会话已存档位；"default" / "full"）
+     */
+    public LoopTask(String prompt, int intervalMinutes, String cron,
+                    String goalCondition, Boolean worktreeEnabled,
+                    Integer maxIterations, boolean runNow,
+                    String workspace, String modelName, String thinkingDepth, Long contextLength,
+                    String accessMode,
+                    String channelNotify, String boundSessionId) {
+        this(prompt, intervalMinutes, cron, goalCondition, worktreeEnabled, maxIterations, runNow,
+                workspace, modelName, thinkingDepth, contextLength, accessMode,
+                channelNotify, boundSessionId, null, null);
+    }
+
+    /**
+     * 便捷构造（全执行上下文 + 权限档位 + 任务级附件）。
+     *
+     * @param attachmentPaths 附件目录内的简单文件名清单（可为 null，视为无附件）
+     * @param attachmentTypes 与 attachmentPaths 同序的类型声明（{@code image} / {@code file}；可为 null）
+     */
+    public LoopTask(String prompt, int intervalMinutes, String cron,
+                    String goalCondition, Boolean worktreeEnabled,
+                    Integer maxIterations, boolean runNow,
+                    String workspace, String modelName, String thinkingDepth, Long contextLength,
+                    String accessMode,
+                    String channelNotify, String boundSessionId,
+                    List<String> attachmentPaths, List<String> attachmentTypes) {
         this.id = UUID.randomUUID().toString().substring(0, 8);
         this.prompt = prompt;
         // 间隔钒在 [MIN_INTERVAL, MAX_INTERVAL]，不存在 0 间隔；goal 模式通过 fixedDelay 串行调度逐轮触发
@@ -191,6 +240,9 @@ public class LoopTask {
         this.modelName = blankToNull(modelName);
         this.thinkingDepth = blankToNull(thinkingDepth);
         this.contextLength = normalizeContextLength(contextLength);
+        this.accessMode = normalizeAccessMode(accessMode);
+        this.attachmentPaths = immutableCopy(attachmentPaths);
+        this.attachmentTypes = immutableCopy(attachmentTypes);
         this.maxIterations = normalizeMaxIterations(maxIterations);
         this.runNow = runNow;
         this.currentIteration = 0;
@@ -224,9 +276,38 @@ public class LoopTask {
     }
 
     /**
+     * 归一访问控制档位：空白归为 null（回退会话已存档位），脏值经 normalize 回落默认档。
+     */
+    private static String normalizeAccessMode(String accessMode) {
+        String v = blankToNull(accessMode);
+        return v != null ? AccessMode.normalize(v).code() : null;
+    }
+
+    /**
+     * 归一附件清单：null → 空 list；逐条 trim 并丢弃空白项；返回不可变视图。
+     *
+     * <p>存储不可变副本 + 返回不可变视图，避免调用方持有的 list 被外部改写后
+     * 与「已落盘的附件字节」失配（那种失配会让某轮执行注入一个不存在的附件）。</p>
+     */
+    private static List<String> immutableCopy(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<String> copy = new ArrayList<>(values.size());
+        for (String v : values) {
+            String t = blankToNull(v);
+            if (t != null) {
+                copy.add(t);
+            }
+        }
+        return copy.isEmpty() ? Collections.emptyList() : Collections.unmodifiableList(copy);
+    }
+
+    /**
      * 基于当前任务复制出一份更新后的任务定义，保留任务身份和运行时状态。
      *
-     * <p>执行上下文（workspace / modelName / thinkingDepth / contextLength / channelNotify / boundSessionId）沿用原值。</p>
+     * <p>执行上下文（workspace / modelName / thinkingDepth / contextLength / accessMode /
+     * channelNotify / boundSessionId）沿用原值。</p>
      */
     public LoopTask copyWithUpdate(String prompt, int intervalMinutes, String cron,
                                     String goalCondition, Boolean worktreeEnabled,
@@ -234,7 +315,7 @@ public class LoopTask {
         return copyWithUpdate(prompt, intervalMinutes, cron, goalCondition, worktreeEnabled,
                 maxIterations, runNow,
                 this.workspace, this.modelName, this.thinkingDepth, this.contextLength,
-                this.channelNotify, this.boundSessionId);
+                this.accessMode, this.channelNotify, this.boundSessionId);
     }
 
     /**
@@ -247,7 +328,30 @@ public class LoopTask {
                                     String goalCondition, Boolean worktreeEnabled,
                                     Integer maxIterations, Boolean runNow,
                                     String workspace, String modelName, String thinkingDepth, Long contextLength,
+                                    String accessMode,
                                     String channelNotify, String boundSessionId) {
+        return copyWithUpdate(prompt, intervalMinutes, cron, goalCondition, worktreeEnabled,
+                maxIterations, runNow,
+                workspace, modelName, thinkingDepth, contextLength, accessMode,
+                channelNotify, boundSessionId, null, null);
+    }
+
+    /**
+     * 基于当前任务复制出一份更新后的任务定义（可改执行上下文与任务级附件），保留任务身份和运行时状态。
+     *
+     * <p>附件清单语义与其它执行上下文字段一致：传 null 表示「未声明，沿用原值」，
+     * 传非 null（含空 list）表示「以新值为准」——空 list 即清空全部附件。</p>
+     *
+     * @param attachmentPaths 新的附件文件名清单（null = 沿用原值）
+     * @param attachmentTypes 与 attachmentPaths 同序的类型声明（null = 沿用原值）
+     */
+    public LoopTask copyWithUpdate(String prompt, int intervalMinutes, String cron,
+                                    String goalCondition, Boolean worktreeEnabled,
+                                    Integer maxIterations, Boolean runNow,
+                                    String workspace, String modelName, String thinkingDepth, Long contextLength,
+                                    String accessMode,
+                                    String channelNotify, String boundSessionId,
+                                    List<String> attachmentPaths, List<String> attachmentTypes) {
         LoopTask task = new LoopTask(
                 this.id,
                 prompt,
@@ -266,6 +370,9 @@ public class LoopTask {
                 modelName,
                 thinkingDepth,
                 contextLength,
+                accessMode,
+                attachmentPaths != null ? attachmentPaths : this.attachmentPaths,
+                attachmentTypes != null ? attachmentTypes : this.attachmentTypes,
                 normalizeMaxIterations(maxIterations),
                 runNow != null ? runNow : this.runNow,
                 this.cancelled,
@@ -421,10 +528,51 @@ public class LoopTask {
         if (modelName != null) node.set("modelName", modelName);
         if (thinkingDepth != null) node.set("thinkingDepth", thinkingDepth);
         if (contextLength != null) node.set("contextLength", contextLength);
+        if (accessMode != null) node.set("accessMode", accessMode);
+        // 任务级附件：空清单不写节点（与可选字段一律「未设置不落盘」的既有口径一致）
+        if (!attachmentPaths.isEmpty()) node.set("attachmentPaths", toArrayNode(attachmentPaths));
+        if (!attachmentTypes.isEmpty()) node.set("attachmentTypes", toArrayNode(attachmentTypes));
         if (maxIterations != DEFAULT_MAX_ITERATIONS) node.set("maxIterations", maxIterations);
         if (runNow) node.set("runNow", true);
 
         return node;
+    }
+
+    /**
+     * 把字符串清单写成 ONode 数组节点（与 LoopScheduler 持久化任务列表同一构造口径）。
+     */
+    private static ONode toArrayNode(List<String> values) {
+        ONode arr = new ONode();
+        for (String v : values) {
+            arr.add(v);
+        }
+        return arr;
+    }
+
+    /**
+     * 从 ONode 读取字符串数组节点：缺失、非数组或单条损坏一律降级（整体缺失 → 空 list，
+     * 单条损坏 → 跳过该条），确保旧版本任务文件与非预期写入都不会让任务恢复失败。
+     */
+    private static List<String> readStringArray(ONode node, String key) {
+        ONode arr = node.getOrNull(key);
+        if (arr == null) {
+            return Collections.emptyList();
+        }
+        try {
+            if (!arr.isArray()) {
+                return Collections.emptyList();
+            }
+            List<String> out = new ArrayList<>();
+            for (ONode item : arr.getArray()) {
+                String v = blankToNull(item.getString());
+                if (v != null) {
+                    out.add(v);
+                }
+            }
+            return out.isEmpty() ? Collections.emptyList() : Collections.unmodifiableList(out);
+        } catch (RuntimeException e) {
+            return Collections.emptyList();
+        }
     }
 
     /**
@@ -475,6 +623,8 @@ public class LoopTask {
                 // 损坏值：忽略，保持未设置
             }
         }
+        String accessModeVal = node.getOrNull("accessMode") != null
+                ? node.get("accessMode").getString() : null;
         int maxIterationsVal = node.getOrNull("maxIterations") != null
                 ? node.get("maxIterations").getInt() : DEFAULT_MAX_ITERATIONS;
         int currentIterationVal = node.getOrNull("currentIteration") != null
@@ -501,6 +651,9 @@ public class LoopTask {
                 modelNameVal,
                 thinkingDepthVal,
                 contextLengthVal,
+                accessModeVal,
+                readStringArray(node, "attachmentPaths"),
+                readStringArray(node, "attachmentTypes"),
                 maxIterationsVal,
                 runNowVal,
                 node.getOrNull("cancelled") != null

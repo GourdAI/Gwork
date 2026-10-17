@@ -37,6 +37,7 @@ import com.gourdai.core.config.AgentSettings;
 import com.gourdai.core.config.BuildInfo;
 import com.gourdai.core.config.entity.ModelDo;
 import com.gourdai.core.portal.WorkspaceWatcher;
+import com.gourdai.core.command.builtin.LoopAttachments;
 import com.gourdai.core.command.builtin.LoopScheduler;
 import com.gourdai.core.command.builtin.LoopStateManager;
 import com.gourdai.core.command.builtin.LoopTask;
@@ -195,12 +196,24 @@ public class WebController {
                 // 该目录仅本轮有效（执行完即被删除），故作为瞬态根单独传入，不得写入会话注册表。
                 String worktreeRoot = task != null ? task.getActiveWorktreePath() : null;
 
+                // 任务级附件：每轮都把附件注入本轮 Prompt（图片→多模态，文件→[附件: 绝对路径] 前缀）。
+                // 目录口径与任务状态目录一致（engine.getWorkspace() 下的 loops/<taskId>/attachments），
+                // 不受 task.workspace（执行目录）影响：工作区整体搬迁后仍可由当前 workspace 重新解析。
+                List<String> attachmentPaths = task != null ? task.getAttachmentPaths() : null;
+                List<String> attachmentTypes = task != null ? task.getAttachmentTypes() : null;
+                java.nio.file.Path attachmentsDir = (attachmentPaths != null && !attachmentPaths.isEmpty())
+                        ? LoopAttachments.dir(engine.getWorkspace(), task.getId())
+                        : null;
+
                 // Loop 任务可能长时间执行（数小时），使用 Loop 专用无限等待版本；
                 // 透传工作空间根保证 __cwd 与落盘目录正确，并按任务定义应用模型、思考档位与上下文窗口
                 return webGate.safeChatInputAndCaptureLoop(sessionId, projectRoot, worktreeRoot, effectiveInput, "Loop",
                         task != null ? task.getModelName() : null,
                         task != null ? task.getThinkingDepth() : null,
-                        task != null ? task.getContextLength() : null);
+                        task != null ? task.getContextLength() : null,
+                        task != null ? task.getAccessMode() : null,
+                        attachmentsDir, attachmentPaths, attachmentTypes,
+                        task != null ? task.getName() : null);
             });
         }
     }
@@ -604,6 +617,66 @@ public class WebController {
         data.put("accessMode", accessMode);
 
         return Result.succeed(data);
+    }
+
+    /**
+     * 读取会话最近一次 Loop 定时任务执行的取证参数（供执行视图「任务运行参数」提示条恢复）。
+     *
+     * <p>背景：Loop 任务的模型/思考/上下文/权限是 per-turn transient 的，刻意不写入会话上下文
+     * （避免污染用户前台选择），执行会话 composer 回显的永远是会话自己的旧值，用户会误判
+     * 「参数没生效/与自动化表单对不上」。Loop 轮首把本轮实际生效值写入会话取证键
+     * （{@link HarnessEngine#CTX_LOOP_RUN}，随快照持久化），本端点负责读回。</p>
+     *
+     * <p><b>单一数据源（2026-10-17 review 修订）：</b>{@link HarnessEngine#getSession} 永不返回
+     * null（LRU 未命中即从磁盘快照加载，见 Configurator 的 sessionProvider），故内存会话就是
+     * 唯一权威现态——快照加载时取证键随 FlowContext 一并还原（反序列化经 toBean(Map.class)，
+     * 值必为 Map）。旧实现另有的「快照文件兜底 / 旧快照派生」两条路径在该前提下永不可达
+     * （死代码），且任意 sessionId（含空串）的 GET 都会物化一个幽灵会话（构造时全量加载
+     * messages+snapshot），故一并删除；空 sessionId 在此显式拒绝。</p>
+     *
+     * <p>无取证（该会话从未跑过 Loop 或最近一轮是前台对话）返回 null，前端隐藏提示条。</p>
+     */
+    @Get
+    @Mapping("/web/chat/loop-run")
+    public Result loop_run(@Param("sessionId") String sessionId,
+                           @Param(value = "root", required = false) String root) {
+        if (sessionId == null || sessionId.isEmpty() || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
+            return Result.failure(400, "Invalid sessionId");
+        }
+
+        // 内存会话为权威现态：前台轮已清除取证时，快照里的旧取证不得再冒出来误导提示条
+        AgentSession session = engine.getSession(sessionId);
+        Object raw = session.getContext().get(HarnessEngine.CTX_LOOP_RUN);
+        Map<String, Object> evidence = null;
+        if (raw instanceof Map) {
+            evidence = loopRunEvidenceFromContext(raw);
+        } else if (raw instanceof ONode && !((ONode) raw).isNull()) {
+            // 防御分支：当前反序列化链路（FlowContextDefault.fromJson → toBean(Map.class)）
+            // 恒产出 Map；保留此分支以防 snack4 行为变化时取证被静默丢弃。
+            evidence = loopRunEvidenceFromContext(((ONode) raw).toBean(Map.class));
+        }
+        return Result.succeed(evidence);
+    }
+
+    /** 把上下文/快照中的取证原始值规整为端点输出形态；缺失或形态不符返回 null。 */
+    private static Map<String, Object> loopRunEvidenceFromContext(Object raw) {
+        if (!(raw instanceof Map)) {
+            return null;
+        }
+        // 先拷成 Map<String,Object>：Map<?,?> 的 getOrDefault 第二参受 capture 泛型约束，String 字面量不兼容
+        Map<String, Object> src = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : ((Map<?, ?>) raw).entrySet()) {
+            src.put(String.valueOf(e.getKey()), e.getValue());
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("name", String.valueOf(src.getOrDefault("name", "")));
+        out.put("model", String.valueOf(src.getOrDefault("model", "")));
+        out.put("thinkingDepth", String.valueOf(src.getOrDefault("thinkingDepth", "")));
+        out.put("contextLength", ContextLengthPolicy.normalize(src.get("contextLength")));
+        out.put("accessMode", AccessMode.normalize(src.get("accessMode")).code());
+        Object at = src.get("at");
+        out.put("at", at instanceof Number ? ((Number) at).longValue() : 0L);
+        return out;
     }
 
     /**
@@ -1815,8 +1888,11 @@ public class WebController {
             if (t.getModelName() != null) item.put("modelName", t.getModelName());
             if (t.getThinkingDepth() != null) item.put("thinkingDepth", t.getThinkingDepth());
             if (t.getContextLength() != null) item.put("contextLength", t.getContextLength());
+            if (t.getAccessMode() != null) item.put("accessMode", t.getAccessMode());
             if (t.getChannelNotify() != null) item.put("channelNotify", t.getChannelNotify());
             if (t.getBoundSessionId() != null) item.put("boundSessionId", t.getBoundSessionId());
+            // 任务级附件：无附件时不输出（保持无附件任务的响应体与旧版一致）
+            appendAttachmentMeta(item, t);
             // 运行时会话（执行对话）：前端据此在点击任务行时打开该任务的执行记录
             if (t.getRuntimeSessionId() != null) item.put("runtimeSessionId", t.getRuntimeSessionId());
             data.add(item);
@@ -1862,8 +1938,11 @@ public class WebController {
                 if (t.getModelName() != null) item.put("modelName", t.getModelName());
                 if (t.getThinkingDepth() != null) item.put("thinkingDepth", t.getThinkingDepth());
                 if (t.getContextLength() != null) item.put("contextLength", t.getContextLength());
+                if (t.getAccessMode() != null) item.put("accessMode", t.getAccessMode());
                 if (t.getChannelNotify() != null) item.put("channelNotify", t.getChannelNotify());
                 if (t.getBoundSessionId() != null) item.put("boundSessionId", t.getBoundSessionId());
+                // 任务级附件：供编辑页回显已上传的附件清单
+                appendAttachmentMeta(item, t);
                 if (t.getRuntimeSessionId() != null) item.put("runtimeSessionId", t.getRuntimeSessionId());
                 return Result.succeed(item);
             }
@@ -1872,11 +1951,20 @@ public class WebController {
     }
 
     /**
-     * 新增循环任务。
+     * 新增循环任务（支持任务级附件）。
+     *
+     * <p>附件以 multipart 提交（{@code attachments} 文件域 + 同序的 {@code attachmentTypes}），
+     * 落盘到 {@code <workspace>/<loops>/<taskId>/attachments/}，任务定义里只记简单文件名。
+     * 每次定时执行都会把它们重新注入本轮 Prompt（图片→多模态，文件→{@code [附件: 路径]} 前缀）。</p>
+     *
+     * <p>附件参数沿用 {@code /web/chat/input} 的 solon 参数注入写法（不带 {@code @Param}）；
+     * 若注入为空但请求确实带了文件域，再用 {@code ctx.fileValues} 兜底读取（见
+     * {@link #resolveUploadedFiles}），保证两种绑定路径都能拿到字节。</p>
      */
     @Post
     @Mapping("/web/chat/loop/add")
-    public Result loopAdd(@Param("sessionId") String sessionId,
+    public Result loopAdd(Context ctx,
+                          @Param("sessionId") String sessionId,
                           @Param("prompt") String prompt,
                           @Param(value = "name", required = false) String name,
                           @Param(value = "intervalMinutes", required = false) Integer intervalMinutes,
@@ -1890,7 +1978,10 @@ public class WebController {
                           @Param(value = "thinkingDepth", required = false) String thinkingDepth,
                           @Param(value = "channelNotify", required = false) String channelNotify,
                           @Param(value = "boundSessionId", required = false) String boundSessionId,
-                          @Param(value = "contextLength", required = false) String contextLength) {
+                          @Param(value = "contextLength", required = false) String contextLength,
+                          @Param(value = "accessMode", required = false) String accessMode,
+                          UploadedFile[] attachments,
+                          String[] attachmentTypes) {
         if (sessionId == null || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
             return Result.failure(400, "Invalid sessionId");
         }
@@ -1907,6 +1998,15 @@ public class WebController {
             }
         }
 
+        // 权限档位（可选）：空串视为未设置（回退会话已存档位）；非空必须是合法码值
+        String effectiveAccessMode = null;
+        if (accessMode != null && !accessMode.trim().isEmpty()) {
+            if (!AccessMode.isAllowed(accessMode)) {
+                return Result.failure(400, "Unsupported accessMode: " + accessMode);
+            }
+            effectiveAccessMode = AccessMode.normalize(accessMode).code();
+        }
+
         String workspace = engine.getWorkspace();
         String harnessSessions = engine.getHarnessSessions();
 
@@ -1920,15 +2020,62 @@ public class WebController {
                 runNow != null && runNow,
                 taskWorkspace, modelName, thinkingDepth,
                 parsedContextLength,
+                effectiveAccessMode,
                 channelNotify, boundSessionId
         );
 
         task.setName(name);
 
+        // 任务级附件：必须在任务注册之前落盘。落盘失败时任务不得创建，
+        // 否则会留下一个「前端以为带了附件、实际一个字节也没落盘」的任务，
+        // 而定时执行每轮都只会静默地跑成纯文本——这种分叉事后无法从任务定义上看出来。
+        UploadedFile[] files = resolveUploadedFiles(ctx, attachments, "attachments");
+        String[] types = resolveStringArray(ctx, attachmentTypes, "attachmentTypes");
+
         try {
             LoopStateManager.init(workspace, task.getId(), prompt);
+
+            if (files != null && files.length > 0) {
+                LoopAttachments.Saved saved;
+                try {
+                    saved = LoopAttachments.save(workspace, task.getId(), files, types);
+                } catch (java.io.IOException | RuntimeException e) {
+                    LOG.error("[Web] loop attachment dir unavailable for task {}: {}", task.getId(), e.toString());
+                    LoopStateManager.cleanup(workspace, task.getId());
+                    return Result.failure(500, "ATTACHMENT_DIR_UNAVAILABLE");
+                }
+                if (saved.isEmpty()) {
+                    LoopStateManager.cleanup(workspace, task.getId());
+                    if (saved.getRejected() > 0) {
+                        // 文件名全部非法：明确失败，让前端保留输入与附件
+                        return Result.failure(400, "INVALID_ATTACHMENT_NAME");
+                    }
+                    return Result.failure(500, "ATTACHMENT_SAVE_FAILED");
+                }
+                if (saved.getRejected() > 0 || saved.getFailed() > 0) {
+                    LOG.warn("[Web] loop task {} attachments partially saved: ok={}, rejected={}, failed={}",
+                            task.getId(), saved.getNames().size(), saved.getRejected(), saved.getFailed());
+                }
+                // 附件名在任务构造后才可知（id 随机生成），故用 copyWithUpdate 补写附件清单：
+                // 它保留 id / createdAt / expireAt / enabled，仅叠加附件字段。
+                task = task.copyWithUpdate(
+                        prompt, interval, cron, goalCondition,
+                        worktreeEnabled != null ? worktreeEnabled : false,
+                        maxIterations,
+                        runNow != null && runNow,
+                        taskWorkspace, modelName, thinkingDepth,
+                        parsedContextLength,
+                        effectiveAccessMode,
+                        channelNotify, boundSessionId,
+                        saved.getNames(), saved.getTypes()
+                );
+                task.setName(name);
+            }
+
             loopScheduler.schedule(sessionId, workspace, harnessSessions, task);
         } catch (IllegalStateException e) {
+            // 注册失败（如达到任务上限）：任务从未生效，连带清掉刚建的状态目录与附件字节
+            LoopStateManager.cleanup(workspace, task.getId());
             return Result.failure(400, e.getMessage());
         }
 
@@ -1936,11 +2083,18 @@ public class WebController {
     }
 
     /**
-     * 更新循环任务定义。
+     * 更新循环任务定义（支持任务级附件的保留 / 追加 / 删除）。
+     *
+     * <p>附件语义与其它执行上下文字段一致：{@code attachmentKeepPaths} 未传（null）表示「未声明，
+     * 沿用现有附件」；传了（含空数组）表示「以它为准」，不在其中的附件会被从磁盘上删除。
+     * 新上传的附件追加到保留清单之后；同名不覆盖，而是拿计数后缀（{@code a.png} → {@code a-1.png}）。</p>
+     *
+     * @param attachmentKeepPaths 需要保留的现有附件名（可为 null = 全部保留）
      */
     @Post
     @Mapping("/web/chat/loop/update")
-    public Result loopUpdate(@Param("sessionId") String sessionId,
+    public Result loopUpdate(Context ctx,
+                             @Param("sessionId") String sessionId,
                              @Param("taskId") String taskId,
                              @Param(value = "prompt", required = false) String prompt,
                              @Param(value = "name", required = false) String name,
@@ -1954,8 +2108,12 @@ public class WebController {
                              @Param(value = "taskWorkspace", required = false) String taskWorkspace,
                              @Param(value = "modelName", required = false) String modelName,
                              @Param(value = "thinkingDepth", required = false) String thinkingDepth,
-                             @Param(value = "boundSessionId", required = false) String boundSessionId,
-                             @Param(value = "contextLength", required = false) String contextLength) {
+                              @Param(value = "boundSessionId", required = false) String boundSessionId,
+                              @Param(value = "contextLength", required = false) String contextLength,
+                              @Param(value = "accessMode", required = false) String accessMode,
+                              UploadedFile[] attachments,
+                              String[] attachmentTypes,
+                              @Param(value = "attachmentKeepPaths", required = false) String[] attachmentKeepPaths) {
         if (sessionId == null || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
             return Result.failure(400, "Invalid sessionId");
         }
@@ -1983,6 +2141,19 @@ public class WebController {
         String effectiveChannel = channelNotify != null ? channelNotify : existing.getChannelNotify();
         String effectiveBoundSession = boundSessionId != null ? boundSessionId : existing.getBoundSessionId();
 
+        // 权限档位：未传（null）沿用旧值；空串清除（回退会话已存档位）；非空必须是合法码值
+        String effectiveAccessMode = existing.getAccessMode();
+        if (accessMode != null) {
+            if (accessMode.trim().isEmpty()) {
+                effectiveAccessMode = null;
+            } else {
+                if (!AccessMode.isAllowed(accessMode)) {
+                    return Result.failure(400, "Unsupported accessMode: " + accessMode);
+                }
+                effectiveAccessMode = AccessMode.normalize(accessMode).code();
+            }
+        }
+
         // 上下文窗口：未传（null）沿用旧值；空串清除；非空必须是固定选项之一
         Long effectiveContextLength = existing.getContextLength();
         if (contextLength != null) {
@@ -1997,6 +2168,71 @@ public class WebController {
             }
         }
 
+        // 任务级附件：未传 attachmentKeepPaths（null）= 沿用现有附件；传了（含「一个空值」）= 以它为准。
+        // 新上传的附件追加到保留清单之后；磁盘清理（prune）必须在任务定义更新成功之后执行，
+        // 否则一旦 update 抛异常，字节已删而定义还指着它们——下一轮执行会注入一批不存在的附件。
+        UploadedFile[] files = resolveUploadedFiles(ctx, attachments, "attachments");
+        String[] types = resolveStringArray(ctx, attachmentTypes, "attachmentTypes");
+        String[] keepPaths = resolveKeepPaths(ctx, attachmentKeepPaths);
+        List<String> effectiveAttachmentPaths = null;
+        List<String> effectiveAttachmentTypes = null;
+        if (keepPaths != null || (files != null && files.length > 0)) {
+            List<String> keptNames;
+            List<String> keptTypes;
+            if (keepPaths != null) {
+                List<String> keepNames = LoopAttachments.normalizeNames(Arrays.asList(keepPaths));
+                keptNames = new ArrayList<>();
+                keptTypes = new ArrayList<>();
+                // 只保留任务定义里确实存在的附件，并按原清单的类型声明回填（前端可能只回传路径）
+                List<String> oldNames = existing.getAttachmentPaths();
+                List<String> oldTypes = existing.getAttachmentTypes();
+                for (String keep : keepNames) {
+                    int idx = indexOfName(oldNames, keep);
+                    if (idx < 0) {
+                        LOG.warn("[Web] loop task {} attachmentKeepPaths refers to unknown attachment: {}", taskId, keep);
+                        continue;
+                    }
+                    keptNames.add(oldNames.get(idx));
+                    keptTypes.add(idx < oldTypes.size() ? oldTypes.get(idx) : "file");
+                }
+                if (keptNames.isEmpty() && !oldNames.isEmpty()) {
+                    // 显式清空（keep 清单为空而原有附件）：删字节不可逆，留一条可观测痕迹
+                    LOG.info("[Web] loop task {} clears all {} attachment(s)", taskId, oldNames.size());
+                }
+            } else {
+                keptNames = new ArrayList<>(existing.getAttachmentPaths());
+                keptTypes = new ArrayList<>(existing.getAttachmentTypes());
+            }
+
+            List<String> addedNames = Collections.emptyList();
+            List<String> addedTypes = Collections.emptyList();
+            if (files != null && files.length > 0) {
+                LoopAttachments.Saved saved;
+                try {
+                    saved = LoopAttachments.save(workspace, taskId, files, types);
+                } catch (java.io.IOException | RuntimeException e) {
+                    LOG.error("[Web] loop attachment dir unavailable for task {}: {}", taskId, e.toString());
+                    return Result.failure(500, "ATTACHMENT_DIR_UNAVAILABLE");
+                }
+                if (saved.isEmpty() && saved.getRejected() + saved.getFailed() > 0) {
+                    // 用户上传了附件但一条也没存下：必须明确失败，让前端保留输入
+                    return Result.failure(saved.getRejected() > 0 ? 400 : 500,
+                            saved.getRejected() > 0 ? "INVALID_ATTACHMENT_NAME" : "ATTACHMENT_SAVE_FAILED");
+                }
+                if (saved.getRejected() > 0 || saved.getFailed() > 0) {
+                    LOG.warn("[Web] loop task {} attachments partially saved on update: ok={}, rejected={}, failed={}",
+                            taskId, saved.getNames().size(), saved.getRejected(), saved.getFailed());
+                }
+                addedNames = saved.getNames();
+                addedTypes = saved.getTypes();
+            }
+
+            effectiveAttachmentPaths = new ArrayList<>(keptNames);
+            effectiveAttachmentPaths.addAll(addedNames);
+            effectiveAttachmentTypes = new ArrayList<>(keptTypes);
+            effectiveAttachmentTypes.addAll(addedTypes);
+        }
+
         LoopTask newTask = existing.copyWithUpdate(
                 effectivePrompt, interval, effectiveCron,
                 goalCondition != null ? goalCondition : existing.getGoalCondition(),
@@ -2004,7 +2240,9 @@ public class WebController {
                 maxIterations != null ? maxIterations : existing.getMaxIterations(),
                 runNow != null ? runNow : existing.isRunNow(),
                 effectiveWorkspace, effectiveModelName, effectiveThinking, effectiveContextLength,
-                effectiveChannel, effectiveBoundSession
+                effectiveAccessMode,
+                effectiveChannel, effectiveBoundSession,
+                effectiveAttachmentPaths, effectiveAttachmentTypes
         );
 
         // 保留 enabled 和 name
@@ -2021,7 +2259,153 @@ public class WebController {
         }
 
         loopScheduler.update(sessionId, workspace, harnessSessions, taskId, newTask);
+
+        // 任务定义已换成新清单，此时才清理磁盘上不再被引用的字节；
+        // 清理失败只留痕（prune 内部已兜底），不影响更新结果。
+        if (effectiveAttachmentPaths != null) {
+            LoopAttachments.prune(workspace, taskId, effectiveAttachmentPaths);
+        }
         return Result.succeed();
+    }
+
+    /**
+     * 在既有附件名清单中定位一个名字（忽略大小写，Windows/远端部署下大小写不可靠）。
+     *
+     * @return 下标；不存在时返回 -1
+     */
+    private static int indexOfName(List<String> names, String target) {
+        if (names == null || target == null) {
+            return -1;
+        }
+        for (int i = 0; i < names.size(); i++) {
+            if (target.equalsIgnoreCase(names.get(i))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * 解析本次请求携带的上传文件。
+     *
+     * <p>优先用 solon 的参数注入结果（与 {@code /web/chat/input} 同写法）；注入为空时用
+     * {@code ctx.fileValues(name)} 兜底——不同 solon 版本/序列化器对「multipart 文件数组参数」
+     * 的绑定支持程度不一，而任务附件一旦静默丢失，用户只会看到「定时任务不带附件跑」，
+     * 故宁可多一次读取也不能漏。</p>
+     */
+    private static UploadedFile[] resolveUploadedFiles(Context ctx, UploadedFile[] injected, String name) {
+        if (injected != null && injected.length > 0) {
+            return injected;
+        }
+        if (ctx == null) {
+            return injected;
+        }
+        try {
+            UploadedFile[] fromCtx = ctx.fileValues(name);
+            return fromCtx != null && fromCtx.length > 0 ? fromCtx : injected;
+        } catch (RuntimeException e) {
+            LOG.warn("[Web] failed to read uploaded files '{}' from context: {}", name, e.toString());
+            return injected;
+        }
+    }
+
+    /**
+     * 解析重复表单键（如 {@code attachmentTypes=image&attachmentTypes=file}）为字符串数组。
+     *
+     * <p>与 {@code /web/chat/attachment/meta} 对 {@code paths} 的处理同口径：
+     * {@code @Param} 单值绑定在重复键下只会拿到其中一个，故优先取 {@code ctx.paramValues} 的全量值。</p>
+     */
+    private static String[] resolveStringArray(Context ctx, String[] injected, String name) {
+        String[] fromCtx = longestParamValues(ctx, name, name + "[]");
+        // 类型清单与文件数组必须同序对齐：取条目更多的那一份，截断的类型清单会让
+        // 靠后的图片被当成普通文件（丢失多模态），故不以注入值作为唯一依据。
+        if (fromCtx != null && (injected == null || fromCtx.length >= injected.length)) {
+            return fromCtx;
+        }
+        return injected;
+    }
+
+    /**
+     * 解析「需要保留的现有附件名」声明。
+     *
+     * <p>返回 {@code null} 表示前端<b>未声明</b>（沿用现有附件）；返回非 null（哪怕只有一个空字符串）
+     * 表示「以这份清单为准」，不在其中的附件会被从磁盘删除。</p>
+     *
+     * <p>为何不直接用 {@code @Param} 的注入值：该参数是重复表单键，而 jQuery 在非 traditional
+     * 模式下会把它序列化为 {@code attachmentKeepPaths[]}，按精确名绑定时会得到 null——
+     * 而 null 在本接口里恰好是「全部保留」的语义，删除意图会被静默吞掉（用户看到
+     * 「已保存」但附件一个也没删）。故这里兼容两种键名。</p>
+     *
+     * <p>方向性 fail-safe：只在「确实读到了键」时才返回非 null。拿不准时一律当未声明（沿用），
+     * 因为误删字节不可逆，而「没删掉」用户重试一次就能修正。</p>
+     */
+    private static String[] resolveKeepPaths(Context ctx, String[] injected) {
+        String[] fromCtx = longestParamValues(ctx, "attachmentKeepPaths", "attachmentKeepPaths[]");
+        if (fromCtx != null && fromCtx.length > 0) {
+            return fromCtx;
+        }
+        // ctx 读不到时才看参数注入结果；必须剔除 null 条目：solon 在「键未出现」时
+        // 不同版本可能给 null、也可能给 [null]，后者若直接当成「声明了空清单」
+        // 会把用户全部附件静默删光（而 null 本应是「沿用」）。空字符串则要保留：
+        // 那是「显式清空」的唯一可区分信号（空数组在表单序列化后不会产生任何条目）。
+        if (injected == null || injected.length == 0) {
+            return null;
+        }
+        List<String> kept = new ArrayList<>(injected.length);
+        for (String item : injected) {
+            if (item != null) {
+                kept.add(item);
+            }
+        }
+        return kept.isEmpty() ? null : kept.toArray(new String[0]);
+    }
+
+    /**
+     * 从上下文取重复表单键的全量值，多个候选键名中取条目最多的一份。
+     *
+     * <p>不用 {@code @Param} 的注入值作为优先源：它对重复表单键可能只绑到第一个值
+     * （同 {@code /web/chat/attachment/meta} 对 {@code paths} 的处理理由），
+     * 截断的 keepPaths 会让本应保留的附件被当成「未声明保留」而删除。</p>
+     */
+    private static String[] longestParamValues(Context ctx, String... names) {
+        if (ctx == null) {
+            return null;
+        }
+        String[] best = null;
+        for (String name : names) {
+            try {
+                String[] values = ctx.paramValues(name);
+                if (values != null && (best == null || values.length > best.length)) {
+                    best = values;
+                }
+            } catch (RuntimeException e) {
+                LOG.warn("[Web] failed to read param values '{}' from context: {}", name, e.toString());
+            }
+        }
+        return best;
+    }
+
+    /**
+     * 向 list/get 的输出条目追加任务级附件信息：{@code attachmentPaths} / {@code attachmentTypes} /
+     * {@code attachmentSizes}（与 paths 同序，读不到大小的条目填 -1，保证前端不会错位）。
+     *
+     * <p>无附件时三个键都不输出，保持无附件任务的响应体与旧版完全一致。</p>
+     */
+    private void appendAttachmentMeta(Map<String, Object> item, LoopTask task) {
+        List<String> paths = task.getAttachmentPaths();
+        if (paths == null || paths.isEmpty()) {
+            return;
+        }
+        item.put("attachmentPaths", paths);
+        item.put("attachmentTypes", task.getAttachmentTypes());
+        Map<String, Long> meta;
+        try {
+            meta = LoopAttachments.listMeta(engine.getWorkspace(), task.getId());
+        } catch (RuntimeException e) {
+            LOG.warn("[Web] failed to read loop attachment meta for task {}: {}", task.getId(), e.toString());
+            meta = Collections.emptyMap();
+        }
+        item.put("attachmentSizes", LoopAttachments.sizesOf(meta, paths));
     }
 
     /**
@@ -2043,6 +2427,9 @@ public class WebController {
         }
 
         loopScheduler.remove(sessionId, engine.getWorkspace(), engine.getHarnessSessions(), taskId);
+        // 任务定义已从调度器与任务文件里摘除，同步清理其附件字节，避免状态目录里留下无主文件；
+        // 删不掉只留痕（deleteAll 内部已兜底），不让「附件目录被占用」把用户的删除操作变成失败。
+        LoopAttachments.deleteAll(engine.getWorkspace(), taskId);
         return Result.succeed();
     }
 

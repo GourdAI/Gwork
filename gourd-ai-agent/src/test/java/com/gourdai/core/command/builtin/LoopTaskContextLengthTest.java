@@ -97,11 +97,11 @@ class LoopTaskContextLengthTest {
         LoopTask task = taskWithContextLength(128_000L);
 
         LoopTask changed = task.copyWithUpdate("p", 5, null, null, false, null, false,
-                null, null, null, 1_000_000L, null, null);
+                null, null, null, 1_000_000L, task.getAccessMode(), null, null);
         assertEquals(1_000_000L, changed.getContextLength());
 
         LoopTask cleared = task.copyWithUpdate("p", 5, null, null, false, null, false,
-                null, null, null, null, null, null);
+                null, null, null, null, task.getAccessMode(), null, null);
         assertNull(cleared.getContextLength());
     }
 }
