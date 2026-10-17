@@ -17,6 +17,15 @@
         "unsupported":  "当前环境不支持远程连接（需要桌面端）",
 
         "saved_hosts":  "最近连接",
+        "step_settings":  "连接配置",
+        "step_connecting":  "连接中",
+        "step_directory":  "选择目录",
+        "minimize":  "收起",
+        "entry_connecting":  "连接中…",
+        "connect_another":  "连接另一台",
+        "host_edit":  "编辑",
+        "close_confirm_connecting":  "正在连接远程主机，确定要停止并关闭吗？",
+        "close_confirm_connected":  "已连接但尚未选择目录，确定要离开吗？（连接会保留，可稍后再选目录）",
 
         "no_saved_hosts":  "暂无已保存的主机",
 
@@ -523,6 +532,9 @@
                                         "risk_high":  "高风险",
                                         "risk_medium":  "中风险",
                                         "no_match":  "没有找到匹配的工具",
+                                        "exempt_dirs_label":  "bash 豁免目录（每行一个）",
+                                        "exempt_dirs_desc":  "默认权限下，bash 读写当前项目之外的路径需要审批。若构建产物、共享缓存等必须放在项目外，在此登记可免去审批。",
+                                        "exempt_dirs_note":  "豁免同时适用于读取与写入；递归删除、提权等高危操作仍会要求审批。构建缓存与临时目录已内置豁免，无需重复登记。",
                                         "tool":  {
                                                      "bash_desc":  "Shell 命令执行",
                                                      "read_desc":  "读取文件内容",
@@ -1088,6 +1100,10 @@
                  "dir_access_failed":  "无法访问该目录",
                  "no_subdirs":  "（无子目录）",
                  "dir_load_failed":  "加载失败",
+                 "new_folder":  "新建文件夹",
+                 "new_folder_placeholder":  "输入新文件夹名称",
+                 "new_folder_empty":  "请输入文件夹名称",
+                 "new_folder_ok":  "文件夹已创建",
                  "please_enter_dir":  "请先进入一个目录",
                  "no_projects_empty":  "还没有项目，点上方「打开文件夹」或「新建项目」",
                  "recent_projects":  "最近项目",

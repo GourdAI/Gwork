@@ -17,6 +17,15 @@
         "unsupported":  "La connexion à distance nécessite l'application de bureau",
 
         "saved_hosts":  "Connexions récentes",
+        "step_settings":  "Connexion",
+        "step_connecting":  "Connexion en cours",
+        "step_directory":  "Choisir un dossier",
+        "minimize":  "Réduire",
+        "entry_connecting":  "Connexion…",
+        "connect_another":  "Connecter un autre",
+        "host_edit":  "Modifier",
+        "close_confirm_connecting":  "Connexion à l'hôte distant en cours. Arrêter et fermer ?",
+        "close_confirm_connected":  "Connecté mais aucun dossier choisi. Quitter maintenant ? (La connexion est conservée.)",
 
         "no_saved_hosts":  "Aucun hôte enregistré",
 
@@ -523,6 +532,9 @@
                                         "risk_high":  "Risque élevé",
                                         "risk_medium":  "Risque moyen",
                                         "no_match":  "Aucun outil correspondant trouvé",
+                                        "exempt_dirs_label":  "Répertoires exemptés pour bash (un par ligne)",
+                                        "exempt_dirs_desc":  "Avec les autorisations par défaut, la lecture ou l'écriture de bash hors du projet actuel nécessite une approbation. Enregistrez ici les répertoires si les artefacts de compilation ou les caches partagés doivent se trouver hors du projet.",
+                                        "exempt_dirs_note":  "L'exemption s'applique aux lectures comme aux écritures ; les opérations à risque comme la suppression récursive ou l'élévation de privilèges exigent toujours une approbation. Les caches de compilation et les répertoires temporaires sont déjà exemptés.",
                                         "tool":  {
                                                      "bash_desc":  "Exécution de commandes Shell",
                                                      "read_desc":  "Lecture du contenu de fichier",
@@ -1088,6 +1100,10 @@
                  "dir_access_failed":  "Impossible d\u0027accéder à ce répertoire",
                  "no_subdirs":  "(Aucun sous-répertoire)",
                  "dir_load_failed":  "Chargement échoué",
+                 "new_folder":  "Nouveau dossier",
+                 "new_folder_placeholder":  "Saisissez le nom du nouveau dossier",
+                 "new_folder_empty":  "Veuillez saisir un nom de dossier",
+                 "new_folder_ok":  "Dossier créé",
                  "please_enter_dir":  "Veuillez d\u0027abord entrer dans un répertoire",
                  "no_projects_empty":  "Aucun projet, cliquez sur « Ouvrir un dossier » ou « Nouveau projet » ci-dessus",
                  "recent_projects":  "Projets récents",

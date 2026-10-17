@@ -54,3 +54,4 @@ _scratch/
 gourd-ai-tauri/.cache/
 .tmp/
 .tmp-*
+.research

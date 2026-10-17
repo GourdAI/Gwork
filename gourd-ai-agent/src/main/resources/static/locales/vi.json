@@ -17,6 +17,15 @@
         "unsupported":  "Kết nối từ xa cần ứng dụng máy tính để bàn",
 
         "saved_hosts":  "Kết nối gần đây",
+        "step_settings":  "Kết nối",
+        "step_connecting":  "Đang kết nối",
+        "step_directory":  "Chọn thư mục",
+        "minimize":  "Thu nhỏ",
+        "entry_connecting":  "Đang kết nối…",
+        "connect_another":  "Kết nối máy khác",
+        "host_edit":  "Sửa",
+        "close_confirm_connecting":  "Đang kết nối tới máy chủ từ xa. Dừng và đóng?",
+        "close_confirm_connected":  "Đã kết nối nhưng chưa chọn thư mục. Rời bây giờ? (Kết nối được giữ lại.)",
 
         "no_saved_hosts":  "Chưa có máy chủ nào được lưu",
 
@@ -523,6 +532,9 @@
                                         "risk_high":  "Rủi ro cao",
                                         "risk_medium":  "Rủi ro trung bình",
                                         "no_match":  "Không tìm thấy công cụ phù hợp",
+                                        "exempt_dirs_label":  "Thư mục miễn kiểm tra của bash (mỗi dòng một thư mục)",
+                                        "exempt_dirs_desc":  "Với quyền mặc định, bash đọc hoặc ghi ra ngoài dự án hiện tại cần được phê duyệt. Hãy đăng ký tại đây những thư mục nếu tệp build hoặc bộ đệm chia sẻ phải nằm ngoài dự án.",
+                                        "exempt_dirs_note":  "Việc miễn áp dụng cho cả đọc và ghi; các thao tác nguy hiểm như xóa đệ quy hay leo thang đặc quyền vẫn cần phê duyệt. Bộ đệm build và thư mục tạm đã được miễn sẵn.",
                                         "tool":  {
                                                      "bash_desc":  "Thực thi lệnh Shell",
                                                      "read_desc":  "Đọc nội dung tệp",
@@ -1088,6 +1100,10 @@
                  "dir_access_failed":  "Không thể truy cập thư mục này",
                  "no_subdirs":  "(Không có thư mục con)",
                  "dir_load_failed":  "Tải thất bại",
+                 "new_folder":  "Thư mục mới",
+                 "new_folder_placeholder":  "Nhập tên thư mục mới",
+                 "new_folder_empty":  "Vui lòng nhập tên thư mục",
+                 "new_folder_ok":  "Đã tạo thư mục",
                  "please_enter_dir":  "Vui lòng vào một thư mục trước",
                  "no_projects_empty":  "Chưa có dự án, nhấp «Mở thư mục» hoặc «Tạo dự án mới» ở trên",
                  "recent_projects":  "Dự án gần đây",

@@ -230,11 +230,241 @@ class HitlStrategyTest {
         assertReleased("cat docs/env.md");
     }
 
+    // ==================== 前缀包装器不得遮蔽危险形态 ====================
+
     /**
-     * 提权与生命周期动词必须按「词」匹配，不能命中被包含的子串。
+     * 前缀包装器（nohup / time / nice / stdbuf / setsid …）不得让后面的危险形态漏网。
      *
-     * <p>旧口径用 {@code \\b} 边界已经能挡掉一部分，但 {@code su} / {@code rm -rf} 这类
-     * 短词极易误伤（如 {@code sudo} 里的 {@code su}、文件名里的 {@code rm -r}）。</p>
+     * <p><b>本仓实证的绕过</b>：旧 {@code CMD_ANCHOR} 只认 {@code ^|[;&|]|$(|`|\n}，
+     * 而 {@code nohup rm -rf D:\其他项目} 里 {@code rm} 前面是「字母 + 空格」、不含任何锚点字符
+     * → 形态轴不命中。叠加路径轴当时也因包装器未展开而不命中，于是
+     * <b>默认档下不可逆递归删除零审批静默执行</b>。</p>
+     *
+     * <p>当时看似被拦的 {@code sudo rm -rf /} 其实是<b>假象</b>：命中它的不是 {@code rm -rf}，
+     * 而是 {@code sudo} 自身在提权正则里。换个不在名单里的前缀词就全放了。</p>
+     *
+     * <p>注：本类用 {@code evaluate(null, args)}，{@code null} trace 使路径轴短路，
+     * 所以本用例测到的<b>只有形态轴</b>——正是意图（越界部分由
+     * {@code BashPathGuardTest#prefixModifiersAreUnwrappedNotSkipped} 从路径轴侧锁）。</p>
+     */
+    @Test
+    void prefixWrappersDoNotHideDangerousShape() {
+        // 递归删除（最危险：不可逆）
+        assertBlocked("nohup rm -rf D:/out/x");
+        assertBlocked("time rm -rf D:/out/x");
+        assertBlocked("nice rm -rf /opt/x");
+        assertBlocked("setsid rm -rf /opt/x");
+        assertBlocked("ionice rm -rf D:/out/x");
+        assertBlocked("stdbuf -oL rm -rf D:/out/x");
+        assertBlocked("nohup Remove-Item D:/out -Recurse -Force");
+        assertBlocked("time rd /s /q D:\\out");
+
+        // 提权 / 身份篡改
+        assertBlocked("nohup chmod 777 /etc/passwd");
+        assertBlocked("nohup chown root:root /etc/passwd");
+        assertBlocked("time passwd");
+
+        // 系统生命周期
+        assertBlocked("time reboot");
+        assertBlocked("nohup shutdown -h now");
+        assertBlocked("stdbuf -oL poweroff");
+
+        // 多层前缀嵌套
+        assertBlocked("sudo nohup rm -rf D:/out/x");
+        assertBlocked("nohup sudo rm -rf D:/out/x");
+        assertBlocked("stdbuf -oL nohup rm -rf D:/out");
+        assertBlocked("nohup nice -n 5 rm -rf /opt/x");
+
+        // 载荷标记后面的危险形态
+        assertBlocked("sh -c \"rm -rf D:/out/x\"");
+        assertBlocked("bash -c \"chmod 777 /etc/passwd\"");
+        assertBlocked("powershell -Command \"Remove-Item D:/out -Recurse\"");
+        assertBlocked("cmd /c rd /s /q D:\\out");
+    }
+
+    /**
+     * 前缀词白名单<b>不得宽到误拦引号内文本</b>。
+     *
+     * <p>这是上面那条用例的反向约束，两条必须同时成立：若把锚点改成「任意词 + 空格」，
+     * {@code git commit -m "nohup rm -rf everything"} 就会被误拦。而本策略的设计前提是
+     * 「审批不得多到被连点」，误拦同样会摧毁护栏的有效性。</p>
+     *
+     * <p>关键机制：前缀序列必须<b>紧跟在原锚点之后</b>。{@code git commit -m "..."} 里的
+     * {@code nohup} 前面是 {@code -m "}，不在原锚点后 → 不匹配。</p>
+     */
+    @Test
+    void prefixWrapperWhitelistDoesNotOverMatchQuotedText() {
+        assertReleased("git commit -m \"add sudo docs\"");
+        assertReleased("git commit -m \"nohup rm -rf everything\"");
+        assertReleased("git commit -m \"fix: shutdown hook leak\"");
+        assertReleased("echo \"please run rm -rf /tmp/x\"");
+        assertReleased("git log --grep=sudo");
+        assertReleased("grep -rn \"rm -rf\" src/");
+        assertReleased("grep -r \"nohup\" scripts/");
+        assertReleased("python -c \"print('rm -rf /')\"");
+        assertReleased("docker rm -f mycontainer");
+
+        // 高频正常操作：不得因白名单引入而变拦
+        assertReleased("mvn -q test");
+        assertReleased("npm install");
+        assertReleased("git status");
+        assertReleased("ls -la");
+        assertReleased("echo hello | grep h");
+        assertReleased("git commit -m \"normal message\"");
+        assertReleased("git push origin main");
+    }
+
+    /**
+     * 两轴一致性护栏：路径轴的<b>前缀修饰器名单</b>与形态轴的<b>锚点白名单</b>必须同步。
+     *
+     * <p>两处各有一份「哪些词会把控制权交给后续命令」的认知，分属两个类、
+     * 靠人肉保持同步。一旦漂移，表现是「加个前缀就绕过其中一轴」——而两轴本来是
+     * 互为兜底的（重叠是设计意图）。本护栏把漂移变成编译期可见的测试失败。</p>
+     */
+    @Test
+    void prefixModifierVocabularyIsConsistentAcrossBothAxes() throws java.io.IOException {
+        java.util.Set<String> pathAxis = extractSetMembers("BashPathGuard.java", "PREFIX_MODIFIERS");
+        java.util.Set<String> shapeAxis = extractAnchorWhitelist("HitlStrategy.java");
+
+        Assertions.assertFalse(pathAxis.isEmpty(),
+                "从 BashPathGuard 提取 PREFIX_MODIFIERS 为空，说明源码排版变了、本用例会退化成假绿");
+        Assertions.assertFalse(shapeAxis.isEmpty(),
+                "从 HitlStrategy 提取锚点白名单为空，说明源码排版变了、本用例会退化成假绿");
+
+        java.util.Set<String> onlyInPathAxis = new java.util.TreeSet<>(pathAxis);
+        onlyInPathAxis.removeAll(shapeAxis);
+        Assertions.assertTrue(onlyInPathAxis.isEmpty(),
+                "以下前缀修饰器在路径轴（BashPathGuard.PREFIX_MODIFIERS）里会展开，"
+                        + "但形态轴（HitlStrategy.CMD_ANCHOR 白名单）不认它——"
+                        + "加这个前缀就能绕过形态轴： " + onlyInPathAxis);
+
+        // 反向只提醒不失败：形态轴白名单故意更宽（还收了提权器与 shell 启动器），
+        // 那些词在路径轴属于另两张表，不该要求它们出现在 PREFIX_MODIFIERS 里。
+    }
+
+    /** 从源码提取指定集合字面量的成员。 */
+    private static java.util.Set<String> extractSetMembers(String fileName, String fieldName) throws java.io.IOException {
+        java.util.List<String> lines = java.nio.file.Files.readAllLines(
+                sourceFile(fileName), java.nio.charset.StandardCharsets.UTF_8);
+        java.util.Set<String> members = new java.util.LinkedHashSet<>();
+        boolean inTarget = false;
+        for (String line : lines) {
+            if (line.contains(fieldName + " = Collections")) {
+                inTarget = true;
+            }
+            if (!inTarget) {
+                continue;
+            }
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"([^\"]+)\"").matcher(line);
+            while (m.find()) {
+                members.add(m.group(1).toLowerCase(java.util.Locale.ROOT));
+            }
+            if (line.contains(")));")) {
+                break;
+            }
+        }
+        return members;
+    }
+
+    /** 从 {@code PREFIX_WRAPPER_WORD} 常量里提取锚点白名单词（小写）。 */
+    private static java.util.Set<String> extractAnchorWhitelist(String fileName) throws java.io.IOException {
+        java.util.List<String> lines = java.nio.file.Files.readAllLines(
+                sourceFile(fileName), java.nio.charset.StandardCharsets.UTF_8);
+        StringBuilder body = new StringBuilder();
+        boolean inTarget = false;
+        for (String line : lines) {
+            if (line.contains("PREFIX_WRAPPER_WORD =")) {
+                inTarget = true;
+            }
+            if (!inTarget) {
+                continue;
+            }
+            body.append(line).append('\n');
+            if (line.trim().endsWith(";") && body.toString().contains("(?:")) {
+                break;
+            }
+        }
+
+        java.util.Set<String> words = new java.util.LinkedHashSet<>();
+
+        // 第一步：把跨行的字符串字面量<b>拼接</b>成完整的正则文本。
+        // Java 源码里 PREFIX_WRAPPER_WORD 是用 + 分多行写的，
+        // 必须先还原成单一字符串才能解析。
+        StringBuilder regexText = new StringBuilder();
+        java.util.regex.Matcher lit = java.util.regex.Pattern
+                .compile("\"((?:[^\"\\\\]|\\\\.)*)\"").matcher(body);
+        while (lit.find()) {
+            // 字面量里的 \\b / \\. 是 Java 转义，还原成正则真实形态
+            regexText.append(lit.group(1).replace("\\\\", "\\"));
+        }
+        Assertions.assertFalse(regexText.length() == 0,
+                "从 PREFIX_WRAPPER_WORD 里没提取到任何字符串字面量，源码排版变了");
+
+        // 第二步：剥掉外层分组 (?: ... )\b 与嵌套的可选后缀 (?:\.exe)?
+        String text = regexText.toString();
+        int open = text.indexOf("(?:");
+        Assertions.assertTrue(open >= 0, "PREFIX_WRAPPER_WORD 缺少外层分组，排版变了");
+        String inner = text.substring(open + 3);
+        int close = findMatchingParen(inner);
+        Assertions.assertTrue(close > 0, "PREFIX_WRAPPER_WORD 分组未闭合，排版变了");
+        inner = inner.substring(0, close);
+
+        // 第三步：按 | 切分。嵌套的 (?:\.exe)? 里不含 |，故简单切分就够；
+        // 切完后把每段的可选后缀剔掉，只留词干。
+        for (String alt : inner.split("\\|")) {
+            String word = alt.replaceAll("\\(\\?:[^)]*\\)\\??", "").trim();
+            if (!word.isEmpty()) {
+                words.add(word.toLowerCase(java.util.Locale.ROOT));
+            }
+        }
+        return words;
+    }
+
+    /** 找与串首隐含的 {@code (} 相配的 {@code )} 下标；找不到返回 -1。 */
+    private static int findMatchingParen(String s) {
+        int depth = 1;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\') {
+                i++;
+                continue;
+            }
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /** 读被测源文件（双 cwd 兼容，与 BashPathGuardTest#sourceOf 同口径）。 */
+    private static java.nio.file.Path sourceFile(String fileName) {
+        String rel = "src/main/java/com/gourdai/harness/hitl/" + fileName;
+        java.nio.file.Path direct = java.nio.file.Paths.get(rel);
+        if (java.nio.file.Files.exists(direct)) {
+            return direct;
+        }
+        java.nio.file.Path fromRepoRoot = java.nio.file.Paths.get("..").resolve(rel).normalize();
+        Assertions.assertTrue(java.nio.file.Files.exists(fromRepoRoot),
+                "找不到被测源文件 " + fileName);
+        return fromRepoRoot;
+    }
+
+    // ==================== 不得误拦偶然子串 ====================
+
+    /**
+     * 危险词出现在<b>非命令位置</b>时不得触发审批。
+     *
+     * <p>提权与生命周期动词必须按「词」匹配，不能命中被包含的子串：
+     * {@code su} / {@code rm -rf} 这类短词极易误伤（如 {@code sudo} 里的 {@code su}、
+     * 文件名里的 {@code rm -r}）。</p>
+     *
+     * <p>与 {@link #prefixWrapperWhitelistDoesNotOverMatchQuotedText} 是同一约束的两个侧面：
+     * 护栏的价值在于「只拦真的」，一旦误拦率上去，审批就会被连点成无效。</p>
      */
     @Test
     void doesNotMatchIncidentalSubstrings() {

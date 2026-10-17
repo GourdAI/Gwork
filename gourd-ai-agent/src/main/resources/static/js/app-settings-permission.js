@@ -123,6 +123,9 @@
             if (resp.code === 200 && resp.data) {
                 var disallowedTools = resp.data.disallowedTools || [];
                 renderToolsList(disallowedTools);
+                // bash 读写豁免目录回显：后端 permissionGet 直接返回整个 PermissionGroupDo，
+                // 故新字段随 data 一并到达，无需额外接口。
+                $('#bashExemptDirs').val(toLines(resp.data.bashExemptDirs || []));
                 // 已移除高级模式同步
             }
         }).fail(function () { console.error('[Settings] Failed to load permission settings'); });
@@ -145,10 +148,16 @@
         var $btn = $('#permissionSaveBtn');
         $btn.prop('disabled', true);
         
+        // bash 读写豁免目录：多行文本 -> 去重去空数组。
+        // 必须显式带上这个键，否则后端按「键不存在=不更新」的部分提交语义保留旧值，
+        // 用户在此清空后将无法真正删除已配置的豁免目录。
+        var bashExemptDirs = toList($('#bashExemptDirs').val());
+
         // 后端API需要tools字段，留空表示允许所有
         var bodyObj = {
             tools: ['**'],  // 允许所有工具
-            disallowedTools: disallowedTools
+            disallowedTools: disallowedTools,
+            bashExemptDirs: bashExemptDirs
         };
 
         $.ajax({ url: '/web/settings/permission/save', method: 'POST', data: JSON.stringify(bodyObj), contentType: 'application/json', dataType: 'json' })

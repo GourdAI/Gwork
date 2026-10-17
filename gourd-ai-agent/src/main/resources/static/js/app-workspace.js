@@ -348,6 +348,12 @@
             // 缓存完整列表到容器上，供搜索过滤使用
             dd._fullList = list;
             renderFilteredList(dd, list, '');
+            /* 动作按钮区是 innerHTML 重建的，「连接中」指示器类名（is-connecting）会随
+               重建丢失 → 向导收起期间重开下拉就看不到「有个连接在跑」。渲染完补刷一次
+               （幂等；无 app-remote 时 typeof 守卫静默）。 */
+            if (typeof window.refreshRemoteEntryIndicator === 'function') {
+                try { window.refreshRemoteEntryIndicator(); } catch (e) {}
+            }
 
             // 搜索框聚焦
             if (searchInput && typeof searchInput.focus === 'function') {
@@ -571,6 +577,32 @@
         也不能跳机绑；真需要绑定新登记目录时，登记分支会先往缓存补一条带 _scope 的
         临时记录（见 projects/add 两处分支），查得到就不会落到这里。
         断开路径同理：doDisconnect 按 id 摘除连接后列表重拉，归属查不到即回本地。*/
+    /* 登记一个【刚新增】的目录到 projectsCache，带明确归属（scopeId：'local' 或 connectionId）。
+       WHY 必需：add 请求成功后紧接着就 selectChatWorkspace → scopeOfPath 查归属，而
+       notifyProjectsChanged 触发的重拉是【异步】的，此刻缓存里还没有这条 → 查到 null。
+       虽然 null 会被调用方按 local 处理（不再跳机），但补临时记录能让归属成为【确定事实】
+       而不是靠兜底推出来的；且列表渲染（title 主机名）与后续删除的归属也依赖条目在缓存里。
+       远端目录尤其不能省：两台同时在线时 scopeId 必须是【选定那台】而非 activeId，
+       写错会让该目录后续读写跳到另一台机器（本仓已修过同款缺陷两处）。
+       幂等：同路径已有记录则更新 _scope（重拉竞态下可能出现重复 push）。 */
+    function registerProjectScope(path, scopeId) {
+        if (!path) return;
+        var pk = pathKey(path);
+        var scope = (scopeId && scopeId !== 'local') ? scopeId : 'local';
+        if (!Array.isArray(projectsCache)) return;
+        for (var i = 0; i < projectsCache.length; i++) {
+            var p = projectsCache[i];
+            if (p && pathKey(p.path) === pk) { p._scope = scope; return; }
+        }
+        projectsCache.push({ path: path, name: baseName(path), _scope: scope });
+    }
+    /* app-remote.js 的一体化向导（选定远端目录后登记）与本模块的「打开远程目录」分支
+       共用此入口：两个模块各有 projectsCache 副本是不可能的（本模块是唯一持有者），
+       故必须经 window 暴露。 */
+    window.__gourdRegisterRemoteProject = function (path, scopeId) {
+        try { registerProjectScope(path, scopeId); } catch (e) { /* 静默：不得阻断选择 */ }
+    };
+
     function scopeOfPath(path) {
         var pk = pathKey(path);
         for (var i = 0; i < projectsCache.length; i++) {
@@ -820,8 +852,10 @@
                         }
                         /* 新登记的远端路径：补临时 _scope（同 add 分支理由，防选中时误绑）。
                            _scope 必须是【选定的那台 rid】而不是 activeId：两台同时在线时二者
-                           不同，写错就会把该目录后续读写跳到另一台机器。 */
-                        projectsCache.push({ path: picked, name: picked.split(/[\\/]/).pop() || picked, _scope: rid });
+                           不同，写错就会把该目录后续读写跳到另一台机器。
+                           改走 registerProjectScope：与一体化向导（app-remote.finishWizardWithDir）
+                           共用同一实现，避免两处内联 push 日后漂移（含 name 计算口径不一致）。 */
+                        registerProjectScope(picked, rid);
                         if (typeof window.notifyProjectsChanged === 'function') window.notifyProjectsChanged();
                         selectChatWorkspace(picked);
                     }).fail(function () {

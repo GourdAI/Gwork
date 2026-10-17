@@ -17,6 +17,15 @@
         "unsupported":  "A conexão remota requer o aplicativo de desktop",
 
         "saved_hosts":  "Conexões recentes",
+        "step_settings":  "Conexão",
+        "step_connecting":  "Conectando",
+        "step_directory":  "Escolher pasta",
+        "minimize":  "Minimizar",
+        "entry_connecting":  "Conectando…",
+        "connect_another":  "Conectar outra",
+        "host_edit":  "Editar",
+        "close_confirm_connecting":  "Conectando ao host remoto. Parar e fechar?",
+        "close_confirm_connected":  "Conectado mas nenhuma pasta selecionada. Sair agora? (A conexão é mantida.)",
 
         "no_saved_hosts":  "Nenhum host salvo ainda",
 
@@ -523,6 +532,9 @@
                                         "risk_high":  "Alto risco",
                                         "risk_medium":  "Risco médio",
                                         "no_match":  "Nenhuma ferramenta correspondente encontrada",
+                                        "exempt_dirs_label":  "Diretórios isentos do bash (um por linha)",
+                                        "exempt_dirs_desc":  "Com as permissões padrão, o bash ler ou gravar fora do projeto atual exige aprovação. Registre aqui os diretórios se os artefatos de build ou caches compartilhados precisarem ficar fora do projeto.",
+                                        "exempt_dirs_note":  "A isenção vale para leituras e gravações; operações de alto risco, como exclusão recursiva ou escalação de privilégios, ainda exigem aprovação. Caches de build e diretórios temporários já são isentos.",
                                         "tool":  {
                                                      "bash_desc":  "Execução de comandos Shell",
                                                      "read_desc":  "Leitura de conteúdo de arquivo",
@@ -1088,6 +1100,10 @@
                  "dir_access_failed":  "Não foi possível acessar este diretório",
                  "no_subdirs":  "(Sem subdiretórios)",
                  "dir_load_failed":  "Falha ao carregar",
+                 "new_folder":  "Nova pasta",
+                 "new_folder_placeholder":  "Insira o nome da nova pasta",
+                 "new_folder_empty":  "Insira um nome de pasta",
+                 "new_folder_ok":  "Pasta criada",
                  "please_enter_dir":  "Primeiro entre em um diretório",
                  "no_projects_empty":  "Nenhum projeto, clique em «Abrir pasta» ou «Novo projeto» acima",
                  "recent_projects":  "Projetos recentes",

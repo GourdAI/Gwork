@@ -121,7 +121,32 @@
     font-size: 12.5px; color: var(--text-primary); font-family: inherit;
 }
 .workspace-search-input::placeholder { color: var(--text-tertiary); }
-.workspace-list-scroll { overflow-y: auto; max-height: 210px; padding: 4px 6px; }
+/* ---- 列表区双层可压缩（底部遮挡修复）----
+   下拉是 overflow:hidden 的竖向 flex，而 .workspace-actions 声明了 flex-shrink:0
+   （三个动作按钮共 103px 寸步不让）。此前 .workspace-list-container 全仓无任何
+   CSS 规则（裸 div）→ flex 项默认 min-height:auto，它按内容（内层 scroll 的
+   max-height:210px）算出 210px 同样拒绝压缩。于是「搜索框 33 + 列表 210 +
+   动作 103 = 346px」撞上 positionDropdown 收紧后的 max-height（设计上限 338，
+   窗口矮/选择器靠下时低至 257）→ 末尾的「远程连接」按钮被 overflow:hidden 硬裁：
+   实测默认场景切掉 4px、紧凑场景整条 87px 完全不可见；且 elementFromPoint 命中的
+   是按钮【身后的宿主元素】→ 被裁部分既看不见也点不到，overflow-y:hidden 又不给
+   滚动条自救（用户报「底部有点遮挡」的真实形态，且是「连不上第二台远程」的根因
+   ——多连接与入口本就存在，只是那个入口被裁没了）。
+
+   必须【两层一起】放开：只给 container 加 min-height:0 会让它被压到 119px 而
+   内层 scroll 仍固守 210px，多出的 91px 被 container 的 overflow:hidden 裁掉——
+   按钮是可见了，但列表最后一项同样点不到（实测 lastItemClickable=false），等于把
+   一个遮挡换成另一个。内层同步 min-height:0 + flex 才跟着收缩，收缩后由自身
+   overflow-y:auto 接管滚动，列表项始终可达。
+   max-height:210px 刻意保留：仍限制长列表不把下拉撑破设计上限。 */
+.workspace-list-container {
+    flex: 1 1 auto; min-height: 0; overflow: hidden;
+    display: flex; flex-direction: column;
+}
+.workspace-list-scroll {
+    flex: 1 1 auto; min-height: 0;
+    overflow-y: auto; max-height: 210px; padding: 4px 6px;
+}
 /* 列表项与搜索框视觉同档：单行（图标+名称）、同字号同内边距量级，
    避免「搜索框小而选项块大」的比例失调（参照稿即单行条目）。
    完整路径改挂 title 悬停查看，不再占第二行。 */

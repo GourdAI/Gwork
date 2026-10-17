@@ -229,6 +229,15 @@ public class HarnessEngine {
         return options.getHitlInterceptor();
     }
 
+    /**
+     * 本引擎自行构造的默认 bash 策略；嵌入方传了自定义拦截器时为 null。
+     *
+     * <p>保留引用只为热更新豁免目录：{@code HITLInterceptor} 的策略表是私有的，
+     * 拿不回刚塞进去的实例。为 null 时 {@code bashExemptDirsReset} 只更新 options，
+     * 不去碰不属于我们的拦截器。</p>
+     */
+    private volatile HitlStrategy defaultBashStrategy;
+
     public AskUserInterceptor getAskUserInterceptor() {
         return options.getAskUserInterceptor();
     }
@@ -746,6 +755,32 @@ public class HarnessEngine {
         }
     }
 
+    /**
+     * 热更新 bash 读写豁免目录（设置页保存后调用，无需重启）。
+     *
+     * <p>与 {@link #disallowToolReset} 不同，这里<b>不需要重建 Agent</b>：豁免目录不参与
+     * 工具集生成，只是 {@code HitlStrategy} 内部的一个 volatile 字段，就地替换即可对
+     * 所有会话生效。重建 Agent 反而会打断正在跑的会话，代价毫无必要。</p>
+     *
+     * <p><b>嵌入方自定义了拦截器时只更新 options</b>：{@code defaultBashStrategy} 为 null
+     * 说明 {@code options.getHitlInterceptor()} 不是本引擎构造的，我们无权改它内部的策略
+     * （也不知道它是不是 {@code HitlStrategy}）。此时配置仍存进 options，
+     * 嵌入方自行决定是否采用。</p>
+     */
+    public void bashExemptDirsReset(Collection<String> dirs) {
+        options.setBashExemptDirs(dirs);
+        if (defaultBashStrategy != null) {
+            defaultBashStrategy.setBashExemptDirs(options.getBashExemptDirs());
+        }
+    }
+
+    /**
+     * 当前生效的 bash 读写豁免目录（只读视图，供设置页回显）。
+     */
+    public List<String> getBashExemptDirs() {
+        return options.getBashExemptDirs();
+    }
+
 
     /**
      * 重扫技能与子代理目录，并回收已缓存的自定义代理定义。
@@ -930,9 +965,14 @@ public class HarnessEngine {
             options.setStopLoopInterceptor(new StopLoopInterceptor(3, 8));
         }
 
-        //人工介入拉截器默认处理
+        //人工介入拦截器默认处理
         if (options.getHitlInterceptor() == null) {
-            options.setHitlInterceptor(new HITLInterceptor().onTool("bash", new HitlStrategy()));
+            // 把用户配置的 bash 读写豁免目录交给策略：没有这个通道，「构建产物在项目外」的用户
+            // 只能整档切到完全访问——那是解除全部空间边界，代价远大于需求。
+            // 保留策略引用是为了热更新（见 bashExemptDirsReset）。
+            HitlStrategy bashStrategy = new HitlStrategy(options.getBashExemptDirs());
+            this.defaultBashStrategy = bashStrategy;
+            options.setHitlInterceptor(new HITLInterceptor().onTool("bash", bashStrategy));
         }
 
         //结构化问答拦截器默认处理（默认启用，不加开关）
@@ -1508,6 +1548,21 @@ public class HarnessEngine {
 
         public Builder disallowedToolsAdd(Collection<String> tools) {
             options.getDisallowedTools().addAll(tools);
+            return this;
+        }
+
+        /**
+         * 追加 bash 读写豁免目录（工作区之外仍允许直接读写、不弹审批的位置）。
+         *
+         * <p>条目支持 {@code ~} 与环境变量（{@code $env:X}、{@code %X%}）；
+         * 非法条目在解析时被静默忽略（见 {@code BashPathGuard.resolveExemptDirs}）。
+         * <b>读写都豁免</b>。只影响 bash 的路径轴：结构化文件工具的边界与形态轴
+         * （递归删除等）照旧生效。</p>
+         */
+        public Builder bashExemptDirsAdd(Collection<String> dirs) {
+            if (dirs != null) {
+                options.getBashExemptDirs().addAll(dirs);
+            }
             return this;
         }
 

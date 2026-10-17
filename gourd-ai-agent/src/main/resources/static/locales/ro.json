@@ -17,6 +17,15 @@
         "unsupported":  "Conexiunea la distanță necesită aplicația desktop",
 
         "saved_hosts":  "Conexiuni recente",
+        "step_settings":  "Conexiune",
+        "step_connecting":  "Se conectează",
+        "step_directory":  "Alege dosarul",
+        "minimize":  "Minimizează",
+        "entry_connecting":  "Se conectează…",
+        "connect_another":  "Conectează alta",
+        "host_edit":  "Editează",
+        "close_confirm_connecting":  "Se conectează la gazda remote. Oprești și închizi?",
+        "close_confirm_connected":  "Conectat dar niciun dosar selectat. Ieși acum? (Conexiunea este păstrată.)",
 
         "no_saved_hosts":  "Nicio gazdă salvată încă",
 
@@ -523,6 +532,9 @@
                                         "risk_high":  "Risc ridicat",
                                         "risk_medium":  "Risc mediu",
                                         "no_match":  "Nu s-au găsit instrumente care să corespundă",
+                                        "exempt_dirs_label":  "Directoare exceptate pentru bash (unul pe linie)",
+                                        "exempt_dirs_desc":  "Cu permisiunile implicite, citirea sau scrierea bash în afara proiectului curent necesită aprobare. Înregistrați aici directoarele dacă artefactele de compilare sau cache-urile partajate trebuie să fie în afara proiectului.",
+                                        "exempt_dirs_note":  "Excepția se aplică atât citirilor cât și scrierilor; operațiunile riscante, precum ștergerea recursivă sau escaladarea de privilegii, necesită în continuare aprobare. Cache-urile de compilare și directoarele temporare sunt deja exceptate.",
                                         "tool":  {
                                                      "bash_desc":  "Execuție comandă Shell",
                                                      "read_desc":  "Citire conținut fișier",
@@ -1088,6 +1100,10 @@
                  "dir_access_failed":  "Nu se poate accesa acest director",
                  "no_subdirs":  "(Fără directoare fiu)",
                  "dir_load_failed":  "Încărcare eșuată",
+                 "new_folder":  "Folder nou",
+                 "new_folder_placeholder":  "Introdu numele noului folder",
+                 "new_folder_empty":  "Te rog introdu un nume de folder",
+                 "new_folder_ok":  "Folder creat",
                  "please_enter_dir":  "Intrarea într-un director este necesară mai întâi",
                  "no_projects_empty":  "Nu există proiecte, apăsați «Deschidere dosar» sau «Proiect nou» mai sus",
                  "recent_projects":  "Proiecte recente",

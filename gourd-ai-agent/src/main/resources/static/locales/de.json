@@ -17,6 +17,15 @@
         "unsupported":  "Remote-Verbindung erfordert die Desktop-App",
 
         "saved_hosts":  "Letzte Verbindungen",
+        "step_settings":  "Verbindung",
+        "step_connecting":  "Verbinden",
+        "step_directory":  "Ordner wählen",
+        "minimize":  "Minimieren",
+        "entry_connecting":  "Verbinde…",
+        "connect_another":  "Weitere verbinden",
+        "host_edit":  "Bearbeiten",
+        "close_confirm_connecting":  "Verbindung zum Remote-Host läuft. Stoppen und schließen?",
+        "close_confirm_connected":  "Verbunden, aber noch kein Ordner gewählt. Jetzt verlassen? (Die Verbindung bleibt erhalten.)",
 
         "no_saved_hosts":  "Noch keine gespeicherten Hosts",
 
@@ -521,6 +530,9 @@
                                         "risk_high":  "Hohes Risiko",
                                         "risk_medium":  "Mittleres Risiko",
                                         "no_match":  "Keine passenden Tools gefunden",
+                                        "exempt_dirs_label":  "bash-Ausnahmeverzeichnisse (eines pro Zeile)",
+                                        "exempt_dirs_desc":  "Unter Standardberechtigungen erfordert Lesen oder Schreiben von bash außerhalb des aktuellen Projekts eine Zustimmung. Tragen Sie hier Verzeichnisse ein, wenn Build-Ausgaben oder gemeinsame Caches außerhalb des Projekts liegen müssen.",
+                                        "exempt_dirs_note":  "Die Ausnahme gilt für Lese- und Schreibzugriffe; riskante Operationen wie rekursives Löschen oder Rechteausweitung erfordern weiterhin eine Zustimmung. Build-Caches und temporäre Verzeichnisse sind bereits ausgenommen.",
                                         "tool":  {
                                                      "bash_desc":  "Shell-Befehlsausführung",
                                                      "read_desc":  "Dateiinhalte lesen",
@@ -1086,6 +1098,10 @@
                  "dir_access_failed":  "Verzeichnis kann nicht zugriffen werden",
                  "no_subdirs":  "(Keine Unterverzeichnisse)",
                  "dir_load_failed":  "Laden fehlgeschlagen",
+                 "new_folder":  "Neuer Ordner",
+                 "new_folder_placeholder":  "Namen für den neuen Ordner eingeben",
+                 "new_folder_empty":  "Bitte einen Ordnernamen eingeben",
+                 "new_folder_ok":  "Ordner erstellt",
                  "please_enter_dir":  "Bitte zuerst in ein Verzeichnis wechseln",
                  "no_projects_empty":  "Noch keine Projekte, oben auf 「Ordner öffnen」 oder 「Neues Projekt」 klicken",
                  "recent_projects":  "Neueste Projekte",

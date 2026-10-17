@@ -17,6 +17,15 @@
         "unsupported":  "當前環境不支援遠端連線（需要桌面端）",
 
         "saved_hosts":  "最近連線",
+        "step_settings":  "連接設定",
+        "step_connecting":  "連接中",
+        "step_directory":  "選擇目錄",
+        "minimize":  "收起",
+        "entry_connecting":  "連接中…",
+        "connect_another":  "連接另一台",
+        "host_edit":  "編輯",
+        "close_confirm_connecting":  "正在連接遠端主機，確定要停止並關閉嗎？",
+        "close_confirm_connected":  "已連接但尚未選擇目錄，確定要離開嗎？（連接會保留，可稍後再選目錄）",
 
         "no_saved_hosts":  "暫無已儲存的主機",
 
@@ -515,6 +524,9 @@
                                         "risk_high":  "高風險",
                                         "risk_medium":  "中風險",
                                         "no_match":  "未找到符合的工具",
+                                        "exempt_dirs_label":  "bash 豁免目錄（每行一個）",
+                                        "exempt_dirs_desc":  "預設權限下，bash 讀寫目前專案之外的路徑需要核准。若建置產物、共用快取等必須放在專案外，在此登記可免於核准。",
+                                        "exempt_dirs_note":  "豁免同時適用於讀取與寫入；遞迴刪除、提權等高危操作仍會要求核准。建置快取與暫存目錄已內建豁免，無需重複登記。",
                                         "tool":  {
                                                      "bash_desc":  "Shell 命令執行",
                                                      "read_desc":  "讀取檔案內容",
@@ -1087,6 +1099,10 @@
                  "dir_access_failed":  "無法存取該目錄",
                  "no_subdirs":  "（無子目錄）",
                  "dir_load_failed":  "載入失敗",
+                 "new_folder":  "新增資料夾",
+                 "new_folder_placeholder":  "輸入新資料夾名稱",
+                 "new_folder_empty":  "請輸入資料夾名稱",
+                 "new_folder_ok":  "資料夾已建立",
                  "please_enter_dir":  "請先進入一個目錄",
                  "no_projects_empty":  "還沒有專案，點上方「開啟資料夾」或「建立專案」",
                  "recent_projects":  "最近專案",

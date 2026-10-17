@@ -3383,6 +3383,70 @@ pre:hover .code-copy-btn { opacity: 1; }
 .remote-forget-btn { padding: 4px 10px; background: transparent; color: var(--text-secondary); border: 1px solid var(--border-color); border-radius: 5px; font: 11px/1.6 ui-monospace, Consolas, monospace; cursor: pointer; }
 .remote-forget-btn:hover { color: var(--text-primary); border-color: var(--text-tertiary); }
 .remote-forget-btn:disabled { opacity: .55; cursor: default; }
+
+/* ============ 向导三步流（连接与选目录一体化） ============
+   head 右侧双按钮（收起 + 关闭）：两者都是 14px 图标按钮，必须同基类视觉。
+   【收起按钮用独立类 .remote-wizard-min】不复用 .remote-wizard-close：JS 用
+   el.querySelector('.remote-wizard-close') 绑定关闭，若收起也带该类且排在前，
+   querySelector 会命中它 → 关闭逻辑绑错按钮（真实回归）。 */
+.remote-wizard-head-acts { display: flex; align-items: center; gap: 2px; }
+.remote-wizard-min { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; }
+.remote-wizard-min:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+/* 步骤条：横向序号 + 名称 + 连接线。当前步强调色、已过步可点回退（cursor:pointer），
+   未到步降为次要色且不可点。高度固定，不随 body 内容变化而抖动。 */
+.remote-steps { display: flex; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
+.remote-step { display: flex; align-items: center; gap: 5px; color: var(--text-tertiary); font-size: 11.5px; white-space: nowrap; }
+.remote-step.done { color: var(--text-secondary); cursor: pointer; }
+.remote-step.done:hover { color: var(--text-primary); }
+.remote-step.active { color: var(--accent); font-weight: 600; }
+.remote-step-idx { width: 16px; height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; border: 1px solid currentColor; flex-shrink: 0; }
+.remote-step.active .remote-step-idx { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
+.remote-step-line { flex: 1; height: 1px; background: var(--border-color); margin: 0 6px; min-width: 8px; }
+.remote-step-line.done { background: var(--text-tertiary); }
+/* 步骤条在窄面板下可能拥挤：面板宽度沿用既有 .remote-wizard-panel 定义（不在此另写
+   width 覆盖——两处定义同一属性会让「哪条生效」取决于源序，是隐蔽的维护陷阱）。 */
+
+/* connecting 步：表单转只读观感（半透明 + 禁指针），但【不隐藏】——用户要看到自己在连哪台。
+   仅降视觉权重，input 仍可读；真正的只读由 JS 控制（避免用户误改）。 */
+.remote-wizard-body.is-busy { opacity: .6; pointer-events: none; user-select: none; }
+
+/* directory 步：主体容器 + 顶部「连接成功」条 + 内嵌目录树 */
+.remote-wizard-stepbody { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* 成功横幅配色【只用成套令牌】：--color-success-dim 由 theme.css 按主题定义为
+   「对应主题绿的 25% alpha」（light=rgba(34,197,94,.25) / dark=rgba(74,222,128,.25)），
+   文字取 --color-success。不写 var(--token, 兜底)：兜底一律是浅色字面量，某主题漏赋值
+   就当场掉回浅色（本仓既有门禁 dark-theme-token-contract 明确禁止此写法）。 */
+.remote-dir-ok { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: var(--color-success-dim); border-bottom: 1px solid var(--border-color); font-size: 12.5px; color: var(--color-success); flex-shrink: 0; }
+.remote-dir-host { color: var(--text-secondary); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 「连接另一台」靠右：用户投诉「连了这台还想连别的」，此按钮是不关窗直接发起第二条连接的入口 */
+.remote-dir-another { margin-left: auto; flex-shrink: 0; background: none; border: 1px solid var(--border-color); color: var(--text-secondary); border-radius: 5px; padding: 3px 9px; font-size: 11.5px; cursor: pointer; }
+.remote-dir-another:hover { color: var(--text-primary); border-color: var(--text-tertiary); background: var(--bg-hover); }
+/* 内嵌目录树宿主：占满 stepbody 剩余空间，让 renderDirBrowserInto 的 .dir-picker（height:100%）有确定高度 */
+.remote-dir-host-wrap { flex: 1; min-height: 260px; display: flex; flex-direction: column; }
+
+/* 侧栏「远程连接」入口的【连接中】指示器：向导收起但流程活跃时点亮，
+   让用户知道「有个连接在跑，点我能回去看」。文字走 data-connecting-label 覆盖默认「远程连接」。 */
+.workspace-remote-btn.is-connecting { color: var(--color-success); }
+.workspace-remote-btn.is-connecting::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--color-success); margin-left: auto; animation: remote-entry-pulse 1.4s ease-in-out infinite; }
+@keyframes remote-entry-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+/* 已存主机行的「编辑」次级按钮：与 remove 同族（悬停才显形，避免行内三个图标抢视觉）。
+   直连是主交互（点整行即连），编辑是低频动作，故降权到 hover 显现。 */
+.remote-host-edit { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; opacity: 0; }
+.remote-host-item:hover .remote-host-edit { opacity: 1; }
+.remote-host-edit:hover { color: var(--accent); background: var(--bg-hover); }
+
+/* 目录浏览器内嵌态适配：弹窗里 .dir-picker 高度靠 layer 的 area 撑，内嵌到向导里
+   则由 .remote-dir-host-wrap 的 flex:1 给高度。两态共用同一套 .dir-picker-* 规则，
+   此处只补内嵌态特有的「工具栏新建按钮」与「内联新建行」样式。 */
+.dir-picker-mkdir { flex-shrink: 0; }
+.dir-picker-mkdir-row { display: flex; align-items: center; gap: 6px; padding: 6px 8px; margin-bottom: 4px; border: 1px solid var(--accent); border-radius: 7px; background: var(--bg-input-box); }
+.dir-picker-mkdir-input { flex: 1; min-width: 0; height: 30px; padding: 0 10px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-sidebar); color: var(--text-primary); font-size: 13px; outline: none; }
+.dir-picker-mkdir-input:focus { border-color: var(--accent); }
+.dir-picker-mkdir-row .btn-primary, .dir-picker-mkdir-row .btn-secondary { height: 30px; padding: 0 12px; border-radius: 6px; font-size: 12px; cursor: pointer; border: 1px solid var(--border-color); flex-shrink: 0; }
+.dir-picker-mkdir-row .btn-primary { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
+.dir-picker-mkdir-row .btn-secondary { background: var(--bg-hover); color: var(--text-primary); }
 /* 远程状态徽标：由 app-remote.js 注入侧栏头部右侧（.sidebar-header-top）。
 
    【为什么不是 document.body】P4 初版写的 appendChild(document.body)：徽标拿到

@@ -44,7 +44,8 @@
 
     // ---------- 状态 ----------
     /* tab 列表：[{id, name, cwd, scopeKey, socket, connected, dead,
-                   bufEl, inEl, history, historyIdx, pendingDraft, restartToken, lastUsedAt}]
+                   bufEl, inEl, history, historyIdx, pendingDraft, restartToken,
+                   bannerSeen, lastUsedAt}]
        socket 为 null 表示该 tab 当前无连接（未连/被回收/已断开），切回时懒重建。 */
     var tabs = [];
     var activeTab = null;
@@ -290,6 +291,12 @@
             historyIdx: -1,
             pendingDraft: '',
             restartToken: 0,
+            /* 本 tab 是否已展示过 Windows 版本 banner。后端对每条新连接都补发
+               一次 banner（cmd /K 形态自身不打印），而本模块关面板只断连、
+               保留输出缓冲，重连即懒重建 → 不抑制则每「开→关→开」一轮就在
+               回滚缓冲里叠一份 banner+提示符（用户实测截图 3 份）。首帧放行、
+               后续精确丢弃；restart 清屏时重置（用户主动重启=要全新会话）。 */
+            bannerSeen: false,
             lastUsedAt: Date.now()
         };
         tab.name = baseNameOf(tab.cwd);
@@ -340,6 +347,11 @@
         }
         tab.socket = socket;
         enforcePoolLimit(tab);
+        /* 连接级首帧标记：TerminalGate.start() 在 reader 线程启动前发送 banner，
+           故 banner 恒为【本连接首条 output 帧】（协议契约）。去重窗口收窄到首帧，
+           消除「seen 之后任何时刻命中形态都丢」的误吞窗口——用户 cat 一个内容恰为
+           两行 banner 的文件时，该回显不是首帧，必须展示。 */
+        var firstFrame = true;
         socket.onopen = function () {
             if (tab.socket !== socket) return;   // 已被回收/顶替：不接管
             tab.connected = true;
@@ -350,7 +362,19 @@
             var msg;
             try { msg = JSON.parse(ev.data); } catch (e) { return; }
             if (msg.type === 'output') {
-                appendOutputTo(tab, msg.data || '');
+                /* banner 去重：后端每条连接首帧补发 Windows 版本横幅，关面板只断连、
+                   保留缓冲、重连懒重建 → 不抑制则每「开→关→开」叠一份（用户截图缺陷）。
+                   仅首帧识别 banner（协议契约）；判据与后端切片同口径：以版本行开头、
+                   恰两行、换行收尾。非首帧的 banner 形态一律当用户输出展示。 */
+                var d = msg.data || '';
+                if (firstFrame) {
+                    firstFrame = false;
+                    if (isWindowsBanner(d)) {
+                        if (tab.bannerSeen) return;   // 重连补发：缓冲已有一份，丢弃
+                        tab.bannerSeen = true;        // 首次展示：落标记
+                    }
+                }
+                appendOutputTo(tab, d);
             } else if (msg.type === 'exit') {
                 appendSystemTo(tab, '\n' + GourdI18n.t('terminal.process_exit', msg.code));
                 tab.connected = false;
@@ -559,6 +583,22 @@
     }
     window.toggleCodeTerminal = toggleTerminal;
 
+    /* 后端首帧 banner 的形态（TerminalGate.windowsBanner 取无参 cmd 输出首两行）：
+       「Microsoft Windows [版本 ...]」+「(c) Microsoft Corporation...」+ 换行收尾。
+       前后端各持一份判据：后端负责切片采集，前端负责重连去重，口径必须一致——
+       后端切片约束为 substring(0, idx2+1) 且 idx2>idx+1、raw[idx+1]!='\n'，
+       等价于「恰两行、第二行非空、换行收尾」；少锁任一条都会把用户输出误判成
+       banner（三行/单行形态后端永不产出）。 */
+    function isWindowsBanner(text) {
+        if (typeof text !== 'string') return false;
+        if (text.indexOf('Microsoft Windows') !== 0) return false;
+        if (text.charAt(text.length - 1) !== '\n') return false;
+        var firstNl = text.indexOf('\n');
+        if (firstNl <= 0) return false;
+        var secondNl = text.indexOf('\n', firstNl + 1);
+        return secondNl === text.length - 1 && secondNl > firstNl + 1;
+    }
+
     /* 重启只重建【当前 tab】的 shell：多实例下其它 tab 的子进程与本页无关，
        用户点「重启」的意图只是重启眼前这个。 */
     function restartTerminal() {
@@ -566,6 +606,7 @@
         if (!tab) return;
         killSocket(tab);
         tab.bufEl.innerHTML = '';
+        tab.bannerSeen = false;   // 清屏=全新会话：新连接的首帧 banner 应重新展示
         appendSystemTo(tab, GourdI18n.t('terminal.restarting'));
         var myToken = ++tab.restartToken;   // 本轮代次；后续任何一轮重启都会使它过期
         var timer = setTimeout(function () {
@@ -642,7 +683,12 @@
     if (closeBtn) closeBtn.addEventListener('click', closeTerminal);
     if (newBtn) newBtn.addEventListener('click', function () { newTab(); });
     if (clearBtn) clearBtn.addEventListener('click', function () {
-        if (activeTab) activeTab.bufEl.innerHTML = '';
+        if (activeTab) {
+            activeTab.bufEl.innerHTML = '';
+            // 清屏=全新屏幕（与 restart 同语义）：重连首帧 banner 应重新展示，
+            // 不重置则清屏后重连的补发 banner 被静默吞掉、屏顶缺横幅。
+            activeTab.bannerSeen = false;
+        }
         if (activeTab && activeTab.inEl) activeTab.inEl.focus();
     });
     if (restartBtn) restartBtn.addEventListener('click', restartTerminal);

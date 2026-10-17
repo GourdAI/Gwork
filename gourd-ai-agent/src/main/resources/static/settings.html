@@ -299,6 +299,15 @@
                             <!-- 高级模式已移除 -->
                         </div>
 
+                        <!-- bash 豁免目录（读写均豁免）：与工具列表共用下方同一个保存按钮 -->
+                        <div class="form-group">
+                            <label data-i18n="settings.permission.exempt_dirs_label">bash 豁免目录（每行一个）</label>
+                            <textarea id="bashExemptDirs" rows="3" spellcheck="false"
+                                      placeholder="D:\build-out&#10;~/my-cache&#10;%LOCALAPPDATA%\my-tool"></textarea>
+                            <div class="settings-section-desc" data-i18n="settings.permission.exempt_dirs_desc">默认权限下，bash 读写当前项目之外的路径需要审批。若构建产物、共享缓存等必须放在项目外，在此登记可免去审批。</div>
+                            <div class="settings-section-desc" data-i18n="settings.permission.exempt_dirs_note">豁免同时适用于读取与写入；递归删除、提权等高危操作仍会要求审批。构建缓存与临时目录已内置豁免，无需重复登记。</div>
+                        </div>
+
                         <div class="form-actions form-actions-end settings-actions-spacious">
                             <button class="btn-primary" id="permissionSaveBtn" data-i18n="settings.save">保存</button>
                         </div>

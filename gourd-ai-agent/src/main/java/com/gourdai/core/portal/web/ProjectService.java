@@ -250,6 +250,70 @@ public class ProjectService {
     }
 
     /**
+     * 在指定父目录下新建一个空目录，<b>不登记为项目</b>。
+     *
+     * <p>与 {@link #create(String, String)} 的区别：create 末尾会 {@code return add(...)}
+     * 把新目录登记进 projects.json 并置顶。目录浏览器里「新建文件夹」是<b>导航途中</b>
+     * 的动作——用户可能只是想建个中间层目录再往里进，若沿用 create，每建一层就往工作区
+     * 下拉里塞一条垃圾项目条目（远端场景更糟：登记写进远端 projects.json，本地列表扇出后
+     * 出现一堆无意义远端项目）。故这里只建目录，登记仍由用户最终「选定此目录」触发。</p>
+     *
+     * <p>安全校验与 create 完全同口径（禁止路径穿越与分隔符、二次确认解析结果仍在父目录内），
+     * 避免出现「create 严格、mkdir 宽松」的双标绕过面。</p>
+     *
+     * @param parent 父目录绝对路径；为空时取用户主目录（与 create 同默认）
+     * @param name   新目录名，不允许含路径分隔符 / \ 、{@code ..} 或 {@code :}
+     * @return 含 path（新目录绝对路径）与 name 的结果；参数非法或目录已存在时返回失败
+     */
+    public Result<Map> mkdir(String parent, String name) {
+        if (name == null || name.trim().isEmpty()) {
+            return Result.failure(400, "目录名不能为空");
+        }
+        String cleanName = name.trim();
+        // 目录名安全校验：禁止路径穿越与分隔符（跨平台，与 create 同口径）
+        if (cleanName.contains("..") || cleanName.contains("/") || cleanName.contains("\\")
+                || cleanName.contains(":")) {
+            return Result.failure(400, "目录名包含非法字符");
+        }
+
+        String parentPath = (parent != null && !parent.trim().isEmpty())
+                ? parent.trim()
+                : AgentFlags.getUserHome();
+        if (parentPath.contains("..")) {
+            return Result.failure(400, "父目录路径非法");
+        }
+
+        Path parentDir = Paths.get(parentPath).toAbsolutePath().normalize();
+        File parentFile = parentDir.toFile();
+        if (!parentFile.exists() || !parentFile.isDirectory()) {
+            return Result.failure(404, "父目录不存在");
+        }
+
+        Path target = parentDir.resolve(cleanName).normalize();
+        // 二次确认解析结果仍在父目录之内（防御拼接绕过）
+        if (!target.startsWith(parentDir)) {
+            return Result.failure(400, "目录名包含非法字符");
+        }
+        File targetFile = target.toFile();
+        if (targetFile.exists()) {
+            // 已存在（无论是目录还是同名文件）都不静默成功：静默会让用户以为建好了，
+            // 随后进入的却是别人的目录 / 一个文件路径。
+            return Result.failure(400, "目录已存在");
+        }
+
+        try {
+            Files.createDirectories(target);
+        } catch (Exception e) {
+            return Result.failure(500, "创建目录失败：" + e.getMessage());
+        }
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("path", target.toString());
+        data.put("name", cleanName);
+        return Result.succeed(data);
+    }
+
+    /**
      * 移除项目登记（不删除磁盘上的实际目录）。
      *
      * @param path 项目目录绝对路径

@@ -17,6 +17,15 @@
         "unsupported":  "リモート接続にはデスクトップ版が必要です",
 
         "saved_hosts":  "最近の接続",
+        "step_settings":  "接続設定",
+        "step_connecting":  "接続中",
+        "step_directory":  "フォルダーを選択",
+        "minimize":  "最小化",
+        "entry_connecting":  "接続中…",
+        "connect_another":  "別を接続",
+        "host_edit":  "編集",
+        "close_confirm_connecting":  "リモートホストに接続中です。停止して閉じますか？",
+        "close_confirm_connected":  "接続済みですがフォルダー未選択です。離れますか？（接続は保持されます）",
 
         "no_saved_hosts":  "保存されたホストはありません",
 
@@ -523,6 +532,9 @@
                                         "risk_high":  "高リスク",
                                         "risk_medium":  "中リスク",
                                         "no_match":  "一致するツールが見つかりません",
+                                        "exempt_dirs_label":  "bash 例外ディレクトリ（1 行に 1 つ）",
+                                        "exempt_dirs_desc":  "既定の権限では、bash が現在のプロジェクト外を読み書きする際に承認が必要です。ビルド成果物や共有キャッシュをプロジェクト外に置く必要がある場合は、ここに登録すると承認が不要になります。",
+                                        "exempt_dirs_note":  "例外は読み取りと書き出しの両方に適用されます。再帰削除や権限昇格などの危険な操作は引き続き承認が必要です。ビルドキャッシュと一時ディレクトリは既に例外扱いのため、再登録は不要です。",
                                         "tool":  {
                                                      "bash_desc":  "Shell コマンド実行",
                                                      "read_desc":  "ファイル内容の読み取り",
@@ -1088,6 +1100,10 @@
                  "dir_access_failed":  "このディレクトリにアクセスできません",
                  "no_subdirs":  "（サブディレクトリなし）",
                  "dir_load_failed":  "読み込みに失敗しました",
+                 "new_folder":  "新しいフォルダー",
+                 "new_folder_placeholder":  "新しいフォルダー名を入力",
+                 "new_folder_empty":  "フォルダー名を入力してください",
+                 "new_folder_ok":  "フォルダーを作成しました",
                  "please_enter_dir":  "先にディレクトリに入ってください",
                  "no_projects_empty":  "プロジェクトがありません。上方の「フォルダを開く」または「新しいプロジェクト」をクリック",
                  "recent_projects":  "最近のプロジェクト",

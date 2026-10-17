@@ -28,6 +28,7 @@ import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -163,12 +164,27 @@ class TerminalGateShellSessionTest {
         TerminalGate gate = new TerminalGate(System.getProperty("java.io.tmpdir"));
         String banner = gate.windowsBanner();
         assertNotNull(banner, "banner 采集失败（超时/异常）不应在 Windows 上发生");
-        assertTrue(banner.contains("Microsoft Windows"), "首行应为版本行: " + banner);
+        assertTrue(banner.startsWith("Microsoft Windows"), "首行应为版本行: " + banner);
         assertTrue(banner.endsWith("\n"), "banner 应以换行收尾便于与后续输出拼接");
+        // 形状契约（前端去重判据的同口径锁）：恰两行、第二行非空。
+        // 前端 app-terminal.js 的 isWindowsBanner 以「版本行开头+恰两行+换行收尾」
+        // 识别重连补发帧；后端切片若漂移成单行/三行，前端会静默失配（banner 叠回
+        // 缓冲或误吞用户输出），而仅 contains 的旧断言抓不到这类漂移。
+        int nlCount = 0;
+        for (int i = 0; i < banner.length(); i++) {
+            if (banner.charAt(i) == '\n') nlCount++;
+        }
+        assertEquals(2, nlCount, "banner 必须恰两行（前端去重判据同口径）: " + banner);
+        assertNotEquals('\n', banner.charAt(banner.length() - 2),
+                "第二行不得为空（后端切片要求 idx2>idx+1）: " + banner);
         // 中文 Windows 上裸 cmd 横幅按系统代码页（GBK）输出：硬编码 UTF-8 解码会把
         // 「版本/版权所有」解成替换符乱码（用户实测首帧乱码），解码必须走 OutputDecoder 兜底
         assertFalse(banner.indexOf('\uFFFD') >= 0, "banner 不得含替换符（GBK 误按 UTF-8 解码）: " + banner);
-        assertTrue(banner.contains("版本"), "中文系统横幅应正确解出「版本」: " + banner);
+        // 措辞断言必须 locale 无关：版本行措辞随系统语言（中文「版本」/英文「Version」），
+        // 硬编码单一语种会让英文 locale 机器恒红（实测定罪）；防乱码已由上方
+        // U+FFFD 断言覆盖，此处只锁「第二行是版权行」这一语种无关锚点。
+        assertTrue(banner.contains("Microsoft Corporation"),
+                "第二行应为版权行（locale 无关锚点）: " + banner);
         // 缓存幂等：二次调用同值（不重复起进程）
         assertEquals(banner, gate.windowsBanner());
     }

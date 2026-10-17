@@ -17,6 +17,15 @@
         "unsupported":  "Remote connection requires the desktop app",
 
         "saved_hosts":  "Recent connections",
+        "step_settings":  "Connection",
+        "step_connecting":  "Connecting",
+        "step_directory":  "Select Folder",
+        "minimize":  "Minimize",
+        "entry_connecting":  "Connecting…",
+        "connect_another":  "Connect Another",
+        "host_edit":  "Edit",
+        "close_confirm_connecting":  "Connecting to the remote host. Stop and close?",
+        "close_confirm_connected":  "Connected but no folder selected yet. Leave now? (The connection is kept; you can pick a folder later.)",
 
         "no_saved_hosts":  "No saved hosts yet",
 
@@ -523,6 +532,9 @@
                                         "risk_high":  "High Risk",
                                         "risk_medium":  "Medium Risk",
                                         "no_match":  "No matching tools found",
+                                        "exempt_dirs_label":  "bash exempt directories (one per line)",
+                                        "exempt_dirs_desc":  "Under default permissions, bash reading or writing outside the current project requires approval. Register directories here when build outputs or shared caches must live outside the project.",
+                                        "exempt_dirs_note":  "The exemption applies to both reads and writes; high-risk operations such as recursive deletion or privilege escalation still require approval. Build caches and temp directories are already exempt.",
                                         "tool":  {
                                                      "bash_desc":  "Shell command execution",
                                                      "read_desc":  "Read file content",
@@ -1088,6 +1100,10 @@
                  "dir_access_failed":  "Cannot access this directory",
                  "no_subdirs":  "(No subdirectories)",
                  "dir_load_failed":  "Load failed",
+                 "new_folder":  "New Folder",
+                 "new_folder_placeholder":  "Enter new folder name",
+                 "new_folder_empty":  "Please enter a folder name",
+                 "new_folder_ok":  "Folder created",
                  "please_enter_dir":  "Please enter a directory first",
                  "no_projects_empty":  "No projects yet. Click \"Open Folder\" or \"New Project\" above",
                  "recent_projects":  "Recent Projects",

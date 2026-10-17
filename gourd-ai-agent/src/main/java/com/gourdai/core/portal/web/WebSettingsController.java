@@ -278,6 +278,17 @@ public class WebSettingsController {
      * <p>tools 为允许白名单（支持通配，如 {@code **}、{@code mcp__*}），留空等价于放开全部；
      * disallowedTools 为禁用黑名单。保存后通过 engine.allowToolReset / disallowToolReset 热更新，
      * 引擎会重建主 Agent 即时生效，无需重启。</p>
+     *
+     * <p>{@code bashExemptDirs} 是 bash 访问的额外豁免目录（<b>读写都豁免</b>；工作区之外仍可直接读写、
+     * 不弹审批的位置）。它的保存口径与上面两项<b>刻意不同</b>：</p>
+     * <ul>
+     *   <li><b>只在该键存在时才更新</b>：前端只改工具黑名单时不会带这个键，
+     *       若无条件清空会把用户已配的豁免目录抹掉。这是「部分提交」接口的必需语义。</li>
+     *   <li><b>不做路径合法性校验</b>：非法或环境变量不存在的条目由
+     *       {@code BashPathGuard.resolveExemptDirs} 在解析时静默忽略。少一项豁免只会让判定
+     *       <b>更严</b>（多弹一次审批），不会造成越权；反之因为一个拼错的目录就拒绝保存，
+     *       会让用户卡在设置页里出不来。</li>
+     * </ul>
      */
     @Post
     @Mapping("/web/settings/permission/save")
@@ -304,8 +315,28 @@ public class WebSettingsController {
         // 热更新到引擎（会重建主 Agent 即时生效）
         engine.disallowToolReset(settings.getPermission().getDisallowedTools());
 
+        // bash 读写豁免目录：仅当本次提交带了这个键才更新（部分提交不得抹掉已有配置）
+        boolean exemptDirsUpdated = false;
+        if (root.hasKey("bashExemptDirs") && root.get("bashExemptDirs").isArray()) {
+            List<String> exemptDirs = new ArrayList<>();
+            for (ONode item : root.get("bashExemptDirs").getArray()) {
+                String v = item.getString();
+                if (Assert.isNotEmpty(v) && exemptDirs.contains(v.trim()) == false) {
+                    exemptDirs.add(v.trim());
+                }
+            }
+
+            settings.getPermission().getBashExemptDirs().clear();
+            settings.getPermission().getBashExemptDirs().addAll(exemptDirs);
+
+            // 热更新：只替换策略内部字段，不重建 Agent（不打断正在跑的会话）
+            engine.bashExemptDirsReset(exemptDirs);
+            exemptDirsUpdated = true;
+        }
+
         saveSettings();
-        LOG.info("[Settings] Permission updated: disallowedTools={}", disallowedTools);
+        LOG.info("[Settings] Permission updated: disallowedTools={}, bashExemptDirs={}",
+                disallowedTools, exemptDirsUpdated ? settings.getPermission().getBashExemptDirs() : "(unchanged)");
         return Result.succeed();
     }
 

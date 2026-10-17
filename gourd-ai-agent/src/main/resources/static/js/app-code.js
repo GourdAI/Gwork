@@ -798,91 +798,227 @@
         return parts.length ? ('?' + parts.join('&')) : '';
     }
 
-    function openDirPicker(onPick, scopeQ) {
-        var state = { current: '', parent: null, sep: '\\' };
+    /* 新建目录（【不登记为项目】）：POST /web/chat/projects/mkdir
+       WHY 不用 /projects/create：create 末尾 return add(...) 会把新目录登记进项目列表，
+       而目录浏览器里的「新建文件夹」是【导航途中】动作（用户往往只是建个中间层目录再
+       往里进）。沿用 create 会每建一层就往工作区下拉塞一条垃圾项目条目；远端场景更糟——
+       登记写进远端 projects.json，本地列表扇出拉取后冒出一堆无意义的远端项目。
+       登记仍由用户最终「选定此目录」触发（调用方的 add 分支）。
+       scopeQ 必须与 browse 用同一个：在哪台机器上浏览，就在哪台机器上建。 */
+    function mkdirRequest(parent, name, scopeQ) {
+        return new Promise(function (resolve) {
+            $.ajax({
+                url: '/web/chat/projects/mkdir' + browseQuery('', scopeQ),
+                method: 'POST', contentType: 'application/json',
+                data: JSON.stringify({ parent: parent, name: name })
+            }).done(function (resp) {
+                /* Solon Result：失败也是 HTTP 200，业务码在 body.code（与 add 分支同口径）。
+                   description 是后端给的中文原因（「目录已存在」「目录名包含非法字符」），
+                   原样透传比统一文案更有用——用户能立刻知道该改什么。 */
+                if (resp && resp.code === 200) resolve({ path: (resp.data && resp.data.path) || '' });
+                else resolve({ error: (resp && resp.description) || GourdI18n.t('code.create_failed') });
+            }).fail(function () { resolve({ error: GourdI18n.t('code.dir_load_failed') }); });
+        });
+    }
 
-        var html = ''
+    /* ================= 目录浏览器渲染核（弹窗 / 向导内嵌 两态共用） =================
+       WHY 抽取：远程连接向导要把「选远端目录」做成向导的最后一步、内嵌进同一个弹窗
+       （对标 ZCode：连接成功后弹窗不关闭、就地推进到 directory 步并内嵌目录树）。
+       若向导另写一份目录浏览器，两处必然漂移——新建文件夹、竞态守卫、scope 归属
+       任一改动都会漏掉一边（这类「同一缺陷的两个副本」在本仓已反复出现）。
+
+       host  : 容器元素（innerHTML 会被整体覆盖；调用方负责其可见性与尺寸）
+       opts  : { scopeQ, onPick(path), onCancel(), showCancel, autoBrowse, autoFocusMkdir }
+       返回  : { browse(path), pick(), currentPath(), destroy() }，供宿主（向导）驱动步骤切换
+       注意  : 一切 DOM 查找都限定在 host 内（querySelector），不用 getElementById——
+               内嵌态与弹窗态可能同时存在于文档中，全局 id 查找会串到另一个实例。 */
+    function renderDirBrowserInto(host, opts) {
+        opts = opts || {};
+        var scopeQ = opts.scopeQ || '';
+        /* reqId：请求竞态守卫。快速连点目录时较早的 browse 可能后返回，
+           过期响应会覆盖最新导航状态（列表与路径框不一致、甚至选中错目录）。
+           单调递增，回包时比对，不等即丢弃。 */
+        var state = { current: '', parent: null, sep: '\\', reqId: 0, creating: false, alive: true };
+
+        var ICON_UP = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>';
+        var ICON_DIR = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+
+        host.innerHTML = ''
             + '<div class="dir-picker">'
             + '  <div class="dir-picker-bar">'
-            + '    <button class="dir-picker-up" id="dpUp" title="' + GourdI18n.t('code.go_up') + '">'
-            + '      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>'
-            + '    </button>'
-            + '    <input type="text" class="dir-picker-path" id="dpPath" placeholder="' + GourdI18n.t('code.current_dir') + '" />'
-            + '    <button class="dir-picker-go" id="dpGo">' + GourdI18n.t('code.go') + '</button>'
+            + '    <button type="button" class="dir-picker-up" data-act="up" title="' + GourdI18n.t('code.go_up') + '">' + ICON_UP + '</button>'
+            + '    <input type="text" class="dir-picker-path" data-role="path" placeholder="' + GourdI18n.t('code.current_dir') + '" />'
+            + '    <button type="button" class="dir-picker-go" data-act="go">' + GourdI18n.t('code.go') + '</button>'
+            /* 新建文件夹：与「前往」同一视觉语言（复用 .dir-picker-go 基类 + 附加类），
+               放在工具栏而非右键菜单——本仓没有右键菜单组件，工具栏按钮可发现性也更好。 */
+            + '    <button type="button" class="dir-picker-go dir-picker-mkdir" data-act="mkdir">' + GourdI18n.t('code.new_folder') + '</button>'
             + '  </div>'
-            + '  <div class="dir-picker-list" id="dpList"></div>'
+            + '  <div class="dir-picker-list" data-role="list"></div>'
             + '  <div class="dir-picker-foot">'
             + '    <span class="dir-picker-hint">' + GourdI18n.t('code.select_dir_hint') + '</span>'
             + '    <div class="dir-picker-actions">'
-            + '      <button class="btn-secondary" id="dpCancel">' + GourdI18n.t('code.cancel') + '</button>'
-            + '      <button class="btn-primary" id="dpChoose">' + GourdI18n.t('code.select_this_dir') + '</button>'
+            + (opts.showCancel === false
+                ? ''
+                : '      <button type="button" class="btn-secondary" data-act="cancel">' + GourdI18n.t('code.cancel') + '</button>')
+            + '      <button type="button" class="btn-primary" data-act="choose">' + GourdI18n.t('code.select_this_dir') + '</button>'
             + '    </div>'
             + '  </div>'
             + '</div>';
 
-        var idx = layer.open({
-            type: 1, title: GourdI18n.t('code.select_project_dir'), area: ['520px', '520px'], skin: 'kd-layer',
-            content: html,
-            success: function (layero) {
-                var $list = layero.find('#dpList');
-                var $path = layero.find('#dpPath');
+        var $list = host.querySelector('[data-role="list"]');
+        var $path = host.querySelector('[data-role="path"]');
 
-                function browse(p) {
-                    $list.html('<div class="dir-picker-loading">' + GourdI18n.t('code.dir_loading') + '</div>');
-                    $.get('/web/chat/projects/browse' + browseQuery(p, scopeQ), function (resp) {
-                        if (!resp || resp.code !== 200) {
-                            $list.html('<div class="dir-picker-empty">' + GourdI18n.t('code.dir_access_failed') + '</div>');
-                            return;
-                        }
-                        var d = resp.data || {};
-                        state.current = d.current || '';
-                        state.parent = d.parent;
-                        state.sep = d.separator || '\\';
-                        $path.val(state.current);
-                        var dirs = d.dirs || [];
-                        var h = '';
-                        if (dirs.length === 0) {
-                            h = '<div class="dir-picker-empty">' + GourdI18n.t('code.no_subdirs') + '</div>';
-                        } else {
-                            for (var i = 0; i < dirs.length; i++) {
-                                h += '<div class="dir-picker-item" data-path="' + escAttr(dirs[i].path) + '">'
-                                    + '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
-                                    + '<span class="dir-picker-item-name">' + escHtml(dirs[i].name) + '</span>'
-                                    + '</div>';
-                            }
-                        }
-                        $list.html(h);
-                    }).fail(function () {
-                        $list.html('<div class="dir-picker-empty">' + GourdI18n.t('code.dir_load_failed') + '</div>');
-                    });
-                }
+        function toast(msg, type) {
+            if (typeof showToast === 'function') showToast(msg, type || 'error');
+        }
 
-                // 进入子目录（单击）
-                $list.on('click', '.dir-picker-item', function () {
-                    browse($(this).attr('data-path'));
-                });
-                // 上一级
-                layero.find('#dpUp').on('click', function () {
-                    browse(state.parent || ''); // parent 为空回到起点（盘符列表）
-                });
-                // 手动前往
-                layero.find('#dpGo').on('click', function () {
-                    var v = $path.val().trim();
-                    if (v) browse(v);
-                });
-                $path.on('keydown', function (e) { if (e.key === 'Enter') { var v = $path.val().trim(); if (v) browse(v); } });
-                // 选定 / 取消
-                layero.find('#dpChoose').on('click', function () {
-                    if (!state.current) { if (typeof showToast === 'function') showToast(GourdI18n.t('code.please_enter_dir'), 'error'); return; }
-                    layer.close(idx);
-                    onPick(state.current);
-                });
-                layero.find('#dpCancel').on('click', function () { layer.close(idx); });
-
-                browse(''); // 起点
+        function renderItems(dirs) {
+            if (!state.alive) return;
+            if (!dirs.length) {
+                $list.innerHTML = '<div class="dir-picker-empty">' + GourdI18n.t('code.no_subdirs') + '</div>';
+                return;
             }
+            var h = '';
+            for (var i = 0; i < dirs.length; i++) {
+                h += '<div class="dir-picker-item" data-path="' + escAttr(dirs[i].path) + '">'
+                    + ICON_DIR
+                    + '<span class="dir-picker-item-name">' + escHtml(dirs[i].name) + '</span>'
+                    + '</div>';
+            }
+            $list.innerHTML = h;
+        }
+
+        function browse(p) {
+            if (!state.alive) return;
+            var reqId = ++state.reqId;
+            $list.innerHTML = '<div class="dir-picker-loading">' + GourdI18n.t('code.dir_loading') + '</div>';
+            $.get('/web/chat/projects/browse' + browseQuery(p, scopeQ), function (resp) {
+                if (!state.alive || reqId !== state.reqId) return;   // 过期响应：丢弃
+                if (!resp || resp.code !== 200) {
+                    $list.innerHTML = '<div class="dir-picker-empty">' + GourdI18n.t('code.dir_access_failed') + '</div>';
+                    return;
+                }
+                var d = resp.data || {};
+                state.current = d.current || '';
+                state.parent = d.parent;
+                state.sep = d.separator || '\\';
+                $path.value = state.current;
+                renderItems(d.dirs || []);
+            }).fail(function () {
+                if (!state.alive || reqId !== state.reqId) return;
+                $list.innerHTML = '<div class="dir-picker-empty">' + GourdI18n.t('code.dir_load_failed') + '</div>';
+            });
+        }
+
+        /* 内联新建：在列表最前插入一行输入框（不打断浏览上下文，也不另开弹窗）。
+           回车/确定 = 提交；Esc/取消 = 收起。提交成功后【进入】新目录而不是仅刷新——
+           用户新建目录的下一步几乎总是要往里面放东西或选它，进入一层省一次点击。 */
+        function beginCreate() {
+            if (state.creating) return;
+            if (!state.current) {
+                /* 起点态（Windows 盘符列表）没有 current，无处可建：明确告知而不是静默失败 */
+                toast(GourdI18n.t('code.please_enter_dir'));
+                return;
+            }
+            state.creating = true;
+            var row = document.createElement('div');
+            row.className = 'dir-picker-mkdir-row';
+            row.innerHTML = '<input type="text" class="dir-picker-mkdir-input" data-role="mkdir-input" '
+                + 'placeholder="' + escAttr(GourdI18n.t('code.new_folder_placeholder')) + '" autocomplete="off" spellcheck="false" />'
+                + '<button type="button" class="btn-primary" data-act="mkdir-ok">' + GourdI18n.t('code.confirm') + '</button>'
+                + '<button type="button" class="btn-secondary" data-act="mkdir-no">' + GourdI18n.t('code.cancel') + '</button>';
+            $list.insertBefore(row, $list.firstChild);
+            var input = row.querySelector('[data-role="mkdir-input"]');
+
+            function endCreate() {
+                state.creating = false;
+                if (row.parentNode) row.parentNode.removeChild(row);
+            }
+
+            function submit() {
+                var name = (input.value || '').trim();
+                if (!name) { toast(GourdI18n.t('code.new_folder_empty')); return; }
+                input.disabled = true;
+                mkdirRequest(state.current, name, scopeQ).then(function (r) {
+                    if (!state.alive) return;
+                    input.disabled = false;
+                    if (r.error) { toast(r.error); return; }
+                    endCreate();
+                    toast(GourdI18n.t('code.new_folder_ok'), 'success');
+                    /* 进入新目录：优先用后端回传的规范路径（含大小写/分隔符归一），
+                       缺失时用浏览响应里的 sep 本地拼接兜底。 */
+                    var target = r.path || (state.current.replace(/[\/\\]+$/, '') + (state.sep || '/') + name);
+                    browse(target);
+                });
+            }
+
+            row.querySelector('[data-act="mkdir-ok"]').addEventListener('click', submit);
+            row.querySelector('[data-act="mkdir-no"]').addEventListener('click', endCreate);
+            input.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') { e.preventDefault(); submit(); }
+                else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); endCreate(); }
+            });
+            if (opts.autoFocusMkdir !== false && typeof input.focus === 'function') input.focus();
+        }
+
+        function pick() {
+            if (!state.current) { toast(GourdI18n.t('code.please_enter_dir')); return false; }
+            if (typeof opts.onPick === 'function') opts.onPick(state.current);
+            return true;
+        }
+
+        /* 事件委托挂在 host 上（而非逐个按钮绑定）：内联新建行是动态插入的，
+           委托才能覆盖它的按钮；也避免重渲染后监听器丢失。 */
+        host.addEventListener('click', function (e) {
+            if (!state.alive) return;
+            var t = e.target;
+            var actEl = t.closest ? t.closest('[data-act]') : null;
+            var item = t.closest ? t.closest('.dir-picker-item') : null;
+            if (item && !actEl) { browse(item.getAttribute('data-path')); return; }
+            if (!actEl) return;
+            var act = actEl.getAttribute('data-act');
+            if (act === 'up') browse(state.parent || '');
+            else if (act === 'go') { var v = ($path.value || '').trim(); if (v) browse(v); }
+            else if (act === 'mkdir') beginCreate();
+            else if (act === 'choose') pick();
+            else if (act === 'cancel') { if (typeof opts.onCancel === 'function') opts.onCancel(); }
+        });
+        $path.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { var v = ($path.value || '').trim(); if (v) browse(v); }
+        });
+
+        if (opts.autoBrowse !== false) browse('');   // 起点：Windows=盘符列表，Unix=用户主目录
+        return {
+            browse: browse,
+            pick: pick,
+            currentPath: function () { return state.current; },
+            destroy: function () { state.alive = false; host.innerHTML = ''; }
+        };
+    }
+
+    /* 目录选择器弹窗（薄壳）：复用上面的渲染核，只负责 layer 弹窗的生命周期。
+       签名与行为保持不变（onPick(path)、scopeQ 路由归属），既有调用点零改动。
+       注意：弹窗与向导内嵌态可能同时存在，故渲染核内部一律用 host.querySelector，
+       不用 getElementById（全局 id 查找会串到另一个实例）。 */
+    function openDirPicker(onPick, scopeQ) {
+        var browser = null;
+        var idx = layer.open({
+            type: 1, title: GourdI18n.t('code.select_project_dir'), area: ['560px', '520px'], skin: 'kd-layer',
+            content: '<div class="dir-picker-host"></div>',
+            success: function (layero) {
+                var rootEl = (layero && layero[0]) ? layero[0] : layero;
+                var hostEl = rootEl && rootEl.querySelector ? rootEl.querySelector('.dir-picker-host') : null;
+                if (!hostEl) return;
+                browser = renderDirBrowserInto(hostEl, {
+                    scopeQ: scopeQ,
+                    onPick: function (p) { layer.close(idx); if (onPick) onPick(p); },
+                    onCancel: function () { layer.close(idx); }
+                });
+            },
+            end: function () { if (browser) browser.destroy(); }
         });
     }
+
 
     /* declaredScope（可选）：调用方已知的归属。chat 侧栏项目行自己渲染时就拿着
        _scope（确定事实），而本模块的 projects 可能尚未加载（从未进过 code 模式），
@@ -1620,5 +1756,8 @@
     window.removeProjectFromList = removeProject;
     // chat 工作空间选择器复用：目录浏览弹窗 + watch 根登记
     window.openDirPicker = openDirPicker;
+    /* 供远程连接向导内嵌「选目录」步骤：app-remote.js 加载序在本文件之前，只能运行时取用 */
+    window.renderDirBrowserInto = renderDirBrowserInto;
+    window.mkdirRequest = mkdirRequest;
     window.notifyWatchRoot = notifyWatchRoot;
 })();

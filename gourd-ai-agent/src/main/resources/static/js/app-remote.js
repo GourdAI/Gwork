@@ -61,6 +61,30 @@
     var connecting = false;
     var connectingId = null;       // 进行中的连接流程预期 connectionId（进度事件按它过滤防串流）
     var wizardChannel = 'ssh';     // 向导当前通道：ssh | wsl（| preinstalled，受 PREINSTALLED_CHANNEL_ENABLED 屏蔽）
+
+    /* ===== 向导三步流：连接与选目录在【同一个弹窗】内连续推进 =====
+       WHY（用户投诉「人家是连接、选目录一起的，现在你这样每次都得重新连接嘛」）：
+       旧形态是「连接向导 → closeWizard → 下拉底部『打开远程目录』→ 连接选择层 →
+       目录浏览器」四道界面切换、三次弹窗。首次 SSH 连接要在远端部署后端（数十秒），
+       连完弹窗就关，用户得回头找入口再选目录。
+       ZCode 的同类修复注释写得很直白：连接完成后只更新内部步骤而没有重新展示弹窗，
+       用户会停留在其它页面且看不到选目录或失败原因。故连接成功【不关窗】，就地把主体
+       换成内嵌目录树——连接与选目录是同一事务的两半，中间不存在「会话悬空」窗口期。
+       step 从 settings 起（不设独立 kind 步）：通道选择本就是 settings 里的一排 tab，
+       再拆一步只是多一次点击；且不拆可让 renderWizard 的表单绑定始终有宿主元素，
+       避免「kind 步下 #remoteConnectBtn 不存在 → 绑定抛错」这类真实回归。 */
+    var wizardStep = 'settings';      // settings | connecting | directory
+    var wizardMinimized = false;      // 收起态：非破坏（不取消连接、不清日志、不释放会话）
+    var wizardConnId = null;          // 已连上、等待选目录的 connectionId
+    var wizardHostLabel = '';         // directory 步顶栏展示的主机名（user@host）
+    /* 用户已在「连接中」确认过「停止并关闭」：在途的 remoteConnect Promise 之后仍会
+       resolve，成功分支若无此闸会 add('open')+renderWizard 把向导【复活自动弹出】
+       （codereview 2026-10-15 P1：关闭承诺被在途 Promise 击穿）。doConnect 起始复位、
+       destroyWizardFlow 置真，成功分支据此跳过拉回弹窗（连接本身是注册表资产，照旧登记）。 */
+    var wizardCancelled = false;
+    var embeddedBrowser = null;       // directory 步内嵌的目录浏览器（renderDirBrowserInto 返回）
+    var WIZARD_STEPS = ['settings', 'connecting', 'directory'];
+
     /* WSL 发行版缓存（P2-D 注释修正）：null = 尚未拉取（首次切到 WSL 页签时去拉），
        [] = 拉过了但没可用发行版——此时**不是隐藏 WSL 页签**（页签可见性只由
        win32 决定），而是下拉里展示「未发现 WSL 发行版」并让连接前的必填校验拦住。
@@ -303,6 +327,27 @@
 
     /* ================= 连接流程 ================= */
 
+    /* 已保存主机一键直连：按通道组 cfg，敏感字段留空交给 Rust 侧 autofill_secret
+       从 OS 凭据库回填（用户勾过「记住密码」才回得来）。未记住 → 认证失败，日志区
+       明示原因，用户点「编辑」补密码重试；绝不静默失败，也不假装连上了。 */
+    function connectSavedHost(h) {
+        if (!h) return;
+        var ch = effectiveChannel(h);
+        var cfg = (ch === 'wsl')
+            ? { channel: 'wsl', host: h.host, user: h.user }
+            : {
+                channel: ch, host: h.host, user: h.user, port: h.port || 22,
+                authType: h.authType || 'password',
+                password: '', keyPath: h.keyPath || '', passphrase: '',
+                rememberSecret: true   // 直连成功后刷新凭据库时间线（不改变是否记住的既有事实）
+            };
+        wizardChannel = ch;
+        /* 先渲染一次让表单/日志区存在（doConnect 要往 #remoteConnectLog 写行）。
+           日志区显形不必在此补丁：doConnect 进入 connecting 步时集中 applyWizardStep。 */
+        renderWizard();
+        doConnect(cfg);
+    }
+
     function logLine(text) {
         var box = document.getElementById('remoteConnectLog');
         if (!box) return;
@@ -404,8 +449,18 @@
             return;
         }
         connecting = true;
+        wizardCancelled = false;   // 新一轮连接：撤销上一轮的「已确认关闭」标记
         var logBox = document.getElementById('remoteConnectLog');
         if (logBox) logBox.innerHTML = '';
+        /* 进入 connecting 步：表单转只读（用户要看到自己在连哪台，故不隐藏）、
+           日志区显形。收起后此状态保留（minimize 非破坏），入口显示「连接中」。
+           【施态统一走 applyWizardStep】（codereview 2026-10-15 P1）：旧实现只手动加
+           is-busy 而不显日志区，而 applyWizardStep 只在 renderWizard 末尾跑——主连接
+           路径（点「连接」按钮）不重渲染，日志区全程 display:none，连接进度与失败原因
+           完全不可见；connectSavedHost 里那行 logBox0 显形只是直连路径的补丁。此处集中
+           施态后，所有进入 connecting 的路径（主按钮/直连/forget 后重连）都可见日志。 */
+        wizardStep = 'connecting';
+        applyWizardStep();
         var isWsl = cfg.channel === 'wsl';
         logLine(isWsl
             ? GourdI18n.t('remote.connecting_wsl', { distro: cfg.host, user: cfg.user })
@@ -427,12 +482,44 @@
             });
             saveHosts(hosts.slice(0, 8));
             applyConnection(outcome);
-            closeWizard();
+            /* 【连接成功不关窗】就地推进到 directory 步，把主体换成内嵌目录树：
+               连接与选目录是同一事务的两半，中间不存在「会话悬空」窗口期。
+               旧实现在这里 closeWizard()，用户得回工作区下拉找「打开远程目录」再选一次
+               ——即「每次都得重新连接」体感的直接来源。 */
+            wizardConnId = (outcome && outcome.connectionId) || null;
+            wizardHostLabel = hostLabelOf(outcome || {});
+            if (wizardConnId) {
+                wizardStep = 'directory';
+                /* 用户已在连接途中确认「停止并关闭」：不得再把向导拉回来（关闭承诺），
+                   但连接本身照旧登记进注册表——它是资产，用户稍后可从工作区下拉的
+                   「打开远程目录」继续用它选目录，不浪费这次成功。 */
+                if (!wizardCancelled) {
+                    /* 向导被收起过（用户去干别的事了）：连接完成必须把它拉回来，否则用户
+                       停在别的页面、既看不到选目录也看不到成功（ZCode 同类修复的原因）。 */
+                    wizardMinimized = false;
+                    var el2 = wizardEl();
+                    if (el2) el2.classList.add('open');
+                    renderWizard();
+                }
+            } else {
+                destroyWizardFlow();   // 无 connectionId（异常态）：不留半死流程
+            }
         }, function (err) {
             connecting = false;
             connectingId = null;
             logLine('──────────────────────────────');
             logLine(GourdI18n.t('remote.connect_failed'));
+            /* 失败【回 settings 步但保留日志】：表单恢复可编辑（能改完直接重试），
+               同时日志区因 logHasContent() 为真而继续展示（用户能看到失败原因）。
+               停在 connecting 步会让表单锁在只读态，用户改不了配置只能关掉重来。 */
+            if (wizardStep === 'connecting') {
+                wizardStep = 'settings';
+                /* 集中施态：恢复表单可编辑观感（去 is-busy）+ 步骤类回 settings +
+                   日志区因 logHasContent() 为真继续展示（用户要看到失败原因）。
+                   与 doConnect 起始同一入口，避免「施态逻辑两个副本」漂移。 */
+                applyWizardStep();
+                refreshRemoteEntryIndicator();
+            }
             var msg = (err && err.message) ? err.message : String(err);
             logLine(msg);
             /* 主机密钥校验失败（服务器换钥/中间人防御拒绝）：给出「忘记该主机」
@@ -537,17 +624,222 @@
         if (el) el.classList.remove('open');
     }
 
+    /* 重开恢复步骤：流程活跃（正在连接 / 已连接未选目录）→ 恢复到当前步，不从头再来；
+       空闲 → 从 settings 开始。这让「收起后点入口回来」是无缝的，也正是消灭
+       「每次都得重新连接」体感的关键一环。 */
     function openWizard() {
         var el = wizardEl();
         if (!el) return;
+        if (!wizardFlowActive() && wizardStep !== 'settings') wizardStep = 'settings';
+        wizardMinimized = false;
         el.classList.add('open');
         renderWizard();
+        refreshRemoteEntryIndicator();
     }
 
     function channelTabLabel(key) {
         if (key === 'wsl') return GourdI18n.t('remote.channel_wsl');
         if (key === 'preinstalled') return GourdI18n.t('remote.channel_preinstalled');
         return GourdI18n.t('remote.channel_ssh');
+    }
+
+    /* ================= 向导三步流：步骤条 / 收起 / 关闭 / 入口指示器 ================= */
+
+    /* 步骤名映射：【显式字面量键】而非 'remote.step_' + s 拼接。
+       WHY：i18n 键必须静态可提取——契约测试用正则从源码派生引用键（漏译会在 CI 暴露），
+       未来新增语言包与翻译工具同样依赖字面量扫描。拼接写法会让派生结果变成假键
+       `step_`（既误报缺译，又掩盖真实的 3 个键未被任何工具发现＝必然漏译）。 */
+    function stepLabel(step) {
+        if (step === 'settings') return GourdI18n.t('remote.step_settings');
+        if (step === 'connecting') return GourdI18n.t('remote.step_connecting');
+        return GourdI18n.t('remote.step_directory');
+    }
+
+    /* 步骤条：已走过的步可点回退（如从 directory 退回 settings 改配置）。
+       回退【不断开已建立的连接】：物理连接由 Rust 侧注册表持有（可能被别的工作区
+       引用计数共用），断开有专门入口（远程徽标菜单 / doDisconnect），不该被「上一步」误触。 */
+    function stepsHtml() {
+        var cur = WIZARD_STEPS.indexOf(wizardStep);
+        var h = '<div class="remote-steps">';
+        for (var i = 0; i < WIZARD_STEPS.length; i++) {
+            var s = WIZARD_STEPS[i];
+            var cls = i === cur ? ' active' : (i < cur ? ' done' : '');
+            h += '<div class="remote-step' + cls + '"' + (i < cur ? ' data-goto="' + s + '"' : '') + '>'
+                + '<span class="remote-step-idx">' + (i + 1) + '</span>'
+                + '<span class="remote-step-name">' + esc(stepLabel(s)) + '</span></div>';
+            if (i < WIZARD_STEPS.length - 1) h += '<div class="remote-step-line' + (i < cur ? ' done' : '') + '"></div>';
+        }
+        return h + '</div>';
+    }
+
+    /* 收起（minimize）与关闭（close）是两条语义不同的通道：
+       - 收起：只隐藏弹窗。不取消进行中的连接、不清日志、不重置步骤、不释放已连接会话；
+         侧栏「远程连接」入口显示【连接中】指示器，点它回到同一向导的当前步骤。
+       - 关闭：破坏性。正在连接 / 已连接未选目录时需二次确认（文案不同），确认后清流程。
+       WHY 必须分开：首次连接耗时数十秒，若只有一种「关掉」且它不保状态，用户为了去干
+       别的事就得付重连代价；若关掉又静默保状态，用户则无从判断会话何时真正释放。 */
+    function minimizeWizard() {
+        wizardMinimized = true;
+        var el = wizardEl();
+        if (el) el.classList.remove('open');
+        refreshRemoteEntryIndicator();
+    }
+
+    /* 关闭前的确认判据（纯函数，可脱离 DOM 单测）：返回需确认的原因，null = 可直接关 */
+    function wizardCloseReason(step, connId, loading) {
+        if (loading) return 'connecting';                        // 正在连接：确认「停止连接」
+        if (step === 'directory' && connId) return 'connected';  // 已连接未选目录：确认「离开已连接会话」
+        return null;
+    }
+
+    function requestCloseWizard() {
+        var reason = wizardCloseReason(wizardStep, wizardConnId, !!connecting);
+        if (!reason) { destroyWizardFlow(); return; }
+        var msg = reason === 'connecting'
+            ? GourdI18n.t('remote.close_confirm_connecting')
+            : GourdI18n.t('remote.close_confirm_connected');
+        /* layConfirm 签名是 (msg, yesFn, noFn)，无自定义按钮文案参数 → 把动作名写进正文，
+           按钮仍是站点统一的「确定/取消」（保持视觉一致，不为一个弹窗破例改公共组件）。
+           【不得退回裸 window.confirm】桌面端规约禁止原生弹窗（会阻塞事件循环且样式割裂），
+           而 layConfirm 内部在拿不到 layer 时已自行降级到 fallbackConfirm（自绘遮罩），
+           故这里无需、也不应再写一层原生兜底——写了就是既违规又冗余的死分支。 */
+        window.layConfirm(msg, function () { destroyWizardFlow(); }, function () {});
+    }
+
+    /* 结束向导流程：清步骤与内嵌实例，但【不断开已建立的连接】——连接是注册表里的资产
+       （可能被别的工作区引用计数持有），用户只是不再选目录而已。 */
+    function destroyWizardFlow() {
+        if (embeddedBrowser) { try { embeddedBrowser.destroy(); } catch (e) {} embeddedBrowser = null; }
+        /* 在途连接的成功分支据此放弃拉回弹窗（见 wizardCancelled 声明处注释）。
+           注意只闸「弹窗复活」，不闸连接登记：连接是注册表资产，不因关窗而作废。 */
+        wizardCancelled = true;
+        wizardConnId = null;
+        wizardHostLabel = '';
+        wizardStep = 'settings';
+        wizardMinimized = false;
+        closeWizard();
+        refreshRemoteEntryIndicator();
+    }
+
+    /* 流程是否活跃（= 有正在跑的连接，或有已连上但还没选目录的会话）。
+       与 ZCode 同口径：loading || Boolean(connectedSessionId)。 */
+    function wizardFlowActive() {
+        return !!connecting || (wizardStep === 'directory' && !!wizardConnId);
+    }
+
+    /* 侧栏「远程连接」入口的【连接中】指示器：向导被收起但流程仍活跃时点亮，
+       让用户知道「有个连接在跑，点我能回去看」。入口按钮由 renderDropdown 动态渲染，
+       故 connections-changed / 重渲染后都要重刷（refreshRemoteEntryIndicator 幂等）。 */
+    function refreshRemoteEntryIndicator() {
+        var btns = document.querySelectorAll('.workspace-remote-btn');
+        var on = wizardMinimized && wizardFlowActive();
+        for (var i = 0; i < btns.length; i++) {
+            btns[i].classList.toggle('is-connecting', on);
+            if (on) btns[i].setAttribute('data-connecting-label', GourdI18n.t('remote.entry_connecting'));
+            else btns[i].removeAttribute('data-connecting-label');
+        }
+    }
+
+    /* 日志区是否有内容（决定重渲染后是否保持可见：切步不该把已产生的日志藏起来，
+       否则用户回到弹窗就看不到刚才的失败原因） */
+    function logHasContent() {
+        var box = document.getElementById('remoteConnectLog');
+        return !!(box && box.childNodes && box.childNodes.length > 0);
+    }
+
+    /* 按当前 step 施加可见性/可交互态。表单 DOM 始终存在（renderWizard 一次性渲染），
+       这里只切换展示——避免「某步缺元素 → 绑定 querySelector 返回 null → 抛错」。 */
+    function applyWizardStep() {
+        var el = wizardEl();
+        if (!el) return;
+        var panel = el.querySelector('.remote-wizard-panel');
+        var body = el.querySelector('.remote-wizard-body');
+        var logBox = document.getElementById('remoteConnectLog');
+        if (panel) panel.classList.toggle('step-' + wizardStep, true);
+        for (var i = 0; i < WIZARD_STEPS.length; i++) {
+            if (panel && WIZARD_STEPS[i] !== wizardStep) panel.classList.remove('step-' + WIZARD_STEPS[i]);
+        }
+        if (body) {
+            /* directory 步：表单整体让位给内嵌目录树（表单只是隐藏，值仍在，
+               用户点步骤条回退即可继续改配置，不必重填） */
+            body.style.display = (wizardStep === 'directory') ? 'none' : '';
+            /* connecting 步：表单可见但只读（用户要看到自己在连哪台），焦点交给日志区 */
+            body.classList.toggle('is-busy', wizardStep === 'connecting');
+        }
+        if (logBox) {
+            var showLog = (wizardStep === 'connecting' || wizardStep === 'directory' || logHasContent());
+            logBox.style.display = showLog ? 'block' : 'none';
+        }
+        /* directory 步：挂载内嵌目录浏览器（只挂一次；重渲染后 embeddedBrowser 仍在则复用其容器）。
+           【挂载点必须是专设容器 #remoteDirHost 而非 stepBody 本身】（codereview 2026-10-15 P1）：
+           渲染核首行 host.innerHTML='' 会整体覆盖宿主——挂 stepBody 会把与它同批渲染的
+           成功横幅（.remote-dir-ok，含「连接另一台」按钮）一起清掉，用户核心诉求入口
+           在 DOM 里不可达；横幅是 stepBody 的前置兄弟节点，挂内层容器才两全。 */
+        var stepBody = el.querySelector('#remoteStepBody');
+        if (stepBody) stepBody.style.display = (wizardStep === 'directory') ? 'block' : 'none';
+        var hostWrap = el.querySelector('#remoteDirHost');
+        if (wizardStep === 'directory' && hostWrap && !embeddedBrowser) mountEmbeddedBrowser(hostWrap);
+    }
+
+    /* 内嵌目录浏览器：复用 app-code.js 的渲染核（window.renderDirBrowserInto）。
+       WHY 复用而非另写一份：新建文件夹、竞态守卫、scope 归属任一改动都会漏掉一边
+       （「同一缺陷的两个副本」在本仓已反复出现）。
+       app-remote.js 加载序在 app-code.js 之前（bootstrap APP_SCRIPTS），故只能运行时取用，
+       且必须做存在性守卫：浏览器直开/code 模式未初始化时降级为「用弹窗式选择器」。 */
+    function mountEmbeddedBrowser(host) {
+        var rid = wizardConnId;
+        if (!rid) return;
+        var scopeQ = '&__scope=id:' + encodeURIComponent(rid);
+        var onPicked = function (picked) { finishWizardWithDir(rid, picked); };
+        if (typeof window.renderDirBrowserInto !== 'function') {
+            /* 降级：渲染核不可用（app-code.js 未加载）→ 退回既有弹窗式选择器，
+               功能不缺，只是多一次弹窗（比白屏/无入口好） */
+            if (typeof window.openDirPicker === 'function') {
+                window.openDirPicker(onPicked, scopeQ);
+                destroyWizardFlow();
+            }
+            return;
+        }
+        embeddedBrowser = window.renderDirBrowserInto(host, {
+            scopeQ: scopeQ,
+            showCancel: false,       // 向导有自己的收起/关闭，内嵌层不必再来一个取消
+            onPick: onPicked,
+            onCancel: function () { destroyWizardFlow(); }
+        });
+    }
+
+    /* 选定目录 → 登记为该连接的工作区 → 选中 → 关窗。
+       与 app-workspace.js 的 workspace-remote-open-btn 分支同一口径（登记必须带
+       __scope=id:<选定连接>，且临时 _scope 记录写【选定那台】而非 activeId——
+       两台同时在线时二者不同，写错会让该目录后续读写跳到另一台机器）。 */
+    function finishWizardWithDir(rid, picked) {
+        if (!picked) return;
+        var $ = window.jQuery || window.$;
+        if (!$ || typeof $.ajax !== 'function') { destroyWizardFlow(); return; }
+        $.ajax({
+            url: '/web/chat/projects/add?__scope=id:' + encodeURIComponent(rid),
+            method: 'POST', contentType: 'application/json',
+            data: JSON.stringify({ path: picked })
+        }).done(function (resp) {
+            /* Solon Result：失败也是 HTTP 200，业务码在 body.code（不校验会静默选中一个
+               后端不存在的路径）。失败时【不关窗】，让用户看到原因并可重选。 */
+            if (resp && resp.code !== 200) {
+                if (typeof showToast === 'function') showToast(resp.description || GourdI18n.t('code.add_failed_no_dir'), 'error');
+                return;
+            }
+            /* 补临时 _scope 记录：notifyProjectsChanged 触发的重拉是异步的，紧接着的
+               selectChatWorkspace → scopeOfPath 查的是旧缓存（还没有这条），会回 null。 */
+            if (typeof window.__gourdRegisterRemoteProject === 'function') {
+                try { window.__gourdRegisterRemoteProject(picked, rid); } catch (e) {}
+            }
+            if (typeof window.notifyProjectsChanged === 'function') { try { window.notifyProjectsChanged(); } catch (e) {} }
+            if (typeof window.applyChatWorkspace === 'function') {
+                try { window.applyChatWorkspace(picked); } catch (e) {}
+            }
+            destroyWizardFlow();
+        }).fail(function () {
+            if (typeof showToast === 'function') showToast(GourdI18n.t('code.dir_access_failed'), 'error');
+        });
     }
 
     /* ===== layui select 托管（WSL 发行版下拉，与定时任务「推送通道」同范式） =====
@@ -602,6 +894,10 @@
             hostHtml += '<div class="remote-host-item" data-i="' + i + '">'
                 + '<div class="remote-host-info"><div class="remote-host-name">' + esc(nameText) + '</div>'
                 + '<div class="remote-host-meta">' + esc(metaText) + '</div></div>'
+                /* 直连为主、编辑为次：主行点击直接发起连接，铅笔按钮才回填表单。
+                   编辑按钮必须排在 remove 之前且带独立类——两个图标按钮同在一行，
+                   共用类会让 stopPropagation 的判定分不清用户点的是哪个。 */
+                + '<button type="button" class="remote-host-edit" data-i="' + i + '" title="' + esc(GourdI18n.t('remote.host_edit')) + '"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg></button>'
                 + '<button class="remote-host-remove" data-i="' + i + '" title="' + esc(GourdI18n.t('remote.remove_host')) + '"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>'
                 + '</div>';
         }
@@ -694,15 +990,33 @@
                 + '<button class="remote-connect-btn" id="remoteConnectBtn">' + esc(GourdI18n.t('remote.connect_btn')) + '</button>';
         }
 
+        /* 面板外壳：head（标题 + 收起 + 关闭）→ 步骤条 → body（表单）→ #remoteStepBody
+           （directory 步的内嵌目录树容器）→ 日志区。
+           【收起按钮刻意不复用关闭按钮那个类名】：renderWizard 末尾按该类名取
+           第一个元素来绑定「关闭」，若收起按钮也带同类且排在前面，就会命中收起按钮
+           → 关闭逻辑被绑错（真实回归）。另注：注释里不写该选择器的完整代码形态，
+           因为它同时是契约测试的切片锚点，自匹配会让切片提前截断（本仓已踩三次）。 */
         el.innerHTML =
             '<div class="remote-wizard-panel">'
             + '<div class="remote-wizard-head"><span>' + esc(GourdI18n.t('remote.title')) + '</span>'
-            + '<button class="remote-wizard-close" title="' + esc(GourdI18n.t('app.close')) + '"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>'
+            + '<div class="remote-wizard-head-acts">'
+            + '<button type="button" class="remote-wizard-min" title="' + esc(GourdI18n.t('remote.minimize')) + '"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>'
+            + '<button type="button" class="remote-wizard-close" title="' + esc(GourdI18n.t('app.close')) + '"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>'
+            + '</div></div>'
+            + stepsHtml()
             + '<div class="remote-wizard-body">'
             + (hostHtml ? '<div class="remote-section-label">' + esc(GourdI18n.t('remote.saved_hosts')) + '</div><div class="remote-host-list">' + hostHtml + '</div>' : '')
             + '<div class="remote-section-label">' + esc(GourdI18n.t('remote.new_connection')) + '</div>'
             + tabsHtml
             + '<div id="remoteChannelBody">' + bodyHtml + '</div>'
+            + '</div>'
+            + '<div class="remote-wizard-stepbody" id="remoteStepBody" style="display:none">'
+            + (wizardStep === 'directory'
+                ? '<div class="remote-dir-ok"><span>' + esc(GourdI18n.t('remote.connected_ok')) + '</span>'
+                  + (wizardHostLabel ? '<span class="remote-dir-host">' + esc(wizardHostLabel) + '</span>' : '')
+                  + '<button type="button" class="remote-dir-another" data-act="another">' + esc(GourdI18n.t('remote.connect_another')) + '</button></div>'
+                  + '<div class="remote-dir-host-wrap" id="remoteDirHost"></div>'
+                : '')
             + '</div>'
             + '<div class="remote-connect-log" id="remoteConnectLog" style="display:none"></div>'
             + '</div>';
@@ -820,7 +1134,39 @@
             });
         }
 
-        el.querySelector('.remote-wizard-close').addEventListener('click', closeWizard);
+        /* 关闭走确认闸门（连接中 / 已连接未选目录 需二次确认），不再直接 closeWizard */
+        el.querySelector('.remote-wizard-close').addEventListener('click', requestCloseWizard);
+        var minBtn = el.querySelector('.remote-wizard-min');
+        if (minBtn) minBtn.addEventListener('click', minimizeWizard);
+
+        /* 步骤条回退：已走过的步可点（回退不断开连接，见 stepsHtml 注释） */
+        el.querySelectorAll('.remote-step[data-goto]').forEach(function (s) {
+            s.addEventListener('click', function () {
+                var target = s.getAttribute('data-goto');
+                if (!target || target === wizardStep) return;
+                /* 从 directory 退回 settings 时销毁内嵌实例（否则重进时容器已被清空
+                   而 embeddedBrowser 仍指向旧对象 → 再点「选定此目录」无效）。
+                   连接本身保留：wizardConnId 不清，回退只是改配置/看一眼。 */
+                if (embeddedBrowser) { try { embeddedBrowser.destroy(); } catch (e) {} embeddedBrowser = null; }
+                wizardStep = target;
+                renderWizard();
+            });
+        });
+
+        /* directory 步的「连接另一台」：用户投诉「远程工作空间在这打开，那我想再连接
+           别的远程工作空间不是不行了嘛」。这里回到 settings 步去连第二台，而【已连上的
+           那台连接保持存活】（connectionsById 注册表持有，与向导生命周期无关）——
+           它的目录随时可从工作区下拉的「打开远程目录」再选。 */
+        var anotherBtn = el.querySelector('.remote-dir-another');
+        if (anotherBtn) {
+            anotherBtn.addEventListener('click', function () {
+                if (embeddedBrowser) { try { embeddedBrowser.destroy(); } catch (e) {} embeddedBrowser = null; }
+                wizardConnId = null;
+                wizardHostLabel = '';
+                wizardStep = 'settings';
+                renderWizard();
+            });
+        }
         el.querySelector('#remoteConnectBtn').addEventListener('click', function () {
             if (wizardChannel === 'wsl') {
                 var distro = pendingDistro || ((el.querySelector('#remoteDistro') && el.querySelector('#remoteDistro').value) || '').trim();
@@ -877,11 +1223,27 @@
             });
         });
 
-        /* 已保存主机快选 */
+        /* 已保存主机：【一键直连】+ 次级「编辑」入口。
+           WHY 改：旧实现点击只是把字段回填进表单，用户还得再点一次「连接」——
+           而密码框每次都是空的（savedHosts 不存敏感字段），所以体感是
+           「每次都得重新连接」。现在点击直接发起连接：勾过「记住密码」的主机
+           由 Rust 侧 autofill_secret 从 OS 凭据库回填，全程零输入；没勾过的会在
+           日志区收到认证失败，此时用户点「编辑」回到表单补密码即可（不静默、不误导）。 */
         el.querySelectorAll('.remote-host-item').forEach(function (item) {
             item.addEventListener('click', function (e) {
                 if (e.target.closest('.remote-host-remove')) return;
+                if (e.target.closest('.remote-host-edit')) return;   // 编辑分支另有监听
                 var h = savedHosts()[parseInt(item.getAttribute('data-i'), 10)];
+                if (!h) return;
+                connectSavedHost(h);   // 一键直连（不再只回填表单）
+            });
+        });
+        /* 次级「编辑」入口：把字段回填进表单供修改（端口/认证方式变了、或需要补密码时用） */
+        el.querySelectorAll('.remote-host-edit').forEach(function (btn) {
+            btn.addEventListener('click', function (e) {
+                e.stopPropagation();
+                var item = btn.closest('.remote-host-item');
+                var h = item ? savedHosts()[parseInt(item.getAttribute('data-i'), 10)] : null;
                 if (!h) return;
                 wizardChannel = effectiveChannel(h);
                 renderWizard();
@@ -912,6 +1274,11 @@
                 renderWizard();
             });
         });
+
+        /* 最后施加步骤态（必须放在所有绑定之后：applyWizardStep 只改可见性，
+           而 directory 步会把 body 隐藏——若先隐藏再绑定，表单元素虽仍在 DOM
+           但语义上易被误改；顺序统一为「先绑定后施态」更安全） */
+        applyWizardStep();
     }
 
     /* 连接进度事件（Rust 推送）：方案B 起载荷带 connectionId（契约 §1.3），
@@ -1244,6 +1611,10 @@
 
     /* 供外部（workspace 按钮）打开向导 */
     window.openRemoteWizard = openWizard;
+    /* 工作区下拉是动态渲染的（renderDropdown 每次重建按钮），重建后指示器类名会丢，
+       故暴露刷新入口供其渲染完调用；幂等，可安全重复调。 */
+    window.refreshRemoteEntryIndicator = refreshRemoteEntryIndicator;
+    window.__GOURD_REMOTE_WIZARD_ACTIVE__ = wizardFlowActive;
     window.disconnectRemote = doDisconnect;
     window.remoteActiveOutcome = function () { return activeConnection; };
 

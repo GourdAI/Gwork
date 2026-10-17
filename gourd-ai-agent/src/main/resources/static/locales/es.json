@@ -17,6 +17,15 @@
         "unsupported":  "La conexión remota requiere la aplicación de escritorio",
 
         "saved_hosts":  "Conexiones recientes",
+        "step_settings":  "Conexión",
+        "step_connecting":  "Conectando",
+        "step_directory":  "Elegir carpeta",
+        "minimize":  "Minimizar",
+        "entry_connecting":  "Conectando…",
+        "connect_another":  "Conectar otra",
+        "host_edit":  "Editar",
+        "close_confirm_connecting":  "Conectando al host remoto. ¿Detener y cerrar?",
+        "close_confirm_connected":  "Conectado pero sin carpeta seleccionada. ¿Salir ahora? (La conexión se mantiene.)",
 
         "no_saved_hosts":  "Aún no hay equipos guardados",
 
@@ -523,6 +532,9 @@
                                         "risk_high":  "Riesgo alto",
                                         "risk_medium":  "Riesgo medio",
                                         "no_match":  "No se encontraron herramientas coincidentes",
+                                        "exempt_dirs_label":  "Directorios exentos de bash (uno por línea)",
+                                        "exempt_dirs_desc":  "Con los permisos predeterminados, que bash lea o escriba fuera del proyecto actual requiere aprobación. Registre aquí los directorios si los artefactos de compilación o las cachés compartidas deben estar fuera del proyecto.",
+                                        "exempt_dirs_note":  "La exención se aplica tanto a lecturas como a escrituras; las operaciones de alto riesgo, como el borrado recursivo o la escalada de privilegios, siguen requiriendo aprobación. Las cachés de compilación y los directorios temporales ya están exentos.",
                                         "tool":  {
                                                      "bash_desc":  "Ejecución de comandos Shell",
                                                      "read_desc":  "Leer contenido de archivos",
@@ -1088,6 +1100,10 @@
                  "dir_access_failed":  "No se puede acceder al directorio",
                  "no_subdirs":  "(Sin subdirectorios)",
                  "dir_load_failed":  "Error al cargar",
+                 "new_folder":  "Nueva carpeta",
+                 "new_folder_placeholder":  "Introduce el nombre de la nueva carpeta",
+                 "new_folder_empty":  "Introduce un nombre de carpeta",
+                 "new_folder_ok":  "Carpeta creada",
                  "please_enter_dir":  "Por favor, entra primero en un directorio",
                  "no_projects_empty":  "Aún no hay proyectos, haz clic en「Abrir carpeta」o「Nuevo proyecto」arriba",
                  "recent_projects":  "Proyectos recientes",

@@ -3052,6 +3052,30 @@ public class WebController {
         return projectService.create(parent, name);
     }
 
+    /**
+     * 新建目录（<b>不登记为项目</b>）：供目录浏览器「新建文件夹」使用。
+     *
+     * <p>为何不复用 {@code /projects/create}：create 末尾会调 add 把新目录登记进项目列表，
+     * 而目录浏览器的新建是<b>导航途中</b>动作（建中间层目录再往里进），沿用 create 会每建一层
+     * 就往工作区下拉塞一条垃圾项目条目。远端场景下该登记还会写进远端 projects.json，
+     * 本地列表扇出后出现一堆无意义远端项目。</p>
+     *
+     * <p>走 {@code __scope} 分流（Rust 侧 route_for 按 query 参数选上游），因此带上
+     * {@code __scope=id:<rid>} 即在远端 mkdir；不声明则落激活兜底，语义与其它 projects 端点一致。</p>
+     */
+    @Post
+    @Mapping("/web/chat/projects/mkdir")
+    public Result<Map> projectMkdir(@Body String body) {
+        String parent = null;
+        String name = null;
+        if (body != null && !body.trim().isEmpty()) {
+            ONode json = ONode.ofJson(body);
+            parent = json.get("parent").getString();
+            name = json.get("name").getString();
+        }
+        return projectService.mkdir(parent, name);
+    }
+
     /** 消息队列文件操作工具 */
     private final QueueFileHelper queueHelper = new QueueFileHelper();
 

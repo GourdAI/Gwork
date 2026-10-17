@@ -156,6 +156,8 @@ public class Configurator {
                 .mcpRetries(settings.getGeneral().getModelRetries())
                 .toolsAdd(settings.getPermission().getTools())
                 .disallowedToolsAdd(settings.getPermission().getDisallowedTools())
+                // bash 读写豁免目录：让「构建产物在工作区外」的项目不必整档切到完全访问
+                .bashExemptDirsAdd(settings.getPermission().getBashExemptDirs())
                 .cacheControl(CacheControl.ofEphemeral())
                 .build();
 

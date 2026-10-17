@@ -120,6 +120,14 @@ class HarnessOptions implements Serializable {
     private ContextCompressionInterceptor compressionInterceptor;
     private StopLoopInterceptor stopLoopInterceptor;
     private HITLInterceptor hitlInterceptor;
+    /**
+     * bash 访问的额外豁免目录（读写都豁免；来自 settings.json 的 {@code permission.bashExemptDirs}）。
+     *
+     * <p>存<b>字面量</b>而不存解析后的 Path：环境变量可能在运行期变化，且展开口径只在
+     * {@code BashPathGuard.resolveExemptDirs} 里有一份实现。用 {@code CopyOnWriteArrayList}
+     * 保证并发读不会看到「已清空但尚未填充」的中间态（本策略实例被多个会话线程共用）。</p>
+     */
+    private final List<String> bashExemptDirs = new CopyOnWriteArrayList<>();
     private AskUserInterceptor askUserInterceptor;
     private MemorySolutionProvider memoryProvider;
     private SkillProvider skillProvider;
@@ -574,6 +582,24 @@ class HarnessOptions implements Serializable {
 
     void setHitlInterceptor(HITLInterceptor hitlInterceptor) {
         this.hitlInterceptor = hitlInterceptor;
+    }
+
+    /**
+     * bash 读写豁免目录（活引用）。
+     *
+     * <p>返回内部集合本身而非拷贝：设置页保存后需要就地替换内容，
+     * 并让已构造的 {@code HitlStrategy} 看到新值（热更新、无需重启）。
+     * 用 {@code CopyOnWriteArrayList} 保证并发读不会看到「已清空但尚未填充」的中间态。</p>
+     */
+    public List<String> getBashExemptDirs() {
+        return bashExemptDirs;
+    }
+
+    void setBashExemptDirs(Collection<String> dirs) {
+        this.bashExemptDirs.clear();
+        if (dirs != null) {
+            this.bashExemptDirs.addAll(dirs);
+        }
     }
 
     AskUserInterceptor getAskUserInterceptor() {
