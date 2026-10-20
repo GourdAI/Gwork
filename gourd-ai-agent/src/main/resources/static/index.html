@@ -193,8 +193,9 @@
      body 级 fixed 贴顶行右端、原生窗口按钮左侧：不放进 .titlebar-drag-region，
      因为该拖拽条在 skills 视图与浏览器 code 模式会被整体隐藏（skills.css:52 /
      code.css:323），塞进去的按钮会随之消失。右偏移由 app-titlebar-actions.js
-     按平台运行时计算（Tauri 自绘控件 138px / Electron 原生 overlay 不可覆盖 /
-     mac 红绿灯在左不占右侧），CSS 只给无桌面壳浏览器的缺省值。 -->
+     按平台运行时计算（Tauri 自绘控件条 102px，注入脚本暴露总宽 /
+     Electron 原生 overlay 不可覆盖退 138 / mac 红绿灯在左不占右侧），
+     CSS 只给无桌面壳浏览器的缺省值。 -->
 <div class="titlebar-actions" id="titlebarActions">
     <button class="titlebar-action-btn" id="titlebarTerminalBtn" type="button" data-i18n-title="code.terminal.title" aria-pressed="false">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/></svg>

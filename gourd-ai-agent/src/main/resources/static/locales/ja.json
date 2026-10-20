@@ -5,7 +5,11 @@
 
         "group_empty":  "プロジェクトなし（接続オンライン）",
 
-        "badge_count":  "{n}",
+        "group_add":  "ワークスペースを追加",
+
+        "group_actions":  "接続アクション",
+
+        "group_add_down":  "接続オフライン",
 
         "pick_connection":  "リモート接続を選択",
     "connect_in_progress": "接続処理が進行中です。しばらくお待ちください",
@@ -86,8 +90,6 @@
         "remove_host":  "削除",
 
         "badge":  "リモート",
-
-        "badge_title":  "リモートワークスペース: {host}（クリックでリモートメニュー）",
 
         "mirror_sync_menu":  "モデル設定をリモートへ同期",
 

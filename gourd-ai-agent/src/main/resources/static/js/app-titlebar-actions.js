@@ -18,17 +18,23 @@
 
     // ---------- 右偏移：避让窗口按钮 ----------
     /* 顶行右端被窗口控件占据，宽度按壳分流：
-       - Tauri（Win/Linux）：自绘控件层 3×46=138px（titlebar_ui.rs BTN_W*3）；
-       - Electron（Win/Linux）：原生 titleBarOverlay 同尺寸，且不可覆盖、无横向预留；
+       - Tauri（Win/Linux）：自绘控件条总宽由注入脚本暴露为
+         window.__GOURD_TITLEBAR_STRIP_W__（3×30 + 2×2 gap + 2×4 padding = 102），
+         按钮与左侧动作组同款 chip（titlebar_ui.rs）；
+       - Electron（Win/Linux）：原生 titleBarOverlay 不可覆盖、无横向预留，
+         固定 3×46=138；注入变量不存在时同样退回 138 兜底；
        - mac：红绿灯在左上角，右侧无控件；
        - 浏览器直连：无窗口按钮。
        Tauri 与 Electron 复用同一 is-electron 类（ipc_bridge.rs 对齐），故只需再判 is-mac。
-       144 = 138 控件宽 + 6px 视觉间距。 */
+       +6px 为两组控件之间的视觉间距。 */
     function applyRightOffset() {
         var right = 6;
         try {
             var b = document.body;
-            if (b.classList.contains('is-electron') && !b.classList.contains('is-mac')) right = 144;
+            if (b.classList.contains('is-electron') && !b.classList.contains('is-mac')) {
+                var strip = window.__GOURD_TITLEBAR_STRIP_W__;
+                right = (typeof strip === 'number' && strip > 0 ? strip : 138) + 6;
+            }
         } catch (e) { /* classList 不可用时退回 CSS 缺省值 */ }
         actions.style.setProperty('--titlebar-actions-right', right + 'px');
     }

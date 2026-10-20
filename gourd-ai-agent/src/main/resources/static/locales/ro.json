@@ -5,7 +5,11 @@
 
         "group_empty":  "Fără proiecte (conexiune online)",
 
-        "badge_count":  "{n}",
+        "group_add":  "Adaugă spațiu de lucru",
+
+        "group_actions":  "Acțiuni conexiune",
+
+        "group_add_down":  "Conexiune offline",
 
         "pick_connection":  "Alege conexiunea la distanță",
     "connect_in_progress": "O conexiune este deja în curs, așteptați puțin",
@@ -86,8 +90,6 @@
         "remove_host":  "Elimină",
 
         "badge":  "La distanță",
-
-        "badge_title":  "Spațiu de lucru remote: {host} (click pentru meniul remote)",
 
         "mirror_sync_menu":  "Sincronizează configul modelelor spre remote",
 

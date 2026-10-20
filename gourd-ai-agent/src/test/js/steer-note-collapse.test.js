@@ -16,7 +16,7 @@
  *   并打 data-steer-collapse-pending，由 steerCollapseRemeasure 入真实容器后补测校正；
  *   去重守卫仍最优先）
  * - 折叠口径：CSS 限高必须是 calc(可见行数 × 行高em) 形态，系数取自源码常量
- *   STEER_COLLAPSE_VISIBLE_LINES，行高/字号取自 app.css 真实规则（14px × 1.75 = 24.5px/行）
+ *   STEER_COLLAPSE_VISIBLE_LINES，行高/字号取自 app.css 真实规则（13px × 1.75 = 22.75px/行）
  * - 源码形态：废弃的独立事件卡写法（.steer-note-text / .steer-note-attachments /
  *   insertBeforeActions(sess, note)）不得回归；window 导出（appendSteerNote /
  *   steerCollapseApply / steerCollapseRemeasure）对完整源码断言
@@ -109,8 +109,8 @@ function createSteerSandbox(opts) {
     const env = {
         existingSteerIds: opts.existingSteerIds || [],
         textScrollHeight: opts.textScrollHeight != null ? opts.textScrollHeight : 0,
-        /* 真实口径：.msg-row.user .msg-bubble 是 14px，.msg-bubble 行高 1.75 → 24.5px/行 */
-        lineHeight: opts.lineHeight || '24.5px',
+        /* 真实口径：.msg-row.user .msg-bubble 是 13px，.msg-bubble 行高 1.75 → 22.75px/行 */
+        lineHeight: opts.lineHeight || '22.75px',
         skipScroll: !!opts.skipScroll,
         detached: !!opts.detached,          // 回放期：落点是游离临时容器
         inDocument: opts.inDocument !== false,
@@ -430,7 +430,7 @@ test('appendSteerNote：折叠按钮只建一个（重复 apply 不叠加）', (
 });
 
 test('appendSteerNote：字符数超限但视觉不足 5 行时不折叠（高度校正口径）', () => {
-    /* 24.5px/行 × 5 行 = 122.5px；60px 只有约 2.4 行，属超长单行 token 的形态 */
+    /* 22.75px/行 × 5 行 = 113.75px；60px 只有约 2.6 行，属超长单行 token 的形态 */
     const h = createSteerSandbox({ textScrollHeight: 60 });
     h.api.appendSteerNote(h.sess, { steerId: 'st3', text: 'x'.repeat(400) });
     const row = h.getLastRow();
@@ -470,7 +470,7 @@ test('steerCollapseRemeasure：入真实容器后补测——视觉不足则撤�
     h.api.appendSteerNote(h.sess, { steerId: 'st9', text: text });
     const row = h.getLastRow();
     assert.ok((row.className || '').includes('collapsed'));
-    h.env.textScrollHeight = 49;      // 24.5 × 2 = 49px，确实不足 5 行
+    h.env.textScrollHeight = 45.5;    // 22.75 × 2 = 45.5px，确实不足 5 行
     row.removeAttribute('data-steer-collapse-pending');
     h.api.steerCollapseRemeasure(row);
     assert.ok(!(row.className || '').includes('collapsed'), '补测判定视觉不足必须撤销折叠');
@@ -626,7 +626,7 @@ test('app.css：气泡列布局 + 徽标胶囊 + 折叠限高 + 按钮；旧 gri
 
 test('app.css 折叠限高：calc(可见行数 × 行高em)，口径取自真实 CSS 规则与源码常量', () => {
     /* 旧断言写死 max-height: 104px 并「证明」它等于 5 × 13 × 1.6，
-       而 13px 字号 / 1.6 行高在 app.css 里根本不存在（气泡是 14px / 1.75）——
+       而 13px 字号 / 1.6 行高这个组合在 app.css 里根本不存在（气泡是 13px / 1.75）——
        那是把伪证算式当成契约。现在口径全部从真实源码提取。 */
     const bubbleRule = cssRule(appCss, '.msg-bubble');
     const userBubbleRule = cssRule(appCss, '.msg-row.user .msg-bubble');
@@ -637,7 +637,7 @@ test('app.css 折叠限高：calc(可见行数 × 行高em)，口径取自真实
     assert.ok(lineH > 0, '.msg-bubble 必须声明 line-height');
     assert.ok(fontPx > 0, '.msg-row.user .msg-bubble 必须声明 font-size');
     const pxPerLine = fontPx * lineH;
-    assert.equal(pxPerLine, 24.5, '真实行高 = 14px × 1.75 = 24.5px/行');
+    assert.equal(pxPerLine, 22.75, '真实行高 = 13px × 1.75 = 22.75px/行');
 
     // 限高必须是 calc(N × Xem) 形态，N 与源码常量、X 与真实行高逐一对齐
     const maxH = cssDecl(collapsedRule, 'max-height');
@@ -663,9 +663,14 @@ test('app.css 折叠限高：calc(可见行数 × 行高em)，口径取自真实
 
     // 沙箱与源码注释也必须写真实口径，避免测试环境用一套行高、产品用另一套
     assert.equal(createSteerSandbox().env.lineHeight, pxPerLine + 'px',
-        '沙箱默认 lineHeight 必须等于真实行高 24.5px');
-    assert.ok(message.indexOf('24.5px/行') >= 0, 'app-message.js 的折叠说明必须写真实口径（24.5px/行）');
+        '沙箱默认 lineHeight 必须等于真实行高 22.75px');
+    assert.ok(message.indexOf('22.75px/行') >= 0, 'app-message.js 的折叠说明必须写真实口径（22.75px/行）');
     assert.ok(message.indexOf('5 × 1.75em') >= 0, 'app-message.js 的折叠说明必须写 calc 同口径（5 × 1.75em）');
+    /* app.css 折叠注释块也必须写真实口径：2026-10 自审抓到过「行为层已改 13px、
+       注释仍写 14px/24.5px」的漂移——注释是后人改字号时的第一参照， drift 会
+       误导人按旧值「还原」。数值从真实规则推导而非写死，字号再改时断言自动跟随。 */
+    assert.ok(appCss.indexOf(pxPerLine + 'px/行') >= 0,
+        'app.css 折叠限高注释必须写真实行高口径（' + pxPerLine + 'px/行），不得残留旧字号算式');
 });
 
 test('12 个语言包均提供 steer_expand_full（含 {0}）、steer_collapse、steer_tag', () => {

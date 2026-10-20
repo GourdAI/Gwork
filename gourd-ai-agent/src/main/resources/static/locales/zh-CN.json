@@ -5,7 +5,11 @@
 
         "group_empty":  "暂无项目（连接在线）",
 
-        "badge_count":  "{n} 台",
+        "group_add":  "添加工作空间",
+
+        "group_actions":  "连接操作",
+
+        "group_add_down":  "连接已离线，无法添加",
 
         "pick_connection":  "选择远程连接",
     "connect_in_progress": "已有连接正在进行中，请稍候",
@@ -86,8 +90,6 @@
         "remove_host":  "移除",
 
         "badge":  "远程",
-
-        "badge_title":  "远程工作区：{host}（点击打开远程菜单）",
 
         "mirror_sync_menu":  "同步模型配置到远程",
 

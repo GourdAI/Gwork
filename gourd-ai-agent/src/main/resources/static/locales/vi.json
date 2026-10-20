@@ -5,7 +5,11 @@
 
         "group_empty":  "Chưa có dự án (kết nối trực tuyến)",
 
-        "badge_count":  "{n}",
+        "group_add":  "Thêm không gian làm việc",
+
+        "group_actions":  "Thao tác kết nối",
+
+        "group_add_down":  "Kết nối ngoại tuyến",
 
         "pick_connection":  "Chọn kết nối từ xa",
     "connect_in_progress": "Đã có một kết nối đang được thực hiện, vui lòng chờ",
@@ -86,8 +90,6 @@
         "remove_host":  "Xóa",
 
         "badge":  "Từ xa",
-
-        "badge_title":  "Không gian làm việc từ xa: {host} (nhấp để mở menu từ xa)",
 
         "mirror_sync_menu":  "Đồng bộ cấu hình mô hình sang máy từ xa",
 

@@ -150,7 +150,7 @@
        （与徽标同根，P2-C 已修过一次）。 */
     var hostLabelByConnection = Object.create(null);
 
-    /* 展示名口径与徽标一致（refreshRemoteBadge L659）：user@host，无 user 则只 host。
+    /* 展示名口径全站统一：user@host，无 user 则只 host。
        WSL 通道 host 字段存的是发行版名，同样成立。 */
     function hostLabelOf(outcome) {
         if (!outcome) return '';
@@ -200,7 +200,6 @@
             try { connChangeListeners[i](detail); } catch (e) {}
         }
         window.dispatchEvent(new CustomEvent('remote:connections-changed', { detail: detail }));
-        if (typeof window.refreshRemoteBadge === 'function') window.refreshRemoteBadge();
     }
     function setActiveId(id) {
         activeIdStored = id || null;
@@ -1411,66 +1410,13 @@
        clearReconnectFor(target)（见其函数体），旧版在此处另包一层 wrap 重复同一调用，
        属纯冗余（wrap 与直接调用不可区分），已删除。 */
 
-    /* ================= 远程状态徽标（P4 补齐 P1 缺口） =================
-       P1 只在 app-remote.js 里调 refreshRemoteBadge(o) 却从未定义它（DOM 注入器
-       不存在，CSS 类闲置）——徽标从未真正渲染过。本轮补全。
-
-       注入位置（P2-B 修正）：侧栏头部右侧（.sidebar-header-top，就是 logo 行右边
-       那个 space-between 的空槽）。为什么不是输入框托盘（composer-tray）：
-       1) 托盘只存在于欢迎页，进入对话后（消息视图）徒子都没；
-       2) 托盘在 code 模式整体隐藏，而远程连接对 code 模式同样生效；
-       3) 侧栏头部是两种模式、两种页面都常驻的 chrome 区，与“当前运行环境”这种
-          全局状态的语义对齐。 */
-
-    /* 徽标多连接化（契约 §2.4）：1 条在线 = 现状文案「远程 · label」；
-       ≥2 条 = 「远程 · N」+ data-multi，点击展开按连接分组的菜单。
-       无参调用 = 按注册表全量重渲染（connections-changed 事件驱动）。 */
-    window.refreshRemoteBadge = function (outcome) {
-        var old = document.getElementById('remoteStateBadge');
-        var list = connEntries();
-        if (!list.length) {
-            if (old) old.remove();
-            return;
-        }
-        var anchor = document.querySelector('.sidebar-header-top');
-        if (!old && !anchor) {
-            /* 侧栏头部还没装配（启动早期/片段加载失败）：本次不渲染，不静默失败——
-               下一个 remote:connected / 启动恢复会重试。挂 body 上的旧写法就是
-               这样“渲染了但看不见”的根因。 */
-            return;
-        }
-        if (!old) {
-            old = document.createElement('button');
-            old.id = 'remoteStateBadge';
-            old.type = 'button';
-            old.className = 'remote-badge';
-            anchor.appendChild(old);
-        }
-        var multi = list.length > 1;
-        if (multi) old.setAttribute('data-multi', 'true');
-        else old.removeAttribute('data-multi');
-        var primary = (activeIdStored && connectionsById[activeIdStored]) ? connectionsById[activeIdStored] : connectionsById[list[0].connectionId];
-        var host = hostLabelByConnection[primary.connectionId] || hostLabelOf(primary);
-        var text;
-        if (multi) {
-            text = GourdI18n.t('remote.badge') + ' · ' + GourdI18n.t('remote.badge_count', { n: list.length });
-        } else {
-            text = GourdI18n.t('remote.badge') + ' · ' + host;
-        }
-        old.innerHTML = '<span class="remote-badge-dot"></span><span class="remote-badge-text"></span>'
-            + (multi ? '<span class="remote-badge-count">' + esc(String(list.length)) + '</span>' : '');
-        old.querySelector('.remote-badge-text').textContent = text;
-        old.title = multi
-            ? list.map(function (c) { return c.label; }).join(' / ')
-            : GourdI18n.t('remote.badge_title', { host: host });
-        if (!old._menuBound) {
-            old._menuBound = true;
-            old.addEventListener('click', function (e) {
-                e.stopPropagation();
-                toggleRemoteMenu(old);
-            });
-        }
-    };
+    /* ================= 连接动作菜单（2026-10-16 重构） =================
+       徽标（logo 行右侧「远程 · host」胶囊）已整体下线：产品支持同时连多台远端，
+       单个全局徽标只能报「其中一台/台数」，与侧栏分组树（本地组 + 每连接一组，
+       带在线状态点）信息重复且更弱——连接状态的唯一展现面收敛到分组树。
+       连接级动作（同步模型镜像 / 重连 / 断开）不随之消失：菜单本体保留，
+       入口改挂到分组头的「⋯」按钮（openRemoteConnMenu(anchor, connId)），
+       动作天然落在「哪一台」的上下文里，不再需要菜单内再按连接分组。 */
 
     function ensureRemoteMenu() {
         var m = document.getElementById('remoteMenu');
@@ -1497,31 +1443,17 @@
         }
     }
 
-    /* 菜单按连接分组（契约 §2.4）：每连接一段（状态点 + label + 三动作带 data-conn-id）。
-       单连接时退化为旧平铺三按钮形态（视觉零变化，仍带 data-conn-id）。 */
-    function toggleRemoteMenu(badge) {
+    /* 单连接动作菜单：入口是分组头「⋯」（anchor），动作只针对该连接（data-conn-id）。
+       toggle 语义实现为「菜单开着时本次点击只关不开」（不区分锚点）：关旧菜单的
+       这次点击对 outside handler 而言同样是「点别处」，同事件里再开新菜单会与
+       关闭路径打架（开-关-开闪烁）；菜单关着时点任一「⋯」= 重建内容并锚定定位。 */
+    function openRemoteConnMenu(anchor, connId) {
         var existing = document.getElementById('remoteMenu');
         if (existing) { closeRemoteMenu(); return; }
-        var list = connEntries();
-        if (!list.length) return;
+        if (!connId || !connectionsById[connId]) return;
         var m = ensureRemoteMenu();
-        var html = '';
-        for (var i = 0; i < list.length; i++) {
-            var c = list[i];
-            var st = (c.state === 'connected') ? 'connected' : 'down';
-            if (list.length > 1) {
-                html += '<div class="rbm-conn" data-conn-id="' + esc(c.connectionId) + '">'
-                    + '<div class="rbm-conn-head"><span class="rbm-state-dot" data-state="' + st + '"></span>'
-                    + '<span class="rbm-conn-label">' + esc(c.label) + '</span></div>'
-                    + '<div class="rbm-conn-acts">'
-                    + menuActsHtml()
-                    + '</div></div>';
-            } else {
-                html += '<div class="rbm-conn" data-conn-id="' + esc(c.connectionId) + '">' + menuActsHtml() + '</div>';
-            }
-        }
-        m.innerHTML = html;
-        var rect = badge.getBoundingClientRect();
+        m.innerHTML = '<div class="rbm-conn" data-conn-id="' + esc(connId) + '">' + menuActsHtml() + '</div>';
+        var rect = anchor.getBoundingClientRect();
         m.style.top = (rect.bottom + 6) + 'px';
         m.style.left = Math.max(8, rect.right - 200) + 'px';
         m.addEventListener('click', function (e) {
@@ -1599,18 +1531,15 @@
         closeWizard();
     });
 
-    /* 远程状态徽标（chat 头部）：connected 事件后渲染，disconnected 移除 */
-    document.addEventListener('remote:connected', function (e) {
-        var o = e.detail || {};
+    /* 连接成功提示（徽标已下线：状态展现收敛到侧栏分组树，见 openRemoteConnMenu 注释） */
+    document.addEventListener('remote:connected', function () {
         if (typeof showToast === 'function') showToast(GourdI18n.t('remote.connected_ok'), 'success');
-        if (typeof window.refreshRemoteBadge === 'function') window.refreshRemoteBadge(o);
-    });
-    document.addEventListener('remote:disconnected', function () {
-        if (typeof window.refreshRemoteBadge === 'function') window.refreshRemoteBadge(null);
     });
 
     /* 供外部（workspace 按钮）打开向导 */
     window.openRemoteWizard = openWizard;
+    /* 分组头「⋯」入口：连接级动作菜单（同步镜像/重连/断开） */
+    window.openRemoteConnMenu = openRemoteConnMenu;
     /* 工作区下拉是动态渲染的（renderDropdown 每次重建按钮），重建后指示器类名会丢，
        故暴露刷新入口供其渲染完调用；幂等，可安全重复调。 */
     window.refreshRemoteEntryIndicator = refreshRemoteEntryIndicator;
@@ -1682,7 +1611,12 @@
                 connectionsById[st.connectionId] = st;
                 hostLabelByConnection[st.connectionId] = hostLabelOf(st);
             }
-            /* activeId 恢复：LS 数组里仍在线的第一个（保持用户上次选中环境） */
+            /* activeId 恢复：LS 数组里仍在线的第一个。
+               注意 LS_ACTIVE 的写入语义是「在线连接全集」（三处写入均为
+               Object.keys(connectionsById)），「第一个」只是确定性兜底、【不是】
+               用户上次选中的环境；用户选择的权威置位是 selectChatWorkspace 经
+               __GOURD_REMOTE_SET_ACTIVE__ 同步（选择仍指向该连接时会在选择那一刻
+               把镜像纠正为正确值），此处不得声称「保持用户上次选中环境」。 */
             var restoredActive = null;
             for (var k = 0; k < savedIds.length; k++) {
                 if (connectionsById[savedIds[k]]) { restoredActive = savedIds[k]; break; }

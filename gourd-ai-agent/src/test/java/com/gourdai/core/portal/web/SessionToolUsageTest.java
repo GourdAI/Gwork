@@ -291,7 +291,7 @@ class SessionToolUsageTest {
     @Test
     void nullArgumentsAreTolerated() throws Exception {
         // sessionDir / sessionId 为空：回空态，绝不抛 NPE
-        Map<String, Object> noDir = SessionToolUsageService.usage(null, SESSION_ID);
+        Map<String, Object> noDir = SessionToolUsageService.usage((java.io.File) null, SESSION_ID);
         Assertions.assertEquals(Boolean.FALSE, noDir.get("exists"));
 
         Path dir = writeMessages(assistant("x", call("skillread", "{\"name\":\"s3\"}")));

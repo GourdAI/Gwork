@@ -539,7 +539,11 @@ public class WebStreamBuilder {
             return oneFrame(onToolCallBatchEvent((ToolCallBatchEvent) chunk));
         }
         if (chunk instanceof ToolCallEndEvent) {
-            return oneFrame(onToolCallEndEvent((ToolCallEndEvent) chunk));
+            ToolCallEndEvent endEvent = (ToolCallEndEvent) chunk;
+            // 用量账本：在可见性过滤之前逐次追写工具调用事实（记忆工具被过滤后无 stream 帧，
+            // 账本是「记忆是否更新」的唯一数据源）。失败只降级，绝不影响主映射与推流。
+            recordToolUsageLedger(session, endEvent);
+            return oneFrame(onToolCallEndEvent(endEvent));
         }
         if (chunk instanceof RetryEvent) {
             RetryEvent retry = (RetryEvent) chunk;
@@ -874,6 +878,32 @@ public class WebStreamBuilder {
             batchChunk.setArgs(args);
         }
         return batchChunk;
+    }
+
+    /**
+     * 向会话用量账本追写一条工具调用事实（任务监控「技能调用/记忆更新」的数据源）。
+     *
+     * <p><b>为何挂在这里</b>：mapEvent 是引擎事件到 Web 帧的唯一汇聚点，且本调用位于
+     * {@link WebToolVisibilityPolicy} 过滤之前——记忆工具被过滤后不产生任何 stream 帧，
+     * 若账本挂在过滤之后就永远统计不到记忆写入。</p>
+     *
+     * <p><b>为何用 ToolCallEndEvent</b>：一次调用只落一行（end 携带成败），start 会重复计数；
+     * 失败调用也如实记录（ok=false），统计不得只报喜。</p>
+     */
+    private void recordToolUsageLedger(AgentSession session, ToolCallEndEvent event) {
+        try {
+            SessionStreamStore store = webGate == null ? null : webGate.getStreamStore();
+            if (store == null || session == null) return;
+            String sessionId = session.getSessionId();
+            if (sessionId == null || sessionId.isEmpty()) return;
+            String toolName = event.getToolName();
+            if (toolName == null || toolName.isEmpty()) return;
+            store.recordToolUsage(sessionId, webGate.streamRoot(sessionId), toolName,
+                    event.getError() == null, event.getActionId(), event.getAgentName(),
+                    SessionToolUsageService.skillNameOrNull(event.getArgs(), toolName));
+        } catch (Throwable e) {
+            LOG.debug("[WebStream] record tool usage ledger failed: {}", e.toString());
+        }
     }
 
     /**

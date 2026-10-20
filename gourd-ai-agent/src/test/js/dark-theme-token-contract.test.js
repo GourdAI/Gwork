@@ -21,6 +21,8 @@
  *   （不硬编码「我以为写了什么」），暗色主题零例外 ≥ 4.5
  * - light/indigo 的既有色板偏差显式登记（同 hitl-btn-accent 口径），修好预设应清空
  * - 【第四族】文本口径 hover 前景必须随底色成套（四处 hover 接线 + 明暗派生对比度 ≥ 4.5）
+ * - 【第五族】settings.css 三族复选框勾标前景（::after 的 border 声明）必须 --accent-contrast
+ *   + 非文本口径对比度门禁（既有全站门禁只扫 color 声明，border 声明是盲区）
  * - 反向自检：门禁必须真的在算，样本数与登记表面板不符即判失败
  * - gourd-ai-tauri/ui 发布副本与 static 源同步
  */
@@ -226,7 +228,7 @@ function contrastRatio(fgStr, bgStr, hostStr) {
 const CASES = [
     // [名称, 取文字色的规则, 取底色的规则（同规则即自铺底）, 无底色时的宿主 token]
     ['panelTitle',      '.remote-wizard-panel',      '.remote-wizard-panel',      null,                '--text-primary'],
-    ['badge',           '.remote-badge',             '.remote-badge',             null],
+    /* badge 行 2026-10-16 随徽标整体下线删除（.remote-badge 规则已不存在） */
     ['channelActive',   '.remote-channel-tab.active','.remote-channel-tab.active', null],
     ['authActive',      '.remote-auth-tab.active',   '.remote-auth-tab.active',   null],
     ['connectBtn',      '.remote-connect-btn',       '.remote-connect-btn',       null],
@@ -255,7 +257,7 @@ const KNOWN_BASELINE = {
     'light/indigo/jumpToggle': 4.28,
 };
 
-test('对比度门禁：13 组合 × 5 accent × 2 主题，暗色零例外 ≥ AA 4.5', () => {
+test('对比度门禁：12 组合 × 5 accent × 2 主题，暗色零例外 ≥ AA 4.5', () => {
     const failures = [];
     const samples = [];
     THEMES.forEach((t) => ACCENTS.forEach((ac) => {
@@ -290,22 +292,16 @@ test('对比度门禁：13 组合 × 5 accent × 2 主题，暗色零例外 ≥ 
 });
 
 test('暗色主题下 accent 派生底色必须成套抬升（--accent-light 不能沿用浅色值）', () => {
-    /* .remote-badge 2026-10-11 起改素底胶囊（--bg-hover + --border-color），不再用
-       --accent-light——但「暗色 --accent-light 必须单独赋值」的约定本身仍要守：
-       .sidebar-item.active / .model-dropdown-item.active 等同范式组件还在用它。 */
+    /* .remote-badge 2026-10-16 随徽标整体下线删除（.remote-badge 规则已不存在，
+       原三条底色/文字/描边断言随之退役）——但「暗色 --accent-light 必须单独赋值」
+       的约定本身仍要守：.sidebar-item.active / .model-dropdown-item.active 等
+       同范式组件还在用它。 */
     const pick = (th) => {
         const m = themeCss.match(new RegExp('\\[data-theme="' + th + '"\\]\\s*\\{([\\s\\S]*?)\\n\\}'));
         return m[1].match(/--accent-light\s*:\s*([^;]+);/)[1].trim();
     };
     const L = pick('light'), D = pick('dark');
     assert.notEqual(L, D, '--accent-light 明暗必须各异（暗色复用浅色值 = active 态底色发白）');
-    assert.match(rule('.remote-badge')['background'], /^var\(--bg-card\)$/,
-        '.remote-badge 底色应走 --bg-card（2026-10-11 素底化：徽标是 chrome 不是 active 态，accent 底太抢眼）');
-    assert.match(rule('.remote-badge')['color'], /^var\(--text-secondary\)$/,
-        '.remote-badge 文字应走 --text-secondary（新形态：次要文本权重）');
-    /* rule() 解析的是简写 border（非 border-color 键）：写 border 简写才能被解析到 */
-    assert.match(rule('.remote-badge')['border'], /var\(--border-color\)$/,
-        '.remote-badge 必须带描边（素底需边界与背景分离）');
 });
 
 test('危险动作文字统一走 --error-text，不用 --color-danger', () => {
@@ -368,6 +364,60 @@ test('全站：accent/功能色/品牌色实心底不得写死白字', () => {
         }
     });
     assert.deepEqual(offenders, [], '功能色实底必须用成套 on-* 前景令牌（白字在暗色提亮后的底色上实测 1.74–2.97）:\n  ' + offenders.join('\n  '));
+});
+
+/* ===================== 第五族：复选框勾标前景（非文本声明盲区） =====================
+   背景：settings.css 三族复选框（工具权限 / MCP 工具 / LLM 默认）勾选态的勾标用
+   ::after 的 border 画，颜色曾写死 #fff。上面「全站不得写死白字」门禁只扫 color
+   声明，border 声明恰好是盲区：暗色主题 --accent = 近白 #e4e4e7，白勾压近白底
+   实测对比度 **1.07:1** = 勾隐形（用户截图呈现为灰白方块，2026-10 反馈「按钮颜色不对」）。
+   修复 = border: solid var(--accent-contrast)。勾标是 2px 笔画图形而非文本，
+   对比度用 WCAG 非文本 3.0 口径；暗色主题（投诉现场）零例外。 */
+const CHECKMARK_FAMILIES = [
+    ['permission', '.permission-tool-checkbox input:checked + .permission-tool-checkmark'],
+    ['mcp', '.mcp-tool-checkbox input:checked + .mcp-tool-checkmark'],
+    ['llm', '.llm-default-checkbox input:checked + .llm-default-checkmark'],
+];
+
+test('复选框勾选态：accent 实底 + 勾标前景走 --accent-contrast（border 声明也纳入门禁）', () => {
+    const rules = parseRules(stripComments(readStatic('css', 'settings.css')));
+    CHECKMARK_FAMILIES.forEach(([name, base]) => {
+        const box = rules.get(base);
+        assert.ok(box, 'settings.css 缺少勾选态规则: ' + base);
+        assert.equal(box['background'], 'var(--accent)', name + ' 勾选底色必须是 --accent（跟随强调色预设）');
+        assert.equal(box['border-color'], 'var(--accent)', name + ' 勾选描边必须同底色');
+        const after = rules.get(base + '::after');
+        assert.ok(after, 'settings.css 缺少勾标规则: ' + base + '::after');
+        assert.equal(after['border'], 'solid var(--accent-contrast)',
+            name + ' 勾标色必须走 --accent-contrast；写死 #fff 在暗色主题（accent=近白）下实测 1.07:1 = 勾隐形');
+    });
+});
+
+test('对比度门禁：勾标前景 × accent 实底，3 族 × 5 accent × 2 主题 ≥ 非文本 3.0', () => {
+    const rules = parseRules(stripComments(readStatic('css', 'settings.css')));
+    const failures = [];
+    const samples = [];
+    THEMES.forEach((t) => ACCENTS.forEach((ac) => {
+        const vars = tokensFor(t, ac);
+        const host = resolve(vars['--bg-card'], vars);
+        CHECKMARK_FAMILIES.forEach(([name, base]) => {
+            const fgDecl = rules.get(base + '::after')['border'];
+            const m = /^solid\s+(\S.*)$/.exec(String(fgDecl));
+            assert.ok(m, name + ' 勾标前景解析失败: ' + fgDecl);
+            const c = contrastRatio(resolve(m[1], vars), resolve(rules.get(base)['background'], vars), host);
+            const key = t + '/' + ac + '/' + name;
+            samples.push(key + '=' + (c.ratio === null ? c.note : c.ratio));
+            if (c.ratio === null) { failures.push(key + ' 无法解析: ' + c.note); return; }
+            if (c.ratio < 3) failures.push(key + ' = ' + c.ratio + '（非文本阈值 3）');
+        });
+    }));
+    assert.equal(failures.length, 0, '勾标对比度不达标:\n  ' + failures.join('\n  '));
+    assert.equal(samples.length, THEMES.length * ACCENTS.length * CHECKMARK_FAMILIES.length,
+        '样本数异常：应 ' + (THEMES.length * ACCENTS.length * CHECKMARK_FAMILIES.length) + '，实 ' + samples.length);
+    /* 反向自检：门禁必须真在算——修复前的 #fff 形态在暗色 accent 上必须当场判红 */
+    const varsDark = tokensFor('dark', 'graphite');
+    const old = contrastRatio('#ffffff', resolve('var(--accent)', varsDark), resolve(varsDark['--bg-card'], varsDark));
+    assert.ok(old.ratio !== null && old.ratio < 3, '自检失败：#fff 压暗色 accent 应 <3，实 ' + old.ratio + '（门禁阈值形同虚设）');
 });
 
 test('on-* 前景令牌明暗成套定义，且与底色对比度 ≥ AA 4.5', () => {

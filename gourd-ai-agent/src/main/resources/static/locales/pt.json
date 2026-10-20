@@ -5,7 +5,11 @@
 
         "group_empty":  "Sem projetos (conexão online)",
 
-        "badge_count":  "{n}",
+        "group_add":  "Adicionar workspace",
+
+        "group_actions":  "Ações da conexão",
+
+        "group_add_down":  "Conexão offline",
 
         "pick_connection":  "Escolher conexão remota",
     "connect_in_progress": "Já existe uma conexão em andamento, aguarde",
@@ -86,8 +90,6 @@
         "remove_host":  "Remover",
 
         "badge":  "Remoto",
-
-        "badge_title":  "Espaço de trabalho remoto: {host} (clique para abrir o menu remoto)",
 
         "mirror_sync_menu":  "Sincronizar config de modelos ao remoto",
 

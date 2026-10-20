@@ -330,8 +330,12 @@ public class TaskTalentBackgroundVisibilityTest {
            实测三个子代理全部失败但信封全 success=true）。见 TaskTalentHealthyRunEndTest。 */
         Assertions.assertTrue(taskDo.contains("emitBackgroundEnd(__sessionId, task, invocationId, resultOk, result)"),
                 "成功路径必须发 agent_end 收卡（成败位取 resultOk，不得写死 true），否则状态点永远闪");
-        Assertions.assertTrue(taskDo.contains("emitBackgroundEnd(__sessionId, task, invocationId, false, \"ERROR: \" + describe(e))"),
+        // 取消文案分叉落地后 catch 的收卡参数改为 endMessage 变量（取消→中性文案 / 真异常→ERROR），
+        // 故锁变量形态 + 变量必须被赋值；「异常路径必须收卡」的意图不变。
+        Assertions.assertTrue(taskDo.contains("emitBackgroundEnd(__sessionId, task, invocationId, false, endMessage)"),
                 "异常路径必须补发 agent_end：卡片已建（start 无条件先发），不收卡就永久 loading");
+        Assertions.assertTrue(taskDo.replaceAll("\\s+", " ").contains("String endMessage = cancelFlag.get()"),
+                "收卡文案变量必须按取消位分叉赋值：无条件 ERROR 会让被取消的任务被模型原样重派");
 
         // 进度心跳必须挂在工具边界，且只认 ToolCallStartEvent
         Assertions.assertTrue(taskDo.contains("if (ev instanceof ToolCallStartEvent)"),
@@ -454,13 +458,19 @@ public class TaskTalentBackgroundVisibilityTest {
         Assertions.assertTrue(taskDo.contains("registerCancellable(__sessionId, invocationId, cancelFlag)"),
                 "取消位必须在流启动前登记，否则 Stop 落在登记之前就会漏掉这个任务");
 
-        // 取消后必须报 CANCELLED 而非 ERROR：带 ERROR 前缀会让模型把它当可重试失败并反复重派
+        // 取消后必须报中性文案而非 ERROR：带 ERROR 前缀会让模型把它当可重试失败并反复重派。
+        // 墙钟止损落地后取消文案分叉为 cancelMessage 变量（用户终止=CANCELLED_MESSAGE /
+        // 墙钟=WALL_CLOCK_MESSAGE，两者都以 CANCELLED 开头），故断言收卡/回包用变量名，
+        // 并另断言分叉表达式本身——锁死「两种取消都不得退化成 ERROR」这一意图。
         Assertions.assertTrue(taskDo.contains("if (cancelFlag.get())"),
                 "必须区分「被取消」与「流未产出 RunEndEvent」两种 blockLast()==null 的成因");
-        Assertions.assertTrue(taskDo.contains("emitBackgroundEnd(__sessionId, task, invocationId, false, CANCELLED_MESSAGE)"),
+        Assertions.assertTrue(taskDo.contains("emitBackgroundEnd(__sessionId, task, invocationId, false, cancelMessage)"),
                 "取消时也必须收卡，否则卡片永久 loading");
-        Assertions.assertTrue(taskDo.contains("return formatTaskResp(task, false, CANCELLED_MESSAGE, isMultitask)"),
-                "取消必须走中性的 CANCELLED_MESSAGE，不得报 ERROR");
+        Assertions.assertTrue(taskDo.contains("return formatTaskResp(task, false, cancelMessage, isMultitask)"),
+                "取消回包必须走中性文案变量，不得报 ERROR");
+        Assertions.assertTrue(taskDo.replaceAll("\\s+", " ").contains(
+                        "wallClockFired.get() ? WALL_CLOCK_MESSAGE : CANCELLED_MESSAGE"),
+                "取消文案分叉必须存在：用户终止与墙钟止损的文案都不得带 ERROR 前缀");
 
         Assertions.assertTrue(taskDo.contains("unregisterCancellable(__sessionId, invocationId);"),
                 "必须在 finally 里注销取消登记，否则异常路径泄漏取消位");

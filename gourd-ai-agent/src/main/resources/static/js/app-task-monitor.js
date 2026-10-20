@@ -12,7 +12,8 @@
    （memory_extract 的工具帧被 WebToolVisibilityPolicy 主动过滤、不落 stream，
      前端永远收不到，故「记忆是否更新」只能由后端扫 messages.ndjson 反查。）
 
-    刷新时机：打开时、会话/工作区变化时、打开期间 6s 轮询。
+    刷新时机：打开时、会话切换时（事件驱动，见 window.refreshTaskMonitor）、
+    工作区变化时、打开期间 6s 轮询（兑底）。
     【无头部】不设标题与刷新钮（用户参照稿形态）：开合由标题栏监控按钮承担，
     轮询 + 事件重拉已覆盖实时性，手动刷新钮属冗余控件。
 
@@ -35,6 +36,51 @@
     var POLL_MS = 6000;
     var pollTimer = null;
     var reqVersions = {};   // 每个端点一个版本号：旧响应晚到不得覆盖新响应（同 app-todos 纪律）
+
+    /* ---------- 会话切换即时刷新（2026-10 用户报障：切会话后监控等 2-3s 才变） ----------
+       根因：本面板刷新触发只有「打开时 / workspace:changed / 6s 轮询」，而
+       workspace:changed 仅在工作区真变化时派发（app-workspace.js 的 sel!==current 门禁），
+       同工作区内切会话不派发 → 面板只能等轮询 tick（0-6s 均匀、均值 3s）。
+       修法（用户拍板方案A）：
+       ① app-base.js setActiveSession（全部切换入口的唯一汇聚点）在 switching 分支
+          调 window.refreshTaskMonitor() → 切换即重拉，不等轮询；
+       ② git 两接口结果只依赖 root、与 sessionId 无关（实测每次 ~1s、9 个 git 子进程），
+          root 未变时复用上次结果、切换只发 3 个会话级毫秒接口 → 环境区也即时；
+       ③ 切换瞬间先给五区上 loading 态，杜绝「显示旧会话内容」的误导（次因B）。 */
+    var lastEnvRoot = null;      // 上次成功渲染环境区所用的 root（git 结果复用键）
+    var lastRemoteData = null;   // 上次 /git/remote 的成功响应（undefined=失败态，不缓存）
+    var lastRemoteRoot = null;   // lastRemoteData 对应的 root（缓存不得跨 root 串台）
+
+    /* ---------- 无变化不闪（2026-10 用户反馈：「已同步」每几秒闪一次） ----------
+       闪烁由三个叠加机制造成，逐一拆除：
+       ① 轮询也闪 loading：loadAll 只要 reuse=false 就 showLoading()，而 6s 轮询 /
+          workspace:changed 都是 reuse=false → 每 6s 四区被换成呼吸动画再换回。
+          修法：loading 门禁收窄到「会话切换 / root 变化 / 首开」（旧内容可能冒充
+          新会话的场景）；轮询与 workspace 变化保留旧内容，数据到达后原地更新。
+       ② 同步行文案翻转：轮询时 git/status 先回包且 remote 传 undefined → 同步行
+          先翻成「未配置远程」，git/remote 晚到再翻回「已同步」，每轮一次跳变。
+          修法：remote 缓存按 root 复用，status 渲染时带上同 root 的旧 remote。
+       ③ 内容没变也整棵重写 innerHTML（hover/缩略图/滚动状态白丢）。
+          修法：setBodyHtml 逐区缓存 html，与上轮相同则跳过写 DOM。 */
+    function setBodyHtml(el, html) {
+        if (!el) return;
+        if (el.__tmHtml === html) return;   // 值未变：不碰 DOM，杜绝无谓重绘闪烁
+        el.__tmHtml = html;
+        el.innerHTML = html;
+    }
+
+    function loadingRow() { return '<div class="tm-empty tm-loading">' + esc(t('common.loading')) + '</div>'; }
+    function showLoading() {
+        // 同步清缓存标记：loading 行必须真的写进 DOM（不得被 setBodyHtml 的同值跳过）
+        if (envBody) { envBody.__tmHtml = null; envBody.innerHTML = loadingRow(); }
+        if (outputsBody) { outputsBody.__tmHtml = null; outputsBody.innerHTML = loadingRow(); }
+        if (sourcesBody) { sourcesBody.__tmHtml = null; sourcesBody.innerHTML = loadingRow(); }
+        if (skillsBody) { skillsBody.__tmHtml = null; skillsBody.innerHTML = loadingRow(); }
+    }
+    /* loading 在飞标记曾以 loadingOn 变量实现，但全仓零读取（只写不读的死状态，
+       2026-10 自审删除）：门禁真源是 envStale（lastEnvRoot vs root），showLoading
+       只在 stale 路径调用、各 render 成功/失败两路都解除，无需额外标记。 */
+    function clearLoading() { }
 
     function t(key, params) { return GourdI18n.t(key, params); }
     function esc(s) {
@@ -93,7 +139,9 @@
     // ---------- 五类渲染 ----------
     function renderEnv(status, remote, root) {
         if (!envBody) return;
-        if (status === undefined) { envBody.innerHTML = errorRow(); return; }
+        // 错误行也必须走 setBodyHtml：raw 写会让 __tmHtml 缓存与 DOM 失步——
+        // 瞬断恢复后若新 html 与错误前同值，同值跳过会把「加载失败」行永久卡住
+        if (status === undefined) { clearLoading(); setBodyHtml(envBody, errorRow()); return; }
         var html = '';
         var changed = status ? ((status.changed || 0) + (status.staged || 0) + (status.untracked || 0)) : 0;
         html += row('compare', '', changed > 0
@@ -116,19 +164,24 @@
         }
         // 远程同步态：无 remote / 无 upstream / ahead-behind
         var syncText;
-        if (!remote || !remote.hasRemote) syncText = t('monitor.no_remote');
-        else if (!remote.upstream) syncText = t('monitor.no_upstream');
-        else if ((remote.ahead || 0) === 0 && (remote.behind || 0) === 0) syncText = t('monitor.synced');
-        else syncText = t('monitor.ahead_behind', [remote.ahead || 0, remote.behind || 0]);
-        html += row('commit', '', esc(syncText), remote && remote.remoteUrl ? remote.remoteUrl : '');
-        envBody.innerHTML = html;
+        // remote 缺省（status 先到、remote 在飞/失败）时回落到同 root 的缓存：
+        // 否则每轮轮询同步行都会「已同步 → 未配置远程 → 已同步」翻一次（用户报的闪）
+        var rm = remote;
+        if (rm === undefined && lastRemoteData && lastRemoteRoot === root) rm = lastRemoteData;
+        if (!rm || !rm.hasRemote) syncText = t('monitor.no_remote');
+        else if (!rm.upstream) syncText = t('monitor.no_upstream');
+        else if ((rm.ahead || 0) === 0 && (rm.behind || 0) === 0) syncText = t('monitor.synced');
+        else syncText = t('monitor.ahead_behind', [rm.ahead || 0, rm.behind || 0]);
+        html += row('commit', '', esc(syncText), rm && rm.remoteUrl ? rm.remoteUrl : '');
+        clearLoading();
+        setBodyHtml(envBody, html);
     }
 
     function renderOutputs(data) {
         if (!outputsBody) return;
-        if (data === undefined) { outputsBody.innerHTML = errorRow(); return; }
+        if (data === undefined) { clearLoading(); setBodyHtml(outputsBody, errorRow()); return; }
         var files = (data && data.files) || [];
-        if (!files.length) { outputsBody.innerHTML = emptyRow('monitor.empty_outputs'); return; }
+        if (!files.length) { setBodyHtml(outputsBody, emptyRow('monitor.empty_outputs')); return; }
         var html = '';
         for (var i = 0; i < files.length; i++) {
             var f = files[i];
@@ -139,7 +192,7 @@
                 '<span class="tm-row-text">' + esc(shortPath(f.path)) + ' ' +
                 '<span class="tm-row-sub">' + esc(f.changeType || '') + '</span>' + sub + '</span></div>';
         }
-        outputsBody.innerHTML = html;
+        setBodyHtml(outputsBody, html);
     }
 
     /* 来源区（本会话上传过的附件清单）。
@@ -153,9 +206,9 @@
        ③ 文件行保持纯展示（名称 + 大小）；uploads/ 路径不在工作区文件树内，不可跳文件查看器。 */
     function renderSources(data) {
         if (!sourcesBody) return;
-        if (data === undefined) { sourcesBody.innerHTML = errorRow(); return; }
+        if (data === undefined) { clearLoading(); setBodyHtml(sourcesBody, errorRow()); return; }
         var items = (data && data.items) || [];
-        if (!items.length) { sourcesBody.innerHTML = emptyRow('monitor.empty_sources'); return; }
+        if (!items.length) { setBodyHtml(sourcesBody, emptyRow('monitor.empty_sources')); return; }
         var imagePaths = [];
         var html = '';
         for (var i = 0; i < items.length; i++) {
@@ -177,7 +230,7 @@
                     '<span class="tm-row-text">' + esc(it.name) + ' ' + sizeSub + '</span></div>';
             }
         }
-        sourcesBody.innerHTML = html;
+        setBodyHtml(sourcesBody, html);
         upgradeSourceThumbs(imagePaths);
     }
 
@@ -204,6 +257,10 @@
                 if (!meta) continue;
                 var icon = rows[j].querySelector('.tm-row-icon');
                 if (!icon) continue;
+                // 同值不闪纪律的延伸：DOM 未重写时行节点是上一轮的，缩略图可能已就位；
+                // src 相同则跳过，避免每轮轮询把同一张图摘了重挂（无谓重绘）
+                var exist = icon.querySelector ? icon.querySelector('img.tm-src-thumb') : null;
+                if (exist && exist.src === meta.dataUrl) continue;
                 var img = document.createElement('img');
                 img.className = 'tm-src-thumb';
                 img.src = meta.dataUrl;
@@ -238,16 +295,16 @@
 
     function renderSkills(data) {
         if (!skillsBody) return;
-        if (data === undefined) { skillsBody.innerHTML = errorRow(); return; }
+        if (data === undefined) { clearLoading(); setBodyHtml(skillsBody, errorRow()); return; }
         var skills = (data && data.skills) || [];
-        if (!skills.length) { skillsBody.innerHTML = emptyRow('monitor.no_skills'); return; }
+        if (!skills.length) { setBodyHtml(skillsBody, emptyRow('monitor.no_skills')); return; }
         var html = '';
         for (var i = 0; i < skills.length; i++) {
             var s = skills[i];
             html += row('skill', '', esc(s.name || s.toolName) +
                 '<span class="tm-row-sub">×' + (s.count || 1) + '</span>');
         }
-        skillsBody.innerHTML = html;
+        setBodyHtml(skillsBody, html);
     }
 
     function renderMemory(data) {
@@ -258,23 +315,43 @@
     }
 
     // ---------- 汇总加载 ----------
-    function loadAll() {
+    /* reuseGit=true（会话切换触发）且 root 与上次环境区渲染相同时，git 两接口
+       直接复用缓存：它们只依赖 root（实测每次 ~1s、9 个 git 子进程串行），
+       与 sessionId 无关，同 root 下重拉是纯浪费；会话级 3 接口（毫秒级）仍必发。
+       轮询/打开/workspace:changed 传 false：git 工作区状态需保持新鲜。 */
+    function loadAll(reuseGit) {
         var sid = currentSessionId();
         if (!sid) {
             // 未进入任何会话（欢迎页）：五区全空态，不发请求
-            if (envBody) envBody.innerHTML = emptyRow('monitor.empty_env');
-            if (outputsBody) outputsBody.innerHTML = emptyRow('monitor.empty_outputs');
-            if (sourcesBody) sourcesBody.innerHTML = emptyRow('monitor.empty_sources');
-            if (skillsBody) skillsBody.innerHTML = emptyRow('monitor.no_skills');
+            clearLoading();
+            setBodyHtml(envBody, emptyRow('monitor.empty_env'));
+            setBodyHtml(outputsBody, emptyRow('monitor.empty_outputs'));
+            setBodyHtml(sourcesBody, emptyRow('monitor.empty_sources'));
+            setBodyHtml(skillsBody, emptyRow('monitor.no_skills'));
             renderMemory(null);
             return;
         }
         var root = resolveRoot(sid);
         var rq = root ? '&root=' + encodeURIComponent(root) : '';
-        fetchJson('/web/chat/git/status?sessionId=' + encodeURIComponent(sid) + rq, root, 'env1')
-            .then(function (d) { renderEnv(d || {}, undefined, root); }, function () { renderEnv(undefined, undefined, root); });
-        fetchJson('/web/chat/git/remote?sessionId=' + encodeURIComponent(sid) + rq, root, 'env2')
-            .then(function (d) { renderRemoteInto(d); }, function () { /* 远程态失败不整区报错 */ });
+        var reuse = reuseGit === true && lastEnvRoot !== null && lastEnvRoot === root;
+        /* loading 门禁（2026-10 闪烁修复）：只有「会话/root 真切换或首开」才闪 loading——
+           那些场景旧内容可能冒充新会话；轮询与 workspace:changed 保留旧内容原地更新，
+           数据没变时 setBodyHtml 连 DOM 都不碰（用户：值没变更就不要闪）。 */
+        var envStale = lastEnvRoot === null || lastEnvRoot !== root;
+        if (envStale) showLoading();
+        if (reuse) {
+            // 环境区立即用缓存重绘（含上次 remote 结果）：切换零等待
+            renderEnv(lastEnvStatus ? lastEnvStatus.status : {}, lastRemoteData || undefined, root);
+        } else {
+            fetchJson('/web/chat/git/status?sessionId=' + encodeURIComponent(sid) + rq, root, 'env1')
+                .then(function (d) { renderEnv(d || {}, undefined, root); }, function () { renderEnv(undefined, undefined, root); });
+            fetchJson('/web/chat/git/remote?sessionId=' + encodeURIComponent(sid) + rq, root, 'env2')
+                // lastRemoteRoot 必须同写：轮询时 git/status 先回包（remote=undefined）靠
+                // 「同 root 的 remote 缓存」回落，缺它则同步行每轮先翻 no_remote 再翻回
+                // （用户所指「已同步每几秒闪一次」的另一半根因）
+                .then(function (d) { lastRemoteData = d || {}; lastRemoteRoot = root; renderRemoteInto(d); },
+                    function () { /* 远程态失败不整区报错，也不缓存失败态 */ });
+        }
         fetchJson('/web/chat/changes/session?sessionId=' + encodeURIComponent(sid) + rq, root, 'out')
             .then(function (d) { renderOutputs(d || {}); }, function () { renderOutputs(undefined); });
         fetchJson('/web/chat/attachment/list?sessionId=' + encodeURIComponent(sid) + rq, root, 'src')
@@ -289,11 +366,15 @@
     var lastEnvStatus = null;
     var _renderEnv = renderEnv;
     renderEnv = function (status, remote, root) {
-        if (status !== undefined) lastEnvStatus = { status: status, root: root };
+        if (status !== undefined) { lastEnvStatus = { status: status, root: root }; lastEnvRoot = root; }
+        // 成功响应才入缓存：失败态（undefined）不得污染同步行文案的回落值
+        if (remote !== undefined) { lastRemoteData = remote || {}; lastRemoteRoot = root; }
         _renderEnv(status, remote, root);
     };
     function renderRemoteInto(remote) {
         if (!lastEnvStatus) return;
+        // 守卫：remote 晚到时若会话/root 已切走，不得把旧 root 的环境区绘回新会话
+        if (lastEnvStatus.root !== lastEnvRoot) return;
         _renderEnv(lastEnvStatus.status, remote, lastEnvStatus.root);
     }
 
@@ -327,6 +408,12 @@
     window.toggleTaskMonitor = toggleMonitor;
     window.closeTaskMonitor = closeMonitor;
     window.openTaskMonitor = openMonitor;
+    /* 会话切换即时刷新入口：app-base.js setActiveSession 的 switching 分支调用。
+       面板关着或还在欢迎页时 no-op（openMonitor/syncWithView 会在进入时自拉）。 */
+    window.refreshTaskMonitor = function () {
+        if (!isOpen() || isWelcomePage()) return;
+        loadAll(true);
+    };
 
     /* 默认显示：进入会话自动开（偏好可关）；回欢迎页自动收起。
        视图切换由 app-ui.js 的 switchToChatMode/switchToWelcomeMode 驱动，二者都会

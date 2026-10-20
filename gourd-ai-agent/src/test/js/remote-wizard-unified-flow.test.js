@@ -403,12 +403,21 @@ test('行为接线・app-workspace 暴露统一登记钩子，且「打开远程
         '已存在同路径则更新 _scope 并返回（幂等；重拉竞态下不会 push 出重复条目）');
     assert.match(src, /projectsCache\.push\(\{ path: path, name: baseName\(path\), _scope: scope \}\);/,
         'name 必须走 baseName（与列表渲染同口径，不得各自 split 一遍）');
-    /* 既有「打开远程目录」分支必须改用该 helper（否则就是同一逻辑的两个副本） */
+    /* 既有「打开远程目录」分支必须复用共用登记链（否则就是同一逻辑的两个副本）。
+       2026-10-16 再收编一层：分支不再直接调 registerProjectScope，而是走
+       registerWorkspacePath(picked, rid, true)（内部调 registerProjectScope +
+       body.code 校验 + 广播单点）；断言锁「走共用链」且「不得内联 push/ajax」。 */
     const seg = workspaceCode.slice(workspaceCode.indexOf("var remoteOpen = t.closest('.workspace-dropdown .workspace-remote-open-btn');"));
     const branch = seg.slice(0, seg.indexOf('var item = t.closest'));
-    assert.match(branch, /registerProjectScope\(picked, rid\);/, '「打开远程目录」分支必须复用同一 helper');
+    assert.match(branch, /registerWorkspacePath\(picked, rid, true\);/, '「打开远程目录」分支必须复用共用登记链');
     assert.doesNotMatch(branch, /projectsCache\.push\(\{ path: picked/,
         '不得再内联 push（与向导分支各写一份 = 日后必然漂移，含 name 计算口径不一致）');
+    assert.doesNotMatch(branch, /\$\.ajax\(/, '不得再内联登记 ajax（单点纪律）');
+    const reg = cutFn(workspaceCode, 'function registerWorkspacePath(picked, scopeId, autoSelect) {');
+    /* scopeId || 'local'：两分支（远端/本地）临时记录都走同一 helper（它带幂等
+       去重）；内联 push 无去重，重拉竞态下会留重复条目 */
+    assert.match(reg, /registerProjectScope\(picked, scopeId \|\| 'local'\);/, '共用链内部必须复用同一 helper（临时 _scope 记录单点 + 幂等）');
+    assert.doesNotMatch(reg, /projectsCache\.push\(/, '登记链内不得内联 push（无幂等去重）');
 });
 
 /* ============ 8) 向导面板结构 ============ */

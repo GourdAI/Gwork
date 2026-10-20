@@ -871,6 +871,36 @@ function wsGroupGlobalHtml(g) {
    head 用 <button> 而不是 <div>：开合在可访问性语义上就是按钮（键盘可达 + 读屏播报），
    aria-expanded 必须与折叠态同步——读屏与契约测试都只认这个属性。
    count 报项目数：这一行回答的是「这台机器上我登记了几个工作区」。 */
+/* 分组头快捷动作（2026-10-16 用户诉求）：不必回主页工作区下拉，在分组头上直接
+   「＋」新增本组归属的工作空间。本地组 = 本机对话框 + __scope=local 登记；
+   在线远端组 = 浏览该台远端磁盘 + __scope=id:<rid> 登记（与下拉入口同机闭合）。
+   掉线组不渲染「＋」（browse 必失败，给了入口只会撞墙）；远端组另带「⋯」
+   连接动作菜单（同步镜像/重连/断开）——徽标下线后这是连接级动作的唯一入口。
+   按钮是 head（<button>）内的嵌套交互元素：HTML 不允许 button 套 button，
+   故用 span[role=button] + tabindex，键盘可达性由 role 承担。 */
+function wsGroupActsHtml(g) {
+    var isLocal = !g.conn;
+    var isDown = !isLocal && g.state === 'down';
+    var addTitle = GourdI18n.t('remote.group_add');
+    var html = '<span class="ws-group-acts">';
+    if (!isDown) {
+        html += '<span class="ws-group-act ws-group-add" role="button" tabindex="0"'
+            + ' data-scope="' + escAttr(g.scopeKey) + '" title="' + escAttr(addTitle) + '"'
+            + ' aria-label="' + escAttr(addTitle) + '">'
+            + '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>'
+            + '</span>';
+    }
+    if (!isLocal) {
+        var moreTitle = GourdI18n.t('remote.group_actions');
+        html += '<span class="ws-group-act ws-group-more" role="button" tabindex="0"'
+            + ' data-conn="' + escAttr(g.conn.id) + '" title="' + escAttr(moreTitle) + '"'
+            + ' aria-label="' + escAttr(moreTitle) + '">'
+            + '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>'
+            + '</span>';
+    }
+    return html + '</span>';
+}
+
 function wsGroupHtml(g) {
     var isLocal = !g.conn;
     var isDown = !isLocal && g.state === 'down';
@@ -886,6 +916,11 @@ function wsGroupHtml(g) {
         + '<span class="ws-group-label">' + escapeHtml(g.label) + '</span>'
         + '<span class="ws-group-count">' + g.items.length + '</span>'
         + '</button>'
+        /* acts 是 head 按钮的【兄弟节点】（绝对定位盖在组头右上）而不是塞进
+           button 内部：① <button> 的内容模型禁止交互后代（span[role=button]
+           塞进去是非法 HTML，读屏会播报嵌套按钮）；② 兄弟定位后点击天然不
+           经过 head 的折叠委派，不需要 stopPropagation 防误折叠。 */
+        + wsGroupActsHtml(g)
         + '<div class="ws-group-body">';
     html += wsGroupGlobalHtml(g);
     for (var i = 0; i < g.meta.length; i++) {
@@ -985,6 +1020,24 @@ var _wsGlobalCollapsed = {};
    就地改属性而不整表重渲染：body 显隐与 caret 旋转全部由 CSS 按 [aria-expanded] 驱动，
    省掉一次 innerHTML 重建（也就不会冲掉当前搜索过滤态与滚动位置）。
    委托绑定在 document 上：列表 innerHTML 重建后不丢事件。 */
+/* 组头快捷动作（「＋」新增本组工作空间 / 「⋯」连接动作菜单）：acts 是 head 的
+   兄弟节点，点击不经过 head 的折叠委派（天然不互扰）；stopPropagation 只为了
+   不让这次点击被 document 上的其它委派（如下拉外点关闭）当成「点了别处」。 */
+$(document).on('click', '.ws-group-act', function (e) {
+    e.stopPropagation();
+    if ($(this).hasClass('ws-group-add')) {
+        var addScope = $(this).attr('data-scope');
+        if (addScope && typeof window.sidebarAddWorkspace === 'function') {
+            window.sidebarAddWorkspace(addScope);
+        }
+    } else if ($(this).hasClass('ws-group-more')) {
+        var cid = $(this).attr('data-conn');
+        if (cid && typeof window.openRemoteConnMenu === 'function') {
+            window.openRemoteConnMenu(this, cid);
+        }
+    }
+});
+
 $(document).on('click', '.ws-group-head', function (e) {
     if ($(e.target).closest('.proj-node').length) return;
     var scopeKey = $(this).closest('.ws-group').attr('data-scope');
@@ -1003,6 +1056,20 @@ $(document).on('click', '.ws-group-global-head', function () {
     _wsGlobalCollapsed[scopeKey] = collapsed;
     $(this).attr('aria-expanded', collapsed ? 'false' : 'true');
     $sec.toggleClass('ws-group-global-collapsed', collapsed);
+});
+/* 组头快捷动作的键盘可达性：span[role=button] 不是原生 button，Enter/Space
+   必须手动触发 click（组头本身是 <button>，键盘原生可达，无需此处理）。
+   【必须 triggerHandler 而非 trigger】：jQuery 的 trigger 跑完 jQuery 处理器后
+   还会调原生方法（elem[type]() → elem.click()），原生 click 再冒泡到 document
+   命中上面那条 click 委派 = 同一次按键动作执行两遍（「＋」连开两次目录对话框、
+   「⋯」开了又关看起来像坏了）。triggerHandler 只跑 jQuery 处理器、不冒泡、
+   不触发原生方法；keydown 里的 stopPropagation 只防 keydown 冒泡，拦不住
+   trigger 自造的原生 click，故不能靠它兜。 */
+$(document).on('keydown', '.ws-group-act', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    e.stopPropagation();
+    $(this).triggerHandler('click');
 });
 
 /* 搜索过滤 × 分组（契约 §5.7）：过滤器本体在 app-ui.js（不在本模块所有权范围内），
@@ -1803,17 +1870,70 @@ function updateLoadMoreBtn(sess) {
             // 防无限自激：按钮被程序性插入视口时不自动触发。
             // 必须先离开视口（_hasBeenHidden）再回来，才判定为用户主动滚到此处。
             // _triggered 一次性保护防止边界情况下的重复触发。
-            var _triggered = false, _hasBeenHidden = false;
+            // 门禁二（实测补）：触发前用实时几何复核「按钮真在视口内且视口真在消息区顶部」。
+            // IO 的 entry 是异步投递的旧快照：初始加载收尾瞬间按钮短暂可见→首个
+            // non-intersecting 回调把 _hasBeenHidden 置真→随后一条【过期】的 intersecting
+            // 回调在用户还在底部/中部时就误触发分页（实测 +100ms 误触发，随后 prepend 收尾
+            // 把视口拽走，即「没拉也跳」）。故回调里不直接信 entry，用 getBoundingClientRect
+            // 复核；复核不过则启动有界轮询补抓「用户随后真拉到顶」的那一刹（IO 只在阈值
+            // 交叉时回调，过期拒绝后可能不再有交叉事件）。
+            var _triggered = false, _hasBeenHidden = false, _recheckLeft = 0, _recheckTimer = null;
+            // 贴顶判定（实测 P1-B 修正）：按钮 DOM 上位于内容容器【之前】，用户真贴顶
+            // （scrollTop=0）时按钮在视口顶之上、getBoundingClientRect 与视口矩形【不相交】，
+            // 「按钮在视口内」旧条件此时恒假——贴顶停住的用户永远触发不了自动分页，
+            // 且按钮不可见不可点（分页入口消失）。故主门禁用 scrollTop（用户位置是唯一
+            // 真源）；几何条件作 sanity：按钮在视口内（路过顶部区）或已越过视口顶（贴顶）
+            // 二者必居其一，都不满足说明几何异常，拒绝。
+            var btnVisibleNow = function () {
+                var b = $btn[0];
+                if (!b || !document.contains(b)) return false;
+                if (messagesWrap.scrollTop > 240) return false;
+                var r = b.getBoundingClientRect();
+                var wr = messagesWrap.getBoundingClientRect();
+                return (r.bottom > wr.top && r.top < wr.bottom) || r.bottom <= wr.top;
+            };
+            // 按钮已滚过视口顶（在视口上方）：用户已越过入口，同样视为到达分页位。
+            var btnAboveViewport = function () {
+                var b = $btn[0];
+                if (!b || !document.contains(b)) return false;
+                return b.getBoundingClientRect().bottom <= messagesWrap.getBoundingClientRect().top
+                    && messagesWrap.scrollTop <= 240;
+            };
+            var fireLoad = function () {
+                if (_triggered) return;
+                _triggered = true;
+                if (_recheckTimer) { clearTimeout(_recheckTimer); _recheckTimer = null; }
+                obs.disconnect();
+                sess._loadMoreObserver = null;
+                loadMoreMessages(sess);
+            };
+            var scheduleRecheck = function () {
+                if (_triggered || _recheckLeft <= 0) return;
+                if (_recheckTimer) return;
+                _recheckTimer = setTimeout(function () {
+                    _recheckTimer = null;
+                    _recheckLeft--;
+                    if (_triggered) return;
+                    if (btnVisibleNow()) { fireLoad(); return; }
+                    scheduleRecheck();
+                }, 160);
+            };
             var obs = new IntersectionObserver(function(entries) {
                 var e = entries[0];
                 if (!e.isIntersecting) {
                     _hasBeenHidden = true;
-                } else if (_hasBeenHidden && !_triggered) {
-                    _triggered = true;
-                    obs.disconnect();
-                    sess._loadMoreObserver = null;
-                    loadMoreMessages(sess);
+                    // 实测 P1-B：non-intersecting 也可能是「用户贴顶、按钮在视口顶之上」
+                    // （几何上不相交）。此时若等 intersecting 回调则永远等不到（按钮不会
+                    // 再进视口），分页入口静默消失。故即时复核：贴顶且按钮已越过视口顶
+                    // = 用户真到了分页位，立即触发。
+                    if (!_triggered && btnAboveViewport()) { fireLoad(); }
+                    return;
                 }
+                if (!_hasBeenHidden || _triggered) return;
+                if (btnVisibleNow()) { fireLoad(); return; }
+                // 过期/布局抖动产生的 intersecting：给用户 160ms×12 的窗口补抓真到顶
+                _recheckLeft = 12;
+                scheduleRecheck();
             }, { threshold: 0.5 });
             obs.observe($btn[0]);
             sess._loadMoreObserver = obs;
@@ -2171,9 +2291,18 @@ function replaySession(sess, events, prepend, keepOpen) {
         var prependedRows = prepend ? Array.prototype.slice.call(fragment.childNodes) : null;
 
         if (prepend) {
+            // 用户在 prepend 前是否贴着底部（gap<=80 与 app-base.js userScrolledUp 阈值同口径）：
+            // 决定下方 anchorEl 缺席时的兜底补偿是否允许执行。必须在插入前采集（插入后 scrollHeight 即变）。
+            // WHY：兜底补偿 scrollTop += ΔscrollHeight 的语义是「把视口留在底部」，只对原本就在底部的
+            // 用户成立；用户在顶部/中部时这行会把视口直接拽到底部——「上拉到顶被拽回底部」的根因
+            // （实测栈：replayDoneCore 的 else 兜底，cur=0 时写入 v=scrollHeight-clientHeight）。
+            var atBottomBeforePrepend = (messagesWrap.scrollHeight - messagesWrap.scrollTop - messagesWrap.clientHeight) <= 80;
             // 跨页缝合必须在选锚点之前：缝合会删除真实容器里的首行（内容并入本页末行），
             // 若锚点先选中了它，修正时读的是脱离文档的节点，视口会跳。
-            stitchPrependedRunRows(fragment, realContainer, sess);
+            // 缝合返回值携带「被删行删除前的视觉偏移 + 内容目的行」：单行会话场景下
+            // 被删行正是用户正在看的唯一行，锚点循环随后必然落空（rows=0），
+            // 需靠目的行在插入后做锚点修正（见 applyPrependViewportFix）。
+            var stitchInfo = stitchPrependedRunRows(fragment, realContainer, sess);
 
             // 选锚点：当前视口顶部第一个可见的旧消息行及其相对偏移。
             var anchorEl = null, anchorOffset = 0;
@@ -2222,14 +2351,7 @@ function replaySession(sess, events, prepend, keepOpen) {
 
             // 锚点在异步分片回放收尾时才选取，因此它对应用户此刻正在看的行（含请求在途中的手动滚动）；
             // prepend 后仅修正这条仍可见的旧行，不恢复请求开始时的绝对 scrollTop。
-            if (anchorEl) {
-                var newTop = anchorEl.getBoundingClientRect().top - messagesWrap.getBoundingClientRect().top;
-                messagesWrap.scrollTop += (newTop - anchorOffset);
-            } else {
-                // anchorEl 选取失败（所有旧行都滚出了视口）：
-                // scrollHeight 增量就是 prepend 内容的高度，同步补偿 scrollTop 让视口不跳。
-                messagesWrap.scrollTop += (messagesWrap.scrollHeight - scrollHeightBefore);
-            }
+            applyPrependViewportFix(messagesWrap, anchorEl, anchorOffset, atBottomBeforePrepend, scrollHeightBefore, stitchInfo);
         } else {
             // 初始加载模式：清空后移入
             $(realContainer).html('');
@@ -2336,12 +2458,46 @@ function replaySession(sess, events, prepend, keepOpen) {
     }
 }
 
+/* prepend 收尾的视口修正（2026-10-19 自审从内联代码抽出为纯函数，供契约测试行为级断言）。
+   三分支，按可信度递降：
+   ① anchorEl 在文档中：用户正在看的旧行仍在，按其视觉偏移修正（常规路径）。
+      contains 守卫：锚点行若已被缝合删除（单行会话场景），getBoundingClientRect
+      读脱离文档节点会得 0，修正量变成 -anchorOffset 的错值，必须降级到②。
+   ② stitchInfo 首个搬移节点在文档中：缝合删掉的正是用户正在看的行（其内容已搬入
+      目的行），按「搬移后首个内容节点的视觉顶 - 被删行删除前的视觉顶」修正——
+      否则分页后视口显示新页顶、用户原阅读内容沉到视口外（实测 P1-A 视觉跳变）。
+      注意锚点必须是搬移的内容节点而非目的行本身：目的行顶部是新页内容的起点，
+      原内容在其下方（页脚之前），用行顶做锚会把原内容留在视口外。
+   ③ 两者皆缺席且用户原本贴底：scrollHeight 增量即 prepend 内容高度，补偿 scrollTop
+      让视口继续留在底部。用户不贴底时 prepend 内容全在视口上方，浏览器不移动可见区，
+      保持不动即不跳——旧实现此处无条件补偿，是「上拉到顶被拽回底部」的根因。 */
+function applyPrependViewportFix(wrap, anchorEl, anchorOffset, atBottomBeforePrepend, scrollHeightBefore, stitchInfo) {
+    var wrapTop = wrap.getBoundingClientRect().top;
+    if (anchorEl && document.contains(anchorEl)) {
+        var newTop = anchorEl.getBoundingClientRect().top - wrapTop;
+        wrap.scrollTop += (newTop - anchorOffset);
+        return;
+    }
+    var moved = stitchInfo && stitchInfo.firstMoved;
+    if (moved && document.contains(moved) && stitchInfo.removedVisualTop != null) {
+        wrap.scrollTop += (moved.getBoundingClientRect().top - wrapTop) - stitchInfo.removedVisualTop;
+        return;
+    }
+    if (atBottomBeforePrepend) {
+        wrap.scrollTop += (wrap.scrollHeight - scrollHeightBefore);
+    }
+}
+
 /* prepend 回放的跨页同 run 缝合：后端页边界（字节预算截断、旧数据无游标等）偶尔会落在某条
    assistant run 的中段，于是本页末行与真实容器首行属于同一个 runId——不缝合的话同一条回答
    在 DOM 上是「上方碎片行 + 下方残段行」两行，且每次上拉都可能再切一刀。
    缝合规则：把下方行 .msg-bubble 的内容子节点（正文/思考块/工具卡等，按原序）搬入上方行气泡，
    下方行的耗时徽标与时间先过户再整行删除。meta-row / msg-actions 不搬（上方行自带一套，
-   搬过去会出现两份复制/重跑按钮）。 */
+   搬过去会出现两份复制/重跑按钮）。
+   返回值：未缝合返回 null；缝合成功返回 { firstMoved, removedVisualTop }——被删行
+   删除前相对视口顶的视觉偏移，与首个被搬移的内容节点引用（插入文档后调用方可实测
+   其视觉顶）。单行会话场景下被删行就是用户正在看的唯一行，调用方需靠 firstMoved
+   在插入后做锚点修正，否则视口内容被换页。 */
 function stitchPrependedRunRows(fragment, realContainer, sess) {
     var kids = fragment.childNodes;
     var lastRow = null;
@@ -2349,22 +2505,24 @@ function stitchPrependedRunRows(fragment, realContainer, sess) {
         var n = kids[i];
         if (n.nodeType === 1 && n.classList && n.classList.contains('msg-row') && n.classList.contains('assistant')) { lastRow = n; break; }
     }
-    if (!lastRow) return;
+    if (!lastRow) return null;
     var runId = lastRow.getAttribute('data-run-id');
-    if (!runId) return;
+    if (!runId) return null;
     var firstRow = null;
     var rows = realContainer.children;
     for (var j = 0; j < rows.length; j++) {
         var r = rows[j];
         if (r.nodeType === 1 && r.classList && r.classList.contains('msg-row') && r.classList.contains('assistant')) { firstRow = r; break; }
     }
-    if (!firstRow || firstRow === lastRow) return;
-    if (firstRow.getAttribute('data-run-id') !== runId) return;
+    if (!firstRow || firstRow === lastRow) return null;
+    if (firstRow.getAttribute('data-run-id') !== runId) return null;
     // 绝不动承载实时流式输出的行：删掉它会让 sess.currentBubbleEl 指向脱离文档的节点
-    if (sess && sess.currentBubbleEl && (firstRow === sess.currentBubbleEl || firstRow.contains(sess.currentBubbleEl))) return;
+    if (sess && sess.currentBubbleEl && (firstRow === sess.currentBubbleEl || firstRow.contains(sess.currentBubbleEl))) return null;
     var srcBubble = $(firstRow).find('.msg-bubble')[0];
     var dstBubble = $(lastRow).find('.msg-bubble')[0];
-    if (!srcBubble || !dstBubble || srcBubble === dstBubble) return;
+    if (!srcBubble || !dstBubble || srcBubble === dstBubble) return null;
+    // 被删行删除前的视觉偏移：此刻容器尚未变动，实测即准（调用方在选锚点前调用本函数）。
+    var removedVisualTop = firstRow.getBoundingClientRect().top - messagesWrap.getBoundingClientRect().top;
 
     // 徽标/时间过户：下方行是本 run 的收尾页，耗时徽标与完成时间在它身上
     var srcMeta = $(firstRow).find('.msg-meta-row')[0];
@@ -2389,16 +2547,19 @@ function stitchPrependedRunRows(fragment, realContainer, sess) {
         var fn = dstBubble.childNodes[fi];
         if (fn && fn.classList && (fn.classList.contains('msg-meta-row') || fn.classList.contains('msg-actions'))) { dstFooter = fn; break; }
     }
+    var firstMoved = null;
     while (srcBubble.firstElementChild) {
         var child = srcBubble.firstElementChild;
         if (child.classList && (child.classList.contains('msg-meta-row') || child.classList.contains('msg-actions'))) {
             child.parentNode.removeChild(child);
             continue;
         }
+        if (firstMoved === null) firstMoved = child;
         if (dstFooter) dstBubble.insertBefore(child, dstFooter);
         else dstBubble.appendChild(child);
     }
     $(firstRow).remove();
+    return { firstMoved: firstMoved, removedVisualTop: removedVisualTop };
 }
 
 function loadMessagesLegacy(sess, rootQ) {

@@ -326,7 +326,7 @@ function appendSystemNotice(sess, text) {
    判定为「阈值初判 + 实际高度校正」双口径：字符数超限但视觉不足 5 行时（如超长单行
    token），校正后不折叠，避免出现点了没变化的无效按钮；渲染落点在游离临时容器的会话回放
    测不到高度，只能先按阈值初判，入真实容器后由 steerCollapseRemeasure 补测校正。
-   CSS 的 max-height 按 5 行（5 × 1.75em，14px 字号下 24.5px/行）与之对齐。 */
+   CSS 的 max-height 按 5 行（5 × 1.75em，13px 字号下 22.75px/行）与之对齐。 */
 var STEER_COLLAPSE_MAX_CHARS = 320;
 var STEER_COLLAPSE_MAX_LINES = 6;
 var STEER_COLLAPSE_VISIBLE_LINES = 5;

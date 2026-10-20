@@ -46,7 +46,8 @@ function sandbox(opts) {
     remoteData: opts.remoteData,          // undefined = 远端拉取失败
     activeId: opts.activeId || null,
     currentSelection: opts.currentSelection || '',
-    applyCalls: [],                       // 绑定自愈的 applyChatWorkspace 调用记录
+    applyCalls: [],                       // applyChatWorkspace 调用记录（自愈【不得】再走它：会关下拉）
+    bindCalls: [],                        // 绑定自愈的 remoteBindScope 声明记录
     renderCount: 0,
     cbArg: null,
   };
@@ -78,6 +79,7 @@ function sandbox(opts) {
     'function trimTrail(p) { return (p || "").replace(/[\\\\/]+$/, ""); }',
     cutFn(ws, 'function pathKey(p)'),
     cutFn(ws, 'function scopeOfPath(path)'),
+    cutFn(ws, 'function bindWorkspaceScope(path)'),
     cutFn(ws, 'function loadProjects(cb)'),
     'function renderSelectors(){ state.renderCount++; }',
     'return { loadProjects: loadProjects, getCache: function(){ return projectsCache; },',
@@ -96,6 +98,10 @@ function sandbox(opts) {
     },
     currentChatWorkspace: state.currentSelection,
     applyChatWorkspace: (p, silent) => { state.applyCalls.push({ path: p, silent: !!silent }); },
+    /* 壳绑定入口桩：bindWorkspaceScope 经它声明归属（记录 path/id 供断言） */
+    __GOURD_IPC__: {
+      remoteBindScope: (p, id) => { state.bindCalls.push({ path: p, id: id }); return Promise.resolve(true); },
+    },
   };
   const core = fn(win, state, $, { t: (k) => k }, () => {}, (s) => String(s));
   const api = {
@@ -224,9 +230,14 @@ test('绑定自愈：选中远端工作区时 settle 后重声明归属（不用
   });
   s.api.loadProjects();
   s.settleAll();
-  assert.equal(s.state.applyCalls.length, 1, '选中项能查到 _scope 时必须重声明一次');
-  assert.equal(s.state.applyCalls[0].path, '/srv/remote');
-  assert.equal(s.state.applyCalls[0].silent, true, '自愈必须 silent（不跳页不重置视图）');
+  assert.equal(s.state.bindCalls.length, 1, '选中项能查到 _scope 时必须重声明一次');
+  assert.equal(s.state.bindCalls[0].path, '/srv/remote');
+  assert.equal(s.state.bindCalls[0].id, 'rc-a', '归属必须是条目自己的 _scope（不是 activeId 兜底）');
+  /* 【回归钉·远程态下拉闪现消失】自愈曾走 applyChatWorkspace → selectChatWorkspace
+     的 closeAll 把刚打开的下拉关掉（下拉每次打开都重跑 loadProjects，远程态自愈必触发）。
+     自愈唯一目的是向壳重声明归属，必须直调 bindWorkspaceScope、零 UI 副作用。 */
+  assert.equal(s.state.applyCalls.length, 0,
+    '自愈不得走 applyChatWorkspace：它进 selectChatWorkspace 会 closeAll 关掉正在打开的下拉');
 });
 
 test('绑定自愈不误触发：选本地目录/无选择时不重声明', () => {
@@ -238,7 +249,7 @@ test('绑定自愈不误触发：选本地目录/无选择时不重声明', () =
   });
   s1.api.loadProjects();
   s1.settleAll();
-  assert.equal(s1.state.applyCalls.length, 0, '选本地项不需要重声明（bind(local) 已幂等）');
+  assert.equal(s1.state.bindCalls.length, 0, '选本地项不需要重声明（bind(local) 已幂等）');
 
   const s2 = sandbox({
     activeId: 'rc-a',
@@ -248,7 +259,7 @@ test('绑定自愈不误触发：选本地目录/无选择时不重声明', () =
   });
   s2.api.loadProjects();
   s2.settleAll();
-  assert.equal(s2.state.applyCalls.length, 0, '无选择不重声明');
+  assert.equal(s2.state.bindCalls.length, 0, '无选择不重声明');
 });
 
 test('两个请求都结算后才回调（不得只挂一个 always 导致永挂）', () => {

@@ -438,10 +438,12 @@ test('P1-2 app-remote.js 必须维护「连接 → 主机展示名」映射并�
   /* 反向断言：不得用「最近连过的那台」冒充当前连接的主机（多机场景报错主机，
      与徽标同根缺陷 P2-C 已修过一次）。注释里有反面教材，故查剥注释后的源码。 */
   assert.doesNotMatch(remote, /savedHosts\(\)\[0\]/, '不得用 savedHosts 首项冒充当前连接的主机');
-  /* 徽标与条目必须同源（口径不一致就会出现「徽标报 A、条目报 B」）。 */
-  const badge = sliceBetween(remote, 'window.refreshRemoteBadge = function', 'old.innerHTML =');
-  assert.match(badge, /hostLabelByConnection\[primary\.connectionId\] \|\| hostLabelOf\(primary\)/,
-    '徽标必须与条目同源（先查共享映射、回落 hostLabelOf，口径一致）');
+  /* 徽标已下线（2026-10-16）：连接状态展现面收敛到分组树，「同源」纪律改锁
+     组头标签——它和条目 title 一样必须查共享展示名映射，口径不一致就会出现
+     「组头报 A、条目报 B」。 */
+  assert.doesNotMatch(remote, /window\.refreshRemoteBadge/, '徽标必须已下线（不得留死接口）');
+  const grp = sliceBetween(history, 'function wsGroupLabelOf(conn)', 'var LS_WS_GROUP_COLLAPSED');
+  assert.match(grp, /remoteHostLabel\(conn\.id\)/, '组头标签必须查共享展示名映射（与条目 title 同源）');
 });
 
 test('P1-2 app-base.js 必须提供统一 helper（两处合并点各写 typeof 守卫必漏）', () => {
@@ -476,9 +478,16 @@ test('P1-2 渲染层必须消费 _scopeHost（否则是空承诺）', () => {
 test('P1-1「打开文件夹」链路必须恒本地（locate 扫盘 + 消歧候选登记）', () => {
   const locate = sliceBetween(workspace, 'function locateFolder(name, children)', 'function fallbackInputPicker(onPicked)');
   assert.match(locate, /projects\/locate\?__scope=local/, 'locate 必须锁本地：否则选中远端工作区后会去远端扫本机目录名');
-  const cand = sliceBetween(workspace, 'if (pendingCandidates && pendingCandidates.indexOf(p) >= 0)', 'selectChatWorkspace(p);');
-  assert.match(cand, /projects\/add\?__scope=local/, '消歧候选来自本机扫盘，登记必须回本地');
-  assert.match(cand, /_scope: 'local'/, '消歧候选登记后必须补临时 _scope=local（重拉是异步的，紧接着的选中会查旧缓存回落激活环境）');
+  /* 2026-10-16 消歧分支收编进 registerWorkspacePath 单点登记链（原内联 ajax 是
+     「同缺陷两副本」的第二份）：这里锁「消歧分支必须走共用链且传本地归属」，
+     本地锁与临时记录的具体断言落在共用链本体上。 */
+  const cand = sliceBetween(workspace, 'if (pendingCandidates && pendingCandidates.indexOf(p) >= 0)', 'registerWorkspacePath(p, null, true);');
+  assert.match(cand, /pendingCandidates = null;/, '命中后必须退出消歧态');
+  const reg = sliceBetween(workspace, 'function registerWorkspacePath(picked, scopeId, autoSelect)', 'window.sidebarAddWorkspace');
+  assert.match(reg, /\?__scope=local/, '共用登记链必须锁本地：消歧候选来自本机扫盘，不声明就落激活兜底会登记到远端');
+  /* 临时 _scope=local 记录现在由共用链内的 registerProjectScope(picked, scopeId || 'local')
+     单点补齐（重拉是异步的，紧接着的选中会查旧缓存回落激活环境） */
+  assert.match(reg, /registerProjectScope\(picked, scopeId \|\| 'local'\)/, '登记后必须经共用 helper 补临时归属（本地回落 local）');
 });
 
 test('P1-1 removeProject 的归属优先用调用方声明值（侧栏副本与本模块列表可能不同步）', () => {

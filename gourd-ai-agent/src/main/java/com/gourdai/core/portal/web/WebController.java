@@ -88,9 +88,12 @@ public class WebController {
     /** 日志记录器 */
     private static final Logger LOG = LoggerFactory.getLogger(WebController.class);
 
-    /** 会话「最后活动」数据文件后缀：引擎消息 / 引擎快照 / Web 流式回放；取三者 mtime 最大值判定活动时间 */
+    /** 会话「最后活动」数据文件后缀：引擎消息 / 引擎快照 / Web 流式回放 / 工具用量账本；
+     * 取各者 mtime 最大值判定活动时间。账本必须入列：它是工具调用的逐次追写，
+     * 漏掉会让「只跑工具不产文本」的轮次（如纯 todowrite/记忆写入）不刷新会话时间 */
     private static final String[] ACTIVITY_FILE_SUFFIXES = {
-            ".messages.ndjson", ".snapshot.json", SessionStreamStore.STREAM_SUFFIX};
+            ".messages.ndjson", ".snapshot.json", SessionStreamStore.STREAM_SUFFIX,
+            SessionStreamStore.USAGE_SUFFIX};
 
     /**
      * {@code /web/chat/attachment/meta} 单次请求的路径条数上限。
@@ -2659,8 +2662,9 @@ public class WebController {
      * 会话工具用量统计（只读）：从会话消息文件里统计记忆与技能的调用情况。
      *
      * <p><b>WHY</b>：任务监控面板需要回答「这一轮 AI 有没有真的用上记忆/技能」。
-     * 这份事实只存在于 {@code <sessionDir>/<sid>.messages.ndjson} 的 assistant 消息
-     * {@code toolCalls} 里，而 {@link #messages} 只取 role/content/createdAt。
+     * 这份事实的权威源是 {@code <sid>.usage.ndjson} 用量账本（写侧在可见性过滤前逐次追写）；
+     * 老会话无账本时回退 stream 的 action_start 帧，再回退 messages 的 toolCalls
+     * （详见 {@link SessionToolUsageService} 的数据源优先级）。
      * 统计逻辑全部在 {@link SessionToolUsageService}（无状态纯函数，可独立单测），
      * 本端点只负责会话目录解析与安全校验。</p>
      *
@@ -2691,9 +2695,15 @@ public class WebController {
                 return Result.failure(400, "Workspace root does not match the session binding");
             }
 
-            final String messageFileName = sessionId + ".messages.ndjson";
-            File sessionDir = sessionLocator.resolveDirForRead(sessionId, sessionRoot, messageFileName);
-            return Result.succeed(SessionToolUsageService.usage(sessionDir, sessionId));
+            // 候选目录：标准落点优先，历史落点（旧版无根会话写进 workspace 的那批）兜底。
+            // 三类数据源文件各自在候选目录里取第一个命中，只读其一不混读（见 Service）。
+            File primaryDir = sessionLocator.resolveDir(sessionId, sessionRoot);
+            File legacyDir = sessionLocator.resolveDirForRead(sessionId, sessionRoot,
+                    sessionId + ".messages.ndjson");
+            List<File> candidateDirs = primaryDir.equals(legacyDir)
+                    ? List.of(primaryDir)
+                    : List.of(primaryDir, legacyDir);
+            return Result.succeed(SessionToolUsageService.usage(candidateDirs, sessionId));
         } catch (Throwable e) {
             // 只读统计端点不得抛 500：解析失败一律回空态，面板降级为「暂无统计」
             LOG.warn("[Web] session tool usage failed: {}", e.getMessage());

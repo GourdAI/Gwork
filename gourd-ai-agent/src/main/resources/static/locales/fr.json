@@ -5,7 +5,11 @@
 
         "group_empty":  "Aucun projet (connexion en ligne)",
 
-        "badge_count":  "{n}",
+        "group_add":  "Ajouter un espace de travail",
+
+        "group_actions":  "Actions de connexion",
+
+        "group_add_down":  "Connexion hors ligne",
 
         "pick_connection":  "Choisir une connexion distante",
     "connect_in_progress": "Une connexion est déjà en cours, veuillez patienter",
@@ -86,8 +90,6 @@
         "remove_host":  "Supprimer",
 
         "badge":  "Distant",
-
-        "badge_title":  "Espace de travail distant : {host} (cliquer pour ouvrir le menu distant)",
 
         "mirror_sync_menu":  "Synchroniser la config des modèles vers le distant",
 

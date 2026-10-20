@@ -2399,6 +2399,14 @@ public class WebGate extends SimpleWebSocketListener {
     }
 
     /**
+     * 本轮已登记的流根（用量账本等旁路写入与 stream 同落点用）；未登记返回 null，
+     * 调用方交由 {@link SessionLocator} 的登记表/全局基准兜底。
+     */
+    String streamRoot(String sessionId) {
+        return streamRoots.get(sessionId);
+    }
+
+    /**
      * 解析会话存储目录（Web 侧旁路落盘的权威口径）。
      *
      * <p>优先用本轮已登记的流根 {@link #streamRoots}（run 进行中它就是附件与 queue.json 的落点），

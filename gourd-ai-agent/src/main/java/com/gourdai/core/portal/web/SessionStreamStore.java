@@ -79,6 +79,16 @@ public class SessionStreamStore {
     public static final String STREAM_SUFFIX = ".stream.ndjson";
 
     /**
+     * 用量账本文件后缀（与 messages/stream 并列存放）：每行一条工具调用事实。
+     *
+     * <p>WHY 需要账本：任务监控面板的「技能调用 / 记忆是否更新」统计需要<b>全量</b>工具调用事实，
+     * 而既有两个落盘点都覆盖不全——{@code messages.ndjson} 只存最终纯文本答复（带 toolCalls 的
+     * 中间 assistant 消息只活在内存 workingMemory），stream 帧又在可见性策略处过滤掉了记忆工具。
+     * 账本在事件映射层（过滤之前）逐次追写，见 {@link #recordToolUsage}。</p>
+     */
+    public static final String USAGE_SUFFIX = ".usage.ndjson";
+
+    /**
      * 单个块 {@code text} 落盘的<b>病态防护上限</b>（非功能性截断）。
      * <p>历史回溯要求「信息零丢失」，故正常工具结果（read 大文件、bash 长日志）一律<b>全文落盘</b>，
      * 磁盘文件即完整源真相，可回溯/导出。此上限仅用于兜底极端异常——某个工具一次吐出数百 MB
@@ -411,6 +421,80 @@ public class SessionStreamStore {
         } catch (Throwable e) {
             LOG.warn("[StreamStore] record failed for session {}: {}", sessionId, e.getMessage());
         }
+    }
+
+    /**
+     * 向会话用量账本 {@code <sid>.usage.ndjson} 追加一行工具调用事实。
+     *
+     * <p><b>调用位置纪律</b>：必须在 {@code WebToolVisibilityPolicy} 过滤<b>之前</b>调用（当前由
+     * {@code WebStreamBuilder.mapEvent} 的 ToolCallEndEvent 分支负责）——记忆工具被可见性策略
+     * 过滤后永不产生 stream 帧，若账本也挂在过滤之后，「记忆是否更新」将永远统计不到。</p>
+     *
+     * <p><b>性能与体积</b>：复用本类逐文件锁与长驻 Writer（与 stream 行同一条 {@link #appendLine}
+     * 路径，行级可见）；每行约 90 字节且不含参数与结果，典型会话 60~150 次工具调用即几 KB~十几 KB，
+     * 相对 MB 级 stream 文件可忽略；单次写入成本与 stream 追加一行同量级（小 append + flush）。</p>
+     *
+     * <p>失败只记日志降级：统计属展示增强，绝不影响工具调用本身与主推流。</p>
+     *
+     * @param sessionId   会话 ID（空则 no-op）
+     * @param projectRoot 会话归属根（与 stream 同口径，可为 null）
+     * @param toolName    工具注册名（空则 no-op）
+     * @param success     调用是否成功（失败也如实记录）
+     * @param actionId    调用 ID（与 stream 帧配对去重用，可为 null）
+     * @param agentName   发起代理名（可为 null）
+     * @param skillName   技能标识（仅 skillread/skillsearch 有值，其余传 null）
+     */
+    public void recordToolUsage(String sessionId, String projectRoot, String toolName,
+                                boolean success, String actionId, String agentName, String skillName) {
+        if (sessionId == null || sessionId.isEmpty() || toolName == null || toolName.isEmpty()) {
+            return;
+        }
+        try {
+            File file = usageLedgerFile(sessionId, projectRoot);
+            if (file == null) return;
+            StringBuilder sb = new StringBuilder(96);
+            sb.append("{\"tool\":").append(jsonStr(toolName))
+                    .append(",\"ok\":").append(success)
+                    .append(",\"at\":").append(System.currentTimeMillis());
+            if (actionId != null && !actionId.isEmpty()) {
+                sb.append(",\"actionId\":").append(jsonStr(actionId));
+            }
+            if (agentName != null && !agentName.isEmpty()) {
+                sb.append(",\"agent\":").append(jsonStr(agentName));
+            }
+            if (skillName != null && !skillName.isEmpty()) {
+                sb.append(",\"skill\":").append(jsonStr(skillName));
+            }
+            sb.append('}');
+            synchronized (lockFor(file)) {
+                appendLine(file, sessionId, sb.toString());
+            }
+        } catch (Throwable e) {
+            LOG.warn("[StreamStore] record tool usage failed for session {}: {}", sessionId, e.getMessage());
+        }
+    }
+
+    /** JSON 字符串字面量（账本行手工拼装，字段均为标识符类短串，转义兜底控制字符）。 */
+    private static String jsonStr(String value) {
+        StringBuilder sb = new StringBuilder(value.length() + 8);
+        sb.append('"');
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        return sb.append('"').toString();
     }
 
     /**
@@ -1953,6 +2037,17 @@ public class SessionStreamStore {
                 compacted.remove(key);
                 usageSums.remove(key);
             }
+            // 用量账本与 stream 共用长驻 Writer 机制（writerFor 对任何文件都会懒建句柄）：Windows 下
+            // 句柄未关时 deleteIfExists 必抛 AccessDenied（被 catch 吞掉 → 文件残留 → 会话目录删不掉），
+            // 故账本必须与 stream 同口径关句柄并删除。漏掉它的表现是「会话删除后目录残留一个几 KB 文件」。
+            File ledger = usageLedgerFile(sessionId, projectRoot);
+            if (ledger != null) {
+                synchronized (lockFor(ledger)) {
+                    closeWriter(ledger);
+                    Files.deleteIfExists(ledger.toPath());
+                    lastWriteAt.remove(pathKey(ledger));
+                }
+            }
         } catch (Throwable e) {
             LOG.warn("[StreamStore] delete failed for session {}: {}", sessionId, e.getMessage());
         }
@@ -2607,6 +2702,17 @@ public class SessionStreamStore {
         try {
             File dir = sessionLocator.resolveDir(sessionId, projectRoot);
             return new File(dir, sessionId + STREAM_SUFFIX);
+        } catch (Throwable e) {
+            LOG.warn("[StreamStore] resolve dir failed for session {}: {}", sessionId, e.getMessage());
+            return null;
+        }
+    }
+
+    /** 用量账本文件（与 stream 同目录同解析口径）；解析失败返回 null（调用方 no-op 降级）。 */
+    private File usageLedgerFile(String sessionId, String projectRoot) {
+        try {
+            File dir = sessionLocator.resolveDir(sessionId, projectRoot);
+            return new File(dir, sessionId + USAGE_SUFFIX);
         } catch (Throwable e) {
             LOG.warn("[StreamStore] resolve dir failed for session {}: {}", sessionId, e.getMessage());
             return null;

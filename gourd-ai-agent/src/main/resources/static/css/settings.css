@@ -334,7 +334,9 @@
     top: 1.5px;
     width: 5px;
     height: 9px;
-    border: solid #fff;
+    /* 勾色必须走 --accent-contrast：底色是 var(--accent)，暗色主题 accent 提亮为近白，
+       写死 #fff 实测对比度 1.07:1 = 勾隐形（2026-10 用户截图反馈「按钮颜色不对」）。 */
+    border: solid var(--accent-contrast);
     border-width: 0 2px 2px 0;
     transform: rotate(45deg);
 }
@@ -690,7 +692,8 @@ select[disabled] {
     top: 1.5px;
     width: 5px;
     height: 9px;
-    border: solid #fff;
+    /* 同 .mcp-tool-checkmark::after：勾色走 --accent-contrast，禁止写死 #fff */
+    border: solid var(--accent-contrast);
     border-width: 0 2px 2px 0;
     transform: rotate(45deg);
 }
@@ -973,7 +976,7 @@ input[type=number] { -moz-appearance: textfield; }
 .permission-tool-checkmark { width: 18px; height: 18px; border: 1.5px solid var(--border-color); border-radius: 4px; background: var(--bg-sidebar); transition: all 0.2s; position: relative; flex-shrink: 0; }
 .permission-tool-checkbox:hover .permission-tool-checkmark { border-color: var(--accent); }
 .permission-tool-checkbox input:checked + .permission-tool-checkmark { background: var(--accent); border-color: var(--accent); }
-.permission-tool-checkbox input:checked + .permission-tool-checkmark::after { content: ''; position: absolute; left: 5px; top: 2px; width: 5px; height: 9px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.permission-tool-checkbox input:checked + .permission-tool-checkmark::after { content: ''; position: absolute; left: 5px; top: 2px; width: 5px; height: 9px; border: solid var(--accent-contrast); border-width: 0 2px 2px 0; transform: rotate(45deg); }
 .permission-tool-info { flex: 1; min-width: 0; }
 .permission-tool-name { font-size: 13px; font-weight: 500; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
 .permission-tool-desc { font-size: 11px; color: var(--text-secondary); margin-top: 1px; }

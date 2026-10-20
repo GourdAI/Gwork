@@ -5,7 +5,11 @@
 
         "group_empty":  "Sin proyectos (conexión en línea)",
 
-        "badge_count":  "{n}",
+        "group_add":  "Añadir espacio de trabajo",
+
+        "group_actions":  "Acciones de conexión",
+
+        "group_add_down":  "Conexión desconectada",
 
         "pick_connection":  "Elegir conexión remota",
     "connect_in_progress": "Ya hay una conexión en curso, espere un momento",
@@ -86,8 +90,6 @@
         "remove_host":  "Quitar",
 
         "badge":  "Remoto",
-
-        "badge_title":  "Espacio de trabajo remoto: {host} (clic para abrir el menú remoto)",
 
         "mirror_sync_menu":  "Sincronizar config de modelos al remoto",
 

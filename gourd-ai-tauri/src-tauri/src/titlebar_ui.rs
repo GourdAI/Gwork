@@ -43,9 +43,16 @@
 //!
 //! 后一条是踩过坑的。业务遮罩是 `position:fixed; inset:0`，本就盖在控件层
 //! *之下*、已经把按钮区背景压暗了一次；控件层若再铺一张同色蒙版，那块
-//! 138x36 的区域会被压暗两次（0.5 叠 0.5 等效 0.75），在整片遮罩里显出一块
+//! 102x36 的区域会被压暗两次（0.5 叠 0.5 等效 0.75），在整片遮罩里显出一块
 //! 明显更深的补丁。真正没被压暗的只有按钮图标本身（它在遮罩之上），
 //! 所以只需要压暗图标，背景交还给业务遮罩，整屏才是同一个色。
+//!
+//! ## 按钮形态：与前端标题栏动作组同款 chip
+//!
+//! 30x26 / 圆角 6 / hover 走主题令牌 `--bg-hover` / 图标 12px，与
+//! `css/task-monitor.css` 的 `.titlebar-action-btn`（终端/监控钮）逐项一致；
+//! 控件条总宽 = 3×30 + 2×2(gap) + 2×4(padding) = 102px。
+//! 唯一例外：关闭钮 hover 保留 Win11 标准红底白叉（破坏性操作警示）。
 //!
 //! macOS 仍走原生红绿灯显隐（titlebar.rs），因为那里确实没有 DOM 可用。
 
@@ -59,9 +66,20 @@ use crate::window::MAIN_WINDOW_LABEL;
 /// 改这里必须同步改那里，否则控件层会与内容区错位。
 pub const TITLEBAR_HEIGHT: u32 = 36;
 
-/// 单个窗口按钮宽度（px）。Windows 11 原生标题栏按钮为 46x32，
-/// 这里高度取 36 与前端拖拽条齐平，宽度沿用 46 保持肌肉记忆。
-const BUTTON_WIDTH: u32 = 46;
+/// 单个窗口按钮命中块宽度（px）。与前端 `.titlebar-action-btn`
+/// （task-monitor.css）的 30px 逐字对齐：用户要求窗口按钮与左侧
+/// 终端/监控钮「同款 chip」，观感统一优先于 Win11 原生 46px 肌肉记忆。
+const BUTTON_WIDTH: u32 = 30;
+
+/// 单个窗口按钮命中块高度（px）。同 `.titlebar-action-btn` 的 26px；
+/// 在 36px 控件条内垂直居中，四周留 5px 呼吸位形成圆角 chip。
+const BUTTON_HEIGHT: u32 = 26;
+
+/// 相邻窗口按钮间距（px）。同 `.titlebar-actions` 的 gap: 2px。
+const BUTTON_GAP: u32 = 2;
+
+/// 控件层左右内边距（px）。同 `.titlebar-actions` 的 padding: 0 4px。
+const STRIP_PAD_X: u32 = 4;
 
 /// macOS 红绿灯需要让出的左侧宽度（px）。
 /// 系统红绿灯实际占位约 78px，取 80 留 2px 余量。
@@ -149,6 +167,9 @@ pub fn init_script() -> String {
         .replace("__GOURD_PLATFORM__", crate::ipc_bridge::platform_tag())
         .replace("__TB_HEIGHT__", &TITLEBAR_HEIGHT.to_string())
         .replace("__BTN_WIDTH__", &BUTTON_WIDTH.to_string())
+        .replace("__BTN_HEIGHT__", &BUTTON_HEIGHT.to_string())
+        .replace("__BTN_GAP__", &BUTTON_GAP.to_string())
+        .replace("__PAD_X__", &STRIP_PAD_X.to_string())
         .replace("__MAC_INSET__", &MAC_TRAFFIC_LIGHT_INSET.to_string())
 }
 
@@ -164,7 +185,13 @@ const TITLEBAR_JS: &str = r#"
   var PLATFORM = '__GOURD_PLATFORM__';
   var TB_H = __TB_HEIGHT__;
   var BTN_W = __BTN_WIDTH__;
+  var BTN_H = __BTN_HEIGHT__;
+  var BTN_GAP = __BTN_GAP__;
+  var PAD_X = __PAD_X__;
   var MAC_INSET = __MAC_INSET__;
+  /* 控件条总宽（px）：3 按钮 + 2 间距 + 2 内边距。前端 app-titlebar-actions.js
+     的左组右偏移必须与此同值（+6px 视觉间距），改尺寸时四处同改。 */
+  var STRIP_W = BTN_W * 3 + BTN_GAP * 2 + PAD_X * 2;
 
   /* macOS 用原生红绿灯（见 Rust 侧模块文档），只需让出左上角空间，不注入按钮 */
   var USE_CUSTOM_CONTROLS = (PLATFORM !== 'darwin');
@@ -184,19 +211,21 @@ const TITLEBAR_JS: &str = r#"
     });
   }
 
-  /* ───────── 图标（Windows 11 Fluent 线性风格，10x10 视口，1px 描边）───────── */
+  /* ───────── 图标（Windows 11 Fluent 线性风格，10x10 视口，12px 渲染）─────────
+     渲染尺寸 12px：与左侧 .titlebar-action-btn 的 15px 图标在 30x26 chip 内
+     视觉重量对齐（窗控符号笔画更简，12px 即等效）；viewBox 不变只改外框。 */
 
   var ICONS = {
-    minimize: '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">'
+    minimize: '<svg width="12" height="12" viewBox="0 0 10 10" aria-hidden="true">'
             + '<rect x="0" y="4.5" width="10" height="1" fill="currentColor"/></svg>',
-    maximize: '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">'
+    maximize: '<svg width="12" height="12" viewBox="0 0 10 10" aria-hidden="true">'
             + '<rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg>',
     /* 还原：右上角一个偏移方框 + 左下角实框，与 Win11 一致 */
-    restore:  '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">'
+    restore:  '<svg width="12" height="12" viewBox="0 0 10 10" aria-hidden="true">'
             + '<path d="M2.5 2.5 V1 A0.5 0.5 0 0 1 3 0.5 H9 A0.5 0.5 0 0 1 9.5 1 V7 A0.5 0.5 0 0 1 9 7.5 H7.5" '
             + 'fill="none" stroke="currentColor" stroke-width="1"/>'
             + '<rect x="0.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1"/></svg>',
-    close:    '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">'
+    close:    '<svg width="12" height="12" viewBox="0 0 10 10" aria-hidden="true">'
             + '<path d="M0.5 0.5 L9.5 9.5 M9.5 0.5 L0.5 9.5" stroke="currentColor" stroke-width="1.1"/></svg>'
   };
 
@@ -207,28 +236,36 @@ const TITLEBAR_JS: &str = r#"
   var CSS = [
     '#' + ROOT_ID + '{',
     '  position:fixed;top:0;right:0;height:' + TB_H + 'px;',
-    '  z-index:2147483000;display:flex;align-items:stretch;',
+    '  z-index:2147483000;display:flex;align-items:center;',
+    /* gap/padding 与 .titlebar-actions 逐字一致：chip 间距 2px、两侧 4px，
+       五钮（终端/监控 + 最小化/最大化/关闭）排布节奏统一。 */
+    '  gap:' + BTN_GAP + 'px;padding:0 ' + PAD_X + 'px;',
     '  pointer-events:none;', /* 容器不吃事件，只有按钮吃，避免遮挡右上角业务控件 */
     '  -webkit-user-select:none;user-select:none;',
     '  font-family:system-ui,"Segoe UI",sans-serif;',
     '}',
     '#' + ROOT_ID + '.is-hidden{display:none;}',
 
-    /* 按钮本体 */
+    /* 按钮本体：与 .titlebar-action-btn 同款 chip（30x26 / 圆角6 / 居中）。
+       高度不再 100% 撑满控件条，改为定高 + 垂直居中，hover 底色才是圆角小块
+       而非整条色带（用户反馈「与左侧两钮不一致」的根因）。 */
     '#' + ROOT_ID + ' .__gourd_tb_btn{',
-    '  pointer-events:auto;width:' + BTN_W + 'px;height:100%;',
+    '  pointer-events:auto;width:' + BTN_W + 'px;height:' + BTN_H + 'px;',
     '  display:flex;align-items:center;justify-content:center;',
     '  border:0;padding:0;margin:0;background:transparent;cursor:default;',
+    '  border-radius:6px;',
     '  color:var(--gourd-tb-fg,#1a1a2e);',
     '  opacity:var(--gourd-tb-dim,1);',
-    '  transition:background-color .12s ease,color .12s ease,opacity .15s ease;',
+    '  transition:background-color .15s,color .15s,opacity .15s ease;',
     '  -webkit-app-region:no-drag;', /* 对可能存在的 Chromium 内核无害 */
     '}',
     '#' + ROOT_ID + ' .__gourd_tb_btn svg{display:block;pointer-events:none;}',
     /* 失焦时按钮变淡（对齐 Windows 原生）。与遮罩压暗相乘，二者可叠加生效 */
     '#' + ROOT_ID + '.is-blurred .__gourd_tb_btn{opacity:calc(var(--gourd-tb-dim,1) * .55);}',
 
-    '#' + ROOT_ID + ' .__gourd_tb_btn:hover{background:var(--gourd-tb-hover,rgba(0,0,0,.06));}',
+    /* hover/active 底色优先吃主题令牌 --bg-hover，与 .titlebar-action-btn 完全同源；
+       令牌缺失（注入早于 theme.css 解析的极端时序）才退回 rgba 兜底值。 */
+    '#' + ROOT_ID + ' .__gourd_tb_btn:hover{background:var(--bg-hover,var(--gourd-tb-hover,rgba(0,0,0,.06)));color:var(--text-primary,var(--gourd-tb-fg,#1a1a2e));}',
     '#' + ROOT_ID + ' .__gourd_tb_btn:active{background:var(--gourd-tb-active,rgba(0,0,0,.12));}',
     /* 关闭键：Win11 标准红 #c42b1c，图标转白 */
     '#' + ROOT_ID + ' .__gourd_tb_btn.__gourd_tb_close:hover{background:#c42b1c;color:#fff;opacity:1;}',
@@ -248,13 +285,30 @@ const TITLEBAR_JS: &str = r#"
     '}',
 
     /* 右侧内容区顶部拖拽条：为控件让出宽度，避免业务控件被按钮压住。
+       让位宽 = 控件条总宽 STRIP_W（3 按钮 + gap + padding），与前端
+       app-titlebar-actions.js 的左组偏移同源；改按钮尺寸时自动跟随。
        仅 Win/Linux 需要；mac 的红绿灯在窗口左上角，那里是 .sidebar 而非 .main-area，
        已由前端 app.css 的 .sidebar-header{padding-top:40px} 与
        code.css 的 .filer-topbar{padding-top:44px} 处理，此处无需再加横向让位。 */
     'body.__gourd_has_controls .titlebar-drag-region{',
-    '  padding-right:' + (BTN_W * 3) + 'px;',
+    '  padding-right:' + STRIP_W + 'px;',
     '}'
   ].join('\n');
+
+  /* 控件条总宽对外暴露为唯一真源：前端 app-titlebar-actions.js 的左组右偏移
+     直接消费它（+6px 视觉间距），避免两处硬编码宽度漂移。
+     仅 Win/Linux 自绘时非 0；mac 无自绘控件，前端据此退回不让位。 */
+  window.__GOURD_TITLEBAR_STRIP_W__ = USE_CUSTOM_CONTROLS ? STRIP_W : 0;
+  /* 首帧兜底：本脚本 document-start 注入、早于业务脚本，先把偏移变量写好，
+     避免 app-titlebar-actions.js 执行前的空窗里左组按 CSS 缺省 144px 站位、
+     随后跳变 36px。documentElement 在极早期可能缺失，try/catch 兜住。 */
+  try {
+    if (document.documentElement && document.documentElement.style) {
+      document.documentElement.style.setProperty(
+        '--titlebar-actions-right',
+        (USE_CUSTOM_CONTROLS ? STRIP_W + 6 : 6) + 'px');
+    }
+  } catch (e) { /* 首帧兜底失败不致命：业务脚本随后会覆写 */ }
 
   function injectStyle() {
     if (document.getElementById(STYLE_ID)) return;

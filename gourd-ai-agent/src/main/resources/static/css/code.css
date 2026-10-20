@@ -833,7 +833,7 @@ body.terminal-open .code-terminal-resize-handle { display: block; }
 .new-project-foot .btn-primary:hover { opacity: 0.9; }
 .new-project-foot .btn-secondary { background: var(--bg-hover); color: var(--text-primary); }
 
-/* ---- 对话正文字号收敛：code 模式对话栏被压窄，14px 默认字号显大，统一到 12px 与紧凑风格对齐（不影响 chat 模式）---- */
+/* ---- 对话正文字号收敛：code 模式对话栏被压窄，13px 默认字号仍显大，统一到 12px 与紧凑风格对齐（不影响 chat 模式）---- */
 body.code-mode #chatView .md-content { font-size: 12px; }
 body.code-mode #chatView .msg-row.user .msg-bubble { font-size: 12px; }
 body.code-mode #chatView .md-content pre code { font-size: 11px; }

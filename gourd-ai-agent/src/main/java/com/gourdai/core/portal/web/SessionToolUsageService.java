@@ -42,6 +42,11 @@ import java.util.Set;
  * 因此纯逻辑抽到本类：控制器只负责解析 sessionDir，本类只负责读文件与聚合，
  * 二者可独立验证（见 SessionToolUsageTest）。</p>
  *
+ * <p><b>数据源优先级（2026-10 修复）</b>：{@code <sid>.usage.ndjson} 用量账本（写侧在可见性
+ * 过滤前逐次追写，全量工具事实）&gt; {@code <sid>.stream.ndjson} 的 action_start 帧（老会话无账本，
+ * 技能可统计；记忆工具本就不进 stream，如实为空）&gt; {@code <sid>.messages.ndjson} 的 toolCalls
+ * （兼容既有落盘形态与单测夹具）。三者只取其一，绝不混读以免重复计数。</p>
+ *
  * <p><b>只读、无状态</b>：不持有任何字段，不写盘、不联网；全部为静态纯函数，天然线程安全。
  * 任何解析失败都降级为计数（{@code degradedLines}）而不抛出——监控面板拿不到统计时显示
  * 空态即可，绝不该把整个请求打成 500。</p>
@@ -97,26 +102,131 @@ public final class SessionToolUsageService {
         private final Map<String, Map<String, Integer>> skillGroups = new LinkedHashMap<>();
     }
 
+    /** 用量账本文件名后缀（与 {@link SessionStreamStore#USAGE_SUFFIX} 同值，避免反向依赖）。 */
+    private static final String USAGE_SUFFIX = ".usage.ndjson";
+    /** 流式事件文件名后缀（老会话回退数据源）。 */
+    private static final String STREAM_SUFFIX = ".stream.ndjson";
+    /** 会话消息文件名后缀（末位兼容数据源）。 */
+    private static final String MESSAGES_SUFFIX = ".messages.ndjson";
+
+    /**
+     * 统计一个会话的工具用量（单目录便捷重载）。
+     */
+    public static Map<String, Object> usage(File sessionDir, String sessionId) {
+        return usage(sessionDir == null ? List.of() : List.of(sessionDir), sessionId);
+    }
+
     /**
      * 统计一个会话的工具用量。
      *
-     * @param sessionDir 会话目录（由控制器用 SessionLocator 解析后传入）
-     * @param sessionId  会话 ID，用于拼出 {@code <sid>.messages.ndjson}
+     * @param sessionDirs 候选会话目录（按优先级排序，通常为 [标准目录, 历史落点]）；
+     *                    账本/流/消息三类文件各自取第一个命中的目录，只读其一不混读
+     * @param sessionId   会话 ID，用于拼出各数据源文件名
      * @return LinkedHashMap{sessionId, exists, memory{updated,extractCount,totalCount,names},
      *         skills[{name,toolName,count}], skillCount, toolCallCount, degradedLines}；
-     *         文件不存在时回结构化空态（exists=false），绝不抛异常
+     *         三类文件都不存在时回结构化空态（exists=false），绝不抛异常
      */
-    public static Map<String, Object> usage(File sessionDir, String sessionId) {
+    public static Map<String, Object> usage(List<File> sessionDirs, String sessionId) {
         Counters counters = new Counters();
-        File msgFile = (sessionDir == null || sessionId == null || sessionId.isEmpty())
-                ? null
-                : new File(sessionDir, sessionId + ".messages.ndjson");
-        boolean exists = msgFile != null && msgFile.exists();
-
-        if (exists) {
-            readUsage(msgFile, counters);
+        boolean exists = false;
+        if (sessionId != null && !sessionId.isEmpty()) {
+            File ledger = firstExisting(sessionDirs, sessionId + USAGE_SUFFIX);
+            File stream = firstExisting(sessionDirs, sessionId + STREAM_SUFFIX);
+            File messages = firstExisting(sessionDirs, sessionId + MESSAGES_SUFFIX);
+            if (ledger != null) {
+                exists = true;
+                readLedger(ledger, counters);
+            } else if (stream != null) {
+                exists = true;
+                readStreamFallback(stream, counters);
+            } else if (messages != null) {
+                exists = true;
+                readUsage(messages, counters);
+            }
         }
         return result(sessionId, exists, counters);
+    }
+
+    /** 在候选目录中按序查找第一个存在的目标文件；全不存在返回 null。 */
+    private static File firstExisting(List<File> dirs, String fileName) {
+        if (dirs == null) return null;
+        for (File dir : dirs) {
+            if (dir == null) continue;
+            File file = new File(dir, fileName);
+            if (file.exists()) return file;
+        }
+        return null;
+    }
+
+    /**
+     * 读用量账本：每行一条 {@code {tool,ok,at,actionId?,agent?,skill?}}。
+     *
+     * <p>账本行不是消息对象（无 role），降级判定独立于消息口径：解析不出对象或缺 tool 字段
+     * 才计 degraded；追写中的半行会被宽容解析为缺 tool 的对象，同样计入 degraded——
+     * 账本行极短（约 90 字节）且写完即 flush，半行窗口几乎不存在，宁可如实标记。</p>
+     */
+    private static void readLedger(File ledgerFile, Counters counters) {
+        forEachLine(ledgerFile, line -> {
+            ONode node;
+            try {
+                node = ONode.ofJson(line);
+            } catch (Throwable e) {
+                throw new IllegalArgumentException("not a json object", e);
+            }
+            if (node == null || !node.isObject()) {
+                throw new IllegalArgumentException("not a json object");
+            }
+            String tool = textOf(node.getOrNull("tool"));
+            if (tool == null) {
+                throw new IllegalArgumentException("ledger line without tool");
+            }
+            String skill = textOf(node.getOrNull("skill"));
+            accumulateTool(tool, skill != null ? skill : fallbackSkillName(tool), counters);
+        }, counters);
+    }
+
+    /**
+     * 老会话回退：扫 stream 的 action_start 帧取 toolName 与 args。
+     *
+     * <p>非 action_start 行与解析失败的行一律静默跳过（stream 由多种帧组成，
+     * 半行/异构行属常态，计 degraded 只会制造噪音）；记忆工具本就不进 stream，
+     * 老会话的「记忆是否更新」如实为空，不伪造。</p>
+     */
+    private static void readStreamFallback(File streamFile, Counters counters) {
+        forEachLine(streamFile, line -> {
+            ONode node;
+            try {
+                node = ONode.ofJson(line);
+            } catch (Throwable e) {
+                return;
+            }
+            if (node == null || !node.isObject()) return;
+            if (!"action_start".equals(textOf(node.getOrNull("type")))) return;
+            String tool = textOf(node.getOrNull("toolName"));
+            if (tool == null) return;
+            accumulateTool(tool, skillNameOfArgsNode(node.getOrNull("args"), tool), counters);
+        }, counters);
+    }
+
+    /** 逐行读取回调式处理：行级异常计入 degradedLines 并继续（与既有 readUsage 同纪律）。 */
+    private static void forEachLine(File file, java.util.function.Consumer<String> handler, Counters counters) {
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(new FileInputStream(file), "UTF-8"))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) continue;
+                try {
+                    handler.accept(line);
+                } catch (Throwable e) {
+                    counters.degradedLines++;
+                    LOG.debug("[Web] tool usage skipped unparsable line: {}", e.getMessage());
+                }
+            }
+        } catch (Throwable e) {
+            counters.degradedLines++;
+            LOG.warn("[Web] tool usage read failed for {}: {}", file.getName(), e.getMessage());
+        }
     }
 
     /**
@@ -129,24 +239,7 @@ public final class SessionToolUsageService {
      * （半行 JSON），若因此整批失败，面板在会话运行期间会一直拿不到任何统计。</p>
      */
     private static void readUsage(File msgFile, Counters counters) {
-        try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(new FileInputStream(msgFile), "UTF-8"))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty()) continue;
-                try {
-                    accumulateLine(line, counters);
-                } catch (Throwable e) {
-                    counters.degradedLines++;
-                    LOG.debug("[Web] tool usage skipped unparsable line: {}", e.getMessage());
-                }
-            }
-        } catch (Throwable e) {
-            // 读文件本身失败（权限/被并发删除）：保留已统计部分并记一次 degraded，不回 500
-            counters.degradedLines++;
-            LOG.warn("[Web] tool usage read failed for {}: {}", msgFile.getName(), e.getMessage());
-        }
+        forEachLine(msgFile, line -> accumulateLine(line, counters), counters);
     }
 
     /**
@@ -184,20 +277,67 @@ public final class SessionToolUsageService {
             if (call == null) continue;
             String name = textOf(call.getOrNull("name"));
             if (name == null) continue;
-            counters.toolCallCount++;
-
-            if (MemoryTalent.isMemoryTool(name)) {
-                counters.memoryTotal++;
-                counters.memoryNames.add(name);
-                if (MEMORY_EXTRACT_TOOL.equals(name)) {
-                    counters.memoryExtract++;
-                }
-            } else if (SKILL_TOOLS.contains(name)) {
-                String skillName = skillNameOf(call, name);
-                counters.skillGroups.computeIfAbsent(skillName, k -> new LinkedHashMap<>())
-                        .merge(name, 1, Integer::sum);
-            }
+            accumulateTool(name, skillNameOf(call, name), counters);
         }
+    }
+
+    /**
+     * 记一条工具调用事实（三个数据源共用）：计数 + 记忆/技能分组。
+     *
+     * @param toolName  工具注册名
+     * @param skillName 技能标识（仅技能工具有意义；调用方负责兜底占位）
+     */
+    private static void accumulateTool(String toolName, String skillName, Counters counters) {
+        counters.toolCallCount++;
+        if (MemoryTalent.isMemoryTool(toolName)) {
+            counters.memoryTotal++;
+            counters.memoryNames.add(toolName);
+            if (MEMORY_EXTRACT_TOOL.equals(toolName)) {
+                counters.memoryExtract++;
+            }
+        } else if (SKILL_TOOLS.contains(toolName)) {
+            counters.skillGroups.computeIfAbsent(skillName, k -> new LinkedHashMap<>())
+                    .merge(toolName, 1, Integer::sum);
+        }
+    }
+
+    /** 取不到技能名时的兜底：skillread/skillsearch 用占位符，无参工具用工具名本身。 */
+    private static String fallbackSkillName(String toolName) {
+        return ("skillread".equals(toolName) || "skillsearch".equals(toolName)) ? UNKNOWN_SKILL : toolName;
+    }
+
+    /**
+     * 写侧（用量账本）取技能标识：仅技能工具返回非 null，其余工具返回 null（账本不写 skill 字段）；
+     * 事件 args 是 Map 形态，只认 name/query/skill 三键。
+     *
+     * <p>供 {@code WebStreamBuilder} 在落账本行时填入 skill 字段；取不到时兜底占位，
+     * 与读侧口径完全一致（同一事实不得两处各算一套）。</p>
+     */
+    public static String skillNameOrNull(Map<String, Object> args, String toolName) {
+        if (toolName == null || !SKILL_TOOLS.contains(toolName)) return null;
+        if (args != null) {
+            String value = firstNonEmpty(asText(args.get("name")), asText(args.get("query")), asText(args.get("skill")));
+            if (value != null) return value;
+        }
+        return fallbackSkillName(toolName);
+    }
+
+    /** Map 值 → 非空 trim 字符串；非字符串或空白返回 null。 */
+    private static String asText(Object value) {
+        if (value == null) return null;
+        String text = String.valueOf(value).trim();
+        return text.isEmpty() ? null : text;
+    }
+
+    /** stream 回退源：从 action_start 帧的 args 对象取技能标识。 */
+    private static String skillNameOfArgsNode(ONode args, String toolName) {
+        if (args != null && args.isObject()) {
+            String value = firstNonEmpty(textOf(args.getOrNull("name")),
+                    textOf(args.getOrNull("query")),
+                    textOf(args.getOrNull("skill")));
+            if (value != null) return value;
+        }
+        return fallbackSkillName(toolName);
     }
 
     /**

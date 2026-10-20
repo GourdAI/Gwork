@@ -5,7 +5,11 @@
 
         "group_empty":  "暫無專案（連線線上）",
 
-        "badge_count":  "{n} 台",
+        "group_add":  "新增工作區",
+
+        "group_actions":  "連線動作",
+
+        "group_add_down":  "連線離線，無法新增",
 
         "pick_connection":  "選擇遠端連線",
     "connect_in_progress": "已有連線正在進行中，請稍候",
@@ -86,8 +90,6 @@
         "remove_host":  "移除",
 
         "badge":  "遠端",
-
-        "badge_title":  "遠端工作區：{host}（點擊開啟遠端選單）",
 
         "mirror_sync_menu":  "同步模型配置到遠程",
 

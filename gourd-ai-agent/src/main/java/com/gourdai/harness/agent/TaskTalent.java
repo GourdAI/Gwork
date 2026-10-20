@@ -55,6 +55,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -638,6 +639,13 @@ public class TaskTalent extends AbsTalent {
                 // 的类注释），不依赖父 sink 是否存活，因此主代理本轮结束、界面空闲时卡片仍能更新。
                 final AtomicBoolean cancelFlag = new AtomicBoolean(false);
                 registerCancellable(__sessionId, invocationId, cancelFlag);
+                // 墙钟止损：提交后 BACKGROUND_WALL_CLOCK_MINUTES 内未出结果就自动置取消位，
+                // 复用协作式取消链停流（取值与「不 interrupt 线程」的理由见该常量的 javadoc）。
+                // wallClockFired 是取消原因的唯一判据：不能用「定时器是否仍 pending」判墙钟——
+                // 用户 Stop 走到取消分支时 finally 尚未撤定时器，同样 pending，会被误报成墙钟。
+                final AtomicBoolean wallClockFired = new AtomicBoolean(false);
+                final ScheduledFuture<?> wallClock =
+                        scheduleWallClockStop(__sessionId, invocationId, cancelFlag, wallClockFired);
                 try {
                     emitBackgroundStart(__sessionId, task, invocationId);
 
@@ -687,9 +695,14 @@ public class TaskTalent extends AbsTalent {
                         // 这是<b>正常取消</b>不是子代理失败，绝不能报成 ERROR，否则模型会重派
                         // 一个用户刚刚亲手停掉的任务。
                         if (cancelFlag.get()) {
-                            LOG.warn("后台任务被取消[{}/{} - {}]：用户已停止该会话", task.index, count, task.agent_name);
-                            emitBackgroundEnd(__sessionId, task, invocationId, false, CANCELLED_MESSAGE);
-                            return formatTaskResp(task, false, CANCELLED_MESSAGE, isMultitask);
+                            // 原因分叉：墙钟真的触发过（CAS 抢到取消位）才报墙钟文案；
+                            // 用户 Stop 抢先置位时 fired 保持 false，报用户终止文案，
+                            // 避免模型对用户亲手停掉的任务收到「请拆分重派」的建议。
+                            String cancelMessage = wallClockFired.get()
+                                    ? WALL_CLOCK_MESSAGE : CANCELLED_MESSAGE;
+                            LOG.warn("后台任务被取消[{}/{} - {}]：reason={}", task.index, count, task.agent_name, cancelMessage);
+                            emitBackgroundEnd(__sessionId, task, invocationId, false, cancelMessage);
+                            return formatTaskResp(task, false, cancelMessage, isMultitask);
                         }
                         throw new IllegalStateException("子代理流已结束但未产出 RunEndEvent，无最终结果可取");
                     }
@@ -701,9 +714,19 @@ public class TaskTalent extends AbsTalent {
                 } catch (Throwable e) {
                     // 卡片已建（start 无条件先发），必须补一个结束帧收卡：否则状态点永远闪，
                     // 用户看到的是一张永久 loading 的卡。emit 内部已 try/catch，不会再抛。
-                    emitBackgroundEnd(__sessionId, task, invocationId, false, "ERROR: " + describe(e));
+                    // 取消位已置时收卡文案必须走中性取消文案而非 ERROR：takeUntil 截断流后上游
+                    // 可能以 onError（如 CancellationException）而非正常 complete 收敛，此刻异常只是
+                    // 「取消的形态」而非任务失败；报 ERROR 会让模型把用户 Stop / 墙钟止损停掉的
+                    // 任务当作可重试失败原样重派。原因分叉口径与 runEnd==null 分支完全一致。
+                    String endMessage = cancelFlag.get()
+                            ? (wallClockFired.get() ? WALL_CLOCK_MESSAGE : CANCELLED_MESSAGE)
+                            : "ERROR: " + describe(e);
+                    emitBackgroundEnd(__sessionId, task, invocationId, false, endMessage);
                     throw e;
                 } finally {
+                    // 先撤墙钟定时器再摘取消位：任务已收尾后定时器再触发只会留下误导日志，
+                    // 并可能把 fired 标记置位污染同 invocationId 的后续诊断。
+                    wallClock.cancel(false);
                     unregisterCancellable(__sessionId, invocationId);
                 }
             } else if (__parentTrace == null || __parentTrace.getOptions() == null || __parentTrace.getOptions().getStreamSink() == null) {
@@ -1144,6 +1167,40 @@ public class TaskTalent extends AbsTalent {
     private static final String CANCELLED_MESSAGE =
             "CANCELLED: 任务已被用户停止或连接中断，未产出结果。这是正常的主动终止，不是子代理出错，请勿重试同一任务。";
 
+    /**
+     * 后台子代理的墙钟止损上限（分钟）：自提交起超过此时长仍未完成即自动触发协作式取消。
+     *
+     * <p><b>为何需要</b>：原有三层超时（await_tasks 等待预算、注册表 TTL、单次模型调用封顶）
+     * <b>都不停任务</b>——await 超时只让主代理放弃等待，TTL 只摘回执，单次调用封顶只约束
+     * 一次模型调用；多回合子代理的总墙钟没有上界，一个不断「反思后续航」的失控任务会一直
+     * 烧 token，直到用户手动点 Stop。</p>
+     *
+     * <p><b>为何取 45 分钟</b>：必须大于单次调用总封顶（25 分钟），否则一次合法的慢调用会被
+     * 墙钟误杀；又明显小于注册表 TTL（60 分钟），保证被墙钟停掉的任务在模型下一轮回来
+     * await 时回执仍在注册表里（能拿到取消文案，而不是「token 不存在」）。</p>
+     *
+     * <p><b>为何复用协作式取消链而非 future.cancel(true)</b>：与 TTL 不 interrupt 线程同因——
+     * 子代理可能正在 write/edit 落盘，外部中断会留下写一半的文件；置取消位后由流上的
+     * takeUntil 在下一个事件边界停流并取消在途模型请求。</p>
+     *
+     * <p><b>为何走 {@link RunUtil#timer()}</b>：与 TTL 清理同因——schedule() 延时期间不占线程，
+     * 而 io() 工作池里 sleep 会占死平台线程整个时长。</p>
+     */
+    private static final long BACKGROUND_WALL_CLOCK_MINUTES = 45;
+
+    /**
+     * 后台子代理被墙钟止损自动终止时的结果文案。
+     *
+     * <p>与 {@link #CANCELLED_MESSAGE} 分叉的必要性：墙钟触发说明任务跑了
+     * {@link #BACKGROUND_WALL_CLOCK_MINUTES} 分钟仍未收敛，重派同一个任务大概率再次撞墙；
+     * 文案必须引导模型换更小的拆分或向用户求助，而不是原样重派。刻意不带 "ERROR:" 前缀：
+     * 这不是子代理执行出错，重派也不是对错误的修复动作。</p>
+     */
+    private static final String WALL_CLOCK_MESSAGE =
+            "CANCELLED: 任务运行超过 " + BACKGROUND_WALL_CLOCK_MINUTES
+                    + " 分钟墙钟上限被自动终止，未产出结果。请勿原样重派同一任务："
+                    + "先把它拆成更小的子任务，或向用户说明阻塞点并申请协助。";
+
     private String formatTaskResp(MultiTaskOp task, boolean successful, String result, boolean isMultitask) {
         StringBuilder buf = new StringBuilder();
 
@@ -1413,6 +1470,42 @@ public class TaskTalent extends AbsTalent {
                 BACKGROUND_TTL_MINUTES, TimeUnit.MINUTES);
 
         return token;
+    }
+
+    /**
+     * 为后台任务登记墙钟止损定时器：到期置取消位（协作式取消，不中断线程）。
+     *
+     * <p><b>为何用 CAS 而非 set(true)</b>：定时器与用户 Stop 同时到达时，两条路径都应算
+     * 「用户/外部主动终止」（{@link #CANCELLED_MESSAGE}）；只有抢先拿到取消位的那一方才算墙钟。
+     * 若用 set(true)，墙钟会覆盖用户 Stop 的原因，让模型对一个用户已亲手停掉的任务收到
+     * 「请拆分任务」的建议并重派。</p>
+     *
+     * @return 定时器句柄；调用方必须在 finally 里 {@code cancel(false)}（原因分叉判据见 taskDo 取消分支）
+     */
+    private ScheduledFuture<?> scheduleWallClockStop(String sessionId, String invocationId,
+                                                     AtomicBoolean cancelFlag, AtomicBoolean firedMarker) {
+        return RunUtil.timer().schedule(() -> {
+            // CAS 抢到取消位才算「墙钟是终止原因」：用户 Stop 抢先置位时此处返回 false，
+            // fired 标记保持 false，取消分支据此报用户终止文案而非墙钟文案。
+            if (fireWallClockStop(sessionId, invocationId, cancelFlag)) {
+                firedMarker.set(true);
+            }
+        }, BACKGROUND_WALL_CLOCK_MINUTES, TimeUnit.MINUTES);
+    }
+
+    /**
+     * 墙钟到期动作：以 CAS 置取消位（协作式取消，不中断线程），返回是否抢到取消位。
+     *
+     * <p>包级可见仅为契约测试能真调 CAS 语义（项目无 mockito，定时器 45 分钟不可等待）。
+     * 用 CAS 而非 set(true)：返回值是「终止原因归属」的唯一判据，set(true) 拿不到「是否抢先」。</p>
+     */
+    boolean fireWallClockStop(String sessionId, String invocationId, AtomicBoolean cancelFlag) {
+        if (cancelFlag.compareAndSet(false, true)) {
+            LOG.warn("后台任务触发墙钟止损[{} - {}]：运行超过 {} 分钟未出结果，已置取消位",
+                    sessionId, invocationId, BACKGROUND_WALL_CLOCK_MINUTES);
+            return true;
+        }
+        return false;
     }
 
     /**

@@ -90,8 +90,9 @@
        条目 title 的 _scopeHost 负责告诉用户这条属于哪台机器。
 
        【绑定自愈】页面重载/断线重连后路由表的 by_cwd 绑定可能丢失（连接重建会重登记
-       但绑定需重新声明）。每次扇出 settle 后：若当前选中项能查到【远端】_scope，重新走
-       applyChatWorkspace（内部幂等调 bindWorkspaceScope）——不依赖用户重新点一次。
+        但绑定需重新声明）。每次扇出 settle 后：若当前选中项能查到【远端】_scope，直调
+        bindWorkspaceScope 重声明（幂等、零 UI 副作用；【不得】走 applyChatWorkspace，
+        理由见 settle 内自愈注释）——不依赖用户重新点一次。
        查不到归属（scopeOfPath 返回 null）时【不动现有绑定】：旧实现在这里拿到的是
        兜底回落的 activeId，连上第二台后会用 B 的 id 重新 bind A 机的目录（跨机误绑）。 */
     function loadProjects(cb) {
@@ -190,16 +191,22 @@
             // 本地在前、远端在后（与「默认环境是本地」的心智一致）；远端各连接按 list() 顺序
             projectsCache = projectsCache.concat(merged);
             renderSelectors();
-            /* 绑定自愈：当前选中项能查到【远端】_scope 才重声明（applyChatWorkspace
-               内部幂等调 bindWorkspaceScope；路由表丢失/页面重载后不用等用户重点一次）。
+            /* 绑定自愈：当前选中项能查到【远端】_scope 才重声明（直调 bindWorkspaceScope；
+               路由表丢失/页面重载后不用等用户重点一次）。
                查不到（null）时【不动绑定】：兜底回落 activeId 会把 A 机目录改绑到
                刚连上的 B 机隧道（跨机误绑，UI 无提示），故这里 null 直接跳过。
                选本地/无选择不重声明：本地绑定本就幂等、无选择无 cwd，重声明只会多一次
-               无意义的页面副作用（silent 也可能触发列表重拉）。 */
+               无意义的页面副作用（silent 也可能触发列表重拉）。
+               【不得走 applyChatWorkspace】它会进 selectChatWorkspace 的 closeAll 关掉
+               下拉：下拉每次打开都重跑 loadProjects，而远程态（选中项归属=远端 scope）
+               自愈必触发 → 刚打开的下拉在 HTTP settle 后被自己的自愈关掉，即用户实测的
+               「远程工作区下弹层闪现消失」；本地态不触发故仅远程爆炸。自愈的唯一目的是
+               向壳重声明归属（bind_scope 幂等），直调 bindWorkspaceScope 语义相同且
+               零 UI 副作用。 */
             if (window.currentChatWorkspace) {
                 var scope = scopeOfPath(window.currentChatWorkspace);
-                if (scope && scope !== 'local' && typeof window.applyChatWorkspace === 'function') {
-                    try { window.applyChatWorkspace(window.currentChatWorkspace, true); } catch (e) {}
+                if (scope && scope !== 'local') {
+                    try { bindWorkspaceScope(window.currentChatWorkspace); } catch (e) {}
                 }
             }
             if (typeof cb === 'function') cb(projectsCache);
@@ -307,6 +314,76 @@
     function openRemoteDirPicker(rid, onPicked) {
         window.openDirPicker(onPicked, '&__scope=id:' + encodeURIComponent(rid));
     }
+
+    /* ================= 工作区登记共用流程（2026-10-16 抽取） =================
+       三个入口（工作区下拉「打开文件夹」/「打开远程目录」、侧栏分组头「＋」）
+       共用同一条链：选目录 → POST /web/chat/projects/add?__scope=<归属> →
+       校 body.code → 补临时 _scope 记录 → notifyProjectsChanged。
+       WHY 必须共用：临时记录与归属声明是「防跳机读写」的关键步骤，历史上
+       add-btn 与消歧分支就是同一条缺陷的两个副本（修一处漏一处）；再增加
+       第三个入口时绝不允许再抄一份内联实现。
+       autoSelect：下拉入口登记完顺势选中（用户意图就是「换到这个项目」）；
+       分组头「＋」只登记不选中——用户正在别的环境里干活，添加动作不该
+       打断当前会话（与下拉入口的唯一差异，用参数表达而非复制流程）。 */
+    function registerWorkspacePath(picked, scopeId, autoSelect) {
+        var q = scopeId ? ('?__scope=id:' + encodeURIComponent(scopeId)) : '?__scope=local';
+        $.ajax({
+            url: '/web/chat/projects/add' + q, method: 'POST', contentType: 'application/json',
+            data: JSON.stringify({ path: picked })
+        }).done(function (resp) {
+            /* Solon Result：失败也回 HTTP 200，业务码在 body.code。不校验就会
+               静默选中一个后端不存在的路径 */
+            if (resp && resp.code !== 200) {
+                if (typeof showToast === 'function') showToast(GourdI18n.t('code.add_failed_no_dir'), 'error');
+                return;
+            }
+            /* 补临时 _scope 记录（缓存重拉前的过渡）：让紧接着的选中/渲染/删除
+               拿到确定归属，而不是靠 scopeOfPath 兜底推出来。scopeId 为空 = 本地。
+               两分支都走 registerProjectScope（它带幂等去重：同路径已存在则更新
+               _scope）——内联 push 无去重，重拉竞态下会留重复条目。 */
+            registerProjectScope(picked, scopeId || 'local');
+            if (typeof window.notifyProjectsChanged === 'function') window.notifyProjectsChanged(); // 新增登记：同步记忆页/自动化等持有项目列表的视图
+            if (autoSelect) selectChatWorkspace(picked);
+        }).fail(function () {
+            if (typeof showToast === 'function') showToast(GourdI18n.t('code.dir_access_failed'), 'error');
+        });
+    }
+
+    /* 侧栏分组头「＋」入口（app-history 组头动作按钮调用）：
+       scopeKey='local' → 本机对话框 + 本地登记；'id:<rid>' → 该连接的远端磁盘浏览 + 同机登记。
+       只登记不选中（理由见 registerWorkspacePath 的 autoSelect 注释）。 */
+    window.sidebarAddWorkspace = function (scopeKey) {
+        if (!scopeKey || scopeKey === 'local') {
+            /* 本地添加（并存语义）：本机对话框选本机目录，登记请求带 __scope=local
+               强制打到本地后端（激活 scope 可能指向远端，不带就会去远端校验本地路径
+               → 必然失败）。 */
+            pickSystemFolder(function (picked) { registerWorkspacePath(picked, null, false); });
+            return;
+        }
+        var rid = String(scopeKey).replace(/^id:/, '');
+        if (!rid) return;
+        /* 掉线连接的组不渲染「＋」（app-history 门控），这里是第二道闸：
+           连接已不在注册表/非 connected 时 browse 必失败，不发请求；
+           但必须给 toast（group_add_down）——能走到这里只可能是渲染后
+           刚掉线的竞态，静默 return 会让用户以为按钮坏了。 */
+        var api = window.__GOURD_REMOTE__;
+        var conns = (api && typeof api.list === 'function') ? api.list() : [];
+        var alive = false;
+        for (var i = 0; i < conns.length; i++) {
+            if (conns[i].connectionId === rid && conns[i].state === 'connected') { alive = true; break; }
+        }
+        if (!alive) {
+            /* UI 门控（掉线组不渲染「＋」）通常拦不到这里；真走到说明是
+               渲染后刚掉线的竞态——必须给反馈，静默 return 用户以为按钮坏了 */
+            if (typeof showToast === 'function') showToast(GourdI18n.t('remote.group_add_down'), 'error');
+            return;
+        }
+        if (typeof window.openDirPicker !== 'function') {
+            if (typeof showToast === 'function') showToast(GourdI18n.t('remote.unsupported'), 'error');
+            return;
+        }
+        openRemoteDirPicker(rid, function (picked) { registerWorkspacePath(picked, rid, false); });
+    };
 
     function renderDropdown(dd) {
         // 构建搜索框 + 列表容器结构
@@ -677,7 +754,11 @@
        否则回欢迎页开新会话 + 重载侧栏列表（仿 code 模式 selectProject 语义）。 */
     function selectChatWorkspace(path, silent) {
         var sel = toSelection(path);
-        closeAll();
+        /* 关下拉是「用户做出了选择」的 UI 后果：仅当选择真的变化时才关。
+           silent + 同值 = 纯状态重声明（历史恢复/归属自愈/断开回退等程序化调用），
+           用户可能正在下拉里操作，关掉就是弹层闪现消失（远程态自愈曾恰为此形态）。
+           真实选择分支（含清空选择）保持原语义照关。 */
+        if (!(silent && sel === window.currentChatWorkspace)) closeAll();
         /* 归属声明先于任何带 X-Session-Cwd 的请求（下面的事件广播会触发拉取） */
         bindWorkspaceScope(sel);
         /* 【activeId 同步（自查 P2）】选中远端工作区 = 前端「当前环境」切到该连接、
@@ -797,32 +878,8 @@
         var add = t.closest('.workspace-dropdown .workspace-add-btn');
         if (add) {
             closeAll();
-            /* 本地添加（并存语义）：本机对话框选本机目录，登记请求带 __scope=local
-               强制打到本地后端（激活 scope 可能指向远端，不带就会去远端校验本地路径
-               → 必然失败）。选中时 _scope 查不到（刚登记还没重拉）——scopeOfPath
-               现在回 null，调用方按 local 处理，方向恰好正确；但列表渲染（title 主机名）
-               与后续删除的归属仍需要条目在缓存里，故登记成功后先补一条
-               _scope=local 的临时记录，选中与渲染立即拿到确定归属（不靠任何兜底）。 */
-            pickSystemFolder(function (picked) {
-                $.ajax({
-                    url: '/web/chat/projects/add?__scope=local', method: 'POST', contentType: 'application/json',
-                    data: JSON.stringify({ path: picked })
-                }).done(function (resp) {
-                    /* Solon Result：失败也回 HTTP 200，业务码在 body.code。不校验就会
-                       静默选中一个后端不存在的路径 */
-                    if (resp && resp.code !== 200) {
-                        if (typeof showToast === 'function') showToast(GourdI18n.t('code.add_failed_no_dir'), 'error');
-                        return;
-                    }
-                    /* 新登记的本地路径：补临时 _scope=local（缓存重拉前的过渡记录，
-                       让紧接着的 selectChatWorkspace → scopeOfPath 查到正确归属） */
-                    projectsCache.push({ path: picked, name: picked.split(/[\\/]/).pop() || picked, _scope: 'local' });
-                    if (typeof window.notifyProjectsChanged === 'function') window.notifyProjectsChanged(); // 新增登记：同步记忆页/自动化等持有项目列表的视图
-                    selectChatWorkspace(picked);
-                }).fail(function () {
-                    if (typeof showToast === 'function') showToast(GourdI18n.t('code.dir_access_failed'), 'error');
-                });
-            });
+            /* 本地添加：共用登记流程（见 registerWorkspacePath 注释），登记完顺势选中 */
+            pickSystemFolder(function (picked) { registerWorkspacePath(picked, null, true); });
             return;
         }
 
@@ -841,27 +898,7 @@
             }
             pickRemoteConn(function (rid) {
                 if (!rid) return;   // 用户取消（或无在线连接）：静默，不打扰
-                openRemoteDirPicker(rid, function (picked) {
-                    $.ajax({
-                        url: '/web/chat/projects/add?__scope=id:' + encodeURIComponent(rid), method: 'POST', contentType: 'application/json',
-                        data: JSON.stringify({ path: picked })
-                    }).done(function (resp) {
-                        if (resp && resp.code !== 200) {
-                            if (typeof showToast === 'function') showToast(GourdI18n.t('code.add_failed_no_dir'), 'error');
-                            return;
-                        }
-                        /* 新登记的远端路径：补临时 _scope（同 add 分支理由，防选中时误绑）。
-                           _scope 必须是【选定的那台 rid】而不是 activeId：两台同时在线时二者
-                           不同，写错就会把该目录后续读写跳到另一台机器。
-                           改走 registerProjectScope：与一体化向导（app-remote.finishWizardWithDir）
-                           共用同一实现，避免两处内联 push 日后漂移（含 name 计算口径不一致）。 */
-                        registerProjectScope(picked, rid);
-                        if (typeof window.notifyProjectsChanged === 'function') window.notifyProjectsChanged();
-                        selectChatWorkspace(picked);
-                    }).fail(function () {
-                        if (typeof showToast === 'function') showToast(GourdI18n.t('code.dir_access_failed'), 'error');
-                    });
-                });
+                openRemoteDirPicker(rid, function (picked) { registerWorkspacePath(picked, rid, true); });
             });
             return;
         }
@@ -869,38 +906,16 @@
         var item = t.closest('.workspace-dropdown .project-dropdown-item');
         if (item) {
             var p = item.getAttribute('data-path') || '';
-            /* 消歧列表命中：该路径尚未登记，先登记再选中（与 add-btn 同一 ajax 结构） */
+            /* 消歧列表命中：该路径尚未登记，先登记再选中。
+               消歧候选来自 locateFolder（已强制本地），故登记也必须回本地：
+               不声明就落激活兜底，会把本机路径登记到远端（远端无此路径）。
+               2026-10-16 收编进 registerWorkspacePath（scopeId=null → __scope=local，
+               autoSelect=true 保持「登记完顺势选中」的原语义）：body.code 校验与
+               临时 _scope=local 记录从此单点，消灭「同一条缺陷的两个副本」
+               （历史上这里与 add-btn 各抄一份内联 ajax，修一处漏一处）。 */
             if (pendingCandidates && pendingCandidates.indexOf(p) >= 0) {
                 pendingCandidates = null;
-                $.ajax({
-                    /* 消歧候选来自 locateFolder（已强制本地），故登记也必须回本地：
-                       不声明就落激活兑底，会把本机路径登记到远端（远端无此路径）。 */
-                    url: '/web/chat/projects/add?__scope=local', method: 'POST', contentType: 'application/json',
-                    data: JSON.stringify({ path: p })
-                }).done(function (resp) {
-                    /* 与 add-btn 分支同一口径校 body.code（P2 补完）：Solon 的失败也是
-                       HTTP 200 + body.code=400，不校就会静默选中一个不存在的路径。
-                       消歧候选来自刚刚扫盘结果，远端把它删掉的窗口极窄但仍存在
-                       （远程模式下这个窗口更大：本地扫描根本看不到远端磁盘）。 */
-                    if (resp && resp.code !== 200) {
-                        if (typeof showToast === 'function') showToast(GourdI18n.t('code.add_failed_no_dir'), 'error');
-                        return;
-                    }
-                     /* 同 add-btn 分支：必须补临时 _scope=local。notifyProjectsChanged
-                        触发的重拉是异步的，而下一行的 selectChatWorkspace → scopeOfPath
-                        查的是【旧缓存】（还没有这条）。旧实现在这里会回落激活环境，
-                        「激活=远端」时把本地新目录误绑到远端（后续读写全跳机）；
-                        现在 scopeOfPath 回 null（按 local）不再跳机，但补临时记录仍是
-                        必需：它让归属成为【确定事实】而不是靠兜底推出来的本地。
-                        这里与 add-btn 是同一条缺陷的两个副本，修一处必须修两处。 */
-                    if (projectsCache && projectsCache.push) {
-                        projectsCache.push({ path: p, name: baseName(p), _scope: 'local' });
-                    }
-                    if (typeof window.notifyProjectsChanged === 'function') window.notifyProjectsChanged(); // 新增登记：同步记忆页/自动化等持有项目列表的视图
-                    selectChatWorkspace(p);
-                }).fail(function () {
-                    if (typeof showToast === 'function') showToast(GourdI18n.t('code.dir_access_failed'), 'error');
-                });
+                registerWorkspacePath(p, null, true);
                 return;
             }
             selectChatWorkspace(p);

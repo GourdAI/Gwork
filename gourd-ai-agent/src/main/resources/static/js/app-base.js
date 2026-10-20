@@ -445,6 +445,15 @@ function setActiveSession(sessionId) {
     else if (typeof resetContextIndicator === 'function') resetContextIndicator();
     // 任务执行会话的运行参数提示条（loop 任务）：按新活动会话重建/隐藏
     if (typeof renderLoopRunBanner === 'function') renderLoopRunBanner();
+    /* 任务监控右栏按会话展示数据：切换活动会话必须立即通知它重拉。
+       WHY 挂在这里：setActiveSession 是全部会话切换入口的唯一汇聚点
+       （侧栏 selectSession / openSessionById / 流式回跳 / 视图恢复共 8 处调用），
+       而监控面板自身的刷新触发只有「打开时 / workspace:changed / 6s 轮询」——
+       workspace:changed 仅在工作区真变化时派发，同工作区内切会话不派发，
+       面板只能干等轮询 tick（0-6s 均匀分布、均值 3s）：用户报障「切会话后
+       监控内容等 2-3 秒才刷新」的根因。事件驱动后切会话即刷新（<300ms）。
+       同 updateMessageQueueUI 纪律：typeof 守卫（app-task-monitor 晚于本文件装载）。 */
+    if (switching && typeof window.refreshTaskMonitor === 'function') window.refreshTaskMonitor();
     // 切换完成后回收较早会话的 DOM 与草稿（当前会话已置为 active，不会被误淘汰）
     evictInactiveSessions();
     pruneSessionDrafts();

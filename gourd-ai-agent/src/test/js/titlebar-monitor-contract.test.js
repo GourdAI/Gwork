@@ -198,12 +198,46 @@ test('标题栏按钮在 body 级 fixed 容器，未塞进 .titlebar-drag-region
         '按钮必须 no-drag（通用元素白名单口径：preload/ipc_bridge 只认 button 等元素选择器）');
 });
 
-test('右偏移按平台分流：Win 桌面壳让位 138px 控件，mac/浏览器不让位', () => {
-    assert.match(barJs, /right = 144/, 'Win/Linux 桌面壳：3×46=138 控件宽 + 6 间距');
+test('右偏移按平台分流：Tauri 消费注入控件条总宽，Electron 退 138，mac/浏览器不让位', () => {
+    assert.match(barJs, /__GOURD_TITLEBAR_STRIP_W__/, 'Tauri 壳：左组偏移必须消费注入脚本暴露的控件条总宽（单一真源，防两处硬编码漂移）');
+    assert.match(barJs, /138/, 'Electron 原生 overlay 无暴露变量：退 3×46=138 兜底');
     assert.match(barJs, /is-mac/, 'mac 红绿灯在左上，右侧不让位');
     assert.match(barJs, /setProperty\('--titlebar-actions-right'/, '偏移写入 CSS 变量而非硬编码 style.right');
     assert.match(barJs, /MutationObserver/, '按钮高亮态必须观察 body 类（面板可被多条路径关闭）');
     assert.match(barJs, /attributeFilter: \['class'\]/);
+});
+
+// ---------- 窗口按钮与左组同款 chip（跨模块一致性护栏）----------
+/* 用户反馈「缩放/关闭钮与左侧两钮阴影大小不一致」后的固化护栏：
+   Tauri 自绘窗控（titlebar_ui.rs 注入脚本）与 .titlebar-action-btn 必须逐项同规格。
+   数字从 Rust 常量解析而非写死，改尺寸时本护栏随真实源码走。 */
+const tbRs = fs.readFileSync(path.resolve(__dirname, '../../../../gourd-ai-tauri/src-tauri/src/titlebar_ui.rs'), 'utf8');
+
+test('Tauri 自绘窗口按钮与左组同款 chip：30x26 / 圆角6 / hover 走 --bg-hover', () => {
+    assert.match(tbRs, /const BUTTON_WIDTH: u32 = 30;/, '按钮宽与 .titlebar-action-btn 同 30px');
+    assert.match(tbRs, /const BUTTON_HEIGHT: u32 = 26;/, '按钮高与 .titlebar-action-btn 同 26px');
+    assert.match(tbRs, /border-radius:6px;/, '圆角与左组同 6px');
+    assert.match(tbRs, /__gourd_tb_btn:hover\{background:var\(--bg-hover/, 'hover 底色与左组同源主题令牌');
+    assert.match(tbRs, /__gourd_tb_close:hover\{background:#c42b1c/, '关闭钮 hover 保留 Win11 标准红（用户拍板）');
+    // 左组规格逐项对照（task-monitor.css）
+    assert.match(monitorCss, /\.titlebar-action-btn \{[\s\S]{0,200}?width: 30px; height: 26px;[\s\S]{0,80}?border-radius: 6px;/);
+    assert.match(monitorCss, /\.titlebar-action-btn:hover \{ background: var\(--bg-hover\);/);
+});
+
+test('控件条总宽单一真源：Rust 常量推导 = 注入脚本 STRIP_W = 拖拽让位 = 左组偏移源', () => {
+    const w = Number((tbRs.match(/const BUTTON_WIDTH: u32 = (\d+);/) || [])[1]);
+    const h = Number((tbRs.match(/const BUTTON_HEIGHT: u32 = (\d+);/) || [])[1]);
+    const gap = Number((tbRs.match(/const BUTTON_GAP: u32 = (\d+);/) || [])[1]);
+    const pad = Number((tbRs.match(/const STRIP_PAD_X: u32 = (\d+);/) || [])[1]);
+    assert.ok([w, h, gap, pad].every((n) => Number.isFinite(n) && n > 0), '四个尺寸常量必须可解析');
+    assert.strictEqual(h, 26, '高度不得回归（曾为 100% 撞满控件条）');
+    assert.strictEqual(w * 3 + gap * 2 + pad * 2, 102, '控件条总宽 = 3 钮 + 2 间距 + 2 内边距');
+    // 注入脚本从同组常量推导总宽（禁止再出现硬编码 138/102 的第二份认知）
+    assert.match(tbRs, /var STRIP_W = BTN_W \* 3 \+ BTN_GAP \* 2 \+ PAD_X \* 2;/);
+    assert.match(tbRs, /window\.__GOURD_TITLEBAR_STRIP_W__ = USE_CUSTOM_CONTROLS \? STRIP_W : 0;/, '总宽对外暴露且 mac 归零');
+    assert.match(tbRs, /padding-right:' \+ STRIP_W \+ 'px;/, '拖拽条让位从 STRIP_W 推导');
+    assert.match(tbRs, /USE_CUSTOM_CONTROLS \? STRIP_W \+ 6 : 6/, '首帧兜底偏移同样推导（mac 不让位）');
+    assert.doesNotMatch(tbRs, /height:100%;/, '按钮不得回归撞满控件条高（hover 底会变整条色带）');
 });
 
 // ---------- 任务监控右栏 ----------

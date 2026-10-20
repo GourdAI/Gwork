@@ -58,9 +58,13 @@ test('侧栏重命名成功后广播 projects:changed（否则其它视图停在
 });
 
 test('欢迎页选择器的新增/移除登记同样广播（列表增删对其它视图可见）', () => {
+    /* 2026-10-16 收编后新增路径的广播点在共用链 registerWorkspacePath 内（三个登记
+       入口共用），不再出现在 click 委派切片里；移除路径仍在委派内。两处合起来
+       覆盖「增/删都广播」，缺一即回归。 */
     const delegate = sliceBetween(workspace, "document.addEventListener('click'", 'function boot()');
-    const calls = delegate.match(/window\.notifyProjectsChanged\(\)/g) || [];
-    assert.ok(calls.length >= 2, '新增与移除两条路径都应广播 projects:changed');
+    assert.match(delegate, /window\.notifyProjectsChanged\(\)/, '移除路径必须广播 projects:changed');
+    const reg = sliceBetween(workspace, 'function registerWorkspacePath(picked, scopeId, autoSelect)', 'window.sidebarAddWorkspace');
+    assert.match(reg, /window\.notifyProjectsChanged\(\)/, '新增路径（共用登记链）必须广播 projects:changed');
 });
 
 // ====================================================================

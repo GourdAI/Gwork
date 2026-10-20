@@ -201,7 +201,9 @@ const LOCALES = path.join(STATIC, 'locales');
 const REMOTE_KEYS = ['title', 'unsupported', 'saved_hosts', 'no_saved_hosts', 'new_connection',
   'host_placeholder', 'user_placeholder', 'auth_password', 'auth_key', 'password_placeholder',
   'keypath_placeholder', 'passphrase_placeholder', 'browse', 'connect_btn', 'connecting_to',
-  'connected_ok', 'connect_failed', 'host_user_required', 'remove_host', 'badge', 'badge_title',
+  /* badge_title/badge_count 2026-10-16 随徽标整体下线删除（零消费死键，
+     硬锁清单只锁活键；'badge' 仍是分组标签回落文案，保留） */
+  'connected_ok', 'connect_failed', 'host_user_required', 'remove_host', 'badge',
   /* P2/P3 新增 */
   'channel_ssh', 'channel_wsl', 'channel_preinstalled', 'connecting_wsl',
   'wsl_user_placeholder', 'wsl_hint', 'wsl_loading', 'wsl_none', 'wsl_none_v2', 'preinstalled_hint',
@@ -255,7 +257,6 @@ test('i18n：占位参数必须与代码传参一致（错了会直接显示 {ho
   const withParams = {
     connecting_to: ['{host}', '{port}'],
     connecting_wsl: ['{distro}', '{user}'],
-    badge_title: ['{host}'],
     reconnecting: ['{attempt}', '{max}'],
   };
   for (const lang of ['zh-CN.json', 'en.json']) {
@@ -357,7 +358,10 @@ test('P0-A：并存语义——「打开文件夹」恒本地原生对话框，�
   assert.match(workspace, /workspace-remote-open-btn/, '远端目录必须有专属入口按钮');
   const seg = sliceBetween(workspace, '.workspace-remote-open-btn', 'var item = t.closest');
   assert.match(seg, /openRemoteDirPicker/, '入口必须走远程目录选择器（带 scope 的 openDirPicker）');
-  assert.match(seg, /projects\/add\?__scope=id:/, '远端登记必须显式带 __scope=id（打到登记它的连接）');
+  /* 2026-10-16 收编：登记 ajax 收敛到 registerWorkspacePath 单点（scopeId=rid →
+     __scope=id:<rid>），入口分支不再内联 url 字面量。断言改锁「走共用链且传 rid」。 */
+  assert.match(seg, /registerWorkspacePath\(picked, rid, true\)/,
+    '远端登记必须走共用链且锁选定连接（scopeId=rid → __scope=id；下拉入口 autoSelect=true 保持登记完顺势选中）');
   // openDirPicker 支持 scope 参数（app-code.js），browse 强制打到指定连接
   const code = fs.readFileSync(path.join(STATIC, 'js', 'app-code.js'), 'utf8');
   assert.match(code, /function openDirPicker\(onPick, scopeQ\)/, 'openDirPicker 必须支持 scope 参数');
@@ -387,13 +391,18 @@ test('P0-A：并存语义——「打开文件夹」恒本地原生对话框，�
   assert.match(remote, /window\.__GOURD_REMOTE_ACTIVE__\s*=\s*function/, '远程态探针必须由 app-remote.js 导出');
 });
 
-test('P0-A：projects/add 两条登记分支都必须校验 body.code（Solon 失败也是 HTTP 200）', () => {
-  // add-btn 与消歧候选（pendingCandidates）两处：只校 .done() 不校 code 会静默选中幽灵路径
+test('P0-A：projects/add 登记必须校验 body.code（Solon 失败也是 HTTP 200）', () => {
+  /* 2026-10-16 收编：三个登记入口（add-btn / 消歧候选 / 侧栏分组头「＋」）共用
+     registerWorkspacePath——body.code 校验与临时 _scope 记录单点，消灭「同一条
+     缺陷的两个副本」（历史上 add-btn 与消歧各抄一份内联 ajax，修一处漏一处）。
+     计数断言因此翻转：校验点必须恰好 1 处（多处 = 内联副本回流）。 */
   const okChecks = (workspace.match(/resp && resp\.code !== 200/g) || []).length;
-  assert.ok(okChecks >= 2,
-    `登记分支必须逐条校 body.code，实际命中 ${okChecks} 处（需 ≥2：add-btn + 消歧候选）`);
-  const selectCalls = (workspace.match(/selectChatWorkspace\(p(icked)?\);/g) || []).length;
-  assert.ok(selectCalls >= 2, '对照：选中调用至少两处（两处登记都要被 code 守卫拦住）');
+  assert.equal(okChecks, 1,
+    `body.code 校验必须收敛到 registerWorkspacePath 单点，实际 ${okChecks} 处（多处 = 内联副本回流）`);
+  const reg = sliceBetween(workspace, 'function registerWorkspacePath(picked, scopeId, autoSelect)', 'window.sidebarAddWorkspace');
+  assert.match(reg, /resp && resp\.code !== 200/, '单点必须校 body.code（只校 .done() 会静默选中幽灵路径）');
+  const calls = (workspace.match(/registerWorkspacePath\(/g) || []).length;
+  assert.ok(calls >= 4, '定义 + 至少三个调用点（add-btn/消歧/分组头两分支），实际=' + calls);
 });
 
 test('P1-A：应用退出必须清理远端后端进程（shutdown_all 定义 + RunEvent::Exit 接线）', () => {
@@ -447,21 +456,23 @@ test('P2-A：#remoteKeyBrowse「浏览」必须真接线到原生文件对话框
   assert.ok(caps.includes('"allow-pick-file"'), 'capabilities 授权');
 });
 
-test('P2-B：徽标必须注入常驻容器（不得挂 document.body 无定位）', () => {
-  const at = remote.indexOf('window.refreshRemoteBadge');
-  assert.ok(at > 0, '徽标渲染函数必须存在');
-  /* 切片只取 refreshRemoteBadge 本体（到它的收尾 `};` 为止）。不能用固定长度切片：
-     紧随的 ensureRemoteMenu 确实要挂 body（position:fixed 弹层，本来就该脱离文档流），
-     多切一段就会把合法写法误判成回归。 */
-  const body = sliceBetween(remote, 'window.refreshRemoteBadge = function', 'function ensureRemoteMenu');
-  assert.match(body, /document\.querySelector\('\.sidebar-header-top'\)/,
-    '必须锚定侧栏头部（logo 行右侧空槽，欢迎页/对话页/code 模式都常驻）');
-  assert.doesNotMatch(body, /document\.body\.appendChild/, '挂 body 且无 position → 落在页面流末尾，看不见也点不着');
-  assert.match(body, /if \(!old && !anchor\)/, '锚点未就绪时不能静默挂到别处');
-  // CSS 配套：侧栏头部里的徽标必须能截断不溢出
-  assert.match(appCss, /\.remote-badge \.remote-badge-text \{[^}]*text-overflow: ellipsis/,
-    '主机名过长必须截断（侧栏可拖到 180px），完整值走 title');
-  assert.match(appCss, /\.sidebar-header-top \.remote-badge \{[^}]*max-width/, '侧栏内徽标必须有宽度上限');
+test('P2-B：连接状态展现面收敛到分组树（全局徽标已下线；动作菜单改挂分组头）', () => {
+  /* 2026-10-16 产品拍板：支持同时连多台远端，logo 行右侧单个全局徽标只能报
+     「其中一台/台数」，与侧栏分组树（本地组 + 每连接一组 + 在线状态点）信息
+     重复且更弱 → 徽标整体删除。连接级动作（同步镜像/重连/断开）不随之消失：
+     菜单本体保留，入口改挂分组头「⋯」（openRemoteConnMenu）。 */
+  assert.doesNotMatch(remote, /window\.refreshRemoteBadge/, '徽标渲染器不得残留（零调用点即死接口）');
+  assert.doesNotMatch(remote, /remoteStateBadge/, '徽标 DOM id 不得残留');
+  const menu = sliceBetween(remote, 'function openRemoteConnMenu(anchor, connId)', 'function menuActsHtml');
+  assert.match(menu, /ensureRemoteMenu\(\)/, '菜单本体必须保留（复用 #remoteMenu 弹层与关闭链）');
+  assert.match(menu, /if \(!connId \|\| !connectionsById\[connId\]\) return/,
+    '连接不存在必须静默返回（分组头⋯只渲染在线/掉线组，这里是第二道闸）');
+  assert.match(menu, /data-conn-id="/ , '动作必须绑定到具体连接（菜单不再按连接分组）');
+  assert.match(remote, /window\.openRemoteConnMenu = openRemoteConnMenu/,
+    '分组头入口必须暴露到 window（app-history 跨闭包调用）');
+  /* CSS 配套：徽标规则必须随实现一起删（留着就是死规则 + 误导后人） */
+  assert.doesNotMatch(appCss, /\.remote-badge \{/, '.remote-badge 规则必须已删除');
+  assert.doesNotMatch(appCss, /\.sidebar-header-top \.remote-badge/, '侧栏头部徽标占位规则必须已删除');
 });
 
 test('P2-C：启动恢复的主机展示名取自 Rust 回传（不得拿已保存列表第一项猜）', () => {
@@ -522,9 +533,9 @@ test('P2-D：向导文案必须与实际能力一致（JRE 自装链已落地）
     assert.match(data.remote.wsl_hint, /JRE 17/, '必须描述 JRE 自装语义');
     assert.doesNotMatch(data.remote.preinstalled_hint, /JAVA_TOOL_OPTIONS/,
       '预装提示不得再指 JAVA_TOOL_OPTIONS（凭据已改走环境变量，避开 Picked up 日志泄漏）');
-    assert.match(data.remote.badge_title, /\{host\}/, 'badge_title 必须保留 {host} 占位');
-    assert.doesNotMatch(data.remote.badge_title, /断开\)|disconnect\)/,
-      '点击实际弹菜单（同步/重连/断开）；写「点击断开」与行为不符');
+    /* 徽标下线后 badge_title/badge_count 必须不存在（死键不得回流） */
+    assert.equal(data.remote.badge_title, undefined, 'badge_title 已随徽标下线，不得回流');
+    assert.equal(data.remote.badge_count, undefined, 'badge_count 已随徽标下线，不得回流');
   }
 });
 
@@ -674,9 +685,14 @@ test('分流：双拉合并——主拉恒本地 + 远端经 __scope=id（并存
   assert.ok((fn.match(/\.always\(settle\)/g) || []).length === 2,
     '两个请求都必须接 settle（只接一个会永不调回调 → 下拉一直转圈）');
   /* 本地登记与远端登记都必须显式 scope：/web/chat/projects/add 无 cwd 归属，
-     不带 scope 会打到激活环境（可能指向远端 → 本地路径在远端不存在，登记失败） */
-  assert.match(workspace, /projects\/add\?__scope=local/, '本地登记必须带 __scope=local');
-  assert.match(workspace, /projects\/add\?__scope=id:/, '远端登记必须带 __scope=id');
+     不带 scope 会打到激活环境（可能指向远端 → 本地路径在远端不存在，登记失败）。
+     2026-10-16 收编后 scope 串在 registerWorkspacePath 单点拼装（q 三目），
+     断言改锁拼装点；并反向锁「不得再有内联 url 字面量」（单点纪律）。 */
+  const reg = sliceBetween(workspace, 'function registerWorkspacePath(picked, scopeId, autoSelect)', 'window.sidebarAddWorkspace');
+  assert.match(reg, /'\?__scope=local'/, '本地登记必须带 __scope=local');
+  assert.match(reg, /'\?__scope=id:' \+ encodeURIComponent\(scopeId\)/, '远端登记必须带 __scope=id 且 encodeURIComponent');
+  assert.doesNotMatch(workspace, /url: '\/web\/chat\/projects\/add\?/,
+    '登记 ajax 不得再内联 scope 字面量（单点纪律：出现即复制实现回流）');
 });
 
 test('分流：绑定必须按条目来源而非激活环境（合并列表下否则会把本地项误绑远端）', () => {

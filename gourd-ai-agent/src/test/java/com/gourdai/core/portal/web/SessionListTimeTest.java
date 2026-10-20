@@ -124,6 +124,34 @@ public class SessionListTimeTest {
         }
     }
 
+    /**
+     * 回归（2026-10 自审）：用量账本是工具调用的逐次追写，必须计入最后活动时间——
+     * 「只跑工具不产文本」的轮次（纯 todowrite/记忆写入）若不入列，会话会越用越旧。
+     */
+    @Test
+    public void testLastActivityCountsUsageLedger() throws Exception {
+        Path base = Files.createTempDirectory("list-time-ledger");
+        try {
+            Path dir = base.resolve("work-eee");
+            Files.createDirectories(dir);
+            long now = System.currentTimeMillis();
+
+            Path messages = dir.resolve("work-eee.messages.ndjson");
+            Path ledger = dir.resolve("work-eee.usage.ndjson");
+            Files.write(messages, "m".getBytes(StandardCharsets.UTF_8));
+            Files.write(ledger, "l".getBytes(StandardCharsets.UTF_8));
+            setTime(messages, now - 3 * DAY);
+            setTime(ledger, now - DAY);
+            setTime(dir, now - 5 * DAY);
+
+            Assertions.assertEquals(ledger.toFile().lastModified(),
+                    WebController.lastActivityOf(dir.toFile(), "work-eee"),
+                    "账本 mtime 最新时必须成为最后活动时间");
+        } finally {
+            deleteRecursively(base);
+        }
+    }
+
     /** 源码形态：列表 time 与排序必须同源走 lastActivityOf，且不得回改目录 mtime。 */
     @Test
     public void source_shape_guards() throws IOException {
