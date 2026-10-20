@@ -49,8 +49,10 @@
 //!
 //! ## 按钮形态：与前端标题栏动作组同款 chip
 //!
-//! 30x26 / 圆角 6 / hover 走主题令牌 `--bg-hover` / 图标 12px，与
+//! 30x26 / 圆角 6 / hover 走主题令牌 `--bg-hover` / 图标 15px，与
 //! `css/task-monitor.css` 的 `.titlebar-action-btn`（终端/监控钮）逐项一致；
+//! 图标同用 24 网格 + `stroke-width="2"`：两侧图标在同一标题栏并排，
+//! 外框尺寸与线宽任一不同都会露出「大小不一致」。
 //! 控件条总宽 = 3×30 + 2×2(gap) + 2×4(padding) = 102px。
 //! 唯一例外：关闭钮 hover 保留 Win11 标准红底白叉（破坏性操作警示）。
 //!
@@ -211,22 +213,39 @@ const TITLEBAR_JS: &str = r#"
     });
   }
 
-  /* ───────── 图标（Windows 11 Fluent 线性风格，10x10 视口，12px 渲染）─────────
-     渲染尺寸 12px：与左侧 .titlebar-action-btn 的 15px 图标在 30x26 chip 内
-     视觉重量对齐（窗控符号笔画更简，12px 即等效）；viewBox 不变只改外框。 */
+  /* ───────── 图标（Windows 11 Fluent 线性风格，24x24 视口，15px 渲染）─────────
+     【与左侧同规格，勿再退 12px/10 视口】窗控图标必须与 .titlebar-action-btn 的
+     终端/监控图标逐项同源：15px 外框 + 24 网格 + stroke-width 2，两者在同一标题栏里
+     并排，任何一项不同都会露出一眼可见的大小差。
+     历史：本组曾用「10x10 视口 / 12px / stroke 1」，注释以「窗控符号笔画更简，
+     12px 即等效」自证——实测该假设不成立：12px 渲染下墨迹只有 12px、
+     左侧按 24 网格 15px 渲染为 12.5px（描边缩放后 1.25px），五个按钮并排时
+     右侧三枚明显偏小，即用户报障「图标大小都不一致」。
+     现在两侧共用一套渲染契约：改尺寸请同时改 index.html 里 .titlebar-action-btn
+     的 svg 属性与本处，契约测试会校验两边数字一致。 */
 
   var ICONS = {
-    minimize: '<svg width="12" height="12" viewBox="0 0 10 10" aria-hidden="true">'
-            + '<rect x="0" y="4.5" width="10" height="1" fill="currentColor"/></svg>',
-    maximize: '<svg width="12" height="12" viewBox="0 0 10 10" aria-hidden="true">'
-            + '<rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg>',
-    /* 还原：右上角一个偏移方框 + 左下角实框，与 Win11 一致 */
-    restore:  '<svg width="12" height="12" viewBox="0 0 10 10" aria-hidden="true">'
-            + '<path d="M2.5 2.5 V1 A0.5 0.5 0 0 1 3 0.5 H9 A0.5 0.5 0 0 1 9.5 1 V7 A0.5 0.5 0 0 1 9 7.5 H7.5" '
-            + 'fill="none" stroke="currentColor" stroke-width="1"/>'
-            + '<rect x="0.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1"/></svg>',
-    close:    '<svg width="12" height="12" viewBox="0 0 10 10" aria-hidden="true">'
-            + '<path d="M0.5 0.5 L9.5 9.5 M9.5 0.5 L0.5 9.5" stroke="currentColor" stroke-width="1.1"/></svg>'
+    /* 墨迹口径（四枚统一 20 单位 / 24 网格 ≠ 每枚都画满 24 网格）：
+       描边以路径为中心线向两侧各外扩 stroke-width/2 = 1 单位，故取线心 3..21 → 墨迹 2..22。
+       20 单位 × (15px/24) = 12.5px，与左组 18x18 rect@(3,3) 的墨迹完全同大。
+       圆角统一 rx=2，与 index.html 左组 rect 的 rx="2" 逐项一致——半径不同会在同尺寸下仍显"不一样"。 */
+    minimize: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+            + ' stroke-width="2" stroke-linecap="round" aria-hidden="true">'
+            + '<path d="M3 12h18"/></svg>',
+    maximize: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+            + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+            + '<rect x="3" y="3" width="18" height="18" rx="2"/></svg>',
+    /* 还原：右上偏移框 + 左下整框，与 Win11 一致。
+       【端点必须锚在前框边上】后框是被前框"咬断"的，两个断口各落在前框的两条边上：
+       起始点 (8,8) 压在前框上边缘 y=8，终点 x=16 压在前框右边缘 x=3+13。
+       写成 M8 6 / h-1 会让两端各自悬空 2 单位，15px 下是一根脱节的短笔（bbox 测不出来）。 */
+    restore:  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+            + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+            + '<path d="M8 8V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-3"/>'
+            + '<rect x="3" y="8" width="13" height="13" rx="2"/></svg>',
+    close:    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+            + ' stroke-width="2" stroke-linecap="round" aria-hidden="true">'
+            + '<path d="M3 3 L21 21 M21 3 L3 21"/></svg>'
   };
 
   /* ───────── 样式 ─────────

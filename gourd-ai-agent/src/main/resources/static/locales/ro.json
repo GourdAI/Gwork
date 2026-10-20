@@ -761,7 +761,18 @@
                                         "view_title":  "Setări modele",
                                         "custom_group":  "Furnizori personalizați",
                                         "add_provider_title":  "Adăugare furnizor de modele",
-                                        "add_provider_desc":  "Configurați un endpoint API complet personalizat și un model inițial"
+                                        "add_provider_desc":  "Configurați un endpoint API complet personalizat și un model inițial",
+                                        "clear_models_confirm":  "Goliți lista de modele? {0} model(e) vor fi eliminate.",
+                                        "delete_provider_confirm":  "Ștergeți furnizorul „{0}”? Cele {1} model(e) ale sale vor fi de asemenea șterse definitiv.",
+                                        "delete_provider_confirm_no_models":  "Ștergeți furnizorul „{0}”? Această acțiune nu poate fi anulată.",
+                                        "remove_model_confirm":  "Eliminați modelul „{0}” din listă?",
+                                        "load_providers_failed":  "Încărcarea furnizorilor a eșuat, încercați din nou",
+                                        "edit_model_title":  "Editare model",
+                                        "fetch_models_failed":  "Obținerea listei de modele a eșuat, încercați din nou",
+                                        "model_exists_named":  "Modelul „{0}” există deja",
+                                        "field_required":  "{0} este obligatoriu",
+                                        "model_count":  "{0} model(e)",
+                                        "create":  "Creare furnizor"
                                     },
                       "loop":  {
                                   "title":  "Sarcini programate",

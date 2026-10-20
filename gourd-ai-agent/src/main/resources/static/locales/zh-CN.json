@@ -761,7 +761,18 @@
                                         "view_title":  "模型设置",
                                         "custom_group":  "自定义供应商",
                                         "add_provider_title":  "添加模型供应商",
-                                        "add_provider_desc":  "配置一个完全自定义的 API 端点和初始模型"
+                                        "add_provider_desc":  "配置一个完全自定义的 API 端点和初始模型",
+                                        "clear_models_confirm":  "确定要清空模型列表吗？共 {0} 个模型将被移除。",
+                                        "delete_provider_confirm":  "确定要删除服务商「{0}」吗？其名下 {1} 个模型将被一并删除，且无法恢复。",
+                                        "delete_provider_confirm_no_models":  "确定要删除服务商「{0}」吗？此操作无法恢复。",
+                                        "remove_model_confirm":  "确定要从列表中移除模型「{0}」吗？",
+                                        "load_providers_failed":  "加载服务商列表失败，请重试",
+                                        "edit_model_title":  "编辑模型",
+                                        "fetch_models_failed":  "拉取模型列表失败，请重试",
+                                        "model_exists_named":  "模型「{0}」已存在",
+                                        "field_required":  "{0}不能为空",
+                                        "model_count":  "{0} 个模型",
+                                        "create":  "创建服务商"
                                     },
                       "loop":  {
                                   "title":  "定时任务",

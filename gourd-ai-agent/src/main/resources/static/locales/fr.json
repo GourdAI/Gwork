@@ -761,7 +761,18 @@
                                         "view_title":  "Paramètres des modèles",
                                         "custom_group":  "Fournisseurs personnalisés",
                                         "add_provider_title":  "Ajouter un fournisseur de modèles",
-                                        "add_provider_desc":  "Configurez un point d'entrée API entièrement personnalisé et un modèle initial"
+                                        "add_provider_desc":  "Configurez un point d'entrée API entièrement personnalisé et un modèle initial",
+                                        "clear_models_confirm":  "Vider la liste des modèles ? {0} modèle(s) seront supprimés.",
+                                        "delete_provider_confirm":  "Supprimer le fournisseur « {0} » ? Ses {1} modèle(s) seront également supprimés définitivement.",
+                                        "delete_provider_confirm_no_models":  "Supprimer le fournisseur « {0} » ? Cette action est irréversible.",
+                                        "remove_model_confirm":  "Retirer le modèle « {0} » de la liste ?",
+                                        "load_providers_failed":  "Échec du chargement des fournisseurs, veuillez réessayer",
+                                        "edit_model_title":  "Modifier le modèle",
+                                        "fetch_models_failed":  "Échec de la récupération de la liste des modèles, veuillez réessayer",
+                                        "model_exists_named":  "Le modèle « {0} » existe déjà",
+                                        "field_required":  "{0} est obligatoire",
+                                        "model_count":  "{0} modèle(s)",
+                                        "create":  "Créer un fournisseur"
                                     },
                       "loop":  {
                                   "title":  "Tâches planifiées",

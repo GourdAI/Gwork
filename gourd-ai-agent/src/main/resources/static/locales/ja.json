@@ -761,7 +761,18 @@
                                         "view_title":  "モデル設定",
                                         "custom_group":  "カスタムプロバイダー",
                                         "add_provider_title":  "モデルプロバイダーを追加",
-                                        "add_provider_desc":  "完全にカスタマイズされた API エンドポイントと初期モデルを設定します"
+                                        "add_provider_desc":  "完全にカスタマイズされた API エンドポイントと初期モデルを設定します",
+                                        "clear_models_confirm":  "モデルリストをクリアしますか？{0} 件のモデルが削除されます。",
+                                        "delete_provider_confirm":  "プロバイダー「{0}」を削除しますか？配下の {1} 件のモデルも削除され、元に戻せません。",
+                                        "delete_provider_confirm_no_models":  "プロバイダー「{0}」を削除しますか？この操作は元に戻せません。",
+                                        "remove_model_confirm":  "モデル「{0}」をリストから削除しますか？",
+                                        "load_providers_failed":  "プロバイダーの読み込みに失敗しました。再試行してください",
+                                        "edit_model_title":  "モデルを編集",
+                                        "fetch_models_failed":  "モデルリストの取得に失敗しました。再試行してください",
+                                        "model_exists_named":  "モデル「{0}」は既に存在します",
+                                        "field_required":  "{0}は必須です",
+                                        "model_count":  "{0} 件のモデル",
+                                        "create":  "プロバイダーを作成"
                                     },
                       "loop":  {
                                   "title":  "スケジュールタスク",

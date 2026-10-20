@@ -19,15 +19,20 @@
             <div class="model-settings-card">
                 <!-- 左栏：供应商列表 -->
                 <div class="model-settings-left">
+                    <!-- 左栏头部：分组标题 + 新建入口。
+                         新建是「列表级」操作，放左栏顶部作为入口；表单提交（创建）是右栏底部的
+                         主操作。二者曾同名「添加服务商」并排吸在卡片底部，文案与视觉完全重复，
+                         且编辑态下左栏那个按钮仍常驻、右栏那个被隐藏，底部左右还不对称。 -->
+                    <div class="model-settings-left-header">
+                        <span class="model-settings-left-title" data-i18n="settings.providers.custom_group">自定义供应商</span>
+                        <button class="model-settings-add-btn" id="msProviderAddBtn" data-i18n-title="settings.providers.add_title">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        </button>
+                    </div>
                     <div class="model-settings-left-scroll">
                         <div class="model-settings-group" id="msGroupCustom">
-                            <div class="model-settings-group-label" data-i18n="settings.providers.custom_group">自定义供应商</div>
                             <div class="model-settings-group-list" id="msCustomList"></div>
                         </div>
-                        <button class="model-settings-add-provider-btn" id="msProviderAddBtn" data-i18n-title="settings.providers.add">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                            <span data-i18n="settings.providers.add">添加供应商</span>
-                        </button>
                     </div>
                 </div>
                 <!-- 右栏：详情/表单 -->
@@ -121,11 +126,13 @@
                                     <!-- 搜索无命中空态（有模型但关键词零匹配时显示，与「暂无模型」区分） -->
                                     <div class="provider-models-empty" id="msProviderModelsSearchEmpty" style="display:none" data-i18n="settings.providers.search_no_result">未找到匹配的模型</div>
                                 </div>
-                                <div class="form-actions form-actions-end" id="msProviderFormSubmitRow">
-                                    <button class="btn-primary" id="msProviderSaveBtn" data-i18n="settings.providers.add">添加供应商</button>
-                                </div>
                             </div>
                         </div>
+                    </div>
+                    <!-- 右栏吸底操作栏：表单提交（创建服务商）。文案用「创建服务商」以区分左栏头部
+                         的「新建」入口——两者曾是同名「添加服务商」，用户无法判断点哪个才会真正创建。 -->
+                    <div class="model-settings-footer" id="msProviderFormSubmitRow">
+                        <button class="btn-primary" id="msProviderSaveBtn" data-i18n="settings.providers.create">创建服务商</button>
                     </div>
                 </div>
             </div>

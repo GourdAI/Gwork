@@ -761,7 +761,18 @@
                                         "view_title":  "Cài đặt mô hình",
                                         "custom_group":  "Nhà cung cấp tùy chỉnh",
                                         "add_provider_title":  "Thêm nhà cung cấp mô hình",
-                                        "add_provider_desc":  "Cấu hình điểm cuối API hoàn toàn tùy chỉnh và mô hình ban đầu"
+                                        "add_provider_desc":  "Cấu hình điểm cuối API hoàn toàn tùy chỉnh và mô hình ban đầu",
+                                        "clear_models_confirm":  "Xóa toàn bộ danh sách mô hình? {0} mô hình sẽ bị gỡ bỏ.",
+                                        "delete_provider_confirm":  "Xóa nhà cung cấp \"{0}\"? {1} mô hình của nó cũng sẽ bị xóa vĩnh viễn.",
+                                        "delete_provider_confirm_no_models":  "Xóa nhà cung cấp \"{0}\"? Không thể hoàn tác thao tác này.",
+                                        "remove_model_confirm":  "Gỡ mô hình \"{0}\" khỏi danh sách?",
+                                        "load_providers_failed":  "Tải danh sách nhà cung cấp thất bại, vui lòng thử lại",
+                                        "edit_model_title":  "Sửa mô hình",
+                                        "fetch_models_failed":  "Lấy danh sách mô hình thất bại, vui lòng thử lại",
+                                        "model_exists_named":  "Mô hình \"{0}\" đã tồn tại",
+                                        "field_required":  "{0} là bắt buộc",
+                                        "model_count":  "{0} mô hình",
+                                        "create":  "Tạo nhà cung cấp"
                                     },
                       "loop":  {
                                   "title":  "Tác vụ được lên lịch",

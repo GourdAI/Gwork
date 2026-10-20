@@ -761,7 +761,18 @@
                                         "view_title":  "Configuración de modelos",
                                         "custom_group":  "Proveedores personalizados",
                                         "add_provider_title":  "Añadir proveedor de modelos",
-                                        "add_provider_desc":  "Configure un endpoint de API totalmente personalizado y un modelo inicial"
+                                        "add_provider_desc":  "Configure un endpoint de API totalmente personalizado y un modelo inicial",
+                                        "clear_models_confirm":  "¿Vaciar la lista de modelos? Se eliminarán {0} modelo(s).",
+                                        "delete_provider_confirm":  "¿Eliminar el proveedor «{0}»? Sus {1} modelo(s) también se eliminarán de forma permanente.",
+                                        "delete_provider_confirm_no_models":  "¿Eliminar el proveedor «{0}»? Esta acción no se puede deshacer.",
+                                        "remove_model_confirm":  "¿Quitar el modelo «{0}» de la lista?",
+                                        "load_providers_failed":  "No se pudieron cargar los proveedores, inténtalo de nuevo",
+                                        "edit_model_title":  "Editar modelo",
+                                        "fetch_models_failed":  "No se pudo obtener la lista de modelos, inténtalo de nuevo",
+                                        "model_exists_named":  "El modelo «{0}» ya existe",
+                                        "field_required":  "{0} es obligatorio",
+                                        "model_count":  "{0} modelo(s)",
+                                        "create":  "Crear proveedor"
                                     },
                       "loop":  {
                                   "title":  "Tareas programadas",

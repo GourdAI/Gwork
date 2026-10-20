@@ -77,7 +77,10 @@
         // 清空模型列表
         $('#msProviderClearModelsBtn').on('click', function () {
             if (fetchedModels.length === 0) return;
-            var tConfirm = GourdI18n.t('settings.confirm_delete') + GourdI18n.t('settings.providers.model_management') + '？' + GourdI18n.t('settings.providers.add_model') + GourdI18n.t('common.delete');
+            // 整句式文案：早期用 confirm_delete + model_management + add_model + delete 四段拼接，
+            // 中文产出「确认删除？模型管理？手动添加模型删除」这种不成句的碎片，
+            // 且不同语序的语言（英/德/日等）会粘连成「Confirm delete?Model Management？Add ModelDelete」。
+            var tConfirm = GourdI18n.t('settings.providers.clear_models_confirm', [fetchedModels.length]);
             layConfirm(tConfirm, function () {
                 fetchedModels = [];
                 // 列表已清空，残留的搜索词没有意义（搜索框会随空列表隐藏）
@@ -94,10 +97,12 @@
             openModelDialog(null);
         });
 
-        // 模型列表 - 删除手动模型
+        // 模型列表 - 删除手动模型（二次确认：此前点一下即移除并立即写库，误点无法撤销）
         $modelsList.on('click', '.provider-model-remove-btn', function () {
             var modelId = $(this).closest('.provider-model-item').data('model-id');
-            removeManualModel(modelId);
+            layConfirm(GourdI18n.t('settings.providers.remove_model_confirm', [modelId]), function () {
+                removeManualModel(modelId);
+            });
         });
 
         // 模型列表 - 设为默认模型（星标；成功静默刷新，失败时提示原因）
@@ -284,7 +289,7 @@
             if (!newName) {
                 // 名称必填：留空直接回退，否则表单会卡在空名状态（后续任何即时保存都被拦截）
                 $(this).val(currentProvider.name);
-                showToast(GourdI18n.t('common.name') + GourdI18n.t('common.required'), 'error');
+                showToast(GourdI18n.t('settings.providers.field_required', [GourdI18n.t('common.name')]), 'error');
                 return;
             }
             persistProvider();
@@ -519,7 +524,7 @@
                     console.warn('[model-settings] 供应商列表加载失败（启动预载，已静默）');
                     return;
                 }
-                showToast(GourdI18n.t('common.loading') + GourdI18n.t('settings.providers.title') + GourdI18n.t('settings.loop.operation_failed'), 'error');
+                showToast(GourdI18n.t('settings.providers.load_providers_failed'), 'error');
             },
             complete: function () {
                 if (onDone) onDone();
@@ -552,7 +557,7 @@
             '<div class="ms-provider-icon custom">' + escapeHtml((provider.name || 'B')[0].toUpperCase()) + '</div>' +
             '<div class="ms-provider-info">' +
                 '<div class="ms-provider-name">' + escapeHtml(provider.name) + '</div>' +
-                '<div class="ms-provider-count">' + modelsCount + ' ' + GourdI18n.t('settings.providers.title') + '</div>' +
+                '<div class="ms-provider-count">' + GourdI18n.t('settings.providers.model_count', [modelsCount]) + '</div>' +
             '</div>' +
             '<label class="toggle-switch">' +
                 '<input type="checkbox" ' + (provider.enabled ? 'checked' : '') + ' data-name="' + escapeAttr(provider.name) + '" class="provider-toggle"/>' +
@@ -563,15 +568,40 @@
     }
 
     // ==================== 右栏详情/表单（Master-Detail：原地切换，不隐藏左栏） ====================
-    /** 右栏切换为「添加供应商」表单（新增态） */
+    /**
+     * 右栏回顶：切换供应商/进入新增态时把滚动位置归零。
+     * 若沿用上一家供应商的滚动位置（例如刚在长模型列表里滑到中段），新表单会直接
+     * 从中段开始，标题与名称/地址输入框都看不见。
+     *
+     * 滚动容器随布局切换而不同，两处都要归零：
+     * - 宽屏双栏：.model-settings-form-wrap 是右栏唯一滚动区；
+     * - 窄屏堆叠（<=860px）：wrap 被改成 overflow:visible、长不高也不再滚动，
+     *   整页滚动由外层 .model-settings-scroll 承担。此时只清 wrap.scrollTop 无效，
+     *   换供应商后标题会停在视口上方（实测 120 个模型时标题位于 -2445px，完全看不到）。
+     */
+    function resetFormScroll() {
+        var wrap = $('.model-settings-form-wrap')[0];
+        if (wrap) wrap.scrollTop = 0;
+        var pageScroll = $('.model-settings-scroll')[0];
+        if (pageScroll) pageScroll.scrollTop = 0;
+    }
+
+    /**
+     * 右栏切换为「添加供应商」表单（新增态）。
+     * 已在新增态时直接返回：重绘会把用户已填写的名称/地址/密钥全部清空。
+     * 新建入口在左栏头部，离表单区域很近，填表途中被误点的概率很高（实测一把填好的字段
+     * 全丢、无任何提示）。唯一需要真正重绘的情形是原选中供应商已消失（currentProvider 非空）
+     * 或从编辑态/关闭视图返回（selectedName 不是 '__add__'），两者都自然通过守卫。
+     */
     function selectAdd() {
+        if (selectedName === '__add__' && currentProvider === null) return;
         selectedName = '__add__';
         currentProvider = null;
         fetchedModels = [];
         keyTouched = false;
-        // 左栏选中态同步
         $('.ms-provider-item').removeClass('selected');
         renderDetailForm(null);
+        resetFormScroll();
     }
 
     /** 选中左栏某供应商：右栏切换为其编辑详情 */
@@ -581,6 +611,7 @@
         $('.ms-provider-item').removeClass('selected');
         $('.ms-provider-item[data-name="' + escapeAttr(name) + '"]').addClass('selected');
         fillDetailFromCache(name);
+        resetFormScroll();
     }
 
     /** 填充右栏：先用列表缓存快速回填基础字段，再拉取后端详情（含完整模型列表）覆盖 */
@@ -693,7 +724,7 @@
         var dialogHtml = '<div class="model-add-overlay" id="msModelAddOverlay">'
             + '<div class="model-add-dialog">'
             + '<div class="model-add-header">'
-             + '<span class="model-add-title">' + (isEdit ? GourdI18n.t('common.edit') + GourdI18n.t('settings.providers.model_management') : GourdI18n.t('settings.providers.add_model')) + '</span>'
+             + '<span class="model-add-title">' + (isEdit ? GourdI18n.t('settings.providers.edit_model_title') : GourdI18n.t('settings.providers.add_model')) + '</span>'
             + '<button class="model-add-close" id="msModelAddClose">&times;</button>'
             + '</div>'
             + '<div class="model-add-body">'
@@ -708,7 +739,7 @@
             + '</div>'
             + '<div class="model-add-footer">'
              + '<button class="btn-secondary" id="msModelAddCancel">' + GourdI18n.t('common.cancel') + '</button>'
-             + '<button class="btn-primary" id="msModelAddConfirm">' + (isEdit ? GourdI18n.t('common.save') + GourdI18n.t('common.edit') : GourdI18n.t('common.confirm') + GourdI18n.t('common.add')) + '</button>'
+             + '<button class="btn-primary" id="msModelAddConfirm">' + (isEdit ? GourdI18n.t('common.save') : GourdI18n.t('common.add')) + '</button>'
              + '</div>'
              + '</div>'
              + '</div>';
@@ -730,7 +761,7 @@
             var modelId = $overlay.find('#msManualModelName').val().trim();
 
             if (!modelId) {
-                showToast(GourdI18n.t('settings.providers.model_name') + GourdI18n.t('common.required'), 'error');
+                showToast(GourdI18n.t('settings.providers.field_required', [GourdI18n.t('settings.providers.model_name')]), 'error');
                 return;
             }
 
@@ -739,7 +770,7 @@
                 return m.id === modelId && (!isEdit || m.id !== model.id);
             });
             if (exists) {
-                showToast(GourdI18n.t('settings.providers.model_name') + ' "' + modelId + '" ' + GourdI18n.t('settings.providers.model_exists'), 'error');
+                showToast(GourdI18n.t('settings.providers.model_exists_named', [modelId]), 'error');
                 return;
             }
 
@@ -805,7 +836,7 @@
         var standard = $('input[name="msProviderStandard"]:checked').val() || DEFAULT_STANDARD;
 
         if (!apiUrl) {
-            showToast(GourdI18n.t('settings.providers.api_url') + GourdI18n.t('common.required'), 'error');
+            showToast(GourdI18n.t('settings.providers.field_required', [GourdI18n.t('settings.providers.api_url')]), 'error');
             return;
         }
 
@@ -891,7 +922,7 @@
                         });
                         showToast(GourdI18n.t('settings.providers.fetch_models_success').replace('{0}', fetchedModels.length), 'success');
                     } catch (e) {
-                        showToast(GourdI18n.t('settings.providers.fetch_models') + GourdI18n.t('settings.loop.operation_failed'), 'error');
+                        showToast(GourdI18n.t('settings.providers.fetch_models_failed'), 'error');
                     }
                 } else {
                     showFetchFailure(res);
@@ -1026,7 +1057,7 @@
                 '</div>';
 
             html += '<div class="provider-model-item' + (!enabled ? ' disabled' : '') + '" data-model-id="' + escapeAttr(model.id) + '">' +
-                '<div class="provider-model-info" title="' + GourdI18n.t('common.edit') + GourdI18n.t('settings.providers.model_management') + '">' +
+                '<div class="provider-model-info" title="' + GourdI18n.t('settings.providers.edit_model_title') + '">' +
                      '<div class="provider-model-name">' + escapeHtml(model.id) + defaultTag + manualTag + (isSynced ? ' <span class="provider-model-synced">' + GourdI18n.t('settings.providers.synced') + '</span>' : '') + '</div>' +
                 '</div>' +
                 '<div class="provider-model-actions">' +
@@ -1165,11 +1196,11 @@
         });
 
         if (!name) {
-            showToast(GourdI18n.t('common.name') + GourdI18n.t('common.required'), 'error');
+            showToast(GourdI18n.t('settings.providers.field_required', [GourdI18n.t('common.name')]), 'error');
             return;
         }
         if (!apiUrl) {
-            showToast(GourdI18n.t('settings.providers.api_url') + GourdI18n.t('common.required'), 'error');
+            showToast(GourdI18n.t('settings.providers.field_required', [GourdI18n.t('settings.providers.api_url')]), 'error');
             return;
         }
 
@@ -1317,7 +1348,14 @@
     function deleteProvider() {
         if (!currentProvider) return;
 
-        layConfirm(GourdI18n.t('settings.confirm_delete') + GourdI18n.t('settings.providers.add_title') + ' "' + currentProvider.name + '"？', function () {
+        // 整句式文案：早期拼接 confirm_delete + add_title（「添加服务商」），删除场景里却出现「添加」字样；
+        // 且后端 providersRemove 走 removeProviderCascade，会级联删除该供应商名下全部模型（旧文案
+        // 对影响范围零提示，用户点「确定」后数百个模型一并消失且不可恢复）。
+        var modelCount = (currentProvider.models || []).length;
+        var tConfirm = modelCount > 0
+            ? GourdI18n.t('settings.providers.delete_provider_confirm', [currentProvider.name, modelCount])
+            : GourdI18n.t('settings.providers.delete_provider_confirm_no_models', [currentProvider.name]);
+        layConfirm(tConfirm, function () {
             $.ajax({
                 url: '/web/settings/providers/remove',
                 method: 'POST',

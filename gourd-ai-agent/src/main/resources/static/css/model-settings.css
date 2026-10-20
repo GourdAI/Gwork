@@ -39,13 +39,37 @@ body.code-mode .model-settings-view { display: none !important; }
     border-right: 1px solid var(--border-color);
     display: flex; flex-direction: column; min-height: 0;
 }
-.model-settings-left-scroll { flex: 1; overflow-y: auto; padding: 16px 12px 12px; min-height: 0; }
 
-.model-settings-group { margin-bottom: 18px; }
-.model-settings-group-label {
-    font-size: 12px; color: var(--text-secondary); padding: 0 8px 8px;
+/* 左栏头部：分组标题 + 新建入口。
+ * 新建是「列表级」操作，常驻头部（不随列表滚动）；表单提交（创建）在右栏底部。
+ * 两者不再同名并排于卡片底部，消除「两个一模一样的按钮」的重复感。 */
+.model-settings-left-header {
+    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 12px 12px 8px 16px;
+}
+.model-settings-left-title {
+    font-size: 12px; color: var(--text-secondary);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     user-select: none;
 }
+
+/* 新建供应商图标按钮：轻量、与列表同层，与右栏实心主按钮形成主次层级 */
+.model-settings-add-btn {
+    flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px;
+    padding: 0;
+    border: 1px solid var(--border-color); border-radius: 7px;
+    background: transparent; color: var(--text-secondary);
+    cursor: pointer; transition: color .15s, border-color .15s, background .15s;
+}
+.model-settings-add-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-light); }
+.model-settings-add-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.model-settings-left-scroll { flex: 1; overflow-y: auto; padding: 0 12px 12px; min-height: 0; }
+
+.model-settings-group { margin-bottom: 18px; }
 .model-settings-group-list { display: flex; flex-direction: column; gap: 2px; }
 
 /* 供应商项（自定义项支持拖拽排序：顺序持久化于 localStorage） */
@@ -92,19 +116,6 @@ body.code-mode .model-settings-view { display: none !important; }
 }
 .ms-provider-dot.on { background: var(--color-success, #3ecf6f); }
 
-/* 左栏底部添加按钮（虚线全宽，参考图样式） */
-.model-settings-add-provider-btn {
-    display: flex; align-items: center; justify-content: center; gap: 6px;
-    width: 100%; padding: 9px 0; margin-top: 4px;
-    border: 1px dashed var(--border-color); border-radius: 8px;
-    background: transparent; color: var(--text-secondary);
-    font-size: 13px; cursor: pointer; transition: color .15s, border-color .15s, background .15s;
-}
-.model-settings-add-provider-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-light); }
-
-/* 空分组占位 */
-.model-settings-group-empty { font-size: 12px; color: var(--text-secondary); padding: 2px 8px 6px; }
-
 /* 拖拽排序时的释放位置指示线（由 JS 插入/移除） */
 .ms-drag-indicator {
     height: 2px; margin: 1px 6px; border-radius: 1px;
@@ -116,6 +127,18 @@ body.code-mode .model-settings-view { display: none !important; }
 .model-settings-form-wrap { flex: 1; overflow-y: auto; padding: 24px 28px; min-height: 0; }
 /* settings-section 在右栏内不额外撑边距（头部间距交给 .model-settings-form-wrap） */
 .model-settings-right .settings-section { padding: 0; }
+
+/* 右栏吸底操作栏：表单提交（创建服务商）主操作，常驻底部、移出滚动流。
+ * 拉取上百个模型后表单会很长，按钮若在滚动流末端就必须滚到底才能点（用户报障）。
+ * flex-shrink:0 + 上方 .model-settings-form-wrap 的 overflow-y:auto，使操作栏永远贴底可见。
+ * 新增态显示；编辑态所有字段即时保存，由脚本 toggle 隐藏（此时右栏底部不留空区）。 */
+.model-settings-footer {
+    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+    padding: 12px 28px;
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-card, var(--bg-main));
+}
 
 /* ----- 右栏「模型管理」搜索框（标题行内联，自适应宽度） ----- */
 /* 空模型时随脚本隐藏；多词 AND 过滤与聊天模型下拉搜索同口径 */
@@ -177,6 +200,9 @@ body.code-mode .model-settings-view { display: none !important; }
     .model-settings-left-scroll { max-height: 300px; }
     .model-settings-right { overflow: visible; }
     .model-settings-form-wrap { overflow: visible; }
+    /* 堆叠布局下吸底区回到文档流末尾（整页滚动，不需要吸底）；
+       底部圆角跟随卡片，避免与卡片圆角错位 */
+    .model-settings-footer { border-radius: 0 0 12px 12px; }
 }
 
 /* 极窄屏：标题行允许换行，搜索框独占一行（批量按钮与标签同行） */

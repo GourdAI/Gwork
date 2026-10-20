@@ -761,7 +761,18 @@
                                         "view_title":  "Model Settings",
                                         "custom_group":  "Custom Providers",
                                         "add_provider_title":  "Add Model Provider",
-                                        "add_provider_desc":  "Configure a fully custom API endpoint and initial model"
+                                        "add_provider_desc":  "Configure a fully custom API endpoint and initial model",
+                                        "clear_models_confirm":  "Clear the model list? {0} model(s) will be removed.",
+                                        "delete_provider_confirm":  "Delete provider \"{0}\"? Its {1} model(s) will also be deleted permanently.",
+                                        "delete_provider_confirm_no_models":  "Delete provider \"{0}\"? This cannot be undone.",
+                                        "remove_model_confirm":  "Remove model \"{0}\" from the list?",
+                                        "load_providers_failed":  "Failed to load providers, please retry",
+                                        "edit_model_title":  "Edit Model",
+                                        "fetch_models_failed":  "Failed to fetch the model list, please retry",
+                                        "model_exists_named":  "Model \"{0}\" already exists",
+                                        "field_required":  "{0} is required",
+                                        "model_count":  "{0} model(s)",
+                                        "create":  "Create Provider"
                                     },
                       "loop":  {
                                   "title":  "Scheduler",

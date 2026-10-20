@@ -759,7 +759,18 @@
                                         "view_title":  "Modell-Einstellungen",
                                         "custom_group":  "Eigene Anbieter",
                                         "add_provider_title":  "Modellanbieter hinzufügen",
-                                        "add_provider_desc":  "Konfigurieren Sie einen vollständig eigenen API-Endpunkt und ein Startmodell"
+                                        "add_provider_desc":  "Konfigurieren Sie einen vollständig eigenen API-Endpunkt und ein Startmodell",
+                                        "clear_models_confirm":  "Modellliste wirklich leeren? {0} Modell(e) werden entfernt.",
+                                        "delete_provider_confirm":  "Anbieter \"{0}\" wirklich löschen? Seine {1} Modell(e) werden ebenfalls unwiderruflich gelöscht.",
+                                        "delete_provider_confirm_no_models":  "Anbieter \"{0}\" wirklich löschen? Dies kann nicht rückgängig gemacht werden.",
+                                        "remove_model_confirm":  "Modell \"{0}\" aus der Liste entfernen?",
+                                        "load_providers_failed":  "Anbieter konnten nicht geladen werden, bitte erneut versuchen",
+                                        "edit_model_title":  "Modell bearbeiten",
+                                        "fetch_models_failed":  "Modellliste konnte nicht abgerufen werden, bitte erneut versuchen",
+                                        "model_exists_named":  "Modell \"{0}\" existiert bereits",
+                                        "field_required":  "{0} ist erforderlich",
+                                        "model_count":  "{0} Modell(e)",
+                                        "create":  "Anbieter erstellen"
                                     },
                       "loop":  {
                                   "title":  "Geplante Aufgaben",

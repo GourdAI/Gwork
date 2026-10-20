@@ -761,7 +761,18 @@
                                         "view_title":  "Configurações de modelos",
                                         "custom_group":  "Provedores personalizados",
                                         "add_provider_title":  "Adicionar provedor de modelos",
-                                        "add_provider_desc":  "Configure um endpoint de API totalmente personalizado e um modelo inicial"
+                                        "add_provider_desc":  "Configure um endpoint de API totalmente personalizado e um modelo inicial",
+                                        "clear_models_confirm":  "Limpar a lista de modelos? {0} modelo(s) serão removidos.",
+                                        "delete_provider_confirm":  "Excluir o provedor \"{0}\"? Seus {1} modelo(s) também serão excluídos permanentemente.",
+                                        "delete_provider_confirm_no_models":  "Excluir o provedor \"{0}\"? Esta ação não pode ser desfeita.",
+                                        "remove_model_confirm":  "Remover o modelo \"{0}\" da lista?",
+                                        "load_providers_failed":  "Falha ao carregar provedores, tente novamente",
+                                        "edit_model_title":  "Editar modelo",
+                                        "fetch_models_failed":  "Falha ao obter a lista de modelos, tente novamente",
+                                        "model_exists_named":  "O modelo \"{0}\" já existe",
+                                        "field_required":  "{0} é obrigatório",
+                                        "model_count":  "{0} modelo(s)",
+                                        "create":  "Criar provedor"
                                     },
                       "loop":  {
                                   "title":  "Tarefas agendadas",

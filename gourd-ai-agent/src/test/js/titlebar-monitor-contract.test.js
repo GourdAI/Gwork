@@ -213,6 +213,91 @@ test('右偏移按平台分流：Tauri 消费注入控件条总宽，Electron �
    数字从 Rust 常量解析而非写死，改尺寸时本护栏随真实源码走。 */
 const tbRs = fs.readFileSync(path.resolve(__dirname, '../../../../gourd-ai-tauri/src-tauri/src/titlebar_ui.rs'), 'utf8');
 
+/* 【注入脚本的可执行性护栏】
+   TITLEBAR_JS 是写在 Rust 原始字符串（r#"…"#）里的 JS：它不是 Rust 代码，
+   cargo check 完全看不到里面的语法错误；而现有的图标断言全是文本正则，如果脚本
+   语法被改坏（引号不成对、括号不匹配、误引入 "#），测试依旧全绿、安装包一启动就白屏。
+   因此这里真抽出来做三件事：① vm.Script 编译；② 占位符全部被替换且无残留；③ 沙箱里真执行一遍。 */
+const TITLEBAR_JS_SRC = (() => {
+    const marker = 'const TITLEBAR_JS: &str = r#"';
+    const start = tbRs.indexOf(marker);
+    assert.ok(start >= 0, 'titlebar_ui.rs 必须保留 const TITLEBAR_JS 的 r#" 原始字符串声明');
+    const bodyStart = start + marker.length;
+    const end = tbRs.indexOf('"#;', bodyStart);
+    assert.ok(end > bodyStart, 'TITLEBAR_JS 原始字符串必须正常闭合（缺 "#; 会吞掉后续全部 Rust 代码）');
+    return tbRs.slice(bodyStart, end);
+})();
+
+// 与 Rust 侧 init_script() 的 replace 口径逐项对应
+const TB_SUBST = {
+    __GOURD_PLATFORM__: 'win32', __TB_HEIGHT__: '36', __BTN_WIDTH__: '30',
+    __BTN_HEIGHT__: '26', __BTN_GAP__: '2', __PAD_X__: '4', __MAC_INSET__: '80',
+};
+const renderTitlebarJs = () => Object.entries(TB_SUBST)
+    .reduce((s, [k, v]) => s.split(k).join(v), TITLEBAR_JS_SRC);
+
+test('TITLEBAR_JS 注入脚本必须语法可编译且无占位符残留', () => {
+    const vm = require('vm');
+    const js = renderTitlebarJs();
+    assert.doesNotThrow(() => new vm.Script(js, { filename: 'TITLEBAR_JS.js' }),
+        'TITLEBAR_JS 必须能被 JS 引擎编译（原始字符串里的语法错误 cargo check 发现不了）');
+
+    // 替换目标清单必须与 Rust 侧一一对应：Rust 改了名字而这里没跟就会残留
+    const declared = [...tbRs.matchAll(/\.replace\("([^"]+)"/g)].map((m) => m[1]);
+    assert.deepStrictEqual(Object.keys(TB_SUBST).sort(), declared.sort(),
+        'TB_SUBST 必须与 Rust init_script() 的 replace 目标完全一致');
+
+    /* 残留判定只看「赋值/引用位置上的 __大写__」，不误伤 window.__GOURD_TITLEBAR__ 这类合法标识符：
+       合法标识符总以点号前缀出现（window.__X__），而占位符出现在值位置（= __X__ / ' __X__'）。 */
+    const residue = [...js.matchAll(/(^|[^.\w$])(__[A-Z][A-Z0-9_]*__)/g)].map((m) => m[2]);
+    assert.deepStrictEqual([...new Set(residue)], [],
+        'TITLEBAR_JS 不得残留未替换占位符（残留会让注入脚本直接 ReferenceError）');
+});
+
+test('TITLEBAR_JS 能在沙箱里真执行并挂出预期全局（防改坏运行时逻辑）', () => {
+    const vm = require('vm');
+    const listeners = {};
+    const appended = [];
+    const fakeEl = (tag) => ({
+        tagName: tag, id: '', className: '', type: '', title: '', textContent: '', innerHTML: '',
+        style: { setProperty() {} },
+        setAttribute(k, v) { this[k] = v; },
+        appendChild(c) { appended.push(c); if (c.id) this[c.id] = c; return c; },
+        addEventListener() {}, querySelector() { return null; }, querySelectorAll() { return []; },
+    });
+    const body = fakeEl('body');
+    body.classList = { add() {}, toggle() {}, contains() { return false; } };
+    const sandbox = {
+        window: { __TAURI_INTERNALS__: { invoke: () => Promise.resolve() }, addEventListener() {} },
+        document: {
+            readyState: 'complete',
+            documentElement: fakeEl('html'),
+            head: fakeEl('head'),
+            body,
+            createElement: fakeEl,
+            getElementById: () => null,
+            addEventListener(t, f) { listeners[t] = f; },
+        },
+        navigator: { language: 'zh-CN' },
+        console: { warn() {}, log() {}, error() {} },
+        setTimeout, clearTimeout,
+    };
+    sandbox.window.document = sandbox.document;
+    sandbox.window.navigator = sandbox.navigator;
+    sandbox.globalThis = sandbox;
+
+    assert.doesNotThrow(() => vm.runInNewContext(renderTitlebarJs(), vm.createContext(sandbox), { timeout: 5000 }),
+        'TITLEBAR_JS 必须在最小 DOM 沙箱里零异常跑完（报错则整个标题栏控件层不渲染）');
+    assert.strictEqual(typeof sandbox.window.__GOURD_TITLEBAR__, 'object',
+        '执行后必须导出 window.__GOURD_TITLEBAR__（Rust 侧状态同步靠它）');
+    assert.strictEqual(typeof sandbox.window.__GOURD_TITLEBAR__.apply, 'function',
+        '__GOURD_TITLEBAR__ 必须带 apply（最大化/失焦状态经此下发）');
+    assert.strictEqual(typeof sandbox.window.__GOURD_TITLEBAR_SCRIM__, 'function',
+        '执行后必须导出 __GOURD_TITLEBAR_SCRIM__（遮罩压暗联动）');
+    assert.strictEqual(sandbox.window.__GOURD_TITLEBAR_STRIP_W__, 102,
+        'STRIP_W 必须由 3×30+2×2+2×4 推导为 102（前端左组偏移靠它）');
+});
+
 test('Tauri 自绘窗口按钮与左组同款 chip：30x26 / 圆角6 / hover 走 --bg-hover', () => {
     assert.match(tbRs, /const BUTTON_WIDTH: u32 = 30;/, '按钮宽与 .titlebar-action-btn 同 30px');
     assert.match(tbRs, /const BUTTON_HEIGHT: u32 = 26;/, '按钮高与 .titlebar-action-btn 同 26px');
@@ -222,6 +307,111 @@ test('Tauri 自绘窗口按钮与左组同款 chip：30x26 / 圆角6 / hover 走
     // 左组规格逐项对照（task-monitor.css）
     assert.match(monitorCss, /\.titlebar-action-btn \{[\s\S]{0,200}?width: 30px; height: 26px;[\s\S]{0,80}?border-radius: 6px;/);
     assert.match(monitorCss, /\.titlebar-action-btn:hover \{ background: var\(--bg-hover\);/);
+});
+
+/* 【图标同尺寸护栏（2026-10-20 用户报障）】
+   报障：「这图标大小都不一致，看起来好奇怪…右侧三个图标优化下，大小和左侧两个保持一致」。
+   根因：窗控组用「10x10 视口 / 12px / stroke 1」而左组用「24 网格 / 15px / stroke 2」，
+   旧注释用「窗控符号笔画更简，12px 即等效」自证——实测不成立：同一标题栏并排时，
+   窗控墨迹 12.00px vs 左组 12.50px，一眼可见偏小（12px/10 视口 → 满铺，15px/24 视口 → 20 单位）。
+   本组用源码解析出的真实数字校验两边同契约，改一侧而不改另一侧即变红。 */
+const tbIcons = () => {
+    const block = tbRs.slice(tbRs.indexOf('var ICONS = {'), tbRs.indexOf('/* ───────── 样式 ─────────'));
+    /* 【必须带词边界】属性名互相包含：不加边界时 /width="…"/ 会命中 stroke-width="2"，
+       一旦有人把属性改序（完全合法的重构）就会把 15px 误读成 2px，测试报假失败并把人带偏。 */
+    const attrOf = (seg, k) => {
+        const m = seg.match(new RegExp('(?:^|\\s)' + k + '="([^"]+)"'));
+        return m ? m[1] : null;
+    };
+    const parse = (name) => {
+        const i = block.indexOf(name + ':');
+        if (i < 0) return null;
+        // 截止到该图标自身的 </svg>，避免多行拼接时吃进下一个图标的属性
+        const seg = block.slice(i, block.indexOf('</svg>', i));
+        return {
+            w: attrOf(seg, 'width'), h: attrOf(seg, 'height'), viewBox: attrOf(seg, 'viewBox'),
+            strokeWidth: attrOf(seg, 'stroke-width'), stroke: attrOf(seg, 'stroke'),
+            fill: attrOf(seg, 'fill'), rx: attrOf(seg, 'rx'), seg,
+        };
+    };
+    return { parse, names: ['minimize', 'maximize', 'restore', 'close'] };
+};
+
+test('窗控图标与标题栏左组同尺寸：15px / 24 网格 / stroke-width 2 / fill=none', () => {
+    const { parse, names } = tbIcons();
+    // 左组基准：从 index.html 的实际 markup 解析，不写死数字
+    const btnSvg = indexHtml.match(/id="titlebarTerminalBtn"[\s\S]{0,300}?(<svg[^>]*>)/);
+    assert.ok(btnSvg, 'index.html 必须能解析出 #titlebarTerminalBtn 的 svg');
+    const leftTag = btnSvg[1];
+    const leftW = (leftTag.match(/(?:^|\s)width="(\d+)"/) || [])[1];
+    const leftVb = (leftTag.match(/viewBox="([^"]+)"/) || [])[1];
+    const leftSw = (leftTag.match(/stroke-width="([^"]+)"/) || [])[1];
+    // 左组 rect 圆角：同尺寸下半径不同也会显得"不一样"，因此也必须对齐
+    const leftRx = (indexHtml.match(/id="titlebarTerminalBtn"[\s\S]{0,300}?<rect[^>]*rx="([^"]+)"/) || [])[1];
+    assert.ok(leftW && leftVb && leftSw && leftRx, '左组 svg 必须带 width/viewBox/stroke-width，rect 必须带 rx');
+
+    for (const n of names) {
+        const ic = parse(n);
+        assert.ok(ic, 'ICONS.' + n + ' 必须存在');
+        assert.strictEqual(ic.w, leftW, 'ICONS.' + n + ' 渲染宽度必须与左组同为 ' + leftW + 'px（曾被用户报障偏小）');
+        assert.strictEqual(ic.h, leftW, 'ICONS.' + n + ' 渲染高度必须与左组同为 ' + leftW + 'px');
+        assert.strictEqual(ic.viewBox, leftVb, 'ICONS.' + n + ' 必须与左组共享 ' + leftVb + ' 网格（否则同等外框下墨迹大小不同）');
+        assert.strictEqual(ic.strokeWidth, leftSw, 'ICONS.' + n + ' 线宽必须与左组同为 ' + leftSw + '（线宽不同会直接看得出粗细不一致）');
+        assert.strictEqual(ic.stroke, 'currentColor', 'ICONS.' + n + ' 必须用 currentColor 以跟随主题/hover 前景色');
+        assert.strictEqual(ic.fill, 'none', 'ICONS.' + n + ' 必须 fill="none"（否则 stroke 图形会被实心填充）');
+        if (ic.rx) {
+            assert.strictEqual(ic.rx, leftRx, 'ICONS.' + n + ' 的 rect 圆角必须与左组同为 rx=' + leftRx + '（半径不同时同尺寸也会显出形状不一致）');
+        }
+    }
+});
+
+test('窗控图标不得回退到 10 视口 / 12px / stroke-width 1 旧形态', () => {
+    const { parse, names } = tbIcons();
+    for (const n of names) {
+        const ic = parse(n);
+        assert.ok(ic, 'ICONS.' + n + ' 必须存在');
+        assert.notStrictEqual(ic.viewBox, '0 0 10 10',
+            'ICONS.' + n + ' 不得回退 10x10 视口：满铺视口 + 12px 渲染会让墨迹只有 12.00px，比左组 12.5px 小一圈');
+        assert.notStrictEqual(ic.w, '12', 'ICONS.' + n + ' 不得回退 12px 渲染（用户报障尺寸不一致的直接成因）');
+        assert.notStrictEqual(ic.strokeWidth, '1', 'ICONS.' + n + ' 不得回退 stroke-width 1（比左组 2 细一半）');
+    }
+});
+
+/* restore 的“两框咬合”几何护栏：墨迹 bbox 量不出端点浮空（浮空不改变极值），必须直接校验路径端点。
+   后框被前框遮断，两个断口必须分别压在前框的上边缘 (y=8) 与右边缘 (x=16) 上；
+   曾误写成 M8 6 / h-1，断口各自悬空 2 单位，15px 渲染下就是两根脱节短笔。 */
+test('restore 图标的两个断口必须锚在前框相邻边上（不得浮空）', () => {
+    const { parse } = tbIcons();
+    const ic = parse('restore');
+    assert.ok(ic, 'ICONS.restore 必须存在');
+    const rect = ic.seg.match(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/);
+    assert.ok(rect, 'restore 必须含 rect 前框');
+    const [rx0, ry0, rw] = rect.slice(1, 4).map(Number);
+    const topEdge = ry0, rightEdge = rx0 + rw;
+    const d = (ic.seg.match(/ d="([^"]+)"/) || [])[1];
+    assert.ok(d, 'restore 必须含 path 后框');
+    const start = d.match(/^M([\d.]+) ([\d.]+)/);
+    assert.ok(start, 'restore 的 path 必须以绝对 M 起笔（相对起笔无法静态校验锚点）');
+    assert.strictEqual(Number(start[2]), topEdge,
+        '后框起笔 y 必须压在前框上边缘 y=' + topEdge + '（满前值 ' + start[2] + '，悬空即脱节）');
+
+    /* 逐段回放 path，求出终点 x。本图标只用 M/V/H/v/h/A/a，足够覆盖。 */
+    const segs = d.match(/[A-Za-z][^A-Za-z]*/g) || [];
+    let curX = Number(start[1]), curY = Number(start[2]);
+    for (const s of segs) {
+        const cmd = s[0];
+        const nums = (s.slice(1).match(/-?[\d.]+/g) || []).map(Number);
+        if (cmd === 'H') curX = nums[nums.length - 1];
+        else if (cmd === 'h') curX += nums[nums.length - 1];
+        else if (cmd === 'V') curY = nums[nums.length - 1];
+        else if (cmd === 'v') curY += nums[nums.length - 1];
+        else if (cmd === 'A' || cmd === 'a') {
+            const ex = nums[nums.length - 2], ey = nums[nums.length - 1];
+            if (cmd === 'A') { curX = ex; curY = ey; } else { curX += ex; curY += ey; }
+        }
+    }
+    assert.strictEqual(curX, rightEdge,
+        '后框收尾 x 必须压在前框右边缘 x=' + rightEdge + '（满前值 ' + curX + '，悬空即脱节）');
 });
 
 test('控件条总宽单一真源：Rust 常量推导 = 注入脚本 STRIP_W = 拖拽让位 = 左组偏移源', () => {
