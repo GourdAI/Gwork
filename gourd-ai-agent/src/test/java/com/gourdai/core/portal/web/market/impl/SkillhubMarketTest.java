@@ -290,6 +290,50 @@ public class SkillhubMarketTest {
             Result<MarketDetail> result = market.detail("");
             assertNotEquals(200, result.getCode(), "空 slug 应返回非200");
         }
+
+        @Test
+        @Order(6)
+        @DisplayName("同名 slug 双记录：限定 slug 各自解析到对应 owner（不得都返回同一家）")
+        void testDetailSameSlugDifferentOwners() {
+            // 上游实测存在不同作者共用同一公开 slug 的记录（dev-expert：
+            // @indiv-ebandao 与 @user_814dbe54）。若上游该 fixture 消失则跳过，
+            // 不制造 flaky；存在时必须两家各自解析成功且 owner 互不相同。
+            Result<MarketPageResult> page = market.search("编程专家", null, 50);
+            assertEquals(200, page.getCode());
+            List<MarketItem> list = items(page);
+            // 按裸尾分组：取第一个「同裸尾 ≥2 条限定记录」的组（不能拿第一条的尾
+            // 当基准——dev-expert-pro 之类只有一条的尾会让假设恒假而静默跳过）
+            java.util.Map<String, java.util.Map<String, MarketItem>> byTail = new java.util.LinkedHashMap<>();
+            for (MarketItem item : list) {
+                String s = item.getSlug();
+                if (s != null && s.startsWith("@") && s.indexOf('/') > 0) {
+                    byTail.computeIfAbsent(s.substring(s.indexOf('/') + 1),
+                                    k -> new java.util.LinkedHashMap<>())
+                            .putIfAbsent(s, item);
+                }
+            }
+            java.util.Map<String, MarketItem> group = null;
+            for (java.util.Map<String, MarketItem> g : byTail.values()) {
+                if (g.size() >= 2) {
+                    group = g;
+                    break;
+                }
+            }
+            Assumptions.assumeTrue(group != null,
+                    "上游需存在同裸 slug 的多条记录才能验证（当前分组数 " + byTail.size() + "）");
+
+            java.util.Set<String> owners = new java.util.HashSet<>();
+            for (String qualified : group.keySet()) {
+                Result<MarketDetail> d = market.detail(qualified);
+                assertEquals(200, d.getCode(), "限定 slug 详情应成功: " + qualified
+                        + (d.getDescription() != null ? " / " + d.getDescription() : ""));
+                assertEquals(qualified, d.getData().getSlug(), "详情 slug 应与请求逐字一致");
+                assertNotNull(d.getData().getOwnerHandle(), "owner 不应为 null");
+                owners.add(d.getData().getOwnerHandle());
+            }
+            assertEquals(group.size(), owners.size(),
+                    "同名 slug 的不同限定形态必须解析到不同 owner，不得都返回上游默认那一家");
+        }
     }
 
     // ==================== 5. install ====================
@@ -313,8 +357,8 @@ public class SkillhubMarketTest {
                     "安装应成功。如果失败，description=" + result.getDescription());
             assertNotNull(result.getData(), "安装成功应返回 displayName");
 
-            // 验证目录已创建
-            Path skillDir = installDir.resolve(cachedSlug);
+            // 验证目录已创建（目录名口径 = installDirName：限定 slug → _owner_slug）
+            Path skillDir = installDir.resolve(market.installDirName(cachedSlug));
             assertTrue(Files.exists(skillDir), "技能目录应存在");
             assertTrue(Files.isDirectory(skillDir), "技能目录应为目录");
 

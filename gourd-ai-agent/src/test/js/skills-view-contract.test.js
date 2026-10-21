@@ -163,6 +163,25 @@ test('图标走后端代理且加载失败自毁露出首字母底', () => {
     assert.match(css, /\.skill-card-icon img \{ position: absolute;/, '图标 img 必须叠在字母底之上');
 });
 
+test('已安装判定：回退候选按 slug 形态隔离，限定卡不得回退裸尾名', () => {
+    /* 上游实测 skillhub 存在不同作者共用同一公开 slug 的记录（dev-expert 两条）。
+     * 旧实现 candidates 无条件含裸 slug：装过任一同名技能后，所有同 slug 卡片
+     * 连带误亮「已安装」。契约：限定形态（@owner/s）候选只含限定 slug 与其
+     * 目录名形态（@ / → _），不得含裸尾；裸形态候选不得含限定目录名形态。 */
+    const fnStart = js.indexOf('function findInstalledForMarket');
+    assert.ok(fnStart !== -1, 'findInstalledForMarket 必须存在');
+    const fn = js.slice(fnStart, js.indexOf('\n    }', fnStart));
+    assert.match(fn, /charAt\(0\) === '@'/, '必须按 @ 起首区分限定形态');
+    const qualifiedBranch = fn.slice(fn.indexOf("charAt(0) === '@'"), fn.indexOf('} else {'));
+    // 源码形态：String(slug).replace(/[@/]/g, '_') —— 用字符串匹配，
+    // 避免正则字面量内未转义斜杠提前闭合正则的语法坑
+    assert.ok(qualifiedBranch.includes("replace(/[@/]/g, '_')"), '限定候选须含目录名形态（@ 与 / → _）');
+    // 限定分支不得含裸尾剥离候选（[^a-zA-Z0-9._-] 剥离后即裸尾名，
+    // 装过任一同名技能后所有同 slug 卡片会连带误亮「已安装」）
+    assert.ok(!qualifiedBranch.includes('[^a-zA-Z0-9._-]'),
+        '限定分支不得含裸尾剥离候选（同 slug 卡片会连带误亮已安装）');
+});
+
 test('已安装卡片：启禁用开关 + 悬浮卸载按钮', () => {
     assert.match(js, /class="skill-toggle/, '已安装卡片必须渲染开关');
     assert.match(js, /\/web\/settings\/skills\/toggle/, '开关必须走 toggle 端点');

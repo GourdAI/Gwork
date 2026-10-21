@@ -62,12 +62,32 @@ public class MarketCategoryFilterTest {
     }
 
     @Test
-    @DisplayName("Skillhub 安装目录名：剥离非法字符（默认实现）")
+    @DisplayName("Skillhub 安装目录名：裸 slug 剥离非法字符；限定 slug 的 @ 与 / 换下划线")
     void skillhubDirName() {
         SkillhubMarket market = new SkillhubMarket();
         assertEquals("abc-123_x", market.installDirName("abc-123_x"));
         assertEquals("abcdef", market.installDirName("ab/cd@ef"));
         assertEquals("", market.installDirName(null));
+        // namespace 限定 slug：同名技能必须能在磁盘并存，目录名保留 owner 维度
+        // （上游实测 skillhub 存在不同作者共用同一公开 slug 的记录）
+        assertEquals("_indiv-ebandao_dev-expert", market.installDirName("@indiv-ebandao/dev-expert"));
+        assertEquals("_user_814dbe54_dev-expert", market.installDirName("@user_814dbe54/dev-expert"));
+        // 退化形态不得进限定分支（owner 或尾段为空 → 回剥离口径）
+        assertEquals("dev-expert", market.installDirName("@/dev-expert"));
+        assertEquals("a", market.installDirName("@a/"));
+    }
+
+    @Test
+    @DisplayName("Skillhub isQualifiedSlug：仅 @owner/slug 两侧非空为限定形态")
+    void skillhubQualifiedSlugShapes() {
+        assertTrue(SkillhubMarket.isQualifiedSlug("@owner/slug"));
+        assertTrue(SkillhubMarket.isQualifiedSlug("@user_814dbe54/dev-expert"));
+        assertFalse(SkillhubMarket.isQualifiedSlug("dev-expert"), "裸 slug 不是限定形态");
+        assertFalse(SkillhubMarket.isQualifiedSlug("@owner"), "无分隔符不是限定形态");
+        assertFalse(SkillhubMarket.isQualifiedSlug("@/slug"), "owner 为空不是限定形态");
+        assertFalse(SkillhubMarket.isQualifiedSlug("@owner/"), "尾段为空不是限定形态");
+        assertFalse(SkillhubMarket.isQualifiedSlug(null));
+        assertFalse(SkillhubMarket.isQualifiedSlug("a@o/s"), "非 @ 起首不是限定形态");
     }
 
     @Test
