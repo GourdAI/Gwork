@@ -312,6 +312,13 @@ public class WsGate extends SimpleWebSocketListener {
                         o.chatModel(chatModel);
                         o.toolContextPut(HarnessEngine.ATTR_CWD, finalCwd);
                         applyThinkingDepth(o, chatModel, session);
+                        // 档位投影：桌面端主对话轮也必须注入。旧实现只靠会话上下文回读，
+                        // 虽能拿到当前值，但缺投影时 TerminalTalent 的 Prompt 属性与
+                        // 审批门两路口径不一致（提示词按默认档保守估算）。标记为「继承」：
+                        // 本轮内用户切档时审批门改读会话实时值，立即生效。
+                        o.toolContextPut(AccessMode.ATTR_KEY,
+                                AccessMode.normalize(session.getContext().getAs(AccessMode.CTX_KEY)).code());
+                        o.toolContextPut(AccessMode.ATTR_INHERITED_KEY, true);
                     })
                     .stream()
                     .doFinally(signal -> {
@@ -764,6 +771,9 @@ public class WsGate extends SimpleWebSocketListener {
                                 ? accessOverrideFinal
                                 : AccessMode.normalize(session.getContext().getAs(AccessMode.CTX_KEY)).code();
                         o.toolContextPut(AccessMode.ATTR_KEY, effectiveAccess);
+                        // 与 WebStreamBuilder 同口径：无 Loop override 时该投影只是会话值快照，
+                        // 标记后消费方改读会话实时值，使轮内切档对后续命令立即生效。
+                        o.toolContextPut(AccessMode.ATTR_INHERITED_KEY, accessOverrideFinal == null);
                     })
                     .stream()
                     .doFinally(signal -> {
@@ -1015,6 +1025,11 @@ public class WsGate extends SimpleWebSocketListener {
                         o.toolContextPut(HarnessEngine.ATTR_CWD, sessionCwd);
                     }
                     applyThinkingDepth(o, chatModel, session);
+                    // 与主流程同口径注入档位：漏注入时本路径上 TerminalTalent 只能按会话
+                    // 默认档保守折算，表现为「已切完全访问却仍被沙盒/路径轴拦住」。
+                    o.toolContextPut(AccessMode.ATTR_KEY,
+                            AccessMode.normalize(session.getContext().getAs(AccessMode.CTX_KEY)).code());
+                    o.toolContextPut(AccessMode.ATTR_INHERITED_KEY, true);
                 })
                 .stream()
                 .doFinally(signal -> session.attrs().remove("disposable"))

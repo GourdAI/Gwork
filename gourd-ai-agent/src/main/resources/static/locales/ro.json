@@ -285,6 +285,7 @@
                 "access_risk_net_desc":  "Orice adresă de rețea accesibilă; risc de scurgere de date sau descărcări necunoscute",
                 "access_ack":  "Înțeleg riscurile și îmi asum responsabilitatea pentru securitatea datelor mele",
                 "access_allow":  "Permite accesul complet",
+                "access_released":  "Eliberat cu acces complet",
                 "access_cancel":  "Anulează",
                 "access_toast_default":  "Comutat la acces implicit",
                 "access_toast_full":  "Comutat la acces complet",

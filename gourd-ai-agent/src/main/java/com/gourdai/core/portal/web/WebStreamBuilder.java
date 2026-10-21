@@ -264,10 +264,17 @@ public class WebStreamBuilder {
         // 「继续/恢复」时不会重置，其 beginTimeMs 停留在最初任务起点，导致耗时累计成整段对话时长。
         // 每次 buildStreamFlux 恰对应一轮任务，用 Flux.defer 在订阅时刻取时，才是「单轮耗时」。
         final Prompt promptFinal = prompt;
-        final String effectiveAccessModeFinal = effectiveAccessMode;
+        // 投影是否仅为会话值快照：无 Loop override（accessModeOverride == null）即“继承”。
+        // 供 HITL 闸门区分「轮内可被用户改写的快照」与「任务级显式覆盖」。
+        //
+        // 【为何不用 buildTurnFlux 里的 effectiveAccessMode 反推】buildTurnFlux 的
+        // options lambda 属于长链路操作，每轮可能多次执行；在那里写 toolContext 会重复覆盖
+        // 同一份工具上下文（同轮内并非幂等）。标记与取值在这里一次定下，与 loopRunLabel
+        // 等同口径，避免「同轮多写」带来的不可推断语义。
+        final boolean accessModeInheritedFinal = (accessModeOverride == null);
         final String loopRunLabelFinal = loopRunLabel;
         return Flux.defer(() ->
-                buildTurnFlux(session, agent, chatModel, sessionCwd, promptFinal, System.currentTimeMillis(), thinkingDepthOverride, contextLengthOverride, modelOverride, effectiveAccessModeFinal, loopRunLabelFinal));
+                buildTurnFlux(session, agent, chatModel, sessionCwd, promptFinal, System.currentTimeMillis(), thinkingDepthOverride, contextLengthOverride, modelOverride, effectiveAccessMode, accessModeInheritedFinal, loopRunLabelFinal));
     }
 
     /**
@@ -302,7 +309,7 @@ public class WebStreamBuilder {
 
     private Flux<WebChunk> buildTurnFlux(AgentSession session, ReActAgent agent, ChatModel chatModel, String sessionCwd, Prompt prompt, long turnStartMs,
                                          String thinkingDepthOverride, Long contextLengthOverride, String modelOverride, String effectiveAccessMode,
-                                         String loopRunLabel) {
+                                         boolean accessModeInherited, String loopRunLabel) {
         // 思考深度：优先用本轮显式指定的档位（如 Loop 任务），否则回退会话选择的档位；
         // 再结合当前模型的推理能力（按模型而非按接口）翻译成各家 API 各自的参数
         String thinkingDepth = thinkingDepthOverride != null
@@ -373,6 +380,10 @@ public class WebStreamBuilder {
                     // toolContext 合并进 Prompt.attrs，故提示词与真实放行天然同源。
                     // 本轮 override（Loop 任务）优先，否则回退会话已存档位；读不到/脏值一律回落默认档。
                     o.toolContextPut(AccessMode.ATTR_KEY, effectiveAccessMode);
+                    // 标记「本投影是否只是会话值的快照」：是则消费方据此改读会话实时值，
+                    // 从而让用户在轮内切档（/web/chat/access/select）对后续每条命令立即生效。
+                    // 无此标记 = 显式覆盖（Loop 任务级），保持原优先语义。
+                    o.toolContextPut(AccessMode.ATTR_INHERITED_KEY, accessModeInherited);
 
                     // TerminalTalent 在 cwd 为空时本就回退 engine workspace；显式注入可让文件变更账本
                     // 与工具使用完全相同的规范根，并覆盖 Web 主 Agent 的全局会话。

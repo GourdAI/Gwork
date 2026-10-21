@@ -57,31 +57,65 @@ public class HITLInterceptor extends AbsReActInterceptor {
     /**
      * 读取本轮生效的访问控制档位。
      *
-     * <p>优先读 toolContext 的 per-turn 投影（{@link AccessMode#ATTR_KEY}）：Loop 定时任务的
-     * 任务级档位刻意不写入会话上下文（避免污染用户前台选择），只经 toolContext 透传；
-     * 只读会话上下文会让「任务级完全访问」在审批闸门这里静默失效——空间已放行、审批仍弹，
-     * 正是 AccessPolicy 要消灭的漂移症状。</p>
+     * <h4>取值规则</h4>
      *
-     * <p>投影缺省时回退会话上下文（权威存储位，随快照持久化）。两路读到的都是框架注入值：
-     * 工具参数里的同形键由 ToolRequest 统一剥离，模型无法伪造。读不到档位时 {@code normalize}
-     * 会 fail-safe 到最严的一档。子代理会话由 {@code TaskTalent} 在创建时写入同一键，
-     * 故子代理与父会话同档——空间与审批两路消费点不会在子代理里各说各话。</p>
+     * <ol>
+     *   <li>投影 {@link AccessMode#ATTR_KEY} 存在且<b>无</b> {@link AccessMode#ATTR_INHERITED_KEY}
+     *       标记 → 是<b>显式覆盖</b>（Loop 任务级档位、取证还原的恢复轮），直接用它。</li>
+     *   <li>投影缺失，或带继承标记 → 改读会话上下文（<b>实时值</b>）。</li>
+     * </ol>
+     *
+     * <p><b>“继承标记”为什么必须存在</b>（2026-10-21 实机取证）：投影在<b>每轮开始时</b>写一次，
+     * 而用户轮内切档位（{@code /web/chat/access/select}）只改会话上下文。若无条件信任投影，
+     * 正在跑的这一轮里后续每条 bash 仍按旧档判定——用户刚点完「完全访问」，下一条命令照样弹审批，
+     * 卡片还写着「当前为默认权限」。实测样本 {@code work-mvhqk622}：快照 {@code _access_mode=full}，
+     * 却残留 {@code _pending_reason_=「当前为默认权限…』}。带标记时改读实时值，切换立即生效。</p>
+     *
+     * <p><b>显式覆盖必须保留优先级</b>：Loop 任务级档位刻意不写入会话上下文（避免污染用户
+     * 前台选择）。若这里无条件改读会话，任务级的 full 会被会话的 default 降档——那是
+     * {@code AccessModePerTurnOverrideTest} 锁死的契约。故两类投影靠标记区分，而不是靠优先级猜。</p>
+     *
+     * <p>两路读到的都是框架注入值：工具参数里的同形键由 ToolRequest 统一剥离，模型无法伪造。
+     * 读不到档位时 {@code normalize} 会 fail-safe 到最严的一档。子代理会话由 {@code TaskTalent}
+     * 在创建时写入同一键，故子代理与父会话同档——空间与审批两路消费点不会在子代理里各说各话。</p>
      */
     static AccessMode accessModeOf(ReActTrace trace) {
-        if (trace.getOptions() != null && trace.getOptions().getToolContext() != null) {
-            Object perTurn = trace.getOptions().getToolContext().get(AccessMode.ATTR_KEY);
-            if (perTurn != null) {
+        Map<String, Object> toolContext = (trace.getOptions() == null)
+                ? null
+                : trace.getOptions().getToolContext();
+
+        if (toolContext != null) {
+            Object perTurn = toolContext.get(AccessMode.ATTR_KEY);
+            boolean inherited = isInheritedProjection(toolContext.get(AccessMode.ATTR_INHERITED_KEY));
+
+            if (perTurn != null && !inherited) {
                 String text = String.valueOf(perTurn).trim();
                 if (!text.isEmpty()) {
+                    // 显式覆盖：Loop 任务级 / 恢复轮。原优先语义不变。
                     return AccessMode.normalize(text);
                 }
             }
         }
+
+        // 无投影，或是继承型投影（轮内可能已被用户切过档）：一律读会话实时值。
         if (trace.getContext() == null) {
             return AccessMode.DEFAULT;
         }
 
         return AccessMode.normalize(trace.getContext().get(HarnessEngine.CTX_ACCESS_MODE));
+    }
+
+    /** 继承标记：{@code true}（布尔）或非空非 {@code "false"} 的字符串均视为继承型。 */
+    private static boolean isInheritedProjection(Object raw) {
+        if (raw instanceof Boolean) {
+            return (Boolean) raw;
+        }
+        if (raw == null) {
+            return false;
+        }
+
+        String text = String.valueOf(raw).trim();
+        return !text.isEmpty() && !"false".equalsIgnoreCase(text);
     }
 
     @Override

@@ -285,6 +285,7 @@
                 "access_risk_net_desc":  "任意のネットワークアドレスにアクセス可能、データ流出や不明ファイルのDLの恐れ",
                 "access_ack":  "リスクを理解し、自分のデータの安全に責任を持ちます",
                 "access_allow":  "完全アクセスを許可",
+                "access_released":  "完全アクセスで許可済み",
                 "access_cancel":  "キャンセル",
                 "access_toast_default":  "既定の権限に切り替えました",
                 "access_toast_full":  "完全アクセスに切り替えました",

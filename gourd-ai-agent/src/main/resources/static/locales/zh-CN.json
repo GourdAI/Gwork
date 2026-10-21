@@ -285,6 +285,7 @@
                 "access_risk_net_desc":  "可访问任意网络地址，可能外发数据或下载不明文件",
                 "access_ack":  "我已了解风险，并对自己的数据安全负责",
                 "access_allow":  "允许完全访问",
+                "access_released":  "已按完全访问放行",
                 "access_cancel":  "取消",
                 "access_toast_default":  "已切换为默认权限",
                 "access_toast_full":  "已切换为完全访问",

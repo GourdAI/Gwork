@@ -653,6 +653,33 @@ public class WebChunk {
     }
 
     /**
+     * 创建「挂起审批已解除」消息块。
+     *
+     * <p>2026-10-21 自审抓出的回归：切到完全访问时后端清了挂起态（{@code HITL.clearPending}），
+     * 但已落盘的 {@code hitl} 帧仍在回放日志里——重开会话时回放会把它重新渲染成一张
+     * <b>可点的死卡</b>：后端已无挂起任务，点批准只会拿到 ACTION_MISMATCH，前端回退恢复
+     * pending 后再点还是 MISMATCH，死循环。HEAD 上该卡刷新后反而还能点通（挂起态还在），
+     * 是清理挂起态引入的新缺口，故必须补一帧释放事件：</p>
+     *
+     * <ul>
+     *   <li>实时：经 WebGate 广播，当前页面立即把对应卡改为「已放行」态；</li>
+     *   <li>回放：本帧随出站落盘，重开会话时 replay 按序重放，旧 hitl 帧渲染出的卡
+     *       会被紧随其后的释放帧收掉，历史里不再留可点死卡。</li>
+     * </ul>
+     *
+     * @param actionId 被解除的那次审批调用标识（与 hitl 帧同源；可为 null 表示释放会话内全部挂起卡）
+     * @return 释放事件消息块
+     */
+    public static WebChunk ofHitlReleased(String actionId) {
+        WebChunk tmp = new WebChunk();
+        tmp.type = "hitl_released";
+        tmp.actionId = actionId;
+        tmp.createdAt = Instant.now().toEpochMilli();
+
+        return tmp;
+    }
+
+    /**
      * 创建「结构化提问」消息块。
      * <p>type 为 {@code question}，表示 Agent 通过 ask_user 工具向用户发起结构化提问，
      * 任务已挂起等待回答。args 携带完整的 questions 数组，供前端渲染问答卡。</p>

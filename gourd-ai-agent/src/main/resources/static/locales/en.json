@@ -285,6 +285,7 @@
                 "access_risk_net_desc":  "Any network address can be reached, risking data leaks or unknown downloads",
                 "access_ack":  "I understand the risks and take responsibility for my own data security",
                 "access_allow":  "Allow Full Access",
+                "access_released":  "Released under Full Access",
                 "access_cancel":  "Cancel",
                 "access_toast_default":  "Switched to default access",
                 "access_toast_full":  "Switched to full access",

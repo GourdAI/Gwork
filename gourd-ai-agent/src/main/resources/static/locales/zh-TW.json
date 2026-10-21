@@ -285,6 +285,7 @@
                 "access_risk_net_desc":  "可存取任意網路位址，可能外洩資料或下載不明檔案",
                 "access_ack":  "我已了解風險，並對自己的資料安全負責",
                 "access_allow":  "允許完全存取",
+                "access_released":  "已按完全存取放行",
                 "access_cancel":  "取消",
                 "access_toast_default":  "已切換為預設權限",
                 "access_toast_full":  "已切換為完全存取",

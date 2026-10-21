@@ -19,6 +19,8 @@ import org.noear.snack4.ONode;
 import org.noear.solon.Solon;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.ContextLengthPolicy;
+import com.gourdai.agent.react.intercept.HITL;
+import com.gourdai.agent.react.intercept.HITLTask;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.permission.AccessMode;
 import com.gourdai.harness.change.FileChangeService;
@@ -797,6 +799,25 @@ public class WebController {
 
         AgentSession session = engine.getSession(sessionId);
         session.getContext().put(AccessMode.CTX_KEY, AccessMode.normalize(accessMode).code());
+
+        // 切到完全访问时，必须把「仍在等审批的那张卡」一并解除。
+        //
+        // 旧实现只写档位 + 更新快照：那张挂起卡会永远停在会话里（快照带 _last_intervened_ /
+        // _pending_reason_，刷新或重开会话还会被回放出来），而它代表的命令在新档位下本就不需要审批。
+        // 实测样本 work-mvhqk622：_access_mode=full 却残留 _pending_reason_=「当前为默认权限…」。
+        //
+        // 只清挂起态、不自动跑命令：清掉后模型可重新发起调用，届时按新档位放行，
+        // 用户无需面对一张永远点不下去的旧卡（其 decision 已不会被消费）。
+        if (AccessMode.normalize(accessMode).isFull()) {
+            HITLTask released = HITL.clearPending(session);
+            // 补发释放帧：已落盘的 hitl 帧在重开会话时会被回放重新渲染成可点的死卡
+            // （后端已无挂起任务，点批准只会 ACTION_MISMATCH → 前端回退 pending → 死循环）。
+            // 本帧经 WebGate 出站即落盘 + 广播：实时页面立即收卡，回放时按序把旧卡收掉。
+            if (released != null) {
+                webGate.emitToClient(sessionId, WebChunk.ofHitlReleased(released.getActionId()));
+            }
+        }
+
         session.updateSnapshot();
 
         return Result.succeed(AccessMode.normalize(accessMode).code());

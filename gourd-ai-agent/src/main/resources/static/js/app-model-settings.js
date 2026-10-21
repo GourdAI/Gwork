@@ -425,6 +425,9 @@
         clearModelSearch(false);
         modelSearchProviderKey = null;
         $('#msProviderModelsActionMenu').removeClass('show');
+        // 视图已关闭：在途拉取不会再有人关心，顺手复位按钮，
+        // 否则下次进入本页时第一眼就是一个转着的禁用按钮
+        setFetchBtnBusy(false);
         // 通知聊天组件刷新模型下拉
         if (typeof window.reloadModels === 'function') {
             window.reloadModels();
@@ -820,6 +823,25 @@
         NETWORK_ERROR: 'fetch_network_error', INVALID_RESPONSE: 'fetch_invalid_response', UNKNOWN: 'fetch_unknown'
     };
 
+    /* ===== 拉取按钮的忙碌态 =====
+     * 「发起」与「复原」必须共用同一份 DOM 字符串：改前两处各写一遍内联 SVG，
+     * 复原那份还漏了 stroke-linecap/linejoin（计算值 stroke-linecap:butt，而空闲
+     * 下载图标是 round），旋转中弧线端头呈平口，与图标库其余图标的圆头描边不一致。
+     * 尺寸也统一到 16px：改前忙碌态用 14px，点击瞬间图标会缩一圈（16→14→16）。 */
+    var FETCH_BTN_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+    var FETCH_BTN_SPINNER = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>';
+
+    /**
+     * 拉取按钮忙碌态开关（唯一入口）。
+     * @param {boolean} busy true=转圈并禁用；false=复原下载图标并启用
+     */
+    function setFetchBtnBusy(busy) {
+        $('#msProviderFetchModelsBtn')
+            .prop('disabled', !!busy)
+            .toggleClass('is-loading', !!busy)
+            .html(busy ? FETCH_BTN_SPINNER : FETCH_BTN_ICON);
+    }
+
     function showFetchFailure(res) {
         var data = res && res.data;
         if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { data = {}; } }
@@ -846,8 +868,7 @@
         var requestApiUrl = apiUrl;
         var requestStandard = standard;
 
-        var $btn = $('#msProviderFetchModelsBtn');
-        $btn.prop('disabled', true).html('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>');
+        setFetchBtnBusy(true);
 
         $.ajax({
             url: '/web/settings/providers/fetch',
@@ -861,13 +882,20 @@
                 providerName: (currentProvider && currentProvider.name) || ''
             },
             success: function (res) {
+                // 复原必须【无条件】执行 —— 否则本按钮会永久停在 spinner + disabled。
+                // 改前它写在下面那条「表单是否被改动」守卫之后：用户在等待期间改了 API 地址、
+                // 切了接口类型或离开视图，success 就直接 return，按钮再也不复原
+                // （实测 3 秒后仍在转、click 不再触发，只能刷新整页恢复）。
+                // 本处与 closeModelSettings 的兜底是两个正交的落定点：请求有结果就归本处
+                //（守卫不成立也要先复原，再 return）；视图先被关闭（请求注定无人接收）就归那处。
+                // 仍以 requestId 作闸门：过期请求不得关掉后发起那次请求的忙碌态。
+                if (requestId === fetchRequestId) setFetchBtnBusy(false);
                 if (requestId !== fetchRequestId || selectedName !== requestSelectedName
                         || (currentProvider && currentProvider.name) !== requestProviderName
                         || $('#msProviderApiUrl').val() !== requestApiUrl
                         || ($('input[name="msProviderStandard"]:checked').val() || DEFAULT_STANDARD) !== requestStandard) {
                     return; // Provider/表单已切换，丢弃旧请求结果
                 }
-                $btn.prop('disabled', false).html('<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>');
                 if (res.code === 200) {
                     try {
                         var data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
@@ -929,7 +957,7 @@
                 }
             },
             error: function (xhr) {
-                $btn.prop('disabled', false).html('<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>');
+                if (requestId === fetchRequestId) setFetchBtnBusy(false);
                 showToast(GourdI18n.t('settings.providers.fetch_network_error'), 'error');
             }
         });

@@ -3222,6 +3222,42 @@ function restoreHitlCardPending(sess, card) {
     });
 }
 
+/* 把待审批卡改为「已放行」终态（后端已解除挂起，卡不再可点）。
+   两个调用方：① hitl_released 帧（实时广播 + 回放重放同一条入口）；
+   ② app-access-mode.js 切到完全访问且持久化确认 200 后的兜底（帧丢失时仍能收卡）。
+
+   【必须按会话渲染落点作用域】旧实现用 $('.hitl-pending') 全文档扫：每个会话的容器
+   都常驻文档（仅隐藏），会把【别的会话】正在等审批的卡一并释放——那是一张还能点通的活卡。
+   回放期间渲染落点是 sess.renderTarget（临时容器），故取 renderRoot 而非 container。 */
+function releaseHitlCards(sess, actionId) {
+    var root = null;
+    if (sess) {
+        root = (typeof renderRoot === 'function') ? renderRoot(sess) : sess.container;
+    }
+    if (!root) root = document;
+    $(root).find('.hitl-pending').each(function () {
+        var $card = $(this);
+        // 带 id 且对不上：不是本次被解除的那张，不动
+        var cardId = $card.attr('data-hitl-action-id');
+        if (actionId && cardId && cardId !== actionId) return;
+        $card.find('.hitl-card-actions').remove();
+        $card.removeClass('hitl-pending expanded');
+        // 状态点用仓库既有的 .done：app.css 只有 loading/done/warn/reject 四条规则
+        var $icon = $card.find('.tool-status-icon');
+        if ($icon.length) { $icon.removeClass('warn loading').addClass('done').empty(); }
+        var $name = $card.find('.tool-name');
+        if ($name.length) {
+            $name.text(GourdI18n.t('app.access_released'));
+            // 摘掉重译锚：relocalizeDynamicLabels 按 [data-i18n-hitl] 全文档重译，
+            // 不摘则切语言后这张「已放行」卡会被翻回「需要授权：xxx」
+            $name.removeAttr('data-i18n-hitl').removeAttr('data-i18n-hitl-tool');
+        }
+        // 卡已不对应任何可提交任务，摘掉标识避免误导按属性重建上下文的逻辑
+        $card.removeAttr('data-hitl-action-id');
+    });
+}
+window.releaseHitlCards = releaseHitlCards;
+
 /* ===== 结构化问答卡（ask_user） =====
    与 HITL 审批卡（消息流内、审批即放行）不同：问答卡是一张悬浮于输入框上方的交互卡片，
    承载「一至多道带选项的提问」。用户逐题作答/补充/跳过后一次性提交，或点 X 跳过剩余直接提交

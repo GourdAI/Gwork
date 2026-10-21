@@ -124,7 +124,7 @@ pub struct RemoteEnv {
     pub home: String,
 }
 
-/// 远端 Java 最低主版本（与 gourdai-parent/pom.xml 的 java.version=17 对齐；
+/// 远端 Java 最低主版本（与 gourd-ai-agent/pom.xml 的 java.version=17 对齐；
 /// 生产代码用了 Stream.toList()/Files.readString 等 11~16+ API，class 版本 61）。
 pub const MIN_JAVA_MAJOR: u32 = 17;
 
@@ -679,7 +679,7 @@ pub fn backend_stop_command(pid: u32) -> String {
 
 /// 探测远端预装 gwork CLI：返回 (gwork 路径, 版本串)。无则 None。
 ///
-/// 版本取 `gwork version` 的输出（Configurator:253 输出 "GWork v2026.6.21"），
+/// 版本取 `gwork version` 的输出（Configurator 的 version 分支输出 "GWork v0.2.3"，语义化形态），
 /// 该分支在 checkUpdate 之前，不联网、秒退。
 pub async fn detect_preinstalled(session: &dyn ExecChannel) -> Result<Option<(String, String)>> {
     let res = session

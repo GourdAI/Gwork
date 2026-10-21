@@ -122,7 +122,15 @@
         var target = next;
         $.post(ACCESS_SELECT_URL, { sessionId: session, accessMode: target })
             .done(function (resp) {
-                if (resp && resp.code === 200) return;
+                if (resp && resp.code === 200) {
+                    // 切到完全访问：旧档位下挂起的审批卡已失去意义（后端在 access_select 里
+                    // 已清挂起态并广播 hitl_released 帧），这里做 DOM 兜底：帧丢失/页面
+                    // 未连 WS 时仍能收卡。【必须在确认 200 之后】：先撤卡再发请求时，一旦
+                    // 请求失败回滚，后端仍停在 pending + 默认档，而前端按钮已没了——会话
+                    // 卡死在等待态且无从恢复（pending 期间新消息按 busy 拒绝）。
+                    if (target === MODE_FULL) dismissPendingHitlCards();
+                    return;
+                }
                 rollback();
             })
             .fail(function (err) {
@@ -138,6 +146,26 @@
                 render();
             }
             if (typeof window.showToast === 'function') window.showToast(t('app.access_failed'), 'error');
+        }
+    }
+
+    /* 切到完全访问后，把本会话残留的待审批卡改为「已放行」态。
+       主路径是后端广播的 hitl_released 帧（app-streaming.js）；这里是帧丢失时的兜底。
+       实现统一走 app-message.js 的 releaseHitlCards：按会话渲染落点作用域收卡，
+       避免全文档扫到别个会话还能点通的活卡。 */
+    function dismissPendingHitlCards() {
+        try {
+            if (typeof window.releaseHitlCards !== 'function') return;
+            var sess = null;
+            if (typeof window.sessionMap !== 'undefined' && window.sessionMap && currentSession) {
+                sess = window.sessionMap[currentSession];
+            }
+            // 查不到会话对象就直接放弃兜底：releaseHitlCards 在无 sess 时会全文档扫，
+            // 那会把别个会话还能点通的活卡一并释放——比不收卡更糟。
+            if (!sess) return;
+            window.releaseHitlCards(sess, null);
+        } catch (err) {
+            console.error('[access] dismiss pending hitl cards failed:', err);
         }
     }
 

@@ -63,13 +63,22 @@ test('删除接口与刷新链路保持可用', () => {
     assert.match(source, /if \(resp\.code === 200\) \{ showMcpListView\(\); loadMcpList\(\); \}/);
 });
 
-test('tauri/ui 发布副本与 static 源保持同步', () => {
-    const mirrorPath = path.resolve(
-        __dirname,
-        '../../../gourd-ai-tauri/ui/js/app-settings-mcp.js'
+test('tauri/ui 发布副本与 static 源保持同步', (t) => {
+    // 路径算术自证：__dirname = gourd-ai-agent/src/test/js，向上四级才到仓库根。
+    // 旧版本写 '../../../'（只到 gourd-ai-agent 根）拼出 gourd-ai-agent/gourd-ai-tauri/ui，
+    // 再配“不存在就 return” → 从提交以来从未真正比对过任何文件（本仓第 4 次同类假绿灯）。
+    const repoRoot = path.resolve(__dirname, '../../../..');
+    assert.equal(
+        staticJsDir,
+        path.join(repoRoot, 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js'),
+        `镜像路径算术错误：向上四级得 ${repoRoot}，拼回 static/js 后与实际不同源`
     );
+
+    const mirrorPath = path.join(repoRoot, 'gourd-ai-tauri', 'ui', 'js', 'app-settings-mcp.js');
     if (!fs.existsSync(mirrorPath)) {
-        return; // 副本不存在时跳过（例如仅检出 agent 模块）
+        // ui/ 是 cmd/prepare-ui.js 生成的构建产物（已 gitignore），干净检出时不存在。
+        t.skip('镜像不存在（gourd-ai-tauri/ui 未执行 prepare-ui）');
+        return;
     }
     const mirror = fs.readFileSync(mirrorPath, 'utf8').replace(/^\uFEFF/, '');
     assert.equal(mirror, source, 'gourd-ai-tauri/ui 副本已与 static 源不同步，请同步后再提交');

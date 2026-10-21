@@ -285,6 +285,7 @@
                 "access_risk_net_desc":  "Truy cập mọi địa chỉ mạng; nguy cơ rò rỉ dữ liệu hoặc tải tệp không rõ nguồn gốc",
                 "access_ack":  "Tôi hiểu rõ các rủi ro và tự chịu trách nhiệm về an toàn dữ liệu của mình",
                 "access_allow":  "Cho phép toàn quyền",
+                "access_released":  "Đã cho phép theo toàn quyền",
                 "access_cancel":  "Hủy",
                 "access_toast_default":  "Đã chuyển sang quyền mặc định",
                 "access_toast_full":  "Đã chuyển sang toàn quyền truy cập",

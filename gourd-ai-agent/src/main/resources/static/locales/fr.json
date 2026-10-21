@@ -285,6 +285,7 @@
                 "access_risk_net_desc":  "Toute adresse réseau accessible ; risque de fuite de données ou de téléchargements inconnus",
                 "access_ack":  "Je comprends les risques et assume la responsabilité de la sécurité de mes données",
                 "access_allow":  "Autoriser l’accès complet",
+                "access_released":  "Autorisé en accès complet",
                 "access_cancel":  "Annuler",
                 "access_toast_default":  "Passé à l’accès par défaut",
                 "access_toast_full":  "Passé à l’accès complet",

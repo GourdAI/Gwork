@@ -66,7 +66,7 @@ public class AgentFlags {
      * 故本方法必须与 {@link #compareVersions} 配合使用，绝不能再拿版本号去当日期解析。</p>
      *
      * <p>本值是后端的**唯一权威**：pom 的 {@code project.version}、{@code setup/info.json}、
-     * 两个 setup 脚本的下载地址、桌面壳（Electron/Tauri）的版本声明、README 徐标全部与它对齐。</p>
+     * 两个 setup 脚本的下载地址、桌面壳（Electron/Tauri）的版本声明、README 徽章全部与它对齐。</p>
      */
     public static String getVersion() {
         return "v0.2.3";

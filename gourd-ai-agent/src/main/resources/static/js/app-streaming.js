@@ -752,6 +752,9 @@ function inferPhaseFromType(type) {
         case 'action_draft': case 'action_args': case 'action_batch': return PHASE_TOOL;
         case 'action_end': return PHASE_WAITING;
         case 'hitl': return PHASE_HITL;
+        // 释放帧不推进相位：它只收卡，不改变「本轮在等什么」的语义（后端清挂起后
+        // 引擎流随即正常结束并补 done，相位由 done 收口）。
+        case 'hitl_released': return null;
         case 'question': return PHASE_QUESTION;
         // 问答已闭环（本人提交或他端作答）：引擎在消费答案后继续执行，语义等同「引擎处理中」，
         // 归入 PHASE_WAITING；若沿用 PHASE_QUESTION 会让底部指示器在卡片隐藏后长期缺席。
@@ -943,6 +946,10 @@ function onWebChunk(sess, chunk) {
                 appendRetryChunk(sess, chunk.text);
                 break;
         case 'hitl':   finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendHitlCard(sess, chunk.toolName, chunk.command, chunk.actionId); break;
+        // 后端解除挂起（切完全访问）：把对应审批卡收为「已放行」终态。
+        // 回放同走此分支：已落盘的 hitl 帧重渲染出的卡会被紧随其后的释放帧收掉，
+        // 历史里不再留可点的死卡（后端已无挂起任务，点批准只会 ACTION_MISMATCH）。
+        case 'hitl_released': if (typeof releaseHitlCards === 'function') releaseHitlCards(sess, chunk.actionId || null); break;
         case 'question': finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendQuestionCard(sess, chunk); break;
         case 'question_answered': handleQuestionAnsweredFrame(sess, chunk); break;
             case 'trace':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendTraceBadge(sess, chunk);

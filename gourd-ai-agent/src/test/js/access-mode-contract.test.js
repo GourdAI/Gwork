@@ -360,3 +360,98 @@ test('12 个语言包均提供档位文案，且不再含沙盒键', () => {
             `${lang} 仍残留 settings.general.sandbox 文案`);
     }
 });
+
+/* ===== 「已给完全访问仍弹审批」的前端回归 =====
+ *
+ * 后端已由 HITL.clearPending 清掉挂起态，但 DOM 里那张卡如果仍停在 hitl-pending，
+ * 用户点它只会提交一个已不存在任务的决策——表现为「点了没反应」。
+ * 注意断言必须看代码而不是看注释：本仓多次因「注释里含关键词」而假绿。 */
+test('切到完全访问必须撒掉残留的待审批卡', () => {
+    const js = readStatic('js', 'app-access-mode.js');
+
+    // 只取 applyMode 函数体，避免命中别处的同名字符串
+    const start = js.indexOf('function applyMode(');
+    assert.ok(start >= 0, '找不到 applyMode');
+    const end = js.indexOf('function dismissPendingHitlCards(');
+    assert.ok(end > start, '找不到 dismissPendingHitlCards 定义');
+    const body = js.slice(start, end);
+
+    const callIdx = body.indexOf('dismissPendingHitlCards()');
+    assert.ok(callIdx >= 0,
+        'applyMode 必须调用 dismissPendingHitlCards，否则帧丢失时切 full 后旧审批卡仍可点');
+
+    /* 顺序契约（2026-10-21 自审抓出的真实缺陷）：撤卡必须在持久化确认成功之后。
+       旧实现先撤卡再发请求：请求失败回滚时后端仍停在 pending + 默认档，
+       而前端按钮已没了——会话卡死在等待态且无从恢复（pending 期间新消息按 busy 拒绝）。 */
+    const postIdx = body.indexOf('$.post(ACCESS_SELECT_URL');
+    const okIdx = body.indexOf('code === 200');
+    assert.ok(postIdx >= 0 && okIdx >= 0, 'applyMode 必须先发持久化请求并检查 code===200');
+    assert.ok(callIdx > okIdx && callIdx > postIdx,
+        'dismissPendingHitlCards 必须在确认 200 之后调用：先撤卡后失败回滚会让会话卡死在 pending');
+
+    /* 兜底路径不得全文档扫：每个会话容器都常驻文档（仅隐藏），
+       $('.hitl-pending') 会把别个会话还能点通的活卡一并释放。 */
+    assert.ok(!js.includes("$('.hitl-pending')"),
+        'app-access-mode 不得全文档扫 .hitl-pending：会误释放别会话的活卡');
+    const dismissBody = js.slice(end, end + 1200);
+    assert.ok(dismissBody.includes('releaseHitlCards'),
+        '兜底必须复用 app-message.js 的 releaseHitlCards（按会话作用域收卡）');
+    assert.ok(/if\s*\(!sess\)\s*return;/.test(dismissBody),
+        '查不到会话对象时必须放弃兜底，不得回退全文档扫');
+});
+
+/* 释放帧链路（2026-10-21 自审抓出的回归）：切 full 后后端清了挂起态，但已落盘的 hitl 帧
+   在重开会话时会被回放重渲染成可点的死卡（点批准 → ACTION_MISMATCH → 回退 pending → 死循环）。
+   必须有一帧 hitl_released 随出站落盘 + 广播，前端按帧收卡。 */
+test('释放帧链路：hitl_released 必须被前端消费且按会话作用域收卡', () => {
+    const msgJs = readStatic('js', 'app-message.js');
+    const streamJs = readStatic('js', 'app-streaming.js');
+
+    const defIdx = msgJs.indexOf('function releaseHitlCards(');
+    assert.ok(defIdx >= 0, 'app-message.js 必须定义 releaseHitlCards');
+    const relBody = msgJs.slice(defIdx, defIdx + 2200);
+
+    assert.ok(msgJs.includes('window.releaseHitlCards = releaseHitlCards'),
+        'releaseHitlCards 必须导出，供 app-streaming/app-access-mode 调用');
+    assert.ok(relBody.includes("removeClass('hitl-pending"),
+        '必须摘掉 hitl-pending 态');
+    assert.ok(relBody.includes('hitl-card-actions'),
+        '必须移除审批按钮组');
+
+    /* 状态点必须用仓库真实存在的样式类：app.css 只有 loading/done/warn/reject 四条规则，
+       写 .ok 命中不到任何样式，圆点连底色都没有（自审抓出）。 */
+    const css = readStatic('css', 'app.css');
+    assert.ok(css.includes('.tool-status-icon.done'), '前置：app.css 必须存在 .done 规则');
+    assert.ok(!css.includes('.tool-status-icon.ok'), '前置：app.css 不存在 .ok 规则（本断言锁住前提）');
+    assert.ok(relBody.includes("addClass('done')"), '状态点必须加 .done：.ok 在 app.css 中不存在');
+
+    /* 必须摘掉重译锚：relocalizeDynamicLabels 在语言切换时按 [data-i18n-hitl] 全文档重译，
+       不摘则「已放行」卡会被翻回「需要授权：xxx」。 */
+    assert.ok(relBody.includes("removeAttr('data-i18n-hitl')"),
+        '必须摘掉 data-i18n-hitl 重译锚，否则切语言后卡片文案被翻回待审批');
+
+    /* 作用域：必须按会话渲染落点收卡（回放期 renderTarget，否则 container），
+       全文档扫会误释放别会话的活卡。 */
+    assert.ok(relBody.includes('renderRoot'),
+        '必须取 renderRoot 作为收卡作用域（回放期渲染落点是临时容器）');
+    assert.ok(/\$\(root\)\.find\('\.hitl-pending'\)/.test(relBody),
+        '必须在会话作用域内 find，不得全文档扫');
+
+    /* 帧消费：onWebChunk 的 switch 必须有 hitl_released 分支且调 releaseHitlCards；
+       相位映射不得把它推进任何相位（它只收卡）。 */
+    assert.ok(streamJs.includes("case 'hitl_released'"),
+        'app-streaming 必须消费 hitl_released 帧：否则回放重渲染的死卡无人收');
+    const branch = streamJs.slice(streamJs.indexOf("case 'hitl_released': if"), streamJs.indexOf("case 'hitl_released': if") + 220);
+    assert.ok(branch.includes('releaseHitlCards(sess'),
+        'hitl_released 分支必须把帧交给 releaseHitlCards 并带上会话');
+    assert.ok(/case 'hitl_released': return null;/.test(streamJs),
+        '释放帧不得推进流式相位（只收卡，相位由 done 收口）');
+});
+
+test('12 个语言包均提供「已放行」文案', () => {
+    for (const lang of LOCALES) {
+        const json = JSON.parse(readStatic('locales', `${lang}.json`));
+        assert.equal(typeof json.app.access_released, 'string', `${lang} 缺少 app.access_released`);
+        assert.ok(json.app.access_released.length > 0, `${lang} 的 app.access_released 为空`);
+    }
+});

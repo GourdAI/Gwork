@@ -54,6 +54,21 @@ public enum AccessMode {
     public static final String ATTR_KEY = "__accessMode";
 
     /**
+     * 标记「本轮档位是直接继承会话、不是显式覆盖」。
+     *
+     * <p>存在的理由（2026-10-21 实机缺陷）：{@link #ATTR_KEY} 在每轮开始时写入一次，
+     * 而用户在轮内切档位只改会话上下文。若消费方无条件信任投影，轮内从 default 升到 full 后，
+     * 本条轮里后续每条 bash 仍按旧档判定——用户刚点完「完全访问」，下一条命令照样弹审批，
+     * 卡片还写着「当前为默认权限」。实测样本 {@code work-mvhqk622}：快照
+     * {@code _access_mode=full} 却残留 {@code _pending_reason_=「当前为默认权限…』}。</p>
+     *
+     * <p>带此标记时，消费方应改读会话上下文（实时值）；无此标记说明是 Loop 任务级等
+     * <b>显式覆盖</b>，必须按覆盖值判定。这样不改变「显式覆盖优先」的原契约（否则任务级 full
+     * 会被会话 default 降档），又让轮内切档即时生效。</p>
+     */
+    public static final String ATTR_INHERITED_KEY = "__accessModeInherited";
+
+    /**
      * 构建系统提示词时携带的档位（经 Prompt 属性透传）。
      *
      * <p>与 {@link #ATTR_KEY} 值相同、语义不同：工具执行走 toolContext，而

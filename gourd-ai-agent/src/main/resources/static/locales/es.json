@@ -285,6 +285,7 @@
                 "access_risk_net_desc":  "Acceso a cualquier dirección de red; posible fuga de datos o descargas desconocidas",
                 "access_ack":  "Entiendo los riesgos y asumo la responsabilidad de la seguridad de mis datos",
                 "access_allow":  "Permitir acceso total",
+                "access_released":  "Liberado con acceso total",
                 "access_cancel":  "Cancelar",
                 "access_toast_default":  "Cambiado a acceso predeterminado",
                 "access_toast_full":  "Cambiado a acceso total",
