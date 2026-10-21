@@ -414,6 +414,42 @@ test('restore 图标的两个断口必须锚在前框相邻边上（不得浮空
         '后框收尾 x 必须压在前框右边缘 x=' + rightEdge + '（满前值 ' + curX + '，悬空即脱节）');
 });
 
+/* 【图标颜色同源护栏（2026-10-21 用户再次报障）】
+   报障：「这这大小明显不一致，右侧明显自绘的三个图标要比左侧的两个按钮大」。
+   但像素级实测（DPI=100%、真实运行窗口截图、逐像素解码）证明两侧几何完全一致：
+   墨迹包围盒均 13x13px，笔画有效墨迹宽度均约 1.23px。差异不在尺寸而在 *颜色*：
+   左组静止态 color:var(--text-secondary)（#71717a 灰）
+   右组静止态 color:var(--gourd-tb-fg,#1a1a2e)（近黑）
+   同尺寸下近黑比灰在视觉上更重、更粗，人眼直接读成「右边更大」。
+   因此两侧静止态图标色收敛为同一令牌 --titlebar-icon-fg（取值对齐右侧）。
+   本组同时锁三件事：① 令牌在明/暗两主题都有定义；② 左组 CSS 用它；
+   ③ 右组注入脚本用它且保留健链回退——任一侧单改就变红。 */
+test('两侧标题栏图标静止态颜色必须同源：--titlebar-icon-fg 单一真源', () => {
+    // ① 令牌必须在明暗两主题都定义（漏一个主题就会出现一侧变白/变黑）
+    const defs = [...themeCss.matchAll(/--titlebar-icon-fg:\s*([^;]+);/g)].map((m) => m[1].trim());
+    assert.strictEqual(defs.length, 2, '--titlebar-icon-fg 必须在 theme.css 的 light/dark 两段各定义一次');
+    for (const v of defs) {
+        assert.match(v, /^#[0-9a-fA-F]{6}$/, '--titlebar-icon-fg 必须是具体色值（不得为 var() 引用或空值）：' + v);
+    }
+
+    // ② 左组（DOM 内联 svg）静止态必须消费该令牌，不得再直写 --text-secondary
+    const leftBtnRule = (monitorCss.match(/\.titlebar-action-btn \{[\s\S]*?\}/) || [])[0];
+    assert.ok(leftBtnRule, 'task-monitor.css 必须存在 .titlebar-action-btn 基础规则');
+    assert.match(leftBtnRule, /color:\s*var\(--titlebar-icon-fg\)/,
+        '左组静止态图标色必须走 --titlebar-icon-fg（曾用 --text-secondary，比右侧灰一截，显小）');
+    assert.doesNotMatch(leftBtnRule, /color:\s*var\(--text-secondary\)/,
+        '左组不得回退 --text-secondary（与右组混色是「两侧大小不一致」的真因）');
+
+    // ③ 右组（Tauri 注入脚本）静止态必须优先消费同一令牌，并保留健链回退
+    const tbBtnIdx = tbRs.indexOf("' .__gourd_tb_btn{'");
+    assert.ok(tbBtnIdx > 0, 'titlebar_ui.rs 必须存在 .__gourd_tb_btn 基础规则');
+    const tbBtnRule = tbRs.slice(tbBtnIdx, tbRs.indexOf("'}", tbBtnIdx));
+    assert.match(tbBtnRule, /color:var\(--titlebar-icon-fg,/,
+        '右组静止态图标色必须以 --titlebar-icon-fg 为首选值（与左组共源）');
+    assert.match(tbBtnRule, /color:var\(--titlebar-icon-fg,var\(--gourd-tb-fg,[^)]+\)\)/,
+        '右组必须保留 var() 健链回退（注入早于 theme.css 解析时仍有色，不得裸掉）');
+});
+
 test('控件条总宽单一真源：Rust 常量推导 = 注入脚本 STRIP_W = 拖拽让位 = 左组偏移源', () => {
     const w = Number((tbRs.match(/const BUTTON_WIDTH: u32 = (\d+);/) || [])[1]);
     const h = Number((tbRs.match(/const BUTTON_HEIGHT: u32 = (\d+);/) || [])[1]);

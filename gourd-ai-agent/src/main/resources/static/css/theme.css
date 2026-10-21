@@ -91,6 +91,16 @@
     --text-code: #24292e;
     --text-tertiary: #a1a1aa;
 
+    /* Titlebar Icon —— 标题栏图标的唯一前景色真源（左右两组必须共用）。
+       【为何单列一个令牌】标题栏并排着两套图标：左侧 .titlebar-action-btn
+       （终端/监控，DOM 内联 svg）与右侧 Tauri 自绘窗控（titlebar_ui.rs 注入）。
+       二者曾各用一套色：左组 --text-secondary（#71717a 灰）、右组 --gourd-tb-fg
+       （#1a1a2e 近黑）。虽几何尺寸完全一致（实测均 13x13 墨迹、笔宽 1.23px），
+       但近黑比灰在视觉上更重、更粗，用户一眼判定「右侧明显比左侧大」。
+       故左右统一走本令牌，取值对齐右侧窗控，杜绝两侧再各自漂移。
+       注意：这是 *静止态* 图标色；hover 仍走 --text-primary，激活态走 --accent。 */
+    --titlebar-icon-fg: #1a1a2e;
+
     /* Border */
     --border-color: #e4e4e7;
     --border-input: #d4d4d8;
@@ -218,6 +228,9 @@
     --text-sidebar: #b5b5bb;
     --text-code: #d4d4d4;
     --text-tertiary: #66666d;
+
+    /* Titlebar Icon —— 暗色取值与右侧窗控 --gourd-tb-fg 同源（见亮色段注释） */
+    --titlebar-icon-fg: #dcdde1;
 
     /* Border */
     --border-color: #27272a;

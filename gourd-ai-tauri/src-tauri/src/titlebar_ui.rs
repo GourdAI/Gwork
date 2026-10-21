@@ -273,7 +273,7 @@ const TITLEBAR_JS: &str = r#"
     '  display:flex;align-items:center;justify-content:center;',
     '  border:0;padding:0;margin:0;background:transparent;cursor:default;',
     '  border-radius:6px;',
-    '  color:var(--gourd-tb-fg,#1a1a2e);',
+    '  color:var(--titlebar-icon-fg,var(--gourd-tb-fg,#1a1a2e));',
     '  opacity:var(--gourd-tb-dim,1);',
     '  transition:background-color .15s,color .15s,opacity .15s ease;',
     '  -webkit-app-region:no-drag;', /* 对可能存在的 Chromium 内核无害 */
