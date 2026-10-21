@@ -22,8 +22,8 @@ import java.util.Properties;
  * {@link #UNKNOWN}，绝不抛异常、绝不阻断启动。</p>
  *
  * <p><b>与 {@link AgentFlags#getVersion()} 的关系</b>：两者语义不同且不可合并。后者是硬编码的
- * 日期形态版本号，会被 {@code DateUtil.parseTry} 当日期解析用于更新检测；构建指纹只用于展示与
- * 比对，任何情况下都不要把它拼进 {@code AgentFlags.getVersion()}。</p>
+ * 语义化版本号（如 {@code v0.2.3}），由 {@link AgentFlags#compareVersions} 比较用于更新检测；
+ * 构建指纹只用于展示与比对，任何情况下都不要把它拼进 {@code AgentFlags.getVersion()}。</p>
  *
  * @author oisin
  * @see AgentFlags
@@ -101,7 +101,7 @@ public class BuildInfo {
 
     /**
      * 可读构建指纹：{@code <版本>-<ISO-8601 UTC 时间>-<短 revision>}，例如
-     * {@code 2026.6.21-2026-09-06T06:59:13Z-a1b2c3d}。桌面端比对「后端与壳是否同一次构建」
+     * {@code 0.2.3-2026-09-06T06:59:13Z-a1b2c3d}。桌面端比对「后端与壳是否同一次构建」
      * 即用此值，把它当不透明字符串对待（不要尝试拆分或从中反推日期）。
      */
     public static String getBuildId() {

@@ -10,7 +10,7 @@ Java AI Agent
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-8%20~%2026-orange.svg)](#)
-[![Version](https://img.shields.io/badge/v2026.6.21-Latest-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/v0.2.3-Latest-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20鸿蒙-lightgrey.svg)](#)
 
 **Desktop 桌面端 · Web 网页端 · CLI 命令行 · ACP 编辑器接入 · 微信/企微/飞书远程控制**

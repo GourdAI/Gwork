@@ -14,6 +14,15 @@
  *                                   会回落到它，且它决定 exe 的文件属性
  *   - package.json               ← 仅作模块自身标识，保持一致便于人工核对
  *
+ * ## 另两个锁文件也要同步（2026-10 补齐，别以为只有三处）
+ * 两个 lock 文件里各自还嵌着一份本包版本：
+ *   - src-tauri/Cargo.lock       ← name = "gourd-ai-tauri" 段内的 version
+ *   - package-lock.json          ← 顶层 version 与 packages[""].version
+ * 它们不参与依赖求解，所以漏改**不会让构建报错**，但 `cargo build` / `npm ci`
+ * 会把它当成「本地改动」重写回去，每次构建都凭空多出一份与版本无关的脏 diff。
+ * 两个 lock 在不同模块的 .gitignore 里（不入库），因此漏改的代价会落在
+ * 每个开发者自己的本地工作区上——比入库文件漏改更难发现。
+ *
  * ## Cargo.toml 的改写为什么按「段」定位，而不是取全文首处 version
  * 旧写法 /^version = "..."/m 取全文第一处行首 version，靠的是「[package] 在文件开头、
  * 依赖都写成 `tauri = { version = "2" }`（version 不在行首）或 `objc2 = "0.5"`（键名不是
@@ -68,6 +77,77 @@ function fail(msg) {
   process.exit(1);
 }
 
+/**
+ * 同步 Cargo.lock 里本 crate 的 version（只改 name = "gourd-ai-tauri" 那一段）。
+ *
+ * 不能全文替换 version 行：Cargo.lock 里有几百个包的 version = "x.y.z"，
+ * 全文替换会把所有依赖的锁定版本一起改掉，依赖树直接崩。
+ *
+ * 文件不存在时静默跳过：新人拉仓尚未 cargo build 时本就没有 Cargo.lock，
+ * 那不是错误，不值得阻断发版。
+ */
+function syncCargoLock(version) {
+  const file = path.join(ROOT, 'src-tauri/Cargo.lock');
+  if (!fs.existsSync(file)) {
+    console.log('[set-version] src-tauri/Cargo.lock 不存在（尚未 cargo build），跳过');
+    return;
+  }
+  const text = fs.readFileSync(file, 'utf8');
+  const marker = 'name = "gourd-ai-tauri"';
+  const idx = text.indexOf(marker);
+  if (idx < 0) {
+    console.log('[set-version] src-tauri/Cargo.lock 中未找到本 crate 段，跳过');
+    return;
+  }
+  // 段尾 = 下一个 [[package]]
+  const nextIdx = text.indexOf('[[package]]', idx);
+  const segEnd = nextIdx < 0 ? text.length : nextIdx;
+  const seg = text.slice(idx, segEnd);
+  const m = /(^|\r?\n)version = "([^"]*)"/.exec(seg);
+  if (!m) {
+    fail('src-tauri/Cargo.lock 的本 crate 段内没有 version 行');
+  }
+  if (m[2] === version) {
+    console.log(`[set-version] src-tauri/Cargo.lock 已是 ${version}，跳过写入`);
+    return;
+  }
+  const newSeg = seg.replace(/(^|\r?\n)version = "[^"]*"/, `$1version = "${version}"`);
+  fs.writeFileSync(file, text.slice(0, idx) + newSeg + text.slice(segEnd));
+  console.log(`[set-version] src-tauri/Cargo.lock: ${m[2]} -> ${version}`);
+}
+
+/**
+ * 同步 package-lock.json 里本包的两处 version（顶层 + packages[""].version）。
+ *
+ * 只改这两处：依赖项的 version 在 packages["node_modules/xxx"] 里，不能动。
+ * 文件不存在时静默跳过（原因同 Cargo.lock）。
+ */
+function syncNpmLock(version) {
+  const file = path.join(ROOT, 'package-lock.json');
+  if (!fs.existsSync(file)) {
+    console.log('[set-version] package-lock.json 不存在（尚未 npm install），跳过');
+    return;
+  }
+  const raw = fs.readFileSync(file, 'utf8');
+  const json = JSON.parse(raw);
+  const changes = [];
+  if (json.version !== undefined && json.version !== version) {
+    changes.push(`version ${json.version} -> ${version}`);
+    json.version = version;
+  }
+  if (json.packages && json.packages[''] && json.packages[''].version !== version) {
+    changes.push(`packages[""].version ${json.packages[''].version} -> ${version}`);
+    json.packages[''].version = version;
+  }
+  if (!changes.length) {
+    console.log(`[set-version] package-lock.json 已是 ${version}，跳过写入`);
+    return;
+  }
+  // 保持 npm 自己的风格：2 空格缩进 + 行尾换行
+  fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+  console.log(`[set-version] package-lock.json: ${changes.join('; ')}`);
+}
+
 function main() {
   const version = process.argv[2];
   if (!version) fail('缺少版本号参数，用法: node cmd/set-version.js <version>');
@@ -109,6 +189,9 @@ function main() {
     console.log(`[set-version] src-tauri/Cargo.toml: ${located.version} -> ${version}`);
   }
 
+  syncCargoLock(version);
+  syncNpmLock(version);
+
   // 终检：任何一处没写进去都在这里以明确信息失败，CI 日志不必再猜是哪一步出的问题。
   const stale = [];
   for (const rel of ['package.json', 'src-tauri/tauri.conf.json']) {
@@ -119,8 +202,25 @@ function main() {
   if (recheck.kind !== 'ok' || recheck.version !== version) {
     stale.push(`src-tauri/Cargo.toml 仍是 ${recheck.kind === 'ok' ? recheck.version : recheck.kind}`);
   }
+  // 锁文件终检：它们不入库、且漏改不报错，所以必须靠这里拦住
+  const lockPath = path.join(ROOT, 'package-lock.json');
+  if (fs.existsSync(lockPath)) {
+    const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    if (lock.version !== undefined && lock.version !== version) {
+      stale.push(`package-lock.json 仍是 ${lock.version}`);
+    }
+    if (lock.packages && lock.packages[''] && lock.packages[''].version !== version) {
+      stale.push(`package-lock.json 的 packages[""].version 仍是 ${lock.packages[''].version}`);
+    }
+  }
+  const cargoLockPath = path.join(ROOT, 'src-tauri/Cargo.lock');
+  if (fs.existsSync(cargoLockPath)) {
+    const cargoLock = fs.readFileSync(cargoLockPath, 'utf8');
+    const m = /name = "gourd-ai-tauri"[\s\S]{0,200}?version = "([^"]*)"/.exec(cargoLock);
+    if (m && m[1] !== version) stale.push(`src-tauri/Cargo.lock 仍是 ${m[1]}`);
+  }
   if (stale.length) fail(`版本写入未完成：${stale.join('；')}`);
-  console.log(`[set-version] 三处版本已一致：${version}`);
+  console.log(`[set-version] 全部版本已一致：${version}`);
 }
 
 main();

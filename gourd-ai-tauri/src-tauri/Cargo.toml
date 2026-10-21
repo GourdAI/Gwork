@@ -1,6 +1,6 @@
 [package]
 name = "gourd-ai-tauri"
-version = "0.1.0"
+version = "0.2.3"
 description = "GWork Desktop (Tauri)"
 authors = ["gourdai"]
 license = "AGPL-3.0-only"

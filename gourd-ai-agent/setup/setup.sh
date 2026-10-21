@@ -6,7 +6,7 @@
 
 set -e
 
-VERSION="v2026.6.21"
+VERSION="v0.2.3"
 PACKAGE_URL="https://github.com/GourdAI/gourdai/releases/download/${VERSION}/gourd-ai-agent-bin-${VERSION}.tar.gz"
 TEMP_DIR="/tmp/gourdai-install"
 

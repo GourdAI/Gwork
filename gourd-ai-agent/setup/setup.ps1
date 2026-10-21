@@ -5,7 +5,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$VERSION = "v2026.6.21"
+$VERSION = "v0.2.3"
 $PACKAGE_URL = "https://github.com/GourdAI/gourdai/releases/download/$VERSION/gourd-ai-agent-bin-$VERSION.tar.gz"
 $TEMP_DIR = Join-Path $env:TEMP "gourdai-install"
 
@@ -51,9 +51,9 @@ try {
     # Run PowerShell installer
     $installPath = $installScript.FullName
     $installDir = Split-Path $installPath -Parent
-    
+
     Write-Host "Install path: $installPath" -ForegroundColor Gray
-    
+
     # Set environment variable to tell install.ps1 not to wait
     $env:GOURDWORK_SETUP = "1"
 

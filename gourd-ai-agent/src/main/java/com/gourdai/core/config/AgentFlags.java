@@ -1,7 +1,6 @@
 package com.gourdai.core.config;
 
 import org.noear.snack4.ONode;
-import org.noear.solon.core.util.DateUtil;
 import org.noear.solon.core.util.IoUtil;
 import org.noear.solon.net.http.HttpUtils;
 import org.slf4j.Logger;
@@ -13,7 +12,6 @@ import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Date;
 
 /**
  *
@@ -57,8 +55,21 @@ public class AgentFlags {
     public final static String SCOPE_USER = "user"; //作用域：用户（用局）
     public final static String SCOPE_LOCAL = "workspace"; //作用域：本地
 
+    /**
+     * 当前后端版本号（带前导 {@code v}，展示形态）。
+     *
+     * <p><b>版本体系已从日期形态（{@code v2026.6.21}）切换为语义化版本（{@code v0.2.3}）。</b>
+     * 切换到语义化版本时有个必须同步改的隐患：旧 {@link #checkUpdate()} 用
+     * {@code DateUtil.parseTry(version.substring(1))} 把版本号当**日期**比较；
+     * 换成 {@code 0.2.3} 后该解析恒返 null，旧逻辑会直接跳过比较、
+     * **永远判「无新版本」且不报任何异常** —— 更新检测就这样静默失效。
+     * 故本方法必须与 {@link #compareVersions} 配合使用，绝不能再拿版本号去当日期解析。</p>
+     *
+     * <p>本值是后端的**唯一权威**：pom 的 {@code project.version}、{@code setup/info.json}、
+     * 两个 setup 脚本的下载地址、桌面壳（Electron/Tauri）的版本声明、README 徐标全部与它对齐。</p>
+     */
     public static String getVersion() {
-        return "v2026.6.21";
+        return "v0.2.3";
     }
 
     private static String lastVersion;
@@ -80,20 +91,107 @@ public class AgentFlags {
     }
 
 
+    /**
+     * 检查是否有新版本。
+     *
+     * <p>远端 {@code info.json} 的 {@code cli_version} 与本地 {@link #getVersion()} 都按
+     * 语义化版本比较（见 {@link #compareVersions}）。任一侧解析不出数字段时一律返回
+     * {@code false}：宁可漏提示一次，也不能因为远端返回脏数据就弹一个假的更新提示。</p>
+     */
     public static boolean checkUpdate() {
-        String tmp = getLastVersion();
-        if (tmp != null) {
-            Date lastDate = DateUtil.parseTry(tmp.substring(1));
-            Date currDate = DateUtil.parseTry(getVersion().substring(1));
+        return isRemoteNewer(getLastVersion(), getVersion());
+    }
 
-            if (lastDate != null && currDate != null) {
-                if (lastDate.getTime() > currDate.getTime()) {
-                    return true;
-                }
+    /**
+     * 远端版本是否比本地新（{@link #checkUpdate()} 的纯函数内核）。
+     *
+     * <p><b>为什么单独抽出来</b>：{@link #checkUpdate()} 需要发 HTTP 请求，无法在单测中稳定复现；
+     * 而“脏数据不能引发异常”这个分支又恰恰最容易写错——{@link #compareVersions} 解析失败时返回
+     * {@code null}，直接写 {@code compareVersions(...) > 0} 会因 {@code Integer} 自动拆箱抛
+     * {@link NullPointerException}。抽出纯函数后，这条分支才能被真实测到。</p>
+     *
+     * @param remote 远端版本号（如 {@code info.json} 的 {@code cli_version}），可为 null
+     * @param local  本地版本号，可为 null
+     * @return 远端严格高于本地时 true；任一为 null 或无法解析时 false（宁可不提示，也不弹假的更新提示）
+     */
+    static boolean isRemoteNewer(String remote, String local) {
+        Integer result = compareVersions(remote, local);
+        // 必须显式判空：compareVersions 解析失败返回 null，直接比较会拆箱 NPE。
+        return result != null && result > 0;
+    }
+
+    /**
+     * 语义化版本比较。
+     *
+     * <p>支持的形态：{@code v1.2.3} / {@code 1.2.3} / {@code 1.2.3-beta.1}，段数不足时以 0 补齐
+     * （{@code 0.2} 等价于 {@code 0.2.0}）。比较按数值而非字典序，故 {@code 0.10.0 > 0.9.9}。
+     * 预发布后缀存在的那个版本小于同号正式版（{@code 1.0.0-beta < 1.0.0}），与 semver 一致。</p>
+     *
+     * <p>容错：前导 {@code v} 大小写不忌；某段含非数字（如 {@code 1.2.x}）时该段按 0 计；
+     * 主版本段完全解析不出数字时返回 {@code null}，由调用方决定降级策略（不抛异常）。</p>
+     *
+     * @return 正数表示 {@code left} 更新，负数表示 {@code right} 更新，0 表示同版；无法解析时 {@code null}
+     */
+    static Integer compareVersions(String left, String right) {
+        int[] l = parseVersion(left);
+        int[] r = parseVersion(right);
+        if (l == null || r == null) {
+            return null;
+        }
+        // 预发布标记接在最后一个段上：下标 3 位是标记，值 1=正式版 0=预发布
+        for (int i = 0; i < 3; i++) {
+            if (l[i] != r[i]) {
+                return l[i] > r[i] ? 1 : -1;
             }
         }
+        return Integer.compare(l[3], r[3]);
+    }
 
-        return false;
+    /**
+     * 把版本串解成 {@code [major, minor, patch, releaseFlag]}；解不出主段时返 {@code null}。
+     *
+     * <p>{@code releaseFlag}：正式版 1、带预发布后缀 0。这样统一在同一个比较循环里处理，
+     * 不必在 {@link #compareVersions} 里为后缀单开分支。</p>
+     */
+    private static int[] parseVersion(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String text = raw.trim();
+        if (text.startsWith("v") || text.startsWith("V")) {
+            text = text.substring(1);
+        }
+        // 预发布/构建元数据后缀不参与数字比较，只区分“是不是正式版”
+        boolean prerelease = false;
+        int cut = text.length();
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '-' || c == '+') {
+                prerelease = c == '-';
+                cut = i;
+                break;
+            }
+        }
+        String core = text.substring(0, cut);
+        String[] parts = core.split("\\.");
+        if (parts.length == 0) {
+            return null;
+        }
+        int[] result = {0, 0, 0, prerelease ? 0 : 1};
+        boolean anyNumeric = false;
+        for (int i = 0; i < 3 && i < parts.length; i++) {
+            String part = parts[i].trim();
+            if (part.isEmpty()) {
+                continue;
+            }
+            try {
+                result[i] = Integer.parseInt(part);
+                anyNumeric = true;
+            } catch (NumberFormatException e) {
+                // 该段非纯数字（如 1.x）按 0 计，不让脏数据阻断整个比较
+            }
+        }
+        return anyNumeric ? result : null;
     }
 
     //------------------

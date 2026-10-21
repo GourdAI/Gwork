@@ -4,11 +4,26 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
+    <!--
+      父 POM 直接是 solon-parent。
+
+      历史：本模块原先继承仓库内自建的 gourdai-parent（一个只有 58 行的纯 pom），而那个 pom
+      本身也只是继承 solon-parent 并搬运若干属性/仓库声明，既不产出构件、也不提供
+      dependencyManagement —— 等于纯转手层。2026-10 把它并入本模块，少一跳继承、少一个目录。
+
+      【迁移时必须一起带过来的属性，勿删】
+        - java.version=17：solon-parent 的默认值是 1.8，且它同时驱动
+          maven.compiler.source/target，漏掉会静默降级回 Java 8 编译；
+        - 其余 <xxx.version> 是本模块依赖里 ${...} 的直接来源（solon-parent 里没有同名属性，
+          查证过它只管理 jsoup 的传递版本、不含 swagger-parser/lsp4j/roguemap/flexmark）。
+      原 gourdai-parent 里的 playwright.version / diff.version 两项经全仓检索确认零引用，
+      属历史残留，未随迁移带入。
+    -->
     <parent>
         <groupId>org.noear</groupId>
-        <artifactId>gourdai-parent</artifactId>
-        <version>2026.6.21</version>
-        <relativePath>../gourdai-parent/pom.xml</relativePath>
+        <artifactId>solon-parent</artifactId>
+        <version>4.1.0</version>
+        <relativePath/>
     </parent>
 
     <!--
@@ -17,10 +32,13 @@
         - com.gourdai.agent   —— 智能体核心抽象（Agent、ReAct、Team、Session 等）
         - com.gourdai.harness —— 引擎与工具（HarnessEngine、talents.*、command 框架、permission、hitl）
         - com.gourdai.core    —— 门户与配置（portal.*、channel.*、config.*、command.*、memory）
-      版本随 gourdai（继承 parent 2026.6.21）。第三方依赖版本由 parent 的 dependencyManagement 统一管理。
+      版本号即本模块唯一权威：AgentFlags.getVersion() 的展示值、setup/info.json 与两个
+      setup 脚本的下载地址、桌面壳（Electron/Tauri）的版本声明、README 徽章全部与它对齐。
+      第三方依赖版本由 solon-parent 的 dependencyManagement 统一管理。
     -->
     <artifactId>gourd-ai-agent</artifactId>
     <name>${project.artifactId}</name>
+    <version>0.2.3</version>
     <packaging>jar</packaging>
 
     <licenses>
@@ -64,9 +82,55 @@
         -Dgwork.build.revision=${GITHUB_SHA::7} 覆盖（命令行 -D 优先级高于 pom 属性），
         因此本地 build.ps1 / build.sh 无需任何改动。
     -->
+    <!--
+      以下属性全部由原 gourdai-parent 迁入（详见上方 parent 段注释）。
+
+      java.version 必须留在本模块：solon-parent 默认 1.8，且它同时喂给
+      maven.compiler.source/target，漏写就静默降回 Java 8。
+      三个 encoding 属性同理：solon-parent 只声 project.build.sourceEncoding，
+      reporting/output 两项缺失会让 javadoc/站点产物换编码。
+    -->
     <properties>
+        <java.version>17</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <maven.compiler.encoding>UTF-8</maven.compiler.encoding>
+
+        <slf4j.version>2.0.18</slf4j.version>
+        <lsp4j.version>0.20.1</lsp4j.version>
+        <flexmark.version>0.50.50</flexmark.version>
+        <roguemap.version>1.1.5</roguemap.version>
+        <jsoup.version>1.22.2</jsoup.version>
+        <swagger-parser.version>1.0.76</swagger-parser.version>
+        <swagger-parser-v3.version>2.1.45</swagger-parser-v3.version>
+
         <gwork.build.revision>local</gwork.build.revision>
     </properties>
+
+    <!--
+      Sonatype Snapshots 仓库（随 gourdai-parent 一并迁入）。solon 系依赖的
+      x.x.x-SNAPSHOT 版本只能从该仓库拉取；去掉后依赖解析会直接失败。
+    -->
+    <repositories>
+        <repository>
+            <id>sonatype-snapshots</id>
+            <name>Sonatype Snapshots</name>
+            <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+            <releases>
+                <enabled>false</enabled>
+            </releases>
+        </repository>
+    </repositories>
+    <pluginRepositories>
+        <pluginRepository>
+            <id>sonatype-snapshots</id>
+            <name>Sonatype Snapshots</name>
+            <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+            <releases>
+                <enabled>false</enabled>
+            </releases>
+        </pluginRepository>
+    </pluginRepositories>
 
     <dependencies>
         <!-- ============ agent 层 ============ -->

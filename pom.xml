@@ -23,7 +23,6 @@
     </properties>
 
     <modules>
-        <module>gourdai-parent</module>
         <module>gourd-ai-agent</module>
     </modules>
 
