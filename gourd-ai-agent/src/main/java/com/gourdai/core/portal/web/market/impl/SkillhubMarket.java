@@ -157,6 +157,12 @@ public class SkillhubMarket implements Market {
             return Result.failure("slug is required");
         }
 
+        // namespace 限定 slug（@owner/slug）：上游详情端点不接受限定形态（实测 405），
+        // 改走列表接口 + namespace 精确匹配回退，保证同名 slug 下取到请求的那一家。
+        if (isQualifiedSlug(slug)) {
+            return detailQualified(slug);
+        }
+
         try {
             // 使用 skillhub 详情接口: GET /api/v1/skills/{slug}
             String url = BASE_URL + "/api/v1/skills/" + URLEncoder.encode(slug, "UTF-8");
@@ -225,6 +231,63 @@ public class SkillhubMarket implements Market {
         }
     }
 
+    /**
+     * 是否为 namespace 限定 slug（{@code @owner/slug}：以 @ 起、含分隔 /、两侧非空）。
+     */
+    static boolean isQualifiedSlug(String slug) {
+        if (slug == null) {
+            return false;
+        }
+        int slash = slug.indexOf('/');
+        return slug.startsWith("@") && slash > 1 && slash < slug.length() - 1;
+    }
+
+    /**
+     * namespace 限定 slug 的详情 — 上游详情端点不接受限定形态（实测 405），
+     * 改走「列表接口 + namespace 精确匹配」回退：按裸尾 slug 搜索一页，
+     * 在结果中匹配限定 slug 逐字相等者（列表已输出限定形态）。
+     *
+     * <p>局限：目标记录若不在该裸 slug 搜索结果首页则命中不了（上游无按 owner
+     * 过滤的查询手段）；此时返回失败，用户从列表卡片进入即可（列表自带全量
+     * namespace）。详情页直链旧裸 slug 的行为不受影响。</p>
+     */
+    private Result<MarketDetail> detailQualified(String qualifiedSlug) {
+        int slash = qualifiedSlug.indexOf('/');
+        String bare = qualifiedSlug.substring(slash + 1);
+        try {
+            Result<MarketPageResult> page = search(bare, null, UPSTREAM_MAX_PAGE_SIZE, null);
+            if (page.getCode() != 200 || page.getData() == null || page.getData().getItems() == null) {
+                return Result.failure("技能不存在: " + qualifiedSlug);
+            }
+            MarketItem hit = null;
+            for (MarketItem item : page.getData().getItems()) {
+                if (qualifiedSlug.equals(item.getSlug())) {
+                    hit = item;
+                    break;
+                }
+            }
+            if (hit == null) {
+                return Result.failure("技能不存在: " + qualifiedSlug);
+            }
+            MarketDetail detail = new MarketDetail()
+                    .slug(hit.getSlug())
+                    .displayName(hit.getDisplayName())
+                    .summary(hit.getSummary())
+                    .description(hit.getDescription())
+                    .ownerHandle(hit.getOwnerHandle())
+                    .installs(hit.getInstalls())
+                    .stars(hit.getStars())
+                    .iconUrl(hit.getIconUrl())
+                    .category(hit.getCategory())
+                    .version(hit.getVersion())
+                    .installSlug(hit.getSlug());
+            return Result.succeed(detail);
+        } catch (Exception e) {
+            LOG.warn("SkillhubMarket.detailQualified error: {}", e.getMessage());
+            return Result.failure("获取技能详情失败: " + e.getMessage());
+        }
+    }
+
     // ==================== 安装 ====================
 
     @Override
@@ -233,8 +296,20 @@ public class SkillhubMarket implements Market {
             return Result.failure("slug is required");
         }
 
-        slug = slug.replaceAll("[^a-zA-Z0-9._-]", "");
-        if (slug.isEmpty()) {
+        // namespace 限定 slug 原样保留（下载端点实测接受 @owner/slug 并解析到对应
+        // 作者的包）；裸 slug 仍按旧口径剥离非法字符。
+        boolean qualified = isQualifiedSlug(slug);
+        if (!qualified) {
+            slug = slug.replaceAll("[^a-zA-Z0-9._-]", "");
+            if (slug.isEmpty()) {
+                return Result.failure("Invalid slug");
+            }
+        }
+
+        // 落盘目录名与 Market.installDirName 口径一致：限定 slug → _owner_slug，
+        // 使同名技能可并存；控制器 writeMarketMeta 亦据此定位目录。
+        String dirName = installDirName(slug);
+        if (dirName.isEmpty()) {
             return Result.failure("Invalid slug");
         }
 
@@ -274,7 +349,7 @@ public class SkillhubMarket implements Market {
                     return Result.failure("下载技能包失败: 文件为空");
                 }
 
-                Path targetDir = skillsDir.resolve(slug);
+                Path targetDir = skillsDir.resolve(dirName);
                 if (Files.exists(targetDir)) {
                     deleteDirectory(targetDir);
                 }
@@ -337,6 +412,26 @@ public class SkillhubMarket implements Market {
         List<MarketItem> result = new ArrayList<>();
         for (ONode node : skillsNode.getArray()) {
             String slug = getStringValue(node, "slug");
+
+            // 上游存在不同作者共用同一公开 slug 的记录（实测 dev-expert 两条：
+            // @indiv-ebandao 与 @user_814dbe54）。裸 slug 无法区分二者：detail/
+            // download 只解析到其中一家，前端已安装判定也会连带误亮同名卡。
+            // 故对外 slug 一律输出 namespace 限定形态 @owner/slug（owner 取自
+            // namespace.handle，缺失时回退 ownerName）；裸 slug 仅在无 namespace
+            // 时保留，保持旧行为。
+            String ownerForSlug = null;
+            ONode nsNodeForSlug = node.get("namespace");
+            if (nsNodeForSlug != null && !nsNodeForSlug.isNull()) {
+                ownerForSlug = getStringValue(nsNodeForSlug, "handle");
+            }
+            if (ownerForSlug == null || ownerForSlug.isEmpty()) {
+                ownerForSlug = getStringValue(node, "ownerName");
+            }
+            if (slug != null && !slug.isEmpty()
+                    && ownerForSlug != null && !ownerForSlug.isEmpty()
+                    && !slug.startsWith("@")) {
+                slug = "@" + ownerForSlug + "/" + slug;
+            }
 
             long installs = getLongValue(node, "installs");
             long downloads = getLongValue(node, "downloads");

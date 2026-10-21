@@ -742,4 +742,147 @@ class FileChangeServiceTest {
             });
         }
     }
+
+    // ================== 临时产物不进账本（用户实测的噪音） ==================
+
+    /**
+     * 写入 {@code .tmp/*.js} 这类验证脚本后，本轮账本里必须<b>完全</b>看不到它。
+     *
+     * <p>这是用户报的那个缺陷的最小复现：验证脚本被当成产物列出。断言落在真实
+     * {@code summary().files} 上，而非字符串匹配源码。</p>
+     */
+    @Test
+    void ephemeralScriptsAreNotTrackedAtAll() throws Exception {
+        Path root = Files.createTempDirectory("file-changes-ephemeral");
+        try {
+            Path dir = root.resolve(".tmp");
+            Files.createDirectories(dir);
+            Path script = dir.resolve("verify_ui.js");
+            Files.writeString(script, "console.log(1)");
+
+            FileChangeService.Capture capture = service.before("work-e1", "run-e1", root.toString(), ".tmp/verify_ui.js");
+            Files.writeString(script, "console.log(2)");
+            service.after(capture);
+
+            Map<String, Object> run = service.getRun("work-e1", "run-e1", root.toString());
+            Assertions.assertEquals(0, number(run.get("fileCount")),
+                    "临时脚本不得计入本轮文件数");
+            Assertions.assertTrue(files(run).isEmpty(), "临时脚本不得出现在变更列表");
+            // 关键：跳过它不能把本轮标成不完整（否则「不该显示」会恶化成「本轮全都不可信」）
+            Assertions.assertFalse((Boolean) run.get("possiblyIncomplete"),
+                    "跳过一个临时产物不得降低本轮完整性");
+
+            Map<String, Object> session = service.listSession("work-e1", root.toString());
+            Assertions.assertEquals(0, number(session.get("fileCount")), "会话级汇总同样不得包含临时脚本");
+        } finally {
+            delete(root);
+        }
+    }
+
+    /** 同一个 run 里真实产物与临时脚本混写：只留真实产物，计数与行数均不受污染。 */
+    @Test
+    void mixedRunKeepsRealArtifactsAndDropsTempOnes() throws Exception {
+        Path root = Files.createTempDirectory("file-changes-mixed");
+        try {
+            Path real = root.resolve("src/Main.java");
+            Files.createDirectories(real.getParent());
+            Files.writeString(real, "class Main {}\n");
+            Path tmp = root.resolve(".tmp/probe.js");
+            Files.createDirectories(tmp.getParent());
+            Files.writeString(tmp, "probe\n");
+
+            FileChangeService.Capture realCapture = service.before("work-m1", "run-m1", root.toString(), "src/Main.java");
+            Files.writeString(real, "class Main { int x; }\n");
+            service.after(realCapture);
+
+            FileChangeService.Capture tmpCapture = service.before("work-m1", "run-m1", root.toString(), ".tmp/probe.js");
+            Files.writeString(tmp, "probe2\n");
+            service.after(tmpCapture);
+
+            Map<String, Object> run = service.getRun("work-m1", "run-m1", root.toString());
+            Assertions.assertEquals(1, number(run.get("fileCount")), "只应剩 1 个真实文件");
+            Assertions.assertEquals("src/Main.java", files(run).get(0).get("path"));
+        } finally {
+            delete(root);
+        }
+    }
+
+    /**
+     * 历史账本（修复前落盘）里的临时行必须在<b>读取</b>时被滤掉。
+     *
+     * <p>用户当前那些会话是在修复之前跑出来的，磁盘上已经写着 {@code .tmp/*}。只改写侧
+     * 等于不管已有会话。这里直接构造旧 manifest 验证无需数据迁移即生效。</p>
+     */
+    @Test
+    void legacyManifestWithTempEntriesIsFilteredOnRead() throws Exception {
+        Path root = Files.createTempDirectory("file-changes-legacy");
+        try {
+            String sessionId = "work-legacy";
+            String runId = "run-legacy";
+            String entry = fileEntry(".tmp/probe.js", sha256Hex("a"), sha256Hex("b"))
+                    + "," + fileEntry("src/Keep.java", sha256Hex("c"), sha256Hex("d"));
+            writeManifest(root, sessionId, runId, entry, System.currentTimeMillis());
+
+            Map<String, Object> run = service.getRun(sessionId, runId, root.toString());
+            Assertions.assertEquals(1, number(run.get("fileCount")),
+                    "旧账本里的 .tmp 行必须被滤掉，只留真实文件");
+            Assertions.assertEquals("src/Keep.java", files(run).get(0).get("path"));
+
+            Map<String, Object> session = service.listSession(sessionId, root.toString());
+            Assertions.assertEquals(1, number(session.get("fileCount")),
+                    "会话级清单同样不得回显旧的临时行");
+        } finally {
+            delete(root);
+        }
+    }
+
+    /**
+     * 写到系统临时目录（工作区之外）的脚本不得把本轮标成不完整。
+     *
+     * <p>这条守住「临时文件改写到 %TEMP%」这条治理路线的可行性：若这里退化成
+     * possiblyIncomplete，则每写一个验证脚本都会昭告「本轮变更不可信」，
+     * 比原先的噪音更糟。</p>
+     */
+    @Test
+    void systemTempScriptDoesNotDegradeRunCompleteness() throws Exception {
+        Path root = Files.createTempDirectory("file-changes-outside");
+        Path temp = Files.createTempFile("gwork-ephemeral-verify-", ".js");
+        try {
+            Files.writeString(temp, "console.log('probe')");
+            FileChangeService.Capture capture = service.before("work-t1", "run-t1", root.toString(), temp.toString());
+            Files.writeString(temp, "console.log('probe2')");
+            service.after(capture);
+
+            Map<String, Object> run = service.getRun("work-t1", "run-t1", root.toString());
+            Assertions.assertEquals(0, number(run.get("fileCount")));
+            Assertions.assertFalse((Boolean) run.get("possiblyIncomplete"),
+                    "系统临时目录里的脚本属于正常验证行为，不得降完整性");
+        } finally {
+            Files.deleteIfExists(temp);
+            delete(root);
+        }
+    }
+
+    /**
+     * 负对照：真正越出工作区（且不在系统临时目录）的绝对路径仍应降完整性。
+     *
+     * <p>否则本功能会把「写到别的项目去了」也一并静音，那就把安全提示也抹了。</p>
+     */
+    @Test
+    void realOutOfWorkspaceWriteStillDegradesCompleteness() throws Exception {
+        Path root = Files.createTempDirectory("file-changes-escape");
+        Path outside = Path.of(System.getProperty("java.io.tmpdir")).toAbsolutePath().normalize()
+                .getParent().resolve("gwork-outside-project-NOTTEMP").resolve("Other.java");
+        try {
+            FileChangeService.Capture capture = service.before("work-o1", "run-o1", root.toString(), outside.toString());
+            service.after(capture);
+
+            Map<String, Object> run = service.getRun("work-o1", "run-o1", root.toString());
+            Assertions.assertEquals(0, number(run.get("fileCount")));
+            Assertions.assertTrue((Boolean) run.get("possiblyIncomplete"),
+                    "真正的越界写入仍必须提示本轮可能不完整");
+        } finally {
+            delete(root);
+        }
+    }
 }

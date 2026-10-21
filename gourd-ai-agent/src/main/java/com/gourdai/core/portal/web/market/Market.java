@@ -77,10 +77,22 @@ public interface Market {
      *
      * <p>默认与多数适配器一致：剥离非法字符后的 slug；ModelScope 的
      * {@code @owner/name} 形态需替换分隔符，由其自行覆写。</p>
+     *
+     * <p><b>namespace 限定 slug</b>（{@code @owner/slug}，用于上游存在不同作者
+     * 共用同一公开 slug 的市场，如 skillhub）：把 {@code @} 与 {@code /} 替换为
+     * 下划线落盘（{@code @o/s} → {@code _o_s}），使同名技能可并存；裸 slug 仍按
+     * 剥离口径落盘，与历史安装目录保持同名（不迁移旧目录）。</p>
      */
     default String installDirName(String slug) {
         if (slug == null) {
             return "";
+        }
+        // 限定形态判定与 SkillhubMarket.isQualifiedSlug 逐字同口径（@ 起首、
+        // / 两侧非空）：两侧口径若漂移，install 剥离后的目录名会与控制器
+        // writeMarketMeta 据原始 slug 算出的目录名不一致 → 元数据静默丢失。
+        int slash = slug.indexOf('/');
+        if (slug.startsWith("@") && slash > 1 && slash < slug.length() - 1) {
+            return slug.replaceAll("[@/]", "_");
         }
         return slug.replaceAll("[^a-zA-Z0-9._-]", "");
     }

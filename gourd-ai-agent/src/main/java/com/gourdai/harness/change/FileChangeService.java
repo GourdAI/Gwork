@@ -205,6 +205,14 @@ public final class FileChangeService {
         try {
             capture.root = validateRoot(root);
             ensureStoreExcluded(capture.root);
+            // 临时产物直接跳过，必须在 validateRelativePath 之前判定：
+            // 验证脚本的首选落点是系统临时目录（工作区外），交给下面的严格校验只会抛异常，
+            // 进而走 catch 分支把整轮标成 possiblyIncomplete —— 把一个「不该显示」的噪音
+            // 恶化成「本轮所有变更都不可信」。这里提前返回即是「不登记、也不降级完整性」。
+            if (EphemeralPaths.isEphemeralTarget(capture.root, filePath)) {
+                capture.ephemeral = true;
+                return capture;
+            }
             capture.path = validateRelativePath(capture.root, filePath);
             capture.relativePath = normalizeRelative(capture.root.relativize(capture.path));
             capture.before = readState(capture.path);
@@ -219,7 +227,8 @@ public final class FileChangeService {
 
     /** 工具执行后聚合快照。before/after 相同会移除净零条目。 */
     public void after(Capture capture) {
-        if (capture == null || capture.error != null || capture.path == null) {
+        // ephemeral：临时产物，工具执行前就决定不登记（见 before 里的判定与其说明）
+        if (capture == null || capture.error != null || capture.path == null || capture.ephemeral) {
             return;
         }
         Map<String, Object> snapshot;
@@ -948,7 +957,11 @@ public final class FileChangeService {
                 meta.put("updatedAt", longValue(map.get("updatedAt")));
                 meta.put("possiblyIncomplete", Boolean.TRUE.equals(map.get("possiblyIncomplete")));
                 Object entries = map.get("entries");
-                meta.put("fileCount", entries instanceof List ? ((List<Object>) entries).size() : 0);
+                // fileCount 必须与下面第二遍 load 后按过滤结果重算，但总数这里就先用
+                // 「非临时的顶层条目数」起步：第一遍只是为了按 updatedAt 排序与截断，
+                // 直接用原始 entries.size() 会把临时行也算进去（panel 头部文件数会跳变）。
+                meta.put("fileCount", entries instanceof List
+                        ? countNonEphemeralEntries((List<Object>) entries) : 0);
                 runMetas.add(meta);
             }
 
@@ -1370,6 +1383,10 @@ public final class FileChangeService {
                     entry.undone = Boolean.TRUE.equals(row.get("undone"));
                     entry.additions = intValue(row.get("additions"), -1);
                     entry.deletions = intValue(row.get("deletions"), -1);
+                    // 读侧过滤：本次修复之前落盘的账本里已经躺着临时产物（用户实测的那批 .tmp/*.js）。
+                    // 仅在写侧拦截只管未来，历史会话依旧铺满噪声，而旧账本不需要数据迁移——
+                    // 这里在载入时丢掉，下一次 touchAndSave 会自然把磁盘上的旧行一并清掉。
+                    if (EphemeralPaths.isEphemeralRelative(entry.path)) continue;
                     manifest.entries.put(entry.path, entry);
                 }
             }
@@ -1920,6 +1937,25 @@ public final class FileChangeService {
         return path.toString().replace('\\', '/');
     }
 
+    /**
+     * 统计一遍 manifest 原始 entries 中非临时条目的数量。
+     *
+     * <p>供会话级清单的<b>第一遍</b>使用（该遍只读轻量索引，不解快照）。必须与
+     * {@link #load} 的读侧过滤保持同一判据，否则两遍得出的 fileCount 不一致：
+     * 头部文件数在「刚打开」与「滚到底部触发整份加载」时会跳变。</p>
+     */
+    private static int countNonEphemeralEntries(List<Object> entries) {
+        int count = 0;
+        for (Object value : entries) {
+            if (!(value instanceof Map)) continue;
+            Object path = ((Map<?, ?>) value).get("path");
+            if (path == null) continue;
+            if (EphemeralPaths.isEphemeralRelative(String.valueOf(path))) continue;
+            count++;
+        }
+        return count;
+    }
+
     private static String safePath(String path) {
         return path == null ? "<null>" : path.replace('\n', ' ').replace('\r', ' ');
     }
@@ -2012,6 +2048,8 @@ public final class FileChangeService {
         private String relativePath;
         private FileState before;
         private String error;
+        /** 临时产物：before 已决定不登记，after 据此提前返回（否则会走 error 分支误降完整性）。 */
+        private boolean ephemeral;
 
         private Capture(String sessionId, String runId, String root, String filePath) {
             this.sessionId = sessionId;

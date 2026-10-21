@@ -226,7 +226,11 @@ public class CodeTalent extends AbsTalent {
             }
             if (updated) Files.write(targetPath, finalContent.getBytes(StandardCharsets.UTF_8));
 
-            ensureInGitignore(rootPath, ".gwork/");
+            ensureInGitExclude(rootPath, ".gwork/");
+            // 规约要求验证脚本放 `.tmp/`，那就必须真的让 git 看不见它。
+            // 只写规约而不给黑名单，用户下一次 `git status` 依旧会看到一堆 probe 脚本——
+            // 那等于把「不进变更面板」换成了「进 git 未跟踪列表」，问题只是换了个地方。
+            ensureInGitExclude(rootPath, ".tmp/");
 
             StringBuilder resultMsg = new StringBuilder();
             resultMsg.append(updated ? "已更新" : "已验证").append("项目工程规范");
@@ -267,26 +271,67 @@ public class CodeTalent extends AbsTalent {
                 .append("- **路径规范**: 仅使用相对路径（例如：`src/main/java/App.java`，严禁使用 `./src/...`）。\n")
                 .append("- **风格对齐**: 必须遵循代码库中已有的编码风格和设计模式。\n")
                 .append("- **版本对齐**: 参考「环境版本」章节声明的版本，不要使用超过该版本的语法特性；若未列出版本，应从配置文件或构建工具复核后再决定。\n")
-                .append("- **环境感知**: 利用你对各语言默认本地仓库路径（如 Maven、Node）的知识，协助排查依赖问题或进行源码分析。\n\n");
+                .append("- **环境感知**: 利用你对各语言默认本地仓库路径（如 Maven、Node）的知识，协助排查依赖问题或进行源码分析。\n")
+                // 临时文件规约：对齐 Codex 的硬性要求——验证脚本不得污染变更面板。
+                //
+                // 【为何不写「一律写到系统临时目录」】上一版就是这么写的，但它不可执行：
+                // write 工具走 TerminalSupport.resolveSafePath，默认档（AccessMode.DEFAULT）
+                // 会直接拒给工作区外的绝对路径（“路径越界”），只有 FULL 档才放行。
+                // 于是该规约把 agent 逗进一个死胡同：要么写不进去而反复重试，要么退回工作区。
+                // 实测证据：Probe3 输出「拒绝 绝对路径写 %TEMP% / 允许 相对路径写 .tmp/」。
+                // 改成「工作区内的临时目录 + 不必清理」：这是默认档真能执行的做法。
+                // 脏不了仓库，因为最终由 EphemeralPaths 在账本层硬性排除。
+                .append("- **临时文件**: 验证脚本、探测代码、对比截图等一次性文件放到工作区根的 `.tmp/` 目录下（例：`.tmp/probe.js`），")
+                .append("用完可以删，**不删也不影响交付**：`.tmp/` 已被版本控制忽略，且不会出现在变更列表里。")
+                .append("**严禁**把 `verify_*.js`、`probe_*.js`、`*.log`、临时截图这类文件放到 `src/`、项目根或任何会被提交的位置。")
+                .append("若确需保留持久化的中间产物，先征得用户同意并加入忽略清单。\n\n");
 
     }
 
-    private void ensureInGitignore(Path rootPath, String fileName) {
+    /**
+     * 把路径写进 {@code <root>/.git/info/exclude}（<b>不碰</b>用户的 .gitignore）。
+     *
+     * <p>可重复调用（每个条目一份）：{@code `.gwork/`} 与 {@code `.tmp/`} 共用本方法。</p>
+     *
+     * <p><b>WHY 不用 .gitignore：</b>旧实现直接向用户的 {@code .gitignore} 尾部追加一行。
+     * 这有两个真实代价：① 污染用户的版本管理文件——用户会看到一个自己没写过的改动，
+     * 并且它会被提交进仓库、影响其他协作者；② 与 {@code FileChangeService.ensureStoreExcluded}
+     * 的做法自相矛盾（那里刻意选 info/exclude 并注释了理由：「效果等同于 ignore，但它是本地私有的、
+     * 不会被提交、也不会污染用户版本管理中的文件」）。同一个产品不应该对同一件事有两套策略。</p>
+     *
+     * <p>worktree / submodule 形态下 {@code .git} 是文件而非目录，此时不猜 gitdir 指向，直接跳过。
+     * 任何失败只忽略：这只是防误提交，绝不能反过来阻晓初始化。</p>
+     */
+    private void ensureInGitExclude(Path rootPath, String entry) {
         try {
-            Path gitignore = rootPath.resolve(".gitignore");
-            if (Files.exists(gitignore)) {
-                List<String> lines = Files.readAllLines(gitignore, StandardCharsets.UTF_8);
-                // 精确匹配行，或者检查是否有以该文件名开头的有效行
-                boolean exists = lines.stream()
-                        .map(String::trim)
-                        .anyMatch(line -> line.equals(fileName) || line.startsWith(fileName + " "));
-
-                if (!exists) {
-                    String separator = (lines.isEmpty() || lines.get(lines.size() - 1).isEmpty()) ? "" : "\n";
-                    Files.write(gitignore, (separator + fileName + "\n").getBytes(StandardCharsets.UTF_8), StandardOpenOption.APPEND);
+            Path gitDir = rootPath.resolve(".git");
+            if (!Files.isDirectory(gitDir)) {
+                return;
+            }
+            Path info = gitDir.resolve("info");
+            Files.createDirectories(info);
+            Path exclude = info.resolve("exclude");
+            String bare = entry.endsWith("/") ? entry.substring(0, entry.length() - 1) : entry;
+            List<String> lines = Files.exists(exclude)
+                    ? Files.readAllLines(exclude, StandardCharsets.UTF_8)
+                    : new ArrayList<>();
+            for (String line : lines) {
+                String trimmed = line.trim();
+                if (trimmed.equals(entry) || trimmed.equals(bare)) {
+                    return;
                 }
             }
+            StringBuilder out = new StringBuilder();
+            for (String line : lines) {
+                out.append(line).append('\n');
+            }
+            if (out.length() > 0) {
+                out.append('\n');
+            }
+            out.append(entry).append('\n');
+            Files.writeString(exclude, out.toString(), StandardCharsets.UTF_8);
         } catch (Throwable ignored) {
+            // 防误提交的辅助手段，失败不影响初始化
         }
     }
 

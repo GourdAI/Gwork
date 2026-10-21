@@ -125,11 +125,15 @@
                 }
             });
             updateInstalledCount();
+            // 索引变了就要重算屏幕上的徽标（安装/卸载后都走这里）；
+            // 否则卡片会停在旧状态，与「已安装」视图对不上。
+            syncInstalledBadges();
             if (callback) callback();
         }).fail(function () {
             _installedAll = [];
             _installedIndex = {};
             updateInstalledCount();
+            syncInstalledBadges();
             if (callback) callback();
         });
     }
@@ -142,21 +146,117 @@
         $('.skills-tab-count').text(n > 0 ? String(n) : '');
     }
 
-    /** 市场条目是否已安装（优先市场元数据精确匹配，回退目录名候选） */
-    function findInstalledForMarket(marketName, slug) {
+    /**
+     * 市场条目是否已安装（优先市场元数据精确匹配；回退候选按 slug 形态隔离）。
+     *
+     * @param {boolean} allowLegacyBare 是否允许用「裸 slug」回退匹配旧版安装记录。
+     *        仅当该裸 slug 在本次渲染的列表里【唯一】时才为真（由调用方算好）。
+     */
+    function findInstalledForMarket(marketName, slug, allowLegacyBare) {
         if (!_installedIndex) return null;
         var hit = _installedIndex['market:' + marketName + '|' + slug];
         if (hit) return hit;
-        var candidates = [
-            slug,
-            String(slug).replace(/[@/]/g, '_'),
-            String(slug).replace(/[^a-zA-Z0-9._-]/g, '')
-        ];
+        // 回退候选必须按形态隔离：namespace 限定卡（@owner/s）不得无条件回退到裸尾名，
+        // 否则同名技能只要装过任何一个，所有同 slug 卡片会连带误亮「已安装」
+        // （上游实测：skillhub 存在不同作者共用同一公开 slug 的记录）。
+        // 限定形态的目录名候选与后端 installDirName 口径一致（@ 与 / → _）。
+        var qualified = String(slug).charAt(0) === '@' && String(slug).indexOf('/') > 0;
+        var candidates;
+        if (qualified) {
+            candidates = [slug, String(slug).replace(/[@/]/g, '_')];
+        } else {
+            candidates = [slug, String(slug).replace(/[^a-zA-Z0-9._-]/g, '')];
+        }
         for (var i = 0; i < candidates.length; i++) {
             hit = _installedIndex['name:' + candidates[i]];
             if (hit) return hit;
         }
+        /* 旧版安装兼容：本次改动之前安装的技能，元数据与目录名都是【裸 slug】
+         * （download?slug=bare 由上游解析到某一家，落盘却只有裸名）。
+         * 这种记录无法反推作者，故只在「该裸 slug 在本列表唯一」时才认领——
+         * 唯一即可确定就是这一家；多卡同裸 slug 时任何认领都是猜测，
+         * 宁可不上徽标（用户仍可在已安装视图看到它），也不能回到误亮的老毛病。 */
+        if (qualified && allowLegacyBare) {
+            var bare = String(slug).substring(String(slug).indexOf('/') + 1);
+            hit = _installedIndex['market:' + marketName + '|' + bare];
+            if (hit) return hit;
+            hit = _installedIndex['name:' + bare];
+            if (hit) return hit;
+        }
         return null;
+    }
+
+    /** 市场 slug 的裸尾形态（@owner/s → s；裸 slug 原样返回） */
+    function marketBareSlug(slug) {
+        var s = String(slug || '');
+        return (s.charAt(0) === '@' && s.indexOf('/') > 0) ? s.substring(s.indexOf('/') + 1) : s;
+    }
+
+    /**
+     * 统计「裸 slug → 出现次数」，用于判定旧版裸 slug 安装能否安全认领。
+     * 必须把已在列表里的卡（无限滚动 append 的旧批次）与新批次一起算：
+     * 只算新批次会让「第一页 1 张、第二页又 1 张」的同名技能各自被判为唯一 → 双双误亮。
+     */
+    function countBareSlugs(incoming) {
+        var counts = {};
+        var add = function (slug) {
+            var bare = marketBareSlug(slug);
+            if (!bare) return;
+            counts[bare] = (counts[bare] || 0) + 1;
+        };
+        $skillsList.find('.skill-card:not(.skill-card-installed)').each(function () {
+            add($(this).attr('data-slug'));
+        });
+        (incoming || []).forEach(function (s) {
+            add(s && (s.slug || s.name));
+        });
+        return counts;
+    }
+
+    /**
+     * 按「当前列表整体」重算所有市场卡的徽标与 + 按钮。
+     *
+     * <p>为什么不能只在渲染时算一次：旧版裸 slug 安装的认领条件是「裸 slug 在本列表
+     * 唯一」，而无限滚动会分批 append——第一页只有 1 张同名卡时判定「唯一」并亮徽标，
+     * 第二页又未一张同名卡后前提就崩了。所以每次列表变化（首次渲染/append/
+     * 已安装索引刷新）都从 DOM 集重算，保证「同一屏内口径终态一致」。</p>
+     */
+    function syncInstalledBadges() {
+        if (!_installedIndex) return;
+        /* 只能作用于市场卡：已安装视图的卡（.skill-card-installed）没有 data-slug，
+         * 它们本来就不该有市场徽标，若一并处理会被当成「未安装」而凭空长出一个 + 按钮。 */
+        var $cards = $skillsList.find('.skill-card:not(.skill-card-installed)');
+        var counts = {};
+        $cards.each(function () {
+            var bare = marketBareSlug($(this).attr('data-slug'));
+            if (bare) counts[bare] = (counts[bare] || 0) + 1;
+        });
+        $cards.each(function () {
+            var $card = $(this);
+            var slug = $card.attr('data-slug') || '';
+            var market = $card.attr('data-market') || _currentView;
+            var installed = !!findInstalledForMarket(market, slug, counts[marketBareSlug(slug)] === 1);
+
+            var $badge = $card.find('.skill-installed-badge');
+            if (installed && !$badge.length) {
+                $card.find('.skill-card-title').append('<span class="skill-installed-badge">'
+                    + escapeHtml(GourdI18n.t('settings.skills.installed')) + '</span>');
+            } else if (!installed && $badge.length) {
+                $badge.remove();
+            }
+
+            // 未安装 → 必须有 + 按钮；已安装 → 必须没有（两者严格互斥）
+            var $actions = $card.find('.skill-card-actions');
+            if (!installed && !$actions.length) {
+                $card.append('<div class="skill-card-actions"><button type="button" class="skill-card-add" data-slug="'
+                    + escapeAttr(slug) + '" data-market="' + escapeAttr(market) + '" title="'
+                    + escapeAttr(GourdI18n.t('settings.skills.install')) + '">'
+                    + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>'
+                    + '</button></div>');
+            } else if (installed && $actions.length) {
+                $actions.remove();
+            }
+        });
     }
 
     // ==================== 标签页与分类 ====================
@@ -403,6 +503,8 @@
         }
 
         var html = '';
+        // 裸 slug 出现次数：决定旧版（裸 slug）安装记录能否被安全认领（详见 findInstalledForMarket）
+        var bareCounts = countBareSlugs(skills);
         skills.forEach(function (skill) {
             var slug = skill.slug || skill.name || '';
             var displayName = skill.displayName || slug;
@@ -410,8 +512,8 @@
             var owner = skill.ownerHandle || (skill.owner && skill.owner.handle) || '';
             var installs = skill.installs || 0;
             var stars = skill.stars || 0;
-            var installed = findInstalledForMarket(_currentView, slug);
-
+            var allowLegacyBare = bareCounts[marketBareSlug(slug)] === 1;
+            var installed = findInstalledForMarket(_currentView, slug, allowLegacyBare);
             html += '<div class="skill-card" data-slug="' + escapeAttr(slug) + '" data-market="' + escapeAttr(_currentView) + '">'
                 + iconHtml(skill.iconUrl, displayName, 'skill-card-icon')
                 + '<div class="skill-card-body">'
@@ -433,6 +535,11 @@
 
         if (append) $skillsList.append(html);
         else $skillsList.html(html);
+
+        /* 列表发生变化（首次渲染 / 无限滚动 append / 搜索换批）后重算所有卡的徽标：
+         * 「旧版裸 slug 安装可认领」的前提是裸 slug 在【当前整屏】唯一，
+         * 只按本批计算会在 append 后与已渲染卡得出不同结论 → 同页自相矛盾。 */
+        syncInstalledBadges();
     }
 
     // ==================== 渲染：已安装卡片 ====================
@@ -594,7 +701,15 @@
     // ==================== 详情弹窗 ====================
 
     function openDetail(slug, marketName) {
-        _detailCtx = { slug: slug, market: marketName, installed: !!findInstalledForMarket(marketName, slug) };
+        // 与卡片判定保持同源：详情弹窗不能自己用另一套口径，否则会出现
+        // 「卡片亮已安装、点进去安装按钮却能点（或反之）」的自相矛盾。
+        // 计数源就是当前列表里已渲染的卡片（openDetail 只可能从卡片点进来）。
+        var bareCounts = countBareSlugs([]);
+        _detailCtx = {
+            slug: slug,
+            market: marketName,
+            installed: !!findInstalledForMarket(marketName, slug, bareCounts[marketBareSlug(slug)] === 1)
+        };
 
         $detailOverlay.show();
         $('#skillDetailName').text(slug);
