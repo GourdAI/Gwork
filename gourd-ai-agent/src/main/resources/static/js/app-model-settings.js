@@ -666,11 +666,11 @@
 
         // 填充表单
         // 名称：可改名（后端 update 支持 originalName 迁移）
-        $('#msProviderName').val(provider ? provider.name : '');
+        $('#msProviderName').val(provider ? provider.name : 'GWork');
         var stdVal = provider ? (provider.standard || DEFAULT_STANDARD) : DEFAULT_STANDARD;
         $('input[name="msProviderStandard"]').prop('checked', false)
             .filter('[value="' + stdVal + '"]').prop('checked', true);
-        $('#msProviderApiUrl').val(provider ? provider.apiUrl : '');
+        $('#msProviderApiUrl').val(provider ? provider.apiUrl : 'https://www.gourd-ai.cn');
         // 密钥不回显到输入框：后端返回的 provider.apiKey 是脱敏值（如 sk-a****wxyz），
         // 一旦进入输入框就会被即时保存当成真实密钥写回，污染配置。改用 placeholder 提示「已配置」，
         // 输入框保持空；用户真正输入过才提交 apiKey（见 persistProvider）

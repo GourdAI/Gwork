@@ -221,17 +221,37 @@ const TITLEBAR_JS: &str = r#"
      12px 即等效」自证——实测该假设不成立：12px 渲染下墨迹只有 12px、
      左侧按 24 网格 15px 渲染为 12.5px（描边缩放后 1.25px），五个按钮并排时
      右侧三枚明显偏小，即用户报障「图标大小都不一致」。
-     现在两侧共用一套渲染契约：改尺寸请同时改 index.html 里 .titlebar-action-btn
-     的 svg 属性与本处，契约测试会校验两边数字一致。 */
+
+     【字形跨度分两组，不要再"统一"成一个数字（2026-10-21 用户再次报障）】
+     报障：「右侧图标虽然和左侧画的一样大，但感觉是贴着边绘制的，视觉上比左侧两个大」。
+     像素级实测（PrintWindow 抓真实窗口、15px 逐像素解码）结论：
+       · 外框跨度：左组 18u（线心 3..21）→ 墨迹 13px；窗控 18u → 墨迹也是 13px。**完全一致**。
+        · 但左组两枚是【闭合圆角外框 + 内部小图形】，眼睛把外框当"容器"去量里面的内容；
+          而最小化/关闭是【裸笔画占到 18u】，墨迹占满视口 13/15px，四周边距只剩 1px，
+          没有容器托住，眼睛量到的就是极限跨度 → 同尺寸却被读成"更大、更贴边"。
+          反证：墨量上左侧 98/103 个墨点、右侧仅 84/29/13 —— 右侧不是更粗，而是
+          "更空的形状占了同样大的框"，这种大而稀的形态最容易被读成变大。
+     故按主流图标集（Lucide / Feather）的通用口径把四枚分成两组：
+       · 框体组 maximize / restore：外框保持 18u（线心 3..21）。
+         它们的"大"由左侧同款 18u 外框托住；一起内缩反而会让右侧框比左侧框小 15%，
+         变成"右边更小"的新不一致（该方案实测后已否决）。
+       · 裸笔画组 minimize / close：线心内缩到 5..19（跨度 14u → 墨迹 11px），
+         视觉重量与左侧 13px 框内的图形相当，四周边距从 1px 回到 2px，不再贴边。
+     改尺寸请同时改 index.html 里 .titlebar-action-btn 的 svg 属性与本处；
+     两组的跨度都由契约测试 titlebar-monitor-contract.test.js 锁定，回退 18u 即变红。 */
+
+    /* 墨迹口径（按组区分，不再"四枚统一"——理由见上）：
+       描边以路径为中心线向两侧各外扩 stroke-width/2 = 1 单位。
+       · 框体组：线心 3..21（18u）→ 墨迹 2..22（20u）；20 × 15/24 = 12.5px，抗锯齿量化后占 13px，
+         与左组 18x18 rect@(3,3) 的墨迹逐像素同大。
+       · 裸笔画组：线心 5..19（14u）→ 墨迹 4..20（16u）；16 × 15/24 = 10px，量化后占 11px。
+       圆角统一 rx=2，与 index.html 左组 rect 的 rx="2" 逐项一致——半径不同会在同尺寸下仍显"不一样"。 */
 
   var ICONS = {
-    /* 墨迹口径（四枚统一 20 单位 / 24 网格 ≠ 每枚都画满 24 网格）：
-       描边以路径为中心线向两侧各外扩 stroke-width/2 = 1 单位，故取线心 3..21 → 墨迹 2..22。
-       20 单位 × (15px/24) = 12.5px，与左组 18x18 rect@(3,3) 的墨迹完全同大。
-       圆角统一 rx=2，与 index.html 左组 rect 的 rx="2" 逐项一致——半径不同会在同尺寸下仍显"不一样"。 */
+    /* 裸笔画组：线心内缩到 5..19，跨度 14u，墨迹占视口 11/15px（详见上方两组说明） */
     minimize: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
             + ' stroke-width="2" stroke-linecap="round" aria-hidden="true">'
-            + '<path d="M3 12h18"/></svg>',
+            + '<path d="M5 12h14"/></svg>',
     maximize: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
             + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
             + '<rect x="3" y="3" width="18" height="18" rx="2"/></svg>',
@@ -243,9 +263,11 @@ const TITLEBAR_JS: &str = r#"
             + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
             + '<path d="M8 8V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-3"/>'
             + '<rect x="3" y="8" width="13" height="13" rx="2"/></svg>',
+    /* 裸笔画组：端点 5..19（跨度 14u → 墨迹 11px）；若回退 3..21，墨迹会涨到 13px、
+       占满视口 13/15px（四周边距只剩 1px），这正是「贴着边绘制、看着比左侧大」的成因。 */
     close:    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
             + ' stroke-width="2" stroke-linecap="round" aria-hidden="true">'
-            + '<path d="M3 3 L21 21 M21 3 L3 21"/></svg>'
+            + '<path d="M5 5 L19 19 M19 5 L5 19"/></svg>'
   };
 
   /* ───────── 样式 ─────────

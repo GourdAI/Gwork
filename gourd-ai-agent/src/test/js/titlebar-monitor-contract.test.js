@@ -414,16 +414,15 @@ test('restore 图标的两个断口必须锚在前框相邻边上（不得浮空
         '后框收尾 x 必须压在前框右边缘 x=' + rightEdge + '（满前值 ' + curX + '，悬空即脱节）');
 });
 
-/* 【图标颜色同源护栏（2026-10-21 用户再次报障）】
+/* 【图标颜色同源护栏（2026-10-21 用户第三次报障）】
    报障：「这这大小明显不一致，右侧明显自绘的三个图标要比左侧的两个按钮大」。
-   但像素级实测（DPI=100%、真实运行窗口截图、逐像素解码）证明两侧几何完全一致：
-   墨迹包围盒均 13x13px，笔画有效墨迹宽度均约 1.23px。差异不在尺寸而在 *颜色*：
-   左组静止态 color:var(--text-secondary)（#71717a 灰）
-   右组静止态 color:var(--gourd-tb-fg,#1a1a2e)（近黑）
-   同尺寸下近黑比灰在视觉上更重、更粗，人眼直接读成「右边更大」。
-   因此两侧静止态图标色收敛为同一令牌 --titlebar-icon-fg（取值对齐右侧）。
+   该轮排查确认了颜色维度：左组静止态 color:var(--text-secondary)（#71717a 灰），
+   右组静止态 color:var(--gourd-tb-fg,#1a1a2e)（近黑）——同尺寸下近黑比灰更重更粗，
+   人眼直接读成「右边更大」。故两侧静止态图标色收敛为同一令牌 --titlebar-icon-fg。
    本组同时锁三件事：① 令牌在明/暗两主题都有定义；② 左组 CSS 用它；
-   ③ 右组注入脚本用它且保留健链回退——任一侧单改就变红。 */
+   ③ 右组注入脚本用它且保留健链回退——任一侧单改就变红。
+   注意：颜色同源后用户又报了「贴着边绘制、视觉上更大」，那个是 *字形跨度* 问题，
+   与本组无关，由下方「字形跨度分组」一组的用例锁定（勿把两者当成同一件事）。 */
 test('两侧标题栏图标静止态颜色必须同源：--titlebar-icon-fg 单一真源', () => {
     // ① 令牌必须在明暗两主题都定义（漏一个主题就会出现一侧变白/变黑）
     const defs = [...themeCss.matchAll(/--titlebar-icon-fg:\s*([^;]+);/g)].map((m) => m[1].trim());
@@ -448,6 +447,110 @@ test('两侧标题栏图标静止态颜色必须同源：--titlebar-icon-fg 单�
         '右组静止态图标色必须以 --titlebar-icon-fg 为首选值（与左组共源）');
     assert.match(tbBtnRule, /color:var\(--titlebar-icon-fg,var\(--gourd-tb-fg,[^)]+\)\)/,
         '右组必须保留 var() 健链回退（注入早于 theme.css 解析时仍有色，不得裸掉）');
+});
+
+test('字形跳度必须分两组：框体组 18u、裸笔画组 14u（右侧「贴着边显大」不得回退）', () => {
+    /* 【为何分组而不是"四枚统一"】
+       左组两枚是【闭合圆角外框 + 内部小图形】，眼睛把外框当容器、量的是里面的内容；
+       而最小化/关闭是【裸笔画】。两者都取 18u 时墨迹同为 13px（占满 15px 视口的 13/15，四周边距仅 1px），
+       裸笔画没有容器托住，眼睛量到的就是极限跳度 → 用户读成「右侧贴着边画、比左侧大」。
+       反向也试过且否决：四枚一起内缩到 14u 会让右侧的框变 11px、
+       比左侧的框（13px）小 15%，变成「右边反而更小」的新不一致。
+       故按 Lucide/Feather 通用口径：框体组框保持 18u，裸笔画组内缩至 14u。 */
+    const { parse, names } = tbIcons();
+
+    /* 从源码真实几何算字形跳度（线心 min..max）。
+       【绝对不能用"全串抓数字"】svg 属性里的 width="15" viewBox="0 0 24 24" stroke-width="2"
+       会把 0/15/24/2 一起抬进来 → 跳度永远算成 24，护栏就变成测空气。
+       故只取 svg 开标签之后的 body，且只认 rect 的 x/y/width/height 与 path 的 d。 */
+    const pathPoints = (d) => {
+        const tokens = d.match(/[A-Za-z]|-?[\d.]+/g) || [];
+        const pts = [];
+        let i = 0, cmd = null, x = 0, y = 0;
+        const num = () => Number(tokens[i++]);
+        while (i < tokens.length) {
+            if (/[A-Za-z]/.test(tokens[i])) cmd = tokens[i++];
+            if (cmd === 'M' || cmd === 'L') { x = num(); y = num(); pts.push([x, y]); }
+            else if (cmd === 'm' || cmd === 'l') { x += num(); y += num(); pts.push([x, y]); }
+            else if (cmd === 'H') { x = num(); pts.push([x, y]); }
+            else if (cmd === 'h') { x += num(); pts.push([x, y]); }
+            else if (cmd === 'V') { y = num(); pts.push([x, y]); }
+            else if (cmd === 'v') { y += num(); pts.push([x, y]); }
+            else if (cmd === 'A' || cmd === 'a') {
+                num(); num(); num(); num(); num(); // rx ry rot laf sf
+                const ex = num(), ey = num();
+                if (cmd === 'A') { x = ex; y = ey; } else { x += ex; y += ey; }
+                pts.push([x, y]);
+            } else {
+                /* 遇到未支持的命令直接报错，不得静默跳过——
+                   静默跳过会让跳度算小 → 断言看似通过、实际测的是一段不完整的路径。 */
+                throw new Error('字形跳度校验未支持 path 命令 "' + cmd + '"（新增曲线请先扩展本解析器）');
+            }
+        }
+        return pts;
+    };
+
+    const glyphSpan = (name) => {
+        const ic = parse(name);
+        assert.ok(ic, 'ICONS.' + name + ' 必须存在');
+        const body = ic.seg.slice(ic.seg.indexOf('>') + 1);
+        const xs = [], ys = [];
+        let rectCount = 0, pathCount = 0;
+        for (const m of body.matchAll(/<rect\b([^>]*)>/g)) {
+            const a = m[1];
+            const g = (k) => Number((a.match(new RegExp('(?:^|\\s)' + k + '="([-\\d.]+)"')) || [])[1]);
+            const x = g('x'), y = g('y'), w = g('width'), h = g('height');
+            if ([x, y, w, h].every(Number.isFinite)) {
+                xs.push(x, x + w); ys.push(y, y + h); rectCount++;
+            }
+        }
+        for (const m of body.matchAll(/(?:^|\s)d="([^"]+)"/g)) {
+            for (const [px, py] of pathPoints(m[1])) { xs.push(px); ys.push(py); }
+            pathCount++;
+        }
+        /* 自证断言：解析器必须真的从该图标里揽到了几何，否则下面的跳度断言全是 NaN 比较（假绿） */
+        assert.ok(rectCount + pathCount > 0,
+            'ICONS.' + name + ' 必须能解析出至少一个 rect/path（解析失败会让跳度断言变成测空气）');
+        assert.ok(xs.length > 1 && ys.length > 0, 'ICONS.' + name + ' 几何点必须可提取');
+        return {
+            x: Math.max(...xs) - Math.min(...xs),
+            y: Math.max(...ys) - Math.min(...ys),
+            rectCount, pathCount
+        };
+    };
+
+    const BOX = ['maximize', 'restore']; // 框体组：与左侧 18u 外框对齐
+    const BARE = ['minimize', 'close'];   // 裸笔画组：内缩至 14u，消除"贴着边"
+    assert.deepStrictEqual([...BOX, ...BARE].sort(), [...names].sort(),
+        '分组必须无遗漏无多余地覆盖 ICONS 四枚（新增图标时请归入某一组）');
+
+    for (const n of BOX) {
+        const s = glyphSpan(n);
+        assert.strictEqual(s.rectCount > 0, true, 'ICONS.' + n + ' 属于框体组，必须含闭合 rect（否则分组已经错了）');
+        assert.strictEqual(s.x, 18, 'ICONS.' + n + ' 框体组横向跳度必须为 18u（与左侧终端/监控的 18u 外框逐项对齐）');
+        assert.strictEqual(s.y, 18, 'ICONS.' + n + ' 框体组纵向跳度必须为 18u');
+    }
+
+    for (const n of BARE) {
+        const s = glyphSpan(n);
+        assert.strictEqual(s.rectCount, 0, 'ICONS.' + n + ' 属于裸笔画组，不得包上 rect 框（否则应归入框体组）');
+        /* 【不能用 s.y === 14 去卡所有裸笔画】最小化是一条横线，纵向跳度天然为 0，
+           硬卡 14 会把它误判成缺陷（写这条时真实踩过）。改用「最大维度恰好 14u」：
+           最小化 → max(x=14, y=0) = 14；关闭 X → max(14,14) = 14。
+           两者回退到 3..21 都会变成 18，依旧被杀死。 */
+        assert.strictEqual(s.x, 14, 'ICONS.' + n + ' 裸笔画横向跳度必须为 14u（5..19）。回退 18u 即墨迹 13px、占满视口，就是"贴着边显大"');
+        assert.strictEqual(Math.max(s.x, s.y), 14,
+            'ICONS.' + n + ' 最大维度必须为 14u（实得 x=' + s.x + ' y=' + s.y + '）。曾为 18u 满铺，必须内缩');
+        assert.ok(s.x <= 14 && s.y <= 14,
+            'ICONS.' + n + ' 任一维度都不得超 14u（实得 x=' + s.x + ' y=' + s.y + '）');
+    }
+
+    /* 分组决策本身的护栏：若有人把两组"统一"回同一数字，上面两条必有一条变红；
+       这里再显式锁一次"两组必须不同"，防止将来有人把两组常量改成同一值时只靠巧合通过。 */
+    const bareMax = Math.max(...BARE.map((n) => glyphSpan(n).x));
+    const boxMin = Math.min(...BOX.map((n) => glyphSpan(n).x));
+    assert.ok(bareMax < boxMin,
+        '裸笔画组跳度（' + bareMax + 'u）必须严格小于框体组（' + boxMin + 'u）——两组相等即回到"裸笔画满铺"的旧缺陷');
 });
 
 test('控件条总宽单一真源：Rust 常量推导 = 注入脚本 STRIP_W = 拖拽让位 = 左组偏移源', () => {
