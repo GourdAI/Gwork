@@ -48,6 +48,7 @@ import com.gourdai.harness.agent.AgentStartEvent;
 import com.gourdai.harness.agent.RetryEvent;
 import com.gourdai.harness.agent.TaskTalent;
 import com.gourdai.harness.command.Command;
+import com.gourdai.harness.talents.cli.SkillInvocation;
 import com.gourdai.harness.talents.memory.MemoryTalent;
 import com.gourdai.ai.util.CmdUtil;
 import com.gourdai.core.command.WebCommandContext;
@@ -957,7 +958,15 @@ public class WsGate extends SimpleWebSocketListener {
             // 查找命令
             Command command = engine.getCommandRegistry().find(cmdName);
             if (command == null) {
-                // 不是有效命令，当作普通输入走流式处理
+                // 命令未命中再试技能（同一个 / 入口）：命中则由服务端注入 SKILL.md 规约直接跑任务，
+                // 内建命令永远优先，同名技能不会改写 /clear 之类的语义。
+                SkillInvocation invocation = SkillInvocation.parse(engine.getSkills(),
+                        engine.getSkillTalent().getSkillProvider(), input);
+                if (invocation != null) {
+                    handleFallbackPrompt(socket, session, chatModel, sessionCwd, invocation.getPrompt(), finalSessionId);
+                    return;
+                }
+                // 不是有效命令也不是技能，当作普通输入走流式处理
                 handleFallbackPrompt(socket, session, chatModel, sessionCwd, input, finalSessionId);
                 return;
             }

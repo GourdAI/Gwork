@@ -2667,7 +2667,7 @@ if (window.__GOURD_IPC__ && typeof window.__GOURD_IPC__.onBackendReady === 'func
 /* ===== Command System ===== */
 var commandList = []; // [{name, description, type}, ...]
 var commandsLoaded = false;
-var cmdTrigger = null; // '/' for commands, '@' for subagents, '$' for skills
+var cmdTrigger = null; // '/' for skills, '@' for subagents
 
 function loadCommands() {
     $.get('/web/chat/hints', function(resp) {
@@ -2718,7 +2718,11 @@ function showCmdComplete(inputEl, completeEl, prefix) {
     closeAllToolbarPanels();
     var trigger = prefix.charAt(0);
     var query = prefix.substring(1).toLowerCase();
-    var filterType = (trigger === '@') ? 'subagent' : (trigger === '$') ? 'skill' : 'command';
+    /* 「/」专属于技能（2026-10 收敛）：它是最显眼、最不用切换键盘的符号，
+       内建命令（/clear /compact …）仍可手写，但不再占用补全面板——
+       面板一开就只给用户看他要找的技能，不用先在一堆命令里排除。
+       「$」入口已删除（旧习惯者输入 $xxx 会当普通文本，不上技能）。 */
+    var filterType = (trigger === '@') ? 'subagent' : 'skill';
     cmdVisibleItems = [];
     var html = '';
 
@@ -2728,7 +2732,7 @@ function showCmdComplete(inputEl, completeEl, prefix) {
         if (cmd.type !== filterType) continue;
         if (cmd.name.toLowerCase().indexOf(query) === 0 || query.length === 0) {
             cmdVisibleItems.push(cmd);
-            var nameClass = (trigger === '@') ? 'cmd-name subagent' : (trigger === '$') ? 'cmd-name skill' : 'cmd-name';
+            var nameClass = (trigger === '@') ? 'cmd-name subagent' : 'cmd-name skill';
             html += '<div class="cmd-complete-item" data-index="' + (cmdVisibleItems.length - 1) + '">'
                 + '<span class="' + nameClass + '">' + escapeHtml(trigger + cmd.name) + '</span>'
                 + '<span class="cmd-desc">' + escapeHtml(cmd.description || '') + '</span>'
@@ -2784,12 +2788,19 @@ function applyCmdSelection(inputEl, completeEl) {
         var val = inputEl.value;
         var prefixPos = -1;
         
-        // 查找最近的命令前缀（/、@ 或 $）
+        /* 定位触发符：只认「行首」或「空白之后」的那一个。
+           不能像旧实现那样反向扫任意 / 或 @——技能名本身可能含 /（两级组织，
+           如 design/lanhu），反向扫描会命中名字内部的 /，把前缀算到第 0 位之后的
+           /design 上，于是 /design/lanhu 点选补全后回填成 /design/design/lanhu。
+           该值到服务端已不是合法技能名，会静默降级成普通文本、SKILL.md 规约完全不注入。
+           （旧符号 $ 不会踩：$ 不在技能名里，反向扫必命中触发符。） */
         for (var i = val.length - 1; i >= 0; i--) {
             var ch = val.charAt(i);
-            if (ch === '/' || ch === '@' || ch === '$') {
-                prefixPos = i;
-                break;
+            if (ch === '/' || ch === '@') {
+                if (i === 0 || /\s/.test(val.charAt(i - 1))) {
+                    prefixPos = i;
+                    break;
+                }
             }
         }
         
@@ -2869,7 +2880,7 @@ function handleInputForCommands(e) {
     var completeEl = (inputEl === welcomeInput) ? $welcomeCmdComplete[0] : $chatCmdComplete[0];
     var val = inputEl.value;
 
-    if (val.indexOf('/') === 0 || val.indexOf('@') === 0 || val.indexOf('$') === 0) {
+    if (val.indexOf('/') === 0 || val.indexOf('@') === 0) {
         // Only show completion when cursor is at the command/agent/skill name part (no spaces yet)
         var cursorPos = inputEl.selectionStart;
         var textBeforeCursor = val.substring(0, cursorPos);
@@ -2898,14 +2909,14 @@ function onHistoryBtnClick(e) {
     }
 }
 
-// Command & Agent button handlers
+// 命令 & Agent 按钮处理器
 function triggerCmdComplete(inputEl, completeEl, prefix) {
     // 保存当前光标位置
     var cursorPos = inputEl.selectionStart;
     var textBefore = inputEl.value.substring(0, cursorPos);
     var textAfter = inputEl.value.substring(cursorPos);
     
-    // 在光标位置插入前缀（命令/子代理/技能符号后追加空格）
+    // 在光标位置插入前缀（技能/子代理符号后追加空格）
     inputEl.value = textBefore + prefix + ' ' + textAfter;
     
     // 更新光标位置到前缀和空格后面
@@ -2915,10 +2926,10 @@ function triggerCmdComplete(inputEl, completeEl, prefix) {
     inputEl.focus();
     showCmdComplete(inputEl, completeEl, prefix);
 }
-$('#welcomeCmdBtn').on('click', function() {
+$('#welcomeSkillBtn').on('click', function() {
     triggerCmdComplete(welcomeInput, $welcomeCmdComplete[0], '/');
 });
-$('#chatCmdBtn').on('click', function() {
+$('#chatSkillBtn').on('click', function() {
     triggerCmdComplete(chatInput, $chatCmdComplete[0], '/');
 });
 $('#welcomeAgentBtn').on('click', function() {
@@ -2926,12 +2937,6 @@ $('#welcomeAgentBtn').on('click', function() {
 });
 $('#chatAgentBtn').on('click', function() {
     triggerCmdComplete(chatInput, $chatCmdComplete[0], '@');
-});
-$('#welcomeSkillBtn').on('click', function() {
-    triggerCmdComplete(welcomeInput, $welcomeCmdComplete[0], '$');
-});
-$('#chatSkillBtn').on('click', function() {
-    triggerCmdComplete(chatInput, $chatCmdComplete[0], '$');
 });
 
 $(welcomeInput).on('input', handleInputForCommands);
@@ -2990,7 +2995,7 @@ $chatCmdComplete.on('click', function(e) {
 // Hide on outside click
 $(document).on('click', function(e) {
     var $target = $(e.target);
-    if (!$target.closest('.cmd-complete').length && !$target.closest('.history-panel').length && !$target.closest('textarea').length && !$target.closest('#welcomeCmdBtn').length && !$target.closest('#welcomeAgentBtn').length && !$target.closest('#chatCmdBtn').length && !$target.closest('#chatAgentBtn').length && !$target.closest('#welcomeSkillBtn').length && !$target.closest('#chatSkillBtn').length && !$target.closest('#chatHistoryBtn').length) {
+    if (!$target.closest('.cmd-complete').length && !$target.closest('.history-panel').length && !$target.closest('textarea').length && !$target.closest('#welcomeAgentBtn').length && !$target.closest('#chatAgentBtn').length && !$target.closest('#welcomeSkillBtn').length && !$target.closest('#chatSkillBtn').length && !$target.closest('#chatHistoryBtn').length) {
         hideCmdComplete();
         hideHistoryPanel();
     }
@@ -3920,7 +3925,7 @@ window.selectContext = selectContext;
 // 思考深度档位单一真源：供自动化视图（app-automation.js）复用，避免重复维护档位表
 window.thinkingOptionsForModel = thinkingOptionsForModel;
 
-/* 命令补全（/ 命令、@ 子代理、$ 技能）对外接口：供自动化表单的指令区完整复用，
+/* 命令补全（/ 技能、@ 子代理）对外接口：供自动化表单的指令区完整复用，
    避免在 app-automation.js 里再实现一份候选集过滤/键盘导航（两份必然漂移）。
    宿主需自备面板元素并自行处理「点击候选项」与「点击外部收起」（见 app-automation.js）。 */
 window.GourdCmdComplete = {

@@ -590,7 +590,16 @@ test('预览是单行截断（标题行内弹性收缩，不得把标题行撑�
     assert.ok(/white-space:\s*nowrap/.test(block), '必须单行');
     assert.ok(/overflow:\s*hidden/.test(block), '必须裁切溢出');
     assert.ok(/text-overflow:\s*ellipsis/.test(block), '必须有省略号');
-    assert.ok(/flex:\s*1 1 0/.test(block), '必须弹性伸缩（超长时让位给工具名）');
+    /* 2026-10-21 用户报障「Java 被遮挡」：旧值 flex:1 1 0（basis 0）在左侧 .tool-args
+       按 max-content 占位（实测 685px）时，预览分到 0px 而**彻底消失**（16 张卡复现，
+       clientWidth=0 / scrollWidth=132）。故改为 0 0 auto + max-width 上限：
+       保留自然宽度并受 40% 封顶，绝不再塌成 0；超长仍由 args(min-width:0) 收缩腾位。 */
+    assert.ok(/flex:\s*0 0 auto/.test(block),
+        '预览必须 0 0 auto：flex-basis:0 会被 args 的 max-content 占位挤成 0 宽而整体不可见');
+    assert.ok(!/flex:\s*1 1 0(?!\d)/.test(block),
+        '不得回退为 flex:1 1 0（basis:0 在长参数行上会把预览压成 0 宽，用户实测「被遮挡」）');
+    assert.ok(/max-width:\s*4?0%|max-width:\s*40%/.test(block),
+        '预览需 max-width 封顶，避免预览反噬挤压工具名与参数摘要');
     assert.ok(/min-width:\s*0/.test(block), 'flex 子项必须有 min-width:0 才能收缩');
     assert.ok(/order:\s*4(?!\d|\.)/.test(block), '顺序钉在参数摘要之后、耗时/状态点之前');
     assert.ok(!/order:\s*\d+\.\d+/.test(block),

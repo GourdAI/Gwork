@@ -318,7 +318,6 @@
                 "switch_thinking":  "思考モード切替",
                 "attach_file":  "ファイルを添付",
                 "attach_image":  "画像を添付",
-                "cmd_commands":  "コマンドショートカット",
                 "skills":  "スキル",
                 "subagent":  "サブエージェント",
                 "history_msg":  "履歴メッセージ",

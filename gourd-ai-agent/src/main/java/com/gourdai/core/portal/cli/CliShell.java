@@ -43,6 +43,7 @@ import com.gourdai.ai.chat.prompt.Prompt;
 import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.agent.TaskTalent;
 import com.gourdai.harness.command.Command;
+import com.gourdai.harness.talents.cli.SkillInvocation;
 import com.gourdai.harness.talents.cli.TodoTalent;
 import com.gourdai.harness.talents.memory.MemoryTalent;
 import com.gourdai.ai.util.CmdUtil;
@@ -263,6 +264,9 @@ public class CliShell implements Runnable {
 
         // 解析命令名和参数
         List<String> parts = CmdUtil.parseArguments(input.trim().substring(1));
+        if (parts.isEmpty()) {
+            return false;
+        }
         String cmdName = parts.get(0).toLowerCase();
         List<String> args = parts.size() > 1
                 ? parts.subList(1, parts.size())
@@ -271,7 +275,10 @@ public class CliShell implements Runnable {
         // 查找命令
         Command command = engine.getCommandRegistry().find(cmdName);
         if (command == null) {
-            return false;
+            /* 命令未命中再试技能：内建命令永远优先，同名技能不会改写 /clear 之类的语义。
+               技能命中即由服务端注入 SKILL.md 规约并直接发起本轮任务——
+               旧实现把 "$技能名" 原样交给模型去领会，实测经常不生效。 */
+            return runSkill(session, input);
         }
 
         // 构建 context（注入 agentTaskRunner 回调）
@@ -293,6 +300,22 @@ public class CliShell implements Runnable {
             printWelcome(session);
         }
 
+        return true;
+    }
+
+    /**
+     * 尝试把输入当技能调用（{@code /技能名 [说明]}）执行。
+     *
+     * @return true 表示已识别为技能调用并发起任务；false 表示不是技能，交由调用方按普通输入处理
+     */
+    private boolean runSkill(AgentSession session, String input) throws Exception {
+        SkillInvocation invocation = SkillInvocation.parse(engine.getSkills(),
+                engine.getSkillTalent().getSkillProvider(), input);
+        if (invocation == null) {
+            return false;
+        }
+
+        performAgentTask(session, invocation.getPrompt(), null);
         return true;
     }
 
@@ -802,8 +825,7 @@ public class CliShell implements Runnable {
         terminal.writer().println(DIM + path + RESET);
         terminal.writer().println(DIM + "Tips: " +
                 RESET + "(esc)" + DIM + " interrupt | " +
-                RESET + "/(tab)" + DIM + " command | " +
-                RESET + "$(tab)" + DIM + " skill | " +
+                RESET + "/(tab)" + DIM + " command/skill | " +
                 RESET + "@(tab)" + DIM + " agent" + RESET);
 
         terminal.flush();

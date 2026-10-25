@@ -57,6 +57,22 @@ public class CliCompleter implements Completer {
                     candidates.add(new Candidate("/" + name, "/" + name + "  " + cmd.description(), null, null, null, null, true));
                 }
             }
+
+            // 技能同用 / 入口（见 SkillInvocation）：与命令并列补全，内建命令优先于同名技能。
+            // 旧实现用 $ 触发技能，符号在中文输入法下要多切一次键盘、视觉又抢注意力。
+            Set<String> added = new HashSet<>();
+            for (SkillDir skill : engine.getSkills()) {
+                if (skill.getName().startsWith(prefix)) {
+                    if (added.contains(skill.getName())) {
+                        continue;
+                    }
+                    added.add(skill.getName());
+
+                    candidates.add(new Candidate("/" + skill.getName(),
+                            "/" + skill.getName() + "  " + clipDescription(skill.getDescription()),
+                            null, null, null, null, true));
+                }
+            }
         }
 
         if (line.word().startsWith("/m")) {
@@ -77,34 +93,17 @@ public class CliCompleter implements Completer {
                 }
             }
         }
+    }
 
-        if (line.word().startsWith("$")) {
-            Set<String> added = new HashSet<>();
-            String prefix = line.word().substring(1).toLowerCase();
-            for (SkillDir skill : engine.getSkills()) {
-                if (skill.getName().startsWith(prefix)) {
-                    if (added.contains(skill.getName())) {
-                        continue;
-                    } else {
-                        added.add(skill.getName());
-                    }
-
-                    // 构建补全提示：description + argument-hint
-                    String desc = skill.getDescription();
-                    if (desc != null) {
-                        // 取第一行，并限制最大长度
-                        int newlineIdx = desc.indexOf('\n');
-                        if (newlineIdx > 0) {
-                            desc = desc.substring(0, newlineIdx);
-                        }
-                        if (desc.length() > 30) {
-                            desc = desc.substring(0, 30) + "...";
-                        }
-                    }
-
-                    candidates.add(new Candidate("$" + skill.getName(), "$" + skill.getName() + "  " + desc, null, null, null, null, true));
-                }
-            }
+    /** 描述只取首行并限长：Tab 候选是一行渲染，换行会把候选列表撞坏。 */
+    private static String clipDescription(String desc) {
+        if (desc == null) {
+            return "";
         }
+        int newlineIdx = desc.indexOf('\n');
+        if (newlineIdx > 0) {
+            desc = desc.substring(0, newlineIdx);
+        }
+        return desc.length() > 30 ? desc.substring(0, 30) + "..." : desc;
     }
 }

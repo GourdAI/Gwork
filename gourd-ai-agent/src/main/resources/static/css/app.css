@@ -499,8 +499,21 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    【必须用整数】flex order 规范只接受 <integer>，曾写 3.5 被浏览器直接丢弃、
    回退为 0，预览因此窜到工具名之前（用户实测的「展示乱」即源于此），勿再改回小数。
    弹性收缩 + 省略号：超长时让位给工具名，绝不换行。
-   三级文字色 + 小字号（视觉降级为注脚，不与正文争权重）。 */
-.tool-card-header .preview-inline, .thinking-block-header .preview-inline { order: 4; flex: 1 1 0; min-width: 0; color: var(--text-tertiary); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+   三级文字色 + 小字号（视觉降级为注脚，不与正文争权重）。
+
+   【2026-10-21 用户报障「Java 被遮挡」——预览被压成 0 宽的根因与修法】
+   旧值是 flex: 1 1 0（flex-basis:0 + 可收缩）。而左侧 .tool-args 的 flex-basis 是 auto
+   ＝「整段参数文本的 max-content 宽度」（一张 bash 卡实测 685px，头部可用宽度仅 557px）。
+   flex 分配时 args 先按自身全文宽度占位，预览的 basis 本就是 0 → 最后分到 0px。
+   结果不是「缩到很短」，而是**彻底消失**：实测 16 张卡预览 clientWidth=0、scrollWidth=132，
+   文字一个像素都不显示；同时 args 正文被算到 685px、越过 duration/preview 的实际起点
+   2.6~6px，紧邻错位处正是 argv 里「src/main/java」这类长路径被压住的位置（用户圈出的 Java）。
+   修法：
+   1) 预览改 flex: 0 0 auto + max-width:40% —— 保留自然宽度、拿不到空间时仍按 40% 上限
+      显示省略号，绝不再塌成 0；剩余空间由 args（min-width:0）收缩并省略号。
+   2) .tool-name / .tool-duration 显式 flex-shrink:0 —— 它们是单行定长信息，
+      被参与收缩后文字会互相挤压（此前 duration 也没锁死）。 */
+.tool-card-header .preview-inline, .thinking-block-header .preview-inline { order: 4; flex: 0 0 auto; max-width: 40%; min-width: 0; color: var(--text-tertiary); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 【字体族统一 2026-09-29】思考预览不再独用等宽：头部次要文字是单行注脚，
    相邻工具行/思考行 mono↔sans 来回切换正是「怪」的来源；等宽只保留给卡体
    （.tool-card-body / .thinking-block-body）等真正承载代码内容的位置。
@@ -512,7 +525,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    排序不随「耗时出现」变化，状态点因此全程不动、稳定贴行尾。
    （旧实现的 .has-duration 覆盖会把两者 order 对调——类切换的过渡窗口里排序异步变化，
    圆点先左闪再右跳，已随实测修复移除，勿再引入。） */
-.tool-duration { order: 5; color: var(--text-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; opacity: 0.75; }
+.tool-duration { order: 5; flex-shrink: 0; color: var(--text-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; opacity: 0.75; }
 .tool-duration.failed { color: var(--color-danger, #e5484d); opacity: 1; }
 .tool-label { color: var(--text-secondary); font-size: 12px; }
 /* 展开的结果体：以顶部细分隔线归属到本行，而非再套一层盒子边框 */
@@ -1087,7 +1100,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .attachment-item-remove:hover { background: var(--color-danger-hover); color: var(--on-danger-hover); }
 
 .attach-input { display: none; }
-/* Plus 聚合菜单：原一排圆钮（附加文件/图片/快捷命令/技能/子代理/定时任务/历史消息）
+/* Plus 聚合菜单：原一排圆钮（附加文件/图片/技能/子代理/定时任务/历史消息）
    收敛为“+”按钮弹出的菜单（参考主流 AI 产品的“+”交互）；菜单项沿用原按钮 ID，JS 绑定不变。 */
 .plus-menu-wrap { position: relative; flex-shrink: 0; }
 .plus-btn { width: 34px; height: 34px; border-radius: 50%; border: none; background: transparent; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; flex-shrink: 0; }
@@ -1331,7 +1344,8 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .voice-btn.hidden { display: none; }
 @keyframes voice-pulse { 0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239,68,68,0.4); } 50% { transform: scale(1.08); box-shadow: 0 0 0 8px rgba(239,68,68,0); } }
 
-/* Command Completion */
+/* Command Completion（现只服务两种候选项：/ 技能与 @ 子代理；
+   内建命令仍可手写但不再进面板，见 app-history.js showCmdComplete） */
 .cmd-complete { position: absolute; bottom: 100%; left: 0; right: 0; margin-bottom: 4px; background: var(--bg-input-box); border: 1px solid var(--border-color); border-radius: 10px; box-shadow: var(--shadow-lg); max-height: 240px; overflow-y: auto; display: none; z-index: 100; animation: drop-up 0.15s ease-out; }
 .cmd-complete.show { display: block; }
 .cmd-complete-item { padding: 10px 14px; cursor: pointer; font-size: 13px; transition: background 0.15s; display: flex; align-items: flex-start; gap: 10px; }
@@ -3570,14 +3584,17 @@ pre:hover .code-copy-btn { opacity: 1; }
    远端组=浏览该连接磁盘）；「⋯」= 该连接的动作菜单。acts 是 head 按钮的兄弟节点、
    绝对定位盖在组头右上（悬停时遮住 count，动作取代计数是常见行内操作范式）。
    默认隐藏、悬停组头才出现，避免常驻图标把组头扫读节奏打碎；指针移入 acts
-   自身或键盘聚焦时保持可见（否则移过去就消失，永远点不着）。 */
+   自身或键盘聚焦时保持可见（否则移过去就消失，永远点不着）。
+   悬停显隐同样用通用兄弟 ~（不用 +）：与下方折叠规则同一纪律。实测在 head 与
+   acts 之间插入任意兄弟后，用 + 时悬停 head 完全不显形（动作按钮整体不可达），
+   而 ~ 不受中间节点影响。 */
 .ws-group-acts {
     display: none; align-items: center; gap: 2px;
     position: absolute; top: 7px; right: 6px; padding: 0 2px;
     /* 与 head 悬停底色同值：盖上去时与组头悬停态融为一体，不像补丁 */
     background: var(--bg-hover); border-radius: 6px;
 }
-.ws-group-head:hover + .ws-group-acts, .ws-group-acts:hover, .ws-group-acts:focus-within { display: inline-flex; }
+.ws-group-head:hover ~ .ws-group-acts, .ws-group-acts:hover, .ws-group-acts:focus-within { display: inline-flex; }
 .ws-group-act {
     display: inline-flex; align-items: center; justify-content: center;
     width: 20px; height: 20px; border: none; border-radius: 5px;
@@ -3586,7 +3603,12 @@ pre:hover .code-copy-btn { opacity: 1; }
 .ws-group-act:hover { background: var(--bg-card); color: var(--text-primary); }
 .ws-group-act:focus-visible { outline: 1px solid var(--text-tertiary); outline-offset: 1px; }
 .ws-group-body { padding-left: 10px; }
-.ws-group-head[aria-expanded="false"] + .ws-group-body { display: none; }
+/* 【必须用通用兄弟 ~ 而不是相邻兄弟 +】：.ws-group-acts（组头快捷动作）是 head 的
+   兄弟节点、插在 head 与 body 之间，故 body 并非 head 的「紧邻」兄弟。用 + 时本规则
+   永远命中不到 → 点组头只有 caret 旋转、body 常驻展开，表现为「收缩不起来」。
+   （2026-10-20 99ca548 新增 acts 时踩中：结构变了、选择器没跟着改。）
+   用 ~ 表达的是「body 是 head 之后的兄弟」，与中间夹几个节点无关，后续再插兄弟也不会坏。 */
+.ws-group-head[aria-expanded="false"] ~ .ws-group-body { display: none; }
 /* 掉线连接组：条目置灰但保留可见（用户能看到「这台掉线了」而非凭空消失） */
 .ws-group[data-state="down"] .ws-group-body { opacity: 0.5; }
 .ws-group-empty { padding: 4px 8px 4px 24px; color: var(--text-tertiary); font-size: 11.5px; }
@@ -3641,8 +3663,8 @@ pre:hover .code-copy-btn { opacity: 1; }
    WHY 补——app-history.js 点击子节 head 会切 aria-expanded 与 .ws-group-global-collapsed，
    但上面只给了 head 的排布样式，没有 body 的隐藏规则：折叠点击会「没反应」（body 常驻展开）。
    caret 同样需要与分组头一致的旋转过渡，否则子节开合缺视觉反馈。
-   相邻兄弟选择器依赖 wsGroupGlobalHtml 生成的 head→body 紧邻结构（与 .ws-group 同手法）。 */
+   兄弟选择器同样用 ~（不用 +）：与 .ws-group-body 保持同一纪律，删掉对「紧邻」的脆性依赖。 */
 .ws-group-global-head[aria-expanded="true"] .ws-group-caret { transform: rotate(90deg); }
-.ws-group-global-head[aria-expanded="false"] + .ws-group-global-body { display: none; }
+.ws-group-global-head[aria-expanded="false"] ~ .ws-group-global-body { display: none; }
 .ws-group-global-body { margin: 1px 0 3px 14px; border-left: 1px solid var(--border-color); padding-left: 6px; }
 .ws-group-global-body .sidebar-item { padding: 6px 8px; border-radius: 8px; }

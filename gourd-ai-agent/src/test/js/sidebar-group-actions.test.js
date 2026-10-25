@@ -160,8 +160,12 @@ test('openRemoteConnMenu：单连接菜单 + toggle 语义 + 锚点定位', () =
  * ====================================================================== */
 test('组头动作样式：默认隐藏、悬停/自身悬停/焦点显隐、20px 命中区', () => {
   assert.match(appCss, /\.ws-group-acts \{[\s\S]{0,200}display: none;/, '默认必须隐藏（常驻图标打碎组头扫读节奏）');
-  assert.match(appCss, /\.ws-group-head:hover \+ \.ws-group-acts, \.ws-group-acts:hover, \.ws-group-acts:focus-within \{ display: inline-flex; \}/,
+  assert.match(appCss, /\.ws-group-head:hover ~ \.ws-group-acts, \.ws-group-acts:hover, \.ws-group-acts:focus-within \{ display: inline-flex; \}/,
     '组头悬停、指针移入 acts 自身、键盘聚焦三者都必须显隐（移过去就消失 = 永远点不着）');
+  /* 悬停显隐必须用通用兄弟 ~：与折叠规则同一纪律。实测在 head 与 acts 之间插一个
+     兄弟后，用 + 时悬停 head 完全不显形（动作整体不可达），而 ~ 不受中间节点影响。 */
+  assert.doesNotMatch(appCss, /\.ws-group-head:hover \+ \.ws-group-acts/,
+    '悬停显隐不得用相邻兄弟 +（中间插兄弟即失效，与折叠规则同源脆性）');
   assert.match(appCss, /\.ws-group-act \{[\s\S]{0,240}width: 20px; height: 20px;/, '动作必须有足够命中区（20px）');
   assert.match(appCss, /\.ws-group-act:focus-visible \{ outline:/, '键盘焦点必须有可见环');
   assert.match(appCss, /\.ws-group \{ margin: 2px 0; position: relative; \}/, '组容器必须 relative（acts 绝对定位的参照）');
@@ -181,4 +185,47 @@ test('i18n：group_add / group_actions / group_add_down 12 语言包齐全', () 
         lang + '.remote.' + key + ' 缺失或为空（运行时会退成显示键名）');
     }
   }
+});
+/* ========================================================================
+ * 7. 折叠规则：head 与 body 之间夹着 acts，必须用通用兄弟 ~（回归）
+ * ====================================================================== */
+/* 2026-10-20 99ca548 给组头加了 .ws-group-acts 快捷动作，它是 head 的兄弟、插在
+   head 与 .ws-group-body 之间。折叠规则原写 `.ws-group-head[aria-expanded="false"]
+   + .ws-group-body`，相邻兄弟选择器从此永远命中不到 → 点组头只转 caret、body 常驻
+   展开，用户报「收缩不起来」。本组断言就是那次回归的护栏。
+
+   为什么断言 ~ 而不是 +：+ 依赖「head 与 body 紧邻」这一结构事实，而结构会随需求
+   变（已经变过一次），选择器不该跟着脆。~ 表达「body 在 head 之后」，中间夹几个
+   兄弟都成立。若将来有人改回 +，即使当次结构恰好紧邻（测试仍绿），下次插兄弟就会
+   复发——故直接锁 ~。
+
+   反向断言 +：防止两者并存时 + 先手命中造成歧义（同选择器优先级下由书写顺序决定，
+   属于脆性陷阱），故明确禁止 + 形态存在。
+*/
+test('分组折叠：head→body 跨 acts 仍能收起（必须用 ~，禁用 +）', () => {
+  assert.match(appCss, /\.ws-group-head\[aria-expanded="false"\] ~ \.ws-group-body \{ display: none; \}/,
+    '分组折叠必须用通用兄弟 ~：acts 夹在 head 与 body 之间，+ 永远命中不到（收缩失灵回归）');
+  assert.doesNotMatch(appCss, /\.ws-group-head\[aria-expanded="false"\] \+ \.ws-group-body/,
+    '不得保留相邻兄弟 + 形态（与 ~ 并存会产生优先级歧义，且下次插兄弟即复发）');
+});
+
+test('全局会话子节折叠：同样用 ~，与分组折叠同一纪律', () => {
+  assert.match(appCss, /\.ws-group-global-head\[aria-expanded="false"\] ~ \.ws-group-global-body \{ display: none; \}/,
+    '子节折叠也必须用 ~（与 .ws-group-body 统一，不依赖紧邻结构）');
+  assert.doesNotMatch(appCss, /\.ws-group-global-head\[aria-expanded="false"\] \+ \.ws-group-global-body/,
+    '不得保留相邻兄弟 + 形态');
+});
+
+/* 结构性证据：DOM 生成顺序确实是 head → acts → body（即上面两选择器要跨的那个兄弟）。
+   这条把「为什么不能用 +」的原因也锁进测试：哪天 acts 被挪走/删掉，本断言先红，
+   提醒维护者回头审视折叠选择器是否还能简化——避免原因与实现脱节。 */
+test('DOM 顺序证据：acts 确实夹在 head 与 body 之间（+ 不适用的根因）', () => {
+  const g = sliceBetween(history, 'function wsGroupHtml(g)', 'function buildSidebar');
+  const headOpen = g.indexOf('<button type="button" class="ws-group-head"');
+  const btnClose = g.indexOf("+ '</button>'", headOpen);
+  const actsAt = g.indexOf('+ wsGroupActsHtml(g)');
+  const bodyAt = g.indexOf("+ '<div class=\"ws-group-body\">'");
+  assert.ok(headOpen >= 0 && btnClose > headOpen, '组头结构基线必须成立');
+  assert.ok(actsAt > btnClose && bodyAt > actsAt,
+    'acts 必须夹在 head 与 body 之间——正是它让「+.ws-group-body」失效的根因');
 });

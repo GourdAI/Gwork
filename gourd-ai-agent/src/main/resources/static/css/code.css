@@ -366,7 +366,7 @@ body.code-mode .chat-view {
 body.code-mode .chat-view .messages-wrap { padding-left: 10px; padding-right: 10px; }
 
 /* code 模式对话栏定宽（min-width:320px），输入区工具条空间有限：原一排功能圆钮已收敛为“+”聚合菜单
-  （app.css .plus-menu），单按钮宽度即可在窄栏正常使用，功能（附件/图片/快捷命令/技能/子代理/历史）不再被隐藏。
+  （app.css .plus-menu），单按钮宽度即可在窄栏正常使用，功能（附件/图片/技能/子代理/历史）不再被隐藏。
    附件仍可拖拽添加，斜杠命令仍可直接输入 / 触发。 */
 
 /* code 模式：缩小右侧语音/发送圆钮，避免在窄对话栏里占用过多空间 */

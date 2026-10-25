@@ -37,6 +37,7 @@ import com.gourdai.harness.agent.TaskTalent;
 import com.gourdai.harness.permission.AccessMode;
 import com.gourdai.harness.change.FileChangeService;
 import com.gourdai.harness.command.Command;
+import com.gourdai.harness.talents.cli.SkillInvocation;
 import com.gourdai.ai.util.CmdUtil;
 import com.gourdai.core.command.WebCommandContext;
 import com.gourdai.core.command.builtin.LoopExecutionResult;
@@ -734,8 +735,13 @@ public class WebGate extends SimpleWebSocketListener {
             // 网页手动输入只有在本次受理锁内通过 busy 检查后才落盘；这样既保证 user 在首个
             // AI chunk 之前，又避免竞态失败请求留下幽灵 user。IM/Loop 自己通过 emitToClient 记录用户事件。
             // 附件路径随帧落盘：历史回放时前端才能把数量徽标还原为真实缩略图（见 recordUser 七参重载）。
+            //
+            // 【为什么不是 !input.startsWith("/")】内建命令（/clear、/model …）不产生 user/assistant 对话对，
+            // 因此不能记 user 帧；但技能调用（/技能名 …）也是 / 开头，却会真的跑一轮任务——
+            // 若按前缀一刀切，斜杠技能调用的用户消息会从历史回放里静默消失（首次发送看不出，
+            // 刷新页面后自己说过什么全没了）。故按【是否为注册命令】判定，而不是按符号。
             if (clientMessageId != null && Assert.isEmpty(hitlAction) && Assert.isNotEmpty(input)
-                    && !input.startsWith("/") && streamStore != null) {
+                    && !isRegistryCommand(input) && streamStore != null) {
                 // multipart 部分只记「确实落盘成功」的路径；按路径引用的部分（字节早已在盘上）
                 // 沿用 collectAttachmentPaths 的原口径，两者汇入同一对清单。
                 List<String> recImagePaths = new ArrayList<>(savedImagePaths);
@@ -1322,6 +1328,24 @@ public class WebGate extends SimpleWebSocketListener {
     }
 
     /**
+     * 输入是否命中已注册的内建命令（不看符号，只看是否真能路由）。
+     *
+     * <p>存在的理由：/clear 这类命令不产生对话对，不该落 user 帧；而 /技能名 虽然同样以 / 开头，
+     * 却是真正的一轮任务，必须落盘。若用 {@code startsWith("/")} 一刀切，斜杠技能调用的
+     * 用户消息会从历史回放里静默消失。此处的判定口径必须与 {@link #isCommand} 一致。</p>
+     */
+    private boolean isRegistryCommand(String input) {
+        if (input == null || !input.startsWith("/")) {
+            return false;
+        }
+        List<String> parts = CmdUtil.parseArguments(input.trim().substring(1));
+        if (parts.isEmpty()) {
+            return false;
+        }
+        return engine.getCommandRegistry().find(parts.get(0).toLowerCase()) != null;
+    }
+
+    /**
      * 尝试将用户输入解析为斜杠命令并执行。
      *
      * <p>解析输入字符串中的命令名和参数，查找已注册的 {@link Command} 并执行。
@@ -1344,6 +1368,14 @@ public class WebGate extends SimpleWebSocketListener {
 
         // 解析命令名和参数
         List<String> parts = CmdUtil.parseArguments(input.trim().substring(1));
+        /* 纯 "/"（或 "/   "）解析后为空列表，直接取 parts.get(0) 会抛
+           IndexOutOfBoundsException。前端发送按钮通常会 trim 后拦空输入，
+           但 /web/chat/input 接口是直接可达的，且这里本就在判定「是不是命令」——
+           空输入显然不是，守卫后一并回落到普通输入。
+           （CliShell.isCommand 与 WsGate.handleCommand 一直有该守卫，只有这里漏了。） */
+        if (parts.isEmpty()) {
+            return false;
+        }
         String cmdName = parts.get(0).toLowerCase();
         List<String> args = parts.size() > 1
                 ? parts.subList(1, parts.size())
@@ -1352,7 +1384,11 @@ public class WebGate extends SimpleWebSocketListener {
         // 查找命令
         Command command = engine.getCommandRegistry().find(cmdName);
         if (command == null) {
-            return false;
+            /* 命令未命中再试技能：内建命令（/clear /compact …）永远优先，
+               不存在被同名技能改写语义的窗口。技能命中即由服务端把 SKILL.md 规约
+               注入本轮 Prompt 并直接发起任务，不再依赖模型自发调 skillread；
+               旧实现把 "$技能名" 原样发给模型碰运气，实测经常不生效。 */
+            return runSkill(session, sessionCwd, input, selectedModel, agentName, accessMode);
         }
 
         // 构建 context（注入 agentTaskRunner 回调）
@@ -1412,6 +1448,32 @@ public class WebGate extends SimpleWebSocketListener {
         return true;
     }
 
+
+    /**
+     * 尝试把输入当技能调用（{@code /技能名 [说明]}）执行。
+     *
+     * <p>与命令同一个入口（都是 {@code /}），因此两者必须在同一处裁决优先级：
+     * 先查 {@link com.gourdai.harness.command.CommandRegistry}，未命中才落到这里。</p>
+     *
+     * @return true 表示已识别为技能调用并发起本轮任务；false 表示不是技能，由调用方继续原逻辑
+     */
+    private boolean runSkill(AgentSession session, String sessionCwd, String input, String selectedModel,
+                             String agentName, String accessMode) {
+        SkillInvocation invocation = SkillInvocation.parse(engine.getSkills(),
+                engine.getSkillTalent().getSkillProvider(), input);
+        if (invocation == null) {
+            return false;
+        }
+
+        // 记一行 INFO：技能调用会直接把 SKILL.md 整篇链进本轮 Prompt（体积可达数 KB），
+        // 而 /技能名 与 /clear 同样是 / 开头、失败时又都只是“没反应”。不留痕就无法从日志
+        // 分辨「用户点了技能」与「用户发了一句带斜杠的普通文本」，排障时只能靠猜。
+        LOG.info("[WebGate] slash skill invocation for session {}: skill={}, hasArgs={}",
+                session.getSessionId(), invocation.getName(), !invocation.getArgs().isEmpty());
+
+        performAgentTaskAsync(session, sessionCwd, Prompt.of(invocation.getPrompt()), selectedModel, agentName, accessMode);
+        return true;
+    }
 
     /**
      * 判断指定会话是否有 AI 任务正在执行。

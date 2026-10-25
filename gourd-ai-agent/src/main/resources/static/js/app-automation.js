@@ -518,7 +518,7 @@
         // 已选附件（结构与首页 .attachments-wrap 同构，chip 类名直接复用全局样式）
         html += '<div class="attachments-wrap" id="autoAttachmentsWrap"></div>';
         html += '<div style="position:relative">';
-        // 命令补全面板（/ 命令、@ 子代理、$ 技能）：由 app-history.js 导出的 GourdCmdComplete 驱动
+        // 命令补全面板（/ 技能、@ 子代理）：由 app-history.js 导出的 GourdCmdComplete 驱动
         html += '<div class="cmd-complete" id="autoCmdComplete"></div>';
         // 不写 rows：rows=4 算出的初始高度（≈104px）大于 CSS min-height(92px)，
         // 用户删空文本后 autoGrowPrompt 会钳到 92px 造成不可逆的高度塌陷。高度全交 CSS + JS
@@ -540,11 +540,8 @@
         html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
         html += '<span>' + escapeHtml(t('app.attach_image')) + '</span></button>';
         html += '<div class="plus-menu-sep"></div>';
-        html += '<button type="button" class="plus-menu-item" id="autoCmdBtn">';
-        html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20L16 4"/><circle cx="8" cy="12" r="2"/><circle cx="16" cy="12" r="2"/></svg>';
-        html += '<span>' + escapeHtml(t('app.cmd_commands')) + '</span></button>';
         html += '<button type="button" class="plus-menu-item" id="autoSkillBtn">';
-        html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><text x="4" y="18" font-size="18" font-weight="bold" font-family="monospace" fill="currentColor" stroke="none">$</text></svg>';
+        html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><text x="4" y="18" font-size="18" font-weight="bold" font-family="monospace" fill="currentColor" stroke="none">/</text></svg>';
         html += '<span>' + escapeHtml(t('app.skills')) + '</span></button>';
         html += '<button type="button" class="plus-menu-item" id="autoAgentBtn">';
         html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/><line x1="19" y1="2" x2="19" y2="6"/><line x1="17" y1="4" x2="21" y2="4"/></svg>';
@@ -1232,7 +1229,7 @@
     // ===================== 指令区事件（+菜单 / 命令补全 / 附件受理） =====================
 
     /**
-     * 命令补全（/ 命令、@ 子代理、$ 技能）：完整复用 app-history.js 导出的 GourdCmdComplete，
+     * 命令补全（/ 技能、@ 子代理）：完整复用 app-history.js 导出的 GourdCmdComplete，
      * 本页只提供宿主元素与事件接线（候选集过滤/键盘导航/插入语义不在这里重写一份，避免两份漂移）。
      */
     function autoPromptEl() { return document.getElementById('autoPrompt'); }
@@ -1249,13 +1246,13 @@
     }
 
     /** textarea input：除自适应高度外，接命令补全（口径同 app-history.js handleInputForCommands）。
-     *  仅在「以 / @ $ 开头且光标前无空格」时展示面板，其余情况收起本页面板（不动聊天页面板）。 */
+     *  仅在「以 / @ 开头且光标前无空格」时展示面板，其余情况收起本页面板（不动聊天页面板）。 */
     function autoCmdCompleteOnInput() {
         var inputEl = autoPromptEl();
         var completeEl = autoCmdEl();
         if (!inputEl || !completeEl || !window.GourdCmdComplete) return;
         var val = inputEl.value;
-        if (val.indexOf('/') === 0 || val.indexOf('@') === 0 || val.indexOf('$') === 0) {
+        if (val.indexOf('/') === 0 || val.indexOf('@') === 0) {
             var textBeforeCursor = val.substring(0, inputEl.selectionStart);
             if (textBeforeCursor.indexOf(' ') === -1) {
                 window.GourdCmdComplete.show(inputEl, completeEl, textBeforeCursor);
@@ -1319,11 +1316,11 @@
             removeAutoAttachment(parseInt($(this).attr('data-idx'), 10));
         });
 
-        // ---- 命令 / 技能 / 子代理：插入前缀并开面板 ----
-        // stopPropagation 必须保留：否则事件继续上到 document，app-history.js 的外部收起器
-        // 会 hideCmdComplete() 把刚 show 出来的候选集清空（面板还在、导航已死）。
-        $view.on('click', '#autoCmdBtn', function (e) { e.stopPropagation(); triggerAutoCmd('/'); });
-        $view.on('click', '#autoSkillBtn', function (e) { e.stopPropagation(); triggerAutoCmd('$'); });
+        // ---- 技能 / 子代理：插入前缀并开面板 ----
+        // 命令不再单独占一个入口：技能与命令同用 /（见 SkillInvocation），本页只保留
+        // 「技能」一项。stopPropagation 必须保留：否则事件继续上到 document，
+        // app-history.js 的外部收起器会把刚 show 出来的候选集清空（面板还在、导航已死）。
+        $view.on('click', '#autoSkillBtn', function (e) { e.stopPropagation(); triggerAutoCmd('/'); });
         $view.on('click', '#autoAgentBtn', function (e) { e.stopPropagation(); triggerAutoCmd('@'); });
         // #autoHistoryBtn 置灰，无动作
 
