@@ -186,10 +186,19 @@
         return null;
     }
 
-    /** 市场 slug 的裸尾形态（@owner/s → s；裸 slug 原样返回） */
+    /**
+     * 市场 slug 的裸尾形态（{@code @owner/s → s}；裸 slug 原样返回）。
+     *
+     * <p><b>与后端 {@code WebSettingsController.marketBareSlug} 严格同口径</b>：
+     * 分隔符下标必须 {@code > 1}（而不是 {@code > 0}）。首版写的是 {@code > 0}，对
+     * {@code @/slug} 这种畸形 slug 前端会剥成 {@code slug}、后端却原样返回，
+     * 同一个 slug 在两端算出不同展示名（旧记录兜底时后端下发一个、前端再算另一个）。
+     * 正常 {@code @owner/slug} 两条件都命中，差异只在这类边界值上——而边界值上的
+     * 「口径一致」注释恰是最容易骗过自己的地方。
+     */
     function marketBareSlug(slug) {
         var s = String(slug || '');
-        return (s.charAt(0) === '@' && s.indexOf('/') > 0) ? s.substring(s.indexOf('/') + 1) : s;
+        return (s.charAt(0) === '@' && s.indexOf('/') > 1) ? s.substring(s.indexOf('/') + 1) : s;
     }
 
     /**
@@ -368,27 +377,55 @@
         if (html) $skillsList.append(html);
     }
 
+    /**
+     * 复位「当前列表的加载态」：加载中提示、底部 footer、列表级错误条、append 在途标记。
+     *
+     * <p><b>为什么必须有这个统一出口</b>：加载态原本只在请求回调里清理，而回调的清理
+     * 全部写在「这次请求仍然有效」的分支内部（seq 校验、视图校验之后）。用户在请求在途时
+     * 切走视图，回调走到校验就 return 了，清理整段被跳过 —— 于是上一个视图的
+     * 「加载中…」永久挂在【新视图】上（用户报障：从技能市场切到已安装，市场还在加载，
+     * 已安装这块也显示加载信息）。加载态的生命周期必须由视图切换来收口，不能寄望于
+     * 「那个请求一定会回来并且走完清理分支」。</p>
+     */
+    function resetListStatus() {
+        $('.skills-list-footer').remove();
+        $skillsLoading.hide();
+        _isLoadingMore = false;
+        /* 错误条同属「上一次加载」的结果，换视图时一并清掉。
+         * 例外：markets 端点整体失败时那条「加载失败，点击重试」是【视图级】恢复入口
+         * （此时 _markets 为空、只剩「已安装」标签），清掉用户就再没有重试的路了。 */
+        if (_marketsLoadFailed) {
+            $skillsStatus.show();
+            $skillsError.text(GourdI18n.t('settings.skills.load_failed_retry')).show();
+        } else {
+            $skillsStatus.hide();
+            $skillsError.text('').hide();
+        }
+    }
+
     function loadSkillsList(query, append) {
         var isAppend = append === true;
 
-        if (_currentView === VIEW_INSTALLED) {
-            if (!isAppend) {
-                _loadSeq++;
-                _hasMore = false;
-                $('.skills-list-footer').remove();
-                renderInstalledList(query);
-            }
-            return;
-        }
+        /* 已安装视图的数据源是本地索引（同步内存），永远不走列表加载。
+         * 这是防御守卫：所有调用方（switchView / 搜索 / 分类 / 无限滚动）都已提前拦截，
+         * 此处保留仅为封口。注："已安装视图不显示加载态"不能靠这一支保证——
+         * 真正保证它的是 switchView 里的 resetListStatus（在切视图那一刻就清）。 */
+        if (_currentView === VIEW_INSTALLED) return;
 
         if (!isAppend) {
+            /* 全新加载（首次进入/换分类/搜索）必须从干净状态起步：
+             * 清掉上一次加载残留的「加载中…」与 footer，否则会与新加载态叠加。 */
+            resetListStatus();
             _nextCursor = null;
             _hasMore = true;
             _seenSlugs = {};
             $skillsList.empty();
         }
 
-        if (_isLoadingMore) return;
+        /* 防重入只对「追加下一页」成立：首次/换分类/搜索是用户主动发起的「取代」，
+         * 必须允许提掉在途的旧请求（旧请求靠 _loadSeq 作废），否则用户会看到一个
+         * 灵异的「点了没反应」。 */
+        if (isAppend && _isLoadingMore) return;
         _isLoadingMore = true;
         var mySeq = ++_loadSeq;
         var viewAtRequest = _currentView;
@@ -419,8 +456,14 @@
             dataType: 'json'
         })
             .done(function (resp) {
+                // 已有更新的请求接管：加载态归它管，这里不能动
                 if (mySeq !== _loadSeq) return;
-                if (_currentView !== viewAtRequest || _currentView === VIEW_INSTALLED) return;
+                if (_currentView !== viewAtRequest || _currentView === VIEW_INSTALLED) {
+                    /* 视图已切走 → 结果作废。但 append 在途标记必须复位，
+                     * 否则新视图的下一次「加载更多」会被永久拦住。 */
+                    _isLoadingMore = false;
+                    return;
+                }
                 if (resp && resp.code !== undefined && resp.code !== 200) {
                     $skillsLoading.hide();
                     $('.skills-list-footer').remove();
@@ -476,7 +519,10 @@
             })
             .fail(function (jqXHR, textStatus) {
                 if (mySeq !== _loadSeq) return;
-                if (_currentView !== viewAtRequest) return;
+                if (_currentView !== viewAtRequest) {
+                    _isLoadingMore = false;
+                    return;
+                }
                 $('.skills-list-footer').remove();
                 if (!isAppend) $skillsLoading.hide();
                 if (isAppend) appendListFooter('error');
@@ -549,7 +595,12 @@
         if (query) {
             var kw = query.toLowerCase();
             skills = skills.filter(function (s) {
-                return (s.name || '').toLowerCase().indexOf(kw) !== -1
+                /* 必须同时匹配 displayName：卡片标题显示的是展示名（如「编程专家.Skill」），
+                 * 用户只会照着看得见的名字搜。只搜 name（真实目录名 _owner_slug）会出现
+                 * 「看着卡片上的名字搜，却搜不到它自己」——恰好是本次修完展示名后新引入的
+                 * 不一致。name 仍保留匹配，方便用户按目录名/旧名精确查找。 */
+                return (s.displayName || '').toLowerCase().indexOf(kw) !== -1
+                    || (s.name || '').toLowerCase().indexOf(kw) !== -1
                     || (s.description || '').toLowerCase().indexOf(kw) !== -1;
             });
         }
@@ -562,15 +613,21 @@
         var html = '';
         skills.forEach(function (skill) {
             var name = skill.name || '';
+            /* 展示名与操作标识必须分开：
+             *  - data-name / data-scope 是卸载与启禁用的定位键，必须是真实目录名；
+             *  - 卡片上给用户看的标题优先用市场展示名（否则 namespace 限定 slug
+             *    会落成 _owner_slug，用户看到的是个完全陌生的目录名，与安装前对不上）。
+             * 无 displayName 时（本地手放技能 / 旧版安装记录）回退目录名，行为不变。 */
+            var displayName = skill.displayName || name;
             var desc = skill.description || '';
             var enabled = skill.enabled !== false;
             var scope = skill.scope || 'global';
             var sourceLabel = skill.market ? marketLabel(skill.market) : GourdI18n.t('settings.skills.source_local');
 
             html += '<div class="skill-card skill-card-installed' + (enabled ? '' : ' skill-card-disabled') + '" data-name="' + escapeAttr(name) + '" data-scope="' + escapeAttr(scope) + '">'
-                + iconHtml(skill.iconUrl, name, 'skill-card-icon')
+                + iconHtml(skill.iconUrl, displayName, 'skill-card-icon')
                 + '<div class="skill-card-body">'
-                + '<div class="skill-card-title"><span class="skill-card-name">' + escapeHtml(name) + '</span>'
+                + '<div class="skill-card-title"><span class="skill-card-name" title="' + escapeAttr(displayName) + '">' + escapeHtml(displayName) + '</span>'
                 + (skill.version ? '<span class="skill-installed-badge" style="color:var(--text-secondary);background:var(--bg-hover)">v' + escapeHtml(skill.version) + '</span>' : '')
                 + '</div>'
                 + '<div class="skill-card-desc">' + escapeHtml(desc) + '</div>'
@@ -606,12 +663,17 @@
 
         renderTabs();
 
+        /* 视图一换，上一个视图的加载态立刻作废。
+         * 这一步是用户报障的直接解药：市场列表还在飞时点「已安装」，
+         * 若不在这里清，「加载中…」会一直挂在已安装视图上（且请求回来时
+         * 因视图校验直接 return，永远不会有人来清它）。 */
+        resetListStatus();
+
         _currentQuery = null;
         $skillsSearchInput.val('');
         $skillsSearchClear.hide();
         _nextCursor = null;
         _hasMore = true;
-        _isLoadingMore = false;
 
         if (view === VIEW_INSTALLED) {
             _currentCategory = '';
@@ -809,7 +871,11 @@
         var name = $btn.attr('data-name') || '';
         var scope = $btn.attr('data-scope') || 'global';
 
-        layConfirm(GourdI18n.t('settings.skills.uninstall_confirm', [name]), function () {
+        /* 确认文案必须用用户看得见的名字（展示名），否则卡片写着「编程专家.Skill」、
+         * 弹窗却问「确定卸载 _owner_slug 吗」——用户无法确认自己删的是不是那一张。
+         * 注意：真正的请求体仍传 name（真实目录名），两者不可互换。 */
+        var shownName = $btn.closest('.skill-card').find('.skill-card-name').text();
+        layConfirm(GourdI18n.t('settings.skills.uninstall_confirm', [shownName || name]), function () {
             $btn.prop('disabled', true).addClass('removing');
             $.ajax({
                 url: '/web/settings/skills/uninstall',
@@ -825,7 +891,8 @@
                         renderInstalledList(_currentQuery);
                     });
                     if (typeof window.showToast === 'function') {
-                        window.showToast(GourdI18n.t('app.skills') + '「' + escapeHtml(name) + '」' + GourdI18n.t('settings.loop.deleted') + '！', 'success');
+                        // 同上：提示用展示名，与卡片/确认框保持同一个名字
+                        window.showToast(GourdI18n.t('app.skills') + '「' + escapeHtml(shownName || name) + '」' + GourdI18n.t('settings.loop.deleted') + '！', 'success');
                     }
                 } else {
                     $btn.prop('disabled', false).removeClass('removing');

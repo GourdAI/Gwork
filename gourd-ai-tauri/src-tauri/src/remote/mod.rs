@@ -548,11 +548,40 @@ pub struct RemoteConnection {
     pub refs: std::sync::atomic::AtomicUsize,
     /// 断连时间戳（Disconnected 徽标 + 重连提示用）
     pub state: std::sync::atomic::AtomicU8,
-    /// 探活代际：每次 register_connection（含重连重建）+1。
+    /// 探活代际：取自**全局单调**计数器 [`next_health_generation`]（进程内唯一、
+    /// 严格递增），每次 register_connection（含重连重建）分配一个新值。
     /// 旧探活循环凭 connectionId 查表，重连后同 id 的新连接会被旧循环误判
     /// （旧控制面已死 → 探活失败 → 把刚建好的新连接置 Disconnected 并摘路由）。
     /// 循环持代际快照，查到的连接代际不符即自退（新循环已接管）。
+    ///
+    /// 【2026-10 codereview P1 修复】值源必须是全局 seq 而非「新对象 fetch_add(1)」：
+    /// 后者让每条新连接的代际**恒为 1**——重建时旧连接仍 Connected（复用重推失败
+    /// fall-through、探活失败后重连等路径），旧循环快照 1 == 新连接值 1，自退守卫
+    /// 失效，旧循环与新循环并行跑同一条 connectionId：旧循环 10s 后探活必失败
+    /// （旧数据面已被重建链 stop），把**新连接**误置 Disconnected 并摘路由；WSL
+    /// 保活循环同病，还会对已 shutdown 的旧会话 forever ping（僵尸循环 + 会话泄漏）。
+    /// 全局 seq 下旧循环快照严格小于新连接值，查表一次即自退，无需任何额外清理。
     pub health_generation: std::sync::atomic::AtomicU64,
+    /// 模型镜像世代（屏障语义，对标 ZCode provisioning fail-closed）。
+    ///
+    /// 语义：**桌面端最后一次推送成功时，远端回报的世代号**。0 = 从未同步成功
+    /// （或远端不支持世代端点 → 未知，按未同步处理）。
+    ///
+    /// WHY 需要它：镜像活在远端**进程内存**里（断连即焚、不落盘），而连接存活
+    /// 与镜像存活是两件事——远端 java 被 OOM 收走后由别的链路拉起、或用户在服务器
+    /// 上手动重启，数据面 HTTP 探活照样通过，镜像却已归零。没有世代号就只能
+    /// 「每次复用都盲推」（浪费且掩盖问题）或「从不校验」（远端静默用空配置跑）。
+    /// 判定口径见 [`mirror_sync_needed`]。
+    pub mirror_generation: std::sync::atomic::AtomicU64,
+    /// 上次镜像重推的时间戳（Unix epoch 毫秒；0 = 本连接从未重推过）。
+    ///
+    /// WHY：心跳自愈重推的冷却闸。远端世代端点缺失（旧 jar）时 fetch_generation
+    /// 恒 None → 记 0 → 每轮心跳都判定「需要同步」；没有冷却就会 10s 一次全量
+    /// 重推镜像（载荷含全部 provider/model，MB 级），把数据面刷爆。60s 冷却把
+    /// 最坏情况压到每分钟一次，同时保留「远端进程复活后一分钟内自愈」的体验。
+    /// 用 epoch 毫秒而非 Instant：Instant 不是 Send-safe 的跨任务比较基准，且
+    /// 原子整数与结构体其余计数字段同构（无需额外 Mutex）。
+    pub last_repush_ms: std::sync::atomic::AtomicU64,
 }
 
 impl RemoteConnection {
@@ -705,12 +734,83 @@ pub async fn connect(
     // 于是「复用」变「重建 + 杀掉上一个还在跑任务的远端后端」（P0）。
     {
         let reuse_key = connection_id_of(&host_key);
-        let conns = CONNECTIONS.lock().await;
-        if let Some(existing) = conns.get(&reuse_key) {
+        // 只取 Arc 快照，锁在任何 await 之前释放：下面的世代校验与重推都要走数据面
+        // HTTP（秒级），持锁 await 会把整张注册表卡住——其它连接的 state_of /
+        // list_all / 心跳查表全部排队，表现为「连第二台时整个远程面板冻住」。
+        let existing = {
+            let conns = CONNECTIONS.lock().await;
+            conns.get(&reuse_key).cloned()
+        };
+        if let Some(existing) = existing {
             if existing.conn_state() == ConnState::Connected {
-                existing.refs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                progress(format!("[remote] 复用已有连接 {}", reuse_key));
-                return Ok(existing_outcome(existing));
+                // 镜像世代校验（屏障语义第②条）：连接活着 ≠ 镜像还在。
+                // 远端 java 被 OOM 收走后重拉、或用户在服务器上手动重启，都会让
+                // 内存镜像归零，而数据面探活照样通过。旧实现直接 refs+1 返回，
+                // 于是用户拿到一个「已连接但模型列表是空的」工作区，零错误零提示。
+                let local_gen = existing
+                    .mirror_generation
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let remote_gen = mirror::fetch_generation(
+                    existing.local_port(),
+                    &existing.auth_user,
+                    &existing.auth_pass,
+                )
+                .await
+                .unwrap_or(0);
+                if !mirror_sync_needed(remote_gen, local_gen) {
+                    existing.refs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    progress(format!(
+                        "[remote] 复用已有连接 {}（镜像世代 {} 一致）",
+                        reuse_key, local_gen
+                    ));
+                    return Ok(existing_outcome(&existing));
+                }
+                // 需要同步：就地重推（比重建便宜得多——不重启远端后端，正在跑的
+                // 任务不受影响）。进度直接走向导日志通道：此刻向导必然开着。
+                progress(format!(
+                    "[remote] 复用连接 {} 前校验镜像：远端世代 {} ≠ 本地 {}，重推模型配置…",
+                    reuse_key, remote_gen, local_gen
+                ));
+                let repushed = mirror::push_with_progress(
+                    existing.local_port(),
+                    &existing.auth_user,
+                    &existing.auth_pass,
+                    progress,
+                )
+                .await;
+                if repushed {
+                    // 重推成功：刷新世代基准（取不到则记 0 = 未知，下次仍会重推）
+                    let gen = mirror::fetch_generation(
+                        existing.local_port(),
+                        &existing.auth_user,
+                        &existing.auth_pass,
+                    )
+                    .await
+                    .unwrap_or(0);
+                    existing
+                        .mirror_generation
+                        .store(gen, std::sync::atomic::Ordering::SeqCst);
+                    existing
+                        .last_repush_ms
+                        .store(now_epoch_ms(), std::sync::atomic::Ordering::SeqCst);
+                    existing.refs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    progress(format!(
+                        "[remote] 复用已有连接 {}（镜像已重推，世代 {}）",
+                        reuse_key, gen
+                    ));
+                    return Ok(existing_outcome(&existing));
+                }
+                // 重推失败 → **不复用**（屏障语义：宁可不给连接，也不给一个模型配置
+                // 缺失的连接）。不加 refs、不返回，落到下面的重建链：重建会在
+                // register_connection 里回收旧远端进程与数据面，无需在此重复收尾。
+                tracing::warn!(
+                    "[remote] 复用连接 {} 的镜像重推失败 → 不复用，转重建链",
+                    reuse_key
+                );
+                progress(format!(
+                    "[remote] 镜像重推失败，不复用旧连接，改走完整重建链（{}）",
+                    reuse_key
+                ));
             }
         }
     }
@@ -809,9 +909,11 @@ async fn connect_ssh(
         refs: std::sync::atomic::AtomicUsize::new(1),
         state: std::sync::atomic::AtomicU8::new(0),
         health_generation: std::sync::atomic::AtomicU64::new(0),
+        mirror_generation: std::sync::atomic::AtomicU64::new(0),
+        last_repush_ms: std::sync::atomic::AtomicU64::new(0),
     });
 
-    Ok(register_connection(app, host_key, conn).await)
+    register_connection(app, host_key, conn).await
 }
 
 /// WSL 通道（P2）：wsl.exe 控制面 + localhostForwarding 数据面（无隧道）。
@@ -905,9 +1007,11 @@ async fn connect_wsl(
         refs: std::sync::atomic::AtomicUsize::new(1),
         state: std::sync::atomic::AtomicU8::new(0),
         health_generation: std::sync::atomic::AtomicU64::new(0),
+        mirror_generation: std::sync::atomic::AtomicU64::new(0),
+        last_repush_ms: std::sync::atomic::AtomicU64::new(0),
     });
 
-    Ok(register_connection(app, host_key, conn).await)
+    register_connection(app, host_key, conn).await
 }
 
 /// CLI 预装通道（P3）：复用 SSH 传输，探测 gwork 命中则跳过部署。
@@ -1012,9 +1116,11 @@ async fn connect_preinstalled(
         refs: std::sync::atomic::AtomicUsize::new(1),
         state: std::sync::atomic::AtomicU8::new(0),
         health_generation: std::sync::atomic::AtomicU64::new(0),
+        mirror_generation: std::sync::atomic::AtomicU64::new(0),
+        last_repush_ms: std::sync::atomic::AtomicU64::new(0),
     });
 
-    Ok(register_connection(app, host_key, conn).await)
+    register_connection(app, host_key, conn).await
 }
 
 /// 部署链公共段：指纹比对 → 上传/解包/切换（上传由通道实现决定：SSH cat 流式 /
@@ -1196,6 +1302,81 @@ async fn attach_remote_diagnostics(
     anyhow!("{}\n── 远端现场诊断 ──\n{}", err, diag)
 }
 
+/// 镜像重推冷却（毫秒）：心跳自愈两次重推之间的最小间隔。
+///
+/// WHY 60s：心跳 10s 一轮，而远端不支持世代端点时 fetch_generation 恒 None
+/// → 本地世代恒记 0 → 每轮都判定「需要同步」。没冷却就是 10s 一次全量重推
+/// （载荷含全部 provider/model，可达 MB 级），白白占满数据面；60s 把最坏情况
+/// 压到每分钟一次，同时保留「远端进程复活后一分钟内自愈」的体验。
+const MIRROR_REPUSH_COOLDOWN_MS: u64 = 60_000;
+
+/// 当前 Unix 时间（毫秒）。时钟回拨/不可用时回 0（= 「从未重推」，只会多推一次）。
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 探活/保活代际的全局单调计数器（进程级，从 1 起）。
+///
+/// WHY 全局而非「每条连接对象自增」：代际的唯一消费者是「旧循环查表发现值不符
+/// 即自退」的守卫。若值源是新对象上的 fetch_add(1)，则每条新连接的代际**恒为 1**；
+/// 而重建（复用重推失败 fall-through / 探活失败后重连）时旧连接仍 Connected、旧循环
+/// 仍在跑，旧循环快照 1 == 新连接值 1 → 守卫失效 → 新旧两个循环并行跑同一条
+/// connectionId：旧循环下一轮探活必失败（旧数据面已被重建链 stop），把**新连接**
+/// 误置 Disconnected 并摘路由；WSL 保活循环同病，还会对已 shutdown 的旧会话
+/// forever ping（僵尸循环 + 远端会话泄漏）。全局 seq 下旧循环快照严格小于新连接值，
+/// 查表一次即自退。
+///
+/// 从 1 起而非 0：0 留给「未分配」语义（结构体默认值），便于日志/调试区分。
+fn next_health_generation() -> u64 {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// 镜像世代比对：判定「远端内存里的镜像」是否仍是桌面端推上去的那一份。
+///
+/// 真值表（拍板口径，逐条对应一个真实故障形态）：
+/// - `local == 0` → **true**。本地从未推送成功（或远端不支持世代端点 → 未知）。
+///   未知必须当「未同步」：反过来把未知当已同步，就永远发现不了远端丢镜像。
+///   代价只是多推一次（推送是幂等替换语义，无害）。
+/// - `local > 0 && remote == local` → **false**。唯一可以安心复用的形态。
+/// - 其余（`remote < local` / `remote > local` / `remote == 0`）→ **true**。
+///   `remote == 0` 是核心场景：远端进程复活（OOM 被杀后重拉、用户手动重启），
+///   镜像随旧进程一起没了，而数据面 HTTP 探活照样通过。
+///   `remote > local` 则是另一台桌面端（或手动同步）推过更新的镜像：本地记录
+///   已失真，重推一次把两边拉齐比「相信一个自己没推过的世代」更安全。
+///
+/// 纯函数（无 IO、无全局态）：这是整条屏障链上唯一能被单测完整锁住的判据，
+/// 而它一旦写反（例如改成 `remote != 0`），后果是静默的：要么每轮心跳重推
+/// 刷爆数据面，要么远端用空配置跑而桌面端显示「已连接」。
+fn mirror_sync_needed(remote_gen: u64, local_gen: u64) -> bool {
+    if local_gen == 0 {
+        return true;
+    }
+    remote_gen != local_gen
+}
+
+/// 连接屏障的失败文案（纯函数，便于单测锁口径）。
+///
+/// WHY 抽出来：fail-closed 把「镜像没同步」升级成「连接失败」，这条消息是用户
+/// 唯一的线索。文案必须同时讲清三件事——**失败的是什么**（远程模型配置同步）、
+/// **为什么连接被废**（屏障：远端带着自己的空配置跑比连不上更难查）、
+/// **能不能重试**（能，且重试安全：远端后端已被回收，不留孤儿进程）。
+/// 少任何一件都会变成支持工单：「SSH 明明连上了为何报失败？」
+///
+/// `synced = true` → None（屏障通过，无错误）。
+fn barrier_error_message(synced: bool, reason: &str) -> Option<String> {
+    if synced {
+        return None;
+    }
+    Some(format!(
+        "远程模型配置同步失败（连接屏障，可重试）：{}",
+        reason
+    ))
+}
+
 /// 注册连接 + 起探活 + 组装返回值（三通道公共尾段）。
 ///
 /// 【2026-10-10 闪退根因】本函数在 async 上下文（三通道 connect_* 尾段）调用，
@@ -1209,24 +1390,36 @@ async fn attach_remote_diagnostics(
 /// 原注释担心的「登记时不可能有其它持锁者」是死锁视角，非 panic 视角，
 /// 一并作废。
 ///
-/// 远端镜像（P4 方案 A）：连接发布后立即推送本机模型配置到远端内存。
-/// 放在登记之后：远端后端已就绪（wait_backend_ready 已过），失败只降级
-/// （远端退回自身配置）不废连接——用户在向导日志能看到措辞。
+/// 远端镜像（P4 方案 A）= **连接屏障**（对标 ZCode provisioning 的 fail-closed）。
+///
+/// 【语义变更 2026-10】旧口径是「推送失败只降级，连接照旧成立」。真机暴露的
+/// 故障形态比连不上更糟：远端后端起来了、隧道通了、前端显示「已连接」，但远端
+/// 进程内存里**没有**桌面端的 providers/models（镜像是内存态、不落盘），于是
+/// 用户看到的是「连上了但一个模型都没有 / 用的不是我配的那套」——没有任何错误，
+/// 无从排查。ZCode 对同类 provisioning 步骤的处理是 fail-closed：环境没备好就
+/// 不让连接成立，把问题暴露在唯一有上下文的地方（连接向导），并允许重试。
+///
+/// 因此本函数返回 `Result`：推送失败 → 回收远端后端 + 摘表摘路由 + 关数据面/控制面
+/// → `Err`。成功路径行为与旧版一致（登记世代 → 起探活 → 起保活 → 返回 outcome）。
+///
+/// 推送必须 **await**（旧版是 `tauri::async_runtime::spawn`）：spawn 出去的失败
+/// 无人接收，函数早已返回 Ok，屏障无从谈起。函数保持 async 签名（契约测试
+/// `remote_never_blocks_async_runtime` 钉死，防 blocking_lock 复活 → panic=abort 闪退）。
 async fn register_connection(
     app: tauri::AppHandle,
     host_key: String,
     conn: Arc<RemoteConnection>,
-) -> ConnectOutcome {
+) -> Result<ConnectOutcome> {
     let connection_id = connection_id_of(&host_key);
     let outcome = existing_outcome(&conn);
     let probe_id = connection_id.clone();
-    // 探活代际：重建（重连/复用失败后新建）时 +1 并快照给新探活循环；
-    // 旧循环下一轮查表发现代际不符即自退，不会拿已死的旧控制面探活
-    // 误判新连接（codereview 2026-10-09 P1）。
-    let probe_gen = conn
-        .health_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        + 1;
+    // 探活代际：从全局单调计数器分配并快照给新探活循环；旧循环下一轮查表发现
+    // 代际不符即自退，不会拿已死的旧控制面探活误判新连接（codereview 2026-10-09 P1）。
+    // 值源必须是全局 seq（见字段注释）：「新对象 +1」会让所有新连接代际恒为 1，
+    // 重建场景下旧循环守卫失效、与新循环并行互踩（2026-10 codereview P1）。
+    let probe_gen = next_health_generation();
+    conn.health_generation
+        .store(probe_gen, std::sync::atomic::Ordering::SeqCst);
     // 镜像终态帧要带 connectionId，而 connection_id 本体在下面会被移进注册表
     let mirror_conn_id = connection_id.clone();
     {
@@ -1272,47 +1465,115 @@ async fn register_connection(
     // 那是用户在向导里刚改过的目标（换端口/换跳板机/换认证方式），重连理应
     // 复刻最近一次意图而不是首次意图——键相同，覆盖只会把同一连接的参数推到最新，
     // 不可能波及其它连接（旧版单值正是做不到这一点）。
-    // 模型镜像推送（async；用 spawn 让 register 保持同步签名——三通道调用点零改动）
-    {
-        let mirror_conn = conn.clone();
-        // 镜像进度必须推到前端（P1-B 修复）。原先 sink 只写 tracing::info：
-        // 「远端退回自身配置」这条降级在 UI 上完全不可见，用户只会觉得
-        // 「远端模型跟我本机配的不一样」却无从排查——典型哑故障。事件名独立于
-        // remote-connect-progress：后者只在向导开着时被 logLine 消费（DOM 不在即
-        // 丢弃），而镜像推送发生在向导已关闭之后，两条通道语义也不同。
-        let mirror_app = app.clone();
-        let mirror_id = mirror_conn_id.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut sink = |line: String| {
-                tracing::info!("{}", line);
-                crate::ipc_bridge::emit(
-                    &mirror_app,
-                    "remote-mirror-state",
-                    &serde_json::json!({
-                        "connectionId": mirror_id,
-                        "line": line,
-                    }),
-                );
-            };
-            let synced = mirror::push_with_progress(
-                mirror_conn.local_port(),
-                &mirror_conn.auth_user,
-                &mirror_conn.auth_pass,
-                &mut sink,
-            )
-            .await;
-            // 终态单独一帧：前端据此决定是否 toast（成功静默、失败必须打扰）
+    // ── 模型镜像推送（连接屏障，await 而非 spawn）──────────────────
+    // 镜像进度必须推到前端（P1-B 修复）。原先 sink 只写 tracing::info：
+    // 「远端退回自身配置」这条降级在 UI 上完全不可见，用户只会觉得
+    // 「远端模型跟我本机配的不一样」却无从排查——典型哑故障。事件名独立于
+    // remote-connect-progress：后者只在向导开着时被 logLine 消费（DOM 不在即
+    // 丢弃），而镜像推送可能发生在向导已关闭之后（重连链），两条通道语义也不同。
+    let mirror_reason = {
+        let mirror_app = &app;
+        let mirror_id = &mirror_conn_id;
+        let mut sink = |line: String| {
+            tracing::info!("{}", line);
             crate::ipc_bridge::emit(
-                &mirror_app,
+                mirror_app,
                 "remote-mirror-state",
                 &serde_json::json!({
                     "connectionId": mirror_id,
-                    "done": true,
-                    "synced": synced,
+                    "line": line,
                 }),
             );
+        };
+        mirror::push_with_reason(
+            conn.local_port(),
+            &conn.auth_user,
+            &conn.auth_pass,
+            &mut sink,
+        )
+        .await
+        .err()
+    };
+    let synced = mirror_reason.is_none();
+    // 终态单独一帧：前端据此决定是否 toast（成功静默、失败必须打扰）
+    crate::ipc_bridge::emit(
+        &app,
+        "remote-mirror-state",
+        &serde_json::json!({
+            "connectionId": mirror_conn_id,
+            "done": true,
+            "synced": synced,
+        }),
+    );
+    if let Some(reason) = mirror_reason {
+        // fail-closed 收尾：这条连接不能留给用户。四件事必须做全，漏任一件都是
+        // 比「连接失败」更难查的半死形态：
+        // ① 摘表——否则 connect 的复用分支会命中一条后端已被 kill 的死连接，
+        //    用户「重试」得到的是复用而非重建（表现为永远连不上且无新日志）；
+        // ② 摘路由——register_remote_connection 已把本连接登记为上游，不摘就会
+        //    把请求灌进即将关闭的隧道（全 502 且无提示，同探活失败的口径）；
+        // ③ 关数据面——隧道不关就白占本地端口；
+        // ④ 回收远端后端——我们刚 spawn 的 java（Xmx1024m 常驻）无人 kill 就是
+        //    孤儿进程，多次重试累积吃内存 → 「越失败越连不上」自增强循环
+        //    （2026-10-10 154 事故的同一形态）。
+        tracing::warn!(
+            "[remote] 连接 {} 镜像屏障未通过 → 判定连接失败并回收远端资源：{}",
+            connection_id,
+            reason
+        );
+        {
+            let mut conns = CONNECTIONS.lock().await;
+            conns.remove(&connection_id);
+        }
+        crate::server::unregister_remote_connection(&connection_id);
+        if let Some(d) = conn.data.as_ref() {
+            d.stop();
+        }
+        // kill 命令自带 2s sleep：放 spawn 异步等（与上方旧连接回收同写法），
+        // 不阻塞错误返回。控制面 shutdown 必须排在 kill **之后**且在同一个任务里
+        // ——并发关会话会把还没发出去的 kill 一起掐掉，远端进程就真成孤儿了。
+        let teardown_control = conn.control.clone();
+        let teardown_pid = conn.remote_pid;
+        tauri::async_runtime::spawn(async move {
+            if teardown_pid > 0 {
+                let _ = teardown_control
+                    .exec(&deploy::backend_stop_command(teardown_pid))
+                    .await;
+                tracing::info!(
+                    "[remote] 镜像屏障失败，已回收远端后端 PID={}",
+                    teardown_pid
+                );
+            }
+            teardown_control.shutdown().await;
         });
+        return Err(anyhow!(
+            "{}",
+            barrier_error_message(synced, &reason).unwrap_or(reason)
+        ));
     }
+    // 屏障通过：记录远端回报的镜像世代，作为后续「复用校验 / 心跳自愈」的比对基准。
+    // 取不到（旧远端无该端点）记 0 = 未知，按 mirror_sync_needed 的口径下次仍会重推
+    // （幂等，无害）；反之记一个假世代会让「远端丢镜像」永远查不出来。
+    let mirror_gen = mirror::fetch_generation(
+        conn.local_port(),
+        &conn.auth_user,
+        &conn.auth_pass,
+    )
+    .await
+    .unwrap_or(0);
+    if mirror_gen == 0 {
+        tracing::warn!(
+            "[remote] 连接 {} 镜像已推送但取不到远端世代号（远端可能是不支持 \
+             /web/settings/mirror-state 的旧版本）；后续按「世代未知」处理，\
+             复用/心跳会重推镜像（幂等）",
+            connection_id
+        );
+    }
+    conn.mirror_generation
+        .store(mirror_gen, std::sync::atomic::Ordering::SeqCst);
+    // 首推也记时间戳：它是心跳冷却的起点，否则旧远端上第一轮心跳就会再推一次
+    conn.last_repush_ms
+        .store(now_epoch_ms(), std::sync::atomic::Ordering::SeqCst);
     // 断连探测：探活循环，SSH 死/远端进程死 → 置 Disconnected 并推事件
     spawn_health_probe(app, probe_id.clone(), probe_gen);
     // WSL 通道：连接存续期间常驻保活（idle-stop 根因修复，见 connect_wsl 注释）。
@@ -1335,7 +1596,7 @@ async fn register_connection(
             }
         });
     }
-    outcome
+    Ok(outcome)
 }
 
 /// 复用已有连接时组装返回值（不重启后端）。
@@ -1710,6 +1971,99 @@ fn spawn_health_probe(app: tauri::AppHandle, connection_id: String, generation: 
                 );
                 return;
             }
+
+            // ── 镜像自愈（屏障语义第③条）──────────────────────
+            // 探活只证明「远端进程在听」，不证明「镜像还在它内存里」。远端 java
+            // 被 OOM killer 收走后由 systemd/看门狗重拉、或用户在服务器上手动重启，
+            // 都会让内存镜像归零（镜像不落盘），而本循环的 HTTP 探活照样通过。
+            // 旧实现对此完全无感：用户看到「已连接」，远端却在用空配置跑。
+            // 此处每轮探活成功后比对世代，不一致则重推（带冷却，见下）。
+            let local_gen = conn
+                .mirror_generation
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let remote_gen = mirror::fetch_generation(
+                conn.local_port(),
+                &conn.auth_user,
+                &conn.auth_pass,
+            )
+            .await
+            .unwrap_or(0);
+            if mirror_sync_needed(remote_gen, local_gen) {
+                // 冷却闸：远端不支持世代端点时 remote_gen 恒 0 → 每轮都判定需同步，
+                // 没冷却就是 10s 一次全量重推（MB 级载荷）刷爆数据面。
+                let last = conn
+                    .last_repush_ms
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let now = now_epoch_ms();
+                if now.saturating_sub(last) >= MIRROR_REPUSH_COOLDOWN_MS {
+                    // 代际守卫（与上方探活同构）：重推是秒级 await，期间连接可能已被
+                    // 重连重建。不查表就用旧凭据/旧端口重推，会把镜像推进一个已死的
+                    // 数据面（白推），更糟的是推进同 id 的**新**连接却用旧凭据（401）。
+                    let still_current = {
+                        let conns = CONNECTIONS.lock().await;
+                        conns.get(&connection_id).map(|c| {
+                            Arc::ptr_eq(c, &conn)
+                                && c.health_generation
+                                    .load(std::sync::atomic::Ordering::SeqCst)
+                                    == generation
+                        })
+                    };
+                    if still_current.unwrap_or(false) {
+                        tracing::info!(
+                            "[remote] 连接 {} 镜像世代回退（远端 {} ≠ 本地 {}），自愈重推…",
+                            connection_id,
+                            remote_gen,
+                            local_gen
+                        );
+                        // 先占冷却位再推：推送本身可能耗时数十秒，不先占位则下一轮
+                        // 心跳（10s 后）会在本次未完成时又起一次重推（叠加推送）。
+                        conn.last_repush_ms
+                            .store(now, std::sync::atomic::Ordering::SeqCst);
+                        let heal_app = app.clone();
+                        let heal_id = connection_id.clone();
+                        let mut sink = |line: String| {
+                            tracing::info!("{}", line);
+                            crate::ipc_bridge::emit(
+                                &heal_app,
+                                "remote-mirror-state",
+                                &serde_json::json!({
+                                    "connectionId": heal_id,
+                                    "line": line,
+                                }),
+                            );
+                        };
+                        let healed = mirror::push_with_progress(
+                            conn.local_port(),
+                            &conn.auth_user,
+                            &conn.auth_pass,
+                            &mut sink,
+                        )
+                        .await;
+                        if healed {
+                            let gen = mirror::fetch_generation(
+                                conn.local_port(),
+                                &conn.auth_user,
+                                &conn.auth_pass,
+                            )
+                            .await
+                            .unwrap_or(0);
+                            conn.mirror_generation
+                                .store(gen, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        // 终态帧（与首推同形）：前端据此决定要不要打扰用户。
+                        // 失败不在此处重试：冷却到期后下一轮心跳自然再试（自愈语义）。
+                        crate::ipc_bridge::emit(
+                            &app,
+                            "remote-mirror-state",
+                            &serde_json::json!({
+                                "connectionId": connection_id,
+                                "done": true,
+                                "synced": healed,
+                            }),
+                        );
+                    }
+                }
+            }
         }
     });
 }
@@ -1917,6 +2271,20 @@ pub async fn remote_mirror_sync(app: tauri::AppHandle, connection_id: String) ->
         };
         mirror::push_with_progress(conn.local_port(), &conn.auth_user, &conn.auth_pass, &mut push).await
     };
+    // 手动同步成功后必须刷新世代基准（屏障语义第②/③条的比对基准）。
+    // 不刷新的后果：远端世代已因本次推送而 +1，而本地还记着旧值 →
+    // 下一次复用校验与每一轮心跳都判定「不一致」→ 无意义重推（冷却到期就推，
+    // 永远推不完）。取不到世代（旧远端）则记 0 = 未知，同样会重推，但那是
+    // 「宁可多推不可漏推」的既定取舍（推送幂等）。
+    if ok {
+        let gen = mirror::fetch_generation(conn.local_port(), &conn.auth_user, &conn.auth_pass)
+            .await
+            .unwrap_or(0);
+        conn.mirror_generation
+            .store(gen, std::sync::atomic::Ordering::SeqCst);
+        conn.last_repush_ms
+            .store(now_epoch_ms(), std::sync::atomic::Ordering::SeqCst);
+    }
     Ok(serde_json::json!({
         "connectionId": connection_id,
         "synced": ok,
@@ -2463,6 +2831,8 @@ mod tests {
                     refs: std::sync::atomic::AtomicUsize::new(2),
                     state: std::sync::atomic::AtomicU8::new(0),
                     health_generation: std::sync::atomic::AtomicU64::new(0),
+                    mirror_generation: std::sync::atomic::AtomicU64::new(0),
+                    last_repush_ms: std::sync::atomic::AtomicU64::new(0),
                 }),
             );
             conns.insert(
@@ -2479,6 +2849,8 @@ mod tests {
                     refs: std::sync::atomic::AtomicUsize::new(1),
                     state: std::sync::atomic::AtomicU8::new(0),
                     health_generation: std::sync::atomic::AtomicU64::new(0),
+                    mirror_generation: std::sync::atomic::AtomicU64::new(0),
+                    last_repush_ms: std::sync::atomic::AtomicU64::new(0),
                 }),
             );
         }
@@ -2883,6 +3255,318 @@ mod tests {
         );
         assert!(logs.iter().any(|l| l.contains("跳过上传")), "{:?}", logs);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ─── 探活代际全局单调（2026-10 codereview P1 修复锁）───
+
+    /// 【根因锁】代际值源必须是全局单调 seq，不得退回「新对象 fetch_add(1)」。
+    ///
+    /// 旧形态下每条新连接代际恒为 1：重建（复用重推失败 fall-through / 探活失败后
+    /// 重连）时旧连接仍 Connected、旧循环仍在跑，旧循环快照 1 == 新连接值 1 →
+    /// 自退守卫失效 → 新旧循环并行跑同一条 connectionId，旧循环 10s 后探活必失败
+    /// （旧数据面已被重建链 stop）并把**新连接**误置 Disconnected 摘路由；WSL
+    /// 保活循环同病且对已 shutdown 旧会话 forever ping。本测试锁「严格递增 +
+    /// 非零」两条性质：任一退回（对象自增 / 常量 / 随机）都会被杀。
+    #[test]
+    fn health_generation_is_globally_monotonic_and_nonzero() {
+        let a = next_health_generation();
+        let b = next_health_generation();
+        let c = next_health_generation();
+        assert!(a >= 1, "代际从 1 起（0 留给未分配语义）：{}", a);
+        assert!(b > a, "连续分配必须严格递增（旧循环快照必小于新连接值）：{} !> {}", b, a);
+        assert!(c > b, "连续分配必须严格递增：{} !> {}", c, b);
+    }
+
+    /// 【源码契约】register_connection 的代际必须来自全局 seq 并 store 到连接上，
+    /// 不得在连接对象上 fetch_add（那正是恒为 1 碰撞的根因形态）。
+    #[test]
+    fn register_connection_takes_generation_from_global_seq() {
+        let src = include_str!("mod.rs");
+        let seg = src
+            .split("async fn register_connection(")
+            .nth(1)
+            .expect("register_connection 必须存在")
+            .split("fn existing_outcome(")
+            .next()
+            .expect("register_connection 函数体切片失败");
+        assert!(
+            seg.contains("next_health_generation()"),
+            "代际必须取自全局单调 seq（对象自增会让所有新连接恒为 1，重建时旧循环守卫失效）"
+        );
+        assert!(
+            seg.contains("health_generation") && seg.contains(".store(probe_gen"),
+            "分配的全局代际必须写回连接对象（探活/保活循环查表比对的正是它）"
+        );
+        assert!(
+            !seg.contains("health_generation\n            .fetch_add(1") && !seg.contains(".health_generation\n        .fetch_add(1"),
+            "不得保留「新对象 fetch_add(1)」旧形态（恒为 1 碰撞根因）"
+        );
+    }
+
+    // ─── 模型镜像屏障（对标 ZCode provisioning fail-closed）───
+
+    /// 【真值表全锁】镜像世代比对是整条屏障链上唯一能被单测完整覆盖的判据。
+    ///
+    /// 它写反的两个方向都是**静默**故障：
+    /// - 该同步却判不需 → 远端进程复活后镜像已归零，用户拿到「已连接但模型
+    ///   列表是空的」工作区，零错误零提示（本次改造要消灭的原故障）；
+    /// - 不需同步却判需 → 每轮心跳（10s）全量重推 MB 级载荷，刷爆数据面。
+    /// 行为级验证需真远端 + 真凭据，故逐例钉死纯函数。
+    #[test]
+    fn mirror_sync_needed_truth_table() {
+        // ① local=0 && remote=0：从未同步过（首推失败/远端无世代端点）→ 必须同步。
+        // 把「两边都是 0」读成「一致」是最诱人的错：字面上确实相等，但 0 的语义是
+        // 「未知/从未」而不是「第 0 代已同步」。
+        assert!(
+            mirror_sync_needed(0, 0),
+            "local=0 是「从未同步/世代未知」，必须重推（不得读成「两边相等」）"
+        );
+        // ② local=0 && remote>0：本地无记录但远端有镜像（另一台桌面端推的，或
+        // 本地记录丢失）→ 仍须同步：本地无法确认远端那份是不是自己的配置。
+        assert!(mirror_sync_needed(5, 0), "local=0 恒需同步（remote 为何值都不改变结论）");
+        // ③ 相等非零：唯一可以安心复用的形态。
+        assert!(
+            !mirror_sync_needed(7, 7),
+            "世代相等且非零 = 远端内存里就是本地推上去的那份，不得重推"
+        );
+        // ④ remote < local：远端回退到更早的世代（理论上不应出现，但一旦出现
+        // 就说明远端状态已失真）→ 重推拉齐。
+        assert!(mirror_sync_needed(3, 7), "remote < local 必须重推");
+        // ⑤ remote > local：远端被其它客户端推过更新的镜像 → 本地记录已失真，
+        // 重推一次把两边拉齐（推送是幂等替换语义，多推一次无害）。
+        assert!(mirror_sync_needed(9, 7), "remote > local 必须重推（本地记录已失真）");
+        // ⑥ local>0 && remote=0：核心场景——远端进程复活（OOM 被杀后重拉/手动
+        // 重启），镜像随旧进程一起没了，而数据面 HTTP 探活照样通过。
+        assert!(
+            mirror_sync_needed(0, 7),
+            "远端世代归零 = 进程复活丢镜像，必须自愈重推（本改造的核心场景）"
+        );
+    }
+
+    /// 【fail-closed 文案锁】屏障失败消息必须同时讲清三件事。
+    ///
+    /// 为何锁文案：fail-closed 把「镜像没同步」升级成「连接失败」，而 SSH/隧道/后端
+    /// 启动全部成功了——用户看到的第一个反应必然是「明明连上了为何报失败？」。
+    /// 消息里缺「屏障」二字就丢了「为何废掉连接」这个因果，缺「可重试」就丢了
+    /// 出口（用户会去重装而不是重连）。同时锁「成功不得造错误」：否则屏障
+    /// 会在正常路径上误报。
+    #[test]
+    fn barrier_error_message_explains_why_and_allows_retry() {
+        // 成功：无错误（屏障通过）
+        assert_eq!(barrier_error_message(true, ""), None);
+        assert_eq!(
+            barrier_error_message(true, "忽略的原因"),
+            None,
+            "synced=true 时不得携带任何错误（否则正常连接被误判失败）"
+        );
+        // 失败：文案三要素 + 原因透传
+        let msg = barrier_error_message(false, "远端未接受镜像（code=400）")
+            .expect("synced=false 必须产出错误消息");
+        assert!(msg.contains("屏障"), "必须讲清「为何连接被废」: {}", msg);
+        assert!(msg.contains("可重试"), "必须给出出口（重试安全：远端后端已回收）: {}", msg);
+        assert!(
+            msg.contains("远端未接受镜像（code=400）"),
+            "具体原因必须透传（用户靠它区分「本机没配模型」与「远端拒绝」）: {}",
+            msg
+        );
+        // 空原因也不得 panic / 不得产出空消息
+        let empty = barrier_error_message(false, "").unwrap();
+        assert!(!empty.trim().is_empty(), "原因缺失时仍须有可读文案: {}", empty);
+    }
+
+    /// 【源码契约】屏障必须是 fail-closed：推送 await、失败走 Err、三调用点直传。
+    ///
+    /// 为何锁源码而不锁行为：完整验证需要真 SSH/WSL 会话 + 真远端（单测里造不出
+    /// AppHandle 与控制面）；而回退到 spawn 的后果是静默的——函数早已返回 Ok，
+    /// 推送失败无人接收，用户拿到一个模型配置缺失的「已连接」工作区。
+    /// 锚点拼接构造：include_str! 会把本测试自己的字面量计入（mod.rs 里踩过两次）。
+    #[test]
+    fn mirror_barrier_is_fail_closed_not_spawned() {
+        let src = include_str!("mod.rs");
+        // ① register_connection 必须返回 Result（屏障不成立就无法 fail-closed）
+        let sig = [") -> Result<Connect", "Outcome> {"].concat();
+        let reg_seg = src
+            .split(["async fn register", "_connection("].concat().as_str())
+            .nth(1)
+            .expect("register_connection 必须存在");
+        // 切到下一个顶层项为止（existing_outcome 紧接在 register_connection 之后）：
+        // 用固定字符数窗口会在函数变长后静默漏检尾部断言（恒假绿）。
+        let reg_body = reg_seg.split("fn existing_outcome").next().unwrap_or(reg_seg);
+        assert!(
+            reg_body.contains(&sig),
+            "register_connection 必须返回 Result<ConnectOutcome>（屏障语义的前提）"
+        );
+        // ② 推送必须 await 在本函数内，不得 spawn 出去（spawn = 失败无人接收）
+        let push_call = ["mirror::push_with", "_reason("].concat();
+        assert!(
+            reg_body.contains(&push_call),
+            "屏障推送必须走带原因回报的变体（只回 bool 就写不出可排查的失败消息）"
+        );
+        let spawn_push = ["spawn(async move {\n            let synced = mirror::", "push"].concat();
+        assert!(
+            !src.contains(&spawn_push),
+            "镜像推送不得回退到 spawn（异步失败无人接收 = 屏障形同虚设）"
+        );
+        // ③ 失败必须回收远端后端 + 摘表 + 摘路由（漏任一件都是更难查的半死形态）
+        let stop = ["deploy::backend_stop", "_command(teardown_pid)"].concat();
+        assert!(reg_body.contains(&stop), "屏障失败必须 kill 远端后端（否则重试累积孤儿 java）");
+        let unreg = ["unregister_remote", "_connection(&connection_id)"].concat();
+        assert!(reg_body.contains(&unreg), "屏障失败必须摘路由（否则请求灌进已死隧道 → 全 502）");
+        assert!(
+            reg_body.contains("conns.remove(&connection_id)"),
+            "屏障失败必须摘表（否则重试时复用分支命中一条后端已 kill 的死连接）"
+        );
+        // ④ 三通道调用点必须直接传播（包一层 Ok 就把 Err 吾掉了）
+        let ok_wrap = ["Ok(register", "_connection("].concat();
+        assert!(
+            !src.contains(&ok_wrap),
+            "三通道调用点不得再用 Ok(...) 包装（屏障 Err 会被吾掉，fail-closed 失效）"
+        );
+        assert_eq!(
+            src.matches(["register_connection(app, host_key, conn)", ".await"].concat().as_str()).count(),
+            3,
+            "三通道（SSH/WSL/预装）均必须直接传播 register_connection 的 Result"
+        );
+    }
+
+    /// 【源码契约】心跳自愈重推必须带代际守卫与冷却闸。
+    ///
+    /// 两个守卫各自防一类真实事故：
+    /// - 代际守卫：重推是秒级 await，期间连接可能已被重连重建。不查表就用旧凭据/
+    ///   旧端口重推，轻则白推（数据面已死），重则拿旧凭据打同 id 的新连接（401）。
+    /// - 冷却闸：远端不支持世代端点时 fetch 恒 None → 每轮（10s）都判定需同步，
+    ///   没冷却就是每 10s 一次 MB 级全量重推，把数据面刷爆。
+    #[test]
+    fn health_probe_mirror_self_heal_is_guarded_and_throttled() {
+        let src = include_str!("mod.rs");
+        let probe_seg = src
+            .split(["fn spawn_health", "_probe("].concat().as_str())
+            .nth(1)
+            .and_then(|s| s.split(["// \u{2500}\u{2500}\u{2500} Tauri ", "Commands"].concat().as_str()).next())
+            .expect("探活循环必须存在");
+        // 自愈段必须存在且走世代判定（不得自己另写一套比对）
+        assert!(
+            probe_seg.contains(["mirror_sync", "_needed("].concat().as_str()),
+            "心跳自愈必须复用 mirror_sync_needed 单一判据（另写一套就会与复用分支漂移）"
+        );
+        assert!(
+            probe_seg.contains(["mirror::fetch", "_generation("].concat().as_str()),
+            "心跳必须每轮拉远端世代（不拉就发现不了远端进程复活）"
+        );
+        // 代际守卫：重推前必须查表确认连接仍在且代际未变
+        assert!(
+            probe_seg.contains("Arc::ptr_eq(c, &conn)"),
+            "重推前必须确认表里还是同一条连接（不得用旧连接凭据重推新连接）"
+        );
+        assert!(
+            probe_seg.contains(["health_generation"].concat().as_str())
+                && probe_seg.contains("== generation"),
+            "重推前必须校验健康代际未变（重连重建后旧循环自退）"
+        );
+        // 冷却闸：必须读 last_repush_ms 并与冷却常量比较
+        assert!(
+            probe_seg.contains(["last_repush", "_ms"].concat().as_str()),
+            "自愈重推必须受冷却约束（旧远端上世代恒未知 → 否则 10s 一次全量重推）"
+        );
+        assert!(
+            probe_seg.contains(["MIRROR_REPUSH", "_COOLDOWN_MS"].concat().as_str()),
+            "冷却阈值必须用命名常量（魔术数字会被随手改小，刷爆数据面）"
+        );
+        assert_eq!(
+            MIRROR_REPUSH_COOLDOWN_MS,
+            60_000,
+            "冷却拍板值 = 60s（远端进程复活后一分钟内自愈，且最坏每分钟一次重推）"
+        );
+        // 终态帧必须发（前端据此决定要不要打扰用户；只写日志 = 哑故障）
+        let done_frame = ["\"done\": true,", "\n"].concat();
+        assert!(
+            probe_seg.contains(&done_frame) || probe_seg.contains("\"done\": true,"),
+            "自愈重推必须发终态帧（成功静默、失败必须打扰）"
+        );
+    }
+
+    /// 【源码契约】复用分支与手动同步都必须维护世代基准。
+    ///
+    /// 不刷新的后果是**永久重推**：远端世代已因本次推送 +1，而本地还记着旧值 →
+    /// 下一次复用校验与每一轮心跳都判定「不一致」，冷却到期就推，永远推不完。
+    #[test]
+    fn mirror_generation_is_recorded_on_every_successful_push() {
+        let src = include_str!("mod.rs");
+        // ① 复用分支：校验 + 重推 + 刷新世代（且重推失败不得加 refs）
+        let reuse_seg = src
+            .split(["// \u{2500}\u{2500} host ", "\u{590d}\u{7528}\u{68c0}\u{67e5}"].concat().as_str())
+            .nth(1)
+            .and_then(|s| s.split("match kind {").next())
+            .expect("host 复用段必须存在");
+        assert!(
+            reuse_seg.contains(["mirror_sync", "_needed("].concat().as_str()),
+            "复用前必须校验镜像世代（连接活着 ≠ 镜像还在）"
+        );
+        assert!(
+            reuse_seg.contains(["mirror::push_with", "_progress("].concat().as_str()),
+            "世代不一致时必须就地重推（比重建便宜：不重启远端后端，在跑的任务不受影响）"
+        );
+        assert!(
+            reuse_seg.contains(["mirror_generation"].concat().as_str()),
+            "重推成功后必须刷新世代基准（否则永久重推）"
+        );
+        // 重推失败必须落到重建链：复用段内不得在失败分支 return Ok
+        assert!(
+            reuse_seg.contains("if repushed {"),
+            "重推结果必须分支处理（成功才复用）"
+        );
+        assert_eq!(
+            reuse_seg.matches("return Ok(existing_outcome").count(),
+            2,
+            "复用段只应有两个 return（世代一致 / 重推成功）；重推失败必须 fall-through 到重建链"
+        );
+        // ② 手动同步命令：成功后同样刷新世代
+        let sync_seg = src
+            .split(["pub async fn remote_mirror", "_sync("].concat().as_str())
+            .nth(1)
+            .and_then(|s| s.split(["/// \u{5217}\u{51fa}\u{672c}\u{673a} WSL "].concat().as_str()).next())
+            .expect("remote_mirror_sync 必须存在");
+        assert!(
+            sync_seg.contains("if ok {") && sync_seg.contains(["mirror_generation"].concat().as_str()),
+            "手动同步成功后必须刷新世代（否则心跳会反复重推同一份镜像）"
+        );
+        // ③ 首推（register_connection）也必须记世代，否则复用校验永远拿到 local=0
+        let reg_seg = src
+            .split(["async fn register", "_connection("].concat().as_str())
+            .nth(1)
+            .expect("register_connection 必须存在");
+        let reg_body = reg_seg.split("fn existing_outcome").next().unwrap_or(reg_seg);
+        assert!(
+            reg_body.contains(["mirror::fetch", "_generation("].concat().as_str())
+                && reg_body.contains(["mirror_generation"].concat().as_str()),
+            "首推成功后必须拉取并记录远端世代（后续所有比对的基准）"
+        );
+    }
+
+    /// 世代字段必须存在于连接结构体（防「写了比对逻辑但字段从未被赋值」的漂移）。
+    #[test]
+    fn remote_connection_carries_mirror_generation_fields() {
+        let src = include_str!("mod.rs");
+        let struct_seg = src
+            .split(["pub struct Remote", "Connection {"].concat().as_str())
+            .nth(1)
+            .and_then(|s| s.split("}").next())
+            .expect("RemoteConnection 结构体必须存在");
+        assert!(
+            struct_seg.contains(["pub mirror_generation: std::sync::atomic::", "AtomicU64"].concat().as_str()),
+            "镜像世代字段必须存在（屏障比对基准）"
+        );
+        assert!(
+            struct_seg.contains(["pub last_repush_ms: std::sync::atomic::", "AtomicU64"].concat().as_str()),
+            "重推冷却时间戳字段必须存在（心跳自愈的节流闸）"
+        );
+        // 构造点全覆盖：漏一处就是编译错（结构体字面量必须穷举字段），但测试构造点
+        // 同样要跟上，否则 cargo test 直接编不过——这里只锁「生产构造点数量」防回退。
+        assert_eq!(
+            src.matches(["mirror_generation: std::sync::atomic::AtomicU64::", "new(0)"].concat().as_str()).count(),
+            5,
+            "三通道构造点 + 两个测试构造点都必须初始化世代字段"
+        );
     }
 
     // ─── 真机端到端验收（2026-10-09 用户拍板：全流程自己走一遍） ───

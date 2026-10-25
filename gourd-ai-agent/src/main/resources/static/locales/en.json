@@ -226,6 +226,7 @@
                     "model_group_other":  "Other",
                     "model_search_placeholder":  "Search model or provider...",
                     "model_search_empty":  "No matching models",
+                    "models_remote_not_synced":  "Remote model config not synced; retrying. If it stays empty, check the remote connection.",
                     "model_group_toggle":  "Collapse / expand this provider",
                     "thinking":  {
                                      "auto":  {
@@ -468,6 +469,8 @@
                                     "date_ym":  "{0}-{1}",
                                     "range_hint":  "Period {0} ~ {1} · {2} days",
                                     "tooltip":  "{0}: {1} Tokens · {2} rounds",
+                                    "tip_tasks":  "Tasks",
+                                    "tip_tokens":  "Tokens used",
                                     "loading":  "Loading…",
                                     "load_failed":  "Failed to load",
                                     "cache_title":  "Cache Hit Rate Ranking",

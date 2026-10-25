@@ -28,16 +28,35 @@
     var currentDays = RANGE_30;
     var loadSerial = 0;
     var pendingRequest = null;
+    // 最近一次成功渲染的数据：切语言时用它原位重绘，不重拉接口
+    var lastData = null;
 
     function t(key, args) { return window.GourdI18n ? GourdI18n.t(key, args) : key; }
 
     function $c() { return $('#' + CONTAINER); }
 
-    /* ── 数值格式化（万 / 亿） ─────────────────────────────── */
+    /* ── 数值格式化（按 locale 紧凑记法） ───────────────────
+     * 旧实现把「万 / 亿」写死在代码里：切到 English 后概览卡仍是「1.2万 tokens」。
+     * 改用 Intl.NumberFormat(notation:'compact')，单位由 locale 数据决定
+     * （en → 1.2K/12.3K，zh → 1.2万，ja → 1.2万，ru → 1,2 тыс.）。
+     * 与 app-heatmap.js 的 fmtTokens 同一口径，两处不得再出现硬编码单位。 */
+    var fmtLocale = '';
+    var fmtFormatter = null;
     function fmtNum(n) {
         n = Number(n) || 0;
-        if (n >= 1e8) return trimZero(n / 1e8) + '亿';
-        if (n >= 1e4) return trimZero(n / 1e4) + '万';
+        var loc = '';
+        try { if (window.GourdI18n && typeof window.GourdI18n.getLocale === 'function') loc = window.GourdI18n.getLocale() || ''; } catch (e) { loc = ''; }
+        if (loc !== fmtLocale || !fmtFormatter) {
+            fmtLocale = loc;
+            try {
+                fmtFormatter = (typeof Intl !== 'undefined' && Intl.NumberFormat)
+                    ? new Intl.NumberFormat(loc || undefined, { notation: 'compact', maximumFractionDigits: 1 })
+                    : null;
+            } catch (e2) { fmtFormatter = null; }
+        }
+        if (fmtFormatter) {
+            try { return fmtFormatter.format(n); } catch (e3) { /* 落到纯数字 */ }
+        }
         return String(Math.round(n));
     }
     function trimZero(v) {
@@ -147,6 +166,9 @@
 
     /* ── 数据区渲染（所有图表，可反复重建；不含页头和时间范围） ── */
     function renderBody(data) {
+        // 缓存最后一次成功数据：切语言时要原位重绘（不重拉接口），
+        // 否则用户切完语言看到的还是旧语言的卡片标题与 aria-label。
+        lastData = data;
         var models = data.models || [];
         var colorMap = buildColorMap(models);
 
@@ -176,6 +198,12 @@
         html += renderCacheCard(data.cacheRanking || [], colorMap);
 
         $body().removeClass('is-loading').html(html);
+        // 热力图悬停浮层：内容已插进 DOM 后才能挂委派监听。
+        // 挂在 body 根（不是全局 document）——切走页面后容器仍在 DOM 里（只是隐藏），
+        // 全局监听会让隐藏容器的格子继续弹浮层。
+        if (window.GourdHeatmap && typeof window.GourdHeatmap.mountTip === 'function') {
+            window.GourdHeatmap.mountTip($body()[0]);
+        }
     }
 
     /* ── 概览卡片 ─────────────────────────────────────────── */
@@ -416,10 +444,37 @@
     function closeUsage() {
         $('#usageView').removeClass('active');
         $('#usageNavBtn').removeClass('active');
+        // 视图一隐藏，指针下的格子就没了，mouseleave 永远不会触发 → 浮层会带着
+        // 旧数据停在屏幕上（实测：切到聊天页后它依旧悬在那儿）。这里显式收起。
+        if (window.GourdHeatmap && typeof window.GourdHeatmap.hideTip === 'function') window.GourdHeatmap.hideTip();
     }
     window.openUsage = openUsage;
     window.closeUsage = closeUsage;
     window.isUsageOpen = function () { return $('#usageView').hasClass('active'); };
 
     window._settingsUsage = { load: load };
+
+    /* 切语言后重绘（补上这个主题之前缺失的一环）。
+     * 旧实现根本没监听 i18n:localeChanged：用户切语言后，统计页的卡片标题、
+     * 单位、以及新加的浮层文案全部停在旧语言，必须“先点别的页再点回来”才看到。
+     * 这里不重拉接口（lastData 已有），只原位重绘：
+     *  1) 页头/时间范围条（ensureShell 负责）；
+     *  2) 数据区；
+     *  3) 已渲染格子的 aria-label（读屏器读属性，不看浮层）；
+     *  4) 正在悬停的浮层文本。
+     * 只在统计页可见时重绘：隐藏时重绘没意义，且下次 openUsage 本来就会 load()。 */
+    document.addEventListener('i18n:localeChanged', function () {
+        if (!window.isUsageOpen || !window.isUsageOpen()) return;
+        if (window.GourdHeatmap && typeof window.GourdHeatmap.hideTip === 'function') window.GourdHeatmap.hideTip();
+        // 页头也被 t() 渲染过：外壳只在首次建，必须显式重建才能换语言
+        $c().empty();
+        ensureShell();
+        updateRangeBar();
+        if (lastData) {
+            renderBody(lastData);
+        } else {
+            renderBodyLoading();
+            load();
+        }
+    });
 })();

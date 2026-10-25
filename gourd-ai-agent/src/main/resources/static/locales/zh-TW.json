@@ -226,6 +226,7 @@
                     "model_group_other":  "其他",
                     "model_search_placeholder":  "搜尋模型或服務商...",
                     "model_search_empty":  "找不到符合的模型",
+                    "models_remote_not_synced":  "遠端模型配置未同步，正在重試；若持續為空請檢查遠端連線",
                     "model_group_toggle":  "折疊/展開該服務商",
                     "thinking":  {
                                      "auto":  {
@@ -442,7 +443,7 @@
                                     "range_30":  "最近 30 天",
                                     "range_all":  "累計至今",
                                     "stat_tokens":  "tokens 用量",
-                                    "stat_sessions":  "會話數量",
+                                    "stat_sessions":  "工作階段數量",
                                     "stat_messages":  "訊息數量",
                                     "stat_active_days":  "活躍天數",
                                     "stat_streak":  "目前連續天數",
@@ -460,6 +461,8 @@
                                     "date_ym":  "{0}年{2}月",
                                     "range_hint":  "統計區間 {0} ~ {1} · 共 {2} 天",
                                     "tooltip":  "{0}：{1} Tokens · {2} 輪",
+                                    "tip_tasks":  "任務數",
+                                    "tip_tokens":  "消耗 Tokens",
                                     "loading":  "載入中…",
                                     "load_failed":  "載入失敗",
                                     "cache_title":  "快取命中率排行",

@@ -428,10 +428,17 @@ test('P1-B：模型镜像结果必须推前端事件（不能只写日志）', (
     '终态必须单独一帧（前端据此决定要不要打扰用户）');
   const bridge = readRepo(path.join('gourd-ai-tauri', 'src-tauri', 'src', 'ipc_bridge.rs'));
   assert.match(bridge, /onRemoteMirror:\s*function\s*\(cb\)\s*\{\s*on\('remote-mirror-state', cb\);/, '桥接层暴露订阅');
-  // 前端消费：失败要打扰、成功静默、只认当前连接
+  // 前端消费：失败要打扰、成功不弹 toast（但需广播让模型列表重载）、只认当前连接
   assert.match(remote, /onRemoteMirror/, '前端必须订阅镜像事件');
   const handler = sliceBetween(remote, 'onRemoteMirror(function (payload)', '}\n    }');
-  assert.match(handler, /payload\.synced\) return/, '成功静默（每次连接弹“同步成功”是噪声）');
+  /* 成功分支契约（2026-10-20 更新）：旧形态是 `if (payload.synced) return`（纯静默），
+     但远端模型表可能因镜像丢失而为空——同步成功后必须广播 gourd:mirror-synced 让
+     app-history 重载模型列表；成功仍不弹 toast（每次连接弹“同步成功”是噪声）。 */
+  assert.match(handler, /if \(payload\.synced\) \{/, '成功分支必须存在（不再纯静默 return）');
+  assert.match(handler, /window\.dispatchEvent\(new CustomEvent\('gourd:mirror-synced'/,
+    '成功必须广播 gourd:mirror-synced（模型列表据此重载，否则远端空表永不自愈）');
+  assert.match(handler, /detail: \{ connectionId: payload\.connectionId \}/,
+    '广播载荷必须带 connectionId（多连接下消费方据此判别归属）');
   assert.match(handler, /connectionsById\[payload\.connectionId\]/,
     '守卫必须是注册表存在性（方案B：任一在线连接镜像失败都要报；不在注册表的旧尾帧不报）');
   assert.match(handler, /remote\.mirror_auto_failed/, '失败必须有可读懂的提示键');

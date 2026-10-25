@@ -3192,6 +3192,7 @@ $chatHistoryPanel.on('click', function(e) {
 var modelList = [];        // [{name, desc, standard, thinkingLevels}, ...] (shared, only loaded once)
 var modelsLoaded = false;  // whether model list holds usable data（会话级模型刷新的门闸语义）
 var modelsListStale = false; // reload 失败但保留了旧列表：下次成功响应时强制重解析列表
+var healedByScope = Object.create(null); // scope → true：该 scope 已触发过镜像重推自愈（防环，二次空表不再重推）
 var sessionModelMap = {};  // { sessionId: selectedModelName }
 var sessionThinkingMap = {}; // { sessionId: thinkingDepth }  统一 5 档编码 / auto
 
@@ -3441,10 +3442,35 @@ function inheritSelectionToSession(newSessionId) {
 }
 window.inheritSelectionToSession = inheritSelectionToSession;
 
+/* 模型列表请求的归属解析（与 app-streaming 的 strict 读口同口径）：code 模式取
+   当前项目根的真实归属（__currentProjectScope 查不到保守回本地），其余回 'local'。
+   不显式声明就会落到代理 route_for 的「激活 scope 兜底」——选中远端工作区时模型
+   请求被打到远端后端，远端镜像丢失即返回空表。 */
+function modelsRequestScope() {
+    var s = null;
+    if (typeof window.__currentProjectScope === 'function') {
+        try { s = window.__currentProjectScope(); } catch (e) { s = null; }
+    }
+    return (s && s !== 'local') ? s : 'local';
+}
+
+/* 归属 → 路由 query 段（与 projScopeQuery / app-code.scopeQueryFor 同口径）。
+   返回不含 '?' 的 '__scope=...' 片段，由调用方用数组 join('&') 拼接，
+   保证 sessionId 与 __scope 各出现一次（本仓踩过重复 __scope 参数坑：
+   route_for 按 query 顺序扫到第一个命中即返回，重复参数会让后一个永远无效）。 */
+function modelsScopeSegment(scope) {
+    return (scope && scope !== 'local')
+        ? '__scope=id:' + encodeURIComponent(scope)
+        : '__scope=local';
+}
+
 // Load model list (once) + selected model for given session
 function loadModels(sessionId, callback) {
-    var url = '/web/chat/models';
-    if (sessionId) url += '?sessionId=' + encodeURIComponent(sessionId);
+    var scope = modelsRequestScope();
+    var qParts = [];
+    if (sessionId) qParts.push('sessionId=' + encodeURIComponent(sessionId));
+    qParts.push(modelsScopeSegment(scope));
+    var url = '/web/chat/models?' + qParts.join('&');
 
     $.get(url, function(resp) {
         try {
@@ -3457,6 +3483,18 @@ function loadModels(sessionId, callback) {
                 return;
             }
             var data = resp.data;
+            var list = data.list || [];
+            // 远端空模型表 = 可疑态（远端镜像可能丢失）：不锁死「已加载」，标记 stale，
+            // 触发一次镜像重推自愈（healedByScope 防环）；本地空表维持原 degrade 路径。
+            if (list.length === 0 && scope !== 'local') {
+                // 远端权威空表：清掉可能残留的上一 scope 列表，否则下拉会展示旧环境的模型，
+                // 且空表专属文案的渲染条件（列表总量 0）永远不成立。
+                modelList = [];
+                modelsLoaded = false;
+                modelsListStale = true;
+                handleRemoteEmptyModels(scope, sessionId, callback);
+                return;
+            }
             var selected = data.selected || '';
             // 会话上下文由响应顶层提供；旧后端缺少字段时稳定回退到 256K。
             applyContextResponse(data, sessionId);
@@ -3480,12 +3518,13 @@ function loadModels(sessionId, callback) {
             // modelsListStale=true（reload 失败保留旧列表）时同样强制重解析，保证与后端最终一致
             if (!modelsLoaded || modelsListStale) {
                 modelList = [];
-                var list = data.list || [];
                 for (var i = 0; i < list.length; i++) {
                     modelList.push({ name: list[i].name || list[i].model, model: list[i].model || list[i].name, desc: list[i].description, standard: list[i].standard || '', provider: list[i].provider || '', thinkingLevels: (Object.prototype.toString.call(list[i].thinkingLevels) === '[object Array]') ? list[i].thinkingLevels : null });
                 }
                 modelsLoaded = true;
                 modelsListStale = false;
+                // 非空成功 → 清除该 scope 的自愈标记：日后若再次空表（真实回归）仍可自愈一次
+                delete healedByScope[scope];
             }
 
             renderModelUI();
@@ -3537,6 +3576,52 @@ function reloadModels(callback) {
     loadModels(activeSessionId || null, callback);
 }
 
+/* 远端空模型表自愈：本 scope 尚未自愈过 → 触发一次镜像重推（window.remoteMirrorSync）。
+   synced=true 重新 loadModels 一次（此次若仍空，healedByScope 已置位 → 不再重推，防环）；
+   synced=false / 无入口 → 释放加载态并渲染空表专属文案（不静默）。
+   本地 scope 空表不走这里（维持 degradeModelLoad 原路径）。 */
+function handleRemoteEmptyModels(scope, sessionId, callback) {
+    if (healedByScope[scope]) {
+        // 已自愈过仍空：渲染专属文案，不再重推（防环）
+        renderModelUI();
+        if (callback) callback();
+        return;
+    }
+    healedByScope[scope] = true;
+    if (typeof window.remoteMirrorSync !== 'function') {
+        renderModelUI();
+        if (callback) callback();
+        return;
+    }
+    Promise.resolve(window.remoteMirrorSync(scope)).then(function (res) {
+        if (res && res.synced) {
+            loadModels(sessionId, callback);   // 重推成功 → 重新拉一次
+        } else {
+            renderModelUI();
+            if (callback) callback();
+        }
+    }, function () {
+        renderModelUI();
+        if (callback) callback();
+    });
+}
+
+/* 镜像同步成功 / 工作区切换 / 连接表变化 → 模型列表归属或内容可能已变，
+   标记 stale 并去抖重载。300ms 去抖防风暴：connections-changed 与 mirror-synced
+   可能同批到达（连接建立后 Rust 自动推镜像 → 两个事件几乎同时触发）。 */
+var _modelsReloadTimer = null;
+function scheduleModelsReload() {
+    modelsListStale = true;
+    if (_modelsReloadTimer) clearTimeout(_modelsReloadTimer);
+    _modelsReloadTimer = setTimeout(function () {
+        _modelsReloadTimer = null;
+        loadModels(activeSessionId || null);
+    }, 300);
+}
+window.addEventListener('gourd:mirror-synced', scheduleModelsReload);
+document.addEventListener('workspace:changed', scheduleModelsReload);
+window.addEventListener('remote:connections-changed', scheduleModelsReload);
+
 // Refresh model UI for a specific session using local cache (no network request)
 function refreshSessionModel(sessionId) {
     if (!sessionId) return;
@@ -3547,7 +3632,8 @@ function refreshSessionModel(sessionId) {
         // setActiveSession 与显式会话切换都可能触发刷新，合并同一会话的在途请求。
         if (sessionModelRequestMap[sessionId]) return;
         sessionModelRequestMap[sessionId] = true;
-        var url = '/web/chat/models?sessionId=' + encodeURIComponent(sessionId);
+        var scope = modelsRequestScope();
+        var url = '/web/chat/models?' + ['sessionId=' + encodeURIComponent(sessionId), modelsScopeSegment(scope)].join('&');
         $.get(url, function(resp) {
             try {
                 var data = (resp && resp.data) || {};
@@ -3651,7 +3737,11 @@ function renderModelUI() {
         currentModel: currentModel,
         currentProvider: currentEntry ? (currentEntry.provider || '') : '',
         otherLabel: GourdI18n.t('history.model_group_other'),
-        emptyText: GourdI18n.t('history.model_search_empty'),
+        // 空态文案区分：列表总量 0 且当前归属为远端 → 「远程未同步」专属文案；
+        // 其余（搜索无命中）仍用原「未找到匹配的模型」。
+        emptyText: (modelList.length === 0 && modelsRequestScope() !== 'local')
+            ? GourdI18n.t('history.models_remote_not_synced')
+            : GourdI18n.t('history.model_search_empty'),
         toggleTitle: GourdI18n.t('history.model_group_toggle'),
         itemHtml: function (m, active) {
             var shortName = modelShortName(m);

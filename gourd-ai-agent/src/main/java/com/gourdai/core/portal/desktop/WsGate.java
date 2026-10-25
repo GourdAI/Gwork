@@ -85,9 +85,55 @@ public class WsGate extends SimpleWebSocketListener {
     private final HarnessEngine engine;
     private final AgentSettings agentSettings;
 
+    /**
+     * 模型表为空时的可读业务错误文案（与 {@code WebGate} 同口径，两处必须字面一致）。
+     *
+     * <p><b>为什么必须拦：</b>{@code engine.getModelOrMain(name)} 在模型表为空时返回
+     * {@code null}（见 {@code HarnessOptions#getModelOrDef} 的 {@code models.isEmpty()} 分支），
+     * null 一路流到 {@code ReActAgentConfig} 构造器的 {@code Objects.requireNonNull} 才炸，
+     * 客户端收到的是裸 NPE 文案「chatModel is required」——既看不出是配置问题还是程序缺陷，
+     * 也不知道该去哪里修。远程工作区下这个场景并不罕见：远端进程重启后内存镜像随之消失
+     * （镜像刻意不落盘），模型表就空了。</p>
+     *
+     * <p><b>为什么分两种文案：</b>修复动作完全不同。镜像态（{@code mirrored=true}）下远端磁盘上
+     * 那份 settings.json 属于远端用户自己，让用户「去设置里加模型」是错误指引——正确动作是
+     * 等桌面壳心跳探测到世代号归零后自动重推镜像，或重连远程工作区；非镜像态才是真正的
+     * 「本机没配模型」，指引用户去设置页添加。</p>
+     */
+    private static final String MSG_MODEL_MISSING_MIRROR =
+            "远程模型配置未同步或镜像已失效（远端模型表为空），请稍后重试；持续失败请重连远程工作区";
+
+    /** 非镜像态（本地/CLI，或远端用户自己的会话）下模型表为空的指引文案。 */
+    private static final String MSG_MODEL_MISSING_LOCAL =
+            "未配置可用模型：请在「设置 - 模型」中添加并启用一个模型";
+
     public WsGate(HarnessEngine engine, AgentSettings agentSettings) {
         this.engine = engine;
         this.agentSettings = agentSettings;
+    }
+
+    /**
+     * 模型表为空时的统一拦截出口：记 WARN（含 sessionId 与 mirrored 态）并返回可读业务文案。
+     *
+     * <p>与 {@code WebGate#missingChatModelMessage} 同口径（本类两处 + WebGate 两处共四个拦截点）。
+     * 不抽到公共类是因为那会新增主源文件并改动两个 Gate 的依赖面；文案常量在两类里字面一致，
+     * 并由契约测试同时锁定两份源码，漂移会被测试抦下。</p>
+     *
+     * <p><b>WARN 必须带 mirrored：</b>这是区分「远端镜像丢失」（运维/自愈问题，壳该重推）与
+     * 「用户真没配模型」（使用问题，该去设置页）的唯一现场证据。</p>
+     *
+     * <p>本类直接读构造器注入的 {@link #agentSettings}（与 overlay 端点改的是同一实例），
+     * 绝不能用 {@code AgentSettings.loadFromFile()}：那是从磁盘重读的新实例，而
+     * {@code mirrored} 是纯内存态（镜像刻意不落盘），新实例上永远读到 false。</p>
+     *
+     * @param sessionId 会话标识（仅用于日志定位）
+     * @return 面向用户的可读错误文案
+     */
+    private String missingChatModelMessage(String sessionId) {
+        boolean mirrored = agentSettings != null && agentSettings.isMirrored();
+        LOG.warn("[WS] no usable chat model for session {} (mirrored={}): refusing to start run, "
+                + "returning readable business error instead of 'chatModel is required'", sessionId, mirrored);
+        return mirrored ? MSG_MODEL_MISSING_MIRROR : MSG_MODEL_MISSING_LOCAL;
     }
 
     @Override
@@ -219,6 +265,17 @@ public class WsGate extends SimpleWebSocketListener {
             // 根据前端指定的 model 选择对应 ChatModel
             String modelName = req.getModel();
             ChatModel chatModel = engine.getModelOrMain(modelName);
+            if (chatModel == null) {
+                // 屏障：模型表为空（远程镜像丢失 / 本机未配模型）。不拦的话 null 会流到
+                // ReActAgentConfig 的 requireNonNull，客户端只看到裸文案「chatModel is required」；
+                // 下方 handleCommand 的 done 帧还会在 chatModel.getConfig() 上再炸一次 NPE。
+                // 出站形态与本方法既有错误路径一致（单个 error 帧即终止，见上方 sessionId/cwd 校验
+                // 与末尾 catch 分支），不额外补 done：/ws 客户端把 error 帧当作本轮终止信号。
+                socket.send(new ONode().set("type", "error")
+                        .set("sessionId", sessionId)
+                        .set("text", missingChatModelMessage(sessionId)).toJson());
+                return;
+            }
 
             // 与 WebGate.performAgentTaskAsync 同口径：仅在前端显式携带 model 时才覆写会话已选模型；
             // 直接 put(null) 会把上一轮的选择清空，后续 HITL/问答恢复轮会静默回落主模型。
@@ -736,6 +793,16 @@ public class WsGate extends SimpleWebSocketListener {
                 modelName = session.getContext().getAs(HarnessEngine.CTX_MODEL_SELECTED);
             }
             ChatModel chatModel = engine.getModelOrMain(modelName);
+            if (chatModel == null) {
+                // 屏障（同 onMessage 主路径）：HITL 审批后的恢复轮。此时 approve/reject 已落定，
+                // 但无模型可用就无法继续跑——与其让 null 流进下方 o.chatModel(chatModel) 抛
+                // 「chatModel is required」（被末尾 catch 包成同样不可读的 error 帧），不如在此
+                // 直接回可读文案。形态与本方法既有错误路径一致（单 error 帧）。
+                socket.send(new ONode().set("type", "error")
+                        .set("sessionId", sessionId)
+                        .set("text", missingChatModelMessage(sessionId)).toJson());
+                return;
+            }
             String cwd = session.attrs().getOrDefault(HarnessEngine.ATTR_CWD, ".").toString();
 
             Prompt hitlPrompt = Prompt.of();

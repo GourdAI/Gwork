@@ -388,6 +388,68 @@ public class UsageStatsServiceTest {
         }
     }
 
+    /**
+     * 热力图每格必须带 sessions（当天有活动的任务/会话个数）。
+     *
+     * <p>悬停浮层要展示「时间 / 任务数 / 总 tokens」三要素，其中任务数只能由账本的
+     * sessions 集合大小得到 —— rounds 是推理轮数，一个任务可能跑好几轮，
+     * 两者不能互相替代。旧接口只输出 rounds，前端无从得知任务数。</p>
+     */
+    @Test
+    public void testHeatmapExposesSessionCountPerDay() throws Exception {
+        Path base = Files.createTempDirectory("usage-heat-sessions");
+        try {
+            LocalDate today = LocalDate.now();
+            String month = today.toString().substring(0, 7);
+            String d1 = today.toString();
+            Path dir = base.resolve(".gwork/usage");
+            Files.createDirectories(dir);
+            // 今天：3 个会话、4 轮；昨天：1 个会话、1 轮
+            String y1 = today.minusDays(1).toString();
+            String json = "{\"month\":\"" + month + "\",\"days\":{"
+                    + "\"" + d1 + "\":{\"messages\":9,\"sessions\":[\"work-a\",\"work-b\",\"work-c\"],"
+                    + "\"models\":{\"m1\":{\"tokens\":100,\"input\":50,\"output\":50,\"cacheRead\":0,\"cacheCreation\":0,\"rounds\":4}}},"
+                    + "\"" + y1 + "\":{\"messages\":1,\"sessions\":[\"work-a\"],"
+                    + "\"models\":{\"m1\":{\"tokens\":10,\"input\":5,\"output\":5,\"cacheRead\":0,\"cacheCreation\":0,\"rounds\":1}}}"
+                    + "},\"watermarks\":{}}";
+            Files.write(dir.resolve("usage-" + month + ".json"), json.getBytes(StandardCharsets.UTF_8));
+
+            Map<String, Object> r = newStatsService(base).compute(30);
+            Map<String, Object> todayCell = null;
+            Map<String, Object> y1Cell = null;
+            for (Map<String, Object> cell : list(r, "heatmap")) {
+                Object date = cell.get("date");
+                if (d1.equals(String.valueOf(date))) {
+                    todayCell = cell;
+                } else if (y1.equals(String.valueOf(date))) {
+                    y1Cell = cell;
+                }
+            }
+            Assertions.assertNotNull(todayCell, "热力图应含今天这一格");
+            Assertions.assertEquals(3L, num(todayCell, "sessions"), "今天的任务数应为 3（sessions 集合大小）");
+            Assertions.assertEquals(4L, num(todayCell, "rounds"), "轮次仍需保留（4 轮），与任务数不同维度");
+            Assertions.assertEquals(100L, num(todayCell, "tokens"));
+            Assertions.assertNotNull(y1Cell, "热力图应含昨天这一格");
+            Assertions.assertEquals(1L, num(y1Cell, "sessions"));
+
+            // 未来日与无数据日都必须带 sessions=0（字段恒定存在，前端不必做存在性分叉）
+            for (Map<String, Object> cell : list(r, "heatmap")) {
+                Assertions.assertTrue(cell.containsKey("sessions"),
+                        "每格都必须带 sessions 字段，缺失格=" + cell.get("date"));
+            }
+            boolean sawFuture = false;
+            for (Map<String, Object> cell : list(r, "heatmap")) {
+                if (Boolean.TRUE.equals(cell.get("future"))) {
+                    sawFuture = true;
+                    Assertions.assertEquals(0L, num(cell, "sessions"), "未来日 sessions 应为 0");
+                }
+            }
+            Assertions.assertTrue(sawFuture, "本周窗口应含未来日");
+        } finally {
+            deleteRecursively(base.toFile());
+        }
+    }
+
     private void deleteRecursively(File f) {
         if (f == null || !f.exists()) {
             return;

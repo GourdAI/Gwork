@@ -1331,10 +1331,16 @@
         window.__GOURD_IPC__.onRemoteMirror(function (payload) {
             if (!payload || !payload.done) return;
             if (!payload.connectionId || !connectionsById[payload.connectionId]) return;
-            if (payload.synced) return;
+            if (payload.synced) {
+                /* 镜像同步成功 → 广播让模型列表重载（app-history 监听 gourd:mirror-synced）。
+                   连接建立后 Rust 自动推镜像、或用户手动重推成功都走这里：远端模型表
+                   此前可能因镜像丢失而为空，同步成功后即可拉到真实列表。成功仍静默（不弹 toast）。 */
+                window.dispatchEvent(new CustomEvent('gourd:mirror-synced', { detail: { connectionId: payload.connectionId } }));
+                return;
+            }
             /* 用 error 而非 info：「远端跑的不是我配的模型」是会被静默吞掉的重要偏差，
-               而 showToast 只实现了 success/error/info 三色（toast-item.warning 无样式），
-               本仓约定里 warning 一律走 error 口径。 */
+                而 showToast 只实现了 success/error/info 三色（toast-item.warning 无样式），
+                本仓约定里 warning 一律走 error 口径。 */
             if (typeof showToast === 'function') {
                 showToast(GourdI18n.t('remote.mirror_auto_failed'), 'error');
             }

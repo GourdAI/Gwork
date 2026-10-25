@@ -2333,6 +2333,48 @@ public class WebSettingsController {
     }
 
     /**
+     * 镜像状态回告（远程工作区屏障化）：供桌面壳心跳比对世代号、探测镜像丢失并自愈。
+     *
+     * <p><b>为什么需要这个端点：</b>镜像只活在远端进程内存（{@link AgentSettings#applyRemoteMirror}
+     * 置 mirrored 后拒绝落盘），远端进程一旦被重启/被回收，镜像就静默消失，而桌面壳对此
+     * 一无所知——用户下一次对话会直接撞上「模型表为空」，表现为一条莫名其妙的错误。
+     * 本端点把「远端当前镜像世代」暴露出来，壳侧只需比较「自己记录值 vs 远端当前值」：
+     * 远端值更小（典型是重启后归零）即判定镜像丢失，自动重推 overlay 自愈。</p>
+     *
+     * <p><b>路由注意（勿误判为不可达）：</b>{@code /web/settings/*} 在 Rust 侧的
+     * {@code route_for} 里被强制归为本地路由（设置页属于壳自己的 UI，不得透到远端）。
+     * 但本端点的调用方是<b>壳经隧道直连远端后端</b>（与 overlay 推送同一条链路），
+     * 不经壳内代理的 route_for 分发，故不受该强制本地规则影响。若后续改成走代理，
+     * 必须同步调整 Rust 侧路由白名单，否则请求会被送到本地后端、永远读到 generation=0。</p>
+     *
+     * <p><b>非远端模式也正常返回</b>（{@code mirrored=false, generation=0}），不做拒绝：
+     * 与 overlay 端点刻意不同。overlay 是写操作，本地模式下开放它毫无意义且白增攻击面，
+     * 故拒绝；本端点是只读探针，本地模式下回告「未镜像」本身就是有效答案（壳据此知道
+     * 对端不是远端部署，或远端尚未收到镜像），拒绝反而让壳无法区分「不是远端」与「探测失败」。
+     * 且响应不含任何凭证（只有布尔、计数与模型个数），无泄漏面。</p>
+     *
+     * @return {@code {mirrored, generation, modelCount}}；modelCount 为<b>启用</b>模型数
+     *         （{@link ModelDo#isEnabled()}，即可见且已启用），与 overlay 同步进引擎的口径一致——
+     *         壳侧真正关心的是「远端此刻有没有可用模型」，而非配置里躺着多少条禁用项。
+     */
+    @Get
+    @Mapping("/web/settings/mirror-state")
+    public Result<Map<String, Object>> settingsMirrorState() {
+        int enabledModels = 0;
+        for (ModelDo model : settings.getModels().values()) {
+            if (model != null && model.isEnabled()) {
+                enabledModels++;
+            }
+        }
+
+        Map<String, Object> state = new LinkedHashMap<>();
+        state.put("mirrored", settings.isMirrored());
+        state.put("generation", settings.getMirrorGeneration());
+        state.put("modelCount", enabledModels);
+        return Result.succeed(state);
+    }
+
+    /**
      * 解析请求超时（形如 "120s"），无值时返回 fallback。
      */
     private Duration parseTimeout(ONode root, Duration fallback) {
@@ -2527,7 +2569,17 @@ public class WebSettingsController {
     }
 
     /**
-     * 在已安装技能目录写入 {@code .skill-market.json}（市场名/市场 slug/图标 URL）。
+     * 在已安装技能目录写入 {@code .skill-market.json}（市场名/市场 slug/图标 URL/市场展示名）。
+     *
+     * <p><b>为什么必须落盘 displayName</b>：本地扫描出的技能名是<b>安装目录名</b>
+     * （namespace 限定 slug 会落成 {@code _owner_slug}），而市场里展示的是
+     * {@code displayName}（如「编程专家.Skill」）——不存展示名，装机后用户就会看到
+     * 一个完全陌生的目录名，与安装前的卡片对不上。</p>
+     *
+     * <p><b>信任边界</b>：displayName 只来自<b>市场接口</b>（{@link Market#detail}），
+     * 不读安装包内的任何文件。安装包是第三方内容，若采信包内自述名，发布者就能
+     * 让自己的技能在用户本地伪装成任意已有技能的名字。市场接口是已登录的权威源，
+     * 且它同时提供 slug → 展示名的映射，正是本项目已信赖的数据通路。</p>
      *
      * <p>失败只记日志不影响安装结果：元数据仅用于展示，写坏了不应让安装回滚。</p>
      */
@@ -2541,20 +2593,26 @@ public class WebSettingsController {
             if (!Files.isDirectory(target)) {
                 return;
             }
+            // 一次 detail 调用同时取图标与展示名（原本只为图标调用，不新增网络请求）
             String iconUrl = null;
+            String displayName = null;
             try {
                 Result<MarketDetail> detail = market.detail(slug);
                 if (detail != null && detail.getCode() == 200 && detail.getData() != null) {
                     iconUrl = detail.getData().getIconUrl();
+                    displayName = detail.getData().getDisplayName();
                 }
             } catch (Exception ignore) {
-                // 图标取不到就算了，元数据其余字段仍要写
+                // 详情取不到就算了，元数据其余字段仍要写
             }
             ONode meta = new ONode();
             meta.set("market", market.name());
             meta.set("slug", slug);
             if (iconUrl != null && !iconUrl.isEmpty()) {
                 meta.set("iconUrl", iconUrl);
+            }
+            if (displayName != null && !displayName.trim().isEmpty()) {
+                meta.set("displayName", displayName.trim());
             }
             Files.write(target.resolve(".skill-market.json"),
                     meta.toJson().getBytes(StandardCharsets.UTF_8));
@@ -2565,20 +2623,13 @@ public class WebSettingsController {
 
     /**
      * 读取技能目录的市场元数据（{@code .skill-market.json}），不存在返回 null。
+     *
+     * <p>实现在 {@link SkillDisplayNames}（展示名口径的单一来源）——本类不再持有副本：
+     * 2026-10 的真实缺陷正是「同一口径散落多处、改一处漏一处」（技能页修好、
+     * 任务监控漏修）。
      */
     private ONode readMarketMeta(Path skillDir) {
-        if (skillDir == null) {
-            return null;
-        }
-        Path meta = skillDir.resolve(".skill-market.json");
-        if (!Files.isRegularFile(meta)) {
-            return null;
-        }
-        try {
-            return ONode.ofJson(new String(Files.readAllBytes(meta), StandardCharsets.UTF_8));
-        } catch (Exception e) {
-            return null;
-        }
+        return SkillDisplayNames.readMarketMeta(skillDir);
     }
 
     /**
@@ -2619,10 +2670,17 @@ public class WebSettingsController {
             ONode meta = readMarketMeta(skill.getRealPath());
             if (meta != null) {
                 item.put("market", meta.get("market").getString());
-                item.put("marketSlug", meta.get("slug").getString());
+                String marketSlug = meta.get("slug").getString();
+                item.put("marketSlug", marketSlug);
                 String iconUrl = meta.get("iconUrl").getString();
                 if (iconUrl != null && !iconUrl.isEmpty()) {
                     item.put("iconUrl", iconUrl);
+                }
+                /* 展示名：口径统一在 {@link SkillDisplayNames}（任务监控用同一个出口）。
+                 * 分层：meta 有 displayName 原样透出 → 旧记录退裸尾名 → 无 meta 不出字段。 */
+                String displayName = SkillDisplayNames.ofMeta(meta);
+                if (displayName != null && !displayName.trim().isEmpty()) {
+                    item.put("displayName", displayName.trim());
                 }
             }
             skills.add(item);
@@ -2633,6 +2691,17 @@ public class WebSettingsController {
         skills.sort(Comparator.comparing(m -> String.valueOf(m.get("name")), String.CASE_INSENSITIVE_ORDER));
 
         return Result.succeed(skills);
+    }
+
+    /**
+     * 市场 slug 的裸尾形态（{@code @owner/slug} → {@code slug}；裸 slug 原样返回）。
+     *
+     * <p>实现已收归 {@link SkillDisplayNames#marketBareSlug}（展示名口径的单一来源），
+     * 本类只保留转发：前端 {@code app-skills.js} 的 {@code marketBareSlug} 仍是对端副本，
+     * 两者口径一致由 {@code skills-view-contract.test.js} 锁定。</p>
+     */
+    private static String marketBareSlug(String slug) {
+        return SkillDisplayNames.marketBareSlug(slug);
     }
 
     /**

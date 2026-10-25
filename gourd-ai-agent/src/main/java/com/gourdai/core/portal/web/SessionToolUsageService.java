@@ -127,6 +127,25 @@ public final class SessionToolUsageService {
      *         三类文件都不存在时回结构化空态（exists=false），绝不抛异常
      */
     public static Map<String, Object> usage(List<File> sessionDirs, String sessionId) {
+        return usage(sessionDirs, sessionId, null);
+    }
+
+    /**
+     * 统计一个会话的工具用量，并给技能行补上展示名。
+     *
+     * <p><b>WHY 展示名在服务层补而不是控制器补</b>：技能行的字段骨架必须只有一处
+     * （{@link #result}）——空态与正常态共用同一份结构，前端才不用对每个字段做
+     * undefined 判定。若让控制器在返回后往行里塞字段，行的形状就有了两个来源。</p>
+     *
+     * <p><b>WHY 由调用方传映射而不是本类读磁盘</b>：本类是「只读、无状态、纯函数」
+     * （见类注释），读技能目录会引入对 {@code TalentRegistry} 的依赖与 IO 抖动。
+     * 展示名口径统一在 {@link SkillDisplayNames}，调用方取一次映射传进来即可。</p>
+     *
+     * @param skillDisplayNames 技能名 → 展示名（{@link SkillDisplayNames#ofAll} 的产物）；
+     *                          null 或未命中时不产生 displayName 字段，前端回退技能名
+     */
+    public static Map<String, Object> usage(List<File> sessionDirs, String sessionId,
+                                            Map<String, String> skillDisplayNames) {
         Counters counters = new Counters();
         boolean exists = false;
         if (sessionId != null && !sessionId.isEmpty()) {
@@ -144,7 +163,7 @@ public final class SessionToolUsageService {
                 readUsage(messages, counters);
             }
         }
-        return result(sessionId, exists, counters);
+        return result(sessionId, exists, counters, skillDisplayNames);
     }
 
     /** 在候选目录中按序查找第一个存在的目标文件；全不存在返回 null。 */
@@ -402,7 +421,8 @@ public final class SessionToolUsageService {
      * 组装响应。单独抽出是为了让「文件不存在」与「正常统计」共用同一份字段骨架——
      * 空态也必须字段齐备，否则前端要对每个字段做 undefined 判定。
      */
-    private static Map<String, Object> result(String sessionId, boolean exists, Counters counters) {
+    private static Map<String, Object> result(String sessionId, boolean exists, Counters counters,
+                                              Map<String, String> skillDisplayNames) {
         Map<String, Object> memory = new LinkedHashMap<>();
         memory.put("updated", counters.memoryExtract > 0);
         memory.put("extractCount", counters.memoryExtract);
@@ -416,6 +436,13 @@ public final class SessionToolUsageService {
                 row.put("name", skill.getKey());
                 row.put("toolName", tool.getKey());
                 row.put("count", tool.getValue());
+                /* 展示名：技能页显示什么，监控就显示什么。两地各算一套已出过真实缺陷
+                 * （技能页修好、监控仍显示 _owner_slug 目录名）。
+                 * name 保持目录名不动——它是 skillread 的定位键与账本落盘值。 */
+                String displayName = skillDisplayNames == null ? null : skillDisplayNames.get(skill.getKey());
+                if (displayName != null && !displayName.trim().isEmpty()) {
+                    row.put("displayName", displayName.trim());
+                }
                 skills.add(row);
             }
         }

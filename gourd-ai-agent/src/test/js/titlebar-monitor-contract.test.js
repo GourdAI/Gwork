@@ -680,6 +680,34 @@ test('记忆行：updated 类驱动圆点与文案，跳转走 openMemoryView', 
         '更新态圆点必须强调色（参照稿蓝点语义）');
 });
 
+/* 【技能区展示名（2026-10 用户报障：技能页修好了、监控漏改）】
+   技能行的 name = skillread 的参数值 = 安装目录名（_owner_slug 形态），直接渲染是
+   用户看不懂、且与技能页对不上的名字。
+   本用例锁「两端同源」：
+   ① 前端：renderSkills 优先 displayName，且目录名不丢（收进 title）；
+   ② 后端：两个消费方（技能页已Installed 列表 / 监控 tool-usage）必须调【同一个】
+       SkillDisplayNames 出口——口径散落多处正是本缺陷的根因。 */
+test('技能区展示名：前端优先 displayName，后端两消费方同源', () => {
+    const src = monJs.slice(monJs.indexOf('function renderSkills('),
+        monJs.indexOf('function renderMemory('));
+    assert.ok(src.length > 200, 'renderSkills 切片必须真实命中函数');
+    assert.match(src, /s\.displayName \|\| s\.name \|\| s\.toolName/,
+        '展示名优先级：displayName > name > toolName（三级都要有，否则无参技能渲染空行）');
+    assert.match(src, /title/, '目录名必须收进 title（原文不丢：排查时可对照账本）');
+
+    const settingsJava = fs.readFileSync(path.resolve(__dirname,
+        '../../main/java/com/gourdai/core/portal/web/WebSettingsController.java'), 'utf8');
+    const controllerJava = fs.readFileSync(path.resolve(__dirname,
+        '../../main/java/com/gourdai/core/portal/web/WebController.java'), 'utf8');
+    assert.match(settingsJava, /SkillDisplayNames\.ofMeta\(meta\)/,
+        '技能页已Installed 列表必须走 SkillDisplayNames.ofMeta（唯一口径）');
+    assert.match(controllerJava, /SkillDisplayNames\.ofAll\(engine\.getSkillsAll\(\)\)/,
+        '任务监控 tool-usage 必须走 SkillDisplayNames.ofAll（与技能页同一出口）');
+    // 两个消费方不得再各自内联一份裸尾逻辑（本缺陷的根因形态）
+    assert.doesNotMatch(controllerJava, /indexOf\('\/'\) > 1/,
+        '监控端点不得内联裸尾逻辑（必须复用 SkillDisplayNames）');
+});
+
 /* 【来源区：缩略图 + 友好名 + 点击预览（2026-10-15 用户改进需求）】
    机器长名（pasted-image-<毫秒戳>-<随机>.png）直接展示必被截断；图片行现改展示
    「monitor.image · 相对时间」+ meta 拉回的真实缩略图，点击走全站灯箱。

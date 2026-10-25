@@ -226,6 +226,7 @@
                     "model_group_other":  "其他",
                     "model_search_placeholder":  "搜索模型或服务商...",
                     "model_search_empty":  "未找到匹配的模型",
+                    "models_remote_not_synced":  "远程模型配置未同步，正在重试；若持续为空请检查远程连接",
                     "model_group_toggle":  "折叠/展开该服务商",
                     "thinking":  {
                                      "auto":  {
@@ -468,6 +469,8 @@
                                     "date_ym":  "{0}年{2}月",
                                     "range_hint":  "统计区间 {0} ~ {1} · 共 {2} 天",
                                     "tooltip":  "{0}：{1} Tokens · {2} 轮",
+                                    "tip_tasks":  "任务数",
+                                    "tip_tokens":  "消耗 Tokens",
                                     "loading":  "加载中…",
                                     "load_failed":  "加载失败",
                                     "cache_title":  "缓存命中率排行",

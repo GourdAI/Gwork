@@ -182,12 +182,106 @@ test('已安装判定：回退候选按 slug 形态隔离，限定卡不得回�
         '限定分支不得含裸尾剥离候选（同 slug 卡片会连带误亮已安装）');
 });
 
+test('已安装卡片显示市场展示名，操作键仍用真实目录名', () => {
+    /* 用户报障：「技能安装前和安装后展示的名字怎么不一样」。
+     * 根因：本地技能名取自【安装目录名】，namespace 限定 slug 会落成 _owner_slug。
+     * 后端已落盘/回传 displayName，前端必须优先用它，且【不能】拿它去替换 data-name。
+     *
+     * 【为何不用真实上游名字做夹具】初版注释写「市场里叫编程专家.Skill」，
+     * 但上游实测 @user_814dbe54/dev-expert 的 name 就是 dev-expert，
+     * 「编程专家.Skill」属于另一位作者 @indiv-ebandao。验证与上游具体叫什么都无关，
+     * 写错事实只会让人误判真相。 */
+    const fnStart = js.indexOf('function renderInstalledList');
+    assert.ok(fnStart !== -1, 'renderInstalledList 必须存在');
+    const fn = js.slice(fnStart, js.indexOf('\n    function renderEmpty', fnStart));
+
+    assert.match(fn, /var displayName = skill\.displayName \|\| name;/, '展示名必须优先 displayName，无则回退目录名');
+    assert.match(fn, /escapeHtml\(displayName\)/, '卡片标题必须渲染展示名');
+    // 操作键：卸载与启禁用靠 data-name 定位，必须是真目录名
+    assert.match(fn, /data-name="' \+ escapeAttr\(name\)/, 'data-name 必须仍是真实目录名（否则卸载/启禁用会打错技能）');
+    assert.ok(!/data-name="' \+ escapeAttr\(displayName\)/.test(fn),
+        'data-name 严禁用展示名——展示名不是磁盘上的目录名');
+
+    /* 搜索必须同时匹配 displayName：卡片上写的是展示名，用户只会照着它搜。
+     * 只搜 name 会造成「看着名字搜不到它自己」——展示名上线后新引入的不一致。 */
+    assert.match(fn, /\(s\.displayName \|\| ''\)\.toLowerCase\(\)\.indexOf\(kw\)/,
+        '已安装视图搜索必须匹配 displayName（否则照卡片上的名字搜不到）');
+});
+
+test('卸载确认与提示使用展示名，请求体仍用目录名', () => {
+    /* 卡片写着展示名、确认框却问「确定卸载 _owner_slug 吗」——用户无法确认删的是哪一张。
+     * 但【请求体】必须仍传目录名，两者不可互换（传错就删错技能）。 */
+    const start = js.indexOf("$skillsList.on('click', '.skill-uninstall-btn'");
+    assert.ok(start !== -1, '卸载处理器必须存在');
+    const fn = js.slice(start, start + 2600);
+
+    assert.match(fn, /var shownName = \$btn\.closest\('\.skill-card'\)\.find\('\.skill-card-name'\)\.text\(\);/,
+        '确认框必须取卡片上展示名作为文案');
+    assert.match(fn, /uninstall_confirm', \[shownName \|\| name\]/, '确认文案必须用展示名（带目录名兜底）');
+    assert.match(fn, /data: \{ scope: scope, skillName: name \}/,
+        '请求体必须仍传真实目录名——传展示名会卸载错技能');
+    assert.ok(!/skillName: shownName/.test(fn), 'skillName 严禁用展示名');
+});
+
+test('裸尾 slug 口径：前后端判定边界必须一致', () => {
+    /* 前端曾写 indexOf('/') > 0、后端写 > 1：正常 @owner/slug 两条件都命中，
+     * 但对 @/slug 这种畸形值会算出不同结果（前端剥成 slug、后端原样）。
+     * 光看注释「口径逐字一致」会误以为已经对齐，必须直接比对真实表达式。 */
+    const front = js.match(/function marketBareSlug\(slug\) \{([\s\S]*?)\n    \}/);
+    assert.ok(front, '前端 marketBareSlug 必须存在');
+    assert.match(front[1], /indexOf\('\/'\) > 1/, "前端裸尾判定必须是 indexOf('/') > 1（与后端同口径）");
+});
+
+
 test('已安装卡片：启禁用开关 + 悬浮卸载按钮', () => {
     assert.match(js, /class="skill-toggle/, '已安装卡片必须渲染开关');
     assert.match(js, /\/web\/settings\/skills\/toggle/, '开关必须走 toggle 端点');
     assert.match(js, /data-enabled=/, '开关态必须由 data-enabled 承载');
     assert.match(css, /\.skill-toggle\.on \{ background: var\(--color-success\); \}/, '开启态用 success 令牌');
-    assert.match(css, /\.skill-card-installed:hover \.skill-uninstall-btn \{ display: flex; \}/, '卸载按钮仅悬浮出现');
+});
+
+test('卸载按钮：常驻占位（visibility 切换），悬停不得引起开关抖动', () => {
+    /* 用户报障：「启禁用的每次鼠标光标移动的时候都会抖动」。
+     * Playwright 实测根因：卸载按钮旧写法是 display:none → :hover 时 display:flex，
+     * 侧栏宽 36→70px、高 20→26px，align-items:center 让开关跟着重排 ——
+     * 鼠标每次进出卡片，开关 y 在 27/30 之间反复跳（每回 3px）。
+     *
+     * 【为何旧断言必须改掉】：旧契约写的是
+     *   .skill-card-installed:hover .skill-uninstall-btn { display: flex; }
+     * ——它把【缺陷形态本身】当成了正确形态，全绿却恰好在为抖动保驾。
+     * 正确的契约是「占位恒定 + 仅可见性切换」。 */
+    assert.match(css, /\.skill-uninstall-btn \{[^}]*visibility: hidden;/, '卸载按钮必须常驻占位（visibility:hidden）');
+    assert.match(css, /\.skill-card-installed:hover \.skill-uninstall-btn \{ visibility: visible; \}/,
+        '悬浮只切可见性，不得切 display（切 display 会重排 → 开关抖动）');
+    assert.ok(!/\.skill-card-installed:hover \.skill-uninstall-btn \{[^}]*display:/.test(css),
+        '悬浮规则严禁改 display —— 那正是开关抖动的根因');
+    assert.ok(!/\.skill-uninstall-btn \{[^}]*display: none;/.test(css),
+        '卸载按钮不得回退 display:none（不占位 → 悬浮时侧栏尺寸突变）');
+
+    /* 侧栏必须定宽定高：尺寸不再由子元素驱动，开关位置才不会随子元素显隐而变。
+     * 这两个值同时是标题预留宽度的计算基准（见下一条用例）。 */
+    const side = css.match(/\.skill-card-side \{([^}]*)\}/);
+    assert.ok(side, '已安装卡侧栏 .skill-card-side 必须存在');
+    assert.match(side[1], /width:\s*70px;/, '侧栏必须定宽 70px（开关 36 + gap 8 + 卸载 26）');
+    assert.match(side[1], /height:\s*26px;/, '侧栏必须定高 26px（否则高度随子元素显隐变化）');
+});
+
+test('长标题不得跑到底下按钮下面：标题必须按侧栏宽度预留', () => {
+    /* 用户报障：「标题长了的话，删除图标展示有点问题」。
+     * Playwright 实测（旧值 padding-right:30px）：长标题卡悬停时
+     * 名称右缘 258.13 超出卸载按钮左缘 273.66 → 超出量 +15.53px（文字压在图标下）。
+     * 换算：已安装卡操作区实占 = 卸载 26 + gap 8 + 开关 36 = 70px，
+     * 加上 right:10px 与卡内 padding 14px、呼吸 6px → 需 72px。 */
+    assert.match(css, /\.skill-card \{[^}]*--side-gutter:\s*30px;/, '市场卡预留 30px（只有一个 + 按钮）');
+    assert.match(css, /\.skill-card-installed \{[^}]*--side-gutter:\s*72px;/,
+        '已安装卡必须预留 72px（旧值 30px 小于操作区实占 70px+呼吸 → 长标题被图标压住）');
+    assert.match(css, /\.skill-card-title \{[^}]*padding-right: var\(--side-gutter\);/, '标题预留宽度必须走变量（两种卡各自取值）');
+
+    // 预留值必须 >= 侧栏实占宽度，否则回归：这里用源码里的真实数字交叉校验，不写死期望
+    const side = css.match(/\.skill-card-side \{([^}]*)\}/)[1];
+    const sideW = parseInt(side.match(/width:\s*(\d+)px;/)[1], 10);
+    const gutter = parseInt(css.match(/\.skill-card-installed \{[^}]*--side-gutter:\s*(\d+)px;/)[1], 10);
+    assert.ok(gutter >= sideW, '标题预留 ' + gutter + 'px 必须 >= 侧栏实占 ' + sideW + 'px（否则文字被压住）');
 });
 
 test('详情弹窗：detail 端点 + 弹窗内安装 + ESC/遮罩关闭', () => {
@@ -336,4 +430,87 @@ test('头部下边框左端补齐：resize handle 缺口必须补住且不被裁
     assert.ok(cm, '必须设置 overflow-clip-margin（缺省 0 仍会裁掉盒外补齐线）');
     assert.ok(parseInt(cm[1], 10) >= handleWidth, '盒外绘制余量必须 >= handle 宽度（低于则补齐线被裁回）');
     assert.ok(!/\.skills-view \{[^}]*overflow: hidden;/.test(css), '不得回退 overflow:hidden（会把盒外补齐线裁掉）');
+});
+
+test('加载态生命周期：切视图必须收口，在途请求提前 return 也必须复位在途标记', () => {
+    /* 用户报障：「从技能市场切到已安装的时候，如果之前技能市场还是在加载，
+     * 已安装这块也会显示加载的信息」。
+     *
+     * 【根因不是「忘了清」而是「清理位置错了」】
+     * 旧代码只在 loadSkillsList 的 done/fail 回调里清加载态，而清理全部写在
+     * 「这次请求仍然有效」的判断之后（seq 校验 + 视图校验）。请求在途时切走视图，
+     * 回调走到校验就 return，清理整段被跳过，于是上一个视图的「加载中…」
+     * 永久挂在新视图上——而且那个请求回来时同样会被校验挡掉，永远不会有人来清。
+     * 这类缺陷的共性是：**生命周期依赖「请求一定会回来并走完清理分支」**，
+     * 一旦有提前 return 分支就漏。所以契约不能只断言「存在 .hide() 调用」，
+     * 必须断言「视图切换自身负责收口」+「所有提前 return 分支都复位在途标记」。
+     *
+     * 浏览器实测对照（.tmp/sk_loading_repro.js，可控 mock 上游）：
+     *   HEAD  10/13（A×2 + B 失败，正是用户报障点）
+     *   修复后 13/13 */
+    assert.match(js, /function resetListStatus\(\) \{/, '必须有统一的加载态复位出口');
+    const resetFn = js.slice(js.indexOf('function resetListStatus() {'));
+    const resetBody = resetFn.slice(0, resetFn.indexOf('\n    }'));
+    assert.match(resetBody, /\$\('\.skills-list-footer'\)\.remove\(\);/, '复位必须清底部 footer');
+    assert.match(resetBody, /\$skillsLoading\.hide\(\);/, '复位必须隐藏加载中提示（报障点本体）');
+    assert.match(resetBody, /_isLoadingMore = false;/, '复位必须清「在途」标记');
+
+    /* switchView 必须在切换分支之前调用复位：放在 if (view === VIEW_INSTALLED)
+     * 之后就会漏掉「切到市场」那一支，等于只修一半。 */
+    const sw = js.slice(js.indexOf('function switchView(view) {'));
+    const swBody = sw.slice(0, sw.indexOf('\n    }'));
+    const resetIdx = swBody.indexOf('resetListStatus();');
+    assert.ok(resetIdx !== -1, 'switchView 必须调用 resetListStatus（视图切换是加载态的生命周期边界）');
+    assert.ok(resetIdx < swBody.indexOf('if (view === VIEW_INSTALLED)'),
+        'resetListStatus 必须在分支之前调用（放在某一支里会漏掉另一支）');
+
+    /* 已安装视图走本地索引、不发网络请求，它自己从不显示加载中。 */
+    const ls = js.slice(js.indexOf('function loadSkillsList(query, append) {'));
+
+    /* 【防重入闸门必须是「按用途分级」的】
+     * 缺陷形态：无条件 if (_isLoadingMore) return; —— 一旦闸门被卡住（见下一条），
+     * 「换分类」这种用户主动发起的取代动作也会被直接吞掉（点了完全没反应）。
+     * 正确形态：只有 append 需要防重入；首次/换分类/搜索是取代，必须放行。 */
+    assert.match(ls, /if \(isAppend && _isLoadingMore\) return;/,
+        '防重入必须只拦 append：首次/换分类/搜索是取代动作，必须允许重新发起');
+
+    /* 【最隐蔽的一条，也是变异验证帮我找出的盲区】
+     * 视图已切走时 done/fail 会 return，而复位写在 finally 里 ——
+     * finally 只在 try 块真正进入后才执行，提前 return 的那条路径上它被整段跳过，
+     * 于是 _isLoadingMore 永久停在 true。症状不是「多转一圈」，而是：
+     * 之后所有 append 都被闸门拦死，滚动到底再也加载不出下一页。
+     * M3/M5 变异（删掉这两处复位）最初 SURVIVED，证明只断言
+     * 「有 _isLoadingMore = false;」太弱 —— 必须把「位于提前 return 分支内
+     * 且在 return 之前」这一顺序一并锁住，否则测试杀不死缺陷。 */
+    const doneStart = ls.indexOf('.done(function (resp) {');
+    const doneBranch = ls.slice(doneStart, ls.indexOf('.fail(function', doneStart));
+    assert.match(doneBranch,
+        /_currentView !== viewAtRequest \|\| _currentView === VIEW_INSTALLED\) \{[\s\S]{0,200}?_isLoadingMore = false;[\s\S]{0,40}?return;/,
+        'done 的「视图已切走」分支必须复位 _isLoadingMore 再 return（否则 append 闸门永久卡死）');
+    const failStart = ls.indexOf('.fail(function');
+    const failBranch = ls.slice(failStart, failStart + 1200);
+    assert.match(failBranch,
+        /_currentView !== viewAtRequest\) \{[\s\S]{0,200}?_isLoadingMore = false;[\s\S]{0,40}?return;/,
+        'fail 的「视图已切走」分支必须复位 _isLoadingMore 再 return');
+
+    /* 已安装视图不发请求（它读本地索引），loadSkillsList 里这一支只是防御守卫。
+     * 真正保证「切过来看不到市场加载态」的是 switchView 的 resetListStatus（上方已锁）。
+     * 故此处只要求该守卫以 return 封口，不把死分支写成契约 ——
+     * 第一版写了「该分支必须调用 resetListStatus」，变异直接证明它不可杀，
+     * 是保护性断言，已删除。 */
+    const guardStart = ls.indexOf('if (_currentView === VIEW_INSTALLED)');
+    assert.ok(guardStart !== -1, 'loadSkillsList 必须有已安装视图守卫');
+    assert.match(ls.slice(guardStart, guardStart + 260), /return;/,
+        '已安装视图必须在 loadSkillsList 内被守卫挡掉（它不走网络加载）');
+});
+
+test('加载态复位不得吞掉 markets 失败的重试入口', () => {
+    /* resetListStatus 会清错误条，但 markets 端点整体失败时那条
+     * 「加载失败，点击重试」是【视图级】唯一恢复入口（此时 _markets 为空、
+     * 只剩「已安装」标签）。若在换视图时被一并清掉，用户再也没有重试的路。 */
+    const resetFn = js.slice(js.indexOf('function resetListStatus() {'));
+    const resetBody = resetFn.slice(0, resetFn.indexOf('\n    }'));
+    assert.match(resetBody, /if \(_marketsLoadFailed\) \{/, '复位必须给 markets 失败态留出分支');
+    assert.match(resetBody, /load_failed_retry/, 'markets 失败重试文案必须保留');
+    assert.match(resetBody, /\} else \{[\s\S]*?\$skillsError\.text\(''\)\.hide\(\);/, '非 markets 失败时才允许清掉错误条');
 });

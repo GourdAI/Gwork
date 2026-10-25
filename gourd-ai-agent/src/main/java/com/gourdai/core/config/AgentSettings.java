@@ -91,6 +91,26 @@ public class AgentSettings implements Serializable {
      */
     private volatile boolean mirrored;
 
+    /**
+     * 镜像世代号（远程工作区屏障化）：本进程<b>成功应用</b>桌面端镜像的累计次数。
+     *
+     * <p>语义钉死：世代号只属于「当前远端进程的内存」，<b>不持久化、不跨进程</b>——
+     * 远端进程重启即归零（新进程从 0 开始，第一次成功镜像后为 1）。这正是桌面壳需要的
+     * 判据：壳侧记住自己上次推送成功时的世代号，心跳时读远端
+     * {@code /web/settings/mirror-state} 比对，一旦发现远端世代号<b>小于</b>自己记录的值
+     * （典型是归零），即可断定「远端进程已重启 / 镜像已丢失」，从而自动重推镜像自愈，
+     * 而不必等用户下一次对话撞上「模型表为空」才被动发现。</p>
+     *
+     * <p>为什么用递增计数而不是布尔或时间戳：布尔（{@link #mirrored}）无法区分
+     * 「同一个镜像」与「重启后重新镜像」；时间戳需要跨进程可比的时钟，而远端与桌面端
+     * 时钟未必同步。单调递增的小整数只需「壳记录值 vs 远端当前值」一次比较即可判定丢失，
+     * 且天然幂等（重复推送同一快照只会让世代号继续增长，壳侧以「不小于」为健康条件）。</p>
+     *
+     * <p>递增点唯一：{@link #applyRemoteMirror(String)} 的成功路径末尾（与置 {@link #mirrored}
+     * 同处）。解析失败抛异常时不递增——世代号必须严格对应「真的生效过一次镜像」。</p>
+     */
+    private volatile long mirrorGeneration;
+
     /** 损坏配置备份文件名的时间戳后缀格式：{@code settings.json.corrupt-20260910153000} */
     private static final DateTimeFormatter CORRUPT_BACKUP_STAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
 
@@ -1081,14 +1101,32 @@ public class AgentSettings implements Serializable {
         this.models = newModels;
         this.defaultModel = Assert.isEmpty(newDefaultModel) ? null : newDefaultModel;
         this.mirrored = true;
+        // 世代号递增必须与 mirrored 置位同处、且在所有解析成功之后：解析抛异常时不得递增，
+        // 否则桌面壳会把「推送失败」误判成「镜像已生效」，心跳比对从此永久错位。
+        this.mirrorGeneration++;
 
-        LOG.info("[Settings] Remote mirror applied in memory: {} provider(s), {} model(s), defaultModel={}",
-                providers.size(), models.size(), defaultModel);
+        LOG.info("[Settings] Remote mirror applied in memory: {} provider(s), {} model(s), defaultModel={}, generation={}",
+                providers.size(), models.size(), defaultModel, mirrorGeneration);
     }
 
     /** 是否已载入桌面端镜像（仅远端模式可为 true；供端点回告与测试断言）。 */
     public boolean isMirrored() {
         return mirrored;
+    }
+
+    /**
+     * 当前镜像世代号：本进程成功应用镜像的累计次数（见 {@link #mirrorGeneration}）。
+     *
+     * <p>供 {@code /web/settings/mirror-state} 回告给桌面壳做心跳比对：壳侧记录值 &gt; 远端
+     * 当前值 ⇒ 远端进程已重启、镜像已丢失 ⇒ 壳自动重推自愈。远端进程重启即归零，
+     * 故本值<b>绝不</b>参与任何持久化。</p>
+     *
+     * <p>注：类级 Lombok {@code @Setter} 会为本字段生成公开 setter，与既有 {@code mirrored}/
+     * {@code loadFailed} 两个门禁字段同处境；该 setter 属误用面，任何调用方都不得写它
+     * （世代号只能由 {@link #applyRemoteMirror(String)} 的成功路径推进）。</p>
+     */
+    public long getMirrorGeneration() {
+        return mirrorGeneration;
     }
 
     /**

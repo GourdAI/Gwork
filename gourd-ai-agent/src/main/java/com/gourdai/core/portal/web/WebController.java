@@ -2696,7 +2696,7 @@ public class WebController {
      * @param sessionId 会话 ID（参数缺失时回退 X-Session-Id 头）
      * @param root      可选项目根提示（code 模式）
      * @return {@code {sessionId, exists, memory{updated,extractCount,totalCount,names},
-     *         skills[{name,toolName,count}], skillCount, toolCallCount, degradedLines}}；
+     *         skills[{name,displayName?,toolName,count}], skillCount, toolCallCount, degradedLines}}；
      *         消息文件不存在时回结构化空态（exists=false）而非 404
      */
     @Get
@@ -2724,7 +2724,17 @@ public class WebController {
             List<File> candidateDirs = primaryDir.equals(legacyDir)
                     ? List.of(primaryDir)
                     : List.of(primaryDir, legacyDir);
-            return Result.succeed(SessionToolUsageService.usage(candidateDirs, sessionId));
+            /* 展示名：技能页与任务监控必须显示同一个名字。
+             * 账本里落的是 skillread 的 name 参数（= 安装目录名，_owner_slug 形态），
+             * 直接渲染就是用户看不懂、且与技能页对不上的那个名字。
+             * 口径统一在 SkillDisplayNames（技能页已Installed 列表同源）。
+             *
+             * 【刻意不加缓存】按每个技能读一个小文件（实测 ~150 字节）；同一次请求
+             * 本就要读几十 KB 到 MB 级的账本/stream，这点 IO 完全不是瓶颈。
+             * 而缓存会引入安装/卸载后的失效难题——失效写错就是“显示上一个技能的名字”，
+             * 比多读几个小文件严重得多。 */
+            Map<String, String> displayNames = SkillDisplayNames.ofAll(engine.getSkillsAll());
+            return Result.succeed(SessionToolUsageService.usage(candidateDirs, sessionId, displayNames));
         } catch (Throwable e) {
             // 只读统计端点不得抛 500：解析失败一律回空态，面板降级为「暂无统计」
             LOG.warn("[Web] session tool usage failed: {}", e.getMessage());

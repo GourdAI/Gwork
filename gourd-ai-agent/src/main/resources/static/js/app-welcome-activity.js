@@ -61,6 +61,11 @@
         // year:true：把后端窗口补齐到一年（53 周）——运行中的桌面 jar 可能仍是旧构建
         // （26 周），不补齐月份轴就只有 7 个标签；补齐后稳定 12+ 个月，后端重建为 53 周后幂等。
         body.innerHTML = window.GourdHeatmap.renderGrid(heatmap, { legend: false, months: true, year: true });
+        // 悬停浮层是事件驱动的：innerHTML 重建后节点是新的，但浮层监听挂在 body 容器上
+        // （mountTip 幂等，重复调用只建一次），因此每轮重建后补一次是安全的。
+        // 旧实现把三要素写进 title 属性，现在改成自定义浮层后必须显式接这一句，
+        // 否则悬停什么也不显示（渲染出来但交互是死的）。
+        if (typeof window.GourdHeatmap.mountTip === 'function') window.GourdHeatmap.mountTip(body);
         setVisible(true);
     }
 

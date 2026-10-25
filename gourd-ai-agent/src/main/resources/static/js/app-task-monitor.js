@@ -301,8 +301,16 @@
         var html = '';
         for (var i = 0; i < skills.length; i++) {
             var s = skills[i];
-            html += row('skill', '', esc(s.name || s.toolName) +
-                '<span class="tm-row-sub">×' + (s.count || 1) + '</span>');
+            /* 【展示名优先】技能行的 name 是 skillread 的参数值 = 安装目录名
+               （namespace 限定 slug 会落成 _user_xxx_yyy），直接渲染是用户看不懂的名字，
+               而且在技能页里同一个技能已经显示成展示名/裸尾名了——两地对不上。
+               2026-10 已发生过这个真实缺陷（技能页修好、监控漏修）。
+               目录名不丢：收进 title，悬停仍可看到真实标识。 */
+            var label = s.displayName || s.name || s.toolName;
+            /* 目录名不丢：仅在展示名生效且与 name 不同时收进 title（悬停可看真实标识） */
+            var rawName = (s.displayName && s.name && s.name !== s.displayName) ? s.name : '';
+            html += row('skill', '', esc(label) +
+                '<span class="tm-row-sub">×' + (s.count || 1) + '</span>', rawName);
         }
         setBodyHtml(skillsBody, html);
     }

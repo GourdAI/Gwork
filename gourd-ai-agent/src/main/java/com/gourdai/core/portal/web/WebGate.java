@@ -16,6 +16,9 @@
 package com.gourdai.core.portal.web;
 
 import org.noear.snack4.ONode;
+import org.noear.solon.Solon;
+import org.noear.solon.core.AppContext;
+import com.gourdai.core.config.AgentSettings;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.session.FileAgentSession;
 import com.gourdai.agent.react.ReActAgent;
@@ -114,6 +117,28 @@ public class WebGate extends SimpleWebSocketListener {
 
     /** 统一序列化同一会话的持久化与广播，避免并发事件乱序。 */
     private final Map<String, Object> publishLocks = new ConcurrentHashMap<>();
+
+    /**
+     * 模型表为空时的可读业务错误文案（与 {@code WsGate} 同口径，两处必须字面一致）。
+     *
+     * <p><b>为什么必须拦：</b>{@code engine.getModelOrMain(name)} 在模型表为空时返回
+     * {@code null}（见 {@code HarnessOptions#getModelOrDef} 的 {@code models.isEmpty()} 分支），
+     * 而 null 一路流到 {@code ReActAgentConfig} 构造器的 {@code Objects.requireNonNull} 才炸，
+     * 用户看到的是裸 NPE 文案「chatModel is required」——既不知道是配置问题还是程序缺陷，
+     * 也不知道该去哪里修。远程工作区下这个场景并不罕见：远端进程重启后内存镜像随之消失
+     * （镜像刻意不落盘），模型表就空了。</p>
+     *
+     * <p><b>为什么分两种文案：</b>修复动作完全不同。镜像态（{@code mirrored=true}）下远端
+     * 磁盘上那份 settings.json 属于远端用户自己，让用户「去设置里加模型」是错误指引——
+     * 正确动作是等桌面壳心跳探测到世代号归零后自动重推镜像，或重连远程工作区；
+     * 非镜像态才是真正的「本机没配模型」，指引用户去设置页添加。</p>
+     */
+    private static final String MSG_MODEL_MISSING_MIRROR =
+            "远程模型配置未同步或镜像已失效（远端模型表为空），请稍后重试；持续失败请重连远程工作区";
+
+    /** 非镜像态（本地/CLI，或远端用户自己的会话）下模型表为空的指引文案。 */
+    private static final String MSG_MODEL_MISSING_LOCAL =
+            "未配置可用模型：请在「设置 - 模型」中添加并启用一个模型";
 
 
     /**
@@ -1108,6 +1133,16 @@ public class WebGate extends SimpleWebSocketListener {
         }
 
         ChatModel chatModel = engine.getModelOrMain(selectedModel);
+        if (chatModel == null) {
+            // 屏障：模型表为空（远程镜像丢失 / 本机未配模型）。不拦的话 null 会流到
+            // ReActAgentConfig 的 requireNonNull，用户只看到裸文案「chatModel is required」。
+            // 出站形态与下面 doOnError 分支完全一致（error 帧 + done 帧）：前端 finishStream
+            // 靠 done 收敛等待态，只发 error 会让输入框永久停在加载态。
+            // 此处尚未登记 disposable，直接 return 不会留下 busy 僵尸态。
+            emitToClient(sessionId, WebChunk.ofError(missingChatModelMessage(sessionId)));
+            emitToClient(sessionId, WebChunk.ofDone());
+            return;
+        }
         ReActAgent agent = engine.getAgentOrMain(agentName);
 
         // 自引用持有：供 doOnError/doFinally 做同实例判定（终止回调可能早于/晚于新订阅登记）
@@ -1202,6 +1237,48 @@ public class WebGate extends SimpleWebSocketListener {
     }
 
     /**
+     * 模型表为空时的统一拦截出口：记 WARN（含 sessionId 与 mirrored 态）并返回可读业务文案。
+     *
+     * <p>四处拦截点（本类两处 + {@code WsGate} 两处）共用同一套判定与文案，避免口径漂移：
+     * 早先各写一份的结果就是「Web 端提示去设置页加模型、桌面端提示重连远程」这种自相矛盾。</p>
+     *
+     * <p><b>WARN 必须带 mirrored：</b>这是区分「远端镜像丢失」（运维/自愈问题，壳该重推）与
+     * 「用户真没配模型」（使用问题，该去设置页）的唯一现场证据；只记「模型为空」的话，
+     * 事后翻日志无法判断该派给谁修。</p>
+     *
+     * @param sessionId 会话标识（仅用于日志定位）
+     * @return 面向用户的可读错误文案
+     */
+    private String missingChatModelMessage(String sessionId) {
+        AgentSettings settings = resolveSettings();
+        boolean mirrored = settings != null && settings.isMirrored();
+        LOG.warn("[WebGate] no usable chat model for session {} (mirrored={}): refusing to start run, "
+                + "returning readable business error instead of 'chatModel is required'", sessionId, mirrored);
+        return mirrored ? MSG_MODEL_MISSING_MIRROR : MSG_MODEL_MISSING_LOCAL;
+    }
+
+    /**
+     * 取容器里的 {@link AgentSettings} 单例（{@code App#initAgentSettings} 注册），取不到返回 null。
+     *
+     * <p><b>为什么不能用 {@code AgentSettings.loadFromFile()}：</b>那是从磁盘重读一份新实例，
+     * 而 {@code mirrored}/{@code mirrorGeneration} 是<b>纯内存态</b>（镜像刻意不落盘），
+     * 新实例上永远读到 {@code mirrored=false}——恰好把远程场景误判成本地场景，
+     * 给出「去设置页加模型」这条错误指引。必须读容器里那个被 overlay 端点改过的同一实例。</p>
+     *
+     * <p><b>为什么走容器而不是构造器注入：</b>本类构造签名 {@code WebGate(HarnessEngine)} 由
+     * {@code Configurator} 调用，改签名会波及本次改动范围之外的文件。容器查找失败（如单元测试
+     * 未启动 Solon）时返回 null，调用方按「非镜像态」降级——只影响文案选择，不影响拦截本身。</p>
+     */
+    private static AgentSettings resolveSettings() {
+        try {
+            AppContext context = Solon.context();
+            return context == null ? null : context.getBean(AgentSettings.class);
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
+    /**
      * 同步 run 的等待句柄。
      *
      * <p>订阅与 disposable 登记已在调用线程内同步完成（非阻塞），等待必须在
@@ -1252,6 +1329,18 @@ public class WebGate extends SimpleWebSocketListener {
         }
 
         ChatModel chatModel = engine.getModelOrMain(selectedModel);
+        if (chatModel == null) {
+            // 屏障（同 performAgentTaskAsync）：Loop 同步链路。本方法的契约是「返回可 await 的句柄」，
+            // 调用方 safeChatInputAndCaptureLoop 会在会话锁外阻塞等待 latch——所以这里绝不能返回
+            // 一个永不 countDown 的句柄（等于把 Loop 调度线程永久挂死），必须回一个已终止的句柄。
+            // finalAnswer 填可读文案而非空串：Loop 执行记录里要能看出这轮为什么没跑。
+            String message = missingChatModelMessage(sessionId);
+            emitToClient(sessionId, WebChunk.ofError(message));
+            emitToClient(sessionId, WebChunk.ofDone());
+            CountDownLatch aborted = new CountDownLatch(1);
+            aborted.countDown();
+            return new SyncRunHandle(aborted, new AtomicReference<>(message));
+        }
         ReActAgent agent = engine.getAgentOrMain(agentName);
         CountDownLatch countDownLatch = new CountDownLatch(1);
         AtomicReference<String> finalAnswerRef = new AtomicReference<>("");

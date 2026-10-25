@@ -197,6 +197,113 @@ body.code-mode .usage-view { display: none !important; }
 .usage-heat-months { position: relative; height: 14px; font-size: 11px; line-height: 14px; color: var(--text-secondary); }
 .usage-heat-months span { position: absolute; top: 0; white-space: nowrap; }
 
+/* ── 悬停浮层（.usage-heat-tip）───────────────────────────
+ * 为什么不用原生 title：title 由操作系统/浏览器绘制，字体、圆角、间距、延迟全部
+ * 不可控，且无法承载「日期一行 + 两列指标」的结构；暗色主题下白底黑字刺眼。
+ *
+ * 定位：position:fixed + 坐标由 app-heatmap.js placeTip 算好（含上下翻转与左右夹紧），
+ * 挂在 body 下而非卡片内 —— 卡片若有 overflow 或独立层叠上下文，
+ * absolute 浮层会被裁掉半截（欢迎页热力图就在卡片顶部，最坏情况下根本看不到）。
+ *
+ * z-index 取 9990：高于热力图/侧边栏等常规层，但低于设置弹层（10000）与
+ * 遮罩（10001）。浮层永远不应该盖住模态框。
+ *
+ * pointer-events:none 是必须的：浮层若可命中，鼠标移上去会触发格子的 mouseleave，
+ * 浮层消失→鼠标又落回格子→再次弹出，形成闪烁死循环。
+ *
+ * 【为何不能再用 white-space:nowrap + 固定 max-width】
+ * nowrap 让浮层最小宽度由最长那一行决定，而 max-width:260px 只限制**盒子**，
+ * 不限制内容 —— 实测长译文（如法语「Consommation totale de jetons…」）
+ * 会把盒子顶到 260px 后内容继续画到盒外（scrollW=300 > clientW=260），
+ * 文字直接叠在页面其他内容上；窄窗口（240px）下 260px 的盒子还会整个越出视口。
+ * 现改为“行不换、但允许在可行处折行 + 宽度随内容自适应 + 视口驱动上限”：
+ *   - 标签行允许折行（标签本身是词，换行比截断可读）；日期行保持单行。
+ *   - max-width 改成 min(260px, calc(100vw - 16px)) 确保任何视口都不越界。 */
+.usage-heat-tip {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 9990;
+    pointer-events: none;
+    display: none;
+    min-width: 132px;
+    /* 视口窄于 276px 时以视口为准，否则取 260px。不能写成固定 260px：
+       实测 240px 视口下浮层右边界 268px 直接越出屏幕。 */
+    max-width: min(260px, calc(100vw - 16px));
+    padding: 9px 11px;
+    box-sizing: border-box;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: var(--shadow-lg);
+    font-size: 12px;
+    line-height: 1.5;
+    /* 全局 font-family 在 app.css，这里显式声明仅为避免某些弹层容器继承到等宽字体 */
+    font-family: var(--font-sans);
+    /* 不再全局 nowrap（见上方注释）：默认允许折行以免长译文溢出盒子 */
+    white-space: normal;
+    overflow-wrap: break-word;
+}
+.usage-heat-tip.is-visible { display: block; animation: usage-heat-tip-in .12s ease-out; }
+@keyframes usage-heat-tip-in {
+    from { opacity: 0; transform: translateY(2px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+/* 小三角：用 border 画，颜色跟随主题底色与边框，不用额外 DOM 元素。
+   --tip-arrow-x 由 placeTip 写进元素 style，指向格子中心（已夹在浮层内）。 */
+.usage-heat-tip::after {
+    content: '';
+    position: absolute;
+    left: var(--tip-arrow-x, 50%);
+    margin-left: -5px;
+    border: 5px solid transparent;
+}
+.usage-heat-tip[data-placement="top"]::after {
+    top: 100%;
+    border-top-color: var(--bg-card);
+}
+.usage-heat-tip[data-placement="bottom"]::after {
+    bottom: 100%;
+    border-bottom-color: var(--bg-card);
+}
+/* 日期行：主信息，比指标行重一档。单行不折（短文本，折了更难看），
+   但超长时也要能自己截断而不是撑破盒子。 */
+.usage-heat-tip-date {
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* 指标行：左标签右值，两行等宽对齐。
+   标签允许折行（长译文），值列不折（数字很短，折行会把数字拆开看不了）。 */
+.usage-heat-tip-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+}
+.usage-heat-tip-k {
+    color: var(--text-secondary);
+    font-size: 12px;
+    /* 标签是唯一可能很长的部分，允许在词间折行。
+       min-width:0 必须加：flex 子项默认 min-width:auto，不加就不会收缩，
+       结果还是会把行撑宽（经典 flex 溢出陷阱）。 */
+    min-width: 0;
+    overflow-wrap: break-word;
+}
+.usage-heat-tip-v {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    white-space: nowrap;
+    flex: none;
+}
+
 /* ── 按天 Token 趋势 ─────────────────────────────────── */
 #usageView .usage-trend-wrap {
     width: 100%;

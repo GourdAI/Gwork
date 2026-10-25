@@ -279,6 +279,9 @@ public class UsageStatsService {
 
         // ── 热力图口径：按周对齐的固定窗口（heatmapStart..heatmapEnd），与范围选择器解耦 ──
         // 逐日铺满整周，超出今天的未来日标记 future=true 供前端渲染为空格。
+        // 每格除 tokens/rounds 外还带 sessions（当天有活动的<b>任务/会话个数</b>）：
+        // 悬停浮层要展示「时间 / 任务数 / tokens」三要素，其中任务数只能由账本的
+        // sessions 集合大小得到（rounds 是推理轮数，与任务数不是一回事，两者都要保留）。
         List<Map<String, Object>> heatmap = new ArrayList<>();
         for (LocalDate d = heatmapStart; !d.isAfter(heatmapEnd); d = d.plusDays(1)) {
             Map<String, Object> item = new LinkedHashMap<>();
@@ -287,11 +290,13 @@ public class UsageStatsService {
                 item.put("future", true);
                 item.put("tokens", 0L);
                 item.put("rounds", 0);
+                item.put("sessions", 0);
             } else {
                 UsageArchiveService.DayStat b = buckets.get(d);
                 item.put("future", false);
                 item.put("tokens", b != null ? b.tokens() : 0L);
                 item.put("rounds", b != null ? b.rounds() : 0);
+                item.put("sessions", b != null ? b.sessions.size() : 0);
             }
             heatmap.add(item);
         }

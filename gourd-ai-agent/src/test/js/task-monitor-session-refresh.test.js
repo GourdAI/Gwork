@@ -152,7 +152,7 @@ function makeEl(id) {
     return el;
 }
 
-function runMonitorSandbox() {
+function runMonitorSandbox(overrides) {
     const els = {};
     for (const id of ['taskMonitorDrawer', 'tmEnvBody', 'tmOutputsBody', 'tmSourcesBody', 'tmSkillsBody', 'tmMemoryRow', 'tmMemoryLabel', 'tmMemoryJumpBtn', 'chatView']) {
         els[id] = makeEl(id);
@@ -172,6 +172,8 @@ function runMonitorSandbox() {
         '/web/chat/attachment/list': { items: [] },
         '/web/chat/session/tool-usage': { skills: [], memory: { updated: false } }
     };
+    // 用例可覆盖单个端点的响应（如自定义 skills 行），其余保持默认
+    Object.assign(responses, overrides || {});
     const fetchStub = (url) => {
         const key = Object.keys(responses).find(k => url.indexOf(k) === 0);
         fetchCalls.push(url);
@@ -337,4 +339,56 @@ test('行为：git 两接口瞬断后轮询恢复，错误行必须被清除（�
     assert.ok(els.tmEnvBody.innerHTML.indexOf('monitor.load_failed') < 0,
         '恢复轮询必须清除错误行：同值跳过不得因缓存-DOM 失步吞掉这次恢复渲染');
     assert.ok(els.tmEnvBody.innerHTML.indexOf('monitor.synced') >= 0, '恢复后环境区回到同步态');
+});
+
+/* ===== 技能区展示名（2026-10 用户报障：技能页与任务监控两处名字不一样）=====
+   根因：技能行的 name 是 skillread 的参数值 = 安装目录名（namespace 限定 slug 会
+   落成 _user_xxx_yyy）。技能页已改成显示 displayName，监控这边仍直接渲染 name。
+   本组用例走 vm 行为级：把 displayName 真送进 renderSkills，断言最终写进 DOM
+   的 html 是展示名，且目录名不丢（收进 title）。 */
+test('行为：技能行渲染展示名，目录名收进 title（不丢）', async () => {
+    const { sandbox, els, bodyEl } = runMonitorSandbox({
+        '/web/chat/session/tool-usage': {
+            skills: [{ name: '_user_3b5e1511_lawyer-letter5399', displayName: '示例展示名.Skill', toolName: 'skillread', count: 2 }],
+            memory: { updated: false }
+        }
+    });
+    await openInSessionView(sandbox, els, bodyEl);
+    const html = els.tmSkillsBody.innerHTML;
+    assert.ok(html.indexOf('示例展示名.Skill') >= 0,
+        '监控必须显示展示名（与技能页同一个名字），实际: ' + html);
+    /* 只验【正文】：目录名本来就该出现在 title 属性里（那是刻意保留的），
+       对整段 html 断言「不含目录名」会把正确实现判成缺陷 */
+    const textOnly = html.replace(/<[^>]*>/g, '');
+    assert.ok(textOnly.indexOf('_user_3b5e1511_lawyer-letter5399') < 0,
+        '目录名不得出现在正文（用户看不懂的那个名字），实际正文: ' + textOnly);
+    assert.ok(html.indexOf('title="_user_3b5e1511_lawyer-letter5399"') >= 0,
+        '目录名必须收进 title：悬停仍可看到真实标识（排查时可对照账本）');
+    assert.ok(textOnly.indexOf('×2') >= 0, '调用次数照旧渲染');
+});
+
+test('行为：无 displayName 时回退 name（旧后端/已卸载技能不得渲染成空行）', async () => {
+    const { sandbox, els, bodyEl } = runMonitorSandbox({
+        '/web/chat/session/tool-usage': {
+            skills: [{ name: '_owner_gone-skill', toolName: 'skillread', count: 1 }],
+            memory: { updated: false }
+        }
+    });
+    await openInSessionView(sandbox, els, bodyEl);
+    const html = els.tmSkillsBody.innerHTML;
+    assert.ok(html.indexOf('_owner_gone-skill') >= 0,
+        '无展示名必须回退 name（技能已卸载时算不出展示名），实际: ' + html);
+    assert.ok(html.indexOf('undefined') < 0, '不得渲染出 undefined，实际: ' + html);
+});
+
+test('行为：无参技能（skilllist/skillrefresh）用 toolName 兜底，不得渲染空行', async () => {
+    const { sandbox, els, bodyEl } = runMonitorSandbox({
+        '/web/chat/session/tool-usage': {
+            skills: [{ toolName: 'skilllist', count: 1 }],
+            memory: { updated: false }
+        }
+    });
+    await openInSessionView(sandbox, els, bodyEl);
+    assert.ok(els.tmSkillsBody.innerHTML.indexOf('skilllist') >= 0,
+        '既无 displayName 又无 name 时必须回退 toolName，实际: ' + els.tmSkillsBody.innerHTML);
 });
