@@ -202,22 +202,62 @@ jobs:
       - name: 安装 cross
         run: cargo install cross --locked
 
+      # 静态性校验的硬依赖。ubuntu-latest 默认带 file / binutils，但 runner 镜像
+      # 会变；显式安装可避免「工具缺失 → 校验腿红灯」这种与产物本身无关的假失败。
+      - name: 安装 ELF 校验工具（file / readelf）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y file binutils
+
       - name: 交叉编译内核（musl 静态）
         working-directory: gourd-work
         run: cross build --release --target ${{ matrix.target }} -p gourd-work-cli
 
       # 产物必须真是静态 musl：若 cross 因某种原因产出动态链接二进制，远端仍可能
       # 因 libc 版本跑不起来——“musl 静态”的承诺就没兜现，而故障要到用户连远端才暴露。
+      #
+      # 【2026-11-04 教训：为什么不能只 grep "statically linked"】
+      # run 41797867972 里 x64 腿红、aarch64 腿绿，同一份代码、同一个 rust 工具链：
+      #   x64      → ELF 64-bit LSB pie executable ... static-pie linked, stripped
+      #   aarch64  → ELF 64-bit LSB executable ... statically linked, stripped
+      # rustc 对 x86_64-unknown-linux-musl 默认产出静态 PIE（ET_DYN），对
+      # aarch64-unknown-linux-musl 产出普通静态（ET_EXEC）。`file` 只是如实区分
+      # 这两种 ELF 类型，措辞差异 ≠ 静态性差异：两者都零动态依赖，都满足 musl 承诺。
+      # 旧断言写死单一措辞，等于把 x64 产物永久误杀。
+      #
+      # 现改为两层判据：
+      #   1. 文本层：接受 "statically linked" 或 "static-pie linked" 任一，兼容
+      #      rustc 的 ELF 类型差异与 file 版本演进导致的措辞变化。
+      #   2. 结构层（本质判据）：readelf 查程序头/动态段，只要出现 PT_INTERP
+      #      （需要 ld.so）或 DT_NEEDED（需要共享库）就是动态链接，一律拒绝。
+      #      静态 PIE 与普通静态都没有这两项；这一层完全不依赖 `file` 的措辞。
       - name: 校验产物是静态 ELF
         working-directory: gourd-work
+        shell: bash
         run: |
           set -e
           bin="target/${{ matrix.target }}/release/gwork"
           test -f "$bin" || { echo "::error::未产出 $bin"; exit 1; }
+          command -v file >/dev/null || { echo "::error::缺 file 命令"; exit 1; }
+          # readelf 是纯 ELF 解析、与架构无关（同时覆盖 x86_64 与 aarch64 产物）。
+          # 工具缺失必须显式报错，不能被 || true 吞成「结构层静默跳过」。
+          command -v readelf >/dev/null || { echo "::error::缺 readelf（无法做静态性结构复核）"; exit 1; }
           info="$(file "$bin")"
           echo "$info"
           echo "$info" | grep -qi "ELF" || { echo "::error::不是 ELF: $info"; exit 1; }
-          echo "$info" | grep -qi "statically linked" || { echo "::error::不是静态链接（musl 承诺未兜现）: $info"; exit 1; }
+          echo "$info" | grep -Eqi 'statically linked|static-pie linked' \
+            || { echo "::error::file 未报告静态链接（musl 承诺未兜现）: $info"; exit 1; }
+          prog="$(readelf -lW "$bin")"
+          # 静态文件没有 .dynamic，readelf -d 只打印提示，故按内容判断而非退出码。
+          dyn="$(readelf -dW "$bin" 2>/dev/null || true)"
+          test -n "$prog" || { echo "::error::readelf -lW 无输出，无法判定静态性"; exit 1; }
+          if echo "$prog" | grep -q 'INTERP'; then
+            echo "::error::存在 PT_INTERP（依赖动态加载器 ld.so）: $info"; exit 1
+          fi
+          if echo "$dyn" | grep -q '(NEEDED)'; then
+            echo "::error::存在 DT_NEEDED（链接了共享库）: $info"; exit 1
+          fi
+          echo "静态性确认：无 PT_INTERP / DT_NEEDED — $bin"
 
       # 重命名为部署资产名（与 paths.rs::kernel_asset_tag 逐字对齐）。单独一步而非
       # 直接上传原名：paths.rs 按 `gwork-linux-<arch>` 找资产，而 cargo 产物恒叫 `gwork`，

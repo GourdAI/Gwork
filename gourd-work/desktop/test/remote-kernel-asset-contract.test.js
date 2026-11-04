@@ -66,6 +66,21 @@ function ciKernelAssets() {
   assert.ok(pairs.length >= 2, 'CI kernel-assets 必须至少两个 target/asset 对，实得 ' + pairs.length);
   return pairs;
 }
+// CI: 静态 ELF 校验步骤的脚本体（从 "- name: 校验产物是静态 ELF" 到下一个步骤）
+function ciStaticCheckStep() {
+  const seg = CI_YML.split('name: 校验产物是静态 ELF')[1] || '';
+  const body = seg.split(/\n\s+- name:/)[0];
+  assert.ok(body, 'CI 必须有「校验产物是静态 ELF」步骤');
+  return body;
+}
+// CI: 该文件用来匹配 `file` 输出的正则字面量。测试直接复用它跑代表性样本，
+// 而不是在测试里另写一份正则 —— 另写一份只会两边一起漂移，等于没有护栏。
+function ciStaticFilePattern() {
+  const body = ciStaticCheckStep();
+  const m = body.match(/grep\s+-Eqi\s+'([^']+)'/);
+  assert.ok(m, 'CI 静态校验必须用 grep -Eqi 接受多种静态措辞');
+  return new RegExp(m[1], 'i');
+}
 // CI: 下载内核资产的 pattern 与落点
 function ciDownload() {
   const dl = CI_YML.split('name: 下载内核资产')[1] || '';
@@ -147,4 +162,45 @@ test('paths.rs 发布态候选把 kernels/ 子目录排在带后缀资产之前'
   assert.ok(iTagged >= 0 && iPlainKernels >= 0 && iBare >= 0, '三个候选都必须在');
   assert.ok(iTagged < iPlainKernels, '带平台后缀的候选必须排在不带后缀之前');
   assert.ok(iPlainKernels < iBare, 'kernels/ 子目录候选必须排在裸名之前');
+});
+
+// ── 静态 ELF 校验判据（run 41797867972 的回归护栏）──────────────────────
+//
+// rustc 对 x86_64-unknown-linux-musl 产出静态 PIE（ET_DYN，`file` 报
+// "static-pie linked"），对 aarch64-unknown-linux-musl 产出普通静态（ET_EXEC，
+// `file` 报 "statically linked"）。旧校验只认后者，于是同一次 run 里 x64 红、
+// aarch64 绿——被误杀的是完全合规、零动态依赖的二进制。
+//
+// 这里直接取 CI 里的正则跑代表性样本：既锁住两种合法措辞，也锁住「动态链接
+// 必须被拒」，防止有人为了消红把校验放宽成无条件放行。
+test('CI 静态校验同时接受普通静态与静态 PIE 的 file 描述', () => {
+  const re = ciStaticFilePattern();
+  const cases = [
+    // run 41797867972 的真实输出（x64，旧断言误杀的那一行）
+    ['target/x86_64-unknown-linux-musl/release/gwork: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, stripped', true],
+    // aarch64 的普通静态输出
+    ['target/aarch64-unknown-linux-musl/release/gwork: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped', true],
+    // 大小写与措辞变体（file 版本演进）
+    ['ELF 64-bit LSB pie executable, x86-64, STATIC-PIE LINKED, stripped', true],
+    // 动态链接：绝不能放行，否则 musl 承诺彻底失守
+    ['ELF 64-bit LSB pie executable, x86-64, dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, for GNU/Linux 3.2.0, stripped', false],
+    ['ELF 64-bit LSB executable, x86-64, dynamically linked, stripped', false],
+  ];
+  for (const [sample, expected] of cases) {
+    assert.strictEqual(re.test(sample), expected,
+      `静态判据对 ${JSON.stringify(sample)} 应返回 ${expected}`);
+  }
+  // 兜底：不许退回只认单一措辞的旧写法（它会静默重新引入 x64 误杀）。
+  assert.doesNotMatch(ciStaticCheckStep(), /grep\s+-qi\s+"statically linked"/,
+    '不可退回只认 "statically linked" 的单一措辞断言');
+});
+
+test('CI 静态校验含不依赖 file 措辞的结构复核（PT_INTERP / DT_NEEDED）', () => {
+  const body = ciStaticCheckStep();
+  // 文本层再怎么演进，静态性的本质判据是「没有动态加载器、没有共享库依赖」。
+  assert.match(body, /readelf\s+-lW/, '必须读 ELF 程序头（readelf -lW）');
+  assert.match(body, /readelf\s+-dW/, '必须读 ELF 动态段（readelf -dW）');
+  assert.match(body, /INTERP/, '必须拒绝 PT_INTERP（依赖 ld.so）');
+  assert.match(body, /\(NEEDED\)/, '必须拒绝 DT_NEEDED（链接共享库）');
+  assert.match(body, /command\s+-v\s+readelf/, 'readelf 缺失必须硬失败而不是静默跳过');
 });
