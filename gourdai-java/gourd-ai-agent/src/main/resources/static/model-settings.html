@@ -1,0 +1,142 @@
+<!-- model-settings.html — 模型配置独立主视图片段（与自动化/技能/远控通道同构），由 app-bootstrap.js 装配到 .main-area -->
+<!-- 双栏 Master-Detail 布局：左栏供应商列表（自定义分组 + 状态圆点），右栏详情/表单常驻；
+      表单组件与样式复用 settings.css 组件类（form-group / provider-model-* / settings-scope-toggle 等），DOM id 统一 ms 前缀 -->
+<template data-mount=".main-area">
+<div class="model-settings-view" id="modelSettingsView">
+    <div class="model-settings-scroll">
+        <div class="model-settings-inner">
+            <!-- 头部：标题 + 描述（与自动化/技能视图页头同构） -->
+            <div class="model-settings-header">
+                <h1 class="model-settings-title" data-i18n="settings.providers.view_title">模型设置</h1>
+                <div class="model-settings-subtitle" data-i18n="settings.providers.desc">按服务商配置 AI 模型：填写接口地址与密钥，拉取或手动添加模型，并为每个模型选择接口类型</div>
+                <!-- 当前默认模型提示：跨供应商可见（行内星标只在展开的供应商内可见）；由 app-model-settings.js 动态填充，无默认模型时隐藏 -->
+                <div class="model-settings-default-hint" id="msDefaultModelHint" style="display:none">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <span id="msDefaultModelHintText"></span>
+                </div>
+            </div>
+            <!-- 双栏卡片 -->
+            <div class="model-settings-card">
+                <!-- 左栏：供应商列表 -->
+                <div class="model-settings-left">
+                    <!-- 左栏头部：分组标题 + 新建入口。
+                         新建是「列表级」操作，放左栏顶部作为入口；表单提交（创建）是右栏底部的
+                         主操作。二者曾同名「添加服务商」并排吸在卡片底部，文案与视觉完全重复，
+                         且编辑态下左栏那个按钮仍常驻、右栏那个被隐藏，底部左右还不对称。 -->
+                    <div class="model-settings-left-header">
+                        <span class="model-settings-left-title" data-i18n="settings.providers.custom_group">自定义供应商</span>
+                        <button class="model-settings-add-btn" id="msProviderAddBtn" data-i18n-title="settings.providers.add_title">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        </button>
+                    </div>
+                    <div class="model-settings-left-scroll">
+                        <div class="model-settings-group" id="msGroupCustom">
+                            <div class="model-settings-group-list" id="msCustomList"></div>
+                        </div>
+                    </div>
+                </div>
+                <!-- 右栏：详情/表单 -->
+                <div class="model-settings-right">
+                    <div class="model-settings-form-wrap">
+                        <div class="settings-section">
+                            <div class="settings-section-header">
+                                <div>
+                                    <span class="settings-section-title" id="msProviderFormTitle" data-i18n="settings.providers.add_provider_title">添加模型供应商</span>
+                                    <div class="settings-section-desc" id="msProviderFormDesc" data-i18n="settings.providers.add_provider_desc">配置一个完全自定义的 API 端点和初始模型</div>
+                                </div>
+                                <div class="settings-form-actions" id="msProviderFormActions" style="display:none">
+                                    <button class="settings-form-action-btn danger" id="msProviderFormDeleteBtn" data-i18n-title="settings.common.delete">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                                        <span data-i18n="settings.common.delete">删除</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="openapi-add-form" id="msProviderAddForm">
+                                <div class="form-group">
+                                    <label data-i18n="settings.providers.name_label">名称 <span class="required">*</span></label>
+                                    <input type="text" id="msProviderName" placeholder="GWork"/>
+                                </div>
+                                <div class="form-group">
+                                    <label data-i18n="settings.providers.scope_label">作用域</label>
+                                    <input type="hidden" id="msProviderScope" value="user"/>
+                                    <div class="settings-scope-toggle" data-target="msProviderScope">
+                                        <button class="settings-scope-btn active" data-scope="user" type="button" data-i18n="settings.general.scope_user">用户（全局）</button>
+                                        <button class="settings-scope-btn" data-scope="workspace" type="button" data-i18n="settings.general.scope_workspace">工作区（本地）</button>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label data-i18n="settings.providers.model_list_api_label">模型列表接口</label>
+                                    <div class="layui-form provider-std-form" lay-filter="msProviderStandardForm">
+                                        <input type="radio" name="msProviderStandard" value="openai" title="OpenAI" checked>
+                                        <input type="radio" name="msProviderStandard" value="anthropic" title="Anthropic">
+                                        <input type="radio" name="msProviderStandard" value="ollama" title="Ollama">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label data-i18n="settings.providers.api_url_label">API 地址 <span class="required">*</span></label>
+                                    <input type="text" id="msProviderApiUrl" placeholder="https://www.gourd-ai.cn"/>
+                                </div>
+                                <div class="form-group">
+                                    <label data-i18n="settings.providers.api_key_label">API 密钥</label>
+                                    <div class="password-input-group">
+                                        <input type="password" id="msProviderApiKey" placeholder="sk-xxx" data-i18n-placeholder="settings.providers.api_key_placeholder" autocomplete="new-password"/>
+                                        <button class="password-toggle" id="msProviderApiKeyToggle" data-i18n-title="settings.providers.toggle_visibility">
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label data-i18n="settings.providers.timeout_label">超时时间（可选）</label>
+                                    <input type="text" id="msProviderTimeout" placeholder="120s（默认 120 秒，该服务商下所有模型共用）" data-i18n-placeholder="settings.providers.timeout_placeholder"/>
+                                </div>
+                                <div class="form-group">
+                                    <div class="form-group-header">
+                                        <label data-i18n="settings.providers.models_label">模型管理</label>
+                                        <!-- 模型搜索框：即时过滤当前供应商的模型列表（多词 AND、大小写不敏感，与聊天模型下拉搜索同口径）；
+                                             切换供应商/关闭视图时由脚本清空；批量全选/反选仅作用于过滤后的可见行 -->
+                                        <div class="ms-model-search">
+                                            <svg class="ms-model-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                                            <input type="text" id="msModelSearchInput" autocomplete="off" spellcheck="false" placeholder="搜索模型…" data-i18n-placeholder="settings.providers.search_placeholder"/>
+                                            <span class="ms-model-search-clear" id="msModelSearchClear" style="display:none">&#10005;</span>
+                                        </div>
+                                        <div class="provider-model-header-actions">
+                                            <div class="provider-model-menu-wrap">
+                                                <button class="provider-model-icon-btn" id="msProviderModelsSelectToggle" data-i18n-title="settings.providers.bulk_select_title">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                                                </button>
+                                                <div class="provider-model-menu" id="msProviderModelsActionMenu">
+                                                    <button type="button" class="provider-model-menu-item" id="msProviderModelsSelectAll" data-i18n="settings.providers.select_all">全选</button>
+                                                    <button type="button" class="provider-model-menu-item" id="msProviderModelsSelectNone" data-i18n="settings.providers.select_none">全不选</button>
+                                                    <button type="button" class="provider-model-menu-item" id="msProviderModelsInvert" data-i18n="settings.providers.invert">反选</button>
+                                                </div>
+                                            </div>
+                                            <button class="provider-model-icon-btn" id="msProviderAddModelBtn" data-i18n-title="settings.providers.add_model_title">
+                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                            </button>
+                                            <button class="provider-model-icon-btn" id="msProviderFetchModelsBtn" data-i18n-title="settings.providers.fetch_models_title">
+                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                            </button>
+                                            <button class="provider-model-icon-btn danger" id="msProviderClearModelsBtn" data-i18n-title="settings.providers.clear_models_title">
+                                                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="provider-models-list layui-form" lay-filter="msModelForm" id="msProviderModelsList"></div>
+                                    <div class="provider-models-empty" id="msProviderModelsEmpty" data-i18n="settings.providers.empty_hint">暂无模型，请点击添加或从 API 拉取</div>
+                                    <!-- 搜索无命中空态（有模型但关键词零匹配时显示，与「暂无模型」区分） -->
+                                    <div class="provider-models-empty" id="msProviderModelsSearchEmpty" style="display:none" data-i18n="settings.providers.search_no_result">未找到匹配的模型</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- 右栏吸底操作栏：表单提交（创建服务商）。文案用「创建服务商」以区分左栏头部
+                         的「新建」入口——两者曾是同名「添加服务商」，用户无法判断点哪个才会真正创建。 -->
+                    <div class="model-settings-footer" id="msProviderFormSubmitRow">
+                        <button class="btn-primary" id="msProviderSaveBtn" data-i18n="settings.providers.create">创建服务商</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</template>

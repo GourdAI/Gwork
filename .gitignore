@@ -11,8 +11,8 @@ BOOT-INF/
 .settings
 .springBeans
 .gourdai
-!gourd-ai-desktop/build/extraResources/.gourdai/
-!gourd-ai-desktop/build/extraResources/.gourdai/settings.json
+!gourdai-java/gourd-ai-desktop/build/extraResources/.gourdai/
+!gourdai-java/gourd-ai-desktop/build/extraResources/.gourdai/settings.json
 
 ### IntelliJ IDEA ###
 .idea
@@ -24,7 +24,15 @@ BOOT-INF/
 *.md
 !gourdwork-cli/docs/*.md
 # 内置子代理定义属于运行时必需资源，绝不能被 *.md 规则吞掉
-!gourd-ai-agent/src/main/resources/META-INF/gourdai/agents/*.md
+!gourdai-java/gourd-ai-agent/src/main/resources/META-INF/gourdai/agents/*.md
+# Rust 内核的内置子代理定义同理（agents/mod.rs 用 include_str! 编译进二进制，
+# 文件缺失会编译失败；此规则保证它们在仓库里可见、可 review）
+!gourd-work/core/src/agents/definitions/*.md
+# 仓库根 README 与 Java 模块 README 同样不能被 *.md 吞掉（2026-10-26 迁移后新增）
+!README.md
+!gourdai-java/README.md
+# gourd-work 的 README 是模块说明，必须入库（迁移时实测被 *.md 静默跳过，需 -f 或此规则）
+!gourd-work/README.md
 
 ### NetBeans ###
 nbproject/private/
@@ -44,14 +52,33 @@ TODO.md
 work
 
 .gourdai/
-!gourd-ai-desktop/build/extraResources/.gourdai/
-!gourd-ai-desktop/build/extraResources/.gourdai/settings.json
+!gourdai-java/gourd-ai-desktop/build/extraResources/.gourdai/
+!gourdai-java/gourd-ai-desktop/build/extraResources/.gourdai/settings.json
 
 .gwork/
 downloads/
 _scratch/
 # Local build cache & scratch output (never commit; regenerated on demand)
-gourd-ai-tauri/.cache/
+gourdai-java/gourd-ai-tauri/.cache/
 .tmp/
 .tmp-*
 .research
+
+# ── 2026-10-26 模块迁移遗留：旧路径下的构建产物 ─────────────────────────────
+# 四个 Java 模块已迁入 gourdai-java/，但旧目录里仍残留构建产物
+# （gourd-ai-tauri/src-tauri/target 约 23.4 GB、node_modules、out、.cache、ui 等），
+# 它们被 IDEA / 桌面壳进程持有句柄而无法移动或删除。
+#
+# 这些产物的模块级 .gitignore 已随目录迁走，旧路径因此**失去忽略保护**，
+# `git add -A` 会把 24 GB 构建残骸全部纳入暂存（已实测发生并回滚）。
+#
+# 下面三条用**前导斜杠锚定到仓库根**，只忽略旧路径本身：
+#   /gourd-ai-agent/   只匹配仓库根的 gourd-ai-agent/
+# 绝不能写成 `gourd-ai-agent/`（无前导斜杠）—— 那会匹配任意层级，
+# 把迁移后的 gourdai-java/gourd-ai-agent/ 一起忽略掉，等于让整个模块从 git 消失。
+#
+# 关闭 IDEA 与 GWork 桌面壳后，可直接删除这三个旧目录回收约 24 GB 空间；
+# 删除后这三条规则可一并移除。
+/gourd-ai-agent/
+/gourd-ai-desktop/
+/gourd-ai-tauri/

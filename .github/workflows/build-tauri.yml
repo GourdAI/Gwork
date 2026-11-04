@@ -4,9 +4,9 @@ name: Desktop (Tauri) 多平台打包
 # 打同一个 v* tag 会同时产出两套安装包，产物用不同的 artifact 名区分。
 #
 # 与 Electron 版的关键差异：
-#   1. 后端资源在**本模块自己的目录** gourd-ai-tauri/build/extraResources/。
-#      2026-09-06 前它跨模块引用 gourd-ai-desktop/build/extraResources/，等于「打 Tauri 包
-#      要先打 Electron 包」；现由 cmd/sync-backend.js 直接从 gourd-ai-agent/target 取 jar，
+#   1. 后端资源在**本模块自己的目录** gourdai-java/gourd-ai-tauri/build/extraResources/。
+#      2026-09-06 前它跨模块引用 gourdai-java/gourd-ai-desktop/build/extraResources/，等于「打 Tauri 包
+#      要先打 Electron 包」；现由 cmd/sync-backend.js 直接从 gourdai-java/gourd-ai-agent/target 取 jar，
 #      两个桌面壳互不依赖。
 #   2. 多一条 Rust 工具链，且 Linux 需要 WebKitGTK 等系统库（Tauri 用系统 WebView，
 #      不像 Electron 自带 Chromium）。
@@ -72,7 +72,7 @@ jobs:
       # 坏了几秒内当场红，不用等编译 4 分钟。
       - name: 回归测试（只读资源重复构建）
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: node test/readonly-resource-repro.js
 
       # 发布清单契约：latest.json / downloads.json 必须与产物真实文件名逐字一致
@@ -81,7 +81,7 @@ jobs:
       # 零依赖、毫秒级，同样放在昂贵步骤之前。
       - name: 契约测试（发布清单生成）
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: node test/release-manifest-contract.js
 
       # 安装器品牌位图契约：header.bmp 的 logo 必须留在条幅【左】端（历史 bug：
@@ -90,7 +90,7 @@ jobs:
       # 零依赖、毫秒级。
       - name: 契约测试（安装器品牌位图）
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: node test/nsis-header-asset-contract.js
 
       # 安装器维护页「已存在版本」文案契约：检出「较旧版本」时必须显示**真实版本号**
@@ -98,7 +98,7 @@ jobs:
       # 详见 test/nsis-installed-version-contract.js 头部说明。零依赖、毫秒级。
       - name: 契约测试（安装器版本文案）
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: node test/nsis-installed-version-contract.js
 
       # 安装器标题字号契约：「标题级大字号」判定阈值必须按 DPI 缩放（MulDiv(14, dpi, 96)）。
@@ -107,7 +107,7 @@ jobs:
       # 零依赖、毫秒级。
       - name: 契约测试（安装器标题字号）
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: node test/nsis-title-font-contract.js
 
       # NSIS 冻结模板与 CLI 钉版对齐契约（2026-09-28 事故门禁）：template.nsi 是整份
@@ -119,7 +119,7 @@ jobs:
       # 「实装版本 == 钉版」那条断言（见下一步）。
       - name: 契约测试（NSIS 模板与 CLI 钉版对齐）
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: node test/nsis-template-cli-version-contract.js
 
       # deb control 必填字段契约：应用商店上传时先做「包格式检测」，control 缺少
@@ -128,7 +128,7 @@ jobs:
       # 契约在配置层钉死，防止再被摘掉。零依赖、毫秒级。
       - name: 契约测试（deb control 必填字段）
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: node test/deb-control-fields-contract.js
 
       # macOS 要出 x64 + arm64 两个 dmg，需预装两个 target；其余平台用默认宿主 target
@@ -140,7 +140,7 @@ jobs:
       - name: Rust 构建缓存
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: './gourd-ai-tauri/src-tauri -> target'
+          workspaces: './gourdai-java/gourd-ai-tauri/src-tauri -> target'
 
       # Tauri 在 Linux 用系统 WebView（webkit2gtk）而非自带 Chromium，这些是硬依赖：
       #   libwebkit2gtk-4.1-dev  Tauri v2 的 WebView（4.0 是 v1 的，不通用）
@@ -184,7 +184,7 @@ jobs:
             exit 0
           fi
           echo "使用版本号: $VERSION"
-          cd gourd-ai-tauri
+          cd gourdai-java/gourd-ai-tauri
           node cmd/set-version.js "$VERSION"
           grep -m1 '"version"' src-tauri/tauri.conf.json
           grep -m1 '^version' src-tauri/Cargo.toml
@@ -194,14 +194,14 @@ jobs:
       # -Dgwork.build.revision：把 git 短 sha 写入 jar 内 build-info.properties（与 build.yml 保持一致）
       - name: Maven 构建后端 JAR
         shell: bash
-        run: mvn -B -ntp -pl gourd-ai-agent -am package -DskipTests -Dgwork.build.revision=${GITHUB_SHA::7}
+        run: mvn -f gourdai-java/pom.xml -B -ntp -pl gourd-ai-agent -am package -DskipTests -Dgwork.build.revision=${GITHUB_SHA::7}
 
       # jar 的复制交给 cmd/sync-backend.js（beforeBuildCommand 里也会跑一次，幂等），
       # 保证 CI 与本地走**同一段逻辑**，不再出现「本地忘了复制 jar」这类分叉。
       # --jar-only：此刻 JRE 尚未生成（在下一步），不能做 JRE 校验，否则必败。
       - name: 同步后端 JAR 到 extraResources
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: node cmd/sync-backend.js --jar-only
 
       # 模块清单与 build.ps1 / build.sh / build.yml / cmd/sync-backend.js 保持一致
@@ -221,7 +221,7 @@ jobs:
         run: |
           set -e
           MODULES="java.base,java.logging,java.sql,java.naming,java.management,java.instrument,java.net.http,jdk.crypto.ec,jdk.zipfs,jdk.unsupported"
-          JRE_DIR="gourd-ai-tauri/build/extraResources/jre"
+          JRE_DIR="gourdai-java/gourd-ai-tauri/build/extraResources/jre"
           rm -rf "$JRE_DIR"
           "$JAVA_HOME/bin/jlink" --module-path "$JAVA_HOME/jmods" --add-modules "$MODULES" \
             --output "$JRE_DIR" --strip-debug --compress 2 --no-header-files --no-man-pages
@@ -244,8 +244,8 @@ jobs:
           ARM_HOME="$(find /tmp/jdk-arm64 -maxdepth 5 -name jmods -type d | head -n1 | sed 's|/jmods$||')"
           echo "x64 JDK: $X64_HOME"
           echo "arm64 JDK: $ARM_HOME"
-          OUT_X64="gourd-ai-tauri/build/jre-mac-x64"
-          OUT_ARM="gourd-ai-tauri/build/jre-mac-arm64"
+          OUT_X64="gourdai-java/gourd-ai-tauri/build/jre-mac-x64"
+          OUT_ARM="gourdai-java/gourd-ai-tauri/build/jre-mac-arm64"
           rm -rf "$OUT_X64" "$OUT_ARM"
           "$JAVA_HOME/bin/jlink" --module-path "$X64_HOME/jmods" --add-modules "$MODULES" \
             --output "$OUT_X64" --strip-debug --compress 2 --no-header-files --no-man-pages
@@ -264,7 +264,7 @@ jobs:
       # 资产缺失不阻断打包（Rust 侧回退 L4 远端自装/用户离线包），但 CI 必须产出。
       - name: 生成远端运行时资产（runtime-linux-x64）
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: |
           set -e
           if [ "${{ matrix.platform }}" = "linux" ]; then
@@ -278,7 +278,7 @@ jobs:
       # （prepare-ui.js + generate-nsis-assets.js）在 build 时现生成，无需入库
       - name: 安装前端依赖
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: npm install
 
       # npm install 之后复跑钉版契约：此时 node_modules/@tauri-apps/cli 已存在，
@@ -286,7 +286,7 @@ jobs:
       # node_modules 还不存在，该条是 SKIP 的；两道合起来才闭环。
       - name: 复验 CLI 实装版本与钉版一致
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: node test/nsis-template-cli-version-contract.js
 
       # 决定本次构建是否产出更新包（.sig）由 npm scripts 的 preflight 步骤完成
@@ -298,7 +298,7 @@ jobs:
       - name: 打包（Windows nsis）
         if: matrix.platform == 'win'
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -314,7 +314,7 @@ jobs:
       - name: 打包（Linux deb）
         if: matrix.platform == 'linux'
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -328,7 +328,7 @@ jobs:
         id: deb-control-gate
         if: matrix.platform == 'linux'
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: |
           set -e
           deb_count=0
@@ -380,11 +380,11 @@ jobs:
         id: linux-appimage
         if: matrix.platform == 'linux'
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         env:
           # 指向**源** JRE（build/extraResources/jre）而非 AppDir 内的副本：本步骤开始时
           # AppDir 尚未生成，而源目录在「生成内置 JRE」步骤后必定存在，两者是同一份文件。
-          LD_LIBRARY_PATH: ${{ github.workspace }}/gourd-ai-tauri/build/extraResources/jre/lib:${{ github.workspace }}/gourd-ai-tauri/build/extraResources/jre/lib/server
+          LD_LIBRARY_PATH: ${{ github.workspace }}/gourdai-java/gourd-ai-tauri/build/extraResources/jre/lib:${{ github.workspace }}/gourdai-java/gourd-ai-tauri/build/extraResources/jre/lib/server
           NO_STRIP: 'true'
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -399,7 +399,7 @@ jobs:
       - name: 诊断（Linux AppImage 失败时）
         if: failure() && matrix.platform == 'linux' && steps.linux-appimage.outcome == 'failure'
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: |
           echo "===== 已产出的 bundle ====="
           find src-tauri/target/release/bundle -maxdepth 2 -type f 2>/dev/null | sort || true
@@ -460,7 +460,7 @@ jobs:
       - name: 打包（macOS dmg x64 + arm64）
         if: matrix.platform == 'mac'
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -505,7 +505,7 @@ jobs:
       - name: 校验 macOS 签名
         if: matrix.platform == 'mac'
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: |
           set -e
           for app in src-tauri/target/*/release/bundle/macos/*.app; do
@@ -521,7 +521,7 @@ jobs:
       - name: 归集产物（macOS 双架构防同名覆盖）
         if: matrix.platform == 'mac'
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: |
           set -e
           mkdir -p staging
@@ -563,7 +563,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'win' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-tauri/src-tauri/target/release/bundle/nsis/*.exe
+          path: gourdai-java/gourd-ai-tauri/src-tauri/target/release/bundle/nsis/*.exe
           archive: false
           if-no-files-found: error
 
@@ -571,7 +571,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'win' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-tauri/src-tauri/target/release/bundle/nsis/*.exe.sig
+          path: gourdai-java/gourd-ai-tauri/src-tauri/target/release/bundle/nsis/*.exe.sig
           archive: false
           if-no-files-found: ignore
 
@@ -582,7 +582,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'linux' && steps.deb-control-gate.outcome != 'failure' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-tauri/src-tauri/target/release/bundle/deb/*.deb
+          path: gourdai-java/gourd-ai-tauri/src-tauri/target/release/bundle/deb/*.deb
           archive: false
           if-no-files-found: error
 
@@ -592,7 +592,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'linux' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-tauri/src-tauri/target/release/bundle/appimage/*.AppImage
+          path: gourdai-java/gourd-ai-tauri/src-tauri/target/release/bundle/appimage/*.AppImage
           archive: false
           if-no-files-found: warn
 
@@ -600,7 +600,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'linux' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-tauri/src-tauri/target/release/bundle/appimage/*.AppImage.sig
+          path: gourdai-java/gourd-ai-tauri/src-tauri/target/release/bundle/appimage/*.AppImage.sig
           archive: false
           if-no-files-found: ignore
 
@@ -610,7 +610,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'mac' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-tauri/staging/x64/*.dmg
+          path: gourdai-java/gourd-ai-tauri/staging/x64/*.dmg
           archive: false
           if-no-files-found: error
 
@@ -618,7 +618,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'mac' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-tauri/staging/arm64/*.dmg
+          path: gourdai-java/gourd-ai-tauri/staging/arm64/*.dmg
           archive: false
           if-no-files-found: error
 
@@ -628,7 +628,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'mac' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-tauri/staging/x64/*.app.tar.gz
+          path: gourdai-java/gourd-ai-tauri/staging/x64/*.app.tar.gz
           archive: false
           if-no-files-found: ignore
 
@@ -636,7 +636,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'mac' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-tauri/staging/x64/*.app.tar.gz.sig
+          path: gourdai-java/gourd-ai-tauri/staging/x64/*.app.tar.gz.sig
           archive: false
           if-no-files-found: ignore
 
@@ -644,7 +644,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'mac' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-tauri/staging/arm64/*.app.tar.gz
+          path: gourdai-java/gourd-ai-tauri/staging/arm64/*.app.tar.gz
           archive: false
           if-no-files-found: ignore
 
@@ -652,7 +652,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'mac' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-tauri/staging/arm64/*.app.tar.gz.sig
+          path: gourdai-java/gourd-ai-tauri/staging/arm64/*.app.tar.gz.sig
           archive: false
           if-no-files-found: ignore
 
@@ -705,7 +705,7 @@ jobs:
 
       - name: 生成发布清单（latest.json + downloads.json）
         shell: bash
-        working-directory: gourd-ai-tauri
+        working-directory: gourdai-java/gourd-ai-tauri
         run: |
           set -e
           VERSION=""
@@ -716,15 +716,15 @@ jobs:
           fi
           # downloads.json = 官网下载区数据源，与 latest.json 同一次扫描产出：
           # 清单里写的就是产物真实文件名（上传服务器即生效，发版零改站）。
-          ARGS=(--artifacts ../artifacts --out ../latest.json --site-out ../downloads.json)
+          ARGS=(--artifacts ../../artifacts --out ../../latest.json --site-out ../../downloads.json)
           [ -n "$VERSION" ] && ARGS+=(--version "$VERSION")
           # 缺签名密钥 / 缺安装包时本步可能部分产出或非零退出，这是刻意的：
           # 宁可缺清单，也不能产出缺签名、或指向不存在文件的清单。
           # 两份清单各以「文件是否存在」为准上传（失败仅告警，不阻断 Release）。
           node cmd/generate-latest-json.js "${ARGS[@]}" \
             || echo "::warning::清单未完整生成（常见原因：未配置 TAURI_SIGNING_PRIVATE_KEY / 缺少安装包产物），详见上方日志"
-          if [ -f ../latest.json ]; then cat ../latest.json; fi
-          if [ -f ../downloads.json ]; then cat ../downloads.json; fi
+          if [ -f ../../latest.json ]; then cat ../../latest.json; fi
+          if [ -f ../../downloads.json ]; then cat ../../downloads.json; fi
 
       - name: 上传 latest.json
         if: hashFiles('latest.json') != ''

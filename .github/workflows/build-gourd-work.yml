@@ -1,0 +1,521 @@
+name: GWork Rust 桌面端多平台打包
+
+# ─────────────────────────────────────────────────────────────────────────────
+# gourd-work（Rust 原生内核）的独立打包流水线。
+#
+# 与另外两条流水线的关系：
+#   build.yml        → Electron 壳 + Java 内核（gourdai-java/gourd-ai-desktop）
+#   build-tauri.yml  → Tauri 壳 + Java 内核子进程（gourdai-java/gourd-ai-tauri）
+#   本文件           → Tauri 壳 + **Rust 内核进程内嵌**（gourd-work/desktop）
+#
+# 关键差异（也是本流水线存在的理由）：
+#   1. **不需要 JDK / Maven / jlink**。Java 版要把 jar + 内置 JRE（近 100MB）塞进
+#      安装包，本模块内核是 Rust 静态编译进二进制的，包体小一个量级。
+#   2. **不需要 sync-backend / prepare-ui / brand-jre 等前置脚本**。前端 UI 已作为
+#      唯一源入库在 gourd-work/desktop/ui/（203 文件，含 monaco 与 12 个语言包），
+#      由 tauri.conf.json 的 frontendDist 直接内联，构建期零拷贝。
+#      —— 2026-10-26 起 Java 版前端不再维护，一切前端改动都在 gourd-work 侧。
+#   3. 产物用独立的 artifact 名（gwork-rust-* 前缀），与 Java 版产物并存不覆盖。
+#
+# 触发条件与另两条一致：打同一个 v* tag 会同时产出三套安装包。
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（留空则使用 tauri.conf.json 当前版本）'
+        required: false
+        default: ''
+      publish_release:
+        description: '构建后发布到 GitHub Release（必须同时填写上面的版本号）'
+        type: boolean
+        required: false
+        default: false
+  push:
+    tags:
+      - 'v*'
+    paths:
+      - 'gourd-work/**'
+      - '.github/workflows/build-gourd-work.yml'
+  pull_request:
+    paths:
+      - 'gourd-work/**'
+      - '.github/workflows/build-gourd-work.yml'
+
+env:
+  CARGO_TERM_COLOR: never
+  # 内核与 CLI 的产物名前缀，避免与 Java 版产物在 Release 里混淆
+  ARTIFACT_PREFIX: gwork-rust
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # 门禁：先跑测试与 clippy，坏了在几十秒内当场红，不浪费三平台打包的 20 分钟。
+  # 只跑 core + cli —— desktop crate 在 Linux 上需要 WebKitGTK 系统库，
+  # 而门禁腿不装它们（打包腿才装），所以这里刻意排除 desktop。
+  # ───────────────────────────────────────────────────────────────────────────
+  gate:
+    name: 门禁（test + clippy）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链（含 clippy）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust 构建缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './gourd-work -> target'
+
+      # UI 完整性门禁：前端唯一源已入库，203 个文件 / 12 个语言包 / 10 个 HTML 入口页
+      # 缺一不可。这条断言防的是「误加 /ui/ 到 .gitignore」或「误删语言包」这类
+      # 静默丢失 —— 打包照样成功，但装出来的界面是坏的。
+      - name: UI 完整性门禁
+        shell: bash
+        run: |
+          set -e
+          UI=gourd-work/desktop/ui
+          total=$(find "$UI" -type f | wc -l)
+          locales=$(find "$UI/locales" -name '*.json' | wc -l)
+          htmls=$(find "$UI" -maxdepth 1 -name '*.html' | wc -l)
+          echo "UI 文件总数=$total 语言包=$locales HTML入口页=$htmls"
+          test -f "$UI/index.html" || { echo "::error::缺 index.html"; exit 1; }
+          test "$total" -ge 200 || { echo "::error::UI 文件数 $total < 200，疑似丢失"; exit 1; }
+          test "$locales" -eq 12 || { echo "::error::语言包 $locales != 12"; exit 1; }
+          test "$htmls" -eq 10 || { echo "::error::HTML 入口页 $htmls != 10"; exit 1; }
+          # 12 个语言包必须键数一致，否则某语言界面会出现未翻译的裸键
+          node -e '
+            const fs=require("fs"),p="gourd-work/desktop/ui/locales";
+            const c=x=>Object.values(x).reduce((s,v)=>s+(v&&typeof v==="object"?c(v):1),0);
+            const n=fs.readdirSync(p).filter(f=>f.endsWith(".json")).map(f=>[f,c(JSON.parse(fs.readFileSync(p+"/"+f,"utf8")))]);
+            const set=new Set(n.map(x=>x[1]));
+            n.forEach(([f,k])=>console.log("  "+f+" 叶子键="+k));
+            if(set.size!==1){console.error("::error::语言包键数不一致: "+[...set].join(","));process.exit(1);}
+          '
+
+      - name: cargo test（core + cli）
+        working-directory: gourd-work
+        run: cargo test -p gourd-work-core -p gourd-work-cli --all-targets
+
+      # 前端契约测试。这些测试锁的是「桌面壳下 API 地址必须可达」这类
+      # 纯前端不变量（DOM 属性形态的 /web/ 地址不经 fetch/XHR/WS，kernel-bridge
+      # 的三层改写拦不到），cargo test 覆盖不到。runner 自带 node（上面的 UI
+      # 完整性门禁已在用），无需 setup-node。
+      #
+      # glob 故意**不加引号**：引号形式要由 node 自己展开，而那是 node 21+ 才
+      # 有的能力；本腿没有 setup-node，用的是 runner 自带版本（ubuntu-24.04 为
+      # node 20），加了引号会在 CI 上直接报找不到测试。交给 bash 展开成显式
+      # 文件列表，node 18+ 都能跑；无匹配时 bash 传字面量、node 报错，仍是真失败。
+      - name: 前端契约测试（node --test）
+        working-directory: gourd-work/desktop
+        run: node --test test/*.test.js
+
+      # clippy 不加 -D warnings：当前代码库有既存警告（unused variable 等），
+      # 加了会让门禁永久红 —— 永久红的门禁等于没有门禁，还会训练人忽略红灯。
+      # 警告照常输出供人查看，等清零后再收紧成硬门禁。
+      - name: cargo clippy（core + cli，仅告警不阻断）
+        working-directory: gourd-work
+        run: cargo clippy -p gourd-work-core -p gourd-work-cli --all-targets
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Linux 内核资产（远程工作空间的部署物）
+  #
+  # 远程工作空间方案 A：桌面壳把**内核二进制**部署到远端主机运行。远端几乎
+  # 都是 Linux，所以三平台安装包（win/mac/linux）都要携带同一份 Linux 内核资产——
+  # Windows/macOS 的构建腿无法交叉编译 Linux 目标，故独立成 job 产出一次、三腿共享。
+  #
+  # 【为何 musl 静态】用户拍板：musl 静态二进制不链接任何远端 libc，Alpine/CentOS 7/
+  # 老 Ubuntu 都能跑，远端零先决条件。gnu 动态构建则受构建机 glibc 版本限制
+  # （在 ubuntu-22.04 上构建 → glibc < 2.35 的远端全部报 GLIBC_2.35 not found）。
+  #
+  # 【为何用 cross】aarch64-unknown-linux-musl 需要 aarch64 的 musl C 工具链
+  # （依赖树含 ring，经 rustls；ring 的 build.rs 要编译 C）。cross 的 Docker 镜像
+  # 为每个 target 预装了正确的工具链，开箱即用。
+  #
+  # ⚠️ 本 job 涉及 Linux musl 交叉编译，无法在开发机（Windows）验证，必须在
+  # GitHub Actions 上实跑一次确认。产物命名与 paths.rs 的 kernel_asset_tag 逐字
+  # 对齐（gwork-linux-x64 / gwork-linux-aarch64），由
+  # desktop/test/remote-kernel-asset-contract.test.js 钉死（它同时读本文件、
+  # tauri.conf.json、paths.rs、deploy.rs 四方比对，跑在 gate 的 node --test 里）。
+  # ─────────────────────────────────────────────────────────────────────────
+  kernel-assets:
+    name: Linux 内核资产 (${{ matrix.asset }})
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset: gwork-linux-x64
+          - target: aarch64-unknown-linux-musl
+            asset: gwork-linux-aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust 构建缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './gourd-work -> target'
+
+      - name: 安装 cross
+        run: cargo install cross --locked
+
+      - name: 交叉编译内核（musl 静态）
+        working-directory: gourd-work
+        run: cross build --release --target ${{ matrix.target }} -p gourd-work-cli
+
+      # 产物必须真是静态 musl：若 cross 因某种原因产出动态链接二进制，远端仍可能
+      # 因 libc 版本跑不起来——“musl 静态”的承诺就没兜现，而故障要到用户连远端才暴露。
+      - name: 校验产物是静态 ELF
+        working-directory: gourd-work
+        run: |
+          set -e
+          bin="target/${{ matrix.target }}/release/gwork"
+          test -f "$bin" || { echo "::error::未产出 $bin"; exit 1; }
+          info="$(file "$bin")"
+          echo "$info"
+          echo "$info" | grep -qi "ELF" || { echo "::error::不是 ELF: $info"; exit 1; }
+          echo "$info" | grep -qi "statically linked" || { echo "::error::不是静态链接（musl 承诺未兜现）: $info"; exit 1; }
+
+      # 重命名为部署资产名（与 paths.rs::kernel_asset_tag 逐字对齐）。单独一步而非
+      # 直接上传原名：paths.rs 按 `gwork-linux-<arch>` 找资产，而 cargo 产物恒叫 `gwork`，
+      # 两个 arch 的产物同名，不重命名就会在 artifact 里互相覆盖（upload-artifact 拍平目录）。
+      - name: 重命名为部署资产名
+        working-directory: gourd-work
+        run: |
+          set -e
+          mkdir -p ../kernel-staging
+          cp "target/${{ matrix.target }}/release/gwork" "../kernel-staging/${{ matrix.asset }}"
+          chmod +x "../kernel-staging/${{ matrix.asset }}"
+          ls -la ../kernel-staging
+
+      - name: 上传内核资产
+        uses: actions/upload-artifact@v7
+        with:
+          # archive:false 下 upload-artifact v7 **忽略 name 字段**，artifact 名恒等于
+          # 文件 basename（@actions/artifact 在 skipArchive 分支里 name = basename(files[0])，
+          # 与 build.yml 同一条约束）。文件已重命名为 ${{ matrix.asset }}，故 artifact 名
+          # 就是它（gwork-linux-x64 / gwork-linux-aarch64）。name 字段写成同值仅为不自欺。
+          # 下游 build job 的下载 pattern 必须是 gwork-linux-*（而非 gwork-kernel-*），
+          # 否则匹配不到 → 静默零产物。
+          name: ${{ matrix.asset }}
+          path: kernel-staging/${{ matrix.asset }}
+          archive: false
+          if-no-files-found: error
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 三平台桌面安装包
+  # ───────────────────────────────────────────────────────────────────────────
+  build:
+    name: ${{ matrix.label }}
+    needs: [gate, kernel-assets]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+            label: Windows (nsis x64)
+          - os: macos-latest
+            platform: mac
+            label: macOS (dmg x64+arm64)
+          # 固定 22.04 而非 ubuntu-latest：Tauri v2 需要 webkit2gtk-4.1，
+          # 且低版本 glibc 能让 AppImage 覆盖更多发行版。
+          # 24.04 上 libfuse2 已改名 libfuse2t64 —— 与 build-tauri.yml 同一理由。
+          - os: ubuntu-22.04
+            platform: linux
+            label: Linux (AppImage/deb x64)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node.js（仅为钉版 @tauri-apps/cli）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # macOS 要出 x64 + arm64 两个 dmg，需预装两个 target；其余平台用默认宿主 target
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'mac' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust 构建缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './gourd-work -> target'
+
+      # Tauri 在 Linux 用系统 WebView（webkit2gtk）而非自带 Chromium，这些是硬依赖。
+      # 与 build-tauri.yml 保持同一份清单，避免两条流水线因依赖差异产生
+      # 「一条能打包另一条不能」的诡异分叉。
+      - name: 安装 Linux 系统依赖
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            libfuse2 \
+            xdg-utils
+
+      - name: 安装前端构建依赖（@tauri-apps/cli 钉版 2.12.0）
+        working-directory: gourd-work/desktop
+        run: npm install
+
+      # ── 下载 Linux 内核资产 → tauri bundle.resources 的源目录 ────────────────
+      # 三平台安装包都携带**同一份** Linux 内核（远端几乎都是 Linux）。落点
+      # `desktop/build/extraResources/kernels/` 必须与 tauri.conf.json 的 bundle.resources
+      # 源路径逐字一致，也必须与 paths.rs 的 `resources_dir()/kernels/gwork-linux-<arch>`
+      # 候选逐字一致——任一处漂移就是**静默零产物**：打包成功、安装成功，但发布版
+      # 连远端时报「读取本地内核二进制失败」，而本地 cargo test 全绿（开发态走
+      # target/release/gwork 回落，根本不碰这个资产目录）。
+      #
+      # merge-multiple：两个 artifact（x64/aarch64）合并进同一目录，正好得到
+      # kernels/gwork-linux-x64 + kernels/gwork-linux-aarch64 两个文件。
+      - name: 下载内核资产
+        uses: actions/download-artifact@v8
+        with:
+          # pattern 必须匹配 upload-artifact 在 archive:false 下的**真实** artifact 名
+          # （= 文件 basename = gwork-linux-<arch>），不是上传步骤里那个被忽略的 name。
+          # gwork-linux-* 不会误匹配安装包（那些是 gwork-rust-* 前缀）。
+          pattern: gwork-linux-*
+          path: gourd-work/desktop/build/extraResources/kernels
+          merge-multiple: true
+
+      # 资产必须真的落地且是两个 arch：download-artifact 在 pattern 无匹配时默认
+      # 静默成功（产出空目录），不校验就会把「零产物」带到打包环节。
+      - name: 校验内核资产就位
+        shell: bash
+        run: |
+          set -e
+          d="gourd-work/desktop/build/extraResources/kernels"
+          for a in gwork-linux-x64 gwork-linux-aarch64; do
+            test -s "$d/$a" || { echo "::error::缺内核资产 $d/$a（kernel-assets job 未产出或命名漂移）"; exit 1; }
+            chmod +x "$d/$a"
+          done
+          ls -la "$d"
+
+      # 版本号三处必须同步：Cargo.toml（workspace.package）、tauri.conf.json、
+      # desktop/package.json。漂移会让产物文件名与实际内核版本对不上。
+      - name: 写入版本号
+        if: ${{ github.event.inputs.version != '' }}
+        shell: bash
+        working-directory: gourd-work
+        run: |
+          set -e
+          V="${{ github.event.inputs.version }}"
+          V="${V#v}"
+          echo "写入版本号: $V"
+          node -e '
+            const fs=require("fs");
+            const v=process.argv[1];
+            // tauri.conf.json
+            const cf="desktop/src-tauri/tauri.conf.json";
+            const c=JSON.parse(fs.readFileSync(cf,"utf8")); c.version=v;
+            fs.writeFileSync(cf, JSON.stringify(c,null,2)+"\n");
+            // desktop/package.json
+            const pf="desktop/package.json";
+            const p=JSON.parse(fs.readFileSync(pf,"utf8")); p.version=v;
+            fs.writeFileSync(pf, JSON.stringify(p,null,2)+"\n");
+            // Cargo.toml 的 [workspace.package] version
+            const tf="Cargo.toml";
+            let t=fs.readFileSync(tf,"utf8");
+            t=t.replace(/^(\s*version\s*=\s*)"[^"]+"/m, `$1"${v}"`);
+            fs.writeFileSync(tf,t);
+            console.log("已同步三处版本号 → "+v);
+          ' "$V"
+
+      - name: 打包（Windows nsis）
+        if: matrix.platform == 'win'
+        working-directory: gourd-work/desktop
+        run: npm run build:win
+
+      - name: 打包（Linux deb）
+        if: matrix.platform == 'linux'
+        working-directory: gourd-work/desktop
+        run: npm run build:linux:deb
+
+      # AppImage 单独一步且允许失败：它依赖 linuxdeploy 下载外部工具，
+      # 网络抖动时 deb 已成功不该被它连坐。失败日志单独上传便于排查。
+      - name: 打包（Linux AppImage）
+        if: matrix.platform == 'linux'
+        continue-on-error: true
+        working-directory: gourd-work/desktop
+        run: npm run build:linux:appimage 2>&1 | tee /tmp/gwork-appimage-build.log
+
+      - name: 打包（macOS dmg 双架构）
+        if: matrix.platform == 'mac'
+        working-directory: gourd-work/desktop
+        run: |
+          set -e
+          for triple in x86_64-apple-darwin aarch64-apple-darwin; do
+            echo "=== 构建 $triple ==="
+            npx tauri build --ci --bundles app,dmg --target "$triple"
+          done
+
+      # ── 产物上传 ────────────────────────────────────────────────────────────
+      # 【路径口径·实测确认】gourd-work 是 Cargo **workspace**（根 Cargo.toml 的
+      # members 含 core/cli/desktop/src-tauri），所以 target 目录在 **workspace 根**
+      # gourd-work/target/，而不是 desktop/src-tauri/target/。
+      # 这与旧 gourd-ai-tauri 不同 —— 后者的 src-tauri 不属于任何 workspace，
+      # 才有自己的 target。照抄旧流水线的路径会**静默零产物**（打包成功但上传为空）。
+      # 2026-10-26 Windows 实测：target/release/bundle/nsis/GWork_0.3.0_x64-setup.exe (7.75 MiB)
+      #
+      # if-no-files-found 分级（沿用 build-tauri.yml 的口径）：
+      #   安装包本体 → error（成功路径上必须存在，防 path 写错静默零产物）
+      #   AppImage   → warn（可能上一步失败而 deb 已成功，不该再报一次盖掉真因）
+      - name: 上传安装包（Windows nsis）
+        if: ${{ !cancelled() && matrix.platform == 'win' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_PREFIX }}-windows-nsis
+          path: gourd-work/target/release/bundle/nsis/*.exe
+          archive: false
+          if-no-files-found: error
+
+      - name: 上传安装包（Linux deb）
+        if: ${{ !cancelled() && matrix.platform == 'linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_PREFIX }}-linux-deb
+          path: gourd-work/target/release/bundle/deb/*.deb
+          archive: false
+          if-no-files-found: error
+
+      - name: 上传安装包（Linux AppImage）
+        if: ${{ !cancelled() && matrix.platform == 'linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_PREFIX }}-linux-appimage
+          path: gourd-work/target/release/bundle/appimage/*.AppImage
+          archive: false
+          if-no-files-found: warn
+
+      - name: 上传 AppImage 失败日志
+        if: ${{ !cancelled() && matrix.platform == 'linux' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_PREFIX }}-appimage-debug-log
+          path: /tmp/gwork-appimage-build.log
+          if-no-files-found: ignore
+
+      - name: 上传安装包（macOS dmg x64）
+        if: ${{ !cancelled() && matrix.platform == 'mac' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_PREFIX }}-macos-dmg-x64
+          path: gourd-work/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          archive: false
+          if-no-files-found: error
+
+      - name: 上传安装包（macOS dmg arm64）
+        if: ${{ !cancelled() && matrix.platform == 'mac' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_PREFIX }}-macos-dmg-arm64
+          path: gourd-work/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          archive: false
+          if-no-files-found: error
+
+      # ── CLI 二进制（远程工作空间/无头场景用，顺带产出，成本几乎为零）────────
+      - name: 构建 CLI（gwork）
+        working-directory: gourd-work
+        run: cargo build --release -p gourd-work-cli
+
+      # 重命名成带平台的资产名再上传。两条硬约束逼出这一步（与 build.yml 同源）：
+      # archive:false 下 upload-artifact **忽略 name 字段**、artifact 名恒等于文件
+      # basename；而三平台 CLI 的 basename 都是 gwork / gwork.exe → Linux 与 Mac
+      # 撞名互相覆盖，且光改 name 字段无效。重命名让 basename 自带平台，既消除
+      # 撞名，又让 Release 里用户看到的就是 gwork-cli-<平台>（用户诉求：别在中间
+      # 夹语言段）。Windows 保留 .exe（否则用户下载下来不能直接跑）。
+      - name: 重命名 CLI 资产
+        shell: bash
+        working-directory: gourd-work
+        run: |
+          set -e
+          mkdir -p cli-staging
+          if [ -f target/release/gwork.exe ]; then
+            cp target/release/gwork.exe "cli-staging/gwork-cli-${{ matrix.platform }}.exe"
+          else
+            cp target/release/gwork "cli-staging/gwork-cli-${{ matrix.platform }}"
+            chmod +x "cli-staging/gwork-cli-${{ matrix.platform }}"
+          fi
+          ls -la cli-staging
+
+      - name: 上传 CLI 二进制
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gwork-cli-${{ matrix.platform }}
+          path: gourd-work/cli-staging/*
+          archive: false
+          if-no-files-found: warn
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 发布到 GitHub Release（仅在填了版本号且勾选 publish_release 时执行）
+  # 刻意不 checkout：只需要 artifacts 与 gh CLI，省一次全仓检出。
+  # 与另两条流水线共写同一个 Release，靠 gwork-rust-* 前缀区分产物。
+  # ───────────────────────────────────────────────────────────────────────────
+  release:
+    name: 发布到 GitHub Release
+    if: ${{ github.event.inputs.publish_release == 'true' && github.event.inputs.version != '' }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # 不写 pattern：本 workflow 所有产物都以 archive:false 上传，artifact 名就是
+      # 文件 basename，没有统一前缀可匹配（旧版写 pattern: gwork-rust-* 其实一个都
+      # 匹配不到，那是个既存哑弹，与 build.yml 同源）。直接拉本次 run 全部 artifact，
+      # 下一步按白名单挑出要发布的。
+      - name: 下载全部产物
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: 汇总待发布文件
+        run: |
+          set -e
+          mkdir -p release
+          # Release 资产是扁平的，只认 basename，故先查重名：同名会静默覆盖，
+          # 用户可能下到错架构的包，比构建失败更难排查。
+          dups="$(find artifacts -type f -printf '%f\n' | sort | uniq -d)"
+          if [ -n "$dups" ]; then
+            echo "::error::存在同名产物，扁平上传会互相覆盖："; echo "$dups"; exit 1
+          fi
+          # 白名单：安装包（各平台格式）+ CLI 二进制（gwork-cli-*）。
+          # **排除**内核资产 gwork-linux-x64 / gwork-linux-aarch64（无扩展名、不匹配
+          # 白名单，自然排除）——那是给安装包内嵌、部署到远端的中间产物，不是用户
+          # 下载物；也排除 appimage 调试日志（*.log）。
+          find artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' \
+            -o -name '*.deb' -o -name 'gwork-cli-*' \) \
+            -exec cp {} release/ \;
+          ls -lh release
+          [ -n "$(ls -A release)" ] || { echo "::error::没有可发布的产物"; exit 1; }
+
+      - name: 创建/更新 Release 并上传
+        run: |
+          set -e
+          TAG="v${{ github.event.inputs.version }}"
+          gh release create "$TAG" --title "$TAG" --notes "GWork Rust 原生内核桌面端" || true
+          gh release upload "$TAG" release/* --clobber

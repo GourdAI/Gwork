@@ -1,0 +1,25 @@
+﻿cargo :     Checking gourd-work-core v0.3.0 (D:\work\gourd\gourdai\gourd-work\core)
+At line:10 char:277
++ ... only) ---"; cargo check -p gourd-work-core -p gourd-work-cli --all-ta ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checking go...ourd-work\core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused variable: `key`
+    --> core\src\llm\dialect.rs:2298:23
+     |
+2298 |         for (dialect, key) in [
+     |                       ^^^ help: if this is intentional, prefix it with an underscore: `_key`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+    Checking gourd-work-cli v0.3.0 (D:\work\gourd\gourdai\gourd-work\cli)
+warning: unused variable: `id`
+    --> core\src\session\mod.rs:1531:15
+     |
+1531 |     fn stored(id: &str, n: usize) -> Vec<StoredMessage> {
+     |               ^^ help: if this is intentional, prefix it with an underscore: `_id`
+
+warning: `gourd-work-core` (lib test) generated 2 warnings (run `cargo fix --lib -p gourd-work-core --tests` to apply 2
+ suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.20s

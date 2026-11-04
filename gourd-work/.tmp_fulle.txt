@@ -1,0 +1,646 @@
+﻿cargo :    Compiling gourd-work-core v0.3.0 (D:\work\gourd\gourdai\gourd-work\core)
+At line:10 char:38
++ ... gourd-work; cargo test --workspace > .tmp_full.txt 2>.tmp_fulle.txt;  ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling go...ourd-work\core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused variable: `id`
+    --> core\src\session\mod.rs:1531:15
+     |
+1531 |     fn stored(id: &str, n: usize) -> Vec<StoredMessage> {
+     |               ^^ help: if this is intentional, prefix it with an underscore: `_id`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling gourd-work-desktop v0.3.0 (D:\work\gourd\gourdai\gourd-work\desktop\src-tauri)
+   Compiling gourd-work-cli v0.3.0 (D:\work\gourd\gourdai\gourd-work\cli)
+error[E0425]: cannot find function `preset_runtime_usable` in module `deploy`
+  --> desktop\src-tauri\src\remote\mod.rs:79:16
+   |
+79 |     if deploy::preset_runtime_usable(env) {
+   |                ^^^^^^^^^^^^^^^^^^^^^ not found in `deploy`
+
+error[E0425]: cannot find function `remote_runtime_java` in module `deploy`
+   --> desktop\src-tauri\src\remote\mod.rs:103:37
+    |
+103 |             env.java = Some(deploy::remote_runtime_java(env));
+    |                                     ^^^^^^^^^^^^^^^^^^^
+    |
+   ::: desktop\src-tauri\src\remote\deploy.rs:897:1
+    |
+897 | pub fn remote_jre_java(env: &RemoteEnv, os: &str, arch: &str) -> String {
+    | ----------------------------------------------------------------------- similarly named function `remote_jre_java
+` defined here
+    |
+help: a function with a similar name exists
+    |
+103 -             env.java = Some(deploy::remote_runtime_java(env));
+103 +             env.java = Some(deploy::remote_jre_java(env));
+    |
+
+error[E0425]: cannot find function `deploy_runtime` in module `deploy`
+   --> desktop\src-tauri\src\remote\mod.rs:112:17
+    |
+112 |         deploy::deploy_runtime(
+    |                 ^^^^^^^^^^^^^^ not found in `deploy`
+
+error[E0425]: cannot find function `remote_runtime_java` in module `deploy`
+   --> desktop\src-tauri\src\remote\mod.rs:121:33
+    |
+121 |         env.java = Some(deploy::remote_runtime_java(env));
+    |                                 ^^^^^^^^^^^^^^^^^^^
+    |
+   ::: desktop\src-tauri\src\remote\deploy.rs:897:1
+    |
+897 | pub fn remote_jre_java(env: &RemoteEnv, os: &str, arch: &str) -> String {
+    | ----------------------------------------------------------------------- similarly named function `remote_jre_java
+` defined here
+    |
+help: a function with a similar name exists
+    |
+121 -         env.java = Some(deploy::remote_runtime_java(env));
+121 +         env.java = Some(deploy::remote_jre_java(env));
+    |
+
+error[E0425]: cannot find function `libc_gate` in module `deploy`
+   --> desktop\src-tauri\src\remote\mod.rs:129:34
+    |
+129 |     if let Err(reason) = deploy::libc_gate(env.libc.as_deref()) {
+    |                                  ^^^^^^^^^ not found in `deploy`
+
+error[E0425]: cannot find function `remote_runtime_java` in module `deploy`
+   --> desktop\src-tauri\src\remote\mod.rs:144:37
+    |
+144 |             env.java = Some(deploy::remote_runtime_java(env));
+    |                                     ^^^^^^^^^^^^^^^^^^^
+    |
+   ::: desktop\src-tauri\src\remote\deploy.rs:897:1
+    |
+897 | pub fn remote_jre_java(env: &RemoteEnv, os: &str, arch: &str) -> String {
+    | ----------------------------------------------------------------------- similarly named function `remote_jre_java
+` defined here
+    |
+help: a function with a similar name exists
+    |
+144 -             env.java = Some(deploy::remote_runtime_java(env));
+144 +             env.java = Some(deploy::remote_jre_java(env));
+    |
+
+error[E0425]: cannot find function `deploy_runtime` in module `deploy`
+   --> desktop\src-tauri\src\remote\mod.rs:154:17
+    |
+154 |         deploy::deploy_runtime(
+    |                 ^^^^^^^^^^^^^^ not found in `deploy`
+
+error[E0425]: cannot find function `remote_runtime_java` in module `deploy`
+   --> desktop\src-tauri\src\remote\mod.rs:163:33
+    |
+163 |         env.java = Some(deploy::remote_runtime_java(env));
+    |                                 ^^^^^^^^^^^^^^^^^^^
+    |
+   ::: desktop\src-tauri\src\remote\deploy.rs:897:1
+    |
+897 | pub fn remote_jre_java(env: &RemoteEnv, os: &str, arch: &str) -> String {
+    | ----------------------------------------------------------------------- similarly named function `remote_jre_java
+` defined here
+    |
+help: a function with a similar name exists
+    |
+163 -         env.java = Some(deploy::remote_runtime_java(env));
+163 +         env.java = Some(deploy::remote_jre_java(env));
+    |
+
+error[E0425]: cannot find function `kernel_libc_gate` in module `deploy`
+   --> desktop\src-tauri\src\remote\mod.rs:850:34
+    |
+850 |     if let Err(reason) = deploy::kernel_libc_gate(env.libc.as_deref()) {
+    |                                  ^^^^^^^^^^^^^^^^ not found in `deploy`
+
+error[E0425]: cannot find function `kernel_libc_gate` in module `deploy`
+    --> desktop\src-tauri\src\remote\mod.rs:1086:42
+     |
+1086 |             if let Err(reason) = deploy::kernel_libc_gate(env.libc.as_deref()) {
+     |                                          ^^^^^^^^^^^^^^^^ not found in `deploy`
+
+warning: variable does not need to be mutable
+   --> desktop\src-tauri\src\remote\ssh.rs:593:13
+    |
+593 |         let mut session = Self::connect_over_stream(stream, target.clone(), auth).await?;
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+error[E0609]: no field `preset_runtime_java` on type `&mut RemoteEnv`
+  --> desktop\src-tauri\src\remote\mod.rs:81:24
+   |
+81 |         env.java = env.preset_runtime_java.clone();
+   |                        ^^^^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0609]: no field `preset_runtime_java` on type `&mut remote::deploy::RemoteEnv`
+  --> desktop\src-tauri\src\remote\mod.rs:81:24
+   |
+81 |         env.java = env.preset_runtime_java.clone();
+   |                        ^^^^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0609]: no field `preset_runtime_java` on type `&mut RemoteEnv`
+  --> desktop\src-tauri\src\remote\mod.rs:84:12
+   |
+84 |     if env.preset_runtime_java.is_some() {
+   |            ^^^^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0609]: no field `preset_runtime_java` on type `&mut remote::deploy::RemoteEnv`
+  --> desktop\src-tauri\src\remote\mod.rs:84:12
+   |
+84 |     if env.preset_runtime_java.is_some() {
+   |            ^^^^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0609]: no field `preset_java_major` on type `&mut remote::deploy::RemoteEnv`
+  --> desktop\src-tauri\src\remote\mod.rs:87:17
+   |
+87 |             env.preset_java_major.unwrap_or(0),
+   |                 ^^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0609]: no field `preset_java_major` on type `&mut RemoteEnv`
+  --> desktop\src-tauri\src\remote\mod.rs:87:17
+   |
+87 |             env.preset_java_major.unwrap_or(0),
+   |                 ^^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0609]: no field `runtime_fingerprint` on type `&mut RemoteEnv`
+   --> desktop\src-tauri\src\remote\mod.rs:101:16
+    |
+101 |         if env.runtime_fingerprint.as_deref() == Some(fp.as_str()) {
+    |                ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+101 -         if env.runtime_fingerprint.as_deref() == Some(fp.as_str()) {
+101 +         if env.current_fingerprint.as_deref() == Some(fp.as_str()) {
+    |
+
+error[E0609]: no field `runtime_fingerprint` on type `&mut remote::deploy::RemoteEnv`
+   --> desktop\src-tauri\src\remote\mod.rs:101:16
+    |
+101 |         if env.runtime_fingerprint.as_deref() == Some(fp.as_str()) {
+    |                ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+101 -         if env.runtime_fingerprint.as_deref() == Some(fp.as_str()) {
+101 +         if env.current_fingerprint.as_deref() == Some(fp.as_str()) {
+    |
+
+error[E0609]: no field `runtime_fingerprint` on type `&mut RemoteEnv`
+   --> desktop\src-tauri\src\remote\mod.rs:122:13
+    |
+122 |         env.runtime_fingerprint = Some(fp);
+    |             ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+122 -         env.runtime_fingerprint = Some(fp);
+122 +         env.current_fingerprint = Some(fp);
+    |
+
+error[E0609]: no field `runtime_fingerprint` on type `&mut remote::deploy::RemoteEnv`
+   --> desktop\src-tauri\src\remote\mod.rs:122:13
+    |
+122 |         env.runtime_fingerprint = Some(fp);
+    |             ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+122 -         env.runtime_fingerprint = Some(fp);
+122 +         env.current_fingerprint = Some(fp);
+    |
+
+error[E0609]: no field `runtime_fingerprint` on type `&mut RemoteEnv`
+   --> desktop\src-tauri\src\remote\mod.rs:142:16
+    |
+142 |         if env.runtime_fingerprint.as_deref() == Some(fp.as_str()) {
+    |                ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+142 -         if env.runtime_fingerprint.as_deref() == Some(fp.as_str()) {
+142 +         if env.current_fingerprint.as_deref() == Some(fp.as_str()) {
+    |
+
+error[E0609]: no field `runtime_fingerprint` on type `&mut remote::deploy::RemoteEnv`
+   --> desktop\src-tauri\src\remote\mod.rs:142:16
+    |
+142 |         if env.runtime_fingerprint.as_deref() == Some(fp.as_str()) {
+    |                ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+142 -         if env.runtime_fingerprint.as_deref() == Some(fp.as_str()) {
+142 +         if env.current_fingerprint.as_deref() == Some(fp.as_str()) {
+    |
+
+error[E0609]: no field `runtime_fingerprint` on type `&mut RemoteEnv`
+   --> desktop\src-tauri\src\remote\mod.rs:145:17
+    |
+145 |             env.runtime_fingerprint = Some(fp);
+    |                 ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+145 -             env.runtime_fingerprint = Some(fp);
+145 +             env.current_fingerprint = Some(fp);
+    |
+
+error[E0609]: no field `runtime_fingerprint` on type `&mut remote::deploy::RemoteEnv`
+   --> desktop\src-tauri\src\remote\mod.rs:145:17
+    |
+145 |             env.runtime_fingerprint = Some(fp);
+    |                 ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+145 -             env.runtime_fingerprint = Some(fp);
+145 +             env.current_fingerprint = Some(fp);
+    |
+
+error[E0609]: no field `runtime_fingerprint` on type `&mut RemoteEnv`
+   --> desktop\src-tauri\src\remote\mod.rs:164:13
+    |
+164 |         env.runtime_fingerprint = Some(fp);
+    |             ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+164 -         env.runtime_fingerprint = Some(fp);
+164 +         env.current_fingerprint = Some(fp);
+    |
+
+error[E0609]: no field `runtime_fingerprint` on type `&mut remote::deploy::RemoteEnv`
+   --> desktop\src-tauri\src\remote\mod.rs:164:13
+    |
+164 |         env.runtime_fingerprint = Some(fp);
+    |             ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+164 -         env.runtime_fingerprint = Some(fp);
+164 +         env.current_fingerprint = Some(fp);
+    |
+
+warning: use of deprecated method `tauri_plugin_shell::Shell::<R>::open`: Use tauri-plugin-opener instead.
+   --> desktop\src-tauri\src\external_link.rs:101:62
+    |
+101 |     if let Err(e) = tauri_plugin_shell::ShellExt::shell(app).open(url.as_str(), None) {
+    |                                                              ^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+error[E0560]: struct `remote::deploy::RemoteEnv` has no field named `preset_runtime_java`
+   --> desktop\src-tauri\src\remote\deploy.rs:944:13
+    |
+944 |             preset_runtime_java: None,
+    |             ^^^^^^^^^^^^^^^^^^^ `remote::deploy::RemoteEnv` does not have this field
+    |
+    = note: all struct fields are already assigned
+
+error[E0560]: struct `remote::deploy::RemoteEnv` has no field named `preset_java_major`
+   --> desktop\src-tauri\src\remote\deploy.rs:945:13
+    |
+945 |             preset_java_major: None,
+    |             ^^^^^^^^^^^^^^^^^ `remote::deploy::RemoteEnv` does not have this field
+    |
+    = note: all struct fields are already assigned
+
+error[E0560]: struct `remote::deploy::RemoteEnv` has no field named `runtime_fingerprint`
+   --> desktop\src-tauri\src\remote\deploy.rs:947:13
+    |
+947 |             runtime_fingerprint: None,
+    |             ^^^^^^^^^^^^^^^^^^^ `remote::deploy::RemoteEnv` does not have this field
+    |
+    = note: all struct fields are already assigned
+
+error[E0560]: struct `remote::deploy::RemoteEnv` has no field named `preset_runtime_java`
+    --> desktop\src-tauri\src\remote\deploy.rs:1024:13
+     |
+1024 |             preset_runtime_java: None,
+     |             ^^^^^^^^^^^^^^^^^^^ `remote::deploy::RemoteEnv` does not have this field
+     |
+     = note: available fields are: `platform`, `arch`, `libc`, `current_fingerprint`, `home`
+
+error[E0560]: struct `remote::deploy::RemoteEnv` has no field named `preset_java_major`
+    --> desktop\src-tauri\src\remote\deploy.rs:1025:13
+     |
+1025 |             preset_java_major: None,
+     |             ^^^^^^^^^^^^^^^^^ `remote::deploy::RemoteEnv` does not have this field
+     |
+     = note: available fields are: `platform`, `arch`, `libc`, `current_fingerprint`, `home`
+
+error[E0560]: struct `remote::deploy::RemoteEnv` has no field named `preset_runtime_java`
+    --> desktop\src-tauri\src\remote\deploy.rs:1106:13
+     |
+1106 |             preset_runtime_java: None,
+     |             ^^^^^^^^^^^^^^^^^^^ `remote::deploy::RemoteEnv` does not have this field
+     |
+     = note: all struct fields are already assigned
+
+error[E0560]: struct `remote::deploy::RemoteEnv` has no field named `preset_java_major`
+    --> desktop\src-tauri\src\remote\deploy.rs:1107:13
+     |
+1107 |             preset_java_major: None,
+     |             ^^^^^^^^^^^^^^^^^ `remote::deploy::RemoteEnv` does not have this field
+     |
+     = note: all struct fields are already assigned
+
+error[E0560]: struct `remote::deploy::RemoteEnv` has no field named `runtime_fingerprint`
+    --> desktop\src-tauri\src\remote\deploy.rs:1109:13
+     |
+1109 |             runtime_fingerprint: None,
+     |             ^^^^^^^^^^^^^^^^^^^ `remote::deploy::RemoteEnv` does not have this field
+     |
+     = note: all struct fields are already assigned
+
+error[E0609]: no field `preset_runtime_java` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\deploy.rs:1387:13
+     |
+1387 |         env.preset_runtime_java = Some("/home/dev/.gwork/remote/runtime/current/bin/java".into());
+     |             ^^^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0609]: no field `preset_java_major` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\deploy.rs:1388:13
+     |
+1388 |         env.preset_java_major = Some(17);
+     |             ^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0425]: cannot find function `preset_runtime_usable` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1389:17
+     |
+1389 |         assert!(preset_runtime_usable(&env));
+     |                 ^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0609]: no field `preset_java_major` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\deploy.rs:1390:13
+     |
+1390 |         env.preset_java_major = Some(11);
+     |             ^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0425]: cannot find function `preset_runtime_usable` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1391:18
+     |
+1391 |         assert!(!preset_runtime_usable(&env), "预置 Java 11 也是假成功，必须拒");
+     |                  ^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0609]: no field `preset_runtime_java` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\deploy.rs:1392:13
+     |
+1392 |         env.preset_runtime_java = None;
+     |             ^^^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0609]: no field `preset_java_major` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\deploy.rs:1393:13
+     |
+1393 |         env.preset_java_major = Some(17);
+     |             ^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0425]: cannot find function `preset_runtime_usable` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1394:18
+     |
+1394 |         assert!(!preset_runtime_usable(&env));
+     |                  ^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `libc_gate` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1400:17
+     |
+1400 |         assert!(libc_gate(Some("2.17")).is_ok(), "CentOS 7 下限必须放行");
+     |                 ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `libc_gate` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1401:17
+     |
+1401 |         assert!(libc_gate(Some("2.28")).is_ok());
+     |                 ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `libc_gate` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1402:17
+     |
+1402 |         assert!(libc_gate(Some("2.39")).is_ok());
+     |                 ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `libc_gate` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1404:17
+     |
+1404 |         let e = libc_gate(Some("2.12")).unwrap_err();
+     |                 ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `libc_gate` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1406:17
+     |
+1406 |         let e = libc_gate(Some("2.5")).unwrap_err();
+     |                 ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `libc_gate` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1409:17
+     |
+1409 |         let e = libc_gate(Some("musl")).unwrap_err();
+     |                 ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `libc_gate` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1412:17
+     |
+1412 |         assert!(libc_gate(None).is_ok());
+     |                 ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `libc_gate` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1413:17
+     |
+1413 |         assert!(libc_gate(Some("weird-vendor-libc")).is_ok());
+     |                 ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `libc_gate` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1415:17
+     |
+1415 |         assert!(libc_gate(Some("3.0")).is_ok());
+     |                 ^^^^^^^^^ not found in this scope
+
+error[E0609]: no field `preset_runtime_java` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\deploy.rs:1449:17
+     |
+1449 |             env.preset_runtime_java.as_deref(),
+     |                 ^^^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0609]: no field `runtime_fingerprint` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\deploy.rs:1454:24
+     |
+1454 |         assert_eq!(env.runtime_fingerprint.as_deref(), Some("def456"));
+     |                        ^^^^^^^^^^^^^^^^^^^ unknown field
+     |
+help: a field with a similar name exists
+     |
+1454 -         assert_eq!(env.runtime_fingerprint.as_deref(), Some("def456"));
+1454 +         assert_eq!(env.current_fingerprint.as_deref(), Some("def456"));
+     |
+
+error[E0609]: no field `preset_java_major` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\deploy.rs:1455:24
+     |
+1455 |         assert_eq!(env.preset_java_major, Some(17), "预置运行时是 17 → 可用");
+     |                        ^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0433]: cannot find type `DeployKind` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1543:95
+     |
+1543 |         let rt = deploy_script("/b/S.staging", "/b/S.realroot", "/b/f.tar.gz", "/b/f", "fp", &DeployKind::Runtim
+e);
+     |                                                                                               ^^^^^^^^^^ use of 
+undeclared type `DeployKind`
+
+error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+    --> desktop\src-tauri\src\remote\deploy.rs:1543:18
+     |
+1543 |         let rt = deploy_script("/b/S.staging", "/b/S.realroot", "/b/f.tar.gz", "/b/f", "fp", &DeployKind::Runtim
+e);
+     |                  ^^^^^^^^^^^^^                                                               -------------------
+- unexpected argument #6
+     |
+note: function defined here
+    --> desktop\src-tauri\src\remote\deploy.rs:473:4
+     |
+ 473 | fn deploy_script(
+     |    ^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+1543 -         let rt = deploy_script("/b/S.staging", "/b/S.realroot", "/b/f.tar.gz", "/b/f", "fp", &DeployKind::Runtim
+e);
+1543 +         let rt = deploy_script("/b/S.staging", "/b/S.realroot", "/b/f.tar.gz", "/b/f", "fp");
+     |
+
+error[E0433]: cannot find type `DeployKind` in this scope
+    --> desktop\src-tauri\src\remote\deploy.rs:1544:97
+     |
+1544 |         let kern = deploy_script("/b/S.staging", "/b/S.realroot", "/b/f.tar.gz", "/b/f", "fp", &DeployKind::Kern
+el);
+     |                                                                                                 ^^^^^^^^^^ use o
+f undeclared type `DeployKind`
+
+error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+    --> desktop\src-tauri\src\remote\deploy.rs:1544:20
+     |
+1544 |         let kern = deploy_script("/b/S.staging", "/b/S.realroot", "/b/f.tar.gz", "/b/f", "fp", &DeployKind::Kern
+el);
+     |                    ^^^^^^^^^^^^^                                                               -----------------
+-- unexpected argument #6
+     |
+note: function defined here
+    --> desktop\src-tauri\src\remote\deploy.rs:473:4
+     |
+ 473 | fn deploy_script(
+     |    ^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+1544 -         let kern = deploy_script("/b/S.staging", "/b/S.realroot", "/b/f.tar.gz", "/b/f", "fp", &DeployKind::Kern
+el);
+1544 +         let kern = deploy_script("/b/S.staging", "/b/S.realroot", "/b/f.tar.gz", "/b/f", "fp");
+     |
+
+error[E0560]: struct `remote::deploy::RemoteEnv` has no field named `preset_runtime_java`
+    --> desktop\src-tauri\src\remote\mod.rs:3134:13
+     |
+3134 |             preset_runtime_java: None,
+     |             ^^^^^^^^^^^^^^^^^^^ `remote::deploy::RemoteEnv` does not have this field
+     |
+     = note: all struct fields are already assigned
+
+error[E0560]: struct `remote::deploy::RemoteEnv` has no field named `preset_java_major`
+    --> desktop\src-tauri\src\remote\mod.rs:3135:13
+     |
+3135 |             preset_java_major: None,
+     |             ^^^^^^^^^^^^^^^^^ `remote::deploy::RemoteEnv` does not have this field
+     |
+     = note: all struct fields are already assigned
+
+error[E0560]: struct `remote::deploy::RemoteEnv` has no field named `runtime_fingerprint`
+    --> desktop\src-tauri\src\remote\mod.rs:3137:13
+     |
+3137 |             runtime_fingerprint: None,
+     |             ^^^^^^^^^^^^^^^^^^^ `remote::deploy::RemoteEnv` does not have this field
+     |
+     = note: all struct fields are already assigned
+
+error[E0609]: no field `preset_runtime_java` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\mod.rs:3187:13
+     |
+3187 |         env.preset_runtime_java = Some("/home/dev/.gwork/remote/runtime/current/bin/java".into());
+     |             ^^^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0609]: no field `preset_java_major` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\mod.rs:3188:13
+     |
+3188 |         env.preset_java_major = Some(17);
+     |             ^^^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `platform`, `arch`, `java`, `java_major`, `libc` ... and 2 others
+
+error[E0609]: no field `runtime_fingerprint` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\mod.rs:3252:21
+     |
+3252 |         assert!(env.runtime_fingerprint.is_some(), "运行时指纹必须回填");
+     |                     ^^^^^^^^^^^^^^^^^^^ unknown field
+     |
+help: a field with a similar name exists
+     |
+3252 -         assert!(env.runtime_fingerprint.is_some(), "运行时指纹必须回填");
+3252 +         assert!(env.current_fingerprint.is_some(), "运行时指纹必须回填");
+     |
+
+error[E0609]: no field `runtime_fingerprint` on type `remote::deploy::RemoteEnv`
+    --> desktop\src-tauri\src\remote\mod.rs:3330:13
+     |
+3330 |         env.runtime_fingerprint = Some(fp.clone()); // detect 已读回同指纹
+     |             ^^^^^^^^^^^^^^^^^^^ unknown field
+     |
+help: a field with a similar name exists
+     |
+3330 -         env.runtime_fingerprint = Some(fp.clone()); // detect 已读回同指纹
+3330 +         env.current_fingerprint = Some(fp.clone()); // detect 已读回同指纹
+     |
+
+Some errors have detailed explanations: E0425, E0609.
+For more information about an error, try `rustc --explain E0425`.
+warning: `gourd-work-desktop` (lib) generated 2 warnings (1 duplicate)
+error: could not compile `gourd-work-desktop` (lib) due to 18 previous errors; 2 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+warning: `gourd-work-core` (lib test) generated 1 warning (run `cargo fix --lib -p gourd-work-core --tests` to apply 1 
+suggestion)
+Some errors have detailed explanations: E0061, E0425, E0433, E0560, E0609.
+For more information about an error, try `rustc --explain E0061`.
+warning: `gourd-work-desktop` (lib test) generated 2 warnings (1 duplicate)
+error: could not compile `gourd-work-desktop` (lib test) due to 57 previous errors; 2 warnings emitted

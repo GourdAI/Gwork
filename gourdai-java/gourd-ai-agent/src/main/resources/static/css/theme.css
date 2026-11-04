@@ -1,0 +1,531 @@
+/*
+ * Global Theme Variables
+ * Shared across all pages. Switch theme via <body data-theme="light|dark">,
+ * accent preset via <body data-accent="teal|graphite|clay|sky|indigo">.
+ *
+ * Usage:
+ *   <link rel="stylesheet" href="/css/theme.css"/>
+ *   <body data-theme="light" data-accent="teal">
+ *
+ * 色彩治理约定（勿破坏）：
+ *   1. 全站颜色字面量只允许出现在本文件；其它 CSS 一律引用 token 变量。
+ *   2. 中性色阶为真中性（zinc 系），禁止再引入带蓝底的灰（#f5f6fa 一类）。
+ *   3. accent 派生 token 必须成套定义：--accent / --accent-hover / --accent-light /
+ *      --accent-rgb / --accent-contrast。漏一个就会出现硬编码兜底串色。
+ *   4. --accent-contrast 是「accent 作背景时的文字色」。暗色主题 accent 提亮后
+ *      白字对比度会掉到 2:1 以下，必须用深色 contrast，不能写死 #fff。
+ */
+
+/* ===== Common ===== */
+:root {
+    --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+
+    /* Scrollbar —— 全局唯一的滚动条视觉规范。
+       原生滚动条（*::-webkit-scrollbar）与 Monaco 自绘滚动条
+       （code.css 覆盖）共用此组变量，保证 code 编辑器 / diff / 其它区域观感一致。
+       thumb 高度半透明灰，透光不压内容（模拟毛玻璃），大圆角。
+       明暗主题下均协调，无需分主题赋值。
+
+       ——「细看着好看，但点不到」的两个根因（已实测确认，勿回退）——
+       1) 命中区太窄：原 size=6px，远低于指针设备的舒适命中阈值。现将
+          *命中区* 与 *视觉宽度* 解耦：轨道 --scrollbar-size 给足 12px 供鼠标
+          捕获，滑块用 --scrollbar-thumb-inset 透明内衬 + background-clip:padding-box
+          收窄为 6px 视觉宽度。即「看起来还是细的，但好点了一倍」。
+       2) 滑块被压成细条：Chromium 对 ::-webkit-scrollbar-thumb 默认不设最小长度，
+          长会话 / 大文件下滑块会缩到几 px 高，鼠标根本按不住 —— 这才是
+          「有时候完全点不到」的主因。--scrollbar-thumb-min 强制下限。
+
+       注意：本滚动条 *占据布局宽度*（实测 offsetWidth-clientWidth == size），
+       并非悬浮覆盖在内容之上。改 size 会等量压缩滚动容器的内容宽度。 */
+    --scrollbar-size: 12px;
+    --scrollbar-thumb-inset: 3px;
+    --scrollbar-thumb-inset-hover: 2px;
+    --scrollbar-thumb-min: 36px;
+    --scrollbar-radius: 8px;
+    --scrollbar-thumb: rgba(150, 152, 158, 0.35);
+    --scrollbar-thumb-hover: rgba(150, 152, 158, 0.65);
+
+    /* Dropdown —— 全站悬浮下拉/菜单面板的统一宽度档位。
+       改造前各处散落 160/170/220/248/260/280/320 七种宽度，同一产品里
+       面板宽窄不一，且窄面板下长模型名频繁省略号截断。此处收敛为三档：
+         sm : 纯动作菜单（无长文本，如「+」菜单、安装方式菜单）
+         md : 常规列表面板（模型下拉、模板菜单）——默认档
+         lg : 宽面板（ACP 设置、工作空间选择等长路径/长模型名场景）
+       max 用于给 md/lg 封顶，避免超长条目把面板撑到失控宽度。
+       条目右内边距需另留出 --scrollbar-size，避免滑块压住右侧文字。 */
+    --dropdown-w-sm: 190px;
+    --dropdown-w-md: 288px;
+    --dropdown-w-lg: 320px;
+    --dropdown-w-max: 380px;
+}
+
+/* ===== Light Theme =====
+   中性色阶为真中性 zinc 系（不带蓝底）。accent 默认值 = 青玉预设，
+   与 [data-accent="teal"] 块同值；body 未带 data-accent 时由此兜底。 */
+[data-theme="light"] {
+    /* Background */
+    --bg-body: #fafafa;
+    --bg-sidebar: #ffffff;
+    --bg-main: #ffffff;
+    --bg-input-box: #ffffff;
+    --bg-hover: #f2f2f3;
+    --bg-code: #f4f4f5;
+    --bg-code-block: #f6f6f7;
+    --bg-primary: #ffffff;
+    --bg-secondary: #f4f4f5;
+    --bg-card: #ffffff;
+
+    /* Message */
+    --bg-user-msg: #f4f4f5;
+    --bg-action: #f0f7f0;
+
+    /* Text */
+    --text-primary: #18181b;
+    --text-secondary: #71717a;
+    --text-user-msg: #18181b;
+    --text-user-msg-link: var(--accent);
+    --text-user-msg-link-hover: var(--accent-hover);
+    --text-ai-msg: #18181b;
+    --text-sidebar: #3f3f46;
+    --text-code: #24292e;
+    --text-tertiary: #a1a1aa;
+
+    /* Titlebar Icon —— 标题栏图标的唯一前景色真源（左右两组必须共用）。
+       【为何单列一个令牌】标题栏并排着两套图标：左侧 .titlebar-action-btn
+       （终端/监控，DOM 内联 svg）与右侧 Tauri 自绘窗控（titlebar_ui.rs 注入）。
+       二者曾各用一套色：左组 --text-secondary（#71717a 灰）、右组 --gourd-tb-fg
+       （#1a1a2e 近黑）。虽几何尺寸完全一致（实测均 13x13 墨迹、笔宽 1.23px），
+       但近黑比灰在视觉上更重、更粗，用户一眼判定「右侧明显比左侧大」。
+       故左右统一走本令牌，取值对齐右侧窗控，杜绝两侧再各自漂移。
+       注意：这是 *静止态* 图标色；hover 仍走 --text-primary，激活态走 --accent。 */
+    --titlebar-icon-fg: #1a1a2e;
+
+    /* Border */
+    --border-color: #e4e4e7;
+    --border-input: #d4d4d8;
+
+    /* Accent（默认 = 石墨 graphite：高级黑灰路线，去品牌色；
+       白字 on accent = 17.7:1。可选预设见下方 Accent Presets） */
+    --accent: #18181b;
+    --accent-hover: #27272a;
+    --accent-light: #ececee;
+    --accent-rgb: 24, 24, 27;
+    --accent-contrast: #ffffff;
+
+    /* Functional */
+    --action-border: #86b886;
+    --error-bg: #fef2f2;
+    --error-border: #fca5a5;
+    --error-text: #dc2626;
+    --color-success: #22c55e;
+    /* 状态点闪动暗态：= --color-success 的 25% alpha，详见 app.css status-dot-blink 注释。 */
+    --color-success-dim: rgba(34,197,94,0.25);
+    --color-success-hover: #16a34a;
+    --color-danger: #ef4444;
+    --color-danger-hover: #dc2626;
+    --color-warning: #f59e0b;
+    --color-wechat: #07c160;
+    --color-feishu: #3370ff;
+    --color-feishu-hover: #2960e6;
+    --color-dingtalk: #0089FF;
+    --color-dingtalk-hover: #0070dd;
+    --bg-danger-subtle: rgba(239, 68, 68, 0.1);
+    --bg-warning-subtle: rgba(245, 158, 11, 0.12);
+
+    /* On-solid 前景色 —— 高饱和功能色/品牌色做实心底时的前景。
+       禁止写死白字：这些底色在浅色主题上白字本就不达标（实测 2.28–4.28），
+       暗色主题功能色进一步提亮后白字崩到 1.74–2.97（实测）。
+       前景必须与底色成套；对比度门禁见 dark-theme-token-contract。 */
+    --on-danger: #200404;
+    /* hover 底色是更深的 #dc2626：纯黑压其上也仅 4.35，深色前景走不通，
+       只有白字达标（4.83）——与 --on-danger 相反，故单独成套。 */
+    --on-danger-hover: #ffffff;
+    /* 实心危险钮（图形口径）—— 停止方块/录音麦克风等【纯图形】前景专用。
+       上方 on-* 系按文本 AA 4.5 选深色前景，套到无文字的图形上会把停止按钮
+       中心变成黑方块（用户实测报告）；图形对象走 WCAG 1.4.11 门槛 3:1，
+       白图形在 #ef4444 上 3.76 达标。底色明暗同值不提亮：提亮档 #f87171 上
+       白图形仅 2.77 不达门槛，且提亮本是为暗底红文字服务，实心块自身对
+       暗背景 4.71 足够醒目。门禁见 dark-theme-token-contract 图形口径组。 */
+    --color-danger-solid: #ef4444;
+    --color-danger-solid-hover: #dc2626;
+    --on-danger-icon: #ffffff;
+    --on-success: #052e16;
+    --on-feishu: #05070d;
+    --on-dingtalk: #031625;
+    --on-warning: #1a1b1e;
+    /* hover 底色更深（#2960e6/#0070dd），深色前景压其上仅 3.75/3.81 不达 AA；
+       白字 5.37/4.81 达标——与 --on-danger-hover 同理，hover 态前景必须随底色成套切换。 */
+    --on-feishu-hover: #ffffff;
+    --on-dingtalk-hover: #ffffff;
+    /* 品牌色块前景：图标属图形对象（WCAG 1.4.11 门槛 3:1），但白字在微信绿上
+       实测仅 2.38:1、在暗色提亮后的飞书/钉钉蓝上 2.97:1 —— 连图形门槛都不够。
+       故每个品牌色配自己的深色前景（与文本同口径，一套值明暗通用）。 */
+    --on-wechat: #052e16;
+    --on-feishu-icon: #05070d;
+    --on-dingtalk-icon: #031625;
+    /* 品牌色（主题不变：品牌识别不随明暗漂移，与 logo 同理）。
+       原先硬编码在 app.css 的 .channel-card-icon.* 里，违反色彩治理约定第 1 条。 */
+    --brand-wechat: #07c160;
+    --brand-feishu: #3370ff;
+    --brand-dingtalk: #0089ff;
+
+    /* Git */
+    --git-line-add-bg: rgba(46, 160, 67, 0.15);
+    --git-line-add-text: #22863a;
+    --git-line-del-bg: rgba(248, 81, 73, 0.15);
+    --git-line-del-text: #cb2431;
+    --git-line-hunk-text: #032f62;
+    --git-status-staged: #28a745;
+    --git-status-modified: #dbab09;
+    --git-status-added: #28a745;
+    --git-status-deleted: #cb2431;
+    --git-status-untracked: #6e7681;
+
+    /* Effects */
+    --shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    --shadow-lg: 0 4px 24px rgba(0, 0, 0, 0.08);
+    /* 模态弹窗专用：比 --shadow-lg 更深更散，让卡片从遮罩里「浮」出来。
+       不能用 --shadow-lg：弹窗背景遮罩本身就压暗了一层，同量级阴影会糊成一块。 */
+    --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.14), 0 2px 8px rgba(0, 0, 0, 0.06);
+    --thinking-dot: var(--accent);
+    --tag-bg: #f4f4f5;
+    --tag-border: #e4e4e7;
+    --thinking-block-bg: #f6f6f7;
+    --thinking-block-border: #e4e4e7;
+
+    /* Overlay —— 模态遮罩底色。此前只有各浮层各自内联 rgba(0,0,0,.4/.45/.5)，
+       新代码若引用 --overlay 会因「未定义」静默回落到浅色字面量（深色模式翻车根因之一），
+       故正式建立成对 token：明暗各一值，遮罩深度按各自主题底色分别校准。 */
+    --overlay: rgba(0, 0, 0, 0.45);
+}
+
+/* ===== Dark Theme ===== */
+[data-theme="dark"] {
+    /* Background */
+    --bg-body: #131315;
+    --bg-sidebar: #0f0f11;
+    --bg-main: #17171a;
+    --bg-input-box: #1c1c20;
+    --bg-hover: #232327;
+    --bg-code: rgba(255, 255, 255, 0.07);
+    --bg-code-block: #0f0f11;
+    --bg-primary: #17171a;
+    --bg-secondary: #101012;
+    --bg-card: #1c1c20;
+
+    /* Message（用户气泡为中性抬升面，不再铺实心 accent） */
+    --bg-user-msg: #232327;
+    --bg-action: #1a2a1a;
+
+    /* Text */
+    --text-primary: #e4e4e7;
+    --text-secondary: #8f8f96;
+    --text-user-msg: #e4e4e7;
+    --text-user-msg-link: var(--accent);
+    --text-user-msg-link-hover: var(--accent-hover);
+    --text-ai-msg: #e4e4e7;
+    --text-sidebar: #b5b5bb;
+    --text-code: #d4d4d4;
+    --text-tertiary: #66666d;
+
+    /* Titlebar Icon —— 暗色取值与右侧窗控 --gourd-tb-fg 同源（见亮色段注释） */
+    --titlebar-icon-fg: #dcdde1;
+
+    /* Border */
+    --border-color: #27272a;
+    --border-input: #3f3f46;
+
+    /* Accent（默认 = 石墨 graphite；暗色下主操作为近白底 + 深字，
+       contrast 必须深色：白字 on #e4e4e7 仅 1.16:1） */
+    --accent: #e4e4e7;
+    --accent-hover: #f4f4f5;
+    --accent-light: #2a2a2e;
+    --accent-rgb: 228, 228, 231;
+    --accent-contrast: #18181b;
+
+    /* Functional */
+    --action-border: #2a4a2a;
+    --error-bg: #261a1a;
+    --error-border: #4a2a2a;
+    --error-text: #f87171;
+    --color-success: #4ade80;
+    /* 状态点闪动暗态：= --color-success 的 25% alpha，详见 app.css status-dot-blink 注释。 */
+    --color-success-dim: rgba(74,222,128,0.25);
+    --color-success-hover: #22c55e;
+    --color-danger: #f87171;
+    --color-danger-hover: #ef4444;
+    --color-warning: #fbbf24;
+    --color-wechat: #2dd469;
+    --color-feishu: #5b93ff;
+    --color-feishu-hover: #4a80f0;
+    --color-dingtalk: #3ea6ff;
+    --color-dingtalk-hover: #2b96f0;
+    --bg-danger-subtle: rgba(248, 113, 113, 0.12);
+    --bg-warning-subtle: rgba(251, 191, 36, 0.12);
+
+    /* On-solid 前景色 —— 与浅色主题成套（取值经双主题实测：同一前景在明暗两档
+       底色上均 ≥ AA 4.5；暗色功能色提亮后白字仅 1.74–2.97，故用深色前景）。 */
+    --on-danger: #200404;
+    /* 暗色 hover 底色 = #ef4444（提亮档），深色前景 5.16 达标；白字仅 3.76。 */
+    --on-danger-hover: #200404;
+    /* 实心危险钮（图形口径）—— 与浅色主题同值：白图形需 ≥3:1，提亮档 #f87171 上
+       白仅 2.77 不达标，未提亮 #ef4444 上 3.76 达标；实心红块对暗背景 4.71 醒目，
+       无需随文字档提亮（提亮是给暗底红文字用的）。停止/录音等纯图形按钮用这套，
+       文本类（断网条/审批按钮）继续用上方 on-* 深色前景。 */
+    --color-danger-solid: #ef4444;
+    --color-danger-solid-hover: #dc2626;
+    --on-danger-icon: #ffffff;
+    --on-success: #052e16;
+    --on-feishu: #05070d;
+    --on-dingtalk: #031625;
+    --on-warning: #1a1b1e;
+    /* 暗色 hover 底色是提亮档（#4a80f0/#2b96f0），白字仅 2.79/2.51；
+       深色前景 6.20/6.00 达标——与浅色相反，故 hover 令牌明暗各取各值。 */
+    --on-feishu-hover: #05070d;
+    --on-dingtalk-hover: #031625;
+    --on-wechat: #052e16;
+    --on-feishu-icon: #05070d;
+    --on-dingtalk-icon: #031625;
+    --brand-wechat: #07c160;
+    --brand-feishu: #3370ff;
+    --brand-dingtalk: #0089ff;
+
+    /* Git */
+    --git-line-add-bg: rgba(46, 160, 67, 0.2);
+    --git-line-add-text: #56d364;
+    --git-line-del-bg: rgba(248, 81, 73, 0.2);
+    --git-line-del-text: #f87171;
+    --git-line-hunk-text: #8b949e;
+    --git-status-staged: #3fb950;
+    --git-status-modified: #d29922;
+    --git-status-added: #3fb950;
+    --git-status-deleted: #f85149;
+    --git-status-untracked: #8b949e;
+
+    /* Effects */
+    --shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    --shadow-lg: 0 4px 24px rgba(0, 0, 0, 0.4);
+    /* 暗色必须比明色重得多：底色近黑时弱阴影完全不可见，卡片与遮罩会糊成一块。 */
+    --shadow-modal: 0 20px 56px rgba(0, 0, 0, 0.64), 0 2px 8px rgba(0, 0, 0, 0.44);
+    --thinking-dot: var(--accent);
+    --tag-bg: #232327;
+    --tag-border: #2e2e33;
+    --thinking-block-bg: #1a1a1d;
+    --thinking-block-border: #27272a;
+
+    /* Overlay —— 暗色下页面底色本身已近黑（#131315/#17171a），沿用明度的 0.45 黑遮罩
+       等于什么都没盖住（浮层与背景不分离）。加深到 0.62 才拉得出层次。 */
+    --overlay: rgba(0, 0, 0, 0.62);
+}
+
+/* ===== Accent Presets =====
+   每套预设明暗各一组。选择器同时匹配「body 自身带 data-accent」与
+   「[data-theme] 后代中带 data-accent 的节点」——后者是给设置页主题网格用的：
+   每张卡片挂 data-accent="<id>" 即可在当前明暗模式下预览该预设的成色，
+   无需在 JS/其它 CSS 里重复任何色值。 */
+
+/* 石墨 graphite（默认）：去品牌色路线，主操作近黑/近白 */
+[data-theme="light"][data-accent="graphite"], [data-theme="light"] [data-accent="graphite"] {
+    --accent: #18181b; --accent-hover: #27272a; --accent-light: #ececee;
+    --accent-rgb: 24, 24, 27; --accent-contrast: #ffffff;
+}
+[data-theme="dark"][data-accent="graphite"], [data-theme="dark"] [data-accent="graphite"] {
+    --accent: #e4e4e7; --accent-hover: #f4f4f5; --accent-light: #2a2a2e;
+    --accent-rgb: 228, 228, 231; --accent-contrast: #18181b;
+}
+
+/* 青玉 teal */
+[data-theme="light"][data-accent="teal"], [data-theme="light"] [data-accent="teal"] {
+    --accent: #0f766e; --accent-hover: #0c5f58; --accent-light: #e6f2f0;
+    --accent-rgb: 15, 118, 110; --accent-contrast: #ffffff;
+}
+[data-theme="dark"][data-accent="teal"], [data-theme="dark"] [data-accent="teal"] {
+    --accent: #2dd4bf; --accent-hover: #5eead4; --accent-light: #12312e;
+    --accent-rgb: 45, 212, 191; --accent-contrast: #04302c;
+}
+
+/* 陶土 clay */
+[data-theme="light"][data-accent="clay"], [data-theme="light"] [data-accent="clay"] {
+    --accent: #9a3412; --accent-hover: #7c2d12; --accent-light: #f6ebe3;
+    --accent-rgb: 154, 52, 18; --accent-contrast: #ffffff;
+}
+[data-theme="dark"][data-accent="clay"], [data-theme="dark"] [data-accent="clay"] {
+    --accent: #fb923c; --accent-hover: #fdba74; --accent-light: #33200f;
+    --accent-rgb: 251, 146, 60; --accent-contrast: #431407;
+}
+
+/* 天青 sky：保留一点蓝，但远离蓝紫轴 */
+[data-theme="light"][data-accent="sky"], [data-theme="light"] [data-accent="sky"] {
+    --accent: #0369a1; --accent-hover: #075985; --accent-light: #e4f0f7;
+    --accent-rgb: 3, 105, 161; --accent-contrast: #ffffff;
+}
+[data-theme="dark"][data-accent="sky"], [data-theme="dark"] [data-accent="sky"] {
+    --accent: #38bdf8; --accent-hover: #7dd3fc; --accent-light: #0f2937;
+    --accent-rgb: 56, 189, 248; --accent-contrast: #082f49;
+}
+
+/* 蓝紫 indigo：旧版默认色，留作可回退选项 */
+[data-theme="light"][data-accent="indigo"], [data-theme="light"] [data-accent="indigo"] {
+    --accent: #4f6ef7; --accent-hover: #3b5de7; --accent-light: #eef1fe;
+    --accent-rgb: 79, 110, 247; --accent-contrast: #ffffff;
+}
+[data-theme="dark"][data-accent="indigo"], [data-theme="dark"] [data-accent="indigo"] {
+    --accent: #6b8aff; --accent-hover: #5a75e6; --accent-light: #1c2140;
+    --accent-rgb: 107, 138, 255; --accent-contrast: #0d1330;
+}
+
+/* ===== Global Scrollbar =====
+    全站统一使用一套 webkit 自定义滚动条（圆角 / 细窄 / 半透明毛玻璃）。
+    刻意不使用标准 scrollbar-width / scrollbar-color：其一无法实现圆角与
+    精确透明度，其二 Chromium 121+ 下它会使同元素上的 ::-webkit-scrollbar-*
+    规则整体失效（正是桌面端 Electron 原生滚动条观感不一致的根因）。
+    Monaco 自绘滚动条（内部 DOM，不走 webkit 滚动条）在 code.css 里引用同组 --scrollbar-* 变量对齐。 */
+*::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+}
+*::-webkit-scrollbar-track {
+    background: transparent;
+}
+/* 滑块：轨道占 12px 便于命中，但用透明边框把可见部分收窄回 6px。
+   background-clip: padding-box 是关键 —— 没有它，background 会铺满 border 区，
+   透明边框就失去收窄效果，滑块会变成一根 12px 的粗棍。 */
+*::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: var(--scrollbar-radius);
+    border: var(--scrollbar-thumb-inset) solid transparent;
+    background-clip: padding-box;
+    min-height: var(--scrollbar-thumb-min);
+    min-width: var(--scrollbar-thumb-min);
+}
+/* 悬浮：加深 + 变粗（内衬 3px→2px），给出「抓住了」的反馈 */
+*::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
+    background-clip: padding-box;
+    border-width: var(--scrollbar-thumb-inset-hover);
+}
+/* 拖拽中保持高亮，避免指针移出滑块窄边时视觉「松手」 */
+*::-webkit-scrollbar-thumb:active {
+    background: var(--scrollbar-thumb-hover);
+    background-clip: padding-box;
+    border-width: var(--scrollbar-thumb-inset-hover);
+}
+/* 一旦自定义 ::-webkit-scrollbar，Chromium 默认不再渲染上下箭头按钮；
+   显式 none 双保险，避免个别平台残留。 */
+*::-webkit-scrollbar-button {
+    display: none;
+}
+*::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+/* ===== Accessibility ===== */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+*:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* ===== Custom layer dialogs =====
+   桌面端应用内弹窗（规约禁原生 confirm/alert）。两条渲染路径必须【观感完全一致】：
+   A. layui layer 存在 → .kd-layer.layui-layer 外壳 + .kd-confirm 内容；
+   B. layer 缺失 → app-base.js fallbackConfirm 自建 .kd-fallback-overlay + .kd-confirm。
+   色彩治理：本块不得出现颜色/阴影字面量（一律走 theme.css 令牌）——
+   旧实现把阴影写死 rgba(0,0,0,.14)、遮罩写死 rgba(0,0,0,.3)，两主题同值，
+   暗色下阴影几乎不可见（底色近黑）、卡片与遮罩糊成一块。 */
+.kd-layer.layui-layer {
+    border-radius: 14px !important;
+    border: 1px solid var(--border-color) !important;
+    box-shadow: var(--shadow-modal) !important;
+    background: var(--bg-primary) !important;
+    padding: 0 !important;
+    /* 入场动效：用微幅上浮+缩放取代 layui 默认的弹跳（bounceIn）。
+       弹跳在桌面端确认框上显得轻浮，且与全站其它面板的冷静节奏不一致。 */
+    animation: kd-dialog-in .18s cubic-bezier(.2, .8, .24, 1) both !important;
+}
+.kd-layer .layui-layer-content { background: transparent !important; padding: 0 !important; }
+.kd-layer .layui-layer-setwin { display: none !important; }
+/* layui 遮罩：inline 写了 opacity（来自 shade: 0.3），必须两属性一起覆盖，
+   只改 background 会被 inline opacity 再乘一道 → 暗色仍偏浅。 */
+.layui-layer-shade { background: var(--overlay) !important; opacity: 1 !important; }
+
+@keyframes kd-dialog-in {
+    from { opacity: 0; transform: translateY(6px) scale(.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes kd-overlay-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* 卡片：定宽使两条路径宽度一致（旧实现内容撑宽，短句 302px / 长句 340px，
+   不同弹窗宽窄不一看上去很随意）；窄屏不溢出视口。 */
+.kd-confirm { padding: 22px 22px 18px; width: 340px; max-width: calc(100vw - 32px); box-sizing: border-box; }
+.kd-confirm-msg {
+    font-size: 14px; color: var(--text-primary); line-height: 1.65;
+    margin-bottom: 22px; word-break: break-word;
+}
+.kd-confirm-btns { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* 按钮基类 = 次操作（取消）：【透明底 + 描边】的 ghost 样式，不与主操作抢视觉权重。
+   旧实现给取消钮也铺了 --bg-hover 实底，两个按钮一样重 → 主次不分。
+   hover 不得用 filter: brightness(0.95)：它在暗色下等于【变暗】
+   （底色 #232327 本来就接近页面底），hover 反而更难辨认 → 改走令牌切背景。 */
+.kd-btn {
+    height: 34px; min-width: 72px; padding: 0 16px;
+    border-radius: 9px; border: 1px solid var(--border-color);
+    font-size: 13px; font-weight: 500; font-family: inherit;
+    cursor: pointer; background: transparent; color: var(--text-primary);
+    transition: background-color .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease;
+}
+.kd-btn:hover { background: var(--bg-hover); border-color: var(--border-input); }
+.kd-btn:active { background: var(--bg-secondary); }
+/* 焦点环：双层 box-shadow（内层用卡片底色隔出一圈间隙）——
+   单靠 outline 在主按钮（accent 实底）上几乎看不出边界。
+   必须显式给：旧实现依赖全局 *:focus-visible，键盘用户开弹窗时看不清焦点在哪。 */
+.kd-btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--accent);
+}
+/* 主操作：background/color 不得改——hitl-btn-accent.test.js 拿它当
+   HITL approve 按钮的【参照基准】（断言两者同 token），改了会连带打破那份契约。 */
+.kd-btn-ok { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
+.kd-btn-ok:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-contrast); }
+.kd-btn-ok:active { background: var(--accent-hover); }
+
+/* 无 layer 兜底确认框（app-base.js fallbackConfirm）：layer 缺失时的应用内弹窗，
+   桌面端规约禁止回落原生 confirm。内容复用 .kd-confirm 卡片规格，遮罩/阴影/入场
+   必须与 layui 路径逐项对齐，否则同一产品内两种弹窗观感不一致。 */
+.kd-fallback-overlay {
+    position: fixed; inset: 0; z-index: 10001;
+    background: var(--overlay);
+    display: flex; align-items: center; justify-content: center;
+    animation: kd-overlay-in .18s ease both;
+}
+.kd-fallback-overlay .kd-confirm {
+    background: var(--bg-primary); border: 1px solid var(--border-color);
+    border-radius: 14px; box-shadow: var(--shadow-modal);
+    animation: kd-dialog-in .18s cubic-bezier(.2, .8, .24, 1) both;
+}
+.kd-fallback-toast {
+    position: fixed; top: 120px; left: 50%; transform: translateX(-50%); z-index: 10001;
+    background: var(--bg-primary); color: var(--text-primary);
+    border: 1px solid var(--border-color); border-radius: 10px;
+    box-shadow: var(--shadow-lg); padding: 10px 16px; font-size: 13px; max-width: 420px;
+}
+
+/* layer.msg（轻提示） */
+.kd-layer-msg.layui-layer { border-radius: 10px !important; background: var(--bg-primary) !important; border: 1px solid var(--border-color) !important; box-shadow: var(--shadow-lg) !important; color: var(--text-primary) !important; }
+.kd-layer-msg .layui-layer-content { color: var(--text-primary) !important; background: transparent !important; }
+
+/* 旧遗留覆盖：原写死 #2a2d33 / #444（非全站 zinc 色阶）→ 改走令牌，
+   否则暗色下这一类 msg 与其余弹窗不同色系。 */
+[data-theme="dark"] .layui-layer-msg { background: var(--bg-card); border-color: var(--border-color); color: var(--text-primary); }

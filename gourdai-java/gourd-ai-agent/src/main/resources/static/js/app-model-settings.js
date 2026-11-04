@@ -1,0 +1,1465 @@
+/**
+ * 模型配置独立主视图（左侧栏「模型配置」入口）
+ *
+ * 双栏 Master-Detail 交互：左栏供应商列表（内置/自定义分组 + 启用开关），
+ * 右栏详情/表单常驻——点击左栏项或「添加供应商」时右栏原地切换，无列表/表单往返。
+ * 编辑模式所有字段变更即时保存；新增模式走底部「添加供应商」按钮。
+ * 复用 /web/settings/providers 系列 API；DOM id 统一 ms 前缀。
+ */
+;(function () {
+    'use strict';
+
+    var core = window._settingsCore || {};
+    var postJson = core.postJson;
+    var escapeAttr = core.escapeAttr || function (s) { return s == null ? '' : String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+    var escapeHtml = core.escapeHtml || function (s) { return s == null ? '' : String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
+    var showToast = core.showToast || function (msg, type) { layAlert(msg); };
+
+    // ==================== 状态管理 ====================
+    var LS_PROVIDER_ORDER = 'gourdai-provider-order'; // 自定义供应商拖拽排序持久化（仅本地展示顺序，不影响后端按名称存储）
+    var providers = [];
+    var currentProvider = null; // 当前编辑的连接（null 表示新增）
+    var fetchedModels = []; // 已拉取/已配置的模型列表
+    var selectedName = null; // 左栏选中项（'__add__' 表示右侧为新增表单）
+    var fetchRequestId = 0; // 拉取结果只允许写回发起时的同一 Provider/表单版本
+    // 右栏密钥输入框是否被用户真正编辑过。后端列表/详情接口返回的 apiKey 一律是脱敏值，
+    // 输入框不再回填任何密钥值，所以「未编辑过」就等于「真实密钥未知」——
+    // 此时绝不能提交 apiKey 字段，否则会把脱敏值或空串写回后端污染真实密钥
+    var keyTouched = false;
+
+    // 模型列表搜索：多词 AND、大小写不敏感（与聊天模型下拉搜索同口径），输入 150ms 防抖；
+    // 搜索词只在供应商真正切换（或离开视图/进入新增表单）时清空，同供应商重渲染不丢失
+    var modelSearchQuery = '';
+    var modelSearchTimer = null;
+    var modelSearchProviderKey = null;
+
+    // 接口类型选项（按模型单独配置）
+    var STANDARD_OPTIONS = [
+        { value: 'openai', label: 'OpenAI (Chat Completions)' },
+        { value: 'openai-responses', label: 'OpenAI (Responses)' },
+        { value: 'anthropic', label: 'Anthropic (Messages)' },
+        { value: 'gemini', label: 'Google (Gemini)' },
+        { value: 'ollama', label: 'Ollama (/api/chat)' }
+    ];
+    var DEFAULT_STANDARD = 'openai';
+
+    // ==================== DOM 元素 ====================
+    var $view = $('#modelSettingsView');
+    var $customGroup = $('#msGroupCustom');
+    var $customList = $('#msCustomList');
+    var $formTitle = $('#msProviderFormTitle');
+    var $formDesc = $('#msProviderFormDesc');
+    var $modelsList = $('#msProviderModelsList');
+    var $modelsEmpty = $('#msProviderModelsEmpty');
+    var $searchInput = $('#msModelSearchInput');
+    var $searchClear = $('#msModelSearchClear');
+    var $searchEmpty = $('#msProviderModelsSearchEmpty');
+    var $searchBox = $searchInput.closest('.ms-model-search');
+
+    // ==================== 初始化 ====================
+    function init() {
+        bindEvents();
+        // 静默预载：此时界面停在首页，拉不到供应商不应该弹窗打扰
+        __whenBackendReady(function () { loadProvidersListIfBackendReady(true); });
+    }
+
+    function bindEvents() {
+        // 添加供应商按钮（右栏切换为新增表单）
+        $('#msProviderAddBtn').on('click', function () {
+            selectAdd();
+        });
+
+        // 拉取模型列表
+        $('#msProviderFetchModelsBtn').on('click', function () {
+            fetchModels();
+        });
+
+        // 清空模型列表
+        $('#msProviderClearModelsBtn').on('click', function () {
+            if (fetchedModels.length === 0) return;
+            // 整句式文案：早期用 confirm_delete + model_management + add_model + delete 四段拼接，
+            // 中文产出「确认删除？模型管理？手动添加模型删除」这种不成句的碎片，
+            // 且不同语序的语言（英/德/日等）会粘连成「Confirm delete?Model Management？Add ModelDelete」。
+            var tConfirm = GourdI18n.t('settings.providers.clear_models_confirm', [fetchedModels.length]);
+            layConfirm(tConfirm, function () {
+                fetchedModels = [];
+                // 列表已清空，残留的搜索词没有意义（搜索框会随空列表隐藏）
+                clearModelSearch(false);
+                renderModelsList();
+                if (currentProvider) {
+                    persistProvider();
+                }
+            });
+        });
+
+        // 手动添加模型
+        $('#msProviderAddModelBtn').on('click', function () {
+            openModelDialog(null);
+        });
+
+        // 模型列表 - 删除手动模型（二次确认：此前点一下即移除并立即写库，误点无法撤销）
+        $modelsList.on('click', '.provider-model-remove-btn', function () {
+            var modelId = $(this).closest('.provider-model-item').data('model-id');
+            layConfirm(GourdI18n.t('settings.providers.remove_model_confirm', [modelId]), function () {
+                removeManualModel(modelId);
+            });
+        });
+
+        // 模型列表 - 设为默认模型（星标；成功静默刷新，失败时提示原因）
+        $modelsList.on('click', '.provider-model-default-btn', function () {
+            var llmName = $(this).data('llm-name');
+            if (!llmName || llmName === llmDefaultModel) return; // 缺名或已是默认模型：幂等
+            setDefaultModel(llmName);
+        });
+
+        // 模型列表 - 点击模型信息，弹出修改配置弹框
+        $modelsList.on('click', '.provider-model-info', function () {
+            var modelId = $(this).closest('.provider-model-item').data('model-id');
+            var model = null;
+            for (var i = 0; i < fetchedModels.length; i++) {
+                if (String(fetchedModels[i].id) === String(modelId)) {
+                    model = fetchedModels[i];
+                    break;
+                }
+            }
+            if (model) openModelDialog(model);
+        });
+
+        // 保存按钮
+        $('#msProviderSaveBtn').on('click', function () {
+            saveProvider();
+        });
+
+        // 删除按钮
+        $('#msProviderFormDeleteBtn').on('click', function () {
+            deleteProvider();
+        });
+
+        // 供应商项点击（选中 -> 右栏详情原地切换）：左栏容器为静态 DOM，事件委托一次即可
+        $('.model-settings-left').on('click', '.ms-provider-item', function (e) {
+            // 忽略启用/禁用开关与拖拽手柄点击
+            if ($(e.target).closest('.toggle-switch, .ms-provider-drag-handle').length) return;
+            selectProvider($(this).data('name'));
+        });
+
+        // ===== 自定义供应商拖拽排序（HTML5 原生 DnD，无第三方依赖）=====
+        var dragState = null;
+        var $dragIndicator = null;
+
+        // 仅当按住手柄时才给项加 draggable，避免干扰点击选中与开关操作
+        // 注意：此处绝不能 e.preventDefault()——取消 mousedown 默认行为会阻止浏览器发起 HTML5 拖拽；
+        // 防文本选择改由 CSS user-select: none 承担
+        $('.model-settings-left').on('mousedown', '.ms-provider-drag-handle', function () {
+            $(this).closest('.ms-provider-item').attr('draggable', 'true');
+        });
+        $(document).on('mouseup', function () {
+            $('.ms-provider-item[draggable]').removeAttr('draggable');
+        });
+
+        function cleanupDrag() {
+            $customList.find('.ms-provider-item').removeClass('dragging').removeAttr('draggable');
+            if ($dragIndicator) $dragIndicator.remove();
+            dragState = null;
+        }
+
+        function customNamesInDomOrder() {
+            var names = [];
+            $customList.find('.ms-provider-item').each(function () { names.push($(this).data('name')); });
+            return names;
+        }
+
+        $customList.on('dragstart', '.ms-provider-item', function (e) {
+            var $item = $(this);
+            dragState = $item.data('name');
+            e.originalEvent.dataTransfer.effectAllowed = 'move';
+            try { e.originalEvent.dataTransfer.setData('text/plain', dragState); } catch (err) { /* 旧内核兼容 */ }
+            // 延迟加类，保证拖拽快照（drag image）是正常外观
+            setTimeout(function () { $item.addClass('dragging'); }, 0);
+        });
+
+        $customList.on('dragover', '.ms-provider-item', function (e) {
+            if (!dragState) return;
+            e.preventDefault();
+            e.originalEvent.dataTransfer.dropEffect = 'move';
+            var $self = $(this);
+            if ($self.data('name') === dragState) {
+                if ($dragIndicator) $dragIndicator.remove();
+                return;
+            }
+            var rect = this.getBoundingClientRect();
+            var after = (e.originalEvent.clientY - rect.top) > rect.height / 2;
+            if (!$dragIndicator) $dragIndicator = $('<div class="ms-drag-indicator"></div>');
+            if (after) { $self.after($dragIndicator); } else { $self.before($dragIndicator); }
+        });
+
+        $customList.on('drop', '.ms-provider-item', function (e) {
+            if (!dragState) return;
+            e.preventDefault();
+            e.stopImmediatePropagation(); // 阻止下方容器级「拖到空白=末尾」兜底逻辑重复执行
+            var from = dragState;
+            cleanupDrag();
+            var to = $(this).data('name');
+            if (from === to) return;
+            var rect = this.getBoundingClientRect();
+            var after = (e.originalEvent.clientY - rect.top) > rect.height / 2;
+            var names = customNamesInDomOrder();
+            var fromIdx = names.indexOf(from);
+            if (fromIdx === -1) return;
+            names.splice(fromIdx, 1);
+            var toIdx = names.indexOf(to);
+            if (toIdx === -1) return;
+            names.splice(after ? toIdx + 1 : toIdx, 0, from);
+            saveProviderOrder(names);
+            renderProviderList();
+        });
+
+        $customList.on('dragend', '.ms-provider-item', cleanupDrag);
+
+        // 容器级兜底：落在指示线/项间隙/列表末尾空白处
+        $customList.on('dragover', function (e) {
+            if (!dragState) return;
+            e.preventDefault();
+            e.originalEvent.dataTransfer.dropEffect = 'move';
+        });
+        $customList.on('drop', function (e) {
+            if (!dragState) return;
+            e.preventDefault();
+            var from = dragState;
+            // 指示线存在 = 按指示线位置插入（统计指示线前的供应商项数）；
+            // 无指示线（落在列表末尾空白）= 移到末尾
+            var insertAt = null;
+            if ($dragIndicator && $dragIndicator.length && $dragIndicator[0].parentNode === $customList[0]) {
+                insertAt = 0;
+                $customList.children().each(function () {
+                    if (this === $dragIndicator[0]) return false;
+                    if ($(this).hasClass('ms-provider-item')) insertAt++;
+                });
+            }
+            cleanupDrag();
+            var names = customNamesInDomOrder();
+            var fromIdx = names.indexOf(from);
+            if (fromIdx === -1) return;
+            names.splice(fromIdx, 1);
+            if (insertAt === null) insertAt = names.length;
+            else if (fromIdx < insertAt) insertAt--;
+            names.splice(insertAt, 0, from);
+            saveProviderOrder(names);
+            renderProviderList();
+        });
+
+        // 启用/禁用开关（状态直接在左栏项上呈现）
+        $('.model-settings-left').on('change', '.provider-toggle', function () {
+            var name = $(this).closest('.ms-provider-item').data('name');
+            var enabled = $(this).prop('checked');
+            toggleProvider(name, enabled);
+        });
+
+        // 模型列表 - 启用/禁用开关
+        $modelsList.on('change', '.provider-model-toggle', function () {
+            var modelId = $(this).closest('.provider-model-item').data('model-id');
+            var enabled = $(this).prop('checked');
+            var llmName = $(this).data('llm-name');
+            var isSynced = $(this).data('synced') === true || $(this).data('synced') === 'true';
+            toggleProviderModel(modelId, enabled, llmName, isSynced);
+        });
+
+        // 模型列表 - 接口类型切换（按模型，layui select）：编辑模式下即时生效
+        if (typeof layui !== 'undefined' && layui.form) {
+            layui.form.on('select(msModelStd)', function (data) {
+                var modelId = $(data.elem).data('model-id');
+                var std = data.value;
+                for (var i = 0; i < fetchedModels.length; i++) {
+                    if (fetchedModels[i].id === modelId) {
+                        fetchedModels[i].standard = std;
+                        break;
+                    }
+                }
+                if (currentProvider) {
+                    persistProvider();
+                }
+            });
+        }
+
+        // 名称：编辑模式下变更即时保存（内置连接输入框为 readonly，不会触发）
+        $('#msProviderName').on('change', function () {
+            if (!currentProvider) return;
+            var newName = ($(this).val() || '').trim();
+            $(this).val(newName);
+            if (newName === currentProvider.name) return; // 无实质变更（含仅首尾空格差异）
+            if (!newName) {
+                // 名称必填：留空直接回退，否则表单会卡在空名状态（后续任何即时保存都被拦截）
+                $(this).val(currentProvider.name);
+                showToast(GourdI18n.t('settings.providers.field_required', [GourdI18n.t('common.name')]), 'error');
+                return;
+            }
+            persistProvider();
+        });
+
+        // 连接基础字段（作用域/模型列表接口/API 地址/密钥/超时）：编辑模式下变更即时保存；新增模式仍走保存按钮
+        $('.settings-scope-toggle[data-target="msProviderScope"]').on('click', '.settings-scope-btn', function () {
+            if (currentProvider) {
+                // 先同步隐藏域，再持久化（通用作用域切换 handler 在 app-settings.js，两者幂等）
+                $('#msProviderScope').val($(this).data('scope'));
+                persistProvider();
+            }
+        });
+        $('input[name="msProviderStandard"]').on('change', function () {
+            if (currentProvider) persistProvider();
+        });
+        // 密钥输入框：任何真实键入都标记为「用户已编辑」，persistProvider 据此决定是否提交 apiKey 字段
+        //（用 input 而非 change：用户输入后又删空也要算编辑过，空串=主动清空密钥）
+        $('#msProviderApiKey').on('input', function () {
+            keyTouched = true;
+        });
+        $('#msProviderApiUrl, #msProviderApiKey, #msProviderTimeout').on('change', function () {
+            if (currentProvider) persistProvider();
+        });
+
+        // 模型搜索框：输入 150ms 防抖后即时过滤列表；清除按钮一键复位（过滤口径见 parseModelSearchTerms）
+        $searchInput.on('input', function () {
+            var val = $(this).val() || '';
+            $searchClear.toggle(!!val);
+            if (modelSearchTimer) clearTimeout(modelSearchTimer);
+            modelSearchTimer = setTimeout(function () {
+                modelSearchTimer = null;
+                modelSearchQuery = val;
+                renderModelsList();
+            }, 150);
+        });
+
+        // 一键清除搜索并恢复全量列表
+        $searchClear.on('click', function () {
+            clearModelSearch(true);
+        });
+
+        // 批量选择菜单
+        $('#msProviderModelsSelectToggle').on('click', function (e) {
+            e.stopPropagation();
+            $('#msProviderModelsActionMenu').toggleClass('show');
+        });
+
+        $(document).on('click', function (e) {
+            if ($(e.target).closest('.provider-model-menu-wrap').length === 0) {
+                $('#msProviderModelsActionMenu').removeClass('show');
+            }
+        });
+
+        $('#msProviderModelsSelectAll, #msProviderModelsSelectNone, #msProviderModelsInvert').on('click', function () {
+            var action = this.id;
+            var changed = false;
+
+            $modelsList.find('.provider-model-toggle').each(function () {
+                var $toggle = $(this);
+                var nextChecked = $toggle.prop('checked');
+
+                if (action === 'msProviderModelsSelectAll') {
+                    nextChecked = true;
+                } else if (action === 'msProviderModelsSelectNone') {
+                    nextChecked = false;
+                } else if (action === 'msProviderModelsInvert') {
+                    nextChecked = !$toggle.prop('checked');
+                }
+
+                if ($toggle.prop('checked') !== nextChecked) {
+                    changed = true;
+                    $toggle.prop('checked', nextChecked).trigger('change');
+                }
+            });
+
+            $('#msProviderModelsActionMenu').removeClass('show');
+        });
+
+        // 作用域切换（app-settings.js 的通用 handler 仅管 active 态与隐藏域同步，
+        // 此处自绑一份保证主视图独立可用，与设置弹框原行为一致）
+        $('.settings-scope-toggle[data-target="msProviderScope"]').on('click', '.settings-scope-btn', function () {
+            var $toggle = $(this).closest('.settings-scope-toggle');
+            var target = $toggle.data('target');
+            var scope = $(this).data('scope');
+            $toggle.find('.settings-scope-btn').removeClass('active');
+            $(this).addClass('active');
+            $('#' + target).val(scope);
+        });
+    }
+
+    // ==================== 视图入口（独立主视图，与自动化/技能/远控通道同构） ====================
+
+    /** 打开模型配置视图（由左侧栏「模型配置」导航触发） */
+    function openModelSettings() {
+        // 与聊天/欢迎/自动化/技能/远控通道视图互斥：隐藏它们，显示本视图
+        if (typeof window.exitCodeMode === 'function' && window.appMode === 'code') {
+            window.exitCodeMode();
+        }
+        if (typeof window.closeAutomation === 'function') window.closeAutomation();
+        if (typeof window.closeSkills === 'function') window.closeSkills();
+        if (typeof window.closeChannel === 'function') window.closeChannel();
+        if (typeof window.closeMemoryView === 'function') window.closeMemoryView();
+        if (typeof window.closeUsage === 'function') window.closeUsage();
+        $('#welcomeView').hide();
+        $('#chatView').removeClass('active');
+        $('#modelSettingsView').addClass('active');
+        $('.main-nav-item').removeClass('active');
+        $('#modelConfigNavBtn').addClass('active');
+
+        // 独立视图既不属于 chat 也不属于 welcome，必须让出 inChatMode（与 automation 一致），
+        // 否则切回聊天时 #chatView 拿不回 .active（主区停留白屏）
+        window.inChatMode = false;
+
+        // 关掉可能打开的设置浮层（浮层为高 z-index 遮罩，会盖住本视图）
+        if (typeof window.closeSettings === 'function') window.closeSettings();
+        else if ($('#settingsOverlay').is(':visible')) $('#settingsCloseBtn').trigger('click');
+
+        // 默认右栏为「添加供应商」表单；后端失败时不请求接口，也不影响自定义供应商表单使用。
+        selectAdd();
+        // 用户主动打开本页：失败要可见，否则只看到一个空列表
+        __whenBackendReady(function () { loadProvidersListIfBackendReady(false); });
+    }
+
+    /** 离开模型配置视图（切回聊天/欢迎/自动化/技能时由对应切换函数调用） */
+    function closeModelSettings() {
+        $('#modelSettingsView').removeClass('active');
+        $('#modelConfigNavBtn').removeClass('active');
+        currentProvider = null;
+        fetchedModels = [];
+        selectedName = null;
+        // 关闭视图时清空搜索（含取消未触发的防抖任务），避免下次打开残留过滤态
+        clearModelSearch(false);
+        modelSearchProviderKey = null;
+        $('#msProviderModelsActionMenu').removeClass('show');
+        // 视图已关闭：在途拉取不会再有人关心，顺手复位按钮，
+        // 否则下次进入本页时第一眼就是一个转着的禁用按钮
+        setFetchBtnBusy(false);
+        // 通知聊天组件刷新模型下拉
+        if (typeof window.reloadModels === 'function') {
+            window.reloadModels();
+        }
+    }
+
+    // ==================== 左栏供应商列表 ====================
+    /** 读取本地保存的自定义供应商展示顺序 */
+    function readProviderOrder() {
+        try {
+            var raw = localStorage.getItem(LS_PROVIDER_ORDER);
+            var arr = raw ? JSON.parse(raw) : [];
+            return Array.isArray(arr) ? arr : [];
+        } catch (e) { return []; }
+    }
+
+    /** 按本地保存顺序重排 providers（未保存过顺序的排到末尾） */
+    function applyProviderOrder() {
+        var saved = readProviderOrder();
+        if (!saved.length) return;
+        var rank = {};
+        saved.forEach(function (n, i) { rank[n] = i; });
+        providers.sort(function (a, b) {
+            return (rank[a.name] !== undefined ? rank[a.name] : 9999) - (rank[b.name] !== undefined ? rank[b.name] : 9999);
+        });
+    }
+
+    /** 改名后同步本地展示顺序中的名称，保持原有拖拽位置（顺序按名称存储，不同步会掉到列表末尾） */
+    function renameProviderOrder(oldName, newName) {
+        var order = readProviderOrder();
+        var idx = order.indexOf(oldName);
+        if (idx === -1) return;
+        order[idx] = newName;
+        try { localStorage.setItem(LS_PROVIDER_ORDER, JSON.stringify(order)); } catch (e) { /* 存储不可用时忽略 */ }
+    }
+
+    /** 持久化展示顺序：裁剪已删除的名称，并追加新增的供应商 */
+    function saveProviderOrder(names) {
+        var valid = {};
+        providers.forEach(function (p) { valid[p.name] = true; });
+        var pruned = (names || []).filter(function (n) { return valid[n]; });
+        providers.forEach(function (p) {
+            if (pruned.indexOf(p.name) === -1) pruned.push(p.name);
+        });
+        try { localStorage.setItem(LS_PROVIDER_ORDER, JSON.stringify(pruned)); } catch (e) { /* 存储不可用时忽略 */ }
+    }
+
+    /**
+     * @param silent 见 loadProvidersList。启动预载传 true：用户此刻停在首页，
+     *        主页面不该冒出模型配置的失败提示；打开模型配置视图时传 false，
+     *        那是用户主动进入本页，列表空白必须给出原因。
+     */
+    function loadProvidersListIfBackendReady(silent) {
+        if (typeof window.__backendReadyState === 'function' && window.__backendReadyState() === 'failed') {
+            providers = [];
+            renderProviderList();
+            return;
+        }
+        loadProvidersList(null, silent);
+    }
+
+    /**
+     * @param silent 静默模式：接口失败时只记日志、不弹 toast。
+     *        冷启动预载（init / openModelSettings 前）走这条路：那时用户多半停在首页，
+     *        后端还没起来，弹一条「模型操作失败」既无从处理也解释不清（后端未就绪已有
+     *        右下角错误条兜底说明）。用户主动触发的增删改查仍要弹，否则操作静默失败更糟。
+     */
+    function loadProvidersList(onDone, silent) {
+        $.ajax({
+            url: '/web/settings/providers',
+            method: 'GET',
+            success: function (res) {
+                if (res.code === 200) {
+                    providers = res.data || [];
+                    // 若当前选中项仍存在于新列表中则保持选中，否则回落到「添加供应商」表单
+                    if (selectedName !== '__add__') {
+                        var stillExists = false;
+                        providers.forEach(function (p) { if (p.name === selectedName) stillExists = true; });
+                        if (!stillExists) {
+                            selectedName = '__add__';
+                        }
+                    }
+                    renderProviderList();
+                    // 右栏详情仅在视图已打开时同步（冷启动预载/视图未激活时只更新左栏，
+                    // 打开视图时 openModelSettings 会显式 selectAdd + 重新拉取）
+                    if ($view.hasClass('active')) {
+                        if (selectedName === '__add__') {
+                            selectAdd();
+                        } else {
+                            fillDetailFromCache(selectedName);
+                        }
+                    }
+                }
+            },
+            error: function () {
+                if (silent) {
+                    console.warn('[model-settings] 供应商列表加载失败（启动预载，已静默）');
+                    return;
+                }
+                showToast(GourdI18n.t('settings.providers.load_providers_failed'), 'error');
+            },
+            complete: function () {
+                if (onDone) onDone();
+            }
+        });
+    }
+
+    function renderProviderList() {
+        applyProviderOrder();
+        var customHtml = '';
+        var hasCustom = false;
+
+        providers.forEach(function (provider) {
+            var item = renderProviderItem(provider);
+            customHtml += item;
+            hasCustom = true;
+        });
+
+        $customGroup.toggle(hasCustom);
+        $customList.html(customHtml);
+    }
+
+    function renderProviderItem(provider) {
+        var modelsCount = (provider.models || []).length;
+        var selected = (selectedName === provider.name) ? ' selected' : '';
+        // 拖拽手柄：供应商可拖拽排序
+        var dragHandle = '<span class="ms-provider-drag-handle"><svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor"><circle cx="2.5" cy="2.5" r="1.4"/><circle cx="7.5" cy="2.5" r="1.4"/><circle cx="2.5" cy="7" r="1.4"/><circle cx="7.5" cy="7" r="1.4"/><circle cx="2.5" cy="11.5" r="1.4"/><circle cx="7.5" cy="11.5" r="1.4"/></svg></span>';
+        return '<div class="ms-provider-item' + selected + (provider.enabled === false ? ' disabled' : '') + '" data-name="' + escapeAttr(provider.name) + '">' +
+            dragHandle +
+            '<div class="ms-provider-icon custom">' + escapeHtml((provider.name || 'B')[0].toUpperCase()) + '</div>' +
+            '<div class="ms-provider-info">' +
+                '<div class="ms-provider-name">' + escapeHtml(provider.name) + '</div>' +
+                '<div class="ms-provider-count">' + GourdI18n.t('settings.providers.model_count', [modelsCount]) + '</div>' +
+            '</div>' +
+            '<label class="toggle-switch">' +
+                '<input type="checkbox" ' + (provider.enabled ? 'checked' : '') + ' data-name="' + escapeAttr(provider.name) + '" class="provider-toggle"/>' +
+                '<span class="toggle-slider"></span>' +
+            '</label>' +
+            '<span class="ms-provider-dot' + (provider.enabled !== false ? ' on' : '') + '"></span>' +
+        '</div>';
+    }
+
+    // ==================== 右栏详情/表单（Master-Detail：原地切换，不隐藏左栏） ====================
+    /**
+     * 右栏回顶：切换供应商/进入新增态时把滚动位置归零。
+     * 若沿用上一家供应商的滚动位置（例如刚在长模型列表里滑到中段），新表单会直接
+     * 从中段开始，标题与名称/地址输入框都看不见。
+     *
+     * 滚动容器随布局切换而不同，两处都要归零：
+     * - 宽屏双栏：.model-settings-form-wrap 是右栏唯一滚动区；
+     * - 窄屏堆叠（<=860px）：wrap 被改成 overflow:visible、长不高也不再滚动，
+     *   整页滚动由外层 .model-settings-scroll 承担。此时只清 wrap.scrollTop 无效，
+     *   换供应商后标题会停在视口上方（实测 120 个模型时标题位于 -2445px，完全看不到）。
+     */
+    function resetFormScroll() {
+        var wrap = $('.model-settings-form-wrap')[0];
+        if (wrap) wrap.scrollTop = 0;
+        var pageScroll = $('.model-settings-scroll')[0];
+        if (pageScroll) pageScroll.scrollTop = 0;
+    }
+
+    /**
+     * 右栏切换为「添加供应商」表单（新增态）。
+     * 已在新增态时直接返回：重绘会把用户已填写的名称/地址/密钥全部清空。
+     * 新建入口在左栏头部，离表单区域很近，填表途中被误点的概率很高（实测一把填好的字段
+     * 全丢、无任何提示）。唯一需要真正重绘的情形是原选中供应商已消失（currentProvider 非空）
+     * 或从编辑态/关闭视图返回（selectedName 不是 '__add__'），两者都自然通过守卫。
+     */
+    function selectAdd() {
+        if (selectedName === '__add__' && currentProvider === null) return;
+        selectedName = '__add__';
+        currentProvider = null;
+        fetchedModels = [];
+        keyTouched = false;
+        $('.ms-provider-item').removeClass('selected');
+        renderDetailForm(null);
+        resetFormScroll();
+    }
+
+    /** 选中左栏某供应商：右栏切换为其编辑详情 */
+    function selectProvider(name) {
+        if (selectedName === name) return; // 已选中，避免重复拉取
+        selectedName = name;
+        $('.ms-provider-item').removeClass('selected');
+        $('.ms-provider-item[data-name="' + escapeAttr(name) + '"]').addClass('selected');
+        fillDetailFromCache(name);
+        resetFormScroll();
+    }
+
+    /** 填充右栏：先用列表缓存快速回填基础字段，再拉取后端详情（含完整模型列表）覆盖 */
+    function fillDetailFromCache(name) {
+        var cached = null;
+        providers.forEach(function (p) { if (p.name === name) cached = p; });
+        // 真实密钥前端永远拿不到（列表与详情接口都只回脱敏值）：
+        // 未被用户编辑过就不提交 apiKey 字段，后端保留原值（见 persistProvider）
+        keyTouched = false;
+        if (cached) {
+            renderDetailForm(cached);
+        }
+        editProvider(name);
+    }
+
+    /**
+     * 密钥输入框的占位提示：只用后端返回的脱敏值告知「已配置密钥」，绝不回显明文。
+     * 新增态或尚未配置密钥时回落到 i18n 默认占位文案。
+     */
+    function keyPlaceholder(provider) {
+        if (provider && provider.apiKey) return provider.apiKey; // 后端脱敏值，如 sk-a****wxyz
+        if (provider && provider.hasKey) return '••••••••';
+        return GourdI18n.t('settings.providers.api_key_placeholder');
+    }
+
+    /** 填充右栏详情表单（provider 为 null 表示新增态） */
+    function renderDetailForm(provider) {
+        currentProvider = provider;
+        // 每次重绘表单都视为「用户尚未编辑密钥」：输入框一律留空，只有真实键入才提交
+        keyTouched = false;
+        // 复制模型列表，并为每个模型补齐接口类型（缺省 openai）
+        fetchedModels = (provider && provider.models) ? provider.models.map(function (m) {
+            return {
+                id: m.id,
+                manual: m.manual || false,
+                standard: m.standard || (provider.standard || DEFAULT_STANDARD),
+                enabled: m.enabled !== false
+            };
+        }) : [];
+
+        // 标题与描述：新增态=添加模型供应商；编辑态=编辑「名称」
+        if (provider) {
+            $formTitle.text(GourdI18n.t('settings.providers.edit_title') + '：' + provider.name);
+            $formDesc.text(provider.apiUrl || '');
+        } else {
+            $formTitle.text(GourdI18n.t('settings.providers.add_provider_title'));
+            $formDesc.text(GourdI18n.t('settings.providers.add_provider_desc'));
+        }
+
+        // 填充表单
+        // 名称：可改名（后端 update 支持 originalName 迁移）
+        $('#msProviderName').val(provider ? provider.name : 'GWork');
+        var stdVal = provider ? (provider.standard || DEFAULT_STANDARD) : DEFAULT_STANDARD;
+        $('input[name="msProviderStandard"]').prop('checked', false)
+            .filter('[value="' + stdVal + '"]').prop('checked', true);
+        $('#msProviderApiUrl').val(provider ? provider.apiUrl : 'https://www.gourd-ai.cn');
+        // 密钥不回显到输入框：后端返回的 provider.apiKey 是脱敏值（如 sk-a****wxyz），
+        // 一旦进入输入框就会被即时保存当成真实密钥写回，污染配置。改用 placeholder 提示「已配置」，
+        // 输入框保持空；用户真正输入过才提交 apiKey（见 persistProvider）
+        $('#msProviderApiKey').val('').attr('placeholder', keyPlaceholder(provider));
+        $('#msProviderTimeout').val(provider && provider.timeout ? provider.timeout : '');
+        $('#msProviderScope').val(provider ? (provider.scope || 'user') : 'user');
+
+        // 编辑态显示删除按钮（新增态隐藏）
+        $('#msProviderFormActions').toggle(!!provider);
+
+        // 设置作用域按钮状态
+        var scope = provider ? (provider.scope || 'user') : 'user';
+        $('.settings-scope-toggle[data-target="msProviderScope"] .settings-scope-btn').removeClass('active');
+        $('.settings-scope-toggle[data-target="msProviderScope"] .settings-scope-btn[data-scope="' + scope + '"]').addClass('active');
+
+        // 渲染"模型列表接口" layui 单选，使皮肤与选中态同步
+        if (typeof layui !== 'undefined' && layui.form) {
+            layui.form.render('radio', 'msProviderStandardForm');
+        }
+
+        // 编辑模式：页面内操作均即时生效，隐藏提交行（新增模式保留「添加供应商」按钮）
+        $('#msProviderFormSubmitRow').toggle(!provider);
+
+        // 搜索词仅在供应商真正切换（或进入新增表单）时清空：
+        // loadProvidersList / toggleProvider 等链路会用同一供应商重渲染右栏，此时保留用户的过滤状态
+        var providerKey = provider ? provider.name : '__add__';
+        if (providerKey !== modelSearchProviderKey) {
+            clearModelSearch(false);
+            modelSearchProviderKey = providerKey;
+        }
+
+        // 加载 LLM 模型缓存后渲染模型列表
+        loadLlmModelsCache(function () {
+            renderModelsList();
+        });
+    }
+
+    // ==================== 模型列表 ====================
+    var llmModelsCache = {}; // 缓存 LLM 模型列表，用于判断是否已同步
+    // 当前默认模型（后端 effectiveDefault 口径：settings 原始值空/悬空时已按引擎回落链解析为实际生效模型）。
+    // 星标高亮、页头提示均以它为准，保证展示的始终是「未选模时实际会用的模型」。
+    var llmDefaultModel = null;
+
+    // 添加 / 修改模型弹框（model 为 null 表示新增，否则为编辑）
+    // 结构与设置弹框完全一致（model-add-* 组件类），id 加 ms 前缀避免与设置弹框冲突
+    function openModelDialog(model) {
+        var isEdit = !!model;
+        var curStd = isEdit ? (model.standard || DEFAULT_STANDARD) : DEFAULT_STANDARD;
+        var manualStdOptions = '';
+        STANDARD_OPTIONS.forEach(function (opt) {
+            manualStdOptions += '<option value="' + opt.value + '"' + (opt.value === curStd ? ' selected' : '') + '>' + opt.label + '</option>';
+        });
+        var nameVal = isEdit ? escapeAttr(model.id) : '';
+        var dialogHtml = '<div class="model-add-overlay" id="msModelAddOverlay">'
+            + '<div class="model-add-dialog">'
+            + '<div class="model-add-header">'
+             + '<span class="model-add-title">' + (isEdit ? GourdI18n.t('settings.providers.edit_model_title') : GourdI18n.t('settings.providers.add_model')) + '</span>'
+            + '<button class="model-add-close" id="msModelAddClose">&times;</button>'
+            + '</div>'
+            + '<div class="model-add-body">'
+            + '<div class="form-group">'
+             + '<label>' + GourdI18n.t('settings.providers.model_name') + ' <span class="required">*</span></label>'
+             + '<input type="text" id="msManualModelName" placeholder="' + GourdI18n.t('settings.providers.model_id') + ' (e.g. gpt-4o-mini)" value="' + nameVal + '">'
+            + '</div>'
+            + '<div class="form-group layui-form" lay-filter="msManualModelForm">'
+             + '<label>' + GourdI18n.t('settings.providers.model_standard') + ' <span class="required">*</span></label>'
+             + '<select id="msManualModelStandard" lay-filter="msManualModelStandard">' + manualStdOptions + '</select>'
+            + '</div>'
+            + '</div>'
+            + '<div class="model-add-footer">'
+             + '<button class="btn-secondary" id="msModelAddCancel">' + GourdI18n.t('common.cancel') + '</button>'
+             + '<button class="btn-primary" id="msModelAddConfirm">' + (isEdit ? GourdI18n.t('common.save') : GourdI18n.t('common.add')) + '</button>'
+             + '</div>'
+             + '</div>'
+             + '</div>';
+
+        $('body').append(dialogHtml);
+
+        var $overlay = $('#msModelAddOverlay');
+
+        // 渲染弹框内的 layui 接口类型下拉
+        var manualStandard = curStd;
+        if (typeof layui !== 'undefined' && layui.form) {
+            layui.form.render('select');
+            layui.form.on('select(msManualModelStandard)', function (data) {
+                manualStandard = data.value;
+            });
+        }
+
+        function doSave() {
+            var modelId = $overlay.find('#msManualModelName').val().trim();
+
+            if (!modelId) {
+                showToast(GourdI18n.t('settings.providers.field_required', [GourdI18n.t('settings.providers.model_name')]), 'error');
+                return;
+            }
+
+            // 名称重复校验（编辑时排除自身）
+            var exists = fetchedModels.some(function (m) {
+                return m.id === modelId && (!isEdit || m.id !== model.id);
+            });
+            if (exists) {
+                showToast(GourdI18n.t('settings.providers.model_exists_named', [modelId]), 'error');
+                return;
+            }
+
+            if (isEdit) {
+                model.id = modelId;
+                model.standard = manualStandard || DEFAULT_STANDARD;
+            } else {
+                fetchedModels.push({ id: modelId, manual: true, standard: manualStandard || DEFAULT_STANDARD });
+            }
+            renderModelsList();
+            // 编辑模式下即时生效（新增模式仍随保存按钮一并提交）
+            if (currentProvider) {
+                persistProvider();
+            }
+            $overlay.remove();
+        }
+
+        $('#msModelAddConfirm').on('click', doSave);
+        $('#msModelAddCancel, #msModelAddClose').on('click', function () {
+            $overlay.remove();
+        });
+        $overlay.on('keypress', 'input', function (e) {
+            if (e.which === 13) doSave();
+        });
+        setTimeout(function () {
+            $overlay.find('#msManualModelName').focus();
+        }, 100);
+    }
+
+    function removeManualModel(modelId) {
+        fetchedModels = fetchedModels.filter(function (m) {
+            return m.id !== modelId;
+        });
+        renderModelsList();
+        if (currentProvider) {
+            persistProvider();
+        }
+    }
+
+    var FETCH_REASON_KEYS = {
+        INVALID_URL: 'fetch_invalid_url', NOT_SUPPORTED: 'fetch_not_supported',
+        AUTH_FAILED: 'fetch_auth_failed', RATE_LIMITED: 'fetch_rate_limited',
+        UPSTREAM_ERROR: 'fetch_upstream_error', BAD_STATUS: 'fetch_bad_status',
+        CONNECT_TIMEOUT: 'fetch_connect_timeout', READ_TIMEOUT: 'fetch_read_timeout',
+        TIMEOUT: 'fetch_timeout', DNS_FAILED: 'fetch_dns_failed',
+        CONNECT_REFUSED: 'fetch_connect_refused', TLS_ERROR: 'fetch_tls_error',
+        NETWORK_ERROR: 'fetch_network_error', INVALID_RESPONSE: 'fetch_invalid_response', UNKNOWN: 'fetch_unknown'
+    };
+
+    /* ===== 拉取按钮的忙碌态 =====
+     * 「发起」与「复原」必须共用同一份 DOM 字符串：改前两处各写一遍内联 SVG，
+     * 复原那份还漏了 stroke-linecap/linejoin（计算值 stroke-linecap:butt，而空闲
+     * 下载图标是 round），旋转中弧线端头呈平口，与图标库其余图标的圆头描边不一致。
+     * 尺寸也统一到 16px：改前忙碌态用 14px，点击瞬间图标会缩一圈（16→14→16）。 */
+    var FETCH_BTN_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+    var FETCH_BTN_SPINNER = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>';
+
+    /**
+     * 拉取按钮忙碌态开关（唯一入口）。
+     * @param {boolean} busy true=转圈并禁用；false=复原下载图标并启用
+     */
+    function setFetchBtnBusy(busy) {
+        $('#msProviderFetchModelsBtn')
+            .prop('disabled', !!busy)
+            .toggleClass('is-loading', !!busy)
+            .html(busy ? FETCH_BTN_SPINNER : FETCH_BTN_ICON);
+    }
+
+    function showFetchFailure(res) {
+        var data = res && res.data;
+        if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { data = {}; } }
+        data = data || {};
+        var key = FETCH_REASON_KEYS[data.reason] || FETCH_REASON_KEYS.UNKNOWN;
+        var msg = GourdI18n.t('settings.providers.' + key);
+        if (data.status) msg = msg.replace('{0}', data.status);
+        showToast(msg, 'error');
+    }
+
+    function fetchModels() {
+        var apiUrl = $('#msProviderApiUrl').val();
+        var apiKey = $('#msProviderApiKey').val();
+        var standard = $('input[name="msProviderStandard"]:checked').val() || DEFAULT_STANDARD;
+
+        if (!apiUrl) {
+            showToast(GourdI18n.t('settings.providers.field_required', [GourdI18n.t('settings.providers.api_url')]), 'error');
+            return;
+        }
+
+        var requestId = ++fetchRequestId;
+        var requestSelectedName = selectedName;
+        var requestProviderName = currentProvider && currentProvider.name;
+        var requestApiUrl = apiUrl;
+        var requestStandard = standard;
+
+        setFetchBtnBusy(true);
+
+        $.ajax({
+            url: '/web/settings/providers/fetch',
+            method: 'POST',
+            data: {
+                apiUrl: apiUrl,
+                apiKey: apiKey,
+                standard: standard,
+                // 输入框留空时后端按该名称回落到已保存的真实密钥（前端已不再持有明文），
+                // 否则编辑既有连接时不重新输入密钥就无法拉取模型
+                providerName: (currentProvider && currentProvider.name) || ''
+            },
+            success: function (res) {
+                // 复原必须【无条件】执行 —— 否则本按钮会永久停在 spinner + disabled。
+                // 改前它写在下面那条「表单是否被改动」守卫之后：用户在等待期间改了 API 地址、
+                // 切了接口类型或离开视图，success 就直接 return，按钮再也不复原
+                // （实测 3 秒后仍在转、click 不再触发，只能刷新整页恢复）。
+                // 本处与 closeModelSettings 的兜底是两个正交的落定点：请求有结果就归本处
+                //（守卫不成立也要先复原，再 return）；视图先被关闭（请求注定无人接收）就归那处。
+                // 仍以 requestId 作闸门：过期请求不得关掉后发起那次请求的忙碌态。
+                if (requestId === fetchRequestId) setFetchBtnBusy(false);
+                if (requestId !== fetchRequestId || selectedName !== requestSelectedName
+                        || (currentProvider && currentProvider.name) !== requestProviderName
+                        || $('#msProviderApiUrl').val() !== requestApiUrl
+                        || ($('input[name="msProviderStandard"]:checked').val() || DEFAULT_STANDARD) !== requestStandard) {
+                    return; // Provider/表单已切换，丢弃旧请求结果
+                }
+                if (res.code === 200) {
+                    try {
+                        var data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+                        var models = data.data || data.models || data || [];
+                        if (!Array.isArray(models)) throw new Error('invalid models response');
+                        models = models.filter(function (m) { return !!(m && (m.id || m.name || (typeof m === 'string' && m))); });
+                        if (models.length === 0) {
+                            showToast(GourdI18n.t('settings.providers.fetch_empty_keep_existing'), 'info');
+                            return;
+                        }
+                        // 记录已有模型的接口类型，拉取后尽量沿用
+                        var prevStandards = {};
+                        var prevEnabled = {};
+                        fetchedModels.forEach(function (m) {
+                            if (m.standard) prevStandards[m.id] = m.standard;
+                            prevEnabled[m.id] = m.enabled !== false;
+                        });
+                        // 保留手动添加的模型，合并拉取的模型
+                        var manualModels = fetchedModels.filter(function (m) {
+                            return m.manual === true;
+                        });
+                        var fetchedMapped = models.map(function (m) {
+                            var id = m.id || m.name || m;
+                            // 接口类型优先级：用户此前手动设定 > 后端按 supported_endpoint_types 推断 > 默认 openai
+                            var std = prevStandards[id] || m.standard || DEFAULT_STANDARD;
+                            return { id: id, manual: false, standard: std, enabled: prevEnabled[id] !== false };
+                        });
+                        // 手动模型去重：如果手动模型 id 已在拉取列表中，保留手动标记
+                        var fetchedIds = {};
+                        fetchedMapped.forEach(function (m) { fetchedIds[m.id] = m; });
+                        manualModels.forEach(function (mm) {
+                            if (fetchedIds[mm.id]) {
+                                fetchedIds[mm.id].manual = true;
+                                if (mm.standard) fetchedIds[mm.id].standard = mm.standard;
+                                if (mm.enabled !== undefined) {
+                                    fetchedIds[mm.id].enabled = mm.enabled;
+                                }
+                            } else {
+                                fetchedMapped.push(mm);
+                            }
+                        });
+                        fetchedModels = fetchedMapped;
+                        // 加载 LLM 模型列表缓存，用于判断同步状态
+                        loadLlmModelsCache(function () {
+                            if (requestId !== fetchRequestId || selectedName !== requestSelectedName
+                                    || (currentProvider && currentProvider.name) !== requestProviderName) return;
+                            renderModelsList();
+                            // 编辑模式下拉取结果即时生效
+                            if (currentProvider) {
+                                persistProvider();
+                            }
+                        });
+                        showToast(GourdI18n.t('settings.providers.fetch_models_success').replace('{0}', fetchedModels.length), 'success');
+                    } catch (e) {
+                        showToast(GourdI18n.t('settings.providers.fetch_models_failed'), 'error');
+                    }
+                } else {
+                    showFetchFailure(res);
+                }
+            },
+            error: function (xhr) {
+                if (requestId === fetchRequestId) setFetchBtnBusy(false);
+                showToast(GourdI18n.t('settings.providers.fetch_network_error'), 'error');
+            }
+        });
+    }
+
+    // 加载 LLM 模型列表缓存
+    function loadLlmModelsCache(callback) {
+        $.get('/web/settings/llm/models', function (res) {
+            if (res.code === 200 && res.data) {
+                var list = res.data.list || (Array.isArray(res.data) ? res.data : []);
+                llmModelsCache = {};
+                list.forEach(function (item) {
+                    if (item.name) {
+                        llmModelsCache[item.name] = item;
+                    }
+                });
+                // 默认模型使用「实际生效」口径（后端已按引擎回落链解析，可能为空 = 一个模型都没配），
+                // 顺带刷新页头提示，保证星标与提示始终指向「未选模时实际会用的模型」
+                llmDefaultModel = res.data.effectiveDefault || null;
+                updateDefaultModelHint();
+            }
+            if (callback) callback();
+        }).fail(function () {
+            if (callback) callback();
+        });
+    }
+
+    // ==================== 模型列表搜索（多词 AND，与聊天模型下拉搜索同口径） ====================
+
+    /** 解析搜索词：小写化 + 空格分词（「aws opus」= 两词 AND 匹配） */
+    function parseModelSearchTerms(query) {
+        var text = String(query == null ? '' : query).toLowerCase().trim();
+        if (!text) return [];
+        return text.split(/\s+/);
+    }
+
+    /** 单个模型是否命中全部搜索词（大小写不敏感；搜索范围为模型 id） */
+    function modelMatchesSearch(model, terms) {
+        if (!terms.length) return true;
+        var haystack = String((model && model.id) || '').toLowerCase();
+        for (var i = 0; i < terms.length; i++) {
+            if (haystack.indexOf(terms[i]) === -1) return false;
+        }
+        return true;
+    }
+
+    /** 当前可见模型：有关键词时为命中子集（严格保序），否则全量 */
+    function visibleModels() {
+        var terms = parseModelSearchTerms(modelSearchQuery);
+        if (!terms.length) return fetchedModels;
+        return fetchedModels.filter(function (m) { return modelMatchesSearch(m, terms); });
+    }
+
+    /**
+     * 清空搜索词并复位输入框/清除按钮。
+     * @param reRender 是否立即重绘列表：清除按钮点击传 true；
+     *        切换供应商/关闭视图等后续链路自会重绘的场景传 false，避免重复渲染
+     */
+    function clearModelSearch(reRender) {
+        modelSearchQuery = '';
+        if (modelSearchTimer) { clearTimeout(modelSearchTimer); modelSearchTimer = null; }
+        if ($searchInput.length && $searchInput.val() !== '') $searchInput.val('');
+        if ($searchClear.length) $searchClear.hide();
+        if (reRender) renderModelsList();
+    }
+
+    function renderModelsList() {
+        // 无模型可言时收起搜索框（新增供应商/未拉取形态），有模型时恢复
+        $searchBox.toggle(fetchedModels.length > 0);
+
+        if (fetchedModels.length === 0) {
+            $modelsEmpty.show();
+            $searchEmpty.hide();
+            $modelsList.hide();
+            return;
+        }
+
+        var models = visibleModels();
+        if (models.length === 0) {
+            // 有关键词但零命中：展示「未找到」空态（与「暂无模型」区分），批量按钮仅作用于可见行故无需禁用
+            $modelsEmpty.hide();
+            $searchEmpty.show();
+            $modelsList.hide();
+            return;
+        }
+
+        $modelsEmpty.hide();
+        $searchEmpty.hide();
+        $modelsList.show();
+
+        var providerName = $('#msProviderName').val() || '';
+        var providerEnabled = currentProvider ? currentProvider.enabled !== false : true;
+        var html = '';
+        models.forEach(function (model) {
+            // 检查是否已同步到 LLM
+            var llmName = providerName ? providerName + '-' + model.id : model.id;
+            var syncedModel = llmModelsCache[llmName];
+            var isSynced = !!syncedModel;
+            // 设置端点返回全量模型，enabled 已综合 visibled 与连接启用状态
+            var enabled = isSynced ? syncedModel.enabled !== false : providerEnabled;
+
+            // 默认模型：以「实际生效」口径比对行内 llmName。星标按钮只在已同步且启用中的行渲染
+            //（未同步的模型后端不存在、禁用的模型不允许设为默认）；当前默认行显示高亮星标 + 「默认」徽标。
+            var isDefaultModel = isSynced && llmDefaultModel === llmName;
+            var defaultBtn = (isSynced && enabled)
+                ? '<button class="provider-model-default-btn' + (isDefaultModel ? ' active' : '') + '" data-llm-name="' + escapeAttr(llmName) + '" title="' + escapeAttr(GourdI18n.t('settings.providers.set_default_model')) + '">' +
+                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (isDefaultModel ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' +
+                  '</button>'
+                : '';
+            var defaultTag = isDefaultModel ? ' <span class="provider-model-default-tag">' + GourdI18n.t('settings.providers.default_badge') + '</span>' : '';
+
+            var manualTag = model.manual ? ' <span class="provider-model-manual-tag">' + GourdI18n.t('settings.providers.model_manual') + '</span>' : '';
+            var removeBtn = model.manual
+                ? '<button class="provider-model-remove-btn" title="' + GourdI18n.t('common.delete') + '"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>'
+                : '';
+
+            // 接口类型下拉（按模型，layui 样式）
+            var curStd = model.standard || DEFAULT_STANDARD;
+            var stdOptions = '';
+            STANDARD_OPTIONS.forEach(function (opt) {
+                stdOptions += '<option value="' + opt.value + '"' + (opt.value === curStd ? ' selected' : '') + '>' + opt.label + '</option>';
+            });
+            var stdSelect = '<div class="provider-model-standard-wrap">' +
+                '<select lay-filter="msModelStd" data-model-id="' + escapeAttr(model.id) + '">' + stdOptions + '</select>' +
+                '</div>';
+
+            html += '<div class="provider-model-item' + (!enabled ? ' disabled' : '') + '" data-model-id="' + escapeAttr(model.id) + '">' +
+                '<div class="provider-model-info" title="' + GourdI18n.t('settings.providers.edit_model_title') + '">' +
+                     '<div class="provider-model-name">' + escapeHtml(model.id) + defaultTag + manualTag + (isSynced ? ' <span class="provider-model-synced">' + GourdI18n.t('settings.providers.synced') + '</span>' : '') + '</div>' +
+                '</div>' +
+                '<div class="provider-model-actions">' +
+                    defaultBtn +
+                    stdSelect +
+                    removeBtn +
+                     '<label class="toggle-switch">' +
+                        '<input type="checkbox" ' + (enabled ? 'checked' : '') + ' class="provider-model-toggle" data-synced="' + isSynced + '" data-llm-name="' + escapeAttr(llmName) + '"/>' +
+                        '<span class="toggle-slider"></span>' +
+                     '</label>' +
+                '</div>' +
+            '</div>';
+        });
+        $modelsList.html(html);
+        // 渲染 layui 下拉（切换事件在 bindEvents 里按 lay-filter=msModelStd 全局绑定一次）
+        if (typeof layui !== 'undefined' && layui.form) {
+            layui.form.render('select');
+        }
+    }
+
+    function toggleProviderModel(modelId, enabled, llmName, isSynced) {
+        // 记录按模型的启用状态
+        var model = null;
+        for (var i = 0; i < fetchedModels.length; i++) {
+            if (String(fetchedModels[i].id) === String(modelId)) {
+                model = fetchedModels[i];
+                break;
+            }
+        }
+        if (model) {
+            model.enabled = enabled;
+        }
+
+        // 如果已同步到模型列表，直接调用后端接口即时更新运行时状态
+        if (isSynced && llmName) {
+            postJson('/web/settings/llm/models/toggle', { name: llmName, enabled: enabled }, function (resp) {
+                if (resp.code === 200) {
+                    // 通知聊天组件刷新模型下拉列表（设置页缓存由后续 persistProvider 链路刷新）
+                    if (typeof window.reloadModels === 'function') {
+                        window.reloadModels();
+                    }
+                } else {
+                    showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error');
+                    // 回滚状态
+                    if (model) model.enabled = !enabled;
+                    renderModelsList();
+                    return;
+                }
+                // 持久化按模型启用状态，避免后续同步把开关状态改回去
+                if (currentProvider) {
+                    persistProvider();
+                }
+            });
+        } else if (currentProvider) {
+            // 未同步：即时持久化并触发后端同步生成运行时模型
+            persistProvider();
+        }
+    }
+
+    /**
+     * 刷新页头的「默认模型：xxx」提示；尚未解析出默认模型（一个模型都没配）时隐藏。
+     */
+    function updateDefaultModelHint() {
+        var $hint = $('#msDefaultModelHint');
+        if (!$hint.length) return;
+        if (llmDefaultModel) {
+            $('#msDefaultModelHintText').text(
+                GourdI18n.t('settings.providers.default_model_hint').replace('{0}', llmDefaultModel));
+            $hint.show();
+        } else {
+            $hint.hide();
+        }
+    }
+
+    /**
+     * 将模型设为默认（星标点击）。
+     * 成功静默——星标高亮与页头提示变化即为反馈，不弹 toast；
+     * 失败时提示原因（如模型恰在别处被禁用），避免操作无感知地失败。
+     */
+    function setDefaultModel(llmName) {
+        postJson('/web/settings/llm/models/default', { name: llmName }, function (resp) {
+            if (resp.code === 200) {
+                llmDefaultModel = llmName;
+                renderModelsList();
+                updateDefaultModelHint();
+                // 默认模型影响未选模会话/自动化/ACP 的回落，通知聊天组件刷新模型下拉
+                if (typeof window.reloadModels === 'function') {
+                    window.reloadModels();
+                }
+            } else {
+                showToast((resp && resp.description) || GourdI18n.t('settings.loop.operation_failed'), 'error');
+            }
+        });
+    }
+
+    // ==================== CRUD 操作 ====================
+    /** 拉取供应商详情（含完整模型列表；密钥为脱敏值）并填充右栏 */
+    function editProvider(name) {
+        $.ajax({
+            url: '/web/settings/providers/get',
+            method: 'GET',
+            data: { name: name },
+            success: function (res) {
+                if (res.code === 200) {
+                    // 详情拉回后同步 providers 缓存项（模型数/启用态与后端一致），重绘左栏
+                    var idx = -1;
+                    providers.forEach(function (p, i) { if (p.name === name) idx = i; });
+                    if (idx >= 0) providers[idx] = res.data;
+                    renderProviderList();
+                    // 若期间用户已切走（selectedName 变了）则不覆盖右栏
+                    if (selectedName === name) {
+                        // renderDetailForm 内部会把 keyTouched 重置为 false：详情接口回的也是脱敏值，
+                        // 前端始终不持有真实密钥，故只有用户真正键入过才提交 apiKey 字段
+                        renderDetailForm(res.data);
+                    }
+                } else {
+                    showToast(res.msg || GourdI18n.t('settings.loop.operation_failed'), 'error');
+                }
+            },
+            error: function () {
+                showToast(GourdI18n.t('settings.loop.operation_failed'), 'error');
+            }
+        });
+    }
+
+    // 持久化连接及其模型列表（保存成功不弹提示，仅失败时提示）
+    function persistProvider() {
+        var name = $('#msProviderName').val();
+        var standard = $('input[name="msProviderStandard"]:checked').val() || DEFAULT_STANDARD;
+        var apiUrl = $('#msProviderApiUrl').val();
+        var apiKey = $('#msProviderApiKey').val();
+        var scope = $('#msProviderScope').val();
+        var timeout = ($('#msProviderTimeout').val() || '').trim();
+        var models = fetchedModels.map(function (m) {
+            return { id: m.id, manual: m.manual || false, standard: m.standard || DEFAULT_STANDARD, enabled: m.enabled !== false };
+        });
+
+        if (!name) {
+            showToast(GourdI18n.t('settings.providers.field_required', [GourdI18n.t('common.name')]), 'error');
+            return;
+        }
+        if (!apiUrl) {
+            showToast(GourdI18n.t('settings.providers.field_required', [GourdI18n.t('settings.providers.api_url')]), 'error');
+            return;
+        }
+
+        var data = {
+            name: name,
+            standard: standard,
+            apiUrl: apiUrl,
+            apiKey: apiKey,
+            scope: scope,
+            timeout: normalizeTimeout(timeout),
+            models: models,
+            // 编辑模式沿用当前连接的启用状态，避免即时保存时把已禁用的连接误开启
+            enabled: currentProvider ? currentProvider.enabled !== false : true
+        };
+
+        // 如果是编辑模式，添加 originalName（以提交时缓存的名称查找旧记录）
+        var renameFrom = null;
+        // 捕获提交时正在编辑的对象：请求在途期间用户可能切到别的供应商，
+        // 回调必须改回这个对象，不能改到新选中的供应商上
+        var target = currentProvider;
+        if (target) {
+            data.originalName = target.name;
+            renameFrom = target.name;
+        }
+        // 用户没真正编辑过密钥输入框：不提交该字段，后端保留原值。
+        // 前端持有的 apiKey 只可能是脱敏值或空串，提交上去就会污染真实密钥；
+        // 编辑过（含输入后又删空）才提交，空串=用户主动清空，由后端清除
+        var keySubmitted = true;
+        if (target && !keyTouched) {
+            delete data.apiKey;
+            keySubmitted = false;
+        }
+
+        var url = target ? '/web/settings/providers/update' : '/web/settings/providers/add';
+
+        $.ajax({
+            url: url,
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(data),
+            success: function (res) {
+                if (res.code === 200) {
+                    var stillEditing = (currentProvider === target); // 请求在途期间用户未切走
+                    // 本次密钥（若有）已落库，重置编辑标记：后续因其它字段触发的即时保存不再重复提交
+                    keyTouched = false;
+                    if (target) {
+                        var renamed = !!(renameFrom && data.name !== renameFrom);
+                        // 缓存里不留明文密钥：renderDetailForm 会把 target.apiKey 当 placeholder 明文展示出来。
+                        // 只记「是否已配置」，脱敏值等下次列表/详情刷新时由后端补回
+                        if (keySubmitted) {
+                            target.hasKey = !!apiKey;
+                            target.apiKey = '';
+                        }
+                        // 本地同步左栏缓存（模型数/接口/地址/超时/作用域/启用态）并重绘左栏，
+                        // 不走整体 loadProvidersList，避免右栏重新渲染打断即时编辑
+                        target.models = models;
+                        target.standard = standard;
+                        target.apiUrl = apiUrl;
+                        target.scope = scope;
+                        target.timeout = data.timeout;
+                        target.enabled = data.enabled;
+                        target.name = data.name; // 改名成功后缓存切到新名称
+                        var pIdx = -1;
+                        providers.forEach(function (p, i) { if (p.name === data.name) pIdx = i; });
+                        if (pIdx >= 0) providers[pIdx] = target; else providers.push(target);
+                        if (renamed) {
+                            // 本地拖拽顺序按名称存储，改名后同步替换，否则该项会掉到列表末尾
+                            renameProviderOrder(renameFrom, data.name);
+                            // 左栏整表刷新；仅在用户仍停留在该供应商时才接管选中并重填右栏
+                            //（详情接口回真实密钥）
+                            if (stillEditing) {
+                                selectedName = data.name;
+                                loadProvidersList();
+                                fillDetailFromCache(data.name);
+                            } else {
+                                loadProvidersList();
+                            }
+                        } else {
+                            renderProviderList();
+                        }
+                        // 先同步生成运行时模型（改名时后端已按新前缀迁移，这里按新名同步），再重载 LLM 缓存重绘模型列表，保证已同步徽标/开关态与运行时一致
+                        syncModelsToLlm(data, function () {
+                            loadLlmModelsCache(function () {
+                                renderModelsList();
+                            });
+                        });
+                    } else {
+                        syncModelsToLlm(data, null);
+                        // 新增成功：左栏刷新并选中新增项，右栏切换为其编辑详情（用户已切走则不抢选中）
+                        if (stillEditing) selectedName = data.name;
+                        loadProvidersList();
+                    }
+                } else {
+                    showToast(res.msg || GourdI18n.t('settings.save_failed'), 'error');
+                    // 失败时输入框与缓存不同步会残留脏值（如改名冲突后新名称滞留输入框），回退到缓存名
+                    if (target && currentProvider === target) {
+                        $('#msProviderName').val(target.name);
+                    }
+                }
+            },
+            error: function () {
+                showToast(GourdI18n.t('settings.save_failed'), 'error');
+            }
+        });
+    }
+
+    // 保存按钮（新增模式使用；编辑模式隐藏该按钮，所有操作即时生效）
+    function saveProvider() {
+        persistProvider();
+    }
+
+    // 归一化超时输入：数字 -> "Ns"；已带 s 或空则原样返回
+    function normalizeTimeout(t) {
+        if (!t) return '';
+        t = String(t).trim();
+        if (/^\d+$/.test(t)) return t + 's';
+        return t;
+    }
+
+    function syncModelsToLlm(providerData, onDone) {
+        // 调用后端接口同步模型
+        $.ajax({
+            url: '/web/settings/providers/sync-models',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                providerName: providerData.name,
+                models: providerData.models || []
+            }),
+            success: function (res) {
+                if (res.code === 200) {
+                    // 通知聊天组件刷新模型下拉列表（新增/更新/删除后都要刷新）
+                    if (typeof window.reloadModels === 'function') {
+                        window.reloadModels();
+                    }
+                }
+                if (onDone) onDone();
+            },
+            error: function () {
+                if (onDone) onDone();
+            }
+        });
+    }
+
+    function deleteProvider() {
+        if (!currentProvider) return;
+
+        // 整句式文案：早期拼接 confirm_delete + add_title（「添加服务商」），删除场景里却出现「添加」字样；
+        // 且后端 providersRemove 走 removeProviderCascade，会级联删除该供应商名下全部模型（旧文案
+        // 对影响范围零提示，用户点「确定」后数百个模型一并消失且不可恢复）。
+        var modelCount = (currentProvider.models || []).length;
+        var tConfirm = modelCount > 0
+            ? GourdI18n.t('settings.providers.delete_provider_confirm', [currentProvider.name, modelCount])
+            : GourdI18n.t('settings.providers.delete_provider_confirm_no_models', [currentProvider.name]);
+        layConfirm(tConfirm, function () {
+            $.ajax({
+                url: '/web/settings/providers/remove',
+                method: 'POST',
+                data: { name: currentProvider.name },
+                success: function (res) {
+                    if (res.code === 200) {
+                        showToast(GourdI18n.t('settings.loop.deleted'), 'success');
+                        // 删除会级联移除该供应商的运行时模型，立即刷新聊天模型下拉。
+                        if (typeof window.reloadModels === 'function') {
+                            window.reloadModels();
+                        }
+                        // 删除成功：左栏刷新，右栏回落到首个供应商或新增表单
+                        selectedName = null;
+                        loadProvidersList();
+                    } else {
+                        showToast(res.msg || GourdI18n.t('settings.loop.delete_failed'), 'error');
+                    }
+                },
+                error: function () {
+                    showToast(GourdI18n.t('settings.loop.delete_failed'), 'error');
+                }
+            });
+        });
+    }
+
+    function toggleProvider(name, enabled) {
+        $.ajax({
+            url: '/web/settings/providers/toggle',
+            method: 'POST',
+            data: { name: name, enabled: enabled },
+            success: function (res) {
+                if (res.code === 200) {
+                    showToast(enabled ? GourdI18n.t('settings.loop.enable') : GourdI18n.t('settings.loop.disable'), 'success');
+                    // 刷新供应商列表（左栏圆点/计数同步）；若右栏正编辑该项，loadProvidersList 内部会回填其详情态
+                    loadProvidersList();
+                    // 通知聊天组件刷新模型下拉列表
+                    if (typeof window.reloadModels === 'function') {
+                        window.reloadModels();
+                    }
+                } else {
+                    showToast(res.msg || GourdI18n.t('settings.loop.operation_failed'), 'error');
+                    loadProvidersList();
+                }
+            },
+            error: function () {
+                showToast(GourdI18n.t('settings.loop.operation_failed'), 'error');
+                loadProvidersList();
+            }
+        });
+    }
+
+    // ==================== 暴露全局接口 ====================
+    window.openModelSettings = openModelSettings;
+    window.closeModelSettings = closeModelSettings;
+    window.isModelSettingsOpen = function () { return $view.hasClass('active'); };
+
+    // 语言切换后刷新动态文案：页头「默认模型」提示 + 模型列表（星标 title /「默认」徽标等由 JS 拼装的文本）
+    document.addEventListener('i18n:localeChanged', function () {
+        updateDefaultModelHint();
+        if ($view.hasClass('active')) renderModelsList();
+    });
+
+    // Provider API Key 显示切换
+    $(document).on('click', '#msProviderApiKeyToggle', function () {
+        var $input = $('#msProviderApiKey');
+        if ($input.attr('type') === 'password') {
+            $input.attr('type', 'text');
+            $(this).html('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>');
+        } else {
+            $input.attr('type', 'password');
+            $(this).html('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>');
+        }
+    });
+
+    // 自动初始化
+    $(document).ready(function () {
+        init();
+    });
+})();

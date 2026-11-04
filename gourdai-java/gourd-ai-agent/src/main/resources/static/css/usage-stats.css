@@ -1,0 +1,482 @@
+/* ===== usage-stats.css — 「使用统计」主视图样式 =====
+ *
+ * 独立主视图（#usageView）专属样式。所有配色取自 theme.css 主题变量，
+ * 明暗自适应；概览卡片、热力图、趋势柱、环形图均为纯 CSS/SVG 渲染，无第三方图表库。
+ * 卡片外壳与既有 .general-card 观感保持一致。
+ */
+
+#usageView .usage-content { flex: 1; min-width: 0; }
+.usage-view { flex: 1; display: none; flex-direction: column; min-height: 0; overflow: hidden; }
+.usage-view.active { display: flex; }
+body.code-mode .usage-view { display: none !important; }
+.usage-scroll { flex: 1; overflow-y: auto; padding: 28px 24px 40px; }
+.usage-inner { max-width: 860px; margin: 0 auto; }
+#usageView .settings-section-header { margin-bottom: 18px; }
+#usageView .usage-body { width: 100%; }
+
+#usageView .usage-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+/* ── 状态占位（加载 / 空 / 错误） ─────────────────────── */
+#usageView .usage-state {
+    padding: 40px 0;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+#usageView .usage-state-error { color: var(--error-text); }
+
+/* ── 时间范围切换 ─────────────────────────────────────── */
+#usageView .usage-range-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 4px 0 16px;
+}
+#usageView .usage-range-label {
+    font-size: 14px;
+    color: var(--text-primary);
+    font-weight: 500;
+}
+#usageView .usage-range-toggle {
+    display: inline-flex;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 3px;
+    gap: 2px;
+}
+#usageView .usage-range-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    padding: 5px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+}
+#usageView .usage-range-btn:hover { color: var(--text-primary); }
+#usageView .usage-range-btn.active {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    box-shadow: var(--shadow);
+}
+
+/* ── 概览卡片网格 ─────────────────────────────────────── */
+#usageView .usage-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 16px;
+}
+#usageView .usage-stat-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 16px 18px;
+    min-height: 92px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+#usageView .usage-stat-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--text-secondary);
+    margin-bottom: 10px;
+}
+#usageView .usage-stat-icon { color: var(--text-secondary); flex: none; }
+#usageView .usage-stat-label { font-size: 13px; }
+#usageView .usage-stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.1;
+    letter-spacing: .5px;
+}
+#usageView .usage-stat-model {
+    font-size: 20px;
+    font-weight: 600;
+}
+#usageView .usage-muted { color: var(--text-tertiary); }
+#usageView .usage-stat-sub {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+}
+
+/* 统计区间提示：紧贴概览卡片网格下方，不上承卡面、不抢图表标题的视觉重量 */
+#usageView .usage-range-hint {
+    margin: -8px 0 16px;
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── 公共卡片外壳 ─────────────────────────────────────── */
+#usageView .usage-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+}
+#usageView .usage-card-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 16px;
+}
+
+/* ── 活跃热力图 ───────────────────────────────────────── */
+/* 本区块为两页共用（使用统计 + 欢迎页活跃卡）：选择器不带 #usageView 前缀，
+   避免欢迎页复用时复制第二份样式；使用统计页仍由外层 #usageView 提供天然隔离。 */
+.usage-heat-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.usage-heat-grid {
+    display: grid;
+    grid-auto-flow: column;
+    grid-template-rows: repeat(7, 1fr);
+    gap: 3px;
+    width: 100%;
+}
+.usage-heat-cell {
+    aspect-ratio: 1 / 1;
+    min-height: 10px;
+    border-radius: 2px;
+    background: var(--bg-hover);
+}
+/* 未来日：与「零活跃」同色，保证整块热力图始终是完整矩形。
+   若留空透明，末列尚未到来的那几天会透出卡面底色，在暗色主题下形成突兀的黑洞。 */
+.usage-heat-empty { background: var(--bg-hover); }
+.usage-heat-cell[data-level="0"] { background: var(--bg-hover); }
+.usage-heat-cell[data-level="1"] { background: var(--accent); opacity: .3; }
+.usage-heat-cell[data-level="2"] { background: var(--accent); opacity: .5; }
+.usage-heat-cell[data-level="3"] { background: var(--accent); opacity: .75; }
+.usage-heat-cell[data-level="4"] { background: var(--accent); opacity: 1; }
+.usage-heat-legend {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    justify-content: flex-end;
+}
+.usage-heat-legend-cell {
+    width: 13px;
+    height: 13px;
+    aspect-ratio: auto;
+    min-height: 0;
+    flex: none;
+}
+/* 紧凑变体（欢迎页调用方传 legend:false 并套 .usage-heat-compact）：
+   方形格 + 更窄间隙；图例信息由悬停提示承载。
+   历史教训：曾用 aspect-ratio: 2/1 压扁高度，26 列铺满 680px 时每格变成
+   「长条」（用户截图点名丑）；方形格才是热力图的可读形态，高度交给列宽自然推导。 */
+.usage-heat-compact .usage-heat-grid { gap: 2px; }
+.usage-heat-compact .usage-heat-cell { aspect-ratio: 1 / 1; min-height: 0; }
+/* 紧凑变体整体铺满容器宽（欢迎卡与输入框同宽 max-width 680px，两边缘对齐才协调）：
+   53 列窗口下列宽 ≈ 680/53 ≈ 12.8px、格 ≈ 10.9px、整块高 ≈ 7×10.9+6×2 ≈ 88px。
+   历史教训：曾用 fit-content + 8px 固定格宽把整块缩成 528×68 的小条，与输入框宽度
+   错位（用户截图点名「不协调、太小」）；也曾用 aspect-ratio: 2/1 压扁高度变「长条」。
+   列宽与 app-heatmap.js renderMonths 的 LABEL_W=2.6 / MIN_GAP=3.0 互为契约，改任一须同步。 */
+.usage-heat-compact { width: 100%; gap: 6px; }
+/* 月份时间轴：标签绝对定位，left% 以「列」为单位由 renderMonths 算好（含让位/回拉）；
+   宽度随 wrap = 网格宽，保证 left% 与列严格对齐。
+   字号 11px：「10月/Oct」约 33px ≈ 2.6 列（欢迎页列宽 ≈ 12.8px），与 renderMonths 的
+   LABEL_W=2.6 / MIN_GAP=3.0 常量互为契约，改字号必须同步改 JS 常量。 */
+.usage-heat-months { position: relative; height: 14px; font-size: 11px; line-height: 14px; color: var(--text-secondary); }
+.usage-heat-months span { position: absolute; top: 0; white-space: nowrap; }
+
+/* ── 悬停浮层（.usage-heat-tip）───────────────────────────
+ * 为什么不用原生 title：title 由操作系统/浏览器绘制，字体、圆角、间距、延迟全部
+ * 不可控，且无法承载「日期一行 + 两列指标」的结构；暗色主题下白底黑字刺眼。
+ *
+ * 定位：position:fixed + 坐标由 app-heatmap.js placeTip 算好（含上下翻转与左右夹紧），
+ * 挂在 body 下而非卡片内 —— 卡片若有 overflow 或独立层叠上下文，
+ * absolute 浮层会被裁掉半截（欢迎页热力图就在卡片顶部，最坏情况下根本看不到）。
+ *
+ * z-index 取 9990：高于热力图/侧边栏等常规层，但低于设置弹层（10000）与
+ * 遮罩（10001）。浮层永远不应该盖住模态框。
+ *
+ * pointer-events:none 是必须的：浮层若可命中，鼠标移上去会触发格子的 mouseleave，
+ * 浮层消失→鼠标又落回格子→再次弹出，形成闪烁死循环。
+ *
+ * 【为何不能再用 white-space:nowrap + 固定 max-width】
+ * nowrap 让浮层最小宽度由最长那一行决定，而 max-width:260px 只限制**盒子**，
+ * 不限制内容 —— 实测长译文（如法语「Consommation totale de jetons…」）
+ * 会把盒子顶到 260px 后内容继续画到盒外（scrollW=300 > clientW=260），
+ * 文字直接叠在页面其他内容上；窄窗口（240px）下 260px 的盒子还会整个越出视口。
+ * 现改为“行不换、但允许在可行处折行 + 宽度随内容自适应 + 视口驱动上限”：
+ *   - 标签行允许折行（标签本身是词，换行比截断可读）；日期行保持单行。
+ *   - max-width 改成 min(260px, calc(100vw - 16px)) 确保任何视口都不越界。 */
+.usage-heat-tip {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 9990;
+    pointer-events: none;
+    display: none;
+    min-width: 132px;
+    /* 视口窄于 276px 时以视口为准，否则取 260px。不能写成固定 260px：
+       实测 240px 视口下浮层右边界 268px 直接越出屏幕。 */
+    max-width: min(260px, calc(100vw - 16px));
+    padding: 9px 11px;
+    box-sizing: border-box;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: var(--shadow-lg);
+    font-size: 12px;
+    line-height: 1.5;
+    /* 全局 font-family 在 app.css，这里显式声明仅为避免某些弹层容器继承到等宽字体 */
+    font-family: var(--font-sans);
+    /* 不再全局 nowrap（见上方注释）：默认允许折行以免长译文溢出盒子 */
+    white-space: normal;
+    overflow-wrap: break-word;
+}
+.usage-heat-tip.is-visible { display: block; animation: usage-heat-tip-in .12s ease-out; }
+@keyframes usage-heat-tip-in {
+    from { opacity: 0; transform: translateY(2px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+/* 小三角：用 border 画，颜色跟随主题底色与边框，不用额外 DOM 元素。
+   --tip-arrow-x 由 placeTip 写进元素 style，指向格子中心（已夹在浮层内）。 */
+.usage-heat-tip::after {
+    content: '';
+    position: absolute;
+    left: var(--tip-arrow-x, 50%);
+    margin-left: -5px;
+    border: 5px solid transparent;
+}
+.usage-heat-tip[data-placement="top"]::after {
+    top: 100%;
+    border-top-color: var(--bg-card);
+}
+.usage-heat-tip[data-placement="bottom"]::after {
+    bottom: 100%;
+    border-bottom-color: var(--bg-card);
+}
+/* 日期行：主信息，比指标行重一档。单行不折（短文本，折了更难看），
+   但超长时也要能自己截断而不是撑破盒子。 */
+.usage-heat-tip-date {
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* 指标行：左标签右值，两行等宽对齐。
+   标签允许折行（长译文），值列不折（数字很短，折行会把数字拆开看不了）。 */
+.usage-heat-tip-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+}
+.usage-heat-tip-k {
+    color: var(--text-secondary);
+    font-size: 12px;
+    /* 标签是唯一可能很长的部分，允许在词间折行。
+       min-width:0 必须加：flex 子项默认 min-width:auto，不加就不会收缩，
+       结果还是会把行撑宽（经典 flex 溢出陷阱）。 */
+    min-width: 0;
+    overflow-wrap: break-word;
+}
+.usage-heat-tip-v {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    white-space: nowrap;
+    flex: none;
+}
+
+/* ── 按天 Token 趋势 ─────────────────────────────────── */
+#usageView .usage-trend-wrap {
+    width: 100%;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 8px 6px 0;
+}
+#usageView .usage-trend-svg {
+    display: block;
+    width: 100%;
+    height: 240px;
+}
+#usageView .usage-grid-line {
+    stroke: var(--border-color);
+    stroke-width: 1;
+    stroke-dasharray: 3 4;
+    opacity: .6;
+}
+#usageView .usage-axis-label {
+    fill: var(--text-tertiary);
+    font-size: 11px;
+}
+
+/* ── 图例 ─────────────────────────────────────────────── */
+#usageView .usage-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    margin-top: 14px;
+    padding-top: 4px;
+}
+#usageView .usage-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+#usageView .usage-legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex: none;
+}
+
+/* ── 模型用量（环形图 + 列表） ───────────────────────── */
+#usageView .usage-donut-wrap {
+    display: flex;
+    align-items: center;
+    gap: 32px;
+}
+#usageView .usage-donut-chart { flex: none; }
+#usageView .usage-donut-svg {
+    width: 170px;
+    height: 170px;
+    display: block;
+}
+#usageView .usage-donut-total {
+    fill: var(--text-primary);
+    font-size: 22px;
+    font-weight: 700;
+}
+#usageView .usage-donut-unit {
+    fill: var(--text-secondary);
+    font-size: 12px;
+}
+#usageView .usage-model-list {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+#usageView .usage-model-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 13px;
+}
+#usageView .usage-model-row:last-child { border-bottom: none; }
+#usageView .usage-model-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-primary);
+    font-weight: 500;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#usageView .usage-model-pct {
+    color: var(--text-primary);
+    font-weight: 600;
+    flex: none;
+}
+#usageView .usage-model-tok {
+    color: var(--text-secondary);
+    flex: none;
+    min-width: 96px;
+    text-align: right;
+}
+
+/* ── 窄屏自适应 ───────────────────────────────────────── */
+#usageView .usage-cache-list {
+    display: flex;
+    flex-direction: column;
+}
+#usageView .usage-cache-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 13px;
+}
+#usageView .usage-cache-row:last-child { border-bottom: none; }
+#usageView .usage-cache-rank {
+    flex: none;
+    width: 20px;
+    text-align: center;
+    color: var(--text-tertiary);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+#usageView .usage-cache-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-primary);
+    font-weight: 500;
+    width: 200px;
+    flex: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#usageView .usage-cache-bar {
+    flex: 1;
+    min-width: 40px;
+    height: 8px;
+    background: var(--bg-hover);
+    border-radius: 4px;
+    overflow: hidden;
+}
+#usageView .usage-cache-bar-fill {
+    display: block;
+    height: 100%;
+    border-radius: 4px;
+    transition: width .3s ease;
+}
+#usageView .usage-cache-rate {
+    flex: none;
+    width: 52px;
+    text-align: right;
+    color: var(--text-primary);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+#usageView .usage-cache-hit {
+    flex: none;
+    min-width: 120px;
+    text-align: right;
+    color: var(--text-secondary);
+}
+
+@media (max-width: 720px) {
+    #usageView .usage-stat-grid { grid-template-columns: repeat(2, 1fr); }
+    #usageView .usage-donut-wrap { flex-direction: column; align-items: stretch; }
+    #usageView .usage-donut-chart { align-self: center; }
+    #usageView .usage-cache-name { width: 120px; }
+    #usageView .usage-cache-hit { min-width: 0; }
+}

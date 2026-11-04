@@ -1,0 +1,92 @@
+﻿cargo :     Checking gourd-work-core v0.3.0 (D:\work\gourd\gourdai\gourd-work\core)
+At line:10 char:232
++ ...  file ---"; cargo clippy -p gourd-work-core --lib --message-format sh ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checking go...ourd-work\core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+core\src\llm\dialect.rs:894:5: warning: field assignment outside of initializer for an instance created with Default::d
+efault()
+core\src\llm\dialect.rs:1347:13: warning: field assignment outside of initializer for an instance created with Default:
+:default()
+core\src\protocol\mod.rs:12:5: warning: doc list item overindented: help: try using `  ` (2 spaces)
+core\src\protocol\mod.rs:14:5: warning: doc list item overindented: help: try using `  ` (2 spaces)
+core\src\protocol\mod.rs:436:9: warning: doc list item overindented: help: try using `  ` (2 spaces)
+core\src\react\mod.rs:349:55: warning: casting to the same type is unnecessary (`usize` -> `usize`): help: try: `LOOP_W
+INDOW`
+core\src\react\mod.rs:1217:43: warning: casting to the same type is unnecessary (`usize` -> `usize`): help: try: `LOOP_
+WINDOW`
+core\src\react\mod.rs:1294:52: warning: redundant reference in `format!` argument: help: remove the redundant `&`: `con
+fig.run_id`
+core\src\session\mod.rs:268:9: warning: consider using `sort_by_key`
+core\src\session\mod.rs:571:18: warning: `filter_map()` will run forever if the iterator repeatedly produces an `Err`: 
+help: replace with: `map_while(Result::ok)`
+core\src\session\mod.rs:599:40: warning: `filter_map()` will run forever if the iterator repeatedly produces an `Err`: 
+help: replace with: `map_while(Result::ok)`
+core\src\session\mod.rs:629:40: warning: `filter_map()` will run forever if the iterator repeatedly produces an `Err`: 
+help: replace with: `map_while(Result::ok)`
+core\src\skills\mod.rs:341:8: warning: manual `!RangeInclusive::contains` implementation: help: use: `!(16..=8192).cont
+ains(&raw)`
+core\src\skills\mod.rs:474:21: warning: very complex type used. Consider factoring parts into `type` definitions
+core\src\skills\mod.rs:479:6: warning: very complex type used. Consider factoring parts into `type` definitions
+core\src\skills\mod.rs:616:42: warning: this expression creates a reference which is immediately dereferenced by the co
+mpiler: help: change this to: `md.parent().unwrap_or(Path::new("."))`
+core\src\mcp\mod.rs:219:1: warning: large size difference between variants: the entire enum is at least 440 bytes
+core\src\mcp\mod.rs:902:5: error: this loop never actually loops
+core\src\mcp\mod.rs:905:5: error: this loop never actually loops
+core\src\team\mod.rs:167:25: warning: you are using an explicit closure for cloning elements: help: consider calling th
+e dedicated `cloned` method: `manager.get(&task.agent_name).cloned()`
+core\src\agents\mod.rs:526:19: warning: this expression creates a reference which is immediately dereferenced by the co
+mpiler: help: change this to: `TOOL_ALL_FULL`
+core\src\agents\mod.rs:527:18: warning: this expression creates a reference which is immediately dereferenced by the co
+mpiler: help: change this to: `TOOL_ALL_PUBLIC`
+core\src\agents\mod.rs:528:19: warning: this expression creates a reference which is immediately dereferenced by the co
+mpiler: help: change this to: `TOOL_PI`
+core\src\server\loop_api.rs:103:5: warning: field assignment outside of initializer for an instance created with Defaul
+t::default()
+core\src\server\settings_api.rs:1080:12: warning: this `map_or` can be simplified
+core\src\server\settings_api.rs:1083:15: warning: this `map_or` can be simplified
+core\src\server\settings_api.rs:1086:12: warning: this `map_or` can be simplified
+core\src\server\mod.rs:928:5: warning: this block may be rewritten with the `?` operator: help: replace it with: `valid
+ate(&sp)?;`
+core\src\server\mod.rs:1324:5: warning: doc quote line without `>` marker
+core\src\server\mod.rs:1325:5: warning: doc quote line without `>` marker
+core\src\server\mod.rs:1908:13: warning: unneeded `return` statement
+core\src\server\mod.rs:1922:13: warning: unneeded `return` statement
+core\src\server\mod.rs:1944:13: warning: unneeded `return` statement
+core\src\server\mod.rs:1984:13: warning: unneeded `return` statement
+core\src\server\mod.rs:2002:13: warning: unneeded `return` statement
+core\src\server\mod.rs:4553:9: warning: this `if` statement can be collapsed
+core\src\attachments.rs:106:33: warning: using `contains()` instead of `iter().any()` is more efficient: help: try: `IM
+AGE_EXTENSIONS.contains(&ext)`
+core\src\changes.rs:529:9: warning: consider using `sort_by_key`
+core\src\compress.rs:405:38: warning: writing `&mut Vec` instead of `&mut [_]` involves a new object where a slice will
+ do
+core\src\ephemeral.rs:39:17: warning: this block may be rewritten with the `?` operator: help: replace it with: `stack.
+pop()?;`
+core\src\loop_task.rs:145:9: warning: returning the result of a `let` binding from a block
+core\src\channels\transport.rs:220:45: warning: useless conversion to the same type: `std::string::String`: help: consi
+der removing `.into()`: `t`
+core\src\channels\transport.rs:221:49: warning: useless conversion to the same type: `std::vec::Vec<u8>`: help: conside
+r removing `.into()`: `b`
+core\src\channels\wechat.rs:670:17: warning: unneeded `return` statement
+core\src\channels\wechat.rs:674:17: warning: unneeded `return` statement
+core\src\channels\mod.rs:60:1: warning: this `impl` can be derived
+core\src\acp.rs:44:5: warning: you should consider adding a `Default` implementation for `AcpAgent`
+core\src\projects.rs:196:20: warning: this `map_or` can be simplified
+core\src\filer.rs:128:5: warning: using `contains()` instead of `iter().any()` is more efficient: help: try: `SKIP_DIRS
+.contains(&name)`
+core\src\filer.rs:206:5: warning: this loop could be written as a `while let` loop: help: try: `while let Some(next) = 
+sole_dir_child(&path) { .. }`
+core\src\gitops.rs:297:31: warning: found call to `str::trim` before `str::split_whitespace`: help: remove `trim()`
+core\src\gitops.rs:606:32: warning: found call to `str::trim` before `str::split_whitespace`: help: remove `trim()`
+core\src\gitops.rs:858:39: warning: used consecutive `str::replace` call: help: replace with: `replace(['*', '`'], "")`
+core\src\hitl\path_guard.rs:1196:14: warning: the loop variable `i` is used to index `seg`
+core\src\hitl\path_guard.rs:1721:71: warning: argument to `Path::join` starts with a path separator
+core\src\hitl\shape.rs:493:5: warning: this `let...else` may be rewritten with the `?` operator: help: replace it with:
+ `let root = workspace_root?;`
+core\src\hitl\shape.rs:497:5: warning: this `let...else` may be rewritten with the `?` operator: help: replace it with:
+ `let v = crate::hitl::path_guard::inspect(cmd, root, extra)?;`
+core\src\usage.rs:204:5: warning: consider using `sort_by_key`
+warning: `gourd-work-core` (lib) generated 56 warnings
+error: could not compile `gourd-work-core` (lib) due to 2 previous errors; 56 warnings emitted

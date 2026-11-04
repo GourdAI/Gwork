@@ -1,0 +1,193 @@
+/**
+ * app-settings.js — 设置面板核心逻辑（面板开关、Tab 管理、公共工具）
+ *
+ * 各设置页逻辑拆分在 app-settings-*.js 中。
+ */
+(function () {
+    'use strict';
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function escapeAttr(str) {
+        if (!str) return '';
+        return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function parseKvLines(text) {
+        var obj = {};
+        (text || '').split('\n').forEach(function (line) {
+            var idx = line.indexOf('=');
+            if (idx > 0) obj[line.substring(0, idx).trim()] = line.substring(idx + 1).trim();
+        });
+        return obj;
+    }
+
+    function showToast(msg, type) {
+        if (typeof window.showToast === 'function') {
+            window.showToast(msg, type === 'error' ? 'error' : 'success');
+        } else {
+            layAlert(msg);
+        }
+    }
+
+    function postJson(url, data, doneFn, alwaysFn) {
+        return $.ajax({ url: url, method: 'POST', data: JSON.stringify(data), contentType: 'application/json', dataType: 'json' })
+            .done(function (resp) { doneFn(resp); })
+            .fail(function () { showToast(GourdI18n.t('settings.network_error'), 'error'); })
+            .always(function () { if (alwaysFn) alwaysFn(); });
+    }
+
+    function checkWithLoading(opts) {
+        var $btn = opts.$btn;
+        var btnOriginal = $btn.html();
+        var loadingSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> ' + opts.loadingText;
+        var okSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> ';
+        var failSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> ';
+
+        $btn.prop('disabled', true).html(loadingSvg);
+        opts.$result.hide();
+
+        $.ajax($.extend({ timeout: 15000, dataType: 'json' }, opts.ajax))
+            .done(function (resp) {
+                var ok = resp.code === 200;
+                if (opts.isList && ok) ok = resp.data && resp.data.length > 0;
+                opts.$result.attr('class', opts.cls + ' ' + (ok ? 'success' : 'error'))
+                    .html((ok ? okSvg : failSvg) + escapeHtml(ok ? (opts.successMsg || GourdI18n.t('settings.connect_success')) : (resp.message || opts.failMsg || GourdI18n.t('settings.connect_failed'))))
+                    .css('display', 'flex');
+            })
+            .fail(function (jqXHR, textStatus) {
+                var msg = textStatus === 'timeout' ? GourdI18n.t('settings.connect_timeout') : GourdI18n.t('settings.network_error_retry');
+                opts.$result.attr('class', opts.cls + ' error').html(msg).css('display', 'flex');
+            })
+            .always(function () { $btn.prop('disabled', false).html(btnOriginal); });
+    }
+
+    function getScopeControl(scopeInput) {
+        return $('.settings-scope-toggle[data-target="' + scopeInput + '"]');
+    }
+
+    function setScopeValue(scopeInput, value) {
+        value = value || 'user';
+        $('#' + scopeInput).val(value);
+        var $toggle = getScopeControl(scopeInput);
+        $toggle.find('.settings-scope-btn').removeClass('active');
+        $toggle.find('.settings-scope-btn[data-scope="' + value + '"]').addClass('active');
+    }
+
+    function setScopeReadonly(scopeInput, readonly) {
+        var $toggle = getScopeControl(scopeInput);
+        $toggle.toggleClass('readonly-gray disabled', !!readonly);
+        $toggle.find('.settings-scope-btn').toggleClass('disabled', !!readonly).prop('disabled', !!readonly);
+    }
+
+    window._settingsCore = {
+        escapeHtml: escapeHtml,
+        escapeAttr: escapeAttr,
+        parseKvLines: parseKvLines,
+        postJson: postJson,
+        showToast: showToast,
+        checkWithLoading: checkWithLoading,
+        setScopeValue: setScopeValue,
+        setScopeReadonly: setScopeReadonly
+    };
+
+    var $overlay = $('#settingsOverlay');
+    var $settingsBtn = $('#settingsBtn');
+    var $tabs = $('.settings-tab');
+    var $tabContents = $('.settings-tab-content');
+
+    function mod(name) { return window[name]; }
+
+    function resetCurrentTabView(targetTab) {
+        if (targetTab === 'mcp' && mod('_settingsMcp')) { mod('_settingsMcp').showList(); mod('_settingsMcp').reset(); $('#mcpToolsToolbar').hide(); }
+        else if (targetTab === 'openapi' && mod('_settingsOpenapi')) { mod('_settingsOpenapi').showList(); mod('_settingsOpenapi').reset(); }
+    }
+
+    function openSettings() {
+        // 每次打开设置面板，默认定位到通用设置 tab
+        $tabs.removeClass('active');
+        $tabContents.removeClass('active');
+        $tabs.filter('[data-tab="general"]').addClass('active');
+        $('#settingsTabGeneral').addClass('active');
+        resetCurrentTabView('general');
+        $overlay.css('display', 'flex');
+        if (mod('_settingsGeneral')) mod('_settingsGeneral').load();
+    }
+
+    function closeSettings() {
+        $overlay.hide();
+        // 广播设置关闭：侧栏「任务」区等依赖设置页数据的视图据此刷新
+        document.dispatchEvent(new Event('settings:closed'));
+        if (mod('_settingsMcp')) mod('_settingsMcp').showList();
+        if (mod('_settingsOpenapi')) mod('_settingsOpenapi').showList();
+        $('#mcpFormActions, #openapiFormActions').hide();
+    }
+
+
+    $settingsBtn.on('click', openSettings);
+    $('#settingsCloseBtn').on('click', closeSettings);
+
+    // 导出给其它主视图调用（如自动化页面打开时需关掉本浮层）；
+    // 本文件整体包在 IIFE 内，不导出时外部只能靠 trigger('click') 兜底。
+    window.openSettings = openSettings;
+    window.closeSettings = closeSettings;
+    // 不再支持点击浮层外部关闭：面板内修改未保存时误触会丢失全部填写内容，只能通过右上角关闭按钮或 ESC 关闭
+    $(document).on('keydown', function (e) { if (e.key === 'Escape' && $overlay.is(':visible')) closeSettings(); });
+
+    $(document).on('click', '.settings-scope-btn', function () {
+        var $btn = $(this);
+        if ($btn.prop('disabled') || $btn.hasClass('disabled')) return;
+        var $toggle = $btn.closest('.settings-scope-toggle');
+        var target = $toggle.attr('data-target');
+        if (!target) return;
+        setScopeValue(target, $btn.attr('data-scope') || 'user');
+    });
+
+    $('.settings-tabs').on('click', '.settings-tab', function () {
+        var $tab = $(this);
+        $tabs.removeClass('active');
+        $tabContents.removeClass('active');
+        $tab.addClass('active');
+
+        var targetTab = $tab.attr('data-tab');
+        resetCurrentTabView(targetTab);
+        if (targetTab === 'general') {
+            $('#settingsTabGeneral').addClass('active');
+            if (mod('_settingsGeneral')) mod('_settingsGeneral').load();
+        } else if (targetTab === 'appearance') {
+            $('#settingsTabAppearance').addClass('active');
+            if (mod('_settingsAppearance')) mod('_settingsAppearance').load();
+        } else if (targetTab === 'permission') {
+            $('#settingsTabPermission').addClass('active');
+            if (mod('_settingsPermission')) mod('_settingsPermission').load();
+        } else if (targetTab === 'mcp') {
+            $('#settingsTabMcp').addClass('active');
+            if (mod('_settingsMcp')) mod('_settingsMcp').load();
+        } else if (targetTab === 'openapi') {
+            $('#settingsTabOpenapi').addClass('active');
+            if (mod('_settingsOpenapi')) mod('_settingsOpenapi').load();
+        } else if (targetTab === 'acp') {
+            $('#settingsTabAcp').addClass('active');
+            if (mod('_settingsAcp')) mod('_settingsAcp').load();
+        } else if (targetTab === 'about') {
+            $('#settingsTabAbout').addClass('active');
+            if (mod('_settingsAbout')) mod('_settingsAbout').load();
+        }
+    });
+
+    function loadActiveTabData() {
+        var $active = $('.settings-tab.active');
+        if (!$active.length) return;
+        var targetTab = $active.attr('data-tab');
+        if (targetTab === 'general') { if (mod('_settingsGeneral')) mod('_settingsGeneral').load(); }
+        else if (targetTab === 'appearance') { if (mod('_settingsAppearance')) mod('_settingsAppearance').load(); }
+        else if (targetTab === 'permission') { if (mod('_settingsPermission')) mod('_settingsPermission').load(); }
+        else if (targetTab === 'mcp') { if (mod('_settingsMcp')) mod('_settingsMcp').load(); }
+        else if (targetTab === 'openapi') { if (mod('_settingsOpenapi')) mod('_settingsOpenapi').load(); }
+        else if (targetTab === 'acp') { if (mod('_settingsAcp')) mod('_settingsAcp').load(); }
+        else if (targetTab === 'about') { if (mod('_settingsAbout')) mod('_settingsAbout').load(); }
+    }
+})();

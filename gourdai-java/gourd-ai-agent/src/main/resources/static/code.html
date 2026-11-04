@@ -1,0 +1,225 @@
+<!-- code.html — Code 模式界面片段（中间编辑器/Git 差异查看器 + 左侧文件树面板）。 -->
+<!-- 两个挂载点：编辑器区注入 .main-area；文件树面板注入 body 级（与 .main-area 同级，靠 flex order 布局）。 -->
+<template data-mount=".main-area">
+    <!-- Code 模式：编辑器与右侧对话栏之间的拖拽手柄（改变对话栏宽度）。靠 flex order 夹在二者之间 -->
+    <div class="code-chat-resize-handle" id="codeChatResizeHandle"></div>
+    <!-- Code 模式：对话栏收起后，右侧边缘的悬浮展开按钮 -->
+    <button class="code-chat-expand-btn" id="codeChatExpandBtn">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+    <!-- chat 模式：聊天与审查查看器之间的独立分隔手柄（仅 viewer-open 时显示） -->
+    <div class="chat-review-resize-handle" id="chatReviewResizeHandle"
+         role="separator" aria-orientation="vertical" aria-label="调整聊天区和审查查看器宽度"
+         aria-valuemin="300" aria-valuemax="300" aria-valuenow="300" tabindex="0"></div>
+    <!-- Code 模式：中间编辑器列（Git diff/文件浮层 + 编辑器 + 底部终端共享一列）。
+         chat 模式下该容器为 display:contents（浮层仍直接铺满 main-area，行为与改造前一致）。 -->
+    <div class="code-editor-col">
+        <!-- Git Diff / File Viewer -->
+        <div class="git-diff-viewer" id="gitDiffViewer" style="display:none">
+            <div class="git-viewer-header">
+                <div class="git-viewer-breadcrumb">
+                    <span class="git-viewer-label" id="gitViewerLabel" data-i18n="git.changeDetails">变更详情</span>
+                    <span class="git-viewer-sep">/</span>
+                    <span class="git-viewer-file" id="gitViewerFile"></span>
+                </div>
+                <button class="git-viewer-close" id="gitViewerClose">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <div class="git-viewer-content" id="gitViewerContent">
+                <div class="git-viewer-info-bar" id="gitViewerInfoBar" style="display:none"></div>
+                <div class="git-viewer-msg" id="gitViewerMsg" style="display:none"></div>
+                <div class="git-viewer-host" id="gitViewerFileHost" style="display:none"></div>
+                <div class="git-viewer-host" id="gitViewerDiffHost" style="display:none"></div>
+            </div>
+        </div>
+
+        <!-- Code 模式：中间编辑器面板 -->
+        <div class="code-editor-pane" id="codeEditorPane">
+            <div class="code-editor-empty" id="codeEditorEmpty">
+                <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+                </svg>
+                <div class="code-editor-empty-title" data-i18n="code.modeTitle">Code 模式</div>
+                <div class="code-editor-empty-desc" data-i18n="code.editorEmpty"></div>
+            </div>
+            <!-- Git 审查视图：未点开具体变更文件时的中间区占位 -->
+            <div class="code-editor-empty" id="codeGitEmpty" style="display:none">
+                <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>
+                </svg>
+                <div class="code-editor-empty-title" data-i18n="git.reviewTitle">代码审查</div>
+                <div class="code-editor-empty-desc" data-i18n="git.reviewDesc">从左侧选择一个变更文件查看差异对比</div>
+            </div>
+            <!-- Code 模式：未选项目时的欢迎面板（打开文件夹 / 新建项目 / 最近项目）-->
+            <div class="code-project-welcome" id="codeProjectWelcome" style="display:none">
+                <div class="code-welcome-inner">
+                    <svg class="code-welcome-logo" width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+                    </svg>
+                    <div class="code-welcome-title" data-i18n="code.modeTitle">Code 模式</div>
+                    <div class="code-welcome-desc" data-i18n="code.project.start">选择或新建一个项目开始</div>
+                    <div class="code-welcome-actions">
+                        <button class="code-welcome-action" id="codeWelcomeOpenBtn">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        <span data-i18n="code.project.openFolder">打开文件夹</span>
+                        </button>
+                        <button class="code-welcome-action" id="codeWelcomeNewBtn">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+                        <span data-i18n="code.project.newProject">新建项目</span>
+                        </button>
+                    </div>
+                    <div class="code-welcome-recent" id="codeWelcomeRecent"></div>
+                </div>
+            </div>
+            <div class="code-editor-main" id="codeEditorMain" style="display:none">
+                <div class="code-editor-tabbar" id="codeEditorTabbar"></div>
+                <div class="code-editor-host" id="codeEditorHost"></div>
+                <!-- 二进制文件预览层（图片/PDF/音视频）：与 Monaco 编辑器宿主互斥显示，由 app-code.js 切换 -->
+                <div class="code-preview-host" id="codePreviewHost" style="display:none"></div>
+            </div>
+        </div>
+        <!-- 底部本地终端已全局化：markup 移至 index.html 的 body 级 fixed 底栏
+             （chat/code 全视图可用），连接与渲染逻辑仍在 app-terminal.js。 -->
+    </div>
+</template>
+<template data-mount="body">
+<!-- File Tree Panel (chat 模式在右侧；code 模式移到左侧) -->
+    <button class="filer-panel-toggle-btn collapsed" id="filerToggleBtn">‹</button>
+    <div class="filer-resize-handle" id="filerResizeHandle"></div>
+    <div class="filer-panel collapsed" id="filerPanel">
+        <div class="filer-content">
+        <!-- 专注模式：面板顶栏（返回 + 终端/记忆/设置入口）-->
+        <div class="filer-topbar">
+            <button class="filer-back-btn" id="filerBackBtn" data-i18n-title="code.back">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+                <span data-i18n="code.back">返回</span>
+            </button>
+            <div class="filer-topbar-actions">
+                <button class="filer-head-btn filer-terminal-btn" id="filerTerminalBtn" data-i18n-title="app.terminal_shortcut">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                </button>
+                <button class="filer-head-btn" id="filerMemoryBtn" data-i18n-title="app.memory_view">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>
+                </button>
+                <button class="filer-head-btn" id="filerSettingsBtn" data-i18n-title="settings.title">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                </button>
+            </div>
+        </div>
+        <!-- 专注模式：项目行（项目名 + 文件/Git 视图切换）-->
+        <div class="filer-project-row">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            <span class="filer-project-name" id="projectSelectorName">选择项目...</span>
+            <div class="filer-project-actions">
+                <button class="filer-head-btn filer-view-btn active" data-view="files" data-i18n-title="app.project_view">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                </button>
+                <button class="filer-head-btn filer-view-btn" data-view="gitdiff" data-i18n-title="app.review_view">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
+                    <span class="git-badge" style="display:none">0</span>
+                </button>
+                
+            </div>
+        </div>
+        <div class="filer-tab-content active" id="tabContentFiles">
+            <div class="filer-search-bar">
+                <svg class="filer-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input type="text" class="filer-search-input" id="filerSearchInput" placeholder="搜索文件..." data-i18n-placeholder="code.project.search" />
+                <button class="filer-search-clear" id="filerSearchClear" style="display:none">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <div class="filer-panel-tree" id="filerTree"></div>
+        </div>
+
+        <div class="filer-tab-content" id="tabContentGitdiff">
+            <div class="git-unavailable" id="gitUnavailable" style="display:none">
+                <div class="git-empty-icon">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)"
+                         stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                        <line x1="12" y1="9" x2="12" y2="13"/>
+                        <line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                </div>
+                <div class="git-empty-title" data-i18n="git.unavailable">Git 不可用</div>
+                <div class="git-empty-desc" data-i18n="git.unavailableDesc">系统未安装 Git 或 Git 不在 PATH 中</div>
+            </div>
+
+            <div class="git-uninitialized" id="gitUninitialized" style="display:none">
+                <div class="git-empty-icon">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)"
+                         stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+                        <path d="M15 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />
+                        <path d="M11 8a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />
+                        <path d="M11 16a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />
+                        <path d="M12 15v-6" />
+                        <path d="M15 11l-2 -2" />
+                        <path d="M11 7l-1.9 -1.9" />
+                        <path d="M13.446 2.6l7.955 7.954a2.045 2.045 0 0 1 0 2.892l-7.955 7.955a2.045 2.045 0 0 1 -2.892 0l-7.955 -7.955a2.045 2.045 0 0 1 0 -2.892l7.955 -7.955a2.045 2.045 0 0 1 2.892 0" />
+                    </svg>
+                </div>
+                <div class="git-empty-title" data-i18n="git.notInitialized">当前工作区不是 Git 仓库</div>
+                <div class="git-init-benefits">
+                    <div data-i18n="git.init.benefits">初始化后可以：</div>
+                    <ul>
+                        <li data-i18n="git.init.trackHistory">跟踪文件变更历史</li>
+                        <li data-i18n="git.init.viewDiff">查看 diff 代码对比</li>
+                        <li data-i18n="git.init.reviewWithAI">配合 AI 进行代码审查</li>
+                    </ul>
+                </div>
+                <div class="git-init-options">
+                    <label class="git-init-checkbox">
+                        <input type="checkbox" id="gitInitCommit" checked/>
+                        <span data-i18n="git.init.autoCommit">自动提交当前所有文件</span>
+                    </label>
+                </div>
+                <button class="git-init-btn" id="gitInitBtn" data-i18n="git.init.createRepo">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                    初始化 Git 仓库
+                </button>
+                <div class="git-init-note" data-i18n="git.init.note">将在工作区执行 git init</div>
+            </div>
+
+            <div class="git-diff-panel" id="gitDiffPanel" style="display:none">
+                <div class="git-diff-header">
+                    <div class="git-header-left">
+                        <label class="git-select-all-label">
+                            <input type="checkbox" id="gitSelectAll" checked/>
+                        </label>
+                    </div>
+                    <div class="git-header-center">
+                        <span class="git-branch" id="gitBranch">--</span>
+                    </div>
+                    <div class="git-header-right">
+                        <button class="git-refresh-btn" id="gitRefreshBtn">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="git-diff-file-list" id="gitDiffFileList"></div>
+                <div class="git-commit-bar" id="gitCommitBar">
+                    <div class="input-resize-handle" data-i18n-title="app.resize_input"></div>
+                    <textarea class="git-commit-input" id="gitCommitMsg" placeholder="审查摘要..." rows="1" data-i18n-placeholder="git.commitSummary"></textarea>
+                    <div class="git-commit-actions">
+                        <button class="git-summary-btn" id="gitSummaryBtn" data-i18n="git.generateSummary">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8L19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2L19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2L11 5"/></svg>
+                            生成摘要
+                        </button>
+                        <button class="git-commit-btn" id="gitCommitBtn" data-i18n="git.commit">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                            提交
+                        </button>
+                    </div>
+                </div>
+                <div class="git-diff-empty" id="gitDiffEmpty" style="display:none">
+                    <div class="git-empty-desc" data-i18n="git.noChanges">没有未提交的变更</div>
+                </div>
+            </div>
+        </div>
+        </div>
+    </div>
+</template>

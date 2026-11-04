@@ -1,0 +1,88 @@
+[package]
+name = "gourd-work-desktop"
+description = "GWork Desktop (Tauri + Rust-native kernel, no JVM)"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+gourd-work-core = { path = "../../core" }
+tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
+# 单实例锁。托盘常驻后必需：用户点关闭→窗口消失→以为退了→再点图标，
+# 没有它就会起第二个进程，而 find_available_port() 会给它一个新端口，
+# 于是两个内核同时读写同一个 ~/.gwork（settings.json / 会话 ndjson）互相覆盖。
+# 必须在 Builder 上**第一个**注册（见 lib.rs 注释）。
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-os = "2"
+tauri-plugin-process = "2"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs.workspace = true
+# Loopback health probe for the in-process kernel (see wait_for_kernel).
+reqwest.workspace = true
+
+# ─── 远控通道（remote/ 子系统，自 gourd-ai-tauri 移植）─────────────────────
+#
+# 版本纪律（与旧壳 Cargo.toml 逐条对齐，不得随意升级）：
+#
+# · russh 锁 0.54 线：0.63 要求 rust-version 1.89，超出本 workspace 的
+#   rust-version = "1.77.2"；0.54 线（1.75+）是满足 MSRV 的最新稳定线。
+#   必须 default-features = false + features = ["ring"]：默认 feature 含
+#   aws-lc-rs，其 C 构建链在 Windows 上需要 NASM/CLink，缺了直接编译失败；
+#   ring 是纯 Rust 汇编后端，三平台免工具链。
+# · keyring 锁 3.6.x：4.0 要求 rustc 1.88，超 MSRV。v3 无默认 feature，
+#   必须显式指定平台库；sync-secret-service 需要 crypto，选 crypto-rust
+#   （纯 Rust，不引 OpenSSL 链）。全同步 API，异步上下文用 spawn_blocking 包。
+russh = { version = "0.54", default-features = false, features = ["ring"] }
+keyring = { version = "3.6", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
+# 部署 tar.gz 内存打包（GzEncoder/GzDecoder）。russh 自带的 flate2 feature 只
+# 面向压缩协商，不能替代这里的显式依赖。
+flate2 = "1"
+# 隧道取消令牌（Tunnel 生命周期管理）
+tokio-util.workspace = true
+# SHA-256 内容寻址指纹（版本化安装根的目录名）+ 指纹 hex 编码
+sha2.workspace = true
+hex.workspace = true
+# 远端输出解码 GBK 兜底（遗留中文系统 shell/JVM 输出非 UTF-8）
+encoding_rs.workspace = true
+# ExecChannel trait 的 async 方法：edition 2021 + rust 1.77 下 dyn trait 必须走宏
+async-trait.workspace = true
+base64.workspace = true
+rand.workspace = true
+futures-util.workspace = true
+# server.rs 的本地 UI 服务器 + 反向代理（REMOTE_ROUTE 数据面）
+axum.workspace = true
+tower-http.workspace = true
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
+# 以下两个不在 workspace.dependencies 里，按成员自有依赖声明（无需改 workspace 根）
+tower = { version = "0.5", features = ["util"] }
+lazy_static = "1"
+
+[target.'cfg(windows)'.dependencies]
+# WSL 默认用户探测（Lxss 注册表 DefaultUid → root 特判）
+winreg = "0.52"
+
+# server.rs / remote 在 Unix 下用 libc 做进程组管理。libc 虽被 tokio 间接依赖，
+# 但间接依赖不可直接 `use`，必须显式声明，否则 macOS/Linux 编译报 E0433。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# 测试用 mock 凭据库（keyring v3 的 mock store 默认内置，无需 feature 声明）
+[dev-dependencies]
+keyring = "3.6"
+
+[lib]
+name = "gourd_work_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]

@@ -1,0 +1,255 @@
+﻿/* automation.css — 自动化（定时任务）独立主视图
+ * 命名前缀 .automation- / .auto-，避免与侧栏 .loop-item（app.css:95/714 两处定义）冲突。
+ * 仅调度 tab / 星期按钮复用 app.css 既有的 .loop-schedule-* / .loop-weekday-* 规则。
+ */
+
+/* ===== 视图容器（照 .chat-view 模式：基线 none + .active 显示） ===== */
+.automation-view { flex: 1; display: none; flex-direction: column; min-height: 0; overflow: hidden; }
+.automation-view.active { display: flex; }
+body.code-mode .automation-view { display: none !important; }
+
+.automation-scroll { flex: 1; overflow-y: auto; padding: 28px 24px 40px; }
+.automation-inner { max-width: 860px; margin: 0 auto; }
+
+/* ===== 页头 ===== */
+.automation-header { margin-bottom: 22px; }
+.automation-title { font-size: 26px; font-weight: 600; color: var(--text-primary); letter-spacing: .3px; }
+.automation-desc { margin-top: 6px; font-size: 13px; color: var(--text-tertiary); }
+.automation-back-btn {
+    margin-top: 10px; display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px 4px 6px; font-size: 13px; cursor: pointer;
+    background: transparent; border: 1px solid var(--border-color); border-radius: 7px;
+    color: var(--text-secondary); transition: background .15s, color .15s;
+}
+.automation-back-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* ===== 区块 ===== */
+.automation-section {
+    background: var(--bg-card, var(--bg-main)); border: 1px solid var(--border-color);
+    border-radius: 12px; padding: 18px 20px;
+}
+.automation-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.automation-section-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.automation-add-btn {
+    padding: 5px 12px; font-size: 12px; cursor: pointer; white-space: nowrap;
+    background: var(--accent); color: var(--accent-contrast); border: none; border-radius: 7px;
+    transition: filter .15s;
+}
+.automation-add-btn:hover { filter: brightness(1.08); }
+.automation-empty { padding: 40px 0; text-align: center; color: var(--text-tertiary); font-size: 13px; }
+
+/* ===== 任务卡片 ===== */
+.automation-task-list { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.auto-task-item {
+    padding: 12px 14px; border: 1px solid var(--border-color); border-radius: 10px;
+    background: var(--bg-main); transition: border-color .15s;
+}
+.auto-task-item:hover { border-color: var(--accent); }
+.auto-task-row { display: flex; align-items: center; gap: 8px; }
+.auto-task-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--text-tertiary); }
+.auto-task-dot.ready { background: #22c55e; }
+.auto-task-dot.running { background: var(--accent); }
+.auto-task-dot.disabled { background: var(--text-tertiary); }
+.auto-task-dot.cancelled { background: #ef4444; }
+.auto-task-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.auto-task-schedule { font-size: 11px; color: var(--accent); white-space: nowrap; }
+.auto-task-status { font-size: 11px; color: var(--text-tertiary); }
+.auto-task-status.running { color: var(--accent); }
+.auto-task-actions { margin-left: auto; display: flex; gap: 4px; }
+.auto-task-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; cursor: pointer;
+    background: transparent; border: 1px solid var(--border-color); border-radius: 6px;
+    color: var(--text-secondary); transition: background .15s, color .15s, border-color .15s;
+}
+.auto-task-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.auto-task-btn.danger:hover { border-color: #ef4444; color: #ef4444; }
+.auto-task-prompt {
+    margin-top: 8px; font-size: 12px; line-height: 1.6; color: var(--text-secondary);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.auto-task-info { margin-top: 8px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.auto-task-meta { font-size: 11px; color: var(--text-tertiary); }
+.auto-task-tags { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.auto-task-tag {
+    font-size: 10px; padding: 1px 6px; border-radius: 4px;
+    background: var(--bg-hover); color: var(--text-tertiary);
+}
+.auto-task-tag.accent { background: var(--accent-light); color: var(--accent); }
+.auto-task-result {
+    margin-top: 8px; padding: 6px 8px; font-size: 11px; line-height: 1.5;
+    border-radius: 6px; background: var(--bg-hover); color: var(--text-tertiary);
+    word-break: break-all;
+}
+.auto-task-result.achieved { color: #22c55e; }
+.auto-task-result.error { color: #ef4444; }
+
+/* ===== 表单 ===== */
+.auto-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.auto-form-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+.auto-form-group > label { font-size: 12px; color: var(--text-secondary); }
+.auto-form-group-check { justify-content: flex-end; }
+.auto-form-group-check label { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; color: var(--text-secondary); }
+.auto-required { color: #ef4444; }
+.auto-input {
+    width: 100%; padding: 7px 10px; font-size: 13px; font-family: inherit;
+    background: var(--bg-main); color: var(--text-primary);
+    border: 1px solid var(--border-color); border-radius: 7px; outline: none;
+    transition: border-color .15s;
+}
+.auto-input:focus { border-color: var(--accent); }
+.auto-input-sm { width: 140px; }
+.auto-input-xs { width: 88px; }
+
+/* ---- layui select 统一范式（外层 .layui-form 包裹；面板样式由 settings.css:765-1002 全局适配） ---- */
+.auto-select-wrap { width: 100%; }
+.auto-select-wrap-xs { width: 96px; flex: 0 0 auto; }
+.auto-select-wrap .layui-form-select { min-width: 0; }
+/* layui 默认 38px 行高偏大，压到与 .auto-input 同高 */
+.auto-select-wrap .layui-input {
+    height: 34px; line-height: 34px; padding: 0 30px 0 10px;
+    font-size: 13px; border-radius: 7px;
+}
+.auto-select-wrap .layui-edge { top: 50%; }
+.auto-sched-pane { margin-top: 10px; }
+.auto-interval-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-primary); }
+
+/* ===== 指令区（完全对齐首页 composer） =====
+ * 容器 class 刻意不写 .input-box / .welcome-input-box：app-streaming.js 在这两个 class 上
+ * 绑了「点击容器即聚焦聊天输入框」，套上会把焦点从表单抢走。
+ * 因此视觉靠本块【抄 .input-box 的值】实现（app.css:958-960）：底色 --bg-input-box、
+ * 边框 --border-input、圆角 12px、投影 --shadow，聚焦态换成 --accent 边框。
+ * 内层元素（.attachments-wrap / .attachment-item* / .input-toolbar / .toolbar-left|right /
+ * .plus-menu* / .cmd-complete / .model-selector* / .access-* / .composer-tray）全部复用全局类，
+ * 这里只补自动化页特有的尺寸差。 */
+.auto-composer {
+    position: relative; display: flex; flex-direction: column;
+    background: var(--bg-input-box); border: 1px solid var(--border-input);
+    border-radius: 12px; box-shadow: var(--shadow);
+    transition: all 0.25s;
+}
+.auto-composer:focus-within {
+    border-color: var(--accent);
+    box-shadow: var(--shadow), 0 0 0 3px rgba(var(--accent-rgb), 0.06);
+}
+/* textarea 字号/行高/内边距对齐首页 .input-box textarea（app.css:960），
+   仅保留自动化页原有的 92px 最小高度（表单里指令通常更长）与 resize:none */
+.auto-composer-textarea {
+    width: 100%; min-height: 92px; max-height: 320px; padding: 12px 14px 4px;
+    font-size: 14px; line-height: 1.6; font-family: var(--font-sans);
+    background: transparent; color: var(--text-primary);
+    border: none; outline: none; box-sizing: border-box;
+    /* resize:none —— 原生手柄会在圆角边框右下角露出一个灰色小三角，
+       且与下方 toolbar 视觉冲突；高度改由 JS autoGrowPrompt() 自适应 */
+    resize: none; overflow-y: hidden;
+}
+.auto-composer-textarea::placeholder { color: var(--text-secondary); }
+/* 附件条：全局 .attachments-wrap 的内边距是 8px 14px 0，与本页容器内边距一致，无需覆写 */
+/* 工具条：沿用全局 .input-toolbar 的 flex/space-between/padding，本页仅收紧左区间距
+   （+菜单 / 工作空间 / 模型选择器三者并排，全局 gap 在窄表单里偏松） */
+.auto-composer-toolbar .toolbar-left { gap: 4px; flex-wrap: wrap; }
+/* 托盘条：全局 .composer-tray 自带 max-width:680px 与 --bg-secondary 底色，
+   但它在首页是「输入框外的底座」（与输入框分离）；本页它嵌在 .auto-composer 内部，
+   故取消宽度上限、去掉底色与上外边距，改用一条分隔线作为「输入框底座」视觉。 */
+.auto-composer-tray {
+    max-width: none; margin-top: 0; padding: 4px 8px;
+    background: transparent; border-radius: 0;
+    border-top: 1px solid var(--border-color);
+}
+/* 权限气泡向上弹出（全局 .access-dropdown 已是 bottom:100%），托盘在最底行，
+   向上弹刚好落在输入区内，不会被表单下缘裁切 */
+.auto-composer-tray .access-dropdown { left: 0; right: auto; }
+
+/* ---- 工作空间选择器（自有命名，规避 app-workspace.js 的 document 委托） ---- */
+.auto-ws-selector { position: relative; display: flex; }
+.auto-ws-current {
+    display: flex; align-items: center; gap: 5px; max-width: 200px;
+    padding: 4px 10px; font-size: 12px; cursor: pointer;
+    background: transparent; color: var(--text-secondary);
+    border: 1px solid var(--border-color); border-radius: 7px;
+    transition: background .15s, color .15s;
+}
+.auto-ws-current:hover { background: var(--bg-hover); color: var(--text-primary); }
+.auto-ws-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.auto-ws-arrow { width: 12px; height: 12px; flex-shrink: 0; transition: transform .18s; }
+.auto-ws-selector.open .auto-ws-arrow { transform: rotate(180deg); }
+.auto-ws-dropdown {
+    position: absolute; bottom: 100%; left: 0; margin-bottom: 6px;
+    min-width: 260px; max-width: 420px; max-height: 280px; overflow-y: auto;
+    display: none; z-index: 100; padding: 4px;
+    background: var(--bg-card, var(--bg-main)); border: 1px solid var(--border-color);
+    border-radius: 9px; box-shadow: var(--shadow-lg, 0 8px 24px rgba(0,0,0,.18));
+}
+.auto-ws-selector.open .auto-ws-dropdown { display: block; }
+.auto-ws-item { padding: 7px 10px; border-radius: 6px; cursor: pointer; transition: background .12s; }
+.auto-ws-item:hover { background: var(--bg-hover); }
+.auto-ws-item.active { background: var(--accent-light); }
+.auto-ws-item-name { font-size: 12px; color: var(--text-primary); }
+.auto-ws-item-path {
+    margin-top: 2px; font-size: 10px; color: var(--text-tertiary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.auto-ws-empty { padding: 10px; font-size: 12px; color: var(--text-tertiary); text-align: center; }
+
+/* 已选工作空间时：悬停按钮，文件夹图标切换为清除小标（同聊天页 code.css:62-70） */
+.auto-ws-clear {
+    display: none; align-items: center; justify-content: center;
+    border: none; background: none; cursor: pointer;
+    color: var(--text-secondary); padding: 1px; border-radius: 4px; flex-shrink: 0;
+}
+.auto-ws-clear:hover { background: var(--bg-danger-subtle); color: var(--color-danger); }
+.auto-ws-selector.ws-has-selection .auto-ws-current:hover .auto-ws-clear { display: inline-flex; }
+.auto-ws-selector.ws-has-selection .auto-ws-current:hover .auto-ws-folder-icon { display: none; }
+
+/* ===== 定时任务模板区 ===== */
+.automation-tpl-wrap { margin-top: 26px; }
+.automation-tpl-head { margin-bottom: 12px; font-size: 13px; color: var(--text-tertiary); }
+.automation-tpl-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.auto-tpl-card {
+    padding: 14px 16px; cursor: pointer;
+    background: var(--bg-card, var(--bg-main)); border: 1px solid var(--border-color);
+    border-radius: 10px; transition: border-color .15s, background .15s;
+}
+.auto-tpl-card:hover { border-color: var(--accent); background: var(--bg-hover); }
+.auto-tpl-title {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 13px; font-weight: 600; color: var(--text-primary);
+}
+.auto-tpl-title svg { flex: 0 0 auto; color: var(--text-secondary); }
+.auto-tpl-desc {
+    margin-top: 7px; font-size: 12px; line-height: 1.6; color: var(--text-secondary);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.auto-tpl-sched { margin-top: 10px; font-size: 11px; color: var(--text-tertiary); }
+@media (max-width: 700px) {
+    .automation-tpl-grid { grid-template-columns: 1fr; }
+}
+
+/* ---- 模型选择器：复用 app.css 的 .model-selector 视觉，仅补尺寸 ---- */
+.auto-model-selector .model-selector-current { max-width: 220px; }
+.auto-model-selector .model-dropdown { min-width: var(--dropdown-w-md); max-width: var(--dropdown-w-max); }
+
+/* ===== 高级 / 操作区 ===== */
+.auto-advanced-toggle {
+    display: inline-flex; align-items: center; gap: 5px; margin: 2px 0 10px;
+    font-size: 12px; color: var(--text-secondary); cursor: pointer; user-select: none;
+}
+.auto-advanced-toggle:hover { color: var(--text-primary); }
+.auto-advanced-toggle svg { transition: transform .18s; }
+.auto-advanced-toggle.collapsed svg { transform: rotate(-90deg); }
+.auto-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.auto-btn-primary, .auto-btn-secondary {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 7px 16px; font-size: 13px; cursor: pointer; border-radius: 7px;
+    transition: filter .15s, background .15s;
+}
+.auto-btn-primary { background: var(--accent); color: var(--accent-contrast); border: none; }
+.auto-btn-primary:hover { filter: brightness(1.08); }
+.auto-btn-primary:disabled { opacity: .6; cursor: not-allowed; }
+.auto-btn-secondary {
+    background: transparent; color: var(--text-secondary); border: 1px solid var(--border-color);
+}
+.auto-btn-secondary:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* ===== 侧栏导航选中态（app.css 只有 :hover，无 .active） ===== */
+.main-nav-item.active { background: var(--bg-hover); color: var(--text-primary); }

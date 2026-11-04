@@ -1,0 +1,36 @@
+﻿cargo :    Compiling gourd-work-core v0.3.0 (D:\work\gourd\gourdai\gourd-work\core)
+At line:10 char:38
++ ... gourd-work; cargo test -p gourd-work-core --lib mcp:: --no-run 2>.tmp ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling go...ourd-work\core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0308]: mismatched types
+   --> core\src\remote\mirror.rs:337:25
+    |
+337 |         s.models.insert("x", ModelConfig::default());
+    |                  ------ ^^^ expected `String`, found `&str`
+    |                  |
+    |                  arguments to this method are incorrect
+    |
+note: method defined here
+   --> C:\Users\LUZW\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\indexmap-2.14.2\src\map.rs:451:12
+    |
+451 |     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+    |            ^^^^^^
+help: try using a conversion method
+    |
+337 |         s.models.insert("x".to_string(), ModelConfig::default());
+    |                            ++++++++++++
+
+warning: unused variable: `id`
+    --> core\src\session\mod.rs:1528:15
+     |
+1528 |     fn stored(id: &str, n: usize) -> Vec<StoredMessage> {
+     |               ^^ help: if this is intentional, prefix it with an underscore: `_id`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `gourd-work-core` (lib test) generated 1 warning
+error: could not compile `gourd-work-core` (lib test) due to 1 previous error; 1 warning emitted

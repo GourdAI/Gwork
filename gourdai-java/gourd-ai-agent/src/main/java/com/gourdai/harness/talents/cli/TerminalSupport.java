@@ -1,0 +1,1247 @@
+/*
+ * Copyright 2017-2025 noear.org and authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.gourdai.harness.talents.cli;
+
+import org.noear.solon.Utils;
+
+import com.gourdai.ai.chat.content.ImageBlock;
+import com.gourdai.ai.talents.registry.TalentRegistry;
+
+import java.util.Base64;
+import org.noear.solon.core.util.Assert;
+
+import java.io.IOException;
+import java.io.File;
+import java.nio.file.*;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * TerminalTalent 的内部支撑逻辑。
+ *
+ * @author oisin
+ * @since 3.9.1
+ */
+public class TerminalSupport {
+
+    /**
+     * 匹配结果：包含起始位置和实际匹配长度（含缩进和换行符）。
+     */
+    static class MatchResult {
+        final int startIndex;
+        final int matchedLength;
+        final boolean isLooseMatch; // true 表示通过忽略行首行尾空白匹配（findAtStartLineLoose / collapse）
+
+        MatchResult(int startIndex, int matchedLength, boolean isLooseMatch) {
+            this.startIndex = startIndex;
+            this.matchedLength = matchedLength;
+            this.isLooseMatch = isLooseMatch;
+        }
+    }
+    static final int MAX_CHARACTER_LIMIT = 128 * 1024;
+
+    private final TalentRegistry talentRegistry;
+    private final Set<String> ignoreDirs;
+    private final ShellMode shellMode;
+
+    TerminalSupport(TalentRegistry talentRegistry, Set<String> ignoreDirs, ShellMode shellMode) {
+        this.talentRegistry = talentRegistry;
+        this.ignoreDirs = ignoreDirs;
+        this.shellMode = shellMode;
+    }
+
+    String normalizeNewlines(String context, String text) {
+        if (text == null) return null;
+        // 如果文件内容包含 \r\n，则将 text 中的 \n 转换为 \r\n
+        if (context.contains("\r\n")) {
+            return text.replace("\r\n", "\n").replace("\n", "\r\n");
+        } else {
+            return text.replace("\r\n", "\n");
+        }
+    }
+
+    String applyEditLogic(String content, String oldStr, String newStr, boolean replaceAll, Integer oldStrStartLine) {
+        if (Utils.isEmpty(oldStr)) {
+            throw new IllegalArgumentException("old_str 不能为空");
+        }
+
+        if (oldStr.equals(newStr)) {
+            return content; // 内容相同无需处理
+        }
+
+        String finalOld = normalizeNewlines(content, oldStr);
+        String finalNew = normalizeNewlines(content, newStr);
+
+        if (replaceAll) {
+            if (!content.contains(finalOld)) {
+                throw new IllegalArgumentException("找不到待替换的文本块");
+            }
+            return content.replace(finalOld, finalNew);
+        } else {
+            MatchResult match = findAtStartLine(content, finalOld, oldStrStartLine);
+            if (match != null) {
+                String replacement = finalNew;
+                if (match.isLooseMatch) {
+                    // 当通过忽略缩进的宽松匹配时，提取原始内容的行首缩进并应用到 newStr
+                    replacement = applyContentLeadingWhitespace(content, match.startIndex, match.matchedLength, finalNew);
+                }
+                return content.substring(0, match.startIndex) + replacement + content.substring(match.startIndex + match.matchedLength);
+            }
+
+            int firstIndex = content.indexOf(finalOld);
+            if (firstIndex == -1) {
+                throw new IllegalArgumentException("找不到文本块。这通常是由于前面的修改改变了文件的字符偏移或内容，建议分步执行。");
+            }
+            if (content.lastIndexOf(finalOld) != firstIndex) {
+                throw new IllegalArgumentException("文本块在当前状态下不唯一");
+            }
+            return content.substring(0, firstIndex) + finalNew + content.substring(firstIndex + finalOld.length());
+        }
+    }
+
+    MatchResult findAtStartLine(String content, String oldStr, Integer oldStrStartLine) {
+        if (oldStrStartLine == null || oldStrStartLine <= 0) {
+            return null;
+        }
+
+        int lineStartIndex = getLineStartIndex(content, oldStrStartLine);
+        if (lineStartIndex < 0) {
+            return null;
+        }
+
+        // 精确匹配（保留原有行为）
+        if (content.startsWith(oldStr, lineStartIndex)) {
+            return new MatchResult(lineStartIndex, oldStr.length(), false);
+        }
+
+        // 策略2：逐行 trim 匹配（忽略每行首尾空白差异）
+        MatchResult looseMatch = findAtStartLineLoose(content, oldStr, lineStartIndex);
+        if (looseMatch != null) {
+            return looseMatch;
+        }
+
+        // 策略3：折叠空白匹配（行内多余空格/Tab混合等，collapseWhitespace 兜底）
+        MatchResult collapsedMatch = findAtStartLineCollapseWhitespace(content, oldStr, lineStartIndex);
+        if (collapsedMatch != null) {
+            return collapsedMatch;
+        }
+
+        return null;
+    }
+
+    /**
+     * 宽松匹配：将 oldStr 按行拆分，与 content 从指定起始位置开始的行逐行比较，
+     * 忽略每行行首和行尾的空白字符差异（空格 vs Tab、空格数量不同等）。
+     * 同时容忍 oldStr 末尾多余的空白行（例如从 diff 格式转换带来的多余换行）。
+     */
+    private MatchResult findAtStartLineLoose(String content, String oldStr, int lineStartIndex) {
+        // 提取 content 中从 lineStartIndex 开始的各行的实际内容（trim 后）
+        List<String> contentLines = extractTrimmedLines(content, lineStartIndex);
+        if (contentLines.isEmpty()) {
+            return null;
+        }
+
+        // 拆分 oldStr 为行列表，并去掉末尾多余的空白行
+        String[] oldStrLinesRaw = oldStr.split("\\r?\\n", -1);
+        List<String> oldStrLines = trimTrailingEmptyLines(oldStrLinesRaw);
+        if (oldStrLines.isEmpty()) {
+            return null;
+        }
+
+        if (oldStrLines.size() > contentLines.size()) {
+            return null; // oldStr 行数多于 content 可用行数，不可能匹配
+        }
+
+        // 逐行比较（忽略每行首尾空白）
+        for (int i = 0; i < oldStrLines.size(); i++) {
+            String actualLine = contentLines.get(i);
+            String expectedLine = trimLine(oldStrLines.get(i));
+            if (!actualLine.equals(expectedLine)) {
+                return null;
+            }
+        }
+
+        int computedLength = computeMatchLength(content, lineStartIndex, oldStrLines.size());
+        return computedLength > 0 ? new MatchResult(lineStartIndex, computedLength, true) : null;
+    }
+
+    /**
+     * 折叠空白匹配：在 trim 行首尾空白的基础上，将行内连续空白折叠为单个空格后比较。
+     * 作为 findAtStartLineLoose 的兜底策略，处理行内多余空格或 Tab 混合的情况。
+     */
+    private MatchResult findAtStartLineCollapseWhitespace(String content, String oldStr, int lineStartIndex) {
+        List<String> contentLines = extractTrimmedLines(content, lineStartIndex);
+        if (contentLines.isEmpty()) {
+            return null;
+        }
+
+        String[] oldStrLinesRaw = oldStr.split("\\r?\\n", -1);
+        List<String> oldStrLines = trimTrailingEmptyLines(oldStrLinesRaw);
+        if (oldStrLines.isEmpty() || oldStrLines.size() > contentLines.size()) {
+            return null;
+        }
+
+        for (int i = 0; i < oldStrLines.size(); i++) {
+            String actualLine = collapseWhitespace(contentLines.get(i));
+            String expectedLine = collapseWhitespace(trimLine(oldStrLines.get(i)));
+            if (!actualLine.equals(expectedLine)) {
+                return null;
+            }
+        }
+
+        int computedLength = computeMatchLength(content, lineStartIndex, oldStrLines.size());
+        return computedLength > 0 ? new MatchResult(lineStartIndex, computedLength, true) : null;
+    }
+
+    /**
+     * 去掉字符串列表末尾的空白行。
+     */
+    private List<String> trimTrailingEmptyLines(String[] lines) {
+        int end = lines.length;
+        while (end > 0 && lines[end - 1].trim().isEmpty()) {
+            end--;
+        }
+        List<String> result = new ArrayList<>(end);
+        for (int i = 0; i < end; i++) {
+            result.add(lines[i]);
+        }
+        return result;
+    }
+
+    /**
+     * 多策略匹配诊断版：按策略链（trim → collapseWhitespace）依次检查，
+     * 返回具体是哪一行不匹配及其差异描述。匹配成功时返回 null。
+     *
+     * @param lineStartIndex 1-based 行号（来自 edit.oldStrStartLine），注意不是字符偏移量
+     */
+    String findLooseMatchDiagnostics(String content, String oldStr, int lineStartIndex) {
+        // 先将 1-based 行号转换为字符偏移量（和 findAtStartLine 的转换方式保持一致）
+        int startOffset = getLineStartIndex(content, lineStartIndex);
+        if (startOffset < 0) {
+            startOffset = 0; // 行号超出范围时的回退
+        }
+
+        // 先尝试 trim 策略检查
+        String diag = tryTrimMatchDiagnostics(content, oldStr, startOffset, "trim");
+        if (diag == null) {
+            return null; // trim 策略匹配成功
+        }
+
+        // trim 策略失败，检查是否是 whitespace 折叠可以解决的差异
+        String collapseDiag = tryTrimMatchDiagnostics(content, oldStr, startOffset, "collapse");
+        if (collapseDiag == null) {
+            return null; // collapse 策略匹配成功
+        }
+
+        // 两个策略都失败，报告 trim 策略的诊断信息（最贴近用户预期）
+        return diag;
+    }
+
+    /**
+     * 单一策略诊断：按指定模式检查每一行的差异。
+     *
+     * @param mode "trim" 使用 trimLine 比较，"collapse" 使用 collapseWhitespace 比较
+     */
+    private String tryTrimMatchDiagnostics(String content, String oldStr, int startOffset, String mode) {
+        List<String> contentLines = extractTrimmedLines(content, startOffset);
+        if (contentLines.isEmpty()) {
+            return "文件在指定行号处无内容";
+        }
+
+        String[] oldStrLinesRaw = oldStr.split("\\r?\\n", -1);
+        List<String> oldStrLines = trimTrailingEmptyLines(oldStrLinesRaw);
+        if (oldStrLines.isEmpty()) {
+            return "old_str 全为空行";
+        }
+
+        if (oldStrLines.size() > contentLines.size()) {
+            return String.format("行数不匹配：old_str 有 %d 行，但文件中从起始行开始只剩 %d 行",
+                    oldStrLines.size(), contentLines.size());
+        }
+
+        boolean useCollapse = "collapse".equals(mode);
+        for (int i = 0; i < oldStrLines.size(); i++) {
+            String actualRaw = contentLines.get(i);
+            String expectedRaw = trimLine(oldStrLines.get(i));
+            String actual = useCollapse ? collapseWhitespace(actualRaw) : actualRaw;
+            String expected = useCollapse ? collapseWhitespace(expectedRaw) : expectedRaw;
+            if (!actual.equals(expected)) {
+                int fileLineNum = lineStartIndexToLineNumber(content, startOffset) + i;
+                if (useCollapse) {
+                    return String.format("第 %d 行内容不匹配（折叠空白后）：期待「%s」，文件中是「%s」",
+                            fileLineNum, expected, actual);
+                } else {
+                    return String.format("第 %d 行内容不匹配：期待「%s」，文件中是「%s」",
+                            fileLineNum, expected, actual);
+                }
+            }
+        }
+
+        return null; // 匹配成功
+    }
+
+    /**
+     * 将字符偏移位置转换为行号
+     */
+    private int lineStartIndexToLineNumber(String content, int charOffset) {
+        int line = 1;
+        for (int i = 0; i < charOffset && i < content.length(); i++) {
+            if (content.charAt(i) == '\n') {
+                line++;
+            }
+        }
+        return line;
+    }
+
+    /**
+     * 从 content 的 lineStartIndex 开始，提取所有行的内容（trim 后，不含换行符）。
+     */
+    private List<String> extractTrimmedLines(String content, int startOffset) {
+        List<String> lines = new ArrayList<>();
+        int pos = startOffset;
+        while (pos < content.length()) {
+            int lineEnd = findLineEnd(content, pos);
+            String lineContent = content.substring(pos, lineEnd);
+            lines.add(trimLine(lineContent));
+            if (lineEnd >= content.length()) {
+                break; // 文件末尾
+            }
+            char c = content.charAt(lineEnd);
+            if (c == '\n') {
+                pos = lineEnd + 1;
+            } else if (c == '\r') {
+                pos = lineEnd + 1;
+                if (pos < content.length() && content.charAt(pos) == '\n') {
+                    pos++;
+                }
+            }
+        }
+        return lines;
+    }
+
+    /**
+     * 查找从 pos 开始的行的结束位置（换行符之前的位置）。
+     */
+    private int findLineEnd(String content, int pos) {
+        for (int i = pos; i < content.length(); i++) {
+            char c = content.charAt(i);
+            if (c == '\n' || c == '\r') {
+                return i;
+            }
+        }
+        return content.length();
+    }
+
+    /**
+     * 计算从 lineStartIndex 开始的 n 行的总字符数（包含换行符）。
+     */
+    private int computeMatchLength(String content, int lineStartIndex, int nLines) {
+        int pos = lineStartIndex;
+        int length = 0;
+        for (int i = 0; i < nLines; i++) {
+            int lineEnd = findLineEnd(content, pos);
+            length = lineEnd - lineStartIndex;
+            boolean isLastLine = (i == nLines - 1);
+            // 包含换行符（仅非最后一行包含行尾换行符）
+            if (lineEnd < content.length() && content.charAt(lineEnd) == '\n') {
+                if (!isLastLine) {
+                    length++;
+                }
+                pos = lineEnd + 1;
+            } else if (lineEnd < content.length() && content.charAt(lineEnd) == '\r') {
+                if (!isLastLine) {
+                    length++;
+                }
+                pos = lineEnd + 1;
+                if (lineEnd + 1 < content.length() && content.charAt(lineEnd + 1) == '\n') {
+                    if (!isLastLine) {
+                        length++;
+                    }
+                    pos = lineEnd + 2;
+                }
+            } else {
+                pos = lineEnd;
+            }
+        }
+        return length;
+    }
+
+    /**
+     * 去除字符串行首和行尾的空白字符（空格、Tab）。
+     */
+    private String trimLine(String s) {
+        int start = 0;
+        while (start < s.length() && (s.charAt(start) == ' ' || s.charAt(start) == '\t')) {
+            start++;
+        }
+        int end = s.length();
+        while (end > start && (s.charAt(end - 1) == ' ' || s.charAt(end - 1) == '\t')) {
+            end--;
+        }
+        return s.substring(start, end);
+    }
+
+    /**
+     * 将字符串内部的所有连续空白字符折叠为单个空格，并去除首尾空白。
+     * 用于处理行内多余空格或 Tab 混合等 whitespace 差异。
+     */
+    private String collapseWhitespace(String s) {
+        return s.replaceAll("\\s+", " ").trim();
+    }
+
+    /**
+     * 将原始匹配内容各行的行首缩进提取出来，逐行应用到 newStr 上。
+     *
+     * <p>当通过忽略缩进的宽松匹配（loose match / collapse match）时，此方法确保
+     * newStr 中的每一行都继承原始内容对应行的行首缩进，避免替换后缩进丢失。</p>
+     *
+     * @param content      原始文件内容
+     * @param startIndex   匹配区域的起始字符偏移
+     * @param matchedLength 匹配区域的字符长度
+     * @param newStr       用户提供的替换内容（newline 已归一化）
+     * @return 调整后的替换文本，每行继承了原始内容的行首缩进
+     */
+    private String applyContentLeadingWhitespace(String content, int startIndex, int matchedLength, String newStr) {
+        // Step 1: 提取原始匹配内容中每行的行首空白
+        List<String> leadingWhitespaces = new ArrayList<>();
+        int pos = startIndex;
+        int end = startIndex + matchedLength;
+        while (pos < end && pos < content.length()) {
+            int lineStart = pos;
+            int lineEnd = findLineEnd(content, pos);
+            if (lineEnd > end) {
+                lineEnd = end;
+            }
+            String line = content.substring(lineStart, lineEnd);
+            // 提取行首空白（空格和 Tab）
+            int wsLen = 0;
+            while (wsLen < line.length() && (line.charAt(wsLen) == ' ' || line.charAt(wsLen) == '\t')) {
+                wsLen++;
+            }
+            leadingWhitespaces.add(line.substring(0, wsLen));
+
+            // 前进到下一行
+            if (lineEnd >= end || lineEnd >= content.length()) break;
+            char c = content.charAt(lineEnd);
+            if (c == '\n') {
+                pos = lineEnd + 1;
+            } else if (c == '\r') {
+                pos = lineEnd + 1;
+                if (pos < content.length() && content.charAt(pos) == '\n') {
+                    pos++;
+                }
+            } else {
+                pos = lineEnd;
+            }
+        }
+
+        if (leadingWhitespaces.isEmpty()) {
+            return newStr; // 没有原始内容可提取
+        }
+
+        // Step 2: 确定行分隔符
+        String lineSep = content.contains("\r\n") ? "\r\n" : "\n";
+
+        // Step 3: 逐行处理 newStr
+        String[] newLines = newStr.split("\\r?\\n", -1);
+        boolean hasTrailingNewline = newLines.length > 1 && newLines[newLines.length - 1].isEmpty();
+        int linesToProcess = hasTrailingNewline ? newLines.length - 1 : newLines.length;
+
+        StringBuilder sb = new StringBuilder(newStr.length());
+        for (int i = 0; i < linesToProcess; i++) {
+            if (i > 0) {
+                sb.append(lineSep);
+            }
+            String line = newLines[i];
+            // 如果 newStr 该行已有行首空白（用户有意指定缩进），则原样保留
+            if (!line.isEmpty() && (line.charAt(0) == ' ' || line.charAt(0) == '\t')) {
+                sb.append(line);
+            } else {
+                // 用户没写缩进 → 继承原文件对应行的缩进
+                // 如果 newStr 行数多于原始行，则重复最后一行缩进
+                int wsIdx = Math.min(i, leadingWhitespaces.size() - 1);
+                sb.append(leadingWhitespaces.get(wsIdx)).append(line);
+            }
+        }
+        if (hasTrailingNewline) {
+            sb.append(lineSep);
+        }
+
+        return sb.toString();
+    }
+
+    int getLineStartIndex(String content, int lineNumber) {
+        if (lineNumber <= 0) {
+            return -1;
+        }
+
+        if (lineNumber == 1) {
+            return 0;
+        }
+
+        int currentLine = 1;
+        for (int i = 0; i < content.length(); i++) {
+            if (content.charAt(i) == '\n') {
+                currentLine++;
+                if (currentLine == lineNumber) {
+                    return i + 1;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    /** 类 Unix 的进程终止动词（PowerShell 里 {@code kill} 也是 Stop-Process 的别名，故不分平台都查） */
+    private static final Pattern UNIX_KILL_VERB =
+            Pattern.compile("\\b(?:kill|pkill|killall)\\b", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Windows 下「杀宿主进程」的终止动词。
+     *
+     * <p>Unix 侧只靠 {@code kill|pkill|killall} 关键字就够了，Windows 完全不同：
+     * {@code taskkill /F /PID 1234} 里 PID 前面隔着 {@code /F /PID} 这种含 {@code /} 的开关（不属于
+     * {@code [\s\w]}，所以旧正则永不命中），而 {@code Stop-Process -Id 1234} /
+     * {@code Stop-Process -Name java} 连 {@code kill} 字样都没有。引导词里已向模型明文承诺
+     * 「严禁 taskkill /IM java.exe、Stop-Process -Name java」，这里必须有对应的硬拦截，
+     * 否则两个平台的自保护强度不对等。</p>
+     *
+     * <p>{@code spps} 是 PowerShell 里 {@code Stop-Process} 的别名（{@code kill} 也是，已由 Unix
+     * 分支的关键字覆盖）。</p>
+     */
+    private static final Pattern WINDOWS_KILL_VERB =
+            Pattern.compile("\\b(?:taskkill|stop-process|spps)\\b", Pattern.CASE_INSENSITIVE);
+
+    /** 按进程名批量终止 java（{@code /IM java.exe}、{@code -Name java}、{@code -Name javaw}） */
+    private static final Pattern WINDOWS_KILL_JAVA_BY_NAME =
+            Pattern.compile("\\bjavaw?(?:\\.exe)?\\b", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * 删除动词（含 PowerShell 别名 {@code ri}/{@code rm}、CMD 的 {@code rd}/{@code rmdir}/{@code del}）。
+     */
+    private static final Pattern WINDOWS_DELETE_VERB = Pattern.compile(
+            "(?:\\bremove-item\\b|\\bri\\b|\\brm\\b|\\brd\\b|\\brmdir\\b|\\bdel\\b|\\berase\\b)",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Windows 高危删除目标：盘符根（{@code C:\}、{@code C:/}）与系统目录。
+     *
+     * <p>这是 {@code rm -rf /} 在 Windows 上的等价物：{@code Remove-Item -Recurse -Force C:\}、
+     * {@code rd /s /q C:\}。同样包含环境变量写法（{@code %SystemRoot%}、{@code $env:windir}），
+     * 否则一个变量就能绕过字面量匹配。</p>
+     *
+     * <p><b>系统目录与用户目录区别对待</b>：{@code C:\Windows}、{@code Program Files} 连子路径一并拦
+     * （删其中任何一块都不是正常开发动作）；而用户目录（{@code C:\Users}、{@code %USERPROFILE%}）
+     * <b>只拦目录自身</b>。后者如果连子路径一起拦，{@code Remove-Item -Recurse
+     * $env:USERPROFILE\.gradle\caches}、{@code del %USERPROFILE%\Downloads\x.zip} 这类日常清理就全部被误伤，
+     * 而 Unix 侧对应的 {@code rm -rf ~/.gradle/caches} 是放行的——两个平台的护栏强度必须一致。</p>
+     */
+    private static final Pattern WINDOWS_CRITICAL_TARGET = Pattern.compile(
+            "(?:(?<![\\w:])[a-z]:[\\\\/](?=[\\s\"']|$)"
+                    + "|(?<![\\w:])[a-z]:[\\\\/](?:windows|winnt|programdata|program files(?: \\(x86\\))?)\\b"
+                    + "|(?<![\\w:])[a-z]:[\\\\/]users[\\\\/]?(?=[\\s\"']|$)"
+                    + "|%(?:systemroot|windir|systemdrive|programfiles)%"
+                    + "|\\$env:(?:systemroot|windir|systemdrive|programfiles)\\b"
+                    + "|%userprofile%[\\\\/]?(?=[\\s\"']|$)"
+                    + "|\\$env:userprofile[\\\\/]?(?=[\\s\"']|$))",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * 类 Unix 的「递归强删根目录 / 系统目录」。
+     *
+     * <p><b>旧写法的误伤</b>：{@code .*rm\s+.*-[rR].*f\s+/.*} 只要删除目标以 {@code /} 开头就命中，
+     * 于是 {@code rm -rf /tmp/build}、{@code rm -rf /var/folders/xx/T/xxx}（macOS 临时目录）这类
+     * 完全正当、且已在临时目录白名单内的清理命令全部被拦，Linux/macOS 上的误报率远高于命中率。</p>
+     *
+     * <p>现改为只认「目标就是根目录或某个系统目录本身」：{@code rm -rf /}、{@code rm -rf /usr} 拦；
+     * {@code rm -rf /usr/local/lib/node_modules/x}（Homebrew 区）、{@code rm -rf /tmp/x} 放行。</p>
+     *
+     * <p><b>递归/强制开关改用两个 lookahead 分开认</b>：只列举 {@code -rf}、{@code -fr}、{@code -r -f}
+     * 这些组合永远会漏——{@code rm --recursive --force /}、{@code rm -r --force /} 都是合法的 GNU 写法，
+     * 一个长选项就能绕过整条护栏。现在只要同一命令段内同时出现「含 r 的短选项或 --recursive」与
+     * 「含 f 的短选项或 --force」即命中，与书写顺序无关。开关判定宽一点不危险：精度由后面的
+     * 目标限定（必须是根/系统目录本身）撑着。</p>
+     *
+     * <p><b>目标前的引号要可选吞掉</b>：{@code rm -rf "/"}、{@code rm -rf '/usr'} 与裸写法危害完全相同，
+     * 而只写 {@code \s+/} 会因为中间夹了一个引号导致整条不命中。Windows 侧的
+     * {@link #WINDOWS_CRITICAL_TARGET} 已在收尾 lookahead 里认了 {@code "'}，两侧须对称。</p>
+     *
+     * <p><b>为何把 {@code ~} / {@code $HOME} 也当临界目标</b>：本校验跑在
+     * {@link #translateCommandToEnv} 之前，看到的是未展开的原文，所以 {@code rm -rf ~} 既不会命中
+     * {@code /home} 字面量，也不会命中任何其它分支——而 Windows 侧的 {@code %USERPROFILE%} /
+     * {@code $env:USERPROFILE} 是拦的。同样只拦目录自身：{@code rm -rf ~/.gradle/caches} 放行。</p>
+     */
+    private static final Pattern UNIX_RM_CRITICAL = Pattern.compile(
+            "\\brm\\b"
+                    + "(?=[^;|&\\r\\n]*?(?:\\s-[a-z]*r|\\s--recursive\\b))"
+                    + "(?=[^;|&\\r\\n]*?(?:\\s-[a-z]*f|\\s--force\\b))"
+                    + "[^;|&\\r\\n]*?\\s+[\"']?(?:/\\*?"
+                    + "|/(?:etc|usr|bin|sbin|lib|lib64|boot|proc|sys|dev|var|opt|root|home|users"
+                    + "|system|library|applications)/?"
+                    + "|~[\\\\/]?|\\$\\{?home\\}?[\\\\/]?)"
+                    + "(?=[\\s\"';|&]|$)",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * 统一的命令安全校验
+     *
+     * <p>设计理念（参考 Anthropic sandbox-runtime）：Java 层仅做最小自保护，
+     * 安全隔离的重活交给 OS 内核沙盒（Seatbelt / bwrap）。
+     * 当 sandboxSystemRestrict=true 时，由 wrapCommand() 在 OS 内核级强制隔离。</p>
+     *
+     * <p><b>平台对等</b>：自保护与根目录删除这两条红线必须在 Unix / CMD / PowerShell 上强度一致。
+     * 只在引导词里写「严禁」而不做硬拦截，等于给了一个不存在的护栏。
+     * Windows 侧的 1b / 2b 以「宿主 OS 是 Windows」为适用判据（见 {@link #isWindowsRiskScope()}），
+     * 以免 Windows 上跑 {@link ShellMode#UNIX_SHELL} 时整条护栏隐形失效。</p>
+     *
+     * @return null 表示校验通过；非 null 为错误消息
+     */
+    String validateCommandNoKill(String command) {
+        if (Assert.isEmpty(command)) {
+            return "错误：command 不能为空。";
+        }
+
+        String pid = Utils.pid();
+        String lowerCmd = command.toLowerCase();
+
+        // 1. 自保护：禁止杀死当前 Java 进程（全模式、全配置始终生效）
+        if (isUnixHostKill(lowerCmd, pid)) {
+            return "错误：检测到危险命令。严禁试图停止宿主进程 (PID: " + pid + ")。";
+        }
+
+        // 1b. Windows 侧的等价形态（taskkill / Stop-Process）
+        if (isWindowsRiskScope() && isWindowsHostKill(command, pid)) {
+            return "错误：检测到危险命令。严禁试图停止宿主进程 (PID: " + pid + ")。";
+        }
+
+        // 2. 高危自毁命令：exit / 递归强删根目录或系统目录（全模式、全配置始终生效）
+        if (lowerCmd.matches("(?i)(?:^|.*[;|&])\\s*exit\\b.*") ||
+                UNIX_RM_CRITICAL.matcher(lowerCmd).find()) {
+            return "错误：检测到高危指令。出于安全策略，禁止执行 exit、系统重启或根目录/系统目录删除的操作。";
+        }
+
+        // 2b. Windows 侧的盘符根/系统目录删除
+        if (isWindowsRiskScope()
+                && WINDOWS_DELETE_VERB.matcher(command).find()
+                && WINDOWS_CRITICAL_TARGET.matcher(command).find()) {
+            return "错误：检测到高危指令。禁止对盘符根目录或系统目录（Windows / Program Files / Users 等）执行删除操作。";
+        }
+
+        return null; // null 表示校验通过
+    }
+
+    /**
+     * Windows 专属红线（自保护 1b、盘符根/系统目录删除 2b）的适用范围。
+     *
+     * <p><b>判据是宿主 OS，不是 shell 方言</b>：旧实现只看 {@code shellMode == CMD || POWERSHELL}，
+     * 于是在 Windows 宿主上一旦方言是 {@link ShellMode#UNIX_SHELL}（Git Bash / MSYS / WSL 风格的会话，
+     * 或用户通过 shell override 显式指定），两条红线整体失效——而 {@code taskkill /IM java.exe}、
+     * {@code Remove-Item -Recurse -Force C:\} 在那种会话里照样能执行并杀掉宿主 JVM。
+     * 护栏的成立条件是「命令可能在 Windows 宿主上生效」，与用哪种方言书写无关。</p>
+     *
+     * <p><b>为何仍保留方言判定</b>：一是非 Windows 宿主上声明 Windows 方言时（单元测试即如此）
+     * 护栏依然要可验证；二是这两条规则在类 Unix 宿主上本就不可能命中真实命令
+     * （没有 {@code taskkill}、没有盘符），多判一次零成本、无误伤风险。</p>
+     */
+    private boolean isWindowsRiskScope() {
+        return EnvironmentResolver.isWindows()
+                || this.shellMode == ShellMode.CMD
+                || this.shellMode == ShellMode.POWERSHELL;
+    }
+
+    /**
+     * 是否属于类 Unix 下「指向宿主进程」的终止命令。
+     *
+     * <p><b>旧实现的洞</b>：旧正则为 {@code (?:kill|pkill|killall)\s+[\s\w]*\b<pid>\b}——
+     * {@code [\s\w]} 不包含 {@code -}，所以只要动词与 PID 之间夹了任何开关（而“带信号”才是
+     * 真实用法）就彻底失效：{@code kill -9 <pid>}、{@code kill -TERM <pid>}、{@code killall -9 java}
+     * 全部不命中。而引导词里写的是「严禁执行 kill -9 任何数字」——同样是一个对模型承诺了
+     * 却不存在的护栏。此处改为按「同一命令段内出现终止动词 + 目标」判定。</p>
+     *
+     * <p><b>不能误伤 {@code pkill -P <pid>}</b>：它只终止宿主的<b>子进程</b>，是引导词明确推荐的
+     * 清理方式，必须显式放行；否则新护栏会把自己推荐的用法也拦了。</p>
+     *
+     * <p>跨命令段（{@code ; | &}）不算：{@code kill 111; echo <pid>} 里的 PID 只是一个被打印的
+     * 数字，与终止目标无关。</p>
+     */
+    private static boolean isUnixHostKill(String lowerCmd, String pid) {
+        if (UNIX_KILL_VERB.matcher(lowerCmd).find() == false) {
+            return false;
+        }
+        String quotedPid = Pattern.quote(pid);
+        if (lowerCmd.matches("(?s).*\\bpkill\\b[^\\r\\n;|&]*\\s-p\\s+" + quotedPid + "\\b.*")) {
+            return false; // pkill -P <pid>：只杀子进程，放行
+        }
+        if (lowerCmd.matches("(?s).*\\b(?:kill|pkill|killall)\\b[^\\r\\n;|&]*\\b" + quotedPid + "\\b.*")) {
+            return true;
+        }
+        // 按进程名批量终止 java（pkill java、killall -9 java、pkill -f javaw）
+        return lowerCmd.matches("(?s).*\\b(?:pkill|killall)\\b[^\\r\\n;|&]*\\bjavaw?\\b.*");
+    }
+
+    /**
+     * 是否属于 Windows 下「指向宿主进程」的终止命令。
+     *
+     * <p>三种形态：① 终止动词 + 宿主 PID；② 终止动词 + java 进程名（批量杀必然误伤自己）；
+     * ③ {@code Get-Process java | Stop-Process} 这种管道形式——终止动词后面没有任何参数，
+     * 但“java”仍出现在同一条命令里，故第二条能覆盖。</p>
+     */
+    private static boolean isWindowsHostKill(String command, String pid) {
+        if (WINDOWS_KILL_VERB.matcher(command).find() == false) {
+            return false;
+        }
+        // ① 直接指向宿主 PID（taskkill /PID 1234、Stop-Process -Id 1234）
+        if (Pattern.compile("\\b" + Pattern.quote(pid) + "\\b").matcher(command).find()) {
+            return true;
+        }
+        // ②/③ 按进程名批量终止 java
+        return WINDOWS_KILL_JAVA_BY_NAME.matcher(command).find();
+    }
+
+    private String preprocessUserHome(String pStr) {
+        if (pStr == null) return null;
+
+        // 支持 ~/ 或 ~ 转换为用户主目录。
+        // <b>展开 ≠ 豁免</b>：展开后是绝对路径，仍要过下方边界检查；工作区之外的唯一读取豁免
+        // 是受信只读目录（见 {@code TalentRegistry#getTrustedReadRoots}）。旧实现对 ~ 前缀路径
+        // 整体放行（跳过越界检查与敏感文件名单），导致默认档下 read("~/.ssh/id_rsa")、
+        // write("~/.bashrc") 均能成功——那是文件工具最大的越权洞，已移除。
+        // ~ 的正当需求（mvn 读 ~/.m2、npm 读 ~/.npm）属于 bash 构建链，
+        // 由 {@link #translateCommandToEnv} 承担，与本方法无关。
+        if (pStr.equals("~") || pStr.startsWith("~/") || pStr.startsWith("~\\")) {
+            String userHome = System.getProperty("user.home");
+            if (pStr.length() == 1) {
+                return userHome;
+            } else {
+                return Paths.get(userHome, pStr.substring(2)).toString();
+            }
+        }
+        return pStr;
+    }
+
+    /**
+     * 解析工具路径并执行空间隔离边界。
+     *
+     * <p>隔离生效时的三级规则：</p>
+     * <ol>
+     *   <li>工作区内：放行（real-to-real 比对，防符号链接逃逸）；</li>
+     *   <li>工作区外但落在受信只读目录内、且为读操作：放行
+     *       （全局技能自带的 scripts/ 必须可读，否则 skillread 公示的路径是死路）；</li>
+     *   <li>其余一律拒绝。绝对路径与 ~ 路径不再特判——统一由边界检查裁决，
+     *       规则只有一条，也就只有一个漂移点。</li>
+     * </ol>
+     *
+     * <p>写操作无任何豁免：受信目录是只读的。</p>
+     */
+    Path resolveSafePath(Path workPath, String pStr, boolean writeMode, boolean sandboxEnabled) throws IOException {
+        if (Assert.isEmpty(pStr) || ".".equals(pStr)) {
+            return workPath;
+        }
+
+        if (pStr.startsWith("./")) {
+            pStr = pStr.substring(2);
+        }
+
+        String pStr2 = preprocessUserHome(pStr);
+        Path p = Paths.get(pStr2);
+        Path target;
+
+        if (p.isAbsolute()) {
+            target = p.normalize();
+        } else {
+            target = workPath.resolve(pStr2).normalize();
+        }
+
+        if (sandboxEnabled) {
+            // 符号链接防护：先解析真实路径再判断；目标不存在时退化为
+            // 「最近存在祖先的真实路径 + 剩余词法段」，与 isSandboxBoundaryDenied 同构
+            Path realTarget;
+            boolean lexicalFallback = false;
+            try {
+                if (Files.exists(target)) {
+                    realTarget = target.toRealPath();
+                } else {
+                    Path ancestor = resolveExistingAncestor(target);
+                    Path relative = ancestor.relativize(target.normalize());
+                    realTarget = ancestor.toRealPath().resolve(relative).normalize();
+                }
+            } catch (IOException | IllegalArgumentException e) {
+                // 目标及其所有祖先都不存在（如不存在的盘符）：回退词法检查
+                realTarget = target;
+                lexicalFallback = true;
+            }
+
+            Path workAnchor;
+            if (lexicalFallback) {
+                workAnchor = workPath;
+            } else {
+                try {
+                    workAnchor = workPath.toRealPath();
+                } catch (IOException e) {
+                    workAnchor = workPath;
+                }
+            }
+
+            if (!realTarget.startsWith(workAnchor)) {
+                boolean trustedRead = !writeMode && talentRegistry.isTrustedReadPath(realTarget);
+                if (!trustedRead) {
+                    throw new SecurityException(
+                            "权限拒绝：路径越界（沙盒模式已开启）。仅工作区与框架受信只读目录可访问。");
+                }
+            }
+        }
+
+        enforceFilesystemPolicy(workPath, target, writeMode, sandboxEnabled);
+
+        return target;
+    }
+
+
+
+    boolean isSandboxBoundaryDenied(Path rootPath, Path target, boolean sandboxEnabled) {
+        if (!sandboxEnabled) {
+            return false;
+        }
+        try {
+            Path realRoot = rootPath.toRealPath();
+            Path realTarget;
+            try {
+                if (Files.exists(target)) {
+                    realTarget = target.toRealPath();
+                } else {
+                    Path ancestor = resolveExistingAncestor(target);
+                    Path relative = ancestor.relativize(target.normalize());
+                    realTarget = ancestor.toRealPath().resolve(relative).normalize();
+                }
+            } catch (IOException | IllegalArgumentException e) {
+                realTarget = target.normalize();
+            }
+            return !realTarget.startsWith(realRoot);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+
+
+
+
+    // mandatory deny files (same as dangerous files + cli-specific paths)
+    private static final List<String> MANDATORY_DENY_FILES = Collections.unmodifiableList(Arrays.asList(
+            ".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".bash_logout",
+            ".zshrc", ".zprofile", ".profile", ".ripgreprc", ".mcp.json",
+            ".gwork/commands", ".gwork/agents", ".gourdai/commands", ".gourdai/agents"
+    ));
+
+    private static final List<String> MANDATORY_DENY_DIRS = Collections.unmodifiableList(Arrays.asList(
+            ".vscode", ".idea", ".gwork/commands", ".gwork/agents", ".gourdai/commands", ".gourdai/agents", ".git/hooks"
+    ));
+
+    /**
+     * 读取即敏感的路径：这些文件本身承载凭据或可执行配置，读到即等于泄漏。
+     * 其余 deny 项（.vscode/.idea/.gwork/agents 等）威胁在于「被写入」而非「被读取」，
+     * 故不纳入读拦截，避免影响正常的工程浏览。
+     */
+    private static final List<String> READ_DENY_FILES = Collections.unmodifiableList(Arrays.asList(
+            ".gitconfig", ".mcp.json", ".bashrc", ".bash_profile", ".bash_logout",
+            ".zshrc", ".zprofile", ".profile"
+    ));
+
+    /**
+     * 判定某个「工作区相对路径」是否命中读拦截名单。
+     */
+    public static boolean isReadDenied(String relativePath) {
+        if (relativePath == null) {
+            return false;
+        }
+        String normalized = relativePath.replace("\\", "/");
+        if (normalized.startsWith("./")) {
+            normalized = normalized.substring(2);
+        }
+        for (String denyFile : READ_DENY_FILES) {
+            if (normalized.equals(denyFile)
+                    || normalized.endsWith("/" + denyFile)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 敏感路径准入校验：写操作拦截全部 mandatory-deny 名单，读操作仅拦截 {@link #READ_DENY_FILES}。
+     *
+     * <p>仅在沙盒模式下生效，与 {@code resolveSafePath} 中其余校验保持一致的启用条件；
+     * 开放模式下用户已明确放弃隔离，不做额外限制。</p>
+     *
+     * <p>注意：本校验作用于结构化文件工具（read/write/edit/ls/glob/grep），
+     * 不覆盖 bash 命令——属纵深防御，非不可绕过的安全边界。</p>
+     */
+    private void enforceFilesystemPolicy(Path workPath, Path target, boolean writeMode, boolean sandboxEnabled) {
+        if (!sandboxEnabled) {
+            return;
+        }
+
+        String relative = toPolicyRelative(workPath, target);
+        if (relative == null) {
+            return;
+        }
+
+        if (writeMode) {
+            if (isMandatoryDenyRelativePath(relative)) {
+                throw new SecurityException(
+                        "权限拒绝：路径 " + relative + " 属于受保护的敏感配置，禁止写入（沙盒模式已开启）。");
+            }
+        } else {
+            if (isReadDenied(relative)) {
+                throw new SecurityException(
+                        "权限拒绝：路径 " + relative + " 可能包含凭据，禁止读取（沙盒模式已开启）。");
+            }
+        }
+    }
+
+    /**
+     * 将目标路径换算为相对工作区的路径字符串；越界或无法换算时返回 null（越界由既有校验负责）。
+     */
+    private String toPolicyRelative(Path workPath, Path target) {
+        try {
+            Path normalizedTarget = target.toAbsolutePath().normalize();
+            Path normalizedWork = workPath.toAbsolutePath().normalize();
+            if (!normalizedTarget.startsWith(normalizedWork)) {
+                return null;
+            }
+            return normalizedWork.relativize(normalizedTarget).toString().replace("\\", "/");
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    public static boolean isMandatoryDenyRelativePath(String relativePath) {
+        if (relativePath == null) {
+            return false;
+        }
+        String normalized = relativePath.replace("\\", "/");
+        if (normalized.startsWith("./")) {
+            normalized = normalized.substring(2);
+        }
+        for (String denyFile : MANDATORY_DENY_FILES) {
+            if (normalized.equals(denyFile)
+                    || normalized.startsWith(denyFile + "/")
+                    || normalized.endsWith("/" + denyFile)
+                    || normalized.contains("/" + denyFile + "/")) {
+                return true;
+            }
+        }
+        for (String denyDir : MANDATORY_DENY_DIRS) {
+            if (normalized.equals(denyDir) || normalized.startsWith(denyDir + "/")
+                    || normalized.endsWith("/" + denyDir)
+                    || normalized.contains("/" + denyDir + "/")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+
+    String formatDisplayPath(Path workPath, Path file, boolean sandboxEnabled) {
+        // 开放模式下，如果文件不在 workPath 内部，返回绝对路径字符串
+        if (!sandboxEnabled && !file.startsWith(workPath)) {
+            return file.toAbsolutePath().toString().replace("\\", "/");
+        }
+
+        try {
+            String relative = workPath.relativize(file).toString().replace("\\", "/");
+            // 受信只读目录（如全局技能）内的文件在工作区外：relativize 会得到 .. 开头的
+            // 无用路径，直接给绝对路径，模型才能据此 read / 执行
+            if (relative.startsWith("..")) {
+                return file.toAbsolutePath().normalize().toString().replace("\\", "/");
+            }
+            return relative;
+        } catch (IllegalArgumentException e) {
+            return file.toAbsolutePath().toString().replace("\\", "/");
+        }
+    }
+
+    boolean containsUserHomePath(String command) {
+        return command != null && command.matches("(?s).*(^|[\\s=:\\(\\[\\{;|&<>])~(?=$|[/\\\\\\s'\"`)\\]\\};|&<>]).*");
+    }
+
+    /**
+     * bash 命令的 ~ 展开（统一所有 shell 模式）。
+     *
+     * <p><b>这是 ~ 豁免的唯一合法去处</b>：mvn 读 {@code ~/.m2}、npm 读 {@code ~/.npm}、
+     * cargo 读 {@code ~/.cargo} 都发生在 bash 子进程里，属于构建链而非文件工具。
+     * 结构化文件工具（read/write/edit/ls/glob/grep）不再享有任何 ~ 豁免，
+     * 见 {@link #resolveSafePath}。</p>
+     *
+     * <p>原实现还会把 {@code @alias} 替换成挂载点环境变量——挂载点已移除，
+     * 该翻译随之删除。命令里若再出现 {@code @xxx/} 路径，shell 会自行报「路径不存在」，
+     * 模型一轮即可自纠。</p>
+     */
+    String translateCommandToEnv(String command, Map<String, String> envs) {
+        String result = command;
+
+        if (containsUserHomePath(result)) {
+            result = expandUserHomePaths(result);
+        }
+
+        return result;
+    }
+
+    private String expandUserHomePaths(String command) {
+        String userHome = System.getProperty("user.home").replace("\\", "/");
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(^|[\\s=:\\(\\[\\{;|&<>])~(?=$|[/\\\\\\s'\"`)\\]\\};|&<>])");
+        java.util.regex.Matcher matcher = pattern.matcher(command);
+        StringBuffer sb = new StringBuffer();
+        while (matcher.find()) {
+            matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(matcher.group(1) + userHome));
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
+    }
+
+    String getEnvPlaceholder(String envKey) {
+        if (this.shellMode == ShellMode.CMD) {
+            return "%" + envKey + "%";
+        }
+        if (this.shellMode == ShellMode.POWERSHELL) {
+            return "$env:" + envKey;
+        }
+        return "$" + envKey;
+    }
+
+    private Path resolveExistingAncestor(Path target) throws IOException {
+        Path current = target.getParent();
+        while (current != null) {
+            if (Files.exists(current)) {
+                return current;
+            }
+            current = current.getParent();
+        }
+        throw new NoSuchFileException(String.valueOf(target));
+    }
+
+    /**
+     * 列举边界根：跟随已解析的 target。
+     *
+     * <p>工作区内为工作区根；落在受信只读目录内则为该目录根——否则
+     * {@link #isSandboxBoundaryDenied} 会以工作区为根，把受信目录里的每一项都过滤掉，
+     * 使 grep/glob/ls 在技能目录内静默返回空。</p>
+     */
+    Path getSandboxPolicyRoot(Path workPath, Path target) {
+        if (target != null) {
+            Path probe = target;
+            try {
+                probe = target.toRealPath();
+            } catch (IOException | IllegalArgumentException ignored) {
+                // 保留词法路径：与受信根的比较退化为词法对词法，方向保守
+            }
+            for (Path root : talentRegistry.getTrustedReadRoots()) {
+                if (probe.startsWith(root) || target.startsWith(root)) {
+                    return root;
+                }
+            }
+        }
+        return workPath;
+    }
+
+    void generateTreeInternal(Path workPath, Path current, int depth, int maxDepth, String indent, StringBuilder sb, boolean showHidden, boolean sandboxEnabled) throws IOException {
+        if (depth >= maxDepth) return;
+        try (Stream<Path> stream = Files.list(current)) {
+            List<Path> children = stream
+                    .filter(p -> !isIgnored(workPath, p))
+                    .filter(p -> !isSandboxBoundaryDenied(workPath, p, sandboxEnabled))
+                    .filter(p -> showHidden || !p.getFileName().toString().startsWith("."))
+                    .sorted((a, b) -> {
+                        boolean aDir = Files.isDirectory(a);
+                        boolean bDir = Files.isDirectory(b);
+                        if (aDir != bDir) return aDir ? -1 : 1;
+                        return a.getFileName().compareTo(b.getFileName());
+                    }).collect(Collectors.toList());
+
+            for (int i = 0; i < children.size(); i++) {
+                Path child = children.get(i);
+                boolean isLast = (i == children.size() - 1);
+                boolean isDir = Files.isDirectory(child);
+                if (isSandboxBoundaryDenied(workPath, child, sandboxEnabled)) {
+                    continue;
+                }
+                sb.append(indent).append(isLast ? "└── " : "├── ").append(child.getFileName()).append("\n");
+                if (isDir)
+                    generateTreeInternal(workPath, child, depth + 1, maxDepth, indent + (isLast ? "    " : "│   "), sb, showHidden, sandboxEnabled);
+            }
+        } catch (AccessDeniedException e) {
+            sb.append(indent).append("└── [拒绝访问]\n");
+        }
+    }
+
+    String flatListLogic(Path workPath, Path policyRoot, Path target, boolean showHidden, boolean sandboxEnabled) throws IOException {
+        try (Stream<Path> stream = Files.list(target)) {
+            List<String> lines = stream
+                    .filter(p -> !isIgnored(workPath, p))
+                    .filter(p -> !isSandboxBoundaryDenied(policyRoot, p, sandboxEnabled))
+                    .filter(p -> showHidden || !p.getFileName().toString().startsWith("."))
+                    .map(p -> {
+                        boolean isDir = Files.isDirectory(p);
+                        String displayPath = formatDisplayPath(workPath, p, sandboxEnabled);
+                        return (isDir ? "[DIR] " : "[FILE] ") + displayPath + (isDir ? "/" : "");
+                    }).sorted().collect(Collectors.toList());
+            return lines.isEmpty() ? "(目录为空)" : String.join("\n", lines);
+        }
+    }
+
+
+    boolean isIgnored(Path workPath, Path path) {
+        String name = path.getFileName().toString();
+        if (ignoreDirs.contains(name)) return true;
+        try {
+            // 只有在 workPath 内部时才进行递归片段检查
+            if (path.startsWith(workPath)) {
+                Path relative = workPath.relativize(path);
+                for (Path segment : relative) {
+                    if (ignoreDirs.contains(segment.toString())) return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    boolean isNotTextFile(Path file) {
+        String fileName = file.getFileName().toString().toLowerCase();
+
+        // 1. 基于已知二进制后缀的快速过滤
+        if (fileName.endsWith(".class") || fileName.endsWith(".jar")  ||
+                fileName.endsWith(".war")   || fileName.endsWith(".exe")   ||
+                fileName.endsWith(".dll")   || fileName.endsWith(".so")    ||
+                fileName.endsWith(".a")     || fileName.endsWith(".lib")   ||
+                fileName.endsWith(".o")     || fileName.endsWith(".obj")   ||
+                fileName.endsWith(".pyc")   || fileName.endsWith(".pyo")   ||
+                fileName.endsWith(".png")   || fileName.endsWith(".jpg")   ||
+                fileName.endsWith(".jpeg")  || fileName.endsWith(".gif")   ||
+                fileName.endsWith(".webp")  || fileName.endsWith(".ico")   ||
+                fileName.endsWith(".zip")   || fileName.endsWith(".gz")    ||
+                fileName.endsWith(".tar")   || fileName.endsWith(".bz2")   ||
+                fileName.endsWith(".7z")    || fileName.endsWith(".rar")   ||
+                fileName.endsWith(".pdf")   || fileName.endsWith(".doc")   ||
+                fileName.endsWith(".docx")  || fileName.endsWith(".xls")   ||
+                fileName.endsWith(".xlsx")  || fileName.endsWith(".ppt")   ||
+                fileName.endsWith(".pptx")  || fileName.endsWith(".odt")   ||
+                fileName.endsWith(".ods")   || fileName.endsWith(".odp")   ||
+                fileName.endsWith(".bin")   || fileName.endsWith(".dat")   ||
+                fileName.endsWith(".wasm")  || fileName.endsWith(".class")) {
+            return true;
+        }
+
+        // 2. 字节级内容兜底：识别无后缀（或后缀伪装）的二进制文件，
+        //    如编译产物、core dump、无扩展名的 ELF 等。读取文件首部采样探测，
+        //    避免后缀白名单漏判后将二进制按文本强行解码输出乱码。
+        return isLikelyBinaryFile(file);
+    }
+
+    // ─── 视觉通道：read 直接返回图片 ────────────────────────────────────────
+
+    /**
+     * read 单张图片内联上限（字节）。
+     * <p>base64 后约膨胀 4/3 倍进入模型上下文，4MB 原图 ≈ 5.3MB base64；
+     * 超限明确报错引导压缩或改走附件通道，
+     * 而不是静默丢弃图片让模型以为"看到了"。</p>
+     */
+    static final long MAX_IMAGE_READ_BYTES = 4L * 1024 * 1024;
+
+    /**
+     * 是否为视觉模型可读的图片格式（按扩展名）。
+     * <p>与附件通道（WebGate.extensionToMime）的图片集合对齐，但不含 svg：
+     * 主流视觉模型不接受 svg（矢量格式，需先栅格化）。</p>
+     */
+    static boolean isVisionImageFile(Path file) {
+        String name = file.getFileName().toString().toLowerCase();
+        return name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg")
+                || name.endsWith(".gif") || name.endsWith(".webp") || name.endsWith(".bmp");
+    }
+
+    /**
+     * 图片扩展名（含点）映射 MIME；与附件通道同口径，未匹配默认 png。
+     */
+    static String imageMimeOf(Path file) {
+        String name = file.getFileName().toString().toLowerCase();
+        if (name.endsWith(".jpg") || name.endsWith(".jpeg")) {
+            return "image/jpeg";
+        }
+        if (name.endsWith(".gif")) {
+            return "image/gif";
+        }
+        if (name.endsWith(".webp")) {
+            return "image/webp";
+        }
+        if (name.endsWith(".bmp")) {
+            return "image/bmp";
+        }
+        return "image/png";
+    }
+
+    /**
+     * 读取图片文件为 base64 内联 ImageBlock（视觉通道）。
+     *
+     * @return 图片块；超过 {@link #MAX_IMAGE_READ_BYTES} 时返回 null（由调用方决定降级文案）
+     */
+    ImageBlock readImageBlock(Path file) throws IOException {
+        if (Files.size(file) > MAX_IMAGE_READ_BYTES) {
+            return null;
+        }
+        byte[] bytes = Files.readAllBytes(file);
+        return ImageBlock.ofBase64(Base64.getEncoder().encodeToString(bytes), imageMimeOf(file));
+    }
+
+    /**
+     * 读取文件首部采样，按字节判定是否疑似二进制。
+     *
+     * <p>判定规则与命令输出探测保持一致：NUL 直接判定；统计非空白控制字符占比，
+     * 超过阈值判定为二进制。对常见空白、ANSI 转义及 UTF-8 多字节高位字节（&gt;= 0x80）
+     * 做豁免，避免误伤中文等多字节文本。探测失败（IO 异常）时保守按文本处理。</p>
+     */
+    private boolean isLikelyBinaryFile(Path file) {
+        byte[] buffer = new byte[4096];
+        int read;
+        try (java.io.InputStream in = Files.newInputStream(file)) {
+            read = in.read(buffer);
+        } catch (Throwable e) {
+            return false; // 读不到就保守按文本，交由后续流程处理
+        }
+
+        if (read <= 0) {
+            return false;
+        }
+
+        int suspicious = 0;
+        for (int i = 0; i < read; i++) {
+            int b = buffer[i] & 0xFF;
+            if (b == 0x00) {
+                return true; // NUL 是二进制强特征
+            }
+            if (b == '\n' || b == '\r' || b == '\t' || b == 0x1B || b >= 0x80) {
+                continue;
+            }
+            if (b < 0x20) {
+                suspicious++;
+            }
+        }
+
+        return suspicious * 100 > read * 30; // 控制字符占比 > 30%
+    }
+}

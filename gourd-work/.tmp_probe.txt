@@ -1,0 +1,29 @@
+﻿== connect_one (initialize + tools/list) ==
+CONNECT_OK tools_discovered=1
+== all_tools ==
+TOOL get_code_context_exa :: [Deprecated: Use web_search_exa instead] Find code examples,
+== call_tool get_code_context_exa ==
+CALL_OK len=15652
+HEAD:
+Title: from_fn in axum::middleware - Rust
+URL: https://docs.rs/axum/latest/axum/middleware/fn.from_fn.html
+Code/Highlights:
+from_fn in axum::middleware - Rust
+
+Source 
+
+```
+pub fn from_fn<F, T>(f: F) -> FromFnLayer<F, (), T>
+```
+
+Expand description
+
+Create a middleware from an async function.
+
+`from_fn` requires the function given to
+
+1. Be an `async fn`.
+2. Take zero or more `FromRequestParts` extractors.
+3. Take exactly one `FromRequest` extractor as the second to last argument.
+4. Take `Next`
+== disconnected ==

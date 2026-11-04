@@ -1,0 +1,9 @@
+﻿cargo :    Compiling gourd-work-core v0.3.0 (D:\work\gourd\gourdai\gourd-work\core)
+At line:10 char:38
++ ... gourd-work; cargo run -p gourd-work-core --example mcp_streamable_pro ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling go...ourd-work\core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 29.61s
+     Running `target\debug\examples\mcp_streamable_probe.exe`

@@ -1,0 +1,19 @@
+﻿cargo :    Compiling gourd-work-core v0.3.0 (D:\work\gourd\gourdai\gourd-work\core)
+At line:10 char:38
++ ... gourd-work; cargo test -p gourd-work-core --lib skills::tests::cache_ ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling go...ourd-work\core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused variable: `id`
+    --> core\src\session\mod.rs:1531:15
+     |
+1531 |     fn stored(id: &str, n: usize) -> Vec<StoredMessage> {
+     |               ^^ help: if this is intentional, prefix it with an underscore: `_id`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `gourd-work-core` (lib test) generated 1 warning (run `cargo fix --lib -p gourd-work-core --tests` to apply 1 
+suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.38s
+     Running unittests src\lib.rs (target\debug\deps\gourd_work_core-53a2185f1e3546c0.exe)

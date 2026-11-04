@@ -1,0 +1,1650 @@
+/*
+ * Copyright 2017-2025 noear.org and authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.gourdai.harness;
+
+import com.gourdai.agent.Agent;
+import com.gourdai.agent.AgentSession;
+import com.gourdai.agent.AgentSessionProvider;
+import com.gourdai.core.config.AgentFlags;
+import com.gourdai.harness.agent.*;
+import com.gourdai.agent.react.ReActAgent;
+import com.gourdai.agent.react.ReActRequest;
+import com.gourdai.agent.react.ReActTrace;
+import com.gourdai.harness.talents.cli.*;
+import com.gourdai.harness.talents.cli.impl.RegistrySkillProvider;
+import com.gourdai.ai.chat.message.AssistantMessage;
+import com.gourdai.ai.chat.message.ChatMessage;
+import com.gourdai.agent.react.intercept.HITLInterceptor;
+import com.gourdai.agent.react.intercept.AskUserInterceptor;
+import com.gourdai.agent.react.intercept.ContextCompressionInterceptor;
+import com.gourdai.agent.react.intercept.CompressionStrategy;
+import com.gourdai.agent.react.intercept.StopLoopInterceptor;
+import com.gourdai.agent.react.intercept.compress.UnifiedCompressionStrategy;
+import com.gourdai.ai.chat.CacheControl;
+import com.gourdai.ai.chat.ChatConfig;
+import com.gourdai.ai.chat.ChatModel;
+import com.gourdai.ai.chat.prompt.Prompt;
+import com.gourdai.harness.command.CommandRegistry;
+import com.gourdai.harness.hitl.HitlStrategy;
+import com.gourdai.ai.mcp.client.McpClientProvider;
+import com.gourdai.harness.talents.memory.MemorySolutionProvider;
+import com.gourdai.ai.talents.registry.AgentMd;
+import com.gourdai.ai.talents.registry.TalentRegistry;
+import com.gourdai.ai.talents.registry.TalentScope;
+import com.gourdai.harness.permission.AccessMode;
+import com.gourdai.harness.permission.ToolPermission;
+import com.gourdai.harness.talents.code.CodeTalent;
+import com.gourdai.harness.talents.lsp.LspManager;
+import com.gourdai.harness.talents.lsp.LspServerParameters;
+import com.gourdai.harness.talents.lsp.LspTalent;
+import com.gourdai.ai.mcp.client.McpServerParameters;
+import com.gourdai.harness.talents.memory.MemoryTalent;
+import com.gourdai.ai.talents.registry.SkillDir;
+import com.gourdai.harness.talents.gateway.openapi.ApiSource;
+import com.gourdai.harness.talents.gateway.openapi.ApiSourceClient;
+import com.gourdai.harness.talents.gateway.OpenApiGatewayTalent;
+import com.gourdai.harness.talents.gateway.McpGatewayTalent;
+import com.gourdai.harness.talents.web.CodeSearchTalent;
+import com.gourdai.harness.talents.web.WebfetchTalent;
+import com.gourdai.harness.talents.web.WebsearchTalent;
+import org.noear.solon.core.util.Assert;
+
+import org.noear.solon.lang.Preview;
+
+import java.util.*;
+import java.util.concurrent.locks.ReentrantLock;
+
+/**
+ * 马具引擎
+ *
+ * @author oisin
+ * @since 4.0
+ */
+@Preview("3.10")
+public class HarnessEngine {
+    public final static String ATTR_CWD = "__cwd";
+    public final static String CTX_MODEL_SELECTED = "_model_selected";
+    public final static String CTX_THINKING_DEPTH = "_thinking_depth";
+
+    /**
+     * 本轮生效的思考档位（per-turn，经 toolContext 透传）。
+     *
+     * <p>存在的理由：{@link #CTX_THINKING_DEPTH} 是<b>会话级</b>的用户前台选择，而 Loop 定时任务等
+     * 场景需要「按任务而非按会话」指定档位（见 WebStreamBuilder 的 thinkingDepthOverride），
+     * 该 override 刻意<b>不写入</b>会话上下文以免污染用户选择。若不另行透传，TaskTalent 只能读会话级值，
+     * 于是主代理用 override（如 high）、子代理读到旧值（甚至 null→OFF）而静默降档。</p>
+     *
+     * <p>下划线前缀参数由框架注入且不进入 JSON schema，与 {@link #ATTR_CWD} 同机制。</p>
+     */
+    public final static String ATTR_THINKING_DEPTH = "__thinkingDepth";
+
+    /**
+     * 本轮生效的模型（per-turn，经 toolContext 透传）。
+     *
+     * <p>与 {@link #ATTR_THINKING_DEPTH} 同构的缺口：{@link #CTX_MODEL_SELECTED} 是<b>会话级</b>的
+     * 用户前台选择，而 Loop 定时任务等场景需要「按任务而非按会话」指定模型（WebStreamBuilder /
+     * startSyncRun 的 selectedModel + transientSelection=true），该 override 刻意<b>不写入</b>
+     * 会话上下文以免污染用户选择。若不另行透传，TaskTalent 构建于代理时只能读到会话级值，
+     * 于是主代理用任务模型、子代理静默换成会话旧模型/默认模型——这正是「定时任务设定的模型
+     * 未生效、跑成了别的模型」的根因。下划线前缀参数由框架注入且不进入 JSON schema，
+     * 与 {@link #ATTR_CWD} 同机制。</p>
+     */
+    public final static String ATTR_MODEL_OVERRIDE = "__modelOverride";
+
+    /**
+     * Loop 执行取证标记（会话级，随快照持久化）。
+     *
+     * <p>存在的理由：Loop 定时任务的模型/思考/上下文/权限是 per-turn transient 的，刻意不写入
+     * 会话上下文（避免污染用户前台选择），于是执行会话的 composer 回显的永远是会话自己的旧值，
+     * 用户看到「执行视图与自动化表单显示不一致」会误判参数没生效。本键在 Loop 轮开头把
+     * 「本轮实际生效的参数」以取证形态写入会话（值为本轮生效值而非任务定义值，任务随后被删除
+     * 也不影响回看），供执行视图的「任务运行参数」提示条经 /web/chat/loop-run 端点恢复。</p>
+     *
+     * <p>前台对话轮开头清除本键（幂等自愈）：该会话恢复手动对话后，提示条不应继续声称
+     * 「本会话正在按任务参数运行」。值为 Map：name/model/thinkingDepth/contextLength/accessMode/at。</p>
+     */
+    public final static String CTX_LOOP_RUN = "_loop_run";
+
+    /**
+     * 读取会话上的 Loop 执行取证标记（供各恢复入口还原任务级 override）。
+     *
+     * <p>统一口径（2026-10-17 review）：Web 与桌面两条恢复链路都必须经本方法读取证，
+     * 避免两处各自解析再次漂移。形态兼容：内存写入的 Map 直用；快照恢复的会话
+     * 理论上经 FlowContext 反序列化后恒为 Map，ONode 分支仅作防御（防 snack4 行为
+     * 变化时取证被静默丢弃）。读不到/形态不符一律返回 null（按普通发言语义处理）。</p>
+     */
+    @SuppressWarnings("unchecked")
+    public static java.util.Map<String, Object> loopRunEvidence(AgentSession session) {
+        if (session == null) {
+            return null;
+        }
+        Object raw = session.getContext().get(CTX_LOOP_RUN);
+        if (raw instanceof java.util.Map) {
+            return (java.util.Map<String, Object>) raw;
+        }
+        if (raw instanceof org.noear.snack4.ONode && !((org.noear.snack4.ONode) raw).isNull()) {
+            return ((org.noear.snack4.ONode) raw).toBean(java.util.Map.class);
+        }
+        return null;
+    }
+
+    /**
+     * 会话级访问控制档位（用户在输入框工具栏上的选择，随快照持久化）。
+     *
+     * <p>值为 {@link com.gourdai.harness.permission.AccessMode} 的 code。
+     * 这是档位的<b>权威存储位</b>——{@link #ATTR_ACCESS_MODE} 与 Prompt 属性都由它派生。</p>
+     */
+    public final static String CTX_ACCESS_MODE = AccessMode.CTX_KEY;
+
+    /**
+     * 本轮生效的访问控制档位（per-turn，经 toolContext 透传给工具方法）。
+     *
+     * <p>必须透传而不能让 TerminalTalent 读自身字段：TerminalTalent 是引擎级<b>单例</b>
+     * （HarnessEngine 构造时创建、全会话共用），把档位写进它的字段会让 A 会话开启完全访问的
+     * 同时解除 B 会话的隔离。下划线前缀参数由框架注入且不进入 JSON schema，
+     * 与 {@link #ATTR_CWD} 同机制。</p>
+     */
+    public final static String ATTR_ACCESS_MODE = AccessMode.ATTR_KEY;
+
+    /**
+     * 构建系统提示词时携带的档位（经 Prompt 属性透传）。
+     *
+     * <p>与 {@link #ATTR_ACCESS_MODE} 并存而非二选一：工具执行走 toolContext，而
+     * {@code TerminalTalent.getInstruction} 拿到的只有 Prompt。两处若不同源，会出现
+     * 「提示词说严禁绝对路径、实际却已放行」的自相矛盾——模型据错误先验自我设限，
+     * 完全访问档等于白开。</p>
+     */
+    public final static String PROMPT_ATTR_ACCESS_MODE = AccessMode.PROMPT_ATTR_KEY;
+
+    private final ReentrantLock agentLock = new ReentrantLock();
+
+    private final HarnessOptions options;
+
+    private final CodeTalent codeTalent;
+    private final TodoTalent todoTalent;
+    private final TaskTalent taskTalent;
+    private final GenerateTalent generateTalent;
+
+    private final ClockTalent clockTalent;
+
+    private final WebfetchTalent webfetchTalent;
+    private final WebsearchTalent websearchTalent;
+    private final CodeSearchTalent codeSearchTalent;
+
+    private final LspManager lspManager;
+    private final LspTalent lspTalent;
+
+    private final McpGatewayTalent mcpGatewayTalent;
+    private final OpenApiGatewayTalent openApiGatewayTalent;
+
+    private final MemoryTalent memoryTalent;
+
+    private final TerminalTalent terminalTalent;
+    private final SkillTalent skillTalent;
+
+    private final CommandRegistry commandRegistry = new CommandRegistry();
+
+    private final AgentManager agentManager;
+
+    private volatile ReActAgent mainAgent; //允许运行时切换
+
+    public String getName() {
+        return getMainAgent().name();
+    }
+
+    public CommandRegistry getCommandRegistry() {
+        return commandRegistry;
+    }
+
+    public AgentManager getAgentManager() {
+        return agentManager;
+    }
+
+    public ContextCompressionInterceptor getCompressionInterceptor() {
+        return options.getCompressionInterceptor();
+    }
+
+    public StopLoopInterceptor getStopLoopInterceptor() {
+        return options.getStopLoopInterceptor();
+    }
+
+    public CacheControl getCacheControl() {
+        return options.getCacheControl();
+    }
+
+    public HITLInterceptor getHitlInterceptor() {
+        return options.getHitlInterceptor();
+    }
+
+    /**
+     * 本引擎自行构造的默认 bash 策略；嵌入方传了自定义拦截器时为 null。
+     *
+     * <p>保留引用只为热更新豁免目录：{@code HITLInterceptor} 的策略表是私有的，
+     * 拿不回刚塞进去的实例。为 null 时 {@code bashExemptDirsReset} 只更新 options，
+     * 不去碰不属于我们的拦截器。</p>
+     */
+    private volatile HitlStrategy defaultBashStrategy;
+
+    public AskUserInterceptor getAskUserInterceptor() {
+        return options.getAskUserInterceptor();
+    }
+
+    public TerminalTalent getTerminalTalent() {
+        return terminalTalent;
+    }
+
+    public SkillTalent getSkillTalent() {
+        return skillTalent;
+    }
+
+    public TodoTalent getTodoTalent() {
+        return todoTalent;
+    }
+
+    public TaskTalent getTaskTalent() {
+        return taskTalent;
+    }
+
+    public CodeTalent getCodeTalent() {
+        return codeTalent;
+    }
+
+    public MemoryTalent getMemoryTalent() {
+        return memoryTalent;
+    }
+
+    public GenerateTalent getGenerateTalent() {
+        return generateTalent;
+    }
+
+    public CodeSearchTalent getCodeSearchTalent() {
+        return codeSearchTalent;
+    }
+
+    public ClockTalent getClockTalent() {
+        return clockTalent;
+    }
+
+    public WebsearchTalent getWebsearchTalent() {
+        return websearchTalent;
+    }
+
+    public WebfetchTalent getWebfetchTalent() {
+        return webfetchTalent;
+    }
+
+    public McpGatewayTalent getMcpGatewayTalent() {
+        return mcpGatewayTalent;
+    }
+
+    public OpenApiGatewayTalent getOpenApiGatewayTalent() {
+        return openApiGatewayTalent;
+    }
+
+    public LspTalent getLspTalent() {
+        return lspTalent;
+    }
+
+    public AgentSessionProvider getSessionProvider() {
+        return options.getSessionProvider();
+    }
+
+    public MemorySolutionProvider getMemoryProvider() {
+        return options.getMemoryProvider();
+    }
+
+    public SkillProvider getSkillProvider() {
+        return options.getSkillProvider();
+    }
+
+    // ========== 配置读取（代理到 options） ==========
+
+    public String getHarnessHome() {
+        return options.getHarnessHome();
+    }
+
+    public String getHarnessSessions() {
+        return options.getHarnessSessions();
+    }
+
+    public String getHarnessCommands() {
+        return options.getHarnessCommands();
+    }
+
+    public String getHarnessMemory() {
+        return options.getHarnessMemory();
+    }
+
+    public String getHarnessDownload() {
+        return options.getHarnessDownload();
+    }
+
+    public String getHarnessChannels() {
+        return options.getHarnessChannels();
+    }
+
+    /**
+     * 当前目录
+     */
+    public String getUserDir() {
+        return System.getProperty("user.dir");
+    }
+
+    /**
+     * 用户主目录
+     */
+    public String getUserHome() {
+        return System.getProperty("user.home");
+    }
+
+    public String getUserAgent() {
+        return options.getUserAgent();
+    }
+
+    public String getWorkspace() {
+        return options.getWorkspace();
+    }
+
+    public String getSystemPrompt() {
+        return options.getSystemPrompt();
+    }
+
+    public int getMaxTurns() {
+        return options.getMaxTurns();
+    }
+
+    public boolean isAutoRethink() {
+        return options.isAutoRethink();
+    }
+
+    public int getSessionWindowSize() {
+        return options.getSessionWindowSize();
+    }
+
+    public int getCompressionMaxMessages() {
+        return options.getCompressionMaxMessages();
+    }
+
+    // 上下文窗口不再由引擎暴露：它是会话级用户选择，唯一事实源为 ContextLengthPolicy，
+    // 消费方（压缩器、Web 用量指示器、子代理）一律直接向当前会话取值。
+    // 这里刻意不保留 getCompressionDefaultContextLength()/getEffective...() 这类
+    // 恒返回常量的转发方法，避免后人误以为「引擎侧还能配置窗口」而接出第二个事实源。
+
+    public String getCompressionModel() {
+        return options.getCompressionModel();
+    }
+
+    public boolean isMemoryEnabled() {
+        return options.isMemoryEnabled();
+    }
+
+    public boolean isSandboxEnabled() {
+        return options.isSandboxEnabled();
+    }
+
+    public int getApiRetries() {
+        return options.getApiRetries();
+    }
+
+    public int getMcpRetries() {
+        return options.getMcpRetries();
+    }
+
+    public int getModelRetries() {
+        return options.getModelRetries();
+    }
+
+    public Collection<String> getTools() {
+        return Collections.unmodifiableCollection(options.getTools());
+    }
+
+    public Collection<String> getDisallowedTools() {
+        return Collections.unmodifiableCollection(options.getDisallowedTools());
+    }
+
+    public Collection<HarnessExtension> getExtensions() {
+        return Collections.unmodifiableCollection(options.getExtensions());
+    }
+
+    /**
+     * 技能与子代理的发现器。
+     *
+     * <p>取代已移除的 {@code getMounts()} / {@code getMount(alias)} 一族：技能与子代理的
+     * 发现目录固定为「全局区 + 工作区」，不再存在可配置、可增删的挂载点。</p>
+     */
+    public TalentRegistry getTalentRegistry() {
+        return options.getTalentRegistry();
+    }
+
+    public Collection<SkillDir> getSkills() {
+        return options.getTalentRegistry().getSkills();
+    }
+
+    /** 全部已扫描技能（含禁用）— 仅供管理视图使用。 */
+    public Collection<SkillDir> getSkillsAll() {
+        return options.getTalentRegistry().getSkillsAll();
+    }
+
+    public Collection<SkillDir> getSkillsByScope(TalentScope scope) {
+        return options.getTalentRegistry().getSkillsByScope(scope);
+    }
+
+    public Collection<AgentMd> getAgents() {
+        return options.getTalentRegistry().getAgents();
+    }
+
+    public Map<String, McpServerParameters> getMcpServers() {
+        return Collections.unmodifiableMap(options.getMcpServers());
+    }
+
+    public Map<String, ApiSource> getApiServers() {
+        return Collections.unmodifiableMap(options.getApiServers());
+    }
+
+    public Map<String, LspServerParameters> getLspServers() {
+        return Collections.unmodifiableMap(options.getLspServers());
+    }
+
+    public Collection<ChatConfig> getModels() {
+        return Collections.unmodifiableCollection(options.getModels().values());
+    }
+
+    public ChatConfig getModelOrNil(String name) {
+        return options.getModelOrNil(name);
+    }
+
+    public ChatConfig getModelOrDef(String name) {
+        return options.getModelOrDef(name);
+    }
+
+    /**
+     * 判断指定模型名是否会被静默回退到默认模型（未命中或已禁用）。
+     * 供入口层在真正发起模型调用前做告警，避免用户在无感知的情况下被换模型。
+     */
+    public boolean isModelFallback(String name) {
+        return options.isModelFallback(name);
+    }
+
+    public String getDefaultModel() {
+        return options.getDefaultModel();
+    }
+
+    // ========== 运行时动态修改 ==========
+
+    public void setMaxTurns(Integer maxTurns) {
+        if (maxTurns != null) {
+            options.setMaxTurns(maxTurns);
+        }
+    }
+
+    public void setModelRetries(Integer modelRetries) {
+        if (modelRetries != null) {
+            options.setModelRetries(modelRetries);
+        }
+    }
+
+    public void setMcpRetries(Integer mcpRetries) {
+        if (mcpRetries != null) {
+            options.setMcpRetries(mcpRetries);
+            mcpGatewayTalent.retryConfig(mcpRetries);
+        }
+    }
+
+    public void setApiRetries(Integer apiRetries) {
+        if (apiRetries != null) {
+            options.setApiRetries(apiRetries);
+            openApiGatewayTalent.retryConfig(apiRetries);
+        }
+    }
+
+    public void setMemoryEnabled(Boolean memoryEnabled) {
+        options.setMemoryEnabled(memoryEnabled);
+        memoryTalent.setEnabled(memoryEnabled);
+    }
+
+    public void setSandboxEnabled(Boolean sandboxEnabled) {
+        options.setSandboxEnabled(sandboxEnabled);
+        terminalTalent.setSandboxEnabled(sandboxEnabled);
+    }
+
+    public void setSandboxAllowUserHome(Boolean sandboxAllowUserHome) {
+        options.setSandboxAllowUserHome(sandboxAllowUserHome);
+        terminalTalent.setSandboxAllowUserHome(sandboxAllowUserHome);
+    }
+
+    public boolean isSandboxSystemRestrict() {
+        return options.isSandboxSystemRestrict();
+    }
+
+    public void setSandboxSystemRestrict(Boolean sandboxSystemRestrict) {
+        options.setSandboxSystemRestrict(sandboxSystemRestrict);
+        terminalTalent.setSandboxSystemRestrict(sandboxSystemRestrict);
+    }
+
+    public void setSessionWindowSize(Integer sessionWindowSize) {
+        options.setSessionWindowSize(sessionWindowSize);
+    }
+
+    public void setCompressionThreshold(Integer maxMessages) {
+        if (maxMessages != null) {
+            options.setCompressionMaxMessages(maxMessages);
+            options.getCompressionInterceptor().setMaxMessages(maxMessages);
+        }
+    }
+
+    public void setCompressionRatio(Integer compressionRatio) {
+        if (compressionRatio != null) {
+            options.setCompressionRatio(compressionRatio);
+            options.getCompressionInterceptor().setCompressionRatio(compressionRatio);
+        }
+    }
+
+    /**
+     * 设置技能清单预算百分比（设置项 {@code general.skillListingBudgetFraction}）。
+     *
+     * <p>必须同时写 options 与 skillTalent：前者是单一真源（供新建子代理时继承），
+     * 后者是本轮提示词的实际消费方。只写一边会出现「设置页显示已保存、
+     * 但提示词仍按旧预算渲染」的静默不一致。</p>
+     */
+    public void setSkillListingBudgetFraction(Integer fraction) {
+        options.setSkillListingBudgetFraction(fraction);
+        if (skillTalent != null) {
+            skillTalent.listingBudgetFraction(options.getSkillListingBudgetFraction());
+        }
+    }
+
+    /**
+     * 设置技能清单单条 description 上限（设置项 {@code general.skillListingMaxDescChars}）。
+     *
+     * <p>同 {@link #setSkillListingBudgetFraction}：两处必须同写。</p>
+     */
+    public void setSkillListingMaxDescChars(Integer chars) {
+        options.setSkillListingMaxDescChars(chars);
+        if (skillTalent != null) {
+            skillTalent.listingMaxDescChars(options.getSkillListingMaxDescChars());
+        }
+    }
+
+    /**
+     * 设置压缩后的目标水位比例（10~95）。决定「压到多深」，与触发比例解耦。
+     */
+    public void setCompressionTargetRatio(Integer compressionTargetRatio) {
+        if (compressionTargetRatio != null) {
+            options.setCompressionTargetRatio(compressionTargetRatio);
+            options.getCompressionInterceptor().setCompressionTargetRatio(options.getCompressionTargetRatio());
+        }
+    }
+
+    public int getCompressionTargetRatio() {
+        return options.getCompressionTargetRatio();
+    }
+
+    /** 设置为模型单轮输出预留的 token 数（绝对量）。 */
+    public void setCompressionReservedOutputTokens(Integer value) {
+        if (value != null) {
+            options.setCompressionReservedOutputTokens(value);
+            options.getCompressionInterceptor().setReservedOutputTokens(options.getCompressionReservedOutputTokens());
+        }
+    }
+
+    public int getCompressionReservedOutputTokens() {
+        return options.getCompressionReservedOutputTokens();
+    }
+
+    /** 启用/关闭会话意图链（防多轮对话意图漂移）。 */
+    public void setIntentChainEnabled(Boolean value) {
+        if (value != null) {
+            options.setIntentChainEnabled(value);
+            options.getCompressionInterceptor().setIntentChainEnabled(options.isIntentChainEnabled());
+        }
+    }
+
+    public boolean isIntentChainEnabled() {
+        return options.isIntentChainEnabled();
+    }
+
+    public void setIntentChainMaxTokens(Integer value) {
+        if (value != null) {
+            options.setIntentChainMaxTokens(value);
+            options.getCompressionInterceptor().setIntentChainMaxTokens(options.getIntentChainMaxTokens());
+        }
+    }
+
+    public int getIntentChainMaxTokens() {
+        return options.getIntentChainMaxTokens();
+    }
+
+    // ========== 手动压缩（/compact） ==========
+
+    /**
+     * 请求在下一轮推理开始时强制执行一次压缩（无视阈值）。
+     *
+     * <p>自动压缩只在触达阈值时发生，但用户往往比阈值更早知道
+     * 「前面那一大段探索已经没用了」。</p>
+     */
+    public void requestCompact() {
+        options.getCompressionInterceptor().requestCompact();
+    }
+
+    /** 设置下一次压缩的 focus 指令（透传给摘要模型）。 */
+    public void setCompactFocus(String focus) {
+        options.getCompressionInterceptor().setCompactFocus(focus);
+    }
+
+    public void setSystemPrompt(String systemPrompt) {
+        if (Assert.isNotEmpty(systemPrompt)) {
+            options.setSystemPrompt(systemPrompt);
+        }
+    }
+
+    public void setCacheControl(CacheControl cacheControl) {
+        if (cacheControl != null) {
+            options.setCacheControl(cacheControl);
+        }
+    }
+
+    // ========== 动态模型管理 ==========
+
+    public void setDefaultModel(String defaultModel) {
+        String oldDefault = options.getDefaultModel();
+        options.setDefaultModel(defaultModel);
+
+        if (mainAgent != null
+                && !Objects.equals(defaultModel, oldDefault)
+                && (oldDefault == null || oldDefault.equals(mainAgent.getModel().getNameOrModel()))) {
+            refreshMainAgent();
+        }
+    }
+
+    public void addModel(ChatConfig config) {
+        if (Assert.isEmpty(config.getUserAgent())) {
+            config.setUserAgent(options.getUserAgent());
+        }
+
+        options.addModel(config);
+
+        if (mainAgent != null && mainAgent.getModel().getNameOrModel().equals(config.getNameOrModel())) {
+            refreshMainAgent();
+        }
+    }
+
+    public void removeModel(String name) {
+        options.removeModel(name);
+
+        if (mainAgent != null && mainAgent.getModel().getNameOrModel().equals(name)) {
+            refreshMainAgent();
+        }
+    }
+
+    public boolean hasModel(String name) {
+        return options.hasModel(name);
+    }
+
+    /**
+     * 动态授权一个工具（允许使用）
+     */
+    public void allowTool(String toolName) {
+        if (Assert.isEmpty(toolName)) {
+            return;
+        }
+
+        options.getDisallowedTools().remove(toolName);
+        options.getTools().add(toolName);
+
+        // 权限变更需要重建 Agent 以重新生成工具集
+        agentLock.lock();
+        try {
+            if (this.mainAgent != null) {
+                this.mainAgent = createMainAgent();
+            }
+        } finally {
+            agentLock.unlock();
+        }
+    }
+
+    public void allowToolReset(Collection<String> tools) {
+        options.getTools().clear();
+        if (tools != null) {
+            options.getTools().addAll(tools);
+        }
+
+        // 权限变更需要重建 Agent 以重新生成工具集
+        agentLock.lock();
+        try {
+            if (this.mainAgent != null) {
+                this.mainAgent = createMainAgent();
+            }
+        } finally {
+            agentLock.unlock();
+        }
+    }
+
+    /**
+     * 动态撤销一个工具的权限（禁用）
+     */
+    public void disallowTool(String toolName) {
+        if (Assert.isEmpty(toolName)) {
+            return;
+        }
+
+        options.getTools().remove(toolName);
+        options.getDisallowedTools().add(toolName);
+
+        agentLock.lock();
+        try {
+            if (this.mainAgent != null) {
+                this.mainAgent = createMainAgent();
+            }
+        } finally {
+            agentLock.unlock();
+        }
+    }
+
+    public void disallowToolReset(Collection<String> disallowedTools) {
+        options.getDisallowedTools().clear();
+        if (disallowedTools != null) {
+            options.getDisallowedTools().addAll(disallowedTools);
+        }
+
+        // 权限变更需要重建 Agent 以重新生成工具集
+        agentLock.lock();
+        try {
+            if (this.mainAgent != null) {
+                this.mainAgent = createMainAgent();
+            }
+        } finally {
+            agentLock.unlock();
+        }
+    }
+
+    /**
+     * 热更新 bash 读写豁免目录（设置页保存后调用，无需重启）。
+     *
+     * <p>与 {@link #disallowToolReset} 不同，这里<b>不需要重建 Agent</b>：豁免目录不参与
+     * 工具集生成，只是 {@code HitlStrategy} 内部的一个 volatile 字段，就地替换即可对
+     * 所有会话生效。重建 Agent 反而会打断正在跑的会话，代价毫无必要。</p>
+     *
+     * <p><b>嵌入方自定义了拦截器时只更新 options</b>：{@code defaultBashStrategy} 为 null
+     * 说明 {@code options.getHitlInterceptor()} 不是本引擎构造的，我们无权改它内部的策略
+     * （也不知道它是不是 {@code HitlStrategy}）。此时配置仍存进 options，
+     * 嵌入方自行决定是否采用。</p>
+     */
+    public void bashExemptDirsReset(Collection<String> dirs) {
+        options.setBashExemptDirs(dirs);
+        if (defaultBashStrategy != null) {
+            defaultBashStrategy.setBashExemptDirs(options.getBashExemptDirs());
+        }
+    }
+
+    /**
+     * 当前生效的 bash 读写豁免目录（只读视图，供设置页回显）。
+     */
+    public List<String> getBashExemptDirs() {
+        return options.getBashExemptDirs();
+    }
+
+
+    /**
+     * 重扫技能与子代理目录，并回收已缓存的自定义代理定义。
+     *
+     * <p>取代原 {@code refreshMount(alias)}：没有挂载点后就不存在「刷哪个」的问题，
+     * 四个目录全量重扫（规模是几十个量级，全量比增量更不易错）。</p>
+     *
+     * <p>必须先回收缓存再重扫：{@code AgentManager} 把解析结果缓存在自己的 map 里，
+     * 不先清掉的话，已删除的代理会继续从缓存里被解析出来。</p>
+     */
+    public void refreshTalents() {
+        agentManager.clearCustomAgents();
+        options.getTalentRegistry().refresh();
+    }
+
+
+    /**
+     * 动态添加 API 源
+     */
+    public void addApiServer(ApiSource apiSource) {
+        openApiGatewayTalent.addApi(apiSource);
+        options.getApiServers().put(apiSource.getDocUrl(), apiSource);
+    }
+
+    /**
+     * 获取指定 docUrl 的 ApiSourceClient
+     */
+    public ApiSourceClient getApiServer(String docUrl) {
+        return openApiGatewayTalent.getApiSource(docUrl);
+    }
+
+    /**
+     * 刷新指定 API 源（权限变更后）
+     */
+    public void refreshApiServer(String docUrl) {
+        openApiGatewayTalent.refreshApi(docUrl);
+    }
+
+    /**
+     * 动态移除 API 源
+     */
+    public void removeApiServer(String docUrl) {
+        openApiGatewayTalent.removeApi(docUrl);
+        options.getApiServers().remove(docUrl);
+    }
+
+    /**
+     * 动态添加 MCP 服务
+     */
+    public void addMcpServer(String name, McpServerParameters mcpServer) {
+        mcpGatewayTalent.addMcpServer(name, mcpServer);
+        options.getMcpServers().put(name, mcpServer);
+    }
+
+    public McpClientProvider getMcpServer(String name) {
+        return mcpGatewayTalent.getMcpServer(name);
+    }
+
+    public void refreshMcpServer(String name) {
+        mcpGatewayTalent.refreshMcpServer(name);
+    }
+
+    /**
+     * 动态移除 MCP 服务（并关闭连接）
+     */
+    public void removeMcpServer(String name) {
+        mcpGatewayTalent.removeMcpServer(name);
+        options.getMcpServers().remove(name);
+    }
+
+    /**
+     * 动态添加一个 LSP 服务器
+     */
+    public void addLspServer(String name, LspServerParameters lspServer) {
+        if (lspServer == null) {
+            return;
+        }
+
+        // 将配置同步到 options 中，以便后续快照使用
+        options.getLspServers().put(name, lspServer);
+        // 让 LspManager 运行时加载该服务器
+        lspManager.registerServer(name, lspServer);
+
+        // LSP 工具的增减会影响 Agent 的可用工具集，需重建 Agent
+        agentLock.lock();
+        try {
+            if (this.mainAgent != null) {
+                this.mainAgent = createMainAgent();
+            }
+        } finally {
+            agentLock.unlock();
+        }
+    }
+
+    /**
+     * 动态移除一个 LSP 服务器
+     */
+    public void removeLspServer(String name) {
+        if (name == null) {
+            return;
+        }
+
+        options.getLspServers().remove(name);
+        lspManager.unregisterServer(name);
+
+        agentLock.lock();
+        try {
+            if (this.mainAgent != null) {
+                this.mainAgent = createMainAgent();
+            }
+        } finally {
+            agentLock.unlock();
+        }
+    }
+
+
+    public void addExtension(HarnessExtension extension) {
+        if (extension == null) {
+            return;
+        }
+        options.getExtensions().add(extension);
+
+        agentLock.lock();
+        try {
+            if (this.mainAgent != null) {
+                this.mainAgent = createMainAgent();
+            }
+        } finally {
+            agentLock.unlock();
+        }
+    }
+
+    /**
+     * 动态移除一个扩展
+     */
+    public void removeExtension(HarnessExtension extension) {
+        if (extension == null) {
+            return;
+        }
+        options.getExtensions().remove(extension);
+
+        // 重建 mainAgent 以应用变更，使用 agentLock 保证线程安全
+        agentLock.lock();
+        try {
+            if (this.mainAgent != null) {
+                this.mainAgent = createMainAgent();
+            }
+        } finally {
+            agentLock.unlock();
+        }
+    }
+
+
+    private HarnessEngine(HarnessOptions options) {
+        this.options = options;
+
+        //上下文压缩拦截器默认处理
+        if (options.getCompressionInterceptor() == null) {
+            // 单次 LLM 调用完成「关键信息提取 + 滚动摘要 + 防意图漂移」。
+            // 旧装配 Composite(KeyInfo + Hierarchical) 会把同一段历史独立发给 LLM 两次，
+            // 输入 token 与调用次数均翻倍；两者职责可在一个 prompt 内用分段完成。
+            CompressionStrategy strategy = new UnifiedCompressionStrategy();
+
+            options.setCompressionInterceptor(new ContextCompressionInterceptor(
+                    options.getCompressionMaxMessages(),
+                    () -> getModelOrMain(options.getCompressionModel()),
+                    strategy));
+        }
+        // 无论默认或自定义实例，HarnessOptions 都是运行时配置真源。
+        // 注意：上下文窗口不在此列——它是会话级用户选择（ContextLengthPolicy），
+        // 每轮从当前会话读取，绝不由引擎全局配置或模型配置决定。
+        options.getCompressionInterceptor().setMaxMessages(options.getCompressionMaxMessages());
+        options.getCompressionInterceptor().setMaxRetries(options.getModelRetries());
+        options.getCompressionInterceptor().setCompressionRatio(options.getCompressionRatio());
+        options.getCompressionInterceptor().setCompressionTargetRatio(options.getCompressionTargetRatio());
+        options.getCompressionInterceptor().setReservedOutputTokens(options.getCompressionReservedOutputTokens());
+        options.getCompressionInterceptor().setIntentChainEnabled(options.isIntentChainEnabled());
+        options.getCompressionInterceptor().setIntentChainMaxTokens(options.getIntentChainMaxTokens());
+
+        //停止循环拦截器默认处理
+        if (options.getStopLoopInterceptor() == null) {
+            options.setStopLoopInterceptor(new StopLoopInterceptor(3, 8));
+        }
+
+        //人工介入拦截器默认处理
+        if (options.getHitlInterceptor() == null) {
+            // 把用户配置的 bash 读写豁免目录交给策略：没有这个通道，「构建产物在项目外」的用户
+            // 只能整档切到完全访问——那是解除全部空间边界，代价远大于需求。
+            // 保留策略引用是为了热更新（见 bashExemptDirsReset）。
+            HitlStrategy bashStrategy = new HitlStrategy(options.getBashExemptDirs());
+            this.defaultBashStrategy = bashStrategy;
+            options.setHitlInterceptor(new HITLInterceptor().onTool("bash", bashStrategy));
+        }
+
+        //结构化问答拦截器默认处理（默认启用，不加开关）
+        if (options.getAskUserInterceptor() == null) {
+            options.setAskUserInterceptor(new AskUserInterceptor());
+        }
+
+        this.todoTalent = new TodoTalent(options.getHarnessSessions());
+        this.codeTalent = new CodeTalent(options.getWorkspace(), options.getHarnessHome());
+        this.taskTalent = new TaskTalent(this);
+        this.generateTalent = new GenerateTalent(this);
+
+        this.clockTalent = new ClockTalent();
+
+        this.codeSearchTalent = new CodeSearchTalent().retryConfig(options.getMcpRetries());
+        this.websearchTalent = new WebsearchTalent().retryConfig(options.getMcpRetries());
+        this.webfetchTalent = new WebfetchTalent().retryConfig(options.getApiRetries());
+
+        //lsp
+        this.lspManager = new LspManager(options.getWorkspace());
+        if (Assert.isNotEmpty(options.getLspServers())) {
+            for (Map.Entry<String, LspServerParameters> entry : options.getLspServers().entrySet()) {
+                lspManager.registerServer(entry.getKey(), entry.getValue());
+            }
+        }
+        this.lspTalent = new LspTalent(lspManager, options.getWorkspace());
+        this.lspManager.setDiagnosticsCallback(lspTalent::updateDiagnostics);
+
+        if (options.getMemoryProvider() != null) {
+            this.memoryTalent = new MemoryTalent(options.getMemoryProvider()).sessionIsolation(false);
+            this.memoryTalent.setEnabled(options.isMemoryEnabled());
+        } else {
+            this.memoryTalent = null;
+        }
+
+        openApiGatewayTalent = new OpenApiGatewayTalent().retryConfig(options.getApiRetries());
+        if (Assert.isNotEmpty(options.getApiServers())) {
+            for (Map.Entry<String, ApiSource> entry : options.getApiServers().entrySet()) {
+                openApiGatewayTalent.addApi(entry.getValue());
+            }
+        }
+
+        mcpGatewayTalent = new McpGatewayTalent().retryConfig(options.getMcpRetries());
+
+        if (Assert.isNotEmpty(options.getMcpServers())) {
+            for (Map.Entry<String, McpServerParameters> entry : options.getMcpServers().entrySet()) {
+                if (entry.getValue().isEnabled()) {
+                    mcpGatewayTalent.addMcpServer(entry.getKey(), entry.getValue());
+                }
+            }
+        }
+
+        TalentRegistry talentRegistry = options.getTalentRegistry();
+
+        terminalTalent = new TerminalTalent(talentRegistry);
+
+        if (options.getSkillProvider() == null) {
+            skillTalent = new SkillTalent(new RegistrySkillProvider(talentRegistry));
+        } else {
+            skillTalent = new SkillTalent(options.getSkillProvider());
+        }
+
+        // 创建后立即应用清单预算设置：不补这两行，首次启动（还没走过设置页保存）
+        // 会一直用 SkillTalent 自己的默认值，而 settings.json 里已配的值静默无效。
+        skillTalent.listingBudgetFraction(options.getSkillListingBudgetFraction());
+        skillTalent.listingMaxDescChars(options.getSkillListingMaxDescChars());
+
+        agentManager = new AgentManager(talentRegistry);
+
+        terminalTalent.setSandboxEnabled(options.isSandboxEnabled());
+        terminalTalent.setSandboxAllowUserHome(options.isSandboxAllowUserHome());
+        terminalTalent.setSandboxSystemRestrict(options.isSandboxSystemRestrict());
+
+        //mainAgent = createMainAgent(); //改为懒加载
+    }
+
+    protected ReActAgent createMainAgent() {
+        AgentDefinition agentDefinition = new AgentDefinition();
+
+        // 系统提示词
+        agentDefinition.setSystemPrompt(options.getSystemPrompt());
+        // 名字
+        agentDefinition.getMetadata().setName(AgentDefinition.AGENT_MAIN);
+        // 主代理
+        agentDefinition.getMetadata().setPrimary(true);
+        // 工具权限
+        agentDefinition.getMetadata().getTools().addAll(options.getTools()); //允许
+
+        ReActAgent.Builder agentBuilder = AgentFactory.create(this, agentDefinition, null);
+
+        return agentBuilder.build();
+    }
+
+
+    public AgentSession getSession(String instanceId) {
+        return options.getSessionProvider().getSession(instanceId);
+    }
+
+    /**
+     * 移除（驱逐）指定实例的会话缓存。
+     *
+     * <p>会话被删除时调用，切断内存中会话对落盘文件的重建源。</p>
+     *
+     * @param instanceId 会话实例标识
+     */
+    public void removeSession(String instanceId) {
+        options.getSessionProvider().removeSession(instanceId);
+    }
+
+    public ReActAgent.Builder createSubagent(AgentDefinition definition) {
+        return AgentFactory.create(this, definition, null);
+    }
+
+    public ChatModel getMainModel() {
+        return getMainAgent().getModel();
+    }
+
+    public ReActAgent getMainAgent() {
+        ReActAgent agent = this.mainAgent; // 引入局部变量，仅执行一次 volatile read
+        if (agent == null) {
+            agentLock.lock();
+            try {
+                if (this.mainAgent == null) {
+                    this.mainAgent = createMainAgent();
+                }
+                agent = this.mainAgent;
+            } finally {
+                agentLock.unlock();
+            }
+        }
+
+        return agent;
+    }
+
+    /**
+     * 刷新主代理
+     */
+    public void refreshMainAgent() {
+        agentLock.lock();
+        try {
+            this.mainAgent = null;
+        } finally {
+            agentLock.unlock();
+        }
+    }
+
+    public ChatModel getModelOrMain(String modelName) {
+        ChatConfig config = getModelOrDef(modelName);
+        if (config == null) {
+            return null;
+        } else {
+            return config.toChatModel();
+        }
+    }
+
+    public ReActAgent getAgentOrMain(String agentName) {
+        if (Assert.isEmpty(agentName)) {
+            return getMainAgent();
+        } else if (agentManager.hasAgent(agentName)) {
+            AgentDefinition definition = agentManager.getAgent(agentName);
+            return AgentFactory.create(this, definition, null).build();
+        } else {
+            return getMainAgent();
+        }
+    }
+
+    // ========== 中断续跑（断点续传）==========
+
+    /**
+     * 解析指定会话中某个 agent 的执行痕迹（trace）。
+     *
+     * <p>trace 存放在会话的 FlowContext 里，key 为 {@code "__" + agentName}（见 ReActAgentConfig.getTraceKey，
+     * 主 agent 名为 {@link AgentDefinition#AGENT_MAIN}）。这里直接推导 traceKey，避免为读一个字符串而全量构建子 agent；
+     * 也避免了 getAgentOrMain 在 agent 不存在时静默回退主 agent、导致误取主 agent trace 的问题——
+     * 名字不存在时得到的是该名字自己的 key，getAs 返回 null，不会错误命中主 agent 的中断任务。</p>
+     *
+     * @param session   会话
+     * @param agentName 指定 agent 名（为空则主 agent）
+     * @return 对应 trace；无则 null
+     */
+    public ReActTrace resolveTrace(AgentSession session, String agentName) {
+        if (session == null) {
+            return null;
+        }
+        String name = Assert.isEmpty(agentName) ? AgentDefinition.AGENT_MAIN : agentName;
+        return session.getContext().getAs("__" + name);
+    }
+
+    /**
+     * 判断某会话上一次任务是否「异常中断、可续跑」。
+     *
+     * <p>依据持久化且语义精确的信号：trace 路由停在 END 且被标记为 abnormal。
+     * abnormal 由库在模型调用失败/超时/达到最大回合时置位（{@code setFinalAnswer(msg)} 单参重载），
+     * 正常完成则为 false。该状态随快照落盘，进程重启后仍可判定。</p>
+     *
+     * <p>用户主动停止（interrupt）且任务未完成的场景同样视为可续跑：取消不会经过库的
+     * 异常兜底（abnormal 不置位），改由 {@link ReActTrace#EXTRA_USER_INTERRUPTED} 标记
+     * （见 {@link #markUserInterruptedForResume}）。否则用户随后发「继续」会被当成
+     * 全新任务、断点工作记忆被整体重置，重复消耗 token。</p>
+     */
+    public boolean canResume(ReActTrace trace) {
+        return trace != null
+                && Agent.ID_END.equals(trace.getRoute())
+                && (trace.isAbnormal() || trace.isUserInterrupted());
+    }
+
+    /**
+     * 便捷重载：直接按会话 + agent 名判断是否可续跑。
+     */
+    public boolean canResume(AgentSession session, String agentName) {
+        return canResume(resolveTrace(session, agentName));
+    }
+
+    /**
+     * 判断某会话是否存在「已结束、可从结束点继续」的任务。
+     *
+     * <p>比 {@link #canResume(ReActTrace)} 宽松：只要求路由停在 END，不要求 abnormal。
+     * 用于用户显式点击「继续运行」({@code /continue})——即便上次是正常完成，
+     * 也允许让 agent 接着结论再推进一轮。自动续跑请用严格的 canResume。</p>
+     */
+    public boolean canContinue(ReActTrace trace) {
+        return trace != null && Agent.ID_END.equals(trace.getRoute());
+    }
+
+    /**
+     * 用户主动停止（interrupt/取消）任务时，为「未完成的任务」打上可续跑标记并立即落盘。
+     *
+     * <p>取消路径不会经过库的异常兜底（abnormal 不置位），执行流最终停在 route=END
+     * 但 abnormal=false——若不打标，用户随后发「继续」会被 {@link #canResume} 判为
+     * 新任务，断点工作记忆（推理 + 工具结果）被整体重置，此前消耗的上下文无法复用。
+     * 打标后「继续」与「异常中断续跑」行为完全对齐：保留工作记忆并把新输入追加进去
+     * 接着执行。</p>
+     *
+     * <p>仅当任务尚未结束（route 非 END）时打标；打完立即落盘，覆盖「流程收尾前进程
+     * 退出」的场景（重启后仍可判定）。异常只记日志，绝不影响停止主流程。</p>
+     *
+     * @param session   会话
+     * @param agentName 指定 agent 名（为空则主 agent，与取消入口口径一致）
+     */
+    public void markUserInterruptedForResume(AgentSession session, String agentName) {
+        try {
+            ReActTrace trace = resolveTrace(session, agentName);
+            if (trace == null || Agent.ID_END.equals(trace.getRoute())) {
+                return;
+            }
+            trace.markUserInterrupted();
+            session.updateSnapshot();
+        } catch (Throwable e) {
+            org.slf4j.LoggerFactory.getLogger(HarnessEngine.class)
+                    .warn("mark user-interrupted for resume failed (ignored): {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 为「中断续跑」做准备：在保留已有工作记忆（推理 + 工具执行结果）的前提下，
+     * 把用户的新输入追加进去，并让 agent 从中断点继续，而不是 reset 从头重跑。
+     *
+     * <p>是否移除工作记忆/历史里最后一条 Assistant 消息由 {@code removeLastAnswer} 决定：
+     * 异常中断续跑传 true（那条是"抱歉，暂时无法使用模型服务…"失败兜底，需重新生成）；
+     * 正常完成后的显式继续传 false（那条是真实的最终答复，必须保留，否则会丢结论/损坏历史）。</p>
+     *
+     * <p>调用方随后应以「空 Prompt」发起任务（{@code Prompt.of()}），触发库的恢复分支复用工作记忆。</p>
+     *
+     * @param trace           已确认可续跑的 trace（canResume/canContinue 为 true）
+     * @param session         会话
+     * @param newUserInput    用户新输入（可为空——纯"继续"语义；非空则作为新指令追加）
+     * @param removeLastAnswer 是否移除最后一条 Assistant 消息（异常兜底=true，正常答复=false）
+     */
+    public void prepareResume(ReActTrace trace, AgentSession session, String newUserInput, boolean removeLastAnswer) {
+        prepareResume(trace, session, newUserInput, removeLastAnswer, null);
+    }
+
+    /**
+     * 同 {@link #prepareResume(ReActTrace, AgentSession, String, boolean)}，另接受工作目录参数。
+     *
+     * @param cwd 会话工作目录（用于定位 TODO.md）。传 null 时依次回退会话属性 ATTR_CWD、工作区根目录。
+     */
+    public void prepareResume(ReActTrace trace, AgentSession session, String newUserInput, boolean removeLastAnswer, String cwd) {
+        // ① 回到思考节点，清掉最终答案标记并复位 abnormal；同时消费「用户中断」续跑标记
+        trace.setRoute(ReActAgent.ID_REASON);
+        trace.setFinalAnswer(null, false);
+        trace.clearUserInterrupted();
+
+        // ② 仅在异常兜底场景移除最后一条 Assistant 消息（正常完成的真实答复要保留）
+        if (removeLastAnswer) {
+            ChatMessage lastWorking = trace.getWorkingMemory().getLastMessage();
+            if (lastWorking instanceof AssistantMessage) {
+                trace.getWorkingMemory().removeLastMessage();
+            }
+
+            List<ChatMessage> history = session.getMessages();
+            if (Assert.isNotEmpty(history)
+                    && history.get(history.size() - 1) instanceof AssistantMessage) {
+                session.removeLatestMessage(1);
+            }
+        }
+
+        // ③ 把用户新输入作为新指令追加（库的恢复分支不会自动带上新消息）
+        if (Assert.isNotEmpty(newUserInput)) {
+            ChatMessage userMsg = ChatMessage.ofUser(newUserInput);
+            trace.getWorkingMemory().addMessage(userMsg);
+            session.addMessage(userMsg);
+        }
+
+        // ③.5 恢复校准：注入 TODO.md 落盘真实状态。中断时刻模型可能未及时 todowrite，
+        //     落盘状态会滞后于实际执行进度；若按记忆或陈旧清单盲目重跑，会重复执行已完成的
+        //     步骤。此处物理注入清单快照并要求先核对历史 Observation 再行动（仅异常中断时）。
+        if (removeLastAnswer) {
+            injectTodoCalibration(session, trace, cwd);
+        }
+
+        // ④ 落盘
+        session.updateSnapshot();
+    }
+
+    /**
+     * 恢复续跑前，读取 TODO.md 落盘清单并注入校准消息，防止盲目重复执行已完成的步骤。
+     *
+     * <p>清单路径与 TodoTalent 落盘规则保持一致：{@code <cwd>/<harnessSessions>/<sessionId>/TODO.md}。
+     * 工作目录优先取入参，其次会话属性 ATTR_CWD（与 WebGate/WsGate 取 cwd 的口径一致）；
+     * 均缺失时依次回探全局基准目录与工作区根；异常只记日志，绝不影响恢复主流程。</p>
+     *
+     * <p><b>为何要多根回探：</b>无所属根的会话在旧版本里把 TODO.md 写进了
+     * {@code user.dir}（workspace），而会话落盘标准位置是 {@code user.home}（全局基准）。
+     * 只试单一根会让这批会话恢复时读不到清单 → 模型重复执行已完成步骤。</p>
+     */
+    private void injectTodoCalibration(AgentSession session, ReActTrace trace, String cwd) {
+        try {
+            String sessionId = session.getSessionId();
+
+            if (Assert.isEmpty(cwd)) {
+                Object cwdAttr = session.attrs().get(ATTR_CWD);
+                cwd = cwdAttr != null ? cwdAttr.toString() : null;
+            }
+
+            // 候选根：显式 cwd → 全局基准目录 → 工作区根（去重、跳空）
+            java.util.List<String> candidates = new java.util.ArrayList<>(3);
+            for (String c : new String[]{cwd, AgentFlags.getHarnessBase(), getWorkspace()}) {
+                if (Assert.isNotEmpty(c) && !candidates.contains(c)) {
+                    candidates.add(c);
+                }
+            }
+            if (candidates.isEmpty()) {
+                return;
+            }
+
+            String content = null;
+            for (String candidate : candidates) {
+                content = todoTalent.readTodoContentOrNil(candidate, sessionId);
+                if (content != null) {
+                    break;
+                }
+            }
+            if (content == null) {
+                return;
+            }
+
+            String calibration = TodoTalent.buildResumeCalibration(content);
+            if (calibration == null) {
+                return;
+            }
+
+            trace.getWorkingMemory().addMessage(ChatMessage.ofUser(calibration));
+        } catch (Throwable e) {
+            org.slf4j.LoggerFactory.getLogger(HarnessEngine.class)
+                    .warn("TODO 恢复校准注入失败（已忽略）: {}", e.getMessage());
+        }
+    }
+
+    private ReActRequest promptDo(Prompt prompt) {
+        return getMainAgent()
+                .prompt(prompt)
+                .options(o -> {
+                    o.retryConfig(options.getModelRetries());
+                    o.maxTurns(options.getMaxTurns());
+                    o.sessionWindowSize(options.getSessionWindowSize());
+                });
+    }
+
+    public ReActRequest prompt(Prompt prompt) {
+        return promptDo(prompt);
+    }
+
+
+    public ReActRequest prompt(String prompt) {
+        return promptDo(Prompt.of(prompt));
+    }
+
+
+    public ReActRequest prompt() {
+        return promptDo(null);
+    }
+
+
+    public static Builder of(String workspace, String harnessHome) {
+        return new Builder(workspace, harnessHome);
+    }
+
+    public static class Builder {
+        private final HarnessOptions options;
+
+        public Builder(String workspace, String harnessHome) {
+            this.options = new HarnessOptions(workspace, harnessHome);
+        }
+
+        // ========== 服务注入（代理到 options） ==========
+
+        public Builder sessionProvider(AgentSessionProvider sessionProvider) {
+            options.setSessionProvider(sessionProvider);
+            return this;
+        }
+
+        /**
+         * 人工介入拦截器
+         */
+        public Builder hitlInterceptor(HITLInterceptor hitlInterceptor) {
+            options.setHitlInterceptor(hitlInterceptor);
+            return this;
+        }
+
+        /**
+         * 结构化问答拦截器
+         */
+        public Builder askUserInterceptor(AskUserInterceptor askUserInterceptor) {
+            options.setAskUserInterceptor(askUserInterceptor);
+            return this;
+        }
+
+        /**
+         * 心智记忆存储方案
+         */
+        public Builder memoryProvider(MemorySolutionProvider memoryProvider) {
+            options.setMemoryProvider(memoryProvider);
+            return this;
+        }
+
+        /**
+         * 技能提供者（如果需要对接数据库，通过此接口适配）
+         */
+        public Builder skillProvider(SkillProvider skillProvider) {
+            options.setSkillProvider(skillProvider);
+            return this;
+        }
+
+        // ========== 简单属性配置（代理到 options） ==========
+
+        public Builder systemPrompt(String systemPrompt) {
+            options.setSystemPrompt(systemPrompt);
+            return this;
+        }
+
+        public Builder userAgent(String userAgent) {
+            options.setUserAgent(userAgent);
+            return this;
+        }
+
+        public Builder maxTurns(Integer maxTurns) {
+            options.setMaxTurns(maxTurns);
+            return this;
+        }
+
+        public Builder autoRethink(Boolean autoRethink) {
+            options.setAutoRethink(autoRethink);
+            return this;
+        }
+
+        public Builder sessionWindowSize(Integer sessionWindowSize) {
+            options.setSessionWindowSize(sessionWindowSize);
+            return this;
+        }
+
+        public Builder compressionThreshold(Integer maxMessages) {
+            options.setCompressionMaxMessages(maxMessages);
+            return this;
+        }
+
+        public Builder compressionRatio(Integer compressionRatio) {
+            options.setCompressionRatio(compressionRatio);
+            return this;
+        }
+
+        /** 技能清单预算百分比（窗口的 N%），见 {@link SkillListingPolicy}。 */
+        public Builder skillListingBudgetFraction(Integer fraction) {
+            options.setSkillListingBudgetFraction(fraction);
+            return this;
+        }
+
+        /** 技能清单单条 description 的字符上限。 */
+        public Builder skillListingMaxDescChars(Integer chars) {
+            options.setSkillListingMaxDescChars(chars);
+            return this;
+        }
+
+        public Builder compressionTargetRatio(Integer compressionTargetRatio) {
+            options.setCompressionTargetRatio(compressionTargetRatio);
+            return this;
+        }
+
+        public Builder compressionReservedOutputTokens(Integer value) {
+            options.setCompressionReservedOutputTokens(value);
+            return this;
+        }
+
+        public Builder intentChainEnabled(Boolean value) {
+            options.setIntentChainEnabled(value);
+            return this;
+        }
+
+        public Builder intentChainMaxTokens(Integer value) {
+            options.setIntentChainMaxTokens(value);
+            return this;
+        }
+
+        public Builder compressionModel(String compressionModel) {
+            options.setCompressionModel(compressionModel);
+            return this;
+        }
+
+        public Builder compressionInterceptor(ContextCompressionInterceptor compressionInterceptor) {
+            options.setCompressionInterceptor(compressionInterceptor);
+            return this;
+        }
+
+        public Builder stopLoopInterceptor(StopLoopInterceptor stopLoopInterceptor) {
+            options.setStopLoopInterceptor(stopLoopInterceptor);
+            return this;
+        }
+
+        public Builder cacheControl(CacheControl cacheControl) {
+            options.setCacheControl(cacheControl);
+            return this;
+        }
+
+        public Builder memoryEnabled(Boolean memoryEnabled) {
+            options.setMemoryEnabled(memoryEnabled);
+            return this;
+        }
+
+        public Builder sandboxEnabled(Boolean sandboxEnabled) {
+            options.setSandboxEnabled(sandboxEnabled);
+            return this;
+        }
+
+        public Builder sandboxAllowUserHome(Boolean sandboxAllowUserHome) {
+            options.setSandboxAllowUserHome(sandboxAllowUserHome);
+            return this;
+        }
+
+        public Builder sandboxSystemRestrict(Boolean sandboxSystemRestrict) {
+            options.setSandboxSystemRestrict(sandboxSystemRestrict);
+            return this;
+        }
+
+        public Builder apiRetries(Integer apiRetries) {
+            options.setApiRetries(apiRetries);
+            return this;
+        }
+
+        public Builder mcpRetries(Integer mcpRetries) {
+            options.setMcpRetries(mcpRetries);
+            return this;
+        }
+
+        public Builder modelRetries(Integer modelRetries) {
+            options.setModelRetries(modelRetries);
+            return this;
+        }
+
+        // ========== 集合类配置（代理到 options） ==========
+
+        public Builder toolsAdd(ToolPermission... val) {
+            options.addTools(val);
+            return this;
+        }
+
+        public Builder toolsAdd(Collection<String> tools) {
+            options.getTools().addAll(tools);
+            return this;
+        }
+
+        public Builder disallowedToolsAdd(ToolPermission... val) {
+            options.addDisallowedTools(val);
+            return this;
+        }
+
+        public Builder disallowedToolsAdd(Collection<String> tools) {
+            options.getDisallowedTools().addAll(tools);
+            return this;
+        }
+
+        /**
+         * 追加 bash 读写豁免目录（工作区之外仍允许直接读写、不弹审批的位置）。
+         *
+         * <p>条目支持 {@code ~} 与环境变量（{@code $env:X}、{@code %X%}）；
+         * 非法条目在解析时被静默忽略（见 {@code BashPathGuard.resolveExemptDirs}）。
+         * <b>读写都豁免</b>。只影响 bash 的路径轴：结构化文件工具的边界与形态轴
+         * （递归删除等）照旧生效。</p>
+         */
+        public Builder bashExemptDirsAdd(Collection<String> dirs) {
+            if (dirs != null) {
+                options.getBashExemptDirs().addAll(dirs);
+            }
+            return this;
+        }
+
+        public Builder extensionAdd(HarnessExtension val) {
+            options.getExtensions().add(val);
+            return this;
+        }
+
+        public Builder modelAdd(ChatConfig val) {
+            options.addModel(val);
+            return this;
+        }
+
+        public Builder modelAdd(Iterable<ChatConfig> models) {
+            for (ChatConfig val : models) {
+                options.getModels().put(val.getNameOrModel(), val); //build 时再加 ua
+            }
+            return this;
+        }
+
+
+
+        public Builder mcpServerAdd(String name, McpServerParameters params) {
+            options.getMcpServers().put(name, params);
+            return this;
+        }
+
+        public Builder apiServerAdd(String name, ApiSource source) {
+            options.getApiServers().put(name, source);
+            return this;
+        }
+
+        public Builder lspServerAdd(String name, LspServerParameters lspServer) {
+            options.getLspServers().put(name, lspServer);
+            return this;
+        }
+
+        public Builder defaultModel(String defaultModel) {
+            options.setDefaultModel(defaultModel);
+            return this;
+        }
+
+        public HarnessEngine build() {
+            Objects.nonNull(options.getSessionProvider());
+
+            //缺省 userAgent 补尝
+            if (Assert.isNotEmpty(options.getUserAgent())) {
+                for (ChatConfig m1 : options.getModels().values()) {
+                    if (Assert.isEmpty(m1.getUserAgent())) {
+                        m1.setUserAgent(options.getUserAgent());
+                    }
+                }
+            }
+
+            return new HarnessEngine(options);
+        }
+    }
+}

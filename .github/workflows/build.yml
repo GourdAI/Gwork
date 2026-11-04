@@ -65,7 +65,7 @@ jobs:
             VERSION="${GITHUB_REF_NAME#v}"
           fi
           if [ -n "$VERSION" ]; then
-            cd gourd-ai-desktop
+            cd gourdai-java/gourd-ai-desktop
             npm version "$VERSION" --no-git-tag-version --allow-same-version
             echo "使用版本号: $VERSION"
           else
@@ -76,15 +76,15 @@ jobs:
       # -Dgwork.build.revision：把 git 短 sha 写入 jar 内 build-info.properties（属性名与 pom 默认值一致）
       - name: Maven 构建后端 JAR
         shell: bash
-        run: mvn -B -ntp -pl gourd-ai-agent -am package -DskipTests -Dgwork.build.revision=${GITHUB_SHA::7}
+        run: mvn -f gourdai-java/pom.xml -B -ntp -pl gourd-ai-agent -am package -DskipTests -Dgwork.build.revision=${GITHUB_SHA::7}
 
       # 对应本地构建脚本的 [2/5]
       - name: 复制 JAR 到 extraResources
         shell: bash
         run: |
           set -e
-          mkdir -p gourd-ai-desktop/build/extraResources
-          cp -f gourd-ai-agent/target/gourd-ai-agent.jar gourd-ai-desktop/build/extraResources/gourd-ai-agent.jar
+          mkdir -p gourdai-java/gourd-ai-desktop/build/extraResources
+          cp -f gourdai-java/gourd-ai-agent/target/gourd-ai-agent.jar gourdai-java/gourd-ai-desktop/build/extraResources/gourd-ai-agent.jar
 
       # 对应本地构建脚本的 [4/5]：模块清单与 build.ps1 / generate-jre.js 保持一致
       - name: 生成内置 JRE（Windows / Linux）
@@ -93,7 +93,7 @@ jobs:
         run: |
           set -e
           MODULES="java.base,java.logging,java.sql,java.naming,java.management,java.instrument,java.net.http,jdk.crypto.ec,jdk.zipfs,jdk.unsupported"
-          JRE_DIR="gourd-ai-desktop/build/extraResources/jre"
+          JRE_DIR="gourdai-java/gourd-ai-desktop/build/extraResources/jre"
           rm -rf "$JRE_DIR"
           "$JAVA_HOME/bin/jlink" --module-path "$JAVA_HOME/jmods" --add-modules "$MODULES" \
             --output "$JRE_DIR" --strip-debug --compress 2 --no-header-files --no-man-pages
@@ -115,8 +115,8 @@ jobs:
           ARM_HOME="$(find /tmp/jdk-arm64 -maxdepth 5 -name jmods -type d | head -n1 | sed 's|/jmods$||')"
           echo "x64 JDK: $X64_HOME"
           echo "arm64 JDK: $ARM_HOME"
-          OUT_X64="gourd-ai-desktop/build/jre-mac-x64"
-          OUT_ARM="gourd-ai-desktop/build/jre-mac-arm64"
+          OUT_X64="gourdai-java/gourd-ai-desktop/build/jre-mac-x64"
+          OUT_ARM="gourdai-java/gourd-ai-desktop/build/jre-mac-arm64"
           rm -rf "$OUT_X64" "$OUT_ARM"
           "$JAVA_HOME/bin/jlink" --module-path "$X64_HOME/jmods" --add-modules "$MODULES" \
             --output "$OUT_X64" --strip-debug --compress 2 --no-header-files --no-man-pages
@@ -133,9 +133,9 @@ jobs:
         shell: bash
         run: |
           set -e
-          mkdir -p gourd-ai-desktop/build/icons
-          cp -f gourd-ai-desktop/resources/icons/icon.ico gourd-ai-desktop/build/icons/icon.ico
-          cp -f gourd-ai-desktop/resources/icons/icon.png gourd-ai-desktop/build/icons/icon.png
+          mkdir -p gourdai-java/gourd-ai-desktop/build/icons
+          cp -f gourdai-java/gourd-ai-desktop/resources/icons/icon.ico gourdai-java/gourd-ai-desktop/build/icons/icon.ico
+          cp -f gourdai-java/gourd-ai-desktop/resources/icons/icon.png gourdai-java/gourd-ai-desktop/build/icons/icon.png
 
       # builder-mac.json 引用 build/icons/icon.icns，仓库中只有 png，CI 上用系统工具生成
       - name: 生成 macOS 图标 (icon.icns)
@@ -143,20 +143,20 @@ jobs:
         shell: bash
         run: |
           set -e
-          SRC="gourd-ai-desktop/build/icons/icon.png"
+          SRC="gourdai-java/gourd-ai-desktop/build/icons/icon.png"
           DIR="$(mktemp -d)/icon.iconset"
           mkdir -p "$DIR"
           for s in 16 32 128 256 512; do
             sips -z "$s" "$s" "$SRC" --out "$DIR/icon_${s}x${s}.png" >/dev/null
             sips -z "$((s*2))" "$((s*2))" "$SRC" --out "$DIR/icon_${s}x${s}@2x.png" >/dev/null
           done
-          iconutil -c icns "$DIR" -o "gourd-ai-desktop/build/icons/icon.icns"
+          iconutil -c icns "$DIR" -o "gourdai-java/gourd-ai-desktop/build/icons/icon.icns"
 
       # 对应本地构建脚本的 [5/5]（lockfile 未入库，使用 npm install；
       # .npmrc 中的 npmmirror 镜像在 runner 上不可达，先移除再安装）
       - name: 安装前端依赖
         shell: bash
-        working-directory: gourd-ai-desktop
+        working-directory: gourdai-java/gourd-ai-desktop
         run: |
           set -e
           rm -f .npmrc
@@ -165,7 +165,7 @@ jobs:
       - name: 打包（Windows / Linux）
         if: matrix.platform != 'mac'
         shell: bash
-        working-directory: gourd-ai-desktop
+        working-directory: gourdai-java/gourd-ai-desktop
         run: npm run build:${{ matrix.platform }}
 
       # 分两次打包：每次换入对应架构的 JRE，electron-builder 用 --x64/--arm64 过滤目标架构
@@ -174,7 +174,7 @@ jobs:
       - name: 打包（macOS x64 + arm64）
         if: matrix.platform == 'mac'
         shell: bash
-        working-directory: gourd-ai-desktop
+        working-directory: gourdai-java/gourd-ai-desktop
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -216,7 +216,7 @@ jobs:
       - name: 校验 macOS 签名
         if: matrix.platform == 'mac'
         shell: bash
-        working-directory: gourd-ai-desktop
+        working-directory: gourdai-java/gourd-ai-desktop
         run: |
           set -e
           for app in out/mac-arm64/*.app out/mac/*.app; do
@@ -240,7 +240,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'win' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-desktop/out/*.exe
+          path: gourdai-java/gourd-ai-desktop/out/*.exe
           archive: false
           if-no-files-found: error
 
@@ -248,7 +248,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'linux' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-desktop/out/*.AppImage
+          path: gourdai-java/gourd-ai-desktop/out/*.AppImage
           archive: false
           if-no-files-found: error
 
@@ -256,7 +256,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'linux' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-desktop/out/*.deb
+          path: gourdai-java/gourd-ai-desktop/out/*.deb
           archive: false
           if-no-files-found: error
 
@@ -269,8 +269,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           path: |
-            gourd-ai-desktop/out/*.dmg
-            !gourd-ai-desktop/out/*-arm64.dmg
+            gourdai-java/gourd-ai-desktop/out/*.dmg
+            !gourdai-java/gourd-ai-desktop/out/*-arm64.dmg
           archive: false
           if-no-files-found: error
 
@@ -278,7 +278,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'mac' }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-desktop/out/*-arm64.dmg
+          path: gourdai-java/gourd-ai-desktop/out/*-arm64.dmg
           archive: false
           if-no-files-found: error
 
@@ -288,7 +288,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          path: gourd-ai-desktop/out/latest*.yml
+          path: gourdai-java/gourd-ai-desktop/out/latest*.yml
           archive: false
           if-no-files-found: warn
 
@@ -301,7 +301,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gwork-blockmap-${{ matrix.platform }}
-          path: gourd-ai-desktop/out/*.blockmap
+          path: gourdai-java/gourd-ai-desktop/out/*.blockmap
           if-no-files-found: warn
 
   # 打 v* tag 时把三平台产物汇总发布到同名 GitHub Release。

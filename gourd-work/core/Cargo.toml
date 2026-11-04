@@ -1,0 +1,48 @@
+[package]
+name = "gourd-work-core"
+description = "GWork Rust-native agent kernel (ReAct loop, tools, sessions, streaming protocol)"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+async-trait.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+walkdir.workspace = true
+regex.workspace = true
+glob.workspace = true
+dirs.workspace = true
+encoding_rs.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+base64.workspace = true
+url.workspace = true
+serde_urlencoded = "0.7"
+rand.workspace = true
+sha2.workspace = true
+hex.workspace = true
+once_cell.workspace = true
+mime_guess.workspace = true
+cron.workspace = true
+tokio-tungstenite.workspace = true
+notify.workspace = true
+indexmap = { version = "2.11.4", features = ["serde"] }
+flate2 = "1.1.10"
+fancy-regex = "0.20.0"
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+tokio-test = "0.4"
+tower.workspace = true

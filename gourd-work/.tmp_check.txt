@@ -1,0 +1,9 @@
+﻿cargo :     Blocking waiting for file lock on build directory
+At line:10 char:38
++ ... gourd-work; cargo check -p gourd-work-core --lib --message-format sho ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...build directory:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking gourd-work-core v0.3.0 (D:\work\gourd\gourdai\gourd-work\core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.04s

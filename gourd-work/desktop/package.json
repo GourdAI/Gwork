@@ -1,0 +1,26 @@
+{
+  "name": "gourd-work-desktop",
+  "version": "0.3.0",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "description": "GWork Desktop (Tauri + Rust-native kernel) —— 内核进程内嵌，无 JVM 子进程",
+  "homepage": "https://gourdwork.com",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build --ci",
+    "build:win": "tauri build --ci --bundles nsis",
+    "build:mac": "tauri build --ci --bundles app,dmg",
+    "build:linux": "npm run build:linux:deb && npm run build:linux:appimage",
+    "build:linux:deb": "tauri build --ci --bundles deb",
+    "build:linux:appimage": "tauri build --ci --bundles appimage --verbose",
+    "check": "cargo check --workspace",
+    "clippy": "cargo clippy --workspace --all-targets",
+    "test": "cargo test --workspace",
+    "test:js": "node --test test/*.test.js",
+    "test:ctx": "node test/e2e-context-store.probe.js",
+    "test:all": "npm run test && npm run test:js"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.0"
+  }
+}

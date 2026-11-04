@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GWork</title>
+  <link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">⌁ GWork</div>
+        <button id="newChatBtn" class="btn-primary" title="新建会话">＋ 新会话</button>
+      </div>
+      <nav id="mainNav">
+        <button class="nav-item active" data-view="chat">💬 对话</button>
+        <button class="nav-item" data-view="automation">⏱ 自动化</button>
+        <button class="nav-item" data-view="memory">🧠 记忆</button>
+        <button class="nav-item" data-view="skills">🧩 技能</button>
+        <button class="nav-item" data-view="channels">📡 通道</button>
+        <button class="nav-item" data-view="files">📁 文件</button>
+        <button class="nav-item" data-view="terminal">⌨ 终端</button>
+        <button class="nav-item" data-view="usage">📊 用量</button>
+        <button class="nav-item" data-view="settings">⚙ 设置</button>
+      </nav>
+      <div class="sidebar-footer">
+        <div id="sessionList" class="session-list"></div>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main id="main">
+      <!-- Chat view -->
+      <section id="view-chat" class="view active">
+        <div class="chat-toolbar">
+          <select id="modelSelect" title="模型"></select>
+          <select id="accessSelect" title="权限档位">
+            <option value="default">默认权限</option>
+            <option value="full">完全访问</option>
+          </select>
+          <span id="connStatus" class="conn-status">●</span>
+        </div>
+        <div id="messageList" class="message-list"></div>
+        <div class="chat-input-area">
+          <div id="pendingAttachments" class="pending-attachments"></div>
+          <div class="input-row">
+            <button id="attachBtn" class="icon-btn" title="添加附件">📎</button>
+            <input type="file" id="fileInput" multiple style="display:none" />
+            <textarea id="chatInput" placeholder="输入任务，Enter 发送，Shift+Enter 换行" rows="1"></textarea>
+            <button id="sendBtn" class="btn-primary">发送</button>
+            <button id="stopBtn" class="btn-danger" style="display:none">停止</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Automation view -->
+      <section id="view-automation" class="view">
+        <div class="view-header">
+          <h2>自动化任务（Loop）</h2>
+          <button id="addLoopBtn" class="btn-primary">＋ 新建任务</button>
+        </div>
+        <div id="loopList" class="loop-list"></div>
+      </section>
+
+      <!-- Memory view -->
+      <section id="view-memory" class="view">
+        <div class="view-header">
+          <h2>长期记忆</h2>
+          <button id="clearMemoryBtn" class="btn-danger">清空全部</button>
+        </div>
+        <div id="memoryList" class="memory-list"></div>
+      </section>
+
+      <!-- Skills view -->
+      <section id="view-skills" class="view">
+        <div class="view-header"><h2>已安装技能</h2></div>
+        <div id="skillList" class="skill-list"></div>
+      </section>
+
+      <!-- Channels view -->
+      <section id="view-channels" class="view">
+        <div class="view-header"><h2>IM 通道</h2></div>
+        <div id="channelList" class="channel-list"></div>
+      </section>
+
+      <!-- Files view -->
+      <section id="view-files" class="view">
+        <div class="view-header"><h2>文件浏览</h2></div>
+        <div class="files-layout">
+          <div id="fileTree" class="file-tree"></div>
+          <div class="file-detail">
+            <div id="filePath" class="file-path"></div>
+            <pre id="fileContent" class="file-content"></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Terminal view -->
+      <section id="view-terminal" class="view">
+        <div class="view-header"><h2>终端</h2></div>
+        <div id="terminalOutput" class="terminal-output"></div>
+        <div class="terminal-input-row">
+          <span class="prompt">$</span>
+          <input type="text" id="terminalInput" placeholder="输入命令" />
+        </div>
+      </section>
+
+      <!-- Usage view -->
+      <section id="view-usage" class="view">
+        <div class="view-header"><h2>用量统计</h2></div>
+        <div id="usageStats" class="usage-stats"></div>
+        <div id="usageHeatmap" class="usage-heatmap"></div>
+      </section>
+
+      <!-- Settings view -->
+      <section id="view-settings" class="view">
+        <div class="view-header"><h2>设置</h2></div>
+        <div class="settings-tabs">
+          <button class="tab active" data-tab="general">通用</button>
+          <button class="tab" data-tab="models">模型</button>
+          <button class="tab" data-tab="permission">权限</button>
+          <button class="tab" data-tab="acp">编辑器接入</button>
+        </div>
+        <div id="settings-general" class="settings-panel active"></div>
+        <div id="settings-models" class="settings-panel"></div>
+        <div id="settings-permission" class="settings-panel"></div>
+        <div id="settings-acp" class="settings-panel"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Modals -->
+  <div id="modalOverlay" class="modal-overlay" style="display:none">
+    <div id="modalBox" class="modal-box"></div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/chat.js"></script>
+  <script src="js/views.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

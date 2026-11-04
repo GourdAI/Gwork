@@ -1,0 +1,25 @@
+[package]
+name = "gourd-work-cli"
+description = "GWork CLI - terminal front for the Rust-native agent kernel"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "gwork"
+path = "src/main.rs"
+
+[dependencies]
+gourd-work-core = { path = "../core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+futures-util.workspace = true
+uuid.workspace = true
+tokio-util.workspace = true
+chrono.workspace = true

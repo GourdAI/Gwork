@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <title>GWork</title>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta rel="apple-touch-icon" href="/img/favicon.png"/>
+    <link rel="shortcut icon" type="image/x-icon" href="/img/favicon.png"/>
+    <link rel="icon" sizes="any" type="image/x-icon" href="/img/favicon.png"/>
+    <link rel="stylesheet" href="/layui/css/layui.css"/>
+    <!-- layui 图标字体预热：layer / laydate 等内置组件的图标走该字体。
+         不预热时字体要等首次用到才去下载，桌面端（Tauri/WebView2）首启会出现缺字方块。 -->
+    <link rel="preload" as="font" type="font/woff2" href="/layui/font/iconfont.woff2?v=293" crossorigin="anonymous"/>
+    <link rel="stylesheet" href="/css/theme.css"/>
+    <link rel="stylesheet" href="/css/app.css"/>
+    <link rel="stylesheet" href="/css/settings.css"/>
+    <link rel="stylesheet" href="/css/code.css"/>
+    <link rel="stylesheet" href="/css/automation.css"/>
+    <link rel="stylesheet" href="/css/skills.css"/>
+    <link rel="stylesheet" href="/css/channel.css"/>
+    <link rel="stylesheet" href="/css/model-settings.css"/>
+    <link rel="stylesheet" href="/css/memory-view.css"/>
+    <link rel="stylesheet" href="/css/usage-stats.css"/>
+    <link rel="stylesheet" href="/css/task-monitor.css"/>
+    <link rel="stylesheet" href="/highlight/github.min.css" media="(prefers-color-scheme: light)" id="hljs-light-theme"/>
+    <link rel="stylesheet" href="/highlight/github-dark.min.css" media="(prefers-color-scheme: dark)" id="hljs-dark-theme" disabled/>
+    <!-- 编辑器样式由 Monaco editor.main.js 运行时自动注入（vs/editor/editor.main.css） -->
+    <style>
+        /* 启动阶段不再设全屏遮罩：应用打开即展示首页骨架（sidebar + 主区）。
+           旧版 #appBootLoading 遮罩要等最后一个 app-*.js 的 onload 才移除，
+           反而把「已可用的界面」盖住，桌面端表现为一段无意义的转圈缓冲页。 */
+        /* i18n 就绪前隐藏需翻译的文本，避免中文兜底文本闪烁 */
+        [data-i18n].i18n-hidden { opacity: 0 !important; transition: none !important; }
+        [data-i18n].i18n-hidden::after { content: ''; display: inline-block; width: 0; overflow: hidden; }
+    </style>
+</head>
+<body data-theme="light">
+<script>
+    // 主题预置：在首帧绘制前用 localStorage 的模式/强调色覆盖 body 默认值，消除“亮→暗”闪烁。
+    // 必须放在 body 首个节点——此时 body 已存在、遮罩等可见元素尚未解析绘制，内联脚本同步
+    // 执行完再绘制首帧，故不闪。app-ui.js 稍后按同一规则再设一次是幂等的。
+    // 规则与 app-ui.js 的 getThemeMode/getAccent 保持一致：
+    //   'chat-theme-mode' = system|light|dark（缺省 system，跟随 OS）；
+    //   'chat-theme' 为旧版本/解析值；'chat-accent' 为强调色预设。
+    // JS 失败时退回 body 上硬编码的 data-theme="light" 兜底。
+    (function () {
+        try {
+            var mode = localStorage.getItem('chat-theme-mode');
+            var t;
+            if (mode === 'light' || mode === 'dark') {
+                t = mode;
+            } else if (mode === 'system') {
+                t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+            } else {
+                t = localStorage.getItem('chat-theme');
+                if (t !== 'light' && t !== 'dark') t = 'light';
+            }
+            document.body.setAttribute('data-theme', t);
+            var a = localStorage.getItem('chat-accent');
+            if (a) document.body.setAttribute('data-accent', a);
+        } catch (e) {}
+    })();
+</script>
+
+<!-- ============ 共享外壳（sidebar / 移动端菜单 / 拖拽把手 / 主区容器）============ -->
+<!-- 各模式界面（chat / code / settings）由 /js/app-bootstrap.js 从 chat.html、code.html、settings.html 注入 -->
+
+<!-- Sidebar -->
+<div class="sidebar">
+    <div class="sidebar-header">
+        <div class="sidebar-header-top">
+            <div class="sidebar-logo">
+                <img src="/img/favicon.png" alt="GWork" class="sidebar-logo-img"/>
+                <span class="sidebar-logo-text">GWork</span>
+            </div>
+        </div>
+        <!-- 主导航：整行按钮（图标 + 文字 + 快捷键提示） -->
+        <div class="main-nav">
+            <button class="main-nav-item" id="newChatBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+                <span class="main-nav-label" data-i18n="app.sidebar.new_task">新建任务</span>
+                <span class="main-nav-kbd">Ctrl+N</span>
+            </button>
+            <button class="main-nav-item" id="modelConfigNavBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                <span class="main-nav-label" data-i18n="app.sidebar.model_config">模型配置</span>
+            </button>
+            <button class="main-nav-item" id="automationNavBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                <span class="main-nav-label" data-i18n="app.sidebar.automation">自动化</span>
+            </button>
+            <button class="main-nav-item" id="skillsNavBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></svg>
+                <span class="main-nav-label" data-i18n="app.skills">技能</span>
+            </button>
+            <button class="main-nav-item" id="memoryNavBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>
+                <span class="main-nav-label" data-i18n="app.sidebar.memory">记忆</span>
+            </button>
+            <button class="main-nav-item" id="channelNavBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.2 19.1 19.1"/></svg>
+                <span class="main-nav-label" data-i18n="app.sidebar.remote_channel">远控通道</span>
+            </button>
+            <button class="main-nav-item" id="usageNavBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 16v-5"/><path d="M12 16V8"/><path d="M16 16v-8"/></svg>
+                <span class="main-nav-label" data-i18n="settings.tabs.usage">使用统计</span>
+            </button>
+        </div>
+    </div>
+    <!-- 历史 tab 行：对话 / 项目 两个 pill tab + 展开、搜索、清空操作按钮 -->
+    <div class="history-tabs-row" id="historyScopeBar">
+        <div class="history-tabs">
+            <button class="history-tab" id="scopeGlobalBtn" data-scope="global">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+                <span data-i18n="app.sidebar.tab_chats">对话</span>
+            </button>
+            <button class="history-tab" id="scopeProjectBtn" data-scope="project">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                <span data-i18n="app.sidebar.tab_projects">项目</span>
+            </button>
+        </div>
+        <div class="history-tab-actions">
+            <button class="sidebar-icon-btn" id="expandAllBtn" data-i18n-title="app.sidebar.expand_all" style="display:none;">
+                <svg class="expand-all-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+                <svg class="collapse-all-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+            </button>
+            <button class="sidebar-icon-btn" id="filterListBtn" data-i18n-title="app.sidebar.search">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            </button>
+            <button class="sidebar-icon-btn" id="clearAllBtn" data-i18n-title="app.sidebar.clear_all">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+        </div>
+    </div>
+    <div class="sidebar-search-bar" id="sidebarSearchBar" style="display:none;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="sidebarSearchInput" data-i18n-placeholder="app.search_history" autocomplete="off"/>
+        <button class="sidebar-search-clear" id="sidebarSearchClear" style="display:none;">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+    </div>
+    <div class="sidebar-list" id="historyList"></div>
+    <div class="sidebar-footer">
+        <button class="settings-btn" id="settingsBtn" data-i18n-title="settings.title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+            <span class="sidebar-text" style="margin-left:6px;font-size:12px;" data-i18n="settings.title">设置</span>
+        </button>
+        <!-- 桌面端「更新」按钮：仅在检测到新版的三种状态（可下载 / 下载中 / 待重启）下出现，
+             默认隐藏（样式见 app.css .sidebar-update-btn），状态驱动逻辑见 app-update-badge.js。
+             刻意不写 data-i18n：文案由 JS 按状态机实时赋值，静态翻译属性会被覆盖。
+             【顺序纪律】必须排在 settingsBtn 之后。底栏布局是 justify-content:space-between：
+             首子项恒贴左端（设置位置不随「有无更新」跳变）、末子项贴右端（更新出现即靠右）。
+             顺序若调换，设置会在有/无更新之间左右跳位（真浏览器实测 x=14 → x=201）。
+             此约束由 sidebar-update-badge.test.js 锁定，勿调换。 -->
+        <button class="sidebar-update-btn" id="sidebarUpdateBtn" type="button" data-state="idle">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M4 21h16"/></svg>
+            <span class="sidebar-update-btn-label" id="sidebarUpdateLabel"></span>
+            <span class="sidebar-update-dot" aria-hidden="true"></span>
+        </button>
+    </div>
+</div>
+<button class="mobile-menu-btn" id="mobileMenuBtn" data-i18n-title="app.menu">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+</button>
+<div class="mobile-overlay" id="mobileOverlay"></div>
+
+<div class="sidebar-resize-handle" id="sidebarResizeHandle"></div>
+
+<!-- Main（chat.html 的欢迎/对话视图与 code.html 的编辑器/差异视图注入此容器）-->
+<div class="main-area">
+    <!-- 标题栏拖拽条：桌面壳下 44px 可拖拽区（与 app.css 的跨栈高度契约同值）。左端空白复用为「当前任务名」展示位
+         （.titlebar-task，逻辑见 app-titlebar-task.js）：无活动会话时 hidden 不占位，
+         有会话时显示会话名。
+         【纪律一】终端/监控按钮不得塞进本容器（skills/浏览器 code 模式整条隐藏，
+         按钮会随之消失，见 titlebar-monitor-contract.test.js）。
+         【纪律二】本块是纯标题文字，不是按钮：不带 role/tabindex、不带状态圆点、
+         不可聚焦、不可选中（CSS pointer-events:none + user-select:none）。用户两次
+         要求「前面的圆点不需要」并否掉了任何悬停框选观感——不要把 role="button"
+         加回来：那会让它重新可聚焦（:focus-visible 描边＝用户说的「框选」），
+         也会让 chip 从拖拽区里被摘出去，鼠标压在标题上反而不能拖窗口。 -->
+    <div class="titlebar-drag-region">
+        <div class="titlebar-task" id="titlebarTask" hidden>
+            <span class="titlebar-task-label" id="titlebarTaskLabel"></span>
+        </div>
+    </div>
+    <!-- 主内容区拖放遮罩：覆盖整个 .main-area（原落区只有输入框，占视口 8%）。
+         文件树面板与设置浮层是 body 级（在本容器之外），天然不受影响；
+         Monaco 编辑器区在 app-ui.js 里按选择器排除，保留「拖文件到编辑器=打开文件」语义。 -->
+    <div class="drop-overlay" id="mainDropOverlay">
+        <div class="drop-overlay-content">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <span data-i18n="app.drop_attach">松开以添加附件</span>
+        </div>
+    </div>
+</div>
+
+<!-- code.html 的文件树面板、settings.html 的设置浮层注入到 body 级（此处之后） -->
+
+<!-- 远程工作区连接向导（P1 SSH 骨架）：app-remote.js 的挂载容器。body 级浮层，
+     默认无 open 类不占位；面板/表单/连接日志由 app-remote.js renderWizard 动态注入。 -->
+<div class="remote-wizard-backdrop" id="remoteWizard"></div>
+
+<!-- ============ 标题栏动作组（终端 / 任务监控）============
+     body 级 fixed 贴顶行右端、原生窗口按钮左侧：不放进 .titlebar-drag-region，
+     因为该拖拽条在 skills 视图与浏览器 code 模式会被整体隐藏（skills.css:52 /
+     code.css:323），塞进去的按钮会随之消失。右偏移由 app-titlebar-actions.js
+     按平台运行时计算（Tauri 自绘控件条 102px，注入脚本暴露总宽 /
+     Electron 原生 overlay 不可覆盖退 138 / mac 红绿灯在左不占右侧），
+     CSS 只给无桌面壳浏览器的缺省值。 -->
+<div class="titlebar-actions" id="titlebarActions">
+    <button class="titlebar-action-btn" id="titlebarTerminalBtn" type="button" data-i18n-title="code.terminal.title" aria-pressed="false">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/></svg>
+    </button>
+    <button class="titlebar-action-btn" id="titlebarMonitorBtn" type="button" data-i18n-title="monitor.title" aria-expanded="false">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg>
+    </button>
+</div>
+
+<!-- 任务监控右栏：版式内右栏（.main-area 打开时让出宽度），不遮挡对话/查看器内容。
+     展示当前会话的环境信息 / 产出 / 来源 / 技能调用 / 记忆更新。数据与渲染见
+     app-task-monitor.js；默认无 open 类不占位。
+     【无头部纪律】不设「任务监控」标题与刷新钮（用户参照稿即无头部）：开合与高亮
+     由标题栏监控按钮承担，数据靠打开时拉取 + 6s 轮询 + 会话/工作区变化重拉。
+     契约测试锁定 head/close 两件不得回归。 -->
+<div class="task-monitor-drawer" id="taskMonitorDrawer" aria-hidden="true">
+    <div class="task-monitor-body" id="taskMonitorBody">
+        <section class="tm-section" id="tmSecEnv">
+            <button class="tm-sec-head" type="button" data-tm-sec="env" aria-expanded="true">
+                <span class="tm-sec-title" data-i18n="monitor.env">环境信息</span>
+                <svg class="tm-sec-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div class="tm-sec-body" id="tmEnvBody"></div>
+        </section>
+        <section class="tm-section" id="tmSecOutputs">
+            <button class="tm-sec-head" type="button" data-tm-sec="outputs" aria-expanded="true">
+                <span class="tm-sec-title" data-i18n="monitor.outputs">产出</span>
+                <svg class="tm-sec-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div class="tm-sec-body" id="tmOutputsBody"></div>
+        </section>
+        <section class="tm-section" id="tmSecSources">
+            <button class="tm-sec-head" type="button" data-tm-sec="sources" aria-expanded="true">
+                <span class="tm-sec-title" data-i18n="monitor.sources">来源</span>
+                <svg class="tm-sec-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div class="tm-sec-body" id="tmSourcesBody"></div>
+        </section>
+        <section class="tm-section" id="tmSecSkills">
+            <button class="tm-sec-head" type="button" data-tm-sec="skills" aria-expanded="true">
+                <span class="tm-sec-title" data-i18n="monitor.skills">技能调用</span>
+                <svg class="tm-sec-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div class="tm-sec-body" id="tmSkillsBody"></div>
+        </section>
+        <!-- 记忆行固定在最底部（参照稿形态）：状态点 + 跳转记忆视图 -->
+        <div class="tm-memory-row" id="tmMemoryRow">
+            <span class="tm-memory-label" id="tmMemoryLabel" data-i18n="monitor.memory_not_updated">记忆未更新</span>
+            <span class="tm-memory-dot" id="tmMemoryDot" aria-hidden="true"></span>
+            <button class="tm-memory-jump" id="tmMemoryJumpBtn" type="button" data-i18n-title="monitor.open_memory">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- 全局终端面板：原 code.html 编辑器列内的底部终端上移为 body 级 fixed 底栏，
+     使 chat 等非 code 模式同样可用（标题栏终端按钮的全局入口）。连接/池/渲染
+     逻辑仍全部在 app-terminal.js，markup 仅换挂载层级。 -->
+<div class="code-terminal-resize-handle" id="codeTerminalResizeHandle"></div>
+<div class="code-terminal-pane" id="codeTerminalPane">
+    <div class="code-terminal-tabbar">
+        <!-- 多实例标签栏：每个 tab 一个独立 shell（输出/历史/连接各自隔离），
+             由 app-terminal.js renderTabs 动态填充；静态仅留空容器。 -->
+        <div class="code-terminal-tabs" id="codeTerminalTabs"></div>
+        <div class="code-terminal-actions">
+            <button class="code-terminal-act-btn" id="codeTerminalNewBtn" data-i18n-title="terminal.new_tab">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+            <button class="code-terminal-act-btn" id="codeTerminalClearBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+            <button class="code-terminal-act-btn" id="codeTerminalRestartBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            </button>
+            <button class="code-terminal-act-btn" id="codeTerminalCloseBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </div>
+    </div>
+    <!-- 内联命令行：输出与输入同处一个可滚动区，输入光标直接贴在 shell 提示符后。
+         多实例：容器静态留空，激活 tab 的输出缓冲与输入框由 app-terminal.js 挂载。 -->
+    <div class="code-terminal-body" id="codeTerminalBody"></div>
+</div>
+
+<!-- 此处原为启动遮罩 #appBootLoading，已移除：打开即展示首页，不再经过转圈缓冲页。
+     后端启动失败同样不做任何提示（无感，界面自行降级为空态）；右下角非阻塞错误条
+     仅保留给界面片段装配失败这一种情况（见 app-bootstrap.js showBootError）。 -->
+
+<!-- ============ 第三方库（不依赖应用 DOM，静态按序加载，与原 web.html 一致）============ -->
+<!-- 内核地址改写桥：Rust 壳页面源是 tauri.localhost，内核在 127.0.0.1:随机端口，
+     不引入本文件则所有相对路径请求落空、WS 直连 ERR_CONNECTION_REFUSED。
+     必须早于 layui 与全部 app-*.js。Java 内核同源提供 static，故该文件不进 static。 -->
+<script src="/js/kernel-bridge.js"></script>
+<script src="/layui/layui.js"></script>
+<script>window.$ = layui.$;</script>
+<script src="/js/marked.min.js"></script>
+<script src="/js/qrcode.min.js"></script>
+<!-- mermaid.min.js（约 3.2MB）改为按需加载：由 app-ui.js 的 processMermaidBlocks 在
+     首次遇到 ```mermaid 代码块时动态注入，纯对话场景可省约 25-40MB 常驻内存 -->
+<script src="/highlight/highlight.min.js"></script>
+
+<!-- Monaco Editor（离线打包，Code 模式编辑器；AMD 入口 vs/editor/editor.main，Worker/CSS 由编辑器运行时自举）-->
+<script src="/monaco/loader.js"></script>
+
+<!-- ============ 片段装配 + 应用脚本按序加载 ============ -->
+<script src="/js/app-i18n.js"></script>
+<script src="/js/app-bootstrap.js"></script>
+</body>
+</html>

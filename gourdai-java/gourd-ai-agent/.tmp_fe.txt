@@ -1,0 +1,33 @@
+﻿✔ 列表行渲染出删除按钮（含 data-name 与 i18n 标题） (1.0969ms)
+✔ 列表行删除按钮走统一的确认 + 删除链路 (0.1604ms)
+✔ 确认弹窗单一来源：表单页删除按钮复用 mcpConfirmRemoveServer (0.1324ms)
+✔ 删除接口与刷新链路保持可用 (0.7743ms)
+✔ tauri/ui 发布副本与 static 源保持同步 (2.0237ms)
+✔ A: McpTypeResolver 覆盖全部上游别名（含 streamable_stateless） (1.81ms)
+✔ A: 控制器 list/add/update/check 均接入 McpTypeResolver (2.4246ms)
+✔ E: 检测连接 HTTP 分支使用 listTools()+doOnError 错误链 (0.5717ms)
+✔ D: tools/save 空值防御（null → emptyList，@Param required=false） (0.6893ms)
+✔ B: 新增 /import/parse/string 端点并与文件导入共享 parseMcpConfigNode (0.7394ms)
+✔ B: settings.html 导入按钮改为下拉菜单（文件/字符串两项） (1.1544ms)
+✔ B: 前端菜单事件与字符串导入对话框（POST /import/parse/string） (0.6963ms)
+✔ F1: toggle 后强制刷新列表（确保开关状态与服务端一致） (0.3609ms)
+✔ F2: 检测连接超时使用专用提示（15 秒） (1.1088ms)
+✔ F3: 撤销导入确认改用 layConfirm（与全局弹窗风格统一） (0.4391ms)
+✔ F4: 空状态文案使用专用键（不再拼接 no_data） (0.4786ms)
+✔ streamable_stateless 贯通：导入/编辑展示/保存兜底 (0.3375ms)
+✔ CSS：下拉菜单与字符串对话框样式齐备 (1.3418ms)
+✔ i18n：12 个语言包含全部 16 个新键且非空 (16.2338ms)
+✔ MCP：列表项渲染支持 disabled 置灰（renderMcpList） (0.9969ms)
+✔ LSP / OpenAPI：列表项渲染支持 disabled 置灰 (1.8658ms)
+✔ CSS：.mcp-server-item.disabled 置灰规则存在（含图标变体） (0.3922ms)
+✔ LSP：toggle 无论成败都刷新列表 (0.2692ms)
+✔ OpenAPI：toggle 无论成败都刷新列表 (0.2295ms)
+✔ tauri/ui 发布副本与 static 源保持同步（本批 5 个文件） (2.8439ms)
+ℹ tests 25
+ℹ suites 0
+ℹ pass 25
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 148.3565

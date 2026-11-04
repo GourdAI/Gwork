@@ -1,0 +1,10 @@
+﻿cargo :    Compiling gourd-work-core v0.3.0 (D:\work\gourd\gourdai\gourd-work\core)
+At line:10 char:38
++ ... gourd-work; cargo test -p gourd-work-cli > .tmp_cli.txt 2>.tmp_clie.t ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling go...ourd-work\core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling gourd-work-cli v0.3.0 (D:\work\gourd\gourdai\gourd-work\cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.95s
+     Running unittests src\main.rs (target\debug\deps\gwork-6acffa885b52ec11.exe)
