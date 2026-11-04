@@ -56,7 +56,19 @@ cat > "$TARGET_BIN_DIR/gwork" <<'LAUNCHER'
 #!/bin/bash
 # gwork-cli-installed
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-JAVA_OPTS=("-Dfile.encoding=UTF-8" "-Dgwork.home=$HOME")
+# JVM 内存参数：与桌面端 gourd-ai-tauri/src-tauri/src/backend.rs 的 jvm_memory_opts() 同源。
+# 不给这组参数时 JDK 会按物理内存推导默认值（实测 32G 机器上 InitialHeap=512M /
+# MaxHeap=8.4G / G1GC），一启动就预提交 512MB，且 G1 峰值后不把堆归还 OS。
+# SerialGC + MinHeapFreeRatio/MaxHeapFreeRatio 使 GC 后按比例收缩并归还 OS；
+# 只设 -Xms/-Xmx 而不配 FreeRatio 是负优化（实测反升到 341M）。
+# 【改动约】上方 backend.rs 的取值变动时，本文件与 install.ps1 需同步。
+JAVA_OPTS=(
+  "-Xms48m" "-Xmx1024m" "-Xss512k"
+  "-XX:+UseSerialGC" "-XX:MinHeapFreeRatio=10" "-XX:MaxHeapFreeRatio=25"
+  "-XX:MaxMetaspaceSize=192m" "-XX:CompressedClassSpaceSize=64m"
+  "-XX:ReservedCodeCacheSize=96m" "-XX:InitialCodeCacheSize=4m" "-XX:-UsePerfData"
+  "-Dfile.encoding=UTF-8" "-Dgwork.home=$HOME"
+)
 JAVA_VER=$(java -version 2>&1 | sed -n 's/.*version "\([0-9]*\).*/\1/p' | head -1)
 [ -n "$JAVA_VER" ] && [ "$JAVA_VER" -ge 21 ] 2>/dev/null && JAVA_OPTS+=("--enable-native-access=ALL-UNNAMED")
 [ -n "$MSYSTEM" ] && JAVA_OPTS+=("-Djline.terminal.type=xterm-256color")

@@ -503,6 +503,38 @@ pub async fn wait_for_backend(port: u16, timeout_ms: u64) -> Result<()> {
 
 // ─── 启动 / 停止 ─────────────────────────────────────────────────────────────
 
+/// JVM 内存参数——桌面 GUI、CLI 启动器、install 包的**单一真源**。
+///
+/// 【为什么要抽出来】这组参数此前只存在于 `start_backend` 的字面量里，CLI 启动器
+/// （`cli_provision::build_java_opts`）与发布包启动器（`release/install.{sh,ps1}`）
+/// 完全没有引用它，导致同一个后端经不同入口启动时内存行为差出一个量级：走 JDK 默认时
+/// 本机实测 `-XX:+PrintFlagsFinal` 得到 InitialHeapSize=512MB / MaxHeapSize=8.4G / UseG1GC，
+/// 一启动就预提交 512MB，且 G1 峰值后堆 committed 不归还 OS——这正是用户看到「有时能到
+/// 500M」的主要来源（GUI 进程实测稳态 303MB，峰值 683MB）。
+///
+/// 【配套纪律】`MinHeapFreeRatio=10`/`MaxHeapFreeRatio=25` 必须与 `-Xms`/`-Xmx` 一起给：
+/// 只设 Xms/Xmx 而不给 FreeRatio 是负优化（Electron 侧早期实测反升到 341M）。
+///
+/// 【入口差异】`-Dgwork.home` 各入口取值不同（GUI 用运行时基目录，CLI 用安装目录）、
+/// `-Dgwork.remote=true` 仅远端部署需要，均不在本函数内，由调用方自行追加。
+pub fn jvm_memory_opts() -> Vec<String> {
+    vec![
+        "-Xms48m".into(),
+        "-Xmx1024m".into(),
+        "-Xss512k".into(),
+        "-XX:+UseSerialGC".into(),
+        "-XX:MinHeapFreeRatio=10".into(),
+        "-XX:MaxHeapFreeRatio=25".into(),
+        "-XX:MaxMetaspaceSize=192m".into(),
+        "-XX:CompressedClassSpaceSize=64m".into(),
+        "-XX:ReservedCodeCacheSize=96m".into(),
+        "-XX:InitialCodeCacheSize=4m".into(),
+        // 关掉 perf 数据文件：桌面单用户不需要 jstat/jcmd 采样，省一处共享内存映射
+        // （代价：jstat 不可用，排障请用 `jcmd <pid> GC.heap_info` / `VM.flags`，实测可用）
+        "-XX:-UsePerfData".into(),
+    ]
+}
+
 /// 启动 gourd-ai-agent JAR 子进程。若已有存活进程则直接复用其 PID。
 async fn start_backend(port: u16) -> Result<u32> {
     // 若已有存活进程，直接复用
@@ -550,8 +582,8 @@ async fn start_backend(port: u16) -> Result<u32> {
             }
         });
 
-    // JVM 内存参数与 Electron 版严格一致：SerialGC + FreeRatio，GC 后按比例收缩并归还 OS。
-    // 注意：仅设 -Xms/-Xmx 而不配 MinHeapFreeRatio/MaxHeapFreeRatio 是负优化。
+    // JVM 内存参数取自 `jvm_memory_opts()`（与 CLI 启动器、install 包同源，详见其注释）：
+    // SerialGC + FreeRatio，GC 后按比例收缩并归还 OS。
     //
     // -Xmx 从 512m 上调到 1024m：512m 曾在打开大会话时稳定 OOM（实测 84MB/24 万行的
     // stream.ndjson，历史加载路径把整个文件读进内存后仅此一项就占 180MB+，叠加 agent
@@ -561,23 +593,13 @@ async fn start_backend(port: u16) -> Result<u32> {
     // 常驻占用不会因此变大——MinHeapFreeRatio/MaxHeapFreeRatio 仍会在 GC 后把空闲内存还给 OS，
     // -Xmx 只是上限而非预分配。
     let runtime_home = paths::runtime_home_dir();
-    let mut args: Vec<String> = vec![
-        "-Xms48m".into(),
-        "-Xmx1024m".into(),
-        "-Xss512k".into(),
-        "-XX:+UseSerialGC".into(),
-        "-XX:MinHeapFreeRatio=10".into(),
-        "-XX:MaxHeapFreeRatio=25".into(),
-        "-XX:MaxMetaspaceSize=192m".into(),
-        "-XX:CompressedClassSpaceSize=64m".into(),
-        "-XX:ReservedCodeCacheSize=96m".into(),
-        "-XX:InitialCodeCacheSize=4m".into(),
-        "-XX:-UsePerfData".into(),
+    let mut args: Vec<String> = jvm_memory_opts();
+    args.extend_from_slice(&[
         "-Dfile.encoding=UTF-8".into(),
         "-Dsolon.boot.openBrowser=false".into(), // 禁止自动打开浏览器
         // 全局配置区根（与 ACP 子进程一致，保证读同一份全局配置）；不含 .gwork 子目录
         format!("-Dgwork.home={}", runtime_home.display()),
-    ];
+    ]);
     if let Some(level) = file_log_level {
         args.push(format!("-Dsolon.logging.appender.file.level={}", level));
     }

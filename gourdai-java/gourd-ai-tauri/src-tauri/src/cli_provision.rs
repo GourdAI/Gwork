@@ -140,13 +140,22 @@ fn bundled_java_major() -> Option<u32> {
 /// 组装 JVM 参数（编码统一 UTF-8；21+ 追加 native-access）。
 /// 注意：不含任何可能带空格的项；-Dgwork.home 因安装路径常含空格，
 /// 由各启动器按自身引号规则单独承载。
+///
+/// 【内存参数为何必须在此】这里推 `crate::backend::jvm_memory_opts()`（与桌面 GUI 同源）。
+/// 2026-10-27 之前本函数**只放编码参数、零内存参数**，导致 `gwork web` / `gwork cli` 走
+/// JDK 默认值：本机实测（`-XX:+PrintFlagsFinal`，32G 内存）ergonomic 推得
+/// InitialHeapSize=512MB / MaxHeapSize=8.4G / UseG1GC / ParallelGCThreads=13。
+/// 即命令行版一启动就预提交 512MB（这就是用户看到的「内存能高到 500M」），且 G1 峰值后
+/// 不会把堆 committed 归还 OS，常驻不降。桌面 GUI 早已靠这组参数把稳态压到 ~303MB，
+/// 两个入口同一个 jar，差出一个量级——现在对齐。
 fn build_java_opts(major: Option<u32>) -> Vec<String> {
-    let mut opts = vec![
+    let mut opts = crate::backend::jvm_memory_opts();
+    opts.extend([
         "-Dfile.encoding=UTF-8".to_string(),
         "-Dstdout.encoding=UTF-8".to_string(),
         "-Dstderr.encoding=UTF-8".to_string(),
         "-Dstdin.encoding=UTF-8".to_string(),
-    ];
+    ]);
     if let Some(m) = major {
         if m >= 21 {
             opts.push("--enable-native-access=ALL-UNNAMED".to_string());

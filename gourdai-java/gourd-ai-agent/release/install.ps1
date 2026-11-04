@@ -45,7 +45,16 @@ $launcherPs1 = @'
 param([Parameter(ValueFromRemainingArguments)]$RestArgs)
 $JarDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $JarFile = Join-Path $JarDir "gourd-ai-agent.jar"
-$JavaArgs = @("-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8", "-Dstdin.encoding=UTF-8", "-Dgwork.home=$env:USERPROFILE")
+# JVM 内存参数：与桌面端 gourd-ai-tauri/src-tauri/src/backend.rs 的 jvm_memory_opts() 同源。
+# 不给时 JDK 按物理内存推导默认值（实测 32G 机器 InitialHeap=512M / MaxHeap=8.4G / G1GC），
+# 一启动就预提交 512MB 且峰值后不归还 OS。【改动约束】backend.rs 取值变动时本文件需同步。
+$JvmMemArgs = @(
+  "-Xms48m", "-Xmx1024m", "-Xss512k",
+  "-XX:+UseSerialGC", "-XX:MinHeapFreeRatio=10", "-XX:MaxHeapFreeRatio=25",
+  "-XX:MaxMetaspaceSize=192m", "-XX:CompressedClassSpaceSize=64m",
+  "-XX:ReservedCodeCacheSize=96m", "-XX:InitialCodeCacheSize=4m", "-XX:-UsePerfData"
+)
+$JavaArgs = $JvmMemArgs + @("-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8", "-Dstdin.encoding=UTF-8", "-Dgwork.home=$env:USERPROFILE")
 & java @JavaArgs -jar $JarFile @RestArgs
 '@
 $launcherBat = @'
@@ -54,13 +63,15 @@ rem gwork-cli-installed
 setlocal
 set "SCRIPT_DIR=%~dp0"
 set "JAR_FILE=%SCRIPT_DIR%gourd-ai-agent.jar"
-java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -Dstdin.encoding=UTF-8 "-Dgwork.home=%USERPROFILE%" -jar "%JAR_FILE%" %*
+rem JVM 内存参数与 backend.rs 的 jvm_memory_opts() 同源（不给则 JDK 默认预提交 512M 且 G1 不归还 OS）
+java -Xms48m -Xmx1024m -Xss512k -XX:+UseSerialGC -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=25 -XX:MaxMetaspaceSize=192m -XX:CompressedClassSpaceSize=64m -XX:ReservedCodeCacheSize=96m -XX:InitialCodeCacheSize=4m -XX:-UsePerfData -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -Dstdin.encoding=UTF-8 "-Dgwork.home=%USERPROFILE%" -jar "%JAR_FILE%" %*
 '@
 $launcherSh = @'
 #!/bin/bash
 # gwork-cli-installed
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec java "-Dfile.encoding=UTF-8" "-Dgwork.home=$USERPROFILE" -jar "$SCRIPT_DIR/gourd-ai-agent.jar" "$@"
+# JVM 内存参数与 backend.rs 的 jvm_memory_opts() 同源（不给则 JDK 默认预提交 512M 且 G1 不归还 OS）
+exec java -Xms48m -Xmx1024m -Xss512k -XX:+UseSerialGC -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=25 -XX:MaxMetaspaceSize=192m -XX:CompressedClassSpaceSize=64m -XX:ReservedCodeCacheSize=96m -XX:InitialCodeCacheSize=4m -XX:-UsePerfData "-Dfile.encoding=UTF-8" "-Dgwork.home=$USERPROFILE" -jar "$SCRIPT_DIR/gourd-ai-agent.jar" "$@"
 '@
 foreach ($name in @('gwork','gourdai')) { Set-Content (Join-Path $TARGET_BIN_DIR "$name.ps1") $launcherPs1 -Encoding UTF8; Set-Content (Join-Path $TARGET_BIN_DIR "$name.bat") $launcherBat -Encoding UTF8; Set-Content (Join-Path $TARGET_BIN_DIR $name) $launcherSh -Encoding UTF8 }
 
