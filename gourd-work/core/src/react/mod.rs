@@ -719,6 +719,9 @@ impl ReActAgent {
             // P2 caps 1+2 start when the first byte of *this* stream is
             // awaited; idle is measured chunk-to-chunk, total from first
             // select (Java: idle latch reset per event, total latch per stream).
+            // Any frame from the upstream — content, reasoning, tool-call
+            // start/args, usage — proves the connection is alive and resets the
+            // idle clock. See the reset in the `rx.recv()` arm below.
             let stream_started_at = std::time::Instant::now();
             let mut last_chunk_at = std::time::Instant::now();
             let mut idle_expired = false;
@@ -768,7 +771,24 @@ impl ReActAgent {
                         break;
                     }
                     ev = rx.recv() => match ev {
-                        Some(ev) => ev,
+                        Some(ev) => {
+                            // ANY event from the transport is liveness, not just
+                            // `ContentDelta`. Long-thinking models emit a stream of
+                            // `ReasoningDelta` with zero content for minutes, and a
+                            // large tool argument is nothing but
+                            // `ToolCallArgsDelta`. Resetting only on visible text
+                            // (the old behaviour) turned the idle cap into a
+                            // from-stream-start total cap: a healthy, active
+                            // reasoning stream was killed at 150s as "no data
+                            // received" even though frames never stopped — the
+                            // exact "thinking done then timeout + retry" symptom.
+                            // Java's `req.stream().timeout(idleCap)` resets its
+                            // latch on every onNext of *any* event type; this is
+                            // the equivalent. A genuinely dead stream emits
+                            // nothing, so it still trips both sleep arms above.
+                            last_chunk_at = std::time::Instant::now();
+                            ev
+                        }
                         None => break,
                     },
                     _ = cancel.cancelled() => {
@@ -793,7 +813,6 @@ impl ReActAgent {
                     StreamEvent::ContentDelta(delta) => {
                         content_buf.push_str(&delta);
                         emit!(Frame::text_delta(&config.session_id, &delta));
-                        last_chunk_at = std::time::Instant::now();
                     }
                     StreamEvent::ReasoningDelta(delta) => {
                         emit!(Frame::reason(&config.session_id, &delta));
@@ -2634,6 +2653,33 @@ mod tests {
         assert!(
             norm.contains("idle_expired = true;"),
             "idle expiry must set the flag that synthesises the timeout error"
+        );
+    }
+
+    /// The idle clock must reset on EVERY received event, not just visible text.
+    /// Reasoning/thinking deltas and tool-argument deltas are the only frames a
+    /// long-thinking model emits for minutes; when the reset lived solely in the
+    /// `ContentDelta` arm, an active reasoning stream hit the 150s idle cap as
+    /// "no data received" (the reported incident) and was retried 24/30 times.
+    /// Java's `req.stream().timeout(idleCap)` resets on any onNext — this pins
+    /// the Rust equivalent to the `rx.recv()` arm, which sees all event types.
+    #[test]
+    fn idle_clock_resets_on_any_received_event_not_only_content() {
+        let src = include_str!("mod.rs");
+        // The reset must be in the receive arm, before the per-variant match.
+        let recv = src.split("ev = rx.recv() => match ev {").nth(1).unwrap_or("");
+        let recv = recv.split("None => break,").next().unwrap_or(recv);
+        assert!(
+            recv.contains("last_chunk_at = std::time::Instant::now();"),
+            "receiving ANY event must reset the idle clock (M-pin: removed → long thinking times out)"
+        );
+        // ...and must NOT be duplicated back into a single variant arm: a reset
+        // only on ContentDelta would leave reasoning/tool-args streams unwatched.
+        let cd = src.split("StreamEvent::ContentDelta(delta) => {").nth(1).unwrap_or("");
+        let cd = cd.split("StreamEvent::ReasoningDelta").next().unwrap_or(cd);
+        assert!(
+            !cd.contains("last_chunk_at"),
+            "ContentDelta must not own the idle reset alone; it belongs to the recv arm"
         );
     }
 

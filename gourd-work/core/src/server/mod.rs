@@ -1213,9 +1213,11 @@ async fn chat_models_select(
             .await
             .insert(form.session_id.clone(), model.clone());
         let store = bind_session_cwd(&state, &form.session_id, cwd_header_of(&headers).as_deref());
-        let mut ctx = store.read_context(&form.session_id);
-        ctx.model = Some(model);
-        store.write_context(&form.session_id, &ctx);
+        // Field-level update under the store's process-wide lock: the welcome
+        // page inherits model + thinking + context in three concurrent POSTs,
+        // and a whole-document read/modify/write here silently dropped whichever
+        // sibling field the other requests had just written.
+        store.update_context(&form.session_id, |ctx| ctx.model = Some(model));
     }
     Json(serde_json::json!({"code": 200}))
 }
@@ -1252,9 +1254,8 @@ async fn chat_thinking_select(
     }
     if !form.session_id.is_empty() && !form.depth.is_empty() {
         let store = bind_session_cwd(&state, &form.session_id, cwd_header_of(&headers).as_deref());
-        let mut ctx = store.read_context(&form.session_id);
-        ctx.thinking = Some(form.depth.clone());
-        store.write_context(&form.session_id, &ctx);
+        let depth = form.depth.clone();
+        store.update_context(&form.session_id, |ctx| ctx.thinking = Some(depth));
         return Json(serde_json::json!({"code": 200, "data": form.depth}));
     }
     Json(serde_json::json!({"code": 200}))
@@ -1288,9 +1289,7 @@ async fn chat_context_select(
         let parsed: i64 = form.context_length.trim().parse().unwrap_or(0);
         if crate::usage::CONTEXT_LENGTH_OPTIONS.contains(&parsed) {
             let store = bind_session_cwd(&state, &form.session_id, cwd_header_of(&headers).as_deref());
-            let mut ctx = store.read_context(&form.session_id);
-            ctx.context_length = Some(parsed);
-            store.write_context(&form.session_id, &ctx);
+            store.update_context(&form.session_id, |ctx| ctx.context_length = Some(parsed));
             return Json(serde_json::json!({"code": 200, "data": parsed}));
         }
         return Json(serde_json::json!({"code": 400, "description": "Unsupported context length"}));
@@ -1346,9 +1345,8 @@ async fn chat_access_select(
             .insert(form.session_id.clone(), mode.clone());
         // Persist so a restart restores the picker's shown level.
         let store = bind_session_cwd(&state, &form.session_id, cwd_header_of(&headers).as_deref());
-        let mut ctx = store.read_context(&form.session_id);
-        ctx.access_mode = Some(mode.clone());
-        store.write_context(&form.session_id, &ctx);
+        let persisted = mode.clone();
+        store.update_context(&form.session_id, |ctx| ctx.access_mode = Some(persisted));
         // If switching to full, release a pending HITL approval — the user has
         // just said "stop asking me", so the card must go away. Consume ONLY a
         // `hitl` suspension (atomically, via `consume_suspension`): a pending
@@ -1985,10 +1983,11 @@ async fn handle_slash_command(
             // Persisted on the session context so it survives a kernel restart
             // between the command and that run.
             let focus = commands::compact_focus(&cmd.args);
-            let mut ctx = store.read_context(session_id);
-            ctx.force_compact = Some(true);
-            ctx.compact_focus = focus.clone();
-            store.write_context(session_id, &ctx);
+            let focus_for_ctx = focus.clone();
+            store.update_context(session_id, |ctx| {
+                ctx.force_compact = Some(true);
+                ctx.compact_focus = focus_for_ctx;
+            });
 
             let mut seq = seq_counter.load(Ordering::SeqCst);
             let frames = commands::command_frames(
@@ -2606,7 +2605,14 @@ async fn run_react_session(
     if force_compact {
         session_ctx.force_compact = None;
         session_ctx.compact_focus = None;
-        store.write_context(&session_id, &session_ctx);
+        // Consume only the one-shot flags, not the whole document: the user may
+        // have changed the model/thinking/context pickers while this run was
+        // starting, and writing the stale `session_ctx` snapshot back would
+        // resurrect their old choices.
+        store.update_context(&session_id, |ctx| {
+            ctx.force_compact = None;
+            ctx.compact_focus = None;
+        });
     }
 
     let mut history: Vec<ChatMessage> = if !resume_messages.is_empty() {
@@ -2693,7 +2699,9 @@ async fn run_react_session(
     // message, and storing it would let it reappear on every later replay.
     if session_ctx.interrupted.unwrap_or(false) {
         session_ctx.interrupted = None;
-        store.write_context(&session_id, &session_ctx);
+        // Clear only the one-shot flag under the lock; a whole-document write of
+        // the run-start snapshot would clobber picker changes made meanwhile.
+        store.update_context(&session_id, |ctx| ctx.interrupted = None);
         let todo_file = store
             .session_dir_pub(&session_id)
             .join(crate::session::TODO_FILE_NAME);
@@ -2871,12 +2879,11 @@ async fn run_react_session(
     // the model would then act on. Java draws the same line, which is why its
     // calibration call sits behind `if (removeLastAnswer)`.
     //
-    // Re-read rather than mutate `session_ctx`: that value is moved into the
-    // config above and is no longer available here.
+    // Set only the one-shot flag through `update_context`. `session_ctx` is the
+    // run-start snapshot and was moved into the config above; writing it back
+    // whole would also resurrect the picker values from before this run.
     if !clean {
-        let mut ctx = store.read_context(&session_id);
-        ctx.interrupted = Some(true);
-        store.write_context(&session_id, &ctx);
+        store.update_context(&session_id, |ctx| ctx.interrupted = Some(true));
     }
 
     if let Some(summary) = state.change_ledger.finish(&session_id, &run_id, clean) {

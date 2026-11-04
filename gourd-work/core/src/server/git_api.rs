@@ -390,20 +390,28 @@ mod tests {
 
     #[test]
     fn root_resolution_requires_an_absolute_path() {
-        let ws = std::path::Path::new("D:\\kernel\\workspace");
+        // `Path::is_absolute()` is host-defined: `D:\...` is absolute on Windows
+        // but an ordinary relative name on Unix, where the old assertion expected
+        // the Windows result and went red on the Linux CI gate. Feed host-native
+        // absolute paths so the rule under test — explicit absolute wins, a
+        // relative/empty root falls back to the kernel workspace — is the same.
+        let ws = if cfg!(windows) {
+            std::path::Path::new(r"D:\kernel\workspace")
+        } else {
+            std::path::Path::new("/kernel/workspace")
+        };
+        let absolute = if cfg!(windows) {
+            r"D:\work\project"
+        } else {
+            "/work/project"
+        };
         // Absolute wins.
-        assert_eq!(
-            effective_root(ws, "D:\\work\\project"),
-            std::path::PathBuf::from("D:\\work\\project")
-        );
+        assert_eq!(effective_root(ws, absolute), std::path::PathBuf::from(absolute));
         // Relative or empty falls back to the kernel workspace — accepting a
         // relative root would resolve it against the process CWD, which is
         // wherever the desktop shell happened to be launched from.
-        assert_eq!(effective_root(ws, ""), std::path::PathBuf::from("D:\\kernel\\workspace"));
-        assert_eq!(
-            effective_root(ws, "relative/path"),
-            std::path::PathBuf::from("D:\\kernel\\workspace")
-        );
+        assert_eq!(effective_root(ws, ""), ws.to_path_buf());
+        assert_eq!(effective_root(ws, "relative/path"), ws.to_path_buf());
     }
 
     /// A POSIX-style absolute root must also be honoured (macOS/Linux builds).

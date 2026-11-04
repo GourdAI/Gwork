@@ -32,12 +32,12 @@ on:
         type: boolean
         required: false
         default: false
+  # GitHub 明确规定「Path filters are not evaluated for pushes of tags」：
+  # push.tags 下写 paths 不生效（旧版这里写了，是死配置，只会让人误以为
+  # 「只改别处就不会触发打包」）。tag 触发一律跑全量；PR 仍按下面的 paths 收窄。
   push:
     tags:
       - 'v*'
-    paths:
-      - 'gourd-work/**'
-      - '.github/workflows/build-gourd-work.yml'
   pull_request:
     paths:
       - 'gourd-work/**'
@@ -345,13 +345,24 @@ jobs:
       # 版本号三处必须同步：Cargo.toml（workspace.package）、tauri.conf.json、
       # desktop/package.json。漂移会让产物文件名与实际内核版本对不上。
       - name: 写入版本号
-        if: ${{ github.event.inputs.version != '' }}
         shell: bash
         working-directory: gourd-work
         run: |
           set -e
-          V="${{ github.event.inputs.version }}"
+          # 与另两条流水线同源：手动触发用输入框，打 tag 用 tag 名。
+          # 旧版这里带 `if: inputs.version != ''`，而 tag 触发时 inputs 恒为空 →
+          # 本步恒跳过，打 v1.0.0 出来的安装包仍是仓库里的 0.3.0（文件名与实际
+          # 内核版本对不上）。去掉 if，改为在脚本内按事件取版本号。
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#v}"
+          fi
           V="${V#v}"
+          if [ -z "$V" ]; then
+            echo "未指定版本号，沿用三处声明的当前版本"
+            exit 0
+          fi
           echo "写入版本号: $V"
           node -e '
             const fs=require("fs");
@@ -499,13 +510,28 @@ jobs:
           if-no-files-found: warn
 
   # ───────────────────────────────────────────────────────────────────────────
-  # 发布到 GitHub Release（仅在填了版本号且勾选 publish_release 时执行）
+  # 发布到 GitHub Release。触发条件与另两条流水线同构：打 v* tag，或手动触发时
+  # 勾选 publish_release。
+  #
+  # 【2026-11-04 code review 修复】旧条件只认 workflow_dispatch 的 inputs：
+  #   if: inputs.publish_release == 'true' && inputs.version != ''
+  # 而本流水线的主发布路径是 push.tags: v* —— tag 触发时 inputs 恒为空，于是
+  # 三平台全绿、产物齐备，release job 却恒为 skipped，Release 页面永远为空
+  # （正是 build.yml / build-tauri.yml 早期踩过并已修掉的同一个坑）。
+  # 同时旧的 TAG="v${{ inputs.version }}" 在 tag 触发时会变成 TAG="v"。
+  # 现改为：tag 触发用真实 tag 名，手动发布用输入框版本号拼 v<version>。
+  #
+  # 不加 always()：needs: build 已保证只有打包成功才发布；一条腿失败时
+  # 不发半成品 Release（tauri 版用 always() 是因为它要给「部分平台成功」出清单）。
+  #
   # 刻意不 checkout：只需要 artifacts 与 gh CLI，省一次全仓检出。
-  # 与另两条流水线共写同一个 Release，靠 gwork-rust-* 前缀区分产物。
+  # 与另两条流水线共写同一个 Release，用 gh 的幂等组合避免互相踩。
   # ───────────────────────────────────────────────────────────────────────────
   release:
     name: 发布到 GitHub Release
-    if: ${{ github.event.inputs.publish_release == 'true' && github.event.inputs.version != '' }}
+    if: |
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish_release))
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -545,8 +571,27 @@ jobs:
           [ -n "$(ls -A release)" ] || { echo "::error::没有可发布的产物"; exit 1; }
 
       - name: 创建/更新 Release 并上传
+        shell: bash
         run: |
           set -e
-          TAG="v${{ github.event.inputs.version }}"
-          gh release create "$TAG" --title "$TAG" --notes "GWork Rust 原生内核桌面端" || true
+          # tag 触发时用 tag 名；手动发布时没有 tag，用输入的版本号拼出 v<version>。
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ -n "$GITHUB_REF_NAME" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            V="${{ github.event.inputs.version }}"
+            if [ -z "$V" ]; then
+              echo "::error::手动发布需要填写版本号（version 输入框）"; exit 1
+            fi
+            TAG="v${V#v}"
+          fi
+          echo "目标 Release: $TAG"
+          # 同 tag 会同时触发三条流水线写同一个 Release：先 view 探测，create
+          # 与 view 之间有竞态，create 失败后再 view 一次确认确实已存在。
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" \
+              --notes "GWork Rust 原生内核桌面端" \
+              || gh release view "$TAG"
+          fi
+          # --clobber：重跑流水线时覆盖同名旧资产，而不是报「已存在」中断。
           gh release upload "$TAG" release/* --clobber
+          echo "已发布到: $(gh release view "$TAG" --json url -q .url)"

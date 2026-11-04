@@ -34,8 +34,23 @@ impl LlmClient {
     pub fn with_retries(model: ModelConfig, api_retries: u32) -> Self {
         // A panic here means the process cannot make model calls at all, so
         // failing loudly at construction is correct.
+        //
+        // DELIBERATELY no `.timeout()` on this client. reqwest's `.timeout()`
+        // is a *whole-request* cap measured from send until the response body
+        // is fully consumed — for a streaming completion that includes the
+        // entire SSE/NDJSON body. Leaving it on the shared client treats every
+        // stream as if it were a non-streaming call and kills a healthy,
+        // chunk-by-chunk answer at `model.timeout_secs()` (default 120s),
+        // regardless of how recently a frame arrived. Reasoning models think
+        // for minutes, so this alone produced "stream timed out" on active
+        // streams. `connect_timeout` still bounds the TCP/TLS handshake.
+        //
+        // Streaming liveness is enforced in the react receive loop as a
+        // chunk-to-chunk idle cap plus a per-stream total cap (see
+        // `react/mod.rs`), which is what an idle timeout must mean for a
+        // stream. Non-streaming `complete()` opts back into a total cap
+        // per-request below. This mirrors `mcp::http_client_no_total_timeout`.
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(model.timeout_secs()))
             .connect_timeout(Duration::from_secs(30))
             .build()
             .expect("failed to build http client");
@@ -199,7 +214,15 @@ impl LlmClient {
         let body = self.dialect.request_body(&request);
         let url = self.dialect.endpoint(&self.model, false);
         let headers = self.build_headers();
-        let resp = self.http.post(&url).headers(headers).json(&body).send().await?;
+        // Non-streaming: the whole body arrives at once, so a total wall-clock
+        // cap is the correct semantics here (unlike the streaming path, where
+        // the same cap silently truncates a long live answer). The client no
+        // longer carries a `.timeout()`, so opt back in **per request** with
+        // exactly the configured value — preserving the original non-streaming
+        // behaviour byte-for-byte while leaving streams unbounded at this layer.
+        let resp = self.http.post(&url).headers(headers).json(&body)
+            .timeout(Duration::from_secs(self.model.timeout_secs()))
+            .send().await?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -593,6 +616,32 @@ mod tests {
         assert!(is_non_retryable("HTTP 500 x: {\"error\":{\"status\":\"PERMISSION_DENIED\"}}"));
     }
 
+    /// The shared reqwest client must NOT carry a whole-request `.timeout()`:
+    /// it covers the streaming body and would cut a live long answer at the
+    /// non-streaming timeout. Only the non-streaming `complete()` opts back in,
+    /// per request. (M-pin: re-adding it to the builder regresses
+    /// `active_stream_is_not_cut_off_at_the_model_timeout`.)
+    #[test]
+    fn streaming_client_has_no_whole_request_timeout() {
+        let src = include_str!("client.rs");
+        let body = src.split("pub fn with_retries(").nth(1).unwrap_or("");
+        let body = body.split("pub fn model_name").next().unwrap_or(body);
+        // Strip comments so the explanatory prose above (which legitimately
+        // mentions `.timeout()`) cannot mask a real builder call.
+        let code: String = body.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains(".timeout("),
+            "client-level .timeout() kills long live streams; keep it per-request on complete() only"
+        );
+        assert!(
+            code.contains(".connect_timeout("),
+            "the handshake must still be bounded"
+        );
+    }
+
     fn client(standard: &str, url: &str, model: &str) -> LlmClient {
         LlmClient::new(ModelConfig {
             name: model.into(),
@@ -836,5 +885,90 @@ mod tests {
         }
         assert_eq!(dones, 1, "exactly one Done for a terminated stream");
         assert_eq!(errors, 0, "no Error for a well-formed stream");
+    }
+
+    /// A streaming response that stays active LONGER than the configured model
+    /// timeout must NOT be cut off. The shared reqwest client used to carry
+    /// `.timeout(model.timeout_secs())` — a *whole-request* cap that also covers
+    /// the streaming body — so any answer longer than the non-streaming timeout
+    /// was severed at that mark no matter how recently a frame arrived. Reasoning
+    /// models think for minutes; that is the "stream timed out on a live stream"
+    /// half of the incident. With the cap moved off the client, a stream that
+    /// keeps emitting frames well past the timeout completes normally.
+    #[tokio::test]
+    async fn active_stream_is_not_cut_off_at_the_model_timeout() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                sock.read(&mut buf),
+            )
+            .await;
+            let header = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: text/event-stream\r\n",
+                "Connection: close\r\n\r\n",
+            );
+            let _ = sock.write_all(header.as_bytes()).await;
+            // 6 frames 250ms apart = 1.5s of *active* streaming, deliberately
+            // longer than the 1s model timeout configured below. The old
+            // client-level `.timeout(1s)` would sever the body at ~1s → no
+            // terminator → Error (and a retry).
+            for _ in 0..6 {
+                let frame = "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n";
+                let _ = sock.write_all(frame.as_bytes()).await;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            let tail = concat!(
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            let _ = sock.write_all(tail.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        });
+
+        let mut m = ModelConfig {
+            name: "m".into(),
+            standard: "openai".into(),
+            api_url: format!("http://127.0.0.1:{}", port),
+            api_key: "k".into(),
+            model: "m".into(),
+            ..Default::default()
+        };
+        m.timeout = "1s".into(); // shorter than the stream's 1.5s on purpose
+        let c = LlmClient::with_retries(m, 1);
+
+        let mut rx = c
+            .stream_chat(vec![ChatMessage::user("hi")], None, None)
+            .await
+            .unwrap();
+        let mut content_frames = 0;
+        let mut dones = 0;
+        let mut errors: Vec<String> = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                StreamEvent::ContentDelta(_) => content_frames += 1,
+                StreamEvent::Done { .. } => dones += 1,
+                StreamEvent::Error(e) => errors.push(e),
+                _ => {}
+            }
+        }
+        assert!(
+            content_frames >= 6,
+            "all frames past the timeout must arrive, got {}",
+            content_frames
+        );
+        assert_eq!(dones, 1, "the live stream must end with a normal Done");
+        assert!(
+            errors.is_empty(),
+            "a live stream must not surface a timeout error: {:?}",
+            errors
+        );
     }
 }

@@ -2431,7 +2431,19 @@ mod tests {
         f.blocked("rm -rf ../ws-sibling");
         f.blocked("cp a.txt ../../escape.txt");
         f.blocked("echo x > ../outside.txt");
-        f.blocked("Set-Content ..\\..\\f.txt x");
+        // PowerShell accepts both separators on Windows, but on Unix a backslash
+        // is an ordinary filename character: `..\..\f.txt` is then a single
+        // in-workspace name with no `..` component, so the guard correctly
+        // releases it and the old Windows-only expectation went red on the
+        // Linux CI gate. Keep the Windows spelling on Windows and use the POSIX
+        // spelling elsewhere — the "write verb + parent escape" case stays
+        // covered on both.
+        let ps_escape = if cfg!(windows) {
+            "Set-Content ..\\..\\f.txt x"
+        } else {
+            "Set-Content ../../f.txt x"
+        };
+        f.blocked(ps_escape);
     }
 
     // ── 4. Redirection, independent of the verb table ──────────────────────

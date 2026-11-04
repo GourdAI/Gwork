@@ -2574,7 +2574,16 @@ mod tests {
         assert!(resolve_safe_with(&f.workspace, &f.roots(), "uploads/../secret.txt").is_none());
         assert!(resolve_safe_with(&f.workspace, &f.roots(), "uploads/../../etc/passwd").is_none());
         // An absolute path outside every allowed root is still refused.
-        assert!(resolve_safe_with(&f.workspace, &f.roots(), "C:\\Windows\\win.ini").is_none());
+        // `C:\...` is absolute only on Windows; on Unix it is a plain relative
+        // name that resolves *inside* the workspace and is accepted, so the old
+        // assertion failed on the Linux CI gate. Use a host-native absolute
+        // path that is outside both the workspace and the uploads root.
+        let outside = if cfg!(windows) {
+            "C:\\Windows\\win.ini"
+        } else {
+            "/etc/passwd"
+        };
+        assert!(resolve_safe_with(&f.workspace, &f.roots(), outside).is_none());
     }
 
     // ─── 视觉通道：read 磁盘图片 ─────────────────────────────────────

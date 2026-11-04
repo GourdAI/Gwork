@@ -10,6 +10,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -808,6 +809,29 @@ pub struct SessionContext {
     pub interrupted: Option<bool>,
 }
 
+/// Serialises `context.json` read-modify-write across the whole process.
+///
+/// WHY THIS EXISTS (measured, not hypothetical): the four `/web/chat/*/select`
+/// handlers each did `let mut ctx = read_context(); ctx.field = ...; write_context()`.
+/// `inheritSelectionToSession` on the welcome page fires model + thinking +
+/// context selects **concurrently**; all three read an empty/absent file, each
+/// writes back a whole `SessionContext` carrying only its own field, and the last
+/// rename wins. A 30-round live probe against the real kernel produced 0/30
+/// sessions with all three fields (14 lost model, 13 lost context, 2 lost all),
+/// so the picker fell back to `auto` + 256K right after sending. The Java kernel
+/// stores the same state in an in-memory `Map.put(key, value)`, which merges per
+/// field and can never lose a sibling write — this lock restores that property
+/// for the file-backed Rust kernel.
+///
+/// Global rather than per-`SessionStore`: handlers create a fresh `SessionStore`
+/// per request (`bind_session_cwd` / `store_for`), so a lock held on one instance
+/// would not exclude another. The critical section is a few microsecond file IO;
+/// a single process-wide mutex is both correct and cheaper than keying by path.
+fn context_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 impl SessionStore {
     fn context_file(&self, id: &str) -> PathBuf {
         self.session_dir(id).join("context.json")
@@ -815,10 +839,37 @@ impl SessionStore {
 
     /// Read the persisted per-session UI context (missing/corrupt → default).
     pub fn read_context(&self, id: &str) -> SessionContext {
+        let _guard = context_write_lock().lock().unwrap_or_else(|e| e.into_inner());
+        self.read_context_unlocked(id)
+    }
+
+    /// Unlocked read. Only for use **inside** [`SessionStore::update_context`]
+    /// while the caller already holds the lock.
+    fn read_context_unlocked(&self, id: &str) -> SessionContext {
         let Ok(raw) = std::fs::read_to_string(self.context_file(id)) else {
             return SessionContext::default();
         };
         serde_json::from_str::<SessionContext>(&raw).unwrap_or_default()
+    }
+
+    /// Atomically read, mutate and persist the per-session UI context.
+    ///
+    /// Every caller that changes one field must go through this instead of
+    /// `read_context` + `write_context`: the earlier split let concurrent
+    /// requests overwrite each other's fields wholesale. The closure runs under
+    /// the process-wide lock, so it always sees the latest committed document.
+    ///
+    /// Returns the resulting context so callers that need the value (e.g. the
+    /// run path reading `thinking` / `context_length`) can use it directly.
+    pub fn update_context<F>(&self, id: &str, mutate: F) -> SessionContext
+    where
+        F: FnOnce(&mut SessionContext),
+    {
+        let _guard = context_write_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let mut ctx = self.read_context_unlocked(id);
+        mutate(&mut ctx);
+        self.write_context_unlocked(id, &ctx);
+        ctx
     }
 
     /// Persist the per-session UI context (best effort).
@@ -830,7 +881,17 @@ impl SessionStore {
     /// write can interleave with the first. A truncated `context.json` then
     /// parses as "no context", and `read_context` silently returns default:
     /// the user's chosen thinking level / context window vanishes with no error.
+    ///
+    /// Prefer [`SessionStore::update_context`] when only some fields change;
+    /// a direct whole-document write is only safe for callers that already own
+    /// the complete state (tests, migrations).
     pub fn write_context(&self, id: &str, ctx: &SessionContext) {
+        let _guard = context_write_lock().lock().unwrap_or_else(|e| e.into_inner());
+        self.write_context_unlocked(id, ctx);
+    }
+
+    /// Unlocked write. Only for use while the caller already holds the lock.
+    fn write_context_unlocked(&self, id: &str, ctx: &SessionContext) {
         let path = self.context_file(id);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1385,6 +1446,71 @@ mod tests {
         store.write_context(id, &ctx2);
         let back2 = store.read_context(id);
         assert_eq!(back2.thinking.as_deref(), Some("low"), "second write must not corrupt");
+
+        let _ = std::fs::remove_dir_all(&s.0);
+    }
+
+    /// Concurrent field-level picker writes must merge, not overwrite each
+    /// other's fields.
+    ///
+    /// Regression for the "切到新增任务页后发送，思考等级与上下文长度全变默认"
+    /// defect: `inheritSelectionToSession` fires model/thinking/context selects
+    /// in parallel. With the old `read_context()` + `write_context()` split each
+    /// request read an empty document and wrote back only its own field, so the
+    /// last rename silently erased the other two (measured 0/30 sessions with
+    /// all three fields on the real kernel). Java's in-memory `Map.put` merges
+    /// per field and never had this failure mode.
+    #[test]
+    fn concurrent_context_updates_preserve_every_field() {
+        let s = Scratch::new("context-concurrent");
+        let id = "work-concurrent-probe";
+
+        // Each thread owns a fresh SessionStore, exactly like an axum handler
+        // constructing one via `bind_session_cwd` / `store_for`. A per-store
+        // lock would not exclude them — this asserts the lock is process-wide.
+        let writers: Vec<std::thread::JoinHandle<()>> = vec![
+            std::thread::spawn({
+                let base = s.0.clone();
+                move || {
+                    SessionStore::with_base(base).update_context(id, |ctx| {
+                        ctx.model = Some("GourdWork-test".into());
+                    });
+                }
+            }),
+            std::thread::spawn({
+                let base = s.0.clone();
+                move || {
+                    SessionStore::with_base(base).update_context(id, |ctx| {
+                        ctx.thinking = Some("high".into());
+                    });
+                }
+            }),
+            std::thread::spawn({
+                let base = s.0.clone();
+                move || {
+                    SessionStore::with_base(base).update_context(id, |ctx| {
+                        ctx.context_length = Some(1_000_000);
+                    });
+                }
+            }),
+        ];
+        for w in writers {
+            w.join().expect("context writer panicked");
+        }
+
+        let ctx = SessionStore::with_base(s.0.clone()).read_context(id);
+        assert_eq!(ctx.model.as_deref(), Some("GourdWork-test"), "model lost");
+        assert_eq!(ctx.thinking.as_deref(), Some("high"), "thinking lost");
+        assert_eq!(ctx.context_length, Some(1_000_000), "context_length lost");
+
+        // Also lock down the field-level semantics: a later single-field update
+        // must leave its siblings untouched.
+        SessionStore::with_base(s.0.clone())
+            .update_context(id, |ctx| ctx.interrupted = Some(true));
+        let ctx = SessionStore::with_base(s.0.clone()).read_context(id);
+        assert_eq!(ctx.interrupted, Some(true));
+        assert_eq!(ctx.thinking.as_deref(), Some("high"));
+        assert_eq!(ctx.context_length, Some(1_000_000));
 
         let _ = std::fs::remove_dir_all(&s.0);
     }

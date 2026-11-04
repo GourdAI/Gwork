@@ -693,15 +693,37 @@ mod tests {
 
     #[test]
     fn test_paths_equal() {
+        // Trailing separators are stripped on every platform.
         assert!(paths_equal("D:/proj", "D:/proj/"));
-        assert!(paths_equal("D:/Proj", "d:/proj"));
         assert!(!paths_equal("D:/proj", "D:/other"));
+
+        // `paths_equal` folds case **only on Windows** (NTFS is case-insensitive);
+        // on Linux/macOS `D:/Proj` and `d:/proj` are genuinely different paths.
+        // The expected result therefore flips with the host — asserting the
+        // Windows outcome unconditionally is what made this test red on the
+        // ubuntu-latest CI gate. Keep both branches so the platform contract
+        // stays pinned on either runner.
+        if cfg!(windows) {
+            assert!(paths_equal("D:/Proj", "d:/proj"));
+        } else {
+            assert!(!paths_equal("D:/Proj", "d:/proj"));
+        }
     }
 
     #[test]
     fn normalize_collapses_dot_segments() {
-        let n = normalize_path(Path::new("D:/a/b/../c"));
-        assert_eq!(n.to_string_lossy().replace('\\', "/"), "D:/a/c");
+        // `normalize_path` makes the path absolute first. `D:/...` is already
+        // absolute on Windows, but on Unix it is a *relative* path and gets the
+        // process CWD prepended — so feeding a Windows drive path to a Linux
+        // runner produces `<cwd>/D:/a/c`, not `D:/a/c`. Use a host-native
+        // absolute path so this asserts dot-segment collapsing itself, on both.
+        let (input, expected) = if cfg!(windows) {
+            ("D:/a/b/../c", "D:/a/c")
+        } else {
+            ("/a/b/../c", "/a/c")
+        };
+        let n = normalize_path(Path::new(input));
+        assert_eq!(n.to_string_lossy().replace('\\', "/"), expected);
     }
 
     #[test]

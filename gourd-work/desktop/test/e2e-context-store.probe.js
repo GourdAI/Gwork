@@ -168,6 +168,35 @@ async function waitReady(ms) {
         check('C: 两次保存合并进一份文档（无 lost update）',
             !!projC && projC.thinking === 'medium' && projC.context_length === 128000, JSON.stringify(projC));
 
+        // ── C2. *并发* 保存不得互相覆盖（真实缺陷形态）──
+        // 切到新增任务页时 inheritSelectionToSession 会同时发出 models/thinking/context
+        // 三个 select。旧内核每个请求 read_context→改一字段→整份 write_context，三者都
+        // 读到空文档，最后落地的那个把其它两个字段抹掉，回显随即退回 auto + 256K。
+        // 实测 30 轮三写 0/30 全字段保留，两写 30/30 正常（用户所见「只带上下文长度、
+        // 没带思考等级」正是三写交叠的结果）。这里用 10 轮并发放大，锁死回归。
+        let concurrentLost = 0;
+        let firstLostDetail = '';
+        for (let i = 0; i < 10; i++) {
+            const sid = 'work-probeConcurrent' + i;
+            const reqs = [
+                post('/web/chat/thinking/select', { sessionId: sid, depth: 'high' }, cwdHeader),
+                post('/web/chat/context/select', { sessionId: sid, contextLength: '1000000' }, cwdHeader),
+            ];
+            if (haveModels) {
+                reqs.push(post('/web/chat/models/select', { sessionId: sid, modelName: MODEL_NAME }, cwdHeader));
+            }
+            await Promise.all(reqs);
+            const c = readCtx(ctxPath(PROJ, sid));
+            const ok = !!c && c.thinking === 'high' && c.context_length === 1000000
+                && (!haveModels || c.model === MODEL_NAME);
+            if (!ok) {
+                concurrentLost++;
+                if (!firstLostDetail) firstLostDetail = sid + ': ' + JSON.stringify(c);
+            }
+        }
+        check('C2: 10 轮并发三写无 lost update（切新增任务页的真实时序）',
+            concurrentLost === 0, concurrentLost + '/10 丢失, 首例 ' + firstLostDetail);
+
         // ── D. 改路由后路径穿越守卫必须仍然生效 ──
         r = await post('/web/chat/context/select',
             { sessionId: '..\\probe-escape', contextLength: '256000' }, cwdHeader);
