@@ -67,9 +67,7 @@
     "wsl_loading": "正在获取发行版列表…",
     "wsl_none": "未发现 WSL 发行版",
     "wsl_none_v2": "未发现 WSL2 发行版（WSL1 不支持 localhost 直连）",
-    "preinstalled_hint": "连接已预装 gwork CLI 的服务器：命中则跳过部署直接启动（凭据经环境变量注入，不进命令行）；未命中自动回退标准部署。",
-    "runtime_pkg_label": "离线运行时包（可选，runtime-*.tar.gz）",
-    "runtime_pkg_hint": "内网/离线且无 Java 的服务器：优先上传此包；留空则用安装包内置运行时，再缺回退远端自装。"
+    "preinstalled_hint": "连接已预装 gwork CLI 的服务器：命中则跳过部署直接启动（凭据经环境变量注入，不进命令行）；未命中自动回退标准部署。"
   },
   "streaming": {
     "describe_images": "请描述这些图片",
@@ -444,6 +442,14 @@
         "intent_chain_desc": "压缩时保留用户历轮提问的精简索引（成本极低），防止多轮对话中围着早已完成的旧目标打转",
         "hint": "历史窗口：压缩时始终保护最后多少条消息完整不压缩\n单轮输出预留：为模型下一轮回复预留的绝对空间，触发点 =「模型窗口 − 该预留 − 回合缓冲」\n压缩触发比例：仅用于「提前」触发（取两者较小值），100 表示不额外提前\n压缩目标水位：决定一次压到多深，值越高压得越浅、触发越频繁"
       },
+      "skills": {
+        "title": "技能清单预算",
+        "budget_fraction": "清单预算(窗口%)",
+        "budget_fraction_placeholder": "默认 1",
+        "max_desc_chars": "单条描述上限(字符)",
+        "max_desc_chars_placeholder": "默认 1024",
+        "hint": "技能清单每轮都会写入系统提示词，而描述来自技能作者，因此需要总量上限\n清单预算：占上下文窗口的百分比（对齐 Claude Code 的 1%）。256K 窗口下约为 2560 字符\n超出预算时按描述长度从长到短丢弃描述，技能名字始终保留（模型仍可用 skillread 读取）\n单条描述上限：对齐 Agent Skills 规范的 1024，超出部分截断为省略号"
+      },
       "memory": {
         "title": "心智记忆",
         "enabled_desc": "跨会话保留长期记忆；关闭可减少上下文消耗",
@@ -456,22 +462,6 @@
         "api_retries": "OpenAPI 重试次数",
         "retries_placeholder": "默认 3",
         "hint": "控制各类请求失败后的自动重试次数"
-      },
-      "ui": {
-        "title": "界面效果",
-        "simplified_name": "工具调用显示简化（或者收起）",
-        "simplified_desc": "开启后工具调用输出更简洁；关闭则展示完整的详细信息"
-      },
-      "features": {
-        "title": "功能开关",
-        "subagent_name": "Subagent 子代理机制",
-        "subagent_desc": "开启后可支持 Subagent 子代理机制，允许委派任务给专项子代理；关闭可减少上下文消耗",
-        "mcp_name": "MCP 工具网关",
-        "mcp_desc": "开启后可连接外部 MCP 服务，扩展 AI 的工具调用能力；关闭可减少上下文消耗",
-        "openapi_name": "OpenAPI 接口网关",
-        "openapi_desc": "开启后可调用 OpenAPI/Swagger 接口，扩展 AI 的数据访问能力；关闭可减少上下文消耗",
-        "lsp_name": "LSP 代码智能",
-        "lsp_desc": "开启后提供代码补全、定义跳转等语言服务；关闭可减少上下文消耗"
       },
       "scope_user": "用户（全局）",
       "scope_workspace": "工作区"

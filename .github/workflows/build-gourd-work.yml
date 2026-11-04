@@ -71,9 +71,18 @@ jobs:
         with:
           workspaces: './gourd-work -> target'
 
-      # UI 完整性门禁：前端唯一源已入库，203 个文件 / 12 个语言包 / 10 个 HTML 入口页
+      # UI 完整性门禁：前端唯一源已入库（205 个文件 / 12 个语言包 / 10 个 HTML 入口页），
       # 缺一不可。这条断言防的是「误加 /ui/ 到 .gitignore」或「误删语言包」这类
       # 静默丢失 —— 打包照样成功，但装出来的界面是坏的。
+      #
+      # 【2026-11-04 教训：为什么从「键数一致」改成「键集一致」】
+      # 旧断言只比叶子键的**数量**，而 run 41753013669 正是被这条拦下：
+      # zh-CN.json 漂移了 20 个键（多 14 个孤儿键 + 少 6 个活键），1244 vs 1236。
+      # 数量差只是巧合能拒掉它 —— 若漂移恰好等量（删一个又加一个），旧断言会**静默放行**，
+      # 而界面会显示 `settings.general.skills.title` 这类裸键（app-i18n.js 的 getMessage
+      # 在键缺失时返回键名本身）。现在比的是键集本身，并把差异键名直接打出来，
+      # 不用再手动 diff 两份 JSON。键集校验的完整版本（含「UI 引用键必须全语言覆盖」）
+      # 在 desktop/test/locale-parity.test.js，由下面的 node --test 腿执行。
       - name: UI 完整性门禁
         shell: bash
         run: |
@@ -87,24 +96,46 @@ jobs:
           test "$total" -ge 200 || { echo "::error::UI 文件数 $total < 200，疑似丢失"; exit 1; }
           test "$locales" -eq 12 || { echo "::error::语言包 $locales != 12"; exit 1; }
           test "$htmls" -eq 10 || { echo "::error::HTML 入口页 $htmls != 10"; exit 1; }
-          # 12 个语言包必须键数一致，否则某语言界面会出现未翻译的裸键
+          # 12 个语言包键集必须完全一致，否则某语言界面会出现未翻译的裸键
           node -e '
             const fs=require("fs"),p="gourd-work/desktop/ui/locales";
-            const c=x=>Object.values(x).reduce((s,v)=>s+(v&&typeof v==="object"?c(v):1),0);
-            const n=fs.readdirSync(p).filter(f=>f.endsWith(".json")).map(f=>[f,c(JSON.parse(fs.readFileSync(p+"/"+f,"utf8")))]);
-            const set=new Set(n.map(x=>x[1]));
-            n.forEach(([f,k])=>console.log("  "+f+" 叶子键="+k));
-            if(set.size!==1){console.error("::error::语言包键数不一致: "+[...set].join(","));process.exit(1);}
+            const flat=(o,pre="")=>Object.keys(o).flatMap(k=>{
+              const v=o[k], key=pre?pre+"."+k:k;
+              return v&&typeof v==="object"?flat(v,key):[key];
+            });
+            const files=fs.readdirSync(p).filter(f=>f.endsWith(".json")).sort();
+            const sets=new Map(files.map(f=>[f,new Set(flat(JSON.parse(fs.readFileSync(p+"/"+f,"utf8"))))]));
+            const base=sets.get("en.json");
+            console.log("  en.json 叶子键="+base.size);
+            let bad=0;
+            for(const f of files){
+              if(f==="en.json")continue;
+              const s=sets.get(f);
+              const missing=[...base].filter(k=>!s.has(k));
+              const extra=[...s].filter(k=>!base.has(k));
+              console.log("  "+f+" 叶子键="+s.size+(missing.length||extra.length?"  <-- 漂移":""));
+              if(missing.length||extra.length){
+                bad++;
+                console.error("::error::"+f+" 键集与 en.json 不一致");
+                if(missing.length)console.error("   缺 "+missing.length+" 键: "+missing.join(", "));
+                if(extra.length)console.error("   多 "+extra.length+" 键: "+extra.join(", "));
+              }
+            }
+            // 键数相等但键集不同也会被上面拦下；这里再兜一道总量异常
+            if(new Set([...sets.values()].map(s=>s.size)).size!==1){
+              console.error("::error::叶子键数量已分叉，见上方逐包输出");process.exit(1);
+            }
+            if(bad){console.error("::error::"+bad+" 份语言包键集漂移");process.exit(1);}
           '
 
+      # cargo 测试与前端契约测试各自独立成步：哪一步红了一眼可见。
       - name: cargo test（core + cli）
         working-directory: gourd-work
         run: cargo test -p gourd-work-core -p gourd-work-cli --all-targets
 
       # 前端契约测试。这些测试锁的是「桌面壳下 API 地址必须可达」这类
       # 纯前端不变量（DOM 属性形态的 /web/ 地址不经 fetch/XHR/WS，kernel-bridge
-      # 的三层改写拦不到），cargo test 覆盖不到。runner 自带 node（上面的 UI
-      # 完整性门禁已在用），无需 setup-node。
+      # 的三层改写拦不到），cargo test 覆盖不到；语言包键集契约也在其中。
       #
       # glob 故意**不加引号**：引号形式要由 node 自己展开，而那是 node 21+ 才
       # 有的能力；本腿没有 setup-node，用的是 runner 自带版本（ubuntu-24.04 为

@@ -610,6 +610,100 @@ impl SessionStore {
         })
     }
 
+    /// The highest `eventSeq` currently persisted in the session's stream file,
+    /// or -1 when the file is absent or carries no sequenced frame.
+    ///
+    /// This is the kernel's own resume watermark. The frontend rebuilds its
+    /// dedupe cursor (`lastEventSeq`) from this same file on every replay
+    /// (app-history.js), and the live gate silently drops any frame whose
+    /// `eventSeq` is at or below that cursor (app-streaming.js
+    /// `applySequencedGateChunk`). A counter that restarts at zero after a
+    /// kernel reboot therefore emits frames the UI discards without a trace:
+    /// the run executes, tools update, and the main area spins on "waiting
+    /// for response" until the run ends and history replay finally shows it.
+    /// New sessions are unaffected: an absent or empty stream file reads as
+    /// -1, so the seeded counter still starts at exactly 0 — which is the
+    /// reported split between fresh and old conversations.
+    ///
+    /// Scanning is line-wise with a substring probe, mirroring
+    /// `load_stream_frames_from_seq`, so an 84 MB session costs a sequential
+    /// read rather than a full JSON parse of every line.
+    pub fn max_stream_seq(&self, id: &str) -> i64 {
+        let path = self.stream_file(id);
+        offload(move || {
+            let Ok(file) = std::fs::File::open(&path) else {
+                return -1;
+            };
+            let mut max_seq = -1i64;
+            for line in BufReader::new(file).lines().filter_map(|l| l.ok()) {
+                if line.trim().is_empty() || !line.contains("\"eventSeq\"") {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let Some(s) = v.get("eventSeq").and_then(|s| s.as_i64()) {
+                        max_seq = max_seq.max(s);
+                    }
+                }
+            }
+            max_seq
+        })
+    }
+
+    fn issued_seq_file(&self, id: &str) -> PathBuf {
+        let safe = sanitize_id(id);
+        self.session_dir(id).join(format!("{}.issued-seq", safe))
+    }
+
+    /// The highest `eventSeq` this kernel process lineage has *handed out* for
+    /// the session, or -1 when never recorded.
+    ///
+    /// Companion to [`Self::max_stream_seq`]: the stream file only carries
+    /// persisted frames, but transient frames (`action_args`, `action_draft`,
+    /// `agent_progress`, `reason_start` — see `append_stream_frame`) and
+    /// slash-command frames are broadcast with a seq and never written there.
+    /// The frontend cursor advances on every frame it sees, so after a kernel
+    /// restart *without a page reload* the in-memory cursor sits above the
+    /// persisted watermark and the live gate silently drops the next run's
+    /// opening frames. Recording the issued high-water mark closes that gap;
+    /// `seq_for` seeds from `max(persisted, issued)`.
+    ///
+    /// A corrupt or missing file reads as -1 (never as a high value): the
+    /// seed then falls back to the persisted watermark, the safe direction —
+    /// an over-high issued value would push the seed past frames the frontend
+    /// has not seen yet and leave a visible hole instead of a silent drop.
+    pub fn read_issued_seq(&self, id: &str) -> i64 {
+        let path = self.issued_seq_file(id);
+        offload(move || {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                return -1;
+            };
+            text.trim().parse::<i64>().unwrap_or(-1)
+        })
+    }
+
+    /// Persist the issued high-water mark. Monotonic by construction: a lower
+    /// value than what is already on disk is ignored, so an out-of-order or
+    /// stale flush can never regress the resume seed.
+    pub fn write_issued_seq(&self, id: &str, seq: i64) {
+        let path = self.issued_seq_file(id);
+        offload(move || {
+            let current = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| t.trim().parse::<i64>().ok())
+                .unwrap_or(-1);
+            if seq <= current {
+                return;
+            }
+            // The session directory may not exist yet (first frame of a fresh
+            // session): without this the write fails silently and the resume
+            // seed falls back to the persisted watermark.
+            if std::fs::create_dir_all(path.parent().unwrap_or(path.as_path())).is_err() {
+                return;
+            }
+            let _ = std::fs::write(&path, seq.to_string());
+        })
+    }
+
     /// Per-tool `action_start` counts for `/web/chat/session/tool-usage`.
     ///
     /// The endpoint needs only the `toolName` of `action_start` frames — a tiny
@@ -1520,6 +1614,81 @@ mod tests {
             vec!["action_start".to_string(), "action_end".to_string()],
             "replay must rebuild the card from start+end only"
         );
+    }
+
+    // ─── stream seq watermark (kernel-restart resume) ─────────────────────
+    //
+    // The frontend rebuilds its dedupe cursor from this file and the live gate
+    // drops every frame at or below that cursor, so the kernel's own counter
+    // must never fall behind what is already persisted.
+
+    /// The watermark is the highest persisted `eventSeq`, not the line count
+    /// and not the last line's seq: unsequenced frames, corrupt tails and
+    /// out-of-order appends must not lower it.
+    #[test]
+    fn max_stream_seq_is_the_highest_persisted_event_seq() {
+        let s = Scratch::new("max-seq");
+        let store = SessionStore::with_base(s.0.clone());
+        assert_eq!(store.max_stream_seq("work-seq"), -1, "absent file");
+        let dir = s.0.join("work-seq");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lines = [
+            serde_json::json!({"type":"text","text":"a","eventSeq":7}).to_string(),
+            "not json at all".to_string(),
+            serde_json::json!({"type":"text","text":"b","eventSeq":42}).to_string(),
+            serde_json::json!({"type":"text","text":"c"}).to_string(),
+            serde_json::json!({"type":"text","text":"d","eventSeq":19}).to_string(),
+        ];
+        std::fs::write(dir.join("work-seq.stream.ndjson"), lines.join("\n") + "\n").unwrap();
+        assert_eq!(store.max_stream_seq("work-seq"), 42);
+    }
+
+    /// An empty stream file (session created, nothing streamed yet) must read
+    /// as -1 so the seeded counter starts at exactly zero — the
+    /// fresh-conversation behaviour must not move.
+    #[test]
+    fn max_stream_seq_of_an_empty_stream_is_minus_one() {
+        let s = Scratch::new("max-seq-empty");
+        let store = SessionStore::with_base(s.0.clone());
+        let dir = s.0.join("work-empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("work-empty.stream.ndjson"), "").unwrap();
+        assert_eq!(store.max_stream_seq("work-empty"), -1);
+    }
+
+    /// The issued mark records what was *handed out*, which runs ahead of the
+    /// persisted watermark because transient and slash frames never reach the
+    /// stream file.
+    #[test]
+    fn issued_seq_round_trips_and_absent_reads_minus_one() {
+        let s = Scratch::new("issued-seq");
+        let store = SessionStore::with_base(s.0.clone());
+        assert_eq!(store.read_issued_seq("work-iss"), -1, "never recorded");
+        store.write_issued_seq("work-iss", 57);
+        assert_eq!(store.read_issued_seq("work-iss"), 57);
+    }
+
+    /// Monotonic by construction: a stale flush must never lower the resume
+    /// seed, or the next run would replay seqs the frontend already consumed.
+    #[test]
+    fn issued_seq_never_regresses_on_a_stale_flush() {
+        let s = Scratch::new("issued-seq-mono");
+        let store = SessionStore::with_base(s.0.clone());
+        store.write_issued_seq("work-issm", 90);
+        store.write_issued_seq("work-issm", 12);
+        assert_eq!(store.read_issued_seq("work-issm"), 90);
+    }
+
+    /// A corrupt file degrades to the persisted-watermark fallback (-1), never
+    /// to a high value that would punch a visible hole in the next run.
+    #[test]
+    fn issued_seq_of_a_corrupt_file_reads_minus_one() {
+        let s = Scratch::new("issued-seq-corrupt");
+        let store = SessionStore::with_base(s.0.clone());
+        let dir = s.0.join("work-issc");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("work-issc.issued-seq"), "not a number\n").unwrap();
+        assert_eq!(store.read_issued_seq("work-issc"), -1);
     }
 
     // ─── /clear ────────────────────────────────────────────────────────────

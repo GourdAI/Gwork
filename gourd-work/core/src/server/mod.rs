@@ -47,8 +47,9 @@ pub mod skills_market_api;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Multipart, Query, State};
@@ -112,6 +113,8 @@ pub struct AppState {
     suspensions: Mutex<HashMap<String, SuspensionPoint>>,
     /// Per-session event sequence counters.
     seq_counters: Mutex<HashMap<String, Arc<AtomicI64>>>,
+    /// Throttle state for the issued-seq watermark (see `record_issued_seq`).
+    issued_seq_flush: Mutex<HashMap<String, IssuedFlushState>>,
     /// Per-session selected model override.
     session_models: Mutex<HashMap<String, String>>,
     /// Per-session access mode override.
@@ -140,14 +143,64 @@ pub struct AppState {
     pub workspace: std::path::PathBuf,
 }
 
+/// First value a freshly created event-sequence counter must hand out, given
+/// the highest `eventSeq` already persisted in the session's stream file.
+///
+/// This is the load-bearing line of the kernel-restart resume fix: the
+/// frontend rebuilds its dedupe cursor from that same file on replay and the
+/// live gate (app-streaming.js `applySequencedGateChunk`) silently drops every
+/// frame at or below the cursor, so a counter that restarts at zero after a
+/// reboot emits frames the UI discards without a trace — the run executes
+/// (tools, TODO, HTTP all live) while the main area spins on "waiting for
+/// response" until the run ends and history replay finally renders it.
+/// Seeding one above the watermark is the only value safe in both directions:
+/// at or below it re-triggers the drop, and the watermark itself would hand
+/// out a seq the file already carries.
+///
+/// Free function so the decision is unit-testable without constructing an
+/// `AppState` (its watcher/registry fields have no test constructor); the
+/// end-to-end proof lives outside the repo, this test is the in-repo tooth.
+fn seed_from_watermark(watermark: i64) -> i64 {
+    watermark.max(-1) + 1
+}
+
 impl AppState {
     /// Get or create the event sequence counter for a session.
+    ///
+    /// On first creation the counter is seeded from the session's watermarks,
+    /// not from zero: the **persisted** stream watermark (`max_stream_seq`)
+    /// and the **issued** high-water mark (`read_issued_seq`), whichever is
+    /// higher. The frontend rebuilds its dedupe cursor from the stream file on
+    /// replay and the live gate drops every frame at or below the cursor, so a
+    /// zeroed counter after a kernel restart makes all frames of the next run
+    /// invisible: the run executes (tools, TODO, HTTP all live) while the main
+    /// content area spins on "waiting for response" until the run ends and
+    /// history replay finally renders it. The issued mark additionally covers
+    /// frames that were handed out but never persisted (transient and
+    /// slash-command frames advance the in-memory cursor without reaching the
+    /// stream file), which is what keeps a restart *without a page reload*
+    /// safe too. New sessions have neither file (both -1 → seed 0), so their
+    /// behaviour is unchanged.
     pub async fn seq_for(&self, session_id: &str) -> Arc<AtomicI64> {
+        if let Some(counter) = self.seq_counters.lock().await.get(session_id) {
+            return counter.clone();
+        }
+        // Scan outside the lock: an 84 MB stream file must not stall counter
+        // creation for every other session.
+        let store = store_for(self, session_id);
+        let watermark = store
+            .max_stream_seq(session_id)
+            .max(store.read_issued_seq(session_id));
         let mut counters = self.seq_counters.lock().await;
-        counters
-            .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(AtomicI64::new(0)))
-            .clone()
+        // A concurrent creator may have won the race; adopt its counter rather
+        // than inserting a second one (two live counters for one session would
+        // hand out duplicate seqs).
+        if let Some(counter) = counters.get(session_id) {
+            return counter.clone();
+        }
+        let counter = Arc::new(AtomicI64::new(seed_from_watermark(watermark)));
+        counters.insert(session_id.to_string(), counter.clone());
+        counter
     }
 
     async fn is_busy(&self, session_id: &str) -> bool {
@@ -246,6 +299,7 @@ pub async fn serve_with_static(
         running: Mutex::new(HashMap::new()),
         suspensions: Mutex::new(HashMap::new()),
         seq_counters: Mutex::new(HashMap::new()),
+        issued_seq_flush: Mutex::new(HashMap::new()),
         session_models: Mutex::new(HashMap::new()),
         session_access: Mutex::new(HashMap::new()),
         session_roots: Arc::new(crate::session::SessionRoots::load()),
@@ -2935,8 +2989,65 @@ pub(crate) async fn persist_frame(state: &Arc<AppState>, session_id: &str, frame
     store_for(state, session_id).append_stream_frame(session_id, frame);
 }
 
+/// Throttle bookkeeping for the issued-seq watermark.
+#[derive(Default)]
+struct IssuedFlushState {
+    last_flush: Option<Instant>,
+    frames_since: u32,
+}
+
+/// Record the highest `eventSeq` handed out for a session, so a kernel
+/// restart can seed the next counter above what the frontend cursor may
+/// already hold (see `seq_for`).
+///
+/// Throttled: a text-delta-heavy run broadcasts thousands of frames and a
+/// synchronous file write per frame would sit on the hot path. The flush is
+/// **write-ahead** (record the seq *before* trusting it as durable) and
+/// bounded by time and frame count; lifecycle frames (`done`, `error`,
+/// `done_suspended`) flush immediately because they end a run and the
+/// watermark must be current before the next run can start. The residual
+/// window is therefore a kernel *crash* inside a run (at most the throttle
+/// interval of issued seqs), not a clean restart between runs — and a crash
+/// that also takes the page down rebuilds the cursor from disk anyway.
+///
+/// `"*"` is the watcher's pseudo-session (no stream file, no cursor); it is
+/// excluded so recording cannot create a stray directory.
+const ISSUED_FLUSH_MS: u128 = 2000;
+const ISSUED_FLUSH_FRAMES: u32 = 200;
+
+async fn record_issued_seq(state: &Arc<AppState>, session_id: &str, seq: i64, frame_type: &str) {
+    if session_id == "*" || seq < 0 {
+        return;
+    }
+    let immediate = matches!(frame_type, "done" | "error" | "done_suspended");
+    let flush_now = {
+        let mut map = state.issued_seq_flush.lock().await;
+        let st = map.entry(session_id.to_string()).or_default();
+        st.frames_since += 1;
+        let now = Instant::now();
+        let due = immediate
+            || st.frames_since >= ISSUED_FLUSH_FRAMES
+            || st.last_flush
+                .map(|t| now.duration_since(t).as_millis() >= ISSUED_FLUSH_MS)
+                .unwrap_or(true);
+        if due {
+            st.last_flush = Some(now);
+            st.frames_since = 0;
+        }
+        due
+    };
+    if flush_now {
+        // Outside the ws_clients lock: file IO must not stall other sessions'
+        // broadcasts. Monotonic inside `write_issued_seq`, so an out-of-order
+        // flush cannot regress the mark.
+        store_for(state, session_id).write_issued_seq(session_id, seq);
+    }
+}
+
 /// Broadcast a frame to all WS clients subscribed to a session.
 pub(crate) async fn broadcast_frame(state: &Arc<AppState>, session_id: &str, frame: Frame) {
+    let seq = frame.event_seq;
+    let frame_type = frame.frame_type.clone();
     let mut clients = state.ws_clients.lock().await;
     // Clean up dead senders while we're here
     if let Some(senders) = clients.get_mut(session_id) {
@@ -2951,6 +3062,12 @@ pub(crate) async fn broadcast_frame(state: &Arc<AppState>, session_id: &str, fra
         for tx in senders.iter() {
             let _ = tx.send(frame.clone());
         }
+    }
+    drop(clients);
+    // Record the issued high-water mark *after* the frame left the senders:
+    // the watermark must never claim a seq the frontend could not have seen.
+    if let Some(seq) = seq {
+        record_issued_seq(state, session_id, seq, &frame_type).await;
     }
 }
 
@@ -4687,6 +4804,92 @@ mod tests {
         assert_eq!(resolve_access_mode("FULL", None, None), "default", "case-sensitive like the frontend normalizeMode");
         assert_eq!(resolve_access_mode("", Some("bogus"), Some("full")), "full", "garbage live tier must not mask a good persisted one");
         assert_eq!(resolve_access_mode("bogus", Some("bogus"), None), "default");
+    }
+
+    // ── event-seq resume watermark (kernel restart) ────────────────────────
+    //
+    // The end-to-end proof of this fix (kill the kernel mid-history, reboot,
+    // assert the next run's frames clear the frontend cursor) lives outside
+    // the repo; these are the in-repo teeth so a revert of the seed line can
+    // never ship green again.
+
+    /// The seed must sit exactly one above the persisted watermark: at or
+    /// below it the frontend gate silently drops the frame, and the watermark
+    /// itself would re-issue a seq the stream file already carries.
+    #[test]
+    fn seq_seed_is_one_above_the_persisted_watermark() {
+        assert_eq!(seed_from_watermark(41), 42);
+        assert_eq!(seed_from_watermark(0), 1);
+        assert_eq!(seed_from_watermark(1_000_000), 1_000_001);
+    }
+
+    /// An absent or empty stream file reads as -1, so a brand-new session
+    /// still starts at seq 0 — the fresh-conversation behaviour must not move.
+    #[test]
+    fn seq_seed_of_an_empty_or_absent_stream_is_zero() {
+        assert_eq!(seed_from_watermark(-1), 0);
+    }
+
+    /// Directional invariant across the whole input range: the first handed
+    /// out seq may never replay a persisted one.
+    #[test]
+    fn seq_seed_never_replays_a_persisted_seq() {
+        for watermark in [-1i64, 0, 1, 7, 42, 999_999] {
+            assert!(
+                seed_from_watermark(watermark) > watermark,
+                "watermark {watermark} must seed strictly above itself"
+            );
+        }
+    }
+
+    /// Wiring guard: the behavioural tests above pin the free function, this
+    /// one pins that `seq_for` still routes new counters through it (a revert
+    /// to `AtomicI64::new(0)` inside `seq_for` would otherwise stay green).
+    #[test]
+    fn seq_for_seeds_through_the_watermark_helper() {
+        let src = include_str!("mod.rs");
+        let start = src.find("pub async fn seq_for").expect("seq_for missing");
+        let end = src[start..]
+            .find("async fn is_busy")
+            .expect("is_busy boundary missing");
+        let body = &src[start..start + end];
+        assert!(
+            body.contains("seed_from_watermark(watermark)"),
+            "seq_for must seed new counters through seed_from_watermark"
+        );
+        assert!(
+            body.contains("max_stream_seq"),
+            "seq_for must read the persisted watermark before seeding"
+        );
+        assert!(
+            body.contains("read_issued_seq"),
+            "seq_for must also read the issued watermark: transient and slash \
+             frames advance the frontend cursor without reaching the stream file"
+        );
+        // The double-checked lock is concurrency-correctness, not decoration:
+        // the scan runs outside the lock, so a concurrent creator can win the
+        // race and the loser must adopt its counter — two live counters for
+        // one session would hand out duplicate seqs. A behavioural test would
+        // need a filesystem race, so the re-check is pinned by shape here.
+        assert_eq!(
+            body.matches("counters.get(session_id)").count(),
+            1,
+            "the post-scan adopt re-check inside the lock must survive"
+        );
+        // The issued-mark recorder is what closes the restart-without-reload
+        // window; dropping its call from the broadcast path would leave the
+        // seed blind to transient frames again.
+        let bstart = src
+            .find("pub(crate) async fn broadcast_frame")
+            .expect("broadcast_frame missing");
+        let bend = src[bstart..]
+            .find("POST /web/chat/interrupt")
+            .expect("interrupt boundary missing");
+        let bbody = &src[bstart..bstart + bend];
+        assert!(
+            bbody.contains("record_issued_seq"),
+            "broadcast_frame must record the issued high-water mark"
+        );
     }
 
     // ── /web/chat/todos parsing (Java `WebController.todos` parity) ──────────
