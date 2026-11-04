@@ -278,8 +278,19 @@ pub struct DialectRequest {
 }
 
 /// Anthropic requires `max_tokens`; there is no "unlimited". This is the value
-/// Java's builder falls back to when the caller did not set one.
-const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 8192;
+/// Java's builder falls back to when the caller did not set one
+/// (`AnthropicRequestBuilder` line 255 and `resolveMaxTokens` line 1228 both use
+/// 32000).
+///
+/// This was 8192, which is a hard divergence from Java and an independent cause
+/// of "Model output was truncated mid tool-call arguments": a single large
+/// `write`/`edit` (its `old_str`/`new_str` inlined as JSON) can exceed 8192
+/// output tokens, so Anthropic ends the stream with `finish_reason=max_tokens`
+/// (→ `length`) *mid-argument*. The accumulated JSON is then incomplete, the
+/// react loop's `broken_argument_calls` rejects it, and the turn aborts blaming
+/// the model for a cap we imposed. Java never hits this because it asks for 4×
+/// the budget.
+const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 32000;
 
 /// Map a thinking level onto Anthropic's `budget_tokens`.
 ///

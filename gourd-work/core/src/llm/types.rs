@@ -381,6 +381,27 @@ pub enum StreamEvent {
     ToolCallArgsDelta { index: u32, args: String },
     /// Stream finished.
     Done { finish_reason: String, usage: Option<UsageInfo> },
+    /// The transport is re-issuing this request after a failed attempt that had
+    /// *already delivered* events downstream.
+    ///
+    /// Why this exists: the retry loop lives in [`super::client`], one layer
+    /// below the accumulators in `react/mod.rs` (`content_buf`, `tool_calls`,
+    /// `args_progress`). A disconnect *mid-stream* therefore retried a request
+    /// whose deltas the react loop had already appended, and the second attempt
+    /// appended its own on top — `{"file_path":"a.rs""file_path":"a.rs"` — which
+    /// is not JSON. The turn then died with "Model output was truncated mid
+    /// tool-call arguments", blaming the model for the client's own replay.
+    ///
+    /// Java never showed this because its accumulators are locals *inside* the
+    /// `callWithRetry` lambda (`ReasonTask.java`: `streamedReasoningBuf`,
+    /// `argsProgresses`), so every physical attempt starts from empty. Rust has
+    /// no such scope boundary — the loop is inside the stream receiver — so the
+    /// reset must be signalled explicitly.
+    ///
+    /// Emitted **only** when the failed attempt had already produced events; a
+    /// failure before the first byte retries silently (nothing to discard, and
+    /// a retry banner for an invisible attempt is noise).
+    Retry { attempt: u32, max: u32, reason: String },
     /// Error during streaming.
     Error(String),
 }

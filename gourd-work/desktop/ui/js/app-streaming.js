@@ -788,6 +788,40 @@ function gateFrameScopeMismatch(chunk) {
     return (k !== null && k !== gateRxScopeKey);
 }
 
+/* 已提交水位推进。
+   insertBeforeActions 给主气泡每个块盖了单调递增的 data-ins-seq；本函数在「不可逆帧」
+   到达时把水位推到当前最大序号，意思是「序号 <= 水位的块已经代表真实发生过的副作用，
+   任何后续回滚都不得触碰」。
+
+   为什么需要水位而不是简单清空当前气泡：一个 run 只有一个 .msg-bubble，里面装着该 run
+   所有 turn 的块。流中断重传只作废<b>当前 turn</b>，而本 run 早前 turn 已经执行完的工具
+   （写过的文件、跑过的测试）是必须保留的证据。data-run-id 是 run 级，粒度太粗，用它删
+   会把证据一起抹掉。
+
+   只在主线路推进，两类帧刻意排除：
+   - 子代理帧（resolveAgentState 有归属）：其内容落在 .agent-card 内部，不参与主气泡扫描；
+   - 后台帧（args.background）：与主代理流式帧交错到达，拿它当水位会把主代理正在输出的
+     半成品提前锁成「已提交」，导致该回滚的回滚不掉。 */
+function advanceCommitWatermark(sess, chunk) {
+    if (!sess || !chunk) return;
+    if (chunk.args && chunk.args.background) return;
+    try {
+        if (typeof resolveAgentState === 'function' && chunk.args && resolveAgentState(sess, chunk.args)) return;
+    } catch (e) { /* 归属判定失败按主线路处理，宁可多提交也不误删 */ }
+    switch (chunk.type) {
+        // 工具真实执行完毕：卡片与其结果是副作用的凭证。
+        case 'action_end':
+        // 审批已放行 / 用户已作答：交互资产不可回滚。
+        case 'hitl_released':
+        case 'question_answered':
+        // turn 正常收口（context_size 由每个 turn 的 Done 发出，trace 是 run 级收口）。
+        case 'context_size':
+        case 'trace':
+            sess._commitSeq = sess._insSeq || 0;
+            break;
+    }
+}
+
 function onWebChunk(sess, chunk) {
     try {
         if (gateFrameScopeMismatch(chunk)) return;
@@ -945,6 +979,15 @@ function onWebChunk(sess, chunk) {
                 appendErrorChunk(sess, chunk.text);
                 break;
             case 'retry':  finishThinkingBlock(sess); finishPendingTool(sess);
+                /* discardPartial=true 来自 Frame::stream_retry：transport 重发了一次<b>已经
+                   下发过 delta</b> 的请求。引擎侧已清空累加器，前端必须同步丢掉本次尝试渲染
+                   出来的半成品，否则重传后同一段答案出现两遍、骨架工具卡永远停在 loading。
+                   必须在 appendRetryChunk 之前执行：回滚会把 retryEl 一并清掉（它也在气泡里），
+                   先建提示再回滚会把刚建好的提示删掉。 */
+                if (chunk.discardPartial) {
+                    try { discardPartialRetryDom(sess); }
+                    catch (e) { reportStreamPipelineError('discardPartialRetryDom', e, chunk); }
+                }
                 // 后端不会转发子代理的 RetryEvent（TaskTalent 只转发 ContextUsage/ToolCallStart/ToolCallEnd/ReasonDelta/ReasonEnd），
                 // 故 retry 恒为主代理事件；且 WebChunk.ofRetry 不携带 agentName，无法归属，
                 // 始终在主对话展示重试提示（下一 chunk 到达时自动清除），不得写入智能体卡片体
@@ -979,6 +1022,10 @@ function onWebChunk(sess, chunk) {
                 }
                 break;
         }
+        // 水位推进必须在帧自身的 DOM 建完之后：insertBeforeActions 已为它盖好序号，
+        // 此刻把水位推到最大序号才等于「本帧产出已提交」。放在 switch 外统一判定，
+        // 避免在每个 case 里各写一遍而漏帧。
+        advanceCommitWatermark(sess, chunk);
         sess.silenceTimer = setTimeout(function() {
             if (!sess.isStreaming) return;
             // 存在活跃子智能体卡片时：运行中状态由卡片头部状态标识闪烁表示，

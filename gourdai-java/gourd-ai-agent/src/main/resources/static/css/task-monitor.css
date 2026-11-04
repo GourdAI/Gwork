@@ -79,6 +79,10 @@ body.task-monitor-open .main-area { margin-right: var(--task-monitor-width); }
 body.is-electron .task-monitor-drawer::before {
     content: ""; flex-shrink: 0; height: 44px;
     background: var(--bg-main);
+    /* 与主区拖拽条同款的底部分割线（app.css body.is-electron .titlebar-drag-region
+       的 border-bottom）：监控右栏顶行色带若不带这条线，分割线横贯到右栏处会断口，
+       看起来像「线没画到头」。44px 色带 + 1px 线 = 与左列顶行底边严格同高。 */
+    border-bottom: 1px solid var(--border-color);
     -webkit-app-region: drag;
 }
 /* 窄屏：右栏退化为全宽浮层（主区已无并排空间），仍不盖终端 */

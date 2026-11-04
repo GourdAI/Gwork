@@ -37,7 +37,17 @@ line-height 的 leading，**结构性留白实测 0.00px**（内容区 top 恒�
 曾经把这些抽成 CSS 变量单点改的做法，被 titlebar-monitor-contract.test.js 明令禁止
 （--titlebar-strip-h 下移会在右栅头顶露出色差带），所以**只能逐处同步字面量**，并由
  titlebar-task-contract.test.js 的高度一致性用例把上述点位钉成同一数值。 */
-body.is-electron .titlebar-drag-region { display: flex; align-items: flex-start; padding-left: 14px; height: 44px; -webkit-app-region: drag; }
+/* 底部分割线（用户参照 Go 版标题栏：顶条与内容之间有一条 1px 分隔线，Rust/Java 版原先没有）。
+   border-bottom 画在 44px 拖拽条底边 = 内容区顶边，横贯 .main-area。
+   position:relative 只为给下方 ::before 补线做定位参照，不改变本条自身布局。
+   【契约兼容】titlebar-task-contract.test.js 只要求本规则保留 display:flex 与
+   padding-left:14px、且不得出现 padding 简写；border/position 不在禁止面内。 */
+body.is-electron .titlebar-drag-region { display: flex; align-items: flex-start; padding-left: 14px; height: 44px; -webkit-app-region: drag; position: relative; border-bottom: 1px solid var(--border-color); }
+/* 分割线左端补齐：布局是 [.sidebar(含 1px 右边框)][.sidebar-resize-handle(5px)][.main-area]，
+   border-bottom 只从主区左缘画起，左侧留下 handle 宽度的缺口（skills-head::before 同款缺陷同款修法）。
+   code 模式不补：那里 handle 左侧是文件树列，其顶行本就没有分割线（顶条只覆盖主区），
+   补了反而在文件树列顶出一段 5px 悬空线头。 */
+body.is-electron:not(.code-mode) .titlebar-drag-region::before { content: ""; position: absolute; left: -5px; bottom: -1px; width: 5px; height: 1px; background: var(--border-color); pointer-events: none; z-index: 120; }
 
 /* ===== 标题栏当前任务名 =====
    桌面壳顶条左端原先整段空白（用户反馈「空着也是空着」），现在展示当前会话名。

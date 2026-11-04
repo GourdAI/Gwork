@@ -511,6 +511,15 @@ function ensureAssistantBubble(sess) {
             + '</div></div>';
         $(renderRoot(sess)).append(row);
         sess.currentBubbleEl = $(row).find('.md-content')[0];
+        /* 初始正文容器同样要盖插入序号。
+           它是 row.innerHTML 直接生成的，不经过 insertBeforeActions，若不补戳就没有
+           data-ins-seq —— 而回滚逻辑对「无序号 = 来源不明」一律豁免（宁可留重复也不敢
+           误删）。后果正是 turn 的<b>第一个</b>文本块永远清不掉：流中断重传后，半截答案
+           留在气泡里，新答案又追加一遍，用户看到同一句话出现两次。 */
+        if (sess.currentBubbleEl && sess.currentBubbleEl.setAttribute) {
+            sess._insSeq = (sess._insSeq || 0) + 1;
+            sess.currentBubbleEl.setAttribute('data-ins-seq', String(sess._insSeq));
+        }
         var copyBtn = $(row).find('.copy-btn')[0];
         // 复制目标为「最终答案」：统一从 .md-content 的 data-md-raw 读取。
         // 历史消息与流式结束后后端写入的最终答案都带该属性；流式接收过程中不写，故复制不到中间片段。
@@ -1041,6 +1050,16 @@ function setAssistantTime(sess, ts) {
 }
 
 function insertBeforeActions(sess, el) {
+    /* 插入序号：本函数是主气泡所有块级内容（正文/思考块/工具卡/徽标）的唯一插入漏斗，
+       故在这里给每个块盖一个会话内单调递增的章，就能回答「这个块是哪一次尝试产出的」。
+       用途只有一个——流中断重传时精确回滚（见 discardPartialRetryDom）。
+       不能用 data-run-id 代替：一个 run 只有一个 .msg-bubble，里面装着该 run 所有 turn
+       的块，而中断只作废<b>当前 turn</b>；按 runId 删会连带抹掉本 run 早前已执行完的
+       工具卡（写过的文件、跑过的测试），那是必须保留的证据。 */
+    if (sess && el && el.setAttribute) {
+        sess._insSeq = (sess._insSeq || 0) + 1;
+        el.setAttribute('data-ins-seq', String(sess._insSeq));
+    }
     // 若存在常驻的内联等待指示器，新内容应插在其上方，保证指示器始终在气泡底部。
     var anchor = (sess.inlineThinkingEl && sess.inlineThinkingEl.parentNode) ? sess.inlineThinkingEl : null;
     if (anchor) { $(anchor).before(el); return; }
@@ -2392,6 +2411,115 @@ function clearRetryChunk(sess) {
         if (sess.retryEl.parentNode) sess.retryEl.parentNode.removeChild(sess.retryEl);
         sess.retryEl = null;
     }
+}
+
+/**
+ * 流中断重传：丢弃本次尝试已经渲染出来的半成品 DOM。
+ *
+ * <p><b>为什么必须有这一步</b>：后端 transport 层重发请求时，react 会清掉自己的累加器
+ * （content_buf / tool_calls / args_progress），但那些 delta <b>早已下发到前端并渲染成
+ * DOM</b>。只清引擎状态的话，屏幕上是「半截答案 + 重传后又追加一遍完整答案」，外加几张
+ * 参数永远不会补齐的骨架工具卡。前后端必须对「这次尝试没发生过」达成一致。</p>
+ *
+ * <p><b>判据 = 插入序号 &gt; 已提交水位</b>。insertBeforeActions 给每个块盖了会话内单调
+ * 递增的 data-ins-seq，advanceCommitWatermark 在不可逆帧（action_end / hitl_released /
+ * question_answered / context_size / trace）上把水位推到当前最大序号。序号在水位之上的
+ * 块就是「本次尝试产出、且尚未产生任何真实副作用」的部分，可以安全删。</p>
+ *
+ * <p><b>刻意豁免的三类</b>：</p>
+ * <ul>
+ *   <li><b>无序号的块</b>：来源不明（历史回放、旧数据、其它路径直插）。误删的代价远大于
+ *       留一个重复块，故一律放行。</li>
+ *   <li><b>.agent-card</b>：子代理容器由 agent_start 创建，而 agent_start 只在工具执行
+ *       阶段发出 —— 中断发生在 LLM 流式阶段，所以现存卡片必然属于<b>上一 turn</b> 或
+ *       仍在跑的<b>后台子代理</b>。删掉等于把活跃后台任务的可视载体和已落盘的产出抹掉。</li>
+ *   <li><b>页脚（.msg-meta-row / .msg-actions）</b>：气泡骨架，不是内容。</li>
+ * </ul>
+ *
+ * @param {SessionState} sess - 会话状态
+ * @returns {number} 实际移除的块数（0 表示无需回滚）
+ */
+function discardPartialRetryDom(sess) {
+    if (!sess) return 0;
+    var watermark = sess._commitSeq || 0;
+    if (!(sess._insSeq > 0)) return 0;   // 从未盖过序号：无判据，不动 DOM
+
+    var row = sess.currentBubbleEl ? $(sess.currentBubbleEl).closest('.msg-row')[0] : null;
+    if (!row) {
+        // 指针已丢：退回容器内最后一个助手气泡
+        row = $(renderRoot(sess)).find('.msg-row.assistant').last()[0] || null;
+    }
+    if (!row) return 0;
+    var bubble = $(row).find('.msg-bubble').last()[0];
+    if (!bubble) return 0;
+
+    /* 先收敛，再摘除：thinking-block 挂着 setInterval 计时器，.md-content 挂着增量渲染器
+       （其 tail 区有未提交的挂起帧）。直接 remove 会让计时器与 rAF 永久失联，表现为
+       「已消失的思考块还在偷偷计时、内存不降」。 */
+    try { finishThinkingBlock(sess); } catch (e) { /* 收敛失败不阻断回滚 */ }
+    try { finishPendingTool(sess); } catch (e) {}
+    try { disposeSessionStreamMd(sess); } catch (e) {}
+
+    var removed = 0;
+    var children = $(bubble).children().toArray();
+    for (var i = 0; i < children.length; i++) {
+        var el = children[i];
+        if (!el || !el.getAttribute) continue;
+        if ($(el).is('.msg-meta-row, .msg-actions')) continue;      // 页脚骨架
+        if ($(el).is('.agent-card')) continue;                      // 子代理容器（见上）
+        var seqAttr = el.getAttribute('data-ins-seq');
+        if (!seqAttr) continue;                                     // 无序号 → 豁免
+        var seq = parseInt(seqAttr, 10);
+        if (!isFinite(seq) || seq <= watermark) continue;           // 已提交，保留
+        try {
+            if (el._streamMd && el._streamMd.dispose) el._streamMd.dispose();
+        } catch (e) {}
+        if (el.parentNode) el.parentNode.removeChild(el);
+        removed++;
+    }
+
+    if (removed > 0) {
+        clearRetryChunk(sess);
+        /* 登记表里指向已摘除节点的引用必须清掉，否则后续 action_end 回填会写进游离节点
+           （界面上「工具卡永远停在 loading」），且这些引用会钉住整棵已删子树不释放。 */
+        var k;
+        if (sess.toolCardsById) {
+            for (k in sess.toolCardsById) {
+                if (!Object.prototype.hasOwnProperty.call(sess.toolCardsById, k)) continue;
+                var c = sess.toolCardsById[k];
+                if (!c || !c.parentNode) delete sess.toolCardsById[k];
+            }
+        }
+        if (sess.toolBatchesById) {
+            for (k in sess.toolBatchesById) {
+                if (!Object.prototype.hasOwnProperty.call(sess.toolBatchesById, k)) continue;
+                var b = sess.toolBatchesById[k];
+                if (!b || !b.groupEl || !b.groupEl.parentNode) delete sess.toolBatchesById[k];
+            }
+        }
+        if (sess.pendingToolCard && !sess.pendingToolCard.parentNode) sess.pendingToolCard = null;
+        if (sess.approvedToolCard && !sess.approvedToolCard.parentNode) sess.approvedToolCard = null;
+        if (sess.thinkingBlockEl && !sess.thinkingBlockEl.parentNode) sess.thinkingBlockEl = null;
+        if (sess.retryEl && !sess.retryEl.parentNode) sess.retryEl = null;
+
+        /* 文本缓冲区与指针一并归零：引擎侧 content_buf 已清空，前端若留着 reasonBuffer，
+           下一次增量渲染会把旧尾巴重新提交上去。 */
+        sess.reasonBuffer = '';
+        sess.thinkingBuffer = '';
+        sess.thinkingBodyMdEl = null;
+        sess.thinkingBodyWrapEl = null;
+        sess._lastFinishedThinkingBlockEl = null;
+
+        /* 正文指针若被删掉，必须在<b>原气泡内</b>重建一个空容器。
+           置 null 会让 ensureAssistantBubble 另起一个 .msg-row —— 同一 run 出现两个气泡。 */
+        if (!sess.currentBubbleEl || !sess.currentBubbleEl.parentNode) {
+            var fresh = $('<div>').addClass('md-content')[0];
+            insertBeforeActions(sess, fresh);   // 顺带盖上新序号
+            sess.currentBubbleEl = fresh;
+        }
+        if (sess.sessionId === activeSessionId) scrollToBottom();
+    }
+    return removed;
 }
 
 /* ===== Trace Badge =====

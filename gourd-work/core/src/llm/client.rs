@@ -126,10 +126,13 @@ impl LlmClient {
             loop {
                 attempt += 1;
                 match do_stream(&http, &url, &headers, &body, dialect, &tx).await {
-                    Ok(()) => break,
+                    Ok(_) => break,
                     Err(e) => {
                         let msg = e.to_string();
-                        warn!(attempt, error = %msg, ?dialect, "LLM stream attempt failed");
+                        let delivered = e.downcast_ref::<StreamFailure>()
+                            .map(|f| f.delivered)
+                            .unwrap_or(false);
+                        warn!(attempt, delivered, error = %msg, ?dialect, "LLM stream attempt failed");
                         // Deterministic client/config errors must fail fast:
                         // retrying a de-listed model, a bad key or a malformed
                         // request 20 times only burns ~3 minutes of the user's
@@ -139,6 +142,33 @@ impl LlmClient {
                         if is_non_retryable(&msg) || attempt > api_retries {
                             let _ = tx.send(StreamEvent::Error(msg)).await;
                             break;
+                        }
+                        // The failed attempt already pushed deltas downstream.
+                        // The react loop has appended them into its
+                        // accumulators, and re-issuing the same request would
+                        // append the *whole* answer a second time — visibly
+                        // duplicated text, and for tool calls a concatenation
+                        // of two argument streams, i.e. invalid JSON reported
+                        // as "the model truncated its arguments".
+                        //
+                        // Signal the retry so the consumer discards the partial
+                        // turn first. Java gets this for free: its accumulators
+                        // are locals inside the `callWithRetry` lambda, so each
+                        // physical attempt rebuilds them (`ReasonTask.java`:
+                        // `streamedReasoningBuf` / `argsProgresses`). Here the
+                        // retry loop sits *below* the accumulators, so the
+                        // reset has to be an explicit event.
+                        //
+                        // A failure before the first byte stays silent: there
+                        // is nothing to discard and no visible seam.
+                        if delivered {
+                            let _ = tx
+                                .send(StreamEvent::Retry {
+                                    attempt,
+                                    max: api_retries,
+                                    reason: msg.clone(),
+                                })
+                                .await;
                         }
                         // Exponential backoff: 1s, 2s, 4s
                         let delay = Duration::from_millis(500 * 2u64.pow(attempt));
@@ -274,6 +304,11 @@ fn normalise_thinking(level: Option<&str>) -> Option<String> {
 /// differs, which is what [`StreamParser`] abstracts. Ollama is the reason this
 /// cannot assume SSE: it streams bare NDJSON, and looking for a `data:` prefix
 /// there yields zero events — an empty answer with no error to explain it.
+///
+/// The returned error carries [`StreamFailure::delivered`], which tells the
+/// caller whether anything had already been pushed downstream. That bit is the
+/// difference between an invisible retry and a duplicated answer: see
+/// [`StreamEvent::Retry`].
 async fn do_stream(
     http: &reqwest::Client,
     url: &str,
@@ -287,12 +322,19 @@ async fn do_stream(
         .headers(headers.clone())
         .json(body)
         .send()
-        .await?;
+        .await
+        .map_err(|e| StreamFailure::new(e.to_string(), false))?;
 
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("HTTP {}: {}", status, snippet(&text));
+        // Nothing was delivered: the body was consumed as an error, not as a
+        // stream. Retrying this is invisible to the consumer.
+        return Err(StreamFailure::new(
+            format!("HTTP {}: {}", status, snippet(&text)),
+            false,
+        )
+        .into());
     }
 
     let mut stream = resp.bytes_stream();
@@ -304,9 +346,12 @@ async fn do_stream(
     let mut decoder = StreamDecoder::new();
     let mut parser: Box<dyn StreamParser> = dialect.parser();
     let mut saw_done = false;
+    // Whether any event has crossed the channel. Once true, a retry is
+    // observable: the consumer already holds the partial turn.
+    let mut delivered = false;
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+        let chunk = chunk.map_err(|e| StreamFailure::new(e.to_string(), delivered))?;
         buffer.push_str(&decoder.push(&chunk));
 
         // Frames are newline-separated in every dialect we speak.
@@ -320,6 +365,7 @@ async fn do_stream(
                 }
                 let is_terminal = matches!(event, StreamEvent::Done { .. } | StreamEvent::Error(_));
                 let _ = tx.send(event).await;
+                delivered = true;
                 if is_terminal {
                     return Ok(());
                 }
@@ -339,6 +385,10 @@ async fn do_stream(
             if matches!(event, StreamEvent::Done { .. }) {
                 saw_done = true;
             }
+            // No `delivered` update here: this tail-flush runs after every `?`
+            // error path, and the function only returns `Ok` from here on — the
+            // flag is consumed solely when a chunk read fails mid-stream
+            // (inside the loop above), so setting it here would be dead.
             let _ = tx.send(event).await;
         }
     }
@@ -360,6 +410,12 @@ async fn do_stream(
         // retry-then-fail path, which is both honest and self-healing for
         // transient disconnects. The receive loop still finishes, because the
         // sender drops when this function returns.
+        //
+        // Deliberately *terminal* here rather than an `Err` fed to the
+        // transport retry loop: the react loop re-creates its accumulators on
+        // every `continue`, so its own retry is already clean, and an EOF
+        // without a terminator usually means the upstream gave up on this
+        // request — re-sending the identical (large) context just repeats it.
         for event in parser.finish() {
             if !matches!(event, StreamEvent::Done { .. }) {
                 let _ = tx.send(event).await;
@@ -373,6 +429,33 @@ async fn do_stream(
     }
     Ok(())
 }
+
+/// A failed streaming attempt, carrying whether it had already delivered
+/// events downstream.
+///
+/// Kept as a distinct type (rather than a second return value) so `do_stream`
+/// stays `anyhow::Result<()>` and every early `?` inside it is accounted for:
+/// an untracked error would silently be treated as "nothing delivered" and
+/// re-run the request on top of a partial turn.
+#[derive(Debug)]
+struct StreamFailure {
+    msg: String,
+    delivered: bool,
+}
+
+impl StreamFailure {
+    fn new(msg: String, delivered: bool) -> Self {
+        Self { msg, delivered }
+    }
+}
+
+impl std::fmt::Display for StreamFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl std::error::Error for StreamFailure {}
 
 /// Whether an error message denotes a deterministic failure that no retry can
 /// fix: any 4xx except the transient trio (408 timeout, 409 conflict,

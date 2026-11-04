@@ -421,6 +421,30 @@ impl Frame {
             .with_phase(phase::RETRY)
     }
 
+    /// Retry after the *transport* re-issued a stream that had already emitted
+    /// deltas (see [`crate::llm::StreamEvent::Retry`]).
+    ///
+    /// Carries `discardPartial: true` so the client can drop what the aborted
+    /// attempt already rendered — the bubble text, the skeleton tool cards and
+    /// the thinking block. Without that the reconnect shows the answer twice
+    /// and leaves orphan cards whose arguments never complete. The engine-side
+    /// accumulators are cleared in the same breath (`react/mod.rs`), so DOM and
+    /// state agree on "this attempt never happened".
+    pub fn stream_retry(session: &str, attempt: u32, max: u32, reason: &str) -> Self {
+        let text = if reason.is_empty() {
+            format!("模型响应中断，正在重新请求 {}/{}", attempt, max)
+        } else {
+            format!("模型响应中断，正在重新请求 {}/{}：{}", attempt, max, reason)
+        };
+        Self::new("retry")
+            .session(session)
+            .text(text)
+            .extra("attempt", serde_json::json!(attempt))
+            .extra("max", serde_json::json!(max))
+            .extra("discardPartial", serde_json::json!(true))
+            .with_phase(phase::RETRY)
+    }
+
     /// Context usage indicator (after each model call).
     ///
     /// Wire contract mirrors Java `WebStreamBuilder.onContextUsageEvent` plus the

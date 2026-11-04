@@ -726,6 +726,11 @@ impl ReActAgent {
             // Per-tool-call argument-progress throttle state, keyed by stream
             // index (Java keys by `toolCallKey`, which is the same index).
             let mut args_progress: HashMap<u32, ArgsProgress> = HashMap::new();
+            // `finish_reason` of the stream that ended this round. `length`
+            // means the model hit its output cap rather than finishing, which
+            // is the *actionable* half of a truncated tool-call error: the fix
+            // is a larger cap or a smaller argument, not a retry.
+            let mut finish_reason = String::new();
 
             // Cancellation must be checked *inside* the receive loop, not only
             // between turns. A single streamed completion can run for minutes on a
@@ -854,7 +859,51 @@ impl ReActAgent {
                             }
                         }
                     }
-                    StreamEvent::Done { usage, .. } => {
+                    StreamEvent::Retry { attempt, max, reason } => {
+                        // The transport gave up on a stream that had *already*
+                        // delivered deltas and is re-issuing the same request.
+                        // Every accumulator below has absorbed those deltas, so
+                        // they must be dropped or the retry appends on top:
+                        //
+                        // - `content_buf`  → the answer rendered twice;
+                        // - `tool_calls`   → two argument streams concatenated
+                        //   into one `arguments` string, which is invalid JSON
+                        //   and aborts the turn as "truncated mid tool-call
+                        //   arguments" — a self-inflicted failure the message
+                        //   blames on the model;
+                        // - `args_progress`→ stale byte counts for skeleton
+                        //   cards whose ids the new attempt will never reuse.
+                        //
+                        // Java needs no such branch: its accumulators are locals
+                        // inside the `callWithRetry` lambda (`streamedReasoningBuf`,
+                        // `argsProgresses` in `ReasonTask.java`), rebuilt on
+                        // every physical attempt. Here the retry loop lives one
+                        // layer *below* the accumulators, so the reset has to be
+                        // driven by the event.
+                        //
+                        // The frontend is told the same thing (`discardPartial`),
+                        // because the deltas already reached the DOM: clearing
+                        // engine state alone would leave a half-typed bubble and
+                        // orphan skeleton cards on screen.
+                        warn!(
+                            session = %config.session_id,
+                            turn = turns,
+                            attempt,
+                            max,
+                            error = %reason,
+                            "stream attempt delivered partial output; discarding accumulators before transport retry"
+                        );
+                        content_buf.clear();
+                        tool_calls.clear();
+                        args_progress.clear();
+                        // The retry restarts the round's clock: the new attempt
+                        // is a fresh stream, and measuring the idle/total caps
+                        // against the aborted one would trip them immediately.
+                        last_chunk_at = std::time::Instant::now();
+                        emit!(Frame::stream_retry(&config.session_id, attempt, max, &reason));
+                    }
+                    StreamEvent::Done { finish_reason: fr, usage } => {
+                        finish_reason = fr;
                         if let Some(u) = usage {
                             // Accumulate via UsageInfo::add so prompt_tokens sums
                             // the *normalised* input (cache included) exactly like
@@ -1008,11 +1057,48 @@ impl ReActAgent {
                     // closing the run here is exactly the "task ended
                     // unfinished, no explanation" failure users report.
                     //
-                    // No retry either: the partial text deltas already reached
-                    // the UI, so re-running the turn would render the answer
-                    // twice. Fail honestly and let the user resend; history
-                    // stays clean because the partial assistant turn is never
-                    // pushed to `messages`.
+                    // This used to give up unconditionally, because re-running
+                    // the turn would render the answer twice — the partial
+                    // deltas had already reached the UI and nothing could take
+                    // them back. That is no longer true: `Frame::stream_retry`
+                    // carries `discardPartial`, and the frontend
+                    // (`discardPartialRetryDom`) rolls back exactly the blocks
+                    // this attempt produced, leaving already-executed tools of
+                    // earlier turns untouched. So the turn can now be retried
+                    // under the same budget as an empty-output failure.
+                    //
+                    // Java behaves this way too: its accumulators live inside
+                    // the `callWithRetry` lambda, so a retry starts clean.
+                    let fatal = crate::llm::client::is_non_retryable(&err);
+                    let timeout_class = crate::llm::client::is_timeout_class(&err);
+                    let timeout_out =
+                        timeout_class && timeout_retries >= MAX_TIMEOUT_RETRIES_PER_TURN;
+                    let deadline_out = std::time::Instant::now() > retry_deadline;
+                    if !fatal && !timeout_out && !deadline_out && turns < max_turns {
+                        if timeout_class {
+                            timeout_retries += 1;
+                        }
+                        // Discard before signalling, so the retry frame is the
+                        // only thing left on screen from this attempt.
+                        content_buf.clear();
+                        tool_calls.clear();
+                        args_progress.clear();
+                        finish_reason.clear();
+                        warn!(
+                            session = %config.session_id,
+                            turn = turns,
+                            error = %err,
+                            "stream died after partial output; discarding it and retrying the turn"
+                        );
+                        emit!(Frame::stream_retry(
+                            &config.session_id,
+                            turns,
+                            max_turns,
+                            &err
+                        ));
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        continue;
+                    }
                     let msg = format!(
                         "LLM stream failed after partial output ({}). The incomplete turn was discarded rather than treated as a final answer; send the message again to retry.",
                         err
@@ -1052,11 +1138,39 @@ impl ReActAgent {
             // corrupted file or a phantom command run.
             let broken = broken_argument_calls(&tool_calls);
             if !broken.is_empty() {
+                // Name the actual cause. "The model truncated" is only true for
+                // one of the two ways this happens, and the remedies are
+                // opposite:
+                //
+                // - `finish_reason=length`: we hit the output-token cap, so
+                //   resending the *same* message truncates identically. The fix
+                //   is a smaller argument or a larger cap. (This was the common
+                //   shape while the Anthropic default cap was 8192 instead of
+                //   Java's 32000.)
+                // - otherwise: the connection died mid-argument, or a transport
+                //   retry replayed into a non-cleared accumulator. Resending is
+                //   genuinely the right move.
+                let cause = if finish_reason == "length" {
+                    "the model hit its maximum output token limit"
+                } else {
+                    "the stream ended before the arguments were complete"
+                };
+                let remedy = if finish_reason == "length" {
+                    "Retry with a smaller edit (split it into several tool calls) or raise the model's maximum output tokens; resending the same request will truncate the same way."
+                } else {
+                    "Send the message again to retry."
+                };
                 let msg = format!(
-                    "Model output was truncated mid tool-call arguments ({}); the turn was aborted instead of executing partial calls. Send the message again to retry.",
-                    broken.join(", ")
+                    "Tool-call arguments were incomplete ({}) because {}; the turn was aborted instead of executing partial calls. {}",
+                    broken.join(", "), cause, remedy
                 );
-                warn!(session = %config.session_id, tools = %broken.join(","), "truncated tool-call arguments; aborting turn");
+                warn!(
+                    session = %config.session_id,
+                    turn = turns,
+                    tools = %broken.join(","),
+                    finish_reason = %finish_reason,
+                    "truncated tool-call arguments; aborting turn"
+                );
                 emit!(Frame::error(&config.session_id, &msg));
                 return ReActResult {
                     final_answer: msg,
@@ -3052,6 +3166,215 @@ mod tests {
         p.mark_emitted(5_000, 1_000);
         p.bytes = 100;
         assert!(!p.should_emit(1_000), "bytes < last_emit_bytes must not underflow");
+    }
+
+    // ─── transport retry must not double-concatenate tool arguments ──────────
+    //
+    // Regression for "Model output was truncated mid tool-call arguments (read)".
+    //
+    // The retry loop lives in `llm/client.rs`, *below* the react accumulators.
+    // A stream that died mid-body therefore retried the request while
+    // `tool_calls[i].function.arguments` still held the first attempt's half,
+    // and the second attempt's deltas appended on top:
+    //
+    //     {"file_pa{"file_path":"x.rs"}
+    //
+    // which is not JSON, so `broken_argument_calls` rejected it and the turn
+    // aborted — blaming the model for the client's own replay. Java never showed
+    // this because its accumulators are locals inside the `callWithRetry` lambda.
+    #[tokio::test]
+    async fn transport_retry_after_partial_stream_does_not_double_arguments() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // One SSE line carrying a tool-call delta. Built with serde_json rather
+        // than a hand-written `format!`: the payload has three nesting levels of
+        // escaping (JSON inside a JSON string inside a Rust literal), and a
+        // brace-count slip there produces a line the dialect parser silently
+        // ignores — which would make this test pass by never exercising
+        // anything at all.
+        fn tool_call_delta(args: &str) -> String {
+            let v = serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "c1",
+                            "function": { "name": "read", "arguments": args }
+                        }]
+                    }
+                }]
+            });
+            format!("data: {}\n\n", v)
+        }
+        const FINISH_TOOLS: &str =
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        const DONE: &str = "data: [DONE]\n\n";
+        const HDR: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n";
+
+        // A real file for the surviving `read` call to open.
+        let tmp = std::env::temp_dir().join(format!("gwork-retry-test-{}.txt", std::process::id()));
+        std::fs::write(&tmp, b"hello").unwrap();
+        let full_args = serde_json::json!({ "file_path": tmp.to_string_lossy() }).to_string();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut n = 0u32;
+            loop {
+                if let Ok((mut sock, _)) = listener.accept().await {
+                    let mut buf = [0u8; 8192];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(300),
+                        sock.read(&mut buf),
+                    )
+                    .await;
+                    n += 1;
+                    match n {
+                        1 => {
+                            // Attempt 1: a well-formed 200 header promising far
+                            // more bytes than we send, then HALF a tool-call's
+                            // arguments, then the socket dies. hyper surfaces the
+                            // shortfall as a body read error — exactly the
+                            // mid-stream failure the retry loop must survive.
+                            let body = format!(
+                                "{}Content-Length: 999999\r\n\r\n{}",
+                                HDR,
+                                tool_call_delta("{\"file_pa")
+                            );
+                            let _ = sock.write_all(body.as_bytes()).await;
+                            // Graceful FIN, NOT `drop(sock)`: an abrupt close with
+                            // bytes still in the send buffer makes Windows emit
+                            // RST, which discards them — the client then never
+                            // sees the partial delta, `delivered` stays false and
+                            // the retry goes silent. The test would pass without
+                            // ever exercising the double-concatenation bug.
+                            let _ = sock.shutdown().await;
+                            drop(sock);
+                            continue;
+                        }
+                        2 => {
+                            // Attempt 2 (the transport retry): the complete tool
+                            // call, properly terminated. If the react loop had
+                            // kept attempt 1's half-argument, the concatenation
+                            // would be invalid JSON and the turn would abort.
+                            let body =
+                                format!("{}Connection: close\r\n\r\n", HDR)
+                                    + &tool_call_delta(&full_args)
+                                    + FINISH_TOOLS
+                                    + DONE;
+                            let _ = sock.write_all(body.as_bytes()).await;
+                            let _ = sock.shutdown().await;
+                        }
+                        _ => {
+                            // Turn 2: a plain final answer, so the run ends
+                            // Completed instead of looping on the same tool call
+                            // until the turn budget runs out.
+                            let text = serde_json::json!({
+                                "choices": [{ "delta": { "content": "all done" } }]
+                            });
+                            let body = format!("{}Connection: close\r\n\r\n", HDR)
+                                + &format!("data: {}\n\n", text)
+                                + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                                + DONE;
+                            let _ = sock.write_all(body.as_bytes()).await;
+                            let _ = sock.shutdown().await;
+                        }
+                    }
+                }
+            }
+        });
+
+        let model = crate::config::ModelConfig {
+            name: "mock".into(),
+            standard: "openai".into(),
+            api_url: format!("http://127.0.0.1:{}", port),
+            api_key: "k".into(),
+            model: "mock".into(),
+            ..Default::default()
+        };
+        let mut settings = crate::config::Settings::default();
+        settings.general.api_retries = 3;
+
+        let config = ReActConfig {
+            session_id: "work-retry-itest".into(),
+            workspace: std::env::temp_dir(),
+            session_dir: None,
+            model,
+            settings,
+            access_mode: "full".into(),
+            max_turns: 3,
+            run_id: "run-retry-itest".into(),
+            start_seq: 0,
+            hitl_approved: true,
+            gate: None,
+            change_ledger: None,
+            context_length: 0,
+            turn_start_ms: 0,
+            usage_seed: Default::default(),
+            force_compact: false,
+            compact_focus: None,
+            subagent_depth: 0,
+            root_session_id: "work-retry-itest".into(),
+            thinking: None,
+        };
+
+        let registry = std::sync::Arc::new(crate::tools::ToolRegistry::default_registry());
+        let agent = ReActAgent::new(registry);
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let history = vec![
+            crate::llm::types::ChatMessage::system("sys"),
+            crate::llm::types::ChatMessage::user("read the file"),
+        ];
+
+        let run = agent.run(&config, history, frame_tx, cancel);
+        let collector = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while let Some(f) = frame_rx.recv().await {
+                frames.push(f);
+            }
+            frames
+        });
+        let result = run.await;
+        let frames = collector.await.unwrap();
+
+        // FIRST assert the precondition actually held: a mid-stream transport
+        // retry happened and the frontend was told to drop the partial DOM.
+        // Ordering matters — without this, every assertion below could pass
+        // vacuously if the mock's truncated first attempt never triggered the
+        // retry loop at all (the exact "test is green but proves nothing" trap).
+        let retry_frame = frames
+            .iter()
+            .find(|f| f.frame_type == "retry" && f.extra["discardPartial"] == serde_json::json!(true));
+        assert!(
+            retry_frame.is_some(),
+            "a mid-stream transport retry must emit a discardPartial retry frame; got frames {:?}",
+            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+        );
+
+        // The user-visible symptom must be gone: the retried attempt's arguments
+        // replaced the aborted attempt's half, instead of concatenating onto it.
+        let truncation = frames.iter().find(|f| {
+            f.frame_type == "error"
+                && f.text
+                    .as_deref()
+                    .map(|t| t.contains("truncated mid tool-call"))
+                    .unwrap_or(false)
+        });
+        assert!(
+            truncation.is_none(),
+            "arguments must not be double-concatenated across a transport retry; got {:?}",
+            truncation.map(|f| f.text.clone())
+        );
+        assert_eq!(
+            result.stop_reason,
+            StopReason::Completed,
+            "the retried turn must complete; final_answer={:?}",
+            result.final_answer
+        );
+
+        let _ = std::fs::remove_file(&tmp);
     }
 
     // ─── forced /compact actually fires from inside the loop ───────────────
