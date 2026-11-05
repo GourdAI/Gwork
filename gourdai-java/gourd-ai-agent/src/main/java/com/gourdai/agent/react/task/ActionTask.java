@@ -224,6 +224,12 @@ public class ActionTask {
 
             if (Assert.isEmpty(toolExchanger.getResult())) {
                 result = executeTool(trace, toolName, args);
+                // 把 ToolResult 的结构化错误标志传播到交换器：ToolCallEndEvent 的 error 只承载
+                // Throwable，而 ToolResult.error（含工具自身返回的 error 结果）无异常对象，
+                // 必须靠 failed 布尔位让下游判定失败，不再依赖文本前缀。
+                if (result != null && result.isError()) {
+                    toolExchanger.setFailed(true);
+                }
                 // 多模态结果（含非文本块）需原样进入工作记忆，不能只取文本。
                 if (result != null && result.isMultiModal()) {
                     multimodalResult = result;
@@ -946,9 +952,13 @@ public class ActionTask {
         // 1. 流式客户端通知闭环
         if (trace.getOptions().getStreamSink() != null) {
             try {
-                trace.getOptions().getStreamSink().next(
-                        new ToolCallEndEvent(trace, toolExchanger.getToolName(), toolExchanger.getArgs(), observationMessage,
-                                error, durationMs, actionId, batch.batchId, batch.batchIndex, batch.batchSize));
+                ToolCallEndEvent endEvent = new ToolCallEndEvent(trace, toolExchanger.getToolName(), toolExchanger.getArgs(),
+                        observationMessage, error, durationMs, actionId,
+                        batch.batchId, batch.batchIndex, batch.batchSize);
+                // 失败判定唯一依赖结构化 failed：Throwable 异常或交换器上的业务错误标志。
+                // error 参数保持原样（仍传 Throwable），仅额外置位，不改变其余参数语义。
+                endEvent.setFailed(error != null || toolExchanger.isFailed());
+                trace.getOptions().getStreamSink().next(endEvent);
             } catch (Throwable e) {
                 LOG.error("Push ToolCallEndEvent failed", e);
             }
@@ -1024,11 +1034,11 @@ public class ActionTask {
 
                 return result;
             } catch (IllegalArgumentException | StatusException e) {
-                // 引导模型自愈：返回 Schema 错误提示
-                return ToolResult.success("__ERROR__ Invalid arguments for [" + name + "]. Expected Schema: " + tool.inputSchema() + ". Error: " + e.getMessage());
+                // 引导模型自愈：返回 Schema 错误提示（结构化 error，供下游置 failed）
+                return ToolResult.error("Invalid arguments for [" + name + "]. Expected Schema: " + tool.inputSchema() + ". Error: " + e.getMessage());
             } catch (Throwable e) {
                 LOG.error("Agent [" + config.getName() + "] tool [" + name + "] execution failed", e);
-                return ToolResult.success("__ERROR__ Execution error in tool [" + name + "]: " + e.getMessage());
+                return ToolResult.error("Execution error in tool [" + name + "]: " + e.getMessage());
             } finally {
                 BackgroundNoticeCenter.unbindCurrentOwner();
             }
@@ -1038,6 +1048,6 @@ public class ActionTask {
             LOG.warn("Agent [{}] tool [{}] not found", config.getName(), name);
         }
 
-        return ToolResult.success("__ERROR__ Tool [" + name + "] not found.");
+        return ToolResult.error("Tool [" + name + "] not found.");
     }
 }

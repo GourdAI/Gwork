@@ -118,6 +118,7 @@
     var APP_SCRIPTS = [
         '/js/app-base.js',
         '/js/app-tool-presentation.js',
+        '/js/app-turn-compact.js',      // P2-6 按轮 Compact 折叠（纯展示后处理，UMD 可测）
         '/js/message-queue.js',
         '/js/app-ui.js',
         '/js/model-list-order.js',

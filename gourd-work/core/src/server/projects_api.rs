@@ -69,9 +69,15 @@ pub struct BrowseQuery {
 }
 
 /// GET /web/chat/projects/browse
+///
+/// `data` 是 `{current, parent, separator, dirs}` 对象（Java `ProjectService.browse`
+/// 的同款形状），不是子目录数组——前端目录选择器靠 `data.current` 判断「已进入目录」，
+/// 返回数组会让「新建文件夹/选定此目录」永远被 `please_enter_dir` 拦下。
 pub async fn browse(Query(q): Query<BrowseQuery>) -> Json<serde_json::Value> {
-    let items = projects::browse(&q.path);
-    Json(serde_json::json!({"code": 200, "data": items}))
+    match projects::browse(&q.path) {
+        Ok(data) => Json(serde_json::json!({"code": 200, "data": data})),
+        Err(e) => Json(e.to_json()),
+    }
 }
 
 /// POST /web/chat/projects/remove — unregister (does not delete files).

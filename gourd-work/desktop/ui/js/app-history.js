@@ -1681,8 +1681,10 @@ function historyOverlayHost() {
     return document.getElementById('messagesShell') || $(messagesWrap).parent()[0] || null;
 }
 
-/* 覆盖层存在期间才给 shell 挂 relative（CSS 同名规则注释说明了原因）：
-   每次增删覆盖层后调用，保证「无覆盖层 ⇒ 无 relative」，不留悬挂类。 */
+/* 覆盖层存在期间给 shell 挂 has-history-loading 标记。
+    【2026-11-04 位置修正后的现状】shell 已常驻 relative（rail 与覆盖层的共同定位父级），
+    该标记不再承载 CSS 规则，仅作为「当前有加载态」的可查询状态保留：DOM 探针与
+    测试仍用它断言覆盖层的生命周期。不要因为「找不到同名 CSS 规则」就删掉调用点。 */
 function updateHistoryLoadingShellClass(host) {
     if (!host) return;
     var has = !!host.querySelector('.chat-history-loading');
@@ -2586,6 +2588,43 @@ function replaySession(sess, events, prepend, keepOpen) {
             realContainer.appendChild(fragment);
         }
 
+        /* P2-6 按轮 Compact 折叠：一轮结束时把思考/工具过程行收起成一行统计摘要，
+           只留最终正文。必须在 fragment 移入真实容器之后（要量 DOM 子节点）、
+           高亮/mermaid/插话补测与滚动锚定修正之前（折叠会改变行高，先滚后折会错位）。
+           【逐轮独立】lastTurnClosed 只描述本页最后一轮自身是否结束，与「是否还有更早历史」
+           无关 —— dsh #6250 的 `!historyIncomplete` 全局门控会让长会话折叠全部失效。
+           进行中的最后一轮（keepOpen）必须保留全部过程证据，不许折叠。
+           偏好开关：localStorage 的 gourd.turnCompact === '0' 时完全不启用（可一键回退）。 */
+        try {
+            var tcApi = (typeof window !== 'undefined') ? window.GourdTurnCompact : null;
+            var tcOff = false;
+            try { tcOff = (typeof localStorage !== 'undefined') && localStorage.getItem('gourd.turnCompact') === '0'; } catch (tcLsErr) { /* 隐私模式忽略 */ }
+            if (tcApi && tcOff) {
+                /* 关掉偏好后必须撤销【已渲染】的折叠，否则只是「不再新增」，
+                   屏幕上仍留着上一轮插好的摘要按钮和隐藏标记 = 回退名不副实。
+                   clearTurnCompact 幂等：无标记时是空扫描。 */
+                tcApi.clearTurnCompact(realContainer);
+            } else if (tcApi) {
+                var lastClosed = !keepOpen;
+                if (!lastClosed) {
+                    for (var tci = events.length - 1; tci >= 0; tci--) {
+                        var tcType = events[tci] && events[tci].type;
+                        if (tcType === 'user' || tcType === 'user_input') break;
+                        if (tcType === 'done' || tcType === 'trace') { lastClosed = true; break; }
+                    }
+                }
+                tcApi.applyTurnCompact(realContainer, {
+                    lastTurnClosed: lastClosed,
+                    // prepend 只折本次新插入的更早历史轮，绝不碰容器底部正在实时流式的回复
+                    scopeRows: prepend ? (prependedRows || []) : null,
+                    translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t) ? function (k) { return GourdI18n.t(k); } : null
+                });
+            }
+        } catch (tcErr) {
+            // 纯展示增强，任何异常都不许影响历史消息本身的可用性
+            console.error('[replaySession] 按轮 Compact 折叠失败:', tcErr);
+        }
+
         // 代码高亮和 mermaid 也分片执行，避免阻塞
         if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(realContainer);
         if (typeof processMermaidBlocks === 'function') processMermaidBlocks(realContainer);
@@ -3235,24 +3274,23 @@ $(document).on('click', function(e) {
    WHY 采样而不是封顶显示前 N 条：封顶会让「后半段对话」在轨道上完全没有刻度，
    导航直接失效。采样降级的是「覆盖全部消息」的精度，不降级「跳得中」的能力。
    【与固定步距的关系】间距恒为 min(HISTORY_RAIL_STEP_PX, 轨道高/(n-1))：
-   条数少时取步距（32px，紧凑一簇），条数多时装不下才压缩到 轨道高/(n-1)。
-   压缩分支下 60 根在 676px 轨道上间距约 11.45px，已贴近 12px 命中区上限，
+    条数少时取步距（16px，紧凑一簇），条数多时装不下才压缩到 轨道高/(n-1)。
+    压缩分支下 60 根在 676px 轨道上间距约 11.45px，已贴近 12px 命中区上限，
    再往上就不是「变密」而是「点不准相邻刻度」，所以上限保持 60 ——
    超过 60 条用户消息的会话，轨道表示的是「按时间均匀抽样」，不是逐条。
    【上一版这里写的是「等距后单根占的纵向空间固定（轨道高/(N-1)）」】那是 v2 把等距
-   等同于铺满时的公式；按它算 8 根会得到 96px，与实际的 32px 不符 —— 口径必须含 min()。 */
+    等同于铺满时的公式；按它算 8 根会得到 96px，与实际的 16px 不符 —— 口径必须含 min()。 */
 var HISTORY_RAIL_MAX_TICKS = 60;
 
 /* 刻度的固定步距（像素）。
    【为什么是固定像素而不是铺满轨道】上一版把刻度按「0%~100%」铺满整条轨道，
    8 条消息时就变成 96px 一根 —— 截图上是散落的几个小横线，完全失去「这是一排刻度」的整体感。
    参照稿里它们是紧凑的一小簇：间距恒定、整簇垂直居中、只占轨道中段一段。
-   【为什么是 32】从参照稿量出相邻刻度中心距约 32~38px。取 32 时 8 条消息的簇高 224px
-   （约占轨道 1/3），既不是「一根根散开」也不是「挤成一条虚线」。
-   【为什么还要 min()】刻度多了装不下：20 条 × 32 = 608px 还勉强，30 条要 928px。
-   铺不下时压缩到 trackH/(n-1) 刚好铺满，保证永不溢出、命中区不被挤出轨道，
-   也不会把后段对话挤到轨道外（那等于后半段失去导航）。 */
-var HISTORY_RAIL_STEP_PX = 32;
+    【为什么是 16】2026-11-04 用户对照参照稿指出「刻度的间距太长了」：
+    32px 时 8 条消息拉成 224px 的一长串，散得像几根孤零零的小横线。
+    参照稿里是紧凑一小簇（相邻中心距约 16~18px），8 条只占约 112px。
+    取 16 且保留 min() 压缩分支：条数多时装不下会自动收窄到 trackH/(n-1)。 */
+var HISTORY_RAIL_STEP_PX = 16;
 
 /* 浮层列表每行文本的截断长度。
    卡片宽约 340px、字号 12.5px，单行视觉容量约 24 个汉字；取 48 字是为了
@@ -3559,9 +3597,37 @@ function releaseRailPin() {
     historyRailPinArrived = false;
 }
 
+/** 实测滚动条宽度并写到 .messages-shell 的 --scrollbar-w，供 .history-rail 的
+ *  right 让位使用。2026-11-04「滚动条和刻度位置反了」修复的一环：刻度带改为
+ *  叠在滚动区右缘内侧，必须用真实滚动条宽度（Windows ~15px / macOS overlay 0px）
+ *  把刻度让到滚动条左边；写死 15px 会在 overlay 滚动条平台压住正文右缘。
+ *  offsetWidth - clientWidth 含 border，这里 wrap 无边框，差值即滚动条宽。
+ *  只在值变化时写，避免无谓的样式失效。
+ *  【2026-11-04 review 加固】宿主必须与 historyOverlayHost() 同源：优先按 id 取
+ *  #messagesShell，再退回 parentNode。旧版只写 wrap.parentNode，若 DOM 中插入了
+ *  中间 wrapper（或测试桩无 parentNode），变量会静默写到错误元素 / 干脆不写，
+ *  而 rail 读的是 shell 自身声明的 0px —— 表现就是「刻度压住滚动条且不报错」。 */
+function syncRailScrollbarWidth() {
+    var wrap = typeof messagesWrap !== 'undefined' && messagesWrap ? messagesWrap : null;
+    if (!wrap) return;
+    var shell = typeof document !== 'undefined' && document.getElementById
+        ? document.getElementById('messagesShell')
+        : null;
+    if (!shell) shell = wrap.parentNode || (wrap.parent && wrap.parent[0]) || null;
+    if (!shell || !shell.style) return;
+    var w = Math.max(0, wrap.offsetWidth - wrap.clientWidth);
+    var px = w + 'px';
+    if (shell.style.getPropertyValue('--scrollbar-w') !== px) {
+        shell.style.setProperty('--scrollbar-w', px);
+    }
+}
+
 /** 重建轨道。items 为空则整条轨道隐藏。 */
 function renderHistoryRail(force) {
     if (!$historyRail.length) return;
+    /* 位置修正：轨道是 absolute 覆盖层，右让位量必须跟着滚动条宽度走。
+       每次重建（含窗口 resize）都刷一次，overlay 滚动条启停时也能对齐。 */
+    syncRailScrollbarWidth();
     var sess = activeSessionId ? sessionMap[activeSessionId] : null;
     var items = collectRailMessages();
 
@@ -3674,14 +3740,14 @@ function scheduleRailTipHide() {
     cancelRailTipHide();
     historyRailTipHideTimer = setTimeout(function() {
         historyRailTipHideTimer = null;
-        $historyRailTip.removeClass('is-shown has-cursor');
+        $historyRailTip.removeClass('is-shown');
     }, HISTORY_RAIL_TIP_HIDE_DELAY);
 }
 
 /** 立即关闭（切换会话 / 跳转 / 轨道重建这些「确定要关」的场景）。 */
 function hideHistoryRailTip() {
     cancelRailTipHide();
-    if ($historyRailTip.length) $historyRailTip.removeClass('is-shown has-cursor');
+    if ($historyRailTip.length) $historyRailTip.removeClass('is-shown');
 }
 
 /** 构建/更新浮层列表：每行 = 一条历史消息 + 行尾同款刻度。
@@ -3699,8 +3765,7 @@ function renderRailTipList() {
     if (sig === historyRailTipSig && $historyRailTip.find('.history-rail-tip-row').length) return;
     historyRailTipSig = sig;
 
-    var html = '<div class="history-rail-tip-list">'
-        + '<span class="history-rail-tip-cursor" aria-hidden="true"></span>';
+    var html = '<div class="history-rail-tip-list">';
     for (var j = 0; j < $ticks.length; j++) {
         var $t = $ticks.eq(j);
         var text = $t.attr('data-tip') || '';
@@ -3753,7 +3818,7 @@ function measureRailTipRowGeo() {
 
 /** 把列表里的某一行滚进可视区（只滚列表自己，不连带滚动页面/正文）。
  *  视口高度用 measureRailTipRowGeo 记下的 listH：这里若现读 clientHeight，
- *  它【一定】是强制同步布局 —— 上一行刚写完 cursor 的 transform/height，样式已失效。
+ *  它【可能】是强制同步布局 —— 本函数刚写过 .is-cursor / top，样式可能已失效。
  *
  *  【本轮自审纠正的论断】原来这里写着「scrollTop 是滚动偏移而非布局值，读它不触发重排」，
  *  这句是错的：scrollTop/scrollLeft 和 scrollHeight 一样在「What forces layout」清单上。
@@ -3772,9 +3837,9 @@ function scrollRailTipRowIntoView(rec, geo) {
     else if (rec.top + rec.h > st + viewH) list.scrollTop = rec.top + rec.h - viewH;
 }
 
-/** 移动列表里的选中行：行文本加深 + 刻度变长，并让「滑动指示条」移到该行。
- *  这就是用户要的「鼠标移动选中有动画」：位移带过渡，颜色不做淡化 ——
- *  颜色淡出淡入读起来是「两个东西先后亮」，位移读起来是「选中移到了这里」。 */
+/** 移动列表里的选中行：行文本变黑 + 行尾真实加宽刻度把文字往前挤。
+ *  按参照稿没有滑动指示条、没有阴影背景；宽度带过渡（占布局，所以文字确实前移），
+ *  颜色直接切换不做淡化 —— 参照稿的动感来自刻度推字，而不是两个高亮先后亮灭。 */
 function setRailTipCursor(msgIdx) {
     if (isNaN(msgIdx)) return;
     var $rows = $historyRailTip.find('.history-rail-tip-row');
@@ -3782,12 +3847,9 @@ function setRailTipCursor(msgIdx) {
     var $target = $rows.filter('[data-msg-idx="' + msgIdx + '"]');
     if (!$target.length) return;
     /* 【不能早退】曾经写 `if (historyRailTipIdx === msgIdx) return;`，看似是「已经选中就不动」
-       的优化，实际是一个真实缺陷：卡片隐藏时 scheduleRailTipHide 会移除 has-cursor，
-       但【不会】重置 historyRailTipIdx。于是「悬停第 3 根 → 移开 → 再回来悬停第 3 根」时，
-       函数在第一步就 return，has-cursor 再也不会加回来 ——
-       实测：卡片显示正常、is-cursor 也正确，但滑动指示条的 computed opacity 恒为 0，
-       用户看到的是「第一次有选中动画、第二次没有了」。
-       因此这里只保留「目标行不存在」这一个真守卫，其余状态全部幂等重写。 */
+       的优化，实际是一个真实缺陷：卡片隐藏后不重置 historyRailTipIdx，
+       于是「悬停第 3 根 → 移开 → 再回来悬停第 3 根」时函数第一步就 return，
+       选中态再也不会补回来。故其余状态全部幂等重写。 */
     historyRailTipIdx = msgIdx;
 
     /* 【只清残留、不做全量 removeClass】旧写法 $rows.removeClass('is-cursor') 让 N 行
@@ -3796,7 +3858,6 @@ function setRailTipCursor(msgIdx) {
     var $stale = $rows.filter('.is-cursor').not($target);
     if ($stale.length) $stale.removeClass('is-cursor');
     $target.addClass('is-cursor');
-    $historyRailTip.addClass('has-cursor');
 
     /* 几何全部吃缓存：一次测量，整轮扫描零强制布局。 */
     if (!historyRailTipRowGeo) measureRailTipRowGeo();
@@ -3807,16 +3868,9 @@ function setRailTipCursor(msgIdx) {
             if (geo.rows[i].idx === msgIdx) { rec = geo.rows[i]; break; }
         }
     }
-    var cursor = $historyRailTip.find('.history-rail-tip-cursor')[0];
-    if (cursor && rec) {
-        /* height 只在真的不同时才写：行高恒定时一次都不写，
-           否则 height 的过渡会每帧触发布局（这正是第二处卡顿源）。 */
-        if (cursor.__railH !== rec.h) {
-            cursor.style.height = rec.h + 'px';
-            cursor.__railH = rec.h;
-        }
-        cursor.style.transform = 'translateY(' + rec.top + 'px)';
-    }
+    /* 选中态由行自身的 .is-cursor 表达（文字变黑 + 行尾刻度变长），无滑动指示条：
+       2026-11-04 按参照稿移除后，DOM 与相关写入已一并删掉，避免对 display:none
+       元素做无意义的几何测量。这里只把目标行滚进列表可视区。 */
     scrollRailTipRowIntoView(rec, geo);
 }
 
@@ -4013,6 +4067,11 @@ $(messagesWrap).on('keydown', function(e) {
  *  「当前读到哪里」的答案变化 —— 即使刻度不动，active 也得重算。 */
 function relayoutHistoryRailTicks() {
     if (!$historyRail.hasClass('is-visible')) return;
+    /* 【必须与 renderHistoryRail 同口径重测滚动条宽度】内容异步撑高（图片/代码高亮/
+       Mermaid）会让 .messages-wrap 从「不溢出」变成「溢出」，原生滚动条从无到有；
+       此路径不经过 renderHistoryRail，漏测就会让 --scrollbar-w 停留在 0px，
+       刻度带随即压住新出现的滚动条。只在值变化时写入，不产生额外样式失效。 */
+    syncRailScrollbarWidth();
     var $ticks = $historyRailTrack.find('.history-rail-tick');
     if (!$ticks.length) return;
     var items = collectRailMessages();

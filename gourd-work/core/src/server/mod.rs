@@ -1475,59 +1475,49 @@ async fn chat_replay(
         return Json(serde_json::json!({"code": 400, "description": "Invalid session ID"}));
     }
     let store = store_for(&state, &q.session_id);
-    let all = store.load_stream_frames(&q.session_id);
     let busy = state.is_busy(&q.session_id).await;
 
-    // Active run id: only meaningful while a run is in flight (same semantics
-    // as Java's getCurrentRunId — null otherwise). The stream's last frame
-    // carries the run id of the run currently appending to it.
-    let run_id = if busy {
-        all.iter()
-            .rev()
-            .find_map(|f| f.get("runId").and_then(|r| r.as_str()).map(|s| s.to_string()))
-    } else {
-        None
-    };
-
-    // Hoisted before any branch moves `all`.
-    let latest_all = all_last_seq(&all);
-
-    // ── afterSeq branch: live-stream recovery (app-streaming.js) ──
-    if let Some(after) = q.after_seq {
-        let mut events: Vec<serde_json::Value> =
-            all.into_iter().filter(|f| seq_of(f) > after).collect();
-        if let Some(lim) = q.limit {
-            if lim > 0 && events.len() > lim {
-                // Page forward: return the first `lim`, hasMore if more remain.
-                let more = events.len() > lim;
-                events.truncate(lim);
-                let (first, last) = bounds_of(&events);
-                return Json(serde_json::json!({
-                    "code": 200,
-                    "data": {
-                        "events": events,
-                        "totalCount": 0,
-                        "totalRounds": 0,
-                        "remainingRounds": 0,
-                        "hasMore": more,
-                        "firstSeq": first,
-                        "lastSeq": last,
-                        "latestSeq": last,
-                        "running": busy,
-                        "runId": run_id,
-                    }
-                }));
-            }
+    // ── Fast path: one sequential scan, only the requested window parsed ──
+    //
+    // The old implementation called `load_stream_frames` unconditionally:
+    // every line of an 84 MB / 115k-line stream was deserialized into a
+    // `Value` tree before *any* branch ran, and every "load earlier" click
+    // paid that again. 99% of those lines are `text`/`reason` token deltas;
+    // parsing is the bottleneck (a `Value` tree is 2-4x the raw JSON and
+    // `#[serde(flatten)]` forces serde's `Content` slow path), not disk IO.
+    //
+    // `load_replay_window` probes `eventSeq`/`type` as raw text, parses only
+    // the selected lines, and projects consecutive same-kind main-line deltas
+    // into one frame. That last step matters just as much as the parse: the
+    // browser consumes replay frames 50 per animation frame, so 115k deltas
+    // alone needed ~38 s of rAF budget (>12 s timeout was the symptom).
+    //
+    // Response contract is unchanged field-for-field (app-history.js
+    // :1899-1911 and app-streaming.js's gate both depend on it).
+    let mode = if let Some(after) = q.after_seq {
+        crate::session::ReplayMode::After { after_seq: after, limit: q.limit }
+    } else if q.rounds > 0 || q.before_seq.is_some() {
+        crate::session::ReplayMode::Rounds {
+            before_seq: q.before_seq,
+            rounds: q.rounds as usize,
         }
-        let (first, last) = bounds_of(&events);
+    } else {
+        crate::session::ReplayMode::Tail { cap: q.tail.unwrap_or(REPLAY_DEFAULT_FULL_TAIL) }
+    };
+    let w = store.load_replay_window(&q.session_id, mode);
+    let run_id = if busy { w.last_run_id } else { None };
+
+    if q.after_seq.is_some() {
+        let more = w.total_after > w.events.len();
+        let (first, last) = bounds_of(&w.events);
         return Json(serde_json::json!({
             "code": 200,
             "data": {
-                "events": events,
+                "events": w.events,
                 "totalCount": 0,
                 "totalRounds": 0,
                 "remainingRounds": 0,
-                "hasMore": false,
+                "hasMore": more,
                 "firstSeq": first,
                 "lastSeq": last,
                 "latestSeq": last,
@@ -1537,34 +1527,19 @@ async fn chat_replay(
         }));
     }
 
-    // ── rounds/beforeSeq branch: paginated history (app-history.js) ──
     if q.rounds > 0 || q.before_seq.is_some() {
-        // Work on the window strictly before the cursor (whole window when absent).
-        let window: Vec<serde_json::Value> = match q.before_seq {
-            Some(b) => all.into_iter().filter(|f| seq_of(f) < b).collect(),
-            None => all,
-        };
-        let starts = round_starts(&window);
-        let total_rounds = starts.len();
-        if total_rounds == 0 {
-            return empty_envelope(latest_all, busy, run_id);
+        if w.total_rounds == 0 {
+            return empty_envelope(w.latest_seq, busy, run_id);
         }
-        let want = if q.rounds > 0 { q.rounds as usize } else { total_rounds };
-        // Take the LAST `want` rounds of the window (most recent page first;
-        // earlier pages come via beforeSeq).
-        let take_from = total_rounds.saturating_sub(want);
-        let begin = starts[take_from];
-        let events: Vec<serde_json::Value> = window[begin..].to_vec();
-        let remaining = take_from;
-        let (first, last) = bounds_of(&events);
+        let (first, last) = bounds_of(&w.events);
         return Json(serde_json::json!({
             "code": 200,
             "data": {
-                "events": events,
-                "totalCount": events.len(),
-                "totalRounds": total_rounds,
-                "remainingRounds": remaining,
-                "hasMore": remaining > 0,
+                "events": w.events,
+                "totalCount": w.events.len(),
+                "totalRounds": w.total_rounds,
+                "remainingRounds": w.remaining_rounds,
+                "hasMore": w.remaining_rounds > 0,
                 "firstSeq": first,
                 "lastSeq": last,
                 "latestSeq": last,
@@ -1575,17 +1550,15 @@ async fn chat_replay(
     }
 
     // ── legacy parameter-less / tail branch ──
-    let cap = q.tail.unwrap_or(REPLAY_DEFAULT_FULL_TAIL);
-    let mut events = all;
-    if events.len() > cap {
-        events = events[events.len() - cap..].to_vec();
-    }
-    let (first, last) = bounds_of(&events);
-    let total_rounds = round_starts(&events).len();
+    let (first, last) = bounds_of(&w.events);
+    let total_rounds = w.events
+        .iter()
+        .filter(|f| f.get("type").and_then(|t| t.as_str()) == Some("user"))
+        .count();
     Json(serde_json::json!({
         "code": 200,
         "data": {
-            "events": events,
+            "events": w.events,
             "totalCount": 0,
             "totalRounds": total_rounds,
             "remainingRounds": 0,
@@ -2422,6 +2395,40 @@ fn new_run_id() -> String {
     format!("run-{}", &uuid::Uuid::new_v4().to_string()[..8])
 }
 
+/// Inject the answer/approval as the tool result for the suspended call.
+///
+/// Defensive dedup for suspension snapshots written by an older kernel: the
+/// `ReActAgent::run` exit gate used to repair *every* return path, including
+/// ask_user/HITL suspensions, so `messages_json` can already contain a bogus
+/// INTERRUPTED_MARKER tool result for this very call id. Appending the real
+/// answer after it leaves two `tool` messages for one call; the model reads
+/// "the call was cancelled, do not repeat it" first and discards the answer.
+/// Replace any pre-existing result instead of stacking a second one.
+///
+/// Pure function so both the happy path and the legacy-poisoned path are
+/// locked by unit tests without standing up a server.
+fn inject_resume_result(
+    messages: &mut Vec<ChatMessage>,
+    tool_call_id: Option<&str>,
+    injected_text: &str,
+) {
+    match tool_call_id {
+        Some(id) if !id.is_empty() => {
+            let replacement = ChatMessage::tool_result(id, injected_text);
+            if let Some(existing) = messages
+                .iter_mut()
+                .find(|m| m.tool_call_id.as_deref() == Some(id))
+            {
+                *existing = replacement;
+            } else {
+                messages.push(replacement);
+            }
+        }
+        // Fallback: no tool_call_id recorded (legacy snapshot), use a user message.
+        _ => messages.push(ChatMessage::user(injected_text)),
+    }
+}
+
 /// Spawn a resumed run from a suspension point.
 fn spawn_resume(
     state: Arc<AppState>,
@@ -2453,16 +2460,15 @@ fn spawn_resume(
     // commands get gated again — which is the intended per-invocation semantics.
     let hitl_approved = false;
 
-    // On resume, the message history ends with an assistant message carrying tool_calls.
-    // The OpenAI API contract requires a `tool` role message responding to each
-    // tool_call_id before any new user/assistant message. So we inject a tool message.
+    // On resume, the message history ends with an assistant message carrying
+    // tool_calls; inject the answer/approval as its tool result (see
+    // `inject_resume_result` above for the legacy-snapshot dedup).
     if !injected_text.is_empty() {
-        if let Some(tool_call_id) = &sp.pending_tool_call_id {
-            messages.push(ChatMessage::tool_result(tool_call_id.clone(), &injected_text));
-        } else {
-            // Fallback: no tool_call_id recorded (shouldn't happen), use user message
-            messages.push(ChatMessage::user(&injected_text));
-        }
+        inject_resume_result(
+            &mut messages,
+            sp.pending_tool_call_id.as_deref(),
+            &injected_text,
+        );
     }
 
     tokio::spawn(async move {
@@ -5139,6 +5145,54 @@ mod tests {
         assert!(is_masked_key("abcd****wxyz"));
         assert!(!is_masked_key("abc***def"), "three asterisks is not the mask shape");
         assert!(!is_masked_key("sk-live-000000"));
+    }
+
+    // ── ask_user / HITL resume injection ─────────────────────────────────────
+
+    #[test]
+    fn resume_injects_the_real_answer_as_the_only_tool_result() {
+        // Healthy snapshot: assistant declared ask_user, no result yet.
+        let mut msgs = vec![ChatMessage::user("which option?")];
+        inject_resume_result(&mut msgs, Some("call-ask"), "Q1: 全量根治\nQ2: 不要兼容旧帧");
+        let results: Vec<_> = msgs
+            .iter()
+            .filter(|m| m.tool_call_id.as_deref() == Some("call-ask"))
+            .collect();
+        assert_eq!(results.len(), 1, "exactly one result per tool call");
+        assert_eq!(results[0].content_text(), "Q1: 全量根治\nQ2: 不要兼容旧帧");
+        assert!(!results[0].content_text().contains("中断"));
+    }
+
+    #[test]
+    fn resume_replaces_a_legacy_interrupted_marker_instead_of_stacking_it() {
+        // Snapshot written by the buggy kernel: the run-exit repair gate faked
+        // an INTERRUPTED_MARKER result for the suspended call. The real answer
+        // must replace it — two tool messages would make the model read the
+        // cancellation notice first and discard the answer (work-mw205svw).
+        let mut msgs = vec![
+            ChatMessage::user("which option?"),
+            ChatMessage::tool_result(
+                "call-ask",
+                "[该工具调用因任务中断/取消未执行完成，无输出结果。请勿直接重复执行同一调用]",
+            ),
+        ];
+        inject_resume_result(&mut msgs, Some("call-ask"), "Q1: 全量根治\nQ2: 不要兼容旧帧");
+        let results: Vec<_> = msgs
+            .iter()
+            .filter(|m| m.tool_call_id.as_deref() == Some("call-ask"))
+            .collect();
+        assert_eq!(results.len(), 1, "must not stack two results for one call");
+        assert_eq!(results[0].content_text(), "Q1: 全量根治\nQ2: 不要兼容旧帧");
+        assert!(!results[0].content_text().contains("中断"));
+    }
+
+    #[test]
+    fn resume_without_call_id_falls_back_to_a_user_message() {
+        let mut msgs: Vec<ChatMessage> = Vec::new();
+        inject_resume_result(&mut msgs, None, "Q1: approved");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, crate::llm::Role::User);
+        assert_eq!(msgs[0].content_text(), "Q1: approved");
     }
 
     // ── suspension TTL ──────────────────────────────────────────────────────

@@ -251,7 +251,32 @@ impl ReActAgent {
         // ("No tool output found for tool call …"). Retrying the identical
         // request can never self-heal, so the session would fail on every
         // subsequent turn until the user abandoned it.
-        let repaired = repair_tool_pairing(&mut result.messages);
+        //
+        // SUSPENSION IS THE ONE DELIBERATE EXCEPTION. ask_user / HITL end a run
+        // with an `assistant(tool_calls)` turn that intentionally has no tool
+        // result yet: the result is injected by `spawn_resume` only after the
+        // user answers / approves. Repairing that turn here inserts
+        // INTERRUPTED_MARKER, and `server/mod.rs` then persists the poisoned
+        // array into `SuspensionPoint.messages_json`. On resume the model reads
+        // "该工具调用因任务中断/取消未执行完成…请勿直接重复执行" *before* the real
+        // answer, concludes the question was cancelled, and finishes the turn
+        // with reasoning-only output — zero visible text, zero tool calls.
+        // That is exactly the "问答已提交但任务无法正常执行" incident: session
+        // work-mw205svw, run-f3e7512f = 463 `reason` frames + `done`, and none
+        // of the two answers ("全量根治" / "不要兼容旧帧") reached the model.
+        // `spawn_resume` adds the matching `tool` message in its place. Only the
+        // *pending* call is exempt: a parallel batch may contain other calls that
+        // genuinely died mid-flight, and those still need a placeholder or the
+        // provider rejects the whole history on the resumed request.
+        let suspended_call: Vec<String> = match result.stop_reason {
+            StopReason::SuspendedQuestion | StopReason::SuspendedHitl => result
+                .pending_tool_call_id
+                .clone()
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        };
+        let repaired = repair_tool_pairing_except(&mut result.messages, &suspended_call);
         if repaired > 0 {
             warn!(
                 session = %config.session_id,
@@ -300,6 +325,12 @@ impl ReActAgent {
             .unwrap_or(0);
         let mut total_usage = UsageInfo::default();
         let mut turns = 0u32;
+        // Decode-speed accumulator (Java TurnTimer parity): wall time of the timed
+        // generation segments plus the completion tokens those segments produced.
+        // Tool execution, approval waits and sub-agent scheduling are excluded,
+        // so the ratio is a comparable decode throughput across models.
+        let mut generation_ms_total: u64 = 0;
+        let mut generated_tokens_total: u64 = 0;
 
         // ── P2: retry/latency budget (Java's four caps, aligned 2026-10-31) ──
         // Java production incident work-mua28gy6: 34 retries burned 5 tiers of
@@ -724,6 +755,10 @@ impl ReActAgent {
             // idle clock. See the reset in the `rx.recv()` arm below.
             let stream_started_at = std::time::Instant::now();
             let mut last_chunk_at = std::time::Instant::now();
+            // Start of the first visible model output in this stream; the decode
+            // segment is [first_content_at, usage settlement]. None until a real
+            // content/reasoning delta arrives (Java TurnTimer.onVisibleOutput).
+            let mut first_content_at: Option<std::time::Instant> = None;
             let mut idle_expired = false;
             let mut total_expired = false;
             // Per-tool-call argument-progress throttle state, keyed by stream
@@ -812,10 +847,16 @@ impl ReActAgent {
                 match event {
                     StreamEvent::ContentDelta(delta) => {
                         content_buf.push_str(&delta);
+                        if first_content_at.is_none() {
+                            first_content_at = Some(std::time::Instant::now());
+                        }
                         emit!(Frame::text_delta(&config.session_id, &delta));
                     }
                     StreamEvent::ReasoningDelta(delta) => {
                         emit!(Frame::reason(&config.session_id, &delta));
+                        if first_content_at.is_none() {
+                            first_content_at = Some(std::time::Instant::now());
+                        }
                     }
                     StreamEvent::ToolCallStart { index, id, name } => {
                         while tool_calls.len() <= index as usize {
@@ -914,6 +955,9 @@ impl ReActAgent {
                         );
                         content_buf.clear();
                         tool_calls.clear();
+                        // A transport retry discards the partial deltas: the timed
+                        // decode segment of the aborted attempt must start over too.
+                        first_content_at = None;
                         args_progress.clear();
                         // The retry restarts the round's clock: the new attempt
                         // is a fresh stream, and measuring the idle/total caps
@@ -929,6 +973,20 @@ impl ReActAgent {
                             // Java's Metrics.addUsage; the old field-by-field +=
                             // dropped cache tokens entirely.
                             total_usage.add(&u);
+                            // Close the decode segment: only a stream that produced
+                            // visible output AND reported completion tokens counts.
+                            // Duration and tokens are accumulated as a pair, so a
+                            // missing half can never inflate the speed (Java
+                            // TurnTimer.onUsageSettled).
+                            if let Some(t0) = first_content_at.take() {
+                                let gen_ms = t0.elapsed().as_millis() as u64;
+                                if gen_ms > 0 && u.completion_tokens > 0 {
+                                    generation_ms_total =
+                                        generation_ms_total.saturating_add(gen_ms);
+                                    generated_tokens_total = generated_tokens_total
+                                        .saturating_add(u.completion_tokens as u64);
+                                }
+                            }
                             let input = u.normalized_input();
                             emit!(Frame::context_size(
                                 &config.session_id,
@@ -960,6 +1018,8 @@ impl ReActAgent {
                                     // in-flight AI turn has no trace yet, so it is
                                     // not counted until its run closes.
                                     total_messages: seed.message_count(),
+                                    generation_ms: generation_ms_total,
+                                    generated_tokens: generated_tokens_total,
                                 }
                             ));
                             // Anchor the local estimator to the provider's real
@@ -1325,7 +1385,9 @@ impl ReActAgent {
                     &config.model.name,
                     &total_usage,
                     elapsed,
-                    &answer
+                    &answer,
+                    generation_ms_total,
+                    generated_tokens_total
                 ));
                 // Interjections that arrived too late for any reasoning boundary
                 // are not lost: they go back to the durable queue and the frontend
@@ -2026,6 +2088,15 @@ fn queued_message_text(item: &crate::queue::QueuedMessage) -> String {
 /// complete, and removing it would also desynchronise the frontend's action
 /// cards from the persisted history.
 fn repair_tool_pairing(messages: &mut Vec<ChatMessage>) -> usize {
+    repair_tool_pairing_except(messages, &[])
+}
+
+/// Like [`repair_tool_pairing`], but leave the listed call ids unrepaired.
+///
+/// `skip` carries the suspended tool call when a run ended on ask_user / HITL:
+/// its result is pending user input, not lost. Everything else in the same
+/// batch is still repaired.
+fn repair_tool_pairing_except(messages: &mut Vec<ChatMessage>, skip: &[String]) -> usize {
     let mut repaired = 0usize;
     let mut i = 0usize;
     while i < messages.len() {
@@ -2053,7 +2124,10 @@ fn repair_tool_pairing(messages: &mut Vec<ChatMessage>) -> usize {
         // so the group stays contiguous and correctly paired.
         let mut insert_at = j;
         for tc in &calls {
-            if tc.id.is_empty() || have.contains(&tc.id) {
+            if tc.id.is_empty()
+                || skip.iter().any(|id| id == &tc.id)
+                || have.contains(&tc.id)
+            {
                 continue;
             }
             messages.insert(insert_at, ChatMessage::tool_result(&tc.id, INTERRUPTED_MARKER));
@@ -2201,6 +2275,29 @@ mod tests {
         let c2 = msgs.iter().position(|m| m.tool_call_id.as_deref() == Some("c2")).unwrap();
         let user = msgs.iter().position(|m| m.content_text() == "next").unwrap();
         assert!(c2 < user, "c2 result must precede the later user message");
+    }
+
+    #[test]
+    fn repair_leaves_the_suspended_call_alone_but_heals_its_siblings() {
+        // Real shape when ask_user shares a batch with another tool: the
+        // question's result is pending user input (must NOT be faked), while a
+        // sibling that died mid-flight still needs a placeholder.
+        let mut msgs = vec![
+            ChatMessage::user("task"),
+            assistant_calling(&[("c-ask", "ask_user"), ("c-dead", "bash")]),
+        ];
+        let skip = vec!["c-ask".to_string()];
+        assert_eq!(repair_tool_pairing_except(&mut msgs, &skip), 1);
+        assert_eq!(
+            msgs.iter().filter(|m| m.tool_call_id.as_deref() == Some("c-ask")).count(),
+            0,
+            "suspended call must stay unrepaired so spawn_resume can inject the real answer"
+        );
+        assert_eq!(
+            msgs.iter().filter(|m| m.tool_call_id.as_deref() == Some("c-dead")).count(),
+            1,
+            "the other orphan still needs a placeholder"
+        );
     }
 
     #[test]

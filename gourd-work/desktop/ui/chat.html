@@ -145,12 +145,13 @@
              内容为该任务的 transient 运行参数（模型/思考/上下文/权限）；刻意标识「仅本任务自动执行使用」，
              因为执行会话的 composer 展示的是会话自己的选择，两者按设计不互通（避免任务污染用户会话）。 -->
         <div class="loop-run-banner" id="loopRunBanner" style="display:none"></div>
-        <!-- 消息滚动区与其右侧刻度带的共同父容器（flex 行）。
-             刻度带是滚动区的【兄弟 flex 列】，不是绝对定位覆盖层：
-             ① 覆盖层会压在 .messages-wrap 的原生滚动条上挡住拖动，并排则互不相干；
-             ② 覆盖层要和各类浮层抢 z-index，并排不需要。
-             它不随消息滚走，是因为它在滚动容器【外面】、且刻度位置按内容比例独立计算。
-             结构见 app-history.js 的 Content History Rail（取代旧「输入框上方历史浮层」）。 -->
+        <!-- 消息滚动区与其右缘内侧刻度带的共同父容器。
+              2026-11-04 位置修正（用户报障「滚动条和刻度搞位置反了」）：
+              .messages-wrap 绝对定位占满 shell，原生滚动条因此贴在整个内容区最右；
+              .history-rail 叠回 wrap 右缘内侧、用 --scrollbar-w 让开滚动条宽度，
+              刻度就排在滚动条左边 —— 与参照稿一致。
+              轨道不随消息滚走：它在滚动容器【外面】、刻度位置按固定步距独立计算。
+              结构见 app-history.js 的 Content History Rail（取代旧「输入框上方历史浮层」）。 -->
         <div class="messages-shell" id="messagesShell">
             <div class="messages-wrap" id="messagesWrap">
                 <!-- Per-session containers are added here dynamically -->

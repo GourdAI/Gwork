@@ -150,8 +150,8 @@ class SessionStreamStoreUsageLedgerTest {
         String method = builder.substring(body);
         Assertions.assertTrue(method.contains("store.recordToolUsage(sessionId, webGate.streamRoot(sessionId), toolName,"),
                 "落点必须与 stream 同根（streamRoot），不得另解一套目录");
-        Assertions.assertTrue(method.contains("event.getError() == null"),
-                "ok 必须取 error==null，不得恒真只报喜");
+        Assertions.assertTrue(method.contains("event.getError() == null && !event.isFailed()"),
+                "ok 必须取 error==null 且 !isFailed()，不得把业务失败记成成功");
         Assertions.assertTrue(method.contains("SessionToolUsageService.skillNameOrNull(event.getArgs(), toolName)"),
                 "skill 标识必须与读侧同口径（同一函数），不得两处各算一套");
 

@@ -682,11 +682,18 @@ public class WsGate extends SimpleWebSocketListener {
     }
 
     private String onToolCallEndEvent(ToolCallEndEvent chunk, String finalSessionId) {
-        if (chunk.getError() != null) {
+        if (chunk.getError() != null || chunk.isFailed()) {
             if (!isVisibleTool(chunk.getToolName())) return null;
+            // 业务失败（ToolResult.error / 拦截器置 failed）不带 Throwable，真实文案在观测内容里；
+            // 优先取异常文案，否则取观测内容，避免只剩 safeError(null) 的 "unknown"。
+            String errText = (chunk.getError() != null)
+                    ? safeError(chunk.getError())
+                    : (chunk.getObservation() != null && chunk.getObservation().getContent() != null
+                            ? chunk.getObservation().getContent() : "unknown");
             ONode node = new ONode().set("type", "action_end")
                     .set("sessionId", finalSessionId)
-                    .set("text", "__ERROR__" + safeError(chunk.getError()));
+                    .set("text", errText)
+                    .set("failed", true);
             if (engine.getName().equals(chunk.getAgentName())) {
                 node.set("toolName", chunk.getToolName());
             } else {

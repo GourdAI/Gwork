@@ -53,6 +53,311 @@ where
     }
 }
 
+/// Which slice of a session's stream a replay request wants.
+///
+/// The three variants map 1:1 to `chat_replay`'s three branches. They share
+/// one sequential scan in [`SessionStore::load_replay_window`] so no branch
+/// ever materialises the full parsed frame tree again.
+#[derive(Clone, Copy, Debug)]
+pub enum ReplayMode {
+    /// Paginated history: the last `rounds` conversation rounds whose frames
+    /// are strictly older than `before_seq` (a `user` frame seq).
+    Rounds { before_seq: Option<i64>, rounds: usize },
+    /// Live-stream recovery: frames with `eventSeq > after_seq`, capped at
+    /// `limit` (plus one extra line so `hasMore` stays exact).
+    After { after_seq: i64, limit: Option<usize> },
+    /// Legacy parameter-less request: the last `cap` frames.
+    Tail { cap: usize },
+}
+
+/// Result of one replay window scan. `events` holds **only** the frames in the
+/// requested window; every other line was probed as raw text.
+#[derive(Default)]
+pub struct ReplayWindow {
+    pub events: Vec<serde_json::Value>,
+    /// Conversation rounds in the eligible window (before `Rounds` paging).
+    pub total_rounds: usize,
+    /// Rounds older than the returned page.
+    pub remaining_rounds: usize,
+    /// Highest `eventSeq` in the whole file (not just the window).
+    pub latest_seq: i64,
+    /// `runId` of the most recent frame that carries one.
+    pub last_run_id: Option<String>,
+    /// Total frames after `after_seq` before `limit` was applied.
+    pub total_after: usize,
+}
+
+/// Read a bare top-level `eventSeq` number out of a raw NDJSON line without
+/// building a `serde_json::Value`.
+///
+/// `chat_replay` used to deserialize **every** line of an 84 MB stream just to
+/// pick a few hundred. Parsing is the bottleneck (a parsed `Value` tree is
+/// 2-4x the raw JSON, and `#[serde(flatten)]` forces serde's `Content` slow
+/// path), while a sequential read of 25 MB / 115k lines measured only 186 ms.
+/// `eventSeq` is always a bare i64 on our wire, so a key lookup + digit scan
+/// is exact, allocation-free, and independent of field order (positions must
+/// not be assumed because frames carry a flattened `extra` map).
+///
+/// Whitespace-tolerant around the colon: the Rust kernel writes compact
+/// `"eventSeq":2`, but the Java kernel's writer can emit `"eventSeq" : 2`.
+fn probe_event_seq(line: &str) -> Option<i64> {
+    const KEY: &str = "\"eventSeq\"";
+    let mut from = 0;
+    loop {
+        let rel = line[from..].find(KEY)?;
+        let at = from + rel + KEY.len();
+        let trimmed = line[at..].trim_start();
+        if !trimmed.starts_with(':') {
+            from = at;
+            continue;
+        }
+        let rest = trimmed[1..].trim_start();
+        let b = rest.as_bytes();
+        let mut i = 0;
+        if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
+            i += 1;
+        }
+        let digits_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == digits_start {
+            from = at;
+            continue;
+        }
+        return rest[..i].parse::<i64>().ok();
+    }
+}
+
+/// Read a bare string field (`"type"` / `"runId"`) out of a raw line.
+///
+/// Whitespace-tolerant around the colon: the Rust kernel writes compact
+/// `"type":"text"`, the Java kernel can emit `"type" : "text"`. Whichever
+/// writer produced the file, the FIRST match is the top-level discriminator —
+/// serde serializes declared fields first and the `#[serde(flatten)] extra`
+/// map last, so a nested `type` inside `args` can never win the `find`. That
+/// matters: a loose `contains("\"type\":\"text\"")` would misclassify a tool
+/// frame whose args contain that substring and silently swallow it into a
+/// delta run.
+fn probe_string_field(line: &str, key: &str) -> Option<String> {
+    let quoted = format!("\"{}\"", key);
+    let mut from = 0;
+    while let Some(rel) = line[from..].find(&quoted) {
+        let at = from + rel + quoted.len();
+        let tail = &line[at..];
+        let trimmed = tail.trim_start();
+        if !trimmed.starts_with(':') {
+            from = at;
+            continue;
+        }
+        let after_colon = trimmed[1..].trim_start();
+        if !after_colon.starts_with('"') {
+            from = at;
+            continue;
+        }
+        let rest = &after_colon[1..];
+        let end = rest.find('"')?;
+        return Some(rest[..end].to_string());
+    }
+    None
+}
+
+/// Which main-line delta kind a frame is, if any.
+///
+/// Deltas owned by a sub-agent (`args.agentName` present) are excluded: they
+/// are routed into a per-agent card by `resolveAgentState`, and merging deltas
+/// from different agents into one frame would put text in the wrong card. The
+/// main-line deltas (the 99%) carry no `agentName` and are safe to coalesce.
+fn delta_kind_of(frame_type: Option<&str>, line: &str) -> Option<&'static str> {
+    if line.contains("\"agentName\"") {
+        return None;
+    }
+    match frame_type {
+        Some("text") => Some("text"),
+        Some("reason") => Some("reason"),
+        _ => None,
+    }
+}
+
+/// The probe-pass record for one line. The 99% of lines outside the selected
+/// window are never deserialized into a `serde_json::Value`.
+struct ProbeLine {
+    line: String,
+    seq: Option<i64>,
+    kind: Option<&'static str>,
+    is_user: bool,
+    run_id: Option<String>,
+}
+
+/// Coalesce a run of consecutive same-kind main-line delta frames into one.
+///
+/// `text`/`reason` are append-only on the frontend (`appendContentChunk(...,
+/// true)` / `appendReasonChunk`), so concatenating N deltas into one frame is
+/// an exact projection. Owner fields (`phase`, `runId`, `createdAt`) come from
+/// the **first** frame; `eventSeq` comes from the **last** frame, so the
+/// frontend's `lastEventSeq` cursor still covers every seq in the run and the
+/// live gate (`seq <= lastEventSeq → drop`) deduplicates correctly.
+fn push_coalesced(out: &mut Vec<serde_json::Value>, run: &mut Vec<serde_json::Value>) {
+    if run.is_empty() {
+        return;
+    }
+    if run.len() == 1 {
+        out.push(run.pop().expect("non-empty"));
+        return;
+    }
+    let mut text = String::new();
+    let mut max_seq = 0i64;
+    for f in run.iter() {
+        if let Some(t) = f.get("text").and_then(|v| v.as_str()) {
+            text.push_str(t);
+        }
+        if let Some(s) = f.get("eventSeq").and_then(|v| v.as_i64()) {
+            max_seq = max_seq.max(s);
+        }
+    }
+    let mut first = run[0].clone();
+    if let Some(obj) = first.as_object_mut() {
+        obj.insert("text".into(), serde_json::Value::String(text));
+        if max_seq > 0 {
+            obj.insert("eventSeq".into(), serde_json::json!(max_seq));
+        }
+        // Derived-view marker: the durable log is never rewritten. The
+        // frontend ignores unknown fields.
+        obj.insert("coalesced".into(), serde_json::json!(run.len()));
+    }
+    out.push(first);
+    run.clear();
+}
+
+/// The scan behind [`SessionStore::load_replay_window`].
+///
+/// Two passes over the same raw-line buffer. Holding 25 MB of `String`s is
+/// cheap next to holding 115k parsed `Value` trees (50-100 MB), and it lets
+/// the window selection stay exact without seeking: `eventSeq`/`type` are
+/// read by substring probes, and only lines inside the selected window are
+/// JSON-parsed.
+fn load_replay_window_at(path: &PathBuf, mode: ReplayMode) -> ReplayWindow {
+    let Ok(file) = std::fs::File::open(path) else {
+        return ReplayWindow::default();
+    };
+    let mut probes: Vec<ProbeLine> = Vec::new();
+    for line in BufReader::new(file).lines().filter_map(|l| l.ok()) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let frame_type = probe_string_field(&line, "type");
+        probes.push(ProbeLine {
+            seq: probe_event_seq(&line),
+            kind: delta_kind_of(frame_type.as_deref(), &line),
+            is_user: frame_type.as_deref() == Some("user"),
+            run_id: probe_string_field(&line, "runId"),
+            line,
+        });
+    }
+    let mut out = ReplayWindow::default();
+    for p in &probes {
+        if let Some(s) = p.seq {
+            out.latest_seq = out.latest_seq.max(s);
+        }
+        // Forward scan keeps the LAST runId, matching the old handler's
+        // `all.iter().rev().find_map(...)`.
+        if let Some(r) = &p.run_id {
+            out.last_run_id = Some(r.clone());
+        }
+    }
+
+    // `After` (live-stream recovery) is kept frame-for-frame: it is small by
+    // construction and its `limit`/`hasMore` contract is seq-based, so
+    // coalescing there would change the recovery cursor semantics.
+    if let ReplayMode::After { after_seq, limit } = mode {
+        for p in &probes {
+            if !p.seq.map(|s| s > after_seq).unwrap_or(false) {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&p.line) else {
+                continue;
+            };
+            out.total_after += 1;
+            if let Some(n) = limit {
+                if n > 0 && out.total_after > n {
+                    continue; // still counted, just not returned
+                }
+            }
+            out.events.push(v);
+        }
+        return out;
+    }
+
+    let (start, end) = match mode {
+        ReplayMode::Rounds { before_seq, rounds } => {
+            // Eligible window: frames strictly older than the cursor. We keep
+            // the full slice and re-check the predicate in pass 2 so a file
+            // with out-of-order seqs still matches the old `filter` exactly.
+            let eligible_end = match before_seq {
+                Some(b) => probes
+                    .iter()
+                    .rposition(|p| p.seq.map(|s| s < b).unwrap_or(false))
+                    .map(|i| i + 1)
+                    .unwrap_or(0),
+                None => probes.len(),
+            };
+            let starts: Vec<usize> = probes[..eligible_end]
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    p.is_user
+                        && before_seq.map(|b| p.seq.map(|s| s < b).unwrap_or(false)).unwrap_or(true)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            out.total_rounds = starts.len();
+            if starts.is_empty() {
+                return out;
+            }
+            let want = if rounds > 0 { rounds } else { starts.len() };
+            let take_from = starts.len().saturating_sub(want);
+            out.remaining_rounds = take_from;
+            (starts[take_from], eligible_end)
+        }
+        ReplayMode::Tail { cap } => (probes.len().saturating_sub(cap), probes.len()),
+        ReplayMode::After { .. } => unreachable!("handled above"),
+    };
+    if start >= end {
+        return out;
+    }
+    let before_seq = match mode {
+        ReplayMode::Rounds { before_seq, .. } => before_seq,
+        _ => None,
+    };
+
+    // Pass 2: parse only the selected lines. A run of consecutive same-kind
+    // main-line deltas is coalesced; any other frame flushes the run first,
+    // preserving ordering and round boundaries exactly.
+    let mut delta_run: Vec<serde_json::Value> = Vec::new();
+    let mut delta_kind: Option<&'static str> = None;
+    for p in &probes[start..end] {
+        if let Some(b) = before_seq {
+            if !p.seq.map(|s| s < b).unwrap_or(false) {
+                continue;
+            }
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&p.line) else {
+            continue;
+        };
+        if p.kind != delta_kind {
+            push_coalesced(&mut out.events, &mut delta_run);
+            delta_kind = p.kind;
+        }
+        if p.kind.is_some() {
+            delta_run.push(v);
+        } else {
+            out.events.push(v);
+        }
+    }
+    push_coalesced(&mut out.events, &mut delta_run);
+    out
+}
+
 /// Unified session directory prefix, identical to the Java kernel's
 /// `SessionLocator.PREFIX_WORK`. Session folders are the only `work-`
 /// prefixed entries under a sessions root; anything else (loop task files,
@@ -543,6 +848,34 @@ impl SessionStore {
         {
             let _ = writeln!(file, "{}", line);
         }
+    }
+
+    /// Read only the frames a replay request actually needs.
+    ///
+    /// Replaces [`Self::load_stream_frames`] for `chat_replay`. That method
+    /// parsed **every** line of the stream into a `serde_json::Value` before
+    /// the handler picked a page out of it — on a 25 MB / 115k-line session
+    /// 99% of that work was thrown away, and every "load earlier" click paid
+    /// it again. It also returned 115k delta frames to the browser, which the
+    /// replay loop consumes 50 per animation frame (~38 s of rAF budget).
+    ///
+    /// This does two sequential raw-text passes and never builds a `Value`
+    /// tree for a line outside the requested window:
+    ///  * pass 1 probes `eventSeq` / `type` / `runId` with substring scans
+    ///    (no JSON parse) to locate the window's line range and count rounds;
+    ///  * pass 2 parses only the lines in that range, then **projects**
+    ///    consecutive same-type `text`/`reason` deltas into one frame.
+    ///
+    /// The projection is a *derived view*, not the durable log: it keeps the
+    /// last delta's `eventSeq`/`createdAt` so `lastEventSeq` and the live
+    /// dedupe gate stay correct (that gate drops `seq <= lastEventSeq`, and
+    /// GWork's seqs are monotonic but need not be contiguous). Round
+    /// boundaries (`user` frames) and all non-delta frames are untouched.
+    /// Old files benefit without any rewrite; new files still append raw
+    /// deltas, so the on-disk format and the Java kernel stay compatible.
+    pub fn load_replay_window(&self, id: &str, mode: ReplayMode) -> ReplayWindow {
+        let path = self.stream_file(id);
+        offload(move || load_replay_window_at(&path, mode))
     }
 
     /// Load all persisted stream frames for replay.
@@ -2017,6 +2350,203 @@ mod tests {
         store.write_context(id, &ctx);
         let back = store.read_context(id);
         assert_eq!(back.interrupted, Some(true), "flag lost in round-trip");
+    }
+
+    // ── load_replay_window (chat_replay fast path) ──────────────────────────
+
+    fn frame(t: &str, text: &str, seq: i64) -> String {
+        serde_json::json!({
+            "type": t, "sessionId": "work-rp", "runId": "run-1",
+            "eventSeq": seq, "phase": "text", "text": text,
+            "createdAt": 1_700_000_000_000_i64 + seq
+        })
+        .to_string()
+    }
+
+    struct StreamScratch(PathBuf);
+    impl StreamScratch {
+        fn new(tag: &str, lines: &[String]) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "gwork-replay-test-{}-{}", tag, std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("work-rp.stream.ndjson");
+            std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+            Self(file)
+        }
+    }
+    impl Drop for StreamScratch {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(self.0.parent().unwrap()); }
+    }
+
+    #[test]
+    fn replay_window_coalesces_delta_runs_losslessly() {
+        let lines = vec![
+            frame("user", "第一问", 1),
+            frame("reason", "只", 2),
+            frame("reason", "是", 3),
+            frame("reason", "测试", 4),
+            frame("action_start", "read", 5),
+            frame("text", "答", 6),
+            frame("text", "案", 7),
+            frame("done", "", 8),
+        ];
+        let f = StreamScratch::new("coalesce", &lines);
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10 });
+        assert_eq!(w.total_rounds, 1);
+        assert_eq!(w.latest_seq, 8);
+        assert_eq!(w.events.len(), 5, "delta runs must collapse: {:?}", w.events);
+        assert_eq!(w.events[0]["type"], "user");
+        assert_eq!(w.events[1]["type"], "reason");
+        assert_eq!(w.events[1]["text"], "只是测试");
+        assert_eq!(w.events[1]["eventSeq"], 4, "group max seq must survive");
+        assert_eq!(w.events[1]["createdAt"], 1_700_000_000_002_i64);
+        assert_eq!(w.events[1]["coalesced"], 3);
+        assert_eq!(w.events[2]["type"], "action_start");
+        assert_eq!(w.events[3]["text"], "答案");
+        assert_eq!(w.events[3]["eventSeq"], 7);
+        assert_eq!(w.events[4]["type"], "done");
+    }
+
+    #[test]
+    fn replay_window_before_seq_pages_by_round() {
+        let lines = vec![
+            frame("user", "问1", 1), frame("text", "答1", 2), frame("done", "", 3),
+            frame("user", "问2", 4), frame("text", "答2", 5), frame("done", "", 6),
+            frame("user", "问3", 7), frame("text", "答3", 8), frame("done", "", 9),
+        ];
+        let f = StreamScratch::new("pages", &lines);
+        let first = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 2 });
+        assert_eq!(first.total_rounds, 3);
+        assert_eq!(first.remaining_rounds, 1);
+        assert_eq!(first.events[0]["eventSeq"], 4, "page starts at round 2's user frame");
+        let older = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(4), rounds: 2 });
+        assert_eq!(older.total_rounds, 1);
+        assert_eq!(older.remaining_rounds, 0);
+        assert_eq!(older.events[0]["eventSeq"], 1);
+        assert_eq!(older.latest_seq, 9, "latestSeq spans the whole file");
+    }
+
+    #[test]
+    fn replay_window_after_seq_keeps_every_frame() {
+        let lines = vec![
+            frame("user", "问", 1), frame("text", "A", 2), frame("text", "B", 3),
+            frame("text", "C", 4), frame("done", "", 5),
+        ];
+        let f = StreamScratch::new("after", &lines);
+        let w = load_replay_window_at(&f.0, ReplayMode::After { after_seq: 1, limit: Some(2) });
+        assert_eq!(w.total_after, 4);
+        assert_eq!(w.events.len(), 2);
+        assert_eq!(w.events[0]["text"], "A", "no coalescing in recovery path");
+        assert_eq!(w.events[1]["text"], "B");
+        assert!(w.events.iter().all(|e| e.get("coalesced").is_none()));
+    }
+
+    #[test]
+    fn replay_window_does_not_misread_nested_type_field() {
+        let tool = serde_json::json!({
+            "type": "action_start", "eventSeq": 3, "runId": "run-1",
+            "createdAt": 1_700_000_000_003_i64,
+            "args": { "type": "text", "note": "nested discriminator" }
+        }).to_string();
+        let lines = vec![frame("user", "问", 1), frame("text", "正文", 2), tool, frame("text", "续", 4)];
+        let f = StreamScratch::new("nested-type", &lines);
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5 });
+        assert_eq!(w.events.len(), 4, "tool frame must survive: {:?}", w.events);
+        assert_eq!(w.events[2]["type"], "action_start");
+        assert_eq!(w.events[2]["args"]["type"], "text");
+    }
+
+    #[test]
+    fn replay_window_skips_agent_owned_deltas() {
+        let agent_delta = serde_json::json!({
+            "type": "text", "eventSeq": 4, "runId": "run-1",
+            "createdAt": 1_700_000_000_004_i64, "text": "子代理输出",
+            "args": { "agentName": "explorer" }
+        }).to_string();
+        let lines = vec![frame("user", "问", 1), frame("text", "A", 2), frame("text", "B", 3), agent_delta];
+        let f = StreamScratch::new("agent-delta", &lines);
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5 });
+        assert_eq!(w.events.len(), 3, "main-line coalesces, agent delta stays separate");
+        assert_eq!(w.events[1]["text"], "AB");
+        assert_eq!(w.events[2]["args"]["agentName"], "explorer");
+        assert!(w.events[2].get("coalesced").is_none());
+    }
+
+    #[test]
+    fn replay_window_tail_caps_frames() {
+        let lines: Vec<String> = (1..=10).map(|i| frame("text", "x", i)).collect();
+        let f = StreamScratch::new("tail", &lines);
+        let w = load_replay_window_at(&f.0, ReplayMode::Tail { cap: 3 });
+        assert_eq!(w.events.len(), 1, "last 3 deltas coalesce into one frame");
+        assert_eq!(w.events[0]["text"], "xxx");
+        assert_eq!(w.events[0]["eventSeq"], 10);
+    }
+
+    /// Both kernels write the same stream directory: Rust uses compact JSON,
+    /// the Java writer can emit spaces around the colon. The raw-text probes
+    /// must handle both, or `eventSeq` becomes 0 and `type` becomes None —
+    /// which would silently disable paging and coalescing for Java sessions.
+    #[test]
+    fn replay_window_handles_java_spaced_json() {
+        let lines = vec![
+            r#"{"type" : "user", "eventSeq" : 1, "runId" : "run-j", "createdAt" : 1700000000001, "text" : "问"}"#.to_string(),
+            r#"{"type" : "text", "eventSeq" : 2, "runId" : "run-j", "createdAt" : 1700000000002, "text" : "A"}"#.to_string(),
+            r#"{"type" : "text", "eventSeq" : 3, "runId" : "run-j", "createdAt" : 1700000000003, "text" : "B"}"#.to_string(),
+            r#"{"type" : "done", "eventSeq" : 4, "runId" : "run-j"}"#.to_string(),
+        ];
+        let f = StreamScratch::new("java-spaced", &lines);
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(4), rounds: 3 });
+        assert_eq!(w.latest_seq, 4, "spaced eventSeq must be probed");
+        assert_eq!(w.total_rounds, 1, "spaced type=user must be probed");
+        assert_eq!(w.events.len(), 2, "user + coalesced text (done@4 is excluded by beforeSeq)");
+        assert_eq!(w.events[1]["text"], "AB");
+        assert_eq!(w.events[1]["eventSeq"], 3);
+        assert_eq!(w.last_run_id.as_deref(), Some("run-j"));
+    }
+
+    // ─── Structured `failed` flag on replay ────────────────────────────────
+    //
+    // The frontend's `appendActionEndChunk` reads only `chunk.failed === true`.
+    // A replay that drops or nests the flag silently turns every failed tool
+    // card green, so the read path belongs here alongside the write contract
+    // pinned in `protocol::tests`.
+
+    /// Replay contract for the tool-card flag: `load_stream_frames` parses each
+    /// `.stream.ndjson` line into a whole `serde_json::Value` and must preserve
+    /// the top-level `failed` key. If a reload dropped or nested that field,
+    /// every failed tool in a re-opened conversation would show a green dot.
+    /// A success frame on the same path must still have no `failed` field at all.
+    #[test]
+    fn load_stream_frames_preserves_the_top_level_failed_flag() {
+        let s = Scratch::new("failed-flag-replay");
+        let store = SessionStore::with_base(s.0.clone());
+        let id = "work-failed-flag";
+        let dir = s.0.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Mirror the real writer: `append_stream_frame` appends `frame.to_json()`
+        // verbatim, one frame per line. Build both lines through the protocol
+        // constructors so this exercises the exact serialization replay sees.
+        let failed_line = Frame::action_end_failed(id, "bash", "call_failed", "boom").to_json();
+        let ok_line = Frame::action_end(id, "bash", "call_ok", "ok").to_json();
+        std::fs::write(
+            dir.join(format!("{}.stream.ndjson", id)),
+            format!("{}\n{}\n", failed_line, ok_line),
+        )
+        .unwrap();
+
+        let events = store.load_stream_frames(id);
+        assert_eq!(events.len(), 2, "两行都必须被解析出来: {:?}", events);
+        assert_eq!(events[0]["type"], "action_end");
+        assert_eq!(events[0]["failed"], true, "回放后失败帧必须保留顶层 failed");
+        assert!(events[0].get("extra").is_none(), "failed 不得下沉到 extra 嵌套");
+        assert_eq!(events[1]["type"], "action_end");
+        assert!(
+            events[1].get("failed").is_none(),
+            "回放后成功帧不得凭空出现 failed 字段"
+        );
     }
 
 }

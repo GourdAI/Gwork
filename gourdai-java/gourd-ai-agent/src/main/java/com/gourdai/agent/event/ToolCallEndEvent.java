@@ -34,6 +34,13 @@ import java.util.Map;
 public class ToolCallEndEvent extends AbsToolCallEvent {
     private final Throwable error;
     private final long durationMs;
+    /**
+     * 结构化成败标识：工具调用是否失败（含异常与业务错误结果）。
+     *
+     * <p>独立于 {@link #getError()}：工具返回 {@code ToolResult.error} 或拦截器判定业务失败时，
+     * 并无 Throwable 可承载，前端须凭此布尔位判定卡片成败，不再依赖文本前缀。</p>
+     */
+    private boolean failed;
 
     public ToolCallEndEvent(ReActTrace trace, String toolName, Map<String, Object> args,
                             @Nullable ChatMessage observation, @Nullable Throwable error, long durationMs) {
@@ -70,5 +77,13 @@ public class ToolCallEndEvent extends AbsToolCallEvent {
 
     public long getDurationMs() {
         return durationMs;
+    }
+
+    public boolean isFailed() {
+        return failed;
+    }
+
+    public void setFailed(boolean failed) {
+        this.failed = failed;
     }
 }

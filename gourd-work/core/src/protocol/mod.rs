@@ -94,6 +94,11 @@ pub struct ContextSizePayload {
     pub total_cache_creation: u64,
     pub total_cache_read: u64,
     pub total_messages: u64,
+    /// Cumulative decode time (ms) across this run's completed model calls.
+    /// Paired with 'generated_tokens' for output TPS; 0 = no timed segment yet.
+    pub generation_ms: u64,
+    /// Completion tokens produced in those same timed decode segments.
+    pub generated_tokens: u64,
 }
 
 impl Frame {
@@ -499,6 +504,14 @@ impl Frame {
                 args.insert("totalMessages".into(), serde_json::json!(p.total_messages));
             }
         }
+        // Decode-speed pair (Java TurnTimer parity). Only injected when a timed
+        // segment exists: a zero denominator would fabricate an infinite TPS.
+        // Riding in 'args' means history replay + the frontend's monotonic
+        // createdAt gate already apply, with no extra per-session state.
+        if p.generation_ms > 0 && p.generated_tokens > 0 {
+            args.insert("generationMs".into(), serde_json::json!(p.generation_ms));
+            args.insert("generatedTokens".into(), serde_json::json!(p.generated_tokens));
+        }
         f.extra("args", serde_json::Value::Object(args))
     }
 
@@ -559,6 +572,8 @@ impl Frame {
         usage: &crate::llm::types::UsageInfo,
         elapsed_ms: u64,
         final_answer: &str,
+        generation_ms: u64,
+        generated_tokens: u64,
     ) -> Self {
         let input = usage.normalized_input();
         let output = usage.completion_tokens;
@@ -583,6 +598,8 @@ impl Frame {
             .extra("elapsedSeconds", serde_json::json!(elapsed_ms / 1000))
             .extra("elapsedMs", serde_json::json!(elapsed_ms))
             .extra("finalAnswer", serde_json::json!(final_answer))
+            .extra("generationMs", serde_json::json!(generation_ms))
+            .extra("generatedTokens", serde_json::json!(generated_tokens))
             .with_phase(phase::DONE)
     }
 
@@ -883,6 +900,8 @@ mod tests {
             total_cache_creation: 1_000,
             total_cache_read: 41_100_000,
             total_messages: 7,
+            generation_ms: 4_000,
+            generated_tokens: 320,
         };
         let v: serde_json::Value = serde_json::from_str(&Frame::context_size("work-x", &p).to_json()).unwrap();
         assert_eq!(v["type"], "context_size");
@@ -903,6 +922,8 @@ mod tests {
         assert_eq!(args["totalCacheCreation"], 1_000);
         assert_eq!(args["totalCacheRead"], 41_100_000);
         assert_eq!(args["totalMessages"], 7);
+        assert_eq!(args["generationMs"], 4_000);
+        assert_eq!(args["generatedTokens"], 320);
     }
 
     /// Zero-ledger frames must omit the cumulative keys so the frontend falls
@@ -921,6 +942,23 @@ mod tests {
         assert!(!args.contains_key("totalMessages"));
         assert!(!args.contains_key("contextLength"));
         assert!(!args.contains_key("turnStartMs"));
+        assert!(!args.contains_key("generationMs"));
+        assert!(!args.contains_key("generatedTokens"));
+    }
+
+    /// Wire-contract guard: the trace frame must carry the decode-speed pair
+    /// that 'app-message.js:traceTpsText' and the context meter both read.
+    #[test]
+    fn trace_frame_carries_decode_speed_pair() {
+        let u = crate::llm::types::UsageInfo::default();
+        let v: serde_json::Value = serde_json::from_str(
+            &Frame::trace("work-x", "m", &u, 12_000, "ok", 4_000, 320).to_json(),
+        )
+        .unwrap();
+        assert_eq!(v["type"], "trace");
+        assert_eq!(v["elapsedMs"], 12_000);
+        assert_eq!(v["generationMs"], 4_000);
+        assert_eq!(v["generatedTokens"], 320);
     }
 
     #[test]
@@ -933,5 +971,70 @@ mod tests {
         let v2: serde_json::Value =
             serde_json::from_str(&Frame::reason_start("work-x", 0).to_json()).unwrap();
         assert!(v2.get("args").is_none());
+    }
+
+    /// Locks the tool-card contract: `appendActionEndChunk` reads only
+    /// `chunk.failed === true` (a **top-level** flag). If `action_end_failed`
+    /// stopped emitting `failed`, or buried it inside an `extra` object so
+    /// `#[serde(flatten)]` did not lift it to the top level, every failed tool
+    /// call would be rendered with a green success dot — no error, no red card.
+    #[test]
+    fn action_end_failed_carries_top_level_failed_flag() {
+        let result = "Error: command exited with status 1";
+        let v: serde_json::Value = serde_json::from_str(
+            &Frame::action_end_failed("work-x", "bash", "call_failed", result).to_json(),
+        )
+        .unwrap();
+
+        // Must be the top-level key the frontend reads, never `extra.failed`.
+        assert_eq!(v["failed"], true, "顶层 failed 缺失会让工具失败显示绿点");
+        assert!(v.get("extra").is_none(), "failed 不得被塞进 extra 嵌套对象");
+        assert_eq!(v["type"], "action_end");
+        assert_eq!(v["text"], result);
+        assert_eq!(v["phase"], phase::WAITING);
+    }
+
+    /// Locks the tool-card contract: `appendActionEndChunk` reads only
+    /// `chunk.failed === true`. A success frame must therefore omit `failed`
+    /// **entirely** — not emit `failed: false`, and certainly not leak a
+    /// stale truthy value. `v.get("failed").is_none()` is deliberate: an
+    /// explicit `false` would also evaluate green today, but it would blur the
+    /// "absent means success" wire contract the structured flag was built on.
+    #[test]
+    fn action_end_success_has_no_failed_flag() {
+        let v: serde_json::Value = serde_json::from_str(
+            &Frame::action_end("work-x", "bash", "call_ok", "done").to_json(),
+        )
+        .unwrap();
+
+        assert!(v.get("failed").is_none(), "成功帧不得带 failed 字段（连 false 也不应有）");
+        assert_eq!(v["type"], "action_end");
+    }
+
+    /// Locks the tool-card contract: `appendActionEndChunk` reads only
+    /// `chunk.failed === true`, and replay (`load_stream_frames` → `to_json`
+    /// lines → `serde_json::from_str::<Value>`) must preserve that flag. This
+    /// simulates a whole-line JSON round trip: serialize the frame, parse the
+    /// line back into a generic `Value`, write it out again, parse once more.
+    /// If either hop dropped `failed` — or nested it under an `extra` object —
+    /// every failed tool on a reloaded conversation would show a green dot.
+    /// The success frame is checked on the same path to prove no false flag is
+    /// invented by the round trip.
+    #[test]
+    fn failed_flag_survives_json_round_trip() {
+        let failed_line = Frame::action_end_failed("work-x", "bash", "call_failed", "boom").to_json();
+        let failed_once: serde_json::Value = serde_json::from_str(&failed_line).unwrap();
+        let failed_rewritten = serde_json::to_string(&failed_once).unwrap();
+        let failed_twice: serde_json::Value = serde_json::from_str(&failed_rewritten).unwrap();
+        assert_eq!(failed_once["failed"], true, "第一次解析必须保留顶层 failed");
+        assert_eq!(failed_twice["failed"], true, "整行往返后 failed 不得丢失或下沉到 extra");
+        assert!(failed_twice.get("extra").is_none());
+
+        let ok_line = Frame::action_end("work-x", "bash", "call_ok", "ok").to_json();
+        let ok_once: serde_json::Value = serde_json::from_str(&ok_line).unwrap();
+        let ok_rewritten = serde_json::to_string(&ok_once).unwrap();
+        let ok_twice: serde_json::Value = serde_json::from_str(&ok_rewritten).unwrap();
+        assert!(ok_once.get("failed").is_none());
+        assert!(ok_twice.get("failed").is_none(), "成功帧往返后不得凭空出现 failed 字段");
     }
 }

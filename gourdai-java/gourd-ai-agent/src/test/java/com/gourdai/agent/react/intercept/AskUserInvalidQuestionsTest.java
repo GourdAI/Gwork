@@ -78,10 +78,13 @@ class AskUserInvalidQuestionsTest {
                 "非法参数不得留下挂起任务实体（场景：" + scene + "）");
         Assertions.assertNotNull(exchanger.getResult(),
                 "必须回交模型一个结果，否则模型收不到任何反馈（场景：" + scene + "）");
-        Assertions.assertTrue(exchanger.getResult().startsWith("__ERROR__"),
-                "错误结果须沿用 __ERROR__ 口径（与 ActionTask#executeTool 一致），场景：" + scene);
-        Assertions.assertTrue(exchanger.getResult().contains("questions"),
-                "错误文案须点明是 questions 参数的问题（场景：" + scene + "）");
+        Assertions.assertFalse(exchanger.getResult().startsWith("__ERROR__"),
+                "不再使用 __ERROR__ 文本前缀，改用结构化 failed 标识（场景：" + scene + "）");
+        Assertions.assertTrue(exchanger.isFailed(),
+                "非法参数必须置结构化 failed 标识（场景：" + scene + "）");
+        Assertions.assertTrue(exchanger.getResult().contains("Invalid arguments")
+                        || exchanger.getResult().contains("questions"),
+                "错误文案须对模型可读、点明参数问题（场景：" + scene + "）");
     }
 
     // ==================== 1. 非法参数：绝不挂起 ====================
@@ -223,6 +226,8 @@ class AskUserInvalidQuestionsTest {
         Assertions.assertNotNull(exchanger.getResult());
         Assertions.assertFalse(exchanger.getResult().startsWith("__ERROR__"),
                 "有答案的恢复路径必须走答案回填，不能被非法参数分支截胡");
+        Assertions.assertFalse(exchanger.isFailed(),
+                "有答案的恢复路径是成功回填，不得置结构化 failed 标识");
         Assertions.assertTrue(exchanger.getResult().contains("选方案A"), "答案文本须含用户回答");
     }
 }

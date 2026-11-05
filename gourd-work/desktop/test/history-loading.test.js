@@ -12,8 +12,11 @@
  * 【唯一】判据（app-history.js doSwitchSession / openSessionById、app-base.js
  * evictInactiveSessions、app-streaming.js handleIdleAgentChunk 的注释链）。
  * 骨架节点混进容器 → 判据恒为 false → 切回会话只剩骨架、历史消息永久看不见。
- * 所以覆盖层挂 .messages-shell，并只在覆盖层存在期间给 shell 加 relative
- * （永久 relative 会改写子树绝对元素的定位参考）。
+ * 所以覆盖层挂 .messages-shell 而不是塞进正文容器。
+ *  【2026-11-04 布局修正】.messages-shell 现【常驻】relative，作为 rail / 覆盖层的
+ *  共同定位父级；旧契约「relative 只限加载态期间，永久 relative 会改写子树绝对元素
+ *  的定位参考」已作废 —— 复核确认子树内其它 absolute 浮层都有更近 positioned 祖先，
+ *  不受影响。下方用例反过来锁死「必须常驻 relative」。
  *
  * ── 测试形态 ──────────────────────────────────────────────────────────────
  * 在 node:vm 沙箱里真跑 app-history.js 的加载态区块（骨架 HTML 生成、show/hide
@@ -181,7 +184,7 @@ test('发请求前挂骨架：覆盖层落在 shell 上，不进 sess.container'
     assert.equal(ov.attrs['aria-live'], 'polite', '读屏可达');
     // 关键反向锁死：容器判空是「要不要重拉历史」的唯一判据，骨架绝不能进容器
     assert.equal(sess.container.children.length, 0, 'sess.container 必须保持空');
-    assert.equal(shell._classes.includes('has-history-loading'), true, 'relative 只在加载态期间生效');
+    assert.equal(shell._classes.includes('has-history-loading'), true, '加载态期间必须挂上状态标记');
 });
 
 test('容器已有内容时不放骨架（不遮挡正文）', () => {
@@ -199,13 +202,13 @@ test('骨架文案来自 i18n', () => {
 });
 
 /* ===== 2. 收尾必须撤干净，且 shell class 不悬挂 ===== */
-test('hide 正常路径：覆盖层移除 + shell 的 relative 一并撤销', () => {
+test('hide 正常路径：覆盖层移除 + shell 状态标记一并撤销', () => {
     const { shell, sandbox } = harness();
     const sess = mkSess(sandbox, 'work-D', false);
     sandbox.showHistoryLoading(sess);
     sandbox.hideHistoryLoading(sess);
     assert.equal(overlayOf(shell), null, '内容落地后不得残留骨架');
-    assert.equal(shell._classes.includes('has-history-loading'), false, '不得悬挂 relative');
+    assert.equal(shell._classes.includes('has-history-loading'), false, '不得悬挂状态标记');
     assert.equal(sandbox.__timerCount(), 0, '超时定时器必须随之清理');
 });
 
@@ -315,11 +318,17 @@ test('收尾出口全部接线（漏一处就永远转圈）', () => {
         'setActiveSession 是唯一切换汇聚点，钩子必须在');
 });
 
-test('CSS 规格：主题变量驱动 + 减少动效偏好 + 定位参考不永久改写', () => {
-    assert.ok(/\.messages-shell\.has-history-loading \{ position: relative; \}/.test(CSS_SRC),
-        'relative 必须限定在加载态期间');
-    assert.ok(!/^\.messages-shell \{[^}]*position: relative;/m.test(CSS_SRC),
-        '.messages-shell 不得永久 relative');
+test('CSS 规格：主题变量驱动 + 减少动效偏好 + 位置修正后的定位父级', () => {
+    /* 2026-11-04「滚动条和刻度位置反了」修复：刻度带从「与 wrap 并排的 flex 列」
+        改为「叠在 wrap 右缘内侧的 absolute 覆盖层」，.messages-shell 因此必须常驻
+        relative 作为 rail / 覆盖层的共同定位父级。旧契约（relative 只限加载态期间）
+        随布局模型一并作废，这里反过来锁死「必须常驻」。 */
+    assert.ok(/\.messages-shell \{[\s\S]*?position: relative;/.test(CSS_SRC),
+        '.messages-shell 必须常驻 relative（rail 与加载覆盖层的定位父级）');
+    assert.ok(/\.messages-shell > \.messages-wrap \{ position: absolute; inset: 0; \}/.test(CSS_SRC),
+        '.messages-wrap 必须占满 shell（滚动条才能落在内容区最右）');
+    assert.ok(/\.history-rail \{[\s\S]*?right: var\(--scrollbar-w, 0px\)/.test(CSS_SRC),
+        '刻度带必须用实测滚动条宽度让位，把滚动条留在最右');
 
     /* 精确取「覆盖层主规则」的块体（不是 .chl-* 子元素、也不是 .chat-history-loading-in
        关键帧）：花括号配对切一次，断言只落在这一块内。
@@ -573,23 +582,32 @@ test('live region 必须先入文档、再填内容（否则读屏不播报）',
     assert.equal(f._htmlAtAppend, '', '失败卡的 live region 同样必须先入文档');
 });
 
-test('覆盖层右侧必须让出刻度带宽度（否则内容落地横跳）', () => {
-    /* 缺陷：覆盖层挂 .messages-shell，真实消息容器在 .messages-wrap 内 ——
-       后者已被并排的刻度带挤掉 railW。不让位时骨架版心相对 shell 居中、
-       真实版心相对 wrap 居中，差 railW/2。真实浏览器实测横跳 13px。 */
+test('位置修正后覆盖层铺满 shell，刻度带用实测滚动条宽度让位', () => {
+    /* 2026-11-04「滚动条和刻度位置反了」修复：旧模型里 wrap 被并排的 rail 挤窄
+        railW，覆盖层必须同量让位才不横跳；新模型里 wrap 占满 shell、rail 只是叠在
+        wrap 右缘内侧的透明覆盖层，骨架与真实版心本是同一个容器，无需也不该让位
+        （再让位反而会让骨架比内容窄）。故契约改为「inset: 0 铺满」。 */
     const rule = cssRuleBody('.chat-history-loading');
     assert.ok(rule, '覆盖层主规则缺失');
-    assert.match(rule, /inset:\s*0\s+var\(--rail-w/, '右侧必须用 --rail-w 让位');
-    // 刻度带宽度与让位量必须同源（各写一份 26px 就会漂移）
+    assert.match(rule, /position:\s*absolute;\s*inset:\s*0;/, '覆盖层必须铺满整个 shell');
+    assert.ok(!/var\(--rail-w/.test(rule), '新布局下覆盖层不得再让出 rail 宽度');
+    // 刻度带宽度仍走同源变量，且右让位量必须来自实测滚动条宽度
     const rail = cssRuleBody('.history-rail');
     assert.match(rail, /width:\s*var\(--rail-w/, '刻度带宽度必须走同一个 --rail-w');
+    assert.match(rail, /right:\s*var\(--scrollbar-w, 0px\)/, '刻度带右让位量必须走 --scrollbar-w');
     assert.match(CSS_SRC, /--rail-w:\s*26px/, '--rail-w 必须有定义');
-    // 窄屏刻度带隐藏时必须把让位收回，否则右侧白留 26px 空白
-    assert.match(CSS_SRC, /@media \(max-width: 720px\) \{ \.chat-history-loading \{ right: 0; \} \}/,
-        '窄屏（rail 隐藏）必须把 right 收回 0');
-    // 收回规则必须在主规则之后，否则被同特性度的主规则覆盖
-    assert.ok(CSS_SRC.indexOf('@media (max-width: 720px) { .chat-history-loading') >
-        CSS_SRC.indexOf('inset: 0 var(--rail-w'), '窄屏收回规则必须写在主规则之后');
+    // JS 必须真的把实测宽度写进变量（写死 15px 会在 overlay 滚动条平台压住正文）
+    assert.match(HISTORY_SRC, /shell\.style\.setProperty\('--scrollbar-w', px\)/,
+        '--scrollbar-w 必须由 JS 实测 offsetWidth-clientWidth 写入');
+    /* ResizeObserver 走 relayoutHistoryRailTicks，不经过 renderHistoryRail：
+       图片/代码高亮让正文撑高、滚动条从无到有时，漏测会让 --scrollbar-w 停在 0px，
+       刻度带随即压住新出现的滚动条。锁死「两条路径同口径」。 */
+    const relayoutAt = HISTORY_SRC.indexOf('function relayoutHistoryRailTicks');
+    assert.ok(relayoutAt > 0, 'relayoutHistoryRailTicks 必须存在');
+    const relayoutHead = HISTORY_SRC.slice(relayoutAt, relayoutAt + 900);
+    assert.ok(relayoutHead.indexOf('syncRailScrollbarWidth();') > 0
+            && relayoutHead.indexOf('syncRailScrollbarWidth();') < relayoutHead.indexOf('var $ticks'),
+        'relayout 路径也必须在读几何前重测滚动条宽度');
 });
 
 test('各断点 padding-top 一致，TOP_PAD 模型才恒成立', () => {

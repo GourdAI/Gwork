@@ -495,7 +495,12 @@ window.appendSteerNote = appendSteerNote;
 function ensureAssistantBubble(sess) {
     if (!sess.currentBubbleEl) {
         removeThinking(sess);
-        var row = $('<div>').addClass('msg-row assistant')[0];
+        /* agent-live = 「本轮正在跑」的运行态标记。CSS 据此把思考/工具/子代理卡
+           渲染成扁平语义轨迹（◇/$/▸ 前缀、去卡片边框底色）并强调当前活动行；
+           finishStream 收口时摘除、再按轮折叠成摘要。
+           回放（sess._replaying）不挂：历史消息没有「正在跑」的语义，
+           其形态由 .msg-row.assistant 常驻规则 + 按轮 Compact 负责。 */
+        var row = $('<div>').addClass('msg-row assistant' + (sess._replaying ? '' : ' agent-live'))[0];
         // 存储当前 runId，用于后续删除同一运行的消息
         if (sess.currentRunId) {
             row.setAttribute('data-run-id', sess.currentRunId);
@@ -1185,17 +1190,14 @@ function updateToolHeaderMeta(cardEl, toolName, args, text) {
 }
 window.updateToolHeaderMeta = updateToolHeaderMeta;
 
-/* 统一设置卡状态点：依据 chunk.text 是否以 __ERROR__ 开头判定。后端 WebStreamBuilder
-   在工具真正出错（Exception）时仍然发 action_end，但文本前缀为 "__ERROR__"；
-   正常执行结果不带此标记。失败则显示红点，成功显示绿点。 */
+/* 统一设置卡状态点：唯一真源 = 后端结构化 failed 布尔标识。
+   text 文案只用于展示，绝不参与状态判定；失败显示红点，成功显示绿点。 */
 function setToolCardStatus(cardEl, text, failed) {
     var icon = $(cardEl).find('.tool-status-icon').first()[0];
     if (!icon) return;
 
-    // 失败判定双通道：failed（后端 WebChunk.failed 显式标记，语义最可靠）优先，
-    // __ERROR__ 文本前缀作为旧历史帧与其它通道的兼容约定。
-    // 二者任一成立即判失败，保证没有 failed 字段的旧历史回放仍能正确显示红点。
-    var isError = failed === true || (typeof text === 'string' && text.startsWith('__ERROR__'));
+    // 失败判定唯一依赖 failed === true，不再嗅探任何文本前缀或旧帧兼容约定。
+    var isError = failed === true;
 
     setTimeout(function() {
         requestAnimationFrame(function() {
@@ -1272,7 +1274,7 @@ window.markToolCardFailed = markToolCardFailed;
 window._toolRenderers = window._toolRenderers || {};
 
 /* edit：git-diff 风格逐行着色 + 行号 */
-window._toolRenderers.edit = function(bodyEl, text, args) {
+window._toolRenderers.edit = function(bodyEl, text, args, failed) {
     var diff = (args && typeof args.diff === 'string') ? args.diff : null;
     var result = (typeof text === 'string') ? text : null;
     if (!diff && result && result.startsWith('---')) { diff = result; result = null; }
@@ -1328,8 +1330,8 @@ window._toolRenderers.edit = function(bodyEl, text, args) {
     // 输出段：成功时仅展示 diff（结果提示与改动重复，显示冗余，已隐藏）；
     // 仅在出错时渲染错误信息，避免编辑失败时卡片体空白。
     if (result && result !== diff) {
-        // NOTE: "成功完成" 为后端工具执行成功返回的固定文案，此处判断是否包含该字样以区分正常结果与错误信息；如需改为常量应同步修改后端 WebStreamBuilder
-        var isErr = result.indexOf("成功完成") < 0;
+        // NOTE: 失败判定唯一依赖后端 failed 标识，不再嗅探成功文案（Rust 内核成功文案为英文 Edited ...，旧判定会误报失败）。
+        var isErr = failed === true;
         if (isErr) {
             if (diff) html += '<div class="edit-result-sep"></div>';
             html += '<div class="edit-result is-error">'
@@ -1481,12 +1483,12 @@ function stripAnsiForDisplay(s) {
 }
 window.stripAnsiForDisplay = stripAnsiForDisplay;
 
-function renderToolBody(bodyEl, toolName, text, args) {
+function renderToolBody(bodyEl, toolName, text, args, failed) {
     text = stripAnsiForDisplay(text);
     var renderer = window._toolRenderers[toolName];
     if (typeof renderer === 'function') {
         try {
-            if (renderer(bodyEl, text, args)) return true;
+            if (renderer(bodyEl, text, args, failed)) return true;
         } catch(e) {}
     }
     return false;
@@ -2099,8 +2101,8 @@ function finishBatchGroup(sess, batch, batchKey) {
 
 /* 统一填充工具卡片结果体：命中专用 renderer 则用之，否则纯文本兜底；
    若结果被后端预览截断（meta.truncated），在体末追加「展开全文」按钮，点击按 seq 拉全文重渲染。 */
-function fillToolBody(sess, bodyEl, toolName, text, args, meta) {
-    if (!renderToolBody(bodyEl, toolName, text, args)) {
+function fillToolBody(sess, bodyEl, toolName, text, args, meta, failed) {
+    if (!renderToolBody(bodyEl, toolName, text, args, failed)) {
         // 兜底路径：renderToolBody 分发前已削过一遍，这里再调一次是幂等的（无 ESC 时
     // 直接返回原串）。保留是为了让「未经 renderToolBody」的调用方也能复用本行语义，
     // 且阅读时不必回溯分发函数才能确信显示无颜色码。
@@ -2139,7 +2141,7 @@ function ensureToolCardBody(cardEl) {
     var sess = p.sess, bareToolName = p.toolName;
     bodyEl.removeAttribute('style');
     bodyEl.innerHTML = '';
-    fillToolBody(sess, bodyEl, bareToolName, p.text, p.args, p.meta);
+    fillToolBody(sess, bodyEl, bareToolName, p.text, p.args, p.meta, p.failed);
     /* 【必须补】回放时 highlightCodeBlocks(realContainer) 只能高亮当时已存在的卡体；
        懒构建后卡体是展开才建的，不补这一步，todowrite/todoread 渲染器产出的
        <pre><code class="hljs language-markdown"> 会永远停在无高亮的裸代码。
@@ -2148,9 +2150,9 @@ function ensureToolCardBody(cardEl) {
     return true;
 }
 window.ensureToolCardBody = ensureToolCardBody;
-function setToolBodyPending(cardEl, sess, toolName, text, args, meta) {
+function setToolBodyPending(cardEl, sess, toolName, text, args, meta, failed) {
     if (!cardEl) return;
-    cardEl._pendingToolBody = { sess: sess, toolName: toolName, text: text, args: args, meta: meta };
+    cardEl._pendingToolBody = { sess: sess, toolName: toolName, text: text, args: args, meta: meta, failed: failed };
     /* 折叠态也要有一条可读的输出摘要：取首行，不构建卡体（展开时由 CSS 隐掉本行）。
        传完整 text 而非预览裁切片段——摘要函数自己取行，卡体将来展开仍是全文。 */
     setPreviewLine(cardEl, 'tool-card-preview', text, false);
@@ -2170,7 +2172,7 @@ function bindToolCardToggle(card) {
 }
 
 /* action_end 各配对/兜底路径共用：展示模型、参数、头部元数据与结果体一次回填。 */
-function updateToolCardContent(sess, cardEl, toolName, toolTitle, args, text, meta, options) {
+function updateToolCardContent(sess, cardEl, toolName, toolTitle, args, text, meta, options, failed) {
     var presentation = applyToolPresentation(cardEl, toolName, toolTitle, options);
     var bareToolName = presentation.bareToolName;
     updateToolHeaderMeta(cardEl, bareToolName, args, text);
@@ -2182,7 +2184,7 @@ function updateToolCardContent(sess, cardEl, toolName, toolTitle, args, text, me
     }
     /* 结果体不再无条件构建：折叠态只暂存参数，首次展开才渲染（见 setToolBodyPending）。
        展开态（HITL 复用）由 ensureToolCardBody 立即构建，观感不变。 */
-    setToolBodyPending(cardEl, sess, bareToolName, text, args, meta);
+    setToolBodyPending(cardEl, sess, bareToolName, text, args, meta, failed);
     return bareToolName;
 }
 
@@ -2212,7 +2214,7 @@ function appendExpandFullBtn(sess, bodyEl, toolName, args, meta) {
                直接 bodyEl.textContent = full 会把 ESC 原样写进 DOM（终端工具卡命中
                renderer 不暴露，只有 bash 以外的工具才落到这条兜底上，因此手测
                容易漏）。 */
-            if (!renderToolBody(bodyEl, toolName, full, args)) {
+            if (!renderToolBody(bodyEl, toolName, full, args, false)) {
                 bodyEl.textContent = stripAnsiForDisplay(full);
             }
             if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(bodyEl);
@@ -2246,7 +2248,7 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
                 toolTitle || null, idOwner, batchMeta, null);
         }
         toolName = updateToolCardContent(sess, idCard, toolName, toolTitle, args, text, meta,
-            toolPresentationOptions(idOwner, args, idCard));
+            toolPresentationOptions(idOwner, args, idCard), failed);
         setToolCardStatus(idCard, text, failed);
         setToolCardDuration(idCard, durationMs, failed);
 
@@ -2275,7 +2277,7 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         var pc = sess.pendingToolCard;
         sess.pendingToolStarted = false;
         toolName = updateToolCardContent(sess, pc, toolName, toolTitle, args, text, meta,
-            toolPresentationOptions(agentBody, args, pc));
+            toolPresentationOptions(agentBody, args, pc), failed);
         finishPendingTool(sess);
         setToolCardStatus(pc, text, failed);
         setToolCardDuration(pc, durationMs, failed);
@@ -2302,7 +2304,7 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         fallbackCard.innerHTML = '<div class="tool-card-header"><span class="tool-type-icon"></span><span class="tool-name"></span><span class="tool-status-icon loading"></span></div><div class="tool-card-body"></div>';
         var fallbackAgentBody = agentBody || resolveAgentCardBody(sess, args);
         toolName = updateToolCardContent(sess, fallbackCard, toolName, toolTitle, args, text, meta,
-            toolPresentationOptions(fallbackAgentBody, args, fallbackCard));
+            toolPresentationOptions(fallbackAgentBody, args, fallbackCard), failed);
         setToolCardStatus(fallbackCard, text, failed);
         setToolCardDuration(fallbackCard, durationMs, failed);
         bindToolCardToggle(fallbackCard);
@@ -2320,7 +2322,7 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         var rc = sess.approvedToolCard;
         sess.approvedToolCard = null;
         toolName = updateToolCardContent(sess, rc, toolName, toolTitle, args, text, meta,
-            toolPresentationOptions(agentBody, args, rc));
+            toolPresentationOptions(agentBody, args, rc), failed);
         setToolCardStatus(rc, text, failed);
         setToolCardDuration(rc, durationMs, failed);
         $(rc).removeClass('expanded');
@@ -2346,7 +2348,7 @@ function appendActionEndChunk(sess, toolName, text, args, toolTitle, actionId, m
         + '</div>'
         + '<div class="tool-card-body"></div>';
     toolName = updateToolCardContent(sess, card, toolName, toolTitle, args, text, meta,
-        toolPresentationOptions(fallbackOwner, args, card));
+        toolPresentationOptions(fallbackOwner, args, card), failed);
 
     // 工具结果渲染：公共更新方法已按裸 toolName 委托注册表并处理纯文本兜底/截断按钮
     setToolCardStatus(card, text, failed);
@@ -4528,6 +4530,24 @@ function handleQuestionResponse(sess, state) {
     // 会把答案写到【另一道题】上。空值不入表（旧快照恢复的挂起任务可能本就没有 actionId）。
     if (state.actionId) fields.actionId = String(state.actionId);
     postChatInput(sess, fields, null, {
+        onDone: function(resp) {
+            /* 提交成功即就地闭环问答卡，不再单纯依赖 question_answered 帧。
+               【实测事故】work-mw205svw：后端已消费挂起任务并落盘 answered 帧，
+               但恢复轮只吐 thinking、零正文零工具调用，卡片仍停在「已提交」，
+               用户看到的是「答完了任务却没执行」。answer 记录按 actionId 幂等，
+               故随后到达的 question_answered 帧不会重复落记录。 */
+            if (resp && resp.code && Number(resp.code) !== 200) return;
+            var st = sess._questionState;
+            if (!st || st !== state) return;      // 另一道题已接管，不越权收卡
+            try {
+                appendQuestionAnswerRecord(sess, st, {
+                    actionId: st.actionId,
+                    args: { answers: buildQuestionAnswersPayload(st) }
+                });
+            } catch (e) { console.error('[question] 提交后问答记录渲染失败', e); }
+            sess._questionState = null;
+            if (sess.sessionId === activeSessionId) syncQuestionCard();
+        },
         onFail: function(err) {
             console.error('Question answer error:', err);
             // 失败回退：解除「已提交」锁，保留答案允许重试（否则卡片永卡禁用态而任务不会恢复）

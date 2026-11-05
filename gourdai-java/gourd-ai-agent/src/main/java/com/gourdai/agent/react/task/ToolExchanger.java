@@ -36,6 +36,8 @@ public class ToolExchanger {
      */
     private final String actionId;
     private String result;
+    /** 结构化成败标识：工具结果是否为失败（含拦截器回填的业务错误）。 */
+    private boolean failed;
 
     public ToolExchanger(String toolName, Map<String, Object> args) {
         this(toolName, args, null);
@@ -68,5 +70,13 @@ public class ToolExchanger {
 
     public void setResult(String result) {
         this.result = result;
+    }
+
+    public boolean isFailed() {
+        return failed;
+    }
+
+    public void setFailed(boolean failed) {
+        this.failed = failed;
     }
 }

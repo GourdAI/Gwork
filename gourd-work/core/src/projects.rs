@@ -370,40 +370,87 @@ fn home_dir_string() -> String {
         .to_string()
 }
 
-/// Browse a directory: list subdirectories for the directory picker.
-pub fn browse(path: &str) -> Vec<serde_json::Value> {
-    let p = if path.is_empty() {
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+/// Browse a directory: build the payload for the directory picker.
+///
+/// 【契约不可漂移】响应必须是 `{"current","parent","separator","dirs"}` 对象，而不是
+/// 子目录数组——前端 `app-code.js` 的 `renderDirBrowserInto` 直接读这四个字段，
+/// 其中 `current` 决定「已进入某个目录」。Java 内核 `ProjectService.browse` 返回的
+/// 正是这个对象（见 gourdai-java/.../ProjectService.java），模块头声明
+/// "contract-for-contract" 却只搬了请求形状、漏了 browse 的响应形状：前端把数组
+/// 当对象读会拿到 `current=""` / `dirs=[]`，于是渲染「（无子目录）」，且
+/// 「新建文件夹」与「选定此目录」都被 `please_enter_dir` 守卫拦下——远程工作区
+/// 向导第 3 步整体不可用。目录不存在时也必须回 404 `ApiError`，不能静默给空列表
+/// （前端按 `resp.code !== 200` 判失败并提示「无法访问该目录」）。
+pub fn browse(path: &str) -> Result<serde_json::Value, ApiError> {
+    let separator = std::path::MAIN_SEPARATOR.to_string();
+    let is_windows = std::path::MAIN_SEPARATOR == '\\';
+
+    // 空路径：Windows 返回盘符根列表（current 为空、parent 为 null）；Unix 从用户主目录开始。
+    let p = if path.trim().is_empty() {
+        if is_windows {
+            let mut roots = Vec::new();
+            for letter in b'A'..=b'Z' {
+                let root = format!("{}:\\", letter as char);
+                if Path::new(&root).is_dir() {
+                    roots.push(serde_json::json!({"name": &root, "path": &root}));
+                }
+            }
+            return Ok(serde_json::json!({
+                "separator": &separator,
+                "current": "",
+                "parent": serde_json::Value::Null,
+                "dirs": roots,
+            }));
+        }
+        PathBuf::from(home_dir_string())
     } else {
-        PathBuf::from(path)
+        PathBuf::from(path.trim())
     };
+
     // One `read_dir` plus an `is_dir()` stat per entry. Cheap for a project
     // folder, but the picker is pointed at arbitrary user directories (a drive
     // root with thousands of entries is a normal pick), and it is called from an
     // async handler — so it goes through `offload` like the rest of this module.
     offload(move || {
-        let mut items = Vec::new();
-        let Ok(rd) = std::fs::read_dir(&p) else {
-            return items;
-        };
-        for e in rd.flatten() {
-            let path = e.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                continue;
-            }
-            items.push(serde_json::json!({
-                "name": name,
-                "path": path.to_string_lossy(),
-            }));
+        if !p.is_dir() {
+            return Err(ApiError::new(404, "Directory not found"));
         }
-        items.sort_by(|a, b| {
-            a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+        // Java: dir.toPath().toAbsolutePath().normalize() — 词法归一，不用 canonicalize
+        // （后者在 Windows 会产出 \\?\ 前缀，泄露进 UI 且破坏登记表字符串比对）。
+        let abs = normalize_path(&p);
+        let parent = abs.parent().map(|x| x.to_string_lossy().to_string());
+
+        let mut dirs = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&abs) {
+            for e in rd.flatten() {
+                let child = e.path();
+                if !child.is_dir() {
+                    continue;
+                }
+                let name = e.file_name().to_string_lossy().to_string();
+                // 跳过隐藏目录（Unix 下即以 '.' 开头；与 Java 的 startsWith(".") 同口径）
+                if name.starts_with('.') {
+                    continue;
+                }
+                dirs.push(serde_json::json!({
+                    "name": name,
+                    "path": child.to_string_lossy(),
+                }));
+            }
+        }
+        // Java: compareToIgnoreCase —— 大小写不敏感排序，相等时保持插入序（稳定排序）
+        dirs.sort_by(|a, b| {
+            let an = a["name"].as_str().unwrap_or("").to_lowercase();
+            let bn = b["name"].as_str().unwrap_or("").to_lowercase();
+            an.cmp(&bn)
         });
-        items
+
+        Ok(serde_json::json!({
+            "separator": separator,
+            "current": abs.to_string_lossy(),
+            "parent": parent,
+            "dirs": dirs,
+        }))
     })
 }
 
@@ -779,5 +826,94 @@ mod tests {
         assert!(locate("..", &[]).is_err());
         assert!(locate("a/b", &[]).is_err());
         assert!(locate("", &[]).is_err());
+    }
+
+    /// 目录选择器的响应契约（回归护栏）：`browse` 必须返回带 current/parent/
+    /// separator/dirs 的【对象】。曾有一版只返回子目录数组，前端按对象读拿到
+    /// `current=""` / `dirs=[]`，于是「（无子目录）」+ 所有动作弹
+    /// 「请先进入一个目录」——远程工作区向导第 3 步整体不可用。
+    #[test]
+    fn browse_returns_picker_object_not_bare_array() {
+        let dir = std::env::temp_dir().join(format!(
+            "gwork-browse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Beta")).unwrap();
+        std::fs::create_dir_all(dir.join("alpha")).unwrap();
+        std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+        std::fs::write(dir.join("a-file.txt"), b"x").unwrap();
+
+        let data = browse(&dir.to_string_lossy()).expect("存在的目录必须成功");
+        assert!(data.is_object(), "data 不能是数组：前端要读 current/dirs");
+        assert_eq!(data["separator"], std::path::MAIN_SEPARATOR.to_string());
+        assert_eq!(
+            data["current"].as_str().unwrap_or(""),
+            normalize_path(&dir).to_string_lossy(),
+            "current 必须是绝对归一路径，否则 pick()/beginCreate() 的 !current 守卫会误杀"
+        );
+        assert!(data["parent"].is_string() || data["parent"].is_null());
+        assert_eq!(
+            data["dirs"].as_array().map(|a| a.len()),
+            Some(2),
+            "隐藏目录与文件都要排除"
+        );
+        // Java 侧 compareToIgnoreCase：alpha 排在 Beta 前
+        let names: Vec<&str> = data["dirs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["name"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(names, vec!["alpha", "Beta"]);
+        for item in data["dirs"].as_array().unwrap() {
+            assert!(item["path"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with(&normalize_path(&dir).to_string_lossy().to_string()));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn browse_missing_directory_is_404_not_empty_success() {
+        let missing = std::env::temp_dir().join(format!(
+            "gwork-browse-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let err = browse(&missing.to_string_lossy()).expect_err("不存在的目录必须失败");
+        assert_eq!(
+            err.code, 404,
+            "静默回空列表会让前端停在'无子目录'而不报原因"
+        );
+    }
+
+    #[test]
+    fn browse_empty_path_has_valid_start_shape() {
+        // 起点也必须带齐四个字段：Windows 是盘符列表（current=""），Unix 是主目录。
+        let data = browse("").expect("起点必须成功");
+        assert!(data.is_object());
+        assert!(
+            data.get("current").is_some(),
+            "缺 current 会让首次进入就无法选定"
+        );
+        assert!(data.get("parent").is_some());
+        assert!(data.get("separator").is_some());
+        assert!(data["dirs"].is_array());
+        if cfg!(windows) {
+            assert_eq!(data["current"].as_str(), Some(""));
+            assert!(data["parent"].is_null());
+        } else {
+            assert!(!data["current"].as_str().unwrap_or("").is_empty());
+        }
     }
 }

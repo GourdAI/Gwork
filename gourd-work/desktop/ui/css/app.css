@@ -1,4 +1,4 @@
-:root { --sidebar-width: 280px; --filer-panel-width: 280px; }
+﻿:root { --sidebar-width: 280px; --filer-panel-width: 280px; }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; overflow: hidden; }
@@ -431,21 +431,29 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .chat-view { flex: 1; display: none; flex-direction: column; min-height: 0; }
 .chat-view.active { display: flex; }
 .messages-wrap { flex: 1; overflow-y: auto; }
-/* ===== 消息区外壳（消息滚动区 + 右侧会话导航刻度带）=====
+/* ===== 消息区外壳（消息滚动区 + 叠在其右缘内侧的会话导航刻度带）=====
    结构：.messages-shell > (.messages-wrap + .history-rail)
-   WHY 需要这层壳：导航刻度带必须与滚动区【并排】而不是绝对定位盖在它上面——
-   ① 绝对定位会压在 .messages-wrap 的原生滚动条上，挡住拖动滚动条；
-   ② 独立 flex 列不参与滚动、不遮挡正文，也不需要靠 z-index 与各类浮层抢层级。
+
+   【2026-11-04 位置修正·用户报障「滚动条和刻度位置反了」】
+   旧版把 .history-rail 做成与 .messages-wrap 并排的 flex 列、放在 wrap 右侧，
+   于是 wrap 的原生滚动条被夹在正文与刻度之间 —— 视觉上「滚动条在左、刻度在右」，
+   与参照稿（刻度一小簇、滚动条贴整个内容区最右）正好相反。
+   现改为：wrap 绝对定位占满 shell（滚动条自然落在最右），rail 绝对定位叠在
+   wrap 右缘内侧、用 --scrollbar-w 让开滚动条宽度，刻度就排在滚动条左边。
+   两者都是 absolute，互不参与 flex 流，也不会互相挤压正文宽度。
+   --scrollbar-w 由 JS 实测 wrap 的 offsetWidth-clientWidth 写入（Windows ~15px、
+   macOS overlay 为 0），不写死，跨平台刻度都能恰好贴住滚动条左缘。
+
    min-height/min-width: 0 两个都不可省：flex 子项默认 min-height:auto 会被内容撑高，
    导致 .chat-view 溢出、输入框被顶出视口。 */
-/* --rail-w：刻度带宽度，同时驱动「刻度带自身宽度」与「加载态覆盖层右侧让位」。
-   两处必须是同一个来源 —— 一旦各写一份 26px，任何一边调整都会让骨架版心与真实版心错位
-   （实测漏掉让位时内容落地瞬间正文横跳 13px = 26/2）。 */
-.messages-shell { flex: 1; min-height: 0; min-width: 0; display: flex; align-items: stretch; --rail-w: 26px; }
-/* 加载态覆盖层的定位父级：仅在覆盖层存在期间加上（见 JS 的
-   updateHistoryLoadingShellClass），避免永久 relative 改写子树绝对元素的定位参考。 */
-.messages-shell.has-history-loading { position: relative; }
-.messages-shell > .messages-wrap { flex: 1; min-width: 0; }
+/* --rail-w：刻度带宽度；--scrollbar-w：滚动条实测宽度（rail 的右让位量）。 */
+.messages-shell {
+    flex: 1; min-height: 0; min-width: 0;
+    position: relative; display: flex; align-items: stretch;
+    --rail-w: 26px; --scrollbar-w: 0px;
+}
+/* 加载态覆盖层的定位父级即 .messages-shell（现已常驻 relative）。 */
+.messages-shell > .messages-wrap { position: absolute; inset: 0; }
 .messages-inner { max-width: 820px; margin: 0 auto; padding: 28px 24px 12px; }
 
 /* 任务执行会话的「运行参数」提示条（loop 任务运行时参数；与 composer 的会话选择互不干扰）。
@@ -1514,8 +1522,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 
    形态（对齐参照稿）：内容区右缘一条竖轨，【用户发几条消息就几根刻度，间距固定】。
    当前阅读位置那根加长加深，随滚动实时跟随。悬停/聚焦浮出多行列表卡片，
-   卡片里同样每行一条消息 + 行尾同款刻度，鼠标在行间移动时选中条滑动跟随；
-   点行或点刻度都平滑滚动到该消息并高亮闪烁。
+    点行或点刻度都平滑滚动到该消息并高亮闪烁，选中行只把字体变黑并让行尾刻度变长。
 
    【为什么是等距而不是按内容真实比例】
    上一版按 offset/scrollHeight 摆位（缩略地图）。用户 2026-11-01 明确要求改为固定间距：
@@ -1523,18 +1530,24 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    底部、7 根挤在上半屏，反而没有数量感。附带好处：图片加载 / 代码高亮完成导致的分部
    重排不再让刻度抖动（旧实现必须靠 ResizeObserver 反复校正）。
 
-   位置为什么是 flex 列而不是 absolute 覆盖层：
-   ① 覆盖层会压在 .messages-wrap 的原生滚动条上，挡住拖动；并排则互不相干；
-   ② 覆盖层要和各类浮层抢 z-index，并排不需要。
-   窄屏（<=720px）直接隐藏：26px 的轨道在窄内容区里对正文的挤压大于导航收益。 */
+    位置为什么是 absolute 覆盖层而不是并排 flex 列（2026-11-04 用户报障「位置反了」）：
+    并排列会把 .messages-wrap 的原生滚动条夹在正文与刻度之间，变成「滚动条在左、刻度在右」；
+    参照稿是「刻度一小簇在左、滚动条贴整个内容区最右」。故 rail 叠回 wrap 右缘内侧，
+    用 right: var(--scrollbar-w) 让开滚动条宽度，滚动条重回最右、刻度落在它左边。
+    【不会挡住滚动条】前提：--scrollbar-w 已由 syncRailScrollbarWidth() 同步到 shell
+    自身（renderHistoryRail 与 relayoutHistoryRailTicks 两条路径都刷）。此时 right 恰好
+    等于实测滚动条宽，二者像素级不重叠；
+    【不会挡住正文】rail 只有 26px 宽且透明，刻度是 12~18px 短横。
+    窄屏（<=720px）直接隐藏：26px 的轨道在窄内容区里对正文的挤压大于导航收益。 */
 .history-rail {
-    /* 宽度走 .messages-shell 的 --rail-w：同一个值还要给加载态覆盖层算右侧让位量，
-       各写一份 26px 则任一边调整都会让骨架版心与真实版心错位（实测横跳 13px = 26/2）。
-       带 26px 兜底，避免变量意外缺失时轨道塌成 0 宽。 */
-    flex: 0 0 auto; width: var(--rail-w, 26px);
+    /* 宽度走 .messages-shell 的 --rail-w；right 走实测 --scrollbar-w（滚动条让位）。
+       带 26px / 0px 兜底，避免变量意外缺失时轨道塌成 0 宽或压住滚动条。 */
+    position: absolute; top: 0; bottom: 0;
+    right: var(--scrollbar-w, 0px);
+    width: var(--rail-w, 26px);
     display: none; flex-direction: column;
     align-items: stretch; padding: 12px 0;
-    position: relative;
+    z-index: 12;
 }
 .history-rail.is-visible { display: flex; }
 
@@ -1612,27 +1625,28 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     background: var(--bg-input-box); border-radius: 12px;
     box-shadow: 0 0 0 1px var(--border-color), var(--shadow-lg);
     pointer-events: auto; z-index: 20;
-    opacity: 0; transform: translate(4px, -50%) scale(.985);
-    /* 入场/退场：位移 + 微缩放 + 淡入，只对 opacity/transform 做过渡（不动 width/height，那会每帧重排整张卡）。
-       【visibility 必须带 160ms 延迟，不能省略】基类规则是「退场」时生效的那一份：
-       移除 .is-shown 后，visibility 会在同一帧变 hidden，浏览器立即不再绘制该元素 ——
-       而 opacity 过渡还在跑。结果是入场有动画、退场「啪」地消失。
-       实测（真实浏览器逐帧采样）：t=175ms 时 visibility 已是 hidden、opacity 还有 0.899。
-       写成 `visibility 0s .16s` 后，隐藏被推到淡出结束那一刻，与 opacity 同步。 */
-    transition: opacity .16s ease, transform .16s cubic-bezier(.16, 1, .3, 1),
-                visibility 0s .16s;
+    opacity: 0; transform: translateY(-50%) scale(.88);
+    /* 【2026-11-04 按参照稿改「缩放展现」】旧版是 translateX(4px) 位移 + .985 微缩放，
+        读起来像「从右边滑进来」；参照稿是整张卡从刻度处就地放大展开。
+        故：去掉 X 位移，缩放幅度拉到 .88（看得出来是缩放），transform-origin 取右中，
+        展开方向与「从右侧刻度带长出」一致；只过渡 opacity/transform，不动布局属性。
+        【visibility 必须带与 transform 同步的 220ms 延迟】基类是「退场」那一份：移除 .is-shown 后
+        visibility 会在同一帧变 hidden，浏览器立即停止绘制而 opacity 过渡还在跑，
+        结果入场有动画、退场「啪」地消失。实测 t=175ms 时 opacity 还有 0.899。 */
+    transform-origin: right center;
+    transition: opacity .18s ease, transform .22s cubic-bezier(.16, 1, .3, 1),
+                visibility 0s .22s;
     visibility: hidden;
 }
 .history-rail-tip.is-shown {
-    opacity: 1; transform: translate(0, -50%) scale(1);
+    opacity: 1; transform: translateY(-50%) scale(1);
     visibility: visible;
-    /* 入场时 visibility 必须零延迟：这里覆盖基类的 .16s 延迟，否则会出现
-       「淡入动画先跑、元素还不可见」的一帧空白。 */
-    transition: opacity .16s ease, transform .16s cubic-bezier(.16, 1, .3, 1),
+    /* 入场时 visibility 零延迟，否则会出现「淡入先跑、元素还不可见」的一帧空白。 */
+    transition: opacity .18s ease, transform .22s cubic-bezier(.16, 1, .3, 1),
                 visibility 0s;
 }
 
-/* 列表容器：内部滚动（消息多时卡片不无限长），position:relative 供滑动指示条定位。 */
+/* 列表容器：内部滚动（消息多时卡片不无限长）；行是普通 flex 子项，无需额外定位层。 */
 .history-rail-tip-list {
     position: relative; max-height: 260px; overflow-y: auto; overflow-x: hidden;
     display: flex; flex-direction: column;
@@ -1641,24 +1655,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     scrollbar-width: thin;
 }
 
-/* 滑动指示条：一条竖向高亮背景，位置/高度由 JS 按选中行写入（transform 驱动）。
-   为什么用一条绝对定位的元素而不是给行加 :hover 背景 ——
-   行各自变背景色是「两个东西先后亮」，而滑动的指示条是「选中移到了这里」，
-   后者才能把「鼠标在刻度上滑、卡片里的选中跟着滑」这件事表达出来。
-   放在 row 之下（z-index 0 vs row 1）且 pointer-events:none，不挡点击。 */
-.history-rail-tip-cursor {
-    position: absolute; left: 0; right: 0; top: 0; height: 0;
-    border-radius: 8px; background: var(--bg-hover);
-    pointer-events: none; z-index: 0;
-    /* 默认隐藏：还没选中任何行时不显示一条贴顶的空条 */
-    opacity: 0;
-    /* 【只过渡 transform 与 opacity】
-       原实现还过渡 height —— 但 height 是布局属性，每帧变化都会让浏览器重算这张卡片的
-       布局。列表行的行高恒定（同 padding + 单行 nowrap 文本，实测 33px），
-       height 根本不会变，那条过渡纯属白付。去掉后指示条只做合成层位移。 */
-    transition: transform .18s cubic-bezier(.16, 1, .3, 1), opacity .12s ease;
-}
-.history-rail-tip.has-cursor .history-rail-tip-cursor { opacity: 1; }
+/* 【2026-11-04 按参照稿移除滑动指示条】用户明确要求「鼠标挪动上去没有阴影背景，
+    只有字体变黑色」。选中态只由行自身的文字颜色 + 行尾刻度表达；DOM 与 JS 写入
+    已一并删除，避免对 display:none 元素做无意义的几何测量。 */
 
 /* 一行 = 一段旧输入 + 行尾刻度。
    【为什么用 button 而不是 div】行本来就可点（跳转），button 自带键盘可达与 Enter/Space，
@@ -1669,8 +1668,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     width: 100%; padding: 7px 8px 7px 10px;
     border: 0; background: none; border-radius: 8px;
     font: inherit; color: inherit; text-align: right; cursor: pointer;
-    /* 颜色过渡比指示条位移快一点：位移还在路上时文字已经亮好，
-       否则读起来像「条到了才想起来该高亮」。 */
+    /* 无背景、无阴影：hover/选中只改文字颜色与行尾刻度（参照稿形态）。 */
     transition: color .12s ease;
 }
 .history-rail-tip-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -1683,30 +1681,27 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     transition: color .12s ease;
 }
 
-/* 行尾刻度：与轨道上那根同形状（圆角短横）。默认视觉 14px、选中 18px。
-   【为什么用 scaleX 而不是 width】width 是布局属性：鼠标在行间扫动时，
-   选中行的刻度宽度每帧都在变，flex 行就每帧重排一次。真实浏览器实测这是
-   「光标移动卡顿」的第二大来源（第一大是几何强制同步布局）。
-   改用 transform: scaleX —— 合成层变换，零布局。基准宽取 18px（最大态），
-   默认缩到 14/18 ≈ .7778，选中时回到 1；origin 设右对齐，增长方向与轨道一致。 */
+/* 行尾刻度：默认短灰、选中加长变黑。
+   【2026-11-04 改用 width 而非 scaleX】参照稿要求「后面的刻度变长，字往前挤」——
+   刻度是真实占位变宽，文字（flex:1）被往前推，两者有联动的挤压感。
+   scaleX 只是视觉变形、不占布局宽度，文字纹丝不动，正是用户觉得「动画难受」的原因之一。
+   过渡仍只作用于 width/background-color；单行 nowrap 文本重排成本可忽略（最多 60 行、
+   每行一次，且只在跨行切换时各触发一次，非逐帧）。 */
 .history-rail-tip-tick {
-    flex: 0 0 auto; width: 18px; height: 2px; border-radius: 1px;
+    flex: 0 0 auto; width: 14px; height: 2px; border-radius: 1px;
     background: var(--text-tertiary);
-    transform: scaleX(.7778); transform-origin: right center;
-    transition: background-color .12s ease, transform .18s cubic-bezier(.16, 1, .3, 1);
+    transition: width .2s cubic-bezier(.16, 1, .3, 1), background-color .12s ease;
 }
 
-/* 悬停/选中行：文字深一阶、行尾刻度加长加深 */
+/* 悬停/选中行：只有字体变黑色 + 行尾刻度变长，没有阴影背景、没有竖杠。 */
 .history-rail-tip-row.is-cursor .history-rail-tip-text { color: var(--text-primary); }
-.history-rail-tip-row.is-cursor .history-rail-tip-tick { transform: scaleX(1); background: var(--text-primary); }
+.history-rail-tip-row.is-cursor .history-rail-tip-tick { width: 26px; background: var(--text-primary); }
 
-/* 当前阅读位置那一行：左侧一根竖线标记（不抢选中态的视觉，只做位置提示）。
-   与 .is-cursor 可共存：两者语义不同（一个是你指着的，一个是你正在读的）。 */
-.history-rail-tip-row.is-current::before {
-    content: ''; position: absolute; left: 3px; top: 50%;
-    width: 2px; height: 14px; margin-top: -7px; border-radius: 1px;
-    background: var(--accent); opacity: .8;
-}
+/* 当前阅读位置那一行：同样不要竖杠（用户明确要求「当前消息前面不要一个竖杠」）。
+   与 .is-cursor 共用「文字变黑 + 刻度加长」这组视觉，只是语义不同：
+   一个是你指着的，一个是你正在读的。参照稿里两者都只用长横刻度表达。 */
+.history-rail-tip-row.is-current .history-rail-tip-text { color: var(--text-primary); }
+.history-rail-tip-row.is-current .history-rail-tip-tick { width: 26px; background: var(--text-primary); }
 
 /* 动效尊重系统偏好 */
 @media (prefers-reduced-motion: reduce) {
@@ -1717,15 +1712,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     .history-rail-tip,
     /* 【必须单独列出 .is-shown】它带两个类（特性度 0,2,0），会盖过这里的单类选择器（0,1,0）。
        漏掉它的真实后果：开了系统「减少动效」后，卡片的 opacity/transform 过渡照样跑 ——
-       而卡片正是这一轮新增的最大动效载体。实测 transition-duration 仍为 0.16s。 */
+       而卡片正是这一轮新增的最大动效载体。当前入场时长为 .22s（opacity .18s），
+    忽略 reduced-motion 会把整段缩放动画照常放完。 */
     .history-rail-tip.is-shown,
-    /* 指示条同时用两个写法覆盖（基类 + .has-cursor 态）是砌底的：
-       原来写成两条并列规则，实测证明它们互相兜底 —— 单独删任一条，
-       computed transition-duration 仍为 0s，行为完全不变（已用三组对照实测）。
-       合并为一条后，「会不会被漏掉」变成一次可验证的事实，而不是靠两条规则互相掩护。
-       保留 .has-cursor 选择器是因为它是指示条真正的活动态（不选中时 opacity:0 看不出动画）。 */
-    .history-rail-tip-cursor,
-    .history-rail-tip.has-cursor .history-rail-tip-cursor,
     .history-rail-tip-row,
     .history-rail-tip-text,
     .history-rail-tip-tick { transition: none; }
@@ -4054,18 +4043,11 @@ pre:hover .code-copy-btn { opacity: 1; }
    逐行升起用全站标志性的 cubic-bezier(.16,1,.3,1)，流光用主题变量驱动，
    明暗主题与强调色自动适配，无需 JS 判断主题。 */
 .chat-history-loading {
-    /* 【右侧预留刻度带宽度】覆盖层挂 .messages-shell，而真实消息容器在
-       .messages-wrap 内 —— 后者被并排的刻度带挤掉 railW 宽。若覆盖层盖满 shell，
-       骨架版心相对 shell 居中、真实版心相对 wrap 居中，差 railW/2；内容落地那一刻
-       正文整块横跳（实测 13px）。
-       【为什么是「预留」而不是「跟随 rail 显隐」】真实流程里加载态出现时刻度带必然
-       不可见（容器空 ⇒ collectRailMessages 返回空 ⇒ rail 收起），所以「跟随显隐」
-       会让让位量恒为 0、完全失效。但只要该会话有用户消息，回放落地后 rail 就会显示、
-       wrap 随即收窄 railW —— 提前把这份宽度预留出来，两者才同线。
-       【已知未覆盖场景】会话没有用户消息（如 loop 自动执行）时 rail 永不出现，
-       此时骨架比内容窄 railW/2，落地会有一次 13px 的反向横跳。该场景既无用户消息也
-       无导航需求，视觉影响远小于「每次打开历史会话都跳」。 */
-    position: absolute; inset: 0 var(--rail-w, 0px) 0 0; z-index: 15;
+    /* 【2026-11-04 位置修正后不再需要让位】刻度带已从「并排 flex 列」改为
+       「叠在 wrap 右缘内侧的 absolute 覆盖层」，.messages-wrap 现在占满整个 shell：
+       骨架版心与真实版心本来就是同一个容器，不存在旧版 railW/2 的横跳。
+        故 position/inset 铺满即可。 */
+    position: absolute; inset: 0; z-index: 15;
     display: flex; flex-direction: column; justify-content: flex-start;
     background: var(--bg-main);
     overflow: hidden;
@@ -4084,9 +4066,6 @@ pre:hover .code-copy-btn { opacity: 1; }
    padding-top 28 + 首行 margin-top 14 是一个跨断点恒定的模型。原先窄屏把 padding-top
    改成 16，模型仍按 42 推算 → 窄屏实测首行只到 30px，白算 12px，多渲染一行。 */
 @media (max-width: 768px) { .chl-inner { padding: 28px 12px 8px; } }
-/* 窄屏刻度带整体隐藏（见 .history-rail 的 <=720px 规则），覆盖层随之不再让位。
-   必须写在 .chat-history-loading 主规则之后：同特性度下后出现的媒体查询才生效。 */
-@media (max-width: 720px) { .chat-history-loading { right: 0; } }
 .chl-row {
     display: flex; flex-direction: column; gap: 8px;
     margin: 14px 0;
@@ -4138,4 +4117,212 @@ pre:hover .code-copy-btn { opacity: 1; }
    （骨架的静态灰块本身就能表达「正在准备内容」，不依赖动画） */
 @media (prefers-reduced-motion: reduce) {
     .chat-history-loading, .chl-row, .chl-line { animation: none; }
+    /* P2-6 摘要按钮的箭头翻转与文字过渡同样尊重系统偏好 */
+    .turn-compact-toggle, .turn-compact-toggle::before { transition: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   P2-6 按轮 Compact 折叠（对标 deepseek-harness 的 Normal/Compact 默认 Compact，
+   亦对应 Codex main 分支 ReasoningSummaryCell 的 transcript_only=true 与
+   FinalMessageSeparator 的轮结束元数据行）
+
+   形态：一轮结束后，思考块 / 工具卡 / 并行批次组 / 子代理卡统一收起，
+   只留【最终正文】+ 正文上方一行统计摘要（如「12 次工具调用 · 3 段思考」）。
+   点摘要展开该轮全部过程证据。用户气泡、系统提示、错误、HITL、文件变更卡不参与。
+
+   【零包装层】app-turn-compact.js 只在既有节点上写 data-turn-process 属性，
+   不插 <div> 容器 —— app.css:825 有 `.agent-card-body > .thinking-block + .md-content`
+   这类相邻兄弟选择器，历史上插包装节点导致过折叠静默失效，故此处只用属性选择器。
+   [hidden] 用 !important 是为了压过 .tool-card / .tool-batch-group 等自身的 display 声明，
+   但仅命中带 data-turn-process 的节点，作用域极窄。
+   ═══════════════════════════════════════════════════════════════════════════ */
+.msg-bubble > [data-turn-process] { display: none !important; }
+.msg-bubble.turn-compact-open > [data-turn-process] { display: block !important; }
+
+/* 摘要按钮：正文上方一条低调的「过程入口」，不是卡片、不带底色块。
+   与过程行同口径用细分隔线归属，展开后靠箭头方向表达状态。 */
+.turn-compact-toggle {
+    display: flex; align-items: center; gap: 7px; width: 100%;
+    margin: 2px 0 8px; padding: 5px 10px;
+    border: 0; border-top: 1px solid var(--border-color); border-radius: 0;
+    background: transparent; color: var(--text-tertiary);
+    font: 12px/1.5 var(--font-sans, inherit); text-align: left;
+    cursor: pointer; user-select: none;
+    transition: color .15s ease;
+}
+.turn-compact-toggle:hover { color: var(--text-primary); }
+.turn-compact-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 前缀与 Codex 的 `• ` / `› ` 前缀列同节奏；展开后箭头翻转 */
+.turn-compact-toggle::before {
+    content: '▸'; flex: 0 0 auto; font-family: var(--font-mono, monospace);
+    font-size: 12px; color: var(--text-tertiary);
+    transition: transform .15s ease;
+}
+.msg-bubble.turn-compact-open > .turn-compact-toggle::before { transform: rotate(90deg); }
+.msg-bubble.turn-compact-open > .turn-compact-toggle { color: var(--text-secondary); }
+/* 展开态：过程行之间恢复原有节奏，避免它们贴在一起读成一大块 */
+.msg-bubble.turn-compact-open > [data-turn-process].tool-card,
+.msg-bubble.turn-compact-open > [data-turn-process].tool-batch-group,
+.msg-bubble.turn-compact-open > [data-turn-process].thinking-block,
+.msg-bubble.turn-compact-open > [data-turn-process].agent-card { margin: 2px 0; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   P2-6b 运行态 / 展开态：扁平语义轨迹（不是「取消卡片」这么简单）
+
+   依据（源码级调研 2026-11）：
+   · Codex CLI 无卡片：› / • / $ / └ 前缀 + DIM/italic + 两空格续行，
+     无 border / radius / 底色；运行态 active_cell 原地 mutate + spinner + 「• Running …」。
+   · dsh README 原文「轮次打开期间…始终展开，turn/end 才折叠」—— 运行态不折叠。
+   · ZCode DESIGN.md「Dense operational panels are preferred over marketing-card styling」。
+   · 桌面端 dsh / ZCode / Claude Code 均保留用户气泡（只有 Codex 纯终端 TUI 例外）。
+
+   【职责】运行态由 ensureAssistantBubble 挂 .agent-live（收口 finishStream 摘除并折叠）；
+   展开态由用户点摘要行挂 .turn-compact-open。两者共用下面这套扁平形态，
+   但按【类型】分化前缀与弱化级别 —— 绝不「四类一律抹成同一种 $ 」（上一轮返工教训）。
+
+   【作用域铁律】所有规则以 .msg-row.assistant.agent-live 或 .msg-bubble.turn-compact-open
+   开头，且只命中 assistant 气泡内的【直接子过程行】；用户气泡零规则命中。
+   不插入任何包装节点（app.css:825 相邻兄弟选择器）；不造 │ 字符（Codex 未查到证据，
+   用缩进 + 细线表达层级）。overflow 保持不动 —— contain:paint 抗滚动分层残影依赖它。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ① 去卡片盒：运行态全展开的四类过程行 + 折叠后用户展开的过程行 */
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card,
+.msg-bubble.turn-compact-open > [data-turn-process] {
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    margin: 0 !important;
+}
+/* hover 也不再浮出灰底（否则鼠标一过瞬间又变回卡片） */
+.msg-row.assistant.agent-live .msg-bubble > .tool-card:hover,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group:hover,
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block:not(.streaming):hover,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card:not(.agent-card-streaming):hover,
+.msg-bubble.turn-compact-open > [data-turn-process]:hover { background: transparent !important; }
+
+/* ② 按类型分化的语义前缀列：◇ 思考 / $ 工具 / ▸ 子代理。
+   前缀是 header 内【绝对定位】的 ::before，脱离 flex 流 —— 绝不挤压工具名/参数/预览/
+   计时/状态点（app.css:620「Java 被遮挡」与 :1092「思考完成折两行」都是 flex 挤压事故）。
+   隐藏原 SVG 类型图标，改由文本前缀承担语义；状态点/计时/标签/预览全部保留。 */
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block > .thinking-block-header,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card > .tool-card-header,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group > .tool-batch-header,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card > .agent-card-header,
+.msg-bubble.turn-compact-open > [data-turn-process] > .thinking-block-header,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-card-header,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-batch-header,
+.msg-bubble.turn-compact-open > [data-turn-process] > .agent-card-header {
+    position: relative;
+    padding-left: 24px;
+    background: transparent;
+}
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block > .thinking-block-header > .tool-type-icon,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card > .tool-card-header > .tool-type-icon,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card > .agent-card-header > .agent-icon,
+.msg-bubble.turn-compact-open > [data-turn-process] > .thinking-block-header > .tool-type-icon,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-card-header > .tool-type-icon,
+.msg-bubble.turn-compact-open > [data-turn-process] > .agent-card-header > .agent-icon { display: none; }
+
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block > .thinking-block-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .thinking-block-header::before {
+    content: '◇';
+}
+.msg-row.assistant.agent-live .msg-bubble > .tool-card > .tool-card-header::before,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group > .tool-batch-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-card-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-batch-header::before {
+    content: '$';
+}
+.msg-row.assistant.agent-live .msg-bubble > .agent-card > .agent-card-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .agent-card-header::before {
+    content: '▸';
+}
+/* 前缀统一：等宽、三级色、垂直居中、不参与交互 */
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block > .thinking-block-header::before,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card > .tool-card-header::before,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group > .tool-batch-header::before,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card > .agent-card-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .thinking-block-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-card-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-batch-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .agent-card-header::before {
+    position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
+    font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1;
+    color: var(--text-tertiary); pointer-events: none;
+}
+
+/* ③ 思考行 DIM + 斜体（对标 Codex ReasoningSummaryCell 的 dim+italic），
+   与工具行（等宽命令）在字形上分层；状态点/计时不动 */
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block > .thinking-block-header .thinking-block-label,
+.msg-bubble.turn-compact-open > [data-turn-process="thinking"] > .thinking-block-header .thinking-block-label {
+    font-style: italic; color: var(--text-tertiary);
+}
+
+/* ④ 过程正文（工具/思考之间吐出的解释性文字）：DIM 弱化 + 左缩进 + 细引导线，
+   与最终答案（通栏直出、正常字重）明确分层。用缩进/细线而非 │ 字符（Codex 无证据）。
+   border-left 必须 !important 且选择器特异性高于 ① 的 border:0 !important（0,3,0 > 0,2,0）。 */
+.msg-bubble.turn-compact-open > [data-turn-process="text"] {
+    padding-left: 14px !important;
+    border-left: 2px solid var(--border-color) !important;
+    color: var(--text-tertiary);
+    font-size: 12.5px;
+    opacity: .9;
+    margin: 3px 0 !important;
+}
+.msg-bubble.turn-compact-open > [data-turn-process="text"] p { margin: 2px 0; }
+
+/* ⑤ 运行态活动行强调：进行中的思考/工具/子代理把前缀染成 accent，
+   配合既有 spinner（status-dot-blink）与计时器表达「此刻在跑」，不靠整卡描边。
+   收口后 .agent-live 被摘除，这里自动失效，活动强调不残留到历史里。 */
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block.streaming > .thinking-block-header::before,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card.args-streaming > .tool-card-header::before,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card.agent-card-streaming > .agent-card-header::before {
+    color: var(--accent);
+}
+/* 骨架卡（参数生成中）的虚线描边在扁平轨迹里改回无框，避免又是「卡片」 */
+.msg-row.assistant.agent-live .msg-bubble > .tool-card.args-streaming { border-style: solid; }
+
+/* ⑥ 内部层级扁平化（code review 修复：用户报「折叠打开后还是卡片形式」）。
+   ① 的 `> [data-turn-process]` 只命中气泡【直接子级】；批次组里的子工具卡、
+   以及各卡体自身的 border-top / hover 灰底仍由 :669/:773/:1113/:3675 提供，
+   展开后鼠标一过就又浮出一块块盒子 —— 正是「展开态 ≠ 去卡片」没做干净。
+   这里把【过程行内部】的装饰一并抹平，但保留：
+     · .thinking-block-body / .tool-card-body 的 max-height + overflow（内容限高，非装饰）
+     · .md-content 内代码块/表格/引用（语义内容，不是卡片）
+     · [data-turn-process="text"] 的 2px 左细线（过程正文层级引导，刻意保留）
+   作用域仍是 .agent-live / .turn-compact-open，用户气泡零命中，不插任何包装节点。 */
+.msg-bubble.turn-compact-open > [data-turn-process] .tool-card-body,
+.msg-bubble.turn-compact-open > [data-turn-process] .thinking-block-body,
+.msg-bubble.turn-compact-open > [data-turn-process] .agent-card-body,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card .tool-card-body,
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block .thinking-block-body,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card .agent-card-body {
+    border-top: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+/* 批次组内成员卡：hover 不再浮出灰底（:773），也不再带自己的圆角/描边。
+   缩进 14px 保留 —— 那是「属于这个批次」的层级表达，不是卡片装饰。 */
+.msg-bubble.turn-compact-open > [data-turn-process="batch"] .batch-tool-items > .tool-card,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group .batch-tool-items > .tool-card {
+    border-radius: 0 !important;
+    background: transparent !important;
+}
+.msg-bubble.turn-compact-open > [data-turn-process="batch"] .batch-tool-items > .tool-card:hover,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group .batch-tool-items > .tool-card:hover,
+.msg-bubble.turn-compact-open > [data-turn-process]:hover .tool-card-body,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card:hover .tool-card-body {
+    background: transparent !important;
+}
+/* 批次组自身的左 2px 竖条（:756）在扁平轨迹里降级为细引导线，仍不造 │ 字符：
+   Codex 源码 EXEC_DISPLAY_LAYOUT 里的 "  │ " 只用于【多行命令续行导轨】，
+   与「批次分组」不是同一场景，故不照搬字符，保留视觉等价的细线。 */
+.msg-bubble.turn-compact-open > [data-turn-process="batch"],
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group {
+    border-left-color: var(--border-color) !important;
 }

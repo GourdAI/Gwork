@@ -682,7 +682,7 @@ public class WebStreamBuilder {
     /**
      * 工具执行失败时构造带 {@code failed} 标记的 action_end。
      *
-     * <p><b>为什么必须有这一帧：</b>旧实现在 {@code getError() != null} 时直接返回
+     * <p><b>为什么必须有这一帧：</b>旧实现在工具调用失败（{@code getError() != null 或 isFailed()}）时直接返回
      * {@link WebChunk#EMPTY}，把失败帧整个吞掉。而 {@code action_start} 已经建出了 loading
      * 卡片，它永远等不到配对的结束帧 —— 卡片上的状态点<b>永久闪烁</b>、计时器永久累加，
      * 直到整流结束才被 finishStream 兜底标黄（批量卡甚至会被误判）。</p>
@@ -695,15 +695,27 @@ public class WebStreamBuilder {
             return WebChunk.EMPTY;
         }
         Throwable error = chunk.getError();
-        String errText = error.getMessage();
-        if (Assert.isEmpty(errText)) {
-            errText = error.getClass().getSimpleName();
-        }
+        // 业务失败（ToolResult.error / 拦截器置 failed）不带 Throwable，此时错误文案在观测内容里；
+        // 必须先判空，避免 error.getMessage() 抛 NPE。
+        String errText = (error != null) ? safeErrorMessage(error)
+                : (Assert.isNotEmpty(chunk.getContent()) ? chunk.getContent() : "Tool execution failed");
 
         WebChunk webChunk = WebChunk.ofActionEnd(errText, chunk.getDurationMs());
         webChunk.setFailed(true);
         projectToolCommon(chunk, webChunk);
         return webChunk;
+    }
+
+    /** 提取异常文案：无 message 时退化为异常类名，error 为 null 时返回兜底串。 */
+    private static String safeErrorMessage(Throwable error) {
+        if (error == null) {
+            return "Tool execution failed";
+        }
+        String message = error.getMessage();
+        if (Assert.isEmpty(message)) {
+            return error.getClass().getSimpleName();
+        }
+        return message;
     }
 
 
@@ -910,7 +922,7 @@ public class WebStreamBuilder {
             String toolName = event.getToolName();
             if (toolName == null || toolName.isEmpty()) return;
             store.recordToolUsage(sessionId, webGate.streamRoot(sessionId), toolName,
-                    event.getError() == null, event.getActionId(), event.getAgentName(),
+                    event.getError() == null && !event.isFailed(), event.getActionId(), event.getAgentName(),
                     SessionToolUsageService.skillNameOrNull(event.getArgs(), toolName));
         } catch (Throwable e) {
             LOG.debug("[WebStream] record tool usage ledger failed: {}", e.toString());
@@ -925,7 +937,7 @@ public class WebStreamBuilder {
      * <ul>
      *   <li>工具名称：若属于当前引擎则使用短名，否则使用 {@code agentName/toolName} 全路径</li>
      *   <li>特殊处理 {@code todowrite} 工具：将 todos 参数内容设为文本</li>
-     *   <li>失败时（{@code getError() != null}）走 {@link #onToolFailure}，不再吞帧</li>
+     *   <li>失败时（{@code getError() != null 或 isFailed()}）走 {@link #onToolFailure}，不再吞帧</li>
      * </ul></p>
      *
      * @param chunk 工具调用结束事件
@@ -934,7 +946,7 @@ public class WebStreamBuilder {
     private WebChunk onToolCallEndEvent(ToolCallEndEvent chunk) {
         // R1 修复：工具执行失败不再吞帧。旧实现直接 return EMPTY，而 action_start 已建出
         // loading 卡片，它永远等不到配对的结束帧 —— 卡片状态点永久闪烁、计时器永久累加。
-        if (chunk.getError() != null) {
+        if (chunk.getError() != null || chunk.isFailed()) {
             return onToolFailure(chunk);
         }
 

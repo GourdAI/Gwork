@@ -1216,9 +1216,13 @@ function finishStream(sess, opts) {
     if (typeof window.repositionFileChangeCards === 'function') window.repositionFileChangeCards(sess);
 
     // 流式结束，显示复制按钮（流式过程中被隐藏）
+    var liveFoldRow = null;
     if (sess.currentBubbleEl) {
         var doneRow = $(sess.currentBubbleEl).closest('.msg-row')[0];
         if (doneRow) $(doneRow).find('.msg-actions').show();
+        /* resetStreamState 会把 currentBubbleEl 置 null，收口折叠要在那之后执行，
+           故此处先快照本轮 row（唯一权威落点，不用全容器重扫）。 */
+        liveFoldRow = doneRow || null;
     }
 
     // resetStreamState 会清空 buffer，所以必须在上面强刷完后再调
@@ -1227,6 +1231,43 @@ function finishStream(sess, opts) {
     var keptCompletedActionIds = keepBatchIndex ? sess.completedActionIds : null;
     resetStreamState(sess);
     if (keepBatchIndex) sess.completedActionIds = keptCompletedActionIds || {};
+
+    /* ===== 运行态 → 收口态切换（对标 dsh「turn/end 才折叠」/ Codex flush_active_cell） =====
+       运行中 agent-live 让过程行以扁平语义轨迹实时展开（活动行 accent、思考仍可点开）；
+       真收口时摘掉 agent-live 并把本轮过程区收成一行统计摘要，只留最终正文。
+
+       三条护栏，缺一不可：
+       ① 挂起 done（keepBatchIndex）：引擎随时会同 runId 继续跑，此刻折叠等于半途收口，
+          且恢复后同批帧会再建卡 —— 保持展开，等真正那一轮 done。
+       ② 回放路径（_replaying / _skipScroll）：replaySession 结束后已由 app-history.js
+          按轮统一折叠，这里再折会重复插按钮、并干扰滚动锚定。
+       ③ 渲染落点游离（isDetachedRenderTarget）：节点还没进文档，量不到 DOM、也不该动。 */
+    try {
+        if (!keepBatchIndex && !sess._replaying && !sess._skipScroll
+            && typeof isDetachedRenderTarget === 'function' && !isDetachedRenderTarget(sess)
+            && liveFoldRow && liveFoldRow.classList) {
+            liveFoldRow.classList.remove('agent-live');
+            var tcOff = false;
+            try { tcOff = (typeof localStorage !== 'undefined') && localStorage.getItem('gourd.turnCompact') === '0'; } catch (tcLsErr) { /* 隐私模式忽略 */ }
+            var tcApi = (typeof window !== 'undefined') ? window.GourdTurnCompact : null;
+            if (tcApi && tcOff && liveFoldRow.querySelector) {
+                /* 关掉偏好时撤销本轮已折叠的标记（与 app-history.js 回放接线同一口径），
+                   否则屏幕上仍留着上一轮的摘要按钮 = 「一键回退」名不副实。 */
+                var liveBubbleOff = liveFoldRow.querySelector('.msg-bubble');
+                if (liveBubbleOff && tcApi.clearTurnCompact) tcApi.clearTurnCompact(liveBubbleOff);
+            } else if (tcApi && !tcOff && liveFoldRow.querySelector) {
+                var liveBubble = liveFoldRow.querySelector('.msg-bubble');
+                if (liveBubble) {
+                    tcApi.compactBubble(liveBubble, {
+                        translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t) ? function (k) { return GourdI18n.t(k); } : null
+                    });
+                }
+            }
+        }
+    } catch (tcLiveErr) {
+        // 纯展示增强：任何异常都不许影响本轮消息本身的可用性
+        console.error('[finishStream] 运行态收口折叠失败:', tcLiveErr);
+    }
 
     /* DOM 收尾链异常防护：本段（purgeEmptyMdBlocks 起至函数末尾）任何一步抛异常，
      * 都不得再让全局按钮态与会话态背离——异常只留痕，尾部不再有必须执行的复位。 */

@@ -83,7 +83,12 @@ function buildContextModel(chunk) {
         totalOutputTokens: Math.round(args.totalOutputTokens || 0),
         totalMessages: Math.round(args.totalMessages || 0),
         totalCacheCreation: Math.round(args.totalCacheCreation || 0),
-        totalCacheRead: Math.round(args.totalCacheRead || 0)
+        totalCacheRead: Math.round(args.totalCacheRead || 0),
+        // 输出速度（TPS）：Rust 内核把本轮累计「解码时长 / 解码 token」注入 context_size 帧的
+        // args（与累计用量同源、同样参与历史回放与 createdAt 单调门禁）。旧帧无此字段时为 0，
+        // 该行整行省略，不拿 outputTokens ÷ elapsedMs 顶替（口径不同，会伪装成同一个指标）。
+        generationMs: Math.round(args.generationMs || 0),
+        generatedTokens: Math.round(args.generatedTokens || 0)
     };
 }
 
@@ -141,6 +146,23 @@ function ctxLocalTurnAnchor(chunk, m) {
     var createdAt = (chunk && typeof chunk.createdAt === 'number') ? chunk.createdAt : 0;
     if (createdAt <= m.turnStartMs) return m.turnStartMs;
     return Date.now() - (createdAt - m.turnStartMs);
+}
+
+/**
+ * 输出速度（TPS）文本，口径与 app-message.js 的 traceTpsText 完全一致。
+ * <p>本模块自带一份而非跨文件引用：app-context.js 需能独立加载/独立沙箱测试，
+ * 且两者都是一行级纯函数，重复成本远低于耦合风险（同 ctxFmtElapsed 的取舍）。</p>
+ * <p>分母是内核累计的【解码段时长】、分子是【同一批解码段产出的 token】，
+ * 不含工具执行/审批等待；缺任一字段或非正数时返回空串让该行整行省略。</p>
+ * @param {Object} m - buildContextModel 归一后的展示模型
+ * @returns {string} 形如 "80 tokens/s"；无数据时空串
+ */
+function ctxTpsText(m) {
+    if (!(m.generatedTokens > 0) || !(m.generationMs > 0)) return '';
+    var tps = m.generatedTokens / (m.generationMs / 1000);
+    if (!isFinite(tps) || !(tps > 0)) return '';
+    var num = tps >= 100 ? Math.round(tps) : Math.round(tps * 10) / 10;
+    return GourdI18n.t('chat.tps_unit').replace('{n}', num);
 }
 
 /** 明细卡单行。 */
@@ -212,6 +234,13 @@ function buildContextRows(chunk, opts) {
         // 必须走 ctxLocalTurnAnchor 校准：直接 Date.now()-turnStartMs 会把时钟偏移算成耗时
         elapsedTxt = ctxFmtElapsed(Date.now() - ctxLocalTurnAnchor(chunk, m));
     }
+    // 输出速度：与累计用量同源的解码速率，放在用量行之后、任务耗时之前。
+    // 复用 chat.output_tps / chat.tps_unit（12 语言包已有译文），不新增 i18n 键。
+    var tpsTxt = ctxTpsText(m);
+    if (tpsTxt) {
+        html += ctxRow(GourdI18n.t('chat.output_tps'), tpsTxt);
+    }
+
     if (elapsedTxt) {
         html += ctxElapsedRow(elapsedTxt);
     }
@@ -383,6 +412,10 @@ function noteContextTurnStart(sess, turnStartMs) {
     var args = {};
     for (var k in (c.args || {})) { args[k] = c.args[k]; }
     args.turnStartMs = turnStartMs;
+    // 新轮起步时，旧快照里的解码速率属于上一轮：不随 lastContextChunk 复制，
+    // 等新一轮首个 context_size 帧带权威值后再显示，避免「新一轮显示旧速率」。
+    delete args.generationMs;
+    delete args.generatedTokens;
     renderContextMeter({ args: args, text: c.text, totalTokens: c.totalTokens,
         inputTokens: c.inputTokens, outputTokens: c.outputTokens,
         cacheReadTokens: c.cacheReadTokens, cacheCreationTokens: c.cacheCreationTokens,

@@ -48,8 +48,8 @@ import java.util.Map;
 public class AskUserInterceptor extends AbsReActInterceptor {
 
     /**
-     * 参数非法时回交模型的错误结果（{@code __ERROR__} 前缀与 {@code ActionTask#executeTool} 的
-     * Schema 自愈口径一致，模型已被训练成据此重试）。
+     * 参数非法时回交模型的错误结果（不再使用文本前缀判成败，改用结构化 {@code failed} 标识；
+     * 文案与 {@code ActionTask#executeTool} 的 Schema 自愈口径一致，模型已被训练成据此重试）。
      *
      * <p><b>为什么非法参数绝不能挂起</b>：题面为空时前端会隐藏问答卡，用户根本看不到、也点不到回答入口；
      * 而挂起是「等外部事件唤醒」的单向状态，此时挂起就等于「后台无限死等 + 无人可答」——会话永久卡死，
@@ -57,7 +57,7 @@ public class AskUserInterceptor extends AbsReActInterceptor {
      *
      * <p>措辞给出了正确调用形态与「无需作答就别调」的退路，避免模型拿到错误后原样重放同一份坏参数。</p>
      */
-    static final String INVALID_QUESTIONS_RESULT = "__ERROR__ Invalid arguments for [" + AskUserTool.TOOL_NAME
+    static final String INVALID_QUESTIONS_RESULT = "Invalid arguments for [" + AskUserTool.TOOL_NAME
             + "]: `questions` 为空，或所有条目的 `header` 均为空白，问答卡无法渲染，任务未挂起。"
             + " 请重新调用并至少传入一个 header 非空的问题，格式："
             + "{\"questions\":[{\"header\":\"问题文本\",\"options\":[{\"label\":\"候选项\"}]}]}；"
@@ -91,6 +91,8 @@ public class AskUserInterceptor extends AbsReActInterceptor {
             // 一旦挂起，本轮执行流立即中断，后面不再有任何可以补救的落点。
             if (!hasRenderableQuestion(questions)) {
                 toolExchanger.setResult(INVALID_QUESTIONS_RESULT);
+                // 本路径是回填文本，不经过 executeTool 的 ToolResult.error，须显式置结构化失败标识
+                toolExchanger.setFailed(true);
                 return;
             }
 
