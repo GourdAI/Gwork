@@ -493,6 +493,12 @@
                                                           "intent_chain_desc":  "壓縮時保留使用者歷輪提問的精簡索引（成本極低），防止多輪對話中圍著早已完成的舊目標打轉",
                                                           "hint":  "歷史視窗：壓縮時始終保護最後多少則訊息完整不壓縮\n單輪輸出預留：為模型下一輪回覆預留的絕對空間，觸發點 =「模型視窗 − 該預留 − 回合緩衝」\n壓縮觸發比例：僅用於「提前」觸發（取兩者較小值），100 表示不額外提前\n壓縮目標水位：決定一次壓到多深，值越高壓得越淺、觸發越頻繁"
                                                       },
+                                     "identity": {
+                                       "title": "助手身份",
+                                       "assistant_name": "助手名稱",
+                                       "assistant_name_placeholder": "預設 GWork",
+                                       "hint": "顯示在每條助手回覆的頭部（頭像 + 名稱），預設 GWork\n清空儲存即恢復預設名稱"
+                                     },
                                      "skills":  {
                                                           "title":  "技能清單預算",
                                                           "budget_fraction":  "清單預算(視窗%)",
@@ -993,8 +999,16 @@
     "turn_tools":  "次工具呼叫",
     "turn_thinking":  "段思考",
     "turn_agents":  "次子代理",
-    "turn_thought_only":  "已思考",
+    "turn_done": "已完成",
+    "batch_running": "正在執行中",
+    "batch_done": "已處理",
+    "turn_stopped": "已停止",
+    "turn_suspended": "已掛起",
     "turn_process_texts":  "段過程",
+    "turn_tools_one": "次工具呼叫",
+    "turn_thinking_one": "段思考",
+    "turn_agents_one": "次子代理",
+    "turn_process_texts_one": "段過程",
                  "phase_thinking":  "思考中",
                  "phase_text":  "輸出中",
                  "phase_waiting":  "等待回應",

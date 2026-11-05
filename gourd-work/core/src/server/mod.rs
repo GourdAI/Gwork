@@ -2557,6 +2557,12 @@ async fn run_react_session(
     let Some(model) = model else {
         let frame = Frame::error(&session_id, "No model configured. Add a model in Settings.");
         broadcast_frame(&state, &session_id, frame).await;
+        // This early return bypasses `ReActAgent::run`, so its single terminal
+        // gate cannot cover it. The frontend leaves its streaming state ONLY on
+        // `done` — without this the composer stays locked in "thinking" after
+        // the error, exactly the "task ended unfinished" symptom.
+        let done = Frame::done(&session_id).run(&run_id);
+        broadcast_frame(&state, &session_id, done).await;
         state.running.lock().await.remove(&session_id);
         return;
     };
@@ -3786,6 +3792,9 @@ fn general_payload(settings: &Settings) -> serde_json::Value {
             "skillListingMaxDescChars": crate::skills::normalize_max_desc_chars(
                 settings.general.skill_listing_max_desc_chars as usize,
             ),
+            // Assistant display name for the chat header. `null` = not set;
+            // the frontend falls back to the built-in "GWork".
+            "assistantName": settings.general.assistant_name.clone(),
             // Whether Basic Auth is enforced, and the username. The password is
             // deliberately **never** returned.
             //
@@ -3837,6 +3846,10 @@ struct GeneralSaveBody {
     skill_listing_budget_fraction: Option<u32>,
     #[serde(rename = "skillListingMaxDescChars")]
     skill_listing_max_desc_chars: Option<u32>,
+    /// Assistant display name. `Option<Option<String>>`: absent = leave
+    /// alone, explicit null or blank = clear back to the built-in default.
+    #[serde(rename = "assistantName", default, deserialize_with = "double_option")]
+    assistant_name: Option<Option<String>>,
     /// Basic Auth credentials.
     ///
     /// `Option<Option<String>>`, not `Option<String>`: the two nesting levels
@@ -3914,6 +3927,13 @@ async fn settings_general_save(
             settings.general.skill_listing_max_desc_chars =
                 crate::skills::normalize_max_desc_chars(v as usize) as u32;
         }
+        // Trim and cap the display name: it lands in a fixed-width header
+        // row, and a pasted paragraph would stretch it. Blank = clear.
+        if let Some(v) = body.assistant_name {
+            settings.general.assistant_name = v
+                .map(|s| s.trim().chars().take(32).collect::<String>())
+                .filter(|s| !s.is_empty());
+        }
         // Credentials: outer `Some` = the key was in the body; inner `None` =
         // an explicit null = clear it. An empty/whitespace string also clears,
         // because `BasicAuth::is_enforced` treats a blank half as "not
@@ -3982,6 +4002,7 @@ fn general_patch(settings: &Settings, loaded: bool) -> serde_json::Value {
         // defect the `autoRethink` comment above records.
         "skillListingBudgetFraction": settings.general.skill_listing_budget_fraction,
         "skillListingMaxDescChars": settings.general.skill_listing_max_desc_chars,
+        "assistantName": settings.general.assistant_name.clone(),
     });
 
     // Basic Auth credentials: written only on a good load. See the doc comment.

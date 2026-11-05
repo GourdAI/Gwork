@@ -501,6 +501,12 @@
                                                           "intent_chain_desc":  "Conserva al comprimir un índice compacto de las peticiones anteriores del usuario (coste muy bajo), para que el agente no siga girando en torno a objetivos ya completados",
                                                           "hint":  "Ventana de historial: cuántos mensajes finales permanecen siempre sin comprimir.\nSalida reservada: margen absoluto para la siguiente respuesta del modelo; punto de activación = ventana del modelo − reserva − búfer de turno.\nUmbral de compresión: solo adelanta la activación (se aplica el menor de los dos); 100 significa sin adelanto adicional.\nObjetivo de compresión: qué tan profunda es cada compresión — cuanto mayor sea, más superficial será y más frecuentes las activaciones"
                                                       },
+                                     "identity": {
+                                       "title": "Identidad del asistente",
+                                       "assistant_name": "Nombre del asistente",
+                                       "assistant_name_placeholder": "Predeterminado GWork",
+                                       "hint": "Se muestra en la cabecera de cada respuesta del asistente (avatar + nombre); predeterminado GWork\nVaciar y guardar restaura el nombre predeterminado"
+                                     },
                                      "skills":  {
                                                           "title":  "Presupuesto de la lista de skills",
                                                           "budget_fraction":  "Presupuesto (% de la ventana)",
@@ -993,8 +999,16 @@
     "turn_tools":  "llamadas a herramientas",
     "turn_thinking":  "bloques de razonamiento",
     "turn_agents":  "subagentes",
-    "turn_thought_only":  "Pensando un rato",
+    "turn_done": "Completado",
+    "batch_running": "Ejecutando",
+    "batch_done": "Procesado",
+    "turn_stopped": "Detenido",
+    "turn_suspended": "Suspendido",
     "turn_process_texts":  "pasos del proceso",
+    "turn_tools_one": "llamada a herramienta",
+    "turn_thinking_one": "bloque de razonamiento",
+    "turn_agents_one": "subagente",
+    "turn_process_texts_one": "paso del proceso",
                  "phase_thinking":  "Pensando",
                  "phase_text":  "Escribiendo",
                  "phase_waiting":  "Esperando respuesta",

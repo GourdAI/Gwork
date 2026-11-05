@@ -48,6 +48,10 @@ function el(tag, classes, opts) {
         querySelectorAll(sel) { return queryAll(node, sel); },
         appendChild(c) { c.parentNode = node; node.children.push(c); return c; },
         insertBefore(c, ref) {
+            // 与真实 DOM 同语义：对已在文档中的节点 insertBefore = 移动（先摘原位置）。
+            // 缺这一步会让「盖子归位」类用例插出重复节点（2026-11 自审补）。
+            const old = node.children.indexOf(c);
+            if (old >= 0) node.children.splice(old, 1);
             c.parentNode = node;
             const i = ref ? node.children.indexOf(ref) : -1;
             if (i < 0) node.children.push(c); else node.children.splice(i, 0, c);
@@ -177,16 +181,58 @@ test('buildSummary：批次组按成员数计，三类统计与全零回落', ()
     ]);
     assert.deepEqual(s, { tools: 4, thinking: 1, agents: 1, texts: 0 });
     const txt = api.summaryText(s, null);
+    assert.match(txt, /^已完成/, '状态词恒在首位（WorkBuddy 状态行形态）');
     assert.match(txt, /4 次工具调用/);
     assert.match(txt, /1 段思考/);
     assert.match(txt, /1 次子代理/);
-    assert.equal(api.summaryText({ tools: 0, thinking: 0, agents: 0 }, null), '已思考');
+    // 全零统计不再回落「已思考」：状态词本身即摘要主体（「已完成」）
+    assert.equal(api.summaryText({ tools: 0, thinking: 0, agents: 0, texts: 0 }, null), '已完成');
 });
 
 test('summaryText 走 i18n，缺键时回落中文而不显示裸 key', () => {
     const t = (k) => ({ 'chat.turn_tools': 'tool calls', 'chat.turn_thinking': 'thoughts' }[k] || k);
-    assert.equal(api.summaryText({ tools: 2, thinking: 1, agents: 0 }, t), '2 tool calls · 1 thoughts');
-    assert.equal(api.summaryText({ tools: 1, thinking: 0, agents: 1 }, () => 'chat.turn_agents'), '1 次工具调用 · 1 次子代理');
+    // n=1 走单数键 chat.turn_thinking_one：mock 未提供 → 回落中文量词（中文单复数同形）
+    assert.equal(api.summaryText({ tools: 2, thinking: 1, agents: 0 }, t), '已完成 · 2 tool calls · 1 段思考');
+    assert.equal(api.summaryText({ tools: 1, thinking: 0, agents: 1 }, () => 'chat.turn_agents'), '已完成 · 1 次工具调用 · 1 次子代理');
+});
+
+test('★ 计数词单复数：n=1 用 _one 键，n>1 用复数键，缺单数键回落中文', () => {
+    const t = (k) => ({
+        'chat.turn_tools': 'tool calls', 'chat.turn_tools_one': 'tool call',
+        'chat.turn_thinking': 'thinking blocks', 'chat.turn_thinking_one': 'thinking block'
+    }[k] || k);
+    assert.equal(api.summaryText({ tools: 1, thinking: 1, agents: 0 }, t), '已完成 · 1 tool call · 1 thinking block');
+    assert.equal(api.summaryText({ tools: 2, thinking: 1, agents: 0 }, t), '已完成 · 2 tool calls · 1 thinking block');
+    // 语言包缺 _one 键（旧包/异常）：回落中文量词，不显示裸 key、不显示复数误形
+    const tNoOne = (k) => ({ 'chat.turn_tools': 'tool calls' }[k] || k);
+    assert.equal(api.summaryText({ tools: 1, thinking: 0, agents: 0 }, tNoOne), '已完成 · 1 次工具调用');
+});
+
+test('★ 摘要状态词+耗时：meta 驱动，旧历史无 meta 回落「已完成」无耗时', () => {
+    const s = { tools: 3, thinking: 0, agents: 0, texts: 0 };
+    assert.equal(api.summaryText(s, null, { elapsedMs: 14200, status: 'done' }), '已完成 14s · 3 次工具调用');
+    assert.equal(api.summaryText(s, null, { elapsedMs: 400, status: 'done' }), '已完成 <1s · 3 次工具调用', '亚秒不写 0s（四舍五入口径与 trace 徽标一致）');
+    assert.equal(api.summaryText(s, null, { elapsedMs: 95000, status: 'stopped' }), '已停止 1min 35s · 3 次工具调用');
+    assert.equal(api.summaryText(s, null, { status: 'suspended' }), '已挂起 · 3 次工具调用', '无耗时不编造数字');
+    assert.equal(api.summaryText(s, null), '已完成 · 3 次工具调用', '旧历史无 meta 回落');
+    assert.equal(api.summaryText(s, null, { elapsedMs: -5 }), '已完成 · 3 次工具调用', '负值忽略');
+    assert.equal(api.formatElapsed(3600000), '1h');
+    assert.equal(api.formatElapsed(3661000), '1h 1min 1s');
+});
+
+test('★ readTurnMeta 从 trace 徽标读 data 属性，无徽标/脏数据回落 {}', () => {
+    const b = bubble([{ cls: ['md-content'], text: 'x' }]);
+    assert.deepEqual(api.readTurnMeta(b), {});
+    const badge = el('span', ['msg-trace']);
+    badge.setAttribute('data-elapsed-ms', '14200');
+    badge.setAttribute('data-turn-status', 'stopped');
+    b.appendChild(badge);
+    assert.deepEqual(api.readTurnMeta(b), { elapsedMs: 14200, status: 'stopped' });
+    const bad = el('span', ['msg-trace']);
+    bad.setAttribute('data-elapsed-ms', 'abc');
+    const b2 = bubble([{ cls: ['md-content'], text: 'x' }]);
+    b2.appendChild(bad);
+    assert.deepEqual(api.readTurnMeta(b2), {}, '非数字耗时不得污染摘要');
 });
 
 test('applyTurnCompact：逐轮独立 —— 非最后一轮必折，最后一轮看 lastTurnClosed', () => {
@@ -233,7 +279,7 @@ test('compactBubble 幂等：重复执行不重复插按钮 / 不重复计数', 
     assert.equal(api.compactBubble(b, {}), true);
     const first = b.querySelector('.turn-compact-toggle');
     assert.ok(first);
-    assert.equal(first.textContent, '2 次工具调用 · 1 段思考');
+    assert.equal(first.textContent, '已完成 · 2 次工具调用 · 1 段思考');
     assert.equal(api.compactBubble(b, {}), true);
     assert.equal(b.querySelectorAll('.turn-compact-toggle').length, 1, '只有一个摘要按钮');
     assert.equal(b.querySelector('.turn-compact-toggle'), first, '复用同一个按钮节点');
@@ -385,10 +431,10 @@ test('★ 摘要按钮记录 stats 供语言切换重译（refreshTurnCompact �
     const raw = toggle.getAttribute('data-turn-compact-stats');
     assert.ok(raw, '必须记录统计维度而非写死的文案');
     assert.deepEqual(JSON.parse(raw), { tools: 2, thinking: 0, agents: 0, texts: 0 });
-    assert.equal(toggle.textContent, '2 次工具调用');
+    assert.equal(toggle.textContent, '已完成 · 2 次工具调用');
     // 切成英文翻译函数重译
     api.refreshTurnCompact(b, (k) => ({ 'chat.turn_tools': 'tool calls' }[k] || k));
-    assert.equal(toggle.textContent, '2 tool calls', '新语言生效');
+    assert.equal(toggle.textContent, '已完成 · 2 tool calls', '新语言生效');
     assert.equal(b.querySelectorAll('.turn-compact-toggle').length, 1, '重译不插按钮');
     assert.equal(b.querySelectorAll('[data-turn-process]').length, 2, '重译不动过程行标记');
 });
@@ -420,3 +466,107 @@ test('★ 关掉偏好后回放接线调用 clearTurnCompact（静态接线守�
 function buildProcessStats(processEls) {
     return api.buildSummary(processEls);
 }
+
+/* 回归：用户报「折叠展开的时候内容显示到上面去了」（两轮）。
+   摘要行是 accordion 的【盖子】：必须位于过程组【最前】，展开时过程内容在盖子
+   下方【向下】展开（WorkBuddy「已完成 14s ›」同向）。
+   两次错位史：① 旧实现找「第一个有文本的 md-content」命中过程正文；
+   ② 上一轮改成插在【最终正文】之前 → 盖子落到过程组【尾部】，展开后全部过程行
+   显示在盖子上方 = 用户截图现象。
+   不变量：盖子之前不得存在任何 [data-turn-process] 行；最终正文在所有过程行之后。 */
+function assertLidOnTop(b, toggle) {
+    const kids = b.children;
+    const idxToggle = kids.indexOf(toggle);
+    assert.ok(idxToggle >= 0, '应存在摘要按钮');
+    for (let i = 0; i < idxToggle; i++) {
+        assert.equal(kids[i].getAttribute('data-turn-process'), null,
+            '盖子之前不得出现过程行（否则展开时内容显示到上面去了）');
+    }
+    let seenProcess = false;
+    for (let i = idxToggle + 1; i < kids.length; i++) {
+        const isProc = kids[i].getAttribute('data-turn-process') !== null;
+        if (isProc) seenProcess = true;
+        else if (seenProcess && kids[i]._classes.has('md-content')) {
+            // 过程组之后的 md-content 只允许是最终正文（无折叠标记）
+            assert.equal(kids[i].getAttribute('data-turn-process'), null);
+        }
+    }
+    return idxToggle;
+}
+
+test('★ 摘要盖子在过程组最前：展开内容向下展开，不得显示到上面', () => {
+    const b = bubble([
+        { cls: ['md-content'], text: '过程说明：我先看一下目录' },
+        { cls: ['tool-card'] },
+        { cls: ['thinking-block'] },
+        { cls: ['md-content'], text: 'FINAL-ANSWER 已优化完成' },
+        { cls: ['msg-actions'] }
+    ]);
+    const kids0 = b.children.slice();
+    const finalText = kids0[3];
+    const processText = kids0[0];
+    assert.equal(api.compactBubble(b, {}), true);
+    const toggle = b.querySelector('.turn-compact-toggle');
+    const idxToggle = assertLidOnTop(b, toggle);
+    assert.equal(b.children[idxToggle + 1], processText, '盖子必须紧贴第一个过程行');
+    assert.ok(b.children.indexOf(finalText) > b.children.indexOf(processText),
+        '最终正文必须在过程行之后');
+    assert.equal(finalText.getAttribute('data-turn-process'), null, '最终正文不得被折叠');
+    assert.ok(processText.getAttribute('data-turn-process'), '过程正文应被折叠');
+    // 展开态顺序：盖子 → 过程行 → 最终正文（模拟用户点击后的视觉顺序）
+    toggle.click();
+    assert.ok(b._classes.has('turn-compact-open'));
+    assertLidOnTop(b, toggle);
+});
+
+test('★ 只有一段正文时盖子同样在过程组最前（anchor 退化回归保护）', () => {
+    const b = bubble([
+        { cls: ['tool-card'] },
+        { cls: ['md-content'], text: '唯一的最终答案' }
+    ]);
+    const finalText = b.children[1];
+    api.compactBubble(b, {});
+    const toggle = b.querySelector('.turn-compact-toggle');
+    assertLidOnTop(b, toggle);
+    assert.equal(b.children.indexOf(toggle), 0, '盖子在气泡首位（过程组最前）');
+    assert.ok(b.children.indexOf(finalText) > b.children.indexOf(toggle));
+});
+
+test('★ 运行态样式接线：legacy 历史行摘 agent-live、resume 末轮补挂（静态守护）', () => {
+    const hist = fs.readFileSync(path.join(__dirname, '..', 'ui', 'js', 'app-history.js'), 'utf8');
+    // B7：legacy 回退路径从不置 _replaying（门禁语义），ensureAssistantBubble 会给历史行
+    // 挂上「本轮正在跑」样式且无人摘除 —— loadDone 必须整批摘掉。
+    assert.match(hist, /querySelectorAll\('\.msg-row\.assistant\.agent-live'\)/,
+        'legacy loadDone 必须摘除历史行的 agent-live');
+    assert.match(hist, /classList\.remove\('agent-live'\)/, '摘除必须真调用 remove');
+    // B8：回放 resume 的进行中末轮建于 _replaying 期（不挂类），恢复后实时帧续写同一行
+    // 且不再重建 —— replayDoneCore 必须补挂，否则该轮实时过程行失去扁平轨迹样式。
+    // 逐字钉住条件行：宽松「两片段邻近」断言会被 `if (false && ...)` 前缀绕过
+    // （2026-11 变异 M4 实测 SURVIVED 后收紧）。
+    assert.match(hist, /if \(resumeRow && resumeRow\.classList\) resumeRow\.classList\.add\('agent-live'\);/,
+        'resume 分支必须给末轮行补挂 agent-live');
+});
+
+test('★ 缝合搬移后重跑折叠：盖子必须归位到过程组最前（不得留在组中部）', () => {
+    // 模拟 app-history.js stitchPrependedRunRows：被删行气泡的内容子节点（含已插好的盖子）
+    // 被搬进存活行气泡中部。重跑 compactBubble 后盖子必须重新紧贴第一个过程行。
+    const b = bubble([
+        { cls: ['md-content'], text: '过程A' },
+        { cls: ['tool-card'] },
+        { cls: ['md-content'], text: 'FINAL 最终答案' }
+    ]);
+    assert.equal(api.compactBubble(b, {}), true);
+    const toggle = b.querySelector('.turn-compact-toggle');
+    assert.equal(b.children.indexOf(toggle), 0);
+    // 缝合：把盖子从首位搬到过程行之后（= 搬移循环的真实效果）
+    const procA = b.children[1];
+    b.insertBefore(toggle, b.children[3]); // 移到 FINAL 之前、过程组之后
+    assert.ok(b.children.indexOf(toggle) > b.children.indexOf(procA), '前置条件：盖子已错位到组中部');
+    // 重跑折叠（回放 prepend 后的统一折叠路径）
+    assert.equal(api.compactBubble(b, {}), true);
+    assertLidOnTop(b, toggle);
+    assert.equal(b.children[b.children.indexOf(toggle) + 1], procA, '归位后盖子紧贴第一个过程行');
+    // 同一个 toggle 实例（监听器保留）：点击仍能展开
+    toggle.click();
+    assert.ok(b._classes.has('turn-compact-open'));
+});

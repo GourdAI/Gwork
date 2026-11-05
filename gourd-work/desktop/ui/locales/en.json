@@ -501,6 +501,12 @@
                                                           "intent_chain_desc":  "Keeps a compact index of the user\u0027s earlier requests when compressing (very low cost), so the agent stops circling back to goals that were already completed",
                                                           "hint":  "History window: how many trailing messages always stay uncompressed.\nReserved output: absolute headroom for the model\u0027s next reply; trigger point = model window − reserved output − turn buffer.\nCompression trigger: only fires the trigger EARLIER (the smaller of the two applies); 100 means no extra earlying.\nCompression target: how deep each compaction goes — higher means shallower compaction and more frequent triggers"
                                                       },
+                                     "identity": {
+                                       "title": "Assistant identity",
+                                       "assistant_name": "Assistant name",
+                                       "assistant_name_placeholder": "Default GWork",
+                                       "hint": "Shown in the header of every assistant reply (avatar + name); defaults to GWork\nClear and save to restore the default name"
+                                     },
                                      "skills":  {
                                                           "title":  "Skill Listing Budget",
                                                           "budget_fraction":  "Listing budget (% of window)",
@@ -993,8 +999,16 @@
     "turn_tools":  "tool calls",
     "turn_thinking":  "thinking blocks",
     "turn_agents":  "subagents",
-    "turn_thought_only":  "Thought for a while",
+    "turn_done": "Completed",
+    "batch_running": "Running",
+    "batch_done": "Processed",
+    "turn_stopped": "Stopped",
+    "turn_suspended": "Suspended",
     "turn_process_texts":  "process steps",
+    "turn_tools_one": "tool call",
+    "turn_thinking_one": "thinking block",
+    "turn_agents_one": "subagent",
+    "turn_process_texts_one": "process step",
                  "phase_thinking":  "Thinking",
                  "phase_text":  "Writing",
                  "phase_waiting":  "Waiting for response",

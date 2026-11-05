@@ -442,6 +442,12 @@
         "intent_chain_desc": "压缩时保留用户历轮提问的精简索引（成本极低），防止多轮对话中围着早已完成的旧目标打转",
         "hint": "历史窗口：压缩时始终保护最后多少条消息完整不压缩\n单轮输出预留：为模型下一轮回复预留的绝对空间，触发点 =「模型窗口 − 该预留 − 回合缓冲」\n压缩触发比例：仅用于「提前」触发（取两者较小值），100 表示不额外提前\n压缩目标水位：决定一次压到多深，值越高压得越浅、触发越频繁"
       },
+      "identity": {
+        "title": "助手身份",
+        "assistant_name": "助手名称",
+        "assistant_name_placeholder": "默认 GWork",
+        "hint": "显示在每条助手回复的头部（头像 + 名称），默认 GWork\n清空保存即恢复默认名称"
+      },
       "skills": {
         "title": "技能清单预算",
         "budget_fraction": "清单预算(窗口%)",
@@ -934,8 +940,16 @@
     "turn_tools": "次工具调用",
     "turn_thinking": "段思考",
     "turn_agents": "次子代理",
-    "turn_thought_only": "已思考",
+    "turn_done": "已完成",
+    "batch_running": "正在执行中",
+    "batch_done": "已处理",
+    "turn_stopped": "已停止",
+    "turn_suspended": "已挂起",
     "turn_process_texts":  "段过程",
+    "turn_tools_one": "次工具调用",
+    "turn_thinking_one": "段思考",
+    "turn_agents_one": "次子代理",
+    "turn_process_texts_one": "段过程",
     "phase_thinking": "思考中",
     "phase_text": "输出中",
     "phase_waiting": "等待响应",

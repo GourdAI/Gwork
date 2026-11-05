@@ -1250,15 +1250,23 @@ function finishStream(sess, opts) {
             var tcOff = false;
             try { tcOff = (typeof localStorage !== 'undefined') && localStorage.getItem('gourd.turnCompact') === '0'; } catch (tcLsErr) { /* 隐私模式忽略 */ }
             var tcApi = (typeof window !== 'undefined') ? window.GourdTurnCompact : null;
+            var tbApi = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
             if (tcApi && tcOff && liveFoldRow.querySelector) {
-                /* 关掉偏好时撤销本轮已折叠的标记（与 app-history.js 回放接线同一口径），
-                   否则屏幕上仍留着上一轮的摘要按钮 = 「一键回退」名不副实。 */
+                /* 撤销本轮折叠标记与批次盖子（与 app-history.js 回放接线同一口径） */
                 var liveBubbleOff = liveFoldRow.querySelector('.msg-bubble');
                 if (liveBubbleOff && tcApi.clearTurnCompact) tcApi.clearTurnCompact(liveBubbleOff);
-            } else if (tcApi && !tcOff && liveFoldRow.querySelector) {
+                if (liveBubbleOff && tbApi && tbApi.clearBatch) tbApi.clearBatch(liveBubbleOff);
+            } else if (!tcOff && liveFoldRow.querySelector) {
                 var liveBubble = liveFoldRow.querySelector('.msg-bubble');
                 if (liveBubble) {
-                    tcApi.compactBubble(liveBubble, {
+                    /* 轮结束 = 全部运行批次收口（「已处理」+ 成员折叠）。
+                       必须在 turn-compact 之前：compact 的分类要看到已收口的盖子形态。
+                       【不挂在 tcApi 分支下】批次收口是运行态自身的语义，turn-compact
+                       模块缺失时批次也必须收口，否则盖子永远停在「正在执行中」。 */
+                    if (tbApi && tbApi.closeBatchFor) {
+                        try { tbApi.closeBatchFor(liveBubble); } catch (tbErr) { /* 展示增强 */ }
+                    }
+                    if (tcApi) tcApi.compactBubble(liveBubble, {
                         translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t) ? function (k) { return GourdI18n.t(k); } : null
                     });
                 }

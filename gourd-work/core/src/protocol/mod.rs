@@ -99,6 +99,11 @@ pub struct ContextSizePayload {
     pub generation_ms: u64,
     /// Completion tokens produced in those same timed decode segments.
     pub generated_tokens: u64,
+    /// Time to first token (ms): elapsed from the run's start to the first
+    /// visible model output (Java `TurnTimer.finish` / `onVisibleOutput`).
+    /// `None` = the run never produced a visible delta; the wire key is then
+    /// omitted entirely rather than fabricating a 0 ms latency.
+    pub ttft_ms: Option<u64>,
 }
 
 impl Frame {
@@ -512,6 +517,13 @@ impl Frame {
             args.insert("generationMs".into(), serde_json::json!(p.generation_ms));
             args.insert("generatedTokens".into(), serde_json::json!(p.generated_tokens));
         }
+        // Time to first token (Java TurnTimer.finish). Rides in `args` alongside the
+        // decode-speed pair so it inherits history replay + the frontend's monotonic
+        // createdAt gate with no extra per-session state. `None` (no visible output
+        // this run) omits the key instead of reporting a fake 0 ms.
+        if let Some(ttft) = p.ttft_ms {
+            args.insert("ttftMs".into(), serde_json::json!(ttft));
+        }
         f.extra("args", serde_json::Value::Object(args))
     }
 
@@ -902,6 +914,7 @@ mod tests {
             total_messages: 7,
             generation_ms: 4_000,
             generated_tokens: 320,
+            ttft_ms: Some(1_690),
         };
         let v: serde_json::Value = serde_json::from_str(&Frame::context_size("work-x", &p).to_json()).unwrap();
         assert_eq!(v["type"], "context_size");
@@ -924,6 +937,7 @@ mod tests {
         assert_eq!(args["totalMessages"], 7);
         assert_eq!(args["generationMs"], 4_000);
         assert_eq!(args["generatedTokens"], 320);
+        assert_eq!(args["ttftMs"], 1_690);
     }
 
     /// Zero-ledger frames must omit the cumulative keys so the frontend falls
@@ -944,6 +958,29 @@ mod tests {
         assert!(!args.contains_key("turnStartMs"));
         assert!(!args.contains_key("generationMs"));
         assert!(!args.contains_key("generatedTokens"));
+        assert!(!args.contains_key("ttftMs"));
+    }
+
+    /// A run with no visible output must not report a fabricated 0 ms TTFT, while
+    /// a real first-token delay is carried verbatim (Java `TurnTimer.finish`).
+    #[test]
+    fn context_size_ttft_only_when_a_visible_delta_existed() {
+        let none_frame: serde_json::Value = serde_json::from_str(
+            &Frame::context_size("work-x", &ContextSizePayload { ttft_ms: None, ..Default::default() }).to_json(),
+        )
+        .unwrap();
+        assert!(!none_frame["args"].as_object().unwrap().contains_key("ttftMs"));
+
+        let some_frame: serde_json::Value = serde_json::from_str(
+            &Frame::context_size(
+                "work-x",
+                &ContextSizePayload { ttft_ms: Some(0), ..Default::default() },
+            )
+            .to_json(),
+        )
+        .unwrap();
+        // An instant first token is a legitimate 0 ms, distinct from "no data".
+        assert_eq!(some_frame["args"]["ttftMs"], 0);
     }
 
     /// Wire-contract guard: the trace frame must carry the decode-speed pair

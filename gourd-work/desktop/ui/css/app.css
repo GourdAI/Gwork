@@ -990,33 +990,22 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 /* Msg Time */
 .msg-time { font-size: 11px; color: var(--text-secondary); opacity: 0.55; line-height: 1.2; display: inline-block; vertical-align: top; }
 .msg-row.user .msg-time { text-align: right; }
+
+/* ---- 助手身份头（头像 + 名称，对标 WorkBuddy 消息头）----
+   每条 assistant 行顶部一行；用户行不渲染（骨架只在 ensureAssistantBubble 插入）。
+   头像用品牌 logo.svg 圆形裁切，暗色下反色避免黑块融进背景。 */
+.msg-head { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; }
+.msg-head-avatar { width: 22px; height: 22px; border-radius: 50%; flex: 0 0 auto; display: block; background: var(--bg-secondary, #fff); object-fit: cover; }
+[data-theme="dark"] .msg-head-avatar { filter: invert(1) hue-rotate(180deg); }
+.msg-head-name { font-size: 13px; font-weight: 600; color: var(--text-primary); line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
 .msg-trace { font-size: 11px; color: var(--text-secondary); display: inline-block; line-height: 1.2; pointer-events: none; white-space: nowrap; float: right; vertical-align: top; }
-/* 视觉弱化放在 .trace-item 而非 .msg-trace 容器上：opacity 会整棵子树继承，
-   若加在容器上，悬停展开的耗时详情卡也会被压成半透明且无法用子元素还原。 */
 .msg-trace .trace-item { pointer-events: auto; display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; cursor: default; opacity: 0.5; transition: opacity 0.15s; }
-.msg-trace .trace-item:hover, .msg-trace .trace-item:focus-within { opacity: 1; }
+   .msg-trace .trace-item:hover, .msg-trace .trace-item:focus-within { opacity: 1; }
 .msg-trace .trace-item:first-child { margin-left: 0; }
 .msg-trace .trace-ic { display: inline-flex; align-items: center; opacity: 0.85; line-height: 1; }
 .msg-trace .trace-ic svg { width: 11px; height: 11px; display: block; }
-
-/* ---- 轮次耗时详情卡（悬停 trace 徽标展开）----
-   展示总用时、输出速度（TPS）与首 Token 延迟。数据源为 trace 帧的 elapsedMs/ttftMs/outputTokens，
-   均随会话落盘，历史消息回放同样可展开。 */
-.msg-trace .trace-item.has-pop { position: relative; cursor: help; }
-.trace-pop { position: absolute; bottom: 100%; right: 0; margin-bottom: 6px; display: none; z-index: 60; min-width: 214px; max-width: min(320px, calc(100vw - 32px)); padding: 9px 11px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-input-box); box-shadow: var(--shadow-lg); text-align: left; cursor: default; }
-/* 桥接 6px 间隙：缺了它，鼠标从徽标移向卡片的途中会失去 hover，卡片闪烁消失 */
-.trace-pop::after { content: ''; position: absolute; left: 0; right: 0; bottom: -6px; height: 6px; }
-/* is-open 是触屏/键盘的显式开合态：纯 :hover 在触屏上需要二次点击且无法关闭，
-   键盘用户也无法主动展开；三种触发共用同一套展现规则。 */
-.msg-trace .trace-item.has-pop:hover .trace-pop,
-.msg-trace .trace-item.has-pop:focus-within .trace-pop,
-.msg-trace .trace-item.has-pop.is-open .trace-pop { display: block; }
-.msg-trace .trace-item.has-pop.is-open { opacity: 1; }
-.trace-pop-title { display: flex; align-items: center; gap: 5px; margin-bottom: 7px; font-size: 12px; font-weight: 600; color: var(--text-primary); }
-.trace-pop-title svg { width: 12px; height: 12px; flex-shrink: 0; }
-.trace-pop-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 3px 0; font-size: 12px; }
-.trace-pop-label { color: var(--text-secondary); }
-.trace-pop-value { color: var(--text-primary); font-variant-numeric: tabular-nums; font-weight: 600; }
+/* 耗时详情弹层已移除：总用时 / TPS / 首 Token 延迟统一在底部「上下文用量」明细卡展示
+   （app-context.js buildContextRows），trace 徽标只保留一个静态时钟 + 耗时文本。 */
 .msg-meta-row { display: block; margin-top: 4px; line-height: 1.2; min-height: 0; }
 .msg-meta-row:has(.trace-item) { min-height: 13px; }
 
@@ -4118,7 +4107,8 @@ pre:hover .code-copy-btn { opacity: 1; }
 @media (prefers-reduced-motion: reduce) {
     .chat-history-loading, .chl-row, .chl-line { animation: none; }
     /* P2-6 摘要按钮的箭头翻转与文字过渡同样尊重系统偏好 */
-    .turn-compact-toggle, .turn-compact-toggle::before { transition: none; }
+    .turn-compact-toggle, .turn-compact-toggle::before,
+    .turn-batch-header, .turn-batch-chevron { transition: none; }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -4325,4 +4315,44 @@ pre:hover .code-copy-btn { opacity: 1; }
 .msg-bubble.turn-compact-open > [data-turn-process="batch"],
 .msg-row.assistant.agent-live .msg-bubble > .tool-batch-group {
     border-left-color: var(--border-color) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   运行态批次折叠（对标 Qoder 运行态消息展示，app-turn-batch.js）
+
+   形态：思考/工具/批次组/子代理等过程行归入一个批次盖子（button.turn-batch-header，
+   气泡直接子级）之下。运行中盖子显示「正在执行中 · Ns」且成员展开；批次收口
+   （正文/错误到达、轮结束）后盖子变「已处理」、成员自动折叠；点击盖子展开/收起。
+
+   【零包装层】成员仍是气泡直接子级，兄弟关系不变（app.css:825 相邻兄弟选择器教训）；
+   成员可见性由 JS 管理的 .turn-batch-collapsed 类控制，CSS 只有一条极窄隐藏规则。
+   盖子在轮结束后被 turn-compact 标记 data-turn-process="batch-header" 随整轮收起。
+   ═══════════════════════════════════════════════════════════════════════════ */
+.turn-batch-header {
+    display: flex; align-items: center; gap: 7px; width: 100%;
+    margin: 6px 0 2px; padding: 4px 8px;
+    border: 0; border-radius: 6px; background: transparent;
+    color: var(--text-secondary);
+    font: 12px/1.5 var(--font-sans, inherit); text-align: left;
+    cursor: pointer; user-select: none;
+    transition: background .15s ease, color .15s ease;
+}
+.turn-batch-header:hover { background: var(--bg-hover); color: var(--text-primary); }
+.turn-batch-header:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.turn-batch-chevron {
+    display: inline-flex; width: 14px; height: 14px; flex: 0 0 auto;
+    color: var(--text-tertiary); transition: transform .15s ease;
+}
+.turn-batch-chevron svg { width: 100%; height: 100%; }
+/* 收起态 chevron 指向右（展开态向下），与 Qoder 一致 */
+.turn-batch-header:not(.turn-batch-open) .turn-batch-chevron { transform: rotate(-90deg); }
+/* 成员折叠：JS 管理类的单一窄规则；:empty 的正文壳本就不占位，无需特判 */
+.msg-bubble > .turn-batch-collapsed { display: none !important; }
+/* turn-compact 展开态必须压过批次折叠（特异性配对，顺序在后生效） */
+.msg-bubble.turn-compact-open > .turn-batch-collapsed { display: block !important; }
+/* 批次盖子在 turn-compact 展开态作为分组分隔行恢复 flex 布局（覆盖上一条 block） */
+.msg-bubble.turn-compact-open > [data-turn-process="batch-header"] {
+    display: flex !important;
+    margin-top: 10px; padding-top: 6px;
+    border-top: 1px solid var(--border-color);
 }

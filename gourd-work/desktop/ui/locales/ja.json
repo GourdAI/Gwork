@@ -501,6 +501,12 @@
                                                           "intent_chain_desc":  "圧縮時にユーザーの過去の質問の簡潔なインデックスを保持し（コストは極小）、完了済みの古い目標に固執するのを防ぎます",
                                                           "hint":  "履歴ウィンドウ：圧縮時に最後の何件のメッセージを常に完全保護するか\n1ターン出力予約：モデルの次の応答のために確保する絶対的な余白、トリガー点 =「モデルウィンドウ − この予約 − ターンバッファ」\n圧縮トリガー率：「前倒し」トリガーのみに使用（両者の小さい方を採用）、100 は追加の前倒しなし\n圧縮目標水位：1 回でどこまで圧縮するかを決定、値が高いほど圧縮は浅くトリガーは頻繁になります"
                                                       },
+                                     "identity": {
+                                       "title": "アシスタント身份",
+                                       "assistant_name": "アシスタント名",
+                                       "assistant_name_placeholder": "既定 GWork",
+                                       "hint": "各アシスタント返信のヘッダー（アバター + 名前）に表示、既定は GWork\n空にして保存すると既定名に戻ります"
+                                     },
                                      "skills":  {
                                                           "title":  "スキル一覧のバジェット",
                                                           "budget_fraction":  "一覧バジェット(ウィンドウ%)",
@@ -993,8 +999,16 @@
     "turn_tools":  "ツール呼び出し",
     "turn_thinking":  "思考ブロック",
     "turn_agents":  "サブエージェント",
-    "turn_thought_only":  "しばらく考えました",
+    "turn_done": "完了",
+    "batch_running": "実行中",
+    "batch_done": "処理済み",
+    "turn_stopped": "停止",
+    "turn_suspended": "一時停止中",
     "turn_process_texts":  "途中経過",
+    "turn_tools_one": "ツール呼び出し",
+    "turn_thinking_one": "思考ブロック",
+    "turn_agents_one": "サブエージェント",
+    "turn_process_texts_one": "途中経過",
                  "phase_thinking":  "思考中",
                  "phase_text":  "出力中",
                  "phase_waiting":  "応答待ち",

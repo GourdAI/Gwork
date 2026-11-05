@@ -204,6 +204,16 @@ pub struct GeneralSettings {
     /// skill never silently vanishes.
     #[serde(rename = "skillListingMaxDescChars")]
     pub skill_listing_max_desc_chars: u32,
+    /// Display name of the assistant shown in the chat message header
+    /// (avatar + name row, WorkBuddy-style). `None` = the built-in default
+    /// "GWork"; the frontend falls back itself, so an absent key never
+    /// renders as an empty header.
+    ///
+    /// Purely cosmetic: it is never injected into prompts or logs, so a
+    /// third-party value here cannot become a prompt-injection surface the
+    /// way skill descriptions can.
+    #[serde(rename = "assistantName", default, skip_serializing_if = "Option::is_none")]
+    pub assistant_name: Option<String>,
     /// HTTP Basic Auth username for the kernel's web surface (Java
     /// `GeneralGroupDo.webAuthUser`). Empty = auth disabled.
     ///
@@ -245,6 +255,7 @@ impl Default for GeneralSettings {
             acp_context_length: None,
             skill_listing_budget_fraction: crate::skills::DEFAULT_LISTING_BUDGET_FRACTION,
             skill_listing_max_desc_chars: crate::skills::DESCRIPTION_MAX_CHARS as u32,
+            assistant_name: None,
             // Auth off by default, exactly like Java. The Origin/Host guard in
             // `server::guard` is what makes the default local install safe; these
             // credentials are for the remote/exposed deployment case.

@@ -501,6 +501,12 @@
                                                           "intent_chain_desc":  "Conserve lors de la compression un index compact des demandes précédentes de l\u0027utilisateur (coût très faible), afin d\u0027éviter que l\u0027agent ne revienne sur des objectifs déjà accomplis",
                                                           "hint":  "Fenêtre d\u0027historique : combien de derniers messages restent toujours non compressés.\nSortie réservée : marge absolue pour la prochaine réponse du modèle ; point de déclenchement = fenêtre du modèle − réserve − tampon de tour.\nSeuil de compression : ne fait que déclencher PLUS TÔT (la plus petite des deux valeurs s\u0027applique) ; 100 signifie aucune anticipation supplémentaire.\nCible de compression : profondeur de chaque compression — plus la valeur est élevée, plus la compression est légère et les déclenchements fréquents"
                                                       },
+                                     "identity": {
+                                       "title": "Identité de l’assistant",
+                                       "assistant_name": "Nom de l’assistant",
+                                       "assistant_name_placeholder": "Par défaut GWork",
+                                       "hint": "Affiché en tête de chaque réponse de l’assistant (avatar + nom), par défaut GWork\nVider et enregistrer restaure le nom par défaut"
+                                     },
                                      "skills":  {
                                                           "title":  "Budget de la liste des skills",
                                                           "budget_fraction":  "Budget de la liste (% de la fenêtre)",
@@ -993,8 +999,16 @@
     "turn_tools":  "appels d’outils",
     "turn_thinking":  "blocs de réflexion",
     "turn_agents":  "sous-agents",
-    "turn_thought_only":  "Réflexion terminée",
+    "turn_done": "Terminé",
+    "batch_running": "En cours",
+    "batch_done": "Traité",
+    "turn_stopped": "Arrêté",
+    "turn_suspended": "Suspendu",
     "turn_process_texts":  "étapes du processus",
+    "turn_tools_one": "appel d’outil",
+    "turn_thinking_one": "bloc de réflexion",
+    "turn_agents_one": "sous-agent",
+    "turn_process_texts_one": "étape du processus",
                  "phase_thinking":  "Réflexion",
                  "phase_text":  "Rédaction",
                  "phase_waiting":  "En attente de réponse",

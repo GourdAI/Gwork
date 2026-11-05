@@ -77,7 +77,14 @@
             })(),
             apiRetries: parseNumStr($('#generalApiRetries').val().trim()),
             mcpRetries: parseNumStr($('#generalMcpRetries').val().trim()),
-            modelRetries: parseNumStr($('#generalModelRetries').val().trim())
+            modelRetries: parseNumStr($('#generalModelRetries').val().trim()),
+            // 助手名称：输入框始终回显当前设置值，故每次保存原样回传是幂等的；
+            // 空串 → null（后端 double_option 语义 = 清空回默认 GWork）。
+            assistantName: (function () {
+                var v = $('#generalAssistantName').val();
+                v = (v == null) ? '' : String(v).trim();
+                return v ? v : null;
+            })()
         };
     }
 
@@ -93,6 +100,9 @@
                 if (resp && resp.code !== 200) {
                     showToast((resp.msg || resp.message) || '设置保存失败：本次修改未落盘', 'error');
                     console.error('[Settings] Save refused:', resp);
+                } else if (typeof window.refreshAssistantIdentity === 'function') {
+                    // 落盘成功才刷聊天页身份头：名称缓存 + 已渲染行即时更新
+                    window.refreshAssistantIdentity(bodyObj.assistantName);
                 }
             })
             .fail(function (jqXHR) {
@@ -139,7 +149,7 @@
     }
 
     // ===== 数字输入框：input 事件 + 防抖 =====
-    $(document).on('input', '#generalHistoryWindowSize, #generalCompressionRatio, #generalCompressionTargetRatio, #generalCompressionReservedOutputTokens, #generalModelRetries, #generalMcpRetries, #generalApiRetries, #generalSkillListingBudgetFraction, #generalSkillListingMaxDescChars', function () {
+    $(document).on('input', '#generalHistoryWindowSize, #generalCompressionRatio, #generalCompressionTargetRatio, #generalCompressionReservedOutputTokens, #generalModelRetries, #generalMcpRetries, #generalApiRetries, #generalSkillListingBudgetFraction, #generalSkillListingMaxDescChars, #generalAssistantName', function () {
         saveGeneralSettings(false); // 防抖保存
     });
 
@@ -163,6 +173,7 @@
                 $('#generalApiRetries').val(d.apiRetries != null ? d.apiRetries : '');
                 $('#generalMcpRetries').val(d.mcpRetries != null ? d.mcpRetries : '');
                 $('#generalModelRetries').val(d.modelRetries != null ? d.modelRetries : '');
+                $('#generalAssistantName').val(d.assistantName != null ? d.assistantName : '');
                 if (d.locale) {
                     if (window.GourdI18n) GourdI18n.setLocale(d.locale);
                     ensureLocaleFormReady(function () {

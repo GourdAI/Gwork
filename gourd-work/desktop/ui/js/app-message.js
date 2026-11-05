@@ -492,6 +492,69 @@ function appendSteerNote(sess, item) {
 }
 window.appendSteerNote = appendSteerNote;
 
+/* ===== 助手身份头（头像 + 名称，对标 WorkBuddy 消息头）=====
+   每条 assistant 消息行顶部一行：圆形 logo 头像 + 名称。名称默认 GWork，
+   可在设置页自定义（general.assistantName）。
+   【缓存而非每行拉接口】名称是全局设置，改一次全会话生效：localStorage 缓存
+   （ASSISTANT_NAME_KEY）是渲染时的唯一读取源；缓存的写入只有两处：
+     1) syncAssistantNameFromServer：启动期后端就绪后从 /web/settings/general
+        拉一次（__whenBackendReady 门闸，失败也放行）—— 没有它，在别端
+        （web 模式 / 另一台机器的桌面壳，localStorage 不互通）改过名称的用户
+        本端永远显示默认 GWork；
+     2) refreshAssistantIdentity：设置页保存成功后刷缓存与已渲染行。
+   【转义】名称是用户输入，进 innerHTML 前必须转义（与工具卡名称同口径）。 */
+var ASSISTANT_NAME_KEY = 'gwork.assistantName';
+var ASSISTANT_NAME_DEFAULT = 'GWork';
+var ASSISTANT_NAME_LOGO = '/img/logo.svg';
+function assistantDisplayName() {
+    try {
+        var v = localStorage.getItem(ASSISTANT_NAME_KEY);
+        if (v != null && v.trim()) return v.trim();
+    } catch (e) { /* 隐私模式忽略 */ }
+    return ASSISTANT_NAME_DEFAULT;
+}
+function assistantIdentityHeaderHtml() {
+    var name = assistantDisplayName();
+    var esc = (typeof escapeHtml === 'function') ? escapeHtml : function (s) {
+        return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; });
+    };
+    return '<div class="msg-head"><img class="msg-head-avatar" src="' + ASSISTANT_NAME_LOGO
+        + '" alt="" aria-hidden="true"><span class="msg-head-name">' + esc(name) + '</span></div>';
+}
+/* 设置页保存成功后调用：刷缓存 + 重写已渲染行的名称文本（头像不变）。
+   只改文本节点，不重建行 —— 重建会丢流式状态与折叠态。 */
+function refreshAssistantIdentity(name) {
+    try {
+        if (name == null || !name.trim()) localStorage.removeItem(ASSISTANT_NAME_KEY);
+        else localStorage.setItem(ASSISTANT_NAME_KEY, name.trim());
+    } catch (e) { /* 忽略 */ }
+    var els = document.querySelectorAll('.msg-row.assistant .msg-head-name');
+    var shown = assistantDisplayName();
+    for (var i = 0; i < els.length; i++) els[i].textContent = shown;
+}
+window.refreshAssistantIdentity = refreshAssistantIdentity;
+
+/* 启动期把服务端名称同步进缓存（见文件头注释写入源 1）。
+   只写缓存、不刷已渲染行：本回调在后端就绪门闸里触发，早于会话回放，
+   之后渲染的行自然读到新值；已渲染行由设置页路径的 refreshAssistantIdentity 负责。
+   门闸失败也放行（app-bootstrap settle 对 failed 同样 flush），失败即保持默认名，
+   与「拉不到设置」的其它模块同口径，不额外打扰用户。 */
+function syncAssistantNameFromServer() {
+    var boot = (typeof window !== 'undefined') ? window.__whenBackendReady : null;
+    var fetchIt = function () {
+        $.get('/web/settings/general', function (resp) {
+            if (!resp || resp.code !== 200 || !resp.data) return;
+            var name = resp.data.assistantName;
+            try {
+                if (name == null || !String(name).trim()) localStorage.removeItem(ASSISTANT_NAME_KEY);
+                else localStorage.setItem(ASSISTANT_NAME_KEY, String(name).trim());
+            } catch (e) { /* 隐私模式忽略 */ }
+        }).fail(function () { /* 拉取失败保持默认名，不打扰用户 */ });
+    };
+    if (typeof boot === 'function') boot(fetchIt); else fetchIt();
+}
+syncAssistantNameFromServer();
+
 function ensureAssistantBubble(sess) {
     if (!sess.currentBubbleEl) {
         removeThinking(sess);
@@ -505,7 +568,8 @@ function ensureAssistantBubble(sess) {
         if (sess.currentRunId) {
             row.setAttribute('data-run-id', sess.currentRunId);
         }
-        row.innerHTML = '<div class="msg-bubble"><div class="md-content"></div>'
+        row.innerHTML = assistantIdentityHeaderHtml()
+            + '<div class="msg-bubble"><div class="md-content"></div>'
             + '<div class="msg-meta-row">'
             + '<div class="msg-time" style="display:none"></div>'
             + '</div>'
@@ -969,6 +1033,12 @@ function appendBodyContentCore(sess, h, text, append, ensureEl) {
     var clean = clearThinkTags(text);
     h.reasonBuffer = append ? (h.reasonBuffer || '') + clean : clean;
     var el = ensureEl();
+    /* 运行态批次收口（对标 Qoder「这批执行结束有正文就自动折叠」）：
+       主线路正文到达 = 批次边界。仅主线路（h === sess）收口，
+       智能体卡体内的正文（h = st）不动主批次。closeBatch 幂等（无运行盖子即 no-op）。 */
+    if (h === sess && typeof window !== 'undefined' && window.GourdTurnBatch) {
+        try { window.GourdTurnBatch.closeBatch(sess); } catch (e) { /* 展示增强 */ }
+    }
     // 增量渲染：stable 块只追加一次，tail 每帧重建（极小），消除逐帧全量 innerHTML 重建引起的闪烁
     var r = getStreamMd(el);
     r.afterRender = function() {
@@ -1041,7 +1111,7 @@ function ensureThinkingBlock(sess) {
     ensureAssistantBubble(sess);
     return ensureThinkingBlockCore(sess, sess, {
         placeFresh: function(el) { insertBeforeActions(sess, el); },
-        placeBlock: function(block, pointerEl) { $(pointerEl).before(block); }
+        placeBlock: function(block, pointerEl) { $(pointerEl).before(block); noteBatchInsert(sess, block); }
     });
 }
 
@@ -1067,7 +1137,7 @@ function insertBeforeActions(sess, el) {
     }
     // 若存在常驻的内联等待指示器，新内容应插在其上方，保证指示器始终在气泡底部。
     var anchor = (sess.inlineThinkingEl && sess.inlineThinkingEl.parentNode) ? sess.inlineThinkingEl : null;
-    if (anchor) { $(anchor).before(el); return; }
+    if (anchor) { $(anchor).before(el); noteBatchInsert(sess, el); return; }
     /* currentBubbleEl 兜底重建：空闲态（finishStream 后）与回放态（replaySession 遇 done 后
        都会 resetStreamState 把 currentBubbleEl 置 null）下，任何需要插入内容块的调用方
        （appendAgentBadge 建智能体卡、问答记录、HITL 卡等）都会在下一行裸解引用
@@ -1082,6 +1152,7 @@ function insertBeforeActions(sess, el) {
         if (!sess.currentBubbleEl || !sess.currentBubbleEl.parentNode) {
             var fallbackRoot = (typeof renderRoot === 'function') ? renderRoot(sess) : sess.container;
             if (fallbackRoot) $(fallbackRoot).append(el);
+            noteBatchInsert(sess, el);
             return;
         }
     }
@@ -1091,6 +1162,17 @@ function insertBeforeActions(sess, el) {
     var footer = $(bubble).find('.msg-meta-row').first()[0] || $(bubble).find('.msg-actions').first()[0];
     if (footer) $(footer).before(el);
     else $(bubble).append(el);
+    noteBatchInsert(sess, el);
+}
+
+/* 运行态批次折叠接线（app-turn-batch.js）：过程行落 DOM 后归入当前批次盖子。
+   纯展示增强：模块缺失 / 任何异常都不得影响主渲染链路（与 turn-compact 接线同口径）。 */
+function noteBatchInsert(sess, el) {
+    try {
+        if (typeof window !== 'undefined' && window.GourdTurnBatch) {
+            window.GourdTurnBatch.noteProcessInsert(sess, el);
+        }
+    } catch (e) { /* 展示增强失败静默 */ }
 }
 
 function finishThinkingBlock(sess) {
@@ -2382,6 +2464,10 @@ function appendErrorChunk(sess, text) {
     ensureAssistantBubble(sess);
     var errEl = $('<div>').addClass('chunk-error').text(text)[0];
     insertBeforeActions(sess, errEl);
+    // 错误到达同为批次边界：失败证据留在批次外保持可见，批次自身收口折叠
+    if (typeof window !== 'undefined' && window.GourdTurnBatch) {
+        try { window.GourdTurnBatch.closeBatch(sess); } catch (e) { /* 展示增强 */ }
+    }
     if (sess.sessionId === activeSessionId) scrollToBottom();
 }
 
@@ -2480,6 +2566,12 @@ function discardPartialRetryDom(sess) {
         removed++;
     }
 
+    /* 回滚后批次盖子可能失去全部成员（成员序号在水位之上被删）：空盖子必须移除，
+       否则屏幕上留一个「正在执行中 · Ns」却无任何内容的孤儿盖子。 */
+    if (removed > 0 && typeof window !== 'undefined' && window.GourdTurnBatch) {
+        try { window.GourdTurnBatch.sweepOrphanBatchHeaders(bubble); } catch (e) { /* 展示增强 */ }
+    }
+
     if (removed > 0) {
         clearRetryChunk(sess);
         /* 登记表里指向已摘除节点的引用必须清掉，否则后续 action_end 回填会写进游离节点
@@ -2525,19 +2617,10 @@ function discardPartialRetryDom(sess) {
 }
 
 /* ===== Trace Badge =====
-   只展示耗时。token 用量（输入/缓存/输出）故意不在此展示：
-   本行数据源为 trace.getMetrics()，是「本轮累计」口径（所有 ReAct 迭代求和）；
-   而工具栏的上下文进度环是「本次推理」口径（每轮 onReasonEnd 覆盖一次）。
-   两者分母不同，数字天然对不上（尤其缓存命中率：累计值含首次冷缓存，按输入量加权后必然低于末次），
-   并列展示会让用户误以为统计出错。故用量统一只在进度环展示一处。
-   例外：outputTokens 仅作为 TPS 的分子参与计算，不以绝对量形式显示，不构成口径歧义。 */
-
-/** HTML 转义（与 appendTraceBadge 内部 esc 同口径，供耗时详情卡复用）。 */
-function traceEsc(s) {
-    return String(s).replace(/[&<>"]/g, function (c) {
-        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
-    });
-}
+    只展示耗时（一个时钟图标 + 文本）。用户已要求把 TPS / 首 Token 延迟 / 总用时
+    统一收进底部「上下文用量」明细卡（app-context.js 的 buildContextRows），
+    这里不再挂 hover/点击详情弹层，也不再计算速率。token 用量同理只在进度环展示一处
+    （累计口径 vs 本次推理口径不同，并列会误以为统计错）。 */
 
 /**
  * 耗时徽标文本。
@@ -2557,74 +2640,6 @@ function traceElapsedText(chunk, fmtSec) {
     return null;
 }
 
-/**
- * 输出速度（TPS）文本。
- * <p><b>口径</b>：{@code generatedTokens / generationMs}——两个值由后端成对产出，
- * 统计范围严格一致：只计模型真正在解码的时间与那些解码段产出的 token，
- * 工具执行、审批等待、子代理调度均不在内。所以这是真实解码速度，可用于模型间横向比较。</p>
- * <p><b>为何不用 outputTokens 与 elapsedMs</b>：前者是整轮累计（还会并入子代理产出），
- * 后者含大量非解码时间，二者相除既不是解码速度也不是可比的吞吐量。</p>
- * <p><b>缺失即不展示</b>：旧历史帧没有这对字段，此时返回 null 让该行整行省略。
- * 绝不退回用总时长顶替——那会把一个口径不同的数字伪装成同一个指标。</p>
- * @param {Object} chunk - trace 帧
- * @returns {?string} 数据不足时返回 null
- */
-function traceTpsText(chunk) {
-    var tokens = chunk.generatedTokens;
-    var genMs = chunk.generationMs;
-    if (tokens == null || !(tokens > 0)) return null;
-    if (genMs == null || !(genMs > 0)) return null;
-
-    var tps = tokens / (genMs / 1000);
-    if (!isFinite(tps) || !(tps > 0)) return null;
-
-    var num = tps >= 100 ? Math.round(tps) : Math.round(tps * 10) / 10;
-    return GourdI18n.t('chat.tps_unit').replace('{n}', num);
-}
-
-/**
- * 首 Token 延迟文本（不足 1 秒用 ms，否则用 2 位小数的秒）。
- * <p>该字段本次改动才新增，旧历史消息恒为 null，此时该行整行省略而非显示 0。</p>
- * @param {Object} chunk - trace 帧
- * @returns {?string} 无值时返回 null
- */
-function traceTtftText(chunk) {
-    if (chunk.ttftMs == null || !(chunk.ttftMs >= 0)) return null;
-    var ms = chunk.ttftMs;
-    if (ms < 1000) return Math.round(ms) + 'ms';
-    return (Math.round(ms / 10) / 100).toFixed(2) + 's';
-}
-
-/**
- * 构建耗时详情卡 HTML（悬停/聚焦 trace 徽标展开）。
- * <p><b>全部用 span 而非 div</b>：宿主 .trace-item 是 span，内嵌 div 会被 HTML 解析器
- * 提前断开 span，卡片会被抛出到徽标外面；块级布局全靠 CSS display 达成。</p>
- * <p>仅有总用时一项（TPS 与 TTFT 都缺失，如旧历史帧）时返回空串，
- * 调用方会退回原生 title 提示——只有一行与徽标重复的卡片没有信息增量。</p>
- * @param {Object} chunk - trace 帧
- * @param {string} elapsedTxt - 已格式化的总用时文本
- * @returns {string} 卡片 HTML，不值得展示时为空串
- */
-function buildTracePop(chunk, elapsedTxt) {
-    function row(label, value) {
-        return '<span class="trace-pop-row">'
-            + '<span class="trace-pop-label">' + traceEsc(label) + '</span>'
-            + '<span class="trace-pop-value">' + traceEsc(value) + '</span>'
-            + '</span>';
-    }
-    var tps = traceTpsText(chunk);
-    var ttft = traceTtftText(chunk);
-    if (!tps && !ttft) return '';
-
-    var html = '<span class="trace-pop">'
-        + '<span class="trace-pop-title">' + TRACE_TIME_SVG
-        + traceEsc(GourdI18n.t('chat.turn_timing')) + '</span>'
-        + row(GourdI18n.t('chat.elapsed_total'), elapsedTxt);
-    if (tps) html += row(GourdI18n.t('chat.output_tps'), tps);
-    if (ttft) html += row(GourdI18n.t('chat.ttft'), ttft);
-    return html + '</span>';
-}
-
 function appendTraceBadge(sess, chunk) {
     ensureAssistantBubble(sess);
     // 后端携带的最终答案为权威复制源，写到当前 .md-content 的 data-md-raw（与历史消息统一属性名），供复制按钮读取。
@@ -2639,29 +2654,17 @@ function appendTraceBadge(sess, chunk) {
         if (s >= 60) { var m = Math.floor(s / 60), r = s % 60; return r > 0 ? m + 'min ' + r + 's' : m + 'min'; }
         return s + 's';
     }
-    // 图标化：以小图标替代“耗时”文字标签，节省横向空间；悬停/点击展开耗时详情卡承载完整语义
     function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-    /**
-     * 渲染一个耗时徽标。
-     * <p>有详情卡时做成可聚焦的 disclosure（支持键盘与触屏）；无卡时退回纯展示 + 原生 title。
-     * 属性按数组拼接而非在三元表达式里接半截引号：后者漏一个引号就会静默生成破碎 HTML。</p>
-     */
-    function item(icon, val, pop) {
-        var cls = 'trace-item' + (pop ? ' has-pop' : '');
-        var attrs = ' class="' + cls + '"';
-        if (pop) {
-            // 触屏与读屏软件依赖显式语义：纯 CSS :hover 在触屏上不可靠
-            attrs += ' tabindex="0" role="button" aria-expanded="false"'
-                + ' aria-label="' + esc(GourdI18n.t('chat.turn_timing')) + '"';
-        } else {
-            attrs += ' title="' + esc(GourdI18n.t('chat.elapsed_time')) + '"';
-        }
-        return '<span' + attrs + '><span class="trace-ic" aria-hidden="true">' + icon + '</span>'
-            + esc(val) + (pop || '') + '</span>';
+    /** 纯展示的耗时徽标（时钟图标 + 文本）。TPS / TTFT / 总用时明细已移到底部用量卡，
+     *  这里不再是可展开的 disclosure，仅保留一个带原生 title 的静态徽标。 */
+    function item(icon, val) {
+        return '<span class="trace-item" title="' + esc(GourdI18n.t('chat.elapsed_time')) + '">'
+            + '<span class="trace-ic" aria-hidden="true">' + icon + '</span>'
+            + esc(val) + '</span>';
     }
     var parts = [];
     var elapsedTxt = traceElapsedText(chunk, fmtSec);
-    if (elapsedTxt != null) parts.push(item(TRACE_TIME_SVG, elapsedTxt, buildTracePop(chunk, elapsedTxt)));
+    if (elapsedTxt != null) parts.push(item(TRACE_TIME_SVG, elapsedTxt));
     if (parts.length === 0) return;
 
     // 创建或更新 trace 元素
@@ -2680,43 +2683,18 @@ function appendTraceBadge(sess, chunk) {
         var badge = $('<span>').addClass('msg-trace');
         badge[0].innerHTML = parts.join('');
         $(metaRow).append(badge[0]);
+        traceEl = badge[0];
+    }
+    // data 属性挂在徽标容器上（innerHTML 重建不影响容器属性）；
+    // 重复回放时以最新帧覆盖，与 innerHTML 更新同口径。
+    if (traceEl && traceEl.setAttribute) {
+        var em = (chunk.elapsedMs != null && chunk.elapsedMs >= 0) ? String(Math.round(chunk.elapsedMs)) : null;
+        if (em != null) traceEl.setAttribute('data-elapsed-ms', em); else traceEl.removeAttribute('data-elapsed-ms');
+        traceEl.setAttribute('data-turn-status', chunk.stopped ? 'stopped' : (chunk.suspended ? 'suspended' : 'done'));
     }
 
     if (sess.sessionId === activeSessionId) scrollToBottom();
 }
-
-/* ---- 耗时详情卡：触屏/键盘开合 ----
-   纯 CSS :hover 在触屏设备上不可靠（需要二次点击且无法关闭），故叠加一层显式开合：
-   点击徽标切换 is-open，点击外部或按 Escape 关闭。所有绑定走 document 委托，
-   因为徽标会被流式渲染与历史回放反复重建，直接绑定会失效。 */
-function closeAllTracePops(exceptEl) {
-    $('.trace-item.has-pop.is-open').each(function () {
-        if (exceptEl && this === exceptEl) return;
-        $(this).removeClass('is-open').attr('aria-expanded', 'false');
-    });
-}
-
-$(document).on('click', '.trace-item.has-pop', function (e) {
-    // 卡片内部点击（如选中数值）不应触发关闭
-    if ($(e.target).closest('.trace-pop').length) return;
-    e.stopPropagation();
-    var willOpen = !$(this).hasClass('is-open');
-    closeAllTracePops(this);
-    $(this).toggleClass('is-open', willOpen).attr('aria-expanded', willOpen ? 'true' : 'false');
-});
-
-$(document).on('keydown', '.trace-item.has-pop', function (e) {
-    // 键盘可达：Enter/Space 开合，Escape 关闭并保留焦点
-    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
-        e.preventDefault();
-        $(this).trigger('click');
-    } else if (e.key === 'Escape') {
-        $(this).removeClass('is-open').attr('aria-expanded', 'false');
-    }
-});
-
-$(document).on('click', function () { closeAllTracePops(null); });
-$(document).on('keydown', function (e) { if (e.key === 'Escape') closeAllTracePops(null); });
 
 /* ===== Agent Card (子代理智能体卡片 — 容器型)
    结构：

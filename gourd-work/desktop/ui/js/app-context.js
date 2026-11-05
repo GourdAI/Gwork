@@ -88,7 +88,12 @@ function buildContextModel(chunk) {
         // args（与累计用量同源、同样参与历史回放与 createdAt 单调门禁）。旧帧无此字段时为 0，
         // 该行整行省略，不拿 outputTokens ÷ elapsedMs 顶替（口径不同，会伪装成同一个指标）。
         generationMs: Math.round(args.generationMs || 0),
-        generatedTokens: Math.round(args.generatedTokens || 0)
+        generatedTokens: Math.round(args.generatedTokens || 0),
+        // 首 Token 延迟（TTFT）：内核用 run 级 latch 测得「起点 → 首个可见输出」，同样注入 args。
+        // 用 hasOwnProperty 判存在而非判真值：合法的 0ms 首字与「本轮根本没有可见输出」是两回事
+        // （对齐 Java TurnTimer.finish：无可见输出时 ttftMs 为 null，绝不下发 0）。
+        ttftMs: Object.prototype.hasOwnProperty.call(args, 'ttftMs') && args.ttftMs != null
+            ? Math.round(args.ttftMs) : null
     };
 }
 
@@ -149,7 +154,7 @@ function ctxLocalTurnAnchor(chunk, m) {
 }
 
 /**
- * 输出速度（TPS）文本，口径与 app-message.js 的 traceTpsText 完全一致。
+ * 输出速度（TPS）文本。原先尾部 trace 弹层的 traceTpsText 已移除，这里是唯一实现。
  * <p>本模块自带一份而非跨文件引用：app-context.js 需能独立加载/独立沙箱测试，
  * 且两者都是一行级纯函数，重复成本远低于耦合风险（同 ctxFmtElapsed 的取舍）。</p>
  * <p>分母是内核累计的【解码段时长】、分子是【同一批解码段产出的 token】，
@@ -163,6 +168,20 @@ function ctxTpsText(m) {
     if (!isFinite(tps) || !(tps > 0)) return '';
     var num = tps >= 100 ? Math.round(tps) : Math.round(tps * 10) / 10;
     return GourdI18n.t('chat.tps_unit').replace('{n}', num);
+}
+
+/**
+ * 首 Token 延迟文本（不足 1 秒用 ms，否则用 2 位小数的秒）。
+ * <p>口径与原 trace 弹层一致，复用 chat.ttft（12 语言包已有译文）。
+ * 旧历史帧无 args.ttftMs 时为 null，该行整行省略而非显示 0。</p>
+ * @param {Object} m - buildContextModel 归一后的展示模型
+ * @returns {string} 形如 "860ms" / "5.39s"；无数据时空串
+ */
+function ctxTtftText(m) {
+    if (typeof m.ttftMs !== 'number' || !(m.ttftMs >= 0) || !isFinite(m.ttftMs)) return '';
+    var ms = m.ttftMs;
+    if (ms < 1000) return Math.round(ms) + 'ms';
+    return (Math.round(ms / 10) / 100).toFixed(2) + 's';
 }
 
 /** 明细卡单行。 */
@@ -234,11 +253,16 @@ function buildContextRows(chunk, opts) {
         // 必须走 ctxLocalTurnAnchor 校准：直接 Date.now()-turnStartMs 会把时钟偏移算成耗时
         elapsedTxt = ctxFmtElapsed(Date.now() - ctxLocalTurnAnchor(chunk, m));
     }
-    // 输出速度：与累计用量同源的解码速率，放在用量行之后、任务耗时之前。
-    // 复用 chat.output_tps / chat.tps_unit（12 语言包已有译文），不新增 i18n 键。
+    // 输出速度 / 首 Token 延迟：与累计用量同源（都来自 context_size.args），
+    // 一起放在用量行之后、任务耗时之前。TPS、TTFT 与总用时原本挤在尾部 hover 弹层里，
+    // 用户要求收进这张卡并删掉弹层；复用 chat.* 既有译文，不新增 i18n 键。
     var tpsTxt = ctxTpsText(m);
     if (tpsTxt) {
         html += ctxRow(GourdI18n.t('chat.output_tps'), tpsTxt);
+    }
+    var ttftTxt = ctxTtftText(m);
+    if (ttftTxt) {
+        html += ctxRow(GourdI18n.t('chat.ttft'), ttftTxt);
     }
 
     if (elapsedTxt) {
@@ -412,10 +436,11 @@ function noteContextTurnStart(sess, turnStartMs) {
     var args = {};
     for (var k in (c.args || {})) { args[k] = c.args[k]; }
     args.turnStartMs = turnStartMs;
-    // 新轮起步时，旧快照里的解码速率属于上一轮：不随 lastContextChunk 复制，
-    // 等新一轮首个 context_size 帧带权威值后再显示，避免「新一轮显示旧速率」。
+    // 新轮起步时，旧快照里的解码速率与首字延迟都属于上一轮：不随 lastContextChunk 复制，
+    // 等新一轮首个 context_size 帧带权威值后再显示，避免「新一轮显示旧速率/旧延迟」。
     delete args.generationMs;
     delete args.generatedTokens;
+    delete args.ttftMs;
     renderContextMeter({ args: args, text: c.text, totalTokens: c.totalTokens,
         inputTokens: c.inputTokens, outputTokens: c.outputTokens,
         cacheReadTokens: c.cacheReadTokens, cacheCreationTokens: c.cacheCreationTokens,

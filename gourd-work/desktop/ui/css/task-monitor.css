@@ -58,10 +58,21 @@
     /* 底色与内容区一致（--bg-main），不用 --bg-sidebar：右栏是主区的并排栏，
        侧栏色只属于左侧导航；用侧栏色会让右栏看起来像第二根侧栏（用户反馈
        「底色不对，要和内容区保持一致」）。 */
-    background: var(--bg-main); border-left: 1px solid var(--border-color);
+    background: var(--bg-main);
     visibility: hidden; opacity: 0; pointer-events: none;
     transition: opacity 0.15s ease, visibility 0.15s;
 }
+/* 左侧分隔线：不能用 border-left——元素 top:0 且贯穿到 bottom，那条 1px 线会一路画进
+   44px 标题栏横条（用户反馈「右侧产物弹层的线条超出顶部横条」）。改为绝对定位伪元素，
+   只在内容区起点之下绘制；顶行色带（::before, is-electron 时 44px）内不再有竖线。
+   top 用 0 打底（浏览器直连 / mac 无顶行色带，等价于原 border-left 全高），
+   仅 is-electron 下压到 44px——与 titlebar-actions height / 色带 height 同一跨栈契约值，
+   不改动 drawer 自身的 top/background/width/height。 */
+.task-monitor-drawer::after {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+    width: 1px; background: var(--border-color); pointer-events: none;
+}
+body.is-electron .task-monitor-drawer::after { top: 44px; }
 body.terminal-open .task-monitor-drawer { bottom: var(--code-terminal-height, 0px); }
 body.task-monitor-open .task-monitor-drawer {
     visibility: visible; opacity: 1; pointer-events: auto;

@@ -2507,6 +2507,14 @@ function replaySession(sess, events, prepend, keepOpen) {
         } else {
             endTurn();
         }
+        /* resume 末轮补挂运行态样式：该行建于 _replaying=true 期（ensureAssistantBubble
+           刻意不挂 agent-live），恢复后实时帧继续写入同一行且不再重建行，
+           若不补挂，该轮实时过程行会失去扁平轨迹样式（B8）。
+           只补类、不动 _replaying（门禁语义，20+ 消费方）。 */
+        if (resumeState && resumeState.currentBubbleEl && resumeState.currentBubbleEl.closest) {
+            var resumeRow = resumeState.currentBubbleEl.closest('.msg-row');
+            if (resumeRow && resumeRow.classList) resumeRow.classList.add('agent-live');
+        }
         sess._replaying = false;
         sess._replayClock = null;
         sess.isStreaming = false;
@@ -2604,6 +2612,10 @@ function replaySession(sess, events, prepend, keepOpen) {
                    屏幕上仍留着上一轮插好的摘要按钮和隐藏标记 = 回退名不副实。
                    clearTurnCompact 幂等：无标记时是空扫描。 */
                 tcApi.clearTurnCompact(realContainer);
+                /* 运行态批次盖子与 turn-compact 共用同一偏好开关：关掉时一并撤销，
+                   否则历史里仍留着「已处理」盖子与折叠成员 = 回退名不副实。 */
+                var tbApiOff = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
+                if (tbApiOff && tbApiOff.clearBatch) tbApiOff.clearBatch(realContainer);
             } else if (tcApi) {
                 var lastClosed = !keepOpen;
                 if (!lastClosed) {
@@ -2892,6 +2904,13 @@ function loadMessagesLegacy(sess, rootQ) {
                     fragment.appendChild(tempDiv.firstChild);
                 }
                 realContainer.appendChild(fragment);
+                /* legacy 路径从不置 _replaying（它是门禁语义，20+ 消费方，不能借），
+                   而 ensureAssistantBubble 只在 _replaying 为真时省略 agent-live ——
+                   于是这条回退路径的历史行全部带着「本轮正在跑」的运行态样式，
+                   且没有 finishStream 来摘除。纯样式修正：历史行一律摘掉（B7）。
+                   本路径只渲染正文（无思考/工具过程行），折叠在此天然 no-op，不需接。 */
+                var liveRows = realContainer.querySelectorAll('.msg-row.assistant.agent-live');
+                for (var lr = 0; lr < liveRows.length; lr++) liveRows[lr].classList.remove('agent-live');
                 // 统一高亮所有代码块（user 消息的代码块已被 appendUserMessage 标记收集，不会重复）
                 if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(realContainer);
                 if (typeof processMermaidBlocks === 'function') processMermaidBlocks(realContainer);

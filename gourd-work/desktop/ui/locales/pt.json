@@ -501,6 +501,12 @@
                                                           "intent_chain_desc":  "Mantém ao comprimir um índice compacto dos pedidos anteriores do utilizador (custo muito baixo), evitando que o agente volte a insistir em objetivos já concluídos",
                                                           "hint":  "Janela de histórico: quantas mensagens finais permanecem sempre sem compressão.\nSaída reservada: margem absoluta para a próxima resposta do modelo; ponto de acionamento = janela do modelo − reserva − buffer de turno.\nLimite de compressão: apenas antecipa o acionamento (aplica-se o menor dos dois); 100 significa sem antecipação adicional.\nAlvo de compressão: quão profunda é cada compressão — quanto maior, mais superficial e mais frequentes os acionamentos"
                                                       },
+                                     "identity": {
+                                       "title": "Identidade do assistente",
+                                       "assistant_name": "Nome do assistente",
+                                       "assistant_name_placeholder": "Padrão GWork",
+                                       "hint": "Exibido no cabeçalho de cada resposta do assistente (avatar + nome); padrão GWork\nLimpar e salvar restaura o nome padrão"
+                                     },
                                      "skills":  {
                                                           "title":  "Orçamento da lista de skills",
                                                           "budget_fraction":  "Orçamento da lista (% da janela)",
@@ -993,8 +999,16 @@
     "turn_tools":  "chamadas de ferramenta",
     "turn_thinking":  "blocos de raciocínio",
     "turn_agents":  "subagentes",
-    "turn_thought_only":  "Pensou por um tempo",
+    "turn_done": "Concluído",
+    "batch_running": "Executando",
+    "batch_done": "Processado",
+    "turn_stopped": "Parado",
+    "turn_suspended": "Suspenso",
     "turn_process_texts":  "etapas do processo",
+    "turn_tools_one": "chamada de ferramenta",
+    "turn_thinking_one": "bloco de raciocínio",
+    "turn_agents_one": "subagente",
+    "turn_process_texts_one": "etapa do processo",
                  "phase_thinking":  "Pensando",
                  "phase_text":  "Escrevendo",
                  "phase_waiting":  "Aguardando resposta",

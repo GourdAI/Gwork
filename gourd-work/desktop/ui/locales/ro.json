@@ -501,6 +501,12 @@
                                                           "intent_chain_desc":  "Păstrează la comprimare un index compact al cererilor anterioare ale utilizatorului (cost foarte mic), pentru ca agentul să nu revină la obiective deja finalizate",
                                                           "hint":  "Fereastra de istoric: câte mesaje finale rămân mereu necomprimate.\nIeșire rezervată: spațiul absolut pentru următorul răspuns al modelului; punct de declanșare = fereastra modelului − rezerva − bufferul de tură.\nPrag de compresie: doar declanșează MAI DEVREME (se aplică cea mai mică dintre cele două); 100 înseamnă fără devansare suplimentară.\nȚintă de compresie: cât de adânc comprimă o dată — cu cât valoarea e mai mare, cu atât compresia e mai superficială și declanșările mai frecvente"
                                                       },
+                                     "identity": {
+                                       "title": "Identitatea asistentului",
+                                       "assistant_name": "Numele asistentului",
+                                       "assistant_name_placeholder": "Implicit GWork",
+                                       "hint": "Afișat în antetul fiecărui răspuns al asistentului (avatar + nume), implicit GWork\nGoliți și salvați pentru a restabili numele implicit"
+                                     },
                                      "skills":  {
                                                           "title":  "Bugetul listei de skill-uri",
                                                           "budget_fraction":  "Bugetul listei (% din fereastră)",
@@ -993,8 +999,16 @@
     "turn_tools":  "apeluri de instrumente",
     "turn_thinking":  "blocuri de gândire",
     "turn_agents":  "subagenți",
-    "turn_thought_only":  "S-a gândit o vreme",
+    "turn_done": "Finalizat",
+    "batch_running": "Se execută",
+    "batch_done": "Procesat",
+    "turn_stopped": "Oprit",
+    "turn_suspended": "Suspendat",
     "turn_process_texts":  "pași intermediari",
+    "turn_tools_one": "apel de instrument",
+    "turn_thinking_one": "bloc de gândire",
+    "turn_agents_one": "subagent",
+    "turn_process_texts_one": "pas intermediar",
                  "phase_thinking":  "Gândește",
                  "phase_text":  "Scrie",
                  "phase_waiting":  "Așteaptă răspunsul",

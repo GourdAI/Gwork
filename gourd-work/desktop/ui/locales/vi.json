@@ -501,6 +501,12 @@
                                                           "intent_chain_desc":  "Khi nén vẫn giữ lại chỉ mục rút gọn các yêu cầu trước đó của người dùng (chi phí rất thấp), tránh việc tác nhân quay lại các mục tiêu đã hoàn thành",
                                                           "hint":  "Cửa sổ lịch sử: bao nhiêu tin nhắn cuối luôn được giữ nguyên không nén.\nDự trữ đầu ra: khoảng trống tuyệt đối cho lượt trả lời kế tiếp của mô hình; điểm kích hoạt = cửa sổ mô hình − phần dự trữ − bộ đệm lượt.\nNgưỡng nén: chỉ kích hoạt SỚM HƠN (lấy giá trị nhỏ hơn trong hai); 100 nghĩa là không kích hoạt sớm thêm.\nMục tiêu nén: mỗi lần nén sâu đến đâu — giá trị càng cao thì nén càng nông và kích hoạt càng thường xuyên"
                                                       },
+                                     "identity": {
+                                       "title": "Danh tính trợ lý",
+                                       "assistant_name": "Tên trợ lý",
+                                       "assistant_name_placeholder": "Mặc định GWork",
+                                       "hint": "Hiển thị ở đầu mỗi câu trả lời của trợ lý (avatar + tên), mặc định GWork\nXóa và lưu để khôi phục tên mặc định"
+                                     },
                                      "skills":  {
                                                           "title":  "Ngân sách danh sách kỹ năng",
                                                           "budget_fraction":  "Ngân sách danh sách (% cửa sổ)",
@@ -993,8 +999,16 @@
     "turn_tools":  "lần gọi công cụ",
     "turn_thinking":  "đoạn suy nghĩ",
     "turn_agents":  "tác nhân phụ",
-    "turn_thought_only":  "Đã suy nghĩ một lúc",
+    "turn_done": "Hoàn tất",
+    "batch_running": "Đang chạy",
+    "batch_done": "Đã xử lý",
+    "turn_stopped": "Đã dừng",
+    "turn_suspended": "Tạm ngưng",
     "turn_process_texts":  "bước trung gian",
+    "turn_tools_one": "lần gọi công cụ",
+    "turn_thinking_one": "đoạn suy nghĩ",
+    "turn_agents_one": "tác nhân phụ",
+    "turn_process_texts_one": "bước trung gian",
                  "phase_thinking":  "Đang suy nghĩ",
                  "phase_text":  "Đang viết",
                  "phase_waiting":  "Đang chờ phản hồi",

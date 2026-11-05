@@ -2,7 +2,7 @@
  * 行为级测试：上下文用量明细卡的「输出速度（TPS）」行。
  *
  * 用户报障：Rust 内核改造后输出速率不见了。根因是内核的 trace 帧只下发 elapsedMs，
- * 没有 generatedTokens/generationMs，而 app-message.js:traceTpsText 正吃这两个字段。
+ * 没有 generatedTokens/generationMs（旧 trace 弹层的速率计算字段），故改走 context_size 帧。
  * 本轮让内核把同口径的解码段累计值注入 context_size 帧的 args（与累计用量同源，
  * 天然参与历史回放与 createdAt 单调门禁），再由 app-context.js 渲染成明细卡的一行。
  *
@@ -59,7 +59,7 @@ test('内核帧带解码段累计值时，明细卡显示输出速度行', () =>
     assert.match(html, /class="context-meter-value"[^>]*>80 tokens\/秒</);
 });
 
-test('速率按 <100 保留一位、>=100 取整，口径与 traceTpsText 一致', () => {
+test('速率按 <100 保留一位、>=100 取整，口径与原 trace 弹层一致', () => {
     const slow = sandbox.buildContextRows(chunk({ generationMs: 3000, generatedTokens: 25 }), {});
     assert.match(slow, /8\.3 tokens\/秒/, '25 / 3s ≈ 8.3');
     const fast = sandbox.buildContextRows(chunk({ generationMs: 2000, generatedTokens: 249 }), {});

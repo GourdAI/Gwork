@@ -174,6 +174,18 @@ pub struct ReActConfig {
     pub compact_focus: Option<String>,
 }
 
+/// Time to first token (ms) from the run's start to the first visible model output.
+///
+/// **Pure** so the whole timing contract is table-testable without a wall clock.
+/// `None` means the run never produced a visible content/reasoning delta, which is
+/// deliberately different from a real 0 ms first token (Java `TurnTimer.finish`:
+/// `ttftMs` stays null when `firstVisibleNanos == null`). `saturating_duration_since`
+/// guards against an implausible out-of-order pair instead of panicking/underflowing.
+fn ttft_ms_since(started_at: std::time::Instant, first_visible: Option<std::time::Instant>) -> Option<u64> {
+    let first = first_visible?;
+    Some(first.saturating_duration_since(started_at).as_millis() as u64)
+}
+
 /// Why the run stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
@@ -236,7 +248,54 @@ impl ReActAgent {
         frame_tx: mpsc::UnboundedSender<Frame>,
         cancel: CancellationToken,
     ) -> ReActResult {
-        let mut result = self.run_inner(config, history, frame_tx, cancel).await;
+        let mut result = self.run_inner(config, history, frame_tx.clone(), cancel).await;
+
+        // SINGLE TERMINAL GATE. Every abnormal exit inside `run_inner` emits an
+        // `error` frame but returns without `done`, because the frontend leaves
+        // its streaming state ONLY on `done` (`app-streaming.js` calls
+        // `finishStream` from the done branch). The visible symptom is exactly
+        // "task ended unfinished": after the last tool card (or a lone
+        // thinking block) the run stops with no final answer, no button reset,
+        // and no way to tell whether it failed. Measured with a mock provider:
+        //   reasonOnly / emptyStop / toolThinkOnly / http400 / eof
+        // all ended with `stop=Error`, `done=0`, `error=1`.
+        //
+        // Doing this once here — rather than adding a `done` to each of the
+        // nine `error`/`MaxTurns` returns — is what makes it impossible to
+        // miss a newly added exit later, and covers every caller (HTTP, ACP,
+        // CLI and team) through the same gate.
+        //
+        // `Completed` / `Cancelled` already emitted `done` themselves;
+        // `Suspended*` emitted `done_suspended`. Emitting a second one would
+        // double-`finishStream` and could fold a live resumed run.
+        if matches!(result.stop_reason, StopReason::Error | StopReason::MaxTurns) {
+            // Hand late interjections back before `done`, same as the normal
+            // end: `done` is what makes the frontend read the queue, and a
+            // steer typed while the run was failing must not be lost.
+            if let Some(dir) = config.session_dir.as_ref() {
+                let left = settle_steers(
+                    &crate::queue::QueueManager::new(),
+                    dir,
+                    &config.run_id,
+                    true,
+                );
+                if !left.is_empty() {
+                    let f = Frame::steer_dropped(
+                        &config.session_id,
+                        serde_json::json!({ "count": left.len(), "items": left }),
+                    )
+                    .run(&config.run_id)
+                    .seq(result.next_seq);
+                    result.next_seq += 1;
+                    let _ = frame_tx.send(f);
+                }
+            }
+            let f = Frame::done(&config.session_id)
+                .run(&config.run_id)
+                .seq(result.next_seq);
+            result.next_seq += 1;
+            let _ = frame_tx.send(f);
+        }
 
         // Pairing repair as the single exit gate, so it covers *every* return
         // path (cancel, error, max-turns, suspension) rather than having to be
@@ -276,7 +335,15 @@ impl ReActAgent {
                 .collect(),
             _ => Vec::new(),
         };
-        let repaired = repair_tool_pairing_except(&mut result.messages, &suspended_call);
+        // Scope the exemption to the LAST assistant(tool_calls) group: Gemini /
+        // Ollama synthesise call ids like `gemini-call-0` per stream, so an older
+        // orphan can reuse the exact id of the current pending call. Matching by
+        // string across the whole history would exempt that older orphan too and
+        // leave the resumed request with an unpaired tool_call (HTTP 400).
+        let repaired = repair_tool_pairing_except_in_last_group(
+            &mut result.messages,
+            &suspended_call,
+        );
         if repaired > 0 {
             warn!(
                 session = %config.session_id,
@@ -331,6 +398,12 @@ impl ReActAgent {
         // so the ratio is a comparable decode throughput across models.
         let mut generation_ms_total: u64 = 0;
         let mut generated_tokens_total: u64 = 0;
+        // Run-level latch for the FIRST visible output (Java TurnTimer.firstVisibleNanos).
+        // This is deliberately SEPARATE from the per-attempt `first_content_at` below:
+        // that one times a decode segment and is reset on a transport retry, whereas
+        // TTFT is "how long the user waited to see the first character" and must not be
+        // rewritten by a retry (the aborted attempt's deltas already reached the screen).
+        let mut first_visible_at: Option<std::time::Instant> = None;
 
         // ── P2: retry/latency budget (Java's four caps, aligned 2026-10-31) ──
         // Java production incident work-mua28gy6: 34 retries burned 5 tiers of
@@ -847,15 +920,25 @@ impl ReActAgent {
                 match event {
                     StreamEvent::ContentDelta(delta) => {
                         content_buf.push_str(&delta);
+                        let now = std::time::Instant::now();
                         if first_content_at.is_none() {
-                            first_content_at = Some(std::time::Instant::now());
+                            first_content_at = Some(now);
+                        }
+                        // Only visible text/thinking arms TTFT (Java onVisibleOutput).
+                        // Tool-call frames are NOT visible characters and must not latch it.
+                        if first_visible_at.is_none() {
+                            first_visible_at = Some(now);
                         }
                         emit!(Frame::text_delta(&config.session_id, &delta));
                     }
                     StreamEvent::ReasoningDelta(delta) => {
                         emit!(Frame::reason(&config.session_id, &delta));
+                        let now = std::time::Instant::now();
                         if first_content_at.is_none() {
-                            first_content_at = Some(std::time::Instant::now());
+                            first_content_at = Some(now);
+                        }
+                        if first_visible_at.is_none() {
+                            first_visible_at = Some(now);
                         }
                     }
                     StreamEvent::ToolCallStart { index, id, name } => {
@@ -1020,6 +1103,7 @@ impl ReActAgent {
                                     total_messages: seed.message_count(),
                                     generation_ms: generation_ms_total,
                                     generated_tokens: generated_tokens_total,
+                                    ttft_ms: ttft_ms_since(started_at, first_visible_at),
                                 }
                             ));
                             // Anchor the local estimator to the provider's real
@@ -2096,6 +2180,31 @@ fn repair_tool_pairing(messages: &mut Vec<ChatMessage>) -> usize {
 /// `skip` carries the suspended tool call when a run ended on ask_user / HITL:
 /// its result is pending user input, not lost. Everything else in the same
 /// batch is still repaired.
+fn repair_tool_pairing_except_in_last_group(
+    messages: &mut Vec<ChatMessage>,
+    skip: &[String],
+) -> usize {
+    if skip.is_empty() {
+        return repair_tool_pairing_except(messages, skip);
+    }
+    // Only the final assistant(tool_calls) turn can be the suspension that is
+    // waiting for user input. Everything before it belongs to completed turns
+    // and must be repaired unconditionally, even if a synthesised id collides.
+    let Some(last_group) = messages
+        .iter()
+        .rposition(|m| m.tool_calls.as_ref().is_some_and(|c| !c.is_empty()))
+    else {
+        return repair_tool_pairing_except(messages, skip);
+    };
+    let mut head = messages[..last_group].to_vec();
+    let mut tail = messages[last_group..].to_vec();
+    let mut repaired = repair_tool_pairing_except(&mut head, &[]);
+    repaired += repair_tool_pairing_except(&mut tail, skip);
+    head.extend(tail);
+    *messages = head;
+    repaired
+}
+
 fn repair_tool_pairing_except(messages: &mut Vec<ChatMessage>, skip: &[String]) -> usize {
     let mut repaired = 0usize;
     let mut i = 0usize;
@@ -2158,6 +2267,54 @@ mod tests {
     use super::*;
     use crate::llm::{FunctionCall, ToolCall};
 
+    // ─── TTFT (time to first token) ─────────────────────────────────────────
+
+    /// Java `TurnTimer.finish` parity: TTFT is "run start → first visible output",
+    /// null when no visible output ever arrived (never a fabricated 0), and the
+    /// FIRST latch wins — a later delta must not rewrite it.
+    #[test]
+    fn ttft_is_first_visible_delta_from_run_start() {
+        let t0 = std::time::Instant::now();
+        let at = |ms| t0 + std::time::Duration::from_millis(ms);
+        assert_eq!(ttft_ms_since(t0, None), None, "no visible output ⇒ no TTFT");
+        assert_eq!(ttft_ms_since(t0, Some(at(0))), Some(0), "instant first token is a real 0");
+        assert_eq!(ttft_ms_since(t0, Some(at(1_690))), Some(1_690));
+        assert_eq!(ttft_ms_since(t0, Some(at(5))), Some(5), "sub-10ms must not be rounded away");
+        // Clock anomaly (first before start) must not underflow to a huge u64.
+        assert_eq!(ttft_ms_since(at(9_000), Some(t0)), Some(0), "out-of-order pair clamps to 0");
+    }
+
+    /// The latch must be armed by ContentDelta AND ReasoningDelta only, and never
+    /// reset by a transport retry (unlike `first_content_at`, whose decode segment
+    /// legitimately restarts). A source-level pin: a pure-function test cannot see
+    /// which event arm writes the run-level variable.
+    #[test]
+    fn ttft_latch_is_armed_only_by_visible_deltas_and_survives_retry() {
+        let src = include_str!("mod.rs");
+        let norm = src.replace("\r\n", "\n");
+        // Only inspect PRODUCT code. The test module below quotes the very same
+        // strings these assertions look for; searching the whole file would let a
+        // test literal "prove" a wire that was removed from production (a source
+        // guard that can never go red). Truncate at the first test module.
+        let product = norm.split("#[cfg(test)]").next().unwrap_or("");
+        // Both visible arms set the run-level latch (two occurrences).
+        assert_eq!(
+            product.matches("if first_visible_at.is_none() {\n                            first_visible_at = Some(now);").count(),
+            2,
+            "ContentDelta and ReasoningDelta must BOTH arm the TTFT latch"
+        );
+        // The retry branch resets the per-attempt decode segment but NOT the run latch.
+        let retry = product.split("StreamEvent::Retry { attempt, max, reason } =>")
+            .nth(1).unwrap_or("")
+            .split("emit!(Frame::stream_retry").next().unwrap_or("");
+        assert!(retry.contains("first_content_at = None;"), "retry must drop the aborted decode segment");
+        assert!(!retry.contains("first_visible_at = None"),
+            "retry must NOT reset TTFT: those deltas were already shown to the user");
+        // Wire it into the meter frame.
+        assert!(product.contains("ttft_ms: ttft_ms_since(started_at, first_visible_at)"),
+            "context_size payload must carry the run-level TTFT");
+    }
+
     fn call(id: &str, name: &str) -> ToolCall {
         ToolCall {
             id: id.to_string(),
@@ -2174,6 +2331,103 @@ mod tests {
             tool_call_id: None,
             name: None,
         }
+    }
+
+    // ─── terminal done gate (abnormal exits must close the UI) ───────────
+
+    /// Every `Error` / `MaxTurns` return inside `run_inner` emits `error` but
+    /// historically did NOT emit `done`; the frontend only leaves its streaming
+    /// state on `done`, so the run looked like "ended unfinished" — after the
+    /// last tool card, or after a lone thinking block, with no final answer.
+    /// The fix lives in `run()`'s single exit gate, not at each return, so this
+    /// guard pins the gate's shape: it must match both reasons, must not fire
+    /// for Completed/Cancelled/Suspended (they already emitted their own done),
+    /// and must send through the same channel with a monotonic seq.
+    #[test]
+    fn abnormal_exits_close_with_done_at_the_single_gate() {
+        let src = include_str!("mod.rs");
+        let run = src
+            .split_once("pub async fn run(")
+            .expect("run present")
+            .1
+            .split_once("/// The loop itself; `run` wraps it")
+            .expect("run_inner follows run")
+            .0;
+        assert!(
+            run.contains("if matches!(result.stop_reason, StopReason::Error | StopReason::MaxTurns)"),
+            "the terminal gate must cover BOTH Error and MaxTurns"
+        );
+        assert!(
+            run.contains("Frame::done(&config.session_id)"),
+            "the gate must actually emit done"
+        );
+        assert!(
+            run.contains(".seq(result.next_seq)") && run.contains("result.next_seq += 1"),
+            "done must be seq-stamped so replay ordering stays exact"
+        );
+        assert!(
+            run.contains("Frame::steer_dropped") && run.contains("true,"),
+            "late interjections must be handed back before done"
+        );
+        // Negative shape: the gate must NOT live inside run_inner's nine
+        // individual returns (that is the shape that kept missing exits).
+        let inner = src
+            .split_once("async fn run_inner(")
+            .expect("run_inner present")
+            .1
+            .split_once("/// Marker written for a tool call")
+            .expect("helpers follow the loop")
+            .0;
+        let error_returns = inner.matches("emit!(Frame::error(").count();
+        assert!(
+            error_returns >= 7,
+            "guard premise: run_inner has many error exits, got {error_returns}"
+        );
+        let done_in_inner = inner.matches("emit!(Frame::done(").count();
+        assert!(
+            done_in_inner == 5,
+            "only the 4 cancel paths + completion should own a done; got {done_in_inner}"
+        );
+        // Wiring guard: the pure function below is unit-tested, but that proves
+        // nothing about whether `run()` actually calls it. A mutation that
+        // swapped this back to the whole-history `repair_tool_pairing_except`
+        // left every behaviour test green — the resumed request would still
+        // 400 on a reused synthesised call id.
+        assert!(
+            run.contains("repair_tool_pairing_except_in_last_group("),
+            "the run exit gate must scope the suspension exemption to the last group"
+        );
+    }
+
+    // ─── suspension exemption must not leak into older groups ───────────
+
+    #[test]
+    fn suspension_skip_does_not_exempt_an_older_orphan_with_the_same_id() {
+        // Gemini / Ollama synthesise `gemini-call-0` per stream, so the very
+        // same id can appear in an older, genuinely orphaned group and in the
+        // pending suspension. A global string match would exempt both and the
+        // resumed request would 400 on the unpaired older call.
+        let mut msgs = vec![
+            ChatMessage::user("task"),
+            assistant_calling(&[("gemini-call-0", "bash")]), // older orphan
+            ChatMessage::user("follow-up"),
+            assistant_calling(&[("gemini-call-0", "ask_user")]), // pending
+        ];
+        let skip = vec!["gemini-call-0".to_string()];
+        let repaired = repair_tool_pairing_except_in_last_group(&mut msgs, &skip);
+        assert_eq!(repaired, 1, "only the older orphan is repaired");
+        let results: Vec<_> = msgs
+            .iter()
+            .filter(|m| m.tool_call_id.as_deref() == Some("gemini-call-0"))
+            .collect();
+        // Exactly one placeholder: the older group. The pending one stays free
+        // for spawn_resume to inject the real answer.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content_text(), INTERRUPTED_MARKER);
+        assert!(
+            msgs.last().unwrap().tool_calls.is_some(),
+            "the pending suspension must remain the last turn, unrepaired"
+        );
     }
 
     // ─── broken_argument_calls (truncation guard) ────────────────────

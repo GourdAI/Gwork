@@ -499,6 +499,12 @@
                                                           "intent_chain_desc":  "Behält beim Komprimieren einen kompakten Index früherer Nutzeranfragen (sehr geringe Kosten), damit der Agent nicht auf bereits erledigte Ziele zurückfällt",
                                                           "hint":  "Historienfenster: Wie viele der letzten Nachrichten stets unkomprimiert bleiben.\nReservierte Ausgabe: absoluter Spielraum für die nächste Antwort des Modells; Auslösepunkt = Modellfenster − Reserve − Runden-Puffer.\nKomprimierungs-Auslöser: löst nur FRÜHER aus (der kleinere der beiden Werte gilt); 100 bedeutet keine zusätzliche Vorverlegung.\nKomprimierungsziel: wie tief jede Komprimierung geht — höhere Werte komprimieren flacher und lösen häufiger aus"
                                                       },
+                                     "identity": {
+                                       "title": "Assistenten-Identität",
+                                       "assistant_name": "Assistentenname",
+                                       "assistant_name_placeholder": "Standard GWork",
+                                       "hint": "Wird im Kopf jeder Assistentenantwort angezeigt (Avatar + Name), Standard GWork\nLeeren und speichern stellt den Standardnamen wieder her"
+                                     },
                                      "skills":  {
                                                           "title":  "Skill-Listen-Budget",
                                                           "budget_fraction":  "Listen-Budget (% des Fensters)",
@@ -991,8 +997,16 @@
     "turn_tools":  "Tool-Aufrufe",
     "turn_thinking":  "Gedankengänge",
     "turn_agents":  "Subagenten",
-    "turn_thought_only":  "Eine Weile nachgedacht",
+    "turn_done": "Fertig",
+    "batch_running": "Wird ausgeführt",
+    "batch_done": "Verarbeitet",
+    "turn_stopped": "Gestoppt",
+    "turn_suspended": "Angehalten",
     "turn_process_texts":  "Zwischenschritte",
+    "turn_tools_one": "Tool-Aufruf",
+    "turn_thinking_one": "Gedankengang",
+    "turn_agents_one": "Subagent",
+    "turn_process_texts_one": "Zwischenschritt",
                  "phase_thinking":  "Denkt gerade",
                  "phase_text":  "Schreibt",
                  "phase_waiting":  "Wartet auf Antwort",

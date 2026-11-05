@@ -26,8 +26,10 @@
     'use strict';
 
     /* 过程行：这些是「agent 干了什么」的证据，轮结束后可收起。
-       注意 .tool-batch-group 自身内部还有 .tool-card，但它作为整体一个视觉单元计数一次。 */
-    var PROCESS_SELECTOR = '.thinking-block, .tool-card, .tool-batch-group, .agent-card';
+       注意 .tool-batch-group 自身内部还有 .tool-card，但它作为整体一个视觉单元计数一次。
+       .turn-batch-header 是运行态批次盖子（app-turn-batch.js）：它本身也是过程证据的
+       一行入口，轮结束后随成员一起收起；buildSummary 不对其计数（它不是工具/思考本身）。 */
+    var PROCESS_SELECTOR = '.thinking-block, .tool-card, .tool-batch-group, .agent-card, .turn-batch-header';
 
     /* 【自己保留可见】的元素：错误、max-token、系统提示、HITL / 问答交互卡、文件变更卡
        （app.css:684-692 记录过「刻意保留盒式」的踩坑），以及 turn-tail 行。
@@ -158,6 +160,7 @@
         if (cl.contains('tool-card')) return 'tool';
         if (cl.contains('thinking-block')) return 'thinking';
         if (cl.contains('agent-card')) return 'agent';
+        if (cl.contains('turn-batch-header')) return 'batch-header';
         if (cl.contains('md-content')) return 'text';
         return 'other';
     }
@@ -165,8 +168,29 @@
     /* 摘要文案：i18n 优先，缺失/异常一律回落中文（与项目其它动态标签一致）。
        【为何不能只判 v !== key】GourdI18n.t 在不同语言包缺键时可能返回【另一个】裸 key，
        或返回空串/非字符串；只比对传入的 key 会把 `chat.turn_agents` 之类的技术标识
-       直接显示给用户。故统一按「非空、字符串、且不像 i18n key」三重条件校验。 */
-    function summaryText(stats, t) {
+       直接显示给用户。故统一按「非空、字符串、且不像 i18n key」三重条件校验。
+       【形态（用户拍板，对标 WorkBuddy 状态行）】「已完成 14s · 87 次工具调用 · 32 段思考」：
+       状态词 + 耗时在前，过程统计在后；耗时/状态来自 trace 徽标的 data 属性
+       （readTurnMeta），旧历史无该数据时省略耗时段、状态词回落「已完成」。 */
+    function formatElapsed(ms) {
+        if (ms == null || !(ms >= 0)) return null;
+        var s = Math.round(ms / 1000);
+        if (s < 1) return '<1s';   // 亚秒轮次不写 "0s"（会被读成「没执行」，与 trace 徽标同口径）
+        if (s >= 3600) {
+            var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+            return h + 'h' + (m > 0 ? ' ' + m + 'min' : '') + (r > 0 ? ' ' + r + 's' : '');
+        }
+        if (s >= 60) { var mm = Math.floor(s / 60), rr = s % 60; return rr > 0 ? mm + 'min ' + rr + 's' : mm + 'min'; }
+        return s + 's';
+    }
+
+    function statusWord(status, tr) {
+        if (status === 'stopped') return tr('chat.turn_stopped', '已停止');
+        if (status === 'suspended') return tr('chat.turn_suspended', '已挂起');
+        return tr('chat.turn_done', '已完成');   // done 与旧历史无状态数据同口径
+    }
+
+    function summaryText(stats, t, meta) {
         var trans = typeof t === 'function' ? t : null;
         var parts = [];
         function tr(key, fallback) {
@@ -177,12 +201,37 @@
             if (/^(chat|app|history|queue|settings)\.[\w.]+$/.test(v.trim())) return fallback;
             return v;
         }
-        if (stats.tools > 0) parts.push(String(stats.tools) + ' ' + tr('chat.turn_tools', '次工具调用'));
-        if (stats.thinking > 0) parts.push(String(stats.thinking) + ' ' + tr('chat.turn_thinking', '段思考'));
-        if (stats.agents > 0) parts.push(String(stats.agents) + ' ' + tr('chat.turn_agents', '次子代理'));
-        if (stats.texts > 0) parts.push(String(stats.texts) + ' ' + tr('chat.turn_process_texts', '段过程'));
-        if (parts.length === 0) return tr('chat.turn_thought_only', '已思考');
+        var head = statusWord(meta && meta.status, tr);
+        var elapsed = formatElapsed(meta && meta.elapsedMs);
+        if (elapsed) head += ' ' + elapsed;
+        parts.push(head);
+        /* 计数词单复数：英语等语言 n=1 必须用单数（"1 tool call" 而非 "1 tool calls"）。
+           _one 键在 12 份语言包齐备（locale-parity 键集一致守护）；缺键/异常时
+           tr 回落中文量词形态（中文单复数同形，"1 次工具调用" 本就正确）。 */
+        function countPart(n, keyOne, keyMany, fbOne, fbMany) {
+            if (n === 1) return '1 ' + tr(keyOne, fbOne);
+            return String(n) + ' ' + tr(keyMany, fbMany);
+        }
+        if (stats.tools > 0) parts.push(countPart(stats.tools, 'chat.turn_tools_one', 'chat.turn_tools', '次工具调用', '次工具调用'));
+        if (stats.thinking > 0) parts.push(countPart(stats.thinking, 'chat.turn_thinking_one', 'chat.turn_thinking', '段思考', '段思考'));
+        if (stats.agents > 0) parts.push(countPart(stats.agents, 'chat.turn_agents_one', 'chat.turn_agents', '次子代理', '次子代理'));
+        if (stats.texts > 0) parts.push(countPart(stats.texts, 'chat.turn_process_texts_one', 'chat.turn_process_texts', '段过程', '段过程'));
         return parts.join(' · ');
+    }
+
+    /* 轮终态元数据：trace 徽标是 trace 帧的唯一 DOM 落点（appendTraceBadge 写
+       data-elapsed-ms / data-turn-status），折叠模块拿不到帧对象，只能从徽标读。
+       徽标不存在（旧历史/异常）返回 {} —— 摘要回落「已完成」且无耗时，不编造数字。 */
+    function readTurnMeta(bubble) {
+        if (!bubble || !bubble.querySelector) return {};
+        var badge = bubble.querySelector('.msg-trace');
+        if (!badge || !badge.getAttribute) return {};
+        var out = {};
+        var ms = badge.getAttribute('data-elapsed-ms');
+        if (ms != null && ms !== '' && isFinite(Number(ms))) out.elapsedMs = Number(ms);
+        var st = badge.getAttribute('data-turn-status');
+        if (st) out.status = st;
+        return out;
     }
 
     /* DOM 副作用：对单个已结束轮的 .msg-bubble 应用折叠。
@@ -202,6 +251,11 @@
             for (var m = 0; m < marked.length; m++) marked[m].removeAttribute('data-turn-process');
             if (existing) existing.parentNode.removeChild(existing);
             bubble.classList.remove('turn-compact-open');
+            /* 失败/无正文轮的过程证据不得被批次收口藏住：把本气泡内被批次折叠的成员
+               全部展开（盖子同步回 open 态）。成功轮有折叠决策，不会走到这里。 */
+            if (typeof window !== 'undefined' && window.GourdTurnBatch && window.GourdTurnBatch.revealAll) {
+                try { window.GourdTurnBatch.revealAll(bubble); } catch (e) { /* 展示增强 */ }
+            }
             return false;
         }
 
@@ -223,27 +277,45 @@
         }
 
         var stats = buildSummary(decision.process);
-        var label = summaryText(stats, opts.translate);
+        var meta = readTurnMeta(bubble);
+        var label = summaryText(stats, opts.translate, meta);
         var toggle = existing;
         var created = !toggle;
+        /* 【盖子归位】跨页缝合（app-history.js stitchPrependedRunRows）会把被删行气泡的
+           全部内容子节点（含已插好的盖子）搬进存活行气泡中部 —— 盖子于是落在过程组
+           中间；重跑 compactBubble 时若复用 existing 而不归位，展开后过程行又跑到盖子
+           上方（用户报的 bug 形态在 prepend 缝合路径复发）。不变量：盖子必须紧贴
+           decision.process[0] 之前；不满足就移动（insertBefore 同节点 = move，监听器保留）。 */
+        function placeToggle(tg) {
+            var anchor = decision.process[0];
+            if (anchor && anchor.parentNode === bubble) {
+                // 用 children 的 indexOf 判定相邻（不依赖 nextSibling，契约测试的
+                // 极简假 DOM 与真实 DOM 同口径）；不相邻才移动。
+                var kids = bubble.children || [];
+                var iTg = Array.prototype.indexOf.call(kids, tg);
+                var iAn = Array.prototype.indexOf.call(kids, anchor);
+                // iTg<0 = 首次创建尚未插入，必须插；已插入且紧邻 anchor 之前才跳过。
+                if (iTg < 0 || iTg !== iAn - 1) bubble.insertBefore(tg, anchor);
+            } else if (tg.parentNode !== bubble) {
+                bubble.insertBefore(tg, bubble.firstChild);
+            }
+        }
         if (!toggle) {
             toggle = document.createElement('button');
             toggle.type = 'button';
             toggle.className = 'turn-compact-toggle';
             toggle.setAttribute('aria-expanded', 'false');
-            // 插在最终正文之前：正文直出，摘要行是正文上方的一条细分隔带
-            var anchor = decision.keep.filter(function (e) { return isMdContent(e); })[0];
-            if (anchor && bubble.querySelector) {
-                // 找第一个正文块在气泡里的位置（跳过已在正文前的 toggle）
-                var firstText = null;
-                for (var k = 0; k < bubble.children.length; k++) {
-                    if (isMdContent(bubble.children[k]) && hasVisibleText(bubble.children[k])) { firstText = bubble.children[k]; break; }
-                }
-                if (firstText) bubble.insertBefore(toggle, firstText);
-                else bubble.insertBefore(toggle, bubble.firstChild);
-            } else {
-                bubble.insertBefore(toggle, bubble.firstChild);
-            }
+            // 【accordion 盖子】摘要行必须插在【过程组最前】（第一个过程行之前），
+            // 展开时过程内容在盖子【下方】向下展开 —— 与 WorkBuddy「已完成 14s ›」
+            // 及各家 transcript 折叠的展开方向一致。
+            // 历史两次错位都源于把锚点定在正文侧：① 旧实现找「第一个有文本的
+            // md-content」会命中过程正文，把盖子插到过程区前面但过程行不算折叠组；
+            // ② 上一轮改成插在【最终正文】之前，盖子落到过程组【尾部】，展开后全部
+            // 过程行显示在盖子上方 —— 正是用户报的「折叠展开时内容显示到上面去了」。
+            // 不变量：盖子之前不得出现任何 [data-turn-process] 行（契约测试钉死）。
+            var anchor = decision.process[0];
+            if (anchor && anchor.parentNode === bubble) bubble.insertBefore(toggle, anchor);
+            else bubble.insertBefore(toggle, bubble.firstChild);
             // 事件委托到气泡本身，避免每张卡各挂一个监听器；切换类即可，不改过程行 DOM
             toggle.addEventListener('click', function (ev) {
                 ev.stopPropagation();
@@ -251,6 +323,9 @@
                 toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
             });
             toggle.setAttribute('data-turn-compact-bound', '1');
+            placeToggle(toggle);
+        } else {
+            placeToggle(toggle);
         }
         toggle.textContent = label;
         /* 记下统计维度（不是文案本身）：i18n:localeChanged 时据此按新语言重算文案，
@@ -348,7 +423,9 @@
             if (!raw) continue;
             try {
                 var s = JSON.parse(raw);
-                tg.textContent = summaryText(s, translate);
+                // 耗时/状态不存按钮属性：trace 徽标可能晚于首次折叠到达（回放补帧），
+                // 重译时从气泡现读，才能把后到的耗时补进摘要。
+                tg.textContent = summaryText(s, translate, readTurnMeta(tg.parentNode));
             } catch (e) { /* 单个按钮脏数据不影响其余 */ }
         }
     }
@@ -381,6 +458,8 @@
         classifyChildren: classifyChildren,
         buildSummary: buildSummary,
         summaryText: summaryText,
+        readTurnMeta: readTurnMeta,
+        formatElapsed: formatElapsed,
         compactBubble: compactBubble,
         applyTurnCompact: applyTurnCompact,
         clearTurnCompact: clearTurnCompact,
