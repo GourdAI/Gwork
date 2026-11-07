@@ -471,6 +471,11 @@ impl ToolRegistry {
         permission: &PermissionSettings,
         gate: Option<&ToolGate>,
     ) -> Vec<ToolDefinition> {
+        if permission.tools.is_empty() {
+            tracing::warn!(
+                "permission.tools allowlist is empty; treating it as '**' (all tools) so the model can still see and call them"
+            );
+        }
         self.order
             .iter()
             .filter_map(|name| {
@@ -484,9 +489,26 @@ impl ToolRegistry {
     }
 
     /// Check if a tool is allowed by permission config.
+    ///
+    /// An **empty** `tools` allowlist means "all built-ins", not "none". This is
+    /// the Qoder / `PermissionSettings::default()` semantic and it is load-bearing
+    /// for model visibility: `definitions()` filters through this method, so a
+    /// settings file that loads without a `permission.tools` key (a fresh
+    /// workspace, a partial save, a migrate from an older schema) used to filter
+    /// OUT EVERY tool — including `skillread`/`skillsearch`/`skillrefresh`,
+    /// which the skills summary explicitly tells the model to call. The request
+    /// then went out with no `tools` key at all and the model, seeing no callable
+    /// tools, answered with a one-line intent declaration that the ReAct loop
+    /// faithfully treated as the final answer ("task ended unfinished").
+    ///
+    /// An explicit non-empty allowlist is still honoured exactly; only "no
+    /// allowlist was configured" is fail-open. `disallowedTools` always wins.
     pub fn is_allowed(&self, name: &str, permission: &PermissionSettings) -> bool {
         if permission.disallowed_tools.iter().any(|d| d == name) {
             return false;
+        }
+        if permission.tools.is_empty() {
+            return true;
         }
         permission.tools.iter().any(|pattern| {
             pattern == "**" || pattern == name || Self::glob_match(pattern, name)
@@ -905,5 +927,68 @@ mod tests {
         let defs = reg.definitions(&p, None);
         assert!(!defs.iter().any(|d| d.function.name == "bash"));
         assert!(defs.iter().any(|d| d.function.name == "read"));
+    }
+
+    /// REGRESSION: a settings file with no `permission.tools` key (fresh
+    /// workspace, partial save, old schema) must NOT blind the model. The
+    /// Qoder/default semantics treat an empty allowlist as "all tools"; the
+    /// old `any()` returned false for every tool, `tools` was omitted from the
+    /// request, and the model could only answer with a pure-text intent
+    /// declaration that the ReAct loop ended the run on.
+    #[test]
+    fn empty_allowlist_is_fail_open_not_blind() {
+        let reg = ToolRegistry::default_registry();
+        let mut p = PermissionSettings::default();
+        p.tools = vec![];
+        let defs = reg.definitions(&p, None);
+        assert!(
+            defs.len() > 10,
+            "an empty allowlist must still offer the built-in toolset, got {}",
+            defs.len()
+        );
+        // The skills summary explicitly tells the model to call `skillread`;
+        // the skill tools must never be filtered away while that text is present.
+        for skill_tool in ["skillread", "skillsearch", "skillrefresh"] {
+            assert!(
+                defs.iter().any(|d| d.function.name == skill_tool),
+                "{skill_tool} must stay visible or the skills feature is a dead end"
+            );
+        }
+        // An explicit non-empty allowlist is still honoured exactly.
+        p.tools = vec!["read".to_string()];
+        let narrowed = reg.definitions(&p, None);
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].function.name, "read");
+        // ...and `disallowedTools` still wins over the fail-open fallback.
+        p.tools = vec![];
+        p.disallowed_tools = vec!["bash".to_string()];
+        let blocked = reg.definitions(&p, None);
+        assert!(blocked.iter().any(|d| d.function.name == "read"));
+        assert!(!blocked.iter().any(|d| d.function.name == "bash"));
+    }
+
+    /// The skills check must close the loop, not stop at visibility. `execute`
+    /// never consulted `permission.tools` (only the `ToolGate` blacklist), so
+    /// before the fix the skill tools were callable but invisible — the skills
+    /// summary told the model to use `skillread` while no such definition was
+    /// offered. After the fix both axes agree even with an empty allowlist.
+    #[tokio::test]
+    async fn empty_allowlist_keeps_skill_tools_both_visible_and_executable() {
+        let reg = ToolRegistry::default_registry();
+        let mut p = PermissionSettings::default();
+        p.tools = vec![];
+        let defs = reg.definitions(&p, None);
+        let gate = crate::tools::ToolGate::from_permission(&p);
+        let c = ctx(None, "call-1");
+        for name in ["skillread", "skillsearch", "skillrefresh"] {
+            assert!(defs.iter().any(|d| d.function.name == name), "{name} not offered");
+            assert!(gate.allows(name, false), "{name} refused by the gate");
+            let out = reg.execute(name, serde_json::json!({}), &c).await;
+            assert!(
+                !out.text.contains("not available to this agent") && !out.text.contains("Unknown tool"),
+                "{name} was visible but not executable: {}",
+                out.text
+            );
+        }
     }
 }

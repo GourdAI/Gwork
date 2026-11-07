@@ -1,0 +1,20 @@
+import { llmModelMap } from '@/uni_modules/uni-ai-x/config.uts'
+
+export type ModelCapabilitySummary = {
+	// 配置的所有模型中是否存在支持图片理解的模型
+	hasImageModel: boolean
+}
+
+export function getModelCapabilitySummary(): ModelCapabilitySummary {
+	const summary: ModelCapabilitySummary = {
+		hasImageModel: false
+	}
+	llmModelMap.forEach((provider) => {
+		provider.models.forEach(model => {
+			if (model.image == true) {
+				summary.hasImageModel = true
+			}
+		})
+	})
+	return summary
+}

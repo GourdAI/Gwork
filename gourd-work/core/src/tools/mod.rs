@@ -8,5 +8,6 @@ pub mod builtin;
 pub mod code;
 pub mod registry;
 pub mod web;
+pub mod web_retry;
 
 pub use registry::{ToolRegistry, ToolSpec, ToolContext, ToolOutput, ToolGate, SuspendKind, SuspendRequest};

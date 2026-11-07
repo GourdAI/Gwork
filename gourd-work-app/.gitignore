@@ -1,0 +1,10 @@
+# 根 .gitignore 第 24 行有全局 `*.md`，会静默吞掉本模块内所有 Markdown。
+# 子目录 .gitignore 优先级高于根，且 gourd-work-app/ 及其父目录均未被排除，
+# 故此处用 ! 可重新包含（git 只禁止「父目录已被忽略」时的再包含）。
+# 交付文档（差异清单 / 集成说明）、上游 Apache 许可证与各 uni_modules 变更记录均需入库。
+!*.md
+
+# Edge 探针每次运行都会生成临时 profile（实测 20 个目录 / 5057 文件 / 267MB）。
+# 13 张截图与 metrics.json 是验证证据，保持可见；只忽略浏览器缓存目录。
+mobile/.probe/edge-*/
+vendor/uni-ai-x/.probe/edge-*/

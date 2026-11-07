@@ -1,0 +1,134 @@
+import { reactive } from 'vue'
+import { createDemoMarkdownBlock } from '@/demo/markdown/demo-markdown.uts'
+
+export type DemoMarkdownScenario = {
+	id: string
+	label: string
+	prompt: string
+}
+
+export const FULL_MARKDOWN_SCENARIO_ID = 'full'
+
+export const demoMarkdownScenarios: DemoMarkdownScenario[] = [
+	{ id: FULL_MARKDOWN_SCENARIO_ID, label: '完整的Markdown', prompt: '生成完整的 Markdown 测试文档' },
+	{ id: 'heading', label: '标题', prompt: '持续生成 Markdown 标题测试数据' },
+	{ id: 'list', label: '列表', prompt: '持续生成 Markdown 列表测试数据' },
+	{ id: 'table', label: '表格', prompt: '持续生成 Markdown 表格测试数据' },
+	{ id: 'quote', label: '引用', prompt: '持续生成 Markdown 引用测试数据' },
+	{ id: 'code', label: '代码', prompt: '持续生成 Markdown 代码块测试数据' },
+	{ id: 'link', label: '链接', prompt: '持续生成 Markdown 链接测试数据' },
+	{ id: 'math', label: '公式', prompt: '持续生成 Markdown 数学公式测试数据' },
+	{ id: 'mermaid', label: '图表', prompt: '持续生成 Mermaid 图表测试数据' },
+	{ id: 'gantt', label: '甘特图', prompt: '持续生成 Mermaid 甘特图测试数据' },
+	{ id: 'divider', label: '分割线', prompt: '持续生成 Markdown 分割线测试数据' },
+	{ id: 'paragraph', label: '长文本', prompt: '持续生成 Markdown 长文本测试数据' },
+	{ id: 'mixed', label: '混合', prompt: '持续生成混合 Markdown 测试数据' }
+] as DemoMarkdownScenario[]
+
+export type DemoMarkdownRuntimeState = {
+	runId: number
+	scenarioId: string
+	scenarioLabel: string
+	running: boolean
+	blockCount: number
+	receivedChars: number
+	elapsed: number
+}
+
+export const demoMarkdownState = reactive<DemoMarkdownRuntimeState>({
+	runId: 0,
+	scenarioId: '',
+	scenarioLabel: '',
+	running: false,
+	blockCount: 0,
+	receivedChars: 0,
+	elapsed: 0
+})
+
+let selectedScenarioId = ''
+let nextBlockIndex = 0
+let startedAt = 0
+let receivedChars = 0
+let completedBlocks = 0
+let statsTimer = 0
+
+function scenarioById(scenarioId: string): DemoMarkdownScenario | null {
+	return demoMarkdownScenarios.find((item: DemoMarkdownScenario): boolean => item.id == scenarioId) ?? null
+}
+
+function publishDemoStats() {
+	demoMarkdownState.blockCount = completedBlocks
+	demoMarkdownState.receivedChars = receivedChars
+	demoMarkdownState.elapsed = startedAt == 0 ? 0 : Date.now() - startedAt
+}
+
+function clearStatsTimer() {
+	if (statsTimer != 0) clearInterval(statsTimer)
+	statsTimer = 0
+}
+
+export function selectDemoMarkdownScenario(scenarioId: string): DemoMarkdownScenario | null {
+	const scenario = scenarioById(scenarioId)
+	if (scenario == null) return null
+	selectedScenarioId = scenario.id
+	return scenario
+}
+
+export function beginDemoMarkdownRun(): boolean {
+	const scenario = scenarioById(selectedScenarioId)
+	if (scenario == null) return false
+	clearStatsTimer()
+	nextBlockIndex = 0
+	receivedChars = 0
+	completedBlocks = 0
+	startedAt = Date.now()
+	demoMarkdownState.runId++
+	demoMarkdownState.scenarioId = scenario.id
+	demoMarkdownState.scenarioLabel = scenario.label
+	demoMarkdownState.running = true
+	publishDemoStats()
+	statsTimer = setInterval(() => {
+		publishDemoStats()
+	}, 500)
+	return true
+}
+
+export function nextDemoMarkdownBlock(): string {
+	nextBlockIndex++
+	return createDemoMarkdownBlock(demoMarkdownState.scenarioId, nextBlockIndex)
+}
+
+export function activeDemoMarkdownScenarioId(): string {
+	return demoMarkdownState.scenarioId
+}
+
+export function reportDemoMarkdownSnapshot(charCount: number, blockCount: number, elapsed: number) {
+	if (!demoMarkdownState.running) return
+	receivedChars = charCount
+	completedBlocks = blockCount
+	startedAt = Date.now() - elapsed
+	publishDemoStats()
+}
+
+export function finishDemoMarkdownRun() {
+	if (!demoMarkdownState.running) return
+	clearStatsTimer()
+	publishDemoStats()
+	demoMarkdownState.running = false
+}
+
+export function resetDemoMarkdownStats() {
+	finishDemoMarkdownRun()
+	selectedScenarioId = ''
+	nextBlockIndex = 0
+	startedAt = 0
+	receivedChars = 0
+	completedBlocks = 0
+	demoMarkdownState.runId++
+	demoMarkdownState.scenarioId = ''
+	demoMarkdownState.scenarioLabel = ''
+	demoMarkdownState.running = false
+	demoMarkdownState.blockCount = 0
+	demoMarkdownState.receivedChars = 0
+	demoMarkdownState.elapsed = 0
+}

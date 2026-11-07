@@ -1,0 +1,149 @@
+import { MarkdownToken } from '@/uni_modules/uni-cmark/utssdk/interface.uts'
+import type { MarkdownTextRenderBlock, CodePresentationLine } from './markdown-text.uts'
+import { markdownCodeTokenToRichTextNodes } from './markdown-rich-text.uts'
+import { requestCachedCodeText, ParseCodeTextRes } from './parseCode.uts'
+
+function escapeCodeHtml(text: string): string {
+	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+function codeNodeHtml(node: UTSJSONObject): string {
+	if (node['type'] == 'text') return escapeCodeHtml((node['text'] as string | null) ?? '')
+	const name = node['name'] as string | null
+	if (name == 'br') return '<br/>'
+	if (name == null) return ''
+	let html = '<' + name
+	const attrs = node['attrs'] as UTSJSONObject | null
+	if (attrs != null) {
+		const style = attrs['style'] as string | null
+		if (style != null) html += ' style="' + escapeCodeHtml(style) + '"'
+	}
+	html += '>'
+	const children = node['children'] as UTSJSONObject[] | null
+	if (children != null) for (let i = 0; i < children.length; i++) html += codeNodeHtml(children[i])
+	return html + '</' + name + '>'
+}
+
+function buildCodeLineHtml(text: string, language: string, tokens: MarkdownToken[][]): string {
+	// 原生 rich-text 会折叠空块，用占位空格保留空行；源码仍保存在 line.text。
+	const token: MarkdownToken = {
+		type: 'code_block', lang: language,
+		text: text.length == 0 ? '\u00A0' : text,
+		codeTokens: text.length == 0 ? [] as MarkdownToken[][] : tokens
+	}
+	const nodes = markdownCodeTokenToRichTextNodes(token)
+	let html = ''
+	for (let i = 0; i < nodes.length; i++) html += codeNodeHtml(nodes[i])
+	return html
+}
+
+function appendCodeLineSuffix(html: string, suffix: string): string {
+	if (suffix.length == 0) return html
+	const close = html.lastIndexOf('</pre>')
+	if (close >= 0) return html.slice(0, close) + escapeCodeHtml(suffix) + html.slice(close)
+	return html + escapeCodeHtml(suffix)
+}
+
+// Reuse complete line boundaries when preparing a new immutable HTML snapshot.
+function prepareCodeHtml(block: MarkdownTextRenderBlock, old: MarkdownTextRenderBlock | null) {
+	const lines = block.codeLines ?? []
+	const previous = old?.codeLines ?? []
+	const open = '<div style="height:22px;line-height:22px;white-space:pre;">'
+	const close = '</div>'
+	let stable = 0
+	let prefixLength = 0
+	if (old?.codeHtml != null) {
+		while (stable < lines.length && stable < previous.length &&
+			(lines[stable] === previous[stable] || lines[stable].html == previous[stable].html)) {
+			prefixLength += open.length + lines[stable].html.length + close.length
+			stable++
+		}
+	}
+	const tail: string[] = []
+	for (let i = stable; i < lines.length; i++) tail.push(open + lines[i].html + close)
+	block.codeHtml = (old?.codeHtml ?? '').slice(0, prefixLength) + tail.join('')
+	block.codeContentHeight = (Math.max(1, lines.length) * 22).toString() + 'px'
+}
+
+// Publish source immediately; highlighting replaces the same blocks asynchronously.
+const codePreparationRevisions = new Map<string, number>()
+
+export function prepareCodeBlocks(messageId: string, blocks: MarkdownTextRenderBlock[],
+	ready: (blocks: MarkdownTextRenderBlock[]) => void, previous: MarkdownTextRenderBlock[] = []) {
+	const codeBlocks = blocks.filter((block: MarkdownTextRenderBlock): boolean => block.kind == 'code')
+	const htmlSnapshots = new Map<string, MarkdownTextRenderBlock>()
+	for (let i = 0; i < previous.length; i++) htmlSnapshots.set(previous[i].key, previous[i])
+	const requestRevisions = new Map<string, number>()
+	for (let i = 0; i < codeBlocks.length; i++) {
+		const block = codeBlocks[i]
+		const key = messageId + '\u001f' + block.key
+		const nextRevision = (codePreparationRevisions.get(key) ?? 0) + 1
+		codePreparationRevisions.set(key, nextRevision)
+		requestRevisions.set(block.key, nextRevision)
+	}
+	const publish = () => {
+		// Snapshot identity must change for row caches; unchanged line objects stay shared.
+		ready(blocks.map((block: MarkdownTextRenderBlock): MarkdownTextRenderBlock => {
+			if (block.kind != 'code') return block
+			prepareCodeHtml(block, htmlSnapshots.get(block.key) ?? null)
+			const snapshot = { ...block }
+			htmlSnapshots.set(block.key, snapshot)
+			return snapshot
+		}))
+	}
+	codeBlocks.forEach((block: MarkdownTextRenderBlock) => {
+		const old = previous.find((item: MarkdownTextRenderBlock): boolean => item.key == block.key && item.language == block.language)
+		const oldLines = old?.codeLines ?? [] as CodePresentationLine[]
+		const oldHighlighted = old?.codeHighlightedText ?? ''
+		block.codeHighlightedText = block.text.startsWith(oldHighlighted) ? oldHighlighted : ''
+		block.codeTokens = block.codeHighlightedText.length > 0 ? old?.codeTokens ?? [] as MarkdownToken[][] : [] as MarkdownToken[][]
+		const texts = block.text.replace(/\r\n/g, '\n').split('\n')
+		const lines = [] as CodePresentationLine[]
+		let samePrefix = true
+		for (let i = 0; i < texts.length; i++) {
+			if (i >= oldLines.length || oldLines[i].text != texts[i]) samePrefix = false
+			if (samePrefix) {
+				lines.push(oldLines[i])
+			} else if (i < oldLines.length && oldHighlighted.length > 0 &&
+				oldHighlighted.startsWith(texts.slice(0, i).join('\n') + (i > 0 ? '\n' : '')) &&
+				oldHighlighted.split('\n').length == i + 1 &&
+				texts[i].startsWith(oldHighlighted.split('\n')[i])) {
+				const stableText = oldHighlighted.split('\n')[i]
+				const suffix = texts[i].slice(stableText.length)
+				lines.push({ text: texts[i], html: appendCodeLineSuffix(oldLines[i].html, suffix) })
+			} else {
+				const tokens = i < block.codeTokens.length ? [block.codeTokens[i]] : [] as MarkdownToken[][]
+				lines.push({ text: texts[i], html: buildCodeLineHtml(texts[i], block.language, tokens) })
+			}
+		}
+		block.codeLines = lines
+		block.codeHeight = (Math.max(1, texts.length) * 22 + 16).toString() + 'px'
+	})
+	publish()
+	codeBlocks.forEach((block: MarkdownTextRenderBlock) => {
+		const texts = block.text.replace(/\r\n/g, '\n').split('\n')
+		const count = block.isComplete ? texts.length : Math.min(texts.length, block.codeCompleteLines ?? texts.length - 1)
+		const completedText = texts.slice(0, count).join('\n')
+		if (completedText.length == 0 || completedText == block.codeHighlightedText) return
+		const highlightedCount = block.codeHighlightedText.length == 0 ? 0 : block.codeHighlightedText.split('\n').length
+		const unchangedCount = completedText.startsWith(block.codeHighlightedText + '\n') ? highlightedCount : 0
+		const requestRevision = requestRevisions.get(block.key) ?? 0
+		const requestText = block.text
+		requestCachedCodeText((result: ParseCodeTextRes) => {
+			if (result.error != null) return
+			const revisionKey = messageId + '\u001f' + block.key
+			if (codePreparationRevisions.get(revisionKey) != requestRevision || block.text != requestText) return
+			if (block.text.replace(/\r\n/g, '\n').split('\n').slice(0, count).join('\n') != completedText) return
+			block.codeTokens = result.lines
+			block.codeHighlightedText = completedText
+			const lines = (block.codeLines ?? [] as CodePresentationLine[]).slice()
+			for (let i = unchangedCount; i < count; i++) {
+				const tokens = i < result.lines.length ? [result.lines[i]] : [] as MarkdownToken[][]
+				const html = buildCodeLineHtml(lines[i].text, block.language, tokens)
+				if (html != lines[i].html) lines[i] = { text: lines[i].text, html: html }
+			}
+			block.codeLines = lines
+			publish()
+		}, messageId, block.key, completedText, block.language)
+	})
+}

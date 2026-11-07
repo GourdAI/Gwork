@@ -129,7 +129,8 @@ fn probe_event_seq(line: &str) -> Option<i64> {
     }
 }
 
-/// Read a bare string field (`"type"` / `"runId"`) out of a raw line.
+/// Read a bare string field (`"type"`, `"runId"`, or an `args` attribution key)
+/// out of a raw line.
 ///
 /// Whitespace-tolerant around the colon: the Rust kernel writes compact
 /// `"type":"text"`, the Java kernel can emit `"type" : "text"`. Whichever
@@ -162,21 +163,71 @@ fn probe_string_field(line: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Which main-line delta kind a frame is, if any.
+/// Read one attribution key from the `args` object of a raw line.
 ///
-/// Deltas owned by a sub-agent (`args.agentName` present) are excluded: they
-/// are routed into a per-agent card by `resolveAgentState`, and merging deltas
-/// from different agents into one frame would put text in the wrong card. The
-/// main-line deltas (the 99%) carry no `agentName` and are safe to coalesce.
-fn delta_kind_of(frame_type: Option<&str>, line: &str) -> Option<&'static str> {
-    if line.contains("\"agentName\"") {
-        return None;
-    }
+/// Restricting the probe to the substring after `"args"` matters: `text` is
+/// serialized before the flattened `extra` map, so a delta whose content
+/// happens to contain the literal `"agentName":"..."` must not be mistaken for
+/// a sub-agent frame (or worse, borrow another agent's bucket). Main-line
+/// frames have no `args` and get the same empty-string fields as before.
+fn probe_args_string_field(line: &str, key: &str) -> Option<String> {
+    const ARGS_KEY: &str = "\"args\"";
+    let at = line.find(ARGS_KEY)? + ARGS_KEY.len();
+    probe_string_field(&line[at..], key)
+}
+
+/// Which delta kind a frame is, if any.
+///
+/// Both main-line and sub-agent `text`/`reason` deltas are append-only on the
+/// frontend, so **any** run of consecutive same-owner deltas is safe to
+/// coalesce. The old implementation dropped every frame carrying `agentName`
+/// from coalescing (`line.contains("\"agentName\"") => None`) to avoid mixing
+/// different agents' text into one card — but that left 50-66% of the lines in
+/// real long sessions (sub-agent reasoning) completely uncoalesced: a 158k-line
+/// session returned ~80k replay frames and blew the frontend's 12s loading
+/// budget. Ownership is now expressed by [`delta_owner_of`] instead: deltas from
+/// different agents / invocations / runs / phases form separate buckets.
+fn delta_kind_of(frame_type: Option<&str>) -> Option<&'static str> {
     match frame_type {
         Some("text") => Some("text"),
         Some("reason") => Some("reason"),
         _ => None,
     }
+}
+
+/// Ownership bucket for a delta frame. Two deltas may only be merged when this
+/// key is identical, so text never lands in the wrong agent card.
+///
+/// The frontend routes a delta into the card keyed by `args.invocationId`, or
+/// (for old frames) `agentName + ':' + description`. Two deltas may share a
+/// bucket only when the whole tuple below matches, so text never lands in the
+/// wrong card and deltas from two turns/invocations never merge. Main-line
+/// frames have none of the `args` attribution fields and fall back to empty
+/// strings. `runId`/`phase` are top-level but also participate in the bucket.
+///
+/// `probe_args_string_field` finds the first quoted value for a key inside
+/// `args`, without building a `serde_json::Value` tree in pass 1. `runId` and
+/// `phase` are declared `Frame` fields, so their first match is the top-level
+/// value. There are no `unwrap`s: a field missing from either kernel's JSON
+/// simply contributes an empty string to the bucket.
+fn delta_owner_of(line: &str, run_id: Option<&str>) -> String {
+    let field = |key: &str| probe_args_string_field(line, key).unwrap_or_default();
+    // Length-prefixed so values containing `|` can never make two different
+    // attribution tuples produce the same key.
+    let mut owner = String::new();
+    for value in [
+        run_id.unwrap_or("").to_string(),
+        field("agentName"),
+        field("description"),
+        field("invocationId"),
+        probe_string_field(line, "phase").unwrap_or_default(),
+    ] {
+        owner.push_str(&value.len().to_string());
+        owner.push(':');
+        owner.push_str(&value);
+        owner.push('|');
+    }
+    owner
 }
 
 /// The probe-pass record for one line. The 99% of lines outside the selected
@@ -185,18 +236,22 @@ struct ProbeLine {
     line: String,
     seq: Option<i64>,
     kind: Option<&'static str>,
+    /// Only populated for delta frames; identifies which append-only stream the
+    /// delta belongs to. Consecutive deltas with a different owner must not be
+    /// merged (see [`delta_owner_of`]).
+    owner: String,
     is_user: bool,
     run_id: Option<String>,
 }
 
-/// Coalesce a run of consecutive same-kind main-line delta frames into one.
+/// Coalesce a run of consecutive delta frames from one owner bucket into one.
 ///
 /// `text`/`reason` are append-only on the frontend (`appendContentChunk(...,
 /// true)` / `appendReasonChunk`), so concatenating N deltas into one frame is
-/// an exact projection. Owner fields (`phase`, `runId`, `createdAt`) come from
-/// the **first** frame; `eventSeq` comes from the **last** frame, so the
-/// frontend's `lastEventSeq` cursor still covers every seq in the run and the
-/// live gate (`seq <= lastEventSeq → drop`) deduplicates correctly.
+/// an exact projection. Owner fields (`phase`, `runId`, `createdAt`, `args`)
+/// come from the **first** frame; `eventSeq` comes from the **last** frame,
+/// so the frontend's `lastEventSeq` cursor still covers every seq in the run
+/// and the live gate (`seq <= lastEventSeq → drop`) deduplicates correctly.
 fn push_coalesced(out: &mut Vec<serde_json::Value>, run: &mut Vec<serde_json::Value>) {
     if run.is_empty() {
         return;
@@ -245,12 +300,20 @@ fn load_replay_window_at(path: &PathBuf, mode: ReplayMode) -> ReplayWindow {
         if line.trim().is_empty() {
             continue;
         }
+        let run_id = probe_string_field(&line, "runId");
         let frame_type = probe_string_field(&line, "type");
+        let kind = delta_kind_of(frame_type.as_deref());
+        let owner = if kind.is_some() {
+            delta_owner_of(&line, run_id.as_deref())
+        } else {
+            String::new()
+        };
         probes.push(ProbeLine {
             seq: probe_event_seq(&line),
-            kind: delta_kind_of(frame_type.as_deref(), &line),
+            kind,
+            owner,
             is_user: frame_type.as_deref() == Some("user"),
-            run_id: probe_string_field(&line, "runId"),
+            run_id,
             line,
         });
     }
@@ -330,11 +393,12 @@ fn load_replay_window_at(path: &PathBuf, mode: ReplayMode) -> ReplayWindow {
         _ => None,
     };
 
-    // Pass 2: parse only the selected lines. A run of consecutive same-kind
-    // main-line deltas is coalesced; any other frame flushes the run first,
-    // preserving ordering and round boundaries exactly.
+    // Pass 2: parse only the selected lines. A run of consecutive deltas with
+    // the same (kind, owner) is coalesced; any other frame or a different owner
+    // flushes the run first, preserving ordering and round boundaries exactly.
     let mut delta_run: Vec<serde_json::Value> = Vec::new();
     let mut delta_kind: Option<&'static str> = None;
+    let mut delta_owner: String = String::new();
     for p in &probes[start..end] {
         if let Some(b) = before_seq {
             if !p.seq.map(|s| s < b).unwrap_or(false) {
@@ -344,9 +408,13 @@ fn load_replay_window_at(path: &PathBuf, mode: ReplayMode) -> ReplayWindow {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&p.line) else {
             continue;
         };
-        if p.kind != delta_kind {
+        if p.kind != delta_kind || (p.kind.is_some() && p.owner != delta_owner) {
             push_coalesced(&mut out.events, &mut delta_run);
             delta_kind = p.kind;
+            delta_owner.clear();
+            if p.kind.is_some() {
+                delta_owner.push_str(&p.owner);
+            }
         }
         if p.kind.is_some() {
             delta_run.push(v);
@@ -828,9 +896,15 @@ impl SessionStore {
         // the draft would only add a redundant frame per tool call to files that
         // already reach tens of megabytes — and the frontend explicitly notes its
         // replay path "theoretically never sees" this type.
+        // Ephemeral frames (progress-only) are not persisted.
+        //
+        // `tps_progress` is emitted up to twice a second while a model is
+        // streaming; persisting it would both bloat files that already reach
+        // tens of megabytes and make replay re-render every historical speed
+        // window. Replay is driven by the authoritative `context_size` frame.
         if matches!(
             frame.frame_type.as_str(),
-            "action_args" | "action_draft" | "agent_progress" | "reason_start"
+            "action_args" | "action_draft" | "agent_progress" | "reason_start" | "tps_progress"
         ) {
             return;
         }
@@ -861,10 +935,13 @@ impl SessionStore {
     ///
     /// This does two sequential raw-text passes and never builds a `Value`
     /// tree for a line outside the requested window:
-    ///  * pass 1 probes `eventSeq` / `type` / `runId` with substring scans
-    ///    (no JSON parse) to locate the window's line range and count rounds;
-    ///  * pass 2 parses only the lines in that range, then **projects**
-    ///    consecutive same-type `text`/`reason` deltas into one frame.
+///  * pass 1 probes `eventSeq` / `type` / `runId` and the agent attribution
+///    fields with substring scans (no JSON parse) to locate the window's line
+///    range and count rounds;
+///  * pass 2 parses only the lines in that range, then **projects**
+///    consecutive `text`/`reason` deltas from the same owner bucket into one
+///    frame. Main-line and sub-agent streams, and different agents /
+///    invocations / runs / phases, are never mixed.
     ///
     /// The projection is a *derived view*, not the durable log: it keeps the
     /// last delta's `eventSeq`/`createdAt` so `lastEventSeq` and the live
@@ -1038,36 +1115,245 @@ impl SessionStore {
         })
     }
 
-    /// Per-tool `action_start` counts for `/web/chat/session/tool-usage`.
+    /// Total `action_start` count across all tools for the tool-usage endpoint.
     ///
-    /// The endpoint needs only the `toolName` of `action_start` frames — a tiny
-    /// fraction of the stream — so it must never materialise the frames. This
-    /// walks the file line-by-line, substring-filters for `"action_start"` (the
-    /// same trick `usage_ledger` uses), and parses only the survivors, keeping
-    /// peak memory at O(distinct tools). An 84 MB session and an 8 KB one cost
-    /// the same resident memory.
-    pub fn tool_usage_counts(&self, id: &str) -> std::collections::HashMap<String, u64> {
+    /// Kept as its own scan rather than merged into `skill_usage`/`memory_usage`
+    /// so each aggregation stays independently testable; all three use the
+    /// same substring-prefiltered line walk that never materialises frames.
+    pub fn tool_call_total(&self, id: &str) -> u64 {
         let path = self.stream_file(id);
         offload(move || {
-            let mut counts = std::collections::HashMap::new();
             let Ok(file) = std::fs::File::open(&path) else {
-                return counts;
+                return 0;
             };
             let reader = BufReader::new(file);
+            let mut total: u64 = 0;
             for line in reader.lines().filter_map(|l| l.ok()) {
                 if !line.contains("\"action_start\"") {
                     continue;
                 }
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if v.get("type").and_then(|t| t.as_str()) == Some("action_start") {
-                        if let Some(tool) = v.get("toolName").and_then(|t| t.as_str()) {
-                            *counts.entry(tool.to_string()).or_insert(0) += 1;
-                        }
+                    if v.get("type").and_then(|t| t.as_str()) == Some("action_start")
+                        && v.get("toolName").and_then(|t| t.as_str()).is_some()
+                    {
+                        total += 1;
                     }
                 }
             }
-            counts
+            total
         })
+    }
+
+    /// Skill-call aggregation for `/web/chat/session/tool-usage`.
+    ///
+    /// Java's `SessionToolUsageService` groups calls by the **skill name**
+    /// (`skillread`'s `name` arg / `skillsearch`'s `query` arg), not the tool
+    /// name, so the panel can show one row per skill with a `×count`. The
+    /// stream's `action_start` frames carry both `toolName` and full `args`,
+    /// and they *are* persisted (only broadcast is filtered), so the stream is
+    /// the single source here — no messages fallback needed (skill calls are
+    /// never dropped from the stream).
+    ///
+    /// `skillrefresh`/`skilllist` carry no skill identifier; they group under
+    /// the bare tool name, exactly like Java's `fallbackSkillName`.
+    pub fn skill_usage(&self, id: &str) -> SkillUsage {
+        let path = self.stream_file(id);
+        offload(move || {
+            let mut usage = SkillUsage::default();
+            let Ok(file) = std::fs::File::open(&path) else {
+                return usage;
+            };
+            let reader = BufReader::new(file);
+            for line in reader.lines().filter_map(|l| l.ok()) {
+                if !line.contains("skill") {
+                    continue;
+                }
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if v.get("type").and_then(|t| t.as_str()) != Some("action_start") {
+                    continue;
+                }
+                let Some(tool) = v.get("toolName").and_then(|t| t.as_str()) else {
+                    continue;
+                };
+                if !matches!(tool, "skillread" | "skillsearch" | "skillrefresh" | "skilllist") {
+                    continue;
+                }
+                // Skill identifier: `name` (skillread) / `query` (skillsearch);
+                // missing on skilllist/skillrefresh and on malformed args.
+                let args = v.get("args").and_then(|a| a.as_object());
+                let skill = args
+                    .and_then(|a| {
+                        ["name", "query", "skill"]
+                            .iter()
+                            .find_map(|k| a.get(*k).and_then(|x| x.as_str()))
+                    })
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        if tool == "skillread" || tool == "skillsearch" {
+                            "(unknown)".to_string()
+                        } else {
+                            tool.to_string()
+                        }
+                    });
+                usage.record(&skill, tool);
+            }
+            usage
+        })
+    }
+
+    /// Memory usage aggregation for `/web/chat/session/tool-usage`.
+    ///
+    /// The panel's「记忆是否更新」row must be driven by `memory_extract`
+    /// calls. Memory tool frames are **never** persisted to the stream in the
+    /// Java kernel (the `WebToolVisibilityPolicy` filters them before the
+    /// frontend), and this kernel mirrors that on the broadcast side; the
+    /// durable fact therefore lives in the messages file — the assistant
+    /// message's `toolCalls` array carries the declared call, no matter what
+    /// the stream dropped. `exists` stays false when neither file is on disk,
+    /// so the frontend renders its structured empty state instead of
+    /// "unknown".
+    ///
+    /// Line-level failures degrade to skipping the line (same discipline as
+    /// `usage_ledger`): a half-written tail line is normal while a run is in
+    /// flight, and failing the whole read would blank the panel for the
+    /// duration of every active session.
+    pub fn memory_usage(&self, id: &str) -> (bool, MemoryUsage) {
+        let stream_path = self.stream_file(id);
+        let messages_path = self.messages_file(id);
+        offload(move || {
+            // The stream is authoritative for tool-call *facts* when present
+            // (it is written even when frames are filtered from broadcast);
+            // fall back to messages for sessions the stream never saw.
+            let mut usage = MemoryUsage::default();
+            let mut exists = false;
+            if let Ok(mut file) = std::fs::File::open(&stream_path) {
+                exists = true;
+                usage = MemoryUsage::from_stream(&mut file);
+            }
+            if !exists {
+                if let Ok(file) = std::fs::File::open(&messages_path) {
+                    exists = true;
+                    usage = MemoryUsage::from_messages(file);
+                }
+            }
+            (exists, usage)
+        })
+    }
+}
+
+/// Aggregated skill-call usage for one session (the `skills` array of the
+/// `/web/chat/session/tool-usage` response).
+///
+/// Rows are kept in first-seen order and grouped by (skill, tool), mirroring
+/// Java's `skillGroups: Map<skill, Map<tool, count>>` — the panel renders one
+/// row per group with a `×count`.
+#[derive(Debug, Default, Clone)]
+pub struct SkillUsage {
+    /// (skill name, tool name) → count, insertion-ordered.
+    rows: Vec<((String, String), u64)>,
+}
+
+impl SkillUsage {
+    fn record(&mut self, skill: &str, tool: &str) {
+        if let Some(entry) = self
+            .rows
+            .iter_mut()
+            .find(|((s, t), _)| s == skill && t == tool)
+        {
+            entry.1 += 1;
+            return;
+        }
+        self.rows.push(((skill.to_string(), tool.to_string()), 1));
+    }
+
+    /// Rows as (skill, tool, count), sorted by count desc then skill asc —
+    /// the panel renders them as-is with no client-side sort.
+    pub fn sorted_rows(self) -> Vec<(String, String, u64)> {
+        let mut rows: Vec<(String, String, u64)> = self
+            .rows
+            .into_iter()
+            .map(|((s, t), c)| (s, t, c))
+            .collect();
+        rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        rows
+    }
+}
+
+/// Aggregated memory-tool usage for one session (the `memory` object of the
+/// `/web/chat/session/tool-usage` response).
+#[derive(Debug, Default, Clone)]
+pub struct MemoryUsage {
+    pub extract_count: u64,
+    pub total_count: u64,
+    /// Distinct memory tool names seen, in first-seen order.
+    pub names: Vec<String>,
+}
+
+impl MemoryUsage {
+    fn record(&mut self, tool: &str) {
+        self.total_count += 1;
+        if tool == "memory_extract" {
+            self.extract_count += 1;
+        }
+        if !self.names.iter().any(|n| n == tool) {
+            self.names.push(tool.to_string());
+        }
+    }
+
+    /// Walk the stream's `action_start` frames. Substring pre-filter keeps the
+    /// scan cost at the same order as `usage_ledger` on files that reach tens
+    /// of megabytes.
+    fn from_stream(file: &mut std::fs::File) -> Self {
+        let mut usage = Self::default();
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            if !line.contains("memory_") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if v.get("type").and_then(|t| t.as_str()) != Some("action_start") {
+                continue;
+            }
+            if let Some(tool) = v.get("toolName").and_then(|t| t.as_str()) {
+                if tool.starts_with("memory_") {
+                    usage.record(tool);
+                }
+            }
+        }
+        usage
+    }
+
+    /// Walk the messages file: assistant messages declare calls in
+    /// `toolCalls[{name}]`. `deserialize` of `ChatMessage` is avoided — the
+    /// raw shape is stable and this must not fail on messages that carry
+    /// fields the struct has not modelled.
+    fn from_messages(file: std::fs::File) -> Self {
+        let mut usage = Self::default();
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            if !line.contains("memory_") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(calls) = v.get("toolCalls").and_then(|t| t.as_array()) else {
+                continue;
+            };
+            for call in calls {
+                if let Some(name) = call.get("name").and_then(|n| n.as_str()) {
+                    if name.starts_with("memory_") {
+                        usage.record(name);
+                    }
+                }
+            }
+        }
+        usage
     }
 }
 
@@ -2031,11 +2317,12 @@ mod tests {
         store.append_stream_frame(id, &Frame::action_args(id, "c1", 128));
         store.append_stream_frame(id, &Frame::agent_progress(id, "explore", "d", "i1", "read"));
         store.append_stream_frame(id, &Frame::reason_start(id, 0));
+        store.append_stream_frame(id, &Frame::tps_progress(id, 500, 40, Some(860)));
         store.append_stream_frame(id, &Frame::action_start(id, "write", "c1", serde_json::json!({})));
         store.append_stream_frame(id, &Frame::done(id));
 
         let types = persisted_types(&store, id);
-        for transient in ["action_draft", "action_args", "agent_progress", "reason_start"] {
+        for transient in ["action_draft", "action_args", "agent_progress", "reason_start", "tps_progress"] {
             assert!(
                 !types.contains(&transient.to_string()),
                 "{} is progress-only and must not be persisted; got {:?}",
@@ -2458,20 +2745,132 @@ mod tests {
         assert_eq!(w.events[2]["args"]["type"], "text");
     }
 
+    /// Helper: a delta owned by a sub-agent, mirroring the real wire shape
+    /// (`args.agentName` / `args.invocationId` + top-level runId / phase).
+    fn agent_delta(text: &str, seq: i64, run: &str, agent: &str, inv: &str, phase: &str) -> String {
+        serde_json::json!({
+            "type": "reason", "eventSeq": seq, "runId": run, "phase": phase,
+            "createdAt": 1_700_000_000_000_i64 + seq,
+            "text": text,
+            "args": { "agentName": agent, "invocationId": inv }
+        }).to_string()
+    }
+
     #[test]
-    fn replay_window_skips_agent_owned_deltas() {
-        let agent_delta = serde_json::json!({
-            "type": "text", "eventSeq": 4, "runId": "run-1",
-            "createdAt": 1_700_000_000_004_i64, "text": "子代理输出",
-            "args": { "agentName": "explorer" }
-        }).to_string();
-        let lines = vec![frame("user", "问", 1), frame("text", "A", 2), frame("text", "B", 3), agent_delta];
-        let f = StreamScratch::new("agent-delta", &lines);
+    fn replay_window_coalesces_agent_deltas_per_owner() {
+        // Regression for the "some tasks load forever / white screen" report:
+        // 77k+ sub-agent deltas in a 158k-line session were returned one-by-one
+        // because the old probe excluded every frame carrying "agentName".
+        let lines = vec![
+            frame("user", "问", 1),
+            agent_delta("子", 2, "sub-a", "explore", "inv-1", "thinking"),
+            agent_delta("代理", 3, "sub-a", "explore", "inv-1", "thinking"),
+            agent_delta("输出", 4, "sub-a", "explore", "inv-1", "thinking"),
+            frame("done", "", 5),
+        ];
+        let f = StreamScratch::new("agent-coalesce", &lines);
         let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5 });
-        assert_eq!(w.events.len(), 3, "main-line coalesces, agent delta stays separate");
-        assert_eq!(w.events[1]["text"], "AB");
-        assert_eq!(w.events[2]["args"]["agentName"], "explorer");
-        assert!(w.events[2].get("coalesced").is_none());
+        assert_eq!(w.events.len(), 3, "agent run must collapse into one frame: {:?}", w.events);
+        assert_eq!(w.events[1]["text"], "子代理输出");
+        assert_eq!(w.events[1]["eventSeq"], 4, "group max seq must survive");
+        assert_eq!(w.events[1]["coalesced"], 3);
+        assert_eq!(w.events[1]["runId"], "sub-a", "owner fields must survive");
+        assert_eq!(w.events[1]["args"]["agentName"], "explore");
+        assert_eq!(w.events[1]["args"]["invocationId"], "inv-1");
+        assert_eq!(w.events[1]["phase"], "thinking");
+        assert_eq!(w.events[2]["type"], "done");
+    }
+
+    #[test]
+    fn replay_window_never_merges_different_agent_owners() {
+        let lines = vec![
+            frame("user", "问", 1),
+            agent_delta("A1", 2, "sub-a", "explore", "inv-1", "thinking"),
+            agent_delta("A2", 3, "sub-a", "explore", "inv-1", "thinking"),
+            // different agent
+            agent_delta("B1", 4, "sub-b", "general", "inv-2", "thinking"),
+            // same agent, different invocation
+            agent_delta("C1", 5, "sub-a", "explore", "inv-3", "thinking"),
+            // same agent/invocation but different phase
+            agent_delta("D1", 6, "sub-a", "explore", "inv-3", "text"),
+            frame("done", "", 7),
+        ];
+        let f = StreamScratch::new("agent-owner-buckets", &lines);
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5 });
+        assert_eq!(w.events.len(), 6, "user + 4 owner buckets + done: {:?}", w.events);
+        assert_eq!(w.events[1]["text"], "A1A2");
+        assert_eq!(w.events[1]["coalesced"], 2);
+        assert_eq!(w.events[2]["text"], "B1");
+        assert_eq!(w.events[2]["args"]["agentName"], "general");
+        assert_eq!(w.events[3]["text"], "C1");
+        assert_eq!(w.events[3]["args"]["invocationId"], "inv-3");
+        assert_eq!(w.events[4]["text"], "D1");
+        assert_eq!(w.events[4]["phase"], "text");
+        for e in &w.events[2..5] {
+            assert!(e.get("coalesced").is_none(), "single-frame buckets stay unmarked");
+        }
+    }
+
+    #[test]
+    fn replay_window_keeps_mainline_and_agent_deltas_separate() {
+        let lines = vec![
+            frame("user", "问", 1),
+            frame("text", "主", 2),
+            frame("text", "线", 3),
+            agent_delta("子1", 4, "sub-a", "explore", "inv-1", "thinking"),
+            agent_delta("子2", 5, "sub-a", "explore", "inv-1", "thinking"),
+            frame("text", "续", 6),
+            frame("done", "", 7),
+        ];
+        let f = StreamScratch::new("agent-mixed", &lines);
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5 });
+        assert_eq!(w.events.len(), 5, "user + main + agent + main + done: {:?}", w.events);
+        assert_eq!(w.events[1]["text"], "主线");
+        assert!(w.events[1].get("args").is_none(), "main-line frame unchanged");
+        assert_eq!(w.events[2]["text"], "子1子2");
+        assert_eq!(w.events[2]["args"]["agentName"], "explore");
+        assert_eq!(w.events[3]["text"], "续");
+        assert!(w.events[3].get("coalesced").is_none());
+        assert_eq!(w.events[4]["type"], "done");
+    }
+
+    #[test]
+    fn replay_window_ignores_fake_agent_keys_in_delta_text() {
+        // `text` is serialized before the flattened `extra`/`args` map. A
+        // full-line probe would read this quoted content as attribution and
+        // could let two different agents share one bucket.
+        let spoof = |seq: i64| {
+            serde_json::json!({
+                "type": "text", "eventSeq": seq, "runId": "run-main",
+                "phase": "text", "createdAt": 1_700_000_000_000_i64 + seq,
+                "text": "literal \"agentName\":\"spoof\" and \"invocationId\":\"inv-x\"",
+            })
+            .to_string()
+        };
+        let lines = vec![frame("user", "问", 1), spoof(2), spoof(3)];
+        let f = StreamScratch::new("fake-agent-keys", &lines);
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5 });
+        assert_eq!(w.events.len(), 2, "main-line deltas still coalesce: {:?}", w.events);
+        assert!(w.events[1].get("args").is_none());
+        assert_eq!(w.events[1]["coalesced"], 2);
+        assert_eq!(w.events[1]["runId"], "run-main");
+    }
+
+    #[test]
+    fn replay_window_agent_deltas_still_frame_by_frame_in_after_mode() {
+        // `After` is the live recovery cursor: it must stay un-coalesced.
+        let lines = vec![
+            frame("user", "问", 1),
+            agent_delta("A", 2, "sub-a", "explore", "inv-1", "thinking"),
+            agent_delta("B", 3, "sub-a", "explore", "inv-1", "thinking"),
+        ];
+        let f = StreamScratch::new("agent-after", &lines);
+        let w = load_replay_window_at(&f.0, ReplayMode::After { after_seq: 1, limit: None });
+        assert_eq!(w.total_after, 2);
+        assert_eq!(w.events.len(), 2);
+        assert_eq!(w.events[0]["text"], "A");
+        assert_eq!(w.events[1]["text"], "B");
+        assert!(w.events.iter().all(|e| e.get("coalesced").is_none()));
     }
 
     #[test]
@@ -2547,6 +2946,148 @@ mod tests {
             events[1].get("failed").is_none(),
             "回放后成功帧不得凭空出现 failed 字段"
         );
+    }
+
+    // ─── tool-usage aggregation (memory + skills) ──────────────────────────
+    //
+    // Contract source: Java `SessionToolUsageService` + the shared frontend
+    // `app-task-monitor.js` (renderSkills / renderMemory). The Rust port once
+    // answered `[{tool,count}]`, which `data.skills`/`data.memory` turned into
+    // a permanent empty state — the reported "技能调用了但右侧没统计".
+    // These tests pin the aggregation semantics the endpoint relies on.
+
+    fn stream_session(scratch: &Scratch, id: &str, lines: &[String]) -> SessionStore {
+        let dir = scratch.0.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = lines.join("\n") + "\n";
+        std::fs::write(dir.join(format!("{}.stream.ndjson", id)), body).unwrap();
+        SessionStore::with_base(scratch.0.clone())
+    }
+
+    fn start_frame(tool: &str, args: serde_json::Value) -> String {
+        serde_json::json!({
+            "type": "action_start",
+            "sessionId": "work-x",
+            "runId": "run-x",
+            "eventSeq": 1,
+            "phase": "tool",
+            "toolName": tool,
+            "toolTitle": tool,
+            "actionId": "call-1",
+            "createdAt": 1_700_000_000_000_i64,
+            "args": args
+        })
+        .to_string()
+    }
+
+    /// Skill rows group by the **skill identifier** (skillread's `name` arg),
+    /// not by tool — one row per skill with a count, sorted count-desc.
+    #[test]
+    fn skill_usage_groups_by_skill_name_arg() {
+        let s = Scratch::new("skill-usage-groups");
+        let store = stream_session(&s, "work-s", &[
+            start_frame("skillread", serde_json::json!({"name": "agent-browser"})),
+            start_frame("skillread", serde_json::json!({"name": "agent-browser"})),
+            start_frame("skillread", serde_json::json!({"name": "another"})),
+            start_frame("grep", serde_json::json!({"pattern": "x"})),
+        ]);
+        let usage = store.skill_usage("work-s");
+        let rows = usage.sorted_rows();
+        assert_eq!(rows.len(), 2, "普通工具不进技能统计: {:?}", rows);
+        assert_eq!(rows[0], ("agent-browser".into(), "skillread".into(), 2));
+        assert_eq!(rows[1], ("another".into(), "skillread".into(), 1));
+    }
+
+    /// `skillsearch` groups by its `query` arg; a missing identifier falls
+    /// back to the `(unknown)` placeholder so the call fact is never lost
+    /// (same rule as Java `fallbackSkillName`).
+    #[test]
+    fn skill_usage_search_by_query_and_unknown_placeholder() {
+        let s = Scratch::new("skill-usage-query");
+        let store = stream_session(&s, "work-s", &[
+            start_frame("skillsearch", serde_json::json!({"query": "浏览器 自动化"})),
+            start_frame("skillread", serde_json::json!({})),
+        ]);
+        let rows = store.skill_usage("work-s").sorted_rows();
+        assert_eq!(rows.len(), 2);
+        // 同计数按技能名升序："(unknown)" 是 ASCII '('，排在 UTF-8 中文之前
+        // （与 Java result() 的排序口径一致：count desc → name asc）。
+        assert_eq!(rows[0], ("(unknown)".into(), "skillread".into(), 1));
+        assert_eq!(rows[1], ("浏览器 自动化".into(), "skillsearch".into(), 1));
+    }
+
+    /// `memory.updated` is driven by `memory_extract` only (Java
+    /// `MEMORY_EXTRACT_TOOL`): memory_search alone must not flip it, or the
+    /// panel would claim "AI 沉淀了新认知" when nothing was written.
+    #[test]
+    fn memory_usage_updated_requires_memory_extract() {
+        let s = Scratch::new("memory-usage-extract");
+        let store = stream_session(&s, "work-m", &[
+            start_frame("memory_search", serde_json::json!({"query": "x"})),
+            start_frame("memory_search", serde_json::json!({"query": "y"})),
+        ]);
+        let (exists, usage) = store.memory_usage("work-m");
+        assert!(exists);
+        assert_eq!(usage.extract_count, 0, "只读的 memory_search 不得算成已更新");
+        assert_eq!(usage.total_count, 2);
+
+        let s2 = Scratch::new("memory-usage-extract-2");
+        let store2 = stream_session(&s2, "work-m", &[
+            start_frame("memory_extract", serde_json::json!({"key": "k"})),
+        ]);
+        let (_, usage2) = store2.memory_usage("work-m");
+        assert_eq!(usage2.extract_count, 1);
+        assert_eq!(usage2.names, vec!["memory_extract".to_string()]);
+    }
+
+    /// When no stream exists, memory facts must still be recoverable from
+    /// the messages file (assistant `toolCalls`) — the Java fallback order
+    /// (ledger > stream > messages) ends here for this kernel, which has no
+    /// per-session usage ledger.
+    #[test]
+    fn memory_usage_falls_back_to_messages_tool_calls() {
+        let s = Scratch::new("memory-usage-fallback");
+        let line = serde_json::json!({
+            "role": "ASSISTANT",
+            "content": "",
+            "createdAt": 1_i64,
+            "toolCalls": [
+                {"id": "c1", "name": "memory_extract"},
+                {"id": "c2", "name": "read"}
+            ]
+        })
+        .to_string();
+        s.session("work-m2", &[&line]);
+        let store = SessionStore::with_base(s.0.clone());
+        let (exists, usage) = store.memory_usage("work-m2");
+        assert!(exists, "messages 文件存在时 exists 必须为 true");
+        assert_eq!(usage.extract_count, 1);
+        assert_eq!(usage.total_count, 1, "非 memory 工具不进记忆统计");
+    }
+
+    /// A session with neither stream nor messages answers `exists=false` —
+    /// the frontend renders its structured empty state instead of guessing.
+    #[test]
+    fn memory_usage_missing_session_reports_not_exists() {
+        let s = Scratch::new("memory-usage-missing");
+        let store = SessionStore::with_base(s.0.clone());
+        let (exists, usage) = store.memory_usage("work-nope");
+        assert!(!exists);
+        assert_eq!(usage.extract_count, 0);
+    }
+
+    /// `toolCallCount` counts every tool's action_start, not just the
+    /// memory/skill subset — the field stays in the contract for parity.
+    #[test]
+    fn tool_call_total_counts_all_action_starts() {
+        let s = Scratch::new("tool-call-total");
+        let store = stream_session(&s, "work-t", &[
+            start_frame("grep", serde_json::json!({})),
+            start_frame("skillread", serde_json::json!({"name": "a"})),
+            start_frame("memory_extract", serde_json::json!({})),
+            "{\"type\":\"action_end\",\"toolName\":\"grep\"}".to_string(),
+        ]);
+        assert_eq!(store.tool_call_total("work-t"), 3);
     }
 
 }

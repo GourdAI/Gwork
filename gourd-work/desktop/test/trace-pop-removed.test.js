@@ -58,8 +58,16 @@ test('CSS：.trace-pop 族规则与 code.css 覆写全部移除，基础徽标�
 test('TPS / TTFT / 总用时统一在 app-context.js 用量卡，且 12 语言包键齐全', () => {
     assert.match(ctx, /function ctxTpsText\(/, 'TPS 仍在用量卡');
     assert.match(ctx, /function ctxTtftText\(/, 'TTFT 已迁入用量卡');
-    assert.match(ctx, /ctxRow\(GourdI18n\.t\('chat\.output_tps'\)/, 'TPS 行接线');
-    assert.match(ctx, /ctxRow\(GourdI18n\.t\('chat\.ttft'\)/, 'TTFT 行接线');
+    // TPS / TTFT 行改为带 data-ctx-* 标记的专用行函数（实时帧定向改字用），
+    // label 仍取自同一组 i18n 键，且仍必须在 buildContextRows 里接线。
+    assert.match(ctx, /function ctxTpsRow\(/, 'TPS 行构造器仍在用量卡');
+    assert.match(ctx, /data-ctx-tps="1"/, 'TPS 值 span 可供实时帧定向改字');
+    assert.match(ctx, /ctxTpsRow\(/, 'TPS 行接线');
+    assert.match(ctx, /function ctxTtftRow\(/, 'TTFT 行构造器仍在用量卡');
+    assert.match(ctx, /data-ctx-ttft="1"/, 'TTFT 值 span 可供实时帧定向改字');
+    assert.match(ctx, /ctxTtftRow\(/, 'TTFT 行接线');
+    assert.match(ctx, /GourdI18n\.t\('chat\.output_tps'\)/, 'TPS label 键不变');
+    assert.match(ctx, /GourdI18n\.t\('chat\.ttft'\)/, 'TTFT label 键不变');
     const dir = path.join(UI, 'locales');
     const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
     assert.equal(files.length, 12);

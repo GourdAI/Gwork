@@ -1,0 +1,99 @@
+/**
+ * 这里是 uni-app 内置的常用样式变量 + GWork 主题 token。
+ *
+ * 颜色 token 与 gourd-work-app/mobile/css/theme.css 的浅色态对齐：
+ *   --bg #fafafa / --surface #ffffff / --surface-2 #f2f2f4
+ *   --text #141416 / --text-2 #4a4a50 / --muted #9b9ba2
+ *   --border #ececef / --divider #f0f0f2 / --accent #0fbc9b
+ *   --avatar #3b82f6 / --send-bg #d6d6da
+ *
+ * 重要：uni-app-x 的 App 原生渲染不保证支持 `:root[data-theme]` 这类
+ * 全局 CSS 变量选择器与运行时 CSS 变量替换；因此本项目：
+ *   - 静态浅色值用下方 SCSS 变量（编译期展开，跨端稳定）；
+ *   - 深色与三态运行时切换用 common/workbuddy-theme.uts 的 UTS 常量
+ *     与 :style 内联字符串覆盖（见各 .uvue 页面）；
+ *   - 不写 CSS var(--gw-*) 自定义属性，避免 App 端不生效。
+ * 详见 INTEGRATION.md「颜色 token 策略」。
+ */
+
+/* GWork 设计 token（浅色为默认观感） */
+$gw-bg: #fafafa;
+$gw-surface: #ffffff;
+$gw-surface-2: #f2f2f4;
+$gw-text: #141416;
+$gw-text-2: #4a4a50;
+$gw-muted: #9b9ba2;
+$gw-border: #ececef;
+$gw-divider: #f0f0f2;
+$gw-accent: #0fbc9b;
+$gw-accent-ink: #ffffff;
+$gw-avatar: #3b82f6;
+$gw-send-bg: #d6d6da;
+$gw-send-ink: #ffffff;
+$gw-danger-tint: #ffe9e8;
+$gw-danger-ink: #e0574f;
+
+/* 尺寸 token（与 mobile/css/theme.css 对齐） */
+$gw-radius-pill: 999px;
+$gw-radius-card: 28px;
+$gw-radius-sheet: 32px;
+$gw-page-pad: 22px;
+
+/* 行为相关颜色 */
+$uni-color-primary: #007aff;
+$uni-color-success: #4cd964;
+$uni-color-warning: #f0ad4e;
+$uni-color-error: #dd524d;
+
+/* 文字基本颜色 */
+$uni-text-color:#333;//基本色
+$uni-text-color-inverse:#fff;//反色
+$uni-text-color-grey:#999;//辅助灰色，如加载更多的提示信息
+$uni-text-color-placeholder: #808080;
+$uni-text-color-disable:#c0c0c0;
+
+/* 背景颜色 */
+$uni-bg-color:#ffffff;
+$uni-bg-color-grey:#f8f8f8;
+$uni-bg-color-hover:#f1f1f1;//点击状态颜色
+$uni-bg-color-mask:rgba(0, 0, 0, 0.4);//遮罩颜色
+
+/* 边框颜色 */
+$uni-border-color:#c8c7cc;
+
+/* 尺寸变量 */
+$uni-font-size-sm:12px;
+$uni-font-size-base:14px;
+$uni-font-size-lg:16px;
+
+/* 图片尺寸 */
+$uni-img-size-sm:20px;
+$uni-img-size-base:26px;
+$uni-img-size-lg:40px;
+
+/* Border Radius */
+$uni-border-radius-sm: 2px;
+$uni-border-radius-base: 3px;
+$uni-border-radius-lg: 6px;
+$uni-border-radius-circle: 50%;
+
+/* 水平间距 */
+$uni-spacing-row-sm: 5px;
+$uni-spacing-row-base: 10px;
+$uni-spacing-row-lg: 15px;
+
+/* 垂直间距 */
+$uni-spacing-col-sm: 4px;
+$uni-spacing-col-base: 8px;
+$uni-spacing-col-lg: 12px;
+
+/* 透明度 */
+$uni-opacity-disabled: 0.3; // 组件禁用态的透明度
+
+/* 文章场景相关 */
+$uni-color-title: #2C405A; // 文章标题颜色
+$uni-font-size-title:20px;
+$uni-color-subtitle: #555555; // 二级标题颜色
+$uni-font-size-subtitle:26px;
+$uni-color-paragraph: #3F536E; // 文章段落颜色
+$uni-font-size-paragraph:15px;

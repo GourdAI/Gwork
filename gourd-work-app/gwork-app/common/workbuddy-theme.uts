@@ -1,0 +1,217 @@
+/**
+ * GWork 主题状态（UTS 版）
+ * ------------------------------------------------------------
+ * 对应 mobile/js/app.js 的 DEFAULT_STATE.theme / set-theme / loadState / saveState，
+ * 对应 MOBILE-UI-GAP.md 的 D1：三态 system / light / dark，默认 system，浅色为默认观感。
+ *
+ * 颜色策略（见 INTEGRATION.md）：
+ *  - 浅色 token 以 SCSS 常量写在 uni.scss / 页面 <style lang="scss">，与 mobile/css/theme.css 对齐；
+ *  - 深色与运行时切换通过本文件导出的 UTS 常量 + :style 内联字符串覆盖；
+ *  - 不依赖 `:root[data-theme]` 全局 CSS 变量选择器（uni-app-x App 原生渲染不保证支持），
+ *    也不依赖 uni.$emit/$on（跨端参数类型约束较多）；各页 onShow / 主题点击时重读这些 helper。
+ *  - theme.json 只负责系统导航栏/窗口背景的浅深两态（@ 占位符），与页面 token 不冲突。
+ *
+ * 系统态解析：uni.getSystemInfo 的 osTheme(App) / hostTheme(Web/MP)；
+ * 运行时变更：uni.onAppThemeChange(App) / uni.onHostThemeChange(Web/MP)；
+ * 强制态：uni.setAppTheme（仅 App 生效）。
+ * 参考上游实现：uni_modules/uni-ai-x/sdk/index.uts 的 initUiTheme / refreshUiTheme / applyAppTheme。
+ */
+import { DEFAULT_THEME, ACCENT } from '@/common/workbuddy-data.uts'
+
+export type WorkbuddyTokens = {
+	bg: string,
+	surface: string,
+	surface2: string,
+	text: string,
+	text2: string,
+	muted: string,
+	border: string,
+	divider: string,
+	sendBg: string,
+	sendInk: string,
+	avatar: string,
+	accent: string
+}
+
+// 与 mobile/css/theme.css 的 --bg / --surface / --text / --accent 等逐项对齐
+const LIGHT: WorkbuddyTokens = {
+	bg: '#fafafa', surface: '#ffffff', surface2: '#f2f2f4',
+	text: '#141416', text2: '#4a4a50', muted: '#9b9ba2',
+	border: '#ececef', divider: '#f0f0f2', sendBg: '#d6d6da',
+	sendInk: '#ffffff', avatar: '#3b82f6', accent: ACCENT
+}
+const DARK: WorkbuddyTokens = {
+	bg: '#141416', surface: '#1e1e21', surface2: '#2a2a2e',
+	text: '#f5f5f7', text2: '#c3c3c9', muted: '#8a8a92',
+	border: '#303035', divider: '#2c2c31', sendBg: '#3a3a40',
+	sendInk: '#ffffff', avatar: '#3b82f6', accent: ACCENT
+}
+
+
+
+
+export const THEME_STORAGE_KEY: string = 'gwork.workbuddy.theme.v1'
+export const HAPTICS_STORAGE_KEY: string = 'gwork.workbuddy.haptics.v1'
+
+let systemPrefersDarkValue: boolean = false
+let currentThemeValue: string = DEFAULT_THEME
+
+function normalizeTheme(value: string): string {
+	if (value == 'light' || value == 'dark') return value
+	return DEFAULT_THEME
+}
+
+/** 读取持久化主题，脏数据一律回落 system（对齐 app.js loadState 防御） */
+export function readTheme(): string {
+	try {
+		return normalizeTheme(uni.getStorageSync(THEME_STORAGE_KEY) as string)
+	} catch (e) {
+		return DEFAULT_THEME
+	}
+}
+
+/** 当前用户选择的主题（system / light / dark） */
+export function currentTheme(): string {
+	return currentThemeValue
+}
+
+/** 解析为实际渲染观感：system → 宿主偏好；浅色为默认观感 */
+export function isDarkMode(): boolean {
+	if (currentThemeValue == 'dark') return true
+	if (currentThemeValue == 'light') return false
+	return systemPrefersDarkValue
+}
+
+export function tokens(): WorkbuddyTokens {
+	return isDarkMode() ? DARK : LIGHT
+}
+
+/* ---------- 供页面 :style 绑定的内联样式 helper（全部为编译期常量拼接） ---------- */
+export function rootStyle(): string {
+	const t = tokens()
+	return 'background-color:' + t.bg + ';color:' + t.text + ';'
+}
+export function surfaceStyle(): string {
+	const t = tokens()
+	return 'background-color:' + t.surface + ';border-color:' + t.border + ';'
+}
+export function surface2Style(): string {
+	return 'background-color:' + tokens().surface2 + ';'
+}
+export function textStyle(): string {
+	return 'color:' + tokens().text + ';'
+}
+export function text2Style(): string {
+	return 'color:' + tokens().text2 + ';'
+}
+export function mutedStyle(): string {
+	return 'color:' + tokens().muted + ';'
+}
+export function borderStyle(): string {
+	return 'border-color:' + tokens().border + ';'
+}
+export function dividerStyle(): string {
+	return 'background-color:' + tokens().divider + ';'
+}
+export function accentBgStyle(): string {
+	return 'background-color:' + tokens().accent + ';'
+}
+export function accentTextStyle(): string {
+	return 'color:' + tokens().accent + ';'
+}
+export function accentBorderStyle(): string {
+	return 'border-color:' + tokens().accent + ';'
+}
+export function sendButtonStyle(): string {
+	const t = tokens()
+	return 'background-color:' + t.sendBg + ';color:' + t.sendInk + ';'
+}
+export function avatarStyle(): string {
+	return 'background-color:' + tokens().avatar + ';'
+}
+export function trackStyle(): string {
+	return 'background-color:' + tokens().surface2 + ';'
+}
+export function emptyInkStyle(): string {
+	return 'color:' + tokens().border + ';'
+}
+export function scrimStyle(): string {
+	return 'background-color:rgba(0,0,0,' + (isDarkMode() ? '0.60' : '0.42') + ');'
+}
+
+function refreshSystemTheme(): void {
+	uni.getSystemInfo({
+		success: (res: GetSystemInfoResult) => {
+			// #ifdef APP
+			const value = res.appTheme == 'auto' ? res.osTheme! : res.appTheme!
+			systemPrefersDarkValue = value == 'dark'
+			// #endif
+			// #ifdef WEB || MP
+			systemPrefersDarkValue = res.hostTheme! == 'dark'
+			// #endif
+		}
+	})
+}
+
+/**
+ * App.uvue onLaunch 调用：无强制跳转、无配对前置页（D3）。
+ * 仅做主题初始化与系统主题监听。
+ */
+export function initWorkbuddyTheme(): void {
+	currentThemeValue = readTheme()
+	refreshSystemTheme()
+	// #ifdef APP
+	uni.onAppThemeChange((res: AppThemeChangeResult) => {
+		if (res.appTheme == 'auto') refreshSystemTheme()
+		else systemPrefersDarkValue = res.appTheme == 'dark'
+	})
+	// #endif
+	// #ifdef WEB || MP
+	uni.onHostThemeChange((res: OnHostThemeChangeCallbackResult) => {
+		systemPrefersDarkValue = res.hostTheme == 'dark'
+	})
+	// #endif
+}
+
+/**
+ * 我的页主题分段控件调用。
+ * 各 tab 页在 onShow 重读 rootStyle()/surfaceStyle() 等，无需全局事件总线。
+ */
+export function setWorkbuddyTheme(theme: string): void {
+	currentThemeValue = normalizeTheme(theme)
+	try {
+		uni.setStorageSync(THEME_STORAGE_KEY, currentThemeValue)
+	} catch (e) {
+		// 隐私模式/存储不可用：内存态仍可用
+	}
+	// #ifdef APP
+	uni.setAppTheme({
+		theme: currentThemeValue == 'system' ? 'auto' : currentThemeValue,
+		success: () => {
+			if (currentThemeValue == 'system') refreshSystemTheme()
+		},
+		fail: (err: IAppThemeFail) => {
+			console.error('GWork: setAppTheme failed', err.errMsg)
+		}
+	})
+	// #endif
+}
+
+/** 触感开关持久化（图 81，默认开） */
+export function readHaptics(): boolean {
+	try {
+		const raw = uni.getStorageSync(HAPTICS_STORAGE_KEY) as string
+		if (raw == '') return true
+		return raw == '1'
+	} catch (e) {
+		return true
+	}
+}
+
+export function writeHaptics(value: boolean): void {
+	try {
+		uni.setStorageSync(HAPTICS_STORAGE_KEY, value ? '1' : '0')
+	} catch (e) {
+		// 存储不可用：内存态仍可用
+	}
+}

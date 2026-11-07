@@ -348,6 +348,34 @@ impl ChangeLedger {
         Some(self.summarize(&manifest))
     }
 
+    /// Re-open a run's ledger when the run resumes from a suspension.
+    ///
+    /// `finish()` is idempotent on `ready` (a late abnormal callback must not
+    /// re-publish a completed run). But a suspended run is NOT completed: the
+    /// Rust kernel now resumes it with the **same** `runId` (see
+    /// `spawn_resume`), so the writes made after the answer arrive must still be
+    /// published in one final `file_changes` frame. Without this, the second
+    /// `finish()` would see `ready == true` and return `None`, silently dropping
+    /// the resumed segment from the change card.
+    ///
+    /// `revision` is bumped so the frontend's monotonic `upsert` gate accepts the
+    /// new snapshot even when no file happened to change after the resume. The
+    /// manifest's `entries` are kept: the card stays a single cumulative view of
+    /// the whole task (before + after suspension), with undo covering both halves.
+    pub fn reopen(&self, session_id: &str, run_id: &str) {
+        let Some(mut manifest) = self.load_manifest(session_id, run_id) else {
+            return;
+        };
+        if !manifest.ready {
+            return;
+        }
+        manifest.ready = false;
+        manifest.last_status = "CAPTURED".into();
+        manifest.revision += 1;
+        manifest.updated_at = now_ms();
+        let _ = self.save_manifest(session_id, &manifest);
+    }
+
     /// Get a run summary.
     pub fn get_run(&self, session_id: &str, run_id: &str) -> serde_json::Value {
         let session_id = session_id.to_string();
@@ -1190,6 +1218,83 @@ mod tests {
         let reasons = summary["incompleteReasons"].as_array().expect("must be an array");
         assert!(reasons.is_empty(), "a clean finish must not warn: {:?}", reasons);
         std::fs::remove_dir_all(&_ws).ok();
+    }
+
+    // ── reopen(): suspend → resume keeps one runId, one manifest, one card ───
+    //
+    // Reproduce the exact lifecycle from `spawn_resume`: the suspended segment
+    // publishes a `file_changes` frame and marks the manifest `ready`; the answer
+    // arrives and the resumed segment writes more files under the SAME runId;
+    // the final `finish()` must publish a snapshot containing BOTH halves.
+    #[test]
+    fn reopen_lets_a_resumed_run_publish_a_cumulative_snapshot() {
+        let (ws, ledger) = ledger_with_one_change("reopen-cumulative", "s", "r");
+        let first = ledger.finish("s", "r", true).expect("suspend must publish");
+        assert_eq!(first["fileCount"].as_u64(), Some(1));
+        assert!(manifest_of(&ws, "s", "r").ready);
+        let revision_before_reopen = manifest_of(&ws, "s", "r").revision;
+
+        // Without reopen, finish() would hit its `ready` idempotence gate and the
+        // resumed segment's file never reaches the card.
+        ledger.reopen("s", "r");
+        let after = manifest_of(&ws, "s", "r");
+        assert!(!after.ready, "reopen must un-finish the manifest");
+        assert_eq!(
+            after.revision,
+            revision_before_reopen + 1,
+            "revision must advance for the frontend upsert gate"
+        );
+
+        std::fs::write(ws.join("g.txt"), "x\n").unwrap();
+        let before = ledger.before("s", "r", "g.txt").unwrap();
+        std::fs::write(ws.join("g.txt"), "x\ny\n").unwrap();
+        ledger.record("s", "r", "g.txt", before).unwrap();
+
+        let second = ledger.finish("s", "r", true).expect("resume finish must publish");
+        assert_eq!(second["fileCount"].as_u64(), Some(2), "both halves must be in one card");
+        let paths: Vec<&str> = second["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert!(paths.contains(&"f.txt") && paths.contains(&"g.txt"), "got {paths:?}");
+        assert!(
+            second["revision"].as_u64().unwrap() > first["revision"].as_u64().unwrap(),
+            "frontend upsert drops a snapshot whose revision did not advance"
+        );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn reopen_bumps_revision_even_without_new_writes() {
+        // The answer may be rejected / the resumed segment may touch no file, yet
+        // the final frame must still be accepted by the frontend's monotonic gate.
+        let (ws, ledger) = ledger_with_one_change("reopen-no-write", "s", "r");
+        let first = ledger.finish("s", "r", true).unwrap();
+        ledger.reopen("s", "r");
+        let second = ledger.finish("s", "r", true).expect("reopened finish must publish");
+        assert!(second["revision"].as_u64().unwrap() > first["revision"].as_u64().unwrap());
+        assert_eq!(second["fileCount"].as_u64(), Some(1));
+        // A second resume of the same (now finished) manifest must still publish:
+        // ask_user / HITL can suspend more than once within one task.
+        ledger.reopen("s", "r");
+        assert!(
+            ledger.finish("s", "r", true).is_some(),
+            "a second suspend→resume cycle must still publish a final snapshot"
+        );
+        // ...but a plain second finish() with no reopen stays idempotent.
+        assert!(ledger.finish("s", "r", true).is_none(), "finish stays idempotent");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn reopen_without_a_manifest_is_a_no_op() {
+        let ws = temp_workspace("reopen-no-manifest");
+        let ledger = ChangeLedger::new(ws.clone());
+        ledger.reopen("s", "missing"); // must not panic or create an empty manifest
+        assert!(ledger.finish("s", "missing", true).is_none());
+        std::fs::remove_dir_all(&ws).ok();
     }
 
     #[test]

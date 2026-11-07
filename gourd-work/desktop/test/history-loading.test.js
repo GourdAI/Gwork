@@ -648,3 +648,26 @@ test('12 个语言包的三个文案键齐全', () => {
         }
     }
 });
+
+/* ===== 2026-11 白屏止血回归钉：初始 replay 必须有 timeout / abort / 世代归属 =====
+   缺陷现场：裸 $.get 无 timeout，12s 骨架兜底只换 UI 态不作废回调；切会话、
+   点重试后旧请求带着 8 万帧回来仍会重建整页，形成失败卡 + 迟到内容交错。
+   三壳镜像同步历史上多次把单侧修复冲掉，故两壳都锁。 */
+test('★ 初始 replay 止血：timeout + abort + 世代/会话归属 + fragment 捞回（两壳同步）', () => {
+    const repo = path.resolve(__dirname, '..', '..', '..');
+    const files = [
+        path.join('gourd-work', 'desktop', 'ui', 'js', 'app-history.js'),
+        path.join('gourd-ai-tauri', 'ui', 'js', 'app-history.js')
+    ];
+    for (const rel of files) {
+        const src = fs.readFileSync(path.join(repo, rel), 'utf8');
+        assert.match(src, /timeout:\s*HISTORY_LOAD_TIMEOUT_MS/, rel + ' 初始 replay 必须有真实 HTTP 超时');
+        assert.match(src, /_historyLoadGeneration/, rel + ' 必须有加载世代号，切会话/重试后旧响应作废');
+        assert.match(src, /textStatus === 'abort'/, rel + ' abort 不得再叠二次 legacy 请求');
+        assert.match(src, /pendingXhr\.abort\(\)/, rel + ' 12s 降级必须同时断开在途请求');
+        assert.match(src, /replayFragment/, rel + ' fragment 必须提升到闭包作用域供异常兜底捞回');
+        assert.match(src, /legacyFragment/, rel + ' legacy 路径同款兜底不得丢失');
+        assert.match(src, /rp\.code && Number\(rp\.code\) !== 200/, rel + ' 后端 code:200 + 空 events 静默失败必须显式识别');
+        assert.match(src, /if \(sess\._replaying\) return;/, rel + ' 回放进行中 12s 定时器不得误盖失败卡');
+    }
+});

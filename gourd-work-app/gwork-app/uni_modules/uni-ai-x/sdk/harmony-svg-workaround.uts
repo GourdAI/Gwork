@@ -1,0 +1,203 @@
+// #ifdef APP-ANDROID
+import { prepareAndroidSvgSource } from '@/uni_modules/uni-ai-worker-runtime'
+// #endif
+
+export type HarmonySvgWorkaroundConfig = {
+	rasterScale: number
+	enabled: boolean
+	useFileSource: boolean
+	sdkApiVersion: number
+	cacheVariant: string
+}
+
+type SvgImageSourceCallback = (source: string, cacheable: boolean) => void
+
+const HARMONY_SVG_WORKAROUND_VERSION = '2'
+const HARMONY_NATIVE_DATA_URL_MIN_API = 26
+const SVG_DATA_URL_PREFIX = 'data:image/svg+xml;base64,'
+let cachedHarmonySdkApiVersion = -1
+let svgCacheDirectoryReady = false
+let svgCacheDirectoryCreating = false
+let svgCacheDirectoryWaiters = [] as ((ready: boolean) => void)[]
+let svgCacheFileSequence = 0
+let svgStartupCleanupFinished = false
+const svgFilesCreatedDuringCleanup = new Set<string>()
+const svgSourceFiles = new Map<string, string>()
+const svgSourceOrder = [] as string[]
+const pendingSvgWrites = new Map<string, SvgImageSourceCallback[]>()
+const SVG_SOURCE_CACHE_LIMIT = 128
+
+// Only startup orphans can be removed: current-run snapshots may still own file paths.
+export function cleanupPreviousSvgFiles(protectedSources: string[]) {
+	// #ifdef APP-HARMONY || APP-ANDROID
+	const directory = uni.env.CACHE_PATH + '/ai-svg-cache/'
+	const protectedFiles = new Set<string>(protectedSources)
+	const finish = () => {
+		svgStartupCleanupFinished = true
+		svgFilesCreatedDuringCleanup.clear()
+	}
+	uni.getFileSystemManager().readdir({
+		dirPath: directory,
+		success: (result) => {
+			let index = 0
+			const removeNext = () => {
+				if (index >= result.files.length) { finish(); return }
+				const name = result.files[index++]
+				const path = directory + name
+				if (!/^\d+-\d+\.svg$/.test(name) || protectedFiles.has(path) || svgFilesCreatedDuringCleanup.has(path)) {
+					setTimeout(removeNext, 0)
+					return
+				}
+				uni.getFileSystemManager().unlink({ filePath: path, complete: () => { setTimeout(removeNext, 0) } })
+			}
+			removeNext()
+		},
+		fail: () => { finish() }
+	})
+	// #endif
+}
+
+function getHarmonySdkApiVersion(): number {
+	let sdkApiVersion = 0
+	// #ifdef APP-HARMONY
+	if (cachedHarmonySdkApiVersion < 0) {
+		const reportedVersion = uni.getSystemInfoSync().osHarmonySDKAPIVersion
+		cachedHarmonySdkApiVersion = reportedVersion ?? 0
+	}
+	sdkApiVersion = cachedHarmonySdkApiVersion
+	// #endif
+	return sdkApiVersion
+}
+
+function finishSvgCacheDirectoryCreation(ready: boolean) {
+	svgCacheDirectoryReady = ready
+	svgCacheDirectoryCreating = false
+	const waiters = svgCacheDirectoryWaiters
+	svgCacheDirectoryWaiters = [] as ((ready: boolean) => void)[]
+	for (let i = 0; i < waiters.length; i++) waiters[i](ready)
+}
+
+function ensureSvgCacheDirectory(callback: (ready: boolean) => void) {
+	if (svgCacheDirectoryReady) {
+		callback(true)
+		return
+	}
+	svgCacheDirectoryWaiters.push(callback)
+	if (svgCacheDirectoryCreating) return
+	svgCacheDirectoryCreating = true
+
+	// #ifdef APP-HARMONY || APP-ANDROID
+	uni.getFileSystemManager().mkdir({
+		dirPath: uni.env.CACHE_PATH + '/ai-svg-cache',
+		recursive: true,
+		success: () => {
+			finishSvgCacheDirectoryCreation(true)
+		},
+		fail: (error) => {
+			if (error.errCode == 1301005) {
+				finishSvgCacheDirectoryCreation(true)
+				return
+			}
+			console.error('[SvgCache] create cache directory failed: ' + error.errMsg)
+			finishSvgCacheDirectoryCreation(false)
+		}
+	})
+	// #endif
+	// #ifndef APP-HARMONY
+	// #ifndef APP-ANDROID
+	finishSvgCacheDirectoryCreation(false)
+	// #endif
+	// #endif
+}
+
+export function getHarmonySvgWorkaroundConfig(): HarmonySvgWorkaroundConfig {
+	let rasterScale = 1
+	let enabled = false
+	let sdkApiVersion = 0
+	let useFileSource = false
+	// #ifdef APP-HARMONY
+	rasterScale = Math.max(1, Math.min(uni.getWindowInfo().pixelRatio, 3))
+	enabled = true
+	sdkApiVersion = getHarmonySdkApiVersion()
+	useFileSource = sdkApiVersion < HARMONY_NATIVE_DATA_URL_MIN_API
+	// #endif
+	// #ifdef APP-ANDROID
+	useFileSource = true
+	// #endif
+	return {
+		rasterScale,
+		enabled,
+		useFileSource,
+		sdkApiVersion,
+		cacheVariant: (enabled
+			? 'harmony-v' + HARMONY_SVG_WORKAROUND_VERSION + ':' + rasterScale.toString()
+			: 'default') + ':' + (useFileSource ? 'file' : 'data')
+	}
+}
+
+export function prepareHarmonySvgImageSource(dataURL: string, useFileSource: boolean, callback: SvgImageSourceCallback) {
+	// #ifdef APP-ANDROID
+	if (useFileSource) {
+		prepareAndroidSvgSource(dataURL, callback)
+		return
+	}
+	// #endif
+	if (!useFileSource || !dataURL.startsWith(SVG_DATA_URL_PREFIX)) {
+		callback(dataURL, true)
+		return
+	}
+	const cachedPath = svgSourceFiles.get(dataURL)
+	if (cachedPath != null) {
+		callback(cachedPath, true)
+		return
+	}
+	const waiting = pendingSvgWrites.get(dataURL)
+	if (waiting != null) {
+		waiting.push(callback)
+		return
+	}
+	pendingSvgWrites.set(dataURL, [callback])
+	const finishWrite = (source: string, cacheable: boolean) => {
+		if (cacheable && source != dataURL) {
+			svgSourceFiles.set(dataURL, source)
+			svgSourceOrder.push(dataURL)
+			while (svgSourceOrder.length > SVG_SOURCE_CACHE_LIMIT) {
+				const oldest = svgSourceOrder.shift()
+				if (oldest != null) svgSourceFiles.delete(oldest)
+			}
+		}
+		const callbacks = pendingSvgWrites.get(dataURL) ?? [] as SvgImageSourceCallback[]
+		pendingSvgWrites.delete(dataURL)
+		for (let index = 0; index < callbacks.length; index++) callbacks[index](source, cacheable)
+	}
+
+	ensureSvgCacheDirectory((ready: boolean) => {
+		if (!ready) {
+			finishWrite(dataURL, false)
+			return
+		}
+		svgCacheFileSequence += 1
+		const filePath = uni.env.CACHE_PATH + '/ai-svg-cache/' + Date.now().toString()
+			+ '-' + svgCacheFileSequence.toString() + '.svg'
+		if (!svgStartupCleanupFinished) svgFilesCreatedDuringCleanup.add(filePath)
+		// #ifdef APP-HARMONY || APP-ANDROID
+		uni.getFileSystemManager().writeFile({
+			filePath,
+			data: dataURL.substring(SVG_DATA_URL_PREFIX.length),
+			encoding: 'base64',
+			success: () => {
+				finishWrite(filePath, true)
+			},
+			fail: (error) => {
+				console.error('[SvgCache] write cache file failed: ' + error.errMsg)
+				finishWrite(dataURL, false)
+			}
+		})
+		// #endif
+		// #ifndef APP-HARMONY
+		// #ifndef APP-ANDROID
+		finishWrite(dataURL, false)
+		// #endif
+		// #endif
+	})
+}

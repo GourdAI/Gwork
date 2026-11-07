@@ -1,0 +1,37 @@
+const COPY_TOAST_DURATION = 1500
+
+export class Utils {
+	showCopySuccessToast() : void {
+		uni.showToast({
+			title: '复制成功',
+			icon: 'success',
+			duration: COPY_TOAST_DURATION
+		})
+	}
+
+	showCopyFailureToast() : void {
+		uni.showToast({
+			title: '复制失败',
+			icon: 'none',
+			duration: COPY_TOAST_DURATION
+		})
+	}
+
+	// Android 原生 UTS 可切换调度器；蒸汽模式 JS 引擎下回退为当前线程执行。
+	runOnDispatcher(taskName : string, fn : () => void) {
+		// #ifdef APP-ANDROID
+		try {
+			UTSAndroid.getDispatcher(taskName).async((_) => {
+				fn()
+			})
+		} catch (error) {
+			// 蒸汽模式 JS 引擎版下可能不存在 UTSAndroid，直接回退为当前线程执行。
+			fn()
+		}
+		// #endif
+		// #ifndef APP-ANDROID
+		fn()
+		// #endif
+	}
+}
+export default new Utils()

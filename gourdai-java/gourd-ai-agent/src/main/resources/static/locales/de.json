@@ -1264,6 +1264,10 @@
                 "task_elapsed":  "Aufgabenzeit",
                     "turn_input":  "Eingabe dieser Runde",
                     "turn_output":  "Ausgabe dieser Runde",
+                    "batch_done_count":  "{count} Tool-Aufrufe",
+                    "action_bash_done":  "Terminalbefehl ausgeführt",
+                    "action_thinking_done":  "Gedacht",
+                    "batch_thinking_count":  "Nachgedacht: {count}",
                     "messages":  "Nachrichten"
                 },
     "filer":  {

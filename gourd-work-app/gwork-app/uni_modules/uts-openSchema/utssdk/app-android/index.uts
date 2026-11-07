@@ -1,0 +1,30 @@
+import Intent from 'android.content.Intent'
+import Uri from 'android.net.Uri'
+import { OpenSchema, CanOpenURL } from '../interface.uts'
+
+export const openSchema : OpenSchema = function (url : string) {
+  // Standard web/mail intents do not require a package-visibility query.
+  const isMail = /^mailto:/i.test(url)
+  if (isMail || /^https?:\/\//i.test(url) || canOpenURL(url)) {
+    const context = UTSAndroid.getUniActivity()!
+    const uri = Uri.parse(url)
+    const intent = new Intent(isMail ? Intent.ACTION_SENDTO : Intent.ACTION_VIEW, uri)
+    intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    intent.setData(uri)
+    context.startActivity(intent)
+  } else {
+    console.error('[uts-openSchema] url param Error：', JSON.stringify(url))
+    throw new Error('无法打开此链接')
+  }
+}
+
+export const canOpenURL : CanOpenURL = function (url : string) : boolean {
+  if (typeof url === 'string' && url.length > 0) {
+    const context = UTSAndroid.getUniActivity()!
+    const uri = Uri.parse(url)
+    const intent = new Intent(Intent.ACTION_VIEW, uri)
+    return intent.resolveActivity(context.packageManager) != null ? true : false
+  } else {
+    return false
+  }
+}

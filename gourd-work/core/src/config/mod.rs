@@ -232,6 +232,39 @@ pub struct GeneralSettings {
     /// HTTP Basic Auth password (Java `GeneralGroupDo.webAuthPass`).
     #[serde(rename = "webAuthPass", default, skip_serializing_if = "Option::is_none")]
     pub web_auth_pass: Option<String>,
+
+    /// Retry count for MCP-backed tools (Java `GeneralGroupDo.mcpRetries`, default 3).
+    ///
+    /// Java splits its retries at `HarnessEngine.java:1005-1007`:
+    /// `codeSearchTalent` / `websearchTalent` take `options.getMcpRetries()` while
+    /// `webfetchTalent` takes `options.getApiRetries()`. This kernel previously
+    /// modelled only `apiRetries` and used it *solely* for LLM streams
+    /// (`react/mod.rs:470`), so the web tools had no retry budget at all. The
+    /// split is kept here so a settings.json shared with the Java kernel drives
+    /// both kernels identically: `apiRetries` → HTTP web tools, `mcpRetries` →
+    /// the Exa MCP `codesearch` tool.
+    #[serde(rename = "mcpRetries")]
+    pub mcp_retries: u32,
+
+    /// Explicit outbound HTTP proxy for the web tools, e.g. `http://127.0.0.1:7890`.
+    ///
+    /// Empty = fall back to the standard `HTTPS_PROXY` / `ALL_PROXY` /
+    /// `HTTP_PROXY` environment variables, then to a direct connection. Exists
+    /// because the keyless endpoints (`html.duckduckgo.com`, `r.jina.ai`,
+    /// `mcp.exa.ai`) are unreachable from some networks while a system proxy is
+    /// configured in the OS but not exported to the process environment. Java
+    /// has the equivalent per-MCP-server `McpClientProperties.httpProxy`
+    /// (`gourdai-java/.../McpClientProperties.java:83`).
+    #[serde(rename = "webProxy")]
+    pub web_proxy: String,
+
+    /// Wall-clock budget for one web tool call, **including** its retries and
+    /// backoff waits (seconds). Java's `WebfetchTalent.java:99-109` derives this
+    /// as `min(timeout * 2, 120s)`; that cap is exactly what stops a weak network
+    /// turning `maxRetries` into minutes of silence. Default 120s matches Java's
+    /// `MAX_TIMEOUT_MS`. A budget of 0 disables the cap.
+    #[serde(rename = "webRetryBudgetSecs")]
+    pub web_retry_budget_secs: u32,
 }
 
 impl Default for GeneralSettings {
@@ -261,6 +294,9 @@ impl Default for GeneralSettings {
             // credentials are for the remote/exposed deployment case.
             web_auth_user: None,
             web_auth_pass: None,
+            mcp_retries: 3,
+            web_proxy: String::new(),
+            web_retry_budget_secs: 120,
         }
     }
 }
@@ -710,6 +746,30 @@ mod tests {
     fn auto_rethink_can_be_turned_off_explicitly() {
         let s: Settings = serde_json::from_str(r#"{"general":{"autoRethink":false}}"#).unwrap();
         assert!(!s.general.auto_rethink, "the hard-stop mode must remain reachable");
+    }
+
+    /// The web-tool keys are a shared-file contract with the Java kernel: a
+    /// rename here makes a settings.json written by Java read as defaults here.
+    #[test]
+    fn web_tool_keys_use_java_wire_names_and_safe_defaults() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.general.mcp_retries, 3, "Java AgentProperties.mcpRetries = 3");
+        assert_eq!(s.general.api_retries, 3, "Java AgentProperties.apiRetries = 3");
+        assert_eq!(s.general.web_retry_budget_secs, 120, "Java WebfetchTalent.MAX_TIMEOUT_MS");
+        assert!(s.general.web_proxy.is_empty(), "no proxy by default");
+
+        let s: Settings = serde_json::from_str(
+            r#"{"general":{"mcpRetries":5,"webProxy":"http://127.0.0.1:7890","webRetryBudgetSecs":45}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.general.mcp_retries, 5);
+        assert_eq!(s.general.web_proxy, "http://127.0.0.1:7890");
+        assert_eq!(s.general.web_retry_budget_secs, 45);
+
+        let back = serde_json::to_string(&s.general).unwrap();
+        for key in ["mcpRetries", "webProxy", "webRetryBudgetSecs", "apiRetries"] {
+            assert!(back.contains(key), "{key} must round-trip");
+        }
     }
 
     #[test]

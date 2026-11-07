@@ -1,0 +1,90 @@
+import uniAi from '@/uni_modules/uni-ai-x/sdk'
+import { ImgItem, LLMModel } from '@/uni_modules/uni-ai-x/types.uts'
+import { getModelCapabilitySummary } from '@/uni_modules/uni-ai-x/sdk/model-capabilities.uts'
+
+const modelCapabilitySummary = getModelCapabilitySummary()
+
+function ensureImageModel(currentModel: LLMModel): boolean {
+	if (currentModel.image == true) {
+		return true
+	}
+	const content = modelCapabilitySummary.hasImageModel
+		? '当前模型不支持图像理解，请切换为其他模型'
+		: '你当前配的所有模型均不支持图像理解'
+	uni.showModal({
+		title: '提示',
+		content,
+		showCancel: true,
+		cancelText: '取消',
+		confirmText: '去设置',
+		success: (res) => {
+			if (res.confirm) {
+				// 打开系统设置弹窗，由用户自行切换模型
+				uniAi.emitOpenSetting()
+			}
+		}
+	})
+	return false
+}
+
+function addChosenImages(res: UniCloudChooseAndUploadFileResult) {
+	const imgList: ImgItem[] = res.tempFiles.map<ImgItem>((file: UniCloudChooseAndUploadFileItem): ImgItem => {
+		return {
+			path: file.path,
+			name: file.name,
+			size: '0B',
+			type: 'image',
+			uploadPercent: 0
+		}
+	})
+	uniAi.imgList.push(...imgList)
+}
+
+function updateUploadProgress(res: UniCloudChooseAndUploadFileProgressEvent) {
+	const index = uniAi.imgList.findIndex(img => img.path == res.tempFilePath)
+	if (index == -1) {
+		return
+	}
+	const currentImg = uniAi.imgList[index]!
+	currentImg.size = res.total > 1024 ? Math.floor(res.total / 1024) + 'KB' : Math.floor(res.total / 1024) + 'B'
+	currentImg.uploadPercent = Math.floor(res.loaded / res.total * 100)
+}
+
+function updateUploadedImageUrl(file: UniCloudChooseAndUploadFileItem) {
+	const index = uniAi.imgList.findIndex(img => img.path == file.path)
+	if (index == -1) {
+		return
+	}
+	uniCloud.getTempFileURL({
+		fileList: [file.url!],
+	}).then((res: UniCloudGetTempFileURLResult) => {
+		uniAi.imgList[index]!.path = res.fileList[0].tempFileURL
+	})
+}
+
+export function uploadDraftImages(currentModel: LLMModel) {
+	if (!ensureImageModel(currentModel)) {
+		return
+	}
+	if (uniAi.imgList.length >= 9) {
+		uni.showToast({
+			title: '最多上传9张图片',
+			duration: 3000,
+			icon: 'none'
+		})
+		return
+	}
+
+	uniCloud.chooseAndUploadFile({
+		sourceType: ['album', 'camera'],
+		count: 9 - uniAi.imgList.length,
+		sizeType: ['compressed'],
+		type: 'image',
+		onChooseFile: addChosenImages,
+		onUploadProgress: updateUploadProgress
+	}).then((res: UniCloudChooseAndUploadFileResult) => {
+		res.tempFiles.forEach(updateUploadedImageUrl)
+	}).catch((error) => {
+		console.error('chooseAndUploadFile error', error)
+	})
+}

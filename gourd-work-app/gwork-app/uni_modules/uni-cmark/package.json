@@ -1,0 +1,109 @@
+{
+  "id": "uni-cmark",
+  "displayName": "uni-cmark",
+  "version": "1.2.0",
+  "description": "支持 iOS、Web、微信小程序的 Markdown 转 HTML UTS 插件",
+  "keywords": [
+    "uni-cmark"
+],
+  "repository": "",
+  "engines": {
+    "HBuilderX": "^3.6.8",
+    "uni-app": "",
+    "uni-app-x": "^4.85"
+  },
+  "dcloudext": {
+    "type": "uts",
+    "sale": {
+      "regular": {
+        "price": "0.00"
+      },
+      "sourcecode": {
+        "price": "0.00"
+      }
+    },
+    "contact": {
+      "qq": ""
+    },
+    "declaration": {
+      "ads": "无",
+      "data": "插件不采集任何数据",
+      "permissions": "无"
+    },
+    "npmurl": "",
+    "darkmode": "√",
+    "i18n": "√",
+    "widescreen": "√"
+  },
+  "uni_modules": {
+    "dependencies": [],
+    "encrypt": [],
+    "platforms": {
+      "cloud": {
+        "tcb": "√",
+        "aliyun": "√",
+        "alipay": "√"
+      },
+      "client": {
+        "uni-app": {
+          "vue": {
+            "vue2": "-",
+            "vue3": "-"
+          },
+          "web": {
+            "safari": "-",
+            "chrome": "-"
+          },
+          "app": {
+            "vue": "-",
+            "nvue": "-",
+            "android": "-",
+            "ios": "-",
+            "harmony": "-"
+          },
+          "mp": {
+            "weixin": "-",
+            "alipay": "-",
+            "toutiao": "-",
+            "baidu": "-",
+            "kuaishou": "-",
+            "jd": "-",
+            "harmony": "-",
+            "qq": "-",
+            "lark": "-"
+          },
+          "quickapp": {
+            "huawei": "-",
+            "union": "-"
+          }
+        },
+        "uni-app-x": {
+          "web": {
+            "safari": {
+                "extVersion": "1.2.0",
+                "minVersion": ""
+            },
+            "chrome": {
+                "extVersion": "1.2.0",
+                "minVersion": ""
+            }
+          },
+          "app": {
+            "android": "-",
+            "ios": {
+                "extVersion": "1.2.0",
+                "minVersion": "13"
+            },
+            "harmony": "-"
+          },
+          "mp": {
+            "weixin": {
+                "extVersion": "1.2.0",
+                "minVersion": ""
+            }
+          }
+        }
+      }
+    }
+  }
+}

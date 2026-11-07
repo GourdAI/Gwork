@@ -1266,6 +1266,10 @@
                 "task_elapsed":  "Tempo da tarefa",
                     "turn_input":  "Entrada do turno",
                     "turn_output":  "Saída do turno",
+                    "batch_done_count":  "{count} chamadas de ferramenta",
+                    "action_bash_done":  "Comando do terminal executado",
+                    "action_thinking_done":  "Pensado",
+                    "batch_thinking_count":  "Pensado {count} vezes",
                     "messages":  "Mensagens"
                 },
     "filer":  {

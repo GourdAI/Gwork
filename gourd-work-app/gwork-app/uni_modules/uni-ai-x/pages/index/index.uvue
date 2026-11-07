@@ -1,0 +1,304 @@
+<template>
+	<view class="uni-ai-page-root">
+		<view class="uni-ai-page uni-theme-root" ref="uni-ai-page"
+			:class="showMenu ? 'uni-ai-page-showMenu' : ''"
+			>
+			<uni-ai-menu @close-menu="closeMenu" @open-setting="openSetting"></uni-ai-menu>
+			<uni-ai-chat :show-menu="showMenu" @change-menu="changeMenu" @close-menu="closeMenu" @source="openSource"></uni-ai-chat>
+			<view class="uni-ai-menu-mask" :class="showMenu ? 'uni-ai-menu-mask-show' : ''" @click="closeMenu"></view>
+			<fps v-if="showFps" />
+			<!-- #ifndef MP-WEIXIN -->
+			<web-view v-if="showProxyWeb" class="uni-ai-proxy-web" id="proxy-web"
+				src="/uni_modules/uni-ai-x/static/proxy-web/proxy-web.html"
+				@load="proxyWebLoad" @message="proxyWebMsg"></web-view>
+			<!-- #endif -->
+		</view>
+		<uni-ai-x-setting ref="uniAiXSettingRef"></uni-ai-x-setting>
+		<uni-ai-source-sheet v-if="sourceMessageId.length > 0" :sources="selectedSources" :selected-id="selectedSourceId" @close="closeSources" />
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import uniAiMenu from '@/uni_modules/uni-ai-x/components/uni-ai-menu.uvue'
+	import uniAiChat from '@/uni_modules/uni-ai-x/components/uni-ai-chat.uvue'
+	import fps from '@/uni_modules/uni-ai-x/components/fps/fps.uvue'
+	import { uniAi } from '@/uni_modules/uni-ai-x/sdk'
+	import { updateMathLayout } from '@/uni_modules/uni-ai-x/sdk/math-presentation.uts'
+	import { clearCodeHighlightCache, releaseCodeHighlightSessions } from '@/uni_modules/uni-ai-x/sdk/parseCode.uts'
+	// #ifdef APP-ANDROID
+	import { releaseAllUniAiMdStreams } from '@/uni_modules/uni-ai-x/sdk/uni-ai-md-stream-store.uts'
+	// #endif
+	import { MsgItem, SearchSource } from '@/uni_modules/uni-ai-x/types.uts'
+	import uniAiSourceSheet from '@/uni_modules/uni-ai-x/components/uni-ai-source-sheet.uvue'
+	const sourceMessageId = ref('')
+	const selectedSourceId = ref(0)
+	const selectedSources = computed<SearchSource[]>(() => {
+		const message = uniAi.currentChat?.msgList.find((item: MsgItem): boolean => item._id == sourceMessageId.value)
+		return message?.search?.sources ?? [] as SearchSource[]
+	})
+	function openSource(messageId: string, id: number) {
+		const message = uniAi.currentChat?.msgList.find((item: MsgItem): boolean => item._id == messageId)
+		if (message?.search == null || message.search!.sources.length == 0) return
+		if (id > 0 && !message.search!.sources.some((source: SearchSource): boolean => source.id == id)) return
+		sourceMessageId.value = messageId
+		selectedSourceId.value = id
+	}
+	function closeSources() { sourceMessageId.value = '' }
+	watch(() => uniAi.currentChat?.id, () => { closeSources() })
+	watch((): string => uniAi.chat.activeId, (_newId: string, oldId: string) => {
+		// 新会话可能已开始准备高亮，只释放离开会话的状态；最后一批结果仍交付给消息快照。
+		const previous = uniAi.chat.datas.find(chat => chat.id == oldId)
+		previous?.msgList.forEach((msg: MsgItem) => { releaseCodeHighlightSessions(msg._id, true) })
+	}, { flush: 'sync' })
+	onResize((event: OnResizeOptions) => {
+		updateMathLayout(event.size.windowWidth)
+	})
+	// #ifdef APP
+	import checkUpdate from '@/uni_modules/uni-upgrade-center-app/utils/check-update'
+	// #endif
+	// #ifndef MP-WEIXIN
+	import proxyWeb from '@/uni_modules/uni-ai-x/sdk/proxy-web.uts'
+	// #endif
+	
+	const showMenu = ref<boolean>(false)
+	// 仅供聊天组件判断遮罩状态
+	const showFps: boolean = false
+	const uniAiXSettingRef = ref<ComponentPublicInstance | null>(null)
+	onBackPress((): boolean => {
+		if (sourceMessageId.value.length > 0) {
+			closeSources()
+			return true
+		}
+		return false
+	})
+
+	const setMenu = (show: boolean) => {
+		showMenu.value = show
+	}
+
+	const changeMenu = () => {
+		setMenu(!showMenu.value)
+	}
+
+	const closeMenu = () => {
+		setMenu(false)
+	}
+
+	const openSetting = () => {
+		uniAiXSettingRef.value?.$callMethod('open')
+	}
+
+	// 模型不支持图像理解时，点击"去设置"直接打开模型选择弹窗
+	const openModelPopup = () => {
+		uniAiXSettingRef.value?.$callMethod('openModelPopup')
+	}
+
+	onMounted(() => {
+		uniAi.onOpenSetting(openModelPopup)
+		const notices = uniAi.consumeSettingNotices()
+		if (notices.length > 0) {
+			setTimeout(() => {
+				uni.showModal({
+					title: '模型设置已调整',
+					content: notices.join('\n'),
+					showCancel: false,
+					confirmText: '知道了'
+				})
+			}, 300)
+		}
+	})
+
+	onReady(() => {
+		// #ifdef APP
+		checkUpdate().catch((error) => {
+			const result = error as any
+			if (result == null || (result.code != 0 && result.code != -101)) {
+				console.error('检查应用更新失败', error)
+			}
+		})
+		// #endif
+	})
+
+	onUnmounted(() => {
+		// #ifdef APP-ANDROID
+		releaseAllUniAiMdStreams()
+		// #endif
+		clearCodeHighlightCache(true)
+		uniAi.offOpenSetting(openModelPopup)
+		// #ifndef MP-WEIXIN
+		cancelProxyWebRelease()
+		proxyWebMountToken += 1
+		proxyWeb.setEnsureHandler(null)
+		proxyWeb.setRequestListener(null)
+		proxyWeb.release()
+		// #endif
+	})
+
+	// #ifndef MP-WEIXIN
+	// 按会话懒加载：只有当前会话出现公式/图表时才创建 web-view，切换会话后释放
+	const showProxyWeb = ref<boolean>(false)
+	let proxyWebMountToken = 0
+	let proxyWebReleasePending = false
+	let proxyWebReleaseTimer = -1
+
+	const proxyWebMsg = (e: UniWebViewMessageEvent) => {
+		proxyWeb.onWebMsg(e)
+	}
+
+	const tryInitProxyWebContext = (): boolean => {
+		// #ifdef WEB
+		const proxyWebContext = document.getElementById('proxy-web')
+		// #endif
+		// #ifdef APP
+		const proxyWebContext = uni.getElementById('proxy-web') as UniWebViewElement
+		// #endif
+		if (proxyWebContext == null) return false
+		proxyWeb.init(proxyWebContext!)
+		return true
+	}
+
+	const proxyWebLoad = (_e: UniWebViewLoadEvent) => {
+		if (tryInitProxyWebContext()) proxyWeb.markReady()
+	}
+
+	// web-view 由 v-if 挂载后，元素出现即回填上下文；就绪态由 @load / DOMContentLoaded 回调置位
+	const pollProxyWebContext = (token: number, attempt: number) => {
+		if (token != proxyWebMountToken) return
+		if (tryInitProxyWebContext()) return
+		if (attempt >= 50) return
+		setTimeout(() => {
+			pollProxyWebContext(token, attempt + 1)
+		}, 100)
+	}
+
+	const cancelProxyWebRelease = () => {
+		if (!proxyWebReleasePending) return
+		proxyWebReleasePending = false
+		if (proxyWebReleaseTimer >= 0) {
+			clearTimeout(proxyWebReleaseTimer)
+			proxyWebReleaseTimer = -1
+		}
+	}
+
+	const ensureProxyWeb = () => {
+		cancelProxyWebRelease()
+		if (showProxyWeb.value) return
+		proxyWebMountToken += 1
+		console.log('[proxy-web] load: 会话需要渲染公式/图表，创建 WebView')
+		showProxyWeb.value = true
+		pollProxyWebContext(proxyWebMountToken, 0)
+	}
+
+	// 延迟释放：若新会话在同一批次内也需要渲染，会被 ensure/请求取消，避免无谓的销毁重建
+	const scheduleProxyWebRelease = (oldId: string, newId: string) => {
+		if (proxyWebReleasePending) return
+		proxyWebReleasePending = true
+		proxyWebReleaseTimer = setTimeout(() => {
+			proxyWebReleaseTimer = -1
+			if (!proxyWebReleasePending) return
+			proxyWebReleasePending = false
+			proxyWebMountToken += 1
+			if (showProxyWeb.value) {
+				console.log('[proxy-web] release: 会话切换释放 WebView ' + oldId + ' -> ' + newId)
+			}
+			showProxyWeb.value = false
+			proxyWeb.release()
+		}, 0)
+	}
+
+	watch((): string => uniAi.chat.activeId, (newId: string, oldId: string) => {
+		if (oldId.length == 0) return
+		scheduleProxyWebRelease(oldId, newId)
+	}, { flush: 'sync' })
+	// #endif
+
+	onMounted(() => {
+		// #ifdef WEB
+		window.addEventListener('resize', () => {
+			setMenu(window.innerWidth > 960)
+		})
+		setMenu(window.innerWidth > 960)
+		// #endif
+		// #ifndef MP-WEIXIN
+		proxyWeb.setEnsureHandler(() => {
+			ensureProxyWeb()
+		})
+		proxyWeb.setRequestListener(() => {
+			cancelProxyWebRelease()
+		})
+		// #endif
+	})
+</script>
+
+<style lang="scss">
+@import '@/uni_modules/uni-ai-x/static/css/variables.scss';
+
+.uni-ai-page-root {
+	position: absolute;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	left: 0;
+	overflow: hidden;
+}
+
+.uni-ai-proxy-web {
+	position: fixed;
+	top: -1100px;
+	right: 0;
+	width: 100%;
+	height: 400px;
+	z-index: 100;
+}
+
+.uni-ai-page {
+	position: absolute;
+	top: 0;
+	right: 0;
+	justify-content: flex-end;
+	width: 200%;
+	height: 100%;
+	flex-direction: row;
+	background-color: var(--bg-primary);
+	transform: translateX(0);
+	transition: transform 0.3s;
+}
+
+.uni-ai-page-showMenu {
+	transform: translateX(calc(50% - 44px));
+}
+
+.uni-ai-menu-mask {
+	position: absolute;
+	top: 0;
+	right: 0;
+	width: 50%;
+	height: 100%;
+	z-index: 30;
+	background-color: rgba(0, 0, 0, 0.3);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 1s;
+}
+
+.uni-ai-menu-mask-show {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+/* #ifdef H5 */
+@media screen and (min-device-width:960px){
+	.uni-ai-page {
+		width: calc(100% + 260px);
+	}
+	.uni-ai-page { transition: transform 0.3s, width 0.3s; }
+	.uni-ai-page-showMenu {
+		transform: translateX(0) !important;
+		width: calc(100%) !important;
+	}
+	.uni-ai-menu-mask {
+		display: none;
+	}
+}
+/* #endif */
+</style>

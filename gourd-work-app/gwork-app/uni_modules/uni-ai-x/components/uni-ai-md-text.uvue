@@ -1,0 +1,79 @@
+<template>
+	<view v-if="block.kind == 'hr'" class="uni-ai-md-text-hr"></view>
+	<view v-else class="uni-ai-md-text-block" :class="blockClass">
+		<rich-text class="uni-ai-md-rich-text" :user-select="true" :nodes="block.html" mode="native" @itemclick="onItemClick"></rich-text>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import { MarkdownTextRenderBlock } from '@/uni_modules/uni-ai-x/sdk/markdown-text.uts'
+	import { openWebLink } from '@/uni_modules/uni-ai-x/sdk/open-web-link.uts'
+	import { citationNumber } from '@/uni_modules/uni-ai-x/sdk/search-citations.uts'
+	const emit = defineEmits<{ 'citation': [id: number], 'footnote': [href: string] }>()
+
+	const props = defineProps<{
+		block: MarkdownTextRenderBlock
+	}>()
+
+	const block = computed<MarkdownTextRenderBlock>(() => props.block)
+
+	const blockClass = computed<string>(() => {
+		return block.value.quoteDepth > 0 ? 'uni-ai-md-text-quote' : ''
+	})
+
+	function openLink(href: string) {
+		if (href.startsWith('#uni-ai-footnote-')) { emit('footnote', href); return }
+		const id = citationNumber(href)
+		if (id > 0) emit('citation', id)
+		else openWebLink(href)
+	}
+
+	function onItemClick(e: UniRichTextItemClickEvent) {
+		if (e.detail.href != null && e.detail.href!.length > 0) openLink(e.detail.href!)
+		else if (e.detail.src != null && e.detail.src!.length > 0) previewImage(e.detail.src!)
+	}
+
+	function previewImage(src: string) {
+		if (src.length == 0) return
+		uni.previewImage({ urls: [src] as string[] })
+	}
+
+</script>
+
+<style lang="scss">
+	@import '@/uni_modules/uni-ai-x/static/css/variables.scss';
+
+	.uni-ai-md-text-block {
+		width: 100%;
+		min-width: 0;
+		/* #ifdef WEB */
+		max-width: 100%;
+		/* #endif */
+		flex-direction: row;
+		align-items: flex-start;
+		margin: 2px 0;
+	}
+
+	.uni-ai-md-rich-text {
+		width: 100%;
+		min-width: 0;
+		/* #ifdef WEB */
+		max-width: 100%;
+		/* #endif */
+	}
+
+	.uni-ai-md-text-quote {
+		border-left: 4px solid var(--border-primary, #dddddd);
+		padding-left: 10px;
+		background-color: var(--bg-secondary, #f5f5f5);
+		margin-top: 6px;
+		margin-bottom: 6px;
+	}
+
+	.uni-ai-md-text-hr {
+		width: 100%;
+		height: 1px;
+		background-color: var(--border-primary, #dddddd);
+		margin: 10px 0;
+	}
+</style>

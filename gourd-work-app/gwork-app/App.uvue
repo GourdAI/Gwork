@@ -1,0 +1,105 @@
+<script lang="uts">
+	import { initWorkbuddyTheme } from '@/common/workbuddy-theme.uts'
+
+	let firstBackTime = 0
+
+	export default {
+		onLaunch: function () {
+			console.log('GWork App Launch')
+			// D1：默认主题「系统」，浅色为默认观感；三态 system/light/dark。
+			// 这里是唯一的启动初始化；不做任何 redirectTo / reLaunch / navigateTo，
+			// 不保留「无 host 就强制跳转配对页」的启动门禁（D3）。
+			initWorkbuddyTheme()
+		},
+		onShow: function () {
+			console.log('GWork App Show')
+			// #ifdef WEB
+			// 保留上游行为：web-pc 端用 chrome 模拟移动端时，长按不弹出系统菜单
+			window.addEventListener('contextmenu', (e) => {
+				if (window.navigator.userAgent.match(/Android/i) || window.navigator.userAgent.match(/iPhone/i) || window.navigator.userAgent.match(/iPad/i) || window.navigator.userAgent.match(/iPod/i)) {
+					e.preventDefault()
+				}
+			})
+			// #endif
+		},
+		onHide: function () {
+			console.log('GWork App Hide')
+		},
+		// #ifdef APP-ANDROID
+		onLastPageBackPress: function () {
+			console.log('GWork LastPageBackPress')
+			if (firstBackTime == 0) {
+				uni.showToast({
+					title: '再按一次退出应用',
+					position: 'bottom',
+				})
+				firstBackTime = Date.now()
+				setTimeout(() => {
+					firstBackTime = 0
+				}, 2000)
+			} else if (Date.now() - firstBackTime < 2000) {
+				firstBackTime = Date.now()
+				uni.exit()
+			}
+		},
+		// #endif
+		onExit: function () {
+			console.log('GWork App Exit')
+		},
+	}
+</script>
+
+<style lang="scss">
+	/* App 级公共样式。
+	 * 页面根容器使用绝对定位四边归零（top/right/bottom/left: 0），
+	 * 这是 uni-app-x App 原生渲染中等价于 100dvh/100vh 的写法：
+	 * 页面始终铺满系统状态栏以下到系统手势条以上的整个视口（D2）。
+	 * 不自绘状态栏时间：所有页面顶部只留 env(safe-area-inset-top)，
+	 * 系统状态栏由原生渲染，tabBar 由 pages.json 原生 tabBar 渲染。
+	 */
+	page {
+		background-color: $gw-bg;
+	}
+
+	.uni-row {
+		flex-direction: row;
+	}
+
+	.uni-column {
+		flex-direction: column;
+	}
+
+	/* 4 个主页面共用的全视口根容器；各页根 view 均带该 class */
+	.gw-page-root {
+		position: absolute;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		left: 0;
+		display: flex;
+		flex-direction: column;
+		/* 不写 100dvh：uni-app-x 原生布局引擎用四边归零保证铺满 */
+	}
+
+	/* 内容主体：flex:1 + min-height:0，对应 mobile/css/app.css 的 .page-root */
+	.gw-page-body {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		padding-left: $gw-page-pad;
+		padding-right: $gw-page-pad;
+	}
+
+	/* 系统状态栏占位（不自绘数字时间） */
+	.gw-statusbar {
+		height: env(safe-area-inset-top);
+		flex-shrink: 0;
+	}
+
+	/* 底部系统手势条占位（tabBar 为原生，页面内容不越过安全区） */
+	.gw-gesturebar {
+		height: env(safe-area-inset-bottom);
+		flex-shrink: 0;
+	}
+</style>

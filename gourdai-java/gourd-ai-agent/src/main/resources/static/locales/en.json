@@ -1266,6 +1266,10 @@
                 "task_elapsed":  "Task Time",
                     "turn_input":  "Turn Input",
                     "turn_output":  "Turn Output",
+                    "batch_done_count":  "{count} tool calls",
+                    "action_bash_done":  "Terminal command ran",
+                    "action_thinking_done":  "Thought",
+                    "batch_thinking_count":  "Thought {count} times",
                     "messages":  "Messages"
                 },
     "filer":  {

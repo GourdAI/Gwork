@@ -1,0 +1,24 @@
+{
+  "name": "uni-ai-md",
+  "version": "1.0.0",
+  "description": "uni-ai-md Markdown renderer native library for HarmonyOS",
+  "main": "index.ets",
+  "author": "uni-ai-md",
+  "license": "MIT",
+  "compatibleSdkVersion": 17,
+  "compatibleSdkType": "HarmonyOS",
+  "nativeComponents": [
+    {
+      "name": "libuni-ai-md.so",
+      "compatibleSdkVersion": 17,
+      "compatibleSdkType": "HarmonyOS",
+      "linkLibraries": []
+    },
+    {
+      "name": "libuni-ai-md_bridge.so",
+      "compatibleSdkVersion": 17,
+      "compatibleSdkType": "HarmonyOS",
+      "linkLibraries": ["libuni-ai-md.so"]
+    }
+  ]
+}

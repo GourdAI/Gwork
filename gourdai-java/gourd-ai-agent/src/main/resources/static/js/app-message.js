@@ -399,6 +399,73 @@ function steerCollapseRemeasure(row) {
 }
 window.steerCollapseRemeasure = steerCollapseRemeasure;
 
+/* 【轮边界收口】两类场景会把 currentBubbleEl 清空、另起一条全新 assistant 气泡，
+    而旧气泡从此【再无人收口】：
+      ① 插话：appendSteerNote 清指针并新建气泡，任务本身并未结束（后端继续跑，
+         稍后才会有配对这一轮的 done/trace），不能走 finishStream；
+      ② 挂起 done：ask_user / HITL 的 done(suspended=true) 走 finishStream(keepBatchIndex)，
+         但 resetStreamState 同样清指针；用户作答后问答记录与恢复段帧都写进新气泡。
+    实测留下三处残形态（用户 2026-11「插话后会出问题」/「ask 好像也有同样的问题」）：
+      ① 运行态批次盖子永远停在「正在执行中 · Ns」，ticker 还在每秒改文案，
+         而它下面早就是历史过程行（应为「执行工具 N 次」最终折叠态）；挂起场景里
+         ticker 甚至跨整个等用户作答的等待期累加（截图 10min 12s）；
+      ② 旧行仍挂 .agent-live，过程行保持实时展开的扁平轨迹，与历史行形态不一致；
+      ③ 流式中被 hide 的 .msg-actions 永远不会显示 —— finishStream 只显示
+         currentBubbleEl 所在行，而指针已经被换到新气泡了。
+    本 helper 只做【DOM 层的旧轮收口】，一律不动 sess 的流式状态 / 缓冲 / 按钮态 /
+    批次索引，因此可与挂起收尾的 keepBatchIndex 保留语义并存。调用方必须在
+    【清指针之前】调用（appendSteerNote / finishStream 挂起分支各有接线锁）。
+
+   【为何不调 compactBubble】按轮 Compact 只在轮【真结束】时由 finishStream 施加；
+   插话打断的旧轮没有最终正文、也没有 .msg-trace 终态徽标，classifyChildren 会
+   走 !decision 分支 → revealAll() 把刚收口折叠的批次成员重新全部摊开，正好抵消
+   本修复。Qoder 多折叠组契约下，旧轮的最终形态就是这些已收口的「执行工具 N 次」
+   盖子，不需要也不允许再叠第二层整轮摘要。
+
+   【为何不调 clearBatch（偏好关闭时也不调）】关掉折叠偏好只表示【不再新建】盖子；
+   已渲染的旧轮是既成历史，撤销它会把过程行全摊开，与「一键回退」语义不符
+   （回放路径的 clearBatch 清的是回放自己刚重建的节点，场景不同）。故 tcOff 时
+   只跳过【收口】，不主动拆已有 DOM。
+
+   护栏：回放态（_replaying / 游离渲染容器）一律跳过 —— 回放不建运行态盖子
+   （noteProcessInsert 有 _replaying 门禁），且末尾 applyTurnCompact 会按页统一折叠，
+   此处提前动既量不到游离节点、又会和它重复。
+   全程原生 DOM（不依赖 jQuery），便于契约测试在 node:vm 里直接真跑。 */
+function settleSteerTurnBoundary(sess) {
+    if (!sess || !sess.currentBubbleEl) return;
+    try {
+        if (sess._replaying || (typeof isDetachedRenderTarget === 'function' && isDetachedRenderTarget(sess))) return;
+        var oldBubble = sess.currentBubbleEl.parentNode;
+        if (!oldBubble) return;
+        // 向上找旧行：逐层 parentNode（原生 closest 在极简假 DOM 里不一定有）
+        var oldRow = null, p = oldBubble;
+        while (p) {
+            if (p.classList && p.classList.contains && p.classList.contains('msg-row')) { oldRow = p; break; }
+            p = p.parentNode || null;
+        }
+        // 旧行退出运行态：与 finishStream 的 liveFoldRow 收口同口径
+        if (oldRow && oldRow.classList) oldRow.classList.remove('agent-live');
+        // 操作按钮：流式中被 hide() 设了 inline display:none，旧行此后不会再有 finishStream 来显示
+        if (oldRow && oldRow.querySelectorAll) {
+            var acts = oldRow.querySelectorAll('.msg-actions');
+            for (var ai = 0; ai < acts.length; ai++) acts[ai].style.display = '';
+        }
+
+        var tcOff = false;
+        try { tcOff = (typeof localStorage !== 'undefined') && localStorage.getItem('gourd.turnCompact') === '0'; } catch (lsErr) { /* 隐私模式忽略 */ }
+        if (tcOff) return;
+        /* 运行批次收口是运行态自身的语义，必须与 turn-compact 模块是否存在无关，
+           否则模块缺失时盖子永远停在「正在执行中」（与 finishStream 的接线形状锁
+            同一条教训）。纯展示增强：异常只留痕，不许影响新气泡与后续流式。 */
+        var tbApi = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
+        if (tbApi && tbApi.closeBatchFor) {
+            try { tbApi.closeBatchFor(oldBubble); } catch (tbErr) { /* 展示增强 */ }
+        }
+    } catch (e) {
+        if (typeof console !== 'undefined' && console.error) console.error('[轮边界收口] 旧轮收口失败:', e);
+    }
+}
+
 /* 插话以【用户消息气泡】形态呈现：插话本质是用户在任务运行中补发的一句话，与正常发送、
    队列出队同属用户输入族系（右对齐用户气泡 + 附件真实缩略图），仅多一枚「插话」身份徽标
    区别于空闲期发送。旧的独立事件卡形态把附件降级为数量徽标、且视觉不像用户说的话，已废弃。
@@ -476,6 +543,10 @@ function appendSteerNote(sess, item) {
     // parentNode）为 null，新块静默成孤儿，后续正文全部写进游离子树；②旧正文块非空时新块
     // 会被插进旧气泡内部（页脚之前），即插话气泡上方，顺序颠倒。正确语义是插话之后开一条
     // 全新助手气泡：先收尾旧块的流式渲染器，清指针并清扫指针遗留空壳，再强制新建气泡。
+    // 【轮边界收口】清指针之前必须先把旧气泡收成最终态：任务并未结束，finishStream 稍后
+    // 只会收口【新】气泡，旧气泡的运行态批次盖子 / agent-live / 隐藏的操作按钮会永久残留
+    // （用户 2026-11「插话后会出问题」）。helper 只动 DOM，不改任何流式状态。
+    settleSteerTurnBoundary(sess);
     var prevSteerMd = sess.currentBubbleEl;
     if (prevSteerMd && prevSteerMd._streamMd && prevSteerMd._streamMd.active) {
         prevSteerMd._streamMd.finish();
@@ -894,7 +965,7 @@ function finishThinkingBlockCore(sess, h) {
     }
     var label = $(h.thinkingBlockEl).find('.thinking-block-label')[0];
     if (label) {
-        $(label).text(GourdI18n.t('chat.thinking_finished') + elapsed);
+        $(label).text(GourdI18n.t('chat.action_thinking_done') + elapsed);
         label.setAttribute('data-i18n-thinking', 'finished');
         label.setAttribute('data-i18n-elapsed', elapsed);
     }
@@ -1533,13 +1604,25 @@ function formatToolArgsStr(args) {
 
 /* 工具卡公共展示更新：标题、图标、裸 toolName 数据契约一次完成。
    nested 由调用点的实际归属容器决定，不从带前缀 title 隐式推断。 */
+/* Qoder 式动作完成式短标签：bash 行显示「终端命令已运行」而非工具名「执行命令」。
+   仅作用于【过程行工具卡】的 .tool-name；HITL 审批卡、子代理进度心跳仍显示工具名
+   （那里需要「需要授权 X」/「· X」的名词形态，改成完成式会语义错乱）。
+   缺键时 GourdI18n.t 回裸 key，故显式判 key 形态后回落原始 displayName。 */
+function qoderToolLabel(presentation) {
+    var key = (presentation.bareToolName === 'bash' || presentation.bareToolName === 'bash_output')
+        ? 'chat.action_bash_done' : null;
+    if (!key || typeof GourdI18n === 'undefined' || !GourdI18n.t) return presentation.displayName;
+    var v = GourdI18n.t(key);
+    if (typeof v !== 'string' || !v.trim() || /^chat\.[\w.]+$/.test(v.trim())) return presentation.displayName;
+    return v;
+}
 function applyToolPresentation(cardEl, toolName, toolTitle, options) {
     if (!cardEl) return resolveToolPresentation(toolName, toolTitle, options);
     var presentation = resolveToolPresentation(toolName, toolTitle, options);
     var nameEl = $(cardEl).find('.tool-name').first()[0];
     var iconEl = $(cardEl).find('.tool-type-icon').first()[0];
     if (nameEl) {
-        nameEl.textContent = presentation.displayName;
+        nameEl.textContent = qoderToolLabel(presentation);
         window.GourdToolPresentation.ordinaryToolNameCleanupAttributes().forEach(function(attr) {
             nameEl.removeAttribute(attr);
         });
@@ -4523,7 +4606,7 @@ function relocalizeDynamicLabels() {
                 agentName: el.getAttribute('data-tool-agent') || null
             }
         );
-        el.textContent = presentation.displayName;
+        el.textContent = qoderToolLabel(presentation);
     });
     document.querySelectorAll('.tool-name[data-i18n-hitl]').forEach(function(el) {
         var hitlTool = el.getAttribute('data-i18n-hitl-tool') || 'unknown';
@@ -4554,7 +4637,7 @@ function relocalizeDynamicLabels() {
     document.querySelectorAll('.thinking-block-label[data-i18n-thinking]').forEach(function(el) {
         var st = el.getAttribute('data-i18n-thinking');
         var suffix = el.getAttribute('data-i18n-elapsed') || '';
-        el.textContent = GourdI18n.t(st === 'finished' ? 'chat.thinking_finished' : 'chat.thinking_in_progress') + suffix;
+        el.textContent = GourdI18n.t(st === 'finished' ? 'chat.action_thinking_done' : 'chat.thinking_in_progress') + suffix;
     });
     // 结构化问答卡：题面计数（n/N）、推荐后缀、按钮等组合文案在渲染期以当时语言写死，
     // 语言切换时按已存状态整卡重建（drafts 实时同步，输入不受损）。

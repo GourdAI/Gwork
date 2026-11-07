@@ -1266,6 +1266,10 @@
                 "task_elapsed":  "Timp sarcină",
                     "turn_input":  "Intrare rundă",
                     "turn_output":  "Ieșire rundă",
+                    "batch_done_count":  "{count} apeluri de instrumente",
+                    "action_bash_done":  "Comandă terminal executată",
+                    "action_thinking_done":  "Gândit",
+                    "batch_thinking_count":  "Gândit de {count} ori",
                     "messages":  "Mesaje"
                 },
     "filer":  {

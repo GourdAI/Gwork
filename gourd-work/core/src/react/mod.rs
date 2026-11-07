@@ -34,6 +34,111 @@ fn now_ms() -> i64 {
 /// (Java `ReasonTask.ARGS_PROGRESS_INTERVAL_MS`).
 pub const ARGS_PROGRESS_INTERVAL_MS: i64 = 200;
 
+/// Minimum gap between two live `tps_progress` frames (ms), measured on the
+/// same monotonic clock as the window denominator.
+///
+/// Deliberately coarser than `ARGS_PROGRESS_INTERVAL_MS`: the meter is a
+/// hover-only readout a human reads at ~2 Hz, while a tool-argument counter
+/// must look "typing". Two frames per second is the whole budget.
+pub const TPS_PROGRESS_INTERVAL_MS: u64 = 500;
+
+/// Sliding-window decode-speed meter for **one model call**.
+///
+/// This is a *measurement* of the stream's own delta-arrival rate, not a
+/// provider token count: streaming dialects deliver output in arbitrary text
+/// fragments, so `window_tokens` counts deltas actually received during the
+/// window and `window_ms` is the real elapsed monotonic time between the two
+/// emission instants. Both halves come from the same window, so the ratio can
+/// never mix a numerator from one interval with a denominator from another.
+/// At settlement the authoritative provider-reported pair in `context_size`
+/// replaces this live readout (different unit, hence the expected jump).
+///
+/// Event-driven on purpose: no `tokio::time::interval`, no background task.
+/// A frame is emitted only when a real delta arrives AND a full interval has
+/// elapsed, so a silent stream emits nothing and the idle cap still trips.
+///
+/// Both the throttle and the denominator use [`std::time::Instant`]: mixing a
+/// wall clock (`chrono::Utc::now`) into the throttle let an NTP step backwards
+/// freeze emissions indefinitely, and a step forwards produced a phantom
+/// 1000 tokens/s reading. A monotonic clock cannot be stepped.
+#[derive(Debug, Clone)]
+pub struct TpsMeter {
+    /// Output deltas actually observed since the last emit.
+    pub window_tokens: u64,
+    /// Monotonic instant of the window start (= last emit, or first-delta anchor).
+    pub window_started_at: std::time::Instant,
+    /// Whether this model call has already seen its first visible delta.
+    /// One meter is built per model call (and rebuilt on a transport retry),
+    /// so this is a **per-turn** latch. It must never be the run-level TTFT
+    /// latch: that one is set only once per run, which used to leak the whole
+    /// prefill/TTFT wait of turns 2+ into the first speed window.
+    first_delta_seen: bool,
+}
+
+impl TpsMeter {
+    pub fn new(started_at: std::time::Instant) -> Self {
+        Self {
+            window_tokens: 0,
+            window_started_at: started_at,
+            first_delta_seen: false,
+        }
+    }
+
+    /// Record one visible output delta.
+    pub fn on_delta(&mut self) {
+        self.window_tokens = self.window_tokens.saturating_add(1);
+    }
+
+    /// Re-anchor the window at `now` **without** clearing observed deltas.
+    /// Called on a model call's first visible delta: everything before it was
+    /// prompt processing / TTFT wait, not decode time, and must not enter the
+    /// denominator.
+    pub fn reset_window(&mut self, now: std::time::Instant) {
+        self.window_started_at = now;
+    }
+
+    /// Record a visible delta and report whether it was this model call's
+    /// **first** one. On that first delta the window is re-anchored here, so
+    /// the caller cannot forget to do it and cannot accidentally use a
+    /// run-level latch instead. A fresh `TpsMeter` (new turn, or transport
+    /// retry) reports `true` again by construction.
+    ///
+    /// Returns `true` ⇒ caller should emit the `(0, 0, ttftMs)` latch frame.
+    pub fn note_delta(&mut self, now: std::time::Instant) -> bool {
+        let first = !self.first_delta_seen;
+        if first {
+            self.first_delta_seen = true;
+            self.reset_window(now);
+        }
+        self.on_delta();
+        first
+    }
+
+    /// True when a full interval has elapsed on the monotonic clock and the
+    /// window has real output. Pure function of the stored state, so the
+    /// throttle is table-testable without sleeping (Windows timer granularity
+    /// makes wall-clock timing assertions flaky).
+    pub fn should_emit(&self, now: std::time::Instant) -> bool {
+        self.window_tokens > 0
+            && now.saturating_duration_since(self.window_started_at)
+                >= std::time::Duration::from_millis(TPS_PROGRESS_INTERVAL_MS)
+    }
+
+    /// Consume the current window: returns `(deltas, ms)` measured over exactly
+    /// the same interval, then resets the window at `now`. Callers only invoke
+    /// this after `should_emit`, which guarantees `deltas > 0` and `ms >= 500`,
+    /// so no window can be cleared without a frame being sent.
+    pub fn take_window(&mut self, now: std::time::Instant) -> (u64, u64) {
+        let ms = now
+            .saturating_duration_since(self.window_started_at)
+            .as_millis() as u64;
+        let tokens = self.window_tokens;
+        self.window_tokens = 0;
+        self.window_started_at = now;
+        (tokens, ms)
+    }
+}
+
 /// Minimum byte growth between two `action_args` progress frames for one tool
 /// call (Java `ReasonTask.ARGS_PROGRESS_BYTES`).
 pub const ARGS_PROGRESS_BYTES: u64 = 4096;
@@ -378,13 +483,52 @@ impl ReActAgent {
         let run_model = Arc::new(config.model.clone());
         let run_settings = Arc::new(config.settings.clone());
         let tool_defs = self.registry.definitions_async(&config.settings.permission, Some(&gate)).await;
+        // ── Tool-visibility guard (Qoder / ZCode / Java parity) ──────────────
+        // The wire `tools` field is the ONLY schema source; the system prompt
+        // gets a compact NAME-ONLY roster derived from this exact same list,
+        // so the two can never disagree about what is callable. Cost is capped
+        // at 2 KB — the definitions themselves are NOT duplicated here.
+        //
+        // A truly empty list is a configuration fault, not a normal mode: every
+        // built-in (including the skill tools) was filtered away, so the
+        // request would omit `tools` altogether and the model could do nothing
+        // but emit a pure-text intent declaration that ends the run. Say so
+        // loudly, and tell the model no tools exist so at least its answer is
+        // an honest one instead of "I'll call todoread first".
+        if tool_defs.is_empty() {
+            warn!(
+                session = %config.session_id,
+                workspace = %config.workspace.display(),
+                "no tool definitions available for this run; the model will see NO callable tools"
+            );
+        }
+        let tools = if tool_defs.is_empty() { None } else { Some(tool_defs.clone()) };
+        let roster = crate::react::prompt::tool_roster_prompt(tools.as_deref());
+        let visibility_note = if roster.is_empty() {
+            crate::react::prompt::NO_TOOLS_NOTICE.to_string()
+        } else {
+            roster
+        };
+
+        let mut messages = history;
+        // Append to the existing system message (callers always build one) or
+        // create it when a caller handed us history without one. Mutating in
+        // place keeps message count, role order and replay byte-identical.
+        let sys_text = messages
+            .first()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.content_text())
+            .unwrap_or_default();
+        let sys_text = format!("{}{}", sys_text, visibility_note);
+        if messages.first().is_some_and(|m| m.role == Role::System) {
+            messages[0] = ChatMessage::system(sys_text);
+        } else {
+            messages.insert(0, ChatMessage::system(sys_text));
+        }
         // Fixed per-request overheads. Both count against the context window and
         // must be included in the compression budget, or the trigger fires late
         // (tool definitions alone run to thousands of tokens).
         let tools_tokens = crate::compress::estimate_tools_tokens(&tool_defs);
-        let tools = if tool_defs.is_empty() { None } else { Some(tool_defs) };
-
-        let mut messages = history;
         let system_tokens = messages
             .first()
             .filter(|m| m.role == Role::System)
@@ -837,6 +981,10 @@ impl ReActAgent {
             // Per-tool-call argument-progress throttle state, keyed by stream
             // index (Java keys by `toolCallKey`, which is the same index).
             let mut args_progress: HashMap<u32, ArgsProgress> = HashMap::new();
+            // Live decode-speed meter for this model call. Event-driven: it only
+            // emits when a real delta arrives AND a full interval has elapsed,
+            // so no timer task is created and the idle cap still sees silence.
+            let mut tps_meter = TpsMeter::new(std::time::Instant::now());
             // `finish_reason` of the stream that ended this round. `length`
             // means the model hit its output cap rather than finishing, which
             // is the *actionable* half of a truncated tool-call error: the fix
@@ -921,15 +1069,41 @@ impl ReActAgent {
                     StreamEvent::ContentDelta(delta) => {
                         content_buf.push_str(&delta);
                         let now = std::time::Instant::now();
+                        // `first_content_at` times the authoritative decode segment
+                        // for the settlement frame; `first_visible_at` is the run-level
+                        // TTFT latch (how long the user waited for the first character).
+                        // Tool-call frames are not visible characters and never latch it.
                         if first_content_at.is_none() {
                             first_content_at = Some(now);
                         }
-                        // Only visible text/thinking arms TTFT (Java onVisibleOutput).
-                        // Tool-call frames are NOT visible characters and must not latch it.
                         if first_visible_at.is_none() {
                             first_visible_at = Some(now);
                         }
+                        // `note_delta` re-anchors on this model call's FIRST visible
+                        // delta (per-turn, not run-level): prefill/TTFT wait must not
+                        // enter any speed window, including turns 2+ and retries.
+                        // The first-delta frame carries the latched TTFT immediately,
+                        // with no speed yet, instead of waiting for the first 500 ms.
+                        if tps_meter.note_delta(now) {
+                            emit!(Frame::tps_progress(
+                                &config.session_id,
+                                0,
+                                0,
+                                ttft_ms_since(started_at, first_visible_at),
+                            ));
+                        }
                         emit!(Frame::text_delta(&config.session_id, &delta));
+                        if tps_meter.should_emit(now) {
+                            // `should_emit` guarantees tokens > 0 && ms >= 500, so
+                            // no window is ever consumed without a frame going out.
+                            let (tokens, ms) = tps_meter.take_window(now);
+                            emit!(Frame::tps_progress(
+                                &config.session_id,
+                                ms,
+                                tokens,
+                                ttft_ms_since(started_at, first_visible_at),
+                            ));
+                        }
                     }
                     StreamEvent::ReasoningDelta(delta) => {
                         emit!(Frame::reason(&config.session_id, &delta));
@@ -939,6 +1113,23 @@ impl ReActAgent {
                         }
                         if first_visible_at.is_none() {
                             first_visible_at = Some(now);
+                        }
+                        if tps_meter.note_delta(now) {
+                            emit!(Frame::tps_progress(
+                                &config.session_id,
+                                0,
+                                0,
+                                ttft_ms_since(started_at, first_visible_at),
+                            ));
+                        }
+                        if tps_meter.should_emit(now) {
+                            let (tokens, ms) = tps_meter.take_window(now);
+                            emit!(Frame::tps_progress(
+                                &config.session_id,
+                                ms,
+                                tokens,
+                                ttft_ms_since(started_at, first_visible_at),
+                            ));
                         }
                     }
                     StreamEvent::ToolCallStart { index, id, name } => {
@@ -1042,6 +1233,13 @@ impl ReActAgent {
                         // decode segment of the aborted attempt must start over too.
                         first_content_at = None;
                         args_progress.clear();
+                        // A fresh meter + a cleared per-turn marker means the next
+                        // attempt's first visible delta re-anchors the window again,
+                        // so its prefill wait is excluded just like any other turn.
+                        // TTFT (`first_visible_at`) deliberately survives: those
+                        // aborted-attempt deltas did reach the screen.
+                        let retry_now = std::time::Instant::now();
+                        tps_meter = TpsMeter::new(retry_now);
                         // The retry restarts the round's clock: the new attempt
                         // is a fresh stream, and measuring the idle/total caps
                         // against the aborted one would trip them immediately.
@@ -1050,6 +1248,13 @@ impl ReActAgent {
                     }
                     StreamEvent::Done { finish_reason: fr, usage } => {
                         finish_reason = fr;
+                        // A provider may omit `usage` (or the stream may end
+                        // abnormally). The frontend ends its live speed window on
+                        // `context_size`, so we deliberately leave that case to the
+                        // frontend's `done` fallback instead of fabricating a zero
+                        // settlement frame here — a zero payload would be persisted,
+                        // replayed and counted by `session_usage::sum_usage` as if it
+                        // were a real model call.
                         if let Some(u) = usage {
                             // Accumulate via UsageInfo::add so prompt_tokens sums
                             // the *normalised* input (cache included) exactly like
@@ -2333,6 +2538,57 @@ mod tests {
         }
     }
 
+    // ─── tool-visibility guard (task ended unfinished) ───────────────────
+
+    /// End-to-end shape of the incident the guard fixes. Before the fix, a
+    /// settings file with `permission.tools = []` filtered out EVERY definition
+    /// (including the skill tools), `dialect.rs` omitted the `tools` key, and
+    /// the model — told by the system prompt to "call tools directly" but
+    /// seeing none — replied with a one-line intent declaration that the loop
+    /// closed as `Completed`. Reproduced in session work-mw3cpqs4: three
+    /// consecutive `turns=1 stop=Completed` runs, zero `executing tool`,
+    /// inputTokens ~2.7K vs ~15.8K once tools were visible again.
+    #[test]
+    fn empty_permission_allowlist_still_offers_tools_to_the_model() {
+        let reg = crate::tools::ToolRegistry::default_registry();
+        let mut perm = crate::config::PermissionSettings::default();
+        perm.tools = vec![];
+        let defs = reg.definitions(&perm, None);
+        // Layer 1: fail-open, so the wire request carries `tools` again.
+        assert!(defs.len() > 10, "empty allowlist must not blind the model");
+        // Layer 2: the system prompt gets a compact roster from THAT SAME list.
+        let roster = crate::react::prompt::tool_roster_prompt(Some(&defs));
+        assert!(roster.contains("Available tools"), "{}", roster);
+        assert!(roster.contains("skillread"), "skill tools must be visible in the roster");
+        assert!(!roster.contains("\"properties\""), "roster must not duplicate the JSON Schema");
+        assert!(roster.len() < 2300, "roster must stay token-cheap, got {}", roster.len());
+        // Layer 3: a genuinely empty list is an explicit, honest state.
+        assert!(crate::react::prompt::tool_roster_prompt(None).is_empty());
+        assert!(crate::react::prompt::NO_TOOLS_NOTICE.contains("无可用工具"));
+    }
+
+    /// Source pin: the guard must be wired into `run_inner`, not left as an
+    /// unused helper that a later refactor can silently drop. A pure-function
+    /// test alone would stay green forever if the call site disappeared.
+    #[test]
+    fn tool_visibility_guard_is_wired_into_run_inner() {
+        let src = include_str!("mod.rs");
+        let product = src.split("#[cfg(test)]").next().unwrap_or("");
+        let run_inner = product
+            .split_once("async fn run_inner(")
+            .map(|(_, rest)| rest.split("/// Marker written for a tool call").next().unwrap_or(""))
+            .unwrap_or("");
+        assert!(run_inner.contains("tool_roster_prompt(tools.as_deref())"),
+            "the compact roster must be derived from the same tools sent on the wire");
+        assert!(run_inner.contains("NO_TOOLS_NOTICE"),
+            "an empty tool set must be stated explicitly to the model");
+        assert!(run_inner.contains("ChatMessage::system(sys_text)"),
+            "the roster must be appended to the system message");
+        // The wire definitions and the roster must come from ONE list.
+        assert!(run_inner.contains("Some(tool_defs.clone())"),
+            "wire tools and the prompt roster must share one source");
+    }
+
     // ─── terminal done gate (abnormal exits must close the UI) ───────────
 
     /// Every `Error` / `MaxTurns` return inside `run_inner` emits `error` but
@@ -3478,6 +3734,124 @@ mod tests {
     // These drive the clock explicitly rather than sleeping: Windows timer
     // granularity makes wall-clock timing assertions flaky, and a pure
     // `should_emit(now)` keeps the whole throttle table-testable.
+
+    // ─── live TPS meter throttle ────────────────────────────────────────────
+    //
+    // Drive the clock explicitly with `Instant` arithmetic: no sleeping, no
+    // wall-clock flakiness, pure state transitions. Both the throttle and the
+    // denominator use the same monotonic clock, so an NTP step can neither
+    // freeze emissions nor fabricate a phantom speed.
+
+    /// Explicit-clock helper: `t0 + ms`. Named distinctly from the local `at`
+    /// closure used by the TTFT table test above.
+    fn tps_at(t0: std::time::Instant, ms: u64) -> std::time::Instant {
+        t0 + std::time::Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn tps_meter_does_not_emit_before_a_real_delta() {
+        let t0 = std::time::Instant::now();
+        let m = TpsMeter::new(t0);
+        assert!(!m.should_emit(tps_at(t0, 0)), "no output yet");
+        assert!(
+            !m.should_emit(tps_at(t0, 20_000)),
+            "a long wait with no output is still no frame"
+        );
+    }
+
+    #[test]
+    fn tps_meter_emits_once_per_interval_and_measures_the_same_window() {
+        let t0 = std::time::Instant::now();
+        let mut m = TpsMeter::new(t0);
+        for _ in 0..50 {
+            m.on_delta();
+        }
+        assert!(!m.should_emit(tps_at(t0, 499)), "one ms short of the interval");
+        assert!(m.should_emit(tps_at(t0, 500)), "exactly one interval with real output");
+        let (tokens, ms) = m.take_window(tps_at(t0, 500));
+        assert_eq!(tokens, 50, "every observed delta is counted, no estimation");
+        assert_eq!(ms, 500, "denominator is the real elapsed monotonic time");
+        assert!(!m.should_emit(tps_at(t0, 999)), "window restarts after an emit");
+        m.on_delta();
+        assert!(m.should_emit(tps_at(t0, 1_000)));
+    }
+
+    #[test]
+    fn tps_meter_note_delta_reanchors_the_first_delta_only() {
+        let t0 = std::time::Instant::now();
+        let mut m = TpsMeter::new(t0); // stream starts here
+        // 6 s of prompt processing / TTFT wait, then two visible deltas.
+        assert!(m.note_delta(tps_at(t0, 6_000)), "first delta is reported");
+        assert!(!m.note_delta(tps_at(t0, 6_010)), "only the first is reported");
+        // The 6 s wait must not enter the denominator.
+        let (_, ms) = m.take_window(tps_at(t0, 6_500));
+        assert_eq!(ms, 500, "only the 500 ms decode window, not the 6 s TTFT wait");
+    }
+
+    /// Regression for the P1 code-review finding: the old code keyed the
+    /// re-anchor off the **run-level** TTFT latch, so it only ever happened on
+    /// the run's FIRST model call. Every later turn (and every transport retry)
+    /// charged its whole prefill wait into the first speed window.
+    #[test]
+    fn tps_meter_reanchors_on_every_model_call_and_after_a_retry() {
+        let t0 = std::time::Instant::now();
+        // Turn 1: stream starts at t0, first visible delta at +6 s.
+        let mut turn1 = TpsMeter::new(t0);
+        assert!(turn1.note_delta(tps_at(t0, 6_000)));
+        let (_, ms1) = turn1.take_window(tps_at(t0, 6_500));
+        assert_eq!(ms1, 500, "turn 1 excludes its TTFT wait");
+
+        // Turn 2: a NEW meter (as the react loop does), 8 s of prefill this time.
+        // With the old run-level latch this would have produced (8000, 1).
+        let t1 = tps_at(t0, 10_000);
+        let mut turn2 = TpsMeter::new(t1);
+        assert!(
+            turn2.note_delta(tps_at(t1, 8_000)),
+            "turn 2 must still get a first-delta re-anchor"
+        );
+        let (tokens2, ms2) = turn2.take_window(tps_at(t1, 8_500));
+        assert_eq!(ms2, 500, "turn 2 excludes its own TTFT wait too");
+        assert_eq!(tokens2, 1, "the first delta is still counted");
+
+        // Transport retry inside the same turn: fresh meter, fresh latch.
+        let t2 = tps_at(t0, 30_000);
+        let mut retried = TpsMeter::new(t2);
+        assert!(retried.note_delta(tps_at(t2, 4_000)), "retry must re-arm the latch");
+        let (_, ms3) = retried.take_window(tps_at(t2, 4_500));
+        assert_eq!(ms3, 500, "retried attempt excludes its prefill wait");
+    }
+
+    #[test]
+    fn tps_meter_has_no_wall_clock_to_be_skewed() {
+        // A wall-clock step used to freeze `should_emit` (backwards) or produce
+        // a phantom 1000 tokens/s reading (forwards). The monotonic Instant
+        // used now cannot be stepped at all; verify the throttle is purely a
+        // function of elapsed monotonic time.
+        let t0 = std::time::Instant::now();
+        let mut m = TpsMeter::new(t0);
+        m.note_delta(tps_at(t0, 100));
+        assert!(!m.should_emit(tps_at(t0, 599)));
+        assert!(m.should_emit(tps_at(t0, 600)));
+        let (tokens, ms) = m.take_window(tps_at(t0, 600));
+        assert_eq!((tokens, ms), (1, 500), "one delta over a real 500 ms window");
+    }
+
+    /// Live progress frames must be transient and must not be forwarded by a
+    /// sub-agent. Both lists are silent-failure surfaces: a missing entry makes
+    /// the frame either bloat every stream file or overwrite the parent meter.
+    #[test]
+    fn tps_progress_is_wired_into_the_transient_and_subagent_lists() {
+        let session = include_str!("../session/mod.rs");
+        let team = include_str!("../team/mod.rs");
+        assert!(
+            session.contains("\"reason_start\" | \"tps_progress\""),
+            "session store must skip live progress frames"
+        );
+        assert!(
+            team.contains("| \"tps_progress\""),
+            "sub-agent forwarding must drop live progress frames"
+        );
+    }
 
     #[test]
     fn throttle_constants_match_the_java_kernel() {

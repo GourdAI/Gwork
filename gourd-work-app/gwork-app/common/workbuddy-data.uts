@@ -1,0 +1,121 @@
+/**
+* GWork UI 契约（品牌为 GWork 自有商标）—— UTS 移植版
+ * ------------------------------------------------------------
+ * 唯一数据基准：gourd-work-app/mobile/js/data.js
+ * 本文件只做 UTS 类型化翻译，不新增、不删减任何契约项；
+ * 所有 .uvue 页面通过 import { ... } from '@/common/workbuddy-data.uts' 使用。
+ * 参考图：workbuddy-images/微信图片_20261103140113_74..82_561.jpg
+ */
+export type SuggestGroup = {
+	label: string,
+	icon: string,
+	page: number
+}
+
+export type DiscoverRow = {
+	id: string,
+	label: string,
+	icon: string,
+	group: number
+}
+
+export type SettingRow = {
+	id: string,
+	label: string,
+	value: string,
+	chevron: boolean,
+	toggle: boolean
+}
+
+export type DeviceRow = {
+	id: string,
+	label: string,
+	offline: boolean
+}
+
+export type UiModel = {
+	id: string,
+	name: string,
+	ratio: string,
+	free: boolean
+}
+
+export type ThemeOption = {
+	id: string,
+	label: string
+}
+
+export type Brand = {
+	name: string,
+	device: string,
+	welcome: string,
+	logo: string
+}
+
+// D4：底部 4 Tab 的文案与顺序（pages.json tabBar 也逐字复用）
+export const TABS: string[] = ['任务', '定时任务', '发现', '我的']
+
+// D5：图 75 / 79 —— 首页 4 建议胶囊 + 换一换（两组轮换，与 data.js 顺序一致）
+export const SUGGESTIONS: SuggestGroup[] = [
+	{ label: '进行数据分析及可视化', icon: '◔', page: 0 },
+	{ label: '进行文档处理', icon: '▤', page: 0 },
+	{ label: '做一份幻灯片', icon: '▣', page: 0 },
+	{ label: '制作工作台', icon: '▦', page: 0 },
+	{ label: '整理会议纪要', icon: '▤', page: 1 },
+	{ label: '生成周报', icon: '◔', page: 1 },
+	{ label: '调研竞品并对比', icon: '◇', page: 1 },
+	{ label: '搭建知识库', icon: '▣', page: 1 }
+]
+
+// D8 / 图 80：发现 3 分组卡，分组 1 三行（专家 / 技能 / 连接器）
+export const DISCOVER_GROUPS: DiscoverRow[] = [
+	{ id: 'library', label: '资料库', icon: '▣', group: 0 },
+	{ id: 'expert', label: '专家', icon: '◉', group: 1 },
+	{ id: 'skill', label: '技能', icon: '✦', group: 1 },
+	{ id: 'connector', label: '连接器', icon: '∞', group: 1 },
+	{ id: 'project', label: '项目', icon: '◇', group: 2 }
+]
+
+// D8 / 图 81：我的 —— 6 行设置（含触感反馈开关）
+export const SETTINGS_ROWS: SettingRow[] = [
+	{ id: 'language', label: '语言', value: '跟随系统', chevron: true, toggle: false },
+	{ id: 'fontSize', label: '字体大小', value: '', chevron: true, toggle: false },
+	{ id: 'readAloud', label: '朗读设置', value: '', chevron: true, toggle: false },
+	{ id: 'haptics', label: '触感反馈', value: '', chevron: false, toggle: true },
+	{ id: 'storage', label: '存储空间', value: '', chevron: true, toggle: false },
+	{ id: 'notifications', label: '消息通知设置', value: '', chevron: true, toggle: false }
+]
+
+// 图 74 / 78 / 82 面板数据（骨架阶段保留为契约数据，供后续 popup 接入）
+export const QUICK_ACTIONS: string[] = ['拍照', '照片 / 视频', '添加文件']
+export const SHEET_LIST_ROWS: string[] = ['专家', '技能', '连接器', '定时任务', '录音笔']
+export const DEVICES: DeviceRow[] = [
+	{ id: 'cloud', label: '云端', offline: false },
+	{ id: 'laptop', label: 'LAPTOP-0GMU4KOI', offline: true }
+]
+// 顺序与 data.js MODELS 完全一致；与 config.uts 的 llmModelMap 一一对应
+export const MODELS: UiModel[] = [
+	{ id: 'fast', name: '快速', ratio: '0.21x', free: false },
+	{ id: 'balanced', name: '均衡', ratio: '0.65x', free: false },
+	{ id: 'ultra', name: '极致', ratio: '1.20x', free: false },
+	{ id: 'hy4', name: 'Hy4 preview', ratio: '0.29x', free: false },
+	{ id: 'hy3', name: 'Hy3', ratio: '0.00x', free: true },
+	{ id: 'ds', name: 'DeepSeek-V4.1-Flash', ratio: '0.11x', free: false },
+	{ id: 'glm', name: 'GLM-5.3', ratio: '0.69x', free: false },
+	{ id: 'glmflash', name: 'GLM-5.3-Flash', ratio: '0.08x', free: false }
+]
+export const DEFAULT_MODEL_ID: string = 'hy3'
+export const BRAND: Brand = {
+	name: 'GWork',
+	device: '云电脑',
+	welcome: 'GWork，我帮你',
+	logo: '/static/gwork-logo.png'
+}
+// D1：三态主题，默认「系统」，浅色为默认观感
+export const THEMES: ThemeOption[] = [
+	{ id: 'system', label: '系统' },
+	{ id: 'light', label: '浅色' },
+	{ id: 'dark', label: '深色' }
+]
+export const DEFAULT_THEME: string = 'system'
+export const ACCENT: string = '#0fbc9b'

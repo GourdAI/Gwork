@@ -2336,28 +2336,11 @@ async fn execute_approved_command(workspace: &std::path::Path, command: &str) ->
     // longer needed once it returns; the guard removes it on function exit,
     // covering every early return (spawn error / timeout) without repetition.
     let _guard = crate::tools::builtin::TempScriptGuard::new(temp_script);
-    match tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await {
-        Ok(Ok(output)) => {
-            let stdout = crate::textcodec::decode_bytes(&output.stdout);
-            let stderr = crate::textcodec::decode_bytes(&output.stderr);
-            // 同 format_output：ANSI 颜色码必须在 UI 之前剔干净，否则用户看到的是
-            // 残存的「[31m」「[0m」而不是颜色（HTML 不解释 ESC）。
-            let stdout = crate::textcodec::strip_ansi(&stdout);
-            let stderr = crate::textcodec::strip_ansi(&stderr);
-            let code = output.status.code().unwrap_or(-1);
-            let mut text = String::new();
-            if !stdout.is_empty() { text.push_str(&stdout); }
-            if !stderr.is_empty() {
-                if !text.is_empty() { text.push('\n'); }
-                text.push_str("[stderr]\n");
-                text.push_str(&stderr);
-            }
-            text.push_str(&format!("\n[exit code: {}]", code));
-            text
-        }
-        Ok(Err(e)) => format!("Command spawn failed: {}", e),
-        Err(_) => "Command timed out after 300s".to_string(),
-    }
+    // Same bounded execution as `BashTool::execute`: file-backed stdio, stdin
+    // EOF, timeout, output ceiling and process-tree kill. The old bare
+    // `cmd.output()` waited on pipes that a detached daemon could hold open
+    // forever, and had no kill-tree on its 300 s timeout.
+    crate::tools::builtin::run_command_capture(cmd, 300_000).await
 }
 
 /// Spawn a new ReAct run.
@@ -2441,8 +2424,23 @@ fn spawn_resume(
     let cancel_clone = cancel.clone();
     let model_name = sp.model_name.clone();
     let access_mode = sp.access_mode.clone();
-    let run_id = new_run_id();
+    // A suspension is a *pause*, not a new task: the resumed run must keep the
+    // same runId. Minting a fresh one (the old behaviour) split one user turn
+    // into two manifests, so the UI — which renders one change card per runId
+    // (`app-file-changes.js`) — showed two independent "已编辑 N 个文件" cards
+    // with disjoint file lists, and undo could only roll back one half.
+    //
+    // Java already does this: an empty `Prompt` skips `ReActTrace.reset()`, so
+    // the answer/approval continues the original trace and its runId.
+    let run_id = sp.run_id.clone();
     let run_id_reg = run_id.clone();
+    // The suspended segment already published a `file_changes` frame and marked
+    // the manifest `ready`. Re-open it before any resumed write lands: otherwise
+    // the final `finish()` hits its idempotence gate and the resumed segment's
+    // files never reach the card. `reopen()` also bumps `revision`, which the
+    // frontend's monotonic `upsert` gate requires to accept the final snapshot.
+    // No-op when the suspended segment touched no tracked file (no manifest).
+    state.change_ledger.reopen(&session_id, &run_id);
     // Per-invocation adjudication, NOT run-level immunity.
     //
     // This used to be `sp.kind == "hitl"`, which granted the *entire* resumed run
@@ -3456,23 +3454,41 @@ fn build_hints() -> Vec<serde_json::Value> {
         Some(ws) => crate::skills::SkillRegistry::with_workspace(ws),
         None => crate::skills::SkillRegistry::new(),
     };
+    data.extend(skill_hint_rows(&registry));
+
+    data
+}
+
+/// Build the `type: "skill"` rows of the `/` completion panel.
+///
+/// Split out of [`build_hints`] so the disabled-skill filter can be tested
+/// against a real registry without depending on the process's working
+/// directory or the global `~/.gwork` area.
+///
+/// Uses `load_enabled()`, matching Java `WebController.hints()` →
+/// `engine.getSkills()` (which excludes `enabled: false`). Calling
+/// `load_all()` here is the exact bug this guards against: the `/` panel then
+/// offers disabled skills that cannot be loaded into the model — the settings
+/// page's "off" switch appears to do nothing. `getSkillsAll()`/`load_all()` is
+/// for the **management view only**.
+fn skill_hint_rows(registry: &crate::skills::SkillRegistry) -> Vec<serde_json::Value> {
+    let mut rows: Vec<serde_json::Value> = Vec::new();
     // Java de-duplicates by name while iterating `engine.getSkills()`; the first
-    // entry wins. `load_all` already resolves workspace-over-global shadowing,
+    // entry wins. `load_enabled` already resolves workspace-over-global shadowing,
     // but the guard is kept so a duplicate can never produce two identical rows
     // in the panel.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for skill in registry.load_all() {
+    for skill in registry.load_enabled() {
         if !seen.insert(skill.name.clone()) {
             continue;
         }
-        data.push(serde_json::json!({
+        rows.push(serde_json::json!({
             "name": skill.name,
             "description": hint_description(&skill.description),
             "type": "skill",
         }));
     }
-
-    data
+    rows
 }
 
 /// First line of a skill description, capped for the completion row.
@@ -3771,6 +3787,9 @@ fn general_payload(settings: &Settings) -> serde_json::Value {
         "data": {
             "historyWindowSize": settings.general.history_window_size,
             "apiRetries": settings.general.api_retries,
+            "mcpRetries": settings.general.mcp_retries,
+            "webProxy": settings.general.web_proxy,
+            "webRetryBudgetSecs": settings.general.web_retry_budget_secs,
             "maxTurns": settings.general.max_turns,
             "autoRethink": settings.general.auto_rethink,
             "contextLength": settings.general.context_length,
@@ -3821,6 +3840,12 @@ struct GeneralSaveBody {
     history_window_size: Option<u32>,
     #[serde(rename = "apiRetries")]
     api_retries: Option<u32>,
+    #[serde(rename = "mcpRetries")]
+    mcp_retries: Option<u32>,
+    #[serde(rename = "webProxy")]
+    web_proxy: Option<String>,
+    #[serde(rename = "webRetryBudgetSecs")]
+    web_retry_budget_secs: Option<u32>,
     #[serde(rename = "maxTurns")]
     max_turns: Option<u32>,
     #[serde(rename = "autoRethink")]
@@ -3895,6 +3920,13 @@ async fn settings_general_save(
         let mut settings = state.settings.write().await;
         if let Some(v) = body.history_window_size { settings.general.history_window_size = v; }
         if let Some(v) = body.api_retries { settings.general.api_retries = v; }
+        // Clamp the two web-tool knobs at the write boundary as well as in
+        // `RetryPolicy::from_settings`: a model-written `mcpRetries: 999999`
+        // would otherwise be persisted and echoed back by the settings page.
+        // 10 attempts is already generous for a keyless, rate-limited endpoint.
+        if let Some(v) = body.mcp_retries { settings.general.mcp_retries = v.clamp(1, 10); }
+        if let Some(v) = body.web_proxy { settings.general.web_proxy = v.trim().to_string(); }
+        if let Some(v) = body.web_retry_budget_secs { settings.general.web_retry_budget_secs = v.min(600); }
         if let Some(v) = body.max_turns { settings.general.max_turns = v; }
         if let Some(v) = body.auto_rethink { settings.general.auto_rethink = v; }
         // The context window is a fixed set of options (Java
@@ -3977,9 +4009,12 @@ async fn settings_general_save(
 /// with safe defaults and are what the failing save call intended to change.
 fn general_patch(settings: &Settings, loaded: bool) -> serde_json::Value {
     let mut patch = serde_json::json!({
-        "historyWindowSize": settings.general.history_window_size,
-        "apiRetries": settings.general.api_retries,
-        "maxTurns": settings.general.max_turns,
+            "historyWindowSize": settings.general.history_window_size,
+            "apiRetries": settings.general.api_retries,
+            "mcpRetries": settings.general.mcp_retries,
+            "webProxy": settings.general.web_proxy,
+            "webRetryBudgetSecs": settings.general.web_retry_budget_secs,
+            "maxTurns": settings.general.max_turns,
         // Now that this kernel implements AutoRethink and compression it is an
         // authority for these keys, so they round-trip through save. They were
         // previously absent from both the struct and this list: the values on
@@ -5216,6 +5251,37 @@ mod tests {
         assert_eq!(msgs[0].content_text(), "Q1: approved");
     }
 
+    // ── suspend → resume keeps one runId (one change card, not two) ─────────
+    //
+    // Wiring guard: reverting `spawn_resume` to `new_run_id()` silently splits a
+    // single user turn into two manifests, and the UI renders two independent
+    // "已编辑 N 个文件" cards with disjoint file lists (the reported defect).
+    #[test]
+    fn resume_reuses_the_suspended_run_id_and_reopens_the_ledger() {
+        // Only the production half: include_str! also contains this very test,
+        // so the literals below would otherwise satisfy their own assertions.
+        let src = include_str!("mod.rs");
+        let prod = src.split_once("#[cfg(test)]").map(|(p, _)| p).unwrap_or(src);
+        let start = prod.find("fn spawn_resume(").expect("spawn_resume missing");
+        let end = prod[start..]
+            .find("/// Execute a full ReAct session run.")
+            .expect("next fn boundary missing");
+        let body = &prod[start..start + end];
+        assert!(
+            body.contains(&["let run_id = sp.run_id.clone", "()", ";"].concat()),
+            "resume must keep the suspended runId; minting a new one splits the card in two"
+        );
+        assert!(
+            !body.contains("let run_id = new_run_id();"),
+            "spawn_resume must not mint a fresh runId"
+        );
+        assert!(
+            body.contains("state.change_ledger.reopen(&session_id, &run_id)"),
+            "the suspended segment already finished the manifest; reopen it or the \
+             resumed files never reach the final snapshot"
+        );
+    }
+
     // ── suspension TTL ──────────────────────────────────────────────────────
 
     fn sp_created_at(created_at: i64) -> SuspensionPoint {
@@ -5882,6 +5948,108 @@ mod tests {
                 "unknown hint type `{t}` will never match a trigger"
             );
         }
+    }
+
+    /// The bug this guards: the `/` panel listed **disabled** skills.
+    ///
+    /// Java `WebController.hints()` iterates `engine.getSkills()` (disabled
+    /// entries already filtered by `TalentRegistry`). The Rust kernel iterated
+    /// `SkillRegistry::load_all()` — the management-view set — so a skill with
+    /// `enabled: false` in its SKILL.md front matter still appeared in the
+    /// completion panel (reported live with 5 disabled skills on disk), even
+    /// though it could never be loaded into the model. Use `load_enabled()`.
+    #[test]
+    fn hints_exclude_disabled_skills_from_the_slash_panel() {
+        let dir = std::env::temp_dir().join(format!(
+            "gwork-hints-disabled-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, enabled) in [("on-skill", true), ("off-skill", false)] {
+            let d = dir.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join("SKILL.md"),
+                format!(
+                    "---\nname: {name}\ndescription: {name} desc\nenabled: {enabled}\n---\n\n# {name}\n"
+                ),
+            )
+            .unwrap();
+        }
+        crate::skills::invalidate_cache();
+        let reg = crate::skills::SkillRegistry::with_dir(dir.clone());
+
+        let all = reg.load_all();
+        assert_eq!(all.len(), 2, "setup: both skills must be on disk");
+        let rows = skill_hint_rows(&reg);
+        let names: Vec<&str> = rows.iter().filter_map(|r| r["name"].as_str()).collect();
+
+        assert_eq!(names, vec!["on-skill"], "disabled skill leaked into the / panel: {names:?}");
+        assert!(rows.iter().all(|r| r["type"].as_str() == Some("skill")));
+
+        crate::skills::invalidate_cache();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A source-level tripwire for the same bug: every model/user-facing skill
+    /// consumer must go through `load_enabled()`, never `load_all()`. Behaviour
+    /// tests above cover the `/` panel and the registry; this one covers the
+    /// remaining consumers that need a full `ToolContext` to exercise directly.
+    ///
+    /// **Only the production half of each file is inspected.** An earlier version
+    /// read the whole file with `include_str!("mod.rs")` — which includes this
+    /// very test — so the expected literal in the assertion itself satisfied
+    /// `contains(...)`: reverting production to `load_all()` never turned it red.
+    /// Cutting at `#[cfg(test)]` makes the assertion dependent on real code only.
+    #[test]
+    fn visible_skill_consumers_use_the_enabled_only_registry() {
+        fn production(src: &str) -> &str {
+            src.split_once("#[cfg(test)]").map(|(p, _)| p).unwrap_or(src)
+        }
+
+        let server_prod = production(include_str!("mod.rs"));
+        assert!(
+            server_prod.contains("for skill in registry.load_enabled()"),
+            "build_hints/skill_hint_rows must iterate the enabled-only set"
+        );
+        assert!(
+            !server_prod.contains("registry.load_all()"),
+            "the / panel must never read the management-view set (disabled skills leak)"
+        );
+
+        let tools_prod = production(include_str!("../tools/builtin/mod.rs"));
+        // SkillReadTool, SkillRefreshTool, SkillSearchTool — all three resolve
+        // enabled skills. `>= 2` used to let a third/fourth consumer quietly go
+        // back to `load_all()`; an exact count makes any such change fail loudly.
+        let enabled_calls = tools_prod.matches("registry.load_enabled()").count();
+        assert_eq!(
+            enabled_calls, 3,
+            "skillread / skillrefresh / skillsearch must all use load_enabled(); \
+             a new visible consumer must go through it too (found {enabled_calls})"
+        );
+        assert!(
+            !tools_prod.contains("registry.load_all()"),
+            "a model-facing tool must not read the management-view set"
+        );
+        assert!(
+            !tools_prod.contains(".filter(|s| s.enabled)"),
+            "the enabled filter belongs in the registry alone, not in a tool"
+        );
+
+        let skills_prod = production(include_str!("../skills/mod.rs"));
+        assert!(
+            skills_prod.contains("self.load_enabled()"),
+            "prompt_summary must use the single enabled-only source"
+        );
+        // `.filter(|s| s.enabled)` is allowed exactly once: inside `load_enabled`
+        // itself. A second occurrence is a consumer re-inventing the filter — the
+        // two can drift apart, which is the shape of the original bug.
+        let filter_calls = skills_prod.matches(".filter(|s| s.enabled)").count();
+        assert_eq!(
+            filter_calls, 1,
+            "the enabled filter must live only in load_enabled(), found {filter_calls} hand-written filters"
+        );
     }
 
     /// `command` rows are carried for Java parity but no trigger selects them:

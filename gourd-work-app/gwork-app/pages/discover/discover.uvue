@@ -1,0 +1,122 @@
+<!--
+  GWork「发现」（图 80）
+  移植自 mobile/js/app.js 的 renderDiscover()：
+    居中标题「发现」
+    3 张分组卡：资料库（1 行）/ 专家·技能·连接器（3 行）/ 项目（1 行）
+    每行：图标 + 文案 + 右侧 ›
+  数据来自 common/workbuddy-data.uts 的 DISCOVER_GROUPS（= mobile/js/data.js）。
+-->
+<template>
+	<view class="gw-page-root" :style="pageStyle">
+		<view class="gw-statusbar"></view>
+
+		<text class="gw-discover-title" :style="themeText">发现</text>
+
+		<scroll-view class="gw-discover-scroll" :scroll-y="true">
+			<!-- 分组 0 -->
+			<view class="gw-discover-card" :style="themeSurface">
+				<view class="gw-discover-row" v-for="(row, index) in group0" :key="row.id" @click="onRowClick(row)">
+					<text class="gw-discover-icon" :style="themeText">{{ row.icon }}</text>
+					<text class="gw-discover-label" :style="themeText">{{ row.label }}</text>
+					<text class="gw-discover-chevron" :style="themeMuted">›</text>
+				</view>
+			</view>
+
+			<!-- 分组 1：三行，行间分隔线 -->
+			<view class="gw-discover-card" :style="themeSurface">
+				<view class="gw-discover-row" v-for="(row, index) in group1" :key="row.id" @click="onRowClick(row)">
+					<text class="gw-discover-icon" :style="themeText">{{ row.icon }}</text>
+					<text class="gw-discover-label" :style="themeText">{{ row.label }}</text>
+					<text class="gw-discover-chevron" :style="themeMuted">›</text>
+					<view class="gw-discover-divider" :style="themeDivider" v-if="index < group1.length - 1"></view>
+				</view>
+			</view>
+
+			<!-- 分组 2 -->
+			<view class="gw-discover-card" :style="themeSurface">
+				<view class="gw-discover-row" v-for="(row, index) in group2" :key="row.id" @click="onRowClick(row)">
+					<text class="gw-discover-icon" :style="themeText">{{ row.icon }}</text>
+					<text class="gw-discover-label" :style="themeText">{{ row.label }}</text>
+					<text class="gw-discover-chevron" :style="themeMuted">›</text>
+				</view>
+			</view>
+		</scroll-view>
+
+		<view class="gw-gesturebar"></view>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import { ref, computed } from 'vue'
+	import { DISCOVER_GROUPS, type DiscoverRow } from '@/common/workbuddy-data.uts'
+	import { rootStyle, surfaceStyle, textStyle, mutedStyle, dividerStyle } from '@/common/workbuddy-theme.uts'
+
+	const pageStyle = ref<string>(rootStyle())
+	const surface = ref<string>(surfaceStyle())
+	const ink = ref<string>(textStyle())
+	const muted = ref<string>(mutedStyle())
+	const divider = ref<string>(dividerStyle())
+	const themeSurface = surface
+	const themeText = ink
+	const themeMuted = muted
+	const themeDivider = divider
+
+	function refreshStyles(): void {
+		pageStyle.value = rootStyle()
+		surface.value = surfaceStyle()
+		ink.value = textStyle()
+		muted.value = mutedStyle()
+		divider.value = dividerStyle()
+	}
+	onShow(() => {
+		refreshStyles()
+	})
+
+	// 按 group 字段拆成 3 张卡（等价于 app.js 的 DISCOVER_GROUPS.reduce）
+	const group0 = computed<DiscoverRow[]>(() => filterByGroup(0))
+	const group1 = computed<DiscoverRow[]>(() => filterByGroup(1))
+	const group2 = computed<DiscoverRow[]>(() => filterByGroup(2))
+
+	function filterByGroup(group: number): DiscoverRow[] {
+		const result: DiscoverRow[] = []
+		for (let i = 0; i < DISCOVER_GROUPS.length; i++) {
+			if (DISCOVER_GROUPS[i].group == group) result.push(DISCOVER_GROUPS[i])
+		}
+		return result
+	}
+
+	function onRowClick(row: DiscoverRow): void {
+		// TODO(GWork 后端)：资料库 / 专家 / 技能 / 连接器 / 项目 的详情页与内核 API
+		uni.showToast({ title: row.label + ' 待接入 GWork 内核', icon: 'none' })
+	}
+</script>
+
+<style lang="scss">
+	.gw-discover-title {
+		font-size: 22px;
+		font-weight: 600;
+		text-align: center;
+		padding: 10px 0 20px;
+		flex-shrink: 0;
+	}
+	.gw-discover-scroll {
+		flex: 1;
+		min-height: 0;
+		padding: 0 $gw-page-pad;
+	}
+	.gw-discover-card {
+		border-radius: $gw-radius-card;
+		margin-bottom: 18px;
+		padding: 0 18px;
+	}
+	.gw-discover-row {
+		flex-direction: row;
+		align-items: center;
+		height: 68px;
+		position: relative;
+	}
+	.gw-discover-icon { font-size: 24px; width: 42px; }
+	.gw-discover-label { font-size: 20px; font-weight: 600; flex: 1; }
+	.gw-discover-chevron { font-size: 25px; }
+	.gw-discover-divider { position: absolute; left: 0; right: 0; bottom: 0; height: 1px; }
+</style>

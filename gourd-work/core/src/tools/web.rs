@@ -1,10 +1,130 @@
-//! Web tools: websearch and webfetch.
+//! Web tools: websearch, webfetch, codesearch and crawl_url.
+//!
+//! Every outbound call goes through [`super::web_retry::run_with_retry`], which
+//! ports the Java kernel's `RetryTask` semantics (3 attempts, exponential
+//! backoff with Full Jitter, fast-fail on deterministic 4xx, wall-clock
+//! budget) and adds the two things Java lacks: honouring `Retry-After` on 429
+//! and a configurable proxy. See `web_retry.rs` for why the Java MCP provider's
+//! second, backoff-free retry layer was deliberately **not** ported.
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use super::registry::{Tool, ToolContext, ToolOutput};
+use super::web_retry::{
+    build_client_with_ua, configured_proxy, run_with_retry, AttemptError, RetryOutcome,
+    RetryPolicy,
+};
+
+/// Default User-Agent for the plain HTTP tools.
+const DEFAULT_UA: &str = "Mozilla/5.0 (compatible; GWork/0.3)";
+/// Browser-shaped UA Jina Reader expects (same string as Java's JINA driver,
+/// `WebCrawlerDriverTalent.java:83`).
+const JINA_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
+
+/// Process-wide HTTP client pool.
+///
+/// `reqwest::Client` internally holds an `Arc` to its connection pool, so
+/// cloning is cheap. Caching by (proxy + env fingerprint, UA) means a normal
+/// run builds one client for all four tools and keeps TLS/HTTP2 connections
+/// alive across calls, instead of rebuilding a client and re-handshaking on
+/// every tool invocation — which is what the old code did at `web.rs:36`,
+/// `:286`, `:426`.
+///
+/// **The per-request timeout is deliberately NOT part of the key**: `webfetch`
+/// takes a model-supplied `timeoutMs` (1..120000), so including it would mint
+/// an unbounded number of pooled clients. Callers use
+/// `RequestBuilder::timeout(d)` instead, which applies to that one request
+/// including its body stream (reqwest 0.12 `request.rs:291`). The environment
+/// is a startup constant (as in Java), so no per-call env read is needed and
+/// the cache has exactly one entry per (proxy, UA) — bounded by the two UA
+/// constants below.
+/// Cache key: (configured proxy, User-Agent).
+type ClientKey = (String, String);
+static CLIENTS: Lazy<Mutex<HashMap<ClientKey, reqwest::Client>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Resolve and cache a pooled client for one (proxy, UA) pair. Split out of
+/// [`shared_client`] so the cache-bounding property is testable without
+/// constructing a full `ToolContext` (which has no `Default`).
+fn client_for(raw_proxy: &str, ua: &str) -> reqwest::Client {
+    let proxy = configured_proxy(raw_proxy);
+    let key = (proxy.clone(), ua.to_string());
+    if let Ok(map) = CLIENTS.lock() {
+        if let Some(c) = map.get(&key) {
+            return c.clone();
+        }
+    }
+    let client = build_client_with_ua(&proxy, ua);
+    if let Ok(mut map) = CLIENTS.lock() {
+        map.insert(key, client.clone());
+    }
+    client
+}
+
+fn shared_client(ctx: &ToolContext, ua: &str) -> reqwest::Client {
+    client_for(&ctx.settings.general.web_proxy, ua)
+}
+
+/// Retry policy for the plain HTTP tools (Java `HarnessEngine.java:1007` feeds
+/// `webfetchTalent` from `apiRetries`).
+fn http_policy(ctx: &ToolContext) -> RetryPolicy {
+    RetryPolicy::from_settings(
+        ctx.settings.general.api_retries,
+        ctx.settings.general.web_retry_budget_secs,
+    )
+}
+
+/// Retry policy for the MCP-backed `codesearch` (Java `HarnessEngine.java:1005`
+/// feeds `codeSearchTalent` from `mcpRetries`).
+fn mcp_policy(ctx: &ToolContext) -> RetryPolicy {
+    RetryPolicy::from_settings(
+        ctx.settings.general.mcp_retries,
+        ctx.settings.general.web_retry_budget_secs,
+    )
+}
+
+/// Turn an exhausted retry into an honest error for the model.
+///
+/// The message says *how many* requests were made and *why* it stopped: without
+/// that, a transient 429 after three attempts looks exactly like "the web has
+/// nothing", and the model stops looking.
+fn retry_failure<T>(label: &str, out: RetryOutcome<T>) -> ToolOutput {
+    debug_assert!(out.value.is_none());
+    if out.cancelled {
+        return ToolOutput::err(format!("{} cancelled by user.", label));
+    }
+    let detail = out
+        .last_error
+        .as_ref()
+        .map(|e| e.message())
+        .unwrap_or_else(|| "unknown error".to_string());
+    let reason = if out.fast_failed {
+        "non-retryable error (not retried)".to_string()
+    } else if out.budget_exhausted {
+        format!("time budget exhausted after {} attempt(s)", out.attempts)
+    } else {
+        format!("{} attempt(s)", out.attempts)
+    };
+    ToolOutput::err(format!("{} failed after {}: {}", label, reason, detail))
+}
+
+/// Classify an HTTP response into either a body-carrying success or a retryable
+/// error. `Retry-After` is forwarded so 429 can obey the server's hint.
+fn status_error(status: reqwest::StatusCode, retry_after: Option<String>) -> AttemptError {
+    AttemptError::http(status, retry_after, "")
+}
+
+fn retry_after_of(resp: &reqwest::Response) -> Option<String> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
 
 /// Web search via a configurable search API.
 /// Default implementation uses DuckDuckGo HTML endpoint (no API key required).
@@ -26,59 +146,68 @@ impl Tool for WebSearchTool {
             "required": ["query"]
         })
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> ToolOutput {
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
         let query = args["query"].as_str().unwrap_or_default();
         if query.is_empty() {
             return ToolOutput::err("Empty query");
         }
         let num = args["numResults"].as_u64().unwrap_or(8).min(20) as usize;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("Mozilla/5.0 (compatible; GWork/0.3)")
-            .build()
-            .unwrap();
-
-        // DuckDuckGo HTML search (no key needed)
+        let client = shared_client(ctx, DEFAULT_UA);
         let url = format!(
             "https://html.duckduckgo.com/html/?q={}",
             url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>()
         );
-        match client.get(&url).send().await {
-            Ok(resp) => {
+        let policy = http_policy(ctx);
+        let out = run_with_retry(&policy, &ctx.cancel, |_| {
+            let client = client.clone();
+            let url = url.clone();
+            async move {
+                // Per-request timeout: the client is pooled across all tools,
+                // so the cap must live on the request, not on the client.
+                let resp = client.get(&url).timeout(Duration::from_secs(30)).send().await
+                    .map_err(|e| AttemptError::transport(e.to_string()))?;
                 let status = resp.status();
-                let html = read_body_capped(resp, 1_048_576).await;
+                let after = retry_after_of(&resp);
                 if !status.is_success() {
-                    return ToolOutput::err(format!(
-                        "Search request failed: HTTP {} for query {:?}",
-                        status, query
-                    ));
+                    return Err(status_error(status, after));
                 }
+                let html = read_body_capped(resp, 1_048_576).await?;
                 let results = parse_ddg_results(&html, num);
                 if results.is_empty() {
-                    // Zero parsed results is almost never a genuine "the web has
-                    // nothing on this": it means the endpoint served a soft block
-                    // (a 2xx anomaly page, which `is_success` cannot catch) or
-                    // changed its markup. The old code answered
-                    // `ok("No results found.")`, so the model read a failure as a
-                    // legitimate empty result and stopped looking — a silent
-                    // failure wearing a success flag.
+                    // Zero parsed results is almost never a genuine "the web
+                    // has nothing on this": DDG serves a **2xx anti-bot /
+                    // anomaly page**, so `is_success` cannot catch it. Report
+                    // it as a 429-shaped error so the retry loop treats a soft
+                    // block as a transient rejection rather than returning
+                    // "No results found." as if the search had succeeded.
                     let hint = if looks_like_bot_block(&html) {
-                        "the endpoint returned an anti-bot / anomaly page"
+                        "anti-bot / anomaly page"
                     } else {
-                        "no result anchors matched, so the page markup may have changed"
+                        "no result anchors matched (markup may have changed)"
                     };
-                    return ToolOutput::err(format!(
-                        "Search returned no parseable results ({}; HTTP {}, {} bytes). \
-                         Treat this as a search failure, not as evidence that nothing exists.",
-                        hint,
-                        status,
-                        html.len()
+                    return Err(AttemptError::http(
+                        reqwest::StatusCode::TOO_MANY_REQUESTS,
+                        after,
+                        format!("Search returned no parseable results ({}; {} bytes)", hint, html.len()),
                     ));
                 }
-                ToolOutput::ok(results.join("\n\n"))
+                Ok(results.join("\n\n"))
             }
-            Err(e) => ToolOutput::err(format!("Search request failed: {}", e)),
+        })
+        .await;
+
+        match out.value {
+            Some(text) => ToolOutput::ok(text),
+            None => {
+                let mut o = retry_failure("Search", out);
+                // Make the failure mode explicit: the model must not read a
+                // search outage as evidence that nothing exists on the web.
+                o.text.push_str(
+                    ". Treat this as a search failure, not as evidence that nothing exists.",
+                );
+                o
+            }
         }
     }
 }
@@ -237,9 +366,17 @@ fn decode_entities(text: &str) -> String {
 /// misbehaving endpoint could feed an arbitrarily large (or infinite) payload
 /// into the process before any downstream truncation ever ran — an OOM vector
 /// the tools then truncate to 80–100k chars, i.e. the cap only bounds the
-/// *result*, never the *read*. This reads the stream and stops at `max_bytes`,n/// keeping whatever arrived so the caller can still report/truncate it.
+/// *result*, never the *read*. This reads the stream and stops at `max_bytes`,
+/// keeping whatever arrived so the caller can still report/truncate it.
 /// Mirrors `skills/market.rs`'s MAX_API_BODY_BYTES pattern.
-async fn read_body_capped(mut resp: reqwest::Response, max_bytes: u64) -> String {
+///
+/// A stream error is **not** a truncated success: the old `break` returned
+/// whatever had arrived (often `""`) and `webfetch` reported an empty page as
+/// a successful fetch. Returning `Err` lets the retry loop do its job.
+async fn read_body_capped(
+    resp: reqwest::Response,
+    max_bytes: u64,
+) -> Result<String, AttemptError> {
     use futures_util::StreamExt;
     let mut body: Vec<u8> = Vec::with_capacity(64 * 1024);
     let mut stream = resp.bytes_stream();
@@ -251,14 +388,62 @@ async fn read_body_capped(mut resp: reqwest::Response, max_bytes: u64) -> String
                 }
                 body.extend_from_slice(&b);
             }
-            Err(_) => break,
+            Err(e) => {
+                return Err(AttemptError::transport(format!(
+                    "response body read failed: {}",
+                    e
+                )));
+            }
         }
     }
-    crate::textcodec::decode_bytes(&body)
+    Ok(crate::textcodec::decode_bytes(&body))
 }
 
 /// Fetch a web page and return its content as text/markdown.
 pub struct WebFetchTool;
+
+/// One `webfetch` attempt, split out so the status classification and the
+/// Cloudflare branch can be exercised against a local mock server without
+/// touching `shared_client`'s process-wide proxy resolution.
+async fn webfetch_attempt(
+    client: &reqwest::Client,
+    url: &str,
+    format: &str,
+    timeout: Duration,
+) -> Result<String, AttemptError> {
+    let send = |extra_ua: Option<&str>| {
+        let mut req = client.get(url).timeout(timeout);
+        if let Some(ua) = extra_ua {
+            req = req.header("User-Agent", ua);
+        }
+        req.send()
+    };
+    let mut resp = send(None).await
+        .map_err(|e| AttemptError::transport(e.to_string()))?;
+    if resp.status() == reqwest::StatusCode::FORBIDDEN
+        && resp.headers()
+            .get("cf-mitigated")
+            .and_then(|v| v.to_str().ok())
+            == Some("challenge")
+    {
+        // Java `WebfetchTalent.java:129-136`: one extra physical request with
+        // UA "opencode" inside this attempt — deliberately *not* another
+        // retry-loop iteration, which would double the backoff. A per-request
+        // header overrides the client's default UA (`reqwest` client.rs:2590).
+        resp = send(Some("opencode")).await
+            .map_err(|e| AttemptError::transport(e.to_string()))?;
+    }
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(status_error(status, retry_after_of(&resp)));
+    }
+    let body = read_body_capped(resp, 1_048_576).await?;
+    if format == "html" {
+        Ok(body.chars().take(100_000).collect::<String>())
+    } else {
+        Ok(html_to_text(&body).chars().take(80_000).collect::<String>())
+    }
+}
 
 #[async_trait]
 impl Tool for WebFetchTool {
@@ -271,42 +456,36 @@ impl Tool for WebFetchTool {
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "Full URL including http:// or https://"},
-                "format": {"type": "string", "description": "Output format: text (default) or html"}
+                "format": {"type": "string", "description": "Output format: text (default) or html"},
+                "timeoutMs": {"type": "integer", "description": "Per-attempt timeout in ms (default 30000, max 120000; Java WebfetchTalent)"}
             },
             "required": ["url"]
         })
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> ToolOutput {
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
         let url = args["url"].as_str().unwrap_or_default();
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return ToolOutput::err("URL must start with http:// or https://");
         }
         let format = args["format"].as_str().unwrap_or("text");
+        // Java `WebfetchTalent.java:80-86`: default 30s, hard cap 120s, an
+        // invalid value falls back to the default rather than erroring out.
+        let per_attempt_ms = args["timeoutMs"].as_u64().unwrap_or(30_000).clamp(1, 120_000);
+        let timeout = Duration::from_millis(per_attempt_ms);
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .user_agent("Mozilla/5.0 (compatible; GWork/0.3)")
-            .build()
-            .unwrap();
+        let client = shared_client(ctx, DEFAULT_UA);
+        let policy = http_policy(ctx);
+        let out = run_with_retry(&policy, &ctx.cancel, |_| {
+            let client = client.clone();
+            let url = url.to_string();
+            let format = format.to_string();
+            async move { webfetch_attempt(&client, &url, &format, timeout).await }
+        })
+        .await;
 
-        match client.get(url).send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if !status.is_success() {
-                    return ToolOutput::err(format!("HTTP {}", status));
-                }
-                let body = read_body_capped(resp, 1_048_576).await;
-                if format == "html" {
-                    let truncated: String = body.chars().take(100_000).collect();
-                    ToolOutput::ok(truncated)
-                } else {
-                    // Strip HTML to text
-                    let text = html_to_text(&body);
-                    let truncated: String = text.chars().take(80_000).collect();
-                    ToolOutput::ok(truncated)
-                }
-            }
-            Err(e) => ToolOutput::err(format!("Fetch failed: {}", e)),
+        match out.value {
+            Some(text) => ToolOutput::ok(text),
+            None => retry_failure("Fetch", out),
         }
     }
 }
@@ -329,6 +508,68 @@ const EXA_CODESEARCH_URL: &str = "https://mcp.exa.ai/mcp?tools=get_code_context_
 /// The tool name Exa exposes behind that endpoint (Java calls the same string).
 const EXA_CODESEARCH_TOOL: &str = "get_code_context_exa";
 
+/// A throwaway manager was created, handshaken and torn down on **every**
+/// `codesearch` call (`web.rs:364-374` in the old code). Java instead keeps a
+/// static `McpClientProvider` (`CodeSearchTalent.java:42-55`), so the
+/// initialize handshake happens once per process. This mirrors that: one
+/// shared manager keyed by the proxy setting, guarded by a mutex so concurrent
+/// sub-agents cannot race two handshakes for the same session id.
+static EXA_MANAGERS: Lazy<Mutex<HashMap<String, std::sync::Arc<crate::mcp::McpManager>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+const EXA_MANAGER_NAME: &str = "exa-codesearch";
+
+/// Serializes connect / invalidate / call across concurrent `codesearch`
+/// callers (sub-agents share this manager). `is_connected` alone is a TOCTOU
+/// race: two callers can both see "not connected" and both enter `connect_one`,
+/// which unconditionally calls `disconnect_one` first — one would tear down
+/// the connection the other just built. Holding one async mutex across the
+/// whole attempt makes reuse and reconnect atomic.
+static EXA_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+
+fn exa_manager(ctx: &ToolContext) -> std::sync::Arc<crate::mcp::McpManager> {
+    let proxy = configured_proxy(&ctx.settings.general.web_proxy);
+    if let Ok(map) = EXA_MANAGERS.lock() {
+        if let Some(m) = map.get(&proxy) {
+            return m.clone();
+        }
+    }
+    let mgr = std::sync::Arc::new(crate::mcp::McpManager::new());
+    // Store before connecting: a concurrent caller must find the same manager
+    // rather than building a second one.
+    if let Ok(mut map) = EXA_MANAGERS.lock() {
+        map.insert(proxy, mgr.clone());
+    }
+    mgr
+}
+
+/// Ensure the shared Exa connection is live **without** re-handshaking when it
+/// already is. `connect_one` calls `disconnect_one` first (`mcp/mod.rs:260`),
+/// so invoking it on every call would reintroduce the per-call handshake this
+/// cache exists to remove. A failed `call_tool` clears the connection so the
+/// next retry reconnects (session expiry is the common MCP failure).
+async fn ensure_exa_connected(
+    mgr: &crate::mcp::McpManager,
+    proxy: &str,
+) -> anyhow::Result<()> {
+    if mgr.is_connected(EXA_MANAGER_NAME).await {
+        return Ok(());
+    }
+    let config = crate::mcp::McpServerConfig {
+        kind: crate::mcp::TYPE_STREAMABLE.to_string(),
+        url: EXA_CODESEARCH_URL.to_string(),
+        timeout: "30s".to_string(),
+        proxy: proxy.to_string(),
+        ..Default::default()
+    };
+    mgr.connect_one(EXA_MANAGER_NAME, &config).await?;
+    Ok(())
+}
+
+/// Drop a dead Exa connection so the next attempt performs a fresh handshake.
+async fn invalidate_exa(mgr: &crate::mcp::McpManager) {
+    mgr.disconnect_one(EXA_MANAGER_NAME).await;
+}
+
 #[async_trait]
 impl Tool for CodeSearchTool {
     fn name(&self) -> &str { "codesearch" }
@@ -346,39 +587,53 @@ impl Tool for CodeSearchTool {
             "required": ["query"]
         })
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> ToolOutput {
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
         let query = args["query"].as_str().unwrap_or_default().trim();
         if query.is_empty() {
             return ToolOutput::err("Empty query");
         }
         let tokens = clamp_tokens(args["tokensNum"].as_u64());
+        let proxy = configured_proxy(&ctx.settings.general.web_proxy);
+        let mgr = exa_manager(ctx);
+        let policy = mcp_policy(ctx);
 
-        // A throwaway manager: codesearch talks to one fixed external endpoint and
-        // must not touch the user's configured MCP servers or the shared registry.
-        let config = crate::mcp::McpServerConfig {
-            kind: crate::mcp::TYPE_STREAMABLE.to_string(),
-            url: EXA_CODESEARCH_URL.to_string(),
-            timeout: "30s".to_string(),
-            ..Default::default()
-        };
-        let mgr = crate::mcp::McpManager::new();
-        let name = "exa-codesearch";
-        if let Err(e) = mgr.connect_one(name, &config).await {
-            return ToolOutput::err(format!("Code search connection failed: {}", e));
-        }
-        let result = mgr
-            .call_tool(name, EXA_CODESEARCH_TOOL, json!({"query": query, "tokensNum": tokens}))
-            .await;
-        // Always tear down: the connection is per-call, and leaving it would leak
-        // the socket (and, for SSE, the reader task).
-        mgr.disconnect_one(name).await;
+        let out = run_with_retry(&policy, &ctx.cancel, |_| {
+            let mgr = mgr.clone();
+            let proxy = proxy.clone();
+            let query = query.to_string();
+            async move {
+                // One guard for connect + call + invalidate: never let two
+                // callers race a handshake or invalidate a live connection.
+                let _guard = EXA_LOCK.lock().await;
+                // Reconnect on a dead/expired session; a live one is reused,
+                // so this is not a full handshake per call.
+                if let Err(e) = ensure_exa_connected(&mgr, &proxy).await {
+                    return Err(AttemptError::transport(format!("Code search connection failed: {}", e)));
+                }
+                match mgr
+                    .call_tool(EXA_MANAGER_NAME, EXA_CODESEARCH_TOOL, json!({"query": query, "tokensNum": tokens}))
+                    .await
+                {
+                    Ok(text) => Ok(text),
+                    Err(e) => {
+                        // A dead session would fail identically on every
+                        // retry; drop it so the next attempt reconnects.
+                        invalidate_exa(&mgr).await;
+                        Err(AttemptError::transport(format!("Code search failed: {}", e)))
+                    }
+                }
+            }
+        })
+        .await;
 
-        match result {
-            Ok(text) if !text.trim().is_empty() => ToolOutput::ok(text),
-            Ok(_) => ToolOutput::ok(
+        match out.value {
+            // An empty MCP result is a legitimate "nothing found", not an
+            // outage — same wording as Java `CodeSearchTalent.java:127-128`.
+            Some(text) if !text.trim().is_empty() => ToolOutput::ok(text),
+            Some(_) => ToolOutput::ok(
                 "未找到相关的代码片段或文档。请尝试更换查询词，明确具体的库或编程概念，并检查框架名称拼写是否正确。",
             ),
-            Err(e) => ToolOutput::err(format!("Code search failed: {}", e)),
+            None => retry_failure("Code search", out),
         }
     }
 }
@@ -417,71 +672,48 @@ impl Tool for CrawlUrlTool {
             "required": ["url"]
         })
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> ToolOutput {
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
         let url = args["url"].as_str().unwrap_or_default().trim();
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return ToolOutput::err("错误：URL 无效（必须以 http:// 或 https:// 开头）。");
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
-            .build()
-            .unwrap();
-
-        let req = client
-            .get(format!("{}{}", JINA_READER_PREFIX, url))
-            .header("Accept", "text/plain")
-            // Ask Jina for Markdown and to bypass its cache, matching Java's driver.
-            .header("X-Return-Format", "markdown")
-            .header("X-No-Cache", "true");
-
-        match req.send().await {
-            Ok(resp) => {
+        let client = shared_client(ctx, JINA_UA);
+        let policy = http_policy(ctx);
+        let out = run_with_retry(&policy, &ctx.cancel, |_| {
+            let client = client.clone();
+            let url = url.to_string();
+            async move {
+                let req = client
+                    .get(format!("{}{}", JINA_READER_PREFIX, url))
+                    .timeout(Duration::from_secs(30))
+                    .header("Accept", "text/plain")
+                    // Ask Jina for Markdown. `X-No-Cache: true` is deliberately
+                    // **gone**: it forced an upstream refetch on every call and
+                    // pushed a keyless client straight into the 20 RPM shared
+                    // pool. Jina's own docs recommend using its cache.
+                    .header("X-Return-Format", "markdown");
+                let resp = req.send().await.map_err(|e| AttemptError::transport(e.to_string()))?;
                 let status = resp.status();
-                // Rate limiting is surfaced by Jina as an HTTP status (429 in
-                // practice), not by a marker in the body — a marker check here
-                // would never fire and rate-limit pages would be returned to the
-                // model as if they were page content. Report the status honestly
-                // and name the likely cause for the retryable ones.
-                if status.as_u16() == 429 {
-                    return ToolOutput::err(
-                        "抓取失败：Jina Reader 限流（HTTP 429）。请稍后重试或降低抓取频率。",
-                    );
-                }
                 if !status.is_success() {
-                    return ToolOutput::err(format!("抓取失败：HTTP {}", status));
+                    // Rate limiting is an HTTP status (429 in practice), not a
+                    // marker in the body. Forwarding it as AttemptError::Http
+                    // lets the shared retry loop honour `Retry-After` instead
+                    // of returning the rate-limit page as if it were content.
+                    return Err(status_error(status, retry_after_of(&resp)));
                 }
-                // Bounded read, NOT `resp.text()`: a malicious or misbehaving
-                // endpoint could otherwise feed an arbitrarily large body into
-                // memory before the truncation below ever runs.
-                let mut body: Vec<u8> = Vec::new();
-                {
-                    use futures_util::StreamExt;
-                    const MAX_CRAWL_BYTES: u64 = 1_048_576; // 1 MiB read cap
-                    let mut stream = resp.bytes_stream();
-                    while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(b) => {
-                                if body.len() as u64 + b.len() as u64 > MAX_CRAWL_BYTES {
-                                    break; // keep what we have; enough for the cap below
-                                }
-                                body.extend_from_slice(&b);
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                }
-                let body = crate::textcodec::decode_bytes(&body);
+                let body = read_body_capped(resp, 1_048_576).await?;
                 if body.trim().is_empty() {
-                    return ToolOutput::err("抓取失败：目标页面返回空内容。");
+                    return Err(AttemptError::transport("目标页面返回空内容"));
                 }
-                // Bound the payload like webfetch does: a huge page must not
-                // overflow the model context in one tool result.
-                let truncated: String = body.chars().take(80_000).collect();
-                ToolOutput::ok(truncated)
+                Ok(body.chars().take(80_000).collect::<String>())
             }
-            Err(e) => ToolOutput::err(format!("抓取失败：{}", e)),
+        })
+        .await;
+
+        match out.value {
+            Some(text) => ToolOutput::ok(text),
+            None => retry_failure("抓取", out),
         }
     }
 }
@@ -741,5 +973,295 @@ mod tests {
         assert_eq!(clamp_tokens(Some(999_999)), 50000, "above the ceiling clamps down");
         assert_eq!(clamp_tokens(Some(1000)), 1000, "floor is inclusive");
         assert_eq!(clamp_tokens(Some(50000)), 50000, "ceiling is inclusive");
+    }
+
+    // ─── Retry integration against a real local HTTP server ──────────────────
+    //
+    // No external network: a hand-written TCP server (the same pattern used at
+    // `llm/client.rs:786` and `react/mod.rs:3990`) replies with scripted
+    // statuses. This is what proves a 429 is actually retried rather than just
+    // classified by a pure function.
+
+    /// Serve `responses` in order, one per accepted connection, and return the
+    /// base URL plus a handle carrying how many requests arrived.
+    async fn mock_server(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        tokio::spawn(async move {
+            for (status, body) in responses {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let reply = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status, body.len(), body
+                );
+                let _ = sock.write_all(reply.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://{}", addr), hits)
+    }
+
+    fn tiny_policy() -> RetryPolicy {
+        // Real sleeps would make the suite slow and flaky on Windows; the
+        // backoff *values* are asserted separately in web_retry.rs.
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            budget: Duration::from_secs(10),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_429_is_retried_and_the_eventual_success_is_returned() {
+        let (url, hits) = mock_server(vec![
+            ("429 Too Many Requests", "rate limited"),
+            ("200 OK", "<html><body><p>recovered</p></body></html>"),
+        ])
+        .await;
+        let client = reqwest::Client::builder().build().unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let out = run_with_retry(&tiny_policy(), &cancel, |_| {
+            let c = client.clone();
+            let u = url.clone();
+            async move { webfetch_attempt(&c, &u, "text", Duration::from_secs(2)).await }
+        })
+        .await;
+        assert_eq!(out.attempts, 2, "one 429 then one success");
+        assert_eq!(out.value.as_deref(), Some("recovered"));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_deterministic_400_makes_exactly_one_http_request() {
+        let (url, hits) = mock_server(vec![("400 Bad Request", "nope")]).await;
+        let client = reqwest::Client::builder().build().unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let out = run_with_retry(&tiny_policy(), &cancel, |_| {
+            let c = client.clone();
+            let u = url.clone();
+            async move { webfetch_attempt(&c, &u, "text", Duration::from_secs(2)).await }
+        })
+        .await;
+        assert!(out.fast_failed, "400 must trip the deterministic-error gate");
+        assert_eq!(out.attempts, 1);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "no wasted request");
+    }
+
+    #[tokio::test]
+    async fn retry_after_header_is_forwarded_from_the_response() {
+        // The server's hint must reach AttemptError; the loop then prefers it
+        // over jitter (asserted in web_retry::tests::retry_after_seconds_overrides_jitter).
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let body = "slow down";
+            let reply = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = sock.write_all(reply.as_bytes()).await;
+        });
+        let client = reqwest::Client::builder().build().unwrap();
+        let err = webfetch_attempt(&client, &format!("http://{}", addr), "text", Duration::from_secs(2))
+            .await
+            .expect_err("429 must be an error");
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(2)), "got {:?}", err);
+        assert!(!err.is_deterministic(), "429 must stay retryable");
+    }
+
+    #[tokio::test]
+    async fn exhausted_retries_report_the_last_status_not_a_fake_empty_result() {
+        let (url, hits) = mock_server(vec![
+            ("429 Too Many Requests", "slow down"),
+            ("429 Too Many Requests", "slow down"),
+            ("429 Too Many Requests", "slow down"),
+        ])
+        .await;
+        let client = reqwest::Client::builder().build().unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let out = run_with_retry(&tiny_policy(), &cancel, |_| {
+            let c = client.clone();
+            let u = url.clone();
+            async move { webfetch_attempt(&c, &u, "text", Duration::from_secs(2)).await }
+        })
+        .await;
+        assert!(out.value.is_none());
+        assert_eq!(out.attempts, 3);
+        let failed = retry_failure("Fetch", out);
+        assert!(failed.is_error);
+        assert!(failed.text.contains("429"), "got: {}", failed.text);
+        assert!(failed.text.contains("3 attempt"), "got: {}", failed.text);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// The old `read_body_capped` swallowed a stream error, returned whatever
+    /// bytes had arrived (usually none), and `webfetch` reported an **empty
+    /// successful page**. Here the server advertises a body then closes the
+    /// socket mid-transfer, so reqwest yields a body-stream error.
+    #[tokio::test]
+    async fn a_truncated_body_is_an_error_not_an_empty_success() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            // Claim 100 bytes, send 5, then drop the socket.
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nhello")
+                .await;
+            let _ = sock.shutdown().await;
+        });
+        let client = reqwest::Client::builder().build().unwrap();
+        let err = webfetch_attempt(
+            &client,
+            &format!("http://{}", addr),
+            "text",
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("a truncated body must not be reported as an empty success");
+        assert!(
+            matches!(err, AttemptError::Transport(_)),
+            "got {:?}",
+            err
+        );
+    }
+
+    /// `webfetch`'s `timeoutMs` must cap a single request **without** minting
+    /// a new pooled client. This drives the real process-wide cache through
+    /// `client_for` and asserts the entry count stays bounded: a regression
+    /// that puts `timeout` back into the key would add one client per call.
+    #[test]
+    fn distinct_per_request_timeouts_do_not_grow_the_client_cache() {
+        CLIENTS.lock().unwrap().clear();
+        // Eight distinct timeoutMs values from the model; `client_for` never
+        // sees them (the cap lives on RequestBuilder now).
+        for ms in [1, 999, 1000, 1500, 30_000, 30_001, 120_000, 77_777] {
+            let _: Duration = Duration::from_millis(ms);
+            let _ = client_for("", DEFAULT_UA);
+        }
+        let entries = CLIENTS.lock().unwrap().len();
+        assert_eq!(entries, 1, "one (proxy, UA) pair must map to one pooled client, got {entries}");
+        // A second UA is a genuinely different client, still bounded.
+        let _ = client_for("", JINA_UA);
+        assert_eq!(CLIENTS.lock().unwrap().len(), 2, "cache is bounded by UA count, not timeout values");
+        // A proxy change is a genuinely different egress path.
+        let _ = client_for("http://127.0.0.1:7890", DEFAULT_UA);
+        assert_eq!(CLIENTS.lock().unwrap().len(), 3);
+        CLIENTS.lock().unwrap().clear();
+    }
+
+    /// A round-number budget must allow a wait that fits *exactly* (Java uses
+    /// `remaining < delay`, not `<=`).
+    #[test]
+    fn budget_boundary_allows_a_wait_that_fits_exactly() {
+        let p = RetryPolicy { budget: Duration::from_secs(5), ..RetryPolicy::default() };
+        let got = super::super::web_retry::decide_after_failure(
+            &p,
+            &AttemptError::http(reqwest::StatusCode::TOO_MANY_REQUESTS, None, ""),
+            0,
+            Duration::from_secs(4),
+            1.0,
+        );
+        // elapsed 4s + jittered 1s == 5s budget → exactly fits, must Wait.
+        assert!(matches!(got, super::super::web_retry::RetryDecision::Wait(_)), "got {:?}", got);
+    }
+
+    // ─── Performance contract ───────────────────────────────────────────────
+    //
+    // User requirement: the ported tools must not be slower than the Java
+    // kernel. Java keeps a static `McpClientProvider` and a static HttpClient
+    // (`WebsearchTalent.java:46`, `CodeSearchTalent.java:42-55`); the pre-fix
+    // Rust built a new `reqwest::Client` (and a full MCP handshake) on every
+    // call. These two tests measure the two things that actually dominate:
+    // TCP/TLS connection count and per-call local overhead.
+
+    /// A keep-alive server that counts **accepted TCP connections**, not
+    /// requests. With a pooled client, N sequential requests must reuse one
+    /// connection — the same behaviour Java's static client gives.
+    #[tokio::test]
+    async fn pooled_client_reuses_one_tcp_connection_across_calls() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = accepts.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Handle multiple HTTP/1.1 requests on one connection.
+                loop {
+                    let mut buf = [0u8; 4096];
+                    let n = match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    let _ = &buf[..n];
+                    let body = "ok";
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    if sock.write_all(reply.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        CLIENTS.lock().unwrap().clear();
+        // One client for all 20 calls, exactly what `shared_client` gives.
+        let client = client_for("", DEFAULT_UA);
+        let url = format!("http://{}/", addr);
+        for _ in 0..20 {
+            let text = webfetch_attempt(&client, &url, "text", Duration::from_secs(2))
+                .await
+                .expect("every keep-alive request must succeed");
+            assert_eq!(text, "ok");
+        }
+        let conns = accepts.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            conns <= 2,
+            "20 sequential calls opened {conns} TCP connections; a pooled client must reuse one (Java: 1)"
+        );
+        CLIENTS.lock().unwrap().clear();
+    }
+
+    /// The hot path added by this change must stay cheap: resolving a cached
+    /// client is a mutex + hash lookup + `Arc` clone, with no env reads, no
+    /// client construction and no TLS handshake. 10k resolutions should be
+    /// well under a second even in an unoptimised debug test build.
+    #[test]
+    fn cached_client_lookup_has_bounded_local_cost() {
+        CLIENTS.lock().unwrap().clear();
+        let _ = client_for("", DEFAULT_UA); // warm the single cache entry
+        let t = std::time::Instant::now();
+        for _ in 0..10_000 {
+            let c = client_for("", DEFAULT_UA);
+            std::hint::black_box(c);
+        }
+        let elapsed = t.elapsed();
+        assert_eq!(CLIENTS.lock().unwrap().len(), 1, "no client must be rebuilt");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "10k cached lookups took {elapsed:?}; the retry layer must not add per-call work"
+        );
+        CLIENTS.lock().unwrap().clear();
     }
 }

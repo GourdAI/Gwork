@@ -1,0 +1,63 @@
+<template>
+	<scroll-view direction="vertical" class="select-text-scroll-view uni-theme-root">
+		<rich-text class="select-text-content" :selectable="true" :nodes="nodes"></rich-text>
+	</scroll-view>
+</template>
+
+<script lang="uts" setup>
+	import {uniAi, MsgItem} from '@/uni_modules/uni-ai-x/sdk/'
+	import { ref, onMounted } from 'vue'
+	
+	type SelectTextProps = {
+		msgId?: string
+	}
+	
+	const props = withDefaults(defineProps<SelectTextProps>(), {
+		msgId: ''
+	})
+	
+	const text = ref<string>("加载中...")
+
+	const nodes = computed<UTSJSONObject[]>(() => {
+		const result = [] as UTSJSONObject[]
+		const lines = text.value.split('\n')
+		for (let index = 0; index < lines.length; index++) {
+			if (index > 0) {
+				result.push({ name: 'br' } as UTSJSONObject)
+			}
+			const line = lines[index]
+			if (line.length > 0) {
+				result.push({ type: 'text', text: line } as UTSJSONObject)
+			}
+		}
+		return result
+	})
+
+	onMounted(() => {
+		const msg = uniAi.currentChat?.msgList.find((item: MsgItem) => item._id == props.msgId)
+		const errorMsg = msg?.error_msg ?? null
+		if (errorMsg != null && errorMsg.length > 0) {
+			text.value = errorMsg
+			return
+		}
+		text.value = msg?.body ?? '没有数据'
+	})
+</script>
+
+<style lang="scss">
+	@import '@/uni_modules/uni-ai-x/static/css/variables.scss';
+
+	.select-text-scroll-view {
+		height: 100%;
+		width: 100%;
+		padding: 10px;
+		background-color: var(--bg-primary);
+	}
+
+	.select-text-content {
+		width: 100%;
+		line-height: 24px;
+		font-size: 15px;
+		color: var(--text-primary);
+	}
+</style>

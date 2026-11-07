@@ -845,6 +845,17 @@ function onWebChunk(sess, chunk) {
             return;
         }
 
+        /* tps_progress 是模型流式输出期间的 transient 速率帧（≥500ms 一帧，刻意不带 phase）。
+           与 agent_progress 同级的纯被动帧：只定向刷新用量卡里的 TPS / TTFT 两个 span。
+           必须在此短路，不得走下方完整路径，否则每帧都会：① 刷 lastEventAt / 清 silenceTimer，
+           把速率心跳喂给主流停滞看门狗；② removeInlineThinking 闪掉正在显示的内联思考指示器；
+           ③ inferPhaseFromType 降级推断覆写 sess.phase。历史回放（app-history.js 直接调本入口）
+           同样在此被拦下——该帧不落盘，但回放链路上仍做一次防御，避免单例 DOM 被历史帧写脏。 */
+        if (chunk.type === 'tps_progress') {
+            if (typeof window.updateContextTpsLive === 'function') window.updateContextTpsLive(sess, chunk);
+            return;
+        }
+
         // 事件活跃时间戮：看门狗/对账用它判断“是否长时间无任何事件”
         sess.lastEventAt = Date.now();
 
@@ -1017,6 +1028,10 @@ function onWebChunk(sess, chunk) {
                         updateContextIndicator(chunk, sess);
                     } else if (!sess.lastContextChunk
                             || (chunk.createdAt || 0) >= (sess.lastContextChunk.createdAt || 0)) {
+                        // 后台会话只存快照、不碰单例 DOM。但结算清态必须与前台一致：
+                        // 否则残留的 _ctxLive 会在切回该会话时经 liveMetrics 覆盖这里刚存下的
+                        // 权威 generationMs/generatedTokens/ttftMs。
+                        if (typeof endContextLive === 'function') endContextLive(sess, chunk);
                         sess.lastContextChunk = chunk;
                     }
                 }
@@ -1225,6 +1240,33 @@ function finishStream(sess, opts) {
         liveFoldRow = doneRow || null;
     }
 
+    /* 【挂起 done 的轮边界收口】keepBatchIndex 要保留的是【会话级批次索引】
+       （toolBatchesById / completedActionIds，供恢复后 action_end 认领原卡片容器），
+       不是【DOM 层运行态】。挂起 done（ask_user / HITL，chunk.suspended=true）时
+       旧气泡其实已经是终态：用户作答后 appendQuestionAnswerRecord 与恢复段帧会在
+       resetStreamState 清空的指针下另起一条全新 assistant 气泡，旧气泡从此无人收口。
+       实证（落盘帧 work-mw4m8qep，用户 2026-11「ask 好像也有同样的问题」）：
+       done suspended → 等待 9.6 分钟 → question_answered → 恢复段新 runId，
+       屏幕上留下「正在执行中 · 10min 12s」的 running 盖子（ticker 跨整个等待期
+       一直累加）+ 恢复段新气泡的「正在执行中 · 26s」，与插话缺陷完全同构。
+
+       故挂起收尾也必须在【清指针之前】做一次 DOM 层轮边界收口，复用
+       settleSteerTurnBoundary（命名沿袭插话修复，语义已是通用轮边界）：
+       摘 agent-live / 显示 msg-actions / closeBatchFor 把 running 盖子定格为
+       「执行工具 N 次」。它不动任何流式状态、缓冲、按钮态与批次索引，因此与
+       keepBatchIndex 的保留语义零冲突；也不调 compactBubble —— 挂起段没有
+       终态正文，整轮 Compact 会走 !decision → revealAll 把折叠重新摊开。
+
+       护栏与下方真收口分支对齐：回放 / prepend / 游离渲染容器一律跳过
+       （helper 自身还有一层 _replaying 门禁）。纯展示增强：异常只留痕，
+       绝不阻断 resetStreamState 与按钮复位。 */
+    if (keepBatchIndex && !sess._replaying && !sess._skipScroll
+            && typeof isDetachedRenderTarget === 'function' && !isDetachedRenderTarget(sess)
+            && typeof settleSteerTurnBoundary === 'function') {
+        try { settleSteerTurnBoundary(sess); }
+        catch (suspendBoundaryErr) { console.error('[finishStream] 挂起轮边界收口失败:', suspendBoundaryErr); }
+    }
+
     // resetStreamState 会清空 buffer，所以必须在上面强刷完后再调
     // 挂起收尾：completedActionIds 是「同一 actionId 不重复建卡」的幂等依据，被 resetStreamState
     // 一并清掉后，恢复后重发的同批帧会再建一遍已有的卡。先快照再原样回填。
@@ -1236,12 +1278,14 @@ function finishStream(sess, opts) {
        运行中 agent-live 让过程行以扁平语义轨迹实时展开（活动行 accent、思考仍可点开）；
        真收口时摘掉 agent-live 并把本轮过程区收成一行统计摘要，只留最终正文。
 
-       三条护栏，缺一不可：
-       ① 挂起 done（keepBatchIndex）：引擎随时会同 runId 继续跑，此刻折叠等于半途收口，
-          且恢复后同批帧会再建卡 —— 保持展开，等真正那一轮 done。
-       ② 回放路径（_replaying / _skipScroll）：replaySession 结束后已由 app-history.js
-          按轮统一折叠，这里再折会重复插按钮、并干扰滚动锚定。
-       ③ 渲染落点游离（isDetachedRenderTarget）：节点还没进文档，量不到 DOM、也不该动。 */
+        三条护栏，缺一不可：
+        ① 挂起 done（keepBatchIndex）：上面的【轮边界收口】已在清指针前把旧气泡
+           定格为终态（摘 agent-live / 收 running 盖子）；这里【不再】施加整轮
+           Compact —— 挂起段没有终态正文，compact 会 revealAll 把折叠重新摊开，
+           且恢复段的内容属于新气泡，不该被计入旧轮摘要。会话级批次索引仍保留。
+        ② 回放路径（_replaying / _skipScroll）：replaySession 结束后已由 app-history.js
+           按轮统一折叠，这里再折会重复插按钮、并干扰滚动锚定。
+        ③ 渲染落点游离（isDetachedRenderTarget）：节点还没进文档，量不到 DOM、也不该动。 */
     try {
         if (!keepBatchIndex && !sess._replaying && !sess._skipScroll
             && typeof isDetachedRenderTarget === 'function' && !isDetachedRenderTarget(sess)
@@ -1267,6 +1311,12 @@ function finishStream(sess, opts) {
                         try { tbApi.closeBatchFor(liveBubble); } catch (tbErr) { /* 展示增强 */ }
                     }
                     if (tcApi) tcApi.compactBubble(liveBubble, {
+                        /* 【2026-11 用户拍板】任务【真正结束】时与加载历史一致：
+                            即便有运行态批次组头也折成「一行摘要 + 最终正文」。
+                            回放 / prepend / 挂起 done 都被上面的护栏排除，只有真收口
+                            走到这里；组头 DOM 与批次成员的折叠类均不删，点开摘要
+                            后仍是运行态那套多折叠组形态。 */
+                        ended: true,
                         translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t) ? function (k) { return GourdI18n.t(k); } : null
                     });
                 }
@@ -2175,6 +2225,12 @@ function dispatchGateChunk(chunk) {
         sess._awaitingSendAck = false;
         sess._sendAckConfirmed = false;
         sess.activeRunId = null;
+        /* 实时 TPS/TTFT 兜底收口：provider 未返回 usage 时内核不发 context_size，
+           结算帧缺失会让最后一个 500ms 滑窗值永久留在卡面。非挂起 done 必须清态；
+           挂起（ask_user / HITL）只是暂停，恢复后带同一个 runId 继续跑，不能清。 */
+        if (!isSuspendedDone(sess, chunk) && typeof endContextLive === 'function') {
+            endContextLive(sess, chunk);
+        }
         /* 插话幂等集合只服务实时竞态（WS 的 steer_applied 早于 HTTP 200 到达），轮结束即过期。
            不清会在会话被 LRU 淘汰重建（evictInactiveSessions 清空容器）后继续拦住回放：
            旧 steerResolved 键仍在，重新进入会话时回放还原出的同一 steerId 会被当成已处理
@@ -2227,6 +2283,23 @@ function dispatchGateChunk(chunk) {
     if (chunk.type === 'file_changes') {
         var fileChangesSess = getOrCreateSession(sid);
         if (typeof window.onFileChangesChunk === 'function') window.onFileChangesChunk(fileChangesSess, chunk);
+        return;
+    }
+
+    /* tps_progress 是瞬态速率帧（不落盘、无配对 done）。必须在通用「自动进入 streaming」
+       分支之前消费：空闲窗口到达的尾帧若走下方，会无条件伪造一次流（isStreaming=true +
+       停止按钮 + showThinking），20s 后看门狗强制 finishStream 并弹「强制结束」toast。 */
+    if (chunk.type === 'tps_progress') {
+        // onWebChunk 入口的 gateFrameScopeMismatch 在这里不会执行（本分支直接 return），
+        // 故补一次 scope 检查，避免跨 scope 的瞬态帧写脏会话态。
+        if (gateFrameScopeMismatch(chunk)) return;
+        // 迟到/陌生会话的尾帧不值得为它新建 SessionState（LRU 噪声）。
+        var tpsSess = sessionMap[sid];
+        if (!tpsSess) {
+            if (sid !== activeSessionId) return;
+            tpsSess = getOrCreateSession(sid);
+        }
+        if (typeof window.updateContextTpsLive === 'function') window.updateContextTpsLive(tpsSess, chunk);
         return;
     }
 

@@ -1,0 +1,130 @@
+import {
+	MarkdownHtmlBlock
+} from '@/uni_modules/uni-ai-worker/utssdk/markdown-html.uts'
+import { MarkdownToken } from '@/uni_modules/uni-cmark/utssdk/interface.uts'
+import { TablePresentation, prepareTablePresentation } from './table-presentation.uts'
+import { MathPresentation, buildMathPresentation } from './math-presentation.uts'
+import type { UniAiMdHtmlRenderBlock } from '@/uni_modules/uni-ai-worker/utssdk/uni-ai-md-html.uts'
+
+export type CodePresentationLine = {
+	text: string
+	html: string
+}
+
+export type MarkdownTextRenderBlock = {
+	kind: string
+	key: string
+	html: string
+	text: string
+	language: string
+	isComplete: boolean
+	columnWidths: number[]
+	rowTextWidths: number[][]
+	codeTokens: MarkdownToken[][]
+	level: number
+	indent: number
+	marker: string
+	quoteDepth: number
+	mermaidImageSource?: string
+	mermaidRenderTheme?: string
+	mermaidRenderFailed?: boolean
+	codeHeight?: string
+	codeHtml?: string
+	codeContentHeight?: string
+	codeLines?: CodePresentationLine[]
+	codeCompleteLines?: number
+	codeHighlightedText?: string
+	table?: TablePresentation
+	math?: MathPresentation
+	svgSource: string
+	svgWidth: number
+	svgHeight: number
+}
+
+function htmlHeadingLevel(html: string): number {
+	const value = html.trim().toLowerCase()
+	for (let level = 1; level <= 6; level++) {
+		if (value.startsWith('<h' + level.toString())) return level
+	}
+	return 0
+}
+
+function createSpecialBlock(kind: string, key: string, html: string = '',
+	text: string = '', language: string = '', isComplete: boolean = true,
+	columnWidths: number[] = [] as number[], rowTextWidths: number[][] = [] as number[][],
+	codeTokens: MarkdownToken[][] = [] as MarkdownToken[][],
+	mermaidImageSource: string | null = null, mermaidRenderTheme: string | null = null): MarkdownTextRenderBlock {
+	return {
+		kind: kind,
+		key: key,
+		html: html,
+		text: text,
+		language: language,
+		isComplete: isComplete,
+		columnWidths: columnWidths,
+		rowTextWidths: rowTextWidths,
+		codeTokens: codeTokens,
+		level: 0,
+		indent: 0,
+		marker: '',
+		quoteDepth: 0,
+		mermaidImageSource: mermaidImageSource ?? '',
+		mermaidRenderTheme: mermaidRenderTheme ?? '',
+		svgSource: '',
+		svgWidth: 0,
+		svgHeight: 0
+	}
+}
+
+function legacyHtmlBlockToText(block: MarkdownHtmlBlock): MarkdownTextRenderBlock {
+	const source = block.kind == 'text' ? block.text : block.html
+	const level = htmlHeadingLevel(source)
+	const quoteDepth = block.kind == 'quote' ? 1 : 0
+	const kind = level > 0 ? 'heading' : block.kind == 'math' ? 'math' : 'paragraph'
+	const renderBlock = createSpecialBlock(kind, block.key)
+	renderBlock.level = level
+	renderBlock.quoteDepth = quoteDepth
+	renderBlock.text = block.text
+	if (block.html.length > 0) renderBlock.html = source
+	renderBlock.language = block.language
+	renderBlock.isComplete = block.isComplete
+	return renderBlock
+}
+
+export function uniAiMdHtmlBlocksToTextBlocks(blocks: UniAiMdHtmlRenderBlock[],
+	isDone: boolean = false): MarkdownTextRenderBlock[] {
+	const result = [] as MarkdownTextRenderBlock[]
+	for (let index = 0; index < blocks.length; index++) {
+		const block = blocks[index]
+		const target = createSpecialBlock(block.kind, block.key, block.html, block.text,
+			block.language, isDone ? true : block.isComplete, block.columnWidths, block.rowTextWidths)
+		target.svgSource = block.svgSource
+		target.codeCompleteLines = block.codeCompleteLines
+		target.svgWidth = block.svgWidth
+		target.svgHeight = block.svgHeight
+		result.push(target)
+	}
+	return result
+}
+
+export function markdownHtmlBlocksToTextBlocks(blocks: MarkdownHtmlBlock[], theme: string = 'light'): MarkdownTextRenderBlock[] {
+	const result = [] as MarkdownTextRenderBlock[]
+	for (let index = 0; index < blocks.length; index++) {
+		const block = blocks[index]
+		if (block.kind == 'table' || block.kind == 'code' || block.kind == 'mermaid') {
+			const prepared = createSpecialBlock(block.kind, block.key, block.html, block.text,
+				block.language, block.isComplete, block.columnWidths, block.rowTextWidths, block.codeTokens ?? [] as MarkdownToken[][],
+				block.mermaidImageSource ?? null, block.mermaidRenderTheme ?? null)
+			if (block.kind == 'table') prepared.table = prepareTablePresentation(block.html, block.columnWidths, block.rowTextWidths, theme)
+			if (block.kind == 'code') {
+				prepared.codeHeight = (Math.max(1, block.text.replace(/\r\n/g, '\n').split('\n').length) * 22 + 16).toString() + 'px'
+			}
+			result.push(prepared)
+			continue
+		}
+		const prepared = legacyHtmlBlockToText(block)
+		if (block.kind == 'math') prepared.math = buildMathPresentation(block)
+		result.push(prepared)
+	}
+	return result
+}

@@ -1,0 +1,127 @@
+<!-- 网络链接内容展示页（uni-id-pages-x中用于展示隐私政策协议内容） -->
+<template>
+	<view class="nav-bar">
+		<view class="nav-bar-left">
+			<uni-icons type="left" size="20" color="#000" @click="back"></uni-icons>
+		</view>
+		<text class="nav-bar-title">{{title}}</text>
+		<view class="nav-bar-right">
+			<!-- #ifndef MP -->
+			<view class="external-browser-button" hover-class="external-browser-button-active" @click.stop="openInExternalBrowser">
+				<uni-ai-icon class="external-browser-icon" code="e797" size="24" color="#000"></uni-ai-icon>
+			</view>
+			<!-- #endif -->
+		</view>
+	</view>
+	<web-view class="web-view" v-if="url.length != 0" @load="webviewLoad" @error="webviewError" :src="url" id="webview"></web-view>
+</template>
+
+<script lang="uts" setup>
+	// #ifdef APP
+	import { openSchema } from '@/uni_modules/uts-openSchema'
+	// #endif
+
+	const url = ref<string>("")
+	const title = ref<string>("")
+	function browserFallback() {
+		uni.showModal({ title: '未能切换到浏览器', content: '请检查系统是否允许打开外部应用，或复制链接到浏览器打开。', confirmText: '复制链接',
+			success: (res) => { if (res.confirm) uni.setClipboardData({ data: url.value }) } })
+	}
+	
+	onLoad((param) => {
+		const rawUrlParam = param["url"] as string;
+		let urlParam = rawUrlParam ?? '';
+		try { urlParam = decodeURIComponent(urlParam) ?? urlParam } catch (_) { }
+		title.value = (param["title"] ?? urlParam) as string;
+		if (!/^https?:\/\/[^\s/]+/i.test(urlParam)) {
+			uni.showModal({
+				title: "错误",
+				content: '不是一个有效的网站链接,' + '"' + urlParam + '"',
+				showCancel: false,
+				confirmText: "知道了",
+				complete: () => {
+					uni.navigateBack()
+				}
+			});
+			title.value = "页面路径错误"
+		} else {
+			url.value = urlParam;
+		}
+		if (title.value.length != 0) {
+			uni.setNavigationBarTitle({ title: title.value });
+		}
+	})
+	
+	const webviewLoad = (event: UniWebViewLoadEvent) => {
+	}
+	
+	const webviewError = (event: UniWebViewErrorEvent) => {
+		console.error('webviewError', event);
+	}
+	
+	const back = () => {
+		uni.navigateBack()
+	}
+
+	const openInExternalBrowser = () => {
+		if (url.value.length == 0) return
+		// #ifdef APP
+		try {
+			openSchema(url.value)
+		} catch (_) {
+			browserFallback()
+		}
+		// #endif
+		// #ifdef WEB
+		if (window.open(url.value, '_blank') == null) browserFallback()
+		// #endif
+	}
+
+</script>
+<style lang="scss">
+	/* 蒸汽模式：仅单层 class */
+	.nav-bar {
+		flex-direction: row;
+		padding: 10px;
+		padding-top: var(--status-bar-height);
+		justify-content: space-between;
+		border-bottom: 1px solid #ccc;
+	}
+
+	.nav-bar-left,
+	.nav-bar-right {
+		width: 52px;
+		height: 24px;
+		flex-direction: row;
+		align-items: center;
+	}
+
+	.nav-bar-right {
+		justify-content: flex-end;
+	}
+
+	.external-browser-button {
+		width: 44px;
+		height: 44px;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.external-browser-button-active {
+		opacity: 0.55;
+	}
+
+	.nav-bar-title {
+		width: 50%;
+		text-overflow: ellipsis;
+		text-align: center;
+		white-space: nowrap;
+		overflow: hidden;
+	}
+
+	.web-view {
+		width: 750rpx;
+		flex: 1;
+		height: 100%;
+	}
+</style>

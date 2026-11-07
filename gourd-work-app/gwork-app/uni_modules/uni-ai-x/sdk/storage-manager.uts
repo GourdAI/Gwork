@@ -1,0 +1,564 @@
+import { ChatItem, MsgItem } from '@/uni_modules/uni-ai-x/types.uts'
+// #ifdef APP-ANDROID
+import { saveAndroidMessageInBackground, invalidateAndroidMessageWrite, readAndroidChatMessages, readAndroidChatList, writeAndroidStorageBatch, mutateAndroidChatMessages } from '@/uni_modules/uni-ai-worker-runtime'
+import { requestSnapshotWork } from '@/uni_modules/uni-ai-worker-runtime'
+// #endif
+// #ifdef APP-HARMONY
+import { deleteRenderAssets } from '@/uni_modules/uni-ai-worker/utssdk/snapshot-files.uts'
+// #endif
+
+// 存储键常量
+type T_STORAGE_KEYS = {
+	CHAT_LIST: string
+	CHAT_MSG_IDS_PREFIX: string
+	MSG_CONTENT_PREFIX: string
+}
+
+const STORAGE_KEYS: T_STORAGE_KEYS = {
+	CHAT_LIST: 'uni-ai-chatList',
+	CHAT_MSG_IDS_PREFIX: 'uni-ai-chat-',
+	MSG_CONTENT_PREFIX: 'uni-ai-msg-'
+}
+
+function migrateLegacyMessage(message: MsgItem): MsgItem {
+	if (message.search?.status == 'searching') message.search!.status = 'cancelled'
+	const hasMarkdownBlocks = message.markdownBlocks != null && message.markdownBlocks!.length > 0
+	if (!hasMarkdownBlocks && message.rendered == true && message.markdownHtml != null && message.markdownHtml!.length > 0) {
+		message.markdownHtml = ''
+	}
+	if (message.markdownHtml == null) message.markdownHtml = ''
+	if (message.markdownAst == null) message.markdownAst = ''
+	return message
+}
+
+function serializeMessage(message: MsgItem): string {
+	// #ifdef APP-ANDROID || APP-HARMONY
+	const stored: MsgItem = { ...message, markdownHtml: '', markdownAst: '', markdownBlocks: '', uniAiMdRevision: 0 }
+	return JSON.stringify(stored)
+	// #endif
+	// #ifndef APP-ANDROID || APP-HARMONY
+	return JSON.stringify(message)
+	// #endif
+}
+
+// aiChat表结构 - 会话基本信息
+export type AiChat = {
+	id: string
+	title: string
+	update_time: number
+}
+
+// aiChatMsgId表结构 - 会话消息ID映射
+export type AiChatMsgIds = {
+	chatId: string
+	msgIds: string[]
+}
+
+export type ChatMessageBatch = {
+	chatId: string
+	messages: MsgItem[]
+}
+
+const pendingWrites = new Map<string, MsgItem>()
+const removedMessages = new Set<string>()
+const removedChats = new Set<string>()
+let pendingChatList: AiChat[] | null = null
+let storageRevision = 0
+
+function invalidateKey(key: string) {
+	storageRevision++
+	// #ifdef APP-ANDROID
+	invalidateAndroidMessageWrite(key)
+	// #endif
+}
+
+function snapshotMessage(message: MsgItem): MsgItem {
+	const search = message.search
+	return {
+		_id: message._id, body: message.body, from_uid: message.from_uid,
+		state: message.state, create_time: message.create_time, chat_id: message.chat_id,
+		rendered: message.rendered, thinkContent: message.thinkContent,
+		about_msg_id: message.about_msg_id, error_msg: message.error_msg,
+		img_url_list: message.img_url_list?.slice(),
+		markdownHtml: '', markdownAst: '', markdownBlocks: '', uniAiMdRevision: 0,
+		renderSnapshot: message.renderSnapshot,
+		stressSvgSource: message.stressSvgSource, stressSvgWidth: message.stressSvgWidth,
+		stressSvgHeight: message.stressSvgHeight,
+		search: search == null ? undefined : {
+			status: search.status, query: search.query, error: search.error,
+			sources: search.sources.map((source) => ({ id: source.id, title: source.title,
+				url: source.url, content: source.content, source: source.source, date: source.date }))
+		}
+	}
+}
+
+// 存储管理类
+export class StorageManager {
+	addMessageInBackground(message: MsgItem) {
+		// #ifdef APP-ANDROID
+		storageRevision++
+		const snapshot = snapshotMessage(message)
+		removedMessages.delete(message._id)
+		removedChats.delete(message.chat_id)
+		pendingWrites.set(message._id, snapshot)
+		mutateAndroidChatMessages(message.chat_id, [snapshot as UTSJSONObject], [], false, (ok: boolean) => {
+			if (pendingWrites.get(message._id) != snapshot) return
+			if (ok) pendingWrites.delete(message._id)
+			else console.error('后台新增消息失败: ' + message._id)
+		})
+		// #endif
+		// #ifndef APP-ANDROID
+		this.addMessage(message)
+		// #endif
+	}
+
+	removeMessagesInBackground(chatId: string, ids: string[]) {
+		for (const id of ids) this.removeRenderAssets(id)
+		// #ifdef APP-ANDROID
+		storageRevision++
+		const removed = ids.slice()
+		for (const id of removed) { pendingWrites.delete(id); removedMessages.add(id) }
+		mutateAndroidChatMessages(chatId, [], removed, false, (ok: boolean) => {
+			if (ok) for (const id of removed) removedMessages.delete(id)
+			else console.error('后台删除消息失败: ' + chatId)
+		})
+		// #endif
+		// #ifndef APP-ANDROID
+		this.removeMessages(chatId, ids)
+		// #endif
+	}
+
+	deleteChatInBackground(chatId: string) {
+		// #ifdef APP-ANDROID
+		storageRevision++
+		removedChats.add(chatId)
+		const ids: string[] = []
+		pendingWrites.forEach((message: MsgItem, id: string) => { if (message.chat_id == chatId) ids.push(id) })
+		for (const id of ids) pendingWrites.delete(id)
+		mutateAndroidChatMessages(chatId, [], [], true, (ok: boolean) => {
+			if (ok) removedChats.delete(chatId)
+			else console.error('后台删除会话消息失败: ' + chatId)
+		})
+		// #endif
+		// #ifndef APP-ANDROID
+		this.deleteChat(chatId)
+		// #endif
+	}
+
+	async getChatListAsync(): Promise<AiChat[]> {
+		// #ifdef APP-ANDROID
+		const result = await new Promise<UTSJSONObject[] | null>((resolve) => { readAndroidChatList(resolve) })
+		if (pendingChatList != null) return pendingChatList!.slice()
+		if (result == null) throw new Error('读取会话列表失败')
+		return result as AiChat[]
+		// #endif
+		// #ifndef APP-ANDROID
+		return this.getChatList()
+		// #endif
+	}
+
+	saveChatListInBackground(chats: AiChat[]) {
+		// #ifdef APP-ANDROID
+		const snapshot = chats.map((chat: AiChat): AiChat => ({ id: chat.id, title: chat.title, update_time: chat.update_time }))
+		pendingChatList = snapshot
+		writeAndroidStorageBatch([{ key: STORAGE_KEYS.CHAT_LIST, data: snapshot } as UTSJSONObject], (ok: boolean) => {
+			if (pendingChatList != snapshot) return
+			if (ok) pendingChatList = null
+			else console.error('后台保存会话列表失败')
+		})
+		// #endif
+		// #ifndef APP-ANDROID
+		this.saveChatList(chats)
+		// #endif
+	}
+
+	async getChatMessagesAsync(chatId: string): Promise<MsgItem[]> {
+		// #ifdef APP-ANDROID
+		const revision = storageRevision
+		const result = await new Promise<UTSJSONObject[] | null>((resolve) => { readAndroidChatMessages(chatId, resolve) })
+		if (revision != storageRevision) return await this.getChatMessagesAsync(chatId)
+		if (result == null) throw new Error('读取会话消息失败')
+		return (result as MsgItem[]).map((message: MsgItem): MsgItem => {
+			const pending = pendingWrites.get(message._id)
+			return pending == null ? message : snapshotMessage(pending)
+		})
+		// #endif
+		// #ifndef APP-ANDROID
+		return this.getChatMessages(chatId)
+		// #endif
+	}
+
+	updateStreamingMessage(message: MsgItem) {
+		if (removedMessages.has(message._id) || removedChats.has(message.chat_id)) return
+		// #ifdef APP-ANDROID
+		storageRevision++
+		const snapshot = snapshotMessage(message)
+		pendingWrites.set(message._id, snapshot)
+		let retries = 0
+		const isCurrent = (): boolean => pendingWrites.get(message._id) == snapshot && !removedMessages.has(message._id) && !removedChats.has(message.chat_id)
+		const attempt = () => {
+			if (!isCurrent()) return
+			saveAndroidMessageInBackground(STORAGE_KEYS.MSG_CONTENT_PREFIX + message._id, snapshot as UTSJSONObject, receive)
+		}
+		const receive = (ok: boolean) => {
+			if (!isCurrent()) return
+			if (ok) pendingWrites.delete(message._id)
+			else if (retries < 3) { retries++; setTimeout(attempt, 1000 * retries) }
+			else console.error('[render-snapshot] message save exhausted: ' + message._id)
+		}
+		attempt()
+		// #endif
+		// #ifndef APP-ANDROID
+		this.updateMessage(message)
+		// #endif
+	}
+
+	private invalidateMessageWrite(msgId: string) {
+		invalidateKey(STORAGE_KEYS.MSG_CONTENT_PREFIX + msgId)
+		pendingWrites.delete(msgId)
+	}
+	// 旧版消息渲染字段的惰性重写队列（鸿蒙/Android）
+	private pendingMigrateMsgIds = [] as string[]
+	private migrateTimer = 0
+	
+	/**
+	 * 获取会话列表
+	 */
+	getChatList(): AiChat[] {
+		if (pendingChatList != null) return pendingChatList!.slice()
+		try {
+			const result = uni.getStorageSync(STORAGE_KEYS.CHAT_LIST) as string
+			return result.length > 0 ? JSON.parse<AiChat[]>(result as string) as AiChat[] : []
+		} catch (error) {
+			console.error('获取会话列表失败:', error)
+			return []
+		}
+	}
+	
+	/**
+	 * 保存会话列表
+	 */
+	saveChatList(chatList: AiChat[]): boolean {
+		invalidateKey(STORAGE_KEYS.CHAT_LIST)
+		pendingChatList = null
+		try {
+			uni.setStorageSync(STORAGE_KEYS.CHAT_LIST, JSON.stringify(chatList))
+			return true
+		} catch (error) {
+			console.error('保存会话列表失败:', error)
+			return false
+		}
+	}
+	
+	/**
+	 * 获取会话的消息ID列表
+	 */
+	private _getChatMsgIds(chatId: string): string[] {
+		try {
+			const key = `${STORAGE_KEYS.CHAT_MSG_IDS_PREFIX}${chatId}-msgIds`
+			const result = uni.getStorageSync(key) as string
+			return result.length > 0 ? JSON.parse<string[]>(result as string) as string[] : []
+		} catch (error) {
+			console.error(`获取会话 ${chatId} 消息ID列表失败:`, error)
+			return []
+		}
+	}
+	
+	// 添加ChatMsgIds到会话列表
+	private _addChatMsgIds(chatId: string, msgId: string): boolean {
+		const chatMsgIds = this._getChatMsgIds(chatId)
+		chatMsgIds.push(msgId)
+		try {
+			const key = `${STORAGE_KEYS.CHAT_MSG_IDS_PREFIX}${chatId}-msgIds`
+			invalidateKey(key)
+			uni.setStorageSync(key, JSON.stringify(chatMsgIds))
+			return true
+		} catch (error) {
+			console.error(`保存会话 ${chatId} 消息ID列表失败:`, error)
+			return false
+		}
+	}
+	
+	/**
+	 * 获取单条消息内容
+	 */
+	getMessage(msgId: string): MsgItem | null {
+		if (removedMessages.has(msgId)) return null
+		const pending = pendingWrites.get(msgId)
+		if (pending != null) return snapshotMessage(pending)
+		try {
+			const key = `${STORAGE_KEYS.MSG_CONTENT_PREFIX}${msgId}`
+			const result = uni.getStorageSync(key) as string
+			if (result.length == 0) return null
+			const msg = JSON.parse<MsgItem>(result as string) as MsgItem
+			if (removedChats.has(msg.chat_id)) return null
+			return migrateLegacyMessage(msg)
+		} catch (error) {
+			console.error(`获取消息 ${msgId} 失败:`, error)
+			return null
+		}
+	}
+	
+	/**
+	 * 保存单条消息内容
+	 */
+	saveMessage(msgId: string, message: MsgItem): boolean {
+		removedMessages.delete(msgId)
+		removedChats.delete(message.chat_id)
+		this.invalidateMessageWrite(msgId)
+		try {
+			const key = `${STORAGE_KEYS.MSG_CONTENT_PREFIX}${msgId}`
+			uni.setStorageSync(key, serializeMessage(message))
+			return true
+		} catch (error) {
+			console.error(`保存消息 ${msgId} 失败:`, error)
+			return false
+		}
+	}
+
+	addMessage(message: MsgItem): boolean {
+		// 新增的数据 需要把消息ID添加到会话的消息ID列表中
+		this._addChatMsgIds(message.chat_id, message._id)
+		return this.saveMessage(message._id, message)
+	}
+
+	/**
+	 * 为压测数据准备完整会话快照，避免逐条更新消息 ID 列表。
+	 */
+	saveChatMessages(chatId: string, messages: MsgItem[]): boolean {
+		const msgIds = [] as string[]
+		for (let index = 0; index < messages.length; index++) {
+			const message = messages[index]
+			if (!this.saveMessage(message._id, message)) return false
+			msgIds.push(message._id)
+		}
+		try {
+			const key = `${STORAGE_KEYS.CHAT_MSG_IDS_PREFIX}${chatId}-msgIds`
+			invalidateKey(key)
+			uni.setStorageSync(key, JSON.stringify(msgIds))
+			return true
+		} catch (error) {
+			console.error(`保存会话 ${chatId} 消息ID列表失败:`, error)
+			return false
+		}
+	}
+
+	async saveChatMessagesAsync(chatId: string, messages: MsgItem[]): Promise<boolean> {
+		return await this.saveChatMessagesBatchAsync([{ chatId: chatId, messages: messages }])
+	}
+
+	/**
+	 * Save several independent chat snapshots in one bounded storage batch.
+	 * The stress-copy caller limits each batch so a large run does not enqueue
+	 * hundreds of native storage requests at once.
+	 */
+	async saveChatMessagesBatchAsync(batches: ChatMessageBatch[]): Promise<boolean> {
+		// #ifdef APP-ANDROID
+		const entries: UTSJSONObject[] = []
+		for (const batch of batches) {
+			invalidateKey(STORAGE_KEYS.CHAT_MSG_IDS_PREFIX + batch.chatId + '-msgIds')
+			const ids: string[] = []
+			for (const message of batch.messages) {
+				this.invalidateMessageWrite(message._id)
+				ids.push(message._id)
+				entries.push({ key: STORAGE_KEYS.MSG_CONTENT_PREFIX + message._id, data: snapshotMessage(message) } as UTSJSONObject)
+			}
+			entries.push({ key: STORAGE_KEYS.CHAT_MSG_IDS_PREFIX + batch.chatId + '-msgIds', data: ids } as UTSJSONObject)
+		}
+		return await new Promise<boolean>((resolve) => { writeAndroidStorageBatch(entries, resolve) })
+		// #endif
+		// #ifndef APP-ANDROID
+		const writes = [] as Promise<boolean>[]
+		for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+			const batch = batches[batchIndex]
+			const msgIds = [] as string[]
+			for (let messageIndex = 0; messageIndex < batch.messages.length; messageIndex++) {
+				const message = batch.messages[messageIndex]
+				this.invalidateMessageWrite(message._id)
+				msgIds.push(message._id)
+				const data = serializeMessage(message)
+				writes.push(new Promise<boolean>((resolve) => {
+					uni.setStorage({ key: `${STORAGE_KEYS.MSG_CONTENT_PREFIX}${message._id}`, data: data, success: () => resolve(true), fail: () => resolve(false) })
+				}))
+			}
+			const idsData = JSON.stringify(msgIds)
+			writes.push(new Promise<boolean>((resolve) => {
+				uni.setStorage({ key: `${STORAGE_KEYS.CHAT_MSG_IDS_PREFIX}${batch.chatId}-msgIds`, data: idsData, success: () => resolve(true), fail: () => resolve(false) })
+			}))
+		}
+		const results = await Promise.all(writes)
+		for (let index = 0; index < results.length; index++) if (!results[index]) return false
+		return true
+		// #endif
+	}
+
+	appendChatMessages(chatId: string, messages: MsgItem[]): boolean {
+		invalidateKey(STORAGE_KEYS.CHAT_MSG_IDS_PREFIX + chatId + '-msgIds')
+		const msgIds = this._getChatMsgIds(chatId)
+		for (let index = 0; index < messages.length; index++) {
+			const message = messages[index]
+			if (!this.saveMessage(message._id, message)) return false
+			msgIds.push(message._id)
+		}
+		try {
+			const key = `${STORAGE_KEYS.CHAT_MSG_IDS_PREFIX}${chatId}-msgIds`
+			uni.setStorageSync(key, JSON.stringify(msgIds))
+			return true
+		} catch (error) {
+			console.error(`追加会话 ${chatId} 消息ID列表失败:`, error)
+			return false
+		}
+	}
+	updateMessage(message: MsgItem): boolean {
+		return this.saveMessage(message._id, message)
+	}
+
+	
+	/**
+	 * 删除单条消息
+	 */
+	deleteMessage(msgId: string): boolean {
+		removedMessages.add(msgId)
+		this.removeRenderAssets(msgId)
+		this.invalidateMessageWrite(msgId)
+		try {
+			const key = `${STORAGE_KEYS.MSG_CONTENT_PREFIX}${msgId}`
+			uni.removeStorageSync(key)
+			return true
+		} catch (error) {
+			console.error(`删除消息 ${msgId} 失败:`, error)
+			return false
+		}
+	}
+
+	/**
+	 * 删除会话中的多条消息，并同步消息ID列表
+	 */
+	removeMessages(chatId: string, msgIds: string[]): boolean {
+		try {
+			const storedIds = this._getChatMsgIds(chatId)
+			const remainedIds = [] as string[]
+			for (let i = 0; i < storedIds.length; i++) {
+				if (msgIds.indexOf(storedIds[i]) == -1) remainedIds.push(storedIds[i])
+			}
+			const key = `${STORAGE_KEYS.CHAT_MSG_IDS_PREFIX}${chatId}-msgIds`
+			invalidateKey(key)
+			uni.setStorageSync(key, JSON.stringify(remainedIds))
+			for (let i = 0; i < msgIds.length; i++) {
+				this.deleteMessage(msgIds[i])
+			}
+			return true
+		} catch (error) {
+			console.error(`删除会话 ${chatId} 消息失败:`, error)
+			return false
+		}
+	}
+	
+	/**
+	 * 获取会话的所有消息
+	 */
+	getChatMessages(chatId: string): MsgItem[] {
+		const msgIds = this._getChatMsgIds(chatId)
+		const messages: MsgItem[] = []
+		
+		for (let i = 0; i < msgIds.length; i++) {
+			const msgId = msgIds[i]
+			const msg = this.getMessage(msgId)
+			if (msg != null) {
+				// #ifdef APP-HARMONY || APP-ANDROID
+				// 原生渲染数据不落 storage：清掉历史遗留的 AST/HTML 字段（内存立即生效），
+				// 保留 body 即可在渲染时重建
+				msg.uniAiMdRevision = 0
+				if (msg.from_uid == 'uni-ai' && msg.body.length > 0) msg.rendered = true
+				if (msg.body.length > 0 && ((msg.markdownAst ?? '').length > 0 || (msg.markdownHtml ?? '').length > 0 || (msg.markdownBlocks ?? '').length > 0)) {
+					msg.markdownAst = ''
+					msg.markdownHtml = ''
+					msg.markdownBlocks = ''
+					this.queueLegacyRewrite(msgId)
+				}
+				// #endif
+				messages.push(msg)
+			}
+		}
+		
+		// 按创建时间排序
+		return messages.sort((a, b) => a.create_time - b.create_time)
+	}
+
+	// #ifdef APP-HARMONY || APP-ANDROID
+	/**
+	 * 把需要清理旧渲染字段的消息加入后台队列，分批重写。
+	 * 清掉旧字段可降低 preferences 整文件刷盘成本。
+	 */
+	private queueLegacyRewrite(msgId: string): void {
+		if (this.pendingMigrateMsgIds.indexOf(msgId) < 0) this.pendingMigrateMsgIds.push(msgId)
+		if (this.migrateTimer != 0) return
+		this.migrateTimer = setTimeout(() => {
+			this.migrateTimer = 0
+			this.runLegacyRewrite()
+		}, 200)
+	}
+
+	private runLegacyRewrite(): void {
+		const msgId = this.pendingMigrateMsgIds.shift()
+		if (msgId != null) {
+			const msg = this.getMessage(msgId)
+			if (msg != null && msg.body.length > 0) {
+				msg.markdownAst = ''
+				msg.markdownHtml = ''
+				msg.markdownBlocks = ''
+				this.saveMessage(msgId, msg)
+			}
+		}
+		if (this.pendingMigrateMsgIds.length > 0) {
+			this.migrateTimer = setTimeout(() => {
+				this.migrateTimer = 0
+				this.runLegacyRewrite()
+			}, 200)
+			return
+		}
+	}
+	// #endif
+		
+	/**
+	 * 删除整个会话及其所有消息
+	 */
+	deleteChat(chatId: string): boolean {
+		removedChats.add(chatId)
+		try {
+			// 获取会话的所有消息ID
+			const msgIds = this._getChatMsgIds(chatId)
+			
+			// 删除所有消息内容
+			for (let i = 0; i < msgIds.length; i++) {
+				const msgId = msgIds[i]
+				this.deleteMessage(msgId)
+			}
+			
+			// 删除消息ID列表
+			const key = `${STORAGE_KEYS.CHAT_MSG_IDS_PREFIX}${chatId}-msgIds`
+			invalidateKey(key)
+			uni.removeStorageSync(key)
+
+			// 删除会话
+			const chatList = this.getChatList()
+			const index = chatList.findIndex((item) => item.id == chatId)
+			chatList.splice(index, 1)
+			this.saveChatList(chatList)
+			
+			return true
+		} catch (error) {
+			console.error(`删除会话 ${chatId} 失败:`, error)
+			return false
+		}
+	}
+
+	private removeRenderAssets(msgId: string) {
+		// #ifdef APP-ANDROID
+		requestSnapshotWork({ action: 'delete', messageId: msgId } as UTSJSONObject, (_result: UTSJSONObject) => {})
+		// #endif
+		// #ifdef APP-HARMONY
+		deleteRenderAssets(msgId)
+		// #endif
+	}
+}

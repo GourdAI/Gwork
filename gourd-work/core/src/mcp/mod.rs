@@ -124,6 +124,12 @@ pub struct McpServerConfig {
     pub url: String,
     /// Custom headers (http family only).
     pub headers: HashMap<String, String>,
+    /// Optional outbound proxy for this HTTP MCP server, e.g.
+    /// `http://127.0.0.1:7890`. Java has the same per-server knob
+    /// (`McpClientProperties.httpProxy`). The built-in `codesearch` tool sets
+    /// this from `settings.general.webProxy` so the keyless Exa endpoint stays
+    /// reachable on networks where a direct connection is blocked.
+    pub proxy: String,
     /// Request timeout, e.g. `"120s"`.
     pub timeout: String,
     /// Per-server tool denylist, edited from the MCP tools panel
@@ -146,6 +152,7 @@ impl Default for McpServerConfig {
             env: HashMap::new(),
             url: String::new(),
             headers: HashMap::new(),
+            proxy: String::new(),
             timeout: String::new(),
             disallowed_tools: Vec::new(),
         }
@@ -267,6 +274,16 @@ impl McpManager {
             }
             other => anyhow::bail!("unsupported MCP transport '{}'", other),
         }
+    }
+
+    /// Whether a live connection exists for `name`.
+    ///
+    /// Used by the built-in `codesearch` tool to avoid re-running the MCP
+    /// initialize handshake on every call. `connect_one` deliberately tears
+    /// down first (`disconnect_one` at `:260`), so callers that want reuse must
+    /// gate on this.
+    pub async fn is_connected(&self, name: &str) -> bool {
+        self.connections.lock().await.contains_key(name)
     }
 
     /// Tear down one server: kill its child process / abort its stream task and
@@ -503,10 +520,40 @@ impl McpManager {
                 .map_err(|e| anyhow::anyhow!("invalid header value for {:?}: {}", k, e))?;
             headers.insert(name, value);
         }
-        Ok(reqwest::Client::builder()
+        Ok(Self::client_builder(config)?
             .timeout(parse_timeout(&config.timeout))
             .default_headers(headers)
             .build()?)
+    }
+
+    /// Apply the per-server proxy. Kept separate from both client builders so
+    /// the two cannot drift: an SSE stream and its POSTs must use the same
+    /// egress path.
+    ///
+    /// When no explicit proxy is set we leave reqwest's `auto_sys_proxy`
+    /// enabled. It reads `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`
+    /// with the correct scheme matching. Resolving the env vars by hand and
+    /// calling `Proxy::all` would (a) disable that automatic handling
+    /// (`reqwest` client.rs:1416), (b) drop `NO_PROXY` (`proxy.rs:261`), and
+    /// (c) apply an HTTP-only proxy to HTTPS targets.
+    fn client_builder(config: &McpServerConfig) -> anyhow::Result<reqwest::ClientBuilder> {
+        let mut b = reqwest::Client::builder();
+        let chosen = config.proxy.trim();
+        if !chosen.is_empty() {
+            match reqwest::Proxy::all(chosen) {
+                Ok(p) => {
+                    // Preserve NO_PROXY even for an explicit override, so local
+                    // MCP servers are not unexpectedly tunnelled.
+                    b = b.proxy(p.no_proxy(reqwest::NoProxy::from_env()));
+                }
+                Err(e) => {
+                    // A typo must not make every tool fail with a cryptic
+                    // builder error; log and continue direct.
+                    tracing::warn!(proxy = %chosen, error = %e, "invalid MCP proxy; continuing direct");
+                }
+            }
+        }
+        Ok(b)
     }
 
     /// Same as [`Self::http_client`] but with **no whole-request timeout**.
@@ -528,7 +575,7 @@ impl McpManager {
         }
         // Connect timeout still applies: a server that never accepts the TCP
         // connection must fail in bounded time, same as every other client here.
-        Ok(reqwest::Client::builder()
+        Ok(Self::client_builder(config)?
             .connect_timeout(std::time::Duration::from_secs(30))
             .default_headers(headers)
             .build()?)

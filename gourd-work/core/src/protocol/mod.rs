@@ -3,7 +3,7 @@
 //! Frame types are compatible with the existing frontend (app-streaming.js / WebChunk):
 //! reason_start, reason, text, action_start, action_args, action_batch, action_end,
 //! hitl, hitl_released, question, question_answered, agent_start, agent_progress,
-//! agent_end, context_size, trace, retry, user_input, steer_applied/cancelled/dropped,
+//! agent_end, context_size, tps_progress, trace, retry, user_input, steer_applied/cancelled/dropped,
 //! file_changes, done, error.
 //!
 //! Every frame carries:
@@ -527,6 +527,43 @@ impl Frame {
         f.extra("args", serde_json::Value::Object(args))
     }
 
+    /// Live decode-speed + first-token-latency progress (transient, not persisted).
+    ///
+    /// This frame is emitted **while the model is still streaming**, at most
+    /// `TPS_PROGRESS_INTERVAL_MS` apart. `generatedTokens` / `generationMs` are
+    /// the real tokens observed and real monotonic time elapsed in that one
+    /// measurement window — the frontend's existing `ctxTpsText` computes
+    /// `generatedTokens / generationMs` from them unchanged. Unlike
+    /// [`Frame::context_size`] (the settlement snapshot), these two values are
+    /// a sliding window, so the readout reacts immediately to a slowdown.
+    /// `ttftMs` is latched at the very first visible delta and therefore also
+    /// reaches the UI while the answer is still being typed.
+    ///
+    /// Deliberately carries **no phase**: it is a passive metadata frame, and
+    /// a phase on it would rewrite the main conversation's phase state machine
+    /// (same contract as `agent_progress`). It is transient — added to the
+    /// session store's skip list — so history replay is driven solely by the
+    /// authoritative `context_size` frame and never replays progress frames.
+    ///
+    /// `live: true` tells the frontend this is a running measurement; the
+    /// settling `context_size` frame simply omits it.
+    pub fn tps_progress(
+        session: &str,
+        generation_ms: u64,
+        generated_tokens: u64,
+        ttft_ms: Option<u64>,
+    ) -> Self {
+        let mut f = Self::new("tps_progress")
+            .session(session)
+            .extra("generationMs", serde_json::json!(generation_ms))
+            .extra("generatedTokens", serde_json::json!(generated_tokens))
+            .extra("live", serde_json::json!(true));
+        if let Some(ttft) = ttft_ms {
+            f = f.extra("ttftMs", serde_json::json!(ttft));
+        }
+        f
+    }
+
     /// Run completed successfully.
     pub fn done(session: &str) -> Self {
         Self::new("done").session(session).with_phase(phase::DONE)
@@ -998,6 +1035,37 @@ mod tests {
         assert_eq!(v["generatedTokens"], 320);
     }
 
+    /// Live TPS progress must carry the measured pair + latched TTFT, and
+    /// deliberately carry **no phase** (a phase would rewrite the main
+    /// conversation's phase state machine on every 500 ms heartbeat).
+    #[test]
+    fn tps_progress_frame_carries_the_live_meter_contract() {
+        let v: serde_json::Value =
+            serde_json::from_str(&Frame::tps_progress("work-x", 1_000, 42, Some(1_690)).to_json())
+                .unwrap();
+        assert_eq!(v["type"], "tps_progress");
+        assert_eq!(v["sessionId"], "work-x");
+        assert_eq!(v["generationMs"], 1_000);
+        assert_eq!(v["generatedTokens"], 42);
+        assert_eq!(v["ttftMs"], 1_690);
+        assert_eq!(v["live"], true);
+        assert!(v.get("phase").is_none(), "progress frames must not advance the phase");
+
+        // The first-visible-delta frame has no speed yet: 0/0 must be sent as
+        // real zeros (not omitted), so the frontend knows TTFT is latched.
+        let first: serde_json::Value =
+            serde_json::from_str(&Frame::tps_progress("work-x", 0, 0, Some(860)).to_json()).unwrap();
+        assert_eq!(first["generationMs"], 0);
+        assert_eq!(first["generatedTokens"], 0);
+        assert_eq!(first["ttftMs"], 860);
+        // No visible output ⇒ no fabricated 0 ms latency, same as context_size.
+        let none: serde_json::Value =
+            serde_json::from_str(&Frame::tps_progress("work-x", 0, 0, None).to_json()).unwrap();
+        assert!(none.get("ttftMs").is_none());
+    }
+
+    /// Reason start carries the per-turn anchor that lets the frontend
+    /// invalidate the previous turn's settled elapsed time immediately.
     #[test]
     fn reason_start_carries_turn_anchor() {
         let v: serde_json::Value =

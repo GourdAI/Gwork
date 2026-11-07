@@ -1,0 +1,339 @@
+<template>
+	<view class="chat-extension-input" :class="panelVisible ? '' : 'chat-extension-input-collapsed-root'">
+		<view v-if="panelVisible" class="chat-extension-input-actions">
+			<view v-for="action in actions" :key="action.id"
+				class="chat-extension-input-action"
+				:class="[activeActionId == action.id ? 'chat-extension-input-action-active' : '', aiState == 'processing' ? 'chat-extension-input-action-disabled' : '']"
+				@click.stop="runAction(action.id)">
+				<text class="chat-extension-input-action-text"
+					:class="activeActionId == action.id ? 'chat-extension-input-action-text-active' : ''">{{action.label}}</text>
+			</view>
+			<view class="chat-extension-input-action"
+				:class="!canCopyChats ? 'chat-extension-input-action-disabled' : ''"
+				@click.stop="copyChats">
+				<text class="chat-extension-input-action-text">复制500个会话</text>
+			</view>
+			<view class="chat-extension-input-action"
+				:class="aiState == 'processing' ? 'chat-extension-input-action-disabled' : ''"
+				@click.stop="createChat">
+				<text class="chat-extension-input-action-text">新建会话</text>
+			</view>
+			<view class="chat-extension-input-action chat-extension-input-delete"
+				:class="aiState == 'processing' || uniAi.currentChat == null ? 'chat-extension-input-action-disabled' : ''"
+				@click.stop="deleteCurrentChat">
+				<text class="chat-extension-input-delete-text">删除当前会话</text>
+			</view>
+			<view class="chat-extension-input-action chat-extension-input-delete"
+				:class="aiState == 'processing' || uniAi.chat.datas.length == 0 ? 'chat-extension-input-action-disabled' : ''"
+				@click.stop="deleteAllChats">
+				<text class="chat-extension-input-delete-text">删除所有会话</text>
+			</view>
+			<view class="chat-extension-input-action" @click.stop="toggleMessageToolBar">
+				<text class="chat-extension-input-action-text">{{messageToolBarVisible ? '隐藏消息工具栏' : '显示消息工具栏'}}</text>
+			</view>
+			<view class="chat-extension-input-action" @click.stop="togglePanel">
+				<text class="chat-extension-input-action-text">隐藏此面板</text>
+			</view>
+			<view class="stress-generator">
+				<view class="stress-generator-title"><text>随机生成</text><input class="stress-count" v-model="stressCount" type="number" /><text>条</text><text class="stress-select-all" @click.stop="toggleAll">{{allSelected ? '取消全选' : '全选'}}</text></view>
+				<checkbox-group class="stress-types" @change="onStressTypesChange"><label v-for="type in stressTypes" :key="type" class="stress-type"><checkbox :value="type" :checked="selectedTypes.indexOf(type) >= 0" /><text class="stress-type-text">{{type}}</text></label></checkbox-group>
+				<view class="stress-generate-btn" :class="!canCopyMessages || selectedTypes.length == 0 ? 'chat-extension-input-action-disabled' : ''" @click.stop="copyMessages"><text class="stress-generate-text">确认生成</text></view>
+			</view>
+		</view>
+		<view v-else class="chat-extension-input-collapsed" @click.stop="togglePanel">
+			<uni-icons type="up" size="14" color="var(--text-secondary)"></uni-icons>
+			<text class="chat-extension-input-collapsed-text">显示工具栏</text>
+		</view>
+		<view v-if="aiState == 'processing'" class="chat-extension-input-status-row">
+			<text class="chat-extension-input-status-text">{{statusText}}</text>
+			<view class="chat-extension-input-stop-slot">
+				<view class="chat-extension-input-stop" :style="{visibility: aiState == 'processing' ? 'visible' : 'hidden'}" @click.stop="stop">
+					<uni-ai-icon code="e691" color="#FFF" size="14"></uni-ai-icon>
+				</view>
+			</view>
+		</view>
+		<view class="chat-extension-input-safe-area"></view>
+		<view v-if="copyingChats" class="chat-extension-input-copy-mask">
+			<text class="chat-extension-input-copy-mask-text">正在复制会话 {{copiedChats}} / 500</text>
+		</view>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import uniAi, { messageToolBarVisible } from '@/uni_modules/uni-ai-x/sdk'
+	import { getChatInputExtension } from '@/uni_modules/uni-ai-x/sdk/chat-extension.uts'
+
+	const extension = getChatInputExtension()!
+	const actions = extension.actions
+	const aiState = computed<string>(() => uniAi.currentChat?.state ?? 'none')
+	const activeActionId = computed<string>(() => extension.activeActionId())
+	const statusText = computed<string>(() => extension.statusText())
+	const copyingChats = ref<boolean>(false)
+	const copiedChats = ref<number>(0)
+	const stressCount = ref<string>('100')
+	const stressTypes = ['标题', '长文', '引用', '列表', '表格', '代码', 'SVG', '链接']
+	const selectedTypes = ref<string[]>(['长文'])
+	const allSelected = computed<boolean>(() => selectedTypes.value.length == stressTypes.length)
+	const panelVisible = ref<boolean>(true)
+	let stressCopyRunId = ''
+	const canCopyMessages = computed<boolean>(() => {
+		return !copyingChats.value && aiState.value != 'processing' && uniAi.currentChat != null
+	})
+	const canCopyChats = computed<boolean>(() => {
+		return !copyingChats.value && aiState.value != 'processing' && (uniAi.currentChat?.msgList.length ?? 0) > 0
+	})
+
+	function runAction(actionId: string) {
+		if (aiState.value == 'processing') return
+		extension.runAction(actionId)
+	}
+
+	function createChat() {
+		if (aiState.value == 'processing') return
+		extension.clear()
+	}
+
+	function deleteCurrentChat() {
+		if (aiState.value == 'processing') return
+		const chatId = uniAi.currentChat?.id ?? ''
+		if (chatId.length == 0) return
+		uni.showModal({
+			title: '删除当前会话',
+			content: '确定删除当前会话及其全部消息吗？',
+			success: (result) => {
+				if (result.confirm) uniAi.deleteChat(chatId)
+			}
+		})
+	}
+
+	function deleteAllChats() {
+		if (aiState.value == 'processing' || uniAi.chat.datas.length == 0) return
+		uni.showModal({
+			title: '删除所有会话',
+			content: '确定删除所有会话及其全部消息吗？此操作无法撤销。',
+			success: (result) => {
+				if (result.confirm) uniAi.deleteAllChats()
+			}
+		})
+	}
+
+	function toggleMessageToolBar() {
+		messageToolBarVisible.value = !messageToolBarVisible.value
+	}
+
+	function togglePanel() {
+		panelVisible.value = !panelVisible.value
+	}
+
+	function stop() {
+		extension.stop()
+	}
+
+	function copyMessages() {
+		if (!canCopyMessages.value) return
+		const count = Math.max(1, Math.min(500, parseInt(stressCount.value) || 100))
+		uniAi.copyLastMessageForStress(count, selectedTypes.value.slice())
+	}
+	function onStressTypesChange(event: UniCheckboxGroupChangeEvent) { selectedTypes.value = event.detail.value.slice() }
+	function toggleAll() { selectedTypes.value = allSelected.value ? [] : stressTypes.slice() }
+
+	function copyChats() {
+		if (!canCopyChats.value) return
+		copyingChats.value = true
+		copiedChats.value = 0
+		stressCopyRunId = Date.now().toString(36)
+		copyNextChat()
+	}
+
+	const copyNextChat = async () => {
+		const error = await uniAi.createCurrentChatStressCopies(stressCopyRunId, 500, (completed: number): void => {
+			copiedChats.value = completed
+		})
+		if (error.length > 0) {
+			uniAi.saveChatList2Storage()
+			copyingChats.value = false
+			return
+		}
+		uniAi.saveChatList2Storage()
+		copiedChats.value = 500
+		copyingChats.value = false
+	}
+
+	watch((): string => uniAi.chat.activeId, () => {
+		extension.onChatChanged()
+	})
+
+	onBeforeUnmount(() => {
+		extension.dispose()
+	})
+</script>
+
+<style lang="scss">
+@import '@/uni_modules/uni-ai-x/static/css/variables.scss';
+
+.chat-extension-input {
+	width: 100%;
+	flex-direction: column;
+	background-color: var(--bg-primary);
+	padding: 10px 10px 4px 10px;
+	border-radius: 15px 15px 0 0;
+	border: 1px solid var(--border-secondary);
+}
+
+.chat-extension-input-collapsed-root {
+	padding-top: 4px;
+}
+
+.chat-extension-input-actions {
+	width: 100%;
+	flex-direction: row;
+	flex-wrap: wrap;
+	align-items: center;
+}
+
+.chat-extension-input-collapsed {
+	width: 100%;
+	height: 24px;
+	flex-direction: row;
+	align-items: center;
+	justify-content: center;
+}
+
+.chat-extension-input-collapsed-text {
+	margin-left: 4px;
+	font-size: 12px;
+	color: var(--text-secondary);
+}
+
+.stress-generator { width: 100%; margin-top: 2px; padding: 8px 0 2px 0; border-top: 1px solid var(--border-secondary); }
+.stress-generator-title { flex-direction: row; align-items: center; }
+.stress-count { width: 52px; height: 24px; margin: 0 4px; padding: 0 5px; border: 1px solid var(--border-primary); border-radius: 4px; text-align: center; }
+.stress-select-all { margin-left: auto; color: #2979ff; font-size: 12px; }
+.stress-types { flex-direction: row; flex-wrap: wrap; margin-top: 4px; }
+.stress-type { flex-direction: row; align-items: center; margin-right: 8px; margin-bottom: 3px; }
+.stress-type-text { font-size: 12px; color: var(--text-secondary); }
+.stress-generate-btn { align-self: flex-end; padding: 5px 12px; border-radius: 5px; background-color: #2979ff; }
+.stress-generate-text { color: #ffffff; font-size: 12px; }
+
+.chat-extension-input-action {
+	height: 28px;
+	flex-direction: row;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	padding: 0 9px;
+	margin-right: 5px;
+	margin-bottom: 5px;
+	border-radius: 6px;
+	border: 1px solid var(--border-primary);
+	background-color: var(--bg-secondary);
+}
+
+.chat-extension-input-action-active {
+	border-color: var(--accent-primary);
+	background-color: var(--bg-tertiary);
+}
+
+.chat-extension-input-action-generate {
+	border-color: #2979ff;
+	background-color: #2979ff;
+}
+
+.chat-extension-input-generate-text {
+	color: #ffffff;
+}
+
+.chat-extension-input-action-disabled {
+	opacity: 0.45;
+}
+
+.chat-extension-input-action-text {
+	font-size: 12px;
+	color: var(--text-secondary);
+}
+
+.chat-extension-input-action-text-active {
+	color: var(--accent-primary);
+}
+
+.chat-extension-input-delete {
+	border-color: var(--error);
+}
+
+.chat-extension-input-delete-text {
+	font-size: 12px;
+	color: var(--error);
+}
+
+.chat-extension-input-status-row {
+	width: 100%;
+	height: 34px;
+	flex-direction: row;
+	align-items: center;
+}
+
+.chat-extension-input-copy-mask {
+	position: fixed;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	left: 0;
+	z-index: 500;
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	justify-content: center;
+	background-color: rgba(0, 0, 0, 0.35);
+}
+
+.chat-extension-input-copy-mask-text {
+	padding: 12px 16px;
+	border-radius: 6px;
+	background-color: var(--bg-primary);
+	font-size: 14px;
+	color: var(--text-primary);
+}
+
+.chat-extension-input-status-text {
+	flex: 1;
+	font-size: 11px;
+	line-height: 18px;
+	color: var(--text-tertiary);
+}
+
+.chat-extension-input-stop-slot {
+	width: 34px;
+	height: 34px;
+	margin-left: 8px;
+	align-items: center;
+	justify-content: center;
+}
+
+.chat-extension-input-stop {
+	width: 30px;
+	height: 30px;
+	align-items: center;
+	justify-content: center;
+	border-radius: 100px;
+	background-color: var(--accent-primary);
+}
+
+.chat-extension-input-safe-area {
+	/* #ifdef APP-ANDROID */
+	margin-bottom: env(safe-area-inset-bottom);
+	/* #endif */
+	/* #ifndef APP-ANDROID */
+	padding-bottom: env(safe-area-inset-bottom);
+	/* #endif */
+}
+
+/* #ifdef H5 */
+@media screen and (min-device-width:960px){
+	.chat-extension-input {
+		border-radius: 15px;
+		margin: 10px;
+		margin-top: 0;
+	}
+}
+/* #endif */
+</style>

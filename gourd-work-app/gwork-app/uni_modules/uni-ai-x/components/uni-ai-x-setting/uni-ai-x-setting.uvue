@@ -1,0 +1,295 @@
+<template>
+	<view class="uni-im-setting uni-theme-root">
+		<uni-popup ref="popupRef">
+			<view class="uni-im-setting-popup-content">
+				<text class="uni-im-setting-title">系统设置</text>
+				<!-- #ifdef APP -->
+				<view class="uni-im-setting-item">
+					<text class="uni-im-setting-label">暗黑模式</text>
+					<switch class="uni-im-setting-switch" color="#111" :checked="isDarkMode" @change="onThemeChange" />
+				</view>
+				<!-- #endif -->
+				<!-- #ifdef WEB || MP -->
+				<view class="uni-im-setting-item uni-im-setting-host-theme" @click="onHostThemeClick">
+					<text class="uni-im-setting-label">暗黑模式</text>
+					<view class="uni-im-setting-host-theme-value">
+						<text class="uni-im-setting-host-theme-value-text">跟随系统主题</text>
+						<uni-icons type="info" size="16" color="#999"></uni-icons>
+					</view>
+				</view>
+				<!-- #endif -->
+				<view class="uni-im-setting-item">
+					<text class="uni-im-setting-label">大语言模型</text>
+					<view class="uni-im-setting-value-box" @click="changeModel">
+						<text class="uni-im-setting-value">{{currentModel}}</text>
+						<uni-icons type="down" size="16" :color="uiTheme == 'light' ? '#999' : '#ccc'"></uni-icons>
+					</view>
+				</view>
+				<!-- #ifdef APP -->
+				<view class="uni-im-setting-item uni-im-setting-action" @click="checkForUpdate">
+					<view class="uni-im-setting-update-info">
+						<text class="uni-im-setting-label">检查更新</text>
+						<text class="uni-im-setting-version">当前版本 {{currentAppVersion}}</text>
+					</view>
+					<text class="uni-im-setting-action-text">{{checkingUpdate ? '检查中...' : '立即检查'}}</text>
+				</view>
+				<!-- #endif -->
+			</view>
+		</uni-popup>
+		<uni-popup ref="modelPopupRef" @clickMask="closeModelPopup">
+			<view class="uni-im-setting-choose-llm-model">
+				<text class="uni-im-setting-choose-title">选择AI模型</text>
+				<scroll-view direction="horizontal" class="uni-im-setting-scroll-view">
+					<view v-for="provider in providerNameList" :key="provider">
+						<view v-for="(llmMode, i) in llmModelMap.get(provider)!.models" :key="i" @click="radioChange(provider, llmMode.modelId)" class="uni-im-setting-model-item">
+							<uni-icons class="uni-im-setting-radio" type="checkbox-filled" size="18" :color="uniAi.llm.model == llmMode.modelId && provider == uniAi.llm.provider ? '#007AFF' : '#DDD'"></uni-icons>
+							<text class="uni-im-setting-model-text">{{llmMode.name ?? llmMode.modelId}}</text>
+							<text class="uni-im-setting-tag" v-if="llmMode.thinking">思考</text>
+							<text class="uni-im-setting-tag" v-if="llmMode.image">图片理解</text>
+						</view>
+					</view>
+				</scroll-view>
+			</view>
+		</uni-popup>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import {uniAi, uiTheme, getLlmDisplayName} from '@/uni_modules/uni-ai-x/sdk';
+	import {Provider} from '@/uni_modules/uni-ai-x/types.uts';
+	// #ifdef APP
+	import checkUpdate from '@/uni_modules/uni-upgrade-center-app/utils/check-update'
+	// #endif
+	
+	import {llmModelMap, providerNameList} from '@/uni_modules/uni-ai-x/config';
+	
+	const popupRef = ref<ComponentPublicInstance | null>(null)
+	const modelPopupRef = ref<ComponentPublicInstance | null>(null)
+	
+	const llmModelMapData = llmModelMap as Map<string, Provider>
+	const providerNameListData = providerNameList as string[]
+	
+	// 计算当前是否为暗黑模式
+	const isDarkMode = computed<boolean>(() => {
+		return uiTheme.value == 'dark'
+	})
+	
+	const currentModel = computed<string>(() => {
+		return getLlmDisplayName(uniAi.llm)
+	})
+
+	// #ifdef APP
+	const checkingUpdate = ref<boolean>(false)
+	const currentAppVersion = uni.getAppBaseInfo().appVersion
+	// #endif
+
+	const openModelPopup = () => {
+		(modelPopupRef.value as ComponentPublicInstance).$callMethod('open');
+	}
+
+	const closeModelPopup = () => {
+		(modelPopupRef.value as ComponentPublicInstance).$callMethod('close');
+	}
+	
+	const popupRefMethod = (): ComponentPublicInstance => {
+		return popupRef.value as ComponentPublicInstance
+	}
+	
+	const open = () => {
+		popupRefMethod().$callMethod('open');
+	}
+	
+	const close = () => {
+		popupRefMethod().$callMethod('close');
+	}
+	
+	// 主题切换事件处理
+	const onThemeChange = (event: UniSwitchChangeEvent) => {
+		uniAi.setting.theme = event.detail.value ? 'dark' : 'light'
+	}
+
+	const onHostThemeClick = () => {
+		uni.showToast({
+			title: '当前平台只能跟随系统主题',
+			icon: 'none'
+		})
+	}
+	
+	const changeModel = () => {
+		openModelPopup()
+	}
+
+	// #ifdef APP
+	const checkForUpdate = () => {
+		if (checkingUpdate.value) return
+		checkingUpdate.value = true
+		checkUpdate().then((result) => {
+			if (result.code <= 0) {
+				uni.showToast({
+					title: '当前已是最新版本',
+					icon: 'none'
+				})
+			}
+		}).catch((error) => {
+			const result = error as any
+			if (result != null && (result.code == 0 || result.code == -101)) {
+				uni.showToast({
+					title: '当前已是最新版本',
+					icon: 'none'
+				})
+			} else {
+				uni.showToast({
+					title: '检查更新失败',
+					icon: 'none'
+				})
+			}
+		}).finally(() => {
+			checkingUpdate.value = false
+		})
+	}
+	// #endif
+
+	const radioChange = (provider: string, modelId: string) => {
+		uniAi.llm.provider = provider
+		uniAi.llm.model = modelId
+		nextTick(()=>{closeModelPopup()})
+	}
+	
+	defineExpose({
+		open,
+		close,
+		openModelPopup
+	})
+</script>
+
+<style lang="scss">
+@import '@/uni_modules/uni-ai-x/static/css/variables.scss';
+/* 蒸汽模式：仅单层 class */
+.uni-im-setting-popup-content {
+	background-color: var(--bg-primary);
+	width: 320px;
+	height: auto;
+	max-height: 500rpx;
+	border-radius: 16px;
+	padding: 20px;
+}
+
+.uni-im-setting-title {
+	font-size: 18px;
+	font-weight: 700;
+	margin-bottom: 16px;
+	color: var(--text-primary);
+}
+
+.uni-im-setting-item {
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: center;
+	padding: 14px 0;
+}
+
+.uni-im-setting-switch {
+	transform: scale(0.8);
+}
+
+.uni-im-setting-host-theme-value {
+	flex-direction: row;
+	align-items: center;
+}
+
+.uni-im-setting-host-theme-value-text {
+	font-size: 14px;
+	color: var(--text-secondary);
+	margin-right: 4px;
+}
+
+.uni-im-setting-label {
+	font-size: 16px;
+	color: var(--text-primary);
+}
+
+.uni-im-setting-value-box {
+	flex-direction: row;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid var(--border-secondary);
+	border-radius: 8px;
+	padding: 8px 12px;
+	max-width: 180px;
+}
+
+.uni-im-setting-value {
+	font-size: 14px;
+	color: var(--text-secondary);
+	margin-right: 8px;
+	flex-shrink: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.uni-im-setting-action-text {
+	font-size: 14px;
+	color: var(--accent-primary);
+}
+
+.uni-im-setting-update-info {
+	flex: 1;
+	margin-right: 12px;
+}
+
+.uni-im-setting-version {
+	margin-top: 4px;
+	font-size: 12px;
+	color: var(--text-secondary);
+}
+
+.uni-im-setting-choose-llm-model {
+	width: 650rpx;
+	border-radius: 5px;
+	background-color: var(--bg-primary);
+	padding: 10px 0;
+}
+
+.uni-im-setting-choose-title {
+	padding-bottom: 5px;
+	text-align: center;
+	font-size: 16px;
+	font-weight: bold;
+	color: var(--text-primary);
+}
+
+.uni-im-setting-scroll-view {
+	padding: 0 15px;
+	max-height: 550rpx;
+}
+
+.uni-im-setting-model-item {
+	padding: 5px;
+	flex-direction: row;
+	align-items: center;
+}
+
+.uni-im-setting-radio {
+}
+
+.uni-im-setting-model-text {
+	margin-left: 5px;
+	color: var(--text-secondary);
+	font-size: 14px;
+	flex-shrink: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.uni-im-setting-tag {
+	font-size: 12px;
+	margin-left: 5px;
+	color: var(--accent-primary);
+	border: 1px solid var(--accent-primary);
+	border-radius: 5px;
+	padding: 1px 2px;
+	transform: scale(0.8);
+}
+</style>

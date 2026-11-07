@@ -200,6 +200,26 @@ impl SkillRegistry {
         })
     }
 
+    /// Scan and load **only enabled** skills — the single source of truth for
+    /// every surface that exposes skills to the user or the model.
+    ///
+    /// Mirrors Java `TalentRegistry#getSkills()` (disabled skills are filtered
+    /// out) vs `getSkillsAll()` (management view only). `load_all()` deliberately
+    /// keeps disabled entries so the settings page can show and re-enable them,
+    /// but a consumer that forgets to filter them leaks disabled skills into
+    /// the `/` completion panel, `skillread`, `skillrefresh` and the model's
+    /// context. Centralising the filter here means a new consumer cannot
+    /// accidentally reintroduce that bug by calling `load_all()` directly.
+    ///
+    /// Every model/user-facing consumer goes through this method — there is no
+    /// second hand-written `enabled` check downstream:
+    /// `server::skill_hint_rows` (via `build_hints`), `prompt_summary*`,
+    /// `SkillReadTool`, `SkillRefreshTool`, `SkillSearchTool`. `skills_installed`
+    /// (settings) is the one caller that legitimately needs `load_all()`.
+    pub fn load_enabled(&self) -> Vec<Skill> {
+        self.load_all().into_iter().filter(|s| s.enabled).collect()
+    }
+
     /// Locate one skill's directory by name (for toggle/uninstall).
     pub fn find_dir(&self, name: &str) -> Option<PathBuf> {
         // Workspace wins, matching `load_all`'s shadowing rule.
@@ -248,8 +268,9 @@ impl SkillRegistry {
         fraction: u32,
         max_desc_chars: usize,
     ) -> String {
-        let skills = self.load_all();
-        let enabled: Vec<&Skill> = skills.iter().filter(|s| s.enabled).collect();
+        // `load_enabled` is the single filtering point (Java `getSkills()`);
+        // keeping the filter here too would let the two drift apart.
+        let enabled = self.load_enabled();
         if enabled.is_empty() {
             return String::new();
         }
@@ -261,7 +282,8 @@ impl SkillRegistry {
         let max_desc = normalize_max_desc_chars(max_desc_chars);
 
         let budget = listing_budget_chars(context_length, fraction);
-        let dropped = select_dropped_by_budget(&enabled, budget, max_desc);
+        let refs: Vec<&Skill> = enabled.iter().collect();
+        let dropped = select_dropped_by_budget(&refs, budget, max_desc);
 
         let mut out = String::from("\n## Available Skills\n");
         out.push_str(
@@ -892,6 +914,49 @@ mod tests {
     // locking: a cache that never hits is just overhead, and one that survives a
     // mutation serves stale data — which for `enabled` means the agent keeps
     // loading a skill the user just turned off.
+
+    /// `load_enabled` is the single model/user-visible source of truth: it must
+    /// drop `enabled: false` while `load_all` keeps it for the settings view.
+    /// This is the Rust counterpart of Java `TalentRegistry.getSkills()` vs
+    /// `getSkillsAll()`; a leak here shows up as disabled skills in the `/`
+    /// completion panel and in the model's context.
+    #[test]
+    fn load_enabled_excludes_disabled_skills_but_load_all_keeps_them() {
+        invalidate_cache();
+        let s = Scratch::new("load-enabled");
+        s.skill("on-skill", "---\nname: on-skill\ndescription: enabled one\n---\n\n# On\n");
+        s.skill(
+            "off-skill",
+            "---\nname: off-skill\ndescription: disabled one\nenabled: false\n---\n\n# Off\n",
+        );
+        let reg = SkillRegistry::with_dir(s.0.clone());
+
+        let all = reg.load_all();
+        assert_eq!(all.len(), 2, "management view must still see disabled skills");
+        assert!(all.iter().any(|x| x.name == "off-skill"));
+
+        let enabled = reg.load_enabled();
+        assert_eq!(enabled.len(), 1, "only the enabled skill may be visible");
+        assert_eq!(enabled[0].name, "on-skill");
+        assert!(!enabled.iter().any(|x| x.name == "off-skill"));
+    }
+
+    /// Re-enabling must become visible without a restart (the toggle path calls
+    /// `invalidate_cache`, and `load_enabled` is derived from `load_all`).
+    #[test]
+    fn load_enabled_follows_a_toggle_immediately() {
+        invalidate_cache();
+        let s = Scratch::new("load-enabled-toggle");
+        let dir = s.skill("a", "---\nname: a\ndescription: d\nenabled: true\n---\n\n# A\n");
+        let reg = SkillRegistry::with_dir(s.0.clone());
+        assert_eq!(reg.load_enabled().len(), 1);
+
+        set_enabled(&dir, false).unwrap();
+        assert!(reg.load_enabled().is_empty(), "disabling must hide it from the visible set");
+
+        set_enabled(&dir, true).unwrap();
+        assert_eq!(reg.load_enabled().len(), 1, "re-enabling must restore it");
+    }
 
     /// The fingerprint must be **stable** across repeated reads of an unchanged
     /// tree — that is what makes a cache hit possible at all.

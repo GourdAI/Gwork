@@ -1,0 +1,114 @@
+import { ref, shallowRef } from 'vue'
+import { MsgItem, SearchSource } from '../types.uts'
+import { MarkdownHtmlBlock } from '@/uni_modules/uni-ai-worker/utssdk/markdown-html.uts'
+import { MarkdownTextRenderBlock, markdownHtmlBlocksToTextBlocks } from './markdown-text.uts'
+import { mathWindowWidth } from './math-presentation.uts'
+import { linkSearchCitations } from './search-citations.uts'
+import { linkMarkdownFootnotes } from './markdown-footnotes.uts'
+import { prepareCodeBlocks } from './code-presentation.uts'
+import { releaseCodeHighlightSessions } from './parseCode.uts'
+
+class MessagePresentation {
+	preparationVersion = 0
+	json = ''
+	searchJson = ''
+	footnoteBody = ''
+	theme = ''
+	width = 0
+	sources = new Map<string, string>()
+	byKey = new Map<string, MarkdownTextRenderBlock>()
+	blocks = shallowRef<MarkdownTextRenderBlock[]>([] as MarkdownTextRenderBlock[])
+	layoutRevision = ref<number>(0)
+}
+
+const messages = new Map<string, MessagePresentation>()
+
+function entry(messageId: string): MessagePresentation {
+	const cached = messages.get(messageId)
+	if (cached != null) return cached
+	const created = new MessagePresentation()
+	messages.set(messageId, created)
+	return created
+}
+
+// Views subscribe to a shallow snapshot. Reading it never parses or prepares content.
+export function readMessagePresentation(messageId: string): MarkdownTextRenderBlock[] {
+	return entry(messageId).blocks.value
+}
+
+export function forgetMessagePresentation(messageId: string) {
+	releaseCodeHighlightSessions(messageId)
+	messages.delete(messageId)
+}
+
+export function readMessageLayoutRevision(messageId: string): number {
+	return entry(messageId).layoutRevision.value
+}
+
+function sameBlockLayout(previous: MarkdownTextRenderBlock, next: MarkdownTextRenderBlock): boolean {
+	if (previous.kind != next.kind || previous.key != next.key) return false
+	if (next.kind == 'mermaid') return true
+	if (next.kind == 'code') return previous.codeHeight == next.codeHeight
+	if (next.kind == 'table') return previous.table?.height == next.table?.height
+	if (next.kind == 'math') {
+		const before = previous.math
+		const after = next.math
+		if (before == null || after == null) return before == after
+		if ((before.src.length > 0) != (after.src.length > 0)) return false
+		return after.src.length > 0 ? before.width == after.width && before.height == after.height
+			: before.sourceWidth == after.sourceWidth && before.sourceHeight == after.sourceHeight
+	}
+	return previous.html == next.html && previous.quoteDepth == next.quoteDepth
+}
+
+export function refreshMessagePresentation(msg: MsgItem, theme: string) {
+	const cache = entry(msg._id)
+	const json = msg.markdownBlocks ?? ''
+	const searchJson = (msg.search?.sources ?? [] as SearchSource[]).map((source: SearchSource): string => source.id.toString()).join(',')
+	const footnoteBody = msg.body.indexOf('[^') >= 0 ? msg.body : ''
+	if (cache.json == json && cache.searchJson == searchJson && cache.footnoteBody == footnoteBody && cache.theme == theme && cache.width == mathWindowWidth.value) return
+	let source = [] as MarkdownHtmlBlock[]
+	try {
+		if (json.length > 0) source = JSON.parse<MarkdownHtmlBlock[]>(json) as MarkdownHtmlBlock[]
+	} catch (_) { return }
+	const next = [] as MarkdownTextRenderBlock[]
+	const sources = new Map<string, string>()
+	const byKey = new Map<string, MarkdownTextRenderBlock>()
+	for (let i = 0; i < source.length; i++) {
+		const block = source[i]
+		if (block.kind != 'code' && block.kind != 'math' && block.kind != 'mermaid') {
+			block.html = linkMarkdownFootnotes(block.html, msg.body)
+		}
+		if (msg.search != null && block.kind != 'code' && block.kind != 'math' && block.kind != 'mermaid') {
+			block.html = linkSearchCitations(block.html, msg.search!.sources)
+		}
+		const key = block.kind + ':' + block.key
+		const signature = JSON.stringify(block) ?? ''
+		const previous = cache.byKey.get(key)
+		const sameLayout = block.kind != 'math' || cache.width == mathWindowWidth.value
+		const sameTheme = block.kind != 'table' || cache.theme == theme
+		const prepared = previous != null && signature == cache.sources.get(key) && sameLayout && sameTheme
+			? previous : markdownHtmlBlocksToTextBlocks([block] as MarkdownHtmlBlock[], theme)[0]
+		next.push(prepared)
+		sources.set(key, signature)
+		byKey.set(key, prepared)
+	}
+	const previousBlocks = cache.blocks.value
+	const preparationVersion = ++cache.preparationVersion
+	cache.json = json
+	cache.searchJson = searchJson
+	cache.footnoteBody = footnoteBody
+	cache.theme = theme
+	cache.width = mathWindowWidth.value
+	prepareCodeBlocks(msg._id, next, (preparedBlocks: MarkdownTextRenderBlock[]) => {
+		if (messages.get(msg._id) != cache || cache.preparationVersion != preparationVersion) return
+		let layoutChanged = previousBlocks.length != next.length
+		if (!layoutChanged) for (let i = 0; i < next.length; i++) {
+			if (!sameBlockLayout(previousBlocks[i], next[i])) { layoutChanged = true; break }
+		}
+		cache.sources = sources
+		cache.byKey = byKey
+		cache.blocks.value = preparedBlocks
+		if (layoutChanged) cache.layoutRevision.value += 1
+	}, previousBlocks)
+}

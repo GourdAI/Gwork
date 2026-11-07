@@ -1266,6 +1266,10 @@
                 "task_elapsed":  "任务耗时",
                     "turn_input":  "本轮输入",
                     "turn_output":  "本轮输出",
+                    "batch_done_count":  "执行工具 {count} 次",
+                    "action_bash_done":  "终端命令已运行",
+                    "action_thinking_done":  "已思考",
+                    "batch_thinking_count":  "思考 {count} 次",
                     "messages":  "消息条数"
                 },
     "filer":  {

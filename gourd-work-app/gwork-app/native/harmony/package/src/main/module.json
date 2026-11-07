@@ -1,0 +1,24 @@
+{
+  "app": {
+    "bundleName": "com.uni-ai-md.native",
+    "versionCode": 1000000,
+    "versionName": "1.0.0",
+    "minAPIVersion": 50000017,
+    "targetAPIVersion": 50000017,
+    "apiReleaseType": "Release",
+    "compileSdkVersion": "5.0.5.17",
+    "compileSdkType": "HarmonyOS",
+    "appEnvironments": [],
+    "bundleType": "app"
+  },
+  "module": {
+    "name": "uni-ai-md",
+    "type": "har",
+    "deviceTypes": ["default"],
+    "packageName": "uni-ai-md",
+    "installationFree": false,
+    "virtualMachine": "ark12.0.6.0",
+    "compileMode": "esmodule",
+    "dependencies": []
+  }
+}

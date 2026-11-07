@@ -1,0 +1,61 @@
+<template>
+	<view class="uni-ai-msg-html-table uni-theme-root" :style="props.presentation.containerStyle">
+		<scroll-view class="uni-ai-msg-html-table-scroll"
+			direction="horizontal" :show-scrollbar="true" :style="props.presentation.scrollStyle"
+			>
+			<rich-text :disable-split-screen-render="true" class="uni-ai-msg-html-table-content" :user-select="true" :style="props.presentation.richTextStyle"
+				:nodes="props.presentation.html" mode="native" @itemclick="onItemClick"></rich-text>
+		</scroll-view>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import { TablePresentation } from '@/uni_modules/uni-ai-x/sdk/table-presentation.uts'
+	import { openWebLink } from '@/uni_modules/uni-ai-x/sdk/open-web-link.uts'
+	import { citationNumber } from '@/uni_modules/uni-ai-x/sdk/search-citations.uts'
+	const emit = defineEmits<{ 'citation': [id: number], 'footnote': [href: string] }>()
+
+	type UniAiMsgHtmlTableProps = {
+		presentation: TablePresentation
+	}
+
+	const props = defineProps<UniAiMsgHtmlTableProps>()
+
+	function onItemClick(e: UniRichTextItemClickEvent) {
+		if (e.detail.href != null && e.detail.href!.length > 0) {
+			if (e.detail.href!.startsWith('#uni-ai-footnote-')) { emit('footnote', e.detail.href!); return }
+			const id = citationNumber(e.detail.href!)
+			if (id > 0) emit('citation', id)
+			else openWebLink(e.detail.href!)
+			return
+		}
+		if (e.detail.src != null && e.detail.src!.length > 0) {
+			uni.previewImage({ urls: [e.detail.src!] as string[] })
+		}
+	}
+</script>
+
+<style lang="scss" scoped>
+	@import '@/uni_modules/uni-ai-x/static/css/variables.scss';
+
+	.uni-ai-msg-html-table {
+		position: relative;
+		width: 100%;
+		margin: 6px 0;
+		box-sizing: border-box;
+	}
+
+	.uni-ai-msg-html-table-scroll {
+		width: 100%;
+		box-sizing: border-box;
+		flex-direction: row;
+	}
+
+	.uni-ai-msg-html-table-content {
+		align-self: flex-start;
+		flex-shrink: 0;
+		/* #ifdef WEB || MP-WEIXIN */
+		min-width: 100%;
+		/* #endif */
+	}
+</style>

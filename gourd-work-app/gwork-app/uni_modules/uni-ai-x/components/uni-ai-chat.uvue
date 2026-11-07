@@ -1,0 +1,977 @@
+<template>
+	<view class="chat-box uni-theme-root">
+		<uni-ai-chat-nav @change-menu="changeMenu" />
+		<view class="chat-box-chat" :class="showMenu ? 'chat-box-chat-showMenu' : ''" ref="chat">
+			<view class="chat-box-scroll-view-box">
+				<view class="chat-box-welcome-msg-box" v-if="msgList.length == 0" flatten>
+					<image class="chat-box-welcome-logo" src="@/uni_modules/uni-ai-x/static/uni-chat-logo.png" flatten/>
+					<text class="chat-box-welcome-title" flatten>嗨！我是 UNI-AI</text>
+					<text class="chat-box-welcome-text" flatten>我可以帮你回答问题、写代码、翻译、写诗等。</text>
+					<view class="chat-box-welcome-demo-btn" @click="runMarkdownDemo">
+						<text class="chat-box-welcome-demo-btn-text">体验完整Markdown示例</text>
+					</view>
+				</view>
+				<list-view v-if="msgList.length > 0" :key="chatActiveId" direction="vertical" class="chat-box-msg-list" :style="chatListStyle" :initial-scroll-bottom="initialScrollBottom" :scroll-anchoring="true" :scroll-top="scrollTop" id="msg-list"
+					:scroll-with-animation="scrollWithAnimation" @scroll="onScroll" @touchstart="setTouchState(true)" @touchend="onMsgListTouchEnd"
+				>
+					<list-item v-for="renderItem in renderItemList" :key="renderItem.key" :id="renderItem.id" :style="chatListItemStyle" @longpress="onlongTapMsg(renderItem.msg)" :type="renderItem.itemType">
+						<uni-ai-x-msg v-if="renderItem.isAi" :msg="renderItem.msg" :parts="renderItem.parts"
+							:is-first="renderItem.isFirst" @changeThinkContent="changeThinkContent" @source="openSource"></uni-ai-x-msg>
+						<uni-ai-user-msg v-else :msg="renderItem.msg" />
+					</list-item>
+					<!-- #ifdef MP-WEIXIN -->
+					<list-item :style="bottomAnchorStyle" id="msg-list-bottom"></list-item>
+					<!-- #endif -->
+					<!-- #ifndef MP-WEIXIN -->
+					<list-item :style="bottomAnchorStyle" id="last-msg-a" v-show="bottomAnchorId == 'last-msg-a'"></list-item>
+					<list-item :style="bottomAnchorStyle" id="last-msg-b" v-show="bottomAnchorId == 'last-msg-b'"></list-item>
+					<!-- #endif -->
+				</list-view>
+				<view class="chat-box-add-chat" :style="{visibility: scrollInBottom && state != 'processing' ? 'visible' : 'hidden'}">
+					<add-chat-btn />
+				</view>
+				<view v-if="msgList.length > 0 && showScrollToBottom" class="chat-box-scroll-to-bottom" @click="scrollToLastMsg(true)">
+					<uni-icons type="down" size="15" color="var(--text-secondary)"></uni-icons>
+				</view>
+			</view>
+			<uni-ai-chat-extension-input v-if="hasInputExtension" />
+			<uni-ai-chat-input v-else @scroll-to-last-msg="scrollToLastMsg(true)" />
+			<text class="chat-box-tip" flatten>内容由ai生成，仅供参考</text>
+		</view>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import type { ComputedRef } from 'vue'
+	import {uniAi, MsgItem, uiTheme} from '@/uni_modules/uni-ai-x/sdk/'
+	import { MarkdownTextRenderBlock } from '@/uni_modules/uni-ai-x/sdk/markdown-text.uts'
+	import { readMessagePresentation, readMessageLayoutRevision } from '@/uni_modules/uni-ai-x/sdk/message-presentation.uts'
+	import { prepareTablePresentation } from '@/uni_modules/uni-ai-x/sdk/table-presentation.uts'
+	import { linkSearchCitations } from '@/uni_modules/uni-ai-x/sdk/search-citations.uts'
+	import { linkMarkdownFootnotes } from '@/uni_modules/uni-ai-x/sdk/markdown-footnotes.uts'
+	// #ifdef APP-HARMONY || APP-ANDROID
+	import {
+		uniAiMdStreamApplyRebuild,
+		uniAiMdPresentationRevision,
+		uniAiMdStreamGetRevision,
+		uniAiMdStreamGetBlocks,
+		uniAiMdStreamRequestRebuild
+	} from '@/uni_modules/uni-ai-x/sdk/uni-ai-md-stream-store.uts'
+	import { setAiWorkerRebuildListener } from '@/uni_modules/uni-ai-worker-runtime'
+	import type { AiWorkerRebuildResult } from '@/uni_modules/uni-ai-worker-runtime'
+	// #endif
+	import addChatBtn from '@/uni_modules/uni-ai-x/components/add-chat-btn.uvue'
+	import uniAiChatNav from '@/uni_modules/uni-ai-x/components/uni-ai-chat-nav.uvue'
+	import uniAiChatInput from '@/uni_modules/uni-ai-x/components/uni-ai-chat-input/uni-ai-chat-input.uvue'
+	import uniAiChatExtensionInput from '@/uni_modules/uni-ai-x/components/uni-ai-chat-extension-input/uni-ai-chat-extension-input.uvue'
+	import uniAiUserMsg from '@/uni_modules/uni-ai-x/components/uni-ai-user-msg.uvue'
+	import { getChatInputExtension } from '@/uni_modules/uni-ai-x/sdk/chat-extension.uts'
+	import utils from '@/uni_modules/uni-ai-x/sdk/utils.uts'
+	import { runFullMarkdownDemo } from '@/demo/markdown/run-full-markdown.uts'
+	function openSource(messageId: string, id: number) {
+		emit('source', messageId, id)
+	}
+	
+	type UniAiChatProps = {
+		showMenu?: boolean
+	}
+	
+	const props = withDefaults(defineProps<UniAiChatProps>(), {
+		showMenu: false
+	})
+	
+	const emit = defineEmits<{
+		'change-menu': []
+		'close-menu': []
+		'source': [messageId: string, id: number]
+	}>()
+	
+	const scrollTop = ref<number>(0)
+	const initialScrollBottom = ref<boolean>(false)
+	const bottomAnchorId = ref<string>('last-msg-a')
+	const scrollInBottom = ref<boolean>(true)
+	const showScrollToBottom = ref<boolean>(false)
+	const scrollWithAnimation = ref<boolean>(false)
+	const scrollTouch = ref<boolean>(false)
+	const scrolling = ref<boolean>(false)
+	// #ifdef MP-WEIXIN
+	const chatInstance = getCurrentInstance()!.proxy!
+	// #endif
+	let autoToLastMsg = false
+	let scrollingT = 0
+	let scrollBottomCheckTimer = 0
+	let showScrollToBottomTimer = 0
+	let mouseScrollTimer = 0
+	let mouseScroll = false
+	let needSetLockAutoToLastMsg = true
+	const hasInputExtension = getChatInputExtension() != null
+	
+	const state = computed<string>(() => {
+		return uniAi.currentChat?.state ?? 'none'
+	})
+
+	const chatThemeBackground = computed<string>(() => {
+		return uiTheme.value == 'dark' ? '#25282c' : '#ffffff'
+	})
+
+	const chatListStyle = computed<string>(() => {
+		return 'background-color:' + chatThemeBackground.value + ';'
+	})
+
+	const chatListItemStyle = computed<string>(() => {
+		return 'background-color:' + chatThemeBackground.value + ';'
+	})
+
+	const bottomAnchorStyle = computed<string>(() => {
+		return 'height:35px;background-color:' + chatThemeBackground.value + ';'
+	})
+	
+	const msgList = computed<MsgItem[]>(() => {
+		return uniAi.currentChat?.msgList ?? []
+	})
+
+	type MarkdownBlockCache = {
+		body: string
+		theme: string
+		sources: string
+		uniAiMdRevision: number
+		complete: boolean
+		rebuildVersion: number
+		blocks: MarkdownTextRenderBlock[]
+	}
+	const markdownBlockCache = new Map<string, MarkdownBlockCache>()
+
+	// Worker 重建完成后递增版本号，驱动渲染缓存失效与列表重算
+	const rebuildVersion = ref<number>(0)
+	// 重建导致列表内容高度突变，首帧原生视图可能未重绘：重建完成后主动触发一次滚底刷新
+	let rebuildScrollPending = false
+	let rebuildScrollTimer = 0
+
+	function scheduleRebuildScroll() {
+		if (rebuildScrollPending) return
+		rebuildScrollPending = true
+		rebuildScrollTimer = setTimeout(() => {
+			rebuildScrollTimer = 0
+			rebuildScrollPending = false
+			if (!scrollInBottom.value || scrollTouch.value) return
+			scrollToLastMsg(false)
+		}, 60)
+	}
+
+	// #ifdef APP-HARMONY || APP-ANDROID
+	// Worker 重建完成回调：应用 ops 后驱动重算（页面环境无法调用 uni-ai-md，重建统一在 Worker 执行）
+	const onRebuildResult = (result: AiWorkerRebuildResult) => {
+		if (uniAiMdStreamApplyRebuild(result.msgId, result.ops)) {
+			rebuildVersion.value += 1
+			scheduleRebuildScroll()
+		}
+	}
+	// #endif
+
+	type ChatRenderItem = {
+		key: string
+		id: string
+		itemType: number
+		msg: MsgItem
+		parts: AiMsgRenderPart[]
+		isAi: boolean
+		isFirst: boolean
+	}
+
+	type AiMsgRenderPart = {
+		key: string
+		kind: string
+		block?: MarkdownTextRenderBlock
+	}
+
+	type MessageRowCache = {
+		msg: MsgItem
+		structure: string
+		blocks: MarkdownTextRenderBlock[]
+		rows: ChatRenderItem[]
+	}
+	const messageRowCache = new Map<string, MessageRowCache>()
+	const rowCache = new Map<string, ChatRenderItem>()
+	const noBlocks = [] as MarkdownTextRenderBlock[]
+
+	const RENDER_ITEM_TYPE_USER = 1
+	const RENDER_ITEM_TYPE_AI_TABLE = 11
+	const RENDER_ITEM_TYPE_AI_CODE = 13
+	const RENDER_ITEM_TYPE_AI_MERMAID = 20
+	const RENDER_ITEM_TYPE_AI_NORMAL = 21
+	const RENDER_ITEM_TYPE_AI_SVG = 22
+	const RENDER_ITEM_TYPE_AI_TEXT = 24
+	const RENDER_ITEM_TYPE_AI_RULE = 25
+	const RENDER_ITEM_TYPE_AI_MATH = 26
+	const RENDER_ITEM_TYPE_AI_THINK = 27
+	const RENDER_ITEM_TYPE_AI_PLAIN = 28
+	const RENDER_ITEM_TYPE_AI_ERROR = 29
+	const RENDER_ITEM_TYPE_AI_EMPTY = 30
+	const RENDER_ITEM_TYPE_AI_TOOLBAR = 31
+	const RENDER_ITEM_TYPE_AI_SEARCH = 32
+	const RENDER_ITEM_TYPE_AI_SOURCES = 33
+	const RENDER_ITEM_FIRST_OFFSET = 100
+
+	function canRebuildMarkdownFromBody(msg: MsgItem): boolean {
+		// #ifdef APP-HARMONY || APP-ANDROID
+		return msg.body.length > 0
+		// #endif
+		// #ifndef APP-HARMONY || APP-ANDROID
+		return false
+		// #endif
+	}
+
+	function getMarkdownBlocks(msg: MsgItem): MarkdownTextRenderBlock[] {
+		// #ifndef APP-HARMONY || APP-ANDROID
+		return readMessagePresentation(msg._id)
+		// #endif
+		// #ifdef APP-HARMONY || APP-ANDROID
+		const revision = msg.uniAiMdRevision ?? 0
+			const version = uniAiMdStreamGetRevision(msg._id)
+		const theme = uiTheme.value
+		// Android presentation revisions already represent visible content; raw body changes alone must not rebuild rows.
+		// #ifdef APP-ANDROID
+		const cacheBody = ''
+		// #endif
+		// #ifndef APP-ANDROID
+		const cacheBody = msg.body
+		// #endif
+		// #ifdef APP-ANDROID
+		const sources = ''
+		// #endif
+		// #ifndef APP-ANDROID
+		const sources = JSON.stringify(msg.search?.sources ?? []) ?? ''
+		// #endif
+		const cached = markdownBlockCache.get(msg._id)
+		if (cached != null && cached.body == cacheBody && cached.theme == theme && cached.sources == sources &&
+			cached.uniAiMdRevision == revision && cached.complete == msg.rendered && cached.rebuildVersion == version) return cached.blocks
+		const blocks = uniAiMdStreamGetBlocks(msg._id)
+		if (blocks.length == 0 && msg.body.length > 0 && msg.rendered) {
+			uniAi.prepareMessagePresentation(msg)
+			uniAiMdStreamRequestRebuild(msg._id, msg.body)
+		}
+		markdownBlockCache.set(msg._id, {
+			body: cacheBody, theme: theme, sources: sources, uniAiMdRevision: revision,
+			complete: msg.rendered, rebuildVersion: version, blocks: blocks
+		} as MarkdownBlockCache)
+		return blocks
+		// #endif
+	}
+
+	function markdownBlockItemType(block: MarkdownTextRenderBlock): number {
+		if (block.kind == 'table') return RENDER_ITEM_TYPE_AI_TABLE
+		// 代码块身份和消息直连引用负责处理复用切换，闭合状态不再改变 type，
+		// 避免每个流式代码块完成时触发原生 list-item 重建。
+		if (block.kind == 'mermaid') return RENDER_ITEM_TYPE_AI_MERMAID
+		if (block.kind == 'code') return RENDER_ITEM_TYPE_AI_CODE
+		return RENDER_ITEM_TYPE_AI_NORMAL
+	}
+
+	function appendAiRenderItem(items: ChatRenderItem[], msg: MsgItem, itemType: number,
+		isFirst: boolean, suffix: string, parts: AiMsgRenderPart[]) {
+		const key = msg._id + '-' + suffix
+		const type = itemType + (isFirst ? RENDER_ITEM_FIRST_OFFSET : 0)
+		const cached = rowCache.get(key)
+		if (cached != null && cached.msg == msg && cached.itemType == type && cached.parts.length == parts.length) {
+			let unchanged = true
+			for (let i = 0; i < parts.length; i++) {
+				const previous = cached.parts[i]
+				const next = parts[i]
+				if (previous.key != next.key || previous.kind != next.kind || previous.block != next.block) {
+					unchanged = false
+					break
+				}
+			}
+			if (unchanged) { items.push(cached); return }
+		}
+		const item: ChatRenderItem = {
+			key: key,
+			id: 'msg-item-' + msg._id + '-' + suffix,
+			itemType: type,
+			msg: msg,
+			parts: parts,
+			isAi: true,
+			isFirst: isFirst
+		} as ChatRenderItem
+		rowCache.set(key, item)
+		items.push(item)
+	}
+
+	function aiRenderPart(kind: string, key: string, block?: MarkdownTextRenderBlock): AiMsgRenderPart {
+		return {
+			key: key,
+			kind: kind,
+			block: block
+		} as AiMsgRenderPart
+	}
+
+	function isRichTextListBlock(block: MarkdownTextRenderBlock): boolean {
+		// Only table and code components own native rich-text nodes.
+		return block.kind == 'table' || block.kind == 'code' || block.kind == 'mermaid' ||
+			block.kind == 'html' || block.kind == 'image'
+	}
+
+	function normalPartsItemType(parts: AiMsgRenderPart[]): number {
+		// Mixed paragraphs keep their grouping and spacing; do not create a pool per message.
+		if (parts.length != 1) return RENDER_ITEM_TYPE_AI_NORMAL
+		const part = parts[0]
+		if (part.block != null) {
+			if (part.block!.kind == 'hr') return RENDER_ITEM_TYPE_AI_RULE
+			if (part.block!.kind == 'math') return RENDER_ITEM_TYPE_AI_MATH
+			return RENDER_ITEM_TYPE_AI_TEXT
+		}
+		if (part.kind == 'think') return RENDER_ITEM_TYPE_AI_THINK
+		if (part.kind == 'plain') return RENDER_ITEM_TYPE_AI_PLAIN
+		if (part.kind == 'error') return RENDER_ITEM_TYPE_AI_ERROR
+		if (part.kind == 'empty') return RENDER_ITEM_TYPE_AI_EMPTY
+		return RENDER_ITEM_TYPE_AI_NORMAL
+	}
+
+	function buildMessageRows(msg: MsgItem): ChatRenderItem[] {
+		const items: ChatRenderItem[] = []
+			const blocks = msg.from_uid == 'uni-ai' ? getMarkdownBlocks(msg) : noBlocks
+			const hasMarkdown = blocks.length > 0 || (msg.markdownBlocks ?? '').length > 0 || (msg.markdownHtml ?? '').length > 0 || canRebuildMarkdownFromBody(msg)
+			const structure = msg.from_uid + ':' + (msg.error_msg != null).toString()
+				+ ':' + ((msg.thinkContent ?? '').length > 0).toString() + ':' + (msg.body.length > 0).toString()
+				+ ':' + ((msg.stressSvgSource ?? '').length > 0).toString() + ':' + hasMarkdown.toString()
+				+ ':' + (msg.search?.status ?? '') + ':' + (msg.search?.sources.length ?? 0).toString() + ':' + msg.rendered.toString()
+			const cached = messageRowCache.get(msg._id)
+			if (cached != null && cached.msg == msg && cached.blocks == blocks && cached.structure == structure) {
+				return cached.rows
+			}
+			const rowStart = items.length
+			if (msg.from_uid != 'uni-ai') {
+				items.push({
+					key: msg._id,
+					id: 'msg-item-' + msg._id,
+					itemType: RENDER_ITEM_TYPE_USER,
+					msg: msg,
+					parts: [] as AiMsgRenderPart[],
+					isAi: false,
+					isFirst: true
+				} as ChatRenderItem)
+				messageRowCache.set(msg._id, { msg: msg, structure: structure, blocks: blocks, rows: items.slice(rowStart) } as MessageRowCache)
+				return items
+			}
+
+			let hasAiSegment = false
+			let normalSegmentIndex = 0
+			let mermaidBlockIndex = 0
+			const normalParts = [] as AiMsgRenderPart[]
+			const appendNormalPart = (part: AiMsgRenderPart) => {
+				normalParts.push(part)
+			}
+			const flushNormalParts = () => {
+				if (normalParts.length == 0) return
+				const suffix = 'normal-' + normalSegmentIndex.toString()
+				appendAiRenderItem(items, msg, normalPartsItemType(normalParts), !hasAiSegment, suffix, normalParts.slice())
+				normalParts.length = 0
+				normalSegmentIndex += 1
+				hasAiSegment = true
+			}
+			const appendRichTextBlock = (block: MarkdownTextRenderBlock) => {
+				flushNormalParts()
+				let blockKey = block.key
+				// #ifdef APP-ANDROID || APP-HARMONY
+				if (block.kind == 'mermaid') {
+					blockKey = 'mermaid-' + mermaidBlockIndex.toString()
+					// #ifndef APP-ANDROID
+					blockKey += block.isComplete ? '-c' : ''
+					// #endif
+					mermaidBlockIndex += 1
+				}
+				// #endif
+				appendAiRenderItem(items, msg, markdownBlockItemType(block), !hasAiSegment, blockKey,
+					[aiRenderPart(block.kind, blockKey, block)] as AiMsgRenderPart[])
+				hasAiSegment = true
+			}
+			if (msg.search != null) {
+				appendAiRenderItem(items, msg, RENDER_ITEM_TYPE_AI_SEARCH, true, 'search', [aiRenderPart('search', 'search')])
+				hasAiSegment = true
+			}
+			const stressSvgSource = msg.stressSvgSource ?? ''
+			if (stressSvgSource.length > 0) {
+				appendAiRenderItem(items, msg, RENDER_ITEM_TYPE_AI_SVG, !hasAiSegment, 'stress-svg',
+					[aiRenderPart('stress-svg', 'stress-svg')] as AiMsgRenderPart[])
+				hasAiSegment = true
+			}
+			if (msg.error_msg != null) {
+				appendNormalPart(aiRenderPart('error', 'error'))
+			} else {
+				if (msg.thinkContent != null && msg.thinkContent!.length > 0) {
+					appendNormalPart(aiRenderPart('think', 'think'))
+				}
+				if (hasMarkdown) {
+					if (blocks.length > 0) {
+						for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
+							const block = blocks[blockIndex]
+							if (isRichTextListBlock(block)) {
+								appendRichTextBlock(block)
+							} else {
+								appendNormalPart(aiRenderPart(block.kind, block.key, block))
+							}
+						}
+					} else if (msg.body.length > 0) {
+						// #ifdef APP-ANDROID || APP-HARMONY
+						appendNormalPart(aiRenderPart('restoring', 'restoring'))
+						// #endif
+						// #ifndef APP-ANDROID || APP-HARMONY
+						appendNormalPart(aiRenderPart('plain', 'plain'))
+						// #endif
+					}
+				} else if (msg.body.length > 0) {
+					// #ifdef APP-ANDROID
+					appendNormalPart(aiRenderPart('plain', 'plain'))
+					// #endif
+					// #ifndef APP-ANDROID
+					appendNormalPart(aiRenderPart('plain', 'plain'))
+					// #endif
+				} else if (stressSvgSource.length == 0 && (msg.thinkContent ?? '').length == 0 && msg.search?.status != 'searching') {
+					appendNormalPart(aiRenderPart('empty', 'empty'))
+				}
+			}
+			if (normalParts.length > 0) flushNormalParts()
+			if (msg.rendered && (msg.search?.sources.length ?? 0) > 0) {
+				appendAiRenderItem(items, msg, RENDER_ITEM_TYPE_AI_SOURCES, false, 'sources', [aiRenderPart('sources', 'sources')])
+			}
+			if (hasAiSegment) {
+				// 工具栏独立成消息后的列表项，避免被富文本块的原生布局挤到顶部。
+				appendAiRenderItem(items, msg, RENDER_ITEM_TYPE_AI_TOOLBAR, false, 'toolbar',
+					[aiRenderPart('toolbar', 'toolbar')])
+			}
+			const rows = items.slice(rowStart)
+			messageRowCache.set(msg._id, { msg: msg, structure: structure, blocks: blocks, rows: rows } as MessageRowCache)
+			if (cached != null) {
+				const liveKeys = new Set<string>()
+				rows.forEach((row: ChatRenderItem) => { liveKeys.add(row.key) })
+				cached.rows.forEach((row: ChatRenderItem) => { if (!liveKeys.has(row.key)) rowCache.delete(row.key) })
+			}
+		return items
+	}
+
+	const messageComputations = new Map<string, { msg: MsgItem, rows: ComputedRef<ChatRenderItem[]> }>()
+	const renderItemList = computed<ChatRenderItem[]>(() => {
+		// #ifdef APP-HARMONY
+		uniAiMdPresentationRevision.value
+		rebuildVersion.value
+		// #endif
+		const items: ChatRenderItem[] = []
+		for (const msg of msgList.value) {
+			// #ifdef APP-ANDROID
+			let cached = messageComputations.get(msg._id)
+			if (cached == null || cached.msg != msg) {
+				cached = { msg: msg, rows: computed<ChatRenderItem[]>(() => buildMessageRows(msg)) }
+				messageComputations.set(msg._id, cached)
+			}
+			items.push(...cached.rows.value)
+			// #endif
+			// #ifndef APP-ANDROID
+			items.push(...buildMessageRows(msg))
+			// #endif
+		}
+		return items
+	})
+	
+	const lastMsg = computed<MsgItem | null>(() => {
+		return uniAi.lastAiMsg
+	})
+	
+	const chatActiveId = computed<string>(() => {
+		return uniAi.chat.activeId
+	})
+	
+	function scrollToLastMsg(userClick: boolean){
+		if (msgList.value.length == 0) {
+			resetScrollStateForEmptyChat()
+			return
+		}
+		autoToLastMsg = true
+		scrollWithAnimation.value = userClick
+		bottomAnchorId.value = bottomAnchorId.value == 'last-msg-a' ? 'last-msg-b' : 'last-msg-a'
+		nextTick(() => {
+			if (viewDisposed || !autoToLastMsg) return
+			// 限幅在 10 万~20 万间震荡：流式期间每帧递增会累计到数百万，
+			// 超大 scrollTop 疑似导致 list-view 内部状态异常（既有 item 的子组件 props 更新丢失）
+			scrollTop.value = scrollTop.value > 100000 ? 100000 : scrollTop.value + 100000
+			scrollInBottom.value = true
+		})
+	}
+	
+	function clearTimer(timer: number): number {
+		if (timer != 0) {
+			clearTimeout(timer)
+		}
+		return 0
+	}
+
+	function resetScrollStateForEmptyChat() {
+		autoToLastMsg = false
+		scrollWithAnimation.value = false
+		scrollTop.value = 0
+		scrollInBottom.value = true
+		showScrollToBottomTimer = clearTimer(showScrollToBottomTimer)
+		showScrollToBottom.value = false
+	}
+	
+	function syncScrollToBottomBtn() {
+		if (msgList.value.length == 0) {
+			resetScrollStateForEmptyChat()
+			return
+		}
+		const shouldShow = !scrollInBottom.value && !scrolling.value
+		if (!shouldShow) {
+			showScrollToBottomTimer = clearTimer(showScrollToBottomTimer)
+			showScrollToBottom.value = false
+			return
+		}
+		if (showScrollToBottom.value || showScrollToBottomTimer != 0) {
+			return
+		}
+		showScrollToBottomTimer = setTimeout(() => {
+			showScrollToBottom.value = true
+			showScrollToBottomTimer = 0
+		}, 180)
+	}
+
+	function updateScrollInBottom() {
+		// #ifdef MP-WEIXIN
+		const chatId = chatActiveId.value
+		nextTick(() => {
+			if (viewDisposed || msgList.value.length == 0) return
+			const query = uni.createSelectorQuery().in(chatInstance)
+			query.select('#msg-list').boundingClientRect()
+			query.select('#msg-list-bottom').boundingClientRect()
+			query.exec((result) => {
+				if (viewDisposed || chatId != chatActiveId.value) return
+				const list = result[0] as NodeInfo | null
+				const bottom = result[1] as NodeInfo | null
+				if (list == null || bottom == null) return
+				const diff = (bottom.bottom ?? 0) - (list.bottom ?? 0)
+				scrollInBottom.value = diff < (scrollInBottom.value ? 60 : 30)
+				if (scrollTouch.value) autoToLastMsg = diff <= 3
+				syncScrollToBottomBtn()
+			})
+		})
+		// #endif
+		// #ifndef MP-WEIXIN
+		nextTick(() => {
+			const scrollList = uni.getElementById('msg-list')
+			if (scrollList != null) {
+				const diff: number = scrollList.scrollHeight - scrollList.scrollTop - scrollList.offsetHeight
+				const isInBottom = scrollInBottom.value ? diff < 60 : diff < 30
+				if (scrollInBottom.value != isInBottom) {
+					scrollInBottom.value = isInBottom
+				}
+				if (scrollTouch.value || mouseScroll) {
+					autoToLastMsg = !(diff > 3)
+				}
+				syncScrollToBottomBtn()
+			}
+		})
+		// #endif
+	}
+
+	function setIsInScrollBottom() {
+		scrollBottomCheckTimer = clearTimer(scrollBottomCheckTimer)
+		scrollBottomCheckTimer = setTimeout(() => {
+			scrollBottomCheckTimer = 0
+			updateScrollInBottom()
+		}, 180)
+	}
+	
+	watch(chatActiveId, () => {
+		messageComputations.clear()
+		markdownBlockCache.clear()
+		// Only existing history needs initial bottom positioning. Enabling it on an
+		// empty Android Vapor list can prevent later streamed rows from mounting.
+		initialScrollBottom.value = msgList.value.length > 0
+		messageRowCache.clear()
+		rowCache.clear()
+		autoToLastMsg = false
+		scrollWithAnimation.value = false
+		scrollTop.value = 0
+		scrollInBottom.value = true
+		showScrollToBottomTimer = clearTimer(showScrollToBottomTimer)
+		showScrollToBottom.value = false
+		nextTick(() => {
+			if (lastMsg.value != null) lastMsg.value.rendered = true
+			if (msgList.value.length > 0) updateScrollInBottom()
+		})
+	}, { deep: true, immediate: true })
+
+	watch((): number => msgList.value.length, () => {
+		if (msgList.value.length == 0) {
+			resetScrollStateForEmptyChat()
+		}
+		const activeIds = new Set<string>()
+		msgList.value.forEach((msg: MsgItem) => { activeIds.add(msg._id) })
+		messageRowCache.forEach((cached: MessageRowCache, id: string) => {
+			if (activeIds.has(id)) return
+			messageComputations.delete(id)
+			cached.rows.forEach((row: ChatRenderItem) => { rowCache.delete(row.key) })
+			messageRowCache.delete(id)
+			markdownBlockCache.delete(id)
+		})
+	})
+	
+	const lockAutoToLastMsg = () => {
+		// #ifndef MP-WEIXIN
+		if (!needSetLockAutoToLastMsg) return
+		const lastMsgFirstItem = renderItemList.value.find((item: ChatRenderItem): boolean => {
+			return item.isAi && item.isFirst && item.msg._id == lastMsg.value?._id
+		})
+		if (lastMsgFirstItem == null) return
+		const lastMsgEl: UniElement | null = uni.getElementById(lastMsgFirstItem.id)
+		const scrollList: UniElement | null = uni.getElementById('msg-list')
+		if (lastMsgEl == null || scrollList == null) return 
+		if (msgList.value.length < 3 || scrollList.offsetHeight < lastMsgEl.offsetHeight) {
+			autoToLastMsg = false
+			needSetLockAutoToLastMsg = false
+		}
+		// #endif
+	}
+	
+	let scrollUpdateQueued = false
+	let viewDisposed = false
+	watch(() => {
+		const msg = lastMsg.value
+		return {
+			id: msg?._id ?? '',
+			// #ifndef APP-ANDROID
+			body: msg?.body ?? '',
+			// #endif
+			// #ifdef APP-ANDROID
+			presentation: msg != null ? uniAiMdStreamGetRevision(msg._id) : 0,
+			// #endif
+			html: msg?.markdownHtml ?? '',
+			think: msg?.thinkContent ?? '',
+			error: msg?.error_msg ?? '',
+			rendered: msg?.rendered ?? false,
+			// #ifndef APP-ANDROID
+			uniAiMdRevision: msg?.uniAiMdRevision ?? 0,
+			rebuildVersion: rebuildVersion.value,
+			// #endif
+			state: state.value,
+			layout: msg != null ? readMessageLayoutRevision(msg._id) : 0
+		}
+	}, async () => {
+		// #ifdef APP-ANDROID
+		if (scrollUpdateQueued) return
+		scrollUpdateQueued = true
+		const chatId = chatActiveId.value
+		await nextTick()
+		scrollUpdateQueued = false
+		if (viewDisposed || chatId != chatActiveId.value) return
+		// #endif
+		setIsInScrollBottom()
+		lockAutoToLastMsg()
+		if (!scrollTouch.value && autoToLastMsg) {
+			// #ifndef APP-ANDROID
+			await nextTick()
+			// #endif
+			scrollToLastMsg(false)
+		}
+	})
+	
+	const changeThinkContent = (_hideThinkContent: boolean) => {
+		setIsInScrollBottom()
+	}
+	
+	const resolveCopyText = (item: MsgItem): string => {
+		// 请求出错时错误信息存放于 error_msg，优先复制错误信息，便于用户反馈问题
+		const errorMsg = item.error_msg
+		if (errorMsg != null && errorMsg.length > 0) return errorMsg
+		return item.body
+	}
+	
+	const onlongTapMsg = (item: MsgItem) => {
+		if (scrolling.value) {
+			return
+		}
+		// AI rich-text handles copy/select through its native user-select menu.
+		// Do not open the message action sheet for the same long-press gesture.
+		if (item.from_uid == 'uni-ai') {
+			return
+		}
+		const itemList = ['复制'] as string[]
+		const isAiMsg = item.from_uid == 'uni-ai'
+		itemList.push(isAiMsg ? '选择' : '修改')
+		uni.showActionSheet({
+			itemList,
+			success: (res: ShowActionSheetSuccess) => {
+				if (res.tapIndex == 0) {
+					uni.setClipboardData({
+						data: resolveCopyText(item),
+						showToast: false,
+						success: () => {
+							nextTick(()=>{
+								utils.showCopySuccessToast()
+							})
+						},
+						fail: () => {
+							nextTick(()=>{
+								utils.showCopyFailureToast()
+							})
+						}
+					})
+				} else if (res.tapIndex == 1) {
+					if (isAiMsg) {
+						uni.navigateTo({
+							url: '/uni_modules/uni-ai-x/pages/select-text/select-text?msgId=' + item._id,
+							fail(err){
+								console.error('err', err)
+							}
+						})
+					} else {
+						uniAi.startEditMsg(item)
+					}
+				}
+			},
+		})
+	}
+	
+	const changeMenu = () => {
+		emit('change-menu')
+	}
+	
+	const closeMenu = () => {
+		emit('close-menu')
+	}
+	
+	const onScroll = () => {
+		scrollBottomCheckTimer = clearTimer(scrollBottomCheckTimer)
+		if (!scrolling.value) {
+			scrolling.value = true
+			showScrollToBottomTimer = clearTimer(showScrollToBottomTimer)
+			showScrollToBottom.value = false
+		}
+		scrollingT = clearTimer(scrollingT)
+		scrollingT = setTimeout(() => {
+			scrollingT = 0
+			scrolling.value = false
+			updateScrollInBottom()
+		}, 180)
+	}
+
+	function onMsgListTouchEnd() {
+		setTouchState(false)
+		setIsInScrollBottom()
+	}
+
+	let touchClearTimer: number = 0
+	function setTouchState(state: boolean) {
+		touchClearTimer = clearTimer(touchClearTimer)
+		if (state) {
+			scrollTouch.value = true
+		} else {
+			touchClearTimer = setTimeout(() => {
+				scrollTouch.value = false
+				touchClearTimer = 0
+			}, 2000)
+		}
+	}
+
+	const runMarkdownDemo = async () => {
+		if (state.value == 'processing') return
+		try {
+			await runFullMarkdownDemo()
+		} catch (error) {
+			console.error('[uni-ai-x][Markdown示例] 运行失败', error)
+		}
+	}
+	const beforeRequestAi = () => {
+		autoToLastMsg = true
+		needSetLockAutoToLastMsg = true
+		scrollToLastMsg(false)
+	}
+	
+	onMounted(() => {
+		uniAi.onBeforeRequestAi(beforeRequestAi)
+		// #ifdef APP-HARMONY || APP-ANDROID
+		setAiWorkerRebuildListener(onRebuildResult)
+		// #endif
+		// #ifdef H5
+		window.addEventListener('wheel', () => {
+			mouseScroll = true
+			mouseScrollTimer = clearTimer(mouseScrollTimer)
+			mouseScrollTimer = setTimeout(() => {
+				mouseScroll = false
+				mouseScrollTimer = 0
+			}, 1000)
+		})
+		// #endif
+
+		// #ifdef MP-WEIXIN
+		updateScrollInBottom()
+		// #endif
+	})
+
+	onBeforeUnmount(() => {
+		viewDisposed = true
+		if (rebuildScrollTimer != 0) clearTimeout(rebuildScrollTimer)
+		messageComputations.clear()
+		if (state.value == 'processing') uniAi.abortRequest()
+		uniAi.offBeforeRequestAi(beforeRequestAi)
+		// #ifdef APP-HARMONY || APP-ANDROID
+		setAiWorkerRebuildListener(null)
+		// #endif
+		scrollingT = clearTimer(scrollingT)
+		scrollBottomCheckTimer = clearTimer(scrollBottomCheckTimer)
+		showScrollToBottomTimer = clearTimer(showScrollToBottomTimer)
+		mouseScrollTimer = clearTimer(mouseScrollTimer)
+		touchClearTimer = clearTimer(touchClearTimer)
+	})
+</script>
+
+<style lang="scss">
+@import '@/uni_modules/uni-ai-x/static/css/variables.scss';
+
+.chat-box {
+	width: 50%;
+	height: 100%;
+	/* #ifndef MP-WEIXIN */
+	padding-top: env(safe-area-inset-top);
+	/* #endif */
+}
+
+.chat-box-chat {
+	flex: 1;
+	position: relative;
+	background-color: var(--bg-primary);
+}
+
+.chat-box-scroll-view-box {
+	flex: 1;
+	position: relative;
+}
+
+.chat-box-msg-list {
+	flex: 1;
+	margin-bottom: 140px;
+}
+
+.chat-box-add-chat {
+	position: absolute;
+	bottom: 150px;
+	left: 0;
+	width: 100%;
+	flex-direction: row;
+	justify-content: center;
+	z-index: 20;
+}
+
+.chat-box-welcome-msg-box {
+	flex: 1;
+	width: 100%;
+	padding: 0 20px;
+	box-sizing: border-box;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+}
+
+.chat-box-welcome-logo {
+	width: 50px;
+	height: 50px;
+	margin-bottom: 20px;
+}
+
+.chat-box-welcome-title {
+	font-size: 24px;
+	font-weight: bold;
+	color: var(--text-primary);
+	margin-bottom: 10px;
+}
+
+.chat-box-welcome-text {
+	font-size: 16px;
+	color: var(--text-secondary);
+	text-align: center;
+	line-height: 24px;
+	margin: 0 30px;
+}
+
+.chat-box-welcome-demo-btn {
+	margin-top: 24px;
+	padding: 8px 20px;
+	border-radius: 20px;
+	border: 1px solid var(--border-color);
+	background-color: var(--bg-secondary);
+}
+
+.chat-box-welcome-demo-btn-text {
+	font-size: 14px;
+	color: var(--accent-primary);
+}
+
+.chat-box-scroll-to-bottom {
+	position: absolute;
+	bottom: 150px;
+	right: 10px;
+	width: 35px;
+	height: 35px;
+	flex-direction: row;
+	justify-content: center;
+	align-items: center;
+	background-color: var(--bg-primary);
+	border: 1px solid var(--border-color);
+	border-radius: 50px;
+	padding: 5px;
+	box-shadow: 0 0 10px 0 var(--shadow);
+	z-index: 10;
+}
+
+.chat-box-tip {
+	display: none;
+}
+
+/* #ifdef MP-WEIXIN */
+.chat-box {
+	height: 100%;
+	min-height: 0;
+}
+
+.chat-box-chat,
+.chat-box-scroll-view-box {
+	min-height: 0;
+}
+
+.chat-box-msg-list {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100%;
+	height: 100%;
+	margin-bottom: 0;
+}
+
+.chat-box-add-chat,
+.chat-box-scroll-to-bottom {
+	bottom: 10px;
+}
+/* #endif */
+
+/* #ifdef H5 */
+@media screen and (min-device-width:960px){
+	.chat-box {
+		flex: 1;
+	}
+	.chat-box-chat {
+		width: 100%;
+		max-width: 800px;
+		margin: 0 auto;
+	}
+	.chat-box-tip {
+		display: block;
+		width: 100%;
+		font-size: 12px;
+		text-align: center;
+		color: var(--text-tertiary);
+		margin-bottom: 10px;
+	}
+	.chat-box-mask {
+		display: none;
+	}
+}
+/* #endif */
+</style>

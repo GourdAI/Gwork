@@ -1,0 +1,122 @@
+export function markdownFootnotes(markdown: string): Map<string, string> {
+	const notes = new Map<string, string>()
+	let fence = ''
+	let active = ''
+	for (const line of markdown.split('\n')) {
+		const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)
+		if (marker != null) {
+			const value = marker[1] ?? ''
+			if (fence.length == 0) fence = value
+			else if (value.charAt(0) == fence.charAt(0) && value.length >= fence.length) fence = ''
+			active = ''
+			continue
+		}
+		if (fence.length > 0) continue
+		const definition = /^ {0,3}\[\^([^\]]+)\]:\s*(.*)$/.exec(line)
+		if (definition != null) {
+			active = definition[1] ?? ''
+			notes.set(active, definition[2] ?? '')
+		} else if (active.length > 0 && /^( {4}|\t)/.test(line)) {
+			notes.set(active, notes.get(active)! + '\n' + line.trim())
+		} else if (line.trim().length > 0) active = ''
+	}
+	return notes
+}
+
+export function footnoteLabel(href: string): string {
+	const prefix = '#uni-ai-footnote-'
+	if (!href.startsWith(prefix)) return ''
+	try { return decodeURIComponent(href.slice(prefix.length)) ?? '' } catch (_) { return '' }
+}
+
+// cmark currently parses [^label] definitions as reference links. Normalize only
+// those generated links; code spans and ordinary links retain their behavior.
+export function linkMarkdownFootnotes(html: string, markdown: string, preparedNotes: Map<string, string> | null = null): string {
+	if (html.indexOf('>^') < 0) return html
+	const notes = preparedNotes ?? markdownFootnotes(markdown)
+	if (notes.size == 0) return html
+	let result = ''
+	let cursor = 0
+	while (cursor < html.length) {
+		const marker = html.indexOf('>^', cursor)
+		if (marker < 0) { result += html.slice(cursor); break }
+		const close = html.indexOf('</a>', marker + 2)
+		if (close < 0) { result += html.slice(cursor); break }
+		const label = html.slice(marker + 2, close)
+		const open = html.lastIndexOf('<a', marker)
+		result += html.slice(cursor, open)
+		if (notes.has(label)) result += '<a href="#uni-ai-footnote-' + encodeURIComponent(label) + '">[' + label + ']</a>'
+		else result += html.slice(open, close + 4)
+		cursor = close + 4
+	}
+	return result
+}
+
+const CITATION_PREFIX = '#uni-ai-source-'
+
+export function citationNumber(href: string): number {
+	if (!href.startsWith(CITATION_PREFIX)) return 0
+	const value = href.slice(CITATION_PREFIX.length)
+	return /^[1-9][0-9]*$/.test(value) ? parseInt(value) : 0
+}
+
+function linkTextReferences(text: string, sources: number[]): string {
+	let result = ''
+	let cursor = 0
+	while (cursor < text.length) {
+		const open = text.indexOf('[', cursor)
+		if (open < 0) { result += text.slice(cursor); break }
+		const close = text.indexOf(']', open + 1)
+		if (close < 0) { result += text.slice(cursor); break }
+		const value = text.slice(open + 1, close)
+		const match = text.slice(open, close + 1)
+		if (/^[1-9][0-9]*$/.test(value) && sources.includes(parseInt(value))) result += '<a href="' + CITATION_PREFIX + value + '" style="color:#5082c8;font-size:12px;">' + match + '</a>'
+		else result += text.slice(cursor, close + 1)
+		cursor = close + 1
+	}
+	return result
+}
+
+// Scan HTML tokens, transforming text only. Quoted attributes and code/link contents stay intact.
+export function linkSearchCitations(html: string, sources: number[]): string {
+	if (sources.length == 0 || html.indexOf('[') < 0) return html
+	let result = ''
+	let cursor = 0
+	const excluded = [] as string[]
+	while (cursor < html.length) {
+		if (html.charAt(cursor) != '<') {
+			let end = html.indexOf('<', cursor)
+			if (end < 0) end = html.length
+			const text = html.slice(cursor, end)
+			result += excluded.length > 0 ? text : linkTextReferences(text, sources)
+			cursor = end
+			continue
+		}
+		if (html.slice(cursor, cursor + 4) == '<!--') {
+			const close = html.indexOf('-->', cursor + 4)
+			const end = close < 0 ? html.length : close + 3
+			result += html.slice(cursor, end)
+			cursor = end
+			continue
+		}
+		let end = cursor + 1
+		let quote = ''
+		for (; end < html.length; end++) {
+			const char = html.charAt(end)
+			if (quote.length > 0) { if (char == quote) quote = '' }
+			else if (char == '"' || char == "'") quote = char
+			else if (char == '>') break
+		}
+		if (end == html.length) { result += html.slice(cursor); break }
+		const tag = html.slice(cursor, end + 1)
+		const nameMatch = /^<\/?\s*([a-zA-Z0-9-]+)/.exec(tag)
+		const name = nameMatch == null ? '' : (nameMatch[1] ?? '').toLowerCase()
+		if (name == 'a' || name == 'code' || name == 'pre' || name == 'script' || name == 'style' || name == 'math') {
+			if (tag.startsWith('</')) { if (excluded[excluded.length - 1] == name) excluded.pop() }
+			else if (!tag.endsWith('/>')) excluded.push(name)
+		}
+		result += tag
+		cursor = end + 1
+	}
+	return result
+}

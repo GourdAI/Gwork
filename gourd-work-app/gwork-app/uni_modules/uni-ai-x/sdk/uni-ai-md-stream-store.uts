@@ -1,0 +1,638 @@
+import type { AiWorkerOp } from '@/uni_modules/uni-ai-worker-runtime/utssdk/interface.uts'
+import { requestAiWorkerMarkdownRebuild } from '@/uni_modules/uni-ai-worker-runtime'
+import { UniAiMdHtmlStreamAdapter } from '@/uni_modules/uni-ai-worker/utssdk/uni-ai-md-html.uts'
+import { uniAiMdHtmlBlocksToTextBlocks } from '@/uni_modules/uni-ai-x/sdk/markdown-text.uts'
+import type { MarkdownTextRenderBlock } from '@/uni_modules/uni-ai-x/sdk/markdown-text.uts'
+import { ref, reactive } from 'vue'
+import { prepareCodeBlocks } from './code-presentation.uts'
+import { releaseCodeHighlightSessions } from './parseCode.uts'
+import { prepareNativeMermaidBlocks } from '@/uni_modules/uni-ai-x/sdk/mermaid-presentation.uts'
+import { prepareNativeInlineMathBlocks } from './inline-math-presentation.uts'
+// #ifdef APP-HARMONY
+import { prepareHarmonySvgImageSource } from './harmony-svg-workaround.uts'
+// #endif
+import { pluginBackgroundFor } from './plugin-theme.uts'
+import type { MsgItem } from '../types.uts'
+// #ifdef APP-ANDROID || APP-HARMONY
+import { RenderSnapshot, RENDER_SNAPSHOT_VERSION, renderContentKey } from '@/uni_modules/uni-ai-worker/utssdk/render-snapshot.uts'
+// #endif
+// #ifdef APP-ANDROID
+import { requestSnapshotWork } from '@/uni_modules/uni-ai-worker-runtime'
+// #endif
+// #ifdef APP-HARMONY
+import { persistRenderAssets, restoreRenderAssets } from '@/uni_modules/uni-ai-worker/utssdk/snapshot-files.uts'
+import { prepareTablePresentation } from './table-presentation.uts'
+import { linkMarkdownFootnotes } from './markdown-footnotes.uts'
+import { linkSearchCitations } from './search-citations.uts'
+import { prepareUniAiMdHtml } from '@/uni_modules/uni-ai-worker/utssdk/markdown-html.uts'
+// #endif
+// #ifdef APP-ANDROID
+import { prepareAndroidPresentation, releaseAndroidPresentation } from '@/uni_modules/uni-ai-worker-runtime'
+// #endif
+
+export const uniAiMdPresentationRevision = ref<number>(0)
+// #ifdef APP-ANDROID
+const messageRevisions = reactive(new Map<string, number>())
+// #endif
+let presentationTheme = 'light'
+let presentationWidth = 360
+
+// 内存中保留的渲染条目上限：超出后按最近访问顺序淘汰最久未访问的条目
+const STREAM_ENTRY_LIMIT = 200
+
+type UniAiMdStreamEntry = {
+	messageId: string
+	workerId: string
+	preparationVersion: number
+	presentationRevision: number
+	adapter: UniAiMdHtmlStreamAdapter
+	textBlocks: MarkdownTextRenderBlock[]
+	body: string
+	citationIds: number[]
+	pendingOps: AiWorkerOp[]
+	pendingDone: boolean
+	preparationQueued: boolean
+	done: boolean
+	settled: boolean
+	restored: boolean
+	restoring: boolean
+	savingVersion: number
+	saveRetryCount: number
+	saveRetryTimer: number
+	message: MsgItem | null
+	save: ((message: MsgItem) => void) | null
+}
+
+const streamEntries = new Map<string, UniAiMdStreamEntry>()
+let workerSequence = 0
+// 最近访问顺序（末尾最新），用于 LRU 淘汰
+const streamEntryOrder = [] as string[]
+
+function touchEntry(msgId: string): void {
+	const index = streamEntryOrder.indexOf(msgId)
+	if (index >= 0) streamEntryOrder.splice(index, 1)
+	streamEntryOrder.push(msgId)
+}
+
+function evictEntriesIfNeeded(): void {
+	while (streamEntryOrder.length > STREAM_ENTRY_LIMIT) {
+		const oldest = streamEntryOrder.shift()
+		if (oldest == null) break
+		uniAiMdStreamRelease(oldest!)
+	}
+}
+
+function emptyBlocks(): MarkdownTextRenderBlock[] {
+	return [] as MarkdownTextRenderBlock[]
+}
+
+function entryFor(msgId: string): UniAiMdStreamEntry {
+	const existing = streamEntries.get(msgId)
+	if (existing != null) {
+		touchEntry(msgId)
+		return existing!
+	}
+	const entry: UniAiMdStreamEntry = {
+		messageId: msgId,
+		workerId: msgId + ':' + (++workerSequence).toString(),
+		preparationVersion: 0,
+		presentationRevision: 0,
+		adapter: new UniAiMdHtmlStreamAdapter(),
+		textBlocks: emptyBlocks(),
+		body: '',
+		citationIds: [],
+		pendingOps: [],
+		pendingDone: false,
+		preparationQueued: false,
+		done: false, settled: false, restored: false, restoring: false, savingVersion: -1,
+		saveRetryCount: 0, saveRetryTimer: 0,
+		message: null, save: null
+	}
+	streamEntries.set(msgId, entry)
+	touchEntry(msgId)
+	evictEntriesIfNeeded()
+	return entry
+}
+
+function notifyEntry(entry: UniAiMdStreamEntry) {
+	entry.presentationRevision = uniAiMdPresentationRevision.value + 1
+	uniAiMdPresentationRevision.value = entry.presentationRevision
+	// #ifdef APP-ANDROID
+	messageRevisions.set(entry.messageId, entry.presentationRevision)
+	// #endif
+	persistCompleteEntry(entry)
+}
+
+function persistCompleteEntry(entry: UniAiMdStreamEntry) {
+	// #ifdef APP-ANDROID || APP-HARMONY
+	const message = entry.message
+	if (message == null || entry.save == null || !entry.done || !entry.settled || entry.restored || entry.restoring || entry.textBlocks.length == 0) return
+	if (entry.savingVersion == entry.preparationVersion && message.renderSnapshot != null) return
+	if (!entry.textBlocks.every((block: MarkdownTextRenderBlock): boolean => block.isComplete &&
+		(block.kind != 'code' || block.text.replace(/\r\n/g, '\n') == (block.codeHighlightedText ?? '')) &&
+		(block.kind != 'math' || block.svgSource.length > 0 || (block.math?.src ?? '').length > 0) &&
+		((block.kind != 'image' && block.kind != 'mermaid') || block.mermaidRenderFailed == true || (block.svgWidth > 0 && block.svgHeight > 0)) &&
+		(block.kind != 'mermaid' || block.mermaidRenderFailed == true || (block.mermaidImageSource ?? '').length > 0))) {
+		return
+	}
+	if (entry.saveRetryTimer != 0) { clearTimeout(entry.saveRetryTimer); entry.saveRetryTimer = 0 }
+	entry.saveRetryCount = 0
+	const version = entry.preparationVersion
+	const body = message.body
+	const theme = presentationTheme
+	const width = presentationWidth
+	entry.savingVersion = version
+	const snapshot: RenderSnapshot = { version: RENDER_SNAPSHOT_VERSION, bodyKey: renderContentKey(body), theme: theme,
+		width: width, citations: (message.search?.sources ?? []).map((source) => source.id).join(','), assets: [], blocks: cloneBlocks(entry.textBlocks) }
+	const isCurrent = (): boolean => streamEntries.get(entry.messageId) == entry && entry.preparationVersion == version && message.body == body && presentationTheme == theme && presentationWidth == width
+	const attempt = () => {
+	if (!isCurrent()) {
+		if (entry.savingVersion == version) entry.savingVersion = -1
+		if (entry.saveRetryTimer == 0) entry.saveRetryTimer = setTimeout(() => { entry.saveRetryTimer = 0; persistCompleteEntry(entry) }, 120)
+		return
+	}
+	// #ifdef APP-ANDROID
+	requestSnapshotWork({ action: 'persist', messageId: message._id, body: body, snapshot: snapshot } as UTSJSONObject, (result: UTSJSONObject) => {
+		if (!isCurrent()) return
+		const stored = result['snapshot'] as RenderSnapshot | null
+		if (stored == null) {
+			if (entry.saveRetryCount < 3) {
+				entry.saveRetryCount++
+				entry.saveRetryTimer = setTimeout(() => { entry.saveRetryTimer = 0; attempt() }, 1000 * entry.saveRetryCount)
+			} else console.error('[render-snapshot] asset save exhausted: ' + entry.messageId)
+			return
+		}
+		message.renderSnapshot = stored
+		entry.save?.(message)
+	})
+	// #endif
+	// #ifdef APP-HARMONY
+	let stored: RenderSnapshot | null = null
+	try { stored = persistRenderAssets(message._id, snapshot) } catch (error) { console.error('[render-snapshot] persist failed: ', error) }
+	if (!isCurrent()) return
+	if (stored == null) {
+		if (entry.saveRetryCount < 3) {
+			entry.saveRetryCount++
+			entry.saveRetryTimer = setTimeout(() => { entry.saveRetryTimer = 0; attempt() }, 1000 * entry.saveRetryCount)
+		} else console.error('[render-snapshot] asset save exhausted: ' + entry.messageId)
+		return
+	}
+	message.renderSnapshot = stored
+	entry.save?.(message)
+	// #endif
+	}
+	attempt()
+	// #endif
+}
+
+export function uniAiMdStreamBindMessage(message: MsgItem, save: (message: MsgItem) => void): Promise<void> {
+	// #ifdef APP-ANDROID || APP-HARMONY
+	if (message.from_uid != 'uni-ai') return Promise.resolve()
+	const entry = entryFor(message._id)
+	entry.message = message
+	entry.save = save
+	if (entry.restored && entry.body != message.body) rebuildRestoredEntry(entry)
+	if (entry.restoring || entry.restored || entry.preparationVersion > 0 || entry.textBlocks.length > 0) return Promise.resolve()
+	const snapshot = message.renderSnapshot
+	entry.body = message.body
+	const snapshotMatchesContext = snapshot != null && snapshot.theme == presentationTheme && snapshot.width == presentationWidth &&
+		snapshot.citations == (message.search?.sources ?? []).map((source) => source.id).join(',')
+	if (!snapshotMatchesContext) {
+		uniAiMdStreamRequestRebuild(message._id, message.body)
+		return Promise.resolve()
+	}
+	entry.restoring = true
+	const body = message.body
+	entry.body = body
+	return new Promise<void>((resolve) => {
+	// #ifdef APP-ANDROID
+	requestSnapshotWork({ action: 'restore', snapshot: snapshot, body: body } as UTSJSONObject, (result: UTSJSONObject) => {
+		if (streamEntries.get(message._id) != entry || message.body != body || !entry.restoring) { resolve(); return }
+		entry.restoring = false
+		const restored = result['snapshot'] as RenderSnapshot | null
+		if (restored != null && restored.theme == presentationTheme && restored.width == presentationWidth) {
+			entry.textBlocks = restored.blocks
+			entry.restored = true
+			entry.done = true
+			notifyEntry(entry)
+		} else {
+			message.renderSnapshot = undefined
+			uniAiMdStreamRequestRebuild(message._id, body)
+		}
+		resolve()
+	})
+	// #endif
+	// #ifdef APP-HARMONY
+	let restored: RenderSnapshot | null = null
+	try { restored = restoreRenderAssets(snapshot, body) } catch (_error) { restored = null }
+	if (streamEntries.get(message._id) != entry || message.body != body || !entry.restoring) { resolve(); return }
+	entry.restoring = false
+	if (restored != null && restored.theme == presentationTheme && restored.width == presentationWidth) {
+		entry.textBlocks = restored.blocks
+		entry.restored = true
+		entry.done = true
+		notifyEntry(entry)
+	} else {
+		message.renderSnapshot = undefined
+		uniAiMdStreamRequestRebuild(message._id, body)
+	}
+	resolve()
+	// #endif
+	})
+	// #endif
+	// #ifndef APP-ANDROID || APP-HARMONY
+	return Promise.resolve()
+	// #endif
+}
+
+export function uniAiMdStreamGetRevision(msgId: string): number {
+	// #ifdef APP-ANDROID
+	return messageRevisions.get(msgId) ?? 0
+	// #endif
+	// #ifndef APP-ANDROID
+	return streamEntries.get(msgId)?.presentationRevision ?? 0
+	// #endif
+}
+
+function refreshEntry(entry: UniAiMdStreamEntry, isDone: boolean = false): void {
+	const version = ++entry.preparationVersion
+	const blocks = uniAiMdHtmlBlocksToTextBlocks(entry.adapter.getBlocks(), isDone)
+	const isCurrent = (): boolean => streamEntries.get(entry.messageId) == entry && entry.preparationVersion == version
+	prepareCodeBlocks(entry.messageId, blocks, (prepared: MarkdownTextRenderBlock[]) => {
+		if (!isCurrent()) return
+		// Harmony's image component renders SVG data URIs as bitmaps. Persist native
+		// SVG sources first so streamed blocks use the same file-path rendering as
+		// restored snapshots.
+		// #ifdef APP-HARMONY
+		prepareStreamSvgFiles(prepared, () => {
+			if (!isCurrent()) return
+			finishRefreshEntry(entry, prepared, isCurrent)
+		})
+		// #endif
+		// #ifndef APP-HARMONY
+		finishRefreshEntry(entry, prepared, isCurrent)
+		// #endif
+	}, entry.textBlocks)
+}
+
+// #ifdef APP-HARMONY
+function prepareStreamSvgFiles(blocks: MarkdownTextRenderBlock[], done: () => void) {
+	let pending = 0
+	let finished = false
+	const complete = () => {
+		if (finished || pending > 0) return
+		finished = true
+		done()
+	}
+	const prepare = (source: string, replace: (localSource: string) => void) => {
+		if (!source.startsWith('data:image/svg+xml;base64,')) return
+		pending++
+		prepareHarmonySvgImageSource(source, true, (localSource: string, _cacheable: boolean) => {
+			if (localSource != source && localSource.length > 0) replace(localSource)
+			pending--
+			complete()
+		})
+	}
+	for (const block of blocks) {
+		prepare(block.svgSource, (source: string) => { block.svgSource = source })
+		prepare(block.mermaidImageSource ?? '', (source: string) => { block.mermaidImageSource = source })
+		if (block.math != null) prepare(block.math!.src, (source: string) => { block.math!.src = source })
+	}
+	complete()
+}
+// #endif
+
+function finishRefreshEntry(entry: LibmarkStreamEntry, prepared: MarkdownTextRenderBlock[], isCurrent: () => boolean) {
+	if (!isCurrent()) return
+		entry.settled = true
+		// #ifdef APP-HARMONY
+		for (const block of prepared) {
+			if (block.kind != 'html' && block.kind != 'table') continue
+			block.html = linkMarkdownFootnotes(block.html, entry.message?.body ?? '')
+			if (entry.message?.search != null) block.html = linkSearchCitations(block.html, entry.message!.search!.sources)
+			if (block.kind == 'html') block.html = prepareUniAiMdHtml(block.html, block.isComplete)
+			else block.table = prepareTablePresentation(block.html, block.columnWidths, block.rowTextWidths, presentationTheme)
+		}
+		// #endif
+		entry.textBlocks = prepared
+		prepareNativeInlineMathBlocks(entry.messageId, prepared, presentationTheme, () => {
+			if (!isCurrent()) return
+			entry.textBlocks = prepared.slice()
+			notifyEntry(entry)
+		})
+		notifyEntry(entry)
+		prepareNativeMermaidBlocks(prepared, presentationTheme, () => {
+			if (!isCurrent()) return
+			entry.textBlocks = prepared.slice()
+			notifyEntry(entry)
+		})
+		notifyEntry(entry)
+	}
+
+export function uniAiMdStreamSetLayoutWidth(width: number) {
+	if (width <= 0 || width == presentationWidth) return
+	presentationWidth = width
+	streamEntries.forEach((entry: UniAiMdStreamEntry) => {
+		if (entry.restored) { rebuildRestoredEntry(entry); return }
+		// #ifdef APP-ANDROID
+		if (entry.preparationVersion > 0) prepareAndroidEntry(entry, [])
+		// #endif
+	})
+}
+
+// #ifdef APP-ANDROID
+export function uniAiMdStreamSetContext(msgId: string, body: string, citationIds: number[]) {
+	const entry = entryFor(msgId)
+	if (entry.body == body && entry.citationIds.join(',') == citationIds.join(',')) return
+	entry.body = body
+	entry.citationIds = citationIds
+	if (entry.preparationVersion > 0) prepareAndroidEntry(entry, [])
+}
+
+function prepareAndroidEntry(entry: UniAiMdStreamEntry, ops: AiWorkerOp[], done: boolean = false) {
+	if (entry.restored || entry.restoring) return
+	entry.settled = false
+	entry.preparationVersion += 1
+	for (const op of ops) entry.pendingOps.push({ op: op.op, kind: op.kind, content: op.content, index: op.index, unchanged: op.unchanged })
+	entry.pendingDone = entry.pendingDone || done
+	if (entry.preparationQueued) return
+	entry.preparationQueued = true
+	// One native submission for ops, body and completion published in the same task.
+	Promise.resolve().then(() => {
+		entry.preparationQueued = false
+		if (streamEntries.get(entry.messageId) != entry) return
+		const pending = entry.pendingOps
+		const complete = entry.pendingDone
+		entry.pendingOps = []
+		entry.pendingDone = false
+		sendAndroidEntry(entry, pending, complete)
+	})
+}
+
+function sendAndroidEntry(entry: UniAiMdStreamEntry, ops: AiWorkerOp[], done: boolean) {
+	const wireOps = ops.map((op: AiWorkerOp): UTSJSONObject => ({
+		op: op.op, kind: op.kind, content: op.content, index: op.index, unchanged: op.unchanged
+	} as UTSJSONObject))
+	prepareAndroidPresentation(entry.workerId, wireOps, done, presentationTheme, (message: UTSJSONObject) => {
+		if (streamEntries.get(entry.messageId) != entry) return
+		if (message['action'] == 'error') {
+			notifyEntry(entry)
+			return
+		}
+		const blocks = entry.textBlocks.slice(0, message['length'] as number)
+		const deltas = message['changes'] as UTSJSONObject[]
+		const changed: MarkdownTextRenderBlock[] = []
+		for (let i = 0; i < deltas.length; i++) {
+			const index = deltas[i]['index'] as number
+			const wireBlock = deltas[i]['block'] as UTSJSONObject
+			const block = wireBlock as MarkdownTextRenderBlock
+			const prefix = wireBlock['codeHtmlPrefix'] as number
+			const previousHtml = blocks[index]?.codeHtml ?? ''
+			if (prefix < 0 || prefix > previousHtml.length) {
+				console.error('[uni-ai-x][presentation-worker] Invalid HTML patch prefix')
+				return
+			}
+			block.codeHtml = previousHtml.slice(0, prefix) + (block.codeHtml ?? '')
+			blocks[index] = block
+			changed.push(block)
+		}
+		entry.preparationVersion += 1
+		entry.settled = message['settled'] == true && message['body'] == entry.body &&
+			message['theme'] == presentationTheme && message['windowWidth'] == presentationWidth && !entry.preparationQueued
+		// Worker deltas reuse stable blocks. Only changed blocks need image preparation.
+		entry.textBlocks = blocks
+		const published = changed.slice()
+		const publish = () => {
+			if (streamEntries.get(entry.messageId) != entry || !published.some((block: MarkdownTextRenderBlock): boolean => entry.textBlocks.includes(block))) return
+			const updated = entry.textBlocks.slice()
+			for (let i = 0; i < deltas.length; i++) {
+				const index = deltas[i]['index'] as number
+				if (updated[index] == published[i]) {
+					published[i] = cloneBlock(changed[i])
+					updated[index] = published[i]
+				}
+			}
+			entry.textBlocks = updated
+			notifyEntry(entry)
+		}
+		prepareNativeMermaidBlocks(changed, presentationTheme, publish)
+		notifyEntry(entry)
+	}, entry.body, entry.citationIds, presentationWidth)
+}
+// #endif
+
+export function uniAiMdStreamSetTheme(theme: string) {
+	if (presentationTheme == theme) return
+	presentationTheme = theme
+	streamEntries.forEach((entry: UniAiMdStreamEntry) => {
+		// #ifdef APP-ANDROID || APP-HARMONY
+		// A theme switch invalidates every generated SVG, including entries that
+		// were already prepared. Rebuild from the source so old-theme assets are
+		// never reused by recycled list items.
+		rebuildRestoredEntry(entry)
+		// #endif
+		// #ifndef APP-ANDROID || APP-HARMONY
+		refreshEntry(entry, entry.done)
+		// #endif
+	})
+}
+
+function rebuildRestoredEntry(entry: UniAiMdStreamEntry) {
+	// #ifdef APP-ANDROID
+	releaseAndroidPresentation(entry.workerId)
+	entry.workerId = entry.messageId + ':' + (++workerSequence).toString()
+	// #endif
+	entry.adapter.reset()
+	entry.restored = false
+	entry.restoring = false
+	entry.preparationVersion = 0
+	entry.savingVersion = -1
+	entry.textBlocks = emptyBlocks()
+	if (entry.message != null) {
+		entry.message!.renderSnapshot = undefined
+		uniAiMdStreamRequestRebuild(entry.messageId, entry.message!.body)
+	}
+}
+
+function cloneBlock(block: MarkdownTextRenderBlock): MarkdownTextRenderBlock {
+	const columnWidths = [] as number[]
+	for (let index = 0; index < block.columnWidths.length; index++) columnWidths.push(block.columnWidths[index])
+	const rowTextWidths = [] as number[][]
+	for (let rowIndex = 0; rowIndex < block.rowTextWidths.length; rowIndex++) {
+		const row = [] as number[]
+		for (let columnIndex = 0; columnIndex < block.rowTextWidths[rowIndex].length; columnIndex++) {
+			row.push(block.rowTextWidths[rowIndex][columnIndex])
+		}
+		rowTextWidths.push(row)
+	}
+	return {
+		kind: block.kind,
+		key: block.key,
+		html: block.html,
+		text: block.text,
+		language: block.language,
+		isComplete: block.isComplete,
+		columnWidths: columnWidths,
+		rowTextWidths: rowTextWidths,
+		codeTokens: block.codeTokens,
+		codeLines: block.codeLines,
+		codeHtml: block.codeHtml,
+		codeContentHeight: block.codeContentHeight,
+		codeCompleteLines: block.codeCompleteLines,
+		codeHighlightedText: block.codeHighlightedText,
+		codeHeight: block.codeHeight,
+		table: block.table == null ? undefined : { ...block.table! },
+		mermaidImageSource: block.mermaidImageSource,
+		mermaidRenderTheme: block.mermaidRenderTheme,
+		mermaidRenderFailed: block.mermaidRenderFailed,
+		math: block.math == null ? undefined : { ...block.math! },
+		level: block.level,
+		indent: block.indent,
+		marker: block.marker,
+		quoteDepth: block.quoteDepth,
+		svgSource: block.svgSource,
+		svgWidth: block.svgWidth,
+		svgHeight: block.svgHeight
+	}
+}
+
+function cloneBlocks(blocks: MarkdownTextRenderBlock[]): MarkdownTextRenderBlock[] {
+	const result = [] as MarkdownTextRenderBlock[]
+	for (let index = 0; index < blocks.length; index++) result.push(cloneBlock(blocks[index]))
+	return result
+}
+
+export function uniAiMdStreamApply(msgId: string, ops: AiWorkerOp[]): boolean {
+	if (ops.length == 0) return false
+	const entry = entryFor(msgId)
+	// #ifdef APP-ANDROID
+	prepareAndroidEntry(entry, ops)
+	return true
+	// #endif
+	// #ifndef APP-ANDROID
+	const applied = entry.adapter.applyOps(ops)
+	refreshEntry(entry)
+	return applied
+	// #endif
+}
+
+export function uniAiMdStreamGetBlocks(msgId: string): MarkdownTextRenderBlock[] {
+	const entry = streamEntries.get(msgId)
+	if (entry == null) return emptyBlocks()
+	touchEntry(msgId)
+	// #ifdef APP-ANDROID
+	return entry!.textBlocks
+	// #endif
+	// #ifndef APP-ANDROID
+	return cloneBlocks(entry!.textBlocks)
+	// #endif
+}
+
+// 仅刷新完成态（不序列化 AST），用于流式结束后的 UI 收尾
+export function uniAiMdStreamMarkComplete(msgId: string): void {
+	const entry = streamEntries.get(msgId)
+	if (entry == null) return
+	entry!.done = true
+	// #ifdef APP-ANDROID
+	prepareAndroidEntry(entry!, [], true)
+	return
+	// #endif
+	// #ifndef APP-ANDROID
+	entry!.adapter.markComplete()
+	refreshEntry(entry!, true)
+	// #endif
+}
+
+// #ifdef APP-HARMONY || APP-ANDROID
+// 正在等待 Worker 重建结果的消息（去重）
+const rebuildingMsgIds = [] as string[]
+// 本次会话重建失败的消息（避免反复请求）
+const rebuildFailedMsgIds = [] as string[]
+// #endif
+
+/**
+ * 请求 Worker 用 uni-ai-md 从消息原文（body）重建渲染 ops（重启/中断后的恢复路径）。
+ * 页面运行环境无法调用 uni-ai-md 原生插件，统一由 Worker 解析，
+ * 解析结果通过 setAiWorkerRebuildListener 的监听器回调，再调用 uniAiMdStreamApplyRebuild 应用。
+ */
+export function uniAiMdStreamRequestRebuild(msgId: string, text: string): boolean {
+	// #ifdef APP-HARMONY || APP-ANDROID
+	if (text.length == 0) return false
+	if (rebuildFailedMsgIds.indexOf(msgId) >= 0) return false
+	if (rebuildingMsgIds.indexOf(msgId) >= 0) return false
+	const existing = streamEntries.get(msgId)
+	if (existing?.restoring == true || existing?.restored == true) return false
+	if (existing != null && (existing!.textBlocks.length > 0 || existing!.preparationVersion > 0)) return false
+	rebuildingMsgIds.push(msgId)
+	// 重建会话与展示层当前主题保持一致，重建出的中间态 SVG 用同色画布
+	requestAiWorkerMarkdownRebuild(msgId, text, presentationTheme == 'dark',
+		pluginBackgroundFor(presentationTheme))
+	return true
+	// #endif
+	// #ifndef APP-HARMONY
+	// #ifndef APP-ANDROID
+	return false
+	// #endif
+	// #endif
+}
+
+/**
+ * 应用 Worker 回传的重建 ops；ops 为空或应用后无 blocks 均视为重建失败，本次会话不再重试。
+ */
+export function uniAiMdStreamApplyRebuild(msgId: string, ops: AiWorkerOp[]): boolean {
+	// #ifdef APP-HARMONY || APP-ANDROID
+	const index = rebuildingMsgIds.indexOf(msgId)
+	if (index < 0) return false
+	rebuildingMsgIds.splice(index, 1)
+	const markFailed = (): boolean => {
+		if (rebuildFailedMsgIds.indexOf(msgId) < 0) rebuildFailedMsgIds.push(msgId)
+		return false
+	}
+	if (ops.length == 0) return markFailed()
+	const applied = uniAiMdStreamApply(msgId, ops)
+	uniAiMdStreamMarkComplete(msgId)
+	// #ifndef APP-ANDROID
+	if (streamEntries.get(msgId)!.adapter.getBlocks().length == 0) return markFailed()
+	// #endif
+	return applied
+	// #endif
+	// #ifndef APP-HARMONY
+	// #ifndef APP-ANDROID
+	return false
+	// #endif
+	// #endif
+}
+
+export function uniAiMdStreamReset(msgId: string): void {
+	uniAiMdStreamRelease(msgId)
+	const entry = entryFor(msgId)
+	entry.adapter.reset()
+	entry.textBlocks = emptyBlocks()
+}
+
+export function uniAiMdStreamRelease(msgId: string): void {
+	const entry = streamEntries.get(msgId)
+	if (entry != null && entry.saveRetryTimer != 0) clearTimeout(entry.saveRetryTimer)
+	// #ifdef APP-ANDROID
+	if (entry != null) releaseAndroidPresentation(entry.workerId)
+	// #endif
+	releaseCodeHighlightSessions(msgId)
+	streamEntries.delete(msgId)
+	// #ifdef APP-ANDROID
+	messageRevisions.delete(msgId)
+	// #endif
+	const index = streamEntryOrder.indexOf(msgId)
+	if (index >= 0) streamEntryOrder.splice(index, 1)
+	// #ifdef APP-ANDROID || APP-HARMONY
+	const pendingIndex = rebuildingMsgIds.indexOf(msgId)
+	if (pendingIndex >= 0) rebuildingMsgIds.splice(pendingIndex, 1)
+	const failedIndex = rebuildFailedMsgIds.indexOf(msgId)
+	if (failedIndex >= 0) rebuildFailedMsgIds.splice(failedIndex, 1)
+	// #endif
+}
+
+export function releaseAllUniAiMdStreams(): void {
+	const ids: string[] = []
+	streamEntries.forEach((entry: UniAiMdStreamEntry) => { ids.push(entry.messageId) })
+	for (let i = 0; i < ids.length; i++) uniAiMdStreamRelease(ids[i])
+}

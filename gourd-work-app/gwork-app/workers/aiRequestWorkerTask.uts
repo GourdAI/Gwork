@@ -1,0 +1,726 @@
+// #ifdef APP-ANDROID
+import { createSession, feedChunk, finishSession, destroySession } from '@/uni_modules/uni-ai-md/utssdk/app-android/index.uts'
+import type { UniAiMdEvent, UniAiMdOp } from '@/uni_modules/uni-ai-md/utssdk/app-android/index.uts'
+// #endif
+// #ifdef APP-IOS
+import { initMd2html, isMd2htmlAvailable, md2html } from '../uni_modules/uni-cmark/utssdk/app-ios/index.uts'
+// #endif
+// #ifdef WEB
+import { initMd2html, isMd2htmlAvailable, md2html } from '../uni_modules/uni-cmark/utssdk/web/index.uts'
+// #endif
+// #ifdef MP-WEIXIN
+import { initMd2html, isMd2htmlAvailable, md2html } from '../uni_modules/uni-cmark/utssdk/mp-weixin/index.uts'
+// #endif
+// #ifdef APP-HARMONY
+import { createSession, feedChunk, finishSession, destroySession } from '@/uni_modules/uni-ai-md/utssdk/app-harmony/index.uts'
+import type { UniAiMdEvent, UniAiMdOp } from '@/uni_modules/uni-ai-md/utssdk/app-harmony/index.uts'
+import { AiWorkerState, UniAiMdChunk, createOpBatch } from '@uni_modules/uni-ai-worker-runtime'
+// #endif
+import {
+	MarkdownPreprocessor,
+	prepareMarkdownHtml,
+	buildMarkdownHtmlBlocks
+} from '../uni_modules/uni-ai-worker/utssdk/index.uts'
+// #ifdef APP-HARMONY || APP-ANDROID
+import { UniAiMdSourceTail } from './uni-ai-md-source-tail.uts'
+// #endif
+// #ifdef APP-ANDROID || APP-HARMONY
+import { WorkerStreamRequest } from '../uni_modules/uni-ai-worker/utssdk/stream-request.uts'
+// #endif
+
+type WorkerAiDelta = {
+	content?: string,
+	reasoning_content?: string
+}
+
+type WorkerAiChoice = {
+	delta?: WorkerAiDelta
+}
+
+type WorkerAiChunk = {
+	choices?: WorkerAiChoice[]
+}
+
+function readMessageString(message: UTSJSONObject, key: string, defaultValue: string = ''): string {
+	const value = message[key] as string | null
+	return value == null ? defaultValue : value as string
+}
+
+function readMessageNumber(message: UTSJSONObject, key: string, defaultValue: number = 0): number {
+	const value = message[key] as number | null
+	return value == null ? defaultValue : value as number
+}
+
+// #ifdef APP-HARMONY
+function readEsString(message: ESObject, key: string): string {
+	const value = message[key] as string | null
+	return value == null ? '' : value as string
+}
+// #endif
+
+export class AiRequestWorkerTask extends WorkerTaskImpl {
+	// #ifdef APP-ANDROID || APP-HARMONY
+	private streamRequest: WorkerStreamRequest | null = null
+	// #endif
+	private renderTimer: number = 0
+	private requestVersion: number = 0
+	private snapshotVersion: number = 0
+	private renderInterval: number = 300
+	private startedAt: number = 0
+	private content: string = ''
+	private reasoningContent: string = ''
+	private hasThinkContent: boolean = false
+	private eventCount: number = 0
+	private networkChunkCount: number = 0
+	private receivedBytes: number = 0
+	private terminalSource: string = ''
+	private finished: boolean = false
+	private preprocessor: MarkdownPreprocessor = new MarkdownPreprocessor()
+	// #ifdef APP-HARMONY || APP-ANDROID
+	private uniAiMdSession: object | null = null
+	private uniAiMdLanguage: string | null = null
+	// 解析会话的配色：darkMode 决定 uni-ai-md 插件默认前景色，background 是画布底色；
+	// 由主线程按当前主题随启动消息传入。
+	private uniAiMdDarkMode: boolean = false
+	private uniAiMdBackground: string = ''
+	private uniAiMdPendingOps: UniAiMdOp[] = []
+	private uniAiMdPendingOpOffset: number = 0
+	private uniAiMdPendingContent: string = ''
+	private uniAiMdCompletionPending: boolean = false
+	private uniAiMdFinishCalled: boolean = false
+	// #endif
+
+	constructor() {
+		super()
+	}
+
+	override entry() {
+		// #ifdef APP-HARMONY || APP-ANDROID
+		this.postMessage({ phase: 'ready' } as UTSJSONObject)
+		return
+		// #endif
+		// #ifdef APP-IOS || WEB || MP-WEIXIN
+		initMd2html().then(() => {
+			this.postMessage({ phase: 'ready' } as UTSJSONObject)
+		}).catch((error) => {
+			const errMsg = error instanceof Error ? error.message : 'cmark-gfm WebAssembly 初始化失败'
+			this.postMessage({
+				phase: 'init-error',
+				errMsg: errMsg
+			} as UTSJSONObject)
+		})
+		return
+		// #endif
+		this.postMessage({ phase: 'ready' } as UTSJSONObject)
+	}
+
+	override onMessage(message: any) {
+		// #ifdef APP-HARMONY
+		const messageTag = readEsString(message as ESObject, 'tag')
+		if (messageTag == 'uni-ai-md-chunk') {
+			this.handleUniAiMdChunk(message as ESObject)
+			return
+		}
+		// #endif
+		const payload = message as UTSJSONObject
+		const action = readMessageString(payload, 'action')
+		if (action == 'cancel') {
+			if (readMessageNumber(payload, 'requestVersion') == this.requestVersion) this.cancelCurrent()
+			return
+		}
+		if (action == 'append-markdown') {
+			if (readMessageNumber(payload, 'requestVersion') == this.requestVersion) {
+				this.appendExternalMarkdown(
+					readMessageString(payload, 'content'),
+					readMessageString(payload, 'reasoningContent')
+				)
+			}
+			return
+		}
+		if (action == 'complete-markdown') {
+			if (readMessageNumber(payload, 'requestVersion') == this.requestVersion) this.complete()
+			return
+		}
+		// #ifdef APP-HARMONY || APP-ANDROID
+		if (action == 'rebuild-markdown') {
+			this.rebuildMarkdown(payload)
+			return
+		}
+		// #endif
+		// #ifdef APP-ANDROID || APP-HARMONY
+		if (action == 'start') {
+			this.startRequest(payload)
+			return
+		}
+		// #endif
+		if (action == 'start-markdown') this.startMarkdown(payload)
+	}
+
+	// #ifdef APP-HARMONY || APP-ANDROID
+	private ensureUniAiMdSession(): boolean {
+		if (this.uniAiMdSession != null) return true
+		try {
+			// 关闭 AST 通道，只交付 HTML 与 DATA，渲染由主线程适配层按内容类型分派；
+			// 语言用主线程传入的应用语言，为空时由桥接按设备语言兜底挑集合字体的 face；
+			// 配色（深浅色与画布底色）用主线程按当前主题传入的值
+			this.uniAiMdSession = createSession('html', this.uniAiMdLanguage,
+				this.uniAiMdDarkMode, this.uniAiMdBackground)
+			if (this.uniAiMdSession != null) return true
+		} catch {
+		}
+		this.failUniAiMd('uni_ai_md_session_create_failed', 'uni-ai-md 会话创建失败')
+		return false
+	}
+
+	private appendUniAiMdOps(event: UniAiMdEvent | null | undefined): void {
+		if (event == null) return
+		const ops = (event as UniAiMdEvent).ops
+		for (let i = 0; i < ops.length; i++) {
+			this.uniAiMdPendingOps.push(ops[i])
+		}
+	}
+
+	private flushUniAiMdOps(): void {
+		if (this.uniAiMdPendingOpOffset >= this.uniAiMdPendingOps.length) return
+		// #ifdef APP-HARMONY
+		const batch = createOpBatch(this.requestVersion)
+		while (this.uniAiMdPendingOpOffset < this.uniAiMdPendingOps.length) {
+			const op = this.uniAiMdPendingOps[this.uniAiMdPendingOpOffset]
+			batch.pushOp(op.op, op.kind, op.content, op.index, op.unchanged)
+			this.uniAiMdPendingOpOffset += 1
+		}
+		this.postMessage(batch, { harmonySendable: true } as WorkerPostMessageOptions)
+		// #endif
+		// #ifdef APP-ANDROID
+		const ops = [] as UTSJSONObject[]
+		while (this.uniAiMdPendingOpOffset < this.uniAiMdPendingOps.length) {
+			const op = this.uniAiMdPendingOps[this.uniAiMdPendingOpOffset]
+			ops.push({
+				op: op.op,
+				kind: op.kind,
+				content: op.content,
+				index: op.index,
+				unchanged: op.unchanged
+			} as UTSJSONObject)
+			this.uniAiMdPendingOpOffset += 1
+		}
+		this.postMessage({
+			tag: 'uni-ai-md-op-batch',
+			requestVersion: this.requestVersion,
+			ops: ops
+		} as UTSJSONObject)
+		// #endif
+		this.uniAiMdPendingOps = [] as UniAiMdOp[]
+		this.uniAiMdPendingOpOffset = 0
+	}
+
+	private sourceTail = new UniAiMdSourceTail()
+
+	private processUniAiMdContent(contentDelta: string): boolean {
+		if (contentDelta.length == 0) return true
+		if (this.ensureUniAiMdSession() == false) return false
+		try {
+			const session = this.uniAiMdSession
+			if (session == null) return false
+			let start: number = 0
+			while (start < contentDelta.length) {
+				const newline = contentDelta.indexOf('\n', start)
+				const end = newline < 0 ? contentDelta.length : newline + 1
+				const chunk = contentDelta.slice(start, end)
+				this.appendUniAiMdOps(this.sourceTail.feed(chunk, feedChunk(session, chunk) ?? null))
+				start = end
+			}
+			return true
+		} catch {
+			this.failUniAiMd('uni_ai_md_feed_failed', 'uni-ai-md 解析失败')
+			return false
+		}
+	}
+
+	private pumpUniAiMd() {
+		if (this.finished) return
+		this.flushUniAiMdOps()
+		if (this.uniAiMdPendingContent.length > 0) {
+			const content = this.uniAiMdPendingContent
+			this.uniAiMdPendingContent = ''
+			if (this.processUniAiMdContent(content) == false) return
+			this.flushUniAiMdOps()
+		}
+		if (!this.uniAiMdCompletionPending) return
+		if (!this.uniAiMdFinishCalled) {
+			this.uniAiMdFinishCalled = true
+			const session = this.uniAiMdSession
+			if (session != null) {
+				try {
+					this.appendUniAiMdOps(this.sourceTail.finish(finishSession(session) ?? null))
+				} catch {
+					this.failUniAiMd('uni_ai_md_finish_failed', 'uni-ai-md 完成解析失败')
+					return
+				}
+				this.destroyUniAiMdSession()
+			}
+			this.flushUniAiMdOps()
+			if (this.finished) return
+		}
+		this.finished = true
+		this.postMessage({ phase: 'uni-ai-md-complete', requestVersion: this.requestVersion } as UTSJSONObject)
+		if (!this.content.endsWith('\n')) this.content += '\n'
+		this.publishSnapshot(true)
+	}
+
+	// #ifdef APP-HARMONY
+	private handleUniAiMdChunk(message: ESObject) {
+		if (this.finished || this.uniAiMdCompletionPending) return
+		const chunk = message as UniAiMdChunk
+		if (chunk.requestVersion != this.requestVersion) return
+		const contentDelta = chunk.content
+		const reasoningDelta = chunk.reasoningContent
+		if (contentDelta.length == 0 && reasoningDelta.length == 0) return
+		this.eventCount += 1
+		this.networkChunkCount += 1
+		this.receivedBytes += contentDelta.length + reasoningDelta.length
+		if (contentDelta.length > 0) this.content += contentDelta
+		if (reasoningDelta.length > 0) this.reasoningContent += reasoningDelta
+		if (contentDelta.length > 0) {
+			if (this.uniAiMdPendingOps.length > 0) {
+				this.uniAiMdPendingContent += contentDelta
+			} else if (this.processUniAiMdContent(contentDelta) == false) return
+		}
+		this.pumpUniAiMd()
+		this.scheduleHtmlSnapshot()
+	}
+	// #endif
+
+	private failUniAiMd(code: string, message: string) {
+		this.finished = true
+		if (this.renderTimer != 0) clearTimeout(this.renderTimer)
+		this.renderTimer = 0
+		this.destroyUniAiMdSession()
+		this.resetUniAiMdProtocol()
+		this.postMessage({
+			phase: 'uni-ai-md-error',
+			requestVersion: this.requestVersion,
+			errCode: code,
+			errMsg: message
+		} as UTSJSONObject)
+		this.publishErrorSnapshot(code, message)
+	}
+
+	private destroyUniAiMdSession() {
+		const session = this.uniAiMdSession
+		this.uniAiMdSession = null
+		if (session == null) return
+		try {
+			destroySession(session)
+		} catch {
+			// Cancellation/reset must not be blocked by native cleanup errors.
+		}
+	}
+
+	private resetUniAiMdProtocol() {
+		this.uniAiMdPendingOps = [] as UniAiMdOp[]
+		this.uniAiMdPendingOpOffset = 0
+		this.uniAiMdPendingContent = ''
+		this.uniAiMdCompletionPending = false
+		this.uniAiMdFinishCalled = false
+	}
+
+	// #ifdef APP-HARMONY || APP-ANDROID
+	// 页面冷启动恢复历史消息：用独立 session 解析完整原文并回传 ops，
+	// 不复用流式协议状态，与 AI 请求可并发执行
+	private rebuildMarkdown(payload: UTSJSONObject) {
+		const msgId = readMessageString(payload, 'msgId')
+		const content = readMessageString(payload, 'content')
+		const language = readMessageString(payload, 'language')
+		const darkMode = (payload['darkMode'] as boolean | null) ?? false
+		const background = readMessageString(payload, 'background')
+		const ops = [] as UTSJSONObject[]
+		if (msgId.length == 0 || content.length == 0) {
+			this.postRebuildOps(msgId, ops)
+			return
+		}
+		let session: object | null = null
+		try {
+			session = createSession('html', language.length > 0 ? language : null, darkMode, background)
+			this.appendRebuildOps(ops, feedChunk(session!, content))
+			this.appendRebuildOps(ops, finishSession(session!))
+		} catch (_error) {
+			// 解析失败回传空 ops，页面回退为原文显示
+		}
+		if (session != null) {
+			try {
+				destroySession(session!)
+			} catch (_error) {
+			}
+		}
+		this.postRebuildOps(msgId, ops)
+	}
+
+	private appendRebuildOps(target: UTSJSONObject[], event: UniAiMdEvent | null | undefined) {
+		if (event == null) return
+		const eventOps = (event as UniAiMdEvent).ops
+		for (let i = 0; i < eventOps.length; i++) {
+			const op = eventOps[i]
+			target.push({
+				op: op.op,
+				kind: op.kind,
+				content: op.content,
+				index: op.index,
+				unchanged: op.unchanged
+			} as UTSJSONObject)
+		}
+	}
+
+	private postRebuildOps(msgId: string, ops: UTSJSONObject[]) {
+		this.postMessage({
+			tag: 'uni-ai-md-rebuild-ops',
+			msgId: msgId,
+			ops: ops
+		} as UTSJSONObject)
+	}
+	// #endif
+
+	// #ifdef APP-ANDROID || APP-HARMONY
+	private feedUniAiMdContent(contentDelta: string): void {
+		if (this.finished || contentDelta.length == 0) return
+		if (this.processUniAiMdContent(contentDelta)) this.flushUniAiMdOps()
+	}
+	// #endif
+	// #endif
+
+	private resetState(requestVersion: number, renderInterval: number) {
+		this.cancelCurrent()
+		this.requestVersion = requestVersion
+		this.snapshotVersion = 0
+		this.renderInterval = renderInterval
+		this.startedAt = Date.now()
+		this.content = ''
+		this.reasoningContent = ''
+		this.hasThinkContent = false
+		this.eventCount = 0
+		this.networkChunkCount = 0
+		this.receivedBytes = 0
+		this.terminalSource = ''
+		this.finished = false
+		this.preprocessor = new MarkdownPreprocessor()
+		// #ifdef APP-HARMONY || APP-ANDROID
+		this.uniAiMdLanguage = null
+		this.uniAiMdDarkMode = false
+		this.uniAiMdBackground = ''
+		this.sourceTail = new UniAiMdSourceTail()
+		this.resetUniAiMdProtocol()
+		// #endif
+	}
+
+	// #ifdef APP-ANDROID || APP-HARMONY
+	private startRequest(payload: UTSJSONObject) {
+		const requestVersion = readMessageNumber(payload, 'requestVersion')
+		const url = readMessageString(payload, 'url')
+		const authorization = readMessageString(payload, 'authorization')
+		let bodyJson = readMessageString(payload, 'bodyJson')
+		const timeout = readMessageNumber(payload, 'timeout', 90000)
+		this.resetState(requestVersion, readMessageNumber(payload, 'renderInterval', 300))
+		try {
+			const body = payload['body'] as UTSJSONObject | null
+			if (body != null) bodyJson = JSON.stringify(body)
+		} catch (_error) {
+			this.fail('invalid_request', '请求数据序列化失败')
+			return
+		}
+		if (requestVersion <= 0 || url.length == 0 || authorization.length == 0 || bodyJson.length == 0) {
+			this.fail('invalid_request', 'Worker 请求参数不完整')
+			return
+		}
+		const language = readMessageString(payload, 'language')
+		this.uniAiMdLanguage = language.length > 0 ? language : null
+		this.uniAiMdDarkMode = (payload['darkMode'] as boolean | null) ?? false
+		this.uniAiMdBackground = readMessageString(payload, 'background')
+
+		this.streamRequest = new WorkerStreamRequest(
+			(data: string) => { this.handleSseEvent(data) },
+			(code: string, message: string) => { this.fail(code, message) },
+			(source: string, networkChunkCount: number, receivedBytes: number) => {
+				this.networkChunkCount = networkChunkCount
+				this.receivedBytes = receivedBytes
+				this.terminalSource = source
+				this.complete()
+			}
+		)
+		this.streamRequest!.start(url, authorization, bodyJson, timeout)
+	}
+	// #endif
+
+	private startMarkdown(payload: UTSJSONObject) {
+		const requestVersion = readMessageNumber(payload, 'requestVersion')
+		this.resetState(requestVersion, readMessageNumber(payload, 'renderInterval', 300))
+		// #ifdef APP-HARMONY || APP-ANDROID
+		const language = readMessageString(payload, 'language')
+		this.uniAiMdLanguage = language.length > 0 ? language : null
+		this.uniAiMdDarkMode = (payload['darkMode'] as boolean | null) ?? false
+		this.uniAiMdBackground = readMessageString(payload, 'background')
+		// #endif
+		if (requestVersion <= 0) {
+			this.fail('invalid_markdown_request', 'Worker Markdown 请求参数不完整')
+			return
+		}
+		this.terminalSource = 'external'
+	}
+
+	private appendExternalMarkdown(contentDelta: string, reasoningDelta: string) {
+		if (this.finished) return
+		if (contentDelta.length > 0) this.content += contentDelta
+		if (reasoningDelta.length > 0) this.reasoningContent += reasoningDelta
+		this.eventCount += 1
+		this.networkChunkCount += 1
+		this.receivedBytes += contentDelta.length + reasoningDelta.length
+		// #ifdef APP-ANDROID
+		this.feedUniAiMdContent(contentDelta)
+		// #endif
+		if (contentDelta.length > 0 || reasoningDelta.length > 0) this.scheduleHtmlSnapshot()
+	}
+
+	// #ifdef APP-ANDROID || APP-HARMONY
+	private handleSseEvent(data: string) {
+		if (this.finished) return
+		let raw: UTSJSONObject
+		let chunk: WorkerAiChunk
+		try {
+			raw = JSON.parse<UTSJSONObject>(data) as UTSJSONObject
+			chunk = JSON.parse<WorkerAiChunk>(data) as WorkerAiChunk
+		} catch (_error) {
+			this.fail('invalid_sse_json', 'AI 流数据解析失败')
+			return
+		}
+		const error = raw.getJSON('error')
+		if (error != null) {
+			this.fail(error.getString('code', 'provider_error'), error.getString('message', '模型服务请求失败'))
+			return
+		}
+
+		this.eventCount += 1
+		let contentDelta = chunk.choices?.[0]?.delta?.content ?? ''
+		let reasoningDelta = chunk.choices?.[0]?.delta?.reasoning_content ?? ''
+		if (this.content.length == 0 && contentDelta == '<think>') {
+			this.hasThinkContent = true
+			contentDelta = ''
+		}
+		if (this.hasThinkContent) {
+			if (contentDelta == '</think>') {
+				this.hasThinkContent = false
+			} else {
+				reasoningDelta = contentDelta
+			}
+			contentDelta = ''
+		}
+		if (contentDelta.length > 0) this.content += contentDelta
+		if (reasoningDelta.length > 0) this.reasoningContent += reasoningDelta
+		// #ifdef APP-ANDROID || APP-HARMONY
+		this.feedUniAiMdContent(contentDelta)
+		// #endif
+		if (contentDelta.length > 0 || reasoningDelta.length > 0) this.scheduleHtmlSnapshot()
+	}
+	// #endif
+
+	private scheduleHtmlSnapshot() {
+		if (this.renderTimer != 0 || this.finished) return
+		if (this.snapshotVersion == 0) {
+			this.publishSnapshot(false)
+			console.log('[uni-ai-x][stream] first snapshot ms:', Date.now() - this.startedAt)
+			return
+		}
+		this.renderTimer = setTimeout(() => {
+			this.renderTimer = 0
+			this.publishSnapshot(false)
+		}, this.renderInterval)
+	}
+
+	private complete() {
+		if (this.finished) return
+		if (this.renderTimer != 0) clearTimeout(this.renderTimer)
+		this.renderTimer = 0
+		// #ifdef APP-HARMONY || APP-ANDROID
+		this.uniAiMdCompletionPending = true
+		this.pumpUniAiMd()
+		return
+		// #endif
+		this.finished = true
+		if (!this.content.endsWith('\n')) this.content += '\n'
+		this.publishSnapshot(true)
+		// #ifdef APP-ANDROID || APP-HARMONY
+		this.streamRequest = null
+		// #endif
+	}
+
+	// #ifdef APP-HARMONY || APP-ANDROID
+	// 鸿蒙/Android 不生成 cmark html/ast，只直发纯状态对象（无序列化），渲染由 uni-ai-md ops 驱动
+	private publishUniAiMdState(phase: string, errCode: string = '', errMsg: string = ''): void {
+		this.snapshotVersion += 1
+		// #ifdef APP-HARMONY
+		const state = new AiWorkerState()
+		state.requestVersion = this.requestVersion
+		state.snapshotVersion = this.snapshotVersion
+		state.phase = phase
+		state.msgBody = this.content
+		state.thinkContent = this.reasoningContent.trim()
+		state.eventCount = this.eventCount
+		state.networkChunkCount = this.networkChunkCount
+		state.receivedBytes = this.receivedBytes
+		state.elapsed = Date.now() - this.startedAt
+		state.errCode = errCode
+		state.errMsg = errMsg
+		this.postMessage(state, { harmonySendable: true } as WorkerPostMessageOptions)
+		// #endif
+		// #ifdef APP-ANDROID
+		this.postMessage({
+			tag: 'ai-worker-state',
+			requestVersion: this.requestVersion,
+			snapshotVersion: this.snapshotVersion,
+			phase: phase,
+			msgBody: this.content,
+			thinkContent: this.reasoningContent.trim(),
+			eventCount: this.eventCount,
+			networkChunkCount: this.networkChunkCount,
+			receivedBytes: this.receivedBytes,
+			elapsed: Date.now() - this.startedAt,
+			errCode: errCode,
+			errMsg: errMsg
+		} as UTSJSONObject)
+		// #endif
+	}
+	// #endif
+
+	private publishSnapshot(isDone: boolean) {
+		// 纯深度思考阶段（正文为空但 reasoning 有增量）也需要发布快照，否则思考内容无法流式渲染
+		if (this.content.length == 0 && this.reasoningContent.length == 0 && !isDone) return
+		// #ifdef APP-HARMONY || APP-ANDROID
+		this.publishUniAiMdState(isDone ? 'complete' : 'snapshot')
+		return
+		// #endif
+		const processedMarkdownValue = this.preprocessor.process(this.content, isDone)
+		if (processedMarkdownValue == null) return
+		const processedMarkdown = processedMarkdownValue!
+		// #ifdef APP-IOS || WEB || MP-WEIXIN
+		if (isMd2htmlAvailable() == false) {
+			this.fail('markdown_html_unavailable', 'cmark-gfm Markdown HTML 转换器不可用')
+			return
+		}
+		let html = ''
+		try {
+			const rawHtmlValue = md2html(processedMarkdown) as string | null
+			const rawHtml = rawHtmlValue ?? ''
+			if (processedMarkdown.length > 0 && rawHtml.length == 0) {
+				this.fail('markdown_html_failed', 'cmark-gfm Markdown HTML 转换失败')
+				return
+			}
+			const preparedHtml = prepareMarkdownHtml(rawHtml, isDone) as string | null
+			html = preparedHtml ?? ''
+			if (processedMarkdown.length > 0 && html.length == 0) {
+				this.fail('markdown_html_failed', 'Markdown HTML 后处理失败')
+				return
+			}
+		} catch (error) {
+			this.fail('markdown_html_failed',
+				error instanceof Error ? error.message : 'Markdown HTML 转换失败')
+			return
+		}
+		this.snapshotVersion += 1
+		const snapshot = {
+			requestVersion: this.requestVersion,
+			snapshotVersion: this.snapshotVersion,
+			phase: isDone ? 'complete' : 'snapshot',
+			msgBody: this.content,
+			thinkContent: this.reasoningContent.trim(),
+			renderMode: 'html',
+			html: html,
+			htmlLength: html.length,
+			blocks: JSON.stringify(buildMarkdownHtmlBlocks(html, isDone)) ?? '[]',
+			isDone: isDone,
+			eventCount: this.eventCount,
+			networkChunkCount: this.networkChunkCount,
+			receivedBytes: this.receivedBytes,
+			terminalSource: this.terminalSource,
+			elapsed: Date.now() - this.startedAt,
+			errCode: '',
+			errMsg: ''
+		} as UTSJSONObject
+		this.postMessage({
+			phase: 'snapshot',
+			snapshotJson: JSON.stringify(snapshot) ?? ''
+		} as UTSJSONObject)
+		return
+		// #endif
+		// #ifndef APP-ANDROID
+		// #ifndef WEB
+		// #ifndef MP-WEIXIN
+		// #ifndef APP-HARMONY
+		// #ifndef APP-IOS
+		this.fail('unsupported_platform', '当前平台暂未启用 AI Worker Markdown HTML 转换')
+		// #endif
+		// #endif
+		// #endif
+		// #endif
+		// #endif
+	}
+
+	private fail(code: string, message: string) {
+		if (this.finished && code != 'markdown_html_unavailable' && code != 'markdown_html_failed') return
+		this.finished = true
+		if (this.renderTimer != 0) clearTimeout(this.renderTimer)
+		this.renderTimer = 0
+		// #ifdef APP-HARMONY || APP-ANDROID
+		this.destroyUniAiMdSession()
+		this.resetUniAiMdProtocol()
+		// #endif
+		// #ifdef APP-ANDROID || APP-HARMONY
+		this.streamRequest?.abort()
+		this.streamRequest = null
+		// #endif
+		this.publishErrorSnapshot(code, message)
+	}
+
+	private publishErrorSnapshot(code: string, message: string) {
+		// #ifdef APP-HARMONY || APP-ANDROID
+		this.publishUniAiMdState('error', code, message)
+		return
+		// #endif
+		this.snapshotVersion += 1
+		const snapshot = {
+			requestVersion: this.requestVersion,
+			snapshotVersion: this.snapshotVersion,
+			phase: 'error',
+			msgBody: this.content,
+			thinkContent: this.reasoningContent.trim(),
+			renderMode: '',
+			html: '',
+			htmlLength: 0,
+			ast: '',
+			astLength: 0,
+			isDone: false,
+			eventCount: this.eventCount,
+			networkChunkCount: this.networkChunkCount,
+			receivedBytes: this.receivedBytes,
+			terminalSource: this.terminalSource,
+			elapsed: Date.now() - this.startedAt,
+			errCode: code,
+			errMsg: message
+		} as UTSJSONObject
+		this.postMessage({
+			phase: 'snapshot',
+			snapshotJson: JSON.stringify(snapshot) ?? ''
+		} as UTSJSONObject)
+	}
+
+	private cancelCurrent() {
+		if (this.renderTimer != 0) clearTimeout(this.renderTimer)
+		this.renderTimer = 0
+		this.finished = true
+		// #ifdef APP-HARMONY || APP-ANDROID
+		this.destroyUniAiMdSession()
+		this.resetUniAiMdProtocol()
+		// #endif
+		// #ifdef APP-ANDROID || APP-HARMONY
+		this.streamRequest?.abort()
+		this.streamRequest = null
+		// #endif
+	}
+}

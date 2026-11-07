@@ -1266,6 +1266,10 @@
                 "task_elapsed":  "Χρόνος εργασίας",
                     "turn_input":  "Είσοδος γύρου",
                     "turn_output":  "Έξοδος γύρου",
+                    "batch_done_count":  "{count} κλήσεις εργαλείων",
+                    "action_bash_done":  "Εκτελέστηκε εντολή τερματικού",
+                    "action_thinking_done":  "Σκέφτηκε",
+                    "batch_thinking_count":  "Σκέψη {count} φορές",
                     "messages":  "Μηνύματα"
                 },
     "filer":  {

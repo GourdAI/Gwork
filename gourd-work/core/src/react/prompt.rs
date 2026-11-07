@@ -6,6 +6,68 @@
 use std::path::Path;
 
 use crate::config::{PermissionSettings, Settings};
+use crate::llm::ToolDefinition;
+
+/// Hard ceiling for the system-prompt tool-name roster. The wire `tools` field
+/// already carries every name + description + full JSON Schema (~10K tokens);
+/// duplicating any of that here would double the per-turn fixed cost. The roster
+/// is only a *visibility* safety net, so it lists bare names with a 2 KB cap.
+const TOOL_ROSTER_MAX_CHARS: usize = 2048;
+
+/// Compact, token-cheap projection of the SAME `ToolDefinition` list that is
+/// sent on the wire (ZCode's "single source of truth" idea, minus the schema).
+///
+/// Why this exists: every competitor keeps tool visibility in more than one
+/// channel — Java writes the tool list into the system prompt, Qoder injects a
+/// `[Tool Protocol]` / `## Available Tools` block, ZCode derives both views from
+/// one `ModelToolContract`. This kernel used to rely on the wire `tools` field
+/// ALONE. When a permission/settings drift made `definitions_async()` return an
+/// empty list, `dialect.rs` omitted the `tools` key entirely (`if
+/// !req.tools.is_empty()`) and the model could not see a single callable tool —
+/// including `skillread`, which the skills summary tells it to use. It then
+/// replied with a one-line intent declaration and the loop ended the run.
+///
+/// Returned text is appended to the system message by the ReAct loop. Names are
+/// deduplicated (MCP tools may collide with built-ins) and truncated at
+/// [`TOOL_ROSTER_MAX_CHARS`]; the full definitions still go out on the wire.
+/// Returns an empty string for `None` (no tools configured at all), letting the
+/// caller append [`NO_TOOLS_NOTICE`] instead.
+pub fn tool_roster_prompt(tools: Option<&[ToolDefinition]>) -> String {
+    let Some(tools) = tools else { return String::new() };
+    if tools.is_empty() {
+        return String::new();
+    }
+    let mut names: Vec<&str> = Vec::with_capacity(tools.len());
+    for t in tools {
+        let n = t.function.name.as_str();
+        if !n.is_empty() && !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    if names.is_empty() {
+        return String::new();
+    }
+    // Budget on the joined name list only; the surrounding prose is constant.
+    let mut joined = String::new();
+    for n in names {
+        if !joined.is_empty() {
+            joined.push_str(", ");
+        }
+        if joined.len() + n.len() + 2 > TOOL_ROSTER_MAX_CHARS {
+            break;
+        }
+        joined.push_str(n);
+    }
+    format!(
+        "\n## Available tools (call directly; full parameter schemas are provided in the request)\n\n{}\n",
+        joined
+    )
+}
+
+/// Mirror of Java `ReActSystemPromptCn:135-136`: when no tool can be offered,
+/// say so instead of leaving the model to hallucinate a tool call it cannot
+/// make ("I'll call todoread first…" → pure text → premature END).
+pub const NO_TOOLS_NOTICE: &str = "\n> 注意：当前环境无可用工具，请根据已有信息直接回复，不要声称将要调用工具。\n";
 
 /// Build the system prompt for a ReAct session.
 pub fn build_system_prompt(settings: &Settings, workspace: &str) -> String {
@@ -238,6 +300,46 @@ mod tests {
         let out = build_system_prompt(&s, "/ws");
         assert!(!out.contains("<available_agents>"), "{}", out);
         assert!(out.contains("GWork"));
+    }
+
+    fn td(name: &str) -> ToolDefinition {
+        ToolDefinition::new(name, "description that must NOT be duplicated", serde_json::json!({
+            "type": "object",
+            "properties": { "x": { "type": "string", "description": "a very long schema" } }
+        }))
+    }
+
+    /// The roster must be a token-cheap NAME-ONLY projection of the same list
+    /// sent on the wire: no descriptions, no JSON Schema, bounded size.
+    #[test]
+    fn tool_roster_is_names_only_and_budgeted() {
+        let defs = vec![td("read"), td("write"), td("skillread"), td("skillsearch")];
+        let out = tool_roster_prompt(Some(&defs));
+        assert!(out.contains("Available tools"));
+        for n in ["read", "write", "skillread", "skillsearch"] {
+            assert!(out.contains(n), "missing {n}: {out}");
+        }
+        assert!(!out.contains("description that must NOT"), "description leaked into prompt");
+        assert!(!out.contains("very long schema"), "JSON Schema leaked into prompt");
+        assert!(out.len() < TOOL_ROSTER_MAX_CHARS + 200, "roster too large: {}", out.len());
+
+        // Duplicate (e.g. an MCP tool colliding with a built-in) is listed once.
+        let dup = vec![td("read"), td("read")];
+        assert_eq!(tool_roster_prompt(Some(&dup)).matches("read").count(), 1);
+
+        // Even a pathological tool list stays under the hard ceiling.
+        let huge: Vec<_> = (0..2000).map(|i| td(&format!("tool_with_a_long_name_{i}"))).collect();
+        assert!(tool_roster_prompt(Some(&huge)).len() <= TOOL_ROSTER_MAX_CHARS + 200);
+    }
+
+    /// No tools at all → empty roster, so the caller appends NO_TOOLS_NOTICE
+    /// instead of leaving the model to hallucinate a call it cannot make.
+    #[test]
+    fn tool_roster_empty_states_are_distinct() {
+        assert_eq!(tool_roster_prompt(None), "");
+        assert_eq!(tool_roster_prompt(Some(&[])), "");
+        assert!(NO_TOOLS_NOTICE.contains("无可用工具"));
+        assert!(NO_TOOLS_NOTICE.contains("不要声称将要调用工具"));
     }
 
     /// Locale routing must not drop the roster — it is appended by the caller in

@@ -463,6 +463,10 @@ pub async fn forward_subagent_frames(
                 | "retry"
                 | "trace"
                 | "context_size"
+                // A sub-agent's live speed window must not overwrite the
+                // parent's context meter (same reason as `context_size`), and
+                // its seq starts at 0 which could rewind the parent's cursor.
+                | "tps_progress"
                 | "reason_start"
                 | "hitl"
                 | "hitl_released"
@@ -770,6 +774,7 @@ mod tests {
                 Frame::done("sub-x"),
                 Frame::error("sub-x", "boom"),
                 Frame::context_size("sub-x", &crate::protocol::ContextSizePayload::default()),
+                Frame::tps_progress("sub-x", 500, 40, Some(860)),
                 Frame::retry("sub-x", 1, 3, "slow"),
                 Frame::reason_start("sub-x", 0),
                 Frame::text_delta("sub-x", "kept"),

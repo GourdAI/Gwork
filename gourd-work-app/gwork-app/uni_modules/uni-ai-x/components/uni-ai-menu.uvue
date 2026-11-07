@@ -1,0 +1,224 @@
+<template>
+	<view class="menu-box uni-theme-root">
+		<text class="menu-box-title">UNI-AI 助手</text>
+		<addChatBtn @click="closeMenu()" />
+		<text class="menu-box-nav">历史对话</text>
+		<list-view direction="vertical" class="menu-box-chat-list" :lower-threshold="120" @scrolltolower="loadMoreChats">
+			<list-item v-for="chat in visibleChatDatas" :key="chat.id" @click="setActiveChat(chat)" class="menu-box-chat-item" :class="chat.id == activeChatId ? 'menu-box-chat-item-active' : ''"
+				@longpress="longpress(chat)"
+			>
+				<text class="menu-box-chat-item-title" :max-lines="1" :class="chat.id == activeChatId ? 'menu-box-chat-item-title-active' : ''">{{chat.title}}</text>
+				<view class="menu-box-more-box" @click.stop="longpress(chat)">
+					<uni-icons type="more-filled" size="14" :color="uiTheme == 'light' ? '#999' : '#ccc'"></uni-icons>
+				</view>
+			</list-item>
+		</list-view>
+		<view class="menu-box-bottom">
+			<view class="menu-box-user-info" @click="toUCenter">
+				<image class="menu-box-avatar" :src="currentUser.avatar_file?.url ?? '/uni_modules/uni-ai-x/static/default-avatar.png'"/>
+				<text v-if="currentUser._id != null" class="menu-box-name">{{currentUser.nickname ?? '未设置'}}</text>
+				<text v-else class="menu-box-to-login">未登录</text>
+			</view>
+			<view class="menu-box-btn-group" @click="toSetting">
+				<uni-icons class="menu-box-setting-icon" type="gear-filled" size="20" :color="uiTheme == 'light' ? '#666' : '#FFF'"></uni-icons>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import {uniAi, ChatItem, Userinfo, uiTheme} from '@/uni_modules/uni-ai-x/sdk/'
+	import addChatBtn from '@/uni_modules/uni-ai-x/components/add-chat-btn.uvue'
+	import {userCenterPage} from '@/uni_modules/uni-ai-x/config.uts'
+	
+	const emit = defineEmits<{
+		'close-menu': []
+		'open-setting': []
+	}>()
+	
+	const currentUser = computed<Userinfo>(() => {
+		return uniAi.currentUser
+	})
+	
+	const activeChatId = computed<string>(() => {
+		return uniAi.chat.activeId
+	})
+	const CHAT_PAGE_SIZE = 50
+	const visibleChatCount = ref<number>(CHAT_PAGE_SIZE)
+	
+	const chatDatas = computed<ChatItem[]>(() => {
+		// 按更新时间排序
+		return uniAi.chat.datas.slice(0).sort((a, b) => b.update_time - a.update_time)
+	})
+
+	const visibleChatDatas = computed<ChatItem[]>(() => {
+		return chatDatas.value.slice(0, visibleChatCount.value)
+	})
+	
+	const toUCenter = () => {
+		uni.navigateTo({
+			url: userCenterPage,
+			fail: (err) => {
+				console.error('navigateTo', err, '跳转失败：1. 检查在uni_modules/uni-ai-x/config.uts中配置的用户中心路径 2. 此页面是否已在pages.json中注册')
+				uni.showModal({
+					title: '跳转失败',
+					content: '请检查在 uni_modules/uni-ai-x/config.uts 中配置的用户中心路径是否正确，并确认此页面是否已在pages.json中注册',
+					showCancel: false
+				})
+			}
+		})
+	}
+	
+	const closeMenu = () => {
+		emit('close-menu')
+	}
+	
+	const setActiveChat = (chat: ChatItem) => {
+		uniAi.selectChat(chat.id)
+		closeMenu()
+	}
+
+	function loadMoreChats() {
+		if (visibleChatCount.value >= chatDatas.value.length) return
+		visibleChatCount.value = Math.min(visibleChatCount.value + CHAT_PAGE_SIZE, chatDatas.value.length)
+	}
+	
+	const longpress = (chat: ChatItem) => {
+		uni.showModal({
+			title: '删除对话',
+			content: '是否删除该对话？',
+			success: (res) => {
+				if (res.confirm) {
+					uniAi.deleteChat(chat.id)
+				}
+			}
+		})
+	}
+	
+	const toSetting = () => {
+		emit('open-setting')
+	}
+</script>
+
+<style lang="scss">
+@import '@/uni_modules/uni-ai-x/static/css/variables.scss';
+
+.menu-box {
+	width: calc(50% - 44px);
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+	background-color: var(--menu-bg);
+	border-right: 1px solid var(--menu-border);
+	padding-top: env(safe-area-inset-top);
+	padding-bottom: env(safe-area-inset-bottom);
+	/* #ifdef MP-WEIXIN */
+	padding-top: var(--status-bar-height);
+	/* #endif */
+}
+
+.menu-box-title {
+	padding: 10px;
+	font-size: 18px;
+	font-weight: 700;
+	color: var(--text-primary);
+}
+
+.menu-box-nav {
+	padding: 10px;
+	margin-top: 10px;
+	font-size: 16px;
+	color: var(--text-tertiary);
+}
+
+.menu-box-chat-list {
+	flex: 1;
+	min-height: 0;
+}
+
+.menu-box-chat-item {
+	margin: 1px 5px;
+	padding-left: 10px;
+	padding-right: 10px;
+	height: 40px;
+	border-radius: 10px;
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: center;
+}
+
+.menu-box-chat-item-title {
+	color: var(--text-secondary);
+	white-space: nowrap;
+	font-size: 14px;
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.menu-box-more-box {
+	display: none;
+}
+
+.menu-box-chat-item-active {
+	background-color: var(--menu-active-bg);
+}
+
+.menu-box-chat-item-title-active {
+	color: var(--accent-primary);
+}
+
+.menu-box-bottom {
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: center;
+	padding: 10px;
+}
+
+.menu-box-user-info {
+	flex-direction: row;
+	align-items: center;
+	margin: 10px;
+}
+
+.menu-box-avatar {
+	margin-right: 10px;
+	width: 25px;
+	height: 25px;
+}
+
+.menu-box-name {
+	font-size: 14px;
+	color: var(--text-primary);
+}
+
+.menu-box-to-login {
+	font-size: 14px;
+	color: var(--accent-primary);
+}
+
+.menu-box-setting-icon {
+	margin: 10px;
+}
+
+/* #ifdef H5 */
+@media screen and (min-device-width:960px){
+	.menu-box {
+		width: 260px;
+	}
+	.menu-box-chat-item {
+		cursor: pointer;
+		margin: 2px 10px;
+		border-radius: 10px;
+	}
+
+	.menu-box-more-box {
+		display: flex !important;
+		flex-shrink: 0;
+		margin: 0 6px;
+	}
+}
+/* #endif */
+
+
+</style>

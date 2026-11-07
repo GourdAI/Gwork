@@ -118,8 +118,7 @@
     var APP_SCRIPTS = [
         '/js/app-base.js',
         '/js/app-tool-presentation.js',
-        '/js/app-turn-compact.js',      // P2-6 按轮 Compact 折叠（纯展示后处理，UMD 可测）
-        '/js/app-turn-batch.js',         // 运行态批次折叠（对标 Qoder；须在 app-message/app-streaming 之前）
+        '/js/app-turn-display.js',       // 统一展现折叠（批次折叠 + 整轮 Compact 合一，UMD 可测；须在 app-message/app-streaming 之前）
         '/js/message-queue.js',
         '/js/app-ui.js',
         '/js/model-list-order.js',

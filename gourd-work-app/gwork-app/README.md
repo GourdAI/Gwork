@@ -1,0 +1,143 @@
+# 简介
+
+> uni-ai x v3.0.0 新增于 HBuilderX 5.26
+
+`uni-ai x`，是一个基于uni-app x 蒸汽模式的开源的、全平台的、原生的、云端一体的ai聊天套件。
+
+能够连接ai大模型，真流式接收和输出内容，原生渲染markdown。
+
+## 项目背景：
+市面上开源的AI聊天套件大多以Web端为主，像ChatGPT、DeepSeek等的App端并不开源。  
+而通过Web-view接入AI的体验差强人意，自己开发面临如下核心挑战：  
+- **流式网络请求**：基于POST的SSE技术实现实时数据传输  
+- **Markdown流式解析**：动态解析富文本格式标记  
+- **编程语言代码高亮**：实现语法识别与样式渲染  
+- **Table表格解析渲染**：结构化数据的可视化呈现  
+- **流式排版性能**：确保内容加载不阻塞UI交互操作  
+- **跨平台开发困境**：缺乏成熟跨平台框架，鸿蒙端开发尤为艰难  
+- **极致性能要求**：每个Token需同步完成Markdown解析、代码高亮及排版渲染，运算密集且不能卡顿UI  
+
+**uni-ai x由此应运而生**，专注攻克全平台原生AI聊天场景的技术痛点。
+
+可以满足开发者的如下需求：
+1. 基于`uni-ai x`开发全新的ai应用
+2. 在之前的app中引入`uni-ai x`的sdk，给app补充ai聊天能力
+3. 客户端和服务器均开源，可以自由定制扩展
+
+## 功能和特点
+
+`uni-ai x`功能上参考 deepseek 的客户端设计，并扩展了更多平台。
+
+1. 多端支持与主题适配 
+支持Web/H5、iOS、Android、鸿蒙 App、微信小程序。Web 端采用响应式布局，适配 PC 宽屏和移动设备，并提供浅色和暗黑两种主题模式
+2. 丰富的 AI 服务集成与高级功能 
+集成多家主流 AI 服务商，用户可灵活切换不同 AI 模型，部分模型支持"深度思考"和"联网搜索"等高级能力
+3. 消息与会话管理  
+支持多轮对话和历史会话管理，具备会话切换、删除、自动创建等功能，提供完整的 AI 聊天体验
+4. 高级渲染与输出特性 
+支持 AI 回复内容的流式输出和原生 Markdown 格式渲染，内置高性能解析器，支持代码高亮和复杂文本结构展示
+
+Markdown 展示还支持任务列表、LaTeX 数学公式和 Mermaid 图表；宽表格可横向滚动，Android 端可直接拖选回复文字。
+
+### 与主流 AI 客户端对比
+
+以下横评聚焦 Android 和鸿蒙 App 的 Markdown 展示和流式渲染。
+
+**Android 功能对比**
+
+| 对比项 | uni-ai x | ChatGPT | Gemini | 豆包 | DeepSeek |
+|---|---|---|---|---|---|
+| 多语言代码高亮 | ✅ | ⚠️ | ❌ | ✅ | ✅ |
+| 图表展示 | ✅ | ⚠️ | ❌ | ✅ | ✅ |
+| 任务列表渲染 | ✅ | ❌ | ❌ | ✅ | ✅ |
+| 在回复页直接拖选文字 | ✅ | ✅ | ✅ | ✅ | ❌ |
+
+- ChatGPT 的图表需要手动点击触发。
+- DeepSeek 需要进入单独的选择界面才能选取回复文字。
+- uni-ai x 的代码高亮可扩展 VS Code 支持的编程语言，包括 ets、wxs、ajs、wxml 等。
+
+**鸿蒙功能对比**
+
+本次测试的五款客户端中，只有 uni-ai x 和豆包提供鸿蒙版本。
+
+| 对比项 | uni-ai x | 豆包 |
+|---|---|---|
+| 图表展示 | ✅ | ❌ |
+| 任务列表渲染 | ✅ | ❌ |
+
+**流式渲染性能**
+
+相同 Markdown 回复各测试 5 轮，uni-ai x 在 Android 和鸿蒙端的慢帧次数均最少。Android 端其他客户端的慢帧次数是 uni-ai x 的 8.09～46.61 倍，鸿蒙端豆包是 uni-ai x 的 9.97 倍。
+
+以 16.67ms 为慢帧门槛，表中次数为每轮平均值。两张表的倍数分别以该平台 uni-ai x 的慢帧次数为 1 计算。
+
+Android（小米 11 Pro）：
+
+| 应用 | 慢帧次数 | 慢帧平均耗时 | 慢帧次数倍数 |
+|---|---:|---:|---:|
+| uni-ai x | 15.2 | 28.47ms | 1 倍 |
+| DeepSeek | 123.0 | 34.40ms | 8.09 倍 |
+| Gemini | 282.4 | 51.04ms | 18.58 倍 |
+| ChatGPT | 368.4 | 34.47ms | 24.24 倍 |
+| 豆包 | 708.4 | 60.00ms | 46.61 倍 |
+
+鸿蒙（华为 nova 12）：
+
+| 应用 | 慢帧次数 | 慢帧平均耗时 | 慢帧次数倍数 |
+|---|---:|---:|---:|
+| uni-ai x | 73.4 | 51.60ms | 1 倍 |
+| 豆包 | 732.0 | 43.62ms | 9.97 倍 |
+
+测试版本、采集方法及逐轮数据详见：[uni-ai x 和ChatGPT、Gemini、豆包、DeepSeek的横评测试报告](https://mp.weixin.qq.com/s?__biz=MjM5NjExMjc4NA==&mid=2649706006&idx=1&sn=2f71ed851a04c9470de53871a4108165&chksm=bef5dee9898257ff0860c583fcfab18cb9e063b9f443380957f8a5161f730f1d64f6d45a7f3d)。
+
+**流式回复对比视频**
+
+从左至右：uni-ai x、Gemini、ChatGPT。
+
+<video src="https://web-ext-storage.dcloud.net.cn/video/uni-ai-x/uni-ai-x-pk-out.mp4" poster="https://web-ext-storage.dcloud.net.cn/video/uni-ai-x/uni-ai-x-pk-out.mp4?vframe/jpg/offset/3/w/640" style="width: 100%; max-width: 800px;" preload="none" controls></video>
+
+从左至右：uni-ai x、豆包、DeepSeek。
+
+<video src="https://web-ext-storage.dcloud.net.cn/video/uni-ai-x/uni-ai-x-pk-in.mp4" poster="https://web-ext-storage.dcloud.net.cn/video/uni-ai-x/uni-ai-x-pk-in.mp4?vframe/jpg/offset/3/w/640" style="width: 100%; max-width: 800px;" preload="none" controls></video>
+
+**长会话滚动与启动视频**
+
+长会话滚动：
+
+<video src="https://web-ext-storage.dcloud.net.cn/video/uni-ai-x/scroll.mp4" poster="https://web-ext-storage.dcloud.net.cn/video/uni-ai-x/scroll.mp4?vframe/jpg/offset/1/w/640" style="width: 100%; max-width: 400px;" preload="none" controls></video>
+
+App 启动：
+
+<video src="https://web-ext-storage.dcloud.net.cn/video/uni-ai-x/startup.mp4" poster="https://web-ext-storage.dcloud.net.cn/video/uni-ai-x/startup.mp4?vframe/jpg/offset/3/w/640" style="width: 100%; max-width: 400px;" preload="none" controls></video>
+
+各端效果如下截图，依次平台为：iOS、Android、鸿蒙<br/>
+<img width="200px" src="https://img-cdn-tx.dcloud.net.cn/stream/plugin_screens/69cf7a60-4b4d-11f0-acb4-1f9e73bd04f1_3.jpg/webp?&v=1752044804"/>
+<img width="260px" src="https://img-cdn-tx.dcloud.net.cn/stream/plugin_screens/69cf7a60-4b4d-11f0-acb4-1f9e73bd04f1_1.png/webp?&v=1752044564"/>
+<img width="200px" src="https://img-cdn-tx.dcloud.net.cn/stream/plugin_screens/69cf7a60-4b4d-11f0-acb4-1f9e73bd04f1_2.png/webp?&v=1752044569"/>
+<br/>
+web pc端：
+<br/>
+<img width="630px" src="https://img-cdn-tx.dcloud.net.cn/stream/plugin_screens/69cf7a60-4b4d-11f0-acb4-1f9e73bd04f1_0.png/webp?&v=1752044560"/>
+
+### Android端demo：
+
+<img width="200px" src="https://web-ext-storage.dcloud.net.cn/uni-app-x/uni-ai-x/uni-ai-x-portal-qrcode.png"/>
+
+扫码或[点此下载](https://web-ext-storage.dcloud.net.cn/uni-app-x/uni-ai-x/uni-ai-x-portal.html)
+
+## 交流群  
+更多问题欢迎[点此](https://im.dcloud.net.cn/#/?joinGroup=68511b0b7ae60eb5c891cfbc)加入uni-ai官方交流群
+
+当前项目正在快速迭代UI体验，请关注本项目，订阅更新通知。
+
+## 开发文档[详情查看](https://doc.dcloud.net.cn/uniCloud/uni-ai-x.html#install)
+
+## App升级中心
+
+项目已集成 `uni-upgrade-center-app`，App 启动后会自动检查更新。使用前请将本项目和 `uni-admin` 关联到同一个 uniCloud 服务空间，并在 `uni-admin` 中部署 `uni-upgrade-center` 云函数、添加当前 `appid`，再发布线上版本。发布新安装包时请同步递增 `manifest.json` 的 `versionName` 和 `versionCode`。
+
+uni-app x 的 App-Android 为整包更新，不支持 wgt 热更新；iOS 更新使用 App Store 链接。
+
+## 声明
+本项目依赖以下作品
+1. 代码块的字体为 [FiraCode-Regular](https://github.com/tonsky/FiraCode)

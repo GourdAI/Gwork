@@ -1,0 +1,247 @@
+<template>
+	<view class="msg-segment uni-theme-root" :class="isFirst ? 'msg-segment-first' : ''" :style="msgSegmentStyle">
+		<image v-if="isFirst" class="msg-segment-avatar" src="@/uni_modules/uni-ai-x/static/uni-chat-logo.png" flatten/>
+		<template v-for="(part, partIndex) in parts" :key="partRenderKey(part, partIndex)">
+		<uni-ai-search-status v-if="part.kind == 'search'" :msg="msg" @open="openSource" />
+		<uni-ai-search-sources v-else-if="part.kind == 'sources'" :msg="msg" @open="openSource" />
+		<image v-else-if="part.kind == 'stress-svg'" class="msg-stress-svg" :src="msg.stressSvgSource!" mode="aspectFit" flatten />
+		<template v-else-if="part.kind == 'think'">
+			<view class="msg-segment-think-content">
+				<view class="msg-root-think-content-header" @click.stop="changeThinkContent">
+					<text class="msg-root-think-content-title" flatten>深度思考</text>
+					<uni-icons :type="hideThinkContent ? 'down' : 'up'" size="14" color="#888"></uni-icons>
+				</view>
+				<view class="msg-root-think-content-text-box" :class="hideThinkContent ? 'msg-root-think-content-text-box-hide' : ''">
+					<text class="msg-root-think-content-text" flatten>{{msg.thinkContent}}</text>
+				</view>
+			</view>
+		</template>
+		<text v-else-if="part.kind == 'error'" class="msg-root-error-msg" flatten>{{msg.error_msg}}</text>
+		<uni-ai-msg-html-table v-else-if="part.block != null && part.block.kind == 'table'"
+			:presentation="part.block.table ?? emptyTablePresentation" @citation="openSource" @footnote="openFootnote" />
+		<uni-ai-msg-code v-else-if="part.block != null && part.block.kind == 'code'"
+			:code-text="part.block.text" :prepared-html="part.block.codeHtml ?? ''" :prepared-content-height="part.block.codeContentHeight ?? '22px'" :prepared-height="part.block.codeHeight ?? '38px'" :language="part.block.language" />
+		<uni-ai-msg-mermaid v-else-if="part.block != null && part.block.kind == 'mermaid'"
+			:src="part.block.mermaidImageSource" :identity="msg._id + ':' + part.key" :code-text="part.block.text" :image-width="part.block.svgWidth" :image-height="part.block.svgHeight" :render-failed="part.block.mermaidRenderFailed" />
+		<uni-ai-msg-math v-else-if="part.block != null && part.block.kind == 'math'"
+			:text="part.block.text" :is-close="part.block.isComplete ? 1 : 0"
+			:source-width="part.block.math?.sourceWidth ?? '160px'" :source-height="part.block.math?.sourceHeight ?? '44px'"
+			:source-identity="part.block.math?.sourceIdentity" :source-text="part.block.math?.sourceText"
+			:href="part.block.math?.src ?? ''" :width="part.block.math?.width ?? 0" :height="part.block.math?.height ?? 0" :render-theme="uiTheme"
+			:svg-source="part.block.svgSource" :svg-width="part.block.svgWidth" :svg-height="part.block.svgHeight" />
+		<image v-else-if="part.block != null && part.block.kind == 'image'" :src="part.block.svgSource" mode="aspectFit" :style="blockImageStyle(part.block)" />
+		<text v-else-if="part.block != null && part.block.kind == 'data-text'" class="msg-root-plain-text">{{part.block.text}}</text>
+		<uni-ai-md-html v-else-if="part.block != null && part.block.kind == 'html'"
+			:html="part.block.html" :is-complete="part.block.isComplete" @citation="openSource" @footnote="openFootnote" />
+		<uni-ai-md-text v-else-if="part.block != null" :block="part.block" @citation="openSource" @footnote="openFootnote" />
+		<text v-else-if="part.kind == 'plain'" class="msg-root-plain-text" flatten>{{msg.body}}</text>
+		<view v-else-if="part.kind == 'restoring'" style="height:44px;justify-content:center;"><loading class="msg-root-loging-icon" /></view>
+		<template v-else-if="part.kind == 'empty'">
+			<text v-if="state == 'stop'" class="msg-root-stop-text" flatten>回答被终止</text>
+			<text v-else-if="state == 'none'" class="msg-root-need-try" flatten>错误：未回复</text>
+			<loading v-else-if="state == 'processing' && msg.search?.status != 'searching'" class="msg-root-loging-icon" />
+		</template>
+		<msg-tool-bar v-else-if="part.kind == 'toolbar' && shouldShowToolBar" :msg="msg" />
+		</template>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import {uniAi, MsgItem, messageToolBarVisible, uiTheme} from '@/uni_modules/uni-ai-x/sdk'
+	import { MarkdownTextRenderBlock } from '@/uni_modules/uni-ai-x/sdk/markdown-text.uts'
+	import { messageImageStyle } from '@/uni_modules/uni-ai-x/sdk/image-layout.uts'
+	import { mathWindowWidth, updateMathLayout } from '@/uni_modules/uni-ai-x/sdk/math-presentation.uts'
+	onMounted(() => { updateMathLayout(uni.getWindowInfo().windowWidth) })
+	function blockImageStyle(block: MarkdownTextRenderBlock): string {
+		return messageImageStyle(block.svgWidth, block.svgHeight,
+			mathWindowWidth.value > 0 ? mathWindowWidth.value : uni.getWindowInfo().windowWidth)
+	}
+	import msgToolBar from '@/uni_modules/uni-ai-x/components/msg-tool-bar.uvue'
+	import uniAiMsgHtmlTable from '@/uni_modules/uni-ai-x/components/uni-ai-msg-html-table/uni-ai-msg-html-table.uvue'
+	import { emptyTablePresentation } from '@/uni_modules/uni-ai-x/sdk/table-presentation.uts'
+	import uniAiMsgCode from '@/uni_modules/uni-ai-x/components/uni-ai-msg-code/uni-ai-msg-code.uvue'
+	import uniAiMsgMermaid from '@/uni_modules/uni-ai-x/components/uni-ai-msg-mermaid.uvue'
+	import uniAiMsgMath from '@/uni_modules/uni-ai-x/components/uni-ai-msg-math/uni-ai-msg-math.uvue'
+	import uniAiMdHtml from '@/uni_modules/uni-ai-x/components/uni-ai-md-html/uni-ai-md-html.uvue'
+	import uniAiMdText from '@/uni_modules/uni-ai-x/components/uni-ai-md-text.uvue'
+	import { footnoteLabel, markdownFootnotes } from '@/uni_modules/uni-ai-x/sdk/markdown-footnotes.uts'
+	import uniAiSearchStatus from '@/uni_modules/uni-ai-x/components/uni-ai-search-status.uvue'
+	import uniAiSearchSources from '@/uni_modules/uni-ai-x/components/uni-ai-search-sources.uvue'
+	// #ifdef APP-ANDROID || APP-HARMONY
+	const isUniAiMdPlatform = true
+	// #endif
+	// #ifndef APP-ANDROID || APP-HARMONY
+	const isUniAiMdPlatform = false
+	// #endif
+
+	type UniAiXMsgProps = {
+		msg: MsgItem
+		parts: AiMsgRenderPart[]
+		isFirst?: boolean
+	}
+
+	type AiMsgRenderPart = {
+		key: string
+		kind: string
+		block?: MarkdownTextRenderBlock
+	}
+
+	const props = withDefaults(defineProps<UniAiXMsgProps>(), {
+		isFirst: false
+	})
+	const msg = computed<MsgItem>(() => props.msg)
+	const parts = computed<AiMsgRenderPart[]>(() => props.parts)
+	function partRenderKey(part: AiMsgRenderPart, index: number): string {
+		// Android bytecode keyed replacement can leave recycled message content stale.
+		// Keep the render slot alive; branch selection and child props carry its content.
+		// #ifdef APP-ANDROID
+		return 'slot:' + index.toString()
+		// #endif
+		// #ifndef APP-ANDROID
+		return parts.value.length == 1 && part.block != null && (part.block.kind == 'rich' || part.block.kind == 'html' || (part.block.kind == 'mermaid' && !isUniAiMdPlatform)) ? 'display:' + part.block.kind : part.key
+		// #endif
+	}
+	const isFirst = computed<boolean>(() => props.isFirst)
+	const emit = defineEmits<{
+		'changeThinkContent': [hideThinkContent: boolean]
+		'source': [messageId: string, id: number]
+	}>()
+	const hideThinkContent = ref<boolean>(false)
+	function openSource(id: number) { emit('source', props.msg._id, id) }
+	function openFootnote(href: string) {
+		const label = footnoteLabel(href)
+		const content = markdownFootnotes(props.msg.body).get(label)
+		if (content == null) return
+		uni.showModal({ title: '脚注 [' + label + ']', content: content, showCancel: false })
+	}
+
+	const state = computed<string>(() => {
+		return uniAi.currentChat!.state
+	})
+
+	const isLastAiMsg = computed<boolean>(() => {
+		return uniAi.lastAiMsg?._id == msg.value._id
+	})
+
+	const shouldShowToolBar = computed<boolean>(() => {
+		return messageToolBarVisible.value && (!isLastAiMsg.value || state.value == 'stop' || (state.value != 'processing' && msg.value.rendered))
+	})
+
+	const msgSegmentStyle = computed<string>(() => {
+		const backgroundColor = uiTheme.value == 'dark' ? '#25282c' : '#ffffff'
+		return 'width:100%;min-height:0;box-sizing:border-box;padding-left:45px;padding-right:45px;background-color:' + backgroundColor + ';'
+	})
+
+	const changeThinkContent = () => {
+		hideThinkContent.value = !hideThinkContent.value
+		emit('changeThinkContent', hideThinkContent.value)
+	}
+
+</script>
+
+<style lang="scss">
+@import '@/uni_modules/uni-ai-x/static/css/variables.scss';
+	.msg-segment {
+		width: 100%;
+		min-height: 0;
+		background-color: var(--bg-primary);
+		padding: 0 45px;
+		/* #ifdef WEB */
+		user-select: text;
+		/* #endif */
+	}
+
+.msg-segment-first {
+	min-height: 31px;
+}
+
+.msg-segment-avatar {
+	position: absolute;
+	top: 0;
+	left: 10px;
+	width: 25px;
+	height: 25px;
+	padding: 3px;
+	border-radius: 50px;
+	border: 1px solid var(--border-secondary);
+}
+
+.msg-stress-svg {
+	width: 300px;
+	height: 120px;
+	margin-bottom: 8px;
+}
+
+.msg-segment-think-content {
+	width: 100%;
+	margin: 5px 0;
+}
+
+.msg-root-think-content-header {
+	flex-direction: row;
+}
+
+.msg-root-think-content-title {
+	color: var(--text-tertiary);
+	margin-right: 4px;
+}
+
+.msg-root-think-content-text-box {
+	margin-top: 10px;
+	border-left: 3px solid var(--bg-tertiary);
+	padding-left: 10px;
+	width: 100%;
+	margin: 5px 0;
+}
+
+.msg-root-think-content-text-box-hide {
+	margin-top: 0;
+	height: 0;
+}
+
+.msg-root-think-content-text {
+	text-align: left;
+	color: var(--text-tertiary);
+}
+
+.msg-root-error-msg,
+.msg-root-stop-text,
+.msg-root-need-try,
+.msg-root-plain-text {
+	text-align: left;
+	width: 100%;
+}
+
+.msg-root-plain-text {
+	white-space: pre-wrap;
+	line-height: 24px;
+	color: var(--text-primary);
+	padding: 4px 0;
+}
+
+.msg-root-error-msg {
+	color: var(--error);
+	font-size: 14px;
+	line-height: 26px;
+}
+
+.msg-root-loging-icon {
+	border-color: #aaaaaa;
+	margin-top: 10px;
+	width: 16px;
+	height: 16px;
+}
+
+.msg-root-stop-text {
+	color: var(--text-disabled);
+	font-size: 14px;
+	padding: 10px 0;
+}
+
+.msg-root-need-try {
+	color: var(--error);
+	font-size: 14px;
+	padding: 10px;
+}
+
+</style>

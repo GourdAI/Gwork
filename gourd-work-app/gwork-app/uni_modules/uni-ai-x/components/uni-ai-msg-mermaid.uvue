@@ -1,0 +1,192 @@
+<template>
+	<view class="uni-mermaid-msg-root" :class="uiTheme == 'dark' ? 'uni-theme-dark' : 'uni-theme-light'">
+		<view class="uni-mermaid-msg-code-header">
+			<view class="uni-mermaid-msg-switch" flatten>
+				<text class="uni-mermaid-msg-switch-item" :class="!showSource ? 'uni-mermaid-msg-switch-item-active' : ''" @click.stop="sourceSelection = ''">图表</text>
+				<text class="uni-mermaid-msg-switch-item" :class="showSource ? 'uni-mermaid-msg-switch-item-active' : ''" @click.stop="sourceSelection = props.identity">代码</text>
+			</view>
+			<view v-if="showSource" class="uni-mermaid-msg-copy-btn" @click.stop="copyCode">
+				<uni-ai-icon code="e60c" size="12" :color="uiTheme == 'dark' ? '#f4f4f4' : '#334155'" />
+				<text class="uni-mermaid-msg-copy-text" flatten>复制代码</text>
+			</view>
+		</view>
+		<view class="uni-mermaid-msg-stage">
+			<!-- #ifdef APP-ANDROID -->
+			<view v-if="sourceSelection != props.identity && props.src.length == 0 && !props.renderFailed && !showSource" :style="pendingImageStyle"><loading /></view>
+			<!-- #endif -->
+			<image v-if="sourceSelection != props.identity && props.src.length > 0" class="uni-mermaid-msg-image" :style="imageStyle" :src="props.src" mode="aspectFit" @click.stop="previewMermaidImage" />
+			<view v-else-if="showSource" class="uni-mermaid-msg-code-source">
+				<text class="uni-mermaid-msg-code-text">{{props.codeText}}</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script lang="uts" setup>
+import { uiTheme } from '@/uni_modules/uni-ai-x/sdk'
+import utils from '@/uni_modules/uni-ai-x/sdk/utils.uts'
+import { mathWindowWidth, updateMathLayout } from '@/uni_modules/uni-ai-x/sdk/math-presentation.uts'
+import { messageImageStyle } from '@/uni_modules/uni-ai-x/sdk/image-layout.uts'
+
+const props = withDefaults(defineProps<{
+	codeText?: string
+	identity: string
+	src?: string
+	imageWidth?: number
+	imageHeight?: number
+	renderFailed?: boolean
+}>(), {
+	codeText: '',
+	src: ''
+})
+
+// Only user interaction changes local state; a recycled row cannot inherit another block's tab.
+const sourceSelection = ref<string>('')
+onMounted(() => { updateMathLayout(uni.getWindowInfo().windowWidth) })
+const showSource = computed<boolean>(() => {
+	// #ifdef APP-ANDROID
+	return sourceSelection.value == props.identity || props.src.length == 0
+	// #endif
+	// #ifndef APP-ANDROID
+	return sourceSelection.value == props.identity || props.src.length == 0
+	// #endif
+})
+const imageStyle = computed<string>(() => messageImageStyle(props.imageWidth ?? 0, props.imageHeight ?? 0,
+	mathWindowWidth.value > 0 ? mathWindowWidth.value : uni.getWindowInfo().windowWidth, 2))
+const pendingImageStyle = computed<string>(() => imageStyle.value + 'align-items:center;justify-content:center;')
+
+function previewMermaidImage() {
+	// #ifdef WEB
+	if (window.navigator.userAgent.match(/Android|iPhone|iPad|iPod|Mobile/i) == null) return
+	// #endif
+	if (props.src.length == 0) return
+	uni.previewImage({ urls: [props.src] as string[] })
+}
+
+function copyCode() {
+	uni.setClipboardData({
+		data: props.codeText,
+		showToast: false,
+		success: () => { utils.showCopySuccessToast() },
+		fail: () => { utils.showCopyFailureToast() }
+	})
+}
+
+</script>
+
+<style lang="scss" scoped>
+@import '@/uni_modules/uni-ai-x/static/css/variables.scss';
+
+.uni-mermaid-msg-root {
+	width: 100%;
+	margin: 6px 0;
+	background-color: var(--mermaid-surface);
+	border: 1px solid var(--mermaid-border);
+	overflow: hidden;
+}
+
+.uni-mermaid-msg-root.uni-theme-light {
+	--mermaid-surface: #ffffff;
+	--mermaid-border: #d8dee8;
+	--mermaid-header: #eef2f7;
+	--mermaid-switch: #e2e8f0;
+	--mermaid-switch-text: #64748b;
+	--mermaid-active: #ffffff;
+	--mermaid-active-text: #0f172a;
+	--mermaid-copy: #334155;
+	--mermaid-code-surface: #f8fafc;
+	--mermaid-code-text: #334155;
+}
+
+.uni-mermaid-msg-root.uni-theme-dark {
+	--mermaid-surface: #111827;
+	--mermaid-border: #374151;
+	--mermaid-header: #0d0d0d;
+	--mermaid-switch: #262626;
+	--mermaid-switch-text: #a3a3a3;
+	--mermaid-active: #f5f5f5;
+	--mermaid-active-text: #171717;
+	--mermaid-copy: #f4f4f4;
+	--mermaid-code-surface: #111827;
+	--mermaid-code-text: #d1fae5;
+}
+
+.uni-mermaid-msg-code-header {
+	position: relative;
+	z-index: 2;
+	width: 100%;
+	height: 38px;
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: center;
+	padding: 4px 10px;
+	background-color: var(--mermaid-header);
+}
+
+.uni-mermaid-msg-switch {
+	height: 30px;
+	flex-direction: row;
+	padding: 2px;
+	border-radius: 5px;
+	background-color: var(--mermaid-switch);
+}
+
+.uni-mermaid-msg-switch-item {
+	height: 26px;
+	line-height: 26px;
+	padding: 0 10px;
+	border-radius: 4px;
+	font-size: 12px;
+	color: var(--mermaid-switch-text);
+}
+
+.uni-mermaid-msg-switch-item-active {
+	background-color: var(--mermaid-active);
+	color: var(--mermaid-active-text);
+}
+
+.uni-mermaid-msg-copy-btn {
+	height: 30px;
+	flex-direction: row;
+	align-items: center;
+	padding: 0 5px;
+	border-radius: 4px;
+}
+
+.uni-mermaid-msg-copy-text {
+	font-size: 11px;
+	color: var(--mermaid-copy);
+	margin-left: 3px;
+}
+
+.uni-mermaid-msg-image {
+	width: 100%;
+	background-color: var(--bg-primary);
+}
+
+.uni-mermaid-msg-stage {
+	position: relative;
+	width: 100%;
+	overflow: hidden;
+	background-color: var(--bg-primary);
+}
+
+
+
+.uni-mermaid-msg-code-source {
+	width: 100%;
+	background-color: var(--mermaid-code-surface);
+}
+
+.uni-mermaid-msg-code-text {
+	font-size: 14px;
+	line-height: 22px;
+	font-family: monospace;
+	margin-left: 15px;
+	color: var(--mermaid-code-text);
+	white-space: pre-wrap;
+	word-break: break-all;
+	align-self: flex-start;
+}
+
+</style>

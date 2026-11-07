@@ -1,4 +1,4 @@
-/* ===== app-bootstrap.js =====
+﻿/* ===== app-bootstrap.js =====
    页面装配器：把 chat.html / code.html / settings.html 三个界面片段注入共享外壳（index.html），
    再按固定顺序动态加载全部 app-*.js。取代原 web.html 底部的内联初始化脚本。
 
@@ -118,6 +118,7 @@
     var APP_SCRIPTS = [
         '/js/app-base.js',
         '/js/app-tool-presentation.js',
+        '/js/app-turn-display.js',       // 统一展现折叠（批次折叠 + 整轮 Compact 合一，UMD 可测；须在 app-message/app-streaming 之前）
         '/js/message-queue.js',
         '/js/app-ui.js',
         '/js/model-list-order.js',

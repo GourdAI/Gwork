@@ -1817,7 +1817,23 @@ function showHistoryLoading(sess) {
            「容器已有内容 ⇒ 只撤骨架、绝不叠失败卡」这条守卫，把成功的加载误报成
            失败卡，而且失败卡是 absolute inset:0，会把刚到的正文整块盖住（已实测复现）。
            统一交给 hideHistoryLoading 判定 —— 它是这条守卫的唯一定义处。 */
+        /* 【2026-11 白屏止血】请求早已成功、正在分片回放（_replaying）时，加载态的
+            收尾由 replayDone / finishReplayFallback 负责：内容此刻建在游离 tempDiv，
+            真实容器仍空，旧逻辑会在 12s 误判「请求悬挂」盖上不透明失败卡闪一下
+            （用户报的「加载失败/白屏」观感）。定时器此时直接放手，绝不越权。 */
+        if (sess._replaying) return;
         try { drainGateBuffer(sess); } catch (e) {}
+        /* 【超时即断流 2026-11】12s 已降级成失败+重试卡，必须同时 abort 在途 replay。
+            旧实现只换 UI 态、不作废回调：请求几十秒后带着 8 万帧回来仍会进 done
+            重建整页，形成「失败卡 → 迟到内容 → 二次骨架」交错。
+            abort 触发的 .fail('abort') 由 loadMessages 显式忽略，不再叠加二次请求。
+            sess 上没有句柄时（契约沙箱 / 纯展示调用）整段短路，行为与改前一致。 */
+        try {
+            var pendingXhr = sess._historyLoadXhr;
+            if (pendingXhr && typeof pendingXhr.abort === 'function' && pendingXhr.readyState !== 4) {
+                pendingXhr.abort();
+            }
+        } catch (abortErr) { /* abort 失败不阻断降级卡 */ }
         hideHistoryLoading(sess, { failed: true });
     }, HISTORY_LOAD_TIMEOUT_MS);
 }
@@ -1885,7 +1901,18 @@ $(document).on('click', '.chl-retry-btn', function () {
 });
 
 function loadMessages(sess) {
+    if (!sess || !sess.container) return;
     var rootQ = sessionRootQ(sess);
+    /* 【2026-11 白屏止血 · 请求世代号】旧实现是裸 $.get：切会话/点重试后旧请求
+        的 done 仍会改游标并起一次 replaySession，两个回放共用 renderTarget 与
+        _replayRafId。每次加载自增代号，done/fail 只在自己仍是当前代时生效。 */
+    var gen = (sess._historyLoadGeneration || 0) + 1;
+    sess._historyLoadGeneration = gen;
+    /* 重试前先作废并断开上一次请求（失败卡重试点得快时尤其关键）。 */
+    try {
+        var prevXhr = sess._historyLoadXhr;
+        if (prevXhr && prevXhr.readyState !== 4 && typeof prevXhr.abort === 'function') prevXhr.abort();
+    } catch (e0) { /* 断开失败不阻断重新加载 */ }
     // 发请求前即开启回放/实时互斥门禁：期间到达的同会话实时帧先入缓冲，
     // 回放完成后由 drainGateBuffer 统一去重喂入，避免「后端任务未结束 + UI 发起回放」
     // 竞态窗口内同一事件被两条管线各渲染一次。
@@ -1894,37 +1921,65 @@ function loadMessages(sess) {
     // 原样重建，历史里也能看到「做了哪些操作」。无回放数据时回退到旧的纯文本加载。
     // 初始只加载最后 REPLAY_PAGE_ROUNDS 轮对话。
     showHistoryLoading(sess);
-    $.get('/web/chat/replay?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ + '&rounds=' + REPLAY_PAGE_ROUNDS, function(rp) {
-        var rpData = rp && rp.data;
-        if (rpData && rpData.events && rpData.events.length > 0) {
-            try {
-                sess._replayHasMore = !!rpData.hasMore;
-                sess._replayRemainingRounds = rpData.remainingRounds || 0;
-                // 向上翻页游标：本页最早事件的 seq，下次只取比它更早的，不再重拉整段历史
-                sess._replayFirstSeq = rpData.firstSeq || 0;
-                // 快照覆盖集：标识「回放已渲染的事件」，供缓冲/迟到的实时帧去重（本轮 done 时清除）
-                sess._replayCoverage = buildReplayCoverage(rpData.events);
-                // 尾部快照中实际渲染的最大 eventSeq 才是稳定游标；不能使用 latestSeq（文件可能还有未渲染的新事件）。
-                for (var rsi = 0; rsi < rpData.events.length; rsi++) {
-                    var rseq = Number(rpData.events[rsi] && rpData.events[rsi].eventSeq || 0);
-                    if (rseq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, rseq);
-                }
-                replaySession(sess, rpData.events, false, !!rpData.running);
+    var replayXhr = $.ajax({
+        url: '/web/chat/replay?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ + '&rounds=' + REPLAY_PAGE_ROUNDS,
+        method: 'GET',
+        /* 真实 HTTP 超时：与 12s 骨架兜底同口径。旧实现没有 timeout，大会话响应
+           悬挂时只能靠 UI 定时器降级，而回调仍然有效 → 失败卡与迟到内容打架。 */
+        timeout: HISTORY_LOAD_TIMEOUT_MS,
+        success: function (rp) {
+            if (sess._historyLoadGeneration !== gen || (typeof sessionMap !== 'undefined' && sessionMap[sess.sessionId] !== sess)) return;
+            var rpData = rp && rp.data;
+            /* 后端文件读失败 / 坏行会静默回 code:200 + events:[]（core/session/mod.rs
+               :240-242/:344-346）。前端必须先看 code，否则「加载失败」被误当新对话
+               走 legacy，用户只看到过程消息凭空消失。 */
+            if (rp && rp.code && Number(rp.code) !== 200) {
+                console.error('[loadMessages] replay 返回错误码:', rp.code, rp.description || '');
+                replayXhr = null;
+                loadMessagesLegacy(sess, rootQ, gen);
                 return;
-            } catch (e) {
-                /* 回放异常：清空可能的半成品，回退纯文本加载。
-                   这里必须清真实容器——旧实现执行到此处时 sess.container 已被 replaySession
-                   换成临时容器，清空操作打在孤儿节点上，真实容器里的半成品原样留着。
-                   容器语义恒定后该问题自然消失，同时显式中止回放，释放门禁与渲染落点。*/
-                try { if (typeof abortReplay === 'function') abortReplay(sess); } catch (e3) {}
-                try { $(sess.container).html(''); } catch (e2) {}
             }
+            if (rpData && rpData.events && rpData.events.length > 0) {
+                try {
+                    sess._replayHasMore = !!rpData.hasMore;
+                    sess._replayRemainingRounds = rpData.remainingRounds || 0;
+                    // 向上翻页游标：本页最早事件的 seq，下次只取比它更早的，不再重拉整段历史
+                    sess._replayFirstSeq = rpData.firstSeq || 0;
+                    // 快照覆盖集：标识「回放已渲染的事件」，供缓冲/迟到的实时帧去重（本轮 done 时清除）
+                    sess._replayCoverage = buildReplayCoverage(rpData.events);
+                    // 尾部快照中实际渲染的最大 eventSeq 才是稳定游标；不能使用 latestSeq（文件可能还有未渲染的新事件）。
+                    for (var rsi = 0; rsi < rpData.events.length; rsi++) {
+                        var rseq = Number(rpData.events[rsi] && rpData.events[rsi].eventSeq || 0);
+                        if (rseq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, rseq);
+                    }
+                    /* HTTP 已终结，句柄清空；回放由 replaySession 自己的收尾链负责。 */
+                    sess._historyLoadXhr = null;
+                    replaySession(sess, rpData.events, false, !!rpData.running);
+                    return;
+                } catch (e) {
+                    /* 回放异常：清空可能的半成品，回退纯文本加载。
+                        这里必须清真实容器——旧实现执行到此处时 sess.container 已被 replaySession
+                        换成临时容器，清空操作打在孤儿节点上，真实容器里的半成品原样留着。
+                        容器语义恒定后该问题自然消失，同时显式中止回放，释放门禁与渲染落点。*/
+                    try { if (typeof abortReplay === 'function') abortReplay(sess); } catch (e3) {}
+                    try { $(sess.container).html(''); } catch (e2) {}
+                }
+            }
+            // replay 无事件（新对话）或异常：走纯文本加载路径（缓冲在 legacy 加载完成时统一排空）
+            sess._historyLoadXhr = null;
+            loadMessagesLegacy(sess, rootQ, gen);
+        },
+        error: function (xhr, textStatus) {
+            /* abort（切会话 / 超时兜底 / 重试作废）不是失败：当前代已被顶掉或已被
+               降级卡处理，绝不能再叠一次 legacy 请求与失败卡。 */
+            if (textStatus === 'abort') return;
+            if (sess._historyLoadGeneration !== gen || (typeof sessionMap !== 'undefined' && sessionMap[sess.sessionId] !== sess)) return;
+            console.error('[loadMessages] replay 请求失败:', textStatus, xhr && xhr.status);
+            sess._historyLoadXhr = null;
+            loadMessagesLegacy(sess, rootQ, gen);
         }
-        // replay 无事件（新对话）或异常：走纯文本加载路径（缓冲在 legacy 加载完成时统一排空）
-        loadMessagesLegacy(sess, rootQ);
-    }).fail(function() {
-        loadMessagesLegacy(sess, rootQ);
     });
+    sess._historyLoadXhr = replayXhr;
 }
 
 /**
@@ -2301,6 +2356,12 @@ function replaySession(sess, events, prepend, keepOpen) {
     // 初始加载（prepend=false）走原有 resumeState 逻辑，不受影响。
     var liveState = prepend ? captureLiveStreamState(sess) : null;
     var tempDiv = document.createElement('div');
+    /* 【2026-11 白屏止血】fragment 必须提升到闭包作用域：旧实现是 replayDoneCore 的
+        局部变量，「抽空 tempDiv → 抽到 fragment → 入真实容器」这段窗口内一旦抛错
+        （endTurn / stitch / getBoundingClientRect / html('') 任一），覆盖层已先撤，
+        finishReplayFallback 又只捞已空的 tempDiv ⇒ 内容既不在 DOM 也不在临时容器、
+        失败卡因 !mine 补不上 ⇒ 真空白。提升后兜底可把未入 DOM 的 fragment 一并捞回。 */
+    var replayFragment = null;
     /* 只切换渲染落点，不动 sess.container（见 app-base.js 的 renderRoot 注释）。
        回放期间 sess.container 仍是文档里的真实容器，因此「加载更多」按钮的相对定位、
        会话判空、异常兜底清空这些依赖真实容器的逻辑全程有效；而回放中断也不再可能
@@ -2459,6 +2520,16 @@ function replaySession(sess, events, prepend, keepOpen) {
                 if (prepend) realContainer.insertBefore(salvage, realContainer.firstChild);
                 else realContainer.appendChild(salvage);
             }
+            /* 【2026-11 白屏止血】异常发生在「已抽空 tempDiv、fragment 尚未入 DOM」窗口时，
+                上面的 salvage 捞不到任何东西（tempDiv 已空），旧实现就此留下空容器 + 无
+                骨架 + 无失败卡（覆盖层已被 replayDoneCore 先撤且 !mine 补不上）。
+                此时 replayFragment 仍持有尚未落地的全部行，直接并入即可保住内容。
+                入 DOM 后 fragment 自身会被清空，故不会重复插入。 */
+            if (replayFragment && replayFragment.firstChild && realContainer) {
+                if (prepend) realContainer.insertBefore(replayFragment, realContainer.firstChild);
+                else realContainer.appendChild(replayFragment);
+            }
+            replayFragment = null;
         } catch (e) { /* 兜底本身不得再抛 */ }
         try { drainGateBuffer(sess); } catch (e) {}
         if (prepend && replayLoadMoreToken != null) {
@@ -2524,6 +2595,7 @@ function replaySession(sess, events, prepend, keepOpen) {
         // 回放结束：还原渲染落点，后续一律写真实容器
         sess.renderTarget = null;
         var fragment = document.createDocumentFragment();
+        replayFragment = fragment;
         while (tempDiv.firstChild) { fragment.appendChild(tempDiv.firstChild); }
         // prepend 的空气泡清扫只能扫本页新插入的节点，故先留存引用（入 DOM 后 fragment 会被清空）
         var prependedRows = prepend ? Array.prototype.slice.call(fragment.childNodes) : null;
@@ -2617,6 +2689,24 @@ function replaySession(sess, events, prepend, keepOpen) {
                 var tbApiOff = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
                 if (tbApiOff && tbApiOff.clearBatch) tbApiOff.clearBatch(realContainer);
             } else if (tcApi) {
+                /* 【历史 = 运行态】回放重建的历史气泡没有批次盖子（noteProcessInsert 有
+                   _replaying 门禁，运行期不建盖子）。点开整轮摘要后过程行会逐条平铺，
+                   与运行态的 Qoder 多折叠组形态对不上（用户 2026-11 报障）。
+                   故在 applyTurnCompact 之前按运行态同一套边界规则补建 closed 态批次组
+                   —— compact 的分类要看到已收口的盖子形态，顺序不能反。
+                   幂等：气泡已有盖子（运行态延续/重复调用）时跳过。 */
+                try {
+                    var tbRebuild = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
+                    if (tbRebuild && tbRebuild.rebuildBatchesIn) {
+                         tbRebuild.rebuildBatchesIn(realContainer, {
+                             scopeRows: prepend ? (prependedRows || []) : null,
+                             // 盖子文案 i18n（与 applyTurnCompact 的 translate 同口径）
+                             translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t) ? function (k) { return GourdI18n.t(k); } : null
+                         });
+                    }
+                } catch (rebuildErr) {
+                    console.error('[replaySession] 历史批次重建失败:', rebuildErr);
+                }
                 var lastClosed = !keepOpen;
                 if (!lastClosed) {
                     for (var tci = events.length - 1; tci >= 0; tci--) {
@@ -2627,6 +2717,12 @@ function replaySession(sess, events, prepend, keepOpen) {
                 }
                 tcApi.applyTurnCompact(realContainer, {
                     lastTurnClosed: lastClosed,
+                    /* 【code review 修复 2026-11】回放轮全部是已发生的历史，必须与运行态
+                       finishStream 真收口同口径传 ended:true —— 否则「批次盖子让位」
+                       门禁（compactBubble 只在 ended 时放行）会把带盖子的历史轮全部
+                       短路，历史无正文轮永不折成整轮摘要，与运行态形态分叉。
+                       keepOpen 的进行中轮由 lastTurnClosed 排除，不会被误折。 */
+                    ended: true,
                     // prepend 只折本次新插入的更早历史轮，绝不碰容器底部正在实时流式的回复
                     scopeRows: prepend ? (prependedRows || []) : null,
                     translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t) ? function (k) { return GourdI18n.t(k); } : null
@@ -2847,11 +2943,19 @@ function stitchPrependedRunRows(fragment, realContainer, sess) {
     return { firstMoved: firstMoved, removedVisualTop: removedVisualTop };
 }
 
-function loadMessagesLegacy(sess, rootQ) {
+/* 【2026-11】historyGen：由 loadMessages 传入的加载世代号。切会话/重试后旧请求
+    迟到时直接丢弃，不再把上一代内容盖进当前会话。旧调用方不传则恒为 undefined，
+    undefined === undefined 通过，行为完全向后兼容。 */
+function loadMessagesLegacy(sess, rootQ, historyGen) {
     $.get('/web/chat/messages?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ, function(resp) {
+        if (historyGen !== undefined && sess._historyLoadGeneration !== historyGen) return;
+        if (typeof sessionMap !== 'undefined' && sessionMap[sess.sessionId] !== sess) return;
         // 声明提到 try 外：异常兜底分支要用到，放在 try 内会踩 var 提升的 undefined 陷阱
         var realContainer = null;
         var tempDiv = null;
+        /* 【2026-11 白屏止血】与 replaySession 同款：fragment 提到闭包作用域，
+            「html('') → 抽空 tempDiv → appendChild」窗口内抛错时兜底仍能捞回内容。 */
+        var legacyFragment = null;
         try {
             var msgs = resp.data;
             realContainer = sess.container;
@@ -2900,10 +3004,12 @@ function loadMessagesLegacy(sess, rootQ) {
                 sess.renderTarget = null;
                 $(realContainer).html('');
                 var fragment = document.createDocumentFragment();
+                legacyFragment = fragment;
                 while (tempDiv.firstChild) {
                     fragment.appendChild(tempDiv.firstChild);
                 }
                 realContainer.appendChild(fragment);
+                legacyFragment = null;
                 /* legacy 路径从不置 _replaying（它是门禁语义，20+ 消费方，不能借），
                    而 ensureAssistantBubble 只在 _replaying 为真时省略 agent-live ——
                    于是这条回退路径的历史行全部带着「本轮正在跑」的运行态样式，
@@ -2932,11 +3038,28 @@ function loadMessagesLegacy(sess, rootQ) {
                兜底整个失效、容器永久悬空。现在落点复位无条件执行，不依赖任何局部变量。*/
             hideHistoryLoading(sess, { failed: true });
             sess.renderTarget = null;
+            /* 【2026-11 白屏止血】旧 catch 只复位落点、无 salvage：中途异常时
+                tempDiv 已抽空、fragment 未入 DOM，且覆盖层已被 loadDone 先撤 ⇒
+                真空白且无失败卡。这里把两处半成品都并入真实容器。 */
+            try {
+                if (realContainer) {
+                    if (tempDiv && tempDiv.firstChild) {
+                        var salvageLegacy = document.createDocumentFragment();
+                        while (tempDiv.firstChild) salvageLegacy.appendChild(tempDiv.firstChild);
+                        realContainer.appendChild(salvageLegacy);
+                    }
+                    if (legacyFragment && legacyFragment.firstChild) {
+                        realContainer.appendChild(legacyFragment);
+                    }
+                }
+            } catch (salvageErr) { /* 兜底本身不得再抛 */ }
+            legacyFragment = null;
             drainGateBuffer(sess);
         }
     }).fail(function() {
         // legacy 请求失败也必须释放回放/实时互斥门禁；
         // 否则后续 WebSocket 帧会永久滞留在 _gateBuffer。
+        if (historyGen !== undefined && sess._historyLoadGeneration !== historyGen) return;
         hideHistoryLoading(sess, { failed: true });
         drainGateBuffer(sess);
     });

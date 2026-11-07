@@ -1,0 +1,210 @@
+<!--
+  GWork「定时任务」（图 77）
+  移植自 mobile/js/app.js 的 renderLoop()：
+    顶部左侧云设备胶囊「☁ ⌄」+ 居中双 Tab「任务 / 结果」
+    主体空态：灰色机器人 + 「暂无自动化任务」
+    右下青绿 FAB「＋」
+  数据/文案来自 common/workbuddy-data.uts 与 mobile/js/app.js。
+-->
+<template>
+	<view class="gw-page-root" :style="pageStyle">
+		<view class="gw-statusbar"></view>
+
+		<!-- 图 77 顶部：设备胶囊 + 双 Tab -->
+		<view class="gw-loop-head">
+			<view class="gw-loop-device" :style="themeSurface" @click="onDeviceClick">
+				<text class="gw-loop-cloud" :style="themeText">☁</text>
+				<text class="gw-loop-device-arrow" :style="themeText">⌄</text>
+			</view>
+			<view class="gw-loop-tabs">
+				<view class="gw-loop-tab" @click="onTabClick(0)">
+					<text class="gw-loop-tab-text" :style="loopTabIndex == 0 ? themeText : themeMuted">任务</text>
+				</view>
+				<view class="gw-loop-tab" @click="onTabClick(1)">
+					<text class="gw-loop-tab-text" :style="loopTabIndex == 1 ? themeText : themeMuted">结果</text>
+				</view>
+			</view>
+			<view class="gw-loop-head-space"></view>
+		</view>
+
+		<!-- 空态 -->
+		<view class="gw-loop-empty" :style="pageStyle">
+			<text class="gw-loop-empty-mark" :style="emptyInk">?</text>
+			<view class="gw-loop-empty-bot" :style="emptyInk">
+				<text class="gw-loop-empty-ear" :style="emptyInk">◣</text>
+				<text class="gw-loop-empty-face" :style="emptyInk">◕ ◕</text>
+				<text class="gw-loop-empty-ear" :style="emptyInk">◢</text>
+			</view>
+			<text class="gw-loop-empty-text" :style="themeMuted">{{ emptyText }}</text>
+		</view>
+
+		<!-- 青绿 FAB -->
+		<view class="gw-loop-fab" :style="themeAccentBg" @click="onFabClick">
+			<text class="gw-loop-fab-plus" :style="'color:' + accentInkColor">＋</text>
+		</view>
+
+		<view class="gw-gesturebar"></view>
+
+		<!-- 设备面板（图 74） -->
+		<view class="gw-scrim" :style="themeScrim" v-if="deviceSheetVisible" @click="closeDeviceSheet"></view>
+		<view class="gw-sheet" :style="themeSurface" v-if="deviceSheetVisible">
+			<view class="gw-sheet-head">
+				<text class="gw-sheet-title" :style="themeText">选择设备</text>
+				<text class="gw-sheet-close" :style="themeMuted" @click="closeDeviceSheet">×</text>
+			</view>
+			<view class="gw-sheet-group" :style="themeSurface2">
+				<view class="gw-device-row" v-for="(device, index) in devices" :key="device.id" @click="onDeviceSelect(device.id)">
+					<text class="gw-device-icon" :style="themeText">{{ device.id == 'cloud' ? '☁' : '▭' }}</text>
+					<text class="gw-device-label" :style="themeText">{{ device.label }}</text>
+					<text class="gw-device-offline" :style="themeSurface2" v-if="device.offline">离线</text>
+					<text class="gw-device-check" :style="themeAccentText" v-if="device.id == selectedDevice">✓</text>
+					<view class="gw-device-divider" :style="themeDivider" v-if="index == 0"></view>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import { ref, computed } from 'vue'
+	import { DEVICES, type DeviceRow } from '@/common/workbuddy-data.uts'
+	import {
+		rootStyle, surfaceStyle, surface2Style, textStyle, mutedStyle, dividerStyle,
+		accentTextStyle, accentBgStyle, scrimStyle, emptyInkStyle
+	} from '@/common/workbuddy-theme.uts'
+
+	const devices: DeviceRow[] = DEVICES
+	const accentInkColor: string = '#ffffff'
+	const loopTabIndex = ref<number>(0)
+	const selectedDevice = ref<string>('cloud')
+	const deviceSheetVisible = ref<boolean>(false)
+	const emptyText = computed<string>(() => {
+		return loopTabIndex.value == 0 ? '暂无自动化任务' : '暂无自动化结果'
+	})
+
+	const pageStyle = ref<string>(rootStyle())
+	const surface = ref<string>(surfaceStyle())
+	const surface2 = ref<string>(surface2Style())
+	const ink = ref<string>(textStyle())
+	const muted = ref<string>(mutedStyle())
+	const divider = ref<string>(dividerStyle())
+	const accentInk = ref<string>(accentTextStyle())
+	const accentBg = ref<string>(accentBgStyle())
+	const scrim = ref<string>(scrimStyle())
+	const emptyInk = ref<string>(emptyInkStyle())
+	const themeSurface = surface
+	const themeSurface2 = surface2
+	const themeText = ink
+	const themeMuted = muted
+	const themeDivider = divider
+	const themeAccentText = accentInk
+	const themeAccentBg = accentBg
+	const themeScrim = scrim
+
+	function refreshStyles(): void {
+		pageStyle.value = rootStyle()
+		surface.value = surfaceStyle()
+		surface2.value = surface2Style()
+		ink.value = textStyle()
+		muted.value = mutedStyle()
+		divider.value = dividerStyle()
+		accentInk.value = accentTextStyle()
+		accentBg.value = accentBgStyle()
+		scrim.value = scrimStyle()
+		emptyInk.value = emptyInkStyle()
+	}
+	onShow(() => {
+		refreshStyles()
+	})
+
+	function onTabClick(index: number): void {
+		loopTabIndex.value = index
+	}
+	function onDeviceClick(): void {
+		deviceSheetVisible.value = true
+	}
+	function closeDeviceSheet(): void {
+		deviceSheetVisible.value = false
+	}
+	function onDeviceSelect(id: string): void {
+		selectedDevice.value = id
+		closeDeviceSheet()
+	}
+	function onFabClick(): void {
+		// TODO(GWork 后端)：新建定时任务表单与桌面内核调度 API
+		uni.showToast({ title: '新建定时任务待接入 GWork 内核', icon: 'none' })
+	}
+</script>
+
+<style lang="scss">
+	.gw-loop-head {
+		flex-direction: row;
+		align-items: center;
+		padding: 8px $gw-page-pad 0;
+		flex-shrink: 0;
+	}
+	.gw-loop-device {
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		width: 76px;
+		height: 58px;
+		border-radius: $gw-radius-pill;
+	}
+	.gw-loop-cloud { font-size: 26px; margin-right: 6px; }
+	.gw-loop-device-arrow { font-size: 17px; }
+	.gw-loop-tabs {
+		flex: 1;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+	}
+	.gw-loop-tab { padding: 0 20px; }
+	.gw-loop-tab-text { font-size: 22px; font-weight: 600; }
+	.gw-loop-head-space { width: 76px; }
+
+	.gw-loop-empty {
+		flex: 1;
+		min-height: 0;
+		justify-content: center;
+		align-items: center;
+	}
+	.gw-loop-empty-mark { font-size: 38px; margin-bottom: 4px; }
+	.gw-loop-empty-bot { flex-direction: row; align-items: center; margin-bottom: 28px; }
+	.gw-loop-empty-ear { font-size: 34px; }
+	.gw-loop-empty-face { font-size: 30px; margin: 0 -6px; }
+	.gw-loop-empty-text { font-size: 18px; }
+
+	.gw-loop-fab {
+		position: absolute;
+		right: 26px;
+		bottom: 128px;
+		width: 76px;
+		height: 76px;
+		border-radius: $gw-radius-pill;
+		justify-content: center;
+		align-items: center;
+	}
+	.gw-loop-fab-plus { font-size: 38px; font-weight: 300; }
+
+	.gw-scrim { position: absolute; top: 0; right: 0; bottom: 0; left: 0; }
+	.gw-sheet {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		border-top-left-radius: $gw-radius-sheet;
+		border-top-right-radius: $gw-radius-sheet;
+		padding: 22px $gw-page-pad 32px;
+	}
+	.gw-sheet-head { flex-direction: row; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+	.gw-sheet-title { font-size: 21px; font-weight: 700; }
+	.gw-sheet-close { font-size: 26px; padding: 0 6px; }
+	.gw-sheet-group { border-radius: $gw-radius-card; padding: 0 16px; }
+	.gw-device-row { flex-direction: row; align-items: center; height: 66px; position: relative; }
+	.gw-device-icon { font-size: 24px; margin-right: 14px; }
+	.gw-device-label { font-size: 18px; font-weight: 600; flex: 1; }
+	.gw-device-offline { font-size: 13px; border-radius: 6px; padding: 3px 8px; margin-right: 10px; }
+	.gw-device-check { font-size: 22px; font-weight: 700; }
+	.gw-device-divider { position: absolute; left: 0; right: 0; bottom: 0; height: 1px; }
+</style>

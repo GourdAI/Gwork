@@ -424,6 +424,305 @@ impl Tool for EditTool {
     }
 }
 
+// ─── Command execution (shared by bash / run_in_background / HITL approval) ───
+
+/// Why a [`run_command`] invocation ended. A timed-out / cancelled / capped
+/// command has no meaningful exit code, and the model must be told it was
+/// terminated rather than seeing a truncated result that looks like a natural
+/// exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandOutcome {
+    Exited,
+    TimedOut,
+    Cancelled,
+    OutputCapped,
+    SpawnFailed,
+}
+
+struct CommandResult {
+    status: Option<std::process::ExitStatus>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    outcome: CommandOutcome,
+    error: Option<String>,
+}
+
+/// Physical byte ceiling per stream, mirroring Java
+/// `ProcessExecutor.maxOutputSize` (1 MiB). With file-backed stdio this bounds
+/// the read, not just the text later shown by `format_output`.
+const MAX_STREAM_BYTES: usize = 1024 * 1024;
+/// Sentinel for "no wall-clock timeout" (background / long-running commands).
+/// A literal large millisecond value would overflow `Duration::from_millis`.
+const NO_TIMEOUT: u64 = 0;
+/// How often to check the redirect files for the output ceiling.
+const OUTPUT_POLL_MS: u64 = 100;
+
+/// Redirect child stdout/stderr to **files instead of anonymous pipes**.
+///
+/// This is the actual fix for the agent-browser hang. That CLI detaches a
+/// persistent browser daemon (plus Chrome children) which inherits the root
+/// shell's stdio handles. The root `powershell.exe` exits immediately, so
+/// `child.wait()` returns and the 120 s timeout never fires — but the daemon
+/// keeps the pipe write ends open, so the old `read_to_end`/`pipes.await` never
+/// sees EOF and the whole ReAct turn hangs (40 min in the recorded session).
+///
+/// A regular file has no EOF dependency on its holders: we can read a snapshot
+/// the instant the root exits. Rust's Windows `OpenOptions::new()` defaults to
+/// `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`, so an inherited
+/// daemon handle does not make `remove_file` fail. NOTE: on Windows
+/// `DeleteFileW` only marks the file delete-pending — the directory entry and
+/// disk space are released when the LAST handle closes, i.e. when the daemon
+/// itself exits (same lifetime as the daemon's stdout, not a permanent leak;
+/// verified: 0 leftovers after the detached-holder regression tests). A
+/// normally finishing command does NOT kill the tree: the daemon is supposed
+/// to survive between agent-browser calls.
+struct RedirectFiles {
+    stdout: std::fs::File,
+    stderr: std::fs::File,
+    out_path: PathBuf,
+    err_path: PathBuf,
+}
+
+impl RedirectFiles {
+    fn new() -> std::io::Result<Self> {
+        // Flat files in the OS temp dir, not a per-call subdir: on Windows a
+        // surviving daemon still holds the file handles, so removing the
+        // parent directory would fail and leave an empty dir behind on every
+        // single bash call. The files themselves are unlinked best-effort in
+        // Drop (FILE_SHARE_DELETE lets that succeed despite inherited handles).
+        let id = uuid::Uuid::new_v4();
+        let out_path = std::env::temp_dir().join(format!("gwork-stdout-{}", id));
+        let err_path = std::env::temp_dir().join(format!("gwork-stderr-{}", id));
+        let stdout = std::fs::File::create(&out_path)?;
+        let stderr = std::fs::File::create(&err_path)?;
+        Ok(Self { stdout, stderr, out_path, err_path })
+    }
+
+    fn attach(&self, cmd: &mut Command) -> std::io::Result<()> {
+        // Non-interactive execution: close stdin so commands that read input
+        // get EOF instead of idling to the timeout (Java ProcessExecutor:353).
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::from(self.stdout.try_clone()?));
+        cmd.stderr(std::process::Stdio::from(self.stderr.try_clone()?));
+        Ok(())
+    }
+
+    fn read_capped(&self) -> (Vec<u8>, Vec<u8>) {
+        (read_capped(&self.out_path), read_capped(&self.err_path))
+    }
+
+    fn oversized(&self) -> bool {
+        fn size(p: &Path) -> u64 {
+            std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+        }
+        size(&self.out_path) > MAX_STREAM_BYTES as u64
+            || size(&self.err_path) > MAX_STREAM_BYTES as u64
+    }
+}
+
+impl Drop for RedirectFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.out_path);
+        let _ = std::fs::remove_file(&self.err_path);
+    }
+}
+
+fn read_capped(path: &Path) -> Vec<u8> {
+    use std::io::Read;
+    let Ok(f) = std::fs::File::open(path) else { return Vec::new(); };
+    let mut buf = Vec::new();
+    let _ = f.take(MAX_STREAM_BYTES as u64).read_to_end(&mut buf);
+    buf
+}
+
+/// Kill the whole process tree by root PID.
+///
+/// Java `TerminalSessionManager.destroyProcessTree` uses `taskkill /T /F /PID`
+/// on Windows and a process-group kill on Unix. Tokio's `kill_on_drop(true)`
+/// only reaps the root shell, which has often ALREADY exited by then. On Unix
+/// `process_group(0)` (set below) keeps the orphaned daemon in the same group,
+/// so `kill -KILL -<pid>` still reaches it. On Windows `taskkill /T` needs a
+/// live root; if it already exited the descendants are orphaned, but the turn
+/// no longer hangs — which is the user-visible defect.
+///
+/// Takes a bare pid deliberately: `child.wait()` holds `&mut Child` for the
+/// whole `select!`, so a kill branch that also borrowed it would not compile.
+async fn kill_tree(pid: u32) {
+    let pid_s = pid.to_string();
+    #[cfg(windows)]
+    {
+        // `/T` walks descendants, `/F` forces (daemons ignore WM_CLOSE). Run
+        // on the blocking pool: std::process::Command::output blocks.
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut c = std::process::Command::new("taskkill");
+            c.args(["/T", "/F", "/PID", pid_s.as_str()]);
+            {
+                use std::os::windows::process::CommandExt;
+                c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            let _ = c.output();
+        })
+        .await;
+    }
+    #[cfg(unix)]
+    {
+        let neg = format!("-{}", pid_s);
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut c = std::process::Command::new("kill");
+            c.args(["-KILL", neg.as_str()]);
+            let _ = c.output();
+        })
+        .await;
+    }
+}
+
+/// Spawn and wait for a command with **every** exit path bounded.
+///
+/// Java `ProcessExecutor` closes stdin, drains output off-thread, bounds both
+/// `waitFor(timeout)` and the output drain (5 s), and kills the process tree on
+/// timeout. The previous Rust implementation wrapped only `child.wait()` in the
+/// timeout and then did a bare `pipes.await` — the exact hole agent-browser
+/// fell into. Here there are no pipes to await at all: output lands in files,
+/// and only the wait itself is bounded (by timeout, cancellation and the output
+/// ceiling).
+async fn run_command(
+    mut cmd: Command,
+    timeout_ms: u64,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) -> CommandResult {
+    let failed = |error: String| CommandResult {
+        status: None,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        outcome: CommandOutcome::SpawnFailed,
+        error: Some(error),
+    };
+    let files = match RedirectFiles::new() {
+        Ok(f) => f,
+        Err(e) => return failed(format!("Failed to create stdio redirect files: {}", e)),
+    };
+    if let Err(e) = files.attach(&mut cmd) {
+        return failed(format!("Failed to attach stdio redirect files: {}", e));
+    }
+    cmd.kill_on_drop(true);
+    // Own process group so `kill -KILL -<pid>` reaches every descendant.
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return failed(format!("Command spawn failed: {}", e)),
+    };
+    let pid = child.id();
+
+    // A runaway producer must be stopped, not just truncated at read time.
+    let size_watch = async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(OUTPUT_POLL_MS)).await;
+            if files.oversized() { break; }
+        }
+    };
+    let cancel_fut = async {
+        match &cancel {
+            Some(c) => c.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(size_watch);
+    tokio::pin!(cancel_fut);
+
+    // `timeout_ms == 0` means "no wall-clock limit" (background tasks). The
+    // original contract is "run until it finishes"; with file-backed stdio a
+    // detached daemon can no longer block the reader, so only the user's Stop
+    // token ends it. A hard ceiling would kill legitimately long builds.
+    let timeout_fut = async {
+        if timeout_ms == NO_TIMEOUT {
+            std::future::pending::<()>().await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
+        }
+    };
+    tokio::pin!(timeout_fut);
+
+    let mut outcome = CommandOutcome::Exited;
+    let mut status: Option<std::process::ExitStatus> = None;
+    tokio::select! {
+        r = child.wait() => { status = r.ok(); }
+        _ = &mut cancel_fut => {
+            outcome = CommandOutcome::Cancelled;
+            if let Some(p) = pid { kill_tree(p).await; }
+        }
+        _ = &mut timeout_fut => {
+            outcome = CommandOutcome::TimedOut;
+            if let Some(p) = pid { kill_tree(p).await; }
+        }
+        _ = &mut size_watch => {
+            outcome = CommandOutcome::OutputCapped;
+            if let Some(p) = pid { kill_tree(p).await; }
+        }
+    }
+
+    // Files, not pipes: this read is bounded by MAX_STREAM_BYTES and needs no
+    // drain grace. Partial output is preserved for diagnosis.
+    let (stdout, stderr) = files.read_capped();
+    CommandResult { status, stdout, stderr, outcome, error: None }
+}
+
+/// Render a [`CommandResult`] with the termination reason and partial output.
+/// The normal path reuses `format_output`'s decode/ANSI/head-tail logic verbatim.
+fn format_command_result(r: &CommandResult) -> ToolOutput {
+    if r.outcome == CommandOutcome::Exited {
+        if let Some(status) = r.status {
+            return format_output(&std::process::Output {
+                status,
+                stdout: r.stdout.clone(),
+                stderr: r.stderr.clone(),
+            });
+        }
+    }
+    let stdout = crate::textcodec::strip_ansi(&crate::textcodec::decode_bytes(&r.stdout));
+    let stderr = crate::textcodec::strip_ansi(&crate::textcodec::decode_bytes(&r.stderr));
+    let mut text = String::new();
+    if !stdout.is_empty() { text.push_str(&stdout); }
+    if !stderr.is_empty() {
+        if !text.is_empty() { text.push('\n'); }
+        text.push_str("[stderr]\n");
+        text.push_str(&stderr);
+    }
+    if text.chars().count() > 64_000 {
+        let head: String = text.chars().take(32_000).collect();
+        let tail: String = text.chars().rev().take(16_000).collect::<Vec<_>>().into_iter().rev().collect();
+        text = format!("{}\n... [truncated] ...\n{}", head, tail);
+    }
+    let note = match r.outcome {
+        CommandOutcome::TimedOut => r.error.clone()
+            .unwrap_or_else(|| "Command timed out (process tree terminated)".to_string()),
+        CommandOutcome::Cancelled => "Cancelled by user".to_string(),
+        CommandOutcome::OutputCapped => "Command terminated: output exceeded the physical byte limit".to_string(),
+        CommandOutcome::SpawnFailed => r.error.clone().unwrap_or_else(|| "Command spawn failed".to_string()),
+        CommandOutcome::Exited => "Command wait failed (no exit status)".to_string(),
+    };
+    if text.is_empty() {
+        ToolOutput::err(note)
+    } else {
+        ToolOutput::err(format!("{}\n--- partial output ---\n{}", note, text))
+    }
+}
+
+/// HITL approval path: no run `CancellationToken`, and a 300 s ceiling (same
+/// as the old `cmd.output()` timeout). Exposed crate-wide because
+/// `server::execute_approved_command` lives in another module.
+pub(crate) async fn run_command_capture(cmd: Command, timeout_ms: u64) -> String {
+    let mut r = run_command(cmd, timeout_ms, None).await;
+    // `format_command_result` is shared with the foreground tool (which keeps
+    // its own timeout string); the HITL path historically reported the exact
+    // 300 s ceiling, so preserve that wording with the elapsed timeout value.
+    if r.outcome == CommandOutcome::TimedOut {
+        r.error = Some(format!("Command timed out after {}ms", timeout_ms));
+    }
+    format_command_result(&r).text
+}
+
 // ─── bash ─────────────────────────────────────────────────────────────────────
 
 /// Background bash session registry (for bash_output).
@@ -747,61 +1046,30 @@ impl Tool for BashTool {
         // Synchronous path: every remaining return path is covered by Drop.
         let _guard = TempScriptGuard(temp_script);
 
-        // Spawn by hand instead of `cmd.output()` so the child can be killed.
-        //
-        // `output()` returns no process handle, so the only way to abandon it was
-        // to drop the future — and tokio's default `kill_on_drop(false)` then
-        // leaves the process running as an orphan. The user-visible symptom was
-        // "Stop does nothing": the run kept burning CPU and kept writing into the
-        // workspace after the interrupt, and the timeout branch had the same hole.
-        cmd.kill_on_drop(true);
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => return ToolOutput::err(format!("Command spawn failed: {}", e)),
-        };
-
-        // Drain the pipes concurrently with the wait. Reading only after exit
-        // deadlocks as soon as the child fills the OS pipe buffer and blocks on
-        // write; `cmd.output()` did this internally, so spawning by hand has to
-        // preserve it or long-output commands (cargo, mvn) would hang forever.
-        let mut so = child.stdout.take();
-        let mut se = child.stderr.take();
-        let pipes = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut out: Vec<u8> = Vec::new();
-            let mut err: Vec<u8> = Vec::new();
-            if let Some(s) = so.as_mut() {
-                let _ = s.read_to_end(&mut out).await;
-            }
-            if let Some(s) = se.as_mut() {
-                let _ = s.read_to_end(&mut err).await;
-            }
-            (out, err)
-        });
-
-        let status = tokio::select! {
-            r = child.wait() => r,
-            _ = ctx.cancel.cancelled() => {
-                // Returning drops `child`; `kill_on_drop` reaps the process.
-                return ToolOutput::err("Cancelled by user");
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => {
-                return ToolOutput::err(format!("Command timed out after {}ms", timeout_ms));
-            }
-        };
-
-        let status = match status {
-            Ok(s) => s,
-            Err(e) => return ToolOutput::err(format!("Command wait failed: {}", e)),
-        };
-        let (stdout, stderr) = pipes.await.unwrap_or_else(|_| (Vec::new(), Vec::new()));
-        // Rebuild `Output` so the existing truncation/exit-code formatting is
-        // reused verbatim rather than duplicated here.
-        format_output(&std::process::Output { status, stdout, stderr })
+        // Everything below is bounded by `run_command`: stdin EOF, file-backed
+        // stdio (no inherited pipe handles to wait on forever), timeout,
+        // cancellation, output ceiling and process-tree kill. The old inline
+        // pipes.await had none of the last three and hung the whole ReAct turn
+        // on agent-browser's detached daemon.
+        format_command_result(
+            &foreground_run_command(cmd, timeout_ms, Some(ctx.cancel.clone())).await,
+        )
     }
+}
+
+/// Foreground wrapper: keeps the historical `Command timed out after <N>ms`
+/// message (the exact ceiling is useful to the model when it decides whether to
+/// retry with a smaller scope), which the generic renderer cannot know.
+async fn foreground_run_command(
+    cmd: Command,
+    timeout_ms: u64,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) -> CommandResult {
+    let mut r = run_command(cmd, timeout_ms, cancel).await;
+    if r.outcome == CommandOutcome::TimedOut {
+        r.error = Some(format!("Command timed out after {}ms", timeout_ms));
+    }
+    r
 }
 
 fn format_output(output: &std::process::Output) -> ToolOutput {
@@ -845,80 +1113,54 @@ fn format_output(output: &std::process::Output) -> ToolOutput {
 }
 
 async fn run_background(
-    mut cmd: Command,
+    cmd: Command,
     ctx: &ToolContext,
     temp_script: Option<std::path::PathBuf>,
     command_line: String,
 ) -> ToolOutput {
     let session_id = format!("bg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    // P3: register as running BEFORE the spawn can complete (the task can
-    // finish inside the yield window; registering after would leave a phantom
-    // "running" that keeps the owner's gate armed forever). Keyed by the
-    // session id, unregistered by the same key in the reader task below.
+    // Register BEFORE the spawn can complete (a task can finish inside the
+    // yield window). Pair it with `unregister_running` in the SAME spawned
+    // task below on every path — including timeout / cancellation, which the
+    // old implementation never reached because its pipe reader never saw EOF.
     crate::react::bg_gate::register_running(&ctx.session_id, &session_id).await;
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            if let Some(p) = temp_script {
-                let _ = std::fs::remove_file(p);
-            }
-            return ToolOutput::err(format!("Background spawn failed: {}", e));
-        }
-    };
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
     let buf = Arc::new(Mutex::new(String::new()));
     let done = Arc::new(tokio::sync::Notify::new());
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    BG_SESSIONS.lock().await.insert(session_id.clone(), BgSession {
+        output: buf.clone(),
+        done: done.clone(),
+        finished: finished.clone(),
+    });
 
     let buf2 = buf.clone();
     let done2 = done.clone();
     let fin2 = finished.clone();
-    // P3: the completion notice is published from this same reader task, so
-    // registration and unregistration are structurally paired — whichever
-    // path the process exit takes, this task is the one that observed it.
     let owner_for_notice = ctx.session_id.clone();
     let sid_for_notice = session_id.clone();
     let cmd_for_notice = command_line;
-    // Ownership of the temp script moves into the reader task itself, whose
-    // guard is dropped only after `child.wait().await` below — deleting it any
-    // earlier could race with PowerShell still loading the file. (The outer
-    // future returns the instant the session is registered, so a guard declared
-    // there would unlink the script before the child started.)
+    let cancel = ctx.cancel.clone();
     let script_guard = TempScriptGuard(temp_script);
     tokio::spawn(async move {
+        // Guard lives as long as the running command (the outer future returns
+        // as soon as the session is registered).
         let _script_guard = script_guard;
-        use tokio::io::AsyncReadExt;
-        let mut combined = String::new();
-        if let Some(mut so) = stdout {
-            let mut s = String::new();
-            let _ = so.read_to_string(&mut s).await;
-            combined.push_str(&s);
+        // No wall-clock ceiling: see NO_TIMEOUT. Only Stop/cap ends it.
+        let r = run_command(cmd, NO_TIMEOUT, Some(cancel)).await;
+        let code = r.status.and_then(|s| s.code()).unwrap_or(-1);
+        let mut text = format_command_result(&r).text;
+        // Match the previous background rendering: a single combined buffer
+        // with the exit code appended, ANSI stripped (UI does not interpret ESC).
+        text = crate::textcodec::strip_ansi(&text);
+        if !text.contains("[exit code:") {
+            text.push_str(&format!("\n[exit code: {}]", code));
         }
-        if let Some(mut se) = stderr {
-            let mut s = String::new();
-            let _ = se.read_to_string(&mut s).await;
-            if !s.is_empty() {
-                combined.push_str("\n[stderr]\n");
-                combined.push_str(&s);
-            }
-        }
-        // 后台任务同 format_output：ANSI 颜色码在 UI 里只会变成字面量 `[31m`。
-        // 这里是 read_to_string（非 decode_bytes），但 ESC 是 ASCII，不影响其后的
-        // 多字节字符，直接对字符串处理即可。
-        let mut combined = crate::textcodec::strip_ansi(&combined);
-        let status = child.wait().await;
-        let code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-        combined.push_str(&format!("\n[exit code: {}]", code));
-        *buf2.lock().await = combined;
+        *buf2.lock().await = text.clone();
         fin2.store(true, std::sync::atomic::Ordering::SeqCst);
         done2.notify_waiters();
-        // P3: completion notice + gate release. The tail is capped because the
-        // notice is re-sent with the history on every subsequent turn (Java
-        // renders the same way for the same reason).
-        let tail: String = buf2.lock().await.chars().rev().take(800).collect::<Vec<_>>().into_iter().rev().collect();
+        // The notice is re-sent with the history on every subsequent turn, so
+        // cap its tail (Java renders the same way for the same reason).
+        let tail: String = text.chars().rev().take(800).collect::<Vec<_>>().into_iter().rev().collect();
         let notice = crate::react::bg_gate::render_bash_notice(
             &sid_for_notice,
             &cmd_for_notice,
@@ -926,13 +1168,9 @@ async fn run_background(
             &tail,
         );
         crate::react::bg_gate::publish(&owner_for_notice, notice).await;
+        // Structural pairing: no early return above this line, so the gate is
+        // released on timeout / cancel / cap / spawn failure as well as exit.
         crate::react::bg_gate::unregister_running(&sid_for_notice).await;
-    });
-
-    BG_SESSIONS.lock().await.insert(session_id.clone(), BgSession {
-        output: buf,
-        done,
-        finished,
     });
 
     ToolOutput::ok(format!(
@@ -1881,7 +2119,11 @@ impl Tool for SkillReadTool {
         // `load_all` is itself offloaded; the extra `read_skill_content` is one
         // small file read, kept on the blocking pool for the same reason.
         run_blocking(move || {
-            let skills = registry.load_all();
+            // `load_enabled`, not `load_all`: a disabled skill must not reach the
+            // model through skillread (Java `RegistrySkillProvider.readSkill`
+            // returns null for disabled skills). Reading its SKILL.md body would
+            // inject the very instructions the user switched off.
+            let skills = registry.load_enabled();
             match skills.iter().find(|s| s.name == name) {
                 Some(s) => match crate::skills::read_skill_content(&s.dir) {
                     Some(body) => ToolOutput::ok(format!("# {}\n\n{}", s.title, body)),
@@ -1911,7 +2153,10 @@ impl Tool for SkillRefreshTool {
     }
     async fn execute(&self, _args: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
         let registry = ctx.skill_registry();
-        let skills = registry.load_all();
+        // Management view (`skills_installed`) shows disabled skills so they can be
+        // re-enabled; the model-facing refresh must not — it is the same visible
+        // set as `skillread` / `skillsearch` / the prompt summary.
+        let skills = registry.load_enabled();
         if skills.is_empty() {
             return ToolOutput::ok("No skills installed.");
         }
@@ -1944,30 +2189,40 @@ impl Tool for SkillSearchTool {
     async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
         let query = args["query"].as_str().unwrap_or_default().to_string();
         let registry = ctx.skill_registry();
-        run_blocking(move || {
-            let skills = registry.load_all();
-            let matches = search_skills(&skills, &query);
-            if matches.is_empty() {
-                return ToolOutput::ok("未找到匹配技能。");
-            }
-            let mut out = String::from("<skill_list>\n");
-            for s in &matches {
-                out.push_str(&format!("- {}: {}\n", s.name, s.description));
-            }
-            out.push_str("</skill_list>");
-            ToolOutput::ok(out)
-        })
-        .await
+        run_blocking(move || ToolOutput::ok(search_visible_skills(&registry, &query)))
+            .await
     }
+}
+
+/// Render the `skillsearch` result for the **enabled-only** skill set.
+///
+/// Split out of the tool so the disabled-skill filter can be tested against a
+/// real registry without standing up a `ToolContext`. `load_enabled()` is the
+/// single filtering point (Java `getSkills()`); `search_skills` deliberately
+/// does not filter again — a second hand-written `enabled` check is exactly how
+/// the visible-set contract drifted between consumers in the first place.
+fn search_visible_skills(registry: &crate::skills::SkillRegistry, query: &str) -> String {
+    let skills = registry.load_enabled();
+    let matches = search_skills(&skills, query);
+    if matches.is_empty() {
+        return "未找到匹配技能。".to_string();
+    }
+    let mut out = String::from("<skill_list>\n");
+    for s in &matches {
+        out.push_str(&format!("- {}: {}\n", s.name, s.description));
+    }
+    out.push_str("</skill_list>");
+    out
 }
 
 /// Keyword search over skills, mirroring Java `RegistrySkillProvider.searchSkill`.
 ///
 /// The query is lower-cased and split on whitespace; a skill matches when **any**
-/// token is a substring of its name, title or description. Disabled skills are
-/// excluded (they must not reach the model, same rule as `skillread`), and the
-/// result is capped at 15 like Java. Kept as a free function so the matching rule
-/// is unit-testable without a registry on disk.
+/// token is a substring of its name, title or description, and the result is
+/// capped at 15 like Java. The caller passes the **enabled-only** set from
+/// `SkillRegistry::load_enabled()` — disabled skills must not reach the model,
+/// but that decision belongs to the registry, not to this matcher. Kept as a
+/// free function so the matching rule is unit-testable without a registry.
 fn search_skills<'a>(skills: &'a [crate::skills::Skill], query: &str) -> Vec<&'a crate::skills::Skill> {
     let keys: Vec<String> = query
         .to_lowercase()
@@ -1980,7 +2235,6 @@ fn search_skills<'a>(skills: &'a [crate::skills::Skill], query: &str) -> Vec<&'a
     }
     skills
         .iter()
-        .filter(|s| s.enabled)
         .filter(|s| {
             let name = s.name.to_lowercase();
             let title = s.title.to_lowercase();
@@ -2118,6 +2372,156 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         }
+    }
+
+    // ─── bash: detached-daemon (agent-browser) hang regression ──────────────
+    //
+    // The failing session (work-mw4iwpms) had one bash call that produced no
+    // frames for 40 minutes: `agent-browser` starts a persistent daemon which
+    // inherits the root shell's stdout/stderr. The root powershell.exe exits
+    // immediately, so `child.wait()` returns and the 120 s timeout never fires,
+    // while the OLD `pipes.await` / `read_to_end` waited for an EOF that could
+    // never arrive. These tests build exactly that shape in miniature, with a
+    // short timeout so a regression fails fast instead of hanging the suite.
+
+    /// Spawn a child that prints PARTIAL output, then exits while a detached
+    /// grandchild keeps the inherited stdio handles open and sleeps. Returns
+    /// the `Command` (stdio not yet attached) so each test can pick its path.
+    fn detached_holder_command(hold_ms: u64) -> Command {
+        let mut c = if cfg!(windows) {
+            // PowerShell launches the holder through Start-Process and returns
+            // at once; the holder inherits the shell's redirected handles.
+            let script = format!(
+                "Write-Output 'partial-before-detach'; Start-Process powershell -ArgumentList \
+                 '-NoProfile','-NonInteractive','-Command','Start-Sleep -Milliseconds {}' -WindowStyle Hidden",
+                hold_ms
+            );
+            let mut p = Command::new("powershell");
+            p.args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()]);
+            p
+        } else {
+            let script = format!(
+                "echo partial-before-detach; (sleep {}) &",
+                (hold_ms + 999) / 1000
+            );
+            let mut s = Command::new("sh");
+            s.args(["-c", script.as_str()]);
+            s
+        };
+        #[cfg(windows)]
+        {
+            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        c
+    }
+
+    #[tokio::test]
+    async fn bash_returns_when_a_detached_child_holds_stdio_open() {
+        let cmd = detached_holder_command(20_000);
+        let started = std::time::Instant::now();
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_command(cmd, 15_000, None),
+        )
+        .await
+        .expect("run_command hung on inherited stdio handles — the agent-browser bug is back");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10),
+            "root shell exited immediately; waiting for the daemon is the bug");
+        assert_eq!(r.outcome, CommandOutcome::Exited);
+        assert!(r.status.is_some(), "root exit status must be preserved");
+        let text = format_command_result(&r).text;
+        assert!(text.contains("partial-before-detach"),
+            "partial output must survive: {}", text);
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_kills_tree_and_keeps_partial_output() {
+        // A command that never exits on its own. The timeout branch must win
+        // (not the wait), the tree must be killed, and the output written so
+        // far must still reach the model.
+        let mut cmd = if cfg!(windows) {
+            let mut p = Command::new("powershell");
+            p.args(["-NoProfile", "-NonInteractive", "-Command",
+                "Write-Output 'partial-before-timeout'; Start-Sleep -Seconds 30"]);
+            p
+        } else {
+            let mut s = Command::new("sh");
+            s.args(["-c", "echo partial-before-timeout; sleep 30"]);
+            s
+        };
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x0800_0000);
+        }
+        let started = std::time::Instant::now();
+        let r = run_command(cmd, 1_000, None).await;
+        assert_eq!(r.outcome, CommandOutcome::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10),
+            "timeout must not wait for the 30 s child");
+        let text = format_command_result(&r).text;
+        assert!(text.contains("timed out"), "{}", text);
+        assert!(text.contains("partial-before-timeout"), "{}", text);
+    }
+
+    #[tokio::test]
+    async fn bash_normal_command_preserves_stdout_and_stderr() {
+        // Regression for the file-backed stdio rewrite: the fix must not trade
+        // "hangs forever" for "returns empty output". Exercise the real
+        // BashTool::execute path (prepare_powershell + HITL skip + run_command).
+        let s = Scratch::new("bash-normal-output");
+        let ctx = tool_ctx_for(&s.0);
+        let out = BashTool.execute(json!({
+            "command": if cfg!(windows) {
+                "Write-Output 'HELLO-STDOUT'; Write-Error 'HELLO-STDERR'"
+            } else {
+                "echo HELLO-STDOUT; echo HELLO-STDERR >&2"
+            }
+        }), &ctx).await;
+        assert!(out.text.contains("HELLO-STDOUT"),
+            "stdout lost through file redirect: {}", out.text);
+        assert!(out.text.contains("HELLO-STDERR"),
+            "stderr lost through file redirect: {}", out.text);
+        // `Write-Error` makes PowerShell exit 1, so assert the *field*, not 0.
+        assert!(out.text.contains("[exit code:"),
+            "exit code missing: {}", out.text);
+    }
+
+    #[tokio::test]
+    async fn bash_background_releases_gate_on_detached_holder() {
+        let s = Scratch::new("bg-detached");
+        let ctx = tool_ctx_for(&s.0);
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            BashTool.execute(json!({
+                "command": if cfg!(windows) {
+                    "Write-Output 'bg-partial'; Start-Process powershell -ArgumentList \
+                     '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 20' -WindowStyle Hidden"
+                } else {
+                    "echo bg-partial; (sleep 20) &"
+                },
+                "run_in_background": true
+            }), &ctx),
+        )
+        .await
+        .expect("run_background must return the session id immediately");
+        let text = match out { ToolOutput { text, .. } => text };
+        let sid = text.split("session_id=").nth(1)
+            .and_then(|v| v.split_whitespace().next())
+            .expect("session id in background response").to_string();
+        // The reader task must finish (and unregister the gate) even though a
+        // grandchild still holds the old pipe handles. Poll bash_output rather
+        // than asserting on internal globals that other tests may also touch.
+        let mut finished = false;
+        for _ in 0..40 {
+            let r = BashOutputTool.execute(json!({ "session_id": sid }), &ctx).await;
+            if r.text.starts_with("[finished]") {
+                assert!(r.text.contains("bg-partial"), "{}", r.text);
+                finished = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert!(finished, "background session never finished — gate stays armed forever");
     }
 
     impl Drop for Scratch {
@@ -3703,9 +4107,32 @@ mod tests {
 
     #[test]
     fn skillsearch_excludes_disabled_skills() {
-        // A disabled skill must not reach the model, same rule as skillread.
-        let skills = vec![skill("secret", "Secret", "hidden capability", false)];
-        assert!(search_skills(&skills, "secret").is_empty());
+        // Exercise the real production path: the tool hands `search_visible_skills`
+        // an enabled-only set from `SkillRegistry::load_enabled()`. Asserting on
+        // `search_skills` directly with a disabled `Skill` would keep passing even
+        // if the tool went back to `load_all()` — that was the blind spot in the
+        // old test after the hand-written filter moved into the registry.
+        crate::skills::invalidate_cache();
+        let scratch = Scratch::new("skillsearch-disabled");
+        scratch.write(
+            "on-skill/SKILL.md",
+            "---\nname: on-skill\ndescription: visible capability\nenabled: true\n---\n\n# On\n",
+        );
+        scratch.write(
+            "off-skill/SKILL.md",
+            "---\nname: off-skill\ndescription: hidden capability\nenabled: false\n---\n\n# Off\n",
+        );
+        let reg = crate::skills::SkillRegistry::with_dir(scratch.0.clone());
+        assert_eq!(reg.load_all().len(), 2, "setup: both skills must be on disk");
+
+        let out = search_visible_skills(&reg, "capability");
+        assert!(out.contains("on-skill"), "enabled skill must be searchable: {out}");
+        assert!(
+            !out.contains("off-skill") && !out.contains("hidden"),
+            "disabled skill leaked into the model through skillsearch: {out}"
+        );
+        assert_eq!(search_visible_skills(&reg, "hidden"), "未找到匹配技能。");
+        crate::skills::invalidate_cache();
     }
 
     #[test]

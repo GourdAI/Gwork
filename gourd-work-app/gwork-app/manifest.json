@@ -1,0 +1,104 @@
+{
+	"name": "GWork",
+	"appid": "__UNI__2C8A727",
+	"description": "",
+	"versionName": "3.0.4",
+	"versionCode": "26092302",
+	"uni-app-x": {
+		"vapor": true,
+		"styleIsolationVersion": "2",
+		"vapor-render-target": "bytecode",
+		"vapor-default-script-lang": "ts"
+	},
+	/* 快应用特有相关 */
+	"quickapp": {},
+	/* 小程序特有相关 */
+	"mp-weixin": {
+		"darkmode": true,
+		"appid": "",
+		"setting": {
+			"urlCheck": false
+		},
+		"usingComponents": true
+	},
+	"mp-alipay": {
+		"usingComponents": true
+	},
+	"mp-baidu": {
+		"usingComponents": true
+	},
+	"mp-toutiao": {
+		"usingComponents": true
+	},
+	"uniStatistics": {
+		"enable": false
+	},
+	"vueVersion": "3",
+	"workers": "workers",
+	"app": {
+		"defaultAppTheme": "auto",
+		"distribute": {
+			"icons": {
+				"android": {
+					"hdpi": "",
+					"xhdpi": "",
+					"xxhdpi": "",
+					"xxxhdpi": ""
+				}
+			}
+		}
+	},
+	"app-android": {
+		"distribute": {
+			"modules": {},
+			"icons": {
+				"hdpi": "",
+				"xhdpi": "",
+				"xxhdpi": "",
+				"xxxhdpi": ""
+			},
+			"splashScreens": {
+				"default": {}
+			},
+			"abiFilters": [
+				"arm64-v8a"
+			]
+		}
+	},
+	"app-ios": {
+		"distribute": {
+			"modules": {},
+			"icons": {},
+			"splashScreens": {}
+		}
+	},
+	"web": {
+		"darkmode": true,
+		"router": {
+			"mode": "",
+			"base": "./"
+		}
+	},
+	"app-harmony": {
+		"distribute": {
+			"bundleName": "test.json.xml",
+			"deviceTypes": [
+				"phone"
+			],
+			"deviceArchs": [
+				"arm64-v8a"
+			],
+			"signingConfigs": {
+				"default": {
+					"certpath": "/Users/json/Library/Application Support/HBuilder X/extensions/launcher/agc-certs/1789649321680.cer",
+					"keyAlias": "debugKey",
+					"keyPassword": "0000001B68553F0E3E449CDDF19F604B17B74573DEE135F3A2FCF535B68BCF07E2EEFFB58BAE2E399637DD",
+					"profile": "/Users/json/Library/Application Support/HBuilder X/extensions/launcher/agc-certs/1789649321680.p7b",
+					"signAlg": "SHA256withECDSA",
+					"storeFile": "/Users/json/Library/Application Support/HBuilder X/extensions/launcher/agc-certs/1789113937849.p12",
+					"storePassword": "0000001B68553F0E3E449CDDF19F604B17B74573DEE135F3A2FCF535B68BCF07E2EEFFB58BAE2E399637DD"
+				}
+			}
+		}
+	}
+}

@@ -1,0 +1,100 @@
+import { reactive } from 'vue';
+import { LLMModel, Provider, DefaultLLM, Userinfo } from '@/uni_modules/uni-ai-x/types.uts';
+
+// ---------------------------------------------------------------------------
+// GWork 接入占位（对齐 mobile/js/data.js 的 MODELS / BRAND）
+// ---------------------------------------------------------------------------
+
+// 1. 左侧菜单区域下方的用户信息：GWork 占位，不接 uni-id / uniCloud。
+//    真实用户资料（Blake / 积分 / 套餐）见 pages/mine/mine.uvue 的静态卡。
+//    TODO(GWork 后端)：登录成功后由宿主注入 nickname / avatar_file，
+//    再 reactive 赋值；此处不含任何账号、密码或 token。
+export const currentUser: Userinfo = reactive<Userinfo>({
+	_id: 'gwork-placeholder',
+	nickname: 'GWork 用户',
+	avatar_file: null
+})
+
+// 2. 点击用户头像后跳转的页面：GWork「我的」Tab 占位。
+//    注意：tabBar 页需用 uni.switchTab；上游 uni-ai-menu.uvue 用的是 navigateTo，
+//    因此这里只保留占位字符串并明确后续改造点，避免留下潜在运行时跳转失败。
+//    TODO(GWork 后端)：如需独立资料页，新增 pages/profile/profile 并在 pages.json 注册。
+export const userCenterPage = '/pages/mine/mine'
+
+// 3. 配置大语言模型
+//    顺序、名称与 common/workbuddy-data.uts 的 MODELS（即 mobile/js/data.js）
+//    逐项对应：快速 / 均衡 / 极致 / Hy4 preview / Hy3 / DeepSeek-V4.1-Flash /
+//    GLM-5.3 / GLM-5.3-Flash。默认模型为 Hy3（见下方 defaultLLM）。
+//
+//    modelId 采用上游 provider 的真实上游模型标识（qiniu OpenAI 兼容网关）：
+//      - 快速/均衡/极致 是 GWork 产品档位名，映射到具体上游模型；
+//      - Hy3 / Hy4 preview 为 GWork 自有模型档位名，暂以占位 id 表示；
+//      - DeepSeek / GLM 保留上游 qiniu 的真实 modelId。
+//    TODO(GWork 后端)：把占位 id 换成桌面内核/网关实际支持的模型枚举。
+const llmModelMap = new Map<string, Provider>([
+	[
+		'gwork', {
+			models: [
+				{ modelId: 'gwork/fast', name: '快速', thinking: false, image: false },
+				{ modelId: 'gwork/balanced', name: '均衡', thinking: true, image: false },
+				{ modelId: 'gwork/ultra', name: '极致', thinking: true, image: true },
+				{ modelId: 'gwork/hy4-preview', name: 'Hy4 preview', thinking: true, image: true },
+				{ modelId: 'gwork/hy3', name: 'Hy3', thinking: true, image: false },
+				{ modelId: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', thinking: true, image: true },
+				{ modelId: 'z-ai/glm-5.3', name: 'GLM-5.3', thinking: true, image: false },
+				{ modelId: 'z-ai/glm-5.3-flash', name: 'GLM-5.3-Flash', thinking: true, image: true },
+			],
+			// 占位：指向 GWork 桌面内核的 OpenAI 兼容代理路径。
+			// 不含 host / 端口 / 密钥：部署时由宿主注入（见 INTEGRATION.md）。
+			// TODO(GWork 后端)：把 baseURL 改为
+			//   http://<内核局域网地址>:<port>/v1/chat/completions
+			//   或在 getToken 中返回 host 注入的完整 endpoint；
+			//   桌面内核以 0.0.0.0 监听时，移动端请用局域网可达 IP，而非 0.0.0.0。
+			baseURL: 'https://gwork-backend.invalid/v1/chat/completions',
+			// 不配置 webSearchURL：联网搜索能力待 GWork 后端提供后接入。
+			async getToken(): Promise<string> {
+				// 安全约束：严禁在客户端硬编码任何密钥 / webAuthUser / webAuthPass。
+				//
+				// 接入方式 A（推荐，宿主注入）：GWork 桌面内核通过自定义基座 /
+				// UTS 原生插件把短期 token 写入 uni 存储，键名由宿主约定，例如
+				// `gwork.host.token`；这里只读、不落盘、不打印。
+				//   TODO(GWork 后端)：
+				//   const token = uni.getStorageSync('gwork.host.token') as string
+				//   if (token.length == 0) throw new Error('GWork 内核未注入 token')
+				//   return token
+				//
+				// 接入方式 B（自有服务端换临时 token）：请求自己的后端接口，
+				// 后端使用 webAuthUser / webAuthPass 做 Basic Auth 后签发短期 token；
+				// 账号密码只存在于后端，绝不出现在 App 源码或 manifest。
+				//   TODO(GWork 后端)：
+				//   const res = await uni.request({
+				//     url: 'https://<your-gwork-backend>/get-token',
+				//     method: 'GET'
+				//   })
+				//   if (res.statusCode != 200) throw new Error('获取临时token失败')
+				//   return res.getString('data.token', '')
+				//
+				// 当前为骨架阶段：未接后端时抛出明确错误，不做静默伪造 token。
+				throw new Error('GWork 后端尚未注入 token：请在 config.uts getToken 接入宿主注入或自有服务端')
+			}
+		}
+	]
+])
+
+const providerNameList: string[] = []
+llmModelMap.forEach((_, key: string) => {
+	providerNameList.push(key)
+})
+
+if (providerNameList.length < 1) {
+	throw new Error('至少需要配置一个大语言模型提供商')
+}
+
+// 默认 Hy3（对齐 mobile/js/data.js MODELS 的 selected: true 与 app.js DEFAULT_STATE.modelId）
+const defaultLLM: DefaultLLM = {
+	provider: providerNameList[0]!,
+	model: 'gwork/hy3'
+}
+
+export default llmModelMap
+export { llmModelMap, type LLMModel, providerNameList, defaultLLM }

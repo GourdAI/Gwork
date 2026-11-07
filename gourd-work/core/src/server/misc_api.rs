@@ -300,18 +300,123 @@ pub async fn replay_full(State(state): State<Arc<AppState>>, Query(q): Query<Rep
     Json(serde_json::json!({"code": 200, "data": {"frames": filtered}}))
 }
 
-/// GET /web/chat/session/tool-usage — aggregate tool call counts for a session.
-pub async fn tool_usage(State(state): State<Arc<AppState>>, Query(q): Query<SessionQuery>) -> Json<serde_json::Value> {
+/// GET /web/chat/session/tool-usage — memory & skill usage for a session.
+///
+/// Java kernel contract (`WebController.sessionToolUsage` →
+/// `SessionToolUsageService.usage`), which the shared frontend
+/// (`app-task-monitor.js` `renderSkills`/`renderMemory`) reads field-by-field:
+///
+/// ```json
+/// { "sessionId": ..., "exists": bool,
+///   "memory": {"updated","extractCount","totalCount","names"},
+///   "skills": [{"name","toolName","count","displayName"?}],
+///   "skillCount": 0, "toolCallCount": 0 }
+/// ```
+///
+/// The previous port returned a bare `[{tool,count}]` array, so `data.skills`
+/// and `data.memory` were always `undefined` and the monitor panel showed the
+/// empty state even in sessions full of `skillread`/`memory_extract` calls —
+/// the reported "技能调用了但右侧没统计". Both kernels share the same frontend,
+/// so the shape must match Java's exactly.
+///
+/// `root` is honoured like every other session-scoped endpoint (the frontend
+/// sends the project root; a session bound to a project lives under it):
+/// without the binding, a workspace session would be read from the global
+/// area and the panel would silently show empty.
+#[derive(serde::Deserialize, Default)]
+pub struct ToolUsageQuery {
+    #[serde(rename = "sessionId", default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub root: String,
+}
+
+pub async fn tool_usage(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<ToolUsageQuery>,
+) -> Json<serde_json::Value> {
     if !valid_session(&q.session_id) {
         return Json(serde_json::json!({"code": 400, "description": "Invalid sessionId"}));
     }
-    // Count `action_start` frames without ever building the frame list: the
-    // endpoint needs only per-tool totals. See `SessionStore::tool_usage_counts`.
-    let store = super::store_for(&state, &q.session_id);
-    let counts = store.tool_usage_counts(&q.session_id);
-    let items: Vec<serde_json::Value> = counts
-        .into_iter()
-        .map(|(tool, count)| serde_json::json!({"tool": tool, "count": count}))
+    // Route to the session's owning store: the `root` query param is the
+    // project root the frontend resolved (same value as `X-Session-Cwd`).
+    // Prefer the explicit param, fall back to the header, then the existing
+    // binding — mirroring `resolveSessionRoot` in the Java endpoint.
+    let root_param = q.root.trim().to_string();
+    let header_root = headers
+        .get("x-session-cwd")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let cwd = if !root_param.is_empty() {
+        Some(root_param)
+    } else {
+        header_root
+    };
+    let store = super::bind_session_cwd(&state, &q.session_id, cwd.as_deref());
+
+    let (exists, memory) = store.memory_usage(&q.session_id);
+    let skills = store.skill_usage(&q.session_id);
+
+    // Total tool calls (all tools, not just memory/skills): the stream scan
+    // for skills also gives us this cheaply — but keep the scans separate and
+    // honest: one aggregate pass over action_start rows would be cleaner, yet
+    // the two scans are substring-prefiltered and never materialise frames.
+    // `toolCallCount` mirrors the total in Java's response; the monitor panel
+    // does not display it today but the contract keeps the field.
+    let tool_call_count = store.tool_call_total(&q.session_id);
+
+    // Display names: same registry + same resolution as the skills settings
+    // page (`settings_api::skills_installed` → `display_name_of`), so the
+    // monitor row and the skill card can never show two different names for
+    // one skill. Registry scoped to the session's workspace when one is
+    // bound, global otherwise.
+    let ws_root = state.session_roots.bound_root(&q.session_id);
+    let registry = match ws_root.as_deref() {
+        Some(root) => crate::skills::SkillRegistry::with_workspace(std::path::Path::new(root)),
+        None => crate::skills::SkillRegistry::new(),
+    };
+    let display_names: std::collections::HashMap<String, String> = registry
+        .load_all()
+        .iter()
+        .filter_map(|s| {
+            crate::skills::display_name_of(s.market.as_ref()).map(|dn| (s.name.clone(), dn))
+        })
         .collect();
-    Json(serde_json::json!({"code": 200, "data": items}))
+
+    let rows = skills.sorted_rows();
+    let skill_rows: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|(name, tool, count)| {
+            let mut row = serde_json::json!({
+                "name": name,
+                "toolName": tool,
+                "count": count,
+            });
+            if let Some(dn) = display_names.get(name) {
+                if !dn.trim().is_empty() {
+                    row["displayName"] = serde_json::json!(dn.trim());
+                }
+            }
+            row
+        })
+        .collect();
+    let skill_count: u64 = rows.iter().map(|(_, _, c)| c).sum();
+
+    Json(serde_json::json!({
+        "code": 200,
+        "data": {
+            "sessionId": q.session_id,
+            "exists": exists,
+            "memory": {
+                "updated": memory.extract_count > 0,
+                "extractCount": memory.extract_count,
+                "totalCount": memory.total_count,
+                "names": memory.names,
+            },
+            "skills": skill_rows,
+            "skillCount": skill_count,
+            "toolCallCount": tool_call_count,
+        }
+    }))
 }

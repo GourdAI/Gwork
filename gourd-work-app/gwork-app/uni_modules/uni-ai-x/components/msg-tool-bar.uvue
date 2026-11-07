@@ -1,0 +1,167 @@
+<template>
+	<view class="uni-ai-tool-bar uni-theme-root" :style="toolBarStyle">
+		<!-- 复制按钮、重新回答按钮 -->
+		<view class="uni-ai-tool-bar-btn" :style="toolBarButtonStyle" @click="loop" v-if="msg.from_uid == 'uni-ai' && isLastAiMsg">
+			<text class="uni-ai-tool-bar-icon uni-ai-tool-bar-btn-loop" :style="loopIconStyle" flatten>{{loopIcon}}</text>
+		</view>
+		<view class="uni-ai-tool-bar-btn" :style="toolBarButtonStyle" @click="copy">
+			<text class="uni-ai-tool-bar-icon uni-ai-tool-bar-btn-copy" :style="copyIconStyle" flatten>{{copyIcon}}</text>
+		</view>
+		<!-- <view class="btn"  @click="deleteMsg" v-if="aiState != 'processing'">
+			<uni-icons class="delete" type="trash" size="22" color="#999"></uni-icons>
+		</view> -->
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import {uniAi, MsgItem, uiTheme} from '@/uni_modules/uni-ai-x/sdk';
+	import utils from '@/uni_modules/uni-ai-x/sdk/utils.uts';
+	
+	const props = defineProps<{
+		msg: MsgItem
+	}>()
+	
+	const msg = props.msg as MsgItem;
+	
+	const uicon = (code: string) => {
+		// #ifdef APP
+		let codes = code.split('%u');
+		let chars = codes.map(code => {
+			let hexCode = parseInt(code, 16);
+			return String.fromCharCode(hexCode);
+		});
+		return chars.join('');
+		// #endif
+		// #ifndef APP
+		return unescape(`%u${code}`) as string
+		// #endif
+	}
+	
+	const aiState = computed<string>(() => {
+		return uniAi.currentChat!.state
+	})
+	
+	const isLastAiMsg = computed<boolean>(() => {
+		return msg._id == uniAi.lastAiMsg?._id
+	})
+	
+	const copyIcon = computed<string>(() => {
+		return uicon('e60c')
+	})
+	
+	const loopIcon = computed<string>(() => {
+		return uicon('e633')
+	})
+
+	const toolBarBackgroundColor = computed<string>(() => {
+		return uiTheme.value == 'dark' ? '#25282c' : '#ffffff'
+	})
+
+	const toolBarIconColor = computed<string>(() => {
+		return uiTheme.value == 'dark' ? '#b0b0b0' : '#999999'
+	})
+
+	const toolBarStyle = computed<string>(() => {
+		return 'width:100%;flex-direction:row;background-color:' + toolBarBackgroundColor.value + ';'
+	})
+
+	const toolBarButtonStyle = computed<string>(() => {
+		return 'width:30px;height:30px;align-items:center;justify-content:center;flex-shrink:0;margin-top:5px;margin-right:15px;'
+	})
+
+	const copyIconStyle = computed<string>(() => {
+		return 'font-size:20px;color:' + toolBarIconColor.value + ';font-family:uniAiIconFontFamily;'
+	})
+
+	const loopIconStyle = computed<string>(() => {
+		return 'font-size:20px;color:' + toolBarIconColor.value + ';font-family:UniIconsFontFamily;'
+	})
+	
+	const copyToClipboard = (text: string) => {
+		uni.setClipboardData({
+			data: text,
+			showToast: false,
+			success: () => {
+				utils.showCopySuccessToast()
+			},
+			fail: () => {
+				utils.showCopyFailureToast()
+			}
+		})
+	}
+	
+	const copy = () => {
+		// 请求出错时错误信息存放于 error_msg，优先复制错误信息，便于用户反馈问题
+		const errorMsg = msg.error_msg
+		if (errorMsg != null && errorMsg.length > 0) {
+			copyToClipboard(errorMsg)
+			return
+		}
+		if (typeof msg.body != 'string') {
+			utils.showCopyFailureToast()
+			return
+		}
+		copyToClipboard(msg.body as string)
+	}
+	
+	const loop = async () => {
+		if (uniAi.currentChat!.state == 'processing') {
+			uniAi.currentChat!.state = 'stop'
+			uniAi.abortRequest()
+		}
+		await nextTick()
+		uniAi.resetMsg(msg)
+		uniAi.answerQuestion(msg)
+	}
+	
+	// const deleteMsg = () => {
+	// 	uniAi.deleteMsg(msg._id)
+	// }
+</script>
+
+<style lang="scss">
+	@font-face {
+		// #ifdef WEB
+		font-display: swap;
+		// #endif
+		font-family: uniAiIconFontFamily;
+		src: url('/uni_modules/uni-ai-x/static/font/iconfont.ttf');
+	}
+	@font-face {
+		// #ifdef WEB
+		font-display: swap;
+		// #endif
+		font-family: UniIconsFontFamily;
+		src: url('/uni_modules/uni-icons/components/uni-icons/uniicons.ttf');
+	}
+	.uni-ai-tool-bar {
+		width: 100%;
+		flex-direction: row;
+	}
+
+	.uni-ai-tool-bar-btn {
+		width: 30px;
+		height: 30px;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		margin-top: 5px;
+		margin-right: 15px;
+		/* #ifdef WEB */
+		cursor: pointer;
+		/* #endif */
+	}
+
+	.uni-ai-tool-bar-icon {
+		font-size: 20px;
+		color: var(--text-tertiary);
+	}
+
+	.uni-ai-tool-bar-btn-copy {
+		font-family: uniAiIconFontFamily;
+	}
+
+	.uni-ai-tool-bar-btn-loop {
+		font-family: UniIconsFontFamily;
+	}
+</style>

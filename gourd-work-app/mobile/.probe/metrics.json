@@ -1,0 +1,790 @@
+[
+  {
+    "name": "01-tasks-idle",
+    "tab": "tasks",
+    "panel": "none",
+    "theme": "system",
+    "hash": "",
+    "stateTab": "tasks",
+    "statePanel": null,
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 80,
+    "activeSolid": 1,
+    "brandLogoOk": true,
+    "brandName": "GWork",
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 103775
+  },
+  {
+    "name": "02-tasks-focus",
+    "tab": "tasks",
+    "panel": "none",
+    "theme": "system",
+    "hash": "",
+    "stateTab": "tasks",
+    "statePanel": null,
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 72,
+    "activeSolid": 1,
+    "brandLogoOk": true,
+    "brandName": "GWork",
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 115810
+  },
+  {
+    "name": "03-loop",
+    "tab": "loop",
+    "panel": "none",
+    "theme": "system",
+    "hash": "",
+    "stateTab": "loop",
+    "statePanel": null,
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 27,
+    "activeSolid": 1,
+    "brandLogoOk": null,
+    "brandName": null,
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 48320
+  },
+  {
+    "name": "04-discover",
+    "tab": "discover",
+    "panel": "none",
+    "theme": "system",
+    "hash": "",
+    "stateTab": "discover",
+    "statePanel": null,
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 33,
+    "activeSolid": 1,
+    "brandLogoOk": null,
+    "brandName": null,
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 44850
+  },
+  {
+    "name": "05-mine",
+    "tab": "mine",
+    "panel": "none",
+    "theme": "system",
+    "hash": "",
+    "stateTab": "mine",
+    "statePanel": null,
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 93,
+    "activeSolid": 1,
+    "brandLogoOk": null,
+    "brandName": null,
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [
+      "list-row",
+      "list-row",
+      "row-label",
+      {},
+      {},
+      "list-row"
+    ],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 53174
+  },
+  {
+    "name": "06-drawer",
+    "tab": "tasks",
+    "panel": "drawer",
+    "theme": "system",
+    "hash": "",
+    "stateTab": "tasks",
+    "statePanel": "drawer",
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 95,
+    "activeSolid": 1,
+    "brandLogoOk": true,
+    "brandName": "GWork",
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 26617
+  },
+  {
+    "name": "07-devices",
+    "tab": "tasks",
+    "panel": "devices",
+    "theme": "system",
+    "hash": "",
+    "stateTab": "tasks",
+    "statePanel": "devices",
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 107,
+    "activeSolid": 1,
+    "brandLogoOk": true,
+    "brandName": "GWork",
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 86522
+  },
+  {
+    "name": "08-attach",
+    "tab": "tasks",
+    "panel": "attach",
+    "theme": "system",
+    "hash": "",
+    "stateTab": "tasks",
+    "statePanel": "attach",
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 107,
+    "activeSolid": 1,
+    "brandLogoOk": true,
+    "brandName": "GWork",
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 53075
+  },
+  {
+    "name": "09-models",
+    "tab": "tasks",
+    "panel": "models",
+    "theme": "system",
+    "hash": "",
+    "stateTab": "tasks",
+    "statePanel": "models",
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 197,
+    "activeSolid": 1,
+    "brandLogoOk": true,
+    "brandName": "GWork",
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 60042
+  },
+  {
+    "name": "10-dark",
+    "tab": "mine",
+    "panel": "none",
+    "theme": "dark",
+    "hash": "",
+    "stateTab": "mine",
+    "statePanel": null,
+    "stateTheme": "dark",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(20, 20, 22)",
+    "textLen": 93,
+    "activeSolid": 1,
+    "brandLogoOk": null,
+    "brandName": null,
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [
+      "list-row",
+      "list-row",
+      "row-label",
+      {},
+      {},
+      "list-row"
+    ],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 56903
+  },
+  {
+    "name": "11-deeplink-loop",
+    "tab": "loop",
+    "panel": "none",
+    "theme": "system",
+    "hash": "#loop",
+    "stateTab": "loop",
+    "statePanel": null,
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 27,
+    "activeSolid": 1,
+    "brandLogoOk": null,
+    "brandName": null,
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 48320
+  },
+  {
+    "name": "12-deeplink-mine",
+    "tab": "mine",
+    "panel": "none",
+    "theme": "system",
+    "hash": "#mine",
+    "stateTab": "mine",
+    "statePanel": null,
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 93,
+    "activeSolid": 1,
+    "brandLogoOk": null,
+    "brandName": null,
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [
+      "list-row",
+      "list-row",
+      "row-label",
+      {},
+      {},
+      "list-row"
+    ],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 53174
+  },
+  {
+    "name": "13-dispatch",
+    "tab": "discover",
+    "panel": "none",
+    "theme": "system",
+    "hash": "",
+    "stateTab": "discover",
+    "statePanel": null,
+    "stateTheme": "system",
+    "vw": 320,
+    "vh": 568,
+    "rootTop": 0,
+    "rootH": 568,
+    "rootBottom": 568,
+    "tabTop": 492,
+    "tabbarBottom": 568,
+    "tabH": 76,
+    "scrollY": 0,
+    "docScrollTop": 0,
+    "activeAnimations": 0,
+    "bg": "rgb(250, 250, 250)",
+    "textLen": 33,
+    "activeSolid": 1,
+    "brandLogoOk": null,
+    "brandName": null,
+    "faviconOk": true,
+    "visibleWorkbuddy": false,
+    "overflow": [],
+    "clipped": [],
+    "tabs": [
+      {
+        "t": "任务",
+        "l": 0,
+        "r": 80,
+        "w": 80
+      },
+      {
+        "t": "定时任务",
+        "l": 80,
+        "r": 160,
+        "w": 80
+      },
+      {
+        "t": "发现",
+        "l": 160,
+        "r": 240,
+        "w": 80
+      },
+      {
+        "t": "我的",
+        "l": 240,
+        "r": 320,
+        "w": 80
+      }
+    ],
+    "tabbarW": 320,
+    "errors": [],
+    "shotBytes": 44850
+  }
+]

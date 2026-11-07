@@ -1,0 +1,166 @@
+
+import { HighLighterOptions, ILineTokens, IToken } from '../interface.uts'
+import { ScopeparserBridge } from "scopeparser4ios"
+
+type ktToken = {
+	start : number; // byte offset
+	end : number;   // byte offset
+	token : string;
+}
+
+function codePointToUtf8Bytes(codePoint : number) : number {
+	if (codePoint <= 0x7F) return 1
+	if (codePoint <= 0x7FF) return 2
+	if (codePoint <= 0xFFFF) return 3
+	return 4
+}
+
+function mapByteOffsetsToCharOffsets(text : string, tokens : ktToken[]) : ktToken[] {
+	const byteToChar : Map<number, number> = new Map()
+	let byteIndex = 0
+	let charIndex = 0
+	for (let index = 0; index < text.length; index++) {
+		const codePoint = text.codePointAt(index)
+		if (codePoint == null) continue
+		const utf8Length = codePointToUtf8Bytes(codePoint)
+		byteToChar.set(byteIndex, charIndex)
+		const charWidth = codePoint > 0xFFFF ? 2 : 1
+		if (charWidth == 2) index++
+		byteIndex += utf8Length
+		charIndex += charWidth
+		byteToChar.set(byteIndex, charIndex)
+	}
+	// Native ranges decorate the source; gaps and invalid ranges must not remove text.
+	const result = [] as ktToken[]
+	let cursor = 0
+	for (const token of tokens) {
+		const mappedStart = byteToChar.get(token.start)
+		const mappedEnd = byteToChar.get(token.end)
+		// Only accept UTF-8 character boundaries, never expand invalid offsets to a full line.
+		if (mappedStart == null || mappedEnd == null) continue
+		const start = Math.max(cursor, mappedStart!)
+		const end: number = mappedEnd!
+		if (start >= end) continue
+		if (cursor < start) result.push({ start: cursor, end: start, token: '' } as ktToken)
+		result.push({ start, end, token: token.token } as ktToken)
+		cursor = end
+	}
+	if (cursor < charIndex) result.push({ start: cursor, end: charIndex, token: '' } as ktToken)
+	return result
+}
+
+export class CreateHighLighter {
+	public langMap: Map<string, string>
+	public handleMap: Map<string, any>
+	public grammar: ScopeparserBridge
+	private sessions = new Map<string, any>()
+	constructor(options : HighLighterOptions) {
+			const languages = options.languages!;
+			const langMap : Map<string, string> = new Map();
+			for (let id in languages) {
+			
+				try {
+					let jsonStr = JSON.stringify(languages[id])
+					langMap.set(id, jsonStr!)
+				} catch {
+			
+				}
+			}
+			this.langMap = langMap
+			this.handleMap = new Map()
+			this.grammar = new ScopeparserBridge()
+	}
+	releaseSession(sessionId: string): void {
+		const handle = this.sessions.get(sessionId)
+		if (handle != null) this.grammar.destroyStackHandle(handle)
+		this.sessions.delete(sessionId)
+	}
+	async tokenizeLines(sessionId: string, langId: string, lines: string[], reset: boolean): Promise<ILineTokens[]> {
+		const tmlStr = this.langMap.get(langId)
+		if (tmlStr == null) return []
+		if (reset) this.releaseSession(sessionId)
+		let handle = this.sessions.get(sessionId)
+		if (handle == null) {
+			handle = this.grammar.addGrammar(withLangId = langId, jsonText = tmlStr!)
+			this.sessions.set(sessionId, handle)
+		}
+		const result = [] as ILineTokens[]
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i] + '\n'
+			const raw: string | null = await this.grammar.tokenizeLine(withHandle = handle, langId = langId, text = line)
+			if (raw == null) throw new Error('Code tokenizer returned no result')
+			const parsed = JSON.parseArray<ktToken>(raw!) ?? [] as ktToken[]
+			const tokens = [] as IToken[]
+			mapByteOffsetsToCharOffsets(line, parsed).forEach((item: ktToken) => {
+				tokens.push({ startIndex: item.start, endIndex: item.end, scopes: item.token.split(' ') } as IToken)
+			})
+			result.push({ tokens } as ILineTokens)
+		}
+		return result
+	}
+	// Serialize inside native UTS: nested native objects must not cross the JS bridge.
+	async tokenizeLinesJson(sessionId: string, langId: string, lines: string[], reset: boolean): Promise<string> {
+		const rows: ILineTokens[] = await this.tokenizeLines(sessionId, langId, lines, reset)
+		const json: string | null = JSON.stringify(rows)
+		if (json == null) throw new Error('Code tokenizer serialization failed')
+		return json!
+	}
+	async tokenizeLine(langId : string, lineText : string, state : any): Promise<ILineTokens | null> {
+
+		let res : ILineTokens | null = null
+		let tmlStr = this.langMap.get(langId)
+		if (tmlStr === null) return null
+		let handle  = this.handleMap.get(langId)
+		if (handle === null) {
+			handle = this.grammar.addGrammar(withLangId = langId, jsonText = tmlStr!)
+			this.handleMap.set(langId, handle)
+		}
+		const lineTokens : string | null = await this.grammar.tokenizeLine(withHandle = handle, langId = langId, text = lineText);
+		
+		if (lineTokens === null) return null
+
+		const tokens : IToken[] = []
+		
+
+		const parsed = JSON.parseArray<ktToken>(lineTokens) ?? [] as ktToken[]
+		const lineTokensJson = mapByteOffsetsToCharOffsets(lineText, parsed)
+		
+		for (let j = 0; j < lineTokensJson.length; j++) {
+			const token: ktToken = (lineTokensJson[j]) as ktToken
+			const iToken = { startIndex: token.start, endIndex: token.end, scopes: token.token.split(" ") } as IToken
+			tokens.push(iToken)
+		}
+		let nTokens : ILineTokens = { tokens } as ILineTokens
+		// console.log(19191, nTokens)
+		res = nTokens
+		
+		return res
+		
+	}
+	async tokenizeFullText(langId : string, fullCodeText : string): Promise<ILineTokens[]> {
+		let res : ILineTokens[] = []
+		let tmlStr = this.langMap.get(langId)
+		if (tmlStr === null) return []
+		let handle = this.grammar.addGrammar(withLangId = langId, jsonText = tmlStr!)
+		const textN = fullCodeText.split(/\r\n|\r|\n/);
+		for (let i = 0; i < textN.length; i++) {
+			const line = textN[i] + "\n";
+			const lineTokens : string | null = await this.grammar.tokenizeLine(withHandle = handle, langId = langId, text = line);
+			if (lineTokens === null) {
+				this.grammar.resetStackHandle(handle)
+				this.grammar.destroyStackHandle(handle)
+				return []
+			}
+			const tokens : IToken[] = []
+			const lineTokensJson : ktToken[] = JSON.parseArray<ktToken>(lineTokens) ?? [] as ktToken[]
+			const charOffsets = mapByteOffsetsToCharOffsets(line, lineTokensJson)
+			charOffsets.forEach(token => {
+				tokens.push({ startIndex: token.start, endIndex: token.end, scopes: token.token.split(" ") } as IToken)
+			})
+			res.push({ tokens } as ILineTokens)
+		}
+		this.grammar.resetStackHandle(handle)
+		this.grammar.destroyStackHandle(handle)
+		return res
+	}
+}

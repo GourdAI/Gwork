@@ -1,0 +1,12 @@
+const fs = require('fs');
+const a = fs.readFileSync(__dirname + '/../js/app.js', 'utf8');
+const used = new Set([...a.matchAll(/data-action=\\?"([a-z-]+)\\?"/g)].map(m => m[1]));
+const b = a.match(/var ACTIONS = \{([\s\S]*?)\n  \};/);
+const keys = new Set([...b[1].matchAll(/^\s*['"]([a-z-]+)['"]\s*:/gm)].map(m => m[1]));
+const noHandler = [...used].filter(x => !keys.has(x));
+const noEntry = [...keys].filter(x => !used.has(x));
+console.log('data-action count:', used.size, '| ACTIONS count:', keys.size);
+console.log('按钮无处理器:', JSON.stringify(noHandler));
+console.log('处理器无 UI 入口:', JSON.stringify(noEntry));
+console.log('dispatch 测试接口存在:', a.includes('dispatch: function'));
+if (noHandler.length) process.exitCode = 1;

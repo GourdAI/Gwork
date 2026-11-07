@@ -1,0 +1,529 @@
+<!--
+  GWork 首页「任务」（图 75 / 79 / 78 / 82 / 76 / 74）
+  ------------------------------------------------------------------
+  移植自 mobile/js/app.js 的 renderHome() + renderInput() + popups：
+    - 顶部：菜单胶囊 + GWork 标题 + 「☁ 云电脑 >」（图 75）
+- 中部：机器人 + 大标题「GWork，我帮你」+ 4 建议胶囊 + 换一换（D5）
+    - 底部输入：空闲态单行「发消息或按住说话… + ⊕」；
+      激活态（图 79）多行输入 + 模型选择 Hy3 + 发送按钮（D5 两态输入框）
+    - 面板：图 74 选择设备 / 图 78 快捷面板 / 图 82 选择模型 / 图 76 侧滑抽屉
+  数据来自 common/workbuddy-data.uts（= mobile/js/data.js 的 UTS 翻译）。
+  文案、层级与 9 张参考图一致；图标以 Unicode 字形 + view 边框模拟，
+  不依赖上游图标组件，避免额外资源 404。
+-->
+<template>
+	<view class="gw-page-root" :style="pageStyle">
+		<view class="gw-statusbar"></view>
+
+		<!-- 顶部品牌行（图 75）：菜单按钮 / 标题 / 云电脑 -->
+		<view class="gw-home-head">
+			<view class="gw-head-menu" :style="themeSurface" @click="onDrawerClick">
+				<view class="gw-menu-line" :style="themeText"></view>
+				<view class="gw-menu-line" :style="themeText"></view>
+			</view>
+		<view class="gw-head-title-wrap">
+			<view class="gw-head-brand-row">
+				<image class="gw-head-brand-logo" :src="brand.logo" mode="aspectFit"></image>
+				<text class="gw-head-title" :style="themeText">{{ brand.name }}</text>
+			</view>
+			<view class="gw-head-sub" @click="onDeviceClick">
+					<text class="gw-head-cloud" :style="themeMuted">☁</text>
+					<text class="gw-head-sub-text" :style="themeMuted">{{ brand.device }}</text>
+					<text class="gw-head-chevron" :style="themeMuted">›</text>
+				</view>
+			</view>
+		</view>
+
+		<!-- 中部主视觉（图 75） -->
+		<view class="gw-home-main" :style="pageStyle">
+			<image class="gw-home-robot" src="/static/robot.png" mode="aspectFit"></image>
+			<text class="gw-home-welcome" :style="themeText">{{ brand.welcome }}</text>
+
+			<view class="gw-home-suggests">
+				<view
+					class="gw-suggest"
+					v-for="(item, index) in visibleSuggestions"
+					:key="index"
+					:style="themeSurface"
+					@click="onSuggestClick(item)"
+				>
+					<text class="gw-suggest-icon" :style="themeText">{{ item.icon }}</text>
+					<text class="gw-suggest-label" :style="themeText">{{ item.label }}</text>
+				</view>
+			</view>
+
+			<view class="gw-home-refresh" :style="themeSurface2" @click="onRefreshClick">
+				<text class="gw-refresh-icon" :style="themeText2">↻</text>
+				<text class="gw-refresh-text" :style="themeText2">换一换</text>
+			</view>
+		</view>
+
+		<!-- 底部输入区（图 75 空闲态 / 图 79 激活态），对应 app.js renderInput() -->
+		<view class="gw-home-input-area">
+			<view class="gw-input-card" :style="themeSurface" :class="inputActive ? 'gw-input-card-active' : ''">
+				<!-- 空闲态：单行 -->
+				<view class="gw-input-idle-row" v-if="!inputActive">
+					<text class="gw-input-voice" :style="themeText" @click="onVoiceClick">·))</text>
+					<textarea
+						class="gw-input-idle"
+						:style="themeText"
+						:placeholder="inputPlaceholder"
+						placeholder-class="gw-input-placeholder"
+						:auto-height="false"
+						@focus="onInputFocus"
+						v-model="inputText"
+					></textarea>
+					<text class="gw-input-plus" :style="themeText" @click="onPlusClick">＋</text>
+				</view>
+
+				<!-- 激活态：多行输入 + 模型 + 发送 -->
+				<view class="gw-input-active-wrap" v-else>
+					<textarea
+						class="gw-input-active"
+						:style="themeText"
+						placeholder="发消息…"
+						placeholder-class="gw-input-placeholder"
+						:auto-height="false"
+						v-model="inputText"
+					></textarea>
+					<view class="gw-input-toolbar">
+						<text class="gw-input-voice" :style="themeText" @click="onVoiceClick">·))</text>
+						<view class="gw-model-select" @click="onModelClick">
+							<text class="gw-model-dot" :style="themeText">◉</text>
+							<text class="gw-model-name" :style="themeText">{{ currentModelName }}</text>
+							<text class="gw-model-arrow" :style="themeMuted">⌄</text>
+						</view>
+						<text class="gw-input-plus" :style="themeText" @click="onPlusClick">＋</text>
+						<view class="gw-send-btn" :style="themeSendButton" @click="onSend">
+							<text class="gw-send-arrow" :style="'color:' + sendInk">▲</text>
+						</view>
+					</view>
+				</view>
+			</view>
+			<view class="gw-gesturebar"></view>
+		</view>
+
+		<!-- ===== 面板层（图 74 / 76 / 78 / 82），对应 app.js popups ===== -->
+		<view class="gw-scrim" :style="themeScrim" v-if="sheetVisible" @click="closeAllSheets"></view>
+
+		<!-- 图 74：选择设备 -->
+		<view class="gw-sheet" :style="sheetStyle" v-if="deviceSheetVisible">
+			<view class="gw-sheet-head">
+				<text class="gw-sheet-title" :style="themeText">选择设备</text>
+				<text class="gw-sheet-close" :style="themeMuted" @click="closeAllSheets">×</text>
+			</view>
+			<view class="gw-sheet-group" :style="themeSurface2">
+				<view class="gw-device-row" v-for="(device, index) in devices" :key="device.id">
+					<text class="gw-device-icon" :style="themeText">{{ device.id == 'cloud' ? '☁' : '▭' }}</text>
+					<text class="gw-device-label" :style="themeText">{{ device.label }}</text>
+					<text class="gw-device-offline" :style="themeSurface2" v-if="device.offline">离线</text>
+					<text class="gw-device-check" :style="themeAccentText" v-if="device.id == selectedDevice">✓</text>
+					<view class="gw-device-divider" :style="themeDivider" v-if="index == 0"></view>
+				</view>
+			</view>
+		</view>
+
+		<!-- 图 78：⊕ 快捷面板 -->
+		<view class="gw-sheet" :style="sheetStyle" v-if="quickSheetVisible">
+			<view class="gw-quick-grid">
+				<view class="gw-quick-cell" :style="themeSurface2" v-for="(action, index) in quickActions" :key="index">
+					<text class="gw-quick-icon" :style="themeText">{{ index == 0 ? '⌾' : (index == 1 ? '▧' : '⌁') }}</text>
+					<text class="gw-quick-label" :style="themeText">{{ action }}</text>
+				</view>
+			</view>
+			<view class="gw-sheet-list">
+				<view class="gw-sheet-list-row" v-for="(row, index) in sheetListRows" :key="index" @click="onQuickRowClick(row)">
+					<text class="gw-sheet-list-icon" :style="themeText">{{ ['◉','✦','∞','◷','♩'][index] }}</text>
+					<text class="gw-sheet-list-label" :style="themeText">{{ row }}</text>
+					<text class="gw-sheet-list-chevron" :style="themeMuted">›</text>
+				</view>
+			</view>
+		</view>
+
+		<!-- 图 82：选择模型 -->
+		<view class="gw-sheet" :style="sheetStyle" v-if="modelSheetVisible">
+			<view class="gw-sheet-handle" :style="themeSurface2"></view>
+			<view class="gw-sheet-head">
+				<text class="gw-sheet-title" :style="themeText">选择模型</text>
+				<text class="gw-sheet-close" :style="themeMuted" @click="closeAllSheets">×</text>
+			</view>
+			<scroll-view class="gw-model-list" :scroll-y="true">
+				<view class="gw-model-row" v-for="(model, index) in models" :key="model.id" @click="onModelSelect(model.id)">
+					<text class="gw-model-row-icon" :style="themeText">{{ ['⚡','◔','◇','◉','◉','✦','Z','Z'][index] }}</text>
+					<text class="gw-model-row-name" :style="themeText">{{ model.name }}</text>
+					<text class="gw-model-row-free" :style="'background-color:' + dangerTint + ';color:' + dangerInk" v-if="model.free">限时免费</text>
+					<text class="gw-model-row-ratio" :style="themeMuted">{{ model.ratio }}</text>
+					<text class="gw-model-row-check" :style="themeAccentText" v-if="model.id == selectedModelId">✓</text>
+				</view>
+			</scroll-view>
+		</view>
+
+		<!-- 图 76：侧滑抽屉（复用 mobile/js/app.js 的侧栏结构：云端 ▾ / 新建任务 / 暂无云端任务） -->
+		<view class="gw-drawer" :style="themeSurface" v-if="drawerVisible">
+			<view class="gw-drawer-head">
+				<text class="gw-drawer-cloud" :style="themeText">☁</text>
+				<text class="gw-drawer-cloud-label" :style="themeText">云端</text>
+				<text class="gw-drawer-arrow" :style="themeText">⌄</text>
+			</view>
+			<view class="gw-drawer-new" :style="themeSurface" @click="onNewTaskClick">
+				<text class="gw-drawer-new-icon" :style="themeText">⊕</text>
+				<text class="gw-drawer-new-label" :style="themeText">新建任务</text>
+			</view>
+			<text class="gw-drawer-empty" :style="themeMuted">暂无云端任务</text>
+		</view>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import { ref, computed } from 'vue'
+	import {
+		BRAND, SUGGESTIONS, MODELS, DEVICES, QUICK_ACTIONS, SHEET_LIST_ROWS,
+		DEFAULT_MODEL_ID,
+		type SuggestGroup, type UiModel, type DeviceRow
+	} from '@/common/workbuddy-data.uts'
+	import {
+		rootStyle, surfaceStyle, surface2Style, textStyle, text2Style, mutedStyle,
+		dividerStyle, accentTextStyle, sendButtonStyle, tokens, scrimStyle
+	} from '@/common/workbuddy-theme.uts'
+
+	const brand = BRAND
+	const devices: DeviceRow[] = DEVICES
+	const quickActions: string[] = QUICK_ACTIONS
+	const sheetListRows: string[] = SHEET_LIST_ROWS
+	const models: UiModel[] = MODELS
+	const dangerTint: string = '#ffe9e8'
+	const dangerInk: string = '#e0574f'
+	const inputPlaceholder: string = '发消息或按住说话…'
+
+	// 状态机：对应 app.js DEFAULT_STATE 的 homeSuggestPage / inputActive / selectedModelId 等
+	const suggestPage = ref<number>(0)
+	const inputActive = ref<boolean>(false)
+	const inputText = ref<string>('')
+	const selectedModelId = ref<string>(DEFAULT_MODEL_ID)
+	const selectedDevice = ref<string>('cloud')
+	const drawerVisible = ref<boolean>(false)
+	const deviceSheetVisible = ref<boolean>(false)
+	const quickSheetVisible = ref<boolean>(false)
+	const modelSheetVisible = ref<boolean>(false)
+
+	// :style 绑定的字符串值在 onShow / 主题交互后重算（不使用全局事件总线）
+	const pageStyle = ref<string>(rootStyle())
+	const surface = ref<string>(surfaceStyle())
+	const surface2 = ref<string>(surface2Style())
+	const ink = ref<string>(textStyle())
+	const ink2 = ref<string>(text2Style())
+	const muted = ref<string>(mutedStyle())
+	const border = ref<string>(dividerStyle())
+	const accentInk = ref<string>(accentTextStyle())
+	const sendBtn = ref<string>(sendButtonStyle())
+	const scrim = ref<string>(scrimStyle())
+	const sendInk = computed<string>(() => tokens().sendInk)
+
+	// uni-app-x 原生渲染的 max-height 只接受 number|px（百分比会编译报错并被丢弃）。
+	// H5 契约是 78%（见 mobile/css/app.css 的 .sheet），这里按窗口高度同步换算为 px，
+	// 保证不同屏高下底部面板仍受限；模型列表本身是 scroll-view，超高可滚动。
+	function sheetMaxHeightPx(): number {
+		const h = uni.getWindowInfo().windowHeight
+		if (h <= 0) return 560
+		return Math.floor(h * 0.78)
+	}
+	// 返回完整内联样式串（含主题底色 + 动态 max-height），避免模板里拼接多个 ref。
+	const sheetStyle = computed<string>(() =>
+		surface.value + 'max-height:' + sheetMaxHeightPx() + 'px;')
+
+	function refreshStyles(): void {
+		pageStyle.value = rootStyle()
+		surface.value = surfaceStyle()
+		surface2.value = surface2Style()
+		ink.value = textStyle()
+		ink2.value = text2Style()
+		muted.value = mutedStyle()
+		border.value = dividerStyle()
+		accentInk.value = accentTextStyle()
+		sendBtn.value = sendButtonStyle()
+		scrim.value = scrimStyle()
+	}
+	// 模板统一使用这些响应式别名（名称与 theme helper 区分，避免同名遮蔽）
+	const themeSurface = surface
+	const themeSurface2 = surface2
+	const themeText = ink
+	const themeText2 = ink2
+	const themeMuted = muted
+	const themeDivider = border
+	const themeAccentText = accentInk
+	const themeSendButton = sendBtn
+	const themeScrim = scrim
+
+	// onShow：tab 切换回来 / 主题在「我的」页改动后重读
+	onShow(() => {
+		refreshStyles()
+	})
+
+	const visibleSuggestions = computed<SuggestGroup[]>(() => {
+		const start = suggestPage.value * 4
+		const result: SuggestGroup[] = []
+		for (let i = 0; i < 4; i++) {
+			result.push(SUGGESTIONS[start + i]!)
+		}
+		return result
+	})
+	const currentModelName = computed<string>(() => {
+		for (let i = 0; i < models.length; i++) {
+			if (models[i].id == selectedModelId.value) return models[i].name
+		}
+		return DEFAULT_MODEL_ID
+	})
+	const sheetVisible = computed<boolean>(() => {
+		return deviceSheetVisible.value || quickSheetVisible.value || modelSheetVisible.value
+	})
+
+	function closeAllSheets(): void {
+		deviceSheetVisible.value = false
+		quickSheetVisible.value = false
+		modelSheetVisible.value = false
+	}
+	function onRefreshClick(): void {
+		suggestPage.value = (suggestPage.value + 1) % 2
+	}
+	function onDeviceClick(): void {
+		closeAllSheets()
+		deviceSheetVisible.value = true
+	}
+	function onPlusClick(): void {
+		closeAllSheets()
+		quickSheetVisible.value = true
+	}
+	function onModelClick(): void {
+		closeAllSheets()
+		modelSheetVisible.value = true
+	}
+	function onDrawerClick(): void {
+		drawerVisible.value = !drawerVisible.value
+	}
+	function onNewTaskClick(): void {
+		drawerVisible.value = false
+		inputActive.value = true
+	}
+	function onVoiceClick(): void {
+		uni.showToast({ title: '语音输入待接入 GWork 内核', icon: 'none' })
+	}
+	function onInputFocus(): void {
+		inputActive.value = true
+	}
+
+	function onSuggestClick(item: SuggestGroup): void {
+		// TODO(GWork 后端)：把建议词作为首条消息送入 uni-ai-x 流式对话页
+		inputText.value = item.label
+		inputActive.value = true
+	}
+	function onSend(): void {
+		// TODO(GWork 后端)：接入 uni-ai-x 的 send()/SSE 与会话存储；当前仅清空输入
+		if (inputText.value.length == 0) return
+		uni.showToast({ title: '对话能力待接入 GWork 内核', icon: 'none' })
+		inputText.value = ''
+		inputActive.value = false
+	}
+	function onModelSelect(id: string): void {
+		selectedModelId.value = id
+		closeAllSheets()
+	}
+	function onQuickRowClick(row: string): void {
+		closeAllSheets()
+		if (row == '定时任务') {
+			uni.switchTab({ url: '/pages/loop/loop' })
+		} else if (row == '专家' || row == '技能' || row == '连接器') {
+			uni.switchTab({ url: '/pages/discover/discover' })
+		}
+	}
+</script>
+
+<style lang="scss">
+	.gw-home-head {
+		flex-direction: row;
+		align-items: center;
+		padding: 8px $gw-page-pad 0;
+		flex-shrink: 0;
+	}
+	.gw-head-menu {
+		width: 60px;
+		height: 60px;
+		border-radius: $gw-radius-pill;
+		justify-content: center;
+		align-items: center;
+	}
+	.gw-menu-line {
+		width: 24px;
+		height: 3px;
+		border-radius: 2px;
+		margin: 3px 0;
+	}
+	.gw-head-title-wrap {
+		margin-left: 16px;
+		justify-content: center;
+	}
+	.gw-head-brand-row {
+		flex-direction: row;
+		align-items: center;
+	}
+	.gw-head-brand-logo {
+		width: 30px;
+		height: 30px;
+		border-radius: 7px;
+		margin-right: 8px;
+	}
+	.gw-head-title {
+		font-size: 24px;
+		font-weight: 700;
+	}
+	.gw-head-sub {
+		flex-direction: row;
+		align-items: center;
+		margin-top: 2px;
+	}
+	.gw-head-cloud { font-size: 15px; margin-right: 5px; }
+	.gw-head-sub-text { font-size: 15px; }
+	.gw-head-chevron { font-size: 17px; margin-left: 6px; }
+
+	.gw-home-main {
+		flex: 1;
+		min-height: 0;
+		align-items: flex-start;
+		justify-content: center;
+		padding: 0 $gw-page-pad;
+	}
+	.gw-home-robot {
+		width: 150px;
+		height: 145px;
+		margin-bottom: 14px;
+	}
+	.gw-home-welcome {
+		font-size: 30px;
+		font-weight: 800;
+		line-height: 40px;
+		margin-bottom: 22px;
+	}
+	.gw-home-suggests {
+		align-items: flex-start;
+		margin-bottom: 14px;
+	}
+	.gw-suggest {
+		flex-direction: row;
+		align-items: center;
+		border-width: 1px;
+		border-style: solid;
+		border-radius: $gw-radius-pill;
+		padding: 11px 18px;
+		margin-bottom: 10px;
+	}
+	.gw-suggest-icon { font-size: 17px; margin-right: 9px; }
+	.gw-suggest-label { font-size: 16px; }
+	.gw-home-refresh {
+		flex-direction: row;
+		align-items: center;
+		border-radius: $gw-radius-pill;
+		padding: 9px 16px;
+	}
+	.gw-refresh-icon { font-size: 19px; margin-right: 8px; }
+	.gw-refresh-text { font-size: 15px; }
+
+	.gw-home-input-area {
+		padding: 8px 16px 0;
+		flex-shrink: 0;
+	}
+	.gw-input-card {
+		border-radius: 28px;
+		padding: 0 20px;
+		min-height: 62px;
+		justify-content: center;
+	}
+	.gw-input-card-active { min-height: 132px; padding-top: 16px; padding-bottom: 12px; }
+	.gw-input-idle-row { flex-direction: row; align-items: center; height: 62px; }
+	.gw-input-voice { font-size: 20px; width: 40px; }
+	.gw-input-idle { flex: 1; height: 60px; font-size: 16px; }
+	.gw-input-placeholder { color: $gw-muted; }
+	.gw-input-plus { font-size: 27px; width: 40px; text-align: right; }
+	.gw-input-active-wrap { flex-direction: column; justify-content: space-between; height: 120px; }
+	.gw-input-active { height: 48px; font-size: 17px; }
+	.gw-input-toolbar { flex-direction: row; align-items: center; height: 48px; }
+	.gw-model-select { flex-direction: row; align-items: center; margin-left: 4px; }
+	.gw-model-dot { font-size: 17px; margin-right: 6px; }
+	.gw-model-name { font-size: 16px; }
+	.gw-model-arrow { font-size: 17px; margin-left: 4px; }
+	.gw-send-btn {
+		width: 48px;
+		height: 48px;
+		border-radius: $gw-radius-pill;
+		justify-content: center;
+		align-items: center;
+		margin-left: 4px;
+	}
+	.gw-send-arrow { font-size: 18px; }
+
+	/* 面板层 */
+	.gw-scrim { position: absolute; top: 0; right: 0; bottom: 0; left: 0; }
+	.gw-sheet {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		border-top-left-radius: $gw-radius-sheet;
+		border-top-right-radius: $gw-radius-sheet;
+		padding: 22px $gw-page-pad 32px;
+	}
+	.gw-sheet-handle { width: 56px; height: 5px; border-radius: 3px; align-self: center; margin-bottom: 16px; }
+	.gw-sheet-head { flex-direction: row; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+	.gw-sheet-title { font-size: 21px; font-weight: 700; }
+	.gw-sheet-close { font-size: 26px; padding: 0 6px; }
+	.gw-sheet-group { border-radius: $gw-radius-card; padding: 0 16px; }
+	.gw-device-row { flex-direction: row; align-items: center; height: 66px; position: relative; }
+	.gw-device-icon { font-size: 24px; margin-right: 14px; }
+	.gw-device-label { font-size: 18px; font-weight: 600; flex: 1; }
+	.gw-device-offline { font-size: 13px; border-radius: 6px; padding: 3px 8px; margin-right: 10px; }
+	.gw-device-check { font-size: 22px; font-weight: 700; }
+	.gw-device-divider { position: absolute; left: 0; right: 0; bottom: 0; height: 1px; }
+
+	.gw-quick-grid { flex-direction: row; justify-content: space-between; margin-bottom: 18px; }
+	.gw-quick-cell { width: 31%; height: 104px; border-radius: 18px; justify-content: center; align-items: center; }
+	.gw-quick-icon { font-size: 28px; margin-bottom: 8px; }
+	.gw-quick-label { font-size: 15px; }
+	.gw-sheet-list-row { flex-direction: row; align-items: center; height: 60px; }
+	.gw-sheet-list-icon { font-size: 21px; width: 36px; }
+	.gw-sheet-list-label { font-size: 18px; flex: 1; }
+	.gw-sheet-list-chevron { font-size: 23px; }
+
+	.gw-model-list { max-height: 480px; }
+	.gw-model-row { flex-direction: row; align-items: center; height: 62px; }
+	.gw-model-row-icon { font-size: 21px; width: 36px; }
+	.gw-model-row-name { font-size: 18px; margin-right: 8px; }
+	.gw-model-row-free { font-size: 12px; border-radius: 6px; padding: 3px 7px; margin-right: 8px; }
+	.gw-model-row-ratio { font-size: 15px; flex: 1; }
+	.gw-model-row-check { font-size: 22px; font-weight: 700; }
+
+	/* 图 76 侧滑抽屉 */
+	.gw-drawer {
+		position: absolute;
+		top: 0;
+		left: 0;
+		bottom: 0;
+		width: 82%;
+		padding: 18px $gw-page-pad;
+	}
+	.gw-drawer-head { flex-direction: row; align-items: center; margin-bottom: 24px; }
+	.gw-drawer-cloud { font-size: 28px; margin-right: 10px; }
+	.gw-drawer-cloud-label { font-size: 22px; font-weight: 700; }
+	.gw-drawer-arrow { font-size: 20px; margin-left: 10px; }
+	.gw-drawer-new {
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		height: 62px;
+		border-width: 1px;
+		border-style: solid;
+		border-color: $gw-border;
+		border-radius: $gw-radius-pill;
+		margin-bottom: 40px;
+	}
+	.gw-drawer-new-icon { font-size: 22px; margin-right: 12px; }
+	.gw-drawer-new-label { font-size: 19px; font-weight: 600; }
+	.gw-drawer-empty { font-size: 17px; text-align: center; }
+</style>

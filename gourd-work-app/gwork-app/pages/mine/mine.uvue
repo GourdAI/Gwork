@@ -1,0 +1,197 @@
+<!--
+  GWork「我的」（图 81）
+  移植自 mobile/js/app.js 的 renderMine()：
+    居中标题「我的」
+    资料卡：头像 B / Blake / › / 体验版 + 升级套餐 / 我的积分 3363.38 ›
+    设置卡：主题三段（系统·浅色·深色）/ 语言·字体大小·朗读设置·触感反馈·存储空间·消息通知设置
+    触感反馈为青绿开关；主题分段默认「系统」（D1）
+  数据来自 common/workbuddy-data.uts 的 SETTINGS_ROWS / THEMES / ACCENT / BRAND。
+-->
+<template>
+	<view class="gw-page-root" :style="pageStyle">
+		<view class="gw-statusbar"></view>
+
+		<text class="gw-mine-title" :style="themeText">我的</text>
+
+		<scroll-view class="gw-mine-scroll" :scroll-y="true">
+			<!-- 资料卡 -->
+			<view class="gw-mine-card" :style="themeSurface">
+				<view class="gw-profile-row" @click="onProfileClick">
+					<view class="gw-profile-avatar" :style="themeAvatar">
+						<text class="gw-profile-avatar-text" :style="'color:' + white">B</text>
+					</view>
+					<text class="gw-profile-name" :style="themeText">Blake</text>
+					<text class="gw-profile-chevron" :style="themeMuted">›</text>
+				</view>
+				<view class="gw-profile-divider" :style="themeDivider"></view>
+				<view class="gw-plan-row">
+					<text class="gw-plan-icon" :style="themeText">✿</text>
+					<text class="gw-plan-label" :style="themeText">体验版</text>
+					<view class="gw-plan-upgrade" :style="upgradeStyle" @click="onUpgradeClick">
+						<text class="gw-plan-upgrade-text" :style="'color:' + white">升级套餐</text>
+					</view>
+				</view>
+				<view class="gw-points-row" @click="onPointsClick">
+					<text class="gw-points-label" :style="themeText">我的积分</text>
+					<text class="gw-points-value" :style="themeText2">3363.38</text>
+					<text class="gw-points-chevron" :style="themeMuted">›</text>
+				</view>
+			</view>
+
+			<!-- 设置卡 -->
+			<view class="gw-mine-card" :style="themeSurface">
+				<!-- 主题分段控件 -->
+				<view class="gw-theme-row">
+					<text class="gw-setting-label" :style="themeText">主题</text>
+					<view class="gw-theme-track" :style="themeSurface2">
+						<view
+							class="gw-theme-seg"
+							v-for="(item, index) in themes"
+							:key="item.id"
+							:style="selectedTheme == item.id ? themeSurface : ''"
+							@click="onThemeClick(item.id)"
+						>
+							<text class="gw-theme-seg-text" :style="selectedTheme == item.id ? themeText : themeMuted">{{ item.label }}</text>
+						</view>
+					</view>
+				</view>
+
+				<!-- 其余设置行（SETTINGS_ROWS） -->
+				<view class="gw-setting-row" v-for="(row, index) in settingRows" :key="row.id">
+					<text class="gw-setting-label" :style="themeText">{{ row.label }}</text>
+					<text class="gw-setting-value" :style="themeText2" v-if="row.value.length > 0">{{ row.value }}</text>
+
+					<!-- 触感反馈：青绿开关 -->
+					<view class="gw-switch" :style="hapticsOn ? themeAccentBg : themeSurface2" v-if="row.toggle" @click="onHapticsToggle">
+						<view class="gw-switch-knob" :style="'background-color:' + white + ';' + (hapticsOn ? 'left:28px;' : 'left:2px;')"></view>
+					</view>
+					<text class="gw-setting-chevron" :style="themeMuted" v-else-if="row.chevron">›</text>
+					<view class="gw-setting-divider" :style="themeDivider" v-if="index < settingRows.length - 1"></view>
+				</view>
+			</view>
+
+			<view class="gw-mine-tail"></view>
+		</scroll-view>
+
+		<view class="gw-gesturebar"></view>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import { ref } from 'vue'
+	import { SETTINGS_ROWS, THEMES, type SettingRow, type ThemeOption } from '@/common/workbuddy-data.uts'
+	import {
+		rootStyle, surfaceStyle, surface2Style, textStyle, text2Style, mutedStyle,
+		dividerStyle, accentBgStyle, avatarStyle, currentTheme, setWorkbuddyTheme,
+		readHaptics, writeHaptics
+	} from '@/common/workbuddy-theme.uts'
+
+	const settingRows: SettingRow[] = SETTINGS_ROWS
+	const themes: ThemeOption[] = THEMES
+	const white: string = '#ffffff'
+	const upgradeStyle: string = 'background-color:#141416;'
+	const hapticsOn = ref<boolean>(readHaptics())
+	const selectedTheme = ref<string>(currentTheme())
+
+	const pageStyle = ref<string>(rootStyle())
+	const surface = ref<string>(surfaceStyle())
+	const surface2 = ref<string>(surface2Style())
+	const ink = ref<string>(textStyle())
+	const ink2 = ref<string>(text2Style())
+	const muted = ref<string>(mutedStyle())
+	const divider = ref<string>(dividerStyle())
+	const accentBg = ref<string>(accentBgStyle())
+	const avatar = ref<string>(avatarStyle())
+	const themeSurface = surface
+	const themeSurface2 = surface2
+	const themeText = ink
+	const themeText2 = ink2
+	const themeMuted = muted
+	const themeDivider = divider
+	const themeAccentBg = accentBg
+	const themeAvatar = avatar
+
+	function refreshStyles(): void {
+		pageStyle.value = rootStyle()
+		surface.value = surfaceStyle()
+		surface2.value = surface2Style()
+		ink.value = textStyle()
+		ink2.value = text2Style()
+		muted.value = mutedStyle()
+		divider.value = dividerStyle()
+		accentBg.value = accentBgStyle()
+		avatar.value = avatarStyle()
+		selectedTheme.value = currentTheme()
+	}
+	onShow(() => {
+		refreshStyles()
+	})
+
+	function onThemeClick(id: string): void {
+		setWorkbuddyTheme(id)
+		refreshStyles()
+	}
+	function onHapticsToggle(): void {
+		hapticsOn.value = !hapticsOn.value
+		writeHaptics(hapticsOn.value)
+		// TODO(GWork 内核)：按开关状态调用 uni.vibrateShort 等触感反馈
+	}
+	function onProfileClick(): void {
+		// TODO(GWork 后端)：userCenterPage 为占位，真实资料页需接入登录态
+		uni.showToast({ title: '用户资料待接入 GWork 后端', icon: 'none' })
+	}
+	function onUpgradeClick(): void {
+		uni.showToast({ title: '套餐升级待接入 GWork 后端', icon: 'none' })
+	}
+	function onPointsClick(): void {
+		uni.showToast({ title: '积分明细待接入 GWork 后端', icon: 'none' })
+	}
+</script>
+
+<style lang="scss">
+	.gw-mine-title {
+		font-size: 22px;
+		font-weight: 600;
+		text-align: center;
+		padding: 10px 0 20px;
+		flex-shrink: 0;
+	}
+	.gw-mine-scroll { flex: 1; min-height: 0; padding: 0 $gw-page-pad; }
+	.gw-mine-card { border-radius: $gw-radius-card; margin-bottom: 16px; padding: 0 18px; }
+	.gw-profile-row { flex-direction: row; align-items: center; height: 92px; }
+	.gw-profile-avatar {
+		width: 56px;
+		height: 56px;
+		border-radius: $gw-radius-pill;
+		justify-content: center;
+		align-items: center;
+		margin-right: 16px;
+	}
+	.gw-profile-avatar-text { font-size: 26px; font-weight: 600; }
+	.gw-profile-name { font-size: 22px; font-weight: 600; flex: 1; }
+	.gw-profile-chevron { font-size: 25px; }
+	.gw-profile-divider { height: 1px; }
+	.gw-plan-row { flex-direction: row; align-items: center; height: 78px; }
+	.gw-plan-icon { font-size: 23px; margin-right: 10px; }
+	.gw-plan-label { font-size: 19px; flex: 1; }
+	.gw-plan-upgrade { border-radius: 14px; padding: 10px 16px; }
+	.gw-plan-upgrade-text { font-size: 16px; font-weight: 600; }
+	.gw-points-row { flex-direction: row; align-items: center; height: 76px; }
+	.gw-points-label { font-size: 19px; flex: 1; }
+	.gw-points-value { font-size: 19px; margin-right: 10px; }
+	.gw-points-chevron { font-size: 25px; }
+
+	.gw-theme-row { flex-direction: row; align-items: center; height: 84px; }
+	.gw-setting-label { font-size: 19px; flex: 1; }
+	.gw-theme-track { flex-direction: row; border-radius: $gw-radius-pill; padding: 3px; }
+	.gw-theme-seg { border-radius: $gw-radius-pill; padding: 8px 14px; justify-content: center; align-items: center; }
+	.gw-theme-seg-text { font-size: 16px; }
+
+	.gw-setting-row { flex-direction: row; align-items: center; height: 76px; position: relative; }
+	.gw-setting-value { font-size: 17px; margin-right: 8px; }
+	.gw-setting-chevron { font-size: 25px; }
+	.gw-switch { width: 56px; height: 32px; border-radius: $gw-radius-pill; position: relative; }
+	.gw-switch-knob { position: absolute; top: 2px; width: 28px; height: 28px; border-radius: $gw-radius-pill; }
+	.gw-setting-divider { position: absolute; left: 0; right: 0; bottom: 0; height: 1px; }
+	.gw-mine-tail { height: 16px; }
+</style>

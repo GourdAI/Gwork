@@ -1,0 +1,320 @@
+<template>
+	<view id="chat-input-container" class="chat-input" :class="isFullscreenLayout ? 'chat-input-fullscreen' : ''"
+		:style="{height: chatInputHeight}">
+		<uni-ai-draft-images />
+		<view v-if="isEditingMsg" class="chat-input-edit-tip">
+			<text class="chat-input-edit-tip-text" flatten>正在编辑消息，发送后将替换该消息及之后的对话</text>
+			<view class="chat-input-edit-tip-cancel" @click="cancelEdit">
+				<text class="chat-input-edit-tip-cancel-text">取消</text>
+			</view>
+		</view>
+		<view v-if="chatInputContent.length > 0 || isFullscreen" class="chat-input-fullscreen-btn" @click.stop="toggleFullscreen"
+			@touchstart.stop="prepareFullscreenToggle"
+			<!-- #ifdef WEB -->
+			@mousedown.stop="prepareFullscreenToggle"
+			<!-- #endif -->
+			<!-- #ifdef WEB -->
+			:title="isFullscreen ? '退出全屏输入' : '全屏输入'"
+			<!-- #endif -->
+		>
+			<view class="chat-input-fullscreen-icon">
+				<view class="chat-input-fullscreen-corner chat-input-fullscreen-corner-top"
+					:class="isFullscreen ? 'chat-input-fullscreen-corner-top-collapse' : ''"></view>
+				<view class="chat-input-fullscreen-corner chat-input-fullscreen-corner-bottom"
+					:class="isFullscreen ? 'chat-input-fullscreen-corner-bottom-collapse' : ''"></view>
+			</view>
+		</view>
+		<textarea id="chat-input-textarea" class="chat-input-textarea" :class="isFullscreen ? 'chat-input-textarea-expanded' : ''"
+			:style="{height: isFullscreen ? expandedTextareaHeight : '50px'}" v-model="chatInputContent" placeholder="给 uni-ai-x 发送消息"
+			:adjust-position="false" :hold-keyboard="isFullscreen || keepKeyboardForToggle" @keyboardheightchange="onKeyboardheightchange" placeholder-class="chat-input-placeholder"
+			:focus="inputFocused" @focus="onInputFocus" @blur="onInputBlur" :auto-height="false"
+		></textarea>
+		<view class="chat-input-toolbar" :class="isFullscreenLayout ? 'chat-input-toolbar-fullscreen' : ''"
+			:style="{bottom: isFullscreenLayout ? (keyboardHeight > 0 ? (keyboardHeight + 5) + 'px' : 'env(safe-area-inset-bottom)') : 'auto'}">
+			<input-tool-bar @scrollToLastMsg="scrollToLastMsg" @click.stop />
+		</view>
+		<view class="chat-input-keyboard-cover"
+			:class="keyboardHeight > 0 ? 'chat-input-keyboard-cover-keyboard' : ''"
+			:style="{height: keyboardHeight + 'px'}"></view>
+	</view>
+</template>
+
+<script lang="uts" setup>
+	import uniAi from '@/uni_modules/uni-ai-x/sdk'
+	import inputToolBar from '@/uni_modules/uni-ai-x/components/input-tool-bar.uvue'
+	import uniAiDraftImages from '@/uni_modules/uni-ai-x/components/uni-ai-draft-images.uvue'
+
+	const emit = defineEmits<{
+		'scroll-to-last-msg': []
+	}>()
+
+	const keyboardHeight = ref<number>(0)
+	const isFullscreen = ref<boolean>(false)
+	const isFullscreenLayout = ref<boolean>(false)
+	const inputFocused = ref<boolean>(false)
+	const keepKeyboardForToggle = ref<boolean>(false)
+	const restoreFocusAfterToggle = ref<boolean>(false)
+	const layoutTransitioning = ref<boolean>(false)
+	const expandedTextareaHeight = ref<string>('0px')
+	const chatInputHeight = ref<string>('auto')
+	let normalChatInputHeight: string = 'auto'
+	let layoutTransitionTimer: number = 0
+	const chatInputContent = computed<string>({
+		get: (): string => {
+			return uniAi.currentChat?.inputContent ?? ''
+		},
+		set: (value: string) => {
+			if (uniAi.currentChat != null) {
+				uniAi.currentChat!.inputContent = value
+			}
+		}
+	})
+
+	const isEditingMsg = computed<boolean>(() => {
+		return uniAi.editingMsgId != ''
+	})
+
+	const cancelEdit = () => {
+		uniAi.cancelEditMsg()
+		if (uniAi.currentChat != null) {
+			uniAi.currentChat!.inputContent = ''
+		}
+	}
+
+	function scrollToLastMsg() {
+		emit('scroll-to-last-msg')
+	}
+
+	function onKeyboardheightchange(res: UniInputKeyboardHeightChangeEvent) {
+		if (layoutTransitioning.value) {
+			return
+		}
+		keyboardHeight.value = res.detail.height
+	}
+
+	function onInputFocus() {
+		inputFocused.value = true
+		restoreFocusAfterToggle.value = false
+		scrollToLastMsg()
+	}
+
+	function onInputBlur() {
+		if (!restoreFocusAfterToggle.value) {
+			inputFocused.value = false
+		}
+	}
+
+	function prepareFullscreenToggle() {
+		keepKeyboardForToggle.value = true
+		restoreFocusAfterToggle.value = inputFocused.value
+	}
+
+	function toggleFullscreen() {
+		if (layoutTransitionTimer != 0) {
+			clearTimeout(layoutTransitionTimer)
+			layoutTransitionTimer = 0
+			layoutTransitioning.value = false
+		}
+		isFullscreen.value = !isFullscreen.value
+		if (isFullscreen.value) {
+			const chatInput = uni.getElementById('chat-input-container')
+			const currentHeight = chatInput?.getBoundingClientRect().height ?? 0
+			normalChatInputHeight = currentHeight > 0 ? currentHeight + 'px' : 'auto'
+			chatInputHeight.value = normalChatInputHeight
+			isFullscreenLayout.value = true
+			expandedTextareaHeight.value = uni.getWindowInfo().windowHeight + 'px'
+			nextTick(() => {
+				const windowInfo = uni.getWindowInfo()
+				chatInputHeight.value = (windowInfo.windowHeight - windowInfo.statusBarHeight) + 'px'
+			})
+		} else {
+			layoutTransitioning.value = true
+			chatInputHeight.value = normalChatInputHeight
+			layoutTransitionTimer = setTimeout(() => {
+				isFullscreenLayout.value = false
+				keepKeyboardForToggle.value = false
+				layoutTransitioning.value = false
+				chatInputHeight.value = 'auto'
+				layoutTransitionTimer = 0
+			}, 140)
+		}
+		if (restoreFocusAfterToggle.value) {
+			nextTick(() => {
+				const textarea = uni.getElementById('chat-input-textarea')
+				textarea?.focus()
+				restoreFocusAfterToggle.value = false
+			})
+		}
+	}
+</script>
+
+<style lang="scss">
+@import '@/uni_modules/uni-ai-x/static/css/variables.scss';
+
+.chat-input {
+	position: absolute;
+	/* #ifdef MP-WEIXIN */
+	position: relative;
+	flex-shrink: 0;
+	/* #endif */
+	left: 0;
+	right: 0;
+	bottom: 0;
+	flex-direction: column;
+	background-color: var(--bg-primary);
+	padding: 15px 15px 5px 15px;
+	border-radius: 15px 15px 0 0;
+	border: 1px solid var(--border-secondary);
+	z-index: 30;
+	transition-property: height;
+	transition-duration: 140ms;
+	transition-timing-function: ease-out;
+}
+
+.chat-input-fullscreen {
+	position: fixed;
+	right: 0;
+	bottom: 0;
+	left: 0;
+	width: 100%;
+	z-index: 1000;
+	overflow: hidden;
+}
+
+.chat-input-textarea {
+	max-height: 200px;
+	width: 100%;
+	padding-right: 48px;
+	box-sizing: border-box;
+}
+
+.chat-input-textarea-expanded {
+	max-height: 2000px;
+}
+
+.chat-input-fullscreen-btn {
+	position: absolute;
+	top: 12px;
+	right: 12px;
+	width: 36px;
+	height: 36px;
+	justify-content: center;
+	align-items: center;
+	z-index: 2;
+}
+
+.chat-input-toolbar-fullscreen {
+	position: absolute;
+	left: 15px;
+	right: 15px;
+	z-index: 3;
+}
+
+.chat-input-fullscreen-icon {
+	position: relative;
+	width: 16px;
+	height: 16px;
+}
+
+.chat-input-fullscreen-corner {
+	position: absolute;
+	width: 6px;
+	height: 6px;
+	border-color: #9b9b9b;
+	border-style: solid;
+	border-width: 0;
+}
+
+.chat-input-fullscreen-corner-top {
+	top: 1px;
+	right: 1px;
+	border-top-width: 2px;
+	border-right-width: 2px;
+}
+
+.chat-input-fullscreen-corner-bottom {
+	bottom: 1px;
+	left: 1px;
+	border-bottom-width: 2px;
+	border-left-width: 2px;
+}
+
+.chat-input-fullscreen-corner-top-collapse {
+	top: 1px;
+	right: 1px;
+	border-top-width: 0;
+	border-right-width: 0;
+	border-bottom-width: 2px;
+	border-left-width: 2px;
+}
+
+.chat-input-fullscreen-corner-bottom-collapse {
+	bottom: 1px;
+	left: 1px;
+	border-bottom-width: 0;
+	border-left-width: 0;
+	border-top-width: 2px;
+	border-right-width: 2px;
+}
+
+.chat-input-edit-tip {
+	flex-direction: row;
+	align-items: center;
+	padding: 6px 10px;
+	margin-bottom: 8px;
+	background-color: var(--bg-secondary);
+	border-radius: 8px;
+}
+
+.chat-input-edit-tip-text {
+	flex: 1;
+	font-size: 12px;
+	color: var(--text-secondary);
+}
+
+.chat-input-edit-tip-cancel {
+	flex-direction: row;
+	align-items: center;
+	margin-left: 8px;
+	margin-right: -8px;
+	padding: 4px 8px;
+}
+
+.chat-input-edit-tip-cancel-text {
+	font-size: 12px;
+	color: var(--accent-primary);
+}
+
+.chat-input-placeholder {
+	color: var(--text-disabled);
+}
+
+.chat-input-keyboard-cover {
+	/* #ifdef APP-ANDROID */
+	margin-bottom: env(safe-area-inset-bottom);
+	/* #endif */
+	/* #ifndef APP-ANDROID */
+	padding-bottom: env(safe-area-inset-bottom);
+	/* #endif */
+}
+
+/* The keyboard already owns the bottom inset while it is visible. */
+.chat-input-keyboard-cover-keyboard {
+	/* #ifdef APP-ANDROID */
+	margin-bottom: 0;
+	/* #endif */
+	/* #ifndef APP-ANDROID */
+	padding-bottom: 0;
+	/* #endif */
+}
+
+/* #ifdef H5 */
+@media screen and (min-device-width:960px){
+	.chat-input {
+		border-radius: 15px;
+		margin: 10px;
+		margin-top: 0;
+	}
+}
+/* #endif */
+</style>

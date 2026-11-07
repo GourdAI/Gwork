@@ -15,7 +15,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
 
-const api = require(path.join(__dirname, '..', 'ui', 'js', 'app-turn-compact.js'));
+const api = require(path.join(__dirname, '..', 'ui', 'js', 'app-turn-display.js'));
 
 /* ---- 极简假 DOM：只实现模块用到的 API ---- */
 function el(tag, classes, opts) {
@@ -151,6 +151,53 @@ test('无最终正文的轮次保留全部过程证据', () => {
         { cls: ['md-content'], text: '   ' }   // 空壳
     ]);
     assert.equal(api.classifyChildren(b.children), null);
+});
+
+/* 【code review 回归 · 缺陷3】生产中 .msg-trace 挂在 .msg-meta-row 内部
+   （app-message.js appendTraceBadge），不是气泡直接子级。旧实现只扫直接子级
+   ⇒ 恒 false ⇒ 回放态「无正文成功轮」永远折不成一行摘要。此处钉死真实层级。 */
+test('★ 无正文成功轮：msg-trace 嵌在 meta-row 内也必须识别为成功终态（深层查找）', () => {
+    const b = bubble([
+        { cls: ['tool-card'] },
+        { cls: ['tool-card'] },
+        { cls: ['md-content'], text: '  ' }
+    ]);
+    const meta = el('div', ['msg-meta-row']);
+    const trace = el('span', ['msg-trace']);
+    trace.setAttribute('data-turn-status', 'done');
+    trace.setAttribute('data-elapsed-ms', '9000');
+    meta.appendChild(trace);
+    b.appendChild(meta);
+    const d = api.classifyChildren(b.children, b);
+    assert.ok(d, '深层 msg-trace(done) 必须被识别，否则无正文成功轮永远不折叠');
+    assert.equal(d.final, null, '无最终正文 ⇒ final 为 null');
+    assert.ok(d.process.length >= 2, '两张工具卡进过程区');
+});
+
+test('★ 无正文轮但 trace 为 stopped：仍保留全部过程证据（不许藏失败）', () => {
+    const b = bubble([{ cls: ['tool-card'] }, { cls: ['tool-card'] }]);
+    const meta = el('div', ['msg-meta-row']);
+    const trace = el('span', ['msg-trace']);
+    trace.setAttribute('data-turn-status', 'stopped');
+    meta.appendChild(trace);
+    b.appendChild(meta);
+    assert.equal(api.classifyChildren(b.children, b), null);
+});
+
+test('★ compactBubble 真实层级：无正文成功轮折成一行摘要，且摘要读到耗时', () => {
+    const b = bubble([{ cls: ['tool-card'] }, { cls: ['thinking-block'] }]);
+    const meta = el('div', ['msg-meta-row']);
+    const trace = el('span', ['msg-trace']);
+    trace.setAttribute('data-turn-status', 'done');
+    trace.setAttribute('data-elapsed-ms', '9000');
+    meta.appendChild(trace);
+    b.appendChild(meta);
+    assert.equal(api.compactBubble(b, {}), true, '应折叠');
+    const tg = b.querySelector('.turn-compact-toggle');
+    assert.ok(tg, '摘要按钮存在');
+    assert.match(tg.textContent, /已完成/, '状态词');
+    assert.match(tg.textContent, /9s/, '耗时来自深层 trace');
+    assert.equal(b.querySelector('.msg-trace'), trace, 'trace 徽标不被收起');
 });
 
 test('错误/HITL/文件变更卡自己保留可见，但不阻断其它过程行收起', () => {
@@ -468,29 +515,45 @@ function buildProcessStats(processEls) {
 }
 
 /* 回归：用户报「折叠展开的时候内容显示到上面去了」（两轮）。
-   摘要行是 accordion 的【盖子】：必须位于过程组【最前】，展开时过程内容在盖子
-   下方【向下】展开（WorkBuddy「已完成 14s ›」同向）。
-   两次错位史：① 旧实现找「第一个有文本的 md-content」命中过程正文；
-   ② 上一轮改成插在【最终正文】之前 → 盖子落到过程组【尾部】，展开后全部过程行
-   显示在盖子上方 = 用户截图现象。
-   不变量：盖子之前不得存在任何 [data-turn-process] 行；最终正文在所有过程行之后。 */
-function assertLidOnTop(b, toggle) {
+    摘要行是 accordion 的【盖子】：必须位于过程组【最前】，展开时过程内容在盖子
+    下方【向下】展开（WorkBuddy「已完成 14s ›」同向）。
+    两次错位史：① 旧实现找「第一个有文本的 md-content」命中过程正文；
+    ② 上一轮改成插在【最终正文】之前 → 盖子落到过程组【尾部】，展开后全部过程行
+    显示在盖子上方 = 用户截图现象。
+    258f0a0 连续区间重构后，本函数收紧为四条不变量：
+      ① toggle 之前无任何【可见】节点（toggle 必须是气泡第一个直接子节点）；
+      ② 所有 [data-turn-process] 节点构成【连续 DOM 区间】（中间不得夹无标记节点）；
+      ③ 最终正文（唯一无标记且有文本的 .md-content）之后不得存在任何过程行；
+      ④ 盖子紧贴第一个过程行，展开后过程行全部在盖子下方。 */
+    function assertLidOnTop(b, toggle) {
     const kids = b.children;
     const idxToggle = kids.indexOf(toggle);
     assert.ok(idxToggle >= 0, '应存在摘要按钮');
-    for (let i = 0; i < idxToggle; i++) {
-        assert.equal(kids[i].getAttribute('data-turn-process'), null,
-            '盖子之前不得出现过程行（否则展开时内容显示到上面去了）');
+    // ① toggle 之前无任何可见节点：收紧为 index 0（旧版只查 [data-turn-process]，
+    //    页脚/未知块/缝合搬进来的杂散节点都能藏在 toggle 前面 = 「toggle 夹中间」）。
+    assert.equal(idxToggle, 0, 'toggle 之前不得有任何可见节点（盖子必须是气泡首个直接子节点）');
+        
+    const marked = [];
+    for (let i = 0; i < kids.length; i++) {
+        if (kids[i].getAttribute('data-turn-process') !== null) marked.push(i);
     }
-    let seenProcess = false;
-    for (let i = idxToggle + 1; i < kids.length; i++) {
-        const isProc = kids[i].getAttribute('data-turn-process') !== null;
-        if (isProc) seenProcess = true;
-        else if (seenProcess && kids[i]._classes.has('md-content')) {
-            // 过程组之后的 md-content 只允许是最终正文（无折叠标记）
-            assert.equal(kids[i].getAttribute('data-turn-process'), null);
+    assert.ok(marked.length > 0, '应有被折叠的过程行');
+    // ② process 连续区间：首尾之间不得夹任何无标记节点
+    for (let i = marked[0]; i <= marked[marked.length - 1]; i++) {
+        assert.notEqual(kids[i].getAttribute('data-turn-process'), null,
+            '过程行必须是连续 DOM 区间，第 ' + i + ' 个节点夹在区间中间');
+    }
+    assert.equal(marked[0], idxToggle + 1, '盖子必须紧贴第一个过程行');
+    // ③ 最终正文之后无过程行：最后一个带标记节点之后不得再出现 [data-turn-process]
+    const finalIdx = (() => {
+        for (let i = kids.length - 1; i >= 0; i--) {
+            if (kids[i]._classes.has('md-content') && (kids[i].textContent || '').trim()) return i;
         }
-    }
+        return -1;
+    })();
+    assert.ok(finalIdx >= 0, '应存在最终正文');
+    assert.ok(marked[marked.length - 1] < finalIdx,
+        '最终正文之后不得残留任何过程行（旧 j > lastTextIdx keep 分支缺陷）');
     return idxToggle;
 }
 
@@ -569,4 +632,385 @@ test('★ 缝合搬移后重跑折叠：盖子必须归位到过程组最前（�
     // 同一个 toggle 实例（监听器保留）：点击仍能展开
     toggle.click();
     assert.ok(b._classes.has('turn-compact-open'));
+});
+
+/* ===== 258f0a0 连续区间重构契约（本轮新增） ===== */
+
+test('★ 反例：最终正文之后还有 tool-card 必须收进过程区并重排到正文之前', () => {
+    // 旧实现 classifyChildren 的 `j > lastTextIdx ⇒ keep` 分支会把这个过程行留在
+    // 摘要下方（用户看到「下方散着 6+ 行」）。新实现按连续区间分类 + 目标顺序重排。
+    const b = bubble([
+        { cls: ['thinking-block'] },
+        { cls: ['md-content'], text: 'FINAL 最终答案' },
+        { cls: ['tool-card'], text: '尾部过程卡' },
+        { cls: ['msg-actions'] }
+    ]);
+    const finalText = b.children[1];
+    const tailCard = b.children[2];
+    const d = api.classifyChildren(b.children);
+    assert.ok(d, '应有折叠决策');
+    assert.ok(d.process.includes(tailCard), '最终正文之后的过程行必须归入 process');
+    assert.equal(d.final, finalText, 'final 是唯一最终正文');
+    assert.ok(!d.keep.includes(tailCard), '尾部过程卡不再 keep');
+
+    assert.equal(api.compactBubble(b, {}), true);
+    const toggle = b.querySelector('.turn-compact-toggle');
+    assertLidOnTop(b, toggle);
+    assert.ok(b.children.indexOf(tailCard) < b.children.indexOf(finalText),
+        '重排后尾部过程卡必须回到最终正文之前');
+    assert.equal(tailCard.getAttribute('data-turn-process'), 'tool');
+    // 折叠态顺序：toggle → process(含尾部卡) → final → msg-actions
+    assert.ok(b.children.indexOf(b.querySelector('.msg-actions') || b.children[3]) > b.children.indexOf(finalText),
+        '底部元信息仍排在最终正文之后');
+});
+
+test('★ 白名单夹在过程行中间：重排到 final 之后且常驻可见，process 仍连续', () => {
+    const b = bubble([
+        { cls: ['thinking-block'] },
+        { cls: ['hitl-card'], text: '需要确认' },
+        { cls: ['tool-card'] },
+        { cls: ['msg-trace'] },
+        { cls: ['md-content'], text: '过程正文' },
+        { cls: ['tool-card'] },
+        { cls: ['md-content'], text: 'FINAL 最终答案' },
+        { cls: ['msg-meta-row'] },
+        { cls: ['msg-actions'] }
+    ]);
+    const hitl = b.children[1];
+    const trace = b.children[3];
+    const finalText = b.children[6];
+    const d = api.classifyChildren(b.children);
+    assert.ok(d);
+    assert.ok(d.keep.includes(hitl) && d.keep.includes(trace), '白名单不进 process');
+    assert.ok(d.tail.includes(hitl) && d.tail.includes(trace), '白名单进入 tail');
+    assert.equal(d.final, finalText);
+    // 过程行 = thinking + 2 tool-card + 过程正文 = 4（连续、原相对顺序）
+    assert.equal(d.process.length, 4);
+
+    assert.equal(api.compactBubble(b, {}), true);
+    const toggle = b.querySelector('.turn-compact-toggle');
+    assertLidOnTop(b, toggle);
+    assert.ok(b.children.indexOf(hitl) > b.children.indexOf(finalText), 'HITL 卡重排到最终正文之后');
+    assert.ok(b.children.indexOf(trace) > b.children.indexOf(finalText), 'trace 徽标重排到最终正文之后');
+    assert.equal(hitl.getAttribute('data-turn-process'), null, '白名单常驻可见（无折叠标记）');
+    assert.equal(trace.getAttribute('data-turn-process'), null);
+    // tail 内部保持原相对顺序
+    assert.ok(b.children.indexOf(hitl) < b.children.indexOf(trace));
+});
+
+test('★ 多批次盖子与成员配对：有盖子时整轮摘要让位、不重排、配对不破', () => {
+    const b = bubble([
+        { cls: ['turn-batch-header'], attrs: { 'data-turn-process': '' } },
+        { cls: ['tool-card'], attrs: { 'data-turn-batch': '1' } },
+        { cls: ['tool-card'], attrs: { 'data-turn-batch': '1' } },
+        { cls: ['hitl-card'], text: '批次间交互卡' },
+        { cls: ['turn-batch-header'] },
+        { cls: ['thinking-block'], attrs: { 'data-turn-batch': '1' } },
+        { cls: ['md-content'], text: 'FINAL 最终答案' }
+    ]);
+    const h1 = b.children[0], h2 = b.children[4];
+    const hitl = b.children[3];
+    const finalText = b.children[6];
+    // 先清掉第一个盖子上预置的标记（模拟真实运行：标记由 compactBubble 统一打）
+    h1.removeAttribute('data-turn-process');
+    const d = api.classifyChildren(b.children);
+    assert.ok(d, '纯分类仍有决策（盖子是过程行）');
+    assert.ok(d.process.includes(h1) && d.process.includes(h2), '两个盖子都进过程区');
+    /* 【Qoder 多折叠组让位契约】气泡内已有批次盖子 ⇒ 不叠第二层整轮摘要：
+       返回 false、不建 toggle、不重排（HITL 一级行留在两组之间 = Qoder 形态）。 */
+    assert.equal(api.compactBubble(b, {}), false, '有批次盖子时整轮摘要让位');
+    assert.equal(b.querySelector('.turn-compact-toggle'), null, '不得建整轮摘要盖子');
+    const kids = b.children;
+    // 模拟 app-turn-batch.js membersOf：盖子之后、下一个盖子之前的 data-turn-batch 成员
+    const membersOf = (h) => {
+        const out = [];
+        const i0 = kids.indexOf(h);
+        for (let i = i0 + 1; i < kids.length; i++) {
+            if (kids[i]._classes.has('turn-batch-header')) break;
+            if (kids[i].getAttribute('data-turn-batch') === '1') out.push(kids[i]);
+        }
+        return out;
+    };
+    assert.equal(membersOf(h1).length, 2, '第一批 2 个成员仍紧跟其盖子');
+    assert.equal(membersOf(h2).length, 1, '第二批 1 个成员仍紧跟其盖子');
+    assert.ok(kids.indexOf(hitl) < kids.indexOf(finalText), 'HITL 一级行原位常驻（不被重排）');
+});
+
+test('★ 缝合搬移 + 多批次：让位契约下不重排，盖子/成员兄弟区间不破', () => {
+    const b = bubble([
+        { cls: ['turn-batch-header'] },
+        { cls: ['tool-card'], attrs: { 'data-turn-batch': '1' } },
+        { cls: ['md-content'], text: 'FINAL 最终答案' },
+        { cls: ['msg-actions'] }
+    ]);
+    const h = b.children[0];
+    const member = b.children[1];
+    const meta = b.children[3];
+    assert.equal(api.compactBubble(b, {}), false, '有盖子时让位');
+    // 模拟 stitchPrependedRunRows：把外来节点（页脚）搬进成员区中部
+    b.insertBefore(meta, member);
+    assert.equal(b.children.indexOf(meta), 1, '前置条件：外来节点已夹入批次区');
+    assert.equal(api.compactBubble(b, {}), false, '缝合后重跑仍让位');
+    assert.equal(b.children.indexOf(h), 0, '盖子不被搬移');
+    assert.equal(b.children[2], member, '成员仍紧跟盖子（外来节点按属性跳过）');
+    const membersOf = (hd) => {
+        const out = [];
+        for (let i = b.children.indexOf(hd) + 1; i < b.children.length; i++) {
+            if (b.children[i]._classes.has('turn-batch-header')) break;
+            if (b.children[i].getAttribute('data-turn-batch') === '1') out.push(b.children[i]);
+        }
+        return out;
+    };
+    assert.deepEqual(membersOf(h), [member], 'membersOf 配对不破');
+});
+
+
+/* ===== 智能体卡折叠契约（2026-11 用户拍板「最终态折叠」） ===== */
+/* 未结束态（运行中 / 回放让位 / 缝合重跑）：智能体卡是常驻锚点 —— 不进过程区、
+   不打折叠标记、保持原始时序位置（历史报障「智能体展示每次都在消息最后」的防线）。
+   结束态（ended，finishStream 真收口 / 历史回放收尾）：智能体卡与工具/思考一样
+   是过程证据，归入 process 折叠 —— 最终态只留最终正文（用户报障「最终态会把
+   智能体全都放正文顶部展示」的修复）。 */
+test('★ 未结束态：智能体卡常驻锚点 —— 不进过程区、不打标记、保持原始时序位置', () => {
+    const b = bubble([
+        { cls: ['thinking-block'] },
+        { cls: ['tool-card'] },
+        { cls: ['agent-card'], text: 'Explore · 子 Agent 已完成 185s' },
+        { cls: ['md-content'], text: 'FINAL 最终答案' },
+        { cls: ['msg-actions'] }
+    ]);
+    const agent = b.children[2];
+    const finalText = b.children[3];
+    const d = api.classifyChildren(b.children);
+    assert.ok(d, '工具/思考仍可折叠，折叠决策应存在');
+    assert.ok(!d.process.includes(agent), '未结束态智能体卡不得进过程区（锚点常驻）');
+    assert.ok(d.keep.includes(agent), '未结束态智能体卡常驻可见');
+    assert.ok(!d.tail.includes(agent), '智能体卡是锚点，不进 tail（不得被搬到最终正文之后）');
+    assert.equal(d.final, finalText);
+    assert.ok(!d.process.includes(finalText), '最终正文不得被折叠');
+
+    assert.equal(api.compactBubble(b, {}), true);
+    assert.equal(agent.getAttribute('data-turn-process'), null, '未结束态智能体卡绝不带 data-turn-process 标记');
+    assert.ok(b.children.indexOf(agent) < b.children.indexOf(finalText),
+        'final 之前的智能体卡保持原时序位置（不被重排到最终正文之后）');
+    assert.equal(b.children[0]._classes.has('turn-compact-toggle'), true, 'toggle 仍在最前');
+});
+
+test('★ 最终态折叠：智能体卡归过程区折叠，最终态只留最终正文（用户拍板）', () => {
+    // 用户报障场景：结束态智能体卡堆在正文顶部展示 —— 修复后必须随摘要收起
+    const b = bubble([
+        { cls: ['thinking-block'] },
+        { cls: ['tool-card'] },
+        { cls: ['agent-card'], text: 'Explore · 子 Agent 已完成 185s' },
+        { cls: ['tool-card'] },
+        { cls: ['agent-card'], text: 'general · 子 Agent 已完成 32s' },
+        { cls: ['md-content'], text: 'FINAL 最终答案' },
+        { cls: ['msg-actions'] }
+    ]);
+    const agent1 = b.children[2];
+    const agent2 = b.children[4];
+    const finalText = b.children[5];
+
+    /* ended=true：智能体卡必须归 process（而不是 keep 常驻） */
+    const d = api.classifyChildren(b.children, b, { ended: true });
+    assert.ok(d, '结束态折叠决策应存在');
+    assert.ok(d.process.includes(agent1) && d.process.includes(agent2),
+        '最终态智能体卡归过程区（折叠除最终正文外其他都折叠）');
+    assert.ok(!d.keep.includes(agent1) && !d.keep.includes(agent2), '最终态智能体卡不再常驻');
+    assert.equal(d.final, finalText);
+
+    assert.equal(api.compactBubble(b, { ended: true }), true, '结束态必须折叠');
+    assert.equal(agent1.getAttribute('data-turn-process'), 'agent', '智能体卡带折叠标记');
+    assert.equal(agent2.getAttribute('data-turn-process'), 'agent', '智能体卡带折叠标记');
+    assert.equal(finalText.getAttribute('data-turn-process'), null, '最终正文保持可见');
+    /* 摘要计数：agents 计入「N 次子代理」 */
+    const raw = b.querySelector('.turn-compact-toggle').getAttribute('data-turn-compact-stats');
+    assert.deepEqual(JSON.parse(raw), { tools: 2, thinking: 1, agents: 2, texts: 0 });
+    assert.match(b.querySelector('.turn-compact-toggle').textContent, /2 次子代理/);
+});
+
+test('★ 最终态折叠：final 之后的智能体卡同样收起，不留正文之后的常驻行', () => {
+    const b = bubble([
+        { cls: ['tool-card'] },
+        { cls: ['md-content'], text: '答案' },
+        { cls: ['agent-card'], text: '收尾子代理' },
+        { cls: ['msg-actions'] }
+    ]);
+    const agent = b.children[2];
+    const answer = b.children[1];
+    const d = api.classifyChildren(b.children, b, { ended: true });
+    assert.ok(d);
+    assert.ok(d.process.includes(agent), 'final 之后的智能体卡在 ended 态同样归过程区');
+    assert.equal(api.compactBubble(b, { ended: true }), true);
+    assert.equal(agent.getAttribute('data-turn-process'), 'agent');
+    assert.equal(b.children[b.children.length - 2], answer, '最终正文是最后一个可见内容行');
+});
+
+test('★ 最终态无正文轮：智能体卡随纯工具轮一起折成一行摘要', () => {
+    const b = bubble([
+        { cls: ['tool-card'] },
+        { cls: ['agent-card'], text: '子代理' },
+        { cls: ['md-content'], text: '  ' }
+    ]);
+    const meta = el('div', ['msg-meta-row']);
+    const trace = el('span', ['msg-trace']);
+    trace.setAttribute('data-turn-status', 'done');
+    meta.appendChild(trace);
+    b.appendChild(meta);
+    assert.equal(api.compactBubble(b, { ended: true }), true, '无正文成功轮结束态折叠');
+    const agent = b.children.find(n => n._classes.has('agent-card'));
+    assert.ok(agent, '智能体卡节点存在');
+    assert.equal(agent.getAttribute('data-turn-process'), 'agent', '无正文轮的智能体卡也折叠');
+});
+
+test('★ 智能体卡不参与摘要计数（未结束态锚点）：摘要只统计工具/思考', () => {
+    const b = bubble([
+        { cls: ['tool-card'] },
+        { cls: ['agent-card'], text: '子 Agent' },
+        { cls: ['md-content'], text: '答案' }
+    ]);
+    const d = api.classifyChildren(b.children);
+    assert.ok(d);
+    const stats = api.buildSummary(d.process);
+    assert.equal(stats.agents, 0, '未结束态智能体不进 process ⇒ 摘要 agents 计数为 0');
+    assert.equal(stats.tools, 1);
+});
+
+/* ===== 折叠标头字号对齐（用户 2026-11 报「标头的字比下面的字小得多」） =====
+   回放最终折叠态的摘要行 .turn-compact-toggle 基础是 P2-6 的 12px/1.5，而
+   Qoder 对齐层已把过程行 / 正文 / 批次组头统一到 13px/1.6 —— 摘要行孤零零
+   小一档。⑬ 覆盖规则把它对齐到 13px/1.6、前缀 ▸ 同步放大。三份 UI 镜像必须
+   同步（历史事故：镜像同步会把单侧修复冲掉），且覆盖规则必须排在基础之后。 */
+test('★ 折叠标头字号：三份 UI 镜像都对齐到 13px/1.6，且覆盖规则层叠生效', () => {
+    const repo = path.resolve(__dirname, '..', '..', '..');
+    const mirrors = [
+        path.join('gourd-work', 'desktop', 'ui', 'css', 'app.css'),
+        path.join('gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'css', 'app.css'),
+        path.join('gourd-ai-tauri', 'ui', 'css', 'app.css')
+    ];
+    const fix = '.turn-compact-toggle { font: 13px/1.6 var(--font-sans, inherit) !important; padding: 5px 10px !important; }';
+    const prefix = '.turn-compact-toggle::before { font-size: 13px !important; }';
+    for (const rel of mirrors) {
+        const f = path.join(repo, rel);
+        assert.ok(fs.existsSync(f), 'UI 镜像缺失: ' + rel);
+        const css = fs.readFileSync(f, 'utf8');
+        const base = css.indexOf('font: 12px/1.5');
+        assert.ok(base > 0, rel + ' 缺 12px/1.5 基础规则');
+        assert.ok(css.lastIndexOf(fix) > base,
+            rel + ' 13px 覆盖规则必须排在 12px 基础之后，否则层叠失效、字号仍偏小');
+        assert.ok(css.lastIndexOf(prefix) > base, rel + ' 前缀 ▸ 必须同步放大到 13px');
+        let bal = 0, ok = true;
+        for (const ch of css) {
+            if (ch === '{') bal++;
+            else if (ch === '}') { bal--; if (bal < 0) ok = false; }
+        }
+        assert.ok(ok && bal === 0, rel + ' CSS 花括号不平衡（追加覆盖层破坏了结构）');
+    }
+});
+
+/* ===== 任务结束态自动折叠（用户 2026-11 报「只有加载历史消息才会折叠」） =====
+    真因：finishStream 有调 compactBubble，但旧版「有批次组头一律让位」把 live
+    收口短路；回放不建批次组头 ⇒ 只有回放能折。用户拍板：真结束时与回放一致，
+    折成「一行摘要 + 最终正文」，且点开摘要后保留运行态内部批次折叠。 */
+const MIRRORS = [
+    path.join('gourd-work', 'desktop', 'ui', 'css', 'app.css'),
+    path.join('gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'css', 'app.css'),
+    path.join('gourd-ai-tauri', 'ui', 'css', 'app.css')
+];
+
+test('★ 结束态：有批次组头也折成一行摘要 + 最终正文，组头/成员配对不破', () => {
+    // 模拟 live 收口后的气泡：两个批次组 + 成员 + 中间过程正文 + 最终正文
+    const b = bubble([
+        { cls: ['turn-batch-header'], attrs: { 'data-batch-state': 'closed' } },
+        { cls: ['tool-card'], attrs: { 'data-turn-batch': '1' } },
+        { cls: ['md-content'], text: '中间过程叙述' },
+        { cls: ['turn-batch-header'], attrs: { 'data-batch-state': 'closed' } },
+        { cls: ['thinking-block'], attrs: { 'data-turn-batch': '1' } },
+        { cls: ['md-content'], text: 'FINAL 最终答案' },
+        { cls: ['msg-actions'] }
+    ]);
+    const h1 = b.children[0], h2 = b.children[3];
+    const c1 = b.children[1], c2 = b.children[4];
+    const finalText = b.children[5];
+    // 运行态收口给成员打上的折叠类（用户要求展开后仍保持）
+    c1.classList.add('turn-batch-collapsed');
+    c2.classList.add('turn-batch-collapsed');
+
+    /* 未传 ended（运行态 / 回放 / 缝合重跑）⇒ 旧让位契约不变 */
+    assert.equal(api.compactBubble(b, {}), false, '未结束态仍让位');
+    assert.equal(b.querySelector('.turn-compact-toggle'), null);
+
+    /* 传 ended（finishStream 真收口）⇒ 必须折叠 */
+    assert.equal(api.compactBubble(b, { ended: true }), true, '结束态必须放行整轮折叠');
+    const toggle = b.querySelector('.turn-compact-toggle');
+    assert.ok(toggle, '插入一行整轮摘要');
+    assert.equal(b.children[0], toggle, '摘要在气泡最前');
+    assert.equal(toggle.textContent, '已完成 · 1 次工具调用 · 1 段思考 · 1 段过程');
+    assert.equal(finalText.getAttribute('data-turn-process'), null, '最终正文保持可见');
+    assert.equal(b.children[b.children.length - 2], finalText, '最终正文排在过程区之后');
+    // 组头/成员都进过程区（带标记 ⇒ 折叠态由 CSS 隐藏），且原相对顺序不拆散
+    [h1, h2, c1, c2, b.children[2]].forEach(n => {
+        assert.ok(n.getAttribute('data-turn-process') !== null, '过程行必须带折叠标记');
+    });
+    assert.ok(b.children.indexOf(h1) < b.children.indexOf(c1) && b.children.indexOf(c1) < b.children.indexOf(h2));
+    // 内部批次折叠态绝不被摘掉（用户补充约束）
+    assert.ok(c1.classList.contains('turn-batch-collapsed') && c2.classList.contains('turn-batch-collapsed'),
+        '成员折叠类不得被 compactBubble 摊开');
+});
+
+test('★ 结束态无正文成功轮也折叠；停止/挂起徽标仍不藏过程证据', () => {
+    const mk = (status) => {
+        const b = bubble([
+            { cls: ['turn-batch-header'] },
+            { cls: ['tool-card'], attrs: { 'data-turn-batch': '1' } },
+            { cls: ['msg-meta-row'] }
+        ]);
+        if (status) {
+            const trace = el('span', ['msg-trace']);
+            trace.setAttribute('data-turn-status', status);
+            b.children[2].appendChild(trace);
+        }
+        return b;
+    };
+    assert.equal(api.compactBubble(mk(null), { ended: true }), true, '纯工具轮结束也折成一行摘要');
+    const stopped = mk('stopped');
+    assert.equal(api.compactBubble(stopped, { ended: true }), false, 'stopped 轮保留全部过程证据');
+    const fatal = mk('done');
+    fatal.appendChild(el('div', ['err-bubble'], { text: '失败' }));
+    assert.equal(api.compactBubble(fatal, { ended: true }), false, '失败证据块仍触发 FATAL 护栏');
+});
+
+test('★ 接线形状锁：finishStream 收口必须传 ended:true', () => {
+    const f = path.join(__dirname, '..', 'ui', 'js', 'app-streaming.js');
+    const src = fs.readFileSync(f, 'utf8');
+    const iCall = src.indexOf('tcApi.compactBubble(liveBubble');
+    assert.ok(iCall > 0, 'finishStream 必须调用 compactBubble');
+    const call = src.slice(iCall, iCall + 400);
+    assert.match(call, /ended:\s*true/, '真收口必须传 ended:true，否则组头让位会把折叠短路');
+});
+
+test('★ 展开态保留内部批次折叠：三份 CSS 镜像都不许强制摊平成员', () => {
+    const repo = path.resolve(__dirname, '..', '..', '..');
+    const rule = '.msg-bubble.turn-compact-open > [data-turn-process].turn-batch-collapsed { display: none !important; }';
+    for (const rel of MIRRORS) {
+        const css = fs.readFileSync(path.join(repo, rel), 'utf8');
+        assert.ok(css.includes(rule), rel + ' 展开态必须保留批次折叠（display:none）');
+        assert.doesNotMatch(css, /\.msg-bubble\.turn-compact-open > \[data-turn-process\]\.turn-batch-collapsed \{ display: block !important; \}/,
+            rel + ' 旧摊平规则会抹掉运行态内部批次折叠');
+    }
+});
+
+/* 【2026-11 最终态折叠 · 用户报障「最终态会把智能体全都放正文顶部展示」】
+   根因之一是 ⑨ 块 `.msg-bubble > [data-turn-process].agent-card { display:block !important }`
+   强制智能体卡穿透折叠隐藏。形状锁：三壳 CSS 都不得再出现该强制常驻规则，
+   否则最终态智能体卡会全部堆在正文上方。 */
+test('★ 最终态折叠：三份 CSS 镜像都不许强制智能体卡常驻穿透折叠', () => {
+    const repo = path.resolve(__dirname, '..', '..', '..');
+    for (const rel of MIRRORS) {
+        const css = fs.readFileSync(path.join(repo, rel), 'utf8');
+        assert.ok(!css.includes('[data-turn-process].agent-card { display: block !important; }'),
+            rel + ' 不得强制带折叠标记的智能体卡常驻（最终态必须随摘要收起）');
+        assert.ok(!css.includes('[data-turn-process].agent-card{ display: block !important; }'),
+            rel + ' 同上（无空格变体）');
+    }
 });

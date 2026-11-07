@@ -24,14 +24,35 @@ const css = read(path.join(UI, 'css', 'app.css'));
 const coreCfg = read(path.join(__dirname, '..', '..', 'core', 'src', 'config', 'mod.rs'));
 const coreSrv = read(path.join(__dirname, '..', '..', 'core', 'src', 'server', 'mod.rs'));
 
-test('骨架：assistant 行 innerHTML 以身份头开头，用户行不受影响', () => {
-    assert.match(msg, /row\.innerHTML = assistantIdentityHeaderHtml\(\)/,
-        '身份头必须是 assistant 行骨架的第一个节点');
+test('骨架：assistant 行 innerHTML 以身份头开头（showHead=false 时省略），用户行不受影响', () => {
+    assert.match(msg, /row\.innerHTML = \(showHead \? assistantIdentityHeaderHtml\(\) : ''\)/,
+        '身份头是 assistant 行骨架的第一个节点，同 run 续段省略');
     assert.match(msg, /function assistantIdentityHeaderHtml\(\)/);
     assert.match(msg, /ASSISTANT_NAME_DEFAULT = 'GWork'/, '默认名称 GWork');
     assert.match(msg, /img\/logo\.svg/, '头像复用品牌 logo');
     // 名称是用户输入：进 innerHTML 前必须转义
     assert.match(msg, /assistantIdentityHeaderHtml[\s\S]{0,600}escapeHtml/, '名称必须转义后入 HTML');
+});
+
+test('同轮续段省略身份头：插话/问答/审批后不重复 GWork 头（2026-11 报障）', () => {
+    // 判定函数在位：以「最近一条真实用户消息行」为轮界（插话行 steer-note 不算打断）
+    assert.match(msg, /function assistantRowShouldShowHead\(sess\)/);
+    assert.match(msg, /steer-note.*插话行不算打断|插话行不算打断/,
+        '注释必须写明插话行不构成轮界');
+    assert.match(msg, /r\.classList\.contains\('user'\) && !r\.classList\.contains\('steer-note'\)/,
+        '用户行判定必须排除 steer-note 插话行');
+    // 【code review 回归钉 2026-11】恢复段带全新 runId：按 runId 查旧行会失效，
+    // 判定必须以用户行为轮界（帧日志 work-mw4m8qep 实证：挂起 run-18ba47b8 → 恢复 run-fd81760b）
+    assert.ok(!/querySelector\('\.msg-row\.assistant\[data-run-id=/.test(msg),
+        '不得按 runId 查旧行——ask/HITL 恢复段是新 runId，查不到会漏省头');
+    // 无用户行（会话首条）/ 查询异常必须回退 true（宁可多显示，不可丢头）
+    assert.match(msg, /if \(lastUser < 0\) return true;/);
+    assert.match(msg, /if \(!root \|\| !root\.querySelector\) return true;/);
+    assert.match(msg, /catch \(e\) \{ return true; \}/);
+    // 接线：省头时挂 no-identity-head
+    assert.match(msg, /if \(!showHead\) row\.classList\.add\('no-identity-head'\)/);
+    // CSS：无头行补上缘间距（顶替 msg-head 的 6px 下缘）
+    assert.match(css, /\.msg-row\.assistant\.no-identity-head \.msg-bubble \{ padding-top: 6px; \}/);
 });
 
 test('刷新：refreshAssistantIdentity 挂 window 且只改文本不重建行', () => {

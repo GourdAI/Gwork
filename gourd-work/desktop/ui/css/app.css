@@ -1,4 +1,4 @@
-﻿:root { --sidebar-width: 280px; --filer-panel-width: 280px; }
+:root { --sidebar-width: 280px; --filer-panel-width: 280px; }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; overflow: hidden; }
@@ -430,7 +430,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 /* ===== Chat View ===== */
 .chat-view { flex: 1; display: none; flex-direction: column; min-height: 0; }
 .chat-view.active { display: flex; }
-.messages-wrap { flex: 1; overflow-y: auto; }
+.messages-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; }
 /* ===== 消息区外壳（消息滚动区 + 叠在其右缘内侧的会话导航刻度带）=====
    结构：.messages-shell > (.messages-wrap + .history-rail)
 
@@ -487,7 +487,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .msg-row { display: flex; margin-bottom: 28px; gap: 0; animation: msg-in 0.25s ease-out; }
 @keyframes msg-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .msg-row.user { justify-content: flex-end; }
-.msg-row.assistant { justify-content: flex-start; }
+.msg-row.assistant { flex-direction: column; align-items: stretch; justify-content: flex-start; width: 100%; }
 .msg-row.system-notice { justify-content: center; margin-bottom: 20px; }
 .system-notice-bubble { background: var(--bg-hover, rgba(0,0,0,0.06)); color: var(--text-secondary, #888); font-size: 13px; padding: 8px 18px; border-radius: 16px; text-align: center; }
 /* msg-avatar removed */
@@ -495,10 +495,14 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .msg-bubble { max-width: 75%; line-height: 1.75; word-break: break-word; }
 .msg-row.user .msg-bubble { max-width: 100%; background: var(--bg-user-msg); color: var(--text-user-msg); padding: 12px 18px; border-radius: 20px 20px 4px 20px; font-size: 13px; }
 /* 助手气泡通栏 100%：右边界必须与用户消息的右边界（user-msg-col 100% 处）严格同线。
-   卡片头部状态点 margin-left:auto 钉在气泡最右，若气泡窄于用户列（曾为 92%），
-   两条右边界差约 60px，整列状态点悬在半空形成游离竖列；加宽后同线对齐。
-   min-width 同步 100%：保证短内容时状态点仍贴行尾而非跟随内容收缩。 */
-.msg-row.assistant .msg-bubble { max-width: 100%; min-width: 100%; }
+    卡片头部状态点 margin-left:auto 钉在气泡最右，若气泡窄于用户列（曾为 92%），
+    两条右边界差约 60px，整列状态点悬在半空形成游离竖列；加宽后同线对齐。
+    【258f0a0 身份头事故修复】.msg-head 是 .msg-row 的直接子项、与 .msg-bubble 并列，
+    行已改 flex-direction:column；这里【绝不能】再写 min-width:100% —— 横排时代它会与
+    .msg-head 争同一行宽度并溢出约 30px（头像被挤出气泡左侧、contain:paint 裁掉右侧正文、
+    .messages-wrap 的 overflow-x 被计算成 auto 派生贴底横向灰条）。通栏由行的
+    align-items:stretch + width:100% 与下面 max-width:100% 共同保证，短内容也贴行尾。 */
+.msg-row.assistant .msg-bubble { max-width: 100%; }
 /* 宽度约束放在列容器上，避免气泡百分比相对塌缩列计算导致被挤成窄高条 */
 .msg-row.user .user-msg-col { max-width: 75%; }
 .msg-row.user.wide-user .user-msg-col { max-width: 92%; }
@@ -998,6 +1002,11 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .msg-head-avatar { width: 22px; height: 22px; border-radius: 50%; flex: 0 0 auto; display: block; background: var(--bg-secondary, #fff); object-fit: cover; }
 [data-theme="dark"] .msg-head-avatar { filter: invert(1) hue-rotate(180deg); }
 .msg-head-name { font-size: 13px; font-weight: 600; color: var(--text-primary); line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+/* 【同 run 续段无头行】插话/问答/审批后在同一 run 内另起的 assistant 行省略身份头
+   （见 app-message.js assistantRowShouldShowHead）。带头行的 .msg-head 自带 6px 下缘，
+   无头行补 6px 上缘保持正文首行与上一气泡的间距节奏；运行态首批过程行自带
+   margin-top，这里用 4px 收半，避免无头行首块顶到上一气泡页脚。 */
+.msg-row.assistant.no-identity-head .msg-bubble { padding-top: 6px; }
 .msg-trace { font-size: 11px; color: var(--text-secondary); display: inline-block; line-height: 1.2; pointer-events: none; white-space: nowrap; float: right; vertical-align: top; }
 .msg-trace .trace-item { pointer-events: auto; display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; cursor: default; opacity: 0.5; transition: opacity 0.15s; }
    .msg-trace .trace-item:hover, .msg-trace .trace-item:focus-within { opacity: 1; }
@@ -4130,11 +4139,13 @@ pre:hover .code-copy-btn { opacity: 1; }
 .msg-bubble.turn-compact-open > [data-turn-process] { display: block !important; }
 
 /* 摘要按钮：正文上方一条低调的「过程入口」，不是卡片、不带底色块。
-   与过程行同口径用细分隔线归属，展开后靠箭头方向表达状态。 */
+   【2026-11 用户报障去除横线】旧版用 border-top 细分隔线做归属，实际渲染成
+   身份头下方一条贯穿全宽的横线，视觉突兀；现改为无分隔线，仅靠行间距与
+   箭头前缀表达「可展开的过程入口」，展开后靠箭头方向表达状态。 */
 .turn-compact-toggle {
     display: flex; align-items: center; gap: 7px; width: 100%;
     margin: 2px 0 8px; padding: 5px 10px;
-    border: 0; border-top: 1px solid var(--border-color); border-radius: 0;
+    border: 0; border-radius: 0;
     background: transparent; color: var(--text-tertiary);
     font: 12px/1.5 var(--font-sans, inherit); text-align: left;
     cursor: pointer; user-select: none;
@@ -4150,11 +4161,14 @@ pre:hover .code-copy-btn { opacity: 1; }
 }
 .msg-bubble.turn-compact-open > .turn-compact-toggle::before { transform: rotate(90deg); }
 .msg-bubble.turn-compact-open > .turn-compact-toggle { color: var(--text-secondary); }
-/* 展开态：过程行之间恢复原有节奏，避免它们贴在一起读成一大块 */
+/* 展开态：过程行之间恢复原有节奏，避免它们贴在一起读成一大块。
+    【258f0a0 !important 互压修复】旧版 ① 的 `margin:0 !important`（特异性 0,2,0）
+    压死了这条 margin:2px 0（死规则）；现 ① 已拆开、展开态不再命中 margin:0，
+    这里补 !important 与 0,3,0 特异性，成为唯一生效的展开态间距来源。 */
 .msg-bubble.turn-compact-open > [data-turn-process].tool-card,
 .msg-bubble.turn-compact-open > [data-turn-process].tool-batch-group,
 .msg-bubble.turn-compact-open > [data-turn-process].thinking-block,
-.msg-bubble.turn-compact-open > [data-turn-process].agent-card { margin: 2px 0; }
+.msg-bubble.turn-compact-open > [data-turn-process].agent-card { margin: 2px 0 !important; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    P2-6b 运行态 / 展开态：扁平语义轨迹（不是「取消卡片」这么简单）
@@ -4176,17 +4190,28 @@ pre:hover .code-copy-btn { opacity: 1; }
    用缩进 + 细线表达层级）。overflow 保持不动 —— contain:paint 抗滚动分层残影依赖它。
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* ① 去卡片盒：运行态全展开的四类过程行 + 折叠后用户展开的过程行 */
+/* ① 去卡片盒：运行态全展开的四类过程行 + 折叠后用户展开的过程行。
+    【258f0a0 !important 互压修复】旧版把 `margin:0 !important` 塞在这条共享规则里，
+    既压死了 :4157 的展开态 2px 间距，也压死了 :4358 批次盖子的分组分隔
+    （margin-top/border-top 无 !important）—— 两条都是死规则。现拆成两条：
+      · 运行态（agent-live）：全量归零，紧凑轨迹；
+      · 展开态（turn-compact-open）：只去边框/底色/阴影，【不碰 margin】，
+        让 :4157 与 :4358 各自的 !important 间距/分隔线生效。 */
 .msg-row.assistant.agent-live .msg-bubble > .thinking-block,
 .msg-row.assistant.agent-live .msg-bubble > .tool-card,
 .msg-row.assistant.agent-live .msg-bubble > .tool-batch-group,
-.msg-row.assistant.agent-live .msg-bubble > .agent-card,
-.msg-bubble.turn-compact-open > [data-turn-process] {
+.msg-row.assistant.agent-live .msg-bubble > .agent-card {
     border: 0 !important;
     border-radius: 0 !important;
     background: transparent !important;
     box-shadow: none !important;
     margin: 0 !important;
+}
+.msg-bubble.turn-compact-open > [data-turn-process] {
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
 }
 /* hover 也不再浮出灰底（否则鼠标一过瞬间又变回卡片） */
 .msg-row.assistant.agent-live .msg-bubble > .tool-card:hover,
@@ -4348,11 +4373,278 @@ pre:hover .code-copy-btn { opacity: 1; }
 .turn-batch-header:not(.turn-batch-open) .turn-batch-chevron { transform: rotate(-90deg); }
 /* 成员折叠：JS 管理类的单一窄规则；:empty 的正文壳本就不占位，无需特判 */
 .msg-bubble > .turn-batch-collapsed { display: none !important; }
-/* turn-compact 展开态必须压过批次折叠（特异性配对，顺序在后生效） */
-.msg-bubble.turn-compact-open > .turn-batch-collapsed { display: block !important; }
-/* 批次盖子在 turn-compact 展开态作为分组分隔行恢复 flex 布局（覆盖上一条 block） */
+/* 【2026-11 用户拍板：展开态保留运行态内部批次折叠】结束态整轮折叠后，点开摘要
+    看到的仍是运行态那套「执行工具 N 次」多折叠组（组头可点、成员默认收起），
+    不得被 ① 的 `.turn-compact-open > [data-turn-process] { display:block !important; }`
+    （特异性 0,3,0）摊平成一大片工具行 —— 用户报「现在的加载历史就把内部批次折叠搞没了」。
+    本规则特异性 0,4,0 压过 ①：带 .turn-batch-collapsed 的成员在展开态依旧隐藏；
+    点组头时 app-turn-batch.js applyMembers 摘掉该类 ⇒ 规则失配 ⇒ ① 把成员显示出来。
+    【258f0a0 作用域过宽修复仍保留】只命中带过程标记的成员，turn-tail 里无标记
+    却被批次收口的散行不受影响（它们本就不会被 ① 显示）。 */
+.msg-bubble.turn-compact-open > [data-turn-process].turn-batch-collapsed { display: none !important; }
+/* 批次盖子在 turn-compact 展开态作为分组分隔行恢复 flex 布局（覆盖上一条 block）。
+    【258f0a0 作用域过宽修复仍保留】：margin-top / padding-top 补 !important，否则被
+    ① 的 border:0 !important（展开态块）与基础 .turn-batch-header 的 margin 压死。
+    【2026-11 用户报「每个折叠上都有个横条」】原第 4392 行的 border-top 会把
+    每一组盖子都渲染成一条贯穿全宽的横线（折叠组越多横线越密）。此前整轮摘要
+    的横条已按用户要求去掉（:4142-4144），批次盖子应同口径：只靠行间距 +
+    箭头方向表达分组，不再画横线。特意不写 border-top 重置（① 的 border:0
+    已覆盖），避免与 ① 的 !important 互压再养死规则。 */
 .msg-bubble.turn-compact-open > [data-turn-process="batch-header"] {
     display: flex !important;
-    margin-top: 10px; padding-top: 6px;
-    border-top: 1px solid var(--border-color);
+    margin-top: 10px !important; padding-top: 6px !important;
+    border-top: 0 !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Qoder 过程行对齐层（用户 2026-11 报「字号不一致 / 斜体 / 符号 / 一点都不协调」）
+
+   目标形态（Qoder）：整轮一个「执行工具 N 次」折叠组；组内每行 =
+   统一线性 SVG 图标 + 统一 13px 正体短标签 + 单行省略摘要 + 右侧统一状态点。
+   思考 / 工具 / 批量 / 子代理四种过程行同字号、同行距、同灰度：
+   无 ◇/$/▸ 字符前缀、无 italic 斜体、无 mono↔sans 混排、无参差 padding。
+
+   【为何是追加覆盖层】上文 P2-6b 是上一轮「Codex 扁平语义轨迹」实验，其字符
+   前缀与斜体已被用户否决；保留原文作为决策记录（契约测试仍钉其形态不回归），
+   本层以更高特异性 + 后发顺序统一收口，避免大段删改引入新的死规则。
+   【作用域铁律】只命中 assistant 运行态 / 展开态 / 批次组头，用户气泡零命中。
+   ═══════════════════════════════════════════════════════════════════════════ */
+/* ① 字符前缀全部撤掉，恢复统一的线性 SVG 图标（P2-6b 曾 display:none 隐藏）。 */
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block > .thinking-block-header::before,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card > .tool-card-header::before,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group > .tool-batch-header::before,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card > .agent-card-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .thinking-block-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-card-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-batch-header::before,
+.msg-bubble.turn-compact-open > [data-turn-process] > .agent-card-header::before { content: none !important; }
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block > .thinking-block-header > .tool-type-icon,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card > .tool-card-header > .tool-type-icon,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group > .tool-batch-header > .tool-type-icon,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card > .agent-card-header > .agent-icon,
+.msg-bubble.turn-compact-open > [data-turn-process] > .thinking-block-header > .tool-type-icon,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-card-header > .tool-type-icon,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-batch-header > .tool-type-icon,
+.msg-bubble.turn-compact-open > [data-turn-process] > .agent-card-header > .agent-icon {
+    display: inline-flex !important; align-items: center; justify-content: center;
+    width: 16px; height: 16px; flex: 0 0 16px; color: var(--text-tertiary);
+}
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block > .thinking-block-header > .tool-type-icon svg,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card > .tool-card-header > .tool-type-icon svg,
+.msg-bubble.turn-compact-open > [data-turn-process] > .thinking-block-header > .tool-type-icon svg,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-card-header > .tool-type-icon svg {
+    width: 14px; height: 14px; display: block;
+}
+/* ② 四种过程行 header 统一：13px 正体 sans、同一行高/间距/内边距（撤掉 24px 前缀留白）。 */
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block > .thinking-block-header,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card > .tool-card-header,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group > .tool-batch-header,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card > .agent-card-header,
+.msg-bubble.turn-compact-open > [data-turn-process] > .thinking-block-header,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-card-header,
+.msg-bubble.turn-compact-open > [data-turn-process] > .tool-batch-header,
+.msg-bubble.turn-compact-open > [data-turn-process] > .agent-card-header {
+    padding: 5px 10px !important; gap: 8px !important;
+    font: 13px/1.6 var(--font-sans, inherit) !important;
+    font-style: normal !important;
+}
+/* ③ 行内所有文字同档：主标签 13px 正体、次要摘要 12.5px 同族同色（消灭斜体与字号跳变）。 */
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block .thinking-block-label,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card .tool-name,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group .tool-batch-title,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card .agent-label,
+.msg-bubble.turn-compact-open > [data-turn-process] .thinking-block-label,
+.msg-bubble.turn-compact-open > [data-turn-process] .tool-name,
+.msg-bubble.turn-compact-open > [data-turn-process] .tool-batch-title,
+.msg-bubble.turn-compact-open > [data-turn-process] .agent-label {
+    font: 500 13px/1.6 var(--font-sans, inherit) !important;
+    font-style: normal !important; color: var(--text-secondary);
+}
+.msg-row.assistant.agent-live .msg-bubble > .tool-card .tool-args,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card .preview-inline,
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block .preview-inline,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card .tool-duration,
+.msg-row.assistant.agent-live .msg-bubble > .tool-batch-group .tool-batch-progress,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card .agent-name,
+.msg-bubble.turn-compact-open > [data-turn-process] .tool-args,
+.msg-bubble.turn-compact-open > [data-turn-process] .preview-inline,
+.msg-bubble.turn-compact-open > [data-turn-process] .tool-duration,
+.msg-bubble.turn-compact-open > [data-turn-process] .tool-batch-progress,
+.msg-bubble.turn-compact-open > [data-turn-process] .agent-name {
+    font: 12.5px/1.6 var(--font-sans, inherit) !important;
+    font-style: normal !important; color: var(--text-tertiary);
+}
+/* ④ 过程正文不再独用 12.5px + 左边线 + opacity（Qoder 里正文与过程行同口径）。 */
+.msg-bubble.turn-compact-open > [data-turn-process="text"] {
+    padding-left: 10px !important; border-left: 0 !important;
+    font: 13px/1.6 var(--font-sans, inherit) !important;
+    color: var(--text-secondary) !important; opacity: 1 !important;
+}
+/* ⑤ 状态点统一 8px 圆点、贴行尾（与 Qoder 绿/橙点一致）。 */
+.msg-row.assistant.agent-live .msg-bubble .tool-status-icon,
+.msg-bubble.turn-compact-open > [data-turn-process] .tool-status-icon {
+    width: 8px !important; height: 8px !important; flex: 0 0 8px !important;
+    margin-left: auto !important;
+}
+/* ⑥ 批次组头「执行工具 N 次」/「正在执行中 · Ns」与过程行同口径；组内成员行同档。 */
+.turn-batch-header { font: 13px/1.6 var(--font-sans, inherit) !important; padding: 5px 10px !important; }
+.turn-batch-label { font-size: 13px !important; }
+.turn-batch-chevron { width: 13px !important; height: 13px !important; }
+.batch-tool-items > .tool-card .tool-card-header { padding: 5px 10px 5px 26px !important; }
+.batch-tool-items > .tool-card .tool-card-header .tool-type-icon { display: inline-flex !important; }
+.batch-tool-items > .tool-card .tool-card-header .tool-name,
+.batch-tool-items > .tool-card .tool-card-header .tool-args,
+.batch-tool-items > .tool-card .tool-card-header .preview-inline {
+    font: 12.5px/1.6 var(--font-sans, inherit) !important; font-style: normal !important;
+}
+/* ⑦ 代码/命令内容保留等宽（语义内容），但字号统一到 12.5px，不再 12px 混排。 */
+.msg-bubble.turn-compact-open > [data-turn-process] .tool-card-body,
+.msg-bubble.turn-compact-open > [data-turn-process] .thinking-block-body,
+.msg-row.assistant.agent-live .msg-bubble .tool-card-body,
+.msg-row.assistant.agent-live .msg-bubble .thinking-block-body {
+    font: 12.5px/1.6 var(--font-mono, monospace) !important;
+}
+/* ⑧ 活动行强调不再靠「前缀染 accent」（前缀已撤），改用图标着色，语义等价且不引入字符。
+    【code review 修复 2026-11】必须带 !important：⑭ 统一块（文件更靠后）对同选择器目标
+    写了 color: var(--text-tertiary) !important，本规则不带 !important 时会被无条件压过，
+    运行中活动行图标的蓝色强调色全部失效。同特异性 + 同 !important + 更靠后者胜出，
+    本规则在 ⑭ 之前仍不生效 —— 故移到文件最末（⑭ 之后）的 ⑮ 位置生效（见文件尾）。 */
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block.streaming > .thinking-block-header > .tool-type-icon,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card.args-streaming > .tool-card-header > .tool-type-icon,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card.agent-card-streaming > .agent-card-header > .agent-icon { color: var(--accent); }
+/* ⑨【智能体一级化 → 最终态折叠 · 2026-11 用户拍板】「最终态折叠，折叠除最终正文
+    外其他都折叠」：.agent-card 在 ended 态由 classifyChildren 的 agentFolds 分叉
+    归入 process、打 data-turn-process 标记，随整轮摘要一起收起；未结束态
+    （运行中 / 回放让位）它仍是常驻锚点（JS 不打标记，本块零命中）。
+    本块不再强制 display:block —— 那会让智能体卡在最终态穿透
+    `.msg-bubble > [data-turn-process] { display:none }` 全部堆在正文顶部
+    （用户报障「最终态会把智能体全都放正文顶部展示」的根因）。 */
+.msg-bubble > .agent-card { display: block; }
+/* ⑩【用户 2026-11 报「状态图标有大有小」】三种状态点物理尺寸与视觉重量不一致：
+   tool-status-icon / thinking-status-dot 基础 10px，agent-status-icon 10px 但无 flex 基准
+   （header 挤压时会缩），且 done/reject 态带 4px 外发光 box-shadow —— 视觉上比 loading
+   态大一圈。统一为 8px 实心圆 + flex 基准 + 去发光：同列三种点完全同径（同 Qoder
+   绿/橙点）。loading 的闪烁动画只动 opacity，不受尺寸统一影响。 */
+.msg-row.assistant .tool-status-icon,
+.msg-row.assistant .thinking-status-dot,
+.msg-row.assistant .agent-status-icon {
+    width: 8px !important; height: 8px !important; flex: 0 0 8px !important;
+    box-shadow: none !important;
+}
+/* ⑪【用户 2026-11 报「正文没对齐」】过程行 header 统一 padding:5px 10px（②），
+   而正文 .md-content 是 padding:2px 0 → 正文左缘比过程行整列左移 10px，形成参差的
+   第二列（截图里正文明显凸出）。正文与过程行/折叠组头对齐到同一列（左 10px）。
+   作用域仅 assistant 气泡直接子级：用户气泡内的 .md-content 零命中。 */
+.msg-row.assistant .msg-bubble > .md-content { padding: 2px 10px; }
+/* ⑫【用户 2026-11 指示「批量工具的不用显示什么批量工具了，直接都放统一层级的折叠态」】
+   并行批次（tool-batch-group）不再显示组头行（「批量读取 · 3/3」）：成员卡提升为与
+   普通工具行同层级（同 padding / 同字号 / 同状态点列），统一归 app-turn-batch.js 的
+   「执行工具 N 次」折叠组管理。组头节点保留在 DOM（JS 仍在其上更新进度/状态，
+   隐藏不影响逻辑），仅视觉隐藏；成员恒展开（旧行为需点 .expanded 才可见）。
+   回放旧历史同规则：组头隐藏、成员平铺，新旧形态统一。 */
+.msg-row.assistant .tool-batch-header { display: none !important; }
+.msg-row.assistant .tool-batch-group .batch-tool-items { display: block !important; padding: 0 !important; }
+.msg-row.assistant .tool-batch-group { border-left: 0 !important; margin: 0 !important; }
+.msg-row.assistant .batch-tool-items > .tool-card .tool-card-header { padding: 5px 10px !important; }
+.msg-row.assistant .batch-tool-items > .tool-card .tool-card-header .tool-name,
+.msg-row.assistant .batch-tool-items > .tool-card .tool-card-header .tool-args,
+.msg-row.assistant .batch-tool-items > .tool-card .tool-card-header .preview-inline {
+    font: 13px/1.6 var(--font-sans, inherit) !important; font-style: normal !important;
+}
+
+/* ⑬【用户 2026-11 报「历史消息最终折叠态标头的字比下面的字小得多」】回放最终
+   折叠态的整轮摘要行 .turn-compact-toggle 基础仍是 P2-6 的 font:12px/1.5，
+   而本对齐层已把过程行 / 正文 / 批次组头（⑥）统一到 13px/1.6 —— 摘要行
+   孤零零小一档，读起来像缩了一号。按 ⑥ 同口径对齐到 13px/1.6，前缀 ▸ 同步
+   放大到 13px；只修字号/行高，保留「低调过程入口」的三级灰配色与折叠语义，
+   不动逻辑、不插包装节点、用户气泡零命中。 */
+.turn-compact-toggle { font: 13px/1.6 var(--font-sans, inherit) !important; padding: 5px 10px !important; }
+.turn-compact-toggle::before { font-size: 13px !important; }
+
+/* Qoder 对齐层结束 */
+
+
+/* ⑭【用户 2026-11 报「工具/思考图标大小不一致，颜色有深有浅」】类型图标三层漂移：
+   基础层 18px SVG + 二级灰（.tool-type-icon svg 18px / color:--text-secondary）、
+   Qoder 对齐层 ① 只在 agent-live / turn-compact-open 作用域内改 16px 容器 / 14px
+   SVG + 三级灰、批次成员行只恢复了 inline-flex 未定尺寸 —— 同列图标出现
+   「历史批次展开成员 18px 二级灰、运行中 14px 三级灰、思考图标二级灰」三种
+   大小两种深浅。统一：assistant 气泡内【全部过程行 header】的类型图标
+   同 16px 容器 / 14px SVG、颜色统一三级灰（与 ① 同档，视觉重量一致）。
+   ⑧ 的 streaming/args-streaming accent 强调选择器特异性更高且同带 !important，
+   按 CSS 规则继续生效，运行中强调色不受影响。用户气泡无这些结构，零命中。 */
+.msg-row.assistant .msg-bubble .tool-card-header > .tool-type-icon,
+.msg-row.assistant .msg-bubble .thinking-block-header > .tool-type-icon,
+.msg-row.assistant .msg-bubble .tool-batch-header > .tool-type-icon,
+.msg-row.assistant .msg-bubble .agent-card-header > .agent-icon {
+    display: inline-flex !important; align-items: center; justify-content: center;
+    width: 16px !important; height: 16px !important; flex: 0 0 16px !important;
+    color: var(--text-tertiary) !important;
+}
+.msg-row.assistant .msg-bubble .tool-card-header > .tool-type-icon svg,
+.msg-row.assistant .msg-bubble .thinking-block-header > .tool-type-icon svg,
+.msg-row.assistant .msg-bubble .tool-batch-header > .tool-type-icon svg,
+.msg-row.assistant .msg-bubble .agent-card-header > .agent-icon svg {
+    width: 14px !important; height: 14px !important; display: block;
+}
+
+/* ⑮【code review 修复 2026-11】运行中活动行图标 accent 强调色恢复。
+    ⑭ 统一图标配 color: var(--text-tertiary) !important 后，⑧ 的 accent 规则（无
+    !important）被层叠压死，运行中「正在执行的工具/思考/智能体」图标不再变蓝。
+    本块与 ⑭ 同特异性 + 同 !important + 排在更后 ⇒ 压过 ⑭ 恢复强调色；
+    仅命中 agent-live 运行态的三种 streaming 行，历史/收口态零命中。 */
+.msg-row.assistant.agent-live .msg-bubble > .thinking-block.streaming > .thinking-block-header > .tool-type-icon,
+.msg-row.assistant.agent-live .msg-bubble > .tool-card.args-streaming > .tool-card-header > .tool-type-icon,
+.msg-row.assistant.agent-live .msg-bubble > .agent-card.agent-card-streaming > .agent-card-header > .agent-icon { color: var(--accent) !important; }
+
+/* ⑯【2026-11 用户报「子智能体还是原先的卡片形式」】⑨ 把 .agent-card 定为
+    「与正文平级的一级常驻行」，刻意不进按轮 Compact 折叠、不打 data-turn-process；
+    于是 ①~⑥ 全部以 `.turn-compact-open > [data-turn-process]` 或
+    `.agent-live > .agent-card` 为作用域的扁平化规则，在【历史收口态】一律命中不到它
+    —— 历史里子智能体仍是 :787 的「2px 左竖条 + 6px 圆角 + hover 灰底」卡片，
+    与同轮已扁平化的工具/思考行拼在一起。用户要求它也走扁平轨迹。
+    修复口径（与用户拍板的 Qoder 多折叠组不冲突）：
+      · 【2026-11 最终态折叠更新】ended 时 agent 已归 process（agentFolds 分叉）、
+        随整轮摘要收起；本块只管【可见形态】：无论未结束态锚点行还是展开态
+        过程行，卡片装饰一律抹平（去边框/圆角/竖条/底色/阴影），
+        行内 header 与 ②/③ 同字号、同 padding、同前缀列；
+      · 用户气泡零命中；不插包装节点（:829 相邻兄弟选择器保持有效）；
+      · 卡体 .agent-card-body 的展开/限高语义完全保留，只去装饰。
+    运行态（.agent-live）已有 ① 的同款规则，无需重复。 */
+.msg-row.assistant .msg-bubble > .agent-card:not(.agent-card-streaming) {
+    border: 0 !important;
+    border-left: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    overflow: visible;
+}
+.msg-row.assistant .msg-bubble > .agent-card:not(.agent-card-streaming):hover {
+    background: transparent !important;
+    border-color: transparent !important;
+}
+.msg-row.assistant .msg-bubble > .agent-card > .agent-card-header {
+    padding: 5px 10px !important;
+    font: 13px/1.6 var(--font-sans, inherit) !important;
+    font-style: normal !important;
+    background: transparent !important;
+}
+.msg-row.assistant .msg-bubble > .agent-card > .agent-card-header .agent-label,
+.msg-row.assistant .msg-bubble > .agent-card > .agent-card-header .agent-name {
+    font: 500 13px/1.6 var(--font-sans, inherit) !important;
+    font-style: normal !important; color: var(--text-secondary);
+}
+.msg-row.assistant .msg-bubble > .agent-card > .agent-card-body {
+    border-top: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+/* 卡体内部的工具/思考行同口径去卡片（批次组内的子工具同理）。 */
+.msg-row.assistant .msg-bubble > .agent-card .tool-card,
+.msg-row.assistant .msg-bubble > .agent-card .thinking-block,
+.msg-row.assistant .msg-bubble > .agent-card .tool-batch-group {
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
 }

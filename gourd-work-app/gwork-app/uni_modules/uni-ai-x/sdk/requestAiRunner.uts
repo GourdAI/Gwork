@@ -1,0 +1,819 @@
+import { llmModelMap } from '@/uni_modules/uni-ai-x/config.uts';
+import { Chunk, Provider, RequestAiCoMessage, Llm, CustomProviderCallbacks, MessageSearch, SearchSource } from '@/uni_modules/uni-ai-x/types.uts';
+import { getCustomProvider } from '@/uni_modules/uni-ai-x/sdk/provider-registry.uts'
+import { SseStreamParser } from '@/uni_modules/uni-ai-x/sdk/sse.uts'
+import {
+	lastUserQuestionText,
+	webSearchForRequest
+} from '@/uni_modules/uni-ai-x/sdk/web-search.uts'
+// #ifdef APP-ANDROID || APP-IOS || WEB || MP-WEIXIN || APP-HARMONY
+import {
+	appendAiWorkerMarkdown,
+	cancelAiWorkerRequest,
+	completeAiWorkerMarkdown,
+	destroyAiWorkerRuntime,
+	readAiWorkerSnapshot,
+	setAiWorkerDataListener,
+	startAiWorkerMarkdown,
+	startAiWorkerRequest
+} from '@/uni_modules/uni-ai-worker-runtime'
+// #endif
+// #ifdef APP-HARMONY || APP-ANDROID
+import type { AiWorkerOp } from '@/uni_modules/uni-ai-worker-runtime/utssdk/interface.uts'
+import { readAiWorkerState, takeAiWorkerOps } from '@/uni_modules/uni-ai-worker-runtime'
+import { OP_RESET } from '@/uni_modules/uni-ai-md/utssdk/interface.uts'
+import { logBlockPayload } from '@/uni_modules/uni-ai-worker/utssdk/uni-ai-md-log.uts'
+// #endif
+
+export type RequestAiRunnerCallbacks = {
+	onSearch?: (search: MessageSearch) => void,
+	onMarkdownHtml: (html: string) => void,
+	onMarkdownBlocks: (blocks: string) => void,
+	// #ifdef APP-HARMONY || APP-ANDROID
+	onMarkdownAstDelta?: (ops: AiWorkerOp[]) => void,
+	// #endif
+	onThinkContent: (thinkContent: string) => void,
+	onMsgBody: (msgBody: string) => void,
+	onState: (state: string) => void,
+	onErrorMsg: (errorMsg: string) => void,
+	onRendered: (rendered: boolean) => void,
+	onChatTitle: (title: string) => void
+}
+export type RequestAiStartOptions = {
+	messages: RequestAiCoMessage[],
+	llm: Llm,
+	chat_id: string,
+	// 是否在回答成功结束后自动更新会话标题（仅会话首条提问时传 true，避免每轮都消耗模型 RPM）
+	updateTitleAfterDone ?: boolean,
+	// uni-ai-md 解析会话的配色：darkMode 决定插件默认前景色，background 是画布底色；
+	// 只影响原生解析产出的中间态 SVG，最终绘制仍由展示层按主题重渲染。
+	darkMode ?: boolean,
+	background ?: string
+}
+type RequestAiOnChunkFn = (chunkObj : Chunk) => void
+type RequestAiOnErrorFn = (err : UTSJSONObject) => void
+type RequestAiOnDoneFn = (data : UTSJSONObject) => void
+type RequestAiOnSuccessFn = (chunkObj : Chunk) => void
+type RequestAiOnTaskCreateFn = (requestTask : RequestTask) => void
+type RequestPromiseFn = (data : UTSJSONObject) => void
+type RequestAiServerOptions = {
+	llm : Llm,
+	messages : RequestAiCoMessage[],
+	stream ?: boolean,
+	chat_id ?: string,
+	thinkingOverride ?: boolean,
+	onChunk ?: RequestAiOnChunkFn,
+	onError ?: RequestAiOnErrorFn,
+	onDone ?: RequestAiOnDoneFn,
+	onSuccess ?: RequestAiOnSuccessFn,
+	onTaskCreate ?: RequestAiOnTaskCreateFn
+}
+
+const MARKDOWN_RENDER_INTERVAL = 300
+
+// 当前模型配置是否声明支持深度思考
+function supportsThinking(llm: Llm): boolean {
+	const providerConfig = llmModelMap.get(llm.provider)
+	if (providerConfig == null) return false
+	const model = providerConfig.models.find(m => m.modelId == llm.model)
+	return model?.thinking == true
+}
+
+// 构造深度思考开关参数：仅对支持思考的模型显式传递 thinking 配置（Anthropic/OpenAI 标准）
+// 未设置偏好时默认开启；thinkingOverride 可对单次请求强制指定开关（如标题总结关闭思考）
+function buildThinkingParam(llm: Llm, thinkingOverride: boolean | null = null): UTSJSONObject | null {
+	if (!supportsThinking(llm)) return null
+	const enabled = thinkingOverride ?? llm.thinking ?? true
+	return { type: enabled ? 'enabled' : 'disabled' }
+}
+
+function readSnapshotString(snapshot: UTSJSONObject, key: string, defaultValue: string = ''): string {
+	const value = snapshot[key] as string | null
+	return value == null ? defaultValue : value as string
+}
+
+function readSnapshotNumber(snapshot: UTSJSONObject, key: string, defaultValue: number = 0): number {
+	const value = snapshot[key] as number | null
+	return value == null ? defaultValue : value as number
+}
+
+function readSnapshotBoolean(snapshot: UTSJSONObject, key: string, defaultValue: boolean = false): boolean {
+	const value = snapshot[key] as boolean | null
+	return value == null ? defaultValue : value as boolean
+}
+
+class RequestAiRunner {
+	private searchTask: RequestTask | null = null
+	private searchVersion = 0
+	private activeSearch: MessageSearch | null = null
+	requestTask : RequestTask | null = null
+	msgBody : string = ''
+	thinkContent : string = ''
+	private callbacks : RequestAiRunnerCallbacks | null = null
+	currentChatState : string = ''
+	userAbort : boolean = false
+	hasThinkContent : boolean = false
+	private bodyEmitTimer: number = 0
+	private lastBodyEmitTime: number = 0
+	private workerPollTimer: number = 0
+	private workerRequestVersion: number = 0
+	private workerSnapshotVersion: number = 0
+	private workerActive: boolean = false
+	// 本次请求的 uni-ai-md 解析配色，由 start 的 options 提供，随 worker 启动消息透传
+	private pluginDarkMode: boolean = false
+	private pluginBackground: string = ''
+	private finishRequested: boolean = false
+	private streamParser: SseStreamParser | null = null
+	// 等回答成功结束后再触发标题总结，避免与回答请求并发占用同一模型的 RPM
+	private pendingTitleMessages : RequestAiCoMessage[] | null = null
+	private pendingTitleLlm : Llm | null = null
+	constructor(callbacks: RequestAiRunnerCallbacks) {
+		this.callbacks = callbacks
+	}
+	private emitMsgBody(force: boolean = false) {
+		if (force) {
+			if (this.bodyEmitTimer != 0) clearTimeout(this.bodyEmitTimer)
+			this.bodyEmitTimer = 0
+			this.lastBodyEmitTime = Date.now()
+			this.callbacks?.onMsgBody(this.msgBody)
+			return
+		}
+		const elapsed = this.lastBodyEmitTime == 0 ? MARKDOWN_RENDER_INTERVAL : Date.now() - this.lastBodyEmitTime
+		if (elapsed >= MARKDOWN_RENDER_INTERVAL) {
+			this.lastBodyEmitTime = Date.now()
+			this.callbacks?.onMsgBody(this.msgBody)
+			return
+		}
+		if (this.bodyEmitTimer != 0) return
+		this.bodyEmitTimer = setTimeout(() => {
+			this.bodyEmitTimer = 0
+			this.lastBodyEmitTime = Date.now()
+			this.callbacks?.onMsgBody(this.msgBody)
+		}, MARKDOWN_RENDER_INTERVAL - elapsed)
+	}
+	onChunkFn(chunkObj : Chunk) {
+		let reasoningContent: null | string = null
+		let content = chunkObj.choices?.[0]?.delta?.content
+		if (this.msgBody == '' && content == "<think>") {
+			this.hasThinkContent = true
+			content = ''
+		}
+		if (this.hasThinkContent) {
+			if (content != '</think>') {
+				reasoningContent = content
+			} else {
+				this.hasThinkContent = false
+			}
+			content = ''
+		}
+
+		reasoningContent = reasoningContent ?? chunkObj.choices?.[0]?.delta?.reasoning_content
+		// #ifdef APP-ANDROID || APP-IOS || WEB || MP-WEIXIN || APP-HARMONY
+		if (this.workerActive) {
+			appendAiWorkerMarkdown(this.workerRequestVersion, content ?? '', reasoningContent ?? '')
+			return
+		}
+		// #endif
+		if (content != null && content.length > 0) {
+			this.msgBody += content
+			this.emitMsgBody()
+		} else if (reasoningContent != null) {
+			this.thinkContent += reasoningContent
+			this.callbacks?.onThinkContent(this.thinkContent.trim())
+		}
+
+	};
+
+
+	resetRequestState() {
+		this.stopWorkerRuntime(true)
+		this.workerRequestVersion += 1
+		if (this.bodyEmitTimer != 0) clearTimeout(this.bodyEmitTimer)
+		this.bodyEmitTimer = 0
+		this.lastBodyEmitTime = 0
+		this.msgBody = ''
+		this.thinkContent = ''
+		this.currentChatState = ''
+		this.userAbort = false
+		this.hasThinkContent = false
+		this.finishRequested = false
+		this.streamParser = null
+	}
+	handleRequestError(errRes: UTSJSONObject) {
+		if (this.workerActive) this.stopWorkerRuntime(true)
+		this.clearPendingTitleUpdate()
+		console.error('requestAiServer error', errRes)
+		const errCodeValue = errRes['errCode'] as string | number | null
+		const errCode = errCodeValue == null ? '' : `${errCodeValue}`
+		const errMsgValue = errRes['errMsg'] as string | null
+		let errMsg = errMsgValue == null ? '未知错误' : errMsgValue as string
+		if (errCode == 'data_inspection_failed') {
+			errMsg = '数据检查失败，疑似包含敏感信息'
+		}
+		if (this.userAbort == false) {
+			this.callbacks?.onErrorMsg(errMsg)
+		}
+		this.currentChatState = 'stop'
+		this.callbacks?.onState('stop')
+	}
+	finishRequest() {
+		if (this.finishRequested) return
+		if (this.currentChatState == 'stop') return
+		this.finishRequested = true
+		// #ifdef APP-ANDROID || APP-IOS || WEB || MP-WEIXIN || APP-HARMONY
+		if (this.workerActive) {
+			completeAiWorkerMarkdown(this.workerRequestVersion)
+			return
+		}
+		// #endif
+		if (!this.msgBody.endsWith('\n')) {
+			this.msgBody += '\n'
+		}
+		this.emitMsgBody(true)
+		this.handleRequestError({
+			errCode: 'markdown_html_unsupported',
+			errMsg: '当前平台未启用 Markdown HTML Worker'
+		})
+	}
+	start(options: RequestAiStartOptions) {
+		this.pluginDarkMode = options.darkMode ?? false
+		this.pluginBackground = options.background ?? ''
+		this.requestAi(options.messages, options.llm, options.chat_id, options.updateTitleAfterDone ?? false)
+	}
+	requestAi(messages : RequestAiCoMessage[], llm : Llm, chat_id : string, updateTitleAfterDone: boolean = false) {
+		this.resetRequestState()
+		this.pendingTitleMessages = updateTitleAfterDone ? messages.slice(0) : null
+		this.pendingTitleLlm = updateTitleAfterDone ? llm : null
+
+		// #ifndef APP-ANDROID
+		// #ifndef APP-IOS
+		// #ifndef WEB
+		// #ifndef MP-WEIXIN
+		// #ifndef APP-HARMONY
+		this.handleRequestError({
+			errCode: 'markdown_html_unsupported',
+			errMsg: '当前平台未启用 Markdown HTML Worker'
+		})
+		return
+		// #endif
+		// #endif
+		// #endif
+		// #endif
+		// #endif
+
+		if (llm.webSearch == true) {
+			this.searchThenRequestAi(messages, llm, chat_id)
+			return
+		}
+		this.requestRemoteAi(messages, llm, chat_id)
+	}
+
+	// 开启联网搜索时：先请求全网搜索，把结果注入到最后一条用户消息，再发起 AI 请求；
+	// 搜索失败时降级为直接请求，不阻塞正常对话。
+	private async searchThenRequestAi(messages : RequestAiCoMessage[], llm : Llm, chat_id : string) {
+		const version = ++this.searchVersion
+		const startedAt = Date.now()
+		const providerConfig = llmModelMap.get(llm.provider)
+		const searchURL = providerConfig?.webSearchURL ?? ''
+		const query = lastUserQuestionText(messages)
+		let requestMessages = messages
+		this.activeSearch = { status: 'searching', query: query, sources: [] as SearchSource[], error: '' }
+		this.callbacks?.onSearch?.(this.activeSearch!)
+		if (searchURL.length > 0 && query.length > 0) {
+			try {
+				const token = await providerConfig!.getToken?.()!
+				if (this.userAbort || version != this.searchVersion) return
+				const prepared = await webSearchForRequest(query, token, searchURL, messages, (task: RequestTask) => { this.searchTask = task })
+				if (this.userAbort || version != this.searchVersion) return
+				const results = prepared.sources
+				this.activeSearch = { status: results.length > 0 ? 'complete' : 'empty', query: query, sources: results, error: '' }
+				this.callbacks?.onSearch?.(this.activeSearch!)
+				requestMessages = prepared.messages
+			} catch (error) {
+				if (this.userAbort || version != this.searchVersion) return
+				this.activeSearch = { status: 'failed', query: query, sources: [] as SearchSource[], error: '联网搜索失败，将直接回答' }
+				this.callbacks?.onSearch?.(this.activeSearch!)
+			}
+		} else {
+			this.activeSearch = { status: 'failed', query: query, sources: [] as SearchSource[], error: '当前模型未配置搜索，将直接回答' }
+			this.callbacks?.onSearch?.(this.activeSearch!)
+		}
+		this.searchTask = null
+		if (this.userAbort || version != this.searchVersion) return
+		console.log('[uni-ai-x][search-timing]', this.activeSearch?.status, Date.now() - startedAt)
+		this.requestRemoteAi(requestMessages, llm, chat_id)
+	}
+	requestRemoteAi(messages : RequestAiCoMessage[], llm : Llm, chat_id : string) {
+		// #ifdef APP-ANDROID || APP-HARMONY
+		if (getCustomProvider(llm.provider) == null) {
+			this.requestRemoteAiInWorker(messages, llm, chat_id)
+			return
+		}
+		// #endif
+		// #ifdef APP-ANDROID || APP-IOS || WEB || MP-WEIXIN || APP-HARMONY
+		this.startMarkdownHtmlWorker()
+		// #endif
+		this.requestAiServer({
+			llm,
+			messages,
+			stream: true,
+			chat_id: chat_id,
+			onTaskCreate: (requestTask : RequestTask) => {
+				this.requestTask = requestTask
+			},
+			onChunk: (chunkObj : Chunk) => {
+				this.onChunkFn(chunkObj)
+			},
+			onError: (errRes) => {
+				this.handleRequestError(errRes)
+			},
+			onDone: () => {
+				this.finishRequest()
+			}
+		}).finally(() => {
+			this.requestTask = null
+		}).catch(() => {
+			// 错误已由 onError 回调上报，这里兜住 reject，避免产生 Uncaught (in promise)
+		})
+	}
+	// #ifdef APP-ANDROID || APP-HARMONY
+	private async requestRemoteAiInWorker(messages: RequestAiCoMessage[], llm: Llm, chat_id: string) {
+		const requestVersion = this.workerRequestVersion + 1
+		this.workerRequestVersion = requestVersion
+		const requestOptions: RequestAiServerOptions = {
+			llm: llm,
+			messages: messages,
+			stream: true,
+			chat_id: chat_id,
+			onError: (errRes: UTSJSONObject) => {
+				if (requestVersion == this.workerRequestVersion) this.handleRequestError(errRes)
+			}
+		}
+		try {
+			const config = this.getProviderConfig(llm.provider, requestOptions)
+			const tmpToken = await this.requestProviderToken(config, requestOptions)
+			if (this.userAbort || requestVersion != this.workerRequestVersion) return
+			const body: UTSJSONObject = {
+				messages: messages,
+				stream: true,
+				model: llm.model
+			}
+			const thinkingParam = buildThinkingParam(llm)
+			if (thinkingParam != null) {
+				body['thinking'] = thinkingParam
+			}
+			this.workerSnapshotVersion = 0
+			this.workerActive = true
+			startAiWorkerRequest({
+				requestVersion: requestVersion,
+				provider: llm.provider,
+				model: llm.model,
+				url: config.baseURL!,
+				authorization: 'Bearer ' + tmpToken,
+				bodyJson: '',
+				body: body,
+				renderInterval: MARKDOWN_RENDER_INTERVAL,
+				timeout: 90000,
+				darkMode: this.pluginDarkMode,
+				background: this.pluginBackground
+			})
+			setAiWorkerDataListener(() => {
+				this.pollWorkerSnapshot(requestVersion)
+			})
+		} catch (_error) {
+			// getProviderConfig/requestProviderToken 已通过 requestOptions.onError 上报。
+		}
+	}
+	// #endif
+
+	// #ifdef APP-ANDROID || APP-IOS || WEB || MP-WEIXIN || APP-HARMONY
+	private pollWorkerSnapshot(requestVersion: number) {
+		if (!this.workerActive || requestVersion != this.workerRequestVersion || this.userAbort) return
+		// #ifdef APP-HARMONY || APP-ANDROID
+		const ops = takeAiWorkerOps()
+		for (let i = 0; i < ops.length; i++) {
+			const op = ops[i]
+			if (op.op != OP_RESET) {
+				logBlockPayload(op.kind, op.content, op.index, op.op, op.unchanged)
+			}
+		}
+		if (ops.length > 0) this.callbacks?.onMarkdownAstDelta?.(ops)
+		this.pollUniAiMdState(requestVersion)
+		return
+		// #endif
+		// #ifndef APP-HARMONY
+		// #ifndef APP-ANDROID
+		const snapshotJson = readAiWorkerSnapshot()
+		if (snapshotJson.length == 0) return
+		let snapshot: UTSJSONObject
+		try {
+			snapshot = JSON.parse<UTSJSONObject>(snapshotJson) as UTSJSONObject
+		} catch (_error) {
+			this.handleWorkerSnapshotError('worker_snapshot_invalid', 'Worker 返回数据解析失败')
+			return
+		}
+		if (readSnapshotNumber(snapshot, 'requestVersion') != requestVersion) return
+		const phase = readSnapshotString(snapshot, 'phase')
+		const snapshotVersion = readSnapshotNumber(snapshot, 'snapshotVersion')
+		if (phase != 'error' && snapshotVersion <= this.workerSnapshotVersion) return
+		if (snapshotVersion > this.workerSnapshotVersion) this.workerSnapshotVersion = snapshotVersion
+		if (phase == 'error') {
+			console.log('[uni-ai-x][AI Worker] error', JSON.stringify({
+				requestVersion: requestVersion,
+				snapshotVersion: snapshotVersion,
+				eventCount: readSnapshotNumber(snapshot, 'eventCount'),
+				networkChunkCount: readSnapshotNumber(snapshot, 'networkChunkCount'),
+				receivedBytes: readSnapshotNumber(snapshot, 'receivedBytes'),
+				elapsed: readSnapshotNumber(snapshot, 'elapsed'),
+				errCode: readSnapshotString(snapshot, 'errCode', 'worker_error')
+			}))
+			this.handleWorkerSnapshotError(
+				readSnapshotString(snapshot, 'errCode', 'worker_error'),
+				readSnapshotString(snapshot, 'errMsg', 'Worker 请求失败')
+			)
+			return
+		}
+		if (phase != 'snapshot' && phase != 'complete') return
+
+		this.msgBody = readSnapshotString(snapshot, 'msgBody', this.msgBody)
+		this.thinkContent = readSnapshotString(snapshot, 'thinkContent', this.thinkContent)
+		this.emitMsgBody(true)
+		this.callbacks?.onThinkContent(this.thinkContent)
+		const renderMode = readSnapshotString(snapshot, 'renderMode')
+		if (renderMode != 'html') {
+			this.handleWorkerSnapshotError('worker_html_required', 'Worker 必须返回 Markdown HTML')
+			return
+		}
+		const isDone = phase == 'complete' || readSnapshotBoolean(snapshot, 'isDone')
+		if (isDone) {
+			console.log('[uni-ai-x][AI Worker] complete', JSON.stringify({
+				requestVersion: requestVersion,
+				snapshotVersion: snapshotVersion,
+				eventCount: readSnapshotNumber(snapshot, 'eventCount'),
+				networkChunkCount: readSnapshotNumber(snapshot, 'networkChunkCount'),
+				receivedBytes: readSnapshotNumber(snapshot, 'receivedBytes'),
+				renderMode: renderMode,
+				htmlLength: readSnapshotNumber(snapshot, 'htmlLength'),
+				terminalSource: readSnapshotString(snapshot, 'terminalSource'),
+				elapsed: readSnapshotNumber(snapshot, 'elapsed')
+			}))
+		this.stopWorkerRuntime(false)
+	}
+		this.callbacks?.onMarkdownBlocks(readSnapshotString(snapshot, 'blocks', '[]'))
+		this.callbacks?.onMarkdownHtml(readSnapshotString(snapshot, 'html'))
+		if (isDone) {
+			this.currentChatState = 'completed'
+			this.callbacks?.onState('completed')
+			this.callbacks?.onRendered(true)
+			this.updateChatTitleAfterDone()
+		}
+		// #endif
+		// #endif
+	}
+
+	// #ifdef APP-HARMONY || APP-ANDROID
+	private pollUniAiMdState(requestVersion: number): void {
+		const state = readAiWorkerState()
+		if (state == null) return
+		if (readSnapshotNumber(state, 'requestVersion') != requestVersion) return
+		const phase = readSnapshotString(state, 'phase')
+		const snapshotVersion = readSnapshotNumber(state, 'snapshotVersion')
+		if (phase != 'error' && snapshotVersion <= this.workerSnapshotVersion) return
+		if (snapshotVersion > this.workerSnapshotVersion) this.workerSnapshotVersion = snapshotVersion
+		if (phase == 'error') {
+			console.log('[uni-ai-x][AI Worker] error', JSON.stringify({
+				requestVersion: requestVersion,
+				snapshotVersion: snapshotVersion,
+				eventCount: readSnapshotNumber(state, 'eventCount'),
+				networkChunkCount: readSnapshotNumber(state, 'networkChunkCount'),
+				receivedBytes: readSnapshotNumber(state, 'receivedBytes'),
+				elapsed: readSnapshotNumber(state, 'elapsed'),
+				errCode: readSnapshotString(state, 'errCode', 'worker_error')
+			}))
+			this.handleWorkerSnapshotError(
+				readSnapshotString(state, 'errCode', 'worker_error'),
+				readSnapshotString(state, 'errMsg', 'Worker 请求失败')
+			)
+			return
+		}
+		if (phase != 'snapshot' && phase != 'complete') return
+		this.msgBody = readSnapshotString(state, 'msgBody', this.msgBody)
+		this.thinkContent = readSnapshotString(state, 'thinkContent', this.thinkContent)
+		this.emitMsgBody(true)
+		this.callbacks?.onThinkContent(this.thinkContent)
+		if (phase != 'complete') return
+		console.log('[uni-ai-x][AI Worker] complete', JSON.stringify({
+			requestVersion: requestVersion,
+			snapshotVersion: snapshotVersion,
+			eventCount: readSnapshotNumber(state, 'eventCount'),
+			networkChunkCount: readSnapshotNumber(state, 'networkChunkCount'),
+			receivedBytes: readSnapshotNumber(state, 'receivedBytes'),
+			elapsed: readSnapshotNumber(state, 'elapsed')
+		}))
+		this.stopWorkerRuntime(false)
+		this.currentChatState = 'completed'
+		this.callbacks?.onState('completed')
+		this.callbacks?.onRendered(true)
+		this.updateChatTitleAfterDone()
+	}
+	// #endif
+
+	private handleWorkerSnapshotError(errCode: string, errMsg: string) {
+		this.stopWorkerRuntime(false)
+		this.handleRequestError({
+			errCode: errCode,
+			errMsg: errMsg
+		})
+	}
+	// #endif
+
+	private stopWorkerRuntime(cancelRequest: boolean) {
+		if (this.workerPollTimer != 0) clearInterval(this.workerPollTimer)
+		this.workerPollTimer = 0
+		// #ifndef MP-WEIXIN
+		setAiWorkerDataListener(null)
+		// #endif
+		// #ifdef APP-ANDROID || APP-IOS || WEB || MP-WEIXIN || APP-HARMONY
+		if (cancelRequest && this.workerActive) cancelAiWorkerRequest(this.workerRequestVersion)
+		destroyAiWorkerRuntime()
+		// #endif
+		this.workerActive = false
+	}
+
+	// #ifdef APP-ANDROID || APP-IOS || WEB || MP-WEIXIN || APP-HARMONY
+	private startMarkdownHtmlWorker() {
+		const requestVersion = this.workerRequestVersion + 1
+		this.workerRequestVersion = requestVersion
+		this.workerSnapshotVersion = 0
+		this.workerActive = true
+		startAiWorkerMarkdown({
+			requestVersion: requestVersion,
+			renderInterval: MARKDOWN_RENDER_INTERVAL,
+			darkMode: this.pluginDarkMode,
+			background: this.pluginBackground
+		})
+		// #ifdef MP-WEIXIN
+		this.workerPollTimer = setInterval(() => {
+			this.pollWorkerSnapshot(requestVersion)
+		}, 50)
+		// #endif
+		// #ifndef MP-WEIXIN
+		setAiWorkerDataListener(() => {
+			this.pollWorkerSnapshot(requestVersion)
+		})
+		// #endif
+	}
+	// #endif
+
+	async requestViaCustomProvider(options : RequestAiServerOptions) : Promise<UTSJSONObject> {
+		const adapter = getCustomProvider(options.llm.provider)
+		if (adapter == null) {
+			const errInfo: UTSJSONObject = {
+				errCode: -200,
+				errMsg: '自定义提供商适配器未注册: ' + options.llm.provider
+			}
+			options.onError?.(errInfo)
+			return {}
+		}
+
+		// 适配器会先通过 onError 回调上报具体错误，这里记录上报状态，
+		// 避免 runner 再用通用错误覆盖具体错误，造成同一次失败被重复上报
+		let errorReported = false
+		const callbacks: CustomProviderCallbacks = {
+			onChunk: options.onChunk,
+			onError: (err : UTSJSONObject) => {
+				errorReported = true
+				options.onError?.(err)
+			},
+			onDone: options.onDone
+		}
+		const currentChatId = options.chat_id ?? ''
+		let success = false
+		try {
+			success = await adapter.request(options.messages, options.llm.model, currentChatId, callbacks)
+		} catch (e) {
+			console.error('自定义提供商请求异常', e)
+			if (!errorReported) {
+				const errInfo: UTSJSONObject = {
+					errCode: -204,
+					errMsg: '自定义提供商请求异常'
+				}
+				options.onError?.(errInfo)
+			}
+			return {}
+		}
+		if (!success) {
+			if (!errorReported) {
+				const errInfo: UTSJSONObject = {
+					errCode: -201,
+					errMsg: '自定义提供商发送消息失败'
+				}
+				options.onError?.(errInfo)
+			}
+			return {}
+		}
+		return {}
+	}
+	async requestAiServer(options : RequestAiServerOptions) : Promise<UTSJSONObject> {
+		let resolveFn = (_ : UTSJSONObject) : void => { }, rejectFn = resolveFn;
+
+		if (getCustomProvider(options.llm.provider) != null) {
+			return this.requestViaCustomProvider(options)
+		}
+
+		const config = this.getProviderConfig(options.llm.provider, options)
+		const tmpToken = await this.requestProviderToken(config, options)
+		const requestData: UTSJSONObject = {
+			messages: options.messages,
+			stream: options.stream ?? true,
+			model: options.llm.model
+		}
+		const thinkingParam = buildThinkingParam(options.llm, options.thinkingOverride ?? null)
+		if (thinkingParam != null) {
+			requestData['thinking'] = thinkingParam
+		}
+		const requestTask: RequestTask = uni.request({
+			url: config.baseURL!,
+			method: 'POST',
+			dataType: 'text',
+			data: requestData,
+			// @ts-ignore
+			enableChunked: options.stream ?? true,
+			header: {
+				'Authorization': `Bearer ${tmpToken}`,
+				'Content-Type': 'application/json'
+			},
+			success: (res : RequestSuccess<any>) => {
+				this.handleRequestSuccess(res, options, resolveFn, rejectFn)
+			},
+			fail: (err : RequestFail) => {
+				console.error('request fail', err)
+				const errInfo: UTSJSONObject = {
+					errCode: err.errCode,
+					errMsg: err.errMsg
+				}
+				rejectFn(errInfo)
+				options.onError?.(errInfo)
+			}
+		})
+		options.onTaskCreate?.(requestTask)
+		if (options.stream == true) {
+			this.bindStreamChunks(requestTask, options, rejectFn)
+		}
+		return new Promise<UTSJSONObject>((resolve, reject) => {
+			resolveFn = (data : UTSJSONObject) => { resolve(data) }
+			rejectFn = (data : UTSJSONObject) => { reject(data) }
+		})
+	}
+	getProviderConfig(provider: string, options: RequestAiServerOptions): Provider {
+		const config = llmModelMap.get(provider)
+		if (config == null) {
+			const errInfo: UTSJSONObject = {
+				errCode: -101,
+				errMsg: '模型提供商未配置: ' + provider
+			}
+			options.onError?.(errInfo)
+			throw errInfo
+		}
+		return config
+	}
+	async requestProviderToken(config: Provider, options: RequestAiServerOptions): Promise<string> {
+		try {
+			return await config.getToken?.()!
+		} catch (e) {
+			const errInfo: UTSJSONObject = {
+				errCode: -100,
+				errMsg: '获取临时token失败'
+			}
+			options.onError?.(errInfo)
+			throw errInfo
+		}
+	}
+	handleRequestSuccess(res: RequestSuccess<any>, options: RequestAiServerOptions, resolveFn: RequestPromiseFn, rejectFn: RequestPromiseFn) {
+		if (options.stream == false) {
+			const strData = typeof res.data == 'string' ? res.data : JSON.stringify(res.data)
+			const chunkObj : Chunk = (JSON.parse<Chunk>(strData) ?? {}) as Chunk
+			options.onSuccess?.(chunkObj)
+			resolveFn({})
+			return
+		}
+		if (res.data instanceof UTSJSONObject) {
+			const error = res.data.getJSON('error')
+			if (error != null) {
+				const errInfo: UTSJSONObject = {
+					errCode: error.getString('code', 'unknown'),
+					errMsg: error.getString('message', '未知错误')
+				}
+				options.onError?.(errInfo)
+				rejectFn(errInfo)
+				return
+			}
+		}
+		// 流式响应已传输完成：兜底触发一次结束，避免结尾的 [DONE] 因分包丢失导致状态卡死。
+		const parser = this.streamParser
+		if (parser != null) {
+			// 平台未触发分片回调（例如服务端流式被网关缓冲）时，用结束时的完整响应体兜底解析。
+			const rawData = res.data
+			const textBody = typeof rawData == 'string' ? rawData as string : ''
+			if (parser.receivedBytes() == 0 && textBody.length > 0) {
+				parser.pushText(textBody)
+			}
+		}
+		this.finishStreamRequest(options)
+		resolveFn({})
+	}
+	finishStreamRequest(options: RequestAiServerOptions) {
+		const parser = this.streamParser
+		this.streamParser = null
+		if (parser != null) parser.finish()
+		options.onDone?.({})
+	}
+	bindStreamChunks(requestTask: RequestTask, options: RequestAiServerOptions, rejectFn: RequestPromiseFn) {
+		const parser = new SseStreamParser(
+			(chunkObj : Chunk) => {
+				options.onChunk?.(chunkObj)
+			},
+			(err : UTSJSONObject) => {
+				err.errCode = err.code ?? ''
+				err.errMsg = err.message ?? '未知错误'
+				options.onError?.(err)
+				rejectFn(err)
+			},
+			() => {
+				options.onDone?.({})
+			}
+		)
+		this.streamParser = parser
+		// @ts-ignore
+		requestTask.onChunkReceived((chunk : RequestTaskOnChunkReceivedListenerResult) => {
+			parser.push(chunk.data as ArrayBuffer)
+		})
+	}
+	// 回答成功后触发的标题总结：此时与回答请求不再并发，且可把回答内容一并作为总结输入
+	private updateChatTitleAfterDone() {
+		const titleMessages = this.pendingTitleMessages
+		const titleLlm = this.pendingTitleLlm
+		this.clearPendingTitleUpdate()
+		if (titleMessages == null || titleLlm == null) return
+		this.updateChatTitle(titleMessages, titleLlm, this.msgBody)
+	}
+	private clearPendingTitleUpdate() {
+		this.pendingTitleMessages = null
+		this.pendingTitleLlm = null
+	}
+	updateChatTitle(messages: RequestAiCoMessage[], llm: Llm, answerBody: string = '') {
+		const customAdapter = getCustomProvider(llm.provider)
+		if (customAdapter != null && customAdapter.supportsTitleUpdate != true) return;
+		messages = messages.slice(0)
+		if (answerBody.length > 0) {
+			messages.push({
+				role: 'assistant',
+				content: answerBody
+			})
+		}
+		messages.push({
+			role: 'user',
+			content: '请总结一下这段对话的内容，不包含本对话，用于更新会话的标题。注意：可以直接使用的不要有多余的文字，只保留总结的内容。字数控制在 10 个字以内。'
+		})
+		this.requestAiServer({
+			llm,
+			messages,
+			stream: false,
+			thinkingOverride: false,
+			onError: (err: UTSJSONObject) => {
+				console.error('updateChatTitle error', err)
+			},
+			onSuccess: (chunkObj: Chunk) => {
+				const message = chunkObj.choices?.[0]?.message
+				const newTitle = (message?.content ?? '').trim()
+				if (newTitle.length == 0) {
+					// 返回内容为空时保留原临时标题，避免标题被清空
+					console.log('updateChatTitle 返回内容为空，保留原标题')
+					return
+				}
+				this.callbacks?.onChatTitle(newTitle)
+			}
+		}).catch(() => {
+			// 标题更新失败静默处理，错误已由 onError 回调输出，这里兜住 reject
+		})
+	}
+	abortRequest() {
+		this.searchVersion += 1
+		this.searchTask?.abort()
+		this.searchTask = null
+		if (this.activeSearch?.status == 'searching') {
+			this.callbacks?.onSearch?.({ status: 'cancelled', query: this.activeSearch!.query, sources: [] as SearchSource[], error: '' })
+		}
+		if (this.bodyEmitTimer != 0) clearTimeout(this.bodyEmitTimer)
+		this.bodyEmitTimer = 0
+		this.clearPendingTitleUpdate()
+		this.userAbort = true
+		this.streamParser = null
+		this.stopWorkerRuntime(true)
+		this.workerRequestVersion += 1
+		this.requestTask?.abort()
+		this.callbacks?.onState('stop')
+		this.callbacks = null
+	}
+}
+export default RequestAiRunner;
