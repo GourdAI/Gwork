@@ -879,14 +879,14 @@ test('★ 智能体卡不参与摘要计数（未结束态锚点）：摘要只�
 /* ===== 折叠标头字号对齐（用户 2026-11 报「标头的字比下面的字小得多」） =====
    回放最终折叠态的摘要行 .turn-compact-toggle 基础是 P2-6 的 12px/1.5，而
    Qoder 对齐层已把过程行 / 正文 / 批次组头统一到 13px/1.6 —— 摘要行孤零零
-   小一档。⑬ 覆盖规则把它对齐到 13px/1.6、前缀 ▸ 同步放大。三份 UI 镜像必须
-   同步（历史事故：镜像同步会把单侧修复冲掉），且覆盖规则必须排在基础之后。 */
-test('★ 折叠标头字号：三份 UI 镜像都对齐到 13px/1.6，且覆盖规则层叠生效', () => {
+   小一档。⑬ 覆盖规则把它对齐到 13px/1.6、前缀 ▸ 同步放大。两份 UI 镜像必须
+   同步（历史事故：镜像同步会把单侧修复冲掉），且覆盖规则必须排在基础之后。
+   注：根级 gourd-ai-tauri/ui 已删除且不入库，CI checkout 后不存在，不作第三份镜像。 */
+test('★ 折叠标头字号：两份 UI 镜像都对齐到 13px/1.6，且覆盖规则层叠生效', () => {
     const repo = path.resolve(__dirname, '..', '..', '..');
     const mirrors = [
         path.join('gourd-work', 'desktop', 'ui', 'css', 'app.css'),
-        path.join('gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'css', 'app.css'),
-        path.join('gourd-ai-tauri', 'ui', 'css', 'app.css')
+        path.join('gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'css', 'app.css')
     ];
     const fix = '.turn-compact-toggle { font: 13px/1.6 var(--font-sans, inherit) !important; padding: 5px 10px !important; }';
     const prefix = '.turn-compact-toggle::before { font-size: 13px !important; }';
@@ -914,8 +914,7 @@ test('★ 折叠标头字号：三份 UI 镜像都对齐到 13px/1.6，且覆盖
     折成「一行摘要 + 最终正文」，且点开摘要后保留运行态内部批次折叠。 */
 const MIRRORS = [
     path.join('gourd-work', 'desktop', 'ui', 'css', 'app.css'),
-    path.join('gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'css', 'app.css'),
-    path.join('gourd-ai-tauri', 'ui', 'css', 'app.css')
+    path.join('gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'css', 'app.css')
 ];
 
 test('★ 结束态：有批次组头也折成一行摘要 + 最终正文，组头/成员配对不破', () => {
@@ -989,7 +988,7 @@ test('★ 接线形状锁：finishStream 收口必须传 ended:true', () => {
     assert.match(call, /ended:\s*true/, '真收口必须传 ended:true，否则组头让位会把折叠短路');
 });
 
-test('★ 展开态保留内部批次折叠：三份 CSS 镜像都不许强制摊平成员', () => {
+test('★ 展开态保留内部批次折叠：两份 CSS 镜像都不许强制摊平成员', () => {
     const repo = path.resolve(__dirname, '..', '..', '..');
     const rule = '.msg-bubble.turn-compact-open > [data-turn-process].turn-batch-collapsed { display: none !important; }';
     for (const rel of MIRRORS) {
@@ -1002,9 +1001,9 @@ test('★ 展开态保留内部批次折叠：三份 CSS 镜像都不许强制�
 
 /* 【2026-11 最终态折叠 · 用户报障「最终态会把智能体全都放正文顶部展示」】
    根因之一是 ⑨ 块 `.msg-bubble > [data-turn-process].agent-card { display:block !important }`
-   强制智能体卡穿透折叠隐藏。形状锁：三壳 CSS 都不得再出现该强制常驻规则，
+   强制智能体卡穿透折叠隐藏。形状锁：两份 CSS 都不得再出现该强制常驻规则，
    否则最终态智能体卡会全部堆在正文上方。 */
-test('★ 最终态折叠：三份 CSS 镜像都不许强制智能体卡常驻穿透折叠', () => {
+test('★ 最终态折叠：两份 CSS 镜像都不许强制智能体卡常驻穿透折叠', () => {
     const repo = path.resolve(__dirname, '..', '..', '..');
     for (const rel of MIRRORS) {
         const css = fs.readFileSync(path.join(repo, rel), 'utf8');

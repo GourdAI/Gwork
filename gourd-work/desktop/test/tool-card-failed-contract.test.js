@@ -9,14 +9,14 @@
  * `chunk.failed === true`，再一路交给 setToolCardStatus / edit 渲染器。
  *
  * ── 测试形态（重要）────────────────────────────────────────────────────────
- * 三份 app-message.js 镜像由另一个任务并行修改，故这里**只做源码正则/字符串
+ * 两份 app-message.js 镜像由另一个任务并行修改，故这里**只做源码正则/字符串
  * 断言**，断言的是期望目标状态；不在 node:vm 里 eval 当前函数体真跑——那会与
  * 并行写入竞态，也会把浏览器全局带进 node:test。花括号配平仅用于切出函数体做
- * 三份镜像的逐字一致性比较（与 stale-agent-frame.test.js 的 extractHelper 同
+ * 两份镜像的逐字一致性比较（与 stale-agent-frame.test.js 的 extractHelper 同
  * 手法），不执行其中任何一行。
  *
- * 读到的源码统一把 CRLF 归一成 LF：三份镜像当前都是 CRLF，混用行尾不应让
- * 「三份函数体完全相等」这条契约假红。
+ * 读到的源码统一把 CRLF 归一成 LF：两份镜像当前都是 CRLF，混用行尾不应让
+ * 「两份函数体完全相等」这条契约假红。
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -27,8 +27,11 @@ const path = require('node:path');
  * __dirname = <repo>/gourd-work/desktop/test
  *   ../                     -> gourd-work/desktop
  *   ../../                  -> gourd-work
- *   ../../../               -> <repo>  (gourd-ai-tauri / gourdai-java 在此层)
- * 三条相对路径均已按仓库实际层级核对。
+ *   ../../../               -> <repo>  (gourdai-java 在此层)
+ * 前端唯一源是 gourd-work/desktop/ui；Java 侧 static 为入库的历史镜像。
+ * 根级 gourd-ai-tauri/ui 是 7370119 已删除、.gitignore 忽略的构建期拷贝残骸，
+ * CI checkout 后不存在，绝不作为第三份镜像锁进契约。
+ * 两条相对路径均已按仓库实际层级核对。
  */
 const MIRRORS = [
     {
@@ -36,12 +39,6 @@ const MIRRORS = [
         streamName: 'gourd-work/desktop/ui/js/app-streaming.js',
         msg: path.resolve(__dirname, '../ui/js/app-message.js'),
         stream: path.resolve(__dirname, '../ui/js/app-streaming.js')
-    },
-    {
-        name: 'gourd-ai-tauri/ui/js/app-message.js',
-        streamName: 'gourd-ai-tauri/ui/js/app-streaming.js',
-        msg: path.resolve(__dirname, '../../../gourd-ai-tauri/ui/js/app-message.js'),
-        stream: path.resolve(__dirname, '../../../gourd-ai-tauri/ui/js/app-streaming.js')
     },
     {
         name: 'gourdai-java/gourd-ai-agent/src/main/resources/static/js/app-message.js',
@@ -83,7 +80,7 @@ function extractBlock(src, anchor, label) {
 
 /* ===== 测试 1：判定口径 ===== */
 
-test('测试1 三份镜像都以 failed 为唯一判定，不再有 __ERROR__ / 成功完成 兜底', () => {
+test('测试1 两份镜像都以 failed 为唯一判定，不再有 __ERROR__ / 成功完成 兜底', () => {
     for (const m of MIRRORS) {
         const src = readSource(m.msg, m.name);
 
@@ -118,9 +115,9 @@ test('测试1 三份镜像都以 failed 为唯一判定，不再有 __ERROR__ / 
     }
 });
 
-/* ===== 测试 2：三份镜像逐字一致 ===== */
+/* ===== 测试 2：两份镜像逐字一致 ===== */
 
-test('测试2 三份镜像的 setToolCardStatus 与 edit 渲染器函数体完全相等', () => {
+test('测试2 两份镜像的 setToolCardStatus 与 edit 渲染器函数体完全相等', () => {
     const anchors = [
         {
             key: 'setToolCardStatus',
@@ -140,7 +137,7 @@ test('测试2 三份镜像的 setToolCardStatus 与 edit 渲染器函数体完�
         for (let i = 1; i < bodies.length; i++) {
             assert.ok(
                 bodies[i].body === bodies[0].body,
-                `${bodies[i].name}：契约「三份镜像 ${a.key} 函数体逐字一致」被破坏` +
+                `${bodies[i].name}：契约「两份镜像 ${a.key} 函数体逐字一致」被破坏` +
                 `（与基准 ${bodies[0].name} 不同：${bodies[i].body.length} vs ${bodies[0].body.length} 字符）`
             );
         }
@@ -190,7 +187,7 @@ test('测试3 failed 已透传到渲染/暂存/更新函数，且 appendActionEn
 
 /* ===== 测试 4：流式入口 ===== */
 
-test('测试4 三份 app-streaming.js 都按 chunk.failed === true 透传', () => {
+test('测试4 两份 app-streaming.js 都按 chunk.failed === true 透传', () => {
     for (const m of MIRRORS) {
         const src = readSource(m.stream, m.streamName);
 

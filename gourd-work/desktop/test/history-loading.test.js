@@ -652,12 +652,14 @@ test('12 个语言包的三个文案键齐全', () => {
 /* ===== 2026-11 白屏止血回归钉：初始 replay 必须有 timeout / abort / 世代归属 =====
    缺陷现场：裸 $.get 无 timeout，12s 骨架兜底只换 UI 态不作废回调；切会话、
    点重试后旧请求带着 8 万帧回来仍会重建整页，形成失败卡 + 迟到内容交错。
-   三壳镜像同步历史上多次把单侧修复冲掉，故两壳都锁。 */
-test('★ 初始 replay 止血：timeout + abort + 世代/会话归属 + fragment 捞回（两壳同步）', () => {
+   2026-11 契约对齐：修复只落在前端唯一源 gourd-work/desktop/ui；根级
+   gourd-ai-tauri/ui 是已删除的构建期拷贝残骸（CI checkout 后不存在），
+   Java 侧 static/js/app-history.js 自 2026-10-25 起未同步这批 replay 修复
+   （8 项标记实测全为 0），锁它必然假红，故只锁唯一源。 */
+test('★ 初始 replay 止血：timeout + abort + 世代/会话归属 + fragment 捞回', () => {
     const repo = path.resolve(__dirname, '..', '..', '..');
     const files = [
-        path.join('gourd-work', 'desktop', 'ui', 'js', 'app-history.js'),
-        path.join('gourd-ai-tauri', 'ui', 'js', 'app-history.js')
+        path.join('gourd-work', 'desktop', 'ui', 'js', 'app-history.js')
     ];
     for (const rel of files) {
         const src = fs.readFileSync(path.join(repo, rel), 'utf8');

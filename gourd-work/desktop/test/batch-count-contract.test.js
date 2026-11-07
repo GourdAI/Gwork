@@ -161,34 +161,33 @@ test('★ i18n 占位符：{count} 由 params 插值，不残留字面量', () =
     assert.match(r.labelZh, /1 次/);
 });
 
-test('★ 三份 UI 镜像的 app-turn-display.js 完全一致（旧 turn-batch/turn-compact 已合并删除）', () => {
+/* 2026-11 契约对齐：前端唯一源是 gourd-work/desktop/ui，Java 侧 static 为历史镜像；
+   根级 gourd-ai-tauri/ui 是 7370119 已删除、.gitignore 忽略的构建期拷贝残骸，
+   CI checkout 后不存在，绝不能再作为第三份镜像锁进契约。 */
+test('★ 两份 UI 镜像的 app-turn-display.js 完全一致（旧 turn-batch/turn-compact 已合并删除）', () => {
     const files = [
         path.join(desktop, 'ui', 'js', 'app-turn-display.js'),
-        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-turn-display.js'),
-        path.join(repo, 'gourd-ai-tauri', 'ui', 'js', 'app-turn-display.js')
+        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-turn-display.js')
     ];
     const hashes = files.map(f => {
         assert.ok(fs.existsSync(f), '镜像缺失: ' + f);
         return require('crypto').createHash('md5').update(fs.readFileSync(f)).digest('hex');
     });
-    assert.equal(new Set(hashes).size, 1, '三壳 turn-display 实现必须一致');
+    assert.equal(new Set(hashes).size, 1, '两份 turn-display 实现必须一致');
     // 旧文件必须彻底删除（bootstrap 已只加载 app-turn-display.js，留旧文件会造成双模块双盖子）
     const legacy = [
         path.join(desktop, 'ui', 'js', 'app-turn-batch.js'),
         path.join(desktop, 'ui', 'js', 'app-turn-compact.js'),
         path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-turn-batch.js'),
-        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-turn-compact.js'),
-        path.join(repo, 'gourd-ai-tauri', 'ui', 'js', 'app-turn-batch.js'),
-        path.join(repo, 'gourd-ai-tauri', 'ui', 'js', 'app-turn-compact.js')
+        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-turn-compact.js')
     ];
     for (const f of legacy) {
         assert.ok(!fs.existsSync(f), '旧模块必须删除，防双加载: ' + f);
     }
-    // 三份 bootstrap 加载链都只引用新模块
+    // 两份 bootstrap 加载链都只引用新模块
     const boots = [
         path.join(desktop, 'ui', 'js', 'app-bootstrap.js'),
-        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-bootstrap.js'),
-        path.join(repo, 'gourd-ai-tauri', 'ui', 'js', 'app-bootstrap.js')
+        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-bootstrap.js')
     ];
     for (const f of boots) {
         const src = fs.readFileSync(f, 'utf8');
@@ -212,16 +211,15 @@ test('★ 12 份语言包（desktop）都有 chat.batch_thinking_count 且键集
     assert.equal(new Set(keySets).size, 1, '12 份语言包键集必须一致（locale-parity 契约）');
 });
 
-test('★ 36 份语言包 JSON 全部有效', () => {
+test('★ 24 份语言包 JSON 全部有效', () => {
     const dirs = [
         path.join(desktop, 'ui', 'locales'),
-        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'locales'),
-        path.join(repo, 'gourd-ai-tauri', 'ui', 'locales')
+        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'locales')
     ];
     let n = 0;
     for (const d of dirs) for (const f of fs.readdirSync(d).filter(x => x.endsWith('.json'))) {
         assert.doesNotThrow(() => JSON.parse(fs.readFileSync(path.join(d, f), 'utf8').replace(/^\uFEFF/, '')), d + '/' + f);
         n++;
     }
-    assert.equal(n, 36);
+    assert.equal(n, 24);
 });

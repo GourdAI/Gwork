@@ -190,11 +190,12 @@ test('★ 接线锁：挂起分支必须在 resetStreamState 之前，且真收�
     assert.ok(body.indexOf('!keepBatchIndex', iRealFold) >= iRealFold, '挂起 done 不得走整轮 Compact');
 });
 
-test('★ 三份 UI 镜像同步：helper 定义 / 插话接线 / 泛化注释', () => {
+/* 2026-11 契约对齐：根级 gourd-ai-tauri/ui 已删除且不入库，CI checkout 后不存在；
+   只锁两份入库镜像。 */
+test('★ 两份 UI 镜像同步：helper 定义 / 插话接线 / 泛化注释', () => {
     const mirrors = [
         path.join(desktop, 'ui', 'js', 'app-message.js'),
-        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-message.js'),
-        path.join(repo, 'gourd-ai-tauri', 'ui', 'js', 'app-message.js')
+        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-message.js')
     ];
     for (const f of mirrors) {
         assert.ok(fs.existsSync(f), '镜像缺失: ' + f);

@@ -17,7 +17,7 @@
  * ── 测试形态 ────────────────────────────────────────────────────────────
  * 从真实 app-message.js 里切出 helper 源码（不复制实现，避免测副本），在
  * node:vm 里配极简假 DOM 真跑；另用源码断言守住 appendSteerNote 的接线
- * （helper 必须定义在清 currentBubbleEl 之前被调用）与三份 UI 镜像的一致性，
+ * （helper 必须定义在清 currentBubbleEl 之前被调用）与两份 UI 镜像的一致性，
  * 并钉死「绝不调用 compactBubble / clearBatch」——旧轮没有终态正文，
  * compactBubble 会走 !decision → revealAll 把刚收好的批次重新摊开。
  */
@@ -176,7 +176,7 @@ test('无 currentBubbleEl / 旧气泡已脱离文档：静默 no-op，不抛异�
     assert.deepEqual(calls, []);
 });
 
-/* ===== 接线锁：helper 必须在清 currentBubbleEl 之前被调用，且三份 UI 镜像一致 ===== */
+/* ===== 接线锁：helper 必须在清 currentBubbleEl 之前被调用，且两份 UI 镜像一致 ===== */
 test('★ 接线锁：appendSteerNote 在清指针前调用 settleSteerTurnBoundary', () => {
     const bodyStart = MSG_SRC.indexOf('function appendSteerNote(sess, item) {');
     assert.ok(bodyStart > 0);
@@ -189,11 +189,12 @@ test('★ 接线锁：appendSteerNote 在清指针前调用 settleSteerTurnBound
     assert.ok(iSettle < iClear, '收口必须在清指针之前：清了就再也找不到旧气泡');
 });
 
-test('★ 三份 UI 镜像同步：gourd-work / gourdai-java / gourd-ai-tauri 的插话收口接线', () => {
+/* 2026-11 契约对齐：根级 gourd-ai-tauri/ui 是 7370119 已删除、.gitignore 忽略的
+   构建期拷贝残骸，CI checkout 后不存在；只锁两份入库镜像。 */
+test('★ 两份 UI 镜像同步：gourd-work / gourdai-java 的插话收口接线', () => {
     const mirrors = [
         path.join(desktop, 'ui', 'js', 'app-message.js'),
-        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-message.js'),
-        path.join(repo, 'gourd-ai-tauri', 'ui', 'js', 'app-message.js')
+        path.join(repo, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-message.js')
     ];
     for (const f of mirrors) {
         assert.ok(fs.existsSync(f), '镜像缺失: ' + f);

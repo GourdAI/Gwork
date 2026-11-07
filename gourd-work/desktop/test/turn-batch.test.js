@@ -642,14 +642,16 @@ test('★ 历史重建透传 translate：盖子文案走 i18n 而非中文回落
     assert.ok(calls.length > 0, 'translate 被真实调用');
 });
 
-test('★ 接线形状锁：历史回放 applyTurnCompact 必须传 ended:true（三壳同步）', () => {
+/* 2026-11 契约对齐：根级 gourd-ai-tauri/ui 已删除且不入库（CI checkout 后不存在），
+   Java 侧 static/js/app-history.js 自 2026-10-25 起未同步回放收口的 ended:true
+   （applyTurnCompact(realContainer 接线实测为 0），故只锁前端唯一源。 */
+test('★ 接线形状锁：历史回放 applyTurnCompact 必须传 ended:true', () => {
     // 缺陷C回归钉：compactBubble 的「批次盖子让位」门禁只在 ended 时放行整轮折叠。
     // 历史回放不传 ended ⇒ 带盖子的历史无正文轮永不折成整轮摘要（与运行态 finishStream
     // 分叉）。形状锁与 turn-compact.test.js 的 finishStream ended:true 锁同口径。
     const repo = path.resolve(__dirname, '..', '..', '..');
     const files = [
-        path.join('gourd-work', 'desktop', 'ui', 'js', 'app-history.js'),
-        path.join('gourd-ai-tauri', 'ui', 'js', 'app-history.js')
+        path.join('gourd-work', 'desktop', 'ui', 'js', 'app-history.js')
     ];
     for (const rel of files) {
         const src = require('node:fs').readFileSync(path.join(repo, rel), 'utf8');
@@ -661,15 +663,14 @@ test('★ 接线形状锁：历史回放 applyTurnCompact 必须传 ended:true�
     }
 });
 
-test('★ CSS 形状锁：accent 强调块必须带 !important 且排在 ⑭ 统一块之后（三壳同步）', () => {
+test('★ CSS 形状锁：accent 强调块必须带 !important 且排在 ⑭ 统一块之后（两份镜像同步）', () => {
     // 缺陷B回归钉：⑭ 统一图标块 color:var(--text-tertiary) !important 会压过
     // 无 !important 的 ⑧ accent 规则（层叠无条件败北），运行中活动行图标变灰。
     // 修复=文件尾 ⑮ 块：同特异性 + 同 !important + 更靠后 ⇒ accent 恢复。
     const repo = path.resolve(__dirname, '..', '..', '..');
     const mirrors = [
         path.join('gourd-work', 'desktop', 'ui', 'css', 'app.css'),
-        path.join('gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'css', 'app.css'),
-        path.join('gourd-ai-tauri', 'ui', 'css', 'app.css')
+        path.join('gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'css', 'app.css')
     ];
     const fsx = require('node:fs');
     for (const rel of mirrors) {
