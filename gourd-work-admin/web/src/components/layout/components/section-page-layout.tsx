@@ -23,6 +23,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { Main } from './main'
 import { PageFooterProvider } from './page-footer'
@@ -56,8 +57,21 @@ export type SectionPageLayoutProps = {
 }
 
 export function SectionPageLayout(props: SectionPageLayoutProps) {
+  const { t } = useTranslation()
   const [footerContainer, setFooterContainer] = useState<HTMLDivElement | null>(
     null
+  )
+  // Mono eyebrow path, read once per mount (the layout remounts on navigation
+  // via the animated outlet, and the eyebrow is decorative anyway).
+  const [sectionPath] = useState(
+    () =>
+      typeof window === 'undefined'
+        ? ''
+        : window.location.pathname
+            .split('/')
+            .filter(Boolean)
+            .slice(0, 3)
+            .join('/')
   )
 
   let title: ReactNode = null
@@ -78,6 +92,8 @@ export function SectionPageLayout(props: SectionPageLayoutProps) {
     }
   })
 
+  // Mono eyebrow above the page title, e.g. `console / usage-logs` —
+  // pure decoration, derived from the URL at mount time.
   return (
     <PageFooterProvider container={footerContainer}>
       <Main>
@@ -85,6 +101,11 @@ export function SectionPageLayout(props: SectionPageLayoutProps) {
           {breadcrumb != null && (
             <div className='mb-2 sm:mb-3'>{breadcrumb}</div>
           )}
+          <div className='gw-page-eyebrow' aria-hidden='true'>
+            <b>console</b>
+            <span>/{sectionPath}</span>
+            <span className='sr-only'>{t('Section')}</span>
+          </div>
           <div className='flex flex-wrap items-center justify-between gap-x-3 gap-y-2 sm:gap-x-4'>
             <div
               className={

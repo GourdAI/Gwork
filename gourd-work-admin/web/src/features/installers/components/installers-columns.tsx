@@ -179,7 +179,7 @@ export function useInstallersColumns(
             </span>
             <CopyButton
               value={row.original.sha256}
-              size='icon-sm'
+              size='icon'
               variant='ghost'
               aria-label={t('Copy SHA256')}
             />

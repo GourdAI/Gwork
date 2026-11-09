@@ -30,34 +30,70 @@ export function AuthLayout({ children }: AuthLayoutProps) {
   const { t } = useTranslation()
   const { systemName, logo, loading } = useSystemConfig()
 
-  return (
-    <div className='gw-auth-shell relative grid h-svh max-w-none'>
-      <Link
-        to='/'
-        className='absolute top-4 left-4 z-10 flex items-center gap-2 transition-opacity hover:opacity-80 sm:top-8 sm:left-8'
-      >
-        <div className='relative size-9'>
-          {loading ? (
-            <Skeleton className='absolute inset-0 rounded-xl' />
-          ) : (
-            <img
-              src={logo}
-              alt={t('Logo')}
-              className='gw-brand-mark size-9 object-contain'
-            />
-          )}
-        </div>
+  const brand = (
+    <Link
+      to='/'
+      className='gw-auth-logo flex items-center gap-2.5 transition-opacity hover:opacity-80'
+    >
+      <div className='relative size-8'>
         {loading ? (
-          <Skeleton className='h-6 w-24' />
+          <Skeleton className='absolute inset-0 rounded-lg' />
         ) : (
-          <h1 className='gw-auth-brand text-xl font-semibold'>{systemName}</h1>
+          <img
+            src={logo}
+            alt={t('Logo')}
+            className='gw-brand-mark size-8 object-contain'
+          />
         )}
-      </Link>
-      <div className='container flex items-center pt-16 sm:pt-0'>
-        <div className='mx-auto flex w-full flex-col justify-center space-y-2 px-4 py-8 sm:w-[480px] sm:p-8'>
-          {children}
-        </div>
       </div>
+      {loading ? (
+        <Skeleton className='h-5 w-24' />
+      ) : (
+        <span className='gw-auth-brand text-[15px] font-semibold'>
+          {systemName}
+        </span>
+      )}
+    </Link>
+  )
+
+  return (
+    <div className='gw-auth-shell relative grid h-svh max-w-none lg:grid-cols-[minmax(0,1fr)_460px]'>
+      {/* ── Left: brand panel (hidden on mobile) ── */}
+      <aside className='gw-auth-aside hidden lg:flex' aria-hidden='true'>
+        <div className='gw-auth-aside-inner'>
+          {brand}
+          <div className='mt-auto'>
+            <p className='gw-eyebrow'>console access</p>
+            <h2 className='gw-auth-headline'>
+              {t('Agent workspace')}<br />
+              <span className='gw-auth-headline-dim'>
+                {t('unified gateway')}
+              </span>
+            </h2>
+            <p className='gw-auth-sub'>{systemName}</p>
+            <ul className='gw-auth-points'>
+              <li>
+                {t('Multi-model routing across channels')}
+              </li>
+              <li>{t('Usage, quota and billing in one console')}</li>
+              <li>{t('API keys with fine-grained groups')}</li>
+            </ul>
+          </div>
+          <p className='gw-auth-copy'>© {new Date().getFullYear()} {systemName}</p>
+        </div>
+      </aside>
+
+      {/* ── Right: form panel ── */}
+      <section className='relative flex min-w-0 flex-col'>
+        <div className='flex items-center justify-between px-6 pt-6 sm:px-10 sm:pt-8 lg:hidden'>
+          {brand}
+        </div>
+        <div className='flex flex-1 items-center overflow-y-auto px-6 py-10 sm:px-10'>
+          <div className='mx-auto w-full max-w-[400px] space-y-1'>
+            {children}
+          </div>
+        </div>
+      </section>
     </div>
   )
 }

@@ -28,6 +28,8 @@ import type {
 
 export interface InstallerListParams {
   p: number
+  /** Newer backends accept `page` (contract §3.1); sent alongside `p`. */
+  page?: number
   page_size: number
 }
 

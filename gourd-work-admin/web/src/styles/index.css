@@ -30,6 +30,7 @@ For commercial licensing, please contact support@quantumnous.com
 @import './theme.css';
 @import './theme-presets.css';
 @import './gwork-brand.css';
+@import './gw-console.css';
 
 @layer base {
   :root {

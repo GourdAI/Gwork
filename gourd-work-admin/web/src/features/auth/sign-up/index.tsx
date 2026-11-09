@@ -32,19 +32,11 @@ export function SignUp() {
   return (
     <AuthLayout>
       <div className='w-full space-y-8'>
-        <div className='space-y-2'>
-          <h2 className='text-center text-2xl font-semibold tracking-tight sm:text-left'>
-            {t('Create an account')}
-          </h2>
-          <p className='text-muted-foreground text-left text-sm sm:text-base'>
-            {t('Already have an account?')}{' '}
-            <Link
-              to='/sign-in'
-              className='hover:text-primary font-medium underline underline-offset-4'
-            >
-              {t('Sign in')}
-            </Link>
-            .
+        <div className='gw-auth-head space-y-1.5'>
+          <p className='gw-eyebrow'>auth / sign-up</p>
+          <h2 className='gw-auth-title'>{t('Create an account')}</h2>
+          <p className='gw-auth-switch'>
+            {t('Already have an account?')} <Link to='/sign-in'>{t('Sign in')}</Link>.
           </p>
         </div>
 

@@ -1,0 +1,300 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+/*
+ * GWork console skin layer — extends the "engineering handbook" language of
+ * gwork-brand.css into the authenticated console (auth pages, sidebar,
+ * page headers, panels and stat cards).
+ *
+ * Same rules as the brand layer: no colour token is defined or overridden;
+ * everything derives from existing theme tokens via color-mix so light/dark/
+ * system modes keep working. Rules are intentionally UNLAYERED so they win
+ * over Tailwind v4 layered utilities of the same specificity.
+ */
+
+/* ════════════════════════════════════════════════════════════════════════
+   1. Auth split screen (sign-in / sign-up / forgot-password / otp / reset)
+   ════════════════════════════════════════════════════════════════════════ */
+
+.gw-auth-shell::before {
+  /* keep the old top-grid wash only on the narrow (form-only) view */
+  display: none;
+}
+
+.gw-auth-aside {
+  position: relative;
+  flex-direction: column;
+  border-right: 1px solid var(--gw-line);
+  background:
+    linear-gradient(
+      to bottom,
+      transparent calc(48px - 1px),
+      color-mix(in oklch, var(--foreground) 7%, transparent) 48px,
+      color-mix(in oklch, var(--foreground) 7%, transparent) 49px,
+      transparent 49px
+    ),
+    repeating-linear-gradient(
+      to right,
+      var(--gw-line) 0 1px,
+      transparent 1px 56px
+    );
+  background-size: auto, 100% 100%;
+  background-position: 0 0;
+  overflow: hidden;
+}
+.gw-auth-aside::after {
+  /* right-edge vertical rule echoing the spec sheets */
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(
+    to right,
+    transparent calc(100% - 1px),
+    var(--gw-line) calc(100% - 1px)
+  );
+  opacity: 0;
+}
+
+.gw-auth-aside-inner {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 48px;
+  padding: 44px 48px 36px;
+  width: 100%;
+  max-width: 640px;
+}
+
+.gw-auth-aside .gw-auth-logo { flex: none; }
+
+.gw-auth-headline {
+  margin-top: 12px;
+  font-size: clamp(1.7rem, 2.6vw, 2.3rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  color: var(--gw-ink);
+}
+.gw-auth-headline-dim { color: var(--gw-ink-2); }
+.gw-auth-sub {
+  margin-top: 10px;
+  font-size: 13.5px;
+  color: var(--gw-ink-2);
+}
+
+.gw-auth-points {
+  margin: 26px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-top: 1px solid var(--gw-line);
+}
+.gw-auth-points li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 2px;
+  border-bottom: 1px solid var(--gw-line);
+  font-size: 13px;
+  color: var(--gw-ink-2);
+}
+.gw-auth-points li::before {
+  content: '▸';
+  font-family: var(--gw-mono);
+  font-size: 10px;
+  color: var(--gw-ink-3);
+  flex: none;
+}
+
+.gw-auth-copy {
+  flex: none;
+  font-family: var(--gw-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--gw-ink-3);
+}
+
+/* Form side: clean paper, hairline divider on wide screens only via grid gap */
+.gw-auth-shell > section { background: var(--gw-paper); }
+.gw-auth-shell:not(.gw-auth-split) { grid-template-columns: 1fr; }
+
+/* Mobile (< lg): single column, keep a faint grid wash like the old shell */
+@media (max-width: 1023.98px) {
+  .gw-auth-shell {
+    grid-template-columns: 1fr;
+  }
+  .gw-auth-shell::before {
+    display: block;
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(to right, var(--gw-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--gw-line) 1px, transparent 1px);
+    background-size: 48px 48px;
+    -webkit-mask-image: radial-gradient(
+      ellipse 60% 50% at 50% 0%,
+      black,
+      transparent 75%
+    );
+    mask-image: radial-gradient(
+      ellipse 60% 50% at 50% 0%,
+      black,
+      transparent 75%
+    );
+    opacity: 0.35;
+  }
+}
+
+/* Auth page headers: mono eyebrow + title + description row */
+.gw-auth-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.gw-auth-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.028em;
+  line-height: 1.2;
+  color: var(--gw-ink);
+}
+.gw-auth-switch {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--gw-ink-2);
+}
+.gw-auth-switch a {
+  color: var(--gw-ink);
+  font-weight: 600;
+  text-decoration: none;
+  border-bottom: 1px solid var(--gw-line-2);
+  padding-bottom: 1px;
+  transition: border-color var(--gw-t);
+}
+.gw-auth-switch a:hover { border-color: var(--gw-ink); }
+
+/* ════════════════════════════════════════════════════════════════════════
+   2. Console skin — mounted on <body data-gw-console>
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* 2a. Sidebar: mono lowercase group labels + hairline group separators */
+[data-gw-console] .gw-nav-group-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: auto;
+  padding: 10px 10px 4px;
+  font-family: var(--gw-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  color: var(--gw-ink-3);
+  border-radius: 0;
+}
+[data-gw-console] .gw-nav-group-label::before {
+  content: '//';
+  color: color-mix(in oklch, var(--gw-ink-3) 55%, transparent);
+}
+
+/* 2b. Page header (SectionPageLayout): mono eyebrow above the title */
+.gw-page-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-family: var(--gw-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--gw-ink-3);
+}
+.gw-page-eyebrow b {
+  font-weight: 600;
+  color: var(--gw-ink-2);
+}
+.gw-page-eyebrow::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--gw-line);
+  min-width: 24px;
+}
+
+/* 2c. Panel wrapper: hairline header band, mono title */
+.gw-panel {
+  border-radius: var(--gw-r-lg);
+  box-shadow: none;
+}
+.gw-panel > .gw-panel-head {
+  background: var(--gw-paper-2);
+  border-bottom: 1px solid var(--gw-line);
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.gw-panel-head-title {
+  font-family: var(--gw-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--gw-ink-2);
+  line-height: 1.4;
+}
+.gw-panel-head-desc {
+  font-size: 11.5px;
+  color: var(--gw-ink-3);
+  margin-top: 2px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* 2d. Stat cards: spec-sheet cell look (bordered hairline cells) */
+[data-gw-console] .gw-stat-cell {
+  position: relative;
+  border: 1px solid var(--gw-line);
+  border-radius: var(--gw-r);
+  background: var(--gw-paper);
+  padding: 14px 16px;
+}
+[data-gw-console] .gw-stat-cell::after {
+  content: '';
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  height: 1px;
+  background: var(--gw-line);
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gw-auth-aside, .gw-auth-points li { transition: none; }
+}

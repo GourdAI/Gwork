@@ -253,24 +253,20 @@ export function SummaryCards() {
   })
 
   return (
-    <div className='bg-card overflow-hidden rounded-2xl border shadow-xs'>
+    <div className='bg-card overflow-hidden rounded-2xl border'>
       <div className='grid xl:grid-cols-[minmax(0,1fr)_19rem]'>
         <div className='flex flex-col gap-2.5 p-3 sm:gap-3 sm:p-5'>
           <div className='flex flex-wrap items-start justify-between gap-3'>
             <div className='flex flex-col gap-1'>
-              <h3 className='text-sm font-semibold sm:text-base'>
-                {t('Usage at a glance')}
-              </h3>
-              <p className='text-muted-foreground text-xs sm:text-sm'>
-                {t('Monitor balance, usage, and request volume')}
-              </p>
+              <h3 className='gw-panel-head-title'>{t('Usage at a glance')}</h3>
+              <p className='gw-panel-head-desc'>{t('Monitor balance, usage, and request volume')}</p>
             </div>
           </div>
           <StaggerContainer className='grid grid-cols-3 gap-1.5 sm:gap-3'>
             {items.map((it) => (
               <StaggerItem
                 key={it.key}
-                className='bg-background/60 rounded-lg border px-2 py-1.5 sm:rounded-xl sm:p-3'
+                className='gw-stat-cell'
               >
                 <StatCard
                   title={it.title}

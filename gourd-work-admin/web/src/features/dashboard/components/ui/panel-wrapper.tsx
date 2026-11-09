@@ -41,16 +41,16 @@ function PanelHeader(props: {
   actions?: ReactNode
 }) {
   const heading = (
-    <div className='flex flex-col gap-1'>
-      <div className='text-sm font-semibold'>{props.title}</div>
+    <div className='flex flex-col gap-0.5'>
+      <div className='gw-panel-head-title'>{props.title}</div>
       {props.description != null && (
-        <div className='text-muted-foreground text-xs'>{props.description}</div>
+        <div className='gw-panel-head-desc'>{props.description}</div>
       )}
     </div>
   )
 
   return (
-    <div className='border-b px-4 py-3 sm:px-5'>
+    <div className='gw-panel-head'>
       {props.actions != null ? (
         <div className='flex items-start justify-between gap-2'>
           {heading}
@@ -67,10 +67,7 @@ export function PanelWrapper(props: PanelWrapperProps) {
   const { t } = useTranslation()
   const resolvedEmptyMessage = props.emptyMessage ?? t('No data available')
   const height = props.height ?? 'h-64'
-  const frameClassName = cn(
-    'overflow-hidden rounded-2xl border bg-card shadow-xs',
-    props.className
-  )
+  const frameClassName = cn('gw-panel', 'bg-card overflow-hidden', props.className)
 
   if (props.loading) {
     return (
