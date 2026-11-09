@@ -62,7 +62,7 @@ export function AuthLayout({ children }: AuthLayoutProps) {
       <aside className='gw-auth-aside hidden lg:flex' aria-hidden='true'>
         <div className='gw-auth-aside-inner'>
           {brand}
-          <div className='mt-auto'>
+          <div className='gw-auth-pitch'>
             <p className='gw-eyebrow'>console access</p>
             <h2 className='gw-auth-headline'>
               {t('Agent workspace')}<br />

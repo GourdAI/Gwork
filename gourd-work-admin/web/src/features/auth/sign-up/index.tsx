@@ -36,7 +36,7 @@ export function SignUp() {
           <p className='gw-eyebrow'>auth / sign-up</p>
           <h2 className='gw-auth-title'>{t('Create an account')}</h2>
           <p className='gw-auth-switch'>
-            {t('Already have an account?')} <Link to='/sign-in'>{t('Sign in')}</Link>.
+            {t('Already have an account?')} <Link to='/sign-in'>{t('Sign in')}</Link>
           </p>
         </div>
 

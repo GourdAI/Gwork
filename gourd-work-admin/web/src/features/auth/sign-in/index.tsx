@@ -40,7 +40,7 @@ export function SignIn() {
             status?.register_enabled !== false && (
               <p className='gw-auth-switch'>
                 {t("Don't have an account?")}{' '}
-                <Link to='/sign-up'>{t('Sign up')}</Link>.
+                <Link to='/sign-up'>{t('Sign up')}</Link>
               </p>
             )}
         </div>

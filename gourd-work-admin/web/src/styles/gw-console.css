@@ -80,7 +80,16 @@ For commercial licensing, please contact support@quantumnous.com
   gap: 48px;
   padding: 44px 48px 36px;
   width: 100%;
-  max-width: 640px;
+  max-width: 680px;
+  /* centre the 680px block inside the (up to 980px) brand column so the
+     right side no longer shows a large empty gap */
+  margin-inline: auto;
+}
+
+/* Vertically centre the pitch between the top logo and the bottom copyright
+   (auto block margins absorb the free space on both sides). */
+.gw-auth-pitch {
+  margin-block: auto;
 }
 
 .gw-auth-aside .gw-auth-logo { flex: none; }

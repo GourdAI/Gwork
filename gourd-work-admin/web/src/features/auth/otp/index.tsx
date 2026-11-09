@@ -35,7 +35,7 @@ export function Otp() {
           </p>
           <p className='gw-auth-switch'>
             {t('Session expired?')}{' '}
-            <Link to='/sign-in'>{t('Re-login')}</Link>.
+            <Link to='/sign-in'>{t('Re-login')}</Link>
           </p>
         </div>
 
