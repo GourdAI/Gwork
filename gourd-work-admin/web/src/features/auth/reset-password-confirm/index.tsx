@@ -113,11 +113,10 @@ export function ResetPasswordConfirm({
   return (
     <AuthLayout>
       <div className='w-full space-y-8'>
-        <div className='space-y-2'>
-          <h2 className='text-center text-2xl font-semibold tracking-tight sm:text-left'>
-            {t('Reset password')}
-          </h2>
-          <p className='text-muted-foreground text-left text-sm sm:text-base'>
+        <div className='gw-auth-head space-y-1.5'>
+          <p className='gw-eyebrow'>auth / reset-password</p>
+          <h2 className='gw-auth-title'>{t('Reset password')}</h2>
+          <p className='gw-auth-switch'>
             {newPassword
               ? t('auth.resetPasswordConfirm.success')
               : t('auth.resetPasswordConfirm.description')}

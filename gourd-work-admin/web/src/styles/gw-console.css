@@ -134,15 +134,28 @@ For commercial licensing, please contact support@quantumnous.com
   color: var(--gw-ink-3);
 }
 
-/* Form side: clean paper, hairline divider on wide screens only via grid gap */
-.gw-auth-shell > section { background: var(--gw-paper); }
-.gw-auth-shell:not(.gw-auth-split) { grid-template-columns: 1fr; }
+/* Form side: clean paper, hairline divider on wide screens only via grid gap.
+ * The two-column grid is defined HERE (unlayered) rather than via a Tailwind
+ * `lg:grid-cols-*` utility: Tailwind utilities live in @layer utilities and
+ * would silently lose to any unlayered `grid-template-columns` declaration.
+ * Defining both the wide and narrow column layouts in one place keeps the
+ * cascade deterministic and avoids the stacked-rows bug (brand panel on top of
+ * the form instead of beside it). */
+.gw-auth-shell {
+  grid-template-columns: minmax(0, 1fr) 460px;
+  grid-template-rows: minmax(0, 1fr);
+}
+.gw-auth-shell > section { background: var(--gw-paper); min-height: 0; }
+.gw-auth-shell > aside { min-height: 0; }
 
 /* Mobile (< lg): single column, keep a faint grid wash like the old shell */
 @media (max-width: 1023.98px) {
   .gw-auth-shell {
     grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr);
   }
+  /* Let the shell's ::before grid wash show through the form column. */
+  .gw-auth-shell > section { background: transparent; }
   .gw-auth-shell::before {
     display: block;
     content: '';
@@ -276,13 +289,18 @@ For commercial licensing, please contact support@quantumnous.com
   text-transform: none;
 }
 
-/* 2d. Stat cards: spec-sheet cell look (bordered hairline cells) */
+/* 2d. Stat cards: spec-sheet cell look (bordered hairline cells).
+ * Padding stays compact on narrow screens so the 3-column grid does not
+ * squeeze its numbers (the original cells used 6px/8px there). */
 [data-gw-console] .gw-stat-cell {
   position: relative;
   border: 1px solid var(--gw-line);
   border-radius: var(--gw-r);
   background: var(--gw-paper);
-  padding: 14px 16px;
+  padding: 8px 10px;
+}
+@media (min-width: 640px) {
+  [data-gw-console] .gw-stat-cell { padding: 14px 16px; }
 }
 [data-gw-console] .gw-stat-cell::after {
   content: '';

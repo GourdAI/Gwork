@@ -57,7 +57,7 @@ export function AuthLayout({ children }: AuthLayoutProps) {
   )
 
   return (
-    <div className='gw-auth-shell relative grid h-svh max-w-none lg:grid-cols-[minmax(0,1fr)_460px]'>
+    <div className='gw-auth-shell relative grid h-svh max-w-none'>
       {/* ── Left: brand panel (hidden on mobile) ── */}
       <aside className='gw-auth-aside hidden lg:flex' aria-hidden='true'>
         <div className='gw-auth-aside-inner'>
@@ -88,8 +88,11 @@ export function AuthLayout({ children }: AuthLayoutProps) {
         <div className='flex items-center justify-between px-6 pt-6 sm:px-10 sm:pt-8 lg:hidden'>
           {brand}
         </div>
-        <div className='flex flex-1 items-center overflow-y-auto px-6 py-10 sm:px-10'>
-          <div className='mx-auto w-full max-w-[400px] space-y-1'>
+        {/* `m-auto` (not `items-center`) centres the form but collapses to 0 on
+            the overflowing axis, so tall forms (sign-up, reset) stay scrollable
+            instead of having their top clipped in short viewports. */}
+        <div className='flex flex-1 overflow-y-auto px-6 py-10 sm:px-10'>
+          <div className='m-auto w-full max-w-[400px] space-y-1'>
             {children}
           </div>
         </div>

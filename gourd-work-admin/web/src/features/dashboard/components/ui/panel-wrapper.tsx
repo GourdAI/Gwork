@@ -67,7 +67,13 @@ export function PanelWrapper(props: PanelWrapperProps) {
   const { t } = useTranslation()
   const resolvedEmptyMessage = props.emptyMessage ?? t('No data available')
   const height = props.height ?? 'h-64'
-  const frameClassName = cn('gw-panel', 'bg-card overflow-hidden', props.className)
+  const frameClassName = cn(
+    'gw-panel',
+    // Keep the frame border explicitly: `.gw-panel` only overrides radius and
+    // shadow, it does not paint an outline itself.
+    'rounded-2xl border bg-card shadow-none overflow-hidden',
+    props.className
+  )
 
   if (props.loading) {
     return (
