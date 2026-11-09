@@ -303,10 +303,11 @@ test('收尾出口全部接线（漏一处就永远转圈）', () => {
         ['    showHistoryLoading(sess);', 1],                                    // loadMessages 发请求前
         ['        hideHistoryLoading(sess);   // 内容即将移入真实容器', 1],          // replayDoneCore
         ['                hideHistoryLoading(sess);', 1],                        // legacy loadDone
-        /* 4 处：回放兜底 + legacy catch + legacy fail + 超时定时器。
+        /* 5 处：回放兜底 + legacy catch + legacy fail + 超时定时器 + stall 盲兜底
+           （2026-11 P0-2：回放卡死宽限耗尽后的强制收口出口）。
            超时分支必须复用 hideHistoryLoading，而不是自己写失败卡 ——
            后者会绕过「容器已有内容 ⇒ 绝不叠失败卡」这条守卫（缺陷已实测复现）。 */
-        ['hideHistoryLoading(sess, { failed: true });', 4],
+        ['hideHistoryLoading(sess, { failed: true });', 5],
     ];
     for (const [needle, want] of checks) {
         const got = HISTORY_SRC.split(needle).length - 1;
@@ -663,13 +664,23 @@ test('★ 初始 replay 止血：timeout + abort + 世代/会话归属 + fragmen
     ];
     for (const rel of files) {
         const src = fs.readFileSync(path.join(repo, rel), 'utf8');
-        assert.match(src, /timeout:\s*HISTORY_LOAD_TIMEOUT_MS/, rel + ' 初始 replay 必须有真实 HTTP 超时');
+        /* P1-1：HTTP 超时必须宽于 UI watchdog（12s）。同值会竞态出「失败卡 +
+           legacy 内容 + 二次骨架」三态交错。 */
+        assert.match(src, /timeout:\s*HISTORY_HTTP_TIMEOUT_MS/, rel + ' 初始 replay 必须有真实 HTTP 超时（宽于 watchdog）');
+        assert.match(src, /var HISTORY_HTTP_TIMEOUT_MS = 60000;/, rel + ' HTTP 超时常量必须存在且宽于 12s watchdog');
+        /* P0-2：回放期 watchdog 不得一次性放手（保护真空 = 白屏），
+           必须重排宽限 + stall hook 强制收口。 */
+        assert.match(src, /REPLAY_STALL_GRACE_MS/, rel + ' 回放卡死必须有宽限重排，不得保护真空');
+        assert.match(src, /__replayStalled/, rel + ' stall hook 标记必须在');
+        assert.match(src, /stalledTarget/, rel + ' 盲兜底必须 salvage renderTarget 半成品，不得裸释放');
         assert.match(src, /_historyLoadGeneration/, rel + ' 必须有加载世代号，切会话/重试后旧响应作废');
         assert.match(src, /textStatus === 'abort'/, rel + ' abort 不得再叠二次 legacy 请求');
         assert.match(src, /pendingXhr\.abort\(\)/, rel + ' 12s 降级必须同时断开在途请求');
         assert.match(src, /replayFragment/, rel + ' fragment 必须提升到闭包作用域供异常兜底捞回');
         assert.match(src, /legacyFragment/, rel + ' legacy 路径同款兜底不得丢失');
         assert.match(src, /rp\.code && Number\(rp\.code\) !== 200/, rel + ' 后端 code:200 + 空 events 静默失败必须显式识别');
-        assert.match(src, /if \(sess\._replaying\) return;/, rel + ' 回放进行中 12s 定时器不得误盖失败卡');
+        /* P1-2：legacy 请求不得是裸 $.get（无 timeout、无 abort 句柄）。 */
+        assert.match(src, /legacyXhr = \$\.ajax\(/, rel + ' legacy 请求必须是 $.ajax 且可 abort');
+        assert.match(src, /sess\._historyLoadXhr = legacyXhr;/, rel + ' legacy 句柄必须注册给 watchdog');
     }
 });

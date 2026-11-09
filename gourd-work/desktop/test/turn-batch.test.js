@@ -578,6 +578,13 @@ test('★ rebuildBatches：历史气泡按运行态规则补建 closed 态批次
     for (const h of hs) {
         assert.equal(h.getAttribute('data-batch-state'), 'closed', '历史批次一律 closed 态');
         assert.equal(h.getAttribute('data-batch-open'), 'false', '历史批次默认收起（与运行态收口一致）');
+        // 【2026-11 用户报障：历史折叠态箭头方向错】CSS 旋转只认 .turn-batch-open 类
+        //（app.css `:not(.turn-batch-open)` rotate(-90deg)），不认 data-batch-open 属性。
+        // createHeader 建盖子即挂该类；rebuildBatches 只改属性不摘类时，历史折叠盖子的
+        // chevron 恒朝下（展开态方向），与运行态收口的右向箭头不一致。
+        assert.ok(!h._classes.has('turn-batch-open'),
+            '历史折叠盖子必须摘掉 turn-batch-open 类（否则 CSS 箭头旋转永不命中）');
+        assert.ok(h._classes.has('turn-batch-closed'), '历史盖子带 closed 类');
     }
     assert.equal(t1.getAttribute('data-turn-batch'), '1');
     assert.equal(think.getAttribute('data-turn-batch'), '1');

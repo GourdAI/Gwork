@@ -3823,7 +3823,13 @@ function formatQuestionAnswerForRecord(question, answerItem) {
 var QUESTION_CARD_SVG_PREV = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>';
 var QUESTION_CARD_SVG_NEXT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
 var QUESTION_CARD_SVG_CLOSE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-/* 折叠/展开：卡片整体收放，让用户在「看上下文」与「作答」之间快速切换 */
+/* 整卡折叠钮的两支箭头：COLLAPSE=∧ 上尖角、EXPAND=∨ 下尖角（SVG y 轴向下）。
+   【契约】箭头表示【当前状态】，不是点击动作：展开态 ∨ 朝下（内容在下方铺开）、
+   折叠态 ∧ 朝上，与 .ws-group-caret / .turn-batch-chevron / .model-group-arrow 的
+   「展开态朝下」一致。用户 2026-11 报障「ask 弹层缩放箭头反了」即旧代码按动作取
+   （展开态给 ∧）所致。tooltip 仍按动作取 question_collapse / question_expand，
+   与箭头刻意不同；detail 的「展开/收起」文字按钮则按动作配箭头（CSS 旋转 180°），
+   两者形态不同，勿为了「看起来统一」把整卡钮改回动作型。 */
 var QUESTION_CARD_SVG_COLLAPSE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>';
 var QUESTION_CARD_SVG_EXPAND = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
 var QUESTION_CARD_SVG_EDIT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>';
@@ -4203,7 +4209,11 @@ function renderQuestionCard(host, sess, state) {
        detail 取证中位 115 字、p90 280：超阈值默认收起为两行（CSS 限高），「展开」按钮切换；
        展开态记在 state.detailOpen[idx]，整卡重建（勾选/翻页）不丢。 */
     var collapseTitle = collapsed ? GourdI18n.t('chat.question_expand') : GourdI18n.t('chat.question_collapse');
-    var collapseSvg = collapsed ? QUESTION_CARD_SVG_EXPAND : QUESTION_CARD_SVG_COLLAPSE;
+    /* 折叠钮箭头表示【当前状态】，不是点击动作（用户报障「ask 弹层缩放箭头反了」）：
+       展开态 ∨ 向下（内容在下方铺开）、折叠态 ∧ 向上（内容收进头部），与 .ws-group-caret /
+       .turn-batch-chevron 的「展开态向下」契约一致。故按 collapsed 取同名状态图标，
+       不要再「顺」回按下一步动作取（展开态取 COLLAPSE）；tooltip 仍按动作取文案，二者刻意相反。 */
+    var collapseSvg = collapsed ? QUESTION_CARD_SVG_COLLAPSE : QUESTION_CARD_SVG_EXPAND;
     html += '<div class="question-card-header">';
     html += '<div class="question-card-heading">';
     html += '<span class="question-card-title">' + escapeHtml(q.header || '') + '</span>';

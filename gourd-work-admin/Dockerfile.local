@@ -1,0 +1,47 @@
+# 本地源码构建（无 digest 固定引用，使用本机可解析的镜像名）
+# 与生产 Dockerfile 的差异仅在于：
+#   1. FROM 去掉 @sha256（本机 Docker Hub 直连超时，镜像加速器不认 digest）
+#   2. builder2 注入 GOPROXY（proxy.golang.org 不可达，goproxy.cn 可用）
+# 构建产物、编译参数、PGO、运行时依赖与生产 Dockerfile 完全一致。
+
+FROM docker.1panel.live/oven/bun:1.4.4 AS builder
+
+WORKDIR /build/web
+COPY web/package.json web/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY ./web ./
+COPY ./VERSION /build/VERSION
+RUN DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(cat /build/VERSION) bun run build
+
+FROM docker.1ms.run/library/golang:1.26.10-alpine AS builder2
+ENV GO111MODULE=on CGO_ENABLED=0 GOWORK=off
+ENV GOPROXY=https://goproxy.cn,direct GOSUMDB=off
+
+ARG TARGETOS
+ARG TARGETARCH
+ENV GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64}
+ENV GOEXPERIMENT=greenteagc
+
+WORKDIR /build
+
+ADD go.mod go.sum ./
+ADD relaykit/go.mod ./relaykit/go.mod
+ADD tokenkit/go.mod ./tokenkit/go.mod
+RUN go mod download
+
+COPY . .
+COPY --from=builder /build/web/dist ./web/dist
+RUN go build -pgo="$(go list -m -f '{{.Dir}}' github.com/Calcium-Ion/moejs)/default.pgo" -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(cat VERSION)'" -o new-api
+
+# 运行时用本地已有的 alpine:3.21（debian:bookworm-slim 经加速器拉 blob 卡死）。
+# Go 为 CGO_ENABLED=0 静态二进制，不依赖 glibc / libasan8，运行时只需 CA 证书、时区与 wget。
+FROM alpine:3.21
+
+RUN apk add --no-cache ca-certificates tzdata wget \
+    && update-ca-certificates
+
+COPY --from=builder2 /build/new-api /
+COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/
+EXPOSE 3000
+WORKDIR /data
+ENTRYPOINT ["/new-api"]

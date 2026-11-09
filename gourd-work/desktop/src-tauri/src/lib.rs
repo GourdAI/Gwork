@@ -35,6 +35,7 @@ use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tracing::{error, info, warn};
 
 mod commands;
+mod auth;
 mod external_link;
 mod ipc_bridge;
 mod logging;
@@ -199,6 +200,11 @@ pub fn run() {
                 backend_port,
             });
 
+            // 账号登录态：注册全局 AuthState，从 OS keyring 恢复上次的会话并
+            // 启动常驻保活（access token 临近到期自动 refresh）。必须在建窗前
+            // 完成，否则前端首个 auth_status() 会拿到「账号模块未初始化」。
+            auth::install(&handle);
+
             // Start the kernel in-process.
             //
             // Must use `tauri::async_runtime::spawn`, NOT `tokio::spawn`: the setup
@@ -326,6 +332,13 @@ pub fn run() {
             // 于是 WSL 通道自动隐藏（与旧壳同一口径）。
             #[cfg(target_os = "windows")]
             remote::remote_wsl_list,
+            // 账号登录态（注册/登录/登出/查询/刷新/取用户资料）
+            auth::auth_status,
+            auth::auth_login,
+            auth::auth_register,
+            auth::auth_logout,
+            auth::auth_refresh,
+            auth::auth_self,
         ])
         .build(tauri::generate_context!())
         .expect("error while running GWork desktop")

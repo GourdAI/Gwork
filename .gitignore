@@ -33,6 +33,11 @@ BOOT-INF/
 !gourdai-java/README.md
 # gourd-work 的 README 是模块说明，必须入库（迁移时实测被 *.md 静默跳过，需 -f 或此规则）
 !gourd-work/README.md
+# gourd-work-admin 是 vendor 进来的最新 new-api（QuantumNous/new-api v1.0.0-rc.48）。
+# 上游文档与第三方许可证清单必须完整入库：README*.md / docs/** / THIRD-PARTY-LICENSES.md
+# 等会被上面的 `*.md` 规则静默吞掉，导致合规文件缺失（实测 38 个 .md 被忽略）。
+!gourd-work-admin/**/*.md
+!gourd-work-admin/*.md
 
 ### NetBeans ###
 nbproject/private/
@@ -47,6 +52,8 @@ nbdist/
 .claude
 node_modules/
 CLAUDE.md
+# vendor 的上游 agent 规约属于仓库内容，不是本地私有指令，需保留
+!gourd-work-admin/CLAUDE.md
 TODO.md
 /gourdwork-cli/src/main/resources/config.yml
 work

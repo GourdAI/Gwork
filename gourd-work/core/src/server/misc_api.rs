@@ -319,10 +319,18 @@ pub async fn replay_full(State(state): State<Arc<AppState>>, Query(q): Query<Rep
 /// the reported "技能调用了但右侧没统计". Both kernels share the same frontend,
 /// so the shape must match Java's exactly.
 ///
-/// `root` is honoured like every other session-scoped endpoint (the frontend
-/// sends the project root; a session bound to a project lives under it):
-/// without the binding, a workspace session would be read from the global
-/// area and the panel would silently show empty.
+/// Root routing: the frontend sends the project root **twice** — as the
+/// percent-encoded `X-Session-Cwd` header (undecoded on the wire) and as the
+/// `root` query param (already percent-decoded once by axum's `Query`
+/// extractor). The header is authoritative and preferred; the param is a
+/// fallback for callers that only set it, and is fed through the
+/// **pre-decoded** entry so it is never decoded twice — a path with a
+/// literal `%` (`C:\proj\100%25done`) would otherwise be re-decoded into a
+/// wrong directory, fail the existence gate, and silently fall back to the
+/// global area (panel goes empty on a session that exists).
+///
+/// Routing is read-only (`route_session_cwd`): this is a GET whose polls must
+/// never overwrite the session→root binding that the run-start path owns.
 #[derive(serde::Deserialize, Default)]
 pub struct ToolUsageQuery {
     #[serde(rename = "sessionId", default)]
@@ -339,32 +347,26 @@ pub async fn tool_usage(
     if !valid_session(&q.session_id) {
         return Json(serde_json::json!({"code": 400, "description": "Invalid sessionId"}));
     }
-    // Route to the session's owning store: the `root` query param is the
-    // project root the frontend resolved (same value as `X-Session-Cwd`).
-    // Prefer the explicit param, fall back to the header, then the existing
-    // binding — mirroring `resolveSessionRoot` in the Java endpoint.
-    let root_param = q.root.trim().to_string();
-    let header_root = headers
-        .get("x-session-cwd")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let cwd = if !root_param.is_empty() {
-        Some(root_param)
-    } else {
-        header_root
+    // Header first (raw, percent-encoded — `route_session_cwd` decodes it
+    // exactly once); axum-decoded `root` param only when the header is absent.
+    let header_root = super::cwd_header_of(&headers);
+    let store = match header_root.as_deref() {
+        Some(h) => super::route_session_cwd(&state, &q.session_id, Some(h)),
+        None => {
+            let root_param = q.root.trim().to_string();
+            if root_param.is_empty() {
+                super::route_session_cwd(&state, &q.session_id, None)
+            } else {
+                // Already decoded by the Query extractor — hand it to the
+                // pre-decoded entry, never through the header path.
+                super::route_session_cwd_decoded(&state, &q.session_id, &root_param)
+            }
+        }
     };
-    let store = super::bind_session_cwd(&state, &q.session_id, cwd.as_deref());
 
-    let (exists, memory) = store.memory_usage(&q.session_id);
-    let skills = store.skill_usage(&q.session_id);
-
-    // Total tool calls (all tools, not just memory/skills): the stream scan
-    // for skills also gives us this cheaply — but keep the scans separate and
-    // honest: one aggregate pass over action_start rows would be cleaner, yet
-    // the two scans are substring-prefiltered and never materialise frames.
-    // `toolCallCount` mirrors the total in Java's response; the monitor panel
-    // does not display it today but the contract keeps the field.
-    let tool_call_count = store.tool_call_total(&q.session_id);
+    // One sequential scan yields memory + skills + total in one pass; the
+    // previous shape walked the same ndjson three times per poll.
+    let stats = store.tool_usage_stats(&q.session_id);
 
     // Display names: same registry + same resolution as the skills settings
     // page (`settings_api::skills_installed` → `display_name_of`), so the
@@ -384,7 +386,7 @@ pub async fn tool_usage(
         })
         .collect();
 
-    let rows = skills.sorted_rows();
+    let rows = stats.skills.sorted_rows();
     let skill_rows: Vec<serde_json::Value> = rows
         .iter()
         .map(|(name, tool, count)| {
@@ -407,16 +409,16 @@ pub async fn tool_usage(
         "code": 200,
         "data": {
             "sessionId": q.session_id,
-            "exists": exists,
+            "exists": stats.exists,
             "memory": {
-                "updated": memory.extract_count > 0,
-                "extractCount": memory.extract_count,
-                "totalCount": memory.total_count,
-                "names": memory.names,
+                "updated": stats.memory.extract_count > 0,
+                "extractCount": stats.memory.extract_count,
+                "totalCount": stats.memory.total_count,
+                "names": stats.memory.names,
             },
             "skills": skill_rows,
             "skillCount": skill_count,
-            "toolCallCount": tool_call_count,
+            "toolCallCount": stats.tool_call_count,
         }
     }))
 }

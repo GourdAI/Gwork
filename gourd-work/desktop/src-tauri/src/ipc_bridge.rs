@@ -319,7 +319,26 @@ const BRIDGE_JS: &str = r#"
        consumer, so a degradation would otherwise be invisible. */
     onRemoteMirror: function (cb) { on('remote-mirror-state', cb); },
   
-    getAppVersion: function () { return invoke('get_app_version'); }
+    getAppVersion: function () { return invoke('get_app_version'); },
+
+    /* ───────── Account / login session ─────────
+       桌面端不退出就一直保持登录：Rust 侧负责 refresh 与 keyring 持久化，
+       这里只是把 6 个 command 暴露给 app-account.js。密码只在 invoke 参数里
+       短暂出现，绝不落 localStorage / settings.json。 */
+    authStatus: function () { return invoke('auth_status'); },
+    authLogin: function (username, password) {
+      return invoke('auth_login', { username: String(username || ''), password: String(password || '') });
+    },
+    authRegister: function (username, password, email) {
+      return invoke('auth_register', {
+        username: String(username || ''),
+        password: String(password || ''),
+        email: String(email || '')
+      });
+    },
+    authLogout: function () { return invoke('auth_logout'); },
+    authRefresh: function () { return invoke('auth_refresh'); },
+    authSelf: function () { return invoke('auth_self'); }
   };
 
   /* ───────── Drag region ─────────

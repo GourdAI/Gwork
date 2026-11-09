@@ -505,6 +505,97 @@ function sessionScopeOf(entry) {
 
 /* ===== Chat 侧栏条目渲染（tab 视图：项目树 / 对话平铺；code 模式平铺）===== */
 
+/* 拖动排序（2026-11 用户诉求：左侧的任务和项目空间可以拖着排序）。
+   顺序层是独立 UMD 模块：纯函数可单测、localStorage 只存本机展示顺序、不改后端数据。
+   app-bootstrap.js 保证它在本文件之前加载；此处做一次防御式兜底，避免旧壳/单测
+   未加载该脚本时整份侧栏渲染抛错（DnD 降级为不可用，原有功能不受影响）。 */
+var GourdSidebarOrder = window.GourdSidebarOrder || null;
+
+/* 【架构】drop 只把「当前容器内的 id 顺序」写进 localStorage，然后触发一次重绘；
+   重绘时（buildSidebar / updateHistoryUI）统一用 sortBySaved 把内存数组按保存顺序排好，
+   再生成 HTML。好处：拖拽全程不改动 DOM 结构（只加 data-drag-* 属性与行内手柄），
+   因此 .proj-node.expanded + .proj-sessions、.ws-group-head ~ .ws-group-body
+   这些兄弟选择器完全不受影响；排序逻辑也全部收敛到纯函数，可单测。
+   无保存记录时 sortBySaved 返回原数组引用 —— 默认展示逐字不变（执行中置顶 + 时间倒序）。
+
+   稳定 id 与容器 key 分开：
+   - 项目 id：沿用 pushList 去重的 pathScopeKey(path) + '@' + scope —— 同名目录分属
+     两台机器时不会串。
+   - 会话 id：sessionId（后端唯一）；缺 id 时回落 label|time，只影响极端脏数据。
+   - 分组 id：DOM 的 data-scope（'local' / 'id:<rid>'）。
+   容器 key 与 DOM 的「同父」边界一一对应：drop 时 rowsOf(parent,type) 只收集同父同类行，
+   所以同一 key 只能被同一个容器写入，不会串到别的项目 / 别的 tab。 */
+function sidebarOrder() { return window.GourdSidebarOrder || GourdSidebarOrder; }
+function projectScopeOf(proj) {
+    return (proj && proj._scope && proj._scope !== 'local') ? proj._scope : 'local';
+}
+function projectOrderId(proj) {
+    return pathScopeKey(proj.path) + '@' + projectScopeOf(proj);
+}
+function projectContainerKeyOfScope(scopeKey) { return 'projects@' + scopeKey; }
+function sessionOrderId(entry) {
+    return (entry && entry.sessionId) ? String(entry.sessionId)
+        : ('noid:' + ((entry && entry.label) || '') + '|' + ((entry && entry.time) || 0));
+}
+function sessionContainerKeyForProject(proj) { return 'sessions@' + projectOrderId(proj); }
+function sessionContainerKeyForScope(scopeKey) { return 'sessions@' + scopeKey; }
+/* 对话 tab / code 平铺：会话行直接挂在 #historyList 下，全体同父 = 一个容器。 */
+function sessionContainerKeyFlat() { return 'sessions@__flat'; }
+/* 会话所在容器的顺序 key：由渲染处按归属写入 window.__sidebarSessionKey。
+   项目树内 = sessions@<项目稳定 id>；远端「全局对话」子节 = sessions@<scopeKey>；
+   对话 tab / code 平铺 = sessions@__flat。会话行渲染是共用的 sidebarItemHtml(i)，
+   靠这个当前值区分容器，避免把 A 项目的拖拽顺序串到 B 项目。 */
+function currentSessionOrderKey() {
+    return window.__sidebarSessionKey || sessionContainerKeyFlat();
+}
+function applySessionOrder(entries, key) {
+    var SO = sidebarOrder();
+    if (!SO) return entries;
+    /* unknownFirst=true：新会话/新登记项目仍置顶，符合「最近使用置顶」的既有语义 */
+    return SO.sortBySaved(entries, key, sessionOrderId, true);
+}
+function applyProjectOrder(items, key) {
+    var SO = sidebarOrder();
+    if (!SO) return items;
+    return SO.sortBySaved(items, key, projectOrderId, true);
+}
+function applyGroupOrder(groups) {
+    var SO = sidebarOrder();
+    if (!SO) return groups;
+    /* unknownFirst=false：拖过的组按用户顺序在前，新连接稳定追加末尾 */
+    return SO.sortBySaved(groups, 'groups', function (g) { return g.scopeKey; }, false);
+}
+function dragTitle() { return GourdI18n.t('app.sidebar.drag_to_sort'); }
+function withSessionContainer(key, fn) {
+    var prev = window.__sidebarSessionKey;
+    window.__sidebarSessionKey = key;
+    try { return fn(); } finally { window.__sidebarSessionKey = prev; }
+}
+
+/* 拖拽手柄：只认「按住手柄」才发起 HTML5 拖拽（见 app-sidebar-order.js 的 mousedown 绑定）。
+   手柄一律塞进该行【已有的】操作区（.item-actions / .proj-actions / .ws-group-acts），
+   绝不新增兄弟节点。role=button + tabindex 让它键盘可达；不写 draggable 属性——
+   那是 mousedown 命中手柄时才临时加的。 */
+function dragHandleHtml(type, title) {
+    var SO = sidebarOrder();
+    if (!SO) return '';
+    return '<span class="sidebar-drag-handle" data-drag-handle="' + escAttr(type) + '"'
+        + ' role="button" tabindex="0" title="' + escAttr(title) + '" aria-label="' + escAttr(title) + '">'
+        + '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">'
+        + '<circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/>'
+        + '<circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/>'
+        + '<circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/>'
+        + '</svg></span>';
+}
+/* 行的拖拽元数据。type 决定同容器判定，key 决定存哪份顺序，id 是稳定标识。
+   模块未加载时不输出任何属性，DOM 与改造前逐字一致。 */
+function dragRowAttrs(type, key, id) {
+    var SO = sidebarOrder();
+    if (!SO) return '';
+    return ' data-drag-type="' + escAttr(type) + '" data-drag-key="' + escAttr(key) + '"'
+        + ' data-drag-id="' + escAttr(id) + '"';
+}
+
 function escAttr(s) {
     return escapeHtml(s == null ? '' : String(s)).replace(/"/g, '&quot;');
 }
@@ -529,7 +620,13 @@ function sidebarItemHtml(i) {
     var isRemote = !!(chatHistory[i]._scope && chatHistory[i]._scope !== 'local');
     if (isRemote) cls += ' remote';
 
-    var html = '<div class="' + cls + '" data-idx="' + i + '"' + (isRemote ? ' data-remote="1"' : '') + '>';
+    /* 容器 key 由 buildSidebar / updateHistoryUI 的 withSessionContainer 写入当前值：
+       项目树内各项目、全局子节、对话 tab 平铺各自独立，互不串序。 */
+    var sKey = currentSessionOrderKey();
+    var sId = sessionOrderId(chatHistory[i]);
+
+    var html = '<div class="' + cls + '" data-idx="' + i + '"' + (isRemote ? ' data-remote="1"' : '')
+        + dragRowAttrs('session', sKey, sId) + '>';
     // 定时任务执行会话：条目名前时钟小图标（与旧任务行同款 feather clock）
     if (chatHistory[i].loop) {
         html += '<span class="sidebar-item-loop" title="' + escAttr(GourdI18n.t('app.sidebar.loop_mark')) + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>';
@@ -549,7 +646,9 @@ function sidebarItemHtml(i) {
         html += '<span class="sidebar-item-time">' + formatRelTime(chatHistory[i].time) + '</span>';
     }
     // 右侧悬停操作组（重命名 / 删除）：与项目行 .proj-actions 同款悬浮规格，feather SVG 图标与项目行风格统一（样式见 app.css）
+    // 拖动手柄并入已有操作区：不新增兄弟节点，.proj-node.expanded + .proj-sessions 不受影响
     html += '<span class="item-actions">'
+        + dragHandleHtml('session', dragTitle())
         + '<button class="item-action-btn sidebar-item-rename" title="' + escAttr(GourdI18n.t('history.rename')) + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>'
         + '<button class="item-action-btn sidebar-item-del" title="' + escAttr(GourdI18n.t('history.delete_session')) + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>'
         + '</span>'
@@ -565,11 +664,17 @@ function projNodeHtml(path, name, expanded) {
        title 附主机名，使「同名目录分属两台机器」在悬停时可区分。 */
     var hostLabel = projNodeHostLabel(path);
     var nodeTitle = path + (hostLabel ? (' · ' + hostLabel) : '');
-    return '<div class="proj-node' + (expanded ? ' expanded' : '') + '" data-proj="' + escAttr(path) + '"' + (projNodeIsRemote(path) ? ' data-remote="1"' : '') + ' title="' + escAttr(nodeTitle) + '">'
+    /* 项目行的容器 = 所属分组的 scope（同组内拖动）；id 用 path@scope 稳定去重。 */
+    var pScope = projNodeScopeOf(path);
+    var pKey = projectContainerKeyOfScope(wsScopeKey(pScope));
+    var pId = pathScopeKey(path) + '@' + pScope;
+    return '<div class="proj-node' + (expanded ? ' expanded' : '') + '" data-proj="' + escAttr(path) + '"' + (projNodeIsRemote(path) ? ' data-remote="1"' : '')
+        + dragRowAttrs('project', pKey, pId) + ' title="' + escAttr(nodeTitle) + '">'
         + '<svg class="proj-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>'
         + '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
         + '<span class="proj-name">' + escapeHtml(name || '') + '</span>'
         + '<span class="proj-actions">'
+        + dragHandleHtml('project', dragTitle())
         + '<button class="proj-action-btn proj-new-chat" title="' + escAttr(GourdI18n.t('app.sidebar.new_task')) + '">'
         + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>'
         + '</button>'
@@ -635,6 +740,15 @@ function projScopeQuery(scope) {
 /* Sidebar event delegation — single listener instead of per-item binding */
 $(historyList).on('click', function(e) {
     var $target = $(e.target);
+    /* 拖动手柄：显式在本委派最先拦掉，不依赖 jQuery「委托 handler 先于直接 handler、
+       stopPropagation 切断后续分组」的内部 dispatch 细节。手柄是 span[role=button]，
+       点它会冒泡到这里被当成「展开项目 / 选中会话」；拖拽结束 mouseup→click 那一下
+       尤其容易误触。stopPropagation 同时挡住 document 上「点别处关闭浮层」类委派。 */
+    if ($target.closest('.sidebar-drag-handle').length) {
+        e.stopPropagation();
+        e.preventDefault();
+        return;
+    }
     // 侧栏加载失败提示：点击任意位置重试（重拉项目列表 + 会话）
     var $retryHint = $target.closest('.sidebar-load-failed-hint');
     if ($retryHint.length) {
@@ -727,8 +841,22 @@ function updateHistoryUI() {
             // chat 聚合视图：按 tab 渲染（项目树 / 对话平铺），内部重建 chatHistory/currentChatIndex
             html = buildSidebar();
         } else {
-            // code 模式或聚合数据未到达：原平铺列表
-            for (var i = 0; i < chatHistory.length; i++) html += sidebarItemHtml(i);
+            // code 模式或聚合数据未到达：原平铺列表（同父 = 一个容器）
+            html = withSessionContainer(sessionContainerKeyFlat(), function () {
+                /* 用「有序索引」渲染而非改 chatHistory 本身：code 模式的 chatHistory
+                   由 toSessionEntries 直接赋值、未经 buildSidebar，若原地重排会让
+                   selectSession/deleteSession 的下标契约错位。sortBySaved 对下标数组
+                   排序，data-idx 仍是原下标，行为完全兼容。 */
+                var SO = sidebarOrder();
+                var indices = [];
+                for (var n = 0; n < chatHistory.length; n++) indices.push(n);
+                if (SO) indices = SO.sortBySaved(indices, sessionContainerKeyFlat(), function (ix) {
+                    return sessionOrderId(chatHistory[ix]);
+                }, true);
+                var out = '';
+                for (var m = 0; m < indices.length; m++) out += sidebarItemHtml(indices[m]);
+                return out;
+            });
         }
         var $list = $(historyList);
         // 仅当 HTML 真正变化时才写入 DOM，避免无效重排
@@ -748,6 +876,20 @@ function updateHistoryUI() {
         if (typeof window.renderTitlebarTask === 'function') window.renderTitlebarTask();
     });
 }
+
+/* ===== 拖放绑定（一次性委托，绑定在静态 #historyList 上）=====
+   innerHTML 重建不会丢事件：所有 drag 事件都冒泡到这个容器。drop 只写顺序 +
+   触发 updateHistoryUI 重绘（重绘时 buildSidebar 用 sortBySaved 应用新顺序）。
+   模块未加载时完全不绑定 —— 旧壳/单测降级为「不可拖动」，渲染不受影响。 */
+(function bindSidebarOrder() {
+    var SO = sidebarOrder();
+    if (!SO || !historyList) return;
+    SO.bind(historyList, function () { updateHistoryUI(); });
+})();
+
+/* 手柄 click 已在上方行点击委派开头显式 early return 拦截（见 740 行附近）；
+   这里不再重复注册委托 handler，避免同一事件被处理两次、也避免依赖 jQuery 的
+   委托 dispatch 顺序（不同 jQuery 版本行为不保证一致）。 */
 
 /* 侧栏条目排序：执行中的任务优先，其余按最近活动时间倒序；最后保持接口原顺序稳定。 */
 function sortSidebarEntries(entries) {
@@ -886,6 +1028,9 @@ function wsGroupActsHtml(g) {
     var isDown = !isLocal && g.state === 'down';
     var addTitle = GourdI18n.t('remote.group_add');
     var html = '<span class="ws-group-acts">';
+    /* 分组拖动手柄并入已有操作区（acts 是 head 的兄弟，绝对定位）：不新增兄弟节点，
+       .ws-group-head[aria-expanded] ~ .ws-group-body 的通用兄弟规则不受影响。 */
+    html += dragHandleHtml('group', dragTitle());
     if (!isDown) {
         html += '<span class="ws-group-act ws-group-add" role="button" tabindex="0"'
             + ' data-scope="' + escAttr(g.scopeKey) + '" title="' + escAttr(addTitle) + '"'
@@ -911,6 +1056,7 @@ function wsGroupHtml(g) {
     var html = '<div class="ws-group' + (collapsed ? ' ws-group-collapsed' : '')
         + (isDown ? ' ws-group-down' : '') + '"'
         + ' data-scope="' + escAttr(g.scopeKey) + '"'
+        + dragRowAttrs('group', 'groups', g.scopeKey)
         + (isDown ? ' data-state="down"' : '') + '>'
         + '<button type="button" class="ws-group-head" aria-expanded="' + (collapsed ? 'false' : 'true') + '"'
         + ' title="' + escAttr(g.label) + '">'
@@ -925,14 +1071,24 @@ function wsGroupHtml(g) {
            经过 head 的折叠委派，不需要 stopPropagation 防误折叠。 */
         + wsGroupActsHtml(g)
         + '<div class="ws-group-body">';
-    html += wsGroupGlobalHtml(g);
+    /* 组顶「全局对话」子节：会话容器 = sessions@<scopeKey> */
+    html += withSessionContainer(sessionContainerKeyForScope(g.scopeKey), function () {
+        return wsGroupGlobalHtml(g);
+    });
     for (var i = 0; i < g.meta.length; i++) {
         var pm = g.meta[i];
         html += projNodeHtml(pm.path, pm.name, !!_projExpanded[pm.path]);
         // 子列表始终入 DOM（收起态由 CSS 控制），保证搜索可过滤折叠项目的会话
         if (pm.count > 0) {
+            /* 每个项目是独立容器：drop 时 rowsOf 只收集这个 .proj-sessions 下的行 */
             html += '<div class="proj-sessions">';
-            for (var j = pm.start; j < pm.start + pm.count; j++) html += sidebarItemHtml(j);
+            html += withSessionContainer(pm.sessionKey || sessionContainerKeyFlat(), (function (s, e) {
+                return function () {
+                    var out = '';
+                    for (var j = s; j < s + e; j++) out += sidebarItemHtml(j);
+                    return out;
+                };
+            })(pm.start, pm.count));
             html += '</div>';
         }
     }
@@ -963,28 +1119,31 @@ function buildSidebar() {
            组顶「全局对话」子节在前（§5.3），其后是该 scope 的项目行。
            平铺必须包含子节里的会话：selectSession/deleteSession/startRename 全部按
            chatHistory 下标定位，漏进去就等于那些会话点不开、也删不掉。 */
-        groups = wsGroupOrder(projects);
+        groups = applyGroupOrder(wsGroupOrder(projects));
         for (i = 0; i < groups.length; i++) {
             var g = groups[i];
             g.globalStart = flat.length;
-            var gl = sortSidebarEntries(g.globals || []);
+            var gl = applySessionOrder(sortSidebarEntries(g.globals || []), sessionContainerKeyForScope(g.scopeKey));
             for (j = 0; j < gl.length; j++) flat.push(gl[j]);
             g.globals = gl;
             g.globalCount = gl.length;
+            /* 分组内的项目行：按该 scope 保存的顺序重排（同组内拖动） */
+            g.items = applyProjectOrder(g.items, projectContainerKeyOfScope(g.scopeKey));
             for (j = 0; j < g.items.length; j++) {
                 var proj = g.items[j];
                 var start = flat.length;
-                // 项目内执行中的任务置顶，其余按最近活动时间倒序
-                var ss = sortSidebarEntries(proj.sessions || []);
+                // 项目内执行中的任务置顶，其余按最近活动时间倒序；再叠加用户自定义顺序
+                var ss = applySessionOrder(sortSidebarEntries(proj.sessions || []), sessionContainerKeyForProject(proj));
                 for (k = 0; k < ss.length; k++) flat.push(ss[k]);
-                g.meta.push({ path: proj.path, name: proj.name, start: start, count: ss.length });
+                g.meta.push({ path: proj.path, name: proj.name, start: start, count: ss.length,
+                    sessionKey: sessionContainerKeyForProject(proj), scopeKey: g.scopeKey });
             }
         }
     } else {
         /* 对话 tab：仅全局会话（非工作空间下），执行中的任务置顶，其余按 time 倒序。
            【零改动 · 契约 §5.4】分组树只组织项目/工作区，全局对话仍在这里平铺。 */
         for (i = 0; i < global.length; i++) flat.push(global[i]);
-        flat = sortSidebarEntries(flat);
+        flat = applySessionOrder(sortSidebarEntries(flat), sessionContainerKeyFlat());
     }
 
     // —— 重建全局量并修正激活下标 ——
@@ -1000,9 +1159,15 @@ function buildSidebar() {
     if (scope === 'project') {
         /* 2026-10-11 用户反馈：「这个项目不要，本身上面就有项目了，下面这个重复了。
            tab 名就叫「项目」，组头又全是机器名/本地，这行 section-title 纯重复占位，删。 */
+        /* wsGroupHtml 内部按「全局子节 / 各项目 proj-sessions」分别切换
+           __sidebarSessionKey，让共用的 sidebarItemHtml 落到正确容器。 */
         for (i = 0; i < groups.length; i++) html += wsGroupHtml(groups[i]);
     } else {
-        for (i = 0; i < flat.length; i++) html += sidebarItemHtml(i);
+        html += withSessionContainer(sessionContainerKeyFlat(), function () {
+            var out = '';
+            for (var n = 0; n < flat.length; n++) out += sidebarItemHtml(n);
+            return out;
+        });
     }
     // 加载失败空态：当前视图一条条目都没有且此前记录过加载失败时，渲染可点击的重试提示。
     // 默认「项目」tab 的 flat 仅由 projects 构建，projects 接口失败时旧实现留下纯空白、
@@ -1675,6 +1840,15 @@ installReplayLoadMoreSessionHook();
    WHY 覆盖层不进 sess.container：children.length===0 是全项目「需要重拉历史」的
    唯一判据，骨架节点混入会让切回会话只剩骨架、历史永久消失。 */
 var HISTORY_LOAD_TIMEOUT_MS = 12000;
+/* 【P1-1 修复 2026-11】HTTP 超时必须宽于 UI watchdog，两者同值会竞态：
+   HTTP 先到点触发 error('timeout') → legacy 二次请求 → UI watchdog 随后又盖
+   失败卡，三态交错（失败卡 + legacy 内容 + 二次骨架）。watchdog 先行 abort 后，
+   迟到的 error('abort') 已被显式忽略，这里只是悬挂请求的网络级兜底。 */
+var HISTORY_HTTP_TIMEOUT_MS = 60000;
+/* 【P0-2 修复 2026-11】回放卡死宽限：12s watchdog 命中回放态（_replaying）时
+   不再一次性 return（旧实现保护真空：rAF 链一旦卡死，门禁与覆盖层永久残留
+   = 白屏），而是重排到该截止点；届时仍未收尾则强制收口（__replayStalled）。 */
+var REPLAY_STALL_GRACE_MS = 30000;
 var _historyLoadingTimers = {};
 
 function historyOverlayHost() {
@@ -1817,11 +1991,54 @@ function showHistoryLoading(sess) {
            「容器已有内容 ⇒ 只撤骨架、绝不叠失败卡」这条守卫，把成功的加载误报成
            失败卡，而且失败卡是 absolute inset:0，会把刚到的正文整块盖住（已实测复现）。
            统一交给 hideHistoryLoading 判定 —— 它是这条守卫的唯一定义处。 */
-        /* 【2026-11 白屏止血】请求早已成功、正在分片回放（_replaying）时，加载态的
-            收尾由 replayDone / finishReplayFallback 负责：内容此刻建在游离 tempDiv，
-            真实容器仍空，旧逻辑会在 12s 误判「请求悬挂」盖上不透明失败卡闪一下
-            （用户报的「加载失败/白屏」观感）。定时器此时直接放手，绝不越权。 */
-        if (sess._replaying) return;
+        /* 【P0-2 修复 2026-11】请求已成功、正在分片回放（_replaying）时，12s 定时器
+            不再直接放手（旧实现把定时器消费掉且永不重排，此后 rAF 链一旦卡死，
+            门禁/覆盖层/骨架永久残留 = 白屏）。改为：重排一次宽限定时器，宽限内仍未
+            收尾（_replaying 仍为真）则强制收口——replayChunk 的 stall hook 会执行
+            finishReplayFallback（salvage 半成品 + 释放门禁 + 撤骨架）。 */
+        if (sess._replaying) {
+            _historyLoadingTimers[sess.sessionId] = setTimeout(function () {
+                delete _historyLoadingTimers[sess.sessionId];
+                var host3 = historyOverlayHost();
+                var cur3 = host3 && host3.querySelector('.chat-history-loading');
+                if (!cur3 || cur3.dataset.ownerSession !== sess.sessionId) return;   // 已被撤销/被新会话接管
+                if (!sess._replaying) {
+                    /* 宽限期间恰好收尾完成：replayDoneCore 已撤骨架，无事可做。 */
+                    return;
+                }
+                console.error('[history] 回放分片链卡死（宽限 ' + REPLAY_STALL_GRACE_MS + 'ms 内无收尾），强制收口');
+                /* 通知 replayChunk：下一帧分片回调进入时直接走 fallback 收尾，
+                    半成品由 finishReplayFallback salvage 入真实容器，绝不白屏。
+                    不 cancel rAF：挂着的那帧正是 stall hook 的载体，掐了它就只剩
+                    下面的盲收口（无 salvage）。 */
+                sess.__replayStalled = true;
+                /* 盲兜底：250ms 后 stall hook 仍未生效（rAF 链彻底死透，连挂起帧
+                    都没有），只能就地强制释放门禁与骨架。renderTarget 仍指向 tempDiv
+                    （回放期渲染落点），把里面的半成品 salvage 进真实容器，尽量保内容。 */
+                setTimeout(function () {
+                    if (!sess._replaying) return;   // stall 标记生效后已被正常收尾
+                    console.error('[history] stall 标记未生效，强制释放回放门禁与加载态');
+                    sess.__replayStalled = false;
+                    sess._replaying = false;
+                    sess._gateBuffering = false;
+                    sess._skipScroll = false;
+                    sess.isStreaming = false;
+                    try {
+                        /* 回放期 sess.renderTarget 正是 replaySession 的 tempDiv（游离
+                            半成品容器）；salvage 它而非引用局部变量（此处拿不到）。 */
+                        var stalledTarget = sess.renderTarget;
+                        if (stalledTarget && stalledTarget !== sess.container
+                                && stalledTarget.firstChild && sess.container) {
+                            sess.container.appendChild(stalledTarget);
+                        }
+                    } catch (eSalv) { /* salvage 失败不阻断收口 */ }
+                    sess.renderTarget = null;
+                    hideHistoryLoading(sess, { failed: true });
+                    try { drainGateBuffer(sess); } catch (e1) {}
+                }, 250);
+            }, REPLAY_STALL_GRACE_MS);
+            return;
+        }
         try { drainGateBuffer(sess); } catch (e) {}
         /* 【超时即断流 2026-11】12s 已降级成失败+重试卡，必须同时 abort 在途 replay。
             旧实现只换 UI 态、不作废回调：请求几十秒后带着 8 万帧回来仍会进 done
@@ -1926,7 +2143,8 @@ function loadMessages(sess) {
         method: 'GET',
         /* 真实 HTTP 超时：与 12s 骨架兜底同口径。旧实现没有 timeout，大会话响应
            悬挂时只能靠 UI 定时器降级，而回调仍然有效 → 失败卡与迟到内容打架。 */
-        timeout: HISTORY_LOAD_TIMEOUT_MS,
+        /* timeout 用宽口径（watchdog 先行降级并 abort；同值会触发 P1-1 三态交错竞态）。 */
+        timeout: HISTORY_HTTP_TIMEOUT_MS,
         success: function (rp) {
             if (sess._historyLoadGeneration !== gen || (typeof sessionMap !== 'undefined' && sessionMap[sess.sessionId] !== sess)) return;
             var rpData = rp && rp.data;
@@ -2483,6 +2701,13 @@ function replaySession(sess, events, prepend, keepOpen) {
         }
 
         if (idx < events.length) {
+            /* 【P0-2 修复 2026-11】stall hook：watchdog 宽限耗尽时置 __replayStalled，
+                此处检测到即直接走 fallback 收尾（salvage 半成品 + 释放门禁），
+                而不是继续喂帧——卡死的 rAF 链若还在动，也能在下一帧被拦下。 */
+            if (sess.__replayStalled) {
+                finishReplayFallback(new Error('replay stalled (watchdog grace exhausted)'));
+                return;
+            }
             /* 还有未处理的事件，下一帧继续。
                回调整体兜底：rAF 回调抛出的异常无人接管，会直接终止分片链，
                replayDone 永不执行 → 门禁永不释放（与旧版 cancelAnimationFrame 同样的僵死后果）。*/
@@ -2503,6 +2728,7 @@ function replaySession(sess, events, prepend, keepOpen) {
        _replaying / _gateBuffering 门禁、排空实时帧缓冲——少做任何一步，后续实时帧都会
        被永久扣在缓冲区里，表现为「后端在跑、界面不动」。 */
     function finishReplayFallback(err) {
+        try { sess.__replayStalled = false; } catch (eStall) {}
         // 兜底：半成品若已并入容器则静默撤骨架；容器仍空才亮失败卡（见 hideHistoryLoading）
         hideHistoryLoading(sess, { failed: true });
         console.error('[replaySession] 回放收尾异常，执行兜底:', err);
@@ -2555,6 +2781,7 @@ function replaySession(sess, events, prepend, keepOpen) {
     }
 
     function replayDoneCore() {
+        try { sess.__replayStalled = false; } catch (eStall) {}
         hideHistoryLoading(sess);   // 内容即将移入真实容器，先撤覆盖层
         var resumeState = null;
         if (keepOpen && !prepend && (sess.currentBubbleEl || sess.thinkingBlockEl || sess.pendingToolCard)) {
@@ -2947,7 +3174,17 @@ function stitchPrependedRunRows(fragment, realContainer, sess) {
     迟到时直接丢弃，不再把上一代内容盖进当前会话。旧调用方不传则恒为 undefined，
     undefined === undefined 通过，行为完全向后兼容。 */
 function loadMessagesLegacy(sess, rootQ, historyGen) {
-    $.get('/web/chat/messages?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ, function(resp) {
+    /* 【P1-2 修复 2026-11】裸 $.get → $.ajax + timeout + abort 句柄：
+       旧实现无 timeout（请求可无限悬挂）、无 abort（watchdog 12s abort 只对
+       replay XHR 生效，legacy XHR 悬挂时旧响应 done 仍会重建整页）。
+       gen 校验只挡迟到写入，挡不住连接悬挂。timeout 用宽口径（watchdog 先行）。 */
+    var legacyXhr = $.ajax({
+        url: '/web/chat/messages?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ,
+        method: 'GET',
+        timeout: HISTORY_HTTP_TIMEOUT_MS,
+        success: function (resp) {
+            /* 请求完成即摘句柄：watchdog 的 abort 不再指向已终结的请求。 */
+            if (sess._historyLoadXhr === legacyXhr) sess._historyLoadXhr = null;
         if (historyGen !== undefined && sess._historyLoadGeneration !== historyGen) return;
         if (typeof sessionMap !== 'undefined' && sessionMap[sess.sessionId] !== sess) return;
         // 声明提到 try 外：异常兜底分支要用到，放在 try 内会踩 var 提升的 undefined 陷阱
@@ -3056,13 +3293,20 @@ function loadMessagesLegacy(sess, rootQ, historyGen) {
             legacyFragment = null;
             drainGateBuffer(sess);
         }
-    }).fail(function() {
+        },
+        error: function(xhr, textStatus) {
+        if (sess._historyLoadXhr === legacyXhr) sess._historyLoadXhr = null;
+        /* watchdog/loadMessages abort 的不是失败：当前代已被顶掉或已降级处理。 */
+        if (textStatus === 'abort') return;
         // legacy 请求失败也必须释放回放/实时互斥门禁；
         // 否则后续 WebSocket 帧会永久滞留在 _gateBuffer。
         if (historyGen !== undefined && sess._historyLoadGeneration !== historyGen) return;
         hideHistoryLoading(sess, { failed: true });
         drainGateBuffer(sess);
+        }
     });
+    /* 注册句柄：loadMessages 重试 / watchdog 12s 降级时能 abort 这条悬挂请求。 */
+    sess._historyLoadXhr = legacyXhr;
 }
 
 /* Load on startup（桌面端等后端就绪再拉，避免冷启动占用连接；浏览器端立即执行）。

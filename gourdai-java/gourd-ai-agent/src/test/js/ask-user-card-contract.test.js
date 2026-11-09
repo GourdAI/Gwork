@@ -1400,6 +1400,18 @@ test('app-message.js：整卡折叠按钮——collapsed 只留头部，detail/�
     assert.match(appCss, /\.question-card\.collapsed \.question-card-detail/);
     assert.match(appCss, /\.question-card\.collapsed \.question-card-options/);
     assert.match(appCss, /\.question-card\.collapsed \.question-card-footer/);
+
+    /* 箭头方向契约（用户 2026-11 报障「ask 弹层缩放箭头反了」）：
+       纯图标折叠钮按【当前状态】配图 —— 展开态 ∨ 朝下、折叠态 ∧ 朝上，
+       与本仓 .ws-group-caret / .turn-batch-chevron 的「展开态朝下」一致。
+       旧实现写成 collapsed ? EXPAND : COLLAPSE（动作型），展开着的卡反而显示 ∧。
+       tooltip 仍按动作取文案，故不能拿 title 反推箭头。 */
+    assert.match(render, /var collapseSvg = collapsed \? QUESTION_CARD_SVG_COLLAPSE : QUESTION_CARD_SVG_EXPAND;/,
+        '折叠钮必须按状态取箭头：展开态 EXPAND(∨)、折叠态 COLLAPSE(∧)');
+    const svgCollapse = (message.match(/var QUESTION_CARD_SVG_COLLAPSE = '([^']*)'/) || [])[1] || '';
+    const svgExpand = (message.match(/var QUESTION_CARD_SVG_EXPAND = '([^']*)'/) || [])[1] || '';
+    assert.match(svgCollapse, /points="18 15 12 9 6 15"/, 'COLLAPSE 必须是上尖角 ∧（折叠态箭头）');
+    assert.match(svgExpand, /points="6 9 12 15 18 9"/, 'EXPAND 必须是下尖角 ∨（展开态箭头）');
 });
 
 test('app.css：折叠按钮有独立样式承载（尺寸与卡内其它图标按钮一致）', () => {
@@ -1428,7 +1440,8 @@ test('app-message.js：renderQuestionCard 沙箱执行——展开/折叠两态�
         'var questionSubmitMode = function(){ return "skip"; };',
         'var currentInputBoxText = function(){ return ""; };',
         'var QUESTION_SUBMIT_MODE_KEYS = {skip:"chat.question_skip",next:"chat.question_next",submit:"chat.question_submit"};',
-        'var QUESTION_CARD_SVG_PREV="<svg></svg>", QUESTION_CARD_SVG_NEXT="<svg></svg>", QUESTION_CARD_SVG_CLOSE="<svg></svg>", QUESTION_CARD_SVG_COLLAPSE="<svg></svg>", QUESTION_CARD_SVG_EXPAND="<svg></svg>", QUESTION_CARD_SVG_EDIT="<svg></svg>", QUESTION_CARD_SVG_CHEVRON="<svg></svg>";',
+        // 两支箭头给可区分标记：本用例要真跑 renderQuestionCard 看两态产物用了哪支
+        'var QUESTION_CARD_SVG_PREV="<svg></svg>", QUESTION_CARD_SVG_NEXT="<svg></svg>", QUESTION_CARD_SVG_CLOSE="<svg></svg>", QUESTION_CARD_SVG_COLLAPSE="<svg data-arrow=up></svg>", QUESTION_CARD_SVG_EXPAND="<svg data-arrow=down></svg>", QUESTION_CARD_SVG_EDIT="<svg></svg>", QUESTION_CARD_SVG_CHEVRON="<svg></svg>";',
         'var questionCardFocusKeyIn = function(){ return ""; };',
         'var questionCardCaretIn = function(){ return null; };',
         'var questionCardScrollSnapshot = function(){ return null; };',
@@ -1450,6 +1463,8 @@ test('app-message.js：renderQuestionCard 沙箱执行——展开/折叠两态�
     assert.match(host.innerHTML, /question-card-options/, '展开态必须渲染选项区');
     assert.doesNotMatch(host.innerHTML, /class="question-card[^"]*collapsed/, '展开态根节点不得带 collapsed 类');
     assert.match(host.innerHTML, /aria-expanded="true"/, '展开态折叠按钮 aria-expanded 须为 true');
+    assert.match(host.innerHTML, /data-arrow=down/, '展开态箭头必须朝下（∨），不是 ∧');
+    assert.doesNotMatch(host.innerHTML, /data-arrow=up/, '展开态不得出现上尖角');
 
     // 折叠态：根节点必须挂 collapsed 类，且选项/底部不再渲染（双保险：类 + 结构）
     host = mkHost();
@@ -1460,4 +1475,6 @@ test('app-message.js：renderQuestionCard 沙箱执行——展开/折叠两态�
     assert.equal(host.innerHTML.indexOf('question-card-options'), -1, '折叠态不得再渲染选项区');
     assert.equal(host.innerHTML.indexOf('question-card-footer'), -1, '折叠态不得再渲染底部按钮');
     assert.match(host.innerHTML, /aria-expanded="false"/, '折叠态折叠按钮 aria-expanded 须为 false');
+    assert.match(host.innerHTML, /data-arrow=up/, '折叠态箭头必须朝上（∧），不是 ∨');
+    assert.doesNotMatch(host.innerHTML, /data-arrow=down/, '折叠态不得出现下尖角');
 });

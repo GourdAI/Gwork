@@ -179,10 +179,22 @@
         return out;
     }
 
+    /* 直接子级盖子列表（2026-11 方案A）：智能体卡体内也建盖子后，querySelectorAll
+       会穿透到卡内——主气泡收口误关卡内 running 盖子、lastHeader 串到别的容器。
+       所有「找本容器盖子」的场合一律只认直接子级。 */
+    function childHeadersOf(container) {
+        var out = [];
+        if (!container || !container.children) return out;
+        var kids = container.children;
+        for (var i = 0; i < kids.length; i++) {
+            if (kids[i].classList && kids[i].classList.contains('turn-batch-header')) out.push(kids[i]);
+        }
+        return out;
+    }
+
     function lastHeader(bubble) {
-        if (!bubble || !bubble.querySelectorAll) return null;
-        var hs = bubble.querySelectorAll('.turn-batch-header');
-        return hs && hs.length ? hs[hs.length - 1] : null;
+        var hs = childHeadersOf(bubble);
+        return hs.length ? hs[hs.length - 1] : null;
     }
 
     /* 成员可见性单一入口：open=true 移除折叠类，false 加上；盖子 aria / chevron 类同步。 */
@@ -260,8 +272,15 @@
         if (batchDisabled()) return null;
         var bubble = el.parentNode;
         if (!bubble || !bubble.querySelector) return null;
-        // 只认主气泡：子代理卡体（.agent-card-body）内的过程行不建盖子
-        if (!bubble.classList || !bubble.classList.contains('msg-bubble')) return null;
+        /* 宿主白名单（2026-11 方案A 用户拍板：卡内与外部同构折叠）：
+           · 主气泡 .msg-bubble（原行为）
+           · 子代理卡体 .agent-card-body —— 卡内工具/思考同样进批次盖子，
+             与外部消息共用同一份 noteProcessInsert/closeBatchFor/membersOf 逻辑，
+             一处维护。盖子是卡体直接子级 button，不插任何包装节点，
+             app.css:825 的相邻兄弟选择器不受影响（盖子不是 md/thinking 的兄弟定位锚）。 */
+        var inAgentBody = !!(bubble.classList && bubble.classList.contains('agent-card-body'));
+        if (!inAgentBody
+                && !(bubble.classList && bubble.classList.contains('msg-bubble'))) return null;
         /* 成员门禁：只有三类过程行能进批次。正文 md-content / 错误 / HITL / 问答卡 /
            文件变更卡 / trace 徽标等一律不是成员（它们在盖子外保持可见）。 */
         if (!isProcessRow(el)) return null;
@@ -300,11 +319,13 @@
         return header;
     }
 
-    /* 收口：气泡内【全部】运行批次 → 「已处理」+ 成员折叠（倒序遍历，收口不改变集合）。
-       零成员的盖子直接移除（空壳比不显示更误导）。返回是否有批次被收口/移除。 */
+    /* 收口：容器内【全部】运行批次 → 「已处理」+ 成员折叠（倒序遍历，收口不改变集合）。
+       零成员的盖子直接移除（空壳比不显示更误导）。返回是否有批次被收口/移除。
+       【方案A】容器既可以是主气泡，也可以是智能体卡体（childHeadersOf 只认直接子级，
+       主气泡收口不会误关卡内的 running 盖子）。 */
     function closeBatchFor(bubble, nowMs) {
         if (!bubble || !bubble.querySelectorAll) return false;
-        var hs = bubble.querySelectorAll('.turn-batch-header');
+        var hs = childHeadersOf(bubble);
         var now = typeof nowMs === 'number' ? nowMs : Date.now();
         var changed = false;
         for (var i = hs.length - 1; i >= 0; i--) {
@@ -329,9 +350,13 @@
         return changed;
     }
 
-    /* 会话级收口入口：正文 / 错误到达时调用（指针所在气泡）。 */
-    function closeBatch(sess, nowMs) {
+    /* 会话级收口入口：正文 / 错误到达时调用（指针所在气泡）。
+       【卡内批次收口】传 st（子代理状态）时收口该卡体内部的 running 盖子——
+       子代理正文到达（appendBodyContentCore, h !== sess 分支）与 agent_end 收卡
+       两条路径共用。不传 st 时维持原语义（主线路指针气泡）。 */
+    function closeBatch(sess, nowMs, st) {
         if (!sess) return false;
+        if (st && st.bodyEl) return closeBatchFor(st.bodyEl, nowMs);
         var bubble = sess.currentBubbleEl ? sess.currentBubbleEl.parentNode : null;
         return closeBatchFor(bubble, nowMs);
     }
@@ -366,8 +391,9 @@
     function rebuildBatches(bubble, meta) {
         if (!bubble || !bubble.children || !bubble.querySelectorAll) return 0;
         if (batchDisabled()) return 0;
-        /* 已有盖子 = 运行态延续的气泡（恢复流式）或重复调用：不重建，避免双盖子 */
-        if (bubble.querySelectorAll('.turn-batch-header').length > 0) return 0;
+        /* 已有盖子 = 运行态延续的气泡（恢复流式）或重复调用：不重建，避免双盖子
+           （只看直接子级：卡体内盖子不算本气泡已有盖子） */
+        if (childHeadersOf(bubble).length > 0) return 0;
         var kids = bubble.children || [];
         var built = 0;
         var header = null;
@@ -396,6 +422,12 @@
                 header = createHeader(bubble, el);
                 header.setAttribute('data-batch-state', 'closed');
                 header.classList.add('turn-batch-closed');
+                /* 【2026-11 用户报障：历史折叠态箭头方向错】createHeader 挂的 .turn-batch-open
+                   类只摘属性不摘类时，CSS :not(.turn-batch-open) 的旋转规则（app.css:4373）
+                   永不命中 → 历史折叠盖子的 chevron 一直朝下（展开态方向），与运行态收口后的
+                   右向箭头不一致。applyMembers(header,false) 是唯一同时同步类/aria/data 的
+                   单一入口，这里直接走它（成员折叠类已在下方循环统一补，重复 add 幂等）。 */
+                applyMembers(header, false);
                 header.setAttribute('data-batch-open', 'false');
                 header.setAttribute('aria-expanded', 'false');
                 header.removeAttribute('data-batch-start');   // 历史批次无 running 语义，去掉计时起点
@@ -411,6 +443,13 @@
            membersOf 依赖 data-turn-batch 标记，循环内首个成员尚未落标时统计恒 0。 */
         for (var b2 = 0; b2 < builtHeaders.length; b2++) {
             setLabel(builtHeaders[b2], meta && meta.translate ? meta.translate : windowTranslate());
+        }
+        /* 【方案A · 卡内历史批次】下钻智能体卡体：历史帧里的子代理工具/思考同样
+           按 run 态规则补建 closed 态盖子。卡体边界规则与主气泡一致（非空正文切断
+           批次），但卡内没有嵌套 agent-card（子代理不再嵌套派发），无边界一分支。 */
+        var agentBodies = bubble.querySelectorAll('.agent-card-body');
+        for (var ab = 0; ab < agentBodies.length; ab++) {
+            built += rebuildBatches(agentBodies[ab], meta);
         }
         return built;
     }

@@ -1697,10 +1697,20 @@ fn apply_provider_visibility(
 
 /// POST /web/settings/providers/fetch — list models from the provider's API.
 ///
-/// Talks to `<apiUrl>/models` with the protocol-appropriate auth header. When
-/// `apiKey` is omitted but `providerName` is given, the stored key is used — and
-/// in that case the stored `apiUrl`/`standard` are used **as a set** with it, so
-/// a caller cannot make the kernel send a saved secret to an arbitrary host.
+/// Talks to the protocol-appropriate models endpoint with the matching auth
+/// header. When `apiKey` is omitted but `providerName` is given, the stored key
+/// is used — and in that case the stored `apiUrl`/`standard` are used **as a
+/// set** with it, so a caller cannot make the kernel send a saved secret to an
+/// arbitrary host.
+///
+/// The URL/path rules here mirror the Java `ModelsAdapter`s AND the chat
+/// `Dialect` used by this same kernel. Confusing the two was the original bug:
+/// chat appends `/v1/...` to a bare host (so chat worked), while the first
+/// Rust port appended only `/models`. For proxies such as `api.aionly.com` the
+/// bare `/models` is served by the website/gateway and answers **HTTP 200** with
+/// `{"code":401,"msg":"token 无效","data":null}`. Silently treating that as
+/// "zero models" is exactly the "服务返回空模型列表" report — Java had fixed
+/// this with `ModelsFetchReason` (see its javadoc), and the port lost the fix.
 pub async fn providers_fetch(Form(body): Form<ProviderFetchBody>) -> Json<serde_json::Value> {
     let mut api_url = body.api_url.clone();
     let mut api_key = body.api_key.clone();
@@ -1711,7 +1721,7 @@ pub async fn providers_fetch(Form(body): Form<ProviderFetchBody>) -> Json<serde_
     };
 
     if api_url.trim().is_empty() {
-        return Json(fetch_fail("INVALID_URL", 0));
+        return Json(fetch_fail("INVALID_URL", 0, None));
     }
     if api_key.is_empty() && !body.provider_name.trim().is_empty() {
         let providers = read_providers();
@@ -1729,108 +1739,224 @@ pub async fn providers_fetch(Form(body): Form<ProviderFetchBody>) -> Json<serde_
         }
     }
 
-    let url = join_models_url(&api_url);
+    let std_lower = standard.to_ascii_lowercase();
+    let candidates = model_list_urls(&api_url, &std_lower);
+    let Some(first) = candidates.first().cloned() else {
+        return Json(fetch_fail("INVALID_URL", 0, None));
+    };
+
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
     {
         Ok(c) => c,
-        Err(e) => return Json(fetch_fail(&format!("UNKNOWN:{}", e), 0)),
+        Err(e) => return Json(fetch_fail("UNKNOWN", 0, Some(&e.to_string()))),
     };
 
-    let mut req = client.get(&url);
-    // Auth header depends on the protocol: Anthropic uses x-api-key plus a
-    // version header, OpenAI/Ollama use a Bearer token. Sending Bearer for
-    // anthropic would add a spurious header.
-    match standard.to_lowercase().as_str() {
-        "anthropic" => {
-            if !api_key.is_empty() {
-                req = req.header("x-api-key", api_key.clone());
+    // A bare base URL belongs to the provider's website more often than to its
+    // API. Retrying the canonical `/v1/models` is what makes "add provider with
+    // the same URL that already works in chat" succeed. Only a response that is
+    // *not* a usable model list is retried — a genuine empty `{"data":[]}` from
+    // the canonical URL stays an empty list (the UI keeps the old one).
+    let mut last_failure: Option<(String, u16)> = None;
+    for url in candidates {
+        let mut req = client.get(&url);
+        match std_lower.as_str() {
+            "anthropic" => {
+                if !api_key.is_empty() {
+                    req = req.header("x-api-key", api_key.clone());
+                }
+                req = req.header("anthropic-version", "2023-06-01");
             }
-            req = req.header("anthropic-version", "2023-06-01");
-        }
-        _ => {
-            if !api_key.is_empty() {
-                req = req.bearer_auth(api_key.clone());
+            "gemini" => {
+                if !api_key.is_empty() {
+                    req = req.header("x-goog-api-key", api_key.clone());
+                }
+            }
+            _ => {
+                if !api_key.is_empty() {
+                    req = req.bearer_auth(api_key.clone());
+                }
             }
         }
-    }
 
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            let reason = if e.is_timeout() {
-                "TIMEOUT"
-            } else if e.is_connect() {
-                "CONNECT_FAILED"
-            } else {
-                "UNKNOWN"
-            };
-            return Json(fetch_fail(reason, 0));
-        }
-    };
-    let status = resp.status().as_u16();
-    if !resp.status().is_success() {
-        let reason = match status {
-            401 | 403 => "UNAUTHORIZED",
-            404 => "NOT_FOUND",
-            429 => "RATE_LIMITED",
-            _ => "HTTP_ERROR",
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let reason = if e.is_timeout() {
+                    "TIMEOUT"
+                } else if e.is_connect() {
+                    "CONNECT_REFUSED"
+                } else {
+                    "NETWORK_ERROR"
+                };
+                // Transport failures are not worth retrying at a different path:
+                // the host itself is unreachable.
+                return Json(fetch_fail(reason, 0, Some(&e.to_string())));
+            }
         };
-        return Json(fetch_fail(reason, status));
-    }
-
-    let payload: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(_) => return Json(fetch_fail("INVALID_RESPONSE", status)),
-    };
-
-    // OpenAI-compatible: {"data":[{"id":...}]}. Ollama: {"models":[{"name":...}]}.
-    let items = payload
-        .get("data")
-        .and_then(|d| d.as_array())
-        .or_else(|| payload.get("models").and_then(|d| d.as_array()))
-        .cloned()
-        .unwrap_or_default();
-
-    let mut out: Vec<serde_json::Value> = Vec::new();
-    for it in items {
-        let id = it
-            .get("id")
-            .and_then(|v| v.as_str())
-            .or_else(|| it.get("name").and_then(|v| v.as_str()))
-            .unwrap_or("")
-            .to_string();
-        if id.is_empty() {
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            last_failure = Some((http_fetch_reason(status).to_string(), status));
             continue;
         }
-        out.push(serde_json::json!({
-            "id": id,
-            "owned_by": it.get("owned_by").cloned().unwrap_or(serde_json::Value::Null),
-            "standard": standard,
-            "supported_endpoint_types": it.get("supported_endpoint_types").cloned().unwrap_or(serde_json::Value::Null),
-        }));
+
+        let payload: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                last_failure = Some(("INVALID_RESPONSE".to_string(), status));
+                tracing::warn!(url = %url, error = %e, "provider /models response is not JSON");
+                continue;
+            }
+        };
+
+        let Some(items) = model_list_items(&payload, &std_lower) else {
+            // e.g. `{"code":401,"msg":"token 无效","data":null}` returned with
+            // HTTP 200 by the bare path, or an HTML SPA fallback. Never report
+            // this as "the provider has no models".
+            last_failure = Some(("INVALID_RESPONSE".to_string(), status));
+            tracing::warn!(url = %url, "provider /models response has no model array");
+            continue;
+        };
+
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for it in items {
+            let id = it
+                .get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| it.get("name").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string();
+            // Gemini's /v1beta/models lists entries as {"name":"models/gemini-x"}.
+            // The chat Dialect builds `{root}/models/{model_id}:generateContent`,
+            // so an un-stripped prefix would produce `/models/models/gemini-x:...`
+            // and every chat call would 404 after a successful fetch.
+            let id = id.strip_prefix("models/").map(|s| s.to_string()).unwrap_or(id);
+            if id.is_empty() {
+                continue;
+            }
+            // Anthropic/Ollama adapters stamp their own protocol; proxies return
+            // `supported_endpoint_types` so the UI can pick the chat dialect.
+            let item_standard = infer_model_standard(it, &std_lower);
+            out.push(serde_json::json!({
+                "id": id,
+                "owned_by": it.get("owned_by").cloned().unwrap_or(serde_json::Value::Null),
+                "standard": item_standard,
+                "supported_endpoint_types": it.get("supported_endpoint_types").cloned().unwrap_or(serde_json::Value::Null),
+            }));
+        }
+        return Json(serde_json::json!({"code": 200, "data": out}));
     }
-    Json(serde_json::json!({"code": 200, "data": out}))
+
+    // Every candidate failed. Returning `code: 400` is the whole point: the UI
+    // shows an actionable reason instead of the "empty model list" toast.
+    let (reason, status) = last_failure.unwrap_or(("UNKNOWN".to_string(), 0));
+    Json(fetch_fail(&reason, status, Some(&first)))
 }
 
-fn fetch_fail(reason: &str, status: u16) -> serde_json::Value {
+fn fetch_fail(reason: &str, status: u16, detail: Option<&str>) -> serde_json::Value {
+    let mut data = serde_json::json!({ "reason": reason, "status": status });
+    if let Some(d) = detail {
+        data["detail"] = serde_json::Value::String(d.to_string());
+    }
     serde_json::json!({
         "code": 400,
         "description": "fetch models failed",
         "message": "fetch models failed",
-        "data": { "reason": reason, "status": status }
+        "data": data
     })
 }
 
-/// Build the models-list URL from a base URL that may or may not already include
-/// `/v1` and may or may not have a trailing slash.
-fn join_models_url(base: &str) -> String {
-    let b = base.trim().trim_end_matches('/');
-    if b.ends_with("/models") {
-        return b.to_string();
+/// Machine-readable reasons consumed by the UI's `FETCH_REASON_KEYS`
+/// (`app-model-settings.js`). Keep these names equal to Java's
+/// `ModelsFetchReason` — the Rust port once emitted UNAUTHORIZED/NOT_FOUND and
+/// the UI silently fell back to the generic "unknown" text.
+fn http_fetch_reason(status: u16) -> &'static str {
+    match status {
+        401 | 403 | 407 => "AUTH_FAILED",
+        404 | 405 | 501 => "NOT_SUPPORTED",
+        408 | 504 => "TIMEOUT",
+        429 => "RATE_LIMITED",
+        500..=599 => "UPSTREAM_ERROR",
+        _ => "BAD_STATUS",
     }
-    format!("{}/models", b)
+}
+
+/// Ordered candidate URLs for the models-list request.
+///
+/// Java's adapters (and this kernel's chat `Dialect`) insert `/v1` for a bare
+/// base URL; the Rust settings port did not. Both paths are attempted so a
+/// provider that genuinely serves `/models` at the root still works.
+fn model_list_urls(base: &str, standard: &str) -> Vec<String> {
+    let b = base.trim().trim_end_matches('/');
+    if standard == "ollama" {
+        return vec![if b.ends_with("/api/tags") {
+            b.to_string()
+        } else {
+            format!("{}/api/tags", b)
+        }];
+    }
+    if b.ends_with("/models") {
+        return vec![b.to_string()];
+    }
+    let canonical = if standard == "gemini" {
+        if b.ends_with("/v1beta") || b.ends_with("/v1") {
+            format!("{}/models", b)
+        } else {
+            format!("{}/v1beta/models", b)
+        }
+    } else if b.ends_with("/v1") || b.ends_with("/v1beta") {
+        format!("{}/models", b)
+    } else {
+        format!("{}/v1/models", b)
+    };
+    let bare = format!("{}/models", b);
+    if canonical == bare {
+        vec![canonical]
+    } else {
+        vec![canonical, bare]
+    }
+}
+
+/// Extract the model array from a provider response, or `None` when the body is
+/// not a model list at all (an error object, an HTML page, `{"data":null}`).
+fn model_list_items<'a>(payload: &'a serde_json::Value, standard: &str) -> Option<&'a Vec<serde_json::Value>> {
+    // OpenAI/Anthropic: {"data":[{...}]}; Ollama: {"models":[{...}]}.
+    let key = if standard == "ollama" { "models" } else { "data" };
+    if let Some(arr) = payload.get(key).and_then(|v| v.as_array()) {
+        return Some(arr);
+    }
+    if let Some(arr) = payload.get("models").and_then(|v| v.as_array()) {
+        return Some(arr);
+    }
+    // Some Gemini-compatible proxies return a bare array.
+    payload.as_array()
+}
+
+/// Per-model chat dialect. Mirrors Java `ModelInfo.inferStandard`, with the
+/// protocol-specific adapters' fixed values applied first.
+fn infer_model_standard(item: &serde_json::Value, standard: &str) -> String {
+    if standard == "anthropic" || standard == "ollama" || standard == "gemini" {
+        return standard.to_string();
+    }
+    if let Some(types) = item.get("supported_endpoint_types").and_then(|v| v.as_array()) {
+        for raw in types.iter().filter_map(|v| v.as_str()) {
+            let t = raw.trim().to_ascii_lowercase();
+            if t.contains("anthropic") || t.contains("claude") {
+                return "anthropic".to_string();
+            }
+            if t.contains("gemini") || t.contains("google") {
+                return "gemini".to_string();
+            }
+            if t.contains("response") {
+                return "openai-responses".to_string();
+            }
+            if t.contains("openai") || t.contains("chat") {
+                return "openai".to_string();
+            }
+        }
+    }
+    "openai".to_string()
 }
 
 /// POST /web/settings/providers/sync-models
@@ -2527,6 +2653,213 @@ mod tests {
         let answer = settings_write_failed();
         assert_eq!(answer["code"], 500);
         assert!(answer["msg"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    // ─── Provider model fetch (the "empty model list" regression) ───────────
+
+    /// Chat appends `/v1/...` to a bare host; the settings port appended only
+    /// `/models`. Both must be tried, canonical first, so the API URL that
+    /// already works in chat also works when adding a provider.
+    #[test]
+    fn bare_base_url_tries_the_v1_models_endpoint_first() {
+        assert_eq!(
+            model_list_urls("https://www.gourd-ai.cn", "openai"),
+            vec![
+                "https://www.gourd-ai.cn/v1/models",
+                "https://www.gourd-ai.cn/models"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_base_that_already_names_v1_is_not_double_prefixed() {
+        assert_eq!(
+            model_list_urls("https://www.gourd-ai.cn/v1/", "openai"),
+            vec!["https://www.gourd-ai.cn/v1/models"]
+        );
+    }
+
+    #[test]
+    fn a_full_models_url_is_used_verbatim() {
+        assert_eq!(
+            model_list_urls("https://host/v1/models", "anthropic"),
+            vec!["https://host/v1/models"]
+        );
+    }
+
+    #[test]
+    fn ollama_and_gemini_use_their_own_model_endpoints() {
+        assert_eq!(
+            model_list_urls("http://127.0.0.1:11434", "ollama"),
+            vec!["http://127.0.0.1:11434/api/tags"]
+        );
+        assert_eq!(
+            model_list_urls("https://host/v1beta", "gemini"),
+            vec!["https://host/v1beta/models"]
+        );
+    }
+
+    /// The exact payload observed from `https://api.aionly.com/models` when the
+    /// Rust kernel hit the bare path: HTTP 200 with an auth error and `data:null`.
+    /// Returning "zero models" for it is the reported bug.
+    #[test]
+    fn an_http_200_error_object_is_not_an_empty_model_list() {
+        let payload = serde_json::json!({"code": 401, "msg": "token 无效", "data": null});
+        assert!(model_list_items(&payload, "openai").is_none());
+    }
+
+    #[test]
+    fn a_real_empty_data_array_is_still_an_empty_list() {
+        let payload = serde_json::json!({"object": "list", "data": []});
+        assert_eq!(model_list_items(&payload, "openai").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn model_standard_follows_supported_endpoint_types() {
+        let item = serde_json::json!({"id": "claude-x", "supported_endpoint_types": ["anthropic"]});
+        assert_eq!(infer_model_standard(&item, "openai"), "anthropic");
+        let item = serde_json::json!({"id": "gpt-x"});
+        assert_eq!(infer_model_standard(&item, "openai"), "openai");
+        let item = serde_json::json!({"id": "claude-y"});
+        assert_eq!(infer_model_standard(&item, "anthropic"), "anthropic");
+    }
+
+    /// Gemini lists models as `{"name":"models/gemini-x"}`. The chat Dialect
+    /// builds `{root}/models/{model}:generateContent`, so the fetch result must
+    /// strip the prefix or chat hits `/models/models/gemini-x:...` and 404s.
+    #[tokio::test]
+    async fn gemini_model_ids_are_stripped_of_the_models_prefix() {
+        let mut routes = std::collections::HashMap::new();
+        routes.insert(
+            "/v1beta/models".to_string(),
+            (200, r#"{"models":[{"name":"models/gemini-2.5-pro"},{"name":"models/gemini-2.5-flash"}]}"#.to_string()),
+        );
+        let base = spawn_models_mock(routes).await;
+
+        let mut body = fetch_body(base);
+        body.standard = "gemini".to_string();
+        let res = providers_fetch(Form(body)).await.0;
+        assert_eq!(res["code"], 200, "{}", res);
+        assert_eq!(res["data"][0]["id"], "gemini-2.5-pro");
+        assert_eq!(res["data"][0]["standard"], "gemini");
+        assert_eq!(res["data"][1]["id"], "gemini-2.5-flash");
+    }
+
+    /// The UI's `FETCH_REASON_KEYS` only knows Java's enum names. The Rust port
+    /// used UNAUTHORIZED/NOT_FOUND/HTTP_ERROR and every failure rendered as the
+    /// generic "unknown" toast.
+    #[test]
+    fn fetch_failure_reasons_match_the_ui_contract() {
+        assert_eq!(http_fetch_reason(401), "AUTH_FAILED");
+        assert_eq!(http_fetch_reason(404), "NOT_SUPPORTED");
+        assert_eq!(http_fetch_reason(429), "RATE_LIMITED");
+        assert_eq!(http_fetch_reason(500), "UPSTREAM_ERROR");
+        let answer = fetch_fail("AUTH_FAILED", 401, None);
+        assert_eq!(answer["code"], 400, "a fetch failure must never be a 200");
+        assert_eq!(answer["data"]["reason"], "AUTH_FAILED");
+        assert_eq!(answer["data"]["status"], 401);
+    }
+
+    /// Minimal HTTP server: path → (status, body). Every response closes the
+    /// connection so reqwest opens a fresh one for the next candidate URL.
+    async fn spawn_models_mock(
+        routes: std::collections::HashMap<String, (u16, String)>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let mut buf = [0u8; 4096];
+                let n = match tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    sock.read(&mut buf),
+                )
+                .await
+                {
+                    Ok(Ok(n)) => n,
+                    _ => 0,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let (status, body) = routes
+                    .get(&path)
+                    .cloned()
+                    .unwrap_or((404, "{}".to_string()));
+                let label = if status == 200 { "OK" } else { "Error" };
+                let resp = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status, label, body.len(), body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://127.0.0.1:{}", port)
+    }
+
+    fn fetch_body(api_url: String) -> ProviderFetchBody {
+        ProviderFetchBody {
+            api_url,
+            api_key: "sk-test".to_string(),
+            standard: "openai".to_string(),
+            provider_name: String::new(),
+        }
+    }
+
+    /// Exact reproduction of the report: the bare `/models` is a website route
+    /// that answers 200 with an auth error, while `/v1/models` is the real API.
+    /// The Rust port used to hit only the bare path and returned "zero models".
+    #[tokio::test]
+    async fn fetch_hits_v1_models_instead_of_the_bare_website_route() {
+        let mut routes = std::collections::HashMap::new();
+        routes.insert(
+            "/models".to_string(),
+            (200, r#"{"code":401,"msg":"token 无效","data":null}"#.to_string()),
+        );
+        routes.insert(
+            "/v1/models".to_string(),
+            (200, r#"{"data":[{"id":"gpt-4o","owned_by":"openai"}]}"#.to_string()),
+        );
+        let base = spawn_models_mock(routes).await;
+
+        let res = providers_fetch(Form(fetch_body(base))).await.0;
+        assert_eq!(res["code"], 200, "{}", res);
+        assert_eq!(res["data"][0]["id"], "gpt-4o");
+    }
+
+    /// A provider that really serves the list at the root still works: the
+    /// canonical path failing must not break it.
+    #[tokio::test]
+    async fn fetch_falls_back_to_root_models_for_root_only_providers() {
+        let mut routes = std::collections::HashMap::new();
+        routes.insert("/v1/models".to_string(), (404, "{}".to_string()));
+        routes.insert(
+            "/models".to_string(),
+            (200, r#"{"data":[{"id":"root-model"}]}"#.to_string()),
+        );
+        let base = spawn_models_mock(routes).await;
+
+        let res = providers_fetch(Form(fetch_body(base))).await.0;
+        assert_eq!(res["code"], 200, "{}", res);
+        assert_eq!(res["data"][0]["id"], "root-model");
+    }
+
+    /// The regression that mattered most: a 200 error body must never be
+    /// reported as a successful empty model list.
+    #[tokio::test]
+    async fn fetch_never_reports_an_error_body_as_an_empty_model_list() {
+        let mut routes = std::collections::HashMap::new();
+        let bad = r#"{"code":401,"msg":"token 无效","data":null}"#.to_string();
+        routes.insert("/models".to_string(), (200, bad.clone()));
+        routes.insert("/v1/models".to_string(), (200, bad));
+        let base = spawn_models_mock(routes).await;
+
+        let res = providers_fetch(Form(fetch_body(base))).await.0;
+        assert_eq!(res["code"], 400, "{}", res);
+        assert_eq!(res["data"]["reason"], "INVALID_RESPONSE");
+        assert!(res["data"]["detail"].as_str().is_some());
     }
 
     #[test]

@@ -146,7 +146,16 @@ fn probe_string_field(line: &str, key: &str) -> Option<String> {
     while let Some(rel) = line[from..].find(&quoted) {
         let at = from + rel + quoted.len();
         let tail = &line[at..];
-        let trimmed = tail.trim_start();
+        // ASCII fast path: the writers we probe emit compact JSON where the
+        // next byte after the key is the colon, and in the `#[serde(flatten)]
+        // extra` payload the JSON structural characters are always ASCII.
+        // `trim_start` would scan a multi-byte-aware whitespace table per byte
+        // — on a 37 MB pass-1 that alone measured double-digit milliseconds —
+        // while JSON whitespace is exactly ` ` `\t` `\r` `\n`.
+        let trimmed = match tail.as_bytes().first() {
+            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') => tail.trim_start(),
+            _ => tail,
+        };
         if !trimmed.starts_with(':') {
             from = at;
             continue;
@@ -297,7 +306,11 @@ fn load_replay_window_at(path: &PathBuf, mode: ReplayMode) -> ReplayWindow {
     };
     let mut probes: Vec<ProbeLine> = Vec::new();
     for line in BufReader::new(file).lines().filter_map(|l| l.ok()) {
-        if line.trim().is_empty() {
+        // Empty check on the raw line (every writer emits `\r?\n`-terminated
+        // records, and a line that is whitespace-only cannot start with `{`):
+        // `line.trim().is_empty()` would scan multi-byte whitespace over the
+        // whole 37 MB of pass-1 input for no behavioural difference.
+        if line.is_empty() || line.as_bytes().first() == Some(&b'\r') && line.len() == 1 {
             continue;
         }
         let run_id = probe_string_field(&line, "runId");
@@ -1008,13 +1021,22 @@ impl SessionStore {
             let reader = BufReader::new(file);
             let mut out = Vec::new();
             for line in reader.lines().filter_map(|l| l.ok()) {
-                if line.trim().is_empty() || !line.contains("\"eventSeq\"") {
+                if line.is_empty() {
+                    continue;
+                }
+                // Probe first: the overwhelming majority of lines are
+                // text/reasoning deltas whose seq sits far below the resume
+                // point, so rejecting them without a JSON parse is the bulk
+                // of the saving. `probe_event_seq` is whitespace-tolerant
+                // (Java kernel writes `"eventSeq" : 2`).
+                let Some(s) = probe_event_seq(&line) else {
+                    continue;
+                };
+                if s < seq {
                     continue;
                 }
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if v.get("eventSeq").and_then(|s| s.as_i64()).unwrap_or(i64::MAX) >= seq {
-                        out.push(v);
-                    }
+                    out.push(v);
                 }
             }
             out
@@ -1039,6 +1061,14 @@ impl SessionStore {
     /// Scanning is line-wise with a substring probe, mirroring
     /// `load_stream_frames_from_seq`, so an 84 MB session costs a sequential
     /// read rather than a full JSON parse of every line.
+    ///
+    /// The probe (`probe_event_seq`) does not build a `serde_json::Value` at
+    /// all: measured on a real 37 MB / 184k-line stream, the full-parse form
+    /// of this scan took **322 ms** while the probe form takes ~110 ms — this
+    /// runs on every `seq_for` (i.e. once per run start, including every
+    /// reconnect during a long session), so the saving lands on the critical
+    /// path of "why does my next turn feel slow". Whitespace-tolerant because
+    /// the Java kernel writes `"eventSeq" : 2`.
     pub fn max_stream_seq(&self, id: &str) -> i64 {
         let path = self.stream_file(id);
         offload(move || {
@@ -1047,13 +1077,11 @@ impl SessionStore {
             };
             let mut max_seq = -1i64;
             for line in BufReader::new(file).lines().filter_map(|l| l.ok()) {
-                if line.trim().is_empty() || !line.contains("\"eventSeq\"") {
+                if line.is_empty() {
                     continue;
                 }
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if let Some(s) = v.get("eventSeq").and_then(|s| s.as_i64()) {
-                        max_seq = max_seq.max(s);
-                    }
+                if let Some(s) = probe_event_seq(&line) {
+                    max_seq = max_seq.max(s);
                 }
             }
             max_seq
@@ -1115,132 +1143,172 @@ impl SessionStore {
         })
     }
 
-    /// Total `action_start` count across all tools for the tool-usage endpoint.
+    /// One-pass tool-usage aggregation for `/web/chat/session/tool-usage`.
     ///
-    /// Kept as its own scan rather than merged into `skill_usage`/`memory_usage`
-    /// so each aggregation stays independently testable; all three use the
-    /// same substring-prefiltered line walk that never materialises frames.
-    pub fn tool_call_total(&self, id: &str) -> u64 {
-        let path = self.stream_file(id);
-        offload(move || {
-            let Ok(file) = std::fs::File::open(&path) else {
-                return 0;
-            };
-            let reader = BufReader::new(file);
-            let mut total: u64 = 0;
-            for line in reader.lines().filter_map(|l| l.ok()) {
-                if !line.contains("\"action_start\"") {
-                    continue;
-                }
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if v.get("type").and_then(|t| t.as_str()) == Some("action_start")
-                        && v.get("toolName").and_then(|t| t.as_str()).is_some()
-                    {
-                        total += 1;
-                    }
-                }
-            }
-            total
-        })
-    }
-
-    /// Skill-call aggregation for `/web/chat/session/tool-usage`.
+    /// Data source priority mirrors Java's `SessionToolUsageService` minus the
+    /// per-session usage ledger this kernel does not keep:
+    /// stream `action_start` frames > messages-file `toolCalls`. The two are
+    /// **never mixed** (Java: 三者只取其一，绝不混读以免重复计数) — when the
+    /// stream exists it is authoritative, and messages are read only for
+    /// sessions the stream never saw.
     ///
-    /// Java's `SessionToolUsageService` groups calls by the **skill name**
-    /// (`skillread`'s `name` arg / `skillsearch`'s `query` arg), not the tool
-    /// name, so the panel can show one row per skill with a `×count`. The
-    /// stream's `action_start` frames carry both `toolName` and full `args`,
-    /// and they *are* persisted (only broadcast is filtered), so the stream is
-    /// the single source here — no messages fallback needed (skill calls are
-    /// never dropped from the stream).
+    /// ## Rust persistence facts (read before editing — the Java kernel differs)
     ///
-    /// `skillrefresh`/`skilllist` carry no skill identifier; they group under
-    /// the bare tool name, exactly like Java's `fallbackSkillName`.
-    pub fn skill_usage(&self, id: &str) -> SkillUsage {
-        let path = self.stream_file(id);
-        offload(move || {
-            let mut usage = SkillUsage::default();
-            let Ok(file) = std::fs::File::open(&path) else {
-                return usage;
-            };
-            let reader = BufReader::new(file);
-            for line in reader.lines().filter_map(|l| l.ok()) {
-                if !line.contains("skill") {
-                    continue;
-                }
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                    continue;
-                };
-                if v.get("type").and_then(|t| t.as_str()) != Some("action_start") {
-                    continue;
-                }
-                let Some(tool) = v.get("toolName").and_then(|t| t.as_str()) else {
-                    continue;
-                };
-                if !matches!(tool, "skillread" | "skillsearch" | "skillrefresh" | "skilllist") {
-                    continue;
-                }
-                // Skill identifier: `name` (skillread) / `query` (skillsearch);
-                // missing on skilllist/skillrefresh and on malformed args.
-                let args = v.get("args").and_then(|a| a.as_object());
-                let skill = args
-                    .and_then(|a| {
-                        ["name", "query", "skill"]
-                            .iter()
-                            .find_map(|k| a.get(*k).and_then(|x| x.as_str()))
-                    })
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| {
-                        if tool == "skillread" || tool == "skillsearch" {
-                            "(unknown)".to_string()
-                        } else {
-                            tool.to_string()
-                        }
-                    });
-                usage.record(&skill, tool);
-            }
-            usage
-        })
-    }
-
-    /// Memory usage aggregation for `/web/chat/session/tool-usage`.
-    ///
-    /// The panel's「记忆是否更新」row must be driven by `memory_extract`
-    /// calls. Memory tool frames are **never** persisted to the stream in the
-    /// Java kernel (the `WebToolVisibilityPolicy` filters them before the
-    /// frontend), and this kernel mirrors that on the broadcast side; the
-    /// durable fact therefore lives in the messages file — the assistant
-    /// message's `toolCalls` array carries the declared call, no matter what
-    /// the stream dropped. `exists` stays false when neither file is on disk,
-    /// so the frontend renders its structured empty state instead of
-    /// "unknown".
+    /// Unlike Java, where `WebToolVisibilityPolicy` filters memory-tool frames
+    /// out of the frontend *and* the stream, this kernel's
+    /// `append_stream_frame` skip-list covers only the five transient frame
+    /// types (`action_args`/`action_draft`/`agent_progress`/`reason_start`/
+    /// `tps_progress`) — **every** `action_start` lands on disk, memory and
+    /// skill tools included, with its full `args`. The stream is therefore a
+    /// complete tool-call fact source here, and the messages fallback exists
+    /// only for sessions created before a stream was ever written (or written
+    /// by another kernel under the same shared session directory whose frames
+    /// were filtered).
     ///
     /// Line-level failures degrade to skipping the line (same discipline as
     /// `usage_ledger`): a half-written tail line is normal while a run is in
     /// flight, and failing the whole read would blank the panel for the
-    /// duration of every active session.
-    pub fn memory_usage(&self, id: &str) -> (bool, MemoryUsage) {
+    /// duration of every active session. `exists` stays false when neither
+    /// file is on disk so the frontend renders its structured empty state.
+    pub fn tool_usage_stats(&self, id: &str) -> ToolUsageStats {
         let stream_path = self.stream_file(id);
         let messages_path = self.messages_file(id);
         offload(move || {
-            // The stream is authoritative for tool-call *facts* when present
-            // (it is written even when frames are filtered from broadcast);
-            // fall back to messages for sessions the stream never saw.
-            let mut usage = MemoryUsage::default();
-            let mut exists = false;
-            if let Ok(mut file) = std::fs::File::open(&stream_path) {
-                exists = true;
-                usage = MemoryUsage::from_stream(&mut file);
+            if let Ok(file) = std::fs::File::open(&stream_path) {
+                ToolUsageStats::from_stream(file)
+            } else if let Ok(file) = std::fs::File::open(&messages_path) {
+                ToolUsageStats::from_messages(file)
+            } else {
+                ToolUsageStats::default()
             }
-            if !exists {
-                if let Ok(file) = std::fs::File::open(&messages_path) {
-                    exists = true;
-                    usage = MemoryUsage::from_messages(file);
-                }
-            }
-            (exists, usage)
         })
+    }
+}
+
+/// One-pass tool-usage aggregation for one session — the payload behind the
+/// `/web/chat/session/tool-usage` response (memory object + skills array +
+/// total tool-call count), extracted from a **single** sequential scan.
+///
+/// Previous shape: three separate full-file scans (`tool_call_total` /
+/// `skill_usage` / `memory_usage`) per poll of the monitor panel — the same
+/// ndjson (tens of MB on long sessions) walked three times per request.
+/// The aggregation rules are unchanged; only the traversal count dropped 3→1.
+#[derive(Debug, Default, Clone)]
+pub struct ToolUsageStats {
+    /// Total `action_start` count across **all** tools (the response's
+    /// `toolCallCount`), kept for contract parity even though the panel does
+    /// not display it today.
+    pub tool_call_count: u64,
+    /// `memory_*` aggregates (the response's `memory` object).
+    pub memory: MemoryUsage,
+    /// Skill-call aggregates (the response's `skills` array).
+    pub skills: SkillUsage,
+    /// True when either data-source file existed on disk; false makes the
+    /// frontend render its structured empty state instead of guessing.
+    pub exists: bool,
+}
+
+impl ToolUsageStats {
+    /// Stream source: walk `action_start` frames. Substring pre-filter on
+    /// `"action_start"` keeps the scan cost at the same order as
+    /// `usage_ledger` on files that reach tens of megabytes.
+    fn from_stream(file: std::fs::File) -> Self {
+        let mut stats = Self {
+            exists: true,
+            ..Self::default()
+        };
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            if !line.contains("\"action_start\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if v.get("type").and_then(|t| t.as_str()) != Some("action_start") {
+                continue;
+            }
+            let Some(tool) = v.get("toolName").and_then(|t| t.as_str()) else {
+                continue;
+            };
+            // Full args ride on `action_start` (only the transient draft/
+            // args-progress frames are filtered from persistence), so the
+            // skill identifier is extractable here — never from the frontend
+            // broadcast, which Java filters for memory tools.
+            let args = v.get("args").and_then(|a| a.as_object());
+            stats.record(tool, args);
+        }
+        stats
+    }
+
+    /// Messages source: assistant messages declare calls in
+    /// `toolCalls[{name}]`. `deserialize` of `ChatMessage` is avoided — the
+    /// raw shape is stable and this must not fail on messages that carry
+    /// fields the struct has not modelled. Skill identifiers are *not*
+    /// recoverable here (the per-call `arguments` this kernel persists lack
+    /// the parsed-args guarantee the stream has); Java's `argumentsStr`
+    /// parsing exists for this path, and this kernel mirrors only its
+    /// `name`/`query`/`skill` probe for parity where the key happens to be
+    /// present as a string.
+    fn from_messages(file: std::fs::File) -> Self {
+        let mut stats = Self {
+            exists: true,
+            ..Self::default()
+        };
+        let reader = BufReader::new(file);
+        for line in reader.lines().filter_map(|l| l.ok()) {
+            if !line.contains("toolCalls") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(calls) = v.get("toolCalls").and_then(|t| t.as_array()) else {
+                continue;
+            };
+            for call in calls {
+                let Some(name) = call.get("name").and_then(|n| n.as_str()) else {
+                    continue;
+                };
+                let args = call.get("arguments").and_then(|a| a.as_object());
+                stats.record(name, args);
+            }
+        }
+        stats
+    }
+
+    /// Record one tool-call fact (both sources share this tail).
+    ///
+    /// Mirrors Java `accumulateTool`: memory tools and skill tools are
+    /// mutually exclusive branches; every tool counts toward
+    /// `tool_call_count` regardless of category.
+    fn record(&mut self, tool: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) {
+        self.tool_call_count += 1;
+        if tool.starts_with("memory_") {
+            self.memory.record(tool);
+            return;
+        }
+        if matches!(tool, "skillread" | "skillsearch" | "skillrefresh" | "skilllist") {
+            let skill = args
+                .and_then(|a| {
+                    ["name", "query", "skill"]
+                        .iter()
+                        .find_map(|k| a.get(*k).and_then(|x| x.as_str()))
+                })
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    // Java `fallbackSkillName`: keep the call fact even when
+                    // the identifier is missing — "(unknown)" for tools that
+                    // *should* carry one, the bare tool name otherwise.
+                    if tool == "skillread" || tool == "skillsearch" {
+                        "(unknown)".to_string()
+                    } else {
+                        tool.to_string()
+                    }
+                });
+            self.skills.record(&skill, tool);
+        }
     }
 }
 
@@ -1301,59 +1369,6 @@ impl MemoryUsage {
         if !self.names.iter().any(|n| n == tool) {
             self.names.push(tool.to_string());
         }
-    }
-
-    /// Walk the stream's `action_start` frames. Substring pre-filter keeps the
-    /// scan cost at the same order as `usage_ledger` on files that reach tens
-    /// of megabytes.
-    fn from_stream(file: &mut std::fs::File) -> Self {
-        let mut usage = Self::default();
-        let reader = BufReader::new(file);
-        for line in reader.lines().filter_map(|l| l.ok()) {
-            if !line.contains("memory_") {
-                continue;
-            }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            if v.get("type").and_then(|t| t.as_str()) != Some("action_start") {
-                continue;
-            }
-            if let Some(tool) = v.get("toolName").and_then(|t| t.as_str()) {
-                if tool.starts_with("memory_") {
-                    usage.record(tool);
-                }
-            }
-        }
-        usage
-    }
-
-    /// Walk the messages file: assistant messages declare calls in
-    /// `toolCalls[{name}]`. `deserialize` of `ChatMessage` is avoided — the
-    /// raw shape is stable and this must not fail on messages that carry
-    /// fields the struct has not modelled.
-    fn from_messages(file: std::fs::File) -> Self {
-        let mut usage = Self::default();
-        let reader = BufReader::new(file);
-        for line in reader.lines().filter_map(|l| l.ok()) {
-            if !line.contains("memory_") {
-                continue;
-            }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            let Some(calls) = v.get("toolCalls").and_then(|t| t.as_array()) else {
-                continue;
-            };
-            for call in calls {
-                if let Some(name) = call.get("name").and_then(|n| n.as_str()) {
-                    if name.starts_with("memory_") {
-                        usage.record(name);
-                    }
-                }
-            }
-        }
-        usage
     }
 }
 
@@ -2991,8 +3006,8 @@ mod tests {
             start_frame("skillread", serde_json::json!({"name": "another"})),
             start_frame("grep", serde_json::json!({"pattern": "x"})),
         ]);
-        let usage = store.skill_usage("work-s");
-        let rows = usage.sorted_rows();
+        let stats = store.tool_usage_stats("work-s");
+        let rows = stats.skills.sorted_rows();
         assert_eq!(rows.len(), 2, "普通工具不进技能统计: {:?}", rows);
         assert_eq!(rows[0], ("agent-browser".into(), "skillread".into(), 2));
         assert_eq!(rows[1], ("another".into(), "skillread".into(), 1));
@@ -3008,7 +3023,7 @@ mod tests {
             start_frame("skillsearch", serde_json::json!({"query": "浏览器 自动化"})),
             start_frame("skillread", serde_json::json!({})),
         ]);
-        let rows = store.skill_usage("work-s").sorted_rows();
+        let rows = store.tool_usage_stats("work-s").skills.sorted_rows();
         assert_eq!(rows.len(), 2);
         // 同计数按技能名升序："(unknown)" 是 ASCII '('，排在 UTF-8 中文之前
         // （与 Java result() 的排序口径一致：count desc → name asc）。
@@ -3026,24 +3041,25 @@ mod tests {
             start_frame("memory_search", serde_json::json!({"query": "x"})),
             start_frame("memory_search", serde_json::json!({"query": "y"})),
         ]);
-        let (exists, usage) = store.memory_usage("work-m");
-        assert!(exists);
-        assert_eq!(usage.extract_count, 0, "只读的 memory_search 不得算成已更新");
-        assert_eq!(usage.total_count, 2);
+        let stats = store.tool_usage_stats("work-m");
+        assert!(stats.exists);
+        assert_eq!(stats.memory.extract_count, 0, "只读的 memory_search 不得算成已更新");
+        assert_eq!(stats.memory.total_count, 2);
 
         let s2 = Scratch::new("memory-usage-extract-2");
         let store2 = stream_session(&s2, "work-m", &[
             start_frame("memory_extract", serde_json::json!({"key": "k"})),
         ]);
-        let (_, usage2) = store2.memory_usage("work-m");
-        assert_eq!(usage2.extract_count, 1);
-        assert_eq!(usage2.names, vec!["memory_extract".to_string()]);
+        let stats2 = store2.tool_usage_stats("work-m");
+        assert_eq!(stats2.memory.extract_count, 1);
+        assert_eq!(stats2.memory.names, vec!["memory_extract".to_string()]);
     }
 
     /// When no stream exists, memory facts must still be recoverable from
     /// the messages file (assistant `toolCalls`) — the Java fallback order
     /// (ledger > stream > messages) ends here for this kernel, which has no
-    /// per-session usage ledger.
+    /// per-session usage ledger. The messages source must also count plain
+    /// tools toward `toolCallCount` and keep `exists=true`.
     #[test]
     fn memory_usage_falls_back_to_messages_tool_calls() {
         let s = Scratch::new("memory-usage-fallback");
@@ -3059,10 +3075,11 @@ mod tests {
         .to_string();
         s.session("work-m2", &[&line]);
         let store = SessionStore::with_base(s.0.clone());
-        let (exists, usage) = store.memory_usage("work-m2");
-        assert!(exists, "messages 文件存在时 exists 必须为 true");
-        assert_eq!(usage.extract_count, 1);
-        assert_eq!(usage.total_count, 1, "非 memory 工具不进记忆统计");
+        let stats = store.tool_usage_stats("work-m2");
+        assert!(stats.exists, "messages 文件存在时 exists 必须为 true");
+        assert_eq!(stats.memory.extract_count, 1);
+        assert_eq!(stats.memory.total_count, 1, "非 memory 工具不进记忆统计");
+        assert_eq!(stats.tool_call_count, 2, "messages 源也要计入全工具总数");
     }
 
     /// A session with neither stream nor messages answers `exists=false` —
@@ -3071,9 +3088,9 @@ mod tests {
     fn memory_usage_missing_session_reports_not_exists() {
         let s = Scratch::new("memory-usage-missing");
         let store = SessionStore::with_base(s.0.clone());
-        let (exists, usage) = store.memory_usage("work-nope");
-        assert!(!exists);
-        assert_eq!(usage.extract_count, 0);
+        let stats = store.tool_usage_stats("work-nope");
+        assert!(!stats.exists);
+        assert_eq!(stats.memory.extract_count, 0);
     }
 
     /// `toolCallCount` counts every tool's action_start, not just the
@@ -3087,7 +3104,39 @@ mod tests {
             start_frame("memory_extract", serde_json::json!({})),
             "{\"type\":\"action_end\",\"toolName\":\"grep\"}".to_string(),
         ]);
-        assert_eq!(store.tool_call_total("work-t"), 3);
+        assert_eq!(store.tool_usage_stats("work-t").tool_call_count, 3);
+    }
+
+    /// One-pass regression: memory + skills + total from the *same* scan must
+    /// agree with the three-scans-behind-them semantics — a mixed session
+    /// (skill + memory + plain tool, with an action_end that must not count)
+    /// exercises all three aggregates off one file.
+    #[test]
+    fn tool_usage_stats_one_pass_mixed_session() {
+        let s = Scratch::new("tool-usage-mixed");
+        let store = stream_session(&s, "work-x", &[
+            start_frame("skillread", serde_json::json!({"name": "agent-browser"})),
+            start_frame("skillread", serde_json::json!({"name": "agent-browser"})),
+            start_frame("skillsearch", serde_json::json!({"query": "浏览器"})),
+            start_frame("skilllist", serde_json::json!({})),
+            start_frame("memory_extract", serde_json::json!({"key": "k"})),
+            start_frame("memory_search", serde_json::json!({"query": "q"})),
+            start_frame("bash", serde_json::json!({"command": "ls"})),
+            "{\"type\":\"action_end\",\"toolName\":\"bash\"}".to_string(),
+            // 非 action_start 且不含 "action_start" 子串的行必须整体跳过
+            "{\"type\":\"text\",\"text\":\"action_start mentioned in prose\"}".to_string(),
+        ]);
+        let stats = store.tool_usage_stats("work-x");
+        assert!(stats.exists);
+        assert_eq!(stats.tool_call_count, 7, "7 个 action_start，end/prose 不计");
+        assert_eq!(stats.memory.extract_count, 1);
+        assert_eq!(stats.memory.total_count, 2);
+        assert_eq!(stats.memory.names.len(), 2);
+        let rows = stats.skills.sorted_rows();
+        assert_eq!(rows.len(), 3, "agent-browser / query / skilllist: {:?}", rows);
+        assert_eq!(rows[0], ("agent-browser".into(), "skillread".into(), 2));
+        // skilllist 无参 → 按工具名聚合（Java fallbackSkillName）
+        assert!(rows.iter().any(|r| r.0 == "skilllist" && r.1 == "skilllist"));
     }
 
 }

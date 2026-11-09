@@ -343,7 +343,8 @@
       "update_install": "立即安装",
       "update_tooltip": "发现新版本 {0}，点击即可更新",
       "update_tooltip_downloading": "新版本 {0} 正在下载",
-      "update_tooltip_downloaded": "新版本 {0} 已下载完成，点击安装并重启"
+      "update_tooltip_downloaded": "新版本 {0} 已下载完成，点击安装并重启",
+      "drag_to_sort": "拖动排序"
     }
   },
   "settings": {
@@ -949,7 +950,7 @@
     "batch_thinking_count": "思考 {count} 次",
     "turn_stopped": "已停止",
     "turn_suspended": "已挂起",
-    "turn_process_texts":  "段过程",
+    "turn_process_texts": "段过程",
     "turn_tools_one": "次工具调用",
     "turn_thinking_one": "段思考",
     "turn_agents_one": "次子代理",
@@ -1389,5 +1390,21 @@
     "empty_sources": "暂无来源数据 :)",
     "no_skills": "本会话未调用技能",
     "load_failed": "监控数据加载失败"
+  },
+  "account": {
+    "close": "关闭",
+    "entry": "登录 / 注册",
+    "sign_in": "登录",
+    "sign_up": "注册",
+    "sign_up_submit": "注册并登录",
+    "sign_out": "退出登录",
+    "username": "用户名",
+    "email": "邮箱（可选）",
+    "password": "密码",
+    "working": "请稍候…",
+    "signed_in": "已登录",
+    "required": "请填写用户名和密码",
+    "password_policy": "密码长度需为 8–128 个字符",
+    "failed": "操作失败"
   }
 }

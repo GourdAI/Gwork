@@ -674,11 +674,53 @@ pub(crate) fn store_for(state: &AppState, session_id: &str) -> SessionStore {
 /// Pull the raw `X-Session-Cwd` header off a request. No decoding here:
 /// `bind_session_cwd` owns it (it also owns the "absent → existing binding or
 /// global area" rule), so every caller must hand it the untouched value.
-fn cwd_header_of(headers: &axum::http::HeaderMap) -> Option<String> {
+pub(crate) fn cwd_header_of(headers: &axum::http::HeaderMap) -> Option<String> {
     headers
         .get("x-session-cwd")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
+}
+
+/// Read-only routing for GET endpoints: resolve the store the same way
+/// `bind_session_cwd` would, **without** mutating the session→root binding.
+///
+/// WHY a read-only twin: `bind_session_cwd` re-binds on every call. On a GET
+/// that is a query with a write side effect — a monitor-panel poll carrying a
+/// stale/wrong `root` would silently overwrite the correct binding that the
+/// run-start path established, and the *next* write (message persist) would
+/// land in the wrong tree. GETs must route by what is already true; only the
+/// endpoints that own the session lifecycle may change the ownership.
+///
+/// Resolution order (header path mirrors the decode+gate of the binding
+/// twin, minus the `bind` call): valid header → that root's store; invalid
+/// or absent → existing binding → global area.
+pub(crate) fn route_session_cwd(state: &AppState, session_id: &str, header: Option<&str>) -> SessionStore {
+    let Some(raw) = header else {
+        return store_for(state, session_id);
+    };
+    let decoded = percent_decode(raw);
+    route_decoded_root(state, session_id, &decoded)
+}
+
+/// Read-only routing from an **already-decoded** root (e.g. a query param
+/// that axum's `Query` extractor has percent-decoded once). Never call this
+/// with a still-encoded value: that would double-decode a path containing a
+/// literal `%` and route to a wrong (usually nonexistent) directory.
+pub(crate) fn route_session_cwd_decoded(state: &AppState, session_id: &str, decoded: &str) -> SessionStore {
+    route_decoded_root(state, session_id, decoded)
+}
+
+/// Shared read-only tail of the routing twins: validate + existence-gate the
+/// decoded root, then return its store **without** touching the binding.
+fn route_decoded_root(state: &AppState, session_id: &str, decoded: &str) -> SessionStore {
+    if decoded.is_empty() || decoded.contains("..") {
+        return store_for(state, session_id);
+    }
+    if !std::path::Path::new(decoded).is_dir() {
+        return store_for(state, session_id);
+    }
+    let normalized = std::path::Path::new(decoded).to_string_lossy().to_string();
+    SessionStore::with_base(crate::session::sessions_root_for(&normalized))
 }
 
 pub(crate) fn bind_session_cwd(state: &AppState, session_id: &str, header: Option<&str>) -> SessionStore {

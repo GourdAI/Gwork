@@ -4373,6 +4373,8 @@ pre:hover .code-copy-btn { opacity: 1; }
 .turn-batch-header:not(.turn-batch-open) .turn-batch-chevron { transform: rotate(-90deg); }
 /* 成员折叠：JS 管理类的单一窄规则；:empty 的正文壳本就不占位，无需特判 */
 .msg-bubble > .turn-batch-collapsed { display: none !important; }
+/* 【方案A · 卡内批次】智能体卡体内成员折叠同口径（2026-11 用户拍板卡内与外部同构） */
+.agent-card-body > .turn-batch-collapsed { display: none !important; }
 /* 【2026-11 用户拍板：展开态保留运行态内部批次折叠】结束态整轮折叠后，点开摘要
     看到的仍是运行态那套「执行工具 N 次」多折叠组（组头可点、成员默认收起），
     不得被 ① 的 `.turn-compact-open > [data-turn-process] { display:block !important; }`
@@ -4648,3 +4650,80 @@ pre:hover .code-copy-btn { opacity: 1; }
     background: transparent !important;
     box-shadow: none !important;
 }
+
+/* ===== 账号入口 / 登录注册浮层（app-account.js）=====
+   与 .remote-wizard-* 同范式：body 级 fixed 浮层，z-index 高于主界面但
+   低于设置浮层(10000)。入口放在 sidebar-header-top，不动 sidebar-footer
+   的 space-between 布局（sidebar-update-badge 契约锁定首/末子项位置）。 */
+.account-entry-btn { margin-left: auto; max-width: 46%; background: transparent; border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-secondary); cursor: pointer; font-size: 12px; padding: 4px 8px; display: flex; align-items: center; }
+.account-entry-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
+.account-entry-btn.is-signed-in { color: var(--text-primary); border-color: transparent; }
+.account-entry-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-overlay { display: none; position: fixed; inset: 0; z-index: 2100; background: var(--overlay); align-items: center; justify-content: center; }
+.account-panel { position: relative; width: min(380px, 92vw); background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; box-shadow: var(--shadow-lg); padding: 20px; }
+.account-close { position: absolute; top: 8px; right: 10px; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 20px; line-height: 1; }
+.account-close:hover { color: var(--text-primary); }
+.account-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+.account-tab { flex: 1; padding: 8px; border: 1px solid var(--border-color); border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 13px; }
+.account-tab.active { color: var(--text-primary); background: var(--bg-hover); border-color: var(--border-color); font-weight: 600; }
+.account-field { margin-bottom: 12px; }
+.account-label { display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
+.account-input { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-input-box); color: var(--text-primary); font-size: 13px; }
+.account-input:focus { outline: none; border-color: var(--accent-color, #4a7cf7); }
+.account-hint { min-height: 18px; font-size: 12px; margin: 8px 0; color: var(--text-secondary); }
+.account-hint-error { color: #e5534b; }
+.account-submit, .account-logout { width: 100%; padding: 9px; border: none; border-radius: 6px; background: var(--accent-color, #4a7cf7); color: #fff; cursor: pointer; font-size: 13px; }
+.account-submit:disabled { opacity: .6; cursor: default; }
+.account-logout { background: transparent; color: var(--text-secondary); border: 1px solid var(--border-color); }
+.account-who { font-size: 14px; color: var(--text-primary); margin: 8px 0 16px; word-break: break-all; }
+
+/* ===== 侧栏拖动排序（app-sidebar-order.js）=====
+   纪律：落点指示线一律用行自身的 ::before / ::after 伪元素画，【绝不往 DOM 插入
+   指示线 div 兄弟节点】——.proj-node.expanded + .proj-sessions 是相邻兄弟选择器，
+   插任何兄弟都会让展开态静默失效；.ws-group-head ~ .ws-group-body 同理（历史教训：
+   99ca548 插 .ws-group-acts 已让「收缩不起来」踩过一次）。三类行 .sidebar-item /
+   .proj-node / .ws-group 本来就是 position:relative，伪元素有天然定位锚点。
+
+   手柄与 .item-actions / .proj-actions / .ws-group-acts 的显隐联动：
+   - 会话行 / 项目行的操作组默认 opacity:0 + pointer-events:none，只有 hover 或
+     focus-within 才显示。手柄跟着一起隐藏即可（拖拽必然先 hover 到行）。
+     刻意【不】在拖拽态强行显示整组操作：那会让拖影里多出删除/重命名按钮。
+   - 组头的 acts 默认 display:none，由 .ws-group-head:hover ~ .ws-group-acts 显示；
+     手柄作为 .ws-group-act 的同款规格复用已有规则，无需另写显隐。
+   - dragging 态降低整行不透明度（拖影是 dragstart 前快照，不受此影响），
+     并给所有行统一 cursor 提示。 */
+.sidebar-drag-handle {
+    display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border: none; border-radius: 6px;
+    color: var(--text-tertiary); cursor: grab;
+    /* 阻止浏览器把手柄内的 SVG 当成可选中文本/图片原生拖拽，避免抢 HTML5 dragstart */
+    user-select: none; -webkit-user-drag: none;
+    transition: background 0.15s, color 0.15s;
+}
+.sidebar-drag-handle svg { pointer-events: none; }
+.sidebar-drag-handle:hover { background: rgba(127,127,127,0.15); color: var(--text-primary); }
+.sidebar-drag-handle:focus-visible { outline: 1px solid var(--text-tertiary); outline-offset: 1px; }
+.sidebar-drag-handle:active { cursor: grabbing; }
+/* 组头 acts 里的手柄：与 .ws-group-act 同为 20x20、透明底，避免 22px 把组头撑高 */
+.ws-group-acts .sidebar-drag-handle { width: 20px; height: 20px; border-radius: 5px; padding: 0; }
+.ws-group-acts .sidebar-drag-handle:hover { background: var(--bg-card); }
+
+/* 【刻意不写 [data-drag-type] 的 cursor 规则】行自身已有 cursor:pointer
+   （.sidebar-item / .proj-node）或组头塌陷态，末尾新增同特异性规则会把「可点击手型」
+   覆盖成 default，破坏「不拖时默认展示逐字不变」的纪律。拖拽反馈只由手柄的
+   grab/grabbing 与下面的 .sidebar-dragging 承担。 */
+.sidebar-dragging { opacity: 0.4; }
+
+/* 落点指示线：只挂在目标行自身，2px accent 横线 + 左端小圆点。
+   用伪元素而不是 box-shadow/border：不改变盒模型，不会让列表在拖拽中抖动。
+   z-index 抬到操作组之上，指示线不会被右侧渐变遮罩盖住。 */
+.sidebar-drop-before::before, .sidebar-drop-after::after {
+    content: '';
+    position: absolute; left: 2px; right: 2px; height: 2px; z-index: 3;
+    background: var(--accent); border-radius: 2px; pointer-events: none;
+}
+.sidebar-drop-before::before { top: -2px; }
+.sidebar-drop-after::after { bottom: -2px; }
+/* 分组是带 margin 的块，指示线放到组外沿，视觉上才像「插在两组之间」 */
+.ws-group.sidebar-drop-before::before { top: -3px; }
+.ws-group.sidebar-drop-after::after { bottom: -3px; }

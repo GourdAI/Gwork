@@ -73,6 +73,14 @@ const COMMANDS: &[&str] = &[
     "remote_mirror_sync",
     "remote_bind_scope",
     "remote_wsl_list",
+    // ─── 账号登录态（auth.rs）────────────────────────────────────────
+    // 与 src/lib.rs 的 generate_handler! 一一对应；漏登会被 ACL 静默拒绝。
+    "auth_status",
+    "auth_login",
+    "auth_register",
+    "auth_logout",
+    "auth_refresh",
+    "auth_self",
 ];
 
 fn main() {

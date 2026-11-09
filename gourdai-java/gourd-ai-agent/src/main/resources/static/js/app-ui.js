@@ -635,6 +635,57 @@ function gourdAutoLinkExtension() {
 /*AUTOLINK-REG-START*/
 if (typeof marked !== 'undefined') { marked.use(gourdAutoLinkExtension()); }
 /*AUTOLINK-REG-END*/
+/*EXTERNAL-LINK-GUARD-START*/
+/* ===== 外链一律交给外部浏览器，禁止在应用窗口内导航 =====
+ * 消息正文由 marked 渲染，链接形如 <a href="https://…">（不带 target）。点击这种锚点的
+ * 默认行为是「当前窗口导航」：浏览器 / WebGate 直连模式下没有桌面壳的 on_navigation
+ * 守卫，当前标签会被外部网页整个替换（"页面啥都被替换了"）。
+ *
+ * 这里在 document 的 **capture 阶段** 统一接管外部 http(s) 链接：先 preventDefault 掐断
+ * 应用内导航，再 window.open(url,'_blank') —— 桌面壳已注册的 on_new_window 会把它交给
+ * 系统浏览器（src-tauri/src/external_link.rs → shell().open()）；浏览器端则开新标签，
+ * 应用页面始终保留。external_link.rs 首行注释即把 window.open 列为该 handler 的触发源。
+ *
+ * 判定范围刻意收窄，与 Rust 侧 external_link::is_internal_url 对齐，避免误伤：
+ *   - 只认绝对 http(s)；#锚点 / mailto: / javascript: / file: / data: / blob: 一律放行；
+ *   - 同源（含相对链接）、localhost / 127.0.0.1 / ::1（内核与 dev server）、
+ *     tauri.localhost 及其子域（桌面壳自定义源）都算内部，放行；
+ *   - 只有 target=_blank 的既有外链（设置页那批）沿用原链路，不重复接管：桌面壳
+ *     由 on_new_window 交系统浏览器、浏览器端开新标签，都不会替换当前页；
+ *     target=_self/_top/_parent/命名窗口/无 target 一律接管（无父框架时它们等价于
+ *     当前窗口导航，且消息正文允许 raw HTML，可被注入这类链接）；
+ *   - 带 download 属性、非主键点击放行，保留原生语义。
+ * 修饰键（Ctrl/Shift/Alt/Meta）放行交浏览器原生语义（后台新标签/新窗口）：这些行为
+ * 本就不会替换当前页，且避免 window.open 被 popup blocker 拦成「点了没反应」。
+ * 用 capture 而非冒泡委托，是为了先于任何业务 click 处理器执行，杜绝被 stopPropagation 绕过。 */
+(function () {
+    function isExternalHttpLink(a) {
+        var proto = String(a.protocol || '').toLowerCase();
+        if (proto !== 'http:' && proto !== 'https:') return false;
+        if (a.hasAttribute && a.hasAttribute('download')) return false;
+        var host = String(a.hostname || '').toLowerCase();
+        var here = String((window.location && window.location.hostname) || '').toLowerCase();
+        if (!host || host === here) return false;
+        if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]') return false;
+        if (host === 'tauri.localhost' || /\.tauri\.localhost$/.test(host)) return false;
+        return true;
+    }
+    document.addEventListener('click', function (e) {
+        if (e.defaultPrevented) return;
+        if (typeof e.button === 'number' && e.button !== 0) return;
+        if (e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
+        var t = e.target;
+        var a = (t && t.closest) ? t.closest('a[href]') : null;
+        if (!a) return;
+        var tgt = String(a.getAttribute('target') || '').toLowerCase();
+        if (tgt === '_blank') return;
+        if (!isExternalHttpLink(a)) return;
+        e.preventDefault();                 // 关键：绝不让当前应用窗口导航
+        try { window.open(a.href, '_blank', 'noopener,noreferrer'); }
+        catch (err) { /* window.open 被拦也不能退回应用内导航，静默即可 */ }
+    }, true);
+})();
+/*EXTERNAL-LINK-GUARD-END*/
 var _mdCache = new Map();
 var _MD_CACHE_MAX = 100;
 var _MD_CACHE_MAX_LENGTH = 5000; // 超过此长度的文本不缓存（避免大字符串 Key 占用过多内存）
@@ -2051,4 +2102,3 @@ $(document).on('click', '#chatQueueChip', function(e) {
 
 window.updateMessageQueueUI = updateMessageQueueUI;
 window.processMessageQueue = processMessageQueue;
-

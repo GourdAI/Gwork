@@ -68,12 +68,18 @@
 <!-- Sidebar -->
 <div class="sidebar">
     <div class="sidebar-header">
-        <div class="sidebar-header-top">
-            <div class="sidebar-logo">
-                <img src="/img/favicon.png" alt="GWork" class="sidebar-logo-img"/>
-                <span class="sidebar-logo-text">GWork</span>
-            </div>
-        </div>
+<div class="sidebar-header-top">
+<div class="sidebar-logo">
+<img src="/img/favicon.png" alt="GWork" class="sidebar-logo-img"/>
+<span class="sidebar-logo-text">GWork</span>
+</div>
+<!-- 账号入口：由 app-account.js 按登录态填充。刻意放在 header 而不是
+sidebar-footer —— 底栏是 justify-content:space-between 且首/末子项位置被
+sidebar-update-badge.test.js 锁定，往里插按钮会让「设置」左右跳位。 -->
+<button class="account-entry-btn" id="accountEntryBtn" type="button">
+<span class="account-entry-name" id="accountEntryName" data-i18n="account.entry">登录 / 注册</span>
+</button>
+</div>
         <!-- 主导航：整行按钮（图标 + 文字 + 快捷键提示） -->
         <div class="main-nav">
             <button class="main-nav-item" id="newChatBtn">

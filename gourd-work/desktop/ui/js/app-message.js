@@ -1147,12 +1147,16 @@ function appendBodyContentCore(sess, h, text, append, ensureEl) {
     h.reasonBuffer = append ? (h.reasonBuffer || '') + clean : clean;
     var el = ensureEl();
     /* 【Qoder 多折叠组】主线路正文到达 = 批次边界：把当前运行批次收口（成员折叠成
-       「执行工具 N 次」组），随后工具/思考行开新盖子。一轮里因此并列存在多个折叠组，
-       组间夹着常驻可见的正文 —— 与 Qoder 截图形态一致（用户 2026-11 指定）。
-       仅主线路（h === sess）收口；智能体卡体内的正文（h = st）不动主批次。
-       closeBatch 幂等（无运行盖子即 no-op）。 */
-    if (h === sess && typeof window !== 'undefined' && window.GourdTurnBatch) {
-        try { window.GourdTurnBatch.closeBatch(sess); } catch (e) { /* 展示增强 */ }
+        「执行工具 N 次」组），随后工具/思考行开新盖子。一轮里因此并列存在多个折叠组，
+        组间夹着常驻可见的正文 —— 与 Qoder 截图形态一致（用户 2026-11 指定）。
+        【方案A · 卡内同构】子代理卡体内的正文到达同样是卡内批次的边界：closeBatch
+        传 st（智能体状态）收口该卡体内部的 running 盖子（不动主气泡批次）。
+        closeBatch 幂等（无运行盖子即 no-op）。 */
+    if (typeof window !== 'undefined' && window.GourdTurnBatch) {
+        try {
+            if (h === sess) window.GourdTurnBatch.closeBatch(sess);
+            else if (h.bodyEl) window.GourdTurnBatch.closeBatch(sess, null, h);
+        } catch (e) { /* 展示增强 */ }
     }
     // 增量渲染：stable 块只追加一次，tail 每帧重建（极小），消除逐帧全量 innerHTML 重建引起的闪烁
     var r = getStreamMd(el);
@@ -1880,6 +1884,7 @@ function ensureBatchGroup(sess, meta, insertAgentBody) {
     if (insertAgentBody) {
         $(insertAgentBody).append(group);
         followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
+        noteBatchInsert(sess, group);
     } else {
         insertBeforeActions(sess, group);
     }
@@ -2022,6 +2027,7 @@ function appendActionDraftChunk(sess, toolName, toolTitle, actionId, args) {
     if (insertAgentBody) {
         $(insertAgentBody).append(card);
         followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
+        noteBatchInsert(sess, card);
     } else {
         insertBeforeActions(sess, card);
     }
@@ -2222,6 +2228,7 @@ function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agent
         } else if (insertAgentBody) {
             $(insertAgentBody).append(card);
             followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
+            noteBatchInsert(sess, card);
         } else {
             insertBeforeActions(sess, card);
         }
@@ -2232,6 +2239,7 @@ function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agent
         if (insertAgentBody) {
             $(insertAgentBody).append(card);
             followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
+            noteBatchInsert(sess, card);
         } else {
             insertBeforeActions(sess, card);
         }
@@ -3008,6 +3016,15 @@ function updateAgentProgress(sess, chunk) {
                trace 显示 isStaleAgentFrame 第一次 true、第二次 false，而决定重建的是第二次。 */
             var agentCardStaleRun = isStaleAgentFrame(sess, chunk.args);
 
+            /* 【方案A · 卡内批次收口】agent_end 收卡前把卡体内 running 盖子定格为
+               closed（成员折叠成「执行工具 N 次」组）。与 purgeEmptyMdBlocks 同一
+               收口位（摘要追加之前），保证卡体终态 = 外部气泡终态同构。 */
+            try {
+                if (window.GourdTurnBatch) {
+                    window.GourdTurnBatch.closeBatchFor(endState ? endState.bodyEl : $(existCard).find('.agent-card-body')[0]);
+                }
+            } catch (e) { /* 展示增强 */ }
+
             $(existCard).removeClass('agent-card-streaming');
             delete sess.agentCards[agentId];
             if (sess.agentStates) delete sess.agentStates[agentId];
@@ -3242,17 +3259,19 @@ function advanceAgentBodyPointer(sess, st) {
     advanceBodyPointer(sess, st, function(el) { st.bodyEl.appendChild(el); });
 }
 
-/* 在子智能体块内创建 thinking-block（复用主线路核心，新思考块按时序落在已有内容之后） */
-function ensureAgentThinkingBlock(sess, st) {
-    if (!st) return;
-    ensureThinkingBlockCore(sess, st, {
-        placeFresh: function(el) { st.bodyEl.appendChild(el); },
-        placeBlock: function(block, pointerEl) {
-            if (pointerEl && pointerEl.parentNode) $(pointerEl).before(block);
-            else st.bodyEl.appendChild(block);
-        }
-    });
-}
+    /* 在子智能体块内创建 thinking-block（复用主线路核心，新思考块按时序落在已有内容之后）。
+       placeBlock 与主线路 1229 行同构：落 DOM 后接 noteBatchInsert 归入卡内批次盖子。 */
+    function ensureAgentThinkingBlock(sess, st) {
+        if (!st) return;
+        ensureThinkingBlockCore(sess, st, {
+            placeFresh: function(el) { st.bodyEl.appendChild(el); },
+            placeBlock: function(block, pointerEl) {
+                if (pointerEl && pointerEl.parentNode) $(pointerEl).before(block);
+                else st.bodyEl.appendChild(block);
+                noteBatchInsert(sess, block);
+            }
+        });
+    }
 
 /* 结束子智能体的 thinking-block。不传 st 时结束所有正打开的智能体思考块。 */
 function finishAgentThinkingBlock(sess, st) {
@@ -4050,7 +4069,13 @@ function formatQuestionAnswerForRecord(question, answerItem) {
 var QUESTION_CARD_SVG_PREV = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>';
 var QUESTION_CARD_SVG_NEXT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
 var QUESTION_CARD_SVG_CLOSE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-/* 折叠/展开：卡片整体收放，让用户在「看上下文」与「作答」之间快速切换 */
+/* 整卡折叠钮的两支箭头：COLLAPSE=∧ 上尖角、EXPAND=∨ 下尖角（SVG y 轴向下）。
+   【契约】箭头表示【当前状态】，不是点击动作：展开态 ∨ 朝下（内容在下方铺开）、
+   折叠态 ∧ 朝上，与 .ws-group-caret / .turn-batch-chevron / .model-group-arrow 的
+   「展开态朝下」一致。用户 2026-11 报障「ask 弹层缩放箭头反了」即旧代码按动作取
+   （展开态给 ∧）所致。tooltip 仍按动作取 question_collapse / question_expand，
+   与箭头刻意不同；detail 的「展开/收起」文字按钮则按动作配箭头（CSS 旋转 180°），
+   两者形态不同，勿为了「看起来统一」把整卡钮改回动作型。 */
 var QUESTION_CARD_SVG_COLLAPSE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>';
 var QUESTION_CARD_SVG_EXPAND = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
 var QUESTION_CARD_SVG_EDIT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>';
@@ -4430,7 +4455,11 @@ function renderQuestionCard(host, sess, state) {
        detail 取证中位 115 字、p90 280：超阈值默认收起为两行（CSS 限高），「展开」按钮切换；
        展开态记在 state.detailOpen[idx]，整卡重建（勾选/翻页）不丢。 */
     var collapseTitle = collapsed ? GourdI18n.t('chat.question_expand') : GourdI18n.t('chat.question_collapse');
-    var collapseSvg = collapsed ? QUESTION_CARD_SVG_EXPAND : QUESTION_CARD_SVG_COLLAPSE;
+    /* 折叠钮箭头表示【当前状态】，不是点击动作（用户报障「ask 弹层缩放箭头反了」）：
+       展开态 ∨ 向下（内容在下方铺开）、折叠态 ∧ 向上（内容收进头部），与 .ws-group-caret /
+       .turn-batch-chevron 的「展开态向下」契约一致。故按 collapsed 取同名状态图标，
+       不要再「顺」回按下一步动作取（展开态取 COLLAPSE）；tooltip 仍按动作取文案，二者刻意相反。 */
+    var collapseSvg = collapsed ? QUESTION_CARD_SVG_COLLAPSE : QUESTION_CARD_SVG_EXPAND;
     html += '<div class="question-card-header">';
     html += '<div class="question-card-heading">';
     html += '<span class="question-card-title">' + escapeHtml(q.header || '') + '</span>';

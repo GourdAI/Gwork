@@ -1,0 +1,35 @@
+# 本地 Docker 部署（SQLite 单容器模式）
+#
+# 依据 README「Try locally with Docker」：不设置 SQL_DSN 时后端默认使用
+# SQLite，数据库文件持久化在 ./data 目录，无需 PostgreSQL / Redis。
+#
+# 镜像 calciumion/new-api:latest 已在本机通过镜像加速器预拉并 retag，
+# 请勿执行 `docker compose pull`（直连 Docker Hub 会超时）。
+#
+# 启动：docker compose -f docker-compose.local.yml up -d
+# 停止：docker compose -f docker-compose.local.yml down
+# 日志：docker compose -f docker-compose.local.yml logs -f
+# 访问：http://localhost:3000 （首次进入完成初始化向导创建管理员）
+
+services:
+  gourd-work-admin:
+    image: calciumion/new-api:latest
+    container_name: gourd-work-admin
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+      - ERROR_LOG_ENABLED=true
+      - BATCH_UPDATE_ENABLED=true
+      - NODE_NAME=gourd-work-admin-local
+      - DEFAULT_LANGUAGE=zh-CN
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -o '\"success\":\\s*true' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

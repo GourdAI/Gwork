@@ -50,6 +50,12 @@
     "allow-remote-forget-host",
     "allow-remote-mirror-sync",
     "allow-remote-bind-scope",
-    "allow-remote-wsl-list"
+    "allow-remote-wsl-list",
+    "allow-auth-status",
+    "allow-auth-login",
+    "allow-auth-register",
+    "allow-auth-logout",
+    "allow-auth-refresh",
+    "allow-auth-self"
   ]
 }
