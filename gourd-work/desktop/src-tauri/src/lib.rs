@@ -422,6 +422,31 @@ fn create_main_window(app: &tauri::AppHandle, kernel_origin: &str) -> tauri::Res
         .inner_size(WIN_WIDTH, WIN_HEIGHT)
         .min_inner_size(MIN_WIDTH, MIN_HEIGHT)
         .resizable(true)
+        // Hand the WebView2 drag-drop handler back to the web layer.
+        //
+        // wry registers an OLE drop target on the WebView2 control, which —
+        // because WebView2 is a windowed control — swallows the entire HTML5
+        // drag event family: `dragstart` / `dragover` / `drop` never reach the
+        // page. Tauri's own docs say disabling this "is required to use HTML5
+        // drag and drop APIs on the frontend on Windows"
+        // (tauri::webview::WebviewWindowBuilder::disable_drag_drop_handler).
+        //
+        // Without it every in-page drag looks dead while the CSS `cursor: grab`
+        // still shows, so the affordance lies to the user. That was the reported
+        // symptom for the sidebar task/project reorder handles, and it equally
+        // broke the model-settings provider reorder and the `dataTransfer.files`
+        // upload drop zones in app-ui.js.
+        //
+        // Disabling is safe here: the app never consumes Tauri's native drop
+        // events (no `WindowEvent::DragDrop` arm in the window event match, no
+        // `onDragDropEvent` listener in the UI). Uploads read the sandboxed
+        // `File` objects from the DOM drop event, which is exactly what the
+        // browser gives us once this is off.
+        //
+        // Note: `dragDropEnabled` cannot be set in tauri.conf.json for this
+        // window — `app.windows` is empty because the decoration strategy is
+        // platform-specific, so the window is built here in code.
+        .disable_drag_drop_handler()
         .visible(false);
 
     #[cfg(target_os = "macos")]
