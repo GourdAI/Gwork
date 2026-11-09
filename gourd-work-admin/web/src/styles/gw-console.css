@@ -28,166 +28,66 @@ For commercial licensing, please contact support@quantumnous.com
  */
 
 /* ════════════════════════════════════════════════════════════════════════
-   1. Auth split screen (sign-in / sign-up / forgot-password / otp / reset)
+   1. Auth centred card (sign-in / sign-up / forgot-password / otp / reset)
    ════════════════════════════════════════════════════════════════════════ */
 
-.gw-auth-shell::before {
-  /* keep the old top-grid wash only on the narrow (form-only) view */
-  display: none;
+/* Faint grid wash over the whole shell (defined in gwork-brand.css via
+   .gw-auth-shell::before); keep it, but soften so the card reads first. */
+.gw-auth-shell { background: var(--gw-paper-3); }
+.gw-auth-shell::before { opacity: 0.25; }
+
+.gw-auth-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  max-width: 440px;
 }
 
-.gw-auth-aside {
-  position: relative;
-  flex-direction: column;
-  border-right: 1px solid var(--gw-line);
-  background:
-    linear-gradient(
-      to bottom,
-      transparent calc(48px - 1px),
-      color-mix(in oklch, var(--foreground) 7%, transparent) 48px,
-      color-mix(in oklch, var(--foreground) 7%, transparent) 49px,
-      transparent 49px
-    ),
-    repeating-linear-gradient(
-      to right,
-      var(--gw-line) 0 1px,
-      transparent 1px 56px
-    );
-  background-size: auto, 100% 100%;
-  background-position: 0 0;
-  overflow: hidden;
+.gw-auth-brand-block { display: flex; justify-content: center; }
+.gw-auth-brand-block .gw-auth-logo {
+  gap: 10px;
 }
-.gw-auth-aside::after {
-  /* right-edge vertical rule echoing the spec sheets */
+.gw-auth-brand-block .gw-auth-brand { font-size: 17px; }
+
+.gw-auth-card {
+  position: relative;
+  width: 100%;
+  padding: 28px 28px 24px;
+  border: 1px solid var(--gw-line-2);
+  border-radius: 14px;
+  background: var(--gw-paper);
+  box-shadow:
+    0 1px 2px color-mix(in oklch, var(--foreground) 5%, transparent),
+    0 18px 48px -28px color-mix(in oklch, var(--foreground) 28%, transparent);
+}
+/* Hairline top accent echoing the handbook rule language. */
+.gw-auth-card::before {
   content: '';
   position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background-image: linear-gradient(
+  top: -1px;
+  left: 20px;
+  right: 20px;
+  height: 2px;
+  border-radius: 0 0 2px 2px;
+  background: linear-gradient(
     to right,
-    transparent calc(100% - 1px),
-    var(--gw-line) calc(100% - 1px)
+    transparent,
+    var(--gw-line-2) 18%,
+    var(--gw-line-2) 82%,
+    transparent
   );
-  opacity: 0;
-}
-
-.gw-auth-aside-inner {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 48px;
-  padding: 44px 48px 36px;
-  width: 100%;
-  max-width: 680px;
-  /* centre the 680px block inside the (up to 980px) brand column so the
-     right side no longer shows a large empty gap */
-  margin-inline: auto;
-}
-
-/* Vertically centre the pitch between the top logo and the bottom copyright
-   (auto block margins absorb the free space on both sides). */
-.gw-auth-pitch {
-  margin-block: auto;
-}
-
-.gw-auth-aside .gw-auth-logo { flex: none; }
-
-.gw-auth-headline {
-  margin-top: 12px;
-  font-size: clamp(1.7rem, 2.6vw, 2.3rem);
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  line-height: 1.15;
-  color: var(--gw-ink);
-}
-.gw-auth-headline-dim { color: var(--gw-ink-2); }
-.gw-auth-sub {
-  margin-top: 10px;
-  font-size: 13.5px;
-  color: var(--gw-ink-2);
-}
-
-.gw-auth-points {
-  margin: 26px 0 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  border-top: 1px solid var(--gw-line);
-}
-.gw-auth-points li {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 11px 2px;
-  border-bottom: 1px solid var(--gw-line);
-  font-size: 13px;
-  color: var(--gw-ink-2);
-}
-.gw-auth-points li::before {
-  content: '▸';
-  font-family: var(--gw-mono);
-  font-size: 10px;
-  color: var(--gw-ink-3);
-  flex: none;
 }
 
 .gw-auth-copy {
-  flex: none;
   font-family: var(--gw-mono);
   font-size: 10.5px;
   letter-spacing: 0.06em;
   color: var(--gw-ink-3);
 }
 
-/* Form side: clean paper, hairline divider on wide screens only via grid gap.
- * The two-column grid is defined HERE (unlayered) rather than via a Tailwind
- * `lg:grid-cols-*` utility: Tailwind utilities live in @layer utilities and
- * would silently lose to any unlayered `grid-template-columns` declaration.
- * Defining both the wide and narrow column layouts in one place keeps the
- * cascade deterministic and avoids the stacked-rows bug (brand panel on top of
- * the form instead of beside it). */
-.gw-auth-shell {
-  grid-template-columns: minmax(0, 1fr) 460px;
-  grid-template-rows: minmax(0, 1fr);
-}
-.gw-auth-shell > section { background: var(--gw-paper); min-height: 0; }
-.gw-auth-shell > aside { min-height: 0; }
-
-/* Mobile (< lg): single column, keep a faint grid wash like the old shell */
-@media (max-width: 1023.98px) {
-  .gw-auth-shell {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr);
-  }
-  /* Let the shell's ::before grid wash show through the form column. */
-  .gw-auth-shell > section { background: transparent; }
-  .gw-auth-shell::before {
-    display: block;
-    content: '';
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background-image:
-      linear-gradient(to right, var(--gw-line) 1px, transparent 1px),
-      linear-gradient(to bottom, var(--gw-line) 1px, transparent 1px);
-    background-size: 48px 48px;
-    -webkit-mask-image: radial-gradient(
-      ellipse 60% 50% at 50% 0%,
-      black,
-      transparent 75%
-    );
-    mask-image: radial-gradient(
-      ellipse 60% 50% at 50% 0%,
-      black,
-      transparent 75%
-    );
-    opacity: 0.35;
-  }
-}
+/* Form side: the card carries the layout now; children pages keep their own
+   .gw-auth-head + form structure inside. */
 
 /* Auth page headers: mono eyebrow + title + description row */
 .gw-auth-head {
@@ -323,5 +223,5 @@ For commercial licensing, please contact support@quantumnous.com
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .gw-auth-aside, .gw-auth-points li { transition: none; }
+  .gw-auth-card { transition: none; }
 }
