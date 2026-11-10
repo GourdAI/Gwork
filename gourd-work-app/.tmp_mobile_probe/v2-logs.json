@@ -1,9 +1,0 @@
-[
-  "[debug] [vite] connecting...",
-  "[debug] [vite] connected.",
-  "[log] GWork App Launch",
-  "[log] [gwork] 无可用内核，进入配对流程",
-  "[log] Preload pages in uni-app-x development mode.",
-  "[error] SyntaxError: Unexpected token '<', \"<!DOCTYPE \"... is not valid JSON\n    at JSON.parse (<anonymous>)\n    at Object.parse (http://127.0.0.1:5173/@fs/D:/Apps/HBuilderX/plugins/uniapp-cli-vite/node_modules/@dcloudio/uni-shared/dist/uni-shared.es.js:930:40)\n    at parseResponseText (http://127.0.0.1:5173/@fs/D:/Apps/HBuilderX/plugins/uniapp-cli-vite/node_modules/@dcloudio/uni-h5/dist-x/uni-h5.es.js:24",
-  "[warning] at sdk/index.uts:395 [gwork] 会话列表刷新失败 Error: 获取会话列表失败: \n    at GWorkHttpClient.<anonymous> (http://127.0.0.1:5173/api/request.uts?import:334:23)\n    at Generator.next (<anonymous>)\n    at fulfilled (http://127.0.0.1:5173/@id/__x00__tslib.js:114:58)"
-]

@@ -1,10 +1,37 @@
-# 根 .gitignore 第 24 行有全局 `*.md`，会静默吞掉本模块内所有 Markdown。
-# 子目录 .gitignore 优先级高于根，且 gourd-work-app/ 及其父目录均未被排除，
-# 故此处用 ! 可重新包含（git 只禁止「父目录已被忽略」时的再包含）。
-# 交付文档（差异清单 / 集成说明）、上游 Apache 许可证与各 uni_modules 变更记录均需入库。
-!*.md
+yarn.lock
+.DS_Store
+.hbuilderx/
+.vite/
+uni_modules.config.json
+.DS_Store
+node_modules
+/unpackage/
+uniCloud-alipay/database/newQuery.jql
+package-lock.json
+*.yaml
+# AI 代码评审配置需纳入版本管理
+!code-review/configs/code-review.yaml
+cementing-debug.log
+*.log
+uni_modules/uni-config-center/uniCloud/cloudfunctions/common/uni-config-center/uni-ai-x/config.json
+logger-server
+logs
+/uni_modules/uni-ai-x/static/app-harmony/html/
+!*/.gitkeep
+platformConfig.json
 
-# Edge 探针每次运行都会生成临时 profile（实测 20 个目录 / 5057 文件 / 267MB）。
-# 13 张截图与 metrics.json 是验证证据，保持可见；只忽略浏览器缓存目录。
-mobile/.probe/edge-*/
-vendor/uni-ai-x/.probe/edge-*/
+# uni-agent 调试产物目录：截图、临时验证素材等统一放这里，不要散落到项目根目录
+/uni-agent-artifacts/*
+!/uni-agent-artifacts/.gitkeep
+selfIdentity.plist
+
+# uni-ai-md 原生桥接层构建准备与产物（源码与脚本入库，产物不入库）
+/native/include/
+/native/prebuilt/
+/native/build/
+
+# Local performance captures: screenshots, frame statistics and experiment snapshots.
+/tests/performance/
+
+# Keep local benchmark pages, scripts, reports and raw data together under
+# tests/performance/<date>-<topic>/ instead of adding them to production folders.

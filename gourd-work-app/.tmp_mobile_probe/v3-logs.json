@@ -1,7 +1,0 @@
-[
-  "[debug] [vite] connecting...",
-  "[debug] [vite] connected.",
-  "[log] GWork App Launch",
-  "[log] Preload pages in uni-app-x development mode.",
-  "[pageerror] TypeError: Cannot read properties of undefined (reading 'length')"
-]
