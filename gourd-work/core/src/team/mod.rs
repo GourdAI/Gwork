@@ -422,6 +422,13 @@ pub fn resolve_definition(workspace: &std::path::Path, name: &str) -> Option<Age
 ///   stop button and freeze the thinking bubble.
 /// - `context_size` / `trace` — would overwrite the parent's context meter and
 ///   usage rows with the sub-agent's numbers.
+/// - `context_compacted` — the sub-agent compressed *its own* history, which is
+///   invisible to the user's conversation. The frontend's handler has no
+///   `resolveAgentState` routing (the divider is a main-line conversation marker
+///   by design), so a forwarded frame would draw "已压缩上下文" into the **main**
+///   bubble, attributed to nobody and describing nothing the user can see.
+///   Java agrees by construction: `TaskTalent` forwards only a subset of events
+///   and `ContextSizeEvent` is not in it.
 /// - `error` / `retry` — would render a red error block or a "model call failed,
 ///   retrying" notice in the main conversation, attributed to nobody. The
 ///   sub-agent's failure is already reported through `agent_end`'s `success` flag
@@ -467,6 +474,9 @@ pub async fn forward_subagent_frames(
                 // parent's context meter (same reason as `context_size`), and
                 // its seq starts at 0 which could rewind the parent's cursor.
                 | "tps_progress"
+                // A sub-agent compressing its own context is not a fact about
+                // the user's conversation; see the function docs.
+                | "context_compacted"
                 | "reason_start"
                 | "hitl"
                 | "hitl_released"
@@ -775,6 +785,7 @@ mod tests {
                 Frame::error("sub-x", "boom"),
                 Frame::context_size("sub-x", &crate::protocol::ContextSizePayload::default()),
                 Frame::tps_progress("sub-x", 500, 40, Some(860)),
+                Frame::context_compacted("sub-x", 40, 12, 90_000, 30_000),
                 Frame::retry("sub-x", 1, 3, "slow"),
                 Frame::reason_start("sub-x", 0),
                 Frame::text_delta("sub-x", "kept"),
@@ -784,6 +795,39 @@ mod tests {
         .await;
         let kinds: Vec<&str> = out.iter().map(|f| f.frame_type.as_str()).collect();
         assert_eq!(kinds, vec!["text"], "only content survives: {:?}", kinds);
+    }
+
+    /// A sub-agent compressing **its own** context must not draw a divider into
+    /// the main conversation. The frontend's `case 'context_compacted'` handler
+    /// has no `resolveAgentState` routing — the divider is a main-line marker by
+    /// design — so a forwarded frame would be restamped to the parent session,
+    /// stamped with attribution nobody reads, and rendered as though the *user's*
+    /// context had just been compressed.
+    #[tokio::test]
+    async fn a_subagent_context_compacted_frame_never_reaches_the_parent() {
+        let out = forward(
+            vec![
+                Frame::context_compacted("sub-task-abc", 40, 12, 90_000, 30_000),
+                Frame::text_delta("sub-task-abc", "still forwarded"),
+            ],
+            false,
+        )
+        .await;
+        let kinds: Vec<&str> = out.iter().map(|f| f.frame_type.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["text"],
+            "the divider must be dropped while content survives: {:?}",
+            kinds
+        );
+        // Background path collapses everything to heartbeats anyway, so the
+        // divider must not leak there either.
+        let bg = forward(
+            vec![Frame::context_compacted("sub-x", 40, 12, 90_000, 30_000)],
+            true,
+        )
+        .await;
+        assert!(bg.is_empty(), "background must not forward it: {:?}", bg.iter().map(|f| &f.frame_type).collect::<Vec<_>>());
     }
 
     /// Suspension frames must not be forwarded: a sub-agent runs with

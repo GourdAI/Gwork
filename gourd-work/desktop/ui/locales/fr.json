@@ -956,6 +956,8 @@
     "turn_agents_one": "sous-agent",
     "turn_process_texts_one": "étape du processus",
     "phase_thinking": "Réflexion",
+    "context_compacted":  "Contexte compresse",
+    "context_compacted_tip":  "Le contexte a depasse le budget ; l historique ancien a ete compresse automatiquement",
     "phase_text": "Rédaction",
     "phase_waiting": "En attente de réponse",
     "args_streaming": "Génération des arguments · {size}",
@@ -1405,6 +1407,11 @@
     "signed_in": "Connecté",
     "required": "Saisissez le nom d utilisateur et le mot de passe",
     "password_policy": "Le mot de passe doit contenir 8–128 caractères",
-    "failed": "Échec de l opération"
+    "failed": "Échec de l opération",
+    "plan": "Forfait",
+    "points": "Solde de points",
+    "memory": "Mémoire et évolution",
+    "feedback": "Commentaires",
+    "unavailable": "Service de connexion indisponible. Utilisez l’application de bureau."
   }
 }

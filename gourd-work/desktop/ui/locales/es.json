@@ -956,6 +956,8 @@
     "turn_agents_one": "subagente",
     "turn_process_texts_one": "paso del proceso",
     "phase_thinking": "Pensando",
+    "context_compacted":  "Contexto comprimido",
+    "context_compacted_tip":  "El contexto supero el presupuesto; el historial anterior se comprimio automaticamente",
     "phase_text": "Escribiendo",
     "phase_waiting": "Esperando respuesta",
     "args_streaming": "Generando argumentos · {size}",
@@ -1405,6 +1407,11 @@
     "signed_in": "Sesión iniciada",
     "required": "Introduce usuario y contraseña",
     "password_policy": "La contraseña debe tener 8–128 caracteres",
-    "failed": "Operación fallida"
+    "failed": "Operación fallida",
+    "plan": "Plan",
+    "points": "Saldo de puntos",
+    "memory": "Memoria y evolución",
+    "feedback": "Comentarios",
+    "unavailable": "El servicio de inicio de sesión no está disponible. Use la aplicación de escritorio."
   }
 }

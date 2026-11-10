@@ -993,6 +993,8 @@
                  "thinking_in_progress":  "Đang suy nghĩ",
                  "thinking_finished":  "Suy nghĩ hoàn tất",
                  "phase_thinking":  "Đang suy nghĩ",
+                 "context_compacted":  "Đã nén ngữ cảnh",
+                 "context_compacted_tip":  "Ngữ cảnh vượt ngân sách; lịch sử cũ đã được nén tự động",
                  "phase_text":  "Đang viết",
                  "phase_waiting":  "Đang chờ phản hồi",
                  "args_streaming":  "Đang tạo tham số · {size}",

@@ -580,7 +580,14 @@
             }
             if (hasBatchHeader || !hasSuccessfulTerminal(list, bubble)) return null;
         }
-        /* 结束态纯工具轮（无正文）也允许折叠，但停止/挂起终态徽标必须拦住。 */
+        /* 结束态纯工具轮（无正文）也允许折叠，但停止/挂起终态徽标必须拦住。
+           【刻意只读徽标、不读 readTurnMeta 的气泡覆盖位】markTurnStatus 写入的
+           suspended 覆盖位是给【无徽标挂起段】补终态文案用的（标「已挂起」），
+           它不得反过来在这里否决折叠 —— 否则挂起段永远折不动，与 2026-11 用户
+           拍板的「挂起一并折、状态词标已挂起」直接矛盾。本护栏针对的是【后端已发
+           trace 帧并明确标了 stopped/suspended】的轮次：那种轮次有权威终态证据，
+           过程行必须留可见。真实挂起段不发 trace 帧（done_suspended 直接 return），
+           走的是「无徽标 → endStatus=null → 放行」这一支。 */
         if (noFinal && ended) {
             var endBadge = (bubble && bubble.querySelector) ? bubble.querySelector('.msg-trace') : null;
             if (!endBadge) {
@@ -735,16 +742,44 @@
         return parts.join(' · ');
     }
 
+    /* 轮终态读取：徽标真值【优先】，气泡覆盖位仅作回落。
+       · 徽标 .msg-trace[data-turn-status]：由 appendTraceBadge 在 trace 帧写入，是后端
+         的权威终态（done / stopped / suspended）。
+       · 覆盖位 .msg-bubble[data-turn-status]：由 markTurnStatus 写入，服务【无徽标轮】。
+         挂起 done（ask_user / HITL）不发 trace 帧（core/src/react/mod.rs 的
+         done_suspended 分支直接 return，全仓唯一的 Frame::trace 只在正常结束路径），
+         故挂起段气泡永远没有徽标，readTurnMeta 恒返回空、statusWord 一律回落
+         「已完成」——把等待作答的轮次谎报成已完成。
+       【为何徽标优先】prepend 分页缝合（app-history.js stitchPrependedRunRows）会把收尾页
+         的徽标过户给同 runId 的挂起段行（spawn_resume 沿用挂起 runId，两段必然同 runId）。
+         缝合后该行承载的是【完整 run】的内容，徽标的 done 才是当下真值，覆盖位是缝合前
+         的历史快照，必须让位。反之若覆盖位优先，缝合行会永久显示「已挂起」。 */
     function readTurnMeta(bubble) {
-        if (!bubble || !bubble.querySelector) return {};
-        var badge = bubble.querySelector('.msg-trace');
-        if (!badge || !badge.getAttribute) return {};
+        if (!bubble) return {};
         var out = {};
-        var ms = badge.getAttribute('data-elapsed-ms');
-        if (ms != null && ms !== '' && isFinite(Number(ms))) out.elapsedMs = Number(ms);
-        var st = badge.getAttribute('data-turn-status');
-        if (st) out.status = st;
+        var badge = bubble.querySelector ? bubble.querySelector('.msg-trace') : null;
+        if (badge && badge.getAttribute) {
+            var ms = badge.getAttribute('data-elapsed-ms');
+            if (ms != null && ms !== '' && isFinite(Number(ms))) out.elapsedMs = Number(ms);
+            var st = badge.getAttribute('data-turn-status');
+            if (st) out.status = st;
+        }
+        if (!out.status && bubble.getAttribute) {
+            var ovr = bubble.getAttribute('data-turn-status');
+            if (ovr) out.status = ovr;
+        }
         return out;
+    }
+
+    /* 给【无徽标轮】补记终态，供 readTurnMeta 回落读取（当前唯一用途：挂起段标「已挂起」）。
+       不建徽标 DOM：徽标同时承载耗时与时间文案，凭空造一个半截徽标会让页脚多出一枚
+       没有耗时的空壳，且与 appendTraceBadge 的 innerHTML 重建逻辑抢同一节点。
+       幂等：同值重复写无副作用；status 为空则清除覆盖位（回到「无终态信息」）。 */
+    function markTurnStatus(bubble, status) {
+        if (!bubble || !bubble.setAttribute) return false;
+        if (status) bubble.setAttribute('data-turn-status', String(status));
+        else if (bubble.removeAttribute) bubble.removeAttribute('data-turn-status');
+        return true;
     }
 
     /* DOM 副作用：对单个已结束轮的 .msg-bubble 应用折叠。幂等。
@@ -1043,6 +1078,7 @@
         buildSummary: buildSummary,
         summaryText: summaryText,
         readTurnMeta: readTurnMeta,
+        markTurnStatus: markTurnStatus,
         formatElapsed: formatElapsed,
         compactBubble: compactBubble,
         applyTurnCompact: applyTurnCompact,

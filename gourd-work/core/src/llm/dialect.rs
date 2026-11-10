@@ -1542,6 +1542,13 @@ impl StreamParser for OllamaParser {
                     out.push(StreamEvent::ContentDelta(text.to_string()));
                 }
             }
+            // Ollama carries thinking in its own field (qwen3 with `think:true`);
+            // dropping it here lost the reasoning channel entirely.
+            if let Some(th) = msg.get("thinking").and_then(|c| c.as_str()) {
+                if !th.is_empty() {
+                    out.push(StreamEvent::ReasoningDelta(th.to_string()));
+                }
+            }
             // Ollama delivers tool calls whole, like Gemini.
             if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
                 for tc in tcs {
@@ -2417,6 +2424,16 @@ mod tests {
             .collect()
     }
 
+    fn reasonings(events: &[StreamEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ReasoningDelta(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn openai_chat_stream_parses_text_tools_and_usage() {
         let mut p = Dialect::OpenAiChat.parser();
@@ -2594,6 +2611,22 @@ mod tests {
         }
     }
 
+    /// Reasoning deltas live in dedicated events, never in output text.
+    #[test]
+    fn responses_reasoning_deltas_map_to_reasoning() {
+        let mut p = Dialect::OpenAiResponses.parser();
+        let events = collect(
+            p.as_mut(),
+            &[
+                "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"hmm\"}",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}",
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}",
+            ],
+        );
+        assert_eq!(texts(&events), "ok");
+        assert_eq!(reasonings(&events), "hmm");
+    }
+
     /// Responses identifies tool calls by `call_id`, not by index. Two calls
     /// arriving interleaved must not have their arguments cross-wired.
     #[test]
@@ -2723,6 +2756,22 @@ mod tests {
         let mut p = Dialect::OllamaChat.parser();
         let events = collect(p.as_mut(), &["{\"error\":\"model 'x' not found\"}"]);
         assert!(matches!(&events[0], StreamEvent::Error(m) if m.contains("not found")), "{:?}", events);
+    }
+
+    /// Ollama's `message.thinking` (qwen3 with think enabled) is the reasoning
+    /// channel; dropping it lost the thinking block entirely.
+    #[test]
+    fn ollama_thinking_maps_to_reasoning() {
+        let mut p = Dialect::OllamaChat.parser();
+        let events = collect(
+            p.as_mut(),
+            &[
+                "{\"message\":{\"role\":\"assistant\",\"thinking\":\"hmm\",\"content\":\"\"},\"done\":false}",
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":true,\"done_reason\":\"stop\"}",
+            ],
+        );
+        assert_eq!(texts(&events), "ok");
+        assert_eq!(reasonings(&events), "hmm");
     }
 
     // ── Robustness ────────────────────────────────────────────────────────────

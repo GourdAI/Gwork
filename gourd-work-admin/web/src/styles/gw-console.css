@@ -122,52 +122,25 @@ For commercial licensing, please contact support@quantumnous.com
    2. Console skin — mounted on <body data-gw-console>
    ════════════════════════════════════════════════════════════════════════ */
 
-/* 2a. Sidebar: mono lowercase group labels + hairline group separators */
+/* 2a. Sidebar: quiet section labels + hairline separators between groups.
+ * Deliberately plain (no mono, no `//` prefix): CJK group names read better
+ * at a normal weight, and the hairline gives the tree its structure. */
 [data-gw-console] .gw-nav-group-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   height: auto;
-  padding: 10px 10px 4px;
-  font-family: var(--gw-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: lowercase;
-  color: var(--gw-ink-3);
+  padding: 6px 10px 4px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: color-mix(in oklch, var(--foreground) 52%, transparent);
   border-radius: 0;
 }
-[data-gw-console] .gw-nav-group-label::before {
-  content: '//';
-  color: color-mix(in oklch, var(--gw-ink-3) 55%, transparent);
+[data-gw-console] .gw-nav-group + .gw-nav-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid color-mix(in oklch, var(--foreground) 7%, transparent);
 }
 
-/* 2b. Page header (SectionPageLayout): mono eyebrow above the title */
-.gw-page-eyebrow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-  font-family: var(--gw-mono);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--gw-ink-3);
-}
-.gw-page-eyebrow b {
-  font-weight: 600;
-  color: var(--gw-ink-2);
-}
-.gw-page-eyebrow::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: var(--gw-line);
-  min-width: 24px;
-}
-
-/* 2c. Panel wrapper: hairline header band, mono title */
+/* 2b. Panel wrapper: hairline header band, mono title */
 .gw-panel {
   border-radius: var(--gw-r-lg);
   box-shadow: none;
@@ -198,7 +171,7 @@ For commercial licensing, please contact support@quantumnous.com
   text-transform: none;
 }
 
-/* 2d. Stat cards: spec-sheet cell look (bordered hairline cells).
+/* 2c. Stat cards: spec-sheet cell look (bordered hairline cells).
  * Padding stays compact on narrow screens so the 3-column grid does not
  * squeeze its numbers (the original cells used 6px/8px there). */
 [data-gw-console] .gw-stat-cell {

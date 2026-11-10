@@ -34,7 +34,6 @@ export function SignIn() {
     <AuthLayout>
       <div className='w-full space-y-8'>
         <div className='gw-auth-head space-y-1.5'>
-          <p className='gw-eyebrow'>auth / sign-in</p>
           <h2 className='gw-auth-title'>{t('Sign in')}</h2>
           {!status?.self_use_mode_enabled &&
             status?.register_enabled !== false && (

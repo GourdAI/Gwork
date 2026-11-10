@@ -41,13 +41,40 @@ pub fn decode_bytes(bytes: &[u8]) -> String {
 /// Valid bytes are emitted immediately (a shell prompt must reach the UI
 /// without waiting for a newline); only a *truncated* multi-byte sequence at
 /// the very end of a chunk is held back until the next chunk completes it.
+///
+/// Two encoding policies, and picking the wrong one is a corruption source:
+///
+/// - [`StreamDecoder::new`] — GBK fallback. Right for shell/pipe/file output
+///   from legacy Windows programs, which genuinely emit code page 936.
+/// - [`StreamDecoder::strict_utf8`] — never switches to GBK. Required for any
+///   stream that is UTF-8 **by contract** (HTTP/SSE JSON, LLM deltas, WebSocket
+///   text frames). See the `gbk` field for the concrete damage the fallback
+///   caused when it was wired to the LLM stream.
 pub struct StreamDecoder {
     /// Incomplete UTF-8 sequence held from the previous chunk (≤ 3 bytes).
     pending: Vec<u8>,
     /// Set once the stream is proven non-UTF-8; the remainder is GBK.
+    /// Stays `false` forever in strict mode.
     gbk: bool,
     /// Lone GBK lead byte held from the previous chunk (0 or 1 byte).
     gbk_pending: Vec<u8>,
+    /// Strict mode: a non-UTF-8 byte is a *corruption*, not an encoding hint.
+    ///
+    /// The GBK switch is sticky and lossy by construction: once one bad byte
+    /// flips it, **every following byte pair** is decoded as one GBK character.
+    /// UTF-8 CJK is 3 bytes per character, so GBK eats 1.5 characters per one,
+    /// silently deleting text — observed on LLM session work-mw8wizyz as
+    /// `wx-ai`→`w-ai`, `org.dromara`→`org.d/org/grom`, and a whole Chinese
+    /// clause rendered as the Latin word `wants`. Because the switch is
+    /// permanent for the rest of the stream, one bad byte garbles the entire
+    /// remainder of the turn, and the garbled bytes then land in tool-call
+    /// arguments, so the kernel executes a nonsense path.
+    ///
+    /// For a stream that is UTF-8 by contract the fallback can only ever be
+    /// wrong, so strict mode decodes the bad byte as U+FFFD (a detectable
+    /// corruption signature, see `react::corruption_signatures`) and keeps the
+    /// rest of the stream intact.
+    strict: bool,
 }
 
 impl Default for StreamDecoder {
@@ -158,13 +185,88 @@ pub fn strip_ansi(s: &str) -> String {
 
 impl StreamDecoder {
     pub fn new() -> Self {
-        Self { pending: Vec::new(), gbk: false, gbk_pending: Vec::new() }
+        Self { pending: Vec::new(), gbk: false, gbk_pending: Vec::new(), strict: false }
+    }
+
+    /// Decoder for a stream that is UTF-8 **by contract**: HTTP/SSE JSON,
+    /// LLM token deltas, WebSocket text frames.
+    ///
+    /// A byte that is not valid UTF-8 on such a stream is upstream corruption
+    /// (truncated frame, broken proxy, provider crash) — never an encoding hint.
+    /// The lossy decoder turns it into exactly one U+FFFD and continues in
+    /// UTF-8, so the consumer can *detect* the damage (see
+    /// `react::corruption_signatures`) instead of inheriting a silently
+    /// rewritten stream.
+    pub fn strict_utf8() -> Self {
+        Self { pending: Vec::new(), gbk: false, gbk_pending: Vec::new(), strict: true }
     }
 
     /// Feed one chunk; returns whatever text is decodable so far.
     pub fn push(&mut self, chunk: &[u8]) -> String {
         if chunk.is_empty() {
             return String::new();
+        }
+
+        // Strict mode first, and unconditionally: `self.gbk` can never be set
+        // here, but an explicit branch documents that a contract-UTF-8 stream
+        // must never enter the GBK state machine (its sticky latch would garble
+        // every remaining byte pair of the stream).
+        //
+        // Iterative rather than recursive: one upstream hiccup can inject
+        // several bad bytes into a single chunk, and a recursion per bad byte
+        // is both wasteful and stack-risky on a large chunk.
+        if self.strict {
+            let mut buf: Vec<u8> = Vec::with_capacity(self.pending.len() + chunk.len());
+            buf.extend_from_slice(&self.pending);
+            buf.extend_from_slice(chunk);
+            self.pending.clear();
+
+            let mut out = String::with_capacity(buf.len());
+            let mut rest: &[u8] = &buf;
+            loop {
+                match std::str::from_utf8(rest) {
+                    Ok(s) => {
+                        out.push_str(s);
+                        break;
+                    }
+                    Err(e) => {
+                        let valid_up_to = e.valid_up_to();
+                        // `valid_up_to` is always a char boundary, so both
+                        // slices are valid UTF-8 (the prefix) and raw bytes
+                        // (the tail).
+                        out.push_str(&String::from_utf8_lossy(&rest[..valid_up_to]));
+                        rest = &rest[valid_up_to..];
+                        match e.error_len() {
+                            Some(n) => {
+                                // A genuinely invalid byte sequence: emit one
+                                // replacement for it and keep decoding UTF-8.
+                                // One U+FFFD per *sequence* (not per byte) is
+                                // what `from_utf8_lossy` does, and it keeps the
+                                // corruption signature countable.
+                                out.push('\u{FFFD}');
+                                rest = &rest[n.min(rest.len())..];
+                                if rest.is_empty() {
+                                    break;
+                                }
+                            }
+                            None => {
+                                // Truncated multi-byte sequence at the chunk
+                                // boundary: hold it for the next chunk (the
+                                // CJK-split fix). A real UTF-8 prefix is ≤ 3
+                                // bytes; anything longer is not a prefix, so
+                                // flush it instead of holding garbage forever.
+                                if rest.len() > 3 {
+                                    out.push_str(&String::from_utf8_lossy(rest));
+                                    break;
+                                }
+                                self.pending.extend_from_slice(rest);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            return out;
         }
 
         if self.gbk {
@@ -351,5 +453,167 @@ mod tests {
         assert_eq!(d.push(&bytes[..2]), "", "incomplete char must be held");
         let tail = d.finish();
         assert!(tail.contains('\u{FFFD}'), "dangling bytes must not vanish: {:?}", tail);
+    }
+
+    // ─── strict_utf8 (LLM/SSE contract streams) ────────────────────────────
+    //
+    // The bug these pin down is the one seen on session work-mw8wizyz: the LLM
+    // stream used the GBK-fallback decoder, one bad byte from the upstream
+    // latched it into GBK permanently, and every following UTF-8 CJK character
+    // (3 bytes) was re-read as 1.5 GBK characters — i.e. the decoder *deleted*
+    // text. Observed damage: `wx-ai`→`w-ai`, `org.dromara`→`org.d/org/grom`,
+    // and a Chinese clause rendered as `wants`.
+
+    /// A single invalid byte must cost exactly one U+FFFD, and the text after
+    /// it must survive byte-for-byte. This is the exact shape the lossy decoder
+    /// got wrong: it lost the *whole remainder* of the stream, not one byte.
+    #[test]
+    fn strict_recovers_after_one_bad_byte() {
+        let tail = "抓紧排查下 wx-ai/wx-ai-agent/src/main/java/org/dromara/ai/models";
+        let mut bad = Vec::new();
+        bad.extend_from_slice("prefix ".as_bytes());
+        bad.push(0xFF); // never valid UTF-8, not a valid GBK lead either
+        bad.extend_from_slice(tail.as_bytes());
+
+        let mut d = StreamDecoder::strict_utf8();
+        let out = d.push(&bad) + &d.finish();
+
+        assert!(out.starts_with("prefix "), "good prefix lost: {:?}", out);
+        assert!(
+            out.contains(tail),
+            "text after the bad byte must be intact (this is what GBK latching destroyed): {:?}",
+            out
+        );
+        assert_eq!(
+            out.matches('\u{FFFD}').count(),
+            1,
+            "one bad byte ⇒ exactly one replacement, not a garbled tail: {:?}",
+            out
+        );
+    }
+
+    /// The lossy decoder must NOT be usable as a drop-in replacement for the
+    /// strict one: this asserts the *difference*, so a future "simplification"
+    /// that routes the LLM stream back through `new()` fails here.
+    ///
+    /// The tail is deliberately CJK. GBK is byte-compatible with ASCII, so a
+    /// pure-ASCII tail survives the latch unharmed and the test would prove
+    /// nothing — that is exactly why the reported damage clustered around
+    /// Chinese text. Under the latch a 3-byte UTF-8 CJK character is re-read as
+    /// 1.5 GBK characters, and because GBK lead bytes (0x81–0xFE) swallow the
+    /// *next* byte unconditionally, following ASCII bytes get eaten as trail
+    /// bytes too. The misalignment is self-perpetuating, so one bad byte
+    /// garbles the whole remainder of the stream.
+    #[test]
+    fn lossy_decoder_loses_the_tail_but_strict_does_not() {
+        let tail = "抓紧排查下渠道亲和 wx-ai/wx-ai-agent org.dromara.ai";
+        let mut bytes = Vec::new();
+        bytes.push(0xFF);
+        bytes.extend_from_slice(tail.as_bytes());
+
+        let mut lossy = StreamDecoder::new();
+        let lossy_out = lossy.push(&bytes) + &lossy.finish();
+
+        let mut strict = StreamDecoder::strict_utf8();
+        let strict_out = strict.push(&bytes) + &strict.finish();
+
+        assert!(
+            strict_out.contains(tail),
+            "strict must preserve the tail: {:?}",
+            strict_out
+        );
+        assert!(
+            !lossy_out.contains(tail),
+            "the GBK latch is expected to mangle the tail — if this passes the \
+             assertion above no longer proves anything: {:?}",
+            lossy_out
+        );
+        assert!(
+            !lossy_out.contains("渠道亲和"),
+            "the reported symptom is CJK text vanishing under the latch: {:?}",
+            lossy_out
+        );
+    }
+
+    /// Several bad bytes in one chunk: iterative loop must not recurse, must
+    /// not drop the text between them, and must not hang.
+    #[test]
+    fn strict_handles_multiple_bad_bytes_in_one_chunk() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice("aa".as_bytes());
+        bytes.push(0xFF);
+        bytes.extend_from_slice("中文".as_bytes());
+        bytes.push(0x80); // a bare continuation byte
+        bytes.extend_from_slice("bb".as_bytes());
+
+        let mut d = StreamDecoder::strict_utf8();
+        let out = d.push(&bytes) + &d.finish();
+
+        assert!(out.starts_with("aa"), "{:?}", out);
+        assert!(out.contains("中文"), "CJK between bad bytes must survive: {:?}", out);
+        assert!(out.ends_with("bb"), "{:?}", out);
+        assert_eq!(out.matches('\u{FFFD}').count(), 2, "{:?}", out);
+    }
+
+    /// Strict mode must still hold a CJK character split across chunks — that
+    /// was the original reason the decoder exists, and it must not regress.
+    #[test]
+    fn strict_still_reassembles_split_multibyte_chars() {
+        let s = "data: {\"text\":\"标签页只剩 skillhub 和 clawhub\"}\n\n";
+        let bytes = s.as_bytes();
+        for split in 1..bytes.len() {
+            let mut d = StreamDecoder::strict_utf8();
+            let mut out = String::new();
+            out.push_str(&d.push(&bytes[..split]));
+            out.push_str(&d.push(&bytes[split..]));
+            out.push_str(&d.finish());
+            assert!(!out.contains('\u{FFFD}'), "split {} produced {:?}", split, out);
+            assert_eq!(out, s, "split at {} mismatched", split);
+        }
+    }
+
+    /// Every split point of the reported failure shape (a bad byte followed by
+    /// CJK and a path) must lose only the bad byte — a chunk boundary must
+    /// never *add* corruption on top of it.
+    #[test]
+    fn strict_is_split_independent_with_one_bad_byte() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice("思考 ".as_bytes());
+        bytes.push(0xFF);
+        bytes.extend_from_slice(" org.dromara.ai".as_bytes());
+
+        for split in 1..bytes.len() {
+            let mut d = StreamDecoder::strict_utf8();
+            let mut out = String::new();
+            out.push_str(&d.push(&bytes[..split]));
+            out.push_str(&d.push(&bytes[split..]));
+            out.push_str(&d.finish());
+            assert!(
+                out.contains("思考") && out.contains("org.dromara.ai"),
+                "split {} lost real text: {:?}",
+                split,
+                out
+            );
+            assert_eq!(
+                out.matches('\u{FFFD}').count(),
+                1,
+                "split {} produced {:?} (expected exactly one replacement)",
+                split,
+                out
+            );
+        }
+    }
+
+    /// Strict mode must never latch into GBK: feeding genuine GBK bytes yields
+    /// replacements, not a silent re-encoding. (A shell that really speaks GBK
+    /// must use `new()`; routing it through strict is a bug in the *caller*,
+    /// and this documents the intended behaviour.)
+    #[test]
+    fn strict_never_decodes_gbk() {
+        let (bytes, _, _) = encoding_rs::GBK.encode("中文测试");
+        let mut d = StreamDecoder::strict_utf8();
+        let out = d.push(&bytes) + &d.finish();
+        assert_ne!(out, "中文测试", "strict must not silently switch encodings");
+        assert!(out.contains('\u{FFFD}'), "{:?}", out);
     }
 }

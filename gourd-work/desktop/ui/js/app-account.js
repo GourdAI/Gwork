@@ -1,27 +1,86 @@
 /* ===== app-account.js =====
-   桌面端账号入口：登录 / 注册 / 登出。
+    桌面端账号入口：侧栏底栏（原「设置按钮」区域）整体为用户卡片 +
+    就地向上展开的账号弹层 + 【独立居中登录弹框】三件套。
 
-   凭据与会话保活全部在 Rust 侧（auth.rs）：本页面只调用
-   window.__GOURD_IPC__.auth*，绝不接触 access token / refresh cookie。
-   浏览器模式下没有 IPC，整个模块静默隐藏入口（不影响既有功能）。
+    参照设计稿（用户 11-09 提供并二次确认）：
+      - 底栏区域 = 用户卡片：未登录显示「登录 / 注册」，已登录显示头像 + 昵称 + 套餐；
+      - 点击卡片向上展开弹层，内容是【设置 + 用户相关】菜单：
+          已登录 = 用户信息面板（头像/昵称/套餐/积分 + 设置、外观浅深、
+                  记忆与进化、意见反馈、检查更新、退出登录）；
+          未登录 = 登录/注册入口行 + 设置菜单（设置、外观浅深、检查更新、意见反馈）；
+      - 登录 / 注册表单是【独立居中弹框】（.account-modal，半透明遮罩 + 居中），
+        绝不塞进账号弹层里（用户明确否决过弹层内嵌表单的方案）。
 
-   ES5：与其余 app-*.js 保持一致。 */
+    凭据与会话保活全部在 Rust 侧（auth.rs）：本页面只调用
+    window.__GOURD_IPC__.auth*，绝不接触 access token / refresh cookie。
+
+    【关键修复：点击没弹框 —— 两个叠加原因，别再只修一个】
+    ① 主因（真实桌面壳命中的就是这条）：旧版 CSS
+       `.account-overlay { display: none; ... }`，而旧版 show() 用
+       `overlay.style.display = ''` 清空内联来「显示」。清空内联后元素回落到
+       类规则 `display:none` —— 弹层永远不可见，点下去像没反应。注意
+       __GOURD_IPC__ 由 src-tauri/lib.rs 的 initialization_script 注入，真实
+       壳里必然存在，所以「无 IPC」并不是用户当时遇到的场景。
+       现在 show()/showAuthModal() 显式写 `style.display = 'block'`：内联显式值
+       优先于任何类默认值，即使日后有人把 `display:none` 加回 CSS 类也不会复现。
+       account-entry-behavior.test.js / account-contract.test.js 双向锁死此契约。
+    ② 次因（边缘场景）：旧版第 13 行
+       `if (!ipc || typeof ipc.authStatus !== 'function') return;`
+       让无 IPC 时连 onclick 都不绑定（浏览器直连、IPC 注入未就绪等命中）。
+       现在 UI 层与后端能力解耦：入口恒绑定、弹层/弹框恒可开，只在真正发登录 /
+       登出请求时检查能力，缺能力给明确文案，绝不静默失败。
+
+    【布局纪律】用户卡片是 .sidebar-footer 的【首子项】（原设置按钮的位置），
+    更新按钮是末子项。底栏 justify-content:space-between 下首子项恒贴左端、
+    末子项恒贴右端，卡片位置不随「有无更新」跳变 —— 与原设置按钮同一纪律，
+    由 account-contract.test.js 锁定。独立设置按钮已删除，设置入口在弹层里。
+
+    ES5：与其余 app-*.js 保持一致。 */
 (function () {
     'use strict';
 
-    var ipc = window.__GOURD_IPC__;
-    if (!ipc || typeof ipc.authStatus !== 'function') return;
+    /* 意见反馈 / 官网入口：与 app-settings-about.js 的 HOMEPAGE_URL 同源。
+       不臆造不存在的 /feedback 路由；外链靠壳层 external_link.rs 的
+       on_new_window 拦截交给系统浏览器（target="_blank" 本身在 wry 下不够）。 */
+    var HOMEPAGE_URL = 'https://www.gourdwork.com/';
 
     function t(key, fallback) {
         var msg = window.GourdI18n ? window.GourdI18n.t(key) : key;
         return (msg && msg !== key) ? msg : (fallback || key);
     }
 
-    var state = { signed_in: false, username: '', display_name: '' };
-    var overlay = null;
+    function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+    }
+
+    function ipc() { return window.__GOURD_IPC__ || null; }
+    function hasAuth() { var i = ipc(); return !!(i && typeof i.authStatus === 'function'); }
+
+    var state = {
+        signed_in: false, username: '', display_name: '',
+        plan: '', points: '', avatar_url: ''
+    };
+    var selfLoaded = false;
+    var entry = null;
+    var backdrop = null;
+    var popover = null;
+    var modalBackdrop = null;
+    var modal = null;
+    var view = null;            // 'profile' | 'menu'，决定弹层当前渲染的骨架
+    var authMode = 'login';     // 'login' | 'register'
     var busy = false;
 
-    /* ---------- DOM ---------- */
+    /* 提示容器 id：弹层与登录弹框【各持一个，绝不共用同 id】。
+       【codereview P2 修复】此前两个视图都写 id="accountHint"：DOM 里同时存在
+       两个同 id 节点时 getElementById 只返回先插入的那个（弹层先于弹框挂载），
+       登录弹框打开期间 submit 失败提示会写进【已被隐藏的弹层节点】——弹框里
+       看不到任何文案，正是「点了没反应」的同族静默失败。 */
+    var HINT_POP = 'accountPopHint';
+    var HINT_MODAL = 'accountModalHint';
+
+    /* ---------- 通用 DOM 小工具 ---------- */
 
     function el(tag, cls, text) {
         var n = document.createElement(tag);
@@ -30,103 +89,310 @@
         return n;
     }
 
-    function buildOverlay() {
-        if (overlay) return overlay;
-        overlay = el('div', 'account-overlay');
-        overlay.id = 'accountOverlay';
-        overlay.style.display = 'none';
+    function avatarInitial(name) {
+        var s = String(name || '').trim();
+        return s ? s.charAt(0).toUpperCase() : 'G';
+    }
 
-        var panel = el('div', 'account-panel');
-        var close = el('button', 'account-close', '×');
-        close.type = 'button';
-        close.setAttribute('aria-label', t('account.close', '关闭'));
-        close.onclick = hide;
-        panel.appendChild(close);
+    /* 有真实头像 URL 就渲染 <img>，加载失败退回昵称首字，绝不显示破图。 */
+    function renderAvatar(node, url, name) {
+        if (!node) return;
+        node.innerHTML = '';
+        if (url) {
+            var img = document.createElement('img');
+            img.src = url;
+            img.alt = '';
+            img.onerror = function () { node.textContent = avatarInitial(name); };
+            node.appendChild(img);
+        } else {
+            node.textContent = avatarInitial(name);
+        }
+    }
 
-        var tabs = el('div', 'account-tabs');
-        var loginTab = el('button', 'account-tab active', t('account.sign_in', '登录'));
-        var regTab = el('button', 'account-tab', t('account.sign_up', '注册'));
-        loginTab.type = 'button';
-        regTab.type = 'button';
-        loginTab.onclick = function () { switchTab('login'); };
-        regTab.onclick = function () { switchTab('register'); };
-        tabs.appendChild(loginTab);
-        tabs.appendChild(regTab);
-        panel.appendChild(tabs);
+    function isOpen() { return !!(popover && popover.style.display !== 'none'); }
+    function isModalOpen() { return !!(modal && modal.style.display !== 'none'); }
 
-        var form = el('div', 'account-form');
-        form.id = 'accountForm';
-        panel.appendChild(form);
+    /* ---------- 触发卡片（侧栏底栏首子项） ---------- */
 
-        var hint = el('div', 'account-hint');
-        hint.id = 'accountHint';
-        panel.appendChild(hint);
+    function renderCard() {
+        var name = document.getElementById('accountEntryName');
+        var sub = document.getElementById('accountCardSub');
+        var card = document.getElementById('accountEntryBtn');
+        var display = state.display_name || state.username || '';
 
-        var submit = el('button', 'account-submit', t('account.sign_in', '登录'));
-        submit.id = 'accountSubmit';
-        submit.type = 'button';
-        submit.onclick = onSubmit;
-        panel.appendChild(submit);
+        if (name) {
+            if (state.signed_in) {
+                name.textContent = display || t('account.signed_in', '已登录');
+                name.removeAttribute('data-i18n');
+            } else {
+                name.textContent = t('account.entry', '登录 / 注册');
+                name.setAttribute('data-i18n', 'account.entry');
+            }
+        }
+        if (sub) sub.textContent = state.signed_in ? (state.plan || '') : '';
+        if (card) {
+            if (state.signed_in) card.classList.add('is-signed-in');
+            else card.classList.remove('is-signed-in');
+        }
+        renderAvatar(document.getElementById('accountCardAvatar'), state.avatar_url, display);
+    }
 
-        var signedIn = el('div', 'account-signed-in');
-        signedIn.id = 'accountSignedIn';
-        signedIn.style.display = 'none';
-        var who = el('div', 'account-who');
-        who.id = 'accountWho';
-        signedIn.appendChild(who);
-        var logout = el('button', 'account-logout', t('account.sign_out', '退出登录'));
-        logout.type = 'button';
-        logout.onclick = onLogout;
-        signedIn.appendChild(logout);
-        panel.appendChild(signedIn);
+    /* ---------- 事件委托（弹层与登录弹框共用） ----------
+       图标是 <svg>/<path> 时向上找带 data-act / data-mode 的祖先。 */
+    function delegate(root) {
+        return function (e) {
+            var node = e.target;
+            while (node && node !== root) {
+                if (node.getAttribute) {
+                    var mode = node.getAttribute('data-mode');
+                    if (mode) { onTheme(mode); return; }
+                    var act = node.getAttribute('data-act');
+                    if (act) { onAction(act); return; }
+                }
+                node = node.parentNode;
+            }
+        };
+    }
 
-        overlay.appendChild(panel);
-        overlay.onclick = function (e) { if (e.target === overlay) hide(); };
-        document.body.appendChild(overlay);
-        switchTab('login');
-        return overlay;
+    /* ---------- 账号弹层（设置 + 用户相关） ---------- */
+
+    function ensurePopover() {
+        if (popover) return;
+        backdrop = el('div', 'account-backdrop');
+        backdrop.style.display = 'none';
+        backdrop.onclick = hide;
+
+        popover = el('div', 'account-popover');
+        popover.id = 'accountPopover';
+        popover.setAttribute('role', 'dialog');
+        popover.setAttribute('aria-label', t('account.entry', '登录 / 注册'));
+        popover.style.display = 'none';
+        popover.onclick = delegate(popover);
+
+        document.body.appendChild(backdrop);
+        document.body.appendChild(popover);
+    }
+
+    /* 就地定位：优先贴卡片上方；上方空间不足时落到下方。宽度跟随侧栏，
+       但夹在 280–340px，避免窄侧栏把弹层挤成一条。 */
+    function position() {
+        if (!entry || !popover) return;
+        var r = entry.getBoundingClientRect();
+        var vw = window.innerWidth || 1024;
+        var vh = window.innerHeight || 768;
+        popover.style.width = Math.max(280, Math.min(340, Math.round(r.width) + 24)) + 'px';
+        var w = popover.offsetWidth;
+        var h = popover.offsetHeight;
+        var left = Math.min(Math.max(8, r.left - 4), Math.max(8, vw - w - 8));
+        var top = r.top - h - 8;
+        if (top < 8) top = Math.min(r.bottom + 8, vh - h - 8);
+        popover.style.left = left + 'px';
+        popover.style.top = Math.max(8, top) + 'px';
+    }
+
+    function icon(paths) {
+        return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths + '</svg>';
+    }
+
+    var ICON_GEAR = '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.83 1.83 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>';
+    var ICON_THEME = '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z"/>';
+    var ICON_MEMORY = '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>';
+    var ICON_FEEDBACK = '<circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.5-3 4"/><path d="M12 17h.01"/>';
+    var ICON_UPDATE = '<circle cx="12" cy="12" r="9"/><polyline points="12 16 12 8"/><polyline points="8 12 12 8 16 12"/>';
+    var ICON_LOGOUT = '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>';
+    var ICON_LOGIN = '<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/>';
+
+    function menuItem(act, key, fallback, paths, danger) {
+        return '<button class="account-pop-item' + (danger ? ' is-danger' : '') + '" type="button" data-act="' + act + '">'
+            + icon(paths) + '<span class="account-pop-item-label">' + esc(t(key, fallback)) + '</span></button>';
+    }
+
+    /* 外观分段控件（浅色 / 深色），与设置页共用 __themeApi；
+       已登录信息面板与未登录设置菜单都带这一行。 */
+    function themeRow() {
+        return '<div class="account-pop-item">' + icon(ICON_THEME)
+            + '<span class="account-pop-item-label">' + esc(t('settings.tabs.appearance', '外观')) + '</span>'
+            + '<span class="account-theme-switch">'
+            + '<button class="account-theme-btn" type="button" data-mode="light" id="accountThemeLight">' + esc(t('settings.appearance.mode.light', '浅色')) + '</button>'
+            + '<button class="account-theme-btn" type="button" data-mode="dark" id="accountThemeDark">' + esc(t('settings.appearance.mode.dark', '深色')) + '</button>'
+            + '</span></div>';
+    }
+
+    /* 视图 A：已登录用户信息面板（弹层） */
+    function renderProfile() {
+        var h = '';
+        h += '<div class="account-pop-profile">'
+            + '<div class="account-pop-avatar" id="accountPopAvatar"></div>'
+            + '<div style="flex:1 1 auto;min-width:0">'
+            + '<div class="account-pop-name" id="accountPopName"></div>'
+            + '<div class="account-pop-desc" id="accountPopDesc"></div>'
+            + '</div></div>';
+        h += '<div class="account-pop-stats">'
+            + '<div><div class="account-pop-stat-label">' + esc(t('account.plan', '套餐')) + '</div>'
+            + '<div class="account-pop-stat-value" id="accountPopPlan">—</div></div>'
+            + '<div><div class="account-pop-stat-label">' + esc(t('account.points', '积分余额')) + '</div>'
+            + '<div class="account-pop-stat-value" id="accountPopPoints">—</div></div>'
+            + '</div>';
+        h += '<div class="account-pop-menu">';
+        h += menuItem('settings', 'settings.title', '设置', ICON_GEAR);
+        h += themeRow();
+        h += menuItem('memory', 'account.memory', '记忆与进化', ICON_MEMORY);
+        h += menuItem('feedback', 'account.feedback', '意见反馈', ICON_FEEDBACK);
+        h += menuItem('update', 'settings.about.check_update', '检查更新', ICON_UPDATE);
+        h += '<div class="account-pop-sep"></div>';
+        h += menuItem('logout', 'account.sign_out', '退出登录', ICON_LOGOUT, true);
+        h += '</div>';
+        /* 【P1 静默失败修复】profile 视图必须带 hint 容器：登出失败或
+           后端能力缺失时 setHint()/unavailable() 靠 getElementById 找它，
+           少了这个节点错误会被完全吞掉（弹层还开着，用户以为按钮坏了，
+           与「点击没反应」是同一类问题）。
+           【P2】id 用 HINT_POP，与登录弹框的 HINT_MODAL 区分，杜绝同 id 双节点。 */
+        h += '<div class="account-hint" id="' + HINT_POP + '"></div>';
+        popover.innerHTML = h;
+    }
+
+    /* 视图 B：未登录设置菜单（弹层）—— 设置 + 用户相关（登录入口行）。
+       登录表单不在这里，点「登录 / 注册」行打开独立居中弹框。 */
+    function renderMenu() {
+        var h = '<div class="account-pop-menu">';
+        h += menuItem('login', 'account.entry', '登录 / 注册', ICON_LOGIN);
+        h += '<div class="account-pop-sep"></div>';
+        h += menuItem('settings', 'settings.title', '设置', ICON_GEAR);
+        h += themeRow();
+        h += menuItem('update', 'settings.about.check_update', '检查更新', ICON_UPDATE);
+        h += menuItem('feedback', 'account.feedback', '意见反馈', ICON_FEEDBACK);
+        h += '</div>';
+        popover.innerHTML = h;
+        refreshThemeBtns();
+    }
+
+    /* 只刷新动态文本，不动输入框 —— 60s 保活刷新不会清掉用户正在输入的内容。 */
+    function refreshProfile() {
+        var display = state.display_name || state.username || t('account.signed_in', '已登录');
+        var n = document.getElementById('accountPopName');
+        var d = document.getElementById('accountPopDesc');
+        var plan = document.getElementById('accountPopPlan');
+        var pts = document.getElementById('accountPopPoints');
+        if (n) n.textContent = display;
+        if (d) d.textContent = state.username && state.username !== display ? state.username : (state.plan || '');
+        if (plan) plan.textContent = state.plan || '—';
+        if (pts) pts.textContent = state.points || '—';
+        renderAvatar(document.getElementById('accountPopAvatar'), state.avatar_url, display);
+        refreshThemeBtns();
+    }
+
+    function refreshThemeBtns() {
+        var api = window.__themeApi;
+        var mode = api && typeof api.getThemeMode === 'function' ? api.getThemeMode() : null;
+        if (!mode) mode = document.body && document.body.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+        var l = document.getElementById('accountThemeLight');
+        var d = document.getElementById('accountThemeDark');
+        if (l) { if (mode === 'light') l.classList.add('active'); else l.classList.remove('active'); }
+        if (d) { if (mode === 'dark') d.classList.add('active'); else d.classList.remove('active'); }
+    }
+
+    function refreshView() {
+        if (view === 'profile') refreshProfile();
+    }
+
+    /* ---------- 独立居中登录弹框 ---------- */
+
+    function ensureModal() {
+        if (modal) return;
+        modalBackdrop = el('div', 'account-modal-backdrop');
+        modalBackdrop.style.display = 'none';
+        modalBackdrop.onclick = hideModal;
+
+        modal = el('div', 'account-modal');
+        modal.id = 'accountModal';
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-label', t('account.entry', '登录 / 注册'));
+        modal.style.display = 'none';
+        modal.onclick = delegate(modal);
+
+        document.body.appendChild(modalBackdrop);
+        document.body.appendChild(modal);
+    }
+
+    function renderAuth() {
+        var h = '<div class="account-auth">';
+        h += '<button class="account-close" type="button" data-act="close-modal" aria-label="' + esc(t('account.close', '关闭')) + '">×</button>';
+        h += '<div class="account-tabs">'
+            + '<button class="account-tab' + (authMode === 'login' ? ' active' : '') + '" type="button" data-act="tab-login">' + esc(t('account.sign_in', '登录')) + '</button>'
+            + '<button class="account-tab' + (authMode === 'register' ? ' active' : '') + '" type="button" data-act="tab-register">' + esc(t('account.sign_up', '注册')) + '</button>'
+            + '</div>';
+        h += '<div id="accountForm"></div>';
+        h += '<div class="account-hint" id="' + HINT_MODAL + '"></div>';
+        h += '<button class="account-submit" id="accountSubmit" type="button" data-act="submit"></button>';
+        h += '</div>';
+        modal.innerHTML = h;
+        renderForm(authMode);
+        refreshAuthLabels();
+    }
+
+    function showAuthModal() {
+        ensureModal();
+        renderAuth();
+        /* 【P0 根因护栏】必须显式写 'block'，绝不能写 '' —— 清空内联会让元素
+           回落到类规则；一旦有人给这些类加上 display:none（旧版 .account-overlay
+           就是这样），弹框会永远不可见，表现正是「点击没反应」。 */
+        modalBackdrop.style.display = 'block';
+        modal.style.display = 'block';
+        var first = document.getElementById('accountUsername');
+        if (first) { try { first.focus(); } catch (e) { /* ignore */ } }
+    }
+
+    function hideModal() {
+        if (modal) modal.style.display = 'none';
+        if (modalBackdrop) modalBackdrop.style.display = 'none';
     }
 
     function renderForm(mode) {
         var form = document.getElementById('accountForm');
         if (!form) return;
-        form.innerHTML = '';
-        function field(id, label, type, placeholder) {
-            var wrap = el('div', 'account-field');
-            wrap.appendChild(el('label', 'account-label', label));
-            var input = document.createElement('input');
-            input.type = type;
-            input.className = 'account-input';
-            input.id = id;
-            if (placeholder) input.placeholder = placeholder;
-            input.onkeydown = function (e) {
-                if (e.key === 'Enter' && !busy) onSubmit();
-            };
-            wrap.appendChild(input);
-            form.appendChild(wrap);
+        var h = '';
+        function field(id, label, type) {
+            h += '<div class="account-field"><label class="account-label" for="' + id + '">' + esc(label) + '</label>'
+                + '<input class="account-input" id="' + id + '" type="' + type + '" autocomplete="off"></div>';
         }
-        field('accountUsername', t('account.username', '用户名'), 'text', '');
-        if (mode === 'register') {
-            field('accountEmail', t('account.email', '邮箱（可选）'), 'email', '');
+        field('accountUsername', t('account.username', '用户名'), 'text');
+        if (mode === 'register') field('accountEmail', t('account.email', '邮箱（可选）'), 'email');
+        field('accountPassword', t('account.password', '密码'), 'password');
+        form.innerHTML = h;
+        /* 回车提交：重建表单后重新绑定 */
+        ['accountUsername', 'accountEmail', 'accountPassword'].forEach(function (id) {
+            var n = document.getElementById(id);
+            if (n) n.onkeydown = function (e) { if (e.key === 'Enter' && !busy) onSubmit(); };
+        });
+    }
+
+    function refreshAuthLabels() {
+        var submit = document.getElementById('accountSubmit');
+        if (submit) {
+            submit.textContent = busy ? t('account.working', '请稍候…')
+                : (authMode === 'register' ? t('account.sign_up_submit', '注册并登录') : t('account.sign_in', '登录'));
+            submit.disabled = busy;
         }
-        field('accountPassword', t('account.password', '密码'), 'password', '');
     }
 
     function switchTab(mode) {
-        buildOverlay();
-        var tabs = overlay.querySelectorAll('.account-tab');
+        authMode = mode;
+        var tabs = modal ? modal.querySelectorAll('.account-tab') : [];
         for (var i = 0; i < tabs.length; i++) {
-            tabs[i].className = 'account-tab' + ((i === 0 && mode === 'login') || (i === 1 && mode === 'register') ? ' active' : '');
+            var want = (i === 0 && mode === 'login') || (i === 1 && mode === 'register');
+            if (want) tabs[i].classList.add('active');
+            else tabs[i].classList.remove('active');
         }
-        overlay.setAttribute('data-mode', mode);
-        var submit = document.getElementById('accountSubmit');
-        if (submit) submit.textContent = mode === 'login' ? t('account.sign_in', '登录') : t('account.sign_up_submit', '注册并登录');
         renderForm(mode);
-        setHint('', '');
+        setHint('modal', '', '');
+        refreshAuthLabels();
     }
 
-    function setHint(text, kind) {
-        var hint = document.getElementById('accountHint');
+    /* 提示只写进【指定容器】的 hint 节点：'pop' = 账号弹层，'modal' = 登录弹框。
+       两容器各持唯一 id（HINT_POP / HINT_MODAL），避免同 id 双节点时
+       getElementById 命中被隐藏的那一个、提示对用户不可见。 */
+    function setHint(scope, text, kind) {
+        var hint = document.getElementById(scope === 'pop' ? HINT_POP : HINT_MODAL);
         if (!hint) return;
         hint.textContent = text || '';
         hint.className = 'account-hint' + (kind ? ' account-hint-' + kind : '');
@@ -134,121 +400,203 @@
 
     function setBusy(on) {
         busy = !!on;
-        var submit = document.getElementById('accountSubmit');
-        if (submit) {
-            submit.disabled = busy;
-            submit.textContent = busy
-                ? t('account.working', '请稍候…')
-                : (overlay && overlay.getAttribute('data-mode') === 'register'
-                    ? t('account.sign_up_submit', '注册并登录') : t('account.sign_in', '登录'));
-        }
+        refreshAuthLabels();
     }
 
+    /* ---------- 打开 / 关闭弹层 ---------- */
+
     function show() {
-        buildOverlay();
-        var entry = document.getElementById('accountEntryBtn');
-        var signedIn = document.getElementById('accountSignedIn');
-        var form = document.getElementById('accountForm');
-        var tabs = overlay.querySelector('.account-tabs');
-        var submit = document.getElementById('accountSubmit');
-        if (state.signed_in) {
-            if (signedIn) signedIn.style.display = '';
-            if (form) form.style.display = 'none';
-            if (tabs) tabs.style.display = 'none';
-            if (submit) submit.style.display = 'none';
-            var who = document.getElementById('accountWho');
-            if (who) who.textContent = (state.display_name || state.username || '') +
-                (state.username ? '  (' + state.username + ')' : '');
-        } else {
-            if (signedIn) signedIn.style.display = 'none';
-            if (form) form.style.display = '';
-            if (tabs) tabs.style.display = '';
-            if (submit) submit.style.display = '';
-            switchTab(overlay.getAttribute('data-mode') || 'login');
+        ensurePopover();
+        var want = state.signed_in ? 'profile' : 'menu';
+        if (view !== want) {
+            view = want;
+            if (want === 'profile') renderProfile(); else renderMenu();
         }
-        overlay.style.display = '';
-        setHint('', '');
-        var first = document.getElementById('accountUsername');
-        if (first && !state.signed_in) { try { first.focus(); } catch (e) { /* ignore */ } }
+        refreshView();
+        /* 【P0 根因护栏】同 showAuthModal：显式 'block'，绝不清空内联。 */
+        backdrop.style.display = 'block';
+        popover.style.display = 'block';
+        position();
         if (entry) entry.setAttribute('aria-expanded', 'true');
     }
 
     function hide() {
-        if (overlay) overlay.style.display = 'none';
-        var entry = document.getElementById('accountEntryBtn');
+        if (popover) popover.style.display = 'none';
+        if (backdrop) backdrop.style.display = 'none';
         if (entry) entry.setAttribute('aria-expanded', 'false');
     }
 
-    /* ---------- 状态 ---------- */
+    /* ---------- 菜单动作 ---------- */
+
+    function openExternal(url) {
+        var a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }
+
+    function onTheme(mode) {
+        var api = window.__themeApi;
+        if (api && typeof api.applyThemeMode === 'function') api.applyThemeMode(mode);
+        refreshThemeBtns();
+    }
+
+    function onAction(act) {
+        if (act === 'close') { hide(); return; }
+        if (act === 'close-modal') { hideModal(); return; }
+        if (act === 'tab-login') { switchTab('login'); return; }
+        if (act === 'tab-register') { switchTab('register'); return; }
+        if (act === 'submit') { onSubmit(); return; }
+        if (act === 'login') {
+            /* 登录表单是独立弹框：收起弹层再开居中弹框 */
+            hide();
+            showAuthModal();
+            return;
+        }
+        if (act === 'settings') {
+            hide();
+            if (typeof window.openSettings === 'function') window.openSettings();
+            return;
+        }
+        if (act === 'memory') {
+            hide();
+            if (typeof window.openMemoryView === 'function') window.openMemoryView();
+            return;
+        }
+        if (act === 'feedback') { hide(); openExternal(HOMEPAGE_URL); return; }
+        if (act === 'update') {
+            hide();
+            /* 检查更新能力在「设置 → 关于」页；打开后直接切到该 tab。 */
+            if (typeof window.openSettings === 'function') {
+                window.openSettings();
+                if (window.$) window.$('.settings-tab[data-tab="about"]').trigger('click');
+            }
+            return;
+        }
+        if (act === 'logout') { onLogout(); return; }
+    }
+
+    /* ---------- 状态与后端 ---------- */
 
     function applyStatus(s) {
-        state = s || state;
-        var name = document.getElementById('accountEntryName');
-        var entry = document.getElementById('accountEntryBtn');
-        if (!name || !entry) return;
-        if (state.signed_in) {
-            name.textContent = state.display_name || state.username || t('account.signed_in', '已登录');
-            name.removeAttribute('data-i18n');
-            entry.classList.add('is-signed-in');
-        } else {
-            name.textContent = t('account.entry', '登录 / 注册');
-            entry.classList.remove('is-signed-in');
+        var prev = state.signed_in;
+        state.signed_in = !!(s && s.signed_in);
+        state.username = (s && s.username) || '';
+        state.display_name = (s && s.display_name) || '';
+        if (!state.signed_in) {
+            state.plan = ''; state.points = ''; state.avatar_url = ''; selfLoaded = false;
         }
-        if (overlay && overlay.style.display !== 'none') show();
+        renderCard();
+        /* 登录态翻转时登录弹框没有存在意义了（已登录成功）：收起。 */
+        if (isModalOpen() && state.signed_in) hideModal();
+        if (isOpen()) {
+            if (prev !== state.signed_in) show();  // 登录态翻转：重建弹层骨架
+            else refreshView();                    // 同态刷新：只更文本，不动表单
+        }
+        if (state.signed_in) refreshSelf();
+    }
+
+    /* authSelf → invoke('auth_self') → authorized_get → parse_api_response
+       已经把 {success,message,data} 信封解包成 data 本体，这里拿到的是
+       buildSelfUserData 的字段：username / display_name / group（渠道分组，
+       非套餐名）/ quota（剩余额度整数）等；后端【没有】avatar / avatar_url
+       字段，所以真实头像 URL 通常拿不到，展示一律退回昵称首字渐变底。
+       保留 raw.data 兼容分支只为防御后端改信封，尽力解析、失败静默降级「—」：
+       绝不让补充信息阻塞主弹层。 */
+    function refreshSelf() {
+        var i = ipc();
+        if (!i || typeof i.authSelf !== 'function' || selfLoaded) return;
+        selfLoaded = true;
+        i.authSelf().then(function (raw) {
+            var d = (raw && raw.data) ? raw.data : raw;
+            if (!d || typeof d !== 'object') return;
+            state.plan = d.group || d.group_name || d.plan || state.plan;
+            var q = (d.quota != null) ? d.quota : (d.credits != null ? d.credits : null);
+            if (q != null) state.points = String(q);
+            state.avatar_url = d.avatar_url || d.avatar || state.avatar_url;
+            renderCard();
+            if (isOpen()) refreshView();
+        }, function () { selfLoaded = false; });
     }
 
     function refreshStatus() {
-        return ipc.authStatus().then(applyStatus, function () {
+        if (!hasAuth()) {
+            /* 无 IPC：不 return、不隐藏入口，只是把状态归位为未登录。
+               入口依然可点，弹层/弹框依然能开 —— 这正是「点击没反应」的修复点。 */
+            applyStatus({ signed_in: false, username: '', display_name: '' });
+            return Promise.resolve();
+        }
+        return ipc().authStatus().then(applyStatus, function () {
             // 后台/模块暂不可用：保留上次状态，不把入口误显示成已登录。
         });
     }
 
-    /* ---------- 动作 ---------- */
+    /* ---------- 表单动作 ---------- */
 
     function val(id) {
         var n = document.getElementById(id);
         return n ? String(n.value || '').trim() : '';
     }
 
+    function unavailable() {
+        /* 能力缺失只会发生在登录/登出请求路径上，两者此刻都在登录弹框或
+           弹层里可见；submit 走弹框、logout 走弹层，故按调用点分域。 */
+        setHint('modal', t('account.unavailable', '登录服务暂不可用，请在桌面客户端中操作'), 'error');
+    }
+
     function onSubmit() {
         if (busy) return;
+        var i = ipc();
+        if (!i || typeof i.authLogin !== 'function' || typeof i.authRegister !== 'function') {
+            unavailable();
+            return;
+        }
         var username = val('accountUsername');
         var password = val('accountPassword');
         if (!username || !password) {
-            setHint(t('account.required', '请填写用户名和密码'), 'error');
+            setHint('modal', t('account.required', '请填写用户名和密码'), 'error');
             return;
         }
         if (password.length < 8 || password.length > 128) {
-            setHint(t('account.password_policy', '密码长度需为 8–128 个字符'), 'error');
+            setHint('modal', t('account.password_policy', '密码长度需为 8–128 个字符'), 'error');
             return;
         }
-        var mode = overlay ? overlay.getAttribute('data-mode') : 'login';
         setBusy(true);
-        setHint('', '');
-        var call = mode === 'register'
-            ? ipc.authRegister(username, password, val('accountEmail'))
-            : ipc.authLogin(username, password);
+        setHint('modal', '', '');
+        var call = authMode === 'register'
+            ? i.authRegister(username, password, val('accountEmail'))
+            : i.authLogin(username, password);
         call.then(function (s) {
             setBusy(false);
-            applyStatus(s);
-            hide();
+            authMode = 'login';
+            applyStatus(s);   // 内部会收起登录弹框
         }, function (e) {
             setBusy(false);
-            setHint(errText(e), 'error');
+            setHint('modal', errText(e), 'error');
         });
     }
 
     function onLogout() {
         if (busy) return;
+        var i = ipc();
+        if (!i || typeof i.authLogout !== 'function') {
+            /* 登出发生在弹层里：提示必须写弹层的 hint，写弹框的会被隐藏吞掉。 */
+            setHint('pop', t('account.unavailable', '登录服务暂不可用，请在桌面客户端中操作'), 'error');
+            return;
+        }
         setBusy(true);
-        ipc.authLogout().then(function (s) {
+        i.authLogout().then(function (s) {
             setBusy(false);
+            authMode = 'login';
             applyStatus(s);
-            switchTab('login');
-            show();
+            /* 退出后弹层重建为未登录设置菜单（参考图语义：退出即回未登录态） */
+            if (isOpen()) show();
         }, function (e) {
             setBusy(false);
-            setHint(errText(e), 'error');
+            setHint('pop', errText(e), 'error');
         });
     }
 
@@ -258,20 +606,38 @@
         return String(e.message || e);
     }
 
-    /* ---------- 初始化 ---------- */
+    /* ---------- 初始化 ----------
+       不依赖 IPC 是否存在；DOM 未就绪时等 DOMContentLoaded（动态脚本
+       可能被提前注入），保证 onclick 一定绑上。 */
+    function init() {
+        entry = document.getElementById('accountEntryBtn');
+        if (!entry) return;
+        entry.onclick = function () { isOpen() ? hide() : show(); };
+        document.addEventListener('keydown', function (e) {
+            if (e.key !== 'Escape') return;
+            /* 登录弹框优先：它盖在弹层之上 */
+            if (isModalOpen()) hideModal();
+            else if (isOpen()) hide();
+        });
+        window.addEventListener('resize', function () { if (isOpen()) position(); });
+        document.addEventListener('i18n:localeChanged', function () {
+            renderCard();
+            /* 弹层/弹框内静态文案按新语言重建；正在打开时先收起，
+               避免输入到一半被清空。 */
+            if (isModalOpen()) hideModal();
+            if (isOpen()) { hide(); view = null; }
+        });
+        refreshStatus();
+        setInterval(refreshStatus, 60000);
+    }
 
-    var entry = document.getElementById('accountEntryBtn');
-    if (!entry) return;
-    entry.onclick = show;
-    refreshStatus();
-    // 语言切换后重刷动态文案（静态 data-i18n 由 GourdI18n 自己处理）。
-    document.addEventListener('i18n:localeChanged', function () {
-        applyStatus(state);
-        if (overlay && overlay.getAttribute('data-mode')) switchTab(overlay.getAttribute('data-mode'));
-    });
-    // 定时对齐 Rust 侧保活结果（refresh 成功后状态在 Rust 内存里，前端只展示）。
-    setInterval(refreshStatus, 60000);
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+    else init();
 
     // 暴露给控制台/测试，不含任何凭据。
-    window.GourdAccount = { status: refreshStatus, show: show, hide: hide };
+    window.GourdAccount = {
+        status: refreshStatus, show: show, hide: hide,
+        showAuth: showAuthModal, hideAuth: hideModal,
+        state: function () { return state; }
+    };
 })();

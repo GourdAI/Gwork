@@ -112,7 +112,6 @@ class RequestAiRunner {
 	private callbacks : RequestAiRunnerCallbacks | null = null
 	currentChatState : string = ''
 	userAbort : boolean = false
-	hasThinkContent : boolean = false
 	private bodyEmitTimer: number = 0
 	private lastBodyEmitTime: number = 0
 	private workerPollTimer: number = 0
@@ -152,22 +151,8 @@ class RequestAiRunner {
 		}, MARKDOWN_RENDER_INTERVAL - elapsed)
 	}
 	onChunkFn(chunkObj : Chunk) {
-		let reasoningContent: null | string = null
 		let content = chunkObj.choices?.[0]?.delta?.content
-		if (this.msgBody == '' && content == "<think>") {
-			this.hasThinkContent = true
-			content = ''
-		}
-		if (this.hasThinkContent) {
-			if (content != '</think>') {
-				reasoningContent = content
-			} else {
-				this.hasThinkContent = false
-			}
-			content = ''
-		}
-
-		reasoningContent = reasoningContent ?? chunkObj.choices?.[0]?.delta?.reasoning_content
+		let reasoningContent: null | string = chunkObj.choices?.[0]?.delta?.reasoning_content
 		// #ifdef APP-ANDROID || APP-IOS || WEB || MP-WEIXIN || APP-HARMONY
 		if (this.workerActive) {
 			appendAiWorkerMarkdown(this.workerRequestVersion, content ?? '', reasoningContent ?? '')
@@ -177,7 +162,8 @@ class RequestAiRunner {
 		if (content != null && content.length > 0) {
 			this.msgBody += content
 			this.emitMsgBody()
-		} else if (reasoningContent != null) {
+		}
+		if (reasoningContent != null && reasoningContent.length > 0) {
 			this.thinkContent += reasoningContent
 			this.callbacks?.onThinkContent(this.thinkContent.trim())
 		}
@@ -195,7 +181,6 @@ class RequestAiRunner {
 		this.thinkContent = ''
 		this.currentChatState = ''
 		this.userAbort = false
-		this.hasThinkContent = false
 		this.finishRequested = false
 		this.streamParser = null
 	}

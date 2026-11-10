@@ -2377,6 +2377,45 @@ mod tests {
         );
     }
 
+    /// The divider frame is the one metadata frame that **must** survive: it is
+    /// part of the conversation's history shape, so replay has to redraw the
+    /// compression boundary where it really happened. Adding it to the transient
+    /// skip list would be a silent failure — the live view shows a divider that
+    /// disappears after a reload.
+    #[test]
+    fn context_compacted_is_durable_unlike_the_progress_frames() {
+        let s = Scratch::new("compacted-durable");
+        let store = SessionStore::with_base(s.0.clone());
+        let id = "work-compacted";
+
+        store.append_stream_frame(id, &Frame::tps_progress(id, 500, 40, Some(860)));
+        store.append_stream_frame(id, &Frame::context_compacted(id, 40, 12, 90_000, 30_000));
+        store.append_stream_frame(id, &Frame::reason_start(id, 0));
+
+        let types = persisted_types(&store, id);
+        assert_eq!(
+            types,
+            vec!["context_compacted".to_string()],
+            "only the divider is durable here: {:?}",
+            types
+        );
+
+        // Its `args` must round-trip too: the frontend degrades to a bare label
+        // without them, so a lossy write would silently drop "40 → 12".
+        let path = store.stream_file(id);
+        let line = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["args"]["beforeMessages"], 40);
+        assert_eq!(v["args"]["afterMessages"], 12);
+        assert_eq!(v["args"]["beforeTokens"], 90_000);
+        assert_eq!(v["args"]["afterTokens"], 30_000);
+    }
+
     // ─── stream seq watermark (kernel-restart resume) ─────────────────────
     //
     // The frontend rebuilds its dedupe cursor from this file and the live gate

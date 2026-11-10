@@ -991,6 +991,8 @@
                  "thinking_in_progress":  "Denke gerade",
                  "thinking_finished":  "Denken beendet",
                  "phase_thinking":  "Denkt gerade",
+                 "context_compacted":  "Kontext komprimiert",
+                 "context_compacted_tip":  "Kontext ueber Budget; aeltere Historie wurde automatisch komprimiert (Zusammenfassung / bereinigte Tool-Ergebnisse)",
                  "phase_text":  "Schreibt",
                  "phase_waiting":  "Wartet auf Antwort",
                  "args_streaming":  "Parameter werden erzeugt · {size}",

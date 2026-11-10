@@ -135,14 +135,17 @@ public class AgentSettings implements Serializable {
         return new ONode().fill(source).toBean(ProviderDo.class);
     }
 
-    /** 新增或替换 provider；结构和值均以新快照发布。 */
+    /** 新增或替换 provider；结构和值均以新快照发布。id 缺失时自动生成渠道唯一 id。 */
     public synchronized void putProvider(String name, ProviderDo provider) {
+        if (Assert.isEmpty(provider.getId())) {
+            provider.setId(newChannelId());
+        }
         Map<String, ProviderDo> rebuilt = new LinkedHashMap<>(providers);
         rebuilt.put(name, copyProvider(provider));
         this.providers = rebuilt;
     }
 
-    /** 原位替换 provider，支持改名并保留其在 LinkedHashMap 中的位置。 */
+    /** 原位替换 provider，支持改名并保留其在 LinkedHashMap 中的位置。渠道 id 恒延续旧值（改名不改身份）。 */
     public synchronized boolean replaceProvider(String oldName, String newName, ProviderDo provider) {
         if (providers.containsKey(oldName) == false) {
             return false;
@@ -150,6 +153,11 @@ public class AgentSettings implements Serializable {
         if (oldName.equals(newName) == false && providers.containsKey(newName)) {
             return false;
         }
+        ProviderDo existing = providers.get(oldName);
+        // 身份延续：编辑/改名提交的 payload 可能不带 id（旧前端），一律沿用旧条目的 id；
+        // 旧条目也没有（极旧配置尚未回填）时才生成新 id
+        provider.setId(Assert.isNotEmpty(existing.getId()) ? existing.getId()
+                : (Assert.isNotEmpty(provider.getId()) ? provider.getId() : newChannelId()));
         Map<String, ProviderDo> rebuilt = new LinkedHashMap<>();
         for (Map.Entry<String, ProviderDo> entry : providers.entrySet()) {
             if (entry.getKey().equals(oldName)) {
@@ -160,6 +168,144 @@ public class AgentSettings implements Serializable {
         }
         this.providers = rebuilt;
         return true;
+    }
+
+    /** 生成渠道唯一 id：12 位短 UUID（与 providers 表既有 id 撞车时重试）。 */
+    private String newChannelId() {
+        String id;
+        do {
+            id = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+            for (ProviderDo p : providers.values()) {
+                if (id.equals(p.getId())) {
+                    id = null;
+                    break;
+                }
+            }
+        } while (id == null);
+        return id;
+    }
+
+    /**
+     * 渠道名 → 渠道 id 解析：providers 表按名称命中时返回其 id；未命中（手工模型/未知渠道）返回 null，
+     * 调用方据此回退为按名称匹配（旧配置兼容）。
+     */
+    public String channelIdOf(String providerName) {
+        if (providerName == null || providerName.isEmpty()) {
+            return null;
+        }
+        ProviderDo provider = providers.get(providerName);
+        return provider == null ? null : provider.getId();
+    }
+
+    /**
+     * 模型归属的渠道分组键（顺序不变量与一切渠道身份判定的唯一依据）：
+     * 优先 {@code providerId}（渠道唯一 id）；缺失时回退名称（旧配置/手工模型），
+     * 两者皆空为 {@link #UNGROUPED_MODEL_KEY}（手工模型，不参与归组）。
+     *
+     * <p>回退键加 {@code name:} 前缀，避免「无 id 的名称 X」与「id 恰为 X 的渠道」误并组。</p>
+     */
+    private static String modelGroupKey(ModelDo model) {
+        if (model.getProviderId() != null && model.getProviderId().isEmpty() == false) {
+            return model.getProviderId();
+        }
+        String provider = model.getProvider();
+        if (provider == null || provider.isEmpty()) {
+            return UNGROUPED_MODEL_KEY;
+        }
+        return "name:" + provider;
+    }
+
+    /** 判断模型是否属于指定渠道（按名称入参）：模型已带 providerId 时按渠道 id 匹配，
+     * 否则按 provider 名称回退匹配（旧配置/渠道后建于模型的场景）。 */
+    private boolean modelBelongsToChannel(ModelDo model, String providerName) {
+        return belongsToChannelId(model, channelIdOf(providerName), providerName);
+    }
+
+    /**
+     * 按<b>已解析</b>的渠道 id 判定归属：模型带 providerId 时以 id 为准（展示名可任意漂移），
+     * 否则回退名称匹配（旧配置/渠道后建于模型）。
+     *
+     * <p>与 {@link #modelBelongsToChannel} 的区别：本方法不把名称再解析成 id，供调用方在
+     * 「providers 表键名已变更」的时序下自行传入正确 id（见 {@link #renameProviderModels}）。</p>
+     */
+    private static boolean belongsToChannelId(ModelDo model, String channelId, String providerName) {
+        if (channelId != null && Assert.isNotEmpty(model.getProviderId())) {
+            return channelId.equals(model.getProviderId());
+        }
+        return providerName.equals(model.getProvider());
+    }
+
+    /** 渠道名称对应的分组键（与 {@link #modelGroupKey(ModelDo)} 同口径）：有 id 用 id，无 id 用 name: 前缀回退键。 */
+    private String channelGroupKey(String providerName) {
+        String channelId = channelIdOf(providerName);
+        return channelId != null ? channelId : "name:" + providerName;
+    }
+
+    /** 分组键 → 渠道展示名：id 键查 providers 表取 name（查不到回退键本身）；name: 回退键去前缀。 */
+    private String channelDisplayName(String groupKey) {
+        if (groupKey == null) {
+            return "";
+        }
+        if (groupKey.startsWith("name:")) {
+            return groupKey.substring("name:".length());
+        }
+        for (Map.Entry<String, ProviderDo> entry : providers.entrySet()) {
+            if (groupKey.equals(entry.getValue().getId())) {
+                return entry.getKey();
+            }
+        }
+        return groupKey;
+    }
+
+    /**
+     * 渠道 id 内存迁移：为无 id 的 provider 生成 id，并按名称把 models 的 providerId 回填。
+     *
+     * <p>只改内存、不落盘（与 {@link #normalizeModelProviderOrder} 同口径），下次用户保存自然持久化。
+     * 加载路径与远端镜像路径均调用，保证运行期内「渠道身份=id」恒成立。</p>
+     */
+    public synchronized void ensureChannelIds() {
+        // 1) provider 补 id（COW 发布）
+        Map<String, ProviderDo> rebuiltProviders = null;
+        Map<String, String> nameToId = new LinkedHashMap<>();
+        for (Map.Entry<String, ProviderDo> entry : providers.entrySet()) {
+            ProviderDo provider = entry.getValue();
+            if (Assert.isEmpty(provider.getId())) {
+                if (rebuiltProviders == null) {
+                    rebuiltProviders = new LinkedHashMap<>(providers);
+                }
+                ProviderDo changed = copyProvider(provider);
+                changed.setId(newChannelId());
+                rebuiltProviders.put(entry.getKey(), changed);
+                nameToId.put(entry.getKey(), changed.getId());
+            } else {
+                nameToId.put(entry.getKey(), provider.getId());
+            }
+        }
+        if (rebuiltProviders != null) {
+            this.providers = rebuiltProviders;
+        }
+
+        // 2) models 按 provider 名称回填 providerId（COW 发布）
+        Map<String, ModelDo> rebuiltModels = null;
+        for (Map.Entry<String, ModelDo> entry : models.entrySet()) {
+            ModelDo model = entry.getValue();
+            if (model == null || Assert.isEmpty(model.getProviderId()) == false) {
+                continue;
+            }
+            String id = nameToId.get(model.getProvider());
+            if (id == null) {
+                continue; // 手工模型或孤儿渠道：保持无 id，按名称回退匹配
+            }
+            if (rebuiltModels == null) {
+                rebuiltModels = new LinkedHashMap<>(models);
+            }
+            ModelDo changed = copyModel(model);
+            changed.setProviderId(id);
+            rebuiltModels.put(entry.getKey(), changed);
+        }
+        if (rebuiltModels != null) {
+            this.models = rebuiltModels;
+        }
     }
 
     /** COW 更新 provider 启用状态，返回发布后的副本。 */
@@ -190,7 +336,7 @@ public class AgentSettings implements Serializable {
         return changed;
     }
 
-    /** COW 更新 provider 名下模型可见性，一次性发布完整 models 快照。 */
+    /** COW 更新渠道名下模型可见性，一次性发布完整 models 快照（按渠道 id 匹配，名称回退）。 */
     public synchronized List<ModelDo> setProviderModelsVisible(String providerName,
                                                                 boolean providerEnabled,
                                                                 Map<String, Boolean> modelEnabled) {
@@ -199,7 +345,7 @@ public class AgentSettings implements Serializable {
         String prefix = providerName + "-";
         for (Map.Entry<String, ModelDo> entry : models.entrySet()) {
             ModelDo current = entry.getValue();
-            if (providerName.equals(current.getProvider()) == false) {
+            if (modelBelongsToChannel(current, providerName) == false) {
                 continue;
             }
             Boolean enabled = current.getName() != null && current.getName().startsWith(prefix)
@@ -216,11 +362,23 @@ public class AgentSettings implements Serializable {
     /**
      * provider 改名时复制并更新其模型值、尽可能同步模型 key；返回实际 oldKey -> newKey。
      *
+     * <p><b>渠道身份不变</b>：模型的 {@code providerId} 不动（渠道 id 是唯一身份），仅更新展示名
+     * {@code provider} 与模型 key 前缀。改名后模型归属、下拉分组、统计口径全部保持稳定。</p>
+     *
      * <p><b>统计身份冻结</b>：改名生效前先让每个模型的稳定 uid 按「旧 provider|model」派生
      * （{@code stableUid()}，若尚无则现算并随副本携带）。否则本次改名后首个 trace 会按新名
      * 现算 uid，与账本回填时按旧名派生的 uid 分裂——统计页会再次出现「改名后对不上」。</p>
      */
     public synchronized Map<String, String> renameProviderModels(String oldProvider, String newProvider) {
+        // 渠道 id 解析必须容忍生产调用序：WebSettingsController#providersUpdate 先 replaceProvider
+        //（providers 表键已切到新名）再调本方法（入参仍是旧名）。只按旧名查会得到 null，
+        // 「按渠道 id 匹配」随即退化为名称回退——展示名漂移过的模型会被漏改名，
+        // 同一渠道内残留两种展示名，前端按名称分组就裂成两段（即用户看到的「重复」）。
+        // 故旧名未命中时回查新名：两者指向同一条渠道，id 在 replaceProvider 中恒延续。
+        String channelId = channelIdOf(oldProvider);
+        if (channelId == null) {
+            channelId = channelIdOf(newProvider);
+        }
         String oldPrefix = oldProvider + "-";
         String newPrefix = newProvider + "-";
         Set<String> occupied = new LinkedHashSet<>(models.keySet());
@@ -229,7 +387,7 @@ public class AgentSettings implements Serializable {
         for (Map.Entry<String, ModelDo> entry : models.entrySet()) {
             String oldKey = entry.getKey();
             ModelDo current = entry.getValue();
-            if (oldProvider.equals(current.getProvider()) == false) {
+            if (belongsToChannelId(current, channelId, oldProvider) == false) {
                 rebuilt.put(oldKey, current);
                 continue;
             }
@@ -275,15 +433,6 @@ public class AgentSettings implements Serializable {
     private static final String UNGROUPED_MODEL_KEY = "";
 
     /**
-     * 模型分组依据：provider 名称；空 provider 返回 {@link #UNGROUPED_MODEL_KEY}，
-     * 表示「手工模型」——它们不属于任何供应商区块，归组时保持原位不动。
-     */
-    private static String modelGroupKey(ModelDo model) {
-        String provider = model.getProvider();
-        return (provider == null || provider.isEmpty()) ? UNGROUPED_MODEL_KEY : provider;
-    }
-
-    /**
      * 顺序不变量：同一 provider 的模型在 {@link #models} 中必须连续。
      *
      * <p>稳定归组：组间顺序 = 各组在原列表中首次出现的顺序；组内顺序 = 原组内相对顺序。
@@ -323,7 +472,10 @@ public class AgentSettings implements Serializable {
         }
 
         if (splitProviders != null) {
-            splitProviders.addAll(split);
+            // 影响面报告用渠道展示名（分组键可能是渠道 id 或 name: 回退键，日志/提示不暴露内部键）
+            for (String group : split) {
+                splitProviders.add(channelDisplayName(group));
+            }
         }
 
         if (split.isEmpty()) {
@@ -413,7 +565,7 @@ public class AgentSettings implements Serializable {
      * oldKey 不存在时退化为 {@link #addModelInProviderBlock(ModelDo)}。
      *
      * <p><b>顺序不变量由本方法自行保证</b>：若新旧配置的 provider 不同，原位替换会把目标
-     * provider 的区块勈成两段，故此时方法内部自动归组一次（{@link #normalizeModelProviderOrder()}），
+      * provider 的区块劈成两段，故此时方法内部自动归组一次（{@link #normalizeModelProviderOrder()}），
      * 返回时「同一 provider 的模型连续」一定成立，调用方无需再补一次 normalize 兜着。
      * provider 未变时不归组，以严格保持本方法「接管原槽位、位置不变」的契约。</p>
      *
@@ -434,6 +586,14 @@ public class AgentSettings implements Serializable {
                 && java.util.Objects.equals(oldEntry.getProvider(), newModel.getProvider())
                 && java.util.Objects.equals(oldEntry.getModel(), newModel.getModel())) {
             newModel.setUid(oldEntry.getUid());
+        }
+        // 渠道身份延续：编辑表单不携带 providerId 时，若 provider 名称与 model 未变，
+        // 继承旧条目的 providerId——否则渠道 id 会被一次无关编辑抹掉、模型退回名称回退匹配
+        if (Assert.isEmpty(newModel.getProviderId()) && oldEntry != null
+                && Assert.isNotEmpty(oldEntry.getProviderId())
+                && java.util.Objects.equals(oldEntry.getProvider(), newModel.getProvider())
+                && java.util.Objects.equals(oldEntry.getModel(), newModel.getModel())) {
+            newModel.setProviderId(oldEntry.getProviderId());
         }
 
         String newKey = newModel.getNameOrModel();
@@ -462,7 +622,7 @@ public class AgentSettings implements Serializable {
             repairRenamedReferences(renamed);
         }
         if (oldGroup.equals(newGroup) == false) {
-            // 归位：把被勈开的目标 provider 区块合并回其首次出现处，其余模型相对顺序不变
+            // 归位：把被劈开的目标 provider 区块合并回其首次出现处，其余模型相对顺序不变
             normalizeModelProviderOrder();
         }
         return true;
@@ -518,10 +678,13 @@ public class AgentSettings implements Serializable {
             return false;
         }
 
+        // 渠道分组键：可解析出渠道 id 时按 id，否则按名称回退（与 modelGroupKey 同口径）
+        String group = channelGroupKey(provider);
+
         // 该 provider 当前成员（按原顺序）
         Set<String> members = new LinkedHashSet<>();
         for (Map.Entry<String, ModelDo> entry : models.entrySet()) {
-            if (provider.equals(modelGroupKey(entry.getValue()))) {
+            if (group.equals(modelGroupKey(entry.getValue()))) {
                 members.add(entry.getKey());
             }
         }
@@ -548,7 +711,7 @@ public class AgentSettings implements Serializable {
         Map<String, ModelDo> rebuilt = new LinkedHashMap<>();
         boolean inserted = false;
         for (Map.Entry<String, ModelDo> entry : models.entrySet()) {
-            if (provider.equals(modelGroupKey(entry.getValue()))) {
+            if (group.equals(modelGroupKey(entry.getValue()))) {
                 if (inserted == false) {
                     for (String key : block) {
                         rebuilt.put(key, models.get(key));
@@ -689,7 +852,7 @@ public class AgentSettings implements Serializable {
         Map<String, ModelDo> rebuilt = new LinkedHashMap<>();
         List<String> removedKeys = new ArrayList<>();
         for (Map.Entry<String, ModelDo> entry : models.entrySet()) {
-            if (providerName.equals(modelGroupKey(entry.getValue()))) {
+            if (modelBelongsToChannel(entry.getValue(), providerName)) {
                 removedKeys.add(entry.getKey());
             } else {
                 rebuilt.put(entry.getKey(), entry.getValue());
@@ -815,6 +978,11 @@ public class AgentSettings implements Serializable {
             this.models = seeded;
         }
 
+        // 渠道 id 回填必须在播种之后再做一次：loadFromFile 里的 ensureChannelIds 早于本方法，
+        // 从 config.yml 播种进来的模型不带 providerId，漏回填会让它们退回名称回退匹配、
+        // 与同渠道 id 模型分裂成两个区块（顺序不变量随之失效）。幂等，重复调用无副作用。
+        ensureChannelIds();
+
         // 兼容旧的 AgentProperties/config.yml：模型级上下文长度不再是有效设置。
         clearModelContextLengths();
 
@@ -919,6 +1087,10 @@ public class AgentSettings implements Serializable {
              // 「每次加载都重排 + 回写」的死循环（AcpLink 每轮 prompt 都会 loadFromFile，等于每问一句
              // 重写两个配置文件，且并发下互相覆盖）。saveToFile 现已是原子写，但重排-拆分互相抵消的问题仍在。
             // 顺序会在下一次用户主动保存（各写入入口均调 saveSettings）时自然持久化。
+            //
+            // 渠道 id 回填必须先于归组：旧配置 models 只有 provider 名称，ensureChannelIds 按名称
+            // 回填 providerId 后，归组才能以「渠道唯一 id」为键把同名渠道的分裂段真正合并。
+            agentSettings.ensureChannelIds();
             List<String> splitProviders = new ArrayList<>();
             if (agentSettings.normalizeModelProviderOrder(splitProviders)) {
                 LOG.info("[Settings] Model order normalized in memory (not persisted here): {} provider(s) had split blocks {}, {} models total",
@@ -1091,6 +1263,9 @@ public class AgentSettings implements Serializable {
         this.providers = newProviders;
         this.models = newModels;
         this.defaultModel = Assert.isEmpty(newDefaultModel) ? null : newDefaultModel;
+        // 桌面端镜像可能来自旧版本配置（无渠道 id）：与加载路径同口径回填 id/providerId，
+        // 保证远端进程内「渠道身份=id」恒成立；只改内存，镜像本身不落盘
+        ensureChannelIds();
         this.mirrored = true;
         // 世代号递增必须与 mirrored 置位同处、且在所有解析成功之后：解析抛异常时不得递增，
         // 否则桌面壳会把「推送失败」误判成「镜像已生效」，心跳比对从此永久错位。

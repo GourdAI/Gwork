@@ -956,6 +956,8 @@
     "turn_agents_one": "subagent",
     "turn_process_texts_one": "pas intermediar",
     "phase_thinking": "Gândește",
+    "context_compacted":  "Context comprimat",
+    "context_compacted_tip":  "Contextul a depasit bugetul; istoricul vechi a fost comprimat automat",
     "phase_text": "Scrie",
     "phase_waiting": "Așteaptă răspunsul",
     "args_streaming": "Se generează argumentele · {size}",
@@ -1405,6 +1407,11 @@
     "signed_in": "Autentificat",
     "required": "Introduceți utilizatorul și parola",
     "password_policy": "Parola trebuie să aibă 8–128 caractere",
-    "failed": "Operațiune eșuată"
+    "failed": "Operațiune eșuată",
+    "plan": "Plan",
+    "points": "Sold puncte",
+    "memory": "Memorie și evoluție",
+    "feedback": "Feedback",
+    "unavailable": "Serviciul de autentificare nu este disponibil. Folosiți aplicația desktop."
   }
 }

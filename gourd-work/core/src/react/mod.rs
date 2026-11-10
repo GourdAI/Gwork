@@ -556,7 +556,10 @@ impl ReActAgent {
         // generating (and billing); retrying re-sends the full context, and a
         // larger context times out *more* easily: a positive feedback loop.
         // So timeout-class failures get their own ≤2-per-round allowance, and
-        // the run's total retry time is capped regardless of failure class.
+        // one model call's total retry time is capped regardless of failure
+        // class. Both budgets are per call, never per run: a run-wide cap is a
+        // countdown on the task itself, so any run outliving it dies on its
+        // first transient error (see Cap 3 below).
         //
         // Cap 1: single-stream idle ceiling — no SSE data for this long means
         // the stream is dead (Java `streamIdleCap = modelTimeout + 30s`;
@@ -569,12 +572,33 @@ impl ReActAgent {
         // receive loop). A legitimately long answer can be legitimately long,
         // but 30 minutes of one completion is a stuck stream, not an answer.
         let stream_total_cap = std::time::Duration::from_secs(30 * 60);
-        // Cap 3: run-level retry deadline (Java `REASON_RETRY_TOTAL_DEADLINE =
-        // 45min` on `RetryTask.totalDeadline`). Bounded with `Instant` so a
-        // clock jump cannot extend or fake-expire it (same reason the D-1
-        // await_tasks fix used nanoTime on the Java side).
-        let retry_deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(RUN_RETRY_DEADLINE_SECS);
+        // Cap 3: per-model-call retry deadline (Java `REASON_RETRY_TOTAL_DEADLINE
+        // = 45min` on `RetryTask.totalDeadline`). `RetryTask` is constructed
+        // *inside* `callWithRetry` and takes its `startNanos` on entry, so Java's
+        // budget re-arms on every turn and is shared only by that turn's physical
+        // retries. Bounded with `Instant` so a clock jump cannot extend or
+        // fake-expire it (same reason the D-1 await_tasks fix used nanoTime on the
+        // Java side).
+        //
+        // This is deliberately NOT a whole-run budget, which is what it used to be.
+        // A run-level deadline turns 45 minutes into a countdown on the *task*:
+        // every long run that outlives it loses the ability to absorb a single
+        // transient network error, so one reqwest hiccup at minute 46 kills a task
+        // that had been healthy for 45 minutes — reported in production as
+        // "error sending request for url (…) The run's retry budget of 45 minutes
+        // is exhausted". Java's own argument for why this budget cannot hurt a
+        // legitimate long answer (`ReasonTask` javadoc: “首次尝试永不受约束…
+        // 45min > 30min ⇒ 一个正常完成的长回答（含深度思考）永远不会碰到本预算”)
+        // holds *only* because the budget re-arms per call.
+        let mut retry_deadline = retry_deadline_from_now();
+        // Marks the next loop iteration as another *attempt at the same model
+        // call* rather than a fresh turn. Only a fresh turn re-arms the deadline
+        // (Java: one `RetryTask` per `callWithRetry`, shared by that call's
+        // retries). Re-arming on a retry too would make the deadline unreachable
+        // and resurrect the infinite-retry shape it exists to bound — so every
+        // retry-of-the-same-call branch below must set this flag, and nothing else
+        // may. `p2_retry_deadline_is_per_call_not_per_run` pins the set.
+        let mut retry_of_same_call = false;
         // Timeout-bucket counter, reset every round (Java counts per turn).
         let mut timeout_retries = 0u32;
         // Mutable: AutoRethink extends the ceiling as the run progresses
@@ -605,6 +629,16 @@ impl ReActAgent {
         // "completed" ended runs with an empty final answer and no explanation
         // (the other half of the "long task ends wrong" symptom).
         let mut empty_rounds = 0u32;
+
+        // Corrupted-stream retries, **run-level and never reset**.
+        //
+        // Run-scoped on purpose: a turn-scoped bucket would be re-armed by
+        // every successful round, so a provider that corrupts intermittently
+        // could burn the whole 45-minute `retry_deadline` — the shape actually
+        // recorded on session work-mw8wizyz (3.5M input tokens, then "retry
+        // budget exhausted"). Corruption is a property of the upstream, not of
+        // one turn, so the allowance is spent once for the run.
+        let mut corruption_retries = 0u32;
 
         // There is deliberately no output-volume or "no progress" judgement
         // here. A pair of such checks lived here (P4, 2026-10-31) and was
@@ -713,6 +747,17 @@ impl ReActAgent {
         loop {
             turns += 1;
 
+            // Cap 3 re-arm point: a fresh turn is a fresh `callWithRetry`, so it
+            // gets its own retry budget (Java constructs `RetryTask` per call and
+            // takes `startNanos` on entry). A retry of the *same* call — flagged by
+            // the two retry branches below — skips this and keeps burning the
+            // budget it already started, which is what keeps the deadline
+            // reachable at all.
+            if !retry_of_same_call {
+                retry_deadline = retry_deadline_from_now();
+            }
+            retry_of_same_call = false;
+
             if cancel.is_cancelled() {
                 // Emit `done` before returning. The frontend leaves its streaming
                 // state only on a `done` frame for the active run
@@ -772,6 +817,18 @@ impl ReActAgent {
                     tokens = %format!("{}->{}", outcome.before_tokens, outcome.after_tokens),
                     "context compressed"
                 );
+                // Tell the frontend so the content area can draw the
+                // "已压缩上下文" divider at exactly this point in the stream
+                // (Java `WebStreamBuilder.onContextSizeEvent`). Emitted before
+                // any frame of this turn, so the divider lands between the
+                // pre-compression tool groups and whatever this turn produces.
+                emit!(Frame::context_compacted(
+                    &config.session_id,
+                    outcome.before_count,
+                    outcome.after_count,
+                    outcome.before_tokens,
+                    outcome.after_tokens,
+                ));
             }
             messages = outcome.messages;
             // Context pressure for this turn, snapshot here (Java caches it in
@@ -962,6 +1019,18 @@ impl ReActAgent {
 
             // Accumulate the response
             let mut content_buf = String::new();
+            // Thinking/reasoning text of this round, accumulated for the
+            // **corruption gate only** — never fed back into `messages`
+            // (`ChatMessage` has no reasoning field; Java keeps its
+            // `streamedReasoningBuf` for replay suppression, not history).
+            //
+            // It must exist because `ReasoningDelta` is emit-only: without a
+            // buffer the gate can only see `content_buf`, so a turn whose
+            // damage lands in the *thinking* block passes as clean. That is the
+            // reported "思考也有乱码" case — long-thinking models emit minutes of
+            // reasoning with zero content, so on those runs the gate would have
+            // had nothing to look at at all.
+            let mut reasoning_buf = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut stream_error: Option<String> = None;
             // P2 caps 1+2 start when the first byte of *this* stream is
@@ -1106,6 +1175,7 @@ impl ReActAgent {
                         }
                     }
                     StreamEvent::ReasoningDelta(delta) => {
+                        reasoning_buf.push_str(&delta);
                         emit!(Frame::reason(&config.session_id, &delta));
                         let now = std::time::Instant::now();
                         if first_content_at.is_none() {
@@ -1228,6 +1298,7 @@ impl ReActAgent {
                             "stream attempt delivered partial output; discarding accumulators before transport retry"
                         );
                         content_buf.clear();
+                        reasoning_buf.clear();
                         tool_calls.clear();
                         // A transport retry discards the partial deltas: the timed
                         // decode segment of the aborted attempt must start over too.
@@ -1377,14 +1448,19 @@ impl ReActAgent {
                     // so without this bucket an upstream outage retries forever
                     // — the work-mua28gy6 shape.
                     //
-                    // Cap 3: the run's whole retry budget. Any failure class.
-                    // `Instant`-based, so a wall-clock jump cannot fake-extend it.
+                    // Cap 3: this model call's whole retry budget. Any failure
+                    // class. Re-armed per turn (Java `RetryTask` lifetime), shared
+                    // by this call's retries, `Instant`-based so a wall-clock jump
+                    // cannot fake-extend it.
                     let timeout_out = timeout_class && timeout_retries >= MAX_TIMEOUT_RETRIES_PER_TURN;
                     let deadline_out = std::time::Instant::now() > retry_deadline;
                     if !fatal && !timeout_out && !deadline_out && turns < max_turns {
                         if timeout_class {
                             timeout_retries += 1;
                         }
+                        // Same call, so keep its deadline (see the re-arm point at
+                        // the top of this loop).
+                        retry_of_same_call = true;
                         emit!(Frame::retry(&config.session_id, turns, max_turns, &err));
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         continue;
@@ -1399,9 +1475,10 @@ impl ReActAgent {
                             )
                         } else if deadline_out {
                             format!(
-                                "{}\nThe run's retry budget of {} minutes is exhausted; stopping \
-                                 instead of retrying. Resend the message to start a fresh budget.",
-                                err, RUN_RETRY_DEADLINE_SECS / 60
+                                "{}\nThis model call has spent {} minutes retrying without one \
+                                 successful response, so the run stopped instead of retrying the \
+                                 same request again. Resend the message to continue.",
+                                err, MODEL_CALL_RETRY_DEADLINE_SECS / 60
                             )
                         } else {
                             err
@@ -1449,6 +1526,7 @@ impl ReActAgent {
                         // Discard before signalling, so the retry frame is the
                         // only thing left on screen from this attempt.
                         content_buf.clear();
+                        reasoning_buf.clear();
                         tool_calls.clear();
                         args_progress.clear();
                         finish_reason.clear();
@@ -1464,6 +1542,9 @@ impl ReActAgent {
                             max_turns,
                             &err
                         ));
+                        // Same call, so keep its deadline (see the re-arm point at
+                        // the top of this loop).
+                        retry_of_same_call = true;
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         continue;
                     }
@@ -1493,6 +1574,178 @@ impl ReActAgent {
 
             // Filter out empty tool calls
             tool_calls.retain(|tc| !tc.id.is_empty() && !tc.function.name.is_empty());
+
+            // ── Corruption gate ──────────────────────────────────────────────
+            //
+            // Must run BEFORE the broken-JSON check below: a mangled argument
+            // stream is usually *also* invalid JSON, and the two need opposite
+            // remedies. "Arguments incomplete" is either a length cap (retrying
+            // is futile) or a dropped connection; this one is upstream damage to
+            // a stream the transport considered successful, so a clean retry is
+            // exactly right and must not be pre-empted by the wrong error text.
+            //
+            // Damage site decides the terminal behaviour, and the split is the
+            // whole point:
+            //
+            // - **tool call** → never execute, retry clean, then fail hard.
+            //   A corrupt `file_path` is still valid JSON, so it passed the
+            //   broken check and ran a real `read` of a nonsense path
+            //   (work-mw8wizyz: the "File not found" card the user reported, and
+            //   then the model spent its whole turn chasing that garbage). The
+            //   same damage on a `write` would destroy a real file.
+            // - **prose/thinking** → retry clean, then keep the output and warn.
+            //   Deliberately NOT fatal: U+FFFD is a legitimate character a model
+            //   can emit (debugging a codec, reviewing this very bug), and
+            //   killing a healthy run over it repeats a mistake already made once
+            //   in this file — the removed P4 "diminishing output" pair of checks
+            //   judged healthy agent rounds as filler and terminated a run that
+            //   had 13 successful tool calls on record (see the "no output-volume
+            //   or no-progress judgement" note near the run's local counters,
+            //   and `turn_budget_has_no_output_volume_or_no_progress_gate`).
+            //   Text the user can still read beats an error bubble.
+            let corrupt_tools = corrupt_argument_calls(&tool_calls);
+            // `prose_hits` covers BOTH the answer and the thinking block. They
+            // are the same class of damage (a readable-text corruption with no
+            // tool to protect), so they share the remedy: retry clean, then keep
+            // the output with a warning. Scanning only `content_buf` would leave
+            // the reported "思考也有乱码" case undetected on long-thinking models,
+            // which emit reasoning for minutes with an empty content buffer.
+            let mut prose_hits = corruption_signatures(&content_buf);
+            for sig in corruption_signatures(&reasoning_buf) {
+                if !prose_hits.contains(&sig) {
+                    prose_hits.push(sig);
+                }
+            }
+            if !corrupt_tools.is_empty() || !prose_hits.is_empty() {
+                let retryable = corruption_retries < MAX_CORRUPTION_RETRIES
+                    && std::time::Instant::now() <= retry_deadline
+                    && turns < max_turns;
+                if retryable {
+                    corruption_retries += 1;
+                    // Same shape as the partial-output retry path, and for the
+                    // same defensive reason: drop every accumulator so the retry
+                    // cannot concatenate onto the damaged half, and tell the
+                    // frontend to roll back what this attempt already rendered
+                    // (discardPartial) — otherwise the garbled bubble and the
+                    // orphan skeleton cards stay on screen beside the retry's
+                    // clean output, which is exactly the "old card shapes still
+                    // showing" complaint.
+                    //
+                    // These are technically redundant: `continue` re-enters the
+                    // turn loop, which re-declares all of them per round. They
+                    // stay because the partial-output retry above clears them
+                    // too, and a future edit that moves the declarations outside
+                    // the loop would otherwise turn this into a silent
+                    // concatenate-onto-garbage bug.
+                    content_buf.clear();
+                    reasoning_buf.clear();
+                    tool_calls.clear();
+                    args_progress.clear();
+                    finish_reason.clear();
+                    warn!(
+                        session = %config.session_id,
+                        turn = turns,
+                        attempt = corruption_retries,
+                        max = MAX_CORRUPTION_RETRIES,
+                        corrupt_tools = %corrupt_tools.join(","),
+                        prose_signatures = %prose_hits.join(","),
+                        "upstream stream corruption detected; discarding partial output and retrying clean"
+                    );
+                    emit!(Frame::stream_retry(
+                        &config.session_id,
+                        corruption_retries,
+                        MAX_CORRUPTION_RETRIES,
+                        &format!(
+                            "上游返回的数据已损坏（{}）",
+                            if corrupt_tools.is_empty() {
+                                prose_hits.join(",")
+                            } else {
+                                let mut all = corrupt_tools.clone();
+                                all.extend(prose_hits.iter().map(|s| s.to_string()));
+                                all.join(",")
+                            }
+                        ),
+                    ));
+                    // Same call, so keep its retry deadline (see the re-arm
+                    // point at the top of this loop).
+                    retry_of_same_call = true;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+
+                if !corrupt_tools.is_empty() {
+                    // The parenthetical must name the damage, and it must never be
+                    // empty: in the shape actually reported (corrupt tool arguments,
+                    // readable prose) `prose_hits` is empty, so interpolating it
+                    // alone printed "corrupted ()" — a message that looks broken
+                    // while the run is failing. Fall back to naming the damaged
+                    // call itself, which is the evidence the user can act on.
+                    let damage = if prose_hits.is_empty() {
+                        format!("damaged arguments in: {}", corrupt_tools.join(", "))
+                    } else {
+                        prose_hits.join(", ")
+                    };
+                    let msg = format!(
+                        "The model stream was corrupted ({}), so the tool call(s) {} were \
+                         NOT executed — running them on damaged arguments risks writing to \
+                         the wrong file. The damaged output was discarded rather than treated \
+                         as a result. Resend the message to retry; if it keeps happening, \
+                         switch model or provider.",
+                        damage,
+                        corrupt_tools.join(", ")
+                    );
+                    warn!(
+                        session = %config.session_id,
+                        turn = turns,
+                        tools = %corrupt_tools.join(","),
+                        retries = corruption_retries,
+                        "corrupted tool-call arguments after retries exhausted; refusing to execute"
+                    );
+                    steer_exit!(Frame::steer_dropped, true);
+                    // Discarding error: the final attempt's damaged deltas are
+                    // already rendered (garbled bubble + orphan skeleton cards)
+                    // and no `stream_retry` will follow to clear them, since
+                    // that only fires *before* a retry. Roll them back so the
+                    // error replaces known-bad bytes instead of sitting under
+                    // them — the "old card shapes still showing" complaint.
+                    emit!(Frame::error_discarding(&config.session_id, &msg));
+                    return ReActResult {
+                        final_answer: msg,
+                        turns_used: turns,
+                        usage: total_usage,
+                        stop_reason: StopReason::Error,
+                        next_seq: seq,
+                        messages,
+                        pending_command: None,
+                        pending_tool_call_id: None,
+                    };
+                }
+
+                // Prose-only damage, retries exhausted: keep the answer, but say
+                // so. U+FFFD is visible in the text itself; naming the cause is
+                // what stops it looking like a model that went mad.
+                warn!(
+                    session = %config.session_id,
+                    turn = turns,
+                    signatures = %prose_hits.join(","),
+                    retries = corruption_retries,
+                    "corrupted model text after retries exhausted; surfacing it with a warning"
+                );
+                // Only when there is nothing left to run. An `error` frame makes
+                // the client call `markToolCardFailed`, which would stamp the
+                // *legitimate* skeleton cards of this round as failed a moment
+                // before we execute them — a red card over work that actually
+                // succeeded. Log-only is the honest degradation there.
+                if tool_calls.is_empty() {
+                    emit!(Frame::error(
+                        &config.session_id,
+                        &format!(
+                            "上游返回的数据存在损坏（{}），以下内容可能包含乱码。",
+                            prose_hits.join(", ")
+                        ),
+                    ));
+                }
+            }
 
             // Reject tool calls whose arguments are not valid JSON before
             // executing anything.
@@ -2111,17 +2364,46 @@ const MAX_CONVERGE_DEFERRALS: u32 = 2;
 /// not a contract.
 const MAX_EMPTY_ROUNDS: u32 = 3;
 
+/// Corrupted-stream retries allowed per run (see `corruption_retries`).
+///
+/// Two, matching `MAX_TIMEOUT_RETRIES_PER_TURN`: a transient upstream glitch
+/// usually clears on the next request, and by the third the damage is systemic
+/// — continuing would repeat the work-mw8wizyz shape (3.5M input tokens burned,
+/// then "retry budget exhausted").
+///
+/// Note the *terminal* behaviour differs by damage site, which is the point of
+/// the split: a corrupt tool call ends the run with an error (executing it
+/// could destroy a file), while corrupt prose is surfaced as-is with a warning
+/// (a model that legitimately prints U+FFFD — say, while debugging a codec —
+/// must not be killed for it).
+const MAX_CORRUPTION_RETRIES: u32 = 2;
+
 /// P2: timeout-class failures allowed per round before the run stops
 /// honestly. Java `ReasonTask` timeout bucket: “连续两次都超时说明是系统性
 /// 原因，第三次同样会超时” — production evidence work-mua28gy6 (34 retries,
 /// 67.6 minutes, zero progress).
 const MAX_TIMEOUT_RETRIES_PER_TURN: u32 = 2;
 
-/// P2: run-level retry budget in seconds. Java `REASON_RETRY_TOTAL_DEADLINE =
-/// 45min`: the total wall-clock time a run may spend in retry/failure loops,
-/// regardless of failure class. Bounded so no failure class can spin forever
-/// under AutoRethink's ever-rising `turns < max_turns`.
-const RUN_RETRY_DEADLINE_SECS: u64 = 45 * 60;
+/// P2: per-model-call retry budget in seconds. Java `REASON_RETRY_TOTAL_DEADLINE
+/// = 45min`, taken as `startNanos` inside `callWithRetry`, which runs once per
+/// turn: the total wall-clock time one model call may spend in retry/failure
+/// loops, regardless of failure class, shared by that call's physical retries.
+/// Re-armed on every fresh turn (`retry_of_same_call`), never run-wide — a
+/// run-wide deadline turns the budget into a countdown on the task itself, so a
+/// long but healthy run loses the ability to absorb a single transient error
+/// after 45 minutes.
+///
+/// Bounded so no failure class can spin forever under AutoRethink's ever-rising
+/// `turns < max_turns`.
+const MODEL_CALL_RETRY_DEADLINE_SECS: u64 = 45 * 60;
+
+/// The deadline for a fresh model call's retry budget (`Instant`-based, so a
+/// wall-clock jump cannot extend or fake-expire it). Single source for both the
+/// initial value and the per-turn re-arm, so the two can never drift apart.
+fn retry_deadline_from_now() -> std::time::Instant {
+    std::time::Instant::now()
+        + std::time::Duration::from_secs(MODEL_CALL_RETRY_DEADLINE_SECS)
+}
 
 /// Loop fingerprint for one round, Java `StopLoopInterceptor` semantics:
 /// canonicalised tool name + arguments (except NAME_ONLY_TOOLS, whose args
@@ -2467,6 +2749,82 @@ fn broken_argument_calls(tool_calls: &[ToolCall]) -> Vec<String> {
         .collect()
 }
 
+/// Corruption signatures that make a streamed fragment untrustworthy.
+///
+/// Both were observed live on session work-mw8wizyz (wx-paas-platform), where a
+/// single bad byte from the upstream latched the LLM stream's decoder into GBK
+/// and mangled the rest of the turn:
+///
+/// - `\u{FFFD}` — a byte that was not valid UTF-8. An SSE/JSON body is UTF-8 by
+///   contract, so a replacement character is *always* upstream damage, never
+///   legitimate model output. This is the `` the user reported in
+///   the thinking block and the answer bubble.
+/// - `<arg_key>` / `<arg_value>` — the *provider's* internal tool-call framing
+///   leaking through as data. These tokens do not exist anywhere in this
+///   codebase (verified by grep), so their arrival means the upstream
+///   mis-framed a call. The leaked markup then sat inside a `file_path`
+///   argument, which stayed **valid JSON** and so sailed past
+///   [`broken_argument_calls`] into a real `read` of a nonsense path.
+///
+/// Deliberately NOT in this list: `<tool_call`, `</think>`, `<parameter=`,
+/// `tool_calls":`. Those are ordinary text in a repository that works on agent
+/// tooling — `git_api.rs` keeps a list of exactly these markers, and this very
+/// debugging session quoted them. Rejecting them would break every healthy run
+/// that touches this code. [`is_foreign_framing_leak`] is therefore the narrow,
+/// high-confidence subset.
+///
+/// Returns the matched signature names so the log line can say *why*.
+pub(crate) fn corruption_signatures(text: &str) -> Vec<&'static str> {
+    let mut hits = Vec::new();
+    if text.contains('\u{FFFD}') {
+        hits.push("U+FFFD");
+    }
+    if is_foreign_framing_leak(text) {
+        hits.push("foreign tool framing");
+    }
+    hits
+}
+
+/// Whether `text` carries the provider's leaked tool-call framing.
+///
+/// Requires BOTH halves of the pair. A lone `<arg_key>` could plausibly be
+/// quoted prose (a user pasting the evidence of this very bug, say); the paired
+/// `<arg_key>…</arg_key><arg_value>` shape is what a mis-framed call actually
+/// looks like and is not something anyone writes by hand.
+fn is_foreign_framing_leak(text: &str) -> bool {
+    text.contains("<arg_key>") && text.contains("<arg_value>")
+}
+
+/// Tool calls whose arguments parse as JSON but cannot be trusted.
+///
+/// [`broken_argument_calls`] only rejects *invalid* JSON. The reported failure
+/// was the opposite shape: a damaged `file_path` value inside a perfectly
+/// well-formed `{"file_path":"…"}` object, which the loop then executed. Running
+/// a tool on bytes we know are corrupt is how a `write` destroys a real file and
+/// how a `read` sends the model chasing a path that never existed — so this is
+/// the second half of the same gate.
+///
+/// A call is untrusted when its name or arguments carry a corruption signature.
+/// Kept separate from the JSON check so the two failure modes stay
+/// distinguishable in logs: one means "truncated", this one means "mangled".
+fn corrupt_argument_calls(tool_calls: &[ToolCall]) -> Vec<String> {
+    tool_calls
+        .iter()
+        .filter(|tc| {
+            !corruption_signatures(&tc.function.name).is_empty()
+                || !corruption_signatures(&tc.function.arguments).is_empty()
+        })
+        .map(|tc| {
+            let name = if tc.function.name.is_empty() {
+                "<unnamed>"
+            } else {
+                tc.function.name.as_str()
+            };
+            name.to_string()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2701,6 +3059,123 @@ mod tests {
         let mut b = call("c2", "write");
         b.function.arguments = "{\"file_path\":\"x\"}".into();
         assert!(broken_argument_calls(&[a, b]).is_empty());
+    }
+
+    // ─── corruption gate (U+FFFD / leaked provider framing) ────────────────
+    //
+    // These pin the exact damage recorded on session work-mw8wizyz. The point
+    // the first test proves is subtle and is *why* this gate exists at all: the
+    // corrupt arguments below are VALID JSON, so `broken_argument_calls` waves
+    // them through and the loop runs a real tool on them.
+
+    /// The reported bug: a mangled `file_path` that is still well-formed JSON.
+    /// `broken_argument_calls` must NOT catch it (it parses fine) while
+    /// `corrupt_argument_calls` must — proving the two gates are not redundant.
+    #[test]
+    fn valid_json_with_corrupt_value_is_caught_only_by_the_corruption_gate() {
+        let mut tc = call("c1", "read");
+        // Verbatim shape from the stream dump: leaked `<arg_key>/<arg_value>`
+        // framing plus dropped characters, all inside a valid JSON object.
+        tc.function.arguments =
+            "{\"file_path\":\"37/w 20 |4 Util ...\\\"</think></think><tool_call>bash<arg_key>command</arg_key><arg_value>Select-String -Path/w-ai/wxai-agent/src/main/java/org/d/org/grom/ai/models/ChatClient.java\"}"
+                .into();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&tc.function.arguments).is_ok(),
+            "precondition: this is valid JSON, so the truncation gate cannot see it"
+        );
+        assert!(
+            broken_argument_calls(&[tc.clone()]).is_empty(),
+            "the truncation gate must stay blind to valid JSON (it is the corruption gate's job)"
+        );
+        assert_eq!(
+            corrupt_argument_calls(&[tc]),
+            vec!["read".to_string()],
+            "leaked provider framing inside a valid JSON value must be rejected before execution"
+        );
+    }
+
+    /// A replacement character in the argument value is caught too, and the
+    /// tool name is reported (a corrupt *name* cannot be executed either).
+    #[test]
+    fn replacement_char_in_arguments_is_corrupt() {
+        let mut tc = call("c1", "read");
+        tc.function.arguments = "{\"file_path\":\"src/\u{FFFD}main.rs\"}".into();
+        assert_eq!(corrupt_argument_calls(&[tc]), vec!["read".to_string()]);
+    }
+
+    /// A corrupt tool *name* is flagged, and an empty name is reported as
+    /// `<unnamed>` rather than dropped silently from the message.
+    #[test]
+    fn corrupt_name_is_flagged_and_empty_name_is_named() {
+        let mut named = call("c1", "read");
+        named.function.name = "re\u{FFFD}d".into();
+        assert_eq!(corrupt_argument_calls(&[named]), vec!["re\u{FFFD}d".to_string()]);
+
+        let mut anon = call("c2", "");
+        anon.function.name = String::new();
+        anon.function.arguments = "{\"p\":\"\u{FFFD}\"}".into();
+        assert_eq!(corrupt_argument_calls(&[anon]), vec!["<unnamed>".to_string()]);
+    }
+
+    /// Healthy arguments of every kind must pass. This is the false-positive
+    /// guard: `<tool_call>`, `</think>`, `<parameter=`, `tool_calls":` and a lone
+    /// `<arg_key>` are all legitimate text in a repo that works on agent tooling
+    /// (and this very debugging session quoted them), so only the *paired*
+    /// `<arg_key>…<arg_value>` framing and U+FFFD may trip the gate.
+    #[test]
+    fn agent_tooling_text_in_arguments_is_not_corruption() {
+        let mut a = call("c1", "grep");
+        a.function.arguments = "{\"pattern\":\"<tool_call>\",\"include\":\"*.rs\"}".into();
+        let mut b = call("c2", "grep");
+        b.function.arguments = "{\"pattern\":\"<parameter=|tool_calls\\\\\\\":\",\"include\":\"*\"}".into();
+        let mut c = call("c3", "write");
+        // A lone `<arg_key>` is quotable prose; only the paired framing counts.
+        c.function.arguments = "{\"file_path\":\"x.md\",\"content\":\"the token <arg_key> appears\"}".into();
+        let mut d = call("c4", "read");
+        d.function.arguments = "{\"file_path\":\"src/main.rs\"}".into();
+        assert!(
+            corrupt_argument_calls(&[a, b, c, d]).is_empty(),
+            "agent-tooling markup and lone fragments are not corruption"
+        );
+    }
+
+    /// The paired framing signature is what fires, and both halves are
+    /// required — this is the anti-false-positive contract for the leak check.
+    #[test]
+    fn foreign_framing_leak_requires_the_paired_shape() {
+        assert!(is_foreign_framing_leak("<arg_key>command</arg_key><arg_value>x</arg_value>"));
+        assert!(!is_foreign_framing_leak("only <arg_key> here"), "a lone key is prose");
+        assert!(!is_foreign_framing_leak("only <arg_value> here"), "a lone value is prose");
+        assert!(!is_foreign_framing_leak("clean arguments"), "clean text never trips");
+    }
+
+    /// `corruption_signatures` names every hit so logs and the user-facing
+    /// error can say *why*, and clean text yields nothing.
+    #[test]
+    fn corruption_signatures_reports_each_hit() {
+        assert_eq!(corruption_signatures("healthy text").len(), 0);
+        assert_eq!(corruption_signatures("bad \u{FFFD} byte"), vec!["U+FFFD"]);
+        assert_eq!(
+            corruption_signatures("<arg_key>x</arg_key><arg_value>y</arg_value>"),
+            vec!["foreign tool framing"]
+        );
+        // Both at once (the real dump had both): order is stable.
+        let both = corruption_signatures("\u{FFFD} <arg_key>x</arg_key><arg_value>y</arg_value>");
+        assert_eq!(both, vec!["U+FFFD", "foreign tool framing"]);
+    }
+
+    /// Prose corruption detection used by the keep-the-answer branch: content
+    /// with a replacement character is flagged, clean content is not.
+    #[test]
+    fn prose_corruption_is_detected_in_content_buffer() {
+        assert!(
+            corruption_signatures("a normal assistant reply").is_empty(),
+            "clean prose must not trip the gate"
+        );
+        assert!(
+            !corruption_signatures("a reply with \u{FFFD} inside").is_empty(),
+            "a replacement character in prose is corruption"
+        );
     }
 
     // ─── repair_tool_pairing ────────────────────────────────────────────────
@@ -3105,8 +3580,8 @@ mod tests {
     // ─── P2: retry/latency budget ──────────────────────────────────────────
 
     /// Pure-function model of the retry gate: given the failure class, the
-    /// round's timeout counter, and whether the run deadline is past, decide
-    /// retry vs stop. Mirrors the loop body's `!fatal && !timeout_out &&
+    /// round's timeout counter, and whether *this model call's* deadline is past,
+    /// decide retry vs stop. Mirrors the loop body's `!fatal && !timeout_out &&
     /// !deadline_out && turns < max_turns` exactly — the lesson from the D-1
     /// round: Windows timer granularity makes wall-clock tests flaky, so the
     /// decision logic is table-driven and the loop only threads state in.
@@ -3172,8 +3647,116 @@ mod tests {
             "the honest stop message must explain the timeout bucket"
         );
         assert!(
-            norm.contains("retry budget of {} minutes is exhausted"),
-            "the honest stop message must explain the run deadline"
+            norm.contains("This model call has spent {} minutes retrying"),
+            "the honest stop message must explain the per-call deadline"
+        );
+    }
+
+    /// Source-level guard for the Cap-3 *scope*, which the gate pin above cannot
+    /// see: the deadline must be re-armed per model call (Java constructs
+    /// `RetryTask` inside `callWithRetry`, taking `startNanos` on entry) and must
+    /// NOT be re-armed by a retry of the same call.
+    ///
+    /// Both mutations are silent and both passed this file's whole suite before:
+    ///
+    /// - **Run-wide** (`retry_deadline` computed once before the loop): turns the
+    ///   budget into a countdown on the *task*. Production symptom: a healthy
+    ///   46-minute run died on its first transient reqwest error with "The run's
+    ///   retry budget of 45 minutes is exhausted". Java's javadoc argument for
+    ///   why 45min cannot kill a legitimate long answer only holds because the
+    ///   budget re-arms per call.
+    /// - **Re-armed unconditionally at the top of the loop**: every retry gets a
+    ///   fresh 45 minutes, so the deadline can never expire and Cap 3 stops
+    ///   bounding anything — resurrecting the work-mua28gy6 infinite-retry shape
+    ///   it exists to prevent. This is why the two retry branches must set
+    ///   `retry_of_same_call` and nothing else may.
+    #[test]
+    fn p2_retry_deadline_is_per_call_not_per_run() {
+        let src = include_str!("mod.rs");
+        let body = src
+            .split("async fn run_inner")
+            .nth(1)
+            .and_then(|s| s.split("mod tests").next())
+            .expect("run_inner body must be locatable");
+        let norm = body.replace("\r\n", "\n");
+
+        // The re-arm must sit at the very top of the loop body, ahead of the
+        // cancel check, and be conditional on the flag. The slice is delimited by
+        // `turns += 1;` … `if cancel.is_cancelled()` on purpose: slicing to the
+        // *next* `turns += 1` instead spans the whole loop body, which makes
+        // every `contains` below vacuously true and the guard worthless.
+        let rearm = norm
+            .split("turns += 1;")
+            .nth(1)
+            .unwrap_or("")
+            .split("if cancel.is_cancelled()")
+            .next()
+            .unwrap_or("");
+        let p_flag = rearm.find("if !retry_of_same_call {");
+        let p_rearm = rearm.find("retry_deadline = retry_deadline_from_now();");
+        let p_clear = rearm.find("retry_of_same_call = false;");
+        assert!(
+            p_flag.is_some() && p_rearm.is_some() && p_clear.is_some(),
+            "the loop top must re-arm the deadline under the flag and then clear \
+             it (M-pin: run-wide deadline kills healthy long runs on their first \
+             transient error; unconditional re-arm makes Cap 3 unreachable)"
+        );
+        // Order matters: guard → re-arm → clear. A clear placed before the
+        // guarded re-arm is the same as re-arming unconditionally.
+        assert!(
+            p_flag.unwrap() < p_rearm.unwrap() && p_rearm.unwrap() < p_clear.unwrap(),
+            "the flag must be read before it is cleared, or the re-arm happens \
+             on retries too and the deadline can never expire"
+        );
+
+        // Every retry-of-the-same-call branch must claim the flag, or the re-arm
+        // above silently becomes unconditional for that branch. The count is
+        // deliberately a hard equality rather than a minimum: any newly added
+        // retry branch then has to decide explicitly whether it restarts a model
+        // call (fresh budget) or retries the current one (keep the budget), and
+        // failing this test is what forces that decision.
+        //
+        // The three are: the empty-output retry, the partial-output retry, and the
+        // upstream-corruption retry.
+        assert_eq!(
+            norm.matches("retry_of_same_call = true;").count(),
+            3,
+            "exactly the three retry-of-the-same-call branches (empty-output, \
+             partial-output, upstream-corruption) may keep the existing deadline; \
+             a fourth setter means a path that should start a fresh call does not, \
+             and a missing one means the deadline re-arms mid-call"
+        );
+
+        // Initial arm + per-turn re-arm, both through the shared helper so the
+        // two can never drift to different budgets. Counted as assignment
+        // statements: the helper's own `fn` definition also contains the name and
+        // sits inside this same slice, so counting bare call sites reads 3.
+        assert_eq!(
+            norm.matches("retry_deadline = retry_deadline_from_now();").count(),
+            2,
+            "exactly two arms of the deadline (initial + per-turn re-arm)"
+        );
+    }
+
+    /// The budget must be the per-call one Java uses, and the shared helper must
+    /// be the only thing that turns it into a deadline.
+    #[test]
+    fn p2_retry_deadline_budget_matches_java_per_call() {
+        assert_eq!(
+            MODEL_CALL_RETRY_DEADLINE_SECS,
+            45 * 60,
+            "Java REASON_RETRY_TOTAL_DEADLINE = Duration.ofMinutes(45)"
+        );
+        let src = include_str!("mod.rs");
+        let helper = src
+            .split("fn retry_deadline_from_now()")
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .expect("the deadline helper must exist");
+        assert!(
+            helper.contains("MODEL_CALL_RETRY_DEADLINE_SECS"),
+            "the helper must derive from the single budget constant, not restate \
+             a number that can drift from it"
         );
     }
 
@@ -4146,6 +4729,492 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ─── corruption gate end-to-end (work-mw8wizyz) ─────────────────────────
+    //
+    // The live failure, compressed into a mock: one bad byte from the upstream
+    // garbled the turn, the garbling landed inside a tool-call argument that
+    // stayed VALID JSON (so `broken_argument_calls` waved it through), and the
+    // loop executed a real `read` of a nonsense path. The user saw a
+    // "File not found" tool card, a garbled thinking block, and the model spent
+    // the rest of the run chasing its own garbage until the 45-minute retry
+    // budget ran out.
+    //
+    // Three behaviours must hold, one test each:
+    //   1. corrupt tool arguments are never executed — the turn retries clean;
+    //   2. retries exhausted ⇒ honest terminal error that rolls back the DOM;
+    //   3. corrupt *prose* must NOT kill a healthy run (false-positive guard).
+
+    /// Mock SSE helpers, shared by the corruption tests below.
+    fn corrupt_mock_parts() -> (String, String, String) {
+        // The exact leaked-framing shape from the session dump, wrapped so it
+        // stays valid JSON — that validity is the whole point of the gate.
+        let corrupt_args = serde_json::json!({
+            "file_path": "37/w 20 |4 Util ...\"</think><tool_call>bash<arg_key>command</arg_key><arg_value>Select-String -Path/w-ai/wxai-agent/org/d/org/grom/ChatClient.java"
+        })
+        .to_string();
+
+        let tool_call_line = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "c-corrupt",
+                            "function": { "name": "read", "arguments": corrupt_args }
+                        }]
+                    }
+                }]
+            })
+        );
+        let finish_tools =
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n".to_string();
+        let done = "data: [DONE]\n\n".to_string();
+        (tool_call_line, finish_tools, done)
+    }
+
+    /// 1. A corrupt tool call must never reach the executor; the turn retries
+    ///    clean and the run completes. Asserts on FRAMES (no `action_start`
+    ///    ever emitted) because that is what proves non-execution — the tool
+    ///    registry is real here, so a leak would also touch the filesystem.
+    #[tokio::test]
+    async fn corrupt_tool_arguments_are_never_executed_and_retry_clean() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (tool_line, finish_tools, done) = corrupt_mock_parts();
+        const HDR: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut n = 0u32;
+            loop {
+                if let Ok((mut sock, _)) = listener.accept().await {
+                    let mut buf = [0u8; 16384];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(300),
+                        sock.read(&mut buf),
+                    )
+                    .await;
+                    n += 1;
+                    let body = if n == 1 {
+                        // Attempt 1: the corrupt tool call, properly terminated —
+                        // a "successful" stream as far as the transport knows.
+                        format!("{}Connection: close\r\n\r\n", HDR)
+                            + &tool_line
+                            + &finish_tools
+                            + &done
+                    } else {
+                        // Attempt 2 (the corruption gate's clean retry): a plain
+                        // final answer, so the run completes.
+                        let text = serde_json::json!({
+                            "choices": [{ "delta": { "content": "recovered answer" } }]
+                        });
+                        format!("{}Connection: close\r\n\r\n", HDR)
+                            + &format!("data: {}\n\n", text)
+                            + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                            + &done
+                    };
+                    let _ = sock.write_all(body.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                }
+            }
+        });
+
+        let config = corruption_itest_config(port, "work-corrupt-retry-itest", 5);
+        let agent = ReActAgent::new(std::sync::Arc::new(
+            crate::tools::ToolRegistry::default_registry(),
+        ));
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = agent.run(
+            &config,
+            vec![
+                crate::llm::types::ChatMessage::system("sys"),
+                crate::llm::types::ChatMessage::user("go"),
+            ],
+            frame_tx,
+            cancel,
+        );
+        let collector = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while let Some(f) = frame_rx.recv().await {
+                frames.push(f);
+            }
+            frames
+        });
+        let result = run.await;
+        let frames = collector.await.unwrap();
+
+        // Precondition first: the corruption gate must have fired and told the
+        // client to roll back. Without this, everything below could pass
+        // vacuously (e.g. if the dialect parser silently dropped the delta).
+        assert!(
+            frames.iter().any(|f| f.frame_type == "retry"
+                && f.extra["discardPartial"] == serde_json::json!(true)),
+            "the corruption gate must emit a discardPartial retry frame; got {:?}",
+            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+        );
+        // The corrupt call never executed: `action_start` is emitted only at
+        // execution time, so its absence is the proof (no File-not-found card,
+        // no filesystem touch, no garbage fed back into the model).
+        assert!(
+            !frames.iter().any(|f| f.frame_type == "action_start"),
+            "a corrupt tool call must never be executed"
+        );
+        assert_eq!(result.stop_reason, StopReason::Completed);
+        assert!(
+            result.final_answer.contains("recovered answer"),
+            "the clean retry must produce the real answer; got {:?}",
+            result.final_answer
+        );
+    }
+
+    /// 2. Retries exhausted ⇒ the run ends with an honest error that carries
+    ///    `discardPartial` (the last attempt's garbage is already on screen and
+    ///    no further retry frame will clear it), and the corrupt call still
+    ///    never executed.
+    #[tokio::test]
+    async fn corrupt_stream_exhausts_retries_then_fails_with_discard() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (tool_line, finish_tools, done) = corrupt_mock_parts();
+        const HDR: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut sock, _)) = listener.accept().await {
+                    let mut buf = [0u8; 16384];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(300),
+                        sock.read(&mut buf),
+                    )
+                    .await;
+                    // EVERY attempt corrupt: the systematic-damage case where the
+                    // budget must run out and the run must stop honestly — the
+                    // exact anti-pattern of work-mw8wizyz was retrying this for
+                    // 45 minutes.
+                    let body = format!("{}Connection: close\r\n\r\n", HDR)
+                        + &tool_line
+                        + &finish_tools
+                        + &done;
+                    let _ = sock.write_all(body.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                }
+            }
+        });
+
+        let config = corruption_itest_config(port, "work-corrupt-exhaust-itest", 10);
+        let agent = ReActAgent::new(std::sync::Arc::new(
+            crate::tools::ToolRegistry::default_registry(),
+        ));
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = agent.run(
+            &config,
+            vec![
+                crate::llm::types::ChatMessage::system("sys"),
+                crate::llm::types::ChatMessage::user("go"),
+            ],
+            frame_tx,
+            cancel,
+        );
+        let collector = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while let Some(f) = frame_rx.recv().await {
+                frames.push(f);
+            }
+            frames
+        });
+        let result = run.await;
+        let frames = collector.await.unwrap();
+
+        assert!(
+            !frames.iter().any(|f| f.frame_type == "action_start"),
+            "exhausted or not, the corrupt call must never execute"
+        );
+        let err = frames
+            .iter()
+            .find(|f| f.frame_type == "error")
+            .expect("a terminal error frame must be emitted");
+        assert_eq!(
+            err.extra["discardPartial"],
+            serde_json::json!(true),
+            "the terminal error must roll back the last attempt's garbage DOM"
+        );
+        assert_eq!(result.stop_reason, StopReason::Error);
+        assert!(
+            result.final_answer.contains("NOT executed"),
+            "the error must say the calls were refused, not pretend they ran: {:?}",
+            result.final_answer
+        );
+        // This mock's damage is confined to the tool arguments (attempt 1 emits
+        // no content and no reasoning), so `prose_hits` is empty here — the
+        // exact input that used to render "corrupted ()" with an empty
+        // parenthetical. The message must still name the damage.
+        assert!(
+            !result.final_answer.contains("corrupted ()"),
+            "the damage parenthetical must never be empty; got {:?}",
+            result.final_answer
+        );
+        assert!(
+            result.final_answer.contains("damaged arguments in: read"),
+            "with empty prose signatures the message must fall back to naming \
+             the damaged call; got {:?}",
+            result.final_answer
+        );
+        // Bounded: MAX_CORRUPTION_RETRIES(2) retries + 1 exhausted round = 3
+        // model requests, never the whole turn budget. Pinned because the
+        // counter is run-level BY DESIGN — a per-turn reset would reintroduce
+        // the 45-minute burn.
+        assert!(
+            result.turns_used <= MAX_CORRUPTION_RETRIES + 1,
+            "corruption retries must be run-bounded; turns_used={}",
+            result.turns_used
+        );
+    }
+
+    /// 3. False-positive guard: corrupt *prose* (no tool calls) must NOT kill
+    ///    the run. A model legitimately printing U+FFFD — debugging a codec,
+    ///    reviewing this very bug — keeps its answer; killing it would repeat
+    ///    the removed diminishing-output heuristic's mistake (healthy runs
+    ///    terminated by an output-shape guess).
+    #[tokio::test]
+    async fn corrupt_prose_keeps_the_answer_instead_of_killing_the_run() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const HDR: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n";
+        let garbled = "analysis with a \u{FFFD} inside but still readable";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let garbled_owned = garbled.to_string();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut sock, _)) = listener.accept().await {
+                    let mut buf = [0u8; 16384];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(300),
+                        sock.read(&mut buf),
+                    )
+                    .await;
+                    // Every attempt returns the same slightly-garbled prose with
+                    // a clean stop: text-only, nothing dangerous to refuse.
+                    let text = serde_json::json!({
+                        "choices": [{ "delta": { "content": garbled_owned } }]
+                    });
+                    let body = format!("{}Connection: close\r\n\r\n", HDR)
+                        + &format!("data: {}\n\n", text)
+                        + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                        + "data: [DONE]\n\n";
+                    let _ = sock.write_all(body.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                }
+            }
+        });
+
+        let config = corruption_itest_config(port, "work-corrupt-prose-itest", 10);
+        let agent = ReActAgent::new(std::sync::Arc::new(
+            crate::tools::ToolRegistry::default_registry(),
+        ));
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = agent.run(
+            &config,
+            vec![
+                crate::llm::types::ChatMessage::system("sys"),
+                crate::llm::types::ChatMessage::user("go"),
+            ],
+            frame_tx,
+            cancel,
+        );
+        let collector = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while let Some(f) = frame_rx.recv().await {
+                frames.push(f);
+            }
+            frames
+        });
+        let result = run.await;
+        let frames = collector.await.unwrap();
+
+        assert_eq!(
+            result.stop_reason,
+            StopReason::Completed,
+            "garbled prose must not kill a text-only run; final={:?}",
+            result.final_answer
+        );
+        assert!(
+            result.final_answer.contains(garbled),
+            "the answer must survive verbatim; got {:?}",
+            result.final_answer
+        );
+        // The user is still told why the text looks odd — but only after the
+        // retry budget is spent, and never with discardPartial (the answer text
+        // itself is being KEPT; rolling back would delete it).
+        let err = frames.iter().find(|f| f.frame_type == "error");
+        if let Some(e) = err {
+            assert_ne!(
+                e.extra["discardPartial"],
+                serde_json::json!(true),
+                "a kept answer must not be rolled back"
+            );
+        }
+    }
+
+    /// 4. The gate must see damage that lands ONLY in the thinking block.
+    ///
+    /// `ReasoningDelta` is emit-only, so before a reasoning accumulator existed
+    /// the gate could scan `content_buf` alone — and this test fails: attempt 1
+    /// streams clean content with a clean stop, so the run completes and no
+    /// retry frame is ever emitted. It is an integration test rather than a
+    /// pure-function one precisely because unit tests on
+    /// `corruption_signatures` stay green either way: they cannot see WHICH
+    /// buffer the gate reads. This is the reported "思考也有乱码" case, and on
+    /// long-thinking models the content buffer stays empty for minutes, so
+    /// reasoning is often the ONLY text available to judge.
+    #[tokio::test]
+    async fn corrupt_reasoning_alone_still_fires_the_gate() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const HDR: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut n = 0u32;
+            loop {
+                if let Ok((mut sock, _)) = listener.accept().await {
+                    let mut buf = [0u8; 16384];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(300),
+                        sock.read(&mut buf),
+                    )
+                    .await;
+                    n += 1;
+                    let body = if n == 1 {
+                        // Attempt 1: the *thinking* text is damaged, the visible
+                        // content is clean and the stream terminates normally —
+                        // a "successful" response whose only defect is in
+                        // reasoning. No tool call, so nothing dangerous runs;
+                        // the point is that the damage is still caught.
+                        let reasoning = serde_json::json!({
+                            "choices": [{
+                                "delta": { "reasoning_content": "思考过程 \u{FFFD} 乱码" }
+                            }]
+                        });
+                        let text = serde_json::json!({
+                            "choices": [{ "delta": { "content": "clean visible answer" } }]
+                        });
+                        format!("{}Connection: close\r\n\r\n", HDR)
+                            + &format!("data: {}\n\n", reasoning)
+                            + &format!("data: {}\n\n", text)
+                            + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                            + "data: [DONE]\n\n"
+                    } else {
+                        // Attempt 2 (the gate's clean retry): fully healthy.
+                        let text = serde_json::json!({
+                            "choices": [{ "delta": { "content": "recovered answer" } }]
+                        });
+                        format!("{}Connection: close\r\n\r\n", HDR)
+                            + &format!("data: {}\n\n", text)
+                            + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                            + "data: [DONE]\n\n"
+                    };
+                    let _ = sock.write_all(body.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                }
+            }
+        });
+
+        let config = corruption_itest_config(port, "work-corrupt-reason-itest", 10);
+        let agent = ReActAgent::new(std::sync::Arc::new(
+            crate::tools::ToolRegistry::default_registry(),
+        ));
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let run = agent.run(
+            &config,
+            vec![
+                crate::llm::types::ChatMessage::system("sys"),
+                crate::llm::types::ChatMessage::user("go"),
+            ],
+            frame_tx,
+            cancel,
+        );
+        let collector = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while let Some(f) = frame_rx.recv().await {
+                frames.push(f);
+            }
+            frames
+        });
+        let result = run.await;
+        let frames = collector.await.unwrap();
+
+        // The decisive assertion: reasoning-only damage must have fired the gate
+        // and asked the client to roll back the garbled thinking block. Without
+        // `reasoning_buf` this finds nothing and the test fails.
+        assert!(
+            frames.iter().any(|f| f.frame_type == "retry"
+                && f.extra["discardPartial"] == serde_json::json!(true)),
+            "corruption confined to the thinking block must still fire the gate; got {:?}",
+            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+        );
+        // The retry must have been *taken* and produced the clean attempt, not
+        // merely offered — otherwise the discardPartial frame above could come
+        // from an unrelated path.
+        assert_eq!(
+            result.stop_reason,
+            StopReason::Completed,
+            "the clean retry must complete the run; final={:?}",
+            result.final_answer
+        );
+        assert!(
+            result.final_answer.contains("recovered answer"),
+            "the final answer must come from the clean retry, not the damaged \
+             attempt; got {:?}",
+            result.final_answer
+        );
+    }
+
+    /// Shared config for the corruption integration tests: a real workspace
+    /// (temp dir), full access, generous turn budget — the budget assertions
+    /// are made on `MAX_CORRUPTION_RETRIES`, not `max_turns`.
+    fn corruption_itest_config(port: u16, id: &str, max_turns: u32) -> ReActConfig {
+        ReActConfig {
+            session_id: id.into(),
+            workspace: std::env::temp_dir(),
+            session_dir: None,
+            model: crate::config::ModelConfig {
+                name: "mock".into(),
+                standard: "openai".into(),
+                api_url: format!("http://127.0.0.1:{}", port),
+                api_key: "k".into(),
+                model: "mock".into(),
+                ..Default::default()
+            },
+            settings: crate::config::Settings::default(),
+            access_mode: "full".into(),
+            max_turns,
+            run_id: format!("run-{}", id),
+            start_seq: 0,
+            hitl_approved: true,
+            gate: None,
+            change_ledger: None,
+            context_length: 0,
+            turn_start_ms: 0,
+            usage_seed: Default::default(),
+            force_compact: false,
+            compact_focus: None,
+            subagent_depth: 0,
+            root_session_id: id.into(),
+            thinking: None,
+        }
     }
 
     // ─── forced /compact actually fires from inside the loop ───────────────

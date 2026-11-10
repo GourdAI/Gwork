@@ -216,8 +216,8 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     .sidebar-update-btn, .sidebar-update-btn[data-state="downloading"]::after { transition: none; }
 }
 /* 底栏右侧常驻项（设置）不得被更新按钮挤压而换行撑高底栏 */
-.sidebar-footer .settings-btn { flex-shrink: 0; white-space: nowrap; }
-.sidebar-footer .settings-btn .sidebar-text { white-space: nowrap; }
+/* 底栏首子项现在是用户卡片（.account-card，样式见文件末账号区块）；
+   原 .sidebar-footer .settings-btn 规则随独立设置按钮移除而删除。 */
 /* 极窄侧栏兜底：空间不够时整块收起文字、只留图标。不用 JS 测宽：进图标态后，
    红点（待更新）+ 底边进度条（下载中）+ 强调色淡底 chip（可安装）仍完整传达状态，
    文字降级到 title；而“百分比被省略号截成 4…”会让进度信息直接失效，比不显示更糟。
@@ -610,7 +610,23 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    只存在于参数里，隐藏等于这些调用在界面上没有任何可辨识信息，用户必须逐条点开，
    而卡体内只有输出、没得回命令。重复问题已由 formatToolArgsStr 的 ARG_SUPPRESSED
    在源头消除（file_path/path 不进入参数串，与 .tool-file 不再重叠）。 */
- .tool-args { display: block; order: 3; flex: 0 1 auto; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* flex-basis 必须为 0（2026-11 修复「工具行文件名被挤压裁断」）。
+   旧值 0 1 auto 的 basis=auto = 整段参数全文宽度，先占满整行，把同排 .tool-file
+   压到极窄：真实 Chrome 复现（长参数 + header 320/620px）文件名 client/scroll
+   = 14/66、34/66，被 overflow:hidden + text-overflow:ellipsis 裁断；
+   改 1 1 0 后两档均为 66/66，参数摘要仍伸展吃满剩余空间（620px 下 484→452px）。
+   与下方「2026-10-21 Java 被遮挡」同源：当时只把被挤压方（预览）改成 basis:0，
+   漏了挤压源 .tool-args 自己。骨架态的 .tool-args-progress 同为 order:3 且曾无
+   flex 声明（默认 basis:auto），本轮一并补 1 1 0，避免长文案时复现同类挤压。
+   【read/write 为何看起来例外，勿过度概括】ARG_SUPPRESSED 抑制 file_path/path/
+   content/diff/todos，这两个工具在【只传这些键】时 argsStr 为空 ⇒ 不生成 .tool-args
+   ⇒ 没有挤压源；但 read 带 offset/limit、write 带其它可选键时【同样会】生成，
+   并非工具名级别的硬例外。例外的是「参数串是否为空」，不是工具种类。
+   【范围声明】本修复只解决「文件名被挤压裁断」这一条，不解释用户截图里那块
+   矩形白区：像素采样显示该区域与页面背景同为 #FFFFFF（不是不透明覆盖层），
+   工作区源码折叠态标题行所有子元素 background 均为 rgba(0,0,0,0)、
+   elementFromPoint 无覆盖层，本机 Chrome 未复现。白区成因仍须在运行版单独取证。 */
+ .tool-args { display: block; order: 3; flex: 1 1 0; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 /* 预览摘要：并入标题行（与图标/工具名同一条行）。
    【为何不再独立成行】旧实现是卡体里的独立 div（padding 0 10px 5px 32px）：
    流式过程中预览随内容增删反复出现/移除，卡片高度忽高忽低。
@@ -631,9 +647,13 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    修法：
    1) 预览改 flex: 0 0 auto + max-width:40% —— 保留自然宽度、拿不到空间时仍按 40% 上限
       显示省略号，绝不再塌成 0；剩余空间由 args（min-width:0）收缩并省略号。
-   2) .tool-name / .tool-duration 显式 flex-shrink:0 —— 它们是单行定长信息，
-      被参与收缩后文字会互相挤压（此前 duration 也没锁死）。 */
-.tool-card-header .preview-inline, .thinking-block-header .preview-inline { order: 4; flex: 1 1 0; max-width: none; min-width: 0; color: var(--text-tertiary); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    2) .tool-name / .tool-duration 显式 flex-shrink:0 —— 它们是单行定长信息，
+       被参与收缩后文字会互相挤压（此前 duration 也没锁死）。
+    【2026-11 校准】上面第 1) 条是当时的止血方案，【已不是当前实现】：紧随其后的
+    .preview-inline 规则现为 flex: 1 1 0; max-width: none（见下方思考卡注释的来龙去脉），
+    .tool-name/.tool-duration 的 shrink:0 仍生效。本块保留作决策记录，勿据其改代码。
+    真正确定的挤压源是 .tool-args 的 basis:auto，本轮已把它改成 1 1 0（见上文）。 */
+ .tool-card-header .preview-inline, .thinking-block-header .preview-inline { order: 4; flex: 1 1 0; max-width: none; min-width: 0; color: var(--text-tertiary); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 【思考卡预览：可伸展，但 flex-basis 必须为 0】
    2026-10-21 的「Java 被遮挡」是工具卡的问题：.tool-args 的 basis 是 auto（=整段参数文本的
    max-content，实测一张 bash 卡 685px），会把同排的预览挤成 0 宽。当时的止血是全局把预览
@@ -680,7 +700,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .tool-card.args-streaming { border-style: dashed; border-color: var(--border-color); }
 /* 参数体积进度文案（「生成参数中 · 1.2 KB」）：与 .tool-args / .tool-diff-stat 同档，
    12px + 三级文字色 + 等宽数字（字节数每帧跳动时不会带着整行左右抖动）。 */
-.tool-args-progress { order: 3; color: var(--text-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tool-args-progress { order: 3; flex: 1 1 0; color: var(--text-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .tool-expand-full { display: inline-block; margin: 8px 0 2px; padding: 4px 12px; font-size: 12px; font-family: inherit; color: var(--text-secondary); background: var(--bg-code-block, rgba(127,127,127,.08)); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; }
 .tool-expand-full:hover:not(:disabled) { color: var(--text-primary); border-color: var(--text-secondary); }
 .tool-expand-full:disabled { opacity: .6; cursor: default; }
@@ -4651,31 +4671,73 @@ pre:hover .code-copy-btn { opacity: 1; }
     box-shadow: none !important;
 }
 
-/* ===== 账号入口 / 登录注册浮层（app-account.js）=====
-   与 .remote-wizard-* 同范式：body 级 fixed 浮层，z-index 高于主界面但
-   低于设置浮层(10000)。入口放在 sidebar-header-top，不动 sidebar-footer
-   的 space-between 布局（sidebar-update-badge 契约锁定首/末子项位置）。 */
-.account-entry-btn { margin-left: auto; max-width: 46%; background: transparent; border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-secondary); cursor: pointer; font-size: 12px; padding: 4px 8px; display: flex; align-items: center; }
-.account-entry-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
-.account-entry-btn.is-signed-in { color: var(--text-primary); border-color: transparent; }
-.account-entry-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.account-overlay { display: none; position: fixed; inset: 0; z-index: 2100; background: var(--overlay); align-items: center; justify-content: center; }
-.account-panel { position: relative; width: min(380px, 92vw); background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; box-shadow: var(--shadow-lg); padding: 20px; }
-.account-close { position: absolute; top: 8px; right: 10px; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 20px; line-height: 1; }
+/* ===== 账号用户卡片 / 账号弹层 / 登录弹框（app-account.js）=====
+    参照设计稿：侧栏底栏（原设置按钮区域）整体为用户卡片「头像 + 昵称 + 套餐」，
+    点击就地向上展开弹层（设置 + 用户相关菜单 / 已登录信息面板）；
+    登录 / 注册表单是【独立居中弹框】.account-modal，不在弹层里。
+    【布局纪律】卡片是 sidebar-footer 的【首子项】（原设置按钮位置），更新按钮是
+    末子项：底栏 space-between 下首子项恒贴左端、末子项恒贴右端，卡片位置不随
+    「有无更新」跳变（与原设置按钮同一纪律，account-contract.test.js 锁定）。
+    弹层/弹框挂 body 级 fixed（避免被 sidebar 的 overflow 裁切）：弹层由 JS 按
+    触发卡片的 getBoundingClientRect 定位；弹框由 CSS flex 居中。
+    z-index：弹层 2099/2100，登录弹框 2101/2102，均低于设置浮层(10000)。 */
+.account-card { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 8px 10px; box-sizing: border-box; border: 1px solid transparent; border-radius: 10px; background: var(--bg-hover); color: var(--text-primary); text-align: left; cursor: pointer; transition: background .15s, border-color .15s; }
+.account-card:hover, .account-card[aria-expanded="true"] { border-color: var(--border-color); }
+.account-card-avatar { flex: 0 0 auto; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; overflow: hidden; background: linear-gradient(135deg, rgba(var(--accent-rgb), .95), rgba(var(--accent-rgb), .55)); color: #fff; font-size: 14px; font-weight: 600; line-height: 1; }
+.account-card-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.account-card-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.account-card-name { font-size: 13px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-card:not(.is-signed-in) .account-card-name { font-weight: 500; color: var(--text-secondary); }
+.account-card-sub { font-size: 11px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-card.is-signed-in .account-card-sub { color: var(--accent); }
+.account-card-sub:empty { display: none; }
+.account-card-chevron { flex: 0 0 auto; color: var(--text-secondary); transition: transform .18s; }
+.account-card[aria-expanded="true"] .account-card-chevron { transform: rotate(180deg); }
+/* 透明背板只负责捕获「点击外部关闭」，不加遮罩色：这是就地浮层不是模态框 */
+.account-backdrop { position: fixed; inset: 0; z-index: 2099; background: transparent; }
+.account-popover { position: fixed; z-index: 2100; box-sizing: border-box; max-height: calc(100vh - 24px); overflow-y: auto; padding: 8px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; box-shadow: var(--shadow-lg); }
+/* 登录 / 注册独立居中弹框：半透明遮罩 + 居中卡片（用户明确要求登录是单独弹框，
+   不塞进账号弹层）。遮罩用 var(--overlay) 与全站模态一致。 */
+.account-modal-backdrop { position: fixed; inset: 0; z-index: 2101; background: var(--overlay); }
+.account-modal { position: fixed; z-index: 2102; left: 50%; top: 50%; transform: translate(-50%, -50%); box-sizing: border-box; width: min(380px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; padding: 18px 18px 16px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; box-shadow: var(--shadow-lg); }
+/* 顶部用户卡（头像 + 昵称 + 副标） */
+.account-pop-profile { display: flex; align-items: center; gap: 12px; padding: 12px; margin-bottom: 8px; background: var(--bg-hover); border-radius: 12px; }
+.account-pop-avatar { flex: 0 0 auto; width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; overflow: hidden; background: linear-gradient(135deg, rgba(var(--accent-rgb), .95), rgba(var(--accent-rgb), .55)); color: #fff; font-size: 18px; font-weight: 600; }
+.account-pop-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.account-pop-name { font-size: 16px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-pop-desc { font-size: 12px; color: var(--text-secondary); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 套餐 / 积分余额 两列卡 */
+.account-pop-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px 14px; margin-bottom: 8px; background: var(--bg-hover); border-radius: 12px; }
+.account-pop-stat-label { font-size: 11px; color: var(--text-secondary); }
+.account-pop-stat-value { font-size: 15px; font-weight: 600; color: var(--text-primary); margin-top: 4px; }
+/* 菜单行 */
+.account-pop-menu { padding: 2px 0; }
+.account-pop-item { display: flex; align-items: center; gap: 12px; width: 100%; box-sizing: border-box; padding: 9px 12px; border: none; border-radius: 8px; background: transparent; color: var(--text-primary); font-size: 13px; text-align: left; cursor: pointer; }
+.account-pop-item:hover { background: var(--bg-hover); }
+.account-pop-item svg { flex: 0 0 auto; width: 17px; height: 17px; color: var(--text-secondary); }
+.account-pop-item-label { flex: 1 1 auto; }
+.account-pop-item.is-danger, .account-pop-item.is-danger svg { color: var(--error-text); }
+.account-pop-sep { height: 1px; background: var(--border-color); margin: 6px 8px; }
+/* 外观：浅色 / 深色 分段控件 */
+.account-theme-switch { display: flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--bg-hover); }
+.account-theme-btn { padding: 4px 10px; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
+.account-theme-btn.active { background: var(--bg-card); color: var(--text-primary); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
+/* 登录 / 注册表单视图（未登录时弹层内容） */
+/* 登录弹框内层：relative 供右上角关闭按钮定位；外边距由 .account-modal 承担 */
+.account-auth { position: relative; }
+.account-close { position: absolute; top: 2px; right: 4px; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 20px; line-height: 1; }
 .account-close:hover { color: var(--text-primary); }
-.account-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
-.account-tab { flex: 1; padding: 8px; border: 1px solid var(--border-color); border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 13px; }
-.account-tab.active { color: var(--text-primary); background: var(--bg-hover); border-color: var(--border-color); font-weight: 600; }
-.account-field { margin-bottom: 12px; }
+.account-tabs { display: flex; gap: 8px; margin: 6px 24px 14px 0; }
+.account-tab { flex: 1; padding: 8px; border: 1px solid var(--border-color); border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 13px; }
+.account-tab.active { color: var(--text-primary); background: var(--bg-hover); font-weight: 600; }
+.account-field { margin-bottom: 10px; }
 .account-label { display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
 .account-input { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-input-box); color: var(--text-primary); font-size: 13px; }
-.account-input:focus { outline: none; border-color: var(--accent-color, #4a7cf7); }
+.account-input:focus { outline: none; border-color: var(--accent, #4a7cf7); }
 .account-hint { min-height: 18px; font-size: 12px; margin: 8px 0; color: var(--text-secondary); }
-.account-hint-error { color: #e5534b; }
-.account-submit, .account-logout { width: 100%; padding: 9px; border: none; border-radius: 6px; background: var(--accent-color, #4a7cf7); color: #fff; cursor: pointer; font-size: 13px; }
+.account-hint-error { color: var(--error-text); }
+.account-submit { width: 100%; padding: 9px; border: none; border-radius: 8px; background: var(--accent, #4a7cf7); color: #fff; cursor: pointer; font-size: 13px; }
 .account-submit:disabled { opacity: .6; cursor: default; }
-.account-logout { background: transparent; color: var(--text-secondary); border: 1px solid var(--border-color); }
-.account-who { font-size: 14px; color: var(--text-primary); margin: 8px 0 16px; word-break: break-all; }
 
 /* ===== 侧栏拖动排序（app-sidebar-order.js）=====
    纪律：落点指示线一律用行自身的 ::before / ::after 伪元素画，【绝不往 DOM 插入
@@ -4727,3 +4789,38 @@ pre:hover .code-copy-btn { opacity: 1; }
 /* 分组是带 margin 的块，指示线放到组外沿，视觉上才像「插在两组之间」 */
 .ws-group.sidebar-drop-before::before { top: -3px; }
 .ws-group.sidebar-drop-after::after { bottom: -3px; }
+
+/* ===== 上下文压缩分隔线（context_compacted 帧）=====
+   横向三等分：左线 — 图标+文案 — 右线。颜色取三级文本色（比过程行更弱一档），
+   语义是「轮次边界标记」而非内容，不得抢视觉焦点。
+   非批次成员、非整轮折叠对象：折叠历史过程行时它保持可见（边界标记的价值恰在折叠后）。 */
+.context-compacted-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 14px 0;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    line-height: 1;
+    user-select: none;
+}
+.context-compacted-divider .ccd-line {
+    flex: 1 1 auto;
+    height: 1px;
+    background: var(--border-color);
+}
+.context-compacted-divider .ccd-label {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.context-compacted-divider .ccd-icon {
+    display: inline-flex;
+    align-items: center;
+    opacity: .85;
+}
+.context-compacted-divider .ccd-text {
+    letter-spacing: .02em;
+}

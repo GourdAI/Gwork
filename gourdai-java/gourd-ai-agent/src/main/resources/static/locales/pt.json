@@ -993,6 +993,8 @@
                  "thinking_in_progress":  "Raciocínio em andamento",
                  "thinking_finished":  "Raciocínio concluído",
                  "phase_thinking":  "Pensando",
+                 "context_compacted":  "Contexto compactado",
+                 "context_compacted_tip":  "O contexto excedeu o orcamento; o historico antigo foi compactado automaticamente",
                  "phase_text":  "Escrevendo",
                  "phase_waiting":  "Aguardando resposta",
                  "args_streaming":  "Gerando argumentos · {size}",

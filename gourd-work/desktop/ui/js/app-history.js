@@ -2661,7 +2661,25 @@ function replaySession(sess, events, prepend, keepOpen) {
                                     ? { imagePaths: rpImages, filePaths: rpFiles } : null);
                             continue;
                         }
-                        if (chunk.type === 'done') { endTurn(); resetStreamState(sess); continue; }
+                        /* 挂起 done（ask_user / HITL）：回放也要落「已挂起」状态覆盖位。
+                           实时侧由 finishStream 的挂起分支传 opts.status 完成（app-streaming.js），
+                           回放侧不经 finishStream，若不同步打标，刷新/切会话后同一挂起段会从
+                           「已挂起」变回「已完成」—— 正是本次要消除的那种实时/回放分叉。
+                           必须在 endTurn() 之前：它内部 resetStreamState 会清 currentBubbleEl，
+                           清了就再也定位不到该段气泡。挂起段不发 trace 帧（后端 done_suspended
+                           直接 return），气泡无徽标，故用覆盖位回落；缝合过户徽标时徽标真值
+                           优先（readTurnMeta 已按此排序），不会误挂。 */
+                        if (chunk.type === 'done') {
+                            if (chunk.suspended === true && sess.currentBubbleEl) {
+                                var susBubble = sess.currentBubbleEl.parentNode;
+                                var tcApiSus = (typeof window !== 'undefined') ? window.GourdTurnCompact : null;
+                                if (susBubble && tcApiSus && tcApiSus.markTurnStatus) {
+                                    try { tcApiSus.markTurnStatus(susBubble, 'suspended'); }
+                                    catch (susErr) { console.error('[replayChunk] 挂起轮状态标记失败:', susErr); }
+                                }
+                            }
+                            endTurn(); resetStreamState(sess); continue;
+                        }
                         /* file_changes 是被动 run 快照：回放时也不得为了复用渲染入口临时置
                            isStreaming=true，否则对账与流状态语义会被元数据事件污染。 */
                         if (chunk.type === 'file_changes') {

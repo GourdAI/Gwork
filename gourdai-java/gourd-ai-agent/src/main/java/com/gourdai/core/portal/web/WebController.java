@@ -569,8 +569,9 @@ public class WebController {
                 item.put("name", config.getNameOrModel());
                 item.put("description", config.getDescriptionOrModel());
                 item.put("standard", config.getStandardOrProvider());
-                // 所属供应商：前端据此对模型下拉做分组展示
+                // 所属供应商：前端据此对模型下拉做分组展示（provider 为展示名，providerId 为渠道唯一 id）
                 item.put("provider", config.getProvider());
+                item.put("providerId", config.getProviderId());
                 // 该模型真正可区分的思考档位（策略 S2）。
                 // 档位本身是全局统一的 5 档，但各模型能区分几档各不相同：
                 // 若模型只支持单一 effort 值，渲染 5 档会让用户误以为选了有效果，

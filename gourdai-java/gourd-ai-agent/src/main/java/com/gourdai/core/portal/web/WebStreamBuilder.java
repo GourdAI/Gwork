@@ -19,6 +19,7 @@ import com.gourdai.agent.event.AgentEvent;
 
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.ContextLengthPolicy;
+import com.gourdai.agent.event.ContextSizeEvent;
 import com.gourdai.harness.agent.*;
 import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.event.RunEndEvent;
@@ -528,6 +529,9 @@ public class WebStreamBuilder {
             timer.onUsageSettled(((ContextUsageEvent) chunk).getOutputTokens());
             return oneFrame(onContextUsageEvent(chatModel, (ContextUsageEvent) chunk, turnStartMs));
         }
+        if (chunk instanceof ContextSizeEvent) {
+            return oneFrame(onContextSizeEvent((ContextSizeEvent) chunk));
+        }
         if (chunk instanceof ReasonStartEvent) {
             return oneFrame(onReasonStartEvent((ReasonStartEvent) chunk, turnStartMs));
         }
@@ -571,8 +575,10 @@ public class WebStreamBuilder {
         }
 
         // 以下事件<b>有意</b>不映射、不上送前端：
-        //   · ContextSizeEvent：推理前 jtokkit 本地估算，仅供框架内部做压缩决策；
-        //     上下文指示器只认推理后真实用量的 ContextUsageEvent。
+        //   · ContextSizeEvent 的未压缩帧（compressed=false）：推理前 jtokkit 本地估算，
+        //     仅供框架内部做压缩决策；上下文指示器只认推理后真实用量的 ContextUsageEvent。
+        //     但 compressed=true 的帧会映射为 context_compacted（见 onContextSizeEvent），
+        //     供内容区展示「已压缩上下文」分隔线。
         //   · PlanEvent / NodeEvent / SupervisorDeltaEvent / TeamEndEvent：团队代理体系事件，
         //     Web 端当前未渲染对应 UI（PlanEvent 的 CREATE/PROGRESS/REVISE 三种语义也未下发）。
         //   · SimpleDeltaEvent / SimpleEndEvent：Simple（非 ReAct）代理事件，同上。
@@ -718,6 +724,38 @@ public class WebStreamBuilder {
         return message;
     }
 
+
+    /**
+     * 处理推理前的上下文大小事件：仅在<b>确实发生压缩</b>时映射为 {@code context_compacted} 帧，
+     * 供前端在内容区渲染「已压缩上下文」分隔线（对齐业界同类产品的压缩提示形态）。
+     *
+     * <p><b>为何只转发压缩帧</b>：未压缩帧（compressed=false）是 jtokkit 的本地估算，
+     * 每轮一条，仅供框架内部做压缩决策；上下文指示器只认推理后真实用量的
+     * {@code ContextUsageEvent}。若把估算帧也下发，会与真实用量帧在指示器上互相覆盖。
+     * 而压缩是<b>用户可感知的事实</b>（历史被摘要/清理），值得在对话流里留一条可见痕迹，
+     * 且频率极低（长会话才触发），不构成流量负担。</p>
+     *
+     * <p><b>为何携带前后计数</b>：分隔线悬停/展示「N 条 → M 条」能让用户直观理解
+     * 压缩幅度，也为将来扩展详情卡留好数据位。</p>
+     *
+     * @return {@code context_compacted} 帧；未压缩时返回 {@link WebChunk#EMPTY}
+     */
+    private WebChunk onContextSizeEvent(ContextSizeEvent event) {
+        if (!event.isCompressed()) {
+            return WebChunk.EMPTY;
+        }
+        WebChunk wc = new WebChunk();
+        wc.setType("context_compacted");
+        wc.setRunId(event.getRunId());
+        Map<String, Object> args = new HashMap<>();
+        args.put("beforeMessages", event.getBeforeMessageCount());
+        args.put("afterMessages", event.getAfterMessageCount());
+        args.put("beforeTokens", event.getBeforeTokenCount());
+        args.put("afterTokens", event.getAfterTokenCount());
+        wc.setArgs(args);
+        wc.setCreatedAt(java.time.Instant.now().toEpochMilli());
+        return wc;
+    }
 
     /**
      * 处理上下文用量块（推理后依据模型真实 usage 生成，含缓存创建/读取明细）。

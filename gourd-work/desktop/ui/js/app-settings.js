@@ -95,7 +95,10 @@
     };
 
     var $overlay = $('#settingsOverlay');
-    var $settingsBtn = $('#settingsBtn');
+    /* 侧栏独立设置按钮已移除（底栏整体改为用户卡片，设置入口收进账号弹层，
+       弹层内「设置」行调 window.openSettings()）。原 $settingsBtn 绑定随之
+       删除：#settingsBtn 在 DOM 中已不存在，保留空集合绑定是死代码，只会让
+       后来者误以为还有第二个设置入口。 */
     var $tabs = $('.settings-tab');
     var $tabContents = $('.settings-tab-content');
 
@@ -127,7 +130,6 @@
     }
 
 
-    $settingsBtn.on('click', openSettings);
     $('#settingsCloseBtn').on('click', closeSettings);
 
     // 导出给其它主视图调用（如自动化页面打开时需关掉本浮层）；

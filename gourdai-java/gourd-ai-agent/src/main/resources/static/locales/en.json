@@ -993,6 +993,8 @@
                  "thinking_in_progress":  "Thinking",
                  "thinking_finished":  "Thinking Complete",
                  "phase_thinking":  "Thinking",
+    "context_compacted":  "Context compressed",
+    "context_compacted_tip":  "Context exceeded the budget; earlier history was automatically compressed (summarised / stale tool results cleared)",
                  "phase_text":  "Writing",
                  "phase_waiting":  "Waiting for response",
                  "args_streaming":  "Generating arguments · {size}",

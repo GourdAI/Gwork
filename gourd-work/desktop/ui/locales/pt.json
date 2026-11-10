@@ -956,6 +956,8 @@
     "turn_agents_one": "subagente",
     "turn_process_texts_one": "etapa do processo",
     "phase_thinking": "Pensando",
+    "context_compacted":  "Contexto compactado",
+    "context_compacted_tip":  "O contexto excedeu o orcamento; o historico antigo foi compactado automaticamente",
     "phase_text": "Escrevendo",
     "phase_waiting": "Aguardando resposta",
     "args_streaming": "Gerando argumentos · {size}",
@@ -1405,6 +1407,11 @@
     "signed_in": "Conectado",
     "required": "Informe usuário e senha",
     "password_policy": "A senha deve ter 8–128 caracteres",
-    "failed": "Operação falhou"
+    "failed": "Operação falhou",
+    "plan": "Plano",
+    "points": "Saldo de pontos",
+    "memory": "Memória e evolução",
+    "feedback": "Comentários",
+    "unavailable": "Serviço de login indisponível. Use o aplicativo desktop."
   }
 }

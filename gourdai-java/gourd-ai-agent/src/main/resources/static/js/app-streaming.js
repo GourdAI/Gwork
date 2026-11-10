@@ -973,6 +973,13 @@ function onWebChunk(sess, chunk) {
                     }
                 }
                 break;
+            case 'context_compacted':
+                // 上下文压缩分隔线：纯展示帧，不收敛思考/工具块（压缩发生在轮边界，
+                // 此刻没有在途内容会被误伤），只收口批次盖子并插入分隔线。
+                if (typeof appendContextCompactedDivider === 'function') {
+                    appendContextCompactedDivider(sess, chunk);
+                }
+                break;
         }
         sess.silenceTimer = setTimeout(function() {
             if (!sess.isStreaming) return;

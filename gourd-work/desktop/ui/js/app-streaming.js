@@ -817,6 +817,11 @@ function advanceCommitWatermark(sess, chunk) {
         // turn 正常收口（context_size 由每个 turn 的 Done 发出，trace 是 run 级收口）。
         case 'context_size':
         case 'trace':
+        /* 上下文压缩分隔线：压缩是内核侧<b>已经发生且不可逆</b>的事实（messages 已被重写、
+           帧已落盘），与工具执行完毕同级。若不推进水位，本轮 LLM 流中途失败触发
+           discardPartialRetryDom 时会把分隔线一起摘掉 —— 屏幕上没有分隔线，而刷新/回放后
+           又出现，实时视图与历史分叉。 */
+        case 'context_compacted':
             sess._commitSeq = sess._insSeq || 0;
             break;
     }
@@ -982,11 +987,23 @@ function onWebChunk(sess, chunk) {
         appendAgentBadge(sess, chunk, chunk.type === 'agent_start');
         break;
     }
-            case 'error':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); clearRetryChunk(sess); if (typeof markToolCardFailed === 'function') markToolCardFailed(sess);
+            case 'error':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); clearRetryChunk(sess);
                 // 统一以红色错误块渲染，不再写入智能体卡片体：
                 // 后端 WebChunk.ofError 不携带 sessionId/agentName，无法可靠归属；
                 // 若写入某智能体卡，错误会被当作该智能体的正常正文渲染（误导），
                 // 且并行多智能体时归属无从选择。主对话错误块是唯一可靠位置。
+                /* discardPartial=true 来自 Frame::error_discarding（损坏门控在干净重试用尽后终止 run）。
+                   最后一次尝试的乱码 delta 已经渲染（乱码气泡 + 孤儿骨架工具卡），且不会再有 stream_retry
+                   来清理——stream_retry 只在重试*之前*发。必须在 appendErrorChunk 之前回滚：回滚删的是水位之上
+                   未提交的块，先建错误块再回滚会把刚建的错误块一并删掉。
+                   用户主动 Stop 的 cancel 路径不带 discardPartial：那里的半成品是用户想保留的真实产出，绝不能删。 */
+                if (chunk.discardPartial) {
+                    try { discardPartialRetryDom(sess); }
+                    catch (e) { reportStreamPipelineError('discardPartialRetryDom', e, chunk); }
+                } else if (typeof markToolCardFailed === 'function') {
+                    // 非丢弃路径才标失败：discardPartial 时卡片已被回滚移除，再标无意义且会写进游离节点。
+                    markToolCardFailed(sess);
+                }
                 appendErrorChunk(sess, chunk.text);
                 break;
             case 'retry':  finishThinkingBlock(sess); finishPendingTool(sess);
@@ -1034,6 +1051,13 @@ function onWebChunk(sess, chunk) {
                         if (typeof endContextLive === 'function') endContextLive(sess, chunk);
                         sess.lastContextChunk = chunk;
                     }
+                }
+                break;
+            case 'context_compacted':
+                // 上下文压缩分隔线：纯展示帧，不收敛思考/工具块（压缩发生在轮边界，
+                // 此刻没有在途内容会被误伤），只收口批次盖子并插入分隔线。
+                if (typeof appendContextCompactedDivider === 'function') {
+                    appendContextCompactedDivider(sess, chunk);
                 }
                 break;
         }
@@ -1253,9 +1277,13 @@ function finishStream(sess, opts) {
        故挂起收尾也必须在【清指针之前】做一次 DOM 层轮边界收口，复用
        settleSteerTurnBoundary（命名沿袭插话修复，语义已是通用轮边界）：
        摘 agent-live / 显示 msg-actions / closeBatchFor 把 running 盖子定格为
-       「执行工具 N 次」。它不动任何流式状态、缓冲、按钮态与批次索引，因此与
-       keepBatchIndex 的保留语义零冲突；也不调 compactBubble —— 挂起段没有
-       终态正文，整轮 Compact 会走 !decision → revealAll 把折叠重新摊开。
+       「执行工具 N 次」，并按 ended:true 折成整轮摘要 —— 与回放同口径，否则
+       实时不折、刷新后折（用户 2026-11「插话前的好像不会自动折叠」）。
+       它不动任何流式状态、缓冲、按钮态与批次索引，因此与 keepBatchIndex 的
+       保留语义零冲突。
+       【status: 'suspended'】挂起段不发 trace 帧（后端 done_suspended 直接 return），
+       气泡永远无徽标，摘要文案会回落「已完成」把等待作答谎报成已完成。
+       传覆盖位让其显示「已挂起」。恢复段的内容属于新气泡，不计入本段摘要。
 
        护栏与下方真收口分支对齐：回放 / prepend / 游离渲染容器一律跳过
        （helper 自身还有一层 _replaying 门禁）。纯展示增强：异常只留痕，
@@ -1263,7 +1291,7 @@ function finishStream(sess, opts) {
     if (keepBatchIndex && !sess._replaying && !sess._skipScroll
             && typeof isDetachedRenderTarget === 'function' && !isDetachedRenderTarget(sess)
             && typeof settleSteerTurnBoundary === 'function') {
-        try { settleSteerTurnBoundary(sess); }
+        try { settleSteerTurnBoundary(sess, { status: 'suspended' }); }
         catch (suspendBoundaryErr) { console.error('[finishStream] 挂起轮边界收口失败:', suspendBoundaryErr); }
     }
 
@@ -1280,9 +1308,10 @@ function finishStream(sess, opts) {
 
         三条护栏，缺一不可：
         ① 挂起 done（keepBatchIndex）：上面的【轮边界收口】已在清指针前把旧气泡
-           定格为终态（摘 agent-live / 收 running 盖子）；这里【不再】施加整轮
-           Compact —— 挂起段没有终态正文，compact 会 revealAll 把折叠重新摊开，
-           且恢复段的内容属于新气泡，不该被计入旧轮摘要。会话级批次索引仍保留。
+           定格为终态（摘 agent-live / 收 running 盖子 / 按 ended:true 折整轮摘要）。
+           这里【不再】重复施加：旧气泡指针已被 resetStreamState 清空，liveFoldRow
+           为 null，且挂起段的摘要已由上面那一处按 status:'suspended' 落好文案。
+           会话级批次索引仍保留，供恢复段认领原卡片容器。
         ② 回放路径（_replaying / _skipScroll）：replaySession 结束后已由 app-history.js
            按轮统一折叠，这里再折会重复插按钮、并干扰滚动锚定。
         ③ 渲染落点游离（isDetachedRenderTarget）：节点还没进文档，量不到 DOM、也不该动。 */

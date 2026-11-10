@@ -993,6 +993,8 @@
                  "thinking_in_progress":  "En cours de réflexion",
                  "thinking_finished":  "Réflexion terminée",
                  "phase_thinking":  "Réflexion",
+                 "context_compacted":  "Contexte compresse",
+                 "context_compacted_tip":  "Le contexte a depasse le budget ; l historique ancien a ete compresse automatiquement",
                  "phase_text":  "Rédaction",
                  "phase_waiting":  "En attente de réponse",
                  "args_streaming":  "Génération des arguments · {size}",

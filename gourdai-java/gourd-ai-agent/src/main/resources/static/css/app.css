@@ -610,7 +610,23 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    只存在于参数里，隐藏等于这些调用在界面上没有任何可辨识信息，用户必须逐条点开，
    而卡体内只有输出、没得回命令。重复问题已由 formatToolArgsStr 的 ARG_SUPPRESSED
    在源头消除（file_path/path 不进入参数串，与 .tool-file 不再重叠）。 */
- .tool-args { display: block; order: 3; flex: 0 1 auto; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* flex-basis 必须为 0（2026-11 修复「工具行文件名被挤压裁断」）。
+   旧值 0 1 auto 的 basis=auto = 整段参数全文宽度，先占满整行，把同排 .tool-file
+   压到极窄：真实 Chrome 复现（长参数 + header 320/620px）文件名 client/scroll
+   = 14/66、34/66，被 overflow:hidden + text-overflow:ellipsis 裁断；
+   改 1 1 0 后两档均为 66/66，参数摘要仍伸展吃满剩余空间（620px 下 484→452px）。
+   与下方「2026-10-21 Java 被遮挡」同源：当时只把被挤压方（预览）改成 basis:0，
+   漏了挤压源 .tool-args 自己。骨架态的 .tool-args-progress 同为 order:3 且曾无
+   flex 声明（默认 basis:auto），本轮一并补 1 1 0，避免长文案时复现同类挤压。
+   【read/write 为何看起来例外，勿过度概括】ARG_SUPPRESSED 抑制 file_path/path/
+   content/diff/todos，这两个工具在【只传这些键】时 argsStr 为空 ⇒ 不生成 .tool-args
+   ⇒ 没有挤压源；但 read 带 offset/limit、write 带其它可选键时【同样会】生成，
+   并非工具名级别的硬例外。例外的是「参数串是否为空」，不是工具种类。
+   【范围声明】本修复只解决「文件名被挤压裁断」这一条，不解释用户截图里那块
+   矩形白区：像素采样显示该区域与页面背景同为 #FFFFFF（不是不透明覆盖层），
+   工作区源码折叠态标题行所有子元素 background 均为 rgba(0,0,0,0)、
+   elementFromPoint 无覆盖层，本机 Chrome 未复现。白区成因仍须在运行版单独取证。 */
+ .tool-args { display: block; order: 3; flex: 1 1 0; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 /* 预览摘要：并入标题行（与图标/工具名同一条行）。
    【为何不再独立成行】旧实现是卡体里的独立 div（padding 0 10px 5px 32px）：
    流式过程中预览随内容增删反复出现/移除，卡片高度忽高忽低。
@@ -632,7 +648,11 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    1) 预览改 flex: 0 0 auto + max-width:40% —— 保留自然宽度、拿不到空间时仍按 40% 上限
       显示省略号，绝不再塌成 0；剩余空间由 args（min-width:0）收缩并省略号。
    2) .tool-name / .tool-duration 显式 flex-shrink:0 —— 它们是单行定长信息，
-      被参与收缩后文字会互相挤压（此前 duration 也没锁死）。 */
+      被参与收缩后文字会互相挤压（此前 duration 也没锁死）。
+    【2026-11 校准】上面第 1) 条是当时的止血方案，【已不是当前实现】：紧随其后的
+    .preview-inline 规则现为 flex: 1 1 0; max-width: none（见下方思考卡注释的来龙去脉），
+    .tool-name/.tool-duration 的 shrink:0 仍生效。本块保留作决策记录，勿据其改代码。
+    真正确定的挤压源是 .tool-args 的 basis:auto，本轮已把它改成 1 1 0（见上文）。 */
 .tool-card-header .preview-inline, .thinking-block-header .preview-inline { order: 4; flex: 1 1 0; max-width: none; min-width: 0; color: var(--text-tertiary); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 【思考卡预览：可伸展，但 flex-basis 必须为 0】
    2026-10-21 的「Java 被遮挡」是工具卡的问题：.tool-args 的 basis 是 auto（=整段参数文本的
@@ -680,7 +700,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .tool-card.args-streaming { border-style: dashed; border-color: var(--border-color); }
 /* 参数体积进度文案（「生成参数中 · 1.2 KB」）：与 .tool-args / .tool-diff-stat 同档，
    12px + 三级文字色 + 等宽数字（字节数每帧跳动时不会带着整行左右抖动）。 */
-.tool-args-progress { order: 3; color: var(--text-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tool-args-progress { order: 3; flex: 1 1 0; color: var(--text-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .tool-expand-full { display: inline-block; margin: 8px 0 2px; padding: 4px 12px; font-size: 12px; font-family: inherit; color: var(--text-secondary); background: var(--bg-code-block, rgba(127,127,127,.08)); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; }
 .tool-expand-full:hover:not(:disabled) { color: var(--text-primary); border-color: var(--text-secondary); }
 .tool-expand-full:disabled { opacity: .6; cursor: default; }
@@ -4647,4 +4667,39 @@ pre:hover .code-copy-btn { opacity: 1; }
     border-radius: 0 !important;
     background: transparent !important;
     box-shadow: none !important;
+}
+
+/* ===== 上下文压缩分隔线（context_compacted 帧）=====
+   横向三等分：左线 — 图标+文案 — 右线。颜色取三级文本色（比过程行更弱一档），
+   语义是「轮次边界标记」而非内容，不得抢视觉焦点。
+   非批次成员、非整轮折叠对象：折叠历史过程行时它保持可见（边界标记的价值恰在折叠后）。 */
+.context-compacted-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 14px 0;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    line-height: 1;
+    user-select: none;
+}
+.context-compacted-divider .ccd-line {
+    flex: 1 1 auto;
+    height: 1px;
+    background: var(--border-color);
+}
+.context-compacted-divider .ccd-label {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.context-compacted-divider .ccd-icon {
+    display: inline-flex;
+    align-items: center;
+    opacity: .85;
+}
+.context-compacted-divider .ccd-text {
+    letter-spacing: .02em;
 }

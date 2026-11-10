@@ -96,7 +96,7 @@ test('★ 接线锁：挂起轮边界收口分支覆盖 HITL（注释口径 + �
     assert.ok(fnStart > 0);
     const body = STREAM_SRC.slice(fnStart, STREAM_SRC.indexOf('\nfunction ', fnStart + 10));
     const iSuspend = body.indexOf('if (keepBatchIndex && !sess._replaying');
-    const iSettle = body.indexOf('settleSteerTurnBoundary(sess);', iSuspend);
+    const iSettle = body.indexOf("settleSteerTurnBoundary(sess, { status: 'suspended' });", iSuspend);
     const iReset = body.indexOf('resetStreamState(sess);', iSuspend);
     assert.ok(iSuspend > 0 && iSettle > iSuspend && iReset > iSettle,
         '挂起收口必须在清指针之前（HITL 与 ask 共用这一处）');

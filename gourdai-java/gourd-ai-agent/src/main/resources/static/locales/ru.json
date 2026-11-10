@@ -993,6 +993,8 @@
                  "thinking_in_progress":  "Мышление в процессе",
                  "thinking_finished":  "Мышление завершено",
                  "phase_thinking":  "Мышление",
+                 "context_compacted":  "Контекст сжат",
+                 "context_compacted_tip":  "Контекст превысил бюджет; старая история сжата автоматически",
                  "phase_text":  "Вывод текста",
                  "phase_waiting":  "Ожидание ответа",
                  "args_streaming":  "Генерация аргументов · {size}",

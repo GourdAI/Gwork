@@ -945,6 +945,8 @@
     "batch_running": "正在执行中",
     "batch_done": "已处理",
     "batch_done_count": "执行工具 {count} 次",
+    "context_compacted":  "已压缩上下文",
+    "context_compacted_tip":  "上下文超出预算，历史已自动压缩（摘要/清理早期工具结果）",
     "action_bash_done": "终端命令已运行",
     "action_thinking_done": "已思考",
     "batch_thinking_count": "思考 {count} 次",
@@ -1405,6 +1407,11 @@
     "signed_in": "已登录",
     "required": "请填写用户名和密码",
     "password_policy": "密码长度需为 8–128 个字符",
-    "failed": "操作失败"
+    "failed": "操作失败",
+    "plan": "套餐",
+    "points": "积分余额",
+    "memory": "记忆与进化",
+    "feedback": "意见反馈",
+    "unavailable": "登录服务暂不可用，请在桌面客户端中操作"
   }
 }

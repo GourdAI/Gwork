@@ -956,6 +956,8 @@
     "turn_agents_one": "サブエージェント",
     "turn_process_texts_one": "途中経過",
     "phase_thinking": "思考中",
+    "context_compacted":  "コンテキスト圧縮済み",
+    "context_compacted_tip":  "コンテキストが予算を超過したため、古い履歴は自動的に圧縮されました",
     "phase_text": "出力中",
     "phase_waiting": "応答待ち",
     "args_streaming": "引数を生成中 · {size}",
@@ -1405,6 +1407,11 @@
     "signed_in": "ログイン済み",
     "required": "ユーザー名とパスワードを入力してください",
     "password_policy": "パスワードは 8〜128 文字です",
-    "failed": "操作に失敗しました"
+    "failed": "操作に失敗しました",
+    "plan": "プラン",
+    "points": "ポイント残高",
+    "memory": "メモリと進化",
+    "feedback": "フィードバック",
+    "unavailable": "ログインサービスを利用できません。デスクトップアプリで操作してください。"
   }
 }

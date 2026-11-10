@@ -28,7 +28,6 @@ export function ForgotPassword() {
     <AuthLayout>
       <div className='w-full space-y-8'>
         <div className='gw-auth-head space-y-1.5'>
-          <p className='gw-eyebrow'>auth / forgot-password</p>
           <h2 className='gw-auth-title'>{t('Forgot password')}</h2>
           <p className='gw-auth-switch'>
             {t(

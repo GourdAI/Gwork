@@ -46,6 +46,7 @@ import java.util.Map;
  *   <tr><td>{@code steer_cancelled}</td><td>插话已取消：用户主动 Stop 后残留插话被丢弃</td></tr>
  *   <tr><td>{@code steer_dropped}</td><td>插话已丢弃：任务正常结束后残留插话被转入持久化队列</td></tr>
  *   <tr><td>{@code context_size}</td><td>上下文用量，推理后依据模型真实 usage 生成（输入/输出/缓存明细），刷新「上下文长度」指示器</td></tr>
+ *   <tr><td>{@code context_compacted}</td><td>上下文已压缩：推理前压缩拦截器确实执行了压缩（摘要/清理），前端在内容区渲染「已压缩上下文」分隔线</td></tr>
  *   <tr><td>{@code trace}</td><td>追踪信息：模型名称、token 消耗与推理耗时（最终汇总时输出）</td></tr>
  *   <tr><td>{@code retry}</td><td>模型调用失败后的自动重试提示，携带当前尝试序号、最大次数与失败原因摘要（供应商返回体真实错误）</td></tr>
  *   <tr><td>{@code file_changes}</td><td>Agent 文件变更账本事件，args 携带该 revision 的完整轻量摘要</td></tr>
@@ -116,7 +117,7 @@ public class WebChunk {
 
     /**
      * 消息块类型标识。
-     * 取值范围以类级文档中的「type 类型枚举」表为准（共 25 种，含 text / reason / action_start / action_end / action_draft / action_args / action_batch / context_size / file_changes / steer_* / user / user_input / question / question_answered 等；已废弃 action）。
+     * 取值范围以类级文档中的「type 类型枚举」表为准（共 26 种，含 text / reason / action_start / action_end / action_draft / action_args / action_batch / context_size / context_compacted / file_changes / steer_* / user / user_input / question / question_answered 等；已废弃 action）。
      */
     private String type;
 

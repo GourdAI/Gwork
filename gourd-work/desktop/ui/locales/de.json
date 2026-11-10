@@ -956,6 +956,8 @@
     "turn_agents_one": "Subagent",
     "turn_process_texts_one": "Zwischenschritt",
     "phase_thinking": "Denkt gerade",
+    "context_compacted":  "Kontext komprimiert",
+    "context_compacted_tip":  "Kontext ueber Budget; aeltere Historie wurde automatisch komprimiert (Zusammenfassung / bereinigte Tool-Ergebnisse)",
     "phase_text": "Schreibt",
     "phase_waiting": "Wartet auf Antwort",
     "args_streaming": "Parameter werden erzeugt · {size}",
@@ -1405,6 +1407,11 @@
     "signed_in": "Angemeldet",
     "required": "Bitte Benutzername und Passwort eingeben",
     "password_policy": "Passwort muss 8–128 Zeichen lang sein",
-    "failed": "Vorgang fehlgeschlagen"
+    "failed": "Vorgang fehlgeschlagen",
+    "plan": "Tarif",
+    "points": "Punktestand",
+    "memory": "Gedächtnis & Entwicklung",
+    "feedback": "Feedback",
+    "unavailable": "Anmeldedienst nicht verfügbar. Bitte in der Desktop-App verwenden."
   }
 }

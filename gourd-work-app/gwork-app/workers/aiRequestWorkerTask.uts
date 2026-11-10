@@ -69,7 +69,6 @@ export class AiRequestWorkerTask extends WorkerTaskImpl {
 	private startedAt: number = 0
 	private content: string = ''
 	private reasoningContent: string = ''
-	private hasThinkContent: boolean = false
 	private eventCount: number = 0
 	private networkChunkCount: number = 0
 	private receivedBytes: number = 0
@@ -396,7 +395,6 @@ export class AiRequestWorkerTask extends WorkerTaskImpl {
 		this.startedAt = Date.now()
 		this.content = ''
 		this.reasoningContent = ''
-		this.hasThinkContent = false
 		this.eventCount = 0
 		this.networkChunkCount = 0
 		this.receivedBytes = 0
@@ -500,18 +498,6 @@ export class AiRequestWorkerTask extends WorkerTaskImpl {
 		this.eventCount += 1
 		let contentDelta = chunk.choices?.[0]?.delta?.content ?? ''
 		let reasoningDelta = chunk.choices?.[0]?.delta?.reasoning_content ?? ''
-		if (this.content.length == 0 && contentDelta == '<think>') {
-			this.hasThinkContent = true
-			contentDelta = ''
-		}
-		if (this.hasThinkContent) {
-			if (contentDelta == '</think>') {
-				this.hasThinkContent = false
-			} else {
-				reasoningDelta = contentDelta
-			}
-			contentDelta = ''
-		}
 		if (contentDelta.length > 0) this.content += contentDelta
 		if (reasoningDelta.length > 0) this.reasoningContent += reasoningDelta
 		// #ifdef APP-ANDROID || APP-HARMONY

@@ -73,12 +73,6 @@
 <img src="/img/favicon.png" alt="GWork" class="sidebar-logo-img"/>
 <span class="sidebar-logo-text">GWork</span>
 </div>
-<!-- 账号入口：由 app-account.js 按登录态填充。刻意放在 header 而不是
-sidebar-footer —— 底栏是 justify-content:space-between 且首/末子项位置被
-sidebar-update-badge.test.js 锁定，往里插按钮会让「设置」左右跳位。 -->
-<button class="account-entry-btn" id="accountEntryBtn" type="button">
-<span class="account-entry-name" id="accountEntryName" data-i18n="account.entry">登录 / 注册</span>
-</button>
 </div>
         <!-- 主导航：整行按钮（图标 + 文字 + 快捷键提示） -->
         <div class="main-nav">
@@ -147,20 +141,30 @@ sidebar-update-badge.test.js 锁定，往里插按钮会让「设置」左右跳
     </div>
     <div class="sidebar-list" id="historyList"></div>
     <div class="sidebar-footer">
-        <button class="settings-btn" id="settingsBtn" data-i18n-title="settings.title">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-            <span class="sidebar-text" style="margin-left:6px;font-size:12px;" data-i18n="settings.title">设置</span>
+        <!-- 底栏（原「设置按钮」区域）整体改为用户卡片：独立设置按钮已移除，
+             设置入口收进账号弹层（弹层 = 设置 + 用户相关菜单）；登录 / 注册表单
+             是【独立居中弹框】（.account-modal），不在本弹层里。
+             卡片由 app-account.js 按登录态填充：未登录 = 「登录 / 注册」，
+             已登录 = 头像 + 昵称 + 套餐；点击向上展开账号弹层。
+             【布局纪律】卡片是 sidebar-footer 的首子项、更新按钮是末子项：底栏
+             justify-content:space-between 下首子项恒贴左端、末子项恒贴右端，
+             卡片位置不随「有无更新」跳变（与原设置按钮同一纪律）。
+             此约束由 account-contract.test.js 锁定，勿调换。 -->
+        <button class="account-card" id="accountEntryBtn" type="button" aria-haspopup="dialog" aria-expanded="false">
+            <span class="account-card-avatar" id="accountCardAvatar" aria-hidden="true">G</span>
+            <span class="account-card-text">
+                <span class="account-card-name" id="accountEntryName" data-i18n="account.entry">登录 / 注册</span>
+                <span class="account-card-sub" id="accountCardSub"></span>
+            </span>
+            <svg class="account-card-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>
         </button>
         <!-- 桌面端「更新」按钮：仅在检测到新版的三种状态（可下载 / 下载中 / 待重启）下出现，
              默认隐藏（样式见 app.css .sidebar-update-btn），状态驱动逻辑见 app-update-badge.js。
              刻意不写 data-i18n：文案由 JS 按状态机实时赋值，静态翻译属性会被覆盖。
-             【顺序纪律】必须排在 settingsBtn 之后。底栏布局是 justify-content:space-between：
-             首子项恒贴左端（设置位置不随「有无更新」跳变）、末子项贴右端（更新出现即靠右）。
-             顺序若调换，设置会在有/无更新之间左右跳位（真浏览器实测 x=14 → x=201）。
-             此约束由 sidebar-update-badge.test.js 锁定，勿调换。 -->
+             【顺序纪律】必须排在账号卡片（首子项）之后、做末子项。底栏布局是
+             justify-content:space-between：首子项恒贴左端（卡片位置不随「有无更新」
+             跳变）、末子项贴右端（更新出现即靠右）。顺序若调换，卡片会在有/无更新
+             之间左右跳位。此约束由 account-contract.test.js 锁定，勿调换。 -->
         <button class="sidebar-update-btn" id="sidebarUpdateBtn" type="button" data-state="idle">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M4 21h16"/></svg>
             <span class="sidebar-update-btn-label" id="sidebarUpdateLabel"></span>

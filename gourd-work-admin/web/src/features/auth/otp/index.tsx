@@ -28,7 +28,6 @@ export function Otp() {
     <AuthLayout>
       <div className='w-full space-y-8'>
         <div className='gw-auth-head space-y-1.5'>
-          <p className='gw-eyebrow'>auth / verification</p>
           <h2 className='gw-auth-title'>{t('Security verification')}</h2>
           <p className='gw-auth-switch'>
             {t('Verify your identity to finish signing in.')}

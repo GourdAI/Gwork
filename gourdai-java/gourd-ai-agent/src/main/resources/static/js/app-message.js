@@ -416,11 +416,22 @@ window.steerCollapseRemeasure = steerCollapseRemeasure;
     批次索引，因此可与挂起收尾的 keepBatchIndex 保留语义并存。调用方必须在
     【清指针之前】调用（appendSteerNote / finishStream 挂起分支各有接线锁）。
 
-   【为何不调 compactBubble】按轮 Compact 只在轮【真结束】时由 finishStream 施加；
-   插话打断的旧轮没有最终正文、也没有 .msg-trace 终态徽标，classifyChildren 会
-   走 !decision 分支 → revealAll() 把刚收口折叠的批次成员重新全部摊开，正好抵消
-   本修复。Qoder 多折叠组契约下，旧轮的最终形态就是这些已收口的「执行工具 N 次」
-   盖子，不需要也不允许再叠第二层整轮摘要。
+   【为何要调 compactBubble（2026-11 修订）】旧实现只 closeBatchFor、明确拒绝整轮
+   Compact，理由是「旧轮没有终态正文，compact 会走 !decision → revealAll 摊开」。
+   该理由只对【不传 ended】成立，而回放路径（app-history.js applyTurnCompact）传的是
+   ended:true：classifyChildren 在 noFinal && ended 时只被「徽标标了 stopped/suspended」
+   否决，无徽标即放行（实测决策 process=6）。于是同一个插话前的旧轮出现形态分叉 ——
+   实时只有「执行工具 N 次」批次盖子，刷新/切会话走回放后却多出整轮摘要按钮
+   「已完成 · 3 次工具调用 · 1 段思考」（用户 2026-11 报障「插话前的好像不会自动折叠」）。
+   现改为与回放同口径补 ended:true 折叠，消除分叉。
+   【为何仍绝不传 ended:false】ended 缺省时 classifyChildren 返回 null，compactBubble
+   的 !decision 分支会 revealAll() 把刚收口的批次成员全部摊开（实测 collapsed 4 → 0），
+   正好抵消本 helper 的收口，这是旧注释唯一正确的部分。
+
+   【status 参数】挂起段（ask_user / HITL）不发 trace 帧，气泡永远无徽标，
+   readTurnMeta 恒空 → statusWord 一律回落「已完成」，把等待作答的轮次谎报成已完成。
+   故调用方可传 opts.status='suspended' 落「已挂起」。插话场景不传：任务整体仍在跑，
+   这一段过程的终态就是 done 语义，沿用「已完成」与回放完全一致（用户拍板）。
 
    【为何不调 clearBatch（偏好关闭时也不调）】关掉折叠偏好只表示【不再新建】盖子；
    已渲染的旧轮是既成历史，撤销它会把过程行全摊开，与「一键回退」语义不符
@@ -431,40 +442,61 @@ window.steerCollapseRemeasure = steerCollapseRemeasure;
    （noteProcessInsert 有 _replaying 门禁），且末尾 applyTurnCompact 会按页统一折叠，
    此处提前动既量不到游离节点、又会和它重复。
    全程原生 DOM（不依赖 jQuery），便于契约测试在 node:vm 里直接真跑。 */
-function settleSteerTurnBoundary(sess) {
-    if (!sess || !sess.currentBubbleEl) return;
-    try {
-        if (sess._replaying || (typeof isDetachedRenderTarget === 'function' && isDetachedRenderTarget(sess))) return;
-        var oldBubble = sess.currentBubbleEl.parentNode;
-        if (!oldBubble) return;
-        // 向上找旧行：逐层 parentNode（原生 closest 在极简假 DOM 里不一定有）
-        var oldRow = null, p = oldBubble;
-        while (p) {
-            if (p.classList && p.classList.contains && p.classList.contains('msg-row')) { oldRow = p; break; }
-            p = p.parentNode || null;
-        }
-        // 旧行退出运行态：与 finishStream 的 liveFoldRow 收口同口径
-        if (oldRow && oldRow.classList) oldRow.classList.remove('agent-live');
-        // 操作按钮：流式中被 hide() 设了 inline display:none，旧行此后不会再有 finishStream 来显示
-        if (oldRow && oldRow.querySelectorAll) {
-            var acts = oldRow.querySelectorAll('.msg-actions');
-            for (var ai = 0; ai < acts.length; ai++) acts[ai].style.display = '';
-        }
+ function settleSteerTurnBoundary(sess, opts) {
+     if (!sess || !sess.currentBubbleEl) return;
+     try {
+         if (sess._replaying || (typeof isDetachedRenderTarget === 'function' && isDetachedRenderTarget(sess))) return;
+         var oldBubble = sess.currentBubbleEl.parentNode;
+         if (!oldBubble) return;
+         // 向上找旧行：逐层 parentNode（原生 closest 在极简假 DOM 里不一定有）
+         var oldRow = null, p = oldBubble;
+         while (p) {
+             if (p.classList && p.classList.contains && p.classList.contains('msg-row')) { oldRow = p; break; }
+             p = p.parentNode || null;
+         }
+         // 旧行退出运行态：与 finishStream 的 liveFoldRow 收口同口径
+         if (oldRow && oldRow.classList) oldRow.classList.remove('agent-live');
+         // 操作按钮：流式中被 hide() 设了 inline display:none，旧行此后不会再有 finishStream 来显示
+         if (oldRow && oldRow.querySelectorAll) {
+             var acts = oldRow.querySelectorAll('.msg-actions');
+             for (var ai = 0; ai < acts.length; ai++) acts[ai].style.display = '';
+         }
 
-        var tcOff = false;
-        try { tcOff = (typeof localStorage !== 'undefined') && localStorage.getItem('gourd.turnCompact') === '0'; } catch (lsErr) { /* 隐私模式忽略 */ }
-        if (tcOff) return;
-        /* 运行批次收口是运行态自身的语义，必须与 turn-compact 模块是否存在无关，
-           否则模块缺失时盖子永远停在「正在执行中」（与 finishStream 的接线形状锁
+         var tcOff = false;
+         try { tcOff = (typeof localStorage !== 'undefined') && localStorage.getItem('gourd.turnCompact') === '0'; } catch (lsErr) { /* 隐私模式忽略 */ }
+         if (tcOff) return;
+         /* 运行批次收口是运行态自身的语义，必须与 turn-compact 模块是否存在无关，
+            否则模块缺失时盖子永远停在「正在执行中」（与 finishStream 的接线形状锁
             同一条教训）。纯展示增强：异常只留痕，不许影响新气泡与后续流式。 */
-        var tbApi = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
-        if (tbApi && tbApi.closeBatchFor) {
-            try { tbApi.closeBatchFor(oldBubble); } catch (tbErr) { /* 展示增强 */ }
-        }
-    } catch (e) {
-        if (typeof console !== 'undefined' && console.error) console.error('[轮边界收口] 旧轮收口失败:', e);
-    }
-}
+         var tbApi = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
+         var tcApi = (typeof window !== 'undefined') ? window.GourdTurnCompact : null;
+         if (tbApi && tbApi.closeBatchFor) {
+             try { tbApi.closeBatchFor(oldBubble); } catch (tbErr) { /* 展示增强 */ }
+         }
+         /* 整轮 Compact：必须在 closeBatchFor【之后】——分类要看到已收口的盖子形态
+             （与 finishStream 真收口分支、回放 rebuildBatches → applyTurnCompact 的顺序
+             完全同源）。ended:true 与回放同口径，否则「批次盖子让位」门禁会把带盖子的
+             旧轮整体短路，实时与历史形态分叉。 */
+         if (tcApi) {
+             /* 状态覆盖位要先于 compactBubble 写入：摘要文案由 readTurnMeta 当场读取，
+                晚写则本段仍回落「已完成」。 */
+             if (opts && opts.status && tcApi.markTurnStatus) {
+                 try { tcApi.markTurnStatus(oldBubble, opts.status); } catch (msErr) { /* 展示增强 */ }
+             }
+             if (tcApi.compactBubble) {
+                 try {
+                     tcApi.compactBubble(oldBubble, {
+                         ended: true,
+                         translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t)
+                             ? function (k) { return GourdI18n.t(k); } : null
+                     });
+                 } catch (cbErr) { /* 展示增强 */ }
+             }
+         }
+     } catch (e) {
+         if (typeof console !== 'undefined' && console.error) console.error('[轮边界收口] 旧轮收口失败:', e);
+     }
+ }
 
 /* 插话以【用户消息气泡】形态呈现：插话本质是用户在任务运行中补发的一句话，与正常发送、
    队列出队同属用户输入族系（右对齐用户气泡 + 附件真实缩略图），仅多一枚「插话」身份徽标
@@ -2441,6 +2473,56 @@ function appendErrorChunk(sess, text) {
     ensureAssistantBubble(sess);
     var errEl = $('<div>').addClass('chunk-error').text(text)[0];
     insertBeforeActions(sess, errEl);
+    if (sess.sessionId === activeSessionId) scrollToBottom();
+}
+
+/* ===== 上下文压缩分隔线 =====
+   后端在推理前确实执行了压缩（摘要/清理历史）时下发 context_compacted 帧，
+   在内容区渲染一条「已压缩上下文」横向分隔线（对齐业界同类产品的压缩提示形态）。
+
+   位置语义：分隔线必须落在「压缩前内容」与「压缩后内容」之间。压缩发生在
+   新一轮推理开始之前，故帧到达时先收口当前运行中的批次盖子（「执行工具 N 次」），
+   再把分隔线插到指针之后——视觉上恰好隔开上一段过程行与本轮新内容。
+
+   非成员元素：分隔线不进批次盖子（isProcessRow 白名单不含它），也不被整轮折叠
+   收进「过程」集合（KEEP_VISIBLE 语义：它是轮次边界标记，折叠后仍应可见）。 */
+function appendContextCompactedDivider(sess, chunk) {
+    ensureAssistantBubble(sess);
+    // 收口运行中的批次盖子：分隔线成为上一段过程行的终止符。
+    // 批次 API 挂在 window.GourdTurnBatch（UMD 模块出口），不是全局函数。
+    if (typeof window !== 'undefined' && window.GourdTurnBatch && window.GourdTurnBatch.closeBatch) {
+        try { window.GourdTurnBatch.closeBatch(sess); } catch (e) { /* 展示增强，失败不影响分隔线 */ }
+    }
+    var el = document.createElement('div');
+    el.className = 'context-compacted-divider';
+    var args = (chunk && chunk.args) || {};
+    var bm = args.beforeMessages, am = args.afterMessages;
+    var detail = (typeof bm === 'number' && typeof am === 'number' && bm > am)
+        ? bm + ' → ' + am
+        : '';
+    if (detail) el.setAttribute('data-detail', detail);
+    var label = (typeof GourdI18n !== 'undefined' && GourdI18n.t)
+        ? GourdI18n.t('chat.context_compacted') : 'chat.context_compacted';
+    if (!label || label === 'chat.context_compacted') label = '已压缩上下文';
+    var title = (typeof GourdI18n !== 'undefined' && GourdI18n.t)
+        ? GourdI18n.t('chat.context_compacted_tip') : 'chat.context_compacted_tip';
+    if (!title || title === 'chat.context_compacted_tip') {
+        title = '上下文超出预算，历史已自动压缩（摘要/清理早期工具结果）';
+    }
+    if (detail) title += '（' + detail + '）';
+    el.setAttribute('title', title);
+    el.setAttribute('role', 'separator');
+    el.innerHTML = '<span class="ccd-line" aria-hidden="true"></span>'
+        + '<span class="ccd-label"><span class="ccd-icon" aria-hidden="true">'
+        + '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4">'
+        + '<rect x="3" y="1.5" width="10" height="13" rx="1.5"></rect>'
+        + '<path d="M5.5 5h5M5.5 8h5M5.5 11h3"></path></svg></span>'
+        + '<span class="ccd-text"></span></span>'
+        + '<span class="ccd-line" aria-hidden="true"></span>';
+    el.querySelector('.ccd-text').textContent = label;
+    insertBeforeActions(sess, el);
+    // 指针推进：本轮后续正文落到分隔线之下，保持「压缩前/后」的视觉分界
+    advanceBodyPointer(sess, sess, function (fresh) { insertBeforeActions(sess, fresh); });
     if (sess.sessionId === activeSessionId) scrollToBottom();
 }
 

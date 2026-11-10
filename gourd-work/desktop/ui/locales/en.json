@@ -945,6 +945,8 @@
     "batch_running": "Running",
     "batch_done": "Processed",
     "batch_done_count": "{count} tool calls",
+    "context_compacted":  "Context compressed",
+    "context_compacted_tip":  "Context exceeded the budget; earlier history was automatically compressed (summarised / stale tool results cleared)",
     "action_bash_done": "Terminal command ran",
     "action_thinking_done": "Thought",
     "batch_thinking_count": "Thought {count} times",
@@ -1405,6 +1407,11 @@
     "signed_in": "Signed in",
     "required": "Please enter username and password",
     "password_policy": "Password must be 8–128 characters",
-    "failed": "Operation failed"
+    "failed": "Operation failed",
+    "plan": "Plan",
+    "points": "Points balance",
+    "memory": "Memory & evolution",
+    "feedback": "Feedback",
+    "unavailable": "Sign-in service is unavailable. Please use the desktop app."
   }
 }

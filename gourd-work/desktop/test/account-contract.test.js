@@ -57,6 +57,18 @@ test('app-account.js is loaded by bootstrap and entry exists in index.html', () 
   const html = read('ui/index.html');
   assert.ok(html.includes('id="accountEntryBtn"'), 'account entry button missing');
   assert.ok(html.includes('data-i18n="account.entry"'), 'entry i18n key missing');
+  /* 【布局纪律】用户卡片取代原设置按钮，成为 sidebar-footer 的【首子项】，
+     更新按钮是末子项：底栏 space-between 下首子项恒贴左端、末子项恒贴右端，
+     卡片位置不随「有无更新」跳变（与原设置按钮同一纪律）。 */
+  const footer = html.slice(html.indexOf('class="sidebar-footer"'));
+  assert.ok(footer.indexOf('id="accountEntryBtn"') >= 0,
+    'account card must live INSIDE sidebar-footer (it replaced the settings button)');
+  assert.ok(footer.indexOf('id="accountEntryBtn"') < footer.indexOf('id="sidebarUpdateBtn"'),
+    'account card must be the first footer child, update button the last');
+  assert.ok(!html.includes('id="settingsBtn"'),
+    'standalone settings button must be removed; settings entry lives in the account popover');
+  assert.ok(html.includes('class="account-card"'), 'account card class missing');
+  assert.ok(!html.includes('account-entry-btn'), 'old top-header entry must be removed');
 });
 
 test('12 locales all carry the same account key set', () => {
@@ -66,7 +78,9 @@ test('12 locales all carry the same account key set', () => {
   const expected = [
     'close', 'entry', 'sign_in', 'sign_up', 'sign_up_submit', 'sign_out',
     'username', 'email', 'password', 'working', 'signed_in', 'required',
-    'password_policy', 'failed'
+    'password_policy', 'failed',
+    // 用户卡片 / 信息弹层（参考设计稿）新增键
+    'plan', 'points', 'memory', 'feedback', 'unavailable'
   ].sort();
   for (const f of files) {
     const obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));

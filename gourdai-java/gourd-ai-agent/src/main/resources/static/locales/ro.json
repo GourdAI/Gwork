@@ -993,6 +993,8 @@
                  "thinking_in_progress":  "Gândire în curs",
                  "thinking_finished":  "Gândire finalizată",
                  "phase_thinking":  "Gândește",
+                 "context_compacted":  "Context comprimat",
+                 "context_compacted_tip":  "Contextul a depasit bugetul; istoricul vechi a fost comprimat automat",
                  "phase_text":  "Scrie",
                  "phase_waiting":  "Așteaptă răspunsul",
                  "args_streaming":  "Se generează argumentele · {size}",

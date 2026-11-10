@@ -17,9 +17,15 @@
  * ── 测试形态 ────────────────────────────────────────────────────────────
  * 从真实 app-message.js 里切出 helper 源码（不复制实现，避免测副本），在
  * node:vm 里配极简假 DOM 真跑；另用源码断言守住 appendSteerNote 的接线
- * （helper 必须定义在清 currentBubbleEl 之前被调用）与两份 UI 镜像的一致性，
- * 并钉死「绝不调用 compactBubble / clearBatch」——旧轮没有终态正文，
- * compactBubble 会走 !decision → revealAll 把刚收好的批次重新摊开。
+ * （helper 必须定义在清 currentBubbleEl 之前被调用）与两份 UI 镜像的一致性。
+ *
+ * ── 2026-11 修订（用户报障「插话前的好像不会自动折叠」）───────────────────────
+ * 旧版钉死「绝不调用 compactBubble」，理由是旧轮无终态正文、compact 会走
+ * !decision → revealAll 把批次重新摊开。该理由只对【不传 ended】成立：回放路径
+ * （applyTurnCompact）传 ended:true，同一插话前旧轮刷新后会折出整轮摘要 ——
+ * 实时不折、回放折的形态分叉。现两条路径统一 ended:true，回归钉 A 已反转；
+ * 「绝不 revealAll」仍由「必须传 ended:true」这条更强的断言守住。
+ * clearBatch 依旧是禁区（会摊开已渲染的历史过程行）。
  */
 'use strict';
 const test = require('node:test');
@@ -45,7 +51,7 @@ function extractFn(src, anchor) {
     assert.equal(depth, 0, 'helper 花括号不配平');
     return src.slice(start, i + 1);
 }
-const HELPER_SRC = extractFn(MSG_SRC, 'function settleSteerTurnBoundary(sess) {');
+const HELPER_SRC = extractFn(MSG_SRC, 'function settleSteerTurnBoundary(sess, opts) {');
 
 /* ===== 极简假 DOM（与 turn-batch.test.js 同口径） ===== */
 function el(classes) {
@@ -85,22 +91,26 @@ function makeRunningTurn() {
     return { row, bubble, md, actions };
 }
 
-/** 在 vm 沙箱里装载 helper，返回 {fn, calls}；calls 记录所有收口调用 */
+/** 在 vm 沙箱里装载 helper，返回 {fn, calls, recorded}；calls 记录动作序列，recorded 记录实参 */
 function loadHelper(opts) {
     const o = opts || {};
     const calls = [];
+    const recorded = [];
     const sandbox = {
         console: { error() {} },
         localStorage: { getItem: k => (k === 'gourd.turnCompact' && o.turnCompactOff) ? '0' : null },
         isDetachedRenderTarget: () => !!o.detached,
         window: {
-            /* 探针：compactBubble / clearBatch 一旦被调用就是回归（会把收好的批次摊开） */
+            /* 探针：clearBatch / clearTurnCompact 一旦被调用就是回归（会摊开已折叠的历史过程行） */
             GourdTurnBatch: o.noBatch ? undefined : {
                 closeBatchFor: () => { calls.push('closeBatchFor'); if (o.throwBatch) throw new Error('batch boom'); },
                 clearBatch: () => calls.push('clearBatch')
             },
             GourdTurnCompact: o.noCompact ? undefined : {
-                compactBubble: () => calls.push('compactBubble'),
+                /* 记录实参：ended 必须为 true（与回放 applyTurnCompact 同口径），
+                   缺省会走 classifyChildren 的 null → revealAll 摊开分支。 */
+                compactBubble: (b, opt) => { calls.push('compactBubble'); recorded.push({ bubble: b, opts: opt }); },
+                markTurnStatus: (b, status) => { calls.push('markTurnStatus:' + status); recorded.push({ bubble: b, status: status }); },
                 clearTurnCompact: () => calls.push('clearTurnCompact')
             }
         }
@@ -108,25 +118,38 @@ function loadHelper(opts) {
     vm.createContext(sandbox);
     vm.runInContext(HELPER_SRC + '\nthis.__helper = settleSteerTurnBoundary;', sandbox);
     assert.equal(typeof sandbox.__helper, 'function', 'helper 未成功装载');
-    return { fn: sandbox.__helper, calls };
+    return { fn: sandbox.__helper, calls, recorded };
 }
 
-test('★ 插话轮边界：旧批次收口、旧行退出运行态、操作按钮恢复显示', () => {
+test('★ 插话轮边界：旧批次收口、旧行退出运行态、操作按钮恢复显示、折整轮摘要', () => {
     const t = makeRunningTurn();
     const { fn, calls } = loadHelper({});
     fn({ currentBubbleEl: t.md, _replaying: false });
-    assert.deepEqual(calls, ['closeBatchFor'], '唯一的折叠动作就是运行批次收口');
+    /* 插话不传 status：任务整体仍在跑，这一段过程的终态就是 done 语义，
+       沿用「已完成」与回放完全一致（用户拍板）。故不得出现 markTurnStatus。 */
+    assert.deepEqual(calls, ['closeBatchFor', 'compactBubble'],
+        '收口动作序列：先收批次盖子，再折整轮摘要；插话不落状态覆盖位');
     assert.ok(!t.row._classes.has('agent-live'), '旧行必须摘掉 agent-live（否则过程行永远实时展开）');
     assert.equal(t.actions.style.display, '', '旧行 .msg-actions 必须恢复显示（此后无 finishStream 会来显示它）');
 });
 
-test('★ 回归钉 A：绝不调 compactBubble（旧轮无终态正文，会 revealAll 抵消收口）', () => {
+test('★ 回归钉 A（2026-11 反转）：必须调 compactBubble 且 ended:true，绝不传 ended 缺省', () => {
     const t = makeRunningTurn();
-    const { fn, calls } = loadHelper({});
+    const { fn, calls, recorded } = loadHelper({});
     fn({ currentBubbleEl: t.md });
-    assert.ok(!calls.includes('compactBubble'), 'compactBubble 会把刚折叠的批次重新摊开');
+    /* 旧契约钉「绝不调 compactBubble」，理由是「无终态正文 → revealAll 摊开」。
+       该理由只对【不传 ended】成立：回放路径传 ended:true，同一插话前旧轮刷新后会
+       折出整轮摘要，造成实时不折 / 回放折的形态分叉（用户报障「插话前不会自动折叠」）。
+       现两条路径统一 ended:true 折叠，本钉反转为「必须折且必须传 ended:true」。 */
+    assert.ok(calls.includes('compactBubble'), '插话前旧轮必须与回放同口径折整轮摘要');
+    const cb = recorded.find(r => r.opts !== undefined);
+    assert.equal(cb.opts.ended, true,
+        'ended 必须为 true：缺省会走 classifyChildren 的 null → revealAll，把刚收好的批次摊开');
+    assert.equal(cb.bubble, t.bubble, '必须折叠旧气泡本身（不是新气泡）');
+    assert.ok(!calls.some(c => String(c).indexOf('markTurnStatus') === 0),
+        '插话场景不落状态覆盖位：沿用「已完成」与回放一致');
     assert.ok(!calls.includes('clearTurnCompact'));
-    assert.ok(!calls.includes('clearBatch'), 'clearBatch 同样会摊开已渲染的历史过程行');
+    assert.ok(!calls.includes('clearBatch'), 'clearBatch 会摊开已渲染的历史过程行');
 });
 
 test('★ 回归钉 B：缺少 turn-compact 模块时批次仍必须收口（盖子不能谎报「正在执行中」）', () => {
@@ -199,8 +222,9 @@ test('★ 两份 UI 镜像同步：gourd-work / gourdai-java 的插话收口接�
     for (const f of mirrors) {
         assert.ok(fs.existsSync(f), '镜像缺失: ' + f);
         const src = fs.readFileSync(f, 'utf8');
-        assert.ok(src.indexOf('function settleSteerTurnBoundary(sess) {') > 0, '镜像缺 helper: ' + f);
-        assert.ok(src.indexOf('settleSteerTurnBoundary(sess);') > 0, '镜像缺接线: ' + f);
+        assert.ok(src.indexOf('function settleSteerTurnBoundary(sess, opts) {') > 0, '镜像缺 helper: ' + f);
+        assert.ok(src.indexOf('settleSteerTurnBoundary(sess);') > 0, '镜像缺插话接线: ' + f);
+        assert.ok(src.indexOf("tcApi.compactBubble(oldBubble, {") > 0, '镜像缺整轮折叠（实时/回放形态分叉）: ' + f);
         assert.doesNotMatch(src, /插话以【用户消息气泡】形态呈现\s*\n\s*\n\/\* 插话以/, '镜像残留悬空注释: ' + f);
     }
 });

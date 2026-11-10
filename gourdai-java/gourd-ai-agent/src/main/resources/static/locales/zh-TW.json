@@ -993,6 +993,8 @@
                  "thinking_in_progress":  "思考中",
                  "thinking_finished":  "思考結束",
                  "phase_thinking":  "思考中",
+                 "context_compacted":  "已壓縮上下文",
+                 "context_compacted_tip":  "上下文超出預算，歷史已自動壓縮（摘要/清理早期工具結果）",
                  "phase_text":  "輸出中",
                  "phase_waiting":  "等待回應",
                  "args_streaming":  "產生參數中 · {size}",

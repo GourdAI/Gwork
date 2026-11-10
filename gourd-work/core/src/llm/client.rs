@@ -366,7 +366,23 @@ async fn do_stream(
     // chunk lossily turned the halves into U+FFFD (the intermittent ``
     // garbling in streamed replies). The incremental decoder holds a
     // truncated trailing sequence until the next chunk completes it.
-    let mut decoder = StreamDecoder::new();
+    //
+    // STRICT UTF-8 here, never the GBK-fallback decoder. An SSE/JSON body is
+    // UTF-8 by contract (RFC 8259 / the SSE spec), so a non-UTF-8 byte means
+    // the *upstream* is broken, not that the provider switched encodings. The
+    // GBK decoder latches permanently on the first bad byte and then re-reads
+    // every following byte pair as one CJK character — UTF-8 CJK is 3 bytes,
+    // so it silently eats ~1.5 characters per one. That is the corruption seen
+    // on session work-mw8wizyz: `wx-ai`→`w-ai`, `org.dromara`→`org.d/org/grom`,
+    // a Chinese clause turned into the Latin word `wants`, and — worst — the
+    // garbling reached tool-call *arguments*, which stayed valid JSON and so
+    // sailed past `broken_argument_calls` into a real `read` of a nonsense
+    // path ("File not found" card, then the model chasing its own garbage).
+    //
+    // Strict mode emits exactly one U+FFFD per bad sequence and keeps the rest
+    // of the stream intact, which (a) stops the text loss and (b) leaves a
+    // detectable signature for the react loop to reject and cleanly retry.
+    let mut decoder = StreamDecoder::strict_utf8();
     let mut parser: Box<dyn StreamParser> = dialect.parser();
     let mut saw_done = false;
     // Whether any event has crossed the channel. Once true, a retry is
@@ -651,6 +667,38 @@ mod tests {
             model: model.into(),
             ..Default::default()
         })
+    }
+
+    /// The LLM stream decoder must be constructed in STRICT UTF-8 mode.
+    ///
+    /// `StreamDecoder::new()` latches into GBK on the first non-UTF-8 byte and
+    /// then silently deletes ~1.5 characters per CJK character for the rest of
+    /// the stream — the exact corruption reported on session work-mw8wizyz
+    /// (`wx-ai`→`w-ai`, `org.dromara`→`org.d/org/grom`). A pure-function test on
+    /// `textcodec` cannot see WHICH constructor this call site uses, so a future
+    /// "simplification" back to `new()` would regress the fix with every unit
+    /// test still green. Source pin, same pattern as the timeout guard above.
+    #[test]
+    fn llm_stream_decoder_is_strict_utf8() {
+        let src = include_str!("client.rs");
+        // Only the production code (before the test module), comments stripped
+        // so the explanatory prose — which legitimately names `StreamDecoder::new()`
+        // while forbidding it — cannot satisfy or mask the assertions.
+        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let code: String = production
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("StreamDecoder::strict_utf8()"),
+            "the LLM SSE stream must decode in strict UTF-8 mode"
+        );
+        assert!(
+            !code.contains("StreamDecoder::new()"),
+            "StreamDecoder::new() latches into GBK and silently eats CJK text; \
+             the LLM stream must use strict_utf8()"
+        );
     }
 
     /// The client must pick the protocol from the model config. Before this, every

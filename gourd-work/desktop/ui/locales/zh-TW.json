@@ -956,6 +956,8 @@
     "turn_agents_one": "次子代理",
     "turn_process_texts_one": "段過程",
     "phase_thinking": "思考中",
+    "context_compacted":  "已壓縮上下文",
+    "context_compacted_tip":  "上下文超出預算，歷史已自動壓縮（摘要/清理早期工具結果）",
     "phase_text": "輸出中",
     "phase_waiting": "等待回應",
     "args_streaming": "產生參數中 · {size}",
@@ -1405,6 +1407,11 @@
     "signed_in": "已登入",
     "required": "請填寫使用者名稱和密碼",
     "password_policy": "密碼長度需為 8–128 個字元",
-    "failed": "操作失敗"
+    "failed": "操作失敗",
+    "plan": "套餐",
+    "points": "點數餘額",
+    "memory": "記憶與進化",
+    "feedback": "意見回饋",
+    "unavailable": "登入服務暫不可用，請在桌面客戶端中操作"
   }
 }

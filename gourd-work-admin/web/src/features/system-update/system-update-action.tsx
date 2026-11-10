@@ -16,11 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import {
-  ArrowUp01Icon,
-  InformationCircleIcon,
-  RefreshIcon,
-} from '@hugeicons/core-free-icons'
+import { ArrowUp01Icon, RefreshIcon } from '@hugeicons/core-free-icons'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -36,11 +32,16 @@ import { SystemUpdateDialog } from './system-update-dialog'
 import { useSystemUpdate } from './use-system-update'
 
 type SystemUpdateActionProps = {
-  /** Version labels expand when the header's system-brand container has room. */
-  presentation?: 'action' | 'version'
   compact?: boolean
 }
 
+/**
+ * Administrator-only update entry point.
+ *
+ * Renders a compact icon button (label expands on wide viewports) that
+ * opens the update dialog. The current version is intentionally NOT shown
+ * inline in headers — it lives in the dialog and in System Settings.
+ */
 export function SystemUpdateAction(props: SystemUpdateActionProps) {
   const isAdmin = useAuthStore(
     (state) => (state.auth.user?.role ?? 0) >= ROLE.ADMIN
@@ -54,8 +55,6 @@ function AdminSystemUpdateAction(props: SystemUpdateActionProps) {
   const update = useSystemUpdate()
   const [open, setOpen] = useState(false)
   const compact = props.compact ?? true
-  const versionPresentation = props.presentation === 'version'
-  const version = update.currentVersion?.trim() || t('Unknown version')
   const label = update.shouldNotify
     ? t('Update available')
     : t('Check for updates')
@@ -68,56 +67,6 @@ function AdminSystemUpdateAction(props: SystemUpdateActionProps) {
     description = t('Failed to check for updates')
   }
   const updateAnnouncement = update.shouldNotify ? description : ''
-  if (versionPresentation) {
-    const versionDescription = t(
-      'System updates, current version: {{version}}',
-      { version }
-    )
-    description =
-      update.shouldNotify || update.snapshot?.error
-        ? `${versionDescription}\n${description}`
-        : versionDescription
-  }
-
-  let triggerContent = (
-    <>
-      {update.checking ? (
-        <Spinner data-icon='inline-start' aria-hidden='true' />
-      ) : (
-        <HugeiconsIcon
-          icon={update.shouldNotify ? ArrowUp01Icon : RefreshIcon}
-          data-icon='inline-start'
-          aria-hidden='true'
-        />
-      )}
-      <span className={cn(compact && 'hidden lg:inline')}>{label}</span>
-    </>
-  )
-  if (versionPresentation) {
-    triggerContent = (
-      <>
-        <HugeiconsIcon
-          icon={update.shouldNotify ? ArrowUp01Icon : InformationCircleIcon}
-          className={cn(
-            '@min-[22rem]/system-brand:hidden',
-            update.shouldNotify && 'text-primary'
-          )}
-          aria-hidden='true'
-        />
-        <span className='hidden max-w-32 truncate font-mono text-xs @min-[22rem]/system-brand:inline'>
-          {version}
-        </span>
-        {update.shouldNotify && (
-          <Badge
-            variant='secondary'
-            className='bg-primary/10 text-primary hidden h-5 px-1.5 text-[10px] @min-[22rem]/system-brand:inline-flex'
-          >
-            {t('Update available')}
-          </Badge>
-        )}
-      </>
-    )
-  }
 
   return (
     <SystemUpdateDialog
@@ -127,34 +76,30 @@ function AdminSystemUpdateAction(props: SystemUpdateActionProps) {
       trigger={
         <Button
           type='button'
-          variant={
-            !versionPresentation && update.shouldNotify ? 'outline' : 'ghost'
-          }
+          variant={update.shouldNotify ? 'outline' : 'ghost'}
           aria-label={description}
           title={description}
           aria-busy={update.checking}
           className={cn(
             'relative',
-            versionPresentation &&
-              'text-muted-foreground size-8 px-0 @min-[22rem]/system-brand:h-7 @min-[22rem]/system-brand:w-auto @min-[22rem]/system-brand:gap-1.5 @min-[22rem]/system-brand:px-1.5',
-            !versionPresentation &&
-              compact &&
-              'size-8 px-0 lg:w-auto lg:gap-1.5 lg:px-2.5',
-            !versionPresentation &&
-              update.shouldNotify &&
-              'border-primary/40 bg-primary/10 text-primary'
+            compact && 'size-8 px-0 lg:w-auto lg:gap-1.5 lg:px-2.5',
+            update.shouldNotify && 'border-primary/40 bg-primary/10 text-primary'
           )}
         >
-          {triggerContent}
-          {update.shouldNotify && (versionPresentation || compact) && (
+          {update.checking ? (
+            <Spinner data-icon='inline-start' aria-hidden='true' />
+          ) : (
+            <HugeiconsIcon
+              icon={update.shouldNotify ? ArrowUp01Icon : RefreshIcon}
+              data-icon='inline-start'
+              aria-hidden='true'
+            />
+          )}
+          <span className={cn(compact && 'hidden lg:inline')}>{label}</span>
+          {update.shouldNotify && compact && (
             <Badge
               aria-hidden='true'
-              className={cn(
-                'absolute -end-0.5 -top-0.5 size-1.5 min-w-0 p-0',
-                versionPresentation
-                  ? '@min-[22rem]/system-brand:hidden'
-                  : 'lg:hidden'
-              )}
+              className='absolute -end-0.5 -top-0.5 size-1.5 min-w-0 p-0 lg:hidden'
             />
           )}
           <span className='sr-only' role='status' aria-live='polite'>

@@ -33,7 +33,6 @@ export function SignUp() {
     <AuthLayout>
       <div className='w-full space-y-8'>
         <div className='gw-auth-head space-y-1.5'>
-          <p className='gw-eyebrow'>auth / sign-up</p>
           <h2 className='gw-auth-title'>{t('Create an account')}</h2>
           <p className='gw-auth-switch'>
             {t('Already have an account?')} <Link to='/sign-in'>{t('Sign in')}</Link>

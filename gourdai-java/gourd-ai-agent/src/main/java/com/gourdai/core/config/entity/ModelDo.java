@@ -13,6 +13,23 @@ import java.util.Map;
 public class ModelDo extends ChatConfig {
     private boolean visibled = true;
 
+    /**
+     * 所属渠道的唯一 id（对应 {@code ProviderDo#id}）：模型归属的权威依据。
+     *
+     * <p>{@code provider}（渠道显示名）仅作展示与旧配置兼容；分组、级联删除、供应商同步等
+     * 身份判定一律以本字段为准，渠道改名不再影响模型归属。旧配置无此字段时由
+     * {@code AgentSettings#ensureChannelIds()} 按 provider 名称在内存回填。</p>
+     */
+    private String providerId;
+
+    public String getProviderId() {
+        return providerId;
+    }
+
+    public void setProviderId(String providerId) {
+        this.providerId = providerId;
+    }
+
     //作用域（全局或本地）
     private String scope = AgentFlags.SCOPE_USER;
 

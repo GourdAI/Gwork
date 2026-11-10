@@ -993,6 +993,8 @@
                  "thinking_in_progress":  "Σε σκέψη",
                  "thinking_finished":  "Η σκέψη ολοκληρώθηκε",
                  "phase_thinking":  "Σκέψη",
+                 "context_compacted":  "Sympliesi symfrazomenon",
+                 "context_compacted_tip":  "Ta symfrazomena yperbesan ton proypologismo; to palaiotero istoriko sympiestike aftomata",
                  "phase_text":  "Γράφει",
                  "phase_waiting":  "Αναμονή απόκρισης",
                  "args_streaming":  "Δημιουργία παραμέτρων · {size}",

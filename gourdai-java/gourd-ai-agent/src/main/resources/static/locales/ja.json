@@ -993,6 +993,8 @@
                  "thinking_in_progress":  "思考中",
                  "thinking_finished":  "思考終了",
                  "phase_thinking":  "思考中",
+                 "context_compacted":  "コンテキスト圧縮済み",
+                 "context_compacted_tip":  "コンテキストが予算を超過したため、古い履歴は自動的に圧縮されました",
                  "phase_text":  "出力中",
                  "phase_waiting":  "応答待ち",
                  "args_streaming":  "引数を生成中 · {size}",

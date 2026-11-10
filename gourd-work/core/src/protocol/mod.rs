@@ -3,7 +3,7 @@
 //! Frame types are compatible with the existing frontend (app-streaming.js / WebChunk):
 //! reason_start, reason, text, action_start, action_args, action_batch, action_end,
 //! hitl, hitl_released, question, question_answered, agent_start, agent_progress,
-//! agent_end, context_size, tps_progress, trace, retry, user_input, steer_applied/cancelled/dropped,
+//! agent_end, context_size, context_compacted, tps_progress, trace, retry, user_input, steer_applied/cancelled/dropped,
 //! file_changes, done, error.
 //!
 //! Every frame carries:
@@ -527,6 +527,38 @@ impl Frame {
         f.extra("args", serde_json::Value::Object(args))
     }
 
+    /// Context was compressed before this turn's request (Java
+    /// `ContextSizeEvent(compressed=true)` → `context_compacted`).
+    ///
+    /// A passive metadata frame: no phase (same contract as `tps_progress`),
+    /// so it cannot rewrite the conversation's phase state machine. It IS
+    /// persisted (unlike `tps_progress`) because the divider it draws is part
+    /// of the conversation's history shape — replay must show it where the
+    /// compression happened, between the pre-compression tool groups and the
+    /// post-compression ones.
+    ///
+    /// The before/after counts ride in `args` for the divider's detail text
+    /// ("N 条 → M 条"); the frontend degrades to a bare label when absent.
+    pub fn context_compacted(
+        session: &str,
+        before_messages: usize,
+        after_messages: usize,
+        before_tokens: i64,
+        after_tokens: i64,
+    ) -> Self {
+        Self::new("context_compacted")
+            .session(session)
+            .extra(
+                "args",
+                serde_json::json!({
+                    "beforeMessages": before_messages,
+                    "afterMessages": after_messages,
+                    "beforeTokens": before_tokens,
+                    "afterTokens": after_tokens,
+                }),
+            )
+    }
+
     /// Live decode-speed + first-token-latency progress (transient, not persisted).
     ///
     /// This frame is emitted **while the model is still streaming**, at most
@@ -602,6 +634,30 @@ impl Frame {
     /// Run failed with error.
     pub fn error(session: &str, message: &str) -> Self {
         Self::new("error").session(session).text(message).with_phase(phase::DONE)
+    }
+
+    /// Run failed with error, **and the partial output of the failed attempt
+    /// must be rolled back** on the client (`discardPartial: true`).
+    ///
+    /// Used by the corruption gate's terminal path (`react/mod.rs`): when a
+    /// stream is corrupt and its clean-retry allowance is exhausted, the damaged
+    /// deltas of the *last* attempt are already on screen — a garbled bubble and
+    /// orphan skeleton tool cards — and nothing else will clear them, because the
+    /// per-attempt `stream_retry(discardPartial)` only fires *before* a retry,
+    /// never after the final failure. Emitting the error with this flag lets the
+    /// client drop exactly those uncommitted blocks (`discardPartialRetryDom`)
+    /// and show a clean error in their place.
+    ///
+    /// Deliberately NOT used on the user-Stop / cancel path: there the partial
+    /// output is genuine work the user chose to halt, and discarding it would
+    /// destroy content they asked to keep. Corruption is the only case where the
+    /// rendered bytes are known-bad.
+    pub fn error_discarding(session: &str, message: &str) -> Self {
+        Self::new("error")
+            .session(session)
+            .text(message)
+            .extra("discardPartial", serde_json::json!(true))
+            .with_phase(phase::DONE)
     }
 
     /// Trace/usage badge (final summary of the run).
@@ -1062,6 +1118,25 @@ mod tests {
         let none: serde_json::Value =
             serde_json::from_str(&Frame::tps_progress("work-x", 0, 0, None).to_json()).unwrap();
         assert!(none.get("ttftMs").is_none());
+    }
+
+    /// The compression divider frame must carry the before/after counts inside
+    /// `args` (which `#[serde(flatten)]` lifts to top-level keys on the wire) and
+    /// must deliberately carry **no phase**: a phase would rewrite the main
+    /// conversation's phase state machine from a purely passive marker frame.
+    #[test]
+    fn context_compacted_frame_carries_the_divider_contract() {
+        let v: serde_json::Value =
+            serde_json::from_str(&Frame::context_compacted("work-x", 40, 12, 90_000, 30_000).to_json())
+                .unwrap();
+        assert_eq!(v["type"], "context_compacted");
+        assert_eq!(v["sessionId"], "work-x");
+        assert!(v.get("phase").is_none(), "a passive marker must not advance the phase");
+        // The frontend reads these four through `chunk.args.*`.
+        assert_eq!(v["args"]["beforeMessages"], 40);
+        assert_eq!(v["args"]["afterMessages"], 12);
+        assert_eq!(v["args"]["beforeTokens"], 90_000);
+        assert_eq!(v["args"]["afterTokens"], 30_000);
     }
 
     /// Reason start carries the per-turn anchor that lets the frontend

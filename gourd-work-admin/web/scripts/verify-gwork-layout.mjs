@@ -2,7 +2,8 @@
  * Static contract check for the GWork public-site layout rewrite.
  *
  * Verifies:
- *   1. every gw-* class referenced by a .tsx has a definition in gwork-brand.css
+ *   1. every gw-* class referenced by a .tsx has a definition in the brand
+ *      skin sheets (gwork-brand.css + gw-console.css)
  *   2. no stale gwork-* (old brand-layer) class survives without an alias
  *   3. CSS braces balance
  *   4. every literal t('key') used by the landing/about/footer code exists in
@@ -13,7 +14,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const ROOT = path.resolve(import.meta.dirname, '..')
-const CSS = path.join(ROOT, 'src/styles/gwork-brand.css')
+const CSS_FILES = [
+  path.join(ROOT, 'src/styles/gwork-brand.css'),
+  path.join(ROOT, 'src/styles/gw-console.css'),
+]
 const SRC = path.join(ROOT, 'src')
 const LOCALES = path.join(SRC, 'i18n/locales')
 const LANGS = ['en', 'zh', 'zh-TW', 'fr', 'ru', 'ja', 'vi']
@@ -32,7 +36,7 @@ function walk(dir, out = []) {
   return out
 }
 
-const css = fs.readFileSync(CSS, 'utf8')
+const css = CSS_FILES.map((f) => fs.readFileSync(f, 'utf8')).join('\n')
 const defined = new Set([...css.matchAll(/\.([a-zA-Z][\w-]*)/g)].map((m) => m[1]))
 
 // 1+2: class references in tsx

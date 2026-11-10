@@ -370,7 +370,8 @@ public class WebSettingsController {
             item.put("enabled", config.isEnabled());
             item.put("visibled", config.isVisibled());
             item.put("scope", config.getScope() != null ? config.getScope() : AgentFlags.SCOPE_USER);
-            item.put("provider", config.getProvider());  // 所属供应商
+            item.put("provider", config.getProvider());  // 所属供应商（展示名）
+            item.put("providerId", config.getProviderId());  // 渠道唯一 id（前端分组/识别的稳定键）
             list.add(item);
         }
 
@@ -416,7 +417,8 @@ public class WebSettingsController {
         putMaskedApiKey(item, config.getApiKey());
         item.put("standard", config.getStandardOrProvider());
         item.put("scope", config.getScope() != null ? config.getScope() : AgentFlags.SCOPE_USER);
-        item.put("provider", config.getProvider());  // 所属供应商
+        item.put("provider", config.getProvider());  // 所属供应商（展示名）
+        item.put("providerId", config.getProviderId());  // 渠道唯一 id
         if (config.getTimeout() != null) {
             item.put("timeout", config.getTimeout().getSeconds() + "s");
         }
@@ -476,6 +478,10 @@ public class WebSettingsController {
             settings.setDefaultModel(config.getNameOrModel());
         }
 
+        // 渠道 id 解析：前端可能只带 provider 名称（旧表单），补上渠道唯一 id 以免模型
+        // 退回名称回退匹配、与同渠道 id 模型分裂成两个区块
+        resolveChannelId(config);
+
         // 插入所属 provider 区块末尾（无同组模型时追加总表末尾），避免劈裂同 provider 区块
         settings.addModelInProviderBlock(config);
         saveSettings();
@@ -519,6 +525,9 @@ public class WebSettingsController {
         }
         // 旧客户端可能仍提交该字段，更新前显式丢弃，避免进入 settings 或运行时引擎。
         config.setContextLength(0);
+        // 渠道 id 解析：表单只带 provider 名称时补上渠道唯一 id（provider/model 未变时
+        // replaceModelInPlace 也会继承旧 id，此处覆盖改渠道的编辑场景）
+        resolveChannelId(config);
         // 必须在动 engine 之前判定，避免旧模型已从引擎摘除却未能写回配置
         String targetName = config.getNameOrModel();
         if (!targetName.equals(originalName) && settings.getModels().containsKey(targetName)) {
@@ -1875,6 +1884,7 @@ public class WebSettingsController {
             ProviderDo provider = entry.getValue();
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("name", name);
+            item.put("id", provider.getId());  // 渠道唯一 id（前端排序/识别的稳定键）
             item.put("standard", provider.getStandard());
             item.put("apiUrl", provider.getApiUrl());
             putMaskedApiKey(item, provider.getApiKey());
@@ -1908,6 +1918,7 @@ public class WebSettingsController {
 
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("name", name);
+        item.put("id", provider.getId());  // 渠道唯一 id
         item.put("standard", provider.getStandard());
         item.put("apiUrl", provider.getApiUrl());
         //详情接口同样只回脱敏值：前端把这里的 apiKey 当成真实密钥回写会污染配置（已配套改 JS：
@@ -2207,6 +2218,8 @@ public class WebSettingsController {
                 modelDo.setApiKey(provider.getApiKey());
                 modelDo.setScope(provider.getScope());
                 modelDo.setProvider(providerName);
+                // 渠道唯一 id：模型归属的权威依据（渠道改名不影响归属）
+                modelDo.setProviderId(provider.getId());
                 // 连接开关 与 按模型启用态 取与：连接禁用时模型一律不可见
                 modelDo.setVisibled(provider.isEnabled() && (modelInfo.getEnabled() == null || modelInfo.getEnabled()));
                 if (provider.getTimeout() != null) {
@@ -2217,14 +2230,15 @@ public class WebSettingsController {
                 // 会话上下文由模型选择器统一决定，ModelDo 保持默认的中性值。
 
                 // 插入所属 provider 区块末尾，而不是追加总表末尾：使「同 provider 连续」在每一步都成立，
-                // 不依赖方法末尾的 reorderProviderModels 兵底（reorder 只负责块内排序）
+                // 不依赖方法末尾的 reorderProviderModels 兜底（reorder 只负责块内排序）
                 settings.addModelInProviderBlock(modelDo);
                 engine.addModel(modelDo);
                 syncCount++;
             } else {
-                // 模型已存在，检查是否需要同步状态
+                // 模型已存在，检查是否需要同步状态（按渠道 id 匹配归属；旧数据无 id 时按名称回退）
                 ModelDo existingModel = settings.getModels().get(modelName);
-                if (providerName.equals(existingModel.getProvider())) {
+                boolean sameChannel = modelInChannel(existingModel, provider, providerName);
+                if (sameChannel) {
                     boolean targetVisibled = provider.isEnabled() && (modelInfo.getEnabled() == null || modelInfo.getEnabled());
                     String newStandard = resolveModelStandard(modelInfo, provider);
                     // AiConfig#setTimeout(null) 是 no-op，不能用 null 清除旧自定义值；
@@ -2259,7 +2273,7 @@ public class WebSettingsController {
         String defaultBeforeRemoval = settings.getDefaultModel();
         List<String> staleKeys = new ArrayList<>();
         for (Map.Entry<String, ModelDo> entry : settings.getModels().entrySet()) {
-            if (providerName.equals(entry.getValue().getProvider()) && !validNames.contains(entry.getKey())) {
+            if (modelInChannel(entry.getValue(), provider, providerName) && !validNames.contains(entry.getKey())) {
                 staleKeys.add(entry.getKey());
             }
         }
@@ -2446,6 +2460,34 @@ public class WebSettingsController {
             return modelInfo.getStandard();
         }
         return provider.getStandard();
+    }
+
+    /**
+     * 模型是否归属指定渠道：优先按渠道唯一 id（{@code providerId}）匹配；
+     * 旧配置模型尚无 providerId 时按 provider 名称回退匹配（与 AgentSettings 同口径）。
+     */
+    private boolean modelInChannel(ModelDo model, ProviderDo provider, String providerName) {
+        if (model == null) {
+            return false;
+        }
+        if (provider != null && Assert.isNotEmpty(provider.getId()) && Assert.isNotEmpty(model.getProviderId())) {
+            return provider.getId().equals(model.getProviderId());
+        }
+        return providerName.equals(model.getProvider());
+    }
+
+    /**
+     * 手工添加/编辑模型时补全渠道唯一 id：表单只带 provider 名称（旧前端）时，
+     * 按名称解析出渠道 id 写入 {@code providerId}；名称不属于任何渠道（手工模型）则保持为空。
+     */
+    private void resolveChannelId(ModelDo config) {
+        if (config == null || Assert.isNotEmpty(config.getProviderId())) {
+            return;
+        }
+        String id = settings.channelIdOf(config.getProvider());
+        if (id != null) {
+            config.setProviderId(id);
+        }
     }
 
     /**
@@ -3273,6 +3315,7 @@ public class WebSettingsController {
                 Map<String, Object> item = new LinkedHashMap<>();
                 item.put("name", config.getNameOrModel());
                 item.put("provider", config.getProvider());
+                item.put("providerId", config.getProviderId());
                 // 接口类型随列表下发：切换模型后前端无需重拉页面即可更新关联的思考档位选项集
                 item.put("standard", config.getStandardOrProvider());
                 // 与 /web/chat/models 同口径：该模型真正可区分的思考档位（不含 auto），

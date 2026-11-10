@@ -1146,10 +1146,13 @@
         });
     }
 
-    // 设置：复用主侧栏设置按钮的既有绑定
+    // 设置：侧栏独立设置按钮已移除（底栏整体改为用户卡片，设置入口在账号弹层里），
+    // 直接调 app-settings.js 导出的 openSettings()，不再依赖已删除的 #settingsBtn。
     var filerSettingsBtn = document.getElementById('filerSettingsBtn');
     if (filerSettingsBtn) {
-        filerSettingsBtn.addEventListener('click', function () { $('#settingsBtn').trigger('click'); });
+        filerSettingsBtn.addEventListener('click', function () {
+            if (typeof window.openSettings === 'function') window.openSettings();
+        });
     }
 
     /* 跨工作区打开保护：文件变更卡可能属于另一个项目的 session。若把它当成当前项目的
