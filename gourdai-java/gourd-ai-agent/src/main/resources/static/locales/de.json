@@ -1421,6 +1421,7 @@
         "no_changes": "Keine Änderungen",
         "changes_count": "{0} Änderungen",
         "no_git": "Kein Git-Repository",
+        "no_git_binary": "Git nicht gefunden",
         "no_remote": "Kein Remote konfiguriert",
         "no_upstream": "Kein Upstream-Branch",
         "synced": "Synchronisiert",

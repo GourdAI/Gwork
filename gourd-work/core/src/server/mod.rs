@@ -1492,16 +1492,6 @@ struct ReplayQuery {
 /// `SessionStreamStore.DEFAULT_FULL_TAIL`).
 const REPLAY_DEFAULT_FULL_TAIL: usize = 2000;
 
-/// A conversation round boundary: index of the `user` frame that opens it.
-fn round_starts(frames: &[serde_json::Value]) -> Vec<usize> {
-    frames
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| f.get("type").and_then(|t| t.as_str()) == Some("user"))
-        .map(|(i, _)| i)
-        .collect()
-}
-
 fn seq_of(frame: &serde_json::Value) -> i64 {
     frame
         .get("eventSeq")
@@ -1612,10 +1602,6 @@ async fn chat_replay(
             "runId": run_id,
         }
     }))
-}
-
-fn all_last_seq(frames: &[serde_json::Value]) -> i64 {
-    frames.last().map(seq_of).unwrap_or(0)
 }
 
 fn empty_envelope(latest: i64, running: bool, run_id: Option<String>) -> Json<serde_json::Value> {
@@ -2781,9 +2767,10 @@ async fn run_react_session(
         // Clear only the one-shot flag under the lock; a whole-document write of
         // the run-start snapshot would clobber picker changes made meanwhile.
         store.update_context(&session_id, |ctx| ctx.interrupted = None);
-        let todo_file = store
-            .session_dir_pub(&session_id)
-            .join(crate::session::TODO_FILE_NAME);
+        let todo_file = crate::session::todo_path(
+            Some(&store.session_dir_pub(&session_id)),
+            &state.workspace,
+        );
         if let Ok(raw) = std::fs::read_to_string(&todo_file) {
             // A stored JSON envelope would calibrate to nothing (zero task
             // lines), leaving the resuming run blind to the real stored state.
@@ -3335,7 +3322,10 @@ async fn chat_todos(
         }));
     }
 
-    let todo_file = store.session_dir_pub(&q.session_id).join(crate::session::TODO_FILE_NAME);
+    let todo_file = crate::session::todo_path(
+        Some(&store.session_dir_pub(&q.session_id)),
+        &state.workspace,
+    );
     let Ok(raw) = std::fs::read_to_string(&todo_file) else {
         return Json(serde_json::json!({
             "code": 200,
@@ -4663,7 +4653,7 @@ async fn settings_llm_model_remove(
             settings.general.acp_model = None;
         }
         drop(settings);
-        if (!save_settings_full(&state).await) {
+        if !save_settings_full(&state).await {
             return Json(serde_json::json!({"code": 500, "msg": "settings.json 写入失败，本次修改未落盘。", "message": "settings.json 写入失败，本次修改未落盘。"}));
         }
         Json(serde_json::json!({"code": 200}))
@@ -4709,7 +4699,7 @@ async fn settings_llm_model_update(
         if let Some(v) = form.model { m.model = v; }
         if let Some(v) = form.timeout { m.timeout = v; }
         drop(settings);
-        if (!save_settings_full(&state).await) {
+        if !save_settings_full(&state).await {
             return Json(serde_json::json!({"code": 500, "msg": "settings.json 写入失败，本次修改未落盘。", "message": "settings.json 写入失败，本次修改未落盘。"}));
         }
         Json(serde_json::json!({"code": 200}))
@@ -4752,7 +4742,7 @@ async fn settings_llm_model_toggle(
     if let Some(m) = settings.models.get_mut(&form.name) {
         m.enabled = form.enabled.unwrap_or(!m.enabled);
         drop(settings);
-        if (!save_settings_full(&state).await) {
+        if !save_settings_full(&state).await {
             return Json(serde_json::json!({"code": 500, "msg": "settings.json 写入失败，本次修改未落盘。", "message": "settings.json 写入失败，本次修改未落盘。"}));
         }
         Json(serde_json::json!({"code": 200}))

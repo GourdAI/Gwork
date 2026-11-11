@@ -23,7 +23,6 @@ import {
   FolderOpen,
   Pencil,
   Plus,
-  RotateCcw,
   Search,
 } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
@@ -37,16 +36,16 @@ import { cn } from '@/lib/utils'
  * It shows a GWork desktop window running an agent task ("rebuild the website
  * in a dark tech style") instead of the old API/curl terminal mock. Steps are
  * revealed on a timeline: agent replies, tool calls, a checklist ticking off
- * one item at a time, a typewriter terminal, and a completion bar. It loops,
- * pauses while the tab is hidden or the window is off-screen, and can be
- * replayed.
+ * one item at a time, a typewriter terminal, and a completion card. It starts
+ * a fresh run automatically every 5 seconds and pauses while the tab is hidden
+ * or the window is off-screen. There is no manual restart control.
  *
  * Under `prefers-reduced-motion` the demo must NOT freeze into a dead
  * "already finished" frame (that read as a broken/static page): it still
  * reveals the same steps one by one — the CSS media query already strips the
- * slide-in and blinking motion — but with shorter beats, no typewriter
- * (command and output appear whole) and no auto-loop; the Replay button is
- * shown at the end so the visitor stays in control.
+ * slide-in and blinking motion — but with shorter beats and no typewriter
+ * (command and output appear whole). Both motion modes auto-loop; no mode is
+ * left stuck on a finished frame.
  *
  * All colours come from existing theme tokens through color-mix, so light,
  * dark and system theme modes keep working.
@@ -115,7 +114,7 @@ const BEAT = {
   termOut: 340,
   termTail: 420,
   settle: 500,
-  loop: 8000,
+  loop: 5000,
 } as const
 
 /**
@@ -160,7 +159,6 @@ export function HeroAppDemo(props: HeroAppDemoProps) {
   const [typed, setTyped] = useState('')
   const [termOut, setTermOut] = useState(false)
   const [busy, setBusy] = useState(true)
-  const [showReplay, setShowReplay] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const visibleRef = useRef(true)
 
@@ -178,7 +176,6 @@ export function HeroAppDemo(props: HeroAppDemoProps) {
       setTyped('')
       setTermOut(false)
       setBusy(true)
-      setShowReplay(false)
     }
 
     const run = async () => {
@@ -232,9 +229,7 @@ export function HeroAppDemo(props: HeroAppDemoProps) {
       )
       if (!settled) return
       setBusy(false)
-      setShowReplay(true)
-      // Reduced motion never auto-loops; the visitor replays on demand.
-      if (reduced) return
+      // Both motion modes auto-loop: no mode is left stuck on a finished frame.
       if (!(await wait(BEAT.loop, isCancelled, isPaused))) return
       setRunId((v) => v + 1)
     }
@@ -404,15 +399,6 @@ export function HeroAppDemo(props: HeroAppDemoProps) {
                 <ArrowUp className='gw-app-send-icon' aria-hidden='true' />
               </span>
             </div>
-
-            <button
-              type='button'
-              className={cn('gw-app-replay', showReplay && 'gw-app-replay-show')}
-              onClick={() => setRunId((v) => v + 1)}
-            >
-              <RotateCcw className='gw-app-replay-icon' aria-hidden='true' />
-              {t('Replay')}
-            </button>
           </div>
         </div>
       </div>

@@ -1381,6 +1381,7 @@
     "no_changes": "変更なし",
     "changes_count": "{0} 件の変更",
     "no_git": "Git リポジトリではありません",
+    "no_git_binary": "Git が見つかりません",
     "no_remote": "リモート未設定",
     "no_upstream": "上流ブランチなし",
     "synced": "同期済み",

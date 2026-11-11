@@ -2837,6 +2837,28 @@ impl Tool for AddModelTool {
 mod tests {
     use super::*;
 
+    /// `grep_sync_opts` with default options and the production visit cap.
+    fn grep_sync(
+        re: regex::Regex,
+        base_path: &std::path::Path,
+        include: &str,
+        workspace: &std::path::Path,
+    ) -> ToolOutput {
+        grep_sync_opts(re, base_path, include, workspace, GREP_MAX_VISITED, &GrepOptions::default(), false)
+    }
+
+    /// `grep_sync_opts` with an explicit visit cap, exercised with a handful of
+    /// files instead of twenty thousand.
+    fn grep_sync_capped(
+        re: regex::Regex,
+        base_path: &std::path::Path,
+        include: &str,
+        workspace: &std::path::Path,
+        max_visited: usize,
+    ) -> ToolOutput {
+        grep_sync_opts(re, base_path, include, workspace, max_visited, &GrepOptions::default(), false)
+    }
+
     /// Scratch workspace, unique per test.
     ///
     /// These tests exercise the synchronous bodies (`grep_sync` / `glob_sync`)

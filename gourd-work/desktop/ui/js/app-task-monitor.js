@@ -143,6 +143,9 @@
        加法得到字符串拼接（如 "0a.jsb.js"），> 0 恒为 false → 永远渲染「无变更」。
        故统一取 .length 求和；非数组（后端降级缺字段）按 0 计。 */
     function bucketCount(v) { return Array.isArray(v) ? v.length : 0; }
+    /* 值不可得时的占位符。沿用仓库既有惯例（app-account.js 套餐/积分不可得同样用 '—'），
+       不另造 i18n 键——破折号在各语种里语义一致，无需翻译。 */
+    var UNAVAILABLE_PLACEHOLDER = esc('—');
     /* 行级增删（后端 git diff HEAD --numstat 聚合）：参照稿首行形态是彩色
        「+3,019 -363」。千分位与 +/- 分色按参照稿；无行级变更（干净工作区）不展示。 */
     function fmtLineCount(n) { return Number(n || 0).toLocaleString('en-US'); }
@@ -162,15 +165,27 @@
            当前调用点均传 `d || {}`，故不可达——但旧实现有 `status ? ... : 0` 防护，
            改成 bucketCount 后若不补这行就是白送的健壮性回退。 */
         var st = status || {};
+        /* git 客户端本身缺失（未安装 / 不在 PATH）：后端两内核都会优雅降级——
+           Java status()/remoteInfo() 用 try-catch 包住 `git --version`（IOException
+           即回 gitAvailable:false），Rust git() 把 spawn 失败转成 exit code -1，
+           故【不会崩】。但降级后旧渲染会显示「非 Git 仓库」+「未配置远程」，
+           与「装了 git 但目录不是仓库」完全同形（实测确认），用户会去 git init
+           而真正该做的是装 git。故显式区分：gitAvailable === false 时整区改说
+           「未检测到 Git」，且首行不再谎报「无变更」——没查到 ≠ 没有变更。 */
+        var gitMissing = st.gitAvailable === false;
         var html = '';
         var changed = bucketCount(st.changed) + bucketCount(st.staged) + bucketCount(st.untracked);
         /* 首行主文案：有行级统计时按参照稿展示彩色 +/-（信息密度高于「N 处变更」），
            文件数收进 title；无行级统计（干净工作区或后端未回该字段）回落「无变更 /
-           N 处变更」原文案，保证旧后端（无 additions 字段）下展示不劣化。 */
+           N 处变更」原文案，保证旧后端（无 additions 字段）下展示不劣化。
+           注：gitMissing 时 stats 必为 ''——两内核在 git 不可用时都提前 return，
+           不回 additions/deletions，故无需再为它加守卫（变异测试 P5 证实不可达）。 */
         var stats = lineStatsHtml(st);
-        var firstText = stats
-            ? stats + '<span class="tm-row-sub">' + esc(t('monitor.changes_count', [changed])) + '</span>'
-            : (changed > 0 ? esc(t('monitor.changes_count', [changed])) : esc(t('monitor.no_changes')));
+        var firstText = gitMissing
+            ? esc(t('monitor.no_git_binary'))
+            : (stats
+                ? stats + '<span class="tm-row-sub">' + esc(t('monitor.changes_count', [changed])) + '</span>'
+                : (changed > 0 ? esc(t('monitor.changes_count', [changed])) : esc(t('monitor.no_changes'))));
         html += row('compare', '', firstText,
             stats ? t('monitor.changes_count', [changed]) : '');
         // 环境：本地 / 远端（按工作区根的归属口径，与终端 scope 同源）
@@ -183,7 +198,12 @@
         } catch (e) { /* 归属查不到按本地显示 */ }
         html += row('monitor', '', esc(envName) +
             (root ? '<span class="tm-row-sub">' + esc(shortPath(root)) + '</span>' : ''), root);
-        if (status && status.gitAvailable && status.initialized !== false) {
+        /* git 客户端缺失时分支/同步两行都无从取值。占位符沿用仓库既有惯例
+           （app-account.js 的套餐/积分不可得时同样用 '—'），主信息只在首行说一次，
+           原因收进 title 供悬停——三行重复同一句话是纯视觉噪音。 */
+        if (gitMissing) {
+            html += row('branch', '', UNAVAILABLE_PLACEHOLDER, t('monitor.no_git_binary'));
+        } else if (status && status.gitAvailable && status.initialized !== false) {
             html += row('branch', '', esc(status.branch || 'main'));
         } else {
             html += row('branch', '', esc(t('monitor.no_git')));
@@ -194,15 +214,25 @@
         // 否则每轮轮询同步行都会「已同步 → 未配置远程 → 已同步」翻一次（用户报的闪）
         var rm = remote;
         if (rm === undefined && lastRemoteData && lastRemoteRoot === root) rm = lastRemoteData;
-        if (!rm || !rm.hasRemote) syncText = t('monitor.no_remote');
+        /* git 客户端缺失优先于一切：此时 hasRemote 必然 false，若不拦就会显示
+           「未配置远程」，把「没装 git」误导成「仓库没配远端」。 */
+        var syncTitle = rm && rm.remoteUrl ? rm.remoteUrl : '';
+        if (gitMissing || (rm && rm.gitAvailable === false)) {
+            syncText = UNAVAILABLE_PLACEHOLDER;
+            syncTitle = t('monitor.no_git_binary');
+        }
+        else if (!rm || !rm.hasRemote) syncText = t('monitor.no_remote');
         else if (!rm.upstream) syncText = t('monitor.no_upstream');
-        /* -1 是后端「计数不可得」哨兵（Java REV_COUNT_UNKNOWN / Rust 同值；porcelain
-           头部省略 [ahead N, behind M] 尾缀时 Rust 也回 -1）。旧代码把哨兵直接渲染成
-           「领先 -1 / 落后 -1」（2026-11 用户报障）。治理口径：
-           ① 双 -1（计数不可得）→ 有降级标记时明示「同步状态未知」，否则按已同步展示
-              （git 在完全同步时本就省略尾缀，-1/-1 且非降级即同步态）；
-           ② 单侧 -1（理论不可达，防御性）→ 该侧按 0 计，绝不把哨兵露给用户；
-           ③ 有未提交变更或未推送/未拉取提交时按参照稿显示「提交或推送」行动提示。 */
+        /* -1 是后端「计数不可得」哨兵（Java REV_COUNT_UNKNOWN / Rust 同值）。
+           实测口径（真实仓库验证）：git status --porcelain=v1 --branch 在完全同步时
+           输出 `## main...origin/main`【不带尾缀】——Rust 的 parse_branch_header 已把
+           「有 upstream 但无尾缀」解析为 0/0（git 正是以省略尾缀表达恰好同步），
+           故正常同步态不会走到这个 -1/-1 分支；能走到说明确实取不到计数。
+           旧代码把哨兵直接渲染成「领先 -1 / 落后 -1」（2026-11 用户报障）。治理口径：
+            ① 双 -1（计数不可得）→ 有降级标记时明示「同步状态未知」，否则按已同步展示
+               （无降级标记意味着各步都成功，只是计数确实缺省）；
+            ② 单侧 -1（理论不可达，防御性）→ 该侧按 0 计，绝不把哨兵露给用户；
+            ③ 有未提交变更或未推送/未拉取提交时按参照稿显示「提交或推送」行动提示。 */
         else if (rm.ahead === -1 && rm.behind === -1) {
             syncText = rm.degraded ? t('monitor.sync_unknown') : t('monitor.synced');
         } else {
@@ -213,7 +243,7 @@
             else if (ahead > 0 || changed > 0) syncText = t('monitor.commit_or_push');
             else syncText = t('monitor.ahead_behind', [ahead, behind]);
         }
-        html += row('commit', '', esc(syncText), rm && rm.remoteUrl ? rm.remoteUrl : '');
+        html += row('commit', '', esc(syncText), syncTitle);
         clearLoading();
         setBodyHtml(envBody, html);
     }

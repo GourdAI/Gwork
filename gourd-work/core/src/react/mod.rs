@@ -628,6 +628,15 @@ impl ReActAgent {
         // forgive `loop_reminders` once the model has demonstrably broken out.
         let mut productive_turns = 0u32;
 
+        // Turn-based todo-staleness reminder (Qoder CLI `todo_reminder`). Counts
+        // reasoning turns since the last `todowrite` and since the last reminder;
+        // the dual gate + per-run cap at the injection site keep it a gentle
+        // nudge rather than per-turn spam. Forgiven when the model writes on its
+        // own.
+        let mut turns_since_todowrite = 0u32;
+        let mut turns_since_todo_reminder = 0u32;
+        let mut todo_reminders = 0u32;
+
         // P1: consecutive turns where the model returned neither text nor tool
         // calls. An empty round can never be progress; silently treating it as
         // "completed" ended runs with an empty final answer and no explanation
@@ -2025,6 +2034,32 @@ impl ReActAgent {
                 productive_turns += 1;
             }
 
+            // Turn-based todo-staleness reminder (Qoder CLI `todo_reminder`).
+            //
+            // Count this reasoning turn, then forgive the budget the moment the
+            // model writes its checklist on its own. Otherwise, past the dual
+            // gate, read TODO.md and inject the current list plus a nudge — the
+            // panel lags when a model batches work and forgets to write, and the
+            // footer nudge cannot reach a model that never calls a todo tool.
+            turns_since_todowrite += 1;
+            turns_since_todo_reminder += 1;
+            if tool_calls.iter().any(|tc| tc.function.name == "todowrite") {
+                turns_since_todowrite = 0;
+                todo_reminders = 0;
+            } else if todo_reminder_due(turns_since_todowrite, turns_since_todo_reminder, todo_reminders) {
+                // Same resolution as `ToolContext::todo_file` (single source:
+                // `session::todo_path`). Read only past the gate (at most once
+                // per `TODO_REMINDER_TURNS_BETWEEN` turns).
+                let todo_path = crate::session::todo_path(config.session_dir.as_deref(), &config.workspace);
+                if let Ok(raw) = std::fs::read_to_string(&todo_path) {
+                    if crate::todo::has_unfinished_items(&raw) {
+                        messages.push(ChatMessage::user(crate::todo::stale_reminder(&raw)));
+                        turns_since_todo_reminder = 0;
+                        todo_reminders += 1;
+                    }
+                }
+            }
+
             // Add the assistant message with tool_calls to history
             let assistant_msg = ChatMessage {
                 role: Role::Assistant,
@@ -2366,6 +2401,31 @@ const MAX_LOOP_REMINDERS: u32 = 3;
 /// Three matches `LOOP_REMINDER_THRESHOLD`: it takes as much sustained varied
 /// work to earn forgiveness as it took repeated work to trigger the reminder.
 const PRODUCTIVE_TURNS_TO_FORGIVE: u32 = 3;
+
+/// Turn-based todo-staleness reminder, ported from Qoder CLI `todo_reminder`
+/// (decoded runtime `MMi = {TURNS_SINCE_WRITE:10, TURNS_BETWEEN_REMINDERS:10}`).
+///
+/// Dual gate: nudge only when the checklist has gone this many reasoning turns
+/// without a `todowrite` AND this many turns since the last reminder. The first
+/// threshold is the staleness signal; the second stops a stale list from being
+/// re-announced every turn. The footer's `[继续]` nudge only reaches a model that
+/// already calls a todo tool — this one is independent of that discipline.
+const TODO_REMINDER_TURNS_SINCE_WRITE: u32 = 10;
+const TODO_REMINDER_TURNS_BETWEEN: u32 = 10;
+
+/// Cap on todo reminders per run (mirrors `MAX_LOOP_REMINDERS`). A model that
+/// ignores the nudge this many times is not going to be moved by a fourth;
+/// forgiven to zero whenever it calls `todowrite` on its own.
+const MAX_TODO_REMINDERS: u32 = 3;
+
+/// Whether the turn gates for a todo-staleness reminder are met (Qoder dual
+/// gate + per-run cap). The checklist gate (`has_unfinished_items`) is evaluated
+/// by the caller only once this returns true, so TODO.md is not read every turn.
+fn todo_reminder_due(turns_since_write: u32, turns_since_reminder: u32, reminders: u32) -> bool {
+    turns_since_write >= TODO_REMINDER_TURNS_SINCE_WRITE
+        && turns_since_reminder >= TODO_REMINDER_TURNS_BETWEEN
+        && reminders < MAX_TODO_REMINDERS
+}
 
 /// How many times the convergence gate may re-judge a text-only reply as
 /// "keep going" (Java `MAX_CONVERGE_DEFERRALS = 2`).
@@ -3933,6 +3993,61 @@ mod tests {
             }
         }
         assert!(fired >= 1, "A-B-A-B alternation must trigger the reminder");
+    }
+
+    // ─── todo-staleness reminder (Qoder `todo_reminder` port) ────────────────
+
+    /// The dual gate is the anti-spam core: a reminder needs BOTH enough turns
+    /// since the last write AND enough turns since the last reminder. Either one
+    /// alone must not fire — a stale list re-announced every turn is the defect
+    /// the second threshold exists to prevent.
+    #[test]
+    fn todo_reminder_requires_both_turn_gates() {
+        let w = TODO_REMINDER_TURNS_SINCE_WRITE;
+        let b = TODO_REMINDER_TURNS_BETWEEN;
+        assert!(todo_reminder_due(w, b, 0), "both gates met → due");
+        assert!(!todo_reminder_due(w - 1, b, 0), "one turn short of write gate → not due");
+        assert!(!todo_reminder_due(w, b - 1, 0), "one turn short of reminder gate → not due");
+        assert!(!todo_reminder_due(0, 0, 0), "fresh write → not due");
+        // Just after a reminder the reminder-gate resets even if still stale.
+        assert!(!todo_reminder_due(w, 0, 1), "reminder just fired → cooldown");
+    }
+
+    /// The per-run cap holds even when both turn gates stay met forever.
+    #[test]
+    fn todo_reminder_respects_per_run_cap() {
+        let w = TODO_REMINDER_TURNS_SINCE_WRITE;
+        let b = TODO_REMINDER_TURNS_BETWEEN;
+        assert!(todo_reminder_due(w, b, MAX_TODO_REMINDERS - 1), "last allowed reminder");
+        assert!(!todo_reminder_due(w, b, MAX_TODO_REMINDERS), "cap reached → silent");
+        assert!(!todo_reminder_due(w, b, MAX_TODO_REMINDERS + 5), "past cap → silent");
+    }
+
+    /// Source-level wiring guard (mutation-tested): the loop must forgive the
+    /// budget on a self-initiated `todowrite`, gate the file read behind
+    /// `has_unfinished_items`, and inject `stale_reminder` — not a bare nudge.
+    #[test]
+    fn todo_reminder_is_wired_with_forgiveness_and_checklist_gate() {
+        let src = include_str!("mod.rs");
+        let block = src.split("Count this reasoning turn, then forgive the budget").nth(1).unwrap_or("");
+        let block = block.split("// Add the assistant message with tool_calls to history").next().unwrap_or(block);
+        let norm = block.replace("\r\n", "\n");
+        assert!(
+            norm.contains("tc.function.name == \"todowrite\"") && norm.contains("todo_reminders = 0;"),
+            "a self-initiated todowrite must reset the staleness counter and forgive the budget"
+        );
+        assert!(
+            norm.contains("todo_reminder_due(turns_since_todowrite, turns_since_todo_reminder, todo_reminders)"),
+            "the dual gate must guard the injection"
+        );
+        assert!(
+            norm.contains("crate::todo::has_unfinished_items(&raw)"),
+            "an empty / fully-done checklist must not trigger a reminder"
+        );
+        assert!(
+            norm.contains("crate::todo::stale_reminder(&raw)"),
+            "the injected message must carry the current list, not a bare nudge"
+        );
     }
 
     // ─── P1: empty response prompt ─────────────────────────────────────────

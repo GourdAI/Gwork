@@ -1381,6 +1381,7 @@
     "no_changes": "无变更",
     "changes_count": "{0} 处变更",
     "no_git": "非 Git 仓库",
+    "no_git_binary": "未检测到 Git",
     "no_remote": "未配置远程",
     "no_upstream": "未关联上游分支",
     "synced": "已同步",

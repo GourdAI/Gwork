@@ -559,6 +559,30 @@ pub fn has_unfinished_items(content: &str) -> bool {
     p.pending > 0 || p.in_progress > 0
 }
 
+/// Turn-based staleness nudge, ported from Qoder CLI `todo_reminder`.
+///
+/// Injected by the ReAct loop when the checklist has gone many turns without a
+/// `todowrite`. Unlike [`progress_footer`] — which only reaches a model that
+/// already calls `todowrite`/`todoread` — this is independent of the model's own
+/// todo discipline, and it carries the current rows so the model can update the
+/// exact stale item rather than guess.
+///
+/// Must never order a final answer or a summary: that phrasing is what turned
+/// transitional intent declarations into premature ENDs (the loop reminder's
+/// red line). It only asks the model to record status, then keep going.
+pub fn stale_reminder(raw: &str) -> String {
+    let chars: Vec<char> = raw.trim().chars().collect();
+    let list = if chars.len() > 1500 {
+        format!("{}…", chars[..1500].iter().collect::<String>())
+    } else {
+        chars.into_iter().collect()
+    };
+    format!(
+        "[进度提醒] 任务清单已多轮未更新。若刚才的工作使某项状态发生变化，请先用 todowrite 落盘（开始做置 [/]、拿到结果置 [x]），再继续后续动作；清单已与实际不符则清理或重构。仅在与当前工作相关时使用，这是一条温和提醒，忽略它若不合时宜。\n\n当前清单：\n{}",
+        list
+    )
+}
+
 /// Reply to an empty `todos` argument: nothing is written, and the model is told
 /// why. `FORMAT_WARN` is appended by the caller.
 pub const NOT_SAVED_EMPTY: &str = "TODO not saved: todos 参数为空（未改动已有清单）。";
@@ -704,6 +728,43 @@ mod tests {
     /// Production shape seen in the wild: JSON array envelope + literal `\n`.
     const DIRTY_ENVELOPE: &str = "[{\"todos\": \"- [x] 现场取证\\n- [ ] 代码取证\"}]";
     const CLEAN_TWO_ITEMS: &str = "- [x] 现场取证\n- [ ] 代码取证";
+
+    // ── stale_reminder (Qoder todo_reminder port) ───────────────────────────
+
+    #[test]
+    fn stale_reminder_carries_nudge_and_current_list() {
+        let r = stale_reminder(CLEAN_TWO_ITEMS);
+        assert!(r.contains("[进度提醒]"), "must carry the nudge: {r}");
+        assert!(r.contains("todowrite"), "must name the tool to update: {r}");
+        assert!(r.contains("- [ ] 代码取证"), "must list the current rows: {r}");
+        assert!(r.contains("- [x] 现场取证"), "must list the current rows: {r}");
+    }
+
+    /// Same red line as the loop reminder: a staleness nudge must never order a
+    /// final answer or summary — that phrasing turns a transitional intent into
+    /// a premature END.
+    #[test]
+    fn stale_reminder_never_orders_a_final_answer() {
+        let r = stale_reminder(CLEAN_TWO_ITEMS);
+        for forbidden in ["收尾", "总结", "Final Answer", "最终答案"] {
+            assert!(!r.contains(forbidden), "must not order convergence ({forbidden}): {r}");
+        }
+    }
+
+    #[test]
+    fn stale_reminder_caps_a_long_list() {
+        let long = "- [ ] 任务\n".repeat(2000);
+        let r = stale_reminder(&long);
+        assert!(r.contains('…'), "an over-long list must be truncated: len={}", r.chars().count());
+        assert!(r.chars().count() < 1700, "nudge + capped list must stay bounded: {}", r.chars().count());
+    }
+
+    #[test]
+    fn stale_reminder_trims_surrounding_whitespace() {
+        let r = stale_reminder("\n\n- [ ] A\n\n");
+        assert!(r.contains("- [ ] A"), "{r}");
+        assert!(!r.contains("\n\n\n"), "leading/trailing blank runs must be trimmed: {r}");
+    }
 
     // ── dirty input gets repaired ────────────────────────────────────────────
 

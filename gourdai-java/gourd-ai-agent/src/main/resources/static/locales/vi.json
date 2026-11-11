@@ -1423,6 +1423,7 @@
         "no_changes": "Không có thay đổi",
         "changes_count": "{0} thay đổi",
         "no_git": "Không phải kho Git",
+        "no_git_binary": "Không tìm thấy Git",
         "no_remote": "Chưa cấu hình remote",
         "no_upstream": "Không có nhánh upstream",
         "synced": "Đã đồng bộ",

@@ -453,6 +453,18 @@ pub const PREFIX_WORK: &str = "work-";
 /// again (see `ToolContext::todo_file`).
 pub const TODO_FILE_NAME: &str = "TODO.md";
 
+/// Resolve the checklist path: the session directory when known, otherwise the
+/// legacy workspace path. The single source for `ToolContext::todo_file`, the
+/// ReAct staleness reminder, and any other consumer — keeping the resolution in
+/// one place is what stops them drifting apart (a list written by one reader
+/// invisible to another was the original bug).
+pub fn todo_path(session_dir: Option<&std::path::Path>, workspace: &std::path::Path) -> PathBuf {
+    match session_dir {
+        Some(dir) => dir.join(TODO_FILE_NAME),
+        None => workspace.join(".gwork").join(TODO_FILE_NAME),
+    }
+}
+
 /// A stored message in ndjson format (compatible with Java kernel).
 ///
 /// ## Two body fields, on purpose
@@ -2497,7 +2509,7 @@ mod tests {
     // Covered end-to-end as well, but the store-level contract belongs here so a
     // regression is caught without standing up a kernel.
 
-    fn stored(id: &str, n: usize) -> Vec<StoredMessage> {
+    fn stored(_id: &str, n: usize) -> Vec<StoredMessage> {
         (0..n)
             .map(|i| StoredMessage {
                 role: if i % 2 == 0 { "USER".into() } else { "ASSISTANT".into() },

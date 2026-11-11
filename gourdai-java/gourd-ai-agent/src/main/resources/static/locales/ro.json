@@ -1423,6 +1423,7 @@
         "no_changes": "Fără modificări",
         "changes_count": "{0} modificări",
         "no_git": "Nu este un depozit Git",
+        "no_git_binary": "Git nu a fost detectat",
         "no_remote": "Niciun remote configurat",
         "no_upstream": "Fără ramură upstream",
         "synced": "Sincronizat",

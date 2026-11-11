@@ -191,7 +191,9 @@ pub fn git_available(repo: &Path) -> bool {
 /// `git status --porcelain=v1 --branch` returns all of it in one shot: a leading
 /// `## <branch>...<upstream> [ahead N, behind M]` header followed by the ordinary
 /// porcelain rows. Verified against the four shapes git actually emits:
-///   * `## main...origin/main`            — normal branch with upstream
+///   * `## main...origin/main`            — branch with upstream, **exactly in sync**
+///   * `## main...origin/main [ahead 1]`  — upstream present and counts non-zero; git
+///                                          only prints the trailer for non-zero values
 ///   * `## HEAD (no branch)`              — detached HEAD
 ///   * `## No commits yet on main`        — freshly initialized repository
 ///   * exit code 128, no `##` line        — not a repository at all
@@ -254,8 +256,10 @@ fn branch_status(repo: &Path) -> BranchStatus {
 /// Parse the `## ` header line of `git status --porcelain=v1 --branch`.
 ///
 /// Pure function so every observed shape is unit-testable without a repository.
-/// Returns `(branch, upstream, ahead, behind)`; counts stay `REV_COUNT_UNKNOWN`
-/// unless git actually reported them, matching the old `rev-list` path.
+/// Returns `(branch, upstream, ahead, behind)`. Counts stay `REV_COUNT_UNKNOWN`
+/// only when there is genuinely nothing to compare against (no upstream). When an
+/// upstream exists but git omits the `[ahead/behind]` trailer, the counts are 0 —
+/// that omission *is* git reporting "exactly in sync" (see the match arm below).
 fn parse_branch_header(line: &str) -> (Option<String>, Option<String>, i64, i64) {
     let head = line.trim_start_matches('#').trim_start_matches('#').trim();
 
@@ -289,18 +293,34 @@ fn parse_branch_header(line: &str) -> (Option<String>, Option<String>, i64, i64)
 
     let mut ahead = REV_COUNT_UNKNOWN;
     let mut behind = REV_COUNT_UNKNOWN;
-    if let Some(c) = counts_part {
-        // git prints "ahead 1", "behind 2" or "ahead 1, behind 2".
-        ahead = 0;
-        behind = 0;
-        for part in c.split(',') {
-            let mut it = part.trim().split_whitespace();
-            match (it.next(), it.next().and_then(|n| n.parse::<i64>().ok())) {
-                (Some("ahead"), Some(n)) => ahead = n,
-                (Some("behind"), Some(n)) => behind = n,
-                _ => {}
+    match counts_part {
+        Some(c) => {
+            // git prints "ahead 1", "behind 2" or "ahead 1, behind 2".
+            ahead = 0;
+            behind = 0;
+            for part in c.split(',') {
+                let mut it = part.trim().split_whitespace();
+                match (it.next(), it.next().and_then(|n| n.parse::<i64>().ok())) {
+                    (Some("ahead"), Some(n)) => ahead = n,
+                    (Some("behind"), Some(n)) => behind = n,
+                    _ => {}
+                }
             }
         }
+        // No trailer *while an upstream exists* is git's way of saying "exactly in
+        // sync": `git status --porcelain=v1 --branch` prints just `## main...origin/main`
+        // and only adds `[ahead N]` / `[behind M]` / `[ahead N, behind M]` when the
+        // counts are non-zero (verified against a real repo). Treating that as
+        // "unknown" made `remote()` set degraded=true for the single most common
+        // state, so the panel showed "sync status unknown" instead of "synced" and
+        // diverged from Java — whose `rev-list --count` explicitly yields "0\t0".
+        None if upstream.is_some() => {
+            ahead = 0;
+            behind = 0;
+        }
+        // No upstream (detached HEAD, no commits yet, untracked branch): counts are
+        // genuinely meaningless, so keep the -1 sentinel.
+        None => {}
     }
     (branch, upstream, ahead, behind)
 }
@@ -600,7 +620,11 @@ pub fn remote(repo: &Path) -> serde_json::Value {
         bs.upstream.as_ref().map(|u| serde_json::json!(u)).unwrap_or(serde_json::Value::Null),
     );
 
-    // Ahead/behind only mean something once there is an upstream.
+    // Ahead/behind only mean something once there is an upstream. Reaching the
+    // else-branch here means an upstream exists yet git gave no counts — genuinely
+    // incomplete payload, hence degraded. (A synced branch no longer lands here:
+    // parse_branch_header maps the missing trailer to 0/0, so the panel says
+    // "synced" like the Java kernel does.)
     if bs.upstream.is_some() {
         if bs.ahead != REV_COUNT_UNKNOWN && bs.behind != REV_COUNT_UNKNOWN {
             data.insert("behind".into(), serde_json::json!(bs.behind));
@@ -1049,6 +1073,65 @@ mod tests {
         assert_eq!(parse_ahead_behind("0 0"), Some((0, 0)));
         assert_eq!(parse_ahead_behind("garbage"), None);
         assert_eq!(parse_ahead_behind(""), None);
+    }
+
+    /* Regression tests for the porcelain v1 branch header. This function had zero
+       unit coverage, which is exactly why the bug below survived: git omits the
+       `[ahead/behind]` trailer when a tracked branch is exactly in sync
+       (`## main...origin/main` — verified against a real repo), and the old code
+       read that omission as "counts unknown" (-1). `remote()` then set
+       degraded=true, so the panel showed "sync status unknown" for the single most
+       common state and diverged from the Java kernel, whose `rev-list --count`
+       yields an explicit "0\t0". */
+    #[test]
+    fn branch_header_without_trailer_but_with_upstream_means_in_sync() {
+        assert_eq!(
+            parse_branch_header("## main...origin/main"),
+            (Some("main".into()), Some("origin/main".into()), 0, 0)
+        );
+        assert_eq!(
+            parse_branch_header("## feature/x...origin/feature/x"),
+            (Some("feature/x".into()), Some("origin/feature/x".into()), 0, 0)
+        );
+    }
+
+    #[test]
+    fn branch_header_parses_partial_and_full_trailers() {
+        assert_eq!(
+            parse_branch_header("## main...origin/main [ahead 1]"),
+            (Some("main".into()), Some("origin/main".into()), 1, 0)
+        );
+        assert_eq!(
+            parse_branch_header("## main...origin/main [behind 2]"),
+            (Some("main".into()), Some("origin/main".into()), 0, 2)
+        );
+        assert_eq!(
+            parse_branch_header("## main...origin/main [ahead 3, behind 4]"),
+            (Some("main".into()), Some("origin/main".into()), 3, 4)
+        );
+    }
+
+    #[test]
+    fn branch_header_without_upstream_keeps_the_unknown_sentinel() {
+        // Nothing to compare against, so the counts stay meaningless (-1), not 0.
+        assert_eq!(parse_branch_header("## main"), (Some("main".into()), None, -1, -1));
+        assert_eq!(parse_branch_header("## HEAD (no branch)"), (None, None, -1, -1));
+        assert_eq!(
+            parse_branch_header("## No commits yet on main"),
+            (Some("main".into()), None, -1, -1)
+        );
+    }
+
+    /// End-to-end shape check: the payload the frontend's sync row reads must say
+    /// "in sync, not degraded" for a tracked branch with no divergence. Guarded at
+    /// the parse level above; this asserts the flag combination actually shipped.
+    #[test]
+    fn synced_upstream_header_does_not_mark_the_payload_degraded() {
+        let (_, upstream, ahead, behind) = parse_branch_header("## main...origin/main");
+        // remote() only sets degraded when an upstream exists yet a count is -1.
+        let degraded = upstream.is_some() && (ahead == REV_COUNT_UNKNOWN || behind == REV_COUNT_UNKNOWN);
+        assert!(upstream.is_some(), "upstream must be detected");
+        assert!(!degraded, "synced branch must not be reported as degraded");
     }
 
     #[test]

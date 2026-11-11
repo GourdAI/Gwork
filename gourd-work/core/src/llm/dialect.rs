@@ -2313,7 +2313,7 @@ mod tests {
     /// 无图工具消息行为不变（回归锚）。
     #[test]
     fn plain_tool_message_unchanged_across_dialects() {
-        for (dialect, key) in [
+        for (dialect, _key) in [
             (Dialect::AnthropicMessages, "messages"),
             (Dialect::GeminiGenerate, "contents"),
         ] {

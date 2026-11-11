@@ -1381,6 +1381,7 @@
     "no_changes": "Sem alterações",
     "changes_count": "{0} alterações",
     "no_git": "Não é um repositório Git",
+    "no_git_binary": "Git não detectado",
     "no_remote": "Nenhum remoto configurado",
     "no_upstream": "Sem branch upstream",
     "synced": "Sincronizado",

@@ -478,20 +478,6 @@ For commercial licensing, please contact support@quantumnous.com
 }
 .gw-app-send-icon { width: 14px; height: 14px; }
 
-.gw-app-replay {
-  position: absolute; right: 14px; bottom: 74px; z-index: 5;
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12px; color: var(--gw-ink-2);
-  background: var(--gw-paper-2);
-  border: 1px solid var(--gw-line);
-  border-radius: 999px; padding: 6px 13px;
-  opacity: 0; pointer-events: none;
-  transition: opacity 0.3s, background var(--gw-t);
-}
-.gw-app-replay-show { opacity: 1; pointer-events: auto; }
-.gw-app-replay:hover { background: var(--gw-paper-3); }
-.gw-app-replay-icon { width: 12px; height: 12px; }
-
 /* ── Stats: left-aligned inline definition strip ──────────────────────── */
 .gw-stats {
   display: grid;
@@ -781,7 +767,6 @@ For commercial licensing, please contact support@quantumnous.com
   .gw-cta { padding: 32px 24px; }
   .gw-cta-actions { width: 100%; }
   .gw-app-body { height: 420px; }
-  .gw-app-replay { bottom: 84px; }
   .gw-app-msg { max-width: 96%; }
 }
 

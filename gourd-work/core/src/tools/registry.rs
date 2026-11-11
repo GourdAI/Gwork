@@ -324,10 +324,7 @@ impl ToolContext {
     /// they disagreed about the location, a list written by the agent was
     /// invisible to `/web/chat/todos` and the task panel stayed permanently empty.
     pub fn todo_file(&self) -> PathBuf {
-        match &self.session_dir {
-            Some(dir) => dir.join(crate::session::TODO_FILE_NAME),
-            None => self.workspace.join(".gwork").join(crate::session::TODO_FILE_NAME),
-        }
+        crate::session::todo_path(self.session_dir.as_deref(), &self.workspace)
     }
 
     /// The `actionId` to stamp on suspension frames (`hitl`, `question`).

@@ -1423,6 +1423,7 @@
         "no_changes": "無變更",
         "changes_count": "{0} 處變更",
         "no_git": "非 Git 倉庫",
+        "no_git_binary": "未偵測到 Git",
         "no_remote": "未設定遠端",
         "no_upstream": "未關聯上游分支",
         "synced": "已同步",

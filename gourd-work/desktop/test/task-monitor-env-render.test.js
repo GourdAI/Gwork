@@ -400,3 +400,78 @@ test('非 Git 仓库（gitAvailable=false）显示「非 Git 仓库」而非分�
     });
     assert.ok(html.includes('非 Git 仓库'), '实际：' + html);
 });
+
+/* ── git 客户端未安装（用户提问的场景）────────────────────────────
+   后端两内核都不会崩：Java status()/remoteInfo() 用 try-catch 包住 `git --version`
+   （ProcessBuilder.start 抛 IOException 时返回 gitAvailable:false），Rust git() 把
+   spawn 失败转成 exit code -1、git_available() 随之为 false。
+   但降级后旧渲染把「没装 git」画成与「装了 git 但目录不是仓库」完全同形：
+   行1「无变更」+ 行3「非 Git 仓库」+ 行4「未配置远程」（探针实测确认），
+   用户会去 git init，而真正该做的是装 git。以下用例锁死二者的区分。 */
+const NO_GIT_STATUS = { gitAvailable: false, initialized: false };
+const NO_GIT_REMOTE = {
+    gitAvailable: false, hasRemote: false, remoteUrl: null,
+    upstream: null, ahead: -1, behind: -1, degraded: false
+};
+
+test('git 未安装：首行必须明说「未检测到 Git」，且不得谎报「无变更」', async () => {
+    const { html } = await renderEnvHtml({
+        [statusRoute]: NO_GIT_STATUS,
+        [remoteRoute]: NO_GIT_REMOTE
+    });
+    assert.ok(firstRow(html).includes('未检测到 Git'),
+        '主信息缺失，实际首行：' + firstRow(html));
+    assert.ok(!html.includes('无变更'),
+        '没查到 ≠ 没有变更：git 缺失时不得渲染「无变更」');
+});
+
+test('git 未安装：分支/同步行不得显示「非 Git 仓库」「未配置远程」', async () => {
+    const { html } = await renderEnvHtml({
+        [statusRoute]: NO_GIT_STATUS,
+        [remoteRoute]: NO_GIT_REMOTE
+    });
+    // 这两句是「装了 git」语境下的结论，用在缺客户端场景会把用户引向错误动作
+    assert.ok(!html.includes('非 Git 仓库'), '误导：git 未安装却显示「非 Git 仓库」');
+    assert.ok(!html.includes('未配置远程'), '误导：git 未安装却显示「未配置远程」');
+    assert.ok(lastRow(html).includes('—'), '同步行应显示占位符，实际：' + lastRow(html));
+});
+
+test('git 未安装：占位行必须带原因到 title（悬停可查），且不重复刷屏', async () => {
+    const { html } = await renderEnvHtml({
+        [statusRoute]: NO_GIT_STATUS,
+        [remoteRoute]: NO_GIT_REMOTE
+    });
+    const rs = rowsOf(html);
+    // 主信息只说一次（首行），后两行用占位符 + title，避免三行重复同一句
+    assert.equal(rs.filter(r => r.includes('未检测到 Git</span>')).length, 1,
+        '「未检测到 Git」作为可见正文应只出现一次');
+    const placeholderRows = rs.filter(r => r.includes('title="未检测到 Git"'));
+    assert.equal(placeholderRows.length, 2,
+        '分支行与同步行都应把原因收进 title，实际命中 ' + placeholderRows.length);
+});
+
+test('git 未安装 vs 非 Git 仓库：两种状态渲染结果必须可区分', async () => {
+    const noGit = await renderEnvHtml({
+        [statusRoute]: NO_GIT_STATUS,
+        [remoteRoute]: NO_GIT_REMOTE
+    });
+    const notRepo = await renderEnvHtml({
+        [statusRoute]: { gitAvailable: true, initialized: false, workspacePath: 'D:/x' },
+        [remoteRoute]: { gitAvailable: true, hasRemote: false, degraded: true, ahead: -1, behind: -1 }
+    });
+    assert.notEqual(noGit.html, notRepo.html,
+        '两种状态渲染相同（缺陷复现）：用户无法分辨该装 git 还是该 git init');
+    assert.ok(notRepo.html.includes('非 Git 仓库'), '非仓库场景应保留原文案');
+    assert.ok(notRepo.html.includes('未配置远程'), '非仓库场景应保留原文案');
+});
+
+test('仅 remote 报 git 缺失（status 缓存复用旧值）时同步行同样不得误导', async () => {
+    // reuse 路径下 renderEnv 会拿到缓存的旧 status，只有 remote 是新值
+    const { html } = await renderEnvHtml({
+        [statusRoute]: Object.assign({}, GIT, { changed: ['a.js'], staged: [], untracked: [], additions: 3, deletions: 1 }),
+        [remoteRoute]: NO_GIT_REMOTE
+    });
+    assert.ok(!lastRow(html).includes('未配置远程'),
+        'remote 已明确 gitAvailable:false，同步行仍显示「未配置远程」= 误导');
+    assert.ok(lastRow(html).includes('—'), '实际：' + lastRow(html));
+});

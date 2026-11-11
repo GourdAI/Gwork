@@ -17,7 +17,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { render, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { HeroAppDemo } from '../hero-app-demo'
@@ -27,8 +26,12 @@ import { HeroAppDemo } from '../hero-app-demo'
  *
  * test-setup.ts forces `prefers-reduced-motion: reduce` to match, so the
  * default render here exercises the reduced-motion path — the one that used
- * to freeze the demo into a dead "already finished" frame on first paint
- * (the regression this file guards).
+ * to freeze the demo into a dead "already finished" frame on first paint.
+ *
+ * The manual Replay button is gone: BOTH motion modes must restart on the
+ * fixed 5s loop, otherwise the demo would sit on the finished frame forever.
+ * The loop is observed at runtime (steps reset to 0 after completion), not by
+ * reading a constant, so deleting the loop is a KILLed mutation.
  */
 
 const steps = (container: HTMLElement) =>
@@ -37,8 +40,6 @@ const checks = (container: HTMLElement) =>
   container.querySelectorAll('.gw-app-check-done')
 const status = (container: HTMLElement) =>
   container.querySelector('.gw-app-winstatus')?.textContent ?? ''
-const replayShown = (container: HTMLElement) =>
-  !!container.querySelector('.gw-app-replay-show')
 
 function setReducedMotion(reduced: boolean) {
   Object.defineProperty(window, 'matchMedia', {
@@ -67,39 +68,47 @@ afterEach(() => {
 })
 
 describe('HeroAppDemo timeline', () => {
-  it('reduced motion: reveals steps progressively instead of a frozen finished frame', async () => {
+  it('reduced motion: reveals progressively, has no Replay button, and auto-loops', async () => {
     setReducedMotion(true)
     const { container } = render(<HeroAppDemo />)
 
     // First paint must NOT be the finished demo: no steps yet, still busy.
     expect(steps(container)).toHaveLength(0)
     expect(status(container)).toContain('Running')
-    expect(replayShown(container)).toBe(false)
+    // The manual replay control must not exist in the DOM at all.
+    expect(container.querySelector('.gw-app-replay')).toBeNull()
+    expect(container.querySelector('button')).toBeNull()
 
     // Steps appear one by one...
     await waitFor(() => expect(steps(container).length).toBeGreaterThan(0))
     await waitFor(() => expect(steps(container).length).toBeGreaterThanOrEqual(3))
-    // ...and the run eventually completes with every checklist item ticked.
-    await waitFor(() => expect(steps(container)).toHaveLength(7))
+    // ...and the run completes with every checklist item ticked.
+    await waitFor(() => expect(steps(container)).toHaveLength(7), {
+      timeout: 8000,
+    })
     await waitFor(() => expect(checks(container)).toHaveLength(3))
     await waitFor(() => expect(status(container)).toContain('Completed'))
-    await waitFor(() => expect(replayShown(container)).toBe(true))
 
-    // Reduced motion never auto-loops: the finished frame stays put.
-    await new Promise((resolve) => setTimeout(resolve, 1200))
-    expect(steps(container)).toHaveLength(7)
-    expect(replayShown(container)).toBe(true)
-  })
+    // After the 5s loop the timeline resets and starts a fresh run. If the
+    // auto-loop guard were removed this would time out: the finished frame
+    // would stay on screen forever — exactly the static-page regression.
+    await waitFor(() => expect(steps(container)).toHaveLength(0), {
+      timeout: 9000,
+    })
+    await waitFor(() => expect(status(container)).toContain('Running'))
+    expect(container.querySelector('.gw-app-replay')).toBeNull()
+  }, 20000)
 
-  it('reduced motion: terminal output appears whole (no typewriter) and replay restarts', async () => {
+  it('reduced motion: terminal output appears whole (no typewriter), no Replay button', async () => {
     setReducedMotion(true)
-    const user = userEvent.setup()
     const { container } = render(<HeroAppDemo />)
 
-    await waitFor(() =>
-      expect(container.querySelector('.gw-app-term-cmd')?.textContent).toBe(
-        'node --check js/main.js'
-      )
+    await waitFor(
+      () =>
+        expect(container.querySelector('.gw-app-term-cmd')?.textContent).toBe(
+          'node --check js/main.js'
+        ),
+      { timeout: 8000 }
     )
     // The command is set whole: the caret class (typewriter in progress) never
     // shows once the command text is complete.
@@ -107,13 +116,11 @@ describe('HeroAppDemo timeline', () => {
       container.querySelector('.gw-app-term-cmd.gw-app-caret')
     ).toBeNull()
 
-    await waitFor(() => expect(replayShown(container)).toBe(true))
-
-    await user.click(container.querySelector('.gw-app-replay') as HTMLElement)
-    // Replay resets the timeline to the beginning.
-    expect(steps(container)).toHaveLength(0)
-    expect(status(container)).toContain('Running')
-  })
+    await waitFor(() => expect(status(container)).toContain('Completed'), {
+      timeout: 8000,
+    })
+    expect(container.querySelector('.gw-app-replay')).toBeNull()
+  }, 15000)
 
   it('full motion: starts empty and begins revealing after the first beat', async () => {
     setReducedMotion(false)
@@ -126,5 +133,6 @@ describe('HeroAppDemo timeline', () => {
     await waitFor(() => expect(steps(container).length).toBeGreaterThan(0), {
       timeout: 5000,
     })
+    expect(container.querySelector('.gw-app-replay')).toBeNull()
   })
 })
