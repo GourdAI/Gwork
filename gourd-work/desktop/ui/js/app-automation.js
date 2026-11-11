@@ -1245,19 +1245,19 @@
         autoGrowPrompt();
     }
 
-    /** textarea input：除自适应高度外，接命令补全（口径同 app-history.js handleInputForCommands）。
-     *  仅在「以 / @ 开头且光标前无空格」时展示面板，其余情况收起本页面板（不动聊天页面板）。 */
+    /** textarea input：除自适应高度外，接命令补全。触发段判定复用
+     *  GourdCmdComplete.findToken（与 app-history.js handleInputForCommands 同一函数，
+     *  不在此另写一份）：本页曾自留「以 / @ 开头且光标前无空格」的旧口径，于是
+     *  prompt 里一旦有了内容（或已选过一个技能）再打 / 就唤不出面板，
+     *  与聊天页同一个「技能只能触发一次」的病根。 */
     function autoCmdCompleteOnInput() {
         var inputEl = autoPromptEl();
         var completeEl = autoCmdEl();
         if (!inputEl || !completeEl || !window.GourdCmdComplete) return;
-        var val = inputEl.value;
-        if (val.indexOf('/') === 0 || val.indexOf('@') === 0) {
-            var textBeforeCursor = val.substring(0, inputEl.selectionStart);
-            if (textBeforeCursor.indexOf(' ') === -1) {
-                window.GourdCmdComplete.show(inputEl, completeEl, textBeforeCursor);
-                return;
-            }
+        var token = window.GourdCmdComplete.findToken(inputEl);
+        if (token) {
+            window.GourdCmdComplete.show(inputEl, completeEl, inputEl.value.substring(token.start, token.end));
+            return;
         }
         window.GourdCmdComplete.hide(completeEl);
     }

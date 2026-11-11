@@ -334,6 +334,90 @@ impl StreamDecoder {
     }
 }
 
+/// A detected byte-order mark: the encoding it signals and the BOM's byte length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bom {
+    pub encoding: &'static str,
+    pub len: usize,
+}
+
+/// Detect a leading BOM (UTF-8/16/32, both endiannesses).
+///
+/// Windows tooling routinely emits UTF-16LE (PowerShell `>` redirection,
+/// `Out-File`) and editors save UTF-8-with-BOM; reading those bytes as UTF-8
+/// yields a leading `\u{FEFF}` (UTF-8) or wholesale NUL-interleaved garbage
+/// (UTF-16/32). The read tool strips the BOM and decodes the real encoding so
+/// the model sees clean text. Order matters: UTF-32LE starts with the UTF-16LE
+/// BOM (`FF FE 00 00`), so the 4-byte forms are tested first.
+pub fn detect_bom(bytes: &[u8]) -> Option<Bom> {
+    if bytes.len() >= 4 {
+        if bytes[..4] == [0xFF, 0xFE, 0x00, 0x00] {
+            return Some(Bom { encoding: "utf-32le", len: 4 });
+        }
+        if bytes[..4] == [0x00, 0x00, 0xFE, 0xFF] {
+            return Some(Bom { encoding: "utf-32be", len: 4 });
+        }
+    }
+    if bytes.len() >= 3 && bytes[..3] == [0xEF, 0xBB, 0xBF] {
+        return Some(Bom { encoding: "utf-8", len: 3 });
+    }
+    if bytes.len() >= 2 {
+        if bytes[..2] == [0xFF, 0xFE] {
+            return Some(Bom { encoding: "utf-16le", len: 2 });
+        }
+        if bytes[..2] == [0xFE, 0xFF] {
+            return Some(Bom { encoding: "utf-16be", len: 2 });
+        }
+    }
+    None
+}
+
+/// Decode a complete buffer, honouring a leading BOM before the UTF-8→GBK path.
+///
+/// This is the file-read counterpart of [`decode_bytes`]: a BOM is an explicit
+/// encoding declaration and always wins over the heuristic fallback. Without a
+/// BOM it delegates to [`decode_bytes`] (strict UTF-8, then GBK), so legacy
+/// code-page files keep working exactly as before.
+pub fn decode_with_bom(bytes: &[u8]) -> String {
+    let Some(bom) = detect_bom(bytes) else {
+        return decode_bytes(bytes);
+    };
+    let body = &bytes[bom.len..];
+    match bom.encoding {
+        "utf-8" => decode_bytes(body),
+        "utf-16le" => encoding_rs::UTF_16LE.decode(body).0.into_owned(),
+        "utf-16be" => encoding_rs::UTF_16BE.decode(body).0.into_owned(),
+        "utf-32le" => decode_utf32(body, true),
+        "utf-32be" => decode_utf32(body, false),
+        _ => decode_bytes(body),
+    }
+}
+
+/// Decode UTF-32 (encoding_rs has no UTF-32 codec). Invalid code points become
+/// U+FFFD, matching the lossy contract of the other decoders. A trailing partial
+/// unit (length not a multiple of 4) is dropped — it cannot form a character.
+fn decode_utf32(bytes: &[u8], little_endian: bool) -> String {
+    let mut out = String::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        let cp = if little_endian {
+            u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+        } else {
+            u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+        };
+        out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+    }
+    out
+}
+
+/// Heuristic binary detection: a NUL byte in the leading sample means the file
+/// is not text (the same signal git and ripgrep use). Reading such a file as
+/// text — especially through the GBK fallback — produces pages of mojibake that
+/// pollute the model context, so the read tool refuses it up front.
+pub fn looks_binary(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(8192)];
+    sample.contains(&0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,5 +699,51 @@ mod tests {
         let out = d.push(&bytes) + &d.finish();
         assert_ne!(out, "中文测试", "strict must not silently switch encodings");
         assert!(out.contains('\u{FFFD}'), "{:?}", out);
+    }
+
+    // ─── BOM detection / decode_with_bom / looks_binary ─────────────────────
+
+    #[test]
+    fn bom_detects_every_encoding() {
+        assert_eq!(detect_bom(&[0xEF, 0xBB, 0xBF, b'a']).unwrap().encoding, "utf-8");
+        assert_eq!(detect_bom(&[0xFF, 0xFE, b'a', 0]).unwrap().encoding, "utf-16le");
+        assert_eq!(detect_bom(&[0xFE, 0xFF, 0, b'a']).unwrap().encoding, "utf-16be");
+        // UTF-32LE shares the UTF-16LE prefix; the 4-byte form must win.
+        assert_eq!(detect_bom(&[0xFF, 0xFE, 0x00, 0x00]).unwrap().encoding, "utf-32le");
+        assert_eq!(detect_bom(&[0x00, 0x00, 0xFE, 0xFF]).unwrap().encoding, "utf-32be");
+        assert!(detect_bom(b"plain ascii").is_none());
+        assert!(detect_bom(&[]).is_none());
+    }
+
+    #[test]
+    fn decode_with_bom_strips_and_decodes() {
+        // UTF-8 BOM
+        let mut v = vec![0xEF, 0xBB, 0xBF];
+        v.extend_from_slice("你好".as_bytes());
+        assert_eq!(decode_with_bom(&v), "你好");
+        // UTF-16LE "Hi"
+        assert_eq!(decode_with_bom(&[0xFF, 0xFE, b'H', 0, b'i', 0]), "Hi");
+        // UTF-16BE "Hi"
+        assert_eq!(decode_with_bom(&[0xFE, 0xFF, 0, b'H', 0, b'i']), "Hi");
+        // UTF-32LE "A"
+        assert_eq!(decode_with_bom(&[0xFF, 0xFE, 0, 0, b'A', 0, 0, 0]), "A");
+        // No BOM → existing UTF-8 path
+        assert_eq!(decode_with_bom("plain".as_bytes()), "plain");
+        // No BOM, GBK bytes → existing fallback
+        let (gbk, _, _) = encoding_rs::GBK.encode("中文");
+        assert_eq!(decode_with_bom(&gbk), "中文");
+    }
+
+    #[test]
+    fn looks_binary_flags_nul_bytes() {
+        assert!(looks_binary(b"abc\0def"));
+        assert!(looks_binary(&[0xFF, 0xFE, 0x00, 0x00]));
+        assert!(!looks_binary("你好 world".as_bytes()));
+        assert!(!looks_binary(b""));
+        // NUL beyond the 8 KiB sample is not inspected (text with a late NUL
+        // is rare; the sample bounds the cost).
+        let mut late = vec![b'a'; 8192];
+        late.push(0);
+        assert!(!looks_binary(&late));
     }
 }

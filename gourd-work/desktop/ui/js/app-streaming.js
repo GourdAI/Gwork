@@ -367,12 +367,30 @@ function sendMessage(forceQueue) {
     var inputEl = inChatMode ? chatInput : welcomeInput;
     var rawText = inputEl ? inputEl.value : '';
     var text = getInputText();
+    /* 技能小卡片注入：chip 表面是展示名、内部 data-skill-id 是真实 id。
+       后端斜杠技能协议（Java SkillInvocation / Rust 同口径）只认 "/id ..." 文本，
+       因此发送前把全部 chip 的 id 依次前置为 "/id " 段——多个技能即多段前缀，
+       服务端按序注入各技能规约。展示名与 chip 本身都不进入 wire 文本。
+
+       ⚠ prefix 只是「路由附加物」，不是用户键入的命令：isCommand 等一切
+       「用户是否手打了斜杠命令」的判定都必须基于 userTyped（注入前原文），
+       否则挂了 chip 的普通请求会因 text 以 / 开头被误判为命令，进而被下面的
+       「命令需 Tab 排队 / 命令不支持附件」拦截，消息发不出去。 */
+    var userTyped = text;
+    var chips = (inputEl && typeof getSkillChips === 'function') ? getSkillChips(inputEl) : [];
+    var chipIds = chips.map(function (c) { return c.id; });
+    var prefix = '';
+    if (chipIds.length > 0) {
+        for (var ci = 0; ci < chipIds.length; ci++) prefix += '/' + chipIds[ci] + ' ';
+        text = prefix + text;
+        rawText = prefix + rawText;
+    }
     if (!text && pendingFiles.length === 0) return;
 
     /* 问答挂起路由：当前会话有待作答的结构化问答卡时，输入框文本等价于卡片内「其他补充」，
-       直接记为当前题的自定义答案，不得进入普通发送链路（streaming/steer/queue 行为不受影响）。
-       附件不能进答案（答案协议只有 text 字段）：先落盘再排入队列，等本轮作答恢复的任务结束后
-       由队列链路带附件发送——既不阻塞作答，也不静默吞掉附件。 */
+        直接记为当前题的自定义答案，不得进入普通发送链路（streaming/steer/queue 行为不受影响）。
+        附件不能进答案（答案协议只有 text 字段）：先落盘再排入队列，等本轮作答恢复的任务结束后
+        由队列链路带附件发送——既不阻塞作答，也不静默吞掉附件。 */
     if (activeSessionId && sessionMap[activeSessionId]
             && typeof getPendingQuestionState === 'function') {
         var pendingQuestion = getPendingQuestionState(sessionMap[activeSessionId]);
@@ -394,7 +412,9 @@ function sendMessage(forceQueue) {
     
     if (isBlocked) {
         var blockedSess = sessionMap[activeSessionId];
-        var isCommand = text && text.trim().charAt(0) === '/';
+        /* 命令判定基于 userTyped：用户手打 /clear 之类才算命令；chip 前缀不是。
+           否则挂技能的普通插话会被当成命令，撞上「命令需 Tab 排队」直接 return。 */
+        var isCommand = userTyped && userTyped.trim().charAt(0) === '/';
         if (isCommand && pendingFiles.length > 0) {
             // 命令是纯文本协议：带附件排队会被后端当普通消息发给模型（附件让命令判定失效），
             // 把 "/rerun" 变成一句提示词。明确拦下，而不是让用户事后发现命令没执行。
@@ -428,6 +448,9 @@ function sendMessage(forceQueue) {
     if (folded === null) return;
     if (folded === true) {
         text = GourdI18n.t('streaming.long_input_prompt');
+        // 技能 chip 不在 textarea 原文里：折叠替换文本后必须补回 /id 前缀，
+        // 否则用户挂着的技能会随折叠静默失效（chip 仍在界面上，更迷惑）
+        if (chipIds.length > 0) text = prefix + text;
         if (inputEl) {
             inputEl.value = '';
             inputEl._manualH = 0;
@@ -447,7 +470,19 @@ function sendMessage(forceQueue) {
     }
 
     // Build display text
+    /* 气泡回显「人读形态」：wire 文本为后端路由前置了 /id 段，
+       气泡里若照抄会把 _user_xxx 这类目录 id 甩给用户。改为 chip 展示名
+       （[名称] 标记）+ 用户可读正文。
+       展示名用函数开头捕获的 chips 快照，不再回查 DOM —— 折叠分支已清空
+       inputEl、且 chip 容器已独立，回查既拿不到正确正文也会指向空容器。
+       正文取 text 去掉 prefix 的部分：普通发送是用户原文，折叠后是
+       long_input_prompt（若此处误用 inputEl.value 会得到空串，气泡只剩技能名）。 */
     var displayText = text || '';
+    if (chips.length > 0) {
+        var shown = '';
+        for (var ck = 0; ck < chips.length; ck++) shown += '[' + chips[ck].name + '] ';
+        displayText = shown + text.substring(prefix.length);
+    }
     if (!displayText && filesToSend.length > 0) {
         var first = filesToSend[0];
         if (first.attachmentsType === 'image') {

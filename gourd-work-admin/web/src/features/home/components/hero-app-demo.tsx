@@ -38,8 +38,15 @@ import { cn } from '@/lib/utils'
  * in a dark tech style") instead of the old API/curl terminal mock. Steps are
  * revealed on a timeline: agent replies, tool calls, a checklist ticking off
  * one item at a time, a typewriter terminal, and a completion bar. It loops,
- * pauses while the tab is hidden or the window is off-screen, honours
- * prefers-reduced-motion by rendering everything at once, and can be replayed.
+ * pauses while the tab is hidden or the window is off-screen, and can be
+ * replayed.
+ *
+ * Under `prefers-reduced-motion` the demo must NOT freeze into a dead
+ * "already finished" frame (that read as a broken/static page): it still
+ * reveals the same steps one by one — the CSS media query already strips the
+ * slide-in and blinking motion — but with shorter beats, no typewriter
+ * (command and output appear whole) and no auto-loop; the Replay button is
+ * shown at the end so the visitor stays in control.
  *
  * All colours come from existing theme tokens through color-mix, so light,
  * dark and system theme modes keep working.
@@ -99,6 +106,24 @@ const STEPS: StepDef[] = [
   { kind: 'done' },
 ]
 
+/** Timeline beats (ms) for the animated run. */
+const BEAT = {
+  step: 950,
+  check: 700,
+  termLead: 300,
+  type: 34,
+  termOut: 340,
+  termTail: 420,
+  settle: 500,
+  loop: 8000,
+} as const
+
+/**
+ * Shorter beats for reduced motion: the reveal itself is the content, the
+ * easing/blink motion is what the CSS media query removes.
+ */
+const REDUCED_BEAT = { step: 300, check: 200, termOut: 200, settle: 200 } as const
+
 /** Wait but stay cancellable and pause while the tab is hidden / off-screen. */
 function wait(
   ms: number,
@@ -140,16 +165,8 @@ export function HeroAppDemo(props: HeroAppDemoProps) {
   const visibleRef = useRef(true)
 
   useEffect(() => {
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
-    if (mq.matches) {
-      setStage(STEPS.length)
-      setCheckDone(CHECK_KEYS.length)
-      setTyped(TERMINAL_CMD)
-      setTermOut(true)
-      setBusy(false)
-      setShowReplay(false)
-      return
-    }
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)')
+      .matches
 
     let cancelled = false
     const isCancelled = () => cancelled
@@ -167,29 +184,58 @@ export function HeroAppDemo(props: HeroAppDemoProps) {
     const run = async () => {
       reset()
       for (let i = 0; i < STEPS.length; i++) {
-        if (!(await wait(950, isCancelled, isPaused))) return
+        const stepReady = await wait(
+          reduced ? REDUCED_BEAT.step : BEAT.step,
+          isCancelled,
+          isPaused
+        )
+        if (!stepReady) return
         setStage(i + 1)
         const step = STEPS[i]
         if (step.kind === 'checklist') {
           for (let c = 1; c <= CHECK_KEYS.length; c++) {
-            if (!(await wait(700, isCancelled, isPaused))) return
+            const checkReady = await wait(
+              reduced ? REDUCED_BEAT.check : BEAT.check,
+              isCancelled,
+              isPaused
+            )
+            if (!checkReady) return
             setCheckDone(c)
           }
         } else if (step.kind === 'terminal') {
-          if (!(await wait(300, isCancelled, isPaused))) return
-          for (let n = 1; n <= TERMINAL_CMD.length; n++) {
-            if (!(await wait(34, isCancelled, isPaused))) return
-            setTyped(TERMINAL_CMD.slice(0, n))
+          if (reduced) {
+            // No typewriter: command and result appear as a whole.
+            setTyped(TERMINAL_CMD)
+            const termReady = await wait(
+              REDUCED_BEAT.termOut,
+              isCancelled,
+              isPaused
+            )
+            if (!termReady) return
+            setTermOut(true)
+          } else {
+            if (!(await wait(BEAT.termLead, isCancelled, isPaused))) return
+            for (let n = 1; n <= TERMINAL_CMD.length; n++) {
+              if (!(await wait(BEAT.type, isCancelled, isPaused))) return
+              setTyped(TERMINAL_CMD.slice(0, n))
+            }
+            if (!(await wait(BEAT.termOut, isCancelled, isPaused))) return
+            setTermOut(true)
+            if (!(await wait(BEAT.termTail, isCancelled, isPaused))) return
           }
-          if (!(await wait(340, isCancelled, isPaused))) return
-          setTermOut(true)
-          if (!(await wait(420, isCancelled, isPaused))) return
         }
       }
-      if (!(await wait(500, isCancelled, isPaused))) return
+      const settled = await wait(
+        reduced ? REDUCED_BEAT.settle : BEAT.settle,
+        isCancelled,
+        isPaused
+      )
+      if (!settled) return
       setBusy(false)
       setShowReplay(true)
-      if (!(await wait(8000, isCancelled, isPaused))) return
+      // Reduced motion never auto-loops; the visitor replays on demand.
+      if (reduced) return
+      if (!(await wait(BEAT.loop, isCancelled, isPaused))) return
       setRunId((v) => v + 1)
     }
 

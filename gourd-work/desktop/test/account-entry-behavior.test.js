@@ -17,6 +17,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+const { reducedMotionBlocks, animationDeclarations, findDeadReducedMotion } = require('./css-motion');
+
 const ROOT = path.join(__dirname, '..');
 const SRC = fs.readFileSync(path.join(ROOT, 'ui/js/app-account.js'), 'utf8');
 
@@ -122,17 +124,19 @@ function run(opts) {
   opts = opts || {};
   const dom = makeDom();
   const zh = {
-    'account.entry': '登录 / 注册', 'account.sign_in': '登录', 'account.sign_up': '注册',
+    'account.entry': '登录', 'account.sign_in': '登录', 'account.sign_up': '注册',
     'account.sign_up_submit': '注册并登录', 'account.close': '关闭',
     'account.username': '用户名', 'account.email': '邮箱（可选）', 'account.password': '密码',
     'account.signed_in': '已登录', 'account.plan': '套餐', 'account.points': '积分余额',
     'settings.title': '设置', 'settings.tabs.appearance': '外观',
+    'settings.appearance.mode.system': '系统',
     'settings.appearance.mode.light': '浅色', 'settings.appearance.mode.dark': '深色',
     'account.memory': '记忆与进化', 'account.feedback': '意见反馈',
     'settings.about.check_update': '检查更新', 'account.sign_out': '退出登录',
     'account.working': '请稍候…', 'account.required': '请填写用户名和密码',
     'account.password_policy': '密码长度需为 8–128 个字符',
-    'account.unavailable': '登录服务暂不可用', 'account.failed': '操作失败'
+    'account.unavailable': '登录服务暂不可用', 'account.failed': '操作失败',
+    'account.auth_title_login': '登录 GWork', 'account.auth_title_register': '创建账号'
   };
   const sandbox = {
     document: dom.document,
@@ -174,7 +178,18 @@ test('no __GOURD_IPC__: clicking the entry still opens the popover (regression f
     'login form must NOT be embedded in the popover (separate modal only)');
   assert.ok(pop.innerHTML.indexOf('data-act="login"') >= 0, 'popover must offer a login entry row');
   assert.ok(pop.innerHTML.indexOf('data-act="settings"') >= 0, 'popover must offer the settings entry');
-  assert.equal(dom.name.textContent, '登录 / 注册', 'unsigned-in card shows sign-in label');
+  assert.equal(dom.name.textContent, '登录', 'unsigned-in card shows sign-in label without "register"');
+  assert.ok(dom.name.textContent.indexOf('注册') < 0, 'entry label must not mention registration');
+  /* 外观分段控件必须是【系统/浅色/深色】三档，与设置页外观 tab 同源；
+     只有浅/深两档会让「跟随系统」在弹层里无处可点。 */
+  const switchHtml = pop.innerHTML;
+  for (const mode of ['system', 'light', 'dark']) {
+    assert.ok(switchHtml.indexOf('data-mode="' + mode + '"') >= 0,
+      'theme switch must offer the ' + mode + ' mode');
+  }
+  /* 弹层宽度与用户卡片等宽（夹 240–300），不得再比卡片宽出一截：
+     卡片桩宽 240 → 弹层应取 clamp 下界 240。 */
+  assert.equal(pop.style.width, '240px', 'popover width must track the entry card width (clamped 240–300)');
 });
 
 /* 用户 11-09 二次确认：登录是【单独弹框】，不在账号弹层里。 */
@@ -237,7 +252,7 @@ test('signed-in state: popover renders profile with nickname, plan and sign-out'
     assert.ok(pop.innerHTML.indexOf('account-pop-profile') >= 0, 'profile header');
     assert.ok(pop.innerHTML.indexOf('account-pop-stats') >= 0, 'plan / points card');
     assert.ok(pop.innerHTML.indexOf('data-act="logout"') >= 0, 'sign out entry');
-    assert.ok(pop.innerHTML.indexOf('account-theme-switch') >= 0, 'light/dark switch');
+  assert.ok(pop.innerHTML.indexOf('account-theme-switch') >= 0, 'system/light/dark switch');
     assert.ok(dom.entry.className.indexOf('is-signed-in') >= 0, 'card signed-in class');
     assert.equal(dom.name.textContent, '陆正望', 'card shows nickname');
     assert.equal(dom.byId['accountPopName'].textContent, '陆正望', 'popover shows nickname');
@@ -305,6 +320,139 @@ test('profile view carries a hint node so logout failures are never silent', () 
   });
 });
 
+/* ===== 登录弹框视觉契约（用户 11-xx 报障「X 被挤占、整体丑」）===== */
+
+/* 护栏①：关闭按钮不得再挤占内容流。旧版 .account-tabs 用 margin-right 给
+   右上角的 × 让位，分段控件因此被挤偏。现在关闭按钮靠 absolute 定位脱离
+   文档流；tabs 铺满表单列（Qoder 式左右分栏后 tabs 不再靠 auto margin 居中，
+   「居中」不再是契约，「不为关闭按钮预留空间」才是）。 */
+test('close button floats over the modal without crowding the segmented tabs', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'ui/css/app.css'), 'utf8');
+  const rule = (sel) => {
+    const m = css.match(new RegExp('\\' + sel + '\\s*\\{([^}]*)\\}'));
+    assert.ok(m, sel + ' rule missing');
+    return m[1];
+  };
+  const close = rule('.account-close');
+  assert.ok(/position:\s*absolute/.test(close), 'close button must be absolutely positioned (out of flow)');
+  assert.ok(/z-index/.test(close), 'close button must sit above the content');
+  const tabs = rule('.account-tabs');
+  assert.ok(!/margin-right/.test(tabs) && !/margin:\s*[^;]*\d+px\s+\d+px/.test(tabs),
+    'tabs must not reserve space for the close button (the old crowding bug)');
+  /* 关闭按钮必须有足量命中区，不能只是一个 20px 的裸字符 */
+  assert.ok(/width:\s*30px/.test(close) && /height:\s*30px/.test(close),
+    'close button needs a real 30x30 hit area');
+});
+
+/* 护栏①b：Qoder 式左右分栏契约——弹框为 grid 双列（左视觉区 + 右表单区），
+   窄屏回落单列且视觉区隐藏（功能不依赖视觉区）。防止有人把分栏拍回单列丑版。 */
+test('login modal keeps the Qoder-style split layout with a narrow-screen fallback', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'ui/css/app.css'), 'utf8');
+  const auth = css.match(/\.account-auth\s*\{([^}]*)\}/);
+  assert.ok(auth, '.account-auth rule missing');
+  assert.ok(/display:\s*grid/.test(auth[1]), 'auth view must be a grid (split layout)');
+  assert.ok(/grid-template-columns:\s*\S+\s+\S+/.test(auth[1]),
+    'auth view must declare two columns (visual + form)');
+  assert.ok(/\.account-auth-visual/.test(css), 'visual (brand art) column missing');
+  assert.ok(/\.account-auth-main/.test(css), 'form column missing');
+  const fallback = css.match(/@media\s*\(max-width:\s*679px\)\s*\{([\s\S]*?)\n\}/);
+  assert.ok(fallback && /\.account-auth-visual\s*\{\s*display:\s*none/.test(fallback[1]),
+    'narrow screens must hide the visual column and fall back to a single column');
+});
+
+/* 护栏②：分段滑块必须由 data-mode 驱动，switchTab 必须同步该属性。
+   只改 .active class 无法驱动 ::after 滑块，切到「注册」时高亮块会停在左半。 */
+test('switching tab moves the segmented slider via data-mode', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'ui/css/app.css'), 'utf8');
+  assert.ok(/\.account-tabs\[data-mode="register"\]::after/.test(css),
+    'slider must be driven by the tabs data-mode attribute');
+  const { dom } = run({ ipc: null });
+  dom.entry.onclick({ target: dom.entry });
+  const pop = dom.byId['accountPopover'];
+  const loginRow = pop.children.filter(c => c.attrs && c.attrs['data-act'] === 'login')[0];
+  pop.onclick({ target: loginRow });
+  const modal = dom.byId['accountModal'];
+  const bar = modal.querySelectorAll('.account-tabs')[0];
+  assert.ok(bar, 'segmented tabs container missing');
+  assert.equal(bar.getAttribute('data-mode'), 'login', 'initial mode must be login');
+  const registerTab = modal.querySelectorAll('.account-tab')[1];
+  modal.onclick({ target: registerTab });
+  assert.equal(bar.getAttribute('data-mode'), 'register',
+    'switchTab must sync data-mode so the CSS slider follows');
+  assert.equal(dom.byId['accountForm'].innerHTML.indexOf('accountEmail') >= 0, true,
+    'register mode must add the email field');
+});
+
+/* 护栏③：主标题随模式切换，且必须用 textContent（用户可见文本不得走 innerHTML）。 */
+test('modal title follows the mode and is set via textContent', () => {
+  const { dom } = run({ ipc: null });
+  dom.entry.onclick({ target: dom.entry });
+  const pop = dom.byId['accountPopover'];
+  pop.onclick({ target: pop.children.filter(c => c.attrs && c.attrs['data-act'] === 'login')[0] });
+  const modal = dom.byId['accountModal'];
+  const title = dom.byId['accountAuthTitle'];
+  assert.ok(title, 'modal must carry a title node');
+  assert.equal(title.tagName, 'H2', 'title should be a heading');
+  assert.equal(title.textContent, '登录 GWork', 'login-mode title');
+  modal.onclick({ target: modal.querySelectorAll('.account-tab')[1] });
+  assert.equal(title.textContent, '创建账号', 'register-mode title');
+  const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(!/title\.innerHTML\s*=/.test(code), 'title must never be assigned via innerHTML');
+});
+
+/* 护栏④：账号区块 CSS 必须走主题令牌，不得出现颜色字面量。
+   旧版 .account-submit 写死 color:#fff，暗色 accent 是近白 #e4e4e7，
+   白字压近白底对比度仅 1.16:1（按钮文字几乎不可见），且违反 theme.css
+   色彩治理约定第 1/4 条。 */
+test('account CSS uses theme tokens instead of hard-coded colours', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'ui/css/app.css'), 'utf8');
+  const start = css.indexOf('/* ===== 账号用户卡片');
+  assert.ok(start > 0, 'account section anchor missing');
+  const section = css.slice(start);
+  /* 只校验本轮重写的登录弹框子区块（品牌区起 → 下一个 ===== 区块止），
+     避开早期遗留的头像渐变，也【绝不】扫到本区块之后的既有代码
+     （切片不封顶会误伤 .sidebar-drag-handle 等无关规则，制造假红灯）。 */
+  const authStart = section.indexOf('/* ===== 登录表单视图');
+  assert.ok(authStart > 0, 'auth sub-section anchor missing');
+  const authEnd = section.indexOf('/* ===== ', authStart + 10);
+  assert.ok(authEnd > authStart, 'auth sub-section must be followed by another section marker');
+  const auth = section.slice(authStart, authEnd);
+  assert.ok(auth.indexOf('.account-submit') >= 0, 'slice must cover the submit rule');
+  assert.ok(auth.indexOf('sidebar-drag-handle') < 0, 'slice must not leak into later sections');
+  const submit = auth.match(/\.account-submit\s*\{([^}]*)\}/);
+  assert.ok(submit, '.account-submit rule missing');
+  assert.ok(/var\(--accent-contrast\)/.test(submit[1]),
+    'submit foreground must use --accent-contrast (never hard-coded #fff)');
+  assert.ok(/var\(--accent\)/.test(submit[1]), 'submit background must use the accent token');
+  /* 声明值里的颜色字面量：裸十六进制 / rgb() / rgba(数字…)。
+     「令牌 + 透明度」的 rgba(var(--accent-rgb), .14) 是合规写法，须放行。 */
+  const valueLiterals = [];
+  const declRx = /:\s*([^;{}]*)/g;
+  let d;
+  while ((d = declRx.exec(auth)) !== null) {
+    const v = d[1];
+    const hex = v.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
+    valueLiterals.push(...hex);
+    const fn = v.match(/rgba?\([^)]*\)/g) || [];
+    for (const f of fn) if (!/^rgba\(\s*var\(--/.test(f)) valueLiterals.push(f);
+  }
+  assert.deepStrictEqual(valueLiterals, [],
+    'hard-coded colours in the login modal CSS: ' + valueLiterals.join(', '));
+});
+
+/* 护栏⑤：品牌区必须存在（Qoder 式登录弹框的视觉锚点），
+   且品牌名与侧栏 logo 同源，产品名不做 i18n。 */
+test('login modal carries the brand block', () => {
+  const { dom } = run({ ipc: null });
+  dom.entry.onclick({ target: dom.entry });
+  const pop = dom.byId['accountPopover'];
+  pop.onclick({ target: pop.children.filter(c => c.attrs && c.attrs['data-act'] === 'login')[0] });
+  const modal = dom.byId['accountModal'];
+  assert.ok(modal.innerHTML.indexOf('account-brand-logo') >= 0, 'brand logo missing');
+  assert.ok(modal.innerHTML.indexOf('account-brand-name') >= 0, 'brand name missing');
+  assert.ok(modal.innerHTML.indexOf('>GWork<') >= 0, 'product name must read GWork (same as the sidebar)');
+});
+
 /* P2 结构护栏：弹层与登录弹框【同时】存在于 DOM 时，hint 节点 id 必须互不相同。
    同 id 双节点是 HTML 非法状态：getElementById 只返回先插入者，后渲染容器的
    提示会写进被隐藏的节点 —— 用户视角就是「点了没反应」。
@@ -338,4 +486,47 @@ test('popover and modal hint ids are unique across both containers', () => {
     const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '');
     assert.ok(!/id="accountHint"/.test(code), 'shared id="accountHint" must not come back');
   });
+});
+
+/* 护栏③：左栏插画的漂浮动画必须在「减少动态效果」下【真的】停住。
+
+   这条护栏的存在本身就是一次事故复盘：2026-11-10 登录页改版时，停动画的
+   `.account-art-float { animation: none; }` 被写在了 app.css 靠前的 chl 区块里，
+   而动画声明在靠后的账号区块 —— 同特异性、顺序后者胜，于是那行 none 是【死代码】，
+   插画照样 5.2s 无限循环。更糟的是当时还把「并入尾块是为迁就 history-loading
+   契约」写成了注释，把失效包装成了权衡。
+
+   实测取证方式（不是读代码推断）：把 theme.css 的全局
+   `*{animation-duration:.01ms!important}` 兜底摘掉，仅留 app.css，在
+   prefers-reduced-motion 下取 computed style —— 修复前 animationName 仍是
+   account-art-float / infinite，修复后为 none / 1 次。
+
+   因此这里断言的是【层叠生效性】而非「文本里有没有 none」：判定交给
+   test/css-motion.js（与 history-loading.test.js 共用同一实现，避免两处各写
+   一份正则、各自失真）。 */
+test('floating brand art actually stops under prefers-reduced-motion (not dead CSS)', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'ui/css/app.css'), 'utf8');
+
+  /* 取样自检：解析器若静默失配，下面「最后一条声明是 none」会恒真通过，
+     护栏就成了摆设。 */
+  assert.ok(animationDeclarations(css).length > 0,
+    'animation 声明一条都没解析到（解析器失效，护栏形同虚设）');
+  assert.ok(reducedMotionBlocks(css).length > 0,
+    'app.css 里没有 prefers-reduced-motion 块');
+
+  /* 核心判定：`.account-art-float` 在源码中【最后一条】animation 声明必须是 none。
+     若动画声明排在 none 之后，none 就被反超 → 死代码 → 报出具体违规内容。 */
+  const offender = findDeadReducedMotion(css, '.account-art-float');
+  assert.equal(offender, null, '插画动效未在 reduced-motion 下真正停住：' + offender);
+
+  /* 补一道顺序护栏：停动画的那个 reduced-motion 块，必须排在动画声明之后。
+     上一道断言已能抓住反超，这里再显式钉住「顺序」这一根因，便于失败时定位。 */
+  const stopBlock = reducedMotionBlocks(css).find(b => /animation:\s*none/.test(b.body) && b.body.includes('.account-art-float'));
+  assert.ok(stopBlock, '缺少停掉 .account-art-float 的 reduced-motion 块');
+  const animDecl = animationDeclarations(css)
+    .filter(d => d.selectors.includes('.account-art-float') && !/animation:\s*none/.test(d.body))
+    .pop();
+  assert.ok(animDecl, '未找到 .account-art-float 的动画声明（护栏取样失效）');
+  assert.ok(stopBlock.at > animDecl.at,
+    '停动画的 reduced-motion 块必须排在动画声明【之后】，否则同特异性下会被反超成死代码');
 });

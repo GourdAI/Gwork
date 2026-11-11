@@ -1385,6 +1385,8 @@
     "no_upstream": "No upstream branch",
     "synced": "Synced",
     "ahead_behind": "Ahead {0} / Behind {1}",
+    "commit_or_push": "Commit or push",
+    "sync_unknown": "Sync status unknown",
     "env_local": "Local",
     "env_remote": "Remote",
     "empty_env": "No environment info yet",
@@ -1395,7 +1397,7 @@
   },
   "account": {
     "close": "Close",
-    "entry": "Sign in / Sign up",
+    "entry": "Sign in",
     "sign_in": "Sign in",
     "sign_up": "Sign up",
     "sign_up_submit": "Sign up & sign in",
@@ -1412,6 +1414,9 @@
     "points": "Points balance",
     "memory": "Memory & evolution",
     "feedback": "Feedback",
-    "unavailable": "Sign-in service is unavailable. Please use the desktop app."
+    "unavailable": "Sign-in service is unavailable. Please use the desktop app.",
+    "auth_title_login": "Sign in to GWork",
+    "auth_title_register": "Create an account",
+    "auth_slogan": "Beyond execution, pure creation."
   }
 }

@@ -1385,6 +1385,8 @@
     "no_upstream": "Sin rama upstream",
     "synced": "Sincronizado",
     "ahead_behind": "{0} por delante / {1} por detrás",
+    "commit_or_push": "Hacer commit o push",
+    "sync_unknown": "Estado de sincronización desconocido",
     "env_local": "Local",
     "env_remote": "Remoto",
     "empty_env": "Sin información de entorno aún",
@@ -1395,7 +1397,7 @@
   },
   "account": {
     "close": "Cerrar",
-    "entry": "Iniciar sesión / Registrarse",
+    "entry": "Iniciar sesión",
     "sign_in": "Iniciar sesión",
     "sign_up": "Registrarse",
     "sign_up_submit": "Registrarse e iniciar sesión",
@@ -1412,6 +1414,9 @@
     "points": "Saldo de puntos",
     "memory": "Memoria y evolución",
     "feedback": "Comentarios",
-    "unavailable": "El servicio de inicio de sesión no está disponible. Use la aplicación de escritorio."
+    "unavailable": "El servicio de inicio de sesión no está disponible. Use la aplicación de escritorio.",
+    "auth_title_login": "Inicia sesión en GWork",
+    "auth_title_register": "Crear una cuenta",
+    "auth_slogan": "Más que ejecutar: crear."
   }
 }

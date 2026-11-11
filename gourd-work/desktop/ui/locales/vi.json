@@ -1385,6 +1385,8 @@
     "no_upstream": "Không có nhánh upstream",
     "synced": "Đã đồng bộ",
     "ahead_behind": "Trước {0} / Sau {1}",
+    "commit_or_push": "Commit hoặc push",
+    "sync_unknown": "Trạng thái đồng bộ không xác định",
     "env_local": "Cục bộ",
     "env_remote": "Từ xa",
     "empty_env": "Chưa có thông tin môi trường",
@@ -1395,7 +1397,7 @@
   },
   "account": {
     "close": "Đóng",
-    "entry": "Đăng nhập / Đăng ký",
+    "entry": "Đăng nhập",
     "sign_in": "Đăng nhập",
     "sign_up": "Đăng ký",
     "sign_up_submit": "Đăng ký và đăng nhập",
@@ -1412,6 +1414,9 @@
     "points": "Số dư điểm",
     "memory": "Trí nhớ & tiến hóa",
     "feedback": "Phản hồi",
-    "unavailable": "Dịch vụ đăng nhập không khả dụng. Vui lòng dùng ứng dụng máy tính."
+    "unavailable": "Dịch vụ đăng nhập không khả dụng. Vui lòng dùng ứng dụng máy tính.",
+    "auth_title_login": "Đăng nhập GWork",
+    "auth_title_register": "Tạo tài khoản",
+    "auth_slogan": "Không chỉ thực thi, mà là sáng tạo."
   }
 }

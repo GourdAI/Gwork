@@ -2287,7 +2287,13 @@ async fn handle_hitl_action(
         let output = if command.is_empty() {
             "The approved command could not be determined.".to_string()
         } else {
-            execute_approved_command(&state.workspace, &command).await
+            execute_approved_command(
+                &state.workspace,
+                session_id,
+                &command,
+                sp.pending_timeout_ms,
+                sp.pending_background,
+            ).await
         };
         let messages: Vec<ChatMessage> = serde_json::from_str(&sp.messages_json).unwrap_or_default();
         spawn_resume(
@@ -2332,57 +2338,78 @@ fn format_answers_for_llm(answers: &serde_json::Value) -> String {
     }
 }
 
-/// Execute an approved command synchronously and return its combined output.
-/// Used when the user approves a HITL-gated bash command: the command was NOT
-/// executed before suspension, so we must run it now and feed the real output back.
-async fn execute_approved_command(workspace: &std::path::Path, command: &str) -> String {
-    // Same transport as `BashTool::execute`: `prepare_powershell` builds
-    // `-EncodedCommand` (Base64 of UTF-16LE), falling back to a UTF-8+BOM
-    // `.ps1` when the command is too long for the command line. Sending the
-    // raw string via `-Command` here was the same defect class the bash tool
-    // already fixed: the outer shell pre-evaluated dollar variables and
-    // backticks, dropped
-    // non-ASCII characters, failed on over-long commands, and let
-    // `Get-Content` mis-decode UTF-8 sources.
-    let mut temp_script: Option<std::path::PathBuf> = None;
-    let mut cmd = if cfg!(windows) {
-        let prepared = match crate::tools::builtin::prepare_powershell(command) {
-            Ok(p) => p,
-            Err(e) => return format!("Failed to prepare PowerShell command: {}", e),
-        };
-        temp_script = prepared.temp_script;
-        // `command` is already encoded into argv -- do not append it again.
-        let mut c = tokio::process::Command::new(&prepared.argv[0]);
-        c.args(&prepared.argv[1..]);
-        // GUI host: without this every approved command flashes a black
-        // console window (same defect class as gitops / terminal spawns).
-        //
-        // Attribute block, not a bare statement: `creation_flags` lives behind
-        // tokio's `cfg_windows!`, so the method does not exist on a non-Windows
-        // target, while `if cfg!(windows)` (a runtime `if`) still type-checks
-        // both arms -> E0599 on the ubuntu-latest CI gate. The attribute is
-        // stripped before type checking -- the form gitops.rs already uses.
-        #[cfg(windows)]
-        {
-            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        c
-    } else {
-        let mut c = tokio::process::Command::new("sh");
-        c.arg("-c");
-        c.arg(command);
-        c
+/// Execute an approved command and return the text to feed back as the tool
+/// result. Used when the user approves a HITL-gated bash command: the command was
+/// NOT executed before suspension, so we must run it now. The model's original
+/// `timeout` and `run_in_background` are honored — approval must not silently
+/// shorten the ceiling or turn a detached task into a blocking synchronous run.
+async fn execute_approved_command(
+    workspace: &std::path::Path,
+    session_id: &str,
+    command: &str,
+    timeout_ms: Option<u64>,
+    background: bool,
+) -> String {
+    // Same shell selection as `BashTool::execute`: Git Bash on Windows when
+    // installed, PowerShell fallback otherwise, `sh` on Unix. Routing both paths
+    // through `prepare_shell` keeps the approved command in the *same* dialect
+    // the model wrote it for — an approved `&&` pipeline must not silently become
+    // a PowerShell parse error just because it went through the approval gate.
+    // `prepare_shell` also wraps POSIX commands to start in the session's
+    // persisted cwd and capture the final one; the spawn `current_dir` stays the
+    // workspace (a valid Win32 path — a persisted `/c/...` POSIX path is not).
+    let start = crate::tools::builtin::start_cwd(session_id, workspace).await;
+    let prepared = match crate::tools::builtin::prepare_shell(command, &start) {
+        Ok(p) => p,
+        Err(e) => return format!("Failed to prepare shell command: {}", e),
     };
+    let temp_script = prepared.temp_script;
+    let cwd_file = prepared.cwd_file;
+    let mut cmd = tokio::process::Command::new(&prepared.argv[0]);
+    cmd.args(&prepared.argv[1..]);
+    // GUI host: without this every approved command flashes a black console
+    // window (same defect class as gitops / terminal spawns).
+    //
+    // Attribute block, not a bare statement: `creation_flags` lives behind
+    // tokio's `cfg_windows!`, so the method does not exist on a non-Windows
+    // target, while `if cfg!(windows)` (a runtime `if`) still type-checks
+    // both arms -> E0599 on the ubuntu-latest CI gate. The attribute is
+    // stripped before type checking -- the form gitops.rs already uses.
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
     cmd.current_dir(workspace);
-    // `output()` below waits for the child to exit, so the script file is no
-    // longer needed once it returns; the guard removes it on function exit,
+
+    if background {
+        // Same detached path as `BashTool::execute`: returns a session id at once
+        // and streams into bash_output. `run_background` owns the temp script and
+        // cwd capture (it guards/persists them in the spawned task), so no guard
+        // here. A fresh cancel token: the approving run is suspended, and the
+        // task is tracked by the bg gate under this session for Stop.
+        return crate::tools::builtin::run_background(
+            cmd,
+            session_id,
+            session_id,
+            CancellationToken::new(),
+            temp_script,
+            cwd_file,
+            command.to_string(),
+        )
+        .await
+        .text;
+    }
+
+    // `run_command_capture` below waits for the child to exit, so the script file
+    // is no longer needed once it returns; the guard removes it on function exit,
     // covering every early return (spawn error / timeout) without repetition.
     let _guard = crate::tools::builtin::TempScriptGuard::new(temp_script);
     // Same bounded execution as `BashTool::execute`: file-backed stdio, stdin
-    // EOF, timeout, output ceiling and process-tree kill. The old bare
-    // `cmd.output()` waited on pipes that a detached daemon could hold open
-    // forever, and had no kill-tree on its 300 s timeout.
-    crate::tools::builtin::run_command_capture(cmd, 300_000).await
+    // EOF, timeout, output ceiling and process-tree kill. Honor the model's
+    // timeout; legacy suspensions (None) keep the historical 300 s ceiling.
+    let out = crate::tools::builtin::run_command_capture(cmd, timeout_ms.unwrap_or(300_000)).await;
+    crate::tools::builtin::persist_cwd(session_id, cwd_file).await;
+    out
 }
 
 /// Spawn a new ReAct run.
@@ -2872,6 +2899,8 @@ async fn run_react_session(
                 access_mode: effective_access,
                 model_name: model.name.clone(),
                 pending_command: result.pending_command.clone(),
+                pending_timeout_ms: result.pending_timeout_ms,
+                pending_background: result.pending_background,
                 action_id: result.pending_tool_call_id.clone(),
                 pending_tool_call_id: result.pending_tool_call_id.clone(),
                 messages_json: serde_json::to_string(&result.messages).unwrap_or_default(),
@@ -3524,11 +3553,23 @@ fn skill_hint_rows(registry: &crate::skills::SkillRegistry) -> Vec<serde_json::V
         if !seen.insert(skill.name.clone()) {
             continue;
         }
-        rows.push(serde_json::json!({
+        // Completion panel shows the market display name as the primary label
+        // (frontend chip / row), while `name` stays the routing key the client
+        // sends back. Same source as `settings_api::skills_installed` and
+        // `misc_api` usage rows: market metadata only, never SKILL.md.
+        let display_name = crate::skills::display_name_of(skill.market.as_ref());
+        let mut row = serde_json::json!({
             "name": skill.name,
             "description": hint_description(&skill.description),
             "type": "skill",
-        }));
+        });
+        if let Some(dn) = display_name {
+            let dn = dn.trim();
+            if !dn.is_empty() {
+                row["displayName"] = serde_json::json!(dn);
+            }
+        }
+        rows.push(row);
     }
     rows
 }
@@ -3829,6 +3870,7 @@ fn general_payload(settings: &Settings) -> serde_json::Value {
         "data": {
             "historyWindowSize": settings.general.history_window_size,
             "apiRetries": settings.general.api_retries,
+            "modelRetries": settings.general.model_retries,
             "mcpRetries": settings.general.mcp_retries,
             "webProxy": settings.general.web_proxy,
             "webRetryBudgetSecs": settings.general.web_retry_budget_secs,
@@ -3882,6 +3924,8 @@ struct GeneralSaveBody {
     history_window_size: Option<u32>,
     #[serde(rename = "apiRetries")]
     api_retries: Option<u32>,
+    #[serde(rename = "modelRetries")]
+    model_retries: Option<u32>,
     #[serde(rename = "mcpRetries")]
     mcp_retries: Option<u32>,
     #[serde(rename = "webProxy")]
@@ -3948,6 +3992,82 @@ where
     )?))
 }
 
+/// Apply a partial `general/save` body onto the in-memory settings.
+///
+/// Extracted from the handler so every write-boundary clamp is unit-testable
+/// without spinning up the HTTP stack: a knob that is clamped here but not in
+/// the test would persist a value the settings page then echoes back as if the
+/// kernel honoured it.
+fn apply_general_save_body(settings: &mut Settings, body: GeneralSaveBody) {
+    if let Some(v) = body.history_window_size { settings.general.history_window_size = v; }
+    if let Some(v) = body.api_retries { settings.general.api_retries = v; }
+    // Same bound as `mcp_retries`. Note this clamp alone does NOT stop an
+    // absurd value: it only covers the wire path, while a hand-edited or
+    // Java-written settings.json is loaded straight into `GeneralSettings` and
+    // never passes through here. The bound that actually protects the retry
+    // loop is in `LlmClient::with_retries` (single choke point, same ceiling);
+    // clamping here as well keeps the value the settings page echoes back equal
+    // to the one in effect.
+    if let Some(v) = body.model_retries { settings.general.model_retries = v.clamp(1, 10); }
+    // Clamp the two web-tool knobs at the write boundary as well as in
+    // `RetryPolicy::from_settings`: a model-written `mcpRetries: 999999`
+    // would otherwise be persisted and echoed back by the settings page.
+    // 10 attempts is already generous for a keyless, rate-limited endpoint.
+    if let Some(v) = body.mcp_retries { settings.general.mcp_retries = v.clamp(1, 10); }
+    if let Some(v) = body.web_proxy { settings.general.web_proxy = v.trim().to_string(); }
+    if let Some(v) = body.web_retry_budget_secs { settings.general.web_retry_budget_secs = v.min(600); }
+    if let Some(v) = body.max_turns { settings.general.max_turns = v; }
+    if let Some(v) = body.auto_rethink { settings.general.auto_rethink = v; }
+    // The context window is a fixed set of options (Java
+    // `ContextLengthPolicy.isAllowed`); an arbitrary value would make the
+    // compression budget disagree with what the model actually accepts.
+    if let Some(v) = body.context_length {
+        if crate::usage::CONTEXT_LENGTH_OPTIONS.contains(&v) {
+            settings.general.context_length = v;
+        }
+    }
+    // Clamped exactly like Java's setters, so a bad value from the wire
+    // cannot disable compression (ratio 0) or make it a no-op (target 100).
+    if let Some(v) = body.compression_ratio { settings.general.compression_ratio = v.clamp(1, 100); }
+    if let Some(v) = body.compression_target_ratio { settings.general.compression_target_ratio = v.clamp(10, 95); }
+    if let Some(v) = body.compression_reserved_output_tokens { settings.general.compression_reserved_output_tokens = v.max(1_000); }
+    if let Some(v) = body.compression_max_messages { settings.general.compression_max_messages = v.max(1); }
+    if let Some(v) = body.memory_enabled { settings.general.memory_enabled = v; }
+    if let Some(v) = body.memory_isolation { settings.general.memory_isolation = v; }
+    if let Some(v) = body.locale { settings.general.locale = v; }
+    if let Some(v) = body.dark_mode { settings.general.dark_mode = v; }
+    // Normalized rather than clamped, matching Java
+    // `SkillListingPolicy.normalizeFraction`: a 0 or a 99 here is a config
+    // mistake, and clamping would silently accept a budget the user never
+    // asked for (0 would empty the listing entirely).
+    if let Some(v) = body.skill_listing_budget_fraction {
+        settings.general.skill_listing_budget_fraction =
+            crate::skills::normalize_budget_fraction(Some(v));
+    }
+    if let Some(v) = body.skill_listing_max_desc_chars {
+        settings.general.skill_listing_max_desc_chars =
+            crate::skills::normalize_max_desc_chars(v as usize) as u32;
+    }
+    // Trim and cap the display name: it lands in a fixed-width header
+    // row, and a pasted paragraph would stretch it. Blank = clear.
+    if let Some(v) = body.assistant_name {
+        settings.general.assistant_name = v
+            .map(|s| s.trim().chars().take(32).collect::<String>())
+            .filter(|s| !s.is_empty());
+    }
+    // Credentials: outer `Some` = the key was in the body; inner `None` =
+    // an explicit null = clear it. An empty/whitespace string also clears,
+    // because `BasicAuth::is_enforced` treats a blank half as "not
+    // configured" and storing `""` would leave a key on disk that reads back
+    // as configured-but-inert.
+    if let Some(v) = body.web_auth_user {
+        settings.general.web_auth_user = v.filter(|s| !s.trim().is_empty());
+    }
+    if let Some(v) = body.web_auth_pass {
+        settings.general.web_auth_pass = v.filter(|s| !s.trim().is_empty());
+    }
+}
+
 /// POST /web/settings/general/save
 ///
 /// Partial-update semantics: only keys present in the body are written. The
@@ -3960,65 +4080,7 @@ async fn settings_general_save(
 ) -> Json<serde_json::Value> {
     {
         let mut settings = state.settings.write().await;
-        if let Some(v) = body.history_window_size { settings.general.history_window_size = v; }
-        if let Some(v) = body.api_retries { settings.general.api_retries = v; }
-        // Clamp the two web-tool knobs at the write boundary as well as in
-        // `RetryPolicy::from_settings`: a model-written `mcpRetries: 999999`
-        // would otherwise be persisted and echoed back by the settings page.
-        // 10 attempts is already generous for a keyless, rate-limited endpoint.
-        if let Some(v) = body.mcp_retries { settings.general.mcp_retries = v.clamp(1, 10); }
-        if let Some(v) = body.web_proxy { settings.general.web_proxy = v.trim().to_string(); }
-        if let Some(v) = body.web_retry_budget_secs { settings.general.web_retry_budget_secs = v.min(600); }
-        if let Some(v) = body.max_turns { settings.general.max_turns = v; }
-        if let Some(v) = body.auto_rethink { settings.general.auto_rethink = v; }
-        // The context window is a fixed set of options (Java
-        // `ContextLengthPolicy.isAllowed`); an arbitrary value would make the
-        // compression budget disagree with what the model actually accepts.
-        if let Some(v) = body.context_length {
-            if crate::usage::CONTEXT_LENGTH_OPTIONS.contains(&v) {
-                settings.general.context_length = v;
-            }
-        }
-        // Clamped exactly like Java's setters, so a bad value from the wire
-        // cannot disable compression (ratio 0) or make it a no-op (target 100).
-        if let Some(v) = body.compression_ratio { settings.general.compression_ratio = v.clamp(1, 100); }
-        if let Some(v) = body.compression_target_ratio { settings.general.compression_target_ratio = v.clamp(10, 95); }
-        if let Some(v) = body.compression_reserved_output_tokens { settings.general.compression_reserved_output_tokens = v.max(1_000); }
-        if let Some(v) = body.compression_max_messages { settings.general.compression_max_messages = v.max(1); }
-        if let Some(v) = body.memory_enabled { settings.general.memory_enabled = v; }
-        if let Some(v) = body.memory_isolation { settings.general.memory_isolation = v; }
-        if let Some(v) = body.locale { settings.general.locale = v; }
-        if let Some(v) = body.dark_mode { settings.general.dark_mode = v; }
-        // Normalized rather than clamped, matching Java
-        // `SkillListingPolicy.normalizeFraction`: a 0 or a 99 here is a config
-        // mistake, and clamping would silently accept a budget the user never
-        // asked for (0 would empty the listing entirely).
-        if let Some(v) = body.skill_listing_budget_fraction {
-            settings.general.skill_listing_budget_fraction =
-                crate::skills::normalize_budget_fraction(Some(v));
-        }
-        if let Some(v) = body.skill_listing_max_desc_chars {
-            settings.general.skill_listing_max_desc_chars =
-                crate::skills::normalize_max_desc_chars(v as usize) as u32;
-        }
-        // Trim and cap the display name: it lands in a fixed-width header
-        // row, and a pasted paragraph would stretch it. Blank = clear.
-        if let Some(v) = body.assistant_name {
-            settings.general.assistant_name = v
-                .map(|s| s.trim().chars().take(32).collect::<String>())
-                .filter(|s| !s.is_empty());
-        }
-        // Credentials: outer `Some` = the key was in the body; inner `None` =
-        // an explicit null = clear it. An empty/whitespace string also clears,
-        // because `BasicAuth::is_enforced` treats a blank half as "not
-        // configured" and storing `""` would leave a key on disk that reads back
-        // as configured-but-inert.
-        if let Some(v) = body.web_auth_user {
-            settings.general.web_auth_user = v.filter(|s| !s.trim().is_empty());
-        }
-        if let Some(v) = body.web_auth_pass {
-            settings.general.web_auth_pass = v.filter(|s| !s.trim().is_empty());
-        }
+        apply_general_save_body(&mut settings, body);
     }
     // Persist outside the write lock: persist_settings takes a read lock itself.
     // The result reaches the UI: general/save is the settings page's primary
@@ -4053,6 +4115,7 @@ fn general_patch(settings: &Settings, loaded: bool) -> serde_json::Value {
     let mut patch = serde_json::json!({
             "historyWindowSize": settings.general.history_window_size,
             "apiRetries": settings.general.api_retries,
+            "modelRetries": settings.general.model_retries,
             "mcpRetries": settings.general.mcp_retries,
             "webProxy": settings.general.web_proxy,
             "webRetryBudgetSecs": settings.general.web_retry_budget_secs,
@@ -5335,11 +5398,28 @@ mod tests {
             access_mode: "default".into(),
             model_name: "m".into(),
             pending_command: Some("echo x".into()),
+            pending_timeout_ms: Some(120_000),
+            pending_background: false,
             action_id: Some("call-1".into()),
             pending_tool_call_id: Some("call-1".into()),
             messages_json: "[]".into(),
             created_at,
         }
+    }
+
+    #[test]
+    fn suspension_point_deserializes_legacy_json_without_param_fields() {
+        // Suspensions written by older kernels lack the timeout/background
+        // fields; they must still load (serde defaults) rather than break resume.
+        let legacy = r#"{
+            "session_id":"s","run_id":"r","kind":"hitl","next_seq":1,
+            "access_mode":"default","model_name":"m","pending_command":"echo x",
+            "action_id":"c1","pending_tool_call_id":"c1","messages_json":"[]","created_at":1
+        }"#;
+        let sp: SuspensionPoint = serde_json::from_str(legacy).unwrap();
+        assert_eq!(sp.pending_timeout_ms, None);
+        assert!(!sp.pending_background);
+        assert_eq!(sp.pending_command.as_deref(), Some("echo x"));
     }
 
     #[test]
@@ -5410,6 +5490,48 @@ mod tests {
         let b = parse_general(r#"{"webAuthUser":"admin","webAuthPass":"s3cret"}"#);
         assert_eq!(b.web_auth_user, Some(Some("admin".to_string())));
         assert_eq!(b.web_auth_pass, Some(Some("s3cret".to_string())));
+    }
+
+    // ─── modelRetries round trip ───────────────────────────────────────────
+    //
+    // Regression for "the model-retries box reads back empty": the key was
+    // absent from `GeneralSaveBody`, `general_payload` and `general_patch`, so
+    // a save silently dropped it and the next GET returned nothing for it.
+    // Every leg of the trip is asserted here: parse → apply → payload → patch.
+
+    #[test]
+    fn model_retries_survives_save_and_reads_back() {
+        let mut s = Settings::default();
+        let body = parse_general(r#"{"modelRetries":7}"#);
+        assert_eq!(body.model_retries, Some(7), "the save body must carry the key");
+        apply_general_save_body(&mut s, body);
+        assert_eq!(s.general.model_retries, 7);
+
+        // GET must echo it, or the settings page renders the placeholder again.
+        assert_eq!(general_payload(&s)["data"]["modelRetries"], serde_json::json!(7));
+        // And the disk write must carry it, or a restart loses it.
+        assert_eq!(general_patch(&s, true)["modelRetries"], serde_json::json!(7));
+    }
+
+    #[test]
+    fn model_retries_absent_from_the_body_is_left_alone() {
+        // Partial-save semantics: the appearance panel posts `{darkMode:true}`
+        // and must not reset an unrelated retry knob to the default.
+        let mut s = Settings::default();
+        s.general.model_retries = 6;
+        apply_general_save_body(&mut s, parse_general(r#"{"darkMode":true}"#));
+        assert_eq!(s.general.model_retries, 6);
+    }
+
+    #[test]
+    fn model_retries_is_clamped_at_the_write_boundary() {
+        // Same bound as mcpRetries: the react loop multiplies this into a
+        // per-call retry budget, so u32::MAX from the wire must not persist.
+        let mut s = Settings::default();
+        apply_general_save_body(&mut s, parse_general(r#"{"modelRetries":4000000000}"#));
+        assert_eq!(s.general.model_retries, 10);
+        apply_general_save_body(&mut s, parse_general(r#"{"modelRetries":0}"#));
+        assert_eq!(s.general.model_retries, 1, "0 retries would disable the transport retry loop");
     }
 
     #[test]

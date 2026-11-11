@@ -626,7 +626,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    矩形白区：像素采样显示该区域与页面背景同为 #FFFFFF（不是不透明覆盖层），
    工作区源码折叠态标题行所有子元素 background 均为 rgba(0,0,0,0)、
    elementFromPoint 无覆盖层，本机 Chrome 未复现。白区成因仍须在运行版单独取证。 */
- .tool-args { display: block; order: 3; flex: 1 1 0; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tool-args { display: block; order: 3; flex: 1 1 0; color: var(--text-tertiary); font-size: 12px; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 /* 预览摘要：并入标题行（与图标/工具名同一条行）。
    【为何不再独立成行】旧实现是卡体里的独立 div（padding 0 10px 5px 32px）：
    流式过程中预览随内容增删反复出现/移除，卡片高度忽高忽低。
@@ -1533,6 +1533,24 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .cmd-complete-item .cmd-name.skill { color: #0891b2; }
 .cmd-complete-item .cmd-desc { color: var(--text-secondary); font-size: 12px; line-height: 1.4; }
 .cmd-complete-item .cmd-args { color: var(--text-secondary); font-size: 11px; font-family: var(--font-mono); white-space: nowrap; flex-shrink: 0; margin-top: 1px; }
+/* 技能行右侧的 id 小标签：主视觉是展示名，id 只作核对用（灰、小、等宽） */
+.cmd-complete-item .cmd-id-tag { color: var(--text-tertiary, var(--text-secondary)); font-size: 11px; font-family: var(--font-mono); white-space: nowrap; flex-shrink: 0; margin-top: 1px; opacity: 0.75; }
+
+/* ===== 技能小卡片（chip）=====
+   输入框上方独立一行：表面显示名、内部 data-skill-id 隐藏真实 id，
+   发送时由 app-streaming.js 读 id 前置为 "/id " 协议段。
+
+   容器刻意不复用 .attachments-wrap：那个容器默认隐藏、靠 has-items 显形，且
+   renderAttachmentsWrap 首行无条件 html('') 全量重建（附件增删/粘贴/拖拽/超长
+   折叠共 10 处调用）。chip 寄生其中会「看不见 + 被附件操作顺手抹掉」，用户挂的
+   技能随之静默丢失。独立容器让 chip 的生死只由 add/remove/clear 三个函数决定。 */
+.skill-chips { display: none; padding: 8px 14px 0; }
+.skill-chips.has-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.skill-chip { display: inline-flex; align-items: center; gap: 5px; margin: 0; padding: 4px 8px 4px 7px; border-radius: 8px; background: var(--bg-hover); border: 1px solid var(--border-color); color: #0891b2; font-size: 12.5px; line-height: 1.2; max-width: 100%; user-select: none; }
+.skill-chip svg { width: 13px; height: 13px; flex-shrink: 0; }
+.skill-chip .skill-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.skill-chip .skill-chip-x { border: 0; background: transparent; color: var(--text-secondary); font-size: 10px; line-height: 1; padding: 2px; margin-left: 2px; cursor: pointer; border-radius: 4px; }
+.skill-chip .skill-chip-x:hover { color: var(--text-primary); background: var(--bg-input-box); }
 
 /* ===== Content History Rail —— 内容区右侧的会话导航刻度带 =====
    取代旧「输入框上方的历史消息浮层」：那个浮层既是搜索框又是列表又是按钮，占掉了输入区、
@@ -1664,13 +1682,17 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
                 visibility 0s;
 }
 
-/* 列表容器：内部滚动（消息多时卡片不无限长）；行是普通 flex 子项，无需额外定位层。 */
+/* 列表容器：内部滚动（消息多时卡片不无限长）；行是普通 flex 子项，无需额外定位层。
+   【2026-11-10 报障「滚动条不统一」修复】旧版为让卡片滚条「比正文更细」，在此声明了
+   标准 thin 档滚动条宽度属性。但 theme.css 全局滚动条规约明确：Chromium 121+ 下一旦设置
+   标准 scrollbar-width，同元素上的 ::-webkit-scrollbar-* 规则整体失效 —— 本元素因此
+   回退成平台原生滚动条（带上下箭头按钮），是全站唯一一处会脱离统一滚条的元素。
+   「做细」不能靠换标准属性实现：全局 webkit 滚条本身已是「轨道 12px 保命中、滑块透明
+   内衬视觉收窄 6px」的细滚条，直接复用即与全站一致，故此处不再声明任何 scrollbar-*
+   标准属性。 */
 .history-rail-tip-list {
     position: relative; max-height: 260px; overflow-y: auto; overflow-x: hidden;
     display: flex; flex-direction: column;
-    /* 滚动条只在真的溢出时出现，且做得比正文滚条更细 —— 卡片是辅助面板，
-       一条十向下压的粗滚条会把「这是一张列表」读成「这是一个弹层」。 */
-    scrollbar-width: thin;
 }
 
 /* 【2026-11-04 按参照稿移除滑动指示条】用户明确要求「鼠标挪动上去没有阴影背景，
@@ -4674,7 +4696,7 @@ pre:hover .code-copy-btn { opacity: 1; }
 /* ===== 账号用户卡片 / 账号弹层 / 登录弹框（app-account.js）=====
     参照设计稿：侧栏底栏（原设置按钮区域）整体为用户卡片「头像 + 昵称 + 套餐」，
     点击就地向上展开弹层（设置 + 用户相关菜单 / 已登录信息面板）；
-    登录 / 注册表单是【独立居中弹框】.account-modal，不在弹层里。
+登录表单是【独立居中弹框】.account-modal，不在弹层里。
     【布局纪律】卡片是 sidebar-footer 的【首子项】（原设置按钮位置），更新按钮是
     末子项：底栏 space-between 下首子项恒贴左端、末子项恒贴右端，卡片位置不随
     「有无更新」跳变（与原设置按钮同一纪律，account-contract.test.js 锁定）。
@@ -4695,48 +4717,144 @@ pre:hover .code-copy-btn { opacity: 1; }
 .account-card[aria-expanded="true"] .account-card-chevron { transform: rotate(180deg); }
 /* 透明背板只负责捕获「点击外部关闭」，不加遮罩色：这是就地浮层不是模态框 */
 .account-backdrop { position: fixed; inset: 0; z-index: 2099; background: transparent; }
-.account-popover { position: fixed; z-index: 2100; box-sizing: border-box; max-height: calc(100vh - 24px); overflow-y: auto; padding: 8px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; box-shadow: var(--shadow-lg); }
-/* 登录 / 注册独立居中弹框：半透明遮罩 + 居中卡片（用户明确要求登录是单独弹框，
+/* 弹层：与登录弹框共用一套圆角/阴影语言（14px + --shadow-modal），
+    紧凑行高 + 细边框，层次靠字重与留白拉开，不靠大块底色堆叠。 */
+.account-popover { position: fixed; z-index: 2100; box-sizing: border-box; max-height: calc(100vh - 24px); overflow-y: auto; padding: 6px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 14px; box-shadow: var(--shadow-modal); animation: account-pop-in .14s cubic-bezier(.2, .8, .24, 1) both; }
+@keyframes account-pop-in {
+    from { opacity: 0; transform: translateY(4px) scale(.985); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+/* 登录独立居中弹框：半透明遮罩 + 居中卡片（用户明确要求登录是单独弹框，
    不塞进账号弹层）。遮罩用 var(--overlay) 与全站模态一致。 */
-.account-modal-backdrop { position: fixed; inset: 0; z-index: 2101; background: var(--overlay); }
-.account-modal { position: fixed; z-index: 2102; left: 50%; top: 50%; transform: translate(-50%, -50%); box-sizing: border-box; width: min(380px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; padding: 18px 18px 16px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; box-shadow: var(--shadow-lg); }
+.account-modal-backdrop { position: fixed; inset: 0; z-index: 2101; background: var(--overlay); animation: kd-overlay-in .18s ease both; }
+.account-modal { position: fixed; z-index: 2102; left: 50%; top: 50%; transform: translate(-50%, -50%); box-sizing: border-box; width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; padding: 0; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; box-shadow: var(--shadow-modal); animation: account-modal-in .2s cubic-bezier(.2, .8, .24, 1) both; }
+@keyframes account-modal-in {
+    from { opacity: 0; transform: translate(-50%, -48%) scale(.97); }
+    to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
 /* 顶部用户卡（头像 + 昵称 + 副标） */
-.account-pop-profile { display: flex; align-items: center; gap: 12px; padding: 12px; margin-bottom: 8px; background: var(--bg-hover); border-radius: 12px; }
-.account-pop-avatar { flex: 0 0 auto; width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; overflow: hidden; background: linear-gradient(135deg, rgba(var(--accent-rgb), .95), rgba(var(--accent-rgb), .55)); color: #fff; font-size: 18px; font-weight: 600; }
+.account-pop-profile { display: flex; align-items: center; gap: 10px; padding: 10px; margin-bottom: 4px; background: var(--bg-hover); border-radius: 10px; }
+.account-pop-avatar { flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; overflow: hidden; background: linear-gradient(135deg, rgba(var(--accent-rgb), .95), rgba(var(--accent-rgb), .55)); color: #fff; font-size: 17px; font-weight: 600; }
 .account-pop-avatar img { width: 100%; height: 100%; object-fit: cover; }
-.account-pop-name { font-size: 16px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.account-pop-desc { font-size: 12px; color: var(--text-secondary); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-pop-name { font-size: 14px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-pop-desc { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 套餐 / 积分余额 两列卡 */
-.account-pop-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px 14px; margin-bottom: 8px; background: var(--bg-hover); border-radius: 12px; }
+.account-pop-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px 12px; margin-bottom: 4px; background: var(--bg-hover); border-radius: 10px; }
 .account-pop-stat-label { font-size: 11px; color: var(--text-secondary); }
-.account-pop-stat-value { font-size: 15px; font-weight: 600; color: var(--text-primary); margin-top: 4px; }
-/* 菜单行 */
+.account-pop-stat-value { font-size: 14px; font-weight: 600; color: var(--text-primary); margin-top: 3px; }
+/* 菜单行：紧凑行高，图标与文字同色系（图标略淡一档），hover 柔和抬升 */
 .account-pop-menu { padding: 2px 0; }
-.account-pop-item { display: flex; align-items: center; gap: 12px; width: 100%; box-sizing: border-box; padding: 9px 12px; border: none; border-radius: 8px; background: transparent; color: var(--text-primary); font-size: 13px; text-align: left; cursor: pointer; }
+.account-pop-item { display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; padding: 8px 10px; border: none; border-radius: 9px; background: transparent; color: var(--text-primary); font-size: 13px; font-family: inherit; line-height: 1.4; text-align: left; cursor: pointer; transition: background-color .13s ease, color .13s ease; }
 .account-pop-item:hover { background: var(--bg-hover); }
-.account-pop-item svg { flex: 0 0 auto; width: 17px; height: 17px; color: var(--text-secondary); }
+.account-pop-item:active { background: var(--bg-secondary); }
+.account-pop-item svg { flex: 0 0 auto; width: 16px; height: 16px; color: var(--text-secondary); transition: color .13s ease; }
+.account-pop-item:hover svg { color: var(--text-primary); }
 .account-pop-item-label { flex: 1 1 auto; }
 .account-pop-item.is-danger, .account-pop-item.is-danger svg { color: var(--error-text); }
-.account-pop-sep { height: 1px; background: var(--border-color); margin: 6px 8px; }
-/* 外观：浅色 / 深色 分段控件 */
-.account-theme-switch { display: flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--bg-hover); }
-.account-theme-btn { padding: 4px 10px; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
-.account-theme-btn.active { background: var(--bg-card); color: var(--text-primary); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
-/* 登录 / 注册表单视图（未登录时弹层内容） */
-/* 登录弹框内层：relative 供右上角关闭按钮定位；外边距由 .account-modal 承担 */
-.account-auth { position: relative; }
-.account-close { position: absolute; top: 2px; right: 4px; background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 20px; line-height: 1; }
-.account-close:hover { color: var(--text-primary); }
-.account-tabs { display: flex; gap: 8px; margin: 6px 24px 14px 0; }
-.account-tab { flex: 1; padding: 8px; border: 1px solid var(--border-color); border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 13px; }
-.account-tab.active { color: var(--text-primary); background: var(--bg-hover); font-weight: 600; }
-.account-field { margin-bottom: 10px; }
-.account-label { display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
-.account-input { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-input-box); color: var(--text-primary); font-size: 13px; }
-.account-input:focus { outline: none; border-color: var(--accent, #4a7cf7); }
-.account-hint { min-height: 18px; font-size: 12px; margin: 8px 0; color: var(--text-secondary); }
+.account-pop-item.is-danger:hover { background: var(--bg-danger-subtle); }
+.account-pop-sep { height: 1px; background: var(--border-color); margin: 4px 8px; }
+/* 外观：系统 / 浅色 / 深色 分段控件。弹层窄（与用户卡片等宽），长文案语言
+   （如 en 的 System/Light/Dark）一行放不下时允许整块换行到标签下一行并右对齐，
+   绝不把标签挤成两行或把弹层撑宽。 */
+.account-pop-item-theme { flex-wrap: wrap; row-gap: 6px; }
+.account-pop-item-theme:hover { background: transparent; }
+.account-theme-switch { display: flex; gap: 2px; padding: 2px; margin-left: auto; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-hover); }
+.account-theme-btn { padding: 3px 9px; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; font-family: inherit; line-height: 1.5; white-space: nowrap; cursor: pointer; transition: background-color .13s ease, color .13s ease; }
+.account-theme-btn:hover { color: var(--text-primary); }
+.account-theme-btn.active { background: var(--bg-card); color: var(--text-primary); font-weight: 600; box-shadow: var(--shadow); }
+/* ===== 登录表单视图（独立居中弹框 .account-modal 内）=====
+    视觉参照 Qoder 官网登录页：【左右分栏】左品牌视觉区（手写体标语 + 图标插画），
+    右表单区（品牌标 → 主标题 → 分段切换 → 表单 → 单一主操作）。
+    色彩治理：本块不得出现颜色字面量（theme.css 约定第 1 条），一律走主题变量 /
+    color-mix 派生；accent 作底时前景必须走 --accent-contrast（约定第 4 条：暗色
+    accent 近白，写死 #fff 会让按钮文字对比度掉到 1.16:1 几乎不可见）。
+    【分栏几何】grid 两列：左视觉 300px 固定、右表单自适应；窄屏（<680px）左栏
+    整体隐藏回落单列——登录功能不依赖视觉区，隐藏零功能损失。 */
+.account-auth { position: relative; display: grid; grid-template-columns: 300px minmax(0, 1fr); }
+/* 左：品牌视觉区。底色用 bg-hover 与右栏 bg-card 分层（同 Qoder 左浅右白），
+   圆角只切左侧两角，与弹框 16px 圆角吻合。 */
+.account-auth-visual { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: space-between; gap: 16px; padding: 34px 24px 22px; overflow: hidden; background: var(--bg-hover); border-radius: 15px 0 0 15px; }
+/* 背景装饰弧：两层同心圆环，纯 color-mix 派生，明暗主题自适应 */
+.account-auth-visual::before { content: ''; position: absolute; right: -140px; bottom: -160px; width: 340px; height: 340px; border-radius: 50%; border: 46px solid color-mix(in srgb, var(--text-primary) 5%, transparent); pointer-events: none; }
+.account-auth-visual::after { content: ''; position: absolute; left: -120px; top: -140px; width: 260px; height: 260px; border-radius: 50%; border: 34px solid color-mix(in srgb, var(--text-primary) 4%, transparent); pointer-events: none; }
+/* 手写体标语：Qoder 式艺术字。字体栈优先系统手写/楷体系（离线可用，不引 webfont），
+   逐层回落到 cursive；字号与行距放大到「海报级」，与右栏表单字号拉开层级。 */
+.account-auth-slogan { position: relative; z-index: 1; font-family: 'Kaiti SC', 'STKaiti', KaiTi, 'DFKai-SB', 'Segoe Script', 'Bradley Hand', cursive; font-size: 24px; font-weight: 700; line-height: 1.55; letter-spacing: 0.02em; text-align: center; text-wrap: balance; color: var(--text-primary); transform: rotate(-2deg); }
+.account-auth-art { position: relative; z-index: 1; width: 100%; max-width: 232px; }
+.account-art-svg { display: block; width: 100%; height: auto; }
+/* 插画取色：全部主题变量派生，禁止字面量 */
+.account-art-halo { fill: color-mix(in srgb, var(--text-primary) 4%, transparent); }
+.account-art-tile-dark { fill: var(--accent); }
+.account-art-tile-light { fill: var(--bg-card); stroke: color-mix(in srgb, var(--text-primary) 10%, transparent); stroke-width: 1; }
+.account-art-tile-accent { fill: var(--accent); }
+.account-art-stroke-light { stroke: var(--accent-contrast); stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.account-art-stroke-light-fill { fill: var(--accent-contrast); }
+.account-art-stroke-contrast { stroke: var(--accent-contrast); stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.account-art-accent-fill { fill: var(--accent); }
+.account-art-folder-back { fill: color-mix(in srgb, var(--accent) 46%, var(--bg-card)); }
+.account-art-folder-front { fill: color-mix(in srgb, var(--accent) 30%, var(--bg-card)); }
+/* 漂浮动画：三档错相位上下浮动。
+   【注意】本文件靠前处（.chl 区块内）那个 prefers-reduced-motion 块【不能】用来停这里
+   的动画：它与本声明同特异性却排在更前面，CSS 层叠下同特异性后者胜 —— 写在那里等于
+   死代码（实测：摘掉 theme.css 的全局 !important 兜底后，插画照常 5.2s 无限循环）。
+   停动画的规则必须紧跟在动画声明【之后】，见下方 @media。 */
+.account-art-float { animation: account-art-float 5.2s ease-in-out infinite; }
+.account-art-f2 { animation-delay: -1.7s; }
+.account-art-f3 { animation-delay: -3.4s; }
+.account-art-f4 { animation-delay: -2.5s; animation-duration: 6s; }
+@keyframes account-art-float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-7px); }
+}
+/* 尊重系统「减少动态效果」偏好：必须位于上面的动画声明之后才真正生效。
+   theme.css 另有全局 *{animation-duration:.01ms!important} 兜底，此处显式声明
+   是为了让「插画不漂浮」在本文件内自洽可查，不依赖读者跨文件推断。 */
+@media (prefers-reduced-motion: reduce) {
+    .account-art-float { animation: none; }
+}
+/* 视觉区署名：手写体小字，呼应 Qoder 文件夹上的 Qoder 字样 */
+.account-auth-visual-mark { position: relative; z-index: 1; font-family: 'Kaiti SC', 'STKaiti', KaiTi, 'DFKai-SB', 'Segoe Script', 'Bradley Hand', cursive; font-size: 15px; font-weight: 600; letter-spacing: 0.06em; color: var(--text-secondary); }
+/* 右：表单区。内边距承接旧 .account-auth 的 28px 节奏 */
+.account-auth-main { position: relative; padding: 30px 32px 26px; }
+/* 窄屏回落单列：视觉区隐藏，表单区铺满并恢复四角内圆角无依赖 */
+@media (max-width: 679px) {
+    .account-auth { grid-template-columns: minmax(0, 1fr); }
+    .account-auth-visual { display: none; }
+    .account-auth-main { padding: 28px 24px 24px; }
+}
+/* 关闭按钮：绝对定位在弹框右上角，【不占据内容流】——旧版靠 tabs 的
+   margin-right 硬给它让位，把分段控件挤偏，这是「X 挤占了」的直接成因。 */
+.account-close { position: absolute; top: 12px; right: 12px; z-index: 2; display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; border: none; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; transition: background-color .13s ease, color .13s ease; }
+.account-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+.account-close svg { width: 15px; height: 15px; }
+/* 品牌区：logo + 产品名，居中 */
+.account-brand { display: flex; align-items: center; justify-content: center; gap: 9px; margin-bottom: 18px; }
+.account-brand-logo { width: 30px; height: 30px; border-radius: 7px; box-shadow: var(--shadow); }
+.account-brand-name { font-size: 16px; font-weight: 700; letter-spacing: -0.02em; color: var(--text-primary); }
+.account-auth-title { margin: 0 0 20px; font-size: 19px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.3; text-align: center; color: var(--text-primary); }
+/* 分段式登录/注册切换：胶囊底 + 滑块（::after 由父级 data-mode 驱动位移）。
+   刻意不给 tabs 预留右侧空间：关闭按钮已脱离内容流，无需让位。
+   【几何纪律】列间 gap 必须为 0：滑块宽 calc(50% - 3px) 恰等于单列宽，
+   translateX(100%) 才能精确落到右列；一旦加 gap，位移会少算一个 gap 宽（错位）。 */
+.account-tabs { position: relative; display: grid; grid-template-columns: 1fr 1fr; margin: 0 0 20px; max-width: none; padding: 3px; border-radius: 10px; background: var(--bg-hover); }
+.account-tabs::after { content: ''; position: absolute; top: 3px; bottom: 3px; left: 3px; width: calc(50% - 3px); border-radius: 8px; background: var(--bg-card); box-shadow: var(--shadow); transition: transform .18s cubic-bezier(.2, .8, .24, 1); pointer-events: none; }
+.account-tabs[data-mode="register"]::after { transform: translateX(100%); }
+.account-tab { position: relative; z-index: 1; padding: 7px 0; border: none; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 13px; font-family: inherit; font-weight: 500; line-height: 1.4; transition: color .15s ease; }
+.account-tab:hover { color: var(--text-primary); }
+.account-tab.active { color: var(--text-primary); font-weight: 600; }
+.account-field { margin-bottom: 14px; }
+.account-label { display: block; font-size: 12.5px; font-weight: 500; color: var(--text-secondary); margin-bottom: 6px; }
+.account-input { width: 100%; box-sizing: border-box; height: 40px; padding: 0 12px; border: 1px solid var(--border-input); border-radius: 10px; background: var(--bg-input-box); color: var(--text-primary); font-size: 13.5px; font-family: inherit; transition: border-color .15s ease, box-shadow .15s ease; }
+.account-input::placeholder { color: var(--text-tertiary); }
+.account-input:hover { border-color: var(--text-tertiary); }
+.account-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .14); }
+.account-hint { min-height: 18px; font-size: 12.5px; line-height: 1.5; margin: 0 0 14px; color: var(--text-secondary); }
+.account-hint:empty { margin-bottom: 0; }
 .account-hint-error { color: var(--error-text); }
-.account-submit { width: 100%; padding: 9px; border: none; border-radius: 8px; background: var(--accent, #4a7cf7); color: #fff; cursor: pointer; font-size: 13px; }
+.account-submit { width: 100%; height: 42px; padding: 0; border: 1px solid var(--accent); border-radius: 10px; background: var(--accent); color: var(--accent-contrast); cursor: pointer; font-size: 14px; font-family: inherit; font-weight: 600; letter-spacing: -0.01em; transition: background-color .15s ease, border-color .15s ease, opacity .15s ease; }
+.account-submit:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.account-submit:active:not(:disabled) { background: var(--accent-hover); }
+.account-submit:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--bg-card), 0 0 0 4px var(--accent); }
 .account-submit:disabled { opacity: .6; cursor: default; }
 
 /* ===== 侧栏拖动排序（app-sidebar-order.js）=====

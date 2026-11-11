@@ -3408,11 +3408,18 @@ function showCmdComplete(inputEl, completeEl, prefix) {
         var cmd = commandList[i];
         // Filter by type based on trigger
         if (cmd.type !== filterType) continue;
-        if (cmd.name.toLowerCase().indexOf(query) === 0 || query.length === 0) {
+        /* 技能行展示「显示名」而非目录 id（如 _user_xxx_pdf）：id 对用户不可读，
+           与市场卡片也对不上。displayName 由后端按市场元数据口径给出，缺失时回退 id。
+           过滤同时匹配 id 与显示名：面板改成显示名后，只按 id 过滤会让中文输入永远筛不中。 */
+        var display = (cmd.type === 'skill' && cmd.displayName) ? cmd.displayName : cmd.name;
+        if (cmd.name.toLowerCase().indexOf(query) === 0
+                || display.toLowerCase().indexOf(query) === 0
+                || query.length === 0) {
             cmdVisibleItems.push(cmd);
             var nameClass = (trigger === '@') ? 'cmd-name subagent' : 'cmd-name skill';
             html += '<div class="cmd-complete-item" data-index="' + (cmdVisibleItems.length - 1) + '">'
-                + '<span class="' + nameClass + '">' + escapeHtml(trigger + cmd.name) + '</span>'
+                + '<span class="' + nameClass + '">' + escapeHtml(trigger + display) + '</span>'
+                + (cmd.type === 'skill' ? '<span class="cmd-id-tag" title="' + escapeAttr(cmd.name) + '">' + escapeHtml(cmd.name) + '</span>' : '')
                 + '<span class="cmd-desc">' + escapeHtml(cmd.description || '') + '</span>'
                 + '</div>';
         }
@@ -3457,56 +3464,125 @@ function hideCmdCompleteFor(el) {
     }
 }
 
+/* ===== 技能小卡片（chip）=====
+   选中技能后不再把 "/技能id" 文本回填进 textarea（旧实现的问题：id 不可读、
+   且触发符占住行首导致一次输入只能触发一个技能），改为在输入框上方的独立
+   chip 行插入一枚小卡片：表面显示技能名，内部 data-skill-id 隐藏真实 id。
+   发送时由 app-streaming.js 把 chip 的 id 以 "/id " 前缀注入消息文本——
+   后端斜杠技能协议（SkillInvocation / Java runSkill）只认 id，展示名不参与路由。
+   多个 chip 的 id 依次前置，服务端按序注入各技能规约。
+
+   容器刻意独立于附件区（.attachments-wrap），理由见 app.css 的 .skill-chips 注释：
+   附件区默认隐藏且被 renderAttachmentsWrap 全量 html('') 重建，chip 寄生其中会
+   既看不见又被附件操作顺手抹掉。这里 chip 只受本文件的增删函数管理。 */
+function chipWrapFor(inputEl) {
+    return (inputEl === welcomeInput) ? '#welcomeSkillChips' : '#chatSkillChips';
+}
+
+/* 维护容器可见性：有 chip 才显形（.has-chips）。增删后统一调它，避免遗漏。 */
+function syncSkillChipsVisibility($wrap) {
+    $wrap.toggleClass('has-chips', $wrap.find('.skill-chip').length > 0);
+}
+
+function addSkillChip(inputEl, cmd) {
+    var id = cmd.name;
+    var display = cmd.displayName || cmd.name;
+    var $wrap = $(chipWrapFor(inputEl));
+    // 同一技能不重复挂卡：重复触发只会让用户困惑「到底生效几个」
+    if ($wrap.find('.skill-chip[data-skill-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]').length) {
+        return false;
+    }
+    var $chip = $('<span class="skill-chip" contenteditable="false"></span>')
+        .attr('data-skill-id', id)
+        .attr('title', id)
+        .append('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>')
+        .append($('<span class="skill-chip-name"></span>').text(display))
+        .append('<button type="button" class="skill-chip-x" aria-label="remove">&#10005;</button>');
+    $wrap.append($chip);
+    syncSkillChipsVisibility($wrap);
+    return true;
+}
+
+/* 读取输入框关联的全部技能 chip：[{id, name}]。
+   id 是路由键（发送时前置为 "/id "），name 是展示名（气泡回显用人读形态）。
+   一次读全，避免发送链路里分两处查 DOM —— 两处之间任何一次重渲染都会让
+   id 与展示名对不上号。 */
+function getSkillChips(inputEl) {
+    var out = [];
+    $(chipWrapFor(inputEl)).find('.skill-chip').each(function () {
+        var id = $(this).attr('data-skill-id');
+        if (!id) return;
+        out.push({ id: id, name: $(this).find('.skill-chip-name').text() || id });
+    });
+    return out;
+}
+
+/* 读取输入框关联的全部技能 chip id（发送时注入用） */
+function getSkillChipIds(inputEl) {
+    return getSkillChips(inputEl).map(function (c) { return c.id; });
+}
+
+/* 发送后清空 chip（与 clearInput 同语义）。chat/welcome 两个容器分别清。 */
+function clearSkillChips(fromWelcome) {
+    var $chat = $('#chatSkillChips').empty();
+    syncSkillChipsVisibility($chat);
+    if (fromWelcome) {
+        var $welcome = $('#welcomeSkillChips').empty();
+        syncSkillChipsVisibility($welcome);
+    }
+}
+window.getSkillChipIds = getSkillChipIds;
+window.getSkillChips = getSkillChips;
+window.clearSkillChips = clearSkillChips;
+
+/* chip 的删除按钮：委托到 document，删后同步所属容器可见性 */
+$(document).on('click', '.skill-chip-x', function (e) {
+    e.stopPropagation();
+    var $chip = $(this).closest('.skill-chip');
+    var $wrap = $chip.parent();
+    $chip.remove();
+    syncSkillChipsVisibility($wrap);
+});
+
+/* 用 replacement 替换输入框中的触发段 [token.start, token.end)，光标停在替换文本末尾。
+   技能选中后 replacement 为空串（触发段消失，技能以 chip 形式存在）；
+   子代理选中后为 "@name"（保留旧的文本协议）。 */
+function replaceCmdToken(inputEl, token, replacement) {
+    var val = inputEl.value;
+    var before = val.substring(0, token.start);
+    var after = val.substring(token.end);
+    if (replacement && after && !/^\s/.test(after)) replacement += ' ';
+    inputEl.value = before + replacement + after;
+    var pos = before.length + replacement.length;
+    inputEl.setSelectionRange(pos, pos);
+    autoResize(inputEl);
+}
+
 function applyCmdSelection(inputEl, completeEl) {
     if (cmdActiveIndex >= 0 && cmdActiveIndex < cmdVisibleItems.length) {
         var cmd = cmdVisibleItems[cmdActiveIndex];
-        var trigger = cmdTrigger || '/';
-        
-        // 找到当前输入框中的命令前缀位置
-        var val = inputEl.value;
-        var prefixPos = -1;
-        
-        /* 定位触发符：只认「行首」或「空白之后」的那一个。
-           不能像旧实现那样反向扫任意 / 或 @——技能名本身可能含 /（两级组织，
-           如 design/lanhu），反向扫描会命中名字内部的 /，把前缀算到第 0 位之后的
-           /design 上，于是 /design/lanhu 点选补全后回填成 /design/design/lanhu。
-           该值到服务端已不是合法技能名，会静默降级成普通文本、SKILL.md 规约完全不注入。
-           （旧符号 $ 不会踩：$ 不在技能名里，反向扫必命中触发符。） */
-        for (var i = val.length - 1; i >= 0; i--) {
-            var ch = val.charAt(i);
-            if (ch === '/' || ch === '@') {
-                if (i === 0 || /\s/.test(val.charAt(i - 1))) {
-                    prefixPos = i;
-                    break;
-                }
-            }
-        }
-        
-        if (prefixPos >= 0) {
-            // 替换前缀及其后面的内容
-            var textBefore = val.substring(0, prefixPos);
-            var textAfter = val.substring(prefixPos);
-            
-            // 找到前缀后面的空格位置（如果有）
-            var spaceIndex = textAfter.indexOf(' ');
-            var argsStr = '';
-            if (spaceIndex >= 0) {
-                argsStr = textAfter.substring(spaceIndex);
-            }
-            
-            // 构建新的值（命令/技能/子代理名称后追加空格）
-            inputEl.value = textBefore + trigger + cmd.name + ' ' + argsStr;
-            
-            // 更新光标位置到命令和空格后面
-            var newCursorPos = textBefore.length + trigger.length + cmd.name.length + 1;
-            inputEl.setSelectionRange(newCursorPos, newCursorPos);
+        /* chip 形态只属于聊天页两个输入框；自动化页（#autoPrompt）等外部宿主
+           复用本函数时仍走旧的文本回填，否则技能会落到聊天页的 chip 行上、
+           宿主自己拿不到（它的 prompt 存在表单里，发送链路不经 sendMessage）。 */
+        var useChip = (inputEl === welcomeInput || inputEl === chatInput);
+        var token = findCmdTriggerToken(inputEl);
+        if (cmd.type === 'skill' && useChip) {
+            // 技能：生成小卡片（展示名 + 隐藏 id），触发段从文本中移除，
+            // textarea 保持干净，可继续输入请求内容、可再触发第二个技能
+            addSkillChip(inputEl, cmd);
+            if (token) replaceCmdToken(inputEl, token, '');
+        } else if (token) {
+            /* 回填符号取 token.trigger（现算），不取 cmdTrigger（面板弹出时缓存）：
+               面板开着时点击 textarea 移动光标并不触发 input，cmdTrigger 不会刷新，
+               用缓存值会把 '@agent' 的候选以 '/' 插进新位置的触发段。 */
+            replaceCmdToken(inputEl, token, token.trigger + cmd.name);
         } else {
-            // 如果没有找到前缀，直接在开头插入
-            inputEl.value = trigger + cmd.name + ' ' + val;
+            // 兜底：面板在无触发段的情况下被 apply（外部宿主直接调用），按旧语义前插
+            var trigger = cmdTrigger || '/';
+            inputEl.value = trigger + cmd.name + ' ' + inputEl.value;
             inputEl.setSelectionRange(trigger.length + cmd.name.length + 1, trigger.length + cmd.name.length + 1);
+            autoResize(inputEl);
         }
-        
-        autoResize(inputEl);
     }
     // 按面板收起：同一函数既服务聊天页两个面板，也服务自动化页面板
     hideCmdCompleteFor(completeEl);
@@ -3553,21 +3629,42 @@ function navigateCmdComplete(e, inputEl, completeEl) {
     return false;
 }
 
+/* 定位光标所在（或紧邻光标前）的 / 或 @ 触发段。
+   旧实现只认「整串以 / 开头且无空格」，于是输入框里一旦有了内容（或已选过一个技能），
+   再打 / 就永远唤不出面板——即用户报的「只能触发一次」。
+
+   现口径分两步（A 优先，B 兜底）：
+   A. 从光标向左扫到最近的空白/串首得到 token；token 本身以 / 或 @ 开头即为触发段。
+      这条同时照顾两级组织技能名（design/lanhu 整段命中，不会被名字内部的 / 截断）。
+   B. token 不以触发符开头时，取 token 内【最后一个】/ 或 @ 作为触发段起点 —— 中文场景
+      必须走这条：「帮我写/」里 token 是整串（中文不带空格分词），只认 A 就永远弹不出面板。
+      同理「+ → 技能」按钮在已有文字后插入 /，随后每敲一个字都要靠 B 续住面板。
+      B 加一道护栏：触发符前一个字符若是 ASCII 字母数字或 : / . - _（URL 与文件路径的
+      构成字符），判为非触发 —— 否则 http://x.com、src/main 这类输入会误弹面板。 */
+function findCmdTriggerToken(inputEl) {
+    var val = inputEl.value;
+    var cursor = inputEl.selectionStart == null ? val.length : inputEl.selectionStart;
+    var start = cursor;
+    while (start > 0 && !/\s/.test(val.charAt(start - 1))) start--;
+    if (start >= cursor) return null; // 光标前无 token（空或紧贴空白）
+    var ch = val.charAt(start);
+    if (ch === '/' || ch === '@') return { start: start, end: cursor, trigger: ch };
+
+    for (var i = cursor - 1; i > start; i--) {
+        var c = val.charAt(i);
+        if (c !== '/' && c !== '@') continue;
+        if (/[A-Za-z0-9:/._-]/.test(val.charAt(i - 1))) return null;   // URL / 路径，不是触发段
+        return { start: i, end: cursor, trigger: c };
+    }
+    return null;
+}
+
 function handleInputForCommands(e) {
     var inputEl = e.target;
     var completeEl = (inputEl === welcomeInput) ? $welcomeCmdComplete[0] : $chatCmdComplete[0];
-    var val = inputEl.value;
-
-    if (val.indexOf('/') === 0 || val.indexOf('@') === 0) {
-        // Only show completion when cursor is at the command/agent/skill name part (no spaces yet)
-        var cursorPos = inputEl.selectionStart;
-        var textBeforeCursor = val.substring(0, cursorPos);
-        var spaceIndex = textBeforeCursor.indexOf(' ');
-        if (spaceIndex === -1) {
-            showCmdComplete(inputEl, completeEl, textBeforeCursor);
-        } else {
-            hideCmdComplete();
-        }
+    var token = findCmdTriggerToken(inputEl);
+    if (token) {
+        showCmdComplete(inputEl, completeEl, inputEl.value.substring(token.start, token.end));
     } else {
         hideCmdComplete();
     }
@@ -3579,14 +3676,16 @@ function triggerCmdComplete(inputEl, completeEl, prefix) {
     var cursorPos = inputEl.selectionStart;
     var textBefore = inputEl.value.substring(0, cursorPos);
     var textAfter = inputEl.value.substring(cursorPos);
-    
-    // 在光标位置插入前缀（技能/子代理符号后追加空格）
-    inputEl.value = textBefore + prefix + ' ' + textAfter;
-    
-    // 更新光标位置到前缀和空格后面
-    var newCursorPos = cursorPos + prefix.length + 1;
-    inputEl.setSelectionRange(newCursorPos, newCursorPos);
-    
+
+    /* 光标前已贴着同种触发符（连点两次按钮）时不重复插入，只开面板；
+       否则「+ 菜单 → 技能」连点会堆出 "/ / " 这样的垃圾 token。 */
+    if (textBefore.charAt(textBefore.length - 1) !== prefix) {
+        // 在光标位置插入前缀（不补空格：补了空格 token 即被截断，面板会立刻收起）
+        inputEl.value = textBefore + prefix + textAfter;
+        var newCursorPos = cursorPos + prefix.length;
+        inputEl.setSelectionRange(newCursorPos, newCursorPos);
+    }
+
     inputEl.focus();
     showCmdComplete(inputEl, completeEl, prefix);
 }
@@ -5421,6 +5520,9 @@ window.GourdCmdComplete = {
     apply: applyCmdSelection,
     navigate: navigateCmdComplete,
     trigger: triggerCmdComplete,
+    // 触发段判定（任意位置的 / 或 @）：外部宿主接 input 事件时必须走这个，
+    // 别自己再写「以 / 开头且无空格」——那正是「技能只能触发一次」的病根。
+    findToken: findCmdTriggerToken,
     // 供外部宿主在「点击候选项」时先定位再 apply（cmdActiveIndex 是本模块私有，
     // 无法从外部直接赋值；与 app-history.js 自己的面板点击处理同范式）
     setIndex: function (i) { cmdActiveIndex = i; }

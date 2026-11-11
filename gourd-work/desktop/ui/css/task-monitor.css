@@ -142,6 +142,9 @@ body.is-electron .task-monitor-drawer::before {
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .tm-row-sub { color: var(--text-tertiary); font-size: 11px; margin-left: 6px; }
+/* 环境区首行行级增删统计（参照稿形态）：+ 绿 / - 红，等宽数字避免轮询刷新时宽度跳动 */
+.tm-diff-add { color: #4caf7d; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tm-diff-del { color: #e57373; font-weight: 600; font-variant-numeric: tabular-nums; }
 .tm-row-action {
     border: none; background: none; cursor: pointer; color: var(--text-secondary);
     display: flex; align-items: center; justify-content: center;

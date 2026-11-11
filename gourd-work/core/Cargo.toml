@@ -23,6 +23,7 @@ tracing.workspace = true
 walkdir.workspace = true
 regex.workspace = true
 glob.workspace = true
+ignore.workspace = true
 dirs.workspace = true
 encoding_rs.workspace = true
 uuid.workspace = true

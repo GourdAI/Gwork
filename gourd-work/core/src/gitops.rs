@@ -486,7 +486,70 @@ pub fn status(repo: &Path) -> serde_json::Value {
             .collect::<Vec<_>>()),
     );
 
+    // Line-level insertions/deletions (`git diff HEAD --numstat`): the monitor
+    // panel's env row renders a coloured "+N -M" per the reference design. The
+    // porcelain buckets only carry file counts, so the line totals need their
+    // own aggregation. `HEAD` covers staged + unstaged (baseline = last commit);
+    // untracked files are outside the HEAD comparison and git emits no line
+    // counts for them — same scope as PR/review statistics. Degradation matches
+    // `remote()`: any failure WARNs and yields 0 rather than failing the call.
+    let (additions, deletions) = line_stats(repo);
+    data.insert("additions".into(), serde_json::json!(additions));
+    data.insert("deletions".into(), serde_json::json!(deletions));
+
     serde_json::json!({ "code": 200, "data": data })
+}
+
+/// Aggregate `git diff HEAD --numstat` into `(additions, deletions)`.
+///
+/// Degradation mirrors Java's `GitService.lineStats()`: a failed spawn or a
+/// non-zero exit only yields `(0, 0)` — the read-only panel simply omits the
+/// "+/-" figures instead of turning the whole section into an error.
+fn line_stats(repo: &Path) -> (i64, i64) {
+    let out = git(repo, &["diff", "HEAD", "--numstat"]);
+    if !out.ok() {
+        return (0, 0);
+    }
+    parse_numstat(&out.stdout)
+}
+
+/// Parse `git diff HEAD --numstat` output into `(additions, deletions)`.
+///
+/// Pure function so every observed shape is unit-testable without a repository
+/// (same discipline as [`parse_porcelain`]). Each line is `<add>\t<del>\t<path>`;
+/// binary files print `-\t-\t<path>` and count as 0 (GitHub's convention for
+/// binaries). Rename rows carry tabs inside the path segment, but only the
+/// first two columns are read, so they are unaffected.
+pub fn parse_numstat(out: &str) -> (i64, i64) {
+    let mut additions = 0i64;
+    let mut deletions = 0i64;
+    for line in out.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.split('\t');
+        let add = it.next();
+        let del = it.next();
+        // Fewer than two columns is not a numstat row at all (Java skips
+        // `parts.length < 2` the same way); counting it would inflate totals.
+        if del.is_none() {
+            continue;
+        }
+        additions += numstat_count(add);
+        deletions += numstat_count(del);
+    }
+    (additions, deletions)
+}
+
+/// One numstat count column: `-` (binary) and malformed values count as 0;
+/// negatives cannot occur and are clamped for the same reason.
+fn numstat_count(token: Option<&str>) -> i64 {
+    match token.map(str::trim) {
+        None => 0,
+        Some(t) if t.is_empty() || t == "-" => 0,
+        Some(t) => t.parse::<i64>().map(|v| v.max(0)).unwrap_or(0),
+    }
 }
 
 /// Remote / upstream sync state (read-only; never fetches).
@@ -920,6 +983,36 @@ mod tests {
     fn porcelain_ignores_short_and_blank_lines() {
         let (_, _, _, files) = parse_porcelain("\nab\n");
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn numstat_sums_additions_and_deletions() {
+        let out = "3\t1\tsrc/a.rs\n10\t20\tsrc/b.rs\n";
+        assert_eq!(parse_numstat(out), (13, 21));
+    }
+
+    #[test]
+    fn numstat_binary_dash_counts_as_zero() {
+        // Binary files print "-\t-\t<path>"; GitHub shows no line counts for them.
+        let out = "-\t-\tassets/logo.png\n4\t0\tsrc/c.rs\n";
+        assert_eq!(parse_numstat(out), (4, 0));
+    }
+
+    #[test]
+    fn numstat_rename_row_with_tabs_in_path_only_reads_first_two_columns() {
+        let out = "2\t2\told.rs => new.rs\n";
+        assert_eq!(parse_numstat(out), (2, 2));
+    }
+
+    #[test]
+    fn numstat_ignores_blank_and_malformed_lines() {
+        let out = "\ngarbage\n7\n5\t6\tsrc/d.rs\n";
+        assert_eq!(parse_numstat(out), (5, 6));
+    }
+
+    #[test]
+    fn numstat_empty_output_is_zero_zero() {
+        assert_eq!(parse_numstat(""), (0, 0));
     }
 
     #[test]

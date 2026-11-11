@@ -137,16 +137,42 @@
     }
 
     // ---------- 五类渲染 ----------
+    /* 变更文件数口径（2026-11 用户报障「有变更却一直显示无变更」的根因修复）：
+       后端 /git/status 的 changed/staged/untracked 是【文件路径数组】（Java GitService
+       与 Rust gitops 同口径），不是数字。旧代码 (status.changed || 0) + ... 对数组做
+       加法得到字符串拼接（如 "0a.jsb.js"），> 0 恒为 false → 永远渲染「无变更」。
+       故统一取 .length 求和；非数组（后端降级缺字段）按 0 计。 */
+    function bucketCount(v) { return Array.isArray(v) ? v.length : 0; }
+    /* 行级增删（后端 git diff HEAD --numstat 聚合）：参照稿首行形态是彩色
+       「+3,019 -363」。千分位与 +/- 分色按参照稿；无行级变更（干净工作区）不展示。 */
+    function fmtLineCount(n) { return Number(n || 0).toLocaleString('en-US'); }
+    function lineStatsHtml(status) {
+        var add = status.additions || 0, del = status.deletions || 0;
+        if (!add && !del) return '';
+        return '<span class="tm-diff-add">+' + esc(fmtLineCount(add)) + '</span> ' +
+            '<span class="tm-diff-del">-' + esc(fmtLineCount(del)) + '</span>';
+    }
     function renderEnv(status, remote, root) {
         if (!envBody) return;
         // 错误行也必须走 setBodyHtml：raw 写会让 __tmHtml 缓存与 DOM 失步——
         // 瞬断恢复后若新 html 与错误前同值，同值跳过会把「加载失败」行永久卡住
         if (status === undefined) { clearLoading(); setBodyHtml(envBody, errorRow()); return; }
+        /* null 归一：上面只挡了 undefined（失败态约定值），而 null 会直穿到
+           bucketCount(status.changed) / status.additions 抛 TypeError 让整区变白屏。
+           当前调用点均传 `d || {}`，故不可达——但旧实现有 `status ? ... : 0` 防护，
+           改成 bucketCount 后若不补这行就是白送的健壮性回退。 */
+        var st = status || {};
         var html = '';
-        var changed = status ? ((status.changed || 0) + (status.staged || 0) + (status.untracked || 0)) : 0;
-        html += row('compare', '', changed > 0
-            ? esc(t('monitor.changes_count', [changed]))
-            : esc(t('monitor.no_changes')));
+        var changed = bucketCount(st.changed) + bucketCount(st.staged) + bucketCount(st.untracked);
+        /* 首行主文案：有行级统计时按参照稿展示彩色 +/-（信息密度高于「N 处变更」），
+           文件数收进 title；无行级统计（干净工作区或后端未回该字段）回落「无变更 /
+           N 处变更」原文案，保证旧后端（无 additions 字段）下展示不劣化。 */
+        var stats = lineStatsHtml(st);
+        var firstText = stats
+            ? stats + '<span class="tm-row-sub">' + esc(t('monitor.changes_count', [changed])) + '</span>'
+            : (changed > 0 ? esc(t('monitor.changes_count', [changed])) : esc(t('monitor.no_changes')));
+        html += row('compare', '', firstText,
+            stats ? t('monitor.changes_count', [changed]) : '');
         // 环境：本地 / 远端（按工作区根的归属口径，与终端 scope 同源）
         var envName = t('monitor.env_local');
         try {
@@ -170,8 +196,23 @@
         if (rm === undefined && lastRemoteData && lastRemoteRoot === root) rm = lastRemoteData;
         if (!rm || !rm.hasRemote) syncText = t('monitor.no_remote');
         else if (!rm.upstream) syncText = t('monitor.no_upstream');
-        else if ((rm.ahead || 0) === 0 && (rm.behind || 0) === 0) syncText = t('monitor.synced');
-        else syncText = t('monitor.ahead_behind', [rm.ahead || 0, rm.behind || 0]);
+        /* -1 是后端「计数不可得」哨兵（Java REV_COUNT_UNKNOWN / Rust 同值；porcelain
+           头部省略 [ahead N, behind M] 尾缀时 Rust 也回 -1）。旧代码把哨兵直接渲染成
+           「领先 -1 / 落后 -1」（2026-11 用户报障）。治理口径：
+           ① 双 -1（计数不可得）→ 有降级标记时明示「同步状态未知」，否则按已同步展示
+              （git 在完全同步时本就省略尾缀，-1/-1 且非降级即同步态）；
+           ② 单侧 -1（理论不可达，防御性）→ 该侧按 0 计，绝不把哨兵露给用户；
+           ③ 有未提交变更或未推送/未拉取提交时按参照稿显示「提交或推送」行动提示。 */
+        else if (rm.ahead === -1 && rm.behind === -1) {
+            syncText = rm.degraded ? t('monitor.sync_unknown') : t('monitor.synced');
+        } else {
+            var ahead = Math.max(0, rm.ahead || 0), behind = Math.max(0, rm.behind || 0);
+            if (ahead === 0 && behind === 0 && changed === 0) syncText = t('monitor.synced');
+            /* 本地有未提交变更或未推送提交 → 参照稿的行动提示文案；
+               仅落后（本地无可推送内容）时保留「领先 0 / 落后 N」信息型文案。 */
+            else if (ahead > 0 || changed > 0) syncText = t('monitor.commit_or_push');
+            else syncText = t('monitor.ahead_behind', [ahead, behind]);
+        }
         html += row('commit', '', esc(syncText), rm && rm.remoteUrl ? rm.remoteUrl : '');
         clearLoading();
         setBodyHtml(envBody, html);

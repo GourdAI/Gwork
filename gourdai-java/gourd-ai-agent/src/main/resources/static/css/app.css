@@ -1664,13 +1664,17 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
                 visibility 0s;
 }
 
-/* 列表容器：内部滚动（消息多时卡片不无限长）；行是普通 flex 子项，无需额外定位层。 */
+/* 列表容器：内部滚动（消息多时卡片不无限长）；行是普通 flex 子项，无需额外定位层。
+   【2026-11-10 报障「滚动条不统一」修复】旧版为让卡片滚条「比正文更细」，在此声明了
+   标准 thin 档滚动条宽度属性。但 theme.css 全局滚动条规约明确：Chromium 121+ 下一旦设置
+   标准 scrollbar-width，同元素上的 ::-webkit-scrollbar-* 规则整体失效 —— 本元素因此
+   回退成平台原生滚动条（带上下箭头按钮），是全站唯一一处会脱离统一滚条的元素。
+   「做细」不能靠换标准属性实现：全局 webkit 滚条本身已是「轨道 12px 保命中、滑块透明
+   内衬视觉收窄 6px」的细滚条，直接复用即与全站一致，故此处不再声明任何 scrollbar-*
+   标准属性。 */
 .history-rail-tip-list {
     position: relative; max-height: 260px; overflow-y: auto; overflow-x: hidden;
     display: flex; flex-direction: column;
-    /* 滚动条只在真的溢出时出现，且做得比正文滚条更细 —— 卡片是辅助面板，
-       一条十向下压的粗滚条会把「这是一张列表」读成「这是一个弹层」。 */
-    scrollbar-width: thin;
 }
 
 /* 【2026-11-04 按参照稿移除滑动指示条】用户明确要求「鼠标挪动上去没有阴影背景，

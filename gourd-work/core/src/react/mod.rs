@@ -1,4 +1,4 @@
-//! react — ReAct (Reason + Act) agent loop.
+﻿//! react — ReAct (Reason + Act) agent loop.
 //!
 //! Implements the classic Thought → Action → Observation cycle:
 //! 1. Send conversation + tool definitions to the LLM
@@ -320,6 +320,10 @@ pub struct ReActResult {
     pub messages: Vec<ChatMessage>,
     /// For HITL suspension: the command awaiting approval.
     pub pending_command: Option<String>,
+    /// For HITL suspension: the timeout the model requested (honored on approval).
+    pub pending_timeout_ms: Option<u64>,
+    /// For HITL suspension: whether the model requested background execution.
+    pub pending_background: bool,
     /// For suspension: the tool_call_id of the tool that triggered it.
     /// Needed on resume to inject a proper `tool` role message.
     pub pending_tool_call_id: Option<String>,
@@ -467,7 +471,7 @@ impl ReActAgent {
         frame_tx: mpsc::UnboundedSender<Frame>,
         cancel: CancellationToken,
     ) -> ReActResult {
-        let client = crate::llm::LlmClient::with_retries(config.model.clone(), config.settings.general.api_retries);
+        let client = crate::llm::LlmClient::with_retries(config.model.clone(), config.settings.general.model_retries);
         // One gate for the whole run: the caller's (a sub-agent whitelist) when
         // given, otherwise the user's global `disallowedTools`. Resolved once here
         // so the definitions sent to the model and the `execute` check cannot
@@ -775,7 +779,7 @@ impl ReActAgent {
                     stop_reason: StopReason::Cancelled,
                     next_seq: seq,
                     messages,
-                    pending_command: None,
+                    pending_command: None, pending_timeout_ms: None, pending_background: false,
                     pending_tool_call_id: None,
                 };
             }
@@ -879,7 +883,7 @@ impl ReActAgent {
                             stop_reason: StopReason::MaxTurns,
                             next_seq: seq,
                             messages,
-                            pending_command: None,
+                            pending_command: None, pending_timeout_ms: None, pending_background: false,
                             pending_tool_call_id: None,
                         };
                     }
@@ -910,7 +914,7 @@ impl ReActAgent {
                     stop_reason: StopReason::MaxTurns,
                     next_seq: seq,
                     messages,
-                    pending_command: None,
+                    pending_command: None, pending_timeout_ms: None, pending_background: false,
                     pending_tool_call_id: None,
                 };
             }
@@ -1011,7 +1015,7 @@ impl ReActAgent {
                         stop_reason: StopReason::Error,
                         next_seq: seq,
                         messages,
-                        pending_command: None,
+                        pending_command: None, pending_timeout_ms: None, pending_background: false,
                     pending_tool_call_id: None,
                     };
                 }
@@ -1129,7 +1133,7 @@ impl ReActAgent {
                             stop_reason: StopReason::Cancelled,
                             next_seq: seq,
                             messages,
-                            pending_command: None,
+                            pending_command: None, pending_timeout_ms: None, pending_background: false,
                             pending_tool_call_id: None,
                         };
                     }
@@ -1491,7 +1495,7 @@ impl ReActAgent {
                             stop_reason: StopReason::Error,
                             next_seq: seq,
                             messages,
-                            pending_command: None,
+                            pending_command: None, pending_timeout_ms: None, pending_background: false,
                     pending_tool_call_id: None,
                         };
                     }
@@ -1561,7 +1565,7 @@ impl ReActAgent {
                         stop_reason: StopReason::Error,
                         next_seq: seq,
                         messages,
-                        pending_command: None,
+                        pending_command: None, pending_timeout_ms: None, pending_background: false,
                         pending_tool_call_id: None,
                     };
                 }
@@ -1716,7 +1720,7 @@ impl ReActAgent {
                         stop_reason: StopReason::Error,
                         next_seq: seq,
                         messages,
-                        pending_command: None,
+                        pending_command: None, pending_timeout_ms: None, pending_background: false,
                         pending_tool_call_id: None,
                     };
                 }
@@ -1800,7 +1804,7 @@ impl ReActAgent {
                     stop_reason: StopReason::Error,
                     next_seq: seq,
                     messages,
-                    pending_command: None,
+                    pending_command: None, pending_timeout_ms: None, pending_background: false,
                     pending_tool_call_id: None,
                 };
             }
@@ -1853,7 +1857,7 @@ impl ReActAgent {
                         stop_reason: StopReason::Error,
                         next_seq: seq,
                         messages,
-                        pending_command: None,
+                        pending_command: None, pending_timeout_ms: None, pending_background: false,
                         pending_tool_call_id: None,
                     };
                 }
@@ -1944,7 +1948,7 @@ impl ReActAgent {
                     stop_reason: StopReason::Completed,
                     next_seq: seq,
                     messages,
-                    pending_command: None,
+                    pending_command: None, pending_timeout_ms: None, pending_background: false,
                     pending_tool_call_id: None,
                 };
             }
@@ -2075,7 +2079,7 @@ impl ReActAgent {
                         stop_reason: StopReason::Cancelled,
                         next_seq: seq,
                         messages,
-                        pending_command: None,
+                        pending_command: None, pending_timeout_ms: None, pending_background: false,
                         pending_tool_call_id: None,
                     };
                 }
@@ -2206,7 +2210,7 @@ impl ReActAgent {
                             stop_reason: StopReason::Cancelled,
                             next_seq: seq,
                             messages,
-                            pending_command: None,
+                            pending_command: None, pending_timeout_ms: None, pending_background: false,
                             pending_tool_call_id: None,
                         };
                     }
@@ -2227,7 +2231,7 @@ impl ReActAgent {
                                 stop_reason: StopReason::SuspendedQuestion,
                                 next_seq: seq,
                                 messages,
-                                pending_command: None,
+                                pending_command: None, pending_timeout_ms: None, pending_background: false,
                                 pending_tool_call_id: Some(tc.id.clone()),
                             };
                         }
@@ -2241,6 +2245,8 @@ impl ReActAgent {
                                 next_seq: seq,
                                 messages,
                                 pending_command: suspend.command.clone(),
+                                pending_timeout_ms: suspend.timeout_ms,
+                                pending_background: suspend.background,
                                 pending_tool_call_id: Some(tc.id.clone()),
                             };
                         }
@@ -2284,7 +2290,20 @@ impl ReActAgent {
                 // The frame above keeps its own 2000-char preview: that is what the
                 // UI renders, and it is deliberately independent of what the model
                 // is allowed to see.
-                let observation = crate::compress::sanitise_observation(&output.text, observation_cap);
+                //
+                // 超大输出先落盘再截断：整段文本存进会话存储，模型拿到预览 +
+                // 文件路径，可用 read/grep 取回任意部分，不必重跑命令。落盘
+                // 失败时退回纯截断，工具执行不受影响。
+                let persisted = crate::tools::output::persist_if_large(
+                    &output.text,
+                    &crate::tools::output::store_dir(&config.workspace, config.session_dir.as_deref()),
+                    &tc.function.name,
+                    &tc.id,
+                );
+                let observation = crate::compress::sanitise_observation(
+                    persisted.as_deref().unwrap_or(&output.text),
+                    observation_cap,
+                );
                 if observation.len() != output.text.len() {
                     debug!(
                         session = %config.session_id,
@@ -4647,7 +4666,18 @@ mod tests {
             ..Default::default()
         };
         let mut settings = crate::config::Settings::default();
-        settings.general.api_retries = 3;
+        // The two retry knobs MUST hold different values here, or this test
+        // cannot tell which one the client was built from: `api_retries`
+        // (web tools) and `model_retries` (LLM streams) both default to 3, so
+        // leaving them equal let a revert of the `react` wiring to
+        // `api_retries` pass unnoticed (verified by mutation).
+        //
+        // `api_retries = 0` is the discriminating choice: `with_retries` floors
+        // it at 1 attempt, so a regression gives the stream no retry budget at
+        // all, no `retry` frame is emitted, and the precondition assert below
+        // fails loudly instead of passing vacuously.
+        settings.general.api_retries = 0;
+        settings.general.model_retries = 3;
 
         let config = ReActConfig {
             session_id: "work-retry-itest".into(),
@@ -4705,6 +4735,23 @@ mod tests {
             retry_frame.is_some(),
             "a mid-stream transport retry must emit a discardPartial retry frame; got frames {:?}",
             frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+        );
+
+        // Which retry knob actually reached the LLM client. `api_retries` is 0
+        // and `model_retries` is 3 in this test ON PURPOSE: they are the two
+        // knobs a settings.json carries, and the loop must be wired to the
+        // model one. The frame's `max` is that budget as the client saw it, so
+        // it is the only thing here that can tell the two apart — counting
+        // attempts cannot, because one failure is survivable by any budget ≥1
+        // and `with_retries` floors 0 to 1.
+        //
+        // Verified by mutation: with this assert removed, reverting
+        // `run_inner` to `api_retries` keeps the whole test green.
+        assert_eq!(
+            retry_frame.unwrap().extra["max"],
+            serde_json::json!(3),
+            "the stream retry budget must come from settings.general.model_retries (3), \
+             not api_retries (0 in this test); a floor of 1 proves the wiring regressed"
         );
 
         // The user-visible symptom must be gone: the retried attempt's arguments
@@ -5360,6 +5407,15 @@ pub struct SuspensionPoint {
     pub model_name: String,
     /// The pending command for HITL.
     pub pending_command: Option<String>,
+    /// The timeout the model requested for the pending HITL command. `None` on
+    /// suspensions written by older kernels (serde default) → approval falls
+    /// back to the historical ceiling.
+    #[serde(default)]
+    pub pending_timeout_ms: Option<u64>,
+    /// Whether the pending HITL command was requested in background. Defaults to
+    /// false for older suspensions, preserving their synchronous approval path.
+    #[serde(default)]
+    pub pending_background: bool,
     /// The tool call id that triggered the suspension.
     pub action_id: Option<String>,
     /// The tool_call_id needing a `tool` role response on resume.

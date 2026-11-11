@@ -1385,6 +1385,8 @@
     "no_upstream": "未關聯上游分支",
     "synced": "已同步",
     "ahead_behind": "領先 {0} / 落後 {1}",
+    "commit_or_push": "提交或推送",
+    "sync_unknown": "同步狀態未知",
     "env_local": "本地",
     "env_remote": "遠端",
     "empty_env": "暫無環境資訊",
@@ -1395,7 +1397,7 @@
   },
   "account": {
     "close": "關閉",
-    "entry": "登入 / 註冊",
+    "entry": "登入",
     "sign_in": "登入",
     "sign_up": "註冊",
     "sign_up_submit": "註冊並登入",
@@ -1412,6 +1414,9 @@
     "points": "點數餘額",
     "memory": "記憶與進化",
     "feedback": "意見回饋",
-    "unavailable": "登入服務暫不可用，請在桌面客戶端中操作"
+    "unavailable": "登入服務暫不可用，請在桌面客戶端中操作",
+    "auth_title_login": "登入 GWork",
+    "auth_title_register": "建立帳號",
+    "auth_slogan": "不止執行，更是創造。"
   }
 }

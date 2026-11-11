@@ -142,9 +142,9 @@
     <div class="sidebar-list" id="historyList"></div>
     <div class="sidebar-footer">
         <!-- 底栏（原「设置按钮」区域）整体改为用户卡片：独立设置按钮已移除，
-             设置入口收进账号弹层（弹层 = 设置 + 用户相关菜单）；登录 / 注册表单
+             设置入口收进账号弹层（弹层 = 设置 + 用户相关菜单）；登录表单
              是【独立居中弹框】（.account-modal），不在本弹层里。
-             卡片由 app-account.js 按登录态填充：未登录 = 「登录 / 注册」，
+             卡片由 app-account.js 按登录态填充：未登录 = 「登录」，
              已登录 = 头像 + 昵称 + 套餐；点击向上展开账号弹层。
              【布局纪律】卡片是 sidebar-footer 的首子项、更新按钮是末子项：底栏
              justify-content:space-between 下首子项恒贴左端、末子项恒贴右端，
@@ -153,7 +153,7 @@
         <button class="account-card" id="accountEntryBtn" type="button" aria-haspopup="dialog" aria-expanded="false">
             <span class="account-card-avatar" id="accountCardAvatar" aria-hidden="true">G</span>
             <span class="account-card-text">
-                <span class="account-card-name" id="accountEntryName" data-i18n="account.entry">登录 / 注册</span>
+                <span class="account-card-name" id="accountEntryName" data-i18n="account.entry">登录</span>
                 <span class="account-card-sub" id="accountCardSub"></span>
             </span>
             <svg class="account-card-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>

@@ -1195,6 +1195,13 @@ public class WebController {
             item.put("name", skill.getName());
             item.put("description", desc);
             item.put("type", "skill");
+            /* 补全面板主视觉改为展示名（前端 chip/候选行显示 displayName，
+             * 发送时仍回传 name 作路由键）。口径统一走 SkillDisplayNames：
+             * 与市场「已安装」卡、任务监控同一出口，缺失时前端回退 name。 */
+            String displayName = SkillDisplayNames.of(skill.getRealPath());
+            if (displayName != null && !displayName.trim().isEmpty()) {
+                item.put("displayName", displayName.trim());
+            }
             data.add(item);
         }
 

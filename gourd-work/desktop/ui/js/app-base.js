@@ -931,6 +931,8 @@ function clearInput(fromWelcome) {
     // Go through autoResize uniformly: if there is no manual height, revert to the default min-height; if there is, preserve the height selected by the user
     chatInput.value = '';
     autoResize(chatInput);
+    // 技能小卡片随输入一起消费（发送链路已把其 id 注入 wire 文本）
+    if (typeof clearSkillChips === 'function') clearSkillChips(fromWelcome);
     if (fromWelcome) {
         welcomeInput.value = '';
         autoResize(welcomeInput);

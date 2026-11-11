@@ -125,21 +125,70 @@ pub fn build_agent_roster(workspace: &Path, permission: &PermissionSettings) -> 
     out
 }
 
-/// Windows PowerShell 5.1 dialect guidance block.
+/// The shell dialect block for the *active* shell, or empty when none is needed.
+///
+/// Dispatches on [`crate::tools::builtin::shell_kind`] so the prompt always
+/// matches the shell the bash tool will actually spawn:
+/// - Git Bash (Windows, installed): a compact POSIX block — the model already has
+///   a strong POSIX prior, so it only needs the Windows-specific corrections.
+/// - PowerShell (Windows fallback, no Git Bash): the full pitfall list.
+/// - `sh` (Unix): empty — the model knows POSIX and there is nothing to correct.
+///
+/// Keeping this in sync with the bash tool's selector is load-bearing: a prompt
+/// that says "PowerShell, `&&` unavailable" while the tool runs Git Bash teaches
+/// the model to avoid syntax that actually works (and vice versa).
+pub fn shell_dialect_rules(is_cn: bool) -> String {
+    use crate::tools::builtin::{shell_kind, ShellKind};
+    match shell_kind() {
+        ShellKind::GitBash => git_bash_dialect_rules(is_cn),
+        ShellKind::PowerShell => powershell_dialect_rules(is_cn),
+        ShellKind::Sh => String::new(),
+    }
+}
+
+/// Git Bash dialect guidance — deliberately short. The tool is named `bash` and
+/// Git Bash *is* POSIX, so the model's prior is already correct; this block only
+/// corrects the Windows-specific assumptions (drive paths, MSYS path conversion,
+/// "not WSL", encoding handled by the file tools). A long PowerShell-style list
+/// here would waste context for the common case.
+pub fn git_bash_dialect_rules(is_cn: bool) -> String {
+    let cn: &[&str] = &[
+        "## 终端方言",
+        "终端是 Git Bash（POSIX），**不是** PowerShell/WSL：`&&`/`||`、管道、`grep`/`sed`/`awk`、heredoc 均可用，按标准 POSIX 写命令即可。",
+        "",
+        "- 路径用正斜杠；Windows 盘符挂载为 `/c/`、`/d/`（如 `D:\\work` → `/d/work`）。工作目录在多次调用间保持（`cd` 会延续）。",
+        "- 不要写 PowerShell cmdlet（`Get-Content`/`Select-String` 等），bash 下不存在；读文件/搜索优先用 `read`/`grep`/`glob` 工具。",
+        "- 编码已统一 UTF-8，`read`/`edit`/`grep` 自动处理 BOM 与 GBK，无需 chcp。",
+        "- 调用 Windows 原生程序注意 MSYS 路径转换：`cmd //c dir`（双斜杠），避免 `/c` 被当作路径。",
+    ];
+    let en: &[&str] = &[
+        "## Terminal Dialect",
+        "The terminal is Git Bash (POSIX), **not** PowerShell/WSL: `&&`/`||`, pipes, `grep`/`sed`/`awk`, and heredocs all work — write standard POSIX commands.",
+        "",
+        "- Use forward slashes; Windows drives mount as `/c/`, `/d/` (e.g. `D:\\work` → `/d/work`). The working directory persists across calls (`cd` carries over).",
+        "- Do not use PowerShell cmdlets (`Get-Content`/`Select-String`, etc.) — they do not exist in bash; prefer the `read`/`grep`/`glob` tools for reading/searching files.",
+        "- Encoding is unified to UTF-8; `read`/`edit`/`grep` handle BOM and GBK automatically — no chcp needed.",
+        "- When calling native Windows programs, mind MSYS path conversion: `cmd //c dir` (double slash) so `/c` is not treated as a path.",
+    ];
+    let mut out = (if is_cn { cn } else { en }).join("\n");
+    out.push('\n');
+    out
+}
+
+/// Windows PowerShell 5.1 dialect guidance block (the no-Git-Bash fallback).
 ///
 /// Ported verbatim in content from Java `TerminalTalent.appendShellDialectRules`
 /// (PowerShell branch, `core == false` path) plus the one-line characterization
-/// from `shellDialectSummary`. The Rust kernel is a resident service that always
-/// launches `powershell` (5.1) on Windows — there is no pwsh/CMD detection, so
-/// only the fixed 5.1 dialect is emitted.
+/// from `shellDialectSummary`. Emitted only when Git Bash is absent and the bash
+/// tool falls back to `powershell` (5.1).
 ///
 /// `is_cn == true` returns the Chinese block (identical to Java, and the kernel
 /// primarily serves Chinese users); `is_cn == false` returns an equivalent
 /// English translation covering every point.
 ///
 /// A pure function with no `cfg!(windows)` inside, so it is unit-testable on any
-/// platform; the callers gate injection on `cfg!(windows)`.
-pub fn windows_shell_dialect_rules(is_cn: bool) -> String {
+/// platform; the runtime dispatcher [`shell_dialect_rules`] selects it.
+pub fn powershell_dialect_rules(is_cn: bool) -> String {
     // The tool is named `bash`, which is itself a strong POSIX prior — Java
     // explicitly states "not bash/sh" because the enum name alone does not
     // correct the model's assumptions.
@@ -197,9 +246,10 @@ fn build_en(workspace: &str) -> String {
 "#, workspace = workspace);
     out.push('\n');
     out.push_str(crate::todo::PLANNING_GUIDE_EN);
-    if cfg!(windows) {
+    let dialect = shell_dialect_rules(false);
+    if !dialect.is_empty() {
         out.push('\n');
-        out.push_str(&windows_shell_dialect_rules(false));
+        out.push_str(&dialect);
     }
     out
 }
@@ -227,9 +277,10 @@ fn build_cn(workspace: &str) -> String {
 "#, workspace = workspace);
     out.push('\n');
     out.push_str(crate::todo::PLANNING_GUIDE);
-    if cfg!(windows) {
+    let dialect = shell_dialect_rules(true);
+    if !dialect.is_empty() {
         out.push('\n');
-        out.push_str(&windows_shell_dialect_rules(true));
+        out.push_str(&dialect);
     }
     out
 }
@@ -372,30 +423,67 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The dialect block must carry every pitfall the Java prompt carries —
-    /// dropping one sends the model back to POSIX syntax and the command fails.
+    /// The PowerShell fallback block must carry every pitfall the Java prompt
+    /// carries — dropping one sends the model back to POSIX syntax and fails.
     #[test]
-    fn windows_dialect_rules_cover_the_pitfalls() {
-        let cn = windows_shell_dialect_rules(true);
+    fn powershell_dialect_rules_cover_the_pitfalls() {
+        let cn = powershell_dialect_rules(true);
         for want in ["PowerShell", "bash/sh", "&&", "Select-Object", "Get-Content", "2>&1", "curl.exe"] {
             assert!(cn.contains(want), "cn block missing {want}: {cn}");
         }
-        let en = windows_shell_dialect_rules(false);
+        let en = powershell_dialect_rules(false);
         for want in ["PowerShell", "bash/sh", "&&", "Select-Object", "2>&1"] {
             assert!(en.contains(want), "en block missing {want}: {en}");
         }
     }
 
-    /// On Windows both locales must append the dialect block; the base prompt
-    /// itself stays POSIX-free of shell guidance, so this is the only hook.
+    /// The Git Bash block confirms POSIX and the Windows-specific corrections,
+    /// and stays shorter than the PowerShell block — the slimming guarantee for
+    /// the common case (Git Bash installed).
+    #[test]
+    fn git_bash_dialect_rules_are_posix_and_compact() {
+        let cn = git_bash_dialect_rules(true);
+        for want in ["Git Bash", "POSIX", "/c/", "cmd //c"] {
+            assert!(cn.contains(want), "cn block missing {want}: {cn}");
+        }
+        let en = git_bash_dialect_rules(false);
+        for want in ["Git Bash", "POSIX", "/c/", "cmd //c"] {
+            assert!(en.contains(want), "en block missing {want}: {en}");
+        }
+        assert!(
+            git_bash_dialect_rules(true).len() < powershell_dialect_rules(true).len(),
+            "Git Bash block must be cheaper than the PowerShell fallback"
+        );
+    }
+
+    /// The dispatcher must agree with the bash tool's selector, so the prompt
+    /// never describes a shell the tool will not spawn.
+    #[test]
+    fn shell_dialect_rules_matches_active_shell() {
+        use crate::tools::builtin::{shell_kind, ShellKind};
+        let out = shell_dialect_rules(false);
+        match shell_kind() {
+            ShellKind::GitBash => assert!(out.contains("Git Bash"), "{out}"),
+            ShellKind::PowerShell => assert!(out.contains("PowerShell"), "{out}"),
+            ShellKind::Sh => assert!(out.is_empty(), "Unix needs no dialect block: {out}"),
+        }
+    }
+
+    /// On Windows both locales must append the *active* shell's dialect block.
     #[cfg(windows)]
     #[test]
-    fn windows_prompts_carry_the_dialect_block() {
+    fn windows_prompts_carry_the_active_dialect_block() {
+        use crate::tools::builtin::{shell_kind, ShellKind};
+        let marker_cn = match shell_kind() {
+            ShellKind::GitBash => "Git Bash",
+            ShellKind::PowerShell => "PowerShell 方言",
+            ShellKind::Sh => unreachable!("Windows never selects sh"),
+        };
         let mut s = Settings::default();
         s.general.locale = "zh-CN".into();
-        assert!(build_system_prompt(&s, "/ws").contains("PowerShell 方言"));
+        assert!(build_system_prompt(&s, "/ws").contains(marker_cn));
         s.general.locale = "en".into();
-        assert!(build_system_prompt(&s, "/ws").contains("PowerShell dialect"));
+        assert!(build_system_prompt(&s, "/ws").contains("Terminal Dialect"));
     }
 
     #[cfg(not(windows))]
@@ -403,6 +491,8 @@ mod tests {
     fn non_windows_prompts_have_no_dialect_block() {
         let mut s = Settings::default();
         s.general.locale = "en".into();
-        assert!(!build_system_prompt(&s, "/ws").contains("PowerShell"));
+        let out = build_system_prompt(&s, "/ws");
+        assert!(!out.contains("PowerShell"));
+        assert!(!out.contains("Terminal Dialect"));
     }
 }

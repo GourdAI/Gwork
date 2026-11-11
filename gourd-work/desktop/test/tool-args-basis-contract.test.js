@@ -32,6 +32,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..', '..', '..');
@@ -123,12 +124,24 @@ test('③b 真变异对照：把磁盘副本回退成 0 1 auto，① 必须判�
                  '.tool-args { display: block; order: 3; flex: 0 1 auto;'), 'utf8');
     assert.notEqual(reverted.toString('utf8'), original.toString('utf8'),
         '变异体必须与当前源不同（否则护栏自污染）');
+
+    /* 【2026-11-10 codereview 修复】变异体写进【临时文件】，绝不写回生产源。
+
+       旧写法 writeFileSync(target, reverted) → 子进程校验 → finally 还原 target。
+       `npm run test:js` 跑的是 `node --test test/*.test.js`，node 按【文件】并行开
+       多个进程，而本测试与 scrollbar-uniformity.test.js 变异的是【同一个】app.css。
+       writeFileSync 先截断再写入、并非原子操作，于是并发的纯读取方（如
+       turn-batch.test.js:687 的「缺 ⑭ 统一图标块」）会在「已截断、未写完」的窗口里
+       读到半截文件，表现为偶发漂移失败（实测约十次一次）。
+       更严重的风险是持久损坏：进程若在变异窗口内被杀，finally 来不及执行，
+       app.css 就永久留在变异态。改用临时文件后两者一并消除，子进程仍真读真断言。 */
+    const mutant = path.join(os.tmpdir(), 'tool-args-mutant-' + process.pid + '.css');
     try {
-        fs.writeFileSync(target, reverted);
+        fs.writeFileSync(mutant, reverted);
         // 真跑一个独立 node 进程执行 ① 的两条断言；不复用本测试内的手写副本
         const probe = [
             "const fs=require('fs'),assert=require('assert');",
-            "const css=fs.readFileSync(" + JSON.stringify(target) + ",'utf8');",
+            "const css=fs.readFileSync(" + JSON.stringify(mutant) + ",'utf8');",
             "const m=css.match(/\\.tool-args\\s*\\{([^}]*)\\}/);",
             "assert.ok(m,'no rule');",
             "assert.match(m[1],/flex:\\s*1 1 0\\s*;/);",
@@ -140,8 +153,9 @@ test('③b 真变异对照：把磁盘副本回退成 0 1 auto，① 必须判�
         assert.match((r.stderr || '') + (r.stdout || ''), /AssertionError|assert/,
             '必须因断言失败而非其它意外退出');
     } finally {
-        fs.writeFileSync(target, original);   // 无条件还原，含异常/超时路径
+        fs.rmSync(mutant, { force: true });
     }
+    // 生产源必须逐字未被触碰 —— 这条断言本身就是「变异不外溢」的护栏
     assert.equal(fs.readFileSync(target).toString('utf8'), original.toString('utf8'),
-        '变异结束后磁盘必须逐字还原');
+        '变异对照不得修改生产源文件 ' + COPIES[0]);
 });

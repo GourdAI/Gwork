@@ -1385,6 +1385,8 @@
     "no_upstream": "Fără ramură upstream",
     "synced": "Sincronizat",
     "ahead_behind": "{0} înainte / {1} în urmă",
+    "commit_or_push": "Comite sau împinge",
+    "sync_unknown": "Stare sincronizare necunoscută",
     "env_local": "Local",
     "env_remote": "La distanță",
     "empty_env": "Încă fără informații de mediu",
@@ -1395,7 +1397,7 @@
   },
   "account": {
     "close": "Închide",
-    "entry": "Autentificare / Înregistrare",
+    "entry": "Autentificare",
     "sign_in": "Autentificare",
     "sign_up": "Înregistrare",
     "sign_up_submit": "Înregistrare și autentificare",
@@ -1412,6 +1414,9 @@
     "points": "Sold puncte",
     "memory": "Memorie și evoluție",
     "feedback": "Feedback",
-    "unavailable": "Serviciul de autentificare nu este disponibil. Folosiți aplicația desktop."
+    "unavailable": "Serviciul de autentificare nu este disponibil. Folosiți aplicația desktop.",
+    "auth_title_login": "Conectare la GWork",
+    "auth_title_register": "Creează un cont",
+    "auth_slogan": "Dincolo de executare, creație."
   }
 }

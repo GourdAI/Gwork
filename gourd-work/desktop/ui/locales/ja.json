@@ -1385,6 +1385,8 @@
     "no_upstream": "上流ブランチなし",
     "synced": "同期済み",
     "ahead_behind": "{0} 先行 / {1} 遅延",
+    "commit_or_push": "コミットまたはプッシュ",
+    "sync_unknown": "同期状態は不明",
     "env_local": "ローカル",
     "env_remote": "リモート",
     "empty_env": "環境情報はまだありません",
@@ -1395,7 +1397,7 @@
   },
   "account": {
     "close": "閉じる",
-    "entry": "ログイン / 登録",
+    "entry": "ログイン",
     "sign_in": "ログイン",
     "sign_up": "登録",
     "sign_up_submit": "登録してログイン",
@@ -1412,6 +1414,9 @@
     "points": "ポイント残高",
     "memory": "メモリと進化",
     "feedback": "フィードバック",
-    "unavailable": "ログインサービスを利用できません。デスクトップアプリで操作してください。"
+    "unavailable": "ログインサービスを利用できません。デスクトップアプリで操作してください。",
+    "auth_title_login": "GWork にサインイン",
+    "auth_title_register": "アカウントを作成",
+    "auth_slogan": "実行を超えて、創造へ。"
   }
 }

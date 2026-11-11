@@ -15,6 +15,9 @@
  *      curl / Bearer / /v1/ / tokens / cost strings in the hero;
  *   6. every gw-app-* class used by the component has a CSS definition;
  *   7. all 7 locale files still have identical key counts.
+ *   8. the reduced-motion path is still a progressive timeline, NOT the old
+ *      frozen "already finished" frame (comments are stripped before checking
+ *      so a commented-out example cannot fool this guard).
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -142,6 +145,24 @@ const usedCls = new Set([...demo.matchAll(/((?:gw|gwork)-app-[\w-]+)/g)].map((m)
 const undef = [...usedCls].filter((c) => !defined.has(c))
 if (undef.length) bad(`gw-app-* classes without CSS: ${undef.join(', ')}`)
 else ok(`all ${usedCls.size} gw-app-* classes have CSS definitions`)
+
+// 8: reduced motion must still reveal steps over time. The old bug set the
+// whole timeline at once (`setStage(STEPS.length)` + a busy=false finished
+// frame) and returned early, which made the landing page look static. Detect
+// that shape on REAL CODE ONLY: strip comments/strings first, otherwise a
+// comment mentioning the old pattern (or a doc example) could fool the regex.
+const demoCode = demo
+  .replaceAll(/\/\*[\s\S]*?\*\//g, '')
+  .replaceAll(/(^|[^:])\/\/.*$/gm, '$1')
+const frozenShot =
+  /setStage\(\s*STEPS\.length\s*\)/.test(demoCode) &&
+  /setBusy\(\s*false\s*\)/.test(demoCode)
+const reducedTimeline = /REDUCED_BEAT/.test(demoCode)
+if (frozenShot) {
+  bad('reduced motion froze into a finished frame again (setStage(STEPS.length) + setBusy(false))')
+} else if (!reducedTimeline) {
+  bad('reduced-motion timeline beats (REDUCED_BEAT) are missing')
+} else ok('reduced motion keeps a progressive timeline (no frozen finished frame)')
 
 console.log('\n=== GWork hero demo / single-nav check ===')
 for (const p of pass) console.log(`  PASS  ${p}`)

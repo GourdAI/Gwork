@@ -32,9 +32,112 @@ For commercial licensing, please contact support@quantumnous.com
    ════════════════════════════════════════════════════════════════════════ */
 
 /* Faint grid wash over the whole shell (defined in gwork-brand.css via
-   .gw-auth-shell::before); keep it, but soften so the card reads first. */
-.gw-auth-shell { background: var(--gw-paper-3); }
+   .gw-auth-shell::before); keep it, but soften so the card reads first.
+   Split shell (Qoder-style): left brand-visual column + right form column. */
+.gw-auth-shell {
+  grid-template-columns: minmax(360px, 44%) minmax(0, 1fr);
+  background: var(--gw-paper);
+}
 .gw-auth-shell::before { opacity: 0.25; }
+
+/* ── Left brand-visual panel ─────────────────────────────────────────────
+   Tinted wash + two decorative rings + handwritten slogan + floating-icon
+   art + script mark. Mirrors the desktop login modal's visual column so
+   both clients read as one product. */
+.gw-auth-visual {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  padding: 56px 40px 40px;
+  overflow: hidden;
+  background: var(--gw-paper-3);
+  border-right: 1px solid var(--gw-line);
+}
+.gw-auth-visual::before {
+  content: '';
+  position: absolute;
+  right: -180px;
+  bottom: -200px;
+  width: 460px;
+  height: 460px;
+  border-radius: 50%;
+  border: 64px solid color-mix(in oklch, var(--foreground) 5%, transparent);
+  pointer-events: none;
+}
+.gw-auth-visual::after {
+  content: '';
+  position: absolute;
+  left: -150px;
+  top: -170px;
+  width: 340px;
+  height: 340px;
+  border-radius: 50%;
+  border: 46px solid color-mix(in oklch, var(--foreground) 4%, transparent);
+  pointer-events: none;
+}
+/* Handwritten slogan (the "art lettering"): system script/kai font stack so
+   the page stays offline-safe (no webfont download); falls back to cursive. */
+.gw-auth-slogan {
+  position: relative;
+  z-index: 1;
+  font-family: 'Kaiti SC', 'STKaiti', KaiTi, 'DFKai-SB', 'Segoe Script',
+    'Bradley Hand', cursive;
+  font-size: clamp(30px, 3.4vw, 44px);
+  font-weight: 700;
+  line-height: 1.45;
+  letter-spacing: 0.02em;
+  text-align: center;
+  color: var(--gw-ink);
+  transform: rotate(-2deg);
+}
+.gw-auth-art { position: relative; z-index: 1; width: 100%; max-width: 340px; }
+.gw-auth-art svg { display: block; width: 100%; height: auto; }
+.gw-auth-visual-mark {
+  position: relative;
+  z-index: 1;
+  font-family: 'Kaiti SC', 'STKaiti', KaiTi, 'DFKai-SB', 'Segoe Script',
+    'Bradley Hand', cursive;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--gw-ink-2);
+}
+/* Art palette — theme tokens only (brand-layer rule: no colour literals).
+   Ink-on-paper tiles invert automatically with light/dark mode. */
+.gw-art-halo { fill: color-mix(in oklch, var(--foreground) 4%, transparent); }
+.gw-art-tile-dark, .gw-art-tile-accent { fill: var(--gw-ink); }
+.gw-art-tile-light { fill: var(--gw-paper); stroke: var(--gw-line-2); stroke-width: 1; }
+.gw-art-stroke-light, .gw-art-stroke-contrast {
+  stroke: var(--gw-paper);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.gw-art-stroke-light-fill { fill: var(--gw-paper); }
+.gw-art-accent-fill { fill: var(--gw-ink); }
+.gw-art-folder-back { fill: color-mix(in oklch, var(--gw-ink) 46%, var(--gw-paper)); }
+.gw-art-folder-front { fill: color-mix(in oklch, var(--gw-ink) 30%, var(--gw-paper)); }
+/* Staggered float so the icon rain feels alive, not mechanical. */
+.gw-art-float { animation: gw-art-float 5.2s ease-in-out infinite; }
+.gw-art-f2 { animation-delay: -1.7s; }
+.gw-art-f3 { animation-delay: -3.4s; }
+.gw-art-f4 { animation-delay: -2.5s; animation-duration: 6s; }
+@keyframes gw-art-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-7px); }
+}
+/* Narrow screens: drop the visual column, form column goes full width.
+   No auth functionality lives in the visual panel, so hiding it is safe. */
+@media (max-width: 999px) {
+  .gw-auth-shell { grid-template-columns: minmax(0, 1fr); }
+  .gw-auth-visual { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gw-art-float { animation: none; }
+}
 
 .gw-auth-stack {
   display: flex;
@@ -44,18 +147,29 @@ For commercial licensing, please contact support@quantumnous.com
   max-width: 440px;
 }
 
+/* Brand block: same metrics as the desktop login modal (.account-brand) so the
+   two clients read as one product — 30px mark + 16px/700 wordmark. */
 .gw-auth-brand-block { display: flex; justify-content: center; }
 .gw-auth-brand-block .gw-auth-logo {
-  gap: 10px;
+  gap: 9px;
 }
-.gw-auth-brand-block .gw-auth-brand { font-size: 17px; }
+.gw-auth-brand-block .gw-brand-mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+}
+.gw-auth-brand-block .gw-auth-brand {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
 
 .gw-auth-card {
   position: relative;
   width: 100%;
   padding: 28px 28px 24px;
   border: 1px solid var(--gw-line-2);
-  border-radius: 14px;
+  border-radius: 16px;
   background: var(--gw-paper);
   box-shadow:
     0 1px 2px color-mix(in oklch, var(--foreground) 5%, transparent),
@@ -89,24 +203,30 @@ For commercial licensing, please contact support@quantumnous.com
 /* Form side: the card carries the layout now; children pages keep their own
    .gw-auth-head + form structure inside. */
 
-/* Auth page headers: mono eyebrow + title + description row */
+/* Auth page headers: centred eyebrow + title + switch row.
+   Centring matches the desktop login modal (.account-auth-title is centred) and
+   the reference design; the old left-aligned head made the card look lopsided
+   under an already-centred brand block and copyright line. */
 .gw-auth-head {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 6px;
+  text-align: center;
 }
 .gw-auth-title {
-  font-size: 22px;
+  font-size: 19px;
   font-weight: 700;
-  letter-spacing: -0.028em;
-  line-height: 1.2;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
   color: var(--gw-ink);
 }
 .gw-auth-switch {
   font-size: 13px;
   line-height: 1.6;
   color: var(--gw-ink-2);
+  text-align: center;
 }
 .gw-auth-switch a {
   color: var(--gw-ink);
@@ -117,6 +237,24 @@ For commercial licensing, please contact support@quantumnous.com
   transition: border-color var(--gw-t);
 }
 .gw-auth-switch a:hover { border-color: var(--gw-ink); }
+
+/* Form control rhythm — shared with the desktop login modal so a 40px field,
+   a 42px primary action and a 10px radius mean the same thing on both clients.
+   Scoped to .gw-auth-card so the authenticated console keeps its own sizing.
+   Only geometry is overridden here: shadcn Input already draws its own
+   focus-visible ring, so adding a second box-shadow ring would double up. */
+.gw-auth-card input:not([type='checkbox']):not([type='radio']):not([type='hidden']),
+.gw-auth-card select {
+  height: 40px;
+  border-radius: 10px;
+}
+.gw-auth-card button[type='submit'] {
+  height: 42px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
 
 /* ════════════════════════════════════════════════════════════════════════
    2. Console skin — mounted on <body data-gw-console>

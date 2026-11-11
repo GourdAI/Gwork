@@ -199,8 +199,10 @@ public class GitService {
     /**
      * Git 状态检测：返回 Git 可用性、仓库初始化状态、当前分支名及变更文件列表。
      *
-     * @return 包含 gitAvailable、initialized、branch、changed、staged、untracked、files 的结果对象；
-     *         files 为逐文件条目（path + status 分桶 + type 变更类型 A/M/D/U），供前端按类型渲染图标
+     * @return 包含 gitAvailable、initialized、branch、changed、staged、untracked、files、
+     *         additions、deletions 的结果对象；
+     *         files 为逐文件条目（path + status 分桶 + type 变更类型 A/M/D/U），供前端按类型渲染图标；
+     *         additions/deletions 为行级增删聚合（git diff HEAD --numstat），供监控面板彩色展示
      * @throws Exception Git 命令执行异常
      */
     public Result<Map> status() throws Exception {
@@ -276,6 +278,15 @@ public class GitService {
         data.put("untracked", untracked);
         data.put("files", files);
 
+        // 5. 行级增删统计（git diff HEAD --numstat）：监控面板环境区首行按参照稿
+        //    以彩色「+N -M」展示行级变更。porcelain 分桶只有文件数、没有行数，必须单独聚合。
+        //    HEAD 口径覆盖「已暂存 + 未暂存」（对比基准是最后一次提交），与面板
+        //    「工作区全部变更」的口径一致；untracked 不在 HEAD 对比范围、git 也不计其行数
+        //    （与 PR 统计同口径）。降级口径与 remoteInfo() 一致：异常只 WARN 回 0，不抛出。
+        int[] lineStats = lineStats();
+        data.put("additions", lineStats[0]);
+        data.put("deletions", lineStats[1]);
+
         return Result.succeed(data);
     }
 
@@ -288,6 +299,77 @@ public class GitService {
         m.put("status", status);
         m.put("type", type);
         return m;
+    }
+
+    /**
+     * 行级增删统计：{@code git diff HEAD --numstat} 的聚合值。
+     *
+     * <p><b>WHY</b>：监控面板环境区首行按参照稿展示彩色「+N -M」行级变更，而
+     * {@link #status()} 的 porcelain 分桶只有文件数。{@code HEAD} 口径同时覆盖已暂存与
+     * 未暂存变更（基准是最后一次提交）；untracked 文件不在 HEAD 对比范围内、git 也不
+     * 输出其行数，与 PR/代码评审统计同口径。</p>
+     *
+     * <p>降级口径与 {@link #remoteInfo()} 一致：进程异常或非零退出只 WARN 并回 0，
+     * 绝不抛出——只读面板拿不到行数时不展示 +/- 即可，不该让整区变 500。</p>
+     *
+     * @return {@code int[]{additions, deletions}}；不可用时为 {@code {0, 0}}
+     */
+    private int[] lineStats() {
+        try {
+            ProcessResult numstat = runGitCommand("git", "diff", "HEAD", "--numstat");
+            if (numstat.exitCode != 0) {
+                LOG.warn("[Web] git lineStats: diff HEAD failed, exit {}", numstat.exitCode);
+                return new int[]{0, 0};
+            }
+            return parseNumstat(Arrays.asList(numstat.stdout.split("\n")));
+        } catch (Exception e) {
+            LOG.warn("[Web] git lineStats: {}", e.getMessage());
+            return new int[]{0, 0};
+        }
+    }
+
+    /**
+     * 解析 {@code git diff HEAD --numstat} 输出并聚合行级增删。
+     *
+     * <p><b>WHY 抽成独立静态方法</b>：纯字符串逻辑，无需 spawn 真 git 即可覆盖
+     * 「二进制文件的 '-' 计数 / 改名行的 tab 分隔 / 畸形行」等分支。</p>
+     *
+     * <p>每行形如 {@code <add>\t<del>\t<path>}；二进制文件 git 输出 {@code -\t-\t<path>}，
+     * 计数不可得，按 0 计入（与 GitHub 对二进制文件的展示口径一致）。改名行
+     * （{@code -z} 关闭时）路径段含 tab，只取前两列故不受影响。</p>
+     *
+     * @param lines numstat 逐行输出（可含空行）
+     * @return {@code int[]{additions, deletions}}
+     */
+    static int[] parseNumstat(List<String> lines) {
+        int additions = 0;
+        int deletions = 0;
+        if (lines == null) {
+            return new int[]{0, 0};
+        }
+        for (String raw : lines) {
+            if (raw == null) continue;
+            String line = raw.trim();
+            if (line.isEmpty()) continue;
+            String[] parts = line.split("\t", 3);
+            if (parts.length < 2) continue;
+            additions += parseNumstatCount(parts[0]);
+            deletions += parseNumstatCount(parts[1]);
+        }
+        return new int[]{additions, deletions};
+    }
+
+    /** numstat 单列计数：{@code -}（二进制）与畸形值按 0 计，负值不可能出现同样按 0 挡掉。 */
+    private static int parseNumstatCount(String token) {
+        if (token == null) return 0;
+        String t = token.trim();
+        if (t.isEmpty() || "-".equals(t)) return 0;
+        try {
+            int v = Integer.parseInt(t);
+            return v > 0 ? v : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /** ahead/behind 不可用时的哨兵值：用 -1 而不是 null，保证响应体字段恒定存在，前端无需判 undefined。 */

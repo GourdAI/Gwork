@@ -6,6 +6,8 @@
 pub mod agent;
 pub mod builtin;
 pub mod code;
+pub mod filestate;
+pub mod output;
 pub mod registry;
 pub mod web;
 pub mod web_retry;

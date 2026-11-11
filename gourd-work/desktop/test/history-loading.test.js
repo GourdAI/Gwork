@@ -29,6 +29,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+const { reducedMotionBlocks, animationDeclarations, findDeadReducedMotion } = require('./css-motion');
+
 const uiRoot = path.resolve(__dirname, '../ui');
 const HISTORY_SRC = fs.readFileSync(path.join(uiRoot, 'js', 'app-history.js'), 'utf8');
 const BASE_SRC = fs.readFileSync(path.join(uiRoot, 'js', 'app-base.js'), 'utf8');
@@ -351,14 +353,38 @@ test('CSS 规格：主题变量驱动 + 减少动效偏好 + 位置修正后的�
     assert.ok(/prefers-reduced-motion: reduce/.test(CSS_SRC), '尊重系统减少动效偏好');
     assert.ok(CSS_SRC.includes('chl-shimmer'), '骨架流光必须保留（加载信号的全部来源）');
     // reduced-motion 块必须真的含 .chl-line：骨架只剩流光这一种动效，
-    // 漏掉它等于「减少动效」完全失效，而只断言存在 @media 是测不出来的
-    const rmAt = CSS_SRC.lastIndexOf('@media (prefers-reduced-motion: reduce)');
-    assert.ok(rmAt > 0, '加载态的 reduced-motion 块缺失');
-    const rmBodyEnd = CSS_SRC.indexOf('}', CSS_SRC.indexOf('{', rmAt));
-    const rmBlock = CSS_SRC.slice(rmAt, rmBodyEnd + 1);
-    assert.match(rmBlock, /\.chl-line/, 'reduced-motion 必须把骨架流光一并停掉');
-    assert.match(rmBlock, /\.chl-row/, 'reduced-motion 必须把逐行升起停掉');
-    assert.match(rmBlock, /animation:\s*none/, 'reduced-motion 必须真的置 animation:none');
+    // 漏掉它等于「减少动效」完全失效，而只断言存在 @media 是测不出来的。
+    //
+    // 【护栏修正 2026-11-10】旧实现有两处失真，会把人逼着写死代码：
+    //   ① lastIndexOf 只看「最后一个」reduced-motion 块 —— 于是任何新增的
+    //      reduced-motion 规则都被迫塞进那个尾块，而尾块位置往往【早于】被它
+    //      想停掉的动画声明。同特异性下后者胜出，animation:none 形同虚设
+    //      （实测：变异掉 theme.css 的全局 !important 兜底后，插画照常 5.2s 循环）。
+    //   ② indexOf('}') 取到的是块内【第一条规则】的右括号，rmBlock 名不副实，
+    //      块内后续规则根本没被校验。
+    // 现在改为收集【全部】块并按花括号配平取整块（实现见 test/css-motion.js，
+    // 与登录弹框插画共用）。规则写在哪个块、块的先后顺序都不再影响判定 ——
+    // 与 CSS 层叠真相一致：真正决定生效的是特异性与顺序，不是「块的位置」。
+    const rmBlocks = reducedMotionBlocks(CSS_SRC);
+    assert.ok(rmBlocks.length > 0, '加载态的 reduced-motion 块缺失');
+    const rmAll = rmBlocks.map(b => b.body).join('\n');
+    assert.match(rmAll, /\.chl-line/, 'reduced-motion 必须把骨架流光一并停掉');
+    assert.match(rmAll, /\.chl-row/, 'reduced-motion 必须把逐行升起停掉');
+    assert.match(rmAll, /animation:\s*none/, 'reduced-motion 必须真的置 animation:none');
+
+    /* 取样自检：解析器若静默失配，下面的「最后一条声明是 none」就会恒真通过。 */
+    assert.ok(animationDeclarations(CSS_SRC).length > 0,
+        '未解析到任何 animation 声明（解析器失效，护栏形同虚设）');
+
+    /* 【生效性护栏】光有 animation:none 不够：它必须【盖得住】动画声明。
+       同特异性下顺序后者胜 —— 若「停动画」的规则出现在「放动画」的规则之前，
+       这条 none 就是死代码。骨架的两条动效在此校验；登录弹框插画的同类校验
+       见 account-entry-behavior.test.js（各归各的测试文件，但共用同一实现）。 */
+    const offenders = ['.chl-line', '.chl-row']
+        .map(sel => findDeadReducedMotion(CSS_SRC, sel))
+        .filter(Boolean);
+    assert.deepEqual(offenders, [],
+        '存在「animation:none 被后续声明反超」的死代码：' + offenders.join(' | '));
 });
 
 /* ===== 7. 加载态视觉：去掉「进度条+圆环+小字」三件套，骨架铺满全区 =====

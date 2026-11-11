@@ -20,6 +20,10 @@
                 </div>
             </div>
             <div class="attachments-wrap" id="welcomeAttachmentsWrap"></div>
+            <!-- 技能小卡片行：刻意独立于附件区。附件区由 renderAttachmentsWrap 全量重建
+                 （首行 html('')）且靠 has-items 控制显隐，chip 寄生其中会被清空且看不见；
+                 显隐由 app-history.js 按自身 has-chips 维护。 -->
+            <div class="skill-chips" id="welcomeSkillChips"></div>
             <div class="input-resize-handle" data-i18n-title="app.resize_input"></div>
             <div style="position:relative">
                 <div class="cmd-complete" id="welcomeCmdComplete"></div>
@@ -207,6 +211,8 @@
                     </div>
                 </div>
                 <div class="attachments-wrap" id="chatAttachmentsWrap"></div>
+                <!-- 技能小卡片行：独立于附件区，理由同 welcomeSkillChips 处注释 -->
+                <div class="skill-chips" id="chatSkillChips"></div>
                 <div class="input-resize-handle" data-i18n-title="app.resize_input"></div>
                 <div style="position:relative;">
                     <div class="cmd-complete" id="chatCmdComplete"></div>

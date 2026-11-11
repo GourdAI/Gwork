@@ -1385,6 +1385,8 @@
     "no_upstream": "未关联上游分支",
     "synced": "已同步",
     "ahead_behind": "领先 {0} / 落后 {1}",
+    "commit_or_push": "提交或推送",
+    "sync_unknown": "同步状态未知",
     "env_local": "本地",
     "env_remote": "远程",
     "empty_env": "暂无环境信息",
@@ -1395,7 +1397,7 @@
   },
   "account": {
     "close": "关闭",
-    "entry": "登录 / 注册",
+    "entry": "登录",
     "sign_in": "登录",
     "sign_up": "注册",
     "sign_up_submit": "注册并登录",
@@ -1412,6 +1414,9 @@
     "points": "积分余额",
     "memory": "记忆与进化",
     "feedback": "意见反馈",
-    "unavailable": "登录服务暂不可用，请在桌面客户端中操作"
+    "unavailable": "登录服务暂不可用，请在桌面客户端中操作",
+    "auth_title_login": "登录 GWork",
+    "auth_title_register": "创建账号",
+    "auth_slogan": "不止执行，更是创造。"
   }
 }

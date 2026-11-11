@@ -1385,6 +1385,8 @@
     "no_upstream": "Sem branch upstream",
     "synced": "Sincronizado",
     "ahead_behind": "{0} à frente / {1} atrás",
+    "commit_or_push": "Fazer commit ou push",
+    "sync_unknown": "Estado de sincronização desconhecido",
     "env_local": "Local",
     "env_remote": "Remoto",
     "empty_env": "Sem informações de ambiente ainda",
@@ -1395,7 +1397,7 @@
   },
   "account": {
     "close": "Fechar",
-    "entry": "Entrar / Registrar",
+    "entry": "Entrar",
     "sign_in": "Entrar",
     "sign_up": "Registrar",
     "sign_up_submit": "Registrar e entrar",
@@ -1412,6 +1414,9 @@
     "points": "Saldo de pontos",
     "memory": "Memória e evolução",
     "feedback": "Comentários",
-    "unavailable": "Serviço de login indisponível. Use o aplicativo desktop."
+    "unavailable": "Serviço de login indisponível. Use o aplicativo desktop.",
+    "auth_title_login": "Entrar no GWork",
+    "auth_title_register": "Criar uma conta",
+    "auth_slogan": "Além de executar, criar."
   }
 }

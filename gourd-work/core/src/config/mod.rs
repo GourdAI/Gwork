@@ -124,6 +124,18 @@ pub struct GeneralSettings {
     pub history_window_size: u32,
     #[serde(rename = "apiRetries")]
     pub api_retries: u32,
+    /// Retry count for the model (LLM stream) calls themselves (Java
+    /// `GeneralGroupDo.modelRetries`, default 3; Java feeds it to
+    /// `AgentFactory.builder.retryConfig(...)` / `HarnessEngine.setModelRetries`).
+    ///
+    /// This kernel was missing the key entirely: the settings page's "model
+    /// retries" box posts `modelRetries`, serde dropped it as an unknown field,
+    /// and `GET /web/settings/general` returned nothing for it — so the box read
+    /// back empty on every revisit while the loop quietly borrowed `apiRetries`
+    /// (which in Java drives only the OpenAPI gateway / webfetch tools). The
+    /// shared settings.json contract needs both keys under their Java names.
+    #[serde(rename = "modelRetries")]
+    pub model_retries: u32,
     #[serde(rename = "maxTurns")]
     pub max_turns: u32,
     /// Self-reflection continuation (Java `AgentProperties.autoRethink`, default true).
@@ -238,11 +250,13 @@ pub struct GeneralSettings {
     /// Java splits its retries at `HarnessEngine.java:1005-1007`:
     /// `codeSearchTalent` / `websearchTalent` take `options.getMcpRetries()` while
     /// `webfetchTalent` takes `options.getApiRetries()`. This kernel previously
-    /// modelled only `apiRetries` and used it *solely* for LLM streams
-    /// (`react/mod.rs:470`), so the web tools had no retry budget at all. The
-    /// split is kept here so a settings.json shared with the Java kernel drives
-    /// both kernels identically: `apiRetries` → HTTP web tools, `mcpRetries` →
-    /// the Exa MCP `codesearch` tool.
+    /// modelled only `apiRetries` and borrowed it for LLM streams too, so the
+    /// web tools had no retry budget of their own and the settings page's
+    /// model-retries box (`modelRetries`, see above) had no field to land in.
+    /// The split is kept here so a settings.json shared with the Java kernel
+    /// drives both kernels identically: `modelRetries` → LLM streams,
+    /// `apiRetries` → HTTP web tools, `mcpRetries` → the Exa MCP `codesearch`
+    /// tool.
     #[serde(rename = "mcpRetries")]
     pub mcp_retries: u32,
 
@@ -272,6 +286,7 @@ impl Default for GeneralSettings {
         Self {
             history_window_size: 30,
             api_retries: 3,
+            model_retries: 3,
             max_turns: 20,
             auto_rethink: true,
             context_length: crate::usage::DEFAULT_CONTEXT_LENGTH,
@@ -755,19 +770,21 @@ mod tests {
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.general.mcp_retries, 3, "Java AgentProperties.mcpRetries = 3");
         assert_eq!(s.general.api_retries, 3, "Java AgentProperties.apiRetries = 3");
+        assert_eq!(s.general.model_retries, 3, "Java AgentProperties.modelRetries = 3");
         assert_eq!(s.general.web_retry_budget_secs, 120, "Java WebfetchTalent.MAX_TIMEOUT_MS");
         assert!(s.general.web_proxy.is_empty(), "no proxy by default");
 
         let s: Settings = serde_json::from_str(
-            r#"{"general":{"mcpRetries":5,"webProxy":"http://127.0.0.1:7890","webRetryBudgetSecs":45}}"#,
+            r#"{"general":{"mcpRetries":5,"modelRetries":7,"webProxy":"http://127.0.0.1:7890","webRetryBudgetSecs":45}}"#,
         )
         .unwrap();
         assert_eq!(s.general.mcp_retries, 5);
+        assert_eq!(s.general.model_retries, 7, "the settings page's model-retries box must survive a round trip");
         assert_eq!(s.general.web_proxy, "http://127.0.0.1:7890");
         assert_eq!(s.general.web_retry_budget_secs, 45);
 
         let back = serde_json::to_string(&s.general).unwrap();
-        for key in ["mcpRetries", "webProxy", "webRetryBudgetSecs", "apiRetries"] {
+        for key in ["mcpRetries", "webProxy", "webRetryBudgetSecs", "apiRetries", "modelRetries"] {
             assert!(back.contains(key), "{key} must round-trip");
         }
     }

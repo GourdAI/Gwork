@@ -20,7 +20,7 @@ use super::types::*;
 pub struct LlmClient {
     model: ModelConfig,
     http: reqwest::Client,
-    /// Max retry attempts for failed model calls (from settings.general.api_retries).
+    /// Max retry attempts for failed model calls (from settings.general.model_retries).
     api_retries: u32,
     /// Wire protocol this model speaks, resolved once at construction.
     dialect: Dialect,
@@ -58,7 +58,22 @@ impl LlmClient {
         // and resolving per request would repeat the same string matching.
         let dialect = Dialect::resolve(&model);
         debug!(model = %model.name_or_model(), ?dialect, "LLM client protocol");
-        Self { model, http, api_retries: api_retries.max(1), dialect }
+        // Bound the retry budget at the ONE place every caller funnels through.
+        //
+        // The settings save handler clamps `modelRetries` too, but that is only
+        // the wire path: a hand-edited (or Java-written) settings.json is loaded
+        // straight into `GeneralSettings` and reaches here unclamped. Without a
+        // ceiling at the consumption point a typo like `4000000000` turns one
+        // flaky provider into an effectively unbounded retry storm.
+        //
+        // This also removes a latent panic: the backoff below computes
+        // `500 * 2u64.pow(attempt)`, which overflows in debug builds once
+        // `attempt` reaches 64.
+        //
+        // Same ceiling as the web tools, deliberately sourced from the same
+        // constant so the two knobs cannot drift apart.
+        let api_retries = api_retries.clamp(1, crate::tools::web_retry::MAX_ATTEMPTS_CEILING);
+        Self { model, http, api_retries, dialect }
     }
 
     pub fn model_name(&self) -> &str {
@@ -1018,5 +1033,49 @@ mod tests {
             "a live stream must not surface a timeout error: {:?}",
             errors
         );
+    }
+
+    // ─── retry budget is bounded at the consumption point ────────────────────
+    //
+    // The settings save handler clamps `modelRetries`, but a hand-edited or
+    // Java-written settings.json reaches `with_retries` straight from
+    // `GeneralSettings` and bypasses that handler entirely. This is the only
+    // choke point left, so the bound has to be asserted here.
+
+    fn probe_budget(requested: u32) -> u32 {
+        let m = ModelConfig {
+            name: "m".into(),
+            standard: "openai".into(),
+            api_url: "http://127.0.0.1:1".into(),
+            api_key: "k".into(),
+            model: "m".into(),
+            ..Default::default()
+        };
+        LlmClient::with_retries(m, requested).api_retries
+    }
+
+    #[test]
+    fn an_absurd_retry_budget_from_the_config_file_is_capped() {
+        // Without this cap a `modelRetries: 4000000000` typo in settings.json
+        // turns one flaky provider into an effectively unbounded retry storm —
+        // and, because the backoff computes `500 * 2u64.pow(attempt)`, panics
+        // on overflow once `attempt` reaches 64.
+        assert_eq!(probe_budget(u32::MAX), 10);
+        assert_eq!(probe_budget(4_000_000_000), 10);
+        assert_eq!(
+            probe_budget(u32::MAX),
+            crate::tools::web_retry::MAX_ATTEMPTS_CEILING,
+            "must reuse the web tools' ceiling, not a second hard-coded 10"
+        );
+    }
+
+    #[test]
+    fn a_zero_retry_budget_still_makes_one_attempt() {
+        // `0` is a legitimate "no retry" request, but a stream that is never
+        // issued at all would hang the turn, so it is floored to 1.
+        assert_eq!(probe_budget(0), 1);
+        assert_eq!(probe_budget(1), 1);
+        assert_eq!(probe_budget(3), 3, "in-range values pass through untouched");
+        assert_eq!(probe_budget(10), 10, "the ceiling itself is allowed");
     }
 }

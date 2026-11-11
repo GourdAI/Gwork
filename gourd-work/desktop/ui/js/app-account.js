@@ -3,12 +3,12 @@
     就地向上展开的账号弹层 + 【独立居中登录弹框】三件套。
 
     参照设计稿（用户 11-09 提供并二次确认）：
-      - 底栏区域 = 用户卡片：未登录显示「登录 / 注册」，已登录显示头像 + 昵称 + 套餐；
+      - 底栏区域 = 用户卡片：未登录显示「登录」，已登录显示头像 + 昵称 + 套餐；
       - 点击卡片向上展开弹层，内容是【设置 + 用户相关】菜单：
-          已登录 = 用户信息面板（头像/昵称/套餐/积分 + 设置、外观浅深、
+          已登录 = 用户信息面板（头像/昵称/套餐/积分 + 设置、外观系统/浅/深、
                   记忆与进化、意见反馈、检查更新、退出登录）；
-          未登录 = 登录/注册入口行 + 设置菜单（设置、外观浅深、检查更新、意见反馈）；
-      - 登录 / 注册表单是【独立居中弹框】（.account-modal，半透明遮罩 + 居中），
+          未登录 = 登录入口行 + 设置菜单（设置、外观系统/浅/深、检查更新、意见反馈）；
+    - 登录表单是【独立居中弹框】（.account-modal，半透明遮罩 + 居中），
         绝不塞进账号弹层里（用户明确否决过弹层内嵌表单的方案）。
 
     凭据与会话保活全部在 Rust 侧（auth.rs）：本页面只调用
@@ -125,7 +125,9 @@
                 name.textContent = display || t('account.signed_in', '已登录');
                 name.removeAttribute('data-i18n');
             } else {
-                name.textContent = t('account.entry', '登录 / 注册');
+                /* 入口行只说「登录」：注册在登录弹框内以 tab 形式提供，
+                   卡片/弹层文案不再出现「注册」字样（用户 11-xx 要求）。 */
+                name.textContent = t('account.entry', '登录');
                 name.setAttribute('data-i18n', 'account.entry');
             }
         }
@@ -165,7 +167,7 @@
         popover = el('div', 'account-popover');
         popover.id = 'accountPopover';
         popover.setAttribute('role', 'dialog');
-        popover.setAttribute('aria-label', t('account.entry', '登录 / 注册'));
+        popover.setAttribute('aria-label', t('account.entry', '登录'));
         popover.style.display = 'none';
         popover.onclick = delegate(popover);
 
@@ -173,17 +175,20 @@
         document.body.appendChild(popover);
     }
 
-    /* 就地定位：优先贴卡片上方；上方空间不足时落到下方。宽度跟随侧栏，
-       但夹在 280–340px，避免窄侧栏把弹层挤成一条。 */
+    /* 就地定位：优先贴卡片上方；上方空间不足时落到下方。
+       【宽度纪律】弹层宽度与触发它的用户卡片【等宽】（左缘对齐卡片左缘），
+       视觉上像从卡片长出来的，不再比卡片宽出一截（用户报障「弹层太宽」：
+       旧版 +24px 且夹在 280–340，比 252px 的卡片明显更宽）。
+       夹在 240–300px：窄侧栏不至于把弹层挤成一条，宽侧栏也不至于摊成大面板。 */
     function position() {
         if (!entry || !popover) return;
         var r = entry.getBoundingClientRect();
         var vw = window.innerWidth || 1024;
         var vh = window.innerHeight || 768;
-        popover.style.width = Math.max(280, Math.min(340, Math.round(r.width) + 24)) + 'px';
+        popover.style.width = Math.max(240, Math.min(300, Math.round(r.width))) + 'px';
         var w = popover.offsetWidth;
         var h = popover.offsetHeight;
-        var left = Math.min(Math.max(8, r.left - 4), Math.max(8, vw - w - 8));
+        var left = Math.min(Math.max(8, r.left), Math.max(8, vw - w - 8));
         var top = r.top - h - 8;
         if (top < 8) top = Math.min(r.bottom + 8, vh - h - 8);
         popover.style.left = left + 'px';
@@ -207,12 +212,15 @@
             + icon(paths) + '<span class="account-pop-item-label">' + esc(t(key, fallback)) + '</span></button>';
     }
 
-    /* 外观分段控件（浅色 / 深色），与设置页共用 __themeApi；
-       已登录信息面板与未登录设置菜单都带这一行。 */
+    /* 外观分段控件（系统 / 浅色 / 深色），与设置页共用 __themeApi；
+       已登录信息面板与未登录设置菜单都带这一行。
+       三档与设置页外观 tab 的 system|light|dark 完全同源（app-ui.js 主题引擎
+       原生支持 system：跟随 OS 明暗），弹层不再只提供浅/深两档。 */
     function themeRow() {
-        return '<div class="account-pop-item">' + icon(ICON_THEME)
+        return '<div class="account-pop-item account-pop-item-theme">' + icon(ICON_THEME)
             + '<span class="account-pop-item-label">' + esc(t('settings.tabs.appearance', '外观')) + '</span>'
             + '<span class="account-theme-switch">'
+            + '<button class="account-theme-btn" type="button" data-mode="system" id="accountThemeSystem">' + esc(t('settings.appearance.mode.system', '系统')) + '</button>'
             + '<button class="account-theme-btn" type="button" data-mode="light" id="accountThemeLight">' + esc(t('settings.appearance.mode.light', '浅色')) + '</button>'
             + '<button class="account-theme-btn" type="button" data-mode="dark" id="accountThemeDark">' + esc(t('settings.appearance.mode.dark', '深色')) + '</button>'
             + '</span></div>';
@@ -252,10 +260,10 @@
     }
 
     /* 视图 B：未登录设置菜单（弹层）—— 设置 + 用户相关（登录入口行）。
-       登录表单不在这里，点「登录 / 注册」行打开独立居中弹框。 */
+       登录表单不在这里，点「登录」行打开独立居中弹框。 */
     function renderMenu() {
         var h = '<div class="account-pop-menu">';
-        h += menuItem('login', 'account.entry', '登录 / 注册', ICON_LOGIN);
+        h += menuItem('login', 'account.entry', '登录', ICON_LOGIN);
         h += '<div class="account-pop-sep"></div>';
         h += menuItem('settings', 'settings.title', '设置', ICON_GEAR);
         h += themeRow();
@@ -285,10 +293,15 @@
         var api = window.__themeApi;
         var mode = api && typeof api.getThemeMode === 'function' ? api.getThemeMode() : null;
         if (!mode) mode = document.body && document.body.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
-        var l = document.getElementById('accountThemeLight');
-        var d = document.getElementById('accountThemeDark');
-        if (l) { if (mode === 'light') l.classList.add('active'); else l.classList.remove('active'); }
-        if (d) { if (mode === 'dark') d.classList.add('active'); else d.classList.remove('active'); }
+        /* 三档（system/light/dark）：active 只挂在【模式】上，不按解析后的明暗
+           反推 —— 否则 system 模式下浅色/深色两档会同时「看起来选中」。 */
+        var modes = ['system', 'light', 'dark'];
+        for (var i = 0; i < modes.length; i++) {
+            var b = document.getElementById('accountTheme' + modes[i].charAt(0).toUpperCase() + modes[i].slice(1));
+            if (!b) continue;
+            if (mode === modes[i]) b.classList.add('active');
+            else b.classList.remove('active');
+        }
     }
 
     function refreshView() {
@@ -306,7 +319,7 @@
         modal = el('div', 'account-modal');
         modal.id = 'accountModal';
         modal.setAttribute('role', 'dialog');
-        modal.setAttribute('aria-label', t('account.entry', '登录 / 注册'));
+        modal.setAttribute('aria-label', t('account.entry', '登录'));
         modal.style.display = 'none';
         modal.onclick = delegate(modal);
 
@@ -314,10 +327,33 @@
         document.body.appendChild(modal);
     }
 
+    /* 登录弹框视觉（参照 Qoder 官网登录页）：【左右分栏】——左品牌视觉区
+       （手写体标语 + 漂浮图标插画 + 视觉署名），右表单区（品牌标 + 动态主标题
+       + 分段式登录/注册切换 + 表单 + 单一主操作按钮）。窄屏（<680px）左栏由
+       CSS 隐藏，回落为单列表单，功能不受影响。
+       【关闭按钮挤占修复】旧版 .account-close 浮在右上角、tabs 行又用 margin-right
+       硬给它让位，导致「登录/注册」分段被挤偏、视觉重心失衡。现改为：关闭按钮
+       绝对定位在弹框右上角、不占据内容流；tabs 居中且不再预留右侧空间。
+       品牌名 GWork 与侧栏 .sidebar-logo-text 同源（产品名，不随语言翻译）。
+       插画全部为内联 SVG（无外链资源、离线可用、随主题变量换色）。 */
     function renderAuth() {
         var h = '<div class="account-auth">';
-        h += '<button class="account-close" type="button" data-act="close-modal" aria-label="' + esc(t('account.close', '关闭')) + '">×</button>';
-        h += '<div class="account-tabs">'
+        h += '<button class="account-close" type="button" data-act="close-modal" aria-label="' + esc(t('account.close', '关闭')) + '">'
+            + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">'
+            + '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
+        /* 左：品牌视觉区。标语走 i18n（account.auth_slogan），插画纯装饰 aria-hidden。 */
+        h += '<div class="account-auth-visual" aria-hidden="true">';
+        h += '<div class="account-auth-slogan" id="accountAuthSlogan"></div>';
+        h += '<div class="account-auth-art">' + AUTH_ART_SVG + '</div>';
+        h += '<div class="account-auth-visual-mark">GWork</div>';
+        h += '</div>';
+        /* 右：表单区 */
+        h += '<div class="account-auth-main">';
+        h += '<div class="account-brand">'
+            + '<img class="account-brand-logo" src="/img/favicon.png" alt="" aria-hidden="true">'
+            + '<span class="account-brand-name">GWork</span></div>';
+        h += '<h2 class="account-auth-title" id="accountAuthTitle"></h2>';
+        h += '<div class="account-tabs" data-mode="' + authMode + '">'
             + '<button class="account-tab' + (authMode === 'login' ? ' active' : '') + '" type="button" data-act="tab-login">' + esc(t('account.sign_in', '登录')) + '</button>'
             + '<button class="account-tab' + (authMode === 'register' ? ' active' : '') + '" type="button" data-act="tab-register">' + esc(t('account.sign_up', '注册')) + '</button>'
             + '</div>';
@@ -325,10 +361,36 @@
         h += '<div class="account-hint" id="' + HINT_MODAL + '"></div>';
         h += '<button class="account-submit" id="accountSubmit" type="button" data-act="submit"></button>';
         h += '</div>';
+        h += '</div>';
         modal.innerHTML = h;
         renderForm(authMode);
         refreshAuthLabels();
     }
+
+    /* 品牌插画：漂浮的「能力图标」（终端 / 智能星 / 对话 / 代码括号）落进文件夹，
+       呼应 Qoder 登录页左侧的图标雨 + 文件夹构图。全部走主题变量 / currentColor
+       取色，明暗主题自动适配；不引外部图片，离线与打包均安全。 */
+    var AUTH_ART_SVG = ''
+        + '<svg class="account-art-svg" viewBox="0 0 260 240" fill="none" xmlns="http://www.w3.org/2000/svg">'
+        /* 背景光晕圆 */
+        + '<circle cx="130" cy="118" r="96" class="account-art-halo"/>'
+        /* 漂浮图标 1：终端 */
+        + '<g class="account-art-float account-art-f1"><rect x="34" y="52" width="52" height="52" rx="14" class="account-art-tile-dark"/>'
+        + '<path d="M48 70l9 8-9 8" class="account-art-stroke-light"/><line x1="61" y1="86" x2="72" y2="86" class="account-art-stroke-light"/></g>'
+        /* 漂浮图标 2：智能星 */
+        + '<g class="account-art-float account-art-f2"><rect x="104" y="20" width="52" height="52" rx="14" class="account-art-tile-light"/>'
+        + '<path d="M130 34c2.6 8.4 6.9 12.7 15.3 15.3-8.4 2.6-12.7 6.9-15.3 15.3-2.6-8.4-6.9-12.7-15.3-15.3 8.4-2.6 12.7-6.9 15.3-15.3z" class="account-art-accent-fill"/></g>'
+        /* 漂浮图标 3：对话气泡 */
+        + '<g class="account-art-float account-art-f3"><rect x="172" y="58" width="52" height="52" rx="14" class="account-art-tile-dark"/>'
+        + '<path d="M186 76h24a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4h-12l-7 6v-6h-5a4 4 0 0 1-4-4V80a4 4 0 0 1 4-4z" class="account-art-stroke-light-fill"/></g>'
+        /* 文件夹后片 */
+        + '<path d="M52 128h44l12 12h100a10 10 0 0 1 10 10v62a10 10 0 0 1-10 10H52a10 10 0 0 1-10-10v-74a10 10 0 0 1 10-10z" class="account-art-folder-back"/>'
+        /* 文件夹里探出的代码卡片 */
+        + '<g class="account-art-float account-art-f4"><rect x="112" y="112" width="56" height="44" rx="9" transform="rotate(-8 140 134)" class="account-art-tile-accent"/>'
+        + '<path d="M132 128l-7 8 7 8M150 128l7 8-7 8" class="account-art-stroke-contrast"/></g>'
+        /* 文件夹前片 */
+        + '<path d="M42 152h176v60a10 10 0 0 1-10 10H52a10 10 0 0 1-10-10v-60z" class="account-art-folder-front"/>'
+        + '</svg>';
 
     function showAuthModal() {
         ensureModal();
@@ -366,7 +428,22 @@
         });
     }
 
+    /* 主标题与提交按钮文案同步切换（Qoder 式：标题说明当前在做什么）。
+       标题用 <h2> + textContent 赋值，绝不走 innerHTML —— 它是用户可见文本，
+       必须与翻译值一并转义安全。 */
     function refreshAuthLabels() {
+        var title = document.getElementById('accountAuthTitle');
+        if (title) {
+            title.textContent = authMode === 'register'
+                ? t('account.auth_title_register', '创建账号')
+                : t('account.auth_title_login', '登录 GWork');
+        }
+        /* 左栏手写体标语：与主标题同源于 i18n，语言切换（60s 保活刷新路径）
+           也会经 refreshAuthLabels 同步，无需额外钩子。 */
+        var slogan = document.getElementById('accountAuthSlogan');
+        if (slogan) {
+            slogan.textContent = t('account.auth_slogan', '不止执行，更是创造。');
+        }
         var submit = document.getElementById('accountSubmit');
         if (submit) {
             submit.textContent = busy ? t('account.working', '请稍候…')
@@ -383,6 +460,12 @@
             if (want) tabs[i].classList.add('active');
             else tabs[i].classList.remove('active');
         }
+        /* 分段控件的滑块靠父容器 data-mode 定位：只改 class 无法驱动 ::after，
+           必须同步属性，否则切到「注册」时高亮块仍停在左半。
+           刻意用 querySelectorAll()[0] 而非 querySelector：与模块内既有取节点
+           方式一致，且不依赖调用方具备 querySelector 能力。 */
+        var bar = modal ? modal.querySelectorAll('.account-tabs') : [];
+        if (bar.length) bar[0].setAttribute('data-mode', mode);
         renderForm(mode);
         setHint('modal', '', '');
         refreshAuthLabels();

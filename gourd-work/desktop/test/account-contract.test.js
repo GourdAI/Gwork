@@ -80,7 +80,11 @@ test('12 locales all carry the same account key set', () => {
     'username', 'email', 'password', 'working', 'signed_in', 'required',
     'password_policy', 'failed',
     // 用户卡片 / 信息弹层（参考设计稿）新增键
-    'plan', 'points', 'memory', 'feedback', 'unavailable'
+    'plan', 'points', 'memory', 'feedback', 'unavailable',
+    // 登录弹框主标题（Qoder 式：标题说明当前在做什么，随登录/注册切换）
+    'auth_title_login', 'auth_title_register',
+    // 左栏手写体标语（Qoder 式艺术字，随语言切换）
+    'auth_slogan'
   ].sort();
   for (const f of files) {
     const obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));

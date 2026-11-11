@@ -52,6 +52,12 @@ pub struct SuspendRequest {
     pub kind: SuspendKind,
     /// For HITL: the command awaiting approval (shown to the user).
     pub command: Option<String>,
+    /// For HITL: the timeout the model asked for. Carried through the suspension
+    /// so the approved command runs with the same ceiling, not a hardcoded one.
+    pub timeout_ms: Option<u64>,
+    /// For HITL: whether the model asked for background execution. Preserved so
+    /// approval does not turn a detached task into a blocking synchronous run.
+    pub background: bool,
 }
 
 impl ToolOutput {
@@ -69,17 +75,19 @@ impl ToolOutput {
         Self {
             text: String::new(),
             is_error: false,
-            suspend: Some(SuspendRequest { kind: SuspendKind::Question, command: None }),
+            suspend: Some(SuspendRequest { kind: SuspendKind::Question, command: None, timeout_ms: None, background: false }),
             image_urls: Vec::new(),
         }
     }
-    pub fn suspend_hitl(command: impl Into<String>) -> Self {
+    pub fn suspend_hitl(command: impl Into<String>, timeout_ms: Option<u64>, background: bool) -> Self {
         Self {
             text: String::new(),
             is_error: false,
             suspend: Some(SuspendRequest {
                 kind: SuspendKind::Hitl,
                 command: Some(command.into()),
+                timeout_ms,
+                background,
             }),
             image_urls: Vec::new(),
         }

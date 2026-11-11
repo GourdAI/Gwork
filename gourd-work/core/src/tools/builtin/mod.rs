@@ -136,28 +136,21 @@ fn normalize_case(p: &Path) -> PathBuf {
 
 /// Read-only roots outside the workspace that this invocation may reach.
 ///
-/// Currently just the session's `uploads/` directory, so a file attachment the
-/// user dropped in (`[附件: uploads/x.pdf]`) is actually readable by the model.
+/// The session's `uploads/` directory (so a file attachment the user dropped
+/// in, `[附件: uploads/x.pdf]`, is readable) plus `tool-outputs/` (so the model
+/// can page through large outputs persisted by [`crate::tools::output`]).
 /// **Only read-only tools may pass this** — `write`/`edit` keep the strict
 /// workspace boundary, matching Java where `trustedRead` is gated on
 /// `!writeMode` (`TerminalSupport.resolveSafePath:799`).
+/// `uploads` must stay first: `session_relative_root` keys off element 0.
 fn readonly_extra_roots(ctx: &ToolContext) -> Vec<PathBuf> {
-    ctx.session_dir
-        .as_ref()
-        .map(|dir| vec![crate::attachments::uploads_dir(dir)])
-        .unwrap_or_default()
-}
-
-/// Read a file with encoding fallback (UTF-8 → GBK for legacy Windows files).
-fn read_file_lossy(path: &Path) -> std::io::Result<String> {
-    let bytes = std::fs::read(path)?;
-    match std::str::from_utf8(&bytes) {
-        Ok(s) => Ok(s.to_string()),
-        Err(_) => {
-            let (decoded, _, _) = encoding_rs::GBK.decode(&bytes);
-            Ok(decoded.into_owned())
-        }
-    }
+    let Some(dir) = ctx.session_dir.as_ref() else {
+        return Vec::new();
+    };
+    vec![
+        crate::attachments::uploads_dir(dir),
+        crate::tools::output::store_dir(&ctx.workspace, Some(dir)),
+    ]
 }
 
 /// Detect the dominant line ending of a file's content.
@@ -171,6 +164,26 @@ fn detect_eol(content: &str) -> &'static str {
 /// 4MB 原图 ≈ 5.3MB base64；超限明确报错引导压缩或改走附件通道，
 /// 而不是静默丢弃图片让模型以为"看到了"。与 Java 内核 MAX_IMAGE_READ_BYTES 同值。
 pub(crate) const MAX_IMAGE_READ_BYTES: u64 = 4 * 1024 * 1024;
+
+/// 文本单次读取的文件大小上限（字节）。超限直接拒绝并引导 bash 分段查看：
+/// 把超大文件整个读进内存再分页，内存与上下文两头浪费。
+pub(crate) const MAX_READ_FILE_BYTES: u64 = 10 * 1024 * 1024;
+/// 未指定 limit 时的默认读取行数。旧实现 limit=0 表示整文件，一个 5 万行
+/// 的日志能一次灌满上下文；分页默认值把单次观测约束在可控规模。
+const READ_DEFAULT_LIMIT: usize = 2000;
+/// 单行截断宽度（字符数）。压缩后的 JS / 单行 JSON 一行可达数 MB，
+/// 行数上限挡不住这种「一行即上下文」的文件。
+const READ_MAX_LINE_CHARS: usize = 2000;
+
+/// 按字符截断单行（UTF-8 安全），附截断标记让模型知道还有内容。
+fn truncate_read_line(line: &str) -> String {
+    let n = line.chars().count();
+    if n <= READ_MAX_LINE_CHARS {
+        return line.to_string();
+    }
+    let kept: String = line.chars().take(READ_MAX_LINE_CHARS).collect();
+    format!("{}... [line truncated: {} chars total]", kept, n)
+}
 
 /// 视觉模型可读的图片扩展名（不含 svg：主流视觉模型不接受矢量格式）。
 /// 与附件通道支持的图片集合对齐。
@@ -214,7 +227,7 @@ pub struct ReadTool;
 impl Tool for ReadTool {
     fn name(&self) -> &str { "read" }
     fn description(&self) -> &str {
-        "Read file content. Supports offset/limit for pagination. Use before editing to confirm current content. For image files (png/jpg/jpeg/gif/webp/bmp) returns the visual content the model can see."
+        "Read file content with line numbers. Defaults to the first 2000 lines; use offset/limit to paginate. Lines longer than 2000 chars are truncated. Read a file before editing it. Image files (png/jpg/jpeg/gif/webp/bmp) return visual content."
     }
     fn readonly(&self) -> bool { true }
     fn parameters_schema(&self) -> serde_json::Value {
@@ -223,7 +236,7 @@ impl Tool for ReadTool {
             "properties": {
                 "file_path": {"type": "string", "description": "Relative path from workspace root ('.' = root)"},
                 "offset": {"type": "integer", "description": "Start line (1-based), default 1"},
-                "limit": {"type": "integer", "description": "Max lines to read"}
+                "limit": {"type": "integer", "description": "Max lines to read, default 2000"}
             },
             "required": ["file_path"]
         })
@@ -259,26 +272,61 @@ impl Tool for ReadTool {
                 Err(e) => ToolOutput::err(format!("Read failed: {}", e)),
             };
         }
-        let content = match read_file_lossy(&path) {
-            Ok(c) => c,
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
             Err(e) => return ToolOutput::err(format!("Read failed: {}", e)),
         };
+        if bytes.len() as u64 > MAX_READ_FILE_BYTES {
+            return ToolOutput::err(format!(
+                "File too large: {} ({} MB > {} MB cap). Inspect specific ranges with bash (head/sed/tail) instead of read.",
+                raw,
+                bytes.len() / 1024 / 1024,
+                MAX_READ_FILE_BYTES / 1024 / 1024
+            ));
+        }
+        if crate::textcodec::looks_binary(&bytes) {
+            return ToolOutput::err(format!(
+                "Binary file: {} (NUL bytes detected). read handles text and images only; use bash to inspect binary content.",
+                raw
+            ));
+        }
+        let content = crate::textcodec::decode_with_bom(&bytes);
+        // 记录模型即将看到的内容快照，edit 据此做读前/新鲜度校验。
+        crate::tools::filestate::record(&ctx.root_session_id, &path, &bytes);
         let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
-        let limit = args["limit"].as_u64().unwrap_or(0) as usize;
+        let limit = match args["limit"].as_u64().unwrap_or(0) as usize {
+            0 => READ_DEFAULT_LIMIT,
+            n => n,
+        };
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
         if total == 0 {
             return ToolOutput::ok(format!("--- {} (empty file) ---", raw));
         }
         let start = (offset - 1).min(total);
-        let end = if limit == 0 { total } else { (start + limit).min(total) };
+        if start >= total {
+            return ToolOutput::ok(format!(
+                "--- {} (offset {} is beyond end of file; {} lines total) ---",
+                raw, offset, total
+            ));
+        }
+        let end = (start + limit).min(total);
         let selected: Vec<String> = lines[start..end]
             .iter()
             .enumerate()
-            .map(|(i, l)| format!("{:>5} | {}", start + i + 1, l))
+            .map(|(i, l)| format!("{:>5} | {}", start + i + 1, truncate_read_line(l)))
             .collect();
         let header = format!("--- {} (Lines {}-{} of {}) ---\n", raw, start + 1, end, total);
-        ToolOutput::ok(format!("{}{}", header, selected.join("\n")))
+        let mut out = format!("{}{}", header, selected.join("\n"));
+        if end < total {
+            out.push_str(&format!(
+                "\n[Truncated: {} more line(s). Continue with offset={} limit={}]",
+                total - end,
+                end + 1,
+                limit
+            ));
+        }
+        ToolOutput::ok(out)
     }
 }
 
@@ -319,6 +367,8 @@ impl Tool for WriteTool {
         }
         match std::fs::write(&path, content) {
             Ok(()) => {
+                // 刚写出的内容模型是知道的，视同已读，后续 edit 无需再 read。
+                crate::tools::filestate::record(&ctx.root_session_id, &path, content.as_bytes());
                 // Record the change (after state) in the ledger
                 if let (Some(ledger), Some(before_state)) = (&ctx.change_ledger, before) {
                     let _ = ledger.record(&ctx.session_id, &ctx.run_id, raw, before_state);
@@ -338,14 +388,14 @@ pub struct EditTool;
 impl Tool for EditTool {
     fn name(&self) -> &str { "edit" }
     fn description(&self) -> &str {
-        "Edit a file by replacing an exact text block. old_str must match uniquely (whitespace-trimmed line comparison). Preserves the file's original line endings."
+        "Edit a file by exact text replacement. old_str must match exactly (including indentation) and uniquely unless replace_all=true. The file must be read first in this session. Preserves the file's line endings."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "file_path": {"type": "string"},
-                "old_str": {"type": "string", "description": "Exact text to replace"},
+                "old_str": {"type": "string", "description": "Exact text to replace, including whitespace and indentation"},
                 "new_str": {"type": "string", "description": "Replacement text"},
                 "replace_all": {"type": "boolean", "description": "Replace all occurrences (default false)"}
             },
@@ -360,68 +410,141 @@ impl Tool for EditTool {
         let Some(path) = resolve_safe(&ctx.workspace, raw) else {
             return ToolOutput::err(format!("Path escapes workspace: {}", raw));
         };
+        if old_str.is_empty() {
+            return ToolOutput::err("old_str is empty");
+        }
+        if old_str == new_str {
+            return ToolOutput::err("old_str and new_str are identical; nothing to change");
+        }
+        // 读前校验：没读过的文件不许改；读过但磁盘已变的必须重读。
+        if let Err(e) = crate::tools::filestate::guard(&ctx.root_session_id, &path) {
+            return ToolOutput::err(e);
+        }
         // Capture "before" state for the change ledger
         let before = ctx.change_ledger.as_ref().and_then(|ledger| {
             ledger.before(&ctx.session_id, &ctx.run_id, raw)
         });
-        let content = match read_file_lossy(&path) {
-            Ok(c) => c,
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
             Err(e) => return ToolOutput::err(format!("Read failed: {}", e)),
         };
+        let bom = crate::textcodec::detect_bom(&bytes);
+        let content = crate::textcodec::decode_with_bom(&bytes);
         // Preserve the file's original line ending style.
         let eol = detect_eol(&content);
-        // Whitespace-tolerant matching: compare trimmed lines
-        let old_lines: Vec<&str> = old_str.lines().collect();
-        let content_lines: Vec<&str> = content.lines().collect();
-        if old_lines.is_empty() {
-            return ToolOutput::err("old_str is empty");
-        }
-        let mut matches: Vec<usize> = Vec::new();
-        if content_lines.len() >= old_lines.len() {
-            for i in 0..=content_lines.len() - old_lines.len() {
-                let window = &content_lines[i..i + old_lines.len()];
-                if window.iter().zip(old_lines.iter()).all(|(a, b)| a.trim() == b.trim()) {
-                    matches.push(i);
-                }
+
+        // 1) 字节级精确匹配（缩进敏感）。旧的「按行 trim 比较」会把不同缩进
+        //    的行判为相等，替换后 indentation 被静默改写——这是必须修掉的缺陷。
+        let mut ranges: Vec<(usize, usize)> = content
+            .match_indices(old_str)
+            .map(|(i, _)| (i, i + old_str.len()))
+            .collect();
+        // 2) 行尾差异：old_str 用 \n 而文件是 CRLF（或反之）。
+        if ranges.is_empty() {
+            let eol_old = old_str.replace("\r\n", "\n").replace('\n', eol);
+            if eol_old != old_str {
+                ranges = content
+                    .match_indices(&eol_old)
+                    .map(|(i, _)| (i, i + eol_old.len()))
+                    .collect();
             }
         }
-        if matches.is_empty() {
-            return ToolOutput::err("old_str not found in file");
+        // 3) Unicode 转写差异（弯引号/长破折号/不间断空格/零宽字符）：
+        //    在归一化视图里定位，但始终按原文字节区间替换，绝不把归一化
+        //    文本写回磁盘。
+        if ranges.is_empty() {
+            let (norm, map) = normalised_with_map(&content);
+            let norm_old: String = old_str.chars().filter_map(normalise_for_match).collect();
+            if !norm_old.is_empty() {
+                ranges = norm
+                    .match_indices(&norm_old)
+                    .map(|(i, _)| (map[i], map[i + norm_old.len()]))
+                    .collect();
+            }
         }
-        if matches.len() > 1 && !replace_all {
+        if ranges.is_empty() {
             return ToolOutput::err(format!(
-                "old_str matches {} locations; provide more context or set replace_all=true",
-                matches.len()
+                "old_str not found in {}. It must match the file exactly (including indentation). Re-read the file and copy the text verbatim.",
+                raw
             ));
         }
-        // Rebuild content (apply replacements from bottom to top to keep indices valid)
-        let new_lines: Vec<&str> = new_str.lines().collect();
-        let mut result_lines: Vec<String> = content_lines.iter().map(|s| s.to_string()).collect();
-        for &start in matches.iter().rev() {
-            let end = start + old_lines.len();
-            let mut replacement: Vec<String> = new_lines.iter().map(|s| s.to_string()).collect();
-            result_lines.splice(start..end, replacement.drain(..));
+        if ranges.len() > 1 && !replace_all {
+            return ToolOutput::err(format!(
+                "old_str matches {} locations; provide more context or set replace_all=true",
+                ranges.len()
+            ));
         }
-        let mut new_content = result_lines.join(eol);
-        // Preserve trailing newline if original had one
-        if content.ends_with('\n') && !new_content.ends_with('\n') {
-            new_content.push_str(eol);
+        // 按字节区间自底向上拼接替换：匹配区之外的一切（含行尾、末尾换行）
+        // 原样保留，不再需要旧实现的「补末尾换行」修补。
+        let mut new_eol = new_str.replace("\r\n", "\n").replace('\n', eol);
+        // old_str 以换行结尾而 new_str 没有时补回行尾：模型常把「整行」写进
+        // old_str 却忘了 new_str 的换行，纯字面替换会把两行黏成一行。
+        if old_str.ends_with('\n') && !new_str.ends_with('\n') {
+            new_eol.push_str(eol);
         }
-        match std::fs::write(&path, &new_content) {
+        let mut result = content.clone();
+        for &(start, end) in ranges.iter().rev() {
+            result.replace_range(start..end, &new_eol);
+        }
+        // UTF-8 BOM 原样保留；UTF-16/32 BOM 不保留——正文已按 UTF-8 重写，
+        // 留着旧 BOM 反而会让文件被错误解码。
+        let mut out_bytes = Vec::with_capacity(result.len() + 4);
+        if let Some(b) = bom {
+            if b.encoding == "utf-8" {
+                out_bytes.extend_from_slice(&bytes[..b.len]);
+            }
+        }
+        out_bytes.extend_from_slice(result.as_bytes());
+        match std::fs::write(&path, &out_bytes) {
             Ok(()) => {
+                crate::tools::filestate::record(&ctx.root_session_id, &path, &out_bytes);
                 if let (Some(ledger), Some(before_state)) = (&ctx.change_ledger, before) {
                     let _ = ledger.record(&ctx.session_id, &ctx.run_id, raw, before_state);
                 }
+                let first_line = content[..ranges[0].0].matches('\n').count() + 1;
                 ToolOutput::ok(format!(
                     "Edited {} ({} replacement(s) at line {})",
                     raw,
-                    matches.len(),
-                    matches[0] + 1
+                    ranges.len(),
+                    first_line
                 ))
             }
             Err(e) => ToolOutput::err(format!("Write failed: {}", e)),
         }
     }
+}
+
+/// 模型常「转写错」的字符：弯引号、长破折号、不间断空格、零宽字符。
+/// 精确匹配失败时用于归一化定位；`\r` 一并丢弃使 CRLF 与 LF 等价。
+fn normalise_for_match(c: char) -> Option<char> {
+    match c {
+        '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => Some('\''),
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => Some('"'),
+        '\u{2013}' | '\u{2014}' | '\u{2212}' => Some('-'),
+        '\u{00A0}' | '\u{2007}' | '\u{202F}' => Some(' '),
+        '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\r' => None,
+        _ => Some(c),
+    }
+}
+
+/// 归一化视图 + 「归一化字节偏移 → 原文字节偏移」索引（末位哨兵 = 原文长度）。
+/// 索引按字节而非字符建：归一化后仍可能含多字节字符（如中文），匹配返回的
+/// 是字节偏移，逐字节映射才能把区间端点映回原文。
+fn normalised_with_map(content: &str) -> (String, Vec<usize>) {
+    let mut out = String::with_capacity(content.len());
+    let mut map = Vec::with_capacity(content.len() + 1);
+    for (off, c) in content.char_indices() {
+        if let Some(n) = normalise_for_match(c) {
+            let mut buf = [0u8; 4];
+            let encoded = n.encode_utf8(&mut buf);
+            for _ in encoded.bytes() {
+                map.push(off);
+            }
+            out.push(n);
+        }
+    }
+    map.push(content.len());
+    (out, map)
 }
 
 // ─── Command execution (shared by bash / run_in_background / HITL approval) ───
@@ -586,9 +709,21 @@ async fn kill_tree(pid: u32) {
 /// and only the wait itself is bounded (by timeout, cancellation and the output
 /// ceiling).
 async fn run_command(
+    cmd: Command,
+    timeout_ms: u64,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) -> CommandResult {
+    run_command_live(cmd, timeout_ms, cancel, None).await
+}
+
+/// `live`, when given, receives a rendered snapshot of the output every ~500 ms
+/// **while the command runs** — background tasks used to publish their buffer
+/// only at exit, so `bash_output` answered "no output yet" for the whole run.
+async fn run_command_live(
     mut cmd: Command,
     timeout_ms: u64,
     cancel: Option<tokio_util::sync::CancellationToken>,
+    live: Option<Arc<Mutex<String>>>,
 ) -> CommandResult {
     let failed = |error: String| CommandResult {
         status: None,
@@ -617,8 +752,18 @@ async fn run_command(
 
     // A runaway producer must be stopped, not just truncated at read time.
     let size_watch = async {
+        let mut tick: u64 = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(OUTPUT_POLL_MS)).await;
+            tick += 1;
+            // Live snapshot for background tasks, every 5th poll (~500 ms):
+            // reading + decoding the capped files is too heavy for every 100 ms.
+            if let Some(buf) = &live {
+                if tick % 5 == 0 {
+                    let (out, err) = files.read_capped();
+                    *buf.lock().await = truncate_head_tail(render_streams(&out, &err));
+                }
+            }
             if files.oversized() { break; }
         }
     };
@@ -680,20 +825,7 @@ fn format_command_result(r: &CommandResult) -> ToolOutput {
             });
         }
     }
-    let stdout = crate::textcodec::strip_ansi(&crate::textcodec::decode_bytes(&r.stdout));
-    let stderr = crate::textcodec::strip_ansi(&crate::textcodec::decode_bytes(&r.stderr));
-    let mut text = String::new();
-    if !stdout.is_empty() { text.push_str(&stdout); }
-    if !stderr.is_empty() {
-        if !text.is_empty() { text.push('\n'); }
-        text.push_str("[stderr]\n");
-        text.push_str(&stderr);
-    }
-    if text.chars().count() > 64_000 {
-        let head: String = text.chars().take(32_000).collect();
-        let tail: String = text.chars().rev().take(16_000).collect::<Vec<_>>().into_iter().rev().collect();
-        text = format!("{}\n... [truncated] ...\n{}", head, tail);
-    }
+    let text = truncate_head_tail(render_streams(&r.stdout, &r.stderr));
     let note = match r.outcome {
         CommandOutcome::TimedOut => r.error.clone()
             .unwrap_or_else(|| "Command timed out (process tree terminated)".to_string()),
@@ -731,9 +863,8 @@ static BG_SESSIONS: once_cell::sync::Lazy<Mutex<HashMap<String, BgSession>>> =
 
 struct BgSession {
     output: Arc<Mutex<String>>,
-    #[allow(dead_code)]
-    done: Arc<tokio::sync::Notify>,
     finished: Arc<std::sync::atomic::AtomicBool>,
+    created: std::time::Instant,
 }
 
 /// Commands/patterns considered dangerous and requiring HITL approval in default mode.
@@ -910,26 +1041,190 @@ impl Drop for TempScriptGuard {
     }
 }
 
+// ─── Shell selection (Windows: Git Bash preferred, PowerShell fallback) ──────
+
+/// Cached Git Bash probe: `Some(path)` = use it, `None` = absent → PowerShell.
+/// Probed once per process; installation state does not change mid-run.
+static GIT_BASH: once_cell::sync::OnceCell<Option<PathBuf>> = once_cell::sync::OnceCell::new();
+
+/// Per-session persisted working directory (POSIX form on Git Bash / Unix).
+/// Lets `cd` in one bash call carry into the next, as the model expects.
+static SESSION_CWD: once_cell::sync::Lazy<Mutex<HashMap<String, PathBuf>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// True for the WSL launcher (`System32\bash.exe`), which is **not** Git Bash:
+/// it boots a Linux VM with a different filesystem, so POSIX commands would run
+/// against `/mnt/c/...` instead of the workspace. Must never be selected.
+fn is_wsl_bash(p: &Path) -> bool {
+    let s = p.to_string_lossy().to_lowercase();
+    s.contains("\\system32\\") || s.contains("\\syswow64\\")
+}
+
+/// Locate a usable Git Bash on Windows. Standard install locations are checked
+/// first (most reliable), then `PATH` (portable / scoop / choco installs), with
+/// the WSL launcher excluded. Returns `None` when Git Bash is not installed —
+/// the caller then falls back to PowerShell so the tool keeps working.
+fn git_bash_exe() -> Option<PathBuf> {
+    GIT_BASH
+        .get_or_init(|| {
+            if !cfg!(windows) {
+                return None;
+            }
+            let mut candidates: Vec<PathBuf> = Vec::new();
+            for env in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+                if let Ok(pf) = std::env::var(env) {
+                    candidates.push(PathBuf::from(pf).join("Git").join("bin").join("bash.exe"));
+                }
+            }
+            if let Ok(local) = std::env::var("LOCALAPPDATA") {
+                candidates.push(
+                    PathBuf::from(local).join("Programs").join("Git").join("bin").join("bash.exe"),
+                );
+            }
+            if let Some(found) = candidates.into_iter().find(|p| p.is_file()) {
+                return Some(found);
+            }
+            if let Some(path) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&path) {
+                    let cand = dir.join("bash.exe");
+                    if cand.is_file() && !is_wsl_bash(&cand) {
+                        return Some(cand);
+                    }
+                }
+            }
+            None
+        })
+        .clone()
+}
+
+/// The shell a bash call will actually use. Stable for the process lifetime.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ShellKind {
+    GitBash,
+    PowerShell,
+    Sh,
+}
+
+pub(crate) fn shell_kind() -> ShellKind {
+    if cfg!(windows) {
+        if git_bash_exe().is_some() {
+            ShellKind::GitBash
+        } else {
+            ShellKind::PowerShell
+        }
+    } else {
+        ShellKind::Sh
+    }
+}
+
+/// A ready-to-spawn shell invocation: argv, an optional temp script to clean up
+/// (PowerShell over-long fallback), and an optional cwd-capture file to read
+/// after the run (POSIX shells only) to persist the working directory.
+pub(crate) struct PreparedShell {
+    pub(crate) argv: Vec<std::ffi::OsString>,
+    pub(crate) temp_script: Option<PathBuf>,
+    pub(crate) cwd_file: Option<PathBuf>,
+}
+
+/// Single-quote a string for POSIX shells (handles embedded quotes).
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Wrap a POSIX command so it starts in `start_cwd`, records its final working
+/// directory to `cwd_file`, and preserves the command's own exit code. The
+/// capture is a side file (not stdout) so it never pollutes the observation.
+fn wrap_posix_cwd(command: &str, start_cwd: &Path, cwd_file: &Path) -> String {
+    let cwd = start_cwd.to_string_lossy().replace('\\', "/");
+    let file = cwd_file.to_string_lossy().replace('\\', "/");
+    format!(
+        "cd {cd} 2>/dev/null\n{cmd}\n__gwork_ec=$?\npwd -P > {file} 2>/dev/null\nexit $__gwork_ec",
+        cd = sh_quote(&cwd),
+        cmd = command,
+        file = sh_quote(&file),
+    )
+}
+
+/// Build the shell invocation for `command`, starting in `start_cwd`.
+///
+/// Windows prefers Git Bash (the model's POSIX prior — `&&`, `grep`, heredocs
+/// work as expected) and falls back to PowerShell when Git Bash is absent, so a
+/// user without Git Bash still gets a working shell. Unix uses `sh`. The POSIX
+/// shells additionally persist the working directory across calls; the
+/// PowerShell fallback keeps the historical workspace-fixed cwd (its exit-code
+/// semantics make a safe wrapper fragile, and it is only the fallback path).
+pub(crate) fn prepare_shell(command: &str, start_cwd: &Path) -> std::io::Result<PreparedShell> {
+    use std::ffi::OsString;
+    match shell_kind() {
+        ShellKind::PowerShell => {
+            let p = prepare_powershell(command)?;
+            Ok(PreparedShell { argv: p.argv, temp_script: p.temp_script, cwd_file: None })
+        }
+        kind => {
+            let cwd_file = std::env::temp_dir().join(format!("gwork-cwd-{}", uuid::Uuid::new_v4()));
+            let wrapped = wrap_posix_cwd(command, start_cwd, &cwd_file);
+            let argv = match kind {
+                ShellKind::GitBash => {
+                    let bash = git_bash_exe().expect("GitBash kind implies a probe hit");
+                    vec![OsString::from(bash), OsString::from("-c"), OsString::from(wrapped)]
+                }
+                _ => vec![OsString::from("sh"), OsString::from("-c"), OsString::from(wrapped)],
+            };
+            Ok(PreparedShell { argv, temp_script: None, cwd_file: Some(cwd_file) })
+        }
+    }
+}
+
+/// Read the cwd-capture file (if any) and persist the working directory for the
+/// session, then remove the file. A missing/invalid capture leaves the previous
+/// value untouched — a failed `pwd` must not reset the cwd to the workspace.
+pub(crate) async fn persist_cwd(session: &str, cwd_file: Option<PathBuf>) {
+    let Some(file) = cwd_file else { return };
+    let captured = tokio::fs::read_to_string(&file).await.ok();
+    let _ = tokio::fs::remove_file(&file).await;
+    let Some(text) = captured else { return };
+    let dir = PathBuf::from(text.trim());
+    if !text.trim().is_empty() && dir.is_dir() {
+        SESSION_CWD.lock().await.insert(session.to_string(), dir);
+    }
+}
+
+/// The starting working directory for a session: the persisted one if it still
+/// exists, otherwise the workspace.
+pub(crate) async fn start_cwd(session: &str, workspace: &Path) -> PathBuf {
+    let saved = SESSION_CWD.lock().await.get(session).cloned();
+    match saved {
+        Some(p) if p.is_dir() => p,
+        _ => workspace.to_path_buf(),
+    }
+}
+
+/// The bash description, resolved once from the active shell. `shell_kind()` is a
+/// cached probe (stable for the process lifetime), so a `Lazy<String>` yields a
+/// `&'static str` without re-probing on every schema build. The detailed dialect
+/// rules live in the system prompt; this stays a one-line pointer to them so the
+/// tool roster does not balloon the context.
+static BASH_DESCRIPTION: once_cell::sync::Lazy<String> = once_cell::sync::Lazy::new(|| {
+    let shell = match shell_kind() {
+        ShellKind::GitBash => "Git Bash (POSIX: `&&`, `grep`, heredocs work)",
+        ShellKind::PowerShell => {
+            "Windows PowerShell 5.1 (NOT bash: POSIX syntax and `&&`/`||` are unavailable)"
+        }
+        ShellKind::Sh => "sh",
+    };
+    format!(
+        "Execute a shell command. The shell is {shell}; follow the shell dialect rules in the \
+         system prompt. Set run_in_background=true for long tasks; use bash_output to check progress."
+    )
+});
+
 pub struct BashTool;
 
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str { "bash" }
     fn description(&self) -> &str {
-        // Windows wording mirrors the system prompt's dialect block: the tool
-        // name `bash` is itself a strong POSIX prior, so say plainly that this
-        // is PowerShell 5.1 and that POSIX commands / `&&` do not exist here.
-        // Both literals are &'static, so picking one at (const) compile time via
-        // `if cfg!` keeps the signature a plain &str.
-        if cfg!(windows) {
-            "Execute a shell command in the workspace. The shell is Windows PowerShell 5.1, \
-             NOT bash/sh: POSIX commands and syntax (including `&&`/`||`) are unavailable \
-             — follow the shell dialect rules in the system prompt. \
-             Set run_in_background=true for long tasks; use bash_output to check progress."
-        } else {
-            "Execute a shell command in the workspace. Uses sh on Unix. \
-             Set run_in_background=true for long tasks; use bash_output to check progress."
-        }
+        BASH_DESCRIPTION.as_str()
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -985,7 +1280,7 @@ impl Tool for BashTool {
                     );
                     let _ = tx.send(frame);
                 }
-                return ToolOutput::suspend_hitl(command);
+                return ToolOutput::suspend_hitl(command, Some(timeout_ms), background);
             }
         }
 
@@ -994,46 +1289,39 @@ impl Tool for BashTool {
             return ToolOutput::err("Cancelled");
         }
 
-        // Build the command with correctly-split shell arguments.
+        // Build the command via the shared shell selector: Git Bash (POSIX) on
+        // Windows when installed, PowerShell fallback otherwise, `sh` on Unix.
+        // The POSIX shells wrap the command to persist the working directory
+        // across calls; the wrapper `cd`s into the persisted cwd, so the spawn
+        // `current_dir` stays the workspace (a valid Win32 path — a persisted
+        // `/c/...` POSIX path is not).
         //
-        // Windows goes through `prepare_powershell` (`-EncodedCommand`, or a
-        // `.ps1` fallback when over-long), which eliminates `$var`/backtick
-        // pre-evaluation by the outer shell, dropped non-ASCII characters,
-        // over-long-command failures, and `Get-Content` mis-decoding UTF-8.
-        // Unix keeps the direct `sh -c`.
-        //
-        // The HITL gate above adjudicates the **raw** command — encoding happens
-        // only here, after approval, and never feeds back into a shape check.
-        let mut temp_script: Option<std::path::PathBuf> = None;
-        let mut cmd = if cfg!(windows) {
-            let prepared = match prepare_powershell(command) {
-                Ok(p) => p,
-                Err(e) => return ToolOutput::err(format!("Failed to prepare PowerShell command: {}", e)),
-            };
-            temp_script = prepared.temp_script;
-            let mut c = Command::new(&prepared.argv[0]);
-            c.args(&prepared.argv[1..]);
-            // GUI host: every agent bash call would otherwise flash a black
-            // console window (console-subsystem child, no console parent).
-            //
-            // Attribute block, not a bare statement: `creation_flags` is behind
-            // tokio's `cfg_windows!`, i.e. the method does not exist at all on a
-            // non-Windows target. Inside `if cfg!(windows)` (a runtime `if`) both
-            // arms are still type-checked, so an inline call breaks the
-            // ubuntu-latest CI gate even though it never runs there. The attribute
-            // is stripped before type checking — the same form `mcp/mod.rs` and
-            // `gitops.rs` already use.
-            #[cfg(windows)]
-            {
-                c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-            }
-            c
-        } else {
-            let mut c = Command::new("sh");
-            c.arg("-c");
-            c.arg(command);
-            c
+        // The HITL gate above adjudicates the **raw** command — wrapping and
+        // encoding happen only here, after approval, and never feed back into a
+        // shape check.
+        let start = start_cwd(&ctx.root_session_id, &ctx.workspace).await;
+        let prepared = match prepare_shell(command, &start) {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::err(format!("Failed to prepare shell command: {}", e)),
         };
+        let temp_script = prepared.temp_script;
+        let cwd_file = prepared.cwd_file;
+        let mut cmd = Command::new(&prepared.argv[0]);
+        cmd.args(&prepared.argv[1..]);
+        // GUI host: every agent bash call would otherwise flash a black console
+        // window (console-subsystem child, no console parent).
+        //
+        // Attribute block, not a bare statement: `creation_flags` is behind
+        // tokio's `cfg_windows!`, i.e. the method does not exist at all on a
+        // non-Windows target. Inside `if cfg!(windows)` (a runtime `if`) both
+        // arms are still type-checked, so an inline call breaks the
+        // ubuntu-latest CI gate even though it never runs there. The attribute
+        // is stripped before type checking — the same form `mcp/mod.rs` and
+        // `gitops.rs` already use.
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
         cmd.current_dir(&ctx.workspace);
 
         if background {
@@ -1041,7 +1329,15 @@ impl Tool for BashTool {
             // so ownership of the temp script moves to the background reader,
             // which deletes it after the child has exited. A guard here would
             // unlink the script before PowerShell ever loads it.
-            return run_background(cmd, ctx, temp_script, command.to_string()).await;
+            return run_background(
+                cmd,
+                &ctx.session_id,
+                &ctx.root_session_id,
+                ctx.cancel.clone(),
+                temp_script,
+                cwd_file,
+                command.to_string(),
+            ).await;
         }
         // Synchronous path: every remaining return path is covered by Drop.
         let _guard = TempScriptGuard(temp_script);
@@ -1051,9 +1347,11 @@ impl Tool for BashTool {
         // cancellation, output ceiling and process-tree kill. The old inline
         // pipes.await had none of the last three and hung the whole ReAct turn
         // on agent-browser's detached daemon.
-        format_command_result(
+        let result = format_command_result(
             &foreground_run_command(cmd, timeout_ms, Some(ctx.cancel.clone())).await,
-        )
+        );
+        persist_cwd(&ctx.root_session_id, cwd_file).await;
+        result
     }
 }
 
@@ -1072,18 +1370,20 @@ async fn foreground_run_command(
     r
 }
 
-fn format_output(output: &std::process::Output) -> ToolOutput {
-    // Legacy Windows consoles emit GBK; lossy UTF-8 turned that into
-    // replacement blocks in tool results (same defect class as the stream).
-    let stdout = crate::textcodec::decode_bytes(&output.stdout);
-    let stderr = crate::textcodec::decode_bytes(&output.stderr);
-    // Strip ANSI colour codes **after** decoding, not on the bytes: the escape
-    // introducer is 0x1B (ASCII), so it survives every encoding, but a CSI
-    // sequence can sit between two halves of a multi-byte character's neighbours
-    // and stripping on raw bytes would leave the SGR params behind as text.
-    // See `textcodec::strip_ansi` for the real-world report this fixes.
-    let stdout = crate::textcodec::strip_ansi(&stdout);
-    let stderr = crate::textcodec::strip_ansi(&stderr);
+/// Decode + ANSI-strip + merge the two streams into the canonical observation
+/// text (stdout, then a labelled stderr block). Shared by the foreground
+/// renderer, the termination renderer and the live background snapshot so all
+/// three agree on what the output looks like.
+///
+/// Legacy Windows consoles emit GBK; lossy UTF-8 turned that into replacement
+/// blocks in tool results. ANSI colour codes are stripped **after** decoding,
+/// not on the bytes: the escape introducer is 0x1B (ASCII) and survives every
+/// encoding, but a CSI sequence can sit between two halves of a multi-byte
+/// character's neighbours, and stripping on raw bytes would leave the SGR
+/// params behind as text (see `textcodec::strip_ansi`).
+fn render_streams(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = crate::textcodec::strip_ansi(&crate::textcodec::decode_bytes(stdout));
+    let stderr = crate::textcodec::strip_ansi(&crate::textcodec::decode_bytes(stderr));
     let mut text = String::new();
     if !stdout.is_empty() {
         text.push_str(&stdout);
@@ -1093,18 +1393,28 @@ fn format_output(output: &std::process::Output) -> ToolOutput {
         text.push_str("[stderr]\n");
         text.push_str(&stderr);
     }
+    text
+}
+
+/// Head + tail truncation for very long output (32K head, 16K tail).
+fn truncate_head_tail(text: String) -> String {
+    if text.chars().count() <= 64_000 {
+        return text;
+    }
+    let head: String = text.chars().take(32_000).collect();
+    let tail: String = text.chars().rev().take(16_000).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{}\n... [truncated] ...\n{}", head, tail)
+}
+
+fn format_output(output: &std::process::Output) -> ToolOutput {
+    let mut text = render_streams(&output.stdout, &output.stderr);
     let code = output.status.code().unwrap_or(-1);
     if text.is_empty() {
         text = format!("[exit code: {}]", code);
     } else {
         text.push_str(&format!("\n[exit code: {}]", code));
     }
-    // Truncate very long output (keep head + tail)
-    if text.chars().count() > 64_000 {
-        let head: String = text.chars().take(32_000).collect();
-        let tail: String = text.chars().rev().take(16_000).collect::<Vec<_>>().into_iter().rev().collect();
-        text = format!("{}\n... [truncated] ...\n{}", head, tail);
-    }
+    let text = truncate_head_tail(text);
     if output.status.success() {
         ToolOutput::ok(text)
     } else {
@@ -1112,41 +1422,57 @@ fn format_output(output: &std::process::Output) -> ToolOutput {
     }
 }
 
-async fn run_background(
+pub(crate) async fn run_background(
     cmd: Command,
-    ctx: &ToolContext,
+    session_id: &str,
+    root_session_id: &str,
+    cancel: tokio_util::sync::CancellationToken,
     temp_script: Option<std::path::PathBuf>,
+    cwd_file: Option<std::path::PathBuf>,
     command_line: String,
 ) -> ToolOutput {
-    let session_id = format!("bg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let session_id_bg = format!("bg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
     // Register BEFORE the spawn can complete (a task can finish inside the
     // yield window). Pair it with `unregister_running` in the SAME spawned
     // task below on every path — including timeout / cancellation, which the
     // old implementation never reached because its pipe reader never saw EOF.
-    crate::react::bg_gate::register_running(&ctx.session_id, &session_id).await;
+    crate::react::bg_gate::register_running(session_id, &session_id_bg).await;
     let buf = Arc::new(Mutex::new(String::new()));
-    let done = Arc::new(tokio::sync::Notify::new());
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    BG_SESSIONS.lock().await.insert(session_id.clone(), BgSession {
-        output: buf.clone(),
-        done: done.clone(),
-        finished: finished.clone(),
-    });
+    {
+        let mut sessions = BG_SESSIONS.lock().await;
+        // Finished sessions linger so bash_output can still fetch the result;
+        // evict them after an hour so a long-lived process cannot accumulate
+        // entries without bound.
+        sessions.retain(|_, s| {
+            !s.finished.load(std::sync::atomic::Ordering::SeqCst)
+                || s.created.elapsed() < std::time::Duration::from_secs(3600)
+        });
+        sessions.insert(session_id_bg.clone(), BgSession {
+            output: buf.clone(),
+            finished: finished.clone(),
+            created: std::time::Instant::now(),
+        });
+    }
 
     let buf2 = buf.clone();
-    let done2 = done.clone();
     let fin2 = finished.clone();
-    let owner_for_notice = ctx.session_id.clone();
-    let sid_for_notice = session_id.clone();
+    let owner_for_notice = session_id.to_string();
+    let root_for_cwd = root_session_id.to_string();
+    let sid_for_notice = session_id_bg.clone();
     let cmd_for_notice = command_line;
-    let cancel = ctx.cancel.clone();
     let script_guard = TempScriptGuard(temp_script);
     tokio::spawn(async move {
         // Guard lives as long as the running command (the outer future returns
         // as soon as the session is registered).
         let _script_guard = script_guard;
         // No wall-clock ceiling: see NO_TIMEOUT. Only Stop/cap ends it.
-        let r = run_command(cmd, NO_TIMEOUT, Some(cancel)).await;
+        // The shared buffer doubles as the live snapshot target, so bash_output
+        // shows progress while the command runs, not only after it exits.
+        let r = run_command_live(cmd, NO_TIMEOUT, Some(cancel), Some(buf2.clone())).await;
+        // Persist the working directory the background command ended in, just
+        // like the foreground path (POSIX shells only; None for PowerShell).
+        persist_cwd(&root_for_cwd, cwd_file).await;
         let code = r.status.and_then(|s| s.code()).unwrap_or(-1);
         let mut text = format_command_result(&r).text;
         // Match the previous background rendering: a single combined buffer
@@ -1157,7 +1483,6 @@ async fn run_background(
         }
         *buf2.lock().await = text.clone();
         fin2.store(true, std::sync::atomic::Ordering::SeqCst);
-        done2.notify_waiters();
         // The notice is re-sent with the history on every subsequent turn, so
         // cap its tail (Java renders the same way for the same reason).
         let tail: String = text.chars().rev().take(800).collect::<Vec<_>>().into_iter().rev().collect();
@@ -1175,7 +1500,7 @@ async fn run_background(
 
     ToolOutput::ok(format!(
         "Background task started. session_id={}\nUse bash_output to check progress.",
-        session_id
+        session_id_bg
     ))
 }
 
@@ -1254,25 +1579,46 @@ impl Tool for GlobTool {
 }
 
 /// Synchronous body of the `glob` tool (runs on the blocking pool).
+/// Results are sorted by modification time (newest first) — the file the
+/// user just touched is almost always the one the agent is looking for.
 fn glob_sync(pattern: &str, base_path: &std::path::Path, workspace: &std::path::Path) -> ToolOutput {
-    let full_pattern = base_path.join(pattern).to_string_lossy().replace('\\', "/");
-    let mut matches: Vec<String> = Vec::new();
-    for entry in glob::glob(&full_pattern).into_iter().flatten().flatten() {
-        if let Ok(rel) = entry.strip_prefix(workspace) {
-            matches.push(rel.to_string_lossy().replace('\\', "/"));
-        } else {
-            matches.push(entry.to_string_lossy().replace('\\', "/"));
-        }
-        if matches.len() >= 500 {
-            matches.push("... (truncated at 500)".into());
-            break;
-        }
+    let pat = match glob::Pattern::new(pattern) {
+        Ok(p) => p,
+        Err(e) => return ToolOutput::err(format!("Invalid glob pattern: {}", e)),
+    };
+    // Collect more than the display cap so mtime sorting can pick the newest
+    // 500 from the whole walk rather than the first 500 in readdir order.
+    const COLLECT_CAP: usize = 5_000;
+    let mut matches: Vec<(std::time::SystemTime, String)> = Vec::new();
+    let mut visited = 0usize;
+    for entry in search_walker(base_path).filter_map(|e| e.ok()) {
+        visited += 1;
+        if visited > GREP_MAX_VISITED || matches.len() >= COLLECT_CAP { break; }
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) { continue; }
+        let path = entry.path();
+        if is_build_dir(path) { continue; }
+        let Ok(rel) = path.strip_prefix(base_path) else { continue };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if !pat.matches_path(std::path::Path::new(&rel_str)) { continue; }
+        let mtime = entry.metadata().ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let display = path.strip_prefix(workspace)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
+        matches.push((mtime, display));
     }
+    matches.sort_by(|a, b| b.0.cmp(&a.0));
+    let truncated = matches.len() > 500;
+    matches.truncate(500);
     if matches.is_empty() {
-        ToolOutput::ok("No files matched the pattern.")
-    } else {
-        ToolOutput::ok(matches.join("\n"))
+        return ToolOutput::ok("No files matched the pattern.");
     }
+    let mut out: Vec<String> = matches.into_iter().map(|(_, p)| p).collect();
+    if truncated {
+        out.push("... (truncated at 500)".into());
+    }
+    ToolOutput::ok(out.join("\n"))
 }
 
 // ─── grep ─────────────────────────────────────────────────────────────────────
@@ -1283,7 +1629,7 @@ pub struct GrepTool;
 impl Tool for GrepTool {
     fn name(&self) -> &str { "grep" }
     fn description(&self) -> &str {
-        "Search file contents by regex. Returns 'path:line:content' matches."
+        "Search file contents by regex; respects .gitignore. output_mode: content (path:line:text, default), files_with_matches, count. Supports context lines (-A/-B/-C), case-insensitive (-i) and multiline matching."
     }
     fn readonly(&self) -> bool { true }
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1292,7 +1638,15 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": {"type": "string", "description": "Regex pattern to search"},
                 "path": {"type": "string", "description": "Directory to search (default: workspace root)"},
-                "include": {"type": "string", "description": "File filter like *.rs"}
+                "include": {"type": "string", "description": "File filter like *.rs"},
+                "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"], "description": "content (default), files_with_matches, or count"},
+                "-i": {"type": "boolean", "description": "Case-insensitive search"},
+                "-A": {"type": "integer", "description": "Lines of context after each match"},
+                "-B": {"type": "integer", "description": "Lines of context before each match"},
+                "-C": {"type": "integer", "description": "Lines of context before and after each match"},
+                "multiline": {"type": "boolean", "description": "Let patterns span lines (. matches newline)"},
+                "head_limit": {"type": "integer", "description": "Max result entries (default 200, 0 = unlimited)"},
+                "offset": {"type": "integer", "description": "Skip the first N result entries"}
             },
             "required": ["pattern"]
         })
@@ -1301,9 +1655,35 @@ impl Tool for GrepTool {
         let pattern = args["pattern"].as_str().unwrap_or_default();
         let base = args["path"].as_str().unwrap_or(".").to_string();
         let include = args["include"].as_str().unwrap_or("").to_string();
-        let re = match regex::Regex::new(pattern) {
+        let multiline = args["multiline"].as_bool().unwrap_or(false);
+        let re = match regex::RegexBuilder::new(pattern)
+            .case_insensitive(args["-i"].as_bool().unwrap_or(false))
+            .dot_matches_new_line(multiline)
+            .build()
+        {
             Ok(r) => r,
             Err(e) => return ToolOutput::err(format!("Invalid regex: {}", e)),
+        };
+        let ctx_lines = args["-C"].as_u64().unwrap_or(0) as usize;
+        let (before, after) = if ctx_lines > 0 {
+            (ctx_lines, ctx_lines)
+        } else {
+            (args["-B"].as_u64().unwrap_or(0) as usize, args["-A"].as_u64().unwrap_or(0) as usize)
+        };
+        let opts = GrepOptions {
+            mode: match args["output_mode"].as_str().unwrap_or("content") {
+                "files_with_matches" => GrepMode::Files,
+                "count" => GrepMode::Count,
+                _ => GrepMode::Content,
+            },
+            before,
+            after,
+            head_limit: match args["head_limit"].as_u64() {
+                Some(0) => usize::MAX,
+                Some(n) => n as usize,
+                None => 200,
+            },
+            offset: args["offset"].as_u64().unwrap_or(0) as usize,
         };
         let base_path = match resolve_safe_with(&ctx.workspace, &readonly_extra_roots(ctx), &base) {
             Some(p) => p,
@@ -1312,8 +1692,30 @@ impl Tool for GrepTool {
         let workspace = ctx.workspace.clone();
         // Unbounded synchronous walk + file reads. Inline on a tokio worker this
         // starves every concurrent request; on the blocking pool it is merely
-        // slow. See `grep_sync` for the visit cap that keeps it bounded.
-        run_blocking(move || grep_sync(re, &base_path, &include, &workspace)).await
+        // slow. See `grep_sync_opts` for the visit cap that keeps it bounded.
+        run_blocking(move || grep_sync_opts(re, &base_path, &include, &workspace, GREP_MAX_VISITED, &opts, multiline)).await
+    }
+}
+
+/// Output shape for `grep`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrepMode {
+    Content,
+    Files,
+    Count,
+}
+
+struct GrepOptions {
+    mode: GrepMode,
+    before: usize,
+    after: usize,
+    head_limit: usize,
+    offset: usize,
+}
+
+impl Default for GrepOptions {
+    fn default() -> Self {
+        Self { mode: GrepMode::Content, before: 0, after: 0, head_limit: 200, offset: 0 }
     }
 }
 
@@ -1330,71 +1732,162 @@ impl Tool for GrepTool {
 /// archiving, settings reads).
 const GREP_MAX_VISITED: usize = 20_000;
 
-/// Synchronous body of the `grep` tool (runs on the blocking pool).
-fn grep_sync(
-    re: regex::Regex,
-    base_path: &std::path::Path,
-    include: &str,
-    workspace: &std::path::Path,
-) -> ToolOutput {
-    grep_sync_capped(re, base_path, include, workspace, GREP_MAX_VISITED)
+/// Shared skip list for grep/glob walks. `.gitignore` (via the `ignore` crate)
+/// covers most build/dependency dirs in real repos, but not every project
+/// ignores these — and scratch/test trees have no `.gitignore` at all.
+fn is_build_dir(path: &Path) -> bool {
+    path.components().any(|c| {
+        let s = c.as_os_str().to_string_lossy();
+        s == "node_modules" || s == "target"
+    })
 }
 
-/// `grep_sync` with an explicit visit cap. Split out so the cap can be tested
-/// with a handful of files instead of twenty thousand.
-fn grep_sync_capped(
+/// gitignore-aware walk shared by grep and glob. Hidden entries are skipped
+/// (matching the historical behaviour); `.gitignore` rules apply inside git
+/// repos, so `venv/`, `dist/`, … are excluded without a hardcoded list.
+fn search_walker(base_path: &Path) -> ignore::Walk {
+    ignore::WalkBuilder::new(base_path)
+        .follow_links(false)
+        .hidden(true)
+        .build()
+}
+
+fn grep_sync_opts(
     re: regex::Regex,
     base_path: &std::path::Path,
     include: &str,
     workspace: &std::path::Path,
     max_visited: usize,
+    opts: &GrepOptions,
+    multiline: bool,
 ) -> ToolOutput {
     let mut results: Vec<String> = Vec::new();
     let include_glob = if include.is_empty() { None } else { glob::Pattern::new(include).ok() };
     let mut visited = 0usize;
     let mut truncated_by_cap = false;
+    // Result-entry accounting for offset/head_limit. One entry = one match
+    // (content), one file (files) or one count line (count); context lines
+    // ride along with their match and are not counted separately.
+    let mut entries_seen = 0usize;
+    let mut kept = 0usize;
+    let mut hit_limit = false;
 
-    for entry in walkdir::WalkDir::new(base_path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in search_walker(base_path).filter_map(|e| e.ok()) {
         visited += 1;
         if visited > max_visited {
             truncated_by_cap = true;
             break;
         }
-        if !entry.file_type().is_file() { continue; }
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) { continue; }
         let path = entry.path();
-        // Skip hidden dirs and common build/dependency dirs
-        if path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            s.starts_with('.') || s == "node_modules" || s == "target"
-        }) { continue; }
+        if is_build_dir(path) { continue; }
         if let Some(ref g) = include_glob {
             let fname = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
             if !g.matches(&fname) { continue; }
         }
         // Size limit: skip files > 1MB
         if entry.metadata().map(|m| m.len() > 1_048_576).unwrap_or(true) { continue; }
-        let content = match read_file_lossy(path) {
-            Ok(c) => c,
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
             Err(_) => continue,
         };
-        for (i, line) in content.lines().enumerate() {
-            if re.is_match(line) {
-                let rel = path.strip_prefix(workspace)
-                    .map(|p| p.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
-                results.push(format!("{}:{}:{}", rel, i + 1, line.trim()));
-                if results.len() >= 200 {
-                    results.push("... (truncated at 200)".into());
-                    return ToolOutput::ok(results.join("\n"));
+        if crate::textcodec::looks_binary(&bytes) { continue; }
+        let content = crate::textcodec::decode_with_bom(&bytes);
+        let rel = path.strip_prefix(workspace)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+
+        // Collect this file's matches as (line_number, matched_text) pairs.
+        let mut file_matches: Vec<(usize, String)> = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        if multiline {
+            for m in re.find_iter(&content) {
+                let line_no = content[..m.start()].matches('\n').count() + 1;
+                file_matches.push((line_no, m.as_str().trim().to_string()));
+            }
+        } else {
+            for (i, line) in lines.iter().enumerate() {
+                if re.is_match(line) {
+                    file_matches.push((i + 1, line.trim().to_string()));
                 }
             }
         }
+        if file_matches.is_empty() { continue; }
+
+        match opts.mode {
+            GrepMode::Files => {
+                entries_seen += 1;
+                if entries_seen > opts.offset && results.len() < opts.head_limit {
+                    results.push(rel);
+                }
+            }
+            GrepMode::Count => {
+                entries_seen += 1;
+                if entries_seen > opts.offset && results.len() < opts.head_limit {
+                    results.push(format!("{}:{}", rel, file_matches.len()));
+                }
+            }
+            GrepMode::Content => {
+                // Decide which matches survive offset/head_limit FIRST, so
+                // context attaches only to kept matches. (Testing the offset
+                // per emitted line would drop a kept match's before-context,
+                // which is printed before the match counter advances.)
+                let mut kept_matches: Vec<(usize, String)> = Vec::new();
+                for (line_no, text) in &file_matches {
+                    entries_seen += 1;
+                    if entries_seen <= opts.offset { continue; }
+                    if kept >= opts.head_limit { hit_limit = true; break; }
+                    kept += 1;
+                    kept_matches.push((*line_no, text.clone()));
+                }
+                if kept_matches.is_empty() { continue; }
+
+                // Expand kept matches to line ranges (with context) and merge
+                // overlaps. Multiline matches carry their own text, so context
+                // is meaningless there and each match stands alone.
+                let with_context = (opts.before > 0 || opts.after > 0) && !multiline;
+                let mut ranges: Vec<(usize, usize)> = Vec::new();
+                for &(line_no, _) in &kept_matches {
+                    let (lo, hi) = if with_context {
+                        (line_no.saturating_sub(opts.before).max(1), (line_no + opts.after).min(lines.len()))
+                    } else {
+                        (line_no, line_no)
+                    };
+                    if let Some(last) = ranges.last_mut() {
+                        if with_context && lo <= last.1 + 1 {
+                            last.1 = last.1.max(hi);
+                            continue;
+                        }
+                    }
+                    ranges.push((lo, hi));
+                }
+                let match_text: HashMap<usize, String> = kept_matches.into_iter().collect();
+                let mut first_in_group = true;
+                for (lo, hi) in ranges {
+                    if !first_in_group && with_context {
+                        results.push("--".to_string());
+                    }
+                    first_in_group = false;
+                    for n in lo..=hi {
+                        let (sep, body) = match match_text.get(&n) {
+                            Some(t) => (':', t.clone()),
+                            None => ('-', lines[n - 1].trim().to_string()),
+                        };
+                        results.push(format!("{}{}{}{}{}", rel, sep, n, sep, body));
+                    }
+                }
+            }
+        }
+        let emitted = if opts.mode == GrepMode::Content { kept } else { results.len() };
+        if emitted >= opts.head_limit {
+            hit_limit = true;
+            break;
+        }
     }
 
+    if hit_limit {
+        results.push(format!("... (truncated at {})", opts.head_limit));
+    }
     if truncated_by_cap {
         // Say so explicitly: a silent partial scan reads as "the symbol does not
         // exist", which sends the agent down the wrong path.
@@ -2471,17 +2964,17 @@ mod tests {
         let s = Scratch::new("bash-normal-output");
         let ctx = tool_ctx_for(&s.0);
         let out = BashTool.execute(json!({
-            "command": if cfg!(windows) {
-                "Write-Output 'HELLO-STDOUT'; Write-Error 'HELLO-STDERR'"
-            } else {
-                "echo HELLO-STDOUT; echo HELLO-STDERR >&2"
+            "command": match shell_kind() {
+                ShellKind::PowerShell => "Write-Output 'HELLO-STDOUT'; Write-Error 'HELLO-STDERR'",
+                _ => "echo HELLO-STDOUT; echo HELLO-STDERR >&2",
             }
         }), &ctx).await;
         assert!(out.text.contains("HELLO-STDOUT"),
             "stdout lost through file redirect: {}", out.text);
         assert!(out.text.contains("HELLO-STDERR"),
             "stderr lost through file redirect: {}", out.text);
-        // `Write-Error` makes PowerShell exit 1, so assert the *field*, not 0.
+        // PowerShell's `Write-Error` exits 1; the POSIX branch exits 0. Either
+        // way the renderer must surface the field, so assert its presence.
         assert!(out.text.contains("[exit code:"),
             "exit code missing: {}", out.text);
     }
@@ -2493,11 +2986,11 @@ mod tests {
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             BashTool.execute(json!({
-                "command": if cfg!(windows) {
-                    "Write-Output 'bg-partial'; Start-Process powershell -ArgumentList \
-                     '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 20' -WindowStyle Hidden"
-                } else {
-                    "echo bg-partial; (sleep 20) &"
+                "command": match shell_kind() {
+                    ShellKind::PowerShell =>
+                        "Write-Output 'bg-partial'; Start-Process powershell -ArgumentList \
+                         '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 20' -WindowStyle Hidden",
+                    _ => "echo bg-partial; (sleep 20) &",
                 },
                 "run_in_background": true
             }), &ctx),
@@ -2522,6 +3015,76 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
         assert!(finished, "background session never finished — gate stays armed forever");
+    }
+
+    /// 流式回归锚：后台任务运行中 bash_output 必须能看到已产生的输出。
+    /// 旧实现只在进程结束后写缓冲，整个运行期都是 "no output yet"。
+    #[tokio::test]
+    async fn bash_output_streams_while_running() {
+        let s = Scratch::new("bg-stream");
+        let ctx = tool_ctx_for(&s.0);
+        let out = BashTool.execute(json!({
+            // PowerShell may buffer redirected output until exit, so flush
+            // explicitly: this tests the kernel's streaming snapshot, not the
+            // shell's buffering policy. The POSIX branch streams naturally.
+            "command": match shell_kind() {
+                ShellKind::PowerShell =>
+                    "[Console]::Out.WriteLine('EARLY-LINE'); [Console]::Out.Flush(); \
+                     Start-Sleep -Seconds 3; Write-Output 'LATE-LINE'",
+                _ => "echo EARLY-LINE; sleep 3; echo LATE-LINE",
+            },
+            "run_in_background": true
+        }), &ctx).await;
+        let sid = out.text.split("session_id=").nth(1)
+            .and_then(|v| v.split_whitespace().next())
+            .expect("session id in background response").to_string();
+
+        let mut saw_early_running = false;
+        for _ in 0..20 {
+            let r = BashOutputTool.execute(json!({ "session_id": sid }), &ctx).await;
+            if r.text.starts_with("[running]") && r.text.contains("EARLY-LINE") {
+                assert!(!r.text.contains("LATE-LINE"), "late line must not exist yet: {}", r.text);
+                saw_early_running = true;
+                break;
+            }
+            if r.text.starts_with("[finished]") { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        assert!(saw_early_running, "output must stream while the task runs");
+
+        let mut finished = false;
+        for _ in 0..40 {
+            let r = BashOutputTool.execute(json!({ "session_id": sid }), &ctx).await;
+            if r.text.starts_with("[finished]") {
+                assert!(r.text.contains("LATE-LINE"), "{}", r.text);
+                finished = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert!(finished, "streaming task never finished");
+    }
+
+    /// HITL suspension must carry the model's timeout and background intent so
+    /// the approved command runs with the same parameters. Regression: approval
+    /// used to hardcode a 300 s foreground run, discarding both. The shape gate
+    /// fires before shell selection, so this is platform-independent.
+    #[tokio::test]
+    async fn hitl_suspend_preserves_timeout_and_background() {
+        let s = Scratch::new("hitl-params");
+        let mut ctx = tool_ctx_for(&s.0);
+        ctx.access_mode = "default".into();
+        ctx.hitl_approved = false;
+        let out = BashTool.execute(json!({
+            "command": "rm -rf build",
+            "timeout": 600000,
+            "run_in_background": true
+        }), &ctx).await;
+        let susp = out.suspend.expect("dangerous command must suspend for approval");
+        assert_eq!(susp.kind, crate::tools::SuspendKind::Hitl);
+        assert_eq!(susp.command.as_deref(), Some("rm -rf build"));
+        assert_eq!(susp.timeout_ms, Some(600000));
+        assert!(susp.background);
     }
 
     impl Drop for Scratch {
@@ -2649,6 +3212,106 @@ mod tests {
         assert!(!out.text.contains("huge.txt"), ">1MB file must be skipped: {}", out.text);
     }
 
+    // ─── grep 新模式（output_mode / 上下文 / -i / multiline / 分页）─────────
+
+    #[test]
+    fn grep_files_with_matches_mode() {
+        let s = Scratch::new("grep-files");
+        s.write("a.rs", "needle\n");
+        s.write("b.rs", "needle\nneedle\n");
+        s.write("c.rs", "nothing\n");
+        let out = grep_sync_opts(
+            re("needle"), &s.0, "", &s.0, GREP_MAX_VISITED,
+            &GrepOptions { mode: GrepMode::Files, ..Default::default() }, false,
+        );
+        assert_eq!(out.text.lines().count(), 2, "one line per file: {}", out.text);
+        assert!(out.text.contains("a.rs") && out.text.contains("b.rs"));
+        assert!(!out.text.contains("c.rs"));
+        assert!(!out.text.contains("needle"), "files mode must not print content");
+    }
+
+    #[test]
+    fn grep_count_mode() {
+        let s = Scratch::new("grep-count");
+        s.write("a.rs", "needle\nneedle\n");
+        s.write("b.rs", "nothing\n");
+        let out = grep_sync_opts(
+            re("needle"), &s.0, "", &s.0, GREP_MAX_VISITED,
+            &GrepOptions { mode: GrepMode::Count, ..Default::default() }, false,
+        );
+        assert_eq!(out.text, "a.rs:2");
+    }
+
+    #[test]
+    fn grep_case_insensitive() {
+        let s = Scratch::new("grep-ci");
+        s.write("a.rs", "Needle\n");
+        let ci = regex::RegexBuilder::new("needle").case_insensitive(true).build().unwrap();
+        let out = grep_sync(ci, &s.0, "", &s.0);
+        assert!(out.text.contains("a.rs:1:Needle"), "got: {}", out.text);
+    }
+
+    #[test]
+    fn grep_context_lines_use_dash_separator() {
+        let s = Scratch::new("grep-ctx");
+        s.write("a.rs", "l1\nl2\nMATCH\nl4\nl5\n");
+        let out = grep_sync_opts(
+            re("MATCH"), &s.0, "", &s.0, GREP_MAX_VISITED,
+            &GrepOptions { before: 1, after: 1, ..Default::default() }, false,
+        );
+        assert!(out.text.contains("a.rs-2-l2"), "before context: {}", out.text);
+        assert!(out.text.contains("a.rs:3:MATCH"), "match line: {}", out.text);
+        assert!(out.text.contains("a.rs-4-l4"), "after context: {}", out.text);
+        assert!(!out.text.contains("l1") && !out.text.contains("l5"), "context must be bounded: {}", out.text);
+    }
+
+    #[test]
+    fn grep_multiline_spans_lines() {
+        let s = Scratch::new("grep-multiline");
+        s.write("a.rs", "struct S {\n    field: u32,\n}\n");
+        let ml = regex::RegexBuilder::new(r"struct S \{.*?field")
+            .dot_matches_new_line(true).build().unwrap();
+        let out = grep_sync_opts(ml, &s.0, "", &s.0, GREP_MAX_VISITED, &GrepOptions::default(), true);
+        assert!(out.text.contains("a.rs:1:struct S {"), "got: {}", out.text);
+        assert!(out.text.contains("field"), "matched region must include the tail: {}", out.text);
+    }
+
+    #[test]
+    fn grep_head_limit_and_offset() {
+        let s = Scratch::new("grep-page");
+        let body = (0..10).map(|i| format!("m{}", i)).collect::<Vec<_>>().join("\n");
+        s.write("a.txt", &body);
+
+        let limited = grep_sync_opts(
+            re("m\\d"), &s.0, "", &s.0, GREP_MAX_VISITED,
+            &GrepOptions { head_limit: 3, ..Default::default() }, false,
+        );
+        assert_eq!(limited.text.lines().count(), 4, "3 matches + notice: {}", limited.text);
+        assert!(limited.text.contains("truncated at 3"));
+
+        let page = grep_sync_opts(
+            re("m\\d"), &s.0, "", &s.0, GREP_MAX_VISITED,
+            &GrepOptions { head_limit: 3, offset: 2, ..Default::default() }, false,
+        );
+        assert!(page.text.contains("a.txt:3:m2"), "offset must skip 2: {}", page.text);
+        assert!(page.text.contains("a.txt:5:m4"));
+        assert!(!page.text.contains(":1:m0"));
+    }
+
+    #[test]
+    fn grep_respects_gitignore() {
+        let s = Scratch::new("grep-gitignore");
+        // The ignore crate applies .gitignore inside git repos; a bare .git
+        // dir is enough to mark one.
+        std::fs::create_dir_all(s.0.join(".git")).unwrap();
+        s.write(".gitignore", "ignored/\n");
+        s.write("ignored/a.rs", "needle\n");
+        s.write("kept.rs", "needle\n");
+        let out = grep_sync(re("needle"), &s.0, "", &s.0);
+        assert!(out.text.contains("kept.rs"), "got: {}", out.text);
+        assert!(!out.text.contains("ignored"), "gitignored dir must be skipped: {}", out.text);
+    }
+
     // ─── glob ────────────────────────────────────────────────────────────────
 
     #[test]
@@ -2684,6 +3347,16 @@ mod tests {
         let lines: Vec<&str> = out.text.lines().collect();
         assert_eq!(lines.len(), 501, "500 matches + truncation notice");
         assert!(lines.last().unwrap().contains("truncated at 500"));
+    }
+
+    #[test]
+    fn glob_sorts_by_mtime_newest_first() {
+        let s = Scratch::new("glob-mtime");
+        s.write("old.txt", "");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        s.write("new.txt", "");
+        let out = glob_sync("*.txt", &s.0, &s.0);
+        assert_eq!(out.text.lines().next().unwrap(), "new.txt", "got: {}", out.text);
     }
 
     // ─── run_blocking ────────────────────────────────────────────────────────
@@ -3106,7 +3779,7 @@ mod tests {
         assert!(out.text.contains("附件"), "must point at the attachment channel: {}", out.text);
     }
 
-    /// 非图片二进制与文本文件行为不变（回归锚）。
+    /// 二进制文件明确拒绝（不再 lossy 解码出乱码），文本文件行为不变（回归锚）。
     #[tokio::test]
     async fn read_non_image_and_text_unchanged() {
         let f = UploadsFixture::new("mix");
@@ -3132,10 +3805,12 @@ mod tests {
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
         };
-        // .bin 不在图片扩展名里 → 走文本路径（lossy 解码），无视觉块
+        // .bin 含 NUL 字节 → 二进制拒绝，无视觉块，且说明原因
         let bin = ReadTool
             .execute(json!({ "file_path": "blob.bin" }), &ctx)
             .await;
+        assert!(bin.is_error, "binary must be rejected, not lossy-decoded");
+        assert!(bin.text.contains("Binary"), "got: {}", bin.text);
         assert!(bin.image_urls.is_empty());
 
         let txt = ReadTool
@@ -3144,6 +3819,248 @@ mod tests {
         assert!(!txt.is_error);
         assert!(txt.image_urls.is_empty());
         assert!(txt.text.contains("hello"));
+    }
+
+    // ─── read 三层上限 / BOM / 读状态 ────────────────────────────────────────
+
+    fn plain_ctx(workspace: PathBuf) -> ToolContext {
+        ToolContext {
+            workspace,
+            session_dir: None,
+            session_id: "read-limits".into(),
+            tool_call_id: "c1".into(),
+            run_id: "r1".into(),
+            frame_tx: None,
+            access_mode: "full".into(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            hitl_approved: true,
+            change_ledger: None,
+            gate: None,
+            subagent_depth: 0,
+            root_session_id: "read-limits".into(),
+            thinking: None,
+            model: Default::default(),
+            settings: Default::default(),
+            bash_exempt_dirs: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_defaults_to_2000_lines_and_reports_truncation() {
+        let s = Scratch::new("read-default-limit");
+        let body = (1..=2500).map(|i| format!("line-{}", i)).collect::<Vec<_>>().join("\n");
+        s.write("big.txt", &body);
+        let ctx = plain_ctx(s.0.clone());
+
+        let out = ReadTool.execute(json!({ "file_path": "big.txt" }), &ctx).await;
+        assert!(!out.is_error);
+        assert!(out.text.contains("Lines 1-2000 of 2500"), "got: {}", &out.text[..200.min(out.text.len())]);
+        assert!(out.text.contains("line-2000"));
+        assert!(!out.text.contains("line-2001"), "default limit must stop at 2000");
+        assert!(out.text.contains("offset=2001"), "must tell how to continue: {}", out.text);
+
+        // 显式 limit 仍然生效
+        let page2 = ReadTool
+            .execute(json!({ "file_path": "big.txt", "offset": 2001, "limit": 500 }), &ctx)
+            .await;
+        assert!(page2.text.contains("Lines 2001-2500 of 2500"));
+        assert!(!page2.text.contains("[Truncated:"), "last page must not warn");
+    }
+
+    #[tokio::test]
+    async fn read_truncates_long_lines_by_chars() {
+        let s = Scratch::new("read-long-line");
+        s.write("min.js", &"x".repeat(5000));
+        let ctx = plain_ctx(s.0.clone());
+
+        let out = ReadTool.execute(json!({ "file_path": "min.js" }), &ctx).await;
+        assert!(!out.is_error);
+        assert!(out.text.contains("[line truncated: 5000 chars total]"), "got len {}", out.text.len());
+        assert!(out.text.len() < 3000, "one 5000-char line must not enter context whole");
+    }
+
+    #[tokio::test]
+    async fn read_rejects_oversize_file() {
+        let s = Scratch::new("read-oversize");
+        let huge = vec![b'x'; (MAX_READ_FILE_BYTES + 1) as usize];
+        std::fs::write(s.0.join("huge.log"), &huge).unwrap();
+        let ctx = plain_ctx(s.0.clone());
+
+        let out = ReadTool.execute(json!({ "file_path": "huge.log" }), &ctx).await;
+        assert!(out.is_error);
+        assert!(out.text.contains("too large"), "got: {}", out.text);
+        assert!(out.text.contains("bash"), "must point at an alternative: {}", out.text);
+    }
+
+    #[tokio::test]
+    async fn read_strips_utf8_bom_and_records_state() {
+        let s = Scratch::new("read-bom");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"hello bom");
+        std::fs::write(s.0.join("bom.txt"), &bytes).unwrap();
+        let ctx = plain_ctx(s.0.clone());
+
+        let out = ReadTool.execute(json!({ "file_path": "bom.txt" }), &ctx).await;
+        assert!(!out.is_error);
+        assert!(out.text.contains("hello bom"));
+        assert!(!out.text.contains('\u{FEFF}'), "BOM must not leak into line 1");
+
+        // read 之后 edit 的读前校验应当放行
+        let resolved = resolve_safe(&ctx.workspace, "bom.txt").unwrap();
+        assert!(crate::tools::filestate::guard(&ctx.root_session_id, &resolved).is_ok());
+    }
+
+    // ─── edit 精确匹配 / 读前校验 ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn edit_requires_prior_read() {
+        let s = Scratch::new("edit-unread");
+        s.write("a.txt", "hello\n");
+        let ctx = plain_ctx(s.0.clone());
+
+        let out = EditTool
+            .execute(json!({ "file_path": "a.txt", "old_str": "hello", "new_str": "hi" }), &ctx)
+            .await;
+        assert!(out.is_error);
+        assert!(out.text.contains("not been read"), "got: {}", out.text);
+        assert_eq!(std::fs::read_to_string(s.0.join("a.txt")).unwrap(), "hello\n");
+    }
+
+    #[tokio::test]
+    async fn edit_rejects_stale_file() {
+        let s = Scratch::new("edit-stale");
+        s.write("a.txt", "v1\n");
+        let ctx = plain_ctx(s.0.clone());
+        assert!(!ReadTool.execute(json!({ "file_path": "a.txt" }), &ctx).await.is_error);
+
+        // 外部修改（模拟用户编辑器 / git）
+        std::fs::write(s.0.join("a.txt"), "v2\n").unwrap();
+        let out = EditTool
+            .execute(json!({ "file_path": "a.txt", "old_str": "v1", "new_str": "v3" }), &ctx)
+            .await;
+        assert!(out.is_error);
+        assert!(out.text.contains("modified since last read"), "got: {}", out.text);
+    }
+
+    /// 旧缺陷回归锚：按行 trim 比较会把「中间行 2 空格缩进的多行 old_str」
+    /// 匹配到「4 空格缩进的文件」，整段替换后缩进被静默改写。精确匹配必须拒绝。
+    /// （单行子串匹配不同：2 空格 old_str 是 4 空格行的合法子串，剩余缩进
+    /// 在匹配区之外，天然保留。）
+    #[tokio::test]
+    async fn edit_does_not_match_across_indentation() {
+        let s = Scratch::new("edit-indent");
+        s.write("a.rs", "fn a() {\n    let x = 1;\n}\n");
+        let ctx = plain_ctx(s.0.clone());
+        assert!(!ReadTool.execute(json!({ "file_path": "a.rs" }), &ctx).await.is_error);
+
+        let bad = EditTool
+            .execute(json!({ "file_path": "a.rs", "old_str": "fn a() {\n  let x = 1;\n}", "new_str": "fn a() {\n  let x = 2;\n}" }), &ctx)
+            .await;
+        assert!(bad.is_error, "wrong indentation must not match: {}", bad.text);
+
+        // 子串匹配保留匹配区之外的缩进
+        let ok = EditTool
+            .execute(json!({ "file_path": "a.rs", "old_str": "let x = 1;", "new_str": "let x = 2;" }), &ctx)
+            .await;
+        assert!(!ok.is_error, "got: {}", ok.text);
+        assert_eq!(
+            std::fs::read_to_string(s.0.join("a.rs")).unwrap(),
+            "fn a() {\n    let x = 2;\n}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_multi_match_needs_replace_all() {
+        let s = Scratch::new("edit-multi");
+        s.write("a.txt", "a\na\n");
+        let ctx = plain_ctx(s.0.clone());
+        assert!(!ReadTool.execute(json!({ "file_path": "a.txt" }), &ctx).await.is_error);
+
+        let one = EditTool
+            .execute(json!({ "file_path": "a.txt", "old_str": "a", "new_str": "b" }), &ctx)
+            .await;
+        assert!(one.is_error);
+        assert!(one.text.contains("2 locations"), "got: {}", one.text);
+
+        let all = EditTool
+            .execute(json!({ "file_path": "a.txt", "old_str": "a", "new_str": "b", "replace_all": true }), &ctx)
+            .await;
+        assert!(!all.is_error, "got: {}", all.text);
+        assert_eq!(std::fs::read_to_string(s.0.join("a.txt")).unwrap(), "b\nb\n");
+    }
+
+    #[tokio::test]
+    async fn edit_handles_crlf_file_with_lf_old_str() {
+        let s = Scratch::new("edit-crlf");
+        std::fs::write(s.0.join("a.rs"), "fn a() {\r\n    let x = 1;\r\n}\r\n").unwrap();
+        let ctx = plain_ctx(s.0.clone());
+        assert!(!ReadTool.execute(json!({ "file_path": "a.rs" }), &ctx).await.is_error);
+
+        let out = EditTool
+            .execute(json!({ "file_path": "a.rs", "old_str": "    let x = 1;\n", "new_str": "    let x = 2;" }), &ctx)
+            .await;
+        assert!(!out.is_error, "got: {}", out.text);
+        assert_eq!(
+            std::fs::read_to_string(s.0.join("a.rs")).unwrap(),
+            "fn a() {\r\n    let x = 2;\r\n}\r\n",
+            "CRLF and trailing newline must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_smart_quote_fallback_replaces_original_region() {
+        let s = Scratch::new("edit-quotes");
+        s.write("a.js", "const msg = \u{201C}hello\u{201D};\n");
+        let ctx = plain_ctx(s.0.clone());
+        assert!(!ReadTool.execute(json!({ "file_path": "a.js" }), &ctx).await.is_error);
+
+        let out = EditTool
+            .execute(json!({ "file_path": "a.js", "old_str": "const msg = \"hello\";", "new_str": "const msg = \"hi\";" }), &ctx)
+            .await;
+        assert!(!out.is_error, "got: {}", out.text);
+        assert_eq!(
+            std::fs::read_to_string(s.0.join("a.js")).unwrap(),
+            "const msg = \"hi\";\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_after_write_needs_no_read() {
+        let s = Scratch::new("edit-after-write");
+        let ctx = plain_ctx(s.0.clone());
+        let w = WriteTool
+            .execute(json!({ "file_path": "new.txt", "content": "v1\n" }), &ctx)
+            .await;
+        assert!(!w.is_error);
+        let e = EditTool
+            .execute(json!({ "file_path": "new.txt", "old_str": "v1", "new_str": "v2" }), &ctx)
+            .await;
+        assert!(!e.is_error, "write must count as knowing the content: {}", e.text);
+        assert_eq!(std::fs::read_to_string(s.0.join("new.txt")).unwrap(), "v2\n");
+    }
+
+    #[tokio::test]
+    async fn edit_preserves_utf8_bom_and_rejects_noop() {
+        let s = Scratch::new("edit-bom");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"hello\n");
+        std::fs::write(s.0.join("bom.txt"), &bytes).unwrap();
+        let ctx = plain_ctx(s.0.clone());
+        assert!(!ReadTool.execute(json!({ "file_path": "bom.txt" }), &ctx).await.is_error);
+
+        let noop = EditTool
+            .execute(json!({ "file_path": "bom.txt", "old_str": "hello", "new_str": "hello" }), &ctx)
+            .await;
+        assert!(noop.is_error);
+        assert!(noop.text.contains("identical"), "got: {}", noop.text);
+
+        let out = EditTool
+            .execute(json!({ "file_path": "bom.txt", "old_str": "hello", "new_str": "hi" }), &ctx)
+            .await;
+        assert!(!out.is_error, "got: {}", out.text);
+        let after = std::fs::read(s.0.join("bom.txt")).unwrap();
+        assert_eq!(&after[..3], &[0xEF, 0xBB, 0xBF], "UTF-8 BOM must survive");
+        assert_eq!(&after[3..], b"hi\n");
     }
 
     #[test]
@@ -3785,6 +4702,118 @@ mod tests {
         let _argv: &[std::ffi::OsString] = &p.argv;
         let _temp: Option<std::path::PathBuf> = p.temp_script;
         let _g = TempScriptGuard::new(_temp);
+    }
+
+    // ─── Shell selection (Git Bash primary, PowerShell fallback) ─────────────
+    //
+    // The user-facing guarantee: a Windows box WITHOUT Git Bash must still get a
+    // working shell (PowerShell), and the WSL launcher must never be mistaken for
+    // Git Bash. These pin the probe, the wrapper, and the cwd round-trip.
+
+    #[test]
+    fn wsl_launcher_is_never_git_bash() {
+        assert!(is_wsl_bash(Path::new("C:\\Windows\\System32\\bash.exe")));
+        assert!(is_wsl_bash(Path::new("C:\\Windows\\SysWOW64\\bash.exe")));
+        assert!(is_wsl_bash(Path::new("c:\\windows\\system32\\bash.exe"))); // case-insensitive
+        assert!(!is_wsl_bash(Path::new("C:\\Program Files\\Git\\bin\\bash.exe")));
+        assert!(!is_wsl_bash(Path::new("/usr/bin/bash")));
+    }
+
+    #[test]
+    fn shell_kind_matches_platform_and_probe() {
+        let kind = shell_kind();
+        if cfg!(windows) {
+            // The hard requirement: no Git Bash -> PowerShell, never a broken spawn.
+            if git_bash_exe().is_none() {
+                assert_eq!(kind, ShellKind::PowerShell);
+            } else {
+                assert_eq!(kind, ShellKind::GitBash);
+            }
+            assert_ne!(kind, ShellKind::Sh);
+        } else {
+            assert_eq!(kind, ShellKind::Sh);
+        }
+    }
+
+    #[test]
+    fn prepare_shell_argv_matches_kind() {
+        let start = std::env::temp_dir();
+        let p = prepare_shell("echo hi", &start).unwrap();
+        assert!(!p.argv.is_empty());
+        match shell_kind() {
+            ShellKind::PowerShell => {
+                // Encoded command / ps1 transport; no cwd capture on the fallback.
+                assert!(p.cwd_file.is_none());
+                let exe = p.argv[0].to_string_lossy().to_lowercase();
+                assert!(exe.contains("powershell"), "got {exe}");
+            }
+            ShellKind::GitBash | ShellKind::Sh => {
+                assert!(p.cwd_file.is_some(), "POSIX shells capture cwd");
+                assert_eq!(p.argv[1].to_string_lossy(), "-c");
+                let script = p.argv[2].to_string_lossy();
+                assert!(script.contains("echo hi"));
+                assert!(script.contains("pwd -P"));
+            }
+        }
+    }
+
+    #[test]
+    fn posix_wrapper_preserves_exit_code_and_quotes_paths() {
+        let start = Path::new("C:\\some dir\\proj");
+        let file = Path::new("C:\\tmp\\cwd capture");
+        let wrapped = wrap_posix_cwd("cd sub && ls", start, file);
+        // Backslashes become POSIX separators; spaces are single-quoted. The
+        // replace happens regardless of host, so this holds on Unix too.
+        assert!(wrapped.contains("'C:/some dir/proj'"), "{wrapped}");
+        assert!(wrapped.contains("'C:/tmp/cwd capture'"), "{wrapped}");
+        // The command runs, then its exit code is captured and re-raised.
+        assert!(wrapped.contains("cd sub && ls"));
+        assert!(wrapped.contains("__gwork_ec=$?"));
+        assert!(wrapped.contains("exit $__gwork_ec"));
+        // pwd capture happens AFTER the command, so a `cd` inside it is recorded.
+        let cmd_at = wrapped.find("cd sub && ls").unwrap();
+        let pwd_at = wrapped.find("pwd -P").unwrap();
+        assert!(cmd_at < pwd_at);
+    }
+
+    #[tokio::test]
+    async fn cwd_round_trips_and_isolates_sessions() {
+        let base = std::env::temp_dir().join(format!("gwork-cwd-test-{}", uuid::Uuid::new_v4()));
+        let dir_a = base.join("a");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        let workspace = base.clone();
+
+        let sess_a = format!("cwd-a-{}", uuid::Uuid::new_v4());
+        let sess_b = format!("cwd-b-{}", uuid::Uuid::new_v4());
+
+        // No persisted cwd yet -> workspace.
+        assert_eq!(start_cwd(&sess_a, &workspace).await, workspace);
+
+        // Simulate a capture file written by the wrapper for session A.
+        let cap_a = base.join("cap-a");
+        std::fs::write(&cap_a, dir_a.to_string_lossy().as_bytes()).unwrap();
+        persist_cwd(&sess_a, Some(cap_a.clone())).await;
+        assert!(!cap_a.exists(), "capture file must be removed after read");
+        assert_eq!(start_cwd(&sess_a, &workspace).await, dir_a);
+
+        // Session B is unaffected by A's cwd.
+        assert_eq!(start_cwd(&sess_b, &workspace).await, workspace);
+
+        // A non-directory capture must NOT clobber the previous value.
+        let cap_bad = base.join("cap-bad");
+        std::fs::write(&cap_bad, base.join("does-not-exist").to_string_lossy().as_bytes()).unwrap();
+        persist_cwd(&sess_a, Some(cap_bad)).await;
+        assert_eq!(start_cwd(&sess_a, &workspace).await, dir_a);
+
+        // A missing capture file (pwd failed) leaves the previous value untouched.
+        persist_cwd(&sess_a, Some(base.join("never-written"))).await;
+        assert_eq!(start_cwd(&sess_a, &workspace).await, dir_a);
+
+        // None (PowerShell fallback) is a no-op.
+        persist_cwd(&sess_a, None).await;
+        assert_eq!(start_cwd(&sess_a, &workspace).await, dir_a);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
 // ─── todowrite / todoread contract tests ─────────────────────────────────────
