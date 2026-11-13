@@ -275,6 +275,14 @@
                  "confirm":  "Confirmare"
              },
     "app":  {
+
+        "nav":  {
+
+            "connectors":  "Conectori",
+
+            "interfaces":  "Interfețe"
+
+        },
                                 "access_title":  "Permisiuni de acces",
                 "access_default":  "Acces implicit",
                 "access_full":  "Acces complet",
@@ -580,6 +588,25 @@
                                      "scroll_next":  "Derulează la dreapta"
                                 },
                      "mcp":  {
+                                 "market":  {
+                                             "title":  "Piața MCP",
+                                             "search_placeholder":  "Caută servere MCP",
+                                             "hosted":  "Găzduit",
+                                             "installed":  "Instalat",
+                                             "empty":  "Niciun serviciu găsit",
+                                             "required":  "Obligatoriu",
+                                             "verified":  "Verificat",
+                                             "connect":  "Conectare",
+                                             "connect_title":  "Conectare",
+                                             "save_connect":  "Salvează și conectează",
+                                             "cancel":  "Anulare",
+                                             "config":  "Configurare",
+                                             "load_failed":  "Nu s-a putut încărca directorul MCP: {msg}",
+                                             "install_failed":  "Instalarea a eșuat: {msg}",
+                                             "installed_names":  "Instalat: {msg}",
+                                             "detail_failed":  "Nu s-au putut încărca detaliile: {msg}",
+                                             "retry":  "Reîncearcă"
+                                 },
                                  "title":  "Servere MCP",
                                  "desc":  "Gestionarea serverelor externe de instrumente (fișiere, baze de date, browsere)",
                                  "add":  "Adăugare server",
@@ -1035,6 +1062,7 @@
                  "tool_edit":  "Editare",
                  "tool_bash":  "Executare",
                  "tool_bash_output": "Verifică ieșirea din fundal",
+                 "action_bash_done": "Comandă terminal",
                  "tool_skill":  "Abilitate",
                  "tool_todo":  "Sarcini",
                  "tool_code":  "Cod",
@@ -1269,7 +1297,7 @@
                     "turn_input":  "Intrare rundă",
                     "turn_output":  "Ieșire rundă",
                     "batch_done_count":  "{count} apeluri de instrumente",
-                    "action_bash_done":  "Comandă terminal executată",
+                    "action_bash_done":  "Comandă terminal",
                     "action_thinking_done":  "Gândit",
                     "batch_thinking_count":  "Gândit de {count} ori",
                     "messages":  "Mesaje"

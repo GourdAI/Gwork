@@ -395,6 +395,10 @@ function pruneSessionDrafts() {
 }
 
 function setActiveSession(sessionId) {
+    // 撤掉「不属于新活动会话」的历史加载覆盖层：切回已缓存会话不会再发
+    // loadMessages，没有 show/hide 配对，旧会话的骨架/失败卡必须在此收口。
+    // typeof 守卫：app-base 先于 app-history 装载（定义纪律同 syncQuestionCard）。
+    if (typeof window.dismissHistoryLoadingExcept === 'function') window.dismissHistoryLoadingExcept(sessionId);
     // 同会话重复激活（发送、selectSession、初始化都会触发）不能走草稿交换：
     // 那是无谓的 renderAttachments 重建，也会白白作废正在读取的附件回调。
     var switching = (sessionId !== activeSessionId);
@@ -927,6 +931,8 @@ function clearInput(fromWelcome) {
     // Go through autoResize uniformly: if there is no manual height, revert to the default min-height; if there is, preserve the height selected by the user
     chatInput.value = '';
     autoResize(chatInput);
+    // 技能小卡片随输入一起消费（发送链路已把其 id 注入 wire 文本）
+    if (typeof clearSkillChips === 'function') clearSkillChips(fromWelcome);
     if (fromWelcome) {
         welcomeInput.value = '';
         autoResize(welcomeInput);

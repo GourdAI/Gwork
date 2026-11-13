@@ -3,6 +3,12 @@
     "360": "360",
     "1000": "1000",
     "10000": "10000",
+    "Upload update check file": "上传更新检测文件",
+    "Update check file uploaded successfully": "更新检测文件上传成功",
+    "Failed to upload update check file": "上传更新检测文件失败",
+    "Invalid update check file": "请选择有效的 JSON 更新检测文件",
+    "Update check file": "更新检测文件",
+    "Select a latest.json file to publish to the desktop updater.": "选择 latest.json 文件并发布给桌面客户端更新程序。",
     "_copy": "_复制",
     "and the": "和",
     "By clicking sign in, you agree to our": "点击登录，即表示您同意我们的",
@@ -7571,6 +7577,17 @@
     "Describe your next task…": "描述你的下一个任务…",
     "Syntax check passed": "语法校验通过",
     "Task complete": "任务完成",
-    "2 min 41 s": "2 分 41 秒"
+    "2 min 41 s": "2 分 41 秒",
+    "Latest manifest file is required": "请选择更新检测文件",
+    "Latest manifest must be a .json file": "更新检测文件必须是 .json 文件",
+    "Latest manifest exceeds size limit": "更新检测文件超出大小限制",
+    "Current update manifest": "当前更新检测文件",
+    "Public feed URL": "公开更新源地址",
+    "No latest.json has been uploaded yet.": "尚未上传更新检测文件。",
+    "latest.json not found": "未找到 latest.json",
+    "Failed to read latest.json manifest": "读取 latest.json 失败",
+    "Failed to store latest.json manifest": "保存 latest.json 失败",
+    "Invalid latest.json manifest: missing version": "无效的 latest.json：缺少 version",
+    "Invalid latest.json manifest: missing platforms": "无效的 latest.json：缺少 platforms"
   }
 }

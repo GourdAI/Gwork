@@ -301,8 +301,10 @@ test('名称来源：chatHistory 的 label；绝不回落内部 sessionId', () =
         '不得存在回落文案函数：未定名走 hidden，不拿假名字顶在标题栏上');
     assert.doesNotMatch(taskJs, /history\.new_chat/,
         '标题栏不得引用 history.new_chat（它只属于侧栏条目兜底，app-history.js:407）');
-    assert.match(taskJs, /if \(!sid \|\| !name\)/,
-        '无会话或有会话但未定名都必须进入 hidden 分支（只判 !sid 会露出空标题）');
+    /* 2026-11-12 覆盖视图修复后隐藏条件扩展为三选一（无会话/未定名/被覆盖视图盖住），
+       旧断言只钉 `if (!sid || !name)` 会把合法修复判红；这里钉「三者都在条件里」。 */
+    assert.match(taskJs, /if \(!sid \|\| !name \|\| covered\)/,
+        '无会话/未定名/覆盖视图开启都必须进入 hidden 分支（只判 !sid 会露出空标题或残留标头）');
 });
 
 test('无活动会话必须 hidden（含 deactivateSession 路径）', () => {
@@ -353,14 +355,25 @@ function makeEl() {
     return { hidden: false, textContent: '' };
 }
 
-function loadTaskScript(globals) {
+/* 覆盖视图桩：模块只读 classList.contains('active'/'memory-overlay') */
+function makeViewEl(classes) {
+    const set = new Set(classes || []);
+    return { classList: { contains: (c) => set.has(c) } };
+}
+
+function loadTaskScript(globals, views) {
     const chip = makeEl();
     const label = makeEl();
+    const viewEls = {};
+    const vmap = views || {};
+    for (const vid of Object.keys(vmap)) viewEls[vid] = makeViewEl(vmap[vid]);
     const context = {
         console: { error() {}, warn() {}, log() {} },
         document: {
             getElementById(id) {
-                return id === 'titlebarTask' ? chip : (id === 'titlebarTaskLabel' ? label : null);
+                if (id === 'titlebarTask') return chip;
+                if (id === 'titlebarTaskLabel') return label;
+                return viewEls[id] || null;
             },
             addEventListener() {}
         }
@@ -438,6 +451,59 @@ test('行为：renderTitlebarTask 幂等（重复调用不重复写 DOM）', () 
     context.window.renderTitlebarTask();
     assert.strictEqual(writes, afterFirst,
         '内容未变时不得重复写 label（updateHistoryUI 每帧 rAF 都会调进来）');
+});
+
+/* ===== 覆盖视图期间隐藏标题（用户 2026-11-12 报障）=====
+   报障现象：切到侧栏上方菜单（使用统计/远控通道等）后，头部仍挂着上一个任务名。
+   根因：六个覆盖视图的 openX() 只 $('#chatView').removeClass('active')、给自己加
+   .active，【都不动 activeSessionId】——会话仍活着（切回即恢复），于是旧口径下
+   render() 继续显示该会话的 label。主区已整页换掉而标题还指着看不见的会话，是误导。
+   契约：覆盖视图 .active 期间整块隐藏；class 摘除即恢复真名；记忆专注模式弹层
+   （.memory-overlay，盖在 code 模式之上、底层会话仍在使用）例外保留。 */
+const OVERLAY_IDS = ['skillsView', 'automationView', 'channelView',
+    'usageView', 'modelSettingsView', 'memoryView'];
+
+test('行为：覆盖视图开启 → 隐藏；关闭 → 恢复真名（不残留上一个任务）', () => {
+    const hist = [{ sessionId: 'work-a', label: '你排查下记忆的实现' }];
+    let r = loadTaskScript({ __globals: { activeSessionId: 'work-a' }, chatHistory: hist },
+        { usageView: ['usage-view', 'active'] });
+    assert.strictEqual(r.chip.hidden, true, '使用统计开启时必须隐藏标题');
+    assert.strictEqual(r.label.textContent, '', '隐藏态不得残留文字');
+
+    r = loadTaskScript({ __globals: { activeSessionId: 'work-a' }, chatHistory: hist },
+        { usageView: ['usage-view'] });
+    assert.strictEqual(r.chip.hidden, false, '覆盖视图关闭后必须恢复显示');
+    assert.strictEqual(r.label.textContent, '你排查下记忆的实现');
+});
+
+test('行为：六个覆盖视图 id 全部识别（漏一个即重现残留标头）', () => {
+    const hist = [{ sessionId: 'work-a', label: '任务名' }];
+    for (const vid of OVERLAY_IDS) {
+        const r = loadTaskScript({ __globals: { activeSessionId: 'work-a' }, chatHistory: hist },
+            { [vid]: ['active'] });
+        assert.strictEqual(r.chip.hidden, true, vid + ' 开启时必须隐藏标题');
+    }
+});
+
+test('行为：记忆专注模式弹层（.memory-overlay）不隐藏标题', () => {
+    const hist = [{ sessionId: 'work-a', label: '任务名' }];
+    const r = loadTaskScript({ __globals: { activeSessionId: 'work-a' }, chatHistory: hist },
+        { memoryView: ['memory-view', 'memory-overlay', 'active'] });
+    assert.strictEqual(r.chip.hidden, false,
+        '弹层盖在 code 模式之上、底层会话仍在使用，标题必须保留');
+    assert.strictEqual(r.label.textContent, '任务名');
+});
+
+test('接线：覆盖视图 class 变化必须驱动重绘（openX/closeX 不派发任何事件）', () => {
+    assert.match(taskJs, /OVERLAY_VIEW_IDS/, '必须有覆盖视图 id 清单');
+    for (const vid of OVERLAY_IDS) {
+        assert.ok(taskJs.includes("'" + vid + "'"), '清单必须含 ' + vid);
+    }
+    assert.match(taskJs, /MutationObserver/, '六个 open/close 分属六个文件且无事件，必须观察 class 收口');
+    assert.match(taskJs, /attributeFilter:\s*\['class'\]/, '只观察 class 属性，避免无关属性空转');
+    /* 观察器回调必须落到 render（幂等），留个空回调等于没接线 */
+    assert.match(taskJs, /new MutationObserver\(function \(\) \{ render\(\); \}\)/,
+        '观察器回调必须调用 render');
 });
 
 // ---------- 镜像与产物纪律 ----------

@@ -30,7 +30,27 @@
 //!     后立即 refresh 一次，拿到新 access token，无需重新输密码；
 //!   - 只有显式点「退出登录」才调用 logout 撤销会话并清 keyring。
 //! 凭据只存 OS keyring（独立 service 名），绝不进 settings.json / localStorage。
+//!
+//! ## 参数契约（与 gourd-work-admin 对齐，2026 注册缺参修复）
+//! admin 的 `POST /api/user/register` 直接解码 `model.User`：开启邮箱验证
+//! （`GET /api/status` 的 `email_verification`）时**必须**带
+//! `verification_code`，否则返回「Email verification is enabled...」；验证码
+//! 由 `GET /api/verification?email=...` 下发。旧实现只发 username/password/
+//! email，注册必失败 —— 现已补齐，并在 UI 提供「发送验证码」入口。
+//! `POST /api/user/login` 在后台开启密码加密传输时只接受
+//! `password_encrypted` + `encryption_key_id`（v2 信封：RSA-OAEP/SHA-256
+//! label="password-v2" 包裹随机 AES-256 密钥，AES-GCM 加密密码，AAD 为
+//! "password-v2:<kid>"），明文 password 会被判 Invalid parameters。
+//! **是否需要加密只问 `GET /api/user/login/encryption-key` 自己的 `enabled`
+//! 字段**（它就是 admin 的权威开关），不要用 `/api/status` 的
+//! password_login_encryption_enabled 做前置判断：两条链路一旦有一条探测失败，
+//! 就会静默退回明文并让后台报出误导性的「密码错误」。
 
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Nonce};
+use base64::Engine as _;
+use rsa::pkcs8::DecodePublicKey;
+use rsa::{Oaep, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -134,6 +154,365 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+// ───────────────── 注册能力探测（GET /api/status）─────────────────
+//
+// 注册相关的后台开关是部署级配置，桌面端不能写死假设：渲染注册表单前用
+// GET /api/status 探测一次（进程内缓存 60s）。探测失败时按「邮箱可选」降级
+// ——此时若后台实际开启了邮箱验证，后台会用精确的业务错误文案拒绝注册，
+// 用户可见，不会静默失败。
+//
+// 注意：**登录加密不走这里**。是否需要密码加密传输，只问
+// GET /api/user/login/encryption-key 自己的 enabled（见 login_encryption），
+// 绝不能用 /api/status 的开关做前置判断——那条链路一旦探测失败就会静默退回
+// 明文，正是本轮修掉的缺陷。因此 AuthConfig 刻意【不】承载登录加密开关。
+
+/// `GET /api/status` 中与【注册】流程相关的开关子集。
+/// 登录加密判定见 `login_encryption()`，不在此结构体内（勿在此新增）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AuthConfig {
+    /// 注册时是否强制邮箱 + 验证码（admin: common.EmailVerificationEnabled）。
+    pub email_verification: bool,
+    /// 是否允许密码注册（admin: common.PasswordRegisterEnabled）。
+    pub password_register_enabled: bool,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct StatusWire {
+    #[serde(default)]
+    email_verification: bool,
+    #[serde(default = "default_true")]
+    password_register_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `GET /api/user/login/encryption-key` 的响应子集。
+/// admin controller/user.go::GetPasswordEncryptionKey 在加密未开启时只回
+/// `{enabled:false}`（不带公钥），开启时回 `{enabled:true,kid,public_key}`。
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+struct EncryptionKeyWire {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    kid: String,
+    #[serde(default)]
+    public_key: String,
+}
+
+/// `GET /api/user/login/encryption-key` 的判定结果。
+///
+/// 三态是刻意区分的，不能压成 bool：
+/// - `Disabled`：后台**明确回答**加密关闭（`{success:true,enabled:false}`），
+///   此时明文登录是后台认可的用法；
+/// - `LegacyBackend`：后台**根本没这个端点**（404，旧版 admin）或响应无法
+///   解析。这种情况下也必须回退明文 —— 否则对接旧版后台的客户端会从
+///   「本来能登录」变成「硬失败」；
+/// - `Required`：后台要求加密且给出了可用公钥。
+///
+/// 唯一**不**回退明文的是 `Unavailable`（传输失败/非 404 的服务端错误）：
+/// 这时后台可能已开启加密，静默发明文会让后台回一句误导性的
+/// "Invalid parameters"，用户看到的却是「密码错误」，且日志里没有任何
+/// 指向真因的线索。宁可把真实故障报出来。
+#[derive(Debug, Clone, PartialEq)]
+enum LoginEncryption {
+    /// 后台明确要求加密，公钥可用。
+    Required(EncryptionKeyWire),
+    /// 后台明确回答未开启加密。
+    Disabled,
+    /// 后台没有该端点（旧版 admin，404）或响应不是合法 JSON：按明文登录。
+    LegacyBackend,
+    /// 无法判定（网络失败 / 5xx / 声称开启却无公钥）：必须报错，不得发明文。
+    Unavailable(String),
+}
+
+impl LoginEncryption {
+    /// 是否需要走 v2 信封加密。
+    fn is_required(&self) -> bool {
+        matches!(self, LoginEncryption::Required(_))
+    }
+}
+
+/// 纯判定函数：由 HTTP 状态码 + 响应体决定登录加密策略。
+///
+/// 抽成纯函数是为了让它**可以被单测直接击杀**。此前这段逻辑内联在
+/// `login()` 里，护栏只能靠 `src.includes("password_encrypted")` 这类文本
+/// 匹配，把 `.await?` 改成 `.await.unwrap_or_default()`（探测失败即静默
+/// 发明文）都不会让任何测试变红 —— 变异测试实测该缺陷 SURVIVE。
+///
+/// 注意 admin 的错误响应约定：`ApiErrorT` → `ApiErrorStatus(c, http.StatusOK, ...)`，
+/// 即**业务错误也是 HTTP 200** + `{success:false,message}`。因此只看状态码
+/// 会漏掉「后台声称开启加密却没配好公钥」这类 200 错误，必须同时看
+/// `success` 字段。
+fn decide_login_encryption(status: u16, body: &str) -> LoginEncryption {
+    // 旧版后台没有这个端点：路由不存在，按明文登录（该版本也不校验加密）。
+    if status == 404 {
+        return LoginEncryption::LegacyBackend;
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        // 非 JSON（例如网关返回的 HTML 错误页）：无法判定，不猜。
+        Err(e) => {
+            return LoginEncryption::Unavailable(format!(
+                "获取登录加密公钥失败：响应不是合法 JSON（HTTP {}，{}）",
+                status, e
+            ))
+        }
+    };
+    let success = v.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
+    let message = || {
+        v.get("message")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    // HTTP 200 + success:false 是 admin 的业务错误形态，同样不能当成功。
+    if status < 200 || status >= 300 || !success {
+        let msg = message();
+        return LoginEncryption::Unavailable(if msg.is_empty() {
+            format!("获取登录加密公钥失败（HTTP {}）", status)
+        } else {
+            msg
+        });
+    }
+    let wire: EncryptionKeyWire =
+        serde_json::from_value(v.get("data").cloned().unwrap_or_default()).unwrap_or_default();
+    if !wire.enabled {
+        return LoginEncryption::Disabled;
+    }
+    if wire.kid.is_empty() || wire.public_key.is_empty() {
+        // 声称开启加密却给不出可用公钥：后台侧配置不一致（私钥未落库等）。
+        let msg = message();
+        return LoginEncryption::Unavailable(if msg.is_empty() {
+            "后台已开启密码加密传输但未提供公钥，请联系管理员".to_string()
+        } else {
+            msg
+        });
+    }
+    LoginEncryption::Required(wire)
+}
+
+/// 进程内能力缓存：60s TTL。Mutex 里放 (取到的时刻, 配置)。
+static CONFIG_CACHE: Mutex<Option<(i64, AuthConfig)>> = Mutex::new(None);
+
+fn config_cache_get() -> Option<AuthConfig> {
+    let g = CONFIG_CACHE.lock().ok()?;
+    let (at, cfg) = g.as_ref()?;
+    if now_secs() - at > 60 {
+        return None;
+    }
+    Some(cfg.clone())
+}
+
+fn config_cache_put(cfg: &AuthConfig) {
+    if let Ok(mut g) = CONFIG_CACHE.lock() {
+        *g = Some((now_secs(), cfg.clone()));
+    }
+}
+
+/// 登录加密公钥缓存：5 分钟 TTL，与 web 端 password-encryption.ts 的
+/// KEY_CACHE_TTL_MS 一致。公钥在后台侧只在重新生成密钥时变化，缓存是安全的。
+static KEY_CACHE: Mutex<Option<(i64, EncryptionKeyWire)>> = Mutex::new(None);
+
+const KEY_CACHE_TTL_SECS: i64 = 300;
+
+fn key_cache_get() -> Option<EncryptionKeyWire> {
+    let g = KEY_CACHE.lock().ok()?;
+    let (at, key) = g.as_ref()?;
+    if now_secs() - at > KEY_CACHE_TTL_SECS {
+        return None;
+    }
+    Some(key.clone())
+}
+
+fn key_cache_put(key: &EncryptionKeyWire) {
+    if let Ok(mut g) = KEY_CACHE.lock() {
+        *g = Some((now_secs(), key.clone()));
+    }
+}
+
+/// 加密密码为 admin v2 信封：
+/// `v2.<base64(RSA-OAEP(aes_key, label="password-v2"))>.<base64(nonce)>.<base64(ct||tag)>`
+/// AAD = "password-v2:<kid>"。与 admin common/password_crypto.go::DecryptPassword
+/// 及 web 端 password-encryption.ts 逐字段对齐。
+fn encrypt_password_v2(password: &str, public_key_pem: &str, kid: &str) -> Result<String, String> {
+    let block = pem::parse(public_key_pem).map_err(|e| format!("后台公钥无法解析: {}", e))?;
+    let public_key = RsaPublicKey::from_public_key_der(block.contents())
+        .map_err(|e| format!("后台公钥格式错误: {}", e))?;
+    let mut aes_key = [0u8; 32];
+    let mut nonce_bytes = [0u8; 12];
+    use rand::RngCore;
+    rand::thread_rng().fill_bytes(&mut aes_key);
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let padding = Oaep::new_with_label::<sha2::Sha256, _>("password-v2");
+    let wrapped = public_key
+        .encrypt(&mut rand::thread_rng(), padding, &aes_key)
+        .map_err(|e| format!("密码加密失败: {}", e))?;
+    let cipher = Aes256Gcm::new_from_slice(&aes_key)
+        .map_err(|e| format!("密码加密初始化失败: {}", e))?;
+    let aad = format!("password-v2:{}", kid);
+    let ct = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce_bytes),
+            Payload {
+                msg: password.as_bytes(),
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| "密码加密失败".to_string())?;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    Ok(format!(
+        "v2.{}.{}.{}",
+        b64.encode(&wrapped),
+        b64.encode(&nonce_bytes),
+        b64.encode(&ct)
+    ))
+}
+
+impl AuthState {
+    /// 探测后台账号能力（带 60s 缓存）。失败返回 None（调用方按关闭降级）。
+    pub async fn auth_config(&self) -> Option<AuthConfig> {
+        if let Some(cfg) = config_cache_get() {
+            return Some(cfg);
+        }
+        let url = format!("{}/api/status", self.base_url);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body = resp.text().await.ok()?;
+        let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+        let data = v.get("data").unwrap_or(&v);
+        let wire: StatusWire = serde_json::from_value(data.clone()).ok()?;
+        let cfg = AuthConfig {
+            email_verification: wire.email_verification,
+            password_register_enabled: wire.password_register_enabled,
+        };
+        config_cache_put(&cfg);
+        Some(cfg)
+    }
+
+    /// 取登录加密策略（admin: GET /api/user/login/encryption-key）。
+    ///
+    /// 该端点自身就返回 `enabled`，是「登录是否需要加密传输」的**唯一真相源**：
+    /// 加密关闭时 admin 回 `{enabled:false}`（不带公钥），开启时回
+    /// `{enabled:true,kid,public_key}`。
+    ///
+    /// 【codereview 修复 1】此前 login() 先靠 `GET /api/status` 的
+    /// password_login_encryption_enabled 判断，再去取公钥。/api/status 是另一条
+    /// 链路，它一旦探测失败就返回 None，login 会 `.unwrap_or(false)` 静默发明文
+    /// 密码，后台则对该请求判 "Invalid parameters" —— 用户看到误导性文案，日志
+    /// 里也没有指向真因的线索。现在探测链路只剩一条，少一次往返，也不存在两个
+    /// 开关互相矛盾的可能。
+    ///
+    /// 【codereview 修复 2】判定逻辑抽成纯函数 `decide_login_encryption`，并区分
+    /// 「后台确认关闭」「后台没有该端点（旧版 admin，404）」与「无法判定」三态。
+    /// 上一版把取公钥失败一律当致命错误，会让对接**旧版后台**（404，且该版本
+    /// 根本不校验加密）的客户端从「能登录」退化成「硬失败」。
+    pub async fn login_encryption(&self) -> LoginEncryption {
+        if let Some(key) = key_cache_get() {
+            return if key.enabled && !key.kid.is_empty() && !key.public_key.is_empty() {
+                LoginEncryption::Required(key)
+            } else {
+                LoginEncryption::Disabled
+            };
+        }
+        let url = format!("{}/api/user/login/encryption-key", self.base_url);
+        let resp = match self
+            .client
+            .get(&url)
+            .header("Origin", request_origin(&self.base_url))
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return LoginEncryption::Unavailable(format!("无法连接后台: {}", e));
+            }
+        };
+        let status = resp.status().as_u16();
+        let body = match resp.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                return LoginEncryption::Unavailable(format!("读取响应失败: {}", e));
+            }
+        };
+        let decision = decide_login_encryption(status, &body);
+        if let LoginEncryption::Required(ref wire) = decision {
+            // 公钥只在后台重新生成密钥时变化，缓存与 web 端同为 5 分钟。
+            key_cache_put(wire);
+        } else if matches!(decision, LoginEncryption::Disabled) {
+            key_cache_put(&EncryptionKeyWire::default());
+        }
+        decision
+    }
+
+    /// 发送注册邮箱验证码（admin: GET /api/verification?email=...）。
+    /// 返回后台的 message（成功提示或精确错误）。
+    pub async fn send_verification_code(&self, email: &str) -> Result<String, String> {
+        let email = email.trim();
+        if email.is_empty() {
+            return Err("请先填写邮箱地址".to_string());
+        }
+        let url = format!(
+            "{}/api/verification?email={}",
+            self.base_url,
+            urlenc(email)
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .header("Origin", request_origin(&self.base_url))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("无法连接后台: {}", e))?;
+        let status = resp.status();
+        let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        let v: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|_| format!("后台返回无法解析（{}）", status.as_u16()))?;
+        let msg = v
+            .get("message")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !status.is_success() || v.get("success").and_then(|x| x.as_bool()) == Some(false) {
+            return Err(if msg.is_empty() {
+                format!("验证码发送失败（HTTP {}）", status.as_u16())
+            } else {
+                msg
+            });
+        }
+        Ok(if msg.is_empty() {
+            "验证码已发送，请查收邮箱".to_string()
+        } else {
+            msg
+        })
+    }
+}
+
+/// 最小 URL 编码：邮箱只会出现 @ . _ - 与字母数字，其余按百分号编码。
+fn urlenc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 /// 从 `Set-Cookie` 头里取指定 name 的 `name=value` 段。
@@ -323,15 +702,40 @@ fn request_origin(base: &str) -> String {
 
 impl AuthState {
     /// 登录。成功后写内存 + keyring，并启动保活任务。
+    /// 后台开启密码加密传输时，自动取公钥并以 v2 信封提交
+    /// （明文 password 在该配置下会被后台判 Invalid parameters）。
     pub async fn login(&self, username: &str, password: &str) -> Result<AuthStatus, String> {
         let _guard = self.session_lock.lock().await;
         let url = format!("{}/api/user/login", self.base_url);
+        let mut payload = serde_json::json!({ "username": username, "password": password });
+        // 是否需要加密，只问 /api/user/login/encryption-key 这一个端点。
+        // 不再依赖 /api/status 的探测结果 —— 见 login_encryption 的说明。
+        match self.login_encryption().await {
+            LoginEncryption::Required(key) => {
+                let encrypted = encrypt_password_v2(password, &key.public_key, &key.kid)?;
+                payload = serde_json::json!({
+                    "username": username,
+                    "password_encrypted": encrypted,
+                    "encryption_key_id": key.kid,
+                });
+            }
+            // 后台明确关闭加密，或后台是没有该端点的旧版本：明文是它认可的用法。
+            LoginEncryption::Disabled | LoginEncryption::LegacyBackend => {}
+            // 无法判定：绝不能静默退回明文。后台若已开启加密，明文会被判
+            // "Invalid parameters"，用户只会看到误导性的「密码错误」。
+            LoginEncryption::Unavailable(reason) => {
+                return Err(format!(
+                    "无法确认后台是否要求密码加密传输：{}（为避免用明文密码重试，已中止登录）",
+                    reason
+                ))
+            }
+        }
         let resp = self
             .client
             .post(&url)
             .header("Origin", request_origin(&self.base_url))
             .header("Accept", "application/json")
-            .json(&serde_json::json!({ "username": username, "password": password }))
+            .json(&payload)
             .send()
             .await
             .map_err(|e| format!("无法连接后台: {}", e))?;
@@ -354,16 +758,26 @@ impl AuthState {
 
     /// 注册。new-api 的注册接口只返回 `{success:true}` 不发 token，因此
     /// 成功后自动用同一组凭据登录，用户无需再输一次。
+    ///
+    /// 参数契约（admin controller/user.go::Register）：后台开启邮箱验证时
+    /// `email` 与 `verification_code` 均为必填，缺任何一个都会被拒
+    /// （"Email verification is enabled, please enter email address and
+    /// verification code"）。验证码先经 `send_verification_code` 下发。
     pub async fn register(
         &self,
         username: &str,
         password: &str,
         email: &str,
+        verification_code: &str,
     ) -> Result<AuthStatus, String> {
         let url = format!("{}/api/user/register", self.base_url);
         let mut payload = serde_json::json!({ "username": username, "password": password });
         if !email.trim().is_empty() {
             payload["email"] = serde_json::Value::String(email.trim().to_string());
+        }
+        if !verification_code.trim().is_empty() {
+            payload["verification_code"] =
+                serde_json::Value::String(verification_code.trim().to_string());
         }
         let resp = self
             .client
@@ -679,10 +1093,24 @@ pub async fn auth_register(
     username: String,
     password: String,
     email: String,
+    verification_code: String,
 ) -> Result<AuthStatus, String> {
     state_of(&app)?
-        .register(&username, &password, &email)
+        .register(&username, &password, &email, &verification_code)
         .await
+}
+
+#[tauri::command]
+pub async fn auth_send_code(app: tauri::AppHandle, email: String) -> Result<String, String> {
+    state_of(&app)?.send_verification_code(&email).await
+}
+
+#[tauri::command]
+pub async fn auth_config(app: tauri::AppHandle) -> Result<AuthConfig, String> {
+    state_of(&app)?
+        .auth_config()
+        .await
+        .ok_or_else(|| "后台暂不可用，无法获取注册配置".to_string())
 }
 
 #[tauri::command]
@@ -787,5 +1215,208 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("用户名或密码错误"));
+    }
+
+    /// v2 信封必须能被 admin 的 DecryptPassword 语义解开：结构 4 段、
+    /// wrapped key 长度 = RSA 模长、nonce 12 字节、AAD 绑定 kid。
+    /// 这里用 rsa 私钥自签自解，防止信封拼装顺序/标签漂移。
+    #[test]
+    fn v2_envelope_roundtrips_with_admin_decrypt_semantics() {
+        use rsa::pkcs8::EncodePublicKey;
+        use rsa::traits::PublicKeyParts;
+        use rsa::RsaPrivateKey;
+        let mut rng = rand::thread_rng();
+        let priv_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pub_pem = pem::encode(&pem::Pem::new(
+            "PUBLIC KEY",
+            priv_key
+                .to_public_key()
+                .to_public_key_der()
+                .unwrap()
+                .to_vec(),
+        ));
+        let kid = "test-kid-1";
+        let envelope = encrypt_password_v2("pässwörd-中文-12345678", &pub_pem, kid).unwrap();
+        let parts: Vec<&str> = envelope.split('.').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "v2");
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let wrapped = b64.decode(parts[1]).unwrap();
+        let nonce = b64.decode(parts[2]).unwrap();
+        let ct = b64.decode(parts[3]).unwrap();
+        assert_eq!(wrapped.len(), priv_key.size());
+        assert_eq!(nonce.len(), 12);
+        assert!(ct.len() > 16);
+        // 按 admin password_crypto.go 的解密路径还原明文。
+        let aes_key = rsa::Oaep::new_with_label::<sha2::Sha256, _>("password-v2");
+        let key = priv_key.decrypt(aes_key, &wrapped).unwrap();
+        assert_eq!(key.len(), 32);
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let aad = format!("password-v2:{}", kid);
+        let plain = cipher
+            .decrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: &ct,
+                    aad: aad.as_bytes(),
+                },
+            )
+            .unwrap();
+        assert_eq!(String::from_utf8(plain).unwrap(), "pässwörd-中文-12345678");
+        // kid 不匹配（AAD 被篡改）必须解密失败。
+        let bad = cipher
+            .decrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: &ct,
+                    aad: b"password-v2:other-kid",
+                },
+            )
+            .is_err();
+        assert!(bad, "AAD must bind the key id");
+    }
+
+    #[test]
+    fn urlenc_escapes_at_sign_for_query() {
+        assert_eq!(urlenc("a@b.com"), "a%40b.com");
+        assert_eq!(urlenc("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    // ───── 登录加密判定（decide_login_encryption）─────
+    //
+    // 这组测试是 M5「探测失败即静默发明文」缺陷的真实护栏：判定被抽成纯函数
+    // 后，每个分支都能被直接断言，把 `.await?` 换成 `.unwrap_or_default()`
+    // 之类的降级会让 `unavailable_must_not_be_treated_as_plaintext` 变红。
+    // 文本匹配（src.includes("password_encrypted")）挡不住这类变异 —— 变异
+    // 测试实测其 SURVIVE。
+
+    fn ok_body(data: serde_json::Value) -> String {
+        serde_json::json!({ "success": true, "message": "", "data": data }).to_string()
+    }
+
+    #[test]
+    fn encryption_enabled_with_usable_key_requires_v2_envelope() {
+        let body = ok_body(serde_json::json!({
+            "enabled": true,
+            "kid": "abc123",
+            "public_key": "-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----"
+        }));
+        match decide_login_encryption(200, &body) {
+            LoginEncryption::Required(k) => {
+                assert_eq!(k.kid, "abc123");
+                assert!(k.public_key.contains("PUBLIC KEY"));
+                assert!(decide_login_encryption(200, &body).is_required());
+            }
+            other => panic!("expected Required, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn backend_confirms_encryption_off_is_plaintext_login() {
+        // admin GetPasswordEncryptionKey：未开启时只回 {enabled:false}
+        let body = ok_body(serde_json::json!({ "enabled": false }));
+        assert_eq!(decide_login_encryption(200, &body), LoginEncryption::Disabled);
+        assert!(!decide_login_encryption(200, &body).is_required());
+    }
+
+    #[test]
+    fn legacy_backend_without_the_endpoint_falls_back_to_plaintext() {
+        // 旧版 admin 没有 /api/user/login/encryption-key，路由 404。
+        // 该版本也不校验加密，因此必须允许明文，否则升级前能登录的部署会硬失败。
+        assert_eq!(
+            decide_login_encryption(404, "<html>404 page not found</html>"),
+            LoginEncryption::LegacyBackend
+        );
+        assert_eq!(decide_login_encryption(404, ""), LoginEncryption::LegacyBackend);
+    }
+
+    /// admin 的 `ApiErrorT` 走 `ApiErrorStatus(c, http.StatusOK, ...)`：
+    /// **业务错误的 HTTP 状态码是 200**，只靠 `status.is_success()` 判定会漏。
+    /// 典型场景：后台开了加密但私钥未落库 → 200 + success:false。
+    #[test]
+    fn admin_business_error_carries_http_200_and_must_not_be_plaintext() {
+        let body = serde_json::json!({
+            "success": false,
+            "message": "Database error, please contact the administrator"
+        })
+        .to_string();
+        match decide_login_encryption(200, &body) {
+            LoginEncryption::Unavailable(msg) => assert!(msg.contains("Database error")),
+            other => panic!("HTTP 200 + success:false must be Unavailable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn enabled_but_missing_public_key_is_unavailable_not_plaintext() {
+        let body = ok_body(serde_json::json!({ "enabled": true, "kid": "k1", "public_key": "" }));
+        assert!(matches!(
+            decide_login_encryption(200, &body),
+            LoginEncryption::Unavailable(_)
+        ));
+        let body2 = ok_body(serde_json::json!({ "enabled": true, "kid": "", "public_key": "pem" }));
+        assert!(matches!(
+            decide_login_encryption(200, &body2),
+            LoginEncryption::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn transport_and_parse_failures_are_unavailable() {
+        assert!(matches!(
+            decide_login_encryption(500, "internal error"),
+            LoginEncryption::Unavailable(_)
+        ));
+        assert!(matches!(
+            decide_login_encryption(502, "<html>Bad Gateway</html>"),
+            LoginEncryption::Unavailable(_)
+        ));
+        // 200 但响应体不是 JSON（网关/代理插入了 HTML）
+        assert!(matches!(
+            decide_login_encryption(200, "<html>ok</html>"),
+            LoginEncryption::Unavailable(_)
+        ));
+        // 200 + JSON 但没有 success 字段：不可信，按无法判定处理
+        assert!(matches!(
+            decide_login_encryption(200, "{\"data\":{}}"),
+            LoginEncryption::Unavailable(_)
+        ));
+    }
+
+    /// M5 的语义级护栏：任何「无法判定」都不得被当成「后台确认关闭」。
+    /// 这条断言把三态与二值压平区分开来 —— 若有人把 Unavailable 归并进
+    /// Disabled（即恢复静默发明文的老行为），此测试立即变红。
+    #[test]
+    fn unavailable_must_not_be_treated_as_plaintext() {
+        let untrusted = [
+            (500u16, "boom".to_string()),
+            (200, "{\"success\":false,\"message\":\"no key\"}".to_string()),
+            (200, "not json at all".to_string()),
+            (
+                200,
+                ok_body(serde_json::json!({ "enabled": true, "kid": "k", "public_key": "" })),
+            ),
+        ];
+        for (status, body) in untrusted {
+            let d = decide_login_encryption(status, &body);
+            assert!(
+                matches!(d, LoginEncryption::Unavailable(_)),
+                "status={} body={} must stay Unavailable, got {:?}",
+                status,
+                body,
+                d
+            );
+            assert_ne!(d, LoginEncryption::Disabled, "must not fall back to plaintext");
+            assert_ne!(d, LoginEncryption::LegacyBackend, "must not fall back to plaintext");
+            assert!(!d.is_required());
+        }
+        // 反向对照：只有这两种才允许明文。
+        assert!(matches!(
+            decide_login_encryption(404, "nope"),
+            LoginEncryption::LegacyBackend
+        ));
+        assert!(matches!(
+            decide_login_encryption(200, &ok_body(serde_json::json!({"enabled": false}))),
+            LoginEncryption::Disabled
+        ));
     }
 }

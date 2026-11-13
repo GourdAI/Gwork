@@ -275,6 +275,14 @@
                  "confirm":  "确定"
              },
     "app":  {
+
+        "nav":  {
+
+            "connectors":  "连接器",
+
+            "interfaces":  "接口"
+
+        },
                                 "access_title":  "访问权限",
                 "access_default":  "默认权限",
                 "access_full":  "完全访问",
@@ -580,6 +588,25 @@
                                      "scroll_next":  "向右滚动"
                                 },
                      "mcp":  {
+                                 "market":  {
+                                             "title":  "MCP 服务市场",
+                                             "search_placeholder":  "搜索 MCP 服务",
+                                             "hosted":  "已托管",
+                                             "installed":  "已安装",
+                                             "empty":  "未找到 MCP 服务",
+                                             "required":  "必填",
+                                             "verified":  "已认证",
+                                             "connect":  "连接",
+                                             "connect_title":  "连接",
+                                             "save_connect":  "保存并连接",
+                                             "cancel":  "取消",
+                                             "config":  "对接配置",
+                                             "load_failed":  "魔搭 MCP 目录加载失败：{msg}",
+                                             "install_failed":  "安装失败：{msg}",
+                                             "installed_names":  "已安装：{msg}",
+                                             "detail_failed":  "加载详情失败：{msg}",
+                                             "retry":  "重试"
+                                 },
                                  "title":  "MCP 服务器",
                                  "desc":  "管理外部工具服务器，扩展文件、数据库、浏览器等工具能力",
                                  "add":  "添加服务器",
@@ -1035,6 +1062,7 @@
                  "tool_edit":  "编辑",
                  "tool_bash":  "执行命令",
                  "tool_bash_output": "查看后台输出",
+                 "action_bash_done": "终端命令",
                  "tool_skill":  "技能",
                  "tool_todo":  "任务清单",
                  "tool_code":  "编码",
@@ -1269,7 +1297,7 @@
                     "turn_input":  "本轮输入",
                     "turn_output":  "本轮输出",
                     "batch_done_count":  "执行工具 {count} 次",
-                    "action_bash_done":  "终端命令已运行",
+                    "action_bash_done":  "终端命令",
                     "action_thinking_done":  "已思考",
                     "batch_thinking_count":  "思考 {count} 次",
                     "messages":  "消息条数"

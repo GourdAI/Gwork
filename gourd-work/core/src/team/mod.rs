@@ -471,8 +471,15 @@ pub async fn forward_subagent_frames(
                 | "trace"
                 | "context_size"
                 // A sub-agent's live speed window must not overwrite the
-                // parent's context meter (same reason as `context_size`), and
-                // its seq starts at 0 which could rewind the parent's cursor.
+                // parent's context meter (same reason as `context_size`).
+                //
+                // This used to also cite "its seq starts at 0 which could rewind
+                // the parent's cursor". That half is obsolete: the parent's
+                // forwarder now re-stamps every frame it relays
+                // (`server::stamp_seq`), so a sub-agent's own `start_seq: 0`
+                // numbering never reaches the parent's stream or cursor. Do not
+                // re-add that reason — the frame is dropped for meter hygiene, not
+                // for sequencing.
                 | "tps_progress"
                 // A sub-agent compressing its own context is not a fact about
                 // the user's conversation; see the function docs.

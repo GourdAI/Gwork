@@ -275,6 +275,14 @@
                  "confirm":  "Confirmar"
              },
     "app":  {
+
+        "nav":  {
+
+            "connectors":  "Conectores",
+
+            "interfaces":  "Interfaces"
+
+        },
                                 "access_title":  "Permissões de acesso",
                 "access_default":  "Acesso padrão",
                 "access_full":  "Acesso total",
@@ -580,6 +588,25 @@
                                      "scroll_next":  "Rolar para a direita"
                                 },
                      "mcp":  {
+                                 "market":  {
+                                             "title":  "Mercado MCP",
+                                             "search_placeholder":  "Pesquisar servidores MCP",
+                                             "hosted":  "Hospedado",
+                                             "installed":  "Instalado",
+                                             "empty":  "Nenhum serviço encontrado",
+                                             "required":  "Obrigatório",
+                                             "verified":  "Verificado",
+                                             "connect":  "Conectar",
+                                             "connect_title":  "Conectar",
+                                             "save_connect":  "Salvar e conectar",
+                                             "cancel":  "Cancelar",
+                                             "config":  "Configuração",
+                                             "load_failed":  "Falha ao carregar o diretório MCP: {msg}",
+                                             "install_failed":  "Falha na instalação: {msg}",
+                                             "installed_names":  "Instalado: {msg}",
+                                             "detail_failed":  "Falha ao carregar os detalhes: {msg}",
+                                             "retry":  "Tentar novamente"
+                                 },
                                  "title":  "Servidores MCP",
                                  "desc":  "Gerenciar servidores de ferramentas externos (arquivos, bancos de dados, navegadores)",
                                  "add":  "Adicionar servidor",
@@ -1035,6 +1062,7 @@
                  "tool_edit":  "Editar",
                  "tool_bash":  "Executar",
                  "tool_bash_output": "Ver saída em segundo plano",
+                 "action_bash_done": "Comando do terminal",
                  "tool_skill":  "Habilidade",
                  "tool_todo":  "Tarefas",
                  "tool_code":  "Código",
@@ -1269,7 +1297,7 @@
                     "turn_input":  "Entrada do turno",
                     "turn_output":  "Saída do turno",
                     "batch_done_count":  "{count} chamadas de ferramenta",
-                    "action_bash_done":  "Comando do terminal executado",
+                    "action_bash_done":  "Comando do terminal",
                     "action_thinking_done":  "Pensado",
                     "batch_thinking_count":  "Pensado {count} vezes",
                     "messages":  "Mensagens"

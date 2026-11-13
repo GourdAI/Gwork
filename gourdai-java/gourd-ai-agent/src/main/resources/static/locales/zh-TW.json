@@ -275,6 +275,14 @@
                  "confirm":  "確認"
              },
     "app":  {
+
+        "nav":  {
+
+            "connectors":  "連接器",
+
+            "interfaces":  "介面"
+
+        },
                                 "access_title":  "存取權限",
                 "access_default":  "預設權限",
                 "access_full":  "完全存取",
@@ -572,6 +580,25 @@
                                      "scroll_next":  "向右捲動"
                                 },
                      "mcp":  {
+                                 "market":  {
+                                             "title":  "MCP 服務市集",
+                                             "search_placeholder":  "搜尋 MCP 服務",
+                                             "hosted":  "已託管",
+                                             "installed":  "已安裝",
+                                             "empty":  "找不到 MCP 服務",
+                                             "required":  "必填",
+                                             "verified":  "已認證",
+                                             "connect":  "連接",
+                                             "connect_title":  "連接",
+                                             "save_connect":  "儲存並連接",
+                                             "cancel":  "取消",
+                                             "config":  "對接設定",
+                                             "load_failed":  "魔搭 MCP 目錄載入失敗：{msg}",
+                                             "install_failed":  "安裝失敗：{msg}",
+                                             "installed_names":  "已安裝：{msg}",
+                                             "detail_failed":  "載入詳情失敗：{msg}",
+                                             "retry":  "重試"
+                                 },
                                  "title":  "MCP 伺服器",
                                  "desc":  "管理外部工具伺服器，擴充檔案、資料庫、瀏覽器等工具能力",
                                  "add":  "新增伺服器",
@@ -1035,6 +1062,7 @@
                  "tool_edit":  "編輯",
                  "tool_bash":  "執行命令",
                  "tool_bash_output": "檢視背景輸出",
+                 "action_bash_done": "終端命令",
                  "tool_skill":  "技能",
                  "tool_todo":  "任務清單",
                  "tool_code":  "編碼",
@@ -1269,7 +1297,7 @@
                     "turn_input":  "本輪輸入",
                     "turn_output":  "本輪輸出",
                     "batch_done_count":  "執行工具 {count} 次",
-                    "action_bash_done":  "終端命令已執行",
+                    "action_bash_done":  "終端命令",
                     "action_thinking_done":  "已思考",
                     "batch_thinking_count":  "思考 {count} 次",
                     "messages":  "訊息條數"

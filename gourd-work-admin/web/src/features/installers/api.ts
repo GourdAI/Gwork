@@ -21,6 +21,8 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 
 import type {
   Installer,
+  InstallerLatestInfo,
+  InstallerLatestInfoResponse,
   InstallerListResponse,
   InstallerResponse,
   InstallerUpdatePayload,
@@ -60,6 +62,39 @@ export async function uploadInstaller(
   })
   const result = requireServerSuccess(response.data)
   return result.data as Installer
+}
+
+/** Current published latest.json (`data: null` when nothing was uploaded). */
+export async function getInstallerLatestInfo(): Promise<InstallerLatestInfo | null> {
+  const response = await api.get<InstallerLatestInfoResponse>(
+    '/api/installers/latest'
+  )
+  return requireServerSuccess(response.data).data
+}
+
+/** Publish the desktop auto-update manifest. Only field: `file`. */
+export async function uploadInstallerLatest(
+  file: File,
+  onProgress?: (percent: number) => void
+): Promise<void> {
+  const formData = new FormData()
+  formData.append('file', file)
+  // Let axios set the multipart Content-Type with its boundary.
+  const response = await api.post<{
+    success: boolean
+    message: string
+    data: unknown
+  }>('/api/installers/latest', formData, {
+    onUploadProgress: (event) => {
+      if (!onProgress) return
+      if (!event.total) {
+        onProgress(0)
+        return
+      }
+      onProgress(Math.round((event.loaded / event.total) * 100))
+    },
+  })
+  requireServerSuccess(response.data)
 }
 
 export async function updateInstaller(

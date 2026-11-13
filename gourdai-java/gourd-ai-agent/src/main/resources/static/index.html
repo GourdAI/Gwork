@@ -17,6 +17,7 @@
     <link rel="stylesheet" href="/css/code.css"/>
     <link rel="stylesheet" href="/css/automation.css"/>
     <link rel="stylesheet" href="/css/skills.css"/>
+    <link rel="stylesheet" href="css/mcp-market.css">
     <link rel="stylesheet" href="/css/channel.css"/>
     <link rel="stylesheet" href="/css/model-settings.css"/>
     <link rel="stylesheet" href="/css/memory-view.css"/>
@@ -68,12 +69,12 @@
 <!-- Sidebar -->
 <div class="sidebar">
     <div class="sidebar-header">
-        <div class="sidebar-header-top">
-            <div class="sidebar-logo">
-                <img src="/img/favicon.png" alt="GWork" class="sidebar-logo-img"/>
-                <span class="sidebar-logo-text">GWork</span>
-            </div>
-        </div>
+<div class="sidebar-header-top">
+<div class="sidebar-logo">
+<img src="/img/favicon.png" alt="GWork" class="sidebar-logo-img"/>
+<span class="sidebar-logo-text">GWork</span>
+</div>
+</div>
         <!-- 主导航：整行按钮（图标 + 文字 + 快捷键提示） -->
         <div class="main-nav">
             <button class="main-nav-item" id="newChatBtn">
@@ -91,7 +92,7 @@
             </button>
             <button class="main-nav-item" id="skillsNavBtn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></svg>
-                <span class="main-nav-label" data-i18n="app.skills">技能</span>
+                <span class="main-nav-label nav-composite"><span data-i18n="app.skills">技能</span><span class="nav-sep" aria-hidden="true">·</span><span data-i18n="app.nav.connectors">连接器</span><span class="nav-sep" aria-hidden="true">·</span><span data-i18n="app.nav.interfaces">接口</span></span>
             </button>
             <button class="main-nav-item" id="memoryNavBtn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>
@@ -141,20 +142,30 @@
     </div>
     <div class="sidebar-list" id="historyList"></div>
     <div class="sidebar-footer">
-        <button class="settings-btn" id="settingsBtn" data-i18n-title="settings.title">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-            <span class="sidebar-text" style="margin-left:6px;font-size:12px;" data-i18n="settings.title">设置</span>
+        <!-- 底栏（原「设置按钮」区域）整体改为用户卡片：独立设置按钮已移除，
+             设置入口收进账号弹层（弹层 = 设置 + 用户相关菜单）；登录表单
+             是【独立居中弹框】（.account-modal），不在本弹层里。
+             卡片由 app-account.js 按登录态填充：未登录 = 「登录」，
+             已登录 = 头像 + 昵称 + 套餐；点击向上展开账号弹层。
+             【布局纪律】卡片是 sidebar-footer 的首子项、更新按钮是末子项：底栏
+             justify-content:space-between 下首子项恒贴左端、末子项恒贴右端，
+             卡片位置不随「有无更新」跳变（与原设置按钮同一纪律）。
+             此约束由 account-contract.test.js 锁定，勿调换。 -->
+        <button class="account-card" id="accountEntryBtn" type="button" aria-haspopup="dialog" aria-expanded="false">
+            <span class="account-card-avatar" id="accountCardAvatar" aria-hidden="true">G</span>
+            <span class="account-card-text">
+                <span class="account-card-name" id="accountEntryName" data-i18n="account.entry">登录</span>
+                <span class="account-card-sub" id="accountCardSub"></span>
+            </span>
+            <svg class="account-card-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>
         </button>
         <!-- 桌面端「更新」按钮：仅在检测到新版的三种状态（可下载 / 下载中 / 待重启）下出现，
              默认隐藏（样式见 app.css .sidebar-update-btn），状态驱动逻辑见 app-update-badge.js。
              刻意不写 data-i18n：文案由 JS 按状态机实时赋值，静态翻译属性会被覆盖。
-             【顺序纪律】必须排在 settingsBtn 之后。底栏布局是 justify-content:space-between：
-             首子项恒贴左端（设置位置不随「有无更新」跳变）、末子项贴右端（更新出现即靠右）。
-             顺序若调换，设置会在有/无更新之间左右跳位（真浏览器实测 x=14 → x=201）。
-             此约束由 sidebar-update-badge.test.js 锁定，勿调换。 -->
+             【顺序纪律】必须排在账号卡片（首子项）之后、做末子项。底栏布局是
+             justify-content:space-between：首子项恒贴左端（卡片位置不随「有无更新」
+             跳变）、末子项贴右端（更新出现即靠右）。顺序若调换，卡片会在有/无更新
+             之间左右跳位。此约束由 account-contract.test.js 锁定，勿调换。 -->
         <button class="sidebar-update-btn" id="sidebarUpdateBtn" type="button" data-state="idle">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M4 21h16"/></svg>
             <span class="sidebar-update-btn-label" id="sidebarUpdateLabel"></span>
@@ -300,6 +311,10 @@
      仅保留给界面片段装配失败这一种情况（见 app-bootstrap.js showBootError）。 -->
 
 <!-- ============ 第三方库（不依赖应用 DOM，静态按序加载，与原 web.html 一致）============ -->
+<!-- 内核地址改写桥：Rust 壳页面源是 tauri.localhost，内核在 127.0.0.1:随机端口，
+     不引入本文件则所有相对路径请求落空、WS 直连 ERR_CONNECTION_REFUSED。
+     必须早于 layui 与全部 app-*.js。Java 内核同源提供 static，故该文件不进 static。 -->
+<script src="/js/kernel-bridge.js"></script>
 <script src="/layui/layui.js"></script>
 <script>window.$ = layui.$;</script>
 <script src="/js/marked.min.js"></script>

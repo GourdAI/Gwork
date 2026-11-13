@@ -37,8 +37,15 @@
         // 子代理族：await_tasks 是同一套子代理机制的取结果动作，归「子代理」
         task: 'chat.tool_task', multitask: 'chat.tool_multitask', await_tasks: 'chat.tool_task',
         generate: 'chat.tool_generate',
-        // MCP 网关：search_tools/get_tool_detail 是该网关自身的动作，与具体 mcp 工具同族
-        mcp: 'chat.tool_mcp', search_tools: 'chat.tool_mcp', get_tool_detail: 'chat.tool_mcp',
+        /* MCP 折叠网关：工具数达到阈值后，Rust 内核不再平铺全部 MCP schema，
+           而是只暴露这几个中转动作（四阶段 FULL→SUMMARY→LIST→SEARCH，阈值
+           8/40/100，见 core/src/tools/registry.rs）。这四个名字是该网关自身的
+           动作，与具体 mcp 工具同族，因此共用一个展示 key。
+           历史坑：早期只有 Java 内核实现了 search_tools/get_tool_detail，
+           Rust 内核长期零实现，下面这行映射因此指向不存在的工具（断链）；
+           四阶段折叠补齐后，四个名字都已在 registry.execute 中真实可调用。 */
+        mcp: 'chat.tool_mcp', list_mcp_tools: 'chat.tool_mcp',
+        search_tools: 'chat.tool_mcp', get_tool_detail: 'chat.tool_mcp', call_tool: 'chat.tool_mcp',
         // OpenAPI 网关同理（call_api 等三个是网关动作）
         openapi: 'chat.tool_openapi', search_apis: 'chat.tool_openapi',
         get_api_detail: 'chat.tool_openapi', call_api: 'chat.tool_openapi',

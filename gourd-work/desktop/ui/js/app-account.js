@@ -71,6 +71,10 @@
     var view = null;            // 'profile' | 'menu'，决定弹层当前渲染的骨架
     var authMode = 'login';     // 'login' | 'register'
     var busy = false;
+    /* 后台能力探测结果（GET /api/status 的 email_verification）。null = 未探测/
+       探测失败：注册表单按「邮箱可选」降级渲染，后台的真实拒绝会原样回显。 */
+    var emailRequired = null;
+    var codeSentOnce = false;   // 本次会话是否已发过验证码（按钮切「重新发送」）
 
     /* 提示容器 id：弹层与登录弹框【各持一个，绝不共用同 id】。
        【codereview P2 修复】此前两个视图都写 id="accountHint"：DOM 里同时存在
@@ -400,8 +404,27 @@
            就是这样），弹框会永远不可见，表现正是「点击没反应」。 */
         modalBackdrop.style.display = 'block';
         modal.style.display = 'block';
+        probeRegisterConfig();
         var first = document.getElementById('accountUsername');
         if (first) { try { first.focus(); } catch (e) { /* ignore */ } }
+    }
+
+    /* 探测后台注册契约（email_verification 是否强制）。只更新邮箱标签文案，
+       绝不重建表单 —— 重建会清掉用户已输入的内容。探测失败保持降级文案。 */
+    function probeRegisterConfig() {
+        var i = ipc();
+        if (!i || typeof i.authConfig !== 'function') return;
+        i.authConfig().then(function (c) {
+            var req = !!(c && c.email_verification);
+            if (req === emailRequired) return;
+            emailRequired = req;
+            var lbl = modal ? modal.querySelector('label[for="accountEmail"]') : null;
+            if (lbl) {
+                lbl.textContent = req
+                    ? t('account.email_required', '电子邮件（验证必需）')
+                    : t('account.email', '邮箱（可选）');
+            }
+        }, function () { /* 探测失败：保持降级文案，后台错误会原样回显 */ });
     }
 
     function hideModal() {
@@ -418,13 +441,102 @@
                 + '<input class="account-input" id="' + id + '" type="' + type + '" autocomplete="off"></div>';
         }
         field('accountUsername', t('account.username', '用户名'), 'text');
-        if (mode === 'register') field('accountEmail', t('account.email', '邮箱（可选）'), 'email');
         field('accountPassword', t('account.password', '密码'), 'password');
+        if (mode === 'register') {
+            field('accountPassword2', t('account.password_confirm', '确认密码'), 'password');
+            /* 邮箱在后台开启邮箱验证时是【验证必需】（admin Register 强制
+               email + verification_code），标签随探测结果切换；探测失败
+               降级为「可选」文案，后台的真实拒绝会原样回显。 */
+            field('accountEmail', emailRequired
+                ? t('account.email_required', '电子邮件（验证必需）')
+                : t('account.email', '邮箱（可选）'), 'email');
+            /* 验证码行：输入框 + 发送按钮。data-act 只挂在按钮上——
+               delegate() 会沿祖先向上找 data-act，挂外层 div 会把点击
+               输入框也误触发发送。 */
+            h += '<div class="account-field account-code-row">'
+                + '<input class="account-input account-code-input" id="accountCode" type="text" autocomplete="one-time-code" placeholder="' + esc(t('account.code_placeholder', '验证码')) + '" aria-label="' + esc(t('account.code', '验证码')) + '">'
+                + '<button class="account-code-btn" id="accountSendCode" type="button" data-act="send-code">' + esc(t('account.send_code', '发送验证码')) + '</button>'
+                + '</div>';
+        }
         form.innerHTML = h;
         /* 回车提交：重建表单后重新绑定 */
-        ['accountUsername', 'accountEmail', 'accountPassword'].forEach(function (id) {
+        ['accountUsername', 'accountPassword', 'accountPassword2', 'accountEmail', 'accountCode'].forEach(function (id) {
             var n = document.getElementById(id);
             if (n) n.onkeydown = function (e) { if (e.key === 'Enter' && !busy) onSubmit(); };
+        });
+        refreshCodeBtn();
+    }
+
+    /* 发送验证码按钮的三态：空闲 / 冷却倒计时 / 请求中。
+       后台 EmailVerificationRateLimit 的真实规则是「同一 IP 在 30 秒窗口内
+       最多 2 次」（middleware/email-verification-rate-limit.go：
+       EmailVerificationMaxRequests=2 / EmailVerificationDuration=30），超限回
+       HTTP 429「Please wait before requesting another verification code.」。
+       它不是「每次发送间隔 N 秒」。客户端这里取 60s 冷却：比后台窗口更宽松，
+       单个客户端最多 1 次/60s，正常操作不可能撞上限流；真撞上（例如同 IP 下
+       另一台设备刚发过）后台文案会原样回显。 */
+    var codeCooldown = 0;      // 剩余秒数
+    var codeCooldownTimer = null;
+    var codeSending = false;
+
+    function refreshCodeBtn() {
+        var btn = document.getElementById('accountSendCode');
+        if (!btn) return;
+        if (codeSending) {
+            btn.disabled = true;
+            btn.textContent = t('account.working', '请稍候…');
+            return;
+        }
+        if (codeCooldown > 0) {
+            btn.disabled = true;
+            btn.textContent = t('account.code_retry', '重新发送') + ' (' + codeCooldown + 's)';
+            return;
+        }
+        btn.disabled = false;
+        btn.textContent = codeSentOnce
+            ? t('account.code_retry', '重新发送')
+            : t('account.send_code', '发送验证码');
+    }
+
+    function startCodeCooldown() {
+        codeCooldown = 60;
+        if (codeCooldownTimer) clearInterval(codeCooldownTimer);
+        codeCooldownTimer = setInterval(function () {
+            codeCooldown -= 1;
+            if (codeCooldown <= 0) {
+                clearInterval(codeCooldownTimer);
+                codeCooldownTimer = null;
+                codeCooldown = 0;
+            }
+            refreshCodeBtn();
+        }, 1000);
+        refreshCodeBtn();
+    }
+
+    function onSendCode() {
+        if (busy || codeSending || codeCooldown > 0) return;
+        var i = ipc();
+        if (!i || typeof i.authSendCode !== 'function') {
+            unavailable();
+            return;
+        }
+        var email = val('accountEmail');
+        if (!email) {
+            setHint('modal', t('account.email_first', '请先填写邮箱地址'), 'error');
+            return;
+        }
+        codeSending = true;
+        refreshCodeBtn();
+        setHint('modal', '', '');
+        i.authSendCode(email).then(function (msg) {
+            codeSending = false;
+            codeSentOnce = true;
+            startCodeCooldown();
+            setHint('modal', msg || t('account.code_sent', '验证码已发送，请查收邮箱'), 'ok');
+        }, function (e) {
+            codeSending = false;
+            refreshCodeBtn();
+            setHint('modal', errText(e), 'error');
         });
     }
 
@@ -467,6 +579,7 @@
         var bar = modal ? modal.querySelectorAll('.account-tabs') : [];
         if (bar.length) bar[0].setAttribute('data-mode', mode);
         renderForm(mode);
+        if (mode === 'register') probeRegisterConfig();
         setHint('modal', '', '');
         refreshAuthLabels();
     }
@@ -532,6 +645,7 @@
         if (act === 'close-modal') { hideModal(); return; }
         if (act === 'tab-login') { switchTab('login'); return; }
         if (act === 'tab-register') { switchTab('register'); return; }
+        if (act === 'send-code') { onSendCode(); return; }
         if (act === 'submit') { onSubmit(); return; }
         if (act === 'login') {
             /* 登录表单是独立弹框：收起弹层再开居中弹框 */
@@ -647,10 +761,34 @@
             setHint('modal', t('account.password_policy', '密码长度需为 8–128 个字符'), 'error');
             return;
         }
+        var email = '';
+        var code = '';
+        if (authMode === 'register') {
+            var password2 = val('accountPassword2');
+            if (password2 !== password) {
+                setHint('modal', t('account.password_mismatch', '两次输入的密码不一致'), 'error');
+                return;
+            }
+            email = val('accountEmail');
+            code = val('accountCode');
+            /* 后台开启邮箱验证时 email + verification_code 是注册接口的硬契约
+               （admin controller/user.go::Register），前端先拦一道，避免用户
+               空等一次往返；未探测到（null）时不拦，后台错误原样回显。 */
+            if (emailRequired === true) {
+                if (!email) {
+                    setHint('modal', t('account.email_first', '请先填写邮箱地址'), 'error');
+                    return;
+                }
+                if (!code) {
+                    setHint('modal', t('account.code_required', '请输入邮箱验证码'), 'error');
+                    return;
+                }
+            }
+        }
         setBusy(true);
         setHint('modal', '', '');
         var call = authMode === 'register'
-            ? i.authRegister(username, password, val('accountEmail'))
+            ? i.authRegister(username, password, email, code)
             : i.authLogin(username, password);
         call.then(function (s) {
             setBusy(false);

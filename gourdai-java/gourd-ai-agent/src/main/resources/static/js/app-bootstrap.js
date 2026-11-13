@@ -1,4 +1,4 @@
-﻿/* ===== app-bootstrap.js =====
+/* ===== app-bootstrap.js =====
    页面装配器：把 chat.html / code.html / settings.html 三个界面片段注入共享外壳（index.html），
    再按固定顺序动态加载全部 app-*.js。取代原 web.html 底部的内联初始化脚本。
 
@@ -121,6 +121,7 @@
         '/js/app-turn-display.js',       // 统一展现折叠（批次折叠 + 整轮 Compact 合一，UMD 可测；须在 app-message/app-streaming 之前）
         '/js/message-queue.js',
         '/js/app-ui.js',
+        '/js/app-sidebar-order.js',  // 侧栏拖动排序（纯顺序层 UMD；须在 app-history.js 之前）
         '/js/model-list-order.js',
         '/js/model-dropdown-ui.js',
         '/js/model-selector.js',
@@ -139,14 +140,16 @@
         '/js/app-context.js',
         '/js/app-heatmap.js',          // 活跃热力图共享渲染（使用统计 + 欢迎页卡片复用同一实现）
         '/js/app-welcome-activity.js',  // 欢迎页活跃热力图卡片：拉取 /web/chat/usage/stats 渲染
-        '/js/app-settings.js',
-        '/js/app-settings-general.js',
+'/js/app-settings.js',
+'/js/app-settings-general.js',
+'/js/app-account.js',            // 账号入口（登录/注册/登出），纯 IPC，无 /web 请求
         '/js/app-settings-appearance.js',
         '/js/app-settings-permission.js',
         '/js/app-settings-mcp.js',
         '/js/app-settings-openapi.js',
         '/js/app-settings-lsp.js',
         '/js/app-model-settings.js',
+        '/js/app-mcp-market.js',
         '/js/app-skills.js',
         '/js/app-automation.js',
         '/js/app-channel-config.js',

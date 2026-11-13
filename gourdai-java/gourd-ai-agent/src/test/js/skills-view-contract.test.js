@@ -163,6 +163,35 @@ test('图标走后端代理且加载失败自毁露出首字母底', () => {
     assert.match(css, /\.skill-card-icon img \{ position: absolute;/, '图标 img 必须叠在字母底之上');
 });
 
+test('图标完整展示：contain 而非 cover，横幅形 iconUrl 不得被裁成碎片', () => {
+    /* 实测（2026-11）skillhub 存在横幅形 iconUrl（256×64 官方 LOGO，透明底）：
+     * object-fit:cover 居中裁剪后 38px 方卡只剩横幅中段（"Skill" 两字），
+     * 用户报「图标怪怪的」。contain 保证任意宽高比完整可见。 */
+    assert.match(css, /\.skill-card-icon img \{[^}]*object-fit: contain;/, '卡片图标必须 contain 完整展示');
+    assert.match(css, /\.skill-detail-icon img \{[^}]*object-fit: contain;/, '详情弹窗图标同样必须 contain');
+    assert.ok(!/\.skill-(card|detail)-icon img \{[^}]*object-fit: cover/.test(css),
+        'cover 裁剪形态不得回归（横幅 iconUrl 会被裁成碎片）');
+    /* 透明底横幅在暗色主题下黑字不可见：img 必须垫不透明底 */
+    assert.match(css, /\.skill-card-icon img \{[^}]*background: #fff;/, '图标 img 需垫白底（透明底横幅暗色可见性）');
+});
+
+test('旧壳 ui/ 是构建生成物：存在则必须与 static 源逐字节一致', () => {
+    /* 2026-11 codereview 自纠：曾误把旧 Tauri 壳 ui/css/skills.css 当第三份源
+     * 镜像直接修改。实测 cmd/prepare-ui.js + build-tauri.yml:278（「prepare-ui.js
+     * 在 build 时现生成，无需入库」）+ gourd-ai-tauri/.gitignore:21（/ui/ 被忽略）：
+     * ui/ 是**构建期清空后从 static/ 拷贝的生成物**，唯一源是 static/。直接改
+     * 生成物既无效（下次构建被覆盖）又污染工作区。
+     * 门禁改为：生成物存在即断言与源逐字节一致——杀「手改生成物」与「陈旧生成物」
+     * 两类漂移；生成物缺失（未跑过 prepare-ui）不视为失败。 */
+    const mirror = path.resolve(__dirname, '../../../../gourd-ai-tauri/ui/css/skills.css');
+    if (!fs.existsSync(mirror)) return; // 未生成过则无物可锁
+    const m = fs.readFileSync(mirror);
+    const src = fs.readFileSync(path.join(staticRoot, 'css', 'skills.css'));
+    assert.deepEqual(m, src,
+        '旧壳 ui/css/skills.css 是 prepare-ui.js 的生成物，必须与 static 源逐字节一致；'
+        + '不一致说明有人手改生成物或生成物陈旧——改源后重跑 node cmd/prepare-ui.js');
+});
+
 test('已安装判定：回退候选按 slug 形态隔离，限定卡不得回退裸尾名', () => {
     /* 上游实测 skillhub 存在不同作者共用同一公开 slug 的记录（dev-expert 两条）。
      * 旧实现 candidates 无条件含裸 slug：装过任一同名技能后，所有同 slug 卡片

@@ -105,8 +105,7 @@
     function mod(name) { return window[name]; }
 
     function resetCurrentTabView(targetTab) {
-        if (targetTab === 'mcp' && mod('_settingsMcp')) { mod('_settingsMcp').showList(); mod('_settingsMcp').reset(); $('#mcpToolsToolbar').hide(); }
-        else if (targetTab === 'openapi' && mod('_settingsOpenapi')) { mod('_settingsOpenapi').showList(); mod('_settingsOpenapi').reset(); }
+        // MCP / OpenAPI 配置已迁移至「技能·连接器·接口」，此处无其它 tab 需要复位。
     }
 
     function openSettings() {
@@ -124,9 +123,6 @@
         $overlay.hide();
         // 广播设置关闭：侧栏「任务」区等依赖设置页数据的视图据此刷新
         document.dispatchEvent(new Event('settings:closed'));
-        if (mod('_settingsMcp')) mod('_settingsMcp').showList();
-        if (mod('_settingsOpenapi')) mod('_settingsOpenapi').showList();
-        $('#mcpFormActions, #openapiFormActions').hide();
     }
 
 
@@ -165,12 +161,6 @@
         } else if (targetTab === 'permission') {
             $('#settingsTabPermission').addClass('active');
             if (mod('_settingsPermission')) mod('_settingsPermission').load();
-        } else if (targetTab === 'mcp') {
-            $('#settingsTabMcp').addClass('active');
-            if (mod('_settingsMcp')) mod('_settingsMcp').load();
-        } else if (targetTab === 'openapi') {
-            $('#settingsTabOpenapi').addClass('active');
-            if (mod('_settingsOpenapi')) mod('_settingsOpenapi').load();
         } else if (targetTab === 'acp') {
             $('#settingsTabAcp').addClass('active');
             if (mod('_settingsAcp')) mod('_settingsAcp').load();
@@ -187,8 +177,6 @@
         if (targetTab === 'general') { if (mod('_settingsGeneral')) mod('_settingsGeneral').load(); }
         else if (targetTab === 'appearance') { if (mod('_settingsAppearance')) mod('_settingsAppearance').load(); }
         else if (targetTab === 'permission') { if (mod('_settingsPermission')) mod('_settingsPermission').load(); }
-        else if (targetTab === 'mcp') { if (mod('_settingsMcp')) mod('_settingsMcp').load(); }
-        else if (targetTab === 'openapi') { if (mod('_settingsOpenapi')) mod('_settingsOpenapi').load(); }
         else if (targetTab === 'acp') { if (mod('_settingsAcp')) mod('_settingsAcp').load(); }
         else if (targetTab === 'about') { if (mod('_settingsAbout')) mod('_settingsAbout').load(); }
     }

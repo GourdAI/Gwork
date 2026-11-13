@@ -1,1 +1,0 @@
-﻿[prepare-ui] 前端资源已就绪: D:\work\gourd\gourdai\gourdai-java\gourd-ai-tauri\ui (204 个文件)

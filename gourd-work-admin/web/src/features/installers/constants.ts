@@ -92,6 +92,7 @@ export const UPLOAD_FORM_DEFAULTS: UploadInstallerFormValues = {
 }
 
 export const INSTALLERS_QUERY_KEY = ['installers'] as const
+export const INSTALLER_LATEST_QUERY_KEY = ['installers', 'latest'] as const
 
 export function getInstallerOptionLabelKey<TValue extends string>(
   options: Option<TValue>[],

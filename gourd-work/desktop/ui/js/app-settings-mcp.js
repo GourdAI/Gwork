@@ -4,6 +4,435 @@
 (function () {
     'use strict';
 
+    /* MCP-AUTH-MODULE-START */
+    /**
+     * window.McpAuth — 连接器认证复用层（手动表单 + MCP 市场共用）。
+     *
+     * 固定后端契约：
+     *   GET  /web/settings/mcp/auth/state?name=X  → {ok, name, authType, connected,
+     *        needsAuth, hasCredential, label, helpUrl, helpText, phase, error}
+     *   POST /web/settings/mcp/auth/start         → {ok, phase, authorizationUrl}
+     *   POST /web/settings/mcp/auth/device/start  → {ok, userCode, verificationUri, expiresIn}
+     *   GET  /web/settings/mcp/auth/status?name=X → {ok, phase, authorizationUrl?, userCode?, error?}
+     *
+     * 两种应用内授权形态（WorkBuddy 对齐）：
+     *   authDeviceFlow — RFC 8628，弹窗显示 user_code + 二维码/验证链接，后端自行轮询；
+     *   authQrModal    — 不开系统浏览器，改为内嵌 iframe 展示服务方二维码授权页。
+     *   POST /web/settings/mcp/auth/cancel        → {ok}
+     *   POST /web/settings/mcp/auth/token         → {ok}
+     *   POST /web/settings/mcp/auth/clear         → {ok}
+     *
+     * 安全边界：用户输入的凭据只出现在 /auth/token 的一次请求体里，交给本机
+     * 凭据库；这里不构造任何含凭据的服务器配置请求体，不回显、不缓存，
+     * 弹窗关闭即清空输入框。authType == 'none'（或认证接口不可用）时所有
+     * 入口立即放行，原有保存 / 安装流程一字不改。
+     */
+    (function () {
+        'use strict';
+
+        var API = {
+            state: '/web/settings/mcp/auth/state',
+            start: '/web/settings/mcp/auth/start',
+            deviceStart: '/web/settings/mcp/auth/device/start',
+            status: '/web/settings/mcp/auth/status',
+            cancel: '/web/settings/mcp/auth/cancel',
+            token: '/web/settings/mcp/auth/token',
+            clear: '/web/settings/mcp/auth/clear'
+        };
+        var POLL_MS = 1500;                  // /auth/status 轮询间隔 1.5s
+        var MAX_WAIT_MS = 5 * 60 * 1000;     // 授权整体超时上限 5 分钟
+        var pollTimer = null;
+        var generation = 0;                  // 新弹窗让旧轮询立即失效
+
+        /** settings.mcp.* 取词；语言包未就绪 / 键缺失时回落短兜底文案。 */
+        function authT(key, fallback) {
+            var full = 'settings.mcp.' + key;
+            try {
+                var v = (window.GourdI18n && window.GourdI18n.t) ? GourdI18n.t(full) : null;
+                if (v && v !== full) return v;
+            } catch (e) { /* 语言包未就绪走兜底 */ }
+            return fallback;
+        }
+        function esc(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        function toast(msg, kind) {
+            if (window._settingsCore && window._settingsCore.showToast) window._settingsCore.showToast(msg, kind || 'error');
+            else if (window.showToast) window.showToast(msg, kind || 'error');
+        }
+        /** 统一 ajax 包装：返回原生 Promise，两个调用方都能 .then 或 await。 */
+        function request(url, method, body) {
+            return new Promise(function (resolve, reject) {
+                $.ajax({
+                    url: url, method: method || 'GET',
+                    data: body ? JSON.stringify(body) : undefined,
+                    contentType: body ? 'application/json' : undefined,
+                    dataType: 'json', timeout: 30000
+                }).done(function (resp) { resolve(resp || {}); })
+                  .fail(function () { reject(new Error(authT('network_error', 'Network error'))); });
+            });
+        }
+
+        function state(name) { return request(API.state + '?name=' + encodeURIComponent(name), 'GET'); }
+        function start(name) { return request(API.start, 'POST', { name: name }); }
+        function deviceStart(name) { return request(API.deviceStart, 'POST', { name: name }); }
+        function status(name) { return request(API.status + '?name=' + encodeURIComponent(name), 'GET'); }
+        function cancel(name) { return request(API.cancel, 'POST', { name: name }); }
+        function token(name, value) { return request(API.token, 'POST', { name: name, token: value }); }
+        function clear(name) { return request(API.clear, 'POST', { name: name }); }
+
+        /** 桌面壳 on_new_window 把 _blank 转交系统浏览器（external_link.rs）。 */
+        function openBrowser(url) {
+            window.open(url, '_blank', 'noopener,noreferrer');
+        }
+
+        function stopPolling() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
+        function closeDialog() { stopPolling(); $('#mcpAuthOverlay').remove(); }
+
+        /** 弹窗骨架：视觉与 .import-overlay / .import-dialog 同源（样式在 mcp-auth.css 内复刻）。 */
+        function dialog(title, inner, footer) {
+            closeDialog();
+            generation++;
+            var html = '<div class="mcp-auth-overlay" id="mcpAuthOverlay">'
+                + '<div class="mcp-auth-dialog" role="dialog" aria-modal="true">'
+                + '<div class="mcp-auth-header"><span class="mcp-auth-title" id="mcpAuthTitle"></span>'
+                + '<button type="button" class="mcp-auth-close" id="mcpAuthClose" aria-label="'
+                + esc(authT('common_close', 'Close')) + '">&times;</button></div>'
+                + '<div class="mcp-auth-body">' + inner + '</div>'
+                + '<div class="mcp-auth-footer">' + footer + '</div>'
+                + '</div></div>';
+            $('body').append(html);
+            $('#mcpAuthTitle').text(title);
+            $('#mcpAuthClose').on('click', function () { closeDialog(); });
+            $('#mcpAuthOverlay').on('click', function (e) {
+                if (e && e.target && e.target.id === 'mcpAuthOverlay') closeDialog();
+            });
+            return generation;
+        }
+
+        function errBox() { return '<div class="mcp-auth-error" id="mcpAuthError" style="display:none"></div>'; }
+        function showError(msg) { $('#mcpAuthError').text(msg).show(); }
+        function btn(id, cls, text, hidden) {
+            return '<button type="button" class="mcp-auth-btn ' + cls + '" id="' + id + '"'
+                + (hidden ? ' style="display:none"' : '') + '>' + esc(text) + '</button>';
+        }
+        /** 外链只放行 http(s)，且一律 target=_blank rel=noopener noreferrer。 */
+        function safeExternal(url, text) {
+            if (!/^https?:\/\//i.test(url || '')) return '';
+            return '<a class="mcp-auth-help-link" href="' + esc(url)
+                + '" target="_blank" rel="noopener noreferrer">' + esc(text) + '</a>';
+        }
+        function statusRow(busy, text) {
+            return '<div class="mcp-auth-status"><span class="mcp-auth-status-dot'
+                + (busy ? ' mcp-auth-status-dot-busy' : '') + '"></span><span>'
+                + esc(text) + '</span></div>';
+        }
+
+        /* ── A. 静态 token 弹窗（对齐「邓白氏查全球 MCP 对接配置」） ── */
+        function openTokenDialog(name, st, onDone) {
+            var label = st.label || authT('auth_token_label', 'Access Token');
+            var helpText = st.helpText || authT('auth_local_only', 'Stored only on this machine');
+            var inner = '<div class="mcp-auth-help-text">' + esc(helpText) + '</div>'
+                + safeExternal(st.helpUrl, authT('auth_get_token', 'How to get an Access Token?'))
+                + '<label class="mcp-auth-field"><span class="mcp-auth-field-label">'
+                + esc(label) + ' <b class="mcp-auth-required">*</b></span>'
+                + '<input type="password" id="mcpAuthTokenInput" class="mcp-auth-input"'
+                + ' autocomplete="new-password" spellcheck="false" placeholder="'
+                + esc(authT('auth_token_placeholder', 'Paste Access Token')) + '"></label>'
+                + errBox();
+            var footer = btn('mcpAuthCancelBtn', 'mcp-auth-btn-ghost', authT('common_cancel', 'Cancel'))
+                + btn('mcpAuthSaveBtn', 'mcp-auth-btn-primary', authT('auth_save_and_connect', 'Save and connect'));
+            dialog(label, inner, footer);
+            $('#mcpAuthCancelBtn').on('click', function () { closeDialog(); });
+            $('#mcpAuthTokenInput').on('keydown', function (e) {
+                if (e && e.key === 'Enter') $('#mcpAuthSaveBtn').trigger('click');
+            });
+            $('#mcpAuthSaveBtn').on('click', function () {
+                var value = String($('#mcpAuthTokenInput').val() || '').trim();
+                if (!value) { showError(authT('auth_token_required', 'Token is required')); return; }
+                var $save = $('#mcpAuthSaveBtn');
+                $save.prop('disabled', true);
+                token(name, value).then(function (resp) {
+                    if (resp && resp.ok === false) {
+                        showError(resp.error || authT('auth_failed', 'Authorization failed'));
+                        $save.prop('disabled', false);
+                        return;
+                    }
+                    $('#mcpAuthTokenInput').val('');   // 明文绝不留在 DOM 里
+                    closeDialog();
+                    if (onDone) onDone();              // 继续原有安装 / 保存流程
+                }).catch(function (e) {
+                    showError((e && e.message) || authT('network_error', 'Network error'));
+                    $save.prop('disabled', false);
+                });
+            });
+        }
+
+        /* ── B. OAuth 浏览器授权 ── */
+        function beginOAuth(name, onDone, qrModal) {
+            return start(name).then(function (r) {
+                if (!r || !r.ok || !r.authorizationUrl) {
+                    toast((r && r.error) || authT('auth_failed', 'Authorization failed'));
+                    return false;
+                }
+                if (qrModal) { showQrModal(name, r.authorizationUrl, onDone); return false; }
+                showWaiting(name, r.authorizationUrl, onDone);
+                return false;
+            }).catch(function (e) {
+                toast((e && e.message) || authT('auth_failed', 'Authorization failed'));
+                return false;
+            });
+        }
+
+        /* ── B2. RFC 8628 Device Flow：user_code + 二维码页 + 倒计时 ── */
+        function showDeviceCode(name, r, onDone) {
+            var uri = r.verificationUri || '';
+            var code = r.userCode || '';
+            var secs = Math.max(1, Math.min(3600, Number(r.expiresIn) || 300));
+            // verificationUriComplete 常是二维码页；只放行 https，绝不把任意 URL 塞进 iframe。
+            var inner = statusRow(true, authT('auth_device_waiting', 'Waiting for authorization…'))
+                + '<div class="mcp-auth-device-code" id="mcpAuthDeviceCode">' + esc(code) + '</div>'
+                + '<div class="mcp-auth-help-text">'
+                + esc(authT('auth_device_hint', 'Scan the QR code or open the link, then confirm this code on your phone or in the browser.'))
+                + '</div>'
+                + '<div class="mcp-auth-countdown" id="mcpAuthCountdown"></div>'
+                + safeExternal(uri, authT('auth_device_open', 'Open authorization page'))
+                + errBox();
+            var gen = dialog(authT('auth_device_title', 'Scan to authorize'), inner,
+                btn('mcpAuthCancelBtn', 'mcp-auth-btn-ghost', authT('common_cancel', 'Cancel'))
+                + btn('mcpAuthRetryBtn', 'mcp-auth-btn-primary', authT('market.retry', 'Retry'), true));
+
+            var deadline = Date.now() + secs * 1000;
+            var cdTimer = null;
+            function tickCountdown() {
+                if (gen !== generation) { if (cdTimer) clearInterval(cdTimer); return; }
+                var left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+                var m = Math.floor(left / 60), s = left % 60;
+                $('#mcpAuthCountdown').text(
+                    authT('auth_device_expires', 'Expires in') + ' ' + m + ':' + (s < 10 ? '0' : '') + s);
+                if (left === 0 && cdTimer) clearInterval(cdTimer);
+            }
+            tickCountdown();
+            cdTimer = setInterval(tickCountdown, 1000);
+
+            $('#mcpAuthCancelBtn').on('click', function () {
+                generation++; stopPolling();
+                cancel(name).catch(function () {});
+                closeDialog();
+            });
+            $('#mcpAuthRetryBtn').on('click', function () {
+                generation++; stopPolling(); closeDialog(); beginDeviceFlow(name, onDone);
+            });
+            pollStatus(name, gen, onDone);
+        }
+
+        function beginDeviceFlow(name, onDone) {
+            return deviceStart(name).then(function (r) {
+                if (!r || !r.ok || !r.userCode) {
+                    toast((r && r.error) || authT('auth_failed', 'Authorization failed'));
+                    return false;
+                }
+                showDeviceCode(name, r, onDone);
+                return false;
+            }).catch(function (e) {
+                toast((e && e.message) || authT('auth_failed', 'Authorization failed'));
+                return false;
+            });
+        }
+
+        /**
+         * Is `url` safe to load into an in-app iframe?
+         *
+         * Parses rather than prefix-matching `/^https:\/\//i`: this URL comes
+         * from an authorization server discovered over the network, and a prefix
+         * check can be satisfied by a string that a real browser will resolve
+         * somewhere else entirely. `new URL(...)` is what the browser itself
+         * will use for `iframe.src`, so testing the parsed `protocol` means the
+         * check and the load cannot disagree.
+         *
+         * Returns false for anything unparseable, so a malformed or relative
+         * URL fails closed instead of being handed to the iframe.
+         */
+        function isHttpsUrl(url) {
+            try {
+                return new URL(String(url == null ? '' : url)).protocol === 'https:';
+            } catch (e) {
+                return false;
+            }
+        }
+
+        /* ── B3. authQrModal：应用内 iframe 展示服务方二维码授权页 ── */
+        function showQrModal(name, url, onDone) {
+            // iframe 只允许 https，且必须带 sandbox：服务方授权页无需访问父窗口。
+            if (!isHttpsUrl(url)) {
+                toast(authT('auth_qr_https_only', 'In-app QR authorization requires an https URL'));
+                return false;
+            }
+            var inner = statusRow(true, authT('auth_waiting', 'Waiting for browser authorization…'))
+                + '<div class="mcp-auth-help-text">'
+                + esc(authT('auth_qr_hint', 'Scan the QR code in the panel below and confirm on your phone.')) + '</div>'
+                // sandbox 说明：`allow-same-origin` 与 `allow-scripts` 同时出现时，
+                // 页内脚本可以摘掉自己的 sandbox 属性。这里仍然保留二者，是因为
+                // 不少服务方授权页需要读自身 cookie/localStorage 才能显示二维码
+                // 并在手机确认后自动跳转；去掉 allow-same-origin 会让这些页面
+                // 直接白屏。风险可接受的依据：src 强制 https（见上）、
+                // referrerpolicy=no-referrer、且加载的是**跨源第三方页面**，
+                // 它本就与父窗口同源隔离，摘掉 sandbox 后能拿到的仍只是它自己的
+                // origin。不要在没有实测目标授权页的情况下改动这一行。
+                + '<iframe class="mcp-auth-qr-frame" id="mcpAuthQrFrame" src="' + esc(url)
+                + '" sandbox="allow-forms allow-scripts allow-same-origin allow-popups" '
+                + 'referrerpolicy="no-referrer" title="authorization"></iframe>'
+                + safeExternal(url, authT('auth_device_open', 'Open authorization page'))
+                + errBox();
+            var gen = dialog(authT('auth_qr_title', 'Scan the QR code to authorize'), inner,
+                btn('mcpAuthCancelBtn', 'mcp-auth-btn-ghost', authT('common_cancel', 'Cancel'))
+                + btn('mcpAuthRetryBtn', 'mcp-auth-btn-primary', authT('market.retry', 'Retry'), true));
+            $('#mcpAuthCancelBtn').on('click', function () {
+                generation++; stopPolling(); cancel(name).catch(function () {}); closeDialog();
+            });
+            $('#mcpAuthRetryBtn').on('click', function () {
+                generation++; stopPolling(); closeDialog(); beginOAuth(name, onDone, true);
+            });
+            pollStatus(name, gen, onDone);
+            return false;
+        }
+
+        function showWaiting(name, url, onDone) {
+            var gen = dialog(authT('auth_connect_title', 'Connect & authorize'),
+                statusRow(true, authT('auth_waiting', 'Waiting for browser authorization…'))
+                + '<div class="mcp-auth-help-text">'
+                + esc(authT('auth_browser_hint', 'Finish the authorization in the browser window.')) + '</div>'
+                + safeExternal(url, authT('market.connect', 'Connect'))
+                + errBox(),
+                btn('mcpAuthCancelBtn', 'mcp-auth-btn-ghost', authT('common_cancel', 'Cancel'))
+                + btn('mcpAuthRetryBtn', 'mcp-auth-btn-primary', authT('market.retry', 'Retry'), true));
+
+            // 拿到 authorizationUrl 后立刻打开系统浏览器，绝不拖到轮询里。
+            openBrowser(url);
+
+            $('#mcpAuthCancelBtn').on('click', function () {
+                generation++;
+                stopPolling();
+                cancel(name).catch(function () {});
+                closeDialog();
+            });
+            $('#mcpAuthRetryBtn').on('click', function () {
+                generation++;
+                stopPolling();
+                closeDialog();
+                beginOAuth(name, onDone);
+            });
+            pollStatus(name, gen, onDone);
+        }
+
+        function pollStatus(name, gen, onDone) {
+            var deadline = Date.now() + MAX_WAIT_MS;
+            function tick() {
+                if (gen !== generation) return;
+                if (Date.now() > deadline) {
+                    stopPolling();
+                    showError(authT('auth_timeout', 'Authorization timed out, please retry'));
+                    $('#mcpAuthRetryBtn').show();
+                    return;
+                }
+                status(name).then(function (s) {
+                    if (gen !== generation) return;
+                    var phase = (s && s.phase) || 'idle';
+                    if (phase === 'done') {
+                        stopPolling(); closeDialog();
+                        if (onDone) onDone();
+                        return;
+                    }
+                    if (phase === 'failed' || phase === 'cancelled') {
+                        stopPolling();
+                        showError((s && s.error) || authT('auth_failed', 'Authorization failed'));
+                        $('#mcpAuthRetryBtn').show();
+                        return;
+                    }
+                    // preparing / waiting_for_browser / exchanging / idle 继续轮询
+                    pollTimer = setTimeout(tick, POLL_MS);
+                }).catch(function () {
+                    if (gen !== generation) return;
+                    pollTimer = setTimeout(tick, POLL_MS);
+                });
+            }
+            pollTimer = setTimeout(tick, POLL_MS);
+        }
+
+        /* ── 已有凭据：已连接 / 重新连接 / 清除凭据 ── */
+        function openManageDialog(name, st, onDone) {
+            var label = st.label || name;
+            var inner = statusRow(false, authT('auth_connected', 'Connected'))
+                + '<div class="mcp-auth-help-text">'
+                + esc(st.helpText || authT('auth_local_only', 'Stored only on this machine')) + '</div>'
+                + safeExternal(st.helpUrl, authT('auth_get_token', 'How to get an Access Token?'))
+                + errBox();
+            var footer = btn('mcpAuthClearBtn', 'mcp-auth-btn-ghost', authT('auth_clear', 'Clear credential'))
+                + btn('mcpAuthReconnectBtn', 'mcp-auth-btn-ghost', authT('auth_reconnect', 'Reconnect'))
+                + btn('mcpAuthDoneBtn', 'mcp-auth-btn-primary', authT('market.connect', 'Connect'));
+            dialog(label, inner, footer);
+            $('#mcpAuthClearBtn').on('click', function () {
+                clear(name).then(function (r) {
+                    if (r && r.ok === false) {
+                        showError(r.error || authT('auth_failed', 'Authorization failed'));
+                        return;
+                    }
+                    closeDialog();
+                    if (onDone) onDone();
+                }).catch(function (e) {
+                    showError((e && e.message) || authT('network_error', 'Network error'));
+                });
+            });
+            $('#mcpAuthReconnectBtn').on('click', function () {
+                closeDialog();
+                clear(name).catch(function () {}).then(function () { return openDialog(name, onDone); });
+            });
+            $('#mcpAuthDoneBtn').on('click', function () { closeDialog(); if (onDone) onDone(); });
+        }
+
+        /**
+         * 统一分流入口。返回 Promise<boolean>：
+         *   true  = authType == 'none' / 接口不可用，调用方立即继续原流程；
+         *   false = 弹窗已接管，认证成功后由 onDone 继续原流程。
+         */
+        function openDialog(name, onDone) {
+            if (!name) return Promise.resolve(true);
+            return state(name).then(function (st) {
+                if (!st || st.ok === false) return true;
+                var kind = st.authType || 'none';
+                if (kind === 'none') return true;                 // 原行为不变
+                if (st.connected && !st.needsAuth) {
+                    // 已有凭据：显示「已连接 / 重新连接 / 清除凭据」，但不阻塞本次
+                    // 保存或安装（编辑已连接的服务器仍必须能提交表单）。
+                    openManageDialog(name, st, null);
+                    return true;
+                }
+                if (st.needsAuth && kind === 'token') { openTokenDialog(name, st, onDone); return false; }
+                if (st.needsAuth && kind === 'oauth') {
+                    // Device Flow 优先：它不开系统浏览器，弹窗内显示 user_code / 二维码页。
+                    if (st.authDeviceFlow) return beginDeviceFlow(name, onDone);
+                    return beginOAuth(name, onDone, !!st.authQrModal);
+                }
+                return true;
+            }).catch(function () { return true; });               // 认证异常不得阻断可用连接器
+        }
+
+        window.McpAuth = {
+            state: state, start: start, status: status, cancel: cancel,
+            token: token, clear: clear,
+            openDialog: openDialog, openBrowser: openBrowser,
+            deviceStart: deviceStart, beginDeviceFlow: beginDeviceFlow, showQrModal: showQrModal,
+            // 语义别名与细分入口，供两个页面按需取用
+            ensureConnected: openDialog,
+            openTokenDialog: openTokenDialog, openManageDialog: openManageDialog,
+            showWaiting: showWaiting, closeDialog: closeDialog, stopPolling: stopPolling,
+            POLL_MS: POLL_MS, MAX_WAIT_MS: MAX_WAIT_MS
+        };
+    })();
+    /* MCP-AUTH-MODULE-END */
+
     var core = window._settingsCore;
     var escapeHtml = core.escapeHtml;
     var escapeAttr = core.escapeAttr;
@@ -35,7 +464,13 @@
         $mcpTypeBtns.filter('[data-type="' + type + '"]').addClass('active');
         $('#mcpConfigStdio').toggle(type === 'stdio');
         // streamable_stateless 为导入场景的合法类型，编辑时按远程配置区展示
-        $('#mcpConfigRemote').toggle(type === 'sse' || type === 'streamable' || type === 'streamable_stateless');
+        var isRemote = type === 'sse' || type === 'streamable' || type === 'streamable_stateless';
+        $('#mcpConfigRemote').toggle(isRemote);
+        // 认证凭据（token / OAuth）由 resolve_auth_headers 注入，仅 HTTP 传输有请求头；
+        // stdio 只把 config.env 交给子进程，不消费 CredentialVault。若此处允许 stdio
+        // 选择 token/oauth，会造出「用户存了凭据却永远不注入」的静默空转。
+        $('#mcpAuthTypeGroup').toggle(isRemote);
+        if (!isRemote) $('#mcpAuthType').val('none');
     }
 
     // ==================== MCP 管理 ====================
@@ -241,6 +676,7 @@
         $mcpSaveBtn.text(GourdI18n.t('common.save'));
         $('#mcpName').val('').prop('readOnly', false).removeClass('readonly-gray');
         $('#mcpCommand, #mcpArgs, #mcpEnv, #mcpRemoteUrl, #mcpHeaders, #mcpTimeout').val('');
+        $('#mcpAuthType').val('none');
         setScopeValue('mcpScope', 'user');
         setScopeReadonly('mcpScope', false);
         setMcpType('stdio');
@@ -250,6 +686,9 @@
         var type = server.type || 'stdio';
         setMcpType(type);
         setScopeValue('mcpScope', server.scope || 'user');
+        // 回显认证声明（非密钥）：嵌套 auth 优先，兼容旧版扁平 authType。
+        var authDecl = (server.auth && typeof server.auth === 'object') ? server.auth : {};
+        $('#mcpAuthType').val(authDecl.authType || server.authType || 'none');
 
         if (type === 'stdio') {
             $('#mcpCommand').val(server.command || '');
@@ -295,6 +734,12 @@
             if (Object.keys(headers).length > 0) bodyObj.headers = headers;
             var timeout = $('#mcpTimeout').val().trim();
             if (timeout) bodyObj.timeout = parseTimeout(timeout) || timeout;
+            // 认证声明（非密钥）：只有 authType 落 settings.json，真正的凭据由
+            // /mcp/auth/token 或 OAuth /mcp/auth/start 写进本机 CredentialVault。
+            // 不写这一段，/auth/state 恒返回 none，所有 token / OAuth 弹窗永不触发。
+            // stdio 不消费 vault 凭据（见 setMcpType），因此这里只对 HTTP 家族声明。
+            var authKind = $('#mcpAuthType').val() || 'none';
+            bodyObj.auth = { authType: authKind === 'token' || authKind === 'oauth' ? authKind : 'none' };
         }
         return bodyObj;
     }
@@ -357,24 +802,48 @@
         var isEdit = !!mcpEditName;
         var url = isEdit ? '/web/settings/mcp/servers/update' : '/web/settings/mcp/servers/add';
         var actionText = isEdit ? GourdI18n.t('settings.loop.updated') : GourdI18n.t('common.add');
+        var auth = window.McpAuth || {};
 
-        $mcpSaveBtn.prop('disabled', true);
-        $.ajax({ url: url, method: 'POST', data: JSON.stringify(bodyObj), contentType: 'application/json', dataType: 'json' })
-            .done(function (resp) {
-                if (resp.code === 200) {
-                    loadMcpList(); showMcpListView(); resetMcpForm();
-                    if (resp.connected === false) {
-                        // 配置已落盘但连接失败：如实提示后端给出的原因，不能显示
-                        // 「操作成功」让用户以为服务器已可用（这正是曾经的假成功缺陷）。
-                        showToast(resp.connectError || (actionText + GourdI18n.t('settings.loop.operation_failed')), 'error');
-                    } else {
-                        showToast(actionText + GourdI18n.t('settings.loop.operation_success'));
+        /** 原保存请求。保存成功后才查询认证状态（/auth/state 要求连接器已落盘）。 */
+        function doSave() {
+            $mcpSaveBtn.prop('disabled', true);
+            $.ajax({ url: url, method: 'POST', data: JSON.stringify(bodyObj), contentType: 'application/json', dataType: 'json' })
+                .done(function (resp) {
+                    if (resp.code === 200) {
+                        loadMcpList(); showMcpListView(); resetMcpForm();
+                        if (resp.connected === false) {
+                            // 配置已落盘但连接失败：如实提示后端给出的原因，不能显示
+                            // 「操作成功」让用户以为服务器已可用（这正是曾经的假成功缺陷）。
+                            showToast(resp.connectError || (actionText + GourdI18n.t('settings.loop.operation_failed')), 'error');
+                        } else {
+                            showToast(actionText + GourdI18n.t('settings.loop.operation_success'));
+                        }
+                        /* 配置落盘后按名称查询 /auth/state?name= 判断分支：
+                         * authType == 'none'（或接口不可用）时 openDialog 立即放行且
+                         * 什么都不弹，原保存流程完全不变；token/oauth 时弹出模态框，
+                         * 认证成功后刷新列表（重新连接）。 */
+                        if (typeof auth.openDialog === 'function') {
+                            Promise.resolve(auth.openDialog(bodyObj.name, function () { loadMcpList(); }))
+                                .catch(function () {});
+                        }
                     }
-                }
-                else showToast(actionText + GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error');
-            })
-            .fail(function () { showToast(GourdI18n.t('settings.network_error'), 'error'); })
-            .always(function () { $mcpSaveBtn.prop('disabled', false); });
+                    else showToast(actionText + GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error');
+                })
+                .fail(function () { showToast(GourdI18n.t('settings.network_error'), 'error'); })
+                .always(function () { $mcpSaveBtn.prop('disabled', false); });
+        }
+
+        /* 编辑已存在的连接器：保存前先查 /auth/state，若已声明 token/oauth 且
+         * needsAuth，点「保存并连接」不直接提交配置，先弹认证框；认证成功后
+         * 再提交原有保存流程。新增态后端尚无该 name，必须先落盘再认证。 */
+        var authName = isEdit ? mcpEditName : bodyObj.name;
+        if (isEdit && typeof auth.openDialog === 'function') {
+            Promise.resolve(auth.openDialog(authName, doSave)).then(function (proceed) {
+                if (proceed) doSave();
+            }).catch(function () { doSave(); });
+        } else {
+            doSave();
+        }
     });
 
     // MCP 表单 - 复制按钮

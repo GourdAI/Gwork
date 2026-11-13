@@ -64,6 +64,8 @@ import com.gourdai.core.portal.web.market.MarketDetail;
 import com.gourdai.core.portal.web.market.MarketItem;
 import com.gourdai.core.portal.web.market.MarketManager;
 import com.gourdai.core.portal.web.market.MarketPageResult;
+import com.gourdai.core.portal.web.market.impl.McpMarketConfigNormalizer;
+import com.gourdai.core.portal.web.market.impl.ModelscopeMcpMarket;
 import com.gourdai.ai.talents.registry.SkillMdFrontmatter;
 import org.noear.solon.core.handle.Context;
 import org.noear.solon.core.handle.Result;
@@ -140,6 +142,14 @@ public class WebSettingsController {
      * 飞书扫码绑定管理器（单例）
      */
     private final FeishuQRBindManager feishuQRManager;
+
+    /**
+     * 魔搭 MCP 广场适配器 — 「连接器」页的唯一内置目录源（匿名可用，无需 Token）。
+     *
+     * <p>无状态：只做上游 HTTP 调用与纯数据变换，不持有 settings，因此可安全共享单例。
+     * 落盘统一走 {@link #addMcpServerNode}，与手动添加 MCP 同一份逻辑。</p>
+     */
+    private final ModelscopeMcpMarket mcpMarket = new ModelscopeMcpMarket();
 
     /**
      * 构造函数：使用容器注入的 AgentSettings。
@@ -657,7 +667,24 @@ public class WebSettingsController {
     @Post
     @Mapping("/web/settings/mcp/servers/add")
     public Result mcpServersAdd(@Body String json) throws Exception {
-        ONode root = ONode.ofJson(json);
+        return addMcpServerNode(ONode.ofJson(json));
+    }
+
+    /**
+     * 添加 MCP 服务器的**唯一**落盘实现：类型标准化 + 合法性校验 + 重名去重 +
+     * 持久化 + 引擎热插拔。
+     *
+     * <p>从 {@code mcpServersAdd} 抽出，供两处共用：
+     * <ul>
+     *   <li>{@code POST /web/settings/mcp/servers/add}（手动添加 / JSON 导入）</li>
+     *   <li>{@code POST /web/settings/mcp/market/install}（魔搭 MCP 广场一键安装）</li>
+     * </ul>
+     * 广场安装**不得**另写一份校验或持久化逻辑，否则两条路径会随时间漂移
+     * （例如重名判定口径不同、漏掉引擎同步导致配置写了但工具不可用）。</p>
+     *
+     * @param root 与手动添加完全同形的配置节点（name/type/enabled/scope + command/args/env 或 url/headers/timeout）
+     */
+    Result addMcpServerNode(ONode root) {
         String name = root.get("name").getString();
         String rawType = root.get("type").getString();
         String type = McpTypeResolver.standardize(rawType);
@@ -1305,6 +1332,163 @@ public class WebSettingsController {
         saveSettings();
         LOG.info("[Settings] MCP server tools permissions updated: {}", serverName);
         return Result.succeed();
+    }
+
+    // ==================== 设置：MCP 广场（连接器页目录源） ====================
+
+    /**
+     * 魔搭 MCP 广场列表 / 搜索 — 供「连接器」页的目录卡片渲染。
+     *
+     * <p>返回 {@code {total_count, mcp_server_list, page_number, page_size}}；
+     * 分页窗口由适配器钳制到上游硬限制（{@code page * pageSize <= 100}）。</p>
+     *
+     * @param search   搜索关键词（可空）
+     * @param page     页码，从 1 开始
+     * @param pageSize 每页条数，上限 100
+     * @param category 分类 key（可空 = 全部；空串时适配器<b>整键省略</b>该 filter）
+     * @param hosted   是否只看已托管服务（{@code 1/true/yes/on} 视为真）
+     */
+    @Get
+    @Mapping("/web/settings/mcp/market/servers")
+    public Result mcpMarketServers(@Param(value = "search", defaultValue = "") String search,
+                                   @Param(value = "page", defaultValue = "1") int page,
+                                   @Param(value = "pageSize", defaultValue = "20") int pageSize,
+                                   @Param(value = "category", defaultValue = "") String category,
+                                   @Param(value = "hosted", defaultValue = "") String hosted) {
+        try {
+            return Result.succeed(mcpMarket.servers(search, page, pageSize, category, parseBoolParam(hosted)));
+        } catch (ModelscopeMcpMarket.McpMarketException e) {
+            LOG.warn("[Settings] MCP 广场列表失败: {}", e.getMessage());
+            return Result.failure(e.getMessage());
+        } catch (Exception e) {
+            LOG.warn("[Settings] MCP 广场列表异常", e);
+            return Result.failure("获取 MCP 广场列表失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 魔搭 MCP 服务详情 — 供详情弹窗展示（server_config / env_schema / readme /
+     * is_verified / is_hosted）。
+     *
+     * @param id 服务 id，形如 {@code @amap/amap-maps}（含 @ 与 /，由适配器整体百分号编码）
+     */
+    @Get
+    @Mapping("/web/settings/mcp/market/detail")
+    public Result mcpMarketDetail(@Param(value = "id", defaultValue = "") String id) {
+        if (Assert.isEmpty(id) || id.trim().isEmpty()) {
+            return Result.failure("id is required");
+        }
+        try {
+            return Result.succeed(mcpMarket.detail(id));
+        } catch (ModelscopeMcpMarket.McpMarketException e) {
+            LOG.warn("[Settings] MCP 详情失败 id={}: {}", id, e.getMessage());
+            return Result.failure(e.getMessage());
+        } catch (Exception e) {
+            LOG.warn("[Settings] MCP 详情异常 id={}", id, e);
+            return Result.failure("获取 MCP 服务详情失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * MCP 广场分类表 — 内置静态表（上游无聚合接口，绝不逐类发请求凑计数）。
+     *
+     * <p>key 全部经上游实测确认非零，详见 {@link ModelscopeMcpMarket#DEAD_CATEGORY_KEYS}。</p>
+     */
+    @Get
+    @Mapping("/web/settings/mcp/market/categories")
+    public Result mcpMarketCategories() {
+        return Result.succeed(mcpMarket.categories());
+    }
+
+    /**
+     * 一键安装魔搭 MCP 服务 — 拉详情 → 校验必填 env → 归一化 → 复用手动添加的落盘实现。
+     *
+     * <p>与手动添加 MCP <b>共用</b> {@link #addMcpServerNode}，因此重名去重、类型校验、
+     * 持久化、引擎热插拔口径完全一致；本方法不自己写 settings.json。</p>
+     *
+     * <p>{@code env} 由前端详情弹窗按 {@code env_schema.required} 收集后透传；
+     * 只接受 schema 声明过的键，防止把任意字段塞进进程环境变量。</p>
+     *
+     * @return {@code {installed: [服务名...]}}
+     */
+    @Post
+    @Mapping("/web/settings/mcp/market/install")
+    public Result mcpMarketInstall(@Body String json) {
+        ONode root;
+        try {
+            root = ONode.ofJson(json == null ? "{}" : json);
+        } catch (Exception e) {
+            return Result.failure("请求体不是合法 JSON");
+        }
+        String id = root.hasKey("id") ? root.get("id").getString() : null;
+        if (id == null || id.trim().isEmpty()) {
+            return Result.failure("id is required");
+        }
+
+        ONode data;
+        try {
+            data = mcpMarket.detailNode(id);
+        } catch (ModelscopeMcpMarket.McpMarketException e) {
+            LOG.warn("[Settings] MCP 安装取详情失败 id={}: {}", id, e.getMessage());
+            return Result.failure(e.getMessage());
+        }
+
+        try {
+            // 必须先于 resolveEnv：http 型配置存不下 env，若先索要密钥再失败，
+            // 用户白填一遍，且失败时机滞后，排查成本高。
+            McpMarketConfigNormalizer.assertHttpHasNoEnvSchema(data);
+
+            Map<String, String> supplied = readSuppliedEnv(root);
+            Map<String, String> env = McpMarketConfigNormalizer.resolveEnv(data, supplied);
+            List<Map.Entry<String, ONode>> entries = McpMarketConfigNormalizer.normalize(data, env);
+
+            List<String> installed = new ArrayList<>();
+            for (Map.Entry<String, ONode> entry : entries) {
+                Result r = addMcpServerNode(entry.getValue());
+                if (r == null || r.getCode() != 200) {
+                    String reason = (r == null || r.getDescription() == null)
+                            ? "写入 settings.json 失败" : r.getDescription();
+                    // 已成功的不回滚：与手动逐个添加的结果一致，且回滚会与引擎热插拔打架。
+                    return Result.failure("安装 " + entry.getKey() + " 失败: " + reason);
+                }
+                installed.add(entry.getKey());
+            }
+            Map<String, Object> data2 = new LinkedHashMap<>();
+            data2.put("installed", installed);
+            LOG.info("[Settings] MCP installed from marketplace: id={}, servers={}", id, installed);
+            return Result.succeed(data2);
+        } catch (IllegalArgumentException e) {
+            return Result.failure(e.getMessage());
+        } catch (Exception e) {
+            LOG.warn("[Settings] MCP 安装异常 id={}", id, e);
+            return Result.failure("安装 MCP 服务失败: " + e.getMessage());
+        }
+    }
+
+    /** 读取前端透传的 env（{@code {id, env:{K:V}}}）；缺省或非法时返回 null。 */
+    private static Map<String, String> readSuppliedEnv(ONode root) {
+        if (!root.hasKey("env")) {
+            return null;
+        }
+        ONode env = root.get("env");
+        if (env == null || env.isNull() || !env.isObject()) {
+            return null;
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        for (Map.Entry<String, ONode> e : env.getObject().entrySet()) {
+            String v = e.getValue() == null || e.getValue().isNull() ? "" : e.getValue().getString();
+            out.put(e.getKey(), v == null ? "" : v);
+        }
+        return out;
+    }
+
+    /** 宽松布尔解析，与 Rust 版 {@code parse_bool} 对齐：{@code 1/true/yes/on} 视为真。 */
+    private static boolean parseBoolParam(String raw) {
+        if (raw == null) {
+            return false;
+        }
+        String v = raw.trim().toLowerCase(Locale.ROOT);
+        return "1".equals(v) || "true".equals(v) || "yes".equals(v) || "on".equals(v);
     }
 
     // ==================== 设置：OpenApi 服务器管理 ====================

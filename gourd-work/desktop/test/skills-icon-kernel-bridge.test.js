@@ -173,3 +173,16 @@ test('index.html 在业务脚本之前引入 kernel-bridge（否则改写来不�
     assert.ok(bootAt > -1, 'index.html 必须以 <script src> 引入 app-bootstrap.js');
     assert.ok(bridgeAt < bootAt, 'bridge 必须早于业务脚本，否则首个请求就漏改写');
 });
+
+test('图标完整展示：contain 而非 cover（横幅形 iconUrl 不得被裁成碎片）', () => {
+    /* 实测（2026-11）skillhub 存在横幅形 iconUrl（256×64 官方 LOGO，透明底）：
+     * object-fit:cover 居中裁剪后 38px 方卡只剩横幅中段（"Skill" 两字）。
+     * 桌面壳与 Web 端共用同一份 skills.css，门禁两侧同锁。 */
+    const css = readUi('css', 'skills.css');
+    assert.match(css, /\.skill-card-icon img \{[^}]*object-fit: contain;/, '卡片图标必须 contain 完整展示');
+    assert.match(css, /\.skill-detail-icon img \{[^}]*object-fit: contain;/, '详情弹窗图标同样必须 contain');
+    assert.ok(!/\.skill-(card|detail)-icon img \{[^}]*object-fit: cover/.test(css),
+        'cover 裁剪形态不得回归');
+    assert.match(css, /\.skill-card-icon img \{[^}]*background: #fff;/,
+        '透明底横幅在暗色主题下黑字不可见，img 需垫白底');
+});

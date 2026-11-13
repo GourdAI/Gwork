@@ -86,7 +86,8 @@ function buildContextModel(chunk) {
         totalCacheRead: Math.round(args.totalCacheRead || 0),
         // 输出速度（TPS）：Rust 内核把本轮累计「解码时长 / 解码 token」注入 context_size 帧的
         // args（与累计用量同源、同样参与历史回放与 createdAt 单调门禁）。旧帧无此字段时为 0，
-        // 该行整行省略，不拿 outputTokens ÷ elapsedMs 顶替（口径不同，会伪装成同一个指标）。
+        // 该行恒在、值显示 '--'（由 resolveContextTiming 沿用上次值），不拿
+        // outputTokens ÷ elapsedMs 顶替（口径不同，会伪装成同一个指标）。
         generationMs: Math.round(args.generationMs || 0),
         generatedTokens: Math.round(args.generatedTokens || 0),
         // 首 Token 延迟（TTFT）：内核用 run 级 latch 测得「起点 → 首个可见输出」，同样注入 args。
@@ -154,26 +155,82 @@ function ctxLocalTurnAnchor(chunk, m) {
 }
 
 /**
+ * 判定「输出速度 / 首 Token 延迟」两行的显示值。
+ *
+ * <p><b>用户要求</b>：这两行是卡片的固定类别，不允许因为一轮里某帧缺字段就整行消失、
+ * 过一会儿再冒出来（hover 时看着像闪动）。所以两行恒在；本帧算不出新值时，
+ * 沿用上一次已经显示的文本（粘性值），绝不清空、绝不退回上一轮结算值。</p>
+ *
+ * <p><b>粘性值挂在会话上</b>（{@code sess._ctxTiming}）：单例 DOM 服务所有会话，
+ * 但每个会话有自己的上一次速率/延迟，切会话不得串值。纯函数沙箱无 sess 时退化为
+ * 「只按本帧取值」，用于既有 buildContextRows 单测。</p>
+ *
+ * <p><b>跨轮</b>保留上一轮最后一次已显示的值（用户要「还显示之前的值」），直到本轮
+ * 首个真数值抵达才替换。刻意不按 turnStartMs 主动清空：那本身就是一次视觉跳变。</p>
+ *
+ * <p><b>粘性载体必须是语言无关的原始数值</b>（{@code tpsN / tpsMs / ttftMs}），
+ * 不能存翻译后的文本：{@code ctxTpsText} 把 {@code t('chat.tps_unit')} 拼进文本，
+ * 若缓存的是文本，用户切语言后 {@link refreshContextTpsLiveI18n} 只重译了 DOM，
+ * 缓存里仍是旧语言；此后任何一次不带速率字段的整卡重绘（新轮 reason_start、
+ * 切会话回填）都会走粘性分支，把已经译好的卡面写回旧语言。存数值 + 每次现算，
+ * 天然与当前语言一致，无需任何同步钩子。</p>
+ *
+ * @param {Object} m - buildContextModel 归一后的展示模型（或 null）
+ * @param {Object} [opts] - liveMetrics（未结算的实时滑窗值，优先于结算快照）
+ * @param {Object} [sess] - 所属会话；传入时启用粘性缓存
+ * @returns {{tpsText:string, tpsMetrics:Object, ttftText:string}}
+ */
+function resolveContextTiming(m, opts, sess) {
+    opts = opts || {};
+    var live = (opts.liveMetrics && typeof opts.liveMetrics === 'object') ? opts.liveMetrics : null;
+    var cache = (sess && sess._ctxTiming && typeof sess._ctxTiming === 'object') ? sess._ctxTiming : null;
+    if (sess && !cache) cache = (sess._ctxTiming = {});
+
+    var source = live || m || {};
+    var n = ctxRowNum(source.generatedTokens), ms = ctxRowNum(source.generationMs);
+    var ttft = source.ttftMs;
+    if (cache) {
+        // 本帧算得出真速率才覆盖；否则沿用上次（首字帧 0,0 不清零）。
+        if (ctxTpsText({ generatedTokens: n, generationMs: ms })) {
+            cache.tpsN = n; cache.tpsMs = ms;
+        } else {
+            n = cache.tpsN || 0; ms = cache.tpsMs || 0;
+        }
+        // TTFT 用「是数字且非负」判存在而非判真值：合法的 0ms 首字必须能锁存，
+        // 与 buildContextModel 里 hasOwnProperty 区分 null 的口径保持一致。
+        if (typeof ttft === 'number' && ttft >= 0 && isFinite(ttft)) cache.ttftMs = ttft;
+        else ttft = cache.ttftMs;
+    }
+    return {
+        // 文本一律现算（不入库）：语言切换后无需任何额外同步就是对的。
+        tpsText: ctxTpsText({ generatedTokens: n, generationMs: ms }) || '--',
+        tpsMetrics: { generatedTokens: n, generationMs: ms },
+        ttftText: ctxTtftText({ ttftMs: ttft }) || '--'
+    };
+}
+
+/**
  * 输出速度（TPS）文本。原先尾部 trace 弹层的 traceTpsText 已移除，这里是唯一实现。
  * <p>本模块自带一份而非跨文件引用：app-context.js 需能独立加载/独立沙箱测试，
  * 且两者都是一行级纯函数，重复成本远低于耦合风险（同 ctxFmtElapsed 的取舍）。</p>
  * <p>分母是内核累计的【解码段时长】、分子是【同一批解码段产出的 token】，
- * 不含工具执行/审批等待；缺任一字段或非正数时返回空串让该行整行省略。</p>
- * @param {Object} m - buildContextModel 归一后的展示模型
+ * 不含工具执行/审批等待；缺任一字段或非正数时返回空串（由调用方决定沿用旧值）。</p>
+ * <p><b>只输出整数</b>：TPS 是速率指示，一位小数会让卡面每 500ms 抖动一次字符宽度，
+ * 用户明确要求「TPS 只有整数才对」。四舍五入到个位，不再有 &lt;100 保留一位的分支。</p>
+ * @param {Object} m - buildContextModel 归一后的展示模型（或实时滑窗 metrics）
  * @returns {string} 形如 "80 tokens/s"；无数据时空串
  */
 function ctxTpsText(m) {
     if (!(m.generatedTokens > 0) || !(m.generationMs > 0)) return '';
     var tps = m.generatedTokens / (m.generationMs / 1000);
     if (!isFinite(tps) || !(tps > 0)) return '';
-    var num = tps >= 100 ? Math.round(tps) : Math.round(tps * 10) / 10;
-    return GourdI18n.t('chat.tps_unit').replace('{n}', num);
+    return GourdI18n.t('chat.tps_unit').replace('{n}', Math.round(tps));
 }
 
 /**
  * 首 Token 延迟文本（不足 1 秒用 ms，否则用 2 位小数的秒）。
  * <p>口径与原 trace 弹层一致，复用 chat.ttft（12 语言包已有译文）。
- * 旧历史帧无 args.ttftMs 时为 null，该行整行省略而非显示 0。</p>
+ * 旧历史帧无 args.ttftMs 时为 null，该行恒在、值显示 '--' 而非伪造 0。</p>
  * @param {Object} m - buildContextModel 归一后的展示模型
  * @returns {string} 形如 "860ms" / "5.39s"；无数据时空串
  */
@@ -223,6 +280,7 @@ function ctxTtftRow(text) {
         + '</div>';
 }
 
+
 /**
  * 构建悬停明细卡内容（纯函数）。
  * <p>取值为 0 的可选指标（缓存读取/写入）整行省略，避免一屏全是 0 的噪声；
@@ -232,7 +290,8 @@ function ctxTtftRow(text) {
  *        {@code live} = 是否处于运行中（仅此时才按 turnStartMs 实时推算）；
  *        {@code liveMetrics} = 会话上暂存的实时滑窗速率 / TTFT（来自 tps_progress 帧）。
  *        语义：整卡重绘时回填实时值，避免把 hover 卡面抹回上一轮结算值；
- *        结算帧的 context_size 会先清掉该态，故此处出现即代表「尚未结算」。
+ *        结算帧的 context_size 会先清掉该态，故此处出现即代表「尚未结算」；
+ *        {@code sess} = 所属会话，用于两行粘性值按会话隔离。
  * @returns {string} 明细卡 HTML
  */
 function buildContextRows(chunk, opts) {
@@ -287,29 +346,15 @@ function buildContextRows(chunk, opts) {
         // 必须走 ctxLocalTurnAnchor 校准：直接 Date.now()-turnStartMs 会把时钟偏移算成耗时
         elapsedTxt = ctxFmtElapsed(Date.now() - ctxLocalTurnAnchor(chunk, m));
     }
-    // 输出速度 / 首 Token 延迟：与累计用量同源（都来自 context_size.args），
-    // 一起放在用量行之后、任务耗时之前。TPS、TTFT 与总用时原本挤在尾部 hover 弹层里，
-    // 用户要求收进这张卡并删掉弹层；复用 chat.* 既有译文，不新增 i18n 键。
-    // 若会话上还挂着未结算的实时值（tps_progress 帧），整卡重绘时优先回填它：
-    // 否则 noteContextTurnStart / settleContextElapsed / restore 等重绘会把卡面抹回
-    // 上一轮的结算值，直到下一个 500ms 速率帧才恢复。结算帧抵达时 updateContextIndicator
-    // 会先清掉 _ctxLive，故这里的优先级天然让位给权威累计值。
-    var liveMetrics = (opts.liveMetrics && typeof opts.liveMetrics === 'object') ? opts.liveMetrics : null;
-    var tpsTxt = ctxTpsText(m);
-    if (liveMetrics) {
-        // 滑窗实测口径：首字帧 (0,0) 或无速率窗口显示 '--'，不拿旧帧的结算速率顶替。
-        html += ctxTpsRow(ctxTpsText(liveMetrics) || '--', liveMetrics);
-    } else if (tpsTxt) {
-        html += ctxTpsRow(tpsTxt, m);
-    }
-    var ttftTxt = ctxTtftText(m);
-    if (liveMetrics) {
-        // 首字帧未锁存 TTFT 时显示 '--'（内核锁存后每帧都带值，下一帧定向补上）。
-        // 绝不回退到 chunk 里的旧结算值：那属于上一轮，实时窗口不能串值。
-        html += ctxTtftRow(ctxTtftText(liveMetrics) || '--');
-    } else if (ttftTxt) {
-        html += ctxTtftRow(ttftTxt);
-    }
+    // 输出速度 / 首 Token 延迟：两行恒在，绝不整行省略。
+    // <p>原先按「本帧有无字段」决定显隐：reason_start（每轮起步）、trace（收口）、
+    // context_size（结算）都会整卡 .html() 重绘，而新轮快照刻意删掉了旧值，于是用户
+    // hover 时看到这两行先消失、等下一个 500ms tps_progress 帧再插回来 —— 正是报障的
+    // 「类别都没了，过一会儿再出现」。现在由 resolveContextTiming 统一判定：有真数值就
+    // 替换，缺值就沿用本会话上次显示的文本，卡片布局与类别永远不动。</p>
+    var timing = resolveContextTiming(m, opts, opts.sess);
+    html += ctxTpsRow(timing.tpsText, timing.tpsMetrics);
+    html += ctxTtftRow(timing.ttftText);
 
     if (elapsedTxt) {
         html += ctxElapsedRow(elapsedTxt);
@@ -402,12 +447,18 @@ function renderContextMeter(chunk, sess) {
 
     $meter.find('.context-meter-pct').text(m.percent + '%');
     var live = isContextRunLive(sess);
-    $meter.find('.context-meter-pop-body').html(buildContextRows(chunk, {
+    // 轮级重绘仍用 .html()（这些帧不落 500ms 心跳，不会造成观感上的连闪）；
+    // 两行类别恒在 + 粘性值保证重建前后行集合与数值完全一致，选项不会消失或跳动。
+    // 真正的流式期间每 500ms 更新走 applyContextTpsLive 的定向改字，不动任何行节点。
+    var $body = $meter.find('.context-meter-pop-body');
+    $body.html(buildContextRows(chunk, {
         elapsedMs: settledContextElapsed(sess, m),
         live: live,
         // 整卡重绘时回填未结算的滑窗实测值；结算帧抵达前 updateContextIndicator 已清掉
         // _ctxLive，故此处出现即代表「本次不是结算覆盖」。
-        liveMetrics: sess && sess._ctxLive
+        liveMetrics: sess && sess._ctxLive,
+        // 粘性值按会话隔离：任何重绘也不让两行回退成 '--'。
+        sess: sess
     }));
     $meter.css('display', '');
 
@@ -466,7 +517,8 @@ function syncContextElapsedTick(chunk, sess, m, live) {
     ② 状态只挂 sess._ctxLive，绝不写 sess.lastContextChunk —— 后者参与 createdAt 单调门禁
        与历史回放，写回去会用瞬态帧的 createdAt 顶掉权威快照；
     ③ 稳态帧绝不整卡重绘（.html(buildContextRows(...))）：hover 期间会闪烁并丢掉选区，
-       只做定向改字。唯一例外是全新会话首帧需要一次性建立卡骨架（见 ensureContextMeterSkeleton）；
+       只做定向改字，且缺新值沿用上次数值（resolveContextTiming 粘性），不闪回 '--'。
+       唯一例外是全新会话首帧需要一次性建立卡骨架（见 ensureContextMeterSkeleton）；
     ④ 所有收口路径统一走 endContextLive：结算 / 新轮 / done / 切会话 / reset，
        并绑定 runId，防止空闲窗口尾帧把已结算的实时值复活。 */
 
@@ -525,21 +577,15 @@ function ensureContextMeterSkeleton(sess, chunk) {
     var $meter = $('.context-meter');
     if (!$meter.length) return false;
     var anchor = ctxRowNum(chunk.turnStartMs) || (sess._ctxTurnStartMs || 0);
-    // 骨架只负责显示卡片 + 生成容量/耗时行；实时值由随后的 applyContextTpsLive
-    // 局部插入，一次即可。若这里带上 liveMetrics（renderContextMeter 的回填逻辑），
-    // 后面的插行会再补一次 TPS/TTFT 行，出现重复。
-    var savedLive = sess._ctxLive;
-    sess._ctxLive = undefined;
-    try {
-        renderContextMeter({
-            args: { turnStartMs: anchor },
-            createdAt: chunk.createdAt || Date.now(),
-            totalTokens: 0, inputTokens: 0, outputTokens: 0,
-            cacheReadTokens: 0, cacheCreationTokens: 0, cacheRate: 0, text: ''
-        }, sess);
-    } finally {
-        sess._ctxLive = savedLive;
-    }
+    // 骨架负责显示卡片 + 生成容量行，并一次性建好 TPS/TTFT 两个恒在行（值为 '--'）。
+    // 随后的 applyContextTpsLive 只定向改字，不再插行：两行恒在，故不存在重复。
+    // 本入口在 updateContextTpsLive 里先于 sess._ctxLive 赋值执行，无需临时遮蔽实时态。
+    renderContextMeter({
+        args: { turnStartMs: anchor },
+        createdAt: chunk.createdAt || Date.now(),
+        totalTokens: 0, inputTokens: 0, outputTokens: 0,
+        cacheReadTokens: 0, cacheCreationTokens: 0, cacheRate: 0, text: ''
+    }, sess);
     sess._ctxLiveSkeletonDone = true;
     return true;
 }
@@ -569,9 +615,10 @@ function refreshContextTpsLiveI18n() {
 
 /**
  * 把当前实时值定向写入悬停卡。
- * <p>行不存在时（{@code buildContextRows} 在缺数据时整行省略）只做局部插入：
- * 插到任务耗时行 {@code [data-ctx-elapsed]} 之前，维持「输出速度 → 首 Token 延迟 → 任务耗时」
- * 的既有顺序；连耗时行都没有时退化为 append 到 {@code .context-meter-pop-body} 末尾。</p>
+ * <p>正常情况下 {@code buildContextRows} / 骨架已把两行建好（恒在），这里只定向改字。
+ * 仅兼容旧卡面（本模块升级前遗留的 DOM）行缺失时做一次局部插入：插到任务耗时行
+ * {@code [data-ctx-elapsed]} 之前，维持「输出速度 → 首 Token 延迟 → 任务耗时」的既有顺序；
+ * 连耗时行都没有时退化为 append 到 {@code .context-meter-pop-body} 末尾。</p>
  * <p>二次门禁不可省：rAF 是异步的，帧到达时是前台、回调执行时用户可能已切走会话，
  * 或期间结算帧已把 {@code _ctxLive} 清掉——这两种情况都不得再碰单例 DOM。</p>
  */
@@ -585,14 +632,17 @@ function applyContextTpsLive(sess) {
         var $meter = $('.context-meter');
         if (!$meter.length) return;   // DOM 未命中静默返回
 
-        var tpsTxt = ctxTpsText(metrics) || '--';
-        var ttftTxt = ctxTtftText(metrics) || '--';
+        // 与整卡重绘共用粘性判定：首字帧 (0,0) / 缺 ttft 时不把上一帧的数值抹成 '--'，
+        // 只有真数值抵达才改字。首帧建骨架时行已恒在，此处不会重复插行。
+        var timing = resolveContextTiming({}, { liveMetrics: metrics }, sess);
+        var tpsTxt = timing.tpsText;
+        var ttftTxt = timing.ttftText;
         var $tps = $meter.find('[data-ctx-tps]');
         var $ttft = $meter.find('[data-ctx-ttft]');
         if (!$tps.length || !$ttft.length) {
             var $body = $meter.find('.context-meter-pop-body');
             if (!$body.length) return;
-            var rows = (!$tps.length ? ctxTpsRow(tpsTxt, metrics) : '')
+            var rows = (!$tps.length ? ctxTpsRow(tpsTxt, timing.tpsMetrics) : '')
                 + (!$ttft.length ? ctxTtftRow(ttftTxt) : '');
             var $elapsed = $body.find('[data-ctx-elapsed]');
             var $anchor = $elapsed.length ? $elapsed.closest('.context-meter-row') : null;
@@ -603,9 +653,10 @@ function applyContextTpsLive(sess) {
         }
         if ($tps.length) {
             $tps.text(tpsTxt);
-            // 原始数值留存在行节点上，供语言切换重算（translateDOM 扫不到内嵌译文）
-            $tps.attr('data-ctx-tps-n', String(ctxRowNum(metrics.generatedTokens)));
-            $tps.attr('data-ctx-tps-ms', String(ctxRowNum(metrics.generationMs)));
+            // 原始数值留存在行节点上，供语言切换重算（translateDOM 扫不到内嵌译文）；
+            // 沿用旧值时保留旧数值，不能拿本帧的 0 把它清掉。
+            $tps.attr('data-ctx-tps-n', String(ctxRowNum(timing.tpsMetrics.generatedTokens)));
+            $tps.attr('data-ctx-tps-ms', String(ctxRowNum(timing.tpsMetrics.generationMs)));
         }
         if ($ttft.length) $ttft.text(ttftTxt);
     } catch (e) { /* 异常静默：不得打断 onWebChunk 的帧管线 */ }
@@ -719,11 +770,9 @@ function noteContextTurnStart(sess, turnStartMs) {
     var args = {};
     for (var k in (c.args || {})) { args[k] = c.args[k]; }
     args.turnStartMs = turnStartMs;
-    // 新轮起步时，旧快照里的解码速率与首字延迟都属于上一轮：不随 lastContextChunk 复制，
-    // 等新一轮首个 context_size 帧带权威值后再显示，避免「新一轮显示旧速率/旧延迟」。
-    delete args.generationMs;
-    delete args.generatedTokens;
-    delete args.ttftMs;
+    // 新轮起步时快照里仍带着上一轮的权威值：保留它们做 resolveContextTiming 的粘性来源，
+    // 不再 delete。旧实现在这里删掉三个字段，恰好让两行整行消失、等 500ms 后实时帧插回，
+    // 就是用户看到的「类别没了，过一会儿再出现」。现在两行恒在、沿用上次数值。
     renderContextMeter({ args: args, text: c.text, totalTokens: c.totalTokens,
         inputTokens: c.inputTokens, outputTokens: c.outputTokens,
         cacheReadTokens: c.cacheReadTokens, cacheCreationTokens: c.cacheCreationTokens,

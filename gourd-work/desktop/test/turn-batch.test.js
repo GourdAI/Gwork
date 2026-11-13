@@ -8,7 +8,9 @@
  *  - 收口后新过程行开新批次，旧批次保持折叠
  *  - 零成员盖子必须移除（孤儿盖子比不显示更误导）
  *  - 偏好 gourd.turnCompact==='0' 时不建盖子
- *  - turn-compact 放弃折叠（无正文/失败轮）时批次成员必须被 revealAll 展开
+ *  - turn-compact 放弃折叠（无正文/失败轮）时批次成员【保持折叠】：2026-11 用户拍板
+     失败轮不得 revealAll 摊开（报错后「折叠变默认展开 + 卡片态回潮」的根因），
+     revealAll 仅作为导出 API 保留（见 process-flat-contract.test.js 的接线钉）
  *  - turn-compact 分类把盖子当过程行、摘要不对盖子计数
  */
 'use strict';
@@ -333,7 +335,7 @@ test('点击盖子切换展开/收起（aria 与成员类同步）', () => {
     assert.ok(c1._classes.has('turn-batch-collapsed'));
 });
 
-test('revealAll 展开全部成员但保留盖子（失败轮护栏）', () => {
+test('revealAll 展开全部成员但保留盖子（仅导出 API；失败轮已不再自动调用）', () => {
     const b = mkBubble();
     const sess = mkSess(b);
     const c1 = el('div', ['tool-card']); b.appendChild(c1);
@@ -486,7 +488,7 @@ test('接线形状锁：finishStream 的批次收口不挂在 tcApi 存在性分
     assert.ok(iClose < iCompact, '批次收口必须先于按轮 compact');
 });
 
-test('turn-compact 放弃折叠时批次成员被展开（失败轮不藏证据）', () => {
+test('turn-compact 放弃折叠时批次成员【保持折叠】（2026-11 反转：失败轮不摊开）', () => {
     global.window = { GourdTurnBatch: batch };
     try {
         const b = mkBubble();
@@ -497,7 +499,10 @@ test('turn-compact 放弃折叠时批次成员被展开（失败轮不藏证据�
         assert.ok(c1._classes.has('turn-batch-collapsed'));
         // 无最终正文 → classifyChildren 返回 null → compactBubble 走 !decision 分支
         assert.equal(compact.compactBubble(b, {}), false);
-        assert.ok(!c1._classes.has('turn-batch-collapsed'), '失败轮成员必须展开');
+        /* 旧契约钉「成员必须展开」，理由是「失败轮不藏证据」。2026-11 用户报障反转：
+           报错后整轮摊开 = 卡片态回潮（截图实锤）。错误块本就不是批次成员（见上文
+           「正文/错误/交互卡不是批次成员」），常驻可见，摊开成员对看见错误零增益。 */
+        assert.ok(c1._classes.has('turn-batch-collapsed'), '失败轮成员必须保持折叠');
     } finally { delete global.window; }
 });
 

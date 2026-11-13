@@ -275,6 +275,14 @@
                  "confirm":  "Подтвердить"
              },
     "app":  {
+
+        "nav":  {
+
+            "connectors":  "Коннекторы",
+
+            "interfaces":  "Интерфейсы"
+
+        },
                                 "access_title":  "Права доступа",
                 "access_default":  "Обычный доступ",
                 "access_full":  "Полный доступ",
@@ -580,6 +588,25 @@
                                      "scroll_next":  "Прокрутить вправо"
                                 },
                      "mcp":  {
+                                 "market":  {
+                                             "title":  "Каталог MCP",
+                                             "search_placeholder":  "Поиск MCP-серверов",
+                                             "hosted":  "Хостинг",
+                                             "installed":  "Установлено",
+                                             "empty":  "Сервисы не найдены",
+                                             "required":  "Обязательно",
+                                             "verified":  "Проверено",
+                                             "connect":  "Подключить",
+                                             "connect_title":  "Подключить",
+                                             "save_connect":  "Сохранить и подключить",
+                                             "cancel":  "Отмена",
+                                             "config":  "Конфигурация",
+                                             "load_failed":  "Не удалось загрузить каталог MCP: {msg}",
+                                             "install_failed":  "Ошибка установки: {msg}",
+                                             "installed_names":  "Установлено: {msg}",
+                                             "detail_failed":  "Не удалось загрузить подробности: {msg}",
+                                             "retry":  "Повторить"
+                                 },
                                  "title":  "MCP-серверы",
                                  "desc":  "Управление внешними серверами инструментов (файлы, базы данных, браузеры)",
                                  "add":  "Добавить сервер",
@@ -1035,6 +1062,7 @@
                  "tool_edit":  "Редактирование",
                  "tool_bash":  "Выполнить",
                  "tool_bash_output": "Проверить фоновый вывод",
+                 "action_bash_done": "Команда терминала",
                  "tool_skill":  "Навык",
                  "tool_todo":  "Задачи",
                  "tool_code":  "Код",
@@ -1269,7 +1297,7 @@
                     "turn_input":  "Ввод хода",
                     "turn_output":  "Вывод хода",
                     "batch_done_count":  "Выполнено инструментов: {count}",
-                    "action_bash_done":  "Команда терминала выполнена",
+                    "action_bash_done":  "Команда терминала",
                     "action_thinking_done":  "Обдумано",
                     "batch_thinking_count":  "Обдумано {count} раз",
                     "messages":  "Сообщений"

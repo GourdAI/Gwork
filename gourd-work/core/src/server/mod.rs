@@ -40,6 +40,8 @@ pub mod guard;
 pub mod loop_api;
 pub mod loop_driver;
 pub mod loop_runner;
+pub mod mcp_auth_api;
+pub mod mcp_market_api;
 pub mod misc_api;
 pub mod projects_api;
 pub mod settings_api;
@@ -94,6 +96,9 @@ pub struct AppState {
     /// MCP manager, shared with `registry` so the settings endpoints can
     /// hot-plug servers (add/update/toggle/remove) without a restart.
     pub mcp: Arc<crate::mcp::McpManager>,
+    /// Connector authorization: in-flight browser flows and the local-only
+    /// credential vault. Held here so auth endpoints survive across requests.
+    pub mcp_auth: Arc<crate::mcp::auth::AuthManager>,
     /// File-change ledger for capturing write/edit operations.
     pub change_ledger: Arc<crate::changes::ChangeLedger>,
     /// Loop scheduler.
@@ -235,6 +240,9 @@ pub async fn serve_with_static(
         }
     };
     let mcp = Arc::new(crate::mcp::McpManager::new());
+    let mcp_auth = Arc::new(crate::mcp::auth::AuthManager::new(
+        crate::mcp::auth::CredentialVault::at_home(),
+    ));
 
     // ── Cold start: bind the socket BEFORE any eager loading ────────────────
     //
@@ -269,6 +277,12 @@ pub async fn serve_with_static(
     let mcp_servers = load_mcp_servers();
     if !mcp_servers.is_empty() {
         let mcp_bg = mcp.clone();
+        // Flip the startup latch BEFORE spawning, not inside the task: a chat run
+        // could be accepted in between and would then snapshot an empty MCP tool
+        // list. `wait_for_startup` in the ReAct loop is the other half — together
+        // they close the cold-start race where the first conversation after launch
+        // never saw any MCP tool, however quickly the servers actually connected.
+        mcp.begin_startup();
         tokio::spawn(async move {
             mcp_bg.connect_all(&mcp_servers).await;
         });
@@ -290,6 +304,7 @@ pub async fn serve_with_static(
         session_store: SessionStore::new(),
         registry: Arc::new(registry),
         mcp: mcp.clone(),
+        mcp_auth,
         change_ledger: Arc::new(crate::changes::ChangeLedger::new(workspace.clone())),
         loop_scheduler: Arc::new(crate::loop_task::LoopScheduler::new(workspace.clone())),
         queue_manager: Arc::new(crate::queue::QueueManager::new()),
@@ -481,6 +496,23 @@ pub async fn serve_with_static(
         .route("/web/settings/mcp/servers/tools/save", post(settings_api::mcp_server_tools_save))
         .route("/web/settings/mcp/import/parse", post(settings_api::mcp_import_parse))
         .route("/web/settings/mcp/import/parse/string", post(settings_api::mcp_import_parse_string))
+        // 魔搭 ModelScope MCP 广场：连接器页唯一内置目录源（匿名列表/详情）。
+        // install 复用 settings_api::mcp_server_add 的持久化与热插拔逻辑。
+        .route("/web/settings/mcp/market/servers", get(mcp_market_api::mcp_market_servers))
+        .route("/web/settings/mcp/market/detail", get(mcp_market_api::mcp_market_detail))
+        .route("/web/settings/mcp/market/categories", get(mcp_market_api::mcp_market_categories))
+        .route("/web/settings/mcp/market/install", post(mcp_market_api::mcp_market_install))
+        // Connector authorization: browser OAuth (start/status/cancel), static
+        // token dialog (token/clear), and one state read for the UI to decide
+        // which dialog to show. Credentials never pass through settings.json.
+        .route("/web/settings/mcp/auth/state", get(mcp_auth_api::mcp_auth_state))
+        .route("/web/settings/mcp/auth/start", post(mcp_auth_api::mcp_auth_start))
+        // RFC 8628 Device Flow (user_code + in-app QR modal); same session table.
+        .route("/web/settings/mcp/auth/device/start", post(mcp_auth_api::mcp_auth_device_start))
+        .route("/web/settings/mcp/auth/status", get(mcp_auth_api::mcp_auth_status))
+        .route("/web/settings/mcp/auth/cancel", post(mcp_auth_api::mcp_auth_cancel))
+        .route("/web/settings/mcp/auth/token", post(mcp_auth_api::mcp_auth_token))
+        .route("/web/settings/mcp/auth/clear", post(mcp_auth_api::mcp_auth_clear))
         .route("/web/settings/providers", get(settings_api::providers_list))
         .route("/web/settings/providers/get", get(settings_api::providers_get))
         .route("/web/settings/providers/add", post(settings_api::providers_add))
@@ -616,6 +648,11 @@ fn load_mcp_servers() -> HashMap<String, crate::mcp::McpServerConfig> {
     // fail and `unwrap_or_default()` turned that into "user has no MCP servers"
     // — silent, total, and undiagnosable from the UI. Skipping only the bad
     // entry keeps the rest working and logs what went wrong.
+    //
+    // The log now names the **specific field** that failed, not just
+    // `error = "invalid type ..."`: the latter never told the user which of
+    // `type` / `command` / `url` / `timeout` / `headers` they mistyped. We
+    // inspect the offending value directly so the message is actionable.
     let mut out = HashMap::new();
     for (name, entry) in servers {
         match serde_json::from_value::<crate::mcp::McpServerConfig>(entry.clone()) {
@@ -623,11 +660,82 @@ fn load_mcp_servers() -> HashMap<String, crate::mcp::McpServerConfig> {
                 out.insert(name.clone(), cfg);
             }
             Err(e) => {
-                tracing::warn!(server = %name, error = %e, "skipping malformed mcpServers entry");
+                let field = offending_mcp_field(entry, &e);
+                tracing::warn!(
+                    server = %name,
+                    field = %field,
+                    error = %e,
+                    "skipping malformed mcpServers entry (invalid field: {}) — other servers are unaffected",
+                    field
+                );
             }
         }
     }
     out
+}
+
+/// Name the field in a malformed `mcpServers` entry that actually caused the
+/// deserialization failure.
+///
+/// serde's message for a struct parsed through `from_value` frequently omits the
+/// field name (`invalid type: integer '3', expected a string` at line 1 column
+/// N), which left users guessing. We re-check the value types of the fields
+/// whose types are not `Value`-permissive — those are the ones that can fail —
+/// and report the first mismatch. The map is deliberately kept in sync with
+/// `McpServerConfig`'s non-`Vec`/`HashMap` string fields; a new knob added
+/// there should be added here too.
+fn offending_mcp_field(entry: &serde_json::Value, err: &serde_json::Error) -> String {
+    // String-typed fields (including aliases the UI may write).
+    const STRING_FIELDS: &[&str] = &[
+        "type", "transport", "scope", "command", "url", "proxy", "timeout",
+        "protocolMode", "connectTimeout", "discoveryTimeout", "authTimeout",
+    ];
+    if let Some(obj) = entry.as_object() {
+        for k in STRING_FIELDS {
+            if let Some(v) = obj.get(*k) {
+                if !v.is_string() && !v.is_null() {
+                    return (*k).into();
+                }
+            }
+        }
+        for k in &["enabled", "allowElicitation", "maxToolOutputChars"] {
+            if let Some(v) = obj.get(*k) {
+                let bad = match *k {
+                    "enabled" | "allowElicitation" => !v.is_boolean() && !v.is_null(),
+                    "maxToolOutputChars" => !v.is_u64() && !v.is_null(),
+                    _ => false,
+                };
+                if bad {
+                    return (*k).into();
+                }
+            }
+        }
+        for k in &["args", "disallowedTools", "allowedTools"] {
+            if let Some(v) = obj.get(*k) {
+                if !v.is_array() && !v.is_null() {
+                    return (*k).into();
+                }
+            }
+        }
+        for k in &["env", "headers", "toolOutputLimits"] {
+            if let Some(v) = obj.get(*k) {
+                if !v.is_object() && !v.is_null() {
+                    return (*k).into();
+                }
+            }
+        }
+        // serde sometimes reports a duplicate/unknown-key problem with the
+        // field embedded in the message; fall back to that rather than "unknown".
+        let msg = err.to_string();
+        if let Some(pos) = msg.find("unknown field `") {
+            let rest = &msg[pos + "unknown field `".len()..];
+            if let Some(end) = rest.find('`') {
+                return rest[..end].to_string();
+            }
+        }
+        return "<unknown: check the server entry's field types>".into();
+    }
+    "<entry: expected an object>".into()
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -1934,9 +2042,30 @@ async fn handle_slash_command(
 ) -> Json<serde_json::Value> {
     let seq_counter = state.seq_for(session_id).await;
 
-    /// Broadcast frames without writing them to the stream file (see above).
-    async fn emit(state: &Arc<AppState>, session_id: &str, frames: Vec<Frame>) {
-        for frame in frames {
+    /// Stamp and broadcast frames without writing them to the stream file (see above).
+    ///
+    /// Numbering happens here, at the single funnel every command goes through,
+    /// rather than at each call site. The builders (`command_frames` /
+    /// `rewind_frames`) number from a caller-supplied `&mut i64`, and the call sites
+    /// used to bracket that with a non-atomic `load` … `store`. That window is
+    /// reachable: a **background** sub-agent's forwarder deliberately outlives the
+    /// run that spawned it (`post_run_tx` keeps the channel open, see
+    /// `run_react_session`), so its `stamp_seq` can land between the `load` and the
+    /// `store` and then be overwritten by the stale value — rewinding the counter
+    /// and handing the next producer seqs the frontend has already seen, where its
+    /// live gate silently drops them. `fetch_add` inside the funnel leaves no
+    /// window to lose.
+    ///
+    /// The `seq` the builders were given is therefore a scratch value, discarded by
+    /// the re-stamp below; only their *relative order* matters, and iterating the
+    /// `Vec` in order preserves it.
+    async fn emit(
+        state: &Arc<AppState>,
+        session_id: &str,
+        counter: &AtomicI64,
+        frames: Vec<Frame>,
+    ) {
+        for frame in stamp_all(counter, frames) {
             broadcast_frame(state, session_id, frame).await;
         }
     }
@@ -1949,32 +2078,33 @@ async fn handle_slash_command(
                     // Report rather than silently rewinding one message: the user
                     // asked for something else, and a wrong-count rewind destroys
                     // history they wanted to keep.
-                    let mut seq = seq_counter.load(Ordering::SeqCst);
-                    let frames = commands::command_frames(session_id, &message, &mut seq);
-                    seq_counter.store(seq, Ordering::SeqCst);
-                    emit(state, session_id, frames).await;
+                    //
+                    // The `0` is a scratch start: `emit` re-stamps every frame from
+                    // the atomic counter, so the builder's numbers only fix the
+                    // *order* of the two frames it returns.
+                    let mut scratch = 0;
+                    let frames = commands::command_frames(session_id, &message, &mut scratch);
+                    emit(state, session_id, &seq_counter, frames).await;
                     return Json(serde_json::json!({"code": 400, "description": message}));
                 }
             };
             let removed = store.rewind(session_id, count);
-            let mut seq = seq_counter.load(Ordering::SeqCst);
-            let frames = commands::rewind_frames(session_id, removed, &mut seq);
-            seq_counter.store(seq, Ordering::SeqCst);
-            emit(state, session_id, frames).await;
+            let mut scratch = 0;
+            let frames = commands::rewind_frames(session_id, removed, &mut scratch);
+            emit(state, session_id, &seq_counter, frames).await;
             info!(session = %session_id, requested = count, removed, "slash command /rewind");
             return Json(serde_json::json!({"code": 200, "data": {"sessionId": session_id, "removed": removed}}));
         }
 
         "clear" => {
             let removed = store.clear_messages(session_id);
-            let mut seq = seq_counter.load(Ordering::SeqCst);
+            let mut scratch = 0;
             let frames = commands::command_frames(
                 session_id,
                 &format!("已清空会话记录（{} 条）", removed),
-                &mut seq,
+                &mut scratch,
             );
-            seq_counter.store(seq, Ordering::SeqCst);
-            emit(state, session_id, frames).await;
+            emit(state, session_id, &seq_counter, frames).await;
             info!(session = %session_id, removed, "slash command /clear");
             return Json(serde_json::json!({"code": 200, "data": {"sessionId": session_id, "removed": removed}}));
         }
@@ -1990,14 +2120,13 @@ async fn handle_slash_command(
                 ctx.compact_focus = focus_for_ctx;
             });
 
-            let mut seq = seq_counter.load(Ordering::SeqCst);
+            let mut scratch = 0;
             let frames = commands::command_frames(
                 session_id,
                 &commands::compact_message(focus.as_deref()),
-                &mut seq,
+                &mut scratch,
             );
-            seq_counter.store(seq, Ordering::SeqCst);
-            emit(state, session_id, frames).await;
+            emit(state, session_id, &seq_counter, frames).await;
             info!(session = %session_id, focus = focus.as_deref().unwrap_or("-"), "slash command /compact");
             return Json(serde_json::json!({"code": 200, "data": {"sessionId": session_id}}));
         }
@@ -2016,10 +2145,9 @@ async fn handle_slash_command(
                 }
             }
             let Some(prompt) = last_user else {
-                let mut seq = seq_counter.load(Ordering::SeqCst);
-                let frames = commands::command_frames(session_id, "没有可重新运行的任务", &mut seq);
-                seq_counter.store(seq, Ordering::SeqCst);
-                emit(state, session_id, frames).await;
+                let mut scratch = 0;
+                let frames = commands::command_frames(session_id, "没有可重新运行的任务", &mut scratch);
+                emit(state, session_id, &seq_counter, frames).await;
                 return Json(serde_json::json!({"code": 200, "data": {"sessionId": session_id}}));
             };
             // Write back the truncated history. `rewind` counts from the end, so
@@ -2798,12 +2926,63 @@ async fn run_react_session(
     // Create frame channel
     let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Frame>();
 
-    // Forward frames to WS clients + persist to stream file
+    // Forward frames to WS clients + persist to stream file.
+    //
+    // **This loop is the single authoritative `eventSeq` source for the session.**
+    // Every frame is re-stamped here, unconditionally overwriting whatever seq the
+    // producer put on it (see `stamp_seq`). Two classes of producer cannot number
+    // their own frames correctly, and both were silently corrupting the stream:
+    //
+    // 1. **Frames sent straight to `frame_tx` by tools and sub-agents**, bypassing
+    //    the ReAct `emit!` macro that normally stamps run id + seq. `hitl`,
+    //    `question`, `agent_start` and `agent_end` are built this way
+    //    (`tools/builtin/mod.rs`, `team/mod.rs`) and reached the stream file with
+    //    **no `eventSeq` field at all**. Replay keeps them only in the cursor-less
+    //    modes: `After{after_seq}` (reconnect, reconcile) and `Rounds{before_seq}`
+    //    ("load earlier") both drop a frame whose seq is `None`, because
+    //    `session/mod.rs` filters with `seq.map(..).unwrap_or(false)`. So an
+    //    approval card survived a page refresh but vanished on "load earlier", and
+    //    the run stayed suspended in the kernel with no way to answer it.
+    //
+    // 2. **Forwarded sub-agent frames carrying the sub-agent's own numbering.**
+    //    `team/mod.rs` runs a nested ReAct with `start_seq: 0` and forwards its
+    //    frames into the *parent* channel after rewriting only `session_id` and the
+    //    agent attribution — never `event_seq`. The parent's counter is already at
+    //    e.g. 40, so the child's 0/1/2/3 land in the parent stream and break
+    //    monotonicity. The live gate (`app-streaming.js`) drops `seq <= lastEventSeq`,
+    //    so the child's frames were discarded mid-card — the agent card opened,
+    //    rendered its first line, then never filled in. Worse, a low seq landing
+    //    *before* a high one makes `Rounds{before_seq: N}` return an empty page,
+    //    because the window scan stops at the first frame below the cursor.
+    //
+    // Re-stamping at the exit fixes both with one change and cannot reorder
+    // anything: this is the only consumer of the channel and `mpsc` is FIFO, so
+    // `fetch_add` hands out numbers in exactly arrival order.
+    //
+    // Deliberately NOT applied to the broadcast-only paths (`hitl_released`,
+    // `error`/`done` on "no model configured", slash-command frames): those never
+    // reach the stream file, and giving them a seq would enrol them in the
+    // frontend's dedupe cursor without a persisted counterpart to rebuild it from.
     let state_fwd = state.clone();
     let sid_fwd = session_id.clone();
+    let counter_fwd = seq_counter.clone();
     let fwd_handle = tokio::spawn(async move {
         while let Some(frame) = frame_rx.recv().await {
-            persist_frame(&state_fwd, &sid_fwd, &frame).await;
+            // Stamp + persist are one call (`relay_frame`) precisely so the ordering
+            // between them cannot drift; see that function.
+            //
+            // `store_for` is resolved per frame, exactly as `persist_frame` used to
+            // do internally. Hoisting it out of the loop would be a real regression,
+            // not an optimisation: ownership is decided by `session_roots`, and
+            // `bind_session_cwd` runs *before* the busy check in `chat_input` and is
+            // not gated by it on the resume paths — so a session can make its
+            // **first** binding while this run is already streaming. Bindings are
+            // first-one-wins and never change afterwards, but this loop can outlive
+            // the run (a background sub-agent keeps `post_run_tx` alive, which is
+            // the whole reason it is not awaited), so a store captured at spawn time
+            // would keep writing to the global area after the session moved under
+            // its project root.
+            let frame = relay_frame(&counter_fwd, &store_for(&state_fwd, &sid_fwd), &sid_fwd, frame);
             broadcast_frame(&state_fwd, &sid_fwd, frame).await;
         }
     });
@@ -2867,8 +3046,19 @@ async fn run_react_session(
     let post_run_tx = frame_tx.clone();
     let result = agent.run(&config, history, frame_tx, cancel).await;
 
-    // Update seq counter
-    seq_counter.store(result.next_seq, Ordering::SeqCst);
+    // Advance the counter, never rewind it.
+    //
+    // `result.next_seq` counts only the frames **ReAct itself** emitted from
+    // `start_seq`. It is blind to tool-direct frames (`hitl`, `question`) and to
+    // everything a sub-agent forwarded in — all of which the forwarder above has
+    // already numbered out of this same counter. So `next_seq` is normally *behind*
+    // the counter by then, and the previous bare `store` rewound it: the next run
+    // would start re-issuing seqs the frontend had already seen, and its live gate
+    // (`app-streaming.js`) drops every frame at or below its cursor, silently
+    // eating real output. `advance_counter` makes this a monotonic no-op in the
+    // common case while still covering a run whose frames never reached a
+    // stamping forwarder.
+    advance_counter(&seq_counter, result.next_seq);
 
     // Handle suspension: persist the suspension point
     match result.stop_reason {
@@ -2960,8 +3150,13 @@ async fn run_react_session(
         // Queued through the run's own channel: ordering with `done` is preserved
         // and the forwarder does the persist + broadcast, exactly as for every
         // other frame.
-        let frame = Frame::file_changes(&session_id, &run_id, summary)
-            .seq(seq_counter.fetch_add(1, Ordering::SeqCst));
+        //
+        // No inline `.seq(...)` here — the forwarder stamps it (`stamp_seq`). This
+        // used to `fetch_add` from the same counter and then have that number
+        // *thrown away*, because `Frame::seq` overwrites unconditionally and the
+        // frame passes through the forwarder on its way out. One counter slot was
+        // burned per run for a value nothing ever read.
+        let frame = Frame::file_changes(&session_id, &run_id, summary);
         let _ = post_run_tx.send(frame);
     }
     // Dropping the handle does not abort the forwarder task; it keeps draining so
@@ -3060,6 +3255,82 @@ fn build_memory_preview(project_root: Option<&std::path::Path>) -> String {
 }
 
 /// Persist a frame to the session's .stream.ndjson file (ownership-routed).
+/// Re-stamp a frame with the next authoritative `eventSeq` for its session.
+///
+/// The overwrite is the point, not a side effect: `Frame::seq` assigns
+/// unconditionally, which lets one call site fix **both** failure modes at once —
+/// frames that arrive with no seq (tools and sub-agents send `hitl`, `question`,
+/// `agent_start`, `agent_end` straight to `frame_tx`, bypassing the ReAct `emit!`
+/// macro that normally stamps them) and frames that arrive numbered by a
+/// *different* counter (a forwarded sub-agent run starts at `start_seq: 0` and
+/// `team/mod.rs` rewrites only its `session_id` and agent attribution).
+///
+/// Callers are the per-session forwarder loops and the slash-command emitter —
+/// each is the sole consumer of its channel, and `mpsc` is FIFO, so `fetch_add`
+/// hands out numbers in exactly arrival order and the stream file stays monotonic.
+pub(crate) fn stamp_seq(counter: &AtomicI64, frame: Frame) -> Frame {
+    frame.seq(counter.fetch_add(1, Ordering::SeqCst))
+}
+
+/// One step of a per-session forwarder: stamp the frame, persist it, hand it back
+/// for broadcasting.
+///
+/// Extracted from the two forwarder loops (`run_react_session` and
+/// `loop_runner::execute_loop_task`) so the ordering that matters is *testable
+/// against the real code*. Stamping must happen **before** persisting: doing it
+/// the other way round broadcasts a correctly numbered frame while the stream file
+/// keeps the producer's — a missing seq for tool-direct frames, or a sub-agent's
+/// own `start_seq: 0` numbering — so the live UI looks fine and every later replay
+/// is wrong. That defect is invisible to a test that only calls `stamp_seq`, which
+/// is exactly why the pair lives here.
+pub(crate) fn relay_frame(
+    counter: &AtomicI64,
+    store: &SessionStore,
+    session_id: &str,
+    frame: Frame,
+) -> Frame {
+    let stamped = stamp_seq(counter, frame);
+    store.append_stream_frame(session_id, &stamped);
+    stamped
+}
+
+/// Stamp a batch of frames in order, for producers that broadcast without
+/// persisting (slash-command replies).
+///
+/// Numbering here rather than at each call site is what closes a real race: the
+/// builders take a plain `&mut i64`, and the call sites used to bracket that with a
+/// non-atomic `load` … `store` on the session counter. A **background** sub-agent's
+/// forwarder deliberately outlives the run that spawned it, so its `stamp_seq` could
+/// land inside that window and then be overwritten by the stale value — rewinding
+/// the session sequence and making the frontend's live gate drop real frames.
+pub(crate) fn stamp_all(counter: &AtomicI64, frames: Vec<Frame>) -> Vec<Frame> {
+    frames
+        .into_iter()
+        .map(|f| stamp_seq(counter, f))
+        .collect()
+}
+
+/// Move a session's seq counter forward to `target`, never backwards.
+///
+/// Replaces a bare `store`. One counter is shared by several producers: the
+/// forwarder (`stamp_seq`), the HTTP handlers that persist a frame inline (`user`,
+/// `question_answered`, `file_changes`) and the run's own wrap-up, which reports
+/// `result.next_seq` — a count of the frames *ReAct itself* emitted, blind to
+/// tool-direct frames and to everything a sub-agent forwarded. A plain `store` of
+/// that smaller number rewinds the counter, so the next run re-issues seqs the
+/// frontend has already seen; its live gate drops every frame at or below its
+/// cursor, which silently eats real output. CAS-forward makes the counter a
+/// monotonic high-water mark instead.
+pub(crate) fn advance_counter(counter: &AtomicI64, target: i64) {
+    let mut current = counter.load(Ordering::SeqCst);
+    while current < target {
+        match counter.compare_exchange_weak(current, target, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 pub(crate) async fn persist_frame(state: &Arc<AppState>, session_id: &str, frame: &Frame) {
     store_for(state, session_id).append_stream_frame(session_id, frame);
 }
@@ -6045,12 +6316,24 @@ mod tests {
             derived, 1,
             "the clientInfo version must have a single source of truth (initialize_params), found {derived}"
         );
-        // Every handshake path must go through that helper, or one could drift
-        // back to a literal. stdio connect + streamable + sse = 3 call sites.
-        let helper_calls = src.matches("initialize_params()").count();
+        // Every handshake path must go through a central helper, or one could
+        // drift back to a literal / to a different capability surface.
+        // Production uses the config-aware entry (projects capabilities) and
+        // the pinned retry variant; both delegate to `initialize_params_at`.
+        let helper_calls = src.matches("initialize_params_for(config)").count()
+            + src.matches("initialize_params_pinned(config").count();
         assert!(
             helper_calls >= 3,
-            "all transport handshakes must call initialize_params(), found {helper_calls}"
+            "all transport handshakes must go through a central initialize helper, found {helper_calls}"
+        );
+        // Stronger guard than the old single-spelling count: the two new
+        // wrappers must themselves delegate to the one clientInfo builder.
+        // Without this, someone could put a second `clientInfo` literal in a
+        // wrapper and the `derived == 1` assertion above would still pass.
+        let wrappers = src.matches("Self::initialize_params_at(").count();
+        assert!(
+            wrappers >= 3,
+            "initialize_params / _for / _pinned must all delegate to initialize_params_at, found {wrappers}"
         );
     }
     // ─── /web/chat/hints (completion list) ─────────────────────────────────
@@ -6338,5 +6621,589 @@ mod tests {
         );
 
         assert_eq!(hint_description(""), "");
+    }
+
+    // ─── Authoritative event-seq numbering at the channel exit ───────────────
+    //
+    // Two producers cannot number their own frames: tools and sub-agents that send
+    // straight to `frame_tx` (`hitl`, `question`, `agent_start`, `agent_end`,
+    // loop `user_input`) bypass the ReAct `emit!` macro entirely, and a forwarded
+    // sub-agent frame arrives numbered from *its own* `start_seq: 0` counter. Both
+    // were corrupting the stream file, in opposite directions:
+    //
+    //   no seq      → dropped by every cursor-scoped replay mode, because
+    //                 `session/mod.rs` filters with `seq.map(..).unwrap_or(false)`
+    //   a low seq   → breaks monotonicity, so the live gate (`seq <= lastEventSeq`)
+    //                 discards the frame mid-card and `Rounds{before_seq}` returns
+    //                 an empty page
+    //
+    // These tests drive the **real** writers and the **real** replay filter, not a
+    // mock: an unstamped-frame control is included so the suite cannot pass
+    // vacuously, and so a future regression shows up as "the control changed
+    // behaviour" rather than a silent no-op.
+
+    /// Scratch sessions root for one test, removed on drop.
+    struct SeqScratch(std::path::PathBuf);
+
+    impl SeqScratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "gwork-seq-test-{}-{}",
+                tag,
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn store(&self) -> crate::session::SessionStore {
+            crate::session::SessionStore::with_base(self.0.clone())
+        }
+    }
+
+    impl Drop for SeqScratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The frame types the tools/sub-agents send straight to the channel.
+    fn direct_send_frames(session_id: &str) -> Vec<Frame> {
+        vec![
+            Frame::hitl(session_id, "bash", "rm -rf /tmp/x", "call_1"),
+            Frame::question(
+                session_id,
+                "call_2",
+                serde_json::json!({"questions": [{"header": "pick one"}]}),
+            ),
+            Frame::agent_start(session_id, "explore", "调研", "inv_1", false),
+            Frame::agent_end(session_id, "explore", "调研", "inv_1", true, "done", false),
+            Frame::user_input(session_id, "loop prompt", "loop"),
+        ]
+    }
+
+    fn event_seqs(events: &[serde_json::Value]) -> Vec<i64> {
+        events
+            .iter()
+            .map(|v| v["eventSeq"].as_i64().unwrap_or(i64::MIN))
+            .collect()
+    }
+
+    fn event_types(events: &[serde_json::Value]) -> Vec<String> {
+        events
+            .iter()
+            .map(|v| v["type"].as_str().unwrap_or("?").to_string())
+            .collect()
+    }
+
+    /// Every frame a tool or sub-agent sends directly is built with **no** seq, so
+    /// before the exit stamp it cannot survive a cursor-scoped replay. This is the
+    /// control that gives the tests below their teeth: it pins the *reason* the
+    /// stamp is load-bearing rather than decoration.
+    #[test]
+    fn direct_send_frames_are_built_without_a_seq() {
+        for frame in direct_send_frames("work-ctrl") {
+            assert_eq!(
+                frame.event_seq, None,
+                "{} reaches the channel with no eventSeq — which is exactly why \
+                 the forwarder must stamp it",
+                frame.frame_type
+            );
+        }
+    }
+
+    /// `stamp_seq` overwrites unconditionally. That single property is what fixes
+    /// both directions of the bug: it *fills* a missing seq and it *corrects* a
+    /// sub-agent's own low numbering into the parent's sequence.
+    #[test]
+    fn stamp_seq_fills_a_missing_seq_and_overwrites_a_foreign_one() {
+        let counter = AtomicI64::new(40);
+
+        // Missing seq (tool-direct frame).
+        let stamped = stamp_seq(&counter, Frame::hitl("s", "bash", "ls", "c1"));
+        assert_eq!(stamped.event_seq, Some(40), "a missing seq must be filled");
+
+        // Foreign low seq (forwarded sub-agent frame numbered from its own
+        // `start_seq: 0` counter). Leaving it alone rewinds the parent stream.
+        let foreign = Frame::agent_start("s", "explore", "d", "i1", false).seq(0);
+        assert_eq!(foreign.event_seq, Some(0), "precondition: foreign numbering");
+        let restamped = stamp_seq(&counter, foreign);
+        assert_eq!(
+            restamped.event_seq,
+            Some(41),
+            "a foreign seq must be overwritten by the parent counter, not kept"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            42,
+            "the counter advances once per frame, in arrival order"
+        );
+    }
+
+    /// `advance_counter` is a high-water mark, never an assignment. A bare `store`
+    /// of ReAct's `next_seq` — which counts only ReAct's own frames — rewound the
+    /// counter past everything the forwarder had already handed out, so the next
+    /// run re-issued seqs the frontend had already seen and its live gate dropped
+    /// the real output.
+    #[test]
+    fn advance_counter_never_rewinds_the_session_counter() {
+        let counter = AtomicI64::new(100);
+
+        // The regression: `result.next_seq` is behind the counter because the
+        // forwarder stamped frames ReAct never counted.
+        advance_counter(&counter, 42);
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            100,
+            "a smaller next_seq must not rewind the counter"
+        );
+
+        // Still able to move forward when it genuinely is ahead.
+        advance_counter(&counter, 150);
+        assert_eq!(counter.load(Ordering::SeqCst), 150);
+
+        // Equal is a no-op, not a rewind.
+        advance_counter(&counter, 150);
+        assert_eq!(counter.load(Ordering::SeqCst), 150);
+    }
+
+    /// End-to-end through the real writer and the real replay filter: frames that
+    /// used to be invisible to `After` and `Rounds{before_seq}` are now returned,
+    /// because they carry a seq. The unstamped control is persisted alongside so a
+    /// vacuous pass is impossible.
+    #[test]
+    fn stamped_direct_send_frames_survive_cursor_scoped_replay() {
+        let s = SeqScratch::new("replay-survives");
+        let store = s.store();
+        let id = "work-seq-replay";
+        let counter = AtomicI64::new(0);
+
+        // Round 1: a user frame, then every tool/sub-agent-direct frame, stamped
+        // exactly as the forwarder stamps them.
+        let user = stamp_seq(
+            &counter,
+            Frame::new("user").session(id).text("please run it"),
+        );
+        store.append_stream_frame(id, &user);
+        for frame in direct_send_frames(id) {
+            store.append_stream_frame(id, &stamp_seq(&counter, frame));
+        }
+
+        // Control: the same five frames WITHOUT the exit stamp. This is what the
+        // stream file used to contain.
+        let ctrl_id = "work-seq-control";
+        let ctrl_user = Frame::new("user").session(ctrl_id).text("please run it").seq(0);
+        store.append_stream_frame(ctrl_id, &ctrl_user);
+        for frame in direct_send_frames(ctrl_id) {
+            store.append_stream_frame(ctrl_id, &frame);
+        }
+
+        let wanted: Vec<&str> = vec!["hitl", "question", "agent_start", "agent_end", "user_input"];
+
+        // ── `After` (reconnect / reconcile) ──
+        let stamped = store.load_replay_window(
+            id,
+            crate::session::ReplayMode::After {
+                after_seq: 0,
+                limit: None,
+            },
+        );
+        let got = event_types(&stamped.events);
+        for t in &wanted {
+            assert!(
+                got.iter().any(|g| g == t),
+                "After-mode replay must return `{t}` now that it carries a seq; got {:?}",
+                got
+            );
+        }
+
+        let control = store.load_replay_window(
+            ctrl_id,
+            crate::session::ReplayMode::After {
+                after_seq: 0,
+                limit: None,
+            },
+        );
+        let ctrl_types = event_types(&control.events);
+        for t in &wanted {
+            assert!(
+                !ctrl_types.iter().any(|g| g == t),
+                "control: an UNSTAMPED `{t}` is still dropped by After-mode replay — \
+                 if this fires, the stamp is no longer what saves it and the test \
+                 above proves nothing. got {:?}",
+                ctrl_types
+            );
+        }
+
+        // ── `Rounds{before_seq}` ("load earlier") ──
+        // A second round so paging has something older than the cursor to return.
+        let user2 = stamp_seq(&counter, Frame::new("user").session(id).text("and again"));
+        store.append_stream_frame(id, &user2);
+        store.append_stream_frame(id, &stamp_seq(&counter, Frame::done(id)));
+        let cursor = user2.event_seq.unwrap();
+
+        let paged = store.load_replay_window(
+            id,
+            crate::session::ReplayMode::Rounds {
+                before_seq: Some(cursor),
+                rounds: 5,
+            },
+        );
+        let paged_types = event_types(&paged.events);
+        for t in &wanted {
+            assert!(
+                paged_types.iter().any(|g| g == t),
+                "Rounds-mode paging must return `{t}`; got {:?} (seqs {:?})",
+                paged_types,
+                event_seqs(&paged.events)
+            );
+        }
+    }
+
+    /// A stream written by the mixed producer set — ReAct-numbered frames, tool-
+    /// direct frames and forwarded sub-agent frames all sharing one counter — must
+    /// be **strictly increasing with no duplicates and no descent**. A duplicate is
+    /// what a rewound counter produces; a descent is what an uncorrected sub-agent
+    /// seq produces (its own counter starts at 0 while the parent is at 40).
+    ///
+    /// Deliberately NOT "gap free": gaps are inherent and pre-existing. Transient
+    /// frames (`reason_start`, `agent_progress`, `tps_progress`, `action_args`,
+    /// `action_draft`) consume a number from the counter on their way through the
+    /// forwarder and are then skipped by `append_stream_frame`, so the persisted
+    /// file has always had holes wherever one of those was emitted. The frontend's
+    /// dedupe is `seq <= lastEventSeq`, which tolerates gaps and is only broken by
+    /// repeats or descents — exactly what this asserts.
+    #[test]
+    fn the_exit_stamp_yields_a_strictly_increasing_duplicate_free_sequence() {
+        let s = SeqScratch::new("monotonic");
+        let store = s.store();
+        let id = "work-seq-mono";
+        let counter = AtomicI64::new(0);
+
+        // What one real run mixes into the channel, in arrival order.
+        let mut frames: Vec<Frame> = vec![Frame::new("user").session(id).text("go")];
+        // Transient: consumes a seq, never reaches the file (creates a gap).
+        frames.push(Frame::reason_start(id, 0));
+        frames.push(Frame::action_start(id, "bash", "c1", serde_json::json!({})));
+        // Tool-direct: no seq at all.
+        frames.extend(direct_send_frames(id));
+        // Forwarded sub-agent content, numbered from the child's own counter.
+        // Left unstamped these would persist as 0/1/2 — below the parent's cursor.
+        frames.push(Frame::action_start(id, "read", "c2", serde_json::json!({})).seq(0));
+        frames.push(Frame::action_end(id, "read", "c2", "ok").seq(1));
+        frames.push(Frame::agent_progress(id, "explore", "d", "i1", "read").seq(2));
+        frames.push(Frame::file_changes(id, "run-1", serde_json::json!({})));
+        frames.push(Frame::done(id));
+
+        let entered = frames.len() as i64;
+        let mut persisted = 0;
+        for frame in frames {
+            let stamped = stamp_seq(&counter, frame);
+            // Count only what actually reaches the file, so the expectation below
+            // is not inflated by the transient frames the writer skips.
+            let before = store.load_stream_frames(id).len();
+            store.append_stream_frame(id, &stamped);
+            persisted += store.load_stream_frames(id).len() - before;
+        }
+
+        let all = store.load_stream_frames(id);
+        assert_eq!(all.len(), persisted, "every durable frame was written");
+        assert!(
+            all.len() >= 8,
+            "the sample must be big enough to be meaningful: {}",
+            all.len()
+        );
+
+        let seqs = event_seqs(&all);
+        assert!(
+            seqs.iter().all(|s| *s != i64::MIN),
+            "no persisted frame may lack an eventSeq; got {:?}",
+            seqs
+        );
+        assert_eq!(seqs[0], 0, "numbering starts at the counter's seed");
+        for pair in seqs.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "seq must strictly increase: a duplicate means the counter was \
+                 rewound, a descent means a forwarded sub-agent's own numbering \
+                 survived. got {:?}",
+                seqs
+            );
+        }
+
+        // The forwarded child frames must carry the parent's numbering, not 0/1.
+        let read_start = all
+            .iter()
+            .find(|v| v["type"] == "action_start" && v["toolCallId"] == "c2")
+            .or_else(|| {
+                all.iter()
+                    .find(|v| v["type"] == "action_start" && v["actionId"] == "c2")
+            })
+            .expect("the forwarded child action_start must be persisted");
+        let child_seq = read_start["eventSeq"].as_i64().unwrap();
+        assert!(
+            child_seq > 5,
+            "the forwarded child frame must be renumbered into the parent sequence \
+             (its own numbering was 0), got {}",
+            child_seq
+        );
+
+        // Gaps are expected (transient frames), but the counter itself must have
+        // advanced once per frame that entered the channel.
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            entered,
+            "the counter advances once per frame, including the transient ones"
+        );
+    }
+
+    /// Behavioural coverage for the forwarder step itself, exercised through the
+    /// **real** `relay_frame` rather than a re-implementation of it.
+    ///
+    /// This is what gives the wiring guard below teeth of its own: without it, a
+    /// mutation inside the forwarder (dropping the stamp, or stamping after the
+    /// persist) would only be caught by a source-text assertion — a weaker
+    /// guarantee than observing the file that actually gets written.
+    #[test]
+    fn relay_frame_numbers_and_persists_in_one_step() {
+        let s = SeqScratch::new("relay");
+        let store = s.store();
+        let id = "work-relay";
+        let counter = AtomicI64::new(7);
+
+        // A tool-direct frame: no seq, exactly as it arrives off the channel.
+        let hitl = Frame::hitl(id, "bash", "rm -rf /tmp/x", "call_1");
+        assert_eq!(hitl.event_seq, None, "precondition: unstamped");
+
+        let out = relay_frame(&counter, &store, id, hitl);
+        assert_eq!(out.event_seq, Some(7), "the broadcast copy carries the new seq");
+        assert_eq!(counter.load(Ordering::SeqCst), 8, "the counter advanced exactly once");
+
+        // And the persisted copy must carry it too — this is the ordering that
+        // matters. Stamping after the write would leave the file unstamped while
+        // the live broadcast looked correct.
+        let all = store.load_stream_frames(id);
+        assert_eq!(all.len(), 1, "the frame was written");
+        assert_eq!(all[0]["type"], "hitl");
+        assert_eq!(
+            all[0]["eventSeq"].as_i64(),
+            Some(7),
+            "the FILE must hold the stamped seq, not the producer's missing one"
+        );
+
+        // A forwarded sub-agent frame, numbered from its own `start_seq: 0` counter.
+        let foreign = Frame::action_start(id, "read", "c2", serde_json::json!({})).seq(0);
+        let out2 = relay_frame(&counter, &store, id, foreign);
+        assert_eq!(
+            out2.event_seq,
+            Some(8),
+            "a foreign seq must be replaced by the parent's numbering"
+        );
+        let seqs = event_seqs(&store.load_stream_frames(id));
+        assert_eq!(seqs, vec![7, 8], "the file stays strictly increasing: {:?}", seqs);
+    }
+
+    /// `stamp_all` is the slash-command numbering path. Those frames are broadcast
+    /// only, so nothing is persisted — but the atomic numbering and the builders'
+    /// order must both survive.
+    #[test]
+    fn stamp_all_numbers_a_batch_in_order_from_the_counter() {
+        let counter = AtomicI64::new(30);
+        let mut scratch = 0;
+        let frames = commands::command_frames("s", "已清空会话记录（3 条）", &mut scratch);
+        assert_eq!(frames.len(), 2, "a command frame plus its done");
+
+        let stamped = stamp_all(&counter, frames);
+        let seqs: Vec<i64> = stamped.iter().map(|f| f.event_seq.unwrap()).collect();
+        assert_eq!(seqs, vec![30, 31], "numbered in order from the counter: {:?}", seqs);
+        assert_eq!(counter.load(Ordering::SeqCst), 32, "one number consumed per frame");
+
+        let types: Vec<&str> = stamped.iter().map(|f| f.frame_type.as_str()).collect();
+        assert_eq!(
+            types,
+            vec!["command", "done"],
+            "the builders' scratch numbering must not have reordered anything"
+        );
+    }
+
+    /// Wiring guard. The behavioural tests above pin the helpers; this pins that
+    /// both forwarders actually route through `relay_frame`, that the slash funnel
+    /// numbers through `stamp_all`, and that the rewinding `store(result.next_seq)`
+    /// is gone. Reverting any of those would otherwise stay green, because the
+    /// helpers themselves would still be correct.
+    #[test]
+    fn both_forwarders_stamp_before_persisting_and_never_rewind_the_counter() {
+        // Both forwarders are pinned by one loop, because they must satisfy exactly
+        // the same contract and a rule written twice drifts.
+        let src = include_str!("mod.rs");
+        let loop_src = include_str!("loop_runner.rs");
+
+        // The window must start where a hoisted binding could actually sit. Anchoring
+        // it at the `tokio::spawn` line — as this guard originally did — left the
+        // capture block, the *only* place a hoist can go, outside the window, so the
+        // "must not be hoisted" assertion was vacuously true. Proven by mutation:
+        // inserting `let store_fwd = store_for(...)` immediately above the spawn kept
+        // this test green. The capture statement is unique per file, so it is a safe
+        // anchor, and asserting that uniqueness is what stops the window from
+        // silently moving again.
+        // Assembled at runtime, exactly as the `rewind_needle` below is:
+        // `include_str!` pulls in *this test module*, so a needle written as one
+        // literal would match its own definition and the uniqueness count would fail
+        // (or, for the other needles, inflate every count in this guard).
+        let capture = format!("let {} = {}.clone();", "state_fwd", "state");
+        let loop_head = format!(
+            "while let Some(frame) = {}.recv().await {{",
+            "frame_rx"
+        );
+        let store_call = format!("{}(&state_fwd, &sid_fwd)", "store_for");
+        let relay_call = format!("{}(", "relay_frame");
+        let hoisted = format!("let {}", "store_fwd");
+
+        // Never slice at a raw offset: this file holds CJK comments and `&src[a..b]`
+        // panics when `b` is not a char boundary. Walk back to the nearest one.
+        fn window(src: &str, start: usize, len: usize) -> &str {
+            let mut end = (start + len).min(src.len());
+            while end > start && !src.is_char_boundary(end) {
+                end -= 1;
+            }
+            &src[start..end]
+        }
+
+        for (name, text) in [("server/mod.rs", src), ("loop_runner.rs", loop_src)] {
+            assert_eq!(
+                text.matches(&capture).count(),
+                1,
+                "{}: the capture anchor must stay unique, or this window can move \
+                 onto a different block and every assertion below becomes vacuous",
+                name
+            );
+            let start = text
+                .find(&capture)
+                .unwrap_or_else(|| panic!("{}: forwarder capture block missing", name));
+            let body = window(text, start, 1600);
+
+            // Stamp + persist go through the one helper, exactly once per frame. A
+            // bare `contains` would also be satisfied by keeping the relay call as
+            // dead code next to a direct persist, hence the count and the negative.
+            assert_eq!(
+                body.matches(&relay_call).count(),
+                1,
+                "{}: the forwarder must relay exactly once per frame, not stamp twice",
+                name
+            );
+            let direct_persist = format!("{}(&state_fwd", "persist_frame");
+            assert!(
+                !body.contains(&direct_persist),
+                "{}: the forwarder must not persist behind relay_frame's back",
+                name
+            );
+
+            // The ownership-routed store must be resolved *inside* the loop, and
+            // exactly once. Hoisting it above the `while` looks like a free
+            // optimisation and is a real regression: ownership (`session_roots`) can
+            // be established while the run is already streaming — `bind_session_cwd`
+            // runs ahead of the busy check and the resume paths skip it entirely —
+            // and this loop can outlive the run because a background sub-agent holds
+            // `post_run_tx`. A store captured at spawn time then keeps writing to the
+            // global area after the session moved under its project root.
+            //
+            // The count and the position together cover both hoist shapes: one that
+            // replaces the inline call (count drops to 0) and one that merely adds a
+            // binding (count rises to 2, and the first hit lands before the loop).
+            assert!(
+                body.contains(&loop_head),
+                "{}: the forwarder loop head must be inside the guard window",
+                name
+            );
+            assert_eq!(
+                body.matches(&store_call).count(),
+                1,
+                "{}: the store must be resolved per frame, exactly once",
+                name
+            );
+            assert!(
+                body.find(&store_call).unwrap() > body.find(&loop_head).unwrap(),
+                "{}: the store must be resolved after the loop head, not hoisted above it",
+                name
+            );
+            // `hoisted` is assembled above for the same reason as every other needle:
+            // the literal would match this test's own source through `include_str!`.
+            assert!(
+                !body.contains(&hoisted),
+                "{}: no spawn-time store binding may exist, whatever it is named after: \
+                 see the ownership note above",
+                name
+            );
+        }
+
+        // The loop's own prompt bubble bypasses the forwarder entirely, so it has
+        // to be stamped at the call site. Asserted both ways: the stamp must be
+        // there, and the unstamped construction must not be what gets persisted.
+        assert!(
+            loop_src.contains("stamp_seq(&seq_counter, Frame::user_input("),
+            "the loop prompt frame bypasses the forwarder and must be stamped inline"
+        );
+        let unstamped_prompt = format!("let user_frame = {}::user_input(", "Frame");
+        assert!(
+            !loop_src.contains(&unstamped_prompt),
+            "the loop prompt frame must not be built unstamped and persisted as-is"
+        );
+
+        // No rewinding store of ReAct's frame count may come back, in either runner.
+        //
+        // The needles are assembled at runtime on purpose: `include_str!` pulls in
+        // *this test module too*, so a needle written as one literal would match its
+        // own occurrence below and the assertion would pass no matter what the
+        // production code does. Splitting each needle in two keeps it absent from the
+        // file as a contiguous string while still matching the real call sites.
+        let rewind_needle = format!("{}.store({}", "seq_counter", "result.next_seq");
+        let advance_needle = format!("{}(&seq_counter, {})", "advance_counter", "result.next_seq");
+        for (name, body) in [("server/mod.rs", src), ("loop_runner.rs", loop_src)] {
+            assert!(
+                !body.contains(&rewind_needle),
+                "{} must advance the counter, never rewind it to ReAct's frame count",
+                name
+            );
+            assert!(
+                body.contains(&advance_needle),
+                "{} must route the post-run update through advance_counter",
+                name
+            );
+        }
+
+        // Slash-command frames are numbered inside the single `emit` funnel, not by
+        // a load/store bracket at each of the five call sites (that window is
+        // reachable while a background sub-agent's forwarder is still draining).
+        let emit_start = src
+            .find("async fn emit(")
+            .expect("slash emit funnel missing");
+        let emit_body = &src[emit_start..emit_start + 500];
+        assert!(
+            emit_body.contains("stamp_all(counter, frames)"),
+            "the slash-command funnel must number through stamp_all"
+        );
+        // Same negative shape as above: broadcasting `frames` verbatim would leave
+        // the needle satisfied if a dead `stamp_all` call were kept alongside.
+        assert!(
+            !emit_body.contains("for frame in frames"),
+            "the funnel must not broadcast the builders' scratch numbering as-is"
+        );
+        let slash_start = src
+            .find("async fn handle_slash_command")
+            .expect("handle_slash_command missing");
+        let slash_end = src[slash_start..]
+            .find("// Normal input: persist user message")
+            .expect("slash dispatch boundary missing");
+        let slash_body = &src[slash_start..slash_start + slash_end];
+        assert!(
+            !slash_body.contains("seq_counter.store("),
+            "slash commands must not write the counter back: that window races the \
+             background sub-agent forwarder and rewinds the session sequence"
+        );
+        assert_eq!(
+            slash_body.matches("emit(state, session_id, &seq_counter,").count(),
+            5,
+            "all five command outcomes must number through the atomic funnel"
+        );
     }
 }

@@ -59,36 +59,45 @@ test('内核帧带解码段累计值时，明细卡显示输出速度行', () =>
     assert.match(html, /class="context-meter-value"[^>]*>80 tokens\/秒</);
 });
 
-test('速率按 <100 保留一位、>=100 取整，口径与原 trace 弹层一致', () => {
+test('TPS 只输出整数（用户要求），不再有 <100 保留一位的分支', () => {
     const slow = sandbox.buildContextRows(chunk({ generationMs: 3000, generatedTokens: 25 }), {});
-    assert.match(slow, /8\.3 tokens\/秒/, '25 / 3s ≈ 8.3');
+    assert.match(slow, /8 tokens\/秒/, '25 / 3s ≈ 8.33 → 8，不得出现 8.3');
+    assert.ok(!/8\.3 tokens/.test(slow), '小数必须消失');
     const fast = sandbox.buildContextRows(chunk({ generationMs: 2000, generatedTokens: 249 }), {});
     assert.match(fast, /125 tokens\/秒/, '249 / 2s = 124.5 → 125');
+    const shot = sandbox.buildContextRows(chunk({ generationMs: 10000, generatedTokens: 691 }), {});
+    assert.match(shot, /69 tokens\/秒/, '69.1 → 69，与截图同款速率');
+    assert.ok(!/69\.1/.test(shot));
+    // 纯函数层也必须只吐整数
+    assert.equal(sandbox.ctxTpsText({ generationMs: 10000, generatedTokens: 691 }), '69 tokens/秒');
 });
 
-test('旧历史帧无解码段字段时整行省略，绝不拿 outputTokens ÷ elapsedMs 顶替', () => {
+test('旧历史帧无解码段字段时两行恒在显示 --，绝不拿 outputTokens ÷ elapsedMs 顶替', () => {
     const html = sandbox.buildContextRows(chunk({
         totalInputTokens: 12300, totalOutputTokens: 74400
     }), {});
-    assert.ok(!html.includes('输出速度'), '缺字段时不得显示速率行');
-    assert.ok(!html.includes('tokens/秒'), '更不得显示一个伪造的速率值');
+    assert.match(html, /输出速度（TPS）/, '类别不得消失（用户报障：过一会儿才出现）');
+    assert.match(html, /data-ctx-tps="1"[^>]*>--</, '无数据显示 --，不伪造速率');
+    assert.ok(!/\d+\.?\d* tokens\/秒/.test(html), '不得出现一个伪造的速率值');
     // 但累计输入/输出等常规行不能丢
     assert.match(html, /累计输入/);
     assert.match(html, /累计输出/);
 });
 
-test('半边字段 / 零分母 / 非法值一律省略，不产生 Infinity 或 0.0', () => {
+test('半边字段 / 零分母 / 非法值：行恒在且显示 --，不产生 Infinity 或 0.0', () => {
     const cases = [
         { generationMs: 0, generatedTokens: 320 },
         { generationMs: 4000, generatedTokens: 0 },
         { generationMs: 4000 },
         { generatedTokens: 320 },
         { generationMs: -5, generatedTokens: 320 },
-        { generationMs: 4000, generatedTokens: -1 }
+        { generationMs: 4000, generatedTokens: -1 },
+        { generationMs: NaN, generatedTokens: 320 }
     ];
     for (const c of cases) {
         const html = sandbox.buildContextRows(chunk(c), {});
-        assert.ok(!html.includes('输出速度'), '非法组合不得显示：' + JSON.stringify(c));
+        assert.match(html, /输出速度（TPS）/, '非法组合也不得整行消失：' + JSON.stringify(c));
+        assert.match(html, /data-ctx-tps="1"[^>]*>--</, '显示 -- 而非伪造数值');
         assert.ok(!/Infinity|NaN/.test(html), '不得把 Infinity/NaN 渲染到卡面');
     }
 });
@@ -108,6 +117,22 @@ test('ctxTpsText 纯函数：有效输入给文本，无效输入给空串', () 
     assert.equal(sandbox.ctxTpsText({ generationMs: 1000, generatedTokens: 50 }), '50 tokens/秒');
     assert.equal(sandbox.ctxTpsText({ generationMs: 0, generatedTokens: 50 }), '');
     assert.equal(sandbox.ctxTpsText({}), '');
+});
+
+test('ctxTpsText 负值契约：单边/双边负数一律空串，不得相除成正速率', () => {
+    // 变异测试抓出的护栏缺口：把前置守卫弱化成 isFinite 后，双负值会「负÷负=正」
+    // 算出一个像模像样的伪造速率（-1/-1 → 1000 tokens/秒），而第二道 tps>0 守卫
+    // 恰好放行。生产上该函数还被 refreshContextTpsLiveI18n 直接调用（数值来自
+    // DOM 属性，可能是旧卡面遗留），故负值契约必须在纯函数层被守住。
+    assert.equal(sandbox.ctxTpsText({ generationMs: -1, generatedTokens: -1 }), '',
+        '双负值不得相除成正速率');
+    assert.equal(sandbox.ctxTpsText({ generationMs: -5, generatedTokens: 320 }), '', '分母负');
+    assert.equal(sandbox.ctxTpsText({ generationMs: 4000, generatedTokens: -1 }), '', '分子负');
+    assert.equal(sandbox.ctxTpsText({ generationMs: -Infinity, generatedTokens: -Infinity }), '');
+    // 卡面层同样不得渲染出伪造速率
+    const html = sandbox.buildContextRows(chunk({ generationMs: -1, generatedTokens: -1 }), {});
+    assert.match(html, /data-ctx-tps="1"[^>]*>--</, '双负值显示 --');
+    assert.ok(!/tokens\/秒/.test(html), '不得出现任何伪造速率值');
 });
 
 test('12 语言包都已有 output_tps / tps_unit（不新增 i18n 键）', () => {

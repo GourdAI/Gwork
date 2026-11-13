@@ -70,6 +70,13 @@ var accessTokenExemptRoutes = []string{
 	// API key authentication (TokenAuthReadOnly).
 	"GET /api/usage/token/",
 	"GET /api/log/token",
+
+	// Public desktop client feed: no dashboard session (installed apps have
+	// none). These return the raw latest.json / download bytes.
+	"GET /api/installer-manifest",
+	"GET /api/installer-download/:id",
+	"GET /api/installer-latest",
+	"GET /api/installer-latest.json",
 }
 
 // accessTokenHelperRoutes are declared through handlePermissionRoute outside

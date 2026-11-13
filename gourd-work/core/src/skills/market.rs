@@ -910,7 +910,7 @@ fn parse_clawhub_items(arr: &[Value]) -> Vec<MarketItem> {
         out.push(MarketItem {
             display_name: jstr(node, "displayName"),
             summary: jstr(node, "summary"),
-            description: jstr(node, "description"),
+            description: jstr(node, "description").as_deref().and_then(strip_skill_md_frontmatter),
             owner_handle: jstr(node, "ownerHandle"),
             version: clawhub_latest_version(node),
             installs: jnum(&stats, "installsCurrent"),
@@ -923,6 +923,43 @@ fn parse_clawhub_items(arr: &[Value]) -> Vec<MarketItem> {
         });
     }
     out
+}
+
+/// Strip a SKILL.md YAML frontmatter head from clawhub's raw `description`.
+///
+/// Observed live (2026-11, `clawhub.ai/api/v1/skills/{slug}`): `skill.description`
+/// is the **verbatim SKILL.md** — a `---` frontmatter block (name/description/
+/// metadata keys) leads the text, and the detail dialog rendered it straight to
+/// the user (`---\nname: xxx\n...`). Rule (Java `stripSkillMdFrontmatter`
+/// parity): when the first line is exactly `---` and a later line is exactly
+/// `---`, drop everything through that closing line; otherwise return the text
+/// untouched — showing too much beats deleting body text.
+pub fn strip_skill_md_frontmatter(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    if !text.starts_with("---") {
+        return Some(text.to_string());
+    }
+    // first line must be exactly `---` (line end right after the dashes)
+    match bytes.get(3) {
+        None | Some(b'\n') => {}
+        Some(b'\r') => {}
+        Some(_) => return Some(text.to_string()),
+    }
+    let mut search = 3;
+    while let Some(rel) = text[search..].find("\n---") {
+        let close = search + rel;
+        let mut after = close + 4; // skip \n---
+        if bytes.get(after) == Some(&b'\r') {
+            after += 1;
+        }
+        let line_end = after >= bytes.len() || bytes[after] == b'\n';
+        if line_end {
+            let rest = if after >= bytes.len() { "" } else { text[after + 1..].trim_start() };
+            return if rest.is_empty() { None } else { Some(rest.to_string()) };
+        }
+        search = close + 4; // `---foo` body line: keep looking for the real close
+    }
+    Some(text.to_string()) // unclosed fence: keep as-is
 }
 
 /// `extractLatestVersion`: `latestVersion.version`, falling back to `tags.latest`.
@@ -1003,7 +1040,7 @@ impl Market for ClawhubMarket {
         Ok(MarketDetail {
             display_name: jstr(skill, "displayName"),
             summary: jstr(skill, "summary"),
-            description: jstr(skill, "description"),
+            description: jstr(skill, "description").as_deref().and_then(strip_skill_md_frontmatter),
             owner_handle: jstr(skill, "ownerHandle"),
             icon_url: jstr(skill, "icon"),
             installs: jnum(&stats, "installsCurrent"),
@@ -2476,6 +2513,36 @@ mod tests {
         assert_eq!(clawhub_latest_version(&json!({"tags": {"latest": "0.9"}})).as_deref(), Some("0.9"));
         assert_eq!(clawhub_latest_version(&json!({"latestVersion": {"version": ""}, "tags": {"latest": "0.9"}})).as_deref(), Some("0.9"));
         assert!(clawhub_latest_version(&json!({})).is_none());
+    }
+
+    /// Java `ClawhubFrontmatterStripTest` parity — same cases, same rules.
+    #[test]
+    fn clawhub_description_strips_the_skill_md_frontmatter_head() {
+        let raw = "---\nname: innerwarden-security\ndescription: Install, verify and run\n\
+                   user-invocable: true\nmetadata: {\"a\":1}\n---\n\n# InnerWarden, from inside\n\nbody.";
+        let out = strip_skill_md_frontmatter(raw).unwrap();
+        assert!(out.starts_with("# InnerWarden"), "{out}");
+        assert!(!out.contains("name: innerwarden-security"), "{out}");
+
+        // plain text untouched; empty stays empty
+        assert_eq!(strip_skill_md_frontmatter("Just a description.").as_deref(), Some("Just a description."));
+        assert_eq!(strip_skill_md_frontmatter("").as_deref(), Some(""));
+
+        // unclosed fence: keep as-is (showing too much beats deleting body text)
+        let raw = "---\nname: x\ndescription: y\nbody mentions --- divider";
+        assert_eq!(strip_skill_md_frontmatter(raw).as_deref(), Some(raw));
+
+        // first line must be exactly `---`
+        assert_eq!(strip_skill_md_frontmatter("----\nbody").as_deref(), Some("----\nbody"));
+        assert_eq!(strip_skill_md_frontmatter("---foo\n---\nbody").as_deref(), Some("---foo\n---\nbody"));
+
+        // `---foo` body lines are not the closing fence; the real one wins
+        let raw = "---\nname: x\n---\nbody\n---not-a-fence\nmore";
+        assert_eq!(strip_skill_md_frontmatter(raw).as_deref(), Some("body\n---not-a-fence\nmore"));
+
+        // CRLF and EOF-closing forms
+        assert_eq!(strip_skill_md_frontmatter("---\r\nname: x\r\n---\r\nbody").as_deref(), Some("body"));
+        assert!(strip_skill_md_frontmatter("---\nname: x\n---").is_none());
     }
 
     #[test]

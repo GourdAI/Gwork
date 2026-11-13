@@ -3,11 +3,15 @@ package controller
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -116,6 +120,149 @@ func installerFilePath(storedName string) (string, bool) {
 		return "", false
 	}
 	return filepath.Join(installerStorageDir(), storedName), true
+}
+
+// The desktop updater reads a single *bare* JSON document (tauri-plugin-updater
+// schema: { version, notes, pub_date, platforms: { <os>-<arch>: {url, signature} } }).
+// It is deliberately stored as one well-known file next to the installers rather
+// than in the database: the public GET must return the uploaded bytes verbatim,
+// with no ApiSuccess envelope and no rewrite of the URLs inside it.
+const installerLatestFileName = "latest.json"
+const installerLatestMaxBytes int64 = 1 << 20 // 1 MiB is plenty for a manifest
+
+const installerLatestPublicPath = "/downloads/tauri/latest.json"
+const installerLatestApiPath = "/api/installer-latest"
+
+func installerLatestFilePath() string {
+	return filepath.Join(installerStorageDir(), installerLatestFileName)
+}
+
+// installerLatestPlatform mirrors one platforms[*] entry of the static
+// manifest. It must stay in lockstep with tauri-plugin-updater's
+// ReleaseManifestPlatform { url: Url, signature: String }: BOTH fields are
+// required at deserialization time (signature is String, not Option<String>,
+// with no default). A manifest that omits a signature cannot even be parsed by
+// the client — updater.check() fails before it can report the new version.
+type installerLatestPlatform struct {
+	Signature string `json:"signature"`
+	URL       string `json:"url"`
+}
+
+type installerLatestDocument struct {
+	Version   string                             `json:"version"`
+	Notes     string                             `json:"notes"`
+	PubDate   string                             `json:"pub_date"`
+	Platforms map[string]installerLatestPlatform `json:"platforms"`
+}
+
+// installerLatestVersionPattern mirrors semver::Version (the crate the desktop
+// client uses via parse_version, which strips a leading "v"). A version the
+// client cannot parse makes check() fail before it can compare versions, so a
+// free-form string like "release-2026" must be rejected at upload time.
+// Grammar: MAJOR.MINOR.PATCH with optional -prerelease and +build metadata.
+var installerLatestVersionPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
+
+// installerLatestPlatformKey mirrors the keys tauri-plugin-updater looks up:
+// {os}-{arch} first, then {os}-{arch}-{bundle_type}. OS is linux|darwin|windows
+// (macOS is "darwin", NOT "macos"), ARCH is x86_64|aarch64|i686|armv7, and the
+// optional installer suffix comes from Installer::name(). A key outside this
+// set (e.g. "win64" or "macos-arm64") yields TargetsNotFound on every real
+// client: the manifest publishes successfully but nobody can ever update.
+var installerLatestPlatformKey = regexp.MustCompile(`^(linux|darwin|windows)-(x86_64|aarch64|i686|armv7)(-(deb|rpm|appimage|app|msi|nsis))?$`)
+
+// validateInstallerLatest must accept ONLY what tauri-plugin-updater 2.x can
+// actually deserialize. Its RemoteRelease uses a custom Deserialize impl:
+//   - version  -> semver::Version::from_str (leading "v" stripped)
+//   - url      -> url::Url (absolute, needs a scheme + host)
+//   - pub_date -> OffsetDateTime::parse(Rfc3339) when present
+//   - platforms[*].signature is a required String, and every entry also
+//     needs url; the client looks the entry up by its own OS-ARCH target.
+// Accepting a manifest that violates any of these publishes a feed where
+// updater.check() fails for every platform — the admin sees "upload succeeded"
+// while no desktop client can ever detect the release. A downloads.json-style
+// document (files:[...]) or a JSON array is rejected up front as well.
+func validateInstallerLatest(body []byte) (installerLatestDocument, error) {
+	var doc installerLatestDocument
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return doc, fmt.Errorf("Invalid latest.json manifest: %s", err.Error())
+	}
+	version := strings.TrimSpace(doc.Version)
+	if version == "" {
+		return doc, fmt.Errorf("Invalid latest.json manifest: missing version")
+	}
+	if !installerLatestVersionPattern.MatchString(version) {
+		return doc, fmt.Errorf("Invalid latest.json manifest: version %q is not a valid SemVer (the desktop updater parses it with semver::Version)", version)
+	}
+	if len(doc.Platforms) == 0 {
+		return doc, fmt.Errorf("Invalid latest.json manifest: missing platforms")
+	}
+	for key, entry := range doc.Platforms {
+		if !installerLatestPlatformKey.MatchString(key) {
+			return doc, fmt.Errorf("Invalid latest.json manifest: platform key %q is not a valid updater target (expected {linux|darwin|windows}-{x86_64|aarch64|i686|armv7}, optionally -{installer})", key)
+		}
+		rawURL := strings.TrimSpace(entry.URL)
+		if rawURL == "" {
+			return doc, fmt.Errorf("Invalid latest.json manifest: platform %q has no url", key)
+		}
+		parsed, err := url.Parse(rawURL)
+		if err != nil || !parsed.IsAbs() || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+			return doc, fmt.Errorf("Invalid latest.json manifest: platform %q has a url that is not an absolute http(s) URL: %q", key, rawURL)
+		}
+		if strings.TrimSpace(entry.Signature) == "" {
+			return doc, fmt.Errorf("Invalid latest.json manifest: platform %q has no signature (tauri-plugin-updater rejects signature-less entries at parse time)", key)
+		}
+	}
+	// pub_date is optional, but when present the client parses it as RFC 3339;
+	// an unparseable value fails the whole manifest deserialization.
+	if pubDate := strings.TrimSpace(doc.PubDate); pubDate != "" {
+		if _, err := time.Parse(time.RFC3339, pubDate); err != nil {
+			return doc, fmt.Errorf("Invalid latest.json manifest: pub_date %q is not RFC 3339", pubDate)
+		}
+	}
+	return doc, nil
+}
+
+// installerLatestInfo is what the admin page shows. `data: null` means no
+// manifest has been uploaded yet (the public GET then answers 404).
+type installerLatestInfo struct {
+	Version   string   `json:"version"`
+	Notes     string   `json:"notes"`
+	PubDate   string   `json:"pub_date"`
+	Platforms []string `json:"platforms"`
+	Size      int64    `json:"size"`
+	UpdatedAt string   `json:"updated_at"`
+	URL       string   `json:"url"`
+	ApiURL    string   `json:"api_url"`
+}
+
+func readInstallerLatest() ([]byte, *installerLatestInfo, error) {
+	path := installerLatestFilePath()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	doc, err := validateInstallerLatest(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	st, statErr := os.Stat(path)
+	info := &installerLatestInfo{
+		Version:   doc.Version,
+		Notes:     doc.Notes,
+		PubDate:   doc.PubDate,
+		Platforms: make([]string, 0, len(doc.Platforms)),
+		Size:      int64(len(body)),
+		URL:       installerLatestPublicPath,
+		ApiURL:    installerLatestApiPath,
+	}
+	for key := range doc.Platforms {
+		info.Platforms = append(info.Platforms, key)
+	}
+	sort.Strings(info.Platforms)
+	if statErr == nil {
+		info.UpdatedAt = st.ModTime().UTC().Format(time.RFC3339)
+	}
+	return body, info, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -461,4 +608,121 @@ func DownloadInstaller(c *gin.Context) {
 	if err = model.IncrementDownloadCount(id); err != nil {
 		common.SysError(common.LogText("failed to increment installer download count %d: %s", id, err.Error()))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Auto-update manifest (latest.json) — upload by an admin, read by the desktop
+// ---------------------------------------------------------------------------
+
+// GetInstallerLatest serves the uploaded manifest *verbatim*. tauri-plugin-updater
+// parses the response body as the release JSON, so an ApiSuccess wrapper here
+// would make every update check fail with "Could not fetch a valid release JSON".
+// Both the canonical static path and an /api alias are served so deployments
+// behind a reverse proxy can point GWORK_UPDATE_URL at whichever is reachable.
+func GetInstallerLatest(c *gin.Context) {
+	body, _, err := readInstallerLatest()
+	if err != nil {
+		// tauri-plugin-updater 2.x only treats 204 as "no updates found" and
+		// treats any other non-2xx as ReleaseNotFound. A 200 with an error
+		// envelope is NOT safe: res.status().is_success() is true, so the
+		// plugin tries to deserialize {success:false} as RemoteRelease and
+		// reports a misleading parse error instead of "no update".
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Data(200, "application/json; charset=utf-8", body)
+}
+
+// GetInstallerLatestInfo gives the admin page a friendly view of the currently
+// published manifest. A missing file is a normal state, not an error.
+func GetInstallerLatestInfo(c *gin.Context) {
+	_, info, err := readInstallerLatest()
+	if err != nil {
+		common.ApiSuccess(c, nil)
+		return
+	}
+	common.ApiSuccess(c, info)
+}
+
+// UploadInstallerLatest stores an admin-supplied latest.json. The bytes are
+// validated, then written with the same tmp->rename pattern as the packages, so
+// a concurrent update check never observes a partially written manifest.
+func UploadInstallerLatest(c *gin.Context) {
+	src, fileHeader, err := c.Request.FormFile("file")
+	if err != nil {
+		common.ApiErrorMsg(c, "Latest manifest file is required")
+		return
+	}
+	defer src.Close()
+
+	if !strings.EqualFold(filepath.Ext(fileHeader.Filename), ".json") {
+		common.ApiErrorMsg(c, "Latest manifest must be a .json file")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(src, installerLatestMaxBytes+1))
+	if err != nil {
+		common.ApiErrorMsg(c, "Failed to read latest.json manifest")
+		return
+	}
+	if int64(len(body)) > installerLatestMaxBytes {
+		common.ApiErrorMsg(c, "Latest manifest exceeds size limit")
+		return
+	}
+	if _, err = validateInstallerLatest(body); err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
+
+	dir := installerStorageDir()
+	if err = os.MkdirAll(dir, 0755); err != nil {
+		common.ApiErrorMsg(c, "Failed to store latest.json manifest")
+		return
+	}
+	finalPath := installerLatestFilePath()
+
+	// A unique temp name keeps concurrent uploads from truncating each other's
+	// file. os.Rename is atomic on the same filesystem, so a concurrent update
+	// check always sees either the previous or the new complete manifest.
+	tmp, err := os.CreateTemp(dir, "latest.json-*.tmp")
+	if err != nil {
+		common.ApiErrorMsg(c, "Failed to store latest.json manifest")
+		return
+	}
+	tmpPath := tmp.Name()
+	cleanupTmp := func() { _ = os.Remove(tmpPath) }
+	// os.CreateTemp uses 0600; keep the published file readable like the
+	// installer packages so a separate static-server process can serve it.
+	if err = tmp.Chmod(0644); err != nil {
+		_ = tmp.Close()
+		cleanupTmp()
+		common.ApiErrorMsg(c, "Failed to store latest.json manifest")
+		return
+	}
+	if _, err = tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		cleanupTmp()
+		common.ApiErrorMsg(c, "Failed to store latest.json manifest")
+		return
+	}
+	if err = tmp.Close(); err != nil {
+		cleanupTmp()
+		common.ApiErrorMsg(c, "Failed to store latest.json manifest")
+		return
+	}
+	if err = os.Rename(tmpPath, finalPath); err != nil {
+		cleanupTmp()
+		common.ApiErrorMsg(c, "Failed to store latest.json manifest")
+		return
+	}
+
+	_, info, err := readInstallerLatest()
+	if err != nil {
+		common.ApiErrorMsg(c, "Failed to read back latest.json manifest")
+		return
+	}
+	common.ApiSuccess(c, info)
 }

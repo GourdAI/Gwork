@@ -425,8 +425,9 @@ window.steerCollapseRemeasure = steerCollapseRemeasure;
    「已完成 · 3 次工具调用 · 1 段思考」（用户 2026-11 报障「插话前的好像不会自动折叠」）。
    现改为与回放同口径补 ended:true 折叠，消除分叉。
    【为何仍绝不传 ended:false】ended 缺省时 classifyChildren 返回 null，compactBubble
-   的 !decision 分支会 revealAll() 把刚收口的批次成员全部摊开（实测 collapsed 4 → 0），
-   正好抵消本 helper 的收口，这是旧注释唯一正确的部分。
+    走 !decision 分支【放弃整轮折叠】（清除已有 data-turn-process 标记、移除摘要按钮），
+    已收口的批次盖子虽仍保留，但实时与回放的整轮形态分叉。注意：旧版该分支曾调用
+    revealAll() 摊开成员（2026-11 已按用户拍板删除），现【不再】摊开任何成员。
 
    【status 参数】挂起段（ask_user / HITL）不发 trace 帧，气泡永远无徽标，
    readTurnMeta 恒空 → statusWord 一律回落「已完成」，把等待作答的轮次谎报成已完成。
@@ -1330,6 +1331,20 @@ function noteBatchInsert(sess, el) {
         if (typeof window !== 'undefined' && window.GourdTurnBatch) {
             if (el && el.classList) {
                 if (el.classList.contains('md-content')) return;   // 指针空壳：非边界，不收口
+                /* 【交互卡边界 · 2026-11 用户报障「只要展示 HITL/智能体这两个，页面就会错乱」】
+                   待审批 HITL 卡带 .tool-card 类，若走下方 noteProcessInsert 会被当成
+                   过程行收进批次成员 → 批次收口时审批按钮随成员隐藏；问答记录同理被吞。
+                   二者是等用户拍板 / 已拍板的交互边界：收口当前运行批次、自身永不进成员，
+                   与 .agent-card 同口径（模块内 isInteractiveCard 单一判定源）。
+                   【codereview 修复】宿主判定必须与模块 noteProcessInsert 的白名单一致
+                   （msg-bubble + agent-card-body）：旧写法只认 msg-bubble，卡内待审批卡
+                   （子代理派发需授权工具）会在此提前 return，既不收口卡内 running 盖子、
+                   也不落到模块边界分支 = 静默失效。宿主校验整体下放给模块，不再本地复刻。 */
+                if (window.GourdTurnBatch.isInteractiveCard
+                        && window.GourdTurnBatch.isInteractiveCard(el)) {
+                    window.GourdTurnBatch.noteProcessInsert(sess, el);
+                    return;
+                }
                 if (el.classList.contains('agent-card')) {
                     var bubble = el.parentNode;
                     if (bubble && bubble.classList && bubble.classList.contains('msg-bubble')) {
@@ -1339,6 +1354,38 @@ function noteBatchInsert(sess, el) {
                 }
             }
             window.GourdTurnBatch.noteProcessInsert(sess, el);
+        }
+    } catch (e) { /* 展示增强失败静默 */ }
+}
+
+/* 交互卡（待审批 HITL 卡 / 问答记录）落 DOM 后的批次边界接线：与 noteBatchInsert 的
+   交互卡分支同一语义，供【接管骨架卡】等不走 insertBeforeActions 漏斗的插入路径调用
+   （appendHitlCard 接管分支：节点早已在消息流里，漏斗不会再见它一次）。
+   纯展示增强：模块缺失 / 异常一律静默，绝不影响主渲染链路。 */
+function noteInteractiveInsert(sess, el) {
+    try {
+        if (typeof window !== 'undefined' && window.GourdTurnBatch
+                && window.GourdTurnBatch.isInteractiveCard
+                && window.GourdTurnBatch.isInteractiveCard(el)) {
+            noteBatchInsert(sess, el);
+        }
+    } catch (e) { /* 展示增强失败静默 */ }
+}
+
+/* 【放行/恢复后重算折叠 · 2026-11 codereview 修复】hitl-pending 的【每次】增删都要调一次。
+   卡内穿透例外（模块 hasInteractiveCardInside）依赖该类名存在：
+   · 摘除（批准 / 拒绝 / hitl_released 放行 / 切完全访问兜底）→ 例外失效，所在轮该重新折叠，
+     但 classifyChildren 是纯函数、DOM 标记不会自动跟随 → 旧实现留下【永久常驻】的智能体卡
+     与同轮其余过程卡形态分叉（探针实测 CONFIRMED：实时不折、刷新走回放才折）；
+   · 加回（提交失败 restoreHitlCardPending）→ 例外重新成立，若之前已折则审批按钮仍被
+     display:none 藏住，用户点不到 = 任务卡死。
+   模块侧 refreshInteractiveBoundary 自带保守门禁：只重算【已折叠过】的气泡，
+   不会给未折叠气泡凭空插按钮。纯展示增强：模块缺失 / 异常一律静默。 */
+function refreshHitlFoldBoundary(card) {
+    try {
+        if (typeof window !== 'undefined' && window.GourdTurnCompact
+                && window.GourdTurnCompact.refreshInteractiveBoundary) {
+            window.GourdTurnCompact.refreshInteractiveBoundary(card);
         }
     } catch (e) { /* 展示增强失败静默 */ }
 }
@@ -1807,9 +1854,10 @@ function formatToolArgsStr(args) {
 
 /* 工具卡公共展示更新：标题、图标、裸 toolName 数据契约一次完成。
    nested 由调用点的实际归属容器决定，不从带前缀 title 隐式推断。 */
-/* Qoder 式动作完成式短标签：bash 行显示「终端命令已运行」而非工具名「执行命令」。
+/* 工具卡短标签：bash 行显示名词形态的「终端命令」，而非工具名「执行命令」。
    仅作用于【过程行工具卡】的 .tool-name；HITL 审批卡、子代理进度心跳仍显示工具名
-   （那里需要「需要授权 X」/「· X」的名词形态，改成完成式会语义错乱）。
+   （那里需要「需要授权 X」/「· X」的名词形态）。key 沿用历史名 action_bash_done，
+   但其值已是名词而非完成式，改动时 12 语言 × 各 UI 副本须同步。
    缺键时 GourdI18n.t 回裸 key，故显式判 key 形态后回落原始 displayName。 */
 function qoderToolLabel(presentation) {
     var key = (presentation.bareToolName === 'bash' || presentation.bareToolName === 'bash_output')
@@ -3543,6 +3591,14 @@ function appendHitlCard(sess, toolName, command, actionId) {
 
     // 接管骨架卡时节点已在消息流中（可能在智能体卡内），重插会把它搬到主对话底部
     if (!card.parentNode) insertBeforeActions(sess, card);
+    /* 【交互卡边界接线】审批卡是等用户拍板的交互边界：收口当前运行批次、自身永不进
+       批次成员（否则收口时审批按钮随成员隐藏 = 用户报「展示 HITL 页面就错乱」）。
+       接管分支不走 insertBeforeActions 漏斗，必须在此补一次边界判定。 */
+    noteInteractiveInsert(sess, card);
+    /* 加回 .hitl-pending = 卡内穿透例外重新成立。接管的骨架卡可能位于【已折叠】的智能体
+       卡内，不重算则审批按钮仍被 display:none 藏住（与 restoreHitlCardPending 同一机理）。
+       helper 自带保守门禁：只对已折叠气泡生效，普通新建卡场景是空操作。 */
+    refreshHitlFoldBoundary(card);
 
     var approveBtn = $(card).find('.hitl-btn-approve')[0];
     var rejectBtn = $(card).find('.hitl-btn-reject')[0];
@@ -3555,6 +3611,7 @@ function appendHitlCard(sess, toolName, command, actionId) {
         if (icon) { icon.className = 'tool-status-icon loading'; icon.innerHTML = ''; }
         $(card).find('.hitl-card-actions').remove();
         $(card).removeClass('hitl-pending');
+        refreshHitlFoldBoundary(card);   // 卡内穿透例外失效 → 所在轮重算折叠
         sess.approvedToolCard = card;
         sess.pendingHitlCard = card;   // 供提交失败回退恢复（见 restoreHitlCardPending）
         handleHitlResponse(sess, 'approve', actionId);
@@ -3569,6 +3626,7 @@ function appendHitlCard(sess, toolName, command, actionId) {
         (function() { var hn = $(card).find('.tool-name')[0]; if (hn) { hn.setAttribute('data-i18n-hitl', 'rejected'); hn.setAttribute('data-i18n-hitl-tool', toolName || 'unknown'); } })();
         $(card).find('.hitl-card-actions').remove();
         $(card).removeClass('hitl-pending expanded');
+        refreshHitlFoldBoundary(card);   // 同批准分支：例外失效即重算折叠
         sess.approvedToolCard = null;
         sess.pendingHitlCard = card;   // 供提交失败回退恢复（见 restoreHitlCardPending）
         handleHitlResponse(sess, 'reject', actionId);
@@ -3635,6 +3693,7 @@ function restoreHitlCardPending(sess, card) {
             + '</div>');
     }
     $(card).addClass('hitl-pending');
+    refreshHitlFoldBoundary(card);   // 例外重新成立：若之前已折，必须重算才能露出审批按钮
     if (sess.approvedToolCard === card) sess.approvedToolCard = null;
     if (sess.pendingHitlCard === card) sess.pendingHitlCard = null;
 
@@ -3649,6 +3708,7 @@ function restoreHitlCardPending(sess, card) {
         if (ic) { ic.className = 'tool-status-icon loading'; ic.innerHTML = ''; }
         $(card).find('.hitl-card-actions').remove();
         $(card).removeClass('hitl-pending');
+        refreshHitlFoldBoundary(card);   // 镜像侧同样接线（见上方「两处如改一处必须同步」）
         sess.approvedToolCard = card;
         sess.pendingHitlCard = card;
         handleHitlResponse(sess, 'approve', actionId);
@@ -3663,6 +3723,7 @@ function restoreHitlCardPending(sess, card) {
         (function() { var h = $(card).find('.tool-name')[0]; if (h) { h.setAttribute('data-i18n-hitl', 'rejected'); h.setAttribute('data-i18n-hitl-tool', toolName); } })();
         $(card).find('.hitl-card-actions').remove();
         $(card).removeClass('hitl-pending expanded');
+        refreshHitlFoldBoundary(card);   // 镜像侧同样接线（见上方「两处如改一处必须同步」）
         sess.approvedToolCard = null;
         sess.pendingHitlCard = card;
         handleHitlResponse(sess, 'reject', actionId);
@@ -3682,6 +3743,10 @@ function releaseHitlCards(sess, actionId) {
         root = (typeof renderRoot === 'function') ? renderRoot(sess) : sess.container;
     }
     if (!root) root = document;
+    /* 收集本轮真正被解除的卡：折叠重算必须放在 .each 遍历【之后】统一做。
+       compactBubble 会重排气泡子节点，在遍历中途重排虽然集合已物化、迭代仍安全，
+       但会把「正在改类名的卡」与「正在被搬动的节点」交织在一起，没有必要承担这种风险。 */
+    var releasedCards = [];
     $(root).find('.hitl-pending').each(function () {
         var $card = $(this);
         // 带 id 且对不上：不是本次被解除的那张，不动
@@ -3689,6 +3754,7 @@ function releaseHitlCards(sess, actionId) {
         if (actionId && cardId && cardId !== actionId) return;
         $card.find('.hitl-card-actions').remove();
         $card.removeClass('hitl-pending expanded');
+        releasedCards.push(this);
         // 状态点用仓库既有的 .done：app.css 只有 loading/done/warn/reject 四条规则
         var $icon = $card.find('.tool-status-icon');
         if ($icon.length) { $icon.removeClass('warn loading').addClass('done').empty(); }
@@ -3702,6 +3768,9 @@ function releaseHitlCards(sess, actionId) {
         // 卡已不对应任何可提交任务，摘掉标识避免误导按属性重建上下文的逻辑
         $card.removeAttr('data-hitl-action-id');
     });
+    /* 卡内穿透例外随 .hitl-pending 摘除而失效 → 所在轮重算折叠，
+       否则宿主智能体卡永久常驻（codereview 修复，refreshHitlFoldBoundary 注释有取证）。 */
+    for (var ri = 0; ri < releasedCards.length; ri++) refreshHitlFoldBoundary(releasedCards[ri]);
 }
 window.releaseHitlCards = releaseHitlCards;
 

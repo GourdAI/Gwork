@@ -8,14 +8,14 @@
  * 状态机与旧 Tauri 壳 updater.rs 保持一致：
  *   idle | checking | available | not-available | downloading | downloaded | error
  *
- * 【桌面壳无 updater 能力时的降级】
- * Rust 原生壳（gourd-work/desktop）目前不含 tauri-plugin-updater，桥接层刻意不暴露
- * updater* 方法。此时 isDesktop 为真但快照永远不会到达：lastState 恒 null，applyState
- * 会一直停在「快照尚未到达」的瞬态占位（一个省略号），卡片里连按钮都没有 —— 用户看到的
- * 是一张永久空白的「检查更新」卡片，既无法检查也不知道为什么。
- * 故新增 hasUpdaterBridge() 判定：缺能力就直说「此版本不支持应用内更新」并给出官网下载
- * 入口，而不是假装正在检查。
- * 等 updater 能力补齐（桥接层暴露 updaterGetState 等方法）后，该分支自然不再命中。
+ * 【桌面壳无 updater 能力时的降级（保留给旧壳 / 浏览器）】
+ * Rust 原生壳（gourd-work/desktop）现已接入 tauri-plugin-updater：src/updater.rs 读取
+ * admin 后台上传的、免登录公开的 latest.json，桥接层暴露 updaterGetState / updaterCheck
+ * 等 5 个方法，hasUpdaterBridge() 为真，下面这套完整状态机正常运行。
+ * 该降级分支仍保留给浏览器端与未带更新能力的旧构建：isDesktop 为真但快照永远不到达时，
+ * lastState 恒 null，applyState 会一直停在「快照尚未到达」的瞬态占位（一个省略号），
+ * 卡片里连按钮都没有。故直说「此版本不支持应用内更新」并给出官网下载入口，
+ * 而不是假装正在检查。
  *
  * 【外链为什么能工作：壳层的 on_new_window，不是 _blank 本身】
  * `target="_blank"` 只是向壳层发出「请求新窗口」。wry 0.53 起 Windows 默认禁用新窗口

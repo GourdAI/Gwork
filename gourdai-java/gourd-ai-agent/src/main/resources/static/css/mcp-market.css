@@ -1,0 +1,123 @@
+/* ===== 魔搭 MCP 广场目录（连接器视图） =====
+ * 只接魔搭一个内置源；卡片风格与技能市场保持一致但不复用 .skill-card 的状态类。
+ *
+ * 【配色治理 / 2026-11 修复】全站颜色字面量只允许出现在 theme.css，其它 CSS 一律
+ * 引用主题令牌（theme.css 头部约定）。本文件旧版用了三个【全仓 0 处定义】的假变量
+ * --accent-color / --bg-input / --bg-subtle，于是所有 var() 都落到硬编码 fallback：
+ * #3b7cff 亮蓝 + #fff 死白，与石墨/青玉/各 accent 预设完全脱节，深色主题下也不跟随
+ * （用户报「连接器里面的内容颜色和我们的主题不搭」）。现统一改用真实令牌：
+ *   accent 底用 --accent，底上文字用 --accent-contrast（暗色主题自动翻深色，不能写死 #fff）；
+ *   输入/卡片底 --bg-input-box / --bg-card，readme 块 --bg-code-block；
+ *   认证标 --color-success，logo 占位底 --accent-light。
+ */
+.mcp-market { width: 100%; padding: 4px 0 12px; }
+.mcp-market-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.mcp-market-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.mcp-market-source { margin-left: 8px; font-size: 11px; font-weight: 500; color: var(--text-tertiary); }
+.mcp-market-total { font-size: 12px; color: var(--text-tertiary); }
+.mcp-market-controls { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+/* 搜索框：与技能页 .skills-search-input-wrap input 同口径（白底 --bg-input-box + 焦点 accent 环） */
+.mcp-market-search { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-input-box); color: var(--text-primary); font-size: 12px; outline: none; transition: border-color 0.2s, box-shadow 0.2s; }
+.mcp-market-search::placeholder { color: var(--text-secondary); opacity: 0.6; }
+.mcp-market-search:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.15); }
+.mcp-market-hosted { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; cursor: pointer; }
+.mcp-market-cats { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.mcp-market-chip { padding: 4px 10px; border: 1px solid var(--border-color); border-radius: 14px; background: transparent; font-size: 11px; color: var(--text-secondary); cursor: pointer; transition: color 0.15s, background 0.15s, border-color 0.15s; }
+.mcp-market-chip:hover { border-color: var(--accent); color: var(--text-primary); }
+.mcp-market-chip.active { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast); }
+.mcp-market-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+.mcp-market-card { position: relative; display: flex; flex-direction: column; min-height: 132px; padding: 14px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-card); cursor: pointer; transition: box-shadow .15s, border-color .15s; }
+.mcp-market-card:hover { border-color: var(--accent); box-shadow: 0 4px 14px rgba(0,0,0,.06); }
+.mcp-market-card:active { transform: scale(0.997); }
+.mcp-market-card-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.mcp-market-logo { width: 38px; height: 38px; flex: 0 0 38px; border-radius: 9px; object-fit: contain; background: var(--bg-input-box); }
+.mcp-market-logo-ph { display: flex; align-items: center; justify-content: center; background: var(--accent-light); color: var(--accent); font-weight: 700; font-size: 16px; }
+.mcp-market-card-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; color: var(--text-primary); }
+/* 卡片安装入口：与技能卡 .skill-card-add（skills.css:196）**同形态**——
+   26px 方形、透明底、hover 翻 accent 实底。用户拍板「和技能安装样式保持一致」：
+   同页两种卡片必须是同一个视觉语言，此前 MCP 卡放两个文字按钮（详情/连接）
+   与技能卡的 + 号割裂，且「详情」与「点整卡开弹窗」语义重复。 */
+.mcp-market-card-add { width: 26px; height: 26px; flex: 0 0 26px; border: none; border-radius: 7px; background: var(--bg-hover); color: var(--text-primary); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s, color 0.15s; }
+.mcp-market-card-add:hover { background: var(--accent); color: var(--accent-contrast); }
+.mcp-market-card-add.installing { opacity: 0.6; cursor: wait; }
+.mcp-market-card-add.installing svg { animation: mcp-market-spin 0.8s linear infinite; }
+@keyframes mcp-market-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.mcp-market-verified { margin-left: 4px; color: var(--color-success); font-size: 11px; }
+/* 详情弹窗头部标识区。is_verified / is_hosted 只在详情接口返回，
+   所以这两个标识画在弹窗里，不画在卡片上（列表接口无此字段）。 */
+.mcp-market-badges { display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex: 0 0 auto; }
+.mcp-market-badges .mcp-market-verified { margin-left: 0; }
+.mcp-market-hosted-badge { padding: 1px 6px; border-radius: 9px; font-size: 10px; background: var(--bg-hover); color: var(--text-secondary); }
+.mcp-market-card-desc { flex: 1; margin: 10px 0; font-size: 11px; line-height: 1.55; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.mcp-market-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mcp-market-meta { font-size: 10px; color: var(--text-tertiary); }
+.mcp-market-empty { grid-column: 1 / -1; padding: 40px 0; text-align: center; font-size: 12px; color: var(--text-tertiary); }
+.mcp-market-pager { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 16px; font-size: 12px; color: var(--text-secondary); }
+.mcp-market-pager button { width: 28px; height: 28px; border: 1px solid var(--border-color); border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.mcp-market-pager button:hover:not(:disabled) { border-color: var(--accent); color: var(--text-primary); }
+.mcp-market-pager button:disabled { opacity: .4; cursor: default; }
+/* 弹窗是 skills.html 的持久节点（.skills-view 直接子元素，位于滚动区外），
+   不会被 .skills-scroll(overflow-y:auto) 裁剪，也不随市场 render() 重建。
+   WorkBuddy 式布局：无横条 head，改为 hero 居中头图 + 滚动 body + 双按钮 foot；
+   关闭 × 悬浮在弹窗右上角（.mcp-market-modal-close）。 */
+.mcp-market-modal { position: fixed; inset: 0; z-index: 3000; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.42); }
+.mcp-market-modal-box { position: relative; width: min(600px, 90vw); max-height: 82vh; display: flex; flex-direction: column; border: 1px solid var(--border-color); border-radius: 14px; background: var(--bg-card); color: var(--text-primary); box-shadow: 0 16px 48px rgba(0,0,0,.2); }
+.mcp-market-modal-close { position: absolute; top: 10px; right: 12px; z-index: 2; width: 28px; height: 28px; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 20px; line-height: 1; cursor: pointer; }
+.mcp-market-modal-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+.mcp-market-modal-body { flex: 1; min-height: 0; overflow: auto; padding: 26px 26px 14px; font-size: 12px; line-height: 1.6; color: var(--text-primary); }
+/* hero：居中大 logo + 「连接 {名称}」+ 徽标 + 描述 + 主按钮，对齐 WorkBuddy 连接弹窗 */
+.mcp-market-hero { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 6px 8px 4px; }
+.mcp-market-hero-logo { width: 64px; height: 64px; flex: 0 0 64px; border-radius: 14px; object-fit: contain; background: var(--bg-input-box); }
+.mcp-market-hero-logo.mcp-market-logo-ph { font-size: 26px; }
+.mcp-market-hero-title { margin-top: 14px; font-size: 17px; font-weight: 700; color: var(--text-primary); }
+.mcp-market-hero .mcp-market-badges { margin-top: 8px; }
+.mcp-market-hero-desc { margin-top: 10px; max-width: 46ch; font-size: 12px; line-height: 1.7; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.mcp-market-connect-btn { margin-top: 16px; height: 34px; padding: 0 26px; border: none; border-radius: 8px; background: var(--accent); color: var(--accent-contrast); font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s, opacity 0.15s; }
+.mcp-market-connect-btn:hover { background: var(--accent-hover); opacity: .92; }
+/* 弹窗页脚主按钮（「连接」/「保存并连接」/ 错误态「重试」共用）。
+   基础样式必须留在这里：卡片上的文字安装按钮已按用户要求改成 + 号图标按钮
+   （.mcp-market-card-add），旧的 .mcp-market-detail-btn/.mcp-market-install-btn
+   共享规则已拆掉；若此处不定义，主按钮会退回浏览器默认灰底，与 hero 的
+   .mcp-market-connect-btn 不成族。 */
+.mcp-market-install-btn { height: 32px; padding: 0 18px; border: 1px solid var(--accent); border-radius: 7px; background: var(--accent); color: var(--accent-contrast); font-size: 12px; font-weight: 600; cursor: pointer; transition: background 0.15s, border-color 0.15s, opacity 0.15s; }
+.mcp-market-install-btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); opacity: .9; }
+.mcp-market-env { margin: 16px 0 4px; }
+.mcp-market-env-title { margin-bottom: 10px; font-size: 13px; font-weight: 600; color: var(--text-primary); }
+/* 配置表单：键名一行（必填红星）、描述一行、输入框一行 */
+.mcp-market-field { display: block; margin-bottom: 12px; }
+.mcp-market-field-key { display: block; font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.mcp-market-field-req { color: var(--color-danger); font-weight: 700; }
+.mcp-market-field-desc { display: block; margin: 2px 0 4px; font-size: 11px; color: var(--text-secondary); }
+.mcp-market-field input { display: block; width: 100%; height: 32px; padding: 0 10px; border: 1px solid var(--border-color); border-radius: 7px; background: var(--bg-input-box); color: var(--text-primary); font-size: 12px; box-sizing: border-box; }
+.mcp-market-field input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.15); outline: none; }
+.mcp-market-field input::placeholder { color: var(--text-secondary); opacity: 0.55; }
+/* readme 是上游 Markdown 原文（含大量 HTML table 标签，实测 amap readme 近 5 万字符）。
+   旧版把它整段塞进 <pre> 且只截 1200 字：既显示一堆 \u003ctable\u003e 转义源码，
+   又因 slice 截断出半截标签。现改由 JS 做安全的轻量 Markdown 渲染（见 app-mcp-market.js），
+   这里只给容器与排版样式，不再用 pre 原样输出。 */
+.mcp-market-readme { font-size: 12px; line-height: 1.65; color: var(--text-secondary); word-break: break-word; }
+.mcp-market-readme h1, .mcp-market-readme h2, .mcp-market-readme h3, .mcp-market-readme h4 { margin: 14px 0 6px; color: var(--text-primary); font-size: 13px; font-weight: 600; }
+.mcp-market-readme p { margin: 6px 0; }
+.mcp-market-readme ul, .mcp-market-readme ol { margin: 6px 0; padding-left: 20px; }
+.mcp-market-readme a { color: var(--accent); text-decoration: underline; }
+.mcp-market-readme code { padding: 1px 4px; border-radius: 4px; background: var(--bg-code-block); color: var(--text-primary); font-family: var(--font-mono); font-size: 11px; }
+/* 注：这里刻意**没有** `.mcp-market-readme img` 规则。
+   renderReadme 会跳过 Markdown 图片行、并剥离上游 HTML 标签（含 <img>），
+   实测渲染结果里永远不会出现 <img>，写它就是死规则（2026-11 codereview P2）。
+   若日后改为渲染图片，再连同 <img> 产出一起加回来。 */
+.mcp-market-modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border-color); }
+/* 取消：中性次按钮（灰底），与主「保存并连接」形成主次对比 */
+.mcp-market-cancel-btn { height: 32px; padding: 0 16px; border: none; border-radius: 7px; background: var(--bg-hover); color: var(--text-primary); font-size: 12px; cursor: pointer; transition: background 0.15s; }
+.mcp-market-cancel-btn:hover { background: var(--bg-code-block); }
+/* ── 加载中 / 加载失败态 ──────────────────────────────────────────────
+   失败态必须与正常态同骨架（关闭 × + body + foot），否则用户看到一块光秃秃的
+   文字浮层，像界面坏了（2026-11 codereview P2-1：旧版把裸错误串直接塞进
+   modal-box，无关闭按钮、无内边距）。 */
+.mcp-market-modal-loading { align-items: center; justify-content: center; min-height: 160px; }
+.mcp-market-loading-dot { width: 22px; height: 22px; border: 2px solid var(--border-color); border-top-color: var(--accent); border-radius: 50%; animation: mcp-market-spin 0.8s linear infinite; }
+.mcp-market-err-body { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 40px 26px 30px; text-align: center; }
+.mcp-market-err-icon { display: flex; align-items: center; justify-content: center; width: 38px; height: 38px; flex: 0 0 38px; border-radius: 50%; background: var(--bg-hover); color: var(--color-danger); font-size: 20px; font-weight: 700; }
+.mcp-market-err-text { max-width: 46ch; font-size: 12px; line-height: 1.7; color: var(--text-secondary); word-break: break-word; }
+/* 顶栏「+ 添加服务器」按钮（.skills-add-mcp-btn）是顶栏组件，样式唯一真源在
+   skills.css（先加载），本文件刻意不再重复定义 —— 历史上两处各写一套 solid/dashed
+   配色，后加载者静默覆盖，属于「同按钮两套规则」的串色隐患。 */

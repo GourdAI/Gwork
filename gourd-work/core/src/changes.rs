@@ -414,11 +414,51 @@ impl ChangeLedger {
         self.summarize(&manifest)
     }
 
+    /// Read-time visibility gate for one manifest entry.
+    ///
+    /// Three rules, in this order:
+    /// 1. **Ephemeral paths never surface.** Mirrors the Java kernel's read-side
+    ///    filter (`FileChangeService.load`: `if (isEphemeralRelative(...)) continue`):
+    ///    ledgers written *before* the write-side guard existed still carry scratch
+    ///    rows, so filtering only at write time would leave every historical
+    ///    session noisy forever.
+    /// 2. **Undone entries stay visible.** Undo is user-visible state and reapply
+    ///    must remain reachable; hiding an undone row would strand it.
+    /// 3. **Net-zero scratch is hidden.** An entry whose `before` snapshot says
+    ///    "did not exist" and whose file is gone from disk *right now* contributed
+    ///    nothing to the working tree (created-then-deleted scratch such as
+    ///    `.tmp_add_nav_i18n.js` or `_mut_mcp.cjs`). `changeType` is derived from
+    ///    the write-time snapshot, so without this rule such rows render as ADDED
+    ///    forever after the file was deleted — exactly what the user saw in the
+    ///    outputs panel. Codex's `/diff` cannot show this artifact because it reads
+    ///    git's live view: an untracked file that no longer exists simply is not
+    ///    there. A real ADDED file that still exists is unaffected, as is a real
+    ///    file the user deleted (before.exists=true → shows DELETED).
+    fn entry_visible(&self, entry: &ChangeEntry) -> bool {
+        if ephemeral::is_ephemeral_relative(&entry.path, false) {
+            return false;
+        }
+        if entry.undone {
+            return true;
+        }
+        if !entry.before.exists && !self.workspace.join(&entry.path).exists() {
+            return false;
+        }
+        true
+    }
+
     fn summarize(&self, manifest: &Manifest) -> serde_json::Value {
+        // Read-side visibility (see `entry_visible`): the published snapshot and
+        // every count below must agree on the SAME filtered set, otherwise the
+        // card header count jumps between frames.
+        let visible: Vec<&ChangeEntry> = manifest
+            .entries
+            .iter()
+            .filter(|e| self.entry_visible(e))
+            .collect();
         let mut additions = 0i64;
         let mut deletions = 0i64;
-        let files: Vec<serde_json::Value> = manifest
-            .entries
+        let files: Vec<serde_json::Value> = visible
             .iter()
             .map(|e| {
                 let change_type = if !e.before.exists {
@@ -439,12 +479,12 @@ impl ChangeLedger {
                 })
             })
             .collect();
-        for e in &manifest.entries {
+        for e in &visible {
             additions += e.additions.unwrap_or(0);
             deletions += e.deletions.unwrap_or(0);
         }
-        let all_undone = !manifest.entries.is_empty() && manifest.entries.iter().all(|e| e.undone);
-        let any_undone = manifest.entries.iter().any(|e| e.undone);
+        let all_undone = !visible.is_empty() && visible.iter().all(|e| e.undone);
+        let any_undone = visible.iter().any(|e| e.undone);
         let run_apply_state = if all_undone {
             "FULLY_UNDONE"
         } else if any_undone {
@@ -466,7 +506,7 @@ impl ChangeLedger {
             "incompleteReasons": manifest.incomplete_reasons,
             "updatedAt": manifest.updated_at,
             "files": files,
-            "fileCount": manifest.entries.len(),
+            "fileCount": visible.len(),
             "additions": additions,
             "deletions": deletions,
             "runApplyState": run_apply_state,
@@ -572,10 +612,13 @@ impl ChangeLedger {
             run_summaries.push(serde_json::json!({
                 "runId": m.run_id,
                 "updatedAt": m.updated_at,
-                "fileCount": m.entries.len(),
+                // Count the VISIBLE entries, matching `summarize`'s fileCount:
+                // raw `entries.len()` would count scratch rows the panel never
+                // shows, making the per-run counts disagree with the file list.
+                "fileCount": m.entries.iter().filter(|e| self.entry_visible(e)).count(),
                 "possiblyIncomplete": m.possibly_incomplete,
             }));
-            for e in &m.entries {
+            for e in m.entries.iter().filter(|e| self.entry_visible(e)) {
                 let change_type = if !e.before.exists {
                     "ADDED"
                 } else if !e.after.exists {
@@ -1117,6 +1160,130 @@ mod tests {
         let summary = ledger.get_run(sid, "run-1");
         assert_eq!(summary["additions"].as_i64(), Some(0));
         assert_eq!(summary["deletions"].as_i64(), Some(0));
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    // ── read-side visibility (ephemeral + net-zero scratch) ─────────────────
+    //
+    // Measured defect: the outputs panel listed `.tmp_add_nav_i18n.js` /
+    // `_mut_mcp.cjs` as ADDED long after the files were deleted. Two gaps:
+    // ledgers written before the write-side guard existed are never re-filtered
+    // (Java filters at read time; Rust did not), and `changeType` comes from the
+    // write-time snapshot so a created-then-deleted scratch file renders ADDED
+    // forever. Codex's `/diff` cannot show this artifact at all because it reads
+    // git's live view.
+
+    #[test]
+    fn read_side_hides_scratch_rows_and_keeps_real_changes() {
+        let ws = temp_workspace("readside");
+        let ledger = ChangeLedger::new(ws.clone());
+        let sid = "sess-readside";
+        let rid = "run-1";
+
+        // (1) dotted-underscore scratch: hidden by the naming rule alone.
+        let b1 = ledger.before(sid, rid, ".tmp_probe_x.js").unwrap_or_default();
+        std::fs::write(ws.join(".tmp_probe_x.js"), "x\n").unwrap();
+        ledger.record(sid, rid, ".tmp_probe_x.js", b1).unwrap();
+
+        // (2) arbitrarily-named scratch created then deleted: the naming rule
+        //     does NOT cover `_mut_*`; only the net-zero rule can hide it.
+        let b2 = ledger.before(sid, rid, "_mut_probe.cjs").unwrap_or_default();
+        std::fs::write(ws.join("_mut_probe.cjs"), "y\n").unwrap();
+        ledger.record(sid, rid, "_mut_probe.cjs", b2).unwrap();
+
+        // (3) real ADDED file that still exists: must stay visible.
+        let b3 = ledger.before(sid, rid, "keep.rs").unwrap_or_default();
+        std::fs::write(ws.join("keep.rs"), "z\n").unwrap();
+        ledger.record(sid, rid, "keep.rs", b3).unwrap();
+
+        // (4) real tracked file the user deleted afterwards: before.exists=true,
+        //     so it must surface as DELETED (the net-zero rule must not eat it).
+        std::fs::write(ws.join("gone.txt"), "w\n").unwrap();
+        let b4 = ledger.before(sid, rid, "gone.txt").unwrap();
+        std::fs::remove_file(ws.join("gone.txt")).unwrap();
+        ledger.record(sid, rid, "gone.txt", b4).unwrap();
+
+        // Simulate post-run cleanup of the scratch files.
+        std::fs::remove_file(ws.join(".tmp_probe_x.js")).ok();
+        std::fs::remove_file(ws.join("_mut_probe.cjs")).ok();
+
+        let run = ledger.get_run(sid, rid);
+        let paths: Vec<String> = run["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p == ".tmp_probe_x.js"),
+            "ephemeral naming must be filtered at read time: {:?}",
+            paths
+        );
+        assert!(
+            !paths.iter().any(|p| p == "_mut_probe.cjs"),
+            "deleted net-zero scratch must not render as ADDED: {:?}",
+            paths
+        );
+        assert!(paths.iter().any(|p| p == "keep.rs"), "real ADDED on disk must show: {:?}", paths);
+        assert!(paths.iter().any(|p| p == "gone.txt"), "real deletion must show: {:?}", paths);
+        let row = |p: &str| {
+            run["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["path"] == p)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(row("gone.txt")["changeType"], "DELETED");
+        assert_eq!(row("keep.rs")["changeType"], "ADDED");
+        // Header count must agree with the row list (no jump between frames).
+        assert_eq!(run["fileCount"].as_u64(), Some(2));
+
+        // The session-level merge applies the same gate and the same counts.
+        let session = ledger.list_session(sid);
+        assert_eq!(session["fileCount"].as_u64(), Some(2));
+        let spaths: Vec<String> = session["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!spaths.iter().any(|p| p == ".tmp_probe_x.js" || p == "_mut_probe.cjs"));
+        let runs = session["runs"].as_array().unwrap();
+        assert_eq!(runs[0]["fileCount"].as_u64(), Some(2), "per-run count must match visible rows");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn undone_entries_stay_visible_even_when_net_zero() {
+        // Undo is user-visible state: hiding an undone net-zero row would strand
+        // its reapply button. The gate must exempt `undone` explicitly.
+        let ws = temp_workspace("undone-vis");
+        let ledger = ChangeLedger::new(ws.clone());
+        let sid = "s";
+        let rid = "r";
+        let b = ledger.before(sid, rid, "scratch_undo.txt").unwrap_or_default();
+        std::fs::write(ws.join("scratch_undo.txt"), "a\n").unwrap();
+        ledger.record(sid, rid, "scratch_undo.txt", b).unwrap();
+        std::fs::remove_file(ws.join("scratch_undo.txt")).ok();
+
+        let mpath = ws
+            .join(".gwork/sessions")
+            .join(sid)
+            .join("file-changes/manifests")
+            .join(format!("{}.json", rid));
+        let mut m: Manifest =
+            serde_json::from_str(&std::fs::read_to_string(&mpath).unwrap()).unwrap();
+        m.entries[0].undone = true;
+        std::fs::write(&mpath, serde_json::to_string_pretty(&m).unwrap()).unwrap();
+
+        let run = ledger.get_run(sid, rid);
+        assert_eq!(
+            run["fileCount"].as_u64(),
+            Some(1),
+            "undone rows must remain reachable for reapply"
+        );
         std::fs::remove_dir_all(&ws).ok();
     }
 

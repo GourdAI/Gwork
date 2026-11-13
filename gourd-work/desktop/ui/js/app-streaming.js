@@ -379,13 +379,39 @@ function sendMessage(forceQueue) {
     var userTyped = text;
     var chips = (inputEl && typeof getSkillChips === 'function') ? getSkillChips(inputEl) : [];
     var chipIds = chips.map(function (c) { return c.id; });
+    /* 行首的子代理协议段（"@name "）。后端 WebGate / WsGate / CliShell 一律按
+       `input.startsWith("@")` + `indexOf(" ")` 剥出 agentName，剥完才把余下文本交给
+       命令/技能解析（SkillInvocation 又要求 `startsWith("/")`）。两道判定都锚在行首，
+       于是技能 id 前缀【必须插在 @ 段之后】：直接前置会把 @ 挤出首位 → agentName 恒
+       null → 子代理静默降级成一句普通提示词（chip 还挂在界面上，用户看不出异常）。
+       折叠分支替换正文时同理，必须把 @ 段一起带上（见下方 foldedEcho 处）。 */
+    var agentSegMatch = /^@\S+\s+/.exec(text);
+    var agentSeg = agentSegMatch ? agentSegMatch[0] : '';
     var prefix = '';
     if (chipIds.length > 0) {
         for (var ci = 0; ci < chipIds.length; ci++) prefix += '/' + chipIds[ci] + ' ';
-        text = prefix + text;
-        rawText = prefix + rawText;
+        text = agentSeg + prefix + text.substring(agentSeg.length);
+        // rawText 只喂给 foldLongInputToAttachment（折叠成 TXT），不参与后端路由，
+        // 故按它自己的行首独立判定，避免 text 已 trim 而 rawText 未 trim 时切错偏移。
+        var rawSegMatch = /^@\S+\s+/.exec(rawText);
+        var rawAgentSeg = rawSegMatch ? rawSegMatch[0] : '';
+        rawText = rawAgentSeg + prefix + rawText.substring(rawAgentSeg.length);
     }
     if (!text && pendingFiles.length === 0) return;
+
+    /* 只选了子代理、没写正文：后端子代理路由要求 `input.startsWith("@")` 且
+       `indexOf(" ") > 0`（WebGate:786 / WsGate:255 / CliShell:342 三处同口径）。
+       "@general" 没有那个空格 → agentName 恒为 null → 整串被当普通提示词发给
+       主代理，用户明明选了子代理却完全没生效，界面上也看不出任何异常。
+       注意 getInputText() 是 trim 过的，replaceCmdToken 补的尾随空格救不了这一种；
+       而补一句默认文本又会让子代理收到无信息量的指令。故就地拦下并提示补内容，
+       输入框文本、chip 与附件一律保留（与「命令不能带附件」同一种软拦截语义）。 */
+    if (!agentSeg && /^@\S+$/.test(text)) {
+        if (typeof showToast === 'function') {
+            showToast(GourdI18n.t('streaming.subagent_needs_content'), 'info');
+        }
+        return;
+    }
 
     /* 问答挂起路由：当前会话有待作答的结构化问答卡时，输入框文本等价于卡片内「其他补充」，
         直接记为当前题的自定义答案，不得进入普通发送链路（streaming/steer/queue 行为不受影响）。
@@ -447,10 +473,11 @@ function sendMessage(forceQueue) {
         ? foldLongInputToAttachment(rawText) : false;
     if (folded === null) return;
     if (folded === true) {
+        /* 折叠替换正文后，技能 chip 与子代理段都不在替换文本里，必须一并补回，
+           否则用户挂着的技能/子代理会随折叠静默失效（chip 仍在界面上，更迷惑）。
+           顺序同样是 @ 段在前：后端剥 agentName 的判定锚在行首。 */
         text = GourdI18n.t('streaming.long_input_prompt');
-        // 技能 chip 不在 textarea 原文里：折叠替换文本后必须补回 /id 前缀，
-        // 否则用户挂着的技能会随折叠静默失效（chip 仍在界面上，更迷惑）
-        if (chipIds.length > 0) text = prefix + text;
+        if (chipIds.length > 0 || agentSeg) text = agentSeg + prefix + text;
         if (inputEl) {
             inputEl.value = '';
             inputEl._manualH = 0;
@@ -475,13 +502,15 @@ function sendMessage(forceQueue) {
        （[名称] 标记）+ 用户可读正文。
        展示名用函数开头捕获的 chips 快照，不再回查 DOM —— 折叠分支已清空
        inputEl、且 chip 容器已独立，回查既拿不到正确正文也会指向空容器。
-       正文取 text 去掉 prefix 的部分：普通发送是用户原文，折叠后是
-       long_input_prompt（若此处误用 inputEl.value 会得到空串，气泡只剩技能名）。 */
+       正文取 text 去掉【协议段】的部分：普通发送是用户原文，折叠后是
+       long_input_prompt（若此处误用 inputEl.value 会得到空串，气泡只剩技能名）。
+       要剥的是 agentSeg + prefix 两段（@ 段在行首、prefix 紧随其后），只按
+       prefix.length 切会留下半个 @name 尾巴或切进正文。 */
     var displayText = text || '';
     if (chips.length > 0) {
         var shown = '';
         for (var ck = 0; ck < chips.length; ck++) shown += '[' + chips[ck].name + '] ';
-        displayText = shown + text.substring(prefix.length);
+        displayText = shown + text.substring(agentSeg.length + prefix.length);
     }
     if (!displayText && filesToSend.length > 0) {
         var first = filesToSend[0];

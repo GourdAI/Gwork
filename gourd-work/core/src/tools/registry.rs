@@ -4,7 +4,7 @@
 //! loop detects the suspension, persists a resume point, and halts. When the user
 //! responds, the server resumes the run from that point.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::PermissionSettings;
 use crate::llm::ToolDefinition;
-use crate::mcp::McpManager;
+use crate::mcp::{McpCallResult, McpManager, McpTool};
 use crate::protocol::Frame;
 
 /// Why a tool asked the run to suspend.
@@ -92,6 +92,452 @@ impl ToolOutput {
             image_urls: Vec::new(),
         }
     }
+}
+
+// ── MCP tool-catalog folding ─────────────────────────────────────────────────
+//
+// Flat `tools[]` entries cost their full description AND JSON schema on every
+// request. A server that exposes hundreds of tools can therefore consume the
+// whole context before the model reads the user's message. These four stages
+// trade schema visibility for catalogue size: FULL/SUMMARY keep tools directly
+// callable, LIST replaces the catalogue with one roster tool, and SEARCH hides
+// even the roster behind a three-step lookup workflow. The thresholds count
+// *visible* tools (after enabled / collision / denylist / gate filters), not
+// `all_tools().len()`; otherwise a mostly disabled server would still fold the
+// catalogue and hide tools the user explicitly enabled.
+
+/// Below this count every MCP tool keeps its full description and schema.
+pub const DYNAMIC_THRESHOLD: usize = 8;
+/// At this count a single `list_mcp_tools` roster replaces per-tool schemas.
+pub const LIST_THRESHOLD: usize = 40;
+/// At this count the roster itself is replaced by search / detail / call tools.
+pub const SEARCH_THRESHOLD: usize = 100;
+
+/// Short descriptions are capped by Unicode scalar count, not bytes, so a CJK
+/// or emoji description is cut on a valid `char` boundary.
+pub const SUMMARY_DESCRIPTION_CHARS: usize = 120;
+pub const SEARCH_DEFAULT_LIMIT: usize = 10;
+pub const SEARCH_MIN_LIMIT: usize = 1;
+pub const SEARCH_MAX_LIMIT: usize = 50;
+
+pub const MCP_LIST_TOOL: &str = "list_mcp_tools";
+pub const MCP_SEARCH_TOOL: &str = "search_tools";
+pub const MCP_DETAIL_TOOL: &str = "get_tool_detail";
+pub const MCP_CALL_TOOL: &str = "call_tool";
+
+/// Whether a model-facing name belongs to the MCP folding gateway.
+///
+/// These names are intercepted before the generic MCP route. That ordering is
+/// what prevents an MCP server from shadowing a gateway tool with the same raw
+/// name; it also keeps historical session calls working even in FULL stage,
+/// where no gateway definitions are advertised.
+pub fn is_mcp_gateway_tool(name: &str) -> bool {
+    matches!(name, MCP_LIST_TOOL | MCP_SEARCH_TOOL | MCP_DETAIL_TOOL | MCP_CALL_TOOL)
+}
+
+/// How the MCP catalogue is advertised for one run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpFoldStage {
+    /// One complete schema per tool; identical to the pre-fold definitions.
+    Full,
+    /// One compact description and the original schema per tool.
+    Summary,
+    /// One roster tool; direct `llm_name` calls still work on the execute path.
+    List,
+    /// Search, inspect one schema, then forward a call through `call_tool`.
+    Search,
+}
+
+/// Select a folding stage from the number of MCP tools actually visible to
+/// this run. Kept pure so callers and tests can reason about threshold
+/// boundaries without constructing an `McpManager`.
+pub fn mcp_fold_stage(visible_count: usize) -> McpFoldStage {
+    if visible_count < DYNAMIC_THRESHOLD {
+        McpFoldStage::Full
+    } else if visible_count < LIST_THRESHOLD {
+        McpFoldStage::Summary
+    } else if visible_count < SEARCH_THRESHOLD {
+        McpFoldStage::List
+    } else {
+        McpFoldStage::Search
+    }
+}
+
+/// First meaningful description line, shortened on a Unicode `char` boundary.
+///
+/// `…` is appended when truncation happened, so the model can distinguish a
+/// deliberately short description from a clipped one. Newlines are removed
+/// because rosters and search results are line-oriented.
+pub fn mcp_short_description(description: &str) -> String {
+    let first_line = description
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let mut short: String = first_line.chars().take(SUMMARY_DESCRIPTION_CHARS).collect();
+    if first_line.chars().count() > SUMMARY_DESCRIPTION_CHARS {
+        short.push('…');
+    }
+    short
+}
+
+/// Apply the definition-time MCP filters ONCE, for every fold stage and for
+/// gateway lookups, using the run's gate and live `PermissionSettings`.
+///
+/// `builtin_names` contains the registry's built-in function names. A server
+/// must not win a name collision, and duplicate `llm_name()` values would be
+/// rejected by provider APIs. `seen` is advanced before the denylist/gate
+/// checks deliberately: that is the pre-fold builder's exact semantics, so a
+/// duplicate that is filtered out still reserves its model-facing name. The
+/// `tools` glob allowlist is intentionally NOT applied — MCP tools were never
+/// gated by it, and applying it here would make them vanish under a narrow
+/// built-in allowlist.
+///
+/// `ToolGate::from_permission` copies the user's global `disallowedTools` into
+/// `gate.disallowed`, and sub-agent gates stack that blacklist with
+/// `with_extra_disallowed`; `execute` passes the same live settings and gate as
+/// `definitions_async`, so visibility and forwarding cannot drift.
+pub fn visible_mcp_tools(
+    all_tools: &[McpTool],
+    builtin_names: &HashSet<String>,
+    permission: &PermissionSettings,
+    gate: Option<&ToolGate>,
+) -> Vec<McpTool> {
+    if gate.map(|g| !g.mcp_allowed).unwrap_or(false) {
+        return Vec::new();
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    all_tools
+        .iter()
+        .filter(|t| {
+            if !t.enabled {
+                return false;
+            }
+            let llm_name = t.llm_name();
+            // Names are advertised under the namespaced id, so only a
+            // collision with that model-facing id can shadow a built-in. A
+            // server's raw `read` remains reachable as `mcp__server__read`;
+            // built-in-first dispatch keeps the bare `read` unambiguous.
+            // `seen` is inserted before the later denylist/gate checks to
+            // match the pre-fold builder's de-duplication semantics.
+            if builtin_names.contains(&llm_name) || !seen.insert(llm_name) {
+                return false;
+            }
+            if permission.disallowed_tools.iter().any(|d| d == &t.name) {
+                return false;
+            }
+            gate.map(|g| g.allows(&t.name, true)).unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether one synthetic gateway function is available to this run.
+///
+/// The global `disallowedTools` blacklist and the MCP axis of `ToolGate` both
+/// apply. Use `ToolGate::allows(name, true)` rather than the built-in name
+/// whitelist: MCP and its gateway are governed by `mcp_allowed`, so a sub-agent
+/// that permits MCP does not have to enumerate four synthetic names in its
+/// static `allowed` set. `ToolGate::disallowed` still wins.
+pub fn mcp_gateway_is_allowed(
+    name: &str,
+    permission: &PermissionSettings,
+    gate: Option<&ToolGate>,
+) -> bool {
+    if permission.disallowed_tools.iter().any(|d| d == name) {
+        return false;
+    }
+    gate.map(|g| g.allows(name, true)).unwrap_or(true)
+}
+
+/// Build the MCP portion of `tools[]` for a stage. FULL/SUMMARY add no gateway
+/// functions: with fewer than 40 tools the extra indirection costs more context
+/// and more model turns than the schemas it would save. Gateway definitions in
+/// LIST/SEARCH are filtered by the same permission/gate axes as their execute
+/// interception, so an explicitly banned gateway name is never advertised.
+pub fn mcp_definitions_for_stage(
+    stage: McpFoldStage,
+    visible: &[McpTool],
+    permission: &PermissionSettings,
+    gate: Option<&ToolGate>,
+) -> Vec<ToolDefinition> {
+    match stage {
+        McpFoldStage::Full => visible
+            .iter()
+            .map(|t| ToolDefinition::new(&t.llm_name(), &t.description, t.input_schema.clone()))
+            .collect(),
+        McpFoldStage::Summary => visible
+            .iter()
+            .map(|t| {
+                ToolDefinition::new(
+                    &t.llm_name(),
+                    &mcp_short_description(&t.description),
+                    t.input_schema.clone(),
+                )
+            })
+            .collect(),
+        McpFoldStage::List => {
+            let mut description = format!(
+                "List the {} MCP tools visible to this run. Returns each namespaced llm_name and a one-line description. \
+                 Call the returned llm_name directly; full schemas are intentionally omitted at this catalogue size.\n\
+                 Visible MCP tools:\n",
+                visible.len()
+            );
+            for t in visible {
+                description.push_str(&format!(
+                    "- {}: {}\n",
+                    t.llm_name(),
+                    mcp_short_description(&t.description)
+                ));
+            }
+            if !mcp_gateway_is_allowed(MCP_LIST_TOOL, permission, gate) {
+                return Vec::new();
+            }
+            vec![ToolDefinition::new(
+                MCP_LIST_TOOL,
+                &description,
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )]
+        }
+        McpFoldStage::Search => {
+            let workflow = format!(
+                "{} MCP tools are visible. Workflow: 先 search_tools → get_tool_detail 取 schema → call_tool 执行. \
+                 Individual schemas are hidden until get_tool_detail asks for one.",
+                visible.len()
+            );
+            vec![
+                ToolDefinition::new(
+                    MCP_SEARCH_TOOL,
+                    &format!(
+                        "{workflow} Search by case-insensitive substring over llm_name, raw name and description; \
+                         an empty query returns the first limit tools. Matches are ordered by relevance \
+                         (raw-name equality, then llm_name, raw name, description and match position)."
+                    ),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Case-insensitive substring; use an empty string to list the first tools."
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of matches, clamped to 1..50; defaults to 10."
+                            }
+                        },
+                        "required": ["query"]
+                    }),
+                ),
+                ToolDefinition::new(
+                    MCP_DETAIL_TOOL,
+                    &format!(
+                        "{workflow} Resolve an llm_name or raw tool name and return that tool's complete input_schema JSON."
+                    ),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "The llm_name (mcp__server__tool) or raw tool name."
+                            }
+                        },
+                        "required": ["name"]
+                    }),
+                ),
+                ToolDefinition::new(
+                    MCP_CALL_TOOL,
+                    &format!(
+                        "{workflow} Forward arguments to one visible MCP tool after its schema has been inspected."
+                    ),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "The llm_name (mcp__server__tool) or raw tool name to execute."
+                            },
+                            "arguments": {
+                                "type": "object",
+                                "description": "Arguments matching the schema returned by get_tool_detail."
+                            }
+                        },
+                        "required": ["name", "arguments"]
+                    }),
+                ),
+            ]
+            .into_iter()
+            .filter(|d| mcp_gateway_is_allowed(&d.function.name, permission, gate))
+            .collect()
+        }
+    }
+}
+
+/// Resolve the `limit` argument with a default and a hard 1..50 clamp.
+///
+/// A model occasionally emits 0, a negative number, or an enormous integer.
+/// Rejecting those would waste a turn; returning an unbounded number of tools
+/// would defeat the point of SEARCH.
+pub fn mcp_search_limit(value: Option<&serde_json::Value>) -> usize {
+    let raw = value
+        .and_then(|v| {
+            v.as_i64()
+                .map(|n| n as i128)
+                .or_else(|| v.as_u64().map(|n| n as i128))
+        })
+        .unwrap_or(SEARCH_DEFAULT_LIMIT as i128);
+    raw.clamp(SEARCH_MIN_LIMIT as i128, SEARCH_MAX_LIMIT as i128) as usize
+}
+
+fn mcp_search_rank(tool: &McpTool, needle: &str) -> Option<(u8, usize)> {
+    let raw = tool.name.to_lowercase();
+    if raw == needle {
+        return Some((0, 0));
+    }
+    let fields = [
+        (1u8, tool.llm_name().to_lowercase()),
+        (2u8, raw),
+        (3u8, tool.description.to_lowercase()),
+    ];
+    let mut best: Option<(u8, usize)> = None;
+    for (rank, haystack) in fields {
+        if let Some(byte_pos) = haystack.find(needle) {
+            let char_pos = haystack[..byte_pos].chars().count();
+            let candidate = (rank, char_pos);
+            if best.map_or(true, |current| candidate < current) {
+                best = Some(candidate);
+            }
+        }
+    }
+    best
+}
+
+/// Case-insensitive substring search over llm_name, raw name and description.
+///
+/// Exact raw-name equality wins, then earlier-ranked fields and earlier match
+/// positions; the original discovery order breaks ties. An empty (or
+/// whitespace-only) query is a bounded listing rather than an error, so the
+/// model can page through a large catalogue without guessing a keyword.
+pub fn search_mcp_tools<'a>(
+    visible: &'a [McpTool],
+    query: &str,
+    limit: usize,
+) -> Vec<&'a McpTool> {
+    let limit = limit.clamp(SEARCH_MIN_LIMIT, SEARCH_MAX_LIMIT);
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return visible.iter().take(limit).collect();
+    }
+    let mut ranked: Vec<(usize, (u8, usize), &'a McpTool)> = visible
+        .iter()
+        .enumerate()
+        .filter_map(|(index, t)| {
+            mcp_search_rank(t, &needle).map(|rank| (index, rank, t))
+        })
+        .collect();
+    ranked.sort_by_key(|(index, rank, _)| (*rank, *index));
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, t)| t)
+        .collect()
+}
+
+/// Resolve a gateway `name` parameter: namespaced ids win over raw names,
+/// matching the direct MCP route. Called only on already-filtered lists.
+pub fn resolve_mcp_tool<'a>(tools: &'a [McpTool], name: &str) -> Option<&'a McpTool> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    tools
+        .iter()
+        .find(|t| t.llm_name() == name)
+        .or_else(|| tools.iter().find(|t| t.name == name))
+}
+
+/// Pure helper backing `get_tool_detail`: a full schema or an actionable error.
+pub fn mcp_tool_detail_json(visible: &[McpTool], name: &str) -> Result<String, String> {
+    let tool = resolve_mcp_tool(visible, name).ok_or_else(|| {
+        format!(
+            "MCP tool '{}' was not found among visible tools; call list_mcp_tools or search_tools first.",
+            name
+        )
+    })?;
+    serde_json::to_string_pretty(&tool.input_schema).map_err(|e| {
+        format!(
+            "Failed to serialize MCP tool schema for '{}': {}",
+            name, e
+        )
+    })
+}
+
+/// The exact MCP result mapping used by both direct calls and `call_tool`.
+/// `isError` must reach the model as a failure, image blocks must survive even
+/// on that failure, an empty error gets a non-empty fallback naming the tool,
+/// and transport errors must not be reported as success. The error type is
+/// generic over `Display` so this helper itself needs no error crate; it
+/// accepts whatever `McpManager::call_tool` already returns.
+pub fn mcp_result_to_output<E: std::fmt::Display>(
+    result: Result<McpCallResult, E>,
+    tool_name: &str,
+) -> ToolOutput {
+    match result {
+        Ok(r) if r.is_error => ToolOutput {
+            text: if r.text.trim().is_empty() {
+                format!("MCP tool '{}' failed", tool_name)
+            } else {
+                r.text
+            },
+            is_error: true,
+            suspend: None,
+            image_urls: r.images,
+        },
+        Ok(r) => ToolOutput {
+            text: r.text,
+            is_error: false,
+            suspend: None,
+            image_urls: r.images,
+        },
+        Err(e) => ToolOutput::err(format!("MCP tool error: {}", e)),
+    }
+}
+
+/// Exact refusal text for a discovered-but-disabled MCP tool. Kept shared so
+/// a `call_tool` forward cannot invent a different message from the direct
+/// route (which the model may have learned from an older session).
+pub fn mcp_disabled_output(name: &str) -> ToolOutput {
+    ToolOutput::err(format!(
+        "MCP tool '{}' is disabled by the user's tool settings. Do not retry it.",
+        name
+    ))
+}
+
+/// Resolve a `call_tool` target against the visible catalogue first, then
+/// distinguish a discovered-but-disabled tool from a genuinely unknown name.
+///
+/// The visible list has already applied `enabled`, built-in collision,
+/// deduplication, `disallowedTools` and `ToolGate`. Checking disabled tools
+/// separately preserves the direct MCP route's stop-retrying message rather
+/// than turning a disabled forward into a misleading "not found".
+pub fn resolve_mcp_call_target<'a>(
+    visible: &'a [McpTool],
+    all_tools: &'a [McpTool],
+    name: &str,
+) -> Result<&'a McpTool, ToolOutput> {
+    if let Some(t) = resolve_mcp_tool(visible, name) {
+        return Ok(t);
+    }
+    if all_tools
+        .iter()
+        .any(|t| t.llm_name() == name || t.name == name)
+    {
+        return Err(mcp_disabled_output(name));
+    }
+    Err(ToolOutput::err(format!(
+        "MCP tool '{}' was not found among visible tools; call search_tools first, \
+         then get_tool_detail to obtain its schema.",
+        name
+    )))
 }
 
 /// Per-run tool whitelist, enforced at **both** ends of the registry.
@@ -313,6 +759,33 @@ impl ToolContext {
         self.access_mode != "full"
     }
 
+    /// Whether the workspace boundary of the file tools is lifted.
+    ///
+    /// Loosely mirrors the Java kernel's `AccessPolicy.isSpaceIsolated`, but
+    /// the folding is **not identical**: Java computes
+    /// `isSpaceIsolated(mode) && sandboxEnabled` (`TerminalTalent:173`) and
+    /// has no embedder `sandboxEnabled` switch here, so this kernel folds only
+    /// the tier. The user's full-access tier releases the workspace containment
+    /// of read/write/edit/ls/glob/grep, so an absolute or `../` path into a
+    /// sibling project resolves instead of dying with "Invalid path".
+    ///
+    /// Sub-agents are excluded **by depth**, not by tier, even though they run
+    /// with `access_mode: "full"` (team/mod.rs): that value exists only to
+    /// switch off their *approval gate*, and the workspace boundary is the only
+    /// path containment a delegated run has (`ToolGate` limits which tools it
+    /// holds, not where they reach).
+    ///
+    /// This is a deliberate divergence from Java, not an incomplete port:
+    /// `TaskTalent.resolveAccessMode` (Java:506) inherits the parent session's
+    /// tier, so a Java sub-agent of a full-access conversation is *also* open.
+    /// Rust has no tier-inheritance chain yet, so the depth check keeps every
+    /// delegated run contained regardless of the parent's tier. Aligning the
+    /// two kernels requires adding tier inheritance to `ParentRun`, not
+    /// deleting this check.
+    pub fn space_open(&self) -> bool {
+        self.access_mode == "full" && self.subagent_depth == 0
+    }
+
     /// Where this session's `TODO.md` lives.
     ///
     /// Session directory when known — matching the Java kernel's
@@ -431,6 +904,17 @@ impl ToolRegistry {
         self.mcp = Some(mcp);
     }
 
+    /// The attached MCP manager, if any.
+    ///
+    /// Exposed so the ReAct loop can wait for the startup connection pass to
+    /// settle before snapshotting the tool list. Tool discovery still goes through
+    /// `definitions_async` alone — this accessor is only for asking the manager
+    /// "are servers connected yet?", which is a lifecycle question, not a
+    /// second source of truth for what is advertised.
+    pub fn mcp(&self) -> Option<&Arc<McpManager>> {
+        self.mcp.as_ref()
+    }
+
     /// Register a tool.
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
@@ -444,29 +928,21 @@ impl ToolRegistry {
     }
 
     /// Get tool definitions filtered by permission settings **and** the run's
-    /// gate (plus MCP tools, when the gate allows MCP).
+    /// gate, plus MCP tools folded according to the number that survive those
+    /// filters. See [`mcp_fold_stage`]: small catalogues keep full schemas,
+    /// medium ones shorten descriptions, and large ones advertise a single
+    /// roster or a search/detail/call gateway instead of N schemas.
     pub async fn definitions_async(
         &self,
         permission: &PermissionSettings,
         gate: Option<&ToolGate>,
     ) -> Vec<ToolDefinition> {
         let mut defs = self.definitions(permission, gate);
-        let mcp_ok = gate.map(|g| g.mcp_allowed).unwrap_or(true);
-        if mcp_ok {
-            if let Some(mcp) = &self.mcp {
-                for t in mcp.all_tools().await {
-                    // An MCP tool name can also collide with a built-in name, and
-                    // a gate naming that built-in should not silently admit the
-                    // remote one. Built-ins already covered above are skipped.
-                    if self.tools.contains_key(&t.name) {
-                        continue;
-                    }
-                    if gate.map(|g| g.allows(&t.name, true)).unwrap_or(true) {
-                        defs.push(ToolDefinition::new(&t.name, &t.description, t.input_schema.clone()));
-                    }
-                }
-            }
-        }
+        let Some(mcp) = &self.mcp else { return defs };
+        let builtin_names: HashSet<String> = self.tools.keys().cloned().collect();
+        let visible = visible_mcp_tools(&mcp.all_tools().await, &builtin_names, permission, gate);
+        let stage = mcp_fold_stage(visible.len());
+        defs.extend(mcp_definitions_for_stage(stage, &visible, permission, gate));
         defs
     }
 
@@ -561,20 +1037,118 @@ impl ToolRegistry {
             return spec.tool.execute(args, ctx).await;
         }
 
-        // Route to MCP servers.
-        if let Some(mcp) = &self.mcp {
-            for t in mcp.all_tools().await {
-                if t.name == name {
-                    if let Some(gate) = &ctx.gate {
-                        if !gate.allows(name, true) {
-                            return Self::gated_out(name);
-                        }
+        // MCP folding gateway. These four synthetic functions are the ONLY
+        // model-facing tools in LIST/SEARCH stage; without this interception
+        // the definitions would advertise names that `execute` reports as
+        // "Unknown tool" — the exact dangling-mapping defect this folding
+        // implementation exists to fix. They are also accepted unconditionally
+        // in FULL/SUMMARY so a name persisted in an older session's history
+        // still resolves.
+        if is_mcp_gateway_tool(name) {
+            let gate = ctx.gate.as_deref();
+            // `ToolContext` carries the run's live settings snapshot. Its
+            // `permission.disallowedTools` is the same blacklist that produced
+            // the definitions; the gate additionally covers sub-agent-specific
+            // denials. Avoid `PermissionSettings::default()` here: that would
+            // let a globally banned gateway name become callable.
+            if !mcp_gateway_is_allowed(name, &ctx.settings.permission, gate) {
+                return Self::gated_out(name);
+            }
+            // A gateway name is useless without an MCP manager; say so instead
+            // of returning a bare "Unknown tool".
+            let Some(mcp) = &self.mcp else {
+                return ToolOutput::err(format!("MCP gateway '{}' is unavailable: no MCP manager is attached", name));
+            };
+            let all_tools = mcp.all_tools().await;
+            let builtin_names: HashSet<String> = self.tools.keys().cloned().collect();
+            // The live permission snapshot plus gate reproduces the exact
+            // visible set used by `definitions_async`.
+            let visible = visible_mcp_tools(
+                &all_tools,
+                &builtin_names,
+                &ctx.settings.permission,
+                gate,
+            );
+            return match name {
+                MCP_LIST_TOOL => {
+                    let mut out = format!("{} MCP tools are visible:\n", visible.len());
+                    for t in &visible {
+                        out.push_str(&format!("- {}: {}\n", t.llm_name(), mcp_short_description(&t.description)));
                     }
-                    return match mcp.call_tool(&t.server_name, &t.name, args).await {
-                        Ok(text) => ToolOutput::ok(text),
-                        Err(e) => ToolOutput::err(format!("MCP tool error: {}", e)),
-                    };
+                    ToolOutput::ok(out)
                 }
+                MCP_SEARCH_TOOL => {
+                    let query = args["query"].as_str().unwrap_or("");
+                    let limit = mcp_search_limit(args.get("limit"));
+                    let hits = search_mcp_tools(&visible, query, limit);
+                    let mut out = format!("{} match(es) for {:?}:\n", hits.len(), query);
+                    for t in hits {
+                        out.push_str(&format!("- {}: {}\n", t.llm_name(), mcp_short_description(&t.description)));
+                    }
+                    ToolOutput::ok(out)
+                }
+                MCP_DETAIL_TOOL => {
+                    match mcp_tool_detail_json(&visible, args["name"].as_str().unwrap_or("")) {
+                        Ok(schema) => ToolOutput::ok(schema),
+                        Err(e) => ToolOutput::err(e),
+                    }
+                }
+                MCP_CALL_TOOL => {
+                    let target = args["name"].as_str().unwrap_or("");
+                    match resolve_mcp_call_target(&visible, &all_tools, target) {
+                        Ok(t) => {
+                            let arguments = args.get("arguments").cloned()
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            mcp_result_to_output(
+                                mcp.call_tool(&t.server_name, &t.name, arguments).await,
+                                &t.name,
+                            )
+                        }
+                        Err(e) => e,
+                    }
+                }
+                _ => unreachable!("gateway name was matched above"),
+            };
+        }
+
+        // Route to MCP servers. The model calls the namespaced id
+        // `mcp__server__tool`, but resolve by scanning discovered tools rather
+        // than splitting the string (a server or tool name may itself contain
+        // `__`, and sanitisation is lossy). Also accept the raw name as a
+        // fallback so a tool name persisted in an older session's history — or a
+        // provider that echoed the pre-namespace name — still resolves.
+        if let Some(mcp) = &self.mcp {
+            let tools = mcp.all_tools().await;
+            let matched = tools
+                .iter()
+                .find(|t| t.enabled && t.llm_name() == name)
+                .or_else(|| tools.iter().find(|t| t.enabled && t.name == name));
+            if let Some(t) = matched {
+                if let Some(gate) = &ctx.gate {
+                    if !gate.allows(&t.name, true) {
+                        return Self::gated_out(name);
+                    }
+                }
+                // Definitions hide a globally blacklisted MCP tool; a model
+                // that names its hidden `llm_name` anyway must be stopped here.
+                // Use the shared disabled-tool message rather than a gate error
+                // because `execute` had no permission check at this boundary.
+                if ctx.settings.permission.disallowed_tools.iter().any(|d| d == &t.name) {
+                    return mcp_disabled_output(name);
+                }
+                return mcp_result_to_output(
+                    mcp.call_tool(&t.server_name, &t.name, args).await,
+                    &t.name,
+                );
+            }
+            // The name matches a discovered-but-disabled tool: distinguish "the
+            // user turned this off" from "no such tool" so the model stops
+            // instead of re-guessing a name that will never be available.
+            let disabled = tools
+                .iter()
+                .any(|t| t.llm_name() == name || t.name == name);
+            if disabled {
+                return mcp_disabled_output(name);
             }
         }
         ToolOutput::err(format!("Unknown tool: {}", name))
@@ -995,5 +1569,242 @@ mod tests {
                 out.text
             );
         }
+    }
+
+    // ─── MCP four-stage folding ───────────────────────────────────────────
+    fn fake_mcp_tools(n: usize) -> Vec<McpTool> {
+        (0..n)
+            .map(|i| McpTool {
+                server_name: "srv".into(),
+                name: format!("tool_{i:03}"),
+                description: format!("Tool number {i} searches the frobnicator"),
+                input_schema: serde_json::json!({"type":"object","properties":{"q":{"type":"string"}}}),
+                enabled: true,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fold_stage_threshold_boundaries() {
+        assert_eq!(mcp_fold_stage(0), McpFoldStage::Full);
+        assert_eq!(mcp_fold_stage(7), McpFoldStage::Full);
+        assert_eq!(mcp_fold_stage(DYNAMIC_THRESHOLD), McpFoldStage::Summary);
+        assert_eq!(mcp_fold_stage(LIST_THRESHOLD - 1), McpFoldStage::Summary);
+        assert_eq!(mcp_fold_stage(LIST_THRESHOLD), McpFoldStage::List);
+        assert_eq!(mcp_fold_stage(SEARCH_THRESHOLD - 1), McpFoldStage::List);
+        assert_eq!(mcp_fold_stage(SEARCH_THRESHOLD), McpFoldStage::Search);
+        assert_eq!(mcp_fold_stage(500), McpFoldStage::Search);
+    }
+
+    #[test]
+    fn full_stage_keeps_every_schema_and_summary_shortens_only_description() {
+        let tools = fake_mcp_tools(5);
+        let perm = PermissionSettings::default();
+        let defs = mcp_definitions_for_stage(McpFoldStage::Full, &tools, &perm, None);
+        assert_eq!(defs.len(), 5);
+        assert_eq!(defs[0].function.parameters, tools[0].input_schema);
+        assert_eq!(defs[0].function.description, tools[0].description);
+
+        let mut long = fake_mcp_tools(DYNAMIC_THRESHOLD);
+        let schema = long[0].input_schema.clone();
+        long[0].description = "甲".repeat(SUMMARY_DESCRIPTION_CHARS + 25) + "\nsecond line";
+        let summary = mcp_definitions_for_stage(McpFoldStage::Summary, &long, &perm, None);
+        assert_eq!(summary.len(), DYNAMIC_THRESHOLD, "SUMMARY still offers every tool");
+        let clipped = &summary[0].function.description;
+        assert_eq!(clipped.chars().count(), SUMMARY_DESCRIPTION_CHARS + 1);
+        assert!(clipped.ends_with('…'));
+        assert!(!clipped.contains("second line"));
+        for d in &summary {
+            assert_eq!(d.function.parameters, schema, "schema must stay callable");
+            assert!(d.function.description.chars().count() <= SUMMARY_DESCRIPTION_CHARS + 1);
+        }
+        let gateway_names = [MCP_LIST_TOOL, MCP_SEARCH_TOOL, MCP_DETAIL_TOOL, MCP_CALL_TOOL];
+        for stage in [McpFoldStage::Full, McpFoldStage::Summary] {
+            let defs = mcp_definitions_for_stage(stage, &long, &perm, None);
+            assert!(
+                !defs.iter().any(|d| gateway_names.contains(&d.function.name.as_str())),
+                "FULL/SUMMARY must not pollute small catalogues with gateway tools"
+            );
+        }
+    }
+
+    #[test]
+    fn list_and_search_stages_expose_only_gateway_functions() {
+        let tools = fake_mcp_tools(60);
+        let perm = PermissionSettings::default();
+        let list = mcp_definitions_for_stage(McpFoldStage::List, &tools, &perm, None);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].function.name, MCP_LIST_TOOL);
+        assert!(list[0].function.description.contains("mcp__srv__tool_000"), "roster must name real tools");
+
+        let many = fake_mcp_tools(120);
+        let search = mcp_definitions_for_stage(McpFoldStage::Search, &many, &perm, None);
+        assert_eq!(search.len(), 3);
+        let names: Vec<&str> = search.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&MCP_SEARCH_TOOL));
+        assert!(names.contains(&MCP_DETAIL_TOOL));
+        assert!(names.contains(&MCP_CALL_TOOL));
+        assert!(search[0].function.parameters["required"].as_array().unwrap().contains(&serde_json::json!("query")));
+        assert_eq!(search[0].function.parameters["properties"]["query"]["type"], "string");
+        assert_eq!(search[0].function.parameters["properties"]["limit"]["type"], "integer");
+        assert!(search[1].function.parameters["required"].as_array().unwrap().contains(&serde_json::json!("name")));
+        assert_eq!(search[1].function.parameters["properties"]["name"]["type"], "string");
+        assert!(search[2].function.parameters["required"].as_array().unwrap().contains(&serde_json::json!("name")));
+        assert!(search[2].function.parameters["required"].as_array().unwrap().contains(&serde_json::json!("arguments")));
+        assert_eq!(search[2].function.parameters["properties"]["name"]["type"], "string");
+        assert_eq!(search[2].function.parameters["properties"]["arguments"]["type"], "object");
+        for d in &search {
+            assert!(d.function.description.contains("search_tools"));
+            assert!(d.function.description.contains("get_tool_detail"));
+            assert!(d.function.description.contains("call_tool"));
+        }
+    }
+
+    #[test]
+    fn disabled_and_disallowed_tools_are_invisible_in_every_stage() {
+        let mut tools = fake_mcp_tools(SEARCH_THRESHOLD + 20);
+        tools[3].enabled = false;
+        let mut p = PermissionSettings::default();
+        p.disallowed_tools = vec!["tool_007".into()];
+        let builtins: HashSet<String> = HashSet::new();
+        let visible = visible_mcp_tools(&tools, &builtins, &p, None);
+        assert_eq!(visible.len(), SEARCH_THRESHOLD + 18, "both filters must apply before stage selection");
+        assert!(!visible.iter().any(|t| t.name == "tool_003"));
+        assert!(!visible.iter().any(|t| t.name == "tool_007"));
+        for stage in [
+            McpFoldStage::Full,
+            McpFoldStage::Summary,
+            McpFoldStage::List,
+            McpFoldStage::Search,
+        ] {
+            let defs = mcp_definitions_for_stage(stage, &visible, &p, None);
+            let text = serde_json::to_string(&defs).unwrap();
+            assert!(!text.contains("tool_003"), "disabled tool leaked into {stage:?}: {text}");
+            assert!(!text.contains("tool_007"), "banned tool leaked into {stage:?}: {text}");
+        }
+    }
+
+    /// Stage selection must consume the filtered visible count. Disabling or
+    /// banning tools must not fold a small usable catalogue into LIST/SEARCH
+    /// merely because `all_tools()` is large.
+    #[test]
+    fn fold_stage_uses_filtered_visible_count_not_discovered_total() {
+        let mut discovered = fake_mcp_tools(LIST_THRESHOLD + 20);
+        for t in discovered.iter_mut().skip(6) {
+            t.enabled = false;
+        }
+        let builtins: HashSet<String> = HashSet::new();
+        let perm = PermissionSettings::default();
+
+        let visible = visible_mcp_tools(&discovered, &builtins, &perm, None);
+        assert_eq!(visible.len(), 6);
+        assert_eq!(mcp_fold_stage(discovered.len()), McpFoldStage::List);
+        assert_eq!(mcp_fold_stage(visible.len()), McpFoldStage::Full);
+
+        let gate = ToolGate { allowed: None, disallowed: HashSet::new(), mcp_allowed: false };
+        assert_eq!(visible_mcp_tools(&discovered, &builtins, &perm, Some(&gate)).len(), 0);
+        assert_eq!(mcp_fold_stage(0), McpFoldStage::Full);
+
+        let mut selective_gate = ToolGate::open();
+        selective_gate.disallowed.insert("tool_002".into());
+        selective_gate.disallowed.insert("tool_003".into());
+        let gated_visible = visible_mcp_tools(&discovered, &builtins, &perm, Some(&selective_gate));
+        assert_eq!(gated_visible.len(), 4, "gate blacklist must be applied before counting");
+        assert_eq!(mcp_fold_stage(gated_visible.len()), McpFoldStage::Full);
+
+        let mut perm_with_ban = perm.clone();
+        perm_with_ban.disallowed_tools = vec!["tool_000".into(), "tool_001".into()];
+        let after_ban = visible_mcp_tools(&discovered, &builtins, &perm_with_ban, None);
+        assert_eq!(after_ban.len(), 4);
+        assert_eq!(mcp_fold_stage(after_ban.len()), McpFoldStage::Full);
+        assert_eq!(mcp_definitions_for_stage(McpFoldStage::Full, &after_ban, &perm_with_ban, None).len(), 4);
+    }
+
+    #[test]
+    fn search_is_case_insensitive_clamped_and_browseable() {
+        let tools = fake_mcp_tools(30);
+        let upper = search_mcp_tools(&tools, "FROBNICATOR", 5);
+        assert_eq!(upper.len(), 5, "limit must clamp to at most 5");
+        let lower = search_mcp_tools(&tools, "frobnicator", 5);
+        assert_eq!(lower.len(), upper.len(), "search must be case-insensitive");
+        assert!(lower.iter().any(|t| t.name == tools[0].name));
+        let exact = search_mcp_tools(&tools, "tool_007", 10);
+        assert_eq!(exact[0].name, "tool_007", "exact name match must rank first");
+        assert_eq!(mcp_search_limit(Some(&serde_json::json!(0))), SEARCH_MIN_LIMIT);
+        assert_eq!(mcp_search_limit(Some(&serde_json::json!(-7))), SEARCH_MIN_LIMIT);
+        assert_eq!(mcp_search_limit(Some(&serde_json::json!(9999))), SEARCH_MAX_LIMIT);
+        assert_eq!(mcp_search_limit(None), SEARCH_DEFAULT_LIMIT);
+        let browse = search_mcp_tools(&tools, "", 3);
+        assert_eq!(browse.len(), 3, "empty query is a bounded browse, not an error");
+        assert_eq!(browse[0].name, tools[0].name);
+        assert_eq!(browse[2].name, tools[2].name);
+        assert_eq!(search_mcp_tools(&tools, "   ", 0).len(), SEARCH_MIN_LIMIT);
+        assert!(search_mcp_tools(&tools, "no-such-keyword", 10).is_empty());
+    }
+
+    #[test]
+    fn detail_resolves_and_rejects_unknown_names() {
+        let tools = fake_mcp_tools(5);
+        let schema = mcp_tool_detail_json(&tools, "mcp__srv__tool_002").unwrap();
+        assert!(schema.contains("properties"));
+        let err = mcp_tool_detail_json(&tools, "not-a-tool").unwrap_err();
+        assert!(err.contains("search_tools"), "error must point back to the workflow: {}", err);
+        assert!(resolve_mcp_tool(&tools, "").is_none());
+        // Raw names resolve too, for older session histories.
+        assert_eq!(resolve_mcp_tool(&tools, "tool_001").unwrap().name, "tool_001");
+    }
+
+    /// The mapping is shared by both direct MCP calls and `call_tool`; a
+    /// server-side error must not lose its image blocks or become an empty success.
+    #[test]
+    fn mcp_result_mapping_preserves_is_error_images_and_transport_errors() {
+        let ok = mcp_result_to_output(
+            Ok::<McpCallResult, &str>(McpCallResult {
+                text: "ok".into(),
+                is_error: false,
+                images: vec!["data:image/png;base64,ok".into()],
+            }),
+            "tool",
+        );
+        assert!(!ok.is_error);
+        assert_eq!(ok.text, "ok");
+        assert_eq!(ok.image_urls, vec!["data:image/png;base64,ok"]);
+
+        let failed = mcp_result_to_output(
+            Ok::<McpCallResult, &str>(McpCallResult {
+                text: "".into(),
+                is_error: true,
+                images: vec!["data:image/png;base64,fail".into()],
+            }),
+            "tool_xyz",
+        );
+        assert!(failed.is_error);
+        assert_eq!(failed.text, "MCP tool 'tool_xyz' failed");
+        assert_eq!(failed.image_urls, vec!["data:image/png;base64,fail"]);
+
+        let transport = mcp_result_to_output(
+            Err::<McpCallResult, &str>("socket closed"),
+            "tool",
+        );
+        assert!(transport.is_error);
+        assert!(transport.text.contains("MCP tool error: socket closed"));
+    }
+
+    /// A discovered-but-disabled forward must reproduce the direct route's
+    /// exact stop-retrying text; a genuinely unknown name points back to search.
+    #[test]
+    fn call_tool_target_distinguishes_disabled_from_unknown() {
+        let mut all = fake_mcp_tools(3);
+        all[1].enabled = false;
+        let visible = visible_mcp_tools(&all, &HashSet::new(), &PermissionSettings::default(), None);
+        let disabled = resolve_mcp_call_target(&visible, &all, "mcp__srv__tool_001").unwrap_err();
+        assert!(disabled.is_error);
+        assert_eq!(
+            disabled.text,
+            "MCP tool 'mcp__srv__tool_001' is disabled by the user's tool settings. Do not retry it."
+        );
+        let unknown = resolve_mcp_call_target(&visible, &all, "not-a-tool").unwrap_err();
+        assert!(unknown.is_error);
+        assert!(unknown.text.contains("search_tools"));
     }
 }

@@ -146,7 +146,8 @@
     "dingtalk_enter_appsecret": "Por favor, insira o AppSecret",
     "dingtalk_starting_connection": "Inicializando conexão Stream...",
     "dingtalk_connection_success": "Conexão estabelecida! Envie uma mensagem ao robô no DingTalk...",
-    "waiting_for_dingtalk_message": "Aguardando mensagem do DingTalk"
+    "waiting_for_dingtalk_message": "Aguardando mensagem do DingTalk",
+    "subagent_needs_content": "Please enter the task content for the sub-agent — selecting a sub-agent alone is not enough."
   },
   "history": {
     "new_chat": "Novo Chat",
@@ -345,6 +346,10 @@
       "update_tooltip_downloading": "Baixando a nova versão {0}",
       "update_tooltip_downloaded": "A versão {0} está pronta — clique para instalar e reiniciar",
       "drag_to_sort": "Arrastar para reordenar"
+    },
+    "nav": {
+      "connectors": "Conectores",
+      "interfaces": "Interfaces"
     }
   },
   "settings": {
@@ -526,6 +531,55 @@
       "scroll_next": "Rolar para a direita"
     },
     "mcp": {
+      "auth_device_title": "Scan to authorize",
+      "auth_device_waiting": "Waiting for authorization…",
+      "auth_device_hint": "Scan the QR code or open the link, then confirm the code below.",
+      "auth_device_expires": "Expires in",
+      "auth_device_open": "Open authorization page",
+      "auth_qr_title": "Scan the QR code to authorize",
+      "auth_qr_hint": "Scan the QR code in the panel below and confirm on your phone.",
+      "auth_qr_https_only": "In-app QR authorization requires an https URL.",
+      "auth_type_label": "Authentication",
+      "auth_type_none": "None",
+      "auth_type_token": "Enter an Access Token / API Key",
+      "auth_type_oauth": "Browser sign-in (OAuth / QR code / account login)",
+      "auth_type_hint": "Credentials are stored only on this machine, never in the config file or the cloud.",
+      "auth_token_label": "Access Token",
+      "auth_get_token": "How do I get an Access Token?",
+      "auth_local_only": "The Access Token is stored only on this machine under ~/.gwork/mcp-credentials.json and is never uploaded to the cloud.",
+      "auth_token_placeholder": "Paste your Access Token",
+      "auth_token_required": "Token is required",
+      "auth_save_and_connect": "Save and connect",
+      "auth_connect_title": "Connect & authorize",
+      "auth_waiting": "Waiting for browser authorization…",
+      "auth_browser_hint": "Finish signing in and granting permissions in the browser window that just opened. This dialog continues automatically. Do not close the authorization page, or you will need to reconnect.",
+      "auth_failed": "Authorization failed",
+      "auth_timeout": "Authorization timed out, please retry",
+      "auth_connected": "Connected",
+      "auth_reconnect": "Reconnect",
+      "auth_clear": "Clear credential",
+      "common_cancel": "Cancel",
+      "common_close": "Close",
+      "network_error": "Network error",
+      "market": {
+        "title": "MCP Marketplace",
+        "search_placeholder": "Search MCP servers",
+        "hosted": "Hosted",
+        "installed": "Installed",
+        "empty": "No MCP servers found",
+        "required": "Required",
+        "verified": "Verified",
+        "connect": "Connect",
+        "connect_title": "Connect",
+        "save_connect": "Save & Connect",
+        "cancel": "Cancel",
+        "config": "Configuration",
+        "load_failed": "Failed to load the MCP directory: {msg}",
+        "install_failed": "Install failed: {msg}",
+        "installed_names": "Installed: {msg}",
+        "detail_failed": "Failed to load details: {msg}",
+        "retry": "Retry"
+      },
       "title": "Servidores MCP",
       "desc": "Gerenciar servidores de ferramentas externos (arquivos, bancos de dados, navegadores)",
       "add": "Adicionar servidor",
@@ -945,7 +999,7 @@
     "batch_running": "Executando",
     "batch_done": "Processado",
     "batch_done_count": "{count} chamadas de ferramenta",
-    "action_bash_done": "Comando do terminal executado",
+    "action_bash_done": "Comando do terminal",
     "action_thinking_done": "Pensado",
     "batch_thinking_count": "Pensado {count} vezes",
     "turn_stopped": "Parado",
@@ -956,8 +1010,8 @@
     "turn_agents_one": "subagente",
     "turn_process_texts_one": "etapa do processo",
     "phase_thinking": "Pensando",
-    "context_compacted":  "Contexto compactado",
-    "context_compacted_tip":  "O contexto excedeu o orcamento; o historico antigo foi compactado automaticamente",
+    "context_compacted": "Contexto compactado",
+    "context_compacted_tip": "O contexto excedeu o orcamento; o historico antigo foi compactado automaticamente",
     "phase_text": "Escrevendo",
     "phase_waiting": "Aguardando resposta",
     "args_streaming": "Gerando argumentos · {size}",
@@ -1231,7 +1285,11 @@
     "task_elapsed": "Tempo da tarefa",
     "turn_input": "Entrada do turno",
     "turn_output": "Saída do turno",
-    "messages": "Mensagens"
+    "messages": "Mensagens",
+    "batch_done_count": "{count} chamadas de ferramenta",
+    "action_bash_done": "Comando do terminal",
+    "action_thinking_done": "Pensado",
+    "batch_thinking_count": "Pensado {count} vezes"
   },
   "filer": {
     "expand": "Expandir árvore de arquivos",
@@ -1418,6 +1476,16 @@
     "unavailable": "Serviço de login indisponível. Use o aplicativo desktop.",
     "auth_title_login": "Entrar no GWork",
     "auth_title_register": "Criar uma conta",
-    "auth_slogan": "Além de executar, criar."
+    "auth_slogan": "Além de executar, criar.",
+    "password_confirm": "Confirmar senha",
+    "email_required": "E-mail (verificação obrigatória)",
+    "code": "Código de verificação",
+    "code_placeholder": "Código de verificação",
+    "send_code": "Enviar código",
+    "code_retry": "Reenviar",
+    "code_sent": "Código enviado, verifique sua caixa de entrada",
+    "code_required": "Insira o código de verificação",
+    "email_first": "Preencha primeiro o endereço de e-mail",
+    "password_mismatch": "As duas senhas não coincidem"
   }
 }

@@ -146,7 +146,8 @@
     "dingtalk_enter_appsecret": "Vă rugăm să introduceți AppSecret",
     "dingtalk_starting_connection": "Se inițiază conexiunea Stream...",
     "dingtalk_connection_success": "Conexiune reușită! Vă rugăm să trimiteți un mesaj robotului pe DingTalk...",
-    "waiting_for_dingtalk_message": "Așteptare mesaj DingTalk"
+    "waiting_for_dingtalk_message": "Așteptare mesaj DingTalk",
+    "subagent_needs_content": "Please enter the task content for the sub-agent — selecting a sub-agent alone is not enough."
   },
   "history": {
     "new_chat": "Chat nou",
@@ -345,6 +346,10 @@
       "update_tooltip_downloading": "Se descarcă versiunea nouă {0}",
       "update_tooltip_downloaded": "Versiunea {0} este gata — click pentru a instala și reporni",
       "drag_to_sort": "Trage pentru a reordona"
+    },
+    "nav": {
+      "connectors": "Conectori",
+      "interfaces": "Interfețe"
     }
   },
   "settings": {
@@ -526,6 +531,55 @@
       "scroll_next": "Derulează la dreapta"
     },
     "mcp": {
+      "auth_device_title": "Scan to authorize",
+      "auth_device_waiting": "Waiting for authorization…",
+      "auth_device_hint": "Scan the QR code or open the link, then confirm the code below.",
+      "auth_device_expires": "Expires in",
+      "auth_device_open": "Open authorization page",
+      "auth_qr_title": "Scan the QR code to authorize",
+      "auth_qr_hint": "Scan the QR code in the panel below and confirm on your phone.",
+      "auth_qr_https_only": "In-app QR authorization requires an https URL.",
+      "auth_type_label": "Authentication",
+      "auth_type_none": "None",
+      "auth_type_token": "Enter an Access Token / API Key",
+      "auth_type_oauth": "Browser sign-in (OAuth / QR code / account login)",
+      "auth_type_hint": "Credentials are stored only on this machine, never in the config file or the cloud.",
+      "auth_token_label": "Access Token",
+      "auth_get_token": "How do I get an Access Token?",
+      "auth_local_only": "The Access Token is stored only on this machine under ~/.gwork/mcp-credentials.json and is never uploaded to the cloud.",
+      "auth_token_placeholder": "Paste your Access Token",
+      "auth_token_required": "Token is required",
+      "auth_save_and_connect": "Save and connect",
+      "auth_connect_title": "Connect & authorize",
+      "auth_waiting": "Waiting for browser authorization…",
+      "auth_browser_hint": "Finish signing in and granting permissions in the browser window that just opened. This dialog continues automatically. Do not close the authorization page, or you will need to reconnect.",
+      "auth_failed": "Authorization failed",
+      "auth_timeout": "Authorization timed out, please retry",
+      "auth_connected": "Connected",
+      "auth_reconnect": "Reconnect",
+      "auth_clear": "Clear credential",
+      "common_cancel": "Cancel",
+      "common_close": "Close",
+      "network_error": "Network error",
+      "market": {
+        "title": "MCP Marketplace",
+        "search_placeholder": "Search MCP servers",
+        "hosted": "Hosted",
+        "installed": "Installed",
+        "empty": "No MCP servers found",
+        "required": "Required",
+        "verified": "Verified",
+        "connect": "Connect",
+        "connect_title": "Connect",
+        "save_connect": "Save & Connect",
+        "cancel": "Cancel",
+        "config": "Configuration",
+        "load_failed": "Failed to load the MCP directory: {msg}",
+        "install_failed": "Install failed: {msg}",
+        "installed_names": "Installed: {msg}",
+        "detail_failed": "Failed to load details: {msg}",
+        "retry": "Retry"
+      },
       "title": "Servere MCP",
       "desc": "Gestionarea serverelor externe de instrumente (fișiere, baze de date, browsere)",
       "add": "Adăugare server",
@@ -945,7 +999,7 @@
     "batch_running": "Se execută",
     "batch_done": "Procesat",
     "batch_done_count": "{count} apeluri de instrumente",
-    "action_bash_done": "Comandă terminal executată",
+    "action_bash_done": "Comandă terminal",
     "action_thinking_done": "Gândit",
     "batch_thinking_count": "Gândit de {count} ori",
     "turn_stopped": "Oprit",
@@ -956,8 +1010,8 @@
     "turn_agents_one": "subagent",
     "turn_process_texts_one": "pas intermediar",
     "phase_thinking": "Gândește",
-    "context_compacted":  "Context comprimat",
-    "context_compacted_tip":  "Contextul a depasit bugetul; istoricul vechi a fost comprimat automat",
+    "context_compacted": "Context comprimat",
+    "context_compacted_tip": "Contextul a depasit bugetul; istoricul vechi a fost comprimat automat",
     "phase_text": "Scrie",
     "phase_waiting": "Așteaptă răspunsul",
     "args_streaming": "Se generează argumentele · {size}",
@@ -1231,7 +1285,11 @@
     "task_elapsed": "Timp sarcină",
     "turn_input": "Intrare rundă",
     "turn_output": "Ieșire rundă",
-    "messages": "Mesaje"
+    "messages": "Mesaje",
+    "batch_done_count": "{count} apeluri de instrumente",
+    "action_bash_done": "Comandă terminal",
+    "action_thinking_done": "Gândit",
+    "batch_thinking_count": "Gândit de {count} ori"
   },
   "filer": {
     "expand": "Extinde arborele de fișiere",
@@ -1418,6 +1476,16 @@
     "unavailable": "Serviciul de autentificare nu este disponibil. Folosiți aplicația desktop.",
     "auth_title_login": "Conectare la GWork",
     "auth_title_register": "Creează un cont",
-    "auth_slogan": "Dincolo de executare, creație."
+    "auth_slogan": "Dincolo de executare, creație.",
+    "password_confirm": "Confirmă parola",
+    "email_required": "E-mail (verificare obligatorie)",
+    "code": "Cod de verificare",
+    "code_placeholder": "Cod de verificare",
+    "send_code": "Trimite codul",
+    "code_retry": "Retrimite",
+    "code_sent": "Cod trimis, verifică-ți inboxul",
+    "code_required": "Introdu codul de verificare",
+    "email_first": "Completează mai întâi adresa de e-mail",
+    "password_mismatch": "Cele două parole nu coincid"
   }
 }

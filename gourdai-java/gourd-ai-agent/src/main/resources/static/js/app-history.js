@@ -505,6 +505,97 @@ function sessionScopeOf(entry) {
 
 /* ===== Chat 侧栏条目渲染（tab 视图：项目树 / 对话平铺；code 模式平铺）===== */
 
+/* 拖动排序（2026-11 用户诉求：左侧的任务和项目空间可以拖着排序）。
+   顺序层是独立 UMD 模块：纯函数可单测、localStorage 只存本机展示顺序、不改后端数据。
+   app-bootstrap.js 保证它在本文件之前加载；此处做一次防御式兜底，避免旧壳/单测
+   未加载该脚本时整份侧栏渲染抛错（DnD 降级为不可用，原有功能不受影响）。 */
+var GourdSidebarOrder = window.GourdSidebarOrder || null;
+
+/* 【架构】drop 只把「当前容器内的 id 顺序」写进 localStorage，然后触发一次重绘；
+   重绘时（buildSidebar / updateHistoryUI）统一用 sortBySaved 把内存数组按保存顺序排好，
+   再生成 HTML。好处：拖拽全程不改动 DOM 结构（只加 data-drag-* 属性与行内手柄），
+   因此 .proj-node.expanded + .proj-sessions、.ws-group-head ~ .ws-group-body
+   这些兄弟选择器完全不受影响；排序逻辑也全部收敛到纯函数，可单测。
+   无保存记录时 sortBySaved 返回原数组引用 —— 默认展示逐字不变（执行中置顶 + 时间倒序）。
+
+   稳定 id 与容器 key 分开：
+   - 项目 id：沿用 pushList 去重的 pathScopeKey(path) + '@' + scope —— 同名目录分属
+     两台机器时不会串。
+   - 会话 id：sessionId（后端唯一）；缺 id 时回落 label|time，只影响极端脏数据。
+   - 分组 id：DOM 的 data-scope（'local' / 'id:<rid>'）。
+   容器 key 与 DOM 的「同父」边界一一对应：drop 时 rowsOf(parent,type) 只收集同父同类行，
+   所以同一 key 只能被同一个容器写入，不会串到别的项目 / 别的 tab。 */
+function sidebarOrder() { return window.GourdSidebarOrder || GourdSidebarOrder; }
+function projectScopeOf(proj) {
+    return (proj && proj._scope && proj._scope !== 'local') ? proj._scope : 'local';
+}
+function projectOrderId(proj) {
+    return pathScopeKey(proj.path) + '@' + projectScopeOf(proj);
+}
+function projectContainerKeyOfScope(scopeKey) { return 'projects@' + scopeKey; }
+function sessionOrderId(entry) {
+    return (entry && entry.sessionId) ? String(entry.sessionId)
+        : ('noid:' + ((entry && entry.label) || '') + '|' + ((entry && entry.time) || 0));
+}
+function sessionContainerKeyForProject(proj) { return 'sessions@' + projectOrderId(proj); }
+function sessionContainerKeyForScope(scopeKey) { return 'sessions@' + scopeKey; }
+/* 对话 tab / code 平铺：会话行直接挂在 #historyList 下，全体同父 = 一个容器。 */
+function sessionContainerKeyFlat() { return 'sessions@__flat'; }
+/* 会话所在容器的顺序 key：由渲染处按归属写入 window.__sidebarSessionKey。
+   项目树内 = sessions@<项目稳定 id>；远端「全局对话」子节 = sessions@<scopeKey>；
+   对话 tab / code 平铺 = sessions@__flat。会话行渲染是共用的 sidebarItemHtml(i)，
+   靠这个当前值区分容器，避免把 A 项目的拖拽顺序串到 B 项目。 */
+function currentSessionOrderKey() {
+    return window.__sidebarSessionKey || sessionContainerKeyFlat();
+}
+function applySessionOrder(entries, key) {
+    var SO = sidebarOrder();
+    if (!SO) return entries;
+    /* unknownFirst=true：新会话/新登记项目仍置顶，符合「最近使用置顶」的既有语义 */
+    return SO.sortBySaved(entries, key, sessionOrderId, true);
+}
+function applyProjectOrder(items, key) {
+    var SO = sidebarOrder();
+    if (!SO) return items;
+    return SO.sortBySaved(items, key, projectOrderId, true);
+}
+function applyGroupOrder(groups) {
+    var SO = sidebarOrder();
+    if (!SO) return groups;
+    /* unknownFirst=false：拖过的组按用户顺序在前，新连接稳定追加末尾 */
+    return SO.sortBySaved(groups, 'groups', function (g) { return g.scopeKey; }, false);
+}
+function dragTitle() { return GourdI18n.t('app.sidebar.drag_to_sort'); }
+function withSessionContainer(key, fn) {
+    var prev = window.__sidebarSessionKey;
+    window.__sidebarSessionKey = key;
+    try { return fn(); } finally { window.__sidebarSessionKey = prev; }
+}
+
+/* 拖拽手柄：只认「按住手柄」才发起 HTML5 拖拽（见 app-sidebar-order.js 的 mousedown 绑定）。
+   手柄一律塞进该行【已有的】操作区（.item-actions / .proj-actions / .ws-group-acts），
+   绝不新增兄弟节点。role=button + tabindex 让它键盘可达；不写 draggable 属性——
+   那是 mousedown 命中手柄时才临时加的。 */
+function dragHandleHtml(type, title) {
+    var SO = sidebarOrder();
+    if (!SO) return '';
+    return '<span class="sidebar-drag-handle" data-drag-handle="' + escAttr(type) + '"'
+        + ' role="button" tabindex="0" title="' + escAttr(title) + '" aria-label="' + escAttr(title) + '">'
+        + '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">'
+        + '<circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/>'
+        + '<circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/>'
+        + '<circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/>'
+        + '</svg></span>';
+}
+/* 行的拖拽元数据。type 决定同容器判定，key 决定存哪份顺序，id 是稳定标识。
+   模块未加载时不输出任何属性，DOM 与改造前逐字一致。 */
+function dragRowAttrs(type, key, id) {
+    var SO = sidebarOrder();
+    if (!SO) return '';
+    return ' data-drag-type="' + escAttr(type) + '" data-drag-key="' + escAttr(key) + '"'
+        + ' data-drag-id="' + escAttr(id) + '"';
+}
+
 function escAttr(s) {
     return escapeHtml(s == null ? '' : String(s)).replace(/"/g, '&quot;');
 }
@@ -529,7 +620,13 @@ function sidebarItemHtml(i) {
     var isRemote = !!(chatHistory[i]._scope && chatHistory[i]._scope !== 'local');
     if (isRemote) cls += ' remote';
 
-    var html = '<div class="' + cls + '" data-idx="' + i + '"' + (isRemote ? ' data-remote="1"' : '') + '>';
+    /* 容器 key 由 buildSidebar / updateHistoryUI 的 withSessionContainer 写入当前值：
+       项目树内各项目、全局子节、对话 tab 平铺各自独立，互不串序。 */
+    var sKey = currentSessionOrderKey();
+    var sId = sessionOrderId(chatHistory[i]);
+
+    var html = '<div class="' + cls + '" data-idx="' + i + '"' + (isRemote ? ' data-remote="1"' : '')
+        + dragRowAttrs('session', sKey, sId) + '>';
     // 定时任务执行会话：条目名前时钟小图标（与旧任务行同款 feather clock）
     if (chatHistory[i].loop) {
         html += '<span class="sidebar-item-loop" title="' + escAttr(GourdI18n.t('app.sidebar.loop_mark')) + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>';
@@ -549,7 +646,9 @@ function sidebarItemHtml(i) {
         html += '<span class="sidebar-item-time">' + formatRelTime(chatHistory[i].time) + '</span>';
     }
     // 右侧悬停操作组（重命名 / 删除）：与项目行 .proj-actions 同款悬浮规格，feather SVG 图标与项目行风格统一（样式见 app.css）
+    // 拖动手柄并入已有操作区：不新增兄弟节点，.proj-node.expanded + .proj-sessions 不受影响
     html += '<span class="item-actions">'
+        + dragHandleHtml('session', dragTitle())
         + '<button class="item-action-btn sidebar-item-rename" title="' + escAttr(GourdI18n.t('history.rename')) + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>'
         + '<button class="item-action-btn sidebar-item-del" title="' + escAttr(GourdI18n.t('history.delete_session')) + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>'
         + '</span>'
@@ -565,11 +664,17 @@ function projNodeHtml(path, name, expanded) {
        title 附主机名，使「同名目录分属两台机器」在悬停时可区分。 */
     var hostLabel = projNodeHostLabel(path);
     var nodeTitle = path + (hostLabel ? (' · ' + hostLabel) : '');
-    return '<div class="proj-node' + (expanded ? ' expanded' : '') + '" data-proj="' + escAttr(path) + '"' + (projNodeIsRemote(path) ? ' data-remote="1"' : '') + ' title="' + escAttr(nodeTitle) + '">'
+    /* 项目行的容器 = 所属分组的 scope（同组内拖动）；id 用 path@scope 稳定去重。 */
+    var pScope = projNodeScopeOf(path);
+    var pKey = projectContainerKeyOfScope(wsScopeKey(pScope));
+    var pId = pathScopeKey(path) + '@' + pScope;
+    return '<div class="proj-node' + (expanded ? ' expanded' : '') + '" data-proj="' + escAttr(path) + '"' + (projNodeIsRemote(path) ? ' data-remote="1"' : '')
+        + dragRowAttrs('project', pKey, pId) + ' title="' + escAttr(nodeTitle) + '">'
         + '<svg class="proj-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>'
         + '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
         + '<span class="proj-name">' + escapeHtml(name || '') + '</span>'
         + '<span class="proj-actions">'
+        + dragHandleHtml('project', dragTitle())
         + '<button class="proj-action-btn proj-new-chat" title="' + escAttr(GourdI18n.t('app.sidebar.new_task')) + '">'
         + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>'
         + '</button>'
@@ -635,6 +740,15 @@ function projScopeQuery(scope) {
 /* Sidebar event delegation — single listener instead of per-item binding */
 $(historyList).on('click', function(e) {
     var $target = $(e.target);
+    /* 拖动手柄：显式在本委派最先拦掉，不依赖 jQuery「委托 handler 先于直接 handler、
+       stopPropagation 切断后续分组」的内部 dispatch 细节。手柄是 span[role=button]，
+       点它会冒泡到这里被当成「展开项目 / 选中会话」；拖拽结束 mouseup→click 那一下
+       尤其容易误触。stopPropagation 同时挡住 document 上「点别处关闭浮层」类委派。 */
+    if ($target.closest('.sidebar-drag-handle').length) {
+        e.stopPropagation();
+        e.preventDefault();
+        return;
+    }
     // 侧栏加载失败提示：点击任意位置重试（重拉项目列表 + 会话）
     var $retryHint = $target.closest('.sidebar-load-failed-hint');
     if ($retryHint.length) {
@@ -727,8 +841,22 @@ function updateHistoryUI() {
             // chat 聚合视图：按 tab 渲染（项目树 / 对话平铺），内部重建 chatHistory/currentChatIndex
             html = buildSidebar();
         } else {
-            // code 模式或聚合数据未到达：原平铺列表
-            for (var i = 0; i < chatHistory.length; i++) html += sidebarItemHtml(i);
+            // code 模式或聚合数据未到达：原平铺列表（同父 = 一个容器）
+            html = withSessionContainer(sessionContainerKeyFlat(), function () {
+                /* 用「有序索引」渲染而非改 chatHistory 本身：code 模式的 chatHistory
+                   由 toSessionEntries 直接赋值、未经 buildSidebar，若原地重排会让
+                   selectSession/deleteSession 的下标契约错位。sortBySaved 对下标数组
+                   排序，data-idx 仍是原下标，行为完全兼容。 */
+                var SO = sidebarOrder();
+                var indices = [];
+                for (var n = 0; n < chatHistory.length; n++) indices.push(n);
+                if (SO) indices = SO.sortBySaved(indices, sessionContainerKeyFlat(), function (ix) {
+                    return sessionOrderId(chatHistory[ix]);
+                }, true);
+                var out = '';
+                for (var m = 0; m < indices.length; m++) out += sidebarItemHtml(indices[m]);
+                return out;
+            });
         }
         var $list = $(historyList);
         // 仅当 HTML 真正变化时才写入 DOM，避免无效重排
@@ -748,6 +876,20 @@ function updateHistoryUI() {
         if (typeof window.renderTitlebarTask === 'function') window.renderTitlebarTask();
     });
 }
+
+/* ===== 拖放绑定（一次性委托，绑定在静态 #historyList 上）=====
+   innerHTML 重建不会丢事件：所有 drag 事件都冒泡到这个容器。drop 只写顺序 +
+   触发 updateHistoryUI 重绘（重绘时 buildSidebar 用 sortBySaved 应用新顺序）。
+   模块未加载时完全不绑定 —— 旧壳/单测降级为「不可拖动」，渲染不受影响。 */
+(function bindSidebarOrder() {
+    var SO = sidebarOrder();
+    if (!SO || !historyList) return;
+    SO.bind(historyList, function () { updateHistoryUI(); });
+})();
+
+/* 手柄 click 已在上方行点击委派开头显式 early return 拦截（见 740 行附近）；
+   这里不再重复注册委托 handler，避免同一事件被处理两次、也避免依赖 jQuery 的
+   委托 dispatch 顺序（不同 jQuery 版本行为不保证一致）。 */
 
 /* 侧栏条目排序：执行中的任务优先，其余按最近活动时间倒序；最后保持接口原顺序稳定。 */
 function sortSidebarEntries(entries) {
@@ -886,6 +1028,9 @@ function wsGroupActsHtml(g) {
     var isDown = !isLocal && g.state === 'down';
     var addTitle = GourdI18n.t('remote.group_add');
     var html = '<span class="ws-group-acts">';
+    /* 分组拖动手柄并入已有操作区（acts 是 head 的兄弟，绝对定位）：不新增兄弟节点，
+       .ws-group-head[aria-expanded] ~ .ws-group-body 的通用兄弟规则不受影响。 */
+    html += dragHandleHtml('group', dragTitle());
     if (!isDown) {
         html += '<span class="ws-group-act ws-group-add" role="button" tabindex="0"'
             + ' data-scope="' + escAttr(g.scopeKey) + '" title="' + escAttr(addTitle) + '"'
@@ -911,6 +1056,7 @@ function wsGroupHtml(g) {
     var html = '<div class="ws-group' + (collapsed ? ' ws-group-collapsed' : '')
         + (isDown ? ' ws-group-down' : '') + '"'
         + ' data-scope="' + escAttr(g.scopeKey) + '"'
+        + dragRowAttrs('group', 'groups', g.scopeKey)
         + (isDown ? ' data-state="down"' : '') + '>'
         + '<button type="button" class="ws-group-head" aria-expanded="' + (collapsed ? 'false' : 'true') + '"'
         + ' title="' + escAttr(g.label) + '">'
@@ -925,14 +1071,24 @@ function wsGroupHtml(g) {
            经过 head 的折叠委派，不需要 stopPropagation 防误折叠。 */
         + wsGroupActsHtml(g)
         + '<div class="ws-group-body">';
-    html += wsGroupGlobalHtml(g);
+    /* 组顶「全局对话」子节：会话容器 = sessions@<scopeKey> */
+    html += withSessionContainer(sessionContainerKeyForScope(g.scopeKey), function () {
+        return wsGroupGlobalHtml(g);
+    });
     for (var i = 0; i < g.meta.length; i++) {
         var pm = g.meta[i];
         html += projNodeHtml(pm.path, pm.name, !!_projExpanded[pm.path]);
         // 子列表始终入 DOM（收起态由 CSS 控制），保证搜索可过滤折叠项目的会话
         if (pm.count > 0) {
+            /* 每个项目是独立容器：drop 时 rowsOf 只收集这个 .proj-sessions 下的行 */
             html += '<div class="proj-sessions">';
-            for (var j = pm.start; j < pm.start + pm.count; j++) html += sidebarItemHtml(j);
+            html += withSessionContainer(pm.sessionKey || sessionContainerKeyFlat(), (function (s, e) {
+                return function () {
+                    var out = '';
+                    for (var j = s; j < s + e; j++) out += sidebarItemHtml(j);
+                    return out;
+                };
+            })(pm.start, pm.count));
             html += '</div>';
         }
     }
@@ -963,28 +1119,31 @@ function buildSidebar() {
            组顶「全局对话」子节在前（§5.3），其后是该 scope 的项目行。
            平铺必须包含子节里的会话：selectSession/deleteSession/startRename 全部按
            chatHistory 下标定位，漏进去就等于那些会话点不开、也删不掉。 */
-        groups = wsGroupOrder(projects);
+        groups = applyGroupOrder(wsGroupOrder(projects));
         for (i = 0; i < groups.length; i++) {
             var g = groups[i];
             g.globalStart = flat.length;
-            var gl = sortSidebarEntries(g.globals || []);
+            var gl = applySessionOrder(sortSidebarEntries(g.globals || []), sessionContainerKeyForScope(g.scopeKey));
             for (j = 0; j < gl.length; j++) flat.push(gl[j]);
             g.globals = gl;
             g.globalCount = gl.length;
+            /* 分组内的项目行：按该 scope 保存的顺序重排（同组内拖动） */
+            g.items = applyProjectOrder(g.items, projectContainerKeyOfScope(g.scopeKey));
             for (j = 0; j < g.items.length; j++) {
                 var proj = g.items[j];
                 var start = flat.length;
-                // 项目内执行中的任务置顶，其余按最近活动时间倒序
-                var ss = sortSidebarEntries(proj.sessions || []);
+                // 项目内执行中的任务置顶，其余按最近活动时间倒序；再叠加用户自定义顺序
+                var ss = applySessionOrder(sortSidebarEntries(proj.sessions || []), sessionContainerKeyForProject(proj));
                 for (k = 0; k < ss.length; k++) flat.push(ss[k]);
-                g.meta.push({ path: proj.path, name: proj.name, start: start, count: ss.length });
+                g.meta.push({ path: proj.path, name: proj.name, start: start, count: ss.length,
+                    sessionKey: sessionContainerKeyForProject(proj), scopeKey: g.scopeKey });
             }
         }
     } else {
         /* 对话 tab：仅全局会话（非工作空间下），执行中的任务置顶，其余按 time 倒序。
            【零改动 · 契约 §5.4】分组树只组织项目/工作区，全局对话仍在这里平铺。 */
         for (i = 0; i < global.length; i++) flat.push(global[i]);
-        flat = sortSidebarEntries(flat);
+        flat = applySessionOrder(sortSidebarEntries(flat), sessionContainerKeyFlat());
     }
 
     // —— 重建全局量并修正激活下标 ——
@@ -1000,9 +1159,15 @@ function buildSidebar() {
     if (scope === 'project') {
         /* 2026-10-11 用户反馈：「这个项目不要，本身上面就有项目了，下面这个重复了。
            tab 名就叫「项目」，组头又全是机器名/本地，这行 section-title 纯重复占位，删。 */
+        /* wsGroupHtml 内部按「全局子节 / 各项目 proj-sessions」分别切换
+           __sidebarSessionKey，让共用的 sidebarItemHtml 落到正确容器。 */
         for (i = 0; i < groups.length; i++) html += wsGroupHtml(groups[i]);
     } else {
-        for (i = 0; i < flat.length; i++) html += sidebarItemHtml(i);
+        html += withSessionContainer(sessionContainerKeyFlat(), function () {
+            var out = '';
+            for (var n = 0; n < flat.length; n++) out += sidebarItemHtml(n);
+            return out;
+        });
     }
     // 加载失败空态：当前视图一条条目都没有且此前记录过加载失败时，渲染可点击的重试提示。
     // 默认「项目」tab 的 flat 仅由 projects 构建，projects 接口失败时旧实现留下纯空白、
@@ -1318,6 +1483,8 @@ function deleteSession(idx) {
             if (typeof abortReplay === 'function') abortReplay(sess);
             $(sess.container).remove();
             delete sessionMap[entry.sessionId];
+            clearHistoryLoadingTimer(entry.sessionId);   // 删除会话：撤其加载定时器
+            hideHistoryLoading(sess);              // 撤其覆盖层（仅归属匹配时生效，绝不误伤其它会话）
             // 删除会话时清理可能残留的加载按钮
             $(messagesWrap).find('.chat-load-more-wrapper').remove();
         }
@@ -1661,8 +1828,308 @@ function installReplayLoadMoreSessionHook() {
 }
 installReplayLoadMoreSessionHook();
 
+/* ===== 历史会话恢复加载态（防白屏骨架屏） =====
+   根因与视觉规格见 app.css 同名区块。生命周期：
+   - showHistoryLoading：loadMessages 发请求前挂覆盖层（归属 sessionId）；
+   - hideHistoryLoading：内容落到真实容器的各收尾出口撤销（replay 正常/兜底、
+     legacy 正常/异常/失败共 5 处，漏一处就永远转圈）；
+   - 超时兜底：/web/chat/replay 初始请求没有 timeout，12s 无响应降级为失败+重试卡，
+     绝不静默留白也绝不永久转圈；
+   - setActiveSession 经 window.dismissHistoryLoadingExcept 撤掉「不属于新活动
+     会话」的残留覆盖层（切回已缓存会话不再发请求，没有 show/hide 配对）。
+   WHY 覆盖层不进 sess.container：children.length===0 是全项目「需要重拉历史」的
+   唯一判据，骨架节点混入会让切回会话只剩骨架、历史永久消失。 */
+var HISTORY_LOAD_TIMEOUT_MS = 12000;
+/* 【P1-1 修复 2026-11】HTTP 超时必须宽于 UI watchdog，两者同值会竞态：
+   HTTP 先到点触发 error('timeout') → legacy 二次请求 → UI watchdog 随后又盖
+   失败卡，三态交错（失败卡 + legacy 内容 + 二次骨架）。watchdog 先行 abort 后，
+   迟到的 error('abort') 已被显式忽略，这里只是悬挂请求的网络级兜底。 */
+var HISTORY_HTTP_TIMEOUT_MS = 60000;
+/* 【P0-2 修复 2026-11】回放卡死宽限：12s watchdog 命中回放态（_replaying）时
+   不再一次性 return（旧实现保护真空：rAF 链一旦卡死，门禁与覆盖层永久残留
+   = 白屏），而是重排到该截止点；届时仍未收尾则强制收口（__replayStalled）。 */
+var REPLAY_STALL_GRACE_MS = 30000;
+var _historyLoadingTimers = {};
+
+function historyOverlayHost() {
+    return document.getElementById('messagesShell') || $(messagesWrap).parent()[0] || null;
+}
+
+/* 覆盖层存在期间给 shell 挂 has-history-loading 标记。
+    【2026-11-04 位置修正后的现状】shell 已常驻 relative（rail 与覆盖层的共同定位父级），
+    该标记不再承载 CSS 规则，仅作为「当前有加载态」的可查询状态保留：DOM 探针与
+    测试仍用它断言覆盖层的生命周期。不要因为「找不到同名 CSS 规则」就删掉调用点。 */
+function updateHistoryLoadingShellClass(host) {
+    if (!host) return;
+    var has = !!host.querySelector('.chat-history-loading');
+    host.classList.toggle('has-history-loading', has);
+}
+
+/* 骨架行模板：一个周期 8 行，覆盖「用户短句 / 助手段落 / 用户一句话 / 助手长回答」
+   的真实节奏。宽度百分比相对 820px 版心。 */
+var HISTORY_SKELETON_ROWS = [
+    { cls: 'chl-row-me', widths: ['42%'] },
+    { cls: 'chl-row-ai', widths: ['74%', '58%'] },
+    { cls: 'chl-row-me', widths: ['30%'] },
+    { cls: 'chl-row-ai', widths: ['80%', '66%', '40%'] },
+    { cls: 'chl-row-ai', widths: ['68%', '52%'] },
+    { cls: 'chl-row-me', widths: ['36%'] },
+    { cls: 'chl-row-ai', widths: ['76%', '60%', '44%'] },
+    { cls: 'chl-row-ai', widths: ['58%'] }
+];
+/* 每行【行盒高度】实测值（= .chl-line 高度之和 + 8px gap×(n-1)，gap 取自 .chl-row）。
+   模板行高：单行用户/单行助手 32/12，三行助手 52。
+   模型：首行从 padding-top + margin-top 开始；每行占高 = height（往上加上 margin 由 ROW_GAP 描述）。
+   【为何不能存 pitch（相邻 top 差）】pitch 含上一行的 marginBottom，直接用会把末行的
+   外边距也算成覆盖高度，多算 14px → 少生成半行，末行恰好差几个 px 盖不到底边
+   （实测踩过：末行 bottom=634 vs 容器 641）。 */
+var HISTORY_SKELETON_ROW_HEIGHTS = [32, 32, 32, 52, 32, 32, 52, 12];
+var HISTORY_SKELETON_ROW_GAP_PX = 28;       // 行间 margin（14 上 + 14 下）
+var HISTORY_SKELETON_TOP_PAD_PX = 42;       // inner padding-top 28 + 首行 margin-top 14
+var HISTORY_SKELETON_MAX_ROWS = 64;
+/* 交错升起序号封顶：不封顶时 40 行 × 70ms = 2.8s，最后几行迟迟不出现。 */
+var HISTORY_SKELETON_STAGGER_CAP = 8;
+
+/** 按容器可用高度算需要多少行骨架。availH<=0（契约测试的假 DOM 没有 clientHeight）
+    时返回一个完整周期 —— 拿不到高度也绝不能退化成不渲染。
+    【必须同时排除非有限值】availH = Infinity 满足 availH > 0，会进 while 且 bottom 永远
+    追不上，直接死循环卡死主线程；NaN 已被 !(availH > 0) 拦住。clientHeight 当前不会返回
+    Infinity，但这是零成本的结构性防护，宁可多这一道。 */
+function historySkeletonRowsFor(availH) {
+    var cycle = HISTORY_SKELETON_ROWS.length;
+    if (!(availH > 0) || !isFinite(availH)) return cycle;
+    var heights = HISTORY_SKELETON_ROW_HEIGHTS;
+    var gap = HISTORY_SKELETON_ROW_GAP_PX;
+    /* 【上限必须同时约束循环，不能只在 return 处兜底】
+       上一轮把循环里的 need < MAX_ROWS 当成「冗余防御」删了，理由是删掉后
+       变异体存活 = 行为等价。这个推理是错的：变异体存活只说明【当时的测试观察不到
+       行为差异】，不等于行为相同 —— 差异落在运行时间上。实测 availH=1e9 时
+       循环要跑约 2500 万次、耗时 122ms（纯 O(availH)），而 64 行就够用了。
+       现实里 clientHeight 不会这么大，但这是零成本的确定性收敛，不该留。
+       对应契约测试用【耗时】而非返回值来锁它 —— 返回值两种写法完全一样。 */
+    var need = 0;
+    /* 两个量必须分开，首版混用导致 641 容器永远差 7px：
+       - cursor：下一行盒的起点（= 上一行底边 + gap）
+       - bottom：当前末行的底边（= 上一行底边 + 行高）
+       达标只能看 bottom。 */
+    var cursor = HISTORY_SKELETON_TOP_PAD_PX;
+    var bottom = HISTORY_SKELETON_TOP_PAD_PX;
+    while (bottom < availH && need < HISTORY_SKELETON_MAX_ROWS) {
+        bottom = cursor + heights[need % heights.length];
+        need++;
+        cursor = bottom + gap;
+    }
+    // 至少一个完整周期：极矮容器也不能只剩一行孤零零的骨架
+    return Math.max(cycle, Math.min(need, HISTORY_SKELETON_MAX_ROWS));
+}
+
+function historySkeletonHtml(availH) {
+    var tpl = HISTORY_SKELETON_ROWS;
+    var total = historySkeletonRowsFor(availH);
+    var html = '<div class="chl-inner">';
+    for (var r = 0; r < total; r++) {
+        var row = tpl[r % tpl.length];
+        var i = Math.min(r, HISTORY_SKELETON_STAGGER_CAP);
+        html += '<div class="chl-row ' + row.cls + '" style="--i:' + i + '" aria-hidden="true">';
+        for (var w = 0; w < row.widths.length; w++) {
+            html += '<div class="chl-line" style="width:' + row.widths[w] + '"></div>';
+        }
+        html += '</div>';
+    }
+    /* 读屏文案：进度条/spinner/可见文案三件套已按用户要求移除，覆盖层内再无任何可见
+       文字；没有这段 sr-only 文本，aria-live 区域就是空的，读屏用户只能听到「空白」。 */
+    html += '<span class="chl-sr">' + escapeHtml(GourdI18n.t('history.msgLoading')) + '</span>';
+    html += '</div>';
+    return html;
+}
+
+function historyFailedHtml() {
+    return '<div class="chl-failed-card">'
+        + '<svg class="chl-failed-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>'
+        + '<span>' + escapeHtml(GourdI18n.t('history.msgFailed')) + '</span>'
+        + '<button type="button" class="chl-retry-btn">' + escapeHtml(GourdI18n.t('history.msgRetry')) + '</button>'
+        + '</div>';
+}
+
+function clearHistoryLoadingTimer(sessionId) {
+    if (_historyLoadingTimers[sessionId]) {
+        clearTimeout(_historyLoadingTimers[sessionId]);
+        delete _historyLoadingTimers[sessionId];
+    }
+}
+
+function showHistoryLoading(sess) {
+    if (!sess || !sess.container) return;
+    // 容器已有真实内容（理论上走不到——调用方先判空）：不遮挡正文
+    if (sess.container.children.length > 0) return;
+    var host = historyOverlayHost();
+    if (!host) return;
+    clearHistoryLoadingTimer(sess.sessionId);
+    var old = host.querySelector('.chat-history-loading');
+    if (old) old.remove();
+    var el = document.createElement('div');
+    el.className = 'chat-history-loading';
+    el.setAttribute('aria-live', 'polite');
+    el.dataset.ownerSession = sess.sessionId;
+    /* 【顺序不可换】先入文档、再填内容。aria-live 只在「已存在于文档中的 live region
+       内文本发生变化」时播报；把一棵已经带好文本的子树一次性 appendChild 进去，
+       多数读屏器视为「内容与节点同时出现」，不触发播报 —— 等于 sr-only 文案白写。
+       el 是 position:absolute，不参与 shell 的 flex 布局，提前 append 不影响
+       下面 clientHeight 的读数。 */
+    host.appendChild(el);
+    // 按 shell 实际高度决定骨架行数（拿不到高度时 helper 内部自己兜底）
+    el.innerHTML = historySkeletonHtml(host.clientHeight || 0);
+    updateHistoryLoadingShellClass(host);
+    // 超时兜底：请求悬挂（无 timeout 参数）时降级为失败+重试，不留永久转圈
+    _historyLoadingTimers[sess.sessionId] = setTimeout(function () {
+        delete _historyLoadingTimers[sess.sessionId];
+        var host2 = historyOverlayHost();
+        var cur = host2 && host2.querySelector('.chat-history-loading');
+        if (!cur || cur.dataset.ownerSession !== sess.sessionId) return;   // 已被撤销/被新会话接管
+        /* 【不能在这里直接换失败卡】先排空缓冲：在途的实时帧可能已经带着真实内容，
+           排空后 sess.container 就不再是空的。直接写 innerHTML 会绕过
+           「容器已有内容 ⇒ 只撤骨架、绝不叠失败卡」这条守卫，把成功的加载误报成
+           失败卡，而且失败卡是 absolute inset:0，会把刚到的正文整块盖住（已实测复现）。
+           统一交给 hideHistoryLoading 判定 —— 它是这条守卫的唯一定义处。 */
+        /* 【P0-2 修复 2026-11】请求已成功、正在分片回放（_replaying）时，12s 定时器
+            不再直接放手（旧实现把定时器消费掉且永不重排，此后 rAF 链一旦卡死，
+            门禁/覆盖层/骨架永久残留 = 白屏）。改为：重排一次宽限定时器，宽限内仍未
+            收尾（_replaying 仍为真）则强制收口——replayChunk 的 stall hook 会执行
+            finishReplayFallback（salvage 半成品 + 释放门禁 + 撤骨架）。 */
+        if (sess._replaying) {
+            _historyLoadingTimers[sess.sessionId] = setTimeout(function () {
+                delete _historyLoadingTimers[sess.sessionId];
+                var host3 = historyOverlayHost();
+                var cur3 = host3 && host3.querySelector('.chat-history-loading');
+                if (!cur3 || cur3.dataset.ownerSession !== sess.sessionId) return;   // 已被撤销/被新会话接管
+                if (!sess._replaying) {
+                    /* 宽限期间恰好收尾完成：replayDoneCore 已撤骨架，无事可做。 */
+                    return;
+                }
+                console.error('[history] 回放分片链卡死（宽限 ' + REPLAY_STALL_GRACE_MS + 'ms 内无收尾），强制收口');
+                /* 通知 replayChunk：下一帧分片回调进入时直接走 fallback 收尾，
+                    半成品由 finishReplayFallback salvage 入真实容器，绝不白屏。
+                    不 cancel rAF：挂着的那帧正是 stall hook 的载体，掐了它就只剩
+                    下面的盲收口（无 salvage）。 */
+                sess.__replayStalled = true;
+                /* 盲兜底：250ms 后 stall hook 仍未生效（rAF 链彻底死透，连挂起帧
+                    都没有），只能就地强制释放门禁与骨架。renderTarget 仍指向 tempDiv
+                    （回放期渲染落点），把里面的半成品 salvage 进真实容器，尽量保内容。 */
+                setTimeout(function () {
+                    if (!sess._replaying) return;   // stall 标记生效后已被正常收尾
+                    console.error('[history] stall 标记未生效，强制释放回放门禁与加载态');
+                    sess.__replayStalled = false;
+                    sess._replaying = false;
+                    sess._gateBuffering = false;
+                    sess._skipScroll = false;
+                    sess.isStreaming = false;
+                    try {
+                        /* 回放期 sess.renderTarget 正是 replaySession 的 tempDiv（游离
+                            半成品容器）；salvage 它而非引用局部变量（此处拿不到）。 */
+                        var stalledTarget = sess.renderTarget;
+                        if (stalledTarget && stalledTarget !== sess.container
+                                && stalledTarget.firstChild && sess.container) {
+                            sess.container.appendChild(stalledTarget);
+                        }
+                    } catch (eSalv) { /* salvage 失败不阻断收口 */ }
+                    sess.renderTarget = null;
+                    hideHistoryLoading(sess, { failed: true });
+                    try { drainGateBuffer(sess); } catch (e1) {}
+                }, 250);
+            }, REPLAY_STALL_GRACE_MS);
+            return;
+        }
+        try { drainGateBuffer(sess); } catch (e) {}
+        /* 【超时即断流 2026-11】12s 已降级成失败+重试卡，必须同时 abort 在途 replay。
+            旧实现只换 UI 态、不作废回调：请求几十秒后带着 8 万帧回来仍会进 done
+            重建整页，形成「失败卡 → 迟到内容 → 二次骨架」交错。
+            abort 触发的 .fail('abort') 由 loadMessages 显式忽略，不再叠加二次请求。
+            sess 上没有句柄时（契约沙箱 / 纯展示调用）整段短路，行为与改前一致。 */
+        try {
+            var pendingXhr = sess._historyLoadXhr;
+            if (pendingXhr && typeof pendingXhr.abort === 'function' && pendingXhr.readyState !== 4) {
+                pendingXhr.abort();
+            }
+        } catch (abortErr) { /* abort 失败不阻断降级卡 */ }
+        hideHistoryLoading(sess, { failed: true });
+    }, HISTORY_LOAD_TIMEOUT_MS);
+}
+
+/** 撤掉 sess 的加载态。归属校验：迟到的旧会话收尾回调不得撤掉新会话正在显示的覆盖层。
+    opts.failed=true：换成失败+重试卡（请求确实终结且无内容）。 */
+function hideHistoryLoading(sess, opts) {
+    if (!sess) return;
+    clearHistoryLoadingTimer(sess.sessionId);
+    var host = historyOverlayHost();
+    if (!host) return;
+    var el = host.querySelector('.chat-history-loading');
+    var mine = (el && el.dataset.ownerSession === sess.sessionId) ? el : null;
+    if (!opts || !opts.failed) {
+        if (mine) { mine.remove(); updateHistoryLoadingShellClass(host); }
+        return;
+    }
+    // failed：先撤骨架，再看真实容器有没有落地内容——有内容绝不叠失败卡（回放收尾异常
+    // 或半成品 salvaging 后容器可能已有可用内容，叠卡会误导成「加载失败」）；
+    // 容器仍空才放重试卡。归属不符（迟到回调）时什么都不做，绝不碰新会话的覆盖层。
+    if (!mine) return;
+    mine.remove();
+    // 容器已有落地内容：只撤骨架，绝不叠失败卡（回放收尾异常/半成品 salvaging 后
+    // 容器可能已可用，叠卡会把「成功」误报成「加载失败」）。
+    if (sess.container && sess.container.children.length > 0) {
+        updateHistoryLoadingShellClass(host);
+        return;
+    }
+    var f = document.createElement('div');
+    f.className = 'chat-history-loading chl-failed';
+    f.setAttribute('aria-live', 'polite');
+    f.dataset.ownerSession = sess.sessionId;
+    // 同 showHistoryLoading：先入文档再填内容，否则读屏不播报失败态
+    host.appendChild(f);
+    f.innerHTML = historyFailedHtml();
+    updateHistoryLoadingShellClass(host);
+}
+
+/** 撤掉「不属于 sessionId」的残留覆盖层（setActiveSession 钩子，见文件头注释）。 */
+function dismissHistoryLoadingExcept(sessionId) {
+    var host = historyOverlayHost();
+    if (!host) return;
+    var el = host.querySelector('.chat-history-loading');
+    if (el && el.dataset.ownerSession !== sessionId) {
+        clearHistoryLoadingTimer(el.dataset.ownerSession);
+        el.remove();
+        updateHistoryLoadingShellClass(host);
+    }
+}
+window.dismissHistoryLoadingExcept = dismissHistoryLoadingExcept;
+
+/* 失败卡重试：委托到 document（覆盖层随撤销即销毁，无需解绑）。
+   归属 sessionId 存 data-owner-session，按它反查 sessionMap；
+   重试 = 摘卡 → 重新走与首次进入完全相同的管线（loadMessages 会重新放骨架）。 */
+$(document).on('click', '.chl-retry-btn', function () {
+    var overlay = $(this).closest('.chat-history-loading')[0];
+    if (!overlay) return;
+    var sid = overlay.dataset.ownerSession;
+    clearHistoryLoadingTimer(sid);
+    var sess = sessionMap[sid];
+    var host = historyOverlayHost();
+    overlay.remove();
+    updateHistoryLoadingShellClass(host);
+    if (sess) loadMessages(sess);
+});
+
 function loadMessages(sess) {
+    if (!sess || !sess.container) return;
     var rootQ = sessionRootQ(sess);
+    /* 【2026-11 白屏止血 · 请求世代号】旧实现是裸 $.get：切会话/点重试后旧请求
+        的 done 仍会改游标并起一次 replaySession，两个回放共用 renderTarget 与
+        _replayRafId。每次加载自增代号，done/fail 只在自己仍是当前代时生效。 */
+    var gen = (sess._historyLoadGeneration || 0) + 1;
+    sess._historyLoadGeneration = gen;
+    /* 重试前先作废并断开上一次请求（失败卡重试点得快时尤其关键）。 */
+    try {
+        var prevXhr = sess._historyLoadXhr;
+        if (prevXhr && prevXhr.readyState !== 4 && typeof prevXhr.abort === 'function') prevXhr.abort();
+    } catch (e0) { /* 断开失败不阻断重新加载 */ }
     // 发请求前即开启回放/实时互斥门禁：期间到达的同会话实时帧先入缓冲，
     // 回放完成后由 drainGateBuffer 统一去重喂入，避免「后端任务未结束 + UI 发起回放」
     // 竞态窗口内同一事件被两条管线各渲染一次。
@@ -1670,37 +2137,67 @@ function loadMessages(sess) {
     // 优先尝试「流式过程回放」：若该会话已落盘完整过程事件（工具卡片/思考/正文/trace），
     // 原样重建，历史里也能看到「做了哪些操作」。无回放数据时回退到旧的纯文本加载。
     // 初始只加载最后 REPLAY_PAGE_ROUNDS 轮对话。
-    $.get('/web/chat/replay?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ + '&rounds=' + REPLAY_PAGE_ROUNDS, function(rp) {
-        var rpData = rp && rp.data;
-        if (rpData && rpData.events && rpData.events.length > 0) {
-            try {
-                sess._replayHasMore = !!rpData.hasMore;
-                sess._replayRemainingRounds = rpData.remainingRounds || 0;
-                // 向上翻页游标：本页最早事件的 seq，下次只取比它更早的，不再重拉整段历史
-                sess._replayFirstSeq = rpData.firstSeq || 0;
-                // 快照覆盖集：标识「回放已渲染的事件」，供缓冲/迟到的实时帧去重（本轮 done 时清除）
-                sess._replayCoverage = buildReplayCoverage(rpData.events);
-                // 尾部快照中实际渲染的最大 eventSeq 才是稳定游标；不能使用 latestSeq（文件可能还有未渲染的新事件）。
-                for (var rsi = 0; rsi < rpData.events.length; rsi++) {
-                    var rseq = Number(rpData.events[rsi] && rpData.events[rsi].eventSeq || 0);
-                    if (rseq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, rseq);
-                }
-                replaySession(sess, rpData.events, false, !!rpData.running);
+    showHistoryLoading(sess);
+    var replayXhr = $.ajax({
+        url: '/web/chat/replay?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ + '&rounds=' + REPLAY_PAGE_ROUNDS,
+        method: 'GET',
+        /* 真实 HTTP 超时：与 12s 骨架兜底同口径。旧实现没有 timeout，大会话响应
+           悬挂时只能靠 UI 定时器降级，而回调仍然有效 → 失败卡与迟到内容打架。 */
+        /* timeout 用宽口径（watchdog 先行降级并 abort；同值会触发 P1-1 三态交错竞态）。 */
+        timeout: HISTORY_HTTP_TIMEOUT_MS,
+        success: function (rp) {
+            if (sess._historyLoadGeneration !== gen || (typeof sessionMap !== 'undefined' && sessionMap[sess.sessionId] !== sess)) return;
+            var rpData = rp && rp.data;
+            /* 后端文件读失败 / 坏行会静默回 code:200 + events:[]（core/session/mod.rs
+               :240-242/:344-346）。前端必须先看 code，否则「加载失败」被误当新对话
+               走 legacy，用户只看到过程消息凭空消失。 */
+            if (rp && rp.code && Number(rp.code) !== 200) {
+                console.error('[loadMessages] replay 返回错误码:', rp.code, rp.description || '');
+                replayXhr = null;
+                loadMessagesLegacy(sess, rootQ, gen);
                 return;
-            } catch (e) {
-                /* 回放异常：清空可能的半成品，回退纯文本加载。
-                   这里必须清真实容器——旧实现执行到此处时 sess.container 已被 replaySession
-                   换成临时容器，清空操作打在孤儿节点上，真实容器里的半成品原样留着。
-                   容器语义恒定后该问题自然消失，同时显式中止回放，释放门禁与渲染落点。*/
-                try { if (typeof abortReplay === 'function') abortReplay(sess); } catch (e3) {}
-                try { $(sess.container).html(''); } catch (e2) {}
             }
+            if (rpData && rpData.events && rpData.events.length > 0) {
+                try {
+                    sess._replayHasMore = !!rpData.hasMore;
+                    sess._replayRemainingRounds = rpData.remainingRounds || 0;
+                    // 向上翻页游标：本页最早事件的 seq，下次只取比它更早的，不再重拉整段历史
+                    sess._replayFirstSeq = rpData.firstSeq || 0;
+                    // 快照覆盖集：标识「回放已渲染的事件」，供缓冲/迟到的实时帧去重（本轮 done 时清除）
+                    sess._replayCoverage = buildReplayCoverage(rpData.events);
+                    // 尾部快照中实际渲染的最大 eventSeq 才是稳定游标；不能使用 latestSeq（文件可能还有未渲染的新事件）。
+                    for (var rsi = 0; rsi < rpData.events.length; rsi++) {
+                        var rseq = Number(rpData.events[rsi] && rpData.events[rsi].eventSeq || 0);
+                        if (rseq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, rseq);
+                    }
+                    /* HTTP 已终结，句柄清空；回放由 replaySession 自己的收尾链负责。 */
+                    sess._historyLoadXhr = null;
+                    replaySession(sess, rpData.events, false, !!rpData.running);
+                    return;
+                } catch (e) {
+                    /* 回放异常：清空可能的半成品，回退纯文本加载。
+                        这里必须清真实容器——旧实现执行到此处时 sess.container 已被 replaySession
+                        换成临时容器，清空操作打在孤儿节点上，真实容器里的半成品原样留着。
+                        容器语义恒定后该问题自然消失，同时显式中止回放，释放门禁与渲染落点。*/
+                    try { if (typeof abortReplay === 'function') abortReplay(sess); } catch (e3) {}
+                    try { $(sess.container).html(''); } catch (e2) {}
+                }
+            }
+            // replay 无事件（新对话）或异常：走纯文本加载路径（缓冲在 legacy 加载完成时统一排空）
+            sess._historyLoadXhr = null;
+            loadMessagesLegacy(sess, rootQ, gen);
+        },
+        error: function (xhr, textStatus) {
+            /* abort（切会话 / 超时兜底 / 重试作废）不是失败：当前代已被顶掉或已被
+               降级卡处理，绝不能再叠一次 legacy 请求与失败卡。 */
+            if (textStatus === 'abort') return;
+            if (sess._historyLoadGeneration !== gen || (typeof sessionMap !== 'undefined' && sessionMap[sess.sessionId] !== sess)) return;
+            console.error('[loadMessages] replay 请求失败:', textStatus, xhr && xhr.status);
+            sess._historyLoadXhr = null;
+            loadMessagesLegacy(sess, rootQ, gen);
         }
-        // replay 无事件（新对话）或异常：走纯文本加载路径（缓冲在 legacy 加载完成时统一排空）
-        loadMessagesLegacy(sess, rootQ);
-    }).fail(function() {
-        loadMessagesLegacy(sess, rootQ);
     });
+    sess._historyLoadXhr = replayXhr;
 }
 
 /**
@@ -2077,6 +2574,12 @@ function replaySession(sess, events, prepend, keepOpen) {
     // 初始加载（prepend=false）走原有 resumeState 逻辑，不受影响。
     var liveState = prepend ? captureLiveStreamState(sess) : null;
     var tempDiv = document.createElement('div');
+    /* 【2026-11 白屏止血】fragment 必须提升到闭包作用域：旧实现是 replayDoneCore 的
+        局部变量，「抽空 tempDiv → 抽到 fragment → 入真实容器」这段窗口内一旦抛错
+        （endTurn / stitch / getBoundingClientRect / html('') 任一），覆盖层已先撤，
+        finishReplayFallback 又只捞已空的 tempDiv ⇒ 内容既不在 DOM 也不在临时容器、
+        失败卡因 !mine 补不上 ⇒ 真空白。提升后兜底可把未入 DOM 的 fragment 一并捞回。 */
+    var replayFragment = null;
     /* 只切换渲染落点，不动 sess.container（见 app-base.js 的 renderRoot 注释）。
        回放期间 sess.container 仍是文档里的真实容器，因此「加载更多」按钮的相对定位、
        会话判空、异常兜底清空这些依赖真实容器的逻辑全程有效；而回放中断也不再可能
@@ -2158,7 +2661,25 @@ function replaySession(sess, events, prepend, keepOpen) {
                                     ? { imagePaths: rpImages, filePaths: rpFiles } : null);
                             continue;
                         }
-                        if (chunk.type === 'done') { endTurn(); resetStreamState(sess); continue; }
+                        /* 挂起 done（ask_user / HITL）：回放也要落「已挂起」状态覆盖位。
+                           实时侧由 finishStream 的挂起分支传 opts.status 完成（app-streaming.js），
+                           回放侧不经 finishStream，若不同步打标，刷新/切会话后同一挂起段会从
+                           「已挂起」变回「已完成」—— 正是本次要消除的那种实时/回放分叉。
+                           必须在 endTurn() 之前：它内部 resetStreamState 会清 currentBubbleEl，
+                           清了就再也定位不到该段气泡。挂起段不发 trace 帧（后端 done_suspended
+                           直接 return），气泡无徽标，故用覆盖位回落；缝合过户徽标时徽标真值
+                           优先（readTurnMeta 已按此排序），不会误挂。 */
+                        if (chunk.type === 'done') {
+                            if (chunk.suspended === true && sess.currentBubbleEl) {
+                                var susBubble = sess.currentBubbleEl.parentNode;
+                                var tcApiSus = (typeof window !== 'undefined') ? window.GourdTurnCompact : null;
+                                if (susBubble && tcApiSus && tcApiSus.markTurnStatus) {
+                                    try { tcApiSus.markTurnStatus(susBubble, 'suspended'); }
+                                    catch (susErr) { console.error('[replayChunk] 挂起轮状态标记失败:', susErr); }
+                                }
+                            }
+                            endTurn(); resetStreamState(sess); continue;
+                        }
                         /* file_changes 是被动 run 快照：回放时也不得为了复用渲染入口临时置
                            isStreaming=true，否则对账与流状态语义会被元数据事件污染。 */
                         if (chunk.type === 'file_changes') {
@@ -2198,6 +2719,13 @@ function replaySession(sess, events, prepend, keepOpen) {
         }
 
         if (idx < events.length) {
+            /* 【P0-2 修复 2026-11】stall hook：watchdog 宽限耗尽时置 __replayStalled，
+                此处检测到即直接走 fallback 收尾（salvage 半成品 + 释放门禁），
+                而不是继续喂帧——卡死的 rAF 链若还在动，也能在下一帧被拦下。 */
+            if (sess.__replayStalled) {
+                finishReplayFallback(new Error('replay stalled (watchdog grace exhausted)'));
+                return;
+            }
             /* 还有未处理的事件，下一帧继续。
                回调整体兜底：rAF 回调抛出的异常无人接管，会直接终止分片链，
                replayDone 永不执行 → 门禁永不释放（与旧版 cancelAnimationFrame 同样的僵死后果）。*/
@@ -2218,6 +2746,9 @@ function replaySession(sess, events, prepend, keepOpen) {
        _replaying / _gateBuffering 门禁、排空实时帧缓冲——少做任何一步，后续实时帧都会
        被永久扣在缓冲区里，表现为「后端在跑、界面不动」。 */
     function finishReplayFallback(err) {
+        try { sess.__replayStalled = false; } catch (eStall) {}
+        // 兜底：半成品若已并入容器则静默撤骨架；容器仍空才亮失败卡（见 hideHistoryLoading）
+        hideHistoryLoading(sess, { failed: true });
         console.error('[replaySession] 回放收尾异常，执行兜底:', err);
         try {
             sess.renderTarget = null;
@@ -2233,6 +2764,16 @@ function replaySession(sess, events, prepend, keepOpen) {
                 if (prepend) realContainer.insertBefore(salvage, realContainer.firstChild);
                 else realContainer.appendChild(salvage);
             }
+            /* 【2026-11 白屏止血】异常发生在「已抽空 tempDiv、fragment 尚未入 DOM」窗口时，
+                上面的 salvage 捞不到任何东西（tempDiv 已空），旧实现就此留下空容器 + 无
+                骨架 + 无失败卡（覆盖层已被 replayDoneCore 先撤且 !mine 补不上）。
+                此时 replayFragment 仍持有尚未落地的全部行，直接并入即可保住内容。
+                入 DOM 后 fragment 自身会被清空，故不会重复插入。 */
+            if (replayFragment && replayFragment.firstChild && realContainer) {
+                if (prepend) realContainer.insertBefore(replayFragment, realContainer.firstChild);
+                else realContainer.appendChild(replayFragment);
+            }
+            replayFragment = null;
         } catch (e) { /* 兜底本身不得再抛 */ }
         try { drainGateBuffer(sess); } catch (e) {}
         if (prepend && replayLoadMoreToken != null) {
@@ -2258,6 +2799,8 @@ function replaySession(sess, events, prepend, keepOpen) {
     }
 
     function replayDoneCore() {
+        try { sess.__replayStalled = false; } catch (eStall) {}
+        hideHistoryLoading(sess);   // 内容即将移入真实容器，先撤覆盖层
         var resumeState = null;
         if (keepOpen && !prepend && (sess.currentBubbleEl || sess.thinkingBlockEl || sess.pendingToolCard)) {
             resumeState = {
@@ -2280,6 +2823,14 @@ function replaySession(sess, events, prepend, keepOpen) {
         } else {
             endTurn();
         }
+        /* resume 末轮补挂运行态样式：该行建于 _replaying=true 期（ensureAssistantBubble
+           刻意不挂 agent-live），恢复后实时帧继续写入同一行且不再重建行，
+           若不补挂，该轮实时过程行会失去扁平轨迹样式（B8）。
+           只补类、不动 _replaying（门禁语义，20+ 消费方）。 */
+        if (resumeState && resumeState.currentBubbleEl && resumeState.currentBubbleEl.closest) {
+            var resumeRow = resumeState.currentBubbleEl.closest('.msg-row');
+            if (resumeRow && resumeRow.classList) resumeRow.classList.add('agent-live');
+        }
         sess._replaying = false;
         sess._replayClock = null;
         sess.isStreaming = false;
@@ -2289,6 +2840,7 @@ function replaySession(sess, events, prepend, keepOpen) {
         // 回放结束：还原渲染落点，后续一律写真实容器
         sess.renderTarget = null;
         var fragment = document.createDocumentFragment();
+        replayFragment = fragment;
         while (tempDiv.firstChild) { fragment.appendChild(tempDiv.firstChild); }
         // prepend 的空气泡清扫只能扫本页新插入的节点，故先留存引用（入 DOM 后 fragment 会被清空）
         var prependedRows = prepend ? Array.prototype.slice.call(fragment.childNodes) : null;
@@ -2359,6 +2911,71 @@ function replaySession(sess, events, prepend, keepOpen) {
             // 初始加载模式：清空后移入
             $(realContainer).html('');
             realContainer.appendChild(fragment);
+        }
+
+        /* P2-6 按轮 Compact 折叠：一轮结束时把思考/工具过程行收起成一行统计摘要，
+           只留最终正文。必须在 fragment 移入真实容器之后（要量 DOM 子节点）、
+           高亮/mermaid/插话补测与滚动锚定修正之前（折叠会改变行高，先滚后折会错位）。
+           【逐轮独立】lastTurnClosed 只描述本页最后一轮自身是否结束，与「是否还有更早历史」
+           无关 —— dsh #6250 的 `!historyIncomplete` 全局门控会让长会话折叠全部失效。
+           进行中的最后一轮（keepOpen）必须保留全部过程证据，不许折叠。
+           偏好开关：localStorage 的 gourd.turnCompact === '0' 时完全不启用（可一键回退）。 */
+        try {
+            var tcApi = (typeof window !== 'undefined') ? window.GourdTurnCompact : null;
+            var tcOff = false;
+            try { tcOff = (typeof localStorage !== 'undefined') && localStorage.getItem('gourd.turnCompact') === '0'; } catch (tcLsErr) { /* 隐私模式忽略 */ }
+            if (tcApi && tcOff) {
+                /* 关掉偏好后必须撤销【已渲染】的折叠，否则只是「不再新增」，
+                   屏幕上仍留着上一轮插好的摘要按钮和隐藏标记 = 回退名不副实。
+                   clearTurnCompact 幂等：无标记时是空扫描。 */
+                tcApi.clearTurnCompact(realContainer);
+                /* 运行态批次盖子与 turn-compact 共用同一偏好开关：关掉时一并撤销，
+                   否则历史里仍留着「已处理」盖子与折叠成员 = 回退名不副实。 */
+                var tbApiOff = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
+                if (tbApiOff && tbApiOff.clearBatch) tbApiOff.clearBatch(realContainer);
+            } else if (tcApi) {
+                /* 【历史 = 运行态】回放重建的历史气泡没有批次盖子（noteProcessInsert 有
+                   _replaying 门禁，运行期不建盖子）。点开整轮摘要后过程行会逐条平铺，
+                   与运行态的 Qoder 多折叠组形态对不上（用户 2026-11 报障）。
+                   故在 applyTurnCompact 之前按运行态同一套边界规则补建 closed 态批次组
+                   —— compact 的分类要看到已收口的盖子形态，顺序不能反。
+                   幂等：气泡已有盖子（运行态延续/重复调用）时跳过。 */
+                try {
+                    var tbRebuild = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
+                    if (tbRebuild && tbRebuild.rebuildBatchesIn) {
+                         tbRebuild.rebuildBatchesIn(realContainer, {
+                             scopeRows: prepend ? (prependedRows || []) : null,
+                             // 盖子文案 i18n（与 applyTurnCompact 的 translate 同口径）
+                             translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t) ? function (k) { return GourdI18n.t(k); } : null
+                         });
+                    }
+                } catch (rebuildErr) {
+                    console.error('[replaySession] 历史批次重建失败:', rebuildErr);
+                }
+                var lastClosed = !keepOpen;
+                if (!lastClosed) {
+                    for (var tci = events.length - 1; tci >= 0; tci--) {
+                        var tcType = events[tci] && events[tci].type;
+                        if (tcType === 'user' || tcType === 'user_input') break;
+                        if (tcType === 'done' || tcType === 'trace') { lastClosed = true; break; }
+                    }
+                }
+                tcApi.applyTurnCompact(realContainer, {
+                    lastTurnClosed: lastClosed,
+                    /* 【code review 修复 2026-11】回放轮全部是已发生的历史，必须与运行态
+                       finishStream 真收口同口径传 ended:true —— 否则「批次盖子让位」
+                       门禁（compactBubble 只在 ended 时放行）会把带盖子的历史轮全部
+                       短路，历史无正文轮永不折成整轮摘要，与运行态形态分叉。
+                       keepOpen 的进行中轮由 lastTurnClosed 排除，不会被误折。 */
+                    ended: true,
+                    // prepend 只折本次新插入的更早历史轮，绝不碰容器底部正在实时流式的回复
+                    scopeRows: prepend ? (prependedRows || []) : null,
+                    translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t) ? function (k) { return GourdI18n.t(k); } : null
+                });
+            }
+        } catch (tcErr) {
+            // 纯展示增强，任何异常都不许影响历史消息本身的可用性
+            console.error('[replaySession] 按轮 Compact 折叠失败:', tcErr);
         }
 
         // 代码高亮和 mermaid 也分片执行，避免阻塞
@@ -2571,11 +3188,29 @@ function stitchPrependedRunRows(fragment, realContainer, sess) {
     return { firstMoved: firstMoved, removedVisualTop: removedVisualTop };
 }
 
-function loadMessagesLegacy(sess, rootQ) {
-    $.get('/web/chat/messages?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ, function(resp) {
+/* 【2026-11】historyGen：由 loadMessages 传入的加载世代号。切会话/重试后旧请求
+    迟到时直接丢弃，不再把上一代内容盖进当前会话。旧调用方不传则恒为 undefined，
+    undefined === undefined 通过，行为完全向后兼容。 */
+function loadMessagesLegacy(sess, rootQ, historyGen) {
+    /* 【P1-2 修复 2026-11】裸 $.get → $.ajax + timeout + abort 句柄：
+       旧实现无 timeout（请求可无限悬挂）、无 abort（watchdog 12s abort 只对
+       replay XHR 生效，legacy XHR 悬挂时旧响应 done 仍会重建整页）。
+       gen 校验只挡迟到写入，挡不住连接悬挂。timeout 用宽口径（watchdog 先行）。 */
+    var legacyXhr = $.ajax({
+        url: '/web/chat/messages?sessionId=' + encodeURIComponent(sess.sessionId) + rootQ,
+        method: 'GET',
+        timeout: HISTORY_HTTP_TIMEOUT_MS,
+        success: function (resp) {
+            /* 请求完成即摘句柄：watchdog 的 abort 不再指向已终结的请求。 */
+            if (sess._historyLoadXhr === legacyXhr) sess._historyLoadXhr = null;
+        if (historyGen !== undefined && sess._historyLoadGeneration !== historyGen) return;
+        if (typeof sessionMap !== 'undefined' && sessionMap[sess.sessionId] !== sess) return;
         // 声明提到 try 外：异常兜底分支要用到，放在 try 内会踩 var 提升的 undefined 陷阱
         var realContainer = null;
         var tempDiv = null;
+        /* 【2026-11 白屏止血】与 replaySession 同款：fragment 提到闭包作用域，
+            「html('') → 抽空 tempDiv → appendChild」窗口内抛错时兜底仍能捞回内容。 */
+        var legacyFragment = null;
         try {
             var msgs = resp.data;
             realContainer = sess.container;
@@ -2619,14 +3254,24 @@ function loadMessagesLegacy(sess, rootQ) {
             }
 
             function loadDone() {
+                hideHistoryLoading(sess);
                 // 回放结束：还原渲染落点，一次性移入所有子节点
                 sess.renderTarget = null;
                 $(realContainer).html('');
                 var fragment = document.createDocumentFragment();
+                legacyFragment = fragment;
                 while (tempDiv.firstChild) {
                     fragment.appendChild(tempDiv.firstChild);
                 }
                 realContainer.appendChild(fragment);
+                legacyFragment = null;
+                /* legacy 路径从不置 _replaying（它是门禁语义，20+ 消费方，不能借），
+                   而 ensureAssistantBubble 只在 _replaying 为真时省略 agent-live ——
+                   于是这条回退路径的历史行全部带着「本轮正在跑」的运行态样式，
+                   且没有 finishStream 来摘除。纯样式修正：历史行一律摘掉（B7）。
+                   本路径只渲染正文（无思考/工具过程行），折叠在此天然 no-op，不需接。 */
+                var liveRows = realContainer.querySelectorAll('.msg-row.assistant.agent-live');
+                for (var lr = 0; lr < liveRows.length; lr++) liveRows[lr].classList.remove('agent-live');
                 // 统一高亮所有代码块（user 消息的代码块已被 appendUserMessage 标记收集，不会重复）
                 if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(realContainer);
                 if (typeof processMermaidBlocks === 'function') processMermaidBlocks(realContainer);
@@ -2646,14 +3291,40 @@ function loadMessagesLegacy(sess, rootQ) {
                旧实现写的是 if (realContainer) sess.container = realContainer，而 realContainer
                声明在 try 内部：若异常发生在赋值之前（如 resp.data 取值抛错），它是 undefined，
                兜底整个失效、容器永久悬空。现在落点复位无条件执行，不依赖任何局部变量。*/
+            hideHistoryLoading(sess, { failed: true });
             sess.renderTarget = null;
+            /* 【2026-11 白屏止血】旧 catch 只复位落点、无 salvage：中途异常时
+                tempDiv 已抽空、fragment 未入 DOM，且覆盖层已被 loadDone 先撤 ⇒
+                真空白且无失败卡。这里把两处半成品都并入真实容器。 */
+            try {
+                if (realContainer) {
+                    if (tempDiv && tempDiv.firstChild) {
+                        var salvageLegacy = document.createDocumentFragment();
+                        while (tempDiv.firstChild) salvageLegacy.appendChild(tempDiv.firstChild);
+                        realContainer.appendChild(salvageLegacy);
+                    }
+                    if (legacyFragment && legacyFragment.firstChild) {
+                        realContainer.appendChild(legacyFragment);
+                    }
+                }
+            } catch (salvageErr) { /* 兜底本身不得再抛 */ }
+            legacyFragment = null;
             drainGateBuffer(sess);
         }
-    }).fail(function() {
+        },
+        error: function(xhr, textStatus) {
+        if (sess._historyLoadXhr === legacyXhr) sess._historyLoadXhr = null;
+        /* watchdog/loadMessages abort 的不是失败：当前代已被顶掉或已降级处理。 */
+        if (textStatus === 'abort') return;
         // legacy 请求失败也必须释放回放/实时互斥门禁；
         // 否则后续 WebSocket 帧会永久滞留在 _gateBuffer。
+        if (historyGen !== undefined && sess._historyLoadGeneration !== historyGen) return;
+        hideHistoryLoading(sess, { failed: true });
         drainGateBuffer(sess);
+        }
     });
+    /* 注册句柄：loadMessages 重试 / watchdog 12s 降级时能 abort 这条悬挂请求。 */
+    sess._historyLoadXhr = legacyXhr;
 }
 
 /* Load on startup（桌面端等后端就绪再拉，避免冷启动占用连接；浏览器端立即执行）。
@@ -2737,11 +3408,18 @@ function showCmdComplete(inputEl, completeEl, prefix) {
         var cmd = commandList[i];
         // Filter by type based on trigger
         if (cmd.type !== filterType) continue;
-        if (cmd.name.toLowerCase().indexOf(query) === 0 || query.length === 0) {
+        /* 技能行展示「显示名」而非目录 id（如 _user_xxx_pdf）：id 对用户不可读，
+           与市场卡片也对不上。displayName 由后端按市场元数据口径给出，缺失时回退 id。
+           过滤同时匹配 id 与显示名：面板改成显示名后，只按 id 过滤会让中文输入永远筛不中。 */
+        var display = (cmd.type === 'skill' && cmd.displayName) ? cmd.displayName : cmd.name;
+        if (cmd.name.toLowerCase().indexOf(query) === 0
+                || display.toLowerCase().indexOf(query) === 0
+                || query.length === 0) {
             cmdVisibleItems.push(cmd);
             var nameClass = (trigger === '@') ? 'cmd-name subagent' : 'cmd-name skill';
             html += '<div class="cmd-complete-item" data-index="' + (cmdVisibleItems.length - 1) + '">'
-                + '<span class="' + nameClass + '">' + escapeHtml(trigger + cmd.name) + '</span>'
+                + '<span class="' + nameClass + '">' + escapeHtml(trigger + display) + '</span>'
+                + (cmd.type === 'skill' ? '<span class="cmd-id-tag" title="' + escapeAttr(cmd.name) + '">' + escapeHtml(cmd.name) + '</span>' : '')
                 + '<span class="cmd-desc">' + escapeHtml(cmd.description || '') + '</span>'
                 + '</div>';
         }
@@ -2786,56 +3464,131 @@ function hideCmdCompleteFor(el) {
     }
 }
 
+/* ===== 技能小卡片（chip）=====
+   选中技能后不再把 "/技能id" 文本回填进 textarea（旧实现的问题：id 不可读、
+   且触发符占住行首导致一次输入只能触发一个技能），改为在输入框上方的独立
+   chip 行插入一枚小卡片：表面显示技能名，内部 data-skill-id 隐藏真实 id。
+   发送时由 app-streaming.js 把 chip 的 id 以 "/id " 前缀注入消息文本——
+   后端斜杠技能协议（SkillInvocation / Java runSkill）只认 id，展示名不参与路由。
+   多个 chip 的 id 依次前置，服务端按序注入各技能规约。
+
+   容器刻意独立于附件区（.attachments-wrap），理由见 app.css 的 .skill-chips 注释：
+   附件区默认隐藏且被 renderAttachmentsWrap 全量 html('') 重建，chip 寄生其中会
+   既看不见又被附件操作顺手抹掉。这里 chip 只受本文件的增删函数管理。 */
+function chipWrapFor(inputEl) {
+    return (inputEl === welcomeInput) ? '#welcomeSkillChips' : '#chatSkillChips';
+}
+
+/* 维护容器可见性：有 chip 才显形（.has-chips）。增删后统一调它，避免遗漏。 */
+function syncSkillChipsVisibility($wrap) {
+    $wrap.toggleClass('has-chips', $wrap.find('.skill-chip').length > 0);
+}
+
+function addSkillChip(inputEl, cmd) {
+    var id = cmd.name;
+    var display = cmd.displayName || cmd.name;
+    var $wrap = $(chipWrapFor(inputEl));
+    // 同一技能不重复挂卡：重复触发只会让用户困惑「到底生效几个」
+    if ($wrap.find('.skill-chip[data-skill-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]').length) {
+        return false;
+    }
+    var $chip = $('<span class="skill-chip" contenteditable="false"></span>')
+        .attr('data-skill-id', id)
+        .attr('title', id)
+        .append('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>')
+        .append($('<span class="skill-chip-name"></span>').text(display))
+        .append('<button type="button" class="skill-chip-x" aria-label="remove">&#10005;</button>');
+    $wrap.append($chip);
+    syncSkillChipsVisibility($wrap);
+    return true;
+}
+
+/* 读取输入框关联的全部技能 chip：[{id, name}]。
+   id 是路由键（发送时前置为 "/id "），name 是展示名（气泡回显用人读形态）。
+   一次读全，避免发送链路里分两处查 DOM —— 两处之间任何一次重渲染都会让
+   id 与展示名对不上号。 */
+function getSkillChips(inputEl) {
+    var out = [];
+    $(chipWrapFor(inputEl)).find('.skill-chip').each(function () {
+        var id = $(this).attr('data-skill-id');
+        if (!id) return;
+        out.push({ id: id, name: $(this).find('.skill-chip-name').text() || id });
+    });
+    return out;
+}
+
+/* 读取输入框关联的全部技能 chip id（发送时注入用） */
+function getSkillChipIds(inputEl) {
+    return getSkillChips(inputEl).map(function (c) { return c.id; });
+}
+
+/* 发送后清空 chip（与 clearInput 同语义）。chat/welcome 两个容器分别清。 */
+function clearSkillChips(fromWelcome) {
+    var $chat = $('#chatSkillChips').empty();
+    syncSkillChipsVisibility($chat);
+    if (fromWelcome) {
+        var $welcome = $('#welcomeSkillChips').empty();
+        syncSkillChipsVisibility($welcome);
+    }
+}
+window.getSkillChipIds = getSkillChipIds;
+window.getSkillChips = getSkillChips;
+window.clearSkillChips = clearSkillChips;
+
+/* chip 的删除按钮：委托到 document，删后同步所属容器可见性 */
+$(document).on('click', '.skill-chip-x', function (e) {
+    e.stopPropagation();
+    var $chip = $(this).closest('.skill-chip');
+    var $wrap = $chip.parent();
+    $chip.remove();
+    syncSkillChipsVisibility($wrap);
+});
+
+/* 用 replacement 替换输入框中的触发段 [token.start, token.end)，光标停在替换文本末尾。
+   技能选中后 replacement 为空串（触发段消失，技能以 chip 形式存在）；
+   子代理选中后为 "@name"（保留旧的文本协议）。 */
+function replaceCmdToken(inputEl, token, replacement) {
+    var val = inputEl.value;
+    var before = val.substring(0, token.start);
+    var after = val.substring(token.end);
+    /* 回填文本后必须留一个空格分隔，且【after 为空串时同样要补】—— 这正是子代理
+       选完就失效的病根：后端子代理路由（WebGate/WsGate/CliShell）一律按
+       `input.startsWith("@")` + `indexOf(" ")` 剥 agentName，剥不出就当普通文本。
+       旧条件多写了一个 `after &&`，而选完候选时光标通常在末尾（after === ''，falsy）
+       → 不补空格 → 用户接着输入就粘成 "@general帮我查一下" → 后端 indexOf(" ") == -1
+       → agentName 恒为 null，子代理从未被调用，整串还被当提示词发给主代理。 */
+    if (replacement && !/^\s/.test(after)) replacement += ' ';
+    inputEl.value = before + replacement + after;
+    var pos = before.length + replacement.length;
+    inputEl.setSelectionRange(pos, pos);
+    autoResize(inputEl);
+}
+
 function applyCmdSelection(inputEl, completeEl) {
     if (cmdActiveIndex >= 0 && cmdActiveIndex < cmdVisibleItems.length) {
         var cmd = cmdVisibleItems[cmdActiveIndex];
-        var trigger = cmdTrigger || '/';
-        
-        // 找到当前输入框中的命令前缀位置
-        var val = inputEl.value;
-        var prefixPos = -1;
-        
-        /* 定位触发符：只认「行首」或「空白之后」的那一个。
-           不能像旧实现那样反向扫任意 / 或 @——技能名本身可能含 /（两级组织，
-           如 design/lanhu），反向扫描会命中名字内部的 /，把前缀算到第 0 位之后的
-           /design 上，于是 /design/lanhu 点选补全后回填成 /design/design/lanhu。
-           该值到服务端已不是合法技能名，会静默降级成普通文本、SKILL.md 规约完全不注入。
-           （旧符号 $ 不会踩：$ 不在技能名里，反向扫必命中触发符。） */
-        for (var i = val.length - 1; i >= 0; i--) {
-            var ch = val.charAt(i);
-            if (ch === '/' || ch === '@') {
-                if (i === 0 || /\s/.test(val.charAt(i - 1))) {
-                    prefixPos = i;
-                    break;
-                }
-            }
-        }
-        
-        if (prefixPos >= 0) {
-            // 替换前缀及其后面的内容
-            var textBefore = val.substring(0, prefixPos);
-            var textAfter = val.substring(prefixPos);
-            
-            // 找到前缀后面的空格位置（如果有）
-            var spaceIndex = textAfter.indexOf(' ');
-            var argsStr = '';
-            if (spaceIndex >= 0) {
-                argsStr = textAfter.substring(spaceIndex);
-            }
-            
-            // 构建新的值（命令/技能/子代理名称后追加空格）
-            inputEl.value = textBefore + trigger + cmd.name + ' ' + argsStr;
-            
-            // 更新光标位置到命令和空格后面
-            var newCursorPos = textBefore.length + trigger.length + cmd.name.length + 1;
-            inputEl.setSelectionRange(newCursorPos, newCursorPos);
+        /* chip 形态只属于聊天页两个输入框；自动化页（#autoPrompt）等外部宿主
+           复用本函数时仍走旧的文本回填，否则技能会落到聊天页的 chip 行上、
+           宿主自己拿不到（它的 prompt 存在表单里，发送链路不经 sendMessage）。 */
+        var useChip = (inputEl === welcomeInput || inputEl === chatInput);
+        var token = findCmdTriggerToken(inputEl);
+        if (cmd.type === 'skill' && useChip) {
+            // 技能：生成小卡片（展示名 + 隐藏 id），触发段从文本中移除，
+            // textarea 保持干净，可继续输入请求内容、可再触发第二个技能
+            addSkillChip(inputEl, cmd);
+            if (token) replaceCmdToken(inputEl, token, '');
+        } else if (token) {
+            /* 回填符号取 token.trigger（现算），不取 cmdTrigger（面板弹出时缓存）：
+               面板开着时点击 textarea 移动光标并不触发 input，cmdTrigger 不会刷新，
+               用缓存值会把 '@agent' 的候选以 '/' 插进新位置的触发段。 */
+            replaceCmdToken(inputEl, token, token.trigger + cmd.name);
         } else {
-            // 如果没有找到前缀，直接在开头插入
-            inputEl.value = trigger + cmd.name + ' ' + val;
+            // 兜底：面板在无触发段的情况下被 apply（外部宿主直接调用），按旧语义前插
+            var trigger = cmdTrigger || '/';
+            inputEl.value = trigger + cmd.name + ' ' + inputEl.value;
             inputEl.setSelectionRange(trigger.length + cmd.name.length + 1, trigger.length + cmd.name.length + 1);
+            autoResize(inputEl);
         }
-        
-        autoResize(inputEl);
     }
     // 按面板收起：同一函数既服务聊天页两个面板，也服务自动化页面板
     hideCmdCompleteFor(completeEl);
@@ -2882,21 +3635,53 @@ function navigateCmdComplete(e, inputEl, completeEl) {
     return false;
 }
 
+/* 定位光标所在（或紧邻光标前）的 / 或 @ 触发段。
+   旧实现只认「整串以 / 开头且无空格」，于是输入框里一旦有了内容（或已选过一个技能），
+   再打 / 就永远唤不出面板——即用户报的「只能触发一次」。
+
+   现口径分两步（A 优先，B 兜底）：
+   A. 从光标向左扫到最近的空白/串首得到 token；token 本身以 / 或 @ 开头即为触发段。
+      这条同时照顾两级组织技能名（design/lanhu 整段命中，不会被名字内部的 / 截断）。
+   B. token 不以触发符开头时，取 token 内【最后一个】/ 或 @ 作为触发段起点 —— 中文场景
+      必须走这条：「帮我写/」里 token 是整串（中文不带空格分词），只认 A 就永远弹不出面板。
+      同理「+ → 技能」按钮在已有文字后插入 /，随后每敲一个字都要靠 B 续住面板。
+      B 加一道护栏：触发符前一个字符若是 ASCII 字母数字或 : / . - _（URL 与文件路径的
+      构成字符），判为非触发 —— 否则 http://x.com、src/main 这类输入会误弹面板。 */
+function findCmdTriggerToken(inputEl) {
+    var val = inputEl.value;
+    var cursor = inputEl.selectionStart == null ? val.length : inputEl.selectionStart;
+    var start = cursor;
+    while (start > 0 && !/\s/.test(val.charAt(start - 1))) start--;
+    if (start >= cursor) return null; // 光标前无 token（空或紧贴空白）
+    /* 统一回扫：从光标往回找【最后一个】真正的触发符，规则对 A/B 两种形态一致 ——
+       ① i === start：token 就以触发符开头，整段都是正在输入的候选名（技能名可含 /，
+          两级组织如 design/lanhu 必须整段命中，否则回填会算错前缀位置）；
+       ② 触发符前一个字符是名字字符（字母/数字/斜杠/点/横线）：那是 URL 或文件路径
+          的一段，不是触发段，继续往回找；
+       ③ 其余（前一个是中文、空白等）：这是用户新打的触发符，就地成段。
+
+       ⚠ 不能像旧实现那样「token 以 @ 开头就无条件整段命中」。中文不按空格分词，
+       回填出来的 "@general" 与紧接输入的正文会粘成同一个 token（"@general帮我查一下"），
+       此后用户再打的 "@" 永远被这段旧 token 遮住 —— 表现正是「子代理只能触发一次」。
+       必须回扫到【最后】一个触发符，规则 ③ 才接得住。
+       反过来也不能只认规则 ③：`/设计稿` 这类按中文展示名筛选的输入，token 以 / 开头、
+       内部再无触发符，只有规则 ① 能让它成立。 */
+    for (var i = cursor - 1; i >= start; i--) {
+        var c = val.charAt(i);
+        if (c !== '/' && c !== '@') continue;
+        if (i === start) return { start: start, end: cursor, trigger: c };
+        if (/[A-Za-z0-9:/._-]/.test(val.charAt(i - 1))) continue;   // URL / 路径，不是触发段
+        return { start: i, end: cursor, trigger: c };
+    }
+    return null;
+}
+
 function handleInputForCommands(e) {
     var inputEl = e.target;
     var completeEl = (inputEl === welcomeInput) ? $welcomeCmdComplete[0] : $chatCmdComplete[0];
-    var val = inputEl.value;
-
-    if (val.indexOf('/') === 0 || val.indexOf('@') === 0) {
-        // Only show completion when cursor is at the command/agent/skill name part (no spaces yet)
-        var cursorPos = inputEl.selectionStart;
-        var textBeforeCursor = val.substring(0, cursorPos);
-        var spaceIndex = textBeforeCursor.indexOf(' ');
-        if (spaceIndex === -1) {
-            showCmdComplete(inputEl, completeEl, textBeforeCursor);
-        } else {
-            hideCmdComplete();
-        }
+    var token = findCmdTriggerToken(inputEl);
+    if (token) {
+        showCmdComplete(inputEl, completeEl, inputEl.value.substring(token.start, token.end));
     } else {
         hideCmdComplete();
     }
@@ -2908,14 +3693,16 @@ function triggerCmdComplete(inputEl, completeEl, prefix) {
     var cursorPos = inputEl.selectionStart;
     var textBefore = inputEl.value.substring(0, cursorPos);
     var textAfter = inputEl.value.substring(cursorPos);
-    
-    // 在光标位置插入前缀（技能/子代理符号后追加空格）
-    inputEl.value = textBefore + prefix + ' ' + textAfter;
-    
-    // 更新光标位置到前缀和空格后面
-    var newCursorPos = cursorPos + prefix.length + 1;
-    inputEl.setSelectionRange(newCursorPos, newCursorPos);
-    
+
+    /* 光标前已贴着同种触发符（连点两次按钮）时不重复插入，只开面板；
+       否则「+ 菜单 → 技能」连点会堆出 "/ / " 这样的垃圾 token。 */
+    if (textBefore.charAt(textBefore.length - 1) !== prefix) {
+        // 在光标位置插入前缀（不补空格：补了空格 token 即被截断，面板会立刻收起）
+        inputEl.value = textBefore + prefix + textAfter;
+        var newCursorPos = cursorPos + prefix.length;
+        inputEl.setSelectionRange(newCursorPos, newCursorPos);
+    }
+
     inputEl.focus();
     showCmdComplete(inputEl, completeEl, prefix);
 }
@@ -3007,24 +3794,23 @@ $(document).on('click', function(e) {
    WHY 采样而不是封顶显示前 N 条：封顶会让「后半段对话」在轨道上完全没有刻度，
    导航直接失效。采样降级的是「覆盖全部消息」的精度，不降级「跳得中」的能力。
    【与固定步距的关系】间距恒为 min(HISTORY_RAIL_STEP_PX, 轨道高/(n-1))：
-   条数少时取步距（32px，紧凑一簇），条数多时装不下才压缩到 轨道高/(n-1)。
-   压缩分支下 60 根在 676px 轨道上间距约 11.45px，已贴近 12px 命中区上限，
+    条数少时取步距（16px，紧凑一簇），条数多时装不下才压缩到 轨道高/(n-1)。
+    压缩分支下 60 根在 676px 轨道上间距约 11.45px，已贴近 12px 命中区上限，
    再往上就不是「变密」而是「点不准相邻刻度」，所以上限保持 60 ——
    超过 60 条用户消息的会话，轨道表示的是「按时间均匀抽样」，不是逐条。
    【上一版这里写的是「等距后单根占的纵向空间固定（轨道高/(N-1)）」】那是 v2 把等距
-   等同于铺满时的公式；按它算 8 根会得到 96px，与实际的 32px 不符 —— 口径必须含 min()。 */
+    等同于铺满时的公式；按它算 8 根会得到 96px，与实际的 16px 不符 —— 口径必须含 min()。 */
 var HISTORY_RAIL_MAX_TICKS = 60;
 
 /* 刻度的固定步距（像素）。
    【为什么是固定像素而不是铺满轨道】上一版把刻度按「0%~100%」铺满整条轨道，
    8 条消息时就变成 96px 一根 —— 截图上是散落的几个小横线，完全失去「这是一排刻度」的整体感。
    参照稿里它们是紧凑的一小簇：间距恒定、整簇垂直居中、只占轨道中段一段。
-   【为什么是 32】从参照稿量出相邻刻度中心距约 32~38px。取 32 时 8 条消息的簇高 224px
-   （约占轨道 1/3），既不是「一根根散开」也不是「挤成一条虚线」。
-   【为什么还要 min()】刻度多了装不下：20 条 × 32 = 608px 还勉强，30 条要 928px。
-   铺不下时压缩到 trackH/(n-1) 刚好铺满，保证永不溢出、命中区不被挤出轨道，
-   也不会把后段对话挤到轨道外（那等于后半段失去导航）。 */
-var HISTORY_RAIL_STEP_PX = 32;
+    【为什么是 16】2026-11-04 用户对照参照稿指出「刻度的间距太长了」：
+    32px 时 8 条消息拉成 224px 的一长串，散得像几根孤零零的小横线。
+    参照稿里是紧凑一小簇（相邻中心距约 16~18px），8 条只占约 112px。
+    取 16 且保留 min() 压缩分支：条数多时装不下会自动收窄到 trackH/(n-1)。 */
+var HISTORY_RAIL_STEP_PX = 16;
 
 /* 浮层列表每行文本的截断长度。
    卡片宽约 340px、字号 12.5px，单行视觉容量约 24 个汉字；取 48 字是为了
@@ -3331,9 +4117,37 @@ function releaseRailPin() {
     historyRailPinArrived = false;
 }
 
+/** 实测滚动条宽度并写到 .messages-shell 的 --scrollbar-w，供 .history-rail 的
+ *  right 让位使用。2026-11-04「滚动条和刻度位置反了」修复的一环：刻度带改为
+ *  叠在滚动区右缘内侧，必须用真实滚动条宽度（Windows ~15px / macOS overlay 0px）
+ *  把刻度让到滚动条左边；写死 15px 会在 overlay 滚动条平台压住正文右缘。
+ *  offsetWidth - clientWidth 含 border，这里 wrap 无边框，差值即滚动条宽。
+ *  只在值变化时写，避免无谓的样式失效。
+ *  【2026-11-04 review 加固】宿主必须与 historyOverlayHost() 同源：优先按 id 取
+ *  #messagesShell，再退回 parentNode。旧版只写 wrap.parentNode，若 DOM 中插入了
+ *  中间 wrapper（或测试桩无 parentNode），变量会静默写到错误元素 / 干脆不写，
+ *  而 rail 读的是 shell 自身声明的 0px —— 表现就是「刻度压住滚动条且不报错」。 */
+function syncRailScrollbarWidth() {
+    var wrap = typeof messagesWrap !== 'undefined' && messagesWrap ? messagesWrap : null;
+    if (!wrap) return;
+    var shell = typeof document !== 'undefined' && document.getElementById
+        ? document.getElementById('messagesShell')
+        : null;
+    if (!shell) shell = wrap.parentNode || (wrap.parent && wrap.parent[0]) || null;
+    if (!shell || !shell.style) return;
+    var w = Math.max(0, wrap.offsetWidth - wrap.clientWidth);
+    var px = w + 'px';
+    if (shell.style.getPropertyValue('--scrollbar-w') !== px) {
+        shell.style.setProperty('--scrollbar-w', px);
+    }
+}
+
 /** 重建轨道。items 为空则整条轨道隐藏。 */
 function renderHistoryRail(force) {
     if (!$historyRail.length) return;
+    /* 位置修正：轨道是 absolute 覆盖层，右让位量必须跟着滚动条宽度走。
+       每次重建（含窗口 resize）都刷一次，overlay 滚动条启停时也能对齐。 */
+    syncRailScrollbarWidth();
     var sess = activeSessionId ? sessionMap[activeSessionId] : null;
     var items = collectRailMessages();
 
@@ -3446,14 +4260,14 @@ function scheduleRailTipHide() {
     cancelRailTipHide();
     historyRailTipHideTimer = setTimeout(function() {
         historyRailTipHideTimer = null;
-        $historyRailTip.removeClass('is-shown has-cursor');
+        $historyRailTip.removeClass('is-shown');
     }, HISTORY_RAIL_TIP_HIDE_DELAY);
 }
 
 /** 立即关闭（切换会话 / 跳转 / 轨道重建这些「确定要关」的场景）。 */
 function hideHistoryRailTip() {
     cancelRailTipHide();
-    if ($historyRailTip.length) $historyRailTip.removeClass('is-shown has-cursor');
+    if ($historyRailTip.length) $historyRailTip.removeClass('is-shown');
 }
 
 /** 构建/更新浮层列表：每行 = 一条历史消息 + 行尾同款刻度。
@@ -3471,8 +4285,7 @@ function renderRailTipList() {
     if (sig === historyRailTipSig && $historyRailTip.find('.history-rail-tip-row').length) return;
     historyRailTipSig = sig;
 
-    var html = '<div class="history-rail-tip-list">'
-        + '<span class="history-rail-tip-cursor" aria-hidden="true"></span>';
+    var html = '<div class="history-rail-tip-list">';
     for (var j = 0; j < $ticks.length; j++) {
         var $t = $ticks.eq(j);
         var text = $t.attr('data-tip') || '';
@@ -3525,7 +4338,7 @@ function measureRailTipRowGeo() {
 
 /** 把列表里的某一行滚进可视区（只滚列表自己，不连带滚动页面/正文）。
  *  视口高度用 measureRailTipRowGeo 记下的 listH：这里若现读 clientHeight，
- *  它【一定】是强制同步布局 —— 上一行刚写完 cursor 的 transform/height，样式已失效。
+ *  它【可能】是强制同步布局 —— 本函数刚写过 .is-cursor / top，样式可能已失效。
  *
  *  【本轮自审纠正的论断】原来这里写着「scrollTop 是滚动偏移而非布局值，读它不触发重排」，
  *  这句是错的：scrollTop/scrollLeft 和 scrollHeight 一样在「What forces layout」清单上。
@@ -3544,9 +4357,9 @@ function scrollRailTipRowIntoView(rec, geo) {
     else if (rec.top + rec.h > st + viewH) list.scrollTop = rec.top + rec.h - viewH;
 }
 
-/** 移动列表里的选中行：行文本加深 + 刻度变长，并让「滑动指示条」移到该行。
- *  这就是用户要的「鼠标移动选中有动画」：位移带过渡，颜色不做淡化 ——
- *  颜色淡出淡入读起来是「两个东西先后亮」，位移读起来是「选中移到了这里」。 */
+/** 移动列表里的选中行：行文本变黑 + 行尾真实加宽刻度把文字往前挤。
+ *  按参照稿没有滑动指示条、没有阴影背景；宽度带过渡（占布局，所以文字确实前移），
+ *  颜色直接切换不做淡化 —— 参照稿的动感来自刻度推字，而不是两个高亮先后亮灭。 */
 function setRailTipCursor(msgIdx) {
     if (isNaN(msgIdx)) return;
     var $rows = $historyRailTip.find('.history-rail-tip-row');
@@ -3554,12 +4367,9 @@ function setRailTipCursor(msgIdx) {
     var $target = $rows.filter('[data-msg-idx="' + msgIdx + '"]');
     if (!$target.length) return;
     /* 【不能早退】曾经写 `if (historyRailTipIdx === msgIdx) return;`，看似是「已经选中就不动」
-       的优化，实际是一个真实缺陷：卡片隐藏时 scheduleRailTipHide 会移除 has-cursor，
-       但【不会】重置 historyRailTipIdx。于是「悬停第 3 根 → 移开 → 再回来悬停第 3 根」时，
-       函数在第一步就 return，has-cursor 再也不会加回来 ——
-       实测：卡片显示正常、is-cursor 也正确，但滑动指示条的 computed opacity 恒为 0，
-       用户看到的是「第一次有选中动画、第二次没有了」。
-       因此这里只保留「目标行不存在」这一个真守卫，其余状态全部幂等重写。 */
+       的优化，实际是一个真实缺陷：卡片隐藏后不重置 historyRailTipIdx，
+       于是「悬停第 3 根 → 移开 → 再回来悬停第 3 根」时函数第一步就 return，
+       选中态再也不会补回来。故其余状态全部幂等重写。 */
     historyRailTipIdx = msgIdx;
 
     /* 【只清残留、不做全量 removeClass】旧写法 $rows.removeClass('is-cursor') 让 N 行
@@ -3568,7 +4378,6 @@ function setRailTipCursor(msgIdx) {
     var $stale = $rows.filter('.is-cursor').not($target);
     if ($stale.length) $stale.removeClass('is-cursor');
     $target.addClass('is-cursor');
-    $historyRailTip.addClass('has-cursor');
 
     /* 几何全部吃缓存：一次测量，整轮扫描零强制布局。 */
     if (!historyRailTipRowGeo) measureRailTipRowGeo();
@@ -3579,16 +4388,9 @@ function setRailTipCursor(msgIdx) {
             if (geo.rows[i].idx === msgIdx) { rec = geo.rows[i]; break; }
         }
     }
-    var cursor = $historyRailTip.find('.history-rail-tip-cursor')[0];
-    if (cursor && rec) {
-        /* height 只在真的不同时才写：行高恒定时一次都不写，
-           否则 height 的过渡会每帧触发布局（这正是第二处卡顿源）。 */
-        if (cursor.__railH !== rec.h) {
-            cursor.style.height = rec.h + 'px';
-            cursor.__railH = rec.h;
-        }
-        cursor.style.transform = 'translateY(' + rec.top + 'px)';
-    }
+    /* 选中态由行自身的 .is-cursor 表达（文字变黑 + 行尾刻度变长），无滑动指示条：
+       2026-11-04 按参照稿移除后，DOM 与相关写入已一并删掉，避免对 display:none
+       元素做无意义的几何测量。这里只把目标行滚进列表可视区。 */
     scrollRailTipRowIntoView(rec, geo);
 }
 
@@ -3785,6 +4587,11 @@ $(messagesWrap).on('keydown', function(e) {
  *  「当前读到哪里」的答案变化 —— 即使刻度不动，active 也得重算。 */
 function relayoutHistoryRailTicks() {
     if (!$historyRail.hasClass('is-visible')) return;
+    /* 【必须与 renderHistoryRail 同口径重测滚动条宽度】内容异步撑高（图片/代码高亮/
+       Mermaid）会让 .messages-wrap 从「不溢出」变成「溢出」，原生滚动条从无到有；
+       此路径不经过 renderHistoryRail，漏测就会让 --scrollbar-w 停留在 0px，
+       刻度带随即压住新出现的滚动条。只在值变化时写入，不产生额外样式失效。 */
+    syncRailScrollbarWidth();
     var $ticks = $historyRailTrack.find('.history-rail-tick');
     if (!$ticks.length) return;
     var items = collectRailMessages();
@@ -4085,24 +4892,35 @@ function inheritSelectionToSession(newSessionId) {
     var depth = getSelectedThinking();
     var contextLength = getSelectedContext();
 
+    var cwdHeaders = sessionCwdHeaders(newSessionId);
     if (model) {
         sessionModelMap[newSessionId] = model;
-        $.post('/web/chat/models/select', { sessionId: newSessionId, modelName: model })
-            .fail(function (err) { console.error('Failed to inherit model to new session:', err); });
+        $.ajax({
+            url: '/web/chat/models/select',
+            type: 'POST',
+            headers: cwdHeaders,
+            data: { sessionId: newSessionId, modelName: model }
+        }).fail(function (err) { console.error('Failed to inherit model to new session:', err); });
     }
     if (depth) {
         sessionThinkingMap[newSessionId] = depth;
         if (depth !== THINKING_AUTO) {
-            $.post('/web/chat/thinking/select', { sessionId: newSessionId, depth: depth })
-                .fail(function (err) { console.error('Failed to inherit thinking depth to new session:', err); });
+            $.ajax({
+                url: '/web/chat/thinking/select',
+                type: 'POST',
+                headers: cwdHeaders,
+                data: { sessionId: newSessionId, depth: depth }
+            }).fail(function (err) { console.error('Failed to inherit thinking depth to new session:', err); });
         }
     }
 
     // 上下文始终继承并落到服务端，即使当前值是默认 256K 也不能省略保存。
     sessionContextMap[newSessionId] = contextLength;
-    $.post('/web/chat/context/select', {
-        sessionId: newSessionId,
-        contextLength: contextLength
+    $.ajax({
+        url: '/web/chat/context/select',
+        type: 'POST',
+        headers: cwdHeaders,
+        data: { sessionId: newSessionId, contextLength: contextLength }
     }).fail(function (err) {
         console.error('Failed to inherit context length to new session:', err);
     });
@@ -4474,6 +5292,8 @@ function thinkingChipsHtml() {
 }
 
 // 关联上下文窗口区（内嵌在当前模型项下）：会话级保存，固定显示可用档位
+window.sessionCwdHeaders = sessionCwdHeaders;
+
 function contextChipsHtml() {
     var current = getSelectedContext();
     var opts = contextOptions && contextOptions.length ? contextOptions : CONTEXT_LENGTH_OPTIONS;
@@ -4495,15 +5315,37 @@ function renderThinkingUI() {
     renderModelUI();
 }
 
+/* 会话选择器（模型 / 思考 / 上下文 / 访问档位）写盘归属头。
+   后端 /web/chat/{models,thinking,context,access}/select 把 SessionContext 落在
+   「该会话绑定的工作区根」下的 context.json；不带本头时，一个尚未发过消息的新会话
+   没有绑定 → 后端回退全局根，于是选择写进全局那份，而 /web/chat/input 带 X-Session-Cwd
+   时才绑定项目根、把上下文写进项目那份 —— 同一会话两份 context.json（实测两份字段互相
+   缺失）。回显的 /web/chat/models 读的是已绑定后的项目那份，thinking / context_length
+   不在里面就回退成「默认」+ 256K。所以四个 select 都必须与 app-streaming 的发送请求
+   携带同一归属头（同一真源：会话自己的 projectRoot，回退当前所选工作区）。
+   未选择工作区时 getSessionCwd() 为空串 → 不带头，与发送路径「空 cwd 不带头」的既有
+   约定逐字一致（裸放路径也不行：中文工作区会让 setRequestHeader 直接抛异常）。 */
+function sessionCwdHeaders(sid) {
+    var cwd = '';
+    if (typeof getOrCreateSession === 'function' && sid && typeof sessionMap !== 'undefined' && sessionMap[sid]) {
+        cwd = sessionMap[sid].projectRoot || '';
+    }
+    if (!cwd && typeof getSessionCwd === 'function') cwd = getSessionCwd() || '';
+    var enc = (typeof encodeSessionCwdHeader === 'function') ? encodeSessionCwdHeader(cwd) : '';
+    return enc ? { 'X-Session-Cwd': enc } : {};
+}
+
 function selectModel(modelName) {
     var sid = activeSessionId || SESSION_ID;
     sessionModelMap[sid] = modelName;
     renderModelUI();
 
     // 立即通知服务端绑定模型选择，确保不走 /web/chat/input 的命令（如 /git、循环任务等）也能感知到模型变更
-    $.post('/web/chat/models/select', {
-        sessionId: sid,
-        modelName: modelName
+    $.ajax({
+        url: '/web/chat/models/select',
+        type: 'POST',
+        headers: sessionCwdHeaders(sid),
+        data: { sessionId: sid, modelName: modelName }
     }).fail(function(err) {
         console.error('Failed to select model on server:', err);
     });
@@ -4515,9 +5357,11 @@ function selectThinking(depth) {
     renderModelUI();
 
     // 立即通知服务端绑定档位（与模型选择同理，覆盖不走 /web/chat/input 的场景）
-    $.post('/web/chat/thinking/select', {
-        sessionId: sid,
-        depth: depth
+    $.ajax({
+        url: '/web/chat/thinking/select',
+        type: 'POST',
+        headers: sessionCwdHeaders(sid),
+        data: { sessionId: sid, depth: depth }
     }).fail(function(err) {
         console.error('Failed to select thinking depth on server:', err);
     });
@@ -4536,9 +5380,11 @@ function selectContext(contextLength) {
         applyContextLength(typeof getOrCreateSession === 'function' ? getOrCreateSession(sid) : null, selected);
     }
 
-    $.post('/web/chat/context/select', {
-        sessionId: sid,
-        contextLength: selected
+    $.ajax({
+        url: '/web/chat/context/select',
+        type: 'POST',
+        headers: sessionCwdHeaders(sid),
+        data: { sessionId: sid, contextLength: selected }
     }).fail(function(err) {
         console.error('Failed to select context length on server:', err);
     });
@@ -4691,6 +5537,9 @@ window.GourdCmdComplete = {
     apply: applyCmdSelection,
     navigate: navigateCmdComplete,
     trigger: triggerCmdComplete,
+    // 触发段判定（任意位置的 / 或 @）：外部宿主接 input 事件时必须走这个，
+    // 别自己再写「以 / 开头且无空格」——那正是「技能只能触发一次」的病根。
+    findToken: findCmdTriggerToken,
     // 供外部宿主在「点击候选项」时先定位再 apply（cmdActiveIndex 是本模块私有，
     // 无法从外部直接赋值；与 app-history.js 自己的面板点击处理同范式）
     setIndex: function (i) { cmdActiveIndex = i; }

@@ -10,7 +10,10 @@
  * 测试分三层：
  *   ① vm 沙箱真跑 app-context.js 纯函数（buildContextRows / ctxTpsText）；
  *   ② 源码契约断言（app-streaming.js 两处前置短路、app-context.js 入口与定向 DOM 标记）；
- *   ③ 可变 $ 桩跑 DOM 行为（局部插行、定向改字、rAF 合帧、结算覆盖、语言切换重译）。
+ *   ③ 可变 $ 桩跑 DOM 行为（两行恒在、定向改字、rAF 合帧、结算覆盖、语言切换重译）。
+ *
+ * 2026-11 用户报障「这两行会闪动、类别没了过一会儿再出现」：改为两行恒在 +
+ * 粘性值（缺新值沿用上次显示的数值），只有数值更新；TPS 恒整数。
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -98,16 +101,16 @@ test('liveMetrics 优先于 chunk 的旧结算值，且首字帧 (0,0) 显示 --
     assert.match(noTtft, /data-ctx-ttft="1">--</, '无 TTFT 值显示 --');
 });
 
-test('不传 liveMetrics 时行为与旧版一致（缺数据整行省略，有数据才出现）', () => {
+test('不传 liveMetrics 时两行恒在（缺数据显示 --，有数据才出数值）', () => {
     const s = pureSandbox();
     const empty = s.buildContextRows(chunk({}), {});
-    assert.ok(!empty.includes(ZH.chat.output_tps), '缺数据整行省略');
-    assert.ok(!empty.includes(ZH.chat.ttft));
-    assert.ok(!empty.includes('data-ctx-tps'));
-    assert.ok(!empty.includes('data-ctx-ttft'));
+    assert.match(empty, /data-ctx-tps="1"[^>]*>--</, '类别恒在，无数据显示 --');
+    assert.match(empty, /data-ctx-ttft="1">--</);
+    assert.match(empty, /class="context-meter-label"[^>]*>输出速度/);
+    assert.equal((empty.match(/data-ctx-tps="1"/g) || []).length, 1, 'TPS 行恰好一行');
     // opts.live 的既有语义不动：只有它和 elapsedMs 时不影响 TPS/TTFT 行
     const liveOnly = s.buildContextRows(chunk({}), { live: true });
-    assert.ok(!liveOnly.includes(ZH.chat.output_tps));
+    assert.match(liveOnly, /data-ctx-tps="1"[^>]*>--</);
     const settled = s.buildContextRows(chunk({
         generationMs: 4000, generatedTokens: 320, ttftMs: 5390
     }), {});
@@ -116,15 +119,17 @@ test('不传 liveMetrics 时行为与旧版一致（缺数据整行省略，有�
     assert.ok(settled.indexOf(ZH.chat.output_tps) < settled.indexOf(ZH.chat.ttft));
 });
 
-test('ctxTpsText 既有公式不变，且非法值不产生 Infinity/NaN', () => {
+test('ctxTpsText 只输出整数，且非法值不产生 Infinity/NaN', () => {
     const s = pureSandbox();
     assert.equal(s.ctxTpsText({ generationMs: 1000, generatedTokens: 50 }), '50 tokens/秒');
+    assert.equal(s.ctxTpsText({ generationMs: 10000, generatedTokens: 691 }), '69 tokens/秒', '69.1 → 69');
     assert.equal(s.ctxTpsText({ generationMs: 0, generatedTokens: 50 }), '');
     assert.equal(s.ctxTpsText({}), '');
     const bad = s.buildContextRows(chunk({}), {
         liveMetrics: { generationMs: -1, generatedTokens: NaN, ttftMs: -1 }
     });
     assert.ok(!/Infinity|NaN/.test(bad));
+    assert.match(bad, /data-ctx-tps="1"[^>]*>--</, '非法实时值也不得让类别消失');
 });
 
 /* ===== 2. 分发契约（行为验证，取代源码正则自证） ===== */
@@ -154,7 +159,7 @@ test('入口拒绝非 live 帧与已结算 run 的尾帧，且不写权威快照
     const bad = { type: 'tps_progress', generationMs: 500, generatedTokens: 40, runId: 'run-1' };
     h.sandbox.updateContextTpsLive(sess, bad);
     assert.equal(sess._ctxLive, undefined, '缺 live:true 的脏帧不得重建实时态');
-    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps]').length, 0);
+    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps]').length, 0, '脏帧连骨架都不建');
 
     h.sandbox.updateContextTpsLive(sess, Object.assign({}, bad, { live: true }));
     assert.ok(sess._ctxLive, '合法实时帧进入 live');
@@ -183,7 +188,9 @@ test('结算 / 新轮 / 恢复 / reset 统一收口：清态、取消 rAF、不�
     assert.equal(sess._ctxLive, undefined);
     assert.equal(h.rafCancelled.length, 1, '挂起的 rAF 必须取消');
     assert.equal(h.flushRaf(), 0, '取消后不再执行回调');
-    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps]').length, 0, '旧值不落 DOM');
+    // 两行恒在（骨架已建），但被取消的实时值不得落字：卡面保持 -- 才算「不复活」。
+    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps]').length, 1, '类别恒在');
+    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps]').text(), '--', '旧值不落 DOM');
     // settleContextElapsed 不得清态（trace 可能早于 context_size）
     const s2 = domHarness();
     const sess2 = { sessionId: 'work-A' };
@@ -506,7 +513,7 @@ test('后台 / 回放帧不得写单例 DOM，也不得写 sess._ctxLive', () =>
     assert.equal(h.bodyHtml(), before, 'activeSessionId 不匹配：静默返回');
     h.sandbox.updateContextTpsLive({ sessionId: 'work-A', _replaying: true }, frame);
     assert.equal(h.bodyHtml(), before, '_replaying：静默返回');
-    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps]').length, 0);
+    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps]').length, 0, '回放帧不建行');
     assert.doesNotThrow(() => h.sandbox.updateContextTpsLive(null, frame), '异常静默');
 });
 
@@ -519,7 +526,9 @@ test('rAF 合帧：同一动画帧内多次到达只落一次 DOM，无 rAF 时�
         });
     }
     assert.equal(h.rafQueue.length, 1, '三次到达只注册一个 rAF');
-    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps]').length, 0, 'rAF 前不动 DOM');
+    // 骨架已把两行建好（恒在），rAF 前只是还没落数值；用 -- 断言「不动 DOM」。
+    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps]').length, 1, '两行恒在');
+    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps]').text(), '--', 'rAF 前不落数值');
     assert.equal(h.flushRaf(), 1);
     const tps = h.sandbox.$('.context-meter').find('[data-ctx-tps]');
     assert.equal(tps.text(), '80 tokens/秒', '取最后一帧的滑窗值');
@@ -556,6 +565,50 @@ test('结算 context_size 覆盖实时值并结束 live；createdAt 门禁早退
     assert.match(h.bodyHtml(), /5\.39s/);
 });
 
+test('防闪回归：结算 → 新一轮 reason_start → 首字帧 → 新数值，两行恒在且只在真数值时改字', () => {
+    const h = domHarness();
+    const sess = {
+        sessionId: 'work-A', isStreaming: true,
+        lastContextChunk: chunk({ generationMs: 4000, generatedTokens: 320, ttftMs: 5390 })
+    };
+    // ① 上一轮结算：卡片渲染出两行，粘性缓存记下 80 / 5.39s
+    h.sandbox.renderContextMeter(sess.lastContextChunk, sess);
+    const $m = () => h.sandbox.$('.context-meter');
+    assert.equal($m().find('[data-ctx-tps]').text(), '80 tokens/秒');
+    assert.equal($m().find('[data-ctx-ttft]').text(), '5.39s');
+    const rowCount = h.body.children.length;
+    const labelCount = () => ($m().find('[data-ctx-tps-label]').length)
+        + ($m().find('[data-ctx-ttft-label]').length);
+    assert.equal(labelCount(), 2, '两个类别都在');
+
+    // ② 新一轮 reason_start：旧实现会 delete 三键 → 整卡重绘时两行消失（报障根因）
+    h.sandbox.noteContextTurnStart(sess, 1700000999999);
+    assert.equal(h.body.children.length, rowCount, '整个选项集合不动，行数不变');
+    assert.equal(labelCount(), 2, '类别不得消失再出现');
+    assert.equal($m().find('[data-ctx-tps]').length, 1, 'TPS 行恰好一行');
+    assert.equal($m().find('[data-ctx-ttft]').length, 1, 'TTFT 行恰好一行');
+    assert.equal($m().find('[data-ctx-tps]').text(), '80 tokens/秒', '数值未更新 → 沿用旧值');
+    assert.equal($m().find('[data-ctx-ttft]').text(), '5.39s', '数值未更新 → 沿用旧值');
+    assert.equal(h.injected(), '', '重绘后不得再靠局部插行把行补回来');
+
+    // ③ 本轮首字帧 (0,0)：不得把已有数值抹成 '--'（旧实现会回退）
+    h.sandbox.updateContextTpsLive(sess, {
+        type: 'tps_progress', live: true, generationMs: 0, generatedTokens: 0, ttftMs: 900
+    });
+    assert.equal($m().find('[data-ctx-tps]').text(), '80 tokens/秒', '首字帧无速率不清零');
+    assert.equal($m().find('[data-ctx-tps]').attr('data-ctx-tps-n'), '320', '原始数值也保留');
+    assert.equal($m().find('[data-ctx-ttft]').text(), '900ms', '新的 TTFT 真值才替换');
+
+    // ④ 本轮首个真速率窗口：只有数值更新，类别与行数仍不动
+    h.sandbox.updateContextTpsLive(sess, {
+        type: 'tps_progress', live: true, generationMs: 1000, generatedTokens: 50, ttftMs: 900
+    });
+    assert.equal($m().find('[data-ctx-tps]').text(), '50 tokens/秒');
+    assert.equal(labelCount(), 2);
+    assert.equal(h.body.children.length, rowCount);
+    assert.equal(h.injected(), '', '全程零插行 = 零闪动');
+});
+
 test('切语言重译：行节点属性留数值，i18n:localeChanged 钩子按新语言重算', () => {
     const h = domHarness();
     const sess = { sessionId: 'work-A' };
@@ -569,4 +622,71 @@ test('切语言重译：行节点属性留数值，i18n:localeChanged 钩子按�
     assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps]').text(), '50 tokens/s');
     assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-tps-label]').text(), EN.chat.output_tps);
     assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-ttft-label]').text(), EN.chat.ttft);
+});
+
+/* ===== 语言无关的粘性载体（codereview 抓出的 P1 回归）=====
+   粘性缓存若存【翻译后的文本】：切语言时 i18n 钩子只重译了 DOM，缓存里仍是旧语言，
+   此后任何一次不带速率字段的整卡重绘（新轮 reason_start / 切会话回填 / 旧内核历史帧）
+   都会走粘性分支，把刚译好的卡面写回旧语言。载体必须是原始数值、文本每次现算。 */
+test('切语言后走粘性分支的整卡重绘不得退回旧语言（粘性载体须语言无关）', () => {
+    const h = domHarness();
+    // 权威快照刻意【不带】速率字段：重绘只能走粘性分支（旧内核帧 / 历史回放同理）
+    const sess = { sessionId: 'work-A', isStreaming: true,
+        lastContextChunk: chunk({}) };
+
+    // ① 实时帧建立粘性缓存（中文）
+    h.sandbox.updateContextTpsLive(sess, {
+        type: 'tps_progress', live: true, generationMs: 4000, generatedTokens: 320, ttftMs: 5390
+    });
+    const tps = () => h.sandbox.$('.context-meter').find('[data-ctx-tps]').text();
+    const ttft = () => h.sandbox.$('.context-meter').find('[data-ctx-ttft]').text();
+    assert.equal(tps(), '80 tokens/秒');
+    assert.equal(ttft(), '5.39s');
+    assert.ok(sess._ctxTiming, '粘性缓存已建立');
+    assert.equal(sess._ctxTiming.tpsText, undefined, '载体不得是翻译后的文本');
+    assert.equal(sess._ctxTiming.ttftText, undefined, '载体不得是翻译后的文本');
+    assert.equal(sess._ctxTiming.tpsN, 320, '载体是原始 token 数');
+    assert.equal(sess._ctxTiming.tpsMs, 4000, '载体是原始解码时长');
+    assert.equal(sess._ctxTiming.ttftMs, 5390, 'TTFT 载体是原始毫秒');
+
+    // ② 结算收口：_ctxLive 被清，此后重绘只能依赖粘性载体
+    h.sandbox.endContextLive(sess, { runId: 'run-1' });
+    // 插行基线：桩的初始 body 只有一个耗时行，首个实时帧走「旧卡面兼容」插一次行是合法的；
+    // 真正要守的是【此后所有重绘都不再靠插行把两行补回来】。
+    const injectedBase = h.injected();
+    assert.ok(injectedBase.length > 0, '前置：两行确实已存在于卡面');
+
+    // ③ 用户切英文：钩子重译 DOM
+    h.setLocale(EN);
+    h.listeners['i18n:localeChanged']();
+    assert.equal(tps(), '80 tokens/s', 'DOM 钩子本身能重译');
+
+    // ④ 切会话回填（走粘性分支的整卡重绘）：必须仍是英文
+    h.sandbox.restoreContextIndicator(sess);
+    assert.equal(tps(), '80 tokens/s', '粘性分支重绘不得把卡面写回旧语言');
+    assert.equal(ttft(), '5.39s');
+    // ⑤ 新一轮起步同样走粘性分支，也不得退回
+    h.sandbox.noteContextTurnStart(sess, 1700000999999);
+    assert.equal(tps(), '80 tokens/s', '新轮重绘同样按当前语言现算');
+    assert.equal(h.injected(), injectedBase, '重绘阶段零插行');
+});
+
+test('合法 0ms 首字必须能锁存，非法 ttftMs 不得污染粘性载体', () => {
+    const h = domHarness();
+    const sess = { sessionId: 'work-A' };
+    // 0ms 是合法首字（与 buildContextModel 的 hasOwnProperty 口径一致），不得当成缺值丢弃
+    h.sandbox.updateContextTpsLive(sess, {
+        type: 'tps_progress', live: true, generationMs: 0, generatedTokens: 0, ttftMs: 0
+    });
+    assert.equal(sess._ctxTiming.ttftMs, 0, '合法 0ms 锁存');
+    h.flushRaf();
+    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-ttft]').text(), '0ms');
+
+    // 后续非法值不得把已锁存的 0ms 顶掉
+    h.sandbox.updateContextTpsLive(sess, {
+        type: 'tps_progress', live: true, generationMs: 0, generatedTokens: 0, ttftMs: NaN
+    });
+    assert.equal(sess._ctxTiming.ttftMs, 0, '非法值不覆盖');
+    h.flushRaf();
+    assert.equal(h.sandbox.$('.context-meter').find('[data-ctx-ttft]').text(), '0ms');
 });

@@ -95,16 +95,18 @@
     };
 
     var $overlay = $('#settingsOverlay');
-    var $settingsBtn = $('#settingsBtn');
+    /* 侧栏独立设置按钮已移除（底栏整体改为用户卡片，设置入口收进账号弹层，
+       弹层内「设置」行调 window.openSettings()）。原 $settingsBtn 绑定随之
+       删除：#settingsBtn 在 DOM 中已不存在，保留空集合绑定是死代码，只会让
+       后来者误以为还有第二个设置入口。 */
     var $tabs = $('.settings-tab');
     var $tabContents = $('.settings-tab-content');
 
     function mod(name) { return window[name]; }
 
     function resetCurrentTabView(targetTab) {
-        if (targetTab === 'mcp' && mod('_settingsMcp')) { mod('_settingsMcp').showList(); mod('_settingsMcp').reset(); $('#mcpToolsToolbar').hide(); }
-        else if (targetTab === 'openapi' && mod('_settingsOpenapi')) { mod('_settingsOpenapi').showList(); mod('_settingsOpenapi').reset(); }
-        else if (targetTab === 'lsp' && mod('_settingsLsp')) { mod('_settingsLsp').showList(); mod('_settingsLsp').reset(); }
+        // MCP / OpenAPI 配置已迁移至「技能·连接器·接口」；LSP 是本镜像保留的独立能力。
+        if (targetTab === 'lsp' && mod('_settingsLsp')) { mod('_settingsLsp').showList(); mod('_settingsLsp').reset(); }
     }
 
     function openSettings() {
@@ -122,14 +124,11 @@
         $overlay.hide();
         // 广播设置关闭：侧栏「任务」区等依赖设置页数据的视图据此刷新
         document.dispatchEvent(new Event('settings:closed'));
-        if (mod('_settingsMcp')) mod('_settingsMcp').showList();
-        if (mod('_settingsOpenapi')) mod('_settingsOpenapi').showList();
         if (mod('_settingsLsp')) mod('_settingsLsp').showList();
-        $('#mcpFormActions, #openapiFormActions, #lspFormActions').hide();
+        $('#lspFormActions').hide();
     }
 
 
-    $settingsBtn.on('click', openSettings);
     $('#settingsCloseBtn').on('click', closeSettings);
 
     // 导出给其它主视图调用（如自动化页面打开时需关掉本浮层）；
@@ -165,12 +164,6 @@
         } else if (targetTab === 'permission') {
             $('#settingsTabPermission').addClass('active');
             if (mod('_settingsPermission')) mod('_settingsPermission').load();
-        } else if (targetTab === 'mcp') {
-            $('#settingsTabMcp').addClass('active');
-            if (mod('_settingsMcp')) mod('_settingsMcp').load();
-        } else if (targetTab === 'openapi') {
-            $('#settingsTabOpenapi').addClass('active');
-            if (mod('_settingsOpenapi')) mod('_settingsOpenapi').load();
         } else if (targetTab === 'lsp') {
             $('#settingsTabLsp').addClass('active');
             if (mod('_settingsLsp')) mod('_settingsLsp').load();
@@ -190,8 +183,6 @@
         if (targetTab === 'general') { if (mod('_settingsGeneral')) mod('_settingsGeneral').load(); }
         else if (targetTab === 'appearance') { if (mod('_settingsAppearance')) mod('_settingsAppearance').load(); }
         else if (targetTab === 'permission') { if (mod('_settingsPermission')) mod('_settingsPermission').load(); }
-        else if (targetTab === 'mcp') { if (mod('_settingsMcp')) mod('_settingsMcp').load(); }
-        else if (targetTab === 'openapi') { if (mod('_settingsOpenapi')) mod('_settingsOpenapi').load(); }
         else if (targetTab === 'lsp') { if (mod('_settingsLsp')) mod('_settingsLsp').load(); }
         else if (targetTab === 'acp') { if (mod('_settingsAcp')) mod('_settingsAcp').load(); }
         else if (targetTab === 'about') { if (mod('_settingsAbout')) mod('_settingsAbout').load(); }

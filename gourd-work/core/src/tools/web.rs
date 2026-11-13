@@ -1168,7 +1168,7 @@ impl Tool for CodeSearchTool {
                     return Err(AttemptError::transport(format!("Code search connection failed: {}", e)));
                 }
                 match mgr
-                    .call_tool(EXA_MANAGER_NAME, EXA_CODESEARCH_TOOL, json!({"query": query, "tokensNum": tokens}))
+                    .call_tool_text(EXA_MANAGER_NAME, EXA_CODESEARCH_TOOL, json!({"query": query, "tokensNum": tokens}))
                     .await
                 {
                     Ok(text) => Ok(text),

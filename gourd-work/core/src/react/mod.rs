@@ -486,6 +486,31 @@ impl ReActAgent {
         // model credentials and the entire model registry each time.
         let run_model = Arc::new(config.model.clone());
         let run_settings = Arc::new(config.settings.clone());
+        // ── Cold-start race: wait for MCP handshakes before snapshotting ─────
+        // The kernel starts serving HTTP immediately and handshakes MCP servers
+        // on a background task (a hung `npx` must not delay startup). But the
+        // tool list below is snapshotted ONCE per run and reused for every turn,
+        // so a run that began mid-handshake never saw those tools at all — the
+        // model answered "I don't have that tool" for a server that was in fact
+        // connecting, and only the NEXT conversation would show it.
+        //
+        // Bounded wait, so this can never make startup worse than it was: it
+        // returns immediately when nothing is configured (the latch defaults to
+        // settled) or when handshakes already finished, and otherwise caps at
+        // MCP_STARTUP_WAIT. Timeout is not an error — proceed with whatever
+        // connected, exactly like before, just without silently dropping the
+        // tools that arrived a moment later.
+        const MCP_STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+        if let Some(mcp) = self.registry.mcp() {
+            if !mcp.wait_for_startup(MCP_STARTUP_WAIT).await {
+                warn!(
+                    session = %config.session_id,
+                    waited_secs = MCP_STARTUP_WAIT.as_secs(),
+                    "MCP servers still connecting after {:?}; this run may not see all MCP tools",
+                    MCP_STARTUP_WAIT
+                );
+            }
+        }
         let tool_defs = self.registry.definitions_async(&config.settings.permission, Some(&gate)).await;
         // ── Tool-visibility guard (Qoder / ZCode / Java parity) ──────────────
         // The wire `tools` field is the ONLY schema source; the system prompt

@@ -521,7 +521,12 @@ function buildProcessStats(processEls) {
     ② 上一轮改成插在【最终正文】之前 → 盖子落到过程组【尾部】，展开后全部过程行
     显示在盖子上方 = 用户截图现象。
     258f0a0 连续区间重构后，本函数收紧为四条不变量：
-      ① toggle 之前无任何【可见】节点（toggle 必须是气泡第一个直接子节点）；
+      ① toggle 之前不得有任何【非时序锚】可见节点。
+         【2026-11 修订】旧断言写死 idxToggle===0，与「时序不动点锚」契约冲突：
+         用户报障「先出 qa，执行一段时间后插话，过程被折叠，但折叠盖子显示在 qa 卡
+         上侧，运行态顺序就不对了」—— 盖子折叠的是 qa【之后】的过程，却被钉到 qa
+         之前。现收紧为「toggle 紧贴首个过程段」：其前只允许锚（qa-record /
+         待审批 HITL 卡），页脚/未知块/缝合杂散节点仍一律不得藏在 toggle 前面。
       ② 所有 [data-turn-process] 节点构成【连续 DOM 区间】（中间不得夹无标记节点）；
       ③ 最终正文（唯一无标记且有文本的 .md-content）之后不得存在任何过程行；
       ④ 盖子紧贴第一个过程行，展开后过程行全部在盖子下方。 */
@@ -529,9 +534,18 @@ function buildProcessStats(processEls) {
     const kids = b.children;
     const idxToggle = kids.indexOf(toggle);
     assert.ok(idxToggle >= 0, '应存在摘要按钮');
-    // ① toggle 之前无任何可见节点：收紧为 index 0（旧版只查 [data-turn-process]，
-    //    页脚/未知块/缝合搬进来的杂散节点都能藏在 toggle 前面 = 「toggle 夹中间」）。
-    assert.equal(idxToggle, 0, 'toggle 之前不得有任何可见节点（盖子必须是气泡首个直接子节点）');
+    // ① toggle 之前只允许时序不动点锚；任何过程行 / 页脚 / 未知块都不得排在盖子之前。
+    const ANCHOR_CLASSES = ['qa-record', 'agent-card'];
+    for (let i = 0; i < idxToggle; i++) {
+        const pre = kids[i];
+        const isAnchor = ANCHOR_CLASSES.some(c => pre._classes.has(c))
+            || (pre._classes.has('tool-card') && pre._classes.has('hitl-pending'));
+        assert.ok(isAnchor,
+            'toggle 之前第 ' + i + ' 个节点（' + pre.className + '）不是时序锚：'
+            + '盖子必须紧贴首个过程段，不得把过程行/页脚甩到自己之后');
+        assert.equal(pre.getAttribute('data-turn-process'), null,
+            'toggle 之前的锚不得带折叠标记（否则被 display:none 藏住）');
+    }
         
     const marked = [];
     for (let i = 0; i < kids.length; i++) {
@@ -593,6 +607,101 @@ test('★ 只有一段正文时盖子同样在过程组最前（anchor 退化回
     assertLidOnTop(b, toggle);
     assert.equal(b.children.indexOf(toggle), 0, '盖子在气泡首位（过程组最前）');
     assert.ok(b.children.indexOf(finalText) > b.children.indexOf(toggle));
+});
+
+/* ===== 折叠盖子不得越过时序锚（2026-11 用户报障：插话后折叠态时序颠倒） =====
+   现场：任务运行中先弹出 ask_user → 用户作答落 qa-record → 继续执行若干工具 →
+   用户插话 → settleSteerTurnBoundary 收口旧轮（closeBatchFor + compactBubble ended:true）。
+   旧行为：toggle 分区键钉死 -1、placeToggle 强制提到 children[0]，于是
+   「已完成 · 2 次工具调用」这行摘要压在 qa 卡【上方】，而它折叠的全是 qa【之后】的
+   执行过程 —— 用户肉眼读到的时序与真实发生顺序相反（探针实测 toggle=0、qa=1）。
+   期望：盖子紧贴它真正折叠的那一段过程行，锚保持在盖子之前。 */
+test('★ qa 卡在首个过程段之前：折叠盖子必须落在 qa 卡【下方】（用户报障主场景）', () => {
+    const b = bubble([
+        { cls: ['qa-record'], text: '问答记录 ✓方案A' },
+        { cls: ['thinking-block'] },
+        { cls: ['tool-card'] },
+        { cls: ['tool-card'] },
+        { cls: ['md-content'], text: '已按方案A完成，共改 3 个文件。' },
+        { cls: ['msg-actions'] }
+    ]);
+    const qa = b.children[0];
+    const finalText = b.children[4];
+
+    const d = api.classifyChildren(b.children, b, { ended: true });
+    assert.ok(d, '插话收口（ended:true）应产生折叠决策');
+    assert.ok(!d.process.includes(qa), '问答卡是时序锚，不得进过程区');
+    assert.ok(d.keep.includes(qa), '问答卡常驻可见');
+    assert.equal(d.final, finalText);
+
+    assert.equal(api.compactBubble(b, { ended: true }), true, '折叠应成功');
+    const toggle = b.querySelector('.turn-compact-toggle');
+    const idxToggle = assertLidOnTop(b, toggle);
+    const kids = b.children;
+    assert.ok(kids.indexOf(qa) < idxToggle,
+        '问答卡必须在盖子【之前】：盖子折叠的是 qa 之后的过程，压在 qa 上方即时序颠倒');
+    assert.equal(idxToggle, kids.indexOf(qa) + 1, '盖子紧贴 qa 卡之后（即首个过程段之前）');
+    assert.equal(qa.getAttribute('data-turn-process'), null, '问答卡绝不被折叠隐藏');
+    assert.ok(kids.indexOf(finalText) > idxToggle, '最终正文仍在盖子之后');
+    assert.match(toggle.textContent, /2 次工具调用/, '摘要计数只统计真正被折叠的过程行');
+
+    // 展开后：qa 仍在最前，过程行在盖子与最终正文之间（顺序不再被打乱）
+    toggle.click();
+    assert.ok(b._classes.has('turn-compact-open'));
+    assert.equal(b.children.indexOf(qa), 0, '展开后问答卡仍是第一个可见节点');
+    assertLidOnTop(b, toggle);
+});
+
+test('★ 待审批 HITL 卡在首个过程段之前：盖子同样落在其后（审批按钮不被时序错置）', () => {
+    const b = bubble([
+        { cls: ['tool-card', 'hitl-pending', 'expanded'], text: '需要授权执行 bash' },
+        { cls: ['tool-card'] },
+        { cls: ['thinking-block'] },
+        { cls: ['md-content'], text: 'FINAL 已执行' }
+    ]);
+    const hitl = b.children[0];
+    assert.ok(api.isInteractiveCard(hitl), '前置条件：待审批卡被识别为交互卡');
+    assert.equal(api.compactBubble(b, { ended: true }), true);
+    const toggle = b.querySelector('.turn-compact-toggle');
+    const idxToggle = assertLidOnTop(b, toggle);
+    assert.ok(b.children.indexOf(hitl) < idxToggle, '待审批卡必须在盖子之前（等用户拍板的边界）');
+    assert.equal(hitl.getAttribute('data-turn-process'), null, '待审批卡不得被折叠（否则按钮点不到）');
+});
+
+test('★ 锚在最终正文之后：盖子仍紧贴首个过程段（不得被尾部锚牵走）', () => {
+    // 边界：qa 卡落在最终正文之后（回放缝合等异常序），首个过程段仍在最前，
+    // 盖子必须保持 index 0，不得跑到尾部锚附近。
+    const b = bubble([
+        { cls: ['tool-card'] },
+        { cls: ['thinking-block'] },
+        { cls: ['md-content'], text: 'FINAL 最终答案' },
+        { cls: ['qa-record'], text: '问答记录（正文之后）' },
+        { cls: ['msg-actions'] }
+    ]);
+    const qa = b.children[3];
+    assert.equal(api.compactBubble(b, { ended: true }), true);
+    const toggle = b.querySelector('.turn-compact-toggle');
+    assertLidOnTop(b, toggle);
+    assert.equal(b.children.indexOf(toggle), 0, '首个过程段在最前 ⇒ 盖子仍在气泡首位');
+    assert.ok(b.children.indexOf(qa) > b.children.indexOf(toggle), '尾部锚保持在盖子之后');
+    assert.equal(qa.getAttribute('data-turn-process'), null, '尾部锚同样不被折叠');
+});
+
+test('★ 重跑幂等：插话收口后再次 compactBubble，盖子不得跳回 qa 卡上方', () => {
+    const b = bubble([
+        { cls: ['qa-record'], text: '问答记录 ✓方案A' },
+        { cls: ['tool-card'] },
+        { cls: ['md-content'], text: 'FINAL 完成' }
+    ]);
+    const qa = b.children[0];
+    assert.equal(api.compactBubble(b, { ended: true }), true);
+    const toggle = b.querySelector('.turn-compact-toggle');
+    const firstIdx = b.children.indexOf(toggle);
+    // 第二次收口（缝合重跑 / refreshInteractiveBoundary）必须落同一位置
+    assert.equal(api.compactBubble(b, { ended: true }), true);
+    assert.equal(b.querySelectorAll('.turn-compact-toggle').length, 1, '不得重复插盖子');
+    assert.equal(b.children.indexOf(toggle), firstIdx, '重跑后盖子位置稳定（不回弹到 index 0）');
+    assert.ok(b.children.indexOf(qa) < b.children.indexOf(toggle), '重跑后问答卡仍在盖子之前');
 });
 
 test('★ 运行态样式接线：legacy 历史行摘 agent-live、resume 末轮补挂（静态守护）', () => {
@@ -977,6 +1086,22 @@ test('★ 结束态无正文成功轮也折叠；停止/挂起徽标仍不藏过
     const fatal = mk('done');
     fatal.appendChild(el('div', ['err-bubble'], { text: '失败' }));
     assert.equal(api.compactBubble(fatal, { ended: true }), false, '失败证据块仍触发 FATAL 护栏');
+});
+
+test('★ 失败轮不得摊开批次成员（2026-11 用户报「报错后折叠变默认展开 + 卡片态」）', () => {
+    const b = bubble([
+        { cls: ['turn-batch-header'] },
+        { cls: ['tool-card', 'turn-batch-collapsed'] },
+        { cls: ['chunk-error'], text: 'HTTP 400 Bad Request' },
+        { cls: ['md-content'], text: '正文' }
+    ]);
+    const member = b.children[1];
+    assert.equal(api.compactBubble(b, { ended: true }), false, '失败证据块否决整轮折叠');
+    assert.ok(member.classList.contains('turn-batch-collapsed'),
+        '失败轮必须保持批次收口折叠：revealAll 摊开是卡片态回潮根因，已删除');
+    assert.equal(b.querySelectorAll('.turn-compact-toggle').length, 0, '不得插整轮摘要');
+    const err = b.children[2];
+    assert.ok(!err.classList.contains('turn-batch-collapsed'), '错误块本就在批次外，常驻可见');
 });
 
 test('★ 接线形状锁：finishStream 收口必须传 ended:true', () => {

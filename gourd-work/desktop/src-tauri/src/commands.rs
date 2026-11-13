@@ -3,8 +3,9 @@
 //! Only commands this kernel can genuinely honour are registered. The frontend
 //! guards every call with `typeof ipc.X === 'function'`, so an absent command
 //! degrades to the browser-mode path instead of failing at runtime — which is why
-//! there is deliberately no `restart_backend` (the kernel is in-process) and no
-//! `remote_*` / `updater_*` (not implemented in this kernel).
+//! there is deliberately no `restart_backend` (the kernel is in-process).
+//! `remote_*` and `updater_*` live in their own modules (`remote/`, `updater.rs`)
+//! and are registered in `lib.rs`; auto-update reads the admin-uploaded latest.json.
 
 use tauri::State;
 

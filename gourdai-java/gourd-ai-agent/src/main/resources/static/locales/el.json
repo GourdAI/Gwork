@@ -275,6 +275,14 @@
                  "confirm":  "Επιβεβαίωση"
              },
     "app":  {
+
+        "nav":  {
+
+            "connectors":  "Σύνδεσμοι",
+
+            "interfaces":  "Διεπαφές"
+
+        },
                                 "access_title":  "Δικαιώματα πρόσβασης",
                 "access_default":  "Προεπιλεγμένη πρόσβαση",
                 "access_full":  "Πλήρης πρόσβαση",
@@ -580,6 +588,25 @@
                                      "scroll_next":  "Κύλιση δεξιά"
                                 },
                      "mcp":  {
+                                 "market":  {
+                                             "title":  "Κατάλογος MCP",
+                                             "search_placeholder":  "Αναζήτηση διακομιστών MCP",
+                                             "hosted":  "Φιλοξενούμενο",
+                                             "installed":  "Εγκαταστάθηκε",
+                                             "empty":  "Δεν βρέθηκαν υπηρεσίες",
+                                             "required":  "Απαιτείται",
+                                             "verified":  "Επαληθευμένο",
+                                             "connect":  "Σύνδεση",
+                                             "connect_title":  "Σύνδεση",
+                                             "save_connect":  "Αποθήκευση και σύνδεση",
+                                             "cancel":  "Ακύρωση",
+                                             "config":  "Διαμόρφωση",
+                                             "load_failed":  "Αποτυχία φόρτωσης του καταλόγου MCP: {msg}",
+                                             "install_failed":  "Η εγκατάσταση απέτυχε: {msg}",
+                                             "installed_names":  "Εγκαταστάθηκε: {msg}",
+                                             "detail_failed":  "Αποτυχία φόρτωσης λεπτομερειών: {msg}",
+                                             "retry":  "Επανάληψη"
+                                 },
                                  "title":  "Διεργαστές MCP",
                                  "desc":  "Διαχείριση εξωτερικών εργαλείων διεργαστών (αρχεία, βάσεις δεδομένων, browsers)",
                                  "add":  "Προσθήκη διεργαστή",
@@ -1035,6 +1062,7 @@
                  "tool_edit":  "Επεξεργασία",
                  "tool_bash":  "Εκτέλεση",
                  "tool_bash_output": "Έλεγχος εξόδου παρασκηνίου",
+                 "action_bash_done": "Εντολή τερματικού",
                  "tool_skill":  "Δεξιότητα",
                  "tool_todo":  "Εργασίες",
                  "tool_code":  "Κώδικας",
@@ -1269,7 +1297,7 @@
                     "turn_input":  "Είσοδος γύρου",
                     "turn_output":  "Έξοδος γύρου",
                     "batch_done_count":  "{count} κλήσεις εργαλείων",
-                    "action_bash_done":  "Εκτελέστηκε εντολή τερματικού",
+                    "action_bash_done":  "Εντολή τερματικού",
                     "action_thinking_done":  "Σκέφτηκε",
                     "batch_thinking_count":  "Σκέψη {count} φορές",
                     "messages":  "Μηνύματα"

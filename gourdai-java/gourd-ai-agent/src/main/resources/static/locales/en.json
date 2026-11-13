@@ -275,6 +275,14 @@
                  "confirm":  "Confirm"
              },
     "app":  {
+
+        "nav":  {
+
+            "connectors":  "Connectors",
+
+            "interfaces":  "Interfaces"
+
+        },
                                 "access_title":  "Access Permission",
                 "access_default":  "Default Access",
                 "access_full":  "Full Access",
@@ -580,6 +588,25 @@
                                      "scroll_next":  "Scroll right"
                                 },
                      "mcp":  {
+                                 "market":  {
+                                             "title":  "MCP Marketplace",
+                                             "search_placeholder":  "Search MCP servers",
+                                             "hosted":  "Hosted",
+                                             "installed":  "Installed",
+                                             "empty":  "No MCP servers found",
+                                             "required":  "Required",
+                                             "verified":  "Verified",
+                                             "connect":  "Connect",
+                                             "connect_title":  "Connect",
+                                             "save_connect":  "Save & Connect",
+                                             "cancel":  "Cancel",
+                                             "config":  "Configuration",
+                                             "load_failed":  "Failed to load the MCP directory: {msg}",
+                                             "install_failed":  "Install failed: {msg}",
+                                             "installed_names":  "Installed: {msg}",
+                                             "detail_failed":  "Failed to load details: {msg}",
+                                             "retry":  "Retry"
+                                 },
                                  "title":  "MCP Servers",
                                  "desc":  "Manage external tool servers to extend file, database, browser capabilities",
                                  "add":  "Add Server",
@@ -1035,6 +1062,7 @@
                  "tool_edit":  "Edit",
                  "tool_bash":  "Run",
                  "tool_bash_output": "Check Background Output",
+                 "action_bash_done": "Terminal command",
                  "tool_skill":  "Skill",
                  "tool_todo":  "Todos",
                  "tool_code":  "Code",
@@ -1269,7 +1297,7 @@
                     "turn_input":  "Turn Input",
                     "turn_output":  "Turn Output",
                     "batch_done_count":  "{count} tool calls",
-                    "action_bash_done":  "Terminal command ran",
+                    "action_bash_done":  "Terminal command",
                     "action_thinking_done":  "Thought",
                     "batch_thinking_count":  "Thought {count} times",
                     "messages":  "Messages"

@@ -3,6 +3,12 @@
     "360": "360",
     "1000": "1000",
     "10000": "10000",
+    "Upload update check file": "更新チェックファイルをアップロード",
+    "Update check file uploaded successfully": "更新チェックファイルをアップロードしました",
+    "Failed to upload update check file": "更新チェックファイルのアップロードに失敗しました",
+    "Invalid update check file": "有効な JSON 更新チェックファイルを選択してください",
+    "Update check file": "更新チェックファイル",
+    "Select a latest.json file to publish to the desktop updater.": "デスクトップ更新プログラムに公開する latest.json ファイルを選択してください。",
     "_copy": "_copy",
     "and the": "および",
     "By clicking sign in, you agree to our": "サインインをクリックすると、以下に同意したものとみなされます：",
@@ -7571,6 +7577,17 @@
     "Describe your next task…": "次のタスクを入力…",
     "Syntax check passed": "構文チェックに合格",
     "Task complete": "タスク完了",
-    "2 min 41 s": "2 分 41 秒"
+    "2 min 41 s": "2 分 41 秒",
+    "Latest manifest file is required": "Latest manifest file is required",
+    "Latest manifest must be a .json file": "Latest manifest must be a .json file",
+    "Latest manifest exceeds size limit": "Latest manifest exceeds size limit",
+    "Current update manifest": "現在の更新マニフェスト",
+    "Public feed URL": "公開更新フィード URL",
+    "No latest.json has been uploaded yet.": "latest.json はまだアップロードされていません。",
+    "latest.json not found": "latest.json not found",
+    "Failed to read latest.json manifest": "Failed to read latest.json manifest",
+    "Failed to store latest.json manifest": "Failed to store latest.json manifest",
+    "Invalid latest.json manifest: missing version": "Invalid latest.json manifest: missing version",
+    "Invalid latest.json manifest: missing platforms": "Invalid latest.json manifest: missing platforms"
   }
 }

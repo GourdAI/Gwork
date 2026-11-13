@@ -62,6 +62,34 @@ public class MemoryMdData implements AutoCloseable {
     private static final String FRONT_MATTER_DELIMITER = "---";
     private static final Map<Path, Object> ROOT_LOCKS = new ConcurrentHashMap<>();
 
+    // ==================== 检索字段权重 ====================
+    //
+    // 为什么是三域而不是只有 content：旧实现的索引 token 仅来自 content，
+    // 而这批记忆的可识别信号恰恰写在 title 与 key 里（例如 title「凭证级亲和」
+    // 对应 key `credential_affinity_*`，正文里却可能一次都没出现该词），
+    // 于是出现「明明存过、搜不到」的漏检。
+    //
+    // key/title 权重高于 content：它们是写入时用来**标识**条目的字段，同一个词
+    // 落在标题上远比埋在长正文里更能说明相关性。
+    //
+    // 权重与归一化公式与 Rust 内核 `core/src/memory/mod.rs` 的 `score_entry`
+    // 一致 —— 两个内核服务同一个磁盘目录，对「命中」的定义必须相同，否则
+    // 同一个 query 在一边命中、另一边落空，在模型看来就是记忆随机出现和消失。
+    //
+    // 注意一致性的**边界仅限检索层**：key → 文件名 的映射两侧并不同构。
+    // Rust `sanitize_segment` 会把 `:` 等字符改写为 `_` 并在 128 字符处截断，
+    // 本类的 `buildStoreKey` 则是裸拼接 `userId + "__" + key`，由
+    // `validateIdentity` 拒绝非法 key 而不做改写。因此这类 key 在 Rust 侧会被
+    // 静默改名（原始 key 不可恢复），在 Java 侧则直接抛异常。统一存储层需先
+    // 决定既有数据的迁移方式，故本轮只统一检索语义，未触碰映射规则。
+    private static final double W_KEY = 1.0;
+    private static final double W_TITLE = 1.0;
+    private static final double W_CONTENT = 0.6;
+    /** 子串兜底命中（token 未精确命中任何字段时）的降权系数。 */
+    private static final double W_SUBSTRING = 0.3;
+    /** key 完全相等时置顶：高于 1.0 的评分上限，任何正文命中都无法超越。 */
+    private static final double SCORE_EXACT_KEY = 2.0;
+
     private final Path baseDir;
     private final Object rootLock;
 
@@ -258,18 +286,32 @@ public class MemoryMdData implements AutoCloseable {
             return Collections.emptyList();
         }
 
-        Set<String> queryTokens = tokenize(query.toLowerCase());
+        String rawQuery = query.trim();
+        Set<String> queryTokens = tokenize(rawQuery.toLowerCase());
+        if (queryTokens.isEmpty()) {
+            // 无可索引内容（单个 ASCII 字母、或纯标点）：Java 旧行为是判 0 命中
+            // 直接返回空。改为整串子串探测，与 Rust 内核一致 —— 它不会凭空造出
+            // 不含该文本的条目，只会把「搜不到」变成「搜得到」。
+            queryTokens = new HashSet<>();
+            queryTokens.add(rawQuery.toLowerCase());
+        }
 
         List<ScoredEntry> scored = new ArrayList<>();
         for (IndexEntry entry : userIndex.values()) {
-            double score = computeScore(entry, queryTokens);
+            double score = computeScore(entry, queryTokens, rawQuery);
             if (score > 0) {
                 scored.add(new ScoredEntry(entry, score));
             }
         }
 
+        // 分数优先，其余按重要度/时间/key 兜底：同分结果必须稳定，
+        // 否则会随 ConcurrentHashMap 的遍历顺序漂移，在模型看来就是
+        // 同一个 query 两次返回不同排序。
         return scored.stream()
-                .sorted(Comparator.comparingDouble((ScoredEntry se) -> se.score).reversed())
+                .sorted(Comparator.comparingDouble((ScoredEntry se) -> se.score).reversed()
+                        .thenComparing((ScoredEntry se) -> se.entry.importance, Comparator.reverseOrder())
+                        .thenComparing(se -> se.entry.time == null ? "" : se.entry.time, Comparator.reverseOrder())
+                        .thenComparing(se -> se.entry.userKey == null ? "" : se.entry.userKey))
                 .limit(limit)
                 .map(se -> toSearchResult(se.entry))
                 .collect(Collectors.toList());
@@ -834,14 +876,20 @@ public class MemoryMdData implements AutoCloseable {
      *
      * <p>双重检查锁定保证线程安全：volatile 读在 synchronized 外面，
      * 绝大多数情况下直接返回已缓存的分词结果，不进入同步块。
+     *
+     * <p>缓存的是三域分词（key/title/content），而非只有 content —— 见
+     * {@link #computeScore} 的字段权重说明。
      */
-    private Set<String> getTokens(IndexEntry entry) {
-        Set<String> tokens = entry.tokens;
+    private FieldTokens getTokens(IndexEntry entry) {
+        FieldTokens tokens = entry.tokens;
         if (tokens == null) {
             synchronized (entry) {
                 tokens = entry.tokens;
                 if (tokens == null) {
-                    tokens = tokenize(entry.content.toLowerCase());
+                    tokens = new FieldTokens(
+                            tokenize(entry.userKey.toLowerCase()),
+                            tokenize(entry.title == null ? "" : entry.title.toLowerCase()),
+                            tokenize(entry.content == null ? "" : entry.content.toLowerCase()));
                     entry.tokens = tokens;
                 }
             }
@@ -911,44 +959,70 @@ public class MemoryMdData implements AutoCloseable {
     }
 
     /**
-     * 搜索评分：token 命中率 + 重要性权重
+     * 搜索评分：token 命中率 + 重要性权重，按字段加权。
      *
      * <p>评分策略：
      * <ul>
-     *   <li>精确 token 命中：按命中比率计分（权重 0.7）+ 重要性加权（权重 0.3）</li>
-     *   <li>子串兜底命中：仅当精确 token 命中为 0 时触发，降权计分（权重 0.3）+ 重要性加权（权重 0.2）</li>
+     *   <li>key 完全相等：置顶（{@link #SCORE_EXACT_KEY}），标识符查询不会被同词的正文挤掉</li>
+     *   <li>精确 token 命中：按字段加权计分（key/title &gt; content）+ 重要性加权</li>
+     *   <li>子串兜底命中：仅对精确 token 未命中的 query token 触发，降权计分</li>
      * </ul>
+     *
+     * <p>为什么必须带 key/title：旧实现只对 content 建索引，而这批记忆的可识别
+     * 信号写在 title 与 key 上，导致「存过却搜不到」。字段权重与归一化公式和
+     * Rust 内核 {@code core/src/memory/mod.rs} 的 {@code score_entry} 保持一致。
      */
-    private double computeScore(IndexEntry entry, Set<String> queryTokens) {
-        String contentLower = entry.content.toLowerCase();
-        Set<String> contentTokens = getTokens(entry);
-
-        // 阶段一：精确 token 命中
-        long tokenHits = queryTokens.stream()
-                .filter(contentTokens::contains)
-                .count();
-
-        if (tokenHits > 0) {
-            double hitRate = (double) tokenHits / queryTokens.size();
-            double impWeight = entry.importance / 10.0;
-
-            return hitRate * 0.7 + impWeight * 0.3;
+    private double computeScore(IndexEntry entry, Set<String> queryTokens, String rawQuery) {
+        if (queryTokens.isEmpty()) {
+            return 0;
+        }
+        // 标识符精确查询置顶：先于分词逻辑判断，单字符 key（分词后为空）也能命中。
+        if (entry.userKey != null && entry.userKey.equalsIgnoreCase(rawQuery)) {
+            return SCORE_EXACT_KEY;
         }
 
-        // 阶段二：子串兜底（降权）
-        long substrHits = 0;
+        FieldTokens fields = getTokens(entry);
+        String keyLower = entry.userKey == null ? "" : entry.userKey.toLowerCase();
+        String titleLower = entry.title == null ? "" : entry.title.toLowerCase();
+        String contentLower = entry.content == null ? "" : entry.content.toLowerCase();
+
+        double credit = 0;
         for (String token : queryTokens) {
-            if (contentLower.contains(token)) {
-                substrHits++;
+            if (fields.key.contains(token)) {
+                credit += W_KEY;
+            } else if (fields.title.contains(token)) {
+                credit += W_TITLE;
+            } else if (fields.content.contains(token)) {
+                credit += W_CONTENT;
+            } else if (keyLower.contains(token) || titleLower.contains(token) || contentLower.contains(token)) {
+                // 子串兜底：可达而非摆设。例如「构建脚」是「构建脚本」的子串，
+                // 却不是它的任何 bi-gram，阶段一看不见；没有这一步，query 里
+                // 一个稍有偏差的片段会把整条记忆判为 0 分而不是降权。
+                credit += W_SUBSTRING;
             }
         }
+        if (credit <= 0) {
+            return 0;
+        }
 
-        if (substrHits == 0) return 0;
+        // 以「每个 token 都命中 key 字段」为满分归一，保证比率落在 0..1，
+        // 重要性项才能保持它应有的占比。
+        double hitRate = credit / (queryTokens.size() * W_KEY);
+        double impWeight = Math.min(Math.max(entry.importance, 0), 10) / 10.0;
+        return hitRate * 0.7 + impWeight * 0.3;
+    }
 
-        double substrRate = (double) substrHits / queryTokens.size();
-        double impWeight = entry.importance / 10.0;
+    /** 三域分词结果，随 IndexEntry 生命周期缓存与释放。 */
+    private static final class FieldTokens {
+        final Set<String> key;
+        final Set<String> title;
+        final Set<String> content;
 
-        return substrRate * 0.3 + impWeight * 0.2;
+        FieldTokens(Set<String> key, Set<String> title, Set<String> content) {
+            this.key = key;
+            this.title = title;
+            this.content = content;
+        }
     }
 
     // ==================== 生命周期管理 ====================
@@ -996,9 +1070,9 @@ public class MemoryMdData implements AutoCloseable {
         int ttl;
         String storedTime;
         /**
-         * 分词结果内联缓存（lazy init，随 IndexEntry 生命周期自动释放）
+         * 三域分词结果内联缓存（lazy init，随 IndexEntry 生命周期自动释放）
          */
-        volatile Set<String> tokens;
+        volatile FieldTokens tokens;
 
         IndexEntry(String userId, String userKey, String title, String content, int importance, String time,
                    int ttl, String storedTime) {

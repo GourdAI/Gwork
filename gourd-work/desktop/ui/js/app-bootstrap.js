@@ -145,10 +145,11 @@
 '/js/app-account.js',            // 账号入口（登录/注册/登出），纯 IPC，无 /web 请求
         '/js/app-settings-appearance.js',
         '/js/app-settings-permission.js',
-        '/js/app-settings-mcp.js',
+        '/js/app-settings-mcp.js',   // 内含唯一的 window.McpAuth 定义（认证层须早于市场页）
         '/js/app-settings-openapi.js',
         '/js/app-settings-lsp.js',
         '/js/app-model-settings.js',
+        '/js/app-mcp-market.js',
         '/js/app-skills.js',
         '/js/app-automation.js',
         '/js/app-channel-config.js',

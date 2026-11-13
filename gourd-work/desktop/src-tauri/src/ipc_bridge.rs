@@ -15,11 +15,13 @@
 //! | `remote*` (9 methods + 3 event channels) | the remote-control channel subsystem
 //!   (`src/remote/`) ported from the old shell: SSH/WSL sessions, versioned deploy
 //!   roots, tunnels, and the in-memory model mirror. See `remote/mod.rs`. |
+//! | `updater*` (5 methods + event) | auto-update via `src/updater.rs`: reads the
+//!   admin-uploaded, unauthenticated `latest.json`. Exposing these activates the
+//!   already-written About/badge state machine instead of its "unsupported" fallback. |
 //!
 //! | Deliberately **absent** | Why |
 //! |---|---|
 //! | `restartBackend` | the kernel is in-process, there is no subprocess to restart; the UI then shows "this version does not support in-app retry" instead of pretending |
-//! | `updater*` (5 methods) | no self-update in this kernel |
 //!
 //! Also injected here, because the frontend's desktop-only CSS keys off them:
 //!   - `body.is-electron` — activates `.titlebar-drag-region` (app.css) and the
@@ -140,7 +142,8 @@ const BRIDGE_JS: &str = r#"
 
   var listeners = {};
   var lastPayload = {};
-  var REPLAY = { 'backend-ready': 1, 'backend-failed': 1, 'window-chrome': 1 };
+  var REPLAY = { 'backend-ready': 1, 'backend-failed': 1, 'window-chrome': 1,
+                 'updater-state': 1 };
 
   function on(name, cb) {
     if (typeof cb !== 'function') return;
@@ -321,6 +324,19 @@ const BRIDGE_JS: &str = r#"
   
     getAppVersion: function () { return invoke('get_app_version'); },
 
+    /* ───────── Auto-update ─────────
+       清单由 admin 后台「上传更新检测文件」提供，公开免登录；Rust 侧
+       updater.rs 负责检查/下载/安装并广播 updater-state 事件。前端
+       app-settings-about.js 与 app-update-badge.js 早已写好完整状态机，
+       这五个方法一暴露，「检查更新」卡片与侧栏更新按钮就自动激活
+       （hasUpdaterBridge() 要求 updaterGetState + updaterCheck 同时存在）。 */
+    updaterGetVersion: function () { return invoke('updater_get_version'); },
+    updaterGetState: function () { return invoke('updater_get_state'); },
+    updaterCheck: function () { return invoke('updater_check'); },
+    updaterDownload: function () { return invoke('updater_download'); },
+    updaterInstall: function () { return invoke('updater_install'); },
+    onUpdaterState: function (cb) { on('updater-state', cb); },
+
     /* ───────── Account / login session ─────────
        桌面端不退出就一直保持登录：Rust 侧负责 refresh 与 keyring 持久化，
        这里只是把 6 个 command 暴露给 app-account.js。密码只在 invoke 参数里
@@ -329,13 +345,18 @@ const BRIDGE_JS: &str = r#"
     authLogin: function (username, password) {
       return invoke('auth_login', { username: String(username || ''), password: String(password || '') });
     },
-    authRegister: function (username, password, email) {
+    authRegister: function (username, password, email, verificationCode) {
       return invoke('auth_register', {
         username: String(username || ''),
         password: String(password || ''),
-        email: String(email || '')
+        email: String(email || ''),
+        verificationCode: String(verificationCode || '')
       });
     },
+    authSendCode: function (email) {
+      return invoke('auth_send_code', { email: String(email || '') });
+    },
+    authConfig: function () { return invoke('auth_config'); },
     authLogout: function () { return invoke('auth_logout'); },
     authRefresh: function () { return invoke('auth_refresh'); },
     authSelf: function () { return invoke('auth_self'); }

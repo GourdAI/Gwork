@@ -527,6 +527,15 @@ pub struct McpBody {
     pub server_name: String,
     #[serde(rename = "disallowedTools")]
     pub disallowed_tools: Option<Vec<String>>,
+    // 认证声明（非密钥）：只保存 authType 与令牌弹窗元数据，凭据另存 CredentialVault。
+    /// Non-secret authentication declaration for this connector.
+    /// `authType`: "none" | "token" | "oauth"; plus token dialog metadata.
+    /// Secrets themselves are NEVER stored here — see `mcp::auth::CredentialVault`.
+    #[serde(default)]
+    pub auth: Option<serde_json::Value>,
+    /// Legacy flat spelling accepted by `AuthSpec::from_entry`.
+    #[serde(rename = "authType", default)]
+    pub auth_type: Option<String>,
 }
 
 /// GET /web/settings/mcp/servers
@@ -559,6 +568,14 @@ pub async fn mcp_servers() -> Json<serde_json::Value> {
                 if !cfg.timeout.is_empty() {
                     item["timeout"] = serde_json::json!(cfg.timeout);
                 }
+            }
+            // 该接口逐字段组装返回项，需显式透传认证声明供前端渲染令牌/OAuth 弹窗；
+            // 只透传声明，凭据值仍由 CredentialVault 保管，绝不在此返回。
+            if let Some(v) = entry.get("auth") {
+                item["auth"] = v.clone();
+            }
+            if let Some(v) = entry.get("authType") {
+                item["authType"] = v.clone();
             }
             list.push(item);
         }
@@ -662,7 +679,98 @@ fn build_entry(
         entry["disallowedTools"] = serde_json::json!(dt);
     }
 
+    // 只把「认证声明」写进 settings.json（authType / 弹窗元数据，均为非密钥）。
+    // 凭据值绝不落盘到这里：静态 token 与 OAuth token 由
+    // `mcp::auth::CredentialVault` 单独保管，settings.json 会被导出/共享。
+    if let Some(auth) = &body.auth {
+        entry["auth"] = sanitize_auth_decl(auth);
+    } else if let Some(auth_type) = body
+        .auth_type
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        // 兼容旧版扁平拼写 `authType`，供 `AuthSpec::from_entry` 读取。
+        entry["authType"] = serde_json::json!(auth_type);
+    } else if let Some(e) = existing {
+        // update 语义（与 prev_str 一致）：本次未提交声明时保留已存的
+        // `auth` / `authType`，避免一次编辑把认证方式清掉。但保留也必须过
+        // 同一道白名单：否则旧配置里混入的 token 会被永久写回 settings.json。
+        if let Some(v) = e.get("auth") {
+            entry["auth"] = sanitize_auth_decl(v);
+        }
+        if let Some(v) = e.get("authType") {
+            if let Some(s) = v.as_str() {
+                entry["authType"] = serde_json::json!(s);
+            }
+        }
+    }
+
     Ok(entry)
+}
+
+/// Keep only non-secret declaration fields from a submitted `auth` object.
+///
+/// `auth` is a free-form JSON value because the connector catalog may add new
+/// display metadata. Cloning it verbatim would let a mistaken client (or a
+/// crafted catalog entry) write a live `token` into settings.json — the exact
+/// file this whole auth design exists to keep secrets out of. Whitelisting at
+/// the persistence boundary is the only place that cannot be bypassed.
+///
+/// The whitelist is **type-checked per key**, not merely name-checked. An
+/// earlier version copied each allowed key's value wholesale, which left a hole
+/// even though every *key* was legitimate: a secret nested inside an allowed
+/// value survived and landed on disk (and was echoed back to the UI by
+/// `mcp_servers`), e.g.
+/// `{"authType":"token","scopes":[{"apiKey":"sk-live-…"}],`
+/// `"tokenLabel":{"nested":{"password":"…"}}}`.
+/// Constraining each field to the type `mcp::auth::AuthSpec` actually
+/// deserializes it as closes that permanently — a `String` field cannot carry a
+/// nested object, and `scopes` can only be a list of plain strings.
+pub(crate) fn sanitize_auth_decl(raw: &serde_json::Value) -> serde_json::Value {
+    /// (wire name, accepted JSON types) — mirrors `mcp::auth::AuthSpec` exactly.
+    /// Keep in sync with `mcp_auth_api::auth_spec_for`'s `FIELDS` table, which
+    /// reads the same declaration back out.
+    const STRING_FIELDS: &[&str] = &[
+        "authType", "tokenLabel", "tokenHelpUrl", "tokenHelpText",
+        "tokenHeader", "tokenPrefix", "clientId",
+        // RFC 8628 / in-app QR modal — non-secret presentation metadata.
+        "deviceAuthorizationEndpoint",
+    ];
+    const BOOL_FIELDS: &[&str] = &["authDeviceFlow", "authQrModal"];
+    const NUMBER_FIELDS: &[&str] = &["devicePollIntervalSecs"];
+
+    let Some(obj) = raw.as_object() else { return serde_json::json!({}) };
+    let mut out = serde_json::Map::new();
+
+    for key in STRING_FIELDS {
+        if let Some(v) = obj.get(*key).filter(|v| v.is_string()) {
+            out.insert((*key).to_string(), v.clone());
+        }
+    }
+    for key in BOOL_FIELDS {
+        if let Some(v) = obj.get(*key).filter(|v| v.is_boolean()) {
+            out.insert((*key).to_string(), v.clone());
+        }
+    }
+    for key in NUMBER_FIELDS {
+        if let Some(v) = obj.get(*key).filter(|v| v.is_number()) {
+            out.insert((*key).to_string(), v.clone());
+        }
+    }
+    // `scopes` is the one structured field: accept an array of plain strings and
+    // drop every non-string element, so it can never smuggle an object of
+    // key/value secrets. A non-array `scopes` is dropped entirely.
+    if let Some(serde_json::Value::Array(items)) = obj.get("scopes") {
+        let clean: Vec<serde_json::Value> = items
+            .iter()
+            .filter(|v| v.is_string())
+            .cloned()
+            .collect();
+        if !clean.is_empty() {
+            out.insert("scopes".to_string(), serde_json::Value::Array(clean));
+        }
+    }
+    serde_json::Value::Object(out)
 }
 
 /// Parse one settings entry into a `McpServerConfig` for engine operations.
@@ -695,7 +803,12 @@ async fn sync_engine(state: &Arc<AppState>, name: &str, entry: Option<&serde_jso
             }
         }
         None => {
-            state.mcp.disconnect_one(name).await;
+            // `forget_server`, not `disconnect_one`: the manager retains configs so
+            // it can auto-rebuild a connection that died mid-session. On this path
+            // the user explicitly took the server offline (remove / toggle-off /
+            // rename), and keeping the config would let a queued tool call
+            // resurrect it — the user's "off" would not stick.
+            state.mcp.forget_server(name).await;
             None
         }
     }
@@ -916,23 +1029,10 @@ fn check_fail(msg: &str) -> serde_json::Value {
 /// Map low-level spawn/IO errors onto the messages the Java kernel returns, so
 /// the UI badge says something actionable instead of a raw Rust error string.
 fn humanize_connect_error(raw: &str, kind: &str) -> String {
-    let lower = raw.to_lowercase();
-    if lower.contains("not implemented") {
-        return format!("不支持检测的类型: {}", kind);
-    }
-    if lower.contains("timed out") || lower.contains("timeout") {
-        return "连接超时，请检查地址是否可达".into();
-    }
-    if lower.contains("connection refused") || lower.contains("actively refused") {
-        return "连接被拒绝，请检查地址和端口是否正确".into();
-    }
-    if lower.contains("os error 2") || lower.contains("no such file") {
-        return format!("命令无法执行（未找到可执行文件）: {}", raw);
-    }
-    if lower.contains("closed stdout") {
-        return "服务器已启动但未响应 MCP 握手（请检查命令与参数）".into();
-    }
-    format!("检测失败: {}", raw)
+    // Delegates to the MCP module: connection health is owned there, and the
+    // same wording must reach both this panel and the `last_error` field the
+    // manager records for background/automatic reconnects.
+    crate::mcp::humanize_connect_error(raw, kind)
 }
 
 /// Query for `GET /web/settings/mcp/servers/tools`.
@@ -960,14 +1060,32 @@ pub async fn mcp_server_tools(
 
     // Prefer the live connection; fall back to a one-shot probe so a disabled or
     // not-yet-connected server can still have its tools inspected.
+    //
+    // `connected` comes from the manager's health record, NOT from "did this
+    // server return any tools". Inferring it from the tool list was wrong in both
+    // directions: a server whose child process had died still had its tools in
+    // the registry (they are only dropped on explicit disconnect), so the panel
+    // showed green for a dead server; and a healthy server that legitimately
+    // exposes zero tools showed red and paid for a redundant probe on every
+    // panel refresh.
+    let health = state.mcp.health_of(&name).await;
     let mut tools = state.mcp.tools_of(&name).await;
-    let mut connected = !tools.is_empty();
-    if tools.is_empty() {
+    let connected = health.is_connected();
+    // True when the tool list below came from a throwaway probe rather than the
+    // live connection, so the UI can say "reachable, but not connected" instead
+    // of implying an active session that does not exist.
+    //
+    // Probe only when there is NO live connection. If one exists it is the
+    // authority: an empty list then means the server genuinely exposes zero
+    // tools, and re-probing would be a redundant handshake that could even
+    // contradict the live state.
+    let mut probe_only = false;
+    if tools.is_empty() && !connected {
         let probe_name = format!("__tools__{}", uuid::Uuid::new_v4());
         match state.mcp.probe(&probe_name, &cfg).await {
             Ok(t) => {
                 tools = t;
-                connected = true;
+                probe_only = true;
             }
             Err(e) => {
                 return Json(serde_json::json!({
@@ -975,9 +1093,18 @@ pub async fn mcp_server_tools(
                     "data": {
                         "serverName": name,
                         "connected": false,
+                        "probeOnly": false,
+                        "state": health.state,
                         "disallowedTools": disallowed,
                         "tools": [],
-                        "error": humanize_connect_error(&e.to_string(), &cfg.resolved_type()),
+                        // Prefer the manager's own reason: it is the one recorded
+                        // when the server was last connected (or auto-reconnect
+                        // last failed), which is what the user needs to see.
+                        "error": if health.last_error.is_empty() {
+                            humanize_connect_error(&e.to_string(), &cfg.resolved_type())
+                        } else {
+                            health.last_error.clone()
+                        },
                     }
                 }));
             }
@@ -1000,6 +1127,11 @@ pub async fn mcp_server_tools(
         "data": {
             "serverName": name,
             "connected": connected,
+            "probeOnly": probe_only,
+            "state": health.state,
+            "lastError": health.last_error,
+            "reconnects": health.reconnects,
+            "reconnectAttempts": health.reconnect_attempts,
             "disallowedTools": disallowed,
             "tools": list,
         }
@@ -2889,5 +3021,270 @@ mod tests {
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_readonly(false);
         let _ = std::fs::set_permissions(&path, perms);
+    }
+
+    // ─── MCP auth declaration ───────────────────────────────────────────────
+
+    /// 认证声明是配置、不是密钥：必须落盘为 `auth.authType`，且条目里不得出现
+    /// 任何 token 值字段。真正的凭据由 `mcp::auth::CredentialVault` 单独保管。
+    #[test]
+    fn build_entry_persists_auth_declaration_but_never_a_token_value() {
+        let body = McpBody {
+            name: "dnb".to_string(),
+            kind: "streamable".to_string(),
+            url: Some("https://example.com/mcp".to_string()),
+            auth: Some(serde_json::json!({
+                "authType": "token",
+                "tokenLabel": "D&B Access Token"
+            })),
+            ..McpBody::default()
+        };
+        // 纯内存调用，不触碰真实 settings.json；streamable 属 HTTP 家族，
+        // `build_entry` 只要求 url 非空，故该构造能通过校验。
+        let entry = build_entry(&body, None).expect("valid streamable entry");
+
+        assert_eq!(entry["auth"]["authType"], "token");
+        assert_eq!(entry["auth"]["tokenLabel"], "D&B Access Token");
+        assert_eq!(entry["url"], "https://example.com/mcp");
+
+        // 逐层扫描：声明里可以有 tokenLabel 这类弹窗元数据，但绝不能有
+        // token / accessToken / apiKey 等承载凭据值的字段。
+        fn assert_no_secret_fields(v: &serde_json::Value) {
+            const SECRET_KEYS: &[&str] = &[
+                "token", "tokenValue", "accessToken", "access_token",
+                "refreshToken", "refresh_token", "apiKey", "api_key",
+                "secret", "value",
+            ];
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (k, child) in map {
+                        assert!(
+                            !SECRET_KEYS.contains(&k.as_str()),
+                            "credential field leaked into settings.json: {}",
+                            k
+                        );
+                        assert_no_secret_fields(child);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for child in items {
+                        assert_no_secret_fields(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_no_secret_fields(&entry);
+        assert!(entry.get("authType").is_none(), "nested form should not also emit the flat form");
+    }
+
+    /// Guardrail: the whitelist must actually strip a credential smuggled in the
+    /// `auth` object. Without this, reverting `sanitize_auth_decl` back to a plain
+    /// `clone()` would still pass the test above (which only submits clean data).
+    #[test]
+    fn build_entry_strips_a_smuggled_credential_from_auth_declaration() {
+        let body = McpBody {
+            name: "dnb".to_string(),
+            kind: "streamable".to_string(),
+            url: Some("https://example.com/mcp".to_string()),
+            auth: Some(serde_json::json!({
+                "authType": "token",
+                "tokenLabel": "D&B Access Token",
+                "token": "LIVE-SECRET-MUST-NOT-PERSIST",
+                "accessToken": "another-secret",
+                "nested": { "apiKey": "third-secret" }
+            })),
+            ..McpBody::default()
+        };
+        let entry = build_entry(&body, None).expect("valid streamable entry");
+        let serialized = serde_json::to_string(&entry).unwrap();
+        assert!(!serialized.contains("LIVE-SECRET-MUST-NOT-PERSIST"));
+        assert!(!serialized.contains("another-secret"));
+        assert!(!serialized.contains("third-secret"));
+        assert_eq!(entry["auth"]["authType"], "token");
+        assert_eq!(entry["auth"]["tokenLabel"], "D&B Access Token");
+        assert!(entry["auth"].get("token").is_none());
+        assert!(entry["auth"].get("nested").is_none());
+    }
+
+    /// Guardrail for the *update* path: preserving an existing declaration must
+    /// go through the same whitelist. Otherwise a legacy entry that already
+    /// contains a secret keeps writing it back into settings.json on every edit.
+    #[test]
+    fn build_entry_update_path_also_strips_legacy_secrets() {
+        let existing = serde_json::json!({
+            "type": "streamable",
+            "url": "https://example.com/mcp",
+            "auth": {
+                "authType": "token",
+                "tokenLabel": "D&B Access Token",
+                "token": "LEGACY-SECRET"
+            }
+        });
+        let body = McpBody {
+            name: "dnb".to_string(),
+            kind: "streamable".to_string(),
+            url: Some("https://example.com/mcp".to_string()),
+            ..McpBody::default()
+        };
+        let entry = build_entry(&body, Some(&existing)).expect("valid update");
+        let serialized = serde_json::to_string(&entry).unwrap();
+        assert!(!serialized.contains("LEGACY-SECRET"));
+        assert_eq!(entry["auth"]["authType"], "token");
+    }
+
+    /* ── sanitize_auth_decl 白名单本体（P1 回归护栏） ─────────────────────
+     *
+     * 上面两个测试都把密钥放在**顶层非白名单键**上（`token` / `accessToken` /
+     * `nested`），它们被名字过滤直接整体丢弃 —— 递归检查分支从未被触发，
+     * `assert_no_secret_fields` 的能力实际上是空转的。
+     *
+     * 下面这组才覆盖真正的绕过面：**键名全部合法，密钥藏在值里面**。
+     * 旧实现 `out.insert(key, obj.get(key).clone())` 会把整棵子树原样带进
+     * settings.json，再经 `mcp_servers()` 的 `item["auth"] = v.clone()`
+     * 明文回传前端，正好击穿「凭据绝不落 settings.json」这条核心不变量。
+     */
+
+    #[test]
+    fn sanitize_auth_decl_refuses_secrets_nested_inside_allowed_keys() {
+        let cleaned = sanitize_auth_decl(&serde_json::json!({
+            "authType": "token",
+            "tokenLabel": { "nested": { "password": "SMUGGLED-1" } },
+            "tokenHelpText": [ { "apiKey": "SMUGGLED-2" } ],
+            "clientId": { "client_secret": "SMUGGLED-3" },
+            "scopes": [
+                "mcp:read",
+                { "apiKey": "SMUGGLED-4" },
+                [ "SMUGGLED-5" ],
+                "mcp:write"
+            ],
+            "devicePollIntervalSecs": { "token": "SMUGGLED-6" }
+        }));
+        let serialized = serde_json::to_string(&cleaned).unwrap();
+        for i in 1..=6 {
+            assert!(
+                !serialized.contains(&format!("SMUGGLED-{i}")),
+                "白名单键的值里夹带的密钥泄漏进了 settings.json: SMUGGLED-{i} => {serialized}"
+            );
+        }
+        // 合法的标量与字符串数组仍然保留，功能没有被过度收紧。
+        assert_eq!(cleaned["authType"], "token");
+        assert_eq!(cleaned["scopes"], serde_json::json!(["mcp:read", "mcp:write"]),
+            "scopes 应保留其中的字符串元素、剔除非字符串元素");
+        // 类型不符的字段被整体丢弃，而不是留下半个结构。
+        assert!(cleaned.get("tokenLabel").is_none(), "tokenLabel 必须是字符串");
+        assert!(cleaned.get("tokenHelpText").is_none(), "tokenHelpText 必须是字符串");
+        assert!(cleaned.get("clientId").is_none(), "clientId 必须是字符串");
+        assert!(cleaned.get("devicePollIntervalSecs").is_none(), "devicePollIntervalSecs 必须是数字");
+    }
+
+    #[test]
+    fn sanitize_auth_decl_keeps_every_legal_declaration_field() {
+        let cleaned = sanitize_auth_decl(&serde_json::json!({
+            "authType": "oauth",
+            "tokenLabel": "D&B Access Token",
+            "tokenHelpUrl": "https://example.com/help",
+            "tokenHelpText": "在控制台生成",
+            "tokenHeader": "X-Api-Key",
+            "tokenPrefix": "Bearer ",
+            "clientId": "demo-client",
+            "scopes": ["mcp:read"],
+            "authDeviceFlow": true,
+            "authQrModal": false,
+            "deviceAuthorizationEndpoint": "https://as.example.com/device",
+            "devicePollIntervalSecs": 7,
+            // 凭据字段一律不得留下。
+            "token": "MUST-NOT-PERSIST",
+            "accessToken": "MUST-NOT-PERSIST-2",
+            "refreshToken": "MUST-NOT-PERSIST-3",
+            "apiKey": "MUST-NOT-PERSIST-4",
+            "clientSecret": "MUST-NOT-PERSIST-5",
+            "password": "MUST-NOT-PERSIST-6"
+        }));
+        // 12 个声明字段逐一存活（与 mcp::auth::AuthSpec 一一对应）。
+        assert_eq!(cleaned["authType"], "oauth");
+        assert_eq!(cleaned["tokenLabel"], "D&B Access Token");
+        assert_eq!(cleaned["tokenHelpUrl"], "https://example.com/help");
+        assert_eq!(cleaned["tokenHelpText"], "在控制台生成");
+        assert_eq!(cleaned["tokenHeader"], "X-Api-Key");
+        assert_eq!(cleaned["tokenPrefix"], "Bearer ");
+        assert_eq!(cleaned["clientId"], "demo-client");
+        assert_eq!(cleaned["scopes"], serde_json::json!(["mcp:read"]));
+        assert_eq!(cleaned["authDeviceFlow"], true);
+        assert_eq!(cleaned["authQrModal"], false);
+        assert_eq!(cleaned["deviceAuthorizationEndpoint"], "https://as.example.com/device");
+        assert_eq!(cleaned["devicePollIntervalSecs"], 7);
+
+        let serialized = serde_json::to_string(&cleaned).unwrap();
+        for i in 0..=6 {
+            let needle = if i == 0 { "MUST-NOT-PERSIST".to_string() } else { format!("MUST-NOT-PERSIST-{i}") };
+            assert!(!serialized.contains(&needle), "凭据字段泄漏: {needle}");
+        }
+        // 键集合精确等于 12 个白名单键：多一个都意味着白名单被放宽。
+        let keys: std::collections::BTreeSet<&str> = cleaned
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(keys.len(), 12, "白名单键数量变了: {keys:?}");
+    }
+
+    #[test]
+    fn sanitize_auth_decl_is_fail_closed_on_non_objects() {
+        // 字符串形态的 auth（如 `"auth":"token"`）不得原样透传。
+        assert_eq!(sanitize_auth_decl(&serde_json::json!("token")), serde_json::json!({}));
+        assert_eq!(sanitize_auth_decl(&serde_json::json!(42)), serde_json::json!({}));
+        assert_eq!(sanitize_auth_decl(&serde_json::json!(null)), serde_json::json!({}));
+        assert_eq!(sanitize_auth_decl(&serde_json::json!([])), serde_json::json!({}));
+        // 数组里夹密钥同样不得存活。
+        assert_eq!(
+            sanitize_auth_decl(&serde_json::json!([{ "token": "SECRET" }])),
+            serde_json::json!({})
+        );
+    }
+
+    /// 写侧白名单与读侧 `mcp_auth_api::auth_spec_for` 的 `FIELDS` 表是两份手写
+    /// 清单，此前没有任何一致性测试，漂移不会有任何信号。
+    ///
+    /// 已知的历史漂移：读侧主动兼容 snake_case（`tokenLabel` ↔ `token_label`），
+    /// 写侧只认 camelCase，于是出现「读得懂、写不进」—— 上游目录若给
+    /// `auth_type`，声明会被静默归零，`/auth/state` 恒为 `none`，
+    /// token / OAuth / Device Flow 弹窗全部空转，用户看到「安装成功但无法认证」。
+    /// 这条测试把「两份表覆盖同一批字段」钉住：任何一侧新增字段而另一侧漏了，
+    /// 这里就会红。
+    #[test]
+    fn sanitize_whitelist_and_auth_spec_reader_cover_the_same_fields() {
+        const EXPECTED: &[&str] = &[
+            "authType", "tokenLabel", "tokenHelpUrl", "tokenHelpText",
+            "tokenHeader", "tokenPrefix", "clientId", "scopes",
+            "authDeviceFlow", "authQrModal",
+            "deviceAuthorizationEndpoint", "devicePollIntervalSecs",
+        ];
+        // 写侧：构造一个只含全部字段的输入，输出必须一个不少。
+        let mut all = serde_json::Map::new();
+        for k in EXPECTED {
+            all.insert((*k).to_string(), serde_json::json!("x"));
+        }
+        // scopes / 布尔 / 数字字段按类型给值，否则会被类型检查丢掉（这正是
+        // 上一个测试要保证的行为）。
+        all.insert("scopes".into(), serde_json::json!(["x"]));
+        all.insert("authDeviceFlow".into(), serde_json::json!(true));
+        all.insert("authQrModal".into(), serde_json::json!(true));
+        all.insert("devicePollIntervalSecs".into(), serde_json::json!(7));
+        let cleaned = sanitize_auth_decl(&serde_json::Value::Object(all));
+        let got: std::collections::BTreeSet<&str> = cleaned.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let want: std::collections::BTreeSet<&str> = EXPECTED.iter().copied().collect();
+        assert_eq!(got, want, "写侧白名单与约定字段集不一致（漏字段或多字段都会导致认证声明静默丢失）");
+
+        // 读侧：mcp_auth_api 的 FIELDS 表必须覆盖同一批 camelCase 名。
+        let reader_src = include_str!("mcp_auth_api.rs");
+        for field in EXPECTED {
+            assert!(
+                reader_src.contains(&format!("\"{field}\"")),
+                "读侧 FIELDS 表缺少 {field}：sanitize 写进去了但 auth_spec_for 读不出来，\
+                 该字段会在 /auth/state 中静默失效"
+            );
+        }
     }
 }

@@ -78,9 +78,19 @@ const COMMANDS: &[&str] = &[
     "auth_status",
     "auth_login",
     "auth_register",
+    "auth_send_code",
+    "auth_config",
     "auth_logout",
     "auth_refresh",
     "auth_self",
+    // ─── 自动更新（updater.rs）───────────────────────────────────────
+    // 与 src/lib.rs 的 generate_handler! 一一对应；漏登会被 ACL 静默拒绝，
+    // 表现为「检查更新按钮点了没反应」而非报错。
+    "updater_get_version",
+    "updater_get_state",
+    "updater_check",
+    "updater_download",
+    "updater_install",
 ];
 
 fn main() {

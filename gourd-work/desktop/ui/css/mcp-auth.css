@@ -1,0 +1,220 @@
+/* mcp-auth.css — 连接器认证弹窗（静态 token / OAuth 等待授权）
+ *
+ * 视觉复刻 settings.css 的 .import-overlay / .import-dialog 骨架，但所有类名
+ * 统一 mcp-auth- 前缀，不改原文件任何规则。颜色一律走 theme.css 真实令牌
+ * （--bg-primary / --bg-input-box / --accent / --accent-contrast /
+ *   --color-success / --color-danger / --border-color / --text-*），
+ * 不引入硬编码品牌色，也不存在 [data-theme=dark] 分支。
+ */
+
+.mcp-auth-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mcp-auth-dialog {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2);
+    width: 480px;
+    max-width: 90vw;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.mcp-auth-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.mcp-auth-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.4;
+}
+
+.mcp-auth-close {
+    background: none;
+    border: none;
+    font-size: 20px;
+    line-height: 1;
+    padding: 0 4px;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.mcp-auth-close:hover { color: var(--text-primary); }
+
+.mcp-auth-body {
+    padding: 16px 20px;
+    overflow-y: auto;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.mcp-auth-help-text {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+}
+
+/* helpUrl：可点击外链（target=_blank rel=noopener noreferrer 由 JS 输出） */
+.mcp-auth-help-link {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--accent);
+    text-decoration: none;
+    width: fit-content;
+}
+
+.mcp-auth-help-link:hover { text-decoration: underline; }
+
+.mcp-auth-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 4px;
+}
+
+.mcp-auth-field-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.mcp-auth-required { color: var(--color-danger); font-weight: 700; }
+
+/* 静态 token 输入：type="password" 由 JS 输出，这里只管外观 */
+.mcp-auth-input {
+    width: 100%;
+    box-sizing: border-box;
+    height: 38px;
+    padding: 0 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-input-box);
+    color: var(--text-primary);
+    font-size: 13px;
+    outline: none;
+}
+
+.mcp-auth-input:focus { border-color: var(--accent); }
+.mcp-auth-input::placeholder { color: var(--text-tertiary); }
+
+/* 状态灯：done/已连接为常亮绿；等待授权时脉冲 */
+.mcp-auth-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.mcp-auth-status-dot {
+    width: 8px; height: 8px;
+    flex: 0 0 8px;
+    border-radius: 50%;
+    background: var(--color-success);
+}
+
+.mcp-auth-status-dot-busy {
+    animation: mcp-auth-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes mcp-auth-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .3; }
+}
+
+/* failed / cancelled / 超时 / 表单校验错误文案 */
+.mcp-auth-error {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--color-danger);
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+}
+
+.mcp-auth-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 20px;
+    border-top: 1px solid var(--border-color);
+}
+
+.mcp-auth-btn {
+    padding: 8px 20px;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: opacity 0.15s;
+}
+
+.mcp-auth-btn:disabled { opacity: .55; cursor: not-allowed; }
+
+.mcp-auth-btn-primary {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: var(--accent);
+}
+
+.mcp-auth-btn-primary:hover { background: var(--accent-hover); }
+
+.mcp-auth-btn-ghost {
+    background: none;
+    color: var(--text-secondary);
+    border-color: var(--border-color);
+}
+
+.mcp-auth-btn-ghost:hover { color: var(--text-primary); background: var(--bg-card); }
+
+/* ── RFC 8628 Device Code / in-app QR modal ───────────────────────────── */
+.mcp-auth-device-code {
+    margin: 14px 0 8px;
+    padding: 12px 16px;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: .18em;
+    text-align: center;
+    color: var(--text-primary);
+    background: var(--bg-card);
+    border: 1px dashed var(--border-color);
+    border-radius: 10px;
+    user-select: all;
+}
+.mcp-auth-countdown {
+    margin: 10px 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+.mcp-auth-qr-frame {
+    display: block;
+    width: 100%;
+    height: 320px;
+    margin: 12px 0 4px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-card);
+}

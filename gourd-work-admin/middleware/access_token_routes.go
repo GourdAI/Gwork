@@ -211,6 +211,15 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	// router/authz-router.go
 	"GET /api/authz/catalog": accessTokenScopeRule("user:read"),
 
+	// router/api-router.go: /api/installers (AdminAuth, session-only). The
+	// public read endpoints below are listed in accessTokenExemptRoutes instead.
+	"GET /api/installers/":        accessTokenSessionRule,
+	"POST /api/installers/":       accessTokenSessionRule,
+	"GET /api/installers/latest":  accessTokenSessionRule,
+	"POST /api/installers/latest": accessTokenSessionRule,
+	"PUT /api/installers/:id":     accessTokenSessionRule,
+	"DELETE /api/installers/:id":  accessTokenSessionRule,
+
 	// router/api-router.go: /api/token
 	"GET /api/token/":            accessTokenScopeRule("api_key:read"),
 	"GET /api/token/search":      accessTokenScopeRule("api_key:read"),

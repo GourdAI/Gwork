@@ -76,11 +76,23 @@ body.is-electron .skills-head .skills-inner { padding-top: 48px; }
 .skills-view-tab { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border: none; background: transparent; color: var(--text-secondary); font-size: 13px; font-weight: 500; cursor: pointer; border-radius: 8px; white-space: nowrap; transition: color 0.15s, background 0.15s; flex-shrink: 0; }
 .skills-view-tab:hover { color: var(--text-primary); background: var(--bg-hover); }
 .skills-view-tab.active { color: var(--text-primary); background: var(--bg-hover); font-weight: 600; }
-/* 已安装数量徽标：嵌在标签内，不再另设右上角入口按钮（两者功能完全重复；
+
+/* ===== 技能视图内二级源切换（已安装 / SkillHub / ClawHub / ModelScope） =====
+ * 层级：顶栏 3 主 tab 是圆角矩形 13px；二级源刻意做成更小的 pill 12px +
+ * --accent-light 激活底，避免与主 tab 抢视觉权重。分类 chips 保留在其下方。
+ * 只在「技能」主 tab 激活时显示，连接器/接口页由 showPane 隐藏 wrap。 */
+.skills-source-bar-wrap { margin-bottom: 8px; }
+.skills-source-tabs { display: flex; gap: 6px; align-items: center; }
+.skills-source-tab { display: inline-flex; align-items: center; gap: 5px; padding: 4px 11px; border: none; border-radius: 999px; background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; white-space: nowrap; flex-shrink: 0; transition: color 0.15s, background 0.15s; }
+.skills-source-tab:hover { color: var(--text-primary); background: var(--bg-hover); }
+.skills-source-tab.active { color: var(--accent); background: var(--accent-light); font-weight: 600; }
+.skills-hscroll.is-dragging .skills-source-tab { cursor: grabbing; }
+/* 已安装数量徽标：嵌在【二级源】标签内，不再另设右上角入口按钮（两者功能完全重复；
    旧结构在已安装视图下还会多渲染一行返回条 → 头部 104px 两行、右侧约 1200px 空白） */
 .skills-tab-count { font-size: 11px; font-weight: 600; line-height: 1; color: var(--text-tertiary, var(--text-secondary)); background: var(--bg-hover); padding: 3px 6px; border-radius: 999px; min-width: 8px; text-align: center; }
 .skills-tab-count:empty { display: none; }
-.skills-view-tab.active .skills-tab-count { color: var(--text-primary); }
+.skills-view-tab.active .skills-tab-count,
+.skills-source-tab.active .skills-tab-count { color: var(--text-primary); }
 .skills-topbar-actions { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
 
 /* ===== 搜索框（flex:1 吸收顶栏剩余宽度，消除标签与右侧之间的空洞） ===== */
@@ -167,7 +179,10 @@ body.is-electron .skills-head .skills-inner { padding-top: 48px; }
 .skill-card:active { transform: scale(0.997); }
 
 .skill-card-icon { position: relative; width: 38px; height: 38px; border-radius: 9px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; overflow: hidden; background: var(--bg-hover); color: var(--text-secondary); }
-.skill-card-icon img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 图标必须 contain 而非 cover：实测 skillhub 存在横幅形 iconUrl（256×64 官方
+* LOGO，透明底），cover 居中裁剪只剩横幅中段（"Skill" 两字）——用户报「图标怪怪的」。
+* contain 完整展示任意宽高比；透明底横幅在暗色主题下黑字不可见，故垫白底。 */
+.skill-card-icon img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; background: #fff; border-radius: inherit; }
 
 .skill-card-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .skill-card-title { display: flex; align-items: center; gap: 6px; min-width: 0; padding-right: var(--side-gutter); }
@@ -228,7 +243,7 @@ body.is-electron .skills-head .skills-inner { padding-top: 48px; }
 .skill-detail-close:hover { background: var(--bg-hover); color: var(--text-primary); }
 .skill-detail-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; padding-right: 34px; }
 .skill-detail-icon { position: relative; width: 52px; height: 52px; border-radius: 12px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 700; overflow: hidden; background: var(--bg-hover); color: var(--text-secondary); }
-.skill-detail-icon img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.skill-detail-icon img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; background: #fff; border-radius: inherit; }
 .skill-detail-headinfo { flex: 1; min-width: 0; }
 .skill-detail-name { font-size: 16px; font-weight: 700; color: var(--text-primary); word-break: break-all; }
 .skill-detail-owner { font-size: 12px; color: var(--text-secondary); margin-top: 3px; }
@@ -243,3 +258,17 @@ body.is-electron .skills-head .skills-inner { padding-top: 48px; }
 .skill-detail-stat { text-align: center; }
 .skill-detail-stat b { display: block; font-size: 14px; color: var(--text-primary); font-weight: 700; }
 .skill-detail-stat span { display: block; font-size: 12px; color: var(--text-secondary); margin-top: 3px; }
+
+/* ===== 技能·连接器·接口：三个 pane 共用主视图 =====
+   设置页的 MCP / OpenAPI 配置已迁移进来；这里只解除设置浮层的窄栏约束。 */
+.skills-pane { width: 100%; }
+.skills-pane-inner { width: 100%; max-width: none; }
+.skills-pane-inner .settings-section { width: 100%; max-width: none; }
+.skills-pane-inner .settings-view { width: 100%; }
+#skillsPaneConnectors .skills-pane-inner { margin-top: 16px; }
+/* 三个 pane 的默认显隐：技能 pane 可见，另两个由 inline display:none 隐藏；
+ * #skillsAddMcpBtn 默认隐藏，切到连接器 pane 时由 app-skills.js 显示。 */
+#skillsPaneSkills { display: block; }
+#skillsAddMcpBtn { display: none; }
+.skills-add-mcp-btn { flex-shrink: 0; padding: 6px 12px; border: 1px dashed var(--border-color); border-radius: 8px; background: none; color: var(--accent); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.skills-add-mcp-btn:hover { border-color: var(--accent); background: var(--accent-light); }

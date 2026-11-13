@@ -275,6 +275,14 @@
                  "confirm":  "確認"
              },
     "app":  {
+
+        "nav":  {
+
+            "connectors":  "コネクタ",
+
+            "interfaces":  "インターフェース"
+
+        },
                                 "access_title":  "アクセス権限",
                 "access_default":  "既定の権限",
                 "access_full":  "完全アクセス",
@@ -580,6 +588,25 @@
                                      "scroll_next":  "右へスクロール"
                                 },
                      "mcp":  {
+                                 "market":  {
+                                             "title":  "MCP マーケット",
+                                             "search_placeholder":  "MCP サービスを検索",
+                                             "hosted":  "ホステッド",
+                                             "installed":  "インストール済み",
+                                             "empty":  "サービスが見つかりません",
+                                             "required":  "必須",
+                                             "verified":  "認証済み",
+                                             "connect":  "接続",
+                                             "connect_title":  "接続",
+                                             "save_connect":  "保存して接続",
+                                             "cancel":  "キャンセル",
+                                             "config":  "接続設定",
+                                             "load_failed":  "MCP ディレクトリの読み込みに失敗しました：{msg}",
+                                             "install_failed":  "インストールに失敗しました：{msg}",
+                                             "installed_names":  "インストール済み：{msg}",
+                                             "detail_failed":  "詳細の読み込みに失敗しました：{msg}",
+                                             "retry":  "再試行"
+                                 },
                                  "title":  "MCP サーバー",
                                  "desc":  "外部ツールサーバーを管理し、ファイル・データベース・ブラウザなどのツール機能を拡張",
                                  "add":  "サーバーを追加",
@@ -1035,6 +1062,7 @@
                  "tool_edit":  "編集",
                  "tool_bash":  "コマンド実行",
                  "tool_bash_output": "バックグラウンド出力を確認",
+                 "action_bash_done": "ターミナルコマンド",
                  "tool_skill":  "スキル",
                  "tool_todo":  "タスク一覧",
                  "tool_code":  "コーディング",
@@ -1269,7 +1297,7 @@
                     "turn_input":  "今回の入力",
                     "turn_output":  "今回の出力",
                     "batch_done_count":  "ツールを {count} 回実行",
-                    "action_bash_done":  "ターミナルコマンドを実行",
+                    "action_bash_done":  "ターミナルコマンド",
                     "action_thinking_done":  "思考済み",
                     "batch_thinking_count":  "思考 {count} 回",
                     "messages":  "メッセージ数"

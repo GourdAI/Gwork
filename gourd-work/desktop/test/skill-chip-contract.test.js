@@ -444,11 +444,20 @@ test('③ 附件区全量重建（renderAttachmentsWrap 的 html("")）不得动
  * ④ 发送链路：wire 注入 id、命令判定不被前缀污染、回显人读形态
  * ===================================================================== */
 test('④ wire 文本注入 /id 前缀，展示名不参与路由', () => {
-    // prefix 由 chip id 拼成，text/rawText 同步前置
+    // prefix 由 chip id 拼成
     assert.match(STREAMING_SRC, /for \(var ci = 0; ci < chipIds\.length; ci\+\+\) prefix \+= '\/' \+ chipIds\[ci\] \+ ' ';/,
         'prefix 必须是 "/id " 逐段拼接');
-    assert.match(STREAMING_SRC, /text = prefix \+ text;\s*\r?\n\s*rawText = prefix \+ rawText;/,
-        'text 与 rawText 必须同步前置，否则折叠判定的原文与发送文本不一致');
+    /* 【P0-C】prefix 不得直接抢行首：后端子代理路由（WebGate:786 / WsGate:255 /
+       CliShell:342）一律按 `startsWith("@")` + `indexOf(" ")` 剥 agentName，剥完才
+       交给命令/技能解析（SkillInvocation 又要求 startsWith("/")）。两道判定都锚在行首，
+       prefix 前置会把 @ 挤出首位 → agentName 恒 null → 子代理静默降级成普通提示词。 */
+    assert.match(STREAMING_SRC, /text = agentSeg \+ prefix \+ text\.substring\(agentSeg\.length\);/,
+        'prefix 必须插在 @agentName 段之后（P0-C）');
+    assert.ok(STREAMING_SRC.indexOf('text = prefix + text;') < 0,
+        'P0-C 回归：prefix 不得直接前置，否则顶掉行首的 @agentName');
+    // rawText 只喂折叠函数、不参与后端路由，须按它自己的行首独立判定
+    assert.match(STREAMING_SRC, /rawText = rawAgentSeg \+ prefix \+ rawText\.substring\(rawAgentSeg\.length\);/,
+        'rawText 必须用自己的行首段（text 已 trim、rawText 未 trim，共用偏移会切错）');
     // 展示名不得进 wire：回显走 [名称]，wire 只有 id
     assert.ok(STREAMING_SRC.indexOf("prefix += '/' + chips[ck].name") < 0,
         '展示名不得混进 wire 文本（后端只认 id，混进去会静默降级成普通提示词）');
@@ -477,17 +486,39 @@ test('④c 气泡回显：用捕获快照 + 去前缀正文，不查 DOM、不�
         '必须在链路开头一次性捕获 chips（id + 展示名），避免两处查 DOM 之间被重渲染打散');
     assert.match(STREAMING_SRC, /for \(var ck = 0; ck < chips\.length; ck\+\+\) shown \+= '\[' \+ chips\[ck\]\.name \+ '\] ';/,
         '回显必须用 chip 展示名');
-    // P2：折叠分支已清空 inputEl.value，正文只能从 text 去掉 prefix 取
-    assert.match(STREAMING_SRC, /displayText = shown \+ text\.substring\(prefix\.length\);/,
-        '正文必须取 text 去前缀；取 inputEl.value 在折叠分支会得到空串 → 气泡只剩技能名');
+    // P2：折叠分支已清空 inputEl.value，正文只能从 text 去掉协议段取
+    assert.match(STREAMING_SRC, /displayText = shown \+ text\.substring\(agentSeg\.length \+ prefix\.length\);/,
+        '正文必须去掉 agentSeg + prefix 两段；只按 prefix.length 切会留下半个 @name 尾巴');
+    assert.ok(STREAMING_SRC.indexOf("displayText = shown + text.substring(prefix.length);") < 0,
+        'P0-C 回归：prefix 已不在行首，只剥 prefix.length 会切错偏移');
     assert.ok(STREAMING_SRC.indexOf("displayText = shown + (inputEl ? inputEl.value.trim() : '')") < 0,
         'P2 回归：不得再用已被折叠清空的 inputEl.value 拼回显');
 });
 
-test('④d 折叠超长输入后仍补回 /id 前缀，技能不静默失效', () => {
+test('④d 折叠超长输入后仍补回 @段 + /id 前缀，技能与子代理都不静默失效', () => {
     const folded = STREAMING_SRC.slice(STREAMING_SRC.indexOf('if (folded === true) {'));
-    assert.match(folded, /if \(chipIds\.length > 0\) text = prefix \+ text;/,
-        '折叠替换文本后必须补回技能前缀，否则 chip 还挂在界面上、技能却没发出去');
+    assert.match(folded, /if \(chipIds\.length > 0 \|\| agentSeg\) text = agentSeg \+ prefix \+ text;/,
+        '折叠替换正文后必须补回 @段与技能前缀，否则 chip/子代理还挂在界面上却没发出去');
+    assert.ok(folded.indexOf('text = prefix + text;') < 0,
+        'P0-C 回归：折叠分支同样不得让 prefix 抢在 @段之前');
+});
+
+test('④e 只选子代理没写正文：就地拦下并提示，不得把 "@general" 当普通文本发出去', () => {
+    /* 后端三处（WebGate:786 / WsGate:255 / CliShell:342）都要求 startsWith("@") 且
+       indexOf(" ") > 0 才剥得出 agentName；"@general" 没有空格 → 整串被当提示词发给
+       主代理。而 getInputText() 是 trim 过的，replaceCmdToken 补的尾随空格救不了这一种。 */
+    assert.match(STREAMING_SRC, /if \(!agentSeg && \/\^@\\S\+\$\/\.test\(text\)\) \{/,
+        '必须识别「只剩裸 @子代理名」这一种输入');
+    assert.match(STREAMING_SRC, /showToast\(GourdI18n\.t\('streaming\.subagent_needs_content'\)/,
+        '必须给出可行动的提示，而不是静默把 @name 发给主代理');
+    // 提示文案键必须在 12 份语言包都在位（locale-parity 护栏同口径，缺则界面显示裸键）
+    const localeDir = path.join(uiRoot, 'locales');
+    for (const f of fs.readdirSync(localeDir).filter((n) => n.endsWith('.json'))) {
+        const obj = JSON.parse(fs.readFileSync(path.join(localeDir, f), 'utf8'));
+        assert.ok(obj.streaming && typeof obj.streaming.subagent_needs_content === 'string'
+                && obj.streaming.subagent_needs_content.length > 0,
+            f + ' 缺 streaming.subagent_needs_content，界面会显示裸键');
+    }
 });
 
 /* =====================================================================
@@ -581,6 +612,106 @@ test('⑤d 回填符号取现算的 token.trigger，不取缓存的 cmdTrigger',
     assert.match(apply, /var useChip = \(inputEl === welcomeInput \|\| inputEl === chatInput\);/,
         'chip 形态必须按宿主判定，外部宿主仍走文本回填');
     assert.match(apply, /if \(cmd\.type === 'skill' && useChip\) \{/, '技能 + 聊天页才走 chip');
+});
+
+/* =====================================================================
+ * ⑤e/⑤f/⑤g —— 子代理（@）三处 P0：真跑，不锁源码形状
+ * ===================================================================== */
+
+/* findCmdTriggerToken 真跑句柄（⑤ 与本组共用一套装载方式） */
+function loadFindToken(src) {
+    const sandbox = {};
+    vm.createContext(sandbox);
+    vm.runInContext(sliceFunction(src || HISTORY_SRC, 'function findCmdTriggerToken(inputEl) {',
+        'findCmdTriggerToken') + '\nthis.find = findCmdTriggerToken;', sandbox);
+    const raw = sandbox.find;
+    // 子 realm 对象原型不同，deepStrictEqual 会假红；在主 realm 重建
+    return (value, cursor) => {
+        const t = raw(cursor === undefined ? { value } : { value, selectionStart: cursor });
+        return t == null ? null : { start: t.start, end: t.end, trigger: t.trigger };
+    };
+}
+
+test('⑤e 【P0-B】子代理可反复触发：旧 @name 粘住中文后，再打的 @ 必须能检出', () => {
+    const tok = loadFindToken();
+    /* 病根：中文不按空格分词，回填出的 "@general" 与紧接输入的正文粘成同一个 token。
+       旧实现「token 以 @ 开头就无条件整段命中」会让后打的 @ 永远被旧 token 遮住 ——
+       表现正是用户报的「子代理只能触发一次」。必须回扫到最后一个真触发符。 */
+    assert.deepStrictEqual(tok('@general帮我查一下@', 14), { start: 13, end: 14, trigger: '@' },
+        'P0-B：粘住中文后再打的 @ 检不出来 = 子代理只能触发一次');
+    assert.deepStrictEqual(tok('@general帮我查一下@gen', 17), { start: 13, end: 17, trigger: '@' },
+        '第二个子代理必须能正常筛选（start 指向新 @，query=gen）');
+    // 触发符仍必须能按中文展示名筛选：token 以 / 开头、内部无触发符时整段命中
+    assert.deepStrictEqual(tok('/设计', 3), { start: 0, end: 3, trigger: '/' },
+        '按中文展示名筛技能不得因新规则失效');
+    // 技能侧同样可反复触发
+    assert.deepStrictEqual(tok('/pdf做个报告/', 9), { start: 8, end: 9, trigger: '/' },
+        '技能名后粘中文，再打 / 必须能检出第二个技能');
+    // 既有护栏不得回归：两级技能名整段、URL/路径/词内分隔符不误触发
+    assert.deepStrictEqual(tok('/design/lanhu', 13), { start: 0, end: 13, trigger: '/' });
+    assert.strictEqual(tok('http://x.com', 12), null);
+    assert.strictEqual(tok('改 src/main', 10), null);
+    assert.strictEqual(tok('见 a/b 目录', 8), null);
+    assert.deepStrictEqual(tok('帮我写/', 4), { start: 3, end: 4, trigger: '/' });
+});
+
+test('⑤f 【P0-A】子代理回填后必须留空格：after 为空串时同样要补', () => {
+    const src = sliceFunction(HISTORY_SRC, 'function replaceCmdToken(inputEl, token, replacement) {',
+        'replaceCmdToken');
+    const sandbox = { autoResize: function () {} };
+    vm.createContext(sandbox);
+    vm.runInContext(src + '\nthis.rep = replaceCmdToken;', sandbox, { filename: 'replaceCmdToken' });
+
+    const mk = (value, cursor) => {
+        const el = { value, selectionStart: cursor, setSelectionRange(a) { this.selectionStart = a; } };
+        return el;
+    };
+    /* 选完候选时光标通常在末尾 → after === ''（falsy）。旧条件多写了个 `after &&`，
+       于是不补空格 → 用户接着打字就粘成 "@general帮我查一下" → 后端 indexOf(" ") == -1
+       → agentName 恒 null，子代理从未被调用，整串还被当提示词发给主代理。 */
+    const el = mk('@', 1);
+    sandbox.rep(el, { start: 0, end: 1, trigger: '@' }, '@general');
+    assert.strictEqual(el.value, '@general ',
+        'P0-A：末尾回填子代理必须补尾随空格，否则后端剥不出 agentName');
+    assert.strictEqual(el.selectionStart, 9, '光标要停在补出的空格之后，便于直接输入正文');
+
+    // after 非空且已是空白：不重复补
+    const el2 = mk('@ 正文', 1);
+    sandbox.rep(el2, { start: 0, end: 1, trigger: '@' }, '@general');
+    assert.strictEqual(el2.value, '@general 正文', 'after 已以空白开头时不得补出两个空格');
+
+    // after 非空且非空白（光标在词中间选中候选）：必须补，否则与后文粘连
+    const el3 = mk('@帮我查', 1);
+    sandbox.rep(el3, { start: 0, end: 1, trigger: '@' }, '@general');
+    assert.strictEqual(el3.value, '@general 帮我查', '光标在词中间回填也必须补空格');
+
+    // 技能走空串替换（chip 形态）：不得凭空多出空格
+    const el4 = mk('/pd做个', 3);
+    sandbox.rep(el4, { start: 0, end: 3, trigger: '/' }, '');
+    assert.strictEqual(el4.value, '做个', '技能触发段清空后不得残留空格');
+});
+
+test('⑤g 【配色】chip 与面板技能名必须走主题令牌，不得写死色值', () => {
+    /* 用户报「展示的是天蓝色，和主题不搭」：旧实现把 #0891b2（cyan-600）写死在两处。
+       主题实际是 --accent / --accent-hover / --accent-light / --accent-rgb 四件套，
+       且 graphite、teal、clay、sky、indigo 五套预设 × 明暗两态各自定义（theme.css
+       329~375 行共 12 处），写死色值在任何皮肤下都不跟随。 */
+    const chip = /\.skill-chip \{[^}]*\}/.exec(APP_CSS_SRC);
+    assert.ok(chip, 'app.css 缺少 .skill-chip 规则');
+    const rule = chip[0];
+    assert.match(rule, /color: var\(--accent\)/, 'chip 文字色必须走 --accent');
+    assert.match(rule, /background: var\(--accent-light\)/, 'chip 底色必须走 --accent-light');
+    assert.match(rule, /border: 1px solid rgba\(var\(--accent-rgb\)/, 'chip 描边必须走 --accent-rgb（半透明叠色）');
+    // 面板里的技能名同口径（.cmd-name.subagent 本来就是 var(--accent)）
+    assert.match(APP_CSS_SRC, /\.cmd-complete-item \.cmd-name\.skill \{ color: var\(--accent\); \}/,
+        '补全面板的技能名必须走 --accent，与子代理名同色系');
+    // 断掉写死色值回流：两处都不得再出现 cyan-600
+    const skillBlock = APP_CSS_SRC.slice(APP_CSS_SRC.indexOf('/* ===== 技能小卡片（chip）====='));
+    const chipRules = skillBlock.slice(0, skillBlock.indexOf('/* ===== Content History Rail'));
+    assert.ok(!/color:\s*#0891b2|background:\s*#0891b2/.test(chipRules),
+        'chip 配色不得再写死 #0891b2（注释里提到旧值不算）');
+    assert.ok(!/color:\s*#0891b2/.test(APP_CSS_SRC),
+        '全文件不得再有写死的天蓝色文字规则');
 });
 
 /* =====================================================================

@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Plus } from 'lucide-react'
+import { FileJson, Plus } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -26,12 +26,14 @@ import { Button } from '@/components/ui/button'
 import type { Installer } from './types'
 import { InstallerDeleteDialog } from './components/installer-delete-dialog'
 import { InstallerEditDialog } from './components/installer-edit-dialog'
+import { InstallerLatestUploadDialog } from './components/installer-latest-upload-dialog'
 import { InstallerUploadDialog } from './components/installer-upload-dialog'
 import { InstallersTable } from './components/installers-table'
 
 export function Installers() {
   const { t } = useTranslation()
   const [uploadOpen, setUploadOpen] = useState(false)
+  const [latestOpen, setLatestOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<Installer | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Installer | null>(null)
 
@@ -40,6 +42,14 @@ export function Installers() {
       <SectionPageLayout fixedContent>
         <SectionPageLayout.Title>{t('Installers')}</SectionPageLayout.Title>
         <SectionPageLayout.Actions>
+          <Button
+            size='sm'
+            variant='outline'
+            onClick={() => setLatestOpen(true)}
+          >
+            <FileJson aria-hidden='true' />
+            {t('Upload update check file')}
+          </Button>
           <Button size='sm' onClick={() => setUploadOpen(true)}>
             <Plus aria-hidden='true' />
             {t('Upload installer')}
@@ -57,6 +67,10 @@ export function Installers() {
       <InstallerUploadDialog
         open={uploadOpen}
         onOpenChange={setUploadOpen}
+      />
+      <InstallerLatestUploadDialog
+        open={latestOpen}
+        onOpenChange={setLatestOpen}
       />
       <InstallerEditDialog
         installer={editTarget}

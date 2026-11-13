@@ -3551,7 +3551,13 @@ function replaceCmdToken(inputEl, token, replacement) {
     var val = inputEl.value;
     var before = val.substring(0, token.start);
     var after = val.substring(token.end);
-    if (replacement && after && !/^\s/.test(after)) replacement += ' ';
+    /* 回填文本后必须留一个空格分隔，且【after 为空串时同样要补】—— 这正是子代理
+       选完就失效的病根：后端子代理路由（WebGate/WsGate/CliShell）一律按
+       `input.startsWith("@")` + `indexOf(" ")` 剥 agentName，剥不出就当普通文本。
+       旧条件多写了一个 `after &&`，而选完候选时光标通常在末尾（after === ''，falsy）
+       → 不补空格 → 用户接着输入就粘成 "@general帮我查一下" → 后端 indexOf(" ") == -1
+       → agentName 恒为 null，子代理从未被调用，整串还被当提示词发给主代理。 */
+    if (replacement && !/^\s/.test(after)) replacement += ' ';
     inputEl.value = before + replacement + after;
     var pos = before.length + replacement.length;
     inputEl.setSelectionRange(pos, pos);
@@ -3633,27 +3639,38 @@ function navigateCmdComplete(e, inputEl, completeEl) {
    旧实现只认「整串以 / 开头且无空格」，于是输入框里一旦有了内容（或已选过一个技能），
    再打 / 就永远唤不出面板——即用户报的「只能触发一次」。
 
-   现口径分两步（A 优先，B 兜底）：
-   A. 从光标向左扫到最近的空白/串首得到 token；token 本身以 / 或 @ 开头即为触发段。
-      这条同时照顾两级组织技能名（design/lanhu 整段命中，不会被名字内部的 / 截断）。
-   B. token 不以触发符开头时，取 token 内【最后一个】/ 或 @ 作为触发段起点 —— 中文场景
-      必须走这条：「帮我写/」里 token 是整串（中文不带空格分词），只认 A 就永远弹不出面板。
-      同理「+ → 技能」按钮在已有文字后插入 /，随后每敲一个字都要靠 B 续住面板。
-      B 加一道护栏：触发符前一个字符若是 ASCII 字母数字或 : / . - _（URL 与文件路径的
-      构成字符），判为非触发 —— 否则 http://x.com、src/main 这类输入会误弹面板。 */
+   现口径：从光标向左扫到最近的空白/串首得到 token，再在 token 内【从右往左找最后一个
+   真正的触发符】，规则见下方 findCmdTriggerToken 内的分条注释（① token 即以触发符开头
+   → 整段命中，照顾 design/lanhu 这类两级技能名；② 触发符前一个字符是 ASCII 名字字符
+   → 判为 URL/路径的一段，跳过；③ 其余 → 用户新打的触发符，就地成段）。
+
+   为什么必须「找最后一个」而非「token 以触发符开头就整段命中」：中文不按空格分词，
+   回填出的 "@general" 会与紧接输入的正文粘成同一个 token，若整段命中旧触发符，用户
+   之后再打的 @ / / 永远被遮住 —— 这正是子代理「只能触发一次」的病根（见 ⑤e 护栏）。 */
 function findCmdTriggerToken(inputEl) {
     var val = inputEl.value;
     var cursor = inputEl.selectionStart == null ? val.length : inputEl.selectionStart;
     var start = cursor;
     while (start > 0 && !/\s/.test(val.charAt(start - 1))) start--;
     if (start >= cursor) return null; // 光标前无 token（空或紧贴空白）
-    var ch = val.charAt(start);
-    if (ch === '/' || ch === '@') return { start: start, end: cursor, trigger: ch };
+    /* 统一回扫：从光标往回找【最后一个】真正的触发符，规则对 A/B 两种形态一致 ——
+       ① i === start：token 就以触发符开头，整段都是正在输入的候选名（技能名可含 /，
+          两级组织如 design/lanhu 必须整段命中，否则回填会算错前缀位置）；
+       ② 触发符前一个字符是名字字符（字母/数字/斜杠/点/横线）：那是 URL 或文件路径
+          的一段，不是触发段，继续往回找；
+       ③ 其余（前一个是中文、空白等）：这是用户新打的触发符，就地成段。
 
-    for (var i = cursor - 1; i > start; i--) {
+       ⚠ 不能像旧实现那样「token 以 @ 开头就无条件整段命中」。中文不按空格分词，
+       回填出来的 "@general" 与紧接输入的正文会粘成同一个 token（"@general帮我查一下"），
+       此后用户再打的 "@" 永远被这段旧 token 遮住 —— 表现正是「子代理只能触发一次」。
+       必须回扫到【最后】一个触发符，规则 ③ 才接得住。
+       反过来也不能只认规则 ③：`/设计稿` 这类按中文展示名筛选的输入，token 以 / 开头、
+       内部再无触发符，只有规则 ① 能让它成立。 */
+    for (var i = cursor - 1; i >= start; i--) {
         var c = val.charAt(i);
         if (c !== '/' && c !== '@') continue;
-        if (/[A-Za-z0-9:/._-]/.test(val.charAt(i - 1))) return null;   // URL / 路径，不是触发段
+        if (i === start) return { start: start, end: cursor, trigger: c };
+        if (/[A-Za-z0-9:/._-]/.test(val.charAt(i - 1))) continue;   // URL / 路径，不是触发段
         return { start: i, end: cursor, trigger: c };
     }
     return null;

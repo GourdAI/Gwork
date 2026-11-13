@@ -1,4 +1,4 @@
-//! memory — Long-term memory store, compatible with the Java kernel's
+﻿//! memory — Long-term memory store, compatible with the Java kernel's
 //! `MemoryMdData` on-disk format.
 //!
 //! ## Storage format is the contract
@@ -207,21 +207,104 @@ impl MemoryStore {
         })
     }
 
-    /// Keyword search across key/title/content. `"*"` lists everything.
+    /// Recall one entry by its exact key — no search, no scoring.
+    ///
+    /// WHY THIS EXISTS: `memory_recall` used to be implemented as
+    /// `search(key, 100).iter().find(|e| e.key == key)`, which stacked two
+    /// independent failure modes into one indistinguishable
+    /// "Memory not found: <key>" message:
+    ///
+    /// 1. the candidate list came from a substring search, so an entry whose
+    ///    text does not contain the key verbatim never entered it — the lookup
+    ///    could not see an entry that demonstrably exists on disk;
+    /// 2. the final comparison demanded a byte-exact key, so a key that was
+    ///    sanitized on the way in (`a:b` → `a_b`, or truncated at 128 chars)
+    ///    never compared equal to what the reader parses back out of the file.
+    ///
+    /// Java's `MemoryMdData.get` is a map lookup by storeKey: O(1) and wholly
+    /// independent of the search index. This is the same contract expressed
+    /// against the filesystem — resolve the key to its file and read it.
+    ///
+    /// Expired entries are deleted on sight, matching `load_all`, so a `get`
+    /// never reports a countdown the list would not show.
+    pub fn get(&self, key: &str) -> Option<MemoryEntry> {
+        let path = self.file_for(key)?;
+        // `offload` takes the path by move (the closure may outlive this frame in
+        // the `block_in_place` case), so the cleanup below works off a clone.
+        let cleanup = path.clone();
+        match offload(move || load_file(&path)) {
+            LoadOutcome::Entry(entry) => Some(entry),
+            LoadOutcome::Expired => {
+                let _ = std::fs::remove_file(&cleanup);
+                None
+            }
+            LoadOutcome::Skipped => None,
+        }
+    }
+
+    /// Keyword search across key/title/content, scored and ranked.
+    ///
+    /// `"*"` (or a blank query) lists everything, highest importance first.
+    ///
+    /// WHY THIS IS NOT A SUBSTRING FILTER: the previous implementation
+    /// lowercased the whole query and asked whether any one field *contained it
+    /// verbatim*. A multi-word query — 「凭证级亲和 retryCodes 429 同渠道重试」 —
+    /// then becomes a single substring that no entry can contain, so the tool
+    /// answered "No matching memories found." over a library that held the
+    /// entry. The model reads that as "I never stored this" and writes a
+    /// duplicate, which is how the store grows entries nobody can find again.
+    ///
+    /// The replacement mirrors the Java kernel's `MemoryMdData`, because both
+    /// kernels serve the same directory and must not disagree about what
+    /// "found" means — a query that hits in one and misses in the other reads
+    /// to the model as memories appearing and disappearing at random:
+    ///
+    /// * tokenize ([`tokenize`]): English/digit runs as whole words, CJK runs
+    ///   as the full run plus every bi-gram, so 「构建」 finds 「构建脚本」 with no
+    ///   segmenter and no dictionary;
+    /// * score = hit rate × 0.7 + importance/10 × 0.3 — the same shape Java
+    ///   uses. Key and title hits earn full credit and content hits 0.6: the
+    ///   Java index covered *content only*, which is the "命中不准" half of the
+    ///   complaint, since for these entries the identifying signal lives in the
+    ///   title and the key;
+    /// * a token that matches no field falls back to a plain substring probe at
+    ///   0.3 credit, so one odd fragment demotes an entry instead of dropping it;
+    /// * an exact key match is pinned above every scored result (2.0, above the
+    ///   1.0 maximum): identifier lookups must not be out-ranked by prose that
+    ///   happens to share words.
     pub fn search(&self, query: &str, top_k: usize) -> Vec<MemoryEntry> {
         let all = self.load_all();
-        if query == "*" || query.trim().is_empty() {
+        let trimmed = query.trim();
+        if trimmed == "*" || trimmed.is_empty() {
             return all.into_iter().take(top_k).collect();
         }
-        let q = query.to_lowercase();
-        all.into_iter()
-            .filter(|e| {
-                e.key.to_lowercase().contains(&q)
-                    || e.title.to_lowercase().contains(&q)
-                    || e.content.to_lowercase().contains(&q)
-            })
-            .take(top_k)
-            .collect()
+        let q = trimmed.to_lowercase();
+        let mut tokens = tokenize(&q);
+        if tokens.is_empty() {
+            // Nothing indexable (a lone ASCII letter, or pure punctuation): Java
+            // scores this as zero hits and returns nothing at all. A substring
+            // probe is strictly more useful and cannot invent an entry that does
+            // not contain the text.
+            tokens.insert(q.clone());
+        }
+
+        let mut scored: Vec<(f64, MemoryEntry)> = Vec::with_capacity(all.len());
+        for entry in all {
+            let score = score_entry(&entry, &q, &tokens);
+            if score > 0.0 {
+                scored.push((score, entry));
+            }
+        }
+        // Score first; the rest is `load_all`'s ordering, so equal scores stay
+        // deterministic instead of following directory order.
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.1.importance.cmp(&a.1.importance))
+                .then_with(|| b.1.time.cmp(&a.1.time))
+                .then_with(|| a.1.key.cmp(&b.1.key))
+        });
+        scored.into_iter().take(top_k).map(|(_, e)| e).collect()
     }
 
     /// Delete an entry by key. Returns true when a file was removed.
@@ -235,6 +318,161 @@ impl MemoryStore {
     pub fn count(&self) -> usize {
         self.load_all().len()
     }
+}
+
+/// Field weights for [`score_entry`].
+///
+/// `key` and `title` outrank `content` because they are written to *identify*
+/// an entry, so a word landing there is a far stronger signal than the same word
+/// buried in a long fact body. Java's index carried content only, which is why a
+/// search for a term that appears solely in a title reported nothing.
+const W_KEY: f64 = 1.0;
+const W_TITLE: f64 = 1.0;
+const W_CONTENT: f64 = 0.6;
+/// A substring probe that matched no token. Weaker than any real hit, but it
+/// still counts, so a single awkward fragment demotes rather than excludes.
+const W_SUBSTRING: f64 = 0.3;
+/// An exact key match is pinned to the top of the result list. Above 1.0 so no
+/// combination of prose hits can out-rank it.
+const SCORE_EXACT_KEY: f64 = 2.0;
+
+/// Split text into matchable tokens, mirroring Java `MemoryMdData.tokenize`.
+///
+/// * ASCII letters and digits accumulate into runs; a run is kept only when it
+///   is longer than one character, matching Java's `buf.length() > 1` rule.
+/// * CJK runs yield the whole run *plus* every adjacent pair (bi-gram); a lone
+///   CJK character yields itself. This is what makes 「构建」 match 「构建脚本」
+///   with no dictionary and no segmenter.
+/// * Anything else (spaces, punctuation, full-width marks) flushes both buffers.
+///
+/// The input must already be lowercase — this function lowercases nothing, so
+/// feeding it mixed case would silently break matching.
+fn tokenize(text: &str) -> std::collections::HashSet<String> {
+    let mut tokens = std::collections::HashSet::new();
+    let mut english = String::new();
+    let mut cjk = String::new();
+
+    for c in text.chars() {
+        if is_cjk(c) {
+            flush_english(&mut english, &mut tokens);
+            cjk.push(c);
+        } else if c.is_alphanumeric() {
+            flush_cjk(&mut cjk, &mut tokens);
+            english.push(c);
+        } else {
+            flush_english(&mut english, &mut tokens);
+            flush_cjk(&mut cjk, &mut tokens);
+        }
+    }
+    flush_english(&mut english, &mut tokens);
+    flush_cjk(&mut cjk, &mut tokens);
+    tokens
+}
+
+/// CJK Unified Ideographs, the range Java tests (`\u4e00`..=`\u9fff`).
+fn is_cjk(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&c)
+}
+
+fn flush_english(buf: &mut String, tokens: &mut std::collections::HashSet<String>) {
+    // `chars().count()`, not `len()`: a multi-byte run is still one logical word.
+    if buf.chars().count() > 1 {
+        tokens.insert(std::mem::take(buf));
+    } else {
+        buf.clear();
+    }
+}
+
+fn flush_cjk(buf: &mut String, tokens: &mut std::collections::HashSet<String>) {
+    let chars: Vec<char> = buf.chars().collect();
+    if chars.len() >= 2 {
+        // Whole phrase first — it is what lets an exact multi-character query
+        // out-score text that merely shares a bi-gram with it.
+        tokens.insert(chars.iter().collect());
+        for w in chars.windows(2) {
+            tokens.insert(w.iter().collect());
+        }
+    } else if chars.len() == 1 {
+        tokens.insert(chars[0].to_string());
+    }
+    buf.clear();
+}
+
+/// The three indexed fields of one entry, pre-tokenized.
+///
+/// Built per search, not cached on the entry: `MemoryEntry` is reconstructed from
+/// disk on every `load_all`, so a cache field would be populated once and thrown
+/// away with the struct. At this library size (~200 entries) tokenizing three
+/// short strings per entry is far cheaper than the directory read that precedes it.
+struct FieldTokens {
+    key: std::collections::HashSet<String>,
+    title: std::collections::HashSet<String>,
+    content: std::collections::HashSet<String>,
+}
+
+impl FieldTokens {
+    fn of(entry: &MemoryEntry) -> Self {
+        Self {
+            key: tokenize(&entry.key.to_lowercase()),
+            title: tokenize(&entry.title.to_lowercase()),
+            content: tokenize(&entry.content.to_lowercase()),
+        }
+    }
+}
+
+/// Score one entry against a tokenized query. See [`MemoryStore::search`] for the
+/// reasoning behind each term.
+///
+/// Two phases, in the same order Java uses them, because they answer genuinely
+/// different questions:
+///
+/// 1. **token equality** against each field's own token set — the precise channel.
+///    Weighted by field (key/title beat content) so an identifying word outranks
+///    the same word buried in a long fact body.
+/// 2. **substring** probe, only for tokens phase 1 missed, at a reduced weight.
+///    This is reachable, not vestigial: 「构建脚」 is a substring of 「构建脚本」 but is
+///    not one of its bi-grams, so phase 1 cannot see it. Without this pass a
+///    slightly-off query fragment would drop the entry to zero instead of demoting
+///    it — the "找不到" half of the complaint.
+fn score_entry(entry: &MemoryEntry, query_lower: &str, tokens: &std::collections::HashSet<String>) -> f64 {
+    // Identifier lookups are pinned above every scored result. Checked before the
+    // token math so a key like `a` (too short to tokenize) still resolves.
+    if entry.key.eq_ignore_ascii_case(query_lower) {
+        return SCORE_EXACT_KEY;
+    }
+    if tokens.is_empty() {
+        return 0.0;
+    }
+
+    let fields = FieldTokens::of(entry);
+    let key_lower = entry.key.to_lowercase();
+    let title_lower = entry.title.to_lowercase();
+    let content_lower = entry.content.to_lowercase();
+
+    let mut credit = 0.0f64;
+    for token in tokens {
+        if fields.key.contains(token) {
+            credit += W_KEY;
+        } else if fields.title.contains(token) {
+            credit += W_TITLE;
+        } else if fields.content.contains(token) {
+            credit += W_CONTENT;
+        } else if key_lower.contains(token.as_str())
+            || title_lower.contains(token.as_str())
+            || content_lower.contains(token.as_str())
+        {
+            credit += W_SUBSTRING;
+        }
+    }
+    if credit <= 0.0 {
+        return 0.0;
+    }
+
+    // Normalised against the best possible outcome (every token hitting `key`),
+    // so the rate stays in 0..=1 and the importance term keeps its intended share.
+    let hit_rate = credit / (tokens.len() as f64 * W_KEY);
+    let imp_weight = entry.importance.clamp(0, 10) as f64 / 10.0;
+    hit_rate * 0.7 + imp_weight * 0.3
 }
 
 enum LoadOutcome {
@@ -414,6 +652,36 @@ fn build_md(entry: &MemoryEntry) -> String {
 }
 
 /// `key` → `shared__key`, or None when the key is unusable.
+///
+/// # This mapping is LOSSY and the two kernels do not agree on it
+///
+/// `sanitize_segment` below rewrites `:` (among others) to `_` and truncates at
+/// 128 characters, so the caller's original key **cannot be recovered** from the
+/// entry that comes back. Measured, not inferred:
+///
+/// ```text
+/// store("a:b")            -> file shared__a_b.md
+/// get("a:b").unwrap().key == "a_b"        // the `:` is gone for good
+/// get("a_b").unwrap().key == "a_b"        // and the sanitized form reads back too
+/// store_key_of(&"L".repeat(200))          // -> 136 chars (128 + "shared__")
+/// ```
+///
+/// Java's `MemoryMdData.buildStoreKey` does the opposite: it concatenates
+/// `userId + "__" + key` with **no sanitizing and no truncation**, relying on
+/// `validateIdentity` to *reject* bad keys instead of rewriting them. That
+/// validator does not reject `:`, so the same key maps to two different file
+/// names — and on Windows `:` is not legal in a name, so Java throws where this
+/// kernel silently renames:
+///
+/// ```text
+/// [System.IO.File]::WriteAllText("shared__a:b.md", ..)
+///   -> "The given path's format is not supported."   // measured on this host
+/// ```
+///
+/// Unifying the storage layer would change on-disk file names, so it needs a
+/// decision about migrating the existing library rather than a silent edit.
+/// For now only the *search* semantics are shared across kernels; key → path is
+/// not, and callers must not assume a key round-trips byte-for-byte.
 fn store_key_of(key: &str) -> Option<String> {
     let k = key.trim();
     if k.is_empty() {
@@ -797,11 +1065,651 @@ mod tests {
         assert!(store.search("不存在的词", 10).is_empty());
     }
 
+    // ─── P0-1: exact-key recall must not depend on search ───────────────────
+
+    /// The regression `get` exists for. A key is sanitized on the way in
+    /// (`:` → `_`, because Windows forbids `:` in a file name), so the key read
+    /// back out of the file is NOT the key the caller passed. The old recall did
+    /// `search(key, 100).find(|e| e.key == key)` and that compare can never
+    /// succeed here — the entry exists on disk, yet the tool answered
+    /// "Memory not found: a:b".
+    #[test]
+    fn get_resolves_a_key_that_was_sanitized_on_the_way_in() {
+        let s = Scratch::new("get-sanitized");
+        let store = s.store();
+        store
+            .store(&entry_with("a:b", "标题", "正文内容"))
+            .expect("write");
+
+        // Proof the on-disk key really did change shape.
+        let all = store.load_all();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].key, "a_b", "fixture: `:` must be sanitized to `_`");
+
+        // The old lookup path: exact compare against what search returns.
+        let via_search = store.search("a:b", 100).iter().any(|e| e.key == "a:b");
+        assert!(!via_search, "old recall path cannot see this entry");
+
+        // The new one.
+        let got = store.get("a:b").expect("get must resolve the sanitized key");
+        assert_eq!(got.title, "标题");
+        assert_eq!(got.content, "正文内容");
+    }
+
+    /// Same failure, second trigger: keys longer than the 128-char filename cap
+    /// are truncated when written, so the stored key no longer equals the
+    /// requested one.
+    #[test]
+    fn get_resolves_a_key_truncated_by_the_filename_cap() {
+        let s = Scratch::new("get-truncated");
+        let store = s.store();
+        let long_key = "k".repeat(200);
+        store.store(&entry_with(&long_key, "t", "body")).expect("write");
+
+        let stored = &store.load_all()[0].key;
+        assert!(stored.len() < long_key.len(), "fixture: key must be truncated");
+
+        let got = store.get(&long_key).expect("get must resolve the truncated key");
+        assert_eq!(got.content, "body");
+    }
+
+    #[test]
+    fn get_returns_none_for_absent_and_expired_keys() {
+        let s = Scratch::new("get-miss");
+        let store = s.store();
+        assert!(store.get("never_stored").is_none());
+
+        // An expired entry must not be recalled, and must be cleaned up — the
+        // same rule `load_all` applies, so `get` cannot report a countdown the
+        // list would not show.
+        s.write_raw(
+            "shared__old.md",
+            "---\nname: \"shared__old\"\ntitle: \"t\"\ntime: \"2000-01-01 00:00:00\"\nimportance: 1\nttl: 60\nstored_at: \"2000-01-01 00:00:00\"\n---\n\nbody\n",
+        );
+        assert!(store.get("old").is_none(), "expired entry must not be recalled");
+        assert!(!s.0.join("shared__old.md").exists(), "expired file must be cleaned up");
+    }
+
+    /// `get` must not resurrect an entry whose declared name disagrees with its
+    /// path — the same rule `load_all` enforces.
+    #[test]
+    fn get_skips_a_file_whose_name_field_disagrees() {
+        let s = Scratch::new("get-mismatch");
+        s.write_raw(
+            "shared__real.md",
+            "---\nname: \"shared__other\"\ntitle: \"t\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 1\nttl: -1\n---\n\nbody\n",
+        );
+        assert!(s.store().get("real").is_none());
+    }
+
+    // ─── P0-2: multi-word queries must not be one substring ─────────────────
+
+    /// The exact shape of the reported failure: a mixed CJK/ASCII multi-word
+    /// query. The old code lowercased the whole query and asked whether any
+    /// field *contained it verbatim*, which no entry ever does — so the tool
+    /// answered "No matching memories found." over a library holding the entry,
+    /// and the model concluded it had never stored it.
+    #[test]
+    fn multi_word_query_finds_the_entry_the_substring_filter_missed() {
+        let s = Scratch::new("multiword");
+        s.write_raw(
+            "shared__credential_affinity.md",
+            "---\nname: \"shared__credential_affinity\"\ntitle: \"凭证级亲和与重试\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 8\nttl: -1\n---\n\nretryCodes 命中 429 与 529 时走同渠道重试。\n",
+        );
+        let store = s.store();
+
+        let query = "凭证级亲和 retryCodes 429 529 同渠道重试 状态码";
+        // The whole query is not a substring of anything — proof the old
+        // behaviour was a guaranteed miss, not a ranking accident.
+        let e = &store.load_all()[0];
+        assert!(!e.content.to_lowercase().contains(&query.to_lowercase()));
+        assert!(!e.title.to_lowercase().contains(&query.to_lowercase()));
+
+        let hits = store.search(query, 10);
+        assert_eq!(hits.len(), 1, "multi-word query must find the entry");
+        assert_eq!(hits[0].key, "credential_affinity");
+    }
+
+    /// Every word of a multi-word query contributes: an entry matching more of
+    /// them ranks above one matching fewer. Without this, "found something" and
+    /// "found the right thing" are the same answer.
+    #[test]
+    fn more_matching_words_rank_higher() {
+        let s = Scratch::new("ranking");
+        s.write_raw(
+            "shared__one.md",
+            "---\nname: \"shared__one\"\ntitle: \"只提到构建\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 5\nttl: -1\n---\n\n构建相关。\n",
+        );
+        s.write_raw(
+            "shared__two.md",
+            "---\nname: \"shared__two\"\ntitle: \"构建脚本与缓存\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 5\nttl: -1\n---\n\n构建时清理缓存。\n",
+        );
+        let hits = s.store().search("构建 缓存", 10);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].key, "two", "the entry matching both words must rank first");
+    }
+
+    /// An exact key match is pinned above prose that shares more words. This is
+    /// the "identifier lookup" channel: a model recalling a key it was just told
+    /// must get that entry, not a thematically similar one.
+    #[test]
+    fn exact_key_match_outranks_prose_hits() {
+        let s = Scratch::new("pin");
+        s.write_raw(
+            "shared__build_cache.md",
+            "---\nname: \"shared__build_cache\"\ntitle: \"无关标题\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 1\nttl: -1\n---\n\n只有一行。\n",
+        );
+        s.write_raw(
+            "shared__other.md",
+            "---\nname: \"shared__other\"\ntitle: \"构建缓存构建缓存构建缓存\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 10\nttl: -1\n---\n\n构建缓存构建缓存构建缓存，反复提到构建和缓存。\n",
+        );
+        let hits = s.store().search("build_cache", 10);
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].key, "build_cache", "exact key must win over a higher-scoring prose match");
+    }
+
+    /// A word that appears only in the title must be findable. This is the Java
+    /// kernel's gap (its index covered content alone) reproduced on the Rust
+    /// side, where it was already searchable — kept as a cross-kernel contract
+    /// test so the two cannot drift apart again.
+    #[test]
+    fn title_only_term_is_found() {
+        let s = Scratch::new("title-only");
+        s.write_raw(
+            "shared__k.md",
+            "---\nname: \"shared__k\"\ntitle: \"滚动条统一方案\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 6\nttl: -1\n---\n\n正文完全没有提到那个词。\n",
+        );
+        let hits = s.store().search("滚动条统一", 10);
+        assert_eq!(hits.len(), 1, "a title-only term must be findable");
+    }
+
+    /// A slightly-off fragment demotes instead of dropping. 「构建脚」 is a
+    /// substring of 「构建脚本」 but is not one of its bi-grams, so token matching
+    /// alone scores it zero — the substring pass is what keeps it in the list.
+    #[test]
+    fn partial_fragment_demotes_rather_than_drops() {
+        let s = Scratch::new("partial");
+        s.write_raw(
+            "shared__a.md",
+            "---\nname: \"shared__a\"\ntitle: \"构建脚本\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 5\nttl: -1\n---\n\nbody\n",
+        );
+        s.write_raw(
+            "shared__b.md",
+            "---\nname: \"shared__b\"\ntitle: \"构建\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 5\nttl: -1\n---\n\nbody\n",
+        );
+        let hits = s.store().search("构建脚", 10);
+        assert!(!hits.is_empty(), "a near-miss fragment must still find the entry");
+        assert_eq!(hits[0].key, "a", "the closer match ranks first");
+    }
+
+    /// A query with nothing indexable (a lone ASCII letter — Java drops runs of
+    /// length 1) must not silently return empty; it falls back to a substring
+    /// probe, matching the Rust/Java contract.
+    #[test]
+    fn single_character_query_falls_back_to_substring() {
+        let s = Scratch::new("single-char");
+        s.write_raw(
+            "shared__k.md",
+            "---\nname: \"shared__k\"\ntitle: \"abc\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 5\nttl: -1\n---\n\nbody\n",
+        );
+        assert_eq!(s.store().search("b", 10).len(), 1);
+    }
+
+    /// Equal scores must not follow directory order, or the same query returns a
+    /// different ranking on each call and memories appear to shuffle.
+    #[test]
+    fn equal_scores_are_ordered_deterministically() {
+        let s = Scratch::new("determinism");
+        for k in ["zzz", "aaa", "mmm"] {
+            s.write_raw(
+                &format!("shared__{}.md", k),
+                &format!(
+                    "---\nname: \"shared__{k}\"\ntitle: \"同样的标题\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 5\nttl: -1\n---\n\n同样的正文\n",
+                    k = k
+                ),
+            );
+        }
+        let store = s.store();
+        let first: Vec<String> = store.search("同样", 10).iter().map(|e| e.key.clone()).collect();
+        for _ in 0..3 {
+            let again: Vec<String> = store.search("同样", 10).iter().map(|e| e.key.clone()).collect();
+            assert_eq!(first, again, "ranking must be stable across calls");
+        }
+        assert_eq!(first, vec!["aaa", "mmm", "zzz"], "ties break on key, ascending");
+    }
+
+    /// `search` is case-insensitive; `get` is deliberately NOT.
+    ///
+    /// The asymmetry is the contract, not an oversight. `search` answers "what is
+    /// relevant", where folding case only ever helps. `get` answers "give me this
+    /// exact key", and Java's counterpart is a `Map.get(storeKey)` — case-sensitive
+    /// by construction. Making `get` fold case here would let the two kernels
+    /// disagree about whether a key exists, which is the failure class this whole
+    /// change exists to remove. (On Windows the file would even be *found* by a
+    /// differently-cased path, then rejected by the name/path agreement check —
+    /// so the case-sensitive answer is also the only self-consistent one.)
+    #[test]
+    fn search_folds_case_but_get_does_not() {
+        let s = Scratch::new("case");
+        s.write_raw(
+            "shared__mixed_case_key.md",
+            "---\nname: \"shared__mixed_case_key\"\ntitle: \"Rust Kernel\"\ntime: \"2026-01-01 00:00:00\"\nimportance: 5\nttl: -1\n---\n\nTokio runtime notes.\n",
+        );
+        let store = s.store();
+        assert_eq!(store.search("RUST KERNEL", 10).len(), 1, "search folds case");
+        assert_eq!(store.search("tokio", 10).len(), 1);
+        assert!(store.get("mixed_case_key").is_some(), "exact key resolves");
+        assert!(store.get("MIXED_CASE_KEY").is_none(), "get stays case-sensitive, matching Java");
+    }
+
+    fn entry_with(key: &str, title: &str, content: &str) -> MemoryEntry {
+        MemoryEntry {
+            key: key.to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            importance: 5,
+            time: now_string(),
+            ttl: -1,
+            ttl_known: true,
+            expires_at_epoch_ms: None,
+        }
+    }
+
     #[test]
     fn non_md_files_are_ignored() {
         let s = Scratch::new("non-md");
         s.write_raw("shared__k.json", "{\"key\":\"k\"}");
         s.write_raw("notes.txt", "hello");
         assert!(s.store().load_all().is_empty());
+    }
+}
+
+/// Real-corpus smoke, mirroring Java's `MemoryRealCorpusSmokeTest` on the **same
+/// copied directory** with the **same judgements**.
+///
+/// Unit-test fixtures are entries I wrote to match the behaviour I expect, so
+/// they can only prove "the code matches my assumption" — never that the
+/// reported "命中不准 / 找不到" is actually gone. Only the real 190-entry library
+/// can answer that.
+///
+/// Gated on `GWORK_SMOKE_DIR` so a normal `cargo test` is unaffected. **The path
+/// must be a copy**: `load_all` deletes expired entries on sight, so pointing
+/// this at the live store would silently destroy user data.
+///
+/// ```powershell
+/// Copy-Item "D:\work\gourd\gourdai\.gwork\memory\*.md" $env:TEMP\gwork-smoke-real
+/// $env:GWORK_SMOKE_DIR="$env:TEMP\gwork-smoke-real"
+/// cargo test -p gourd-work-core --lib memory_real_corpus
+/// ```
+#[cfg(test)]
+mod real_corpus_tests {
+    use super::*;
+
+    fn corpus_dir() -> Option<PathBuf> {
+        let dir = std::env::var_os("GWORK_SMOKE_DIR")?;
+        let p = PathBuf::from(dir);
+        if p.is_dir() { Some(p) } else { None }
+    }
+
+    /// Open the copied corpus, or bail out of the test when unset.
+    fn store() -> Option<MemoryStore> {
+        corpus_dir().map(|dir| MemoryStore { dir })
+    }
+
+    /// Hand-off file between the two kernels' smokes, written by Java and read
+    /// here so that `hit_miss_verdict_agrees_with_the_java_kernel` compares
+    /// *measured* verdicts instead of a hard-coded guess at them.
+    ///
+    /// It lives inside the corpus copy, not in either build tree: both runs already
+    /// agree on that directory via `GWORK_SMOKE_DIR`, so no second path convention
+    /// has to be kept in sync.
+    const VERDICTS_FILE: &str = "kernel-verdicts.txt";
+
+    /// Terms to use as negative examples — but **only after** they are verified
+    /// absent from the corpus at run time (see [`absent_term`]).
+    ///
+    /// This list was originally a hard-coded `ABSENT_TERMS` constant asserted
+    /// directly, and that broke: `zzzqqqxxx` had been a made-up sentinel, and a
+    /// later `memory_extract` wrote it into this very store as part of a lesson
+    /// about the memory work. The term stopped being absent and the precision
+    /// guard failed. A live memory store is not a fixture — any constant chosen
+    /// as "a word that is not in here" will eventually be written into here.
+    const CANDIDATE_ABSENT_TERMS: [&str; 5] =
+        ["kubernetes", "terraform", "ansible", "zzqwkxfj", "qmvzbrtl"];
+
+    /// Candidates for the second negative term in a multi-word query.
+    const CANDIDATE_SECOND_TERMS: [&str; 4] = ["zzqwkxfj", "qmvzbrtl", "hxpwzndk", "vbqrjtsm"];
+
+    /// Whole corpus, lowercased, for substring-based absence checks.
+    fn corpus_text(store: &MemoryStore) -> String {
+        let mut hay = String::new();
+        for e in store.load_all() {
+            hay.push_str(&e.key);
+            hay.push('\n');
+            hay.push_str(&e.title);
+            hay.push('\n');
+            hay.push_str(&e.content);
+            hay.push('\n');
+        }
+        hay.to_lowercase()
+    }
+
+    /// A term verified to occur nowhere in the corpus, or `None`.
+    fn absent_term(hay: &str, exclude: Option<&str>) -> Option<String> {
+        CANDIDATE_ABSENT_TERMS
+            .iter()
+            .chain(CANDIDATE_SECOND_TERMS.iter())
+            .find(|t| !hay.contains(**t) && Some(**t) != exclude)
+            .map(|s| s.to_string())
+    }
+
+    /// An English word that really occurs in the corpus, for the counter-assertion.
+    ///
+    /// Without this, "returns nothing" could pass because search is broken
+    /// outright rather than because precision holds. Mid-frequency is deliberate:
+    /// a word in every file has no discriminating power, a word in one file may
+    /// be noise.
+    fn present_term(store: &MemoryStore) -> Option<String> {
+        let mut freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for e in store.load_all() {
+            for w in e
+                .content
+                .to_lowercase()
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .filter(|w| (6..=12).contains(&w.len()))
+            {
+                *freq.entry(w.to_string()).or_insert(0) += 1;
+            }
+        }
+        let mut hits: Vec<(String, usize)> =
+            freq.into_iter().filter(|(_, n)| (10..=200).contains(n)).collect();
+        // Sort so the choice is deterministic across runs.
+        hits.sort();
+        hits.into_iter().next().map(|(w, _)| w)
+    }
+
+    /// First run of ≥`min_len` consecutive CJK characters.
+    ///
+    /// Deliberately not an offset slice: slicing across a word boundary yields a
+    /// fragment like `d-wo` from `gourd-work`, which tokenizes down to `wo` — a
+    /// token present in 154/190 files, i.e. zero discriminating power.
+    fn first_cjk_phrase(title: &str, min_len: usize) -> Option<String> {
+        let mut run = String::new();
+        for c in title.chars() {
+            if is_cjk(c) {
+                run.push(c);
+            } else {
+                if run.chars().count() >= min_len {
+                    return Some(run);
+                }
+                run.clear();
+            }
+        }
+        if run.chars().count() >= min_len { Some(run) } else { None }
+    }
+
+    /// First underscore-delimited key segment of at least `min_len` chars.
+    fn first_long_key_segment(key: &str, min_len: usize) -> Option<String> {
+        key.split('_').find(|p| p.chars().count() >= min_len).map(|s| s.to_string())
+    }
+
+    /// Guard: the corpus is real and fully readable. Without this, every "found"
+    /// assertion below could pass vacuously against an empty store.
+    ///
+    /// # Order matters: load first, count after
+    ///
+    /// `load_all` deletes expired entries on sight. Counting the directory *before*
+    /// calling it therefore races the clock: this test failed for real when an
+    /// entry whose 30-day TTL lapsed at 16:27:07 was removed between the count and
+    /// the load, so the assertion compared 191 against 190 while the code was
+    /// correct. Counting after the load settles those deletions first, which makes
+    /// the comparison race-free — nothing else deletes files here.
+    #[test]
+    fn corpus_is_fully_loaded() {
+        let Some(store) = store() else { return };
+        let dir = store.dir().to_path_buf();
+
+        // Settle expiry deletions before taking the file count (see doc comment).
+        let entries = store.load_all();
+        let files = std::fs::read_dir(&dir)
+            .map(|rd| rd.flatten().filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false)).count())
+            .unwrap_or(0);
+
+        assert!(files > 50, "expected a real corpus (>50 .md files), got {}", files);
+        assert_eq!(entries.len(), files,
+            "every .md file must load; a gap means entries are being silently skipped");
+    }
+
+    /// The reported failure, on real data: a mixed-script multi-word query.
+    ///
+    /// The old substring filter lowercased the whole query and required one field
+    /// to contain it verbatim — impossible for any entry, so the tool answered
+    /// "No matching memories found." over a library that held the memory.
+    #[test]
+    fn multi_word_mixed_script_query_finds_relevant_entries() {
+        let Some(store) = store() else { return };
+        let query = "codereview 变异测试 护栏 P0 修复";
+
+        // Prove the query really is not a substring of anything, so a non-empty
+        // result is attributable to tokenized scoring rather than luck.
+        let verbatim = store.load_all().iter().any(|e| {
+            let q = query.to_lowercase();
+            e.content.to_lowercase().contains(&q) || e.title.to_lowercase().contains(&q)
+        });
+        assert!(!verbatim, "fixture check: the whole query must not appear verbatim");
+
+        let hits = store.search(query, 10);
+        assert!(!hits.is_empty(), "multi-word query must find something: {}", query);
+
+        // Non-empty is not enough — the top hit has to be about the query, or the
+        // change merely replaced "nothing" with "noise".
+        let top = &hits[0];
+        let hay = format!("{} {} {}", top.key, top.title, top.content).to_lowercase();
+        assert!(
+            hay.contains("codereview") || hay.contains("变异") || hay.contains("护栏"),
+            "top1 must relate to the query, got: {} / {}",
+            top.key,
+            top.title
+        );
+    }
+
+    /// Terms appearing **only in a title** must be findable. This is the core of
+    /// the "命中不准" complaint: the identifying signal lives in the title and
+    /// key, not the body.
+    #[test]
+    fn complete_cjk_title_phrases_recall_their_own_entry() {
+        let Some(store) = store() else { return };
+        let entries = store.load_all();
+        let mut checked = 0;
+        for e in &entries {
+            let Some(probe) = first_cjk_phrase(&e.title, 3) else { continue };
+            let hits = store.search(&probe, 20);
+            assert!(
+                hits.iter().any(|h| h.key == e.key),
+                "CJK title phrase {:?} must recall its own entry: {} / {}",
+                probe, e.key, e.title
+            );
+            checked += 1;
+            if checked >= 30 { break; }
+        }
+        assert!(checked > 0, "expected to check some title phrases");
+    }
+
+    /// Key fragments are the strongest identifier signal; the old substring
+    /// filter could match them only by accident (the key had to appear verbatim
+    /// in some field, and the Java index did not cover keys at all).
+    #[test]
+    fn complete_key_fragments_recall_their_own_entry() {
+        let Some(store) = store() else { return };
+        let entries = store.load_all();
+        let mut checked = 0;
+        for e in &entries {
+            let Some(probe) = first_long_key_segment(&e.key, 8) else { continue };
+            let hits = store.search(&probe, 20);
+            assert!(
+                hits.iter().any(|h| h.key == e.key),
+                "key fragment {:?} must recall its own entry: {}",
+                probe, e.key
+            );
+            checked += 1;
+            if checked >= 30 { break; }
+        }
+        assert!(checked > 0, "expected to check some key fragments");
+    }
+
+    /// The control experiment for the fragment case: a noisy cross-boundary probe
+    /// is a *ranking* issue, not a miss. Without this, the two tests above could
+    /// be misread as "only complete words work, fragments are lost".
+    #[test]
+    fn noisy_fragment_probe_is_a_ranking_issue_not_a_miss() {
+        let Some(store) = store() else { return };
+        let victim = "gourdwork_rust_five_usability_defects_maxturns_steer_stop_subagent_compression";
+        if !store.load_all().iter().any(|e| e.key == victim) {
+            return; // corpus differs; this sample is illustrative, not universal
+        }
+        let recalls = |q: &str, k: usize| store.search(q, k).iter().any(|e| e.key == victim);
+
+        // "d-wo" comes from "gourd-work"; it tokenizes to just "wo" (single-char
+        // runs and hyphens are not indexed), which occurs in 154/190 files.
+        assert!(!recalls("d-wo", 20), "reproduces the first smoke failure at limit 20");
+        assert!(recalls("d-wo", 190),
+            "widening the limit must recall it — proof the entry was always a candidate");
+
+        // Same entry, complete words, no widened limit needed.
+        assert!(recalls("gourd-work", 20), "a complete English word must recall");
+        for probe in ["maxturns", "subagent"] {
+            assert!(recalls(probe, 20), "complete key segment {:?} must recall", probe);
+        }
+    }
+
+    /// Precision guard: extending the index to three fields must not turn search
+    /// into "matches everything". Recall gains that cost precision are a net loss
+    /// here, because injected memories that are noise still consume context.
+    #[test]
+    fn queries_whose_tokens_are_all_absent_return_nothing() {
+        let Some(store) = store() else { return };
+        let hay = corpus_text(&store);
+
+        // Derive the negative example at run time. A hard-coded "absent" term is
+        // a trap: this store is written to by `memory_extract` during normal work,
+        // and the previous sentinel `zzzqqqxxx` was eventually recorded *into* the
+        // corpus by exactly that path, flipping this guard from green to red.
+        let absent = absent_term(&hay, None).expect("corpus must admit an absent term");
+        assert!(store.search(&absent, 20).is_empty(),
+            "term verified absent from the corpus must not match: {}", absent);
+
+        let second = absent_term(&hay, Some(&absent)).expect("corpus must admit a second absent term");
+        assert!(store.search(&format!("{} {}", absent, second), 20).is_empty(),
+            "a multi-word query whose every token is absent must return nothing");
+
+        // Counter-assertion: a term that really occurs must match. Without this,
+        // "returns nothing" would also pass if search were broken outright —
+        // which is how a guard can report precision while measuring nothing.
+        let present = present_term(&store).expect("corpus must admit a present term");
+        assert!(!store.search(&present, 20).is_empty(),
+            "a term that really exists in the corpus must match: {}", present);
+    }
+
+    /// Exact-key recall over the whole real library. The counterpart to the
+    /// reported failure: that key genuinely was not in the store, so erroring was
+    /// right — but a key that **does** exist must never report not-found.
+    #[test]
+    fn every_stored_key_is_recallable() {
+        let Some(store) = store() else { return };
+        let entries = store.load_all();
+        assert!(!entries.is_empty());
+        for e in &entries {
+            let got = store.get(&e.key);
+            assert!(got.is_some(), "an existing key must be recallable: {}", e.key);
+            assert_eq!(got.unwrap().key, e.key);
+        }
+    }
+
+    /// Ranking must not drift between calls. With ~190 entries, score ties are
+    /// common; if tie order followed `read_dir` sequence the model would see
+    /// memories shuffling for an identical query.
+    #[test]
+    fn ranking_is_stable_across_calls() {
+        let Some(store) = store() else { return };
+        let query = "rust 内核 修复";
+        let first: Vec<String> = store.search(query, 10).iter().map(|e| e.key.clone()).collect();
+        for _ in 0..5 {
+            let again: Vec<String> = store.search(query, 10).iter().map(|e| e.key.clone()).collect();
+            assert_eq!(first, again, "identical query must produce identical ordering");
+        }
+    }
+
+    /// Cross-kernel agreement on real data. Both kernels serve the same
+    /// directory, so a query that hits in one and misses in the other reads to
+    /// the model as memories appearing and disappearing at random — the
+    /// "时有时无" symptom.
+    ///
+    /// # This test used to be worthless, and how it was fixed
+    ///
+    /// Its first form hard-coded the expected verdicts in a `Vec<(&str, bool)>`
+    /// labelled "taken from MemoryRealCorpusSmokeTest", then asserted Rust against
+    /// that constant. The assertion message even printed `java={}` — filled from the
+    /// constant, not from Java. **The Java kernel was never invoked**, so the test
+    /// could not fail on a kernel disagreement; it only ever checked Rust against my
+    /// own notes about Rust. It reported green while measuring nothing, and I cited it
+    /// as evidence that "both kernels agree, row by row".
+    ///
+    /// It now reads verdicts that the Java smoke *actually wrote* to
+    /// `$GWORK_SMOKE_DIR/kernel-verdicts.txt` (see
+    /// `MemoryRealCorpusSmokeTest#writesKernelVerdictsForTheRustCounterpart`).
+    /// Scores are still not compared — Java caches an index in memory while Rust
+    /// re-reads the directory — only the hit/miss decision.
+    ///
+    /// When the file is missing (Java not run yet), the test **skips loudly**.
+    /// Skipping is not passing: a silent `return` here is precisely what let the
+    /// hard-coded version look like a cross-kernel guarantee.
+    #[test]
+    fn hit_miss_verdict_agrees_with_the_java_kernel() {
+        let Some(store) = store() else { return };
+        let path = corpus_dir().unwrap().join(VERDICTS_FILE);
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            eprintln!(
+                "SKIPPED (not passed): {} is absent — run the Java smoke first so this \
+                 compares real verdicts instead of guessing.\n  \
+                 GWORK_SMOKE_DIR={:?}\n  mvn -o -pl gourd-ai-agent test \
+                 -Dtest=MemoryRealCorpusSmokeTest",
+                VERDICTS_FILE,
+                store.dir()
+            );
+            return;
+        };
+
+        let mut compared = 0usize;
+        let mut disagreements = Vec::new();
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Format: `<HIT|MISS>\t<query>` — tab-delimited so queries may contain spaces.
+            let Some((verdict, query)) = line.split_once('\t') else { continue };
+            let expected_hit = match verdict {
+                "HIT" => true,
+                "MISS" => false,
+                other => panic!("unknown verdict {:?} in {}", other, VERDICTS_FILE),
+            };
+            let rust_hit = !store.search(query, 20).is_empty();
+            compared += 1;
+            if rust_hit != expected_hit {
+                disagreements.push(format!("query={:?} rust={} java={}", query, rust_hit, expected_hit));
+            }
+        }
+
+        // Guard against vacuous agreement: an empty or unparseable file would make
+        // the loop compare nothing and still pass.
+        assert!(compared > 0, "{} contained no usable verdict rows", VERDICTS_FILE);
+        assert!(
+            disagreements.is_empty(),
+            "kernel disagreement on {} of {} queries:\n  {}",
+            disagreements.len(),
+            compared,
+            disagreements.join("\n  ")
+        );
+        eprintln!("cross-kernel verdicts compared: {} (all agree)", compared);
     }
 }

@@ -3,6 +3,12 @@
     "360": "360",
     "1000": "1000",
     "10000": "10000",
+    "Upload update check file": "Télécharger le fichier de vérification des mises à jour",
+    "Update check file uploaded successfully": "Fichier de vérification des mises à jour téléchargé avec succès",
+    "Failed to upload update check file": "Échec du téléchargement du fichier de vérification des mises à jour",
+    "Invalid update check file": "Veuillez sélectionner un fichier JSON de vérification des mises à jour valide",
+    "Update check file": "Fichier de vérification des mises à jour",
+    "Select a latest.json file to publish to the desktop updater.": "Sélectionnez un fichier latest.json à publier pour le programme de mise à jour du client de bureau.",
     "_copy": "_copie",
     "and the": "et la",
     "By clicking sign in, you agree to our": "En cliquant sur se connecter, vous acceptez notre",
@@ -7571,6 +7577,17 @@
     "Describe your next task…": "Décrivez votre prochaine tâche…",
     "Syntax check passed": "Vérification de syntaxe réussie",
     "Task complete": "Tâche terminée",
-    "2 min 41 s": "2 min 41 s"
+    "2 min 41 s": "2 min 41 s",
+    "Latest manifest file is required": "Latest manifest file is required",
+    "Latest manifest must be a .json file": "Latest manifest must be a .json file",
+    "Latest manifest exceeds size limit": "Latest manifest exceeds size limit",
+    "Current update manifest": "Manifeste de mise à jour actuel",
+    "Public feed URL": "URL publique du flux de mise à jour",
+    "No latest.json has been uploaded yet.": "Aucun fichier latest.json n’a encore été téléversé.",
+    "latest.json not found": "latest.json not found",
+    "Failed to read latest.json manifest": "Failed to read latest.json manifest",
+    "Failed to store latest.json manifest": "Failed to store latest.json manifest",
+    "Invalid latest.json manifest: missing version": "Invalid latest.json manifest: missing version",
+    "Invalid latest.json manifest: missing platforms": "Invalid latest.json manifest: missing platforms"
   }
 }

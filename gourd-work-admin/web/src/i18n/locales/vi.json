@@ -3,6 +3,12 @@
     "360": "360",
     "1000": "1000",
     "10000": "10000",
+    "Upload update check file": "Tải lên tệp kiểm tra cập nhật",
+    "Update check file uploaded successfully": "Tải lên tệp kiểm tra cập nhật thành công",
+    "Failed to upload update check file": "Không tải được tệp kiểm tra cập nhật",
+    "Invalid update check file": "Vui lòng chọn tệp JSON kiểm tra cập nhật hợp lệ",
+    "Update check file": "Tệp kiểm tra cập nhật",
+    "Select a latest.json file to publish to the desktop updater.": "Chọn tệp latest.json để phát hành cho trình cập nhật trên máy tính để bàn.",
     "_copy": "_bản sao",
     "and the": "và",
     "By clicking sign in, you agree to our": "Bằng cách nhấp vào đăng nhập, bạn đồng ý với",
@@ -7571,6 +7577,17 @@
     "Describe your next task…": "Mô tả tác vụ tiếp theo…",
     "Syntax check passed": "Kiểm tra cú pháp đạt",
     "Task complete": "Tác vụ hoàn tất",
-    "2 min 41 s": "2 phút 41 giây"
+    "2 min 41 s": "2 phút 41 giây",
+    "Latest manifest file is required": "Latest manifest file is required",
+    "Latest manifest must be a .json file": "Latest manifest must be a .json file",
+    "Latest manifest exceeds size limit": "Latest manifest exceeds size limit",
+    "Current update manifest": "Tệp manifest cập nhật hiện tại",
+    "Public feed URL": "URL nguồn cập nhật công khai",
+    "No latest.json has been uploaded yet.": "Chưa tải lên tệp latest.json nào.",
+    "latest.json not found": "latest.json not found",
+    "Failed to read latest.json manifest": "Failed to read latest.json manifest",
+    "Failed to store latest.json manifest": "Failed to store latest.json manifest",
+    "Invalid latest.json manifest: missing version": "Invalid latest.json manifest: missing version",
+    "Invalid latest.json manifest: missing platforms": "Invalid latest.json manifest: missing platforms"
   }
 }

@@ -67,6 +67,42 @@
         return false;
     }
 
+    /* 【交互卡边界 · 2026-11 用户报障「只要展示 HITL/智能体这两个，页面就会错乱」】
+       待审批 HITL 卡（.tool-card.hitl-pending）与问答记录（.qa-record）是【等用户拍板 /
+       用户已拍板】的交互边界，不是「agent 干了什么」的过程证据：
+       · 进批次成员 = 批次收口时随成员一起 .turn-batch-collapsed 隐藏 → 审批按钮 /
+         问答记录整块消失（HITL 卡还带 .tool-card 类，isProcessRow 恒真，旧实现必吞）；
+       · 进整轮 process = 被 data-turn-process 隐藏，且 compactBubble 重排把它搬离原位。
+       二者都必须：切断当前运行批次（收口旧组）、自身永不进成员 / 永不进 process、
+       其后的过程行开新盖子。与 .agent-card / 非空正文同级的第三类批次边界。
+       注意只认【待审批】的 HITL 卡：批准 / 拒绝 / 放行后 .hitl-pending 被摘除，
+       该卡回归普通工具结果卡语义（过程证据，可折叠）。 */
+    function isInteractiveCard(el) {
+        if (!el || !el.classList) return false;
+        if (el.classList.contains('qa-record')) return true;
+        return el.classList.contains('tool-card') && el.classList.contains('hitl-pending');
+    }
+
+    /* 【卡内穿透 · 2026-11 用户报障「只要展示 hitl 和智能体这两个，页面就会错乱」的
+       另一半根因】交互卡可以落在【子代理卡体内】：appendHitlCard 接管骨架卡分支明确
+       「节点已在消息流中（可能在智能体卡内）」，子代理派发 bash 等需授权工具时就是这形态。
+       而 classifyChildren 只看气泡的【直接子节点】：ended 态 agent-card 归 process
+       （用户拍板「最终态折叠除正文外都折叠」），CSS `.msg-bubble > [data-turn-process]
+       { display:none !important }` 会把整张卡连带子树隐藏 —— 卡内那张【等用户拍板】的
+       审批卡随之消失，用户既看不到也点不到「批准/拒绝」，任务永久卡死（挂起收尾
+       settleSteerTurnBoundary 与回放 applyTurnCompact 传的都是 ended:true，两条路都中）。
+       故：卡内只要还挂着交互卡，这张智能体卡就必须退回「常驻锚点」语义，不得进 process。
+       审批放行后 .hitl-pending 被摘除 → 判定自动失效 → 该卡回归正常的最终态折叠，
+       不会留下常驻残影（与 isInteractiveCard 只认待审批态同口径）。 */
+    function hasInteractiveCardInside(el) {
+        if (!el || !el.querySelectorAll) return false;
+        var nodes = el.querySelectorAll('.tool-card, .qa-record');
+        for (var i = 0; i < nodes.length; i++) {
+            if (isInteractiveCard(nodes[i])) return true;
+        }
+        return false;
+    }
+
     /* 耗时文本：与 trace 徽标 / turn-compact 摘要同口径（亚秒不写 0s）。 */
     function formatBatchElapsed(ms) {
         if (ms == null || !(ms >= 0)) return null;
@@ -256,7 +292,8 @@
     }
 
     /* 展开容器内全部批次成员（盖子同步回 open 态），但【不删】盖子。
-       用于失败/无正文轮：turn-compact 放弃折叠时，过程证据也不得被批次收口藏住。 */
+       【2026-11 用户拍板后仅保留为导出 API / 测试用途】compactBubble 的失败轮分支
+       不再自动调用它（失败轮保持批次折叠，错误块本就在批次外常驻可见）。 */
     function revealAll(container) {
         if (!container || !container.querySelectorAll) return 0;
         var hs = container.querySelectorAll('.turn-batch-header');
@@ -281,6 +318,15 @@
         var inAgentBody = !!(bubble.classList && bubble.classList.contains('agent-card-body'));
         if (!inAgentBody
                 && !(bubble.classList && bubble.classList.contains('msg-bubble'))) return null;
+        /* 【交互卡边界 · 2026-11 用户报障「只要展示 HITL/智能体这两个，页面就会错乱」】
+           待审批 HITL 卡 / 问答记录是等用户拍板的交互边界：收口当前运行批次（与
+           .agent-card 同口径），自身【永不】进成员区 —— 否则批次收口时审批按钮 /
+           问答记录随成员一起隐藏（HITL 卡带 .tool-card 类，旧实现必吞）。
+           必须在 isProcessRow 门禁【之前】判定：hitl-pending 卡同时带 tool-card 类。 */
+        if (isInteractiveCard(el)) {
+            closeBatchFor(bubble);
+            return null;
+        }
         /* 成员门禁：只有三类过程行能进批次。正文 md-content / 错误 / HITL / 问答卡 /
            文件变更卡 / trace 徽标等一律不是成员（它们在盖子外保持可见）。 */
         if (!isProcessRow(el)) return null;
@@ -403,6 +449,13 @@
             if (!el || el.nodeType !== 1 || !el.classList) continue;
             /* 边界一：智能体卡 —— 收口当前批，本身不是成员 */
             if (el.classList.contains('agent-card')) {
+                if (header) { header = null; }
+                continue;
+            }
+            /* 边界一·补：交互卡（待审批 HITL 卡 / 问答记录）—— 与运行态
+               noteProcessInsert 的 isInteractiveCard 分支同口径：收口当前批、
+               自身不是成员、也不是整轮过程行（classifyChildren 白名单同源）。 */
+            if (isInteractiveCard(el)) {
                 if (header) { header = null; }
                 continue;
             }
@@ -613,9 +666,17 @@
             if (el.classList && el.classList.contains('turn-compact-toggle')) return true;
             if (el.matches && el.matches(FOOTER_SELECTOR)) return true;
             if (el.matches && el.matches(KEEP_VISIBLE_SELECTOR)) return true;
+            /* 【交互卡边界】待审批 HITL 卡 / 问答记录：等用户拍板 / 用户已拍板的证据，
+               与智能体卡同级的不动点 —— 永不进 process（否则被折叠隐藏 + 重排搬离原位，
+               用户 2026-11 报「只要展示这两个页面就错乱」的直接成因之一）。 */
+            if (isInteractiveCard(el)) return true;
             /* 【最终态折叠】ended 时智能体卡不再常驻 —— 归入 process；
-               仅未结束态保持锚点常驻（classifyChildren 的 agentFolds 分叉）。 */
-            if (!agentFolds && el.matches && el.matches(AGENT_SELECTOR)) return true;
+               仅未结束态保持锚点常驻（classifyChildren 的 agentFolds 分叉）。
+               【卡内穿透例外】ended 态若卡内仍挂着待审批交互卡，整卡隐藏 = 审批按钮
+               消失、用户无法放行（hasInteractiveCardInside 的注释有完整取证），
+               此时必须退回常驻锚点。放行后该类被摘除，例外自动失效。 */
+            if (el.matches && el.matches(AGENT_SELECTOR)
+                    && (!agentFolds || hasInteractiveCardInside(el))) return true;
             return false;
         }
 
@@ -629,10 +690,12 @@
             if (el === finalNode) { keep.push(el); continue; }   // 唯一最终正文
             if (isAlwaysVisible(el)) {
                 keep.push(el);
-                /* 【agent 锚点化】智能体卡不再进 tail（不重排到 final 之后）；
-                   其余白名单（HITL/错误/页脚）仍由 compactBubble 统一搬到 final 之后。 */
+                /* 【agent / 交互卡锚点化】智能体卡与交互卡（待审批 HITL 卡 / 问答记录）
+                   都不进 tail（不重排到 final 之后）：它们是时序不动点；
+                   其余白名单（HITL 旧卡 / 错误 / 页脚）仍由 compactBubble 统一搬到 final 之后。 */
                 if (!(el.classList && el.classList.contains('turn-compact-toggle'))
-                        && !el.classList.contains('agent-card')) tail.push(el);
+                        && !el.classList.contains('agent-card')
+                        && !isInteractiveCard(el)) tail.push(el);
                 continue;
             }
             if (noFinal || j < lastTextIdx) { process.push(el); continue; }
@@ -799,15 +862,13 @@
             for (var m = 0; m < marked.length; m++) marked[m].removeAttribute('data-turn-process');
             if (existing) existing.parentNode.removeChild(existing);
             bubble.classList.remove('turn-compact-open');
-            /* 失败/无正文轮的过程证据不得被批次收口藏住。成功收口的无正文轮已有
-               批次盖子负责折叠，绝不 revealAll；只有失败/中断/无终态轮才展开。 */
-            var hasTerminalTrace = !!(bubble.querySelector && bubble.querySelector('.msg-trace'));
-            var hasFatal = !!(bubble.querySelector && bubble.querySelector(FATAL_SELECTOR));
-            if (!hasTerminalTrace || hasFatal) {
-                if (revealAll) {
-                    try { revealAll(bubble); } catch (e) { /* 展示增强 */ }
-                }
-            }
+            /* 【2026-11 用户拍板：失败轮也必须保持折叠态】旧实现在此对失败/无终态轮
+               revealAll()，把刚收口的批次成员全部摊开 —— 报错后整轮过程行以盒子形态
+               平铺（用户报障「报错后折叠变默认展开、工具和思考又变卡片态」的直接根因）。
+               失败证据（.err-bubble / .chunk-error）本就是 KEEP_VISIBLE 白名单，永远不被
+               批次收口隐藏（isProcessRow 不认它们，appendErrorChunk 还会主动 closeBatch），
+               故摊开成员对「看见错误」毫无增益，只制造卡片态回潮。现一律保持批次盖子
+               的收口折叠：错误块可见 + 盖子可点开查看过程，两全。 */
             return false;
         }
 
@@ -829,6 +890,20 @@
                 var pe = decision.process[fi];
                 if (pe === active || (pe.contains && pe.contains(active))) return false;
             }
+        }
+
+        /* 【2026-11 codereview 修复 · 只加不删缺陷】重跑必须先清除【本次决策已不在
+           process】的旧标记：classifyChildren 是纯函数，节点归属会随 .hitl-pending 类名
+           增删而变（见 refreshInteractiveBoundary）。旧实现只 setAttribute 不清除，于是
+           「上一轮被折、本轮应变常驻」的节点会残留 data-turn-process —— 失败回退
+           restoreHitlCardPending 加回 hitl-pending 后，宿主智能体卡虽已按例外退回 keep，
+           标记却还在 → CSS `.msg-bubble > [data-turn-process]{display:none!important}`
+           仍生效 → 卡内审批按钮看不到也点不到，任务永久卡死（探针实测 CONFIRMED）。
+           幂等性要求：重跑后 DOM 状态必须【等于】本次决策状态，而非只增不减。
+           清除范围限气泡直接子节点，与上方 :861 / :881 两处同口径。 */
+        var prevMarked = bubble.querySelectorAll ? bubble.querySelectorAll(':scope > [data-turn-process]') : [];
+        for (var pm = 0; pm < prevMarked.length; pm++) {
+            if (decision.process.indexOf(prevMarked[pm]) < 0) prevMarked[pm].removeAttribute('data-turn-process');
         }
 
         for (var i = 0; i < decision.process.length; i++) {
@@ -866,7 +941,13 @@
            锚点编号循环自动退化为「无锚」路径 —— 重排结果 = toggle → 全部 process
            （含智能体卡）→ final → tail，即「折叠除最终正文外其他都折叠」。
            分区键（稳定排序，同键保持原相对顺序）：
-              · toggle（已存在）：-1（恒最前，缝合搬移后重跑自动归位）；
+              · toggle（已存在）：minProcKey - 0.5 —— 【紧贴首个过程段】，不再恒最前。
+                旧实现钉死 -1 + placeToggle 强制提到 children[0]，会把排在首个过程段
+                【之前】的时序不动点锚（qa-record / 待审批 HITL 卡）挤到盖子下方 ——
+                而盖子折叠的恰是锚【之后】的过程行，运行态时序被颠倒（用户 2026-11
+                报障「先出 qa，执行一段时间后插话，折叠盖子却显示在 qa 卡上侧」；
+                探针实测 toggle=0、qa=1）。无锚点轮 minProcKey=1 → 0.5 仍恒最前，
+                与旧行为完全一致（零回归）。
               · process 节点：按其前面有几个【final 之前的 agent 锚】分段，段内保序；
                 最后一段（含原本排在 final 之后的尾部过程行）统一收拢到 final 之前
                 ——与旧「尾部过程卡回正文之前」契约一致；
@@ -887,25 +968,41 @@
             var n = kidsAll[i];
             return !!(n.classList && n.classList.contains('turn-compact-toggle'));
         }
+        /* 不动点锚 = 智能体卡 + 交互卡（待审批 HITL 卡 / 问答记录）：保持原始时序位置，
+           过程行在锚之间分段收拢。交互卡与 agent 卡同权（2026-11 用户报障：
+           展示 HITL / 问答记录时页面错乱 = 被重排搬离原位 + 被折叠隐藏）。 */
         function isAgentAt(i) {
             var n = kidsAll[i];
-            return !!(n.classList && n.classList.contains('agent-card'));
+            if (!n || !n.classList) return false;
+            if (n.classList.contains('agent-card')) return true;
+            return isInteractiveCard(n);
         }
         var finalIdx0 = finalNode0 ? kidsAll.indexOf(finalNode0) : -1;
         if (finalIdx0 < 0) finalIdx0 = len;
-        /* 第一遍：给 final 之前的 agent 锚按原序编号 */
+        /* 第一遍：给 final 之前的锚（agent / 交互卡）按原序编号 */
         var anchorNo = new Array(len);
         var m = 0;
         for (var c1 = 0; c1 < len; c1++) {
             if (isProc[c1] || isTail[c1] || c1 === finalIdx0) continue;
             if (isAgentAt(c1) && c1 < finalIdx0) { anchorNo[c1] = m; m++; }
         }
-        /* 第二遍：分配分区键 */
+        /* 第二遍：分配分区键。
+           【toggle 键 · 2026-11 修订】toggle 不再钉死 -1，而是【首个过程段键 - 0.5】：
+           紧贴它真正折叠的那段过程行之前。锚（qa-record / 待审批 HITL 卡 / 未结束态
+           agent-card）排在首个过程段之前时保持在 toggle 上方（时序不颠倒）；
+           无锚点普通轮 minProcKey=1 → toggle=0.5，仍是第一个子节点（零回归）。
+           toggle 可能出现在任意下标（缝合搬移），故先记录其位置，循环后统一回填。 */
         var keys = new Array(len);
         var seg = 0;
+        var toggleIdx = -1;
+        var minProcKey = Infinity;
         for (var c2 = 0; c2 < len; c2++) {
-            if (isToggleAt(c2)) { keys[c2] = -1; continue; }
-            if (isProc[c2]) { keys[c2] = 2 * seg + 1; continue; }
+            if (isToggleAt(c2)) { toggleIdx = c2; continue; }
+            if (isProc[c2]) {
+                keys[c2] = 2 * seg + 1;
+                if (keys[c2] < minProcKey) minProcKey = keys[c2];
+                continue;
+            }
             if (anchorNo[c2] !== undefined) { keys[c2] = 2 * anchorNo[c2] + 2; seg = anchorNo[c2] + 1; continue; }
             if (isAgentAt(c2)) { keys[c2] = 2 * m + 4 + c2; continue; }   // final 之后的 agent：tail 区之后按原序
             if (c2 === finalIdx0) { keys[c2] = 2 * m + 2; continue; }
@@ -913,6 +1010,9 @@
             /* 其余未分类节点：跟随当前段（段内 process 之后），避免被越过分区边界 */
             keys[c2] = 2 * seg + 1.5;
         }
+        /* decision.process 恒非空（空则 classifyChildren 已返回 null），minProcKey
+           必被赋值；Infinity 回落只是防御（假 DOM / 未来重构兜底）。 */
+        if (toggleIdx >= 0) keys[toggleIdx] = (minProcKey === Infinity ? 1 : minProcKey) - 0.5;
         var pairs = keys.map(function (kv, ki) { return [kv, ki]; })
             .sort(function (a, b) { return a[0] !== b[0] ? (a[0] < b[0] ? -1 : 1) : (a[1] < b[1] ? -1 : 1); });
         var refNode = null;
@@ -922,19 +1022,26 @@
             refNode = nodeToPlace;
         }
 
-        /* 【盖子不变量】toggle 必须是气泡第一个元素子节点；不满足则把挡路的
-           杂散节点统一搬到过程组之后、再把 toggle 提到最前。 */
+        /* 【盖子不变量 · 2026-11 修订】toggle 必须【紧贴首个 [data-turn-process] 节点
+           之前】，而不是恒为气泡第一个子节点。
+           旧不变量（children[0]）会把排在首个过程段之前的时序锚（qa-record / 待审批
+           HITL 卡 / 未结束态 agent-card）挤到盖子下方：盖子折叠的是锚之后的过程，
+           视觉上却压在锚上方 = 运行态时序颠倒（用户报障 + 探针实测 toggle=0、qa=1）。
+           上方重排循环已按分区键把 toggle 放到 minProcKey-0.5 的正确位置，这里只做
+           缝合搬移后的防御性归位；锚点保持在 toggle 之前【不再】被当作杂散搬走。 */
         function placeToggle(tg) {
-            var kids = bubble.children || [];
-            var iTg = Array.prototype.indexOf.call(kids, tg);
-            if (iTg === 0) return;
-            var before = Array.prototype.slice.call(kids, 0, iTg < 0 ? kids.length : iTg);
-            for (var bi = 0; bi < before.length; bi++) {
-                var stray = before[bi];
-                if (stray !== tg && stray.parentNode === bubble) bubble.insertBefore(stray, null);
+            var kids = Array.prototype.slice.call(bubble.children || []);
+            var firstProc = null;
+            for (var pi = 0; pi < kids.length; pi++) {
+                var kn = kids[pi];
+                if (kn !== tg && kn.getAttribute && kn.getAttribute('data-turn-process') !== null) {
+                    firstProc = kn; break;
+                }
             }
-            var first = (bubble.children && bubble.children[0]) || null;
-            bubble.insertBefore(tg, first);
+            var iTg = kids.indexOf(tg);
+            var iProc = firstProc ? kids.indexOf(firstProc) : kids.length;
+            if (iTg >= 0 && iTg === iProc - 1) return;   // 已紧贴首个过程行
+            bubble.insertBefore(tg, firstProc);
         }
         placeToggle(toggle);
         toggle.textContent = label;
@@ -982,6 +1089,32 @@
             }
         }
         return { turns: turns.length, compacted: compacted };
+    }
+
+    /* 【放行后重算折叠 · 2026-11 codereview 修复】摘除 / 加回 .hitl-pending 之后，
+       卡内穿透例外（hasInteractiveCardInside）随之失效或重新成立，但 classifyChildren
+       是【纯函数】：DOM 上的 data-turn-process 标记不会自动跟随重算。
+       实测后果（探针：同级过程行 + 卡内待审批卡 + compactBubble(ended:true)）：
+       挂起收尾时智能体卡因例外未被打标记 → 用户批准摘掉 hitl-pending → 此后无人重跑
+       compactBubble → 该卡【永久常驻】，与同轮其余过程卡形态分叉（实时不折、刷新走
+       回放才折），违背用户拍板的「最终态折叠除正文外都折叠」；失败回退 restore 加回
+       hitl-pending 时反向同理 —— 若之前已折，例外重新成立却无人重算，卡内审批按钮
+       仍被 display:none 藏住 = 任务卡死。故每个 hitl-pending 增删点都要重算一次。
+       【保守门禁】只重算【已经折叠过】的气泡（存在 turn-compact-toggle）：从未折叠的
+       气泡重跑会凭空插一个折叠按钮，属行为改变，绝不引入。
+       入参可以是审批卡本身（向上找宿主气泡）。纯展示增强：任何异常都不得影响主链路。 */
+    function refreshInteractiveBoundary(node, options) {
+        if (!node) return false;
+        var bubble = null, p = node;
+        while (p) {
+            if (p.classList && p.classList.contains && p.classList.contains('msg-bubble')) { bubble = p; break; }
+            p = p.parentNode || null;
+        }
+        if (!bubble || !bubble.querySelector) return false;
+        if (!bubble.querySelector(':scope > .turn-compact-toggle')) return false;
+        var opts = options || {};
+        if (opts.ended === undefined) opts.ended = true;
+        return compactBubble(bubble, opts);
     }
 
     /* 撤销：用于用户关掉偏好 / 回放重跑前，保证可完全回退。 */
@@ -1056,6 +1189,7 @@
         /* Part 1 批次折叠（原 GourdTurnBatch 出口面，键名不变） */
         PROCESS_CLASSES: PROCESS_CLASSES,
         isProcessRow: isProcessRow,
+        isInteractiveCard: isInteractiveCard,
         formatBatchElapsed: formatBatchElapsed,
         labelText: labelText,
         countBatchWork: countBatchWork,
@@ -1083,6 +1217,7 @@
         compactBubble: compactBubble,
         applyTurnCompact: applyTurnCompact,
         clearTurnCompact: clearTurnCompact,
+        refreshInteractiveBoundary: refreshInteractiveBoundary,
         refreshTurnCompact: refreshTurnCompact
     };
 });

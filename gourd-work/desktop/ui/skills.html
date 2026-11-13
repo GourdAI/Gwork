@@ -4,8 +4,10 @@
         <!-- 头部固定区：顶栏与分类栏不随列表滚动（用户诉求：滚动时头部不动） -->
         <div class="skills-head" id="skillsHead">
             <div class="skills-inner">
-                <!-- 顶栏：视图 Tab（已安装标签自带数量徽标） + 搜索
-                     ⚠ 头部必须保持单行：不要再加「已安装返回条」这类独占一行的标题区。
+                <!-- 顶栏：3 个主 Tab（技能 / 连接器 / 接口） + 搜索。
+                     ⚠ 层级：顶栏只放这 3 个主 Tab；「已安装 / SkillHub / ClawHub /
+                     ModelScope」是【技能】模块内部的二级源切换，见下方 #skillsSourceTabs。
+                     头部必须保持单行：不要再加「已安装返回条」这类独占一行的标题区。
                      旧结构在已安装视图下额外渲染一行 `← 已安装`，Playwright 实测头部
                      高 104px = 两行，该行内容仅约 100px、右侧约 1200px 整行空白（用户所指「空隙」）。
                      标签页始终可见，点市场标签即可离开已安装视图，返回条与右上角入口按钮都是冗余。 -->
@@ -16,8 +18,8 @@
                         </button>
                         <div class="skills-hscroll-viewport">
                             <div class="skills-view-tabs skills-hscroll" id="skillsViewTabs">
-                                <!-- 标签页（已安装 + 各市场）全部由 JS 依据 /web/settings/skills/markets 动态生成；
-                                     已安装数量徽标随「已安装」标签一起渲染，不再另设右上角入口按钮（两者功能完全重复）。 -->
+                                <!-- 3 个主 Tab 由 JS 的 renderMainTabs() 动态生成：技能 / 连接器 / 接口。
+                                     技能模块内部的源切换（已安装 + 各市场）在 #skillsSourceTabs。 -->
                             </div>
                         </div>
                         <button type="button" class="skills-hscroll-nav next" disabled tabindex="-1" aria-label="向右滚动标签页" data-i18n-title="settings.skills.scroll_next">
@@ -30,7 +32,25 @@
                             <input type="text" id="skillsSearchInput" placeholder="搜索技能..." data-i18n-placeholder="settings.skills.search_placeholder" autocomplete="off"/>
                             <button class="skills-search-clear" id="skillsSearchClear" style="display:none" data-i18n-title="settings.skills.clear">&times;</button>
                         </div>
+                        <!-- 手动添加 MCP：仅「连接器」视图显示，复用迁入的 #mcpAddBtn 表单。 -->
+                        <button type="button" class="skills-add-mcp-btn" id="skillsAddMcpBtn" style="display:none" data-i18n="settings.mcp.add">+ 添加服务器</button>
                     </div>
+                </div>
+
+                <!-- 技能视图内的二级源切换：已安装 / 各技能市场。
+                     与顶栏 3 个主 Tab（技能 / 连接器 / 接口）构成两级层级，一一对应侧栏三段式；
+                     仅在「技能」主 Tab 下显示，连接器/接口页由 showPane 隐藏。
+                     结构与分类栏共用 .skills-hscroll-wrap，复用 bindHScroll / syncHScrollState。 -->
+                <div class="skills-source-bar-wrap skills-hscroll-wrap" id="skillsSourceBarWrap" style="display:none">
+                    <button type="button" class="skills-hscroll-nav prev" disabled tabindex="-1" aria-label="向左滚动技能源" data-i18n-title="settings.skills.scroll_prev">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                    </button>
+                    <div class="skills-hscroll-viewport">
+                        <div class="skills-source-tabs skills-hscroll" id="skillsSourceTabs"></div>
+                    </div>
+                    <button type="button" class="skills-hscroll-nav next" disabled tabindex="-1" aria-label="向右滚动技能源" data-i18n-title="settings.skills.scroll_next">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                    </button>
                 </div>
 
                 <!-- 市场视图：分类筛选栏
@@ -64,7 +84,270 @@
                     </div>
                     <div class="skills-error" id="skillsError" style="display:none"></div>
                 </div>
-                <div class="skills-list" id="skillsList"></div>
+                <div class="skills-pane" id="skillsPaneSkills">
+                    <div class="skills-list" id="skillsList"></div>
+                </div>
+
+                <!-- 连接器（MCP）：魔搭 MCP 广场目录 + 已安装 MCP 服务器配置（由设置页迁入）。
+                     #mcpMarketRoot 由 app-mcp-market.js 渲染；原 MCP Tab 的 #mcpAddBtn 即手动添加入口。 -->
+                <div class="skills-pane" id="skillsPaneConnectors" style="display:none">
+                    <div id="mcpMarketRoot"></div>
+                    <div class="skills-pane-section">
+                <div class="skills-pane-inner">
+                    <!-- List View -->
+                    <div class="settings-view settings-view-list" id="mcpListView">
+                        <div class="settings-section">
+                            <div class="settings-section-header">
+                                <div>
+                                    <span class="settings-section-title" data-i18n="settings.mcp.title">MCP 服务器</span>
+                                    <div class="settings-section-desc" data-i18n="settings.mcp.desc">管理外部工具服务器，扩展文件、数据库、浏览器等工具能力</div>
+                                </div>
+                                <div class="mcp-header-actions">
+                                    <div class="mcp-import-menu-wrap">
+                                        <button class="settings-add-btn" id="mcpImportBtn" data-i18n="settings.mcp.import">
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                                            导入
+                                        </button>
+                                        <div class="mcp-import-menu" id="mcpImportMenu">
+                                            <button type="button" class="mcp-import-menu-item" data-action="file" data-i18n="settings.mcp.import_json_file">导入 JSON 文件</button>
+                                            <button type="button" class="mcp-import-menu-item" data-action="string" data-i18n="settings.mcp.import_json_str">导入 JSON 字符串</button>
+                                        </div>
+                                    </div>
+                                    <input type="file" id="mcpImportFileInput" accept=".json" style="display:none;"/>
+                                    <button class="settings-add-btn" id="mcpAddBtn" data-i18n="settings.mcp.add">+ 添加服务器</button>
+                                </div>
+                            </div>
+                            <div class="mcp-server-list" id="mcpServerList"></div>
+                        </div>
+                    </div>
+                    <!-- Form View -->
+                    <div class="settings-view settings-view-form" id="mcpFormView" style="display:none">
+                        <div class="settings-section">
+                            <div class="settings-section-header">
+                                <div class="settings-title-row">
+                                    <button class="settings-back-btn" id="mcpBackBtn" data-i18n-title="settings.common.back">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                                    </button>
+                                    <span class="settings-section-title" id="mcpFormTitle" data-i18n="settings.mcp.add_title">添加服务器</span>
+                                </div>
+                                <div class="settings-form-actions" id="mcpFormActions" style="display:none">
+                                    <button class="settings-form-action-btn" id="mcpFormCopyBtn" data-i18n-title="settings.common.copy">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                        <span data-i18n="settings.common.copy">复制</span>
+                                    </button>
+                                    <button class="settings-form-action-btn danger" id="mcpFormDeleteBtn" data-i18n-title="settings.common.delete">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                                        <span data-i18n="settings.common.delete">删除</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="mcp-add-form" id="mcpAddForm">
+                                <div class="form-group">
+                                    <label data-i18n="settings.mcp.name_label">名称 <span class="required">*</span></label>
+                                    <input type="text" id="mcpName" placeholder="my-mcp-server" data-i18n-placeholder="settings.mcp.name_placeholder"/>
+                                </div>
+                                <div class="form-group">
+                                    <label data-i18n="settings.mcp.scope_label">作用域</label>
+                                    <input type="hidden" id="mcpScope" value="user"/>
+                                    <div class="settings-scope-toggle" data-target="mcpScope">
+                                        <button class="settings-scope-btn active" data-scope="user" type="button" data-i18n="settings.general.scope_user">用户（全局）</button>
+                                        <button class="settings-scope-btn" data-scope="workspace" type="button" data-i18n="settings.general.scope_workspace">工作区（本地）</button>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label data-i18n="settings.mcp.type_label">类型</label>
+                                    <div class="mcp-type-toggle">
+                                        <button class="mcp-type-btn active" data-type="stdio" data-i18n="settings.mcp.type_stdio">stdio</button>
+                                        <button class="mcp-type-btn" data-type="sse" data-i18n="settings.mcp.type_sse">http sse</button>
+                                        <button class="mcp-type-btn" data-type="streamable" data-i18n="settings.mcp.type_streamable">http streamable</button>
+                                    </div>
+                                </div>
+                                <!-- 认证声明（非密钥）：只写 authType 到 settings.json；
+                                     真正的 token / OAuth 凭据走 /mcp/auth/* 存本机 CredentialVault。 -->
+                                <div class="form-group" id="mcpAuthTypeGroup">
+                                    <label for="mcpAuthType" data-i18n="settings.mcp.auth_type_label">认证方式</label>
+                                    <select id="mcpAuthType" class="settings-select">
+                                        <option value="none" data-i18n="settings.mcp.auth_type_none">无需认证</option>
+                                        <option value="token" data-i18n="settings.mcp.auth_type_token">填写 Access Token / API Key</option>
+                                        <option value="oauth" data-i18n="settings.mcp.auth_type_oauth">浏览器登录授权（OAuth / 扫码 / 账号登录）</option>
+                                    </select>
+                                    <div class="mcp-auth-type-hint" id="mcpAuthTypeHint" data-i18n="settings.mcp.auth_type_hint">凭据仅保存在本机，不会写入配置文件或上传云端。</div>
+                                </div>
+                                <div class="mcp-config-stdio" id="mcpConfigStdio">
+                                    <div class="form-group">
+                                        <label data-i18n="settings.mcp.command_label">命令 <span class="required">*</span></label>
+                                        <input type="text" id="mcpCommand" placeholder="npx -y @modelcontextprotocol/server-filesystem /path" data-i18n-placeholder="settings.mcp.command_placeholder"/>
+                                    </div>
+                                    <div class="form-group">
+                                        <label data-i18n="settings.mcp.args_label">参数（每行一个）</label>
+                                        <textarea id="mcpArgs" rows="3" placeholder="/path/to/dir&#10;--option value"></textarea>
+                                    </div>
+                                    <div class="form-group">
+                                        <label data-i18n="settings.mcp.env_label">环境变量（KEY=VALUE，每行一个）</label>
+                                        <textarea id="mcpEnv" rows="3" placeholder="API_KEY=xxx"></textarea>
+                                    </div>
+                                </div>
+                                <div class="mcp-config-remote" id="mcpConfigRemote" style="display:none">
+                                    <div class="form-group">
+                                        <label data-i18n="settings.mcp.url_label">URL <span class="required">*</span></label>
+                                        <input type="text" id="mcpRemoteUrl" placeholder="http://localhost:3001/mcp" data-i18n-placeholder="settings.mcp.url_placeholder"/>
+                                    </div>
+                                    <div class="form-group">
+                                        <label data-i18n="settings.mcp.headers_label">请求头（KEY=VALUE，每行一个）</label>
+                                        <textarea id="mcpHeaders" rows="3" placeholder="Authorization=Bearer xxx&#10;X-Custom-Header=value"></textarea>
+                                    </div>
+                                    <div class="form-group">
+                                        <label data-i18n="settings.mcp.timeout_label">超时时间</label>
+                                        <input type="text" id="mcpTimeout" class="settings-short-input" placeholder="30s" data-i18n-placeholder="settings.mcp.timeout_placeholder"/>
+                                    </div>
+                                </div>
+                                <div class="form-actions form-actions-end">
+                                    <div class="settings-inline-actions">
+                                        <button class="btn-secondary settings-icon-btn" id="mcpCheckBtn">
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                                            <span data-i18n="settings.mcp.check_connection">检测连接</span>
+                                        </button>
+                                        <button class="btn-primary" id="mcpSaveBtn" data-i18n="settings.save">保存</button>
+                                    </div>
+                                </div>
+                                <div class="mcp-check-result" id="mcpCheckResult" style="display:none;"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Tools View -->
+                    <div class="settings-view settings-view-form" id="mcpToolsView" style="display:none">
+                        <div class="settings-section">
+                            <div class="settings-section-header">
+                                <div class="settings-title-row">
+                                    <button class="settings-back-btn" id="mcpToolsBackBtn" data-i18n-title="settings.common.back">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+                                    </button>
+                                    <span class="settings-section-title" id="mcpToolsTitle" data-i18n="settings.mcp.tools_title">工具列表</span>
+                                </div>
+                            </div>
+                            <div class="mcp-tools-toolbar" id="mcpToolsToolbar" style="display:none;">
+                                <label class="mcp-tools-select-all">
+                                    <input type="checkbox" id="mcpToolsSelectAll" />
+                                    <span data-i18n="settings.common.select_all">全选</span>
+                                </label>
+                                <div class="mcp-tools-toolbar-actions">
+                                    <span class="mcp-tools-count" id="mcpToolsCount"></span>
+                                    <button class="settings-add-btn settings-toolbar-save-btn" id="mcpToolsSaveBtn" data-i18n="settings.save">保存</button>
+                                </div>
+                            </div>
+                            <div class="mcp-tools-list" id="mcpToolsList"></div>
+                        </div>
+                    </div>
+
+                </div>
+                    </div>
+                </div>
+
+                <!-- 接口（OpenAPI）：由设置页「接口配置」整块迁入，DOM id 不变。 -->
+                <div class="skills-pane" id="skillsPaneInterfaces" style="display:none">
+                <div class="skills-pane-inner">
+                    <!-- List View -->
+                    <div class="settings-view settings-view-list" id="openapiListView">
+                        <div class="settings-section">
+                            <div class="settings-section-header">
+                                <div>
+                                    <span class="settings-section-title" data-i18n="settings.openapi.title">OpenAPI 服务器</span>
+                                    <div class="settings-section-desc" data-i18n="settings.openapi.desc">接入 REST/OpenAPI 接口，控制 AI 可调用的 API 范围</div>
+                                </div>
+                                <div class="openapi-header-actions">
+                                    <button class="settings-add-btn" id="openapiAddBtn" data-i18n="settings.openapi.add">+ 添加服务器</button>
+                                </div>
+                            </div>
+                            <div class="openapi-server-list" id="openapiServerList"></div>
+                        </div>
+                    </div>
+                    <!-- Form View -->
+                    <div class="settings-view settings-view-form" id="openapiFormView" style="display:none">
+                        <div class="settings-section">
+                            <div class="settings-section-header">
+                                <div class="settings-title-row">
+                                    <button class="settings-back-btn" id="openapiBackBtn" data-i18n-title="settings.common.back">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                                    </button>
+                                    <span class="settings-section-title" id="openapiFormTitle" data-i18n="settings.openapi.add_title">添加服务器</span>
+                                </div>
+                                <div class="settings-form-actions" id="openapiFormActions" style="display:none">
+                                    <button class="settings-form-action-btn" id="openapiFormCopyBtn" data-i18n-title="settings.common.copy">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                        <span data-i18n="settings.common.copy">复制</span>
+                                    </button>
+                                    <button class="settings-form-action-btn danger" id="openapiFormDeleteBtn" data-i18n-title="settings.common.delete">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                                        <span data-i18n="settings.common.delete">删除</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="openapi-add-form" id="openapiAddForm">
+                                <div class="form-group">
+                                    <label data-i18n="settings.openapi.name_label">名称 <span class="required">*</span></label>
+                                    <input type="text" id="openapiName" placeholder="my-api-server" data-i18n-placeholder="settings.openapi.name_placeholder"/>
+                                </div>
+                                <div class="form-group">
+                                    <label data-i18n="settings.openapi.scope_label">作用域</label>
+                                    <input type="hidden" id="openapiScope" value="user"/>
+                                    <div class="settings-scope-toggle" data-target="openapiScope">
+                                        <button class="settings-scope-btn active" data-scope="user" type="button" data-i18n="settings.general.scope_user">用户（全局）</button>
+                                        <button class="settings-scope-btn" data-scope="workspace" type="button" data-i18n="settings.general.scope_workspace">工作区（本地）</button>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label data-i18n="settings.openapi.base_url_label">API 基地址 <span class="required">*</span></label>
+                                    <input type="text" id="openapiBaseUrl" placeholder="https://api.example.com/app" data-i18n-placeholder="settings.openapi.base_url_placeholder"/>
+                                </div>
+                                <div class="form-group">
+                                    <label data-i18n="settings.openapi.doc_url_label">接口文档地址（OpenApi 规范） <span class="required">*</span></label>
+                                    <input type="text" id="openapiDocUrl" placeholder="https://api.example.com/app/openapi.json" data-i18n-placeholder="settings.openapi.doc_url_placeholder"/>
+                                </div>
+                                <div class="form-group">
+                                    <label data-i18n="settings.openapi.headers_label">请求头（KEY=VALUE，每行一个）</label>
+                                    <textarea id="openapiHeaders" rows="3" placeholder="API_KEY=xxx&#10;Authorization=Bearer xxx"></textarea>
+                                </div>
+                                <div class="form-actions form-actions-end">
+                                    <div class="settings-inline-actions">
+                                        <button class="btn-secondary settings-icon-btn" id="openapiTestBtn">
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                                            <span data-i18n="settings.openapi.test_connection">测试连接</span>
+                                        </button>
+                                        <button class="btn-primary" id="openapiSaveBtn" data-i18n="settings.save">保存</button>
+                                    </div>
+                                </div>
+                                <div class="llm-check-result" id="openapiCheckResult" style="display:none;"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Apis View -->
+                    <div class="settings-view settings-view-form" id="openapiApisView" style="display:none">
+                        <div class="settings-section">
+                            <div class="settings-section-header">
+                                <div class="settings-title-row">
+                                    <button class="settings-back-btn" id="openapiApisBackBtn" data-i18n-title="settings.common.back">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                                    </button>
+                                    <span class="settings-section-title" id="openapiApisTitle" data-i18n="settings.openapi.apis_title">接口列表</span>
+                                </div>
+                            </div>
+                            <div class="mcp-tools-toolbar" id="openapiApisToolbar" style="display:none;">
+                                <label class="mcp-tools-select-all">
+                                    <input type="checkbox" id="openapiApisSelectAll" />
+                                    <span data-i18n="settings.common.select_all">全选</span>
+                                </label>
+                                <div class="mcp-tools-toolbar-actions">
+                                    <span class="mcp-tools-count" id="openapiApisCount"></span>
+                                    <button class="settings-add-btn settings-toolbar-save-btn" id="openapiApisSaveBtn" data-i18n="settings.save">保存</button>
+                                </div>
+                            </div>
+                            <div id="openapiApisList"></div>
+                        </div>
+                    </div>
+
+                </div>
+                </div>
             </div>
         </div>
 
@@ -85,5 +368,13 @@
                 <div class="skill-detail-stats" id="skillDetailStats"></div>
             </div>
         </div>
+
+        <!-- 连接器（MCP）详情弹窗：必须是 .skills-view 下的【持久节点】，与
+             #skillDetailOverlay 同级（后者已验证可行）。历史缺陷：它原先由
+             app-mcp-market.js 的 shell() 动态生成并塞进 #mcpMarketRoot.innerHTML，
+             于是 ① 任何 render()（翻页/搜索/切分类/语言切换）都会把正在显示的弹窗
+             整个冲掉；② 放在 .skills-scroll(overflow-y:auto) 内部有被裁剪/定位错乱风险；
+             ③ bind() 每次对它 addEventListener 累积监听器。现改由市场模块只填内容。 -->
+        <div class="mcp-market-modal" id="mcpMarketDetail" style="display:none"></div>
     </div>
 </template>

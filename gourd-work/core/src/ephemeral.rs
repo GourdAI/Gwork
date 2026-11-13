@@ -25,6 +25,19 @@ pub const ROOT_LEVEL_EPHEMERAL_PREFIXES: [&str; 3] = ["tmp-", "temp-", "scratch-
 /// Dotted prefixes matched at ANY level.
 pub const DOT_EPHEMERAL_DIR_PREFIXES: [&str; 3] = [".tmp-", ".temp-", ".scratch-"];
 
+/// Dotted prefixes matched at ANY level **for files as well as directories**.
+///
+/// WHY THIS IS A SEPARATE TABLE (measured, not guessed): the agent's own scratch
+/// convention is `.tmp_<purpose>.js` / `.tmp_<purpose>.log` (underscore after the
+/// dotted prefix, e.g. `.tmp_add_nav_i18n.js`, `.tmp_crlf_fix.js`). Those are
+/// FILES, and `DOT_EPHEMERAL_DIR_PREFIXES` deliberately skips the last segment
+/// unless it is known to be a directory — otherwise a real file named
+/// `.tmp-utils.md` inside `src/` would be silenced. The underscore variant is
+/// unambiguously scratch (no project ships `.tmp_*` sources), so it is safe to
+/// apply to the file segment too. Dotted-hyphen names stay directory-only to
+/// preserve that guard.
+pub const DOT_EPHEMERAL_FILE_PREFIXES: [&str; 3] = [".tmp_", ".temp_", ".scratch_"];
+
 /// Special file names matched at any level.
 pub const EPHEMERAL_FILES: [&str; 1] = [".DS_Store"];
 
@@ -73,6 +86,11 @@ pub fn is_ephemeral_relative(rel: &str, is_dir_hint: bool) -> bool {
         if is_last && !is_dir_hint && EPHEMERAL_FILES.iter().any(|f| f == seg) {
             return true;
         }
+        // Dotted scratch prefixes that are unambiguous for FILES as well
+        // (".tmp_add_nav_i18n.js"): apply at every level, last segment included.
+        if DOT_EPHEMERAL_FILE_PREFIXES.iter().any(|p| seg.starts_with(p)) {
+            return true;
+        }
         // Root-level-only rules apply only to the first segment
         if i == 0 {
             if ROOT_LEVEL_EPHEMERAL.iter().any(|d| d == seg) {
@@ -113,6 +131,20 @@ mod tests {
     fn test_dotted_prefix_any_level() {
         assert!(is_ephemeral_relative(".tmp-scan/x", false));
         assert!(is_ephemeral_relative("src/.temp-build/x", false));
+    }
+
+    #[test]
+    fn test_dotted_underscore_scratch_files_any_level() {
+        // The agent's scratch convention: dotted prefix + underscore, FILE form.
+        // These leaked into the outputs panel as ADDED rows (measured defect).
+        assert!(is_ephemeral_relative(".tmp_add_nav_i18n.js", false));
+        assert!(is_ephemeral_relative("scripts/.tmp_crlf_fix.js", false));
+        assert!(is_ephemeral_relative(".temp_x.log", false));
+        assert!(is_ephemeral_relative(".scratch_y.txt", false));
+        // Dotted-HYPHEN names must stay directory-only: a real file named
+        // ".tmp-utils.md" is not unambiguously scratch (Java codereview guard).
+        assert!(!is_ephemeral_relative("src/.tmp-utils.md", false));
+        assert!(is_ephemeral_relative("src/.tmp-utils/x.md", false));
     }
 
     #[test]

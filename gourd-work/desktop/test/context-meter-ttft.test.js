@@ -55,9 +55,10 @@ test('TTFT 格式化：不足 1s 用 ms，>=1s 用 2 位小数秒，0 合法', (
     assert.equal(sandbox.ctxTtftText({ ttftMs: 12345 }), '12.35s');
 });
 
-test('旧历史帧无 ttftMs 时整行省略（null 与「合法 0ms」必须可区分）', () => {
+test('旧历史帧无 ttftMs 时行恒在显示 --（null 与「合法 0ms」必须可区分）', () => {
     const old = sandbox.buildContextRows(chunk({ generationMs: 4000, generatedTokens: 320 }), {});
-    assert.ok(!old.includes('首 Token 延迟'), '无数据不得显示 TTFT 行');
+    assert.match(old, /首 Token 延迟/, '类别不得消失（用户报障：过一会儿才出现）');
+    assert.match(old, /data-ctx-ttft="1">--</, '无数据显示 --');
     // 但 TPS 与常规行仍在
     assert.match(old, /输出速度/);
     assert.match(old, /已用/);
@@ -68,10 +69,11 @@ test('旧历史帧无 ttftMs 时整行省略（null 与「合法 0ms」必须可
     assert.match(instant, /0ms/, '0ms 是真实首字延迟，不是缺数据');
 });
 
-test('非法/半值 ttftMs 一律省略，不把 Infinity/NaN 渲染到卡面', () => {
+test('非法/半值 ttftMs：行恒在显示 --，不把 Infinity/NaN 渲染到卡面', () => {
     for (const v of [null, undefined, -1, NaN, 'abc', Infinity]) {
         const html = sandbox.buildContextRows(chunk({ ttftMs: v }), {});
-        assert.ok(!html.includes('首 Token 延迟'), '非法值不得显示: ' + String(v));
+        assert.match(html, /首 Token 延迟/, '非法值也不得整行消失: ' + String(v));
+        assert.match(html, /data-ctx-ttft="1">--</, '非法值显示 --');
         assert.ok(!/Infinity|NaN/.test(html));
     }
 });
@@ -87,17 +89,30 @@ test('三行共存且顺序稳定：输出速度 → 首 Token 延迟 → 任务
     assert.match(html, /20s/, '任务耗时仍按 trace 定格值');
 });
 
-test('新一轮起步时 noteContextTurnStart 清理旧轮 ttftMs，避免显示旧延迟', () => {
-    // 纯函数层：模拟 noteContextTurnStart 构造的新 args（它复制快照后 delete 三个键）
+test('新一轮起步不再 delete 旧轮指标：两行恒在，粘性保留上次数值', () => {
+    // 用户报障根因：noteContextTurnStart 复制快照后 delete 三个键，整卡重绘时两行消失，
+    // 等下一个 500ms tps_progress 帧才插回来。现在改为保留 + 粘性缓存。
     const src = fs.readFileSync(path.join(uiRoot, 'js', 'app-context.js'), 'utf8');
-    assert.match(src, /delete args\.ttftMs;/, '新轮重绘必须删掉旧轮 ttftMs');
-    assert.match(src, /delete args\.generationMs;/);
-    assert.match(src, /delete args\.generatedTokens;/);
-    // 行为层：删掉后确实不显示（与缺数据用例一致，护栏不能只停在字符串）
-    const fresh = sandbox.buildContextRows(chunk({
-        turnStartMs: 1700000999999
-    }), {});
-    assert.ok(!fresh.includes('首 Token 延迟'));
+    assert.ok(!/delete args\.ttftMs;/.test(src), '不得再删 ttftMs（会整行消失）');
+    assert.ok(!/delete args\.generationMs;/.test(src), '不得再删 generationMs');
+    assert.ok(!/delete args\.generatedTokens;/.test(src), '不得再删 generatedTokens');
+    assert.match(src, /function resolveContextTiming\(/, '必须有统一的粘性判定');
+
+    // 行为层：模拟「上一轮已有值 → 新一轮 reason_start 重绘（无新值）→ 结算帧」全序列。
+    const sess = { sessionId: 'work-A' };
+    const oldFrame = chunk({ generationMs: 4000, generatedTokens: 320, ttftMs: 5390 });
+    const first = sandbox.buildContextRows(oldFrame, { sess: sess });
+    assert.match(first, /80 tokens\/秒/);
+    assert.match(first, /5\.39s/);
+    const fresh = sandbox.buildContextRows(chunk({ turnStartMs: 1700000999999 }), { sess: sess });
+    assert.match(fresh, /首 Token 延迟/, '新一轮起步类别不得消失');
+    assert.match(fresh, /5\.39s/, '缺新值时沿用上次显示值，不闪回 --');
+    assert.match(fresh, /80 tokens\/秒/, '速率同样沿用');
+    assert.equal((fresh.match(/首 Token 延迟/g) || []).length, 1, '行恰好一行，不重复插入');
+    // 本轮首个真数值抵达才替换
+    const settled = sandbox.buildContextRows(chunk({ generationMs: 1000, generatedTokens: 50, ttftMs: 860 }), { sess: sess });
+    assert.match(settled, /50 tokens\/秒/);
+    assert.match(settled, /860ms/);
 });
 
 test('12 语言包都已有 chat.ttft（不新增 i18n 键）', () => {

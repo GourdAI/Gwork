@@ -45,8 +45,21 @@ pub async fn execute_loop_task(state: Arc<AppState>, task_id: String, task: Loop
     let access_mode = task.access_mode.clone().unwrap_or_else(|| "full".into());
     let prompt = crate::loop_task::LoopScheduler::build_effective_prompt(&task);
 
-    // Emit a user_input frame so the frontend renders the loop's prompt bubble
-    let user_frame = Frame::user_input(&session_id, &prompt, "loop");
+    // The session's authoritative seq counter. Resolved before the first frame is
+    // built, because every frame this function hands to `persist_frame` directly
+    // (bypassing the forwarder) must be numbered here.
+    let seq_counter = state.seq_for(&session_id).await;
+
+    // Emit a user_input frame so the frontend renders the loop's prompt bubble.
+    //
+    // Stamped from the session counter **before** it is persisted: this frame goes
+    // straight to `persist_frame` rather than through the forwarder below, so it
+    // would otherwise land in the stream file with no `eventSeq` at all — the same
+    // hole that hid `hitl` / `question` / `agent_start` / `agent_end` from
+    // cursor-scoped replay (`session/mod.rs` drops a frame whose seq is `None` in
+    // both `After` and `Rounds{before_seq}` modes). A loop prompt bubble would then
+    // survive a page refresh but disappear on "load earlier" and on reconnect.
+    let user_frame = super::stamp_seq(&seq_counter, Frame::user_input(&session_id, &prompt, "loop"));
     super::persist_frame(&state, &session_id, &user_frame).await;
     super::broadcast_frame(&state, &session_id, user_frame).await;
 
@@ -69,7 +82,8 @@ pub async fn execute_loop_task(state: Arc<AppState>, task_id: String, task: Loop
 
     // Build history
     let run_id = format!("loop-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    let seq_counter = state.seq_for(&session_id).await;
+    // Read *after* the prompt frame above has been stamped, so the run continues
+    // numbering past it rather than reusing that seq.
     let start_seq = seq_counter.load(std::sync::atomic::Ordering::SeqCst);
     let window = settings.general.history_window_size as usize;
     let mut history = store.to_chat_messages(&session_id, window);
@@ -77,13 +91,34 @@ pub async fn execute_loop_task(state: Arc<AppState>, task_id: String, task: Loop
         + &crate::react::prompt::build_agent_roster(&state.workspace, &settings.permission);
     history.insert(0, ChatMessage::system(system));
 
-    // Frame channel → broadcast + persist
+    // Frame channel → broadcast + persist.
+    //
+    // Same single authoritative numbering point as the interactive run's forwarder
+    // (see the long comment in `run_react_session`): every frame is re-stamped here
+    // so tool-direct frames (`hitl`, `question`, `agent_start`, `agent_end`) get an
+    // `eventSeq` instead of being dropped by cursor-scoped replay, and forwarded
+    // sub-agent frames lose their own `start_seq: 0` numbering instead of rewinding
+    // this session's sequence.
     let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Frame>();
     let state_fwd = state.clone();
     let sid_fwd = session_id.clone();
+    let counter_fwd = seq_counter.clone();
     let fwd = tokio::spawn(async move {
         while let Some(frame) = frame_rx.recv().await {
-            super::persist_frame(&state_fwd, &sid_fwd, &frame).await;
+            // Same single authoritative numbering point as the interactive run:
+            // `relay_frame` stamps and persists as one step so their order cannot
+            // drift. See the long comment in `run_react_session`.
+            //
+            // The store is resolved per frame rather than hoisted, matching what
+            // `persist_frame` did internally before: session ownership can be
+            // established while a run is already streaming, and a store captured at
+            // spawn time would then keep writing to the wrong root.
+            let frame = super::relay_frame(
+                &counter_fwd,
+                &super::store_for(&state_fwd, &sid_fwd),
+                &sid_fwd,
+                frame,
+            );
             super::broadcast_frame(&state_fwd, &sid_fwd, frame).await;
         }
     });
@@ -128,7 +163,11 @@ pub async fn execute_loop_task(state: Arc<AppState>, task_id: String, task: Loop
     let cancel = CancellationToken::new();
     let result = agent.run(&config, history, frame_tx, cancel).await;
 
-    seq_counter.store(result.next_seq, std::sync::atomic::Ordering::SeqCst);
+    // Advance the counter, never rewind it — see the matching comment in
+    // `run_react_session`. `result.next_seq` counts only ReAct's own frames and is
+    // blind to the forwarded sub-agent frames the forwarder above already numbered
+    // out of this same counter, so a bare `store` would rewind it.
+    super::advance_counter(&seq_counter, result.next_seq);
     drop(fwd);
 
     let answer = result.final_answer.clone();

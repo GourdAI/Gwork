@@ -46,5 +46,13 @@
         "sidebarImage": "installer/sidebar.bmp"
       }
     }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://www.gourdwork.com/api/installer-latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE5MEJCQkJDREM0RjY5NEIKUldSTGFVL2N2THNMR1NWVm44bUt6QVpRTFN4QzZzT0hTWlRrSEY1anE0dTJOSGtOR1p1U0trSmEK"
+    }
   }
 }

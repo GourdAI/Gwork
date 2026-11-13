@@ -3,6 +3,12 @@
     "360": "360",
     "1000": "1000",
     "10000": "10000",
+    "Upload update check file": "Загрузить файл проверки обновлений",
+    "Update check file uploaded successfully": "Файл проверки обновлений успешно загружен",
+    "Failed to upload update check file": "Не удалось загрузить файл проверки обновлений",
+    "Invalid update check file": "Выберите допустимый JSON-файл проверки обновлений",
+    "Update check file": "Файл проверки обновлений",
+    "Select a latest.json file to publish to the desktop updater.": "Выберите файл latest.json для публикации в программе обновления настольного клиента.",
     "_copy": "_копировать",
     "and the": "и",
     "By clicking sign in, you agree to our": "Нажимая «Войти», вы соглашаетесь с нашими",
@@ -7571,6 +7577,17 @@
     "Describe your next task…": "Опишите следующую задачу…",
     "Syntax check passed": "Проверка синтаксиса пройдена",
     "Task complete": "Задача выполнена",
-    "2 min 41 s": "2 мин 41 с"
+    "2 min 41 s": "2 мин 41 с",
+    "Latest manifest file is required": "Latest manifest file is required",
+    "Latest manifest must be a .json file": "Latest manifest must be a .json file",
+    "Latest manifest exceeds size limit": "Latest manifest exceeds size limit",
+    "Current update manifest": "Текущий манифест обновлений",
+    "Public feed URL": "Публичный URL ленты обновлений",
+    "No latest.json has been uploaded yet.": "Файл latest.json ещё не загружен.",
+    "latest.json not found": "latest.json not found",
+    "Failed to read latest.json manifest": "Failed to read latest.json manifest",
+    "Failed to store latest.json manifest": "Failed to store latest.json manifest",
+    "Invalid latest.json manifest: missing version": "Invalid latest.json manifest: missing version",
+    "Invalid latest.json manifest: missing platforms": "Invalid latest.json manifest: missing platforms"
   }
 }

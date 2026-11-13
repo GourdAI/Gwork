@@ -146,7 +146,8 @@
     "dingtalk_enter_appsecret": "請輸入 AppSecret",
     "dingtalk_starting_connection": "正在啟動釘釘連線…",
     "dingtalk_connection_success": "釘釘連線成功",
-    "waiting_for_dingtalk_message": "等待釘釘訊息確認中…"
+    "waiting_for_dingtalk_message": "等待釘釘訊息確認中…",
+    "subagent_needs_content": "請填寫要交給子代理的任務內容，不能只選擇子代理。"
   },
   "history": {
     "new_chat": "新對話",
@@ -345,6 +346,10 @@
       "update_tooltip_downloading": "新版本 {0} 正在下載",
       "update_tooltip_downloaded": "新版本 {0} 已下載完成，點擊安裝並重新啟動",
       "drag_to_sort": "拖曳排序"
+    },
+    "nav": {
+      "connectors": "連接器",
+      "interfaces": "介面"
     }
   },
   "settings": {
@@ -518,6 +523,55 @@
       "scroll_next": "向右捲動"
     },
     "mcp": {
+      "auth_device_title": "Scan to authorize",
+      "auth_device_waiting": "Waiting for authorization…",
+      "auth_device_hint": "Scan the QR code or open the link, then confirm the code below.",
+      "auth_device_expires": "Expires in",
+      "auth_device_open": "Open authorization page",
+      "auth_qr_title": "Scan the QR code to authorize",
+      "auth_qr_hint": "Scan the QR code in the panel below and confirm on your phone.",
+      "auth_qr_https_only": "In-app QR authorization requires an https URL.",
+      "auth_type_label": "Authentication",
+      "auth_type_none": "None",
+      "auth_type_token": "Enter an Access Token / API Key",
+      "auth_type_oauth": "Browser sign-in (OAuth / QR code / account login)",
+      "auth_type_hint": "Credentials are stored only on this machine, never in the config file or the cloud.",
+      "auth_token_label": "Access Token",
+      "auth_get_token": "How do I get an Access Token?",
+      "auth_local_only": "The Access Token is stored only on this machine under ~/.gwork/mcp-credentials.json and is never uploaded to the cloud.",
+      "auth_token_placeholder": "Paste your Access Token",
+      "auth_token_required": "Token is required",
+      "auth_save_and_connect": "Save and connect",
+      "auth_connect_title": "Connect & authorize",
+      "auth_waiting": "Waiting for browser authorization…",
+      "auth_browser_hint": "Finish signing in and granting permissions in the browser window that just opened. This dialog continues automatically. Do not close the authorization page, or you will need to reconnect.",
+      "auth_failed": "Authorization failed",
+      "auth_timeout": "Authorization timed out, please retry",
+      "auth_connected": "Connected",
+      "auth_reconnect": "Reconnect",
+      "auth_clear": "Clear credential",
+      "common_cancel": "Cancel",
+      "common_close": "Close",
+      "network_error": "Network error",
+      "market": {
+        "title": "MCP Marketplace",
+        "search_placeholder": "Search MCP servers",
+        "hosted": "Hosted",
+        "installed": "Installed",
+        "empty": "No MCP servers found",
+        "required": "Required",
+        "verified": "Verified",
+        "connect": "Connect",
+        "connect_title": "Connect",
+        "save_connect": "Save & Connect",
+        "cancel": "Cancel",
+        "config": "Configuration",
+        "load_failed": "Failed to load the MCP directory: {msg}",
+        "install_failed": "Install failed: {msg}",
+        "installed_names": "Installed: {msg}",
+        "detail_failed": "Failed to load details: {msg}",
+        "retry": "Retry"
+      },
       "title": "MCP 伺服器",
       "desc": "管理外部工具伺服器，擴充檔案、資料庫、瀏覽器等工具能力",
       "add": "新增伺服器",
@@ -945,7 +999,7 @@
     "batch_running": "正在執行中",
     "batch_done": "已處理",
     "batch_done_count": "執行工具 {count} 次",
-    "action_bash_done": "終端命令已執行",
+    "action_bash_done": "終端命令",
     "action_thinking_done": "已思考",
     "batch_thinking_count": "思考 {count} 次",
     "turn_stopped": "已停止",
@@ -956,8 +1010,8 @@
     "turn_agents_one": "次子代理",
     "turn_process_texts_one": "段過程",
     "phase_thinking": "思考中",
-    "context_compacted":  "已壓縮上下文",
-    "context_compacted_tip":  "上下文超出預算，歷史已自動壓縮（摘要/清理早期工具結果）",
+    "context_compacted": "已壓縮上下文",
+    "context_compacted_tip": "上下文超出預算，歷史已自動壓縮（摘要/清理早期工具結果）",
     "phase_text": "輸出中",
     "phase_waiting": "等待回應",
     "args_streaming": "產生參數中 · {size}",
@@ -1231,7 +1285,11 @@
     "task_elapsed": "任務耗時",
     "turn_input": "本輪輸入",
     "turn_output": "本輪輸出",
-    "messages": "訊息條數"
+    "messages": "訊息條數",
+    "batch_done_count": "執行工具 {count} 次",
+    "action_bash_done": "終端命令",
+    "action_thinking_done": "已思考",
+    "batch_thinking_count": "思考 {count} 次"
   },
   "filer": {
     "expand": "展開檔案樹",
@@ -1418,6 +1476,16 @@
     "unavailable": "登入服務暫不可用，請在桌面客戶端中操作",
     "auth_title_login": "登入 GWork",
     "auth_title_register": "建立帳號",
-    "auth_slogan": "不止執行，更是創造。"
+    "auth_slogan": "不止執行，更是創造。",
+    "password_confirm": "確認密碼",
+    "email_required": "電子郵件（驗證必需）",
+    "code": "驗證碼",
+    "code_placeholder": "驗證碼",
+    "send_code": "發送驗證碼",
+    "code_retry": "重新發送",
+    "code_sent": "驗證碼已發送，請查收信箱",
+    "code_required": "請輸入信箱驗證碼",
+    "email_first": "請先填寫信箱地址",
+    "password_mismatch": "兩次輸入的密碼不一致"
   }
 }

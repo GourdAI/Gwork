@@ -275,6 +275,14 @@
                  "confirm":  "Xác nhận"
              },
     "app":  {
+
+        "nav":  {
+
+            "connectors":  "Trình kết nối",
+
+            "interfaces":  "Giao diện"
+
+        },
                                 "access_title":  "Quyền truy cập",
                 "access_default":  "Quyền mặc định",
                 "access_full":  "Toàn quyền truy cập",
@@ -580,6 +588,25 @@
                                      "scroll_next":  "Cuộn sang phải"
                                 },
                      "mcp":  {
+                                 "market":  {
+                                             "title":  "Thị trường MCP",
+                                             "search_placeholder":  "Tìm dịch vụ MCP",
+                                             "hosted":  "Được lưu trữ",
+                                             "installed":  "Đã cài đặt",
+                                             "empty":  "Không tìm thấy dịch vụ",
+                                             "required":  "Bắt buộc",
+                                             "verified":  "Đã xác minh",
+                                             "connect":  "Kết nối",
+                                             "connect_title":  "Kết nối",
+                                             "save_connect":  "Lưu và kết nối",
+                                             "cancel":  "Hủy",
+                                             "config":  "Cấu hình",
+                                             "load_failed":  "Không tải được danh mục MCP: {msg}",
+                                             "install_failed":  "Cài đặt thất bại: {msg}",
+                                             "installed_names":  "Đã cài đặt: {msg}",
+                                             "detail_failed":  "Không tải được chi tiết: {msg}",
+                                             "retry":  "Thử lại"
+                                 },
                                  "title":  "Máy chủ MCP",
                                  "desc":  "Quản lý máy chủ công cụ bên ngoài (tệp, cơ sở dữ liệu, trình duyệt)",
                                  "add":  "Thêm máy chủ",
@@ -1035,6 +1062,7 @@
                  "tool_edit":  "Chỉnh sửa",
                  "tool_bash":  "Chạy lệnh",
                  "tool_bash_output": "Xem đầu ra nền",
+                 "action_bash_done": "Lệnh terminal",
                  "tool_skill":  "Kỹ năng",
                  "tool_todo":  "Danh sách việc",
                  "tool_code":  "Mã hóa",
@@ -1269,7 +1297,7 @@
                     "turn_input":  "Đầu vào lượt",
                     "turn_output":  "Đầu ra lượt",
                     "batch_done_count":  "Đã thực thi {count} công cụ",
-                    "action_bash_done":  "Đã chạy lệnh terminal",
+                    "action_bash_done":  "Lệnh terminal",
                     "action_thinking_done":  "Đã suy nghĩ",
                     "batch_thinking_count":  "Đã suy nghĩ {count} lần",
                     "messages":  "Số tin nhắn"

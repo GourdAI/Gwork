@@ -22,6 +22,10 @@ tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-os = "2"
 tauri-plugin-process = "2"
+# 自动更新：读取 admin 后台上传的 latest.json（免登录公开接口）。
+# 版本与旧 Java/Tauri 壳一致锁 2.x；pubkey 编译进客户端用于校验清单里的
+# minisign signature，私钥只在发版流水线里（本仓库不产出、不保存）。
+tauri-plugin-updater = "2"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -60,6 +64,11 @@ encoding_rs.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 rand.workspace = true
+# 登录密码传输加密：admin 后台 PasswordLoginEncryptionEnabled 时，/api/user/login
+# 只接受 password_encrypted + encryption_key_id（v2 信封），明文直接 400。
+rsa.workspace = true
+aes-gcm.workspace = true
+pem.workspace = true
 futures-util.workspace = true
 # server.rs 的本地 UI 服务器 + 反向代理（REMOTE_ROUTE 数据面）
 axum.workspace = true

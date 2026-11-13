@@ -3,6 +3,12 @@
     "360": "360",
     "1000": "1000",
     "10000": "10000",
+    "Upload update check file": "Upload update check file",
+    "Update check file uploaded successfully": "Update check file uploaded successfully",
+    "Failed to upload update check file": "Failed to upload update check file",
+    "Invalid update check file": "Invalid update check file",
+    "Update check file": "Update check file",
+    "Select a latest.json file to publish to the desktop updater.": "Select a latest.json file to publish to the desktop updater.",
     "_copy": "_copy",
     "and the": "and the",
     "By clicking sign in, you agree to our": "By clicking sign in, you agree to our",
@@ -7571,6 +7577,17 @@
     "Describe your next task…": "Describe your next task…",
     "Syntax check passed": "Syntax check passed",
     "Task complete": "Task complete",
-    "2 min 41 s": "2 min 41 s"
+    "2 min 41 s": "2 min 41 s",
+    "Latest manifest file is required": "Latest manifest file is required",
+    "Latest manifest must be a .json file": "Latest manifest must be a .json file",
+    "Latest manifest exceeds size limit": "Latest manifest exceeds size limit",
+    "Current update manifest": "Current update manifest",
+    "Public feed URL": "Public feed URL",
+    "No latest.json has been uploaded yet.": "No latest.json has been uploaded yet.",
+    "latest.json not found": "latest.json not found",
+    "Failed to read latest.json manifest": "Failed to read latest.json manifest",
+    "Failed to store latest.json manifest": "Failed to store latest.json manifest",
+    "Invalid latest.json manifest: missing version": "Invalid latest.json manifest: missing version",
+    "Invalid latest.json manifest: missing platforms": "Invalid latest.json manifest: missing platforms"
   }
 }

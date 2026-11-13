@@ -114,3 +114,21 @@ export const KIND_EXTENSIONS: Record<InstallerKind, string> = {
 }
 
 export const VERSION_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/
+
+/** Current published latest.json, from GET /api/installers/latest. */
+export interface InstallerLatestInfo {
+  version: string
+  notes: string
+  pub_date: string
+  platforms: string[]
+  size: number
+  updated_at: string
+  url: string
+  api_url: string
+}
+
+export interface InstallerLatestInfoResponse {
+  success: boolean
+  message: string
+  data: InstallerLatestInfo | null
+}

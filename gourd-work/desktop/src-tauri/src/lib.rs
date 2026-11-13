@@ -41,6 +41,7 @@ mod ipc_bridge;
 mod logging;
 mod titlebar_ui;
 mod tray;
+mod updater;
 
 // ─── 远控通道子系统（自 gourd-ai-tauri 移植）───────────────────────────────
 // paths   : 全局路径解析单一来源（~/.gwork、extraResources 候选排序）
@@ -169,6 +170,13 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
+        // 自动更新插件。tauri.conf.json 的 plugins.updater 提供 endpoint + pubkey，
+        // 排在单实例锁之后（官方要求它抢到进程级互斥后再注册其它插件）。
+        // 显式置位 PLUGIN_REGISTERED：updater.rs 的 do_check 会调
+        // app.updater_builder()，插件未注册时其 state::<UpdaterState>() 会 panic，
+        // 而 release profile 是 panic="abort"。公钥由发版流水线产出（与旧壳同一把），
+        // 本仓库不生成密钥、不产出 .sig。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -204,6 +212,19 @@ pub fn run() {
             // 启动常驻保活（access token 临近到期自动 refresh）。必须在建窗前
             // 完成，否则前端首个 auth_status() 会拿到「账号模块未初始化」。
             auth::install(&handle);
+
+            // 自动更新：插件已在 Builder 上注册，此处显式置位并启动状态机
+            // （延迟首检 + 6h 复检）。必须在建窗之前：窗口创建后前端会立刻
+            // 调 updaterGetState() 拉快照，未初始化时只能拿到 mode='none'。
+            updater::PLUGIN_REGISTERED.store(true, Ordering::SeqCst);
+            {
+                let h = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = updater::init(h).await {
+                        error!(error = %e, "updater init failed");
+                    }
+                });
+            }
 
             // Start the kernel in-process.
             //
@@ -336,9 +357,18 @@ pub fn run() {
             auth::auth_status,
             auth::auth_login,
             auth::auth_register,
+            auth::auth_send_code,
+            auth::auth_config,
             auth::auth_logout,
             auth::auth_refresh,
             auth::auth_self,
+            // 自动更新状态机（前端 app-settings-about.js / app-update-badge.js
+            // 通过 __GOURD_IPC__ 的 updater* 方法订阅，状态机本身已就绪）
+            updater::updater_get_version,
+            updater::updater_get_state,
+            updater::updater_check,
+            updater::updater_download,
+            updater::updater_install,
         ])
         .build(tauri::generate_context!())
         .expect("error while running GWork desktop")

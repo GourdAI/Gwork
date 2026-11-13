@@ -252,11 +252,27 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			installerRoute.GET("/", controller.ListInstallers)
 			installerRoute.POST("/", controller.UploadInstaller)
+			// Auto-update manifest: the admin uploads latest.json from the installers
+			// page. Static paths are registered before PUT/DELETE ":id" so they can
+			// never be swallowed by the id wildcard.
+			installerRoute.POST("/latest", controller.UploadInstallerLatest)
+			installerRoute.GET("/latest", controller.GetInstallerLatestInfo)
 			installerRoute.PUT("/:id", controller.UpdateInstaller)
 			installerRoute.DELETE("/:id", controller.DeleteInstaller)
 		}
 		apiRouter.GET("/installer-manifest", controller.GetInstallerManifest)
 		apiRouter.GET("/installer-download/:id", controller.DownloadInstaller)
+		// Public, unauthenticated, bare-JSON feed. tauri-plugin-updater parses the
+		// response body itself as the release JSON (no ApiSuccess envelope).
+		apiRouter.GET("/installer-latest", controller.GetInstallerLatest)
+		// Product-decided canonical feed: the rust desktop client points here by
+		// default. Same handler, same bare JSON, still unauthenticated. The alias
+		// above keeps older/self-hosted deployments working.
+		apiRouter.GET("/installer-latest.json", controller.GetInstallerLatest)
+		// Canonical static-style path, so GWORK_UPDATE_URL can point at
+		// https://<admin-host>/downloads/tauri/ without rewrite rules. Registered
+		// on the engine (not /api) because the desktop updater does not know /api.
+		router.GET("/downloads/tauri/latest.json", controller.GetInstallerLatest)
 		performanceRoute := apiRouter.Group("/performance")
 		performanceRoute.Use(middleware.RootAuth())
 		{

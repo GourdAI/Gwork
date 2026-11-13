@@ -43,8 +43,11 @@ where
 
 /// Resolve a (possibly relative) path against the workspace root.
 /// Returns None if the resolved path escapes the workspace.
-fn resolve_safe(workspace: &Path, raw: &str) -> Option<PathBuf> {
-    resolve_safe_with(workspace, &[], raw)
+///
+/// `open` lifts the containment check (see [`ToolContext::space_open`]); the
+/// `..` normalization inside [`resolve_safe_with`] still runs either way.
+fn resolve_safe(workspace: &Path, open: bool, raw: &str) -> Option<PathBuf> {
+    resolve_safe_with(workspace, &[], open, raw)
 }
 
 /// [`resolve_safe`] plus extra **read-only** roots that are allowed to sit outside
@@ -63,7 +66,7 @@ fn resolve_safe(workspace: &Path, raw: &str) -> Option<PathBuf> {
 /// isTrustedReadPath(realTarget)`): an explicit allow-list of roots outside the
 /// sandbox boundary. Same discipline here — **read-only**, so `write`/`edit`
 /// pass an empty list and cannot be talked into writing outside the workspace.
-fn resolve_safe_with(workspace: &Path, extra_read_roots: &[PathBuf], raw: &str) -> Option<PathBuf> {
+fn resolve_safe_with(workspace: &Path, extra_read_roots: &[PathBuf], open: bool, raw: &str) -> Option<PathBuf> {
     let p = Path::new(raw);
     let abs = if p.is_absolute() {
         p.to_path_buf()
@@ -88,6 +91,14 @@ fn resolve_safe_with(workspace: &Path, extra_read_roots: &[PathBuf], raw: &str) 
             std::path::Component::CurDir => {}
             other => normalized.push(other),
         }
+    }
+    // Full-access tier: the user lifted the workspace boundary, so the
+    // normalized path stands on its own. Java `resolveSafePath` skips its
+    // containment check when `sandboxEnabled` is false for the same reason;
+    // note it still runs `..` normalization via `Path.normalize()`, as we do
+    // above (this kernel additionally rejects a `..` that pops past the root).
+    if open {
+        return Some(normalized);
     }
     // Workspace containment check (case-insensitive on Windows)
     let ws = normalize_case(workspace);
@@ -243,7 +254,7 @@ impl Tool for ReadTool {
     }
     async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
         let raw = args["file_path"].as_str().unwrap_or_default();
-        let Some(path) = resolve_safe_with(&ctx.workspace, &readonly_extra_roots(ctx), raw) else {
+        let Some(path) = resolve_safe_with(&ctx.workspace, &readonly_extra_roots(ctx), ctx.space_open(), raw) else {
             return ToolOutput::err(format!("Path escapes workspace: {}", raw));
         };
         if !path.exists() {
@@ -353,7 +364,7 @@ impl Tool for WriteTool {
     async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
         let raw = args["file_path"].as_str().unwrap_or_default();
         let content = args["content"].as_str().unwrap_or_default();
-        let Some(path) = resolve_safe(&ctx.workspace, raw) else {
+        let Some(path) = resolve_safe(&ctx.workspace, ctx.space_open(), raw) else {
             return ToolOutput::err(format!("Path escapes workspace: {}", raw));
         };
         // Capture "before" state for the change ledger
@@ -407,7 +418,7 @@ impl Tool for EditTool {
         let old_str = args["old_str"].as_str().unwrap_or_default();
         let new_str = args["new_str"].as_str().unwrap_or_default();
         let replace_all = args["replace_all"].as_bool().unwrap_or(false);
-        let Some(path) = resolve_safe(&ctx.workspace, raw) else {
+        let Some(path) = resolve_safe(&ctx.workspace, ctx.space_open(), raw) else {
             return ToolOutput::err(format!("Path escapes workspace: {}", raw));
         };
         if old_str.is_empty() {
@@ -1566,7 +1577,7 @@ impl Tool for GlobTool {
     async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
         let pattern = args["pattern"].as_str().unwrap_or_default().to_string();
         let base = args["path"].as_str().unwrap_or(".").to_string();
-        let base_path = match resolve_safe_with(&ctx.workspace, &readonly_extra_roots(ctx), &base) {
+        let base_path = match resolve_safe_with(&ctx.workspace, &readonly_extra_roots(ctx), ctx.space_open(), &base) {
             Some(p) => p,
             None => return ToolOutput::err("Invalid path"),
         };
@@ -1685,7 +1696,7 @@ impl Tool for GrepTool {
             },
             offset: args["offset"].as_u64().unwrap_or(0) as usize,
         };
-        let base_path = match resolve_safe_with(&ctx.workspace, &readonly_extra_roots(ctx), &base) {
+        let base_path = match resolve_safe_with(&ctx.workspace, &readonly_extra_roots(ctx), ctx.space_open(), &base) {
             Some(p) => p,
             None => return ToolOutput::err("Invalid path"),
         };
@@ -1929,7 +1940,7 @@ impl Tool for LsTool {
         let base = args["path"].as_str().unwrap_or(".");
         let recursive = args["recursive"].as_bool().unwrap_or(false);
         let show_hidden = args["show_hidden"].as_bool().unwrap_or(false);
-        let base_path = match resolve_safe_with(&ctx.workspace, &readonly_extra_roots(ctx), base) {
+        let base_path = match resolve_safe_with(&ctx.workspace, &readonly_extra_roots(ctx), ctx.space_open(), base) {
             Some(p) => p,
             None => return ToolOutput::err("Invalid path"),
         };
@@ -2316,15 +2327,81 @@ impl Tool for MemoryRecallTool {
     async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
         let key = args["key"].as_str().unwrap_or_default();
         let store = ctx.memory_store();
-        let results = store.search(key, 100);
-        match results.iter().find(|e| e.key == key) {
+        // Direct key lookup, NOT search: the old `search(key, 100).find(e.key == key)`
+        // stacked two failure modes into one indistinguishable "not found" — the
+        // substring search could omit an existing entry from the candidate list,
+        // and the byte-exact compare then rejected keys that were sanitized on the
+        // way in (`a:b` → `a_b`, 128-char truncation). `MemoryStore::get` resolves
+        // the key to its file, mirroring Java's O(1) map lookup.
+        match store.get(key) {
             Some(e) => ToolOutput::ok(format!(
                 "[{}] {} (Imp:{}, {})\n\n{}",
                 e.key, e.title, e.importance, e.time, e.content
             )),
-            None => ToolOutput::err(format!("Memory not found: {}", key)),
+            // A dead end teaches the model nothing; it either retries the same key
+            // or concludes the memory was never stored and writes a duplicate.
+            // Give it the three things that turn this into a recoverable step:
+            // which store was consulted (the workspace/global fallback is a real
+            // failure mode — `ToolContext::memory_store` documents it), what the
+            // store actually holds, and the keys closest to the request.
+            None => {
+                let dir = store.dir().display();
+                let all = store.load_all();
+                // Score each candidate once, then rank. `f64` has no `Ord`, so this
+                // sorts with `partial_cmp` rather than `sort_by_key`.
+                let mut similar: Vec<(f64, &str)> = all
+                    .iter()
+                    .map(|e| e.key.as_str())
+                    .filter(|k| !k.eq_ignore_ascii_case(key))
+                    .map(|k| (key_similarity(k, key), k))
+                    .filter(|(score, _)| *score > 0.0)
+                    .collect();
+                similar.sort_by(|a, b| {
+                    b.0.partial_cmp(&a.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.1.cmp(b.1))
+                });
+                similar.truncate(3);
+
+                let mut msg = format!(
+                    "Memory not found: {} (store: {}, {} entries)",
+                    key,
+                    dir,
+                    all.len()
+                );
+                if !similar.is_empty() {
+                    let keys: Vec<&str> = similar.iter().map(|(_, k)| *k).collect();
+                    msg.push_str(&format!("\nSimilar keys: {}", keys.join(", ")));
+                }
+                msg.push_str("\nHint: use memory_search with keywords, or '*' to list all entries.");
+                ToolOutput::err(msg)
+            }
         }
     }
+}
+
+/// Cheap similarity for the recall "similar keys" hint: the size of the shared
+/// character-bigram set (Dice coefficient over bigrams). Zero for unrelated keys,
+/// 1.0 for identical ones. No dependency, and precise enough to rank snake_case
+/// identifiers that differ by a segment — the shape every stored key has.
+fn key_similarity(a: &str, b: &str) -> f64 {
+    let bigrams = |s: &str| -> std::collections::HashSet<(char, char)> {
+        let mut set = std::collections::HashSet::new();
+        let mut it = s.chars();
+        if let Some(mut prev) = it.next() {
+            for c in it {
+                set.insert((prev, c));
+                prev = c;
+            }
+        }
+        set
+    };
+    let (ba, bb) = (bigrams(&a.to_lowercase()), bigrams(&b.to_lowercase()));
+    if ba.is_empty() || bb.is_empty() {
+        return 0.0;
+    }
+    let shared = ba.intersection(&bb).count();
+    2.0 * shared as f64 / (ba.len() + bb.len()) as f64
 }
 
 pub struct MemoryPruneTool;
@@ -3440,9 +3517,61 @@ mod tests {
 
     /// Path escape must still be rejected after the refactor (the `resolve_safe`
     /// call moved relative to the blocking hand-off).
+    ///
+    /// The context is the **default** tier: containment is the whole point of
+    /// this test, and the default tier is where it must hold. (A full-access
+    /// main run deliberately lifts the boundary — see
+    /// `grep_tool_follows_the_access_mode_tier` below.)
     #[tokio::test]    async fn grep_tool_rejects_path_escaping_workspace() {
         let s = Scratch::new("grep-escape");
         let ctx = ToolContext {
+            workspace: s.0.clone(),
+            session_dir: None,
+            session_id: "work-test".into(),
+            tool_call_id: "call-1".into(),
+            run_id: "run-1".into(),
+            frame_tx: None,
+            access_mode: "default".into(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            hitl_approved: false,
+            change_ledger: None,
+            gate: None,
+            subagent_depth: 0,
+            root_session_id: "work-test".into(),
+            thinking: None,
+            model: Default::default(),
+            settings: Default::default(),
+            bash_exempt_dirs: Vec::new(),
+        };
+
+        let out = GrepTool
+            .execute(
+                serde_json::json!({ "pattern": "x", "path": "../../etc" }),
+                &ctx,
+            )
+            .await;
+        assert!(out.is_error, "escaping path must be rejected");
+        assert_eq!(out.text, "Invalid path");
+    }
+
+    /// The workspace boundary follows the access-mode tier, as in the Java
+    /// kernel (`AccessPolicy.isSpaceIsolated` ⇒ `resolveSafePath` skips its
+    /// containment check in the full tier — Java additionally folds an embedder
+    /// `sandboxEnabled` switch, which this kernel has no equivalent of).
+    /// Reported defect: on the desktop (Rust kernel) a user in full access got
+    /// `Invalid path` from `grep` for a sibling-project directory while `bash`
+    /// reached the very same tree — the file tools never consulted
+    /// `access_mode` at all.
+    #[tokio::test]
+    async fn grep_tool_follows_the_access_mode_tier() {
+        let s = Scratch::new("grep-tier");
+        s.write("src/x.rs", "fn target_fn() {}\n");
+        // A sibling directory OUTSIDE the workspace, with content to find.
+        let sibling = s.0.parent().unwrap().join(format!("{}-sibling", s.0.file_name().unwrap().to_string_lossy()));
+        std::fs::create_dir_all(sibling.join("src")).unwrap();
+        std::fs::write(sibling.join("src").join("y.rs"), "fn target_fn() {}\n").unwrap();
+
+        let mut ctx = ToolContext {
             workspace: s.0.clone(),
             session_dir: None,
             session_id: "work-test".into(),
@@ -3462,14 +3591,161 @@ mod tests {
             bash_exempt_dirs: Vec::new(),
         };
 
+        // Full tier, main run: the sibling project is reachable.
         let out = GrepTool
             .execute(
-                serde_json::json!({ "pattern": "x", "path": "../../etc" }),
+                serde_json::json!({ "pattern": "target_fn", "path": sibling.to_string_lossy() }),
                 &ctx,
             )
             .await;
-        assert!(out.is_error, "escaping path must be rejected");
+        assert!(!out.is_error, "full tier must reach outside the workspace, got: {}", out.text);
+        // Files outside the workspace display with their absolute path in
+        // native separators (grep only slash-normalizes workspace-relative
+        // displays), so assert on the absolute match line.
+        let expect = format!("{}:1:", sibling.join("src").join("y.rs").display());
+        assert!(out.text.contains(&expect), "got: {}", out.text);
+
+        // Default tier: the same path is refused.
+        ctx.access_mode = "default".into();
+        let out = GrepTool
+            .execute(
+                serde_json::json!({ "pattern": "target_fn", "path": sibling.to_string_lossy() }),
+                &ctx,
+            )
+            .await;
+        assert!(out.is_error, "default tier must stay contained");
         assert_eq!(out.text, "Invalid path");
+
+        // Sub-agents carry `access_mode: "full"` only to skip their approval
+        // gate; their `subagent_depth >= 1` keeps the workspace boundary as
+        // their sole path containment. This is stricter than Java (whose
+        // sub-agents inherit the parent tier), and is a deliberate Rust-only
+        // choice until tier inheritance exists — see `ToolContext::space_open`.
+        ctx.access_mode = "full".into();
+        ctx.subagent_depth = 1;
+        let out = GrepTool
+            .execute(
+                serde_json::json!({ "pattern": "target_fn", "path": sibling.to_string_lossy() }),
+                &ctx,
+            )
+            .await;
+        assert!(out.is_error, "sub-agents must stay contained even at full");
+        assert_eq!(out.text, "Invalid path");
+
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// The tier is wired into **all six** file tools, not just `grep`.
+    ///
+    /// Regression guard for a measured hole: with `ReadTool` alone changed from
+    /// `ctx.space_open()` to `false`, the entire 107-test builtin suite stayed
+    /// green — the only behavioural tier test covered `grep`, and the source
+    /// guard checked the resolver's *shape* but not the tier argument. Each
+    /// tool is exercised twice so a hard-coded `true`/`false` cannot pass.
+    #[tokio::test]
+    async fn every_file_tool_follows_the_access_mode_tier() {
+        use std::path::Path;
+
+        let s = Scratch::new("tier-all-tools");
+        let sibling = s.0.parent().unwrap().join(format!(
+            "{}-outside",
+            s.0.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("probe.txt"), "TARGET_MARK\n").unwrap();
+        let target = sibling.join("probe.txt");
+        let target_s = target.to_string_lossy().to_string();
+        let dir_s = sibling.to_string_lossy().to_string();
+
+        let mut ctx = ToolContext {
+            workspace: s.0.clone(),
+            session_dir: None,
+            session_id: "work-tier-all".into(),
+            tool_call_id: "call-1".into(),
+            run_id: "run-1".into(),
+            frame_tx: None,
+            access_mode: "full".into(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            hitl_approved: true,
+            change_ledger: None,
+            gate: None,
+            subagent_depth: 0,
+            root_session_id: "work-tier-all".into(),
+            thinking: None,
+            model: Default::default(),
+            settings: Default::default(),
+            bash_exempt_dirs: Vec::new(),
+        };
+
+        // Both tiers run for every tool so a resolver that ignores `open`
+        // entirely (or a call site hardcoded to either value) fails one half.
+        let out = ReadTool.execute(serde_json::json!({ "file_path": target_s }), &ctx).await;
+        assert!(!out.is_error, "read full tier must reach outside, got: {}", out.text);
+        assert!(out.text.contains("TARGET_MARK"), "read did not return the outside file: {}", out.text);
+        ctx.access_mode = "default".into();
+        let out = ReadTool.execute(serde_json::json!({ "file_path": target_s }), &ctx).await;
+        assert!(out.is_error, "read default tier must stay contained");
+
+        ctx.access_mode = "full".into();
+        let out = GlobTool.execute(serde_json::json!({ "pattern": "*.txt", "path": dir_s }), &ctx).await;
+        assert!(!out.is_error && out.text.contains("probe.txt"), "glob full tier: {}", out.text);
+        ctx.access_mode = "default".into();
+        let out = GlobTool.execute(serde_json::json!({ "pattern": "*.txt", "path": dir_s }), &ctx).await;
+        assert!(out.is_error, "glob default tier must stay contained");
+
+        ctx.access_mode = "full".into();
+        let out = LsTool.execute(serde_json::json!({ "path": dir_s }), &ctx).await;
+        assert!(!out.is_error && out.text.contains("probe.txt"), "ls full tier: {}", out.text);
+        ctx.access_mode = "default".into();
+        let out = LsTool.execute(serde_json::json!({ "path": dir_s }), &ctx).await;
+        assert!(out.is_error, "ls default tier must stay contained");
+
+        let written = sibling.join("written.txt");
+        let written_s = written.to_string_lossy().to_string();
+        ctx.access_mode = "full".into();
+        let out = WriteTool
+            .execute(serde_json::json!({ "file_path": written_s, "content": "WROTE\n" }), &ctx)
+            .await;
+        assert!(!out.is_error, "write full tier must reach outside, got: {}", out.text);
+        assert!(Path::new(&written).exists(), "write did not create the outside file");
+        let written_default = sibling.join("written_default.txt");
+        ctx.access_mode = "default".into();
+        let out = WriteTool
+            .execute(
+                serde_json::json!({ "file_path": written_default.to_string_lossy(), "content": "x" }),
+                &ctx,
+            )
+            .await;
+        assert!(out.is_error, "write default tier must stay contained");
+        assert!(!written_default.exists(), "default tier must not write outside");
+
+        // `edit` requires a prior `read` of the exact path (filestate guard).
+        let edited = sibling.join("edited.txt");
+        let edited_s = edited.to_string_lossy().to_string();
+        std::fs::write(&edited, "BEFORE\n").unwrap();
+        ctx.access_mode = "full".into();
+        let _ = ReadTool.execute(serde_json::json!({ "file_path": edited_s }), &ctx).await;
+        let out = EditTool
+            .execute(
+                serde_json::json!({ "file_path": edited_s, "old_str": "BEFORE", "new_str": "AFTER" }),
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "edit full tier must reach outside, got: {}", out.text);
+        assert!(std::fs::read_to_string(&edited).unwrap().contains("AFTER"), "edit did not apply");
+        std::fs::write(&edited, "BEFORE\n").unwrap();
+        ctx.access_mode = "default".into();
+        let _ = ReadTool.execute(serde_json::json!({ "file_path": edited_s }), &ctx).await;
+        let out = EditTool
+            .execute(
+                serde_json::json!({ "file_path": edited_s, "old_str": "BEFORE", "new_str": "AFTER" }),
+                &ctx,
+            )
+            .await;
+        assert!(out.is_error, "edit default tier must stay contained");
+        assert!(!std::fs::read_to_string(&edited).unwrap().contains("AFTER"), "default tier must not edit outside");
+
+        std::fs::remove_dir_all(&sibling).ok();
     }
 
     // ─── P0 regression: blocking tools must not starve the async worker ──────
@@ -3617,7 +3893,7 @@ mod tests {
     #[test]
     fn uploads_relative_reference_resolves_against_the_session_dir() {
         let f = UploadsFixture::new("rel");
-        let got = resolve_safe_with(&f.workspace, &f.roots(), "uploads/report.txt").unwrap();
+        let got = resolve_safe_with(&f.workspace, &f.roots(), false, "uploads/report.txt").unwrap();
         assert_eq!(got, f.uploads().join("report.txt"));
         assert!(got.is_file(), "resolved path must be the real attachment");
     }
@@ -3626,7 +3902,7 @@ mod tests {
     fn uploads_absolute_path_is_allowed_for_readonly_tools() {
         let f = UploadsFixture::new("abs");
         let abs = f.uploads().join("report.txt");
-        let got = resolve_safe_with(&f.workspace, &f.roots(), &abs.to_string_lossy()).unwrap();
+        let got = resolve_safe_with(&f.workspace, &f.roots(), false, &abs.to_string_lossy()).unwrap();
         assert_eq!(got, abs);
     }
 
@@ -3634,10 +3910,10 @@ mod tests {
     fn workspace_paths_still_resolve_without_extra_roots() {
         let f = UploadsFixture::new("ws");
         // No extra roots at all: the plain workspace behaviour must be unchanged.
-        let got = resolve_safe(&f.workspace, "in-ws.txt").unwrap();
+        let got = resolve_safe(&f.workspace, false, "in-ws.txt").unwrap();
         assert_eq!(got, f.workspace.join("in-ws.txt"));
         // And with roots supplied, workspace paths keep working too.
-        let got2 = resolve_safe_with(&f.workspace, &f.roots(), "in-ws.txt").unwrap();
+        let got2 = resolve_safe_with(&f.workspace, &f.roots(), false, "in-ws.txt").unwrap();
         assert_eq!(got2, f.workspace.join("in-ws.txt"));
     }
 
@@ -3653,7 +3929,7 @@ mod tests {
         // workspace-relative path, so it resolves to `<ws>/uploads/report.txt` —
         // which does not exist. The security property is that it must **not**
         // land on the real attachment under the session dir.
-        let got = resolve_safe_with(&f.workspace, &[], "uploads/report.txt").unwrap();
+        let got = resolve_safe_with(&f.workspace, &[], false, "uploads/report.txt").unwrap();
         assert_eq!(got, f.workspace.join("uploads").join("report.txt"));
         assert_ne!(got, f.uploads().join("report.txt"), "must not reach the real attachment");
         assert!(!got.exists(), "the workspace has no uploads dir, so read answers File not found");
@@ -3661,7 +3937,7 @@ mod tests {
         // An absolute path pointing at the session uploads is refused outright:
         // it is inside no allowed root.
         let abs = f.uploads().join("report.txt");
-        assert!(resolve_safe_with(&f.workspace, &[], &abs.to_string_lossy()).is_none());
+        assert!(resolve_safe_with(&f.workspace, &[], false, &abs.to_string_lossy()).is_none());
     }
 
     #[test]
@@ -3670,8 +3946,8 @@ mod tests {
         // Escaping the uploads dir must not be laundered by the extra root:
         // `uploads/../secret.txt` normalizes to `<sessionDir>/secret.txt`, which
         // is inside no allowed root.
-        assert!(resolve_safe_with(&f.workspace, &f.roots(), "uploads/../secret.txt").is_none());
-        assert!(resolve_safe_with(&f.workspace, &f.roots(), "uploads/../../etc/passwd").is_none());
+        assert!(resolve_safe_with(&f.workspace, &f.roots(), false, "uploads/../secret.txt").is_none());
+        assert!(resolve_safe_with(&f.workspace, &f.roots(), false, "uploads/../../etc/passwd").is_none());
         // An absolute path outside every allowed root is still refused.
         // `C:\...` is absolute only on Windows; on Unix it is a plain relative
         // name that resolves *inside* the workspace and is accepted, so the old
@@ -3682,7 +3958,7 @@ mod tests {
         } else {
             "/etc/passwd"
         };
-        assert!(resolve_safe_with(&f.workspace, &f.roots(), outside).is_none());
+        assert!(resolve_safe_with(&f.workspace, &f.roots(), false, outside).is_none());
     }
 
     // ─── 视觉通道：read 磁盘图片 ─────────────────────────────────────
@@ -3928,7 +4204,7 @@ mod tests {
         assert!(!out.text.contains('\u{FEFF}'), "BOM must not leak into line 1");
 
         // read 之后 edit 的读前校验应当放行
-        let resolved = resolve_safe(&ctx.workspace, "bom.txt").unwrap();
+        let resolved = resolve_safe(&ctx.workspace, false, "bom.txt").unwrap();
         assert!(crate::tools::filestate::guard(&ctx.root_session_id, &resolved).is_ok());
     }
 
@@ -4091,7 +4367,7 @@ mod tests {
         // A sibling directory of uploads must NOT inherit the session base, or
         // `<sessionDir>/messages/<sid>.messages.ndjson` would become readable
         // through this door. It resolves against the workspace instead.
-        let sibling = resolve_safe_with(&f.workspace, &f.roots(), "messages/x.ndjson").unwrap();
+        let sibling = resolve_safe_with(&f.workspace, &f.roots(), false, "messages/x.ndjson").unwrap();
         assert_eq!(sibling, f.workspace.join("messages").join("x.ndjson"));
         assert_ne!(
             sibling,
@@ -4099,7 +4375,7 @@ mod tests {
             "session-relative base must apply to uploads/ only"
         );
         // `./uploads/...` is the same reference with a leading `./`.
-        let got = resolve_safe_with(&f.workspace, &f.roots(), "./uploads/report.txt").unwrap();
+        let got = resolve_safe_with(&f.workspace, &f.roots(), false, "./uploads/report.txt").unwrap();
         assert_eq!(got, f.uploads().join("report.txt"));
     }
 
@@ -4119,8 +4395,20 @@ mod tests {
                 .find("async fn execute")
                 .unwrap_or_else(|| panic!("{} has no execute", tool));
             // The execute body ends at the next top-level item; 2500 chars is
-            // comfortably past it and well short of the next impl.
-            rest[exec..(exec + 2500).min(rest.len())]
+            // comfortably past it and well short of the next impl. Clamp the
+            // window end to a char boundary and cut on a line: a fixed byte
+            // offset can land inside a multi-byte UTF-8 character (the bodies
+            // contain Chinese comments), and slicing there panics.
+            let mut wend = (exec + 2500).min(rest.len());
+            while !rest.is_char_boundary(wend) {
+                wend -= 1;
+            }
+            let window = &rest[..wend];
+            let end = window
+                .rfind('\n')
+                .map(|i| i + 1)
+                .unwrap_or(window.len());
+            rest[exec..end]
                 .lines()
                 .filter(|l| !l.trim_start().starts_with("//"))
                 .collect::<Vec<_>>()
@@ -4142,6 +4430,15 @@ mod tests {
                 tool,
                 calls
             );
+            // The access tier is a property of the CALL SITE: a `false` here
+            // silently restores the reported "full access, still Invalid path"
+            // defect for this one tool while the other five keep working.
+            assert!(
+                calls.iter().all(|l| l.contains("ctx.space_open()")),
+                "{} must pass ctx.space_open() to the resolver, got {:?}",
+                tool,
+                calls
+            );
         }
 
         for tool in ["impl Tool for WriteTool", "impl Tool for EditTool"] {
@@ -4151,10 +4448,13 @@ mod tests {
                 "{} must NOT be given the extra read roots (write stays workspace-bound)",
                 tool
             );
+            let calls: Vec<&str> = body.lines().filter(|l| l.contains("resolve_safe(")).collect();
+            assert!(!calls.is_empty(), "{} never resolves a path", tool);
             assert!(
-                body.contains("resolve_safe("),
-                "{} must keep the strict workspace-bound resolve_safe",
-                tool
+                calls.iter().all(|l| l.contains("ctx.space_open()")),
+                "{} must pass ctx.space_open() to the resolver, got {:?}",
+                tool,
+                calls
             );
         }
     }
@@ -4230,6 +4530,106 @@ mod tests {
         assert!(!out.is_error, "prune must find the project memory: {}", out.text);
         assert!(out.text.contains("proj_key"), "{}", out.text);
         assert_eq!(project.count(), 0, "the project entry must be gone");
+    }
+
+    // ─── memory_recall ──────────────────────────────────────────────────────
+    //
+    // `memory_recall` is an *identifier* lookup, so it must not be implemented on
+    // top of search. The old body was `search(key, 100).find(|e| e.key == key)`,
+    // which failed two independent ways and reported both as the same dead-end
+    // "Memory not found: <key>": the substring search could leave an existing
+    // entry out of the candidate list, and the byte-exact compare rejected keys
+    // that were sanitized on write. The user-visible symptom was the model
+    // concluding a memory it had stored was never stored, then writing a duplicate.
+
+    /// The reported failure, end to end through the tool: a key containing `:` is
+    /// sanitized to `_` on write, so the stored key can never compare equal to the
+    /// requested one. Search-based recall missed it; direct-key recall finds it.
+    #[tokio::test]
+    async fn memory_recall_resolves_a_key_sanitized_on_write() {
+        let s = Scratch::new("mem-recall-sanitized");
+        let root = s.0.clone();
+        let store = crate::memory::MemoryStore::workspace(&root);
+        store.store(&entry("ns:scoped:fact")).expect("write");
+
+        // Proof the fixture really did change the key's shape, so the test below
+        // exercises the sanitization path rather than passing by accident.
+        assert_eq!(store.load_all()[0].key, "ns_scoped_fact");
+
+        let ctx = project_ctx(&root, "work-recall");
+        let out = MemoryRecallTool
+            .execute(serde_json::json!({ "key": "ns:scoped:fact" }), &ctx)
+            .await;
+
+        assert!(!out.is_error, "recall must resolve the sanitized key: {}", out.text);
+        assert!(out.text.contains("ns:scoped:fact"), "{}", out.text);
+    }
+
+    /// A miss must not be a dead end. The model needs to know which store was
+    /// consulted (the workspace/global fallback is itself a failure mode) and what
+    /// else is there, or its only options are to retry the same key or re-store a
+    /// duplicate.
+    #[tokio::test]
+    async fn memory_recall_miss_reports_the_store_and_similar_keys() {
+        let s = Scratch::new("mem-recall-miss");
+        let root = s.0.clone();
+        let store = crate::memory::MemoryStore::workspace(&root);
+        store.store(&entry("credential_affinity_retry")).expect("seed");
+
+        let ctx = project_ctx(&root, "work-recall-miss");
+        let out = MemoryRecallTool
+            .execute(serde_json::json!({ "key": "credential_affinity_retrys" }), &ctx)
+            .await;
+
+        assert!(out.is_error, "a miss is still an error");
+        assert!(out.text.contains("Memory not found"), "{}", out.text);
+        // Which store was searched, and how much it holds.
+        assert!(out.text.contains("entries"), "must report the store contents: {}", out.text);
+        assert!(
+            out.text.contains(&store.dir().display().to_string()),
+            "must name the store that was searched: {}",
+            out.text
+        );
+        // The near-miss key, so the model can correct itself instead of re-storing.
+        assert!(
+            out.text.contains("credential_affinity_retry"),
+            "must suggest the closest key: {}",
+            out.text
+        );
+    }
+
+    /// The happy path is unchanged: content still comes back, and the not-found
+    /// diagnostics must not inflate a successful recall (context cost matters).
+    #[tokio::test]
+    async fn memory_recall_hit_returns_content_without_diagnostics() {
+        let s = Scratch::new("mem-recall-hit");
+        let root = s.0.clone();
+        let store = crate::memory::MemoryStore::workspace(&root);
+        store.store(&entry("plain_key")).expect("seed");
+
+        let ctx = project_ctx(&root, "work-recall-hit");
+        let out = MemoryRecallTool
+            .execute(serde_json::json!({ "key": "plain_key" }), &ctx)
+            .await;
+
+        assert!(!out.is_error, "{}", out.text);
+        assert!(out.text.contains("body of plain_key"), "{}", out.text);
+        assert!(!out.text.contains("Similar keys"), "a hit must carry no diagnostics");
+        assert!(!out.text.contains("entries)"), "a hit must carry no store report");
+    }
+
+    /// `key_similarity` ranks a one-segment typo above an unrelated key. If this
+    /// ever returns equal scores, the "similar keys" hint degrades to arbitrary
+    /// order and stops being a correction signal.
+    #[test]
+    fn key_similarity_ranks_near_misses_above_unrelated_keys() {
+        let target = "credential_affinity_retry";
+        let near = key_similarity("credential_affinity_retrys", target);
+        let far = key_similarity("scrollbar_unified_scheme", target);
+        assert!(near > far, "near={} far={}", near, far);
+        assert!(near > 0.5, "a one-char typo must score high: {}", near);
+        assert_eq!(key_similarity("a", "completely_different"), 0.0, "no shared bigram means no hint");
+        assert_eq!(key_similarity(target, target), 1.0, "identical keys score 1.0");
     }
 
     // ─── memory_consolidate ─────────────────────────────────────────────────

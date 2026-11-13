@@ -29,6 +29,18 @@
 
     var SKILLS_API_BASE = '/web/settings/skills/proxy';
     var VIEW_INSTALLED = 'installed';
+    /* 顶栏 3 个主 tab（用户拍板：3 主 tab + 技能内二级 tab 切源）：
+     *   技能 / 连接器（MCP）/ 接口（OpenAPI）
+     * 「已安装 / SkillHub / ClawHub / ModelScope」收进【技能】视图内的一行二级切换
+     * （#skillsSourceTabs），市场分类 chips 保留在二级切换下面。
+     *
+     * MAIN_SKILLS 只是主 tab 的标识，不是一种 _currentView；_currentView 继续是
+     * 「技能源 或 connectors 或 interfaces」的混合枚举——保持不变可让 showPane /
+     * 搜索 / 无限滚动守卫 / installed 判定等几十处既有判定零改动，风险最低。 */
+    var MAIN_SKILLS = 'skills';
+    var VIEW_CONNECTORS = 'connectors';
+    var VIEW_INTERFACES = 'interfaces';
+
 
     /** 市场名 → 标签页展示名（市场 name 是域名，直接展示不友好） */
     var MARKET_LABELS = {
@@ -39,9 +51,12 @@
 
     // ==================== DOM 引用 ====================
 
-    var $skillsViewTabs = $('#skillsViewTabs');
+    var $skillsViewTabs = $('#skillsViewTabs');           // 顶栏：3 个主 tab
+    var $skillsSourceTabs = $('#skillsSourceTabs');       // 技能视图内：二级源切换
+    var $skillsSourceBarWrap = $('#skillsSourceBarWrap');
     var $skillsViewTabsWrap = $('.skills-tabs-wrap');
     var $skillsSearchInput = $('#skillsSearchInput');
+    var $skillsSearchWrap = $skillsSearchInput.closest('.skills-search-input-wrap');
     var $skillsSearchClear = $('#skillsSearchClear');
     var $skillsList = $('#skillsList');
     var $skillsLoading = $('#skillsLoading');
@@ -54,7 +69,10 @@
     // ==================== 状态 ====================
 
     var _markets = [];              // [{name, description}]
-    var _currentView = VIEW_INSTALLED; // 'installed' 或市场 name
+    var _currentView = VIEW_INSTALLED; // 技能源（installed / 市场名）或 connectors / interfaces
+    /* 记住最后一次停留的【技能源】，供从连接器/接口点回「技能」主 tab 时还原。
+     * 否则点回「技能」会不知道该落在已安装还是哪个市场。 */
+    var _lastSkillView = VIEW_INSTALLED;
     var _categories = [];           // 当前市场的分类列表
     var _currentCategory = '';      // 当前分类 key（'' = 全部）
     var _installedAll = [];         // 已安装技能完整列表（/installed 原始数据）
@@ -93,11 +111,22 @@
         return String(n);
     }
 
+    /** 图标地址：桌面壳（Tauri asset 协议）下页面源不是内核源，相对路径会
+     *  落到 SPA fallback 拿回 index.html，图片解码失败 → onerror 移除 <img> →
+     *  图标永远只剩首字母底。kernel-bridge 注入了 __gworkApiUrl 就用它取内核
+     *  绝对地址；浏览器模式（gwork --serve --static）没有该 helper，直接用相对
+     *  路径。必须是同步拼串：innerHTML 插入的 <img> 会立刻发请求，事后再改
+     *  src 已经晚了。 */
+    function iconSrc(iconUrl) {
+        var path = '/web/settings/skills/icon?url=' + encodeURIComponent(iconUrl);
+        return (typeof window.__gworkApiUrl === 'function') ? window.__gworkApiUrl(path) : path;
+    }
+
     /** 图标 HTML：有 iconUrl 时走后端代理 <img>，加载失败自毁露出首字母底 */
     function iconHtml(iconUrl, displayName, cls) {
         var letter = (displayName || 'SK').substring(0, 2).toUpperCase();
         var img = iconUrl
-            ? '<img src="/web/settings/skills/icon?url=' + encodeURIComponent(iconUrl) + '" alt="" onerror="this.remove()">'
+            ? '<img src="' + escapeAttr(iconSrc(iconUrl)) + '" alt="" onerror="this.remove()">'
             : '';
         return '<div class="' + cls + '"><span>' + escapeHtml(letter) + '</span>' + img + '</div>';
     }
@@ -287,17 +316,110 @@
         });
     }
 
-    function renderTabs() {
+    /**
+     * 是否处于「技能」主 tab（即 _currentView 是某个技能源，而非连接器/接口）。
+     */
+    function isSkillsMain() {
+        return _currentView !== VIEW_CONNECTORS && _currentView !== VIEW_INTERFACES;
+    }
+
+    /**
+     * 顶栏只渲染 3 个主 tab：技能 / 连接器 / 接口。
+     * 「技能」是否 active 由 isSkillsMain() 判定（其下任一二级源都算技能主 tab 激活）。
+     * 主 tab 用 data-main（区别于二级源的 data-view），事件层据此分派。
+     */
+    function renderMainTabs() {
+        var skillsActive = isSkillsMain();
+        var html = '<button type="button" class="skills-view-tab skills-main-tab' + (skillsActive ? ' active' : '') + '" data-main="' + MAIN_SKILLS + '">'
+            + '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>'
+            + '<span>' + escapeHtml(GourdI18n.t('app.skills')) + '</span></button>';
+        html += '<button type="button" class="skills-view-tab skills-main-tab' + (_currentView === VIEW_CONNECTORS ? ' active' : '') + '" data-main="' + VIEW_CONNECTORS + '">'
+            + '<span>' + escapeHtml(GourdI18n.t('app.nav.connectors')) + '</span></button>';
+        html += '<button type="button" class="skills-view-tab skills-main-tab' + (_currentView === VIEW_INTERFACES ? ' active' : '') + '" data-main="' + VIEW_INTERFACES + '">'
+            + '<span>' + escapeHtml(GourdI18n.t('app.nav.interfaces')) + '</span></button>';
+        $skillsViewTabs.html(html);
+    }
+
+    /**
+     * 技能视图内的二级源切换：已安装（带数量徽标） + 各技能市场。
+     * 只在技能主 tab 激活时显示（showPane 控制 wrap 显隐），分类 chips 保留在下面。
+     */
+    function renderSourceTabs() {
         var installedCount = _installedAll.length;
-        var html = '<button type="button" class="skills-view-tab' + (_currentView === VIEW_INSTALLED ? ' active' : '') + '" data-view="' + VIEW_INSTALLED + '">'
-            + '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>'
+        var html = '<button type="button" class="skills-source-tab' + (_currentView === VIEW_INSTALLED ? ' active' : '') + '" data-view="' + VIEW_INSTALLED + '">'
+            + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>'
             + '<span>' + escapeHtml(GourdI18n.t('settings.skills.installed_tab')) + '</span>'
             + '<span class="skills-tab-count">' + (installedCount > 0 ? installedCount : '') + '</span></button>';
         _markets.forEach(function (m) {
-            html += '<button type="button" class="skills-view-tab' + (_currentView === m.name ? ' active' : '') + '" data-view="' + escapeAttr(m.name) + '">'
+            html += '<button type="button" class="skills-source-tab' + (_currentView === m.name ? ' active' : '') + '" data-view="' + escapeAttr(m.name) + '">'
                 + '<span>' + escapeHtml(marketLabel(m.name)) + '</span></button>';
         });
-        $skillsViewTabs.html(html);
+        $skillsSourceTabs.html(html);
+        // 源 tab 数量/文字变化后必须重算横向溢出态（左右箭头与渐隐）
+        if ($skillsSourceTabs[0]) syncHScrollState($skillsSourceTabs[0]);
+    }
+
+    /** 总入口：主 tab + 二级源 tab 一起重绘（loadMarkets / switchView / i18n 切换都走这里）。 */
+    function renderTabs() {
+        renderMainTabs();
+        renderSourceTabs();
+    }
+
+    /**
+     * 三个 pane 的显隐。技能 pane 由 skills.html 提供；连接器/接口 pane 里保留
+     * 了原设置页的 MCP / OpenAPI DOM（id 不变），因此 _settingsMcp 与
+     * _settingsOpenapi 可以直接 load() 到新容器。
+     *
+     * 【2026-11 codereview 修复：顶栏搜索框不再跨视图复用】
+     * 旧版在连接器页把顶栏 #skillsSearchInput 改占位符「复用为 MCP 搜索」，
+     * 而市场模块 shell() 又自带一个 #mcpMarketSearch —— 同屏两个搜索框，
+     * 且两者状态互不同步（顶栏回车才查、内部框输入即查）。更糟的是
+     * showPane 读 `$skillsSearchInput.val()` 当作市场查询词：
+     * switchView 里 showPane(view) 先于 `$skillsSearchInput.val('')` 执行，
+     * 于是「技能市场搜 foo → 点连接器」会把 foo 静默带成 MCP 过滤条件，
+     * 随后顶栏输入框被清空 —— 用户看到搜索框空白、列表却是被 foo 过滤的空态
+     * （即「内容加载不出来」），且 state.search 永久残留，下次 render 又回填。
+     *
+     * 修法与「接口」页同口径：顶栏搜索框在连接器/接口页一律隐藏，
+     * 市场只保留 shell() 里唯一的 #mcpMarketSearch 作为搜索真源。
+     * 由此彻底消除 app-skills.js 与 app-mcp-market.js 之间的查询词耦合，
+     * 也就没有「清空顺序」这类时序陷阱可踩。
+     */
+    function showPane(view) {
+        var isSkills = (view === VIEW_INSTALLED || _markets.some(function (m) { return m.name === view; }));
+        var $paneSkills = $('#skillsPaneSkills');
+        var $paneConnectors = $('#skillsPaneConnectors');
+        var $paneInterfaces = $('#skillsPaneInterfaces');
+        var $addMcpBtn = $('#skillsAddMcpBtn');
+        /* 按钮由 skills.html 静态提供（顶栏 actions 区），不在运行时另造同名 id：
+           重复 id 会让 $('#skillsAddMcpBtn') 与事件委托命中不确定元素。 */
+        if ($paneSkills.length) $paneSkills.toggle(isSkills);
+        if ($paneConnectors.length) $paneConnectors.toggle(view === VIEW_CONNECTORS);
+        if ($paneInterfaces.length) $paneInterfaces.toggle(view === VIEW_INTERFACES);
+        $skillsViewTabsWrap.show();
+        /* 二级源切换（已安装 / SkillHub / ClawHub / ModelScope）只在「技能」主 tab 下显示；
+         * 连接器 / 接口页不再出现它们（用户诉求：三个合并到技能里面，放到技能里面进行切换）。 */
+        if ($skillsSourceBarWrap.length) {
+            $skillsSourceBarWrap.toggle(isSkills);
+            if (isSkills && $skillsSourceTabs[0]) syncHScrollState($skillsSourceTabs[0]);
+        }
+        // 隐藏技能分类栏：连接器/接口有自己的筛选 UI（或不需要筛选）。
+        if (view === VIEW_CONNECTORS || view === VIEW_INTERFACES) hideCategoryBar();
+        /* 顶栏搜索框只服务技能视图（占位符始终是「搜索技能…」，不再按视图改写）。
+         * 连接器页的搜索由市场模块内部的 #mcpMarketSearch 唯一承担。
+         * 必须 toggle 整个 .skills-search-input-wrap 而非只 toggle input：
+         * 放大镜图标是 wrap 内的 position:absolute 子元素，wrap 自身还是
+         * flex:1 1 auto / min-width:180px —— 只藏 input 会留下悬空图标与空白占位。 */
+        $skillsSearchWrap.toggle(isSkills);
+        $skillsSearchClear.toggle(isSkills && !!($skillsSearchInput.val() || '').trim());
+        if ($addMcpBtn.length) $addMcpBtn.toggle(view === VIEW_CONNECTORS);
+        if (view === VIEW_CONNECTORS) {
+            if (window._mcpMarket && typeof window._mcpMarket.setHost === 'function') {
+                // 只渲染到目录容器：整块 pane 里还有从设置页迁入的 MCP 配置 DOM，
+                // 若把 pane 自身当宿主，innerHTML 会把 #mcpAddBtn 等一并冲掉。
+                window._mcpMarket.setHost('#mcpMarketRoot');
+            }
+        }
     }
 
     function loadCategories() {
@@ -407,10 +529,10 @@
         var isAppend = append === true;
 
         /* 已安装视图的数据源是本地索引（同步内存），永远不走列表加载。
-         * 这是防御守卫：所有调用方（switchView / 搜索 / 分类 / 无限滚动）都已提前拦截，
-         * 此处保留仅为封口。注："已安装视图不显示加载态"不能靠这一支保证——
-         * 真正保证它的是 switchView 里的 resetListStatus（在切视图那一刻就清）。 */
+         * 连接器 / 接口页签也不得触发技能列表请求：它们有自己的数据源。
+         * 真正保证「切视图立刻清加载态」的仍是 switchView 里的 resetListStatus。 */
         if (_currentView === VIEW_INSTALLED) return;
+        if (_currentView === VIEW_CONNECTORS || _currentView === VIEW_INTERFACES) return;
 
         if (!isAppend) {
             /* 全新加载（首次进入/换分类/搜索）必须从干净状态起步：
@@ -657,11 +779,17 @@
     // ==================== 视图切换 ====================
 
     function switchView(view) {
-        if (view !== VIEW_INSTALLED && !_markets.some(function (m) { return m.name === view; })) return;
+        /* 允许 installed / 市场名 / connectors / interfaces。 */
+        var isSkillView = (view === VIEW_INSTALLED || _markets.some(function (m) { return m.name === view; }));
+        var isKnown = isSkillView || view === VIEW_CONNECTORS || view === VIEW_INTERFACES;
+        if (!isKnown) return;
         if (_currentView === view) return;
         _currentView = view;
+        // 记住技能源，供从连接器/接口点回「技能」主 tab 时还原
+        if (isSkillView) _lastSkillView = view;
 
         renderTabs();
+        showPane(view);
 
         /* 视图一换，上一个视图的加载态立刻作废。
          * 这一步是用户报障的直接解药：市场列表还在飞时点「已安装」，
@@ -675,7 +803,17 @@
         _nextCursor = null;
         _hasMore = true;
 
-        if (view === VIEW_INSTALLED) {
+        if (view === VIEW_CONNECTORS) {
+            /* 离开技能视图：不再触发任何技能列表请求（loadSkillsList 也有守卫）。 */
+            _currentCategory = '';
+            hideCategoryBar();
+            if (window._settingsMcp && typeof window._settingsMcp.load === 'function') window._settingsMcp.load();
+            if (window._mcpMarket && typeof window._mcpMarket.load === 'function') window._mcpMarket.load();
+        } else if (view === VIEW_INTERFACES) {
+            _currentCategory = '';
+            hideCategoryBar();
+            if (window._settingsOpenapi && typeof window._settingsOpenapi.load === 'function') window._settingsOpenapi.load();
+        } else if (view === VIEW_INSTALLED) {
             _currentCategory = '';
             hideCategoryBar();
             loadInstalledIndex(function () {
@@ -685,6 +823,19 @@
             _currentCategory = '';
             loadCategories();
             loadSkillsList(null, false);
+        }
+    }
+
+    /**
+     * 顶栏 3 主 tab 的分派。
+     * 「技能」→ 还原到最后停留的技能源（_lastSkillView）；连接器/接口 → 直接切。
+     * 与二级源 tab 的 switchView 分开，避免主 tab 的 MAIN_SKILLS 常量混进 _currentView。
+     */
+    function switchMain(main) {
+        if (main === MAIN_SKILLS) {
+            switchView(_lastSkillView);
+        } else if (main === VIEW_CONNECTORS || main === VIEW_INTERFACES) {
+            switchView(main);
         }
     }
 
@@ -802,7 +953,7 @@
             $('#skillDetailName').text(displayName);
             $('#skillDetailOwner').text((d.ownerHandle ? d.ownerHandle + ' · ' : '') + marketLabel(marketName));
             $('#skillDetailIcon').html((d.iconUrl
-                ? '<img src="/web/settings/skills/icon?url=' + encodeURIComponent(d.iconUrl) + '" alt="" onerror="this.remove()">'
+                ? '<img src="' + escapeAttr(iconSrc(d.iconUrl)) + '" alt="" onerror="this.remove()">'
                 : '') + '<span>' + escapeHtml(displayName.substring(0, 2).toUpperCase()) + '</span>');
             $('#skillDetailBody').text(d.description || d.summary || '');
 
@@ -1051,23 +1202,29 @@
         var _hScrollRO = new ResizeObserver(function (entries) {
             entries.forEach(function (en) { syncHScrollState(en.target); });
         });
-        ['#skillsCategoryBar', '#skillsViewTabs'].forEach(function (sel) {
+        ['#skillsCategoryBar', '#skillsViewTabs', '#skillsSourceTabs'].forEach(function (sel) {
             var el = document.querySelector(sel);
             if (el) { bindHScroll(el); bindHScrollNav(el); _hScrollRO.observe(el); }
         });
     } else {
-        ['#skillsCategoryBar', '#skillsViewTabs'].forEach(function (sel) {
+        ['#skillsCategoryBar', '#skillsViewTabs', '#skillsSourceTabs'].forEach(function (sel) {
             var el = document.querySelector(sel);
             if (el) { bindHScroll(el); bindHScrollNav(el); }
         });
         $(window).on('resize', function () {
             syncHScrollState(document.querySelector('#skillsCategoryBar'));
             syncHScrollState(document.querySelector('#skillsViewTabs'));
+            syncHScrollState(document.querySelector('#skillsSourceTabs'));
         });
     }
 
-    // 视图标签页（已安装 + 各市场）
-    $skillsViewTabs.on('click', '.skills-view-tab', function () {
+    // 顶栏 3 主 tab：技能 / 连接器 / 接口（data-main）
+    $skillsViewTabs.on('click', '.skills-main-tab', function () {
+        switchMain($(this).attr('data-main'));
+    });
+
+    // 技能视图内二级源切换：已安装 / 各市场（data-view），复用 switchView
+    $skillsSourceTabs.on('click', '.skills-source-tab', function () {
         switchView($(this).attr('data-view'));
     });
 
@@ -1118,7 +1275,10 @@
         $btn.prop('disabled', true);
     });
 
-    // 搜索（回车触发；已安装视图本地过滤）
+    /* 搜索（回车触发；已安装视图本地过滤，市场视图走上游搜索）。
+     * 顶栏搜索框只在技能视图可见（showPane 里 toggle(isSkills)），连接器页的搜索
+     * 唯一入口是市场内部的 #mcpMarketSearch，所以这里不再有 VIEW_CONNECTORS 分支
+     * ——保留它就是死代码，还会让人误以为顶栏框仍能查 MCP。 */
     $skillsSearchInput.on('input', function () {
         var val = $(this).val().trim();
         $skillsSearchClear.toggle(val.length > 0);
@@ -1129,7 +1289,7 @@
             _currentQuery = val || null;
             if (_currentView === VIEW_INSTALLED) {
                 renderInstalledList(_currentQuery);
-            } else {
+            } else if (isSkillsMain()) {
                 loadSkillsList(_currentQuery, false);
             }
         }
@@ -1139,7 +1299,23 @@
         $(this).hide();
         _currentQuery = null;
         if (_currentView === VIEW_INSTALLED) renderInstalledList(null);
-        else loadSkillsList(null, false);
+        else if (isSkillsMain()) loadSkillsList(null, false);
+    });
+
+    /* 手动添加 MCP：复用设置页迁入的既有「+ 添加服务器」表单，不另造配置 UI。
+     * 表单保存成功后 app-settings-mcp.js 自己会 loadMcpList；这里额外刷新一次，
+     * 保证从弹层返回 / 一键安装后的连接器列表也是最新状态。
+     * 用委托绑定：#skillsAddMcpBtn 可能由 showPane 动态创建。 */
+    $(document).on('click', '#skillsAddMcpBtn', function () {
+        if (window._settingsMcp && typeof window._settingsMcp.showList === 'function') window._settingsMcp.showList();
+        var $add = $('#mcpAddBtn');
+        if ($add.length) $add.trigger('click');
+        if (window._settingsMcp && typeof window._settingsMcp.load === 'function') window._settingsMcp.load();
+    });
+    $(document).on('mcp:installed', function () {
+        if (_currentView === VIEW_CONNECTORS && window._settingsMcp && typeof window._settingsMcp.load === 'function') {
+            window._settingsMcp.load();
+        }
     });
 
     // 底部"加载失败，点击重试"
@@ -1166,6 +1342,7 @@
         if (!_hasMore || _isLoadingMore) return;
         if (!isSkillsViewActive()) return;
         if (_currentView === VIEW_INSTALLED) return;
+        if (_currentView === VIEW_CONNECTORS || _currentView === VIEW_INTERFACES) return;
         loadSkillsList(_currentQuery, true);
     }
 
@@ -1187,7 +1364,8 @@
         if (!_hasMore || _isLoadingMore) return;
         if (!isSkillsViewActive()) return;
         var body = document.querySelector('#skillsScroll');
-        if (body && body.scrollHeight <= body.clientHeight + 4) {
+        if (body && body.scrollHeight <= body.clientHeight + 4
+            && _currentView !== VIEW_CONNECTORS && _currentView !== VIEW_INTERFACES) {
             loadSkillsList(_currentQuery, true);
         }
     }
@@ -1201,6 +1379,7 @@
         _isLoadingMore = false;
         _currentCategory = '';
         closeDetail();
+        showPane(_currentView);
 
         loadMarkets(function () {
             if (!_markets.length) {
@@ -1257,10 +1436,25 @@
 
     // 语言切换后重绘当前页（列表内容是动态渲染的，静态翻译无法覆盖）
     document.addEventListener('i18n:localeChanged', function () {
+        renderTabs();
+        /* 顶栏搜索框占位符不再由 JS 按视图改写（连接器页已隐藏顶栏搜索框，
+         * 占位符恒为「搜索技能…」），交给 skills.html 的 data-i18n-placeholder
+         * 静态翻译处理。旧版在这里给已删除的 PLACEHOLDER_* 变量赋值，
+         * 'use strict' 下会抛 ReferenceError —— 切换语言即崩，且 node --check
+         * 只查语法、抓不到这类运行时错误。 */
         if ($('#skillsView').hasClass('active')) {
-            resetAndLoad();
+            if (_currentView === VIEW_CONNECTORS) {
+                showPane(VIEW_CONNECTORS);
+                // MCP 卡片文案随语言重绘，不重发上游列表请求
+                if (window._mcpMarket && typeof window._mcpMarket.refresh === 'function') window._mcpMarket.refresh();
+                if (window._settingsMcp && typeof window._settingsMcp.load === 'function') window._settingsMcp.load();
+            } else if (_currentView === VIEW_INTERFACES) {
+                showPane(VIEW_INTERFACES);
+                if (window._settingsOpenapi && typeof window._settingsOpenapi.load === 'function') window._settingsOpenapi.load();
+            } else {
+                resetAndLoad();
+            }
         } else {
-            renderTabs();
             renderCategoryBar();
         }
     });

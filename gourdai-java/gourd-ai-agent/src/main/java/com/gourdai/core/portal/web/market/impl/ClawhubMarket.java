@@ -129,7 +129,7 @@ public class ClawhubMarket implements Market {
                     .slug(getStringValue(skillNode, "slug"))
                     .displayName(getStringValue(skillNode, "displayName"))
                     .summary(getStringValue(skillNode, "summary"))
-                    .description(getStringValue(skillNode, "description"))
+                    .description(stripSkillMdFrontmatter(getStringValue(skillNode, "description")))
                     .ownerHandle(getStringValue(skillNode, "ownerHandle"))
                     .iconUrl(getStringValue(skillNode, "icon"))
                     .installSlug(getStringValue(skillNode, "slug"));
@@ -249,7 +249,7 @@ public class ClawhubMarket implements Market {
                     .name(slug)
                     .displayName(getStringValue(node, "displayName"))
                     .summary(getStringValue(node, "summary"))
-                    .description(getStringValue(node, "description"))
+                    .description(stripSkillMdFrontmatter(getStringValue(node, "description")))
                     .ownerHandle(getStringValue(node, "ownerHandle"))
                     .url(detailUrl)
                     .version(extractLatestVersion(node));
@@ -285,6 +285,43 @@ public class ClawhubMarket implements Market {
             }
         }
         return null;
+    }
+
+    /**
+     * 剥离 SKILL.md 的 YAML frontmatter 头。
+     *
+     * <p>实测（2026-11，clawhub.ai /api/v1/skills/{slug}）：{@code skill.description}
+     * 返回的是 SKILL.md **原文**——以 {@code ---} 起的 frontmatter 块（name/description/
+     * metadata 等键）原样打头，详情弹窗直接展示会把 {@code ---\nname: xxx} 这类
+     * 机器头泄露给用户。规则：首行恰为 {@code ---} 且其后存在独占一行的闭合
+     * {@code ---} 时，丢弃闭合行及其之前的全部内容；其余形态（无 frontmatter、
+     * 未闭合）原样返回，宁可多展示也不误删正文。</p>
+     */
+    static String stripSkillMdFrontmatter(String text) {
+        if (text == null || !text.startsWith("---")) {
+            return text;
+        }
+        // 首行必须恰为 ---（其后即行尾）；---foo / ---- 之类不是 frontmatter 开头
+        char afterOpen = text.length() > 3 ? text.charAt(3) : '\n';
+        if (afterOpen != '\n' && afterOpen != '\r') {
+            return text;
+        }
+        // 闭合行：独占一行的 ---（自第二行起找 "\n---"，且 --- 后必须是行尾）
+        int close = text.indexOf("\n---", 3);
+        while (close >= 0) {
+            int after = close + 4; // 跳过 \n---
+            if (after >= text.length() || text.charAt(after) == '\n') {
+                String rest = (after >= text.length()) ? "" : text.substring(after + 1).stripLeading();
+                return rest.isEmpty() ? null : rest;
+            }
+            if (text.charAt(after) == '\r'
+                    && after + 1 < text.length() && text.charAt(after + 1) == '\n') {
+                String rest = text.substring(after + 2).stripLeading();
+                return rest.isEmpty() ? null : rest;
+            }
+            close = text.indexOf("\n---", close + 4); // 形如 ---foo 的正文行，继续找
+        }
+        return text; // 未闭合：原样返回，宁可多展示也不误删正文
     }
 
     private String getStringValue(ONode node, String key) {

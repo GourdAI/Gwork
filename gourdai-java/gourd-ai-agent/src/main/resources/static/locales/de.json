@@ -275,6 +275,14 @@
                  "confirm":  "Bestätigen"
              },
     "app":  {
+
+        "nav":  {
+
+            "connectors":  "Konnektoren",
+
+            "interfaces":  "Schnittstellen"
+
+        },
                                 "access_title":  "Zugriffsrechte",
                 "access_default":  "Standardzugriff",
                 "access_full":  "Vollzugriff",
@@ -578,6 +586,25 @@
                                      "scroll_next":  "Nach rechts scrollen"
                                 },
                      "mcp":  {
+                                 "market":  {
+                                             "title":  "MCP-Dienstverzeichnis",
+                                             "search_placeholder":  "MCP-Dienste suchen",
+                                             "hosted":  "Gehostet",
+                                             "installed":  "Installiert",
+                                             "empty":  "Keine Dienste gefunden",
+                                             "required":  "Erforderlich",
+                                             "verified":  "Verifiziert",
+                                             "connect":  "Verbinden",
+                                             "connect_title":  "Verbinden",
+                                             "save_connect":  "Speichern & verbinden",
+                                             "cancel":  "Abbrechen",
+                                             "config":  "Konfiguration",
+                                             "load_failed":  "MCP-Verzeichnis konnte nicht geladen werden: {msg}",
+                                             "install_failed":  "Installation fehlgeschlagen: {msg}",
+                                             "installed_names":  "Installiert: {msg}",
+                                             "detail_failed":  "Details konnten nicht geladen werden: {msg}",
+                                             "retry":  "Erneut versuchen"
+                                 },
                                  "title":  "MCP-Server",
                                  "desc":  "Externe Tool-Server verwalten, Date-, Datenbank-, Browser-Tools erweitern",
                                  "add":  "Server hinzufügen",
@@ -1033,6 +1060,7 @@
                  "tool_edit":  "Bearbeiten",
                  "tool_bash":  "Ausführen",
                  "tool_bash_output": "Hintergrundausgabe prüfen",
+                 "action_bash_done": "Terminalbefehl",
                  "tool_skill":  "Fähigkeit",
                  "tool_todo":  "Aufgaben",
                  "tool_code":  "Code",
@@ -1267,7 +1295,7 @@
                     "turn_input":  "Eingabe dieser Runde",
                     "turn_output":  "Ausgabe dieser Runde",
                     "batch_done_count":  "{count} Tool-Aufrufe",
-                    "action_bash_done":  "Terminalbefehl ausgeführt",
+                    "action_bash_done":  "Terminalbefehl",
                     "action_thinking_done":  "Gedacht",
                     "batch_thinking_count":  "Nachgedacht: {count}",
                     "messages":  "Nachrichten"

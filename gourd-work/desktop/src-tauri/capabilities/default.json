@@ -54,8 +54,15 @@
     "allow-auth-status",
     "allow-auth-login",
     "allow-auth-register",
+    "allow-auth-send-code",
+    "allow-auth-config",
     "allow-auth-logout",
     "allow-auth-refresh",
-    "allow-auth-self"
+    "allow-auth-self",
+    "allow-updater-get-version",
+    "allow-updater-get-state",
+    "allow-updater-check",
+    "allow-updater-download",
+    "allow-updater-install"
   ]
 }
