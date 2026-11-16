@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "tanyuan-assistant",
+  "version": "1.0.0",
+  "description": "AI assistant powered by a trusted cultural knowledge base. Provides traceable retrieval and creative assistance across world heritage sites, museum collections, oracle bone characters, and academic literature. Covers heritage nomination texts, archaeological data, ceramic genome databases, pattern libraries, and more.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "腾讯数字文化智能体",
+        "name_en": "TDC - Tencent Digital Culture",
+        "description_zh": "基于文化可信知识库的智能体服务，提供世界遗产、博物馆藏品、甲骨文字形释义、学术文献等可溯源检索与创作辅助。覆盖申遗文本、考古数据、陶瓷基因库、纹样库等多模态知识，支持研究考据、策展辅助、文化科普与内容创作。",
+        "description_en": "AI assistant powered by a trusted cultural knowledge base. Provides traceable retrieval and creative assistance across world heritage sites, museum collections, oracle bone characters, and academic literature. Covers heritage nomination texts, archaeological data, ceramic genome databases, pattern libraries, and more."
+      },
+      "categories": [
+        "communication"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

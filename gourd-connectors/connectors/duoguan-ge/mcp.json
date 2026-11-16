@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "duoguan-ge": {
+      "type": "streamable_http",
+      "url": "https://wbmcp.geoniu.cn/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "夺冠 GEO"
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "wanfang-literature-search-download-oauth": {
+      "type": "streamable_http",
+      "url": "https://api.wfdata.com/mcp/wf-search-download",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "万方数据"
+      }
+    }
+  }
+}

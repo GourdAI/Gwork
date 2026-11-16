@@ -72,10 +72,7 @@ body.is-electron .skills-head .skills-inner { padding-top: 48px; }
    标签与右侧搜索框之间出现约 600px 纯空洞（用户所指「头和右侧栏目中间有空隙」）。
    改为标签组按内容宽、搜索框 flex:1 吸收剩余宽度 → 整行无空洞。 */
 .skills-tabs-wrap { flex: 0 1 auto; min-width: 0; }
-.skills-view-tabs { display: flex; gap: 2px; align-items: center; }
-.skills-view-tab { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border: none; background: transparent; color: var(--text-secondary); font-size: 13px; font-weight: 500; cursor: pointer; border-radius: 8px; white-space: nowrap; transition: color 0.15s, background 0.15s; flex-shrink: 0; }
-.skills-view-tab:hover { color: var(--text-primary); background: var(--bg-hover); }
-.skills-view-tab.active { color: var(--text-primary); background: var(--bg-hover); font-weight: 600; }
+/* 主 tab 分段控件形态见文末「2026-11 排版重构」块（唯一真源，勿在此重复定义） */
 
 /* ===== 技能视图内二级源切换（已安装 / SkillHub / ClawHub / ModelScope） =====
  * 层级：顶栏 3 主 tab 是圆角矩形 13px；二级源刻意做成更小的 pill 12px +
@@ -265,10 +262,69 @@ body.is-electron .skills-head .skills-inner { padding-top: 48px; }
 .skills-pane-inner { width: 100%; max-width: none; }
 .skills-pane-inner .settings-section { width: 100%; max-width: none; }
 .skills-pane-inner .settings-view { width: 100%; }
-#skillsPaneConnectors .skills-pane-inner { margin-top: 16px; }
+/* 互斥分区间距见文末重构块（堆叠时代遗留的 16px 已退役） */
 /* 三个 pane 的默认显隐：技能 pane 可见，另两个由 inline display:none 隐藏；
  * #skillsAddMcpBtn 默认隐藏，切到连接器 pane 时由 app-skills.js 显示。 */
 #skillsPaneSkills { display: block; }
 #skillsAddMcpBtn { display: none; }
 .skills-add-mcp-btn { flex-shrink: 0; padding: 6px 12px; border: 1px dashed var(--border-color); border-radius: 8px; background: none; color: var(--accent); font-size: 12px; cursor: pointer; white-space: nowrap; }
 .skills-add-mcp-btn:hover { border-color: var(--accent); background: var(--accent-light); }
+
+/* ===== 2026-11 排版重构：主导航分段控件化 + 连接器二级视图 =====
+ * 用户参考图（WorkBuddy 式）：主 tab 是「分段控件」形态——整组一个圆角容器、
+ * 激活项实底浮起；二级导航是小 pill。旧版主 tab 与二级 tab 都是散装圆角块，
+ * 层级读不出来。配色仍全部走主题令牌，不引入任何硬编码色。 */
+.skills-view-tabs { display: inline-flex; gap: 2px; align-items: center; padding: 3px; border-radius: 10px; background: var(--bg-hover); }
+.skills-view-tab { display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; border: none; background: transparent; color: var(--text-secondary); font-size: 13px; font-weight: 500; cursor: pointer; border-radius: 8px; white-space: nowrap; transition: color 0.15s, background 0.15s, box-shadow 0.15s; flex-shrink: 0; }
+.skills-view-tab:hover { color: var(--text-primary); }
+.skills-view-tab.active { color: var(--text-primary); background: var(--bg-card, var(--bg-main)); font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,0.10); }
+
+/* 顶栏导入按钮：与「+ 添加服务器」同族（dashed → hover accent），带图标 */
+.skills-import-wrap { position: relative; flex-shrink: 0; }
+.skills-import-btn { display: inline-flex; align-items: center; gap: 5px; }
+.skills-import-btn:disabled { opacity: 0.6; cursor: wait; }
+/* 导入菜单打开时由 JS 移挂 body + fixed 定位（.skills-view overflow:clip
+ * 会裁 fixed 后代；.skills-scroll 滚动容器会提升堆叠上下文遮住低 z 菜单）。
+ * body 直挂菜单必须高于一切页内堆叠上下文，取 1600（低于详情弹窗 2000+）。 */
+body > .mcp-import-menu { z-index: 1600; }
+.skills-import-wrap .mcp-import-menu { z-index: 1500; }
+
+/* 连接器 pane：广场与已安装互斥（applyConnView），不再有上下堆叠间距 */
+#skillsPaneConnectors .skills-pane-inner { margin-top: 0; }
+
+/* 隐形程序化锚点：#mcpImportBtn/#mcpAddBtn/#openapiAddBtn 仍是唯一表单真源，
+ * 但入口已上提顶栏——锚点必须不可见且不占布局（visibility 保持可 trigger）。
+ * ⚠ 容器不得用 clip/clip-path/overflow 裁切：导入菜单打开时会移挂 body，
+ * 但关闭归位后仍是容器后代，裁切容器会把 fixed 菜单一并切掉（实测事故）。
+ * 隐藏样式只施加在按钮自身，容器保持零尺寸不裁切。 */
+.mcp-header-actions-hidden { position: absolute !important; width: 0; height: 0; }
+.mcp-header-actions-hidden > .settings-add-btn,
+.mcp-header-actions-hidden > .mcp-import-menu-wrap > .settings-add-btn { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; padding: 0; border: 0; }
+
+/* ===== 已安装连接器/接口列表：卡片网格化（对齐技能卡排版） =====
+ * 旧版是 settings 的单列长条行；参考图是与技能市场同密度的双列卡片。
+ * 只影响技能页两个 pane，设置浮层其余列表不受波及（选择器限定 pane id）。 */
+#skillsPaneConnectors .mcp-server-list,
+#skillsPaneInterfaces .openapi-server-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; align-items: stretch; }
+#skillsPaneConnectors .mcp-server-item,
+#skillsPaneInterfaces .mcp-server-item { margin-bottom: 0; padding: 13px 14px; border-radius: 10px; background: var(--bg-card, var(--bg-main)); align-items: flex-start; }
+#skillsPaneConnectors .mcp-server-icon,
+#skillsPaneInterfaces .mcp-server-icon { width: 38px; height: 38px; border-radius: 9px; font-size: 14px; font-weight: 700; }
+#skillsPaneConnectors .mcp-server-info,
+#skillsPaneInterfaces .mcp-server-info { display: flex; flex-direction: column; gap: 3px; padding-top: 1px; }
+#skillsPaneConnectors .mcp-server-name,
+#skillsPaneInterfaces .mcp-server-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#skillsPaneConnectors .mcp-server-detail,
+#skillsPaneInterfaces .mcp-server-detail { font-size: 11px; }
+/* 操作区悬浮不挤压文本：编辑/删除 hover 才显形（开关常驻），与技能已安装卡同交互 */
+#skillsPaneConnectors .mcp-server-actions,
+#skillsPaneInterfaces .mcp-server-actions { padding-top: 2px; }
+#skillsPaneConnectors .mcp-action-btn,
+#skillsPaneInterfaces .mcp-action-btn { opacity: 0; transition: opacity 0.15s; }
+#skillsPaneConnectors .mcp-server-item:hover .mcp-action-btn,
+#skillsPaneInterfaces .mcp-server-item:hover .mcp-action-btn,
+#skillsPaneConnectors .mcp-server-item:focus-within .mcp-action-btn,
+#skillsPaneInterfaces .mcp-server-item:focus-within .mcp-action-btn { opacity: 1; }
+/* 空态占满网格整行 */
+#skillsPaneConnectors .mcp-empty-state,
+#skillsPaneInterfaces .mcp-empty-state { grid-column: 1 / -1; }

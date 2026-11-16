@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "opendata",
+  "version": "1.0.0",
+  "description": "Query offline spatiotemporal data via natural language — area heat maps, scene recognition, customer-flow analysis, POI search and more — to power business insights and site-selection scenarios.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "及刻智能·时空数据MCP",
+        "name_en": "Jike Spatiotemporal Data MCP",
+        "description_zh": "通过自然语言查询线下时空数据，提供区域热力、场景识别、客流分析、POI查询等能力，助力商业洞察、开店选址等应用场景。",
+        "description_en": "Query offline spatiotemporal data via natural language — area heat maps, scene recognition, customer-flow analysis, POI search and more — to power business insights and site-selection scenarios."
+      },
+      "categories": [
+        "location-services"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

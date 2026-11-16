@@ -1,0 +1,73 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "cloudbase",
+  "version": "1.0.0",
+  "description": "Develop, deploy, debug, and troubleshoot CloudBase applications across Web apps, WeChat Mini Programs, uni-app, native apps, cloud functions, CloudRun, NoSQL/MySQL databases, storage, hosting, authentication, AI model calls, AI agents, and ops diagnostics.",
+  "keywords": [
+    "cli",
+    "skills"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "kind": "cli",
+      "tier": "cli",
+      "auth": {
+        "authType": "cli_login"
+      },
+      "display": {
+        "name": "腾讯云 CloudBase",
+        "name_en": "Tencent CloudBase",
+        "description_zh": "腾讯云开发 CloudBase 全栈开发、部署、调试与排障连接器。覆盖 Web 应用、微信小程序、uni-app、原生 App HTTP API、云函数、CloudRun、NoSQL/MySQL 数据库、云存储、静态托管、身份认证、AI 大模型调用、AI Agent、资源巡检与 Spec 工作流。",
+        "description_en": "Develop, deploy, debug, and troubleshoot CloudBase applications across Web apps, WeChat Mini Programs, uni-app, native apps, cloud functions, CloudRun, NoSQL/MySQL databases, storage, hosting, authentication, AI model calls, AI agents, and ops diagnostics."
+      },
+      "categories": [
+        "cloud-platforms"
+      ],
+      "source": "vendor-cli:@cloudbase/cli@3.9.2",
+      "cli_spec": {
+        "package": "@cloudbase/cli",
+        "version": "3.9.2",
+        "binName": "tcb",
+        "binPath": "bin/tcb",
+        "auth": {
+          "argv": [
+            "login",
+            "--flow",
+            "web",
+            "--yes"
+          ],
+          "urlDomain": "tcb.cloud.tencent.com",
+          "waitForExit": true
+        },
+        "status": {
+          "argv": [
+            "env",
+            "list"
+          ],
+          "matchRegex": "(?:envId|EnvId|环境\\s*ID|┌|\\|)"
+        },
+        "unauth": {
+          "argv": [
+            "logout"
+          ]
+        }
+      },
+      "skills": [
+        {
+          "name": "cloudbase",
+          "dir": "skills/cloudbase"
+        }
+      ],
+      "skills_provenance": {
+        "source": "@cloudbase/cli@3.9.2 官方技能（WB 公开仓库缓存 skills/ 原样复制，缺 LICENSE 由 npm license 字段补齐）",
+        "url": "https://www.npmjs.com/package/@cloudbase/cli",
+        "license": "ISC",
+        "skillCount": 1,
+        "fileCount": 194,
+        "byteCount": 1451923
+      },
+      "readme": "## 腾讯云 CloudBase CLI 连接器\n\n厂商官方 `@cloudbase/cli@3.9.2`，扫码/浏览器授权，内置 1 套官方技能。\n\n### 连接方式\n\n1. 点击「连接」，GWork 自动准备 Node 运行时并安装官方 CLI；\n2. 弹窗展示授权链接/二维码，按厂商页面完成扫码或浏览器确认；\n3. 授权完成后自动连接。凭据由官方 CLI 自管，GWork 不接触 token。\n\n技能包来源：厂商公开 CLI 包随附技能文档（公开仓库缓存副本）；许可见各技能目录 LICENSE。"
+    }
+  }
+}

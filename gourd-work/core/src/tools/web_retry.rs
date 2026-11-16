@@ -19,10 +19,11 @@
 //!   Reader returns seconds or an HTTP-date), and honouring it is the single
 //!   most effective thing a client can do under a rate limit, so it takes
 //!   precedence over the computed jitter.
-//! * Java's fast-fail gate is `LlmRetryPolicy.isNonRetryable`; the identical
-//!   classification already exists in this kernel as
-//!   [`crate::llm::client::is_non_retryable`] and is reused rather than
-//!   duplicated.
+//! * Java's fast-fail gate is `LlmRetryPolicy.isNonRetryable`
+//!   (400/401/403/404/405/413/414/422 fast-fail; 429/408/409/5xx/network
+//!   retry). 【2026-11 用户决策】LLM 流已改为「非 200 一律按 modelRetries
+//!   重试」，但 web/MCP 工具保持 Java 语义不变，故本模块自带同一份状态码
+//!   白名单（`AttemptError::is_deterministic`），不再借用 LLM 侧分类。
 //!
 //! All delays are computed as pure values so they can be unit-tested without
 //! sleeping (Windows `tokio::time::sleep` granularity is ~15 ms, which makes
@@ -86,21 +87,24 @@ impl AttemptError {
     ///
     /// Java `RetryTask.java:202-210` uses `LlmRetryPolicy.isNonRetryable` for
     /// this, and its documented contract (`:103`) keeps 429 / 408 / 409 / all
-    /// 5xx / network errors retryable. That is exactly
-    /// `crate::llm::client::is_non_retryable`, which also understands the
-    /// gateway-wrapped business errors some providers return with HTTP 500.
+    /// 5xx / network errors retryable while 400/401/403/404/405/413/414/422
+    /// fast-fail.
+    ///
+    /// 【2026-11 用户决策】模型调用改为「非 200 一律按 modelRetries 重试」，
+    /// 但那是 LLM 流的用户偏好；web/MCP 工具仍对齐 Java 的确定性快速失败
+    /// （一次网页 404 重试 10 次只是浪费）。因此这里不再借用
+    /// `llm::client::is_non_retryable`（它已随用户决策放开），改为自带的
+    /// 状态码白名单，两条策略从此独立演化、互不牵连。
     pub fn is_deterministic(&self) -> bool {
         match self {
             Self::Http { status, .. } => {
-                // Classify on the status code **only**. `is_non_retryable` also
-                // scans free-form text for LLM-provider fatal markers and parses
-                // `{"code":"403"}` out of JSON bodies; feeding it a remote
-                // error page (or any future `detail` that carries one) would let
-                // third-party content flip a transient 429/5xx into a fast-fail,
-                // or mislabel a website's wording as a revoked API key. Here the
-                // status is already authoritative, so a canonical "HTTP <code>"
-                // string is both sufficient and injection-proof.
-                crate::llm::client::is_non_retryable(&format!("HTTP {}", status.as_u16()))
+                // Classify on the status code **only**: a remote error page is
+                // attacker-controlled text and must never flip the decision.
+                // Java LlmRetryPolicy.NON_RETRYABLE_STATUS, verbatim.
+                matches!(
+                    status.as_u16(),
+                    400 | 401 | 403 | 404 | 405 | 413 | 414 | 422
+                )
             }
             // No response → no status → conservative "retryable", matching the
             // Java policy for network exceptions and timeouts.
@@ -456,15 +460,18 @@ pub fn build_client_with_ua(proxy: &str, user_agent: &str) -> reqwest::Client {
 }
 
 /// The proxy explicitly configured in settings.json (trimmed). Empty means
-/// "use the process environment / system proxy", which reqwest resolves itself
-/// **once, when the client is built** (`client.rs:419-421`).
+/// "use the process environment / system proxy" — this function deliberately
+/// does **not** resolve the env vars by hand: reqwest's `auto_sys_proxy` reads
+/// them (and, with the `system-proxy` feature, the OS registry/PAC-free system
+/// setting) with correct scheme matching and `NO_PROXY` handling.
 ///
-/// The environment is treated as a process-startup constant, exactly like
-/// Java's config.yml / AgentProperties. Nothing in this process calls
-/// `std::env::set_var`, so there is no reason to re-read eight variables and
-/// allocate nine strings on every tool call — that would be pure overhead the
-/// Java kernel does not pay. The cached client therefore snapshots the egress
-/// path on first use and reuses it for the rest of the process.
+/// The OS proxy setting is **not** a process-startup constant: proxy software
+/// toggles it at runtime via the Windows registry. reqwest snapshots it exactly
+/// once per `ClientBuilder::build()` (`client.rs:419-421`), so the caller in
+/// `web.rs` must not cache an auto-proxy client forever — see
+/// `AUTO_PROXY_CLIENT_TTL` / `invalidate_auto_proxy_clients`. Here we only trim
+/// the explicit string; no per-call env reads are needed (that would be pure
+/// overhead the Java kernel does not pay), and no `std::env::set_var` is used.
 pub fn configured_proxy(configured: &str) -> String {
     configured.trim().to_string()
 }

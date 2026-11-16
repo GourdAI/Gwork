@@ -17,10 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
-	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
-
-	"github.com/QuantumNous/new-api/constant"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -298,34 +295,10 @@ func Register(c *gin.Context) {
 		common.ApiErrorT(c, "User registration failed or user ID retrieval failed")
 		return
 	}
-	// 生成默认令牌
-	if constant.GenerateDefaultToken {
-		key, err := common.GenerateKey()
-		if err != nil {
-			common.ApiErrorT(c, "Failed to generate default token")
-			common.SysLog(common.LogText("failed to generate token key: %s", err.Error()))
-			return
-		}
-		// 生成默认令牌
-		token := model.Token{
-			UserId:             insertedUser.Id, // 使用插入后的用户ID
-			Name:               i18n.T(c, i18n.MsgUserDefaultTokenName, map[string]any{"Username": cleanUser.Username}),
-			Key:                key,
-			CreatedTime:        common.GetTimestamp(),
-			AccessedTime:       common.GetTimestamp(),
-			ExpiredTime:        -1,     // 永不过期
-			RemainQuota:        500000, // 示例额度
-			UnlimitedQuota:     true,
-			ModelLimitsEnabled: false,
-		}
-		token.AllowUserQuotaQuery = true
-		if setting.DefaultUseAutoGroup {
-			token.Group = "auto"
-		}
-		if err := token.Insert(); err != nil {
-			common.ApiErrorT(c, "Failed to create default token")
-			return
-		}
+	// 新注册用户无条件创建一个普通令牌；已有启用令牌时由 helper 直接复用。
+	// 不把 key 放进注册响应，桌面客户端登录后从 /api/user/self/model-key 取一次。
+	if _, err := ensureUserModelKey(insertedUser.Id, cleanUser.Username); err != nil {
+		common.SysLog(common.LogText("failed to ensure initial token for user %d: %s", insertedUser.Id, err.Error()))
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1055,6 +1028,10 @@ func CreateUser(c *gin.Context) {
 		}
 	}
 	cleanUser.FinishInsert(0)
+	// 管理员建号同样保证有一个普通模型 key；helper 在事务提交后执行。
+	if _, err := ensureUserModelKey(cleanUser.Id, cleanUser.Username); err != nil {
+		common.SysLog(common.LogText("failed to ensure initial token for user %d: %s", cleanUser.Id, err.Error()))
+	}
 
 	auditParams["username"] = cleanUser.Username
 	recordManageAuditFor(c, cleanUser.Id, "user.create", auditParams)

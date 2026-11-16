@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "medlive-medical-qa",
+  "version": "1.0.0",
+  "description": "Medical Q&A connector for clinicians: ask questions in natural language and get evidence-based answers with literature citations, with follow-up, document Q&A, and history review support.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "医脉通医学问答",
+        "name_en": "Medlive Medical Q&A",
+        "description_zh": "面向医生的医学问答连接器：用自然语言提问并获取带文献依据的完整答案，支持多轮追问、文档问答与历史回看。",
+        "description_en": "Medical Q&A connector for clinicians: ask questions in natural language and get evidence-based answers with literature citations, with follow-up, document Q&A, and history review support."
+      },
+      "categories": [
+        "research-and-data"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

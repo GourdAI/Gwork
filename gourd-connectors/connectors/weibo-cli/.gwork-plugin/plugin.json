@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "weibo-cli",
+  "version": "1.0.0",
+  "description": "Access full Weibo Open Platform capabilities via MCP Connector, including publishing and searching weibo, managing comments, headline articles and V+ paid columns, attitudes/likes, user profiles and statistics, in-depth follower demographics, trending hot searches, and film/TV indexes.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "微博",
+        "name_en": "Weibo",
+        "description_zh": "通过微博 MCP 连接器访问微博开放平台全部核心能力，包括微博查询与发布、评论互动、头条文章与V+付费专栏、点赞表态、用户资料与统计、粉丝深度画像、实时热搜榜单及影视综艺指数等。",
+        "description_en": "Access full Weibo Open Platform capabilities via MCP Connector, including publishing and searching weibo, managing comments, headline articles and V+ paid columns, attitudes/likes, user profiles and statistics, in-depth follower demographics, trending hot searches, and film/TV indexes."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

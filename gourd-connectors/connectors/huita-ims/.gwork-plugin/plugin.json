@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "huita-ims",
+  "version": "1.0.0",
+  "description": "Huita IMS MCP connector: products/inventory (multi-store, batch/expiry), sales & purchase orders, AR/AP, and business analytics. Provides 14 read + 6 analytics + 12 write tools (preview→commit two-phase writes). Data syncs in real time with the Huita desktop and POS clients.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "慧獭进销存",
+        "name_en": "Huita IMS",
+        "description_zh": "慧獭进销存一体化 MCP 连接器：商品/库存（多店多仓、批号效期）、销售与采购开单、往来对账、经营分析。提供 14 个只读 + 6 个分析 + 12 个写工具（preview→commit 两阶段写），数据与慧獭桌面端/收银台实时同步。",
+        "description_en": "Huita IMS MCP connector: products/inventory (multi-store, batch/expiry), sales & purchase orders, AR/AP, and business analytics. Provides 14 read + 6 analytics + 12 write tools (preview→commit two-phase writes). Data syncs in real time with the Huita desktop and POS clients."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

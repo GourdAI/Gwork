@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "yichayun-trade-data": {
+      "type": "streamable_http",
+      "url": "https://mcp.trade-ai.com/mcp/",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "易查云贸易数据"
+      }
+    }
+  }
+}

@@ -204,8 +204,8 @@ For commercial licensing, please contact support@quantumnous.com
    .gw-auth-head + form structure inside. */
 
 /* Auth page headers: centred eyebrow + title + switch row.
-   Centring matches the desktop login modal (.account-auth-title is centred) and
-   the reference design; the old left-aligned head made the card look lopsided
+   Centring matches the desktop login modal's centred brand block and the
+   reference design; the old left-aligned head made the card look lopsided
    under an already-centred brand block and copyright line. */
 .gw-auth-head {
   display: flex;

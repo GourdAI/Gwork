@@ -69,16 +69,47 @@ pub fn tool_roster_prompt(tools: Option<&[ToolDefinition]>) -> String {
 /// make ("I'll call todoread first…" → pure text → premature END).
 pub const NO_TOOLS_NOTICE: &str = "\n> 注意：当前环境无可用工具，请根据已有信息直接回复，不要声称将要调用工具。\n";
 
+/// 契约 §1.2：主动提问硬规则（CN 逐字）。条件注入——仅当 ask_user 在本次 run
+/// 的工具集内才拼进系统提示词；子代理/禁用场景整条不出现，避免教模型调用一个
+/// 它根本拿不到的工具（"Unknown tool" 空转一轮）。
+pub const ASK_RULE_CN: &str = "**主动提问**：需要用户在方案间选择、拍板确认，或提供你无法自行查询/推断的关键信息时，【必须】调用 `ask_user` 发起结构化提问（每个方案一个 option：label 短标题、解释进 description、最佳实践标 recommended=true）；严禁仅在正文列出 A/B/C 方案后以「请选择/请确认/你拍板」收尾让用户打字作答。";
+
+/// 契约 §1.2 EN 语义等价。
+pub const ASK_RULE_EN: &str = "**Ask When Needed**: When the user must choose between options, confirm a decision, or supply critical information you cannot query/infer yourself, you MUST call `ask_user` with a structured question (one option per alternative: short `label`, rationale in `description`, best practice flagged `recommended=true`). Never just list options A/B/C in prose and end with \"please choose / please confirm / you decide\", leaving the user to type an answer.";
+
+/// 契约 §2.4：收尾契约（CN 逐字），紧随「自然完成」规则。
+pub const CLOSING_CONTRACT_CN: &str = "**收尾契约**：最终回答一次成型：默认一到两句说明改动与下一步；评审/调查/重大变更可展开（引用、验证结果、风险）。总结输出后不要再重复或追加第二份总结；收尾不带问句——需要用户决策时调用 ask_user，而不是在正文提问后等待。";
+
+/// 契约 §2.4 EN 语义等价。
+pub const CLOSING_CONTRACT_EN: &str = "**Closing Contract**: Shape the final answer once: by default one or two sentences on what changed and the next step; reviews/investigations/major changes may expand (citations, verification results, risks). After the summary is delivered, never repeat it or append a second summary. Do not end on a question — when a user decision is needed, call ask_user instead of asking in prose and waiting.";
+
+/// 契约 §1.3：子代理 headless 禁问条款（逐字）。子代理没有 ask_user（`**`
+/// 展开已剔除，见 agents/mod.rs），question 帧又会被转发层丢弃——挂起即父代理
+/// 死等。所以从系统提示词源头禁止子代理提问，改为假设推进或报告阻塞。
+pub const SUBAGENT_HEADLESS_CN: &str = "你无法向用户提问：本次运行没有 ask_user 工具，也不要输出面向用户的提问文本。信息不足时做出合理假设并继续，或在结果中明确报告阻塞点，由父代理决定是否向用户提问。";
+
 /// Build the system prompt for a ReAct session.
-pub fn build_system_prompt(settings: &Settings, workspace: &str) -> String {
+///
+/// `ask_user_available` 门控规则 5（契约 §1.2 条件注入）：调用方按本次 run 的
+/// 实际工具集（`settings.permission` 的 allowlist/disallowed）判定。子代理不走
+/// 这个入口（用定义自带的 system_prompt + §1.3 禁问条款）。
+pub fn build_system_prompt(settings: &Settings, workspace: &str, ask_user_available: bool) -> String {
     let locale = &settings.general.locale;
     let is_cn = locale.starts_with("zh") || locale.starts_with("cn");
 
     if is_cn {
-        build_cn(workspace)
+        build_cn(workspace, ask_user_available)
     } else {
-        build_en(workspace)
+        build_en(workspace, ask_user_available)
     }
+}
+
+/// ask_user 是否在本次 run 的工具集内（契约 §1.2 的判定源）。
+///
+/// 与 `ToolRegistry::definitions` 的可见性判定同源：allowlist（空 = 全部，
+/// 支持 `**`/前缀 glob）∧ 非 disallowed。纯函数，便于守护测试直接打表。
+pub fn ask_user_visible(permission: &PermissionSettings) -> bool {
+    crate::tools::ToolRegistry::new().is_allowed("ask_user", permission)
 }
 
 /// The sub-agent roster block, appended after the base system prompt.
@@ -223,15 +254,25 @@ pub fn powershell_dialect_rules(is_cn: bool) -> String {
     out
 }
 
-fn build_en(workspace: &str) -> String {
+fn build_en(workspace: &str, ask_user_available: bool) -> String {
+    // 契约 §4.2：「自然完成」改为推荐 complete_task（保留「无需 Final Answer: 标签」
+    // 语义，纯文本 END 仍合法作兜底）。规则 5（主动提问）条件注入，收尾契约紧随其后。
+    let mut rules_tail = String::from(
+        "4. **Natural Completion**: When the task is done, call `complete_task` to submit the final user-facing summary (its `summary` IS the final answer). Do not output labels like \"Final Answer:\". A plain-text reply still ends the run (fallback), but `complete_task` is preferred.\n"
+    );
+    if ask_user_available {
+        rules_tail.push_str("5. ");
+        rules_tail.push_str(ASK_RULE_EN);
+        rules_tail.push('\n');
+    }
+    rules_tail.push_str(CLOSING_CONTRACT_EN);
     let mut out = format!(r#"You are GWork, a professional autonomous task-solving agent. You follow a rigorous ReAct (Reasoning + Acting) loop.
 
 ## Core Rules
 1. **Tool Calls**: When you need to act (read/write files, run commands, search), invoke tools directly via function calling.
 2. **Result-Oriented**: All conclusions must be grounded in real data returned by tools.
 3. **No Fabrication**: Never simulate or fabricate tool execution results.
-4. **Natural Completion**: When the task is done, reply directly in natural language. Do not output labels like "Final Answer:".
-5. **Ask When Needed**: When you need the user to choose between options or provide critical info you cannot infer, use the `ask_user` tool.
+{rules_tail}
 
 ## Environment
 - Workspace: {workspace}
@@ -243,7 +284,7 @@ fn build_en(workspace: &str) -> String {
 - Read files before editing to confirm current content.
 - Run tests/builds after code changes to verify.
 - Be concise in explanations, thorough in execution.
-"#, workspace = workspace);
+"#, workspace = workspace, rules_tail = rules_tail);
     out.push('\n');
     out.push_str(crate::todo::PLANNING_GUIDE_EN);
     let dialect = shell_dialect_rules(false);
@@ -254,15 +295,25 @@ fn build_en(workspace: &str) -> String {
     out
 }
 
-fn build_cn(workspace: &str) -> String {
+fn build_cn(workspace: &str, ask_user_available: bool) -> String {
+    // 契约 §4.2：「自然完成」改为推荐 complete_task；规则 5（主动提问）条件注入
+    // （ask_user 不在工具集时整条不出现），收尾契约（§2.4）紧随其后。
+    let mut rules_tail = String::from(
+        "4. **自然完成**：任务完成时调用 `complete_task` 提交面向用户的最终总结（summary 即用户看到的最终回答）；无需输出 \"Final Answer:\" 等标签。纯文本回复也能结束（兜底），但推荐 complete_task。\n"
+    );
+    if ask_user_available {
+        rules_tail.push_str("5. ");
+        rules_tail.push_str(ASK_RULE_CN);
+        rules_tail.push('\n');
+    }
+    rules_tail.push_str(CLOSING_CONTRACT_CN);
     let mut out = format!(r#"你是 GWork，一个专业的自主任务解决智能体。你遵循严谨的 ReAct（推理 + 行动）循环。
 
 ## 核心规则
 1. **工具调用**：需要行动（读写文件、执行命令、搜索）时，直接通过函数调用触发工具。
 2. **结果导向**：所有结论必须基于工具返回的真实数据。
 3. **严禁伪造**：禁止模拟或伪造工具执行结果。
-4. **自然完成**：任务完成后直接用自然语言回复，无需输出 "Final Answer:" 等标签。
-5. **主动提问**：需要用户在方案间选择、或需要无法推断的关键信息时，使用 `ask_user` 工具。
+{rules_tail}
 
 ## 环境
 - 工作区：{workspace}
@@ -274,7 +325,7 @@ fn build_cn(workspace: &str) -> String {
 - 编辑文件前先读取确认当前内容。
 - 代码修改后运行测试/构建验证。
 - 解释简洁，执行彻底。
-"#, workspace = workspace);
+"#, workspace = workspace, rules_tail = rules_tail);
     out.push('\n');
     out.push_str(crate::todo::PLANNING_GUIDE);
     let dialect = shell_dialect_rules(true);
@@ -348,7 +399,7 @@ mod tests {
     #[test]
     fn base_prompt_does_not_contain_the_roster() {
         let s = Settings::default();
-        let out = build_system_prompt(&s, "/ws");
+        let out = build_system_prompt(&s, "/ws", true);
         assert!(!out.contains("<available_agents>"), "{}", out);
         assert!(out.contains("GWork"));
     }
@@ -399,9 +450,9 @@ mod tests {
     fn both_locales_build_a_prompt() {
         let mut s = Settings::default();
         s.general.locale = "zh-CN".into();
-        assert!(build_system_prompt(&s, "/ws").contains("核心规则"));
+        assert!(build_system_prompt(&s, "/ws", true).contains("核心规则"));
         s.general.locale = "en".into();
-        assert!(build_system_prompt(&s, "/ws").contains("Core Rules"));
+        assert!(build_system_prompt(&s, "/ws", true).contains("Core Rules"));
     }
 
     /// A user-defined agent in the project must reach the roster, since the caller
@@ -481,9 +532,9 @@ mod tests {
         };
         let mut s = Settings::default();
         s.general.locale = "zh-CN".into();
-        assert!(build_system_prompt(&s, "/ws").contains(marker_cn));
+        assert!(build_system_prompt(&s, "/ws", true).contains(marker_cn));
         s.general.locale = "en".into();
-        assert!(build_system_prompt(&s, "/ws").contains("Terminal Dialect"));
+        assert!(build_system_prompt(&s, "/ws", true).contains("Terminal Dialect"));
     }
 
     #[cfg(not(windows))]
@@ -491,8 +542,82 @@ mod tests {
     fn non_windows_prompts_have_no_dialect_block() {
         let mut s = Settings::default();
         s.general.locale = "en".into();
-        let out = build_system_prompt(&s, "/ws");
+        let out = build_system_prompt(&s, "/ws", true);
         assert!(!out.contains("PowerShell"));
         assert!(!out.contains("Terminal Dialect"));
+    }
+
+    // ─── 契约 §1.2：主动提问规则的条件注入 ────────────────────────────────────
+
+    /// ask_user 可见时规则 5 必须出现（CN/EN），且文案逐字采用契约 §1.2。
+    #[test]
+    fn ask_rule_is_injected_when_ask_user_is_available() {
+        let mut s = Settings::default();
+        s.general.locale = "zh-CN".into();
+        let cn = build_system_prompt(&s, "/ws", true);
+        assert!(cn.contains("5. **主动提问**"), "CN 规则 5 缺失: {}", cn);
+        assert!(cn.contains(ASK_RULE_CN), "CN 文案与契约 §1.2 不一致: {}", cn);
+        s.general.locale = "en".into();
+        let en = build_system_prompt(&s, "/ws", true);
+        assert!(en.contains("5. **Ask When Needed**"), "EN 规则 5 缺失: {}", en);
+        assert!(en.contains(ASK_RULE_EN));
+    }
+
+    /// ask_user 不可见时整条规则不出现（不是弱化措辞，是整条消失）——
+    /// 子代理/禁用场景教模型调用拿不到的工具只会换来 "Unknown tool" 空转。
+    #[test]
+    fn ask_rule_is_absent_when_ask_user_is_unavailable() {
+        let mut s = Settings::default();
+        s.general.locale = "zh-CN".into();
+        let cn = build_system_prompt(&s, "/ws", false);
+        assert!(!cn.contains("主动提问"), "CN 规则 5 应整条消失: {}", cn);
+        // 精确到 ask 规则标题：PLANNING_GUIDE 自带「5. **收尾判据**」编号，
+        // 泛化的 "5. " 会误伤它；守护的对象是核心规则里的主动提问条。
+        assert!(!cn.contains("5. **主动提问**"), "规则编号 5（主动提问）不应残留: {}", cn);
+        s.general.locale = "en".into();
+        let en = build_system_prompt(&s, "/ws", false);
+        assert!(!en.contains("Ask When Needed"));
+        assert!(!en.contains("5. **Ask When Needed**"));
+    }
+
+    /// 可见性判定与 registry 的 definitions 过滤同源：allowlist/disallowed 都要生效。
+    #[test]
+    fn ask_user_visible_follows_permission() {
+        let mut p = PermissionSettings::default();
+        assert!(ask_user_visible(&p), "空 allowlist = 全部可见");
+        p.tools = vec!["**".to_string()];
+        assert!(ask_user_visible(&p), "主代理 ** 保留 ask_user");
+        p.tools = vec!["read".to_string()];
+        assert!(!ask_user_visible(&p), "allowlist 未含 ask_user");
+        p.tools = vec![];
+        p.disallowed_tools = vec!["ask_user".to_string()];
+        assert!(!ask_user_visible(&p), "disallowed 优先");
+    }
+
+    /// 契约 §2.4：收尾契约双模板都在，且「自然完成」推荐 complete_task（§4.2）。
+    #[test]
+    fn closing_contract_and_complete_task_recommendation_are_present() {
+        let mut s = Settings::default();
+        s.general.locale = "zh-CN".into();
+        let cn = build_system_prompt(&s, "/ws", true);
+        assert!(cn.contains(CLOSING_CONTRACT_CN), "CN 收尾契约缺失");
+        assert!(cn.contains("complete_task"), "自然完成应推荐 complete_task");
+        assert!(cn.contains("Final Answer:"), "保留「无需标签」语义");
+        s.general.locale = "en".into();
+        let en = build_system_prompt(&s, "/ws", true);
+        assert!(en.contains(CLOSING_CONTRACT_EN));
+        assert!(en.contains("complete_task"));
+    }
+
+    /// 契约 §1.3：子代理禁问条款逐字，且 team 拼装处确实注入（源码级守护）。
+    #[test]
+    fn subagent_headless_clause_is_verbatim_and_wired() {
+        assert!(SUBAGENT_HEADLESS_CN.contains("你无法向用户提问"));
+        assert!(SUBAGENT_HEADLESS_CN.contains("没有 ask_user 工具"));
+        let team_src = include_str!("../team/mod.rs");
+        assert!(
+            team_src.contains("SUBAGENT_HEADLESS_CN"),
+            "team/mod.rs 的子代理系统提示词拼装必须注入 §1.3 禁问条款"
+        );
     }
 }

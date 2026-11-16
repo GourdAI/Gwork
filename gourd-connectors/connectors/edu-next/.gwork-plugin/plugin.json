@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "edu-next",
+  "version": "1.0.0",
+  "description": "AI teaching for Tsinghua University School of Environment courses, tasks, feedback, and progress.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "Edu Next",
+        "name_en": "Edu Next",
+        "description_zh": "面向清华大学环境学院课程的 AI 教学平台，支持课程、学习任务、教学资料、成果草稿、评价反馈与学习进展协作。",
+        "description_en": "AI teaching for Tsinghua University School of Environment courses, tasks, feedback, and progress."
+      },
+      "categories": [
+        "communication"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

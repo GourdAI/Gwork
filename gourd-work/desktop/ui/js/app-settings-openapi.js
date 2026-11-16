@@ -26,9 +26,9 @@
     var openapiEditName = null;
     var openapiCachedList = [];
 
-    function showOpenapiListView() { $openapiFormView.hide(); $openapiApisView.hide(); $openapiListView.addClass('slide-back').show(); setTimeout(function(){ $openapiListView.removeClass('slide-back'); }, 260); }
-    function showOpenapiApisView(title) { $openapiListView.hide(); $openapiFormView.hide(); $openapiApisTitle.text(title || GourdI18n.t('settings.openapi.apis_title')); $openapiApisView.show(); }
-    function showOpenapiFormView(title, isEdit) { $openapiApisView.hide(); $openapiFormTitle.text(title || GourdI18n.t('settings.openapi.add')); $openapiListView.hide(); $openapiFormView.show(); $('#openapiFormActions').toggle(!!isEdit); }
+    function showOpenapiListView() { $openapiFormView.hide(); $openapiApisView.hide(); $openapiListView.addClass('slide-back').show(); setTimeout(function(){ $openapiListView.removeClass('slide-back'); }, 260); $(document).trigger('openapi:listshown'); }
+    function showOpenapiApisView(title) { $openapiListView.hide(); $openapiFormView.hide(); $openapiApisTitle.text(title || GourdI18n.t('settings.openapi.apis_title')); $openapiApisView.show(); $(document).trigger('openapi:listhidden'); }
+    function showOpenapiFormView(title, isEdit) { $openapiApisView.hide(); $openapiFormTitle.text(title || GourdI18n.t('settings.openapi.add')); $openapiListView.hide(); $openapiFormView.show(); $('#openapiFormActions').toggle(!!isEdit); $(document).trigger('openapi:listhidden'); }
 
     // ==================== OpenApi 管理 ====================
 

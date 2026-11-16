@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "novai-studio",
+  "version": "1.0.0",
+  "description": "Manage AI canvases and assets, generate media, and track tasks with natural language.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "NovAI Studio",
+        "name_en": "NovAI Studio",
+        "description_zh": "通过自然语言管理 AI 画布和素材，生成图片、视频和音频，并查询任务进度。",
+        "description_en": "Manage AI canvases and assets, generate media, and track tasks with natural language."
+      },
+      "categories": [
+        "image-and-video-processing"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

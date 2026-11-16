@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "shuidi-credit",
+  "version": "1.0.0",
+  "description": "Query enterprise data via Shuidi Credit MCP. Supports business registration, shareholders, actual controller penetration, legal risks, intellectual property, bidding, tax credit, and sci-tech innovation assessment for one-stop enterprise due diligence through natural language.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "水滴信用-企业尽调",
+        "name_en": "Shuidi Credit Due Diligence",
+        "description_zh": "水滴信用企业大数据全维度洞察，输入企业名称即可获取工商照面、股东股权、实控人穿透、司法风险、知识产权、招投标、税务信用、科创评分等全维度企业信息。适用于供应商准入尽调、企业背景核查、实控人与关联方穿透、风险预警监控、投资标的风险筛查等场景。",
+        "description_en": "Query enterprise data via Shuidi Credit MCP. Supports business registration, shareholders, actual controller penetration, legal risks, intellectual property, bidding, tax credit, and sci-tech innovation assessment for one-stop enterprise due diligence through natural language."
+      },
+      "categories": [
+        "research-and-data"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

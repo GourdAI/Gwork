@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "sumscope-data",
+  "version": "1.0.0",
+  "description": "Query Sumscope fixed-income market data, including bond reference data, primary issuance, bill quotes, public opinion information, issuer financial statements, macroeconomic indicators, and trading calendars.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "森浦qeubee金融数据",
+        "name_en": "Sumscope qeubee Data",
+        "description_zh": "查询森浦固定收益市场数据：债券基础信息、一级发行、票据行情、舆情信息、发行人财务报表、宏观指标和交易日历。",
+        "description_en": "Query Sumscope fixed-income market data, including bond reference data, primary issuance, bill quotes, public opinion information, issuer financial statements, macroeconomic indicators, and trading calendars."
+      },
+      "categories": [
+        "finance"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

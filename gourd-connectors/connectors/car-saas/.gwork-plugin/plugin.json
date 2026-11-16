@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "car-saas",
+  "version": "1.0.0",
+  "description": "Query parking lot operations: daily revenue, traffic, available spaces, vehicles, passing and fee records, devices and lanes.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "停车运营助手",
+        "name_en": "Parking Operations",
+        "description_zh": "查询停车场今日收入/车流/剩余车位、车辆信息、通行记录、临停收费记录、收入车流日报、设备与车道状态。",
+        "description_en": "Query parking lot operations: daily revenue, traffic, available spaces, vehicles, passing and fee records, devices and lanes."
+      },
+      "categories": [
+        "research-and-data"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

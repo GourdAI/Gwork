@@ -147,11 +147,15 @@ class ReasonTaskConvergeGateTest {
     }
 
     @Test
-    @DisplayName("完成校验文案：双出路措辞且不含绝对化收敛指令")
+    @DisplayName("完成校验文案（契约 §2.2 补缺式）：三条出路且禁止复述已交付总结")
     void completionCheckPromptSemantics() {
         String prompt = ReasonTask.completionCheckPromptFor(1);
-        assertTrue(prompt.contains("请继续执行"), "必须引导未完成则继续\n" + prompt);
-        assertTrue(prompt.contains("完整总结报告"), "必须引导已完成则输出完整总结\n" + prompt);
+        assertTrue(prompt.contains("继续执行它们"), "必须引导未完成则继续\n" + prompt);
+        assertTrue(prompt.contains("直接确认结束"), "必须引导已完整则直接确认结束（不再要求重出总结）\n" + prompt);
+        assertTrue(prompt.contains("只补充遗漏部分"), "必须引导有遗漏只补缺\n" + prompt);
+        assertTrue(prompt.contains("严禁复述已交付的总结"), "必须禁止复述已交付总结（N 份雷同总结的根因）\n" + prompt);
+        assertFalse(prompt.contains("重新输出面向用户的完整总结报告"),
+                "旧文案要求重出完整总结导致每次校验复读一遍，不得回退\n" + prompt);
         assertFalse(prompt.contains("直接输出 Final Answer"),
                 "不得使用绝对化收敛指令（会诱导意图声明当最终答案，work-mupc5nd0 实测）\n" + prompt);
     }

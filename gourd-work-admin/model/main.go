@@ -85,6 +85,13 @@ func createRootAccountIfNeed() error {
 			AccessToken: nil,
 			Quota:       100000000,
 		}
+		// Note: no controller.ensureInitialModelKey call here. model cannot import
+		// controller (controller already imports model, so that would be an import
+		// cycle), and this startup path is not part of the desktop login flow.
+		// GetSelfModelKey calls ensureUserModelKey on every request, so root still
+		// gets its ordinary model key the first time it is requested. This is the
+		// no-cycle option; controller/setup.go::PostSetup wires the interactive
+		// root-creation path directly.
 		DB.Create(&rootUser)
 	}
 	return nil

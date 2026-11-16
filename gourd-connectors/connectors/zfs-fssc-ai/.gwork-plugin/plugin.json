@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "zfs-fssc-ai",
+  "version": "1.0.0",
+  "description": "ZTE FSSC AI reimbursement assistant: file reimbursements, recognize and query invoices, query expense bills and approve via natural language.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "中兴新云AI智报",
+        "name_en": "ZTC AI Assistant",
+        "description_zh": "财务云 AI 报销助手：用自然语言完成报销申请、发票查询识别、报销单查询与费用审批等操作。",
+        "description_en": "ZTE FSSC AI reimbursement assistant: file reimbursements, recognize and query invoices, query expense bills and approve via natural language."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

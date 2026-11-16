@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "3chat-customer-growth",
+  "version": "1.0.0",
+  "description": "Use natural-language queries to search and filter customers, then send targeted, personalized messages to individual or batches of customers through connected channels such as WeChat, WeCom, Xiaohongshu, and Douyin. When customers reply, the configured 3Chat Agent can continue the conversation with full context and provide 24/7 autonomous support, handling needs discovery, product questions, objection management, and purchase guidance. This helps businesses turn customer insights into meaningful outreach and real sales opportunities.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "3Chat 私域客户运营",
+        "name_en": "3Chat Customer Growth",
+        "description_zh": "用自然语言查询和筛选客户，通过微信、企业微信、小红书、抖音等已连接渠道，向单个或批量客户定向发送个性化消息。客户产生回复后，已配置的 3Chat Agent 可接续上下文，提供 7×24 小时自主接待，持续完成需求沟通、产品答疑、异议处理和购买引导，帮助商家将客户洞察转化为真实触达和成交机会",
+        "description_en": "Use natural-language queries to search and filter customers, then send targeted, personalized messages to individual or batches of customers through connected channels such as WeChat, WeCom, Xiaohongshu, and Douyin. When customers reply, the configured 3Chat Agent can continue the conversation with full context and provide 24/7 autonomous support, handling needs discovery, product questions, objection management, and purchase guidance. This helps businesses turn customer insights into meaningful outreach and real sales opportunities."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

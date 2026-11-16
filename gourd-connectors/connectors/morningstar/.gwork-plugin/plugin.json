@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "morningstar",
+  "version": "1.0.0",
+  "description": "Morningstar global and China fund data, analyst research and portfolio analytics for fund screening, risk, holdings, fees and reviews.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "晨星 Morningstar",
+        "name_en": "Morningstar",
+        "description_zh": "接入晨星全球与中国基金数据，通过自然语言实现基金查询、筛选、分析与深度研究，以及组合穿透分析",
+        "description_en": "Morningstar global and China fund data, analyst research and portfolio analytics for fund screening, risk, holdings, fees and reviews."
+      },
+      "categories": [
+        "finance"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

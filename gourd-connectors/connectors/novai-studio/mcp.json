@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "novai-studio": {
+      "type": "streamable_http",
+      "url": "https://xinxingshuke.com/api/v1/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "NovAI Studio"
+      }
+    }
+  }
+}

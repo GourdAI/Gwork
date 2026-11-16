@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "yiketu-ai",
+  "version": "1.0.0",
+  "description": "Generate e-commerce product image sets from a product photo, including white-background, lifestyle, selling-point, and detail images. Edit existing images using natural-language instructions.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "易可图 AI 商品创作",
+        "name_en": "YiKeTu AI Product Studio",
+        "description_zh": "根据商品原图生成白底、场景、卖点、细节等电商商品套图，也支持用自然语言描述修改已有图片。",
+        "description_en": "Generate e-commerce product image sets from a product photo, including white-background, lifestyle, selling-point, and detail images. Edit existing images using natural-language instructions."
+      },
+      "categories": [
+        "image-and-video-processing"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

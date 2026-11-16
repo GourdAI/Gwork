@@ -7,6 +7,7 @@
 package com.gourdai.harness.agent;
 
 import com.gourdai.agent.util.AskUserTool;
+import com.gourdai.agent.util.CompleteTaskTool;
 import com.gourdai.harness.talents.cli.TodoTalent;
 import com.gourdai.harness.talents.memory.MemoryTalent;
 import org.noear.solon.core.util.Assert;
@@ -29,7 +30,9 @@ public final class WebToolVisibilityPolicy {
                 && !TaskTalent.TOOL_TASK.equals(toolName)
                 && !MemoryTalent.isMemoryTool(toolName)
                 // ask_user 挂起时走专用 question 帧交互，生命周期帧不建工具卡
-                && !AskUserTool.TOOL_NAME.equals(toolName);
+                && !AskUserTool.TOOL_NAME.equals(toolName)
+                // complete_task 的 summary 即最终回答正文（走 text 通道下发），不建工具卡
+                && !CompleteTaskTool.TOOL_NAME.equals(toolName);
     }
 
     /** 是否发送 action_start；todowrite 使用专用面板，只有成功 end 可见。 */

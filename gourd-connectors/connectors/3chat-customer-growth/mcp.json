@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "3chat-customer-growth": {
+      "type": "streamable_http",
+      "url": "https://app.3chatai.cn/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "3Chat 私域客户运营"
+      }
+    }
+  }
+}

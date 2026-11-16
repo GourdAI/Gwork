@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "gaodun-job",
+  "version": "1.0.0",
+  "description": "A full-journey AI assistant for student internships and employment: get smart civil-service position recommendations, search internship and campus jobs, run career assessments (MBTI, Holland, career anchors), diagnose and optimize resumes, and practice interview questions with evaluation reports.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "高顿•实习就业助手",
+        "name_en": "Student Internship & Career Assistant",
+        "description_zh": "大学生实习就业全链路 AI 助手：智能推荐公考岗位，检索实习与校招职位，提供 MBTI、霍兰德等职业测评，简历诊断与 AI 优化改写，面试刷题与模拟面试评估报告，助你拿 offer。",
+        "description_en": "A full-journey AI assistant for student internships and employment: get smart civil-service position recommendations, search internship and campus jobs, run career assessments (MBTI, Holland, career anchors), diagnose and optimize resumes, and practice interview questions with evaluation reports."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

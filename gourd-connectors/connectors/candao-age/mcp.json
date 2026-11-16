@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "candao-age": {
+      "type": "streamable_http",
+      "url": "https://mcp-server.can-dao.com/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "餐道.数智经营"
+      }
+    }
+  }
+}

@@ -19,7 +19,42 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws", "multipart"] }
 tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
 tower = "0.5"
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+# 网页抓取成功率：开启自动内容协商与解压（gzip/br/deflate）、HTTP/2、系统代理。
+# default-features=false 曾把 reqwest 默认的 charset/http2/system-proxy 一起关掉，
+# 导致 CDN/现代站点要么无法协商压缩、要么返回压缩字节被当作正文解码成乱码；
+# 且大量站点只走 h2，关掉 http2 会退化到 h1 甚至被拒。这里显式补回成功率相关项。
+#
+# system-proxy 是「零配置跟随本机网络」的编译期前提，不做任何设置页：
+# reqwest 的 auto_sys_proxy 在 ClientBuilder::build() 时构造 ProxyMatcher::system()
+# （reqwest client.rs:419），后者调 hyper-util 的 Matcher::from_system()，在 Windows
+# 下由 client-proxy-system feature 门控的 win::with_system 读注册表
+# HKCU\...\Internet Settings 的 ProxyEnable/ProxyServer/ProxyOverride
+# （hyper-util matcher.rs:238-249, 695-722）。缺这个 feature 时 from_system() 退化成
+# 只读 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 环境变量，于是「浏览器走系统代理能访问、
+# 工具纯直连连不上」——代理软件（Clash/v2ray 等）在系统代理模式只写注册表。
+# 【归因修正 2026-11，二次 codereview】此前误以为「桌面端由
+# tauri-plugin-updater(reqwest 0.13) 通过 feature 统一把 0.12 的 system-proxy
+# 也打开了」。精确机制是：Cargo 只对「同一 package 的同一版本」统一 feature，
+# Cargo.lock 里 reqwest 0.12.28 与 0.13.5 是两个独立编译单元，0.13 的 feature
+# 不会加到 0.12 上；但二者**共享唯一一份 hyper-util 0.1.21**，而两版 reqwest 的
+# system-proxy 都定义为 hyper-util/client-proxy-system。桌面构建同时链接
+# tauri-plugin-updater 2.14.1（default 含 system-proxy → reqwest 0.13）与 0.12，
+# 于是该构建图里那份共享 hyper-util 的 client-proxy-system 被激活，0.12 的
+# auto_sys_proxy 也就编译进了 win::with_system()。单独 -p gourd-work-cli 构建
+# 没有 0.13 链，hyper-util 不带该 feature，from_system() 只剩环境变量；
+# 但 --workspace / 多 -p 构建会把该 feature 一并统一到 CLI 所链接的 hyper-util，
+# 所以差异只在「分离 cargo 调用」时存在。这里显式声明 system-proxy，是为了让
+# reqwest 0.12 自身确定具备该能力，不再依赖桌面链是否恰好拉起 0.13、也不依赖
+# 构建时选了哪些 -p（cargo tree -e features -i reqwest@0.12.28 已确认生效）。
+# socks 仍不开：系统代理的 ProxyServer 不会是 socks scheme，显式 socks5:// 属于
+# 「配置」；reqwest 0.12 的 socks = [] 是空 feature，不会引入 tokio-socks（旧注释
+# 说的「会引入依赖」是 0.11 时代行为，已纠正，Cargo.lock 中亦无该包）。
+# 已知边界：win::with_system 不解析 AutoConfigURL（PAC/WPAD），只覆盖固定
+# ProxyServer 的系统代理模式；且 from_env() 优先，陈旧的 HTTP_PROXY 环境变量
+# 会压过当前注册表值。default-tls 仍不开（0.12 的 default-tls 是 native-tls）。
+# charset 只作用于 resp.text()，bytes_stream 路径的解码由
+# core/src/tools/web.rs::read_body_capped 按 Content-Type 自行完成。
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "charset", "http2", "gzip", "brotli", "deflate", "system-proxy"], default-features = false }
 futures-util = "0.3"
 async-trait = "0.1"
 tokio-util = "0.7"

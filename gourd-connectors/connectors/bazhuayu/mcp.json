@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "bazhuayu": {
+      "type": "streamable_http",
+      "url": "https://mcp.bazhuayu.com/?includeTools=search_templates,execute_task,get_task_status,export_data,search_tasks,start_or_stop_task",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "八爪鱼"
+      }
+    }
+  }
+}

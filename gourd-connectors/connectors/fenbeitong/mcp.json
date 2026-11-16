@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "fenbeitong": {
+      "type": "streamable_http",
+      "url": "https://mcp.fenbeitong.com/mcp/source/workbuddy",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "分贝通"
+      }
+    }
+  }
+}

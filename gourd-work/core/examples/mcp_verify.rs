@@ -23,6 +23,7 @@ fn ctx(gate: Option<Arc<ToolGate>>) -> ToolContext {
         change_ledger: None, gate, subagent_depth: 0, root_session_id: "v".into(),
         thinking: None, model: Arc::new(ModelConfig::default()),
         settings: Arc::new(Settings::default()), bash_exempt_dirs: Vec::new(),
+        resume_calibration: false,
     }
 }
 

@@ -131,6 +131,9 @@ pub async fn discard(owner: &str) {
 /// identical to Java `backgroundGatePromptFor` (this exact text has been seen
 /// to change model behaviour; the two-exit structure — verify now, or account
 /// honestly and stop — must be preserved verbatim).
+///
+/// 契约 §2.3：两出路后追加一行「已完整交代就别重复」——旧文案只给「核实/交代」
+/// 两个动作，模型上一轮已如实交代过后台任务时仍会再写一遍相同内容。
 pub fn background_gate_prompt(deferred: u32, running_count: usize) -> String {
     format!(
         "【系统提示：后台任务收尾校验 (Background Task Gate)】\n\
@@ -138,6 +141,7 @@ pub fn background_gate_prompt(deferred: u32, running_count: usize) -> String {
          回合一旦结束就没有执行体能消费它们的完成通知，「结束后会自动收到通知并继续」这类承诺无法兑现。请二选一：\n\
          1. **当场核实**：用 bash_output / await_tasks 查询后台任务状态与结果，拿到结论后再决定是否结束；\n\
          2. **如实交代后结束**：在最终回答中明确告知用户哪些后台任务仍在运行、用户下一步应如何让你继续（如发送「继续」），不得暗示你会自动跟进。\n\
+         若上一条回复已完整交代上述情况，直接结束即可，不要重复输出相同内容。\n\
          （第 {}/{} 次校验，之后将按普通最终回答处理）",
         running_count, deferred, MAX_BG_GATE_DEFERRALS
     )
@@ -277,6 +281,12 @@ mod tests {
         assert!(p.contains("当场核实"));
         assert!(p.contains("如实交代后结束"));
         assert!(p.contains("1/2"), "must show the deferral counter");
+        // 契约 §2.3：两出路后的去重行必须逐字存在。
+        assert!(
+            p.contains("若上一条回复已完整交代上述情况，直接结束即可，不要重复输出相同内容。"),
+            "§2.3 anti-repeat line missing: {}",
+            p
+        );
     }
 
     /// Bash/sub-agent notices must point at the right follow-up tool.

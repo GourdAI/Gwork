@@ -1,16 +1,25 @@
-//! auth.rs — 桌面端账号登录态（注册 / 登录 / 登出 / 会话保活）。
+﻿//! auth.rs — 桌面端账号登录态（注册 / 登录 / 登出 / 会话保活）。
 //!
-//! 后台是 `gourd-work-admin`（QuantumNous/new-api），地址按产品决策写死
-//! `https://www.gourdwork.com`，不做配置（见 Q2 拍板）。
+//! 后台是同一套 `gourd-work-admin`（QuantumNous/new-api）的多站点反代：
+//! 国内 `https://www.gourd-ai.cn`、国际 `https://www.gourdwork.com`。
+//! 启动时并发探测两站 `/api/status`，谁先返回有效 JSON 就锁定谁，账号
+//! `/api/...` 与模型 `/v1/...` 全程共用这同一个 host（仅后缀不同）。
+//!
+//! 【2026-11 双站点改造】此前写死 `api.gourdwork.com`：该子域已下线，
+//! 而两个 www 站点的 `/api/status` 实测都是 200 JSON（同一个 start_time /
+//! system_name / setup，带 X-Oneapi-Request-Id）。系统语言/时区在 VPN、
+//! 海外用户、企业代理下会误判，因此用「竞速探测 + 健康检查」而不是猜地域：
+//! 国内站 RTT ~0.39s，国际站 ~2.86s；某站宕机自动落到另一站。选定后
+//! 全程锁定同一站点，会话 Cookie 与刷新令牌不会跨站重放（见 ensure_host）。
 //!
 //! ## 为什么在 Rust 侧发请求，而不是 WebView fetch
-//! 页面跑在 `tauri.localhost`，直连 `www.gourdwork.com` 是跨源：登录/注册路由
+//! 页面跑在 `tauri.localhost`，直连官方站点是跨源：登录/注册路由
 //! 未挂 CORS（router/api-router.go 的顺序使后置 `Use(CORS())` 不回溯），
 //! 且带 HttpOnly 刷新 cookie 需要 credentials 模式 —— 浏览器层必被拦。
 //! Rust 用 reqwest 直连则没有 CORS；但 `SessionCookieOriginGuard`
 //! （middleware/auth_origin.go:18-35）在 `SESSION_COOKIE_SECURE=true` 时要求
 //! refresh/logout 必须带**可验证的 Origin**（无 Origin/Referer 直接 403），
-//! 因此这些请求显式带 `Origin: https://www.gourdwork.com` —— 与 request.Host
+//! 因此这些请求显式带 `Origin: <当前锁定站点>` —— 与 request.Host
 //! 同源，guard 的 `isAllowedSessionOrigin` 第一条比较即通过。
 //!
 //! ## 为什么手写 cookie jar
@@ -30,6 +39,14 @@
 //!     后立即 refresh 一次，拿到新 access token，无需重新输密码；
 //!   - 只有显式点「退出登录」才调用 logout 撤销会话并清 keyring。
 //! 凭据只存 OS keyring（独立 service 名），绝不进 settings.json / localStorage。
+//!
+//! ## 官方模型源（2026-11 闭环）
+//! 登录成功后由本模块**一次性**取用户自己的模型 key（普通 `tokens` 表记录，
+//! 不是什么独立「官方 key」：有就取已有的，新注册用户由 admin 自动建一个），
+//! 再拉一次官方 `/v1/models`，一起写进 `gourd_work_core::official` 的进程内内存。
+//! 之后每次模型调用直接从内存取 key，**不再回后台**（用户明确要求别每次调用都取，
+//! 性能不行）。key 不落盘、不进 WebView、不出现在任何前端响应里。
+//! 退出登录 / 会话被服务端撤销时清空内存态。
 //!
 //! ## 参数契约（与 gourd-work-admin 对齐，2026 注册缺参修复）
 //! admin 的 `POST /api/user/register` 直接解码 `model.User`：开启邮箱验证
@@ -56,8 +73,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::async_runtime;
 
-/// 后台地址：产品决策写死，不提供配置入口。
-pub const AUTH_BASE_URL: &str = "https://www.gourdwork.com";
+/// 探测前的默认站点（竞速成功后由 `select_best_host` 覆盖）。
+/// 直接引用 core 的单一事实源，不再各维护一份 host 字面量；生产请求一律
+/// 用 `AuthState::host()` —— 这个常量只在探测前/全部探测失败时生效。
+pub const AUTH_BASE_URL: &str = gourd_work_core::official::DEFAULT_OFFICIAL_HOST;
 const REFRESH_COOKIE_NAME: &str = "new_api_refresh";
 const KEYRING_SERVICE: &str = "gwork-desktop-account";
 const KEYRING_KEY: &str = "session";
@@ -113,7 +132,34 @@ pub struct AuthState {
     /// snapshot —— 后一个请求会读到前一个刚轮换写入的新 secret，从而
     /// 走正常的 current→next 轮换而非 previous 分支。
     session_lock: tokio::sync::Mutex<()>,
-    base_url: String,
+    /// 运行时锁定的站点 host。启动时由 [`AuthState::select_best_host`] 竞速
+    /// 探测写入一次，之后**全程锁定同一站点**（登录 / key / 模型调用同 host，
+    /// 只有 /api 与 /v1 后缀不同），只在重启或会话失效时重新探测。
+    /// 用 `std::sync::RwLock`：临界区极短（只 clone 一个 String），网络请求
+    /// 全在锁外，不会阻塞 runtime。
+    base_url: std::sync::RwLock<String>,
+    /// 【幂等选路闸门】所有会发网络请求的入口都先 `await ensure_host()`。
+    /// 竞速探测只真正跑一次；并发调用一起等同一个结果，杜绝「用户在竞速
+    /// 完成前登录 → 先在默认站建会话、随后 host 被切走」的竞态。
+    host_ready: tokio::sync::OnceCell<String>,
+}
+
+/// 站点健康探测：`GET {host}/api/status` 必须是 2xx + `success:true` +
+/// 显式 bool 配置。复用 [`parse_status_config`] 的严格判据，静态站的
+/// 200 HTML / 网关错误页 / 半残 JSON 都过不了（fail-closed）。
+/// `/api/status` 不需要 Origin，故这里不带任何会话凭据，纯粹比连通性与正确性。
+async fn probe_host(client: reqwest::Client, host: String) -> Option<String> {
+    let url = format!("{}/api/status", host);
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .ok()?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.ok()?;
+    parse_status_config(status, &body)?;
+    Some(host)
 }
 
 impl AuthState {
@@ -121,12 +167,17 @@ impl AuthState {
         Self::with_base_url(AUTH_BASE_URL)
     }
 
-    /// 测试可注入本地地址；生产固定走 `AUTH_BASE_URL`。
+    /// 测试可注入本地地址；生产由启动竞速探测覆盖（默认站只作为探测前的值）。
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             // 只走直连：系统代理会破坏 Origin/Host 一致性，也会让本地联调失真。
             .no_proxy()
+            // 【安全】/v1/models 带 Bearer sk-<官方 key>，登录/refresh/logout
+            // 带会话凭据，绝不跟随 3xx：reqwest 0.12 默认跟 10 跳，跨 host 才
+            // 剥内置 Authorization，且 https→http 同端口降级不剥。账号链路全
+            // 是固定 JSON API，没有需要跟随的重定向，3xx 一律当失败。
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -134,8 +185,102 @@ impl AuthState {
             client,
             keeper_started: Mutex::new(false),
             session_lock: tokio::sync::Mutex::new(()),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: std::sync::RwLock::new(
+                base_url.into().trim_end_matches('/').to_string(),
+            ),
+            host_ready: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// 所有网络入口的必经闸门：竞速选站**只跑一次**，并发调用共享同一结果。
+    /// 返回被锁定的 host。测试用 `with_base_url` 注入本地服务时，也由这里
+    /// 统一完成一次探测（本地服务同样回答 /api/status 即可）。
+    ///
+    /// 【codereview 修复】探测**全部失败**时不把结果写进 `host_ready`
+    /// （`get_or_try_init` 返回 Err 不缓存），下一次网络入口会重新竞速。
+    /// 旧实现用 `get_or_init` + 失败回落默认站：桌面开机往往比网络就绪更快，
+    /// 一次「两站都连不上」就把整个进程生命周期钉死在默认国际站（实测 RTT
+    /// 2.86s），即使国内站（0.39s）随后完全可用也永不再探测。本次请求仍用
+    /// 默认站发出，不影响可用性。
+    pub async fn ensure_host(&self) -> String {
+        match self
+            .host_ready
+            .get_or_try_init(|| async {
+                self.select_best_host()
+                    .await
+                    .ok_or("all official hosts unreachable; will retry on next call")
+            })
+            .await
+        {
+            Ok(host) => host.clone(),
+            // 探测失败：core 里已锁定默认站，直接用它，且下次调用会重试竞速。
+            Err(_) => gourd_work_core::official::host(),
+        }
+    }
+
+    /// 当前锁定的站点 host（无 `/v1`）。所有 `/api/...` 与 `/v1/...` 请求
+    /// 都以它为前缀 —— 用户口径「模型调用 API 与其它 API 同源、仅后缀不同」。
+    pub fn host(&self) -> String {
+        match self.base_url.read() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// 仅竞速探测回调调用：锁定站点。写入前由 core 侧再做一次白名单校验
+    /// （这个 host 决定进程内存里的用户 key 发往哪里，绝不允许任意值）。
+    fn lock_host(&self, host: &str) {
+        let h = host.trim().trim_end_matches('/').to_string();
+        match self.base_url.write() {
+            Ok(mut g) => *g = h,
+            Err(p) => *p.into_inner() = h,
+        }
+    }
+
+    /// 启动时对 `OFFICIAL_HOSTS` 并发竞速，**谁先返回有效响应用谁**。
+    ///
+    /// 这是「按当前网络环境选最优」的真实判据：系统语言/时区在 VPN、海外
+    /// 用户、企业代理下会误判，而 RTT + 健康检查不会；某站宕机也能自动
+    /// 落到另一站。
+    ///
+    /// 返回 `None` 表示两站都探测失败（离线/后台全挂）：此时仍把 core 与
+    /// 本地锁定到默认站（本次请求可以发出去），但**不**让 `ensure_host` 缓存
+    /// 结果，下一次网络入口会重新竞速。
+    ///
+    /// 胜出后同时写 core 的运行时选中站点：模型调用 (`LlmClient`) 必须与
+    /// 登录/取 key 走同一个 host，否则会话与 key 的目的地会分叉。
+    pub async fn select_best_host(&self) -> Option<String> {
+        let mut set = tokio::task::JoinSet::new();
+        for h in gourd_work_core::official::OFFICIAL_HOSTS {
+            set.spawn(probe_host(self.client.clone(), (*h).to_string()));
+        }
+        let mut winner: Option<String> = None;
+        while let Some(joined) = set.join_next().await {
+            if let Ok(Some(h)) = joined {
+                winner = Some(h);
+                break;
+            }
+        }
+        set.abort_all();
+        let Some(chosen) = winner else {
+            // 全部失败：锁定默认站保证本次请求可发，但不缓存选路结果。
+            let fallback = gourd_work_core::official::DEFAULT_OFFICIAL_HOST;
+            let _ = gourd_work_core::official::set_selected_host(fallback);
+            self.lock_host(fallback);
+            tracing::warn!("all official hosts unreachable; using default and will re-probe");
+            return None;
+        };
+        // set_selected_host 内部再做一次白名单校验：这个 host 决定 key 目的地。
+        if !gourd_work_core::official::set_selected_host(&chosen) {
+            let fallback = gourd_work_core::official::DEFAULT_OFFICIAL_HOST;
+            let _ = gourd_work_core::official::set_selected_host(fallback);
+            self.lock_host(fallback);
+            tracing::warn!("host probe returned a non-whitelisted value; fell back to default");
+            return None;
+        }
+        tracing::info!(host = %chosen, "official host selected by startup race");
+        self.lock_host(&chosen);
+        Some(chosen)
     }
 
     pub fn snapshot(&self) -> Option<StoredSession> {
@@ -159,9 +304,12 @@ fn now_secs() -> i64 {
 // ───────────────── 注册能力探测（GET /api/status）─────────────────
 //
 // 注册相关的后台开关是部署级配置，桌面端不能写死假设：渲染注册表单前用
-// GET /api/status 探测一次（进程内缓存 60s）。探测失败时按「邮箱可选」降级
-// ——此时若后台实际开启了邮箱验证，后台会用精确的业务错误文案拒绝注册，
-// 用户可见，不会静默失败。
+// GET /api/status 探测一次（进程内缓存 60s）。探测失败时**不能**按「邮箱
+// 可选」降级：线上后台已开启 `email_verification=true`，此时 email +
+// verification_code 是硬契约，降级会让用户漏填验证码、白白撞一次后台拒绝。
+// 因此探测失败必须返回 None（Tauri command 报错），UI 保持「邮箱+验证码必填」
+// 的保守形态；也只有响应里显式带 `success:true` 和 bool 的
+// `email_verification` 才可信（见 parse_status_config）。
 //
 // 注意：**登录加密不走这里**。是否需要密码加密传输，只问
 // GET /api/user/login/encryption-key 自己的 enabled（见 login_encryption），
@@ -178,16 +326,34 @@ pub struct AuthConfig {
     pub password_register_enabled: bool,
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct StatusWire {
-    #[serde(default)]
-    email_verification: bool,
-    #[serde(default = "default_true")]
-    password_register_enabled: bool,
-}
-
-fn default_true() -> bool {
-    true
+/// 纯解析 `GET /api/status`：只有「HTTP 2xx + 显式 `success:true` + data 里
+/// 显式带 bool 的 `email_verification`」才算探测成功。
+///
+/// 【codereview 修复 A】旧实现用 `StatusWire` + `#[serde(default)]` 反序列化，
+/// 且只检查 `resp.status().is_success()`：200 的网关错误页 JSON、
+/// `success:false` 的业务错误、或 data 里缺字段的响应，都会被静默解析成
+/// `email_verification:false`。前端本轮刚改成「只有显式 false 才放开邮箱
+/// 必填」，这类响应恰好会**反向降级**成可选，把 fail-closed 又打开。
+/// 探测失败必须返回 None（Tauri command 报错），UI 保持「邮箱+验证码必填」。
+fn parse_status_config(status: u16, body: &str) -> Option<AuthConfig> {
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if v.get("success").and_then(|x| x.as_bool()) != Some(true) {
+        return None;
+    }
+    let data = v.get("data")?;
+    // 必须显式是 bool：缺字段/被改写成字符串都不能当成「后台关闭了验证」。
+    let email_verification = data.get("email_verification")?.as_bool()?;
+    let password_register_enabled = data
+        .get("password_register_enabled")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true);
+    Some(AuthConfig {
+        email_verification,
+        password_register_enabled,
+    })
 }
 
 /// `GET /api/user/login/encryption-key` 的响应子集。
@@ -373,12 +539,14 @@ fn encrypt_password_v2(password: &str, public_key_pem: &str, kid: &str) -> Resul
 }
 
 impl AuthState {
-    /// 探测后台账号能力（带 60s 缓存）。失败返回 None（调用方按关闭降级）。
+    /// 探测后台账号能力（带 60s 缓存）。失败返回 None，Tauri command 会报错，
+    /// 前端因此保持「邮箱+验证码必填」的保守形态（绝不降级成可选）。
     pub async fn auth_config(&self) -> Option<AuthConfig> {
+        self.ensure_host().await;
         if let Some(cfg) = config_cache_get() {
             return Some(cfg);
         }
-        let url = format!("{}/api/status", self.base_url);
+        let url = format!("{}/api/status", self.host());
         let resp = self
             .client
             .get(&url)
@@ -386,17 +554,11 @@ impl AuthState {
             .send()
             .await
             .ok()?;
-        if !resp.status().is_success() {
-            return None;
-        }
+        let status = resp.status().as_u16();
         let body = resp.text().await.ok()?;
-        let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-        let data = v.get("data").unwrap_or(&v);
-        let wire: StatusWire = serde_json::from_value(data.clone()).ok()?;
-        let cfg = AuthConfig {
-            email_verification: wire.email_verification,
-            password_register_enabled: wire.password_register_enabled,
-        };
+        // 只有真正的 success:true + 显式 bool 字段才缓存；异常 JSON 一律不缓存，
+        // 避免把「探测失败」固化 60 秒，也避免反向降级邮箱验证。
+        let cfg = parse_status_config(status, &body)?;
         config_cache_put(&cfg);
         Some(cfg)
     }
@@ -419,6 +581,7 @@ impl AuthState {
     /// 上一版把取公钥失败一律当致命错误，会让对接**旧版后台**（404，且该版本
     /// 根本不校验加密）的客户端从「能登录」退化成「硬失败」。
     pub async fn login_encryption(&self) -> LoginEncryption {
+        self.ensure_host().await;
         if let Some(key) = key_cache_get() {
             return if key.enabled && !key.kid.is_empty() && !key.public_key.is_empty() {
                 LoginEncryption::Required(key)
@@ -426,11 +589,11 @@ impl AuthState {
                 LoginEncryption::Disabled
             };
         }
-        let url = format!("{}/api/user/login/encryption-key", self.base_url);
+        let url = format!("{}/api/user/login/encryption-key", self.host());
         let resp = match self
             .client
             .get(&url)
-            .header("Origin", request_origin(&self.base_url))
+            .header("Origin", request_origin(&self.host()))
             .header("Accept", "application/json")
             .send()
             .await
@@ -460,19 +623,20 @@ impl AuthState {
     /// 发送注册邮箱验证码（admin: GET /api/verification?email=...）。
     /// 返回后台的 message（成功提示或精确错误）。
     pub async fn send_verification_code(&self, email: &str) -> Result<String, String> {
+        self.ensure_host().await;
         let email = email.trim();
         if email.is_empty() {
             return Err("请先填写邮箱地址".to_string());
         }
         let url = format!(
             "{}/api/verification?email={}",
-            self.base_url,
+            self.host(),
             urlenc(email)
         );
         let resp = self
             .client
             .get(&url)
-            .header("Origin", request_origin(&self.base_url))
+            .header("Origin", request_origin(&self.host()))
             .header("Accept", "application/json")
             .send()
             .await
@@ -486,7 +650,10 @@ impl AuthState {
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
-        if !status.is_success() || v.get("success").and_then(|x| x.as_bool()) == Some(false) {
+        // 与 parse_api_response 一致：admin 成功响应显式带 success:true；
+        // 旧实现用 == Some(false) 判失败，缺 success 字段的 200 JSON 会
+        // 被当成「验证码已发送」，用户就永远等不到邮件。
+        if !status.is_success() || v.get("success").and_then(|x| x.as_bool()) != Some(true) {
             return Err(if msg.is_empty() {
                 format!("验证码发送失败（HTTP {}）", status.as_u16())
             } else {
@@ -572,14 +739,21 @@ async fn keyring_clear() {
     .await;
 }
 
-/// 统一解析 new-api 的响应：HTTP 非 2xx 或 `success:false` 都算业务错误。
+/// 统一解析 new-api 的响应：只有「HTTP 2xx + 显式 `success:true`」算成功。
+///
+/// 【codereview 修复 B】旧实现用 `success == Some(false)` 判失败：只要响应里
+/// 缺 `success`（网关错误页 JSON、被改写的 200、非 JSON 之外的异常信封），
+/// 就会被当成成功继续走 data 解析。admin 的所有成功响应
+/// （writeLoginResponse / RefreshAuth / GetSelf）都显式带 `success:true`，
+/// 因此这里与 parse_register_response 统一成 fail-closed，避免同一类漏洞
+/// 在登录 / refresh / self 三条链路上各留一份。
 fn parse_api_response<T: for<'de> Deserialize<'de>>(
     status: reqwest::StatusCode,
     body: &str,
 ) -> Result<T, String> {
     let v: serde_json::Value = serde_json::from_str(body)
         .map_err(|_e| format!("后台返回无法解析（{}）", status.as_u16()))?;
-    if !status.is_success() || v.get("success").and_then(|x| x.as_bool()) == Some(false) {
+    if !status.is_success() || v.get("success").and_then(|x| x.as_bool()) != Some(true) {
         // new-api 的 writeAuthSessionError 把精确原因放在 code 里，message 只是
         // HTTP StatusText（如 "Unauthorized"）。把 code 带出来，客户端才能
         // 区分「会话已撤销」与「网络/限流/后台 5xx」，避免误清用户凭据。
@@ -602,6 +776,85 @@ fn parse_api_response<T: for<'de> Deserialize<'de>>(
     }
     let data = v.get("data").cloned().unwrap_or(serde_json::Value::Null);
     serde_json::from_value(data).map_err(|e| format!("后台响应字段缺失: {}", e))
+}
+
+/// 登录响应的解析：**先判业务结果，再看 Cookie**。
+///
+/// 【2026-11 修复】旧 `login()` 在 `resp.text()` 之前就
+/// `.ok_or_else(|| "后台未返回登录会话（Set-Cookie 缺失）")`，于是
+/// 静态站 404 HTML、密码错误（HTTP 200 + success:false）、限流、网关 5xx、
+/// 两阶段验证 challenge 这些**本来就没有 Set-Cookie** 的响应，全被伪装成
+/// 同一句会话错误，用户和日志都看不到真因。现在统一先解析响应体：
+/// 错误响应原样透出后台 message/code，只有「业务成功且是标准登录 data」
+/// 才有资格要求 Cookie。
+fn parse_login_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<AuthData, String> {
+    let v: serde_json::Value = serde_json::from_str(body).map_err(|_| {
+        // 404 + HTML 是「请求打到了静态官网/网关而非 new-api」的典型特征，
+        // 给一句可执行的线索，别再让它退化成 Set-Cookie 缺失。
+        if status.as_u16() == 404 {
+            "后台返回 404（可能是请求被静态站/网关拦截，未到达账号服务）".to_string()
+        } else {
+            format!("后台返回无法解析（HTTP {}）", status.as_u16())
+        }
+    })?;
+    let business_ok = status.is_success()
+        && v.get("success").and_then(|x| x.as_bool()) == Some(true);
+    if business_ok {
+        let data = v.get("data").cloned().unwrap_or(serde_json::Value::Null);
+        // admin `StartLoginVerification` 成功时返回 challenge（2FA / 邮箱
+        // challenge），data 里没有 access_token，也不发 Cookie。桌面端暂不支持
+        // 两步流程，必须明确报错而不是被当成「Set-Cookie 缺失」或解析失败。
+        if data
+            .get("require_verification")
+            .and_then(|x| x.as_bool())
+            == Some(true)
+        {
+            return Err(
+                "该账号需要额外验证（两步验证/邮箱验证），请先在网页端完成".to_string(),
+            );
+        }
+    }
+    // 错误分支（含 HTTP 200 + success:false、缺 success 字段的异常 JSON）
+    // 复用统一解析，带出 message + code；成功分支要求显式 success:true。
+    parse_api_response::<AuthData>(status, body)
+}
+
+/// 注册响应的解析。admin `Register` 成功只回
+/// `{success:true,message:""}`，**没有 data、也不发 Cookie**。
+///
+/// 旧实现用 `success == Some(false)` 判失败：响应里缺 `success` 字段（网关
+/// 错误页 JSON、被改写的响应）时会被当成注册成功并继续自动登录，属于
+/// fail-open。注册接口契约明确带 `success:true`，因此这里要求显式为 true。
+fn parse_register_response(status: reqwest::StatusCode, body: &str) -> Result<(), String> {
+    let v: serde_json::Value = serde_json::from_str(body).map_err(|_| {
+        if status.as_u16() == 404 {
+            "后台返回 404（可能是请求被静态站/网关拦截，未到达账号服务）".to_string()
+        } else {
+            format!("后台返回无法解析（HTTP {}）", status.as_u16())
+        }
+    })?;
+    if !status.is_success() || v.get("success").and_then(|x| x.as_bool()) != Some(true) {
+        let code = v
+            .get("code")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        let msg = v
+            .get("message")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("后台返回 HTTP {}", status.as_u16()));
+        return Err(if code.is_empty() {
+            msg
+        } else {
+            format!("{} [{}]", msg, code)
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -696,8 +949,137 @@ fn session_from_auth_data(
 /// refresh/logout 必须带 Origin（见模块头注释）；login/register 带上也无害，
 /// 且能避免 secure cookie 部署下将来给这些路由补 guard 时出现不对称。
 fn request_origin(base: &str) -> String {
-    // 与 request.Host 同源：base 形如 https://www.gourdwork.com。
+    // 与 request.Host 同源：base 是竞速选站后锁定的站点 host。
     base.trim_end_matches('/').to_string()
+}
+
+/// 登录态就绪后准备官方模型凭据，写入内核进程内存。
+///
+/// 【为什么不在 login() 里做】login/refresh 持 `session_lock`，而本函数经
+/// `authorized_get()` 在 access token 临近到期时会再走 refresh（也要拿同一把
+/// 锁）——在锁内调用必然死锁。因此调用点一律在 Tauri command 层 / install
+/// 的 restore 之后（那时锁已释放）。
+///
+/// 【缓存与强制重取】用户明确「总不能每次调用都后台取，性能不好」：默认只要
+/// 内核里已有同一 user_id、非空 key 且未被标记 stale 的凭据就直接返回，零网络。
+/// 但服务端可以在桌面不知情的情况下改变这把 key（删/禁用/重置 token、额度
+/// 变化、换账号、同账号重登、模型调用 401），因此 `force=true` 时跳过缓存
+/// 直接回后台取一次。`official::is_stale()` 为真时自动按 force 处理。
+///
+/// 【代际复核】本函数是「读会话 → await 网络 → await /v1/models → 写」的长流程，
+/// 期间用户可能已登出/切换账号/另一路 prime 先写成功。用开始时的 generation
+/// 经 `set_if` 复核，过期流程写不回来（见 core/official.rs）。
+///
+/// 【失败不破坏缓存】取 key 失败只记 warn，绝不影响「登录成功」本身，也**不
+/// 清空已有缓存**——否则一次网络抖动会把本来可用的 key 清掉、UI 误判未登录。
+/// 只有「确认会话已不存在」才 clear。
+pub async fn prime_official_credential(state: &AuthState, force: bool) {
+    let Some(s) = state.snapshot() else {
+        gourd_work_core::official::clear();
+        return;
+    };
+    if s.access_token.is_empty() || s.user_id <= 0 {
+        gourd_work_core::official::clear();
+        return;
+    }
+    let force = force || gourd_work_core::official::is_stale();
+    if !force {
+        // 缓存命中：同一账号已注入过且未标记失效 → 不再回后台。
+        if let Some(existing) = gourd_work_core::official::get() {
+            if existing.user_id == s.user_id && !existing.key.is_empty() {
+                return;
+            }
+        }
+    }
+    let generation = gourd_work_core::official::generation();
+    // 用户自己的普通模型 key：有就取已有的，新注册用户由 admin 自动建一个。
+    let key = match state.authorized_get("/api/user/self/model-key").await {
+        Ok(v) => v
+            .get("key")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .trim_start_matches("sk-")
+            .to_string(),
+        Err(e) => {
+            tracing::warn!(error = %e, "official model key unavailable; login still valid");
+            return;
+        }
+    };
+    if key.is_empty() {
+        tracing::warn!("official model key endpoint returned an empty key");
+        return;
+    }
+    // 官方模型列表也只拉一次。失败时保留空列表，key 仍写进内存（模型仍可调）。
+    let models = fetch_official_models(state, &key).await;
+    // set 前复核代际：登出/换账号期间启动的旧 prime 不能覆盖新会话的凭据。
+    if !gourd_work_core::official::set_if(generation, gourd_work_core::official::OfficialCredential {
+        key,
+        // 记录凭据是从哪个站点取的：账号链路与模型 relay 必须同一 host。
+        base_url: gourd_work_core::official::base_url(),
+        user_id: s.user_id,
+        username: if s.display_name.is_empty() { s.username.clone() } else { s.display_name.clone() },
+        models,
+    }) {
+        tracing::warn!("official credential prime discarded: session changed during fetch");
+    }
+}
+
+/// 用用户 key 直调官方 `/v1/models`（Bearer sk-<key>），解析 OpenAI 兼容列表。
+/// 这是 relay 端点，响应没有 `success:true` 信封，故不走 parse_api_response。
+async fn fetch_official_models(
+    state: &AuthState,
+    key: &str,
+) -> Vec<gourd_work_core::official::OfficialModel> {
+    let url = format!("{}/v1/models", state.host());
+    let resp = match state
+        .client
+        .get(&url)
+        .header("Accept", "application/json")
+        .bearer_auth(format!("sk-{}", key))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "official /v1/models request failed");
+            return Vec::new();
+        }
+    };
+    if !resp.status().is_success() {
+        tracing::warn!(status = %resp.status(), "official /v1/models returned non-2xx");
+        return Vec::new();
+    }
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let arr = v
+        .get("data")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for item in arr {
+        let id = item.get("id").and_then(|x| x.as_str()).unwrap_or("").trim();
+        if id.is_empty() {
+            continue;
+        }
+        let owned_by = item
+            .get("owned_by")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        out.push(gourd_work_core::official::OfficialModel {
+            id: id.to_string(),
+            owned_by,
+        });
+    }
+    out
 }
 
 impl AuthState {
@@ -705,8 +1087,9 @@ impl AuthState {
     /// 后台开启密码加密传输时，自动取公钥并以 v2 信封提交
     /// （明文 password 在该配置下会被后台判 Invalid parameters）。
     pub async fn login(&self, username: &str, password: &str) -> Result<AuthStatus, String> {
+        self.ensure_host().await;
         let _guard = self.session_lock.lock().await;
-        let url = format!("{}/api/user/login", self.base_url);
+        let url = format!("{}/api/user/login", self.host());
         let mut payload = serde_json::json!({ "username": username, "password": password });
         // 是否需要加密，只问 /api/user/login/encryption-key 这一个端点。
         // 不再依赖 /api/status 的探测结果 —— 见 login_encryption 的说明。
@@ -733,17 +1116,22 @@ impl AuthState {
         let resp = self
             .client
             .post(&url)
-            .header("Origin", request_origin(&self.base_url))
+            .header("Origin", request_origin(&self.host()))
             .header("Accept", "application/json")
             .json(&payload)
             .send()
             .await
             .map_err(|e| format!("无法连接后台: {}", e))?;
         let status = resp.status();
-        let refresh = extract_set_cookie(resp.headers(), REFRESH_COOKIE_NAME)
-            .ok_or_else(|| "后台未返回登录会话（Set-Cookie 缺失）".to_string())?;
+        // `Response::text()` 会消费 resp，Cookie 头必须先取出来；但**判定顺序**
+        // 不能反：只有业务成功且拿到标准登录 data 后，才检查这个 Option。
+        // 旧实现先 `.ok_or_else("Set-Cookie 缺失")`，把 404 HTML、密码错误、
+        // 限流、2FA challenge 这些本就不会带 Cookie 的响应全部伪装成会话错误。
+        let refresh = extract_set_cookie(resp.headers(), REFRESH_COOKIE_NAME);
         let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
-        let data: AuthData = parse_api_response(status, &body)?;
+        let data: AuthData = parse_login_response(status, &body)?;
+        let refresh = refresh
+            .ok_or_else(|| "后台未返回登录会话（Set-Cookie 缺失）".to_string())?;
         if data.access_token.is_empty() || data.session.sid.is_empty() {
             // 两阶段验证（2FA / 邮箱 challenge）会返回非标准 data，桌面端
             // 暂不支持；明确报错而不是静默当成登录成功。
@@ -770,7 +1158,8 @@ impl AuthState {
         email: &str,
         verification_code: &str,
     ) -> Result<AuthStatus, String> {
-        let url = format!("{}/api/user/register", self.base_url);
+        self.ensure_host().await;
+        let url = format!("{}/api/user/register", self.host());
         let mut payload = serde_json::json!({ "username": username, "password": password });
         if !email.trim().is_empty() {
             payload["email"] = serde_json::Value::String(email.trim().to_string());
@@ -782,7 +1171,7 @@ impl AuthState {
         let resp = self
             .client
             .post(&url)
-            .header("Origin", request_origin(&self.base_url))
+            .header("Origin", request_origin(&self.host()))
             .header("Accept", "application/json")
             .json(&payload)
             .send()
@@ -791,29 +1180,7 @@ impl AuthState {
         let status = resp.status();
         let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
         // 注册响应没有 data 字段，单独按 success 判定。
-        let v: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|_| format!("后台返回无法解析（{}）", status.as_u16()))?;
-        if !status.is_success() || v.get("success").and_then(|x| x.as_bool()) == Some(false) {
-        // new-api 的 writeAuthSessionError 把精确原因放在 code 里，message 只是
-        // HTTP StatusText（如 "Unauthorized"）。把 code 带出来，客户端才能
-        // 区分「会话已撤销」与「网络/限流/后台 5xx」，避免误清用户凭据。
-        let code = v
-            .get("code")
-            .and_then(|x| x.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("");
-        let msg = v
-            .get("message")
-            .and_then(|x| x.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("后台返回 HTTP {}", status.as_u16()));
-        return Err(if code.is_empty() {
-            msg
-        } else {
-            format!("{} [{}]", msg, code)
-        });
-        }
+        parse_register_response(status, &body)?;
         self.login(username, password).await
     }
 
@@ -821,6 +1188,7 @@ impl AuthState {
     /// 后者必须写回 keyring —— 否则重启后会拿旧 secret 去 refresh，被服务端
     /// 的 replay 检测判为复用而撤销整个会话。
     pub async fn refresh(&self) -> Result<AuthStatus, String> {
+        self.ensure_host().await;
         // 串行化：并发的两路 refresh 若都用旧 secret，会踩服务端的 replay
         // 检测（错开 grace window 时整个会话被撤销）。持锁后重新读取，
         // 若前一个请求已经轮换出仍然有效的新令牌，直接复用即可。
@@ -834,11 +1202,11 @@ impl AuthState {
             // 无谓消耗一次 refresh secret 并引入并发风险。
             return Ok(self.status());
         }
-        let url = format!("{}/api/user/auth/refresh", self.base_url);
+        let url = format!("{}/api/user/auth/refresh", self.host());
         let resp = self
             .client
             .post(&url)
-            .header("Origin", request_origin(&self.base_url))
+            .header("Origin", request_origin(&self.host()))
             .header("Accept", "application/json")
             .header("X-Auth-Session", &current.sid)
             .header(
@@ -874,15 +1242,16 @@ impl AuthState {
     /// 退出登录：服务端撤销会话 + 清本地凭据。即便网络失败也必须清本地，
     /// 否则「退出」后重启又被 keyring 自动恢复成登录态。
     pub async fn logout(&self) -> Result<(), String> {
+        self.ensure_host().await;
         let _guard = self.session_lock.lock().await;
         let current = self.snapshot();
         if let Some(ref s) = current {
             if !s.refresh_token.is_empty() {
-                let url = format!("{}/api/user/auth/logout", self.base_url);
+                let url = format!("{}/api/user/auth/logout", self.host());
                 let _ = self
                     .client
                     .post(&url)
-                    .header("Origin", request_origin(&self.base_url))
+                    .header("Origin", request_origin(&self.host()))
                     .header("Accept", "application/json")
                     .header("X-Auth-Session", &s.sid)
                     .header(
@@ -896,12 +1265,15 @@ impl AuthState {
         }
         self.store(None);
         keyring_clear().await;
+        // 官方模型凭据只在进程内存：退出必须一起清，否则下个账号会误用上一个账号的 key。
+        gourd_work_core::official::clear();
         Ok(())
     }
 
     /// 启动恢复：从 keyring 读回会话 → 立即 refresh 一次 → 启动保活。
     /// 这是「桌面端不退出就一直登录」的另一半：进程重启也算一次使用。
     pub async fn restore(&self) -> AuthStatus {
+        self.ensure_host().await;
         if let Some(s) = keyring_load().await {
             self.store(Some(s));
             if let Err(e) = self.refresh().await {
@@ -913,10 +1285,15 @@ impl AuthState {
                     tracing::warn!(error = %e, "stored session is no longer valid; clearing");
                     self.store(None);
                     keyring_clear().await;
+                    gourd_work_core::official::clear();
                 } else {
                     tracing::warn!(error = %e, "startup refresh failed (transient); will retry");
                 }
             }
+        }
+        // restore 之后 session_lock 已释放：补一次官方凭据（有缓存则零网络）。
+        if self.status().signed_in {
+            prime_official_credential(self, false).await;
         }
         self.start_keeper();
         self.status()
@@ -939,19 +1316,26 @@ impl AuthState {
 
     /// 需要鉴权的后台请求（如 /api/user/self）。access token 临近到期时先刷新。
     pub async fn authorized_get(&self, path: &str) -> Result<serde_json::Value, String> {
+        self.ensure_host().await;
         if self
             .snapshot()
             .map(|s| s.access_expires_at <= now_secs() + REFRESH_LEAD_SECS)
             .unwrap_or(true)
         {
-            self.refresh().await?;
+            if let Err(e) = self.refresh().await {
+                // 会话被判定不可恢复：官方 key 必须跟着会话一起失效。
+                if is_session_terminal_error(&e) {
+                    gourd_work_core::official::clear();
+                }
+                return Err(e);
+            }
         }
         let s = self.snapshot().ok_or_else(|| "尚未登录".to_string())?;
-        let url = format!("{}{}", self.base_url, path);
+        let url = format!("{}{}", self.host(), path);
         let resp = self
             .client
             .get(&url)
-            .header("Origin", request_origin(&self.base_url))
+            .header("Origin", request_origin(&self.host()))
             .header("Accept", "application/json")
             .bearer_auth(&s.access_token)
             .send()
@@ -959,7 +1343,14 @@ impl AuthState {
             .map_err(|e| format!("无法连接后台: {}", e))?;
         let status = resp.status();
         let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
-        parse_api_response(status, &body)
+        let result = parse_api_response(status, &body);
+        if let Err(ref e) = result {
+            // 任何鉴权请求若被服务端判定「会话已死」，都不能继续留着模型 key。
+            if is_session_terminal_error(e) {
+                gourd_work_core::official::clear();
+            }
+        }
+        result
     }
 
     /// 常驻保活任务：按 access_expires_at 提前刷新；失败按固定间隔重试，
@@ -996,6 +1387,7 @@ impl AuthState {
                         if is_session_terminal_error(&e) {
                             state.store(None);
                             keyring_clear().await;
+                            gourd_work_core::official::clear();
                         }
                         false
                     }
@@ -1057,8 +1449,25 @@ pub fn install(app: &tauri::AppHandle) -> Arc<AuthState> {
     let state = Arc::new(AuthState::new());
     KEEPER_STATE.install(state.clone());
     app.manage(state.clone());
+
+    // 失效闭环：core 的 LlmClient 拿到 401/403 会调这个 hook，由壳异步
+    // **强制**重新取一次 key（core 自身不发网络请求）。不清缓存：重取成功前
+    // 保留旧 key 不会带来额外安全损失（它本来就调不通），但能避免当前 run
+    // 与 UI 抖动成「请先登录」。重取成功后 official::set 会清 stale 并换新 key。
+    let on_failure = state.clone();
+    gourd_work_core::official::set_refresh_hook(std::sync::Arc::new(move || {
+        let s = on_failure.clone();
+        async_runtime::spawn(async move {
+            prime_official_credential(&s, true).await;
+        });
+    }));
+
     let s = state.clone();
     async_runtime::spawn(async move {
+        // 与登录/取 key 共用同一个幂等闸门：竞速选站只跑一次，restore 的
+        // refresh 与随后 prime 一定用同一个 host。全部探测失败保留默认站，
+        // 启动流程不因此卡死。
+        s.ensure_host().await;
         let _ = s.restore().await;
     });
     state
@@ -1084,7 +1493,14 @@ pub async fn auth_login(
     username: String,
     password: String,
 ) -> Result<AuthStatus, String> {
-    state_of(&app)?.login(&username, &password).await
+    let state = state_of(&app)?;
+    let status = state.login(&username, &password).await?;
+    // 换账号 / 同账号重登：必须先清掉旧凭据再强制重取。否则 prime 的缓存
+    // 命中（同 user_id 有非空 key）会跳过服务端查询，旧 key（可能已被删/
+    // 重置，或干脆属于上一个账号）会一直用下去。
+    gourd_work_core::official::clear();
+    prime_official_credential(&state, true).await;
+    Ok(status)
 }
 
 #[tauri::command]
@@ -1095,9 +1511,14 @@ pub async fn auth_register(
     email: String,
     verification_code: String,
 ) -> Result<AuthStatus, String> {
-    state_of(&app)?
+    let state = state_of(&app)?;
+    let status = state
         .register(&username, &password, &email, &verification_code)
-        .await
+        .await?;
+    // 注册成功后 Register 内部会再 login 一次；新用户此时已有 admin 自动建的 key。
+    gourd_work_core::official::clear();
+    prime_official_credential(&state, true).await;
+    Ok(status)
 }
 
 #[tauri::command]
@@ -1115,13 +1536,42 @@ pub async fn auth_config(app: tauri::AppHandle) -> Result<AuthConfig, String> {
 
 #[tauri::command]
 pub async fn auth_logout(app: tauri::AppHandle) -> Result<AuthStatus, String> {
-    state_of(&app)?.logout().await?;
-    Ok(state_of(&app)?.status())
+    let state = state_of(&app)?;
+    state.logout().await?;
+    gourd_work_core::official::clear();
+    Ok(state.status())
+}
+
+/// 官方模型凭据手动刷新（UI 刷新按钮/登录态变化）：强制重取一次。
+/// 暴露给前端的 IPC 不含 key，只返回是否已就绪。
+///
+/// 不再「先 clear 再取」：那样一旦后台瞬时不可用，本来有效的 key 会被清掉，
+/// UI 直接变成未登录。改为 force prime，成功才用 set_if 替换，失败保留旧缓存。
+#[tauri::command]
+pub async fn auth_official_refresh(app: tauri::AppHandle) -> Result<bool, String> {
+    let state = state_of(&app)?;
+    if !state.status().signed_in {
+        gourd_work_core::official::clear();
+        return Ok(false);
+    }
+    prime_official_credential(&state, true).await;
+    Ok(gourd_work_core::official::is_ready())
 }
 
 #[tauri::command]
 pub async fn auth_refresh(app: tauri::AppHandle) -> Result<AuthStatus, String> {
-    state_of(&app)?.refresh().await
+    let state = state_of(&app)?;
+    match state.refresh().await {
+        Ok(status) => Ok(status),
+        Err(e) => {
+            // 会话已被服务端判定不可恢复：模型 key 必须与会话一起失效，
+            // 否则「账号已掉线但官方模型仍能用旧 key 调」的安全残留。
+            if is_session_terminal_error(&e) {
+                gourd_work_core::official::clear();
+            }
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -1207,6 +1657,70 @@ mod tests {
         assert!(!is_session_terminal_error("invalid peer certificate"));
     }
 
+    /// 【codereview 修复 A】旧 auth_config() 用 `StatusWire` +
+    /// `#[serde(default)]` 且只看 HTTP 200：200 的异常 JSON 会被静默解析成
+    /// `email_verification:false`，前端「只有显式 false 才放开」反而因此
+    /// 把邮箱+验证码降级成可选。探测必须 fail-closed。
+    #[test]
+    fn status_config_probe_is_fail_closed() {
+        let ok = r#"{"success":true,"data":{"email_verification":true,"password_register_enabled":true}}"#;
+        let cfg = parse_status_config(200, ok).expect("explicit success + bool must probe");
+        assert!(cfg.email_verification);
+        assert!(cfg.password_register_enabled);
+
+        // 后台明确关闭邮箱验证：唯一允许放开的情况。
+        let off = r#"{"success":true,"data":{"email_verification":false}}"#;
+        let cfg = parse_status_config(200, off).expect("explicit false is a valid probe");
+        assert!(!cfg.email_verification);
+        assert!(cfg.password_register_enabled, "missing flag defaults to allowed");
+
+        for (status, body, why) in [
+            (200, r#"{"success":false,"message":"oops"}"#, "business error"),
+            (200, r#"{"message":"proxy error"}"#, "missing success"),
+            (200, r#"{"success":true,"data":{}}"#, "missing flag"),
+            (200, r#"{"success":true,"data":{"email_verification":"false"}}"#, "non-bool flag"),
+            (200, r#"{"success":true}"#, "missing data"),
+            (200, "<html>200 ok</html>", "HTML body"),
+            (404, ok, "static-site 404"),
+            (500, ok, "gateway error"),
+        ] {
+            assert!(
+                parse_status_config(status, body).is_none(),
+                "{} must not be trusted as a probe: status={} body={}",
+                why,
+                status,
+                body
+            );
+        }
+    }
+
+    /// 【codereview 修复 B】成功必须显式 success:true；缺字段的 200 JSON
+    /// 不能被当成登录/refresh/self 成功，也不能绕过业务判定去查 Cookie。
+    #[test]
+    fn api_success_requires_explicit_true() {
+        let ok = r#"{"success":true,"data":{"access_token":"jwt","session":{"sid":"s1"},"user":{"id":7,"username":"alice"}}}"#;
+        let data = parse_login_response(reqwest::StatusCode::OK, ok).unwrap();
+        assert_eq!(data.access_token, "jwt");
+
+        for body in [
+            r#"{"data":{"access_token":"jwt","session":{"sid":"s1"}}}"#,
+            r#"{"message":"proxy injected 200"}"#,
+            r#"{"success":"true","data":{"access_token":"jwt"}}"#,
+        ] {
+            let err = parse_login_response(reqwest::StatusCode::OK, body).unwrap_err();
+            assert!(
+                !err.contains("Set-Cookie"),
+                "must fail before cookie judgment: {}",
+                err
+            );
+        }
+        assert!(parse_api_response::<AuthData>(
+            reqwest::StatusCode::OK,
+            r#"{"data":{"access_token":"jwt"}}"#,
+        )
+        .is_err());
+    }
+
     #[test]
     fn api_error_response_is_rejected_with_message() {
         let err = parse_api_response::<AuthData>(
@@ -1215,6 +1729,119 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("用户名或密码错误"));
+    }
+
+    /// 【2026-11 登录全坏修复】www 静态站 404 HTML、密码错误、限流、2FA
+    /// challenge 本就不会带 Set-Cookie；旧 login() 先查 Cookie 会把它们
+    /// 全部伪装成「Set-Cookie 缺失」。parse_login_response 必须先把真因
+    /// 透出来，只有业务成功且标准 data 才轮到检查 Cookie。
+    #[test]
+    fn login_response_errors_are_never_masked_as_missing_cookie() {
+        let html_404 = "<html><head><title>404 Not Found</title></head></html>";
+        let err = parse_login_response(reqwest::StatusCode::NOT_FOUND, html_404).unwrap_err();
+        assert!(err.contains("404"), "static-site 404 must surface: {}", err);
+        assert!(!err.contains("Set-Cookie"), "must not blame the cookie: {}", err);
+
+        // admin 业务错误是 HTTP 200 + success:false（ApiErrorT）。
+        let err = parse_login_response(
+            reqwest::StatusCode::OK,
+            r#"{"success":false,"message":"Username or password is incorrect"}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("Username or password is incorrect"), "{}", err);
+        assert!(!err.contains("Set-Cookie"));
+
+        // 限流/网关错误带 code 时必须原样透出，便于区分会话已死与暂时失败。
+        let err = parse_login_response(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"success":false,"message":"Too many requests","code":"AUTH_RATE_LIMIT"}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("AUTH_RATE_LIMIT"));
+    }
+
+    #[test]
+    fn login_challenge_is_reported_as_extra_verification() {
+        // StartLoginVerification 成功：success:true + challenge data，无 Cookie。
+        let body = serde_json::json!({
+            "success": true,
+            "data": {
+                "require_verification": true,
+                "flow_token": "f1",
+                "expires_at": 1700000000i64,
+                "methods": []
+            }
+        })
+        .to_string();
+        let err = parse_login_response(reqwest::StatusCode::OK, &body).unwrap_err();
+        assert!(err.contains("额外验证"), "{}", err);
+        assert!(!err.contains("Set-Cookie"), "must not blame the cookie: {}", err);
+    }
+
+    #[test]
+    fn successful_login_payload_is_still_parsed() {
+        let data = parse_login_response(
+            reqwest::StatusCode::OK,
+            &serde_json::json!({
+                "success": true,
+                "data": {
+                    "access_token": "jwt",
+                    "access_expires_at": 1700000900i64,
+                    "session": {"sid": "s1"},
+                    "user": {"id": 7, "username": "alice"}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(data.access_token, "jwt");
+        assert_eq!(data.session.sid, "s1");
+    }
+
+    /// 注册成功契约：`{success:true}`；旧实现用 `!= Some(false)`，缺字段的
+    /// 网关 JSON 会被当成成功并继续自动登录（fail-open）。
+    #[test]
+    fn register_response_is_fail_closed() {
+        assert!(parse_register_response(
+            reqwest::StatusCode::OK,
+            r#"{"success":true,"message":""}"#
+        )
+        .is_ok());
+        let err = parse_register_response(
+            reqwest::StatusCode::OK,
+            r#"{"success":false,"message":"Verification code is incorrect or has expired"}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("Verification code is incorrect"));
+        let err = parse_register_response(
+            reqwest::StatusCode::OK,
+            r#"{"message":"proxy error"}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("proxy error"), "missing success must fail: {}", err);
+        let err = parse_register_response(reqwest::StatusCode::NOT_FOUND, "<html>404</html>")
+            .unwrap_err();
+        assert!(err.contains("404"), "static-site 404 must surface: {}", err);
+    }
+
+    /// 双站点候选必须是 https、无尾斜杠，且默认站来自 core 的单一事实源。
+    /// Origin 头由当前锁定站点动态生成，与 request.Host 同源。
+    #[test]
+    fn auth_base_url_uses_the_official_host_allowlist() {
+        assert_eq!(
+            AUTH_BASE_URL,
+            gourd_work_core::official::DEFAULT_OFFICIAL_HOST
+        );
+        assert!(gourd_work_core::official::OFFICIAL_HOSTS
+            .iter()
+            .all(|h| h.starts_with("https://") && !h.ends_with('/')));
+        assert!(gourd_work_core::official::OFFICIAL_HOSTS
+            .contains(&"https://www.gourd-ai.cn"));
+        assert!(gourd_work_core::official::OFFICIAL_HOSTS
+            .contains(&"https://www.gourdwork.com"));
+        for h in gourd_work_core::official::OFFICIAL_HOSTS {
+            assert_eq!(request_origin(h), *h);
+        }
     }
 
     /// v2 信封必须能被 admin 的 DecryptPassword 语义解开：结构 4 段、

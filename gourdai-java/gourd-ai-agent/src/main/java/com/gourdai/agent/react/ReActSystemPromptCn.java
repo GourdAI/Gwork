@@ -16,6 +16,7 @@
 package com.gourdai.agent.react;
 
 import com.gourdai.agent.util.AskUserTool;
+import com.gourdai.agent.util.CompleteTaskTool;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Preview;
 import org.slf4j.Logger;
@@ -107,8 +108,19 @@ public class ReActSystemPromptCn implements ReActSystemPrompt {
         sb.append("## 核心规则\n")
                 .append("1. **工具调用**：如果需要调用工具，请【直接】触发函数调用（Function Calling）。\n")
                 .append("2. **结果导向**：所有结论必须基于工具返回的真实数据（Observation）。\n")
-                .append("3. **严禁伪造**：禁止在回复中模拟或伪造工具的执行过程。\n")
-                .append("4. **自然回复**：任务完成后，请以自然语言直接回复，无需输出 `Final Answer:` 等标签。\n");
+                .append("3. **严禁伪造**：禁止在回复中模拟或伪造工具的执行过程。\n");
+
+        // 契约 §4.2：自然完成规则改为推荐 complete_task（条件注入：工具集内才推荐，
+        // 避免诱导子代理幻觉调用）；纯文本 END 仍是合法兜底，保留「无需标签」语义。
+        if (CompleteTaskTool.isAvailable(trace.getOptions().getTools())) {
+            sb.append("4. **自然完成**：任务完成时，推荐调用 `complete_task` 提交最终总结（summary 即用户看到的最终回答）；")
+                    .append("以自然语言直接回复同样有效，均无需输出 `Final Answer:` 等标签。\n");
+        } else {
+            sb.append("4. **自然回复**：任务完成后，请以自然语言直接回复，无需输出 `Final Answer:` 等标签。\n");
+        }
+
+        // 契约 §2.4：收尾契约条款（紧随自然完成规则；无条件注入——总结去重纪律对无工具环境同样适用）
+        sb.append(CompleteTaskTool.CLOSING_CONTRACT_CN).append("\n");
 
         // 条件注入：仅当 ask_user 在当前工具集内才下发硬规则（否则会诱导模型幻觉调用不存在的工具）
         if (AskUserTool.isAvailable(trace.getOptions().getTools())) {
@@ -153,7 +165,16 @@ public class ReActSystemPromptCn implements ReActSystemPrompt {
         sb.append("## 最终答案要求\n")
                 .append("1. 当你获得结论或信息已足够时，必须给出最终答案。\n")
                 .append("2. 最终答案**必须**以 ").append(config.getFinishMarker()).append(" 开头。\n")
-                .append("3. 在 ").append(config.getFinishMarker()).append(" 之后直接提供完整回答，不要换行，不要输出标注标签。\n\n");
+                .append("3. 在 ").append(config.getFinishMarker()).append(" 之后直接提供完整回答，不要换行，不要输出标注标签。\n");
+
+        // 契约 §4.2：文本协议下 complete_task 经 Action 调用同样有效（工具集内才推荐）
+        if (CompleteTaskTool.isAvailable(trace.getOptions().getTools())) {
+            sb.append("4. 任务完成时，推荐通过 Action 调用 `complete_task` 提交最终总结（summary 即最终回答）；")
+                    .append("带 ").append(config.getFinishMarker()).append(" 前缀的最终答案同样有效。\n");
+        }
+
+        // 契约 §2.4：收尾契约条款（CN/EN 两套模板一致注入）
+        sb.append(CompleteTaskTool.CLOSING_CONTRACT_CN).append("\n\n");
 
         // C. 行为准则：防止模型出现伪造 Observation 或死循环
         sb.append("## 核心规则\n")

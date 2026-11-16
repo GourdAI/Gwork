@@ -101,6 +101,9 @@ func PostSetup(c *gin.Context) {
 			common.ApiErrorT(c, "Failed to create the administrator account: {{error}}", map[string]any{"error": err.Error()})
 			return
 		}
+		// Root is created by a bare DB.Create here, so it must go through the
+		// same post-creation hook as Register/CreateUser/OAuth/WeChat.
+		ensureInitialModelKey(&rootUser)
 	}
 
 	// Set operation modes

@@ -1,0 +1,82 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "meitu-ai",
+  "version": "1.0.0",
+  "description": "Use MeituHub in GWork to create and edit images and videos, produce marketing and e-commerce content, and run custom workflows.",
+  "keywords": [
+    "cli",
+    "skills"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "kind": "cli",
+      "tier": "cli",
+      "auth": {
+        "authType": "cli_login"
+      },
+      "display": {
+        "name": "MeituHub AI影像创作",
+        "name_en": "MeituHub AI Media Creation",
+        "description_zh": "在 GWork 中使用 MeituHub 完成图片与视频生成编辑、营销和电商内容创作，并运行自定义工作流。",
+        "description_en": "Use MeituHub in GWork to create and edit images and videos, produce marketing and e-commerce content, and run custom workflows."
+      },
+      "categories": [
+        "image-and-video-processing"
+      ],
+      "source": "vendor-cli:meitu-cli@2.1.31",
+      "cli_spec": {
+        "package": "meitu-cli",
+        "version": "2.1.31",
+        "binName": "meitu",
+        "binPath": "bin/meitu.js",
+        "npmEnv": {
+          "MEITU_OPENAPI_AUTH_MODE": "iam",
+          "MEITU_IAM_CLIENT_ID": "1189857723",
+          "MEITU_CLI_PARTITION": "cn",
+          "MEITU_CLI_OUTPUT_FORMAT": "full"
+        },
+        "auth": {
+          "argv": [
+            "auth",
+            "login",
+            "--force",
+            "--no-open-browser",
+            "--no-poll-progress"
+          ],
+          "urlDomain": "iam.meitu.com",
+          "waitForExit": true
+        },
+        "status": {
+          "argv": [
+            "auth",
+            "status"
+          ],
+          "matchRegex": "execution_auth_available:\\s*yes"
+        },
+        "unauth": {
+          "argv": [
+            "auth",
+            "logout",
+            "--json"
+          ]
+        }
+      },
+      "skills": [
+        {
+          "name": "meitu-ai",
+          "dir": "skills/meitu-ai"
+        }
+      ],
+      "skills_provenance": {
+        "source": "meitu-cli@2.1.31 官方技能（WB 公开仓库缓存 skills/ 原样复制，缺 LICENSE 由 npm license 字段补齐）",
+        "url": "https://www.npmjs.com/package/meitu-cli",
+        "license": "MIT",
+        "skillCount": 1,
+        "fileCount": 3,
+        "byteCount": 11283
+      },
+      "readme": "## MeituHub AI影像创作 CLI 连接器\n\n厂商官方 `meitu-cli@2.1.31`，扫码/浏览器授权，内置 1 套官方技能。\n\n### 连接方式\n\n1. 点击「连接」，GWork 自动准备 Node 运行时并安装官方 CLI；\n2. 弹窗展示授权链接/二维码，按厂商页面完成扫码或浏览器确认；\n3. 授权完成后自动连接。凭据由官方 CLI 自管，GWork 不接触 token。\n\n技能包来源：厂商公开 CLI 包随附技能文档（公开仓库缓存副本）；许可见各技能目录 LICENSE。"
+    }
+  }
+}

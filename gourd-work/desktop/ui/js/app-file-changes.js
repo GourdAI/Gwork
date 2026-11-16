@@ -565,7 +565,11 @@
 
     function renderCard(sess, runKey, force) {
         var summary = sess._fileChangesByRun ? sess._fileChangesByRun[runKey] : null;
-        if (!summary || !Array.isArray(summary.files) || !summary.files.length) return;
+        if (!summary || !Array.isArray(summary.files)) return;
+        /* 普通空快照仍不落卡；后端「无法完整追踪」的收尾警示快照（files:[] +
+            possiblyIncomplete:true + incompleteReasons）要出一张只有警示条的卡片，
+            warningSig 段与下面的 files 循环完全独立，空数组也能正常渲染。 */
+        if (!summary.files.length && summary.possiblyIncomplete !== true) return;
         var cache = cardCache(sess, runKey);
         if (!cache.el || !cache.el.isConnected) {
             /* 节点被 rerun / 容器清空删除后重建：签名必须作废，否则新节点拿旧签名
@@ -592,18 +596,29 @@
         var count = num(summary.fileCount) != null ? num(summary.fileCount) : files.length;
         var sumAdd = additions != null ? additions : statSum(files, 'additions');
         var sumDel = deletions != null ? deletions : statSum(files, 'deletions');
-        var headSig = [count, sumAdd, sumDel].join('\u0001');
+        var isWarningOnly = files.length === 0 && summary.possiblyIncomplete === true;
+        var headSig = [count, sumAdd, sumDel, isWarningOnly ? 'W' : '-'].join('\u0001');
         if (force || cache.headSig !== headSig) {
             cache.headSig = headSig;
-            cache.titleEl.textContent = t('edited_files', { count: count });
-            cache.statEl.innerHTML = diffStatHtml(sumAdd, sumDel);
+            /* A bash-only / abnormal run publishes an empty terminal snapshot.
+               A card that says "已编辑 0 个文件" with a review button opening an
+               empty list is misleading: it should read as a tracking warning. */
+            cache.titleEl.textContent = isWarningOnly
+                ? (t('possibly_incomplete') || t('edited_files', { count: 0 }))
+                : t('edited_files', { count: count });
+            cache.statEl.innerHTML = isWarningOnly ? '' : diffStatHtml(sumAdd, sumDel);
         }
 
         var stats = undoStats(summary, files);
-        var actionsSig = 'V' + (stats.undone > 0 ? 'R' : '-') + (stats.applied > 0 ? 'U' : '-');
+        var actionsSig = (isWarningOnly ? 'W' : 'V')
+            + (stats.undone > 0 ? 'R' : '-') + (stats.applied > 0 ? 'U' : '-');
         if (force || cache.actionsSig !== actionsSig) {
             cache.actionsSig = actionsSig;
             cache.headActionsEl.innerHTML = '';
+            if (isWarningOnly) {
+                /* No file rows and no undo state: a review/undo button would be
+                   a dead control. The warning strip below is the whole card. */
+            } else {
             cache.headActionsEl.appendChild(actionButton('review-run', t('review'), REVIEW_SVG, function () {
                 if (typeof window.openRunChangesViewer === 'function') window.openRunChangesViewer(sess, runKey);
             }));
@@ -617,10 +632,14 @@
                     layConfirm(t('confirm_undo_run'), function () { runOperation(sess, runKey, '/web/chat/changes/undo/run', 'undo_run_success', button); });
                 }));
             }
+            }
         }
 
-        /* 不完整提示：始终占 body 之前一位，行列表跟在它后面 */
-        var warningSig = summary.possiblyIncomplete ? incompleteText(summary) : '';
+        /* 不完整提示：始终占 body 之前一位，行列表跟在它后面；与 files 循环无耦合，
+            files:[] 的警示快照同样能出警示条。incompleteText 会过滤通用 bash 原因，
+            仅剩该原因时回落到基础文案，避免 possiblyIncomplete 为真却一片空白。 */
+        var warningSig = summary.possiblyIncomplete
+            ? (incompleteText(summary) || t('possibly_incomplete')) : '';
         if (force || cache.warningSig !== warningSig) {
             cache.warningSig = warningSig;
             if (cache.warning && cache.warning.parentNode === cache.el) cache.el.removeChild(cache.warning);
@@ -709,7 +728,10 @@
         /* 空快照（没有任何文件变更/新增）不生成任何卡片：直接短路，不落缓存、不参与 revision 门禁。
            否则空 run（或流式早期的空帧）会留下「0 个文件」的空壳；
            且一旦空帧占用 revision，同 revision 的有效快照会被单调门禁误挡。 */
-        if (!Array.isArray(summary.files) || !summary.files.length) return;
+        /* files:[] 且 possiblyIncomplete:true 的收尾警示快照必须落缓存并出卡；
+           纯空快照仍短路，下方 revision 单调门禁与缓存逻辑原样生效。 */
+        if (!Array.isArray(summary.files)) return;
+        if (!summary.files.length && summary.possiblyIncomplete !== true) return;
         if (!sess._fileChangesByRun) sess._fileChangesByRun = {};
         var runKey = String(runId);
         var previous = sess._fileChangesByRun[runKey];

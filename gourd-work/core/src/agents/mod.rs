@@ -560,9 +560,15 @@ fn expand_one(name: &str) -> Vec<String> {
         // above already matches them, and repeating them here is an unreachable
         // pattern the compiler warns about.
         "read" | "write" | "edit" | "bash" | "bash_output" | "glob" | "grep" | "websearch"
-        | "webfetch" | "ask_user" | "now" | "add_model" | "skillread" | "skillrefresh"
+        | "webfetch" | "now" | "add_model" | "skillread" | "skillrefresh"
         | "multitask" | "await_tasks" | "memory_extract" | "memory_search" | "memory_recall"
         | "memory_prune" => s(&[name]),
+
+        // 契约 §1.5 / §4.1：`ask_user` 与 `complete_task` 是主代理专属——子代理
+        // 即使显式声明也剔除（不只是 `**` 展开不含）。question 帧被转发层丢弃，
+        // 子代理挂起即父代理死等；complete_task 的直通 END 会截断子代理回传。
+        // 与 Java AgentFactory 子代理构建路径同口径。
+        "ask_user" | "complete_task" => Vec::new(),
 
         // No counterpart in this kernel (yet). Dropped, not errored.
         _ => Vec::new(),
@@ -588,16 +594,22 @@ const TOOL_ALL_PUBLIC: &[&str] = &[
 ];
 
 /// Java `TOOL_ALL_FULL` translated the same way. Adds memory (including
-/// `memory_consolidate`), `ask_user`, `add_model`, `generate`, `crawl_url` and
+/// `memory_consolidate`), `add_model`, `generate`, `crawl_url` and
 /// `recall_history` over `TOOL_ALL_PUBLIC`. `mcp`/`openapi`/`hitl` have no tool
 /// counterpart (`mcp` is handled as a separate flag, HITL is an access-mode
 /// concern, and the OpenAPI gateway is not ported); `lsp` is out of scope.
+///
+/// 契约 §1.5：`ask_user` 从 `**` 展开中剔除（Java `TOOL_ALL_FULL` 原有，此处
+/// 刻意不同步）。子代理的 question 帧会被转发层丢弃（team/mod.rs 的帧过滤），
+/// 挂起即父代理死等——所以子代理一律不可提问，由 §1.3 禁问条款兜底。
+/// `complete_task` 同理不进任何子代理通配集（契约 §4.1：子代理最终文本回传
+/// 父代理的机制不变，显式收尾是主代理专属语义）。
 const TOOL_ALL_FULL: &[&str] = &[
     "read", "write", "edit", "glob", "grep", "ls", "bash", "bash_output",
     "skillread", "skillrefresh", "skillsearch", "todowrite", "todoread",
     "websearch", "webfetch", "codesearch", "task", "multitask", "await_tasks", "code", "now",
     "memory_extract", "memory_search", "memory_recall", "memory_prune", "memory_consolidate",
-    "recall_history", "ask_user", "add_model", "generate", "crawl_url",
+    "recall_history", "add_model", "generate", "crawl_url",
 ];
 
 /// Java `TOOL_PI`.
@@ -812,17 +824,42 @@ mod tests {
         );
     }
 
-    /// `**` must be strictly wider than `*`.
+    /// 契约 §1.5：`**` 仍严格宽于 `*`，但不再含 ask_user（断言反转）——
+    /// 子代理挂起提问 = 父代理死等，question 帧在转发层就被丢弃。
+    /// complete_task 同口径排除（§4.1，子代理文本回传机制不变）。
     #[test]
     fn full_wildcard_is_wider_than_public() {
         let full = expand_tools(&["**".to_string()]).0;
         let public = expand_tools(&["*".to_string()]).0;
-        assert!(full.contains(&"ask_user".to_string()));
+        assert!(
+            !full.contains(&"ask_user".to_string()),
+            "`**` must NOT grant ask_user to a sub-agent: {:?}",
+            full
+        );
+        assert!(
+            !full.contains(&"complete_task".to_string()),
+            "`**` must NOT grant complete_task to a sub-agent: {:?}",
+            full
+        );
         assert!(full.contains(&"memory_extract".to_string()));
         assert!(full.len() > public.len(), "{} vs {}", full.len(), public.len());
         for t in &public {
             assert!(full.contains(t), "`**` must include everything `*` has: {}", t);
         }
+    }
+
+    /// 契约 §1.5 加固：显式声明 ask_user / complete_task 的子代理定义同样拿不到
+    /// （剔除发生在展开层，不只是通配集不含）。
+    #[test]
+    fn explicit_ask_user_or_complete_task_is_still_dropped_for_subagents() {
+        let (tools, _, _) = expand_tools(&[
+            "read".to_string(),
+            "ask_user".to_string(),
+            "complete_task".to_string(),
+        ]);
+        assert!(tools.contains(&"read".to_string()));
+        assert!(!tools.contains(&"ask_user".to_string()), "{:?}", tools);
+        assert!(!tools.contains(&"complete_task".to_string()), "{:?}", tools);
     }
 
     /// `pi` is the minimal set.

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "flova",
+  "version": "1.0.0",
+  "description": "Create video and image content with Flova AI, including scripts, short films, dramas, animation, movies, ads, product TVCs, visual design, storyboards, revisions, reviews, and exports.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "Flova",
+        "name_en": "Flova AI",
+        "description_zh": "Flova AI 视频与图片内容创作：支持剧本、短片、短剧、漫剧、电影、广告、商品 TVC 与视觉设计，覆盖文生图、文生视频、图生视频、素材生成、分镜、修改、审阅和导出。",
+        "description_en": "Create video and image content with Flova AI, including scripts, short films, dramas, animation, movies, ads, product TVCs, visual design, storyboards, revisions, reviews, and exports."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

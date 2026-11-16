@@ -64,6 +64,8 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"POST /api/user/sessions/revoke-others":        accessTokenSessionRule,
 	"GET /api/user/self/groups":                    accessTokenScopeRule("profile:read"),
 	"GET /api/user/self":                           accessTokenScopeRule("profile:read"),
+	// PAT 不能用自身权限自举换取模型 key；只允许会话身份验证。
+	"GET /api/user/self/model-key":                 accessTokenSessionRule,
 	"GET /api/user/models":                         accessTokenScopeRule("profile:read"),
 	"PUT /api/user/self":                           accessTokenScopeRule("profile:write"),
 	"DELETE /api/user/self":                        accessTokenScopeRule("account_security:write"),

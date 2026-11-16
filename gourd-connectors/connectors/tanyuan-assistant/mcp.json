@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "tanyuan-assistant": {
+      "type": "streamable_http",
+      "url": "https://api.tanyuan.qq.com/wb/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "腾讯数字文化智能体"
+      }
+    }
+  }
+}

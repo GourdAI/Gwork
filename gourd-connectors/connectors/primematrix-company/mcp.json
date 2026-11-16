@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "primematrix-company": {
+      "type": "streamable_http",
+      "url": "https://mcp.yidian.cn/mcp/company",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "质数幻方·企业数据"
+      }
+    }
+  }
+}

@@ -83,6 +83,7 @@ const COMMANDS: &[&str] = &[
     "auth_logout",
     "auth_refresh",
     "auth_self",
+    "auth_official_refresh",
     // ─── 自动更新（updater.rs）───────────────────────────────────────
     // 与 src/lib.rs 的 generate_handler! 一一对应；漏登会被 ACL 静默拒绝，
     // 表现为「检查更新按钮点了没反应」而非报错。

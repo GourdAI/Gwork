@@ -1,4 +1,4 @@
-﻿//! react — ReAct (Reason + Act) agent loop.
+//! react — ReAct (Reason + Act) agent loop.
 //!
 //! Implements the classic Thought → Action → Observation cycle:
 //! 1. Send conversation + tool definitions to the LLM
@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 use crate::config::{ModelConfig, Settings};
 use crate::llm::{ChatMessage, Role, StreamEvent, ToolCall, UsageInfo};
 use crate::protocol::Frame;
-use crate::tools::{ToolContext, ToolRegistry};
+use crate::tools::{ToolContext, ToolOutput, ToolRegistry};
 
 /// Wall clock in epoch milliseconds.
 fn now_ms() -> i64 {
@@ -277,6 +277,12 @@ pub struct ReActConfig {
     /// reaches `compress()` and lands in the retained window as an explicit focus
     /// turn.
     pub compact_focus: Option<String>,
+    /// 本次 run 是否为「异常中断后的恢复执行」（契约 §3.3）。
+    ///
+    /// 由 `run_react_session` 的 abnormal-exit 校准分支（`session_ctx.interrupted`）
+    /// 置位；透传到 `ToolContext`，让 todo 工具 footer 的恢复 [提示] 行只在校准
+    /// 语境出现。常规 run（含 ask_user/HITL 的正常挂起恢复）保持 false。
+    pub resume_calibration: bool,
 }
 
 /// Time to first token (ms) from the run's start to the first visible model output.
@@ -471,7 +477,40 @@ impl ReActAgent {
         frame_tx: mpsc::UnboundedSender<Frame>,
         cancel: CancellationToken,
     ) -> ReActResult {
-        let client = crate::llm::LlmClient::with_retries(config.model.clone(), config.settings.general.model_retries);
+        // 官方模型未登录时构造失败：发一个 error 帧并走统一的 done 出口，
+        // 不能 panic，也不能拿空 key 向官方 relay 发请求。
+        let client = match crate::llm::LlmClient::with_retries(
+            config.model.clone(),
+            config.settings.general.model_retries,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!("Failed to start LLM stream: {}", e);
+                let f = Frame::error(&config.session_id, &msg)
+                    .run(&config.run_id)
+                    .seq(config.start_seq);
+                let _ = frame_tx.send(f);
+                return ReActResult {
+                    final_answer: msg,
+                    turns_used: 0,
+                    usage: UsageInfo::default(),
+                    stop_reason: StopReason::Error,
+                    next_seq: config.start_seq + 1,
+                    messages: history,
+                    pending_command: None, pending_timeout_ms: None, pending_background: false,
+                    pending_tool_call_id: None,
+                };
+            }
+        };
+        // 【2026-11 用户决策】react 层重试预算与传输层同源同 clamp：
+        // 前台「正在重试 n/N」的 N 必须是用户设置的 modelRetries，
+        // 而不是 turns/maxTurns（AutoRethink 会把 20 扩到 30/40，
+        // 用户看到「设置 10 却重试 40」就是那条串线）。
+        let model_retry_budget = config
+            .settings
+            .general
+            .model_retries
+            .clamp(1, crate::tools::web_retry::MAX_ATTEMPTS_CEILING);
         // One gate for the whole run: the caller's (a sub-agent whitelist) when
         // given, otherwise the user's global `disallowedTools`. Resolved once here
         // so the definitions sent to the model and the `execute` check cannot
@@ -628,6 +667,10 @@ impl ReActAgent {
         // retry-of-the-same-call branch below must set this flag, and nothing else
         // may. `p2_retry_deadline_is_per_call_not_per_run` pins the set.
         let mut retry_of_same_call = false;
+        // 【2026-11 用户决策】本次模型调用已用的重试次数（react 层）。
+        // 与 retry_deadline 同生命周期：新调用清零，同调用重试累加；
+        // 上限 = model_retry_budget（用户设置的 modelRetries）。
+        let mut call_retries = 0u32;
         // Timeout-bucket counter, reset every round (Java counts per turn).
         let mut timeout_retries = 0u32;
         // Mutable: AutoRethink extends the ceiling as the run progresses
@@ -783,7 +826,12 @@ impl ReActAgent {
         }
 
         loop {
-            turns += 1;
+            // 【2026-11 用户决策】重试不再烧轮次：同一次模型调用的重试
+            // （retry_of_same_call）不递增 turns。旧实现 turns += 1 无条件
+            // 执行，重试既虚增「正在重试 n/N」的 n，又吃掉 maxTurns 预算。
+            if !retry_of_same_call {
+                turns += 1;
+            }
 
             // Cap 3 re-arm point: a fresh turn is a fresh `callWithRetry`, so it
             // gets its own retry budget (Java constructs `RetryTask` per call and
@@ -793,6 +841,8 @@ impl ReActAgent {
             // reachable at all.
             if !retry_of_same_call {
                 retry_deadline = retry_deadline_from_now();
+                // 新调用 = 新的重试计数（与 deadline 同生命周期）。
+                call_retries = 0;
             }
             retry_of_same_call = false;
 
@@ -1266,12 +1316,18 @@ impl ReActAgent {
                         // Degrade exactly like Java: no id or no name means the
                         // endpoint gave us nothing to pair a skeleton with, so
                         // emit nothing and let `action_start` build the card.
+                        //
+                        // 契约 §4.2：ask_user / complete_task 不建骨架卡（生命周期
+                        // 帧抑制，见 LIFECYCLE_SUPPRESSED_TOOLS）。仍记 args_progress
+                        // 以便执行段统一 remove，避免节流状态泄漏到后续轮次。
                         if !id.is_empty() && !name.is_empty() {
                             args_progress.insert(
                                 index,
                                 ArgsProgress::new(now_ms()),
                             );
-                            emit!(Frame::action_draft(&config.session_id, &name, &id));
+                            if !lifecycle_suppressed(&name) {
+                                emit!(Frame::action_draft(&config.session_id, &name, &id));
+                            }
                         }
                     }
                     StreamEvent::ToolCallArgsDelta { index, args } => {
@@ -1287,9 +1343,12 @@ impl ReActAgent {
                             // reason; the constants match it.
                             let bytes = tc.function.arguments.len() as u64;
                             let id = tc.id.clone();
+                            // 契约 §4.2：抑制名单内的工具无骨架卡，进度帧无处可更新，
+                            // 跳过（仍累计 bytes，执行段的收尾 flush 同样被抑制）。
+                            let suppressed = lifecycle_suppressed(&tc.function.name);
                             if let Some(p) = args_progress.get_mut(&index) {
                                 p.bytes = bytes;
-                                if p.should_emit(now_ms()) {
+                                if !suppressed && p.should_emit(now_ms()) {
                                     p.mark_emitted(bytes, now_ms());
                                     emit!(Frame::action_args(&config.session_id, &id, bytes));
                                 }
@@ -1301,9 +1360,33 @@ impl ReActAgent {
                             }
                         }
                     }
-                    StreamEvent::Retry { attempt, max, reason } => {
-                        // The transport gave up on a stream that had *already*
-                        // delivered deltas and is re-issuing the same request.
+                    StreamEvent::Retry { attempt, max, reason, delivered } => {
+                        // The transport is re-issuing the same request.
+                        //
+                        // 【2026-11 用户决策】首字节前的失败也到达这里
+                        // （delivered=false）：旧实现静默重试，用户观感是
+                        // 「报错了但根本没重试」。现在两种形态都发 retry 帧，
+                        // 计数一律是 attempt/modelRetries（Java
+                        // RetryNotifyInterceptor 契约），不再是 turns/maxTurns。
+                        if !delivered {
+                            // Nothing was rendered: accumulators are empty and
+                            // the DOM has no seam to roll back. Only surface the
+                            // retry banner (no discardPartial). TTFT/decode
+                            // latches stay untouched — no visible delta ever
+                            // happened, so there is nothing to re-anchor.
+                            warn!(
+                                session = %config.session_id,
+                                turn = turns,
+                                attempt,
+                                max,
+                                error = %reason,
+                                "stream attempt failed before first byte; retrying (visible)"
+                            );
+                            last_chunk_at = std::time::Instant::now();
+                            emit!(Frame::retry(&config.session_id, attempt, max, &reason));
+                            continue;
+                        }
+                        // The failed attempt had *already* delivered deltas.
                         // Every accumulator below has absorbed those deltas, so
                         // they must be dropped or the retry appends on top:
                         //
@@ -1474,11 +1557,13 @@ impl ReActAgent {
             // If the stream errored and produced nothing, retry or fail
             if let Some(err) = stream_error {
                 if content_buf.is_empty() && tool_calls.is_empty() {
-                    // Deterministic errors (de-listed model, bad key, 4xx)
-                    // must surface immediately: the client already refused to
-                    // retry them internally, and looping here would only burn
-                    // max_turns × 2s showing a spinner that can never succeed.
-                    let fatal = crate::llm::client::is_non_retryable(&err);
+                    // 【2026-11 用户决策】非 200 一律重试：不再按错误类别
+                    // 快速失败（旧 is_non_retryable 门控把网关 403 排队判成
+                    // 致命，第 1 次就放弃）。重试次数 = 用户设置的
+                    // modelRetries（与传输层同一预算、同一 clamp），计数
+                    // 展示 attempt/modelRetries，不再是 turns/maxTurns。
+                    // 保留的护栏：超时类每轮 ≤2（系统性慢上游）、单次调用
+                    // 45 分钟总预算。二者都只在重试路径上生效。
                     let timeout_class = crate::llm::client::is_timeout_class(&err);
                     // P2 cap 4: timeout-class failures ≤2 per round (Java:
                     // “连续两次都超时说明是系统性原因，第三次同样会超时”).
@@ -1492,14 +1577,16 @@ impl ReActAgent {
                     // cannot fake-extend it.
                     let timeout_out = timeout_class && timeout_retries >= MAX_TIMEOUT_RETRIES_PER_TURN;
                     let deadline_out = std::time::Instant::now() > retry_deadline;
-                    if !fatal && !timeout_out && !deadline_out && turns < max_turns {
+                    let retries_out = call_retries >= model_retry_budget;
+                    if !timeout_out && !deadline_out && !retries_out {
                         if timeout_class {
                             timeout_retries += 1;
                         }
+                        call_retries += 1;
                         // Same call, so keep its deadline (see the re-arm point at
                         // the top of this loop).
                         retry_of_same_call = true;
-                        emit!(Frame::retry(&config.session_id, turns, max_turns, &err));
+                        emit!(Frame::retry(&config.session_id, call_retries, model_retry_budget, &err));
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         continue;
                     } else {
@@ -1517,6 +1604,12 @@ impl ReActAgent {
                                  successful response, so the run stopped instead of retrying the \
                                  same request again. Resend the message to continue.",
                                 err, MODEL_CALL_RETRY_DEADLINE_SECS / 60
+                            )
+                        } else if retries_out {
+                            format!(
+                                "{}\nModel call failed after {} retries (the modelRetries budget \
+                                 in settings). Resend the message to continue.",
+                                err, model_retry_budget
                             )
                         } else {
                             err
@@ -1552,15 +1645,19 @@ impl ReActAgent {
                     //
                     // Java behaves this way too: its accumulators live inside
                     // the `callWithRetry` lambda, so a retry starts clean.
-                    let fatal = crate::llm::client::is_non_retryable(&err);
+                    //
+                    // 【2026-11 用户决策】与空输出分支同契约：非 200 一律
+                    // 重试，次数 = modelRetries，计数 attempt/modelRetries。
                     let timeout_class = crate::llm::client::is_timeout_class(&err);
                     let timeout_out =
                         timeout_class && timeout_retries >= MAX_TIMEOUT_RETRIES_PER_TURN;
                     let deadline_out = std::time::Instant::now() > retry_deadline;
-                    if !fatal && !timeout_out && !deadline_out && turns < max_turns {
+                    let retries_out = call_retries >= model_retry_budget;
+                    if !timeout_out && !deadline_out && !retries_out {
                         if timeout_class {
                             timeout_retries += 1;
                         }
+                        call_retries += 1;
                         // Discard before signalling, so the retry frame is the
                         // only thing left on screen from this attempt.
                         content_buf.clear();
@@ -1576,8 +1673,8 @@ impl ReActAgent {
                         );
                         emit!(Frame::stream_retry(
                             &config.session_id,
-                            turns,
-                            max_turns,
+                            call_retries,
+                            model_retry_budget,
                             &err
                         ));
                         // Same call, so keep its deadline (see the re-arm point at
@@ -1912,20 +2009,36 @@ impl ReActAgent {
                 // a cap the gate becomes its own dead loop — the model wants to
                 // stop but never can.
                 if converge_pending && converge_deferred < MAX_CONVERGE_DEFERRALS && !answer.is_empty() {
-                    converge_deferred += 1;
-                    warn!(
-                        session = %config.session_id,
-                        deferred = converge_deferred,
-                        "convergence gate deferred an implicit end (intent declaration suspected)"
-                    );
-                    // The declaration must enter history, otherwise the check
-                    // prompt follows the previous user message and the model
-                    // cannot see what it just said.
-                    messages.push(ChatMessage::assistant(answer.clone()));
-                    messages.push(ChatMessage::user(completion_check_prompt(converge_deferred)));
-                    // Stays armed: the next text-only reply is gated too, until
-                    // the cap is reached.
-                    continue;
+                    // 契约 §2.1 放行判据：TODO 全完成 或 回答去空白 ≥400 字符，
+                    // 任一命中即放行 END，不注入校验——完整回答被门禁反复打回
+                    // 重写，正是「总结输出两遍」的直接成因。读取失败（None）
+                    // 按现状保守处理：不放行，仍走校验。
+                    let todo_raw = std::fs::read_to_string(crate::session::todo_path(
+                        config.session_dir.as_deref(),
+                        &config.workspace,
+                    ))
+                    .ok();
+                    if converge_release(&answer, todo_raw.as_deref()) {
+                        info!(
+                            session = %config.session_id,
+                            "convergence gate released: TODO all done or answer already substantial"
+                        );
+                    } else {
+                        converge_deferred += 1;
+                        warn!(
+                            session = %config.session_id,
+                            deferred = converge_deferred,
+                            "convergence gate deferred an implicit end (intent declaration suspected)"
+                        );
+                        // The declaration must enter history, otherwise the check
+                        // prompt follows the previous user message and the model
+                        // cannot see what it just said.
+                        messages.push(ChatMessage::assistant(answer.clone()));
+                        messages.push(ChatMessage::user(completion_check_prompt(converge_deferred)));
+                        // Stays armed: the next text-only reply is gated too, until
+                        // the cap is reached.
+                        continue;
+                    }
                 }
 
                 // P3: background-task gate (Java `bgGateArmed`, three END points
@@ -2096,24 +2209,43 @@ impl ReActAgent {
             messages.push(assistant_msg);
 
             // If multiple tool calls, emit a batch declaration
-            if tool_calls.len() > 1 {
-                let batch_id = format!("batch-{}", &config.run_id);
-                let members: Vec<serde_json::Value> = tool_calls
-                    .iter()
-                    .enumerate()
-                    .map(|(i, tc)| {
-                        serde_json::json!({
-                            "actionId": tc.id,
-                            "index": i,
-                            "toolName": tc.function.name,
-                        })
+            //
+            // 契约 §4.2 自审修复（D1）：批次声明只统计【可见】成员——抑制名单内
+            // 的工具（ask_user/complete_task）不发 action_start/end，前端按
+            // batchSize 记完成数（doneCount >= batchSize 才收口转绿）。把它们
+            // 算进分母，批次进度永远停在 (n-1)/n、头部 loading 永不收口
+            // （finishStream 兜底前用户一直看到「执行中」）。Java 侧
+            // createVisibleBatch 按 WebToolVisibilityPolicy 过滤，同一口径。
+            // 过滤后可见成员 <2 时整帧不发（normalizeBatchMeta 要求 ≥2）。
+            let visible_members: Vec<serde_json::Value> = tool_calls
+                .iter()
+                .enumerate()
+                .filter(|(_, tc)| !lifecycle_suppressed(&tc.function.name))
+                .map(|(i, tc)| {
+                    serde_json::json!({
+                        "actionId": tc.id,
+                        "index": i,
+                        "toolName": tc.function.name,
                     })
-                    .collect();
-                emit!(Frame::action_batch(&config.session_id, &batch_id, members));
+                })
+                .collect();
+            if visible_members.len() > 1 {
+                let batch_id = format!("batch-{}", &config.run_id);
+                emit!(Frame::action_batch(&config.session_id, &batch_id, visible_members));
             }
 
-            // Execute each tool call
-            for (tc_index, tc) in tool_calls.iter().enumerate() {
+            // Execute each tool call.
+            //
+            // 契约 §4.2：complete_task 排到批尾（同批还有其他调用时它必须最后
+            // 执行）；`stream_index` 保留原始流式索引，args_progress 按它记账。
+            let ordered_calls = order_complete_task_last(tool_calls.clone());
+            let batch_has_ask = ordered_calls.iter().any(|(_, tc)| tc.function.name == "ask_user");
+            // 契约 §4.2：complete_task 成功执行后把 summary 作为 final_answer
+            // 直通 END（跳过收敛/后台门禁）。批内先记录，批末统一收尾——保证
+            // 同批其他调用的 tool result 都已配对入史。
+            let mut completed_summary: Option<String> = None;
+            for (stream_index, tc) in ordered_calls.iter() {
+                let tc_index = *stream_index;
                 if cancel.is_cancelled() {
                     // `done` for the same reason as the other cancel exits.
                     //
@@ -2162,127 +2294,161 @@ impl ReActAgent {
                 // `remove` rather than `get_mut`: this tool call is done
                 // streaming, so its throttle state must not leak into a later
                 // turn that reuses the same stream index.
+                //
+                // 契约 §4.2：抑制名单内的工具无骨架卡，收尾 flush 同样跳过。
+                let suppressed = lifecycle_suppressed(&tc.function.name);
                 if let Some(p) = args_progress.remove(&(tc_index as u32)) {
-                    if p.bytes > p.last_emit_bytes {
+                    if !suppressed && p.bytes > p.last_emit_bytes {
                         emit!(Frame::action_args(&config.session_id, &tc.id, p.bytes));
                     }
                 }
 
-                // Emit action_start with full args
-                emit!(Frame::action_start(
-                    &config.session_id,
-                    &tc.function.name,
-                    &tc.id,
-                    args.clone()
-                ));
+                // Emit action_start with full args（抑制名单除外：ask_user 走
+                // question 卡、complete_task 走最终 text 帧，不建工具卡）。
+                if !suppressed {
+                    emit!(Frame::action_start(
+                        &config.session_id,
+                        &tc.function.name,
+                        &tc.id,
+                        args.clone()
+                    ));
+                }
 
-                let tool_ctx = ToolContext {
-                    workspace: config.workspace.clone(),
-                    session_dir: config.session_dir.clone(),
-                    session_id: config.session_id.clone(),
-                    // Stamp this invocation's tool_call_id so suspension frames
-                    // carry the same actionId the resume path persists.
-                    tool_call_id: tc.id.clone(),
-                    run_id: config.run_id.clone(),
-                    frame_tx: Some(frame_tx.clone()),
-                    access_mode: config.access_mode.clone(),
-                    cancel: cancel.clone(),
-                    hitl_approved: config.hitl_approved,
-                    change_ledger: config.change_ledger.clone(),
-                    // Raw configured literals, resolved at judgement time so `~`
-                    // and environment variables follow runtime changes (Java
-                    // `HitlStrategy.java:492`).
-                    bash_exempt_dirs: config.settings.permission.bash_exempt_dirs.clone(),
-                    gate: Some(gate.clone()),
-                    subagent_depth: config.subagent_depth,
-                    root_session_id: config.root_session_id.clone(),
-                    thinking: config.thinking.clone(),
-                    // Model and settings of *this* run, so `task`/`multitask`
-                    // delegate on what the conversation actually selected rather
-                    // than re-deriving a global default (see `ToolContext::model`).
-                    model: run_model.clone(),
-                    settings: run_settings.clone(),
-                };
+                // 契约 §4.2：同批含 ask_user 时 complete_task 不执行、不结束——
+                // 提问还等着用户回答，此刻提交完成自相矛盾。返回错误回执入史，
+                // 批内其他调用（含 ask_user 的挂起）照常推进。
+                let output = if tc.function.name == "complete_task" && batch_has_ask {
+                    ToolOutput::err(COMPLETE_TASK_WITH_ASK_ERROR)
+                } else {
+                    let tool_ctx = ToolContext {
+                        workspace: config.workspace.clone(),
+                        session_dir: config.session_dir.clone(),
+                        session_id: config.session_id.clone(),
+                        // Stamp this invocation's tool_call_id so suspension frames
+                        // carry the same actionId the resume path persists.
+                        tool_call_id: tc.id.clone(),
+                        run_id: config.run_id.clone(),
+                        frame_tx: Some(frame_tx.clone()),
+                        access_mode: config.access_mode.clone(),
+                        cancel: cancel.clone(),
+                        hitl_approved: config.hitl_approved,
+                        change_ledger: config.change_ledger.clone(),
+                        // Raw configured literals, resolved at judgement time so `~`
+                        // and environment variables follow runtime changes (Java
+                        // `HitlStrategy.java:492`).
+                        bash_exempt_dirs: config.settings.permission.bash_exempt_dirs.clone(),
+                        resume_calibration: config.resume_calibration,
+                        gate: Some(gate.clone()),
+                        subagent_depth: config.subagent_depth,
+                        root_session_id: config.root_session_id.clone(),
+                        thinking: config.thinking.clone(),
+                        // Model and settings of *this* run, so `task`/`multitask`
+                        // delegate on what the conversation actually selected rather
+                        // than re-deriving a global default (see `ToolContext::model`).
+                        model: run_model.clone(),
+                        settings: run_settings.clone(),
+                    };
 
-                let started = std::time::Instant::now();
-                // Cancellation must race the **whole tool execution**, not merely be
-                // checked before it starts.
-                //
-                // Until here the loop awaited `execute(...)` with no cancel branch, so
-                // an in-flight tool could not be interrupted and the run could not
-                // leave until it returned on its own. Measured against the real kernel
-                // with a stalled provider: a Stop taken during `webfetch` answered
-                // `{status:"cancelled"}` and then emitted `done` **8271 ms** later —
-                // precisely the remaining time of that tool's own request. A Stop
-                // landing inside the LLM receive loop settles in 6 ms, which is why
-                // the defect looks intermittent (it depends entirely on which phase
-                // the user happens to be looking at).
-                //
-                // Only `bash` polled the token internally; everything else ignored it:
-                // `webfetch` (60 s), `websearch` (30 s), MCP `call_tool` (120 s RPC
-                // deadline), `await_tasks` (300 s poll loop), and `task`/`multitask`,
-                // which forward the same token to the sub-agent but still awaited the
-                // delegation *here* — measured at **7767 ms** for a Stop taken while a
-                // foreground sub-agent was running. Racing at this single call site
-                // covers every tool, including third-party MCP ones and any added
-                // later, rather than depending on each tool remembering to poll.
-                //
-                // `biased` makes the cancel branch win when both are ready: tokio
-                // otherwise polls in random order, so a Stop taken at the exact instant
-                // a tool finished would flip between outcomes — the kind of
-                // nondeterminism a cancellation test must not have.
-                //
-                // Abandoning the future is safe *for the UI* because the parent emits
-                // its own closing `action_end` here, and a sub-agent's teardown no
-                // longer lives inside this future (`tools/agent.rs` runs the delegation
-                // on a detached task, so dropping the join handle lets the sub-agent
-                // finish and report itself through `agent_end` with `success=false`).
-                // An earlier version of this branch instead waited a grace period for
-                // the tool to clean up; measured, that made **every** Stop take 2 s and
-                // still lost the `agent_end`, because a parent and its child share one
-                // cancellation instant and always race to the same deadline.
-                //
-                // After this change the same probe measures 7 ms / 4 ms / 5 ms for the
-                // tool, stream and sub-agent phases respectively.
-                let output = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        // Close the card this run opened with `action_start`, with a
-                        // reason. The frontend's stream-end sweep does neutralise a
-                        // leftover loading icon (`app-streaming.js:1107` turns a tool
-                        // card's into `warn`), so the defect without this frame is not a
-                        // stuck spinner but an **unexplained** yellow warning: the user
-                        // cannot tell whether they stopped it or it failed. Emitting it
-                        // says so. Same text the bash tool's own result produces, so a
-                        // stopped tool looks identical however it was interrupted.
-                        emit!(Frame::action_end_failed(
-                            &config.session_id,
-                            &tc.function.name,
-                            &tc.id,
-                            "Cancelled by user",
-                        ));
-                        steer_exit!(Frame::steer_cancelled, false);
-                        emit!(Frame::done(&config.session_id));
-                        return ReActResult {
-                            final_answer: String::new(),
-                            turns_used: turns,
-                            usage: total_usage,
-                            stop_reason: StopReason::Cancelled,
-                            next_seq: seq,
-                            messages,
-                            pending_command: None, pending_timeout_ms: None, pending_background: false,
-                            pending_tool_call_id: None,
-                        };
-                    }
-                    output = self.registry.execute(&tc.function.name, args, &tool_ctx) => output,
+                    let started = std::time::Instant::now();
+                    // Cancellation must race the **whole tool execution**, not merely be
+                    // checked before it starts.
+                    //
+                    // Until here the loop awaited `execute(...)` with no cancel branch, so
+                    // an in-flight tool could not be interrupted and the run could not
+                    // leave until it returned on its own. Measured against the real kernel
+                    // with a stalled provider: a Stop taken during `webfetch` answered
+                    // `{status:"cancelled"}` and then emitted `done` **8271 ms** later —
+                    // precisely the remaining time of that tool's own request. A Stop
+                    // landing inside the LLM receive loop settles in 6 ms, which is why
+                    // the defect looks intermittent (it depends entirely on which phase
+                    // the user happens to be looking at).
+                    //
+                    // Only `bash` polled the token internally; everything else ignored it:
+                    // `webfetch` (60 s), `websearch` (30 s), MCP `call_tool` (120 s RPC
+                    // deadline), `await_tasks` (300 s poll loop), and `task`/`multitask`,
+                    // which forward the same token to the sub-agent but still awaited the
+                    // delegation *here* — measured at **7767 ms** for a Stop taken while a
+                    // foreground sub-agent was running. Racing at this single call site
+                    // covers every tool, including third-party MCP ones and any added
+                    // later, rather than depending on each tool remembering to poll.
+                    //
+                    // `biased` makes the cancel branch win when both are ready: tokio
+                    // otherwise polls in random order, so a Stop taken at the exact instant
+                    // a tool finished would flip between outcomes — the kind of
+                    // nondeterminism a cancellation test must not have.
+                    //
+                    // Abandoning the future is safe *for the UI* because the parent emits
+                    // its own closing `action_end` here, and a sub-agent's teardown no
+                    // longer lives inside this future (`tools/agent.rs` runs the delegation
+                    // on a detached task, so dropping the join handle lets the sub-agent
+                    // finish and report itself through `agent_end` with `success=false`).
+                    // An earlier version of this branch instead waited a grace period for
+                    // the tool to clean up; measured, that made **every** Stop take 2 s and
+                    // still lost the `agent_end`, because a parent and its child share one
+                    // cancellation instant and always race to the same deadline.
+                    //
+                    // After this change the same probe measures 7 ms / 4 ms / 5 ms for the
+                    // tool, stream and sub-agent phases respectively.
+                    let output = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            // Close the card this run opened with `action_start`, with a
+                            // reason. The frontend's stream-end sweep does neutralise a
+                            // leftover loading icon (`app-streaming.js:1107` turns a tool
+                            // card's into `warn`), so the defect without this frame is not a
+                            // stuck spinner but an **unexplained** yellow warning: the user
+                            // cannot tell whether they stopped it or it failed. Emitting it
+                            // says so. Same text the bash tool's own result produces, so a
+                            // stopped tool looks identical however it was interrupted.
+                            //
+                            // 契约 §4.2：抑制名单内的工具没有开过卡，取消时也不补关卡路。
+                            if !suppressed {
+                                emit!(Frame::action_end_failed(
+                                    &config.session_id,
+                                    &tc.function.name,
+                                    &tc.id,
+                                    "Cancelled by user",
+                                ));
+                            }
+                            steer_exit!(Frame::steer_cancelled, false);
+                            emit!(Frame::done(&config.session_id));
+                            return ReActResult {
+                                final_answer: String::new(),
+                                turns_used: turns,
+                                usage: total_usage,
+                                stop_reason: StopReason::Cancelled,
+                                next_seq: seq,
+                                messages,
+                                pending_command: None, pending_timeout_ms: None, pending_background: false,
+                                pending_tool_call_id: None,
+                            };
+                        }
+                        output = self.registry.execute(&tc.function.name, args, &tool_ctx) => output,
+                    };
+                    let _duration_ms = started.elapsed().as_millis() as u64;
+                    output
                 };
-                let _duration_ms = started.elapsed().as_millis() as u64;
 
                 // Check for suspension
                 if let Some(suspend) = &output.suspend {
                     match suspend.kind {
                         crate::tools::SuspendKind::Question => {
                             // Question frame already emitted by the tool.
+                            // 契约 §4.2：ask_user 挂起会立即结束本 run，批尾的
+                            // complete_task 因此不会执行。为它补一条互斥错误回执入史，
+                            // 保证 tool_call→result 配对完整（否则恢复后的请求会因
+                            // 孤儿 tool_call 400）；语义即「本批含待回答提问，不能同时
+                            // 提交完成」。complete_task 已被排到批尾，必在挂起调用之后。
+                            if batch_has_ask {
+                                for (_, other) in ordered_calls.iter() {
+                                    if other.function.name == "complete_task" {
+                                        messages.push(ChatMessage::tool_result(
+                                            &other.id,
+                                            COMPLETE_TASK_WITH_ASK_ERROR,
+                                        ));
+                                    }
+                                }
+                            }
                             emit!(Frame::done_suspended(&config.session_id));
                             return ReActResult {
                                 final_answer: String::new(),
@@ -2296,6 +2462,20 @@ impl ReActAgent {
                             };
                         }
                         crate::tools::SuspendKind::Hitl => {
+                            // 自审修复（Rust 子代理 P2）：HITL 挂起同样立即结束本 run，
+                            // 批尾的 complete_task 不会执行。与 Question 分支同口径补
+                            // 互斥错误回执入史——否则恢复回放时该孤儿调用被填
+                            // INTERRUPTED_MARKER（「任务中断…请勿重复执行」），模型收到
+                            // 的语义与「本批含待审批操作，不能同时提交完成」完全不同，
+                            // 可能据此放弃收尾。complete_task 已排到批尾，必在挂起调用之后。
+                            for (_, other) in ordered_calls.iter() {
+                                if other.function.name == "complete_task" {
+                                    messages.push(ChatMessage::tool_result(
+                                        &other.id,
+                                        COMPLETE_TASK_WITH_ASK_ERROR,
+                                    ));
+                                }
+                            }
                             emit!(Frame::done_suspended(&config.session_id));
                             return ReActResult {
                                 final_answer: String::new(),
@@ -2313,22 +2493,34 @@ impl ReActAgent {
                     }
                 }
 
-                // Emit action_end frame (with result preview for the stream)
+                // Emit action_end frame (with result preview for the stream)。
+                // 契约 §4.2：抑制名单内的工具不建卡也不关卡路——complete_task 的
+                // summary 若进 action_end 预览就是第二份总结，ask_user 的呈现是
+                // question 卡。错误回执仍入史（模型可见），只是不渲染工具卡。
                 let result_preview: String = output.text.chars().take(2000).collect();
-                if output.is_error {
-                    emit!(Frame::action_end_failed(
-                        &config.session_id,
-                        &tc.function.name,
-                        &tc.id,
-                        &result_preview,
-                    ));
-                } else {
-                    emit!(Frame::action_end(
-                        &config.session_id,
-                        &tc.function.name,
-                        &tc.id,
-                        &result_preview,
-                    ));
+                if !suppressed {
+                    if output.is_error {
+                        emit!(Frame::action_end_failed(
+                            &config.session_id,
+                            &tc.function.name,
+                            &tc.id,
+                            &result_preview,
+                        ));
+                    } else {
+                        emit!(Frame::action_end(
+                            &config.session_id,
+                            &tc.function.name,
+                            &tc.id,
+                            &result_preview,
+                        ));
+                    }
+                }
+
+                // 契约 §4.2：complete_task 成功执行 → 记录 summary，批末直通 END。
+                // tool result（ok(summary)）仍照常入史，保证 tool_call→result 配对
+                // 完整；summary 的呈现走批末的 text 帧，不走 action_end。
+                if tc.function.name == "complete_task" && !output.is_error {
+                    completed_summary = Some(output.text.clone());
                 }
 
                 // Add tool result to messages.
@@ -2386,6 +2578,52 @@ impl ReActAgent {
                         output.image_urls.clone(),
                     ));
                 }
+            }
+
+            // 契约 §4.2：complete_task 成功执行后的直通 END。
+            //
+            // summary 就是用户看到的最终回答：发一个 text 帧（整段，不逐 token
+            // 流式——它不是模型增量输出，重复流式只会渲染两遍）+ trace + done，
+            // StopReason::Completed。跳过收敛门禁与后台门禁——模型已显式声明
+            // 完成并交付总结，再注入校验提示就是逼它写第二份。
+            //
+            // 放在批末而非 complete_task 执行点：同批其他调用的 tool result 必须
+            // 先配对入史（complete_task 已被 order_complete_task_last 排到批尾，
+            // 此处所有调用都已处理完）。
+            if let Some(summary) = completed_summary {
+                steer_exit!(Frame::steer_dropped, true);
+                // 契约 §4.2「若 summary 未曾流式输出」判重（自审修复 D2）：
+                // 模型有时先把总结作为正文流式输出、再调 complete_task 提交
+                // 同一段文字。此时正文已经逐 token 发过 text 帧，再整段补发
+                // 就是用户看到的第二份总结。判重口径：去除首尾空白后与本轮
+                // 已流式正文（content_buf）完全相同 → 跳过补发；不同（哪怕
+                // 只是扩写）仍补发——summary 是模型钦定的最终回答，宁可多一
+                // 段也不丢交付。Java finishByCompleteTask 同口径。
+                if summary.trim() != content_buf.trim() {
+                    // 整段一个 text 帧（phase=TEXT），不逐 token 流式：summary 不是
+                    // 模型增量输出，重复流式只会渲染两遍。
+                    emit!(Frame::text_delta(&config.session_id, &summary));
+                }
+                emit!(Frame::trace(
+                    &config.session_id,
+                    &config.model.name,
+                    &total_usage,
+                    started_at.elapsed().as_millis() as u64,
+                    &summary,
+                    generation_ms_total,
+                    generated_tokens_total,
+                ));
+                emit!(Frame::done(&config.session_id));
+                return ReActResult {
+                    final_answer: summary,
+                    turns_used: turns,
+                    usage: total_usage,
+                    stop_reason: StopReason::Completed,
+                    next_seq: seq,
+                    messages,
+                    pending_command: None, pending_timeout_ms: None, pending_background: false,
+                    pending_tool_call_id: None,
+                };
             }
 
             // Loop back for next reasoning turn
@@ -2546,6 +2784,44 @@ fn loop_fingerprint(tool_calls: &[ToolCall], content: &str) -> Option<String> {
 /// detector blind (Java `NAME_ONLY_TOOLS`).
 const NAME_ONLY_TOOLS: &[&str] = &["todowrite", "todoread"];
 
+/// 生命周期帧抑制名单（契约 §4.2 末段，语义对齐 Java `WebToolVisibilityPolicy`）。
+///
+/// 这两个工具不是「工作步骤」而是「会话控制」：ask_user 的呈现是 question 卡
+/// （question 帧照常发），complete_task 的呈现是最终回答 text 帧。给它们建
+/// action 工具卡只会让用户看到一张「ask_user 执行中/完成」的噪声卡，且
+/// complete_task 的 summary 若再进 action_end 预览就是第二份总结。
+/// 抑制覆盖 action_draft（骨架）/ action_args（进度）/ action_start / action_end。
+const LIFECYCLE_SUPPRESSED_TOOLS: &[&str] = &["ask_user", "complete_task"];
+
+/// 该工具是否抑制生命周期帧（见 [`LIFECYCLE_SUPPRESSED_TOOLS`]）。
+fn lifecycle_suppressed(tool_name: &str) -> bool {
+    LIFECYCLE_SUPPRESSED_TOOLS.contains(&tool_name)
+}
+
+/// 契约 §4.2：complete_task 必须最后执行——同批还有其他调用时把它排到批尾。
+///
+/// 稳定排序：其余调用保持模型给出的相对顺序。返回 (重排后的调用, 原始流式索引)
+/// 对，索引用于取回 `args_progress`（它按流式 index 记账，重排后不能错位）。
+/// 没有 complete_task 时原样返回，零开销。
+fn order_complete_task_last(tool_calls: Vec<ToolCall>) -> Vec<(usize, ToolCall)> {
+    let indexed: Vec<(usize, ToolCall)> = tool_calls.into_iter().enumerate().collect();
+    if !indexed.iter().any(|(_, tc)| tc.function.name == "complete_task") {
+        return indexed;
+    }
+    let (mut rest, completes): (Vec<_>, Vec<_>) = indexed
+        .into_iter()
+        .partition(|(_, tc)| tc.function.name != "complete_task");
+    rest.extend(completes);
+    rest
+}
+
+/// 契约 §4.2：同批含 ask_user（或 HITL 待审批操作）时 complete_task 不得结束任务——
+/// 提问/审批还等着用户回应，此刻提交「完成」是自相矛盾的。返回错误回执（不挂起、
+/// 不 END），让模型先等回应或撤回完成声明。文案双内核逐字一致（自审对齐：旧版
+/// Rust 带前缀后缀、Java 只有中段，且 HITL 场景提 ask_user 语义错位，统一为现版）。
+const COMPLETE_TASK_WITH_ASK_ERROR: &str =
+    "complete_task 未结束任务：本批含待用户回应的挂起操作（提问或审批），不能同时提交完成。请先等待用户回应，再决定是否收尾。";
+
 /// Canonical argument string for fingerprinting: parse the JSON, sort keys,
 /// truncate values to 120 chars. Key order and whitespace differences must
 /// not produce different fingerprints; different `file_path` / `command`
@@ -2618,19 +2894,43 @@ fn rethink_prompt(turn: u32) -> String {
     )
 }
 
+/// 契约 §2.1：收敛门禁的放行判据（纯函数，表驱动可测）。
+///
+/// 两条任一命中即放行 END：
+/// 1. 会话 TODO.md 存在且全部完成（无 `[ ]`/`[/]` 未完成项）——清单是模型自己
+///    维护的完成证据，全勾后再拦「意图声明」就是误伤；
+/// 2. 回答去除空白后 ≥ [`CONVERGE_RELEASE_ANSWER_CHARS`] 字符——已成规模的回答
+///    是完整交付而非一句意图声明，打回重写只会产出第二份重复总结。
+///
+/// `todo_raw = None`（文件不存在/读取失败）按现状保守处理：该判据不命中，
+/// 仍由字符数判据与原有门禁兜底。空清单（total=0）不算「全部完成」——
+/// 没有任何完成证据时放行等于门禁形同虚设。
+fn converge_release(answer: &str, todo_raw: Option<&str>) -> bool {
+    if let Some(raw) = todo_raw {
+        let p = crate::todo::measure(raw);
+        if p.total > 0 && !crate::todo::has_unfinished_items(raw) {
+            return true;
+        }
+    }
+    answer.chars().filter(|c| !c.is_whitespace()).count() >= CONVERGE_RELEASE_ANSWER_CHARS
+}
+
+/// 契约 §2.1 的「回答已成规模」阈值（去除空白后的字符数）。
+const CONVERGE_RELEASE_ANSWER_CHARS: usize = 400;
+
 /// Completion-check prompt injected when the convergence gate defers an implicit
 /// end (Java `completionCheckPromptFor`, wording kept identical).
 ///
-/// Must offer **both** exits — continue if unfinished, full summary if finished.
-/// An absolute "output your Final Answer now" is what caused the original bug:
-/// the model complied literally with a one-line intent declaration and the run
-/// ended with the work undone.
+/// 契约 §2.2 改「补缺式」：旧文案第 2 条要求「重新输出完整总结报告」，模型照做
+/// 就把已交付的总结原样再写一遍——这正是双份总结的成因。新文案三分支：未完成
+/// 继续做；已完整直接确认结束；有遗漏只补遗漏，严禁复述。
 fn completion_check_prompt(deferred: u32) -> String {
     format!(
         "【系统提示：任务完成校验 (Completion Check)】\n\
-         检测到您输出了不含任何工具调用的纯文本回复，但这可能只是过渡性意图声明而非最终回答。请核验：\n\
-         1. **任务清单状态**：若仍有未完成事项（TODO / 计划未全部完成），请继续执行它们，不要停止；\n\
-         2. **若确已全部完成**：请重新输出面向用户的完整总结报告（已完成内容、验证结果与遗留事项）作为最终回答，不要只写一句意图声明。\n\
+         你刚才的纯文本回复可能是过渡性意图声明而非最终回答。请核验：\n\
+         1. 若任务清单仍有未完成事项：继续执行它们，不要停止；\n\
+         2. 若上一条回复已是面向用户的完整回答：直接确认结束，不要重复输出已说过的内容；\n\
+         3. 若确有遗漏：只补充遗漏部分（验证结果、遗留事项），严禁复述已交付的总结。\n\
          （第 {deferred}/{MAX_CONVERGE_DEFERRALS} 次校验，之后将按普通最终回答处理）"
     )
 }
@@ -2971,7 +3271,7 @@ mod tests {
             "ContentDelta and ReasoningDelta must BOTH arm the TTFT latch"
         );
         // The retry branch resets the per-attempt decode segment but NOT the run latch.
-        let retry = product.split("StreamEvent::Retry { attempt, max, reason } =>")
+        let retry = product.split("StreamEvent::Retry { attempt, max, reason, delivered } =>")
             .nth(1).unwrap_or("")
             .split("emit!(Frame::stream_retry").next().unwrap_or("");
         assert!(retry.contains("first_content_at = None;"), "retry must drop the aborted decode segment");
@@ -3103,8 +3403,8 @@ mod tests {
         );
         let done_in_inner = inner.matches("emit!(Frame::done(").count();
         assert!(
-            done_in_inner == 5,
-            "only the 4 cancel paths + completion should own a done; got {done_in_inner}"
+            done_in_inner == 6,
+            "only the 4 cancel paths + completion + complete_task direct-through should own a done; got {done_in_inner}"
         );
         // Wiring guard: the pure function below is unit-tested, but that proves
         // nothing about whether `run()` actually calls it. A mutation that
@@ -3417,12 +3717,74 @@ mod tests {
 
     #[test]
     fn completion_check_offers_both_exits() {
+        // 契约 §2.2「补缺式」：三分支——继续做 / 直接确认结束 / 只补遗漏。
+        // 旧断言「完整总结报告」正是双份总结的成因，按新文案反转。
         let p = completion_check_prompt(1);
         assert!(p.contains("Completion Check"));
-        assert!(p.contains("请继续执行它们"), "must allow continuing");
-        assert!(p.contains("完整总结报告"), "must allow a real final answer");
+        assert!(p.contains("继续执行它们，不要停止"), "must allow continuing");
+        assert!(p.contains("直接确认结束，不要重复输出已说过的内容"), "must allow ending without repeating");
+        assert!(p.contains("只补充遗漏部分"), "must allow gap-filling only");
+        assert!(p.contains("严禁复述已交付的总结"), "must forbid re-summarising");
+        assert!(!p.contains("完整总结报告"), "旧「重新输出完整总结」文案必须消失");
         assert!(p.contains("1/2"), "must show the deferral counter");
         assert!(!p.contains("直接输出 Final Answer"));
+    }
+
+    // ─── 契约 §2.1：收敛门禁放行判据 ─────────────────────────────────────────
+
+    /// TODO 全完成 → 放行（即使回答很短）。清单是模型自己维护的完成证据。
+    #[test]
+    fn converge_releases_when_todo_all_done() {
+        let done = "## H\n- [x] A\n- [x] B\n";
+        assert!(converge_release("改完了。", Some(done)));
+    }
+
+    /// TODO 有未完成项且回答短 → 不放行（原门禁行为保持）。
+    #[test]
+    fn converge_still_defers_short_answer_with_open_todo() {
+        let open = "- [x] A\n- [ ] B\n";
+        assert!(!converge_release("接下来修 B。", Some(open)));
+        let in_progress = "- [/] A\n";
+        assert!(!converge_release("正在做 A。", Some(in_progress)));
+    }
+
+    /// 回答去空白 ≥400 字符 → 放行（即使 TODO 仍有未完成项——已成规模的回答
+    /// 是完整交付，打回重写只会产出第二份重复总结）。
+    #[test]
+    fn converge_releases_substantial_answer_regardless_of_todo() {
+        let long = "甲".repeat(400);
+        assert!(converge_release(&long, Some("- [ ] B\n")));
+        assert!(converge_release(&long, None));
+        // 空白不计入：399 个实字符 + 大量空白仍不放行。
+        let padded = format!("{}{}", "甲".repeat(399), " \n\t".repeat(100));
+        assert!(!converge_release(&padded, None));
+        // 恰好 400（含空白剔除后）放行——边界闭区间。
+        let exact = format!("{}{}", "甲".repeat(200), "乙 ".repeat(200));
+        assert!(converge_release(&exact, None));
+    }
+
+    /// 读取失败/无清单 → 该判据不命中，保守走原门禁；空清单不算「全部完成」。
+    #[test]
+    fn converge_missing_or_empty_todo_is_conservative() {
+        assert!(!converge_release("短回答", None));
+        assert!(!converge_release("短回答", Some("")));
+        assert!(!converge_release("短回答", Some("完全不是清单")));
+    }
+
+    /// 源码级守护：门禁分支必须真的接上放行判据（纯函数测试全绿但调用点
+    /// 漏接是本仓库踩过的坑，见 forced_compact 的教训）。
+    #[test]
+    fn converge_gate_call_site_uses_release_predicate() {
+        let src = include_str!("mod.rs");
+        let norm: String = src.split_whitespace().collect();
+        assert!(
+            norm.contains("ifconverge_release(&answer,todo_raw.as_deref())"),
+            "converge gate must consult converge_release before deferring"
+        );
+        assert!(
+            norm.contains("crate::session::todo_path("),
+            "release predicate must read the session TODO via session::todo_path"
+        );
     }
 
     #[test]
@@ -3743,8 +4105,16 @@ mod tests {
             "run deadline must gate the retry (M-pin: deadline removed → any-class infinite retry)"
         );
         assert!(
-            norm.contains("if !fatal && !timeout_out && !deadline_out && turns < max_turns"),
-            "all three gates must gate together (M-pin: dropped conjunct)"
+            norm.contains("let retries_out = call_retries >= model_retry_budget;"),
+            "the user's modelRetries budget must gate the retry (M-pin: budget \
+             removed → retries bounded only by the 45min deadline)"
+        );
+        assert!(
+            norm.contains("if !timeout_out && !deadline_out && !retries_out"),
+            "all three gates must gate together (M-pin: dropped conjunct). \
+             【2026-11 用户决策】fatal（按错误类别快速失败）与 turns < max_turns \
+             已按用户要求移除：非 200 一律重试、重试不烧轮次；防无限重试的职责 \
+             由 retries_out（modelRetries）+ deadline_out + timeout_out 承担。"
         );
         assert!(
             norm.contains("Timeout-class failures happened"),
@@ -3753,6 +4123,10 @@ mod tests {
         assert!(
             norm.contains("This model call has spent {} minutes retrying"),
             "the honest stop message must explain the per-call deadline"
+        );
+        assert!(
+            norm.contains("Model call failed after {} retries"),
+            "the honest stop message must explain the modelRetries budget"
         );
     }
 
@@ -3839,6 +4213,28 @@ mod tests {
             norm.matches("retry_deadline = retry_deadline_from_now();").count(),
             2,
             "exactly two arms of the deadline (initial + per-turn re-arm)"
+        );
+
+        // 【2026-11 用户决策】重试不烧轮次：turns 只能在「非重试」守卫内递增。
+        // 旧实现无条件 turns += 1，同一次调用的重试既虚增前台重试计数，
+        // 又吃掉 maxTurns 预算（用户看到「设置 10 却重试 40」的另一半）。
+        let p_loop = norm.find("loop {").expect("run_inner must have its turn loop");
+        let p_turns = norm.find("turns += 1;").expect("turns must still advance");
+        let p_guard = norm[..p_turns]
+            .rfind("if !retry_of_same_call {")
+            .expect("the turns increment must sit under a retry_of_same_call guard");
+        assert!(
+            p_loop < p_guard && p_guard < p_turns,
+            "turns += 1 must be guarded by !retry_of_same_call inside the loop; \
+             an unconditional increment burns the turn budget on retries"
+        );
+        // 重试计数与 deadline 同生命周期：新调用清零，且必须在同一守卫内。
+        let p_reset = rearm.find("call_retries = 0;");
+        assert!(
+            p_reset.is_some() && p_reset.unwrap() > p_rearm.unwrap(),
+            "call_retries must reset beside the deadline re-arm (fresh call = \
+             fresh retry count); without it the second call inherits the first \
+             call's spent budget"
         );
     }
 
@@ -4243,20 +4639,28 @@ mod tests {
             "the drain must go through `shift_steer`"
         );
         // Every steer exit settles before its `done`, mirroring WebGate's ordering.
+        // 不用固定行窗：complete_task 直通路径在 settle 与 done 之间隔着多行
+        // trace 帧（契约 §4.2），行窗会随帧参数增减而误判。改用语义守护——
+        // 自上一个 done 以来必须出现过 steer_exit，即每个 done 都被一次结算
+        // 「兜底」，与「done 前必先结算」等价且对块大小稳健。
         let mut done_seen = 0usize;
+        let mut settled_since_last_done = false;
         for (i, line) in body.lines().enumerate() {
+            if line.contains("steer_exit!(") {
+                settled_since_last_done = true;
+            }
             if line.contains("emit!(Frame::done(") {
                 done_seen += 1;
-                let window: String = body.lines().skip(i.saturating_sub(3)).take(3).collect::<Vec<_>>().join("\n");
                 assert!(
-                    window.contains("steer_exit!("),
+                    settled_since_last_done,
                     "`done` at react line ~{i} has no steer settlement before it"
                 );
+                settled_since_last_done = false;
             }
         }
         assert_eq!(
-            done_seen, 5,
-            "3 boundary cancel paths + the in-flight-tool cancel + completion emit `done`"
+            done_seen, 6,
+            "3 boundary cancel paths + the in-flight-tool cancel + completion + complete_task direct-through emit `done`"
         );
     }
 
@@ -4837,6 +5241,7 @@ mod tests {
             usage_seed: Default::default(),
             force_compact: false,
             compact_focus: None,
+            resume_calibration: false,
             subagent_depth: 0,
             root_session_id: "work-retry-itest".into(),
             thinking: None,
@@ -5398,6 +5803,7 @@ mod tests {
             usage_seed: Default::default(),
             force_compact: false,
             compact_focus: None,
+            resume_calibration: false,
             subagent_depth: 0,
             root_session_id: id.into(),
             thinking: None,
@@ -5504,6 +5910,7 @@ mod tests {
             usage_seed: Default::default(),
             force_compact: true,
             compact_focus: Some("prioritise rust-remediation notes".into()),
+            resume_calibration: false,
             subagent_depth: 0,
             root_session_id: "work-itest".into(),
             thinking: None,
@@ -5533,6 +5940,460 @@ mod tests {
             req_text.contains("压缩聚焦"),
             "the focus turn must be labelled as a directive in the request body"
         );
+    }
+
+    // ─── 【2026-11 用户报障】403 排队不重试 / 重试计数串线 / 静默重试 ───────
+    //
+    // 用户症状：后台 modelRetries=10，网关返回
+    // `403 RESOURCE_LIMIT_EXCEEDED ... request is queued ... retry after ...`
+    // 时第 1 次失败就放弃（旧 is_non_retryable 把 403 判成致命）；且前台
+    // 「正在重试 n/40」的 40 是 AutoRethink 扩容后的 maxTurns，不是重试预算。
+    //
+    // 本测试驱动真实 loop + 真实 LlmClient（mock TCP）：
+    //   第 1 次请求 → 403 排队（首字节前失败）
+    //   第 2 次请求 → 正常完成
+    // 断言三件事：重试真的发生且前台可见（retry 帧、无 discardPartial）、
+    // 计数 = attempt/modelRetries（1/3，而不是 turns/maxTurns=1/2）、
+    // 重试不烧轮次（turns_used == 1）。
+    #[tokio::test]
+    async fn queued_403_retries_visibly_with_model_retries_budget_and_no_turn_burn() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut n = 0u32;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let mut buf = [0u8; 8192];
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(300),
+                    sock.read(&mut buf),
+                )
+                .await;
+                n += 1;
+                if n == 1 {
+                    // 用户截图的真实形状：403 + 排队标记 + retry after。
+                    let body = concat!(
+                        "HTTP/1.1 403 Forbidden\r\n",
+                        "Content-Type: application/json\r\n",
+                        "Connection: close\r\n\r\n",
+                        "{\"code\":\"RESOURCE_LIMIT_EXCEEDED\",\"message\":\"request is queued, retry after 1s\"}"
+                    );
+                    let _ = sock.write_all(body.as_bytes()).await;
+                } else {
+                    let text = serde_json::json!({
+                        "choices": [{ "delta": { "content": "done after queue" } }]
+                    });
+                    let body = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n",
+                        text
+                    );
+                    let _ = sock.write_all(body.as_bytes()).await;
+                }
+                let _ = sock.shutdown().await;
+                drop(sock);
+                if n >= 2 { break; }
+            }
+        });
+
+        let model = crate::config::ModelConfig {
+            name: "mock".into(),
+            standard: "openai".into(),
+            api_url: format!("http://127.0.0.1:{}", port),
+            api_key: "k".into(),
+            model: "mock".into(),
+            ..Default::default()
+        };
+        let mut settings = crate::config::Settings::default();
+        // 三个旋钮取互不相同的值，任何一个串线都会被下面的断言抓住：
+        // modelRetries=3（重试预算）、apiRetries=7（web 工具，不得混入）、
+        // maxTurns=2（轮次上限，旧实现把它当重试分母显示成 n/2）。
+        settings.general.model_retries = 3;
+        settings.general.api_retries = 7;
+        settings.general.auto_rethink = false;
+
+        let config = ReActConfig {
+            session_id: "work-queued-403".into(),
+            workspace: std::env::temp_dir(),
+            session_dir: None,
+            model,
+            settings,
+            access_mode: "full".into(),
+            max_turns: 2,
+            run_id: "run-queued-403".into(),
+            start_seq: 0,
+            hitl_approved: true,
+            gate: None,
+            change_ledger: None,
+            context_length: 0,
+            turn_start_ms: 0,
+            usage_seed: Default::default(),
+            force_compact: false,
+            compact_focus: None,
+            resume_calibration: false,
+            subagent_depth: 0,
+            root_session_id: "work-queued-403".into(),
+            thinking: None,
+        };
+
+        let registry = std::sync::Arc::new(crate::tools::ToolRegistry::default_registry());
+        let agent = ReActAgent::new(registry);
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let history = vec![crate::llm::types::ChatMessage::user("hi")];
+
+        let run = agent.run(&config, history, frame_tx, cancel);
+        let collector = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while let Some(f) = frame_rx.recv().await {
+                frames.push(f);
+            }
+            frames
+        });
+        let result = run.await;
+        let frames = collector.await.unwrap();
+
+        // 1) 重试真的发生，且首字节前的失败也前台可见：
+        //    retry 帧存在、不带 discardPartial（没有任何已渲染内容可丢）。
+        let retry_frames: Vec<_> = frames.iter().filter(|f| f.frame_type == "retry").collect();
+        assert!(
+            !retry_frames.is_empty(),
+            "a queued 403 must produce a visible retry frame; got {:?}",
+            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+        );
+        let f = retry_frames[0];
+        assert_ne!(
+            f.extra["discardPartial"], serde_json::json!(true),
+            "nothing was delivered before the 403, so no DOM rollback may be requested"
+        );
+
+        // 2) 计数 = attempt/modelRetries：1/3。
+        //    旧实现这里是 turns/maxTurns = 1/2（线上被 AutoRethink 扩成 n/40）。
+        assert_eq!(f.extra["attempt"], serde_json::json!(1), "first retry of this call");
+        assert_eq!(
+            f.extra["max"], serde_json::json!(3),
+            "the denominator must be settings.modelRetries (3), not maxTurns (2) \
+             or apiRetries (7)"
+        );
+        assert!(
+            f.text.as_deref().unwrap_or("").contains("1/3"),
+            "the banner text must show the same budget: {:?}",
+            f.text
+        );
+
+        // 3) 重试不烧轮次：一次调用 + 一次传输层重试，turns_used 仍为 1。
+        assert_eq!(result.turns_used, 1, "a retry of the same call must not consume a turn");
+        assert_eq!(
+            result.stop_reason,
+            StopReason::Completed,
+            "the retried request must succeed; final_answer={:?}",
+            result.final_answer
+        );
+    }
+
+    // ─── 契约 §4.2：complete_task 直通 / 批尾 / 与 ask_user 互斥 ──────────────
+
+    /// 纯函数：complete_task 排到批尾，其余保持相对顺序，原始流式索引保留。
+    #[test]
+    fn order_complete_task_last_moves_it_to_the_tail() {
+        let mk = |id: &str, name: &str| ToolCall {
+            id: id.into(),
+            call_type: "function".into(),
+            function: crate::llm::types::FunctionCall { name: name.into(), arguments: "{}".into() },
+        };
+        // complete_task 在中间 → 移到末尾，read/grep 相对顺序不变。
+        let ordered = order_complete_task_last(vec![
+            mk("c1", "read"),
+            mk("c2", "complete_task"),
+            mk("c3", "grep"),
+        ]);
+        let names: Vec<&str> = ordered.iter().map(|(_, tc)| tc.function.name.as_str()).collect();
+        assert_eq!(names, vec!["read", "grep", "complete_task"]);
+        // 原始流式索引保留（args_progress 按它记账）。
+        assert_eq!(ordered[2].0, 1, "complete_task keeps its original stream index");
+        // 无 complete_task → 原样。
+        let plain = order_complete_task_last(vec![mk("a", "read"), mk("b", "grep")]);
+        assert_eq!(plain.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    /// 生命周期帧抑制名单：ask_user 与 complete_task 都在内。
+    #[test]
+    fn lifecycle_suppression_covers_ask_and_complete() {
+        assert!(lifecycle_suppressed("ask_user"));
+        assert!(lifecycle_suppressed("complete_task"));
+        assert!(!lifecycle_suppressed("read"));
+        assert!(!lifecycle_suppressed("bash"));
+    }
+
+    /// 构造一个只回放固定 SSE 脚本的 mock provider（每个连接按序取下一段响应）。
+    async fn scripted_mock(responses: Vec<String>) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut idx = 0usize;
+            loop {
+                if let Ok((mut sock, _)) = listener.accept().await {
+                    let mut buf = [0u8; 16384];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(300),
+                        sock.read(&mut buf),
+                    )
+                    .await;
+                    let body = responses.get(idx).cloned().unwrap_or_else(|| {
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: [DONE]\n\n".to_string()
+                    });
+                    idx += 1;
+                    let _ = sock.write_all(body.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                }
+            }
+        });
+        port
+    }
+
+    fn sse_tool_call(index: u32, id: &str, name: &str, args: &serde_json::Value) -> String {
+        format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{ "delta": { "tool_calls": [{
+                    "index": index, "id": id,
+                    "function": { "name": name, "arguments": args.to_string() }
+                }]}}]
+            })
+        )
+    }
+
+    const SSE_HDR: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+    const SSE_FINISH_TOOLS: &str = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+    const SSE_DONE: &str = "data: [DONE]\n\n";
+
+    async fn run_complete_task_scenario(responses: Vec<String>, id: &str) -> (ReActResult, Vec<Frame>) {
+        let port = scripted_mock(responses).await;
+        let config = corruption_itest_config(port, id, 6);
+        let registry = std::sync::Arc::new(crate::tools::ToolRegistry::default_registry());
+        let agent = ReActAgent::new(registry);
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let history = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("do the work"),
+        ];
+        let run = agent.run(&config, history, frame_tx, cancel);
+        let collector = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while let Some(f) = frame_rx.recv().await {
+                frames.push(f);
+            }
+            frames
+        });
+        let result = run.await;
+        let frames = collector.await.unwrap();
+        (result, frames)
+    }
+
+    /// 契约 §4.2：complete_task 成功 → summary 作为 final_answer 直通 END，
+    /// 发 text+trace+done，StopReason::Completed，且无 complete_task 工具卡。
+    #[tokio::test]
+    async fn complete_task_success_streams_summary_and_ends() {
+        let summary = "## 完成\n改动已落地，测试全绿。";
+        let resp = format!(
+            "{SSE_HDR}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
+            sse_tool_call(0, "ct-1", "complete_task", &serde_json::json!({"summary": summary}))
+        );
+        let (result, frames) = run_complete_task_scenario(vec![resp], "ct-direct").await;
+        assert_eq!(result.stop_reason, StopReason::Completed);
+        assert_eq!(result.final_answer, summary);
+        // text 帧整段呈现 summary（不逐 token）。
+        assert!(
+            frames.iter().any(|f| f.frame_type == "text" && f.text.as_deref() == Some(summary)),
+            "summary must be delivered as one text frame: {:?}",
+            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+        );
+        assert!(frames.iter().any(|f| f.frame_type == "trace"));
+        assert!(frames.iter().any(|f| f.frame_type == "done"));
+        // 生命周期帧抑制：complete_task 不建工具卡。
+        assert!(
+            !frames.iter().any(|f| f.tool_name.as_deref() == Some("complete_task")
+                && (f.frame_type == "action_start" || f.frame_type == "action_end" || f.frame_type == "action_draft")),
+            "complete_task must not emit lifecycle cards"
+        );
+        // 历史配对完整：complete_task 的 tool result（ok(summary)）入史。
+        assert!(
+            result.messages.iter().any(|m| m.tool_call_id.as_deref() == Some("ct-1")
+                && m.content_text().contains(summary)),
+            "complete_task must have a paired tool result in history"
+        );
+    }
+
+    /// 自审修复 D1：批次声明只统计可见成员。read + complete_task 同批时，
+    /// complete_task 无生命周期卡，若把它算进 batchSize，前端 doneCount 永远
+    /// 到不了分母、批次头部 loading 永不收口。过滤后可见成员 <2 → 整帧不发。
+    #[tokio::test]
+    async fn batch_declaration_excludes_lifecycle_suppressed_tools() {
+        let summary = "收尾。";
+        let resp = format!(
+            "{SSE_HDR}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
+            sse_tool_call(0, "rd-1", "read", &serde_json::json!({"file_path":"Cargo.toml"})),
+            sse_tool_call(1, "ct-b", "complete_task", &serde_json::json!({"summary": summary}))
+        );
+        let (result, frames) = run_complete_task_scenario(vec![resp], "ct-batch").await;
+        assert_eq!(result.stop_reason, StopReason::Completed);
+        // 可见成员只剩 read（1 个）→ 不发批次声明帧。
+        assert!(
+            !frames.iter().any(|f| f.frame_type == "action_batch"),
+            "a batch with only one visible member must not declare a batch: {:?}",
+            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// 自审修复 D1（对照）：两个可见工具 + complete_task → 批次声明 batchSize=2，
+    /// 成员不含 complete_task（分母与真实卡片数一致，进度可收口）。
+    #[tokio::test]
+    async fn batch_declaration_counts_only_visible_members() {
+        let resp = format!(
+            "{SSE_HDR}{}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
+            sse_tool_call(0, "rd-2", "read", &serde_json::json!({"file_path":"Cargo.toml"})),
+            sse_tool_call(1, "ct-c", "complete_task", &serde_json::json!({"summary":"收尾。"})),
+            sse_tool_call(2, "ls-1", "ls", &serde_json::json!({}))
+        );
+        let (result, frames) = run_complete_task_scenario(vec![resp], "ct-batch2").await;
+        assert_eq!(result.stop_reason, StopReason::Completed);
+        let batch = frames.iter().find(|f| f.frame_type == "action_batch")
+            .expect("two visible members must declare a batch");
+        assert_eq!(batch.extra.get("batchSize").and_then(|v| v.as_u64()), Some(2));
+        let members = batch.extra.get("batchMembers").and_then(|v| v.as_array()).unwrap();
+        assert!(
+            members.iter().all(|m| m.get("toolName").and_then(|v| v.as_str()) != Some("complete_task")),
+            "suppressed tools must not be batch members: {members:?}"
+        );
+    }
+
+    /// 自审修复 D2（契约 §4.2「若 summary 未曾流式输出」）：模型先把总结作为
+    /// 正文流式输出、再调 complete_task 提交同一段文字 → 不得整段补发第二份。
+    #[tokio::test]
+    async fn complete_task_summary_identical_to_streamed_text_is_not_resent() {
+        let summary = "## 完成\n改动已落地，测试全绿。";
+        // 正文先逐段流式输出同一段总结（含首尾空白差异，判重按 trim 口径）
+        let text_delta = |t: &str| format!(
+            "data: {}\n\n",
+            serde_json::json!({"choices":[{"delta":{"content":t}}]})
+        );
+        let resp = format!(
+            "{SSE_HDR}{}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
+            text_delta("## 完成\n"),
+            text_delta("改动已落地，测试全绿。"),
+            sse_tool_call(0, "ct-dup", "complete_task", &serde_json::json!({"summary": summary}))
+        );
+        let (result, frames) = run_complete_task_scenario(vec![resp], "ct-dup").await;
+        assert_eq!(result.stop_reason, StopReason::Completed);
+        assert_eq!(result.final_answer, summary);
+        // 整段 summary 的 text 帧不得出现（正文已逐 token 流式交付）。
+        assert!(
+            !frames.iter().any(|f| f.frame_type == "text" && f.text.as_deref() == Some(summary)),
+            "summary identical to streamed content must not be re-emitted as a whole text frame"
+        );
+        assert!(frames.iter().any(|f| f.frame_type == "done"));
+    }
+
+    /// 自审修复 D2（对照）：summary 与已流式正文不同（扩写）→ 仍整段补发，
+    /// 宁可多一段也不丢模型钦定的最终交付。
+    #[tokio::test]
+    async fn complete_task_summary_different_from_streamed_text_is_emitted() {
+        let streamed = "改完了。";
+        let summary = "## 完成\n改动已落地，测试全绿，另有遗留事项见下。";
+        let text_delta = format!(
+            "data: {}\n\n",
+            serde_json::json!({"choices":[{"delta":{"content":streamed}}]})
+        );
+        let resp = format!(
+            "{SSE_HDR}{text_delta}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
+            sse_tool_call(0, "ct-diff", "complete_task", &serde_json::json!({"summary": summary}))
+        );
+        let (result, frames) = run_complete_task_scenario(vec![resp], "ct-diff").await;
+        assert_eq!(result.stop_reason, StopReason::Completed);
+        assert!(
+            frames.iter().any(|f| f.frame_type == "text" && f.text.as_deref() == Some(summary)),
+            "a summary that extends the streamed text must still be delivered"
+        );
+    }
+
+    /// 自审修复（HITL 互斥回执）：同批 bash 触发 HITL 审批挂起 + complete_task 时，
+    /// complete_task 不执行但必须补互斥错误回执入史——否则恢复回放把孤儿调用填成
+    /// INTERRUPTED_MARKER（「任务中断…请勿重复执行」），模型收到的语义错位。
+    #[tokio::test]
+    async fn complete_task_gets_conflict_receipt_when_batch_hitl_suspends() {
+        let resp = format!(
+            "{SSE_HDR}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
+            sse_tool_call(0, "bash-hitl", "bash", &serde_json::json!({"command":"rm -rf node_modules"})),
+            sse_tool_call(1, "ct-hitl", "complete_task", &serde_json::json!({"summary":"收尾。"}))
+        );
+        let port = scripted_mock(vec![resp]).await;
+        let mut config = corruption_itest_config(port, "ct-hitl", 6);
+        config.access_mode = "default".into(); // 触发 bash HITL 审批
+        config.hitl_approved = false;
+        let registry = std::sync::Arc::new(crate::tools::ToolRegistry::default_registry());
+        let agent = ReActAgent::new(registry);
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let history = vec![ChatMessage::system("sys"), ChatMessage::user("do the work")];
+        let run = agent.run(&config, history, frame_tx, cancel);
+        let collector = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while let Some(f) = frame_rx.recv().await { frames.push(f); }
+            frames
+        });
+        let result = run.await;
+        let _frames = collector.await.unwrap();
+        assert_eq!(result.stop_reason, StopReason::SuspendedHitl, "bash 必须触发 HITL 挂起");
+        let receipt = result.messages.iter().find(|m| m.tool_call_id.as_deref() == Some("ct-hitl"));
+        let receipt = receipt.expect("complete_task 必须有配对回执（否则恢复后孤儿调用 400/被填中断标记）");
+        assert_eq!(receipt.content_text(), COMPLETE_TASK_WITH_ASK_ERROR,
+            "回执必须是互斥错误文案，而非 INTERRUPTED_MARKER");
+    }
+
+    /// 契约 §4.2：同批含 ask_user 时 complete_task 返回错误、不结束；ask_user 照常挂起。
+    #[tokio::test]
+    async fn complete_task_with_ask_user_in_batch_errors_and_suspends() {
+        // complete_task 排在 index 0，ask_user 排在 index 1：验证批尾重排后
+        // ask_user 先执行、complete_task 被互斥拒绝。
+        let resp = format!(
+            "{SSE_HDR}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
+            sse_tool_call(0, "ct-x", "complete_task", &serde_json::json!({"summary":"done"})),
+            sse_tool_call(1, "ask-x", "ask_user", &serde_json::json!({"questions":[{"header":"选哪个？","options":[{"label":"A"}]}]}))
+        );
+        let (result, frames) = run_complete_task_scenario(vec![resp], "ct-ask").await;
+        // ask_user 挂起 → 整个 run 以 SuspendedQuestion 结束，而非 Completed。
+        assert_eq!(result.stop_reason, StopReason::SuspendedQuestion);
+        assert_ne!(result.final_answer, "done", "complete_task must NOT end the run");
+        // complete_task 的互斥错误回执入史（配对完整）。
+        assert!(
+            result.messages.iter().any(|m| m.tool_call_id.as_deref() == Some("ct-x")
+                && m.content_text().contains("不能同时提交完成")),
+            "complete_task must get the mutual-exclusion error result"
+        );
+        // ask_user 的 question 帧照常发。
+        assert!(frames.iter().any(|f| f.frame_type == "question"));
+    }
+
+    /// 契约 §4.2：同批 read + complete_task → complete_task 批尾执行，read 结果先入史。
+    #[tokio::test]
+    async fn complete_task_runs_last_in_a_mixed_batch() {
+        let tmp = std::env::temp_dir().join(format!("gwork-ct-batch-{}.txt", std::process::id()));
+        std::fs::write(&tmp, b"hello").unwrap();
+        let resp = format!(
+            "{SSE_HDR}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
+            sse_tool_call(0, "ct-b", "complete_task", &serde_json::json!({"summary":"收尾"})),
+            sse_tool_call(1, "rd-b", "read", &serde_json::json!({"file_path": tmp.to_string_lossy()}))
+        );
+        let (result, _frames) = run_complete_task_scenario(vec![resp], "ct-batch").await;
+        assert_eq!(result.stop_reason, StopReason::Completed);
+        assert_eq!(result.final_answer, "收尾");
+        // read 与 complete_task 的 tool result 都入史（配对完整）。
+        assert!(result.messages.iter().any(|m| m.tool_call_id.as_deref() == Some("rd-b")));
+        assert!(result.messages.iter().any(|m| m.tool_call_id.as_deref() == Some("ct-b")));
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "huita-ims": {
+      "type": "streamable_http",
+      "url": "https://www.yunqi-zhilian.com/AIAgent/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "慧獭进销存"
+      }
+    }
+  }
+}

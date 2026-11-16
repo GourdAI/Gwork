@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "datahub",
+  "version": "1.0.0",
+  "description": "Discover and run Data Apps, track execution and costs, and retrieve structured results.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "DataHub",
+        "name_en": "DataHub",
+        "description_zh": "用自然语言发现并运行 Data App，跟踪执行状态与费用，读取结构化结果并管理历史运行。",
+        "description_en": "Discover and run Data Apps, track execution and costs, and retrieve structured results."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

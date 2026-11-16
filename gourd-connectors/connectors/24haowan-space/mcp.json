@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "24haowan-space": {
+      "type": "streamable_http",
+      "url": "https://space.24haowan.com/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "24好玩 · 方案空间"
+      }
+    }
+  }
+}

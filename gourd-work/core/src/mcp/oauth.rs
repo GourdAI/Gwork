@@ -1181,6 +1181,13 @@ impl OAuthClient {
         &self.clock
     }
 
+    /// The underlying clean HTTP client (proxy honoured, no resource-server
+    /// headers). Exposed for vendor QR flows (`mcp::qrcode_vendor`) that reuse
+    /// the same egress/TLS posture as OAuth discovery without speaking OAuth.
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     /// GET a metadata document.
     ///
     /// A 404 is returned as `None`, not an error: both RFC 8414 and RFC 9728

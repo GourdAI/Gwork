@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "atlas-cloud",
+  "version": "1.0.0",
+  "description": "Generate images, video, voice and music with 300+ AI models, billed to your Atlas account.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "Atlas Cloud",
+        "name_en": "Atlas Cloud",
+        "description_zh": "用自然语言调用三百多个 AI 模型生成图片、视频、配音和音乐，费用记在你自己的 Atlas Cloud 账户上。",
+        "description_en": "Generate images, video, voice and music with 300+ AI models, billed to your Atlas account."
+      },
+      "categories": [
+        "image-and-video-processing"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

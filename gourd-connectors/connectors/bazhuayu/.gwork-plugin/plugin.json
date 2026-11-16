@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "bazhuayu",
+  "version": "1.0.0",
+  "description": "Drive Bazhuayu cloud scraping with natural language: discover templates, run tasks, check progress, export structured data, and manage existing tasks.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "八爪鱼",
+        "name_en": "Bazhuayu",
+        "description_zh": "用自然语言驱动八爪鱼云采集：搜索模板、启动任务、查询进度、导出结构化数据，并管理已有任务。",
+        "description_en": "Drive Bazhuayu cloud scraping with natural language: discover templates, run tasks, check progress, export structured data, and manage existing tasks."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

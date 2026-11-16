@@ -222,6 +222,11 @@ public class AskUser {
                 continue;
             }
 
+            // 契约 §5.1：多选答案（texts 数组）也是用户真实给出的内容
+            if (multiSelectText(item) != null) {
+                return true;
+            }
+
             ONode textNode = valueOf(item, "text");
             if (textNode != null && Assert.isNotEmpty(textNode.getString())) {
                 return true;
@@ -334,6 +339,15 @@ public class AskUser {
                 continue;
             }
 
+            // 契约 §5.1：多选答案（texts 数组）按「Q{n}: label1、label2」回填。
+            // 仅 texts 承载多选语义；text 为「label1、label2」的旧前端形态与单选不可区分，
+            // 走下方原样回填即天然兼容（顿号连接串已是契约要求的展示形态）。
+            String multiText = multiSelectText(answer);
+            if (multiText != null) {
+                sb.append("Q").append(i + 1).append(": ").append(multiText).append("\n");
+                continue;
+            }
+
             ONode textNode = valueOf(answer, "text");
             String text = (textNode == null) ? null : textNode.getString();
 
@@ -363,6 +377,15 @@ public class AskUser {
 
             ONode skippedNode = valueOf(item, "skipped");
             boolean skipped = skippedNode != null && Boolean.TRUE.equals(skippedNode.getBoolean(false));
+
+            // 契约 §5.1：题面丢失时多选答案同样按「Q{n}: label1、label2」裸列，不丢多选语义
+            if (!skipped) {
+                String multiText = multiSelectText(item);
+                if (multiText != null) {
+                    sb.append("Q").append(seq++).append(": ").append(multiText).append("\n");
+                    continue;
+                }
+            }
 
             ONode textNode = valueOf(item, "text");
             String text = (textNode == null) ? null : textNode.getString();
@@ -429,5 +452,37 @@ public class AskUser {
     private static boolean customAnswer(ONode answer) {
         ONode customNode = valueOf(answer, "custom");
         return customNode != null && Boolean.TRUE.equals(customNode.getBoolean(false));
+    }
+
+    /**
+     * 多选答案文本合成（契约 §5.1）：answers 元素含非空 texts 数组时，
+     * 把选中 label 以「、」连接返回；否则返回 null（单选/旧版答案走原路径）。
+     *
+     * <p>texts 里的空白项跳过；全空白视为无多选内容（回退 text 通道，按跳过呈现）。
+     * custom=true 且带 texts 的组合视为「多勾选 + 自由输入」，自由输入由前端
+     * 追加进 texts/text，此处统一按数组顺序连接，不额外加标记。</p>
+     */
+    private static String multiSelectText(ONode answer) {
+        ONode textsNode = valueOf(answer, "texts");
+        if (textsNode == null || !textsNode.isArray()) {
+            return null;
+        }
+
+        StringBuilder joined = new StringBuilder();
+        for (ONode item : textsNode.getArray()) {
+            if (item == null) {
+                continue;
+            }
+            String label = item.getString();
+            if (Assert.isEmpty(label) || label.trim().isEmpty()) {
+                continue;
+            }
+            if (joined.length() > 0) {
+                joined.append("、");
+            }
+            joined.append(label);
+        }
+
+        return joined.length() > 0 ? joined.toString() : null;
     }
 }

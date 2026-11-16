@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "baixiao-mcp": {
+      "type": "streamable_http",
+      "url": "https://mcp.know-pa.cn/mcp"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "dingteam-suite",
+  "version": "1.0.0",
+  "description": "Landray Dingdang Official Suite, connecting apps such as Smart Performance and Dingdang OKR, covering the full organizational management cycle of goal setting, progress tracking, and performance appraisal. Supports OKR generation, alignment views, and OKR progress updates; creating and saving assessment plans, launching assessments, tracking assessment completion and process efficiency, and analyzing performance results; viewing task lists and progress.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "蓝凌叮当组织效能套件",
+        "name_en": "Landray Dingdang Organizational Effectiveness Suite",
+        "description_zh": "蓝凌叮当官方套件，连接「智能绩效」、「叮当OKR」等应用，覆盖“定目标—管进度—评绩效”等组织管理全流程。支持OKR生成、对齐视图、更新 OKR 进度；创建并落库考核方案、发起考核、跟踪考核完成进度、流程效率统计、绩效结果分析；查看任务列表与进度等能力。",
+        "description_en": "Landray Dingdang Official Suite, connecting apps such as Smart Performance and Dingdang OKR, covering the full organizational management cycle of goal setting, progress tracking, and performance appraisal. Supports OKR generation, alignment views, and OKR progress updates; creating and saving assessment plans, launching assessments, tracking assessment completion and process efficiency, and analyzing performance results; viewing task lists and progress."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

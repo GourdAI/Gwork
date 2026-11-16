@@ -12,7 +12,7 @@ use once_cell::sync::Lazy;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::registry::{Tool, ToolContext, ToolOutput};
 use super::web_retry::{
@@ -29,39 +29,97 @@ const JINA_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebK
 /// Process-wide HTTP client pool.
 ///
 /// `reqwest::Client` internally holds an `Arc` to its connection pool, so
-/// cloning is cheap. Caching by (proxy + env fingerprint, UA) means a normal
-/// run builds one client for all four tools and keeps TLS/HTTP2 connections
-/// alive across calls, instead of rebuilding a client and re-handshaking on
-/// every tool invocation — which is what the old code did at `web.rs:36`,
-/// `:286`, `:426`.
+/// cloning is cheap. Caching by (proxy, UA) means a normal run builds one client
+/// for all four tools and keeps TLS/HTTP2 connections alive across calls, instead
+/// of rebuilding a client and re-handshaking on every tool invocation — which is
+/// what the old code did at `web.rs:36`, `:286`, `:426`.
 ///
 /// **The per-request timeout is deliberately NOT part of the key**: `webfetch`
 /// takes a model-supplied `timeoutMs` (1..120000), so including it would mint
 /// an unbounded number of pooled clients. Callers use
 /// `RequestBuilder::timeout(d)` instead, which applies to that one request
-/// including its body stream (reqwest 0.12 `request.rs:291`). The environment
-/// is a startup constant (as in Java), so no per-call env read is needed and
-/// the cache has exactly one entry per (proxy, UA) — bounded by the two UA
-/// constants below.
+/// including its body stream (reqwest 0.12 `request.rs:291`). The cache has
+/// exactly one entry per (proxy, UA) — bounded by the two UA constants below.
+///
+/// **Auto system-proxy clients are NOT cached forever** (see
+/// [`AUTO_PROXY_CLIENT_TTL`]): unlike an explicit proxy string, the OS proxy
+/// setting is mutable at runtime and reqwest snapshots it at client-build time.
 /// Cache key: (configured proxy, User-Agent).
 type ClientKey = (String, String);
-static CLIENTS: Lazy<Mutex<HashMap<ClientKey, reqwest::Client>>> =
+
+/// How long a client that relies on `auto_sys_proxy` may be reused before it is
+/// rebuilt from the current OS state.
+///
+/// `reqwest` resolves the system proxy exactly once, when `ClientBuilder::build()`
+/// runs (`reqwest` async_impl/client.rs:419 → `ProxyMatcher::system()` →
+/// `hyper-util` `Matcher::from_system()`, whose Windows part reads the
+/// `HKCU\...\Internet Settings` registry). A permanently cached client therefore
+/// freezes the egress path at its first use: start GWork with the proxy off,
+/// turn a system proxy on later (Clash/v2ray's "System Proxy" toggle writes only
+/// the registry, not this process's environment), and every later web tool call
+/// keeps going direct forever — while the browser, which re-reads the OS setting
+/// per request, works. That is precisely the reported
+/// 「浏览器能访问、工具一直获取不到」, including its "有时候" (it depends on the
+/// order in which the proxy and the app were started).
+///
+/// 20s keeps connection pooling across a normal burst of tool calls (the reason
+/// this cache exists) while picking up a proxy toggle without a restart and
+/// without any user-facing setting. Explicitly configured proxies are constant
+/// strings and stay cached permanently.
+const AUTO_PROXY_CLIENT_TTL: Duration = Duration::from_secs(20);
+
+struct CachedClient {
+    client: reqwest::Client,
+    built_at: Instant,
+    /// True when this client relies on `auto_sys_proxy` (no explicit proxy).
+    auto_proxy: bool,
+}
+
+static CLIENTS: Lazy<Mutex<HashMap<ClientKey, CachedClient>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Forget only the auto-system-proxy clients, so the next call rebuilds them
+/// from the **current** OS proxy state.
+///
+/// Called when an outbound attempt fails: a user who just enabled a proxy gets
+/// it picked up on the very next attempt instead of waiting out the TTL. Explicit
+/// proxy entries are untouched — the OS cannot change their value.
+fn invalidate_auto_proxy_clients() {
+    if let Ok(mut map) = CLIENTS.lock() {
+        map.retain(|_, v| !v.auto_proxy);
+    }
+}
+
+/// Pure TTL predicate, kept separate so the boundary is unit-testable without
+/// sleeping 20 seconds. An auto-system-proxy client older than the TTL must be
+/// rebuilt so `ClientBuilder::build()` re-reads the OS proxy state.
+fn auto_proxy_client_is_fresh(built_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(built_at) < AUTO_PROXY_CLIENT_TTL
+}
 
 /// Resolve and cache a pooled client for one (proxy, UA) pair. Split out of
 /// [`shared_client`] so the cache-bounding property is testable without
 /// constructing a full `ToolContext` (which has no `Default`).
 fn client_for(raw_proxy: &str, ua: &str) -> reqwest::Client {
     let proxy = configured_proxy(raw_proxy);
-    let key = (proxy.clone(), ua.to_string());
+    let key: ClientKey = (proxy.clone(), ua.to_string());
+    let auto_proxy = proxy.is_empty();
+    let now = Instant::now();
     if let Ok(map) = CLIENTS.lock() {
         if let Some(c) = map.get(&key) {
-            return c.clone();
+            // An explicit proxy never expires; an auto one expires so a proxy
+            // toggled mid-session is re-read from the OS on the next build.
+            if !auto_proxy || auto_proxy_client_is_fresh(c.built_at, now) {
+                return c.client.clone();
+            }
         }
     }
     let client = build_client_with_ua(&proxy, ua);
     if let Ok(mut map) = CLIENTS.lock() {
-        map.insert(key, client.clone());
+        map.insert(
+            key,
+            CachedClient { client: client.clone(), built_at: now, auto_proxy },
+        );
     }
     client
 }
@@ -251,38 +309,65 @@ fn is_cjk(c: char) -> bool {
     matches!(c, '\u{4e00}'..='\u{9fff}' | '\u{3400}'..='\u{4dbf}')
 }
 
-/// Query terms used by the relevance gate: ASCII alnum runs (≥2 chars) and CJK
-/// runs (≥2 chars), lowercased.
+/// Query terms used by the relevance gate: ASCII alnum runs (≥2 chars) plus
+/// **CJK character bigrams**.
+///
+/// The old code emitted a whole CJK run as ONE term, so a query like
+/// "网页抓取成功率" only matched a page containing that exact 7-character
+/// string. Chinese has no spaces and results routinely reorder / paraphrase
+/// ("提升抓取成功率的方法"), so almost every hit "didn't match" and the gate
+/// declared a perfectly good SERP irrelevant → failover → a failed search.
+/// Bigrams make partial / reordered wording match while still being specific
+/// enough that unrelated spam shares no signal.
 fn query_terms(query: &str) -> Vec<String> {
-    let mut terms = Vec::new();
-    let mut ascii = String::new();
-    let mut cjk = String::new();
-    let flush = |ascii: &mut String, cjk: &mut String, terms: &mut Vec<String>| {
-        if ascii.len() >= 2 {
+    fn flush_ascii(ascii: &mut String, terms: &mut Vec<String>) {
+        if ascii.chars().count() >= 2 {
             terms.push(ascii.to_lowercase());
         }
-        if cjk.chars().count() >= 2 {
-            terms.push(cjk.clone());
-        }
         ascii.clear();
+    }
+    fn flush_cjk(cjk: &mut Vec<char>, terms: &mut Vec<String>) {
+        if cjk.len() == 1 {
+            terms.push(cjk[0].to_string());
+        } else {
+            for w in cjk.windows(2) {
+                terms.push(w.iter().collect());
+            }
+        }
         cjk.clear();
-    };
+    }
+
+    let mut terms: Vec<String> = Vec::new();
+    let mut ascii = String::new();
+    let mut cjk: Vec<char> = Vec::new();
     for c in query.chars() {
         if c.is_ascii_alphanumeric() {
             if !cjk.is_empty() {
-                flush(&mut ascii, &mut cjk, &mut terms);
+                flush_cjk(&mut cjk, &mut terms);
             }
             ascii.push(c);
         } else if is_cjk(c) {
             if !ascii.is_empty() {
-                flush(&mut ascii, &mut cjk, &mut terms);
+                flush_ascii(&mut ascii, &mut terms);
             }
             cjk.push(c);
         } else {
-            flush(&mut ascii, &mut cjk, &mut terms);
+            if !ascii.is_empty() {
+                flush_ascii(&mut ascii, &mut terms);
+            }
+            if !cjk.is_empty() {
+                flush_cjk(&mut cjk, &mut terms);
+            }
         }
     }
-    flush(&mut ascii, &mut cjk, &mut terms);
+    if !ascii.is_empty() {
+        flush_ascii(&mut ascii, &mut terms);
+    }
+    if !cjk.is_empty() {
+        flush_cjk(&mut cjk, &mut terms);
+    }
+    terms.sort();
+    terms.dedup();
     terms
 }
 
@@ -292,8 +377,17 @@ fn query_terms(query: &str) -> Vec<String> {
 /// that have nothing to do with the query** (measured: `bing-int` from a
 /// mainland network returned video-farm spam for `asyncio TimeoutError`).
 /// Status checks and markup parsing both pass such a page, so the only honest
-/// signal left is content overlap: a majority of the hits must mention at
-/// least one query term. Empty queries/termless queries skip the gate.
+/// signal left is content overlap. Empty queries/termless queries skip the gate.
+///
+/// 【2026-11 成功率优化】旧规则要求「过半结果命中至少一个词」
+/// (`matching * 2 >= hits.len()`)。对中文查询这是灾难：中文不分词、结果普遍
+/// 换序/改写，即使命中也常常只有少数结果带得到查询片段，于是整条多引擎链
+/// 被判为「结果无关」逐一切换直至全灭。更关键的是，被误判时代价是**整个
+/// 搜索失败**，而误放行只是把一份略噪的 SERP 交给模型（模型能自行忽略）。
+/// 因此改为：只要结果里还存在*任何*查询信号就放行，仅在**零重叠**时拒绝
+/// ——这才是 shadow-ban 垃圾页的真实特征（源码注释亦如此描述），也契合
+/// 「先提高成功率」的取舍。CJK 词元已由 [`query_terms`] 改为字符二元组，
+/// 换序/部分命中都能贡献信号。
 fn looks_relevant(query: &str, hits: &[SearchHit]) -> bool {
     let terms = query_terms(query);
     if terms.is_empty() || hits.is_empty() {
@@ -306,7 +400,7 @@ fn looks_relevant(query: &str, hits: &[SearchHit]) -> bool {
             terms.iter().any(|t| hay.contains(t.as_str()))
         })
         .count();
-    matching * 2 >= hits.len()
+    matching > 0
 }
 
 fn promote_engine(id: &str) {
@@ -506,6 +600,10 @@ impl Tool for WebSearchTool {
                 if f.cancelled {
                     return ToolOutput::err("Search cancelled by user.");
                 }
+                // An outage may mean the user just turned on a system proxy.
+                // Drop the auto-proxy client so the next call re-snapshots the
+                // OS state instead of waiting out AUTO_PROXY_CLIENT_TTL.
+                invalidate_auto_proxy_clients();
                 // Make the failure mode explicit: the model must not read a
                 // search outage as evidence that nothing exists on the web.
                 // Listing every engine's reason is what turns "search failed"
@@ -926,20 +1024,48 @@ static NUMERIC_ENTITY_RE: Lazy<regex::Regex> =
 /// A stream error is **not** a truncated success: the old `break` returned
 /// whatever had arrived (often `""`) and `webfetch` reported an empty page as
 /// a successful fetch. Returning `Err` lets the retry loop do its job.
+///
+/// The `Content-Type` charset is captured **before** consuming the response:
+/// `resp.bytes_stream()` moves `resp`, so headers are gone afterwards. reqwest's
+/// `charset` feature only applies to `resp.text()`, which we deliberately do
+/// not use here (unbounded buffering), so decoding is done by
+/// [`decode_response_body`] instead.
+/// Append as much of one stream chunk as still fits; returns `true` when the
+/// cap is reached and the caller must stop reading.
+///
+/// The old loop dropped an entire chunk as soon as `len + chunk > cap`, so a
+/// large (now decompressed) first frame produced an **empty successful page**,
+/// and every >cap response was truncated up to one whole frame early — often
+/// cutting a multi-byte character in half. Filling the remainder exactly keeps
+/// the cap meaningful and makes the result deterministic.
+fn push_capped(body: &mut Vec<u8>, chunk: &[u8], max_bytes: u64) -> bool {
+    let remaining = max_bytes.saturating_sub(body.len() as u64) as usize;
+    if remaining == 0 {
+        return true;
+    }
+    let take = remaining.min(chunk.len());
+    body.extend_from_slice(&chunk[..take]);
+    take < chunk.len()
+}
+
 async fn read_body_capped(
     resp: reqwest::Response,
     max_bytes: u64,
 ) -> Result<String, AttemptError> {
     use futures_util::StreamExt;
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let mut body: Vec<u8> = Vec::with_capacity(64 * 1024);
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         match chunk {
             Ok(b) => {
-                if body.len() as u64 + b.len() as u64 > max_bytes {
+                if push_capped(&mut body, &b, max_bytes) {
                     break;
                 }
-                body.extend_from_slice(&b);
             }
             Err(e) => {
                 return Err(AttemptError::transport(format!(
@@ -949,7 +1075,60 @@ async fn read_body_capped(
             }
         }
     }
-    Ok(crate::textcodec::decode_bytes(&body))
+    Ok(decode_response_body(&body, content_type.as_deref()))
+}
+
+/// Charset-aware decoding for HTTP bodies.
+///
+/// Priority follows what browsers and mature fetchers do, tuned for success
+/// rate rather than spec literalism:
+///
+/// 1. A UTF-16/32 BOM is unambiguous (every other byte is NUL) and must be
+///    decoded before any byte-oriented heuristic.
+/// 2. **Bytes that are valid UTF-8 win over a declared legacy charset.**
+///    Mis-declared `charset=gbk` on an actually-UTF-8 page is extremely common;
+///    a genuine GBK/Big5/Shift_JIS Chinese page is never valid UTF-8. Trusting
+///    the bytes here avoids turning perfectly good pages into mojibake.
+/// 3. `Content-Type: ...; charset=…` for genuinely non-UTF-8 bytes.
+/// 4. HTML `<meta charset=…>` / `http-equiv` in the first 4 KiB.
+/// 5. BOM-less heuristic: UTF-8 → GBK fallback (legacy CN sites).
+///
+/// Note reqwest already decompresses gzip/br/deflate when those features are
+/// on, so by the time we see the bytes they are the *decoded* payload.
+fn decode_response_body(bytes: &[u8], content_type: Option<&str>) -> String {
+    use crate::textcodec::{charset_from_content_type, charset_from_html_meta,
+        decode_bytes, decode_with_bom, decode_with_label, detect_bom};
+
+    if let Some(bom) = detect_bom(bytes) {
+        if matches!(bom.encoding, "utf-16le" | "utf-16be" | "utf-32le" | "utf-32be") {
+            return decode_with_bom(bytes);
+        }
+    }
+    // A UTF-8 BOM is just a prefix; strip it so it cannot pollute the head scan
+    // or appear as a stray \u{FEFF} at the start of the extracted text.
+    let bytes: &[u8] = bytes
+        .strip_prefix(&[0xEF, 0xBB, 0xBF][..])
+        .unwrap_or(bytes);
+
+    if let Ok(valid) = std::str::from_utf8(bytes) {
+        return valid.to_string();
+    }
+
+    if let Some(label) = content_type.and_then(charset_from_content_type) {
+        if let Some(s) = decode_with_label(bytes, label) {
+            return s;
+        }
+    }
+    // Only the head is scanned; all charset declarations are ASCII, so a lossy
+    // preview of the first 4 KiB is enough even when the body is GBK.
+    let head_end = bytes.len().min(4096);
+    let head = String::from_utf8_lossy(&bytes[..head_end]);
+    if let Some(label) = charset_from_html_meta(&head) {
+        if let Some(s) = decode_with_label(bytes, &label) {
+            return s;
+        }
+    }
+    decode_bytes(bytes)
 }
 
 /// Fetch a web page and return its content as text/markdown.
@@ -964,8 +1143,18 @@ async fn webfetch_attempt(
     format: &str,
     timeout: Duration,
 ) -> Result<String, AttemptError> {
+    // 【2026-11 成功率优化】浏览器化请求头：只送 UA 而不带 Accept /
+    // Accept-Language 是常见的指纹缺口，CDN/WAF 对这种「半个浏览器」请求
+    // 直接 403。这里与多引擎搜索保持同一套头，UA 仍由 client 统一提供。
     let send = |extra_ua: Option<&str>| {
-        let mut req = client.get(url).timeout(timeout);
+        let mut req = client
+            .get(url)
+            .timeout(timeout)
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
         if let Some(ua) = extra_ua {
             req = req.header("User-Agent", ua);
         }
@@ -996,6 +1185,41 @@ async fn webfetch_attempt(
     } else {
         Ok(html_to_text(&body).chars().take(80_000).collect::<String>())
     }
+}
+
+/// Fetch one page as raw text for `crawl_url`'s direct leg, with the
+/// empty-shell check applied *before* reporting success. Split out because the
+/// plain `webfetch` tool must stay permissive (a short JSON/text endpoint is a
+/// legitimate result there), while `crawl_url` needs to know when to escalate
+/// to Jina Reader.
+async fn crawl_direct_attempt(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+) -> Result<String, AttemptError> {
+    let resp = client
+        .get(url)
+        .timeout(timeout)
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .send()
+        .await
+        .map_err(|e| AttemptError::transport(e.to_string()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(status_error(status, retry_after_of(&resp)));
+    }
+    let body = read_body_capped(resp, 1_048_576).await?;
+    let text = html_to_text(&body);
+    if is_empty_shell(&body, &text) {
+        return Err(AttemptError::transport(
+            "页面正文为空（JS 渲染壳或反爬拦截页）",
+        ));
+    }
+    Ok(text.chars().take(80_000).collect::<String>())
 }
 
 #[async_trait]
@@ -1038,7 +1262,13 @@ impl Tool for WebFetchTool {
 
         match out.value {
             Some(text) => ToolOutput::ok(text),
-            None => retry_failure("Fetch", out),
+            None => {
+                // An outage may mean the user just turned on a system proxy.
+                // Drop the auto-proxy client so the next call re-snapshots the OS
+                // state immediately instead of waiting out AUTO_PROXY_CLIENT_TTL.
+                invalidate_auto_proxy_clients();
+                retry_failure("Fetch", out)
+            }
         }
     }
 }
@@ -1215,16 +1445,27 @@ const JINA_READER_PREFIX: &str = "https://r.jina.ai/";
 
 /// Process-level circuit breaker for Jina Reader.
 ///
-/// From networks where `r.jina.ai` is unreachable (measured: TCP-level timeout
-/// from mainland China), *every* `crawl_url` attempt would otherwise burn its
-/// full 30 s Jina timeout before the direct fallback runs — three attempts,
-/// 90 s of guaranteed waste per call. One transport failure stamps the
-/// timestamp here and later attempts go straight to the direct fetch; after
-/// [`JINA_RETRY_AFTER_SECS`] the next attempt probes Jina again, and a success
-/// clears the stamp, so a restored route is picked up without a restart.
+/// 【2026-11 成功率优化】链路已改为**直连优先、Jina 仅作兜底**：旧版每次
+/// `crawl_url` 都先请求 `r.jina.ai`，在境内网络实测 TCP 超时，首个调用必白等
+/// 30 s，且 Jina 的 20 RPM 共享池在批量抓取时频繁 429。现在只有直连确实
+/// 失败（403/SPA 空壳/正文过少）才升级到 Jina；Jina 自身传输失败会打上时间戳，
+/// 之后 10 分钟内不再探测，避免每次重试都重复烧 30 s。
 static JINA_FAILED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// How long a Jina transport failure suppresses further Jina probes.
 const JINA_RETRY_AFTER_SECS: u64 = 600;
+
+/// Mark Jina as unavailable. **Every** failure must trip this — transport
+/// timeout, any non-2xx (above all the shared 20 RPM `429`), and an empty body.
+/// The old code cleared the circuit on *any* HTTP response, so a 429/403 reset
+/// it and each retry of `run_with_retry` hit the already-rate-limited pool again,
+/// defeating the whole "Jina only as a fallback, back off for 10 min" design.
+fn mark_jina_failed() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(1);
+    JINA_FAILED_AT.store(now.max(1), std::sync::atomic::Ordering::Relaxed);
+}
 
 fn jina_circuit_open() -> bool {
     let failed_at = JINA_FAILED_AT.load(std::sync::atomic::Ordering::Relaxed);
@@ -1243,11 +1484,75 @@ fn jina_circuit_open() -> bool {
     true
 }
 
+/// One Jina Reader attempt. A transport failure opens the circuit and is
+/// returned as `AttemptError::Transport`; HTTP-level failures are
+/// `AttemptError::Http` so the retry loop can honour `Retry-After`.
+async fn jina_attempt(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<String, AttemptError> {
+    let req = client
+        .get(format!("{}{}", JINA_READER_PREFIX, url))
+        .timeout(Duration::from_secs(20))
+        .header("Accept", "text/plain")
+        // Ask Jina for Markdown. `X-No-Cache: true` is deliberately **gone**:
+        // it forced an upstream refetch on every call and pushed a keyless
+        // client straight into the 20 RPM shared pool. Jina's own docs
+        // recommend using its cache.
+        .header("X-Return-Format", "markdown");
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "Jina Reader unreachable; circuit open");
+            mark_jina_failed();
+            return Err(AttemptError::transport(format!("Jina Reader unreachable: {}", e)));
+        }
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        // Any non-2xx — above all the shared-pool 429 — must trip the circuit,
+        // otherwise every `run_with_retry` attempt re-hits an endpoint that just
+        // rate-limited us. The status is still forwarded so Retry-After is honoured.
+        mark_jina_failed();
+        return Err(status_error(status, retry_after_of(&resp)));
+    }
+    let body = read_body_capped(resp, 1_048_576).await?;
+    if body.trim().is_empty() {
+        mark_jina_failed();
+        return Err(AttemptError::transport("目标页面返回空内容"));
+    }
+    // Only a genuinely usable response clears an earlier failure.
+    JINA_FAILED_AT.store(0, std::sync::atomic::Ordering::Relaxed);
+    Ok(body.chars().take(80_000).collect::<String>())
+}
+
+/// One `crawl_url` attempt: direct first, Jina only as an escalation.
+async fn crawl_attempt(
+    direct_client: &reqwest::Client,
+    jina_client: &reqwest::Client,
+    url: &str,
+) -> Result<String, AttemptError> {
+    let direct_error = match crawl_direct_attempt(direct_client, url, Duration::from_secs(30)).await {
+        Ok(text) => return Ok(text),
+        Err(e) => {
+            tracing::debug!(error = %e.message(), "direct fetch failed; escalating to Jina Reader");
+            e
+        }
+    };
+    if jina_circuit_open() {
+        // Jina is known-dead on this network right now; do not burn another
+        // timeout. Keep the *original* direct failure (403 vs timeout matters
+        // both for the retry classifier and for the model's diagnosis).
+        return Err(direct_error);
+    }
+    jina_attempt(jina_client, url).await
+}
+
 #[async_trait]
 impl Tool for CrawlUrlTool {
     fn name(&self) -> &str { "crawl_url" }
     fn description(&self) -> &str {
-        "读取并分析指定 URL 网页的详细内容，返回降噪后的 Markdown（保留标题、列表与代码块）。适合需要结构化正文而非纯文本的场景。"
+        "读取并分析指定 URL 网页的详细内容，返回降噪后的正文（保留标题、列表与代码块结构）。优先直连，直连失败或页面为 JS 空壳时再走 Jina Reader。"
     }
     fn readonly(&self) -> bool { true }
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1265,65 +1570,25 @@ impl Tool for CrawlUrlTool {
             return ToolOutput::err("错误：URL 无效（必须以 http:// 或 https:// 开头）。");
         }
 
-        let client = shared_client(ctx, JINA_UA);
+        let jina_client = shared_client(ctx, JINA_UA);
         let direct_client = shared_client(ctx, BROWSER_UA);
         let policy = http_policy(ctx);
         let out = run_with_retry(&policy, &ctx.cancel, |_| {
-            let client = client.clone();
+            let jina_client = jina_client.clone();
             let direct_client = direct_client.clone();
             let url = url.to_string();
-            async move {
-                // Circuit open: skip Jina entirely (it is known-dead on this
-                // network right now) and fetch the target directly.
-                if jina_circuit_open() {
-                    return webfetch_attempt(&direct_client, &url, "text", Duration::from_secs(30)).await;
-                }
-                let req = client
-                    .get(format!("{}{}", JINA_READER_PREFIX, url))
-                    .timeout(Duration::from_secs(30))
-                    .header("Accept", "text/plain")
-                    // Ask Jina for Markdown. `X-No-Cache: true` is deliberately
-                    // **gone**: it forced an upstream refetch on every call and
-                    // pushed a keyless client straight into the 20 RPM shared
-                    // pool. Jina's own docs recommend using its cache.
-                    .header("X-Return-Format", "markdown");
-                let resp = match req.send().await {
-                    Ok(r) => r,
-                    // Jina unreachable from this network (measured: TCP-level
-                    // timeout from mainland China). A direct fetch of the
-                    // target page inside the same attempt keeps the tool
-                    // useful; the retry loop still covers HTTP-level failures.
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Jina Reader unreachable; falling back to direct fetch");
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(1);
-                        JINA_FAILED_AT.store(now.max(1), std::sync::atomic::Ordering::Relaxed);
-                        return webfetch_attempt(&direct_client, &url, "text", Duration::from_secs(30)).await;
-                    }
-                };
-                JINA_FAILED_AT.store(0, std::sync::atomic::Ordering::Relaxed);
-                let status = resp.status();
-                if !status.is_success() {
-                    // Rate limiting is an HTTP status (429 in practice), not a
-                    // marker in the body. Forwarding it as AttemptError::Http
-                    // lets the shared retry loop honour `Retry-After` instead
-                    // of returning the rate-limit page as if it were content.
-                    return Err(status_error(status, retry_after_of(&resp)));
-                }
-                let body = read_body_capped(resp, 1_048_576).await?;
-                if body.trim().is_empty() {
-                    return Err(AttemptError::transport("目标页面返回空内容"));
-                }
-                Ok(body.chars().take(80_000).collect::<String>())
-            }
+            async move { crawl_attempt(&direct_client, &jina_client, &url).await }
         })
         .await;
 
         match out.value {
             Some(text) => ToolOutput::ok(text),
-            None => retry_failure("抓取", out),
+            None => {
+                // Same as webfetch: pick up a system proxy toggled during this
+                // failing attempt without waiting out AUTO_PROXY_CLIENT_TTL.
+                invalidate_auto_proxy_clients();
+                retry_failure("抓取", out)
+            }
         }
     }
 }
@@ -1334,9 +1599,9 @@ impl Tool for CrawlUrlTool {
 // per call is pure waste; `Lazy` also means a syntax error surfaces on first use
 // rather than being re-paid every request.
 
-/// Script / style / noscript blocks, content included.
+/// Script / style / noscript / boilerplate blocks, content included.
 ///
-/// **Three patterns, not one.** The original was
+/// **Separate patterns, not one.** The original was
 /// `<(script|style|noscript)[^>]*>.*?</\1>` — a backreference, which the `regex`
 /// crate does not support at all. `Regex::new` returned `Err` and the `.unwrap()`
 /// therefore **panicked on every webfetch call**, taking the ReAct loop with it.
@@ -1346,17 +1611,43 @@ impl Tool for CrawlUrlTool {
 /// tests. Only `cargo clippy`'s `invalid_regex` lint (compile-time evaluation of
 /// literals) found it. The tests below now exercise `html_to_text` directly, so
 /// an invalid pattern fails the suite instead of production.
-static SCRIPT_RES: Lazy<[regex::Regex; 3]> = Lazy::new(|| {
+///
+/// 【2026-11 成功率优化 / codereview 修正】新增 nav/header/footer/aside/svg 清理：
+/// 旧版只去 script/style/noscript，抓取结果被导航栏、页脚版权、推荐链接淹没，
+/// 真正正文常常落在 80k 截断之后，表现为「抓到了但没内容」。
+///
+/// **`<form>` 刻意不在此列**：ASP.NET WebForms、政府/论坛/中文 CMS 常用
+/// `<form runat="server">` 把整个 `<body>`（含 `<article>/<main>` 正文）包起来，
+/// 整段删会连正文一起吞掉，反而制造「空成功」。表单控件由后续 TAG_RE 去标签、
+/// 文本会保留，这点噪音远小于丢正文的代价，故只删块、不删 form 容器。
+static SCRIPT_RES: Lazy<[regex::Regex; 8]> = Lazy::new(|| {
     [
         regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap(),
         regex::Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap(),
         regex::Regex::new(r"(?is)<noscript[^>]*>.*?</noscript>").unwrap(),
+        regex::Regex::new(r"(?is)<nav\b[^>]*>.*?</nav\s*>").unwrap(),
+        regex::Regex::new(r"(?is)<header\b[^>]*>.*?</header\s*>").unwrap(),
+        regex::Regex::new(r"(?is)<footer\b[^>]*>.*?</footer\s*>").unwrap(),
+        regex::Regex::new(r"(?is)<aside\b[^>]*>.*?</aside\s*>").unwrap(),
+        regex::Regex::new(r"(?is)<svg\b[^>]*>.*?</svg\s*>").unwrap(),
     ]
 });
 
 /// Block-level closing tags, replaced by a newline so paragraphs do not run together.
 static BLOCK_RE: Lazy<regex::Regex> =
-    Lazy::new(|| regex::Regex::new(r"(?i)</(p|div|h[1-6]|li|tr|br|section|article)>").unwrap());
+    Lazy::new(|| regex::Regex::new(r"(?i)</(p|div|h[1-6]|li|tr|br|section|article|pre|blockquote|table|ul|ol|dl|dd|dt)>").unwrap());
+
+/// Headings get explicit `#` markers so the extracted text retains the
+/// document outline the `crawl_url` description promises. Capturing the level
+/// avoids running six separate passes.
+static HEADING_OPEN_RE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"(?i)<h([1-6])\b[^>]*>").unwrap());
+
+/// List items become `- ` bullets; code blocks are fenced.
+static LI_OPEN_RE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"(?i)<li\b[^>]*>").unwrap());
+static PRE_OPEN_RE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"(?i)<pre\b[^>]*>").unwrap());
 
 /// Any remaining tag.
 static TAG_RE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"<[^>]+>").unwrap());
@@ -1364,7 +1655,15 @@ static TAG_RE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"<[^>]+>").u
 /// Three or more consecutive newlines, collapsed to two.
 static BLANK_RE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\n{3,}").unwrap());
 
+/// Runs of spaces/tabs (but keep newlines) so stripped tags don't leave rivers
+/// of whitespace that eat the 80k char budget.
+static SPACE_RUN_RE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"[ \t]{2,}").unwrap());
+
 /// Basic HTML → text conversion (strip scripts/styles/tags, collapse whitespace).
+///
+/// 【2026-11 成功率优化】保留标题/列表/代码块的结构标记、去掉导航页脚噪音。
+/// 这是「轻量可读性提取」，不是完整 Markdown 渲染器：不引入 scraper/DOM 依赖，
+/// 避免新增编译依赖带来的离线构建风险，但已能显著改善正文密度。
 fn html_to_text(html: &str) -> String {
     // Remove script and style blocks. Each pass is a separate pattern because the
     // crate cannot express "close tag matches open tag" without backreferences.
@@ -1374,20 +1673,65 @@ fn html_to_text(html: &str) -> String {
     for re in SCRIPT_RES.iter() {
         cleaned = re.replace_all(&cleaned, "").into_owned();
     }
+    // Structure markers, applied before the generic tag strip.
+    let cleaned = HEADING_OPEN_RE
+        .replace_all(&cleaned, |caps: &regex::Captures| {
+            let level: usize = caps[1].parse().unwrap_or(2);
+            format!("\n{} ", "#".repeat(level))
+        })
+        .into_owned();
+    let cleaned = LI_OPEN_RE.replace_all(&cleaned, "\n- ").into_owned();
+    let cleaned = PRE_OPEN_RE.replace_all(&cleaned, "\n```\n").into_owned();
     // Replace block-level tags with newlines
     let with_newlines = BLOCK_RE.replace_all(&cleaned, "\n");
     // Strip remaining tags
     let text = TAG_RE.replace_all(&with_newlines, "");
     // Decode common entities
     let text = decode_entities(&text);
-    // Collapse multiple blank lines
+    // Collapse whitespace runs and multiple blank lines
+    let text = SPACE_RUN_RE.replace_all(&text, " ");
     let text = BLANK_RE.replace_all(&text, "\n\n");
-    text.trim().to_string()
+    text
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// A `200 OK` whose HTML is only a JS shell (`<div id="root"></div>`, Vue/React
+/// mount point, "Please enable JavaScript") has no extractable content. Treating
+/// that as a successful fetch is exactly the "grabbed it but got nothing" report.
+/// The caller uses this to trigger a Jina/reader fallback instead of returning
+/// an empty success.
+fn is_empty_shell(html_or_text: &str, extracted: &str) -> bool {
+    let plain_len = extracted.chars().filter(|c| !c.is_whitespace()).count();
+    if plain_len < 80 {
+        let lower = html_or_text.to_ascii_lowercase();
+        // A genuinely short page (a tiny JSON/text endpoint) is still useful;
+        // only call it a shell when the markup looks like an SPA/interstitial.
+        let spa_markers = [
+            "id=\"root\"", "id='root'", "id=\"app\"", "id='app'",
+            "__next", "data-reactroot", "ng-app", "vite",
+            "enable javascript", "please enable javascript", "需要启用javascript",
+            "just a moment", "checking your browser", "cf-challenge",
+        ];
+        return spa_markers.iter().any(|m| lower.contains(m))
+            || (lower.contains("<html") && lower.contains("<script") && plain_len < 30);
+    }
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every test that mutates the process-wide `CLIENTS` cache must hold this
+    /// lock: Rust runs tests in parallel and an unsynchronised `clear()` from a
+    /// neighbour test would make cache-size assertions flaky. Pure tests (no
+    /// `CLIENTS` access) are unaffected.
+    static CLIENT_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Every regex literal in this module must actually compile **and** match what
     /// it claims to. The backreference defect this replaces was invisible to
@@ -1401,7 +1745,14 @@ mod tests {
             (0, "<script>a</script>", "<div>a</div>"),
             (1, "<style>a</style>", "<div>a</div>"),
             (2, "<noscript>a</noscript>", "<div>a</div>"),
+            (3, "<nav class=\"x\">a</nav>", "<div>a</div>"),
+            (4, "<header>a</header>", "<div>a</div>"),
+            (5, "<footer>a</footer>", "<div>a</div>"),
+            (6, "<aside>a</aside>", "<div>a</div>"),
+            (7, "<svg><path/></svg>", "<div>a</div>"),
         ];
+        // `<form>` must NOT be in SCRIPT_RES: see the note above the static.
+        assert_eq!(SCRIPT_RES.len(), 8, "form must stay out of the block-strip list");
         for (i, yes, no) in script_cases {
             let re = &SCRIPT_RES[i];
             assert!(re.is_match(yes), "script pattern {} must match {:?}", i, yes);
@@ -1472,6 +1823,47 @@ mod tests {
         assert_eq!(html_to_text(""), "");
     }
 
+    /// 【2026-11 成功率回归】旧版把导航/页脚/表单一起当正文，80k 截断后
+    /// 真正内容常常被挤掉。这里钉住结构保留 + 噪音剔除。
+    #[test]
+    fn boilerplate_is_removed_and_structure_is_kept() {
+        let html = r#"<html><body>
+          <nav><a href="/">首页</a><a href="/about">关于我们</a></nav>
+          <header>站点横幅 版权所有</header>
+          <main>
+            <h1>安装指南</h1>
+            <p>第一步：下载安装包。</p>
+            <ul><li>Windows</li><li>macOS</li></ul>
+            <pre>cargo install foo</pre>
+          </main>
+          <aside>相关推荐 广告位</aside>
+          <footer>© 2026 保留所有权利</footer>
+          <form><input value="订阅邮件"></form>
+        </body></html>"#;
+        let out = html_to_text(html);
+        assert!(out.contains("# 安装指南"), "heading marker missing: {out:?}");
+        assert!(out.contains("第一步：下载安装包"), "body missing: {out:?}");
+        assert!(out.contains("- Windows"), "list marker missing: {out:?}");
+        assert!(out.contains("cargo install foo"), "code missing: {out:?}");
+        for gone in ["站点横幅", "关于我们", "相关推荐", "保留所有权利", "订阅邮件"] {
+            assert!(!out.contains(gone), "{gone:?} must be stripped, got: {out:?}");
+        }
+    }
+
+    #[test]
+    fn spa_shell_is_detected_but_short_real_pages_are_not() {
+        let shell = r#"<!doctype html><html><head><script src="/app.js"></script></head><body><div id="root"></div></body></html>"#;
+        let text = html_to_text(shell);
+        assert!(is_empty_shell(shell, &text), "JS-only shell must be detected");
+        let interstitial = "<html><body><p>Just a moment... Checking your browser</p></body></html>";
+        assert!(is_empty_shell(interstitial, &html_to_text(interstitial)));
+        // 一个真实的短 HTML 页不该被当成空壳。
+        let short = "<html><body><p>这是一段简短但真实的说明文字，用来确认短页面不会被误判为空壳页面而触发无谓的兜底抓取。</p></body></html>";
+        assert!(!is_empty_shell(short, &html_to_text(short)), "got: {}", html_to_text(short));
+        // 纯文本/JSON 端点根本不是 HTML。
+        assert!(!is_empty_shell(r#"{"ok":true}"#, r#"{"ok":true}"#));
+    }
+
     /// Malformed HTML must degrade to text, never panic: the input comes from an
     /// arbitrary remote server.
     #[test]
@@ -1479,6 +1871,44 @@ mod tests {
         for bad in ["<p>unclosed", "<script>never closed", "<<<>>>", "</p></p>", "<a href=\"x\">y"] {
             let _ = html_to_text(bad);
         }
+    }
+
+    // ─── HTTP body decoding ──────────────────────────────────────────────────
+
+    /// 【2026-11 成功率回归】旧实现把 `bytes_stream()` 的原始字节直接交给
+    /// UTF-8→GBK 兜底，既不读 Content-Type charset 也不认 BOM/meta。
+    #[test]
+    fn body_decoding_honours_declared_charset() {
+        let (gbk, _, _) = encoding_rs::GBK.encode("中文测试");
+        assert_eq!(
+            decode_response_body(&gbk, Some("text/html; charset=gbk")),
+            "中文测试"
+        );
+    }
+
+    #[test]
+    fn a_misdeclared_charset_cannot_mangle_valid_utf8() {
+        // 站点声明 gbk 但实际发 UTF-8，是最常见的中文乱码来源。
+        assert_eq!(
+            decode_response_body("中文测试".as_bytes(), Some("text/html; charset=gbk")),
+            "中文测试"
+        );
+    }
+
+    #[test]
+    fn body_decoding_falls_back_to_html_meta_and_bom() {
+        let (gbk, _, _) = encoding_rs::GBK.encode("中文");
+        let mut html = b"<html><head><meta charset=\"gbk\"></head><body>".to_vec();
+        html.extend_from_slice(&gbk);
+        html.extend_from_slice(b"</body></html>");
+        assert!(decode_response_body(&html, Some("text/html")).contains("中文"));
+
+        // UTF-8 BOM must be stripped, not leaked into the extracted text.
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice("你好".as_bytes());
+        assert_eq!(decode_response_body(&bom, None), "你好");
+        // UTF-16LE BOM wins over any heuristic.
+        assert_eq!(decode_response_body(&[0xFF, 0xFE, b'H', 0, b'i', 0], None), "Hi");
     }
 
     // ─── DuckDuckGo redirect unwrapping ──────────────────────────────────────
@@ -1665,16 +2095,54 @@ mod tests {
             SearchHit { url: "u2".into(), title: "Python asyncio 中的超时控制方案".into(), snippet: "timeout 处理".into() },
         ];
         assert!(looks_relevant(q, &good), "on-topic hits must pass");
-        // A single on-topic hit out of four still fails (majority rule).
+        // 放宽后：只要还残留查询信号就放行（误放行优于整条引擎链全灭）。
         let mixed = {
             let mut v = junk.clone();
             v.push(good[0].clone());
             v.push(good[1].clone());
             v
         };
-        assert!(looks_relevant(q, &mixed), "2 of 4 matching is exactly half → pass");
+        assert!(looks_relevant(q, &mixed));
         // Termless queries skip the gate entirely.
         assert!(looks_relevant("!!!", &junk));
+    }
+
+    /// 【2026-11 成功率回归】中文查询不分词：旧实现把整串中文当一个词，
+    /// 结果换序/改写就零命中，整条多引擎链被判「无关」直至全灭。这里钉住
+    /// 「换序、部分命中、少数结果命中」三种真实 SERP 形态都必须放行。
+    #[test]
+    fn cjk_reordered_and_partial_matches_are_not_rejected() {
+        let q = "网页抓取成功率";
+        // 换序 + 改写，但共享「抓取」「网页」「成功率」等片段。
+        let hits = vec![
+            SearchHit { url: "u1".into(), title: "提升抓取成功率的方法".into(), snippet: "网页内容提取实践".into() },
+            SearchHit { url: "u2".into(), title: "Rust 实现网页抓取".into(), snippet: "如何统计成功率".into() },
+        ];
+        assert!(looks_relevant(q, &hits), "reordered CJK wording must pass");
+        // 只有一条结果带得到查询片段，也必须放行（旧「过半」规则会误杀）。
+        let sparse = vec![
+            SearchHit { url: "u1".into(), title: "某某站点首页".into(), snippet: "无关内容".into() },
+            SearchHit { url: "u2".into(), title: "另一种抓取方案".into(), snippet: "别的描述".into() },
+            SearchHit { url: "u3".into(), title: "继续无关".into(), snippet: "广告".into() },
+            SearchHit { url: "u4".into(), title: "大幅提升成功率".into(), snippet: "实战".into() },
+        ];
+        assert!(looks_relevant(q, &sparse), "a single signal-bearing hit must not fail the whole search");
+        // 真正零重叠的垃圾页仍然拒绝。
+        let spam = vec![
+            SearchHit { url: "u1".into(), title: "高清影视在线观看".into(), snippet: "免费追剧".into() },
+            SearchHit { url: "u2".into(), title: "糖心vlog入口".into(), snippet: "每日更新".into() },
+        ];
+        assert!(!looks_relevant(q, &spam), "pure spam must still be rejected");
+    }
+
+    #[test]
+    fn cjk_query_terms_are_bigrams_not_one_whole_run() {
+        let terms = query_terms("网页抓取成功率");
+        assert!(terms.contains(&"网页".into()), "got {terms:?}");
+        assert!(terms.contains(&"抓取".into()), "got {terms:?}");
+        assert!(!terms.contains(&"网页抓取成功率".into()), "old whole-run term must be gone: {terms:?}");
+        // 单字 CJK 查询仍产生一个词元（term-less 会跳过门禁）。
+        assert_eq!(query_terms("雷"), vec!["雷".to_string()]);
     }
 
     #[test]
@@ -2036,6 +2504,7 @@ mod tests {
     /// that puts `timeout` back into the key would add one client per call.
     #[test]
     fn distinct_per_request_timeouts_do_not_grow_the_client_cache() {
+        let _g = CLIENT_CACHE_TEST_LOCK.lock().unwrap();
         CLIENTS.lock().unwrap().clear();
         // Eight distinct timeoutMs values from the model; `client_for` never
         // sees them (the cap lives on RequestBuilder now).
@@ -2082,8 +2551,12 @@ mod tests {
     /// A keep-alive server that counts **accepted TCP connections**, not
     /// requests. With a pooled client, N sequential requests must reuse one
     /// connection — the same behaviour Java's static client gives.
-    #[tokio::test]
+    // current_thread: this test holds a std MutexGuard (the cache serialisation
+    // lock) across awaits; a multi-thread runtime would require the future to be
+    // Send. Nothing here needs worker threads (the mock server is a tokio task).
+    #[tokio::test(flavor = "current_thread")]
     async fn pooled_client_reuses_one_tcp_connection_across_calls() {
+        let _g = CLIENT_CACHE_TEST_LOCK.lock().unwrap();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2137,6 +2610,7 @@ mod tests {
     /// well under a second even in an unoptimised debug test build.
     #[test]
     fn cached_client_lookup_has_bounded_local_cost() {
+        let _g = CLIENT_CACHE_TEST_LOCK.lock().unwrap();
         CLIENTS.lock().unwrap().clear();
         let _ = client_for("", DEFAULT_UA); // warm the single cache entry
         let t = std::time::Instant::now();
@@ -2151,5 +2625,145 @@ mod tests {
             "10k cached lookups took {elapsed:?}; the retry layer must not add per-call work"
         );
         CLIENTS.lock().unwrap().clear();
+    }
+
+    // ─── Zero-config system proxy: no settings, no restart ─────────────────────
+    //
+    // Regression for 「浏览器能访问、工具一直获取不到」. reqwest snapshots the OS
+    // proxy at ClientBuilder::build(); a permanently cached client freezes it.
+
+    /// The TTL predicate: fresh auto-proxy clients are reused (connection pooling
+    /// must survive a burst), expired ones are rebuilt so the OS state is re-read.
+    /// Exactly at the boundary is expired (`<`, matching the implementation).
+    #[test]
+    fn auto_proxy_client_ttl_boundary() {
+        let t0 = Instant::now();
+        assert!(auto_proxy_client_is_fresh(t0, t0));
+        assert!(auto_proxy_client_is_fresh(t0, t0 + AUTO_PROXY_CLIENT_TTL - Duration::from_millis(1)));
+        assert!(!auto_proxy_client_is_fresh(t0, t0 + AUTO_PROXY_CLIENT_TTL));
+        assert!(!auto_proxy_client_is_fresh(t0, t0 + AUTO_PROXY_CLIENT_TTL + Duration::from_secs(1)));
+        // A clock that moved backwards must never be treated as expired-forever.
+        assert!(auto_proxy_client_is_fresh(t0, t0 - Duration::from_secs(60)));
+    }
+
+    /// `invalidate_auto_proxy_clients` (called on a failed outbound attempt)
+    /// drops only the auto-system-proxy entries and keeps explicitly configured
+    /// proxies — the OS cannot change an explicit value, so rebuilding it would
+    /// only throw away its connection pool.
+    #[test]
+    fn failed_attempt_invalidates_only_auto_proxy_clients() {
+        let _g = CLIENT_CACHE_TEST_LOCK.lock().unwrap();
+        CLIENTS.lock().unwrap().clear();
+        let _ = client_for("", DEFAULT_UA);
+        let _ = client_for("", JINA_UA);
+        let _ = client_for("http://127.0.0.1:7890", DEFAULT_UA);
+        assert_eq!(CLIENTS.lock().unwrap().len(), 3);
+
+        // Simulate: the proxy was switched on while GWork was running and the
+        // current (stale, direct) client just failed.
+        invalidate_auto_proxy_clients();
+        let map = CLIENTS.lock().unwrap();
+        assert_eq!(map.len(), 1, "only the explicit-proxy client must remain");
+        let (key, cached) = map.iter().next().unwrap();
+        assert_eq!(key.0, "http://127.0.0.1:7890");
+        assert!(!cached.auto_proxy);
+        drop(map);
+
+        // The next call rebuilds auto clients from the *current* OS state.
+        let _ = client_for("", DEFAULT_UA);
+        assert_eq!(CLIENTS.lock().unwrap().len(), 2);
+        assert!(CLIENTS.lock().unwrap().values().any(|c| c.auto_proxy));
+        CLIENTS.lock().unwrap().clear();
+    }
+
+    /// An expired auto client is rebuilt in place (cache never grows), while an
+    /// explicitly configured proxy is never expired even after the TTL elapsed.
+    #[test]
+    fn expired_auto_proxy_client_rebuilds_in_place_but_explicit_never_expires() {
+        let _g = CLIENT_CACHE_TEST_LOCK.lock().unwrap();
+        CLIENTS.lock().unwrap().clear();
+        let first = client_for("", DEFAULT_UA);
+        // Rewind built_at to just past the TTL to drive expiry without sleeping.
+        {
+            let mut map = CLIENTS.lock().unwrap();
+            let key: ClientKey = (String::new(), DEFAULT_UA.to_string());
+            let c = map.get_mut(&key).unwrap();
+            c.built_at = Instant::now() - AUTO_PROXY_CLIENT_TTL - Duration::from_secs(1);
+        }
+        let rebuilt = client_for("", DEFAULT_UA);
+        assert_eq!(CLIENTS.lock().unwrap().len(), 1, "expiry replaces, never grows, the entry");
+        // Both are valid pooled clients; the point is that a fresh build happened.
+        std::hint::black_box((first, rebuilt));
+
+        // Explicit proxy: same rewind must NOT trigger a rebuild.
+        let key: ClientKey = ("http://127.0.0.1:7890".to_string(), DEFAULT_UA.to_string());
+        let _ = client_for("http://127.0.0.1:7890", DEFAULT_UA);
+        {
+            let mut map = CLIENTS.lock().unwrap();
+            map.get_mut(&key).unwrap().built_at = Instant::now() - AUTO_PROXY_CLIENT_TTL - Duration::from_secs(1);
+        }
+        let _ = client_for("http://127.0.0.1:7890", DEFAULT_UA);
+        assert_eq!(CLIENTS.lock().unwrap().len(), 2, "explicit proxy stays in the same single entry");
+        CLIENTS.lock().unwrap().clear();
+    }
+
+    // ─── codereview follow-ups (deterministic regressions only) ──────────────
+
+    /// ASP.NET / 政府 / 论坛 CMS 用 `<form runat="server">` 包住整个 body。
+    /// 把 form 当噪音整段删会连正文一起吞掉，制造「空成功」——本轮新增
+    /// 的 nav/header/footer/aside/svg 清理里最危险的一条，必须钉住。
+    #[test]
+    fn a_form_wrapping_the_article_does_not_delete_the_body() {
+        let html = r#"<html><body><form id="form1" runat="server">
+            <article><h1>安装说明</h1><p>这里是真实正文，用于确认表单容器不会把文章一起删掉。</p></article>
+            <input value="__VIEWSTATE"><button>提交</button>
+            </form></body></html>"#;
+        let out = html_to_text(html);
+        assert!(out.contains("安装说明"), "form 吞掉了标题: {out:?}");
+        assert!(out.contains("这里是真实正文"), "form 吞掉了正文: {out:?}");
+        // is_empty_shell 也不该把这种页面判成 JS 空壳去触发 Jina。
+        assert!(!is_empty_shell(html, &out), "got: {out:?}");
+    }
+
+    /// cap 边界：单大帧、逐帧累加、恰好填满、零容量都必须填满而不丢整块。
+    #[test]
+    fn capped_body_fills_the_cap_instead_of_dropping_a_whole_chunk() {
+        // 首个 chunk 就超限：旧实现返回空串，现在是恰好 max_bytes 的前缀。
+        let mut body = Vec::new();
+        assert!(push_capped(&mut body, &vec![b'x'; 2_000], 512));
+        assert_eq!(body.len(), 512, "first large frame must not yield an empty page");
+        assert!(!body.iter().any(|&b| b != b'x'));
+
+        // 多帧累加到 cap：最后一帧只取剩余部分。
+        let mut body = Vec::new();
+        for _ in 0..3 {
+            if push_capped(&mut body, &vec![b'a'; 40], 100) {
+                break;
+            }
+        }
+        assert_eq!(body.len(), 100, "cap must be filled exactly");
+        assert!(push_capped(&mut body, b"z", 100), "must signal stop at cap");
+        assert_eq!(body.len(), 100);
+
+        // 恰好填满不提前 break。
+        let mut body = Vec::new();
+        assert!(!push_capped(&mut body, b"1234", 4));
+        assert_eq!(body, b"1234");
+    }
+
+    /// Jina 的任何失败都必须打开熔断，否则 run_with_retry 的每一次 attempt
+    /// 都会再打一次刚限流我们的共享池。
+    #[test]
+    fn jina_failures_trip_the_circuit_and_only_success_clears_it() {
+        let before = JINA_FAILED_AT.load(std::sync::atomic::Ordering::Relaxed);
+        JINA_FAILED_AT.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(!jina_circuit_open());
+        mark_jina_failed();
+        assert!(JINA_FAILED_AT.load(std::sync::atomic::Ordering::Relaxed) > 0, "failure must stamp the circuit");
+        assert!(jina_circuit_open(), "failed Jina must be suppressed");
+        // 一次可用响应才清零（对应 jina_attempt 成功分支的 store(0)）。
+        JINA_FAILED_AT.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(!jina_circuit_open());
+        JINA_FAILED_AT.store(before, std::sync::atomic::Ordering::Relaxed);
     }
 }

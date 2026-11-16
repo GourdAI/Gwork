@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "hefei-city-alerts",
+  "version": "1.0.0",
+  "description": "Query Hefei real-time public life info: weather & warnings, water/power/gas outage notices, traffic controls and government announcements.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "合肥便民通告",
+        "name_en": "Hefei City Alerts",
+        "description_zh": "查询合肥本地天气与预警、停水停电、燃气检修、交通管制、政府公告等实时民生信息。",
+        "description_en": "Query Hefei real-time public life info: weather & warnings, water/power/gas outage notices, traffic controls and government announcements."
+      },
+      "categories": [
+        "location-services"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

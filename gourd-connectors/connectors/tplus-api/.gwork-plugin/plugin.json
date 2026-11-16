@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "tplus-api",
+  "version": "1.0.0",
+  "description": "Natural-language access to Chanjet T+Cloud: query and manage sales orders, purchase orders, inventory vouchers, production orders, financial documents, reports, and master data.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "畅捷通T+",
+        "name_en": "Chanjet T+",
+        "description_zh": "畅捷通 T+Cloud 自然语言操作入口：查询/管理销售订单、采购订单、库存单据、生产工单、财务凭证、报表及基础档案。",
+        "description_en": "Natural-language access to Chanjet T+Cloud: query and manage sales orders, purchase orders, inventory vouchers, production orders, financial documents, reports, and master data."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

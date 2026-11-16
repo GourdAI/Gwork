@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "picset-commerce-images",
+  "version": "1.0.0",
+  "description": "Picset AI Commerce Design provides four independent capabilities, including product style replication from a style reference: ecommerce image suites (main, detail, listing, and A+ content images), single image text-to-image/image-to-image generation and editing, and Agent Canvas (canvas hosting and image return), plus a unified connector pricing panel. Covers Taobao, Tmall, JD, Pinduoduo, Douyin, 1688, Xiaohongshu, TikTok, Amazon, Shopify, Temu, OZON, Shopee, Alibaba.com with credit quoting, generation tracking, and indexed partial revisions.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "Picset AI 电商设计",
+        "name_en": "Picset AI Commerce Design",
+        "description_zh": "Picset AI 电商设计：面向电商卖家、设计师和美工，提供四条独立功能线——电商套图（主图/详情图/套图/Listing/A+，含一张也走套图）、单图文生图/图生图（独立创意单图与图片编辑）、风格复刻（参考风格与商品图，含复刻电商主图）、Agent Canvas（画布承接与图片返回），以及连接器统一充值面板。覆盖淘宝、天猫、京东、拼多多、抖音、1688、小红书、TikTok、Amazon、Shopify、Temu、OZON、Shopee、阿里巴巴国际站等主流平台，支持方案规划、积分报价、生成跟踪和按编号局部修改。",
+        "description_en": "Picset AI Commerce Design provides four independent capabilities, including product style replication from a style reference: ecommerce image suites (main, detail, listing, and A+ content images), single image text-to-image/image-to-image generation and editing, and Agent Canvas (canvas hosting and image return), plus a unified connector pricing panel. Covers Taobao, Tmall, JD, Pinduoduo, Douyin, 1688, Xiaohongshu, TikTok, Amazon, Shopify, Temu, OZON, Shopee, Alibaba.com with credit quoting, generation tracking, and indexed partial revisions."
+      },
+      "categories": [
+        "image-and-video-processing"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

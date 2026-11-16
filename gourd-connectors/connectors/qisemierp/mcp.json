@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "qisemierp": {
+      "type": "streamable_http",
+      "url": "https://mcp-internal.qisemiyun.com/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "七色米进销存"
+      }
+    }
+  }
+}

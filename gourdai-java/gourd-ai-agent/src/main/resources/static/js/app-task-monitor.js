@@ -248,12 +248,22 @@
         setBodyHtml(envBody, html);
     }
 
+    function incompleteOutputsRow(data) {
+        if (!data || data.possiblyIncomplete !== true) return '';
+        /* 复用既有 file_changes.possibly_incomplete（12 语种齐备），不新增 locale 键；
+           语言包缺键时 GourdI18n.t 会回裸键，故用纯文本兜底，不新增 locale 文件。 */
+        var text = t('file_changes.possibly_incomplete');
+        if (!text || text === 'file_changes.possibly_incomplete') text = 'Some changes may not be tracked';
+        return '<div class="tm-empty">' + esc(text) + '</div>';
+    }
     function renderOutputs(data) {
         if (!outputsBody) return;
         if (data === undefined) { clearLoading(); setBodyHtml(outputsBody, errorRow()); return; }
+        var warn = incompleteOutputsRow(data);
         var files = (data && data.files) || [];
-        if (!files.length) { setBodyHtml(outputsBody, emptyRow('monitor.empty_outputs')); return; }
-        var html = '';
+        /* possiblyIncomplete 时「无产出」不代表真的没有改动：空态/列表上方先给警示。 */
+        if (!files.length) { setBodyHtml(outputsBody, warn + emptyRow('monitor.empty_outputs')); return; }
+        var html = warn;
         for (var i = 0; i < files.length; i++) {
             var f = files[i];
             var sub = (f.additions || 0) || (f.deletions || 0)

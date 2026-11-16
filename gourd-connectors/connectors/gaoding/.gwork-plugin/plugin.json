@@ -1,0 +1,77 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "gaoding",
+  "version": "1.0.0",
+  "description": "Connect to Gaoding AI creative, asset, model and editor capabilities through natural language.",
+  "keywords": [
+    "cli",
+    "skills"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "kind": "cli",
+      "tier": "cli",
+      "auth": {
+        "authType": "cli_login"
+      },
+      "display": {
+        "name": "稿定AI",
+        "name_en": "Gaoding AI",
+        "description_zh": "连接稿定AI创作、素材、模型与编辑器能力，用自然语言完成设计工作。",
+        "description_en": "Connect to Gaoding AI creative, asset, model and editor capabilities through natural language."
+      },
+      "categories": [
+        "image-and-video-processing"
+      ],
+      "source": "vendor-cli:@gaoding/cli@2.1.4",
+      "cli_spec": {
+        "package": "@gaoding/cli",
+        "version": "2.1.4",
+        "binName": "gd-cli",
+        "binPath": "dist/bin/gd-cli.js",
+        "auth": {
+          "argv": [
+            "auth",
+            "login",
+            "--no-browser"
+          ],
+          "urlDomain": "www.gaoding.art",
+          "waitForExit": true
+        },
+        "status": {
+          "argv": [
+            "auth",
+            "status",
+            "--json"
+          ],
+          "matchJson": {
+            "logged_in": "true",
+            "credential.valid": "true"
+          }
+        },
+        "unauth": {
+          "argv": [
+            "auth",
+            "logout"
+          ]
+        }
+      },
+      "skills": [
+        {
+          "name": "gd-cli",
+          "dir": "skills/gd-cli"
+        }
+      ],
+      "skills_provenance": {
+        "source": "@gaoding/cli@2.1.4 官方技能（WB 公开仓库缓存 skills/ 原样复制，缺 LICENSE 由 npm license 字段补齐）",
+        "url": "https://www.npmjs.com/package/@gaoding/cli",
+        "license": "MIT",
+        "skillCount": 1,
+        "fileCount": 11,
+        "byteCount": 26605
+      },
+      "readme": "## 稿定AI CLI 连接器\n\n厂商官方 `@gaoding/cli@2.1.4`，扫码/浏览器授权，内置 1 套官方技能。\n\n### 连接方式\n\n1. 点击「连接」，GWork 自动准备 Node 运行时并安装官方 CLI；\n2. 弹窗展示授权链接/二维码，按厂商页面完成扫码或浏览器确认；\n3. 授权完成后自动连接。凭据由官方 CLI 自管，GWork 不接触 token。\n\n技能包来源：厂商公开 CLI 包随附技能文档（公开仓库缓存副本）；许可见各技能目录 LICENSE。"
+    }
+  }
+}

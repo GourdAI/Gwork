@@ -90,7 +90,9 @@ class AskUserProtocolTest {
         // 此处引用常量而非重复一份字面量：两边手抄易不同步（历史上已发生过一次），
         // 而契约的真正价值在于“它必须是工具对外暴露的那一份描述”。
         Assertions.assertEquals(AskUserTool.TOOL_DESCRIPTION, tool.description());
-        Assertions.assertTrue(tool.description().contains("任务将挂起，直到用户回答后自动恢复"),
+        // 契约 §1.1 精简文案：挂起/恢复语义保留，但措辞由「任务将挂起，直到用户回答后自动恢复」
+        // 收敛为「任务挂起直到回答后自动恢复」——按冻结文案更新断言（语义守护不放松）。
+        Assertions.assertTrue(tool.description().contains("任务挂起直到回答后自动恢复"),
                 "挂起/恢复语义是前端问答卡的行为前提，不得从描述中移除");
         Assertions.assertTrue(tool.description().contains("recommended=true"),
                 "推荐项标记是选项契约的一部分，不得从描述中移除");

@@ -3500,9 +3500,9 @@ window.releaseHitlCards = releaseHitlCards;
    （防任务卡死）。状态挂在会话（sess._questionState），卡片只渲染当前活动会话的那一份：
    切走即隐藏，切回时由 loadMessages→replaySession 对 question / question_answered 帧的顺序
    重放自然重建（历史中问后有答则重建后随即隐藏）。
-   帧契约（冻结）：question {actionId, toolName:"ask_user", args:{questions:[{header, detail?, options?:[{label, recommended?}]}]}}；
+   帧契约（冻结）：question {actionId, toolName:"ask_user", args:{questions:[{header, detail?, options?:[{label, recommended?}], multiSelect?}]}}；
    question_answered {args:{answers:[...]}}，收到即隐藏。
-   提交：POST /web/chat/input（SSE_ENDPOINT），FormData questionAnswer=JSON.stringify({answers:[{index,text,skipped,custom}]})
+   提交：POST /web/chat/input（SSE_ENDPOINT），FormData questionAnswer=JSON.stringify({answers:[{index,text,skipped,custom,texts?}]})
    + sessionId；本地流式态处理与 handleHitlResponse 同构（进入流式态→POST→失败回退）。 */
 
 /* ---- 问答卡状态机（纯函数；行为测试整段提取执行，区块内不得引用 DOM/全局） ---- */
@@ -3652,7 +3652,10 @@ function normalizeQuestionArgs(args) {
         out.push({
             header: (q.header == null) ? '' : String(q.header),
             detail: (q.detail == null) ? '' : String(q.detail),
-            options: opts
+            options: opts,
+            // multiSelect 为可选新增字段（契约 §5.1，默认 false）：仅当选项可同时成立时
+            // 后端 schema 才允许置 true；旧帧不带该字段，!!undefined=false 走原单选路径。
+            multiSelect: !!q.multiSelect
         });
     }
     return out;
@@ -3677,19 +3680,42 @@ function questionAnswerFor(state, index) {
     return (state && state.answers && state.answers[index]) || null;
 }
 
-/* 选项高亮判定：以 selectedLabel 为准（text 可能已拼入补充，不再等于纯标签）。
-   旧状态无 selectedLabel 字段时退回 text 比对，保证已落盘/已渲染的卡不闪失高亮。 */
+/* 取某题的多选标记：题面可能来自 normalizeQuestionArgs（multiSelect 已整形）或旧快照
+   （字段缺失），统一按 !! 收敛成布尔，避免各处重复判空。 */
+function questionIsMultiSelect(state, index) {
+    var q = (state && state.questions && state.questions[index]) || null;
+    return !!(q && q.multiSelect);
+}
+
+/* 多选题的已选 label 列表（按点选顺序）。以 selectedLabels 数组为唯一事实源；
+   旧状态/单选答案无该字段时回退到 selectedLabel 单值，保证升级前已渲染的卡不丢选中态。 */
+function questionSelectedLabels(state, index) {
+    var a = questionAnswerFor(state, index);
+    if (!a || a.skipped) return [];
+    if (Array.isArray(a.selectedLabels)) {
+        return a.selectedLabels.filter(function(s) { return s != null && String(s) !== ''; })
+            .map(function(s) { return String(s); });
+    }
+    if (a.selectedLabel) return [String(a.selectedLabel)];
+    return [];
+}
+
+/* 选项高亮判定：以 selectedLabel(s) 为准（text 可能已拼入补充/多标签连接，不再等于纯标签）。
+   多选题查 selectedLabels 数组；旧状态无 selectedLabel 字段时退回 text 比对，
+   保证已落盘/已渲染的卡不闪失高亮。 */
 function questionOptionSelected(state, index, label) {
     var a = questionAnswerFor(state, index);
     if (!a || a.skipped) return false;
     var want = (label == null) ? '' : String(label);
+    if (questionIsMultiSelect(state, index)) {
+        return questionSelectedLabels(state, index).indexOf(want) >= 0;
+    }
     if (a.selectedLabel != null) return a.selectedLabel === want;
     return !a.custom && a.text === want;
 }
 
 /* 出站文本组装：点选选项与额外补充并存时拼成一段。
-   答案协议只有 text 一个载荷字段（已冻结，后端与测试都依赖），故拼接在客户端完成；
-   采用单行「选项（补充：XXX）」形态，与后端 formatAnswerText 既有的
+   单选路径沿用单行「选项（补充：XXX）」形态，与后端 formatAnswerText 既有的
    「（用户自定义回答）」括号风格一致，模型侧读起来是完整一句而非断裂的多行。 */
 function composeQuestionAnswerText(selectedLabel, supplement) {
     var sel = (selectedLabel == null) ? '' : String(selectedLabel).trim();
@@ -3697,6 +3723,22 @@ function composeQuestionAnswerText(selectedLabel, supplement) {
     if (!sel) return sup;
     if (!sup) return sel;
     return sel + '（补充：' + sup + '）';
+}
+
+/* 多选题出站组装（契约 §5.1/§5.2）：选中 label 按点选顺序以「、」连接为 text，
+   自由输入（supplement 承载）作为【附加项】直接追加进同一串（不再是单选的
+   「（补充：…）」注解形态）；texts 数组与 text 逐项对应，供新内核结构化读取，
+   旧内核只读 text 仍拿到完整语义。空 label 剔除（退数据不参与组装）。 */
+function composeMultiQuestionAnswer(labels, supplement) {
+    var texts = [];
+    var list = Array.isArray(labels) ? labels : [];
+    for (var i = 0; i < list.length; i++) {
+        var s = (list[i] == null) ? '' : String(list[i]);
+        if (s) texts.push(s);
+    }
+    var sup = (supplement == null) ? '' : String(supplement).trim();
+    if (sup) texts.push(sup);
+    return { text: texts.join('、'), texts: texts };
 }
 
 function questionIsAllAnswered(state) {
@@ -3775,10 +3817,15 @@ function nextUnansweredQuestionIndex(state, index) {
 
 /* 点选项 = 单选钮语义，可反悔：再点【已选中的那一项】即取消选择（见 unselectQuestionOption）。
    旧实现只有「写入 / 改选」两条出路，点已选项等于把同一份答案原样重写一遍 —— 用户看到的
-   就是「选中后取消不了」，只能被迫改选别的选项或提交。 */
+   就是「选中后取消不了」，只能被迫改选别的选项或提交。
+   多选题（q.multiSelect=true，契约 §5.2）改走 toggleQuestionMultiOption 数组累积语义。 */
 function applyQuestionOptionAnswer(state, index, label) {
     if (!state) return;
     var sel = (label == null) ? '' : String(label);
+    if (questionIsMultiSelect(state, index)) {
+        toggleQuestionMultiOption(state, index, sel);
+        return;
+    }
     // 空 label 的选项规定上不存在（退数据），不参与 toggle，免得误碰「未选定」判定
     if (sel && questionOptionSelected(state, index, sel)) {
         unselectQuestionOption(state, index);
@@ -3796,6 +3843,56 @@ function applyQuestionOptionAnswer(state, index, label) {
         custom: false
     };
     advanceQuestionCursor(state);
+}
+
+/* 多选题勾选：checkbox 语义，选中集合按点选顺序累积，再点已选项把该项移出（可反悔）。
+   【为什么不推进光标】多选是「攒够再走」：每点一下就翻页会逼用户翻回来继续勾，
+   与单选题「点完即答完」的语义刻意不同；翻页/提交由底部按钮统一承担。
+   【自由输入并存】supplement 原样保留：先补一句再勾选、或先勾选再补一句，两个输入面互不顶掉；
+   集合清空时若已有补充则降级为纯自定义答案（与 unselectQuestionOption 同构），否则整条撤回。 */
+function toggleQuestionMultiOption(state, index, label) {
+    if (!state) return;
+    var sel = (label == null) ? '' : String(label);
+    if (!sel) return;   // 空 label 退数据不参与勾选
+    var prev = questionAnswerFor(state, index);
+    /* 自审修复 F4：已跳过的题不被点选静默复活——与 unselectQuestionOption 的
+       「X 已经表达过放弃」同一纪律。要改答先点「撤销跳过」（questionSkipToggle），
+       而不是点一个选项就把 skipped 标记无提示改写。单选改选路径保留既有可覆盖
+       语义（用户明确点另一选项=改答），多选累积语义下误触即复活，故在此设闸。 */
+    if (prev && prev.skipped) return;
+    /* 自由输入承载位有两处：已勾选时是 supplement；纯自定义答案（尚未勾选）时文本
+       在 text 里、supplement 为空——首次勾选必须把它收编为附加项，否则「先打字再勾选项」
+       会把用户已写的那段话静默顶掉（与单选「改选保留补充」同一纪律）。 */
+    var sup = (prev && !prev.skipped)
+        ? String(prev.supplement || (prev.custom ? (prev.text || '') : '') || '')
+        : '';
+    var labels = questionSelectedLabels(state, index);
+    var at = labels.indexOf(sel);
+    if (at >= 0) labels.splice(at, 1); else labels.push(sel);
+    if (labels.length === 0) {
+        if (!sup) {
+            // 最后一项也取消且无自由输入：回到未作答态（skipped 的题上面读不到 labels，不会走到这）
+            if (prev && !prev.skipped) delete state.answers[index];
+            return;
+        }
+        state.answers[index] = {
+            index: index, text: sup, selectedLabel: '', selectedLabels: [],
+            texts: [sup], supplement: '', skipped: false, custom: true
+        };
+        return;
+    }
+    var composed = composeMultiQuestionAnswer(labels, sup);
+    state.answers[index] = {
+        index: index,
+        text: composed.text,
+        // selectedLabel 恒置空串：多选高亮只认 selectedLabels 数组，旧字段不参与判定
+        selectedLabel: '',
+        selectedLabels: labels,
+        texts: composed.texts,
+        supplement: sup,
+        skipped: false,
+        custom: false
+    };
 }
 
 /* 取消本题的选项选择：这是「已点选项」唯一的撤回出口。
@@ -3829,6 +3926,35 @@ function applyQuestionSupplement(state, index, text) {
     if (!state) return;
     var sup = (text == null) ? '' : String(text).trim();
     var prev = questionAnswerFor(state, index);
+    /* 多选题：自由输入是【附加项】而非注解——与选中 label 一起拼进 text/texts
+       （契约 §5.2「自由输入作为附加项追加」），清空输入即从附加项中移除。 */
+    if (questionIsMultiSelect(state, index)) {
+        state.drafts[index] = sup;
+        var mLabels = questionSelectedLabels(state, index);
+        if (!sup && mLabels.length === 0) {
+            if (prev && !prev.skipped) delete state.answers[index];
+            return;
+        }
+        if (mLabels.length === 0) {
+            state.answers[index] = {
+                index: index, text: sup, selectedLabel: '', selectedLabels: [],
+                texts: [sup], supplement: '', skipped: false, custom: true
+            };
+            return;
+        }
+        var mComposed = composeMultiQuestionAnswer(mLabels, sup);
+        state.answers[index] = {
+            index: index,
+            text: mComposed.text,
+            selectedLabel: '',
+            selectedLabels: mLabels,
+            texts: mComposed.texts,
+            supplement: sup,
+            skipped: false,
+            custom: false
+        };
+        return;
+    }
     var sel = (prev && prev.selectedLabel) ? String(prev.selectedLabel) : '';
     state.drafts[index] = sup;
     if (!sup && !sel) {
@@ -3855,7 +3981,9 @@ function applyQuestionSupplement(state, index, text) {
 function applyQuestionCustomAnswer(state, index, text) {
     if (!state) return;
     var prev = questionAnswerFor(state, index);
-    if (prev && !prev.skipped && prev.selectedLabel) {
+    // 多选题已勾选任一选项时同样转「附加项追加」：勾了 A、B 再补一句，勾选集合不得被顶掉
+    var hasMultiSel = questionIsMultiSelect(state, index) && questionSelectedLabels(state, index).length > 0;
+    if (prev && !prev.skipped && (prev.selectedLabel || hasMultiSel)) {
         applyQuestionSupplement(state, index, text);
         return;
     }
@@ -3863,8 +3991,12 @@ function applyQuestionCustomAnswer(state, index, text) {
     state.answers[index] = {
         index: index, text: val, selectedLabel: '', supplement: '', skipped: false, custom: true
     };
+    // 多选题的纯自定义回答也是单元素 texts（附加项语义：无勾选时它就是唯一项）
+    if (questionIsMultiSelect(state, index) && val) state.answers[index].texts = [val];
     state.drafts[index] = val;
-    advanceQuestionCursor(state);
+    // 自审修复 F5：多选题不推进光标——与 toggleQuestionMultiOption「攒够再走」同语义。
+    // 先打字后勾选的用户若被 Enter 翻页，还得翻回来继续勾；翻页/提交由底部按钮统一承担。
+    if (!questionIsMultiSelect(state, index)) advanceQuestionCursor(state);
 }
 
 function skipQuestionAnswer(state) {
@@ -3886,21 +4018,29 @@ function fillUnansweredAsSkipped(state) {
     }
 }
 
-/* 出站 payload 严格保持四键 {index,text,skipped,custom}：
-   selectedLabel / supplement 只是本地渲染与「不覆盖」判定用的语义位，绝不入表——
-   后端 AskUser.parseAnswers / formatAnswerText 与两份契约测试都按这四个字段冻结。 */
+/* 出站 payload 保持冻结四键 {index,text,skipped,custom}；多选题按契约 §5.1 追加
+   可选 texts:[label,...]（选中 label 依点选顺序 + 自由输入附加项），旧内核只读 text 仍可用。
+   selectedLabel(s) / supplement 只是本地渲染与「不覆盖」判定用的语义位，绝不入表。 */
 function buildQuestionAnswersPayload(state) {
     var out = [];
     var n = (state && state.questions) ? state.questions.length : 0;
     for (var i = 0; i < n; i++) {
         var a = (state && state.answers && state.answers[i]) || null;
         if (!a) a = skippedAnswer(i);
-        out.push({
+        var item = {
             index: i,
             text: (a.text == null) ? '' : String(a.text),
             skipped: !!a.skipped,
             custom: !!a.custom
-        });
+        };
+        /* texts 仅在多选题且确有内容时入表（跳过的多选不带；单选题协议零改动）。
+           本地语义位缺失的旧状态回退按「、」拆 text——与新组装口径互逆。 */
+        if (!item.skipped && questionIsMultiSelect(state, i) && item.text) {
+            item.texts = Array.isArray(a.texts)
+                ? a.texts.map(function(s) { return (s == null) ? '' : String(s); })
+                : item.text.split('、');
+        }
+        out.push(item);
     }
     return { answers: out };
 }
@@ -3916,6 +4056,25 @@ function formatQuestionAnswerForRecord(question, answerItem) {
         return { skipped: true, title: '', desc: '', supplement: '', custom: false };
     }
     var opts = (question && question.options) || [];
+    /* 多选题记录：展示「label1、label2」（契约 §5.2）。texts 逐项反查选项取短标题
+       （与单选记录同用 questionOptionView，长 label 才可扫读）；反查不到的项（自由输入
+       附加项/旧数据）原样保留，绝不丢信息。不做单选的「（补充：…）」拆解——多选的
+       自由输入本就是附加项，直接排在串尾。无 texts 的旧帧回退按「、」拆 text。 */
+    if (question && question.multiSelect) {
+        var parts = Array.isArray(a.texts) ? a.texts : text.split('、');
+        var titles = [];
+        for (var mi = 0; mi < parts.length; mi++) {
+            var part = (parts[mi] == null) ? '' : String(parts[mi]);
+            if (!part) continue;
+            var title = part;
+            for (var mj = 0; mj < opts.length; mj++) {
+                var mLabel = (opts[mj].label == null) ? '' : String(opts[mj].label);
+                if (mLabel && mLabel === part) { title = questionOptionView(opts[mj]).title; break; }
+            }
+            titles.push(title);
+        }
+        return { skipped: false, title: titles.join('、'), desc: '', supplement: '', custom: false };
+    }
     var supPrefix = '（补充：';
     for (var i = 0; i < opts.length; i++) {
         var label = (opts[i].label == null) ? '' : String(opts[i].label);
@@ -4161,6 +4320,74 @@ function getPendingQuestionState(sess) {
     return st;
 }
 
+/* pendingQuestion 兜底拉取（契约 §6，双内核端点已冻结）：
+   GET /web/chat/pendingQuestion?sessionId= → {"code":200,"data":null|{actionId,questions}}。
+   【为何必需】问答卡的唯一重建来源是 question 帧回放；旧落盘无 question 帧、他端已消费、
+   或回放隔离跳过建卡时，后端明明还挂着提问，界面却没有任何作答入口 → 任务死等。
+   会话回放结束后拉一次权威状态：data 非空且 actionId 与现状态不同 → 走 appendQuestionCard
+   同构入口建卡（复用 normalizeQuestionArgs）；data 为 null 且本地有未提交状态 → 后端已无
+   挂起（已消费/过期），清状态收卡，防僵尸卡。
+   【纪律】请求失败静默忽略（不打断会话加载）；回放隔离规则不变——回放期间不 probe、
+   迟到响应也不得改写用户正在作答的另一张卡；同一会话同一时刻只发一次
+   （_pendingQuestionProbe 防抖标记，完成后清）。
+   【请求封装】沿用 app-todos.js 的裸 fetch + r.ok 拦截惯例（桌面端 kernel-bridge 已改写
+   fetch 层补基址，Web 端同源直达；X-Session-Cwd 头与 todos 同口径，多项目会话定位用）。 */
+function probePendingQuestion(sess) {
+    if (!sess || !sess.sessionId) return;
+    if (sess._pendingQuestionProbe) return;
+    if (sess._replaying) return;
+    // 自审修复 F3：旧实现「已有未提交活跃卡 → 不探测」把契约 §6 的 null-清卡分支
+    // 挡成死代码——后端已消费/过期但他端作答帧丢失时，本地僵尸卡永远收不掉。
+    // 改为：活跃卡也探测，由响应侧按 actionId 裁决（同 id 保留、null 收卡、异 id 重建）。
+    sess._pendingQuestionProbe = true;
+    var headers = {};
+    if (sess.projectRoot && typeof encodeSessionCwdHeader === 'function') {
+        headers['X-Session-Cwd'] = encodeSessionCwdHeader(sess.projectRoot);
+    }
+    fetch('/web/chat/pendingQuestion?sessionId=' + encodeURIComponent(sess.sessionId), { headers: headers })
+        .then(function(r) {
+            // fetch 对 4xx/5xx 不会 reject，必须显式拦截（与 loadTodos 同口径）
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(function(res) {
+            if (!res || Number(res.code) !== 200) return;
+            // 迟到响应防越权：会话已切代（sessionMap 换对象）或正在回放
+            if (typeof sessionMap !== 'undefined' && sessionMap[sess.sessionId] !== sess) return;
+            if (sess._replaying) return;
+            var cur = sess._questionState || null;
+            var data = res.data;
+            if (data && Array.isArray(data.questions) && data.questions.length > 0) {
+                var actionId = data.actionId ? String(data.actionId) : '';
+                // 同 id 不重复建卡：含用户正在作答的活跃卡（不得抢占）与已提交快照
+                if (cur && cur.actionId === actionId) return;
+                // 已有【另一张】未提交活跃卡：用户可能正在作答，探测不得抢占
+                //（与 appendQuestionCard 回放隔离同一纪律）；无卡/已提交才重建。
+                if (cur && !cur.submitted && cur.questions && cur.questions.length > 0) return;
+                // 与实时 question 帧完全同构的入口：建卡/幂等/活动会话渲染全部复用
+                appendQuestionCard(sess, {
+                    type: 'question',
+                    actionId: actionId,
+                    toolName: 'ask_user',
+                    args: { questions: data.questions }
+                });
+            } else if (!data && cur && !cur.submitted) {
+                // 后端已无挂起（已消费/过期）：清僵尸状态收卡。
+                // F3 后此分支对「未提交活跃卡」真实可达（前置门禁已放行探测）。
+                sess._questionState = null;
+                if (sess.sessionId === activeSessionId) syncQuestionCard();
+            }
+        })
+        .catch(function() {
+            // 静默忽略：兜底探测失败不得打断会话加载，也不留错误噪声
+        })
+        .then(function() {
+            // 成功/失败统一在此释放防抖标记（then 体内抛错也会落到这里），下次加载可再探
+            sess._pendingQuestionProbe = false;
+        });
+}
+window.probePendingQuestion = probePendingQuestion;
+
 /* question 帧入口（实时与历史回放共用）：状态挂会话；仅活动会话渲染 DOM。
    同 actionId 重复帧幂等（保留已作答进度，仅刷新题面）；不同 actionId 视为新一轮提问，替换旧状态。
 
@@ -4334,6 +4561,11 @@ function renderQuestionCard(host, sess, state) {
     html += '<div class="question-card-header">';
     html += '<div class="question-card-heading">';
     html += '<span class="question-card-title">' + escapeHtml(q.header || '') + '</span>';
+    /* 多选题在题面旁挂「可多选」提示胶囊（契约 §5.2）：不提示的话用户会按单选直觉
+       点一项就走，根本不知道还能继续勾。样式复用 skip-tag 的中性胶囊形态。 */
+    if (q.multiSelect) {
+        html += '<span class="question-card-multi-tag">' + escapeHtml(GourdI18n.t('chat.question_multi_hint')) + '</span>';
+    }
     if (answer && answer.skipped) {
         html += '<span class="question-card-skip-tag">' + escapeHtml(GourdI18n.t('chat.question_skipped')) + '</span>';
     }
@@ -4370,16 +4602,22 @@ function renderQuestionCard(host, sess, state) {
        答案协议零改动。选项多时由 CSS 限高滚动，不把输入框顶出屏幕。 */
     html += '<div class="question-card-options">';
     var optList = q.options || [];
+    /* 多选题选项挂 checkbox 语义（role=checkbox + aria-checked + multi 修饰类），
+       单选题保持现状 button + aria-pressed。视觉沿用同一套选项样式：multi 修饰类只把
+       序号徽章改成方框对勾形态（CSS），选中态高亮仍走 .selected，交互差异由状态机承担。 */
+    var multiSel = !!q.multiSelect;
     for (var oi = 0; oi < optList.length; oi++) {
         var o = optList[oi] || {};
         var view = questionOptionView(o);
         var selected = questionOptionSelected(state, idx, view.label);
-        html += '<button type="button" class="question-card-option' + (selected ? ' selected' : '') + '"'
+        html += '<button type="button" class="question-card-option' + (multiSel ? ' multi' : '') + (selected ? ' selected' : '') + '"'
             + (submitted ? ' disabled' : '')
             /* 只在【已选中项】上挂取消提示：否则「再点一下就取消」这个能力只有知道内情的
                开发者看得见，用户依旧以为选中就撤不回（未选项挂提示反而是噪声）。 */
             + (!submitted && selected ? ' title="' + escapeAttr(GourdI18n.t('chat.question_unselect_hint')) + '"' : '')
-            + ' aria-pressed="' + (selected ? 'true' : 'false') + '"'
+            + (multiSel
+                ? ' role="checkbox" aria-checked="' + (selected ? 'true' : 'false') + '"'
+                : ' aria-pressed="' + (selected ? 'true' : 'false') + '"')
             + ' data-q-index="' + idx + '" data-opt-index="' + oi + '">'
             + '<span class="question-card-opt-index">' + (oi + 1) + '</span>'
             + '<span class="question-card-opt-main">'
@@ -4393,9 +4631,10 @@ function renderQuestionCard(host, sess, state) {
     /* 常驻输入框：总是以编辑态呈现（旧版「点击才变输入框」多一步操作且入口不显眼，
        取证显示用户经常选完选项还想补一句）。placeholder 随本题状态切换：
        已点选选项时是「补充说明」（与选项一起提交），未点选时是「自己输入回答」（替代选项）。
+       多选题的该行是【附加项】输入（与勾选集合一起提交），hasSel 需同时看数组语义位。
        提交后转为只读展示行（已入库的补充文本）。 */
     var selLabel = (answer && answer.selectedLabel) ? String(answer.selectedLabel) : '';
-    var hasSel = !!selLabel;
+    var hasSel = !!selLabel || questionSelectedLabels(state, idx).length > 0;
     var supText = (answer && !answer.skipped)
         ? String(answer.supplement || (answer.custom ? (answer.text || '') : '') || '')
         : '';
@@ -4552,6 +4791,25 @@ function handleQuestionResponse(sess, state) {
     // 会把答案写到【另一道题】上。空值不入表（旧快照恢复的挂起任务可能本就没有 actionId）。
     if (state.actionId) fields.actionId = String(state.actionId);
     postChatInput(sess, fields, null, {
+        onDone: function(resp) {
+            // 提交成功即就地闭环问答卡，不再单纯依赖 question_answered 帧。
+            // 【实测事故】work-mw205svw：恢复轮零正文时后端不下发 question_answered，
+            // 卡片永远停在「已提交…」、不转 qa-record；就地闭环保证「提交→收起」必然发生。
+            // 镜像自 Rust 壳（自审修复 F1）：Java 壳此前只有 onFail，同一事故在此原样存在。
+            // 回执只带状态不带内容（answers 原文不下发），故用本地 state.answers 组装记录。
+            if (!resp || resp.code !== 200) return;
+            if (sess._questionState !== state) return; // 已被 answered 帧/探测收掉则不重复
+            var rec = document.createElement('div');
+            rec.className = 'qa-record';
+            rec.innerHTML = renderQuestionAnswersHtml(state, buildQuestionAnswersPayload(state));
+            var cardEl = state.cardEl;
+            if (cardEl && cardEl.parentNode) {
+                cardEl.parentNode.insertBefore(rec, cardEl);
+                cardEl.parentNode.removeChild(cardEl);
+            }
+            state.cardEl = null;
+            sess._questionState = null;
+        },
         onFail: function(err) {
             console.error('Question answer error:', err);
             // 失败回退：解除「已提交」锁，保留答案允许重试（否则卡片永卡禁用态而任务不会恢复）

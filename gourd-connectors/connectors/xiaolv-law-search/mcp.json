@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "xiaolv-law-search": {
+      "type": "streamable_http",
+      "url": "https://mcp.aixllaw.com/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "小律同学 AI 法律检索"
+      }
+    }
+  }
+}

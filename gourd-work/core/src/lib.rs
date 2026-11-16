@@ -13,6 +13,7 @@
 //! - `team`     : Multi-agent team orchestration
 //! - `agents`   : Sub-agent definitions (built-ins + user directories)
 //! - `server`   : HTTP + WebSocket server (/web/chat/* + /web/gate)
+//! - `official` : process-memory-only official model credential (never persisted)
 
 pub mod config;
 pub mod llm;
@@ -27,6 +28,8 @@ pub mod mcp;
 pub mod team;
 pub mod agents;
 pub mod server;
+/// 官方模型源凭据：只存在于进程内存，供 Tauri 壳 `official::set` 直接写入。
+pub mod official;
 
 // ── Phase modules (post-v1 feature parity with the Java kernel) ──────────────
 pub mod attachments;
@@ -43,6 +46,7 @@ pub mod hitl;
 pub mod queue;
 pub mod reasoning;
 pub mod remote;
+pub mod runtime;
 pub mod terminal;
 pub mod textcodec;
 pub mod todo;

@@ -16,8 +16,10 @@
 package com.gourdai.harness.agent;
 
 import com.gourdai.agent.react.ReActAgent;
+import com.gourdai.agent.react.intercept.CompleteTaskInterceptor;
 import com.gourdai.agent.react.intercept.ToolSanitizerInterceptor;
 import com.gourdai.agent.util.AskUserTool;
+import com.gourdai.agent.util.CompleteTaskTool;
 import com.gourdai.harness.HarnessExtension;
 import com.gourdai.ai.chat.ChatModel;
 import com.gourdai.harness.HarnessEngine;
@@ -31,6 +33,14 @@ import org.noear.solon.lang.Nullable;
  * @author oisin
  */
 public class AgentFactory {
+    /**
+     * 子代理 headless 禁问条款（契约 §1.3，双内核逐字一致）。
+     *
+     * <p>子代理运行在无用户交互的 headless 环境：question 帧被转发层丢弃（team/mod.rs:484-497），
+     * 一旦挂起父代理只能死等。故子代理系统提示词末尾恒注入本条款，与工具集剔除 ask_user 双保险。</p>
+     */
+    public static final String SUBAGENT_NO_ASK_CLAUSE_CN = "你无法向用户提问：本次运行没有 ask_user 工具，也不要输出面向用户的提问文本。信息不足时做出合理假设并继续，或在结果中明确报告阻塞点，由父代理决定是否向用户提问。";
+
     //**
     private static String[] TOOL_ALL_FULL = {"read", "write", "edit", "glob", "grep", "ls", "bash", "bash_output", "skill", "todo", "code", "codesearch", "websearch", "webfetch", "task", "generate", "mcp", "openapi", "hitl", "ask_user", "lsp", "memory"};
     //*
@@ -81,8 +91,28 @@ public class AgentFactory {
         sanitizer.setPressureSupplier(engine.getCompressionInterceptor()::getContextPressure);
         builder.defaultInterceptorAdd(sanitizer);
 
-        if (Assert.isNotEmpty(agentDefinition.getSystemPrompt())) {
-            builder.systemPrompt(r -> agentDefinition.getSystemPrompt());
+        // 契约 §1.3（自审修复 J2）：子代理禁问条款【无条件】注入——旧实现只在
+        // systemPrompt 非空时追加，空 prompt 的子代理（AgentDefinition 无默认值、
+        // markdown 空正文→空串，路径真实可达）完全收不到条款，仍可能以「请选择…」
+        // 收尾让父代理死等。Rust team/mod.rs 对空 prompt 同样无条件拼装，同一口径。
+        if (metadata.isPrimary()) {
+            if (Assert.isNotEmpty(agentDefinition.getSystemPrompt())) {
+                final String customPrompt = agentDefinition.getSystemPrompt();
+                builder.systemPrompt(r -> customPrompt);
+            }
+        } else {
+            // 子代理 headless 禁问条款：子代理的 question 帧会被转发层丢弃，
+            // 挂起即父代理死等——在系统提示词层面明确「无法提问」，信息不足时合理假设或报告阻塞点。
+            final String basePrompt = Assert.isNotEmpty(agentDefinition.getSystemPrompt())
+                    ? agentDefinition.getSystemPrompt() + "\n\n" : "";
+            builder.systemPrompt(r -> basePrompt + SUBAGENT_NO_ASK_CLAUSE_CN);
+        }
+
+        // 契约 §4：complete_task 仅注册到主代理（子代理最终文本回传父代理的机制不变）。
+        // 不走 metadata.tools 名单：主会话恒可用；显式列名（含子代理）在 toolAddDo 内拒绝。
+        if (metadata.isPrimary()) {
+            builder.defaultToolAdd(CompleteTaskTool.getTool());
+            builder.defaultInterceptorAdd(new CompleteTaskInterceptor());
         }
 
         if (Assert.isNotEmpty(engine.getWorkspace())) {
@@ -96,6 +126,11 @@ public class AgentFactory {
             for (String toolName : metadata.getTools()) {
                 if ("**".equals(toolName)) {
                     for (String t1 : TOOL_ALL_FULL) {
+                        // 契约 §1.5：子代理构建路径的 ** 展开剔除 ask_user（question 帧被转发层丢弃，
+                        // 挂起即父代理死等）；主会话 ** 保留。分叉点即 metadata.isPrimary()。
+                        if (metadata.isPrimary() == false && AskUserTool.TOOL_NAME.equals(t1)) {
+                            continue;
+                        }
                         toolAddDo(engine, builder, terminalTalentProxy, metadata, t1);
                     }
                 } else if ("*".equals(toolName)) {
@@ -215,7 +250,12 @@ public class AgentFactory {
 
 
             case "memory": {
-                builder.defaultTalentAdd(engine.getMemoryTalent());
+                // memoryTalent 是条件装配（引擎未配置 MemorySolutionProvider 时为 null，
+                // 见 HarnessEngine 构造器）：** 展开含 memory，裸引擎直接 talentAdd(null)
+                // 会在装配期 NPE。与 hitl/ask_user 同为「能力未配置即静默跳过」语义。
+                if (engine.getMemoryTalent() != null) {
+                    builder.defaultTalentAdd(engine.getMemoryTalent());
+                }
                 break;
             }
             case "code": {
@@ -246,8 +286,17 @@ public class AgentFactory {
             case "ask_user": {
                 // 结构化问答：工具用于引导模型产出 questions 结构化参数；
                 // 真正的挂起/恢复由 AskUserInterceptor 在 onAction 阶段接管（默认启用，不加开关）。
+                // 契约 §1.5：子代理即使显式列名也不给 ask_user（headless 环境挂起即父代理死等）。
+                if (metadata.isPrimary() == false) {
+                    break;
+                }
                 builder.defaultToolAdd(AskUserTool.getTool());
                 builder.defaultInterceptorAdd(engine.getAskUserInterceptor());
+                break;
+            }
+            case "complete_task": {
+                // 契约 §4：主代理在 create() 恒注册；此处仅防御显式列名时的重复注册，
+                // 子代理显式列名一律拒绝（收尾语义由父代理承担）。
                 break;
             }
         }

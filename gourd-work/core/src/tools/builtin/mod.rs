@@ -1300,6 +1300,12 @@ impl Tool for BashTool {
             return ToolOutput::err("Cancelled");
         }
 
+        // bash can mutate files outside write/edit; make sure the run still has
+        // a manifest to publish (possiblyIncomplete warning) at finish time.
+        if let Some(ledger) = &ctx.change_ledger {
+            ledger.note_bash(&ctx.session_id, &ctx.run_id);
+        }
+
         // Build the command via the shared shell selector: Git Bash (POSIX) on
         // Windows when installed, PowerShell fallback otherwise, `sh` on Unix.
         // The POSIX shells wrap the command to persist the working directory
@@ -2087,7 +2093,7 @@ impl Tool for TodoWriteTool {
                 // panel can no longer disagree about the same file.
                 let progress = crate::todo::measure(&body);
                 let mut out = String::from("TODO saved.");
-                out.push_str(&crate::todo::progress_footer(&progress));
+                out.push_str(&crate::todo::progress_footer(&progress, ctx.resume_calibration));
                 // The bug this guards against: `total == 0` used to fall through to
                 // "[继续] 还有未完成事项" — an unsatisfiable command that ran the
                 // session to max_turns. Report the real problem instead.
@@ -2137,12 +2143,37 @@ impl Tool for TodoReadTool {
                     }
                     None => content,
                 };
-                ToolOutput::ok(crate::todo::read_reply(&content))
+                ToolOutput::ok(crate::todo::read_reply(&content, ctx.resume_calibration))
             }
             Err(_) => ToolOutput::ok(crate::todo::EMPTY_LIST),
         }
     }
 }
+
+/// ask_user 参数是否可渲染（对齐 Java `AskUser.hasRenderableQuestion`，契约 §1.4）。
+///
+/// 判据：questions 为非空数组，且至少一条的 header 非空白。只有可渲染才发
+/// question 帧并挂起；否则不挂起、返回错误 ToolOutput，让模型自行纠正。
+///
+/// 【超长不拦】header/label 的字数约束全部是提示词里的「建议」，这里不做硬校验：
+/// Qwen PR#7063 的教训是 header 超长硬拒会让整个提问弹层不出现，代价远大于收益。
+pub(crate) fn has_renderable_question(args: &serde_json::Value) -> bool {
+    match args.get("questions").and_then(|q| q.as_array()) {
+        Some(arr) if !arr.is_empty() => arr.iter().any(|q| {
+            q.get("header")
+                .and_then(|h| h.as_str())
+                .map(|h| !h.trim().is_empty())
+                .unwrap_or(false)
+        }),
+        _ => false,
+    }
+}
+
+/// 非法 questions 的错误回执（语义对齐 Java `INVALID_QUESTIONS_RESULT`，契约 §1.4）：
+/// 说明未挂起、给正确调用形态、给「无需作答就别调」的退路。
+pub(crate) const INVALID_QUESTIONS_RESULT: &str = "ask_user 未挂起任务：questions 参数非法（需为非空数组，且至少一条含非空白 header）。\
+正确形态：{\"questions\":[{\"header\":\"一句话问题\",\"options\":[{\"label\":\"短标题\",\"description\":\"取舍说明\"}]}]}。\
+若无需用户作答即可自行推进，请不要调用本工具，直接继续执行。";
 
 pub struct AskUserTool;
 
@@ -2150,27 +2181,34 @@ pub struct AskUserTool;
 impl Tool for AskUserTool {
     fn name(&self) -> &str { "ask_user" }
     fn description(&self) -> &str {
-        "Ask the user a structured question with options. Task suspends until answered."
+        // 契约 §1.1 CN 主文案（Java 现有文案去重精简版，Rust 直接采用，逐字一致）。
+        "向用户发起结构化提问并等待回答。用户可点击选项、自由输入或跳过；任务挂起直到回答后自动恢复。\n\
+【必须使用】准备在正文列出多个方案让用户挑选，或以「请选择/请确认/你拍板」等措辞收尾等待时，一律改为调用本工具，把每个方案作为一个 option 传入；需要用户无法自行查询/推断的关键信息（凭据、业务口径、目标取舍）时同样必须调用。\n\
+纪律：1) 多个问题一次调用成组提出（1-4 个）；2) 最佳实践项标 recommended=true，不要把「推荐」写进 label；3) 能自行查询/推断的信息不要问；4) 呈现简洁：header 一句话（建议≤30字），label 短标题（建议≤12字），取舍写进 description（建议≤40字），长篇背景写正文；5) 选项互斥单选；仅当选项可同时成立时传 multiSelect=true；6) 不要自造「其他/自定义」选项，界面自动提供自由输入；7) 选项不要包含时间估计。"
     }
     fn parameters_schema(&self) -> serde_json::Value {
+        // 各字段 description 为契约口径的中文引导（字数均为「建议」，不做硬校验）。
         json!({
             "type": "object",
             "properties": {
                 "questions": {
                     "type": "array",
+                    "description": "一次成组提出的问题（1-4 个）；每个问题一项。",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "header": {"type": "string"},
-                            "detail": {"type": "string"},
+                            "header": {"type": "string", "description": "一句话问题（建议≤30字）。"},
+                            "detail": {"type": "string", "description": "补充背景；长篇背景写正文，此处从简。"},
+                            "multiSelect": {"type": "boolean", "description": "选项可同时成立时置 true 允许多选；互斥选项保持默认单选。"},
                             "options": {
                                 "type": "array",
+                                "description": "每个方案一个 option；不要自造「其他/自定义」项，界面自动提供自由输入。",
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "label": {"type": "string"},
-                                        "description": {"type": "string"},
-                                        "recommended": {"type": "boolean"}
+                                        "label": {"type": "string", "description": "短标题（建议≤12字）；不要把「推荐」写进 label。"},
+                                        "description": {"type": "string", "description": "取舍说明（建议≤40字）。"},
+                                        "recommended": {"type": "boolean", "description": "最佳实践项置 true。"}
                                     },
                                     "required": ["label"]
                                 }
@@ -2184,6 +2222,10 @@ impl Tool for AskUserTool {
         })
     }
     async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolOutput {
+        // 契约 §1.4：先校验可渲染性，非法则不挂起、返回错误，让模型纠正而非死等。
+        if !has_renderable_question(&args) {
+            return ToolOutput::err(INVALID_QUESTIONS_RESULT);
+        }
         // Emit a question frame; the ReAct loop detects the suspend and halts.
         if let Some(tx) = &ctx.frame_tx {
             // actionId is this tool call's id, same as the Java kernel: the
@@ -2198,6 +2240,37 @@ impl Tool for AskUserTool {
             let _ = tx.send(frame);
         }
         ToolOutput::suspend_question()
+    }
+}
+
+// ─── complete_task（契约 §4，显式收尾工具）─────────────────────────────────────
+
+pub struct CompleteTaskTool;
+
+#[async_trait]
+impl Tool for CompleteTaskTool {
+    fn name(&self) -> &str { "complete_task" }
+    fn description(&self) -> &str {
+        // 契约 §4.1 CN 文案（逐字一致）。
+        "提交面向用户的最终总结并结束本次任务。仅当全部工作完成（或遇到无法自行解决的阻塞需向用户交代）时调用。summary 就是用户看到的最终回答：一次写全（结论、验证结果、遗留事项），调用后不要再输出重复总结。仍有未完成工作、或需要用户选择/确认时不要调用本工具——继续执行或改用 ask_user。"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "最终回答全文（Markdown）"}
+            },
+            "required": ["summary"]
+        })
+    }
+    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> ToolOutput {
+        // execute 返回 ok(summary)；ReAct 循环检测到成功执行后把 summary 作为
+        // final_answer 直通 END（契约 §4.2）。空 summary 视为非法，返回错误不结束。
+        let summary = args.get("summary").and_then(|s| s.as_str()).unwrap_or_default();
+        if summary.trim().is_empty() {
+            return ToolOutput::err("complete_task 未结束任务：summary 为空。请写入面向用户的最终回答全文（结论、验证结果、遗留事项）。");
+        }
+        ToolOutput::ok(summary)
     }
 }
 
@@ -3503,6 +3576,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         };
 
         let out = GrepTool
@@ -3542,6 +3616,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         };
 
         let out = GrepTool
@@ -3589,6 +3664,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         };
 
         // Full tier, main run: the sibling project is reachable.
@@ -3675,6 +3751,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         };
 
         // Both tiers run for every tool so a resolver that ignores `open`
@@ -3995,6 +4072,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         };
         let out = ReadTool
             .execute(json!({ "file_path": "shot.png" }), &ctx)
@@ -4032,6 +4110,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         };
         let out = ReadTool
             .execute(json!({ "file_path": "photo.JPG" }), &ctx)
@@ -4067,6 +4146,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         };
         let out = ReadTool
             .execute(json!({ "file_path": "huge.png" }), &ctx)
@@ -4102,6 +4182,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         };
         // .bin 含 NUL 字节 → 二进制拒绝，无视觉块，且说明原因
         let bin = ReadTool
@@ -4140,6 +4221,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         }
     }
 
@@ -4485,6 +4567,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         }
     }
 
@@ -5276,6 +5359,7 @@ mod tests {
                 model: Default::default(),
                 settings: Default::default(),
                 bash_exempt_dirs: Vec::new(),
+                resume_calibration: false,
             };
             Self(ctx, dir)
         }
@@ -5507,15 +5591,146 @@ mod tests {
         let en = crate::react::prompt::build_system_prompt(
             &crate::config::Settings::default(),
             "/tmp/ws",
+            true,
         );
         let mut cn_settings = crate::config::Settings::default();
         cn_settings.general.locale = "zh-CN".into();
-        let cn = crate::react::prompt::build_system_prompt(&cn_settings, "/tmp/ws");
+        let cn = crate::react::prompt::build_system_prompt(&cn_settings, "/tmp/ws", true);
 
         assert!(en.contains("Task Planning Guide"), "EN guide missing");
         assert!(cn.contains("任务规划指南"), "CN guide missing");
         // The format contract is the whole point.
         assert!(en.contains("[ ]") && cn.contains("[ ]"));
+    }
+
+    // ─── 契约 §1.4：ask_user 可渲染校验（非法不挂起）─────────────────────────
+
+    fn ask_ctx() -> ToolContext {
+        let dir = std::env::temp_dir().join(format!("gwork-ask-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        ToolContext {
+            workspace: dir.clone(),
+            session_dir: Some(dir),
+            session_id: "work-ask-test".into(),
+            tool_call_id: "call-ask-1".into(),
+            run_id: "run-ask-test".into(),
+            frame_tx: None,
+            access_mode: "full".into(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            hitl_approved: true,
+            change_ledger: None,
+            gate: None,
+            subagent_depth: 0,
+            root_session_id: "work-ask-test".into(),
+            thinking: None,
+            model: std::sync::Arc::new(crate::config::ModelConfig::default()),
+            settings: std::sync::Arc::new(crate::config::Settings::default()),
+            bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
+        }
+    }
+
+    /// 合法 questions → 挂起（发 question 帧的语义由 suspend 标记承载）。
+    #[tokio::test]
+    async fn ask_user_valid_questions_suspend() {
+        let args = json!({"questions":[{"header":"选哪个方案？","options":[{"label":"A"},{"label":"B"}]}]});
+        let out = AskUserTool.execute(args, &ask_ctx()).await;
+        assert!(out.suspend.is_some(), "valid questions must suspend");
+        assert!(!out.is_error);
+    }
+
+    /// 契约 §1.4：非法 questions 不挂起、返回错误 ToolOutput，文案给正确形态与退路。
+    #[tokio::test]
+    async fn ask_user_invalid_questions_do_not_suspend() {
+        let ctx = ask_ctx();
+        for bad in [
+            json!({}),                                            // 缺 questions
+            json!({"questions":[]}),                              // 空数组
+            json!({"questions":[{"header":"   "}]}),              // header 全空白
+            json!({"questions":[{"options":[{"label":"A"}]}]}),   // 无 header
+            json!({"questions":"not-an-array"}),                  // 类型错
+        ] {
+            let out = AskUserTool.execute(bad.clone(), &ctx).await;
+            assert!(out.suspend.is_none(), "must NOT suspend on {bad}");
+            assert!(out.is_error, "must be an error on {bad}");
+            assert!(out.text.contains("未挂起"), "must say not suspended: {}", out.text);
+            assert!(out.text.contains("questions"), "must give the correct shape: {}", out.text);
+        }
+    }
+
+    /// 契约 §1.4：超长 header/label 不拦（Qwen PR#7063 教训：硬拒会让弹层整个不出现）。
+    #[tokio::test]
+    async fn ask_user_overlong_header_is_not_rejected() {
+        let long = "方".repeat(500);
+        let args = json!({"questions":[{"header":long,"options":[{"label":"A"}]}]});
+        let out = AskUserTool.execute(args, &ask_ctx()).await;
+        assert!(out.suspend.is_some(), "overlong header must still suspend (soft guidance only)");
+        assert!(!out.is_error);
+    }
+
+    /// 可渲染判据的纯函数边界：至少一条 header 非空白即可。
+    #[test]
+    fn has_renderable_question_boundaries() {
+        assert!(has_renderable_question(&json!({"questions":[{"header":"Q1"},{"header":"  "}]})));
+        assert!(!has_renderable_question(&json!({"questions":[{"header":""},{"header":"\t"}]})));
+        assert!(!has_renderable_question(&json!({"questions":null})));
+        assert!(!has_renderable_question(&json!({})));
+    }
+
+    /// 契约 §1.1：description 逐字采用 CN 主文案；schema 含 multiSelect 可选布尔。
+    #[test]
+    fn ask_user_description_and_schema_match_contract() {
+        let desc = AskUserTool.description();
+        assert!(desc.contains("向用户发起结构化提问并等待回答"), "{desc}");
+        assert!(desc.contains("【必须使用】"), "{desc}");
+        assert!(desc.contains("multiSelect=true"), "{desc}");
+        let schema = AskUserTool.parameters_schema();
+        let ms = &schema["properties"]["questions"]["items"]["properties"]["multiSelect"];
+        assert_eq!(ms["type"], "boolean", "multiSelect must be an optional boolean: {schema}");
+        // 可选：不在 required 里。
+        let required = schema["properties"]["questions"]["items"]["required"].as_array().unwrap();
+        assert!(!required.iter().any(|r| r == "multiSelect"));
+    }
+
+    // ─── 契约 §4：complete_task 工具 ─────────────────────────────────────────
+
+    /// execute 返回 ok(summary)；空 summary 报错不结束。
+    #[tokio::test]
+    async fn complete_task_returns_ok_summary_and_rejects_empty() {
+        let ctx = ask_ctx();
+        let out = CompleteTaskTool.execute(json!({"summary":"## 完成\n改好了。"}), &ctx).await;
+        assert!(!out.is_error);
+        assert_eq!(out.text, "## 完成\n改好了。");
+        assert!(out.suspend.is_none());
+        for bad in [json!({}), json!({"summary":""}), json!({"summary":"   "})] {
+            let out = CompleteTaskTool.execute(bad.clone(), &ctx).await;
+            assert!(out.is_error, "empty summary must error: {bad}");
+        }
+    }
+
+    /// 契约 §4.1：name/description/schema 逐字。
+    #[test]
+    fn complete_task_definition_matches_contract() {
+        assert_eq!(CompleteTaskTool.name(), "complete_task");
+        let desc = CompleteTaskTool.description();
+        assert!(desc.contains("提交面向用户的最终总结并结束本次任务"), "{desc}");
+        assert!(desc.contains("summary 就是用户看到的最终回答"), "{desc}");
+        let schema = CompleteTaskTool.parameters_schema();
+        assert_eq!(schema["properties"]["summary"]["type"], "string");
+        assert_eq!(schema["properties"]["summary"]["description"], "最终回答全文（Markdown）");
+        assert_eq!(schema["required"], json!(["summary"]));
+    }
+
+    /// 契约 §4.1：complete_task 注册进主代理默认 registry（子代理排除由
+    /// agents/mod.rs 的展开通配守护，见那边的测试）。
+    #[test]
+    fn complete_task_is_registered_for_the_main_agent() {
+        let reg = crate::tools::ToolRegistry::default_registry();
+        let defs = reg.definitions(&crate::config::PermissionSettings::default(), None);
+        assert!(
+            defs.iter().any(|d| d.function.name == "complete_task"),
+            "complete_task must be visible to the main agent"
+        );
     }
 
     // ─── skillsearch matching ───────────────────────────────────────────────
@@ -5727,6 +5942,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         }
     }
 

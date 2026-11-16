@@ -15,6 +15,13 @@
     var escapeHtml = core.escapeHtml || function (s) { return s == null ? '' : String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
     var showToast = core.showToast || function (msg, type) { layAlert(msg); };
 
+    // 官方源：内置、只读。key 只在 Rust 内核进程内存中，本页永远拿不到也不展示。
+    // 「有 key 就取已有的、登录后取一次并缓存」由壳 auth.rs + core official 模块完成，
+    // 这里只消费状态与模型列表，绝不接触凭据。
+    var OFFICIAL_NAME = 'GWork 官方';
+    var officialState = { signedIn: false, username: '', modelCount: 0, baseUrl: '' };
+    var officialModels = [];
+
     // ==================== 状态管理 ====================
     var LS_PROVIDER_ORDER = 'gourdai-provider-order'; // 自定义供应商拖拽排序持久化（仅本地展示顺序，不影响后端按名称存储）
     var providers = [];
@@ -47,6 +54,10 @@
     var $view = $('#modelSettingsView');
     var $customGroup = $('#msGroupCustom');
     var $customList = $('#msCustomList');
+    var $officialList = $('#msOfficialList');
+    var $officialPanel = $('#msOfficialPanel');
+    var $customFormSection = $('#msCustomFormSection');
+    var $submitRow = $('#msProviderFormSubmitRow');
     var $formTitle = $('#msProviderFormTitle');
     var $formDesc = $('#msProviderFormDesc');
     var $modelsList = $('#msProviderModelsList');
@@ -60,11 +71,47 @@
     function init() {
         bindEvents();
         // 静默预载：此时界面停在首页，拉不到供应商不应该弹窗打扰
-        __whenBackendReady(function () { loadProvidersListIfBackendReady(true); });
+        __whenBackendReady(function () {
+            loadProvidersListIfBackendReady(true);
+            loadOfficialState();
+        });
+        // 登录/登出后壳会刷新内核内存态；账号模块派发的事件让本页即时同步，
+        // 语言切换后重绘官方模型列表里的静态文案。
+        $(document).on('gwork:auth-changed', function () { loadOfficialState(); });
+        $(document).on('i18n:localeChanged', function () {
+            renderProviderList();
+            renderOfficialModels();
+        });
     }
 
     function bindEvents() {
-        // 添加供应商按钮（右栏切换为新增表单）
+        // 官方源：登录引导 / 刷新模型（都不接触 key）
+        $('#msOfficialLoginBtn').on('click', function () {
+            if (window.GourdAccount && typeof window.GourdAccount.showAuth === 'function') {
+                window.GourdAccount.showAuth();
+            } else {
+                var entry = document.getElementById('accountEntryBtn');
+                if (entry) entry.click();
+            }
+        });
+        $('#msOfficialRefreshBtn').on('click', function () {
+            var ipc = window.__GOURD_IPC__;
+            if (ipc && typeof ipc.authOfficialRefresh === 'function') {
+                // 壳内：强制重取一次用户 key + 官方模型列表。失败时保留内核
+                // 里的旧缓存，只重绘状态即可，绝不清成「未登录」。
+                ipc.authOfficialRefresh()
+                    .then(function () { loadOfficialState(); })
+                    .catch(function () { loadOfficialState(); });
+            } else {
+                // 无壳环境（浏览器直连内核）：至少把内核内存缓存重绘一遍
+                $.ajax({
+                    url: '/web/settings/official/refresh', method: 'POST',
+                    success: function () { loadOfficialState(); },
+                    error: function () { loadOfficialState(); }
+                });
+            }
+        });
+
         $('#msProviderAddBtn').on('click', function () {
             selectAdd();
         });
@@ -411,7 +458,10 @@
         // 默认右栏为「添加供应商」表单；后端失败时不请求接口，也不影响自定义供应商表单使用。
         selectAdd();
         // 用户主动打开本页：失败要可见，否则只看到一个空列表
-        __whenBackendReady(function () { loadProvidersListIfBackendReady(false); });
+        __whenBackendReady(function () {
+            loadProvidersListIfBackendReady(false);
+            loadOfficialState();
+        });
     }
 
     /** 离开模型配置视图（切回聊天/欢迎/自动化/技能时由对应切换函数调用） */
@@ -473,6 +523,125 @@
             if (pruned.indexOf(p.name) === -1) pruned.push(p.name);
         });
         try { localStorage.setItem(LS_PROVIDER_ORDER, JSON.stringify(pruned)); } catch (e) { /* 存储不可用时忽略 */ }
+    }
+
+    // ==================== 官方源（只读；key 不进本页） ====================
+    /** 官方文案：语言包未收录新键时回落到中/英，绝不把 key 原文显示给用户。 */
+    function officialText(key, zh, en) {
+        var v = GourdI18n.t(key);
+        if (v && v !== key) return v;
+        var loc = (window.GourdI18n && GourdI18n.getLocale) ? (GourdI18n.getLocale() || '') : '';
+        return /^zh/i.test(loc) ? zh : en;
+    }
+
+    /** 只取状态（signedIn/username/modelCount/baseUrl），响应体保证不含 key。 */
+    function loadOfficialState() {
+        $.ajax({
+            url: '/web/settings/official/status',
+            method: 'GET',
+            success: function (res) {
+                var d = (res && res.code === 200 && res.data) ? res.data : {};
+                officialState = {
+                    signedIn: !!d.signedIn,
+                    username: d.username || '',
+                    modelCount: d.modelCount || 0,
+                    baseUrl: d.baseUrl || ''
+                };
+                renderOfficialPanel();
+                renderOfficialList();
+                if (selectedName === OFFICIAL_NAME) loadOfficialModels();
+            },
+            error: function () {
+                officialState = { signedIn: false, username: '', modelCount: 0, baseUrl: '' };
+                renderOfficialPanel();
+                renderOfficialList();
+            }
+        });
+    }
+
+    /** 官方模型列表来自内核内存缓存（登录后取一次），key 不在响应里。 */
+    function loadOfficialModels() {
+        $.ajax({
+            url: '/web/settings/official/models',
+            method: 'GET',
+            success: function (res) {
+                officialModels = (res && res.code === 200 && Object.prototype.toString.call(res.data) === '[object Array]') ? res.data : [];
+                officialState.modelCount = officialModels.length;
+                renderOfficialModels();
+                renderOfficialList();
+            },
+            error: function () { officialModels = []; renderOfficialModels(); }
+        });
+    }
+
+    function renderOfficialModels() {
+        var box = $('#msOfficialModels');
+        if (!box.length) return;
+        if (!officialModels.length) {
+            box.html('<div class="ms-official-empty">' + escapeHtml(officialText('settings.providers.official_no_models', '暂无可用模型', 'No models available')) + '</div>');
+            return;
+        }
+        var html = '';
+        officialModels.forEach(function (m) {
+            var id = m && m.id ? String(m.id) : '';
+            var by = m && m.ownedBy ? String(m.ownedBy) : (m && m.owned_by ? String(m.owned_by) : '');
+            if (!id) return;
+            html += '<div class="ms-official-model">' +
+                '<span class="ms-official-model-id">' + escapeHtml(id) + '</span>' +
+                (by ? '<span class="ms-official-model-by">' + escapeHtml(by) + '</span>' : '') +
+                '</div>';
+        });
+        box.html(html || '<div class="ms-official-empty">' + escapeHtml(officialText('settings.providers.official_no_models', '暂无可用模型', 'No models available')) + '</div>');
+    }
+
+    function renderOfficialPanel() {
+        $('#msOfficialGuest').toggle(!officialState.signedIn);
+        $('#msOfficialSignedIn').toggle(!!officialState.signedIn);
+        $('#msOfficialUsername').text(officialState.username || '');
+        $('#msOfficialDesc').text(officialText(
+            'settings.providers.official_desc',
+            '登录账号后即可直接使用官方模型，无需配置地址与密钥',
+            'Sign in to use official models — no endpoint or key setup required'
+        ));
+        if (officialState.signedIn) renderOfficialModels();
+    }
+
+    /** 左栏官方分组：固定一项、不可拖拽、不可禁用。 */
+    function renderOfficialList() {
+        if (!$officialList || !$officialList.length) return;
+        var selected = (selectedName === OFFICIAL_NAME) ? ' selected' : '';
+        var count = officialState.modelCount || officialModels.length;
+        var dot = officialState.signedIn ? ' on' : '';
+        $officialList.html(
+            '<div class="ms-provider-item official' + selected + '" data-name="' + escapeAttr(OFFICIAL_NAME) + '">' +
+                '<div class="ms-provider-icon">' + escapeHtml(officialText('settings.providers.official_badge', 'G', 'G')) + '</div>' +
+                '<div class="ms-provider-info">' +
+                    '<div class="ms-provider-name">' + escapeHtml(officialText('settings.providers.official_title', 'GWork 官方', 'GWork Official')) + '</div>' +
+                    '<div class="ms-provider-count">' + escapeHtml(GourdI18n.t('settings.providers.model_count', [count])) + '</div>' +
+                '</div>' +
+                '<span class="ms-provider-dot' + dot + '"></span>' +
+            '</div>'
+        );
+    }
+
+    /** 官方面板与自定义表单互斥：显示官方时隐藏所有可编辑字段（含密钥输入）。 */
+    function setOfficialPanelVisible(on) {
+        if ($officialPanel && $officialPanel.length) $officialPanel.toggle(!!on);
+        if ($customFormSection && $customFormSection.length) $customFormSection.toggle(!on);
+        if ($submitRow && $submitRow.length && on) $submitRow.hide();
+    }
+
+    function selectOfficial() {
+        selectedName = OFFICIAL_NAME;
+        currentProvider = null;
+        fetchedModels = [];
+        keyTouched = false;
+        $('.ms-provider-item').removeClass('selected');
+        $('.ms-provider-item[data-name="' + escapeAttr(OFFICIAL_NAME) + '"]').addClass('selected');
+        setOfficialPanelVisible(true);
+        renderOfficialPanel();
+        loadOfficialModels();
+        resetFormScroll();
     }
 
     /**
@@ -541,11 +710,16 @@
         var hasCustom = false;
 
         providers.forEach(function (provider) {
+            // 内核在列表头注入的虚拟官方条目不进自定义分组，也不参与拖拽排序。
+            if (provider && (provider.official === true || provider.name === OFFICIAL_NAME)) return;
             var item = renderProviderItem(provider);
             customHtml += item;
             hasCustom = true;
         });
 
+        // 官方分组恒显示（哪怕未登录也要给出登录入口），自定义分组按有无条目折叠
+        $('#msGroupOfficial').show();
+        renderOfficialList();
         $customGroup.toggle(hasCustom);
         $customList.html(customHtml);
     }
@@ -603,6 +777,7 @@
         fetchedModels = [];
         keyTouched = false;
         $('.ms-provider-item').removeClass('selected');
+        setOfficialPanelVisible(false);
         renderDetailForm(null);
         resetFormScroll();
     }
@@ -610,15 +785,19 @@
     /** 选中左栏某供应商：右栏切换为其编辑详情 */
     function selectProvider(name) {
         if (selectedName === name) return; // 已选中，避免重复拉取
+        // 官方源走只读面板：绝不进入自定义表单（表单里有 apiUrl/apiKey 输入框）
+        if (name === OFFICIAL_NAME) { selectOfficial(); return; }
         selectedName = name;
         $('.ms-provider-item').removeClass('selected');
         $('.ms-provider-item[data-name="' + escapeAttr(name) + '"]').addClass('selected');
+        setOfficialPanelVisible(false);
         fillDetailFromCache(name);
         resetFormScroll();
     }
 
     /** 填充右栏：先用列表缓存快速回填基础字段，再拉取后端详情（含完整模型列表）覆盖 */
     function fillDetailFromCache(name) {
+        if (name === OFFICIAL_NAME) { selectOfficial(); return; }
         var cached = null;
         providers.forEach(function (p) { if (p.name === name) cached = p; });
         // 真实密钥前端永远拿不到（列表与详情接口都只回脱敏值）：
@@ -642,6 +821,10 @@
 
     /** 填充右栏详情表单（provider 为 null 表示新增态） */
     function renderDetailForm(provider) {
+        if (provider && (provider.official === true || provider.name === OFFICIAL_NAME)) {
+            selectOfficial();
+            return;
+        }
         currentProvider = provider;
         // 每次重绘表单都视为「用户尚未编辑密钥」：输入框一律留空，只有真实键入才提交
         keyTouched = false;
@@ -1213,6 +1396,8 @@
 
     // 持久化连接及其模型列表（保存成功不弹提示，仅失败时提示）
     function persistProvider() {
+        // 官方源是内核内置的只读虚拟条目：没有表单字段，也绝不允许被自定义保存覆盖。
+        if (selectedName === OFFICIAL_NAME || (currentProvider && currentProvider.official === true)) return;
         var name = $('#msProviderName').val();
         var standard = $('input[name="msProviderStandard"]:checked').val() || DEFAULT_STANDARD;
         var apiUrl = $('#msProviderApiUrl').val();

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "lingxing-mcp": {
+      "type": "streamable_http",
+      "url": "https://openmcp.lingxing.com/mcp-servers/lingxing-mcp"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "emes-ai": {
+      "type": "streamable_http",
+      "url": "https://amos-dev.digihua.com:14000/mcp-platform/mcp/oauth/emes-ai",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "eMES AI 助手"
+      }
+    }
+  }
+}

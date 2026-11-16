@@ -895,6 +895,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .question-card-heading { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
 .question-card-title { font: 600 14px/1.5 var(--font-sans); color: var(--text-primary); word-break: break-word; }
 .question-card-skip-tag { flex-shrink: 0; padding: 1px 6px; border: 1px solid var(--border-color); border-radius: 8px; font-size: 10px; color: var(--text-tertiary); }
+/* 多选提示胶囊（契约 §5.2）：多选题在题面旁标「可多选」，形态与 skip-tag 同族但走强调色，
+   不提示的话用户会按单选直觉点一项就走。 */
+.question-card-multi-tag { flex-shrink: 0; padding: 1px 6px; border: 1px solid rgba(var(--accent-rgb), 0.4); border-radius: 8px; font-size: 10px; color: var(--accent); }
 /* 题面补充说明（detail）：取证中位 115 字、p90 280、最长 794。长说明默认收起为 3 行
    并以渐隐收尾，配「展开」按钮；短说明不折叠（JS 的 questionDetailShouldCollapse 同源判定）。 */
 .question-card-detail { margin-top: 4px; font-size: 12px; line-height: 1.5; color: var(--text-secondary); word-break: break-word; white-space: pre-wrap; }
@@ -929,6 +932,12 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .question-card-option.selected { border-color: var(--accent); background: rgba(var(--accent-rgb), 0.06); }
 .question-card-option:disabled { cursor: default; opacity: 0.85; }
 .question-card-opt-index { flex-shrink: 0; width: 18px; height: 18px; margin-top: 1px; border: 1px solid var(--border-color); border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: var(--text-secondary); background: var(--bg-hover); }
+/* 多选题（.multi，契约 §5.2）：序号徽章换成 checkbox 语义的方框形态（直角小圆角），
+   选中态填充强调色并以对勾替换序号——序号职责由方框对勾承担后不再重复展示数字。
+   选中高亮仍走 .selected（与单选共用），此处只叠加形态差异。 */
+.question-card-option.multi .question-card-opt-index { border-radius: 4px; }
+.question-card-option.multi.selected .question-card-opt-index { background: var(--accent); border-color: var(--accent); color: #fff; font-size: 0; }
+.question-card-option.multi.selected .question-card-opt-index::after { content: '✓'; font-size: 11px; line-height: 1; }
 .question-card-opt-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .question-card-opt-title { font-weight: 600; color: var(--text-primary); word-break: break-word; }
 /* 说明默认限 3 行 + 渐隐：整形把 90% 的长 label 拆成了「短标题 + 说明」，说明才是长度大头
@@ -4866,7 +4875,6 @@ pre:hover .code-copy-btn { opacity: 1; }
 .account-brand { display: flex; align-items: center; justify-content: center; gap: 9px; margin-bottom: 18px; }
 .account-brand-logo { width: 30px; height: 30px; border-radius: 7px; box-shadow: var(--shadow); }
 .account-brand-name { font-size: 16px; font-weight: 700; letter-spacing: -0.02em; color: var(--text-primary); }
-.account-auth-title { margin: 0 0 20px; font-size: 19px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.3; text-align: center; color: var(--text-primary); }
 /* 分段式登录/注册切换：胶囊底 + 滑块（::after 由父级 data-mode 驱动位移）。
    刻意不给 tabs 预留右侧空间：关闭按钮已脱离内容流，无需让位。
    【几何纪律】列间 gap 必须为 0：滑块宽 calc(50% - 3px) 恰等于单列宽，

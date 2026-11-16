@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "reportgem-research",
+  "version": "1.0.0",
+  "description": "Baogao Yizhan aggregates tens of millions of research reports from hundreds of global research institutions, together with global company filings, U.S. SEC filings, global earnings calls, academic papers, public roadshows, charts and bilingual research materials. RAG-based structuring reduces token use and improves retrieval efficiency and research accuracy.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "报告驿站",
+        "name_en": "Baogao Yizhan",
+        "description_zh": "聚合数百家全球研究机构的千万级研报，并整合全球公司公告、美国SEC 文件，全球公司业绩会、学术论文，公开路演及图表，双语资料。经 RAG 结构化处理，减少 Token 消耗，提升检索效率和投研回答准确率。",
+        "description_en": "Baogao Yizhan aggregates tens of millions of research reports from hundreds of global research institutions, together with global company filings, U.S. SEC filings, global earnings calls, academic papers, public roadshows, charts and bilingual research materials. RAG-based structuring reduces token use and improves retrieval efficiency and research accuracy."
+      },
+      "categories": [
+        "finance"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

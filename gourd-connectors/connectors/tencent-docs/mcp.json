@@ -1,0 +1,18 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "tencent-docs": {
+      "type": "streamable_http",
+      "url": "https://docs.qq.com/openapi/mcp",
+      "auth": {
+        "authType": "qrcode_poll",
+        "qrVendor": "tencent-docs",
+        "tokenHeader": "Authorization",
+        "tokenPrefix": "none",
+        "tokenLabel": "腾讯文档",
+        "tokenHelpUrl": "https://docs.qq.com/open/auth/mcp.html",
+        "tokenHelpText": "扫码获得的凭据仅存储在本机，不会上传云端。"
+      }
+    }
+  }
+}

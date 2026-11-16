@@ -1,0 +1,134 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "beisen-cli",
+  "version": "1.0.0",
+  "description": "Relying on the Beisen HR SaaS platform, we have integrated nearly a hundred HR scenarios—including approvals, recruitment progress, employee profiles, performance records, attendance and leave, organizational structure, and corporate policies—into GWork. This enables you to query HR data and handle HR tasks with just a single sentence.",
+  "keywords": [
+    "cli",
+    "skills"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "kind": "cli",
+      "tier": "cli",
+      "auth": {
+        "authType": "cli_login"
+      },
+      "display": {
+        "name": "北森AI · HR专家",
+        "name_en": "Beisen AI·HR Expert",
+        "description_zh": "依托北森HR SaaS平台，把审批、招聘进展、员工档案、绩效履历、考勤假期、组织架构和企业制度等近百个人力场景装进GWork，一句话查询人力数据、办理HR业务。",
+        "description_en": "Relying on the Beisen HR SaaS platform, we have integrated nearly a hundred HR scenarios—including approvals, recruitment progress, employee profiles, performance records, attendance and leave, organizational structure, and corporate policies—into GWork. This enables you to query HR data and handle HR tasks with just a single sentence."
+      },
+      "categories": [
+        "communication"
+      ],
+      "source": "vendor-cli:beisen-cli@1.0.10",
+      "cli_spec": {
+        "package": "beisen-cli",
+        "version": "1.0.10",
+        "binName": "beisen-cli",
+        "binPath": "dist/run.js",
+        "auth": {
+          "argv": [
+            "auth",
+            "login"
+          ],
+          "urlDomain": "login.italent.cn",
+          "waitForExit": true
+        },
+        "status": {
+          "argv": [
+            "auth",
+            "status"
+          ],
+          "matchJson": {
+            "status": "valid"
+          }
+        },
+        "unauth": {
+          "argv": [
+            "auth",
+            "logout"
+          ]
+        }
+      },
+      "skills": [
+        {
+          "name": "beisen-applicant-follow-up",
+          "dir": "skills/beisen-applicant-follow-up"
+        },
+        {
+          "name": "beisen-approval",
+          "dir": "skills/beisen-approval"
+        },
+        {
+          "name": "beisen-attendance-leave",
+          "dir": "skills/beisen-attendance-leave"
+        },
+        {
+          "name": "beisen-data-query",
+          "dir": "skills/beisen-data-query"
+        },
+        {
+          "name": "beisen-employee-profile",
+          "dir": "skills/beisen-employee-profile"
+        },
+        {
+          "name": "beisen-interview",
+          "dir": "skills/beisen-interview"
+        },
+        {
+          "name": "beisen-job-management",
+          "dir": "skills/beisen-job-management"
+        },
+        {
+          "name": "beisen-knowledge",
+          "dir": "skills/beisen-knowledge"
+        },
+        {
+          "name": "beisen-organization",
+          "dir": "skills/beisen-organization"
+        },
+        {
+          "name": "beisen-recruiting-insights",
+          "dir": "skills/beisen-recruiting-insights"
+        },
+        {
+          "name": "beisen-recruiting-todo",
+          "dir": "skills/beisen-recruiting-todo"
+        },
+        {
+          "name": "beisen-recruitment",
+          "dir": "skills/beisen-recruitment"
+        },
+        {
+          "name": "beisen-recruitment-demand-management",
+          "dir": "skills/beisen-recruitment-demand-management"
+        },
+        {
+          "name": "beisen-service-portal",
+          "dir": "skills/beisen-service-portal"
+        },
+        {
+          "name": "beisen-shared",
+          "dir": "skills/beisen-shared"
+        },
+        {
+          "name": "beisen-talent-sourcing",
+          "dir": "skills/beisen-talent-sourcing"
+        }
+      ],
+      "skills_provenance": {
+        "source": "beisen-cli@1.0.10 官方技能（WB 公开仓库缓存 skills/ 原样复制，缺 LICENSE 由 npm license 字段补齐）",
+        "url": "https://www.npmjs.com/package/beisen-cli",
+        "license": "UNLICENSED",
+        "skillCount": 16,
+        "fileCount": 59,
+        "byteCount": 228249
+      },
+      "readme": "## 北森AI · HR专家 CLI 连接器\n\n厂商官方 `beisen-cli@1.0.10`，扫码/浏览器授权，内置 16 套官方技能。\n\n### 连接方式\n\n1. 点击「连接」，GWork 自动准备 Node 运行时并安装官方 CLI；\n2. 弹窗展示授权链接/二维码，按厂商页面完成扫码或浏览器确认；\n3. 授权完成后自动连接。凭据由官方 CLI 自管，GWork 不接触 token。\n\n技能包来源：厂商公开 CLI 包随附技能文档（公开仓库缓存副本）；许可见各技能目录 LICENSE。"
+    }
+  }
+}

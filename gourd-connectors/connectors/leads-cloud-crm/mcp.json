@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "leads-cloud-crm": {
+      "type": "streamable_http",
+      "url": "https://mcp.leadscloud.com/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "询盘云CRM"
+      }
+    }
+  }
+}

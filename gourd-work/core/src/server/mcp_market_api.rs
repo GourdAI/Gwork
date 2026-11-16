@@ -1,14 +1,19 @@
-//! server::mcp_market_api — 魔搭 ModelScope MCP 广场的 4 个 axum handler。
+//! server::mcp_market_api — 连接器广场的 4 个 axum handler（官方目录 + 魔搭扩展）。
 //!
 //! | Method | Path                                      | 用途 |
 //! |--------|-------------------------------------------|------|
-//! | GET    | `/web/settings/mcp/market/servers`        | 列表 / 搜索 / 分类 / Hosted 筛选 |
+//! | GET    | `/web/settings/mcp/market/servers`        | 列表 / 搜索 / 分类（source=official 默认 / modelscope 扩展）|
 //! | GET    | `/web/settings/mcp/market/detail?id=`     | 详情（server_config / env_schema / readme）|
 //! | GET    | `/web/settings/mcp/market/categories`     | 内置静态分类表 |
 //! | POST   | `/web/settings/mcp/market/install`        | 归一化 + 复用 mcp_server_add 落盘 |
 //!
+//! 目录源（2026-11 用户拍板）：**官方仓库优先**（`mcp::registry`，仅编译期
+//! 内置 gzip 快照，随发版更新，无远程拉取/磁盘缓存/admin 上传），魔搭降级为
+//! 扩展源（`source=modelscope`）。
+//! 「精选/已托管」概念已移除：`source=featured` 与 `featured:` id 仅作兼容别名。
+//!
 //! 响应统一 `{code:200,description:"",data:{...}}`；上游失败 → `{code:400,description:"..."}`,
-//! 不伪造成功。install 不自己写 settings.json：它把上游 `server_config[0].mcpServers`
+//! 不伪造成功。install 不自己写 settings.json：它把 `server_config[0].mcpServers`
 //! 归一化成 `settings_api::McpBody`，逐个调用 `settings_api::mcp_server_add`，从而与手动
 //! 添加 MCP 共用同一份校验 / 去重 / 持久化 / 热插拔逻辑。
 
@@ -51,8 +56,13 @@ pub struct ServersParams {
     pub page_size: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
+    /// 旧「已托管」筛选参数：UI 已移除，仅魔搭扩展源保留透传（兼容旧调用）。
     #[serde(default)]
     pub hosted: Option<String>,
+    /// 目录源：`official`（默认）/ `modelscope`（扩展）。
+    /// `featured` 是旧别名，等价 official 但回旧 id 形态（兼容旧前端缓存）。
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -73,6 +83,30 @@ pub struct InstallBody {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 pub async fn mcp_market_servers(Query(p): Query<ServersParams>) -> Json<Value> {
+    let source = p.source.as_deref().map(str::trim).unwrap_or("");
+    // 官方目录（默认源）：仅编译期内置 gzip 快照，随发版更新，不打魔搭上游。
+    // `featured` 为旧别名：回旧 id/source 形态，兼容旧前端缓存。
+    if source != "modelscope" {
+        let legacy = source == "featured";
+        let items = if legacy {
+            crate::mcp::featured::search_items(
+                &p.search.clone().unwrap_or_default(),
+                &p.category.clone().unwrap_or_default(),
+            )
+        } else {
+            crate::mcp::registry::search_items(
+                &p.search.clone().unwrap_or_default(),
+                &p.category.clone().unwrap_or_default(),
+            )
+        };
+        let total = items.len() as i64;
+        return Json(market::succeed(json!({
+            "total_count": total,
+            "mcp_server_list": items,
+            "page_number": 1,
+            "page_size": total.max(1),
+        })));
+    }
     let q = ServerQuery {
         search: p.search.unwrap_or_default(),
         page: parse_i64(p.page, 1),
@@ -89,6 +123,18 @@ pub async fn mcp_market_servers(Query(p): Query<ServersParams>) -> Json<Value> {
 pub async fn mcp_market_detail(Query(p): Query<DetailParams>) -> Json<Value> {
     if p.id.trim().is_empty() {
         return Json(market::failure("id is required"));
+    }
+    // 官方条目（含旧 featured: 别名）：本地 serving，绝不把官方 id 发给魔搭。
+    // env_supported 注入与魔搭路径同口径。
+    if crate::mcp::registry::is_official_id(&p.id) {
+        return Json(match crate::mcp::registry::detail(&p.id) {
+            Some(mut data) => {
+                let supported = env_supported(&data);
+                data["env_supported"] = Value::Bool(supported);
+                market::succeed(data)
+            }
+            None => market::failure("连接器不存在或已下架"),
+        });
     }
     Json(match market().detail(&p.id).await {
         Ok(mut data) => {
@@ -143,8 +189,39 @@ pub fn env_supported(data: &Value) -> bool {
     true
 }
 
-pub async fn mcp_market_categories() -> Json<Value> {
-    Json(market::succeed(market().categories()))
+/// 分类表按源适配：官方源只返回官方目录里**实际存在条目**的分类。
+/// 恒返回魔搭全表会让官方 tab 出现 4 个「点进去永远空白」的死 chip
+/// （version-control / browser-automation / os-automation / art-and-culture
+/// 在官方目录 0 条）——与 market.rs 注释里定义的 P0 级 UX 缺陷同类。
+pub async fn mcp_market_categories(Query(q): Query<HashMap<String, String>>) -> Json<Value> {
+    let source = q.get("source").map(|s| s.trim()).unwrap_or("");
+    if source == "modelscope" {
+        return Json(market::succeed(market().categories()));
+    }
+    let full = market::categories();
+    let mut present = std::collections::HashSet::new();
+    for item in crate::mcp::registry::list_items() {
+        if let Some(cats) = item.get("categories").and_then(Value::as_array) {
+            for c in cats {
+                if let Some(k) = c.as_str() {
+                    present.insert(k.to_string());
+                }
+            }
+        }
+    }
+    let filtered: Vec<Value> = full
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|c| {
+                    let k = c.get("key").and_then(Value::as_str).unwrap_or("");
+                    k.is_empty() || present.contains(k)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    Json(market::succeed(Value::Array(filtered)))
 }
 
 /// `type` → 标准 kind，并在此处就校验合法性。
@@ -404,9 +481,18 @@ pub async fn mcp_market_install(
     if body.id.trim().is_empty() {
         return Json(market::failure("id is required"));
     }
-    let data = match market().detail(&body.id).await {
-        Ok(d) => d,
-        Err(e) => return Json(market::failure(e)),
+    // 官方条目（含旧 featured: 别名）：本地读详情；其余管线（env 校验、
+    // 归一化、mcp_server_add）与魔搭完全一致。
+    let data = if crate::mcp::registry::is_official_id(&body.id) {
+        match crate::mcp::registry::detail(&body.id) {
+            Some(d) => d,
+            None => return Json(market::failure("连接器不存在或已下架")),
+        }
+    } else {
+        match market().detail(&body.id).await {
+            Ok(d) => d,
+            Err(e) => return Json(market::failure(e)),
+        }
     };
     // 必须先于 resolve_env：http 型配置存不下 env，若先索要密钥再失败，
     // 用户白填一遍，且失败时机滞后到 normalize，排查成本高。

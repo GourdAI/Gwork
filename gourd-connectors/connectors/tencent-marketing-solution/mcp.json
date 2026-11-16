@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "tencent-marketing-solution": {
+      "type": "streamable_http",
+      "url": "https://miaowen.qq.com/miaowen_mcp_service/v1.0/workbuddy/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "腾讯营销"
+      }
+    }
+  }
+}

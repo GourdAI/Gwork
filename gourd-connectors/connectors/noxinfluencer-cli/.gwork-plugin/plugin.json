@@ -1,0 +1,77 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "noxinfluencer-cli",
+  "version": "1.0.0",
+  "description": "Operate NoxInfluencer creator intelligence and marketing operations through natural language: search and shortlist YouTube, TikTok, and Instagram creators, analyze audience, content, and cooperation signals, retrieve contacts, track content performance, run campaigns, CRM, email outreach, brand monitoring, and exports, and check quota and pricing.",
+  "keywords": [
+    "cli",
+    "skills"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "kind": "cli",
+      "tier": "cli",
+      "auth": {
+        "authType": "cli_login"
+      },
+      "display": {
+        "name": "NoxInfluencer 红人数据与营销运营",
+        "name_en": "NoxInfluencer Creator Intelligence & Marketing Ops",
+        "description_zh": "通过自然语言调用 NoxInfluencer 的红人数据与营销运营能力：在 YouTube、TikTok、Instagram 上搜索并筛选红人，分析受众画像、内容表现与合作信号，获取联系方式，追踪内容数据，并管理 Campaign、CRM、邮件触达、品牌监测与导出任务，同时可查看配额与计费。",
+        "description_en": "Operate NoxInfluencer creator intelligence and marketing operations through natural language: search and shortlist YouTube, TikTok, and Instagram creators, analyze audience, content, and cooperation signals, retrieve contacts, track content performance, run campaigns, CRM, email outreach, brand monitoring, and exports, and check quota and pricing."
+      },
+      "categories": [
+        "research-and-data"
+      ],
+      "source": "vendor-cli:@noxinfluencer/cli@0.5.12",
+      "cli_spec": {
+        "package": "@noxinfluencer/cli",
+        "version": "0.5.12",
+        "binName": "noxinfluencer",
+        "binPath": "dist/main.js",
+        "auth": {
+          "argv": [
+            "login",
+            "--no-browser",
+            "--timeout",
+            "300"
+          ],
+          "urlDomain": "noxinfluencer.com",
+          "waitForExit": true
+        },
+        "status": {
+          "argv": [
+            "auth",
+            "status"
+          ],
+          "matchJson": {
+            "authenticated": "true"
+          },
+          "matchRegex": "\"authenticated\"\\s*:\\s*true"
+        },
+        "unauth": {
+          "argv": [
+            "auth",
+            "logout"
+          ]
+        }
+      },
+      "skills": [
+        {
+          "name": "noxinfluencer",
+          "dir": "skills/noxinfluencer"
+        }
+      ],
+      "skills_provenance": {
+        "source": "@noxinfluencer/cli@0.5.12 官方技能（WB 公开仓库缓存 skills/ 原样复制，缺 LICENSE 由 npm license 字段补齐）",
+        "url": "https://www.npmjs.com/package/@noxinfluencer/cli",
+        "license": "UNLICENSED",
+        "skillCount": 1,
+        "fileCount": 8,
+        "byteCount": 53495
+      },
+      "readme": "## NoxInfluencer 红人数据与营销运营 CLI 连接器\n\n厂商官方 `@noxinfluencer/cli@0.5.12`，扫码/浏览器授权，内置 1 套官方技能。\n\n### 连接方式\n\n1. 点击「连接」，GWork 自动准备 Node 运行时并安装官方 CLI；\n2. 弹窗展示授权链接/二维码，按厂商页面完成扫码或浏览器确认；\n3. 授权完成后自动连接。凭据由官方 CLI 自管，GWork 不接触 token。\n\n技能包来源：厂商公开 CLI 包随附技能文档（公开仓库缓存副本）；许可见各技能目录 LICENSE。"
+    }
+  }
+}

@@ -19,6 +19,8 @@ import org.noear.snack4.ONode;
 import org.noear.solon.Solon;
 import com.gourdai.agent.AgentSession;
 import com.gourdai.agent.ContextLengthPolicy;
+import com.gourdai.agent.react.intercept.AskUser;
+import com.gourdai.agent.react.intercept.AskUserTask;
 import com.gourdai.agent.react.intercept.HITL;
 import com.gourdai.agent.react.intercept.HITLTask;
 import com.gourdai.harness.HarnessEngine;
@@ -2699,6 +2701,52 @@ public class WebController {
         } catch (Exception e) {
             LOG.error("Failed to read TODO for session {}: {}", sessionId, e.getMessage());
             return Result.failure(500, e.getMessage());
+        }
+    }
+
+    /**
+     * 挂起提问兜底查询（契约 §3.4，契约冻结）。
+     *
+     * <p>前端会话激活/加载完成后调用：本地无问答卡状态时兜底拉取后端挂起的 ask_user 提问，
+     * 防止「提问帧在断线窗口丢失 → 会话永远停在等待作答但界面没有卡」。</p>
+     *
+     * <p>数据源：{@link AskUser#isResumable}（任务实体存在 <b>且</b> 会话确实挂起）+
+     * {@link AskUser#getPendingTask}（含 actionId 与 questions 快照）。
+     * 无挂起 / HITL 挂起（无 ask_user 任务实体）/ 过期僵尸挂起（实体在但会话已不挂起）
+     * 一律返回 {@code {"code":200,"data":null}}。</p>
+     *
+     * @param sessionId 会话 ID
+     * @return {@code {actionId, questions}} 或 null
+     */
+    @Get
+    @Mapping("/web/chat/pendingQuestion")
+    public Result<Map<String, Object>> pendingQuestion(@Param("sessionId") String sessionId) {
+        if (sessionId == null || sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
+            return Result.failure(400, "Invalid sessionId");
+        }
+
+        try {
+            AgentSession session = engine.getSession(sessionId);
+
+            // isResumable 同时覆盖三类 null 场景：无挂起、HITL 挂起（无 ask_user 实体）、
+            // 过期/已消费挂起（实体残留但会话已不处于挂起态——见 AskUser.isResumable 的僵尸组合说明）
+            if (!AskUser.isResumable(session)) {
+                return Result.succeed(null);
+            }
+
+            AskUserTask task = AskUser.getPendingTask(session);
+            if (task == null || task.getQuestions() == null || task.getQuestions().isEmpty()) {
+                return Result.succeed(null);
+            }
+
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("actionId", task.getActionId());
+            data.put("questions", task.getQuestions());
+            return Result.succeed(data);
+        } catch (Exception e) {
+            // 会话不存在/快照损坏等：兜底端点按「无挂起」处理，不打断前端会话加载
+            LOG.warn("pendingQuestion lookup failed for session {}: {}", sessionId, e.getMessage());
+            return Result.succeed(null);
         }
     }
 

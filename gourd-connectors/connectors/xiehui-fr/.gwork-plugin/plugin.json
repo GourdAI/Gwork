@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "xiehui-fr",
+  "version": "1.0.0",
+  "description": "Search France's official government registry of 3,640+ Chinese associations by name, city, or category, and check chairman-verified certification status before contacting one.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "法国协会网",
+        "name_en": "France Chinese Associations Directory",
+        "description_zh": "查询法国内政部官方登记库收录的 3,640 家华人协会，可按名称、城市、类型搜索，查看认证状态与登记信息，联系前先核实。",
+        "description_en": "Search France's official government registry of 3,640+ Chinese associations by name, city, or category, and check chairman-verified certification status before contacting one."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

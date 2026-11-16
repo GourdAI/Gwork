@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "camscanner-mcp": {
+      "type": "streamable_http",
+      "url": "https://ai-tools.camscanner.com/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "扫描全能王"
+      }
+    }
+  }
+}

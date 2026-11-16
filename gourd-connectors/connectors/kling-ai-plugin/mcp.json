@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "kling-ai-plugin": {
+      "type": "streamable_http",
+      "url": "https://klingai.com/mcp/plugin",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "Kling AI"
+      }
+    }
+  }
+}

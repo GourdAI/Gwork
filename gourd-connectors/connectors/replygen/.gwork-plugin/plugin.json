@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "replygen",
+  "version": "1.0.0",
+  "description": "AI customer-service connector for cross-border multi-store sellers (Shopee & more): ask in natural language for daily buyer-question digests, multi-store operations summaries, escalation handling stats, conversation insights, and order snapshot reports. 25+ read & analytics tools, cross-store and multi-language, with PII redaction on all buyer content.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "睿答",
+        "name_en": "ReplyGen",
+        "description_zh": "跨境电商多店铺客服 AI 连接器（Shopee 等）：用自然语言做每日买家问题总结、多店经营汇总、工单处理统计、会话洞察与订单快照报表。提供 25+ 只读/分析工具，跨店铺跨语种，买家隐私数据经脱敏后输出。",
+        "description_en": "AI customer-service connector for cross-border multi-store sellers (Shopee & more): ask in natural language for daily buyer-question digests, multi-store operations summaries, escalation handling stats, conversation insights, and order snapshot reports. 25+ read & analytics tools, cross-store and multi-language, with PII redaction on all buyer content."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

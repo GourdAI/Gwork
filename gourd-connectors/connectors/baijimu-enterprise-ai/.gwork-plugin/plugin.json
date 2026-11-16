@@ -1,0 +1,76 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "baijimu-enterprise-ai",
+  "version": "1.0.0",
+  "description": "Connect GWork to Baijimu workspaces, agents, workflows, applications, and governed enterprise services.",
+  "keywords": [
+    "cli",
+    "skills"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "kind": "cli",
+      "tier": "cli",
+      "auth": {
+        "authType": "cli_login"
+      },
+      "display": {
+        "name": "百积木",
+        "name_en": "Baijimu",
+        "description_zh": "连接百积木工作区、智能体、工作流、应用与受治理的企业服务。",
+        "description_en": "Connect GWork to Baijimu workspaces, agents, workflows, applications, and governed enterprise services."
+      },
+      "categories": [
+        "developer-tools"
+      ],
+      "source": "vendor-cli:@baijimu/cli@0.177.0",
+      "cli_spec": {
+        "package": "@baijimu/cli",
+        "version": "0.177.0",
+        "binName": "baijimu",
+        "binPath": "dist/index.js",
+        "auth": {
+          "argv": [
+            "auth",
+            "login",
+            "--no-browser"
+          ],
+          "urlDomain": "console.baijimu.com",
+          "waitForExit": true
+        },
+        "status": {
+          "argv": [
+            "auth",
+            "status",
+            "--verify",
+            "--json"
+          ],
+          "matchRegex": "\\\"authenticated\\\"\\s*:\\s*true"
+        },
+        "unauth": {
+          "argv": [
+            "auth",
+            "logout",
+            "--json"
+          ]
+        }
+      },
+      "skills": [
+        {
+          "name": "baijimu-enterprise-operations",
+          "dir": "skills/baijimu-enterprise-operations"
+        }
+      ],
+      "skills_provenance": {
+        "source": "@baijimu/cli@0.177.0 官方技能（WB 公开仓库缓存 skills/ 原样复制，缺 LICENSE 由 npm license 字段补齐）",
+        "url": "https://www.npmjs.com/package/@baijimu/cli",
+        "license": "UNLICENSED",
+        "skillCount": 1,
+        "fileCount": 2,
+        "byteCount": 3978
+      },
+      "readme": "## 百积木 CLI 连接器\n\n厂商官方 `@baijimu/cli@0.177.0`，扫码/浏览器授权，内置 1 套官方技能。\n\n### 连接方式\n\n1. 点击「连接」，GWork 自动准备 Node 运行时并安装官方 CLI；\n2. 弹窗展示授权链接/二维码，按厂商页面完成扫码或浏览器确认；\n3. 授权完成后自动连接。凭据由官方 CLI 自管，GWork 不接触 token。\n\n技能包来源：厂商公开 CLI 包随附技能文档（公开仓库缓存副本）；许可见各技能目录 LICENSE。"
+    }
+  }
+}

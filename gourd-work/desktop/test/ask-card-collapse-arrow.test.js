@@ -79,6 +79,10 @@ test('ask 卡片折叠箭头：真实 renderQuestionCard 两态产物使用正�
         'var GourdI18n = { t: function(k){ return k; } };',
         'var questionAnswerFor = function(st,i){ return (st&&st.answers&&st.answers[i])||null; };',
         'var questionOptionSelected = function(){ return false; };',
+        // multiSelect 改造后 renderQuestionCard 还调用这两个语义位函数（本测试只锁箭头，
+        // 空集 stub 即可；多选勾选行为由 ask-multiselect.test.js 用真实源码区块覆盖）
+        'var questionIsMultiSelect = function(){ return false; };',
+        'var questionSelectedLabels = function(){ return []; };',
         'var questionOptionView = function(o){ o=o||{}; return {label:o.label||"",title:o.label||"",desc:o.description||""}; };',
         'var questionDetailShouldCollapse = function(){ return false; };',
         'var questionSubmitMode = function(){ return "skip"; };',

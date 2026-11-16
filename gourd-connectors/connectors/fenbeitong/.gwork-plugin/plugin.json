@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "fenbeitong",
+  "version": "1.0.0",
+  "description": "View and switch Fenbeitong account and company context; search and manage business travel; check policies, invoices and reimbursements; analyze consumption insights, compliance and cost-reduction opportunities; and get customer support.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "分贝通",
+        "name_en": "Fenbeitong",
+        "description_zh": "用自然语言查看和切换分贝通账号与企业，查询和管理企业差旅、消费规则、发票与报销，分析消费洞察、合规风险和降本机会，并获取客服支持。",
+        "description_en": "View and switch Fenbeitong account and company context; search and manage business travel; check policies, invoices and reimbursements; analyze consumption insights, compliance and cost-reduction opportunities; and get customer support."
+      },
+      "categories": [
+        "communication"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

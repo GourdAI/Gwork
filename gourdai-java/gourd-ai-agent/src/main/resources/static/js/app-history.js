@@ -3040,6 +3040,12 @@ function replaySession(sess, events, prepend, keepOpen) {
         if (prepend && replayLoadMoreToken != null) holdReplayLoadMoreAnchor(sess, replayLoadMoreToken);
         drainGateBuffer(sess);
 
+        /* pendingQuestion 兜底（契约 §6）：回放 + 实时缓冲排空后探一次后端权威挂起状态。
+           旧落盘无 question 帧/他端已消费/回放隔离跳过建卡时，靠它补卡或收僵尸卡。
+           prepend（上拉加载更早历史）不是「会话加载完成」语义，且回放隔离禁止扰动
+           用户正在作答的活跃卡，故仅初始加载探测；函数内部自带防抖与静默失败。 */
+        if (!prepend && typeof window.probePendingQuestion === 'function') window.probePendingQuestion(sess);
+
         // 回放期新建的文件变更卡片在这里统一补对账。file_changes 是被动事件，不会临时进入
         // streaming 态；但回放 DOM 仍先建在临时容器中，所以必须等节点移入真实容器后再请求，
         // 确保对账响应回填时 upsert 能命中并原地更新已有卡片。
@@ -3283,6 +3289,9 @@ function loadMessagesLegacy(sess, rootQ, historyGen) {
                 if (typeof updateLoadMoreBtn === 'function') updateLoadMoreBtn(sess);
                 // legacy 加载完成后统一排空回放缓冲（此路径无覆盖集，全部喂入）
                 drainGateBuffer(sess);
+                // pendingQuestion 兜底（契约 §6）：legacy 回退路径同样是「会话加载完成」，
+                // 与 replayDoneCore 同口径探一次后端权威挂起状态（函数自带防抖/静默失败）。
+                if (typeof window.probePendingQuestion === 'function') window.probePendingQuestion(sess);
             }
 
             loadChunk();

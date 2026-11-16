@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "pandadata",
+  "version": "1.0.0",
+  "description": "Query, organize, and analyze financial data across Chinese, Hong Kong, and U.S. equities, futures, options, funds, macroeconomics, and quantitative factors.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "PandaData 金融数据",
+        "name_en": "PandaData",
+        "description_zh": "查询、整理和分析 A 股、期货、期权、港美股、基金、宏观经济及量化因子等金融数据，支持统计比较与趋势归纳。",
+        "description_en": "Query, organize, and analyze financial data across Chinese, Hong Kong, and U.S. equities, futures, options, funds, macroeconomics, and quantitative factors."
+      },
+      "categories": [
+        "finance"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

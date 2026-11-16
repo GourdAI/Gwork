@@ -59,6 +59,8 @@ fn parent_run(ctx: &ToolContext) -> crate::team::ParentRun {
         session_id: ctx.root_session_id.clone(),
         cancel: ctx.cancel.clone(),
         thinking: ctx.thinking.clone(),
+        run_id: ctx.run_id.clone(),
+        change_ledger: ctx.change_ledger.clone(),
     }
 }
 
@@ -692,6 +694,7 @@ mod tests {
             }),
             settings: Arc::new(settings),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         }
     }
 

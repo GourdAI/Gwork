@@ -194,7 +194,13 @@ pub async fn summary(State(state): State<Arc<AppState>>, FlexBody(body): FlexBod
         stat_info, combined_diff
     );
 
-    let client = crate::llm::LlmClient::new(model);
+    let client = match crate::llm::LlmClient::new(model) {
+        Ok(c) => c,
+        Err(e) => return Json(serde_json::json!({
+            "code": 500,
+            "description": format!("生成摘要失败: {}", e)
+        })),
+    };
     // The system prompt is load-bearing, not decoration. The Java kernel runs this
     // through a dedicated `git-summary` agent whose prompt fixes the output
     // format and forbids meta-commentary; without an equivalent here the model

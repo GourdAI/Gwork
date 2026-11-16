@@ -398,10 +398,12 @@ pub enum StreamEvent {
     /// no such scope boundary — the loop is inside the stream receiver — so the
     /// reset must be signalled explicitly.
     ///
-    /// Emitted **only** when the failed attempt had already produced events; a
-    /// failure before the first byte retries silently (nothing to discard, and
-    /// a retry banner for an invisible attempt is noise).
-    Retry { attempt: u32, max: u32, reason: String },
+    /// 【2026-11 用户决策】每次物理重试都发（含首字节前的失败）：旧实现只在
+    /// 已产出 delta 时发，首字节前静默重试，用户观感是「报错了但没重试」。
+    /// `delivered` 区分两种形态：true = 失败前已下发过 delta，消费端必须丢弃
+    /// 半成品再重放（discardPartial）；false = 什么都没渲染过，只需展示
+    /// 「正在重试 attempt/max」提示，不得触发 DOM 回滚。
+    Retry { attempt: u32, max: u32, reason: String, delivered: bool },
     /// Error during streaming.
     Error(String),
 }

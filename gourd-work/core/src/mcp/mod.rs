@@ -26,8 +26,12 @@
 //!    `McpServerParameters.getTypeOrTransport()`.
 
 pub mod auth;
+pub mod cli;
+pub mod featured;
 pub mod market;
 pub mod oauth;
+pub mod qrcode_vendor;
+pub mod registry;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1932,7 +1936,9 @@ impl McpManager {
         if url.is_empty() { return out; }
         let vault = auth::CredentialVault::at_home();
         match spec.kind() {
-            auth::AuthKind::Token => {
+            auth::AuthKind::Token | auth::AuthKind::QrcodePoll => {
+                // QR-granted tokens are persisted as static tokens, so they
+                // inject through the exact same path as a typed token.
                 if let Some(t) = vault.get_static(url).await {
                     out.insert(t.header, format!("{}{}", t.prefix, t.value));
                 }

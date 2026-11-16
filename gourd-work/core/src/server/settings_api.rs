@@ -735,6 +735,8 @@ pub(crate) fn sanitize_auth_decl(raw: &serde_json::Value) -> serde_json::Value {
         "tokenHeader", "tokenPrefix", "clientId",
         // RFC 8628 / in-app QR modal — non-secret presentation metadata.
         "deviceAuthorizationEndpoint",
+        // Vendor QR protocol selector (authType=qrcode_poll), e.g. "tencent-docs".
+        "qrVendor",
     ];
     const BOOL_FIELDS: &[&str] = &["authDeviceFlow", "authQrModal"];
     const NUMBER_FIELDS: &[&str] = &["devicePollIntervalSecs"];
@@ -1400,6 +1402,60 @@ pub(crate) fn mask_api_key(key: &str) -> String {
     )
 }
 
+/// 官方虚拟服务商条目（契约 C 节 / 任务 6）。
+///
+/// 纯内存构造：不读、不写 `settings.json`；`apiKey` 永远为空字符串，
+/// `hasKey` 只反映 `official::is_ready()` 这个布尔量。模型列表来自壳登录后
+/// 一次性写入的 `official::models()` 缓存。key 绝不进入该 JSON 值。
+fn official_provider_item() -> serde_json::Value {
+    let models: Vec<serde_json::Value> = crate::official::models()
+        .iter()
+        .map(|m| serde_json::json!({
+            "id": m.id,
+            "standard": "openai",
+            "manual": false,
+            "enabled": true,
+        }))
+        .collect();
+    serde_json::json!({
+        "name": crate::official::OFFICIAL_PROVIDER_NAME,
+        "official": true,
+        "standard": "openai",
+        "apiUrl": crate::official::base_url(),
+        "apiKey": "",
+        "hasKey": crate::official::is_ready(),
+        "enabled": true,
+        "scope": SCOPE_USER,
+        "models": models,
+        "timeout": "120s",
+    })
+}
+
+/// 用一个显式的 code 400 拒绝任何对官方条目的写入/覆盖/删除/同步尝试。
+///
+/// `extra_names` 覆盖 `originalName` / `providerName` / rename lookup 等
+/// 所有入口字段；`official` 覆盖 body 里的 `official:true` 标记。这样即使用
+/// 户把名字改成别的、只带 official 标记，也无法借自定义表单覆盖虚拟条目。
+fn official_write_rejected(
+    name: &str,
+    extra_names: &[&str],
+    official_flag: bool,
+) -> Option<Json<serde_json::Value>> {
+    let official_name = crate::official::OFFICIAL_PROVIDER_NAME;
+    let hit = name == official_name
+        || extra_names.iter().any(|n| *n == official_name)
+        || official_flag;
+    if !hit {
+        return None;
+    }
+    Some(Json(serde_json::json!({
+        "code": 400,
+        "description": format!(
+            "{} 为内置官方模型源，禁止新增、修改、删除、启停或同步模型", official_name
+        ),
+    })))
+}
+
 /// Render one provider entry for the UI, masking the key.
 fn provider_item(name: &str, p: &serde_json::Value) -> serde_json::Value {
     let api_key = p.get("apiKey").and_then(|v| v.as_str()).unwrap_or("");
@@ -1433,11 +1489,22 @@ fn read_providers() -> serde_json::Map<String, serde_json::Value> {
 /// `providers.forEach(...)`, so returning the raw settings map (as this endpoint
 /// used to) made the whole model-settings panel render an empty list.
 pub async fn providers_list() -> Json<serde_json::Value> {
-    let mut list: Vec<serde_json::Value> = read_providers()
+    let mut list: Vec<serde_json::Value> = Vec::new();
+    // 官方虚拟条目置顶，不进入 settings.json。
+    list.push(official_provider_item());
+    list.extend(read_providers()
         .iter()
-        .map(|(name, p)| provider_item(name, p))
-        .collect();
-    list.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+        // 磁盘上若残留同名/official 伪条目，绝不展示第二条「官方」：
+        // 该条目的内容只能由进程内存快照生成。
+        .filter(|(name, p)| {
+            *name != crate::official::OFFICIAL_PROVIDER_NAME
+                && p.get("official").and_then(|v| v.as_bool()) != Some(true)
+        })
+        .map(|(name, p)| provider_item(name, p)));
+    // 保留普通条目的既有字母序；虚拟条目不参与排序，始终在结果数组最前面。
+    list[1..].sort_by(|a, b| {
+        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+    });
     Json(serde_json::json!({"code": 200, "data": list}))
 }
 
@@ -1457,6 +1524,9 @@ pub struct ProviderBody {
     pub scope: Option<String>,
     pub timeout: Option<String>,
     pub models: Option<Vec<serde_json::Value>>,
+    /// 官方虚拟条目标记。写操作入口用它拒绝自定义字段写入。
+    #[serde(default)]
+    pub official: bool,
     /// `fetch` / `sync-models` fields.
     #[serde(rename = "providerName")]
     pub provider_name: String,
@@ -1475,6 +1545,9 @@ pub async fn providers_get(Query(q): Query<NameQuery>) -> Json<serde_json::Value
     if name.is_empty() {
         return Json(serde_json::json!({"code": 400, "description": "name is required"}));
     }
+    if name == crate::official::OFFICIAL_PROVIDER_NAME {
+        return Json(serde_json::json!({"code": 200, "data": official_provider_item()}));
+    }
     let providers = read_providers();
     match providers.get(name) {
         Some(p) => Json(serde_json::json!({"code": 200, "data": provider_item(name, p)})),
@@ -1487,6 +1560,9 @@ pub async fn providers_add(Json(body): Json<ProviderBody>) -> Json<serde_json::V
     let name = body.name.trim().to_string();
     if name.is_empty() {
         return Json(serde_json::json!({"code": 400, "description": "name is required"}));
+    }
+    if let Some(rejected) = official_write_rejected(&name, &[], body.official) {
+        return rejected;
     }
     let mut providers = read_providers();
     if providers.contains_key(&name) {
@@ -1529,6 +1605,13 @@ pub async fn providers_update(
     } else {
         body.original_name.trim().to_string()
     };
+    if let Some(rejected) = official_write_rejected(
+        &name,
+        &[lookup.as_str(), body.provider_name.trim()],
+        body.official,
+    ) {
+        return rejected;
+    }
 
     let mut providers = read_providers();
     let Some(existing) = providers.get(&lookup).cloned() else {
@@ -1634,6 +1717,10 @@ fn rename_provider_models(old_name: &str, new_name: &str) {
 #[serde(default)]
 pub struct ProviderNameBody {
     pub name: String,
+    /// 官方虚拟条目标记：若前端误把 `official:true` 提交给表单编码的
+    /// remove/toggle，也必须拒绝，而不是按名字落到普通 provider 上。
+    #[serde(default, deserialize_with = "de_form_bool")]
+    pub official: Option<bool>,
     /// Form encoding carries booleans as the strings "true"/"false".
     #[serde(deserialize_with = "de_form_bool")]
     pub enabled: Option<bool>,
@@ -1650,6 +1737,12 @@ pub struct ProviderFetchBody {
     pub standard: String,
     #[serde(rename = "providerName")]
     pub provider_name: String,
+    /// 官方虚拟条目标记/名称。`providers/fetch` 会把提交的 apiKey 直接发到
+    /// apiUrl 指定的任意 host，绝不能被借来以官方源名义探测或外带凭据。
+    #[serde(default, deserialize_with = "de_form_bool")]
+    pub official: Option<bool>,
+    #[serde(default)]
+    pub name: String,
 }
 
 /// Deserialize a form-encoded boolean. `serde_urlencoded` yields `"true"`/`"false"`
@@ -1689,6 +1782,9 @@ pub async fn providers_remove(
     let name = body.name.trim().to_string();
     if name.is_empty() {
         return Json(serde_json::json!({"code": 400, "description": "name is required"}));
+    }
+    if let Some(rejected) = official_write_rejected(&name, &[], body.official.unwrap_or(false)) {
+        return rejected;
     }
     let mut providers = read_providers();
     providers.remove(&name);
@@ -1764,6 +1860,9 @@ pub async fn providers_toggle(
     };
     if name.is_empty() {
         return Json(serde_json::json!({"code": 400, "description": "name is required"}));
+    }
+    if let Some(rejected) = official_write_rejected(&name, &[], body.official.unwrap_or(false)) {
+        return rejected;
     }
 
     let mut providers = read_providers();
@@ -1844,6 +1943,15 @@ fn apply_provider_visibility(
 /// "zero models" is exactly the "服务返回空模型列表" report — Java had fixed
 /// this with `ModelsFetchReason` (see its javadoc), and the port lost the fix.
 pub async fn providers_fetch(Form(body): Form<ProviderFetchBody>) -> Json<serde_json::Value> {
+    // 官方虚拟条目不经测试连接：fetch 会把提交的 apiKey 直接发到 apiUrl
+    // 指定的任意 host，绝不能被借来以官方源名义探测/外带凭据。
+    if let Some(rejected) = official_write_rejected(
+        &body.name,
+        &[&body.provider_name],
+        body.official.unwrap_or(false),
+    ) {
+        return rejected;
+    }
     let mut api_url = body.api_url.clone();
     let mut api_key = body.api_key.clone();
     let mut standard = if body.standard.trim().is_empty() {
@@ -1879,6 +1987,11 @@ pub async fn providers_fetch(Form(body): Form<ProviderFetchBody>) -> Json<serde_
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
+        // 【安全】这个请求带用户提交的 apiKey（甚至从磁盘 provider 回退读出），
+        // 绝不跟随 3xx：reqwest 0.12 跨 host 才剥内置 Authorization，自定义
+        // x-api-key / x-goog-api-key 根本不剥，https→http 降级也不剥。
+        // 固定 /models 端点没有需要跟随的重定向。
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
@@ -2105,6 +2218,15 @@ pub async fn providers_sync_models(
     let provider_name = body.provider_name.trim().to_string();
     if provider_name.is_empty() {
         return Json(serde_json::json!({"code": 400, "description": "providerName is required"}));
+    }
+    // 官方条目由壳直接 `official::set` 刷新内存模型列表，UI 从
+    // `/web/settings/official/models` 读；sync-models 不得物化它到磁盘。
+    if let Some(rejected) = official_write_rejected(
+        &provider_name,
+        &[body.name.trim()],
+        body.official,
+    ) {
+        return rejected;
     }
     let providers = read_providers();
     let Some(provider) = providers.get(&provider_name).cloned() else {
@@ -2630,6 +2752,64 @@ mod tests {
         .unwrap()
     }
 
+    // ─── Official virtual provider (contract C/B) ───────────────────────────
+
+    #[test]
+    fn official_provider_item_is_virtual_masked_and_never_persists_key() {
+        use crate::official::{OfficialCredential, OfficialModel, OFFICIAL_BASE_URL};
+        const SECRET: &str = "OFFICIAL-PROVIDER-KEY-MUST-NOT-LEAK";
+        let _guard = crate::official::test_lock();
+        crate::official::reset_host_for_test();
+        crate::official::set(OfficialCredential {
+            key: SECRET.to_string(),
+            base_url: OFFICIAL_BASE_URL.to_string(),
+            user_id: 9,
+            username: "u".to_string(),
+            models: vec![OfficialModel { id: "gwork-x".to_string(), owned_by: "gwork".to_string() }],
+        });
+        let item = official_provider_item();
+        assert_eq!(item["name"], crate::official::OFFICIAL_PROVIDER_NAME);
+        assert_eq!(item["official"], true);
+        assert_eq!(item["standard"], "openai");
+        assert_eq!(item["apiUrl"], OFFICIAL_BASE_URL);
+        assert_eq!(item["apiKey"], "");
+        assert_eq!(item["hasKey"], true, "hasKey is a boolean probe, not the key");
+        assert_eq!(item["enabled"], true);
+        assert_eq!(item["scope"], "user");
+        assert_eq!(item["timeout"], "120s");
+        assert_eq!(item["models"][0], serde_json::json!({
+            "id": "gwork-x", "standard": "openai", "manual": false, "enabled": true
+        }));
+        let text = serde_json::to_string(&item).unwrap();
+        assert!(!text.contains(SECRET), "key leaked into virtual provider: {text}");
+        crate::official::clear();
+        assert_eq!(official_provider_item()["hasKey"], false);
+    }
+
+    #[test]
+    fn official_provider_write_guards_cover_every_name_and_flag() {
+        let name = crate::official::OFFICIAL_PROVIDER_NAME;
+        for body_name in ["", "custom"] {
+            let hit = official_write_rejected(body_name, &[name], false);
+            assert_eq!(hit.unwrap().0["code"], 400);
+        }
+        assert_eq!(
+            official_write_rejected("custom", &[], true).unwrap().0["code"], 400,
+            "official:true must be rejected even under an unrelated name"
+        );
+        assert!(official_write_rejected("custom", &[], false).is_none());
+    }
+
+    #[test]
+    fn official_provider_get_returns_the_same_virtual_item_without_disk_read() {
+        let _guard = crate::official::test_lock();
+        crate::official::clear();
+        let q = NameQuery { name: crate::official::OFFICIAL_PROVIDER_NAME.to_string() };
+        let res = tokio_test::block_on(providers_get(Query(q))).0;
+        assert_eq!(res["code"], 200);
+        assert_eq!(res["data"], official_provider_item());
+    }
+
     // ─── BOM ────────────────────────────────────────────────────────────────
 
     #[test]
@@ -2937,6 +3117,8 @@ mod tests {
             api_key: "sk-test".to_string(),
             standard: "openai".to_string(),
             provider_name: String::new(),
+            official: None,
+            name: String::new(),
         }
     }
 
@@ -3193,6 +3375,7 @@ mod tests {
             "authQrModal": false,
             "deviceAuthorizationEndpoint": "https://as.example.com/device",
             "devicePollIntervalSecs": 7,
+            "qrVendor": "tencent-docs",
             // 凭据字段一律不得留下。
             "token": "MUST-NOT-PERSIST",
             "accessToken": "MUST-NOT-PERSIST-2",
@@ -3201,7 +3384,7 @@ mod tests {
             "clientSecret": "MUST-NOT-PERSIST-5",
             "password": "MUST-NOT-PERSIST-6"
         }));
-        // 12 个声明字段逐一存活（与 mcp::auth::AuthSpec 一一对应）。
+        // 13 个声明字段逐一存活（与 mcp::auth::AuthSpec 一一对应）。
         assert_eq!(cleaned["authType"], "oauth");
         assert_eq!(cleaned["tokenLabel"], "D&B Access Token");
         assert_eq!(cleaned["tokenHelpUrl"], "https://example.com/help");
@@ -3214,20 +3397,21 @@ mod tests {
         assert_eq!(cleaned["authQrModal"], false);
         assert_eq!(cleaned["deviceAuthorizationEndpoint"], "https://as.example.com/device");
         assert_eq!(cleaned["devicePollIntervalSecs"], 7);
+        assert_eq!(cleaned["qrVendor"], "tencent-docs");
 
         let serialized = serde_json::to_string(&cleaned).unwrap();
         for i in 0..=6 {
             let needle = if i == 0 { "MUST-NOT-PERSIST".to_string() } else { format!("MUST-NOT-PERSIST-{i}") };
             assert!(!serialized.contains(&needle), "凭据字段泄漏: {needle}");
         }
-        // 键集合精确等于 12 个白名单键：多一个都意味着白名单被放宽。
+        // 键集合精确等于 13 个白名单键：多一个都意味着白名单被放宽。
         let keys: std::collections::BTreeSet<&str> = cleaned
             .as_object()
             .unwrap()
             .keys()
             .map(|k| k.as_str())
             .collect();
-        assert_eq!(keys.len(), 12, "白名单键数量变了: {keys:?}");
+        assert_eq!(keys.len(), 13, "白名单键数量变了: {keys:?}");
     }
 
     #[test]
@@ -3260,6 +3444,7 @@ mod tests {
             "tokenHeader", "tokenPrefix", "clientId", "scopes",
             "authDeviceFlow", "authQrModal",
             "deviceAuthorizationEndpoint", "devicePollIntervalSecs",
+            "qrVendor",
         ];
         // 写侧：构造一个只含全部字段的输入，输出必须一个不少。
         let mut all = serde_json::Map::new();

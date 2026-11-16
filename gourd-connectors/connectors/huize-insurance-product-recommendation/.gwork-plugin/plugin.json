@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "huize-insurance-product-recommendation",
+  "version": "1.0.0",
+  "description": "Screen and compare insurance products from Huize's internal recommendation catalog based on age, audience, occupation, budget, and coverage needs.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "慧择保险产品推荐",
+        "name_en": "Huize Insurance Product Recommendation",
+        "description_zh": "根据年龄、人群、职业、预算和保障需求，从慧择内部产品推荐库中筛选并比较保险产品。",
+        "description_en": "Screen and compare insurance products from Huize's internal recommendation catalog based on age, audience, occupation, budget, and coverage needs."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

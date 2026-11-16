@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "workrally1",
+  "version": "1.0.0",
+  "description": "Use WorkRally MCP for series preproduction, batch image generation, canvas organization, subtitle burn-in, and delivery QC.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "WorkRally",
+        "name_en": "WorkRally",
+        "description_zh": "用 WorkRally MCP 做剧集前期、批量生图、画布整理、字幕烧制与资产验收。",
+        "description_en": "Use WorkRally MCP for series preproduction, batch image generation, canvas organization, subtitle burn-in, and delivery QC."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "yuntu-ft-workbench",
+  "version": "1.0.0",
+  "description": "Bridge GWork skills to the FT Workbench H5: skills write buyer reports, global search, intel cards and follow-ups back into the workbench stored in your own EdgeOne KV.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "云图外贸工作台",
+        "name_en": "Yuntu FT Workbench",
+        "description_zh": "把 GWork 技能生成的外贸开发结果（买家报告/全球搜索/情报卡/跟进）自动写回「云图外贸工作台」工作台，基于 H5 + EdgeOne KV 云存储，数据主权归属用户（BYOC）。",
+        "description_en": "Bridge GWork skills to the FT Workbench H5: skills write buyer reports, global search, intel cards and follow-ups back into the workbench stored in your own EdgeOne KV."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

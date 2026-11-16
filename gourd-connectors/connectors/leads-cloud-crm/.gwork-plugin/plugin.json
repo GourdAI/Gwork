@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "leads-cloud-crm",
+  "version": "1.0.0",
+  "description": "Query LeadsCloud CRM records, follow-ups, touchpoints, and WhatsApp via MCP.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "询盘云CRM",
+        "name_en": "Leads Cloud CRM",
+        "description_zh": "通过 MCP 查询线索、客户、联系人、商机、订单、跟进、触点画像与 WhatsApp 会话。",
+        "description_en": "Query LeadsCloud CRM records, follow-ups, touchpoints, and WhatsApp via MCP."
+      },
+      "categories": [
+        "communication"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

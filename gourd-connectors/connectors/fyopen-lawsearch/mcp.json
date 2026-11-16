@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "fyopen-lawsearch": {
+      "type": "streamable_http",
+      "url": "https://api.cjbdi.com:8443/354347/mcp_law_service",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "法研·法律法规检索"
+      }
+    }
+  }
+}

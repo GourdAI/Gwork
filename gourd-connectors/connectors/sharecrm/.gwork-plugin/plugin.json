@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "sharecrm",
+  "version": "1.0.0",
+  "description": "Easily handle the entire sales workflow—from querying customer data and advancing opportunities to logging follow-ups, managing approvals, and generating charts—using natural language.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "纷享销客CRM",
+        "name_en": "ShareCRM",
+        "description_zh": "用自然语言查询客户、推进商机、写跟进记录、处理审批、建图表等，轻松搞定销售全链路工作。",
+        "description_en": "Easily handle the entire sales workflow—from querying customer data and advancing opportunities to logging follow-ups, managing approvals, and generating charts—using natural language."
+      },
+      "categories": [
+        "communication"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

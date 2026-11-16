@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "xingtu-claw-risk": {
+      "type": "sse",
+      "url": "https://claw-mcp.tcredit.com/mcp/sse",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "天创信用星图MCP"
+      }
+    }
+  }
+}

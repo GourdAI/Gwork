@@ -241,7 +241,12 @@ async fn main() -> Result<()> {
     // turn. Found by the end-to-end probe: the server, ACP and loop paths all had
     // this and the CLI was the one that did not.
     let mut history: Vec<ChatMessage> = vec![ChatMessage::system(
-        build_system_prompt(&settings, &workspace.to_string_lossy())
+        build_system_prompt(
+            &settings,
+            &workspace.to_string_lossy(),
+            // 契约 §1.2：规则 5 条件注入（与 server/ACP/loop 同一判定源）。
+            gourd_work_core::react::prompt::ask_user_visible(&settings.permission),
+        )
             + &build_agent_roster(&workspace, &settings.permission),
     )];
 
@@ -327,6 +332,7 @@ async fn main() -> Result<()> {
             // The CLI one-shot path has no `/compact` entry point.
             force_compact: false,
             compact_focus: None,
+            resume_calibration: false,
         };
 
         let agent = ReActAgent::new(registry.clone());

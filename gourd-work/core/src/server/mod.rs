@@ -15,6 +15,7 @@
 //! - POST /web/chat/input           → send message / answer question / approve HITL
 //! - POST /web/chat/interrupt       → cancel running task
 //! - GET  /web/chat/todos           → parse TODO checklist
+//! - GET  /web/chat/pendingQuestion → pending ask_user question (fallback probe)
 //! - GET  /web/chat/hints           → input hints
 //! - GET  /web/chat/usage/stats     → usage statistics
 //! - GET  /web/chat/memory/list     → list memory entries
@@ -32,6 +33,7 @@
 pub mod attachments_api;
 pub mod changes_api;
 pub mod channels_api;
+pub mod cli_connector_api;
 pub mod commands;
 pub mod filer_api;
 pub mod flex_body;
@@ -43,6 +45,7 @@ pub mod loop_runner;
 pub mod mcp_auth_api;
 pub mod mcp_market_api;
 pub mod misc_api;
+pub mod official_api;
 pub mod projects_api;
 pub mod settings_api;
 pub mod skills_market_api;
@@ -377,6 +380,7 @@ pub async fn serve_with_static(
         .route("/web/chat/input", post(chat_input))
         .route("/web/chat/interrupt", post(chat_interrupt))
         .route("/web/chat/todos", get(chat_todos))
+        .route("/web/chat/pendingQuestion", get(chat_pending_question))
         .route("/web/chat/hints", get(chat_hints))
         .route("/web/chat/usage/stats", get(chat_usage_stats))
         .route("/web/chat/memory/list", get(chat_memory_list))
@@ -509,10 +513,28 @@ pub async fn serve_with_static(
         .route("/web/settings/mcp/auth/start", post(mcp_auth_api::mcp_auth_start))
         // RFC 8628 Device Flow (user_code + in-app QR modal); same session table.
         .route("/web/settings/mcp/auth/device/start", post(mcp_auth_api::mcp_auth_device_start))
+        // Vendor QR-code authorization (authType=qrcode_poll); same session table.
+        .route("/web/settings/mcp/auth/qrcode/start", post(mcp_auth_api::mcp_auth_qrcode_start))
         .route("/web/settings/mcp/auth/status", get(mcp_auth_api::mcp_auth_status))
         .route("/web/settings/mcp/auth/cancel", post(mcp_auth_api::mcp_auth_cancel))
         .route("/web/settings/mcp/auth/token", post(mcp_auth_api::mcp_auth_token))
         .route("/web/settings/mcp/auth/clear", post(mcp_auth_api::mcp_auth_clear))
+        // CLI 连接器（钉钉/飞书/企微/腾讯会议等厂商官方 npm CLI + 扫码授权）：
+        // 安装=确保 Node→npm 装 CLI→落官方技能；授权=编排 CLI 扫码/浏览器流程。
+        // 凭据由厂商 CLI 自管，GWork 不接触 token 明文。
+        .route("/web/settings/runtime/node", get(cli_connector_api::node_status))
+        .route("/web/settings/runtime/node/ensure", post(cli_connector_api::node_ensure))
+        .route("/web/settings/mcp/cli/install", post(cli_connector_api::cli_install))
+        .route("/web/settings/mcp/cli/install/status", get(cli_connector_api::cli_install_status))
+        .route("/web/settings/mcp/cli/state", get(cli_connector_api::cli_state))
+        .route("/web/settings/mcp/cli/auth/start", post(cli_connector_api::cli_auth_start))
+        .route("/web/settings/mcp/cli/auth/status", get(cli_connector_api::cli_auth_status))
+        .route("/web/settings/mcp/cli/auth/cancel", post(cli_connector_api::cli_auth_cancel))
+        .route("/web/settings/mcp/cli/uninstall", post(cli_connector_api::cli_uninstall))
+        // 官方模型源：只读内存态投影。key 由同进程 Tauri 壳 set，不经 HTTP。
+        .route("/web/settings/official/status", get(official_api::official_status))
+        .route("/web/settings/official/models", get(official_api::official_models))
+        .route("/web/settings/official/refresh", post(official_api::official_refresh))
         .route("/web/settings/providers", get(settings_api::providers_list))
         .route("/web/settings/providers/get", get(settings_api::providers_get))
         .route("/web/settings/providers/add", post(settings_api::providers_add))
@@ -2401,6 +2423,10 @@ async fn handle_hitl_action(
         let output = if command.is_empty() {
             "The approved command could not be determined.".to_string()
         } else {
+            // The approved command is about to run outside `BashTool::execute`
+            // (which normally calls `note_bash`), so record the same warning
+            // here on the suspension's original runId.
+            state.change_ledger.note_bash(session_id, &sp.run_id);
             execute_approved_command(
                 &state.workspace,
                 session_id,
@@ -2432,17 +2458,33 @@ async fn handle_hitl_action(
     Json(serde_json::json!({"code": 200}))
 }
 
+/// 把用户答案格式化成回填给模型的 tool result 文本。
+///
+/// 契约 §5.1：多选题（answers[] 元素带 `texts:[label,…]`）按「label1、label2」
+/// 连接输出 `Q{n}: …`；单选/旧前端只有 `text` 时原样用 text（向后兼容）。
+/// `texts` 存在但为空数组时退回 text，避免把多选答案渲染成空串。
 fn format_answers_for_llm(answers: &serde_json::Value) -> String {
     let mut parts = Vec::new();
     if let Some(arr) = answers.as_array() {
         for (i, a) in arr.iter().enumerate() {
-            let text = a["text"].as_str().unwrap_or("");
             let skipped = a["skipped"].as_bool().unwrap_or(false);
             if skipped {
                 parts.push(format!("Q{}: (skipped)", i + 1));
-            } else {
-                parts.push(format!("Q{}: {}", i + 1, text));
+                continue;
             }
+            // 多选优先：texts 非空 → 以「、」连接各 label。
+            let multi = a["texts"]
+                .as_array()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(|l| l.as_str())
+                        .collect::<Vec<_>>()
+                        .join("、")
+                })
+                .filter(|s| !s.is_empty());
+            let text = multi.unwrap_or_else(|| a["text"].as_str().unwrap_or("").to_string());
+            parts.push(format!("Q{}: {}", i + 1, text));
         }
     }
     if parts.is_empty() {
@@ -2719,6 +2761,7 @@ async fn run_react_session(
         state.session_roots.bound_root(&session_id).as_deref(),
         &state.workspace,
     );
+    state.change_ledger.register_run_root(&session_id, &run_workspace);
 
     // Resolve model: explicit > session override > default
     let model = {
@@ -2848,7 +2891,12 @@ async fn run_react_session(
             .unwrap_or_else(|| state.workspace.clone());
         let agent_roster =
             crate::react::prompt::build_agent_roster(&agents_root, &settings.permission);
-        let system = build_system_prompt(&settings, &run_workspace.to_string_lossy())
+        let system = build_system_prompt(
+            &settings,
+            &run_workspace.to_string_lossy(),
+            // 契约 §1.2：规则 5 条件注入，判定源与本次 run 的 definitions 同源。
+            crate::react::prompt::ask_user_visible(&settings.permission),
+        )
             + &skills_summary
             + &memory_preview
             + &agent_roster;
@@ -2890,7 +2938,12 @@ async fn run_react_session(
     //
     // Injected into `history` only, never persisted: it is a one-turn steering
     // message, and storing it would let it reappear on every later replay.
-    if session_ctx.interrupted.unwrap_or(false) {
+    //
+    // 契约 §3.3：这个一次性标记同时是「本次 run 是异常中断后的恢复执行」的判定源。
+    // 透传给 ReActConfig → ToolContext，让 todo footer 的恢复 [提示] 行只在
+    // 校准语境出现（常规 run 的 `[/]` 是模型自己刚标的进行中项，提醒是噪声）。
+    let resume_calibration = session_ctx.interrupted.unwrap_or(false);
+    if resume_calibration {
         session_ctx.interrupted = None;
         // Clear only the one-shot flag under the lock; a whole-document write of
         // the run-start snapshot would clobber picker changes made meanwhile.
@@ -3029,6 +3082,8 @@ async fn run_react_session(
         // subsequent turn re-compress.
         force_compact,
         compact_focus,
+        // 契约 §3.3：abnormal-exit 校准分支的一次性标记（上方捕获并消费）。
+        resume_calibration,
     };
     let agent = ReActAgent::new(state.registry.clone());
     // Clone the frame sender BEFORE it is moved into `run`, so a post-run frame
@@ -3145,18 +3200,24 @@ async fn run_react_session(
     }
 
     if let Some(summary) = state.change_ledger.finish(&session_id, &run_id, clean) {
-        // `finish` returns None when the run touched no tracked file or was
-        // already finished, so this only fires when there is a real snapshot.
         // Queued through the run's own channel: ordering with `done` is preserved
         // and the forwarder does the persist + broadcast, exactly as for every
         // other frame.
-        //
-        // No inline `.seq(...)` here — the forwarder stamps it (`stamp_seq`). This
-        // used to `fetch_add` from the same counter and then have that number
-        // *thrown away*, because `Frame::seq` overwrites unconditionally and the
-        // frame passes through the forwarder on its way out. One counter slot was
-        // burned per run for a value nothing ever read.
         let frame = Frame::file_changes(&session_id, &run_id, summary);
+        let _ = post_run_tx.send(frame);
+    }
+    // A previous run can be left with `ready=false` (process killed before its
+    // wrap-up, or a late abnormal callback). Its changes exist in the ledger but
+    // no final `file_changes` frame was ever emitted, so the per-run card stayed
+    // empty while the outputs panel listed the files. Publish those orphans now,
+    // once: `finalize_orphans` flips `ready` and bumps `revision`, so a later run
+    // will not re-emit them.
+    for summary in state.change_ledger.finalize_orphans(&session_id) {
+        let orphan_run = summary["runId"].as_str().unwrap_or("").to_string();
+        if orphan_run.is_empty() {
+            continue;
+        }
+        let frame = Frame::file_changes(&session_id, &orphan_run, summary);
         let _ = post_run_tx.send(frame);
     }
     // Dropping the handle does not abort the forwarder task; it keeps draining so
@@ -3630,6 +3691,95 @@ async fn chat_todos(
     Json(serde_json::json!({
         "code": 200,
         "data": { "exists": true, "raw": raw, "items": items, "stats": stats }
+    }))
+}
+
+/// GET /web/chat/pendingQuestion — 契约 §3.4 冻结的兜底探针。
+///
+/// 前端在会话激活/回放后拉一次：本地问答卡状态丢失（刷新、换设备、回放隔离）
+/// 时靠它重建；后端已无挂起时返回 null，前端据此收掉僵尸卡。
+///
+/// 响应（契约冻结，不可改字段）：
+/// - `{"code":200,"data":null}` —— 无挂起提问（含 HITL 挂起、过期、已消费）；
+/// - `{"code":200,"data":{"actionId":"<tool_call_id>","questions":[…]}}`。
+///
+/// 数据源：kind=question 的 SuspensionPoint，按 `pending_tool_call_id` 从
+/// `messages_json` 里找 assistant tool_calls 的 arguments（即模型当时调用
+/// ask_user 的原始参数）。只读探针——不消费挂起（消费仍走 /web/chat/input），
+/// 但过期挂起按现有 TTL 机制清理，避免僵尸卡无限期可探。
+async fn chat_pending_question(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<TodosQuery>,
+) -> Json<serde_json::Value> {
+    let null_data = || Json(serde_json::json!({"code": 200, "data": serde_json::Value::Null}));
+    if q.session_id.is_empty()
+        || q.session_id.contains("..")
+        || q.session_id.contains('/')
+        || q.session_id.contains('\\')
+    {
+        return null_data();
+    }
+
+    // 与 consume_suspension 同一把锁下读内存→磁盘兜底，保证探针看到的挂起与
+    // 提交路径一致；但这里只读不删（探针不是消费）。
+    let sp = {
+        let susp = state.suspensions.lock().await;
+        match susp.get(&q.session_id) {
+            Some(sp) => Some(sp.clone()),
+            None => read_suspension_file(&state, &q.session_id),
+        }
+    };
+    let Some(sp) = sp else { return null_data() };
+
+    // HITL 挂起不在本端点范围（契约 §3.4）。
+    if sp.kind != "question" {
+        return null_data();
+    }
+    // 过期挂起：按现有 TTL 机制清理（内存+磁盘），返回 null。与 consume 路径
+    // 同口径——过期即视为不存在，不让僵尸卡被探针无限期复活。
+    if suspension_expired_at(&sp, chrono::Utc::now().timestamp_millis()) {
+        drop_suspension(&state, &q.session_id).await;
+        return null_data();
+    }
+
+    let Some(data) = pending_question_data(&sp) else { return null_data() };
+    Json(serde_json::json!({"code": 200, "data": data}))
+}
+
+/// 从 question 挂起快照里提取 `{actionId, questions}`（契约 §3.4 数据形状）。
+///
+/// 纯函数：按 `pending_tool_call_id`（缺失时退回 `action_id`）在消息史里找
+/// 对应的 assistant tool_call，解析其 arguments 取 `questions`。找不到配对
+/// 调用 / 参数非法 / questions 不可渲染 → None（端点回 null）。
+fn pending_question_data(sp: &SuspensionPoint) -> Option<serde_json::Value> {
+    // 契约 §3.4：仅 question 挂起可被探针建卡；HITL 一律 null（handler 已 gate，
+    // 此处再守一道，保证纯函数自身语义与端点一致）。
+    if sp.kind != "question" {
+        return None;
+    }
+    let call_id = sp
+        .pending_tool_call_id
+        .as_deref()
+        .or(sp.action_id.as_deref())
+        .filter(|s| !s.is_empty())?;
+    let messages: Vec<ChatMessage> = serde_json::from_str(&sp.messages_json).ok()?;
+    let args = messages.iter().find_map(|m| {
+        m.tool_calls.as_ref()?.iter().find_map(|tc| {
+            if tc.id == call_id {
+                serde_json::from_str::<serde_json::Value>(&tc.function.arguments).ok()
+            } else {
+                None
+            }
+        })
+    })?;
+    // 与 ask_user execute 同一可渲染判据：不可渲染的挂起本不该存在，
+    // 探针也不给它建卡。
+    if !crate::tools::builtin::has_renderable_question(&args) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "actionId": call_id,
+        "questions": args.get("questions").cloned().unwrap_or(serde_json::json!([])),
     }))
 }
 
@@ -4601,6 +4751,12 @@ fn model_sections_persistable(loaded: bool, mirrored: bool) -> bool {
         if !m.description.trim().is_empty() {
             entry.insert("description".into(), serde_json::json!(m.description));
         }
+        // 官方模型元数据可落盘（标记 + 空凭据），官方 key 始终只留在进程内存。
+        if m.official {
+            entry.insert("official".into(), serde_json::json!(true));
+            entry.insert("apiKey".into(), serde_json::json!(""));
+            entry.insert("apiUrl".into(), serde_json::json!(crate::official::base_url()));
+        }
 
         models_map.insert(k.clone(), serde_json::Value::Object(entry));
     }
@@ -4879,6 +5035,7 @@ async fn settings_llm_model_add(
         description: String::new(),
         headers: std::collections::HashMap::new(),
         timeout: if form.timeout.is_empty() { "120".into() } else { form.timeout },
+        official: false,
     };
     settings.models.insert(name.clone(), mc);
     drop(settings);
@@ -7205,5 +7362,129 @@ mod tests {
             5,
             "all five command outcomes must number through the atomic funnel"
         );
+    }
+
+    // ─── 契约 §3.4：GET /web/chat/pendingQuestion 数据源 ─────────────────────
+
+    fn question_sp(messages_json: String) -> SuspensionPoint {
+        SuspensionPoint {
+            session_id: "s-pq".into(),
+            run_id: "r-pq".into(),
+            kind: "question".into(),
+            next_seq: 1,
+            access_mode: "default".into(),
+            model_name: "m".into(),
+            pending_command: None,
+            pending_timeout_ms: None,
+            pending_background: false,
+            action_id: Some("call-q".into()),
+            pending_tool_call_id: Some("call-q".into()),
+            messages_json,
+            created_at: 0,
+        }
+    }
+
+    /// 契约 §3.4：kind=question 时按 pending_tool_call_id 从 messages_json 的
+    /// assistant tool_calls 提取 questions（含 multiSelect），actionId 取 tool_call id。
+    #[test]
+    fn pending_question_data_extracts_questions_for_question_suspension() {
+        let msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::assistant_with_tools(vec![crate::llm::types::ToolCall {
+                id: "call-q".into(),
+                call_type: "function".into(),
+                function: crate::llm::types::FunctionCall {
+                    name: "ask_user".into(),
+                    arguments: serde_json::json!({
+                        "questions": [{
+                            "header": "选哪些？",
+                            "multiSelect": true,
+                            "options": [{"label": "A"}, {"label": "B"}]
+                        }]
+                    }).to_string(),
+                },
+            }]),
+        ];
+        let sp = question_sp(serde_json::to_string(&msgs).unwrap());
+        let data = pending_question_data(&sp).expect("question suspension must yield data");
+        assert_eq!(data["actionId"], "call-q");
+        assert_eq!(data["questions"][0]["header"], "选哪些？");
+        assert_eq!(data["questions"][0]["multiSelect"], true);
+    }
+
+    /// 契约 §3.4：HITL 挂起返回 null（前端据此不渲染问题卡）。
+    #[test]
+    fn pending_question_data_null_for_hitl() {
+        let mut sp = question_sp("[]".into());
+        sp.kind = "hitl".into();
+        assert!(pending_question_data(&sp).is_none());
+    }
+
+    /// 契约 §3.4：历史里找不到 pending tool_call（或无 questions）→ null，不报错。
+    #[test]
+    fn pending_question_data_null_when_tool_call_absent() {
+        let sp = question_sp("[]".into());
+        assert!(pending_question_data(&sp).is_none());
+        // tool_call 存在但参数无 questions → null。
+        let msgs = vec![ChatMessage::assistant_with_tools(vec![crate::llm::types::ToolCall {
+            id: "call-q".into(),
+            call_type: "function".into(),
+            function: crate::llm::types::FunctionCall { name: "ask_user".into(), arguments: "{}".into() },
+        }])];
+        let sp2 = question_sp(serde_json::to_string(&msgs).unwrap());
+        assert!(pending_question_data(&sp2).is_none());
+    }
+
+    /// 路由注册守护：/web/chat/pendingQuestion 必须挂在 GET 路由上（照 todos 样式）。
+    #[test]
+    fn pending_question_route_is_registered() {
+        let src = include_str!("mod.rs");
+        assert!(
+            src.contains(".route(\"/web/chat/pendingQuestion\", get(chat_pending_question))"),
+            "GET /web/chat/pendingQuestion must be registered next to /web/chat/todos"
+        );
+    }
+
+    // ─── 契约 §5.1：multiSelect 恢复答案回填 ─────────────────────────────────
+
+    /// 多选答案 texts 数组按「label1、label2」顿号拼接回填（Q{n} 前缀，契约 §5.1）。
+    #[test]
+    fn format_question_answer_joins_multiselect_texts() {
+        let answers = serde_json::json!([{
+            "question": "选哪些？",
+            "texts": ["label1", "label2"]
+        }]);
+        assert_eq!(format_answers_for_llm(&answers), "Q1: label1、label2");
+    }
+
+    /// 单选 text 回填带 Q{n} 前缀（向后兼容，不带顿号）。
+    #[test]
+    fn format_question_answer_single_text_unchanged() {
+        let answers = serde_json::json!([{ "question": "选哪个？", "text": "A" }]);
+        assert_eq!(format_answers_for_llm(&answers), "Q1: A");
+    }
+
+    /// 多题混合：各题答案以换行分隔，多选题内部用顿号。
+    #[test]
+    fn format_question_answer_multi_question_mixed() {
+        let answers = serde_json::json!([
+            { "question": "q1", "texts": ["X", "Y"] },
+            { "question": "q2", "text": "Z" }
+        ]);
+        assert_eq!(format_answers_for_llm(&answers), "Q1: X、Y\nQ2: Z");
+    }
+
+    /// texts 为空数组时退回 text，避免把多选答案渲染成空串。
+    #[test]
+    fn format_question_answer_empty_texts_falls_back_to_text() {
+        let answers = serde_json::json!([{ "question": "q", "texts": [], "text": "fallback" }]);
+        assert_eq!(format_answers_for_llm(&answers), "Q1: fallback");
+    }
+
+    /// skipped 项输出 (skipped)，不进入多选拼接。
+    #[test]
+    fn format_question_answer_skipped() {
+        let answers = serde_json::json!([{ "question": "q", "skipped": true }]);
+        assert_eq!(format_answers_for_llm(&answers), "Q1: (skipped)");
     }
 }

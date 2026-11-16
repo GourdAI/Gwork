@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "wisenote",
+  "version": "1.0.0",
+  "description": "Read Baizhi WiseNote meeting lists, summaries, and transcripts with user authorization.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "百智WiseNote",
+        "name_en": "Baizhi WiseNote",
+        "description_zh": "通过用户授权读取百智 WiseNote 会议列表、会议详情摘要和会议转写内容。",
+        "description_en": "Read Baizhi WiseNote meeting lists, summaries, and transcripts with user authorization."
+      },
+      "categories": [
+        "note-taking"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

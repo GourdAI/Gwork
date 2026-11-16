@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "h3yun-connector",
+  "version": "1.0.0",
+  "description": "With the H3Yun connector, businesses can quickly turn everyday operations into configurable, collaborative, and traceable digital applications. It supports rapid app creation, business data management, and workflow-driven approvals and task routing, making it suitable for a wide range of scenarios including customer, project, procurement, inventory, and after-sales management.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "氚云",
+        "name_en": "h3yun",
+        "description_zh": "通过氚云连接器，将日常业务快速构建为可配置、可协同、可追踪的数字化应用。支持快速创建应用表单、管理业务数据、以流程驱动审批与任务流转，适用于客户、项目、采购、库存、售后等多类业务管理场景。",
+        "description_en": "With the H3Yun connector, businesses can quickly turn everyday operations into configurable, collaborative, and traceable digital applications. It supports rapid app creation, business data management, and workflow-driven approvals and task routing, making it suitable for a wide range of scenarios including customer, project, procurement, inventory, and after-sales management."
+      },
+      "categories": [
+        "developer-tools"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

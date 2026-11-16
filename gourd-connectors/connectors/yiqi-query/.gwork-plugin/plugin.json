@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "yiqi-query",
+  "version": "1.0.0",
+  "description": "Query BaZi charts, marriage compatibility, daily/monthly fortunes, and the Chinese almanac in natural language, with fortune-telling knowledge Q&A.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "易奇八字命理",
+        "name_en": "YiQi Fortune Query",
+        "description_zh": "用自然语言查八字命盘、合婚配对、日运月运、黄历宜忌，支持命理知识与命格概念问答。",
+        "description_en": "Query BaZi charts, marriage compatibility, daily/monthly fortunes, and the Chinese almanac in natural language, with fortune-telling knowledge Q&A."
+      },
+      "categories": [
+        "entertainment-and-media"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

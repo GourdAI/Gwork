@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "awehome-loushu": {
+      "type": "streamable_http",
+      "url": "https://agent-gateway.awehome.com/mcp/local/path_7ec89ebe3e5b4ca4af176053386e10e7/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "Awehome 楼书查房"
+      }
+    }
+  }
+}

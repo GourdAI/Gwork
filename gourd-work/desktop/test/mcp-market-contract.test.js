@@ -10,6 +10,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 
 const REPO = path.resolve(__dirname, '..', '..', '..');
 const UI = path.join(REPO, 'gourd-work', 'desktop', 'ui');
@@ -100,12 +101,14 @@ test('③ bootstrap 加载 app-mcp-market.js，且必须在 app-skills.js 之前
   assert.match(read(path.join(ST, 'index.html')), /css\/mcp-market\.css/, 'static: 未引入市场样式');
 });
 
-test('④ 市场模块只接魔搭一个源，不硬编码 Token，不实现自定义源', () => {
+test('④ 市场模块双目录源（官方默认 + 魔搭扩展），不硬编码 Token，不实现自定义源', () => {
   VARIANTS.forEach(v => {
     const s = read(path.join(v.base, 'js', 'app-mcp-market.js'));
     assert.match(s, /\/web\/settings\/mcp\/market\/servers/, v.tag + ': 未接后端列表端点');
     assert.match(s, /\/web\/settings\/mcp\/market\/install/, v.tag + ': 未接一键安装端点');
-    assert.match(s, /ModelScope|ModelScope/, v.tag + ': 应标注魔搭来源');
+    /* 2026-11 官方仓库轮：魔搭从唯一源降级为扩展源，两个源都必须真实接线 */
+    assert.match(s, /modelscope/, v.tag + ': 应保留魔搭扩展源');
+    assert.match(s, /source:\s*'official'/, v.tag + ': 默认源必须是官方仓库');
     assert.ok(!/Authorization:\s*Bearer|api[_-]?key\s*[:=]\s*['"]ms-/.test(s),
       v.tag + ': 不得硬编码任何魔搭 Token');
     assert.ok(!/registry\.modelcontextprotocol\.io|smithery\.ai/.test(s),
@@ -148,20 +151,51 @@ test('⑥ 24 份语言包含 settings.mcp.market.* 且键集一致', () => {
        *    （带 {msg} 占位）与 retry：此前错误文案硬编码中文，12 语种下
        *    英文用户会看到中文 toast。
        * 既防缺键（界面裸键）也防死键复活。 */
-      ['title', 'search_placeholder', 'hosted', 'installed', 'empty', 'required',
+      ['title', 'market_tab', 'search_placeholder', 'installed', 'empty', 'required',
         'connect', 'connect_title', 'save_connect', 'cancel', 'config',
-        'load_failed', 'install_failed', 'installed_names', 'detail_failed', 'retry']
+        'load_failed', 'install_failed', 'installed_names', 'detail_failed', 'retry',
+        'source_official', 'source_modelscope', 'oauth_badge', 'scan_badge', 'token_badge',
+        /* P0.5 CLI 连接器（扫码连接 + Node 自动安装）键组 */
+        'cli_badge', 'cli_connect', 'cli_connected', 'cli_disconnect', 'cli_disconnect_confirm',
+        'cli_disconnected', 'cli_disconnect_failed', 'cli_preparing_node', 'cli_installing_cli',
+        'cli_installing_skills', 'cli_scan_with', 'cli_scan_generic', 'cli_open_browser',
+        'cli_auth_pending', 'cli_auth_success', 'cli_auth_failed', 'cli_auth_expired',
+        'cli_node_failed', 'cli_install_failed', 'cli_skills_included', 'cli_source',
+        'cli_app_dingtalk', 'cli_app_wecom', 'cli_app_feishu', 'cli_app_tmeet']
         .forEach(k => assert.equal(typeof mkt[k], 'string', f + ': 缺 ' + k));
       assert.ok(!('install' in mkt), f + ': install 键已废弃（UI 改用 connect/save_connect），不得复活');
       /* 死键反向断言：try_it / detail 若复活，说明「示例区」或「详情文字按钮」
        * 被重新引入 —— 前者是已定性的 P0 虚假内容，后者与整卡点击语义重复。 */
       assert.ok(!('try_it' in mkt), f + ': try_it 已随「试试这样用」区块删除，不得复活');
       assert.ok(!('detail' in mkt), f + ': detail 已随卡片文字按钮删除，不得复活');
+      /* 2026-11 官方仓库轮：「精选」概念移除（featured_only/featured_badge 死键不得复活），
+       * 换成目录源 tabs（source_official/source_modelscope）+ oauth 徽标。 */
+      assert.ok(!('featured_only' in mkt), f + ': featured_only 已随「精选」概念移除，不得复活');
+      assert.ok(!('featured_badge' in mkt), f + ': featured_badge 已随「精选」概念移除，不得复活');
+      /* 2026-11 codereview 轮：hosted 是「已托管」勾选退役后残留的死键
+       * （前端零引用），24 份语言包一并删除，反向断言防复活。 */
+      assert.ok(!('hosted' in mkt), f + ': hosted 已随「已托管」概念移除，不得复活');
       /* 带占位符的错误文案必须真的含 {msg}，否则 GourdI18n 插值失效、
        * 界面上会漏出字面 {msg} 或丢掉真实错误原因。 */
-      ['load_failed', 'install_failed', 'installed_names', 'detail_failed']
+      ['load_failed', 'install_failed', 'installed_names', 'detail_failed',
+        'cli_disconnect_confirm', 'cli_disconnect_failed', 'cli_scan_with', 'cli_auth_failed',
+        'cli_node_failed', 'cli_install_failed']
         .forEach(k => assert.ok(mkt[k].includes('{msg}'), f + ': ' + k + ' 缺 {msg} 占位符'));
-      assert.equal(Object.keys(mkt).length, 17, f + ': market 键数漂移，键集契约需同步更新');
+      /* 2026-11 排版重构：+market_tab（连接器二级导航「广场」标签，与技能页
+       * 「已安装/各市场」同构）。17→18。
+       * 2026-11 精选目录+真扫码：+featured_only/featured_badge/scan_badge/token_badge。18→22。
+       * 2026-11 官方仓库：-featured_only/-featured_badge（精选概念移除），
+       * +source_official/source_modelscope/oauth_badge。22→23。
+       * 2026-11 codereview 轮：-hosted（「已托管」死键清除）。23→22。
+       * P0.5 CLI 连接器：+cli_* 25 键（徽标/连接/断开/安装进度/扫码授权/App 名）。22→47。
+       * 2026-11 codereview 轮：+cli_qr_invalid（畸形二维码显式错误态）。47→48。 */
+      assert.equal(Object.keys(mkt).length, 48, f + ': market 键数漂移，键集契约需同步更新');
+      assert.ok(mkt.cli_qr_invalid && !mkt.cli_qr_invalid.includes('{msg}'),
+        f + ': cli_qr_invalid 必须存在且无占位符');
+      /* connect_title 是纯标题（调用处不传 params），不得残留 {msg} 占位符——
+       * zh-TW 曾写成「連接 {msg}」，界面直接漏出字面占位符。 */
+      assert.ok(!String(mkt.connect_title || '').includes('{msg}'),
+        f + ': connect_title 不得含 {msg} 占位符');
     });
   });
 });
@@ -306,13 +340,28 @@ test('⑩ 连接器 MCP 市场配色全部走真实主题令牌（不得用假�
       '--bg-input-box', '--bg-card', '--bg-code-block', '--color-success',
       '--text-primary', '--text-secondary', '--text-tertiary', '--border-color']
       .forEach(tok => assert.ok(css.includes('var(' + tok), v.tag + ': 未使用真实令牌 ' + tok));
-    // 搜索框 / 安装按钮 / chip 三处用户明确点名的控件
-    assert.match(css, /\.mcp-market-search\s*\{[^}]*var\(--bg-input-box\)/,
-      v.tag + ': 搜索框底色应为 --bg-input-box（白色输入框随主题）');
+    /* 搜索框已上移技能页顶栏（唯一真源，2026-11 排版重构）：
+     * 底色契约改锁 skills.css 的顶栏输入框；市场壳内搜索框不得复活。
+     * env 表单输入框仍须 --bg-input-box（弹窗内唯一的输入控件）。 */
+    const skillsCss = read(path.join(v.base, 'css', 'skills.css'));
+    assert.match(skillsCss, /\.skills-search-input-wrap input\s*\{[^}]*var\(--bg-primary\)/,
+      v.tag + ': 顶栏搜索框底色应走主题令牌（随主题切换）');
+    assert.ok(!/\.mcp-market-search\s*\{/.test(css),
+      v.tag + ': 壳内搜索框样式复活（搜索框唯一真源在顶栏）');
+    assert.match(css, /\.mcp-market-field input\s*\{[^}]*var\(--bg-input-box\)/,
+      v.tag + ': env 表单输入框底色应为 --bg-input-box');
     assert.match(css, /\.mcp-market-install-btn\s*\{[^}]*var\(--accent\)[^}]*var\(--accent-contrast\)/,
       v.tag + ': 安装按钮应为 accent 底 + accent-contrast 文字');
-    assert.match(css, /\.mcp-market-chip\.active\s*\{[^}]*var\(--accent\)/,
-      v.tag + ': 激活 chip 应走 --accent');
+    /* 2026-11 官方仓库轮：分类 chip 与技能分类栏**同类名同样式**（用户拍板
+     * 「分类切换的样式按照技能的统一」）。市场 CSS 不得再另画一套 chip；
+     * 激活态唯一真源 = skills.css 的 .skills-category-chip.active。 */
+    assert.ok(!/\.mcp-market-chip/.test(css),
+      v.tag + ': 市场 CSS 残留独立 chip 样式（必须与技能分类栏统一为 .skills-category-chip）');
+    assert.match(skillsCss, /\.skills-category-chip\.active/,
+      v.tag + ': 技能分类 chip 激活态样式缺失（统一样式的唯一真源）');
+    /* 目录源 tabs（官方/魔搭扩展）必须走主题令牌 */
+    assert.match(css, /\.mcp-market-source-tab\.active\s*\{[^}]*var\(--bg-card\)/,
+      v.tag + ': 源 tab 激活态应走 --bg-card 主题令牌');
   });
 });
 
@@ -456,7 +505,9 @@ test('⑬ 并发 load 不吞请求，且旧响应不得覆盖新结果', async (
 test('⑭ 不得回退成布尔锁 state.loading（静态形状锁）', () => {
   VARIANTS.forEach(v => {
     const s = read(path.join(v.base, 'js', 'app-mcp-market.js'));
-    assert.ok(!/if\s*\([^)]*state\.loading[^)]*\)\s*return/.test(s),
+    /* 精确锁旧布尔锁字段 state.loading（词边界）：无限滚动的 state.appending
+     * 是另一语义（追加在途标记，loadMore 内部防重入），不得误伤。 */
+    assert.ok(!/if\s*\([^)]*state\.loading\b[^)]*\)\s*return/.test(s),
       v.tag + ': load() 又用 state.loading 静默吞并发请求');
     assert.match(s, /loadSeq/, v.tag + ': 缺并发代际序号');
     assert.match(s, /if\s*\(seq !== state\.loadSeq\)\s*return/,
@@ -474,7 +525,7 @@ test('⑭ 不得回退成布尔锁 state.loading（静态形状锁）', () => {
  *      → 搜索框空白、列表却是被 foo 过滤的空态，用户无从察觉也无从自救。
  * 修法：顶栏搜索框在连接器/接口页一律隐藏，市场只保留自己那一个搜索框。
  */
-test('⑮ 顶栏搜索框不得跨视图复用，且必须整体隐藏（含放大镜图标）', () => {
+test('⑮ 搜索框唯一真源在顶栏：壳内第二搜索框不得复活，查询词不得跨视图携带', () => {
   VARIANTS.forEach(v => {
     /* 所有子串检测都在【剥离注释后】的源码上做：本轮修复的说明注释里会复述
      * PLACEHOLDER_MCP / _mcpMarket.search 等旧写法，对整份文件检测会被注释骗出假红。 */
@@ -511,14 +562,27 @@ test('⑮ 顶栏搜索框不得跨视图复用，且必须整体隐藏（含放�
     assert.ok(/\$skillsSearchWrap\s*=\s*\$skillsSearchInput\.closest\('\.skills-search-input-wrap'\)/.test(src),
       v.tag + ': 缺 $skillsSearchWrap（应从 input 向上取 .skills-search-input-wrap）');
     assert.match(pane, /\$skillsSearchWrap\.toggle\(isSkills\)/,
-      v.tag + ': 顶栏搜索框应随「是否技能视图」整体显隐，而不是只 toggle input');
+      v.tag + ': 技能视图的搜索框显隐仍须整体 toggle wrap（含放大镜图标）');
     assert.ok(!/\$skillsSearchInput\.toggle\(/.test(pane),
       v.tag + ': 只 toggle input 会留下悬空放大镜图标与 180px 空白占位');
 
-    // (d) 顶栏搜索事件里不得再有 VIEW_CONNECTORS 分支：该框在连接器页已不可见，
-    //     留着就是死代码，还会让人误以为顶栏框仍能查 MCP。
-    assert.ok(!/_currentView === VIEW_CONNECTORS[\s\S]{0,160}_mcpMarket\.search/.test(src),
-      v.tag + ': 顶栏搜索事件里仍有连接器分支（框已隐藏，属死代码）');
+    /* (d) 2026-11 排版重构后的新契约：连接器广场的搜索【就是】顶栏这一个框
+     * （市场壳内 #mcpMarketSearch 已删除，双框状态不同步的旧缺陷被结构性消灭）。
+     * 因此锁三点：
+     *   1. 市场模块不得再渲染第二搜索框（id/类名都不得复活）；
+     *   2. 顶栏搜索事件必须有连接器广场分支（否则广场搜不了）；
+     *   3. 查询词不得跨视图携带：switchView 与 switchConnView 都必须清值。 */
+    const mkt = read(path.join(v.base, 'js', 'app-mcp-market.js'));
+    assert.ok(!/id="mcpMarketSearch"/.test(mkt),
+      v.tag + ': 市场壳内第二搜索框复活（同屏双框、状态互不同步的旧缺陷回来了）');
+    assert.ok(!/mcp-market-search/.test(mkt),
+      v.tag + ': 壳内搜索框类名复活');
+    assert.match(src, /_currentView === VIEW_CONNECTORS[\s\S]{0,200}_mcpMarket\.search/,
+      v.tag + ': 顶栏搜索事件缺连接器广场分支（广场唯一搜索入口失效）');
+    const connFn = /function switchConnView\(view\)\s*\{([\s\S]*?)\n    \}/.exec(src);
+    assert.ok(connFn, v.tag + ': 无法定位 switchConnView 函数体');
+    assert.match(connFn[1], /\$skillsSearchInput\.val\(''\)/,
+      v.tag + ': 连接器二级视图切换不清搜索值（幽灵过滤会跨「已安装/广场」携带）');
   });
 });
 
@@ -530,7 +594,7 @@ test('⑮ 顶栏搜索框不得跨视图复用，且必须整体隐藏（含放�
  * 这里用 vm 跑真实源码：先渲染拿到输入框、置为 activeElement，再触发第二次 render，
  * 断言焦点与 caret 落到了**新的**那个节点上。
  */
-test('⑯ render 重建后必须恢复搜索框焦点与光标位置', async () => {
+test('⑯ 搜索框是持久顶栏节点：render 不得重建/抢占它（焦点丢失缺陷的结构性修复）', async () => {
   function mkEl(id) {
     return {
       id, _ls: {}, _html: '', value: '', style: {}, attrs: {}, textContent: '',
@@ -571,7 +635,10 @@ test('⑯ render 重建后必须恢复搜索框焦点与光标位置', async () 
       },
       window: { addEventListener() {}, showToast() {}, GourdI18n: null },
       fetch: url => {
-        if (/market\/categories/.test(url)) return Promise.resolve(ok([{ key: '', nameZh: '全部', name: 'All' }]));
+        if (/market\/categories/.test(url)) return Promise.resolve(ok([
+          { key: '', nameZh: '全部', name: 'All' },
+          { key: 'search', nameZh: '搜索', name: 'Search' },
+        ]));
         if (/market\/servers/.test(url)) {
           return Promise.resolve(ok({ total_count: 1, mcp_server_list: [{ id: '@a/b', name: 'B' }] }));
         }
@@ -584,26 +651,24 @@ test('⑯ render 重建后必须恢复搜索框焦点与光标位置', async () 
     const market = sandbox.window._mcpMarket;
     market.setHost('#mcpMarketRoot');
 
+    /* 头部筛选宿主是 skills.html 静态持久节点：首次 render 前就位（与真实 DOM 一致）。 */
+    const headBar = mkEl('mcpMarketCatBar');
+    els['mcpMarketCatBar'] = headBar;
+    await market.load();   // 对外 load 会先拉 categories（refresh 只重查列表）
+    /* 壳内不得再有任何输入框：搜索唯一真源在持久顶栏（#skillsSearchInput），
+     * render() 整块 innerHTML 替换只发生在 #mcpMarketRoot 目录区，
+     * 顶栏输入框根本不在替换范围内——焦点/光标丢失缺陷被结构性消灭。 */
+    assert.ok(!els['mcpMarketSearch'],
+      tag + ': 市场壳内又渲染出搜索框（render 重建 → 焦点掉 body 的旧缺陷回来了）');
+    assert.ok(!/mcpMarketSearch/.test(root.innerHTML),
+      tag + ': root.innerHTML 含搜索框节点');
+    /* 头部宿主不得被 render 冲掉：chips 由 shell 回填 innerHTML，
+     * 宿主自身与其监听器必须常驻（bindHeadOnce 记忆化）。 */
     await market.refresh();
-    const firstInput = els['mcpMarketSearch'];
-    assert.ok(firstInput, tag + ': shell() 应渲染出 #mcpMarketSearch（测试前提）');
-    sandbox.document.activeElement = firstInput;   // 用户光标正在输入框里
-    firstInput.selectionStart = 3;
-
-    await market.refresh();
-    const secondInput = els['mcpMarketSearch'];
-    assert.ok(secondInput !== firstInput,
-      tag + ': render 未重建输入框，测试无法证明焦点丢失场景（harness 失效）');
-    assert.equal(secondInput.focusCalls, 1,
-      tag + ': 输入框被 render 重建后焦点掉到 body，用户继续打字完全没反应，' +
-      '必须重新点进搜索框（防抖 350ms 一到就会发生）');
-    assert.equal(secondInput.caretSet, 3, tag + ': 光标位置未恢复');
-
-    // 焦点不在搜索框时不得抢焦点（否则翻页/切分类会把用户输入框抢走）
-    sandbox.document.activeElement = null;
-    await market.refresh();
-    assert.equal(els['mcpMarketSearch'].focusCalls, 0,
-      tag + ': 用户没在输入框里时，render 不得抢走焦点');
+    assert.equal((headBar._ls.click || []).length, 1,
+      tag + ': 头部 chips 宿主委托监听器累积（bindHeadOnce 记忆化失效）');
+    assert.match(headBar.innerHTML, /skills-category-chip/,
+      tag + ': 分类 chips 未回填到头部持久宿主（且必须与技能分类栏同类名）');
   }
 });
 
@@ -887,4 +952,259 @@ test('㉑ 卡片安装入口必须与技能卡同形态（+ 号图标按钮）�
       v.tag + ': 弹窗主按钮缺 accent 底色');
     assert.ok(/\.mcp-market-cancel-btn/.test(css), v.tag + ': 取消按钮样式缺失');
   }
+});
+
+/* ===== ㉒~㉔ 2026-11 官方连接器仓库轮（用户拍板：自建官方仓库 + 魔搭降扩展，
+ * 「精选/已托管」移除，分类样式对齐技能）的接线护栏 ===== */
+
+test('㉒ 目录源 tabs：官方默认 + 魔搭扩展，精选/已托管勾选不得复活', () => {
+  VARIANTS.forEach(v => {
+    const html = read(path.join(v.base, 'skills.html'));
+    assert.match(html, /id="mcpMarketSourceTabs"/, v.tag + ': 缺目录源 tabs 容器');
+    assert.match(html, /data-source="official"/, v.tag + ': 缺官方源 tab');
+    assert.match(html, /data-source="modelscope"/, v.tag + ': 缺魔搭扩展 tab');
+    assert.ok(!/id="mcpMarketFeatured"/.test(html), v.tag + ': 「精选」勾选已移除，不得复活');
+    assert.ok(!/id="mcpMarketHosted"/.test(html), v.tag + ': 「已托管」勾选已移除，不得复活');
+    const js = read(path.join(v.base, 'js', 'app-mcp-market.js'));
+    assert.match(js, /source:\s*'official'/, v.tag + ': 默认源必须是官方仓库');
+    assert.match(js, /p\.set\('source', state\.source\)/, v.tag + ': 列表查询必须携带 source');
+    assert.ok(!/state\.featured/.test(js), v.tag + ': state.featured 已废弃');
+    assert.ok(!/state\.hosted/.test(js), v.tag + ': state.hosted 已废弃');
+    assert.ok(!/mcpMarketFeatured|mcpMarketHosted/.test(js), v.tag + ': 不得再引用已移除的勾选节点');
+    assert.ok(!/mcp-market-hosted-badge/.test(js), v.tag + ': 「已托管」徽标已移除，不得复活');
+    const css = read(path.join(v.base, 'css', 'mcp-market.css'));
+    assert.ok(!/mcp-market-hosted-badge/.test(css), v.tag + ': 「已托管」徽标样式已移除');
+    assert.match(js, /mcp-market-source-tab/, v.tag + ': 源 tab 点击委托缺失');
+  });
+});
+
+test('㉓ Rust 官方目录：编译期 gzip 内置，featured 兼容别名，官方 id 绝不发给魔搭', () => {
+  const mcpDir = path.join(REPO, 'gourd-work', 'core', 'src', 'mcp');
+  const reg = read(path.join(mcpDir, 'registry.rs'));
+  /* 只取生产半段 + 剔除行注释：文档注释里会提到「没有 www.gourdwork.com」这类
+   * 说明性字样，反向断言必须对【代码】生效，不能被说明文字喂饱（自匹配陷阱）。 */
+  const regProd = reg.split('#[cfg(test)]')[0]
+    .split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n');
+  assert.match(regProd, /include_bytes!\("registry\.json\.gz"\)/,
+    'registry 必须在编译期内嵌 gzip 快照（唯一真源）');
+  assert.match(regProd, /flate2::read::GzDecoder/,
+    'registry 必须用 flate2 GzDecoder 解压编译期 gzip 快照');
+  assert.match(regProd, /pub const ID_PREFIX: &str = "official:"/, '官方 id 前缀契约');
+  assert.doesNotMatch(regProd, /www\.gourdwork\.com|DEFAULT_FEED_URL|\/api\/connector-registry/,
+    '远程增量端点 / 官方后端下发链路必须彻底删除');
+  assert.doesNotMatch(regProd, /FEED_URL_ENV|GWORK_CONNECTOR_REGISTRY_URL/,
+    '换源 env 覆盖必须彻底删除（目录随发版固定）');
+  assert.match(regProd, /fn parse_registry/, '编译期快照必须结构校验后才采纳');
+  ['spawn_refresh_loop', 'refresh_once', 'load_cached', 'cache_path'].forEach(sym => {
+    assert.ok(!regProd.includes(sym),
+      'registry.rs 生产代码不得残留后台刷新/磁盘缓存链路符号: ' + sym);
+  });
+  const snapshot = JSON.parse(read(path.join(mcpDir, 'registry.json')));
+  assert.ok(Array.isArray(snapshot.entries) && snapshot.entries.length >= 179,
+    '内置快照条目不得少于 179（实测收录 179；数据层扩容后仍须守住下限）');
+  assert.ok(snapshot.version, '快照必须带版本号');
+  let cliCount = 0;
+  snapshot.entries.forEach(e => {
+    assert.ok(String(e.id).startsWith('official:'), '快照 id 必须带 official: 前缀: ' + e.id);
+    /* P0.5：kind=cli 条目是 CLI 连接器（cli_spec 声明执行面 + skills_zip 落技能），
+     * 不再强制 mcpServers 形态；MCP 条目（无 kind / kind=mcp）契约一字不动。 */
+    if (e.kind === 'cli') {
+      cliCount++;
+      assert.ok(e.cli_spec && e.cli_spec.package, e.id + ' CLI 条目缺 cli_spec.package');
+      return;
+    }
+    assert.ok(e.server_config && e.server_config[0] && e.server_config[0].mcpServers,
+      e.id + ' 缺 server_config');
+  });
+  assert.ok(cliCount >= 4, '内置快照 CLI 条目不得少于 4（实测收录 4）');
+  const api = read(path.join(REPO, 'gourd-work', 'core', 'src', 'server', 'mcp_market_api.rs'));
+  assert.match(api, /registry::is_official_id/, '详情/安装必须按官方前缀分流');
+  assert.match(api, /registry::search_items/, '列表默认源必须走官方 registry');
+  const feat = read(path.join(mcpDir, 'featured.rs'));
+  assert.match(feat, /registry::detail/, 'featured 必须转发 registry（兼容别名层）');
+  const modProd = read(path.join(REPO, 'gourd-work', 'core', 'src', 'server', 'mod.rs'))
+    .split('#[cfg(test)]')[0];
+  ['spawn_refresh_loop', 'refresh_once', 'load_cached', 'cache_path'].forEach(sym => {
+    assert.ok(!modProd.includes(sym),
+      'server/mod.rs 生产代码不得拉起后台刷新/磁盘缓存链路符号: ' + sym);
+  });
+  /* 护栏：gzip 内嵌才是发版真源。压缩产物必须存在，且解压后与明文 registry.json
+   * 逐字节一致——钉死「include_bytes!(registry.json.gz) 与数据真源同源」。 */
+  const plain = fs.readFileSync(path.join(mcpDir, 'registry.json'));
+  const gzPath = path.join(mcpDir, 'registry.json.gz');
+  assert.ok(fs.existsSync(gzPath), '缺 gourd-work/core/src/mcp/registry.json.gz（编译期内嵌真源）');
+  assert.ok(zlib.gunzipSync(fs.readFileSync(gzPath)).equals(plain),
+    'registry.json.gz 解压后必须与 registry.json 明文逐字节一致');
+});
+
+test('㉔ 官方仓库数据真源存在且与内置快照同源（gourd-connectors）', () => {
+  const repoDir = path.join(REPO, 'gourd-connectors');
+  assert.ok(fs.existsSync(path.join(repoDir, 'README.md')), '缺 gourd-connectors/README.md');
+  assert.ok(fs.existsSync(path.join(repoDir, 'scripts', 'build-snapshot.mjs')), '缺快照构建脚本');
+  assert.ok(fs.existsSync(path.join(repoDir, 'scripts', 'import-from-wb.mjs')), '缺导入脚本');
+  const dist = JSON.parse(read(path.join(repoDir, 'dist', 'registry.json')));
+  const snap = JSON.parse(read(path.join(REPO, 'gourd-work', 'core', 'src', 'mcp', 'registry.json')));
+  assert.equal(dist.version, snap.version, 'dist 与内核内置快照版本必须一致（build-snapshot 同步写入）');
+  assert.equal(dist.entries.length, snap.entries.length, 'dist 与内核快照条目数必须一致');
+  /* 收录门槛：MCP 条目必须有实测分级（open/oauth/verified）；
+   * P0.5 CLI 连接器分级为 tier=cli（厂商 CLI 扫码登录），不得混入未实测条目 */
+  dist.entries.forEach(e => {
+    const tiers = e.kind === 'cli' ? ['cli'] : ['open', 'oauth', 'verified'];
+    assert.ok(tiers.includes(e.tier), e.id + ' 缺实测分级 tier');
+  });
+});
+
+/* ===== ㉕~㉗ 2026-11 codereview 轮回归护栏（行为级，非字符串级） =====
+ *
+ * 本轮深审抓出的真实缺陷：源切换不重置分类（跨源残留 → 永久空列表）、
+ * 安装无在途防重（连点 → 「已安装」紧跟「安装失败：重名」）。
+ * 字符串断言测不出这类状态机缺陷，这里用 vm 沙箱跑真实模块源码钉行为。 */
+
+/** 带分类 chip / 源 tab / 滚动容器的增强沙箱（在 loadMarketModule 基础上补宿主节点）。 */
+function loadMarketWithHead(tag, file) {
+  const ctx = loadMarketModule(tag, file);
+  const { sandbox } = ctx;
+  const mkHost = (id) => {
+    const el = makeEl(id);
+    el._nodes = [];
+    el.querySelectorAll = function (sel) {
+      return this._nodes.filter(n => (n._cls || '').split(' ').includes(sel.replace(/^\./, '')));
+    };
+    return el;
+  };
+  const mkNode = (cls, attrs) => {
+    const n = makeEl('');
+    n._cls = cls;
+    n.attrs = Object.assign({}, attrs);
+    n.classList = {
+      toggle(c, on) {
+        const set = new Set(n._cls.split(' ').filter(Boolean));
+        if (on) set.add(c); else set.delete(c);
+        n._cls = [...set].join(' ');
+      },
+      contains(c) { return n._cls.split(' ').includes(c); },
+    };
+    n.closest = function (sel) {
+      if (sel.startsWith('.') && n._cls.split(' ').includes(sel.slice(1))) return n;
+      return null;
+    };
+    return n;
+  };
+  const tabs = mkHost('mcpMarketSourceTabs');
+  tabs._nodes = [mkNode('mcp-market-source-tab', { 'data-source': 'official' }),
+    mkNode('mcp-market-source-tab', { 'data-source': 'modelscope' })];
+  const bar = mkHost('mcpMarketCatBar');
+  bar._nodes = [mkNode('skills-category-chip', { 'data-cat': '' }),
+    mkNode('skills-category-chip', { 'data-cat': 'version-control' })];
+  const scroll = makeEl('skillsScroll');
+  scroll.scrollTop = 500;
+  const byId = { mcpMarketRoot: ctx.root, mcpMarketSourceTabs: tabs, mcpMarketCatBar: bar, skillsScroll: scroll };
+  sandbox.document.getElementById = (id) => byId[id] || null;
+  // 记录列表请求的 source/category，供断言
+  ctx.listCalls = [];
+  const origFetch = sandbox.fetch;
+  sandbox.fetch = async (url, opts) => {
+    if (/market\/servers/.test(url)) ctx.listCalls.push(url);
+    return origFetch(url, opts);
+  };
+  return Object.assign(ctx, { tabs, bar, scroll, mkNode });
+}
+
+test('㉕ 源切换必须重置分类/滚动并立即同步 tab 态（行为级回归护栏）', async () => {
+  for (const base of [UI, ST]) {
+    const tag = base === UI ? 'desktop' : 'static';
+    const ctx = loadMarketWithHead(tag, path.join(base, 'js', 'app-mcp-market.js'));
+    await ctx.market.load();
+    // 在官方源选一个分类（模拟用户点 chip）
+    const chip = ctx.bar._nodes[1];
+    (ctx.bar._ls.click || []).forEach(f => f({ target: chip }));
+    await new Promise(r => setTimeout(r, 20));
+    assert.ok(ctx.listCalls.some(u => /category=version-control/.test(u)), tag + ': 分类点击未生效（测试前提失效）');
+    // 切到魔搭扩展
+    const msTab = ctx.tabs._nodes[1];
+    (ctx.tabs._ls.click || []).forEach(f => f({ target: msTab }));
+    // 立即态：不等响应，active 已切换、滚动已归零
+    assert.ok(msTab.classList.contains('active'), tag + ': 源 tab 点击后 active 态未立即切换（慢网无反馈诱发连点）');
+    assert.equal(ctx.scroll.scrollTop, 0, tag + ': 切源后滚动位置未重置（长列表底部切源视口停在新列表中段）');
+    await new Promise(r => setTimeout(r, 30));
+    const last = ctx.listCalls[ctx.listCalls.length - 1];
+    assert.ok(/source=modelscope/.test(last), tag + ': 切源后列表请求未带新 source');
+    assert.ok(!/category=/.test(last), tag + ': 切源后残留旧分类（version-control 在官方目录 0 条 → 永久空列表陷阱）');
+  }
+});
+
+test('㉖ 安装在途防重：连点同一 id 只发一次安装请求（行为级回归护栏）', async () => {
+  for (const base of [UI, ST]) {
+    const tag = base === UI ? 'desktop' : 'static';
+    const ctx = loadMarketModule(tag, path.join(base, 'js', 'app-mcp-market.js'));
+    await ctx.market.refresh();
+    const fakeBtn = { getAttribute: (k) => (k === 'data-act' ? 'install' : '@a/b'), closest: function (s) { return s === '[data-act]' ? this : null; } };
+    // 连点 3 次（install 是异步链，第一发未返回时后两发必须被在途锁挡掉）
+    (ctx.root._ls.click || []).forEach(f => f({ target: fakeBtn }));
+    (ctx.root._ls.click || []).forEach(f => f({ target: fakeBtn }));
+    (ctx.root._ls.click || []).forEach(f => f({ target: fakeBtn }));
+    await new Promise(r => setTimeout(r, 50));
+    assert.equal(ctx.installed.length, 1,
+      tag + ': 连点 3 次发出 ' + ctx.installed.length + ' 次安装请求（第二发起撞后端重名 400，' +
+      '用户看到「已安装」紧跟「安装失败」）');
+    // 在途结束后再点一次应可正常发起（锁必须释放，不能永久卡死）
+    (ctx.root._ls.click || []).forEach(f => f({ target: fakeBtn }));
+    await new Promise(r => setTimeout(r, 50));
+    assert.equal(ctx.installed.length, 2, tag + ': 在途锁未释放，后续安装被永久卡死');
+  }
+});
+
+test('㉘ 语言包值契约：connect_title 无占位符、zh-TW 授权块无英文残留、双壳字节一致', () => {
+  [path.join(UI, 'locales'), path.join(ST, 'locales')].forEach(dir => {
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort();
+    const zhCN = JSON.parse(read(path.join(dir, 'zh-CN.json'))).settings.mcp;
+    const zhTW = JSON.parse(read(path.join(dir, 'zh-TW.json'))).settings.mcp;
+    const en = JSON.parse(read(path.join(dir, 'en.json'))).settings.mcp;
+    files.forEach(f => {
+      const mkt = JSON.parse(read(path.join(dir, f))).settings.mcp.market;
+      /* m('connect_title','连接') 调用处不传 params：值里出现 {msg} 会直接漏到界面
+       * （zh-TW 曾漂移为「連接 {msg}」）。 */
+      assert.ok(!String(mkt.connect_title || '').includes('{msg}'),
+        dir + '/' + f + ': connect_title 含 {msg} 占位符（调用处不传 params）');
+    });
+    /* zh-TW.json:526-555 的授权块历史上整段是英文占位。判据：zh-CN 值是中文
+     * （含汉字）而 zh-TW 与 en 逐字相同 → 英文残留。含 Access Token / https 等
+     * 专有词的键按「汉字存在」判据放行（其余部分应已译）。 */
+    const cjk = /[\u3400-\u9fff]/;
+    const leftovers = [];
+    Object.keys(zhCN).forEach(k => {
+      if (typeof zhCN[k] !== 'string') return;          // market 子对象由 ⑥ 单独校验
+      if (!cjk.test(zhCN[k])) return;                   // 简体本身是术语，跳过
+      if (String(zhTW[k]) === String(en[k]) && !cjk.test(String(zhTW[k]))) {
+        leftovers.push(k + ' = ' + zhTW[k]);
+      }
+    });
+    assert.deepStrictEqual(leftovers, [], dir + '/zh-TW.json: settings.mcp 授权块仍有英文残留');
+    /* 双壳语言包必须字节一致：两壳同份资源，漂移等于运行时界面不一致。 */
+    const other = dir.includes('desktop' + path.sep + 'ui')
+      ? path.join(ST, 'locales') : path.join(UI, 'locales');
+    files.forEach(f => {
+      const a = fs.readFileSync(path.join(dir, f));
+      const b = fs.readFileSync(path.join(other, f));
+      assert.ok(a.equals(b), f + ': 双壳语言包字节不一致');
+    });
+  });
+});
+
+test('㉗ 授权徽标别名归一 + 详情扁平 authType + 分类表按源（静态接线护栏）', () => {
+  VARIANTS.forEach(v => {
+    const js = read(path.join(v.base, 'js', 'app-mcp-market.js'));
+    /* 后端 AuthKind::parse 接受别名拼写（qrcode/scan/apikey/oauth2…），
+     * 卡片/详情徽标必须同口径归一，否则「后端要授权、卡片无徽标」。 */
+    assert.match(js, /function canonicalAuthKind\(/, v.tag + ': 缺授权形态别名归一');
+    assert.match(js, /canonicalAuthKind\(it\.auth_kind\)/, v.tag + ': 卡片徽标未走归一');
+    assert.match(js, /canonicalAuthKind\(detailAuthKind\(d\)\)/, v.tag + ': 详情徽标未走归一');
+    /* 后端 normalize 兼容扁平 authType，详情只读嵌套会「卡片有徽标、详情无」。 */
+    assert.match(js, /cfg\.authType/, v.tag + ': detailAuthKind 未兼容扁平 authType');
+    /* 分类表按源取（官方源后端聚合实际有条目的分类，杜绝死 chip）。 */
+    assert.match(js, /API\.categories \+ '\?source='/, v.tag + ': 分类请求未带 source');
+  });
+  const api = read(path.join(REPO, 'gourd-work', 'core', 'src', 'server', 'mcp_market_api.rs'));
+  assert.match(api, /pub async fn mcp_market_categories\(Query/, 'categories 端点必须接收 source 参数');
+  assert.match(api, /registry::list_items\(\)/, '官方源分类必须按目录实际条目聚合');
 });

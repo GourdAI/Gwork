@@ -30,7 +30,14 @@
                         </button>
                     </div>
                     <div class="model-settings-left-scroll">
+                        <!-- 官方源：固定置顶、不参与拖拽排序、不显示地址/密钥输入。
+                             登录态与模型列表由内核 /web/settings/official/* 提供，key 永不进本页。 -->
+                        <div class="model-settings-group" id="msGroupOfficial">
+                            <div class="model-settings-group-caption" data-i18n="settings.providers.official_group">官方</div>
+                            <div class="model-settings-group-list" id="msOfficialList"></div>
+                        </div>
                         <div class="model-settings-group" id="msGroupCustom">
+                            <div class="model-settings-group-caption" data-i18n="settings.providers.custom_group">自定义供应商</div>
                             <div class="model-settings-group-list" id="msCustomList"></div>
                         </div>
                     </div>
@@ -38,7 +45,37 @@
                 <!-- 右栏：详情/表单 -->
                 <div class="model-settings-right">
                     <div class="model-settings-form-wrap">
-                        <div class="settings-section">
+                        <!-- 官方源只读面板：与自定义表单互斥显示。
+                             未登录 = 登录引导；已登录 = 账号 + 官方模型列表。全程不出现 key。 -->
+                        <div class="settings-section ms-official-panel" id="msOfficialPanel" style="display:none">
+                            <div class="settings-section-header">
+                                <div>
+                                    <span class="settings-section-title" data-i18n="settings.providers.official_title">GWork 官方</span>
+                                    <div class="settings-section-desc" id="msOfficialDesc" data-i18n="settings.providers.official_desc">登录账号后即可直接使用官方模型，无需配置地址与密钥</div>
+                                </div>
+                            </div>
+                            <div class="ms-official-body">
+                                <div class="ms-official-state" id="msOfficialGuest" style="display:none">
+                                    <p data-i18n="settings.providers.official_guest_hint">尚未登录，请先在左下角账号入口登录或注册。</p>
+                                    <button class="btn-primary" id="msOfficialLoginBtn" data-i18n="settings.providers.official_login">登录 / 注册</button>
+                                </div>
+                                <div class="ms-official-state" id="msOfficialSignedIn" style="display:none">
+                                    <div class="ms-official-account">
+                                        <span data-i18n="settings.providers.official_account">当前账号</span>
+                                        <strong id="msOfficialUsername"></strong>
+                                    </div>
+                                    <div class="ms-official-models-head">
+                                        <span data-i18n="settings.providers.official_models">可用模型</span>
+                                        <button class="ms-official-refresh" id="msOfficialRefreshBtn" data-i18n-title="settings.providers.official_refresh">
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
+                                        </button>
+                                    </div>
+                                    <div class="ms-official-models" id="msOfficialModels"></div>
+                                    <p class="ms-official-note" data-i18n="settings.providers.official_note">密钥由客户端安全保管，不会在此显示。</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="settings-section" id="msCustomFormSection">
                             <div class="settings-section-header">
                                 <div>
                                     <span class="settings-section-title" id="msProviderFormTitle" data-i18n="settings.providers.add_provider_title">添加模型供应商</span>

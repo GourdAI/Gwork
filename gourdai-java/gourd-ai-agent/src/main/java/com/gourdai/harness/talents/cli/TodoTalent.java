@@ -96,16 +96,24 @@ public class TodoTalent extends AbsTalent {
             return null;
         }
 
-        return "## 任务规划指南 (Task Planning Guide)\n" +
-                "0. **格式契约**: `todowrite` 的 todos 参数优先传 JSON 数组：每个元素为对象，含 `content`（任务文本，必填）与 `status`（`pending` / `in_progress` / `done`），可选 `header`/`group` 作为分组；也兼容 Markdown 字符串：每条任务独占一行、以 `- ` 开头并带 `[ ]` / `[/]` / `[x]` 状态标记，使用真实换行分隔。不要把换行写成字面反斜杠 n，不要传 `placeholder` 之类占位符，不要用无状态的普通列表项。\n" +
-                "1. **启动机制**: 超过3步以上的复杂任务，要通过 `todowrite` 创建计划；任务边界或目标发生重大变化时，用 `todowrite` 重构完整计划。\n" +
-                "2. **状态感知（恢复优先）**: 凡是你对当前进度没有十足把握时，必须 **先** `todoread` 再行动，禁止凭记忆推断。以下场景一律强制先读：上下文被压缩/截断后、用户说“继续/接着做/还有吗”、开启新一轮对话、或任务中途被打断后恢复。**注意：中断恢复后清单状态可能滞后于实际进度（中断时刻可能未及时 todowrite）**，对未完成项要先核对历史 Observation 中是否已有对应执行证据，确已完成的直接用 `todowrite` 确认状态即可，禁止盲目重做。\n" +
-                "3. **实时推进（状态变化即更新）**: 状态变更要随做随记，禁止跨回合攒着批量补记。**任何工具结果使某项状态发生变化的那一刻，下一轮的首个动作必须是 `todowrite` 落盘状态，然后才能继续后续动作**：开始做某项前先置 `[/]`；某项拿到执行结果后立即置 `[x]`；尤其收到 `task`/`multitask` 委派结果后，必须马上更新对应项。串行任务通常同一时刻只有一项 `[/]`；并行场景允许多项同时 `[/]`，但每项一旦完成都要第一时间单独更新，避免进度失真。**状态标记**: `[ ]` 待办；`[/]` 进行中；`[x]` 已完成。\n" +
-                "4. **闭环校验（禁止半途收尾）**: 只要清单中还存在 `[ ]` 或 `[/]`，即视为任务未完成。默认行为是 **继续把它做完**，不得停下、不得输出总结。仅当遇到真正的停止条件——外部阻塞（缺少权限、缺少必要信息）或**等待用户拍板方案/决策**（见“改造门禁”）——时，才允许停下并明确说明；不得把“可自行完成的剩余工作”当作追问理由，但**已提交方案、正在等待用户选择时停下是合规行为，不是半途收尾**。\n" +
-                "5. **改造门禁（先方案后动手）**: 对现有代码、配置或架构做复杂改造（如多文件修改、跨模块重构、破坏性/不可逆变更、涉及多种可行实现路径）时，**禁止未经用户确认直接动手**。必须先完成调研，产出 ≥2 个可行实施方案（含实现思路、改动范围、优缺点对比）及推荐项，停下等待用户选择；用户拍板后，再据此创建或更新清单并执行。用户已明确指定实现方式、或仅为单点小修（如改文案、修明显 Bug）时可豁免。\n" +
-                "6. **以返回为准**: `todoread`/`todowrite` 的返回值会附带 [进度] 与 [继续]/[完成] 提示，请以该提示作为“是否可以收尾”的判定依据；返回值出现 [格式警告] 时说明入参格式有误，须按第 0 条修正后重写。\n" +
-                "7. **适用边界**: 不要为常识性提问、简单计算或单次工具创建计划。";
+        // 契约 §3.1：规划指南重写（CN 与 Rust todo.rs PLANNING_GUIDE 逐字一致，~450 tokens）。
+        // 原第 3 条「下一轮首个动作必须 todowrite」放宽为「随做随记」（可同轮并行）。
+        return PLANNING_GUIDE_CN;
     }
+
+    /**
+     * 任务规划指南（契约 §3.1 CN 文案，双内核逐字一致）。
+     *
+     * <p>抽为常量供守护测试断言长度上限（&lt;1400 字符）与关键条款；
+     * 「改造门禁」条款收敛进第 5 条收尾判据（等待用户拍板时停下合规）。</p>
+     */
+    public static final String PLANNING_GUIDE_CN =
+            "## 任务规划指南 (Task Planning Guide)\n" +
+            "1. **格式**：todos 优先传 JSON 数组，每项 {content, status: pending|in_progress|done}，可选 header/group 分组；也接受 Markdown（每行 `- [ ]`/`- [/]`/`- [x]` + 文本，真实换行）。禁止字面反斜杠 n、占位符、无状态列表项。\n" +
+            "2. **何时用**：复杂/多阶段/多产出任务建清单；简单问答与单步操作不建。清单短小、面向结果、可验证，不要一文件一命令一条目。目标重大变化时整体重写。\n" +
+            "3. **状态纪律**：至多一项 in_progress；开始前置 [/]，结果落地即置 [x]，随做随记不攒批；多项同时完成合并为一次 todowrite。委派结果返回后立即更新对应项。\n" +
+            "4. **恢复校准**：中断恢复/压缩后/用户说「继续」时，先 todoread 对照历史执行证据再行动，确已完成的直接置 [x]，禁止盲目重做。\n" +
+            "5. **收尾判据**：以工具返回的 [进度]/[继续]/[完成] footer 为准；仍有未完成项就继续做，仅在真实阻塞或已提交方案等待用户拍板时停下。不要在正文复述整份清单。";
 
     /**
      * 短寒暄的最大字符阈值（超过则一律注入指南）。
@@ -208,8 +216,10 @@ public class TodoTalent extends AbsTalent {
 
     /**
      * 统计内容中可识别的 checkbox 任务行数（按行锚定，与 {@link #isCheckboxLine} 同口径）
+     *
+     * <p>public：ReasonTask 收敛门禁的「清单全完成」放行判据（契约 §2.1）跨包复用同一口径。</p>
      */
-    static int countCheckboxLines(String content) {
+    public static int countCheckboxLines(String content) {
         if (content == null || content.isEmpty()) {
             return 0;
         }
@@ -688,6 +698,14 @@ public class TodoTalent extends AbsTalent {
     }
 
     /**
+     * todo reminder（恢复校准清单快照）截断上限（契约 §3.2，双内核同口径 800 字符）。
+     *
+     * <p>Java 侧没有 Rust stale_reminder 的 10/10/3 节流机制；模型可见的清单快照注入点
+     * 只有 {@link #buildResumeCalibration}，截断落在此处（超出部分以 …[truncated] 标记）。</p>
+     */
+    public static final int REMINDER_MAX_CHARS = 800;
+
+    /**
      * 构造「恢复校准」消息：呈现落盘清单的真实状态，要求模型先核对历史证据再行动，
      * 防止异常中断恢复后盲目重复执行已完成的步骤（中断时刻模型可能未及时 todowrite，
      * 落盘状态会滞后于实际执行进度）。
@@ -700,10 +718,16 @@ public class TodoTalent extends AbsTalent {
             return null;
         }
 
+        // 契约 §3.2：清单快照按 800 字符截断加 …[truncated]（长清单不再整份灌入上下文）
+        String snapshot = content.trim();
+        if (snapshot.length() > REMINDER_MAX_CHARS) {
+            snapshot = snapshot.substring(0, REMINDER_MAX_CHARS) + "…[truncated]";
+        }
+
         return "[TODO 恢复校准] 上一次任务异常中断，现在是恢复执行。" +
                 "下方清单是 TODO.md 落盘的当前真实状态，它可能滞后于实际执行进度" +
                 "（中断时刻可能未及时调用 todowrite），部分标记为 `[ ]` 或 `[/]` 的项实际可能已经完成：\n\n" +
-                "<todo_snapshot>\n" + content.trim() + "\n</todo_snapshot>\n\n" +
+                "<todo_snapshot>\n" + snapshot + "\n</todo_snapshot>\n\n" +
                 "要求：行动前必须逐项核对每个未完成项——检查历史 Observation 中是否已包含该项对应的执行结果/证据。" +
                 "确已完成的，直接用 todowrite 将其置为 `[x]` 确认状态即可，不要重新执行；" +
                 "只对确实未完成的部分继续推进。严禁盲目重复执行已完成的步骤。";
@@ -780,9 +804,23 @@ public class TodoTalent extends AbsTalent {
     }
 
     /**
-     * 根据清单内容构造进度页脚，并在决策点给出明确的“继续/完成”推力。
+     * 根据清单内容构造进度页脚（常规路径：不带恢复校准提示行，契约 §3.3）。
      */
     private String buildProgressFooter(String content) {
+        return buildProgressFooter(content, false);
+    }
+
+    /**
+     * 根据清单内容构造进度页脚，并在决策点给出明确的“继续/完成”推力。
+     *
+     * <p>契约 §3.3：「[提示] 存在 N 个 [/] 进行中项…恢复校准…」长文案仅在
+     * {@code resumeCalibration=true}（本次 run 是恢复/异常中断后续跑）时注入；
+     * 常规 run 的 footer 不再带这行——正常执行中的 [/] 项就是正在做的事，
+     * 每次都提示「可能是遗留项」反而诱导模型反复自查。</p>
+     *
+     * @param resumeCalibration 是否恢复/异常中断后续跑（恢复校准路径传 true）
+     */
+    public static String buildProgressFooter(String content, boolean resumeCalibration) {
         int total = 0, done = 0, inProgress = 0, pending = 0;
         String firstUnfinished = null;
         for (String line : content.split("\n")) {
@@ -828,7 +866,8 @@ public class TodoTalent extends AbsTalent {
                         : firstUnfinished;
                 footer.append(String.format("%n[待办首项] %s", next));
             }
-            if (inProgress > 0) {
+            if (inProgress > 0 && resumeCalibration) {
+                // 契约 §3.3：恢复校准提示行条件化——仅恢复/异常中断后续跑时注入
                 footer.append(String.format("%n[提示] 存在 %d 个 `[/]` 进行中项：若当前是中断后的恢复执行，它们可能是上次异常中断的遗留项，实际或许已经完成。请先核对历史 Observation 中是否已有对应执行结果，确已完成的直接用 todowrite 置 [x] 确认，不要盲目重做。", inProgress));
             }
         } else {

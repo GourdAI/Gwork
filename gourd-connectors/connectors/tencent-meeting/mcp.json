@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "tencent-meeting": {
+      "type": "streamable_http",
+      "url": "https://mcp.meeting.tencent.com/mcp/wemeet-open/v1",
+      "auth": {
+        "authType": "token",
+        "tokenHeader": "X-Tencent-Meeting-Token",
+        "tokenPrefix": "none",
+        "tokenLabel": "腾讯会议 Token",
+        "tokenHelpUrl": "https://meeting.tencent.com/ai-skill.html",
+        "tokenHelpText": "登录 AI Skill 专区（个人账号）获取 Token。凭据仅存储在本机，不会上传云端。"
+      }
+    }
+  }
+}

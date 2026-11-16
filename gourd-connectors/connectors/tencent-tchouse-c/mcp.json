@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "tencent-tchouse-c": {
+      "type": "streamable_http",
+      "url": "https://tcmcpserver.cloud.tencent.com/tchousec/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "腾讯云数据仓库 TCHouse-C"
+      }
+    }
+  }
+}

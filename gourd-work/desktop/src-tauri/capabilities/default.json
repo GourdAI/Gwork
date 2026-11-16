@@ -59,6 +59,7 @@
     "allow-auth-logout",
     "allow-auth-refresh",
     "allow-auth-self",
+    "allow-auth-official-refresh",
     "allow-updater-get-version",
     "allow-updater-get-state",
     "allow-updater-check",

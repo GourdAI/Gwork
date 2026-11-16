@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "infimind-ecommerce-content": {
+      "type": "streamable_http",
+      "url": "https://imiva.ecpro.com/mcp/workbuddy",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "电商内容专家"
+      }
+    }
+  }
+}

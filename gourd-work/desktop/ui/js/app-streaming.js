@@ -1316,7 +1316,15 @@ function finishStream(sess, opts) {
     sess._lastCreatedAt = null;
 
     // 轮末收敛：把该轮变更卡片定位到本轮节点组末尾（流式中新节点可能晚于卡片到达）
-    if (typeof window.repositionFileChangeCards === 'function') window.repositionFileChangeCards(sess);
+    if (typeof window.repositionFileChangeCards === 'function') {
+        try { window.repositionFileChangeCards(sess); } catch (e) { /* 收尾不允许中断 */ }
+    }
+    // 左侧产出面板轮末即时刷新（不再只等 6s 轮询）；挂起态多一次 GET 亦无害，
+    // refreshTaskMonitor 内部自带 isOpen / 欢迎页门禁。必须用 try 包住：此处位于
+    // finishStream 中段，任何同步异常都会跳过后面全部 DOM 收尾与状态复位。
+    try {
+        if (typeof window.refreshTaskMonitor === 'function') window.refreshTaskMonitor();
+    } catch (e) { /* 收尾不允许中断 */ }
 
     // 流式结束，显示复制按钮（流式过程中被隐藏）
     var liveFoldRow = null;

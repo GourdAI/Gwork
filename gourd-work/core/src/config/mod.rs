@@ -363,6 +363,13 @@ pub struct ModelConfig {
     pub description: String,
     pub headers: HashMap<String, String>,
     pub timeout: String,
+    /// 官方模型源标记（契约 D 节）：模型条目不带凭据落盘，调用时由
+    /// `official::key()` 注入进程内存中的用户普通模型 key。旧 settings.json
+    /// 缺该字段时必须按 false 处理，否则历史自定义模型会被误判为官方模型。
+    /// 只在**值已显式打开**时写出，避免给 Java 侧的 ModelDo 增加未知字段；
+    /// 缺字段仍按 false 反序列化（契约 D 节）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub official: bool,
 }
 
 impl Default for ModelConfig {
@@ -380,6 +387,7 @@ impl Default for ModelConfig {
             description: String::new(),
             headers: HashMap::new(),
             timeout: "120s".into(),
+            official: false,
         }
     }
 }
@@ -732,6 +740,28 @@ mod tests {
         assert_eq!(s.default_model, "m1");
         assert!(s.models.contains_key("m1"), "models must not be lost");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_model_config_without_official_defaults_to_false() {
+        // 旧 settings.json / Java 写出的模型条目没有 `official` 字段。
+        // 缺字段必须按 false 处理：否则普通自定义模型会被误判为官方模型，
+        // 在官方凭据未缓存时直接报「请先登录」。
+        let legacy: ModelConfig = serde_json::from_str(
+            r#"{"name":"legacy","apiUrl":"http://x/v1","apiKey":"k","model":"m"}"#,
+        )
+        .unwrap();
+        assert!(!legacy.official);
+        assert!(!ModelConfig::default().official);
+        let explicit: ModelConfig =
+            serde_json::from_str(r#"{"name":"o","official":true}"#).unwrap();
+        assert!(explicit.official);
+
+        let s: Settings = serde_json::from_str(
+            r#"{"models":{"legacy":{"name":"legacy","apiUrl":"http://x/v1","model":"m"}}}"#,
+        )
+        .unwrap();
+        assert!(!s.models["legacy"].official, "full settings load must keep legacy model non-official");
     }
 
     #[test]

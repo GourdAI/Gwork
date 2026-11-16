@@ -3,7 +3,9 @@
 # 启动：docker compose -f docker-compose.pg-redis.yml up -d --build
 # 停止：docker compose -f docker-compose.pg-redis.yml down
 # 日志：docker compose -f docker-compose.pg-redis.yml logs -f
-# 访问：http://localhost:3000 （首次进入完成初始化向导创建管理员）
+# 访问：http://localhost:3000 或 http://<本机局域网IP>:3000（首次进入完成初始化向导创建管理员）
+# 端口绑定 0.0.0.0：允许局域网内其他设备通过宿主机 IP 访问；localhost/127.0.0.1 同样可用。
+# 若只想对单个网卡开放，改回 "192.168.x.x:3000:3000"；若只保留本机访问，改回 "127.0.0.1:3000:3000"。
 #
 # 与仓库 docker-compose.yml 的区别：app 服务由 image: calciumion/new-api:latest
 # 改为 build: . + Dockerfile.local，确保运行的是本地修改过的源码（含 installers 功能）。
@@ -19,7 +21,7 @@ services:
     restart: unless-stopped
     command: --log-dir /app/logs
     ports:
-      - "127.0.0.1:3000:3000"
+      - "0.0.0.0:3000:3000"
     volumes:
       - ./data:/data
       - ./logs:/app/logs

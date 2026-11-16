@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "xuan-gu-mo-fang",
+  "version": "1.0.0",
+  "description": "Provides millisecond-level market snapshot data for Shanghai and Shenzhen indices, stocks, funds and other instruments, supports all-dimensional sector rankings by industry and concept, and ships featured stock pools plus in-depth data such as F10, market temperature, volume forecast and advance/decline distribution.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "选股魔方",
+        "name_en": "Stock Picking Cube",
+        "description_zh": "提供沪深指数、股票、基金等品种毫秒级行情快照数据，支持行业、概念等全维板块排行，内置黄金杯、三步点金等特色股池，并附F10资料、市场温度、量能预测、涨跌分布等深度数据，一站式支撑A股研究与选股决策。",
+        "description_en": "Provides millisecond-level market snapshot data for Shanghai and Shenzhen indices, stocks, funds and other instruments, supports all-dimensional sector rankings by industry and concept, and ships featured stock pools plus in-depth data such as F10, market temperature, volume forecast and advance/decline distribution."
+      },
+      "categories": [
+        "finance"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

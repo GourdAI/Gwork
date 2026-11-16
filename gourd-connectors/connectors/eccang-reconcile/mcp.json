@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "eccang-reconcile": {
+      "type": "streamable_http",
+      "url": "https://datacenter.eccang.com/nexus/mcp/stream"
+    }
+  }
+}

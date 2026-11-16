@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "aimoderator": {
+      "type": "streamable_http",
+      "url": "https://aimoderator.cn/api/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "思研·AI调研平台"
+      }
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "qisemierp",
+  "version": "1.0.0",
+  "description": "Connect to the QiSeMi ERP inventory management system through natural language to query products, inventory, customers, suppliers, and business documents such as sales, purchases, and stock movements at any time. Supports sales statistics, arrears reconciliation, document creation, and more, enabling instant business data Q&A.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "七色米进销存",
+        "name_en": "QiSeMi ERP",
+        "description_zh": "通过自然语言连接七色米进销存系统，随时查询商品、库存、客户、供应商及销售、采购、出入库等业务单据；支持销售统计、欠款对账、单据创建等操作，让业务数据问答即得。",
+        "description_en": "Connect to the QiSeMi ERP inventory management system through natural language to query products, inventory, customers, suppliers, and business documents such as sales, purchases, and stock movements at any time. Supports sales statistics, arrears reconciliation, document creation, and more, enabling instant business data Q&A."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

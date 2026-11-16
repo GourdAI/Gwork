@@ -55,6 +55,14 @@ pub enum AuthKind {
     Token,
     /// OAuth 2.1 authorization-code + PKCE with a browser redirect.
     Oauth,
+    /// Vendor-specific QR-code authorization (e.g. Tencent Docs): the kernel
+    /// generates a session code, the UI renders the authorization URL as a QR
+    /// image, and a background task polls the vendor's token endpoint. The
+    /// granted token is stored as a *static* token, so header injection and
+    /// `hasCredential` reuse the existing static path unchanged. Unlike `Oauth`
+    /// this does NOT speak RFC 9728/8414 discovery — the vendor protocol is
+    /// implemented by `mcp::qrcode_vendor`.
+    QrcodePoll,
 }
 
 impl AuthKind {
@@ -62,6 +70,7 @@ impl AuthKind {
         match raw.trim().to_ascii_lowercase().as_str() {
             "token" | "static" | "apikey" | "api_key" => AuthKind::Token,
             "oauth" | "oauth2" | "browser" | "login" => AuthKind::Oauth,
+            "qrcode_poll" | "qrcode" | "qr_poll" | "scan" => AuthKind::QrcodePoll,
             _ => AuthKind::None,
         }
     }
@@ -71,6 +80,7 @@ impl AuthKind {
             AuthKind::None => "none",
             AuthKind::Token => "token",
             AuthKind::Oauth => "oauth",
+            AuthKind::QrcodePoll => "qrcode_poll",
         }
     }
 }
@@ -132,6 +142,12 @@ pub struct AuthSpec {
     /// value is remotely supplied via the connector catalog.
     #[serde(default)]
     pub device_poll_interval_secs: u64,
+    /// Which vendor QR protocol to speak when `authType == "qrcode_poll"`.
+    /// Currently `"tencent-docs"`. The concrete protocol (session-code
+    /// generation, authorization URL template, poll endpoint, response shape)
+    /// lives in `mcp::qrcode_vendor`, keyed by this value. Non-secret metadata.
+    #[serde(default)]
+    pub qr_vendor: String,
 }
 
 impl AuthSpec {
@@ -736,6 +752,78 @@ impl AuthManager {
         Ok(status)
     }
 
+    /// Start a vendor QR-code authorization (`authType: "qrcode_poll"`).
+    ///
+    /// Unlike [`Self::start`] / [`Self::start_device`] there is **no OAuth
+    /// discovery**: the vendor protocol (session code → authorization URL →
+    /// poll for a token) is implemented by [`super::qrcode_vendor`]. The UI
+    /// renders `verification_uri` as a QR image; the background task polls the
+    /// vendor endpoint and stores the granted token as a *static* token, so
+    /// header injection and `hasCredential` reuse the existing static path.
+    /// Shares the same session table, so `status` / `cancel` work unchanged.
+    pub async fn start_qrcode_poll(
+        self: &Arc<Self>,
+        name: &str,
+        config: &McpServerConfig,
+        spec: &AuthSpec,
+        transient_budget: u32,
+    ) -> anyhow::Result<AuthStatus> {
+        let server_url = config.url.trim().to_string();
+        if server_url.is_empty() {
+            anyhow::bail!("this connector has no URL; QR authorization only applies to HTTP-family MCP servers");
+        }
+        let vendor = spec.qr_vendor.trim().to_string();
+        if vendor.is_empty() {
+            anyhow::bail!("connector declares qrcode_poll but no qrVendor");
+        }
+        self.abort(name).await;
+
+        // Clean client (proxy honoured, no resource-server headers) — same
+        // rationale as the OAuth client: never leak the user's static headers
+        // to a third-party authorization endpoint.
+        let client = oauth::OAuthClient::new(config)?;
+        // Owned clone for the spawned poll task (a borrow of `client` would not
+        // be 'static). reqwest::Client is internally Arc'd, so this is cheap.
+        let http = client.http_client().clone();
+        let session = super::qrcode_vendor::start(&vendor, &http)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("unsupported qrVendor: {}", vendor))?
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let now = oauth::Clock::system().now();
+        let status = AuthStatus {
+            phase: AuthPhase::WaitingForBrowser,
+            authorization_url: None,
+            error: None,
+            user_code: None,
+            verification_uri: Some(session.authorization_url.clone()),
+            expires_in: Some(session.expires_in_secs),
+            name: name.to_string(),
+            started_at: now,
+        };
+
+        let vault = self.vault.clone();
+        let name_owned = name.to_string();
+        let mgr = Arc::clone(self);
+        let header = spec.header_name();
+        let prefix = spec.prefix();
+        let poll_base = oauth::resolve_poll_interval(
+            spec.device_poll_interval_secs,
+            session.poll_interval_secs,
+        );
+        let handle = tokio::spawn(async move {
+            let outcome = complete_qrcode_poll(
+                &http, &session.vendor, &server_url, &header, &prefix,
+                &vault, session.expires_in_secs, poll_base, transient_budget,
+            ).await;
+            mgr.finish(&name_owned, outcome).await;
+        });
+
+        let mut sessions = self.sessions.lock().await;
+        sessions.insert(name.to_string(), Session { status: status.clone(), handle: Some(handle) });
+        Ok(status)
+    }
+
     /// Current status for a connector. Terminal states are kept until polled
     /// once (the UI shows the result), then removed on the next poll.
     pub async fn status(&self, name: &str) -> Option<AuthStatus> {
@@ -1002,6 +1090,63 @@ async fn complete_device_flow(
                 interval = oauth::back_off_poll_interval(interval);
             }
             oauth::DevicePollOutcome::Failed(reason) => return Err(reason),
+        }
+    }
+}
+
+/// Background half of a vendor QR flow: poll the vendor endpoint until the user
+/// approves, then persist the granted token as a **static** token in the same
+/// vault. Reusing the static half means `resolve_auth_headers`, `/auth/state`'s
+/// `hasCredential`, and `clear_all` all pick it up with zero changes.
+///
+/// Deadline / backoff / transient-budget semantics mirror [`complete_device_flow`]
+/// so a mid-scan network blip does not kill the login, while a genuinely dead
+/// endpoint still surfaces instead of spinning to expiry.
+#[allow(clippy::too_many_arguments)]
+async fn complete_qrcode_poll(
+    client: &reqwest::Client,
+    session: &super::qrcode_vendor::VendorSession,
+    server_url: &str,
+    header: &str,
+    prefix: &str,
+    vault: &CredentialVault,
+    expires_in_secs: u64,
+    poll_base_secs: u64,
+    transient_budget: u32,
+) -> Result<(), String> {
+    use tokio::time::{sleep, Duration as TokioDuration};
+    let deadline = std::time::Instant::now() + TokioDuration::from_secs(expires_in_secs.max(30));
+    let mut interval = poll_base_secs.max(1);
+    let mut consecutive_transient = 0u32;
+    let max_transient = transient_budget.max(1);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err("授权码已过期，请重新发起扫码授权".into());
+        }
+        sleep(TokioDuration::from_secs(interval)).await;
+        match super::qrcode_vendor::poll(client, session).await {
+            super::qrcode_vendor::QrPollOutcome::Granted(token) => {
+                let stored = StaticToken {
+                    value: token,
+                    header: header.to_string(),
+                    prefix: prefix.to_string(),
+                    stored_at: oauth::Clock::system().now(),
+                };
+                vault.set_static(server_url, stored).await
+                    .map_err(|e| format!("cannot save credential: {e}"))?;
+                return Ok(());
+            }
+            super::qrcode_vendor::QrPollOutcome::Pending => { consecutive_transient = 0; }
+            super::qrcode_vendor::QrPollOutcome::Transient => {
+                consecutive_transient += 1;
+                if consecutive_transient >= max_transient {
+                    return Err(format!(
+                        "授权服务暂时不可用，已连续重试 {max_transient} 次，请稍后重新发起扫码授权"
+                    ));
+                }
+                interval = oauth::back_off_poll_interval(interval);
+            }
+            super::qrcode_vendor::QrPollOutcome::Failed(reason) => return Err(reason),
         }
     }
 }

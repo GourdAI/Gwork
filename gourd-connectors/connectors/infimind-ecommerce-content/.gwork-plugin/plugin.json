@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "infimind-ecommerce-content",
+  "version": "1.0.0",
+  "description": "Connect to Infimind Ecommerce Content with OAuth to create smart retouching, product main image, detail page, visual migration, KOC seeding, image-text commerce, video generation, and viral video copy tasks.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "电商内容专家",
+        "name_en": "Infimind Ecommerce Content",
+        "description_zh": "通过 OAuth 连接电商内容专家，创建智能精修、商品主图、商品详情页、爆款图复制、KOC 种草、图文带货、视频生成和爆款视频复制任务。",
+        "description_en": "Connect to Infimind Ecommerce Content with OAuth to create smart retouching, product main image, detail page, visual migration, KOC seeding, image-text commerce, video generation, and viral video copy tasks."
+      },
+      "categories": [
+        "research-and-data"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

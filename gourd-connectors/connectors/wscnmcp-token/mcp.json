@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "wscnmcp-token": {
+      "type": "streamable_http",
+      "url": "https://xgb-mcp-api.xuangubao.cn/mcp"
+    }
+  }
+}

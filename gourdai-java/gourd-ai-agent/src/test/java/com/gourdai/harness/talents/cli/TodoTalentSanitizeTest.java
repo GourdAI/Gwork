@@ -430,30 +430,36 @@ public class TodoTalentSanitizeTest {
 
     /**
      * 规划指南必须给 [格式警告] 一个行为出口：模型收到警告后若指南不说
-     * 「修正后重写」，它会带着同一份坏入参反复重试——警告本身就成了循环的
-     * 一部分。Rust 侧指南有这句而 Java 侧曾丢失（双核口径漂移），故钉住。
+     * 「按格式契约重写」，它会带着同一份坏入参反复重试——警告本身就成了循环的
+     * 一部分。契约 §3.1 精简指南把出口收敛进第 1 条格式契约（入参形状即修正依据），
+     * 本护栏钉住「指南必须包含可执行的格式修正依据」这一语义而非旧措辞。
      */
     @Test
-    @DisplayName("规划指南必须解释 [格式警告] 的逃生口（否则警告成为循环的一部分）")
+    @DisplayName("规划指南必须给出格式修正依据（否则 [格式警告] 成为循环的一部分）")
     void guideExplainsTheFormatWarningEscapeHatch() {
         String guide = new TodoTalent().getInstruction(
                 com.gourdai.ai.chat.prompt.Prompt.of("帮我重构这个模块并补测试"));
         assertNotNull(guide, "多步任务不得跳过指南");
-        assertTrue(guide.contains("[格式警告]"), "指南丢失格式警告说明: " + guide);
-        assertTrue(guide.contains("修正后重写") || guide.contains("修正入参"),
-                "指南未给警告后的行为出口: " + guide);
+        // 契约 §3.1 精简版：格式契约（第 1 条）本身就是警告后的修正依据
+        assertTrue(guide.contains("格式") && guide.contains("JSON 数组"),
+                "指南必须保留可执行的入参格式契约（格式警告的修正依据）: " + guide);
+        assertTrue(guide.contains("- [ ]") || guide.contains("`- [ ]`"),
+                "指南必须给出 Markdown 状态标记形态: " + guide);
+        assertTrue(guide.contains("禁止字面反斜杠 n") || guide.contains("占位符"),
+                "指南必须点名历史坏入参形态（字面反斜杠 n / 占位符）: " + guide);
     }
 
     /**
-     * 指南编号必须连续：跳号/重号会被模型读成「规则可取舍」，而第 4 条
-     * （闭环校验）与第 6 条（以返回为准）正是死循环的行为开关。
+     * 指南编号必须连续：跳号/重号会被模型读成「规则可取舍」。
+     * 契约 §3.1 精简为 5 条（1-5），第 3 条（状态纪律）与第 5 条（收尾判据）
+     * 正是死循环的行为开关。
      */
     @Test
-    @DisplayName("规划指南编号连续（0-7），不得跳号重号")
+    @DisplayName("规划指南编号连续（1-5，契约 §3.1），不得跳号重号")
     void guideNumberingIsConsecutive() {
         String guide = new TodoTalent().getInstruction(
                 com.gourdai.ai.chat.prompt.Prompt.of("帮我重构这个模块并补测试"));
-        int expected = 0;
+        int expected = 1;
         for (String line : guide.split("\n")) {
             String t = line.trim();
             int dot = t.indexOf(". ");
@@ -467,6 +473,6 @@ public class TodoTalentSanitizeTest {
             assertEquals(expected, Integer.parseInt(digits), "指南编号不连续: " + t);
             expected++;
         }
-        assertTrue(expected >= 7, "指南条目丢失: 仅 " + expected + " 条");
+        assertEquals(6, expected, "契约 §3.1 指南应为 5 条（1-5）: " + guide);
     }
 }

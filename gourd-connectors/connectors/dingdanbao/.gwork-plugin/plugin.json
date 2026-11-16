@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "dingdanbao",
+  "version": "1.0.0",
+  "description": "An integrated solution for merchants covering order management, inventory, picking and shipping, purchasing, customer operations, sales-rep management, and an online mini-program store.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "订单豹",
+        "name_en": "DingDanBao",
+        "description_zh": "为商家提供订单管理、进销存、分拣发货、采购、客户运营管理、业务员管理及线上小程序商城一体化解决方案",
+        "description_en": "An integrated solution for merchants covering order management, inventory, picking and shipping, purchasing, customer operations, sales-rep management, and an online mini-program store."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

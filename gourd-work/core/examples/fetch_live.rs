@@ -27,6 +27,7 @@ fn ctx() -> ToolContext {
         model: Default::default(),
         settings: Arc::new(gourd_work_core::config::Settings::default()),
         bash_exempt_dirs: Vec::new(),
+        resume_calibration: false,
     }
 }
 

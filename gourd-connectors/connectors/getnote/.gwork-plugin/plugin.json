@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "getnote",
+  "version": "1.0.0",
+  "description": "Connect GetNote to save ideas and webpages, find notes, read transcripts, and organize knowledge.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "得到大脑（原 Get 笔记）",
+        "name_en": "GetNote",
+        "description_zh": "连接得到大脑与 AI：随手保存文字、网页和图片，语义查找个人笔记，读取录音转写与会议待办，并用标签、文件夹和知识库整理长期信息。",
+        "description_en": "Connect GetNote to save ideas and webpages, find notes, read transcripts, and organize knowledge."
+      },
+      "categories": [
+        "note-taking"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

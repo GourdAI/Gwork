@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "wk-workbuddy": {
+      "type": "streamable_http",
+      "url": "https://mcp.wkinfo.com.cn/mcp-servers/integrated/",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "威科先行"
+      }
+    }
+  }
+}

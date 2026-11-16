@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "yingmi-mcp",
+  "version": "1.0.0",
+  "description": "The Yingmi Fund Connector provides AI with professional investment capabilities across funds, advisory, markets, and research. It covers fund basics, NAV, performance, risk, trading rules, asset allocation, industry and bond analysis, fund portfolio diagnosis, advisory strategies, market quotes and news, as well as household assets and liabilities, cash flow, and financial metrics analysis.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "盈米基金",
+        "name_en": "Yingmi Fund",
+        "description_zh": "盈米基金连接器为 AI 提供基金、投顾、市场和投研等专业投资能力，覆盖基金基础信息、净值、业绩、风险、交易规则、资产配置、行业及债券分析、基金组合诊断、投顾策略、市场行情与资讯，以及家庭资产负债、现金流和财务指标分析等场景。",
+        "description_en": "The Yingmi Fund Connector provides AI with professional investment capabilities across funds, advisory, markets, and research. It covers fund basics, NAV, performance, risk, trading rules, asset allocation, industry and bond analysis, fund portfolio diagnosis, advisory strategies, market quotes and news, as well as household assets and liabilities, cash flow, and financial metrics analysis."
+      },
+      "categories": [
+        "finance"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "chainlon-geo-mcp": {
+      "type": "streamable_http",
+      "url": "https://geo.chainlon.pro/mcp"
+    }
+  }
+}

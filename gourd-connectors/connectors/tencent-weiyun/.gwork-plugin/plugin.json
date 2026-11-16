@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "tencent-weiyun",
+  "version": "1.0.0",
+  "description": "Access, download, or remove files from Weiyun, while also supporting file uploads and the creation of sharing links to help you manage your Weiyun storage.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "微云",
+        "name_en": "Weiyun",
+        "description_zh": "查看、下载、删除微云文件，并且提供上传文件到微云、生成分享链接能力，帮你管理微云文件",
+        "description_en": "Access, download, or remove files from Weiyun, while also supporting file uploads and the creation of sharing links to help you manage your Weiyun storage."
+      },
+      "categories": [
+        "file-systems"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

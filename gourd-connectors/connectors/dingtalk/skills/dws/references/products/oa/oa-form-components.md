@@ -1,0 +1,592 @@
+# OA 审批表单控件参考
+
+本文档详细描述钉钉 OA 审批中每种表单控件（componentName）在**发起审批实例**时 `formComponentValues` 的 `value` 格式、约束和注意事项。
+
+> **核心原则：** `formComponentValues[].name` 必须与审批模板中控件的 `props.label` **完全一致**，`value` 为字符串类型（最大 65535 字符）。
+
+---
+
+## 通用约束
+
+| 约束 | 说明 |
+|------|------|
+| 单表单最大控件数 | 200 |
+| label / placeholder 最大长度 | 50 字符 |
+| value 最大长度 | 65535 字符 |
+| ID / bizAlias 唯一性 | 同一表单内不可重复 |
+| TextNote | 不收集数据，不出现在 formComponentValues 中 |
+
+---
+
+## 基础控件
+
+### TextField（单行输入框）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `TextField` |
+| value 格式 | 纯文本字符串 |
+| 示例 | `"测试内容"` |
+| 约束 | 无特殊约束 |
+
+```json
+{ "name": "单行输入框", "value": "测试内容" }
+```
+
+### TextareaField（多行输入框）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `TextareaField` |
+| value 格式 | 纯文本字符串，支持换行 |
+| 示例 | `"第一行\n第二行"` |
+| 约束 | 无 `ratio` 属性 |
+
+```json
+{ "name": "多行输入框", "value": "第一行\n第二行\n第三行" }
+```
+
+### NumberField（数字输入框）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `NumberField` |
+| value 格式 | 数字字符串 |
+| 示例 | `"100"` |
+| 约束 | 适合数量、天数等纯数字场景 |
+
+```json
+{ "name": "加班天数", "value": "3" }
+```
+
+### DDSelectField（单选框）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `DDSelectField` |
+| value 格式 | 选项文本字符串 |
+| 示例 | `"同意"` |
+| 约束 | **必须与模板 `options[].value` 完全匹配**，不可自行编造选项 |
+
+模板中的选项结构（从 `form-schema` 获取）：
+```json
+"options": [
+  { "key": "option_0", "value": "同意" },
+  { "key": "option_1", "value": "不同意" }
+]
+```
+
+提交时传选项的 `value` 文本：
+```json
+{ "name": "审批意见", "value": "同意" }
+```
+
+### DDMultiSelectField（多选框）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `DDMultiSelectField` |
+| value 格式 | JSON 数组字符串，每个元素为选项文本 |
+| 示例 | `'["选项A","选项B"]'` |
+| 约束 | 每个选项须与模板 `options[].value` 匹配； |
+
+```json
+{ "name": "兴趣爱好", "value": "[\"阅读\",\"运动\"]" }
+```
+
+### DDDateField（日期控件）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `DDDateField` |
+| value 格式 | `yyyy-MM-dd` 格式字符串 |
+| 示例 | `"2026-07-27"` |
+| 约束 | 格式固定，不可传其他日期格式 |
+
+```json
+{ "name": "请假日期", "value": "2026-07-27" }
+```
+
+### DDDateRangeField（时间区间控件）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `DDDateRangeField` |
+| value 格式 | JSON 数组字符串 `[开始日期, 结束日期]` |
+| 示例 | `'["2026-07-27","2026-07-30"]'` |
+| 约束 | `props.label` 为数组 `["开始时间","结束时间"]`；提交时 `name` 使用**开始时间的 label** |
+
+模板中的 label 结构（从 `form-schema` 获取）：
+```json
+"props": { "label": ["开始时间", "结束时间"] }
+```
+
+提交时用**开始时间 label** 作为 name：
+```json
+{ "name": "开始时间", "value": "[\"2026-07-27\",\"2026-07-30\"]" }
+```
+
+### PhoneField（电话控件）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `PhoneField` |
+| value 格式 | 手机号字符串 |
+| 示例 | `"13800138000"` |
+| 约束 | `mode: "phone"` 为手机号 |
+
+```json
+{ "name": "联系电话", "value": "13800138000" }
+```
+
+### IdCardField（身份证控件）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `IdCardField` |
+| value 格式 | 身份证号字符串 |
+| 示例 | `"330102199001011234"` |
+| 约束 | 内置格式校验，须传合法身份证号 |
+
+```json
+{ "name": "身份证号", "value": "330102199001011234" }
+```
+
+### TextNote（文字说明）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `TextNote` |
+| value 格式 | — |
+| 约束 | **不收集数据**，不出现在 formComponentValues 中 |
+
+> 遇到 TextNote 控件时直接跳过，不要尝试为它填写值。
+
+---
+
+## 增强控件
+
+### MoneyField（金额控件）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `MoneyField` |
+| value 格式 | 数字字符串 |
+| 示例 | `"1500.50"` |
+| 约束 | 系统自动显示大写金额（`notUpper: "0"` 时显示） |
+
+```json
+{ "name": "报销金额", "value": "1500.50" }
+```
+
+### InnerContactField（联系人控件）
+
+| 属性 | 说明                                                 |
+|------|----------------------------------------------------|
+| `componentName` | `InnerContactField`                                |
+| value 格式 | userId 字符串，多人时为 JSON 数组字符串                         |
+| 示例（单选） | `"user123"`                                        |
+| 示例（多选） | `'["userId1","userId2"]'`                              |
+| 约束 | `choice: "0"` 单选 / `"1"` 多选；userId 须为**当前组织下在职成员** |
+
+```json
+{ "name": "项目负责人", "value": "[\"userId1\",\"userId2\"]" }
+```
+
+> **严禁直接写姓名。** 必须先通过 `dws aisearch person --query "<姓名>" --dimension name --format json` 查询获取 userId；多结果时须让用户消歧确认。
+
+### DepartmentField（部门控件）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `DepartmentField` |
+| value 格式 | 部门 ID 字符串，多部门时为 JSON 数组字符串 |
+| 示例（单选） | `"12345"` |
+| 示例（多选） | `'["12345","67890"]'` |
+| 约束 | `multiple: boolean` 控制单选/多选；部门 ID 须为**当前组织下存在的部门** |
+
+```json
+{ "name": "所属部门", "value": "12345" }
+```
+
+### AddressField（省市区控件）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `AddressField` |
+| value 格式 | JSON 数组字符串 `["省","市","区"]` |
+| 示例 | `'["浙江省","杭州市","西湖区"]'` |
+| 约束 | 三级联动选择器；`needDetail: true` 时末尾追加详细地址文本 |
+
+```json
+{ "name": "办公地点", "value": "[\"浙江省\",\"杭州市\",\"西湖区\"]" }
+```
+
+### DDPhotoField（图片控件）
+
+> **支持通过图片 URL 提交，不支持本地文件上传。** 如果用户已有图片 URL（如公网可访问的图片链接），可直接填入 value 提交。CLI 尚未封装本地文件上传到钉盘 CDN 的流程，若用户只有本地文件而非 URL，需告知用户在钉钉客户端补充。
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `DDPhotoField` |
+| value 格式 | URL 数组转义字符串，即使只有一个 URL 也需数组形式 |
+| 示例 | `"[\"http://example.com/img1.jpg\",\"http://example.com/img2.jpg\"]"` |
+| 约束 | 支持 URL 直接提交；**不支持本地文件上传**（CLI 未封装钉盘上传流程）； |
+
+```json
+{ "name": "图片", "value": "[\"http://example.com/photo.jpg\"]" }
+```
+
+### DDAttachment（附件控件）
+
+> **[支持] 已支持通过 CLI 提交附件控件。** 采用两步流程：先用 `dws oa approval attachment upload --file <path>` 上传本地文件，获取 spaceId、fileName、fileSize、fileType、fileId；再将这些字段组装为 DDAttachment value（JSON 数组转义字符串）随 `create-instance` 提交。
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `DDAttachment` |
+| value 格式 | JSON 数组转义字符串，每个元素包含 spaceId、fileName、fileSize、fileType、fileId |
+| 示例（参考） | `"[{\"spaceId\":\"163xxx\",\"fileName\":\"2644.JPG\",\"fileSize\":\"333\",\"fileType\":\"jpg\",\"fileId\":\"643xxx\"}]"` |
+| 约束 | **支持通过 CLI 提交**；先用 `dws oa approval attachment upload --file <path>` 获取 spaceId、fileName、fileSize、fileType、fileId，再组装为 value 随 `create-instance` 提交 |
+
+### StarRatingField（评分控件）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `StarRatingField` |
+| value 格式 | 数字字符串 |
+| 示例 | `"4"` |
+| 约束 | `limit` 控制最大星数（默认 5） |
+
+```json
+{ "name": "满意度评分", "value": "4" }
+```
+
+### RelateField（关联审批单）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `RelateField` |
+| value 格式 | 审批实例 ID 字符串 |
+| 示例 | `"q-ZZ1sQaTIuYFpKI9aNC1g"` |
+| 约束 | 须为**当前组织下已存在的审批实例 ID** |
+
+```json
+{ "name": "关联审批单", "value": "q-ZZ1sQaTIuYFpKI9aNC1g" }
+```
+
+### SignatureField（签名控件）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `SignatureField` |
+| value 格式 | 签名图片 mediaId |
+| 约束 | 需要客户端交互签名，通常不支持 API 直接提交 |
+
+---
+
+## 复合控件
+
+### TableField（明细控件）
+
+| 属性 | 说明 |
+|------|------|
+| `componentName` | `TableField` |
+| value 格式 | JSON 序列化的二维数组字符串；每行是子控件 name/value 对象数组 |
+| 示例 | `'[[{"name":"商品名","value":"笔记本"},{"name":"数量","value":"2"}],[{"name":"商品名","value":"钢笔"},{"name":"数量","value":"1"}]]'` |
+| 约束 | **不可嵌套 TableField**；**不可包含 DDMultiSelectField 和 DDPhotoField**；最大 100 行；总长度不超过 65535 字符 |
+
+模板结构（从 `form-schema` 获取）：
+```json
+{
+  "componentName": "TableField",
+  "props": { "label": "采购明细" },
+  "children": [
+    { "componentName": "TextField", "props": { "label": "商品名", "id": "TextField_XXX" } },
+    { "componentName": "NumberField", "props": { "label": "数量", "id": "NumberField_YYY" } }
+  ]
+}
+```
+
+提交时 `value` 是 **JSON 序列化的二维数组字符串**：外层数组表示所有明细行，每行是子控件对象数组。子控件的 `name` 必须与其 `props.label` 完全一致，`value` 按对应控件格式填写字符串（数字控件也使用数字字符串）：
+
+```json
+{
+  "name": "采购明细",
+  "value": "[[{\"name\":\"商品名\",\"value\":\"笔记本\"},{\"name\":\"数量\",\"value\":\"2\"}],[{\"name\":\"商品名\",\"value\":\"钢笔\"},{\"name\":\"数量\",\"value\":\"1\"}]]"
+}
+```
+
+`--form-values` 的顶层仍是“字段 label → 字符串值”的对象；上面的 `value` 字符串作为其中“采购明细”的值。使用 `--request` 时，将上面的控件对象放入 `formComponentValues` 列表。两种入口都原样传递明细字符串，**不会把以 label 为 key 的行对象数组自动转换为二维 name/value 数组**。建议用 JSON 序列化器生成字符串，避免手动转义。
+
+格式依据：[钉钉官方创建审批实例文档](https://open.dingtalk.com/document/orgapp/create-an-approval-instance.md)中的“表格（明细）控件”。
+
+### DDHolidayField（请假套件）
+
+> **支持通过 leave-duration / leave-check 命令链发起**，完整工作流见 [oa-leave.md](oa-leave.md)「发起请假审批」。识别特征：`componentName == "DDHolidayField"`，`props.label` 为数组（如 `["开始时间","结束时间"]`），`props.options` 为假期类型选项列表。
+
+模板 Schema 结构（从 `form-schema` 获取，关键字段）：
+```json
+{
+  "componentName": "DDHolidayField",
+  "props": {
+    "label": ["开始时间", "结束时间"],
+    "id": "DDHolidayField-J2BWEN12",
+    "attendTypeLabel": "请假类型",
+    "options": [
+      { "unit": "hour", "name": "事假", "leaveCode": "885dc798-xxx", "displayUnit": "按小时请假" }
+    ]
+  }
+}
+```
+
+提交条目结构（**必须走 `create-instance --request` 高级模式**，简单模式无法承载）：
+```json
+{
+  "id": "DDHolidayField-J2BWEN12",
+  "name": "[\"开始时间\",\"结束时间\"]",
+  "value": "[\"2026-08-13 12:08\",\"2026-08-14 18:08\",14.87,\"hour\",\"事假\",\"请假类型\"]",
+  "extValue": "{\"durationInHour\":14.87,...,\"key\":\"<leaveCode>\",\"leaveParams\":[\"<corpId>\",\"<leaveCode>\",\"<T1>\",\"<T2>\",null]}"
+}
+```
+
+| 字段 | 取值规则 |
+|------|---------|
+| `id` | 套件 `props.id`（服务端按 id 精确匹配控件） |
+| `name` | `JSON.stringify(套件 props.label 数组)`（如 `"[\"开始时间\",\"结束时间\"]"`；label 为数组时整体序列化，不取首元素；id 主通道时的回退匹配） |
+| `value` | 六元数组 JSON 字符串：`[T1, T2, duration, unit, leaveName, attendTypeLabel]` |
+| `extValue` | extendValue JSON 字符串（见下方组装规则，≤65535 字符） |
+
+value 六元数组逐项规则：
+
+| 索引 | 字段 | 取值 |
+|---|---|---|
+| [0] / [1] | 起止时间 | 用户输入，格式随 unit（见下表） |
+| [2] | 时长（number，非字符串） | `unit ∈ {hour, halfHour, limitHour}` → `leave-duration 响应.durationInHour`，否则 → `durationInDay`，**必须服务端计算** |
+| [3] | 单位 | 选定类型的 `leaveViewUnit` 原始值（vacation types 返回；hour / halfHour / limitHour / day / halfDay，小写；展示用中文映射不写入） |
+| [4] | 类型名 | 选定类型的 `leaveName`（与 leaveCode 同取自 vacation types 同一条目，如「事假」） |
+| [5] | 子类型标签 | 套件 `props.attendTypeLabel`，无则取 `props.push.pushTag + "类型"`，均无为 `""` |
+
+时间格式（与 unit 硬绑定）：
+
+| unit | T1/T2 格式 | 示例 |
+|---|---|---|
+| hour / halfHour / limitHour | yyyy-MM-dd HH:mm | 2026-08-13 12:08 |
+| day | yyyy-MM-dd | 2026-08-13 |
+| halfDay | yyyy-MM-dd 上午/下午 | 2026-08-13 上午 |
+
+extValue 组装规则：
+
+```
+extValue = JSON.stringify({
+  ...leave-duration 工具响应,   // durationInHour/Day, detailList, compressedValue, corpId, unit, pushTag... 原样合并，禁止裁剪
+  key: leaveCode,               // = options[i].leaveCode
+  leaveParams: [corpId, leaveCode, T1, T2, staffId]   // corpId 取工具响应回显；本人发起 staffId=null
+})
+```
+
+> **IMPORTANT：**
+> - 时长、detailList、compressedValue 一律取自 `dws attendance approve leave-duration` 的服务端计算结果，严禁本地构造或估算；不支持手动改时长（customDuration）。
+> - 发起前必须先跑 `dws attendance approve leave-check` 提交前校验（--duration-day / --duration-hour 取自 leave-duration 输出）；success=false 时转告 errorMsg 并终止。
+> - 哺乳假模板（类型条目 bizType === "breastfeeding_leave_new"；bizType 缺失时回退名称含「哺乳」）与需上传证明材料的请假类型（类型条目 leaveCertificate.enable=true 且时长双向换算小时后 ≥ 阈值，换算规则见 [oa-leave.md](oa-leave.md)「发起请假审批」步骤 3）**不支持 CLI 发起**，引导用户在客户端提交。
+
+### DDBizSuite · attendance.supply（补卡套件）
+
+> **支持通过 supply-plans / supply-check 命令链发起**，完整工作流见 [oa-supply.md](oa-supply.md)「发起补卡审批」。识别特征：`componentName == "DDBizSuite"` 且 `props.bizType == "attendance.supply"`；补卡时间子控件在 `children` 内（`DDDateField`，`bizAlias == "userCheckTime"`）。
+
+模板 Schema 结构（从 `form-schema` 获取，需下钻 children）：
+```json
+{
+  "componentName": "DDBizSuite",
+  "props": { "bizType": "attendance.supply", "bizAlias": "supply", "id": "DDBizSuite-JYNRW2R9" },
+  "children": [{
+    "componentName": "DDDateField",
+    "props": { "bizAlias": "userCheckTime", "format": "yyyy-MM-dd HH:mm", "id": "DDDateField-JYNRW51O", "label": "补卡时间", "required": true }
+  }]
+}
+```
+
+提交条目结构（**必须走 `create-instance --request` 高级模式**）——注意条目是**子控件**而非 DDBizSuite 容器：
+```json
+{
+  "id": "DDDateField-JYNRW51O",
+  "name": "补卡时间",
+  "value": "2026-08-05 04:00",
+  "extValue": "{\"timeStamp\":1785772800000,\"workDate\":1785772800000,\"planText\":\"2026-08-05 10:39\",\"userCheckTime\":1785873600000,\"planTip\":\"周二 ( 08.04 下班) 补卡\"}"
+}
+```
+
+| 字段 | 取值规则 |
+|------|---------|
+| `id` | 子控件 `children[].props.id`（服务端按 id 精确匹配） |
+| `name` | 子控件 `props.label`（如「补卡时间」；id 主通道时的回退匹配） |
+| `value` | 按**子控件 props.format** 格式化最终补卡时刻毫秒值（默认 `yyyy-MM-dd HH:mm`，禁硬编码格式） |
+| `extValue` | 班次数据 JSON 字符串（见下方组装规则） |
+
+extValue 组装规则（素材全部来自 `dws attendance approve supply-plans` 选定班次）：
+
+```
+extValue = JSON.stringify({
+  planId:      plans.planId,        // 可选（自由工时排班可为空）
+  planTip:     plans.planTip,       // 带状态卡点文案，原样透传不解析
+  planText:    plans.planText,
+  workDate:    plans.workDate,
+  timeStamp:   plans.workDate,      // 恒等于 workDate
+  userCheckTime: 最终补卡时刻        // plans.supplyDate；越出 timeRange 时用夹取值，必须与 value 同一时刻
+})
+// clamp 规则：supplyDate < timeRange[0] → 取 timeRange[0]；
+// supplyDate > timeRange[1] → 取 timeRange[1]；夹取值同时用于 supply-check --timestamp、userCheckTime 与 value
+// timeZoneInfo 不本地拼接（可选字段）：服务端 supply-plans 响应不含时区数据，
+// PC 真实数据不含亦可成功；仅 multiTimeZoneV2 灰度企业需要，一期不支持
+```
+
+> **IMPORTANT：**
+> - `bizAlias` 不组装（MCP formComponentValues 无此字段，服务端按 id 匹配）；**不构造 `repairCheckTime` 条目**（服务端回填字段，PC 提交数据无此字段名）。
+> - 班次匹配与资格判定一律以服务端为准：`supply-plans` 空 → 转告终止；多班次 → 用户按 planTip 选择；`supply-check` qualify=false → 转告 title/desc 终止。
+> - 补卡理由控件（TextareaField）是否必收以 form-schema 的 required 为准（控件必填性由模板配置决定）；图片控件（DDPhotoField）一期跳过并提示客户端补充。
+> - 模板流程不固定（自选审批人只是常见配置之一，管理员可自由改为主管链/条件分支等）：forecast 返回 `workflowActivityRuleVOs[].targetSelect=true` 且 `workflowActor.required=true` 的节点时**必须选人**并组装 `targetSelectActioners`（actionerKey=`workflowActor.actorKey`，漏选会创建成功但流转挂起）；无自选节点则不需要选人，一切以 forecast 返回为准。
+> - `timeZoneInfo` **不本地拼接**（可选字段）：服务端 `supply-plans` 响应不含时区数据，PC 真实数据不含亦可成功。多时区 V2 灰度（multiTimeZoneV2）与补卡次数 trial（enableSupplyTimes）一期不支持。
+
+---
+
+### DDBizSuite · attendance.goout（外出套件）
+
+> **支持通过 `+check-companion-schedules` / `+calculate-approve-duration` 命令链发起**，完整工作流见 [oa-goout.md](oa-goout.md)「发起外出审批」。识别特征：`componentName == "DDBizSuite"` 且 `props.bizType == "attendance.goout"`；子控件在 `children` 内（按 `bizAlias` 识别：`type` / `startTime` / `finishTime` / `duration` / `traveler`）。
+
+模板 Schema 结构（从 `form-schema` 获取，需下钻 children）：
+```json
+{
+  "componentName": "DDBizSuite",
+  "props": {
+    "bizType": "attendance.goout", "bizAlias": "goout", "extract": true,
+    "unit": "day",
+    "childFieldVisible": {"traveler": true, "type": true},
+    "id": "DDBizSuite_2YVW4KTZ17SW", "label": "外出"
+  },
+  "children": [
+    {"componentName": "DDSelectField", "props": {"bizAlias": "type", "id": "DDSelectField_...", "label": "外出类型", "required": true,
+      "options": [{"value": "外出类型2", "key": "option_...", "extension": {"unit": "halfDay"}}]}},
+    {"componentName": "DDDateField", "props": {"bizAlias": "startTime", "id": "DDDateField_...", "label": "开始时间", "required": true}},
+    {"componentName": "DDDateField", "props": {"bizAlias": "finishTime", "id": "DDDateField_...", "label": "结束时间", "required": true}},
+    {"componentName": "NumberField", "props": {"bizAlias": "duration", "id": "NumberField_...", "label": "时长", "required": true, "disable": true}},
+    {"componentName": "InnerContactField", "props": {"bizAlias": "traveler", "id": "InnerContactField_...", "label": "同行人", "required": false, "max": 30, "choice": "1"}}
+  ]
+}
+```
+
+**有效单位判定**：`childFieldVisible.type≠false` 且 options 非空 → 选定 option 的 `extension.unit`（day/halfDay/hour）；type 不可见（options 为空数组）→ 套件 `props.unit`。有效单位决定 startTime/finishTime 的 value 格式与 `+calculate-approve-duration` 的 `--duration-mode`（day→1，halfDay→2 + `--half-start/--half-end`，hour→3）。
+
+提交条目结构（**extract=true 展平形态**：条目是子控件而非 DDBizSuite 容器；**必须走 `create-instance --request` 高级模式**）：
+
+| 条目 | value | extValue |
+|------|-------|----------|
+| type（可见时） | option 显示值（如「外出类型2」） | **重组对象** JSON 字符串：`{"label":<option.value>,"key":<option.key>,"extension":<option.extension>}`——键名是 `label` 而非 option 中的 `value`，禁止原样序列化 option 对象 |
+| startTime / finishTime | 有效单位格式（day → `yyyy-MM-dd`；halfDay → `yyyy-MM-dd 上午/下午`；hour → `yyyy-MM-dd HH:mm`） | 无 |
+| duration | 数字：有效单位=hour → durationInHour，否则 durationInDay | 时长计算响应**按下方映射表转换后**的 JSON 字符串 + `"_from"`/`"_to"`（= 起止 value） |
+| traveler（可见且有同行人时） | **userId JSON 数组字符串** `"[\"uid1\",\"uid2\"]"` | `[{"emplId":uid,"name":姓名,"avatar":"","itemId":uid}]` JSON 字符串（avatar 可空） |
+
+duration extValue 映射（`+calculate-approve-duration` 响应（`data.value`）→ extValue 结构）：
+
+| extValue 字段 | 来源 | 转换 |
+|---|---|---|
+| `durationInDay` / `durationInHour` | 响应同名字段 | 字符串转数字（"0.50" → 0.5） |
+| `isModifiable` | 响应 `modifiable` | 改名 |
+| `unit` | 响应 `durationUnit` | 改名 |
+| `pushTag` / `extension` | — | 固定 `""` / `"{\"tag\":\"\"}"` |
+| `detailList[].approveInfo` | `detailList[].features` | `fromTime=applyFromTime`、`toTime=applyToTime`、`durationInDay/durationInHour` 转数字、`fromAcross/toAcross` 取 classSections 的 startAcross/endAcross |
+| `detailList[].classInfo` | `detailList[]` + `features` | `hasClass` 平移、`name=className`、`sections=classSections`（剔除 durationMins）、`restSections=[]` |
+| `detailList[].isRest` / `workTimeMinutes` / `workDate` | `detailList[]` / `features` | isRest 取 features.isRest，其余平移 |
+| `compressedValue` | 响应同名字段 | 原样（禁止解析/改写） |
+| `_from` / `_to` | — | 附加，= 起止条目的 value 原样 |
+
+> **IMPORTANT：**
+> - `bizAlias` 不组装（MCP formComponentValues 无此字段，服务端按 id 匹配）；**不构造 DDBizSuite 容器条目**（extract=true 展平）；控件 id 必须当次 form-schema 实时取（模板改版即失效，套件外控件 id 可能即中文 label）。
+> - **traveler 的 value 必须是 userId 的 JSON 数组字符串**（姓名显示值经 MCP 通道会触发服务端系统错误）；服务端回读时将 value 规范化为逗号连接 userId 串。
+> - 时长、detailList、compressedValue 一律以 `+calculate-approve-duration`（**--biz-type 2 --approve-biz-type attendance.goout**；--biz-type 5 报业务错误 C0002）服务端计算为准，**严禁本地估算/手改**（不支持 customDuration）；duration 的 value 提交数字（detail 回读为字符串属服务端归一化）。
+> - 有同行人时必须先经 `+check-companion-schedules --approve-type 2` 校验：`valid=false` → 原样转告 title/alertInfo + 冲突同行人（userIds），剔除后重试。
+> - 外出模板常见必选自选审批人节点：forecast 返回 `workflowActivityRuleVOs[].targetSelect=true` 且 `required=true` 时**必须选人**组装 `targetSelectActioners`（缺失时服务端拒绝创建）；组装字段为 **actionerKey**（= 本次 forecast 的 `workflowActor.actorKey`）+ **actionerStaffIds**（userId）——字段名误写为 activityId/actionerUserIds 会创建成功但流转挂起（tasks 返回空 taskIdList）；一切以当次 forecast 返回为准。
+
+### DDBizSuite · attendance.batchovertime（加班套件）
+
+> 加班套件支持 CLI 组装提交，完整工作流见 [oa-overtime.md](oa-overtime.md)「发起加班审批」。识别特征：`componentName == "DDBizSuite"` 且 `props.bizType == "attendance.batchovertime"`；子控件在 `children` 内（按 `bizAlias` 识别：`partner` / `startTime` / `finishTime` / `everyDayDuration` / `duration` / `compensation`）。
+
+模板 Schema 结构（从 `form-schema` 获取，需下钻 children；无 everyDayDuration 的旧版模板降级 submitUrl 引导）：
+```json
+{
+  "componentName": "DDBizSuite",
+  "props": {
+    "bizType": "attendance.batchovertime", "bizAlias": "overtime",
+    "unit": "hour",
+    "id": "DDBizSuite_5ZJ2V5MOR4OW", "label": "加班",
+    "push": {"pushTag": "加班"}, "childFieldVisible": {"partner": true, "type": true, "punchDetails": false}
+  },
+  "children": [
+    {"componentName": "DDSelectField", "props": {"bizAlias": "type", "invisible": true}},
+    {"componentName": "InnerContactField", "props": {"bizAlias": "partner", "id": "InnerContactField_...", "label": "加班人", "required": true}},
+    {"componentName": "DDDateField", "props": {"bizAlias": "startTime", "id": "DDDateField_...", "label": "开始时间", "required": true}},
+    {"componentName": "DDDateField", "props": {"bizAlias": "finishTime", "id": "DDDateField_...", "label": "结束时间", "required": true}},
+    {"componentName": "TableField", "props": {"bizAlias": "everyDayDuration", "id": "TableField_...", "label": "明细",
+      "children": [
+        {"componentName": "DDDateField", "props": {"bizAlias": "overtimeDate", "id": "DDDateField_...", "label": "加班时间"}},
+        {"componentName": "NumberField", "props": {"bizAlias": "overtimeDuration", "id": "NumberField_...", "label": "加班时长"}}
+      ]}},
+    {"componentName": "NumberField", "props": {"bizAlias": "duration", "id": "NumberField_...", "label": "总时长", "required": true}},
+    {"componentName": "DDSelectField", "props": {"bizAlias": "compensation", "id": "DDSelectField_...", "label": "加班补偿", "hidden": true}}
+  ]
+}
+```
+
+**有效单位判定**：`+get-complex-overtime-setting --users <加班人>` 响应 `interactMode`（1=day / 2=halfDay / 3=hour）优先；与模板 `props.unit` 不一致时以 interactMode 为准（单位错配时清空重填，CLI 无该联动——必须先校验再收集）。`reason` 非空 = 该员工组禁止加班，原样转告并终止。
+
+提交条目结构（**容器包裹形态**：schema 无 extract，提交 DDBizSuite 容器条目，value = JSON.stringify(children 条目数组)；与补卡/外出的展平形态相反——先例不可跨类型推用；**必须走 `create-instance --request` 高级模式**）：
+
+容器条目：`{"id":<套件 props.id>,"name":<套件 props.label>,"value":"<children stringify>","extValue":""}`
+
+**子字段可见性过滤（childFieldVisible，DDBizSuite 组件级通用）**：组装 children 前先读套件 `props.childFieldVisible`——某 bizAlias 值 `=== false` 时该子控件**不收集、不组装条目**（组件构造期 filter 直接过滤、不创建字段实例，不渲染不提交）。**仅 `=== false` 生效，缺 key 或 true 均为显示**；与控件级 invisible/hidden 并存，任一命中即不组装。`partner=false` → 模板无加班人字段：不组装 partner 条目、不支持代提交/批量（加班人即发起人）；`type=false` / `partnerTip=false` / `punchDetails=false` 与既有不组装口径一致（type invisible 派生、TextNote/打卡明细纯展示）。各模板配置不同（如加班-new 为 `{"partner":true,"punchDetails":false,"type":true}`），以当次 form-schema 为准。
+
+children 条目（位于容器 value 字符串内部，`key`=子控件 props.id；extendValue 保持原生形态——partner 为原生数组、duration 为原生对象、TableField 为字符串）：
+
+| # | bizAlias | 构造规则 |
+|---|----------|----------|
+| 1 | partner | `{"key":<id>,"label":"加班人","value":"<姓名逗号连接>","bizAlias":"partner","extendValue":[{"avatar":"","emplId":<userId>,"name":<姓名>,"read":false,"readTime":0,"itemId":<userId>}]}`；姓名↔userId 经 aisearch person 同源解析；单/多选与上限以当次 form-schema partner props 为准 |
+| 2/3 | startTime / finishTime | `{"key":<id>,"label":"开始时间"/"结束时间","value":<有效单位格式>,"bizAlias":"startTime"/"finishTime"}`；无 extendValue |
+| 4 | everyDayDuration | 多天（跨度>1 天）：value=stringify 行数组，行=`{"rowValue":[{overtimeDate 子条目},{"key":<overtimeDuration id>,"label":"加班时长","value":"<每日时长字符串>","bizAlias":"overtimeDuration"}],"rowNumber":"<TableField id>_<12位随机串>"}`，extendValue=`"{\"statValue\":[],\"componentName\":\"TableField\"}"`（字符串）；单日省略本行。**多天明细随两阶段确认流程组装（流程见 [oa-overtime.md](oa-overtime.md) 步骤 6）**；rowNumber 形态 `<TableField id>_<12位随机串>`；overtimeDate.extendValue.status 可回填计算响应 detailList[].dayType（workDay/restDay/holiday），空串亦可 |
+| 5 | duration | `{"key":<id>,"label":<多天="总时长"/单日=schema label>,"value":"<总时长字符串>","bizAlias":"duration","extendValue":{...时长计算响应按外出套件映射表转换后的字段集（非原样透传，见 IMPORTANT）...,"durationUnit":<有效单位>,"_from":<T1>,"_to":<T2>}}`；总时长取 durationInHour（hour）或 durationInDay（day/halfDay） |
+| 6 | compensation | 时长计算响应 `overtimeRedressBy=="manual"` → 必选：`{"key":<id>,"label":"加班补偿","value":"转调休\|加班费","bizAlias":"compensation","extendValue":{"key":"vacation\|charge"}}`；否则空条目 `{"key":<id>,"label":"加班补偿","bizAlias":"compensation"}` |
+
+> **IMPORTANT：**
+> - children 内 `bizAlias` 照常携带（容器 value 字符串为同构形态，与展平形态「不组装 bizAlias」相反）；控件 id 必须当次 form-schema 实时取。
+> - 时长、detailList、compressedValue、featureMap 一律以 `+calculate-approve-duration --biz-type 1 --new-overtime` 服务端计算为准，严禁本地估算/手造；compressedValue 为服务端 gzip 签名，禁止解析改写。
+> - 时长计算响应 → duration extendValue 的字段映射参照外出套件章节映射表（同一 calculate_approve_duration 工具），**禁止原样透传**：extendValue 必含非空 `unit`（映射自响应 `durationUnit`）、`durationInHour`、`durationInDay`、`compressedValue`，缺任一即拒「不合法的参数」；值类型不限。一阶段判歧义语义以 oa-overtime.md 步骤 6 为准（歧义窗口返回 durationInHour=0 + 逐日骨架）。
+> - 与 H5 发起链路的已知差异（不补齐）：H5 feature 层在计算响应上恒附加 `_overTimeApplyUserId`（加班人 uid，排查用途）随 duration extendValue 持久化；CLI 不组装该字段（服务端不依赖），PC 端同样不携带。
+> - partner（InnerContactField）value 姓名形态可落库（姓名 value + emplId extValue）；若姓名形态被丢弃/报错，改用 userId JSON 数组字符串，extendValue 保留姓名数组。
+> - 明细级 `overtimeDurationStatus`（detailList[].approveInfo）：0=回填 / 1=回填并提示 message / 2=该日禁止加班（置灰禁提交；CLI 应终止并转告 message）。CLI 时长以服务端计算为准，天然满足回填语义。
+> - 提交侧对照注记（CLI 不组装）：startTime/finishTime extendValue 可注入 `timeZoneInfo`（跨时区场景）；`type` 加班类型多天按 detailList dayType 优先级（holiday>restDay>workDay）自动回填；`punchDetails` 打卡明细为纯展示组件（不收集不组装）；duration 手改会写 extendValue.customDuration（CLI 禁止手改，不产生该字段）；批量加班响应 `approveAlertInfo`（title/content/detailKey）为班次冲突提示，须原样转告。
+
+---
+
+## API 不支持的控件
+
+以下控件**不支持**通过创建实例 API 提交，遇到时应告知用户需在钉钉客户端补充：
+
+| 控件 | componentName | 原因 |
+|------|---------------|------|
+| 文字说明 | `TextNote` | 纯展示，不收集数据 |
+| 计算公式 | `CalculateField` | 由系统自动计算，不可手动填写 |
+| 流水号 | `SeqNumberField` | 由系统自动生成 |
+| OCR 文本识别 | `OcrTextField` | 需要客户端 OCR 交互 |
+| OCR 身份证识别 | `OcrIdCardField` | 需要客户端 OCR 交互 |
+
+> **部分支持的控件：** `DDPhotoField`（图片控件）**支持通过 URL 直接提交**，但不支持本地文件上传（CLI 未封装钉盘 CDN 上传流程）。若用户只有本地文件，需告知在钉钉客户端补充。详见本文 [DDPhotoField](#ddphotofield图片控件) 章节。
+
+> **套件类控件（大部分暂不支持）** — `InvoiceField`（发票）、`RecipientAccountField`（收款账户）等业务套件控件当前暂不支持通过 CLI 发起，包含这些控件的审批模板请直接在钉钉客户端操作。**例外：`DDHolidayField`（请假套件）、`DDBizSuite · attendance.supply`（补卡套件）、`DDBizSuite · attendance.goout`（外出套件）与 `DDBizSuite · attendance.batchovertime`（加班套件）已支持**，按上方章节与 [oa-leave.md](oa-leave.md) / [oa-supply.md](oa-supply.md) / [oa-goout.md](oa-goout.md) / [oa-overtime.md](oa-overtime.md) 工作流发起。
+
+---
+
+## 组装优先级
+
+1. **每次发起前都重新调用 `form-schema`**，不得复用旧结果（模板可能已被修改）
+2. 先读 `form-schema` 返回的 `content`，识别所有控件的 `label`、`componentName`、`options`、`props.required`
+3. **检查是否存在不支持控件且为必填项（`props.required: true`）**，若有则直接告知用户该模板不支持通过 CLI 发起，请在钉钉客户端操作
+4. 按本文档中每种控件的 value 格式组装 `formComponentValues`
+5. **不要把 `form-schema` 的 `content` 当成可直接提交的模板**
+6. 遇到 API 不支持的控件（非必填），跳过并告知用户

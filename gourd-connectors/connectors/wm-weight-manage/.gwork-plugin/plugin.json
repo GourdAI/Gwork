@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "wm-weight-manage",
+  "version": "1.0.0",
+  "description": "Generate a personalized adult weight-management plan and render it as a standalone interactive HTML page with phased goals, nutrition and exercise guidance, meal photo analysis, and a local weight tracker.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "微脉体重管理",
+        "name_en": "Weimai Weight Management",
+        "description_zh": "生成个性化成人体重管理方案，渲染为可打卡的独立 HTML 页面：分阶段目标、饮食运动建议、餐食照片热量分析、本地体重记录。",
+        "description_en": "Generate a personalized adult weight-management plan and render it as a standalone interactive HTML page with phased goals, nutrition and exercise guidance, meal photo analysis, and a local weight tracker."
+      },
+      "categories": [
+        "entertainment-and-media"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

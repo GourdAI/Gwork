@@ -332,9 +332,10 @@
     }
 
     /* 登录弹框视觉（参照 Qoder 官网登录页）：【左右分栏】——左品牌视觉区
-       （手写体标语 + 漂浮图标插画 + 视觉署名），右表单区（品牌标 + 动态主标题
-       + 分段式登录/注册切换 + 表单 + 单一主操作按钮）。窄屏（<680px）左栏由
-       CSS 隐藏，回落为单列表单，功能不受影响。
+       （手写体标语 + 漂浮图标插画 + 视觉署名），右表单区（品牌标 + 分段式
+       登录/注册切换 + 表单 + 单一主操作按钮）。品牌标即产品名，登录/注册由
+       分段控件表达，不再叠加「登录 GWork / 创建账号」副标题（避免重复）。
+       窄屏（<680px）左栏由 CSS 隐藏，回落为单列表单，功能不受影响。
        【关闭按钮挤占修复】旧版 .account-close 浮在右上角、tabs 行又用 margin-right
        硬给它让位，导致「登录/注册」分段被挤偏、视觉重心失衡。现改为：关闭按钮
        绝对定位在弹框右上角、不占据内容流；tabs 居中且不再预留右侧空间。
@@ -356,7 +357,7 @@
         h += '<div class="account-brand">'
             + '<img class="account-brand-logo" src="/img/favicon.png" alt="" aria-hidden="true">'
             + '<span class="account-brand-name">GWork</span></div>';
-        h += '<h2 class="account-auth-title" id="accountAuthTitle"></h2>';
+        /* 副标题（登录 GWork / 创建账号）已移除：品牌标与分段控件已表意，避免重复 */
         h += '<div class="account-tabs" data-mode="' + authMode + '">'
             + '<button class="account-tab' + (authMode === 'login' ? ' active' : '') + '" type="button" data-act="tab-login">' + esc(t('account.sign_in', '登录')) + '</button>'
             + '<button class="account-tab' + (authMode === 'register' ? ' active' : '') + '" type="button" data-act="tab-register">' + esc(t('account.sign_up', '注册')) + '</button>'
@@ -540,18 +541,9 @@
         });
     }
 
-    /* 主标题与提交按钮文案同步切换（Qoder 式：标题说明当前在做什么）。
-       标题用 <h2> + textContent 赋值，绝不走 innerHTML —— 它是用户可见文本，
-       必须与翻译值一并转义安全。 */
+    /* 左栏标语与提交按钮文案同步刷新。副标题已移除：品牌标 + 分段控件已表意，不再重复说明。 */
     function refreshAuthLabels() {
-        var title = document.getElementById('accountAuthTitle');
-        if (title) {
-            title.textContent = authMode === 'register'
-                ? t('account.auth_title_register', '创建账号')
-                : t('account.auth_title_login', '登录 GWork');
-        }
-        /* 左栏手写体标语：与主标题同源于 i18n，语言切换（60s 保活刷新路径）
-           也会经 refreshAuthLabels 同步，无需额外钩子。 */
+        /* 左栏手写体标语：随语言切换经本函数同步，无需额外钩子。 */
         var slogan = document.getElementById('accountAuthSlogan');
         if (slogan) {
             slogan.textContent = t('account.auth_slogan', '不止执行，更是创造。');

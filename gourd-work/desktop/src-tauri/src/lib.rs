@@ -362,6 +362,7 @@ pub fn run() {
             auth::auth_logout,
             auth::auth_refresh,
             auth::auth_self,
+            auth::auth_official_refresh,
             // 自动更新状态机（前端 app-settings-about.js / app-update-badge.js
             // 通过 __GOURD_IPC__ 的 updater* 方法订阅，状态机本身已就绪）
             updater::updater_get_version,

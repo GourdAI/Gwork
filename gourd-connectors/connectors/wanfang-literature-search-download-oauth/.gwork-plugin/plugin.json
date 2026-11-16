@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "wanfang-literature-search-download-oauth",
+  "version": "1.0.0",
+  "description": "Search academic journals, dissertations, patents, standards, and other literature through Wanfang Data MCP, with intelligent search, full-text downloads, and citation analysis.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "万方数据",
+        "name_en": "Wanfang Data",
+        "description_zh": "通过万方数据 MCP 查询学术期刊、学位论文、专利、标准等文献资源，支持智能检索、全文下载与引文分析。",
+        "description_en": "Search academic journals, dissertations, patents, standards, and other literature through Wanfang Data MCP, with intelligent search, full-text downloads, and citation analysis."
+      },
+      "categories": [
+        "research-and-data"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

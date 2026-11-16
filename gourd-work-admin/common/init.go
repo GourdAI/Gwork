@@ -199,7 +199,8 @@ func initConstantEnv() {
 	constant.AzureDefaultAPIVersion = GetEnvOrDefaultString("AZURE_DEFAULT_API_VERSION", "2025-04-01-preview")
 	constant.NotifyLimitCount = GetEnvOrDefault("NOTIFY_LIMIT_COUNT", 2)
 	constant.NotificationLimitDurationMinute = positiveUserSessionEnv("NOTIFICATION_LIMIT_DURATION_MINUTE", 10)
-	// GenerateDefaultToken 是否生成初始令牌，默认关闭。
+	// 保留 GENERATE_DEFAULT_TOKEN 的读取以兼容既有部署，但已不再作为「是否生成」的开关：
+	// 所有新注册用户都会获得普通初始令牌。
 	constant.GenerateDefaultToken = GetEnvOrDefaultBool("GENERATE_DEFAULT_TOKEN", false)
 	// 是否启用错误日志
 	constant.ErrorLogEnabled = GetEnvOrDefaultBool("ERROR_LOG_ENABLED", false)

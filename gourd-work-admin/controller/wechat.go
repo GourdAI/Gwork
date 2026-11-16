@@ -91,6 +91,8 @@ func WeChatAuth(c *gin.Context) {
 				common.ApiError(c, err)
 				return
 			}
+			// 新用户在事务外补建普通模型 key，避免改动 user.Insert 的事务边界。
+			ensureInitialModelKey(&user)
 		} else {
 			common.ApiErrorT(c, "New user registration has been disabled by administrator")
 			return

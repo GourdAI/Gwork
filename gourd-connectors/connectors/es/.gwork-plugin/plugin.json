@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "es",
+  "version": "1.0.0",
+  "description": "Operate Tencent Cloud Elasticsearch Service (ES) via MCP: list instances, inspect cluster health/nodes/shards/thread pools, browse index settings and mappings, query monitoring metrics and cluster logs, diagnose performance and unassigned shards, and manage clusters (scale nodes/disk, restart, rollover, aliases, Kibana access, Logstash pipelines).",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "腾讯云 Elasticsearch Service",
+        "name_en": "Tencent Cloud Elasticsearch Service",
+        "description_zh": "通过 MCP 操作腾讯云 Elasticsearch Service（ES）：查询实例列表，查看集群健康、节点、分片与线程池状态，浏览索引配置与 Mapping，查询监控指标与集群日志，诊断集群性能与分片未分配问题，并管理集群（节点/磁盘变配、重启、索引 Rollover、别名、Kibana 访问、Logstash 管道）。",
+        "description_en": "Operate Tencent Cloud Elasticsearch Service (ES) via MCP: list instances, inspect cluster health/nodes/shards/thread pools, browse index settings and mappings, query monitoring metrics and cluster logs, diagnose performance and unassigned shards, and manage clusters (scale nodes/disk, restart, rollover, aliases, Kibana access, Logstash pipelines)."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

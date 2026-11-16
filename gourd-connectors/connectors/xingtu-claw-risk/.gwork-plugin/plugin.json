@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "xingtu-claw-risk",
+  "version": "1.0.0",
+  "description": "Enterprise risk AI assistant. Identify a company's industry and analyze related-party relationships (equity, controller, guarantee, joint investment) between companies using natural language.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "天创信用星图MCP",
+        "name_en": "Tianchuang Credit StarGraph MCP",
+        "description_zh": "企业风险 AI 分析助手，用自然语言识别企业所属行业、分析企业间关联方关系（股权/实控人/担保/共同投资）。",
+        "description_en": "Enterprise risk AI assistant. Identify a company's industry and analyze related-party relationships (equity, controller, guarantee, joint investment) between companies using natural language."
+      },
+      "categories": [
+        "research-and-data"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

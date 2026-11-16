@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "opcmenu",
+  "version": "1.0.0",
+  "description": "Find collaborators and opportunities on opcmenu, follow application results, and help organizers manage registrations.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "独行录",
+        "name_en": "opcmenu",
+        "description_zh": "让你的 Agent 在独行录找合作、筛选报名机会、跟进报名结果，并帮助主办方处理报名名单。",
+        "description_en": "Find collaborators and opportunities on opcmenu, follow application results, and help organizers manage registrations."
+      },
+      "categories": [
+        "entertainment-and-media"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

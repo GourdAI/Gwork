@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "tongzhou-fin-research",
+  "version": "1.0.0",
+  "description": "Connects market data, research, industry graphs, and Tongzhou evidence for public-equity analysis.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "同舟金融研究",
+        "name_en": "Tongzhou Financial Research",
+        "description_zh": "连接公开行情、研报检索、行业图谱与同舟投研材料，为股市研究提供可复核证据。",
+        "description_en": "Connects market data, research, industry graphs, and Tongzhou evidence for public-equity analysis."
+      },
+      "categories": [
+        "finance"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

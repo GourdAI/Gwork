@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "liesun",
+  "version": "1.0.0",
+  "description": "Connect Liesun for scientific, precise hiring. Compare candidates, review interview-recording analysis, track pipeline and funnel — quickly assess in one sentence whether to move someone forward.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "猎隼AI智聘",
+        "name_en": "Liesun AI Recruiting",
+        "description_zh": "连接猎隼，科学选人、精准选人。人选对比、面试录音分析、在招进展和招聘漏斗，一句话快速评估还要不要往下推。",
+        "description_en": "Connect Liesun for scientific, precise hiring. Compare candidates, review interview-recording analysis, track pipeline and funnel — quickly assess in one sentence whether to move someone forward."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

@@ -572,8 +572,10 @@ pub fn has_unfinished_items(content: &str) -> bool {
 /// red line). It only asks the model to record status, then keep going.
 pub fn stale_reminder(raw: &str) -> String {
     let chars: Vec<char> = raw.trim().chars().collect();
-    let list = if chars.len() > 1500 {
-        format!("{}…", chars[..1500].iter().collect::<String>())
+    // 契约 §3.2：截断收紧到 800 字符并加 …[truncated] 标记（原 1500 只加 …）。
+    // 提醒是温和 nudge，不是清单全文回放；超长清单挤占上下文得不偿失。
+    let list = if chars.len() > 800 {
+        format!("{}…[truncated]", chars[..800].iter().collect::<String>())
     } else {
         chars.into_iter().collect()
     };
@@ -604,40 +606,35 @@ pub const PARAM_TODOS_DESC: &str = "Task checklist. Preferred shape: a JSON arra
 // English planning guide for `build_en`; the Chinese twin below is for `build_cn`.
 // Both exist because the kernel ships two system prompts and the format contract
 // has to reach the model whichever one is active.
+// 契约 §3.1 重写（EN 语义等价，CN 见下）：从 7 条 ~904 tokens 精简到 5 条；
+// 原第 4 条「下一轮首个动作必须 todowrite」放宽为「随做随记」（可同轮并行）。
 pub const PLANNING_GUIDE_EN: &str = "## Task Planning Guide
-1. **Format contract**: prefer a JSON array for the `todos` argument - each element an object with `content` (required task text) and `status` (`pending` / `in_progress` / `done`), plus optional `header`/`group` for a section. A raw Markdown string is also accepted: one task per line, each starting with `- ` and carrying a `[ ]` / `[/]` / `[x]` state marker, separated by real newlines. Never write newlines as literal backslash-n, and never send placeholders such as `placeholder`.
-2. **When to plan**: tasks needing more than 3 steps get a checklist via `todowrite`; re-plan with a full rewrite when the goal or boundaries change materially.
-3. **Read before acting**: whenever you are not certain of current progress, call `todoread` first - mandatory after context compression, on 'continue / keep going', on a new turn, and when resuming an interrupted task. The stored list can lag reality (the interrupt may have hit before a write), so cross-check unfinished items against prior observations before repeating any work.
-4. **Update as you go**: record each state change the moment it happens instead of batching; set `[/]` before starting an item and `[x]` as soon as its result lands - especially after `task`/`multitask` results.
-5. **Finish what you start**: while `[ ]` or `[/]` items remain the task is not done - keep working instead of summarising. Stop only on genuine blockers (missing permission or information) or when a decision has been put to the user and is pending.
-6. **Trust the tool result**: the `[进度]` / `[继续]` / `[完成]` footer is the authority on whether you may wrap up; a `[格式警告]` means your argument was malformed - fix the format per rule 1 and rewrite.
-7. **Out of scope**: do not build a plan for common-sense questions, single calculations, or one-off tool calls.
+1. **Format**: prefer a JSON array for todos, each item {content, status: pending|in_progress|done}, optional header/group for grouping; Markdown is also accepted (one `- [ ]`/`- [/]`/`- [x]` + text per line, real newlines). No literal backslash-n, no placeholders, no unmarked list items.
+2. **When to use**: build a checklist for complex/multi-stage/multi-deliverable tasks; not for simple Q&A or single-step operations. Keep it short, outcome-oriented and verifiable — not one entry per file or command. Rewrite it wholesale when the goal changes materially.
+3. **Status discipline**: at most one in_progress; set [/] before starting, [x] as soon as the result lands, record as you go without batching; merge items finished together into one todowrite. Update the matching item immediately after delegation results return.
+4. **Resume calibration**: after an interrupt/compression, or when the user says \"continue\", call todoread first and cross-check prior execution evidence before acting; mark genuinely finished items [x] directly — never blindly redo them.
+5. **Finish criteria**: the [进度]/[继续]/[完成] footer returned by the tool is authoritative; keep working while unfinished items remain, and stop only on a genuine blocker or when a submitted plan awaits the user's decision. Do not restate the whole checklist in prose.
 ";
 
 /// Task-planning guide injected into the system prompt (Java
 /// `TodoTalent.getInstruction`).
 ///
-/// Before this the kernel only said "use `todowrite` to track progress", which
-/// left the three behaviours that actually need enforcing unstated: read the list
-/// before acting on a resumed or compressed session, update it as each result
-/// lands rather than batch-writing it later, and do not stop while items remain
-/// open. The last one is what the footer's `[继续]` / `[完成]` push is judged
-/// against — Java's rules 2, 3, 4 and 6.
+/// 契约 §3.1 重写（CN 目标 ~450 tokens，原文 ~904）：五条规则覆盖格式、何时建
+/// 清单、状态纪律、恢复校准与收尾判据。原第 4 条「下一轮首个动作必须 todowrite」
+/// 放宽为「随做随记」，允许同轮并行更新。
 pub const PLANNING_GUIDE: &str = "## 任务规划指南 (Task Planning Guide)
-1. **格式契约**: `todowrite` 的 todos 参数优先传 JSON 数组：每个元素为对象，含 `content`（任务文本，必填）与 `status`（`pending` / `in_progress` / `done`），可选 `header`/`group` 作为分组；也兼容 Markdown 字符串：每条任务独占一行、以 `- ` 开头并带 `[ ]` / `[/]` / `[x]` 状态标记，使用真实换行分隔。不要把换行写成字面反斜杠 n，不要传 `placeholder` 之类占位符，不要用无状态的普通列表项。
-2. **启动机制**: 超过3步以上的复杂任务，要通过 `todowrite` 创建计划；任务边界或目标发生重大变化时，用 `todowrite` 重构完整计划。
-3. **状态感知（恢复优先）**: 凡是你对当前进度没有十足把握时，必须 **先** `todoread` 再行动，禁止凭记忆推断。以下场景一律强制先读：上下文被压缩/截断后、用户说“继续/接着做/还有吗”、开启新一轮对话、或任务中途被打断后恢复。**注意：中断恢复后清单状态可能滞后于实际进度（中断时刻可能未及时 todowrite）**，对未完成项要先核对历史 Observation 中是否已有对应执行证据，确已完成的直接用 `todowrite` 确认状态即可，禁止盲目重做。
-4. **实时推进（状态变化即更新）**: 状态变更要随做随记，禁止跨回合攒着批量补记。**任何工具结果使某项状态发生变化的那一刻，下一轮的首个动作必须是 `todowrite` 落盘状态，然后才能继续后续动作**：开始做某项前先置 `[/]`；某项拿到执行结果后立即置 `[x]`；尤其收到 `task`/`multitask` 委派结果后，必须马上更新对应项。串行任务通常同一时刻只有一项 `[/]`；并行场景允许多项同时 `[/]`，但每项一旦完成都要第一时间单独更新，避免进度失真。
-5. **闭环校验（禁止半途收尾）**: 只要清单中还存在 `[ ]` 或 `[/]`，即视为任务未完成。默认行为是 **继续把它做完**，不得停下、不得输出总结。仅当遇到真正的停止条件——外部阻塞（缺少权限、缺少必要信息）或**等待用户拍板方案/决策**——时，才允许停下并明确说明；不得把“可自行完成的剩余工作”当作追问理由，但**已提交方案、正在等待用户选择时停下是合规行为，不是半途收尾**。
-6. **以返回为准**: `todoread`/`todowrite` 的返回值会附带 [进度] 与 [继续]/[完成] 提示，请以该提示作为“是否可以收尾”的判定依据；返回值出现 [格式警告] 时说明入参格式有误，须按第 1 条修正后重写。
-7. **适用边界**: 不要为常识性提问、简单计算或单次工具创建计划。
+1. **格式**：todos 优先传 JSON 数组，每项 {content, status: pending|in_progress|done}，可选 header/group 分组；也接受 Markdown（每行 `- [ ]`/`- [/]`/`- [x]` + 文本，真实换行）。禁止字面反斜杠 n、占位符、无状态列表项。
+2. **何时用**：复杂/多阶段/多产出任务建清单；简单问答与单步操作不建。清单短小、面向结果、可验证，不要一文件一命令一条目。目标重大变化时整体重写。
+3. **状态纪律**：至多一项 in_progress；开始前置 [/]，结果落地即置 [x]，随做随记不攒批；多项同时完成合并为一次 todowrite。委派结果返回后立即更新对应项。
+4. **恢复校准**：中断恢复/压缩后/用户说「继续」时，先 todoread 对照历史执行证据再行动，确已完成的直接置 [x]，禁止盲目重做。
+5. **收尾判据**：以工具返回的 [进度]/[继续]/[完成] footer 为准；仍有未完成项就继续做，仅在真实阻塞或已提交方案等待用户拍板时停下。不要在正文复述整份清单。
 ";
 
 /// `todoread` reply: the stored list plus the same footer `todowrite` returns
 /// (Java `todoRead` → `content + buildProgressFooter(content)`). The model judges
 /// "may I stop?" from that footer alone, so both tools must speak with one voice.
-pub fn read_reply(raw: &str) -> String {
-    format!("{}{}", raw, progress_footer(&measure(raw)))
+pub fn read_reply(raw: &str, resume_hint: bool) -> String {
+    format!("{}{}", raw, progress_footer(&measure(raw), resume_hint))
 }
 
 /// Progress footer appended to every `todowrite` / `todoread` result.
@@ -651,7 +648,11 @@ pub fn read_reply(raw: &str) -> String {
 /// * everything `[x]` → `[完成]`.
 ///
 /// Wording matches Java `TodoTalent.buildProgressFooter`.
-pub fn progress_footer(p: &TodoProgress) -> String {
+///
+/// 契约 §3.3：`resume_hint` 门控 [提示] 行——常规 run 传 false（`[/]` 就是模型
+/// 自己刚标的进行中项，「可能是上次中断遗留」的提醒是噪声），仅 abnormal-exit
+/// 恢复校准路径的首个 run 传 true（那时清单状态确实可能滞后于实际进度）。
+pub fn progress_footer(p: &TodoProgress, resume_hint: bool) -> String {
     let mut footer = format!(
         "\n[进度] total: {}, done: {}, in-progress: {}, pending: {}.",
         p.total, p.done, p.in_progress, p.pending
@@ -678,7 +679,7 @@ pub fn progress_footer(p: &TodoProgress) -> String {
                 footer.push_str(&format!("\n[待办首项] {}", next));
             }
         }
-        if p.in_progress > 0 {
+        if p.in_progress > 0 && resume_hint {
             footer.push_str(&format!(
                 "\n[提示] 存在 {} 个 `[/]` 进行中项：若当前是中断后的恢复执行，它们可能是上次异常中断的遗留项，实际或许已经完成。请先核对历史 Observation 中是否已有对应执行结果，确已完成的直接用 todowrite 置 [x] 确认，不要盲目重做。",
                 p.in_progress
@@ -755,8 +756,20 @@ mod tests {
     fn stale_reminder_caps_a_long_list() {
         let long = "- [ ] 任务\n".repeat(2000);
         let r = stale_reminder(&long);
-        assert!(r.contains('…'), "an over-long list must be truncated: len={}", r.chars().count());
-        assert!(r.chars().count() < 1700, "nudge + capped list must stay bounded: {}", r.chars().count());
+        // 契约 §3.2：截断收紧到 800 字符并加 …[truncated] 标记。
+        assert!(r.contains("…[truncated]"), "an over-long list must carry the truncation marker: len={}", r.chars().count());
+        assert!(r.chars().count() < 1000, "nudge + 800-char capped list must stay bounded: {}", r.chars().count());
+    }
+
+    /// 契约 §3.2：恰好 800 字符不截断（边界闭区间），801 才截。
+    #[test]
+    fn stale_reminder_truncation_boundary() {
+        let exact = "甲".repeat(800);
+        let r = stale_reminder(&exact);
+        assert!(!r.contains("[truncated]"), "800 chars must not be truncated");
+        let over = "甲".repeat(801);
+        let r2 = stale_reminder(&over);
+        assert!(r2.contains("…[truncated]"), "801 chars must be truncated");
     }
 
     #[test]
@@ -1003,7 +1016,7 @@ mod tests {
 
     #[test]
     fn empty_tally_does_not_instruct_the_model_to_continue() {
-        let f = progress_footer(&measure("完全不是清单"));
+        let f = progress_footer(&measure("完全不是清单"), false);
         assert!(f.contains("total: 0"), "{f}");
         assert!(!f.contains("[继续]"), "unsatisfiable push: {f}");
         assert!(!f.contains("[完成]"), "nothing was finished either: {f}");
@@ -1011,7 +1024,7 @@ mod tests {
 
     #[test]
     fn footer_names_the_first_unfinished_item() {
-        let f = progress_footer(&measure("- [x] A\n- [ ] 修复缺陷\n- [ ] B"));
+        let f = progress_footer(&measure("- [x] A\n- [ ] 修复缺陷\n- [ ] B"), false);
         assert!(f.contains("[待办首项] 修复缺陷"), "{f}");
         assert!(f.contains("[继续] 还有 2 项未完成"), "{f}");
     }
@@ -1019,7 +1032,7 @@ mod tests {
     #[test]
     fn footer_truncates_a_long_task_text() {
         let long = "x".repeat(120);
-        let f = progress_footer(&measure(&format!("- [ ] {}", long)));
+        let f = progress_footer(&measure(&format!("- [ ] {}", long)), false);
         assert!(f.contains(&"x".repeat(80)), "{f}");
         assert!(f.contains("..."), "{f}");
         assert!(!f.contains(&"x".repeat(81)), "{f}");
@@ -1027,13 +1040,45 @@ mod tests {
 
     #[test]
     fn footer_warns_about_in_progress_leftovers() {
-        let f = progress_footer(&measure("- [/] A"));
+        // 契约 §3.3：恢复语境（resume_hint=true）才注入 [提示] 行。
+        let f = progress_footer(&measure("- [/] A"), true);
         assert!(f.contains("[提示] 存在 1 个"), "{f}");
+    }
+
+    /// 契约 §3.3：常规 run（resume_hint=false）的 footer 不带恢复 [提示] 行——
+    /// `[/]` 是模型自己刚标的进行中项，「可能是上次中断遗留」是噪声。
+    #[test]
+    fn footer_omits_resume_hint_on_normal_runs() {
+        let f = progress_footer(&measure("- [/] A\n- [ ] B"), false);
+        assert!(!f.contains("[提示]"), "normal run must not nag about leftovers: {f}");
+        // 其余 footer 行不受影响。
+        assert!(f.contains("[进度]"), "{f}");
+        assert!(f.contains("[继续]"), "{f}");
+        assert!(f.contains("[待办首项]"), "{f}");
+    }
+
+    /// 契约 §3.3 源码级守护：恢复标记必须真的从 run_react_session 的
+    /// abnormal-exit 校准分支传到 ToolContext（纯函数测试全绿但调用点漏接
+    /// 是本仓库踩过的坑）。
+    #[test]
+    fn resume_hint_is_wired_from_the_calibration_branch() {
+        let server_src = include_str!("server/mod.rs");
+        let norm: String = server_src.split_whitespace().collect();
+        assert!(
+            norm.contains("letresume_calibration=session_ctx.interrupted.unwrap_or(false)"),
+            "run_react_session must capture the interrupted flag as resume_calibration"
+        );
+        let react_src = include_str!("react/mod.rs");
+        let norm2: String = react_src.split_whitespace().collect();
+        assert!(
+            norm2.contains("resume_calibration:config.resume_calibration"),
+            "the loop must thread resume_calibration into ToolContext"
+        );
     }
 
     #[test]
     fn all_done_grants_permission_to_wrap_up() {
-        let f = progress_footer(&measure("- [x] A\n- [X] B"));
+        let f = progress_footer(&measure("- [x] A\n- [X] B"), false);
         assert!(f.contains("[完成] 所有事项均已 [x]"), "{f}");
         assert!(!f.contains("[继续]"), "{f}");
     }
@@ -1148,11 +1193,25 @@ mod tests {
                 guide.contains("todoread"),
                 "{name} no longer tells the model to read before acting"
             );
+            // 契约 §3.1 重写后不再单列 [格式警告] 规则（格式契约并入第 1 条），
+            // 改为守护「禁止占位符/字面换行」这一格式纪律仍在。
             assert!(
-                guide.contains("[格式警告]") || guide.contains("格式警告") || guide.contains("malformed"),
-                "{name} no longer explains the format warning"
+                guide.contains("占位符") || guide.contains("placeholder"),
+                "{name} no longer forbids placeholder items"
             );
         }
+    }
+
+    /// 契约 §3.1 / §7：CN 指南长度上限 <1400 字符（原 ~904 tokens 的精简目标）。
+    /// 超长指南挤占每轮上下文，且规则越多模型越容易挑着执行。
+    #[test]
+    fn planning_guide_cn_is_within_the_length_budget() {
+        let len = PLANNING_GUIDE.chars().count();
+        assert!(len < 1400, "CN planning guide too long: {len} chars");
+        // 五条规则齐全（重写不能丢规则）。
+        assert!(PLANNING_GUIDE.contains("随做随记"), "lost the record-as-you-go rule");
+        assert!(PLANNING_GUIDE.contains("恢复校准"), "lost the resume-calibration rule");
+        assert!(PLANNING_GUIDE.contains("收尾判据"), "lost the finish-criteria rule");
     }
 
     #[test]

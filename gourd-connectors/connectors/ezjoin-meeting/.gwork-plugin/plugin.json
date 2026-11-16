@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "ezjoin-meeting",
+  "version": "1.0.0",
+  "description": "Manage EzyJoin meetings via natural language: book rooms, create or cancel meetings, view schedules.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "EzyJoin智慧会议",
+        "name_en": "EzyJoin Smart Meeting",
+        "description_zh": "用自然语言管理 EzyJoin 智慧会议：预约会议室、创建/取消会议、查询会议日程与 AI 纪要。",
+        "description_en": "Manage EzyJoin meetings via natural language: book rooms, create or cancel meetings, view schedules."
+      },
+      "categories": [
+        "communication"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

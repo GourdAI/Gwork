@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "jihua-ai-studio",
+  "version": "1.0.0",
+  "description": "Use natural language to check points, works, generation tasks, and create images with Jihua AI.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "极画AI设计室",
+        "name_en": "Jihua AI Studio",
+        "description_zh": "使用自然语言查看极画AI的积分、作品和创作任务，并提交纯文生图任务。",
+        "description_en": "Use natural language to check points, works, generation tasks, and create images with Jihua AI."
+      },
+      "categories": [
+        "image-and-video-processing"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

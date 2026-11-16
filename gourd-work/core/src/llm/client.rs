@@ -27,11 +27,42 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
-    pub fn new(model: ModelConfig) -> Self {
+    pub fn new(model: ModelConfig) -> anyhow::Result<Self> {
         Self::with_retries(model, 3)
     }
 
-    pub fn with_retries(model: ModelConfig, api_retries: u32) -> Self {
+    /// 构造绑定到单个模型配置的客户端。
+    ///
+    /// `model.official == true` 时（契约 D 节）：clone 配置并把 `api_key`
+    /// 替换为进程内存里缓存的用户普通模型 key；未登录则直接返回明确错误，
+    /// 绝不把配置文件里可能残留的旧 key 发到官方 relay。`api_url` 为空时
+    /// 固定填官方地址。注入后的 key 只进入 `reqwest` 请求头，不写日志、
+    /// 不落盘、不进 HTTP 响应体。
+    pub fn with_retries(model: ModelConfig, api_retries: u32) -> anyhow::Result<Self> {
+        let mut model = model;
+        if model.official {
+            // 统一用 sk-<key> 形态：与 relay、/v1/models 探测和后台令牌列表
+            // 一致，脱敏/审计才有单一基准。（内存里存的是裸 key，admin 的
+            // GetFullKey() 也只是 `return token.Key`，前缀在这里补。）
+            let key = crate::official::bearer_key()
+                .ok_or_else(|| anyhow::anyhow!("请先登录官方账号"))?;
+            model.api_key = key;
+            // 无条件固定官方 relay 到「竞速探测选中的那个站点」：settings.json
+            // 里若残留/被写入了别的 apiUrl，绝不能让进程内存里的用户 key 被
+            // 发到第三方 host。官方源不是可配置自定义地址（契约 C/D 节）。
+            // base 自带 /v1，Dialect::OpenAiChat 据此拼 /v1/chat/completions。
+            model.api_url = crate::official::base_url();
+            // 【安全】官方 relay 只说 OpenAI chat-completions，固定协议，
+            // 绝不走 Dialect::resolve：settings.json 里若被塞 anthropic/gemini，
+            // 或模型名含 claude/gemini，resolve 会选中 x-api-key /
+            // x-goog-api-key 这类「reqwest 重定向不剥离」的自定义凭据头，
+            // 一旦遇到开放重定向就会把官方 key 原样带到第三方。
+            model.standard = "openai".to_string();
+            // 用户自定义头在 build_headers 里是「最后写入、可覆盖」的，
+            // 官方源一律清空，防止在 settings.json 里塞 Authorization /
+            // x-api-key 与官方 key 一起外发或覆盖之。
+            model.headers.clear();
+        }
         // A panic here means the process cannot make model calls at all, so
         // failing loudly at construction is correct.
         //
@@ -52,11 +83,26 @@ impl LlmClient {
         // per-request below. This mirrors `mcp::http_client_no_total_timeout`.
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
+            // 【安全】模型请求头里带着凭据（官方源是进程内存里的用户 key，
+            // 自定义源是配置里的 apiKey），绝不跟随 3xx。reqwest 0.12 默认
+            // 会跟 10 跳：跨 host 才剥内置 Authorization（自定义 x-api-key
+            // 等头根本不在剥离名单里），且 0.12.28 的 https→http 同端口
+            // 降级重定向不剥 Authorization。固定端点不需要重定向，3xx 一律
+            // 当失败处理，彻底断掉「开放重定向把 key 重放出去」这条链。
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build http client");
         // Resolved once: the model config cannot change for the lifetime of a run,
         // and resolving per request would repeat the same string matching.
-        let dialect = Dialect::resolve(&model);
+        // 【安全】官方 relay 只说 OpenAI chat-completions，直接钉死 dialect：
+        // Dialect::resolve 除了 standard 还会看 URL 与**模型名**（含 claude /
+        // gemini 就切到 x-api-key / x-goog-api-key），而 reqwest 重定向不剥离
+        // 这类自定义凭据头。只把 standard 改成 openai 挡不住模型名启发式。
+        let dialect = if model.official {
+            Dialect::OpenAiChat
+        } else {
+            Dialect::resolve(&model)
+        };
         debug!(model = %model.name_or_model(), ?dialect, "LLM client protocol");
         // Bound the retry budget at the ONE place every caller funnels through.
         //
@@ -73,7 +119,7 @@ impl LlmClient {
         // Same ceiling as the web tools, deliberately sourced from the same
         // constant so the two knobs cannot drift apart.
         let api_retries = api_retries.clamp(1, crate::tools::web_retry::MAX_ATTEMPTS_CEILING);
-        Self { model, http, api_retries, dialect }
+        Ok(Self { model, http, api_retries, dialect })
     }
 
     pub fn model_name(&self) -> &str {
@@ -93,28 +139,7 @@ impl LlmClient {
     /// model config still wins — some proxies need a custom scheme and the user
     /// who configured it knows better than the dialect default.
     fn build_headers(&self) -> reqwest::header::HeaderMap {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            "application/json".parse().unwrap(),
-        );
-        for (k, v) in self.dialect.auth_headers(&self.model) {
-            if let (Ok(name), Ok(val)) = (
-                reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-                v.parse(),
-            ) {
-                headers.insert(name, val);
-            }
-        }
-        for (k, v) in &self.model.headers {
-            if let (Ok(name), Ok(val)) = (
-                reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-                v.parse(),
-            ) {
-                headers.insert(name, val);
-            }
-        }
-        headers
+        build_headers_for(&self.model, self.dialect)
     }
 
     /// Send a streaming completion request. Returns a receiver of StreamEvents.
@@ -146,15 +171,19 @@ impl LlmClient {
         let body = self.dialect.request_body(&request);
 
         let url = self.dialect.endpoint(&self.model, true);
-        let headers = self.build_headers();
+        let model_cfg = self.model.clone();
         let http = self.http.clone();
         let api_retries = self.api_retries;
         let dialect = self.dialect;
+        let is_official = self.model.official;
 
         tokio::spawn(async move {
             let mut attempt = 0u32;
             loop {
                 attempt += 1;
+                // 官方模型每次物理尝试都重读进程内存里的 key：401 触发重取后
+                // 下一次 attempt 就用上新 key；登出清空内存后不再带 Authorization。
+                let headers = build_headers_for(&model_cfg, dialect);
                 match do_stream(&http, &url, &headers, &body, dialect, &tx).await {
                     Ok(_) => break,
                     Err(e) => {
@@ -163,13 +192,19 @@ impl LlmClient {
                             .map(|f| f.delivered)
                             .unwrap_or(false);
                         warn!(attempt, delivered, error = %msg, ?dialect, "LLM stream attempt failed");
-                        // Deterministic client/config errors must fail fast:
-                        // retrying a de-listed model, a bad key or a malformed
-                        // request 20 times only burns ~3 minutes of the user's
-                        // time showing "thinking 0s" with no chance of success.
-                        // Transient classes (408/409/429/5xx/network) keep the
-                        // backoff loop.
-                        if is_non_retryable(&msg) || attempt > api_retries {
+                        // 官方 key 失效闭环：401/403 上报 → 壳异步强制重取 → 下一次
+                        // attempt 重建 headers 时自动拿到新 key（当前 run 内自愈）。
+                        if is_official && is_official_auth_error(&msg) {
+                            crate::official::report_auth_failure();
+                        }
+                        // 【2026-11 用户决策】非 200 一律重试：确定性错误
+                        // （401 坏 key、404 模型下架、403 排队 RESOURCE_LIMIT…）
+                        // 也按用户设置的 modelRetries 次数退避重试，不再快速失败。
+                        // 旧 `is_non_retryable` 门控把网关 403 排队判成致命，
+                        // 第 1 次失败就放弃，设置的 10 次完全没用上。
+                        // 预算与退避仍在：次数 = settings.general.modelRetries
+                        // （with_retries 处 clamp 1..=10），不会无限重试。
+                        if attempt > api_retries {
                             let _ = tx.send(StreamEvent::Error(msg)).await;
                             break;
                         }
@@ -189,17 +224,19 @@ impl LlmClient {
                         // retry loop sits *below* the accumulators, so the
                         // reset has to be an explicit event.
                         //
-                        // A failure before the first byte stays silent: there
-                        // is nothing to discard and no visible seam.
-                        if delivered {
-                            let _ = tx
-                                .send(StreamEvent::Retry {
-                                    attempt,
-                                    max: api_retries,
-                                    reason: msg.clone(),
-                                })
-                                .await;
-                        }
+                        // 【2026-11 用户决策】首字节前的失败也发 Retry 事件
+                        // （delivered=false）：旧实现静默重试，用户看到的就是
+                        // 「报错了但根本没重试」。现在每次重试前台都可见
+                        // （正在重试 n/modelRetries）；delivered 位告诉消费端
+                        // 是否需要丢弃已渲染的半成品。
+                        let _ = tx
+                            .send(StreamEvent::Retry {
+                                attempt,
+                                max: api_retries,
+                                reason: msg.clone(),
+                                delivered,
+                            })
+                            .await;
                         // Exponential backoff: 1s, 2s, 4s
                         let delay = Duration::from_millis(500 * 2u64.pow(attempt));
                         tokio::time::sleep(delay).await;
@@ -241,9 +278,13 @@ impl LlmClient {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            // Same "HTTP <code> <reason>: <body>" shape the streaming path uses, so
-            // `is_non_retryable` classifies both identically.
-            anyhow::bail!("HTTP {}: {}", status, snippet(&text));
+            // Same "HTTP <code> <reason>: <body>" shape the streaming path uses,
+            // so `is_timeout_class` (and any future classifier) reads both alike.
+            let msg = format!("HTTP {}: {}", status, snippet(&text));
+            if self.model.official && is_official_auth_error(&msg) {
+                crate::official::report_auth_failure();
+            }
+            anyhow::bail!("{}", msg);
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
             anyhow::bail!("provider returned non-JSON body: {}", snippet(&text));
@@ -252,9 +293,114 @@ impl LlmClient {
     }
 }
 
+/// Construct headers for a single physical attempt.
+///
+/// 官方模型（`official == true`）**每次尝试都实时读进程内存里的 key**，而不是
+/// 复用 `with_retries` 构造时注入的快照。这带来两个闭环效果：
+/// - 401 触发 [`crate::official::report_auth_failure`] → 壳异步重取 → 下一次
+///   attempt 自动用上新 key，当前 run 内即可自愈，无需重建 `LlmClient`；
+/// - 登出/会话撤销清空内存后，`crate::official::key()` 返回 `None` → 不带
+///   Authorization，绝不会把构造时的旧 key 继续发到 relay。
+///
+/// 普通模型完全不受影响：直接用配置里的 `api_key`。
+fn build_headers_for(model: &ModelConfig, dialect: Dialect) -> reqwest::header::HeaderMap {
+    let mut effective = model.clone();
+    if model.official {
+        effective.api_key = crate::official::bearer_key().unwrap_or_default();
+    }
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        "application/json".parse().unwrap(),
+    );
+    for (k, v) in dialect.auth_headers(&effective) {
+        if let (Ok(name), Ok(val)) = (
+            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+            v.parse(),
+        ) {
+            headers.insert(name, val);
+        }
+    }
+    for (k, v) in &effective.headers {
+        if let (Ok(name), Ok(val)) = (
+            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+            v.parse(),
+        ) {
+            headers.insert(name, val);
+        }
+    }
+    headers
+}
+
+/// 是否是「官方 key 可能已失效」的响应。命中后触发失效上报。
+///
+/// 只认 relay 明确返回的 401/403 与常见的 token 失效文案；网关 5xx、
+/// 超时、429 限流都不算（那些不是 key 失效，重取也解决不了）。
+fn is_official_auth_error(msg: &str) -> bool {
+    let m = msg.trim_start();
+    let lower = m.to_ascii_lowercase();
+    // 401 一律视为凭据问题；403 在官方 relay 上更常见于「排队 / 资源限制」
+    // （用户决策：这类确定性错误也按 modelRetries 重试，不该触发重取），
+    // 因此只有响应体里带明确 token 失效文案时才判定为 key 失效。
+    if m.starts_with("HTTP 401") {
+        return true;
+    }
+    let token_revoked = lower.contains("invalid_api_key")
+        || lower.contains("invalid token")
+        || lower.contains("token is disabled")
+        || lower.contains("token_not_found")
+        || lower.contains("token_not_exists")
+        || lower.contains("该令牌")
+        || lower.contains("令牌已")
+        || lower.contains("key is disabled");
+    token_revoked && (m.starts_with("HTTP 403") || !m.starts_with("HTTP "))
+}
+
 /// First N characters of a body, for error messages.
+///
+/// 【安全】relay/网关在 4xx/5xx 里回显请求头片段或 token 前缀是常见行为。
+/// `snippet()` 的结果会同时进 `warn!` 日志和 `StreamEvent::Retry/Error`
+/// （进而推到 WebView），所以必须先把当前所有已知凭据形态替换掉：进程内存
+/// 里的官方裸 key、`sk-<key>`、`Bearer <key>`，以及通用 `Bearer xxx` 形态。
+/// 不知道 key 时（未登录）仍抹掉 Bearer 值，避免自定义源的 key 被回显带出。
 fn snippet(s: &str) -> String {
-    s.chars().take(500).collect()
+    let mut out: String = s.chars().take(500).collect();
+    if let Some(key) = crate::official::key() {
+        for secret in [
+            format!("sk-{}", key),
+            key.clone(),
+            format!("Bearer sk-{}", key),
+            format!("Bearer {}", key),
+        ] {
+            if !secret.is_empty() {
+                out = out.replace(&secret, "[REDACTED]");
+            }
+        }
+    }
+    // 兜底：任意 `Bearer <非空白>`（含自定义源回显、被截断的 sk- 前缀）。
+    // 手写一个小型状态机，避免引入新依赖。
+    let lower = out.to_ascii_lowercase();
+    let mut pieces: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel) = lower[cursor..].find("bearer ") {
+        let start = cursor + rel;
+        let value_start = start + "bearer ".len();
+        let rest = &out[value_start..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '"' || c == ',' || c == '}' || c == '<')
+            .unwrap_or(rest.len());
+        if end > 0 {
+            pieces.push(out[cursor..value_start].to_string());
+            pieces.push("[REDACTED]".to_string());
+            cursor = value_start + end;
+        } else {
+            pieces.push(out[cursor..value_start].to_string());
+            cursor = value_start;
+            break;
+        }
+    }
+    pieces.push(out[cursor..].to_string());
+    pieces.concat()
 }
 
 /// Extract the assistant's text from a non-streaming response.
@@ -511,43 +657,6 @@ impl std::fmt::Display for StreamFailure {
 
 impl std::error::Error for StreamFailure {}
 
-/// Whether an error message denotes a deterministic failure that no retry can
-/// fix: any 4xx except the transient trio (408 timeout, 409 conflict,
-/// 429 rate-limit), plus gateway-wrapped business errors (a de-listed model
-/// arrives as HTTP 500 with a business message). A de-listed model, a revoked
-/// key or a bad request will fail identically on attempt 20 — retrying them
-/// only delays the inevitable error bubble.
-pub fn is_non_retryable(msg: &str) -> bool {
-    // Business-level deterministic errors: some gateways wrap them in HTTP 500
-    // (observed: `{"code":500,"msg":"模型已下架"}`), so status alone cannot
-    // classify them. These never succeed on retry.
-    const FATAL_MARKERS: &[&str] = &[
-        "模型已下架",
-        "模型不存在",
-        "模型未找到",
-        "invalid api key",
-        "incorrect api key",
-        "api key not valid",
-        "model_not_found",
-        "model_deprecated",
-        // Anthropic and Gemini report auth problems with their own vocabulary; a
-        // revoked key there is just as unrecoverable.
-        "invalid x-api-key",
-        "authentication_error",
-        "permission_denied",
-        "api key not valid",
-        "unauthenticated",
-    ];
-    let lower = msg.to_lowercase();
-    if FATAL_MARKERS.iter().any(|m| lower.contains(&m.to_lowercase())) {
-        return true;
-    }
-    let Some(code) = status_code_of(msg) else {
-        return false;
-    };
-    (400..500).contains(&code) && !matches!(code, 408 | 409 | 429)
-}
-
 /// Extract an HTTP-ish status code from an error message.
 ///
 /// `do_stream` formats its failures as `"HTTP <code> <reason>: <body>"`, but the
@@ -598,53 +707,55 @@ pub fn is_timeout_class(msg: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// 【2026-11 用户决策】非 200 一律按 modelRetries 重试，LLM 流不再有
+    /// 「确定性错误快速失败」分类（旧 is_non_retryable 已删除：它把网关
+    /// 403 RESOURCE_LIMIT 排队判成致命，第 1 次失败就放弃）。这里只保留
+    /// 超时类分桶（react 层对系统性慢上游每轮 ≤2 次的护栏仍需要它）。
     #[test]
-    fn non_retryable_classification() {
-        // deterministic: fail fast
-        assert!(is_non_retryable("HTTP 401 Unauthorized: bad key"));
-        assert!(is_non_retryable("HTTP 404 Not Found: model gone"));
-        assert!(is_non_retryable("HTTP 400 Bad Request: {\"msg\":\"模型已下架\"}"));
-        assert!(is_non_retryable("HTTP 403 Forbidden: x"));
-        // business errors wrapped in 500 by gateways: fail fast
-        assert!(is_non_retryable("HTTP 500 Internal Server Error: {\"code\":500,\"msg\":\"模型已下架\",\"data\":null}"));
-        assert!(is_non_retryable("HTTP 500 Internal Server Error: {\"msg\":\"模型不存在\"}"));
-        assert!(is_non_retryable("HTTP 401 Unauthorized: Invalid API key"));
-        // transient: keep retrying
-        assert!(!is_non_retryable("HTTP 429 Too Many Requests: slow down"));
-        assert!(!is_non_retryable("HTTP 408 Request Timeout: x"));
-        assert!(!is_non_retryable("HTTP 409 Conflict: x"));
-        assert!(!is_non_retryable("HTTP 500 Internal Server Error: upstream boom"));
-        assert!(!is_non_retryable("HTTP 502 Bad Gateway: x"));
-        // non-HTTP errors (network/parse): keep retrying
-        assert!(!is_non_retryable("connection reset by peer"));
-        assert!(!is_non_retryable(""));
-        // P2: bare JSON error bodies with no `HTTP ` prefix — observed shapes.
-        // `403` inside the JSON body is deterministic and must fail fast;
-        // `504` is transient at this layer (the react loop's timeout bucket
-        // decides how many times to try it).
-        assert!(is_non_retryable(
-            "{\"code\":\"403\",\"message\":\"your balance is not enough\"}"
-        ));
-        assert!(!is_non_retryable(
-            "{\"code\":\"504\",\"message\":\"First Token Timeout or Upstream Timeout\"}"
-        ));
-        assert!(!is_non_retryable("{\"code\":\"429\",\"message\":\"slow down\"}"));
-        // Timeout classification (P2 bucket)
+    fn timeout_classification() {
         assert!(is_timeout_class("HTTP 408 Request Timeout: x"));
         assert!(is_timeout_class("HTTP 504 Gateway Timeout: upstream slow"));
         assert!(is_timeout_class("request timed out"));
         assert!(is_timeout_class("LLM stream timed out: no data received for 150s"));
         assert!(!is_timeout_class("HTTP 401 Unauthorized: bad key"));
         assert!(!is_timeout_class("connection reset by peer"));
+        // 裸 JSON 错误体（无 HTTP 前缀）也要能识别超时类。
+        assert!(is_timeout_class(
+            "{\"code\":\"504\",\"message\":\"First Token Timeout or Upstream Timeout\"}"
+        ));
+        // 排队类 403 不是超时类：它走普通重试预算，不吃每轮 ≤2 的超时桶。
+        assert!(!is_timeout_class(
+            "HTTP 403 Forbidden: {\"code\":\"RESOURCE_LIMIT_EXCEEDED\",\"message\":\"request is queued, retry after 3s\"}"
+        ));
     }
 
-    /// Anthropic and Gemini report auth failures without an HTTP code in the
-    /// message body; a revoked key must still fail fast rather than burn three
-    /// minutes of retries.
+    /// 源钉：LLM 流的重试门控只允许剩「预算」一项。任何人把按错误类别
+    /// 快速失败的判定加回 stream_chat 循环（例如重新引入 is_non_retryable），
+    /// 都会让网关 403 排队/401 等错误第 1 次就放弃，用户的 modelRetries
+    /// 形同虚设——正是本次报障的形状。
     #[test]
-    fn provider_specific_auth_errors_fail_fast() {
-        assert!(is_non_retryable("HTTP 500 Internal Server Error: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}"));
-        assert!(is_non_retryable("HTTP 500 x: {\"error\":{\"status\":\"PERMISSION_DENIED\"}}"));
+    fn stream_retry_gate_is_budget_only() {
+        let src = include_str!("client.rs");
+        let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        let stream = production
+            .split("pub async fn stream_chat")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn complete").next())
+            .expect("stream_chat body must be locatable");
+        let code: String = stream
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("if attempt > api_retries {"),
+            "the only retry gate must be the attempt budget"
+        );
+        assert!(
+            !code.contains("is_non_retryable"),
+            "no error-class fast-fail may gate LLM stream retries (user decision: \
+             every non-200 retries up to modelRetries)"
+        );
     }
 
     /// The shared reqwest client must NOT carry a whole-request `.timeout()`:
@@ -671,6 +782,14 @@ mod tests {
             code.contains(".connect_timeout("),
             "the handshake must still be bounded"
         );
+        // 【安全】带凭据的 HTTP 客户端必须显式禁重定向。reqwest 0.12 默认
+        // 跟 10 跳：跨 host 才剥内置 Authorization，x-api-key 等自定义头
+        // 根本不剥，且 https→http 同端口降级也不剥。删掉这行会让官方
+        // key 可被开放重定向重放到第三方。
+        assert!(
+            code.contains(".redirect(reqwest::redirect::Policy::none())"),
+            "credential-bearing client must disable redirects"
+        );
     }
 
     fn client(standard: &str, url: &str, model: &str) -> LlmClient {
@@ -682,6 +801,181 @@ mod tests {
             model: model.into(),
             ..Default::default()
         })
+        .expect("test client must build")
+    }
+
+    fn official_fixture(key: &'static str) -> crate::official::OfficialCredential {
+        crate::official::OfficialCredential {
+            key: key.to_string(),
+            base_url: crate::official::OFFICIAL_BASE_URL.to_string(),
+            user_id: 1,
+            username: "tester".to_string(),
+            models: vec![],
+        }
+    }
+
+    fn official_model_cfg(api_url: &str) -> ModelConfig {
+        ModelConfig {
+            name: "official".into(),
+            standard: "openai".into(),
+            api_url: api_url.into(),
+            api_key: "stale-on-disk-value".into(),
+            model: "gwork-x".into(),
+            official: true,
+            ..Default::default()
+        }
+    }
+
+    /// P2-7：官方源不是可配置自定义地址。settings.json 里被写入/篡改的
+    /// apiUrl 必须被无条件覆盖，否则进程内存里的用户 key 会被发到第三方 host。
+    #[test]
+    fn official_model_never_sends_key_to_a_custom_host() {
+        let _guard = crate::official::test_lock();
+        crate::official::set(official_fixture("OFFICIAL-IN-MEMORY-KEY"));
+        let c = LlmClient::with_retries(
+            official_model_cfg("https://attacker.example/v1"), 1)
+            .expect("official model must build");
+        assert_eq!(c.model.api_url, crate::official::base_url());
+        assert!(!c.model.api_url.contains("attacker.example"));
+        crate::official::clear();
+    }
+
+    /// 失效闭环：同一 LlmClient 不重建，只要内存里的 key 被换掉（壳重取
+    /// 成功），下一次 build_headers 就必须用新 key；登出清空内存后不能
+    /// 再残留构造时的旧 key。这正是「401 自愈 + 会话撤销不留僵尸凭据」。
+    #[test]
+    fn official_headers_reread_memory_key_per_attempt() {
+        let _guard = crate::official::test_lock();
+        crate::official::set(official_fixture("OLD-REVOKED-KEY"));
+        let c = LlmClient::with_retries(official_model_cfg(""), 1).expect("build");
+        assert_eq!(
+            c.build_headers().get(reqwest::header::AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer sk-OLD-REVOKED-KEY"
+        );
+
+        // 壳重取成功 → set 换上新 key，当前 run 的下一次 attempt 自动生效。
+        crate::official::set(official_fixture("ROTATED-KEY"));
+        assert_eq!(
+            c.build_headers().get(reqwest::header::AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer sk-ROTATED-KEY",
+            "re-fetched key must be picked up without rebuilding the client"
+        );
+
+        // 登出 / 会话撤销：内存清空后不再带任何 Authorization。
+        crate::official::clear();
+        assert!(
+            c.build_headers().get(reqwest::header::AUTHORIZATION).is_none(),
+            "cleared credential must not leave a stale key in request headers"
+        );
+    }
+
+    /// 安全：relay 回显 key 时，snippet 不得把它带进日志或 WebView 事件。
+    #[test]
+    fn snippet_redacts_echoed_credentials() {
+        let _guard = crate::official::test_lock();
+        crate::official::set(official_fixture("SECRET-KEY-0123456789"));
+        let echo = r#"{"error":"invalid key sk-SECRET-KEY-0123456789 / Bearer sk-SECRET-KEY-0123456789 / Bearer custom-provider-token"}"#;
+        let out = snippet(echo);
+        assert!(!out.contains("SECRET-KEY-0123456789"), "key leaked: {out}");
+        assert!(!out.contains("custom-provider-token"), "bearer value leaked: {out}");
+        assert!(out.contains("[REDACTED]"));
+        crate::official::clear();
+    }
+
+    /// 安全：settings.json 里被篡改成 anthropic/gemini 或塞自定义凭据头，
+    /// 官方模型必须强制固定为 OpenAI + 清头，绝不走 reqwest 重定向不剥离的
+    /// x-api-key / x-goog-api-key 分支。
+    #[test]
+    fn official_model_pins_protocol_and_strips_custom_headers() {
+        let _guard = crate::official::test_lock();
+        crate::official::set(official_fixture("SECRET-KEY"));
+        let mut m = official_model_cfg("https://attacker.example/v1");
+        m.standard = "anthropic".into();
+        m.model = "claude-3".into();
+        m.headers.insert("x-api-key".into(), "injected".into());
+        m.headers.insert("Authorization".into(), "CustomScheme x".into());
+        let c = LlmClient::with_retries(m, 1).expect("build");
+        assert_eq!(c.model.standard, "openai");
+        assert!(c.model.headers.is_empty());
+        assert_eq!(c.dialect, Dialect::OpenAiChat);
+        assert_eq!(
+            c.dialect.endpoint(&c.model, true),
+            format!("{}/v1/chat/completions", crate::official::host()),
+            "official chat endpoint must be host/v1/chat/completions — no /v1/v1"
+        );
+        let h = c.build_headers();
+        assert_eq!(
+            h.get(reqwest::header::AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer sk-SECRET-KEY"
+        );
+        assert!(h.get("x-api-key").is_none());
+        crate::official::clear();
+    }
+
+    #[test]
+    fn only_auth_failures_trigger_official_refetch() {
+        assert!(is_official_auth_error("HTTP 401 Unauthorized: bad key"));
+        assert!(is_official_auth_error("HTTP 403 Forbidden: token is disabled"));
+        assert!(is_official_auth_error("invalid_api_key"));
+        // 网关排队/限流/服务不可用不是 key 失效，重取解决不了，不能误触发。
+        assert!(!is_official_auth_error("HTTP 429 Too Many Requests"));
+        assert!(!is_official_auth_error("HTTP 500 Internal Server Error"));
+        assert!(!is_official_auth_error("HTTP 403 Forbidden: RESOURCE_LIMIT queue"));
+    }
+
+    #[test]
+    fn official_model_injects_the_in_memory_key_and_fixed_url() {
+        let _guard = crate::official::test_lock();
+        crate::official::set(official_fixture("OFFICIAL-IN-MEMORY-KEY"));
+        let m = ModelConfig {
+            name: "official".into(),
+            standard: "openai".into(),
+            api_url: String::new(),
+            api_key: "stale-on-disk-value".into(),
+            model: "gwork-x".into(),
+            official: true,
+            ..Default::default()
+        };
+        let c = LlmClient::with_retries(m, 1).expect("logged-in official model must build");
+        assert_eq!(c.model.api_key, "sk-OFFICIAL-IN-MEMORY-KEY");
+        assert_eq!(c.model.api_url, crate::official::base_url());
+        assert_eq!(
+            c.build_headers().get(reqwest::header::AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer sk-OFFICIAL-IN-MEMORY-KEY"
+        );
+        crate::official::clear();
+    }
+
+    #[test]
+    fn official_model_without_credential_returns_a_clear_error() {
+        let _guard = crate::official::test_lock();
+        crate::official::clear();
+        let m = ModelConfig {
+            name: "official".into(),
+            api_key: "must-not-be-used".into(),
+            official: true,
+            ..Default::default()
+        };
+        let err = LlmClient::with_retries(m, 1)
+            .err()
+            .expect("unset official credential must be an error");
+        let msg = err.to_string();
+        assert!(msg.contains("请先登录"), "error must name the login requirement: {msg}");
+        assert!(!msg.contains("must-not-be-used"), "error must never echo a key");
+    }
+
+    #[test]
+    fn ordinary_models_do_not_read_the_official_credential() {
+        let _guard = crate::official::test_lock();
+        crate::official::clear();
+        let m = ModelConfig {
+            name: "custom".into(),
+            api_url: "https://custom.example/v1".into(),
+            api_key: "custom-key".into(),
+            ..Default::default()
+        };
+        let c = LlmClient::with_retries(m, 1).expect("ordinary model must not require login");
+        assert_eq!(c.model.api_key, "custom-key");
     }
 
     /// The LLM stream decoder must be constructed in STRICT UTF-8 mode.
@@ -763,7 +1057,7 @@ mod tests {
             ..Default::default()
         };
         m.headers.insert("Authorization".into(), "CustomScheme abc".into());
-        let c = LlmClient::new(m);
+        let c = LlmClient::new(m).expect("test client must build");
         let h = c.build_headers();
         assert_eq!(
             h.get(reqwest::header::AUTHORIZATION).unwrap().to_str().unwrap(),
@@ -1005,7 +1299,7 @@ mod tests {
             ..Default::default()
         };
         m.timeout = "1s".into(); // shorter than the stream's 1.5s on purpose
-        let c = LlmClient::with_retries(m, 1);
+        let c = LlmClient::with_retries(m, 1).expect("test client must build");
 
         let mut rx = c
             .stream_chat(vec![ChatMessage::user("hi")], None, None)
@@ -1051,7 +1345,9 @@ mod tests {
             model: "m".into(),
             ..Default::default()
         };
-        LlmClient::with_retries(m, requested).api_retries
+        LlmClient::with_retries(m, requested)
+            .expect("budget probe must build")
+            .api_retries
     }
 
     #[test]

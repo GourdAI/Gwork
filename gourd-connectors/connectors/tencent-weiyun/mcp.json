@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "tencent-weiyun": {
+      "type": "streamable_http",
+      "url": "https://www.weiyun.com/api/v3/mcpserver",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "微云"
+      }
+    }
+  }
+}

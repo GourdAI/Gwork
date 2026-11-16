@@ -140,11 +140,19 @@
         return msg;
     }
 
-    // 翻译 DOM 中所有带 data-i18n 标记的元素
-    function translateDOM() {
+    // 翻译 DOM 中所有带 data-i18n 标记的元素。
+    // 可选 root：只翻译该子树（含 root 自身），且【不】派发 i18n:localeChanged——
+    // 局部翻译不是语言切换，派发全局事件会触发各模块全量重绘。缺省仍全文档 + 派发。
+    function translateDOM(root) {
         if (!currentLocale || !messages[currentLocale]) return;
+        var scope = root || document;
 
-        document.querySelectorAll('[data-i18n]').forEach(function (el) {
+        function each(sel, fn) {
+            if (root && root.matches && root.matches(sel)) fn(root);
+            scope.querySelectorAll(sel).forEach(fn);
+        }
+
+        each('[data-i18n]', function (el) {
             var key = el.getAttribute('data-i18n');
             var text = getMessage(key);
             if (el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'search' || el.type === 'password')) {
@@ -174,17 +182,20 @@
             el.classList.remove('i18n-hidden');
         });
 
-        document.querySelectorAll('[data-i18n-placeholder]').forEach(function (el) {
+        each('[data-i18n-placeholder]', function (el) {
             var key = el.getAttribute('data-i18n-placeholder');
             el.placeholder = getMessage(key);
         });
 
-        document.querySelectorAll('[data-i18n-title]').forEach(function (el) {
+        each('[data-i18n-title]', function (el) {
             var key = el.getAttribute('data-i18n-title');
             el.setAttribute('aria-label', getMessage(key));
         });
 
-        document.dispatchEvent(new CustomEvent('i18n:localeChanged', { detail: { locale: currentLocale } }));
+        // 局部翻译（传了 root）不派发全局语言切换事件，避免各模块被误触发全量重绘
+        if (!root) {
+            document.dispatchEvent(new CustomEvent('i18n:localeChanged', { detail: { locale: currentLocale } }));
+        }
     }
 
     function init(options) {
@@ -251,7 +262,7 @@
     function hideI18nTextBeforeReady() {
         document.querySelectorAll('[data-i18n]').forEach(function (el) {
             // 仅对有实际文本节点（非纯图标/按钮内文字 span）的元素隐藏
-            if (el.children.length === 0 || el.childNodes.some(function (n) { return n.nodeType === 3 && n.textContent.trim(); })) {
+            if (el.children.length === 0 || Array.prototype.some.call(el.childNodes, function (n) { return n.nodeType === 3 && n.textContent.trim(); })) {
                 el.classList.add('i18n-hidden');
             }
         });

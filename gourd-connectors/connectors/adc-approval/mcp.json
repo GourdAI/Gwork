@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "adc-approval": {
+      "type": "streamable_http",
+      "url": "https://adc-bridgeservice.map.qq.com/mcp/adc-approval",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "智驾专区审批与工单"
+      }
+    }
+  }
+}

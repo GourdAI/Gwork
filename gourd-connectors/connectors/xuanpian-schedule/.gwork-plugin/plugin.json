@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "xuanpian-schedule",
+  "version": "1.0.0",
+  "description": "Connect to the XuanPian PRO photo-studio scheduling system to check shooting schedules with natural language: monthly availability summary per day, time-slot details for a specific date, and account binding via bind code.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "选片PRO云档期",
+        "name_en": "XuanPian PRO Cloud Schedule",
+        "description_zh": "连接影楼选片系统，通过自然语言查询拍摄档期：支持整月每日可约汇总、单日各时间段档位明细，并支持使用绑定码绑定选片系统账号。",
+        "description_en": "Connect to the XuanPian PRO photo-studio scheduling system to check shooting schedules with natural language: monthly availability summary per day, time-slot details for a specific date, and account binding via bind code."
+      },
+      "categories": [
+        "entertainment-and-media"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

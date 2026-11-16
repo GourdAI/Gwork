@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "duoguan-ge",
+  "version": "1.0.0",
+  "description": "Query and manage GEO analytics, content, publishing, websites, keywords, and tenant data with natural language.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "夺冠 GEO",
+        "name_en": "Duoguan GEO",
+        "description_zh": "通过自然语言查询和管理 GEO 总览、内容、发布、网站、关键词及租户相关数据。",
+        "description_en": "Query and manage GEO analytics, content, publishing, websites, keywords, and tenant data with natural language."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

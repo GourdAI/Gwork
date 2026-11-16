@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "adc-approval",
+  "version": "1.0.0",
+  "description": "Aggregated approval-domain connector: zone onboarding (account whitelisting, bastion hosts, public whitelists, AK/SK, image publishing; 6 read + 3 write tools on the Liuyun platform, submission open, two-phase confirmation) plus Andon ticket forensics (enum maps, ticket list, single-ticket detail; 3 read tools and no ticket write tools). Connects as a remote HTTPS service behind a gateway.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "智驾专区审批与工单",
+        "name_en": "ADC approval and tickets (public)",
+        "description_zh": "审批域聚合连接器：专区接入开通（开白 / 堡垒机 / 公网白名单 / AK-SK / 镜像推送，6 读 3 写、两段式确认）+ 工单取证（3 读）；不做批准决策，不扩大范围。",
+        "description_en": "Aggregated approval-domain connector: zone onboarding (account whitelisting, bastion hosts, public whitelists, AK/SK, image publishing; 6 read + 3 write tools on the Liuyun platform, submission open, two-phase confirmation) plus Andon ticket forensics (enum maps, ticket list, single-ticket detail; 3 read tools and no ticket write tools). Connects as a remote HTTPS service behind a gateway."
+      },
+      "categories": [
+        "cloud-platforms"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

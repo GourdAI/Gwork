@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "hose-ai-assistant",
+  "version": "1.0.0",
+  "description": "Connect to HOSE business travel for authentication and real-time flight, hotel, and train searches.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "合思商旅",
+        "name_en": "HOSE Business Travel",
+        "description_zh": "连接合思商旅服务，提供身份校验、短信登录以及企业实时机票、酒店和火车票查询能力。",
+        "description_en": "Connect to HOSE business travel for authentication and real-time flight, hotel, and train searches."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

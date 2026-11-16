@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "neo-eakey": {
+      "type": "streamable_http",
+      "url": "https://buddy-ai.xiaoshouyi.com/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "销售易·易启"
+      }
+    }
+  }
+}

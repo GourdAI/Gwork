@@ -751,6 +751,13 @@ pub struct ToolContext {
     /// environment variables must be expanded at judgement time so they follow
     /// runtime changes (Java `HitlStrategy.java:492`).
     pub bash_exempt_dirs: Vec<String>,
+    /// 本次 run 是否为「异常中断后的恢复执行」（契约 §3.3）。
+    ///
+    /// footer 的「[提示] 存在 N 个 [/] 进行中项…恢复校准…」长文案只在恢复语境
+    /// 才有意义：常规 run 里 `[/]` 就是模型自己刚标的进行中项，每次 todowrite 都
+    /// 提醒「可能是上次中断遗留」是噪声。由 `run_react_session` 的 abnormal-exit
+    /// 校准分支（`session_ctx.interrupted`）置位，透传到 todo 工具再进 footer。
+    pub resume_calibration: bool,
 }
 
 impl ToolContext {
@@ -1187,6 +1194,7 @@ impl ToolRegistry {
         reg.register(Arc::new(builtin::TodoWriteTool));
         reg.register(Arc::new(builtin::TodoReadTool));
         reg.register(Arc::new(builtin::AskUserTool));
+        reg.register(Arc::new(builtin::CompleteTaskTool));
         reg.register(Arc::new(builtin::NowTool));
         reg.register(Arc::new(web::WebSearchTool));
         reg.register(Arc::new(web::WebFetchTool));
@@ -1252,6 +1260,7 @@ mod tests {
             model: Default::default(),
             settings: Default::default(),
             bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         }
     }
 

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "lingxi",
+  "version": "1.0.0",
+  "description": "Connect Lingxi to create forms, review submissions and event participation, analyze recurring donations, and append processing notes.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "灵析",
+        "name_en": "Lingxi",
+        "description_zh": "连接灵析，创建表单、整理表单反馈与活动报名签到数据、分析月捐经营情况，并追加处理备注。",
+        "description_en": "Connect Lingxi to create forms, review submissions and event participation, analyze recurring donations, and append processing notes."
+      },
+      "categories": [
+        "communication"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

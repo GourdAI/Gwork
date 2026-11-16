@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "masocloud-barcode-generator",
+  "version": "1.0.0",
+  "description": "Generate 1D barcodes, 2D codes and label previews, covering CODE128, QR, DataMatrix, PDF417 and more, plus .alb label template preview.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "条码生成器",
+        "name_en": "Barcode Generator",
+        "description_zh": "生成一维条形码、二维码与标签预览图，支持 CODE128、QR、DataMatrix、PDF417 等 9 种条码与 .alb 标签模板预览，可自定义尺寸、DPI、容错等级与是否显示文字。",
+        "description_en": "Generate 1D barcodes, 2D codes and label previews, covering CODE128, QR, DataMatrix, PDF417 and more, plus .alb label template preview."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

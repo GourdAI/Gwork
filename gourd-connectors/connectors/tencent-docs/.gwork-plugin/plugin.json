@@ -1,0 +1,35 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "tencent-docs",
+  "version": "1.0.0",
+  "description": "Read and write Tencent Docs documents, sheets and slides. Scan with WeChat / QQ to authorize — no manual keys.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "qrcode_poll",
+        "qrVendor": "tencent-docs",
+        "tokenHeader": "Authorization",
+        "tokenPrefix": "none",
+        "tokenLabel": "腾讯文档",
+        "tokenHelpUrl": "https://docs.qq.com/open/auth/mcp.html",
+        "tokenHelpText": "扫码获得的凭据仅存储在本机，不会上传云端。"
+      },
+      "display": {
+        "name": "腾讯文档",
+        "name_en": "Tencent Docs",
+        "description_zh": "读写腾讯文档在线文档、表格与幻灯片。微信 / QQ 扫码授权，无需手填密钥。",
+        "description_en": "Read and write Tencent Docs documents, sheets and slides. Scan with WeChat / QQ to authorize — no manual keys."
+      },
+      "categories": [
+        "note-taking"
+      ],
+      "tier": "verified",
+      "source": "gwork-featured",
+      "readme": "## 腾讯文档 MCP\n\n官方远程 MCP 服务（https://docs.qq.com/openapi/mcp），可读写你的腾讯文档。\n\n### 授权方式\n\n1. 点击「连接」，弹窗内展示二维码；\n2. 用手机微信 / QQ 扫码并确认授权；\n3. 授权完成后自动连接，凭据仅保存在本机。\n\n也可以在二维码弹窗里选择「在浏览器中打开」完成授权。\n\n### 额度\n\n个人免费额度以官方说明为准（https://docs.qq.com/open/auth/mcp.html），会员可享更高额度。"
+    }
+  }
+}

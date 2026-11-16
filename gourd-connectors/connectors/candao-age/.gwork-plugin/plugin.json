@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "candao-age",
+  "version": "1.0.0",
+  "description": "Gain real-time visibility into restaurant delivery reputation with a single query: access authorized stores, reviews, key metrics, issue trends, and review reports.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "餐道.数智经营",
+        "name_en": "CanDao.AGE",
+        "description_zh": "一句话掌握餐厅外卖口碑：查询授权门店、评价指标、差评原因与趋势，快速生成评价分析报告。",
+        "description_en": "Gain real-time visibility into restaurant delivery reputation with a single query: access authorized stores, reviews, key metrics, issue trends, and review reports."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

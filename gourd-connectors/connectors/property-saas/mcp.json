@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "property-saas": {
+      "type": "streamable_http",
+      "url": "https://h63.xa33.cn/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "卓越智慧物业云平台"
+      }
+    }
+  }
+}

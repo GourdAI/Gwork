@@ -134,6 +134,11 @@ func TestAccessTokenRouteRulesCoverEveryDashboardRoute(t *testing.T) {
 	for key := range declared {
 		assert.True(t, panel[key], "declared route %s is not a registered panel route", key)
 	}
+	// 桌面壳取模型 key 的接口禁止 PAT 自举：必须钉住为 session-only。
+	rule, ok := middleware.AccessTokenRouteRule("GET /api/user/self/model-key")
+	require.True(t, ok)
+	assert.Equal(t, "session", rule.Kind())
+	assert.Empty(t, rule.Scope())
 
 	permissionRoutes := map[string]authz.Permission{}
 	for _, route := range channelPermissionRoutes {

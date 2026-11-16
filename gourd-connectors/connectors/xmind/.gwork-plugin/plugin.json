@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "xmind",
+  "version": "1.0.0",
+  "description": "Create, read, and edit Xmind online mind maps directly from AI conversations.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "Xmind思维导图",
+        "name_en": "Xmind",
+        "description_zh": "通过 AI 对话创建、读取和编辑 Xmind 在线思维导图。",
+        "description_en": "Create, read, and edit Xmind online mind maps directly from AI conversations."
+      },
+      "categories": [
+        "note-taking"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

@@ -71,9 +71,12 @@
     var view = null;            // 'profile' | 'menu'，决定弹层当前渲染的骨架
     var authMode = 'login';     // 'login' | 'register'
     var busy = false;
-    /* 后台能力探测结果（GET /api/status 的 email_verification）。null = 未探测/
-       探测失败：注册表单按「邮箱可选」降级渲染，后台的真实拒绝会原样回显。 */
-    var emailRequired = null;
+    /* 后台能力探测结果（GET /api/status 的 email_verification）。
+       【2026-11 注册 fail-open 修复】默认按 true（邮箱 + 验证码必填）：
+       线上后台已开启邮箱验证，探测失败/未返回时若降级成「可选」，用户会漏填
+       验证码并白白撞一次后台拒绝。只有探测**明确**返回 email_verification:false
+       才放开。当前仅探测成功会写回真实值。 */
+    var emailRequired = true;
     var codeSentOnce = false;   // 本次会话是否已发过验证码（按钮切「重新发送」）
 
     /* 提示容器 id：弹层与登录弹框【各持一个，绝不共用同 id】。
@@ -332,9 +335,10 @@
     }
 
     /* 登录弹框视觉（参照 Qoder 官网登录页）：【左右分栏】——左品牌视觉区
-       （手写体标语 + 漂浮图标插画 + 视觉署名），右表单区（品牌标 + 动态主标题
-       + 分段式登录/注册切换 + 表单 + 单一主操作按钮）。窄屏（<680px）左栏由
-       CSS 隐藏，回落为单列表单，功能不受影响。
+       （手写体标语 + 漂浮图标插画 + 视觉署名），右表单区（品牌标 + 分段式
+       登录/注册切换 + 表单 + 单一主操作按钮）。品牌标即产品名，登录/注册由
+       分段控件表达，不再叠加「登录 GWork / 创建账号」副标题（避免重复）。
+       窄屏（<680px）左栏由 CSS 隐藏，回落为单列表单，功能不受影响。
        【关闭按钮挤占修复】旧版 .account-close 浮在右上角、tabs 行又用 margin-right
        硬给它让位，导致「登录/注册」分段被挤偏、视觉重心失衡。现改为：关闭按钮
        绝对定位在弹框右上角、不占据内容流；tabs 居中且不再预留右侧空间。
@@ -356,7 +360,7 @@
         h += '<div class="account-brand">'
             + '<img class="account-brand-logo" src="/img/favicon.png" alt="" aria-hidden="true">'
             + '<span class="account-brand-name">GWork</span></div>';
-        h += '<h2 class="account-auth-title" id="accountAuthTitle"></h2>';
+        /* 副标题（登录 GWork / 创建账号）已移除：品牌标与分段控件已表意，避免重复 */
         h += '<div class="account-tabs" data-mode="' + authMode + '">'
             + '<button class="account-tab' + (authMode === 'login' ? ' active' : '') + '" type="button" data-act="tab-login">' + esc(t('account.sign_in', '登录')) + '</button>'
             + '<button class="account-tab' + (authMode === 'register' ? ' active' : '') + '" type="button" data-act="tab-register">' + esc(t('account.sign_up', '注册')) + '</button>'
@@ -410,12 +414,13 @@
     }
 
     /* 探测后台注册契约（email_verification 是否强制）。只更新邮箱标签文案，
-       绝不重建表单 —— 重建会清掉用户已输入的内容。探测失败保持降级文案。 */
+       绝不重建表单 —— 重建会清掉用户已输入的内容。探测失败保持「必填」：
+       只在线上后台明确关闭邮箱验证时才降级为可选。 */
     function probeRegisterConfig() {
         var i = ipc();
         if (!i || typeof i.authConfig !== 'function') return;
         i.authConfig().then(function (c) {
-            var req = !!(c && c.email_verification);
+            var req = !(c && c.email_verification === false);
             if (req === emailRequired) return;
             emailRequired = req;
             var lbl = modal ? modal.querySelector('label[for="accountEmail"]') : null;
@@ -424,7 +429,7 @@
                     ? t('account.email_required', '电子邮件（验证必需）')
                     : t('account.email', '邮箱（可选）');
             }
-        }, function () { /* 探测失败：保持降级文案，后台错误会原样回显 */ });
+        }, function () { /* 探测失败：沿用「邮箱+验证码必填」，后台错误会原样回显 */ });
     }
 
     function hideModal() {
@@ -445,8 +450,8 @@
         if (mode === 'register') {
             field('accountPassword2', t('account.password_confirm', '确认密码'), 'password');
             /* 邮箱在后台开启邮箱验证时是【验证必需】（admin Register 强制
-               email + verification_code），标签随探测结果切换；探测失败
-               降级为「可选」文案，后台的真实拒绝会原样回显。 */
+               email + verification_code），标签随探测结果切换；未探测到或
+               探测失败时一律按「验证必需」渲染，避免漏填验证码。 */
             field('accountEmail', emailRequired
                 ? t('account.email_required', '电子邮件（验证必需）')
                 : t('account.email', '邮箱（可选）'), 'email');
@@ -540,18 +545,9 @@
         });
     }
 
-    /* 主标题与提交按钮文案同步切换（Qoder 式：标题说明当前在做什么）。
-       标题用 <h2> + textContent 赋值，绝不走 innerHTML —— 它是用户可见文本，
-       必须与翻译值一并转义安全。 */
+    /* 左栏标语与提交按钮文案同步刷新。副标题已移除：品牌标 + 分段控件已表意，不再重复说明。 */
     function refreshAuthLabels() {
-        var title = document.getElementById('accountAuthTitle');
-        if (title) {
-            title.textContent = authMode === 'register'
-                ? t('account.auth_title_register', '创建账号')
-                : t('account.auth_title_login', '登录 GWork');
-        }
-        /* 左栏手写体标语：与主标题同源于 i18n，语言切换（60s 保活刷新路径）
-           也会经 refreshAuthLabels 同步，无需额外钩子。 */
+        /* 左栏手写体标语：随语言切换经本函数同步，无需额外钩子。 */
         var slogan = document.getElementById('accountAuthSlogan');
         if (slogan) {
             slogan.textContent = t('account.auth_slogan', '不止执行，更是创造。');
@@ -773,7 +769,7 @@
             code = val('accountCode');
             /* 后台开启邮箱验证时 email + verification_code 是注册接口的硬契约
                （admin controller/user.go::Register），前端先拦一道，避免用户
-               空等一次往返；未探测到（null）时不拦，后台错误原样回显。 */
+               空等一次往返。emailRequired 默认 true，探测失败也保持必填。 */
             if (emailRequired === true) {
                 if (!email) {
                     setHint('modal', t('account.email_first', '请先填写邮箱地址'), 'error');
@@ -794,6 +790,10 @@
             setBusy(false);
             authMode = 'login';
             applyStatus(s);   // 内部会收起登录弹框
+            /* 官方模型源面板依赖此事件重载登录态与官方模型列表。
+               壳在 auth_login/auth_register 之后已把用户 key 与 /v1/models
+               写进内核进程内存；这里只通知 UI 刷新，不接触任何凭据。 */
+            try { $(document).trigger('gwork:auth-changed'); } catch (_) {}
         }, function (e) {
             setBusy(false);
             setHint('modal', errText(e), 'error');
@@ -815,6 +815,8 @@
             applyStatus(s);
             /* 退出后弹层重建为未登录设置菜单（参考图语义：退出即回未登录态） */
             if (isOpen()) show();
+            /* 内核已清掉官方凭据内存态；通知模型设置页回到「未登录」引导。 */
+            try { $(document).trigger('gwork:auth-changed'); } catch (_) {}
         }, function (e) {
             setBusy(false);
             setHint('pop', errText(e), 'error');

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "pcteam",
+  "version": "1.0.0",
+  "description": "Connect PCTeam, an industrial internet platform for intelligent construction. Query projects, plans, tasks and progress, update schedules, manage task dependencies and calculate critical paths.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "筑享云",
+        "name_en": "PCTeam",
+        "description_zh": "连接筑享云智能建造产业互联网平台，通过自然语言查询项目、计划、任务与进展，并进行进度反馈、计划调整、逻辑关系编排和关键路径计算。",
+        "description_en": "Connect PCTeam, an industrial internet platform for intelligent construction. Query projects, plans, tasks and progress, update schedules, manage task dependencies and calculate critical paths."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

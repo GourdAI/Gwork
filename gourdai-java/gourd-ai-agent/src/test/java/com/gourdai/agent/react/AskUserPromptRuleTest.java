@@ -94,9 +94,9 @@ class AskUserPromptRuleTest {
     void toolDescriptionCarriesMandatoryTrigger() {
         String desc = AskUserTool.TOOL_DESCRIPTION;
 
-        // 强触发：必须点明「正文列方案让用户挑」这一具体反面场景
-        Assertions.assertTrue(desc.contains("必须使用的场景"), "描述必须给出「必须调用」的判据");
-        Assertions.assertTrue(desc.contains("A/B/C"), "描述必须点名正文列选项这一反面场景");
+        // 强触发：必须点明「正文列方案让用户挑」这一具体反面场景（契约 §1.1 精简文案）
+        Assertions.assertTrue(desc.contains("【必须使用】"), "描述必须给出「必须调用」的判据");
+        Assertions.assertTrue(desc.contains("在正文列出多个方案让用户挑选"), "描述必须点名正文列选项这一反面场景");
         Assertions.assertTrue(desc.contains("recommended=true"), "描述必须保留推荐项纪律");
 
         // 防回退：旧描述里的抑制条款让模型偏向「写正文而不调用」，不得再出现
@@ -114,8 +114,18 @@ class AskUserPromptRuleTest {
         String desc = AskUserTool.TOOL_DESCRIPTION;
         Assertions.assertTrue(desc.contains("短标题"), "描述必须要求 label 只写短标题");
         Assertions.assertTrue(desc.contains("写进 description"), "描述必须指明解释写进 description");
-        Assertions.assertTrue(desc.contains("不要写进 label"), "描述必须禁止把「推荐」字样写进 label");
-        Assertions.assertTrue(desc.contains("不要塞进 detail"), "描述必须约束 detail 不放长篇分析");
+        Assertions.assertTrue(desc.contains("不要把「推荐」写进 label"), "描述必须禁止把「推荐」字样写进 label");
+        Assertions.assertTrue(desc.contains("长篇背景写正文"), "描述必须约束长篇背景放正文而非 detail");
+
+        // 契约 §1.1：字数约束一律「建议」措辞（Qwen PR#7063 教训：硬校验会让弹层整个不出现）
+        Assertions.assertTrue(desc.contains("建议≤30字"), "header 字数约束必须是建议措辞");
+        Assertions.assertTrue(desc.contains("建议≤12字"), "label 字数约束必须是建议措辞");
+        Assertions.assertTrue(desc.contains("建议≤40字"), "description 字数约束必须是建议措辞");
+
+        // 契约 §5.1：multiSelect 引导与自由输入/时间估计纪律
+        Assertions.assertTrue(desc.contains("multiSelect=true"), "描述必须给出多选开关的使用判据");
+        Assertions.assertTrue(desc.contains("不要自造「其他/自定义」选项"), "描述必须禁止自造自由输入选项");
+        Assertions.assertTrue(desc.contains("选项不要包含时间估计"), "描述必须保留时间估计禁令");
 
         Assertions.assertTrue(AskUserTool.PROMPT_RULE_CN.contains("description"), "中文硬规则同样要点明 description 分工");
         Assertions.assertTrue(AskUserTool.PROMPT_RULE_EN.contains("description"), "英文硬规则同样要点明 description 分工");
@@ -146,9 +156,12 @@ class AskUserPromptRuleTest {
         Assertions.assertTrue(withTool.contains(AskUserTool.PROMPT_RULE_CN), "注入内容必须与常量同源");
 
         String withoutTool = prompt.getNaturalInstruction(new StubTrace(List.of(otherTool())));
-        Assertions.assertFalse(withoutTool.contains("ask_user"),
-                "工具不可用（如子代理）时不得注入，否则诱导幻觉调用");
-        Assertions.assertTrue(withoutTool.contains("4. **自然回复**"), "原有规则不得被破坏");
+        Assertions.assertFalse(withoutTool.contains(AskUserTool.PROMPT_RULE_CN),
+                "工具不可用（如子代理）时不得注入硬规则，否则诱导幻觉调用");
+        Assertions.assertFalse(withoutTool.contains("调用 `ask_user`"),
+                "工具不可用时不得出现「调用 ask_user」的动作指引");
+        Assertions.assertTrue(withoutTool.contains("4. **自然回复**"),
+                "无 complete_task/ask_user 的工具集（子代理形态）保持自然回复规则");
     }
 
     @Test
@@ -162,8 +175,10 @@ class AskUserPromptRuleTest {
         Assertions.assertTrue(withTool.contains("MUST call"), "英文规则必须使用 MUST 级措辞");
 
         String withoutTool = prompt.getNaturalInstruction(new StubTrace(List.of(otherTool())));
-        Assertions.assertFalse(withoutTool.contains("ask_user"),
-                "工具不可用时不得注入（英文）");
+        Assertions.assertFalse(withoutTool.contains(AskUserTool.PROMPT_RULE_EN),
+                "工具不可用时不得注入硬规则（英文）");
+        Assertions.assertFalse(withoutTool.contains("call `ask_user`"),
+                "工具不可用时不得出现「call ask_user」的动作指引（英文）");
         Assertions.assertTrue(withoutTool.contains("4. **Natural Response**"), "原有规则不得被破坏（英文）");
     }
 

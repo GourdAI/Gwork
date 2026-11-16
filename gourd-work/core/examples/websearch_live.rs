@@ -33,6 +33,7 @@ async fn main() {
         model: Default::default(),
         settings: Arc::new(gourd_work_core::config::Settings::default()),
         bash_exempt_dirs: Vec::new(),
+        resume_calibration: false,
     };
     let started = std::time::Instant::now();
     let out = WebSearchTool.execute(json!({"query": query, "numResults": 5}), &ctx).await;

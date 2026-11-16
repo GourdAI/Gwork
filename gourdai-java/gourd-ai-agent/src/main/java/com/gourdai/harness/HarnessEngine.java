@@ -512,7 +512,12 @@ public class HarnessEngine {
 
     public void setMemoryEnabled(Boolean memoryEnabled) {
         options.setMemoryEnabled(memoryEnabled);
-        memoryTalent.setEnabled(memoryEnabled);
+        // 自审修复 J4：memoryTalent 在 memoryProvider 未配置时为 null（构造器
+        // 1019-1024 行），裸解引用会在设置页切换 memory 开关时 NPE。与构造期
+        // 守卫同口径：无 talent 只落 options，运行期按 options 判定。
+        if (memoryTalent != null) {
+            memoryTalent.setEnabled(memoryEnabled);
+        }
     }
 
     public void setSandboxEnabled(Boolean sandboxEnabled) {
@@ -1349,6 +1354,10 @@ public class HarnessEngine {
             if (calibration == null) {
                 return;
             }
+
+            // 契约 §3.3：恢复/异常中断后续跑（removeLastAnswer 路径）追加带 [提示] 恢复校准行的
+            // 进度页脚；常规 todoread/todowrite 的 footer 不带该行（buildProgressFooter 默认 false）。
+            calibration = calibration + TodoTalent.buildProgressFooter(content, true);
 
             trace.getWorkingMemory().addMessage(ChatMessage.ofUser(calibration));
         } catch (Throwable e) {

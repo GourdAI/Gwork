@@ -188,7 +188,12 @@ impl AcpAgent {
 
         // Build history
         let workspace = std::path::PathBuf::from(&cwd);
-        let system = crate::react::prompt::build_system_prompt(&settings, &workspace.to_string_lossy())
+        let system = crate::react::prompt::build_system_prompt(
+            &settings,
+            &workspace.to_string_lossy(),
+            // 契约 §1.2：规则 5 条件注入（与 server/CLI/loop 同一判定源）。
+            crate::react::prompt::ask_user_visible(&settings.permission),
+        )
             + &crate::react::prompt::build_agent_roster(&workspace, &settings.permission);
         let mut history = vec![ChatMessage::system(system)];
         history.push(ChatMessage::user_with_images(&user_text, image_urls));
@@ -250,6 +255,7 @@ impl AcpAgent {
             // `/compact` to honour.
             force_compact: false,
             compact_focus: None,
+            resume_calibration: false,
         };
         let agent = ReActAgent::new(self.registry.clone());
         let result = agent.run(&config, history, frame_tx, cancel).await;

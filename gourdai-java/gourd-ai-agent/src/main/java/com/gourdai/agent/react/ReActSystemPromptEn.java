@@ -16,6 +16,7 @@
 package com.gourdai.agent.react;
 
 import com.gourdai.agent.util.AskUserTool;
+import com.gourdai.agent.util.CompleteTaskTool;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.lang.Preview;
 import org.slf4j.Logger;
@@ -110,8 +111,19 @@ public class ReActSystemPromptEn implements ReActSystemPrompt {
         sb.append("## Core Rules\n")
                 .append("1. **Direct Action**: If a tool is needed, trigger **Function Calling** directly.\n")
                 .append("2. **Result-Oriented**: All conclusions MUST be based on real data returned by tools (Observation).\n")
-                .append("3. **Prohibit Forgery**: Strictly forbidden to simulate tool execution or forge results in your response.\n")
-                .append("4. **Natural Response**: Once the task is finished, respond directly in natural language without tags like `Final Answer:`.\n");
+                .append("3. **Prohibit Forgery**: Strictly forbidden to simulate tool execution or forge results in your response.\n");
+
+        // 契约 §4.2：自然完成规则改为推荐 complete_task（条件注入，与 CN 模板同构）
+        if (CompleteTaskTool.isAvailable(trace.getOptions().getTools())) {
+            sb.append("4. **Natural Completion**: When the task is done, calling `complete_task` to submit the final summary ")
+                    .append("is recommended (its summary IS the final answer the user sees); ")
+                    .append("replying directly in natural language remains valid — neither needs tags like `Final Answer:`.\n");
+        } else {
+            sb.append("4. **Natural Response**: Once the task is finished, respond directly in natural language without tags like `Final Answer:`.\n");
+        }
+
+        // 契约 §2.4：收尾契约条款（EN 语义等价，紧随自然完成规则）
+        sb.append(CompleteTaskTool.CLOSING_CONTRACT_EN).append("\n");
 
         // Conditional injection: only emit the hard rule when ask_user is actually in the toolset
         if (AskUserTool.isAvailable(trace.getOptions().getTools())) {
@@ -156,7 +168,17 @@ public class ReActSystemPromptEn implements ReActSystemPrompt {
         sb.append("## Final Answer Requirements\n")
                 .append("1. When the task is complete, you MUST provide the final answer.\n")
                 .append("2. The final answer MUST start with ").append(config.getFinishMarker()).append(".\n")
-                .append("3. Directly provide your complete answer after ").append(config.getFinishMarker()).append(" without extra tags.\n\n");
+                .append("3. Directly provide your complete answer after ").append(config.getFinishMarker()).append(" without extra tags.\n");
+
+        // 契约 §4.2：文本协议下 complete_task 经 Action 调用同样有效（工具集内才推荐，与 CN 同构）
+        if (CompleteTaskTool.isAvailable(trace.getOptions().getTools())) {
+            sb.append("4. When the task is done, calling `complete_task` via Action to submit the final summary is recommended ")
+                    .append("(its summary IS the final answer); a final answer prefixed with ")
+                    .append(config.getFinishMarker()).append(" remains valid.\n");
+        }
+
+        // 契约 §2.4：收尾契约条款（两套模板一致注入）
+        sb.append(CompleteTaskTool.CLOSING_CONTRACT_EN).append("\n\n");
 
         // C. Core behaviors
         sb.append("## Core Rules\n")

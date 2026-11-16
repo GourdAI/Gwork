@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "agent-earth": {
+      "type": "streamable_http",
+      "url": "https://agentearth.ai/mcp-server/",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "AgentEarth 金融电商社媒工具集"
+      }
+    }
+  }
+}

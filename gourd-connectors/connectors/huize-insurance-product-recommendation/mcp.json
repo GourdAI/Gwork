@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "huize-insurance-product-recommendation": {
+      "type": "streamable_http",
+      "url": "https://hzc-prosearch.hzins.com/product-recommendation/mcp"
+    }
+  }
+}

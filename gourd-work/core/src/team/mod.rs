@@ -66,6 +66,12 @@ pub struct ParentRun {
     pub cancel: CancellationToken,
     /// Reasoning level in effect for the conversation.
     pub thinking: Option<String>,
+    /// The parent's `runId`. The user's change card is keyed by it; a
+    /// sub-agent's file writes must land in that same manifest.
+    pub run_id: String,
+    /// Shared ledger of the run that delegated this task. `None` for callers
+    /// (ACP/CLI/tests) that have no file-change ledger at all.
+    pub change_ledger: Option<Arc<crate::changes::ChangeLedger>>,
 }
 
 /// Result from a sub-agent execution.
@@ -209,6 +215,14 @@ impl TeamOrchestrator {
         );
 
         let run_id = format!("sub-{}", task.id);
+        if let Some(ledger) = parent.change_ledger.as_ref() {
+            ledger.alias_run(
+                &format!("sub-{}", task.id),
+                &run_id,
+                &parent.session_id,
+                &parent.run_id,
+            );
+        }
         // Read before `settings` is moved into the struct literal below.
         //
         // The budget is the user's own `maxTurns`, not a hardcoded number: it used
@@ -233,7 +247,7 @@ impl TeamOrchestrator {
             start_seq: 0,
             hitl_approved: true, // sub-agents run without approval gates
             gate: Some(gate),
-            change_ledger: None, // sub-agents don't capture file changes
+            change_ledger: parent.change_ledger.clone(),
             // Sub-agents have no session storage and no meter of their own:
             // their context_size frames are not forwarded to the parent UI
             // (Java TaskTalent forwards only a subset), so the ledger fields
@@ -244,6 +258,7 @@ impl TeamOrchestrator {
             // Sub-agents have no `/compact` entry point.
             force_compact: false,
             compact_focus: None,
+            resume_calibration: false,
             subagent_depth: next_depth,
             // The real conversation stays the root even at depth ≥ 2, so a nested
             // sub-agent's frames are attributed to the session the user sees.
@@ -263,8 +278,18 @@ impl TeamOrchestrator {
         // gets neither. It is scoped to one delegated task, and `skillread` is in
         // the whitelist of the agents that need skills, so the roster would be
         // duplicated context the sub-agent did not ask for.
+        //
+        // 契约 §1.3：唯一追加的是 headless 禁问条款。子代理没有 ask_user（`**`
+        // 展开与显式声明都已剔除，agents/mod.rs），question 帧又会被下方转发层
+        // 丢弃——不禁止提问文本，模型就会以「请选择…」收尾然后父代理死等。
+        // 条款要求假设推进或报告阻塞，由父代理决定是否向用户提问。
+        let sub_system = format!(
+            "{}\n\n{}",
+            def.system_prompt,
+            crate::react::prompt::SUBAGENT_HEADLESS_CN
+        );
         let history = vec![
-            ChatMessage::system(def.system_prompt.clone()),
+            ChatMessage::system(sub_system),
             ChatMessage::user(&task.prompt),
         ];
 

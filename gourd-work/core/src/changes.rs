@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -106,13 +108,63 @@ pub struct Manifest {
     pub last_status: String,
     #[serde(rename = "updatedAt")]
     pub updated_at: i64,
+    /// Absolute path of the working tree this run's relative paths belong to.
+    ///
+    /// The ledger's **data** (manifest/blobs) always lives under the kernel's
+    /// global `AppState.workspace` so the outputs panel can read every session
+    /// through one `ChangeLedger`. The *working tree* is a different thing: a
+    /// session bound to another project runs its tools in `bound_root` (see
+    /// `resolve_run_workspace`). Persisting the tool root with the manifest is
+    /// what keeps `before/record/undo/reapply/entry_visible` pointing at the
+    /// same tree the tools actually wrote — across process restarts, and for
+    /// historical manifests. Empty on legacy manifests: callers fall back to
+    /// the kernel workspace.
+    #[serde(rename = "workspaceRoot", default)]
+    pub workspace_root: String,
     pub entries: Vec<ChangeEntry>,
 }
 
 /// The change ledger service.
+#[derive(Debug)]
 pub struct ChangeLedger {
+    /// Where the ledger stores manifests and blobs (`<root>/.gwork/sessions/...`).
     workspace: PathBuf,
+    /// Per-session working-tree roots, registered by the run spawner / tools.
+    /// Shared `Arc` clones (sub-agents, HTTP handlers) all see the same map.
+    run_roots: RwLock<HashMap<String, PathBuf>>,
+    /// `(child_session, child_run) -> (parent_session, parent_run)`.
+    ///
+    /// Sub-agents run with synthetic `sub-*` ids (frames must not look like a
+    /// new conversation), but their `write`/`edit` results belong to the run
+    /// the user is watching. Without this map their changes land in an orphan
+    /// manifest that `finish(parent_run)` never publishes — one of the two
+    /// reasons "this turn clearly changed files but no card appeared".
+    run_aliases: RwLock<HashMap<(String, String), (String, String)>>,
+    /// Per-manifest mutation locks. `record`/`note_bash`/`finish`/`reopen`/
+    /// `finalize_orphans`/`undo`/`reapply` all do a read-modify-save on one
+    /// `<sid,rid>.json`. Parallel sub-agents (multitask) alias to the SAME
+    /// parent manifest, so without this lock two writers each load revision R,
+    /// push one entry, and the second `save` silently drops the first — the
+    /// original "clearly changed files but no card" symptom reappears.
+    run_muts: RwLock<HashMap<(String, String), Arc<Mutex<()>>>>,
+    /// Process start (ms). `finalize_orphans` may only close manifests that
+    /// were last touched BEFORE this process started: those are the remnants of
+    /// a killed prior process. Every manifest this process wrote — an active
+    /// run, a concurrent loop run, a `reopen`ed resume segment — has
+    /// `updatedAt >= process_started_ms` and must NOT be swept. Sweeping one of
+    /// those flips `ready` early; the real `finish()` then hits its idempotence
+    /// gate and the final frame is silently dropped.
+    process_started_ms: i64,
+    /// Monotonic counter for unique atomic-write temp names. A fixed
+    /// `<run>.json.tmp` collides between concurrent saves of the same run.
+    tmp_seq: AtomicU64,
 }
+
+/// A bash command may have touched files without going through `write`/`edit`.
+/// Java records exactly this sentence in `incompleteReasons`; keep it identical
+/// so the two kernels render the same warning through `incompleteText()`.
+pub const BASH_INCOMPLETE_REASON: &str =
+    "bash was invoked and may have changed untracked files";
 
 /// Cap on [`Manifest::incomplete_reasons`] (Java `MAX_INCOMPLETE_REASONS`).
 ///
@@ -142,7 +194,171 @@ impl ChangeLedger {
     }
 
     pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            run_roots: RwLock::new(HashMap::new()),
+            run_aliases: RwLock::new(HashMap::new()),
+            run_muts: RwLock::new(HashMap::new()),
+            process_started_ms: now_ms(),
+            tmp_seq: AtomicU64::new(0),
+        }
+    }
+
+    /// Serialize all read-modify-save operations on one manifest.
+    fn run_lock(&self, session_id: &str, run_id: &str) -> Arc<Mutex<()>> {
+        let key = (session_id.to_string(), run_id.to_string());
+        // Fast path: reuse the existing lock without taking the write lock.
+        if let Ok(map) = self.run_muts.read() {
+            if let Some(l) = map.get(&key) {
+                return l.clone();
+            }
+        }
+        let mut map = match self.run_muts.write() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+    }
+
+    /// Resolve an alias chain to its root. Nested sub-agents used to inherit a
+    /// `sub-*` runId as their parent, so a single lookup left their writes in
+    /// an orphan `(real_session, sub-xxx)` manifest.
+    fn target(&self, session_id: &str, run_id: &str) -> (String, String) {
+        let mut cur = (session_id.to_string(), run_id.to_string());
+        // Bounded to break any accidental cycle in the alias map.
+        for _ in 0..16 {
+            let next = self
+                .run_aliases
+                .read()
+                .ok()
+                .and_then(|m| m.get(&cur).cloned());
+            match next {
+                Some(n) if n != cur => cur = n,
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    /// Make a sub-agent's ledger writes land in the parent run's manifest.
+    pub fn alias_run(
+        &self,
+        child_session: &str,
+        child_run: &str,
+        parent_session: &str,
+        parent_run: &str,
+    ) {
+        if let Ok(mut map) = self.run_aliases.write() {
+            map.insert(
+                (child_session.to_string(), child_run.to_string()),
+                (parent_session.to_string(), parent_run.to_string()),
+            );
+        }
+        if let Ok(mut map) = self.run_roots.write() {
+            if let Some(root) = map.get(parent_session).cloned() {
+                map.insert(child_session.to_string(), root);
+            }
+        }
+    }
+
+    /// Register the working tree a run's tools operate in.
+    ///
+    /// `ChangeLedger` is a single `Arc` shared by the server, the ReAct loop and
+    /// every tool context. Registering here (instead of adding yet another
+    /// `ReActConfig`/`ToolContext` field) means sub-agents and the HTTP handlers
+    /// resolve the same root as the main run without any extra plumbing. The
+    /// root is also persisted into the manifest on the first `record`, so a
+    /// restart does not lose it.
+    pub fn register_run_root(&self, session_id: &str, root: &Path) {
+        if let Ok(mut map) = self.run_roots.write() {
+            map.insert(session_id.to_string(), root.to_path_buf());
+        }
+    }
+
+    /// Working-tree root for a session: the registered run root, else the
+    /// kernel workspace. Used for *new* captures; existing manifests carry
+    /// their own `workspaceRoot` and go through `tree_root`.
+    fn live_root(&self, session_id: &str) -> PathBuf {
+        self.run_roots
+            .read()
+            .ok()
+            .and_then(|m| m.get(session_id).cloned())
+            .unwrap_or_else(|| self.workspace.clone())
+    }
+
+    /// Resolve the tree a path belongs to. Absolute paths are normalised to a
+    /// path relative to `root` (a bound project must never be recorded as an
+    /// absolute path that the outputs panel cannot re-open); relative paths
+    /// are stripped of `./` and drive-letter prefixes left by some shells.
+    fn normalize_rel(root: &Path, raw: &str) -> String {
+        let raw = raw.replace('\\', "/");
+        // Byte-length-preserving normalisation: compare case-insensitively so
+        // `c:/work/proj` and `C:\Work\Proj` resolve to the same tree, then
+        // slice the ORIGINAL string at the same byte offsets (ASCII lowercase
+        // never changes length, so those offsets stay on char boundaries).
+        let root_norm = root
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        let raw_norm = raw.to_ascii_lowercase();
+        let prefix = format!("{}/", root_norm);
+
+        let rel_str: Option<String> = if raw_norm == root_norm {
+            Some(String::new())
+        } else if raw_norm.starts_with(&prefix) {
+            // Absolute / drive-letter / UNC path INSIDE the working tree.
+            Some(raw[root_norm.len() + 1..].to_string())
+        } else {
+            let p = Path::new(&raw);
+            let bytes = raw.as_bytes();
+            let win_abs = bytes.len() > 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && bytes[2] == b'/';
+            if p.is_absolute() || win_abs || raw.starts_with("//") {
+                // An absolute path OUTSIDE the tree must be refused, not
+                // flattened into a bogus relative path: `undo/reapply` join it
+                // with root and would write into the wrong tree (or drive).
+                None
+            } else {
+                Some(raw.clone())
+            }
+        };
+        let Some(rel_str) = rel_str else {
+            return String::new();
+        };
+        let rel = PathBuf::from(&rel_str);
+        let mut out = String::new();
+        for c in rel.components() {
+            match c {
+                std::path::Component::Normal(s) => {
+                    if !out.is_empty() { out.push('/'); }
+                    out.push_str(&s.to_string_lossy());
+                }
+                std::path::Component::ParentDir => {
+                    // `undo/reapply` write to `root.join(&entry.path)`, so a
+                    // stored `..` could escape the working tree. The tools
+                    // already reject out-of-root paths via `resolve_safe`;
+                    // return empty here so `before`/`record` skip the entry
+                    // entirely instead of persisting a traversal path.
+                    return String::new();
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Pick the working tree for a manifest. A persisted `workspaceRoot` always
+    /// wins; otherwise the live registration, then the kernel workspace.
+    fn tree_root(&self, session_id: &str, manifest: Option<&Manifest>) -> PathBuf {
+        if let Some(m) = manifest {
+            if !m.workspace_root.is_empty() {
+                return PathBuf::from(&m.workspace_root);
+            }
+        }
+        self.live_root(session_id)
     }
 
     fn base_dir(&self, session_id: &str) -> PathBuf {
@@ -175,22 +391,53 @@ impl ChangeLedger {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(manifest)?;
-        // Atomic write: temp file + rename
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &path)?;
+        // UNIQUE temp name. A fixed `<run>.json.tmp` collides when two parallel
+        // sub-agents (aliased to the SAME parent manifest) save concurrently:
+        // one rename consumes the other's temp file and the second save fails,
+        // silently dropping a recorded change. pid + monotonic counter keeps
+        // every atomic write independent.
+        let n = self.tmp_seq.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("json.{}.{}.tmp", std::process::id(), n));
+        if let Err(e) = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, &path)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
+    }
+
+    /// The working tree a capture for `(session, run)` must use.
+    ///
+    /// `before()` and `record()` MUST agree on this. Reading `live_root` in one
+    /// and `tree_root(manifest)` in the other made them diverge whenever an
+    /// alias, a re-registered root, or a persisted `workspaceRoot` was present —
+    /// before/after then came from two different trees (the original empty-card
+    /// bug). Resolving through `target()` + existing manifest here makes both
+    /// ends read the same root.
+    fn capture_root(&self, session_id: &str, run_id: &str) -> (String, String, PathBuf) {
+        let (sid, rid) = self.target(session_id, run_id);
+        let existing = self.load_manifest(&sid, &rid);
+        let root = self.tree_root(&sid, existing.as_ref());
+        (sid, rid, root)
     }
 
     /// Capture the "before" state of a file and store its blob.
     /// Returns a token (path) used to finalize "after" via `after`.
-    pub fn before(&self, session_id: &str, _run_id: &str, rel_path: &str) -> Option<FileState> {
+    ///
+    /// Uses the same root as `record()` (`capture_root`), not a bare
+    /// `live_root(original_session)`, so before/after can never be split across
+    /// two working trees for aliased or bound projects.
+    pub fn before(&self, session_id: &str, run_id: &str, rel_path: &str) -> Option<FileState> {
         // Skip ephemeral paths entirely
         if ephemeral::is_ephemeral_relative(rel_path, false) {
             return None;
         }
-        let abs = self.workspace.join(rel_path);
-        let state = self.snapshot(session_id, &abs);
+        let (sid, _rid, root) = self.capture_root(session_id, run_id);
+        let rel = Self::normalize_rel(&root, rel_path);
+        if rel.is_empty() || ephemeral::is_ephemeral_relative(&rel, false) {
+            return None;
+        }
+        let abs = root.join(&rel);
+        let state = self.snapshot(&sid, &abs);
         Some(state)
     }
 
@@ -249,6 +496,10 @@ impl ChangeLedger {
     }
 
     /// Record a completed change (before → after) into the run manifest.
+    ///
+    /// `session_id`/`run_id` may be a sub-agent's synthetic ids: `target()`
+    /// redirects the write into the parent run's manifest so the change card
+    /// the user sees covers delegated work too.
     pub fn record(
         &self,
         session_id: &str,
@@ -259,36 +510,34 @@ impl ChangeLedger {
         if ephemeral::is_ephemeral_relative(rel_path, false) {
             return Ok(());
         }
-        let abs = self.workspace.join(rel_path);
-        let after = self.snapshot(session_id, &abs);
-        let (additions, deletions) = self.line_stats(session_id, &before, &after);
-
-        let mut manifest = self
-            .load_manifest(session_id, run_id)
-            .unwrap_or_else(|| Manifest {
-                version: "1".into(),
-                session_id: session_id.to_string(),
-                run_id: run_id.to_string(),
-                revision: 0,
-                ready: false,
-                possibly_incomplete: false,
-                incomplete_reasons: Vec::new(),
-                last_status: "CAPTURED".into(),
-                updated_at: now_ms(),
-                entries: Vec::new(),
-            });
+        let (sid, rid) = self.target(session_id, run_id);
+        // Serialize with every other writer on this manifest. Parallel
+        // sub-agents alias to the same parent run; without this lock two
+        // `record` calls load the same revision, push one entry each, and the
+        // last save silently discards the other change.
+        let _lock_arc = self.run_lock(&sid, &rid);
+        let _guard = _lock_arc.lock().unwrap_or_else(|p| p.into_inner());
+        let mut manifest = self.load_manifest(&sid, &rid).unwrap_or_else(|| self.blank_manifest(&sid, &rid));
+        let root = self.tree_root(&sid, Some(&manifest));
+        let rel = Self::normalize_rel(&root, rel_path);
+        if rel.is_empty() || ephemeral::is_ephemeral_relative(&rel, false) {
+            return Ok(());
+        }
+        let abs = root.join(&rel);
+        let after = self.snapshot(&sid, &abs);
+        let (additions, deletions) = self.line_stats(&sid, &before, &after);
 
         // Keep only first-before / last-after per path. Line stats are recomputed
         // against the *stored* first-before whenever a later record changes
         // `after`, so the entry always describes first-before → last-after.
-        if let Some(existing) = manifest.entries.iter_mut().find(|e| e.path == rel_path) {
+        if let Some(existing) = manifest.entries.iter_mut().find(|e| e.path == rel) {
             existing.after = after;
-            let (add, del) = self.line_stats(session_id, &existing.before, &existing.after);
+            let (add, del) = self.line_stats(&sid, &existing.before, &existing.after);
             existing.additions = Some(add);
             existing.deletions = Some(del);
         } else {
             manifest.entries.push(ChangeEntry {
-                path: rel_path.to_string(),
+                path: rel,
                 before,
                 after,
                 undone: false,
@@ -298,7 +547,55 @@ impl ChangeLedger {
         }
         manifest.revision += 1;
         manifest.updated_at = now_ms();
-        self.save_manifest(session_id, &manifest)
+        self.save_manifest(&sid, &manifest)
+    }
+
+    fn blank_manifest(&self, session_id: &str, run_id: &str) -> Manifest {
+        Manifest {
+            version: "1".into(),
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            revision: 0,
+            ready: false,
+            possibly_incomplete: false,
+            incomplete_reasons: Vec::new(),
+            last_status: "CAPTURED".into(),
+            updated_at: now_ms(),
+            workspace_root: self.live_root(session_id).to_string_lossy().to_string(),
+            entries: Vec::new(),
+        }
+    }
+
+    /// Record that a run used `bash` (or a similarly opaque path) which may have
+    /// changed files outside `write`/`edit`. Creates a manifest even when no
+    /// tracked file exists, so `finish()` has something to publish: the UI can
+    /// then show a "possibly incomplete" card instead of nothing at all.
+    /// Java's ledger writes the same `incompleteReasons` sentence.
+    pub fn note_bash(&self, session_id: &str, run_id: &str) {
+        let (sid, rid, root) = self.capture_root(session_id, run_id);
+        let _lock_arc = self.run_lock(&sid, &rid);
+        let _guard = _lock_arc.lock().unwrap_or_else(|p| p.into_inner());
+        let mut manifest = self.load_manifest(&sid, &rid)
+            .unwrap_or_else(|| self.blank_manifest(&sid, &rid));
+        let reasons_before = manifest.incomplete_reasons.len();
+        let was_incomplete = manifest.possibly_incomplete;
+        Self::add_reason(&mut manifest, BASH_INCOMPLETE_REASON);
+        manifest.possibly_incomplete = true;
+        if manifest.workspace_root.is_empty() {
+            manifest.workspace_root = root.to_string_lossy().to_string();
+        }
+        // Bump on EVERY state change (not just the first one). `finish(false)`
+        // can append another reason afterwards, and the frontend's monotonic
+        // `revision <= previousRevision` gate must accept that later frame.
+        // Rust publishes one terminal frame per run, so repeated bash calls in
+        // one run still produce a single warning; the extra bumps are harmless.
+        if !was_incomplete || manifest.incomplete_reasons.len() != reasons_before
+            || manifest.revision == 0
+        {
+            manifest.revision += 1;
+        }
+        manifest.updated_at = now_ms();
+        let _ = self.save_manifest(&sid, &manifest);
     }
 
     /// Mark a run as finished and return the summary snapshot to publish.
@@ -322,7 +619,10 @@ impl ChangeLedger {
     /// caller could not tell "published" from "nothing to do", and an abnormal
     /// termination was recorded as a clean `READY`.
     pub fn finish(&self, session_id: &str, run_id: &str, clean: bool) -> Option<serde_json::Value> {
-        let mut manifest = self.load_manifest(session_id, run_id)?;
+        let (sid, rid) = self.target(session_id, run_id);
+        let _lock_arc = self.run_lock(&sid, &rid);
+        let _guard = _lock_arc.lock().unwrap_or_else(|p| p.into_inner());
+        let mut manifest = self.load_manifest(&sid, &rid)?;
         if manifest.ready {
             return None;
         }
@@ -334,13 +634,17 @@ impl ChangeLedger {
             manifest.possibly_incomplete = true;
             // Same text Java's `finish` records, so the two kernels explain an
             // abnormal stop identically.
+            let before = manifest.incomplete_reasons.len();
             Self::add_reason(
                 &mut manifest,
                 "run terminated abnormally or was stopped; the last writes may not be tracked",
             );
+            if manifest.incomplete_reasons.len() != before {
+                manifest.revision += 1;
+            }
         }
         manifest.updated_at = now_ms();
-        if self.save_manifest(session_id, &manifest).is_err() {
+        if self.save_manifest(&sid, &manifest).is_err() {
             // Do not publish a snapshot we failed to persist: the UI would show a
             // revision that a later read cannot reproduce.
             return None;
@@ -363,7 +667,10 @@ impl ChangeLedger {
     /// manifest's `entries` are kept: the card stays a single cumulative view of
     /// the whole task (before + after suspension), with undo covering both halves.
     pub fn reopen(&self, session_id: &str, run_id: &str) {
-        let Some(mut manifest) = self.load_manifest(session_id, run_id) else {
+        let (sid, rid) = self.target(session_id, run_id);
+        let _lock_arc = self.run_lock(&sid, &rid);
+        let _guard = _lock_arc.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(mut manifest) = self.load_manifest(&sid, &rid) else {
             return;
         };
         if !manifest.ready {
@@ -373,7 +680,7 @@ impl ChangeLedger {
         manifest.last_status = "CAPTURED".into();
         manifest.revision += 1;
         manifest.updated_at = now_ms();
-        let _ = self.save_manifest(session_id, &manifest);
+        let _ = self.save_manifest(&sid, &manifest);
     }
 
     /// Get a run summary.
@@ -434,14 +741,14 @@ impl ChangeLedger {
     ///    git's live view: an untracked file that no longer exists simply is not
     ///    there. A real ADDED file that still exists is unaffected, as is a real
     ///    file the user deleted (before.exists=true → shows DELETED).
-    fn entry_visible(&self, entry: &ChangeEntry) -> bool {
+    fn entry_visible(&self, entry: &ChangeEntry, root: &Path) -> bool {
         if ephemeral::is_ephemeral_relative(&entry.path, false) {
             return false;
         }
         if entry.undone {
             return true;
         }
-        if !entry.before.exists && !self.workspace.join(&entry.path).exists() {
+        if !entry.before.exists && !root.join(&entry.path).exists() {
             return false;
         }
         true
@@ -450,11 +757,14 @@ impl ChangeLedger {
     fn summarize(&self, manifest: &Manifest) -> serde_json::Value {
         // Read-side visibility (see `entry_visible`): the published snapshot and
         // every count below must agree on the SAME filtered set, otherwise the
-        // card header count jumps between frames.
+        // card header count jumps between frames. The tree root comes from the
+        // manifest itself — a bound project's ADDED file must be looked up under
+        // that project, not under the kernel install directory.
+        let root = self.tree_root(&manifest.session_id, Some(manifest));
         let visible: Vec<&ChangeEntry> = manifest
             .entries
             .iter()
-            .filter(|e| self.entry_visible(e))
+            .filter(|e| self.entry_visible(e, &root))
             .collect();
         let mut additions = 0i64;
         let mut deletions = 0i64;
@@ -609,16 +919,17 @@ impl ChangeLedger {
             if self.ensure_line_stats(session_id, m) {
                 let _ = self.save_manifest(session_id, m);
             }
+            let root = self.tree_root(session_id, Some(m));
             run_summaries.push(serde_json::json!({
                 "runId": m.run_id,
                 "updatedAt": m.updated_at,
                 // Count the VISIBLE entries, matching `summarize`'s fileCount:
                 // raw `entries.len()` would count scratch rows the panel never
                 // shows, making the per-run counts disagree with the file list.
-                "fileCount": m.entries.iter().filter(|e| self.entry_visible(e)).count(),
+                "fileCount": m.entries.iter().filter(|e| self.entry_visible(e, &root)).count(),
                 "possiblyIncomplete": m.possibly_incomplete,
             }));
-            for e in m.entries.iter().filter(|e| self.entry_visible(e)) {
+            for e in m.entries.iter().filter(|e| self.entry_visible(e, &root)) {
                 let change_type = if !e.before.exists {
                     "ADDED"
                 } else if !e.after.exists {
@@ -711,10 +1022,11 @@ impl ChangeLedger {
         let Some(mut manifest) = self.load_manifest(session_id, run_id) else {
             return serde_json::json!({ "status": "NOT_FOUND" });
         };
+        let root = self.tree_root(session_id, Some(&manifest));
         let Some(entry) = manifest.entries.iter_mut().find(|e| e.path == rel_path) else {
             return serde_json::json!({ "status": "NOT_FOUND" });
         };
-        let abs = self.workspace.join(rel_path);
+        let abs = root.join(rel_path);
         // Conflict pre-check: current content must match "after"
         let current = self.snapshot(session_id, &abs);
         if entry.after.exists && current.exists && current.hash != entry.after.hash {
@@ -774,11 +1086,12 @@ impl ChangeLedger {
         let Some(mut manifest) = self.load_manifest(session_id, run_id) else {
             return serde_json::json!({ "status": "NOT_FOUND" });
         };
+        let root = self.tree_root(session_id, Some(&manifest));
         for entry in manifest.entries.iter_mut() {
             if !entry.undone {
                 continue;
             }
-            let abs = self.workspace.join(&entry.path);
+            let abs = root.join(&entry.path);
             if entry.after.exists {
                 let content = self.read_blob_text(session_id, &entry.after.hash);
                 if let Some(parent) = abs.parent() {
@@ -801,6 +1114,71 @@ impl ChangeLedger {
     pub fn remove_session(&self, session_id: &str) {
         let dir = self.base_dir(session_id);
         let _ = std::fs::remove_dir_all(&dir);
+        if let Ok(mut map) = self.run_roots.write() {
+            map.remove(session_id);
+        }
+        if let Ok(mut map) = self.run_aliases.write() {
+            // Alias keys are synthetic `sub-*` ids; the session being removed is
+            // the PARENT. Drop both halves so a long-lived desktop process with
+            // many delegated tasks does not accumulate stale aliases.
+            map.retain(|(child, _), (parent, _)| child != session_id && parent != session_id);
+        }
+    }
+
+    /// Publish a final snapshot for manifests that were captured but never
+    /// reached `finish()` (a run killed before wrap-up). Returns one summary per
+    /// orphan so the caller can emit the missing `file_changes` frames; the
+    /// revision is bumped so the frontend's monotonic `upsert` gate accepts them.
+    ///
+    /// Real manifests in the field have been observed with `ready=false` after a
+    /// process restart, which is why the left outputs panel could show a change
+    /// while the per-run card stayed empty (and vice versa).
+    ///
+    /// ONLY manifests last touched BEFORE this process started are eligible.
+    /// A `ready=false` manifest written by THIS process is an active run, a
+    /// concurrent loop run, or a just-`reopen`ed resume segment — sweeping it
+    /// flips `ready` early and the real `finish()` then drops its final frame.
+    pub fn finalize_orphans(&self, session_id: &str) -> Vec<serde_json::Value> {
+        let dir = self.base_dir(session_id).join("manifests");
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().map(|x| x == "json").unwrap_or(false) {
+                let c = match std::fs::read_to_string(&p) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let m0: Manifest = match serde_json::from_str(&c) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                // `updatedAt == 0` covers legacy manifests without the field.
+                if m0.ready || (m0.updated_at != 0 && m0.updated_at >= self.process_started_ms) {
+                    continue;
+                }
+                let _lock_arc = self.run_lock(session_id, &m0.run_id);
+                let _guard = _lock_arc.lock().unwrap_or_else(|p| p.into_inner());
+                // Re-read under the lock: another wrap-up may have finished it.
+                let mut m = match self.load_manifest(session_id, &m0.run_id) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                if m.ready || (m.updated_at != 0 && m.updated_at >= self.process_started_ms) {
+                    continue;
+                }
+                m.ready = true;
+                m.last_status = "RECOVERED".into();
+                m.revision += 1;
+                m.updated_at = now_ms();
+                if self.save_manifest(session_id, &m).is_ok() {
+                    out.push(self.summarize(&m));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -986,6 +1364,243 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gwork-changes-{}-{}", tag, uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ── regressions from the self-review of the file-changes fix ──────────────
+
+    #[test]
+    fn parallel_aliased_writers_keep_every_entry() {
+        // multitask/background sub-agents alias to the SAME parent manifest.
+        // Without the per-manifest lock + unique temp name, two concurrent
+        // `record` calls each load revision R and the last save drops the
+        // other's entry — the original "changed files never show" symptom.
+        let ws = temp_workspace("parallel");
+        let ledger = Arc::new(ChangeLedger::new(ws.clone()));
+        let sid = "sess-par";
+        let rid = "run-par";
+        ledger.register_run_root(sid, &ws);
+        for i in 0..8 {
+            ledger.alias_run(&format!("sub-{i}"), &format!("sub-{i}"), sid, rid);
+        }
+        let mut handles = Vec::new();
+        for i in 0..8u32 {
+            let l = ledger.clone();
+            let w = ws.clone();
+            handles.push(std::thread::spawn(move || {
+                let name = format!("f{i}.txt");
+                let before = l.before(&format!("sub-{i}"), &format!("sub-{i}"), &name).unwrap();
+                std::fs::write(w.join(&name), format!("content {i}\n")).unwrap();
+                l.record(&format!("sub-{i}"), &format!("sub-{i}"), &name, before).unwrap();
+            }));
+        }
+        for h in handles { h.join().unwrap(); }
+        let summary = ledger.finish(sid, rid, true).expect("parent finish must publish");
+        assert_eq!(summary["fileCount"].as_u64(), Some(8), "no entry may be lost: {summary:?}");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn before_and_record_use_the_persisted_workspace_root_after_restart() {
+        // before() used live_root(original_session), record() used
+        // tree_root(aliased sid + workspaceRoot). After a restart the live
+        // registration is gone; both must still resolve the persisted root.
+        let kernel = temp_workspace("restart-kernel");
+        let project = temp_workspace("restart-project");
+        {
+            let ledger = ChangeLedger::new(kernel.clone());
+            ledger.register_run_root("s", &project);
+            std::fs::write(project.join("a.txt"), "old\n").unwrap();
+            let before = ledger.before("s", "r", "a.txt").unwrap();
+            std::fs::write(project.join("a.txt"), "new\n").unwrap();
+            ledger.record("s", "r", "a.txt", before).unwrap();
+        }
+        let ledger = ChangeLedger::new(kernel.clone()); // no register_run_root
+        let m = ledger.load_manifest("s", "r").unwrap();
+        assert_eq!(m.workspace_root, project.to_string_lossy(), "root must be persisted");
+        let run = ledger.get_run("s", "r");
+        assert_eq!(run["fileCount"].as_u64(), Some(1));
+        assert_eq!(run["files"][0]["changeType"], "MODIFIED", "before/after must come from one tree");
+        let undone = ledger.undo_file("s", "r", "a.txt");
+        assert_eq!(undone["status"], "OK");
+        assert_eq!(std::fs::read_to_string(project.join("a.txt")).unwrap(), "old\n");
+        assert!(!kernel.join("a.txt").exists(), "undo must not write to the kernel tree");
+        std::fs::remove_dir_all(&kernel).ok();
+        std::fs::remove_dir_all(&project).ok();
+    }
+
+    #[test]
+    fn finalize_orphans_never_closes_a_run_from_this_process() {
+        let ws = temp_workspace("orphan");
+        let ledger = ChangeLedger::new(ws.clone());
+        let sid = "sess-orphan";
+        // An active run in THIS process (ready=false, updatedAt >= start).
+        ledger.note_bash(sid, "active");
+        // A genuine orphan from a previous process: backdate updatedAt.
+        ledger.note_bash(sid, "old");
+        let path = ledger.manifest_path(sid, "old");
+        let mut m: Manifest = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        m.updated_at = ledger.process_started_ms - 60_000;
+        ledger.save_manifest(sid, &m).unwrap();
+        let recovered = ledger.finalize_orphans(sid);
+        assert_eq!(recovered.len(), 1, "only the pre-process orphan is recovered: {recovered:?}");
+        assert_eq!(recovered[0]["runId"], "old");
+        // The active run must still be finishable (sweeping it would have
+        // flipped ready and made finish() return None).
+        assert!(ledger.finish(sid, "active", true).is_some(),
+            "an active run must NOT be swept by finalize_orphans");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn nested_alias_chain_resolves_to_the_real_run() {
+        // A depth-2 sub-agent inherited a `sub-*` runId as its parent; a
+        // single-hop target() left its writes in an orphan manifest.
+        let ws = temp_workspace("nested");
+        let ledger = ChangeLedger::new(ws.clone());
+        ledger.register_run_root("s", &ws);
+        ledger.alias_run("sub-a", "sub-a", "s", "real-run");
+        ledger.alias_run("sub-b", "sub-b", "sub-a", "sub-a");
+        let before = ledger.before("sub-b", "sub-b", "delegated.txt").unwrap();
+        std::fs::write(ws.join("delegated.txt"), "nested\n").unwrap();
+        ledger.record("sub-b", "sub-b", "delegated.txt", before).unwrap();
+        let summary = ledger.finish("s", "real-run", true).expect("root finish publishes nested write");
+        assert_eq!(summary["fileCount"].as_u64(), Some(1), "{summary:?}");
+        assert!(!ledger.manifest_path("s", "sub-a").exists(), "no orphan manifest");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn normalize_rel_rejects_paths_outside_the_tree() {
+        let root = Path::new("C:/Work/Proj");
+        assert_eq!(ChangeLedger::normalize_rel(root, "src/a.rs"), "src/a.rs");
+        // Case / slash differences must still resolve inside the tree.
+        assert_eq!(ChangeLedger::normalize_rel(root, "c:/work/proj/src/a.rs"), "src/a.rs");
+        assert_eq!(ChangeLedger::normalize_rel(root, "C:\\Work\\Proj\\src\\a.rs"), "src/a.rs");
+        // Outside-tree absolute paths and traversal are refused (empty), so
+        // undo/reapply can never write into another tree.
+        assert_eq!(ChangeLedger::normalize_rel(root, "D:/other/x.rs"), "");
+        assert_eq!(ChangeLedger::normalize_rel(root, "../escape/x.rs"), "");
+        assert_eq!(ChangeLedger::normalize_rel(root, "C:/Other/x.rs"), "");
+    }
+
+    #[test]
+    fn abnormal_finish_bumps_revision_when_it_adds_a_reason() {
+        // finish(false) appends an incomplete reason; without a revision bump
+        // the frontend's monotonic upsert gate would discard the warning.
+        let ws = temp_workspace("revision");
+        let ledger = ChangeLedger::new(ws.clone());
+        ledger.note_bash("s", "r");
+        let rev = ledger.load_manifest("s", "r").unwrap().revision;
+        let summary = ledger.finish("s", "r", false).unwrap();
+        assert!(summary["revision"].as_u64().unwrap() > rev);
+        assert_eq!(summary["possiblyIncomplete"], true);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    // ── regressions: bound workspace / bash / sub-agents / orphan manifests ────
+    //
+    // These reproduce the exact four failure shapes behind "this turn clearly
+    // changed files, but the outputs panel and the 已修改 card stay empty".
+
+    #[test]
+    fn a_bound_workspace_records_real_changes_under_its_own_root() {
+        // The ledger's DATA lives under the kernel install dir, but the run's
+        // TOOLS write into a bound project. `register_run_root` + persisted
+        // `workspaceRoot` must make before/record/read-side agree on that tree.
+        let kernel = temp_workspace("bound-kernel");
+        let project = temp_workspace("bound-project");
+        let ledger = ChangeLedger::new(kernel.clone());
+        let sid = "sess-bound";
+        let rid = "run-bound";
+        ledger.register_run_root(sid, &project);
+
+        let rel = "src/app.rs";
+        let before = ledger.before(sid, rid, rel).unwrap();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join(rel), "fn main() {}\n").unwrap();
+        ledger.record(sid, rid, rel, before).unwrap();
+
+        // The kernel tree must NOT have the file — that was the old root bug.
+        assert!(!kernel.join(rel).exists(), "tools wrote into the bound project, not the kernel dir");
+        let run = ledger.get_run(sid, rid);
+        assert_eq!(run["fileCount"].as_u64(), Some(1), "ADDED file must be visible: {run:?}");
+        assert_eq!(run["files"][0]["path"], rel);
+        assert_eq!(run["files"][0]["changeType"], "ADDED");
+        assert_eq!(run["files"][0]["additions"], 1);
+        let session = ledger.list_session(sid);
+        assert_eq!(session["fileCount"].as_u64(), Some(1), "left outputs panel reads the same manifest");
+        // Undo must restore against the bound root too.
+        let undone = ledger.undo_file(sid, rid, rel);
+        assert_eq!(undone["status"], "OK");
+        assert!(!project.join(rel).exists(), "undo must delete from the bound project");
+        std::fs::remove_dir_all(&kernel).ok();
+        std::fs::remove_dir_all(&project).ok();
+    }
+
+    #[test]
+    fn an_absolute_path_is_normalized_relative_to_the_run_root() {
+        // Diagnosed from real manifests: the same session had one run recorded
+        // with absolute paths and another with relative ones. Both must land on
+        // one stable relative path so the outputs panel can merge them.
+        let ws = temp_workspace("abs-path");
+        let ledger = ChangeLedger::new(ws.clone());
+        let sid = "sess-abs";
+        let rid = "run-abs";
+        ledger.register_run_root(sid, &ws);
+        let abs = ws.join("note.txt").to_string_lossy().to_string();
+        let before = ledger.before(sid, rid, &abs).unwrap();
+        std::fs::write(ws.join("note.txt"), "hello\n").unwrap();
+        ledger.record(sid, rid, &abs, before).unwrap();
+        let run = ledger.get_run(sid, rid);
+        assert_eq!(run["files"][0]["path"], "note.txt", "absolute path must be normalised: {run:?}");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn bash_only_run_still_publishes_a_warning_manifest() {
+        // A run that only used bash has no write/edit entries. Without
+        // `note_bash` there is no manifest at all, so `finish` returns None and
+        // NO frame is emitted — the silent card the user reported.
+        let ws = temp_workspace("bash-only");
+        let ledger = ChangeLedger::new(ws.clone());
+        let sid = "sess-bash";
+        let rid = "run-bash";
+        ledger.note_bash(sid, rid);
+        // Idempotent within a run: repeated bash calls must not duplicate the reason.
+        ledger.note_bash(sid, rid);
+        let summary = ledger.finish(sid, rid, true).expect("bash-only run must publish a warning frame");
+        assert_eq!(summary["fileCount"].as_u64(), Some(0));
+        assert_eq!(summary["possiblyIncomplete"], true);
+        let reasons = summary["incompleteReasons"].as_array().unwrap();
+        assert_eq!(reasons.len(), 1, "reason must be deduplicated: {reasons:?}");
+        assert_eq!(reasons[0], BASH_INCOMPLETE_REASON);
+        // The left panel must also see the warning (session-level merge).
+        let session = ledger.list_session(sid);
+        assert_eq!(session["possiblyIncomplete"], true);
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn a_sub_agent_write_lands_in_the_parent_run_manifest() {
+        // `team/mod.rs` gives sub-agents synthetic `sub-*` ids. Without the
+        // alias their writes land in an orphan manifest that finish(parent) never
+        // publishes — the second silent-card root cause.
+        let ws = temp_workspace("alias");
+        let ledger = ChangeLedger::new(ws.clone());
+        let sid = "sess-parent";
+        let rid = "run-parent";
+        ledger.register_run_root(sid, &ws);
+        ledger.alias_run("sub-task1", "sub-task1", sid, rid);
+
+        let before = ledger.before("sub-task1", "sub-task1", "delegated.txt").unwrap();
+        std::fs::write(ws.join("delegated.txt"), "from sub-agent\n").unwrap();
+        ledger.record("sub-task1", "sub-task1", "delegated.txt", before).unwrap();
+
+        let summary = ledger.finish(sid, rid, true).expect("parent finish must publish sub-agent writes");
+        assert_eq!(summary["runId"], rid);
+        assert_eq!(summary["fileCount"].as_u64(), Some(1));
+        assert_eq!(summary["files"][0]["path"], "delegated.txt");
+        std::fs::remove_dir_all(&ws).ok();
     }
 
     #[test]
@@ -1478,6 +2093,7 @@ mod tests {
             incomplete_reasons: Vec::new(),
             last_status: "CAPTURED".into(),
             updated_at: 0,
+            workspace_root: String::new(),
             entries: Vec::new(),
         };
         ChangeLedger::add_reason(&mut m, "reason A");
@@ -1503,6 +2119,7 @@ mod tests {
             incomplete_reasons: Vec::new(),
             last_status: "CAPTURED".into(),
             updated_at: 0,
+            workspace_root: String::new(),
             entries: Vec::new(),
         };
         for i in 0..(MAX_INCOMPLETE_REASONS + 25) {

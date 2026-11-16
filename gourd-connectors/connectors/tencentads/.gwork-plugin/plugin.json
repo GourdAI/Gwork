@@ -1,0 +1,99 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "tencentads",
+  "version": "1.0.0",
+  "description": "Tencent Ads Delivery Skill empowers LLMs with full-funnel ad management capabilities: account authorization, ad/smart delivery campaign creation and update, creative management, ad data query and analysis, marketing asset management, and operation log query.",
+  "keywords": [
+    "cli",
+    "skills"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "kind": "cli",
+      "tier": "cli",
+      "auth": {
+        "authType": "cli_login"
+      },
+      "display": {
+        "name": "腾讯营销投放",
+        "name_en": "Tencent Ads Delivery",
+        "description_zh": "腾讯营销投放 Skill，为大模型赋予广告投放管理能力：支持广告账户授权、广告/智投项目的创建与更新、创意管理、广告数据查询与分析、推广内容资产管理，以及操作日志查询等完整的广告投放全链路操作。",
+        "description_en": "Tencent Ads Delivery Skill empowers LLMs with full-funnel ad management capabilities: account authorization, ad/smart delivery campaign creation and update, creative management, ad data query and analysis, marketing asset management, and operation log query."
+      },
+      "categories": [
+        "research-and-data"
+      ],
+      "source": "vendor-cli:tencentads-cli@1.1.5",
+      "cli_spec": {
+        "package": "tencentads-cli",
+        "version": "1.1.5",
+        "binName": "tencentads",
+        "binPath": "bin/tencentads.cjs",
+        "auth": {
+          "argv": [
+            "auth",
+            "login"
+          ],
+          "urlDomain": "ad.qq.com",
+          "waitForExit": true
+        },
+        "status": {
+          "argv": [
+            "auth",
+            "status"
+          ],
+          "matchJson": {
+            "status": "active"
+          }
+        },
+        "unauth": {
+          "argv": [
+            "auth",
+            "logout",
+            "--force"
+          ]
+        }
+      },
+      "skills": [
+        {
+          "name": "tencentads-advertiser",
+          "dir": "skills/tencentads-advertiser"
+        },
+        {
+          "name": "tencentads-auth",
+          "dir": "skills/tencentads-auth"
+        },
+        {
+          "name": "tencentads-creatives",
+          "dir": "skills/tencentads-creatives"
+        },
+        {
+          "name": "tencentads-delivery-smart-create",
+          "dir": "skills/tencentads-delivery-smart-create"
+        },
+        {
+          "name": "tencentads-delivery-standard-create",
+          "dir": "skills/tencentads-delivery-standard-create"
+        },
+        {
+          "name": "tencentads-delivery-standard-update",
+          "dir": "skills/tencentads-delivery-standard-update"
+        },
+        {
+          "name": "tencentads-management",
+          "dir": "skills/tencentads-management"
+        }
+      ],
+      "skills_provenance": {
+        "source": "tencentads-cli@1.1.5 官方技能（WB 公开仓库缓存 skills/ 原样复制，缺 LICENSE 由 npm license 字段补齐）",
+        "url": "https://www.npmjs.com/package/tencentads-cli",
+        "license": "MIT",
+        "skillCount": 7,
+        "fileCount": 160,
+        "byteCount": 3010560
+      },
+      "readme": "## 腾讯营销投放 CLI 连接器\n\n厂商官方 `tencentads-cli@1.1.5`，扫码/浏览器授权，内置 7 套官方技能。\n\n### 连接方式\n\n1. 点击「连接」，GWork 自动准备 Node 运行时并安装官方 CLI；\n2. 弹窗展示授权链接/二维码，按厂商页面完成扫码或浏览器确认；\n3. 授权完成后自动连接。凭据由官方 CLI 自管，GWork 不接触 token。\n\n技能包来源：厂商公开 CLI 包随附技能文档（公开仓库缓存副本）；许可见各技能目录 LICENSE。"
+    }
+  }
+}

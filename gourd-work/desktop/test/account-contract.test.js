@@ -163,8 +163,7 @@ test('12 locales all carry the same account key set', () => {
     'password_policy', 'failed',
     // 用户卡片 / 信息弹层（参考设计稿）新增键
     'plan', 'points', 'memory', 'feedback', 'unavailable',
-    // 登录弹框主标题（Qoder 式：标题说明当前在做什么，随登录/注册切换）
-    'auth_title_login', 'auth_title_register',
+    // 副标题（登录 GWork / 创建账号）已移除：与品牌标重复，故无 auth_title_* 键
     // 左栏手写体标语（Qoder 式艺术字，随语言切换）
     'auth_slogan',
     // 注册缺参修复：确认密码 / 邮箱验证必需标签 / 验证码行（admin Register
@@ -204,11 +203,29 @@ test('every t(\'account.*\') literal key in app-account.js exists in all locales
 
 test('Rust auth module keeps the long-lived session contract', () => {
   const src = read('src-tauri/src/auth.rs');
-  // 后台地址按产品决策写死，不做配置入口。
-  assert.ok(src.includes('pub const AUTH_BASE_URL: &str = "https://www.gourdwork.com";'));
+  // 双站点竞速选路：候选 host 只由 core/official.rs 的白名单提供，桌面壳
+  // 不自己维护第二份 host 字面量；默认站直接引用 core 的单一事实源。
+  // 实测两个 www 站点的 /api/status 都是 200 JSON（同一 new-api 实例），
+  // 旧的 api.gourdwork.com 子域已下线，故不再写死单一 API 子域。
+  assert.ok(src.includes('pub const AUTH_BASE_URL: &str = gourd_work_core::official::DEFAULT_OFFICIAL_HOST;'),
+    'auth default host must come from the core official allowlist');
+  assert.ok(src.includes('pub async fn select_best_host(&self) -> Option<String>'),
+    'startup host race must exist');
+  assert.ok(src.includes('pub async fn ensure_host(&self) -> String'),
+    'all network entry points must await the idempotent host gate');
+  // 探测全部失败时**不得**缓存选路结果：桌面往往比网络就绪更快启动，一次
+  // 「两站都连不上」若被 get_or_init 钉住，整个进程生命周期都会走默认国际站
+  // （实测 RTT 2.86s vs 国内站 0.39s），即使国内站随后完全可用也永不再探测。
+  assert.ok(src.includes('get_or_try_init'),
+    'failed host probe must stay uncached so the race re-runs on the next call');
+  assert.ok(src.includes('.ok_or("all official hosts unreachable; will retry on next call")'),
+    'host probe failure must not be cached by the idempotent gate');
+  // 账号 /api/... 与模型 /v1/... 必须共用同一个运行时 host（仅后缀不同）。
+  assert.ok(src.includes('format!("{}/api/') && src.includes('format!("{}/v1/models"'),
+    'account and model API must share the locked host');
   // refresh/logout 必须带 Origin，否则 SESSION_COOKIE_SECURE=true 时
   // SessionCookieOriginGuard 会 403。
-  assert.ok(src.includes('.header("Origin", request_origin(&self.base_url))'));
+  assert.ok(src.includes('.header("Origin", request_origin(&self.host()))'));
   // 轮换后的 refresh cookie 必须回写 keyring，否则重启会触发服务端 replay 撤销。
   assert.ok(src.includes('keyring_store(&session).await;'));
   // 启动时从 keyring 恢复并刷新一次（进程重启也算「使用」）。
@@ -234,6 +251,83 @@ test('Rust auth module keeps the long-lived session contract', () => {
   assert.ok(src.includes('AUTH_ORIGIN_FORBIDDEN'));
   // 会话错误码要透传给客户端，否则无法区分撤销与限流。
   assert.ok(src.includes('.get("code")'));
+});
+
+/* 【2026-11 登录/注册全坏修复】此前 login() 在 resp.text() 之前就要求
+   Set-Cookie，静态站 404 HTML、密码错误（HTTP 200 + success:false）、限流、
+   2FA challenge 全被伪装成「后台未返回登录会话（Set-Cookie 缺失）」。
+   CI 只跑 test:js，这里锁死判定顺序与注册 fail-closed，Rust 单测另见
+   auth.rs 的 parse_login_response / parse_register_response 用例。 */
+test('login/register must parse the response before requiring a session cookie', () => {
+  const src = stripRustComments(read('src-tauri/src/auth.rs'));
+  // 注意：传入的是**已剥离注释**的源码，结束标记只能用代码，不能用 /// 文档注释。
+  const login = rustBody(src, 'pub async fn login(&self', '\n    pub async fn register(');
+  const iText = login.indexOf('resp.text()');
+  const iParse = login.indexOf('parse_login_response(');
+  const iCookie = login.indexOf('let refresh = refresh');
+  assert.ok(iText > 0 && iParse > iText,
+    'login() must read and parse the response body before judging it');
+  assert.ok(iCookie > iParse,
+    'the Set-Cookie presence check must come after parse_login_response');
+  assert.ok(!login.includes('parse_api_response'),
+    'login() must use parse_login_response, not the generic parser that hides 2FA challenges');
+  assert.ok(src.includes('fn parse_login_response('),
+    'login response parser must be an explicit, unit-testable pure function');
+  assert.ok(src.includes('fn parse_register_response('),
+    'register response parser must be an explicit, unit-testable pure function');
+  const reg = rustBody(src, 'fn parse_register_response(', '\n#[derive');
+  assert.ok(reg.includes('!= Some(true)'),
+    'register success must require an explicit success:true, never fail-open on a missing field');
+  const regCall = rustBody(src, 'pub async fn register(', '\n    pub async fn refresh(');
+  assert.ok(regCall.includes('parse_register_response(status, &body)?'),
+    'register() must use the fail-closed response parser');
+  // UI：能力探测失败不得把邮箱+验证码降级成可选。
+  const ui = read('ui/js/app-account.js');
+  assert.ok(/var emailRequired = true;/.test(ui),
+    'registration form must default to email+code required');
+  assert.ok(ui.includes('c.email_verification === false'),
+    'only an explicit email_verification:false may relax the email requirement');
+});
+
+/* 【codereview 修复 A/B】CI 只跑 test:js（Rust lib test 在 Windows GNU 工具链
+   上 DLL 入口点异常、Linux 缺 WebKitGTK），所以这两处 fail-open 必须有 JS
+   侧语义护栏，否则 Rust 单测再全也不会在 CI 上挡住回归：
+   A) /api/status 探测用 #[serde(default)] + 只看 HTTP 200，会把异常 JSON
+      静默解析成 email_verification:false —— 正好触发上面的「显式 false 才
+      放开」，把前端刚收紧的必填又降级掉；
+   B) 通用 parse_api_response / send_verification_code 用 == Some(false)
+      判失败，缺 success 字段的 200 响应会被当成成功。 */
+test('all success judgments require an explicit success:true (no fail-open)', () => {
+  const src = stripRustComments(read('src-tauri/src/auth.rs'));
+  // 结束标记一律用剥离注释后仍存在的代码锚点；用 /// 文档注释会 indexOf=-1，
+  // rustBody 会一路切到文件末尾，断言就变成「全文件包含」的假绿。
+  // 通用解析器：登录 / refresh / self 三条链路共用，必须与注册同口径。
+  const generic = rustBody(src, 'fn parse_api_response<T:', '\nfn parse_login_response(');
+  assert.ok(generic.includes('!= Some(true)'),
+    'parse_api_response must require explicit success:true');
+  assert.ok(!generic.includes('== Some(false)'),
+    '== Some(false) would accept a 200 response with no success field');
+  const loginParser = rustBody(src, 'fn parse_login_response(', '\nfn parse_register_response(');
+  assert.ok(loginParser.includes('== Some(true)'),
+    'parse_login_response business_ok must also require explicit success:true');
+  // 能力探测：必须是可单测的纯函数，且显式校验 success + bool 字段。
+  assert.ok(src.includes('fn parse_status_config('),
+    '/api/status parsing must be an explicit pure function, not a silent serde default');
+  const probe = rustBody(src, 'fn parse_status_config(', '\n#[derive(Debug, Clone, Default, Deserialize, PartialEq)]');
+  assert.ok(probe.includes('!= Some(true)'), 'status probe must require success:true');
+  assert.ok(probe.includes('data.get("email_verification")?.as_bool()?'),
+    'email_verification must be an explicit bool; a missing field must fail the probe');
+  assert.ok(!src.includes('struct StatusWire'),
+    'StatusWire with #[serde(default)] would silently turn a missing flag into false');
+  const cfg = rustBody(src, 'pub async fn auth_config(', '\n    pub async fn login_encryption(');
+  assert.ok(cfg.includes('parse_status_config(status, &body)?'),
+    'auth_config() must use the fail-closed status parser');
+  // 验证码发送：缺 success 不得报“已发送”。
+  const send = rustBody(src, 'pub async fn send_verification_code(', '\nfn urlenc(');
+  assert.ok(send.includes('!= Some(true)'),
+    'send_verification_code must require explicit success:true');
+  assert.ok(!send.includes('== Some(false)'),
+    'a 200 JSON without success must not be reported as a sent code');
 });
 
 test('register/login payloads match the admin parameter contract', () => {
@@ -308,8 +402,8 @@ test('login encryption probe must never silently fall back to plaintext', () => 
   assert.ok(decide.includes('!success'),
     'HTTP 200 + success:false must be treated as a failure, not as "encryption off"');
 
-  // login() 对「无法判定」只能报错退出。
-  const login = rustBody(src, 'pub async fn login(&self', '\n    /// 注册。');
+  // login() 对「无法判定」只能报错退出。结束标记用剥离注释后的真实代码。
+  const login = rustBody(src, 'pub async fn login(&self', '\n    pub async fn register(');
   assert.ok(login.includes('LoginEncryption::Unavailable(reason) =>'),
     'login() must handle the Unavailable arm explicitly');
   assert.ok(login.includes('return Err(format!('),

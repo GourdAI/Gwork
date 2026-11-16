@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "oneaix-sea-rate-connector",
+  "version": "1.0.0",
+  "description": "Look up port five-letter codes and compare historical or real-time sea freight rates, carriers and sailing schedules by route, container type and shipping line.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "海运价格",
+        "name_en": "OneAIX Sea Rates",
+        "description_zh": "查询港口五字码、历史海运费与实时运价，按航线、箱型和船公司比较报价及船期。",
+        "description_en": "Look up port five-letter codes and compare historical or real-time sea freight rates, carriers and sailing schedules by route, container type and shipping line."
+      },
+      "categories": [
+        "location-services"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

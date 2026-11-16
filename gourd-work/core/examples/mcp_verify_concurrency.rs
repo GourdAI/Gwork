@@ -22,6 +22,7 @@ fn ctx() -> (
             change_ledger: None, gate: None, subagent_depth: 0, root_session_id: "p".into(),
             thinking: None, model: Arc::new(ModelConfig::default()),
             settings: Arc::new(Settings::default()), bash_exempt_dirs: Vec::new(),
+            resume_calibration: false,
         },
         PermissionSettings::default(),
     )

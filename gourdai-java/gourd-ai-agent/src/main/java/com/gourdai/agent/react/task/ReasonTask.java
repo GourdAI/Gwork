@@ -39,6 +39,8 @@ import com.gourdai.ai.chat.tool.ToolCall;
 import com.gourdai.ai.util.LlmRetryPolicy;
 import com.gourdai.ai.util.RetryTask;
 import com.gourdai.core.portal.web.UsageSubmissionService;
+import com.gourdai.harness.HarnessEngine;
+import com.gourdai.harness.talents.cli.TodoTalent;
 import org.noear.solon.core.util.Assert;
 import org.noear.solon.core.util.RankEntity;
 import org.noear.solon.flow.FlowContext;
@@ -231,26 +233,124 @@ public class ReasonTask {
      * 未达上限；③ 回复不含 finishMarker（显式完成语义直通）。抽为包级静态纯函数：
      * 依赖 ReActAgent 实例的 run() 分支难以行为测试（源码扫描只能验结构验不了执行，
      * 「if (false && …)」型变异会假绿），纯函数可直接驱动全部边界。</p>
+     *
+     * <p>放行判据（契约 §2.1，任一命中即不 defer）：回答已成规模（去空白 ≥ 400 字符，
+     * 视为完整回答而非意图声明）；会话 TODO.md 清单存在且全部完成。TODO 读取失败
+     * 保守不放行（按现状继续校验）。finishMarker 直通逻辑保持不变。</p>
      */
     static boolean shouldDeferImplicitEnd(ReActTrace trace, String clearContent, String finishMarker) {
-        return trace.isConvergePending()
+        if (!(trace.isConvergePending()
                 && trace.getConvergeDeferredCount() < MAX_CONVERGE_DEFERRALS
-                && (finishMarker == null || !clearContent.contains(finishMarker));
+                && (finishMarker == null || !clearContent.contains(finishMarker)))) {
+            return false;
+        }
+
+        // 放行判据一：回答已成规模（去除空白后 ≥ 400 字符）→ 完整回答而非意图声明
+        if (isSubstantialAnswer(clearContent)) {
+            return false;
+        }
+
+        // 放行判据二：会话 TODO 清单存在且全部完成 → 没有未完成事项可校验
+        if (isTodoAllDone(trace)) {
+            return false;
+        }
+
+        return true;
     }
 
     /**
-     * 完成校验提示文案（第 deferred 次改判时注入工作记忆）。
+     * 回答规模判据（契约 §2.1）：去除全部空白后 ≥ 400 字符视为已成规模的完整回答。
+     */
+    static boolean isSubstantialAnswer(String clearContent) {
+        if (clearContent == null) {
+            return false;
+        }
+        int count = 0;
+        for (int i = 0; i < clearContent.length(); i++) {
+            // 自审修复 J3：与 Rust char::is_whitespace（Unicode White_Space）对齐。
+            // Character.isWhitespace 不含 NBSP(U+00A0)/U+2007/U+202F，模型用这些
+            // 字符排版时会被误计入「实字符」，400 阈值两内核口径分叉。
+            if (!isUnicodeWhitespace(clearContent.charAt(i))) {
+                count++;
+                if (count >= 400) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Unicode White_Space 判定（自审修复 J3）：Character.isWhitespace 的补集——
+     * 额外把 NBSP(U+00A0)、U+2007、U+202F 视为空白，与 Rust {@code char::is_whitespace}
+     * 完全同口径，保证 400 字符放行阈值双内核一致。
+     */
+    static boolean isUnicodeWhitespace(char c) {
+        return Character.isWhitespace(c) || c == '\u00A0' || c == '\u2007' || c == '\u202F';
+    }
+
+    /**
+     * TODO 清单全完成判据（契约 §2.1）：读 {@link com.gourdai.harness.talents.cli.TodoTalent#getTodoPath}
+     * 定位的会话 TODO.md，清单存在、可识别出任务行且无未完成项时返回 true。
      *
-     * <p>抽为方法以便行为测试直接断言文案语义：必须同时引导「未完成则继续」与
-     * 「已完成则输出完整总结」两条出路，不得使用「直接输出 Final Answer」类
-     * 绝对化收敛指令（见 EXTRA_CONVERGE_PENDING 的背景说明）。</p>
+     * <p>读取失败/文件不存在/解析不出任务行时返回 false（保守不放行）：宁可多做一次
+     * 完成校验，也不能在证据缺失时放行潜在的意图声明误判。cwd 取值与 HarnessEngine
+     * 恢复校准同源：toolContext 的 ATTR_CWD → 会话属性 ATTR_CWD。</p>
+     */
+    static boolean isTodoAllDone(ReActTrace trace) {
+        try {
+            if (trace == null || trace.getOptions() == null || trace.getSession() == null) {
+                return false;
+            }
+            Object cwd = trace.getOptions().getToolContext() == null
+                    ? null : trace.getOptions().getToolContext().get(HarnessEngine.ATTR_CWD);
+            if (cwd == null) {
+                cwd = trace.getSession().attrs().get(HarnessEngine.ATTR_CWD);
+            }
+            String sessionId = trace.getSession().getSessionId();
+            if (cwd == null || Assert.isEmpty(sessionId)) {
+                return false;
+            }
+            // 候选根与 HarnessEngine.injectTodoCalibration 同源（显式 cwd → 全局基准目录）：
+            // 无所属根的会话历史上把 TODO.md 写进了全局基准而非 workspace，只试单根会漏读。
+            java.util.List<String> candidates = new java.util.ArrayList<>(2);
+            candidates.add(String.valueOf(cwd));
+            String globalBase = com.gourdai.core.config.AgentFlags.getHarnessBase();
+            if (Assert.isNotEmpty(globalBase) && !candidates.contains(globalBase)) {
+                candidates.add(globalBase);
+            }
+            TodoTalent todoTalent = new TodoTalent(com.gourdai.core.config.AgentFlags.getHarnessSessions());
+            String content = null;
+            for (String candidate : candidates) {
+                content = todoTalent.readTodoContentOrNil(candidate, sessionId);
+                if (content != null) {
+                    break;
+                }
+            }
+            if (content == null || TodoTalent.countCheckboxLines(content) == 0) {
+                return false;
+            }
+            return !TodoTalent.hasUnfinishedItems(content);
+        } catch (Throwable e) {
+            // 读取失败保守不放行：按现状继续注入完成校验
+            return false;
+        }
+    }
+
+    /**
+     * 完成校验提示文案（第 deferred 次改判时注入工作记忆，契约 §2.2「补缺式」，双内核逐字一致）。
+     *
+     * <p>抽为方法以便行为测试直接断言文案语义：引导「未完成则继续」「已完整则直接确认结束」
+     * 「有遗漏只补缺」三条出路，严禁复述已交付的总结（去重的根因：旧文案要求重新输出
+     * 完整总结报告，模型每次校验都复读一遍，用户看到 N 份雷同总结）。</p>
      */
     static String completionCheckPromptFor(int deferred) {
         return String.format(
                 "【系统提示：任务完成校验 (Completion Check)】\n" +
-                "检测到您输出了不含任何工具调用的纯文本回复，但这可能只是过渡性意图声明而非最终回答。请核验：\n" +
-                "1. **任务清单状态**：若仍有未完成事项（TODO / 计划未全部完成），请继续执行它们，不要停止；\n" +
-                "2. **若确已全部完成**：请重新输出面向用户的完整总结报告（已完成内容、验证结果与遗留事项）作为最终回答，不要只写一句意图声明。\n" +
+                "你刚才的纯文本回复可能是过渡性意图声明而非最终回答。请核验：\n" +
+                "1. 若任务清单仍有未完成事项：继续执行它们，不要停止；\n" +
+                "2. 若上一条回复已是面向用户的完整回答：直接确认结束，不要重复输出已说过的内容；\n" +
+                "3. 若确有遗漏：只补充遗漏部分（验证结果、遗留事项），严禁复述已交付的总结。\n" +
                 "（第 %d/%d 次校验，之后将按普通最终回答处理）",
                 deferred, MAX_CONVERGE_DEFERRALS
         );
@@ -299,6 +399,7 @@ public class ReasonTask {
                 "回合一旦结束就没有执行体能消费它们的完成通知，「结束后会自动收到通知并继续」这类承诺无法兑现。请二选一：\n" +
                 "1. **当场核实**：用 bash_output / await_tasks 查询后台任务状态与结果，拿到结论后再决定是否结束；\n" +
                 "2. **如实交代后结束**：在最终回答中明确告知用户哪些后台任务仍在运行、用户下一步应如何让你继续（如发送「继续」），不得暗示你会自动跟进。\n" +
+                "若上一条回复已完整交代上述情况，直接结束即可，不要重复输出相同内容。\n" +
                 "（第 %d/%d 次校验，之后将按普通最终回答处理）",
                 runningCount, deferred, MAX_BG_GATE_DEFERRALS
         );

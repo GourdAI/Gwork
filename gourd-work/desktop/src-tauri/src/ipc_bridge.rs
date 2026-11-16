@@ -359,7 +359,10 @@ const BRIDGE_JS: &str = r#"
     authConfig: function () { return invoke('auth_config'); },
     authLogout: function () { return invoke('auth_logout'); },
     authRefresh: function () { return invoke('auth_refresh'); },
-    authSelf: function () { return invoke('auth_self'); }
+    authSelf: function () { return invoke('auth_self'); },
+    /* 官方模型源：重新取一次用户 key 与官方模型列表（key 只在 Rust 进程内存，
+       返回值只是 bool「是否就绪」，绝不把 key 暴露给 WebView）。 */
+    authOfficialRefresh: function () { return invoke('auth_official_refresh'); }
   };
 
   /* ───────── Drag region ─────────

@@ -32,8 +32,23 @@
                             <input type="text" id="skillsSearchInput" placeholder="搜索技能..." data-i18n-placeholder="settings.skills.search_placeholder" autocomplete="off"/>
                             <button class="skills-search-clear" id="skillsSearchClear" style="display:none" data-i18n-title="settings.skills.clear">&times;</button>
                         </div>
-                        <!-- 手动添加 MCP：仅「连接器」视图显示，复用迁入的 #mcpAddBtn 表单。 -->
+                        <!-- 连接器·已安装视图：导入（菜单复用迁入的 #mcpImportMenu，
+                             按钮上提到顶栏后原列表头只留计数徽标）+ 手动添加。
+                             广场视图隐藏两者、显示搜索框（applyConnView 分派）。 -->
+                        <div class="skills-import-wrap" id="skillsImportMcpWrap" style="display:none">
+                            <button type="button" class="skills-add-mcp-btn skills-import-btn" id="skillsImportMcpBtn" data-i18n="settings.mcp.import">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                                导入
+                            </button>
+                            <div class="mcp-import-menu" id="mcpImportMenu">
+                                <button type="button" class="mcp-import-menu-item" data-action="file" data-i18n="settings.mcp.import_json_file">导入 JSON 文件</button>
+                                <button type="button" class="mcp-import-menu-item" data-action="string" data-i18n="settings.mcp.import_json_str">导入 JSON 字符串</button>
+                            </div>
+                        </div>
+                        <!-- 手动添加 MCP：仅「连接器·已安装」视图显示，复用迁入的 #mcpAddBtn 表单。 -->
                         <button type="button" class="skills-add-mcp-btn" id="skillsAddMcpBtn" style="display:none" data-i18n="settings.mcp.add">+ 添加服务器</button>
+                        <!-- 接口页顶栏添加：复用迁入的 #openapiAddBtn 表单（列表态可见）。 -->
+                        <button type="button" class="skills-add-mcp-btn" id="skillsAddApiBtn" style="display:none" data-i18n="settings.openapi.add">+ 添加服务器</button>
                     </div>
                 </div>
 
@@ -72,6 +87,29 @@
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
                     </button>
                 </div>
+
+                <!-- 连接器·广场筛选行：目录源切换（官方/魔搭扩展）+ 分类 chips
+                     （由 app-mcp-market.js shell 回填）。与技能分类栏同一层级、
+                     同一 hscroll 机制；仅连接器·广场视图显示（applyConnView 分派）。
+                     2026-11 用户拍板：官方仓库为默认源，魔搭降为扩展；
+                     「精选」「已托管」勾选移除（无效概念）。 -->
+                <div class="mcp-market-filter-bar" id="mcpMarketFilterBar" style="display:none">
+                    <div class="mcp-market-source-tabs" id="mcpMarketSourceTabs" role="tablist">
+                        <button type="button" class="mcp-market-source-tab active" data-source="official" role="tab" data-i18n="settings.mcp.market.source_official">官方</button>
+                        <button type="button" class="mcp-market-source-tab" data-source="modelscope" role="tab" data-i18n="settings.mcp.market.source_modelscope">魔搭扩展</button>
+                    </div>
+                    <div class="skills-hscroll-wrap mcp-market-cats-wrap">
+                        <button type="button" class="skills-hscroll-nav prev" disabled tabindex="-1" aria-label="向左滚动分类" data-i18n-title="settings.skills.scroll_prev">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                        </button>
+                        <div class="skills-hscroll-viewport">
+                            <div class="skills-category-bar skills-hscroll mcp-market-cats" id="mcpMarketCatBar"></div>
+                        </div>
+                        <button type="button" class="skills-hscroll-nav next" disabled tabindex="-1" aria-label="向右滚动分类" data-i18n-title="settings.skills.scroll_next">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -88,34 +126,31 @@
                     <div class="skills-list" id="skillsList"></div>
                 </div>
 
-                <!-- 连接器（MCP）：魔搭 MCP 广场目录 + 已安装 MCP 服务器配置（由设置页迁入）。
-                     #mcpMarketRoot 由 app-mcp-market.js 渲染；原 MCP Tab 的 #mcpAddBtn 即手动添加入口。 -->
+                <!-- 连接器（MCP）：二级导航「已安装 / 广场」互斥切换（applyConnView）。
+                     广场 = #mcpMarketRoot（app-mcp-market.js 渲染，无限滚动）；
+                     已安装 = 设置页迁入的 MCP 配置区。二者不再上下堆叠（用户报障根因）。 -->
                 <div class="skills-pane" id="skillsPaneConnectors" style="display:none">
                     <div id="mcpMarketRoot"></div>
-                    <div class="skills-pane-section">
+                    <div class="skills-pane-section" id="skillsMcpInstalled" style="display:none">
                 <div class="skills-pane-inner">
                     <!-- List View -->
                     <div class="settings-view settings-view-list" id="mcpListView">
                         <div class="settings-section">
-                            <div class="settings-section-header">
-                                <div>
-                                    <span class="settings-section-title" data-i18n="settings.mcp.title">MCP 服务器</span>
-                                    <div class="settings-section-desc" data-i18n="settings.mcp.desc">管理外部工具服务器，扩展文件、数据库、浏览器等工具能力</div>
+                            <!-- 列表头退役：标题/描述与主 tab+二级导航语义重复；
+                                 导入/添加已上提顶栏（skillsImportMcpBtn / skillsAddMcpBtn）。
+                                 原 #mcpImportBtn/#mcpAddBtn 保留为隐形程序化锚点：
+                                 app-settings-mcp.js 的导入进度态会改写 #mcpImportBtn 的
+                                 html/disabled，顶栏按钮经 MutationObserver 同步其进度文案；
+                                 #mcpAddBtn 仍是打开表单的唯一真源（顶栏按钮 trigger 它）。 -->
+                            <div class="mcp-header-actions mcp-header-actions-hidden" aria-hidden="true">
+                                <div class="mcp-import-menu-wrap" id="mcpImportMenuAnchor">
+                                    <button class="settings-add-btn" id="mcpImportBtn" tabindex="-1" data-i18n="settings.mcp.import">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                                        导入
+                                    </button>
                                 </div>
-                                <div class="mcp-header-actions">
-                                    <div class="mcp-import-menu-wrap">
-                                        <button class="settings-add-btn" id="mcpImportBtn" data-i18n="settings.mcp.import">
-                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                                            导入
-                                        </button>
-                                        <div class="mcp-import-menu" id="mcpImportMenu">
-                                            <button type="button" class="mcp-import-menu-item" data-action="file" data-i18n="settings.mcp.import_json_file">导入 JSON 文件</button>
-                                            <button type="button" class="mcp-import-menu-item" data-action="string" data-i18n="settings.mcp.import_json_str">导入 JSON 字符串</button>
-                                        </div>
-                                    </div>
-                                    <input type="file" id="mcpImportFileInput" accept=".json" style="display:none;"/>
-                                    <button class="settings-add-btn" id="mcpAddBtn" data-i18n="settings.mcp.add">+ 添加服务器</button>
-                                </div>
+                                <input type="file" id="mcpImportFileInput" accept=".json" style="display:none;"/>
+                                <button class="settings-add-btn" id="mcpAddBtn" tabindex="-1" data-i18n="settings.mcp.add">+ 添加服务器</button>
                             </div>
                             <div class="mcp-server-list" id="mcpServerList"></div>
                         </div>
@@ -161,6 +196,17 @@
                                         <button class="mcp-type-btn" data-type="sse" data-i18n="settings.mcp.type_sse">http sse</button>
                                         <button class="mcp-type-btn" data-type="streamable" data-i18n="settings.mcp.type_streamable">http streamable</button>
                                     </div>
+                                </div>
+                                <!-- 认证声明（非密钥）：只写 authType 到 settings.json；
+                                     真正的 token / OAuth 凭据走 /mcp/auth/* 存本机 CredentialVault。 -->
+                                <div class="form-group" id="mcpAuthTypeGroup">
+                                    <label for="mcpAuthType" data-i18n="settings.mcp.auth_type_label">认证方式</label>
+                                    <select id="mcpAuthType" class="settings-select">
+                                        <option value="none" data-i18n="settings.mcp.auth_type_none">无需认证</option>
+                                        <option value="token" data-i18n="settings.mcp.auth_type_token">填写 Access Token / API Key</option>
+                                        <option value="oauth" data-i18n="settings.mcp.auth_type_oauth">浏览器登录授权（OAuth / 扫码 / 账号登录）</option>
+                                    </select>
+                                    <div class="mcp-auth-type-hint" id="mcpAuthTypeHint" data-i18n="settings.mcp.auth_type_hint">凭据仅保存在本机，不会写入配置文件或上传云端。</div>
                                 </div>
                                 <div class="mcp-config-stdio" id="mcpConfigStdio">
                                     <div class="form-group">
@@ -239,14 +285,10 @@
                     <!-- List View -->
                     <div class="settings-view settings-view-list" id="openapiListView">
                         <div class="settings-section">
-                            <div class="settings-section-header">
-                                <div>
-                                    <span class="settings-section-title" data-i18n="settings.openapi.title">OpenAPI 服务器</span>
-                                    <div class="settings-section-desc" data-i18n="settings.openapi.desc">接入 REST/OpenAPI 接口，控制 AI 可调用的 API 范围</div>
-                                </div>
-                                <div class="openapi-header-actions">
-                                    <button class="settings-add-btn" id="openapiAddBtn" data-i18n="settings.openapi.add">+ 添加服务器</button>
-                                </div>
+                            <!-- 与连接器同口径：列表头退役，添加上提顶栏 #skillsAddApiBtn；
+                                 原 #openapiAddBtn 保留为隐形程序化锚点（表单唯一真源）。 -->
+                            <div class="openapi-header-actions mcp-header-actions-hidden" aria-hidden="true">
+                                <button class="settings-add-btn" id="openapiAddBtn" tabindex="-1" data-i18n="settings.openapi.add">+ 添加服务器</button>
                             </div>
                             <div class="openapi-server-list" id="openapiServerList"></div>
                         </div>

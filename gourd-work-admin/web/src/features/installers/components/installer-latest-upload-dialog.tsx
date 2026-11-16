@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Upload } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -26,12 +26,10 @@ import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
 import {
   Field,
-  FieldDescription,
   FieldError,
   FieldGroup,
   FieldLabel,
 } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
 import { handleServerError } from '@/lib/handle-server-error'
 
@@ -60,9 +58,11 @@ export function InstallerLatestUploadDialog(
   const [file, setFile] = useState<File | null>(null)
   const [error, setError] = useState<string | undefined>(undefined)
   const [progress, setProgress] = useState(0)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const mutation = useMutation({
-    mutationFn: (selected: File) => uploadInstallerLatest(selected, setProgress),
+    mutationFn: (selected: File) =>
+      uploadInstallerLatest(selected, setProgress),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: INSTALLERS_QUERY_KEY })
       queryClient.invalidateQueries({ queryKey: INSTALLER_LATEST_QUERY_KEY })
@@ -167,19 +167,38 @@ export function InstallerLatestUploadDialog(
           <FieldLabel htmlFor='installer-latest-file'>
             {t('Update check file')}
           </FieldLabel>
-          <Input
+          <input
+            ref={fileInputRef}
             id='installer-latest-file'
             type='file'
             accept='.json,application/json'
             disabled={isPending}
             aria-invalid={error ? true : undefined}
+            className='sr-only'
             onChange={(event) => {
               selectFile(event.target.files?.[0])
               // Allow re-picking the same file after a failed upload.
               event.target.value = ''
             }}
           />
-          <FieldDescription>{t('Choose file')}</FieldDescription>
+          <div className='flex min-w-0 items-center gap-2'>
+            <Button
+              type='button'
+              variant='outline'
+              disabled={isPending}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {file ? t('Choose another file') : t('Choose file')}
+            </Button>
+            {file ? (
+              <span className='text-muted-foreground flex min-w-0 items-center gap-1 text-sm'>
+                <span className='truncate'>{file.name}</span>
+                <span className='shrink-0'>
+                  · {formatInstallerSize(file.size)}
+                </span>
+              </span>
+            ) : null}
+          </div>
           {error ? <FieldError role='alert'>{error}</FieldError> : null}
         </Field>
 

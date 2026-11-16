@@ -437,6 +437,10 @@ public class UsageStatsServiceTest {
                 Assertions.assertTrue(cell.containsKey("sessions"),
                         "每格都必须带 sessions 字段，缺失格=" + cell.get("date"));
             }
+            // 周六是本周最后一格（周对齐窗口到周六截止），当天运行不存在未来日——
+            // 「本周窗口应含未来日」的前提只在周日..周五成立。按星期条件化断言，
+            // 消除既有测试的星期依赖（周六必红）；其余六天语义与原断言完全一致。
+            boolean weekHasFutureDays = today.getDayOfWeek() != java.time.DayOfWeek.SATURDAY;
             boolean sawFuture = false;
             for (Map<String, Object> cell : list(r, "heatmap")) {
                 if (Boolean.TRUE.equals(cell.get("future"))) {
@@ -444,7 +448,8 @@ public class UsageStatsServiceTest {
                     Assertions.assertEquals(0L, num(cell, "sessions"), "未来日 sessions 应为 0");
                 }
             }
-            Assertions.assertTrue(sawFuture, "本周窗口应含未来日");
+            Assertions.assertEquals(weekHasFutureDays, sawFuture,
+                    "周日..周五窗口应含未来日；周六（本周最后一天）不得出现未来日");
         } finally {
             deleteRecursively(base.toFile());
         }

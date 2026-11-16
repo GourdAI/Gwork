@@ -1,0 +1,73 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "designkit-buddy-cli",
+  "version": "1.0.0",
+  "description": "Call Meitu Design Studio Agent Teams with a single sentence — from market strategy insights to e-commerce image sets, marketing videos, social media graphics, posters, and brand visuals — completing the full commercial design workflow with zero barriers.",
+  "keywords": [
+    "cli",
+    "skills"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "kind": "cli",
+      "tier": "cli",
+      "auth": {
+        "authType": "cli_login"
+      },
+      "display": {
+        "name": "美图设计室 AI设计 CLI",
+        "name_en": "DesignKit Buddy CLI",
+        "description_zh": "一句话轻松调用美图设计室Agent Teams，从市场策略洞察，到电商套图、营销视频、社媒图文、海报及品牌等视觉物料，零门槛完成商业设计的全流程。",
+        "description_en": "Call Meitu Design Studio Agent Teams with a single sentence — from market strategy insights to e-commerce image sets, marketing videos, social media graphics, posters, and brand visuals — completing the full commercial design workflow with zero barriers."
+      },
+      "categories": [
+        "image-and-video-processing"
+      ],
+      "source": "vendor-cli:meitu-designkit-cli@1.0.79",
+      "cli_spec": {
+        "package": "meitu-designkit-cli",
+        "version": "1.0.79",
+        "binName": "designkit",
+        "binPath": "bin/designkit-cli.js",
+        "auth": {
+          "argv": [
+            "auth",
+            "login"
+          ],
+          "urlDomain": "www.designkit.cn",
+          "waitForExit": true
+        },
+        "status": {
+          "argv": [
+            "auth",
+            "status",
+            "--check"
+          ],
+          "matchRegex": "connected"
+        },
+        "unauth": {
+          "argv": [
+            "auth",
+            "logout"
+          ]
+        }
+      },
+      "skills": [
+        {
+          "name": "designkit-buddy-cli",
+          "dir": "skills/designkit-buddy-cli"
+        }
+      ],
+      "skills_provenance": {
+        "source": "meitu-designkit-cli@1.0.79 官方技能（WB 公开仓库缓存 skills/ 原样复制，缺 LICENSE 由 npm license 字段补齐）",
+        "url": "https://www.npmjs.com/package/meitu-designkit-cli",
+        "license": "UNLICENSED",
+        "skillCount": 1,
+        "fileCount": 2,
+        "byteCount": 14652
+      },
+      "readme": "## 美图设计室 AI设计 CLI CLI 连接器\n\n厂商官方 `meitu-designkit-cli@1.0.79`，扫码/浏览器授权，内置 1 套官方技能。\n\n### 连接方式\n\n1. 点击「连接」，GWork 自动准备 Node 运行时并安装官方 CLI；\n2. 弹窗展示授权链接/二维码，按厂商页面完成扫码或浏览器确认；\n3. 授权完成后自动连接。凭据由官方 CLI 自管，GWork 不接触 token。\n\n技能包来源：厂商公开 CLI 包随附技能文档（公开仓库缓存副本）；许可见各技能目录 LICENSE。"
+    }
+  }
+}

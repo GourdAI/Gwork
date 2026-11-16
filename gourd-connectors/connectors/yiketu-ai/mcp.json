@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "yiketu-ai": {
+      "type": "streamable_http",
+      "url": "https://open-api.yiketu.art/api/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "易可图 AI 商品创作"
+      }
+    }
+  }
+}

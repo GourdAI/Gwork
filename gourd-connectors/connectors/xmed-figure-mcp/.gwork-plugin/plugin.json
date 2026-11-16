@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "xmed-figure-mcp",
+  "version": "1.0.0",
+  "description": "Scientific visualization: volcano, PCA, enrichment, survival, and more.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "迪安智能科研云",
+        "name_en": "DAZD X-Med MCP",
+        "description_zh": "科研数据可视化：火山图、PCA、富集分析、生存分析，自动匹配发表级输出",
+        "description_en": "Scientific visualization: volcano, PCA, enrichment, survival, and more."
+      },
+      "categories": [
+        "research-and-data"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

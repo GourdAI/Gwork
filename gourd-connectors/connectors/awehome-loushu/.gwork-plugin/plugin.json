@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "awehome-loushu",
+  "version": "1.0.0",
+  "description": "Access Awehome housing information and inspection tools with your verified employee identity.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "Awehome 楼书查房",
+        "name_en": "Awehome Housing",
+        "description_zh": "通过企业员工身份使用楼书查房、房源信息和房源详情工具，查询房源基础信息、户型详情、周边设施与通勤情况。",
+        "description_en": "Access Awehome housing information and inspection tools with your verified employee identity."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

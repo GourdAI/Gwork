@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "beluga-mcp-prod": {
+      "type": "streamable_http",
+      "url": "https://beluga-server-cn.heytapmobi.com/beluga-mcp/gateway",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "心力球"
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "tapnow": {
+      "type": "streamable_http",
+      "url": "https://mcp.tapnow.media/api/agent-gateway/mcp/workbuddy/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "TapNow"
+      }
+    }
+  }
+}

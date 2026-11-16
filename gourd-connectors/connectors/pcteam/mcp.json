@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "pcteam": {
+      "type": "streamable_http",
+      "url": "https://pm3.pcteam.com/api/ai/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "筑享云"
+      }
+    }
+  }
+}

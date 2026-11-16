@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "fiu-mcp-server",
+  "version": "1.0.0",
+  "description": "Provided by FIU, a financial information provider. Search global market quotes, news and financial data, covering A-shares(Zhcall), Hong Kong stocks, US stocks and Japanese stocks, plus global indices, funds and bond markets. Supports quote and order-book data, candlestick and intraday charts, industry sectors, financial statements, announcements, corporate actions, share capital and shareholder data, ETF NAV and holdings, IPOs, bonds, options, financial news, investment and economic calendars, macroeconomic data, and securities/fund ticker search. The service provides objective data and financial data retrieval only; it does not constitute investment analysis or buy/sell recommendations.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "融聚汇 FIU全球金融数据",
+        "name_en": "FIU Global Financial Data",
+        "description_zh": "由金融信息商融聚汇提供。查询全球市场行情资讯与金融数据，覆盖A股（中华通）、港股、美股、日股及全球指数、基金、债券市场，支持行情盘口、K线分时、行业板块、财务、公告、公司行动、股本股东、ETF基金净值/持仓、新股IPO、债券、期权、财经新闻、投资日历/财经日历、宏观数据及证券/基金代码搜索。仅提供客观数据与金融数据检索，不构成投资分析或买卖建议。",
+        "description_en": "Provided by FIU, a financial information provider. Search global market quotes, news and financial data, covering A-shares(Zhcall), Hong Kong stocks, US stocks and Japanese stocks, plus global indices, funds and bond markets. Supports quote and order-book data, candlestick and intraday charts, industry sectors, financial statements, announcements, corporate actions, share capital and shareholder data, ETF NAV and holdings, IPOs, bonds, options, financial news, investment and economic calendars, macroeconomic data, and securities/fund ticker search. The service provides objective data and financial data retrieval only; it does not constitute investment analysis or buy/sell recommendations."
+      },
+      "categories": [
+        "finance"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

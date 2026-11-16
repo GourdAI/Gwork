@@ -135,8 +135,7 @@ function run(opts) {
     'settings.about.check_update': '检查更新', 'account.sign_out': '退出登录',
     'account.working': '请稍候…', 'account.required': '请填写用户名和密码',
     'account.password_policy': '密码长度需为 8–128 个字符',
-    'account.unavailable': '登录服务暂不可用', 'account.failed': '操作失败',
-    'account.auth_title_login': '登录 GWork', 'account.auth_title_register': '创建账号'
+    'account.unavailable': '登录服务暂不可用', 'account.failed': '操作失败'
   };
   const sandbox = {
     document: dom.document,
@@ -383,21 +382,32 @@ test('switching tab moves the segmented slider via data-mode', () => {
     'register mode must add the email field');
 });
 
-/* 护栏③：主标题随模式切换，且必须用 textContent（用户可见文本不得走 innerHTML）。 */
-test('modal title follows the mode and is set via textContent', () => {
+/* 护栏③：登录/注册不再渲染「登录 GWork / 创建账号」副标题。
+   品牌标（图标 + GWork）+ 分段控件已完整表意，副标题与之重复，故 DOM 中不得
+   再出现标题节点 / 样式类 / i18n 键；切换模式时也不得凭空写入标题文本。 */
+test('auth modal has no duplicate login/register subtitle', () => {
   const { dom } = run({ ipc: null });
   dom.entry.onclick({ target: dom.entry });
   const pop = dom.byId['accountPopover'];
   pop.onclick({ target: pop.children.filter(c => c.attrs && c.attrs['data-act'] === 'login')[0] });
   const modal = dom.byId['accountModal'];
-  const title = dom.byId['accountAuthTitle'];
-  assert.ok(title, 'modal must carry a title node');
-  assert.equal(title.tagName, 'H2', 'title should be a heading');
-  assert.equal(title.textContent, '登录 GWork', 'login-mode title');
+  assert.ok(modal, 'auth modal must be rendered');
+  assert.equal(dom.byId['accountAuthTitle'], undefined, 'subtitle node must be removed');
+  assert.equal(modal.querySelectorAll('.account-auth-title').length, 0,
+    'no element may carry the removed subtitle class');
+  const html = modal.innerHTML;
+  assert.ok(!/登录 GWork|创建账号/.test(html),
+    'login/register mode must not duplicate the brand/product name as a subtitle');
+  /* 切到注册：分段滑块与邮箱字段仍须工作，但不得产生任何标题节点 */
   modal.onclick({ target: modal.querySelectorAll('.account-tab')[1] });
-  assert.equal(title.textContent, '创建账号', 'register-mode title');
+  assert.equal(dom.byId['accountAuthTitle'], undefined,
+    'register mode must not re-create a subtitle node');
+  assert.ok(!/登录 GWork|创建账号|Sign in to GWork|Create an account/.test(modal.innerHTML),
+    'register mode must not add a duplicate subtitle text');
+  /* 源码级护栏：i18n 键与标题赋值逻辑一并清理，杜绝后续以翻译值复活 */
   const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '');
-  assert.ok(!/title\.innerHTML\s*=/.test(code), 'title must never be assigned via innerHTML');
+  assert.ok(!/auth_title_(login|register)/.test(code), 'removed i18n keys must not be referenced');
+  assert.ok(!/accountAuthTitle/.test(code), 'removed subtitle id must not be referenced');
 });
 
 /* 护栏④：账号区块 CSS 必须走主题令牌，不得出现颜色字面量。

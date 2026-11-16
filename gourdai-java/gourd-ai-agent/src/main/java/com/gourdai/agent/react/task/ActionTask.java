@@ -15,6 +15,7 @@
  */
 package com.gourdai.agent.react.task;
 
+import com.gourdai.agent.event.ReasonDeltaEvent;
 import com.gourdai.agent.event.ToolCallBatchEvent;
 import com.gourdai.agent.event.ToolCallEndEvent;
 import com.gourdai.agent.event.ToolCallStartEvent;
@@ -27,6 +28,7 @@ import com.gourdai.harness.HarnessEngine;
 import com.gourdai.harness.change.FileChangeService;
 import com.gourdai.harness.talents.cli.TerminalTalent;
 import com.gourdai.agent.util.FeedbackTool;
+import com.gourdai.agent.util.CompleteTaskTool;
 import com.gourdai.agent.react.BackgroundNoticeCenter;
 import com.gourdai.agent.react.ReActAgent;
 import com.gourdai.agent.react.ReActAgentConfig;
@@ -242,6 +244,17 @@ public class ActionTask {
                 toolExchanger.setResult(result.getContent());
             }
 
+            // 契约 §4.2：complete_task 成功结果 → summary 即最终回答，显式完成直通 END。
+            // 复用 finishMarker 直通分支语义（abnormal=false 的正常完成），不经 ReasonTask
+            // 路由，收敛门禁/后台门禁天然跳过；同批互斥/参数缺失已被拦截器置 failed，不会进入。
+            if (CompleteTaskTool.TOOL_NAME.equals(toolName)
+                    && !toolExchanger.isFailed()
+                    && result != null && !result.isError()
+                    && !trace.getSession().isPending()
+                    && Assert.isNotEmpty(toolExchanger.getResult())) {
+                finishByCompleteTask(trace, toolExchanger.getResult());
+            }
+
             // 最终返回当前轮次处理后的最新观测值
             return toolExchanger.getResult() != null ? ToolResult.success(toolExchanger.getResult()) : null;
 
@@ -317,6 +330,10 @@ public class ActionTask {
         // 仅首个真正执行并推一张卡，重复 id 记录别名、执行后按 id 回填结果，避免双执行与双卡片
         Map<String, List<String>> aliasIdsByPrimaryId = new HashMap<>();
         List<ToolCall> calls = dedupeIdenticalCalls(lastReason.getToolCalls(), aliasIdsByPrimaryId);
+
+        // 契约 §4.2：complete_task 必须最后执行（排到批尾）。同批其它工具先落地结果，
+        // 收尾判定基于完整现场；同批含 ask_user 时由 CompleteTaskInterceptor 互斥拒绝。
+        calls = moveCompleteTaskToTail(calls);
 
         // 挂起恢复重放检测：凡在挂起前已执行完成、结果已回灌工作记忆的调用，回放时必须跳过——
         // 写工具重跑会产生二次副作用；结果重复产出还会破坏 tool_calls 与 observation 的一一配对。
@@ -778,6 +795,73 @@ public class ActionTask {
 
     private boolean isReadonlyCall(ToolCall call) {
         return call != null && READONLY_TOOLS.contains(call.getName());
+    }
+
+    /**
+     * 契约 §4.2：complete_task 成功后的显式完成路由。
+     *
+     * <p>summary 即最终回答文本：setFinalAnswer(summary, false) 与 finishMarker 直通分支
+     * 同语义（正常完成，非异常收口）；路由置 END 后 evalDo 循环退出，收敛门禁/后台门禁
+     * 均不再介入。正文经既有 ReasonDeltaEvent 文本通道补发一帧——complete_task 的 summary
+     * 在工具参数里而非模型正文流里，不补发则前端只见工具卡没有回答正文。</p>
+     *
+     * <p>幂等：路由已 END（同批多个 complete_task 的后续者）直接返回，不重复置答案/补帧。</p>
+     */
+    static void finishByCompleteTask(ReActTrace trace, String summary) {
+        if (Agent.ID_END.equals(trace.getRoute())) {
+            return;
+        }
+        trace.setRoute(Agent.ID_END);
+        trace.setFinalAnswer(summary, false);
+        // 契约 §4.2「若 summary 未曾流式输出」判重（自审修复 J1，Rust 同口径）：
+        // 模型有时先把总结作为正文流式输出、再调 complete_task 提交同一段文字。
+        // 正文已逐 token 经 ReasonDeltaEvent 交付，再整段补发就是用户看到的第二份
+        // 总结。判重口径：去除首尾空白后与本轮推理正文（lastReasonMessage）完全
+        // 相同 → 跳过补发；不同（哪怕只是扩写）仍补发——summary 是模型钦定的最终
+        // 回答，宁可多一段也不丢交付。
+        String streamed = null;
+        if (trace.getLastReasonMessage() != null) {
+            streamed = trace.getLastReasonMessage().getContent();
+        }
+        boolean alreadyStreamed = streamed != null && streamed.trim().equals(summary.trim());
+        if (!alreadyStreamed && trace.getOptions().getStreamSink() != null) {
+            trace.getOptions().getStreamSink().next(
+                    new ReasonDeltaEvent(trace, null, ChatMessage.ofAssistant(summary)));
+        }
+    }
+
+    /**
+     * 把 complete_task 调用移到批尾（契约 §4.2：同批还有其他工具调用时必须最后执行）。
+     *
+     * <p>稳定重排：其余调用保持相对顺序；无 complete_task 时原样返回（零开销快路径）。
+     * 多个 complete_task（模型异常输出）依序排在尾部，首个成功者直通 END 后
+     * 后续调用因路由已 END 而被 doAction 前置退出，不会二次提交。</p>
+     */
+    static List<ToolCall> moveCompleteTaskToTail(List<ToolCall> calls) {
+        if (calls == null || calls.size() <= 1) {
+            return calls;
+        }
+        boolean hasComplete = false;
+        for (ToolCall call : calls) {
+            if (call != null && CompleteTaskTool.TOOL_NAME.equals(call.getName())) {
+                hasComplete = true;
+                break;
+            }
+        }
+        if (!hasComplete) {
+            return calls;
+        }
+        List<ToolCall> reordered = new ArrayList<>(calls.size());
+        List<ToolCall> tail = new ArrayList<>();
+        for (ToolCall call : calls) {
+            if (call != null && CompleteTaskTool.TOOL_NAME.equals(call.getName())) {
+                tail.add(call);
+            } else {
+                reordered.add(call);
+            }
+        }
+        reordered.addAll(tail);
+        return reordered;
     }
 
     /**

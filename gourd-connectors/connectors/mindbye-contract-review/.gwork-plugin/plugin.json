@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "mindbye-contract-review",
+  "version": "1.0.0",
+  "description": "Contract Risk Review is an intelligent contract review tool built on over 40 years of practical experience from a leading law firm in contract review, risk control, and dispute resolution. It helps identify key legal and commercial risks in Chinese contracts, including employment, divorce, lease, entrustment, and sales contracts, and generates structured review reports, actionable revision suggestions, and annotated Word documents to improve review efficiency and signing security.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "明白律师·合同风险审查",
+        "name_en": "Mindbye Contract Risk Review",
+        "description_zh": "基于头部律所40余年合同审查与争议处理实战经验沉淀，面向劳动、离婚、租赁、委托、买卖等中文合同，自动识别关键法律与交易风险，并生成规范审查报告、修改建议和 Word 批注版，提升审查效率和签署安全性。",
+        "description_en": "Contract Risk Review is an intelligent contract review tool built on over 40 years of practical experience from a leading law firm in contract review, risk control, and dispute resolution. It helps identify key legal and commercial risks in Chinese contracts, including employment, divorce, lease, entrustment, and sales contracts, and generates structured review reports, actionable revision suggestions, and annotated Word documents to improve review efficiency and signing security."
+      },
+      "categories": [
+        "research-and-data"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

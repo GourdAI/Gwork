@@ -1,0 +1,71 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "awesun",
+  "version": "1.0.0",
+  "description": "Manage remote devices via CLI: monitor online status in real time, initiate remote control instantly, transfer files quickly, and capture remote screenshots. Zero deployment, no updates, enabling smart batch operations with ease.",
+  "keywords": [
+    "cli",
+    "skills"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "kind": "cli",
+      "tier": "cli",
+      "auth": {
+        "authType": "cli_login"
+      },
+      "display": {
+        "name": "向日葵远程控制",
+        "name_en": "AweSun",
+        "description_zh": "通过命令行管理远端设备，实时监测在线状态、秒级发起远程控制、快速传输文件及远程截屏。零部署、免更新，轻松实现智能批量运维。",
+        "description_en": "Manage remote devices via CLI: monitor online status in real time, initiate remote control instantly, transfer files quickly, and capture remote screenshots. Zero deployment, no updates, enabling smart batch operations with ease."
+      },
+      "categories": [
+        "os-automation"
+      ],
+      "source": "vendor-cli:@aweray/awesun-cli@1.0.9",
+      "cli_spec": {
+        "package": "@aweray/awesun-cli",
+        "version": "1.0.9",
+        "binName": "awesun-cli",
+        "binPath": "run.js",
+        "auth": {
+          "argv": [
+            "login"
+          ],
+          "urlDomain": "cc.sunlogin.oray.com",
+          "waitForExit": true
+        },
+        "status": {
+          "argv": [
+            "login",
+            "status"
+          ],
+          "matchRegex": "Logged in as"
+        },
+        "unauth": {
+          "argv": [
+            "logout",
+            "--clean"
+          ]
+        }
+      },
+      "skills": [
+        {
+          "name": "awesun-skill",
+          "dir": "skills/awesun-skill"
+        }
+      ],
+      "skills_provenance": {
+        "source": "@aweray/awesun-cli@1.0.9 官方技能（WB 公开仓库缓存 skills/ 原样复制，缺 LICENSE 由 npm license 字段补齐）",
+        "url": "https://www.npmjs.com/package/@aweray/awesun-cli",
+        "license": "UNLICENSED",
+        "skillCount": 1,
+        "fileCount": 5,
+        "byteCount": 27252
+      },
+      "readme": "## 向日葵远程控制 CLI 连接器\n\n厂商官方 `@aweray/awesun-cli@1.0.9`，扫码/浏览器授权，内置 1 套官方技能。\n\n### 连接方式\n\n1. 点击「连接」，GWork 自动准备 Node 运行时并安装官方 CLI；\n2. 弹窗展示授权链接/二维码，按厂商页面完成扫码或浏览器确认；\n3. 授权完成后自动连接。凭据由官方 CLI 自管，GWork 不接触 token。\n\n技能包来源：厂商公开 CLI 包随附技能文档（公开仓库缓存副本）；许可见各技能目录 LICENSE。"
+    }
+  }
+}

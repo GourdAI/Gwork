@@ -88,6 +88,10 @@
             });
         }
         $mcpServerList.html(html);
+        /* 连接器「已安装」二级导航徽标：列表每次重绘即上报真实数量。 */
+        if (typeof window._skillsReportMcpCount === 'function') {
+            window._skillsReportMcpCount(list ? list.length : 0);
+        }
     }
 
     // MCP 列表事件委托
@@ -738,21 +742,74 @@
     
     // ==================== 入口事件绑定 ====================
     
-    // 导入按钮 - 切换下拉菜单
+    // 导入按钮 - 切换下拉菜单（隐形锚点，保留给程序化触发/进度态真源）
     $('#mcpImportBtn').on('click', function (e) {
         e.stopPropagation();
-        $('#mcpImportMenu').toggleClass('show');
+        var $menu = $('#mcpImportMenu');
+        if ($menu.hasClass('show')) closeImportMenu();
+        else { $menu.addClass('show'); positionImportMenu(); }
     });
 
-    // 点击页面其他区域关闭下拉菜单
+    /* ── 顶栏导入按钮（排版重构：入口上提到技能页顶栏 actions 区）──
+     * 菜单节点 #mcpImportMenu 已整体移动到顶栏 wrap 内，原菜单项委托、
+     * 遮罩关闭、文件解析进度全部复用，这里只负责开合与定位。
+     * 菜单用 fixed 定位挂在按钮下方：.skills-head 有 overflow 裁切风险，
+     * absolute 会被头部裁掉一半（历史导入菜单在设置浮层内无此问题）。 */
+    function positionImportMenu() {
+        var btn = document.getElementById('skillsImportMcpBtn');
+        var menu = document.getElementById('mcpImportMenu');
+        if (!btn || !menu) return;
+        /* .skills-view 是 overflow:clip 容器：fixed 后代仍会被其裁切
+         * （clip 不像 hidden 那样建立 scroll 容器，但会裁所有后代绘制）。
+         * 菜单打开时移挂 body 重新定位；关闭统一走 closeImportMenu 归位。 */
+        if (menu.parentNode !== document.body) document.body.appendChild(menu);
+        var r = btn.getBoundingClientRect();
+        menu.style.position = 'fixed';
+        menu.style.top = (r.bottom + 4) + 'px';
+        menu.style.left = Math.max(8, r.right - menu.offsetWidth) + 'px';
+    }
+    /* 菜单关闭统一出口：移除 show + 归位顶栏 wrap。
+     * 打开时菜单被移挂 body（fixed，逃离 .skills-view 的 overflow:clip 裁切）；
+     * 关闭后必须归位——否则它带着 fixed 坐标滞留 body，一旦再被加上 show
+     * （程序化 trigger 隐形锚点 / 残留态）会在上次打开的旧坐标凭空出现。
+     * 归位后处于 display:none 的 wrap 内，下次打开由 positionImportMenu 重新移挂。 */
+    function closeImportMenu() {
+        var $menu = $('#mcpImportMenu');
+        $menu.removeClass('show');
+        var wrap = document.getElementById('skillsImportMcpWrap');
+        if (wrap && $menu[0] && $menu[0].parentNode !== wrap) wrap.appendChild($menu[0]);
+    }
+    $(document).on('click', '#skillsImportMcpBtn', function (e) {
+        e.stopPropagation();
+        var $menu = $('#mcpImportMenu');
+        if ($menu.hasClass('show')) closeImportMenu();
+        else { $menu.addClass('show'); positionImportMenu(); }
+    });
+    /* 进度镜像：解析/导入期间旧锚点按钮被改写 html/disabled，
+     * 顶栏按钮必须同步呈现（否则用户以为没反应而重复点击）。 */
+    (function () {
+        var anchor = document.getElementById('mcpImportBtn');
+        var top = document.getElementById('skillsImportMcpBtn');
+        if (!anchor || !top || typeof MutationObserver !== 'function') return;
+        var sync = function () {
+            top.disabled = anchor.disabled;
+            if (anchor.disabled) { top.innerHTML = anchor.innerHTML; }
+            else if (typeof GourdI18n !== 'undefined') {
+                top.innerHTML = anchor.innerHTML;   // 复位文案与锚点同源（含图标）
+            }
+        };
+        new MutationObserver(sync).observe(anchor, { childList: true, attributes: true, attributeFilter: ['disabled'] });
+    })();
+
+    // 点击页面其他区域关闭下拉菜单（统一出口：移除 show + 归位 wrap）
     $(document).on('click', function () {
-        $('#mcpImportMenu').removeClass('show');
+        closeImportMenu();
     });
 
     // 下拉菜单项点击事件
     $('#mcpImportMenu').on('click', '.mcp-import-menu-item', function (e) {
         e.stopPropagation();
-        $('#mcpImportMenu').removeClass('show');
+        closeImportMenu();
         var action = $(this).attr('data-action');
         if (action === 'file') {
             $('#mcpImportFileInput').trigger('click');

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "bizmuse-ai-music-video": {
+      "type": "streamable_http",
+      "url": "https://bizmuse.ai/api/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "BizMuse AI 音乐视频"
+      }
+    }
+  }
+}

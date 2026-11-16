@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "yihook",
+  "version": "1.0.0",
+  "description": "Generate images, extract TikTok Shop products, analyze viral videos, enhance video quality, and create UGC, product, photo avatar and lip-sync videos with your Yihook account.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "yihook",
+        "name_en": "Yihook",
+        "description_zh": "通过 yihook 账号生成图片、解析 TikTok Shop 商品链接、拆解爆款短视频、增强视频画质，并制作 UGC 商品视频、商品智能成片、照片数字人口播与视频口型同步。",
+        "description_en": "Generate images, extract TikTok Shop products, analyze viral videos, enhance video quality, and create UGC, product, photo avatar and lip-sync videos with your Yihook account."
+      },
+      "categories": [
+        "image-and-video-processing"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

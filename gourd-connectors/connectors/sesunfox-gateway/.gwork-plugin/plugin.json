@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "sesunfox-gateway",
+  "version": "1.0.0",
+  "description": "Query Jubaozan orders, products, stores, coupons, refunds, live rooms and warehouse inventory with natural language.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "聚宝赞",
+        "name_en": "Jubaozan",
+        "description_zh": "通过自然语言查询聚宝赞的订单、商品、门店、优惠券、退款单、直播间和云仓库存数据。",
+        "description_en": "Query Jubaozan orders, products, stores, coupons, refunds, live rooms and warehouse inventory with natural language."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

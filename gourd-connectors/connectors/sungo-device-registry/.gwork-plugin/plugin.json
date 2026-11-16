@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "sungo-device-registry",
+  "version": "1.0.0",
+  "description": "Look up a medical-device manufacturer across 14 official registries (NMPA, EUDAMED, FDA, MHRA, Health Canada, ANVISA, TFDA, MFDS, Roszdravnadzor and more): registration counts, risk-class split and device-level detail. 68,000+ manufacturers; every record re-verified against the manufacturer name. 100 free queries/day; unlimited with a free key.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "none"
+      },
+      "display": {
+        "name": "医疗器械注册查询",
+        "name_en": "Medical Device Registry Lookup",
+        "description_zh": "输入公司名，查它在中国 NMPA、欧盟 EUDAMED、美国 FDA、英国 MHRA、加拿大、巴西、台湾、韩国、俄罗斯等 14 个官方注册库的注册数量、风险等级分布与器械明细。收录 68,000+ 家企业，每条记录逐条回查过厂商名。免费每天 100 次，领密钥后不限次。",
+        "description_en": "Look up a medical-device manufacturer across 14 official registries (NMPA, EUDAMED, FDA, MHRA, Health Canada, ANVISA, TFDA, MFDS, Roszdravnadzor and more): registration counts, risk-class split and device-level detail. 68,000+ manufacturers; every record re-verified against the manufacturer name. 100 free queries/day; unlimited with a free key."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "open",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

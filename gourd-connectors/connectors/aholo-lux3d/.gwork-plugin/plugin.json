@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "aholo-lux3d",
+  "version": "1.0.0",
+  "description": "Create 3D assets from text or images, retexture models, convert formats, and retrieve task results.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "Aholo Lux3D",
+        "name_en": "Aholo Lux3D",
+        "description_zh": "通过文字或图片创建 3D 资产，为模型重绘材质、补齐视角、转换格式，并查询任务和获取结果。",
+        "description_en": "Create 3D assets from text or images, retexture models, convert formats, and retrieve task results."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

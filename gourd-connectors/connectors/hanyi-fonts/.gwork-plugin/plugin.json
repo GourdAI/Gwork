@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "hanyi-fonts",
+  "version": "1.0.0",
+  "description": "Connect to HanyiDeliver in GWork to query enterprise contract coverage, font entitlements, and font previews.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "汉仪字库",
+        "name_en": "Hanyi Fonts",
+        "description_zh": "连接汉仪交付平台服务，在 GWork 中查询企业合同、字体权益以及字体预览。",
+        "description_en": "Connect to HanyiDeliver in GWork to query enterprise contract coverage, font entitlements, and font previews."
+      },
+      "categories": [
+        "image-and-video-processing"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

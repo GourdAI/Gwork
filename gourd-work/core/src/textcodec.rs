@@ -36,6 +36,111 @@ pub fn decode_bytes(bytes: &[u8]) -> String {
     }
 }
 
+/// Decode a *declared* legacy encoding (e.g. `gbk`, `gb2312`, `big5`,
+/// `windows-1252`) to UTF-8. Returns `None` for unknown labels so callers can
+/// fall back to the BOM / UTF-8 / GBK heuristic.
+///
+/// Web pages still declare charsets in `Content-Type` or `<meta charset>`;
+/// `decode_bytes` alone would mis-read a Big5 page as GBK and a Shift_JIS page
+/// as mojibake. `Encoding::for_label` implements the WHATWG Encoding Standard
+/// label table, so aliases like `gb2312`, `gb-2312` and `x-sjis` resolve.
+pub fn decode_with_label(bytes: &[u8], label: &str) -> Option<String> {
+    let enc = encoding_rs::Encoding::for_label(label.as_bytes())?;
+    // UTF-8 (and UTF-16-family, which is not valid for HTTP text bodies) is
+    // handled by the caller's strict path; decoding through encoding_rs here
+    // would silently replace invalid bytes instead of surfacing them.
+    if enc == encoding_rs::UTF_8 {
+        return None;
+    }
+    let (decoded, _, _had_errors) = enc.decode(bytes);
+    // No fallback here: `decode_response_body` already lets bytes that are
+    // valid UTF-8 win over a (frequently mis-declared) legacy charset before
+    // calling us. Re-checking `from_utf8` here would be dead code and would
+    // hide where that policy actually lives.
+    Some(decoded.into_owned())
+}
+
+/// Extract the `charset=` parameter from a `Content-Type` value.
+///
+/// `text/html; charset="gbk"` and `text/html;charset=gb2312; foo=bar` are both
+/// real-world shapes. Bare `charset` without `=` is ignored.
+pub fn charset_from_content_type(value: &str) -> Option<&str> {
+    for part in value.split(';').skip(1) {
+        let (k, v) = match part.split_once('=') {
+            Some(kv) => kv,
+            None => continue,
+        };
+        if k.trim().eq_ignore_ascii_case("charset") {
+            let v = v.trim().trim_matches('"').trim();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Extract a `<meta charset="...">` / `<meta http-equiv=... content=...>`
+/// declaration from the first bytes of an HTML document (case-insensitive).
+/// Only the head is scanned: a `charset` string in article text is not a
+/// declaration. Returns the raw label for [`decode_with_label`] to resolve.
+pub fn charset_from_html_meta(head: &str) -> Option<String> {
+    // Bound the scan: a 1 MiB page with no meta must not pay for a full regex
+    // pass, and real declarations live in <head>. Cut at a char boundary
+    // (floor_char_boundary is not available on our 1.77.2 MSRV).
+    let mut end = head.len().min(4096);
+    while end > 0 && !head.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = head[..end].to_ascii_lowercase();
+
+    // Two accepted forms:
+    //   <meta charset="gbk">
+    //   <meta http-equiv="Content-Type" content="text/html; charset=gbk">
+    // Find each <meta ...> tag, then the charset= value inside it.
+    let mut i = 0usize;
+    while let Some(rel) = head[i..].find("<meta") {
+        let start = i + rel;
+        let end = head[start..].find('>').map(|p| start + p).unwrap_or(head.len());
+        let tag = &head[start..end];
+        if let Some(cs) = extract_charset_value(tag) {
+            return Some(cs);
+        }
+        i = end.saturating_add(1);
+        if i >= head.len() {
+            break;
+        }
+    }
+    None
+}
+
+/// Pull `charset=VALUE` (quoted or bare) out of a lowercase tag/attribute blob.
+fn extract_charset_value(tag: &str) -> Option<String> {
+    let pos = tag.find("charset")?;
+    let rest = &tag[pos + "charset".len()..];
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let quote = rest.chars().next().unwrap_or(' ');
+    let value = if quote == '"' || quote == '\'' {
+        let inner = &rest[1..];
+        inner.find(quote).map(|p| &inner[..p])?
+    } else {
+        // Bare value ends at whitespace, ';' or '>' / '/'. A trailing quote
+        // also terminates it: the `http-equiv` form embeds `charset=gbk"`
+        // inside a quoted `content="..."` attribute.
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, ';' | '>' | '/' | '"' | '\''))
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+    .trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 /// Incremental decoder for byte streams whose chunking is arbitrary.
 ///
 /// Valid bytes are emitted immediately (a shell prompt must reach the UI
@@ -461,6 +566,40 @@ mod tests {
     fn gbk_falls_back() {
         let (bytes, _, _) = encoding_rs::GBK.encode("中文测试");
         assert_eq!(decode_bytes(&bytes), "中文测试");
+    }
+
+    // ─── HTTP charset helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn content_type_charset_is_parsed() {
+        assert_eq!(charset_from_content_type("text/html; charset=gbk"), Some("gbk"));
+        assert_eq!(charset_from_content_type("text/html; charset=\"utf-8\"; x=1"), Some("utf-8"));
+        assert_eq!(charset_from_content_type("TEXT/HTML;CHARSET=GB2312"), Some("GB2312"));
+        assert_eq!(charset_from_content_type("text/html"), None);
+        assert_eq!(charset_from_content_type("text/html; charset="), None);
+    }
+
+    #[test]
+    fn html_meta_charset_forms_are_parsed() {
+        assert_eq!(
+            charset_from_html_meta(r#"<html><head><META CHARSET="GBK"></head><body>x</body></html>"#),
+            Some("gbk".into())
+        );
+        assert_eq!(
+            charset_from_html_meta(r#"<meta http-equiv="Content-Type" content="text/html; charset=big5">"#),
+            Some("big5".into()),
+            "http-equiv form must not leave a trailing quote in the label"
+        );
+        assert_eq!(charset_from_html_meta("<meta name='description' content='no charset here'>"), None);
+    }
+
+    #[test]
+    fn declared_legacy_charset_decodes_and_utf8_aliases_degrade() {
+        let (gbk, _, _) = encoding_rs::GBK.encode("中文测试");
+        assert_eq!(decode_with_label(&gbk, "gb2312"), Some("中文测试".to_string()));
+        // UTF-8 is handled by the caller's strict path, never here.
+        assert_eq!(decode_with_label("你好".as_bytes(), "utf-8"), None);
+        assert_eq!(decode_with_label(&gbk, "not-a-real-label"), None);
     }
 
     /// The reported bug: a multi-byte char split across two reads must not

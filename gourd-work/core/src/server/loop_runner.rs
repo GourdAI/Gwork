@@ -87,7 +87,12 @@ pub async fn execute_loop_task(state: Arc<AppState>, task_id: String, task: Loop
     let start_seq = seq_counter.load(std::sync::atomic::Ordering::SeqCst);
     let window = settings.general.history_window_size as usize;
     let mut history = store.to_chat_messages(&session_id, window);
-    let system = crate::react::prompt::build_system_prompt(&settings, &state.workspace.to_string_lossy())
+    let system = crate::react::prompt::build_system_prompt(
+        &settings,
+        &state.workspace.to_string_lossy(),
+        // 契约 §1.2：规则 5 条件注入（loop 任务与交互 run 同一判定源）。
+        crate::react::prompt::ask_user_visible(&settings.permission),
+    )
         + &crate::react::prompt::build_agent_roster(&state.workspace, &settings.permission);
     history.insert(0, ChatMessage::system(system));
 
@@ -131,9 +136,20 @@ pub async fn execute_loop_task(state: Arc<AppState>, task_id: String, task: Loop
         .read_context(&session_id)
         .context_length
         .unwrap_or(settings.general.context_length);
+    // Same bound-project resolution as the interactive spawner
+    // (`run_react_session`). A scheduled loop run on a session bound to an
+    // external project must (a) run its tools in that project and (b) tell the
+    // shared ChangeLedger the same root — otherwise the ledger keeps the
+    // interactive run's registration and records before/after in a tree the
+    // loop tools never wrote to, producing empty change cards.
+    let run_workspace = super::resolve_run_workspace(
+        state.session_roots.bound_root(&session_id).as_deref(),
+        &state.workspace,
+    );
+    state.change_ledger.register_run_root(&session_id, &run_workspace);
     let config = ReActConfig {
         session_id: session_id.clone(),
-        workspace: state.workspace.clone(),
+        workspace: run_workspace,
         // Loop sessions are real sessions with their own storage; route
         // per-session artefacts there just like an interactive run does.
         session_dir: Some(session_dir),
@@ -158,6 +174,7 @@ pub async fn execute_loop_task(state: Arc<AppState>, task_id: String, task: Loop
         // A scheduled loop task has no `/compact` entry point.
         force_compact: false,
         compact_focus: None,
+        resume_calibration: false,
     };
     let agent = ReActAgent::new(state.registry.clone());
     let cancel = CancellationToken::new();
@@ -203,6 +220,18 @@ pub async fn execute_loop_task(state: Arc<AppState>, task_id: String, task: Loop
         // shows the change card on replay — the frontend's replay path consumes
         // `file_changes` through the same handler.
         let frame = crate::protocol::Frame::file_changes(&session_id, &config.run_id, summary)
+            .seq(seq_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+        crate::server::persist_frame(&state, &session_id, &frame).await;
+        crate::server::broadcast_frame(&state, &session_id, frame).await;
+    }
+    // Same orphan recovery as the interactive path: a killed loop run leaves a
+    // ready=false manifest whose changes never got a final frame.
+    for summary in state.change_ledger.finalize_orphans(&session_id) {
+        let orphan_run = summary["runId"].as_str().unwrap_or("").to_string();
+        if orphan_run.is_empty() {
+            continue;
+        }
+        let frame = crate::protocol::Frame::file_changes(&session_id, &orphan_run, summary)
             .seq(seq_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
         crate::server::persist_frame(&state, &session_id, &frame).await;
         crate::server::broadcast_frame(&state, &session_id, frame).await;

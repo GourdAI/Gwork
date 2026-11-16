@@ -14,6 +14,9 @@ var AnonymousRequestBodyLimitKB int
 var AzureDefaultAPIVersion string
 var NotifyLimitCount int
 var NotificationLimitDurationMinute int
+// GenerateDefaultToken is retained only for backward compatibility with the
+// existing environment variable. It no longer controls whether registration
+// creates an initial token: every new user gets one ordinary enabled token.
 var GenerateDefaultToken bool
 var ErrorLogEnabled bool
 var TaskQueryLimit int

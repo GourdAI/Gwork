@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "yingmi-mcp": {
+      "type": "streamable_http",
+      "url": "https://stargate-partner.yingmi.com/mcp/v2/oauth/qieman",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "盈米基金"
+      }
+    }
+  }
+}

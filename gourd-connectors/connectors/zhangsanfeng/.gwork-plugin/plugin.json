@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "zhangsanfeng",
+  "version": "1.0.0",
+  "description": "Connect to Zhangsanfeng (finance, inventory & sales, MES). Ask in natural language for income statements, balance sheets, receivables aging, purchase/sales bills, stock, work orders and reporting progress; draft vouchers and purchase-in bills from plain text and post them after confirmation.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "账三丰",
+        "name_en": "Zhangsanfeng",
+        "description_zh": "连接账三丰（财务云 / 进销存 / MES）。用自然语言查利润表、资产负债表、往来账龄、采购销售单据、库存、工单与报工进度；也能一句话生成记账凭证或开采购入库单草稿，确认后入账。",
+        "description_en": "Connect to Zhangsanfeng (finance, inventory & sales, MES). Ask in natural language for income statements, balance sheets, receivables aging, purchase/sales bills, stock, work orders and reporting progress; draft vouchers and purchase-in bills from plain text and post them after confirmation."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

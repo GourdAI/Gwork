@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "duoguan-fengchao",
+  "version": "1.0.0",
+  "description": "An end-to-end AI content operations platform covering content brains, brand profiles, trend research, short-video and social-copy writing, image generation, podcasts, voiceover, video packaging, and multi-account publishing.",
+  "keywords": [
+    "mcp"
+  ],
+  "extensions": {
+    "cn.gourd.gwork": {
+      "schemaVersion": "1.0.0",
+      "auth": {
+        "authType": "oauth"
+      },
+      "display": {
+        "name": "夺冠蜂巢",
+        "name_en": "Duoguan Fengchao",
+        "description_zh": "覆盖内容大脑、品牌画像、热点选题、口播与图文文案、配图、播客、配音、视频封装和多账号运营的一站式 AI 自媒体内容生产平台。",
+        "description_en": "An end-to-end AI content operations platform covering content brains, brand profiles, trend research, short-video and social-copy writing, image generation, podcasts, voiceover, video packaging, and multi-account publishing."
+      },
+      "categories": [
+        "other"
+      ],
+      "tier": "oauth",
+      "source": "imported:workbuddy-connector-plugins-official",
+      "probedAt": "2026-11-14T08:58:28.748Z"
+    }
+  }
+}

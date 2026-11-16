@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "dknowc-mcp": {
+      "type": "streamable_http",
+      "url": "https://mcp.dknowc.cn/s6/mcp",
+      "auth": {
+        "authType": "oauth",
+        "tokenLabel": "深知可信工作台"
+      }
+    }
+  }
+}
