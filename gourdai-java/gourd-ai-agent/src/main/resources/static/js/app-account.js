@@ -5,11 +5,20 @@
     参照设计稿（用户 11-09 提供并二次确认）：
       - 底栏区域 = 用户卡片：未登录显示「登录」，已登录显示头像 + 昵称 + 套餐；
       - 点击卡片向上展开弹层，内容是【设置 + 用户相关】菜单：
-          已登录 = 用户信息面板（头像/昵称/套餐/积分 + 设置、外观系统/浅/深、
-                  记忆与进化、意见反馈、检查更新、退出登录）；
-          未登录 = 登录入口行 + 设置菜单（设置、外观系统/浅/深、检查更新、意见反馈）；
+          已登录 = 用户信息面板（头像/昵称 + 同行右对齐余额 + 设置、外观系统/浅/深、
+                  检查更新、退出登录）；
+          未登录 = 登录入口行 + 设置菜单（设置、外观系统/浅/深、检查更新）；
     - 登录表单是【独立居中弹框】（.account-modal，半透明遮罩 + 居中），
         绝不塞进账号弹层里（用户明确否决过弹层内嵌表单的方案）。
+
+    【余额展示纪律（用户 11-xx 报障「积分余额显示成一串原始整数」）】
+    弹层只展示后台 GetSelf 下发的【服务端格式化字符串】quota_display
+    （buildSelfUserData 按站点 USD/CNY/TOKENS/CUSTOM 规则换算好），
+    客户端绝不拿原始 quota 整数自行拼展示值：原始整数（如 5039778957）
+    既不是金额也不是可读余额，直接上屏就是误导。后台未下发 quota_display
+    （旧版后台）时显示「—」，宁缺毋错。余额是只读展示：没有任何自服务
+    接口接受 quota 作为入参（admin UpdateSelf 只写 Username/DisplayName/
+    Password），故不存在经此入口篡改余额的路径。
 
     凭据与会话保活全部在 Rust 侧（auth.rs）：本页面只调用
     window.__GOURD_IPC__.auth*，绝不接触 access token / refresh cookie。
@@ -39,10 +48,9 @@
 (function () {
     'use strict';
 
-    /* 意见反馈 / 官网入口：与 app-settings-about.js 的 HOMEPAGE_URL 同源。
-       不臆造不存在的 /feedback 路由；外链靠壳层 external_link.rs 的
-       on_new_window 拦截交给系统浏览器（target="_blank" 本身在 wry 下不够）。 */
-    var HOMEPAGE_URL = 'https://www.gourdwork.com/';
+    /* 意见反馈 / 官网入口已随弹层菜单精简移除（用户 11-xx 要求去掉
+       「记忆与进化」「意见反馈」两行），HOMEPAGE_URL 与 openExternal
+       一并删除，避免留下无人调用的死代码。 */
 
     function t(key, fallback) {
         var msg = window.GourdI18n ? window.GourdI18n.t(key) : key;
@@ -60,7 +68,7 @@
 
     var state = {
         signed_in: false, username: '', display_name: '',
-        plan: '', points: '', avatar_url: ''
+        balance: '', avatar_url: ''
     };
     var selfLoaded = false;
     var entry = null;
@@ -135,7 +143,8 @@
                 name.setAttribute('data-i18n', 'account.entry');
             }
         }
-        if (sub) sub.textContent = state.signed_in ? (state.plan || '') : '';
+        /* 套餐不再展示（用户 11-xx 要求）：副标恒空，:empty 规则会隐藏该节点。 */
+        if (sub) sub.textContent = '';
         if (card) {
             if (state.signed_in) card.classList.add('is-signed-in');
             else card.classList.remove('is-signed-in');
@@ -205,8 +214,6 @@
 
     var ICON_GEAR = '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.83 1.83 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>';
     var ICON_THEME = '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z"/>';
-    var ICON_MEMORY = '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>';
-    var ICON_FEEDBACK = '<circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.5-3 4"/><path d="M12 17h.01"/>';
     var ICON_UPDATE = '<circle cx="12" cy="12" r="9"/><polyline points="12 16 12 8"/><polyline points="8 12 12 8 16 12"/>';
     var ICON_LOGOUT = '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>';
     var ICON_LOGIN = '<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/>';
@@ -230,7 +237,13 @@
             + '</span></div>';
     }
 
-    /* 视图 A：已登录用户信息面板（弹层） */
+    /* 视图 A：已登录用户信息面板（弹层）。
+       【布局优化 11-xx 二轮】余额不再单独占一张卡：并入顶部用户行，与
+       头像/昵称/用户名同行、右对齐成「余额 + 数值」小 chip（用户建议
+       「余额放头像和用户名一起」）。信息面板 = 用户行（含余额 chip）+
+       菜单（设置 / 外观 / 检查更新 / 退出登录），弹层更短更聚焦。
+       余额标签为「余额」，值取后台服务端格式化串 quota_display
+       （见文件头「余额展示纪律」）。 */
     function renderProfile() {
         var h = '';
         h += '<div class="account-pop-profile">'
@@ -238,18 +251,14 @@
             + '<div style="flex:1 1 auto;min-width:0">'
             + '<div class="account-pop-name" id="accountPopName"></div>'
             + '<div class="account-pop-desc" id="accountPopDesc"></div>'
+            + '</div>'
+            + '<div class="account-pop-balance">'
+            + '<div class="account-pop-balance-label">' + esc(t('account.balance', '余额')) + '</div>'
+            + '<div class="account-pop-balance-value" id="accountPopBalance">—</div>'
             + '</div></div>';
-        h += '<div class="account-pop-stats">'
-            + '<div><div class="account-pop-stat-label">' + esc(t('account.plan', '套餐')) + '</div>'
-            + '<div class="account-pop-stat-value" id="accountPopPlan">—</div></div>'
-            + '<div><div class="account-pop-stat-label">' + esc(t('account.points', '积分余额')) + '</div>'
-            + '<div class="account-pop-stat-value" id="accountPopPoints">—</div></div>'
-            + '</div>';
         h += '<div class="account-pop-menu">';
         h += menuItem('settings', 'settings.title', '设置', ICON_GEAR);
         h += themeRow();
-        h += menuItem('memory', 'account.memory', '记忆与进化', ICON_MEMORY);
-        h += menuItem('feedback', 'account.feedback', '意见反馈', ICON_FEEDBACK);
         h += menuItem('update', 'settings.about.check_update', '检查更新', ICON_UPDATE);
         h += '<div class="account-pop-sep"></div>';
         h += menuItem('logout', 'account.sign_out', '退出登录', ICON_LOGOUT, true);
@@ -272,23 +281,22 @@
         h += menuItem('settings', 'settings.title', '设置', ICON_GEAR);
         h += themeRow();
         h += menuItem('update', 'settings.about.check_update', '检查更新', ICON_UPDATE);
-        h += menuItem('feedback', 'account.feedback', '意见反馈', ICON_FEEDBACK);
         h += '</div>';
         popover.innerHTML = h;
         refreshThemeBtns();
     }
 
-    /* 只刷新动态文本，不动输入框 —— 60s 保活刷新不会清掉用户正在输入的内容。 */
+    /* 只刷新动态文本，不动输入框 —— 60s 保活刷新不会清掉用户正在输入的内容。
+       余额只认服务端格式化串 quota_display：拿不到就「—」，绝不回落到原始
+       quota 整数（那串数字上屏就是用户报障的「5039778957」事故）。 */
     function refreshProfile() {
         var display = state.display_name || state.username || t('account.signed_in', '已登录');
         var n = document.getElementById('accountPopName');
         var d = document.getElementById('accountPopDesc');
-        var plan = document.getElementById('accountPopPlan');
-        var pts = document.getElementById('accountPopPoints');
+        var bal = document.getElementById('accountPopBalance');
         if (n) n.textContent = display;
-        if (d) d.textContent = state.username && state.username !== display ? state.username : (state.plan || '');
-        if (plan) plan.textContent = state.plan || '—';
-        if (pts) pts.textContent = state.points || '—';
+        if (d) d.textContent = state.username && state.username !== display ? state.username : '';
+        if (bal) bal.textContent = state.balance || '—';
         renderAvatar(document.getElementById('accountPopAvatar'), state.avatar_url, display);
         refreshThemeBtns();
     }
@@ -616,16 +624,6 @@
 
     /* ---------- 菜单动作 ---------- */
 
-    function openExternal(url) {
-        var a = document.createElement('a');
-        a.href = url;
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-    }
-
     function onTheme(mode) {
         var api = window.__themeApi;
         if (api && typeof api.applyThemeMode === 'function') api.applyThemeMode(mode);
@@ -650,12 +648,6 @@
             if (typeof window.openSettings === 'function') window.openSettings();
             return;
         }
-        if (act === 'memory') {
-            hide();
-            if (typeof window.openMemoryView === 'function') window.openMemoryView();
-            return;
-        }
-        if (act === 'feedback') { hide(); openExternal(HOMEPAGE_URL); return; }
         if (act === 'update') {
             hide();
             /* 检查更新能力在「设置 → 关于」页；打开后直接切到该 tab。 */
@@ -676,7 +668,7 @@
         state.username = (s && s.username) || '';
         state.display_name = (s && s.display_name) || '';
         if (!state.signed_in) {
-            state.plan = ''; state.points = ''; state.avatar_url = ''; selfLoaded = false;
+            state.balance = ''; state.avatar_url = ''; selfLoaded = false;
         }
         renderCard();
         /* 登录态翻转时登录弹框没有存在意义了（已登录成功）：收起。 */
@@ -691,10 +683,12 @@
     /* authSelf → invoke('auth_self') → authorized_get → parse_api_response
        已经把 {success,message,data} 信封解包成 data 本体，这里拿到的是
        buildSelfUserData 的字段：username / display_name / group（渠道分组，
-       非套餐名）/ quota（剩余额度整数）等；后端【没有】avatar / avatar_url
-       字段，所以真实头像 URL 通常拿不到，展示一律退回昵称首字渐变底。
-       保留 raw.data 兼容分支只为防御后端改信封，尽力解析、失败静默降级「—」：
-       绝不让补充信息阻塞主弹层。 */
+       非套餐名）/ quota（原始额度整数）/ quota_display（服务端格式化余额串）
+       等；后端【没有】avatar / avatar_url 字段，所以真实头像 URL 通常拿不到，
+       展示一律退回昵称首字渐变底。
+       【余额展示纪律】只取 quota_display：原始 quota 整数不做任何客户端换算
+       或直显。旧后台未下发该字段时保持「—」。保留 raw.data 兼容分支只为
+       防御后端改信封，尽力解析、失败静默降级「—」：绝不让补充信息阻塞主弹层。 */
     function refreshSelf() {
         var i = ipc();
         if (!i || typeof i.authSelf !== 'function' || selfLoaded) return;
@@ -702,9 +696,9 @@
         i.authSelf().then(function (raw) {
             var d = (raw && raw.data) ? raw.data : raw;
             if (!d || typeof d !== 'object') return;
-            state.plan = d.group || d.group_name || d.plan || state.plan;
-            var q = (d.quota != null) ? d.quota : (d.credits != null ? d.credits : null);
-            if (q != null) state.points = String(q);
+            if (typeof d.quota_display === 'string' && d.quota_display !== '') {
+                state.balance = d.quota_display;
+            }
             state.avatar_url = d.avatar_url || d.avatar || state.avatar_url;
             renderCard();
             if (isOpen()) refreshView();

@@ -87,8 +87,10 @@ public final class FileChangeService {
     /**
      * incompleteReasons 的条数上限。
      *
-     * <p>该列表按失败路径逐条累积、且会随每个变更帧广播给前端，而上限缺失时一次长 run 里
-     * 几十次快照失败就能把它撑到几十条，前端 .file-changes-warning 又没有 max-height，直接撑破卡片。</p>
+     * <p>该列表按失败路径逐条累积、且会随每个变更帧广播给前端。2026-11 产品口径改为
+     * 「汇总不完整警示不上界面」后前端不再渲染它，但字段仍是契约的一部分（监控/排障可读），
+     * 无上限时一次长 run 里几十次快照失败就能把它撑到几十条并随每帧广播，白白放大帧体积，
+     * 故保留硬上限。</p>
      */
     private static final int MAX_INCOMPLETE_REASONS = 20;
 
@@ -850,9 +852,9 @@ public final class FileChangeService {
      * 追加一条不完整原因，带去重与硬上限。
      *
      * <p>上限是必须的：该列表按失败路径逐条累积、且随每个变更帧广播给前端，一次长 run 里
-     * 几十次快照失败（每次带不同文件路径，去重挡不住）就能把它撑到几十条，而前端
-     * .file-changes-warning 没有 max-height，会直接撑破卡片。触顶后把最后一条换成计数占位，
-     * 完整原因落服务端日志，既不丢可诊断性也不撑爆 UI。</p>
+     * 几十次快照失败（每次带不同文件路径，去重挡不住）就能把它撑到几十条。2026-11 起前端
+     * 不再渲染该警示（产品口径：汇总不完整不上界面），但字段仍随帧广播供监控/排障读取，
+     * 触顶后把最后一条换成计数占位，完整原因落服务端日志，既不丢可诊断性也不放大帧体积。</p>
      */
     private static void addReason(Manifest manifest, String reason) {
         if (manifest.incompleteReasons.contains(reason)) {

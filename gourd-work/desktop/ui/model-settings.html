@@ -19,16 +19,6 @@
             <div class="model-settings-card">
                 <!-- 左栏：供应商列表 -->
                 <div class="model-settings-left">
-                    <!-- 左栏头部：分组标题 + 新建入口。
-                         新建是「列表级」操作，放左栏顶部作为入口；表单提交（创建）是右栏底部的
-                         主操作。二者曾同名「添加服务商」并排吸在卡片底部，文案与视觉完全重复，
-                         且编辑态下左栏那个按钮仍常驻、右栏那个被隐藏，底部左右还不对称。 -->
-                    <div class="model-settings-left-header">
-                        <span class="model-settings-left-title" data-i18n="settings.providers.custom_group">自定义供应商</span>
-                        <button class="model-settings-add-btn" id="msProviderAddBtn" data-i18n-title="settings.providers.add_title">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                        </button>
-                    </div>
                     <div class="model-settings-left-scroll">
                         <!-- 官方源：固定置顶、不参与拖拽排序、不显示地址/密钥输入。
                              登录态与模型列表由内核 /web/settings/official/* 提供，key 永不进本页。 -->
@@ -36,8 +26,16 @@
                             <div class="model-settings-group-caption" data-i18n="settings.providers.official_group">官方</div>
                             <div class="model-settings-group-list" id="msOfficialList"></div>
                         </div>
+                        <!-- 自定义分组：标题行右侧带「新建供应商」入口。
+                             早期左栏顶部另有一条「自定义供应商 + 加号」的头部，与这里的分组标题
+                             文案完全重复（同一屏出现两次「自定义供应商」），故头部移除、入口下移到此。 -->
                         <div class="model-settings-group" id="msGroupCustom">
-                            <div class="model-settings-group-caption" data-i18n="settings.providers.custom_group">自定义供应商</div>
+                            <div class="model-settings-group-caption-row">
+                                <span class="model-settings-group-caption" data-i18n="settings.providers.custom_group">自定义供应商</span>
+                                <button class="model-settings-add-btn" id="msProviderAddBtn" data-i18n-title="settings.providers.add_title">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                </button>
+                            </div>
                             <div class="model-settings-group-list" id="msCustomList"></div>
                         </div>
                     </div>
@@ -64,13 +62,37 @@
                                         <span data-i18n="settings.providers.official_account">当前账号</span>
                                         <strong id="msOfficialUsername"></strong>
                                     </div>
-                                    <div class="ms-official-models-head">
-                                        <span data-i18n="settings.providers.official_models">可用模型</span>
-                                        <button class="ms-official-refresh" id="msOfficialRefreshBtn" data-i18n-title="settings.providers.official_refresh">
-                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
-                                        </button>
+                                    <!-- 官方模型管理：与自定义供应商同构（搜索 / 批量启停 / 行内默认星标 /
+                                         接口协议下拉 / 行启停开关）。内核已把官方模型物化进
+                                         settings.models（official:true），这里直接走 llm/models 端点。 -->
+                                    <div class="form-group">
+                                        <div class="form-group-header">
+                                            <label data-i18n="settings.providers.models_label">模型管理</label>
+                                            <div class="ms-model-search">
+                                                <svg class="ms-model-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                                                <input type="text" id="msOfficialSearchInput" autocomplete="off" spellcheck="false" placeholder="搜索模型…" data-i18n-placeholder="settings.providers.search_placeholder"/>
+                                                <span class="ms-model-search-clear" id="msOfficialSearchClear" style="display:none">&#10005;</span>
+                                            </div>
+                                            <div class="provider-model-header-actions">
+                                                <div class="provider-model-menu-wrap">
+                                                    <button class="provider-model-icon-btn" id="msOfficialSelectToggle" data-i18n-title="settings.providers.bulk_select_title">
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                                                    </button>
+                                                    <div class="provider-model-menu" id="msOfficialActionMenu">
+                                                        <button type="button" class="provider-model-menu-item" id="msOfficialSelectAll" data-i18n="settings.providers.select_all">全选</button>
+                                                        <button type="button" class="provider-model-menu-item" id="msOfficialSelectNone" data-i18n="settings.providers.select_none">全不选</button>
+                                                        <button type="button" class="provider-model-menu-item" id="msOfficialInvert" data-i18n="settings.providers.invert">反选</button>
+                                                    </div>
+                                                </div>
+                                                <button class="provider-model-icon-btn" id="msOfficialRefreshBtn" data-i18n-title="settings.providers.official_refresh">
+                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div class="provider-models-list layui-form" lay-filter="msOfficialModelForm" id="msOfficialModelsList"></div>
+                                        <div class="provider-models-empty" id="msOfficialModelsEmpty" data-i18n="settings.providers.official_no_models">暂无可用模型</div>
+                                        <div class="provider-models-empty" id="msOfficialModelsSearchEmpty" style="display:none" data-i18n="settings.providers.search_no_result">未找到匹配的模型</div>
                                     </div>
-                                    <div class="ms-official-models" id="msOfficialModels"></div>
                                     <p class="ms-official-note" data-i18n="settings.providers.official_note">密钥由客户端安全保管，不会在此显示。</p>
                                 </div>
                             </div>

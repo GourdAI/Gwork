@@ -483,6 +483,16 @@ func buildSelfUserData(user *model.User) map[string]any {
 		"telegram_id":       user.TelegramId,
 		"group":             user.Group,
 		"quota":             user.Quota,
+		// quota_display is the SERVER-formatted, human-readable balance
+		// (same conversion rules as the web console: quota / QuotaPerUnit,
+		// then USD/CNY/TOKENS/CUSTOM per site setting). Clients must render
+		// this string verbatim instead of re-deriving a display value from
+		// the raw quota integer, so a stale or tampered client can neither
+		// mislabel the balance nor invent its own formatting. The raw
+		// `quota` above stays for compatibility; it is read-only output and
+		// no self-service endpoint accepts it as input (UpdateSelf copies
+		// only Username / DisplayName / Password into the write model).
+		"quota_display":     formatQuotaForDisplay(user.Quota),
 		"used_quota":        user.UsedQuota,
 		"request_count":     user.RequestCount,
 		"aff_code":          user.AffCode,
@@ -496,6 +506,100 @@ func buildSelfUserData(user *model.User) map[string]any {
 		"sidebar_modules":   userSetting.SidebarModules, // 正确提取sidebar_modules字段
 		"permissions":       permissions,
 	}
+}
+
+// formatQuotaForDisplay renders a raw quota integer (token units) as the
+// human-readable balance string for the current site display type. It reuses the
+// web console's formatQuotaWithCurrency CONVERSION math (web/src/lib/currency.ts):
+// quota / QuotaPerUnit → USD, then × USDExchangeRate (CNY) or ×
+// CustomCurrencyExchangeRate (CUSTOM):
+//   - TOKENS: integer token count with thousands separators
+//   - USD   : quota / QuotaPerUnit, "$" + up to 2/4 fraction digits
+//   - CNY   : USD value * USDExchangeRate, "¥" prefix
+//   - CUSTOM: USD value * CustomCurrencyExchangeRate, custom symbol prefix
+//
+// Presentation INTENTIONALLY differs from the web's Intl.NumberFormat output in
+// one way: the web abbreviates large magnitudes ("5000k", "10k"), whereas a
+// balance must read exactly, so we always emit the full value with thousands
+// separators and never abbreviate. Grouping and the sign-before-symbol form
+// ("-$5", not "$-5") match the web's narrow-symbol currency style.
+//
+// Trailing zeros are trimmed so $10.00 renders as "$10". This is display-only:
+// the value is computed server-side from the authoritative user row and can
+// never be influenced by client input.
+func formatQuotaForDisplay(quota int) string {
+	switch operation_setting.GetQuotaDisplayType() {
+	case operation_setting.QuotaDisplayTypeTokens:
+		return groupThousands(strconv.FormatInt(int64(quota), 10))
+	case operation_setting.QuotaDisplayTypeCNY:
+		return formatCurrencyBalance(float64(quota)/common.QuotaPerUnit*operation_setting.USDExchangeRate, "¥")
+	case operation_setting.QuotaDisplayTypeCustom:
+		symbol := operation_setting.GetGeneralSetting().CustomCurrencySymbol
+		if symbol == "" {
+			symbol = "¤"
+		}
+		rate := operation_setting.GetGeneralSetting().CustomCurrencyExchangeRate
+		if rate <= 0 {
+			rate = 1
+		}
+		return formatCurrencyBalance(float64(quota)/common.QuotaPerUnit*rate, symbol)
+	default: // USD
+		return formatCurrencyBalance(float64(quota)/common.QuotaPerUnit, "$")
+	}
+}
+
+// formatCurrencyBalance formats a currency amount with up to 4 fraction
+// digits (2 when the magnitude is >= 1), trimming trailing zeros, matching
+// the web console's digitsLarge/digitsSmall policy. The integer part gets
+// thousands separators; a negative amount renders the sign BEFORE the symbol
+// ("-$5"), never between symbol and digits ("$-5").
+func formatCurrencyBalance(value float64, symbol string) string {
+	digits := 4
+	if value >= 1 || value <= -1 {
+		digits = 2
+	}
+	negative := value < 0
+	if negative {
+		value = -value
+	}
+	s := strconv.FormatFloat(value, 'f', digits, 64)
+	intPart, fracPart := s, ""
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		intPart, fracPart = s[:i], s[i:]
+		// Trim trailing zeros / a bare decimal point off the fraction only.
+		fracPart = strings.TrimRight(fracPart, "0")
+		if fracPart == "." {
+			fracPart = ""
+		}
+	}
+	prefix := symbol
+	if negative {
+		prefix = "-" + symbol
+	}
+	return prefix + groupThousands(intPart) + fracPart
+}
+
+// groupThousands inserts a comma every three digits of an integer string,
+// e.g. "10079" → "10,079". A leading '-' (negative TOKENS count) is absorbed
+// into the first group so "-5000000" → "-5,000,000". Strings of <= 3 digits
+// are returned unchanged.
+func groupThousands(intPart string) string {
+	n := len(intPart)
+	if n <= 3 {
+		return intPart
+	}
+	var b strings.Builder
+	b.Grow(n + n/3)
+	first := n % 3
+	if first == 0 {
+		first = 3
+	}
+	b.WriteString(intPart[:first])
+	for i := first; i < n; i += 3 {
+		b.WriteByte(',')
+		b.WriteString(intPart[i : i+3])
+	}
+	return b.String()
 }
 
 // 计算用户权限的辅助函数

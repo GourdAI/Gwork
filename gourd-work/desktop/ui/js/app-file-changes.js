@@ -4,7 +4,10 @@
    头部 = 图标 + 「已编辑 N 个文件」+ 增删统计 + 审查/整轮撤销/重新应用；
     body = 文件行（kind 徽标 + 路径 + 增删统计，默认 3 行、其余折叠），
    行点击 = Monaco 快照 diff 审查查看器（唯一预览入口），头部审查 = 查看器轮文件列表。
-   输入区不再渲染恒在 chip / 弹层；无文件变更/新增的 run 不渲染任何内容。 */
+   输入区不再渲染恒在 chip / 弹层；无文件变更/新增的 run 不渲染任何内容。
+   产品口径（2026-11 用户拍板）：「变更汇总可能不完整」警示一律不上界面 ——
+   后端 summary.possiblyIncomplete / incompleteReasons 仅作为契约字段保留，
+   前端只消费 files[]，files 为空的快照（含仅警示快照）不落卡、不展示任何提示。 */
 /* 契约对齐（后端 manifest summary）：
    summary: revision / status / ready / possiblyIncomplete / incompleteReasons[] /
             fileCount / additions / deletions / runApplyState(FULLY_APPLIED|PARTIALLY_UNDONE|FULLY_UNDONE) / files[]
@@ -111,14 +114,6 @@
         if (runState === 'FULLY_UNDONE') return { undone: files.length, applied: 0 };
         if (isUndoneState(runState)) return { undone: files.length ? 1 : 0, applied: files.length };
         return { undone: 0, applied: files.length };
-    }
-    function incompleteText(summary) {
-        var reasons = summary && summary.incompleteReasons;
-        var list = (Array.isArray(reasons) ? reasons : (reasons ? [reasons] : []))
-            .map(function (item) { return item == null ? '' : String(item).trim(); })
-            .filter(Boolean)
-            .filter(function(r) { return r !== 'bash was invoked and may have changed untracked files'; });
-        return list.length ? t('possibly_incomplete_detail', [list.join('; ')]) : '';
     }
     function notify(key, type, params) {
         if (typeof window.showToast === 'function') window.showToast(t(key, params), type || 'info');
@@ -322,8 +317,8 @@
         if (!map[runKey]) {
             map[runKey] = {
                 el: null, headEl: null, titleEl: null, statEl: null, headActionsEl: null,
-                bodyEl: null, toggleEl: null, warning: null,
-                headSig: null, actionsSig: null, warningSig: undefined, toggleSig: null,
+                bodyEl: null, toggleEl: null,
+                headSig: null, actionsSig: null, toggleSig: null,
                 rows: {}, expanded: false
             };
         }
@@ -565,18 +560,13 @@
 
     function renderCard(sess, runKey, force) {
         var summary = sess._fileChangesByRun ? sess._fileChangesByRun[runKey] : null;
-        if (!summary || !Array.isArray(summary.files)) return;
-        /* 普通空快照仍不落卡；后端「无法完整追踪」的收尾警示快照（files:[] +
-            possiblyIncomplete:true + incompleteReasons）要出一张只有警示条的卡片，
-            warningSig 段与下面的 files 循环完全独立，空数组也能正常渲染。 */
-        if (!summary.files.length && summary.possiblyIncomplete !== true) return;
+        if (!summary || !Array.isArray(summary.files) || !summary.files.length) return;
         var cache = cardCache(sess, runKey);
         if (!cache.el || !cache.el.isConnected) {
             /* 节点被 rerun / 容器清空删除后重建：签名必须作废，否则新节点拿旧签名
                跳过填充，头部/操作区/折叠按钮会是空壳。 */
             cache.el = null;
             cache.rows = {};
-            cache.warning = null;
             /* rerun 删除卡片但保留宿主（宿主无 data-run-id）：重建时清掉上一轮固化的
                结束时间，避免旧时间浮在新卡片上方 */
             var oldHost = sess._fchHosts && sess._fchHosts[runKey];
@@ -586,7 +576,6 @@
             }
             cache.headSig = null;
             cache.actionsSig = null;
-            cache.warningSig = undefined;
             cache.toggleSig = null;
             createCardEl(sess, runKey);
         }
@@ -596,29 +585,18 @@
         var count = num(summary.fileCount) != null ? num(summary.fileCount) : files.length;
         var sumAdd = additions != null ? additions : statSum(files, 'additions');
         var sumDel = deletions != null ? deletions : statSum(files, 'deletions');
-        var isWarningOnly = files.length === 0 && summary.possiblyIncomplete === true;
-        var headSig = [count, sumAdd, sumDel, isWarningOnly ? 'W' : '-'].join('\u0001');
+        var headSig = [count, sumAdd, sumDel].join('\u0001');
         if (force || cache.headSig !== headSig) {
             cache.headSig = headSig;
-            /* A bash-only / abnormal run publishes an empty terminal snapshot.
-               A card that says "已编辑 0 个文件" with a review button opening an
-               empty list is misleading: it should read as a tracking warning. */
-            cache.titleEl.textContent = isWarningOnly
-                ? (t('possibly_incomplete') || t('edited_files', { count: 0 }))
-                : t('edited_files', { count: count });
-            cache.statEl.innerHTML = isWarningOnly ? '' : diffStatHtml(sumAdd, sumDel);
+            cache.titleEl.textContent = t('edited_files', { count: count });
+            cache.statEl.innerHTML = diffStatHtml(sumAdd, sumDel);
         }
 
         var stats = undoStats(summary, files);
-        var actionsSig = (isWarningOnly ? 'W' : 'V')
-            + (stats.undone > 0 ? 'R' : '-') + (stats.applied > 0 ? 'U' : '-');
+        var actionsSig = 'V' + (stats.undone > 0 ? 'R' : '-') + (stats.applied > 0 ? 'U' : '-');
         if (force || cache.actionsSig !== actionsSig) {
             cache.actionsSig = actionsSig;
             cache.headActionsEl.innerHTML = '';
-            if (isWarningOnly) {
-                /* No file rows and no undo state: a review/undo button would be
-                   a dead control. The warning strip below is the whole card. */
-            } else {
             cache.headActionsEl.appendChild(actionButton('review-run', t('review'), REVIEW_SVG, function () {
                 if (typeof window.openRunChangesViewer === 'function') window.openRunChangesViewer(sess, runKey);
             }));
@@ -631,25 +609,6 @@
                 cache.headActionsEl.appendChild(actionButton('undo-run', t('undo_run'), UNDO_SVG, function (button) {
                     layConfirm(t('confirm_undo_run'), function () { runOperation(sess, runKey, '/web/chat/changes/undo/run', 'undo_run_success', button); });
                 }));
-            }
-            }
-        }
-
-        /* 不完整提示：始终占 body 之前一位，行列表跟在它后面；与 files 循环无耦合，
-            files:[] 的警示快照同样能出警示条。incompleteText 会过滤通用 bash 原因，
-            仅剩该原因时回落到基础文案，避免 possiblyIncomplete 为真却一片空白。 */
-        var warningSig = summary.possiblyIncomplete
-            ? (incompleteText(summary) || t('possibly_incomplete')) : '';
-        if (force || cache.warningSig !== warningSig) {
-            cache.warningSig = warningSig;
-            if (cache.warning && cache.warning.parentNode === cache.el) cache.el.removeChild(cache.warning);
-            cache.warning = null;
-            if (warningSig) {
-                var warning = document.createElement('div');
-                warning.className = 'file-changes-warning';
-                warning.textContent = warningSig;
-                cache.el.insertBefore(warning, cache.bodyEl);
-                cache.warning = warning;
             }
         }
 
@@ -725,13 +684,11 @@
        相同 revision 数据无变化，不重复渲染。 */
     function upsert(sess, runId, summary) {
         if (!sess || !runId || !summary) return;
-        /* 空快照（没有任何文件变更/新增）不生成任何卡片：直接短路，不落缓存、不参与 revision 门禁。
-           否则空 run（或流式早期的空帧）会留下「0 个文件」的空壳；
+        /* 空快照（没有任何文件变更/新增，含 possiblyIncomplete 的收尾警示快照）不生成
+           任何卡片：直接短路，不落缓存、不参与 revision 门禁。产品口径：汇总不完整
+           的警示不上界面；否则空 run（或流式早期的空帧）会留下「0 个文件」的空壳，
            且一旦空帧占用 revision，同 revision 的有效快照会被单调门禁误挡。 */
-        /* files:[] 且 possiblyIncomplete:true 的收尾警示快照必须落缓存并出卡；
-           纯空快照仍短路，下方 revision 单调门禁与缓存逻辑原样生效。 */
-        if (!Array.isArray(summary.files)) return;
-        if (!summary.files.length && summary.possiblyIncomplete !== true) return;
+        if (!Array.isArray(summary.files) || !summary.files.length) return;
         if (!sess._fileChangesByRun) sess._fileChangesByRun = {};
         var runKey = String(runId);
         var previous = sess._fileChangesByRun[runKey];

@@ -1407,15 +1407,58 @@ pub(crate) fn mask_api_key(key: &str) -> String {
 /// 纯内存构造：不读、不写 `settings.json`；`apiKey` 永远为空字符串，
 /// `hasKey` 只反映 `official::is_ready()` 这个布尔量。模型列表来自壳登录后
 /// 一次性写入的 `official::models()` 缓存。key 绝不进入该 JSON 值。
+///
+/// 每个模型的 `standard` / `enabled` 从 `settings.models` 里同键的物化条目
+/// 读取（用户在模型管理页改过的接口协议与启停），缺省回落 openai/true——
+/// 官方模型的管理口径因此与自定义供应商一致。
 fn official_provider_item() -> serde_json::Value {
+    official_provider_item_with_overrides(&official_model_overrides_from_disk())
+}
+
+/// 从磁盘 settings.json 读官方模型的用户覆盖（仅 `enabled`）。
+///
+/// **不读 `standard`**：内核 `LlmClient` 对 official 模型无条件钉死
+/// `standard=openai` + `Dialect::OpenAiChat`（安全设计，防官方 key 经
+/// x-api-key/x-goog-api-key 这类 reqwest 重定向不剥离的凭据头外泄），磁盘里
+/// 残留的 anthropic/gemini 对官方模型是**无效维度**。把它回显出来等于谎报
+/// 协议（P0-B），所以这里只认 `enabled`——那是内核真正尊重的覆盖。
+/// 读失败一律回落缺省值：官方条目本身是内存投影，磁盘不可读不该让它消失。
+fn official_model_overrides_from_disk() -> std::collections::HashMap<String, bool> {
+    let prefix = official_model_prefix();
+    let mut out = std::collections::HashMap::new();
+    let map = read_settings_key("models");
+    let Some(obj) = map.as_object() else { return out };
+    for (key, val) in obj {
+        if !key.starts_with(&prefix) {
+            continue;
+        }
+        if val.get("official").and_then(|b| b.as_bool()) != Some(true) {
+            continue;
+        }
+        let enabled = val.get("enabled").and_then(|b| b.as_bool()).unwrap_or(true);
+        out.insert(key.clone(), enabled);
+    }
+    out
+}
+
+fn official_provider_item_with_overrides(
+    overrides: &std::collections::HashMap<String, bool>,
+) -> serde_json::Value {
+    let prefix = official_model_prefix();
     let models: Vec<serde_json::Value> = crate::official::models()
         .iter()
-        .map(|m| serde_json::json!({
-            "id": m.id,
-            "standard": "openai",
-            "manual": false,
-            "enabled": true,
-        }))
+        .map(|m| {
+            let key = format!("{}{}", prefix, m.id);
+            // 协议恒为 openai（见 official_model_overrides_from_disk 说明），
+            // 只有 enabled 反映用户覆盖。
+            let enabled = overrides.get(&key).copied().unwrap_or(true);
+            serde_json::json!({
+                "id": m.id,
+                "standard": "openai",
+                "manual": false,
+                "enabled": enabled,
+            })
+        })
         .collect();
     serde_json::json!({
         "name": crate::official::OFFICIAL_PROVIDER_NAME,
@@ -2361,6 +2404,215 @@ pub async fn providers_sync_models(
     Json(serde_json::json!({"code": 200, "data": {"syncCount": synced}}))
 }
 
+// ─── Official model materialization ────────────────────────────────────────
+//
+// 官方模型此前只活在进程内存（`crate::official`），从不进入 `settings.models`，
+// 于是 `/web/chat/models`、`/web/settings/llm/models` 与所有模型下拉都看不到
+// 官方模型——「官方模型完全无法使用」的根因。这里把内存快照物化成
+// `settings.models` 里 `official: true` 的条目：
+// - 键名 `<GWork 官方>-<modelId>`，与自定义供应商同前缀规则，聊天下拉的
+//   供应商分组/去前缀展示逻辑无需特判；
+// - **绝不写凭据**：`apiKey` 恒为空串，调用时由 `LlmClient` 从进程内存注入；
+// - 保留用户覆盖：条目已存在时只刷新 model/official 标记，standard/enabled/
+//   visibled/timeout 沿用磁盘值（用户在模型管理页改过的接口协议与启停不丢）；
+// - 登出/模型下架时按 `provider == 官方名 && official == true` 摘除，
+//   不误伤同名前缀的手工模型。
+
+/// 官方模型在 `settings.models` 里的键前缀（与自定义供应商同规则）。
+fn official_model_prefix() -> String {
+    format!("{}-", crate::official::OFFICIAL_PROVIDER_NAME)
+}
+
+/// 把内存官方模型快照物化进 settings.json 的 `models` 表，并回读内存态。
+///
+/// 由 `official::set_change_hook` 注册的回调在 tokio 任务里调用（登录/登出/
+/// 刷新模型列表后）。失败只记日志：官方模型是内存态的投影，写盘失败不该
+/// 把登录流程本身带崩。
+pub async fn sync_official_models(state: &Arc<AppState>) {
+    sync_official_models_at(state, &settings_path()).await;
+}
+
+/// path-taking 内层实现：单测用临时 settings.json 驱动，不碰用户真实配置。
+pub(crate) async fn sync_official_models_at(state: &Arc<AppState>, path: &std::path::Path) {
+    // 只有真正写过盘才回读内存态：no-op / refused 都不该触发一次全量 reload。
+    if !materialize_official_models_at(path).wrote() {
+        return;
+    }
+    super::reload_settings_from_disk(state).await;
+}
+
+/// 物化结果。三态而非布尔：调用方必须能区分「写了盘」与「没什么可写」。
+///
+/// - [`Materialization::Written`] — settings.json 已改，内存态需要回读；
+/// - [`Materialization::Unchanged`] — 无需写盘（未登录且无残留条目、或快照与
+///   磁盘已一致）。**绝不创建文件**：`settings_path()` 固定指向
+///   `.gwork/settings.json`，而 `Settings::load_default()` 会回落 legacy
+///   `.gourdai/settings.json`——凭空造一个空文件会让 loader 改读它，legacy
+///   安装的全部自定义模型当场消失；
+/// - [`Materialization::Refused`] — 磁盘内容不可安全改写，一个字都没动。
+enum Materialization {
+    Written,
+    Unchanged,
+    Refused,
+}
+
+impl Materialization {
+    /// 只有真正写过盘才需要回读内存态。
+    fn wrote(&self) -> bool {
+        matches!(self, Materialization::Written)
+    }
+}
+
+/// 纯磁盘操作：把内存官方模型快照写进指定 settings.json 的 `models` 表。
+/// 单测直接驱动本函数，无需 AppState。
+fn materialize_official_models_at(path: &std::path::Path) -> Materialization {
+    let prefix = official_model_prefix();
+    let official_name = crate::official::OFFICIAL_PROVIDER_NAME;
+    let ready = crate::official::is_ready();
+    let models = crate::official::models();
+    let api_url = crate::official::base_url();
+
+    let SettingsRead::Usable(obj) = read_settings_for_update(path) else {
+        tracing::error!("settings.json did not parse; refusing to sync official models (would erase the rest of the file)");
+        return Materialization::Refused;
+    };
+    let original = serde_json::Value::Object(obj);
+    let mut v = original.clone();
+
+    // `config::deserialize_models` 明确支持 legacy **数组**形态并在加载时归一化，
+    // 所以磁盘上的 `models` 可能是数组。把它替换成 `{}` 等于当场抹掉用户的
+    // 全部自定义模型——拒绝改写，交给归一化写入口（persist_settings）。
+    match v.get("models") {
+        None => {
+            // 未登录时连 `models` 键都不该凭空加：那是纯粹的写放大，且会把
+            // 一个不存在的文件变成存在的（见 Materialization::Unchanged 注释）。
+            if !ready || models.is_empty() {
+                return Materialization::Unchanged;
+            }
+            v["models"] = serde_json::json!({});
+        }
+        Some(m) if m.is_object() => {}
+        Some(other) => {
+            tracing::error!(
+                kind = if other.is_array() { "array" } else { "scalar" },
+                "settings.json holds models in a shape this sync cannot rewrite; refusing (would erase every custom model)"
+            );
+            return Materialization::Refused;
+        }
+    }
+
+    let mut valid_keys: Vec<String> = Vec::new();
+    {
+        let models_map = v["models"].as_object_mut().unwrap();
+        if ready {
+            for m in &models {
+                let model_id = m.id.trim();
+                if model_id.is_empty() {
+                    continue;
+                }
+                let key = format!("{}{}", prefix, model_id);
+                valid_keys.push(key.clone());
+                match models_map.get_mut(&key) {
+                    Some(existing) => {
+                        // 已存在：保留用户的 standard/enabled/visibled/timeout
+                        // 覆盖，只确保 model id、provider 归属与 official 标记正确。
+                        existing["model"] = serde_json::json!(model_id);
+                        existing["provider"] = serde_json::json!(official_name);
+                        existing["official"] = serde_json::json!(true);
+                        // 官方条目永不带凭据落盘：即便历史文件里被塞过值也清掉。
+                        existing["apiKey"] = serde_json::json!("");
+                        // 协议强制归一到 openai：内核对 official 模型钉死
+                        // standard=openai + Dialect::OpenAiChat，磁盘里残留的
+                        // anthropic/gemini（旧假控件写入的脏值）对官方模型无效。
+                        // 不归一会让设置页谎报协议（P0-B）。enabled 不在这里动——
+                        // 那是内核真正尊重的用户覆盖，由 existing 原样保留。
+                        existing["standard"] = serde_json::json!("openai");
+                    }
+                    None => {
+                        models_map.insert(
+                            key,
+                            serde_json::json!({
+                                "name": format!("{}{}", prefix, model_id),
+                                "model": model_id,
+                                "standard": "openai",
+                                "apiUrl": api_url,
+                                "apiKey": "",
+                                "scope": SCOPE_USER,
+                                "provider": official_name,
+                                "official": true,
+                                "enabled": true,
+                                "visibled": true,
+                                "headers": {},
+                                "timeout": "120s",
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+        // 摘除已不在内存快照里的官方条目（登出 / 模型下架）。
+        let mut pruned: Vec<String> = Vec::new();
+        models_map.retain(|k, val| {
+            let mine = val.get("provider").and_then(|p| p.as_str()) == Some(official_name)
+                && val.get("official").and_then(|b| b.as_bool()) == Some(true);
+            if mine && !valid_keys.contains(k) {
+                pruned.push(k.clone());
+                return false;
+            }
+            true
+        });
+
+        // 摘除即删除模型，必须复刻 `llm/models/remove` 的悬空引用修复
+        // （Java `AgentSettings.repairRemovedModelReferences`）。否则登出后
+        // `defaultModel` 仍指向已消失的官方模型：选择器高亮不到任何项，
+        // 下一轮对话回落到任意模型。
+        if !pruned.is_empty() {
+            let fallback = models_map
+                .iter()
+                .find(|(_, val)| val.get("enabled").and_then(|b| b.as_bool()).unwrap_or(true))
+                .map(|(k, _)| serde_json::json!(k));
+            if pruned.iter().any(|k| v.get("defaultModel").and_then(|d| d.as_str()) == Some(k)) {
+                match fallback.clone() {
+                    Some(next) => { v["defaultModel"] = next; }
+                    None => { v.as_object_mut().unwrap().remove("defaultModel"); }
+                }
+            }
+            let acp_key = v.get("general").and_then(|g| g.get("acpModel")).and_then(|a| a.as_str()).map(String::from);
+            if let Some(acp) = acp_key {
+                if pruned.iter().any(|k| *k == acp) {
+                    if let Some(next) = fallback {
+                        v["general"]["acpModel"] = next;
+                    } else {
+                        v["general"].as_object_mut().unwrap().remove("acpModel");
+                    }
+                }
+            }
+        }
+    }
+
+    // 无实际变化就不写盘：既避免每次登录/登出都产生一次无意义的整文件重写
+    // （与其他 settings 写入者的读-改-写窗口相撞），更重要的是**绝不创建
+    // 文件**——见 `Materialization::Unchanged` 的说明。
+    if v == original {
+        return Materialization::Unchanged;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let body = match serde_json::to_string_pretty(&v) {
+        Ok(b) if !b.is_empty() => b,
+        _ => {
+            tracing::error!("official model sync produced an empty document; not writing");
+            return Materialization::Refused;
+        }
+    };
+    if let Err(e) = std::fs::write(path, body) {
+        tracing::error!(error = %e, "failed to write settings.json during official model sync");
+        return Materialization::Refused;
+    }
+    Materialization::Written
+}
+
 // ─── OpenAPI servers ─────────────────────────────────────────────────────────
 //
 // Config CRUD for external HTTP APIs described by an OpenAPI document.
@@ -2767,7 +3019,9 @@ mod tests {
             username: "u".to_string(),
             models: vec![OfficialModel { id: "gwork-x".to_string(), owned_by: "gwork".to_string() }],
         });
-        let item = official_provider_item();
+        // 用空覆盖表驱动：本测试断言缺省口径（openai/true），不得受开发者
+        // 机器上真实 settings.json 里可能存在的用户覆盖影响。
+        let item = official_provider_item_with_overrides(&std::collections::HashMap::new());
         assert_eq!(item["name"], crate::official::OFFICIAL_PROVIDER_NAME);
         assert_eq!(item["official"], true);
         assert_eq!(item["standard"], "openai");
@@ -2808,6 +3062,234 @@ mod tests {
         let res = tokio_test::block_on(providers_get(Query(q))).0;
         assert_eq!(res["code"], 200);
         assert_eq!(res["data"], official_provider_item());
+    }
+
+    /// 官方模型必须物化进 settings.models（否则聊天/自动化/ACP 的模型下拉与
+    /// 模型管理页全都看不到官方模型——「官方模型完全无法使用」的根因），
+    /// 且：不带凭据落盘、保留用户覆盖、登出即摘除、不误伤自定义模型。
+    #[test]
+    fn official_models_materialize_into_settings_without_credentials() {
+        use crate::official::{OfficialCredential, OfficialModel, OFFICIAL_BASE_URL};
+        const SECRET: &str = "OFFICIAL-MATERIALIZE-KEY-MUST-NOT-LEAK";
+        let _guard = crate::official::test_lock();
+        crate::official::reset_host_for_test();
+        crate::official::set(OfficialCredential {
+            key: SECRET.to_string(),
+            base_url: OFFICIAL_BASE_URL.to_string(),
+            user_id: 3,
+            username: "mat".to_string(),
+            models: vec![
+                OfficialModel { id: "gwork-x".to_string(), owned_by: "gwork".to_string() },
+                OfficialModel { id: "gwork-y".to_string(), owned_by: "openai".to_string() },
+            ],
+        });
+
+        let path = scratch("official-materialize");
+        let official_name = crate::official::OFFICIAL_PROVIDER_NAME;
+        let key_x = format!("{official_name}-gwork-x");
+        let key_y = format!("{official_name}-gwork-y");
+        let key_gone = format!("{official_name}-gwork-gone");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "models": {
+                    // 用户此前停用了该模型（enabled:false 必须保留），且磁盘里残留
+                    // 一个旧假控件写入的 standard:"anthropic"——内核对 official 模型
+                    // 钉死 openai，物化必须把这个无效脏值归一掉（P0-B）。
+                    key_x.clone(): {
+                        "name": key_x.clone(), "model": "gwork-x", "standard": "anthropic",
+                        "apiUrl": "https://old.example/v1", "apiKey": "stale",
+                        "provider": official_name, "official": true,
+                        "enabled": false, "visibled": true, "headers": {}, "timeout": "30s",
+                    },
+                    // 已下架的官方模型：本次物化必须摘除
+                    key_gone.clone(): {
+                        "name": key_gone.clone(), "model": "gwork-gone", "standard": "openai",
+                        "provider": official_name, "official": true,
+                        "enabled": true, "visibled": true,
+                    },
+                    // 自定义模型：必须原样保留
+                    "MyProv-gpt-4o": {
+                        "name": "MyProv-gpt-4o", "model": "gpt-4o", "standard": "openai",
+                        "provider": "MyProv", "enabled": true, "visibled": true,
+                    },
+                },
+                "providers": { "MyProv": { "apiUrl": "https://my.example/v1" } },
+                // 默认模型指向一个已下架的官方模型：物化摘除它之后必须修复
+                // defaultModel，否则选择器高亮不到任何项。
+                "defaultModel": key_gone.clone(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let pruned_default = key_gone.clone();
+
+        assert!(
+            materialize_official_models_at(&path).wrote(),
+            "materialization must accept a parseable file and write it"
+        );
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let models = after["models"].as_object().unwrap();
+
+        let x = &models[&key_x];
+        assert_eq!(x["official"], true);
+        assert_eq!(x["apiKey"], "", "official entries must never persist a credential");
+        assert_eq!(x["standard"], "openai", "official model protocol must be normalized to openai");
+        assert_eq!(x["enabled"], false, "user disable must survive materialization");
+        assert_eq!(x["provider"], official_name);
+
+        let y = &models[&key_y];
+        assert_eq!(y["official"], true);
+        assert_eq!(y["apiKey"], "");
+        assert_eq!(y["standard"], "openai");
+        assert_eq!(y["enabled"], true);
+        assert_eq!(y["model"], "gwork-y");
+
+        assert!(!models.contains_key(&key_gone), "delisted official model must be pruned");
+        assert!(models.contains_key("MyProv-gpt-4o"), "custom models must not be touched");
+        assert_eq!(after["providers"]["MyProv"]["apiUrl"], "https://my.example/v1");
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(SECRET), "credential leaked to disk: {text}");
+
+        // 登出：官方条目全部摘除，自定义模型保留。
+        crate::official::clear();
+        assert!(materialize_official_models_at(&path).wrote());
+        let cleared: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let models = cleared["models"].as_object().unwrap();
+        assert!(!models.contains_key(&key_x));
+        assert!(!models.contains_key(&key_y));
+        assert!(models.contains_key("MyProv-gpt-4o"));
+        // 摘除官方模型等于删除模型：defaultModel 若指向被摘除的条目必须修复，
+        // 否则选择器高亮不到任何项（复刻 llm/models/remove 的悬空引用修复）。
+        assert!(
+            !pruned_default.is_empty() && !models.contains_key(&pruned_default),
+            "defaultModel must have been repaired off the pruned official model"
+        );
+        assert_ne!(
+            cleared["defaultModel"].as_str(),
+            Some(pruned_default.as_str()),
+            "defaultModel must no longer point at the pruned official model"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 不可解析的 settings.json 必须拒绝写入（否则一次物化就抹掉全部配置）。
+    #[test]
+    fn official_materialization_refuses_an_unparseable_settings_file() {
+        let _guard = crate::official::test_lock();
+        crate::official::clear();
+        let path = scratch("official-materialize-bad");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(matches!(
+            materialize_official_models_at(&path),
+            Materialization::Refused
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `models` 在磁盘上可能是 legacy **数组**格式（`config::deserialize_models`
+    /// 明确支持并在加载时归一化）。物化必须拒绝改写这种文件：把数组换成
+    /// `{}` 会当场抹掉用户的全部自定义模型——这是数据毁灭级故障，比
+    /// 「官方模型看不到」严重得多。
+    #[test]
+    fn official_materialization_refuses_legacy_array_shaped_models() {
+        let _guard = crate::official::test_lock();
+        crate::official::reset_host_for_test();
+        crate::official::set(crate::official::OfficialCredential {
+            key: "K".to_string(),
+            base_url: crate::official::OFFICIAL_BASE_URL.to_string(),
+            user_id: 5,
+            username: "arr".to_string(),
+            models: vec![crate::official::OfficialModel {
+                id: "gwork-x".to_string(),
+                owned_by: "gwork".to_string(),
+            }],
+        });
+
+        let path = scratch("official-materialize-array");
+        let original = serde_json::json!({
+            "defaultModel": "legacy-model",
+            "models": [
+                {"name": "legacy-model", "model": "gpt-4o", "standard": "openai",
+                 "apiUrl": "https://x.example/v1", "apiKey": "sk-legacy",
+                 "provider": "MyProv", "enabled": true, "visibled": true},
+            ],
+            "providers": {"MyProv": {"apiUrl": "https://x.example/v1"}},
+        })
+        .to_string();
+        std::fs::write(&path, &original).unwrap();
+
+        assert!(
+            matches!(
+                materialize_official_models_at(&path),
+                Materialization::Refused
+            ),
+            "array-shaped models must be refused, not overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "the legacy file must be byte-identical after a refused sync"
+        );
+        crate::official::clear();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 未登录时物化是 no-op：此时**绝不能创建文件**。
+    ///
+    /// `settings_path()` 固定指向 `.gwork/settings.json`，而 `Settings::load_default()`
+    /// 会回落 legacy `.gourdai/settings.json`。凭空造出一个空的
+    /// `.gwork/settings.json` 会让 loader 改读它，legacy 安装的全部自定义
+    /// 模型从此消失——一次「什么都没发生」的启动同步就能毁掉配置。
+    #[test]
+    fn official_materialization_never_creates_a_file_when_there_is_nothing_to_do() {
+        let _guard = crate::official::test_lock();
+        crate::official::reset_host_for_test();
+        crate::official::clear();
+
+        let dir = std::env::temp_dir()
+            .join(format!("gwork-noop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        assert!(!path.exists());
+
+        // 未登录 → 无官方条目要写、也没有条目要摘 → 必须不落盘。
+        assert!(
+            matches!(
+                materialize_official_models_at(&path),
+                Materialization::Unchanged
+            ),
+            "a no-op sync must report Unchanged, not Written/Refused"
+        );
+        assert!(
+            !path.exists(),
+            "a no-op official sync must never create settings.json \
+             (an empty .gwork/settings.json shadows a legacy .gourdai install)"
+        );
+
+        // 文件已存在但没有官方条目要动：同样不该产生写放大（内容不变）。
+        let existing = serde_json::json!({
+            "models": {"MyProv-gpt-4o": {"name": "MyProv-gpt-4o", "model": "gpt-4o"}},
+            "providers": {"MyProv": {}},
+        })
+        .to_string();
+        std::fs::write(&path, &existing).unwrap();
+        assert!(
+            matches!(
+                materialize_official_models_at(&path),
+                Materialization::Unchanged
+            ),
+            "a sync with nothing to change must report Unchanged"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), existing,
+            "a sync with nothing to change must leave the file byte-identical");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ─── BOM ────────────────────────────────────────────────────────────────

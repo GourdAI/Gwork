@@ -127,11 +127,10 @@ function run(opts) {
     'account.entry': '登录', 'account.sign_in': '登录', 'account.sign_up': '注册',
     'account.sign_up_submit': '注册并登录', 'account.close': '关闭',
     'account.username': '用户名', 'account.email': '邮箱（可选）', 'account.password': '密码',
-    'account.signed_in': '已登录', 'account.plan': '套餐', 'account.points': '积分余额',
+    'account.signed_in': '已登录', 'account.balance': '余额',
     'settings.title': '设置', 'settings.tabs.appearance': '外观',
     'settings.appearance.mode.system': '系统',
     'settings.appearance.mode.light': '浅色', 'settings.appearance.mode.dark': '深色',
-    'account.memory': '记忆与进化', 'account.feedback': '意见反馈',
     'settings.about.check_update': '检查更新', 'account.sign_out': '退出登录',
     'account.working': '请稍候…', 'account.required': '请填写用户名和密码',
     'account.password_policy': '密码长度需为 8–128 个字符',
@@ -231,12 +230,13 @@ test('no IPC: clicking submit shows an explicit hint instead of failing silently
   assert.ok(hint.textContent.indexOf('暂不可用') >= 0, 'hint must explain the service is unavailable');
 });
 
-test('signed-in state: popover renders profile with nickname, plan and sign-out', () => {
+test('signed-in state: popover renders profile with nickname, balance and sign-out', () => {
   const status = { signed_in: true, username: 'luzhengwang', display_name: '陆正望' };
   const { dom } = run({
     ipc: {
       authStatus() { return Promise.resolve(status); },
-      authSelf() { return Promise.resolve({ data: { group: '旗舰版', quota: 0 } }); },
+      /* 后台下发服务端格式化余额串：弹层必须原样展示它，而不是原始 quota 整数。 */
+      authSelf() { return Promise.resolve({ data: { group: '旗舰版', quota: 5039778957, quota_display: '$10,079.56' } }); },
       authLogin() { return Promise.resolve(status); },
       authRegister() { return Promise.resolve(status); },
       authLogout() { return Promise.resolve({ signed_in: false }); }
@@ -249,12 +249,57 @@ test('signed-in state: popover renders profile with nickname, plan and sign-out'
       「清空内联 = ''」这类旧写法骗过。 */
     assert.equal(pop.style.display, 'block');
     assert.ok(pop.innerHTML.indexOf('account-pop-profile') >= 0, 'profile header');
-    assert.ok(pop.innerHTML.indexOf('account-pop-stats') >= 0, 'plan / points card');
+    /* 【11-xx 二轮布局护栏】余额并入用户行（account-pop-balance chip），
+       独立余额卡 account-pop-stats 必须消失。 */
+    assert.ok(pop.innerHTML.indexOf('account-pop-balance') >= 0, 'balance chip in header row');
+    assert.ok(pop.innerHTML.indexOf('account-pop-stats') < 0, 'standalone balance card must be removed');
     assert.ok(pop.innerHTML.indexOf('data-act="logout"') >= 0, 'sign out entry');
   assert.ok(pop.innerHTML.indexOf('account-theme-switch') >= 0, 'system/light/dark switch');
     assert.ok(dom.entry.className.indexOf('is-signed-in') >= 0, 'card signed-in class');
     assert.equal(dom.name.textContent, '陆正望', 'card shows nickname');
     assert.equal(dom.byId['accountPopName'].textContent, '陆正望', 'popover shows nickname');
+    /* 【余额展示纪律护栏】余额值 = 服务端格式化串，绝不回落到原始 quota 整数
+      （用户报障的「5039778957」事故）。 */
+    return new Promise(r => setTimeout(r, 0));
+  }).then(() => {
+    const bal = dom.byId['accountPopBalance'];
+    assert.ok(bal, 'balance value node must exist');
+    assert.equal(bal.textContent, '$10,079.56', 'balance must render the server-formatted string');
+    /* 【二轮布局护栏】余额节点必须落在用户行块内：DOM 桩把 HTML 扁平化
+       （无嵌套树），故用源码顺序断言——余额 chip 出现在 profile 行开始之后、
+       菜单块开始之前（header 与 menu 之间已无独立卡片块）。 */
+    const html = dom.byId['accountPopover'].innerHTML;
+    const iProfile = html.indexOf('account-pop-profile');
+    const iBalance = html.indexOf('account-pop-balance-value');
+    const iMenu = html.indexOf('account-pop-menu');
+    assert.ok(iProfile >= 0 && iBalance > iProfile && iBalance < iMenu,
+      'balance chip must sit inside the profile header row, before the menu block');
+    const pop = dom.byId['accountPopover'];
+    assert.ok(pop.innerHTML.indexOf('5039778957') < 0,
+      'raw quota integer must never reach the screen');
+    /* 精简护栏：套餐列与「记忆与进化 / 意见反馈」两行必须消失。 */
+    assert.ok(!dom.byId['accountPopPlan'], 'plan column must be removed');
+    assert.ok(pop.innerHTML.indexOf('data-act="memory"') < 0, 'memory row must be removed');
+    assert.ok(pop.innerHTML.indexOf('data-act="feedback"') < 0, 'feedback row must be removed');
+  });
+});
+
+test('balance falls back to a dash when the backend sends no quota_display', () => {
+  const status = { signed_in: true, username: 'u', display_name: 'U' };
+  const { dom } = run({
+    ipc: {
+      authStatus() { return Promise.resolve(status); },
+      /* 旧后台只有原始 quota：宁可显示「—」也不把整数当余额上屏。 */
+      authSelf() { return Promise.resolve({ group: 'default', quota: 100 }); }
+    }
+  });
+  return Promise.resolve().then(() => {
+    dom.entry.onclick({ target: dom.entry });
+    return new Promise(r => setTimeout(r, 0));
+  }).then(() => {
+    const bal = dom.byId['accountPopBalance'];
+    assert.ok(bal, 'balance value node must exist');
+    assert.equal(bal.textContent, '—', 'missing quota_display must degrade to a dash, never the raw integer');
   });
 });
 
@@ -288,6 +333,13 @@ test('CSS must not hide the popover/backdrop/modal by default; show() must set d
     "show() must never clear the popover's inline display");
   assert.ok(!/modal\.style\.display\s*=\s*''/.test(code),
     "showAuthModal() must never clear the modal's inline display");
+  /* 【二轮布局护栏】余额 chip 的三个类必须有真实 CSS 规则（否则上屏即裸文本），
+     且旧独立卡 .account-pop-stats 规则必须已删除（防「JS 改了 CSS 没改」）。 */
+  for (const sel of ['.account-pop-balance', '.account-pop-balance-label', '.account-pop-balance-value']) {
+    assert.ok(css.match(new RegExp('\\' + sel + '\\s*\\{')), sel + ' rule missing in app.css');
+  }
+  assert.ok(!/\.account-pop-stats\s*\{/.test(css),
+    'standalone .account-pop-stats rule must be removed from app.css');
 });
 
 /* P1：profile 视图里点「退出登录」若失败/能力缺失，必须有可见文案，

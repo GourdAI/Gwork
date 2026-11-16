@@ -39,6 +39,9 @@
     var modelSearchQuery = '';
     var modelSearchTimer = null;
     var modelSearchProviderKey = null;
+    // 官方模型列表搜索：与自定义同口径、同生命周期（切出官方面板/关闭视图时清空）
+    var officialSearchQuery = '';
+    var officialSearchTimer = null;
 
     // 接口类型选项（按模型单独配置）
     var STANDARD_OPTIONS = [
@@ -100,16 +103,68 @@
                 // 壳内：强制重取一次用户 key + 官方模型列表。失败时保留内核
                 // 里的旧缓存，只重绘状态即可，绝不清成「未登录」。
                 ipc.authOfficialRefresh()
-                    .then(function () { loadOfficialState(); })
-                    .catch(function () { loadOfficialState(); });
+                    .then(function () { loadOfficialState(); refreshModelsEverywhere(); })
+                    .catch(function () { loadOfficialState(); refreshModelsEverywhere(); });
             } else {
                 // 无壳环境（浏览器直连内核）：至少把内核内存缓存重绘一遍
                 $.ajax({
                     url: '/web/settings/official/refresh', method: 'POST',
-                    success: function () { loadOfficialState(); },
-                    error: function () { loadOfficialState(); }
+                    success: function () { loadOfficialState(); refreshModelsEverywhere(); },
+                    error: function () { loadOfficialState(); refreshModelsEverywhere(); }
                 });
             }
+        });
+
+        // ===== 官方模型管理（与自定义供应商同口径：搜索/批量启停/默认星标/协议/行启停）=====
+        $('#msOfficialSearchInput').on('input', function () {
+            var val = $(this).val() || '';
+            $('#msOfficialSearchClear').toggle(!!val);
+            if (officialSearchTimer) clearTimeout(officialSearchTimer);
+            officialSearchTimer = setTimeout(function () {
+                officialSearchTimer = null;
+                officialSearchQuery = val;
+                renderOfficialModels();
+            }, 150);
+        });
+        $('#msOfficialSearchClear').on('click', function () {
+            officialSearchQuery = '';
+            if (officialSearchTimer) { clearTimeout(officialSearchTimer); officialSearchTimer = null; }
+            $('#msOfficialSearchInput').val('');
+            $(this).hide();
+            renderOfficialModels();
+        });
+        $('#msOfficialSelectToggle').on('click', function (e) {
+            e.stopPropagation();
+            $('#msOfficialActionMenu').toggleClass('show');
+        });
+        $('#msOfficialSelectAll, #msOfficialSelectNone, #msOfficialInvert').on('click', function () {
+            var action = this.id;
+            $('#msOfficialModelsList').find('.provider-model-toggle').each(function () {
+                var $toggle = $(this);
+                var nextChecked = $toggle.prop('checked');
+                if (action === 'msOfficialSelectAll') nextChecked = true;
+                else if (action === 'msOfficialSelectNone') nextChecked = false;
+                else nextChecked = !$toggle.prop('checked');
+                if ($toggle.prop('checked') !== nextChecked) {
+                    $toggle.prop('checked', nextChecked).trigger('change');
+                }
+            });
+            $('#msOfficialActionMenu').removeClass('show');
+        });
+        // 官方模型行 - 设为默认模型（星标）
+        $('#msOfficialModelsList').on('click', '.provider-model-default-btn', function () {
+            var llmName = $(this).data('llm-name');
+            if (!llmName || llmName === llmDefaultModel) return;
+            setDefaultModel(llmName);
+            renderOfficialModels();
+        });
+        // 官方模型行 - 启用/禁用开关
+        $('#msOfficialModelsList').on('change', '.provider-model-toggle', function () {
+            var modelId = $(this).closest('.provider-model-item').data('model-id');
+            var enabled = $(this).prop('checked');
+            var llmName = $(this).data('llm-name');
+            var isSynced = $(this).data('synced') === true || $(this).data('synced') === 'true';
+            toggleOfficialModel(modelId, enabled, llmName, isSynced);
         });
 
         $('#msProviderAddBtn').on('click', function () {
@@ -298,6 +353,9 @@
         $('.model-settings-left').on('change', '.provider-toggle', function () {
             var name = $(this).closest('.ms-provider-item').data('name');
             var enabled = $(this).prop('checked');
+            // 官方条目：内核拒绝 providers/toggle（防自定义表单覆盖虚拟条目），
+            // 开关语义映射为批量启停全部官方模型
+            if (name === OFFICIAL_NAME) { toggleOfficialProvider(enabled); return; }
             toggleProvider(name, enabled);
         });
 
@@ -473,8 +531,10 @@
         selectedName = null;
         // 关闭视图时清空搜索（含取消未触发的防抖任务），避免下次打开残留过滤态
         clearModelSearch(false);
+        clearOfficialSearch();
         modelSearchProviderKey = null;
         $('#msProviderModelsActionMenu').removeClass('show');
+        $('#msOfficialActionMenu').removeClass('show');
         // 视图已关闭：在途拉取不会再有人关心，顺手复位按钮，
         // 否则下次进入本页时第一眼就是一个转着的禁用按钮
         setFetchBtnBusy(false);
@@ -567,31 +627,138 @@
             success: function (res) {
                 officialModels = (res && res.code === 200 && Object.prototype.toString.call(res.data) === '[object Array]') ? res.data : [];
                 officialState.modelCount = officialModels.length;
-                renderOfficialModels();
-                renderOfficialList();
+                // 行内启停/协议/星标以运行时模型表为准：先刷新 LLM 缓存再渲染
+                loadLlmModelsCache(function () {
+                    renderOfficialModels();
+                    renderOfficialList();
+                });
             },
             error: function () { officialModels = []; renderOfficialModels(); }
         });
     }
 
+    /** 官方模型在运行时模型表里的键名（与自定义供应商同前缀规则）。 */
+    function officialLlmName(modelId) {
+        return OFFICIAL_NAME + '-' + modelId;
+    }
+
+    /**
+     * 官方模型管理列表：与自定义供应商完全同构的行组件——
+     * 搜索过滤、行内默认星标、接口协议下拉、行启停开关、批量启停。
+     * 内核已把官方模型物化进 settings.models（official:true），
+     * 行内状态（enabled/standard/是否已同步/是否默认）一律读 llmModelsCache。
+     */
     function renderOfficialModels() {
-        var box = $('#msOfficialModels');
-        if (!box.length) return;
+        var $list = $('#msOfficialModelsList');
+        if (!$list.length) return;
+        var $empty = $('#msOfficialModelsEmpty');
+        var $searchEmpty = $('#msOfficialModelsSearchEmpty');
+        var $searchBox = $('#msOfficialSearchInput').closest('.ms-model-search');
+        $searchBox.toggle(officialModels.length > 0);
+
         if (!officialModels.length) {
-            box.html('<div class="ms-official-empty">' + escapeHtml(officialText('settings.providers.official_no_models', '暂无可用模型', 'No models available')) + '</div>');
+            $empty.show();
+            $searchEmpty.hide();
+            $list.hide().html('');
             return;
         }
+        var terms = parseModelSearchTerms(officialSearchQuery);
+        var models = officialModels.filter(function (m) { return modelMatchesSearch(m, terms); });
+        if (!models.length) {
+            $empty.hide();
+            $searchEmpty.show();
+            $list.hide().html('');
+            return;
+        }
+        $empty.hide();
+        $searchEmpty.hide();
+        $list.show();
+
         var html = '';
-        officialModels.forEach(function (m) {
+        models.forEach(function (m) {
             var id = m && m.id ? String(m.id) : '';
-            var by = m && m.ownedBy ? String(m.ownedBy) : (m && m.owned_by ? String(m.owned_by) : '');
             if (!id) return;
-            html += '<div class="ms-official-model">' +
-                '<span class="ms-official-model-id">' + escapeHtml(id) + '</span>' +
-                (by ? '<span class="ms-official-model-by">' + escapeHtml(by) + '</span>' : '') +
+            var llmName = officialLlmName(id);
+            var synced = llmModelsCache[llmName];
+            var isSynced = !!synced;
+            var enabled = isSynced ? synced.enabled !== false : true;
+
+            var isDefaultModel = isSynced && llmDefaultModel === llmName;
+            var defaultBtn = (isSynced && enabled)
+                ? '<button class="provider-model-default-btn' + (isDefaultModel ? ' active' : '') + '" data-llm-name="' + escapeAttr(llmName) + '" title="' + escapeAttr(GourdI18n.t('settings.providers.set_default_model')) + '">' +
+                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (isDefaultModel ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>' +
+                  '</button>'
+                : '';
+            var defaultTag = isDefaultModel ? ' <span class="provider-model-default-tag">' + GourdI18n.t('settings.providers.default_badge') + '</span>' : '';
+
+            // 【P0-B】官方模型的接口协议被内核**钉死为 OpenAI**：
+            // LlmClient 对 official 模型强制 standard=openai + Dialect::OpenAiChat，
+            // 既不走 Dialect::resolve，也不认 settings.json 里写入的 anthropic/gemini
+            // ——这是安全设计（防官方 key 经 x-api-key/x-goog-api-key 这类
+            // reqwest 重定向不剥离的凭据头外泄）。因此这里**绝不给可改的协议下拉**：
+            // 那会是一个假控件（用户改了、UI 显示改了、实际调用静默无效）。
+            // 只渲染一个只读徽标，如实告知协议固定。
+            var stdFixed = '<div class="provider-model-standard-wrap" title="' +
+                escapeAttr(officialText(
+                    'settings.providers.official_std_fixed_tip',
+                    '官方模型固定使用 OpenAI 协议，不可更改',
+                    'Official models always use the OpenAI protocol and cannot be changed'
+                )) + '">' +
+                '<span class="provider-model-standard-readonly">' +
+                escapeHtml(officialText(
+                    'settings.providers.official_std_fixed',
+                    'OpenAI（固定）',
+                    'OpenAI (fixed)'
+                )) + '</span>' +
                 '</div>';
+
+            html += '<div class="provider-model-item' + (!enabled ? ' disabled' : '') + '" data-model-id="' + escapeAttr(id) + '">' +
+                '<div class="provider-model-info">' +
+                     '<div class="provider-model-name">' + escapeHtml(id) + defaultTag + (isSynced ? ' <span class="provider-model-synced">' + GourdI18n.t('settings.providers.synced') + '</span>' : '') + '</div>' +
+                '</div>' +
+                '<div class="provider-model-actions">' +
+                    defaultBtn +
+                    stdFixed +
+                     '<label class="toggle-switch">' +
+                        '<input type="checkbox" ' + (enabled ? 'checked' : '') + ' class="provider-model-toggle" data-synced="' + isSynced + '" data-llm-name="' + escapeAttr(llmName) + '"/>' +
+                        '<span class="toggle-slider"></span>' +
+                     '</label>' +
+                '</div>' +
+            '</div>';
         });
-        box.html(html || '<div class="ms-official-empty">' + escapeHtml(officialText('settings.providers.official_no_models', '暂无可用模型', 'No models available')) + '</div>');
+        $list.html(html);
+        if (typeof layui !== 'undefined' && layui.form) {
+            layui.form.render('select');
+        }
+    }
+
+    /** 官方模型行启停：与自定义同链路（llm/models/toggle 即时写运行时并落盘）。 */
+    function toggleOfficialModel(modelId, enabled, llmName, isSynced) {
+        if (!isSynced || !llmName) {
+            // 内核尚未物化（登录刚完成/旧内核）：重读运行时表后重绘，不做无目标写入
+            loadLlmModelsCache(function () { renderOfficialModels(); });
+            return;
+        }
+        postJson('/web/settings/llm/models/toggle', { name: llmName, enabled: enabled }, function (resp) {
+            if (resp.code === 200) {
+                if (typeof window.reloadModels === 'function') window.reloadModels();
+                loadLlmModelsCache(function () { renderOfficialModels(); });
+            } else {
+                showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error');
+                renderOfficialModels();
+            }
+        });
+    }
+
+    /** 刷新/登录后统一刷新各处模型视图（官方面板行 + 自定义右栏 + 聊天下拉）。 */
+    function refreshModelsEverywhere() {
+        loadLlmModelsCache(function () {
+            renderOfficialModels();
+            if ($view.hasClass('active') && selectedName !== OFFICIAL_NAME && currentProvider) {
+                renderModelsList();
+            }
+        });
+        if (typeof window.reloadModels === 'function') window.reloadModels();
     }
 
     function renderOfficialPanel() {
@@ -606,12 +773,20 @@
         if (officialState.signedIn) renderOfficialModels();
     }
 
-    /** 左栏官方分组：固定一项、不可拖拽、不可禁用。 */
+    /** 左栏官方分组：固定一项、不可拖拽；启停开关为「批量模型启停」的映射。 */
     function renderOfficialList() {
         if (!$officialList || !$officialList.length) return;
         var selected = (selectedName === OFFICIAL_NAME) ? ' selected' : '';
         var count = officialState.modelCount || officialModels.length;
         var dot = officialState.signedIn ? ' on' : '';
+        // 供应商级开关态：任一官方模型启用中即为开；一个都没有时按开展示
+        var anyEnabled = true;
+        if (officialModels.length) {
+            anyEnabled = officialModels.some(function (m) {
+                var synced = llmModelsCache[officialLlmName(m.id)];
+                return synced ? synced.enabled !== false : true;
+            });
+        }
         $officialList.html(
             '<div class="ms-provider-item official' + selected + '" data-name="' + escapeAttr(OFFICIAL_NAME) + '">' +
                 '<div class="ms-provider-icon">' + escapeHtml(officialText('settings.providers.official_badge', 'G', 'G')) + '</div>' +
@@ -619,9 +794,50 @@
                     '<div class="ms-provider-name">' + escapeHtml(officialText('settings.providers.official_title', 'GWork 官方', 'GWork Official')) + '</div>' +
                     '<div class="ms-provider-count">' + escapeHtml(GourdI18n.t('settings.providers.model_count', [count])) + '</div>' +
                 '</div>' +
+                '<label class="toggle-switch">' +
+                    '<input type="checkbox" ' + (anyEnabled ? 'checked' : '') + ' data-name="' + escapeAttr(OFFICIAL_NAME) + '" class="provider-toggle"/>' +
+                    '<span class="toggle-slider"></span>' +
+                '</label>' +
                 '<span class="ms-provider-dot' + dot + '"></span>' +
             '</div>'
         );
+    }
+
+    /**
+     * 官方供应商级启停：内核拒绝 providers/toggle 作用于官方虚拟条目（防自定义
+     * 表单覆盖），这里把开关语义映射为「批量启停全部官方模型」，与自定义供应商
+     * 关掉连接=其模型全部不可用的效果一致。逐个走 llm/models/toggle 即时落盘。
+     */
+    function toggleOfficialProvider(enabled) {
+        var targets = [];
+        officialModels.forEach(function (m) {
+            var llmName = officialLlmName(m.id);
+            var synced = llmModelsCache[llmName];
+            if (synced && (synced.enabled !== false) !== enabled) targets.push(llmName);
+        });
+        if (!targets.length) {
+            renderOfficialList();
+            return;
+        }
+        var idx = 0;
+        var failed = false;
+        function step() {
+            if (idx >= targets.length) {
+                if (failed) showToast(GourdI18n.t('settings.loop.operation_failed'), 'error');
+                if (typeof window.reloadModels === 'function') window.reloadModels();
+                loadLlmModelsCache(function () {
+                    renderOfficialModels();
+                    renderOfficialList();
+                });
+                return;
+            }
+            var name = targets[idx++];
+            postJson('/web/settings/llm/models/toggle', { name: name, enabled: enabled }, function (resp) {
+                if (!resp || resp.code !== 200) failed = true;
+                step();
+            });
+        }
+        step();
     }
 
     /** 官方面板与自定义表单互斥：显示官方时隐藏所有可编辑字段（含密钥输入）。 */
@@ -642,6 +858,15 @@
         renderOfficialPanel();
         loadOfficialModels();
         resetFormScroll();
+    }
+
+    /** 清空官方模型搜索词并复位输入框（切出官方面板/关闭视图时调用）。 */
+    function clearOfficialSearch() {
+        officialSearchQuery = '';
+        if (officialSearchTimer) { clearTimeout(officialSearchTimer); officialSearchTimer = null; }
+        var $input = $('#msOfficialSearchInput');
+        if ($input.length && $input.val() !== '') $input.val('');
+        $('#msOfficialSearchClear').hide();
     }
 
     /**
@@ -778,6 +1003,7 @@
         keyTouched = false;
         $('.ms-provider-item').removeClass('selected');
         setOfficialPanelVisible(false);
+        clearOfficialSearch();
         renderDetailForm(null);
         resetFormScroll();
     }
@@ -791,6 +1017,7 @@
         $('.ms-provider-item').removeClass('selected');
         $('.ms-provider-item[data-name="' + escapeAttr(name) + '"]').addClass('selected');
         setOfficialPanelVisible(false);
+        clearOfficialSearch();
         fillDetailFromCache(name);
         resetFormScroll();
     }
@@ -1161,6 +1388,8 @@
                 // 顺带刷新页头提示，保证星标与提示始终指向「未选模时实际会用的模型」
                 llmDefaultModel = res.data.effectiveDefault || null;
                 updateDefaultModelHint();
+                // 官方面板行的「已同步/启停/默认」徽标以运行时表为准，缓存刷新后同步重绘
+                if (selectedName === OFFICIAL_NAME) renderOfficialModels();
             }
             if (callback) callback();
         }).fail(function () {
@@ -1353,6 +1582,8 @@
             if (resp.code === 200) {
                 llmDefaultModel = llmName;
                 renderModelsList();
+                renderOfficialModels();
+                renderOfficialList();
                 updateDefaultModelHint();
                 // 默认模型影响未选模会话/自动化/ACP 的回落，通知聊天组件刷新模型下拉
                 if (typeof window.reloadModels === 'function') {

@@ -154,8 +154,15 @@ struct OfficialState {
 /// 由回调内部 `async_runtime::spawn` 发起，core 不引入任何异步运行时依赖。
 type RefreshHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
+/// 「官方模型快照变化」回调：由 HTTP 内核（`server::serve_with_static`）注册，
+/// 把内存模型列表物化进 `settings.models`（`official: true`、不带凭据），
+/// 聊天/自动化/ACP 的模型下拉与模型管理页因此能看到官方模型。
+/// 同样是同步 `Fn()`：注册方内部自行 spawn 异步任务。
+type ChangeHook = Arc<dyn Fn() + Send + Sync + 'static>;
+
 static STATE: OnceLock<RwLock<OfficialState>> = OnceLock::new();
 static REFRESH_HOOK: OnceLock<RwLock<Option<RefreshHook>>> = OnceLock::new();
+static CHANGE_HOOK: OnceLock<RwLock<Option<ChangeHook>>> = OnceLock::new();
 
 fn slot() -> &'static RwLock<OfficialState> {
     STATE.get_or_init(|| {
@@ -195,6 +202,31 @@ fn hook_slot() -> &'static RwLock<Option<RefreshHook>> {
     REFRESH_HOOK.get_or_init(|| RwLock::new(None))
 }
 
+fn change_hook_slot() -> &'static RwLock<Option<ChangeHook>> {
+    CHANGE_HOOK.get_or_init(|| RwLock::new(None))
+}
+
+/// 内核注册「官方模型快照变化」回调（登录/登出/刷新模型列表后触发）。
+/// 生产环境只调用一次；测试可重复覆盖。
+pub fn set_change_hook(hook: ChangeHook) {
+    match change_hook_slot().write() {
+        Ok(mut guard) => *guard = Some(hook),
+        Err(poisoned) => *poisoned.into_inner() = Some(hook),
+    }
+}
+
+/// 快照写入/清空后通知内核重新物化官方模型。持锁外调用，回调内部不得
+/// 再回头读写本模块的锁（注册方只应 spawn 异步任务）。
+fn fire_change_hook() {
+    let hook = match change_hook_slot().read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    if let Some(h) = hook {
+        h();
+    }
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -220,6 +252,7 @@ pub fn set(c: OfficialCredential) {
         // 别的线程在持写锁期间 panic 不应让后续登录永久失效。
         Err(poisoned) => apply_credential(&mut poisoned.into_inner(), c),
     }
+    fire_change_hook();
 }
 
 /// 条件写入：仅当代际仍等于 `expected` 时才写。
@@ -228,7 +261,7 @@ pub fn set(c: OfficialCredential) {
 /// 期间用户可能已经切换账号、登出、或另一路 prime 先写成功。用开始时的
 /// 代际复核，避免过期流程把旧账号凭据覆盖回来。
 pub fn set_if(expected: u64, c: OfficialCredential) -> bool {
-    match slot().write() {
+    let written = match slot().write() {
         Ok(mut guard) => {
             if guard.generation != expected {
                 return false;
@@ -244,7 +277,11 @@ pub fn set_if(expected: u64, c: OfficialCredential) -> bool {
             apply_credential(&mut guard, c);
             true
         }
+    };
+    if written {
+        fire_change_hook();
     }
+    written
 }
 
 /// 取一份克隆快照；未登录返回 `None`。返回的是副本，调用方持有它不会
@@ -275,6 +312,9 @@ pub fn clear() {
             guard.unchanged_refreshes = 0;
         }
     }
+    // 登出/撤销后内核必须把官方模型从 settings.models 里摘掉，否则聊天
+    // 下拉会继续展示调不通的模型。
+    fire_change_hook();
 }
 
 /// 当前代际，供 prime 开始时记录、结束前 `set_if` 复核。

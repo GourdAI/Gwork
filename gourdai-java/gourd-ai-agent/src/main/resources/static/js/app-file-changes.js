@@ -4,7 +4,10 @@
    头部 = 图标 + 「已编辑 N 个文件」+ 增删统计 + 审查/整轮撤销/重新应用；
     body = 文件行（kind 徽标 + 路径 + 增删统计，默认 3 行、其余折叠），
    行点击 = Monaco 快照 diff 审查查看器（唯一预览入口），头部审查 = 查看器轮文件列表。
-   输入区不再渲染恒在 chip / 弹层；无文件变更/新增的 run 不渲染任何内容。 */
+   输入区不再渲染恒在 chip / 弹层；无文件变更/新增的 run 不渲染任何内容。
+   产品口径（2026-11 用户拍板）：「变更汇总可能不完整」警示一律不上界面 ——
+   后端 summary.possiblyIncomplete / incompleteReasons 仅作为契约字段保留，
+   前端只消费 files[]，files 为空的快照（含仅警示快照）不落卡、不展示任何提示。 */
 /* 契约对齐（后端 manifest summary）：
    summary: revision / status / ready / possiblyIncomplete / incompleteReasons[] /
             fileCount / additions / deletions / runApplyState(FULLY_APPLIED|PARTIALLY_UNDONE|FULLY_UNDONE) / files[]
@@ -111,14 +114,6 @@
         if (runState === 'FULLY_UNDONE') return { undone: files.length, applied: 0 };
         if (isUndoneState(runState)) return { undone: files.length ? 1 : 0, applied: files.length };
         return { undone: 0, applied: files.length };
-    }
-    function incompleteText(summary) {
-        var reasons = summary && summary.incompleteReasons;
-        var list = (Array.isArray(reasons) ? reasons : (reasons ? [reasons] : []))
-            .map(function (item) { return item == null ? '' : String(item).trim(); })
-            .filter(Boolean)
-            .filter(function(r) { return r !== 'bash was invoked and may have changed untracked files'; });
-        return list.length ? t('possibly_incomplete_detail', [list.join('; ')]) : '';
     }
     function notify(key, type, params) {
         if (typeof window.showToast === 'function') window.showToast(t(key, params), type || 'info');
@@ -322,8 +317,8 @@
         if (!map[runKey]) {
             map[runKey] = {
                 el: null, headEl: null, titleEl: null, statEl: null, headActionsEl: null,
-                bodyEl: null, toggleEl: null, warning: null,
-                headSig: null, actionsSig: null, warningSig: undefined, toggleSig: null,
+                bodyEl: null, toggleEl: null,
+                headSig: null, actionsSig: null, toggleSig: null,
                 rows: {}, expanded: false
             };
         }
@@ -572,7 +567,6 @@
                跳过填充，头部/操作区/折叠按钮会是空壳。 */
             cache.el = null;
             cache.rows = {};
-            cache.warning = null;
             /* rerun 删除卡片但保留宿主（宿主无 data-run-id）：重建时清掉上一轮固化的
                结束时间，避免旧时间浮在新卡片上方 */
             var oldHost = sess._fchHosts && sess._fchHosts[runKey];
@@ -582,7 +576,6 @@
             }
             cache.headSig = null;
             cache.actionsSig = null;
-            cache.warningSig = undefined;
             cache.toggleSig = null;
             createCardEl(sess, runKey);
         }
@@ -616,21 +609,6 @@
                 cache.headActionsEl.appendChild(actionButton('undo-run', t('undo_run'), UNDO_SVG, function (button) {
                     layConfirm(t('confirm_undo_run'), function () { runOperation(sess, runKey, '/web/chat/changes/undo/run', 'undo_run_success', button); });
                 }));
-            }
-        }
-
-        /* 不完整提示：始终占 body 之前一位，行列表跟在它后面 */
-        var warningSig = summary.possiblyIncomplete ? incompleteText(summary) : '';
-        if (force || cache.warningSig !== warningSig) {
-            cache.warningSig = warningSig;
-            if (cache.warning && cache.warning.parentNode === cache.el) cache.el.removeChild(cache.warning);
-            cache.warning = null;
-            if (warningSig) {
-                var warning = document.createElement('div');
-                warning.className = 'file-changes-warning';
-                warning.textContent = warningSig;
-                cache.el.insertBefore(warning, cache.bodyEl);
-                cache.warning = warning;
             }
         }
 
@@ -706,8 +684,9 @@
        相同 revision 数据无变化，不重复渲染。 */
     function upsert(sess, runId, summary) {
         if (!sess || !runId || !summary) return;
-        /* 空快照（没有任何文件变更/新增）不生成任何卡片：直接短路，不落缓存、不参与 revision 门禁。
-           否则空 run（或流式早期的空帧）会留下「0 个文件」的空壳；
+        /* 空快照（没有任何文件变更/新增，含 possiblyIncomplete 的收尾警示快照）不生成
+           任何卡片：直接短路，不落缓存、不参与 revision 门禁。产品口径：汇总不完整
+           的警示不上界面；否则空 run（或流式早期的空帧）会留下「0 个文件」的空壳，
            且一旦空帧占用 revision，同 revision 的有效快照会被单调门禁误挡。 */
         if (!Array.isArray(summary.files) || !summary.files.length) return;
         if (!sess._fileChangesByRun) sess._fileChangesByRun = {};

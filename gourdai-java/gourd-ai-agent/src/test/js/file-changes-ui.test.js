@@ -393,7 +393,11 @@ test('不再引用后端未提供的字段', () => {
     }
     // incompleteReason 只允许以复数 incompleteReasons 形式出现
     assert.doesNotMatch(code, /incompleteReason\b(?!s)/);
-    assert.match(code, /summary\.incompleteReasons/);
+    // 产品口径（2026-11 用户拍板）：「变更汇总可能不完整」警示一律不上界面，
+    // 前端不得再消费 incompleteReasons / possiblyIncomplete 渲染任何提示。
+    assert.doesNotMatch(code, /summary\.incompleteReasons/, '前端不得再读取 incompleteReasons 渲染警示');
+    assert.doesNotMatch(code, /\.possiblyIncomplete\b/, '前端不得再读取 possiblyIncomplete 渲染警示');
+    assert.doesNotMatch(code, /file-changes-warning/, '警示条样式类不得复活');
 });
 
 test('字段读取对齐后端契约：state / changeType / before / after', () => {
@@ -496,7 +500,7 @@ test('全部语言包具有相同且非空的 file_changes key 集', () => {
 test('错误映射相关 i18n key 在 12 个语言包中齐备且占位符正确', () => {
     const dir = path.join(staticRoot, 'locales');
     const required = ['error_conflict', 'error_not_found', 'error_invalid_request',
-        'error_partial', 'error_compensated', 'error_generic', 'error_detail', 'possibly_incomplete_detail'];
+        'error_partial', 'error_compensated', 'error_generic', 'error_detail'];
     for (const file of fs.readdirSync(dir).filter((name) => name.endsWith('.json'))) {
         const json = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8').replace(/^\uFEFF/, ''));
         const block = json.file_changes;
@@ -504,7 +508,8 @@ test('错误映射相关 i18n key 在 12 个语言包中齐备且占位符正确
             assert.ok(block[key] && block[key].trim(), `${file}: 缺少 ${key}`);
         }
         assert.ok(block.error_detail.includes('{0}') && block.error_detail.includes('{1}'), `${file}: error_detail 占位符缺失`);
-        assert.ok(block.possibly_incomplete_detail.includes('{0}'), `${file}: possibly_incomplete_detail 占位符缺失`);
+        // 产品口径（2026-11 用户拍板）：「变更汇总可能不完整」警示不上界面，警示文案键不得复活
+        assert.ok(!('possibly_incomplete' in block) && !('possibly_incomplete_detail' in block), `${file}: 警示文案键复活`);
         // 后端枚举不得以裸字符串形式出现在文案中
         for (const enumName of ['CONFLICT', 'NOT_FOUND', 'INVALID_REQUEST', 'ERROR_PARTIAL', 'ERROR_COMPENSATED']) {
             for (const key of Object.keys(block)) {

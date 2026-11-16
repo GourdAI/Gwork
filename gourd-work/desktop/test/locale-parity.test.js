@@ -105,7 +105,7 @@ const CONCAT_FAMILIES = {
   'file_changes.': [                                                    // app-file-changes.js 的 t() 包装器实参 + STATUS_MESSAGE_KEYS
     'collapse_files', 'confirm_reapply_run', 'confirm_undo_file', 'confirm_undo_run',
     'conflict', 'edited_files', 'error_conflict', 'error_detail', 'open', 'operation_failed',
-    'possibly_incomplete_detail', 'reapply_run', 'review', 'show_more_files',
+    'reapply_run', 'review', 'show_more_files',
     'undo_file', 'undo_run', 'undone',
     'error_not_found', 'error_invalid_request', 'error_partial', 'error_compensated', 'error_generic',
   ],

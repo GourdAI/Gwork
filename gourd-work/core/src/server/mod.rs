@@ -362,6 +362,34 @@ pub async fn serve_with_static(
         });
     }
 
+    // ── Official model materialization ─────────────────────────────────────
+    // 官方模型此前只活在进程内存，聊天/自动化/ACP 的模型下拉与模型管理页
+    // 全都看不到（「官方模型完全无法使用」的根因）。这里把内存快照投影进
+    // `settings.models`（official:true、不带凭据）：
+    // - 启动时先对齐一次（修复上次进程在 set 与写盘之间被杀留下的漂移）；
+    // - 之后登录/登出/刷新模型列表经 `official::set/clear` 的变更钩子增量同步。
+    // 钩子可能在无 tokio 上下文处被调用（单测），此时跳过而不是 panic。
+    {
+        let st = state.clone();
+        crate::official::set_change_hook(Arc::new(move || {
+            let st = st.clone();
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn(async move {
+                        settings_api::sync_official_models(&st).await;
+                    });
+                }
+                Err(_) => {
+                    tracing::warn!("official model change outside a tokio runtime; materialization skipped");
+                }
+            }
+        }));
+        let st = state.clone();
+        tokio::spawn(async move {
+            settings_api::sync_official_models(&st).await;
+        });
+    }
+
     // Start the loop scheduler driver (periodic trigger loop)
     loop_driver::start(state.clone());
 

@@ -90,10 +90,11 @@ pub struct Manifest {
     /// Human-readable reasons why the ledger may be short (Java
     /// `Manifest.incompleteReasons`).
     ///
-    /// `possiblyIncomplete` on its own tells the UI *that* the list may be
-    /// incomplete; this tells the user *why*, and `app-file-changes.js` renders it
-    /// verbatim through `incompleteText()`. Without it an abnormal run shows a
-    /// bare warning with no explanation.
+    /// 2026-11 product decision (user-approved): the "change summary may be
+    /// incomplete" warning is never surfaced in the UI. Both frontends
+    /// (desktop/ui and java static `app-file-changes.js`) no longer render this
+    /// field; `possiblyIncomplete` / `incompleteReasons` are kept purely as
+    /// contract fields for monitoring / diagnostics.
     ///
     /// Always goes through [`ChangeLedger::add_reason`] rather than being pushed
     /// directly: the list rides in every `file_changes` frame, so it needs the
@@ -162,7 +163,8 @@ pub struct ChangeLedger {
 
 /// A bash command may have touched files without going through `write`/`edit`.
 /// Java records exactly this sentence in `incompleteReasons`; keep it identical
-/// so the two kernels render the same warning through `incompleteText()`.
+/// so the two kernels persist the same contract field (no longer rendered — see
+/// the product note on [`Manifest::incomplete_reasons`]).
 pub const BASH_INCOMPLETE_REASON: &str =
     "bash was invoked and may have changed untracked files";
 
@@ -809,10 +811,9 @@ impl ChangeLedger {
             "revision": manifest.revision,
             "ready": manifest.ready,
             "possiblyIncomplete": manifest.possibly_incomplete,
-            // The frontend renders these verbatim (`incompleteText` in
-            // app-file-changes.js). Java's summary carries the same key, and its
-            // absence is what made an abnormal run show a bare "possibly
-            // incomplete" warning with no explanation of why.
+            // Kept in the frame as a contract field (monitoring / diagnostics);
+            // since 2026-11 the frontends no longer render it as a warning.
+            // Java's summary carries the same key.
             "incompleteReasons": manifest.incomplete_reasons,
             "updatedAt": manifest.updated_at,
             "files": files,
@@ -1970,10 +1971,10 @@ mod tests {
 
     #[test]
     fn abnormal_finish_explains_itself_in_incomplete_reasons() {
-        // `possiblyIncomplete` alone tells the UI *that* the list may be short;
-        // `incompleteReasons` is what `app-file-changes.js:incompleteText()`
-        // renders to tell the user *why*. Without it the card shows a bare
-        // warning. The text matches Java's so both kernels read the same.
+        // `possiblyIncomplete` marks that the ledger may be short; `incompleteReasons`
+        // carries *why*, as a contract field for monitoring / diagnostics. Since 2026-11
+        // the frontends no longer render it as a UI warning, but the field is still
+        // persisted and broadcast. The text matches Java's so both kernels agree.
         let (ws, ledger) = ledger_with_one_change("fin-reason", "s", "r");
         let summary = ledger.finish("s", "r", false).expect("publish");
 
@@ -1991,10 +1992,10 @@ mod tests {
 
     #[test]
     fn a_clean_finish_reports_no_reasons() {
-        // The reasons list must be an empty ARRAY, never null or absent:
-        // `incompleteText` does `Array.isArray(reasons) ? reasons : (reasons ? [reasons] : [])`,
-        // so a null would degrade gracefully but an omission in the JSON would
-        // leave `summary.incompleteReasons` undefined on every normal run.
+        // The reasons list must be an empty ARRAY, never null or absent: it is a
+        // contract field consumed by monitoring, and a null would serialize oddly.
+        // An omission in the JSON would leave `summary.incompleteReasons` undefined
+        // on every normal run, so always emit the (empty) array.
         let (_ws, ledger) = ledger_with_one_change("fin-noreason", "s", "r");
         let summary = ledger.finish("s", "r", true).expect("publish");
         let reasons = summary["incompleteReasons"].as_array().expect("must be an array");

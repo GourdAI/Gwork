@@ -162,7 +162,9 @@ test('12 locales all carry the same account key set', () => {
     'username', 'email', 'password', 'working', 'signed_in', 'required',
     'password_policy', 'failed',
     // 用户卡片 / 信息弹层（参考设计稿）新增键
-    'plan', 'points', 'memory', 'feedback', 'unavailable',
+    // 11-xx 精简：plan/points/memory/feedback 四键随套餐列与两行菜单移除，
+    // 余额单列卡改用 balance 键（值取服务端格式化串 quota_display）。
+    'balance', 'unavailable',
     // 副标题（登录 GWork / 创建账号）已移除：与品牌标重复，故无 auth_title_* 键
     // 左栏手写体标语（Qoder 式艺术字，随语言切换）
     'auth_slogan',

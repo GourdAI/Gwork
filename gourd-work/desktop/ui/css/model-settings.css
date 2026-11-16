@@ -40,19 +40,14 @@ body.code-mode .model-settings-view { display: none !important; }
     display: flex; flex-direction: column; min-height: 0;
 }
 
-/* 左栏头部：分组标题 + 新建入口。
- * 新建是「列表级」操作，常驻头部（不随列表滚动）；表单提交（创建）在右栏底部。
- * 两者不再同名并排于卡片底部，消除「两个一模一样的按钮」的重复感。 */
-.model-settings-left-header {
-    flex-shrink: 0;
+/* 左栏不再有独立头部：早期「自定义供应商 + 加号」头部与滚动区内自定义分组
+ * 标题文案完全重复（同屏两次「自定义供应商」）。新建入口下移到自定义分组
+ * 标题行右端，与分组标题同行，视觉层级不变。 */
+.model-settings-group-caption-row {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    padding: 12px 12px 8px 16px;
+    padding-right: 6px;
 }
-.model-settings-left-title {
-    font-size: 12px; color: var(--text-secondary);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    user-select: none;
-}
+.model-settings-group-caption-row .model-settings-group-caption { padding-left: 10px; }
 
 /* 新建供应商图标按钮：轻量、与列表同层，与右栏实心主按钮形成主次层级 */
 .model-settings-add-btn {
@@ -77,32 +72,15 @@ body.code-mode .model-settings-view { display: none !important; }
 }
 .model-settings-group-list { display: flex; flex-direction: column; gap: 2px; }
 
-/* ===== 官方源只读面板（与自定义表单互斥；全程不渲染任何 key 输入） ===== */
+/* ===== 官方源面板（与自定义表单互斥；全程不渲染任何 key 输入） =====
+ * 模型管理区复用自定义供应商的 provider-model-* 行组件（搜索/批量启停/
+ * 行内默认星标/接口协议下拉/行启停开关），口径完全一致。 */
 .ms-official-panel { display: flex; flex-direction: column; gap: 18px; }
 .ms-official-body { font-size: 13px; color: var(--text-secondary); }
 .ms-official-state p { margin: 0 0 14px; line-height: 1.7; }
 .ms-official-account { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; }
 .ms-official-account span { color: var(--text-tertiary, var(--text-secondary)); }
 .ms-official-account strong { color: var(--text-primary); font-weight: 600; }
-.ms-official-models-head {
-    display: flex; align-items: center; justify-content: space-between;
-    font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;
-}
-.ms-official-refresh {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 26px; height: 26px; border: 1px solid var(--border-color); border-radius: 7px;
-    background: transparent; color: var(--text-secondary); cursor: pointer;
-}
-.ms-official-refresh:hover { color: var(--accent); border-color: var(--accent); }
-.ms-official-models { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
-.ms-official-model {
-    display: flex; align-items: center; gap: 8px;
-    padding: 9px 12px; border: 1px solid var(--border-color); border-radius: 8px;
-    color: var(--text-primary); background: var(--bg-main, transparent);
-}
-.ms-official-model-id { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ms-official-model-by { font-size: 11px; color: var(--text-tertiary, var(--text-secondary)); }
-.ms-official-empty { padding: 16px; text-align: center; color: var(--text-tertiary, var(--text-secondary)); }
 .ms-official-note { margin-top: 14px !important; font-size: 11px; color: var(--text-tertiary, var(--text-secondary)); }
 .ms-provider-item.official .ms-provider-icon { background: var(--accent); color: var(--accent-contrast); border: none; }
 
@@ -225,6 +203,26 @@ body.code-mode .model-settings-view { display: none !important; }
     user-select: none;
 }
 .ms-model-search-clear:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* 官方模型行内的接口协议只读徽标（P0-B）。
+   内核把 official 模型协议钉死为 OpenAI（LlmClient 强制 standard=openai +
+   Dialect::OpenAiChat，防官方 key 经 x-api-key/x-goog-api-key 这类 reqwest
+   重定向不剥离的凭据头外泄），前端不再提供可改的协议下拉，改渲染这个只读
+   徽标如实告知「固定、不可改」。复用 provider-model-standard-wrap 的容器宽度，
+   使官方行与自定义行的协议列对齐。 */
+.provider-model-standard-readonly {
+    display: inline-flex;
+    align-items: center;
+    height: 30px;
+    padding: 0 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: var(--bg-hover);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    white-space: nowrap;
+    cursor: default;
+}
 
 /* 响应式：窄屏时上下堆叠 */
 @media (max-width: 860px) {
