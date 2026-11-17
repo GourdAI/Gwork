@@ -1,0 +1,424 @@
+<template>
+	<view class="app-chat">
+		<view class="app-chat__head">
+			<view class="app-chat__row">
+				<view class="app-chat__icon" @click="emit('back')">
+					<!-- 左上是菜单（转出会话抽屉），不是返回；码点即菜单图标。
+						 不能带 icon-caidan1 类名：Web 端引入了 iconfont.css，.icon-caidan1:before 会再补一个字形，与 text 内容重复 -->
+					<text class="iconfont app-chat__back">&#xe634;</text>
+				</view>
+				<view class="app-chat__hd">
+					<text class="app-chat__title" @click="onRename">{{ title }}</text>
+					<!-- 详情页环境行不展示权限段，仅设备与工作空间（设计稿 S3） -->
+					<app-env-bar class="app-chat__env" :device="device" :device-online="deviceOnline"
+						:workspace="workspace" :permission="permission" :show-permission="false"
+						@open-run="runSheetVisible = true"></app-env-bar>
+				</view>
+				<view class="app-chat__icon" @click="onNewChat">
+					<rice-icon name="add" :size="18" color="var(--color-text-secondary)"></rice-icon>
+				</view>
+				<view class="app-chat__icon" @click="menuVisible = true">
+					<!-- 字体图标缺 more，先以文本占位，待字体图标补全后替换 -->
+					<text class="app-chat__more">···</text>
+				</view>
+			</view>
+		</view>
+
+		<view class="app-chat__body">
+			<!-- list-view 原生回收列表，结构对齐 uni-ai-x 的 uni-ai-chat.uvue -->
+			<list-view v-if="messages.length > 0" :key="activeId" direction="vertical" class="app-chat__scroll"
+				:show-scrollbar="false" :initial-scroll-bottom="initialScrollBottom" :scroll-anchoring="true"
+				:scroll-top="scrollTop" :scroll-into-view="scrollIntoViewId">
+				<list-item v-for="msg in messages" :key="msg.id" :type="msg.role === 'user' ? 1 : 2">
+					<view class="app-chat__msg" :class="msg.role === 'user' ? 'app-chat__msg--user' : ''">
+						<!-- 气泡宽度上限靠定宽 wrapper 实现：UCSS 的 max-width 不支持百分比；AI 消息占满整行，用户消息 82% 上限 -->
+						<view class="app-chat__bubble-wrap"
+							:class="msg.role === 'user' ? 'app-chat__bubble-wrap--user' : 'app-chat__bubble-wrap--ai'">
+							<app-chat-bubble :message="msg"></app-chat-bubble>
+						</view>
+					</view>
+				</list-item>
+				<list-item style="height:1px;" id="msg-anchor-a" v-show="bottomAnchorId == 'msg-anchor-a'"></list-item>
+				<list-item style="height:1px;" id="msg-anchor-b" v-show="bottomAnchorId == 'msg-anchor-b'"></list-item>
+			</list-view>
+			<text v-else class="app-chat__empty">{{ t('chat.empty') }}</text>
+		</view>
+
+		<!-- 展开态点空白处收起；放在输入区之前，输入区靠渲染顺序盖在它上面 -->
+		<view v-if="expanded" class="app-chat__catcher" @click="expanded = false"></view>
+
+		<app-composer v-model="draft" :expanded="expanded" :model="model" :tag="attachTag" :processing="processing"
+			input-id="app-chat-composer-input" @expand="expanded = true" @collapse="expanded = false" @send="onSend"
+			@stop="onStop" @open-model="modelSheetVisible = true" @open-plus="plusSheetVisible = true"></app-composer>
+
+		<app-run-sheet :visible="runSheetVisible" :device="device" :workspace="workspace" :permission="permission"
+			:lock-env="true" @close="runSheetVisible = false" @update-permission="onUpdatePermission"></app-run-sheet>
+
+		<app-model-sheet :visible="modelSheetVisible" :model="model" :think="think" :context="context"
+			@close="modelSheetVisible = false" @confirm="onConfirmModel"></app-model-sheet>
+
+		<app-plus-sheet :visible="plusSheetVisible" :selected-skill="selectedSkill"
+			:connector-states="connectorStates" @close="plusSheetVisible = false" @attach="onAttach"
+			@select-skill="onSelectSkill" @toggle-connector="onToggleConnector"></app-plus-sheet>
+
+		<app-artifact-sheet :visible="artifactSheetVisible" :artifacts="artifacts" @close="artifactSheetVisible = false"
+			@open="onOpenArtifact"></app-artifact-sheet>
+
+		<!-- APP 端禁用原生 dialogPage：其关闭动画期内重开会叠开原生页，滞留的透明页会吞掉全屏点击 -->
+		<rice-action-sheet v-model:show="menuVisible" :actions="menuActions" :use-dialog-page="false"
+			:cancel-text="t('conv.cancel')" @select="onMenuSelect"></rice-action-sheet>
+
+		<app-input-dialog :visible="renameVisible" :title="t('conv.renameTitle')" :value="title"
+			@close="renameVisible = false" @confirm="onRenameConfirm"></app-input-dialog>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed, nextTick, ref, watch } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useRunEnv } from '@/hooks/useRunEnv'
+	import { useConversations } from '@/hooks/useConversations'
+	import AppEnvBar from '@/components/app-env-bar/app-env-bar.uvue'
+	import AppComposer from '@/components/app-composer/app-composer.uvue'
+	import AppRunSheet from '@/components/app-run-sheet/app-run-sheet.uvue'
+	import AppModelSheet from '@/components/app-model-sheet/app-model-sheet.uvue'
+	import AppPlusSheet from '@/components/app-plus-sheet/app-plus-sheet.uvue'
+	import AppArtifactSheet from '@/components/app-artifact-sheet/app-artifact-sheet.uvue'
+	import AppInputDialog from '@/components/app-input-dialog/app-input-dialog.uvue'
+	import AppChatBubble from '@/components/app-chat-bubble/app-chat-bubble.uvue'
+	import type { ActionSheetAction } from '@/uni_modules/rice-ui/components/rice-action-sheet/type.uts'
+	import { ARTIFACTS } from '@/data/app-data'
+	import type { ArtifactFile, ChatMessage } from '@/data/app-data'
+
+	defineOptions({
+		name: 'app-chat',
+		styleIsolation: 'app-and-page'
+	})
+
+	const emit = defineEmits<{
+		(e: 'back'): void
+		(e: 'new-chat'): void
+	}>()
+
+	const env = useRunEnv()
+	const {
+		activeConversation,
+		renameConversation, togglePin, removeConversation, sendMessage, stopMessage
+	} = useConversations()
+
+	const {
+		device, deviceOnline, workspace, permission,
+		model, think, context, selectedSkill, attachTag, connectorStates
+	} = env
+
+	const expanded: Ref<boolean> = ref<boolean>(false)
+	const draft: Ref<string> = ref<string>('')
+	// 接口接入前所有会话共用同一份演示清单（data/app-data.ts ARTIFACTS）
+	const artifacts: ArtifactFile[] = ARTIFACTS
+	const runSheetVisible: Ref<boolean> = ref<boolean>(false)
+	const modelSheetVisible: Ref<boolean> = ref<boolean>(false)
+	const plusSheetVisible: Ref<boolean> = ref<boolean>(false)
+	const artifactSheetVisible: Ref<boolean> = ref<boolean>(false)
+	const renameVisible: Ref<boolean> = ref<boolean>(false)
+	const menuVisible: Ref<boolean> = ref<boolean>(false)
+	const scrollTop: Ref<number> = ref<number>(0)
+	const initialScrollBottom: Ref<boolean> = ref<boolean>(false)
+	const bottomAnchorId: Ref<string> = ref<string>('msg-anchor-a')
+	// list-view 的 scroll-into-view 仅鸿蒙端可靠；其余端靠 scrollTop 限幅震荡滚到底（对齐 uni-ai-x）
+	const scrollIntoViewId: ComputedRef<string> = computed<string>((): string => {
+		// #ifdef APP-HARMONY
+		return bottomAnchorId.value
+		// #endif
+		// #ifndef APP-HARMONY
+		return ''
+		// #endif
+	})
+
+	const activeId: ComputedRef<string> = computed<string>((): string => {
+		const conv = activeConversation.value
+		return conv != null ? conv.id : ''
+	})
+
+	const title: ComputedRef<string> = computed<string>((): string => {
+		const conv = activeConversation.value
+		return conv != null ? conv.title : t('conv.newChat')
+	})
+	const messages: ComputedRef<ChatMessage[]> = computed<ChatMessage[]>((): ChatMessage[] => {
+		const conv = activeConversation.value
+		return conv != null ? conv.messages : []
+	})
+	// 回复中（含思考中）：驱动发送按钮 ⇄ 停止按钮切换，发送入口同步禁用（对齐 uni-ai-x state='processing'）
+	const processing: ComputedRef<boolean> = computed<boolean>((): boolean => {
+		return messages.value.some((msg: ChatMessage): boolean => msg.role === 'ai' && msg.status === 'processing')
+	})
+	// 流式期间消息条数不变、只有尾条文本增长，滚动锚点需跟随文本长度一起抖动
+	const scrollTick: ComputedRef<number> = computed<number>((): number => {
+		const list: ChatMessage[] = messages.value
+		const last: ChatMessage | undefined = list.length > 0 ? list[list.length - 1] : undefined
+		return list.length + (last != null ? last.text.length : 0)
+	})
+	const pinned: ComputedRef<boolean> = computed<boolean>((): boolean => {
+		const conv = activeConversation.value
+		return conv != null && conv.pinned
+	})
+	const menuActions: ComputedRef<ActionSheetAction[]> = computed<ActionSheetAction[]>((): ActionSheetAction[] => {
+		return [
+			{ name: t('chat.menu.artifacts'), value: 'artifacts' },
+			{ name: t('conv.menu.rename'), value: 'rename', icon: 'edit' },
+			{ name: pinned.value ? t('conv.menu.unpin') : t('conv.menu.pin'), value: 'pin' },
+			{ name: t('conv.menu.remove'), value: 'remove', icon: 'delete', color: 'var(--color-error)' }
+		]
+	})
+
+	// 切换会话时让 list-view 整体重建并从底部开始（对齐 uni-ai-x：空列表不开 initial-scroll-bottom，
+	// Android 蒸汽模式下会给空列表开底部锚定导致后续行不挂载）
+	watch(activeId, (): void => {
+		initialScrollBottom.value = messages.value.length > 0
+		scrollTop.value = 0
+	})
+
+	// 消息数量或流式尾条文本变化后滚到底
+	watch(scrollTick, (): void => {
+		nextTick((): void => {
+			bottomAnchorId.value = bottomAnchorId.value === 'msg-anchor-a' ? 'msg-anchor-b' : 'msg-anchor-a'
+			// 限幅在 10 万~20 万间震荡：持续递增会累计到数百万，导致 list-view 内部状态异常（uni-ai-x 经验）
+			scrollTop.value = scrollTop.value > 100000 ? 100000 : scrollTop.value + 100000
+		})
+	})
+
+	function t(key: string, values?: Record<string, string>): string {
+		if (values == null) return i18n.global.t(key)
+		return i18n.global.t(key, values)
+	}
+
+	/** 设计稿：点新建对话回到首页初始输入态，发送时才真正建会话 */
+	function onNewChat(): void {
+		expanded.value = false
+		emit('new-chat')
+	}
+
+	function onRename(): void {
+		renameVisible.value = true
+	}
+
+	function onRenameConfirm(value: string): void {
+		renameVisible.value = false
+		const conv = activeConversation.value
+		if (conv == null) return
+		renameConversation(conv.id, value)
+		uni.showToast({ title: t('conv.renamed'), icon: 'none' })
+	}
+
+	function onMenuSelect(action: ActionSheetAction): void {
+		const key: string = action.value as string
+		const conv = activeConversation.value
+		if (conv == null) return
+		if (key === 'artifacts') {
+			artifactSheetVisible.value = true
+			return
+		}
+		if (key === 'rename') {
+			renameVisible.value = true
+			return
+		}
+		if (key === 'pin') {
+			const next: boolean = togglePin(conv.id)
+			uni.showToast({ title: next ? t('conv.pinned') : t('conv.unpinned'), icon: 'none' })
+			return
+		}
+		removeConversation(conv.id)
+		uni.showToast({ title: t('conv.removed'), icon: 'none' })
+		// 会话已删除，退回首页输入态
+		emit('back')
+	}
+
+	function onSend(text: string): void {
+		const content: string = text.trim()
+		if (content.length === 0) {
+			uni.showToast({ title: t('home.emptySend'), icon: 'none' })
+			return
+		}
+		const conv = activeConversation.value
+		if (conv == null) return
+		// 回复中禁止再发：停止按钮已替换发送按钮，这里兜住键盘 confirm 等旁路入口
+		if (processing.value) {
+			uni.showToast({ title: t('chat.busySend'), icon: 'none' })
+			return
+		}
+		draft.value = ''
+		attachTag.value = ''
+		expanded.value = false
+		sendMessage(conv.id, content)
+	}
+
+	/** 停止当前回复：保留已吐出的内容并落「已停止」（对齐 uni-ai-x 的 state='stop'） */
+	function onStop(): void {
+		const conv = activeConversation.value
+		if (conv == null) return
+		stopMessage(conv.id)
+	}
+
+	function onUpdatePermission(name: string): void {
+		env.setPermission(name)
+		uni.showToast({ title: t('home.permission.switched', { name: name }), icon: 'none' })
+	}
+
+	function onConfirmModel(nextModel: string, nextThink: string, nextContext: string): void {
+		env.setModelConfig(nextModel, nextThink, nextContext)
+		modelSheetVisible.value = false
+		uni.showToast({ title: t('home.model.saved'), icon: 'none' })
+	}
+
+	// 产物详情页未实现，待接口接入后由弹层点卡片进入
+	function onOpenArtifact(artifact: ArtifactFile): void {
+		uni.showToast({ title: t('chat.artifact.detailPending'), icon: 'none' })
+	}
+
+	function onAttach(name: string): void {
+		attachTag.value = name
+		plusSheetVisible.value = false
+		uni.showToast({ title: t('home.plus.attached', { name: name }), icon: 'none' })
+	}
+
+	function onSelectSkill(name: string): void {
+		selectedSkill.value = name
+		attachTag.value = t('home.skillTag', { name: name })
+		plusSheetVisible.value = false
+		uni.showToast({ title: t('home.skills.selected', { name: name }), icon: 'none' })
+	}
+
+	function onToggleConnector(name: string): void {
+		const on: boolean = env.toggleConnector(name)
+		uni.showToast({
+			title: on ? t('home.connectors.on', { name: name }) : t('home.connectors.off', { name: name }),
+			icon: 'none'
+		})
+	}
+</script>
+
+<style lang="scss">
+	.app-chat {
+		flex: 1;
+		flex-direction: column;
+		// 状态栏高度由页面根节点 .home 统一让出，组件内不再重复加
+		padding-bottom: env(safe-area-inset-bottom);
+		background-color: var(--color-bg);
+
+		&__head {
+			flex-direction: column;
+			padding: 8px 14px;
+			border-bottom-width: 1px;
+			border-bottom-style: solid;
+			border-bottom-color: var(--color-border-light);
+		}
+
+		&__row {
+			flex-direction: row;
+			align-items: center;
+		}
+
+		&__icon {
+			width: 32px;
+			height: 32px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 10px;
+		}
+
+		// 字体图标字号与颜色需在使用处显式声明（UCSS 不保证继承）
+		&__back {
+			font-size: 18px;
+			color: var(--color-text-secondary);
+		}
+
+		// 标题与环境行同属一块，左边缘对齐，整体在返回按钮右侧垂直居中（设计稿 S3）
+		&__hd {
+			flex: 1;
+			min-width: 0;
+			flex-direction: column;
+			align-items: flex-start;
+			justify-content: center;
+			padding: 2px 0;
+		}
+
+		&__title {
+			// UCSS 的 max-width 不支持百分比；父级 __hd 为 min-width:0 的纵向 flex，文本默认拉伸占满宽度，配合 ellipsis 即可
+			padding: 0 2px;
+			font-size: 15px;
+			font-weight: 720;
+			line-height: 1.3;
+			color: var(--color-text);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__env {
+			margin-top: 2px;
+			padding-left: 2px;
+		}
+
+		&__more {
+			font-size: 16px;
+			font-weight: 720;
+			color: var(--color-text-secondary);
+		}
+
+		&__body {
+			position: relative;
+			flex: 1;
+			min-height: 0;
+		}
+
+		&__scroll {
+			flex: 1;
+			min-height: 0;
+			margin-top: 18px;
+		}
+
+		&__msg {
+			padding: 0 18px;
+			margin-bottom: 14px;
+			flex-direction: row;
+
+			// 定宽 wrap 是行内唯一子节点、默认靠左，仅 wrap 内部 flex-end 会让用户气泡停在 82% 分界处
+			// 而非贴容器右缘；整行先右对齐把 wrap 推到右侧，气泡宽度上限不变
+			&--user {
+				justify-content: flex-end;
+			}
+		}
+
+		// 气泡定宽容器：替代气泡上不被 UCSS 支持的 max-width: 82%；气泡在其中内容自适应、超宽换行
+		&__bubble-wrap {
+			flex-direction: row;
+
+			// AI 消息占满整行：原生布局下长文本气泡会铺满容器宽，占满后右侧不留死区
+			&--ai {
+				flex: 1;
+			}
+
+			// 用户消息保持 82% 上限（width 只在基类未设 flex 时生效，故 flex: 1 仅放 AI 变体）
+			&--user {
+				width: 82%;
+				justify-content: flex-end;
+			}
+		}
+
+		&__empty {
+			margin-top: 40px;
+			padding: 0 18px;
+			font-size: 12px;
+			text-align: center;
+			color: var(--color-text-tertiary);
+		}
+
+		&__catcher {
+			position: absolute;
+			left: 0;
+			right: 0;
+			top: 0;
+			bottom: 0;
+		}
+	}
+</style>

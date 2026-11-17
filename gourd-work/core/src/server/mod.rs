@@ -33,7 +33,6 @@
 pub mod attachments_api;
 pub mod changes_api;
 pub mod channels_api;
-pub mod cli_connector_api;
 pub mod commands;
 pub mod filer_api;
 pub mod flex_body;
@@ -541,24 +540,10 @@ pub async fn serve_with_static(
         .route("/web/settings/mcp/auth/start", post(mcp_auth_api::mcp_auth_start))
         // RFC 8628 Device Flow (user_code + in-app QR modal); same session table.
         .route("/web/settings/mcp/auth/device/start", post(mcp_auth_api::mcp_auth_device_start))
-        // Vendor QR-code authorization (authType=qrcode_poll); same session table.
-        .route("/web/settings/mcp/auth/qrcode/start", post(mcp_auth_api::mcp_auth_qrcode_start))
         .route("/web/settings/mcp/auth/status", get(mcp_auth_api::mcp_auth_status))
         .route("/web/settings/mcp/auth/cancel", post(mcp_auth_api::mcp_auth_cancel))
         .route("/web/settings/mcp/auth/token", post(mcp_auth_api::mcp_auth_token))
         .route("/web/settings/mcp/auth/clear", post(mcp_auth_api::mcp_auth_clear))
-        // CLI 连接器（钉钉/飞书/企微/腾讯会议等厂商官方 npm CLI + 扫码授权）：
-        // 安装=确保 Node→npm 装 CLI→落官方技能；授权=编排 CLI 扫码/浏览器流程。
-        // 凭据由厂商 CLI 自管，GWork 不接触 token 明文。
-        .route("/web/settings/runtime/node", get(cli_connector_api::node_status))
-        .route("/web/settings/runtime/node/ensure", post(cli_connector_api::node_ensure))
-        .route("/web/settings/mcp/cli/install", post(cli_connector_api::cli_install))
-        .route("/web/settings/mcp/cli/install/status", get(cli_connector_api::cli_install_status))
-        .route("/web/settings/mcp/cli/state", get(cli_connector_api::cli_state))
-        .route("/web/settings/mcp/cli/auth/start", post(cli_connector_api::cli_auth_start))
-        .route("/web/settings/mcp/cli/auth/status", get(cli_connector_api::cli_auth_status))
-        .route("/web/settings/mcp/cli/auth/cancel", post(cli_connector_api::cli_auth_cancel))
-        .route("/web/settings/mcp/cli/uninstall", post(cli_connector_api::cli_uninstall))
         // 官方模型源：只读内存态投影。key 由同进程 Tauri 壳 set，不经 HTTP。
         .route("/web/settings/official/status", get(official_api::official_status))
         .route("/web/settings/official/models", get(official_api::official_models))

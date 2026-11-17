@@ -1,0 +1,21 @@
+<template>
+	<view class="theme-root" :class="themeClass">
+		<slot></slot>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { useTheme } from '@/hooks/useTheme'
+
+	const { themeClass } = useTheme()
+</script>
+
+<style lang="scss">
+	/* 样式隔离 2.0 下组件内部取不到 App.uvue 的全局样式，主题变量需自带一份 */
+	@import '@/styles/theme.scss';
+
+	.theme-root {
+		/* 这层包裹会插到页面原有根节点之外，必须撑满，否则压坏以页面为直接父级的 flex: 1 布局 */
+		flex: 1;
+	}
+</style>

@@ -218,20 +218,3 @@
     border-radius: 10px;
     background: var(--bg-card);
 }
-/* 厂商扫码（qrcode_poll）：本地绘制的真二维码。二维码必须白底黑块才可扫，
- * 因此容器固定白底（不随主题反转），外层圆角边框跟随主题。 */
-.mcp-auth-qr-canvas {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 244px;
-    height: 244px;
-    margin: 14px auto 6px;
-    padding: 12px;
-    background: #ffffff;
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-}
-.mcp-auth-qr-canvas img,
-.mcp-auth-qr-canvas canvas { display: block; width: 220px; height: 220px; }
-.mcp-auth-qr-canvas:empty { display: none; }

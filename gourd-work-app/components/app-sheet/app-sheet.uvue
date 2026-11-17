@@ -1,0 +1,136 @@
+<template>
+	<!-- 底部弹层基座：遮罩/定位/圆角/关闭按钮/把手/安全区/动画交给 rice-popup，这里只保留头部与滚动区 -->
+	<!-- bg-color 是 UTS 写到根元素的内联样式，原生端 var() 不可靠，传 JS 字面量（与 --color-bg 同源）；样式表内的 var 不受影响 -->
+	<rice-popup :show="visible" position="bottom" :show-drag-bar="true" :closeable="true"
+		:close-on-click-overlay="true" :radius="26"
+		bg-color="var(--color-bg)"
+		overlay-bg-color="var(--color-sheet-mask)" drag-bar-class="app-sheet__grabber"
+		drag-wrap-class="app-sheet__dragwrap"
+		@update:show="onShowChange" @click-overlay="emit('close')">
+		<view class="app-sheet" :style="panelStyle">
+			<view class="app-sheet__head" :class="compact ? 'app-sheet__head--compact' : ''">
+				<view v-if="showBack" class="app-sheet__icon app-sheet__icon--back" @click="emit('back')">
+					<rice-icon name="arrow-left" size="16px" color="var(--color-text-secondary)"></rice-icon>
+				</view>
+				<text class="app-sheet__title">{{ title }}</text>
+				<view v-if="showSearch" class="app-sheet__icon" @click="emit('search')">
+					<rice-icon name="search" size="16px" color="var(--color-text-secondary)"></rice-icon>
+				</view>
+			</view>
+			<scroll-view class="app-sheet__body" direction="vertical" :show-scrollbar="false">
+				<view class="app-sheet__content">
+					<slot></slot>
+				</view>
+			</scroll-view>
+			<slot name="footer"></slot>
+		</view>
+
+	</rice-popup>
+</template>
+
+<script setup lang="ts">
+	import { computed } from 'vue'
+	import type { ComputedRef } from 'vue'
+
+	defineOptions({
+		name: 'app-sheet',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = withDefaults(defineProps<{
+		visible: boolean
+		title: string
+		showBack?: boolean
+		showSearch?: boolean
+		compact?: boolean
+		tall?: boolean
+	}>(), {
+		visible: false,
+		title: '',
+		showBack: false,
+		showSearch: false,
+		compact: false,
+		tall: false
+	})
+
+	const emit = defineEmits<{
+		(e: 'close'): void
+		(e: 'back'): void
+		(e: 'search'): void
+	}>()
+
+	// UCSS 的 max-height 只接受像素值，按窗口高度换算设计稿的 80% / 88%
+	const panelStyle: ComputedRef<string> = computed<string>((): string => {
+		const ratio: number = props.tall ? 0.88 : 0.8
+		const height: number = Math.round(uni.getWindowInfo().windowHeight * ratio)
+		return 'max-height:' + height.toString() + 'px;'
+	})
+
+	// rice-popup 的关闭（自带 X / 点遮罩 / 下滑）最终都走关闭动画，结束时统一让页面收起弹层
+	function onShowChange(show: boolean): void {
+		if (!show) emit('close')
+	}
+</script>
+
+<style lang="scss">
+	.app-sheet {
+		flex-direction: column;
+		/* 背景与圆角由 rice-popup 的 bg-color / radius 提供，这里只补内容间距 */
+		padding: 0 18px 10px;
+
+		&__head {
+			flex-direction: row;
+			align-items: center;
+			margin-bottom: 14px;
+			/* 右上角关闭按钮来自 rice-popup，标题行留出其位置 */
+			padding-right: 34px;
+
+			&--compact {
+				margin-bottom: 10px;
+			}
+		}
+
+		&__icon {
+			width: 32px;
+			height: 32px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 10px;
+
+			&--back {
+				margin-left: -6px;
+			}
+		}
+
+		&__title {
+			flex: 1;
+			margin-left: 2px;
+			font-size: 16px;
+			font-weight: 760;
+			color: var(--color-text);
+		}
+
+		&__body {
+			width: 100%;
+			flex-grow: 1;
+			flex-shrink: 1;
+			flex-basis: auto;
+		}
+
+		&__content {
+			padding-bottom: 26px;
+		}
+	}
+
+	/* rice-popup 的 drag-bar-class / drag-wrap-class 经 externalClasses 注入，须为顶层类 */
+	.app-sheet__grabber {
+		width: 36px;
+		height: 4px;
+		background-color: var(--color-border);
+	}
+
+	/* 顶部 bar 容器补一层与面板一致的背景，避免根元素 bg-color 在个别端未生效时露底 */
+	.app-sheet__dragwrap {
+		background-color: var(--color-bg);
+	}
+</style>

@@ -1,0 +1,258 @@
+<template>
+	<view class="home" :class="themeClass">
+		<!-- 会话抽屉改为 swiper 原生分页：0=抽屉 1=首页内容。
+			横向手势与纵向滚动由原生层仲裁，页面不再自行判定侧滑 -->
+		<swiper class="home__pager" :current="current" :duration="300" @change="onSwiperChange">
+			<swiper-item class="home__page">
+				<app-conv-drawer @close="closeDrawer" @open-conv="onOpenConv" @new-chat="onNewChat"></app-conv-drawer>
+			</swiper-item>
+
+			<swiper-item class="home__page">
+				<!-- 两种形态各自收进单一容器做 v-if/v-else：
+					不能用 template 片段（子节点数随 expanded 变化）与组件混排后紧跟常驻弹层，
+					否则往返切换后弹层视图的插入锚点与层级不可靠，表现为弹框按钮全部失效 -->
+				<view v-if="!inChat" class="home__main">
+					<home-header :device="device" :device-online="deviceOnline" :workspace="workspace"
+						:permission="permission" @menu="onMenu" @open-run="openSheet('run')"></home-header>
+
+					<home-hero @fill="onFill"></home-hero>
+
+					<!-- 展开态点空白处收起；放在输入区之前，输入区靠渲染顺序盖在它上面 -->
+					<view v-if="expanded" class="home__catcher" @click="onCollapse"></view>
+
+					<app-composer v-model="draft" :expanded="expanded" :model="model" :tag="attachTag"
+						input-id="home-composer-input" @expand="onExpand" @collapse="onCollapse" @send="onSend"
+						@open-model="openSheet('model')" @open-plus="openSheet('plus')"></app-composer>
+				</view>
+
+				<view v-else class="home__chat">
+					<app-chat @new-chat="onNewChat" @back="onChatBack"></app-chat>
+				</view>
+			</swiper-item>
+		</swiper>
+
+		<app-run-sheet :visible="activeSheet === 'run'" :device="device" :workspace="workspace"
+			:permission="permission" @close="closeSheets" @update-device="onUpdateDevice"
+			@update-workspace="onUpdateWorkspace" @update-permission="onUpdatePermission"></app-run-sheet>
+
+		<app-model-sheet :visible="activeSheet === 'model'" :model="model" :think="think" :context="context"
+			@close="closeSheets" @confirm="onConfirmModel"></app-model-sheet>
+
+		<app-plus-sheet :visible="activeSheet === 'plus'" :selected-skill="selectedSkill"
+			:connector-states="connectorStates" @close="closeSheets" @attach="onAttach"
+			@select-skill="onSelectSkill" @toggle-connector="onToggleConnector"></app-plus-sheet>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { ref } from 'vue'
+	import type { Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme } from '@/hooks/useTheme'
+	import { useRunEnv } from '@/hooks/useRunEnv'
+	import { useConversations } from '@/hooks/useConversations'
+	import { onBackPress } from '@dcloudio/uni-app'
+	import HomeHeader from './components/home-header.uvue'
+	import HomeHero from './components/home-hero.uvue'
+	import AppComposer from '@/components/app-composer/app-composer.uvue'
+	import AppRunSheet from '@/components/app-run-sheet/app-run-sheet.uvue'
+	import AppModelSheet from '@/components/app-model-sheet/app-model-sheet.uvue'
+	import AppPlusSheet from '@/components/app-plus-sheet/app-plus-sheet.uvue'
+	import AppChat from '@/components/app-chat/app-chat.uvue'
+	import AppConvDrawer from '@/components/app-conv-drawer/app-conv-drawer.uvue'
+
+	type HomeSheetName = '' | 'run' | 'model' | 'plus'
+
+	const { themeClass } = useTheme()
+	const env = useRunEnv()
+	const { createConversation, sendMessage, setActive } = useConversations()
+
+	const {
+		device, deviceOnline, workspace, permission,
+		model, think, context, selectedSkill, attachTag, connectorStates
+	} = env
+
+	const expanded: Ref<boolean> = ref<boolean>(false)
+	const draft: Ref<string> = ref<string>('')
+	const activeSheet: Ref<HomeSheetName> = ref<HomeSheetName>('')
+	// 0=会话抽屉 1=首页内容；初始落在首页
+	const current: Ref<number> = ref<number>(1)
+	const inChat: Ref<boolean> = ref<boolean>(false)
+
+	// 系统返回手势/返回键：聊天态先转出会话抽屉；抽屉或弹层开着时先收起，二次返回才离开页面
+	onBackPress((): boolean => {
+		if (inChat.value) {
+			exitChatToDrawer()
+			return true
+		}
+		if (current.value === 0) {
+			closeDrawer()
+			return true
+		}
+		if (activeSheet.value !== '') {
+			closeSheets()
+			return true
+		}
+		return false
+	})
+
+	function t(key: string, values?: Record<string, string>): string {
+		if (values == null) return i18n.global.t(key)
+		return i18n.global.t(key, values)
+	}
+
+	// 弹层经 app-sheet → rice-popup：内部关闭由 app-sheet 转发 close，show 在这里手动置 false
+	function openSheet(name: HomeSheetName): void {
+		activeSheet.value = name
+	}
+
+	function closeSheets(): void {
+		activeSheet.value = ''
+	}
+
+	function onMenu(): void {
+		current.value = 0
+	}
+
+	function onSwiperChange(e: SwiperChangeEvent): void {
+		current.value = e.detail.current
+	}
+
+	function closeDrawer(): void {
+		current.value = 1
+	}
+
+	/** 转出会话抽屉供切换会话：保持聊天态，抽屉关闭后仍回到当前会话（详情页点新建对话才退出聊天态） */
+	function exitChatToDrawer(): void {
+		current.value = 0
+	}
+
+	// 详情返回不退出聊天，转出会话抽屉供切换会话
+	function onChatBack(): void {
+		exitChatToDrawer()
+	}
+
+	/** 从抽屉进入聊天：首页形态整块让位，展开态一并复位 */
+	function enterChat(): void {
+		current.value = 1
+		expanded.value = false
+		inChat.value = true
+	}
+
+	function onOpenConv(id: string): void {
+		enterChat()
+	}
+
+	/** 新建会话（抽屉大按钮、工作区 ＋、详情页新建共用）：会话不预建、输入态复位，
+		回到与冷启动一致的首页形态，发送时才真正建会话（见 onSend） */
+	function onNewChat(): void {
+		current.value = 1
+		inChat.value = false
+		draft.value = ''
+		expanded.value = false
+	}
+
+	function onFill(text: string): void {
+		draft.value = text
+		expanded.value = true
+	}
+
+	function onExpand(): void {
+		expanded.value = true
+	}
+
+	function onCollapse(): void {
+		expanded.value = false
+	}
+
+	function onSend(text: string): void {
+		const content: string = text.trim()
+		if (content.length === 0) {
+			uni.showToast({ title: t('home.emptySend'), icon: 'none' })
+			return
+		}
+		draft.value = ''
+		attachTag.value = ''
+		expanded.value = false
+		const convId: string = createConversation(workspace.value, content)
+		sendMessage(convId, content)
+		inChat.value = true
+	}
+
+	function onAttach(name: string): void {
+		attachTag.value = name
+		closeSheets()
+		uni.showToast({ title: t('home.plus.attached', { name: name }), icon: 'none' })
+	}
+
+	function onSelectSkill(name: string): void {
+		selectedSkill.value = name
+		attachTag.value = t('home.skillTag', { name: name })
+		closeSheets()
+		uni.showToast({ title: t('home.skills.selected', { name: name }), icon: 'none' })
+	}
+
+	function onToggleConnector(name: string): void {
+		const on: boolean = env.toggleConnector(name)
+		uni.showToast({
+			title: on ? t('home.connectors.on', { name: name }) : t('home.connectors.off', { name: name }),
+			icon: 'none'
+		})
+	}
+
+	function onUpdateDevice(name: string, online: boolean): void {
+		env.setDevice(name, online)
+		uni.showToast({ title: t('home.device.switched', { name: name }), icon: 'none' })
+	}
+
+	function onUpdateWorkspace(name: string): void {
+		env.setWorkspace(name)
+		uni.showToast({ title: t('home.workspace.switched', { name: name }), icon: 'none' })
+	}
+
+	function onUpdatePermission(name: string): void {
+		env.setPermission(name)
+		uni.showToast({ title: t('home.permission.switched', { name: name }), icon: 'none' })
+	}
+
+	function onConfirmModel(nextModel: string, nextThink: string, nextContext: string): void {
+		env.setModelConfig(nextModel, nextThink, nextContext)
+		closeSheets()
+		uni.showToast({ title: t('home.model.saved'), icon: 'none' })
+	}
+</script>
+
+<style lang="scss">
+	.home {
+		flex: 1;
+		flex-direction: column;
+		padding-top: var(--status-bar-height);
+		padding-bottom: env(safe-area-inset-bottom);
+		background-color: var(--color-bg);
+
+		&__pager,
+		&__page {
+			flex: 1;
+		}
+
+		// 首页态容器：relative 让展开态的 catcher 以它为定位父级，点击层的影响范围锁在容器内
+		&__main {
+			position: relative;
+			flex: 1;
+			flex-direction: column;
+		}
+
+		&__chat {
+			flex: 1;
+			flex-direction: column;
+		}
+
+		&__catcher {
+			position: absolute;
+			left: 0;
+			right: 0;
+			top: 0;
+			bottom: 0;
+		}
+	}
+</style>

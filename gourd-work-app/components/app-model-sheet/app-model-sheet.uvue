@@ -1,0 +1,223 @@
+<template>
+	<app-sheet :visible="visible" :title="title" @close="emit('close')">
+		<view v-if="view === 'main'">
+			<view v-for="item in MODELS" :key="item.name" class="app-model__opt"
+				:class="item.name === draftModel ? 'app-model__opt--on' : ''">
+				<rice-cell :border="false" center :custom-style="cellStyle" @click="draftModel = item.name">
+					<template #title>
+						<view class="app-model__ot">
+							<text class="app-model__ot-title">{{ item.name }}</text>
+							<text class="app-model__ot-desc">{{ item.desc }}</text>
+						</view>
+					</template>
+					<template #rightIcon>
+						<view v-if="item.name === draftModel">
+							<rice-icon name="checked" size="14px" color="var(--color-primary)" />
+						</view>
+					</template>
+				</rice-cell>
+			</view>
+
+			<text class="app-model__heading">{{ t('home.model.settings') }}</text>
+			<rice-cell :title="t('home.model.think')" :value="draftThink" :border="true" center
+				:title-text-style="settingTitleStyle" :value-text-style="settingValueStyle"
+				@click="view = 'think'">
+				<template #rightIcon>
+					<rice-icon name="arrow-right" size="13px" color="var(--color-text-tertiary)" />
+				</template>
+			</rice-cell>
+			<rice-cell :title="t('home.model.context')" :value="draftContext" :border="false" center
+				:title-text-style="settingTitleStyle" :value-text-style="settingValueStyle"
+				@click="view = 'context'">
+				<template #rightIcon>
+					<rice-icon name="arrow-right" size="13px" color="var(--color-text-tertiary)" />
+				</template>
+			</rice-cell>
+		</view>
+
+		<view v-else-if="view === 'think'">
+			<view v-for="item in THINK_LEVELS" :key="item.name" class="app-model__opt"
+				:class="item.name === draftThink ? 'app-model__opt--on' : ''">
+				<rice-cell :border="false" center :custom-style="cellStyle" @click="onPickThink(item.name)">
+					<template #title>
+						<view class="app-model__ot">
+							<text class="app-model__ot-title">{{ item.name }}</text>
+							<text class="app-model__ot-desc">{{ item.desc }}</text>
+						</view>
+					</template>
+					<template #rightIcon>
+						<view v-if="item.name === draftThink">
+							<rice-icon name="checked" size="14px" color="var(--color-primary)" />
+						</view>
+					</template>
+				</rice-cell>
+			</view>
+		</view>
+
+		<view v-else>
+			<view v-for="item in CONTEXT_WINDOWS" :key="item.name" class="app-model__opt"
+				:class="item.name === draftContext ? 'app-model__opt--on' : ''">
+				<rice-cell :border="false" center :custom-style="cellStyle" @click="onPickContext(item.name)">
+					<template #title>
+						<view class="app-model__ot">
+							<text class="app-model__ot-title">{{ item.name }}</text>
+							<text class="app-model__ot-desc">{{ item.desc }}</text>
+						</view>
+					</template>
+					<template #rightIcon>
+						<view v-if="item.name === draftContext">
+							<rice-icon name="checked" size="14px" color="var(--color-primary)" />
+						</view>
+					</template>
+				</rice-cell>
+			</view>
+		</view>
+
+		<template #footer>
+			<view v-if="view === 'main'" class="app-model__foot">
+				<view class="app-model__confirm">
+					<rice-button :text="t('home.model.confirm')" color="transparent"
+						text-color="var(--color-text-inverse)" text-size="14px" width="100%" height="48px"
+						shape="square" @click="onConfirm" />
+				</view>
+			</view>
+		</template>
+	</app-sheet>
+</template>
+
+<script setup lang="ts">
+	import { computed, ref, watch } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
+	import { CONTEXT_WINDOWS, MODELS, THINK_LEVELS } from '@/data/app-data'
+
+	defineOptions({
+		name: 'app-model-sheet',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = defineProps<{
+		visible: boolean
+		model: string
+		think: string
+		context: string
+	}>()
+
+	const emit = defineEmits<{
+		(e: 'close'): void
+		(e: 'confirm', model: string, think: string, context: string): void
+	}>()
+
+	type SheetView = 'main' | 'think' | 'context'
+
+	const TITLE_KEYS: Record<string, string> = {
+		main: 'home.model.title',
+		think: 'home.think.title',
+		context: 'home.context.title'
+	}
+
+	const view: Ref<SheetView> = ref<SheetView>('main')
+	const draftModel: Ref<string> = ref<string>('')
+	const draftThink: Ref<string> = ref<string>('')
+	const draftContext: Ref<string> = ref<string>('')
+
+	const title: ComputedRef<string> = computed<string>((): string => t(TITLE_KEYS[view.value]))
+
+	// 选中态的底色与边框在外层卡片上，cell 本身透明，只承担布局与点击
+	const cellStyle: UTSJSONObject = { backgroundColor: 'transparent', padding: '13px 14px' }
+	// 行内样式用 CSS 变量字符串，切换亮暗由变量继承自动跟随
+	const settingTitleStyle = computed((): UTSJSONObject => ({
+		color: 'var(--color-text)', fontSize: '13.5px', fontWeight: '600'
+	}))
+	const settingValueStyle = computed((): UTSJSONObject => ({
+		color: 'var(--color-text-tertiary)', fontSize: '12.5px', fontWeight: '600'
+	}))
+
+	// 草稿只在弹层打开时同步，弹层内切换先暂存，点「确认」才回写页面
+	watch((): boolean => props.visible, (visible: boolean): void => {
+		if (!visible) return
+		view.value = 'main'
+		draftModel.value = props.model
+		draftThink.value = props.think
+		draftContext.value = props.context
+	})
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function onPickThink(name: string): void {
+		draftThink.value = name
+		view.value = 'main'
+	}
+
+	function onPickContext(name: string): void {
+		draftContext.value = name
+		view.value = 'main'
+	}
+
+	function onConfirm(): void {
+		emit('confirm', draftModel.value, draftThink.value, draftContext.value)
+	}
+</script>
+
+<style lang="scss">
+	.app-model {
+		&__opt {
+			margin-bottom: 10px;
+			border-radius: 15px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+
+			&--on {
+				border-color: var(--color-primary);
+				background-color: var(--color-brand-soft);
+			}
+		}
+
+		&__ot {
+			flex: 1;
+			min-width: 0;
+			flex-direction: column;
+		}
+
+		&__ot-title {
+			font-size: 13.5px;
+			font-weight: 700;
+			color: var(--color-text);
+		}
+
+		&__ot-desc {
+			margin-top: 3px;
+			font-size: 11px;
+			line-height: 15.4px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__heading {
+			margin-top: 16px;
+			margin-left: 4px;
+			margin-bottom: 4px;
+			font-size: 11px;
+			font-weight: 700;
+			letter-spacing: 0.4px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__foot {
+			margin-top: 8px;
+			padding-top: 12px;
+			border-top-width: 1px;
+			border-top-style: solid;
+			border-top-color: var(--color-border);
+		}
+
+		&__confirm {
+			border-radius: 15px;
+			background-color: var(--color-primary);
+		}
+	}
+</style>

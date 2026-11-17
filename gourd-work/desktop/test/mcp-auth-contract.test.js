@@ -320,3 +320,29 @@ test('⑫ 运行时：authType=none 时 openDialog 立即放行且不弹任何�
   assert.equal(h.appended.length, 0, 'none 不得弹出任何模态框');
   assert.equal(h.opened.length, 0, 'none 不得打开浏览器');
 });
+
+/* ⑬ 未知/已退役 authType 的兜底语义 —— 把 app-settings-mcp.js 里那段
+ * 「qrcode_poll 管线已随官方源下线，这里按接口不可用放行」的**注释**升级成断言。
+ *
+ * 为什么必须有这条：后端 `AuthKind::parse` 把 qrcode_poll/qrcode/qr_poll/scan 一族
+ * 归入 `None`，所以正常路径下前端只会看到 authType='none'（已被 ⑫ 覆盖）。但前端
+ * 的 openDialog 是按 `st.authType` 字符串分流的，只要它拿到一个**自己不认识**的值
+ * （后端将来新增授权形态、或上游/旧缓存直接透传未归一的原始串），最后那个
+ * `return true` 就是唯一防线。这条防线的语义是「放行、绝不静默吞掉保存/安装」，
+ * 一旦有人把它改成 `return false`（等一个永远不会出现的弹窗），连接器就再也装不上了。
+ */
+test('⑬ 运行时：未知/已退役 authType 必须兜底放行，绝不静默吞掉保存或安装', async () => {
+  for (const authType of ['qrcode_poll', 'qrcode', 'scan', 'some_future_kind']) {
+    const h = loadAuthModule(() => ({
+      ok: true, name: 'x', authType, needsAuth: true, connected: false,
+      hasCredential: false, label: 'X', helpUrl: '', helpText: '', phase: 'idle', error: null,
+    }));
+    const proceed = await h.McpAuth.openDialog('x', () => {});
+    assert.equal(proceed, true,
+      authType + '：不认识的授权形态必须放行（返回 false 会等一个永不出现的弹窗 → 装不上）');
+    assert.equal(h.appended.length, 0, authType + '：没有对应实现就不得弹窗骗用户');
+    assert.equal(h.opened.length, 0, authType + '：不得打开浏览器');
+    assert.ok(!h.ajaxCalls.some(c => /\/auth\/(start|device\/start|token)$/.test(c.url)),
+      authType + '：不得调用任何授权端点（后端已无该形态的实现）');
+  }
+});

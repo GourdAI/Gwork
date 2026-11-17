@@ -1,0 +1,192 @@
+<template>
+	<!-- 关于弹层：App 信息卡 + 官网入口 + 常见问题折叠列表 -->
+	<app-sheet :visible="visible" :title="t('about.title')" :tall="true" @close="emit('close')">
+		<view class="ab-card">
+			<rice-avatar src="/static/logo.png" size="46px" mode="aspectFit"></rice-avatar>
+			<view class="ab-card__tx">
+				<text class="ab-card__name">GWork</text>
+				<text class="ab-card__slogan">{{ t('about.slogan') }} · v{{ VERSION }}</text>
+			</view>
+			<text class="ab-card__site" @click="onSite">{{ t('about.site') }}</text>
+		</view>
+
+		<text class="ab-hd">{{ t('about.faqTitle') }}</text>
+		<view class="ab-faq">
+			<view v-for="(item, index) in faqs" :key="item.q" class="faq-item"
+				:class="index < faqs.length - 1 ? 'faq-item--divided' : ''">
+				<view class="faq-item__row" @click="toggle(index)">
+					<text class="faq-item__q">Q</text>
+					<text class="faq-item__question">{{ item.q }}</text>
+					<view class="faq-item__icon" :class="openIndex === index ? 'faq-item__icon--open' : ''">
+						<rice-icon name="arrow-down" size="14px" color="var(--color-text-tertiary)"></rice-icon>
+					</view>
+				</view>
+				<text v-if="openIndex === index" class="faq-item__answer">{{ item.a }}</text>
+			</view>
+		</view>
+	</app-sheet>
+</template>
+
+<script setup lang="ts">
+	import { computed, ref } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
+
+	defineOptions({
+		name: 'about-sheet',
+		styleIsolation: 'app-and-page'
+	})
+
+	type FaqItem = {
+		q: string
+		a: string
+	}
+
+	withDefaults(defineProps<{
+		visible: boolean
+	}>(), {
+		visible: false
+	})
+
+	const emit = defineEmits<{
+		(e: 'close'): void
+	}>()
+
+	const VERSION: string = '1.0.0'
+
+	const openIndex: Ref<number> = ref<number>(-1)
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	const faqs: ComputedRef<FaqItem[]> = computed<FaqItem[]>((): FaqItem[] => {
+		const list: FaqItem[] = []
+		for (let i = 1; i <= 5; i++) {
+			list.push({
+				q: t('about.faq' + i + 'q'),
+				a: t('about.faq' + i + 'a')
+			})
+		}
+		return list
+	})
+
+	function toggle(index: number): void {
+		openIndex.value = openIndex.value === index ? -1 : index
+	}
+
+	function onSite(): void {
+		// TODO 接入官网链接（uni-app x 打开外部页面需 uts-openSchema）
+		uni.showToast({ title: t('about.siteDone'), icon: 'none' })
+	}
+</script>
+
+<style lang="scss">
+	.ab-card {
+		flex-direction: row;
+		align-items: center;
+		padding: 16px;
+		border-width: 1px;
+		border-style: solid;
+		border-color: var(--color-border);
+		border-radius: 18px;
+		background-color: var(--color-bg-card);
+
+		&__tx {
+			flex: 1;
+			min-width: 0;
+			flex-direction: column;
+			margin-left: 14px;
+		}
+
+		&__name {
+			font-size: 16px;
+			font-weight: 780;
+			color: var(--color-text);
+		}
+
+		&__slogan {
+			margin-top: 4px;
+			font-size: 12px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__site {
+			font-size: 12.5px;
+			font-weight: 650;
+			color: var(--color-text-tertiary);
+		}
+	}
+
+	.ab-hd {
+		margin: 20px 4px 10px;
+		font-size: 12px;
+		font-weight: 700;
+		color: var(--color-text-tertiary);
+	}
+
+	.ab-faq {
+		border-width: 1px;
+		border-style: solid;
+		border-color: var(--color-border);
+		border-radius: 18px;
+		background-color: var(--color-bg-card);
+		overflow: hidden;
+	}
+
+	.faq-item {
+		&--divided {
+			border-bottom-width: 1px;
+			border-bottom-style: solid;
+			border-bottom-color: var(--color-border);
+		}
+
+		&__row {
+			flex-direction: row;
+			align-items: center;
+			width: 100%;
+			min-height: 56px;
+			padding: 10px 15px;
+		}
+
+		&__q {
+			width: 18px;
+			height: 18px;
+			line-height: 18px;
+			text-align: center;
+			border-radius: 9px;
+			background-color: var(--color-brand-soft);
+			font-size: 11px;
+			font-weight: 800;
+			color: var(--color-primary);
+		}
+
+		&__question {
+			flex: 1;
+			min-width: 0;
+			margin-left: 11px;
+			font-size: 13.5px;
+			font-weight: 650;
+			color: var(--color-text);
+		}
+
+		&__icon {
+			width: 24px;
+			height: 24px;
+			align-items: center;
+			justify-content: center;
+
+			&--open {
+				transform: rotate(180deg);
+			}
+		}
+
+		&__answer {
+			padding: 0 15px 14px 44px;
+			font-size: 12px;
+			line-height: 20px;
+			color: var(--color-text-secondary);
+		}
+	}
+</style>

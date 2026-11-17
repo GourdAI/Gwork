@@ -26,12 +26,8 @@
 //!    `McpServerParameters.getTypeOrTransport()`.
 
 pub mod auth;
-pub mod cli;
-pub mod featured;
 pub mod market;
 pub mod oauth;
-pub mod qrcode_vendor;
-pub mod registry;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -695,14 +691,23 @@ struct HttpConnection {
     /// Keeps the GET stream alive. Dropping the handle does not abort the task,
     /// so `disconnect_one` aborts it explicitly.
     sse_task: Option<tokio::task::JoinHandle<()>>,
-    /// Credentials resolved from `mcp::auth::CredentialVault` at connect time.
+    /// Credentials resolved from `mcp::auth::CredentialVault`.
     ///
     /// Kept separate from `client`'s `default_headers` because OAuth tokens can
-    /// be refreshed mid-session: `http_post_body` re-resolves from the vault on
-    /// each request and overlays this map, so a token that expires during a long
-    /// session does not require reconnecting the whole server. Static tokens are
-    /// resolved once and simply live here.
+    /// be refreshed mid-session: `http_post_body` re-resolves the OAuth
+    /// credential from the vault on **each request** (see `auth_kind` /
+    /// `server_url` below) and overlays this map, so a token that expires
+    /// during a long session does not require reconnecting the whole server.
+    /// Static tokens are resolved once at connect time and simply live here;
+    /// clearing them takes effect via disconnect (`/auth/clear`), not refresh.
     auth_headers: std::collections::HashMap<String, String>,
+    /// The auth declaration this connection was opened with. `Oauth` makes
+    /// `http_post_body` consult the vault per request (inline refresh included)
+    /// instead of replaying the connect-time snapshot forever — the snapshot
+    /// alone was the "works for an hour, then every call 401s" bug.
+    auth_kind: auth::AuthKind,
+    /// The configured server URL, i.e. the vault key. Empty for stdio.
+    server_url: String,
 }
 
 /// A live connection, whichever transport produced it.
@@ -1936,9 +1941,7 @@ impl McpManager {
         if url.is_empty() { return out; }
         let vault = auth::CredentialVault::at_home();
         match spec.kind() {
-            auth::AuthKind::Token | auth::AuthKind::QrcodePoll => {
-                // QR-granted tokens are persisted as static tokens, so they
-                // inject through the exact same path as a typed token.
+            auth::AuthKind::Token => {
                 if let Some(t) = vault.get_static(url).await {
                     out.insert(t.header, format!("{}{}", t.prefix, t.value));
                 }
@@ -2033,6 +2036,8 @@ impl McpManager {
             sse_rx: None,
             sse_task: None,
             auth_headers,
+            auth_kind: auth::AuthSpec::from_config(config).kind(),
+            server_url: config.url.trim().to_string(),
         };
         // The session id arrives as a response header on initialize and must be
         // echoed on every later request, so it is captured before parsing the body.
@@ -2176,6 +2181,8 @@ impl McpManager {
             sse_rx: Some(rx),
             sse_task: Some(task),
             auth_headers,
+            auth_kind: auth::AuthSpec::from_config(config).kind(),
+            server_url: config.url.trim().to_string(),
         };
         // Handshake failures must abort the pump too — the `?` below used to
         // return with the task still running.
@@ -2290,29 +2297,75 @@ fn build_default_headers(config: &McpServerConfig) -> anyhow::Result<reqwest::he
         conn: &HttpConnection,
         body: serde_json::Value,
     ) -> anyhow::Result<reqwest::Response> {
-        let mut req = conn
-            .client
-            .post(&conn.post_url)
-            .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(&body);
-        // Spec (2025-11-25 Transports, "Protocol Version Header"): an HTTP client
-        // MUST send the negotiated version on all *subsequent* requests. It is
-        // omitted while still empty (i.e. during the handshake), because there is
-        // no negotiated version yet and an empty header would advertise one.
-        if !conn.protocol_version.is_empty() {
-            req = req.header("MCP-Protocol-Version", conn.protocol_version.as_str());
+        // OAuth credentials are re-resolved from the vault on EVERY request:
+        // `bearer_header_for` refreshes inline when the token is near expiry,
+        // so a hours-long session keeps working without a reconnect. The
+        // connect-time snapshot in `auth_headers` remains the fallback (vault
+        // read failure) and the sole source for static tokens.
+        let mut live_auth = conn.auth_headers.clone();
+        if conn.auth_kind == auth::AuthKind::Oauth && !conn.server_url.is_empty() {
+            let vault = auth::CredentialVault::at_home();
+            if let Some(value) = oauth::bearer_header_for(&conn.server_url, &vault).await {
+                live_auth.insert("Authorization".to_string(), value);
+            } else {
+                // No usable credential anymore (cleared / expired beyond
+                // refresh). Do not keep replaying the connect-time token.
+                live_auth.remove("Authorization");
+            }
         }
-        if let Some(sid) = &conn.session_id {
-            req = req.header("mcp-session-id", sid);
+        let send = |headers: std::collections::HashMap<String, String>| {
+            let body = body.clone();
+            async move {
+                let mut req = conn
+                    .client
+                    .post(&conn.post_url)
+                    .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .json(&body);
+                // Spec (2025-11-25 Transports, "Protocol Version Header"): an HTTP client
+                // MUST send the negotiated version on all *subsequent* requests. It is
+                // omitted while still empty (i.e. during the handshake), because there is
+                // no negotiated version yet and an empty header would advertise one.
+                if !conn.protocol_version.is_empty() {
+                    req = req.header("MCP-Protocol-Version", conn.protocol_version.as_str());
+                }
+                if let Some(sid) = &conn.session_id {
+                    req = req.header("mcp-session-id", sid);
+                }
+                // Credentials resolved from the local vault. These override any static
+                // `headers` of the same name: a stale API key typed into settings.json
+                // must not beat a freshly authorised (or refreshed) OAuth token.
+                for (k, v) in &headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+                req.send().await
+            }
+        };
+        let mut resp = send(live_auth.clone()).await?;
+        // 401 on an OAuth connection: the server just rejected a token our
+        // bookkeeping considered valid (clock skew / early revocation / an AS
+        // that understates token lifetime). Force one refresh and replay the
+        // request exactly once — a JSON-RPC POST is safe to retry here because
+        // the first attempt was rejected before any tool ran. No refresh
+        // token, or the refresh itself fails → fall through to the original
+        // error path, which tells the user to re-authorize.
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && conn.auth_kind == auth::AuthKind::Oauth
+            && !conn.server_url.is_empty()
+        {
+            let vault = auth::CredentialVault::at_home();
+            if let Some(value) = oauth::bearer_header_force_refresh(&conn.server_url, &vault).await {
+                if live_auth.get("Authorization").map(String::as_str) != Some(value.as_str()) {
+                    tracing::info!(
+                        target: "mcp.oauth",
+                        server = %conn.server_url,
+                        "MCP request got 401; refreshed the OAuth token and retrying once"
+                    );
+                    live_auth.insert("Authorization".to_string(), value);
+                    resp = send(live_auth).await?;
+                }
+            }
         }
-        // Credentials resolved from the local vault. These override any static
-        // `headers` of the same name: a stale API key typed into settings.json
-        // must not beat a freshly authorised (or refreshed) OAuth token.
-        for (k, v) in &conn.auth_headers {
-            req = req.header(k.as_str(), v.as_str());
-        }
-        let resp = req.send().await?;
         let status = resp.status();
         if !status.is_success() {
             // Let the OAuth module interpret a 401 before flattening it into a

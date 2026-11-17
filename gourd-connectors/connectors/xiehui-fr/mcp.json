@@ -1,9 +1,0 @@
-{
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
-  "mcpServers": {
-    "xiehui-fr": {
-      "type": "streamable_http",
-      "url": "https://xiehui.fr/api/mcp"
-    }
-  }
-}

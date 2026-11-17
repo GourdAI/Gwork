@@ -33,7 +33,12 @@ export default function() {
 	// #ifdef APP-PLUS
 	return new Promise((resolve, reject) => {
 		callCheckVersion().then(async (e) => {
-			if (!e.result) return;
+			if (!e.result) {
+				return reject({
+					code: -1,
+					message: '检查更新失败：云函数返回数据为空'
+				})
+			}
 			const {
 				code,
 				message,
@@ -144,11 +149,11 @@ function updateUseModal(packageInfo) {
 			});
 
 			// wgt 和 安卓下载更新
-			downloadTask = uni.downloadFile({
+			uni.downloadFile({
 				url,
 				success: res => {
 					if (res.statusCode !== 200) {
-						console.error('下载安装包失败', err);
+						console.error('下载安装包失败');
 						return;
 					}
 					// 下载好直接安装，下次启动生效

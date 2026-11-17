@@ -1,0 +1,132 @@
+<template>
+	<!-- 居中提示弹窗（原型 .notify-dlg / .ea-dlg）：rice-popup 居中位 + 自绘卡片，
+		按钮竖排通栏；不用 rice-dialog，因其横排按钮与原型不符 -->
+	<rice-popup :show="popupShow" position="center" :close-on-click-overlay="true"
+		bg-color="transparent" overlay-bg-color="var(--color-mask)"
+		@update:show="onShowChange" @click-overlay="emit('close')">
+		<view class="mine-dialog">
+			<text class="mine-dialog__title">{{ title }}</text>
+			<text class="mine-dialog__message">{{ message }}</text>
+			<text v-if="note.length > 0" class="mine-dialog__note">{{ note }}</text>
+			<view class="mine-dialog__btns">
+				<view v-if="showCancel" class="mine-dialog__btn" @click="emit('close')">
+					<text class="mine-dialog__btn-text">{{ resolvedCancelText }}</text>
+				</view>
+				<view class="mine-dialog__btn mine-dialog__btn--go" @click="emit('confirm')">
+					<text class="mine-dialog__btn-text mine-dialog__btn-text--go">{{ confirmText }}</text>
+				</view>
+			</view>
+		</view>
+	</rice-popup>
+</template>
+
+<script setup lang="ts">
+	import { computed } from 'vue'
+	import type { ComputedRef } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useDelayedPopup } from '@/hooks/useDelayedPopup'
+
+	defineOptions({
+		name: 'mine-message-dialog',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = withDefaults(defineProps<{
+		visible: boolean
+		title: string
+		message: string
+		note?: string
+		confirmText: string
+		cancelText?: string
+		showCancel?: boolean
+	}>(), {
+		visible: false,
+		title: '',
+		message: '',
+		note: '',
+		confirmText: '',
+		cancelText: '',
+		showCancel: false
+	})
+
+	const emit = defineEmits<{
+		(e: 'close'): void
+		(e: 'confirm'): void
+	}>()
+
+	// 关闭动画期内重开会撞 rice-popup 内部竞态，经 useDelayedPopup 延迟拉起；其关闭动画 250ms，留 50ms 余量
+	const { popupShow } = useDelayedPopup((): boolean => props.visible, 300)
+
+	const resolvedCancelText: ComputedRef<string> = computed<string>((): string => {
+		return props.cancelText.length > 0 ? props.cancelText : i18n.global.t('conv.cancel')
+	})
+
+	function onShowChange(show: boolean): void {
+		if (!show && props.visible) emit('close')
+	}
+</script>
+
+<style lang="scss">
+	.mine-dialog {
+		width: 300px;
+		padding: 18px;
+		border-radius: 20px;
+		/* 面板底色写在卡片上而非 popup 的 bg-color：UCSS 行内 var() 原生端不可靠，样式表内可靠 */
+		background-color: var(--color-bg);
+
+		&__title {
+			font-size: 15px;
+			font-weight: 750;
+			color: var(--color-text);
+		}
+
+		&__message {
+			margin-top: 14px;
+			margin-bottom: 18px;
+			font-size: 13px;
+			line-height: 21px;
+			color: var(--color-text-secondary);
+		}
+
+		&__note {
+			margin-top: -8px;
+			margin-bottom: 18px;
+			font-size: 13px;
+			line-height: 21px;
+			font-weight: 600;
+			color: var(--color-primary);
+		}
+
+		/* 按钮竖排通栏（原型 .notify-dlg .dlg-btns） */
+		&__btns {
+			flex-direction: column;
+		}
+
+		&__btn {
+			margin-top: 10px;
+			height: 40px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 12px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+
+			&--go {
+				border-color: var(--color-primary);
+				background-color: var(--color-primary);
+			}
+		}
+
+		&__btn-text {
+			font-size: 13px;
+			font-weight: 700;
+			color: var(--color-text);
+
+			&--go {
+				color: var(--color-text-inverse);
+			}
+		}
+	}
+</style>

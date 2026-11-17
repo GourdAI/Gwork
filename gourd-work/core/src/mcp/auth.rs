@@ -44,25 +44,24 @@ use super::McpServerConfig;
 ///
 /// Stored in `settings.json` under `authType`. Absent / unknown = `None`, i.e.
 /// exactly the pre-existing behaviour (static `headers`/`env` only).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+///
+/// **Deliberately not `Serialize`/`Deserialize`/`Default`.** Nothing persists an
+/// `AuthKind`: the on-disk and on-the-wire form is always the `String`
+/// `AuthSpec::auth_type`, and this enum is only ever produced by [`parse`] and
+/// consumed by [`as_str`] / `match`. Deriving serde here would be a trap — with
+/// `rename_all = "lowercase"` and no `#[serde(other)]` fallback, a historical
+/// `"qrcodepoll"` value (from the retired vendor QR flow) would make any future
+/// field of this type fail to *deserialize* instead of degrading to `None`.
+/// `Default` was likewise unused (`AuthKind::default()` had zero call sites).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthKind {
     /// No special handling. The old behaviour: headers/env carry whatever they carry.
-    #[default]
     None,
     /// User types a static token into a password dialog; we persist it locally
     /// and inject it as `Authorization` (or a configured header) on requests.
     Token,
     /// OAuth 2.1 authorization-code + PKCE with a browser redirect.
     Oauth,
-    /// Vendor-specific QR-code authorization (e.g. Tencent Docs): the kernel
-    /// generates a session code, the UI renders the authorization URL as a QR
-    /// image, and a background task polls the vendor's token endpoint. The
-    /// granted token is stored as a *static* token, so header injection and
-    /// `hasCredential` reuse the existing static path unchanged. Unlike `Oauth`
-    /// this does NOT speak RFC 9728/8414 discovery — the vendor protocol is
-    /// implemented by `mcp::qrcode_vendor`.
-    QrcodePoll,
 }
 
 impl AuthKind {
@@ -70,7 +69,12 @@ impl AuthKind {
         match raw.trim().to_ascii_lowercase().as_str() {
             "token" | "static" | "apikey" | "api_key" => AuthKind::Token,
             "oauth" | "oauth2" | "browser" | "login" => AuthKind::Oauth,
-            "qrcode_poll" | "qrcode" | "qr_poll" | "scan" => AuthKind::QrcodePoll,
+            // 历史上还有第四种 `QrcodePoll`（厂商扫码轮询，唯一实现是腾讯文档）。
+            // 它随自建官方连接器目录一起下线了：`qrVendor` 的取值只有
+            // "tencent-docs" 一个，那是官方目录里的条目，魔搭源不提供。
+            // 这里不再识别这些别名 —— 声明 `authType:"qrcode_poll"` 的条目会
+            // 落到 `None`（= 无授权、直接连接），而不是走进一条已不存在实现、
+            // 只能静默放行安装的路径。
             _ => AuthKind::None,
         }
     }
@@ -80,7 +84,6 @@ impl AuthKind {
             AuthKind::None => "none",
             AuthKind::Token => "token",
             AuthKind::Oauth => "oauth",
-            AuthKind::QrcodePoll => "qrcode_poll",
         }
     }
 }
@@ -142,12 +145,6 @@ pub struct AuthSpec {
     /// value is remotely supplied via the connector catalog.
     #[serde(default)]
     pub device_poll_interval_secs: u64,
-    /// Which vendor QR protocol to speak when `authType == "qrcode_poll"`.
-    /// Currently `"tencent-docs"`. The concrete protocol (session-code
-    /// generation, authorization URL template, poll endpoint, response shape)
-    /// lives in `mcp::qrcode_vendor`, keyed by this value. Non-secret metadata.
-    #[serde(default)]
-    pub qr_vendor: String,
 }
 
 impl AuthSpec {
@@ -508,6 +505,16 @@ impl AuthManager {
         &self.vault
     }
 
+    /// The overall browser-callback budget for a connector, in seconds.
+    ///
+    /// Single source of truth shared by `start` (which enforces it) and the
+    /// `/auth/start` HTTP response (which reports it so the UI can align its
+    /// own polling deadline — a hardcoded 5-minute frontend cap used to fire
+    /// while the backend was still legitimately waiting up to 600s).
+    pub fn auth_timeout_secs(config: &McpServerConfig) -> u64 {
+        config.timeout_for(super::TimeoutPhase::Auth).as_secs().max(60).min(600)
+    }
+
     /// Build the authorization URL and start waiting for the callback.
     ///
     /// Returns the URL synchronously (before returning from the HTTP handler)
@@ -593,9 +600,7 @@ impl AuthManager {
         let phase_name = name_owned.clone();
         // Resolve the budget before spawning: the task must own every value it
         // uses, so it cannot borrow `config` (or any other caller stack frame).
-        let timeout = Duration::from_secs(
-            config.timeout_for(super::TimeoutPhase::Auth).as_secs().max(60).min(600),
-        );
+        let timeout = Duration::from_secs(Self::auth_timeout_secs(config));
         let handle = tokio::spawn(async move {
             let outcome = complete_flow(
                 &client,
@@ -752,78 +757,6 @@ impl AuthManager {
         Ok(status)
     }
 
-    /// Start a vendor QR-code authorization (`authType: "qrcode_poll"`).
-    ///
-    /// Unlike [`Self::start`] / [`Self::start_device`] there is **no OAuth
-    /// discovery**: the vendor protocol (session code → authorization URL →
-    /// poll for a token) is implemented by [`super::qrcode_vendor`]. The UI
-    /// renders `verification_uri` as a QR image; the background task polls the
-    /// vendor endpoint and stores the granted token as a *static* token, so
-    /// header injection and `hasCredential` reuse the existing static path.
-    /// Shares the same session table, so `status` / `cancel` work unchanged.
-    pub async fn start_qrcode_poll(
-        self: &Arc<Self>,
-        name: &str,
-        config: &McpServerConfig,
-        spec: &AuthSpec,
-        transient_budget: u32,
-    ) -> anyhow::Result<AuthStatus> {
-        let server_url = config.url.trim().to_string();
-        if server_url.is_empty() {
-            anyhow::bail!("this connector has no URL; QR authorization only applies to HTTP-family MCP servers");
-        }
-        let vendor = spec.qr_vendor.trim().to_string();
-        if vendor.is_empty() {
-            anyhow::bail!("connector declares qrcode_poll but no qrVendor");
-        }
-        self.abort(name).await;
-
-        // Clean client (proxy honoured, no resource-server headers) — same
-        // rationale as the OAuth client: never leak the user's static headers
-        // to a third-party authorization endpoint.
-        let client = oauth::OAuthClient::new(config)?;
-        // Owned clone for the spawned poll task (a borrow of `client` would not
-        // be 'static). reqwest::Client is internally Arc'd, so this is cheap.
-        let http = client.http_client().clone();
-        let session = super::qrcode_vendor::start(&vendor, &http)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("unsupported qrVendor: {}", vendor))?
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-        let now = oauth::Clock::system().now();
-        let status = AuthStatus {
-            phase: AuthPhase::WaitingForBrowser,
-            authorization_url: None,
-            error: None,
-            user_code: None,
-            verification_uri: Some(session.authorization_url.clone()),
-            expires_in: Some(session.expires_in_secs),
-            name: name.to_string(),
-            started_at: now,
-        };
-
-        let vault = self.vault.clone();
-        let name_owned = name.to_string();
-        let mgr = Arc::clone(self);
-        let header = spec.header_name();
-        let prefix = spec.prefix();
-        let poll_base = oauth::resolve_poll_interval(
-            spec.device_poll_interval_secs,
-            session.poll_interval_secs,
-        );
-        let handle = tokio::spawn(async move {
-            let outcome = complete_qrcode_poll(
-                &http, &session.vendor, &server_url, &header, &prefix,
-                &vault, session.expires_in_secs, poll_base, transient_budget,
-            ).await;
-            mgr.finish(&name_owned, outcome).await;
-        });
-
-        let mut sessions = self.sessions.lock().await;
-        sessions.insert(name.to_string(), Session { status: status.clone(), handle: Some(handle) });
-        Ok(status)
-    }
-
     /// Current status for a connector. Terminal states are kept until polled
     /// once (the UI shows the result), then removed on the next poll.
     pub async fn status(&self, name: &str) -> Option<AuthStatus> {
@@ -905,8 +838,16 @@ pub fn build_authorization_url(
 ) -> anyhow::Result<String> {
     let mut url = url::Url::parse(endpoint.trim())
         .map_err(|e| anyhow::anyhow!("invalid authorization_endpoint {:?}: {}", endpoint, e))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        anyhow::bail!("authorization_endpoint must be http(s), got {:?}", url.scheme());
+    // Same rule as the device flow (`device_uri_is_allowed`): https always,
+    // http only to a real loopback host. The endpoint comes from AS metadata
+    // whose issuer was named by the (semi-trusted) MCP server's PRM — accepting
+    // plain http here would let a malicious PRM aim the authorization code at
+    // an eavesdroppable endpoint. RFC 8414 itself requires https issuers.
+    if !oauth::device_uri_is_allowed(url.as_str()) {
+        anyhow::bail!(
+            "authorization_endpoint must be https (or http to a loopback host); got {:?}",
+            endpoint
+        );
     }
     {
         let mut q = url.query_pairs_mut();
@@ -1094,63 +1035,6 @@ async fn complete_device_flow(
     }
 }
 
-/// Background half of a vendor QR flow: poll the vendor endpoint until the user
-/// approves, then persist the granted token as a **static** token in the same
-/// vault. Reusing the static half means `resolve_auth_headers`, `/auth/state`'s
-/// `hasCredential`, and `clear_all` all pick it up with zero changes.
-///
-/// Deadline / backoff / transient-budget semantics mirror [`complete_device_flow`]
-/// so a mid-scan network blip does not kill the login, while a genuinely dead
-/// endpoint still surfaces instead of spinning to expiry.
-#[allow(clippy::too_many_arguments)]
-async fn complete_qrcode_poll(
-    client: &reqwest::Client,
-    session: &super::qrcode_vendor::VendorSession,
-    server_url: &str,
-    header: &str,
-    prefix: &str,
-    vault: &CredentialVault,
-    expires_in_secs: u64,
-    poll_base_secs: u64,
-    transient_budget: u32,
-) -> Result<(), String> {
-    use tokio::time::{sleep, Duration as TokioDuration};
-    let deadline = std::time::Instant::now() + TokioDuration::from_secs(expires_in_secs.max(30));
-    let mut interval = poll_base_secs.max(1);
-    let mut consecutive_transient = 0u32;
-    let max_transient = transient_budget.max(1);
-    loop {
-        if std::time::Instant::now() >= deadline {
-            return Err("授权码已过期，请重新发起扫码授权".into());
-        }
-        sleep(TokioDuration::from_secs(interval)).await;
-        match super::qrcode_vendor::poll(client, session).await {
-            super::qrcode_vendor::QrPollOutcome::Granted(token) => {
-                let stored = StaticToken {
-                    value: token,
-                    header: header.to_string(),
-                    prefix: prefix.to_string(),
-                    stored_at: oauth::Clock::system().now(),
-                };
-                vault.set_static(server_url, stored).await
-                    .map_err(|e| format!("cannot save credential: {e}"))?;
-                return Ok(());
-            }
-            super::qrcode_vendor::QrPollOutcome::Pending => { consecutive_transient = 0; }
-            super::qrcode_vendor::QrPollOutcome::Transient => {
-                consecutive_transient += 1;
-                if consecutive_transient >= max_transient {
-                    return Err(format!(
-                        "授权服务暂时不可用，已连续重试 {max_transient} 次，请稍后重新发起扫码授权"
-                    ));
-                }
-                interval = oauth::back_off_poll_interval(interval);
-            }
-            super::qrcode_vendor::QrPollOutcome::Failed(reason) => return Err(reason),
-        }
-    }
-}
-
 /* ──────────────────────────────── Tests ──────────────────────────────── */
 
 #[cfg(test)]
@@ -1231,6 +1115,33 @@ mod tests {
         let p = pkce();
         let err = build_authorization_url("file:///etc/passwd", "c", "http://127.0.0.1:1", &p, &[], None);
         assert!(err.is_err());
+    }
+
+    /// P1 回归护栏：浏览器流的 authorization_endpoint 与 device flow 同一
+    /// https 规则（回环例外）。issuer 来自半可信 PRM——接受明文 http 会让
+    /// 恶意 PRM 把授权码引到可窃听的端点。此前这里只查 http(s) 家族，
+    /// 与 device flow 双重标准。
+    #[test]
+    fn authorization_url_requires_https_except_loopback() {
+        let p = pkce();
+        // 明文 http 非回环：拒绝。
+        assert!(build_authorization_url(
+            "http://attacker.example/authorize", "c", "http://127.0.0.1:1", &p, &[], None
+        ).is_err());
+        // 形似 localhost 的域名 / userinfo 绕过：拒绝。
+        assert!(build_authorization_url(
+            "http://localhost.evil.example/authorize", "c", "http://127.0.0.1:1", &p, &[], None
+        ).is_err());
+        assert!(build_authorization_url(
+            "http://localhost@evil.example/authorize", "c", "http://127.0.0.1:1", &p, &[], None
+        ).is_err());
+        // 本地开发回环：放行。
+        assert!(build_authorization_url(
+            "http://127.0.0.1:8080/authorize", "c", "http://127.0.0.1:1", &p, &[], None
+        ).is_ok());
+        assert!(build_authorization_url(
+            "http://localhost:8080/authorize", "c", "http://127.0.0.1:1", &p, &[], None
+        ).is_ok());
     }
 
     #[test]

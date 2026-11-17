@@ -1,10 +1,10 @@
 import { ChatItem, MsgItem } from '@/uni_modules/uni-ai-x/types.uts'
 // #ifdef APP-ANDROID
-import { saveAndroidMessageInBackground, invalidateAndroidMessageWrite, readAndroidChatMessages, readAndroidChatList, writeAndroidStorageBatch, mutateAndroidChatMessages } from '@/uni_modules/uni-ai-worker-runtime'
-import { requestSnapshotWork } from '@/uni_modules/uni-ai-worker-runtime'
+import { saveAndroidMessageInBackground, invalidateAndroidMessageWrite, readAndroidChatMessages, readAndroidChatList, writeAndroidStorageBatch, mutateAndroidChatMessages } from '@/uni_modules/uni-ai-x'
 // #endif
-// #ifdef APP-HARMONY
-import { deleteRenderAssets } from '@/uni_modules/uni-ai-worker/utssdk/snapshot-files.uts'
+// #ifdef APP-ANDROID || APP-HARMONY
+// 命名空间导入：避免 Rollup 对被条件编译屏蔽的具名导入做缺失导出校验。
+import * as uniAiWorkerRuntime from '@/uni_modules/uni-ai-x'
 // #endif
 
 // 存储键常量
@@ -32,11 +32,11 @@ function migrateLegacyMessage(message: MsgItem): MsgItem {
 }
 
 function serializeMessage(message: MsgItem): string {
-	// #ifdef APP-ANDROID || APP-HARMONY
+	// #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
 	const stored: MsgItem = { ...message, markdownHtml: '', markdownAst: '', markdownBlocks: '', uniAiMdRevision: 0 }
 	return JSON.stringify(stored)
 	// #endif
-	// #ifndef APP-ANDROID || APP-HARMONY
+	// #ifndef APP-ANDROID || APP-HARMONY || APP-IOS
 	return JSON.stringify(message)
 	// #endif
 }
@@ -76,6 +76,7 @@ function snapshotMessage(message: MsgItem): MsgItem {
 	const search = message.search
 	return {
 		_id: message._id, body: message.body, from_uid: message.from_uid,
+		toolConfirmation: message.toolConfirmation, toolResultText: message.toolResultText,
 		state: message.state, create_time: message.create_time, chat_id: message.chat_id,
 		rendered: message.rendered, thinkContent: message.thinkContent,
 		about_msg_id: message.about_msg_id, error_msg: message.error_msg,
@@ -465,7 +466,7 @@ export class StorageManager {
 			const msgId = msgIds[i]
 			const msg = this.getMessage(msgId)
 			if (msg != null) {
-				// #ifdef APP-HARMONY || APP-ANDROID
+				// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
 				// 原生渲染数据不落 storage：清掉历史遗留的 AST/HTML 字段（内存立即生效），
 				// 保留 body 即可在渲染时重建
 				msg.uniAiMdRevision = 0
@@ -485,7 +486,7 @@ export class StorageManager {
 		return messages.sort((a, b) => a.create_time - b.create_time)
 	}
 
-	// #ifdef APP-HARMONY || APP-ANDROID
+	// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
 	/**
 	 * 把需要清理旧渲染字段的消息加入后台队列，分批重写。
 	 * 清掉旧字段可降低 preferences 整文件刷盘成本。
@@ -554,11 +555,8 @@ export class StorageManager {
 	}
 
 	private removeRenderAssets(msgId: string) {
-		// #ifdef APP-ANDROID
-		requestSnapshotWork({ action: 'delete', messageId: msgId } as UTSJSONObject, (_result: UTSJSONObject) => {})
-		// #endif
-		// #ifdef APP-HARMONY
-		deleteRenderAssets(msgId)
+		// #ifdef APP-ANDROID || APP-HARMONY
+		uniAiWorkerRuntime.requestSnapshotWork({ action: 'delete', messageId: msgId } as UTSJSONObject, (_result: UTSJSONObject) => {})
 		// #endif
 	}
 }

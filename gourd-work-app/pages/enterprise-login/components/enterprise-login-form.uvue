@@ -1,0 +1,114 @@
+<template>
+	<view class="enterprise-form">
+		<text class="enterprise-form__head">{{ t('enterpriseLogin.head') }}</text>
+		<view :class="fieldClass">
+			<rice-input v-model="account" :placeholder="t('enterpriseLogin.emailPlaceholder')" :clearable="true"
+				clear-trigger="always" inputmode="email" border="none" height="52px" font-size="15px"
+				:custom-style="{ paddingLeft: '0px', paddingRight: '0px' }" color="var(--color-text)"
+				:placeholder-style="placeholderStyle" @focus="onFocus" @blur="onBlur" />
+		</view>
+		<view :class="submitClass">
+			<rice-button :text="t('login.getCode')" color="transparent" :text-color="submitTextColor"
+				text-size="15.5px" width="100%" height="52px" shape="square" @click="onSubmit" />
+		</view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed, ref } from 'vue'
+	import type { ComputedRef } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+
+	// 允许全局与页面样式影响组件：主题变量由页面根节点的 themeClass 注入，
+	// 组件内不再重复引入 theme.scss
+	defineOptions({
+		styleIsolation: 'app-and-page'
+	})
+
+	const emit = defineEmits<{
+		(e: 'submit', account: string): void
+	}>()
+
+	const account = ref<string>('')
+	const focused = ref<boolean>(false)
+
+	const canSubmit: ComputedRef<boolean> = computed<boolean>((): boolean => account.value.trim().length > 0)
+
+	const placeholderStyle: ComputedRef<string> = computed<string>((): string => {
+		return 'color:var(--color-text-tertiary)'
+	})
+
+	const submitTextColor: ComputedRef<string> = computed<string>((): string => {
+		return canSubmit.value ? 'var(--color-text-inverse)' : 'var(--color-text-tertiary)'
+	})
+
+	const fieldClass: ComputedRef<string> = computed<string>((): string => {
+		return focused.value ? 'enterprise-form__field enterprise-form__field--focus' : 'enterprise-form__field'
+	})
+
+	const submitClass: ComputedRef<string> = computed<string>((): string => {
+		return canSubmit.value
+			? 'enterprise-form__submit enterprise-form__submit--active'
+			: 'enterprise-form__submit enterprise-form__submit--disabled'
+	})
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function onFocus(): void {
+		focused.value = true
+	}
+
+	function onBlur(): void {
+		focused.value = false
+	}
+
+	function onSubmit(): void {
+		if (!canSubmit.value) return
+		emit('submit', account.value.trim())
+	}
+</script>
+
+<style lang="scss">
+	.enterprise-form {
+		&__head {
+			font-size: 20px;
+			font-weight: 700;
+			text-align: center;
+			color: var(--color-text);
+		}
+
+		/* 内边距统一由外层容器控制：rice-input 在 border="none" 下各端残留的 padding 不一致，
+		   已在组件上把它的横向 padding 置零，这里按设计稿给 16px / 14px */
+		&__field {
+			height: 52px;
+			margin-top: 16px;
+			padding: 0 14px 0 16px;
+			justify-content: center;
+			border-radius: 14px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+		}
+
+		&__field--focus {
+			border-color: var(--color-primary);
+		}
+
+		&__submit {
+			height: 52px;
+			margin-top: 16px;
+			border-radius: 14px;
+		}
+
+		&__submit--active {
+			background-color: var(--color-primary);
+		}
+
+		&__submit--disabled {
+			background-color: var(--color-border);
+		}
+	}
+</style>

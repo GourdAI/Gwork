@@ -1,9 +1,9 @@
 {
 	"name": "GWork",
-	"appid": "__UNI__2C8A727",
+	"appid": "__UNI__55E260E",
 	"description": "",
-	"versionName": "3.0.4",
-	"versionCode": "26092302",
+	"versionName": "0.0.1",
+	"versionCode": "1",
 	"uni-app-x": {
 		"vapor": true,
 		"styleIsolationVersion": "2",
@@ -14,7 +14,6 @@
 	"quickapp": {},
 	/* 小程序特有相关 */
 	"mp-weixin": {
-		"darkmode": true,
 		"appid": "",
 		"setting": {
 			"urlCheck": false
@@ -34,7 +33,6 @@
 		"enable": false
 	},
 	"vueVersion": "3",
-	"workers": "workers",
 	"app": {
 		"defaultAppTheme": "auto",
 		"distribute": {
@@ -49,56 +47,35 @@
 		}
 	},
 	"app-android": {
+		// 录音权限：getRecorderManager 依赖；运行时授权弹窗由框架在 start 时拉起
+		"permissions": [
+			"android.permission.RECORD_AUDIO"
+		],
 		"distribute": {
 			"modules": {},
 			"icons": {
-				"hdpi": "",
-				"xhdpi": "",
-				"xxhdpi": "",
-				"xxxhdpi": ""
+				"hdpi": "static/logos/logo_72x72.png",
+				"xhdpi": "static/logos/logo_96x96.png",
+				"xxhdpi": "static/logos/logo_144x144.png",
+				"xxxhdpi": "static/logos/logo_192x192.png"
 			},
 			"splashScreens": {
 				"default": {}
-			},
-			"abiFilters": [
-				"arm64-v8a"
-			]
+			}
 		}
 	},
 	"app-ios": {
 		"distribute": {
 			"modules": {},
-			"icons": {},
+			"icons": {
+				"appstore": "static/logos/logo_1024x1024.png"
+			},
 			"splashScreens": {}
 		}
 	},
 	"web": {
-		"darkmode": true,
 		"router": {
-			"mode": "",
-			"base": "./"
-		}
-	},
-	"app-harmony": {
-		"distribute": {
-			"bundleName": "test.json.xml",
-			"deviceTypes": [
-				"phone"
-			],
-			"deviceArchs": [
-				"arm64-v8a"
-			],
-			"signingConfigs": {
-				"default": {
-					"certpath": "/Users/json/Library/Application Support/HBuilder X/extensions/launcher/agc-certs/1789649321680.cer",
-					"keyAlias": "debugKey",
-					"keyPassword": "0000001B68553F0E3E449CDDF19F604B17B74573DEE135F3A2FCF535B68BCF07E2EEFFB58BAE2E399637DD",
-					"profile": "/Users/json/Library/Application Support/HBuilder X/extensions/launcher/agc-certs/1789649321680.p7b",
-					"signAlg": "SHA256withECDSA",
-					"storeFile": "/Users/json/Library/Application Support/HBuilder X/extensions/launcher/agc-certs/1789113937849.p12",
-					"storePassword": "0000001B68553F0E3E449CDDF19F604B17B74573DEE135F3A2FCF535B68BCF07E2EEFFB58BAE2E399637DD"
-				}
-			}
+			"mode": ""
 		}
 	}
 }

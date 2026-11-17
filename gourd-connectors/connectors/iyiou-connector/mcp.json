@@ -1,9 +1,0 @@
-{
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
-  "mcpServers": {
-    "iyiou-connector": {
-      "type": "streamable_http",
-      "url": "https://mcp.iyiou.com/data"
-    }
-  }
-}

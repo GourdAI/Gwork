@@ -1,0 +1,89 @@
+<template>
+	<view class="login" :class="themeClass">
+		<view class="login__body">
+			<view class="login__brand">
+				<login-brand></login-brand>
+			</view>
+			<login-form @submit="onSubmit"></login-form>
+		</view>
+		<login-footer @enterprise="onEnterpriseLogin"></login-footer>
+		<!-- 放在最后：绝对定位元素只有位于同级末尾时才不会被后续全屏节点抢走点击 -->
+		<view class="login__theme">
+			<rice-button :icon="themeIcon" type="default" plain shape="round" height="36px" width="36px"
+				icon-color="var(--color-text-secondary)" @click="toggleTheme" />
+		</view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed } from 'vue'
+	import type { ComputedRef } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme } from '@/hooks/useTheme'
+	import LoginBrand from './components/login-brand.uvue'
+	import LoginForm from './components/login-form.uvue'
+	import LoginFooter from './components/login-footer.uvue'
+
+	const { themeClass, isDark, setThemeMode } = useTheme()
+
+	const themeIcon = computed<string>((): string => isDark.value ? 'sun' : 'sleep')
+
+	const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
+	const ENTERPRISE_PAGE = '/pages/enterprise-login/index'
+	const VERIFY_PAGE = '/pages/verify/index'
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function onSubmit(email: string, agreed: boolean): void {
+		if (!agreed) {
+			uni.showToast({ title: t('login.agreeRequired'), icon: 'none' })
+			return
+		}
+		const account = email.trim()
+		if (!EMAIL_PATTERN.test(account)) {
+			uni.showToast({ title: t('login.emailInvalid'), icon: 'none' })
+			return
+		}
+		// TODO 接入发送验证码接口，成功后再进入验证码页
+		uni.navigateTo({ url: VERIFY_PAGE + '?email=' + encodeURIComponent(account) })
+	}
+
+	function onEnterpriseLogin(): void {
+		uni.navigateTo({ url: ENTERPRISE_PAGE })
+	}
+
+	/** 临时入口：便于在登录页直接验证亮 / 暗两种样式 */
+	function toggleTheme(): void {
+		setThemeMode(isDark.value ? 'light' : 'dark')
+		console.log('[login] theme ->', isDark.value ? 'dark' : 'light')
+	}
+</script>
+
+<style lang="scss">
+	.login {
+		flex: 1;
+		flex-direction: column;
+		padding-bottom: env(safe-area-inset-bottom);
+		background-color: var(--color-bg);
+
+		/* 临时主题切换入口，验证完可移除 */
+		&__theme {
+			position: absolute;
+			top: 56px;
+			right: 16px;
+		}
+
+		&__body {
+			flex: 1;
+			justify-content: center;
+			padding: 30px 27px 0;
+		}
+
+		/* 设计稿中品牌区与表单之间留白 100px */
+		&__brand {
+			padding-bottom: 100px;
+		}
+	}
+</style>

@@ -2,31 +2,45 @@
 	<view class="chat-box uni-theme-root">
 		<uni-ai-chat-nav @change-menu="changeMenu" />
 		<view class="chat-box-chat" :class="showMenu ? 'chat-box-chat-showMenu' : ''" ref="chat">
-			<view class="chat-box-scroll-view-box">
+			<view id="chat-scroll-box" class="chat-box-scroll-view-box">
 				<view class="chat-box-welcome-msg-box" v-if="msgList.length == 0" flatten>
 					<image class="chat-box-welcome-logo" src="@/uni_modules/uni-ai-x/static/uni-chat-logo.png" flatten/>
-					<text class="chat-box-welcome-title" flatten>嗨！我是 UNI-AI</text>
-					<text class="chat-box-welcome-text" flatten>我可以帮你回答问题、写代码、翻译、写诗等。</text>
-					<view class="chat-box-welcome-demo-btn" @click="runMarkdownDemo">
-						<text class="chat-box-welcome-demo-btn-text">体验完整Markdown示例</text>
+					<text class="chat-box-welcome-title" flatten>{{tr('嗨！我是 UNI-AI', 'Hi, I am UNI-AI')}}</text>
+					<text class="chat-box-welcome-text" flatten>{{tr('问答、编程、翻译与创作。', 'Ask, code, translate, create.')}}</text>
+					<view class="chat-box-welcome-actions">
+						<view class="chat-box-welcome-demo-btn" @click="runMarkdownDemo">
+							<uni-icons class="chat-box-welcome-demo-icon" type="list" size="20" color="var(--accent-primary)" />
+							<text class="chat-box-welcome-demo-btn-text">{{tr('体验完整Markdown示例', 'Explore the Markdown demo')}}</text>
+							<uni-icons type="right" size="16" color="var(--text-tertiary)" />
+						</view>
+						<template v-if="showToolExamples">
+							<view v-for="item in welcomePrompts" :key="item.label" class="chat-box-welcome-demo-btn" @click="sendWelcomePrompt(item.prompt)">
+								<uni-icons class="chat-box-welcome-demo-icon" :type="item.icon" size="20" color="var(--accent-primary)" />
+								<text class="chat-box-welcome-demo-btn-text">{{ item.label }}</text>
+								<uni-icons type="right" size="16" color="var(--text-tertiary)" />
+							</view>
+						</template>
 					</view>
 				</view>
-				<list-view v-if="msgList.length > 0" :key="chatActiveId" direction="vertical" class="chat-box-msg-list" :style="chatListStyle" :initial-scroll-bottom="initialScrollBottom" :scroll-anchoring="true" :scroll-top="scrollTop" id="msg-list"
+				<list-view v-if="msgList.length > 0" :key="chatActiveId" direction="vertical" class="chat-box-msg-list" :initial-scroll-bottom="initialScrollBottom" :scroll-anchoring="true" :scroll-top="scrollTop" :scroll-into-view="scrollIntoViewId" id="msg-list"
 					:scroll-with-animation="scrollWithAnimation" @scroll="onScroll" @touchstart="setTouchState(true)" @touchend="onMsgListTouchEnd"
 				>
-					<list-item v-for="renderItem in renderItemList" :key="renderItem.key" :id="renderItem.id" :style="chatListItemStyle" @longpress="onlongTapMsg(renderItem.msg)" :type="renderItem.itemType">
+					<list-item v-for="renderItem in renderItemList" :key="renderItem.key" :id="renderItem.id" @longpress="onlongTapMsg(renderItem.msg)" :type="renderItem.itemType">
 						<uni-ai-x-msg v-if="renderItem.isAi" :msg="renderItem.msg" :parts="renderItem.parts"
 							:is-first="renderItem.isFirst" @changeThinkContent="changeThinkContent" @source="openSource"></uni-ai-x-msg>
 						<uni-ai-user-msg v-else :msg="renderItem.msg" />
 					</list-item>
 					<!-- #ifdef MP-WEIXIN -->
-					<list-item :style="bottomAnchorStyle" id="msg-list-bottom"></list-item>
+					<list-item style="height:35px;" id="msg-list-bottom"></list-item>
 					<!-- #endif -->
 					<!-- #ifndef MP-WEIXIN -->
-					<list-item :style="bottomAnchorStyle" id="last-msg-a" v-show="bottomAnchorId == 'last-msg-a'"></list-item>
-					<list-item :style="bottomAnchorStyle" id="last-msg-b" v-show="bottomAnchorId == 'last-msg-b'"></list-item>
+					<list-item style="height:35px;" id="last-msg-a" v-show="bottomAnchorId == 'last-msg-a'"></list-item>
+					<list-item style="height:35px;" id="last-msg-b" v-show="bottomAnchorId == 'last-msg-b'"></list-item>
 					<!-- #endif -->
 				</list-view>
+				<!-- #ifdef APP-HARMONY -->
+				<loading v-if="showPendingLoading && pendingSpinnerVisible" class="chat-box-pending-loading" :style="pendingSpinnerStyle" :paused="false" />
+				<!-- #endif -->
 				<view class="chat-box-add-chat" :style="{visibility: scrollInBottom && state != 'processing' ? 'visible' : 'hidden'}">
 					<add-chat-btn />
 				</view>
@@ -36,20 +50,34 @@
 			</view>
 			<uni-ai-chat-extension-input v-if="hasInputExtension" />
 			<uni-ai-chat-input v-else @scroll-to-last-msg="scrollToLastMsg(true)" />
-			<text class="chat-box-tip" flatten>内容由ai生成，仅供参考</text>
+			<text class="chat-box-tip" flatten>{{tr('内容由ai生成，仅供参考', 'AI generated content may be inaccurate')}}</text>
+		</view>
+		<view v-if="pendingCalendarMessage != null" class="calendar-confirmation-overlay" @click.stop="blockCalendarOverlay">
+			<view class="calendar-confirmation-modal uni-theme-root" @click.stop="blockCalendarOverlay">
+				<text class="calendar-confirmation-title" flatten>{{tr('创建日程提醒', 'Create calendar reminder')}}</text>
+				<text class="calendar-confirmation-detail" flatten>{{pendingCalendarMessage!.toolConfirmation!.title}}</text>
+				<text class="calendar-confirmation-detail" flatten>{{pendingCalendarMessage!.toolConfirmation!.startAt}} · {{pendingCalendarMessage!.toolConfirmation!.durationMinutes}} {{tr('分钟', 'minutes')}}</text>
+				<text class="calendar-confirmation-detail" flatten>{{tr('提前', 'Remind')}} {{pendingCalendarMessage!.toolConfirmation!.alarmMinutesBefore}} {{tr('分钟提醒', 'minutes before')}}</text>
+				<view class="calendar-confirmation-actions">
+					<button class="calendar-confirmation-button calendar-confirmation-cancel" @click="resolveCalendar(false)">{{tr('取消', 'Cancel')}}</button>
+					<button class="calendar-confirmation-button calendar-confirmation-open" @click="resolveCalendar(true)">{{tr('同意', 'Allow')}}</button>
+				</view>
+			</view>
 		</view>
 	</view>
 </template>
 
 <script lang="uts" setup>
 	import type { ComputedRef } from 'vue'
-	import {uniAi, MsgItem, uiTheme} from '@/uni_modules/uni-ai-x/sdk/'
+	import {uniAi, MsgItem, uiTheme, calendarConfirmationRevision} from '@/uni_modules/uni-ai-x/sdk/'
+	import { tr } from '@/uni_modules/uni-ai-x/sdk/locale.uts'
+	import { llmModelMap, mcpServers } from '@/uni_modules/uni-ai-x/config.uts'
 	import { MarkdownTextRenderBlock } from '@/uni_modules/uni-ai-x/sdk/markdown-text.uts'
 	import { readMessagePresentation, readMessageLayoutRevision } from '@/uni_modules/uni-ai-x/sdk/message-presentation.uts'
 	import { prepareTablePresentation } from '@/uni_modules/uni-ai-x/sdk/table-presentation.uts'
 	import { linkSearchCitations } from '@/uni_modules/uni-ai-x/sdk/search-citations.uts'
 	import { linkMarkdownFootnotes } from '@/uni_modules/uni-ai-x/sdk/markdown-footnotes.uts'
-	// #ifdef APP-HARMONY || APP-ANDROID
+	// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
 	import {
 		uniAiMdStreamApplyRebuild,
 		uniAiMdPresentationRevision,
@@ -57,8 +85,12 @@
 		uniAiMdStreamGetBlocks,
 		uniAiMdStreamRequestRebuild
 	} from '@/uni_modules/uni-ai-x/sdk/uni-ai-md-stream-store.uts'
-	import { setAiWorkerRebuildListener } from '@/uni_modules/uni-ai-worker-runtime'
-	import type { AiWorkerRebuildResult } from '@/uni_modules/uni-ai-worker-runtime'
+	import { setAiWorkerRebuildListener } from '@/uni_modules/uni-ai-x'
+	import type { AiWorkerRebuildResult } from '@/uni_modules/uni-ai-x'
+	import { parseAiWorkerOps } from '@/uni_modules/uni-ai-x/sdk/worker-ops.uts'
+	// #endif
+	// #ifdef APP-IOS
+	import { takeAiWorkerRebuildResultsJson } from '@/uni_modules/uni-ai-x'
 	// #endif
 	import addChatBtn from '@/uni_modules/uni-ai-x/components/add-chat-btn.uvue'
 	import uniAiChatNav from '@/uni_modules/uni-ai-x/components/uni-ai-chat-nav.uvue'
@@ -89,6 +121,14 @@
 	const scrollTop = ref<number>(0)
 	const initialScrollBottom = ref<boolean>(false)
 	const bottomAnchorId = ref<string>('last-msg-a')
+	const scrollIntoViewId = computed<string>(() => {
+		// #ifdef APP-HARMONY
+		return bottomAnchorId.value
+		// #endif
+		// #ifndef APP-HARMONY
+		return ''
+		// #endif
+	})
 	const scrollInBottom = ref<boolean>(true)
 	const showScrollToBottom = ref<boolean>(false)
 	const scrollWithAnimation = ref<boolean>(false)
@@ -103,32 +143,28 @@
 	let showScrollToBottomTimer = 0
 	let mouseScrollTimer = 0
 	let mouseScroll = false
-	let needSetLockAutoToLastMsg = true
 	const hasInputExtension = getChatInputExtension() != null
 	
 	const state = computed<string>(() => {
 		return uniAi.currentChat?.state ?? 'none'
 	})
 
-	const chatThemeBackground = computed<string>(() => {
-		return uiTheme.value == 'dark' ? '#25282c' : '#ffffff'
-	})
-
-	const chatListStyle = computed<string>(() => {
-		return 'background-color:' + chatThemeBackground.value + ';'
-	})
-
-	const chatListItemStyle = computed<string>(() => {
-		return 'background-color:' + chatThemeBackground.value + ';'
-	})
-
-	const bottomAnchorStyle = computed<string>(() => {
-		return 'height:35px;background-color:' + chatThemeBackground.value + ';'
-	})
-	
 	const msgList = computed<MsgItem[]>(() => {
 		return uniAi.currentChat?.msgList ?? []
 	})
+	const pendingCalendarMessage = computed<MsgItem | null>(() => {
+		calendarConfirmationRevision.value
+		for (let index = msgList.value.length - 1; index >= 0; index--) {
+			const msg = msgList.value[index]
+			if (msg.toolConfirmation?.state == 'pending') return msg
+		}
+		return null
+	})
+	function resolveCalendar(confirmed: boolean) {
+		const msg = pendingCalendarMessage.value
+		if (msg != null) uniAi.resolveToolConfirmation(msg._id, confirmed)
+	}
+	function blockCalendarOverlay() {}
 
 	type MarkdownBlockCache = {
 		body: string
@@ -153,17 +189,38 @@
 		rebuildScrollTimer = setTimeout(() => {
 			rebuildScrollTimer = 0
 			rebuildScrollPending = false
-			if (!scrollInBottom.value || scrollTouch.value) return
+			if (!autoToLastMsg || scrollTouch.value) return
 			scrollToLastMsg(false)
 		}, 60)
 	}
 
-	// #ifdef APP-HARMONY || APP-ANDROID
+	// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
 	// Worker 重建完成回调：应用 ops 后驱动重算（页面环境无法调用 uni-ai-md，重建统一在 Worker 执行）
 	const onRebuildResult = (result: AiWorkerRebuildResult) => {
-		if (uniAiMdStreamApplyRebuild(result.msgId, result.ops)) {
+		if (uniAiMdStreamApplyRebuild(result.msgId, parseAiWorkerOps(result.opsJson))) {
 			rebuildVersion.value += 1
 			scheduleRebuildScroll()
+		}
+	}
+	// #endif
+	// #ifdef APP-IOS
+	let rebuildPollTimer = 0
+	const pollRebuildResults = () => {
+		const json = takeAiWorkerRebuildResultsJson()
+		if (json.length == 0) return
+		let results: AiWorkerRebuildResult[]
+		try {
+			results = JSON.parse<AiWorkerRebuildResult[]>(json) as AiWorkerRebuildResult[]
+		} catch (error) {
+			console.error('[uni-ai-x][rebuild] 解析重建结果失败', error)
+			return
+		}
+		for (let i = 0; i < results.length; i++) {
+			try {
+				onRebuildResult(results[i])
+			} catch (error) {
+				console.error('[uni-ai-x][rebuild] 应用重建结果失败', error)
+			}
 		}
 	}
 	// #endif
@@ -213,19 +270,19 @@
 	const RENDER_ITEM_FIRST_OFFSET = 100
 
 	function canRebuildMarkdownFromBody(msg: MsgItem): boolean {
-		// #ifdef APP-HARMONY || APP-ANDROID
-		return msg.body.length > 0
+		// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
+		return msg.body.trim().length > 0
 		// #endif
-		// #ifndef APP-HARMONY || APP-ANDROID
+		// #ifndef APP-HARMONY || APP-ANDROID || APP-IOS
 		return false
 		// #endif
 	}
 
 	function getMarkdownBlocks(msg: MsgItem): MarkdownTextRenderBlock[] {
-		// #ifndef APP-HARMONY || APP-ANDROID
+		// #ifndef APP-HARMONY || APP-ANDROID || APP-IOS
 		return readMessagePresentation(msg._id)
 		// #endif
-		// #ifdef APP-HARMONY || APP-ANDROID
+		// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
 		const revision = msg.uniAiMdRevision ?? 0
 			const version = uniAiMdStreamGetRevision(msg._id)
 		const theme = uiTheme.value
@@ -246,7 +303,7 @@
 		if (cached != null && cached.body == cacheBody && cached.theme == theme && cached.sources == sources &&
 			cached.uniAiMdRevision == revision && cached.complete == msg.rendered && cached.rebuildVersion == version) return cached.blocks
 		const blocks = uniAiMdStreamGetBlocks(msg._id)
-		if (blocks.length == 0 && msg.body.length > 0 && msg.rendered) {
+		if (blocks.length == 0 && msg.body.trim().length > 0 && msg.rendered) {
 			uniAi.prepareMessagePresentation(msg)
 			uniAiMdStreamRequestRebuild(msg._id, msg.body)
 		}
@@ -322,19 +379,32 @@
 		}
 		if (part.kind == 'think') return RENDER_ITEM_TYPE_AI_THINK
 		if (part.kind == 'plain') return RENDER_ITEM_TYPE_AI_PLAIN
+		if (part.kind == 'tool-status') return RENDER_ITEM_TYPE_AI_PLAIN
 		if (part.kind == 'error') return RENDER_ITEM_TYPE_AI_ERROR
-		if (part.kind == 'empty') return RENDER_ITEM_TYPE_AI_EMPTY
+		if (part.kind == 'empty') {
+			// #ifdef APP-HARMONY
+			return RENDER_ITEM_TYPE_AI_NORMAL
+			// #endif
+			// #ifndef APP-HARMONY
+			return RENDER_ITEM_TYPE_AI_EMPTY
+			// #endif
+		}
 		return RENDER_ITEM_TYPE_AI_NORMAL
 	}
 
 	function buildMessageRows(msg: MsgItem): ChatRenderItem[] {
 		const items: ChatRenderItem[] = []
+			const emptyState = msg.from_uid == 'uni-ai' && uniAi.lastAiMsg?._id == msg._id ? state.value : ''
+			const hasBody = msg.body.trim().length > 0
 			const blocks = msg.from_uid == 'uni-ai' ? getMarkdownBlocks(msg) : noBlocks
 			const hasMarkdown = blocks.length > 0 || (msg.markdownBlocks ?? '').length > 0 || (msg.markdownHtml ?? '').length > 0 || canRebuildMarkdownFromBody(msg)
 			const structure = msg.from_uid + ':' + (msg.error_msg != null).toString()
-				+ ':' + ((msg.thinkContent ?? '').length > 0).toString() + ':' + (msg.body.length > 0).toString()
+				+ ':' + ((msg.thinkContent ?? '').length > 0).toString() + ':' + hasBody.toString()
+				+ ':' + ((msg.toolStatus ?? '').length > 0).toString()
+				+ ':' + ((msg.toolResultText ?? '').length > 0).toString()
 				+ ':' + ((msg.stressSvgSource ?? '').length > 0).toString() + ':' + hasMarkdown.toString()
 				+ ':' + (msg.search?.status ?? '') + ':' + (msg.search?.sources.length ?? 0).toString() + ':' + msg.rendered.toString()
+				+ ':' + emptyState
 			const cached = messageRowCache.get(msg._id)
 			if (cached != null && cached.msg == msg && cached.blocks == blocks && cached.structure == structure) {
 				return cached.rows
@@ -372,7 +442,7 @@
 			const appendRichTextBlock = (block: MarkdownTextRenderBlock) => {
 				flushNormalParts()
 				let blockKey = block.key
-				// #ifdef APP-ANDROID || APP-HARMONY
+				// #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
 				if (block.kind == 'mermaid') {
 					blockKey = 'mermaid-' + mermaidBlockIndex.toString()
 					// #ifndef APP-ANDROID
@@ -411,25 +481,27 @@
 								appendNormalPart(aiRenderPart(block.kind, block.key, block))
 							}
 						}
-					} else if (msg.body.length > 0) {
-						// #ifdef APP-ANDROID || APP-HARMONY
+					} else if (hasBody) {
+						// #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
 						appendNormalPart(aiRenderPart('restoring', 'restoring'))
 						// #endif
-						// #ifndef APP-ANDROID || APP-HARMONY
+						// #ifndef APP-ANDROID || APP-HARMONY || APP-IOS
 						appendNormalPart(aiRenderPart('plain', 'plain'))
 						// #endif
 					}
-				} else if (msg.body.length > 0) {
+				} else if (hasBody) {
 					// #ifdef APP-ANDROID
 					appendNormalPart(aiRenderPart('plain', 'plain'))
 					// #endif
 					// #ifndef APP-ANDROID
 					appendNormalPart(aiRenderPart('plain', 'plain'))
 					// #endif
-				} else if (stressSvgSource.length == 0 && (msg.thinkContent ?? '').length == 0 && msg.search?.status != 'searching') {
+				} else if (emptyState != '' && emptyState != 'completed' && stressSvgSource.length == 0 && (msg.thinkContent ?? '').length == 0 && (msg.toolStatus ?? '').length == 0 && (msg.toolResultText ?? '').length == 0 && msg.search?.status != 'searching') {
 					appendNormalPart(aiRenderPart('empty', 'empty'))
 				}
 			}
+			if ((msg.toolStatus ?? '').length > 0) appendNormalPart(aiRenderPart('tool-status', 'tool-status'))
+			if ((msg.toolResultText ?? '').length > 0) appendNormalPart(aiRenderPart('tool-result', 'tool-result'))
 			if (normalParts.length > 0) flushNormalParts()
 			if (msg.rendered && (msg.search?.sources.length ?? 0) > 0) {
 				appendAiRenderItem(items, msg, RENDER_ITEM_TYPE_AI_SOURCES, false, 'sources', [aiRenderPart('sources', 'sources')])
@@ -451,7 +523,7 @@
 
 	const messageComputations = new Map<string, { msg: MsgItem, rows: ComputedRef<ChatRenderItem[]> }>()
 	const renderItemList = computed<ChatRenderItem[]>(() => {
-		// #ifdef APP-HARMONY
+		// #ifdef APP-HARMONY || APP-IOS
 		uniAiMdPresentationRevision.value
 		rebuildVersion.value
 		// #endif
@@ -475,6 +547,48 @@
 	const lastMsg = computed<MsgItem | null>(() => {
 		return uniAi.lastAiMsg
 	})
+
+	// #ifdef APP-HARMONY
+	const showPendingLoading = computed<boolean>(() => {
+		const msg = lastMsg.value
+		return state.value == 'processing' && msg != null && msg.body.length == 0
+			&& (msg.thinkContent ?? '').length == 0 && (msg.toolStatus ?? '').length == 0
+			&& (msg.toolResultText ?? '').length == 0 && msg.search?.status != 'searching'
+	})
+	const pendingSpinnerVisible = ref<boolean>(false)
+	const pendingSpinnerStyle = ref<string>('')
+	let pendingSpinnerMeasureTimer = 0
+
+	function updatePendingSpinnerPosition(): void {
+		if (!showPendingLoading.value || viewDisposed) {
+			pendingSpinnerVisible.value = false
+			return
+		}
+		const box = uni.getElementById('chat-scroll-box')?.getBoundingClientRect()
+		const list = uni.getElementById('msg-list')?.getBoundingClientRect()
+		const anchor = uni.getElementById('pending-spinner-anchor')?.getBoundingClientRect()
+		if (box == null || list == null || anchor == null || anchor.width == 0) {
+			pendingSpinnerVisible.value = false
+			return
+		}
+		pendingSpinnerStyle.value = 'top:' + (anchor.top - box.top).toString() + 'px;left:' + (anchor.left - box.left).toString() + 'px;'
+		pendingSpinnerVisible.value = anchor.bottom > list.top && anchor.top < list.bottom
+	}
+
+	watch(showPendingLoading, (visible: boolean) => {
+		pendingSpinnerVisible.value = false
+		pendingSpinnerMeasureTimer = clearTimer(pendingSpinnerMeasureTimer)
+		if (!visible) return
+		nextTick(() => {
+			if (viewDisposed) return
+			updatePendingSpinnerPosition()
+			pendingSpinnerMeasureTimer = setTimeout(() => {
+				pendingSpinnerMeasureTimer = 0
+				updatePendingSpinnerPosition()
+			}, 60)
+		})
+	})
+	// #endif
 	
 	const chatActiveId = computed<string>(() => {
 		return uniAi.chat.activeId
@@ -587,7 +701,12 @@
 		initialScrollBottom.value = msgList.value.length > 0
 		messageRowCache.clear()
 		rowCache.clear()
+		// #ifdef APP-HARMONY
+		autoToLastMsg = msgList.value.length > 0
+		// #endif
+		// #ifndef APP-HARMONY
 		autoToLastMsg = false
+		// #endif
 		scrollWithAnimation.value = false
 		scrollTop.value = 0
 		scrollInBottom.value = true
@@ -595,14 +714,25 @@
 		showScrollToBottom.value = false
 		nextTick(() => {
 			if (lastMsg.value != null) lastMsg.value.rendered = true
-			if (msgList.value.length > 0) updateScrollInBottom()
+			if (msgList.value.length > 0) {
+				// #ifdef APP-HARMONY
+				scrollToLastMsg(false)
+				// #endif
+				updateScrollInBottom()
+			}
 		})
 	}, { deep: true, immediate: true })
 
-	watch((): number => msgList.value.length, () => {
+	watch((): number => msgList.value.length, (length: number, previousLength: number) => {
 		if (msgList.value.length == 0) {
 			resetScrollStateForEmptyChat()
 		}
+		// #ifdef APP-HARMONY
+		if (previousLength == 0 && length > 0) {
+			autoToLastMsg = true
+			nextTick(() => { scrollToLastMsg(false) })
+		}
+		// #endif
 		const activeIds = new Set<string>()
 		msgList.value.forEach((msg: MsgItem) => { activeIds.add(msg._id) })
 		messageRowCache.forEach((cached: MessageRowCache, id: string) => {
@@ -613,23 +743,6 @@
 			markdownBlockCache.delete(id)
 		})
 	})
-	
-	const lockAutoToLastMsg = () => {
-		// #ifndef MP-WEIXIN
-		if (!needSetLockAutoToLastMsg) return
-		const lastMsgFirstItem = renderItemList.value.find((item: ChatRenderItem): boolean => {
-			return item.isAi && item.isFirst && item.msg._id == lastMsg.value?._id
-		})
-		if (lastMsgFirstItem == null) return
-		const lastMsgEl: UniElement | null = uni.getElementById(lastMsgFirstItem.id)
-		const scrollList: UniElement | null = uni.getElementById('msg-list')
-		if (lastMsgEl == null || scrollList == null) return 
-		if (msgList.value.length < 3 || scrollList.offsetHeight < lastMsgEl.offsetHeight) {
-			autoToLastMsg = false
-			needSetLockAutoToLastMsg = false
-		}
-		// #endif
-	}
 	
 	let scrollUpdateQueued = false
 	let viewDisposed = false
@@ -664,7 +777,6 @@
 		if (viewDisposed || chatId != chatActiveId.value) return
 		// #endif
 		setIsInScrollBottom()
-		lockAutoToLastMsg()
 		if (!scrollTouch.value && autoToLastMsg) {
 			// #ifndef APP-ANDROID
 			await nextTick()
@@ -693,9 +805,9 @@
 		if (item.from_uid == 'uni-ai') {
 			return
 		}
-		const itemList = ['复制'] as string[]
+		const itemList = [tr('复制', 'Copy')] as string[]
 		const isAiMsg = item.from_uid == 'uni-ai'
-		itemList.push(isAiMsg ? '选择' : '修改')
+		itemList.push(isAiMsg ? tr('选择', 'Select') : tr('修改', 'Edit'))
 		uni.showActionSheet({
 			itemList,
 			success: (res: ShowActionSheetSuccess) => {
@@ -739,6 +851,9 @@
 	}
 	
 	const onScroll = () => {
+		// #ifdef APP-HARMONY
+		if (showPendingLoading.value) updatePendingSpinnerPosition()
+		// #endif
 		scrollBottomCheckTimer = clearTimer(scrollBottomCheckTimer)
 		if (!scrolling.value) {
 			scrolling.value = true
@@ -779,16 +894,49 @@
 			console.error('[uni-ai-x][Markdown示例] 运行失败', error)
 		}
 	}
+	type WelcomePrompt = {
+		label: string
+		icon: string
+		prompt: string
+	}
+	const welcomePrompts = computed<WelcomePrompt[]>(() => {
+		const prompts: WelcomePrompt[] = []
+	if (mcpServers.some((server): boolean =>
+		server.id == 'weather' && server.url.length > 0 &&
+		(server.tools == null || (server.tools.includes('openmeteo_search_locations') && server.tools.includes('openmeteo_get_forecast')))
+	)) {
+		prompts.push({ label: tr('MCP 示例：查天气', 'MCP example: Weather'), icon: 'search', prompt: tr('帮我查一下北京现在的天气', 'What is the weather in Beijing right now?') })
+	}
+	// #ifdef APP-ANDROID || APP-IOS || APP-HARMONY
+	prompts.push({ label: tr('工具调用示例：创建日程提醒', 'Tool example: Calendar reminder'), icon: 'calendar', prompt: tr('帮我在 15 分钟后创建一个“测试日程”提醒，持续 30 分钟，提前 5 分钟提醒', 'Create a test calendar reminder in 15 minutes, lasting 30 minutes, with an alert 5 minutes before.') })
+	// #endif
+		return prompts
+	})
+	const showToolExamples = computed<boolean>(() => {
+		if (uniAi.llm.provider != 'qiniu') return false
+		const model = llmModelMap.get('qiniu')?.models.find((item) => item.modelId == uniAi.llm.model)
+		return model?.toolCall == true
+	})
+	const sendWelcomePrompt = (prompt: string) => {
+		if (state.value == 'processing' || uniAi.currentChat == null) return
+		uniAi.sendMsg(prompt)
+		uniAi.currentChat!.inputContent = ''
+	}
 	const beforeRequestAi = () => {
 		autoToLastMsg = true
-		needSetLockAutoToLastMsg = true
 		scrollToLastMsg(false)
 	}
 	
 	onMounted(() => {
 		uniAi.onBeforeRequestAi(beforeRequestAi)
-		// #ifdef APP-HARMONY || APP-ANDROID
+		// #ifdef APP-IOS
+		pollRebuildResults()
+		rebuildPollTimer = setInterval(pollRebuildResults, 100)
+		// #endif
+		// #ifndef APP-IOS
+		// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
 		setAiWorkerRebuildListener(onRebuildResult)
+		// #endif
 		// #endif
 		// #ifdef H5
 		window.addEventListener('wheel', () => {
@@ -812,14 +960,23 @@
 		messageComputations.clear()
 		if (state.value == 'processing') uniAi.abortRequest()
 		uniAi.offBeforeRequestAi(beforeRequestAi)
-		// #ifdef APP-HARMONY || APP-ANDROID
+		// #ifdef APP-IOS
+		if (rebuildPollTimer != 0) clearInterval(rebuildPollTimer)
+		rebuildPollTimer = 0
+		// #endif
+		// #ifndef APP-IOS
+		// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
 		setAiWorkerRebuildListener(null)
+		// #endif
 		// #endif
 		scrollingT = clearTimer(scrollingT)
 		scrollBottomCheckTimer = clearTimer(scrollBottomCheckTimer)
 		showScrollToBottomTimer = clearTimer(showScrollToBottomTimer)
 		mouseScrollTimer = clearTimer(mouseScrollTimer)
 		touchClearTimer = clearTimer(touchClearTimer)
+		// #ifdef APP-HARMONY
+		pendingSpinnerMeasureTimer = clearTimer(pendingSpinnerMeasureTimer)
+		// #endif
 	})
 </script>
 
@@ -837,7 +994,64 @@
 .chat-box-chat {
 	flex: 1;
 	position: relative;
+}
+
+.calendar-confirmation-overlay {
+	position: fixed;
+	left: 0;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	z-index: 110;
+	justify-content: center;
+	align-items: center;
+	background-color: rgba(0, 0, 0, 0.7);
+}
+
+.calendar-confirmation-modal {
+	width: 86%;
+	max-width: 360px;
+	padding: 20px;
+	border-radius: 8px;
 	background-color: var(--bg-primary);
+}
+
+.calendar-confirmation-title {
+	font-size: 17px;
+	font-weight: 600;
+	color: var(--text-primary);
+	margin-bottom: 12px;
+}
+
+.calendar-confirmation-detail {
+	font-size: 14px;
+	line-height: 22px;
+	color: var(--text-secondary);
+}
+
+.calendar-confirmation-actions {
+	flex-direction: row;
+	margin-top: 18px;
+}
+
+.calendar-confirmation-button {
+	flex: 1;
+	height: 42px;
+	line-height: 42px;
+	font-size: 14px;
+	margin: 0;
+	padding: 0;
+	border-radius: 4px;
+}
+
+.calendar-confirmation-cancel {
+	margin-right: 8px;
+	color: var(--text-primary);
+}
+
+.calendar-confirmation-open {
+	background-color: #1677c9;
+	color: #fff;
 }
 
 .chat-box-scroll-view-box {
@@ -850,11 +1064,20 @@
 	margin-bottom: 140px;
 }
 
+.chat-box-pending-loading {
+	position: absolute;
+	width: 16px;
+	height: 16px;
+	border-color: #aaaaaa;
+	z-index: 15;
+}
+
 .chat-box-add-chat {
 	position: absolute;
 	bottom: 150px;
-	left: 0;
-	width: 100%;
+	left: 50%;
+	margin-left: -55px;
+	width: 110px;
 	flex-direction: row;
 	justify-content: center;
 	z-index: 20;
@@ -884,24 +1107,44 @@
 }
 
 .chat-box-welcome-text {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 0 10px;
 	font-size: 16px;
 	color: var(--text-secondary);
 	text-align: center;
 	line-height: 24px;
-	margin: 0 30px;
+}
+
+.chat-box-welcome-actions {
+	width: 100%;
+	max-width: 440px;
+	margin-top: 20px;
+	flex-direction: column;
 }
 
 .chat-box-welcome-demo-btn {
-	margin-top: 24px;
-	padding: 8px 20px;
-	border-radius: 20px;
+	width: 100%;
+	min-height: 52px;
+	margin: 5px 0;
+	padding: 8px 12px;
+	box-sizing: border-box;
+	flex-direction: row;
+	align-items: center;
 	border: 1px solid var(--border-color);
-	background-color: var(--bg-secondary);
+	border-radius: 26px;
+	background-color: var(--bg-primary);
+}
+
+.chat-box-welcome-demo-icon {
+	width: 28px;
+	margin-right: 8px;
 }
 
 .chat-box-welcome-demo-btn-text {
+	flex: 1;
 	font-size: 14px;
-	color: var(--accent-primary);
+	color: var(--text-primary);
 }
 
 .chat-box-scroll-to-bottom {
@@ -942,6 +1185,22 @@
 	left: 0;
 	width: 100%;
 	height: 100%;
+	margin-bottom: 0;
+}
+
+.chat-box-add-chat,
+.chat-box-scroll-to-bottom {
+	bottom: 10px;
+}
+/* #endif */
+
+/* #ifdef H5 || APP-ANDROID */
+.chat-box-chat,
+.chat-box-scroll-view-box {
+	min-height: 0;
+}
+
+.chat-box-msg-list {
 	margin-bottom: 0;
 }
 

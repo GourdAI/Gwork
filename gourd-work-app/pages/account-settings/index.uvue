@@ -1,0 +1,208 @@
+<template>
+	<view class="settings" :class="themeClass">
+		<view class="settings__nav">
+			<view class="settings__back" @click="onBack">
+				<rice-icon name="arrow-left" size="20px" color="var(--color-text-secondary)"></rice-icon>
+			</view>
+			<text class="settings__nav-title">{{ t('settings.title') }}</text>
+			<view class="settings__nav-spacer"></view>
+		</view>
+
+		<scroll-view class="settings__scroll" direction="vertical" :show-scrollbar="false">
+			<view class="settings__content">
+				<view class="settings-hero">
+					<view class="settings-hero__avatar" @click="onChangeAvatar">
+						<!-- rice-avatar 的 round 在非 Android 端不生效（radius 默认 null），必须显式传 radius -->
+						<rice-avatar :src="avatar" size="96px" mode="aspectFill" radius="48px"></rice-avatar>
+					</view>
+					<text class="settings-hero__tip">{{ t('settings.changeAvatar') }}</text>
+				</view>
+
+				<view class="settings-sec">
+					<view class="settings-row settings-row--divided" @click="openRename">
+						<text class="settings-row__label">{{ nameLabel }}</text>
+						<text class="settings-row__value">{{ name }}</text>
+						<rice-icon name="arrow-right" size="13px" color="var(--color-text-tertiary)"></rice-icon>
+					</view>
+					<view class="settings-row" @click="goRebind">
+						<text class="settings-row__label">{{ t('settings.email') }}</text>
+						<text class="settings-row__value">{{ email }}</text>
+						<rice-icon name="arrow-right" size="13px" color="var(--color-text-tertiary)"></rice-icon>
+					</view>
+				</view>
+			</view>
+		</scroll-view>
+
+		<app-input-dialog :visible="renameVisible" :title="t('settings.renameTitle')" :value="name"
+			@close="renameVisible = false" @confirm="onRenameConfirm"></app-input-dialog>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed, ref } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme } from '@/hooks/useTheme'
+	import { useUser } from '@/hooks/useUser'
+	import AppInputDialog from '@/components/app-input-dialog/app-input-dialog.uvue'
+
+	const MINE_PAGE: string = '/pages/mine/index'
+	const REBIND_PAGE: string = '/pages/rebind-email/index'
+
+	const { themeClass } = useTheme()
+	const { name, email, avatar, idType, setName, setAvatar } = useUser()
+
+	const renameVisible: Ref<boolean> = ref<boolean>(false)
+
+	// 个人账号显示「用户名称」，企业账号显示「姓名」（原型 S8）
+	const nameLabel: ComputedRef<string> = computed<string>((): string => {
+		return idType.value === 'enterprise' ? t('settings.nameLabelEnt') : t('settings.nameLabel')
+	})
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function onBack(): void {
+		uni.navigateBack({
+			fail: () => {
+				uni.reLaunch({ url: MINE_PAGE })
+			}
+		})
+	}
+
+	function goRebind(): void {
+		uni.navigateTo({ url: REBIND_PAGE })
+	}
+
+	function onChangeAvatar(): void {
+		uni.chooseImage({
+			count: 1,
+			success: (res: ChooseImageSuccessResult) => {
+				const paths: string[] = res.tempFilePaths
+				if (paths.length === 0) return
+				// 演示用临时路径；接口接入后应上传并换成持久 URL
+				setAvatar(paths[0])
+				uni.showToast({ title: t('settings.avatarDone'), icon: 'none' })
+			}
+		})
+	}
+
+	function openRename(): void {
+		renameVisible.value = true
+	}
+
+	function onRenameConfirm(value: string): void {
+		renameVisible.value = false
+		if (value.trim().length === 0) return
+		setName(value)
+		uni.showToast({ title: t('settings.renameDone'), icon: 'none' })
+	}
+</script>
+
+<style lang="scss">
+	.settings {
+		flex: 1;
+		flex-direction: column;
+		padding-top: var(--status-bar-height);
+		padding-bottom: env(safe-area-inset-bottom);
+		background-color: var(--color-bg);
+
+		&__nav {
+			flex-direction: row;
+			align-items: center;
+			height: 54px;
+			padding: 0 14px;
+		}
+
+		&__back {
+			width: 32px;
+			height: 32px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 10px;
+		}
+
+		&__nav-title {
+			flex: 1;
+			margin-left: 4px;
+			font-size: 16px;
+			font-weight: 720;
+			color: var(--color-text);
+		}
+
+		&__nav-spacer {
+			width: 32px;
+			height: 32px;
+		}
+
+		&__scroll {
+			flex: 1;
+			min-height: 0;
+		}
+
+		&__content {
+			padding: 34px 16px 28px;
+		}
+	}
+
+	.settings-hero {
+		flex-direction: column;
+		align-items: center;
+		margin-bottom: 34px;
+
+		&__avatar {
+			width: 96px;
+			height: 96px;
+			border-radius: 48px;
+			overflow: hidden;
+		}
+
+		&__tip {
+			margin-top: 12px;
+			font-size: 11.5px;
+			color: var(--color-text-tertiary);
+		}
+	}
+
+	.settings-sec {
+		border-width: 1px;
+		border-style: solid;
+		border-color: var(--color-border);
+		border-radius: 18px;
+		background-color: var(--color-bg-card);
+		overflow: hidden;
+	}
+
+	.settings-row {
+		flex-direction: row;
+		align-items: center;
+		width: 100%;
+		min-height: 56px;
+		padding: 0 15px;
+
+		&--divided {
+			border-bottom-width: 1px;
+			border-bottom-style: solid;
+			border-bottom-color: var(--color-border);
+		}
+
+		&__label {
+			flex: 1;
+			font-size: 13.5px;
+			font-weight: 600;
+			color: var(--color-text);
+		}
+
+		&__value {
+			margin-right: 6px;
+			max-width: 130px;
+			font-size: 12px;
+			font-weight: 600;
+			color: var(--color-text-tertiary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+	}
+</style>

@@ -1,0 +1,183 @@
+<template>
+	<view class="verify" :class="themeClass">
+		<view class="verify__body">
+			<view class="verify__nav">
+				<view class="verify__back" @click="onBack">
+					<rice-icon name="arrow-left" size="20px" color="var(--color-text-secondary)" />
+				</view>
+			</view>
+			<text class="verify__title">{{ t('verify.sentTo') }}</text>
+			<text class="verify__email">{{ email }}</text>
+			<view class="verify__code">
+				<verify-code-input v-model="code" :length="CODE_LENGTH" @complete="onComplete"></verify-code-input>
+			</view>
+			<view class="verify__resend" @click="onResend">
+				<text class="verify__resend-text">{{ t('verify.resend') }}</text>
+				<text v-if="countdown > 0" class="verify__resend-count">{{ resendCountText }}</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed, onUnmounted, ref } from 'vue'
+	import type { ComputedRef } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme } from '@/hooks/useTheme'
+	import VerifyCodeInput from './components/verify-code-input.uvue'
+
+	const CODE_LENGTH: number = 6
+	const RESEND_SECONDS: number = 60
+	const LOGIN_PAGE: string = '/pages/login/index'
+	const HOME_PAGE: string = '/pages/home/index'
+
+	const { themeClass } = useTheme()
+
+	const email = ref<string>('')
+	const code = ref<string>('')
+	const countdown = ref<number>(RESEND_SECONDS)
+	let countdownTimer: number | null = null
+
+	const resendCountText: ComputedRef<string> = computed<string>((): string => {
+		return i18n.global.t('verify.resendSeconds', { seconds: countdown.value })
+	})
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function decodeEmail(raw: string | null): string {
+		if (raw == null || raw.length === 0) return ''
+		try {
+			return decodeURIComponent(raw)
+		} catch (_) {
+			return raw
+		}
+	}
+
+	function stopCountdown(): void {
+		if (countdownTimer != null) {
+			clearInterval(countdownTimer)
+			countdownTimer = null
+		}
+	}
+
+	function startCountdown(): void {
+		stopCountdown()
+		countdown.value = RESEND_SECONDS
+		countdownTimer = setInterval((): void => {
+			if (countdown.value <= 1) {
+				countdown.value = 0
+				stopCountdown()
+				return
+			}
+			countdown.value -= 1
+		}, 1000)
+	}
+
+	function onResend(): void {
+		code.value = ''
+		startCountdown()
+		// TODO 接入重新发送验证码接口，成功后刷新倒计时
+		uni.showToast({ title: t('verify.resent'), icon: 'none' })
+	}
+
+	function onComplete(value: string): void {
+		if (value.length !== CODE_LENGTH) return
+		// TODO 接入验证码校验接口：校验通过后再进入首页，失败时清空验证码并提示
+		uni.showToast({ title: t('verify.loginSuccess'), icon: 'none' })
+		uni.reLaunch({ url: HOME_PAGE })
+	}
+
+	function onBack(): void {
+		uni.navigateBack({
+			fail: () => {
+				uni.reLaunch({ url: LOGIN_PAGE })
+			}
+		})
+	}
+
+	onLoad((options: OnLoadOptions) => {
+		const rawEmail: string | null = options['email']
+		email.value = decodeEmail(rawEmail)
+		startCountdown()
+		uni.showToast({ title: t('verify.sent'), icon: 'none' })
+	})
+
+	onUnmounted((): void => {
+		stopCountdown()
+	})
+</script>
+
+<style lang="scss">
+	.verify {
+		flex: 1;
+		flex-direction: column;
+		/* H5 下 --status-bar-height 为 0，APP 下取系统状态栏高度，避免返回按钮被状态栏遮挡 */
+		padding-top: var(--status-bar-height);
+		padding-bottom: env(safe-area-inset-bottom);
+		background-color: var(--color-bg);
+
+		&__body {
+			flex: 1;
+			align-items: center;
+			padding: 20px 26px 0;
+		}
+
+		&__nav {
+			width: 100%;
+			flex-direction: row;
+		}
+
+		&__back {
+			width: 32px;
+			height: 32px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 10px;
+		}
+
+		/* 设计稿：返回按钮下方 76px 为引导文案 */
+		&__title {
+			margin-top: 76px;
+			font-size: 15px;
+			color: var(--color-text-secondary);
+		}
+
+		&__email {
+			margin-top: 10px;
+			width: 100%;
+			font-size: 22px;
+			font-weight: 800;
+			letter-spacing: -0.3px;
+			/* 设计稿 line-height: 1.35，22px 字号折算为 30px */
+			line-height: 30px;
+			text-align: center;
+			word-break: break-all;
+			color: var(--color-text);
+		}
+
+		&__code {
+			width: 100%;
+			margin-top: 36px;
+		}
+
+		&__resend {
+			flex-direction: row;
+			align-items: center;
+			margin-top: 22px;
+		}
+
+		&__resend-text {
+			font-size: 12.5px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__resend-count {
+			margin-left: 3px;
+			font-size: 12.5px;
+			font-weight: 700;
+			color: var(--color-primary);
+		}
+	}
+</style>

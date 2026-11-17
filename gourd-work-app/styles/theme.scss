@@ -1,0 +1,144 @@
+/**
+ * 全局主题变量：单一色值来源，light / dark 两套类由循环自动生成
+ *
+ * 用法（页面根节点一行绑定，类名字面量不出现在业务代码里）：
+ *   <view :class="themeClass">
+ *   const { themeClass } = useTheme()   // hooks/useTheme.ts
+ *
+ * 约定（见 AGENTS.md 第 9 节）：
+ * 1. 新增颜色只在下面 $theme-palette 的两张表里各写一次；编译期校验成对，缺一边直接中断构建
+ * 2. 组件内禁止写死十六进制 / rgba 色值；rice-ui 的色值 props 与行内样式直接传 var(--color-*) 字符串
+ * 3. 类名前缀 theme-*，与 uni-ai-x 的 .uni-theme-root、rice-ui 的 .rice-theme-* 互不干扰
+ */
+
+$theme-palette: (
+	'light': (
+		/* 背景 */
+		'bg': #ffffff,                        // 页面主背景
+		'bg-card': #f5f7fb,                   // 卡片、消息气泡等容器
+		'bg-hover': #eaf0fa,                  // 点击 / hover 态
+		/* 文字 */
+		'text': #151b29,                      // 一级文本：标题、正文
+		'text-secondary': #5b6679,            // 二级文本：描述、说明
+		'text-tertiary': #98a3b5,             // 三级文本：辅助信息、时间戳
+		'text-inverse': #ffffff,              // 反色文本：用于主色按钮之上
+		/* 边框与分割线 */
+		'border': #e5eaf3,                    // 主要边框
+		'border-light': #f0f0f0,              // 轻微分割线
+		/* 主色与状态色 */
+		'primary': #2b6bff,                   // 主色：按钮、链接、选中态
+		'primary-press': #1f5ae0,             // 主色按下态
+		'success': #10b886,
+		'warning': #faad14,
+		'error': #ef4457,
+		/* 遮罩与半透明 */
+		'mask': rgba(0, 0, 0, 0.4),           // 弹窗遮罩
+		'sheet-mask': rgba(10, 18, 36, 0.42), // 底部弹层遮罩
+		'primary-alpha': rgba(43, 107, 255, 0.1), // 主色浅底：标签、选中背景
+		'brand-soft': #e9f0ff,                // 品牌浅底：标签、选中卡片
+		'danger-bg': #fff0f1,                 // 危险操作浅底
+		'success-soft': rgba(16, 184, 134, 0.14), // 在线状态浅底
+		/* 「我的」企业账号：图标底与认证状态徽标（参照原型 S7 切换账号卡） */
+		'ent-icon-bg': #f1ecff,
+		'ent-icon': #7b5cf0,
+		'badge-ok-bg': #e6f6ed,
+		'badge-ok': #259c5c,
+		'badge-pending-bg': #fff1e0,
+		'badge-pending': #d4862c,
+		'badge-fail-bg': #ffe9ea,
+		'badge-fail': #e05555,
+		/* 产物弹层：图片类文件图标（与品牌色区分的内容色，参照设计稿） */
+		'file-image-bg': #e6f2fb,
+		'file-image': #2f8fd6,
+		/* 阴影：原生端 box-shadow 颜色不支持 var()，仅供 SCSS map-get 使用 */
+		'shadow': rgba(28, 48, 90, 0.09),
+		'shadow-strong': rgba(20, 38, 80, 0.12),
+		'sheet-shadow': rgba(20, 38, 80, 0.14),
+		/* 首页主视觉 */
+		'hero-title': #454547,
+		'hero-sub': #5b6679,
+		'cap-text': #6c6c75,
+		'cap-dot': #75a7f9,
+		'cap-dot-ring': rgba(117, 167, 249, 0.16),
+		/* 登录页：光晕、品牌渐变与投影 */
+		'login-brand-soft': #e9f0ff,
+		'login-brand-from': #4b86ff,
+		'login-brand-to': #2b6bff,
+		'login-shadow': rgba(43, 107, 255, 0.26)
+	),
+	'dark': (
+		/* 背景 */
+		'bg': #1c1c1e,
+		'bg-card': #252528,
+		'bg-hover': #2e2e32,
+		/* 文字 */
+		'text': #f2f2f5,
+		'text-secondary': #a1a1a8,
+		'text-tertiary': #71717a,
+		'text-inverse': #ffffff,
+		/* 边框与分割线 */
+		'border': #3a3a3e,
+		'border-light': #3a3a3e,
+		/* 主色与状态色（暗黑下适当提亮，保证对比度） */
+		'primary': #4a86ff,
+		'primary-press': #6ba4ff,
+		'success': #2fd3a5,
+		'warning': #ffc53d,
+		'error': #ff6b78,
+		/* 遮罩与半透明 */
+		'mask': rgba(0, 0, 0, 0.6),
+		'sheet-mask': rgba(10, 18, 36, 0.42),
+		'primary-alpha': rgba(74, 134, 255, 0.16),
+		'brand-soft': #202b40,
+		'danger-bg': #3a1e27,
+		'success-soft': rgba(47, 211, 165, 0.16),
+		/* 「我的」企业账号：图标底与认证状态徽标 */
+		'ent-icon-bg': #332b4a,
+		'ent-icon': #a78bfa,
+		'badge-ok-bg': #1c3a2b,
+		'badge-ok': #5fd39b,
+		'badge-pending-bg': #3d2e1b,
+		'badge-pending': #f0b563,
+		'badge-fail-bg': #3d2025,
+		'badge-fail': #ff8b95,
+		/* 产物弹层：图片类文件图标 */
+		'file-image-bg': #16303f,
+		'file-image': #63b7e8,
+		/* 阴影 */
+		'shadow': rgba(0, 0, 0, 0.55),
+		'shadow-strong': rgba(0, 0, 0, 0.55),
+		'sheet-shadow': rgba(0, 0, 0, 0.55),
+		/* 首页主视觉 */
+		'hero-title': #f2f2f5,
+		'hero-sub': #9a9aa2,
+		'cap-text': #a1a1a8,
+		'cap-dot': #4a86ff,
+		'cap-dot-ring': rgba(74, 134, 255, 0.18),
+		/* 登录页：光晕、品牌渐变与投影 */
+		'login-brand-soft': #202b40,
+		'login-brand-from': #5a92ff,
+		'login-brand-to': #3a76f0,
+		'login-shadow': rgba(74, 134, 255, 0.3)
+	)
+);
+
+/* 编译期成对校验：任一边缺变量就中断构建，避免暗黑模式下颜色静默缺失 */
+@each $name, $value in map-get($theme-palette, 'light') {
+	@if not map-has-key(map-get($theme-palette, 'dark'), $name) {
+		@error 'theme.scss: --color-#{$name} 缺少 dark 取值，两套主题必须成对';
+	}
+}
+
+@each $name, $value in map-get($theme-palette, 'dark') {
+	@if not map-has-key(map-get($theme-palette, 'light'), $name) {
+		@error 'theme.scss: --color-#{$name} 缺少 light 取值，两套主题必须成对';
+	}
+}
+
+@each $mode, $palette in $theme-palette {
+	.theme-#{$mode} {
+		@each $name, $value in $palette {
+			--color-#{$name}: #{$value};
+		}
+	}
+}

@@ -27,6 +27,18 @@
 //! pinning a port — over-blocking loopback would push our own pages into the
 //! system browser, which is worse than the threat the port pin defended against.
 //!
+//! # Popup policy: never spawn a second app window
+//!
+//! `on_new_window` (lib.rs) always denies. Allowing would let WebView2 create
+//! a brand-new top-level window running this same UI, and because the kernel
+//! serves the whole app on a loopback port, any popup whose URL resolves to
+//! loopback — an OAuth redirect echo, a vendor CLI login page at
+//! `http://localhost:<port>`, a stray relative link — clones the entire app.
+//! Each clone re-runs the same boot code, so one such popup on the connector
+//! page cascaded into an unbounded pile of windows (2026-11 field report).
+//! Deny + focus-main-window for [`is_app_own_url`], deny + system browser for
+//! everything else http(s), deny + drop for the rest.
+//!
 //! Opening goes through `tauri-plugin-shell` (already registered in `lib.rs`,
 //! `shell:allow-open` already granted) instead of the old shell's hand-rolled
 //! `rundll32` call. Same reasoning as the old `updater.rs`, which also used
@@ -67,6 +79,35 @@ pub fn is_internal_url(url: &Url) -> bool {
         // from generated previews (the code preview and image lightbox both use
         // blob URLs). None of these should ever reach the system browser.
         "about" | "data" | "blob" => true,
+        _ => false,
+    }
+}
+
+/// Is this URL one of our own pages, i.e. would loading it in a window show
+/// the app UI itself?
+///
+/// This is the predicate `on_new_window` uses to decide what a page-requested
+/// popup (`window.open` / `target="_blank"`) meant. It is deliberately
+/// narrower than [`is_internal_url`]: `about:` / `data:` / `blob:` are
+/// internal for *navigation* purposes but can never be "the app", so they are
+/// excluded here and handed to the system-browser path (which refuses
+/// anything that is not http(s), see [`is_external_openable`]).
+pub fn is_app_own_url(url: &Url) -> bool {
+    match url.scheme() {
+        // Tauri's own protocols serve frontendDist; a popup to them is the app.
+        "tauri" | "asset" | "ipc" => true,
+        "http" | "https" => {
+            let host = url.host_str().unwrap_or_default();
+            host == "tauri.localhost"
+                || host.ends_with(".tauri.localhost")
+                // The in-process kernel serves the same UI on a random
+                // loopback port (and the dev server on 1420); a popup to any
+                // of them is another copy of the app, not a web page.
+                || host == "localhost"
+                || host == "127.0.0.1"
+                || host == "::1"
+                || host == "[::1]"
+        }
         _ => false,
     }
 }
@@ -124,6 +165,33 @@ mod tests {
             "asset://localhost/x.png",
         ] {
             assert!(is_internal_url(&u(s)), "must be internal: {}", s);
+        }
+    }
+
+    /* `on_new_window` must never spawn a second app window: every URL that
+    would render the app UI itself is "our own", while in-page schemes that
+    are merely internal for navigation are not (they carry no app). */
+    #[test]
+    fn app_own_urls_are_exactly_the_ui_origins() {
+        for s in [
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/",
+            "http://localhost/",
+            "http://localhost:5055/GWork",
+            "http://127.0.0.1:49713/index.html",
+            "http://[::1]:1420/",
+        ] {
+            assert!(is_app_own_url(&u(s)), "must be our own UI: {}", s);
+        }
+        for s in [
+            "https://www.gourdwork.com/",
+            "https://login.example/oauth",
+            "about:blank",
+            "data:text/html,<p>x",
+            "blob:abc123",
+            "file:///C:/x.html",
+        ] {
+            assert!(!is_app_own_url(&u(s)), "must NOT be our own UI: {}", s);
         }
     }
 

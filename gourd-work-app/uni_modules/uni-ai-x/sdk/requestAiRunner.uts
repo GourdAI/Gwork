@@ -1,6 +1,7 @@
 import { llmModelMap } from '@/uni_modules/uni-ai-x/config.uts';
-import { Chunk, Provider, RequestAiCoMessage, Llm, CustomProviderCallbacks, MessageSearch, SearchSource } from '@/uni_modules/uni-ai-x/types.uts';
+import { Chunk, Provider, RequestAiCoMessage, Llm, CustomProviderCallbacks, CalendarToolConfirmation, MessageSearch, SearchSource } from '@/uni_modules/uni-ai-x/types.uts';
 import { getCustomProvider } from '@/uni_modules/uni-ai-x/sdk/provider-registry.uts'
+import { installAgentTools } from '@/uni_modules/uni-ai-x/sdk/agent-tools.uts'
 import { SseStreamParser } from '@/uni_modules/uni-ai-x/sdk/sse.uts'
 import {
 	lastUserQuestionText,
@@ -16,24 +17,30 @@ import {
 	setAiWorkerDataListener,
 	startAiWorkerMarkdown,
 	startAiWorkerRequest
-} from '@/uni_modules/uni-ai-worker-runtime'
+} from '@/uni_modules/uni-ai-x'
 // #endif
-// #ifdef APP-HARMONY || APP-ANDROID
-import type { AiWorkerOp } from '@/uni_modules/uni-ai-worker-runtime/utssdk/interface.uts'
-import { readAiWorkerState, takeAiWorkerOps } from '@/uni_modules/uni-ai-worker-runtime'
+// #ifdef APP-IOS
+import { startAiWorkerMarkdownByValues } from '@/uni_modules/uni-ai-x'
+// #endif
+// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
+import type { AiWorkerOp } from '@/uni_modules/uni-ai-x/utssdk/worker/interface.uts'
+import { readAiWorkerState } from '@/uni_modules/uni-ai-x'
+import { resolveAiWorkerOps } from './worker-ops.uts'
 import { OP_RESET } from '@/uni_modules/uni-ai-md/utssdk/interface.uts'
-import { logBlockPayload } from '@/uni_modules/uni-ai-worker/utssdk/uni-ai-md-log.uts'
+import { logBlockPayload } from '@/uni_modules/uni-ai-x/utssdk/worker/uni-ai-md-log.uts'
 // #endif
 
 export type RequestAiRunnerCallbacks = {
 	onSearch?: (search: MessageSearch) => void,
 	onMarkdownHtml: (html: string) => void,
 	onMarkdownBlocks: (blocks: string) => void,
-	// #ifdef APP-HARMONY || APP-ANDROID
+	// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
 	onMarkdownAstDelta?: (ops: AiWorkerOp[]) => void,
 	// #endif
 	onThinkContent: (thinkContent: string) => void,
 	onMsgBody: (msgBody: string) => void,
+	onToolStatus?: (status: string) => void,
+	onToolConfirm?: (details: CalendarToolConfirmation) => void,
 	onState: (state: string) => void,
 	onErrorMsg: (errorMsg: string) => void,
 	onRendered: (rendered: boolean) => void,
@@ -112,6 +119,7 @@ class RequestAiRunner {
 	private callbacks : RequestAiRunnerCallbacks | null = null
 	currentChatState : string = ''
 	userAbort : boolean = false
+	hasThinkContent : boolean = false
 	private bodyEmitTimer: number = 0
 	private lastBodyEmitTime: number = 0
 	private workerPollTimer: number = 0
@@ -151,8 +159,22 @@ class RequestAiRunner {
 		}, MARKDOWN_RENDER_INTERVAL - elapsed)
 	}
 	onChunkFn(chunkObj : Chunk) {
+		let reasoningContent: null | string = null
 		let content = chunkObj.choices?.[0]?.delta?.content
-		let reasoningContent: null | string = chunkObj.choices?.[0]?.delta?.reasoning_content
+		if (this.msgBody == '' && content == "<think>") {
+			this.hasThinkContent = true
+			content = ''
+		}
+		if (this.hasThinkContent) {
+			if (content != '</think>') {
+				reasoningContent = content
+			} else {
+				this.hasThinkContent = false
+			}
+			content = ''
+		}
+
+		reasoningContent = reasoningContent ?? chunkObj.choices?.[0]?.delta?.reasoning_content
 		// #ifdef APP-ANDROID || APP-IOS || WEB || MP-WEIXIN || APP-HARMONY
 		if (this.workerActive) {
 			appendAiWorkerMarkdown(this.workerRequestVersion, content ?? '', reasoningContent ?? '')
@@ -162,8 +184,7 @@ class RequestAiRunner {
 		if (content != null && content.length > 0) {
 			this.msgBody += content
 			this.emitMsgBody()
-		}
-		if (reasoningContent != null && reasoningContent.length > 0) {
+		} else if (reasoningContent != null) {
 			this.thinkContent += reasoningContent
 			this.callbacks?.onThinkContent(this.thinkContent.trim())
 		}
@@ -181,6 +202,7 @@ class RequestAiRunner {
 		this.thinkContent = ''
 		this.currentChatState = ''
 		this.userAbort = false
+		this.hasThinkContent = false
 		this.finishRequested = false
 		this.streamParser = null
 	}
@@ -289,7 +311,8 @@ class RequestAiRunner {
 		this.requestRemoteAi(requestMessages, llm, chat_id)
 	}
 	requestRemoteAi(messages : RequestAiCoMessage[], llm : Llm, chat_id : string) {
-		// #ifdef APP-ANDROID || APP-HARMONY
+		installAgentTools()
+		// #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
 		if (getCustomProvider(llm.provider) == null) {
 			this.requestRemoteAiInWorker(messages, llm, chat_id)
 			return
@@ -321,7 +344,7 @@ class RequestAiRunner {
 			// 错误已由 onError 回调上报，这里兜住 reject，避免产生 Uncaught (in promise)
 		})
 	}
-	// #ifdef APP-ANDROID || APP-HARMONY
+	// #ifdef APP-ANDROID || APP-HARMONY || APP-IOS
 	private async requestRemoteAiInWorker(messages: RequestAiCoMessage[], llm: Llm, chat_id: string) {
 		const requestVersion = this.workerRequestVersion + 1
 		this.workerRequestVersion = requestVersion
@@ -355,16 +378,25 @@ class RequestAiRunner {
 				model: llm.model,
 				url: config.baseURL!,
 				authorization: 'Bearer ' + tmpToken,
-				bodyJson: '',
+				// iOS 的 postStart 只透传 bodyJson 字符串（body 对象仅 Android/鸿蒙消费）；
+				// Android/鸿蒙 worker 会优先用 body 覆盖，行为不变
+				bodyJson: JSON.stringify(body) ?? '',
 				body: body,
 				renderInterval: MARKDOWN_RENDER_INTERVAL,
 				timeout: 90000,
 				darkMode: this.pluginDarkMode,
 				background: this.pluginBackground
 			})
+			// #ifdef APP-IOS
+			this.workerPollTimer = setInterval(() => {
+				this.pollWorkerSnapshot(requestVersion)
+			}, 50)
+			// #endif
+			// #ifndef APP-IOS
 			setAiWorkerDataListener(() => {
 				this.pollWorkerSnapshot(requestVersion)
 			})
+			// #endif
 		} catch (_error) {
 			// getProviderConfig/requestProviderToken 已通过 requestOptions.onError 上报。
 		}
@@ -374,20 +406,28 @@ class RequestAiRunner {
 	// #ifdef APP-ANDROID || APP-IOS || WEB || MP-WEIXIN || APP-HARMONY
 	private pollWorkerSnapshot(requestVersion: number) {
 		if (!this.workerActive || requestVersion != this.workerRequestVersion || this.userAbort) return
-		// #ifdef APP-HARMONY || APP-ANDROID
-		const ops = takeAiWorkerOps()
+		// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
+		const ops = resolveAiWorkerOps()
 		for (let i = 0; i < ops.length; i++) {
 			const op = ops[i]
 			if (op.op != OP_RESET) {
 				logBlockPayload(op.kind, op.content, op.index, op.op, op.unchanged)
 			}
 		}
-		if (ops.length > 0) this.callbacks?.onMarkdownAstDelta?.(ops)
+		// 应用 ops 抛异常时不能阻断完成态轮询：data listener 会吞掉异常，否则 complete 状态收不到。
+		if (ops.length > 0) {
+			try {
+				this.callbacks?.onMarkdownAstDelta?.(ops)
+			} catch (error) {
+				console.error('[uni-ai-x][stream] apply ops failed:', error)
+			}
+		}
 		this.pollUniAiMdState(requestVersion)
 		return
 		// #endif
 		// #ifndef APP-HARMONY
 		// #ifndef APP-ANDROID
+		// #ifndef APP-IOS
 		const snapshotJson = readAiWorkerSnapshot()
 		if (snapshotJson.length == 0) return
 		let snapshot: UTSJSONObject
@@ -454,9 +494,10 @@ class RequestAiRunner {
 		}
 		// #endif
 		// #endif
+		// #endif
 	}
 
-	// #ifdef APP-HARMONY || APP-ANDROID
+	// #ifdef APP-HARMONY || APP-ANDROID || APP-IOS
 	private pollUniAiMdState(requestVersion: number): void {
 		const state = readAiWorkerState()
 		if (state == null) return
@@ -497,8 +538,16 @@ class RequestAiRunner {
 		}))
 		this.stopWorkerRuntime(false)
 		this.currentChatState = 'completed'
-		this.callbacks?.onState('completed')
-		this.callbacks?.onRendered(true)
+		try {
+			this.callbacks?.onState('completed')
+		} catch (error) {
+			console.error('[uni-ai-x][stream] onState(completed) failed:', error)
+		}
+		try {
+			this.callbacks?.onRendered(true)
+		} catch (error) {
+			console.error('[uni-ai-x][stream] onRendered failed:', error)
+		}
 		this.updateChatTitleAfterDone()
 	}
 	// #endif
@@ -515,8 +564,10 @@ class RequestAiRunner {
 	private stopWorkerRuntime(cancelRequest: boolean) {
 		if (this.workerPollTimer != 0) clearInterval(this.workerPollTimer)
 		this.workerPollTimer = 0
+		// #ifndef APP-IOS
 		// #ifndef MP-WEIXIN
 		setAiWorkerDataListener(null)
+		// #endif
 		// #endif
 		// #ifdef APP-ANDROID || APP-IOS || WEB || MP-WEIXIN || APP-HARMONY
 		if (cancelRequest && this.workerActive) cancelAiWorkerRequest(this.workerRequestVersion)
@@ -531,21 +582,28 @@ class RequestAiRunner {
 		this.workerRequestVersion = requestVersion
 		this.workerSnapshotVersion = 0
 		this.workerActive = true
+		// #ifdef APP-IOS
+		startAiWorkerMarkdownByValues(requestVersion, MARKDOWN_RENDER_INTERVAL, this.pluginDarkMode, this.pluginBackground)
+		// #endif
+		// #ifndef APP-IOS
 		startAiWorkerMarkdown({
 			requestVersion: requestVersion,
 			renderInterval: MARKDOWN_RENDER_INTERVAL,
 			darkMode: this.pluginDarkMode,
 			background: this.pluginBackground
 		})
-		// #ifdef MP-WEIXIN
+		// #endif
+		// #ifdef APP-IOS || MP-WEIXIN
 		this.workerPollTimer = setInterval(() => {
 			this.pollWorkerSnapshot(requestVersion)
 		}, 50)
 		// #endif
+		// #ifndef APP-IOS
 		// #ifndef MP-WEIXIN
 		setAiWorkerDataListener(() => {
 			this.pollWorkerSnapshot(requestVersion)
 		})
+		// #endif
 		// #endif
 	}
 	// #endif
@@ -566,6 +624,8 @@ class RequestAiRunner {
 		let errorReported = false
 		const callbacks: CustomProviderCallbacks = {
 			onChunk: options.onChunk,
+			onToolStatus: (status: string) => this.callbacks?.onToolStatus?.(status),
+			onToolConfirm: (details: CalendarToolConfirmation) => this.callbacks?.onToolConfirm?.(details),
 			onError: (err : UTSJSONObject) => {
 				errorReported = true
 				options.onError?.(err)
@@ -575,7 +635,7 @@ class RequestAiRunner {
 		const currentChatId = options.chat_id ?? ''
 		let success = false
 		try {
-			success = await adapter.request(options.messages, options.llm.model, currentChatId, callbacks)
+			success = await adapter.request(options.messages, options.llm.model, currentChatId, callbacks, options.llm.thinking)
 		} catch (e) {
 			console.error('自定义提供商请求异常', e)
 			if (!errorReported) {

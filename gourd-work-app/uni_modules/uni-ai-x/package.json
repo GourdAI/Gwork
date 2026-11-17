@@ -1,7 +1,7 @@
 {
   "id": "uni-ai-x",
   "displayName": "uni-ai x",
-  "version": "3.1.0",
+  "version": "3.2.3",
   "description": "一个基于uni-app-x蒸汽模式的、开源的、全平台的、原生的、云端一体的ai聊天套件",
   "keywords": [
     "uni-ai-x",
@@ -13,7 +13,7 @@
   "engines": {
     "HBuilderX": "^3.1.0",
     "uni-app": "",
-    "uni-app-x": "^5.33"
+    "uni-app-x": "^5.34"
   },
   "dcloudext": {
     "type": "unicloud-template-page",
@@ -41,8 +41,13 @@
   },
   "uni_modules": {
     "dependencies": [
-      "uni-ai-worker",
-      "uni-ai-worker-runtime"
+      "uni-ai-md",
+      "uni-cmark",
+      "uni-highlight",
+      "uni-icons",
+      "uni-popup",
+      "uni-upgrade-center-app",
+      "uts-openSchema"
     ],
     "encrypt": [],
     "platforms": {

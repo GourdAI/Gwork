@@ -1,8 +1,8 @@
 {
   "id": "uni-cmark",
   "displayName": "uni-cmark",
-  "version": "1.2.0",
-  "description": "支持 iOS、Web、微信小程序的 Markdown 转 HTML UTS 插件",
+  "version": "1.0.1",
+  "description": "一个由 AI 基于 C 语言库 cmark-gfm 封装的 Markdown 解析 UTS 插件，适用于 uni-app 生态",
   "keywords": [
     "uni-cmark"
 ],
@@ -80,25 +80,28 @@
         "uni-app-x": {
           "web": {
             "safari": {
-                "extVersion": "1.2.0",
+                "extVersion": "1.0.0",
                 "minVersion": ""
             },
             "chrome": {
-                "extVersion": "1.2.0",
+                "extVersion": "1.0.0",
                 "minVersion": ""
             }
           },
           "app": {
-            "android": "-",
+            "android": {
+                "extVersion": "1.0.0",
+                "minVersion": ""
+            },
             "ios": {
-                "extVersion": "1.2.0",
-                "minVersion": "13"
+                "extVersion": "1.0.0",
+                "minVersion": ""
             },
             "harmony": "-"
           },
           "mp": {
             "weixin": {
-                "extVersion": "1.2.0",
+                "extVersion": "1.0.0",
                 "minVersion": ""
             }
           }

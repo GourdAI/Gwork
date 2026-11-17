@@ -4,6 +4,7 @@ export type LLMModel = {
 	// 选择界面展示的模型名，未配置时展示 modelId
 	name?: string,
 	thinking?: boolean,
+	toolCall?: boolean,
 	image?: boolean,
 	video?: boolean,
 	audio?: boolean
@@ -61,9 +62,19 @@ export type EditState = {
 }
 
 // 流式响应分块
+export type ChunkToolCall = {
+	index: number,
+	id?: string,
+	type?: string,
+	function?: {
+		name?: string,
+		arguments?: string
+	}
+}
 export type ChunkChoiceDelta = {
 	content: string,
-	reasoning_content?: string
+	reasoning_content?: string,
+	tool_calls?: ChunkToolCall[]
 }
 export type ChunkMessage = {
 	content: string
@@ -99,12 +110,25 @@ export type MessageSearch = {
 }
 
 // #ifdef APP-ANDROID || APP-HARMONY
-import type { RenderSnapshot } from '@/uni_modules/uni-ai-worker/utssdk/render-snapshot.uts'
+// Keep the persisted snapshot shape local: importing the renderer here creates
+// a runtime module cycle in the Harmony UTS output during app startup.
+type StoredRenderSnapshot = {
+	version: number
+	bodyKey: string
+	theme: string
+	width: number
+	citations: string
+	assets: string[]
+	blocks: object[]
+}
 // #endif
 
 export type MsgItem = {
 	_id: string
 	body: string
+	toolStatus?: string
+	toolConfirmation?: CalendarToolConfirmation | null
+	toolResultText?: string
 	img_url_list?: string[]
 	thinkContent?: string
 	from_uid: string
@@ -117,7 +141,7 @@ export type MsgItem = {
 	markdownHtml?: string
 	markdownBlocks?: string
 	// #ifdef APP-ANDROID || APP-HARMONY
-	renderSnapshot?: RenderSnapshot
+	renderSnapshot?: StoredRenderSnapshot
 	// #endif
 	search?: MessageSearch
 	markdownAst?: string
@@ -127,6 +151,14 @@ export type MsgItem = {
 	stressSvgHeight?: number
 	error_msg?: string
 	rendered: boolean
+}
+
+export type CalendarToolConfirmation = {
+	title: string
+	startAt: string
+	durationMinutes: number
+	alarmMinutesBefore: number
+	state: string
 }
 export type BaseMsgItem = {
 	body: string
@@ -202,6 +234,8 @@ export type ImgItem = {
 // 自定义提供商适配器回调
 export type CustomProviderCallbacks = {
 	onChunk ?: (chunkObj : Chunk) => void,
+	onToolStatus ?: (status : string) => void,
+	onToolConfirm ?: (details : CalendarToolConfirmation) => void,
 	onError ?: (err : UTSJSONObject) => void,
 	onDone ?: (data : UTSJSONObject) => void
 }
@@ -213,7 +247,7 @@ export class CustomProviderAdapter {
 	// 初始化（可选，模块加载时调用）
 	init() : void {}
 	// 发起请求（子类必须重写）
-	async request(messages : RequestAiCoMessage[], model : string, chat_id : string, callbacks : CustomProviderCallbacks) : Promise<boolean> {
+	async request(messages : RequestAiCoMessage[], model : string, chat_id : string, callbacks : CustomProviderCallbacks, thinking ?: boolean) : Promise<boolean> {
 		return false
 	}
 	// 是否支持会话标题更新（不支持则跳过）

@@ -1181,13 +1181,6 @@ impl OAuthClient {
         &self.clock
     }
 
-    /// The underlying clean HTTP client (proxy honoured, no resource-server
-    /// headers). Exposed for vendor QR flows (`mcp::qrcode_vendor`) that reuse
-    /// the same egress/TLS posture as OAuth discovery without speaking OAuth.
-    pub fn http_client(&self) -> &reqwest::Client {
-        &self.http
-    }
-
     /// GET a metadata document.
     ///
     /// A 404 is returned as `None`, not an error: both RFC 8414 and RFC 9728
@@ -1730,6 +1723,15 @@ pub async fn register_client(
         });
     }
     let body = registration_body(redirect_uris, scopes, client_name);
+    // Registration endpoint comes from semi-trusted metadata; same https rule
+    // as the token endpoint (the response carries a client_secret).
+    if !device_uri_is_allowed(url) {
+        return Err(OAuthError::RegistrationFailed {
+            url: url.to_string(),
+            status: None,
+            reason: "registration_endpoint must be https (or http to a loopback host)".into(),
+        });
+    }
     let (status, value, text) = client.post_json(url, &body).await?;
 
     // 2xx with a `client_id` is success. Anything else becomes an error carrying
@@ -2407,6 +2409,22 @@ pub async fn bearer_header_for(
     bearer_header_for_with(server_url, store, None, Clock::system()).await
 }
 
+/// [`bearer_header_for`] that refreshes even a nominally-valid credential.
+///
+/// The 401-retry path needs this: the server just rejected the token, so the
+/// local expiry bookkeeping is evidently wrong (clock skew, early revocation,
+/// or an AS that issues shorter-lived tokens than `expires_in` claims). Going
+/// through the normal path would hand back the very token that was rejected.
+/// A credential without a refresh token still returns its stored token — the
+/// caller then surfaces the original 401, which correctly tells the user to
+/// re-authorize.
+pub async fn bearer_header_force_refresh(
+    server_url: &str,
+    store: &dyn CredentialStore,
+) -> Option<String> {
+    bearer_header_inner(server_url, store, None, Clock::system(), true).await
+}
+
 /// [`bearer_header_for`] with an explicit client and clock (tests, and callers
 /// that must reuse a pre-configured proxy/TLS setup).
 ///
@@ -2420,6 +2438,16 @@ pub async fn bearer_header_for_with(
     store: &dyn CredentialStore,
     client: Option<&OAuthClient>,
     clock: Clock,
+) -> Option<String> {
+    bearer_header_inner(server_url, store, client, clock, false).await
+}
+
+async fn bearer_header_inner(
+    server_url: &str,
+    store: &dyn CredentialStore,
+    client: Option<&OAuthClient>,
+    clock: Clock,
+    force_refresh: bool,
 ) -> Option<String> {
     let stored = match store.load(server_url).await {
         Ok(Some(s)) => s,
@@ -2444,7 +2472,7 @@ pub async fn bearer_header_for_with(
         return None;
     }
     let now = clock.now();
-    if stored.is_valid(now) {
+    if stored.is_valid(now) && !(force_refresh && stored.can_refresh()) {
         return Some(format_authorization(&stored.token_type, &stored.access_token));
     }
     if !stored.can_refresh() {
@@ -2824,6 +2852,14 @@ pub async fn register_device_client(
         });
     }
     let body = device_registration_body(scopes, client_name);
+    // Same https rule as the browser-flow registration (response carries a secret).
+    if !device_uri_is_allowed(url) {
+        return Err(OAuthError::RegistrationFailed {
+            url: url.to_string(),
+            status: None,
+            reason: "registration_endpoint must be https (or http to a loopback host)".into(),
+        });
+    }
     let (status, value, text) = client.post_json(url, &body).await?;
     let client_id = value.get("client_id").and_then(|v| v.as_str()).unwrap_or("").trim();
     if !(200..=299).contains(&status) || client_id.is_empty() {
@@ -2986,6 +3022,21 @@ async fn post_token_request(
     registration: &ClientRegistration,
     form: Vec<(String, String)>,
 ) -> Result<TokenResponse, OAuthError> {
+    // The token endpoint receives the authorization code + PKCE verifier (or
+    // the refresh token). Its URL comes from AS metadata named by a
+    // semi-trusted PRM, so plain http to a non-loopback host would leak those
+    // secrets in cleartext. Same rule as the device flow, single source of
+    // truth: `device_uri_is_allowed`.
+    if !device_uri_is_allowed(token_endpoint) {
+        return Err(OAuthError::TokenRequestFailed {
+            url: token_endpoint.to_string(),
+            status: None,
+            error_code: None,
+            reason: "token_endpoint must be https (or http to a loopback host); refusing to send \
+                     credentials over cleartext http"
+                .into(),
+        });
+    }
     let mut form = form;
     let basic_auth = match registration.token_endpoint_auth_method.to_lowercase().as_str() {
         "client_secret_basic" => registration
@@ -4226,6 +4277,75 @@ mod tests {
     }
 
     // ── Error taxonomy / misc pure helpers ────────────────────────────────
+
+    /// P1 回归护栏：401 重试路径的强制刷新入口。
+    ///
+    /// 凭据「账面有效」但服务器刚拒绝了它（时钟偏移/提前吊销）时，
+    /// `bearer_header_force_refresh` 不得像普通路径那样直接回放假 token——
+    /// 必须尝试刷新。这里离线钉住两个可测分支：
+    /// (a) 无 refresh token → 与旧行为一致返回旧 token（调用方随后把 401
+    ///     透传给用户，指引重新授权）；
+    /// (b) 有 refresh token 但 token_endpoint 是明文 http 非回环 → 刷新被
+    ///     https 护栏拒绝，保留旧凭据返回（绝不把 refresh_token 发上明文网）。
+    #[tokio::test]
+    async fn bearer_header_force_refresh_never_replays_blindly_and_never_leaks_over_http() {
+        let server = "https://host.example.com/mcp";
+        // (a) 账面有效（now=900 < expires_at-skew=970）但无 refresh token：
+        //     强制刷新无从下手，返回旧 token，且绝不 panic / 不发网络请求。
+        let mut cred = sample_credentials(server);
+        cred.refresh_token = None;
+        let store = MemoryCredentialStore::new();
+        store.save(server, &cred).await.unwrap();
+        assert_eq!(
+            bearer_header_inner(server, &store, None, Clock::fixed(900), true).await,
+            Some("Bearer access-abc".to_string())
+        );
+
+        // (b) 有 refresh token + 明文 http 非回环 token_endpoint：强制刷新
+        //     必须真的走到 refresh（而不是因为账面有效直接回放），然后被
+        //     post_token_request 的 https 护栏拦下。刷新失败保留旧凭据。
+        let mut cred = sample_credentials(server);
+        cred.endpoints.token_endpoint = "http://attacker.example/token".into();
+        let store = MemoryCredentialStore::new();
+        store.save(server, &cred).await.unwrap();
+        let got = bearer_header_inner(server, &store, None, Clock::fixed(900), true).await;
+        assert_eq!(got, Some("Bearer access-abc".to_string()),
+            "刷新被 https 护栏拒绝后必须保留旧凭据（而不是清空/换成攻击者 token）");
+        // 对照：普通路径在同一账面有效凭据上直接回放（不触发刷新）。
+        assert_eq!(
+            bearer_header_inner(server, &store, None, Clock::fixed(900), false).await,
+            Some("Bearer access-abc".to_string())
+        );
+    }
+
+    /// P1 回归护栏：token 请求（携带 code_verifier / refresh_token）绝不允许
+    /// 发往明文 http 的非回环端点。AS 元数据来自半可信 PRM，恶意 PRM 可以把
+    /// token_endpoint 指到 http://attacker/ ——这里必须在发请求前拒绝。
+    #[tokio::test]
+    async fn post_token_request_refuses_cleartext_non_loopback_endpoint() {
+        let client = OAuthClient::new(&McpServerConfig::default()).unwrap();
+        let reg = sample_credentials("https://host.example.com/mcp").client;
+        let err = post_token_request(
+            &client,
+            "http://attacker.example/token",
+            &reg,
+            vec![("grant_type".into(), "refresh_token".into())],
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("https"), "错误必须说明 https 要求: {}", msg);
+        // 形似 localhost 的域名同样拒绝（解析 host 而非前缀匹配）。
+        let err2 = post_token_request(
+            &client,
+            "http://localhost.evil.example/token",
+            &reg,
+            vec![],
+        )
+        .await
+        .unwrap_err();
+        assert!(err2.to_string().contains("https"));
+    }
 
     #[test]
     fn oauth_error_retryable_and_needs_user() {

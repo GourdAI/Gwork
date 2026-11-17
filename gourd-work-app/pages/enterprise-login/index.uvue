@@ -1,0 +1,102 @@
+<template>
+	<view class="enterprise-login" :class="themeClass">
+		<view class="enterprise-login__nav">
+			<view class="enterprise-login__back" @click="onBack">
+				<rice-icon name="arrow-left" size="20px" color="var(--color-text-secondary)" />
+			</view>
+			<text class="enterprise-login__title">{{ t('enterpriseLogin.title') }}</text>
+		</view>
+		<view class="enterprise-login__body">
+			<view class="enterprise-login__main">
+				<enterprise-login-form @submit="onSubmit"></enterprise-login-form>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme } from '@/hooks/useTheme'
+	import EnterpriseLoginForm from './components/enterprise-login-form.uvue'
+
+	const { themeClass } = useTheme()
+
+	const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
+	const LOGIN_PAGE = '/pages/login/index'
+	const VERIFY_PAGE = '/pages/verify/index'
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function onSubmit(account: string): void {
+		const email = account.trim()
+		if (!EMAIL_PATTERN.test(email)) {
+			uni.showToast({ title: t('login.emailInvalid'), icon: 'none' })
+			return
+		}
+		// TODO 接入发送验证码接口，成功后再进入验证码页
+		uni.navigateTo({ url: VERIFY_PAGE + '?email=' + encodeURIComponent(email) })
+	}
+
+	function onBack(): void {
+		uni.navigateBack({
+			fail: () => {
+				uni.reLaunch({ url: LOGIN_PAGE })
+			}
+		})
+	}
+</script>
+
+<style lang="scss">
+	.enterprise-login {
+		flex: 1;
+		flex-direction: column;
+		/* H5 下 --status-bar-height 为 0，APP 下取系统状态栏高度，避免返回按钮被状态栏遮挡 */
+		padding-top: var(--status-bar-height);
+		padding-bottom: env(safe-area-inset-bottom);
+		background-color: var(--color-bg);
+
+		&__nav {
+			position: relative;
+			height: 36px;
+			margin: 18px 18px 0;
+			align-items: center;
+			justify-content: center;
+		}
+
+		&__back {
+			position: absolute;
+			left: 0;
+			top: 0;
+			width: 36px;
+			height: 36px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 18px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+		}
+
+		/* 设计稿标题比返回按钮低 4px */
+		&__title {
+			margin-top: 4px;
+			font-size: 16px;
+			font-weight: 700;
+			color: var(--color-text);
+		}
+
+		&__body {
+			flex: 1;
+			justify-content: center;
+			padding: 24px 28px 40px;
+		}
+
+		/* 设计稿中表单整体上移 20px */
+		&__main {
+			margin-top: -20px;
+		}
+	}
+</style>

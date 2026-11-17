@@ -1,0 +1,232 @@
+<template>
+	<!-- 底部弹层基座（自建，替代 rice-popup）：遮罩淡入 + 面板滑入 + 把手下拉关闭 + 右上角关闭 -->
+	<view v-if="maskMounted" class="app-popup__mask" :class="animOn ? 'app-popup__mask--on' : ''"
+		:style="maskStyle" @click="onOverlayClick"></view>
+
+	<view v-if="panelMounted" class="app-popup" :class="animOn ? 'app-popup--on' : ''" :style="panelStyle">
+		<view v-if="closeable" class="app-popup__close" @click.stop="requestClose">
+			<rice-icon name="cross" size="20px" color="var(--color-text-secondary)"></rice-icon>
+		</view>
+		<view v-if="showDragBar" class="app-popup__drag" @touchstart="onDragStart" @touchmove.stop="onDragMove"
+			@touchend="onDragEnd" @touchcancel="onDragEnd">
+			<view class="app-popup__grabber"></view>
+		</view>
+		<slot></slot>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed, ref, watch, onUnmounted } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+
+	defineOptions({
+		name: 'app-popup',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = withDefaults(defineProps<{
+		show: boolean
+		zIndex?: number
+		radius?: number
+		duration?: number
+		closeable?: boolean
+		closeOnClickOverlay?: boolean
+		showDragBar?: boolean
+		safeAreaInsetBottom?: boolean
+	}>(), {
+		show: false,
+		zIndex: 999,
+		radius: 26,
+		duration: 280,
+		closeable: true,
+		closeOnClickOverlay: true,
+		showDragBar: true,
+		safeAreaInsetBottom: true
+	})
+
+	const emit = defineEmits<{
+		(e: 'update:show', value: boolean): void
+		(e: 'clickOverlay'): void
+	}>()
+
+	const safeBottom: number = uni.getWindowInfo().safeAreaInsets.bottom
+
+	// 双态渲染：mounted 控制 v-if 挂载，animOn 驱动过渡。与 rice-popup 的本质区别是 watch 按
+	// show 电平对齐状态：rice-popup 边沿触发，关闭动画期内重开时 open 被吞且不再补偿，弹层永久打不开；
+	// 这里 show 翻 true 时无条件取消卸载定时器并恢复过渡，任何时序下事件都不会丢失
+	const panelMounted: Ref<boolean> = ref(false)
+	const maskMounted: Ref<boolean> = ref(false)
+	const animOn: Ref<boolean> = ref(false)
+	let openTimer: number = -1
+	let closeTimer: number = -1
+
+	watch((): boolean => props.show, (val: boolean): void => {
+		if (val) {
+			handleOpen()
+			return
+		}
+		handleClose()
+	}, { immediate: true })
+
+	function handleOpen(): void {
+		if (closeTimer !== -1) {
+			clearTimeout(closeTimer)
+			closeTimer = -1
+		}
+		if (panelMounted.value) {
+			// 关闭动画期内重开：面板仍在挂载，恢复过渡即可（CSS 从当前位置回弹，无需重挂载）
+			animOn.value = true
+			return
+		}
+		panelMounted.value = true
+		maskMounted.value = true
+		// 先按入场前状态渲染，再翻 animOn 才有过渡；30ms 内渲染未完成时表现为无动画弹出，功能不受影响
+		openTimer = setTimeout((): void => {
+			openTimer = -1
+			animOn.value = true
+		}, 30)
+	}
+
+	function handleClose(): void {
+		if (openTimer !== -1) {
+			clearTimeout(openTimer)
+			openTimer = -1
+		}
+		animOn.value = false
+		if (!panelMounted.value) return
+		if (closeTimer !== -1) clearTimeout(closeTimer)
+		closeTimer = setTimeout((): void => {
+			closeTimer = -1
+			panelMounted.value = false
+			maskMounted.value = false
+		}, props.duration + 80)
+	}
+
+	onUnmounted((): void => {
+		if (openTimer !== -1) clearTimeout(openTimer)
+		if (closeTimer !== -1) clearTimeout(closeTimer)
+	})
+
+	// 内部触发的关闭（X / 遮罩 / 拖拽）乐观播放：同步翻态启动动画，不等 update:show 的
+	// prop 往返（页面状态回流约一帧以上，会明显推迟动画起播）。show 随后追认为 false 时
+	// handleClose 是幂等 no-op；动画期内重开则 handleOpen 取消卸载定时器并恢复，不丢状态
+	function requestClose(): void {
+		handleClose()
+		emit('update:show', false)
+	}
+
+	function onOverlayClick(): void {
+		emit('clickOverlay')
+		if (props.closeOnClickOverlay) requestClose()
+	}
+
+	// 把手区域下拉跟手；松手超过阈值关闭，否则回弹。transform 全部走声明式绑定，行内值与类切换不会互踩
+	const dragOffset: Ref<number> = ref(-1) // -1 表示非拖动态
+	let dragStartY: number = 0
+
+	function onDragStart(e: UniTouchEvent): void {
+		dragStartY = e.touches[0].screenY
+	}
+
+	function onDragMove(e: UniTouchEvent): void {
+		if (!animOn.value) return
+		const offset: number = e.touches[0].screenY - dragStartY
+		if (offset > 0) dragOffset.value = offset
+	}
+
+	function onDragEnd(): void {
+		if (dragOffset.value < 0) return
+		const shouldClose: boolean = dragOffset.value >= 40
+		dragOffset.value = -1
+		if (shouldClose) requestClose()
+	}
+
+	const maskStyle: ComputedRef<Map<string, string | number>> = computed((): Map<string, string | number> => {
+		const css = new Map<string, string | number>()
+		css.set('z-index', props.zIndex - 1)
+		return css
+	})
+
+	const panelStyle: ComputedRef<Map<string, string | number>> = computed((): Map<string, string | number> => {
+		const css = new Map<string, string | number>()
+		css.set('z-index', props.zIndex)
+		css.set('transition-duration', (dragOffset.value >= 0 ? 0 : props.duration).toString() + 'ms')
+		if (dragOffset.value >= 0) {
+			css.set('transform', 'translateY(' + dragOffset.value.toString() + 'px)')
+		} else if (animOn.value) {
+			css.set('transform', 'translateY(0)')
+		} else {
+			css.set('transform', 'translateY(106%)')
+		}
+		const radius: string = props.radius.toString() + 'px'
+		css.set('border-top-left-radius', radius)
+		css.set('border-top-right-radius', radius)
+		if (props.safeAreaInsetBottom && safeBottom > 0) {
+			css.set('padding-bottom', safeBottom.toString() + 'px')
+		}
+		return css
+	})
+</script>
+
+<style lang="scss">
+	/* 阴影色为原生端 box-shadow 专属，不支持 var()，经编译期色板取值（AGENTS.md 9.2） */
+	@import '@/styles/theme.scss';
+
+	.app-popup__mask {
+		position: fixed;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		left: 0;
+		background-color: var(--color-sheet-mask);
+		opacity: 0;
+		transition-property: opacity;
+		transition-duration: 200ms;
+
+		&--on {
+			opacity: 1;
+		}
+	}
+
+	.app-popup {
+		position: fixed;
+		bottom: 0;
+		left: 0;
+		width: 100%;
+		background-color: var(--color-bg);
+		transition-property: transform;
+		transition-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+		/* transition-duration 行内按 duration prop 注入 */
+
+		&--on {
+			transform: translateY(0);
+			box-shadow: 0 -12px 40px map-get(map-get($theme-palette, 'light'), 'sheet-shadow');
+		}
+	}
+
+	/* 暗色阴影经页面根节点的 themeClass 命中（fixed 元素仍是 DOM 后代） */
+	.theme-dark .app-popup--on {
+		box-shadow: 0 -12px 40px map-get(map-get($theme-palette, 'dark'), 'sheet-shadow');
+	}
+
+	.app-popup__close {
+		position: absolute;
+		top: 0;
+		right: 0;
+		z-index: 9;
+		padding: 16px 16px 0 0;
+	}
+
+	.app-popup__drag {
+		justify-content: center;
+		align-items: center;
+		min-height: 32px;
+	}
+
+	.app-popup__grabber {
+		width: 36px;
+		height: 4px;
+		border-radius: 3px;
+		background-color: var(--color-border);
+	}
+</style>

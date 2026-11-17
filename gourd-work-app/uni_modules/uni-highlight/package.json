@@ -1,11 +1,11 @@
 {
   "id": "uni-highlight",
   "displayName": "uni-highlight",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "本插件支持基于 TextMate 语法规则（如 javascript.tmLanguage.json）的代码高亮渲染。",
   "keywords": [
     "uni-highlight"
-  ],
+],
   "repository": "",
   "engines": {
     "HBuilderX": "^3.6.8",
@@ -34,7 +34,7 @@
     "darkmode": "√",
     "i18n": "√",
     "widescreen": "√",
-    "vapor": "-"
+    "vapor": "x"
   },
   "uni_modules": {
     "dependencies": [],
@@ -80,16 +80,34 @@
         },
         "uni-app-x": {
           "web": {
-            "safari": "√",
-            "chrome": "√"
+            "safari": {
+                "extVersion": "1.0.3",
+                "minVersion": ""
+            },
+            "chrome": {
+                "extVersion": "1.0.3",
+                "minVersion": ""
+            }
           },
           "app": {
-            "android": "√",
-            "ios": "√",
-            "harmony": "√"
+            "android": {
+                "extVersion": "1.0.3",
+                "minVersion": ""
+            },
+            "ios": {
+                "extVersion": "1.0.3",
+                "minVersion": ""
+            },
+            "harmony": {
+                "extVersion": "1.0.3",
+                "minVersion": ""
+            }
           },
           "mp": {
-            "weixin": "√"
+            "weixin": {
+                "extVersion": "1.0.3",
+                "minVersion": ""
+            }
           }
         }
       }

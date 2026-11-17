@@ -1,0 +1,63 @@
+<template>
+	<view class="app-conv-row" @click="emit('open')" @longpress="onLongpress">
+		<view v-if="pinned" class="app-conv-row__pin">
+			<!-- 图标待字体图标补全 -->
+		</view>
+		<text class="app-conv-row__name" :class="pinned ? 'app-conv-row__name--pin' : ''">{{ title }}</text>
+		<text class="app-conv-row__time">{{ time }}</text>
+	</view>
+</template>
+
+<script setup lang="ts">
+	defineOptions({
+		name: 'app-conv-row',
+		styleIsolation: 'app-and-page'
+	})
+
+	defineProps<{
+		title: string
+		time: string
+		pinned: boolean
+	}>()
+
+	const emit = defineEmits<{
+		(e: 'open'): void
+		(e: 'longpress'): void
+	}>()
+
+	function onLongpress(): void {
+		emit('longpress')
+	}
+</script>
+
+<style lang="scss">
+	.app-conv-row {
+		flex-direction: row;
+		align-items: center;
+		height: 44px;
+
+		&__pin {
+			margin-right: 7px;
+		}
+
+		&__name {
+			flex: 1;
+			min-width: 0;
+			font-size: 15.5px;
+			color: var(--color-text);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+
+			&--pin {
+				font-weight: 650;
+			}
+		}
+
+		&__time {
+			margin-left: 10px;
+			font-size: 12.5px;
+			color: var(--color-text-tertiary);
+		}
+	}
+</style>

@@ -131,16 +131,33 @@ test('壳层必须接 on_new_window/on_navigation，否则 _blank 是死链', ()
     assert.match(lib, /\.on_new_window\(/, 'builder 未接 on_new_window：target="_blank" 会静默无反应');
     assert.match(lib, /\.on_navigation\(/, 'builder 未接 on_navigation：同窗跳转外链不会交给系统浏览器');
     assert.match(lib, /mod external_link;/, '未声明 external_link 模块');
-    // 两个回调都必须经 is_internal_url 判定，而不是无条件放行/无条件外开
-    const internalChecks = (lib.match(/external_link::is_internal_url\(/g) || []).length;
-    assert.strictEqual(internalChecks, 2,
-        '应恰好两处来源校验（on_new_window + on_navigation），实际 ' + internalChecks);
+    // on_navigation 仍用 is_internal_url 判同窗跳转；on_new_window 改用
+    // is_app_own_url 判「是否自家 UI」（聚焦主窗 vs 交系统浏览器）。
+    assert.match(lib, /external_link::is_internal_url\(url\)/,
+        'on_navigation 必须经 is_internal_url 判定，而不是无条件放行/无条件外开');
+    assert.match(lib, /external_link::is_app_own_url\(&url\)/,
+        'on_new_window 必须经 is_app_own_url 判定聚焦主窗分支');
+
+    /* P0 回归（2026-11「切到连接器后无限弹框」）：on_new_window 永远不得 Allow。
+       Allow 会让 WebView2 新建一个跑同一 UI 的顶层窗口；内核把整个应用服务在
+       回环端口上，任何解析到 loopback 的 window.open（OAuth 回显、厂商 CLI 的
+       http://localhost:<port> 登录页、误拼的相对链接）都会整窗复制应用，
+       每个副本再跑同一套启动代码 → 无限级联。 */
+    const nwStart = lib.indexOf('.on_new_window(');
+    const nwEnd = lib.indexOf('.on_navigation(');
+    assert.ok(nwStart >= 0 && nwEnd > nwStart, 'on_new_window/on_navigation 结构变化，需同步本契约');
+    const nw = lib.slice(nwStart, nwEnd);
+    assert.match(nw, /NewWindowResponse::Deny/, 'on_new_window 必须始终 Deny');
+    assert.ok(!/NewWindowResponse::Allow/.test(nw),
+        'on_new_window 不得返回 Allow：单窗口应用，Allow 会复制出第二个应用窗口');
 
     const ext = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'external_link.rs'), 'utf8');
     assert.match(ext, /matches!\(url\.scheme\(\),\s*"http"\s*\|\s*"https"\)/,
         'scheme 守卫必须只放行 http(s)：被取消的 file:// 会走到 open_external');
     assert.match(ext, /if !is_external_openable\(url\)/,
         'open_external 必须先过 scheme 守卫再 spawn');
+    assert.match(ext, /pub fn is_app_own_url\(url: &Url\) -> bool/,
+        'external_link.rs 必须提供 is_app_own_url（on_new_window 的自家 UI 判定）');
 });
 
 test('无 updater 能力 → 骨架首屏不得写「正在检查更新…」（否则闪一帧假进行中态）', async () => {

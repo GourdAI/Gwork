@@ -1,0 +1,151 @@
+<template>
+	<!-- 设计稿：运行环境整行是一个无边框无底色的按钮，设备 | 工作空间› | 权限› 三段 -->
+	<view class="app-env-bar" @click="emit('open-run')">
+		<view class="app-env-bar__dev">
+			<view class="app-env-bar__dev-icon">
+				<text class="iconfont app-env-bar__dev-glyph">&#xe7a0;</text>
+				<view class="app-env-bar__dot"
+					:class="deviceOnline ? 'app-env-bar__dot--on' : 'app-env-bar__dot--off'"></view>
+			</view>
+			<text class="app-env-bar__dev-name">{{ device }}</text>
+		</view>
+		<view class="app-env-bar__sep"></view>
+		<view class="app-env-bar__seg">
+			<text class="app-env-bar__seg-name">{{ workspace }}</text>
+			<rice-icon name="arrow-right" size="12px" color="var(--color-text-tertiary)"></rice-icon>
+		</view>
+		<view v-if="showPermission" class="app-env-bar__sep"></view>
+		<view v-if="showPermission" class="app-env-bar__seg">
+			<text class="iconfont app-env-bar__seg-glyph"
+				:class="permissionDanger ? 'app-env-bar__seg-glyph--danger' : ''">&#xe98b;</text>
+			<text class="app-env-bar__seg-name"
+				:class="permissionDanger ? 'app-env-bar__seg-name--danger' : ''">{{ permission }}</text>
+			<rice-icon name="arrow-right" size="12px" color="var(--color-text-tertiary)"></rice-icon>
+		</view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed } from 'vue'
+	import type { ComputedRef } from 'vue'
+	import { PERMISSIONS } from '@/data/app-data'
+
+	defineOptions({
+		name: 'app-env-bar',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = withDefaults(defineProps<{
+		device: string
+		deviceOnline: boolean
+		workspace: string
+		permission: string
+		showPermission?: boolean
+	}>(), {
+		device: '',
+		deviceOnline: false,
+		workspace: '',
+		permission: '',
+		showPermission: true
+	})
+
+	const emit = defineEmits<{
+		(e: 'open-run'): void
+	}>()
+
+	const permissionDanger: ComputedRef<boolean> = computed<boolean>((): boolean => {
+		return props.permission === PERMISSIONS[1].name
+	})
+</script>
+
+<style lang="scss">
+	.app-env-bar {
+		height: 22px;
+		flex-direction: row;
+		align-items: center;
+
+		&__dev {
+			flex-direction: row;
+			align-items: center;
+		}
+
+		&__dev-icon {
+			position: relative;
+			width: 14px;
+			height: 14px;
+			align-items: center;
+			justify-content: center;
+		}
+
+		// 字体图标颜色需在使用处显式声明（UCSS 不保证继承）
+		&__dev-glyph {
+			font-size: 14px;
+			color: var(--color-text-secondary);
+		}
+
+		&__dot {
+			position: absolute;
+			top: -2px;
+			right: -2px;
+			width: 6px;
+			height: 6px;
+			border-radius: 3px;
+			border-width: 1.5px;
+			border-style: solid;
+			border-color: var(--color-bg);
+
+			&--on {
+				background-color: var(--color-success);
+			}
+
+			&--off {
+				background-color: var(--color-text-tertiary);
+			}
+		}
+
+		&__dev-name {
+			margin-left: 5px;
+			font-size: 12px;
+			font-weight: 600;
+			color: var(--color-text-secondary);
+		}
+
+		&__sep {
+			width: 1px;
+			height: 13px;
+			margin-left: 9px;
+			margin-right: 9px;
+			background-color: var(--color-border);
+		}
+
+		&__seg {
+			flex-direction: row;
+			align-items: center;
+		}
+
+		&__seg-glyph {
+			font-size: 12px;
+			color: var(--color-text-secondary);
+
+			&--danger {
+				color: var(--color-error);
+			}
+		}
+
+		&__seg-name {
+			margin-left: 4px;
+			margin-right: 5px;
+			max-width: 62px;
+			font-size: 12px;
+			font-weight: 600;
+			color: var(--color-text-secondary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+
+			&--danger {
+				color: var(--color-error);
+			}
+		}
+	}
+</style>

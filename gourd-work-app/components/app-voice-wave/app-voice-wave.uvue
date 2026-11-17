@@ -1,0 +1,87 @@
+<template>
+	<view class="app-voice-wave" v-show="active">
+		<view v-for="(h, index) in heights" :key="index" class="app-voice-wave__bar"
+			:class="error ? 'app-voice-wave__bar--error' : ''" :style="barStyle(h)"></view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { onUnmounted, ref, watch } from 'vue'
+	import type { Ref } from 'vue'
+
+	defineOptions({
+		name: 'app-voice-wave',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = defineProps<{
+		/** 是否处于录音中：驱动动画启停与显隐（v-show 常驻节点，避免按住手势期间结构增删） */
+		active: boolean
+		/** 取消态：波形转危险红 */
+		error: boolean
+	}>()
+
+	const BAR_COUNT = 30
+	const BAR_MIN = 4
+	const BAR_MAX = 18
+	const TICK_MS = 90
+
+	const heights: Ref<number[]> = ref<number[]>(randomHeights())
+
+	let timer: number = 0
+
+	watch((): boolean => props.active, (active: boolean): void => {
+		if (active) {
+			if (timer == 0) {
+				timer = setInterval((): void => {
+					heights.value = randomHeights()
+				}, TICK_MS)
+			}
+			return
+		}
+		stopTimer()
+	})
+
+	onUnmounted((): void => {
+		stopTimer()
+	})
+
+	function stopTimer(): void {
+		if (timer != 0) {
+			clearInterval(timer)
+			timer = 0
+		}
+	}
+
+	function randomHeights(): number[] {
+		const list: number[] = []
+		for (let i = 0; i < BAR_COUNT; i++) {
+			list.push(BAR_MIN + Math.floor(Math.random() * (BAR_MAX - BAR_MIN + 1)))
+		}
+		return list
+	}
+
+	function barStyle(h: number): string {
+		return 'height:' + h + 'px;'
+	}
+</script>
+
+<style lang="scss">
+	.app-voice-wave {
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		height: 18px;
+
+		&__bar {
+			width: 3px;
+			margin-left: 2.5px;
+			border-radius: 2px;
+			background-color: var(--color-primary);
+
+			&--error {
+				background-color: var(--color-error);
+			}
+		}
+	}
+</style>

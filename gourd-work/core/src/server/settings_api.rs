@@ -118,7 +118,7 @@ fn patch_settings(key: &str, value: serde_json::Value) -> bool {
     patch_settings_at(&settings_path(), key, value)
 }
 
-fn read_settings_key(key: &str) -> serde_json::Value {
+pub(crate) fn read_settings_key(key: &str) -> serde_json::Value {
     read_settings_key_at(&settings_path(), key)
 }
 
@@ -536,6 +536,25 @@ pub struct McpBody {
     /// Legacy flat spelling accepted by `AuthSpec::from_entry`.
     #[serde(rename = "authType", default)]
     pub auth_type: Option<String>,
+    // ── 展示元数据（非密钥）──────────────────────────────────────────────
+    // 广场安装时随目录条目落盘，让「连接器·已安装」卡片能显示与技能已安装卡
+    // 同款的图片与展示名（用户诉求：两处已安装显示不一致、连接器没有图片和名字）。
+    // 手动添加 / 导入的条目没有这些字段，前端回退目录名 + 首字母底，行为不变。
+    /// Display name from the catalog (e.g. 「高德地图」), shown on installed cards.
+    #[serde(rename = "displayName", default)]
+    pub display_name: Option<String>,
+    /// Catalog logo URL; rendered through the server-side icon proxy.
+    #[serde(rename = "iconUrl", default)]
+    pub icon_url: Option<String>,
+    /// Short catalog description for the installed card.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 目录来源 id（非密钥）：广场安装时落盘 `marketId = body.id`，前端广场卡片
+    /// 用 `marketId === 市场条目 id` 判定「已安装」。落盘名可能因重名加后缀
+    /// （fetch → fetch-2），按名字匹配不可靠；来源 id 是唯一稳定口径。
+    /// 手动添加 / 导入的条目没有此字段，行为不变。
+    #[serde(rename = "marketId", default)]
+    pub market_id: Option<String>,
 }
 
 /// GET /web/settings/mcp/servers
@@ -577,6 +596,15 @@ pub async fn mcp_servers() -> Json<serde_json::Value> {
             if let Some(v) = entry.get("authType") {
                 item["authType"] = v.clone();
             }
+            // 展示元数据（非密钥）：已安装卡片按技能已安装卡同款渲染图片与展示名。
+            // 逐字段组装的接口必须显式透传，否则前端永远只能画字母占位。
+            // marketId：广场卡片「已安装」态的匹配口径（落盘名可能带 -2 后缀，
+            // 按名匹配不可靠），同样是逐字段组装必须显式透传的非密钥字段。
+            for key in ["displayName", "iconUrl", "description", "marketId"] {
+                if let Some(v) = entry.get(key).filter(|v| v.is_string()) {
+                    item[key] = v.clone();
+                }
+            }
             list.push(item);
         }
     }
@@ -584,11 +612,14 @@ pub async fn mcp_servers() -> Json<serde_json::Value> {
     Json(serde_json::json!({"code": 200, "data": list}))
 }
 
-/// Build the settings.json entry for a server, validating the kind first.
+/// Validate + build the settings.json entry for a server.
+///
+/// `pub(crate)`：市场 install（mcp_market_api）在落盘**前**用同一个函数对整批
+/// 条目做预检 —— 预检判据必须与真正落盘的判据同源，另抄一份校验必然分叉。
 ///
 /// `existing` supplies fall-back values for `update` (a partial submission keeps
 /// whatever the user didn't touch); pass `None` for `add`.
-fn build_entry(
+pub(crate) fn build_entry(
     body: &McpBody,
     existing: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
@@ -679,6 +710,40 @@ fn build_entry(
         entry["disallowedTools"] = serde_json::json!(dt);
     }
 
+    // 展示元数据（非密钥）：submitted wins, otherwise keep the stored one
+    // (update semantics, same as prev_str)。编辑表单不提交这三个字段，若不
+    // 保留，广场装好的连接器每编辑一次就丢一次图片和展示名，退回字母占位。
+    let prev_meta = |key: &str, submitted: &Option<String>| -> Option<String> {
+        submitted
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                existing
+                    .and_then(|e| e.get(key))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+    };
+    if let Some(v) = prev_meta("displayName", &body.display_name) {
+        entry["displayName"] = serde_json::json!(v);
+    }
+    if let Some(v) = prev_meta("iconUrl", &body.icon_url) {
+        entry["iconUrl"] = serde_json::json!(v);
+    }
+    if let Some(v) = prev_meta("description", &body.description) {
+        entry["description"] = serde_json::json!(v);
+    }
+    // 目录来源 id（非密钥）：与展示元数据同一套「submitted wins / update 保留」
+    // 语义。广场卡片据此判定已安装态；编辑表单不提交它，不保留就会每编辑一次
+    // 丢一次已安装标记。
+    if let Some(v) = prev_meta("marketId", &body.market_id) {
+        entry["marketId"] = serde_json::json!(v);
+    }
+
     // 只把「认证声明」写进 settings.json（authType / 弹窗元数据，均为非密钥）。
     // 凭据值绝不落盘到这里：静态 token 与 OAuth token 由
     // `mcp::auth::CredentialVault` 单独保管，settings.json 会被导出/共享。
@@ -735,8 +800,6 @@ pub(crate) fn sanitize_auth_decl(raw: &serde_json::Value) -> serde_json::Value {
         "tokenHeader", "tokenPrefix", "clientId",
         // RFC 8628 / in-app QR modal — non-secret presentation metadata.
         "deviceAuthorizationEndpoint",
-        // Vendor QR protocol selector (authType=qrcode_poll), e.g. "tencent-docs".
-        "qrVendor",
     ];
     const BOOL_FIELDS: &[&str] = &["authDeviceFlow", "authQrModal"];
     const NUMBER_FIELDS: &[&str] = &["devicePollIntervalSecs"];
@@ -778,6 +841,16 @@ pub(crate) fn sanitize_auth_decl(raw: &serde_json::Value) -> serde_json::Value {
 /// Parse one settings entry into a `McpServerConfig` for engine operations.
 fn entry_to_config(entry: &serde_json::Value) -> McpServerConfig {
     serde_json::from_value(entry.clone()).unwrap_or_default()
+}
+
+/// Test-only seam: let sibling modules (market install tests) assert that
+/// display metadata really lands in the persisted entry shape.
+#[cfg(test)]
+pub(crate) fn build_entry_for_test(
+    body: &McpBody,
+    existing: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    build_entry(body, existing)
 }
 
 /// Apply a config change to the live engine (hot-plug, no restart needed).
@@ -3797,6 +3870,55 @@ mod tests {
         assert_eq!(entry["auth"]["authType"], "token");
     }
 
+    /// 展示元数据（图片 + 展示名 + 描述）必须落盘，且编辑（update）不丢。
+    ///
+    /// 用户报障「连接器·已安装没有图片和名字」：根因是安装链路丢弃目录元数据。
+    /// 这里钉住 build_entry 的落盘与 update 保留语义——编辑表单不提交这三个
+    /// 字段，若不保留，广场装好的连接器每编辑一次就退回字母占位。
+    #[test]
+    fn build_entry_persists_display_metadata_and_keeps_it_across_update() {
+        let body = McpBody {
+            name: "amap".to_string(),
+            kind: "sse".to_string(),
+            url: Some("https://mcp.amap.com/sse".to_string()),
+            display_name: Some("高德地图".to_string()),
+            icon_url: Some("https://cdn.example.com/amap.png".to_string()),
+            description: Some("高德地图 MCP 服务".to_string()),
+            ..McpBody::default()
+        };
+        let entry = build_entry(&body, None).expect("valid sse entry");
+        assert_eq!(entry["displayName"], "高德地图");
+        assert_eq!(entry["iconUrl"], "https://cdn.example.com/amap.png");
+        assert_eq!(entry["description"], "高德地图 MCP 服务");
+
+        // update：表单只提交运行字段，元数据必须从 existing 保留。
+        let edit = McpBody {
+            name: "amap".to_string(),
+            kind: "sse".to_string(),
+            url: Some("https://mcp.amap.com/sse?key=2".to_string()),
+            ..McpBody::default()
+        };
+        let updated = build_entry(&edit, Some(&entry)).expect("valid update");
+        assert_eq!(updated["displayName"], "高德地图", "编辑不得丢展示名");
+        assert_eq!(updated["iconUrl"], "https://cdn.example.com/amap.png", "编辑不得丢图标");
+        assert_eq!(updated["description"], "高德地图 MCP 服务");
+
+        // 空白提交不得覆盖已存元数据；无元数据的手动条目不得凭空多出空串字段。
+        let blank = McpBody {
+            name: "amap".to_string(),
+            kind: "sse".to_string(),
+            url: Some("https://mcp.amap.com/sse".to_string()),
+            display_name: Some("   ".to_string()),
+            ..McpBody::default()
+        };
+        let kept = build_entry(&blank, Some(&entry)).expect("valid update");
+        assert_eq!(kept["displayName"], "高德地图");
+        let manual = build_entry(&edit, None).expect("valid manual entry");
+        assert!(manual.get("displayName").is_none());
+        assert!(manual.get("iconUrl").is_none());
+        assert!(manual.get("description").is_none());
+    }
+
     /* ── sanitize_auth_decl 白名单本体（P1 回归护栏） ─────────────────────
      *
      * 上面两个测试都把密钥放在**顶层非白名单键**上（`token` / `accessToken` /
@@ -3857,7 +3979,6 @@ mod tests {
             "authQrModal": false,
             "deviceAuthorizationEndpoint": "https://as.example.com/device",
             "devicePollIntervalSecs": 7,
-            "qrVendor": "tencent-docs",
             // 凭据字段一律不得留下。
             "token": "MUST-NOT-PERSIST",
             "accessToken": "MUST-NOT-PERSIST-2",
@@ -3866,7 +3987,7 @@ mod tests {
             "clientSecret": "MUST-NOT-PERSIST-5",
             "password": "MUST-NOT-PERSIST-6"
         }));
-        // 13 个声明字段逐一存活（与 mcp::auth::AuthSpec 一一对应）。
+        // 12 个声明字段逐一存活（与 mcp::auth::AuthSpec 一一对应）。
         assert_eq!(cleaned["authType"], "oauth");
         assert_eq!(cleaned["tokenLabel"], "D&B Access Token");
         assert_eq!(cleaned["tokenHelpUrl"], "https://example.com/help");
@@ -3879,21 +4000,20 @@ mod tests {
         assert_eq!(cleaned["authQrModal"], false);
         assert_eq!(cleaned["deviceAuthorizationEndpoint"], "https://as.example.com/device");
         assert_eq!(cleaned["devicePollIntervalSecs"], 7);
-        assert_eq!(cleaned["qrVendor"], "tencent-docs");
 
         let serialized = serde_json::to_string(&cleaned).unwrap();
         for i in 0..=6 {
             let needle = if i == 0 { "MUST-NOT-PERSIST".to_string() } else { format!("MUST-NOT-PERSIST-{i}") };
             assert!(!serialized.contains(&needle), "凭据字段泄漏: {needle}");
         }
-        // 键集合精确等于 13 个白名单键：多一个都意味着白名单被放宽。
+        // 键集合精确等于 12 个白名单键：多一个都意味着白名单被放宽。
         let keys: std::collections::BTreeSet<&str> = cleaned
             .as_object()
             .unwrap()
             .keys()
             .map(|k| k.as_str())
             .collect();
-        assert_eq!(keys.len(), 13, "白名单键数量变了: {keys:?}");
+        assert_eq!(keys.len(), 12, "白名单键数量变了: {keys:?}");
     }
 
     #[test]
@@ -3926,7 +4046,6 @@ mod tests {
             "tokenHeader", "tokenPrefix", "clientId", "scopes",
             "authDeviceFlow", "authQrModal",
             "deviceAuthorizationEndpoint", "devicePollIntervalSecs",
-            "qrVendor",
         ];
         // 写侧：构造一个只含全部字段的输入，输出必须一个不少。
         let mut all = serde_json::Map::new();

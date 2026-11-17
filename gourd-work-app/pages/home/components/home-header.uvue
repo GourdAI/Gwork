@@ -1,0 +1,64 @@
+<template>
+	<view class="home-header">
+		<view class="home-header__menu" @click="emit('menu')">
+			<text class="iconfont">&#xe634;</text>
+		</view>
+		<text class="home-header__brand">{{ t('home.brand') }}</text>
+		<app-env-bar class="home-header__env" :device="device" :device-online="deviceOnline" :workspace="workspace"
+			:permission="permission" :show-permission="false" @open-run="emit('open-run')"></app-env-bar>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { i18n } from '@/locale/i18n.ts'
+	import AppEnvBar from '@/components/app-env-bar/app-env-bar.uvue'
+
+	defineOptions({
+		name: 'home-header',
+		styleIsolation: 'app-and-page'
+	})
+
+	defineProps<{
+		device: string
+		deviceOnline: boolean
+		workspace: string
+		permission: string
+	}>()
+
+	const emit = defineEmits<{
+		(e: 'menu'): void
+		(e: 'open-run'): void
+	}>()
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+</script>
+
+<style lang="scss">
+	.home-header {
+		flex-direction: row;
+		align-items: center;
+		padding: 8px 14px 0;
+
+		&__menu {
+			width: 32px;
+			height: 32px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 10px;
+		}
+
+		&__brand {
+			margin-left: 8px;
+			font-size: 17px;
+			font-weight: 800;
+			letter-spacing: -0.3px;
+			color: var(--color-text);
+		}
+
+		&__env {
+			margin-left: auto;
+		}
+	}
+</style>

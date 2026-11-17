@@ -1,0 +1,126 @@
+<template>
+	<!-- 产物弹层（设计稿 S3「产物」）：列出当前对话产出的文件，点击卡片进产物详情（待接口接入） -->
+	<app-sheet :visible="visible" :title="t('chat.artifacts.title')" @close="emit('close')">
+		<view v-if="artifacts.length > 0" class="app-artifact__list">
+			<view v-for="item in artifacts" :key="item.name" class="app-artifact__card" @click="emit('open', item)">
+				<view class="app-artifact__ic" :class="item.icon === 'image' ? 'app-artifact__ic--image' : ''">
+					<!-- 码点直写：e69f 文件 / e61e 图片；代码类文件无对应字体图标，按文档图标展示 -->
+					<text class="iconfont app-artifact__glyph">{{ item.icon === 'image' ? '' : '' }}</text>
+				</view>
+				<view class="app-artifact__tx">
+					<text class="app-artifact__name">{{ item.name }}</text>
+					<text class="app-artifact__meta">{{ fileMeta(item) }}</text>
+				</view>
+			</view>
+		</view>
+		<text v-else class="app-artifact__empty">{{ t('chat.artifacts.empty') }}</text>
+	</app-sheet>
+</template>
+
+<script setup lang="ts">
+	import { i18n } from '@/locale/i18n.ts'
+	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
+	import type { ArtifactFile } from '@/data/app-data'
+
+	defineOptions({
+		name: 'app-artifact-sheet',
+		styleIsolation: 'app-and-page'
+	})
+
+	defineProps<{
+		visible: boolean
+		artifacts: ArtifactFile[]
+	}>()
+
+	const emit = defineEmits<{
+		(e: 'close'): void
+		(e: 'open', artifact: ArtifactFile): void
+	}>()
+
+	function t(key: string, values?: Record<string, string>): string {
+		if (values == null) return i18n.global.t(key)
+		return i18n.global.t(key, values)
+	}
+
+	// 卡片副标题「{类型} 文件 · 大小」，模板里不直接调带插值的 t，收敛到方法
+	function fileMeta(item: ArtifactFile): string {
+		return t('chat.artifacts.fileMeta', { kind: item.kind, size: item.size })
+	}
+</script>
+
+<style lang="scss">
+.app-artifact {
+	&__list {
+		padding-top: 2px;
+	}
+
+	&__card {
+		flex-direction: row;
+		align-items: center;
+		margin-bottom: 11px;
+		padding: 14px 15px;
+		border-width: 1px;
+		border-style: solid;
+		border-color: var(--color-border);
+		border-radius: 17px;
+		background-color: var(--color-bg-card);
+	}
+
+	&__ic {
+		width: 44px;
+		height: 44px;
+		align-items: center;
+		justify-content: center;
+		margin-right: 13px;
+		border-radius: 13px;
+		background-color: var(--color-brand-soft);
+
+		&--image {
+			background-color: var(--color-file-image-bg);
+		}
+	}
+
+	&__glyph {
+		font-size: 22px;
+		color: var(--color-primary);
+
+		&--image {
+			color: var(--color-file-image);
+		}
+	}
+
+	&__tx {
+		flex: 1;
+		min-width: 0;
+		flex-direction: column;
+	}
+
+	&__name {
+		font-size: 14px;
+		font-weight: 700;
+		color: var(--color-text);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	&__meta {
+		margin-top: 5px;
+		font-size: 11.5px;
+		color: var(--color-text-tertiary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	&__empty {
+		padding: 26px 0;
+		font-size: 12px;
+		text-align: center;
+		color: var(--color-text-tertiary);
+	}
+}
+</style>
+
+
+

@@ -1,0 +1,106 @@
+<template>
+	<view class="home-hero">
+		<image class="home-hero__logo" src="/static/logo.png" mode="aspectFit"></image>
+		<text class="home-hero__title">{{ t('home.title') }}</text>
+		<text class="home-hero__sub">{{ t('home.subtitle') }}</text>
+		<view class="home-hero__caps">
+			<view v-for="cap in CAPS" :key="cap.label" class="home-hero__cap" @click="onCap(cap.prompt)">
+				<view class="home-hero__cap-dot"></view>
+				<text class="home-hero__cap-text">{{ t(cap.label) }}</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { i18n } from '@/locale/i18n.ts'
+
+	defineOptions({
+		name: 'home-hero',
+		styleIsolation: 'app-and-page'
+	})
+
+	type Capability = {
+		label: string
+		prompt: string
+	}
+
+	const CAPS: Capability[] = [
+		{ label: 'home.cap.task', prompt: 'home.cap.taskPrompt' },
+		{ label: 'home.cap.continuous', prompt: 'home.cap.continuousPrompt' },
+		{ label: 'home.cap.parallel', prompt: 'home.cap.parallelPrompt' }
+	]
+
+	const emit = defineEmits<{
+		(e: 'fill', text: string): void
+	}>()
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function onCap(promptKey: string): void {
+		emit('fill', t(promptKey))
+	}
+</script>
+
+<style lang="scss">
+	.home-hero {
+		flex: 1;
+		align-items: center;
+		justify-content: center;
+		padding: 0 16px 18px;
+
+		&__logo {
+			width: 74px;
+			height: 74px;
+			margin-bottom: 18px;
+		}
+
+		&__title {
+			font-size: 29px;
+			line-height: 38px;
+			font-weight: 700;
+			letter-spacing: -0.5px;
+			text-align: center;
+			color: var(--color-hero-title);
+		}
+
+		&__sub {
+			margin-top: 10px;
+			max-width: 300px;
+			font-size: 13.5px;
+			line-height: 22px;
+			text-align: center;
+			color: var(--color-hero-sub);
+		}
+
+		&__caps {
+			flex-direction: row;
+			flex-wrap: wrap;
+			align-items: center;
+			justify-content: center;
+			margin-top: 30px;
+		}
+
+		&__cap {
+			flex-direction: row;
+			align-items: center;
+			margin: 4px 9px;
+		}
+
+		&__cap-dot {
+			width: 8px;
+			height: 8px;
+			margin-right: 9px;
+			border-radius: 4px;
+			background-color: var(--color-cap-dot);
+		}
+
+		&__cap-text {
+			font-size: 14px;
+			font-weight: 500;
+			color: var(--color-cap-text);
+		}
+	}
+</style>

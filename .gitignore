@@ -90,16 +90,3 @@ gourdai-java/gourd-ai-tauri/.cache/
 /gourd-ai-desktop/
 /gourd-ai-tauri/
 
-# 连接器仓库导入原料（WorkBuddy 公开 zip 解包 + 实测结果，55MB，不发布不入库）
-gourd-connectors/.import-src/
-# CLI 连接器导入原料暂存（npm tarball / GitHub 仓库解包 / WB 缓存副本，不发布不入库；
-# 技能成品已落 connectors/<name>/skills/ 并随快照打包，原料可由 import-cli.mjs 重新拉取）
-gourd-connectors/.cli-src/
-# CLI 连接器技能文件必须入库：根级 `*.md` 规则会静默吞掉全部 SKILL.md/references
-# （与 gourd-work-admin 文档同一事故模式）。技能是数据真源的一部分，逐文件豁免。
-!gourd-connectors/connectors/**/skills/**/*.md
-# 官方连接器仓库的发布产物必须入库：根级 NetBeans 模板的裸 `dist/` 规则会
-# 静默吞掉 gourd-connectors/dist/registry.json（admin 上传的就是这份文件，
-# 数据真源仓库交付即残缺）。README.md 已被根级 !README.md 豁免，无需重复。
-!gourd-connectors/dist/
-!gourd-connectors/dist/**

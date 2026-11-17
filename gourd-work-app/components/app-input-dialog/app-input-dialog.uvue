@@ -1,0 +1,99 @@
+<template>
+	<!-- 居中输入弹窗：遮罩/卡片/标题/按钮底座全部交给 rice-dialog，这里只放输入框 -->
+	<rice-dialog :show="popupShow" width="300px" :title="title" :close-on-click-overlay="true"
+		:confirm-button-text="t('conv.confirm')" :cancel-button-text="t('conv.cancel')"
+		confirm-button-color="var(--color-primary)" cancel-button-color="var(--color-text-secondary)"
+		@update:show="onShowChange" @confirm="onConfirm" @cancel="emit('close')" @click-overlay="emit('close')">
+		<view class="app-dialog">
+			<rice-input v-model="draft" :placeholder="placeholder" :placeholder-style="placeholderStyle"
+				color="var(--color-text)" bg-color="var(--color-bg)" :custom-style="inputStyle" :focus="autoFocus"
+				:clearable="true" clear-trigger="always" border="surround" :focus-border="true" height="40px"
+				font-size="13px" @focus="onFocus" @blur="onBlur" @confirm="onConfirm" />
+		</view>
+	</rice-dialog>
+</template>
+
+<script setup lang="ts">
+	import { computed, ref, watch } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useDelayedPopup } from '@/hooks/useDelayedPopup'
+
+	defineOptions({
+		name: 'app-input-dialog',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = withDefaults(defineProps<{
+		visible: boolean
+		title: string
+		value: string
+		placeholder?: string
+	}>(), {
+		visible: false,
+		title: '',
+		value: '',
+		placeholder: ''
+	})
+
+	const emit = defineEmits<{
+		(e: 'close'): void
+		(e: 'confirm', value: string): void
+	}>()
+
+	// 关闭动画期内重开会撞 rice-dialog 内部竞态，经 useDelayedPopup 延迟拉起；其关闭动画 250ms，留 50ms 余量
+	const { popupShow } = useDelayedPopup((): boolean => props.visible, 300)
+
+	const draft: Ref<string> = ref<string>('')
+	const focused: Ref<boolean> = ref<boolean>(false)
+	// 弹层每次打开才请求焦点，避免 v-if 重建时 input 未挂载就聚焦
+	const autoFocus: Ref<boolean> = ref<boolean>(false)
+
+	const placeholderStyle: ComputedRef<string> = computed<string>((): string => {
+		return 'color:var(--color-text-tertiary);'
+	})
+
+	// 描边跟随主题与聚焦态：rice-input 的 focusBorder 只能取 rice 主色，颜色改由行内样式驱动
+	const inputStyle = computed<UTSJSONObject>((): UTSJSONObject => ({
+		borderRadius: '11px',
+		padding: '0 12px',
+		borderColor: focused.value ? 'var(--color-primary)' : 'var(--color-border)'
+	}))
+
+	// 跟随实际拉起时机而非 visible：延迟打开期间 input 尚未挂载，提前置 autoFocus 会丢焦点
+	watch((): boolean => popupShow.value, (shown: boolean): void => {
+		if (!shown) {
+			autoFocus.value = false
+			return
+		}
+		draft.value = props.value
+		focused.value = false
+		autoFocus.value = true
+	})
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function onShowChange(show: boolean): void {
+		if (!show && props.visible) emit('close')
+	}
+
+	function onFocus(): void {
+		focused.value = true
+	}
+
+	function onBlur(): void {
+		focused.value = false
+	}
+
+	function onConfirm(): void {
+		emit('confirm', draft.value)
+	}
+</script>
+
+<style lang="scss">
+	.app-dialog {
+		width: 100%;
+	}
+</style>

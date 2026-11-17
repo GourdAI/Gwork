@@ -1,0 +1,94 @@
+<template>
+	<view class="app-chat-bubble" :class="message.role === 'user' ? 'app-chat-bubble--user' : 'app-chat-bubble--ai'">
+		<!-- 思考中：正文未出，先给 loading + 文案（对齐 uni-ai-x 的 pending spinner） -->
+		<view v-if="message.thinking" class="app-chat-bubble__pending">
+			<loading class="app-chat-bubble__spinner"></loading>
+			<text class="app-chat-bubble__pending-text">{{ t('chat.thinking') }}</text>
+		</view>
+		<text v-else-if="message.text.length > 0" class="app-chat-bubble__text"
+			:class="message.role === 'user' ? 'app-chat-bubble__text--user' : 'app-chat-bubble__text--ai'">{{ message.text }}</text>
+		<!-- 停止且无正文：占位文案，对齐 uni-ai-x 的「回答被终止」 -->
+		<text v-else-if="message.status === 'stopped'" class="app-chat-bubble__text app-chat-bubble__text--ai">{{ t('chat.stoppedEmpty') }}</text>
+		<text v-if="message.meta.length > 0" class="app-chat-bubble__meta">{{ message.meta }}</text>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import type { ChatMessage } from '@/data/app-data'
+	import { i18n } from '@/locale/i18n.ts'
+
+	defineOptions({
+		name: 'app-chat-bubble',
+		styleIsolation: 'app-and-page'
+	})
+
+	defineProps<{
+		message: ChatMessage
+	}>()
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+</script>
+
+<style lang="scss">
+	.app-chat-bubble {
+		/* 宽度上限由父级 app-chat__bubble-wrap 定宽控制（UCSS 的 max-width 不支持百分比） */
+		flex-shrink: 1;
+		padding: 11px 14px;
+		border-radius: 17px;
+		flex-direction: column;
+
+		&--user {
+			/*UCSS 布局默认由父级控制，用户气泡靠父容器 justify-content: flex-end 右对齐 */
+			align-items: flex-end;
+			border-bottom-right-radius: 6px;
+			background-color: var(--color-primary);
+		}
+
+		&--ai {
+			align-items: flex-start;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+		}
+
+		&__text {
+			font-size: 13.5px;
+			line-height: 22px;
+
+			&--user {
+				color: var(--color-text-inverse);
+			}
+
+			&--ai {
+				color: var(--color-text);
+			}
+		}
+
+		&__pending {
+			flex-direction: row;
+			align-items: center;
+		}
+
+		// loading 组件的圈色由 border-color 控制（对齐 uni-ai-x），颜色走主题变量
+		&__spinner {
+			width: 16px;
+			height: 16px;
+			margin-right: 8px;
+			border-color: var(--color-text-tertiary);
+		}
+
+		&__pending-text {
+			font-size: 13.5px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__meta {
+			margin-top: 6px;
+			font-size: 10.5px;
+			color: var(--color-text-tertiary);
+		}
+	}
+</style>

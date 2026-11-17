@@ -12,7 +12,7 @@
 					<text class="content-body-version">{{ version }}</text>
 				</view>
 				<view class="body">
-					<scroll-view class="box-des-scroll" scroll-y="true">
+				<scroll-view class="box-des-scroll" :scroll-y="true">
 						<text class="box-des">
 							{{ contents }}
 						</text>
@@ -27,7 +27,7 @@
 					<template v-else>
 						<template v-if="!downloadSuccess">
 							<view class="progress-box flex-column" v-if="downloading">
-								<progress class="progress" :percent="downLoadPercent" activeColor="#3DA7FF" show-info stroke-width="10" />
+								<progress class="progress" :percent="downLoadPercent" activeColor="#3DA7FF" show-info :stroke-width="10" />
 								<view style="width: 100%; font-size: 26rpx; display: flex; justify-content: space-around">
 									<text>{{ downLoadingText }}</text>
 									<text>({{ downloadedSize }}/{{ packageFileSize }}M)</text>
@@ -61,7 +61,7 @@
 							安装未完成，点击安装
 						</button>
 
-						<button v-else-if="installed && isWGT" class="content-button" style="border: none; color: #fff" plain @click="restart">安装完毕，点击重启</button>
+		<button v-else-if="installed && isWGT && !readyPromptHandled" class="content-button" style="border: none; color: #fff" plain @click="restart">安装完毕，点击重启</button>
 					</template>
 				</view>
 			</view>
@@ -76,10 +76,12 @@
 import { createNotificationProgress, cancelNotificationProgress, finishNotificationProgress } from '@/uni_modules/uts-progressNotification';
 // #endif
 import { compare, platform_iOS, platform_Android, platform_Harmony, createUpgradeDownloadTask } from '../utils'
+import { createUpdateManager } from '../utils/update-manager'
 const localFilePathKey = 'UNI_ADMIN_UPGRADE_CENTER_LOCAL_FILE_PATH';
 
 let downloadTask = null;
 let openSchemePromise;
+const updateManager = createUpdateManager();
 
 export default {
     emits: ['close', 'show'],
@@ -90,6 +92,7 @@ export default {
 
 			// 安装
 			installed: false,
+			readyPromptHandled: false,
 			installing: false,
 
 			// 下载
@@ -110,6 +113,9 @@ export default {
 			url: '',
 			platform: [],
 			store_list: null,
+			packageInfo: null,
+			/** @type {import('../utils/update-manager').UpdateTaskContext | null} */
+			taskContext: null,
 
 			// 可自定义属性
 			subTitle: '发现新版本',
@@ -133,13 +139,21 @@ export default {
 		}
 
 		const localPackageInfo = uni.getStorageSync(local_storage_key);
+		uni.removeStorageSync(local_storage_key);
 		if (!localPackageInfo) {
 			console.error('安装包信息为空，请检查后重试');
 			uni.navigateBack();
 			return;
 		}
 
-		this.setLocalPackageInfo(localPackageInfo)
+		if (localPackageInfo.packageInfo) {
+			/** @type {import('../utils/update-manager').UpgradePopupPayload} */
+			const payload = localPackageInfo;
+			this.setLocalPackageInfo(payload.packageInfo, payload.taskContext)
+		} else {
+			// 兼容旧裸包存储及 check-update-nvue 入口。
+			this.setLocalPackageInfo(localPackageInfo)
+		}
 	},
 	onBackPress() {
 		// 强制更新不允许返回
@@ -177,18 +191,18 @@ export default {
 		}
 	},
 	methods: {
-		show(shown, localPackageInfo) {
+		show(shown, localPackageInfo, taskContext = null) {
 			// #ifdef APP-HARMONY
 			this.$emit('show')
 			if (localPackageInfo) {
 				this.shown = shown
-				this.setLocalPackageInfo(localPackageInfo)
+				this.setLocalPackageInfo(localPackageInfo, taskContext)
 			} else {
 				console.error(`安装包信息为空，请检查后重试`);
 			}
 			// #endif
 		},
-		setLocalPackageInfo(localPackageInfo) {
+		setLocalPackageInfo(localPackageInfo, taskContext = null) {
 			const requiredKey = ['version', 'url', 'type'];
 			for (let key in localPackageInfo) {
 				if (requiredKey.indexOf(key) !== -1 && !localPackageInfo[key]) {
@@ -204,6 +218,10 @@ export default {
 			}
 
 			Object.assign(this, localPackageInfo);
+			this.packageInfo = localPackageInfo;
+			this.taskContext = taskContext == null ? updateManager.createTaskContext() : { taskId: taskContext.taskId, checkId: taskContext.checkId };
+			this.readyPromptHandled = false;
+			this.is_mandatory = localPackageInfo.effective_is_mandatory === true || localPackageInfo.is_mandatory === true;
 			this.checkLocalStoragePackage();
 		},
 		checkLocalStoragePackage() {
@@ -299,6 +317,15 @@ export default {
 			return Promise.reject();
 		},
 		downloadPackage() {
+			const packageInfo = this.packageInfo;
+			const taskContext = this.taskContext;
+			// #ifdef APP-PLUS
+			if (this.needNotificationProgress) {
+				updateManager.startNotificationDownload(packageInfo, taskContext);
+				uni.navigateBack();
+				return;
+			}
+			// #endif
 			this.downloading = true;
 			//下载包
 			downloadTask = createUpgradeDownloadTask({
@@ -309,6 +336,7 @@ export default {
 						if (this.isWGT && res.tempFilePath.split('.').slice(-1)[0] !== 'wgt') {
 							const failCallback = (e) => {
 								console.log('[FILE RENAME FAIL]：', JSON.stringify(e));
+								this.downloadFail(e.message || '下载文件重命名失败', packageInfo, taskContext);
 							};
 							// #ifndef APP-HARMONY
 							plus.io.resolveLocalFileSystemURL(
@@ -339,12 +367,12 @@ export default {
 						}
 					} else {
 						console.log('下载错误：' + JSON.stringify(res))
-            this.downloadFail()
+            this.downloadFail(`下载失败（HTTP ${res.statusCode}）`, packageInfo, taskContext)
 					}
 				},
         fail: (err) => {
           console.log('下载错误：' + JSON.stringify(err))
-          this.downloadFail()
+          this.downloadFail(err.errMsg, packageInfo, taskContext)
         }
 			});
 
@@ -368,7 +396,11 @@ export default {
 				uni.navigateBack();
 			}
 		},
-    downloadFail() {
+    downloadFail(message = '下载失败，请点击重试', packageInfo = this.packageInfo, taskContext = this.taskContext) {
+      if (taskContext != null) {
+        updateManager.notifyUpdateFailed({ taskId: taskContext.taskId, checkId: taskContext.checkId,
+          packageInfo, stage: 'download', code: null, message, retryable: true });
+      }
       const errMsg = '下载失败，请点击重试'
 
       this.downloadSuccess = false;
@@ -418,8 +450,12 @@ export default {
 		},
 		installPackage() {
 			// #ifdef APP-PLUS || APP-HARMONY
+			const packageInfo = this.packageInfo;
+			const taskContext = this.taskContext;
+			if (packageInfo == null || taskContext == null) return;
+			const isWGT = packageInfo.type === 'wgt';
 			// wgt资源包安装
-			if (this.isWGT) {
+			if (isWGT) {
 				this.installing = true;
 			}
 			plus.runtime.install(
@@ -432,23 +468,9 @@ export default {
 					this.installed = true;
 
 					// wgt包，安装后会提示 安装成功，是否重启
-					if (this.isWGT) {
-						// 强制更新安装完成重启
-						if (this.is_mandatory) {
-							// #ifdef APP-PLUS
-							uni.showLoading({
-								icon: 'none',
-								title: '安装成功，正在重启……'
-							});
-							// #endif
-
-							setTimeout(() => {
-								// #ifdef APP-PLUS
-								uni.hideLoading();
-								// #endif
-								this.restart();
-							}, 1000);
-						}
+					if (isWGT) {
+						this.readyPromptHandled = packageInfo.is_update_prompt === true;
+						updateManager.notifyUpdateReady(packageInfo, taskContext.taskId, false, taskContext);
 					} else {
 						const localFilePathRecord = uni.getStorageSync(localFilePathKey);
 						uni.setStorageSync(localFilePathKey, {
@@ -458,6 +480,8 @@ export default {
 					}
 				},
 				async (err) => {
+					updateManager.notifyUpdateFailed({ taskId: taskContext.taskId, checkId: taskContext.checkId,
+						packageInfo, stage: 'install', code: err.code, message: err.message, retryable: true });
 					// 如果是安装之前的包，安装失败后删除之前的包
 					if (this.installForBeforeFilePath) {
 						await this.deleteSavedFile(this.installForBeforeFilePath);
@@ -483,21 +507,7 @@ export default {
 			// #endif
 		},
 		restart() {
-			this.installed = false;
-			// #ifdef APP-HARMONY
-			uni.showModal({
-				title: '更新完毕',
-				content: '请手动重启',
-				showCancel: false,
-				success(res) {
-					plus.runtime.quit()
-				}
-			})
-			// #endif
-			// #ifdef APP-PLUS
-			//更新完重启app
-			plus.runtime.restart();
-			// #endif
+			updateManager.applyUpdate();
 		},
 		saveFile(tempFilePath, version) {
 			return new Promise((resolve, reject) => {

@@ -1,9 +1,0 @@
-{
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
-  "mcpServers": {
-    "fiu-mcp-server": {
-      "type": "streamable_http",
-      "url": "https://ai.szfiu.com/api/mcp/v2"
-    }
-  }
-}

@@ -1,0 +1,314 @@
+<template>
+	<view class="rebind" :class="themeClass">
+		<view class="rebind__nav">
+			<view class="rebind__back" @click="onBack">
+				<rice-icon name="arrow-left" size="20px" color="var(--color-text-secondary)"></rice-icon>
+			</view>
+			<text class="rebind__nav-title">{{ t('rebind.title') }}</text>
+			<view class="rebind__nav-spacer"></view>
+		</view>
+
+		<!-- 步骤条：当前步高亮，两步之间以细线相连（原型 rb-steps） -->
+		<view class="rebind__steps">
+			<view class="rebind-step">
+				<text class="rebind-step__num" :class="step === 1 ? 'rebind-step__num--on' : ''">1</text>
+				<text class="rebind-step__text" :class="step === 1 ? 'rebind-step__text--on' : ''">{{ t('rebind.step1') }}</text>
+			</view>
+			<view class="rebind__line"></view>
+			<view class="rebind-step">
+				<text class="rebind-step__num" :class="step === 2 ? 'rebind-step__num--on' : ''">2</text>
+				<text class="rebind-step__text" :class="step === 2 ? 'rebind-step__text--on' : ''">{{ t('rebind.step2') }}</text>
+			</view>
+		</view>
+
+		<scroll-view class="rebind__scroll" direction="vertical" :show-scrollbar="false">
+			<!-- 第一步：验证当前邮箱 -->
+			<view v-if="step === 1" class="rebind__form">
+				<text class="rebind__label">{{ t('rebind.curEmail') }}</text>
+				<view class="rebind__field rebind__field--ro">
+					<text class="rebind__ro-text">{{ email }}</text>
+				</view>
+				<text class="rebind__label">{{ t('rebind.curCode') }}</text>
+				<view class="rebind__field">
+					<rice-input v-model="oldCode" :placeholder="t('rebind.codePlaceholder')" :maxlength="6"
+						:clearable="true" clear-trigger="always" border="none" height="44px" font-size="13px"
+						:custom-style="inputFlexStyle"></rice-input>
+					<view class="rebind__code-btn" @click="onSendCode">
+						<text class="rebind__code-btn-text">{{ t('rebind.getCode') }}</text>
+					</view>
+				</view>
+				<text class="rebind__hint">{{ t('rebind.hintOld') }}</text>
+				<view class="rebind__submit" @click="onNext">
+					<text class="rebind__submit-text">{{ t('rebind.next') }}</text>
+				</view>
+			</view>
+
+			<!-- 第二步：绑定新邮箱 -->
+			<view v-else class="rebind__form">
+				<text class="rebind__label">{{ t('rebind.newEmail') }}</text>
+				<view class="rebind__field">
+					<rice-input v-model="newEmail" :placeholder="t('rebind.emailPlaceholder')" :clearable="true"
+						clear-trigger="always" border="none" height="44px" font-size="13px"
+						:custom-style="inputFlexStyle"></rice-input>
+				</view>
+				<text class="rebind__label">{{ t('rebind.newCode') }}</text>
+				<view class="rebind__field">
+					<rice-input v-model="newCode" :placeholder="t('rebind.codePlaceholder')" :maxlength="6"
+						:clearable="true" clear-trigger="always" border="none" height="44px" font-size="13px"
+						:custom-style="inputFlexStyle"></rice-input>
+					<view class="rebind__code-btn" @click="onSendCode">
+						<text class="rebind__code-btn-text">{{ t('rebind.getCode') }}</text>
+					</view>
+				</view>
+				<text class="rebind__hint">{{ t('rebind.hintNew') }}</text>
+				<view class="rebind__submit" @click="onSubmit">
+					<text class="rebind__submit-text">{{ t('rebind.submit') }}</text>
+				</view>
+				<text class="rebind__back-step" @click="onBackStep">{{ t('rebind.back') }}</text>
+			</view>
+		</scroll-view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { ref } from 'vue'
+	import type { Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme } from '@/hooks/useTheme'
+	import { useUser } from '@/hooks/useUser'
+
+	const ACCOUNT_PAGE: string = '/pages/account-settings/index'
+	// 与登录页同一邮箱格式（pages/login/index.uvue 的 EMAIL_PATTERN）
+	const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
+
+	const { themeClass } = useTheme()
+	const { email, setEmail } = useUser()
+
+	const step: Ref<number> = ref<number>(1)
+	const oldCode: Ref<string> = ref<string>('')
+	const newEmail: Ref<string> = ref<string>('')
+	const newCode: Ref<string> = ref<string>('')
+
+	// 验证码按钮占据行尾，输入框占满剩余宽度
+	const inputFlexStyle: UTSJSONObject = { flex: 1 }
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function isCodeValid(code: string): boolean {
+		return /^[0-9]{6}$/.test(code)
+	}
+
+	function onSendCode(): void {
+		// TODO 接入发送验证码接口（当前邮箱 / 新邮箱两种收件人）
+		uni.showToast({ title: t('rebind.codeSent'), icon: 'none' })
+	}
+
+	function onNext(): void {
+		if (!isCodeValid(oldCode.value)) {
+			uni.showToast({ title: t('rebind.codeInvalid'), icon: 'none' })
+			return
+		}
+		step.value = 2
+	}
+
+	function onBackStep(): void {
+		step.value = 1
+	}
+
+	function onSubmit(): void {
+		if (!EMAIL_PATTERN.test(newEmail.value)) {
+			uni.showToast({ title: t('rebind.emailInvalid'), icon: 'none' })
+			return
+		}
+		if (!isCodeValid(newCode.value)) {
+			uni.showToast({ title: t('rebind.codeInvalid'), icon: 'none' })
+			return
+		}
+		// 演示环境任意 6 位验证码可通过；接口接入后在此调用校验接口，成功再回写
+		setEmail(newEmail.value)
+		uni.showToast({ title: t('rebind.success'), icon: 'none' })
+		onBack()
+	}
+
+	function onBack(): void {
+		uni.navigateBack({
+			fail: () => {
+				uni.reLaunch({ url: ACCOUNT_PAGE })
+			}
+		})
+	}
+</script>
+
+<style lang="scss">
+	.rebind {
+		flex: 1;
+		flex-direction: column;
+		padding-top: var(--status-bar-height);
+		padding-bottom: env(safe-area-inset-bottom);
+		background-color: var(--color-bg);
+
+		&__nav {
+			flex-direction: row;
+			align-items: center;
+			height: 54px;
+			padding: 0 14px;
+		}
+
+		&__back {
+			width: 32px;
+			height: 32px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 10px;
+		}
+
+		&__nav-title {
+			flex: 1;
+			margin-left: 4px;
+			font-size: 16px;
+			font-weight: 720;
+			color: var(--color-text);
+		}
+
+		&__nav-spacer {
+			width: 32px;
+			height: 32px;
+		}
+
+		&__steps {
+			flex-direction: row;
+			align-items: center;
+			padding: 20px 22px 2px;
+		}
+
+		&__line {
+			flex: 1;
+			height: 1px;
+			margin: 0 8px;
+			background-color: var(--color-border);
+		}
+
+		&__scroll {
+			flex: 1;
+			min-height: 0;
+		}
+
+		&__form {
+			padding: 18px 16px 28px;
+		}
+
+		&__label {
+			margin-bottom: 7px;
+			font-size: 12px;
+			font-weight: 700;
+			color: var(--color-text-secondary);
+		}
+
+		&__field {
+			flex-direction: row;
+			align-items: center;
+			height: 44px;
+			margin-bottom: 14px;
+			padding: 0 13px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			border-radius: 13px;
+			background-color: var(--color-bg-card);
+
+			&--ro {
+				background-color: var(--color-bg);
+			}
+		}
+
+		&__ro-text {
+			flex: 1;
+			/* 原生端 text 字形盒有 ascent/descent 留白，行高等于容器高才能视觉垂直居中（同 rebind-step__num 写法） */
+			line-height: 44px;
+			font-size: 13px;
+			color: var(--color-text-secondary);
+		}
+
+		&__code-btn {
+			height: 30px;
+			margin-left: 8px;
+			padding: 0 10px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 9px;
+			background-color: var(--color-brand-soft);
+		}
+
+		&__code-btn-text {
+			font-size: 11.5px;
+			font-weight: 700;
+			color: var(--color-primary);
+		}
+
+		&__hint {
+			margin: 2px 2px 0;
+			font-size: 11px;
+			line-height: 18px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__submit {
+			margin-top: 26px;
+			height: 48px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 15px;
+			background-color: var(--color-primary);
+		}
+
+		&__submit-text {
+			font-size: 14px;
+			font-weight: 720;
+			color: var(--color-text-inverse);
+		}
+
+		&__back-step {
+			margin-top: 14px;
+			text-align: center;
+			font-size: 12.5px;
+			font-weight: 650;
+			color: var(--color-text-tertiary);
+		}
+	}
+
+	.rebind-step {
+		flex-direction: row;
+		align-items: center;
+
+		&__num {
+			width: 20px;
+			height: 20px;
+			line-height: 20px;
+			text-align: center;
+			border-radius: 10px;
+			background-color: var(--color-bg-hover);
+			font-size: 11px;
+			font-weight: 750;
+			color: var(--color-text-tertiary);
+		}
+
+		&__text {
+			margin-left: 6px;
+			font-size: 11.5px;
+			font-weight: 650;
+			color: var(--color-text-tertiary);
+		}
+
+		/* 当前步高亮：UCSS 仅支持单类选择器，修饰类直接挂在元素上 */
+		&__num--on {
+			background-color: var(--color-primary);
+			color: var(--color-text-inverse);
+		}
+
+		&__text--on {
+			color: var(--color-primary);
+		}
+	}
+</style>

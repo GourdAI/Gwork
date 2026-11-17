@@ -21,6 +21,13 @@ use super::web_retry::{
 };
 
 /// Default User-Agent for the plain HTTP tools.
+///
+/// `#[cfg(test)]` because only the tests in this file reference it: production
+/// callers pass a per-engine UA (`JINA_UA`, the browser-shaped UA, …) so that
+/// sites which reject self-identified bots still serve content. Without the cfg
+/// this constant is dead in a lib build and its warning masks a real signal —
+/// 「删多了导致孤儿常量」 would otherwise be invisible in a noisy list.
+#[cfg(test)]
 const DEFAULT_UA: &str = "Mozilla/5.0 (compatible; GWork/0.3)";
 /// Browser-shaped UA Jina Reader expects (same string as Java's JINA driver,
 /// `WebCrawlerDriverTalent.java:83`).

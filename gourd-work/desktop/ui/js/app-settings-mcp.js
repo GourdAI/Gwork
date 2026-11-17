@@ -34,16 +34,24 @@
             state: '/web/settings/mcp/auth/state',
             start: '/web/settings/mcp/auth/start',
             deviceStart: '/web/settings/mcp/auth/device/start',
-            qrcodeStart: '/web/settings/mcp/auth/qrcode/start',
             status: '/web/settings/mcp/auth/status',
             cancel: '/web/settings/mcp/auth/cancel',
             token: '/web/settings/mcp/auth/token',
             clear: '/web/settings/mcp/auth/clear'
         };
         var POLL_MS = 1500;                  // /auth/status 轮询间隔 1.5s
-        var MAX_WAIT_MS = 5 * 60 * 1000;     // 授权整体超时上限 5 分钟
+        /* 授权整体超时上限：兜底 5 分钟，但后端 /auth/start 会返回它实际使用的
+         * timeoutSecs（用户可配到 600s）。前端必须跟随后端预算，否则配置大于
+         * 300s 时前端先报「超时」而后端还在等回调——用户重试会 abort 掉一个
+         * 即将成功的授权。beginOAuth 拿到响应后就地更新。 */
+        var MAX_WAIT_MS = 5 * 60 * 1000;
         var pollTimer = null;
         var generation = 0;                  // 新弹窗让旧轮询立即失效
+        /* 当前弹窗对应的在途授权会话名。X / 遮罩关闭与专门的 Cancel 按钮
+         * 必须同口径调 /auth/cancel：只 closeDialog 不 cancel 的话，后端继续
+         * 占着回环端口等到超时，且期间授权完成会把凭据静默落库而 UI 无感知。
+         * token / manage 弹窗没有会话，置 null（关闭时不发 cancel）。 */
+        var pendingAuthName = null;
 
         /** settings.mcp.* 取词；语言包未就绪 / 键缺失时回落短兜底文案。 */
         function authT(key, fallback) {
@@ -79,7 +87,6 @@
         function state(name) { return request(API.state + '?name=' + encodeURIComponent(name), 'GET'); }
         function start(name) { return request(API.start, 'POST', { name: name }); }
         function deviceStart(name) { return request(API.deviceStart, 'POST', { name: name }); }
-        function qrcodeStart(name) { return request(API.qrcodeStart, 'POST', { name: name }); }
         function status(name) { return request(API.status + '?name=' + encodeURIComponent(name), 'GET'); }
         function cancel(name) { return request(API.cancel, 'POST', { name: name }); }
         function token(name, value) { return request(API.token, 'POST', { name: name, token: value }); }
@@ -91,7 +98,14 @@
         }
 
         function stopPolling() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
-        function closeDialog() { stopPolling(); $('#mcpAuthOverlay').remove(); }
+        function closeDialog() { stopPolling(); pendingAuthName = null; $('#mcpAuthOverlay').remove(); }
+        /** X / 遮罩 / Esc 等「非完成」关闭：有在途授权会话时先 cancel 再关。 */
+        function dismissDialog() {
+            var name = pendingAuthName;
+            pendingAuthName = null;
+            if (name) { generation++; cancel(name).catch(function () {}); }
+            closeDialog();
+        }
 
         /** 弹窗骨架：视觉与 .import-overlay / .import-dialog 同源（样式在 mcp-auth.css 内复刻）。 */
         function dialog(title, inner, footer) {
@@ -107,9 +121,9 @@
                 + '</div></div>';
             $('body').append(html);
             $('#mcpAuthTitle').text(title);
-            $('#mcpAuthClose').on('click', function () { closeDialog(); });
+            $('#mcpAuthClose').on('click', function () { dismissDialog(); });
             $('#mcpAuthOverlay').on('click', function (e) {
-                if (e && e.target && e.target.id === 'mcpAuthOverlay') closeDialog();
+                if (e && e.target && e.target.id === 'mcpAuthOverlay') dismissDialog();
             });
             return generation;
         }
@@ -179,6 +193,9 @@
                     toast((r && r.error) || authT('auth_failed', 'Authorization failed'));
                     return false;
                 }
+                /* 跟随后端实际授权预算（60~600s 可配），缺省保持 5 分钟兜底。 */
+                var secs = Number(r.timeoutSecs);
+                MAX_WAIT_MS = (secs >= 60 && secs <= 600 ? secs : 300) * 1000;
                 if (qrModal) { showQrModal(name, r.authorizationUrl, onDone); return false; }
                 showWaiting(name, r.authorizationUrl, onDone);
                 return false;
@@ -205,6 +222,7 @@
             var gen = dialog(authT('auth_device_title', 'Scan to authorize'), inner,
                 btn('mcpAuthCancelBtn', 'mcp-auth-btn-ghost', authT('common_cancel', 'Cancel'))
                 + btn('mcpAuthRetryBtn', 'mcp-auth-btn-primary', authT('market.retry', 'Retry'), true));
+            pendingAuthName = name;   // X / 遮罩关闭也要 cancel 在途会话
 
             var deadline = Date.now() + secs * 1000;
             var cdTimer = null;
@@ -237,80 +255,6 @@
                     return false;
                 }
                 showDeviceCode(name, r, onDone);
-                return false;
-            }).catch(function (e) {
-                toast((e && e.message) || authT('auth_failed', 'Authorization failed'));
-                return false;
-            });
-        }
-
-        /* ── B4. 厂商扫码（authType=qrcode_poll）：本地渲染真二维码 + 轮询 ──
-         * 与 Device Flow 的区别：没有 user_code，二维码内容就是授权 URL 本身，
-         * 由已加载的全局 QRCode（qrcode.min.js）在本地绘制，不依赖第三方页面。
-         * 后端 /auth/qrcode/start 生成会话码并返回 verificationUri，后台轮询
-         * 厂商接口换 token；前端只负责展示二维码 + 复用 pollStatus。 */
-        function showQrCodeModal(name, r, onDone) {
-            var uri = r.verificationUri || '';
-            var secs = Math.max(1, Math.min(3600, Number(r.expiresIn) || 300));
-            var inner = statusRow(true, authT('auth_qrcode_waiting', 'Waiting for scan authorization…'))
-                + '<div class="mcp-auth-qr-canvas" id="mcpAuthQrCanvas"></div>'
-                + '<div class="mcp-auth-help-text">'
-                + esc(authT('auth_qrcode_hint', 'Scan the QR code with WeChat / QQ and confirm authorization on your phone.'))
-                + '</div>'
-                + '<div class="mcp-auth-countdown" id="mcpAuthCountdown"></div>'
-                + safeExternal(uri, authT('auth_device_open', 'Open authorization page'))
-                + errBox();
-            var gen = dialog(authT('auth_qrcode_title', 'Scan to authorize'), inner,
-                btn('mcpAuthCancelBtn', 'mcp-auth-btn-ghost', authT('common_cancel', 'Cancel'))
-                + btn('mcpAuthRetryBtn', 'mcp-auth-btn-primary', authT('market.retry', 'Retry'), true));
-
-            // 本地绘制二维码。QRCode 全局由 index.html 的 qrcode.min.js 提供；
-            // 缺失时降级为纯链接（safeExternal 已在上方），不阻断授权。
-            try {
-                if (window.QRCode && uri) {
-                    var el = document.getElementById('mcpAuthQrCanvas');
-                    if (el) {
-                        el.innerHTML = '';
-                        new window.QRCode(el, {
-                            text: uri, width: 220, height: 220,
-                            colorDark: '#000000', colorLight: '#ffffff',
-                            correctLevel: window.QRCode.CorrectLevel.M
-                        });
-                    }
-                }
-            } catch (e) { /* 渲染失败仍有外链兜底 */ }
-
-            var deadline = Date.now() + secs * 1000;
-            var cdTimer = null;
-            function tickCountdown() {
-                if (gen !== generation) { if (cdTimer) clearInterval(cdTimer); return; }
-                var left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-                var m = Math.floor(left / 60), s = left % 60;
-                $('#mcpAuthCountdown').text(
-                    authT('auth_device_expires', 'Expires in') + ' ' + m + ':' + (s < 10 ? '0' : '') + s);
-                if (left === 0 && cdTimer) clearInterval(cdTimer);
-            }
-            tickCountdown();
-            cdTimer = setInterval(tickCountdown, 1000);
-
-            $('#mcpAuthCancelBtn').on('click', function () {
-                generation++; stopPolling();
-                cancel(name).catch(function () {});
-                closeDialog();
-            });
-            $('#mcpAuthRetryBtn').on('click', function () {
-                generation++; stopPolling(); closeDialog(); beginQrcodePoll(name, onDone);
-            });
-            pollStatus(name, gen, onDone);
-        }
-
-        function beginQrcodePoll(name, onDone) {
-            return qrcodeStart(name).then(function (r) {
-                if (!r || !r.ok || !r.verificationUri) {
-                    toast((r && r.error) || authT('auth_failed', 'Authorization failed'));
-                    return false;
-                }
-                showQrCodeModal(name, r, onDone);
                 return false;
             }).catch(function (e) {
                 toast((e && e.message) || authT('auth_failed', 'Authorization failed'));
@@ -365,6 +309,7 @@
             var gen = dialog(authT('auth_qr_title', 'Scan the QR code to authorize'), inner,
                 btn('mcpAuthCancelBtn', 'mcp-auth-btn-ghost', authT('common_cancel', 'Cancel'))
                 + btn('mcpAuthRetryBtn', 'mcp-auth-btn-primary', authT('market.retry', 'Retry'), true));
+            pendingAuthName = name;   // X / 遮罩关闭也要 cancel 在途会话
             $('#mcpAuthCancelBtn').on('click', function () {
                 generation++; stopPolling(); cancel(name).catch(function () {}); closeDialog();
             });
@@ -384,6 +329,7 @@
                 + errBox(),
                 btn('mcpAuthCancelBtn', 'mcp-auth-btn-ghost', authT('common_cancel', 'Cancel'))
                 + btn('mcpAuthRetryBtn', 'mcp-auth-btn-primary', authT('market.retry', 'Retry'), true));
+            pendingAuthName = name;   // X / 遮罩关闭也要 cancel 在途会话
 
             // 拿到 authorizationUrl 后立刻打开系统浏览器，绝不拖到轮询里。
             openBrowser(url);
@@ -486,7 +432,10 @@
                     return true;
                 }
                 if (st.needsAuth && kind === 'token') { openTokenDialog(name, st, onDone); return false; }
-                if (st.needsAuth && kind === 'qrcode_poll') { return beginQrcodePoll(name, onDone); }
+                /* qrcode_poll（厂商扫码轮询）管线已随自建官方目录源下线：
+                 * 它唯一的触发方来自官方目录条目（腾讯文档）。魔搭条目若声明
+                 * qrcode_poll，这里按「接口不可用」放行（返回 true 继续原流程），
+                 * 与 authType='none' 同口径 —— 绝不静默吞掉保存/安装。 */
                 if (st.needsAuth && kind === 'oauth') {
                     // Device Flow 优先：它不开系统浏览器，弹窗内显示 user_code / 二维码页。
                     if (st.authDeviceFlow) return beginDeviceFlow(name, onDone);
@@ -501,7 +450,6 @@
             token: token, clear: clear,
             openDialog: openDialog, openBrowser: openBrowser,
             deviceStart: deviceStart, beginDeviceFlow: beginDeviceFlow, showQrModal: showQrModal,
-            qrcodeStart: qrcodeStart, beginQrcodePoll: beginQrcodePoll, showQrCodeModal: showQrCodeModal,
             // 语义别名与细分入口，供两个页面按需取用
             ensureConnected: openDialog,
             openTokenDialog: openTokenDialog, openManageDialog: openManageDialog,
@@ -565,13 +513,29 @@
         }).fail(function () { console.error('[Settings] Failed to load MCP servers'); });
     }
 
+    /** 图标地址：与 app-skills.js iconSrc 同口径。桌面壳（Tauri asset 协议）下
+     *  页面源不是内核源，相对路径会落到 SPA fallback 拿回 index.html，图片解码
+     *  失败 → onerror 移除 <img> → 图标永远只剩首字母底。kernel-bridge 注入了
+     *  __gworkApiUrl 就用它取内核绝对地址；浏览器模式直接用相对路径。
+     *  必须同步拼串：innerHTML 插入的 <img> 会立刻发请求，事后改 src 已经晚了。 */
+    function mcpIconSrc(iconUrl) {
+        var path = '/web/settings/skills/icon?url=' + encodeURIComponent(iconUrl);
+        return (typeof window.__gworkApiUrl === 'function') ? window.__gworkApiUrl(path) : path;
+    }
+
+    /** 已安装连接器卡片图标：与技能已安装卡（app-skills.js iconHtml）同款——
+     *  首字母底 + 后端代理 <img>，加载失败自毁露出字母底。 */
+    function mcpCardIconHtml(iconUrl, displayName) {
+        var letter = (displayName || 'M').substring(0, 2).toUpperCase();
+        var img = iconUrl
+            ? '<img src="' + escapeAttr(mcpIconSrc(iconUrl)) + '" alt="" onerror="this.remove()">'
+            : '';
+        return '<div class="skill-card-icon"><span>' + escapeHtml(letter) + '</span>' + img + '</div>';
+    }
+
     function renderMcpList(list) {
         var html = '';
         var tWorkspace = GourdI18n.t('settings.general.scope_workspace');
-        var tEdit = GourdI18n.t('common.edit');
-        var tDelete = GourdI18n.t('common.delete');
-        var tEnable = GourdI18n.t('settings.loop.enable');
-        var tDisable = GourdI18n.t('settings.loop.disable');
         if (!list || list.length === 0) {
             html = '<div class="mcp-empty-state">'
                 + '<div class="mcp-empty-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></div>'
@@ -579,24 +543,37 @@
                 + '<div class="mcp-empty-desc">' + GourdI18n.t('settings.mcp.empty_desc') + '</div>'
                 + '</div>';
         } else {
-            var iconMap = { stdio: 'S', sse: 'R', streamable: 'H' };
+            /* 用户拍板：连接器·已安装与技能·已安装显示必须一致——同款卡片
+             * （skill-card 家族：图片 + 展示名 + 描述 + 悬浮操作 + 开关）。
+             * 展示名/图标/描述来自广场安装时落盘的目录元数据（displayName /
+             * iconUrl / description，见 mcp_market_api::attach_catalog_meta）；
+             * 手动添加/导入的条目没有元数据，回退目录名 + 首字母底 + 地址行。
+             * data-name 仍是真实目录名：编辑/删除/开关/工具面板全部按它定位。 */
             list.forEach(function (item) {
                 var name = item.name || '';
                 var type = item.type || 'stdio';
+                var displayName = item.displayName || name;
                 var detail = type === 'stdio' ? (item.command || '') : (item.url || '');
-                var icon = iconMap[type] || 'M';
-                html += '<div class="mcp-server-item' + (item.enabled === false ? ' disabled' : '') + '" data-name="' + escapeAttr(name) + '">'
-                    + '<div class="mcp-server-icon">' + escapeHtml(icon) + '</div>'
-                    + '<div class="mcp-server-info">'
-                    + '<div class="mcp-server-name">' + escapeHtml(name) + ' <span class="settings-inline-tag">[' + escapeHtml(type) + ']</span>' + (item.scope === 'workspace' ? ' <span class="settings-scope-badge">' + tWorkspace + '</span>' : '') + '</div>'
-                    + (detail ? '<div class="mcp-server-detail">' + escapeHtml(detail) + '</div>' : '')
-                    + '</div><div class="mcp-server-actions">'
-                    + '<button class="mcp-action-btn edit mcp-edit-btn" data-name="' + escapeAttr(name) + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>'
-                    + '<button class="mcp-action-btn delete mcp-delete-btn" data-name="' + escapeAttr(name) + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>'
-                    + '<label class="toggle-switch">'
-                    + '<input type="checkbox" ' + (item.enabled !== false ? 'checked' : '') + ' data-name="' + escapeAttr(name) + '" class="mcp-toggle"/>'
-                    + '<span class="toggle-slider"></span>'
-                    + '</label>'
+                var desc = item.description || detail;
+                var enabled = item.enabled !== false;
+                html += '<div class="skill-card skill-card-installed mcp-installed-card' + (enabled ? '' : ' skill-card-disabled') + '" data-name="' + escapeAttr(name) + '">'
+                    + mcpCardIconHtml(item.iconUrl, displayName)
+                    + '<div class="skill-card-body">'
+                    + '<div class="skill-card-title"><span class="skill-card-name" title="' + escapeAttr(displayName) + '">' + escapeHtml(displayName) + '</span>'
+                    + '<span class="skill-installed-badge mcp-type-badge">' + escapeHtml(type) + '</span>'
+                    + (item.scope === 'workspace' ? '<span class="settings-scope-badge">' + tWorkspace + '</span>' : '')
+                    + '</div>'
+                    + '<div class="skill-card-desc" title="' + escapeAttr(desc) + '">' + escapeHtml(desc) + '</div>'
+                    + (item.displayName && detail ? '<div class="skill-card-meta"><span title="' + escapeAttr(name) + '">' + escapeHtml(name) + '</span></div>' : '')
+                    + '</div>'
+                    + '<div class="skill-card-side mcp-card-side">'
+                    + '<button type="button" class="skill-uninstall-btn mcp-action-btn edit mcp-edit-btn" data-name="' + escapeAttr(name) + '" title="' + escapeAttr(GourdI18n.t('common.edit')) + '">'
+                    + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>'
+                    + '</button>'
+                    + '<button type="button" class="skill-uninstall-btn mcp-action-btn delete mcp-delete-btn" data-name="' + escapeAttr(name) + '" title="' + escapeAttr(GourdI18n.t('common.delete')) + '">'
+                    + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>'
+                    + '</button>'
+                    + '<button type="button" class="skill-toggle mcp-toggle' + (enabled ? ' on' : '') + '" data-name="' + escapeAttr(name) + '" data-enabled="' + (enabled ? '1' : '0') + '" title="' + escapeAttr(enabled ? GourdI18n.t('settings.loop.disable') : GourdI18n.t('settings.loop.enable')) + '" aria-pressed="' + (enabled ? 'true' : 'false') + '"></button>'
                     + '</div></div>';
             });
         }
@@ -607,25 +584,34 @@
         }
     }
 
-    // MCP 列表事件委托
+    // MCP 列表事件委托（卡片与技能已安装卡同构，选择器随之换到 skill-card 家族）
     $mcpServerList
-        .on('click', '.mcp-action-btn.edit.mcp-edit-btn', function (e) {
+        .on('click', '.mcp-edit-btn', function (e) {
             e.stopPropagation();
             var name = $(this).attr('data-name');
             if (name) mcpEditServer(name);
         })
         .on('click', '.mcp-delete-btn', function (e) {
             e.stopPropagation();
-            mcpConfirmRemoveServer($(this).attr('data-name'));
+            var $card = $(this).closest('.mcp-installed-card');
+            mcpConfirmRemoveServer($(this).attr('data-name'), $card.find('.skill-card-name').text());
         })
-        .on('click', '.mcp-server-item', function (e) {
-            if ($(e.target).closest('.toggle-switch').length) return;
-            if ($(e.target).closest('.mcp-action-btn').length) return;
+        .on('click', '.mcp-installed-card', function (e) {
+            if ($(e.target).closest('.skill-card-side').length) return;
             var name = $(this).attr('data-name');
             if (name) showMcpTools(name);
         })
-        .on('change', '.mcp-toggle', function () {
-            mcpToggleServer($(this).attr('data-name'), this.checked);
+        .on('click', '.mcp-toggle', function (e) {
+            e.stopPropagation();
+            var $btn = $(this);
+            if ($btn.prop('disabled')) return;
+            var enabled = $btn.attr('data-enabled') !== '1';
+            /* 乐观翻转 + 禁用防连点；mcpToggleServer 成功回调 loadMcpList 重绘、
+             * 网络失败走 always 回调回滚解锁，终态以服务端为准（技能卡同交互）。 */
+            $btn.toggleClass('on', enabled).attr('data-enabled', enabled ? '1' : '0')
+                .attr('aria-pressed', enabled ? 'true' : 'false').prop('disabled', true);
+            syncMcpCardDisabled($btn, enabled);
+            mcpToggleServer($btn.attr('data-name'), enabled, $btn);
         });
 
     // MCP 工具列表查看
@@ -633,7 +619,9 @@
         $mcpListView.hide();
         $mcpFormView.hide();
         $mcpToolsView.show();
-        $mcpToolsTitle.text(name + ' - ' + GourdI18n.t('settings.mcp.tools_title'));
+        /* 标题用展示名（与卡片一致），缓存未命中时回退目录名。 */
+        var cached = mcpCachedList.find(function (s) { return s.name === name; });
+        $mcpToolsTitle.text(((cached && cached.displayName) || name) + ' - ' + GourdI18n.t('settings.mcp.tools_title'));
         $mcpToolsList.html('<div class="mcp-empty-state"><div class="skills-loading" style="display:block"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg><span>' + GourdI18n.t('common.loading') + '</span></div></div>');
         $.get('/web/settings/mcp/servers/tools?name=' + encodeURIComponent(name), function (resp) {
             if (resp.code === 200 && resp.data) {
@@ -855,20 +843,39 @@
         });
     }
 
-    // 统一的删除确认（列表行删除按钮与表单页删除按钮共用）
-    function mcpConfirmRemoveServer(name) {
+    // 统一的删除确认（列表卡删除按钮与表单页删除按钮共用）。
+    // shownName 是用户看得见的展示名（可选）：卡片写着「高德地图」，弹窗却问
+    // 「确定删除 amap-maps 吗」会让用户无法确认删的是哪一张（技能卸载同教训）。
+    // 真正的请求体仍传 name（真实目录名），两者不可互换。
+    function mcpConfirmRemoveServer(name, shownName) {
         if (!name) return;
-        layConfirm(GourdI18n.t('settings.confirm_delete') + ' MCP ' + GourdI18n.t('settings.mcp.title') + ' "' + name + '"？', function () {
+        var label = shownName || name;
+        layConfirm(GourdI18n.t('settings.confirm_delete') + ' MCP ' + GourdI18n.t('settings.mcp.title') + ' "' + label + '"？', function () {
             mcpRemoveServer(name);
         });
     }
 
-    function mcpToggleServer(name, enabled) {
+    /* 开关乐观翻转后，整卡的置灰态必须跟着翻（技能卡 toggleSkill 同款）。
+     * 只翻按钮不翻卡：启用一个禁用中的连接器，卡片仍半透明，看起来像没生效。
+     * 服务端返回后的 loadMcpList 重绘是终态兜底，这里只负责即时反馈。 */
+    function syncMcpCardDisabled($btn, enabled) {
+        $btn.closest('.mcp-installed-card').toggleClass('skill-card-disabled', !enabled);
+    }
+
+    function mcpToggleServer(name, enabled, $btn) {
         postJson('/web/settings/mcp/servers/toggle', { name: name, enabled: enabled }, function (resp) {
             if (resp.code !== 200) { showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error'); }
             else if (resp.connected === false) { showToast(resp.connectError || GourdI18n.t('settings.loop.operation_failed'), 'error'); }
             // 无论成败都刷新列表，确保开关状态与服务端一致
             loadMcpList();
+        }, function () {
+            /* postJson 的 always 回调：网络失败走 .fail，不触发上面的 done 回调，
+             * 若不在此解锁/回滚，开关将永远停在 disabled + 假状态（防连点变死锁）。 */
+            if (!$btn || !$btn.length || !$.contains(document.body, $btn[0])) return; // 已被重绘替换
+            $btn.prop('disabled', false).toggleClass('on', !enabled)
+                .attr('data-enabled', enabled ? '0' : '1')
+                .attr('aria-pressed', enabled ? 'false' : 'true');
+            syncMcpCardDisabled($btn, !enabled);
         });
     }
 

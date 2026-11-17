@@ -1,0 +1,538 @@
+<template>
+	<!-- 会话抽屉面板：分页与横滑手势由首页的 swiper 承载，这里只负责会话列表与内嵌弹层 -->
+	<view class="app-conv-drawer">
+		<view class="app-drawer">
+			<view class="app-drawer__head">
+				<view class="app-drawer__dev" @click="deviceSheetVisible = true">
+					<view class="app-drawer__dev-dot"
+						:class="deviceOnline ? 'app-drawer__dev-dot--on' : 'app-drawer__dev-dot--off'"></view>
+					<text class="app-drawer__dev-name">{{ device }}</text>
+					<rice-icon name="arrow-down" size="13px" color="var(--color-text-tertiary)"></rice-icon>
+				</view>
+				<view class="app-drawer__icon" @click="emit('close')">
+					<rice-icon name="cross" size="18px" color="var(--color-text-secondary)"></rice-icon>
+				</view>
+			</view>
+
+			<!-- rice-button 透明底，品牌色底由外层容器提供 -->
+			<view class="app-drawer__new">
+				<!-- 默认插槽覆盖了组件自带的 text，颜色/间距只能写在插槽内容上，text-color 等 props 不生效 -->
+				<rice-button color="transparent" width="100%" height="52px" shape="square" @click="onNewChat">
+					<text class="iconfont app-drawer__new-icon">&#xe6b6;</text>
+					<text class="app-drawer__new-text">{{t('conv.newChat')}}</text>
+                </rice-button>
+			</view>
+
+			<scroll-view class="app-drawer__scroll" direction="vertical" :show-scrollbar="false">
+				<view class="app-drawer__content">
+					<text class="app-drawer__group">{{ t('conv.title') }} ({{ defaultConversations.length }})</text>
+					<app-conv-row v-for="(item, index) in visibleConversations" :key="item.id" :title="item.title"
+						:time="formatRelativeTime(item.updatedAt)" :pinned="item.pinned"
+						@open="onOpenConv(item.id)" @longpress="onConvLongpress(item.id, index)"></app-conv-row>
+					<view v-if="defaultConversations.length > COLLAPSE_COUNT" class="app-drawer__more"
+						@click="moreExpanded = !moreExpanded">
+						<text class="app-drawer__more-text">{{ moreExpanded ? t('conv.collapse') : t('conv.expandMore') }}</text>
+						<view class="app-drawer__more-icon" :class="moreExpanded ? 'app-drawer__more-icon--up' : ''">
+							<rice-icon name="arrow-down" size="12px" color="var(--color-text-tertiary)"></rice-icon>
+						</view>
+					</view>
+
+					<text class="app-drawer__group">{{ t('conv.workspace') }} ({{ otherWorkspaces.length }})</text>
+					<view v-for="(ws, wsIndex) in otherWorkspaces" :key="ws.name" class="app-drawer__ws">
+						<view class="app-drawer__ws-row" @longpress="onWsLongpress(ws.name, wsIndex)">
+							<text class="iconfont app-drawer__ws-glyph">&#xe67c;</text>
+							<text class="app-drawer__ws-name" @click="onPickWorkspace(ws.name)">{{ ws.name }}</text>
+							<view class="app-drawer__ws-icon"
+								:class="openWs === ws.name ? 'app-drawer__ws-icon--open' : ''"
+								@click="openWs = openWs === ws.name ? '' : ws.name">
+								<rice-icon name="arrow-down" size="13px" color="var(--color-text-tertiary)"></rice-icon>
+							</view>
+							<view class="app-drawer__ws-icon" @click="onNewInWorkspace(ws.name)">
+								<rice-icon name="plus" size="15px" color="var(--color-text-secondary)"></rice-icon>
+							</view>
+						</view>
+						<view v-if="openWs === ws.name" class="app-drawer__ws-sub">
+							<view v-for="(sub, subIndex) in conversationsOf(ws.name)" :key="sub.id"
+								class="app-drawer__sub-row" @click="onOpenConv(sub.id)"
+								@longpress="onSubLongpress(sub.id, wsIndex, subIndex)">
+								<text class="app-drawer__sub-name">{{ sub.title }}</text>
+								<text class="app-drawer__sub-time">{{ formatRelativeTime(sub.updatedAt) }}</text>
+							</view>
+							<text v-if="conversationsOf(ws.name).length === 0" class="app-drawer__sub-empty">{{ t('conv.empty') }}</text>
+						</view>
+					</view>
+				</view>
+			</scroll-view>
+
+			<view class="app-drawer__foot">
+				<view class="app-drawer__mine" @click="onMine">
+					<rice-avatar :src="avatar" size="32px" mode="aspectFill" radius="16px"></rice-avatar>
+					<text class="app-drawer__username">{{ name }}</text>
+					<text class="app-drawer__points-label">{{ t('conv.pointsLabel') }}</text>
+					<text class="app-drawer__points-value">{{ points }}</text>
+				</view>
+				<view class="app-drawer__icon" @click="themeSheetVisible = true">
+					<!-- 图标待字体图标补全 -->
+				</view>
+			</view>
+		</view>
+
+		<!-- APP 端禁用原生 dialogPage：其关闭动画期内重开会叠开原生页，滞留的透明页会吞掉全屏点击 -->
+		<rice-action-sheet v-model:show="menuVisible" :actions="menuActions" :use-dialog-page="false"
+			:cancel-text="t('conv.cancel')" @select="onMenuSelect"></rice-action-sheet>
+
+		<app-device-sheet :visible="deviceSheetVisible" :device="device" @close="deviceSheetVisible = false"
+			@select="onSelectDevice"></app-device-sheet>
+
+		<app-sheet :visible="themeSheetVisible" :title="t('theme.title')" @close="themeSheetVisible = false">
+			<rice-cell v-for="item in THEME_OPTIONS" :key="item.value" :title="t(item.label)" :border="false"
+				@click="onPickTheme(item.value)">
+				<template #leftIcon>
+					<rice-icon v-if="item.icon != null" :name="item.icon" size="16px" color="var(--color-primary)"
+						:custom-style="optIconGap"></rice-icon>
+					<text v-else-if="item.glyph != null" class="iconfont app-drawer__opt-glyph">{{ item.glyph }}</text>
+				</template>
+				<template #rightIcon>
+					<rice-icon v-if="currentMode === item.value" name="checked" size="16px"
+						color="var(--color-primary)"></rice-icon>
+				</template>
+			</rice-cell>
+		</app-sheet>
+
+		<app-input-dialog :visible="renameVisible" :title="renameTitle" :value="renameValue"
+			@close="renameVisible = false" @confirm="onRenameConfirm"></app-input-dialog>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed, ref } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme } from '@/hooks/useTheme'
+	import type { ThemeMode } from '@/hooks/useTheme'
+	import { useRunEnv } from '@/hooks/useRunEnv'
+	import { useUser } from '@/hooks/useUser'
+	import { useConversations } from '@/hooks/useConversations'
+	import { formatRelativeTime } from '@/utils/tools.ts'
+	import { WORKSPACES } from '@/data/app-data'
+	import type { Conversation } from '@/data/app-data'
+	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
+	import AppDeviceSheet from '@/components/app-device-sheet/app-device-sheet.uvue'
+	import AppInputDialog from '@/components/app-input-dialog/app-input-dialog.uvue'
+	import AppConvRow from '@/components/app-conv-row/app-conv-row.uvue'
+	import type { ActionSheetAction } from '@/uni_modules/rice-ui/components/rice-action-sheet/type.uts'
+
+	defineOptions({
+		name: 'app-conv-drawer',
+		styleIsolation: 'app-and-page'
+	})
+
+	type MenuKind = 'conv' | 'ws'
+	type MenuState = { kind: MenuKind; id: string; name: string }
+
+	type ThemeOption = { value: ThemeMode; label: string; icon: string | null; glyph: string | null }
+
+	// sun 走 rice-icon；暗黑 / 跟随系统在其内置字体里缺字，走全局 iconfont 码点
+	const THEME_OPTIONS: ThemeOption[] = [
+		{ value: 'light', label: 'theme.light', icon: 'sun', glyph: null },
+		{ value: 'dark', label: 'theme.dark', icon: null, glyph: '\ue6e1' },
+		{ value: 'auto', label: 'theme.auto', icon: null, glyph: '\ue7a0' }
+	]
+
+	const emit = defineEmits<{
+		(e: 'close'): void
+		(e: 'open-conv', id: string): void
+		(e: 'new-chat'): void
+	}>()
+
+	const { currentMode, setThemeMode } = useTheme()
+	const env = useRunEnv()
+	const { device, deviceOnline, workspace } = env
+	const { name, points, avatar } = useUser()
+	const {
+		conversations, defaultConversations, conversationsOf,
+		setActive, renameConversation, togglePin, removeConversation
+	} = useConversations()
+
+	/** 折叠阈值：默认只展示前 N 条会话 */
+	const COLLAPSE_COUNT: number = 4
+
+	const MINE_PAGE: string = '/pages/mine/index'
+
+	const moreExpanded: Ref<boolean> = ref<boolean>(false)
+	const openWs: Ref<string> = ref<string>('')
+	const deviceSheetVisible: Ref<boolean> = ref<boolean>(false)
+	const themeSheetVisible: Ref<boolean> = ref<boolean>(false)
+	const menuVisible: Ref<boolean> = ref<boolean>(false)
+	const menu: Ref<MenuState | null> = ref<MenuState | null>(null)
+	const renameVisible: Ref<boolean> = ref<boolean>(false)
+	const renameTitle: Ref<string> = ref<string>('')
+	const renameValue: Ref<string> = ref<string>('')
+	/** 待重命名的目标；ws 时 id 存工作区名 */
+	const renameTarget: Ref<{ kind: MenuKind; id: string } | null> = ref<{ kind: MenuKind; id: string } | null>(null)
+
+	const otherWorkspaces: ComputedRef<{ name: string }[]> = computed<{ name: string }[]>((): { name: string }[] => {
+		return WORKSPACES.filter((item: { name: string }): boolean => item.name !== workspace.value)
+	})
+	const visibleConversations: ComputedRef<Conversation[]> = computed<Conversation[]>((): Conversation[] => {
+		const list: Conversation[] = defaultConversations.value
+		if (moreExpanded.value) return list
+		return list.slice(0, COLLAPSE_COUNT)
+	})
+	/** 长按菜单用 rice-action-sheet；pin 无对应字体图标，省略 icon */
+	const menuActions: ComputedRef<ActionSheetAction[]> = computed<ActionSheetAction[]>((): ActionSheetAction[] => {
+		const state: MenuState | null = menu.value
+		if (state == null) return []
+		if (state.kind === 'conv') {
+			const conv: Conversation | null = findConv(state.id)
+			const pinned: boolean = conv != null && conv.pinned
+			// 子列表里的会话同样走 conv 菜单，置顶/删除对任意工作区的会话生效
+			return [
+				{ name: t('conv.menu.rename'), value: 'rename', icon: 'edit' },
+				{ name: pinned ? t('conv.menu.unpin') : t('conv.menu.pin'), value: 'pin' },
+				{ name: t('conv.menu.remove'), value: 'remove', color: 'var(--color-error)' }
+			]
+		}
+		return [
+			{ name: t('conv.menu.renameWs'), value: 'rename', icon: 'edit' },
+			{ name: t('conv.menu.pinWs'), value: 'pin' },
+			{ name: t('conv.menu.removeWs'), value: 'remove', color: 'var(--color-error)' }
+		]
+	})
+
+	function t(key: string, values?: Record<string, string>): string {
+		if (values == null) return i18n.global.t(key)
+		return i18n.global.t(key, values)
+	}
+
+	const optIconGap: UTSJSONObject = { marginRight: '10px' }
+
+	function findConv(id: string): Conversation | null {
+		const found: Conversation | undefined = conversations.value.find((item: Conversation): boolean => item.id === id)
+		return found ?? null
+	}
+
+	/** 不预建会话：空会话会一直留在列表里，且发送时首页还会再建一条；
+		统一由首页复位到初始输入态，发送时才真正建会话 */
+	function onNewChat(): void {
+		emit('new-chat')
+	}
+
+	function onOpenConv(id: string): void {
+		setActive(id)
+		emit('open-conv', id)
+	}
+
+	function onPickWorkspace(name: string): void {
+		env.setWorkspace(name)
+		uni.showToast({ title: t('home.workspace.switched', { name: name }), icon: 'none' })
+	}
+
+	/** 工作区 ＋：先把当前工作区切过去，随后同「新建会话」回到初始输入态，
+		发送时才在该工作区建会话（不预建，避免留下空会话） */
+	function onNewInWorkspace(name: string): void {
+		env.setWorkspace(name)
+		uni.showToast({ title: t('home.workspace.switched', { name: name }), icon: 'none' })
+		emit('new-chat')
+	}
+
+	function onSelectDevice(name: string, online: boolean): void {
+		env.setDevice(name, online)
+		uni.showToast({ title: t('home.device.switched', { name: name }), icon: 'none' })
+	}
+
+	function onPickTheme(mode: ThemeMode): void {
+		setThemeMode(mode)
+		themeSheetVisible.value = false
+		uni.showToast({ title: t('conv.themeSwitched'), icon: 'none' })
+	}
+
+	function onMine(): void {
+		uni.navigateTo({ url: MINE_PAGE })
+	}
+
+	/** 菜单为全局 action-sheet，不再按被按行定位；index 参数保留以匹配模板调用 */
+	function onConvLongpress(id: string, index: number): void {
+		const conv: Conversation | null = findConv(id)
+		if (conv == null) return
+		menu.value = { kind: 'conv', id: id, name: conv.title }
+		menuVisible.value = true
+	}
+
+	function onWsLongpress(name: string, wsIndex: number): void {
+		menu.value = { kind: 'ws', id: name, name: name }
+		menuVisible.value = true
+	}
+
+	function onSubLongpress(id: string, wsIndex: number, subIndex: number): void {
+		const conv: Conversation | null = findConv(id)
+		if (conv == null) return
+		menu.value = { kind: 'conv', id: id, name: conv.title }
+		menuVisible.value = true
+	}
+
+	function onMenuSelect(action: ActionSheetAction, index: number): void {
+		onMenuAction(String(action.value ?? ''))
+	}
+
+	function onMenuAction(key: string): void {
+		const state: MenuState | null = menu.value
+		if (state == null) return
+		menu.value = null
+		if (key === 'pin') {
+			if (state.kind === 'conv') {
+				const pinned: boolean = togglePin(state.id)
+				uni.showToast({ title: pinned ? t('conv.pinned') : t('conv.unpinned'), icon: 'none' })
+				return
+			}
+			uni.showToast({ title: t('conv.wsPinned', { name: state.name }), icon: 'none' })
+			return
+		}
+		if (key === 'remove') {
+			if (state.kind === 'conv') {
+				removeConversation(state.id)
+				uni.showToast({ title: t('conv.removed'), icon: 'none' })
+				return
+			}
+			uni.showToast({ title: t('conv.wsRemoved', { name: state.name }), icon: 'none' })
+			return
+		}
+		renameTarget.value = { kind: state.kind, id: state.id }
+		renameTitle.value = state.kind === 'conv' ? t('conv.renameTitle') : t('conv.renameWsTitle')
+		renameValue.value = state.name
+		renameVisible.value = true
+	}
+
+	function onRenameConfirm(value: string): void {
+		const target = renameTarget.value
+		renameVisible.value = false
+		if (target == null) return
+		if (value.trim().length === 0) return
+		if (target.kind === 'conv') {
+			renameConversation(target.id, value)
+			uni.showToast({ title: t('conv.renamed'), icon: 'none' })
+			return
+		}
+		uni.showToast({ title: t('conv.wsRenamePending'), icon: 'none' })
+	}
+</script>
+
+<style lang="scss">
+	// 面板宿主：由首页 swiper-item 提供尺寸，顶部状态栏留白由页面根节点统一处理
+	.app-conv-drawer {
+		flex: 1;
+		flex-direction: column;
+	}
+
+	.app-drawer {
+		flex: 1;
+		flex-direction: column;
+		background-color: var(--color-bg);
+
+		&__head {
+			flex-direction: row;
+			align-items: center;
+			justify-content: space-between;
+			padding: 8px 14px;
+		}
+
+		&__dev {
+			flex-direction: row;
+			align-items: center;
+		}
+
+		&__dev-dot {
+			width: 7px;
+			height: 7px;
+			margin-right: 7px;
+			border-radius: 4px;
+
+			&--on {
+				background-color: var(--color-success);
+			}
+
+			&--off {
+				background-color: var(--color-text-tertiary);
+			}
+		}
+
+		&__dev-name {
+			margin-right: 5px;
+			font-size: 15px;
+			font-weight: 650;
+			color: var(--color-text);
+		}
+
+		&__icon {
+			width: 32px;
+			height: 32px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 10px;
+		}
+
+		&__new {
+			margin: 6px 14px 12px;
+			border-radius: 16px;
+			overflow: hidden;
+			background-color: var(--color-primary);
+		}
+
+		&__new-icon {
+			color: var(--color-text-inverse);
+		}
+
+		&__new-text {
+			margin-left: 8px;
+			font-size: 16px;
+			color: var(--color-text-inverse);
+		}
+
+		&__scroll {
+			flex: 1;
+			min-height: 0;
+		}
+
+		&__content {
+			padding: 0 18px;
+		}
+
+		&__group {
+			height: 30px;
+			line-height: 30px;
+			font-size: 13.5px;
+			font-weight: 700;
+			color: var(--color-text-tertiary);
+		}
+
+		&__more {
+			flex-direction: row;
+			align-items: center;
+			height: 30px;
+		}
+
+		&__more-text {
+			font-size: 14px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__more-icon {
+			margin-left: 4px;
+		}
+
+		&__ws {
+			flex-direction: column;
+		}
+
+		&__ws-row {
+			flex-direction: row;
+			align-items: center;
+			height: 48px;
+		}
+
+		// 工作区行的字体图标，颜色需在使用处显式声明（UCSS 不保证继承）
+		&__ws-glyph {
+			margin-right: 7px;
+			font-size: 15px;
+			color: var(--color-text-secondary);
+		}
+
+		&__ws-name {
+			flex: 1;
+			min-width: 0;
+			font-size: 15.5px;
+			font-weight: 600;
+			color: var(--color-text);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__ws-icon {
+			width: 30px;
+			height: 30px;
+			margin-left: 6px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 9px;
+		}
+
+		&__ws-sub {
+			flex-direction: column;
+			margin-bottom: 4px;
+			padding-left: 25px;
+		}
+
+		&__sub-row {
+			flex-direction: row;
+			align-items: center;
+			height: 36px;
+		}
+
+		&__sub-name {
+			flex: 1;
+			min-width: 0;
+			font-size: 14.5px;
+			color: var(--color-text-secondary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__sub-time {
+			margin-left: 10px;
+			font-size: 12.5px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__sub-empty {
+			height: 30px;
+			font-size: 13.5px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__foot {
+			flex-direction: row;
+			align-items: center;
+			height: 64px;
+			padding: 0 10px 0 18px;
+			border-top-width: 1px;
+			border-top-style: solid;
+			border-top-color: var(--color-border);
+		}
+
+		&__mine {
+			flex: 1;
+			flex-direction: row;
+			align-items: center;
+		}
+
+		&__username {
+			flex: 1;
+			margin-left: 10px;
+			font-size: 15px;
+			font-weight: 650;
+			color: var(--color-text);
+		}
+
+		&__points-label {
+			font-size: 14px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__points-value {
+			margin-left: 4px;
+			margin-right: 8px;
+			font-size: 15px;
+			font-weight: 750;
+			color: var(--color-primary);
+		}
+
+		/* 外观弹层的暗黑/跟随系统图标（iconfont 码点），颜色字号显式声明 */
+		&__opt-glyph {
+			margin-right: 10px;
+			font-size: 16px;
+			color: var(--color-primary);
+		}
+	}
+</style>

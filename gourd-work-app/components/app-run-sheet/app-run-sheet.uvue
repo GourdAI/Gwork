@@ -1,0 +1,357 @@
+<template>
+	<app-sheet :visible="visible" :title="title" :show-back="view !== 'main'" @close="emit('close')"
+		@back="view = 'main'">
+		<view v-if="view === 'main'" class="app-run">
+			<rice-cell class="app-run__opt" :class="lockEnv ? 'app-run__opt--locked' : ''" :border="false" center
+				:custom-style="cellStyle" :title="t('home.run.device')"
+				:label="lockEnv ? t('conv.lockedEnvHint') : t('home.run.deviceHint')"
+				:title-text-style="titleStyle" :label-style="descStyle" :value="device"
+				:value-text-style="valueStyle" :arrow="!lockEnv" arrow-direction="down"
+				@click="onTapEnv('device')">
+				<template #leftIcon>
+					<view class="app-run__oi">
+						<text class="iconfont app-run__oi-font">&#xe7a0;</text>
+					</view>
+				</template>
+			</rice-cell>
+
+			<rice-cell class="app-run__opt" :class="lockEnv ? 'app-run__opt--locked' : ''" :border="false" center
+				:custom-style="cellStyle" :title="t('home.run.workspace')"
+				:label="lockEnv ? t('conv.lockedEnvHint') : t('home.run.workspaceHint')"
+				:title-text-style="titleStyle" :label-style="descStyle" :value="workspace"
+				:value-text-style="valueStyle" :arrow="!lockEnv" arrow-direction="down"
+				@click="onTapEnv('ws')">
+				<template #leftIcon>
+					<view class="app-run__oi">
+						<text class="iconfont app-run__oi-font">&#xe67c;</text>
+					</view>
+				</template>
+			</rice-cell>
+
+			<rice-cell class="app-run__opt" :border="false" center :custom-style="cellStyle"
+				:title="t('home.run.permission')" :label="t('home.run.permissionHint')"
+				:title-text-style="titleStyle" :label-style="descStyle" :value="permission"
+				:value-text-style="permissionDanger ? valueDangerStyle : valueStyle"
+				@click="view = 'perm'">
+				<template #leftIcon>
+					<view class="app-run__oi">
+						<text class="iconfont app-run__oi-font">&#xe98b;</text>
+					</view>
+				</template>
+			</rice-cell>
+		</view>
+
+		<view v-else-if="view === 'device'">
+			<rice-cell v-for="item in DEVICES" :key="item.name" class="app-run__opt"
+				:class="deviceRowClass(item)" :border="false" center :custom-style="cellStyle"
+				:title="item.name" :title-text-style="deviceTitleStyle(item)"
+				:label="deviceNote(item)" :label-style="descStyle"
+				@click="onPickDevice(item)">
+				<template #leftIcon>
+					<view class="app-run__oi">
+						<text class="iconfont app-run__oi-font">&#xe7a0;</text>
+					</view>
+				</template>
+				<!-- 状态标签与对勾走 #rightIcon：#value 插槽与 rice-cell 的 value prop 同名，运行时不会被注册 -->
+				<template #rightIcon>
+					<view class="app-run__ov">
+						<view class="app-run__badge"
+							:class="item.online ? 'app-run__badge--online' : 'app-run__badge--offline'">
+							<text class="app-run__badge-text"
+								:class="item.online ? 'app-run__badge-text--online' : 'app-run__badge-text--offline'">{{ item.online ? t('home.device.online') : t('home.device.offline') }}</text>
+						</view>
+						<view v-if="item.name === device" class="app-run__check">
+							<rice-icon name="checked" size="16px" color="var(--color-primary)" />
+						</view>
+					</view>
+				</template>
+			</rice-cell>
+		</view>
+
+		<view v-else-if="view === 'ws'">
+			<rice-cell class="app-run__opt" :class="isChatWorkspace ? 'app-run__opt--on' : ''" :border="false"
+				center :custom-style="cellStyle" :title="DEFAULT_WORKSPACE" :title-text-style="titleStyle"
+				@click="onPickWorkspace(DEFAULT_WORKSPACE)">
+				<template #leftIcon>
+					<view class="app-run__oi">
+						<text class="iconfont app-run__oi-font">&#xe7ab;</text>
+					</view>
+				</template>
+				<template #rightIcon>
+					<view v-if="isChatWorkspace" class="app-run__check">
+						<rice-icon name="checked" size="16px" color="var(--color-primary)" />
+					</view>
+				</template>
+			</rice-cell>
+			<view class="app-run__ws-other">
+				<rice-cell v-for="(item, index) in otherWorkspaces" :key="item.name"
+					class="app-run__opt app-run__opt--sub" :class="wsRowClass(index, item)"
+					:border="false" center :custom-style="cellStyle" :title="item.name"
+					:title-text-style="titleStyle" @click="onPickWorkspace(item.name)">
+					<template #leftIcon>
+						<view class="app-run__oi">
+							<text class="iconfont app-run__oi-font">&#xe67c;</text>
+						</view>
+					</template>
+					<template #rightIcon>
+						<view v-if="item.name === workspace" class="app-run__check">
+							<rice-icon name="checked" size="16px" color="var(--color-primary)" />
+						</view>
+					</template>
+				</rice-cell>
+			</view>
+		</view>
+
+		<view v-else>
+			<rice-cell v-for="item in PERMISSIONS" :key="item.name" class="app-run__opt"
+				:class="item.name === permission ? 'app-run__opt--on' : ''" :border="false" center
+				:custom-style="cellStyle" :title="item.name" :label="item.desc"
+				:title-text-style="titleStyle" :label-style="descStyle"
+				@click="onPickPermission(item.name)">
+				<template #leftIcon>
+					<view class="app-run__oi" :class="item.danger ? 'app-run__oi--danger' : ''">
+						<text class="iconfont app-run__oi-font"
+							:class="item.danger ? 'app-run__oi-font--danger' : ''">&#xe98b;</text>
+					</view>
+				</template>
+				<template #rightIcon>
+					<view v-if="item.name === permission" class="app-run__check">
+						<rice-icon name="checked" size="16px" color="var(--color-primary)" />
+					</view>
+				</template>
+			</rice-cell>
+		</view>
+	</app-sheet>
+</template>
+
+<script setup lang="ts">
+	import { computed, ref, watch } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import type { UTSJSONObject } from '@dcloudio/uni-app-x/types/uni'
+	import { i18n } from '@/locale/i18n.ts'
+	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
+	import { DEFAULT_WORKSPACE, DEVICES, PERMISSIONS, WORKSPACES } from '@/data/app-data'
+	import type { DeviceOption, WorkspaceOption } from '@/data/app-data'
+
+	defineOptions({
+		name: 'app-run-sheet',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = withDefaults(defineProps<{
+		visible: boolean
+		device: string
+		workspace: string
+		permission: string
+		/** 对话页进入时设备/工作空间只读，仅权限可调 */
+		lockEnv?: boolean
+	}>(), {
+		visible: false,
+		device: '',
+		workspace: '',
+		permission: '',
+		lockEnv: false
+	})
+
+	const emit = defineEmits<{
+		(e: 'close'): void
+		(e: 'update-device', name: string, online: boolean): void
+		(e: 'update-workspace', name: string): void
+		(e: 'update-permission', name: string): void
+	}>()
+
+	type SheetView = 'main' | 'device' | 'ws' | 'perm'
+
+	const TITLE_KEYS: Record<string, string> = {
+		main: 'home.run.title',
+		device: 'home.device.title',
+		ws: 'home.workspace.title',
+		perm: 'home.permission.title'
+	}
+
+	const view: Ref<SheetView> = ref<SheetView>('main')
+
+	const title: ComputedRef<string> = computed<string>((): string => t(TITLE_KEYS[view.value]))
+	const permissionDanger: ComputedRef<boolean> = computed<boolean>((): boolean => {
+		return props.permission === PERMISSIONS[1].name
+	})
+	const isChatWorkspace: ComputedRef<boolean> = computed<boolean>((): boolean => {
+		return props.workspace === DEFAULT_WORKSPACE
+	})
+	// 对话（默认工作空间）固定占首行，其余按原顺序列在下方；选中只换高亮，不换位置
+	const otherWorkspaces: ComputedRef<WorkspaceOption[]> = computed<WorkspaceOption[]>((): WorkspaceOption[] => {
+		return WORKSPACES.slice(1)
+	})
+
+	// 选中态的底色与边框在外层卡片上，cell 本身透明，只承担布局与点击
+	const cellStyle: UTSJSONObject = { backgroundColor: 'transparent', padding: '13px 14px' }
+	const titleStyle: UTSJSONObject = { color: 'var(--color-text)', fontSize: '13.5px', fontWeight: '700' }
+	const titleOffStyle: UTSJSONObject = { color: 'var(--color-text-tertiary)', fontSize: '13.5px', fontWeight: '700' }
+	const descStyle: UTSJSONObject = { color: 'var(--color-text-tertiary)', fontSize: '11px', lineHeight: '15.4px', marginTop: '3px' }
+	const valueStyle: UTSJSONObject = { color: 'var(--color-text-secondary)', fontSize: '12px', marginRight: '5px' }
+	const valueDangerStyle: UTSJSONObject = { color: 'var(--color-error)', fontSize: '12px', marginRight: '5px' }
+
+	watch((): boolean => props.visible, (visible: boolean): void => {
+		if (visible) view.value = 'main'
+	})
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function onTapEnv(target: 'device' | 'ws'): void {
+		if (props.lockEnv) {
+			uni.showToast({ title: t('conv.lockedEnvHint'), icon: 'none' })
+			return
+		}
+		view.value = target
+	}
+
+	function deviceNote(item: DeviceOption): string {
+		return item.name === props.device ? t('home.device.inUse') : item.note
+	}
+
+	function deviceTitleStyle(item: DeviceOption): UTSJSONObject {
+		return item.online ? titleStyle : titleOffStyle
+	}
+
+	function deviceRowClass(item: DeviceOption): string {
+		let cls: string = item.name === props.device ? 'app-run__opt--on' : ''
+		// 设计稿用 opacity 表示离线禁用态，UCSS 不支持 opacity，改为弱化标题色
+		if (!item.online) cls += ' app-run__opt--off'
+		return cls
+	}
+
+	function wsRowClass(index: number, item: WorkspaceOption): string {
+		let cls: string = index > 0 ? 'app-run__opt--sub-top' : ''
+		if (item.name === props.workspace) cls += ' app-run__opt--sub-on'
+		return cls
+	}
+
+	function onPickDevice(item: DeviceOption): void {
+		if (!item.online) return
+		emit('update-device', item.name, item.online)
+		view.value = 'main'
+	}
+
+	function onPickWorkspace(name: string): void {
+		emit('update-workspace', name)
+		view.value = 'main'
+	}
+
+	function onPickPermission(name: string): void {
+		emit('update-permission', name)
+		view.value = 'main'
+	}
+</script>
+
+<style lang="scss">
+	.app-run {
+		flex-direction: column;
+
+		&__opt {
+			margin-bottom: 10px;
+			border-radius: 15px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card) !important;
+
+			&--on {
+				border-color: var(--color-primary);
+				background-color: var(--color-brand-soft) !important;
+			}
+
+			&--sub {
+				margin-bottom: 0;
+				border-width: 0;
+				border-radius: 0;
+				background-color: transparent;
+			}
+
+			&--sub-top {
+				border-top-width: 1px;
+				border-top-style: solid;
+				border-color: var(--color-border);
+			}
+
+			// 分组卡内行自身无边框，选中只铺底色，圆角由外层卡裁切
+			&--sub-on {
+				background-color: var(--color-brand-soft) !important;
+			}
+		}
+
+		&__oi {
+			width: 34px;
+			height: 34px;
+			margin-right: 12px;
+			border-radius: 11px;
+			align-items: center;
+			justify-content: center;
+			background-color: var(--color-bg-hover);
+
+			&--danger {
+				background-color: var(--color-danger-bg);
+			}
+		}
+
+		// 色块内的字体图标，颜色需在使用处显式声明（UCSS 不保证继承）
+		&__oi-font {
+			font-size: 18px;
+			color: var(--color-primary);
+
+			&--danger {
+				color: var(--color-error);
+			}
+		}
+
+		&__ov {
+			flex-direction: row;
+			align-items: center;
+		}
+
+		// 在线/离线状态标签，规格对齐原型 .online/.offline（10px 字、2px 6px 内距、圆角 6）
+		&__badge {
+			padding: 2px 6px;
+			border-radius: 6px;
+
+			&--online {
+				background-color: var(--color-success-soft);
+			}
+
+			&--offline {
+				background-color: var(--color-bg-hover);
+			}
+		}
+
+		// 标签字色不随文本继承，需在使用处显式声明（UCSS 不保证继承）
+		&__badge-text {
+			font-size: 10px;
+
+			&--online {
+				font-weight: 700;
+				color: var(--color-success);
+			}
+
+			&--offline {
+				color: var(--color-text-tertiary);
+			}
+		}
+
+		&__check {
+			margin-left: 5px;
+		}
+
+		&__ws-other {
+			flex-direction: column;
+			margin-top: 4px;
+			margin-bottom: 10px;
+			border-radius: 15px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+			overflow: hidden;
+		}
+	}
+</style>

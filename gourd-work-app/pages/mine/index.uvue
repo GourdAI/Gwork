@@ -1,0 +1,543 @@
+<template>
+	<view class="mine" :class="themeClass">
+		<view class="mine__nav">
+			<view class="mine__back" @click="onBack">
+				<rice-icon name="arrow-left" size="20px" color="var(--color-text-secondary)"></rice-icon>
+			</view>
+			<text class="mine__nav-title">{{ t('mine.title') }}</text>
+			<view class="mine__nav-spacer"></view>
+		</view>
+
+		<scroll-view class="mine__scroll" direction="vertical" :show-scrollbar="false">
+			<view class="mine__content">
+				<!-- 资料卡：整卡进入账号设置（原型 S7 me-card） -->
+				<view class="mine-card" @click="goAccount">
+					<rice-avatar :src="avatar" size="56px" mode="aspectFill" radius="28px"></rice-avatar>
+					<view class="mine-card__id">
+						<view class="mine-card__l1">
+							<text class="mine-card__name">{{ name }}</text>
+							<text v-if="isEnterprise" class="mine-card__role">{{ role }}</text>
+						</view>
+						<text v-if="isEnterprise" class="mine-card__company">{{ enterprise }}</text>
+						<text class="mine-card__email">{{ email }}</text>
+					</view>
+					<rice-icon name="arrow-right" size="16px" color="var(--color-text-tertiary)"></rice-icon>
+				</view>
+
+				<view class="mine-sec">
+					<view class="mine-row mine-row--divided">
+						<text class="mine-row__label">{{ t('mine.points') }}</text>
+						<text class="mine-row__brand">{{ points }}</text>
+					</view>
+					<view class="mine-row mine-row--btn mine-row--divided" @click="themeSheetVisible = true">
+						<text class="mine-row__label">{{ t('mine.appearance') }}</text>
+						<text v-if="themeGlyph != null" class="iconfont mine-row__glyph">{{ themeGlyph }}</text>
+						<rice-icon v-else name="sun" size="14px" color="var(--color-text-tertiary)"
+							:custom-style="rowIconGap"></rice-icon>
+						<text class="mine-row__value">{{ themeLabel }}</text>
+						<rice-icon name="arrow-right" size="13px" color="var(--color-text-tertiary)"></rice-icon>
+					</view>
+					<view class="mine-row mine-row--btn mine-row--divided" @click="langSheetVisible = true">
+						<text class="mine-row__label">{{ t('mine.language') }}</text>
+						<text class="mine-row__value">{{ langLabel }}</text>
+						<rice-icon name="arrow-right" size="13px" color="var(--color-text-tertiary)"></rice-icon>
+					</view>
+					<view class="mine-row mine-row--btn mine-row--divided" @click="notifyVisible = true">
+						<text class="mine-row__label">{{ t('mine.notify') }}</text>
+						<rice-icon name="arrow-right" size="13px" color="var(--color-text-tertiary)"></rice-icon>
+					</view>
+					<view class="mine-row mine-row--btn mine-row--divided" @click="aboutVisible = true">
+						<text class="mine-row__label">{{ t('mine.about') }}</text>
+						<rice-icon name="arrow-right" size="13px" color="var(--color-text-tertiary)"></rice-icon>
+					</view>
+					<view class="mine-row">
+						<text class="mine-row__label">{{ t('mine.version') }}</text>
+						<text class="mine-row__value">v{{ VERSION }}</text>
+						<text class="mine-row__latest">{{ t('mine.versionLatest') }}</text>
+						<rice-icon name="arrow-right" size="13px" color="var(--color-text-tertiary)"></rice-icon>
+					</view>
+				</view>
+
+				<view class="mine-sec">
+					<view class="mine-row mine-row--center mine-row--divided" @click="identityVisible = true">
+						<text class="mine-row__center">{{ t('mine.switchAccount') }}</text>
+					</view>
+					<view class="mine-row mine-row--center" @click="onLogout">
+						<text class="mine-row__center mine-row__center--danger">{{ t('mine.logout') }}</text>
+					</view>
+				</view>
+			</view>
+		</scroll-view>
+
+		<!-- 外观：卡片式选项（设计稿定稿），选中卡蓝描边 + 浅蓝底 + 勾选 -->
+		<app-sheet :visible="themeSheetVisible" :title="t('mine.appearance')" @close="themeSheetVisible = false">
+			<view v-for="item in THEME_OPTIONS" :key="item.value" class="theme-opt"
+				:class="currentMode === item.value ? 'theme-opt--on' : ''" @click="onPickTheme(item.value)">
+				<view class="theme-opt__tile" :class="currentMode === item.value ? 'theme-opt__tile--on' : ''">
+					<rice-icon v-if="item.icon != null" :name="item.icon" size="18px"
+						:color="currentMode === item.value ? 'var(--color-primary)' : 'var(--color-text-secondary)'"></rice-icon>
+					<text v-else-if="item.glyph != null" class="iconfont theme-opt__glyph"
+						:class="currentMode === item.value ? 'theme-opt__glyph--on' : ''">{{ item.glyph }}</text>
+				</view>
+				<view class="theme-opt__tx">
+					<text class="theme-opt__title">{{ t(item.label) }}</text>
+					<text class="theme-opt__desc">{{ t(item.desc) }}</text>
+				</view>
+				<rice-icon v-if="currentMode === item.value" name="checked" size="18px"
+					color="var(--color-primary)"></rice-icon>
+			</view>
+		</app-sheet>
+
+		<!-- 语言：卡片式单选，语言名用固定原名不随语言翻译（设计稿定稿） -->
+		<app-sheet :visible="langSheetVisible" :title="t('mine.language')" @close="langSheetVisible = false">
+			<view v-for="item in LANG_OPTIONS" :key="item.value" class="lang-opt"
+				:class="currentLocale === item.value ? 'lang-opt--on' : ''" @click="onPickLocale(item.value)">
+				<text class="lang-opt__label" :class="currentLocale === item.value ? 'lang-opt__label--on' : ''">{{ item.label }}</text>
+				<rice-icon v-if="currentLocale === item.value" name="checked" size="18px"
+					color="var(--color-primary)"></rice-icon>
+			</view>
+		</app-sheet>
+
+		<identity-sheet :visible="identityVisible" @close="identityVisible = false"
+			@select="onIdentitySelect"></identity-sheet>
+
+		<about-sheet :visible="aboutVisible" @close="aboutVisible = false"></about-sheet>
+
+		<mine-message-dialog :visible="notifyVisible" :title="t('mine.notifyTitle')"
+			:message="t('mine.notifyDesc')" :confirm-text="t('mine.notifyGo')" :show-cancel="true"
+			@close="notifyVisible = false" @confirm="onNotifyGo"></mine-message-dialog>
+
+		<mine-message-dialog :visible="entAlertVisible" :title="entAlertTitle" :message="entAlertDesc"
+			:note="entAlertNote" :confirm-text="t('mine.iGotIt')"
+			@close="entAlertVisible = false" @confirm="entAlertVisible = false"></mine-message-dialog>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed, ref } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme } from '@/hooks/useTheme'
+	import type { ThemeMode } from '@/hooks/useTheme'
+	import { useLocale } from '@/hooks/useLocale'
+	import type { Locale } from '@/hooks/useLocale'
+	import { useUser } from '@/hooks/useUser'
+	import { ENTERPRISES } from '@/data/app-data'
+	import type { EnterpriseAccount } from '@/data/app-data'
+	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
+	import IdentitySheet from './components/identity-sheet.uvue'
+	import AboutSheet from './components/about-sheet.uvue'
+	import MineMessageDialog from './components/mine-message-dialog.uvue'
+
+	const VERSION: string = '1.0.0'
+	const LOGIN_PAGE: string = '/pages/login/index'
+	const ACCOUNT_PAGE: string = '/pages/account-settings/index'
+	const HOME_PAGE: string = '/pages/home/index'
+
+	type ThemeOption = { value: ThemeMode; label: string; desc: string; icon: string | null; glyph: string | null }
+	/** 语言名是固定原名（中文 / English / Deutsch…），不随当前语言翻译，故不走 locale；顺序与桌面端一致 */
+	type LocaleOption = { value: Locale; label: string }
+
+	// sun 走 rice-icon；暗黑 / 跟随系统在其内置字体里缺字，走全局 iconfont 码点
+	const THEME_OPTIONS: ThemeOption[] = [
+		{ value: 'light', label: 'theme.light', desc: 'theme.lightDesc', icon: 'sun', glyph: null },
+		{ value: 'dark', label: 'theme.dark', desc: 'theme.darkDesc', icon: null, glyph: '\ue6e1' },
+		{ value: 'auto', label: 'theme.auto', desc: 'theme.autoDesc', icon: null, glyph: '\ue7a0' }
+	]
+
+	const LANG_OPTIONS: LocaleOption[] = [
+		{ value: 'zh-Hans', label: '中文' },
+		{ value: 'zh-Hant', label: '中文（繁體）' },
+		{ value: 'en', label: 'English' },
+		{ value: 'de', label: 'Deutsch' },
+		{ value: 'ja', label: '日本語' },
+		{ value: 'ru', label: 'Русский' },
+		{ value: 'el', label: 'Ελληνικά' },
+		{ value: 'es', label: 'Español' },
+		{ value: 'fr', label: 'Français' },
+		{ value: 'pt', label: 'Português' },
+		{ value: 'ro', label: 'Română' },
+		{ value: 'vi', label: 'Tiếng Việt' }
+	]
+
+	const { themeClass, currentMode, setThemeMode } = useTheme()
+	const { currentLocale, setLocale } = useLocale()
+	const { name, email, points, avatar, idType, enterprise, role, switchToPersonal, switchToEnterprise } = useUser()
+
+	const themeSheetVisible: Ref<boolean> = ref<boolean>(false)
+	const langSheetVisible: Ref<boolean> = ref<boolean>(false)
+	const identityVisible: Ref<boolean> = ref<boolean>(false)
+	const aboutVisible: Ref<boolean> = ref<boolean>(false)
+	const notifyVisible: Ref<boolean> = ref<boolean>(false)
+	const entAlertVisible: Ref<boolean> = ref<boolean>(false)
+	const entAlertTitle: Ref<string> = ref<string>('')
+	const entAlertDesc: Ref<string> = ref<string>('')
+	const entAlertNote: Ref<string> = ref<string>('')
+
+	const isEnterprise: ComputedRef<boolean> = computed<boolean>((): boolean => idType.value === 'enterprise')
+
+	const themeLabel: ComputedRef<string> = computed<string>((): string => {
+		if (currentMode.value === 'light') return t('theme.light')
+		if (currentMode.value === 'dark') return t('theme.dark')
+		return t('theme.auto')
+	})
+
+	const langLabel: ComputedRef<string> = computed<string>((): string => {
+		const found: LocaleOption | undefined = LANG_OPTIONS.find((item: LocaleOption): boolean => item.value === currentLocale.value)
+		return found?.label ?? '中文'
+	})
+
+	/** 当前后观模式对应的 iconfont 码点字符；light 用 rice-icon 的 sun，返回 null */
+	const themeGlyph: ComputedRef<string | null> = computed<string | null>((): string | null => {
+		const found: ThemeOption | undefined = THEME_OPTIONS.find((item: ThemeOption): boolean => item.value === currentMode.value)
+		return found?.glyph ?? null
+	})
+
+	const rowIconGap: UTSJSONObject = { marginRight: '5px' }
+
+	function t(key: string, values?: Record<string, string>): string {
+		if (values == null) return i18n.global.t(key)
+		return i18n.global.t(key, values)
+	}
+
+	function onBack(): void {
+		uni.navigateBack({
+			fail: () => {
+				uni.reLaunch({ url: HOME_PAGE })
+			}
+		})
+	}
+
+	function goAccount(): void {
+		uni.navigateTo({ url: ACCOUNT_PAGE })
+	}
+
+	function onPickTheme(mode: ThemeMode): void {
+		setThemeMode(mode)
+		themeSheetVisible.value = false
+		uni.showToast({ title: t('conv.themeSwitched'), icon: 'none' })
+	}
+
+	function onPickLocale(next: Locale): void {
+		setLocale(next)
+		langSheetVisible.value = false
+	}
+
+	function onNotifyGo(): void {
+		notifyVisible.value = false
+		// TODO 接入系统通知设置跳转（APP 端打开系统设置需原生插件）
+		uni.showToast({ title: t('mine.notifyDone'), icon: 'none' })
+	}
+
+	function onIdentitySelect(key: string): void {
+		if (key === 'personal') {
+			identityVisible.value = false
+			switchToPersonal()
+			uni.showToast({ title: t('mine.switchedPersonal'), icon: 'none' })
+			uni.reLaunch({ url: HOME_PAGE })
+			return
+		}
+		const ent: EnterpriseAccount | undefined = ENTERPRISES.find((item: EnterpriseAccount): boolean => item.name === key)
+		if (ent != null && switchToEnterprise(key)) {
+			identityVisible.value = false
+			uni.showToast({ title: t('mine.switchedEnterprise', { name: key }), icon: 'none' })
+			uni.reLaunch({ url: HOME_PAGE })
+			return
+		}
+		showEntAlert(ent)
+	}
+
+	/** 受阻企业的提示，优先级与原型一致：认证中 > 未认证 > 未购套餐 */
+	function showEntAlert(ent: EnterpriseAccount | undefined): void {
+		if (ent == null) return
+		if (ent.status === 'pending') {
+			entAlertTitle.value = t('mine.entPendingTitle')
+			entAlertDesc.value = t('mine.entPendingDesc')
+			entAlertNote.value = ''
+		} else if (ent.status === 'fail') {
+			entAlertTitle.value = t('mine.entFailTitle')
+			entAlertDesc.value = t('mine.entFailDesc')
+			entAlertNote.value = t('mine.entFailNote')
+		} else {
+			entAlertTitle.value = t('mine.entPkgTitle')
+			entAlertDesc.value = t('mine.entPkgDesc')
+			entAlertNote.value = t('mine.entPkgNote')
+		}
+		entAlertVisible.value = true
+	}
+
+	function onLogout(): void {
+		// TODO 接入退出登录接口并清理各请求实例 token
+		uni.showToast({ title: t('mine.loggedOut'), icon: 'none' })
+		uni.reLaunch({ url: LOGIN_PAGE })
+	}
+</script>
+
+<style lang="scss">
+	.mine {
+		flex: 1;
+		flex-direction: column;
+		/* H5 下 --status-bar-height 为 0，APP 下取系统状态栏高度 */
+		padding-top: var(--status-bar-height);
+		padding-bottom: env(safe-area-inset-bottom);
+		background-color: var(--color-bg);
+
+		&__nav {
+			flex-direction: row;
+			align-items: center;
+			height: 54px;
+			padding: 0 14px;
+		}
+
+		&__back {
+			width: 32px;
+			height: 32px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 10px;
+		}
+
+		&__nav-title {
+			flex: 1;
+			margin-left: 4px;
+			font-size: 16px;
+			font-weight: 720;
+			color: var(--color-text);
+		}
+
+		&__nav-spacer {
+			width: 32px;
+			height: 32px;
+		}
+
+		&__scroll {
+			flex: 1;
+			min-height: 0;
+		}
+
+		&__content {
+			padding: 18px 16px 28px;
+		}
+	}
+
+	.mine-card {
+		flex-direction: row;
+		align-items: center;
+		padding: 18px 16px;
+		margin-bottom: 18px;
+		border-width: 1px;
+		border-style: solid;
+		border-color: var(--color-border);
+		border-radius: 20px;
+		background-color: var(--color-bg-card);
+
+		&__id {
+			flex: 1;
+			min-width: 0;
+			flex-direction: column;
+			margin-left: 14px;
+		}
+
+		&__l1 {
+			flex-direction: row;
+			align-items: center;
+		}
+
+		&__name {
+			font-size: 17px;
+			font-weight: 760;
+			color: var(--color-text);
+		}
+
+		&__role {
+			margin-left: 8px;
+			font-size: 10.5px;
+			font-weight: 700;
+			padding: 3px 8px;
+			border-radius: 8px;
+			background-color: var(--color-brand-soft);
+			color: var(--color-primary);
+		}
+
+		&__company {
+			margin-top: 4px;
+			font-size: 11.5px;
+			font-weight: 650;
+			color: var(--color-text-secondary);
+		}
+
+		&__email {
+			margin-top: 4px;
+			font-size: 11.5px;
+			color: var(--color-text-tertiary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+	}
+
+	.mine-sec {
+		margin-bottom: 18px;
+		border-width: 1px;
+		border-style: solid;
+		border-color: var(--color-border);
+		border-radius: 18px;
+		background-color: var(--color-bg-card);
+		overflow: hidden;
+	}
+
+	.mine-row {
+		flex-direction: row;
+		align-items: center;
+		width: 100%;
+		min-height: 50px;
+		padding: 0 15px;
+
+		&--divided {
+			border-bottom-width: 1px;
+			border-bottom-style: solid;
+			border-bottom-color: var(--color-border);
+		}
+
+		&--center {
+			justify-content: center;
+			min-height: 52px;
+		}
+
+		&__label {
+			flex: 1;
+			font-size: 13.5px;
+			font-weight: 600;
+			color: var(--color-text);
+		}
+
+		&__brand {
+			font-size: 14px;
+			font-weight: 780;
+			color: var(--color-primary);
+		}
+
+		&__value {
+			margin-right: 6px;
+			font-size: 12px;
+			font-weight: 600;
+			color: var(--color-text-tertiary);
+		}
+
+		/* 外观行当前模式的图标（暗黑/跟随系统走 iconfont），颜色字号显式声明 */
+		&__glyph {
+			margin-right: 5px;
+			font-size: 14px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__latest {
+			margin-right: 6px;
+			margin-left: 2px;
+			font-size: 12px;
+			font-weight: 600;
+			color: var(--color-text-secondary);
+		}
+
+		&__center {
+			font-size: 13.5px;
+			font-weight: 700;
+			color: var(--color-text);
+
+			&--danger {
+				color: var(--color-error);
+			}
+		}
+	}
+
+	/* 外观弹层卡片选项：未选中灰底、选中蓝描边+浅蓝底（设计稿定稿） */
+	.theme-opt {
+		flex-direction: row;
+		align-items: center;
+		margin-bottom: 10px;
+		padding: 13px 14px;
+		border-width: 1px;
+		border-style: solid;
+		border-color: var(--color-bg-card);
+		border-radius: 16px;
+		background-color: var(--color-bg-card);
+
+		&--on {
+			border-color: var(--color-primary);
+			background-color: var(--color-brand-soft);
+		}
+
+		&__tile {
+			width: 38px;
+			height: 38px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 12px;
+			background-color: var(--color-bg-hover);
+
+			&--on {
+				background-color: var(--color-primary-alpha);
+			}
+		}
+
+		/* 暗黑/跟随系统图标（iconfont 码点），颜色字号显式声明 */
+		&__glyph {
+			font-size: 18px;
+			color: var(--color-text-secondary);
+
+			&--on {
+				color: var(--color-primary);
+			}
+		}
+
+		&__tx {
+			flex: 1;
+			min-width: 0;
+			flex-direction: column;
+			margin-left: 12px;
+		}
+
+		&__title {
+			font-size: 14px;
+			font-weight: 750;
+			color: var(--color-text);
+		}
+
+		&__desc {
+			margin-top: 3px;
+			font-size: 11.5px;
+			color: var(--color-text-tertiary);
+		}
+	}
+
+	/* 语言弹层卡片选项：规格与外观卡片一致，选中蓝描边+浅蓝底+蓝字+勾选（设计稿定稿） */
+	.lang-opt {
+		flex-direction: row;
+		align-items: center;
+		min-height: 52px;
+		margin-bottom: 10px;
+		padding: 0 16px;
+		border-width: 1px;
+		border-style: solid;
+		border-color: var(--color-bg-card);
+		border-radius: 16px;
+		background-color: var(--color-bg-card);
+
+		&--on {
+			border-color: var(--color-primary);
+			background-color: var(--color-brand-soft);
+		}
+
+		&__label {
+			flex: 1;
+			font-size: 14px;
+			font-weight: 650;
+			color: var(--color-text);
+
+			&--on {
+				color: var(--color-primary);
+				font-weight: 700;
+			}
+		}
+	}
+</style>

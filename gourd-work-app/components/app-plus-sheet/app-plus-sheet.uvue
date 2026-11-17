@@ -1,0 +1,476 @@
+<template>
+	<app-sheet :visible="visible" :title="title" :show-back="view !== 'main'" :show-search="view !== 'main'"
+		:compact="view !== 'main'" :tall="view !== 'main'" @close="emit('close')" @back="onBack" @search="onSearch">
+		<view v-if="view === 'main'">
+			<rice-grid :column-num="3" :border="false" :clickable="false" class="app-plus__cards">
+				<rice-grid-item v-for="(item, index) in ATTACHMENTS" :key="item.label" :custom-style="gridItemStyle(index)"
+					@click="emit('attach', t(item.label))">
+					<view class="app-plus__card">
+						<!-- image→photo；file 用 iconfont 码点：rice-icon 的 font-family 路径在 APP 端实测不渲染，
+							统一走 <text class="iconfont">（技能/连接器入口同款方式，已验证可用） -->
+						<text v-if="item.icon === 'file'" class="iconfont app-plus__card-iconfont">&#xe69f;</text>
+						<rice-icon v-else-if="riceIconName(item.icon) !== ''" :name="riceIconName(item.icon)" size="24px"
+							color="var(--color-primary)"></rice-icon>
+						<text class="app-plus__card-text">{{ t(item.label) }}</text>
+					</view>
+				</rice-grid-item>
+			</rice-grid>
+
+			<view class="app-plus__opt">
+				<!-- spark 图标待字体图标补全 -->
+				<rice-cell :border="false" center :custom-style="cellStyle" @click="openView('skills')">
+					<template #title>
+						<view class="app-plus__ot-wrap">
+							<view class="app-plus__ot-icon">
+								<text class="iconfont app-plus__ot-icon-font">&#xe7ab;</text>
+							</view>
+							<view class="app-plus__ot">
+								<text class="app-plus__ot-title">{{ t('home.plus.skills') }}</text>
+								<text class="app-plus__ot-desc">{{ t('home.plus.skillsHint') }}</text>
+							</view>
+						</view>
+					</template>
+					<template #rightIcon>
+						<view class="app-plus__ov">
+							<text class="app-plus__ov-text">{{ selectedSkill.length > 0 ? selectedSkill : t('home.plus.select') }}</text>
+							<rice-icon name="arrow-right" size="14px" color="var(--color-text-tertiary)"></rice-icon>
+						</view>
+					</template>
+				</rice-cell>
+			</view>
+
+			<view class="app-plus__opt">
+				<!-- link 图标待字体图标补全 -->
+				<rice-cell :border="false" center :custom-style="cellStyle" @click="openView('connectors')">
+					<template #title>
+						<view class="app-plus__ot-wrap">
+							<view class="app-plus__ot-icon">
+								<text class="iconfont app-plus__ot-icon-font">&#xe62b;</text>
+							</view>
+							<view class="app-plus__ot">
+								<text class="app-plus__ot-title">{{ t('home.plus.connectors') }}</text>
+								<text class="app-plus__ot-desc">{{ t('home.plus.connectorsHint') }}</text>
+							</view>
+						</view>
+					</template>
+					<template #rightIcon>
+						<view class="app-plus__ov">
+							<text class="app-plus__ov-text">{{ t('home.plus.select') }}</text>
+							<rice-icon name="arrow-right" size="14px" color="var(--color-text-tertiary)"></rice-icon>
+						</view>
+					</template>
+				</rice-cell>
+			</view>
+		</view>
+
+		<view v-else-if="view === 'skills'">
+			<rice-search v-if="skillsSearchActive" v-model="skillQuery" class="app-plus__search" shape="round"
+				:placeholder="t('home.skills.search')" :placeholder-style="placeholderStyle" :clearable="true"
+				:focus="searchFocused" @focus="searchFocused = true" @blur="searchFocused = false"></rice-search>
+			<view v-for="item in filteredSkills" :key="item.name" class="app-plus__skill"
+				:class="item.name === selectedSkill ? 'app-plus__skill--on' : ''">
+				<rice-cell :border="false" center :custom-style="cellStyle" @click="emit('select-skill', item.name)">
+					<template #leftIcon>
+						<rice-tag :text="item.badge" :color="item.color" text-size="16px" :custom-style="badgeStyle"></rice-tag>
+					</template>
+					<template #title>
+						<view class="app-plus__skill-tx">
+							<text class="app-plus__skill-name">{{ item.name }}</text>
+							<text class="app-plus__skill-desc">{{ item.desc }}</text>
+						</view>
+					</template>
+					<template #rightIcon>
+						<view v-if="item.name === selectedSkill" class="app-plus__skill-check">
+							<rice-icon name="checked" size="16px" color="var(--color-primary)"></rice-icon>
+						</view>
+					</template>
+				</rice-cell>
+			</view>
+			<text v-if="filteredSkills.length === 0" class="app-plus__empty">{{ t('home.skills.empty') }}</text>
+		</view>
+
+		<view v-else>
+			<rice-search v-if="connectorsSearchActive" v-model="connectorQuery" class="app-plus__search" shape="round"
+				:placeholder="t('home.connectors.search')" :placeholder-style="placeholderStyle" :clearable="true"
+				:focus="searchFocused" @focus="searchFocused = true" @blur="searchFocused = false"></rice-search>
+			<view v-for="item in filteredConnectors" :key="item.name" class="app-plus__conn">
+				<rice-cell :border="false" center :custom-style="cellStyle" @click="emit('toggle-connector', item.name)">
+					<template #leftIcon>
+						<view class="app-plus__conn-icon" :style="'background-color:' + item.color">
+							<!-- file/mountain 无对应图标，待字体图标补全 -->
+							<rice-icon v-if="riceIconName(item.icon) !== ''" :name="riceIconName(item.icon)" size="22px"
+								color="var(--color-text-inverse)"></rice-icon>
+						</view>
+					</template>
+					<template #title>
+						<view class="app-plus__conn-tx">
+							<text class="app-plus__conn-name">{{ item.name }}</text>
+							<text class="app-plus__conn-desc">{{ item.desc }}</text>
+						</view>
+					</template>
+					<template #rightIcon>
+						<!-- switch 自身 change 已触发一次 toggle，阻断冒泡避免再吃到 cell 的 click -->
+						<view class="app-plus__conn-sw" @click.stop>
+							<rice-switch :model-value="connectorOn(item.name)" width="44px" active-color="var(--color-primary)"
+								inactive-color="var(--color-border)" @change="emit('toggle-connector', item.name)"></rice-switch>
+						</view>
+					</template>
+				</rice-cell>
+			</view>
+			<text v-if="filteredConnectors.length === 0" class="app-plus__empty">{{ t('home.connectors.empty') }}</text>
+			<text class="app-plus__conn-tip">{{ t('home.connectors.tip') }}</text>
+		</view>
+	</app-sheet>
+</template>
+
+<script setup lang="ts">
+	import { computed, ref, watch } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
+	import { CONNECTORS, SKILLS } from '@/data/app-data'
+	import type { ConnectorOption, SkillOption } from '@/data/app-data'
+
+	defineOptions({
+		name: 'app-plus-sheet',
+		styleIsolation: 'app-and-page'
+	})
+
+	type AttachmentItem = {
+		label: string
+		icon: string
+	}
+
+	const ATTACHMENTS: AttachmentItem[] = [
+		{ label: 'home.plus.camera', icon: 'camera' },
+		{ label: 'home.plus.photo', icon: 'image' },
+		{ label: 'home.plus.file', icon: 'file' }
+	]
+
+	// 设计稿图标名到 rice-icon 字体名的映射，无对应图标留空，待字体图标补全后再填
+	const RICE_ICON_MAP: Record<string, string> = {
+		camera: 'camera',
+		image: 'photo',
+		file: '',
+		mountain: ''
+	}
+
+	const props = defineProps<{
+		visible: boolean
+		selectedSkill: string
+		connectorStates: Record<string, boolean>
+	}>()
+
+	const emit = defineEmits<{
+		(e: 'close'): void
+		(e: 'attach', name: string): void
+		(e: 'select-skill', name: string): void
+		(e: 'toggle-connector', name: string): void
+	}>()
+
+	type SheetView = 'main' | 'skills' | 'connectors'
+
+	const TITLE_KEYS: Record<string, string> = {
+		main: 'home.plus.title',
+		skills: 'home.skills.title',
+		connectors: 'home.connectors.title'
+	}
+
+	const view: Ref<SheetView> = ref<SheetView>('main')
+	const skillsSearchActive: Ref<boolean> = ref<boolean>(false)
+	const connectorsSearchActive: Ref<boolean> = ref<boolean>(false)
+	const skillQuery: Ref<string> = ref<string>('')
+	const connectorQuery: Ref<string> = ref<string>('')
+	const searchFocused: Ref<boolean> = ref<boolean>(false)
+
+	const title: ComputedRef<string> = computed<string>((): string => t(TITLE_KEYS[view.value]))
+	const placeholderStyle: ComputedRef<string> = computed<string>((): string => {
+		return 'color:var(--color-text-tertiary);'
+	})
+	// 卡片底色与边框在外层卡片上，cell 本身透明，只承担布局与点击
+	const cellStyle = { backgroundColor: 'transparent', padding: '0' }
+	// grid-item 自带内边距与底色，需抹掉；间距用右内边距实现，避免 margin 叠加百分比宽度后溢出
+	function gridItemStyle(index: number): UTSJSONObject {
+		const style: UTSJSONObject = {
+			padding: '0',
+			'background-color': 'transparent'
+		}
+		if (index < ATTACHMENTS.length - 1) {
+			style['padding-right'] = '9px'
+		}
+		return style
+	}
+	const badgeStyle: UTSJSONObject = {
+		width: '40px',
+		height: '40px',
+		'border-radius': '12px',
+		'margin-right': '12px'
+	}
+	const filteredSkills: ComputedRef<SkillOption[]> = computed<SkillOption[]>((): SkillOption[] => {
+		const keyword: string = skillQuery.value.trim().toLowerCase()
+		if (keyword.length === 0) return SKILLS
+		return SKILLS.filter((item: SkillOption): boolean => {
+			return (item.name + item.desc).toLowerCase().indexOf(keyword) >= 0
+		})
+	})
+	const filteredConnectors: ComputedRef<ConnectorOption[]> = computed<ConnectorOption[]>((): ConnectorOption[] => {
+		const keyword: string = connectorQuery.value.trim().toLowerCase()
+		if (keyword.length === 0) return CONNECTORS
+		return CONNECTORS.filter((item: ConnectorOption): boolean => {
+			return (item.name + item.desc).toLowerCase().indexOf(keyword) >= 0
+		})
+	})
+
+	watch((): boolean => props.visible, (visible: boolean): void => {
+		if (!visible) return
+		view.value = 'main'
+		resetSearch()
+	})
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function riceIconName(name: string): string {
+		return RICE_ICON_MAP[name] ?? ''
+	}
+
+	function resetSearch(): void {
+		skillsSearchActive.value = false
+		connectorsSearchActive.value = false
+		skillQuery.value = ''
+		connectorQuery.value = ''
+		searchFocused.value = false
+	}
+
+	function connectorOn(name: string): boolean {
+		return props.connectorStates[name] ?? false
+	}
+
+	function openView(next: SheetView): void {
+		view.value = next
+		resetSearch()
+	}
+
+	function onBack(): void {
+		view.value = 'main'
+		resetSearch()
+	}
+
+	function onSearch(): void {
+		if (view.value === 'skills') {
+			skillsSearchActive.value = !skillsSearchActive.value
+			searchFocused.value = skillsSearchActive.value
+			if (!skillsSearchActive.value) {
+				skillQuery.value = ''
+			}
+			return
+		}
+		connectorsSearchActive.value = !connectorsSearchActive.value
+		searchFocused.value = connectorsSearchActive.value
+		if (!connectorsSearchActive.value) {
+			connectorQuery.value = ''
+		}
+	}
+</script>
+
+<style lang="scss">
+	.app-plus {
+		&__cards {
+			margin-bottom: 8px;
+		}
+
+		&__card {
+			width: 100%;
+			height: 104px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 20px;
+			background-color: var(--color-bg-card);
+		}
+
+		// 卡片内 iconfont 码点图标，颜色需在使用处显式声明（UCSS 不保证继承）
+		&__card-iconfont {
+			font-size: 24px;
+			color: var(--color-primary);
+		}
+
+		&__card-text {
+			margin-top: 10px;
+			font-size: 13px;
+			font-weight: 600;
+			color: var(--color-text-secondary);
+		}
+
+		&__opt {
+			margin-bottom: 10px;
+			padding: 14px;
+			border-radius: 16px;
+			background-color: var(--color-bg-card);
+		}
+
+		&__ot-wrap {
+			flex: 1;
+			min-width: 0;
+			flex-direction: row;
+			align-items: center;
+		}
+
+		&__ot-icon {
+			width: 40px;
+			height: 40px;
+			margin-right: 12px;
+			border-radius: 12px;
+			background-color: var(--color-brand-soft);
+			align-items: center;
+			justify-content: center;
+		}
+
+		// 色块内的字体图标，颜色需在使用处显式声明（UCSS 不保证继承）
+		&__ot-icon-font {
+			font-size: 22px;
+			color: var(--color-primary);
+		}
+
+		&__ot {
+			flex: 1;
+			min-width: 0;
+			flex-direction: column;
+		}
+
+		&__ot-title {
+			font-size: 15px;
+			font-weight: 700;
+			color: var(--color-text);
+		}
+
+		&__ot-desc {
+			margin-top: 3px;
+			font-size: 12px;
+			line-height: 16px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__ov {
+			flex-direction: row;
+			align-items: center;
+		}
+
+		&__ov-text {
+			max-width: 96px;
+			margin-right: 5px;
+			font-size: 13px;
+			color: var(--color-text-secondary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__search {
+			margin: 0 2px 12px;
+		}
+
+		&__skill {
+			margin-bottom: 9px;
+			border-radius: 15px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: transparent;
+			background-color: var(--color-bg-card);
+
+			&--on {
+				border-color: var(--color-primary);
+				background-color: var(--color-brand-soft);
+			}
+		}
+
+		&__skill-tx {
+			flex: 1;
+			min-width: 0;
+			flex-direction: column;
+		}
+
+		&__skill-name {
+			font-size: 13.5px;
+			font-weight: 700;
+			color: var(--color-text);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__skill-desc {
+			margin-top: 4px;
+			font-size: 11px;
+			color: var(--color-text-tertiary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__skill-check {
+			margin-left: 12px;
+		}
+
+		&__conn {
+			margin: 0 2px 8px;
+			padding: 13px 14px;
+			border-radius: 14px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+		}
+
+		&__conn-icon {
+			width: 40px;
+			height: 40px;
+			margin-right: 12px;
+			border-radius: 12px;
+			align-items: center;
+			justify-content: center;
+		}
+
+		&__conn-sw {
+			margin-left: 12px;
+		}
+
+		&__conn-tx {
+			flex: 1;
+			min-width: 0;
+			flex-direction: column;
+		}
+
+		&__conn-name {
+			font-size: 14px;
+			font-weight: 700;
+			color: var(--color-text);
+		}
+
+		&__conn-desc {
+			margin-top: 3px;
+			font-size: 12px;
+			color: var(--color-text-tertiary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__conn-tip {
+			margin-top: 16px;
+			padding: 0 18px 6px;
+			font-size: 11.5px;
+			line-height: 18px;
+			text-align: center;
+			color: var(--color-text-tertiary);
+		}
+
+		&__empty {
+			padding-top: 24px;
+			padding-bottom: 24px;
+			font-size: 12px;
+			text-align: center;
+			color: var(--color-text-tertiary);
+		}
+	}
+</style>

@@ -1,117 +1,56 @@
 {
-	"pages": [
+	"pages": [ //pages数组中第一项表示应用启动页，参考：https://doc.dcloud.net.cn/uni-app-x/collocation/pagesjson.html
 		{
-			"path": "pages/tasks/tasks",
-			"style": {
-				"navigationStyle": "custom",
-				"navigationBarTitleText": "任务",
-				"disableScroll": true,
-				"backgroundColorContent": "@backgroundColorContent"
-			}
+			"path": "pages/login/index"
 		},
 		{
-			"path": "pages/loop/loop",
-			"style": {
-				"navigationStyle": "custom",
-				"navigationBarTitleText": "定时任务",
-				"disableScroll": true,
-				"backgroundColorContent": "@backgroundColorContent"
-			}
+			"path": "pages/verify/index"
 		},
 		{
-			"path": "pages/discover/discover",
-			"style": {
-				"navigationStyle": "custom",
-				"navigationBarTitleText": "发现",
-				"disableScroll": true,
-				"backgroundColorContent": "@backgroundColorContent"
-			}
+			"path": "pages/enterprise-login/index"
 		},
 		{
-			"path": "pages/mine/mine",
-			"style": {
-				"navigationStyle": "custom",
-				"navigationBarTitleText": "我的",
-				"disableScroll": true,
-				"backgroundColorContent": "@backgroundColorContent"
-			}
-		},
-		{
-			"path" : "uni_modules/uni-ai-x/pages/index/index",
-			"style" : 
-			{
-				"navigationStyle" : "custom",
-				"navigationBarTitleText" : "uni-ai x",
-				"disableScroll": true
-			}
-		},
-		{
-			"path" : "uni_modules/uni-ai-x/pages/common/webview/webview",
-			"style" : 
-			{
-				"navigationStyle" : "custom"
-			}
-		},
-		{
-			"path" : "uni_modules/uni-ai-x/pages/select-text/select-text",
-			"style" : 
-			{
-				"navigationBarTitleText" : "选择文本"
-			}
-		},
-		// #ifdef APP-ANDROID || APP-IOS || APP-HARMONY
-		{
-			"path" : "uni_modules/uni-upgrade-center-app/pages/uni-app-x/upgrade-popup",
-			"style" : {
-				"navigationBarTitleText" : ""
-			}
+			"path": "pages/home/index"
 		}
-		// #endif
-	],
+	,{
+	    "path": "pages/mine/index"
+	}
+	,{
+	    "path": "pages/account-settings/index"
+	}
+	,{
+	    "path": "pages/rebind-email/index"
+	}
+	,{
+    "path": "pages/test/index"
+}
+	,{
+    "path": "uni_modules/rice-ui/pages/action-sheet/action-sheet"
+}
+,{
+    "path": "uni_modules/rice-ui/pages/dialog/dialog"
+}
+],
 	"globalStyle": {
-		"navigationBarTextStyle": "@navigationBarTextStyle",
-		"navigationBarTitleText": "GWork",
-		"navigationBarBackgroundColor": "@navigationBarBackgroundColor",
-		"backgroundColorContent": "@backgroundColorContent",
-		"backgroundColor": "@backgroundColor",
-		"backgroundTextStyle": "@backgroundTextStyle"
+		"navigationStyle": "custom",
+		// 导航栏 / 下拉窗口背景由 theme.json 提供亮暗两套值；转场第一帧的页面容器背景见 App.uvue 的 page 规则
+		"navigationBarTextStyle": "@navTxtStyle",
+		"navigationBarTitleText": "uni-app x",
+		"navigationBarBackgroundColor": "@navBgColor",
+		"backgroundColor": "@bgColor",
+		// iOS 回弹区域背景，跟随主题
+		"backgroundColorTop": "@bgColorTop",
+		"backgroundColorBottom": "@bgColorBottom"
 	},
-	"tabBar": {
-		"color": "#9b9ba2",
-		"selectedColor": "#141416",
-		"backgroundColor": "#fafafa",
-		"borderStyle": "white",
-		"borderColor": "#fafafa",
-		"height": "76px",
-		"fontSize": "12px",
-		"iconWidth": "26px",
-		"spacing": "3px",
+	"uniIdRouter": {},
+	"condition" : { //模式配置，仅开发期间生效
+		"current": 0, //当前激活的模式(list 的索引项)
 		"list": [
 			{
-				"pagePath": "pages/tasks/tasks",
-				"text": "任务",
-				"iconPath": "static/tabbar/tasks.png",
-				"selectedIconPath": "static/tabbar/tasks-active.png"
-			},
-			{
-				"pagePath": "pages/loop/loop",
-				"text": "定时任务",
-				"iconPath": "static/tabbar/loop.png",
-				"selectedIconPath": "static/tabbar/loop-active.png"
-			},
-			{
-				"pagePath": "pages/discover/discover",
-				"text": "发现",
-				"iconPath": "static/tabbar/discover.png",
-				"selectedIconPath": "static/tabbar/discover-active.png"
-			},
-			{
-				"pagePath": "pages/mine/mine",
-				"text": "我的",
-				"iconPath": "static/tabbar/mine.png",
-				"selectedIconPath": "static/tabbar/mine-active.png"
+				"name": "", //模式名称
+				"path": "", //启动页面，必选
+				"query": "" //启动参数，在页面的onLoad函数里面得到
 			}
 		]
-	},
-	"uniIdRouter": {}
+	}
 }

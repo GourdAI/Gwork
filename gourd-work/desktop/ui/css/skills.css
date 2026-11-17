@@ -303,9 +303,34 @@ body > .mcp-import-menu { z-index: 1600; }
 
 /* ===== 已安装连接器/接口列表：卡片网格化（对齐技能卡排版） =====
  * 旧版是 settings 的单列长条行；参考图是与技能市场同密度的双列卡片。
- * 只影响技能页两个 pane，设置浮层其余列表不受波及（选择器限定 pane id）。 */
+ * 只影响技能页两个 pane，设置浮层其余列表不受波及（选择器限定 pane id）。
+ * 2026-11 用户拍板：连接器·已安装改用技能已安装卡（.skill-card 家族，
+ * renderMcpList 产出），网格密度与技能列表完全一致（minmax 300px）；
+ * 接口列表仍走 .mcp-server-item 旧卡形态，规则保留。 */
 #skillsPaneConnectors .mcp-server-list,
 #skillsPaneInterfaces .openapi-server-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; align-items: stretch; }
+#skillsPaneConnectors .mcp-server-list { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+/* 连接器已安装卡 = 技能已安装卡 + 可点开工具面板：恢复手型与 hover 高亮
+ * （.skill-card-installed 默认 cursor:default、hover 不变色，那是技能卡的语义）。 */
+#skillsPaneConnectors .mcp-installed-card { cursor: pointer; }
+#skillsPaneConnectors .mcp-installed-card:hover { border-color: var(--accent); box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
+/* 侧栏三件套（编辑 26 + 删除 26 + 开关 36 + 2×gap8 = 104px）比技能卡的两件套宽，
+ * 标题预留宽度必须同步放大，否则长展示名会跑到按钮下方（同 --side-gutter 注释的换算：
+ * 104 + 10(right) - 14(padding) + 6(呼吸) = 106，取 110）。
+ * 双类选择器压过 .skill-card-installed 的 72px，不依赖样式表加载顺序。 */
+#skillsPaneConnectors .skill-card.mcp-installed-card { --side-gutter: 110px; }
+#skillsPaneConnectors .mcp-card-side { width: 104px; }
+/* 编辑按钮复用卸载按钮的悬浮显形形态，但 hover 不变红（编辑非破坏性操作）。 */
+#skillsPaneConnectors .mcp-installed-card:hover .mcp-edit-btn,
+#skillsPaneConnectors .mcp-installed-card:focus-within .mcp-edit-btn { visibility: visible; }
+/* 新卡按钮同时挂着旧 .mcp-action-btn 类（settings.css）。旧规则
+ * `#skillsPaneConnectors .mcp-action-btn{opacity:0}` 的显形入口只认
+ * .mcp-server-item，新卡是 .mcp-installed-card —— 不显式恢复 opacity，
+ * visibility:visible 也救不回（0 × 1 = 0），编辑/删除将永远隐形。 */
+#skillsPaneConnectors .mcp-installed-card .mcp-action-btn { opacity: 1; }
+#skillsPaneConnectors .mcp-edit-btn:hover { color: var(--accent); background: var(--bg-hover); }
+/* 类型徽标（stdio/sse/streamable）用中性色，与技能版本徽标同形态。 */
+#skillsPaneConnectors .mcp-type-badge { color: var(--text-secondary); background: var(--bg-hover); }
 #skillsPaneConnectors .mcp-server-item,
 #skillsPaneInterfaces .mcp-server-item { margin-bottom: 0; padding: 13px 14px; border-radius: 10px; background: var(--bg-card, var(--bg-main)); align-items: flex-start; }
 #skillsPaneConnectors .mcp-server-icon,

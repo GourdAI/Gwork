@@ -1,0 +1,62 @@
+<template>
+	<view class="login-footer">
+		<view class="login-footer__pill">
+			<rice-button type="default" plain shape="round" height="40px" @click="emit('enterprise')">
+				<view class="login-footer__icon">
+					<text class="iconfont login-footer__icon-glyph">&#xe60f;</text>
+				</view>
+				<text class="login-footer__text">{{ t('login.enterpriseLogin') }}</text>
+			</rice-button>
+		</view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { i18n } from '@/locale/i18n.ts'
+
+	// 主题变量由页面根节点的 themeClass 注入，组件内不再引入 theme.scss
+	defineOptions({
+		styleIsolation: 'app-and-page'
+	})
+
+	const emit = defineEmits<{
+		(e: 'enterprise'): void
+	}>()
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+</script>
+
+<style lang="scss">
+	.login-footer {
+		align-items: center;
+		padding-bottom: 24px;
+
+		&__pill {
+			border-radius: 20px;
+		}
+
+		&__icon {
+			width: 30px;
+			height: 30px;
+			margin-right: 7px;
+			border-radius: 15px;
+			align-items: center;
+			justify-content: center;
+			background-color: var(--color-login-brand-soft);
+		}
+
+		/* 企业账号字体图标（iconfont 码点），UCSS 无继承，色与字号需显式声明 */
+		&__icon-glyph {
+			font-size: 16px;
+			color: var(--color-primary);
+		}
+
+		&__text {
+			font-size: 12.5px;
+			font-weight: 700;
+			color: var(--color-text-secondary);
+		}
+	}
+</style>

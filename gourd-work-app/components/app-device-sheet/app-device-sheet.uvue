@@ -1,0 +1,179 @@
+<template>
+	<app-sheet :visible="visible" :title="t('home.device.title')" @close="emit('close')">
+		<!-- 行结构对齐原型 首页.html 的 .opt / .oi / .ot / .ov。
+		     自建行而非 rice-cell：#value 插槽与 rice-cell 的 value prop 同名，运行时不会被注册（实测整块不挂载），
+		     右侧状态区只能落在不受支持的插槽上；同时原型的状态芯片规格（10px 字 / 圆角 6 / 2px 6px 内距）rice-tag 也覆盖不了。 -->
+		<view v-for="item in DEVICES" :key="item.name" class="app-device__opt"
+			:class="item.name === draft ? 'app-device__opt--on' : ''" @click="onPick(item)">
+			<view class="app-device__oi">
+				<text class="iconfont app-device__oi-font"
+					:class="item.online ? '' : 'app-device__oi-font--off'">&#xe7a0;</text>
+			</view>
+			<view class="app-device__ot">
+				<text class="app-device__ot-name"
+					:class="item.online ? '' : 'app-device__ot-name--off'">{{ item.name }}</text>
+				<text v-if="deviceNote(item) != ''" class="app-device__ot-desc">{{ deviceNote(item) }}</text>
+			</view>
+			<view class="app-device__ov">
+				<view class="app-device__badge"
+					:class="item.online ? 'app-device__badge--online' : 'app-device__badge--offline'">
+					<text class="app-device__badge-text"
+						:class="item.online ? 'app-device__badge-text--online' : 'app-device__badge-text--offline'">{{ item.online ? t('home.device.online') : t('home.device.offline') }}</text>
+				</view>
+				<view v-if="item.name === draft" class="app-device__check">
+					<rice-icon name="checked" size="14px" color="var(--color-text-tertiary)" />
+				</view>
+			</view>
+		</view>
+	</app-sheet>
+</template>
+
+<script setup lang="ts">
+	import { ref, watch } from 'vue'
+	import type { Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
+	import { DEVICES } from '@/data/app-data'
+	import type { DeviceOption } from '@/data/app-data'
+
+	defineOptions({
+		name: 'app-device-sheet',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = withDefaults(defineProps<{
+		visible: boolean
+		device: string
+	}>(), {
+		visible: false,
+		device: ''
+	})
+
+	const emit = defineEmits<{
+		(e: 'close'): void
+		(e: 'select', name: string, online: boolean): void
+	}>()
+
+	// 弹层打开期间先暂存草稿，避免直接改动共享状态
+	const draft: Ref<string> = ref<string>('')
+
+	watch((): boolean => props.visible, (visible: boolean): void => {
+		if (visible) draft.value = props.device
+	})
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function deviceNote(item: DeviceOption): string {
+		return item.name === draft.value ? t('home.device.inUse') : item.note
+	}
+
+	function onPick(item: DeviceOption): void {
+		if (!item.online) return
+		draft.value = item.name
+		emit('select', item.name, item.online)
+		emit('close')
+	}
+</script>
+
+<style lang="scss">
+	/* 尺寸与配色严格对齐原型 首页.html：.opt / .oi / .ot / .ov / .online / .offline */
+	.app-device {
+		&__opt {
+			flex-direction: row;
+			align-items: center;
+			width: 100%;
+			margin-bottom: 10px;
+			padding: 13px 14px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			border-radius: 15px;
+			background-color: var(--color-bg-card);
+
+			&--on {
+				border-color: var(--color-primary);
+				background-color: var(--color-brand-soft);
+			}
+		}
+
+		&__oi {
+			width: 34px;
+			height: 34px;
+			/* 原型用 flex gap 控制行内间距，自有样式统一用 margin（UCSS 不保证 gap） */
+			margin-right: 12px;
+			border-radius: 11px;
+			align-items: center;
+			justify-content: center;
+			background-color: var(--color-bg-hover);
+		}
+
+		// 字体图标颜色需在使用处显式声明（UCSS 不保证继承）
+		&__oi-font {
+			font-size: 18px;
+			color: var(--color-primary);
+
+			&--off {
+				color: var(--color-text-tertiary);
+			}
+		}
+
+		&__ot {
+			flex: 1;
+		}
+
+		&__ot-name {
+			font-size: 13.5px;
+			font-weight: 700;
+			color: var(--color-text);
+
+			/* 原型对离线行整体加 opacity .5，UCSS 不支持 opacity，改为逐元素弱化色 */
+			&--off {
+				color: var(--color-text-tertiary);
+			}
+		}
+
+		&__ot-desc {
+			margin-top: 3px;
+			font-size: 11px;
+			line-height: 15.4px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__ov {
+			flex-direction: row;
+			align-items: center;
+		}
+
+		&__badge {
+			padding: 2px 6px;
+			border-radius: 6px;
+
+			&--online {
+				background-color: var(--color-success-soft);
+			}
+
+			&--offline {
+				background-color: var(--color-bg-hover);
+			}
+		}
+
+		&__badge-text {
+			font-size: 10px;
+
+			&--online {
+				font-weight: 700;
+				color: var(--color-success);
+			}
+
+			&--offline {
+				color: var(--color-text-tertiary);
+			}
+		}
+
+		&__check {
+			margin-left: 5px;
+		}
+	}
+</style>

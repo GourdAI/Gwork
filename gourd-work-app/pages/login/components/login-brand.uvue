@@ -1,0 +1,44 @@
+<template>
+	<view class="login-brand">
+		<image class="login-brand__mark" :src="markSrc" mode="aspectFit"></image>
+		<text class="login-brand__name">GWork</text>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed } from 'vue'
+	import type { ComputedRef } from 'vue'
+	import { useTheme } from '@/hooks/useTheme'
+
+	// 主题变量由页面根节点的 themeClass 注入，组件内不再引入 theme.scss
+	defineOptions({
+		styleIsolation: 'app-and-page'
+	})
+
+	const { isDark } = useTheme()
+
+	// 光晕与 logo 合成在一张贴图里：原生端既不支持 radial-gradient，
+	// box-shadow 也不跟随圆角，分层叠加还会因绝对定位出现层级问题
+	const markSrc = computed<string>((): string => {
+		return isDark.value ? '/static/login-mark-dark.png' : '/static/login-mark-light.png'
+	})
+</script>
+
+<style lang="scss">
+	.login-brand {
+		align-items: center;
+
+		&__mark {
+			width: 150px;
+			height: 150px;
+		}
+
+		&__name {
+			margin-top: 10px;
+			font-size: 30px;
+			font-weight: 800;
+			letter-spacing: -1px;
+			color: var(--color-text);
+		}
+	}
+</style>

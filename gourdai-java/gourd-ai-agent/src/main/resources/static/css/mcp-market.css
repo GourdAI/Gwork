@@ -42,10 +42,10 @@
 .mcp-market-badges { display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex: 0 0 auto; }
 .mcp-market-badges .mcp-market-verified { margin-left: 0; }
 /* 授权形态徽标（卡片与详情弹窗共用）：登录/扫码=强调色（官方目录实测
- * DCR 开放，点连接即浏览器登录/扫码），扫码=成功色，Token=中性色。 */
+ * DCR 开放，点连接即浏览器登录/扫码），Token=中性色。
+ * 注：qrcode_poll 扫码徽标已随自建官方源下线（后端 AuthKind 归 None），
+ * .mcp-market-scan-badge / .mcp-market-badge-scan 两条选择器一并删除。 */
 .mcp-market-badge-oauth { padding: 1px 6px; border-radius: 9px; font-size: 10px; color: var(--accent); border: 1px solid var(--accent); background: transparent; }
-.mcp-market-scan-badge,
-.mcp-market-badge-scan { padding: 1px 6px; border-radius: 9px; font-size: 10px; color: var(--color-success); background: var(--bg-hover); }
 .mcp-market-token-badge,
 .mcp-market-badge-token { padding: 1px 6px; border-radius: 9px; font-size: 10px; color: var(--text-secondary); background: var(--bg-hover); }
 .mcp-market-card-foot .mcp-market-badge { flex: 0 0 auto; }
@@ -63,20 +63,20 @@
 .mcp-market-modal-close { position: absolute; top: 10px; right: 12px; z-index: 2; width: 28px; height: 28px; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 20px; line-height: 1; cursor: pointer; }
 .mcp-market-modal-close:hover { background: var(--bg-hover); color: var(--text-primary); }
 .mcp-market-modal-body { flex: 1; min-height: 0; overflow: auto; padding: 26px 26px 14px; font-size: 12px; line-height: 1.6; color: var(--text-primary); }
-/* hero：居中大 logo + 「连接 {名称}」+ 徽标 + 描述 + 主按钮，对齐 WorkBuddy 连接弹窗 */
+/* hero：居中大 logo + 「连接 {名称}」+ 徽标 + 描述（纯信息区，不放操作按钮——
+   唯一主操作在 foot，hero 再放「连接」就是双按钮同语义重复）。 */
 .mcp-market-hero { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 6px 8px 4px; }
 .mcp-market-hero-logo { width: 64px; height: 64px; flex: 0 0 64px; border-radius: 14px; object-fit: contain; background: var(--bg-input-box); }
 .mcp-market-hero-logo.mcp-market-logo-ph { font-size: 26px; }
 .mcp-market-hero-title { margin-top: 14px; font-size: 17px; font-weight: 700; color: var(--text-primary); }
 .mcp-market-hero .mcp-market-badges { margin-top: 8px; }
 .mcp-market-hero-desc { margin-top: 10px; max-width: 46ch; font-size: 12px; line-height: 1.7; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-.mcp-market-connect-btn { margin-top: 16px; height: 34px; padding: 0 26px; border: none; border-radius: 8px; background: var(--accent); color: var(--accent-contrast); font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s, opacity 0.15s; }
-.mcp-market-connect-btn:hover { background: var(--accent-hover); opacity: .92; }
-/* 弹窗页脚主按钮（「连接」/「保存并连接」/ 错误态「重试」共用）。
+/* hero 的 .mcp-market-connect-btn 已删除（与 foot 主按钮语义重复，2026-11 用户报障）。
+   样式规则一并清掉，不留死规则；防复活护栏见契约测试 ㉑(e)。 */
+/* 弹窗页脚主按钮（「连接」/「保存并连接」/ 错误态「重试」共用）——弹窗唯一主操作。
    基础样式必须留在这里：卡片上的文字安装按钮已按用户要求改成 + 号图标按钮
    （.mcp-market-card-add），旧的 .mcp-market-detail-btn/.mcp-market-install-btn
-   共享规则已拆掉；若此处不定义，主按钮会退回浏览器默认灰底，与 hero 的
-   .mcp-market-connect-btn 不成族。 */
+   共享规则已拆掉；若此处不定义，主按钮会退回浏览器默认灰底。 */
 .mcp-market-install-btn { height: 32px; padding: 0 18px; border: 1px solid var(--accent); border-radius: 7px; background: var(--accent); color: var(--accent-contrast); font-size: 12px; font-weight: 600; cursor: pointer; transition: background 0.15s, border-color 0.15s, opacity 0.15s; }
 .mcp-market-install-btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); opacity: .9; }
 .mcp-market-env { margin: 16px 0 4px; }
@@ -133,13 +133,8 @@
  * nowrap，chips 在横向滚动条里换行 → 滚动宽度恒等于可视宽度、箭头/渐隐/滚轮全废。
  * 按 id 强制单行不换行 + 清零外边距（优先级高于后加载的同名类规则）。 */
 #mcpMarketCatBar { flex-wrap: nowrap; margin-bottom: 0; }
-/* 目录源 tabs（官方/魔搭扩展）：分段控件形态，与二级导航同族但更小。
- * 分类 chips 本体样式 = .skills-category-chip（skills.css 唯一真源），
- * 这里只管源 tabs 与筛选行布局。 */
-.mcp-market-source-tabs { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto; padding: 2px; border-radius: 8px; background: var(--bg-hover); }
-.mcp-market-source-tab { padding: 4px 12px; border: none; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; white-space: nowrap; transition: color 0.15s, background 0.15s; }
-.mcp-market-source-tab:hover { color: var(--text-primary); }
-.mcp-market-source-tab.active { background: var(--bg-card); color: var(--text-primary); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+/* 目录源 tabs 已退役：连接器广场唯一目录源 = 魔搭，只剩一个源无需切换控件。
+ * 分类 chips 本体样式 = .skills-category-chip（skills.css 唯一真源）。 */
 
 /* 无限滚动哨兵：与技能列表 footer 同排版（加载中/失败可点重试/没有更多） */
 .mcp-market-sentinel { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 8px; padding: 14px 0 6px; font-size: 12px; color: var(--text-secondary); }
@@ -151,18 +146,26 @@
 
 /* 广场卡片网格密度已并入上方基础规则（minmax 300 与 .skills-list 一致，单一真源） */
 
-/* ===== CLI 连接器（P0.5：扫码连接 + Node 自动安装）=====
- * 详情弹窗的技能清单 / 许可来源行 / 已连接提示；连接流程弹窗的 Node 下载进度条。
- * 连接流程弹窗骨架复用 .mcp-auth-*（mcp-auth.css 唯一真源），这里只补
- * 市场特有的进度条与清单排版。全部走真实主题令牌。 */
-.mcp-market-cli-skills { margin: 14px 2px 0; padding: 12px 14px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-card); }
-.mcp-market-cli-skills-title { font-size: 12px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
-.mcp-market-cli-skills-list { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.8; color: var(--text-secondary); }
-.mcp-market-cli-source { margin: 10px 2px 0; font-size: 11px; color: var(--text-tertiary); }
-.mcp-market-cli-source code { padding: 1px 5px; border-radius: 4px; background: var(--bg-code-block); color: var(--text-primary); font-family: var(--font-mono); font-size: 11px; }
-.mcp-market-cli-connected-tip { margin-top: 10px; font-size: 12px; font-weight: 600; color: var(--color-success); }
-.mcp-market-cli-disconnect-btn { color: var(--color-danger); }
-/* Node 运行时下载进度条（install/status phase=node 的 nodeProgress 0-100） */
-.mcp-cli-progress { margin-top: 14px; height: 6px; border-radius: 3px; background: var(--bg-hover); overflow: hidden; }
-.mcp-cli-progress-fill { height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.4s ease; }
-.mcp-cli-progress-num { margin-top: 6px; font-size: 11px; color: var(--text-tertiary); text-align: right; }
+/* 厂商命令行连接器（安装 / npm / 技能包清单 / Node 下载进度条 / 断开连接）
+ * 的样式已随自建官方目录源整体下线：其安装参数 100% 来自官方目录，
+ * 官方源一删就没有数据来源。授权等待框视觉仍在 mcp-auth.css（唯一真源）。 */
+
+/* ===== 修4：广场卡片「已安装」态 =====
+ * 匹配口径 = 后端落盘的 marketId（install 时写入目录条目 id），不是名字
+ * （落盘名多为 fetch/time 等通用名且重名会加 -2 后缀，按名匹配必然误判）。
+ * 形态参考技能卡 .skill-card-installed（skills.css:200）：hover 不再翻
+ * accent 描边（安装动作已完成），但整卡仍可点开详情弹窗，cursor 保持 pointer。
+ * 全部走主题令牌，禁止硬编码颜色。 */
+.mcp-market-card-installed:hover { border-color: var(--border-color); box-shadow: none; }
+/* 右上角对勾按钮（disabled）：+ 号换对勾，success 色常驻、不随 hover 翻 accent。 */
+.mcp-market-card-add.mcp-market-card-installed-check,
+.mcp-market-card-add.mcp-market-card-installed-check:hover { background: var(--bg-hover); color: var(--color-success); cursor: default; }
+/* 「已安装」徽标（卡片 foot 与详情弹窗 hero 共用），形态参考 .skill-installed-badge，
+ * 颜色改走 --color-success 令牌（技能卡的 #22c55e 字面量是历史遗留，不复制）。 */
+.mcp-market-installed-badge { padding: 1px 6px; border-radius: 9px; font-size: 10px; font-weight: 500; color: var(--color-success); border: 1px solid var(--color-success); background: transparent; flex: 0 0 auto; }
+
+/* 修1：warning toast（「已保存，但连接失败」半成功态）。
+ * .toast-item 基础形态在 app.css（唯一真源），这里只补 warning 变体的强调边，
+ * 与 success/error/info 的 border-left 形态同构。showToast 的类名是原样透传
+ * （app-base.js `toast-item ' + type`），warning 类天然生效。 */
+.toast-item.warning { border-left: 3px solid var(--color-warning); }

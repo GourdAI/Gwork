@@ -1,16 +1,16 @@
-//! server::mcp_market_api — 连接器广场的 4 个 axum handler（官方目录 + 魔搭扩展）。
+//! server::mcp_market_api — 连接器广场的 4 个 axum handler（唯一目录源 = 魔搭）。
 //!
 //! | Method | Path                                      | 用途 |
 //! |--------|-------------------------------------------|------|
-//! | GET    | `/web/settings/mcp/market/servers`        | 列表 / 搜索 / 分类（source=official 默认 / modelscope 扩展）|
+//! | GET    | `/web/settings/mcp/market/servers`        | 列表 / 搜索 / 分类 |
 //! | GET    | `/web/settings/mcp/market/detail?id=`     | 详情（server_config / env_schema / readme）|
 //! | GET    | `/web/settings/mcp/market/categories`     | 内置静态分类表 |
 //! | POST   | `/web/settings/mcp/market/install`        | 归一化 + 复用 mcp_server_add 落盘 |
 //!
-//! 目录源（2026-11 用户拍板）：**官方仓库优先**（`mcp::registry`，仅编译期
-//! 内置 gzip 快照，随发版更新，无远程拉取/磁盘缓存/admin 上传），魔搭降级为
-//! 扩展源（`source=modelscope`）。
-//! 「精选/已托管」概念已移除：`source=featured` 与 `featured:` id 仅作兼容别名。
+//! 目录源（2026-11 用户拍板）：**只保留魔搭 ModelScope 一个源**（`mcp::market`）。
+//! 自建官方连接器仓库（`mcp::registry` / `mcp::featured` / `mcp::cli` / CLI 连接器 /
+//! 内置 Node 运行时）已整体删除，`source` 参数、`official:`/`featured:` id 分流、
+//! admin 远程目录拉取、`registry_error` 软失败态全部不再存在。
 //!
 //! 响应统一 `{code:200,description:"",data:{...}}`；上游失败 → `{code:400,description:"..."}`,
 //! 不伪造成功。install 不自己写 settings.json：它把 `server_config[0].mcpServers`
@@ -25,7 +25,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::settings_api::{mcp_server_add, sanitize_auth_decl, McpBody};
+use super::settings_api::{build_entry, mcp_server_add, read_settings_key, sanitize_auth_decl, McpBody};
 use super::AppState;
 use crate::mcp::market::{
     self, ModelscopeMcpMarket, ReqwestMcpMarketHttp, ServerQuery,
@@ -40,10 +40,6 @@ fn parse_i64(raw: Option<String>, default: i64) -> i64 {
     raw.and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(default)
 }
 
-fn parse_bool(raw: Option<String>) -> bool {
-    matches!(raw.as_deref(), Some("1") | Some("true") | Some("yes") | Some("on"))
-}
-
 // ─── Query / body shapes ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -56,13 +52,11 @@ pub struct ServersParams {
     pub page_size: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
-    /// 旧「已托管」筛选参数：UI 已移除，仅魔搭扩展源保留透传（兼容旧调用）。
-    #[serde(default)]
-    pub hosted: Option<String>,
-    /// 目录源：`official`（默认）/ `modelscope`（扩展）。
-    /// `featured` 是旧别名，等价 official 但回旧 id 形态（兼容旧前端缓存）。
-    #[serde(default)]
-    pub source: Option<String>,
+    // 曾有 `hosted: Option<String>`（旧「已托管」筛选勾选）。2026-11 官方源下线轮
+    // 一并退役：UI 两处 query 构造都不再发它，语言包 `hosted` 键也已删。
+    // 之所以不是「保留透传兼容旧调用」——hosted=true 返回的 4806 条条目，其连接
+    // URL 需要 Bearer Token（`mcp::market` 头部「明确不做」项），用户装上必然连不上。
+    // 留一个旧书签/旧客户端能触发的必败路径，比删掉更糟。见下方 `HOSTED_FILTER`。
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -81,38 +75,26 @@ pub struct InstallBody {
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
+//
+// 全部直接打魔搭上游（`mcp::market::ModelscopeMcpMarket`），无本地目录、无预热、
+// 无退避。上游失败一律走 `market::failure` 返回 400 信封，不伪造成功。
+
+/// 上游 `filter.is_hosted` 的**唯一**取值。
+///
+/// 键本身必须存在（`mcp::market::list_body` 实测：上游靠它区分 7993 / 4806 条），
+/// 但当前只能是 `false`：hosted 条目的连接 URL 需要 Bearer Token，属 deploy /
+/// operational 范畴，`mcp::market` 头部已列为「明确不做」。把它写成常量而不是
+/// 从 query 解析，是为了让「为什么永远是 false」这件事在代码里可见——
+/// 而不是埋在一个 UI 永不传、默认 false 的参数里，让后人误以为传 true 就能用。
+const HOSTED_FILTER: bool = false;
 
 pub async fn mcp_market_servers(Query(p): Query<ServersParams>) -> Json<Value> {
-    let source = p.source.as_deref().map(str::trim).unwrap_or("");
-    // 官方目录（默认源）：仅编译期内置 gzip 快照，随发版更新，不打魔搭上游。
-    // `featured` 为旧别名：回旧 id/source 形态，兼容旧前端缓存。
-    if source != "modelscope" {
-        let legacy = source == "featured";
-        let items = if legacy {
-            crate::mcp::featured::search_items(
-                &p.search.clone().unwrap_or_default(),
-                &p.category.clone().unwrap_or_default(),
-            )
-        } else {
-            crate::mcp::registry::search_items(
-                &p.search.clone().unwrap_or_default(),
-                &p.category.clone().unwrap_or_default(),
-            )
-        };
-        let total = items.len() as i64;
-        return Json(market::succeed(json!({
-            "total_count": total,
-            "mcp_server_list": items,
-            "page_number": 1,
-            "page_size": total.max(1),
-        })));
-    }
     let q = ServerQuery {
         search: p.search.unwrap_or_default(),
         page: parse_i64(p.page, 1),
         page_size: parse_i64(p.page_size, 20),
         category: p.category.unwrap_or_default(),
-        hosted: parse_bool(p.hosted),
+        hosted: HOSTED_FILTER,
     };
     Json(match market().servers(&q).await {
         Ok(data) => market::succeed(data),
@@ -123,18 +105,6 @@ pub async fn mcp_market_servers(Query(p): Query<ServersParams>) -> Json<Value> {
 pub async fn mcp_market_detail(Query(p): Query<DetailParams>) -> Json<Value> {
     if p.id.trim().is_empty() {
         return Json(market::failure("id is required"));
-    }
-    // 官方条目（含旧 featured: 别名）：本地 serving，绝不把官方 id 发给魔搭。
-    // env_supported 注入与魔搭路径同口径。
-    if crate::mcp::registry::is_official_id(&p.id) {
-        return Json(match crate::mcp::registry::detail(&p.id) {
-            Some(mut data) => {
-                let supported = env_supported(&data);
-                data["env_supported"] = Value::Bool(supported);
-                market::succeed(data)
-            }
-            None => market::failure("连接器不存在或已下架"),
-        });
     }
     Json(match market().detail(&p.id).await {
         Ok(mut data) => {
@@ -189,39 +159,13 @@ pub fn env_supported(data: &Value) -> bool {
     true
 }
 
-/// 分类表按源适配：官方源只返回官方目录里**实际存在条目**的分类。
-/// 恒返回魔搭全表会让官方 tab 出现 4 个「点进去永远空白」的死 chip
-/// （version-control / browser-automation / os-automation / art-and-culture
-/// 在官方目录 0 条）——与 market.rs 注释里定义的 P0 级 UX 缺陷同类。
-pub async fn mcp_market_categories(Query(q): Query<HashMap<String, String>>) -> Json<Value> {
-    let source = q.get("source").map(|s| s.trim()).unwrap_or("");
-    if source == "modelscope" {
-        return Json(market::succeed(market().categories()));
-    }
-    let full = market::categories();
-    let mut present = std::collections::HashSet::new();
-    for item in crate::mcp::registry::list_items() {
-        if let Some(cats) = item.get("categories").and_then(Value::as_array) {
-            for c in cats {
-                if let Some(k) = c.as_str() {
-                    present.insert(k.to_string());
-                }
-            }
-        }
-    }
-    let filtered: Vec<Value> = full
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter(|c| {
-                    let k = c.get("key").and_then(Value::as_str).unwrap_or("");
-                    k.is_empty() || present.contains(k)
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-    Json(market::succeed(Value::Array(filtered)))
+/// 分类表：魔搭内置静态表。
+///
+/// 计数一律取列表响应里的 `total_count`，**绝不逐类发请求凑计数**；分类只作为
+/// 筛选条件传给上游 `filter.category`。表里的 key 全部经上游实测确认非零，
+/// 死 key 黑名单见 `mcp::market::DEAD_CATEGORY_KEYS`。
+pub async fn mcp_market_categories() -> Json<Value> {
+    Json(market::succeed(market().categories()))
 }
 
 /// `type` → 标准 kind，并在此处就校验合法性。
@@ -473,6 +417,129 @@ pub fn assert_http_has_no_env_schema(data: &Value) -> Result<(), String> {
     Ok(())
 }
 
+// ─── 展示元数据（已安装卡片的图片与名字） ─────────────────────────────────────
+
+/// 上游条目的展示名：`chinese_name` 优先（中文产品），缺省回退 `name`。
+/// 与前端 `app-mcp-market.js` 的 `pickText(item,'name')` 中文分支同口径。
+fn catalog_display_name(data: &Value) -> String {
+    for key in ["chinese_name", "name"] {
+        if let Some(s) = data.get(key).and_then(Value::as_str).map(str::trim) {
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn catalog_str(data: &Value, key: &str) -> String {
+    data.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// 把目录展示元数据（展示名 / logo / 描述）附到归一化产出的每个 `McpBody` 上。
+///
+/// 背景（用户报障）：「连接器·已安装」与「技能·已安装」显示不一致——技能卡有
+/// 图片和展示名，连接器卡只有目录 key + 字母占位。根因是安装链路只落
+/// command/url 等运行字段，目录的 `name/chinese_name/logo_url/description`
+/// 在 normalize 时被整体丢弃。这里在 install 的必经之路上补齐，落盘经
+/// `build_entry`、回传经 `mcp_servers`，前端已安装卡即可与技能卡同款渲染。
+///
+/// 全部是非密钥展示字段；空值不写（前端回退目录名 + 首字母底）。
+///
+/// `market_id`：目录来源 id（install 请求体的 `id`，如 `@amap/amap-maps`）。
+/// 广场卡片「已安装」态的**唯一可靠匹配口径**——落盘名来自 server_config 的
+/// mcpServers keys（多为 fetch/time 等通用名），且重名时会自动加 -2 后缀，
+/// 按名字匹配必然误判。marketId 经 build_entry 落盘、mcp_servers 透传，
+/// 前端用 `marketId === 市场条目 id` 精确匹配。
+pub fn attach_catalog_meta(data: &Value, market_id: &str, entries: &mut [(String, McpBody)]) {
+    let display = catalog_display_name(data);
+    let icon = catalog_str(data, "logo_url");
+    let desc = catalog_str(data, "description");
+    let mid = market_id.trim();
+    for (_name, body) in entries.iter_mut() {
+        if !display.is_empty() {
+            body.display_name = Some(display.clone());
+        }
+        if !icon.is_empty() {
+            body.icon_url = Some(icon.clone());
+        }
+        if !desc.is_empty() {
+            body.description = Some(desc.clone());
+        }
+        if !mid.is_empty() {
+            body.market_id = Some(mid.to_string());
+        }
+    }
+}
+
+/// 多 server 条目的**落盘前预检**：任一条目 build_entry 失败立即整体报错，
+/// 一个都不落盘。
+///
+/// 背景：install 循环逐个调 mcp_server_add，第 N 个失败时前 N-1 个已经写进
+/// settings.json —— 「部分安装」既不是成功也不是失败，用户重试还会撞上前
+/// N-1 个的重名。预检必须用与 mcp_server_add **同一个** build_entry（判据
+/// 同源），而不是在归一化层另抄一份校验。
+pub fn preflight_entries(entries: &[(String, McpBody)]) -> Result<(), String> {
+    for (name, body) in entries {
+        if let Err(e) = build_entry(body, None) {
+            return Err(format!("安装 {} 失败: {}", name, e));
+        }
+    }
+    Ok(())
+}
+
+/// 重名自动加后缀：`fetch` 已存在 → `fetch-2`、`fetch-3`…直到不冲突。
+///
+/// 魔搭条目的 mcpServers key 多为 `fetch` / `time` 等通用名，不同目录条目
+/// 撞名是**常态**；市场安装必须幂等可重复（重复安装装成 name-2 是可接受行为，
+/// 撞名报 400 则把「再装一个同类服务」这条正常路径堵死）。因此只在市场
+/// install 路径加后缀；手动添加 `mcp_server_add` 的重名 400 保持不变——
+/// 那是用户显式命名，报错合理。
+///
+/// `taken` 初始为 settings.json 已有的 mcpServers keys；每分配一个名字就
+/// 把它加进集合，**同一批 entries 内部也不会互撞**（上游偶发两个 server
+/// 同名、或后缀恰好撞上批内后续条目的原名）。
+pub fn assign_unique_names(entries: &mut [(String, McpBody)], taken: &mut HashSet<String>) {
+    for (name, body) in entries.iter_mut() {
+        let base = name.trim().to_string();
+        let mut candidate = base.clone();
+        let mut n = 2u32;
+        while taken.contains(&candidate) {
+            candidate = format!("{}-{}", base, n);
+            n += 1;
+        }
+        taken.insert(candidate.clone());
+        *name = candidate.clone();
+        body.name = candidate;
+    }
+}
+
+/// 从 mcp_server_add 的响应里提取连接失败原因。
+///
+/// `mcp_saved`（settings_api）在「已落盘但连不上」时返回
+/// `{code:200, saved:true, connected:false, connectError:"..."}` —— code 仍是
+/// 200（配置确实保存了）。install 旧代码只判 `code != 200`，把连不上的服务
+/// 照样计入 installed、前端弹绿色「已安装」，这是**假成功**。这里把
+/// connected:false 的原因收集出来随响应透传（connectErrors），由前端弹
+/// warning。installed 语义保持「已落盘名单」不变。
+pub fn collect_connect_error(name: &str, resp: &Value) -> Option<Value> {
+    if resp.get("connected").and_then(Value::as_bool) != Some(false) {
+        return None;
+    }
+    let reason = resp
+        .get("connectError")
+        .or_else(|| resp.get("message"))
+        .or_else(|| resp.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or("连接失败");
+    Some(json!({"name": name, "error": reason}))
+}
+
 /// POST /web/settings/mcp/market/install — 拉详情 → 校验 env → 复用 mcp_server_add。
 pub async fn mcp_market_install(
     State(state): State<Arc<AppState>>,
@@ -481,18 +548,9 @@ pub async fn mcp_market_install(
     if body.id.trim().is_empty() {
         return Json(market::failure("id is required"));
     }
-    // 官方条目（含旧 featured: 别名）：本地读详情；其余管线（env 校验、
-    // 归一化、mcp_server_add）与魔搭完全一致。
-    let data = if crate::mcp::registry::is_official_id(&body.id) {
-        match crate::mcp::registry::detail(&body.id) {
-            Some(d) => d,
-            None => return Json(market::failure("连接器不存在或已下架")),
-        }
-    } else {
-        match market().detail(&body.id).await {
-            Ok(d) => d,
-            Err(e) => return Json(market::failure(e)),
-        }
+    let data = match market().detail(&body.id).await {
+        Ok(d) => d,
+        Err(e) => return Json(market::failure(e)),
     };
     // 必须先于 resolve_env：http 型配置存不下 env，若先索要密钥再失败，
     // 用户白填一遍，且失败时机滞后到 normalize，排查成本高。
@@ -503,11 +561,30 @@ pub async fn mcp_market_install(
         Ok(e) => e,
         Err(e) => return Json(market::failure(e)),
     };
-    let entries = match normalize_server_config(&data, Some(&env)) {
+    let mut entries = match normalize_server_config(&data, Some(&env)) {
         Ok(e) => e,
         Err(e) => return Json(market::failure(e)),
     };
+    // 目录展示元数据 + marketId（目录来源 id，非密钥）随配置一起落盘：
+    // 已安装卡片据此显示图片与展示名（与技能卡同款），广场卡片据 marketId
+    // 判定「已安装」态（落盘名可能带 -2 后缀，按名匹配不可靠）。
+    attach_catalog_meta(&data, &body.id, &mut entries);
+    // 修3：落盘前对整批条目预检（与 mcp_server_add 同一个 build_entry），
+    // 任一失败立即 400 且不落盘任何条目，杜绝「部分安装」。
+    if let Err(e) = preflight_entries(&entries) {
+        return Json(market::failure(e));
+    }
+    // 修2：重名自动加后缀（fetch → fetch-2…）。必须在预检**之后**、用同一份
+    // 名单做：预检名单与落盘名单一致，且同批 entries 内部也防互撞。
+    let mut taken: HashSet<String> = read_settings_key("mcpServers")
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    assign_unique_names(&mut entries, &mut taken);
     let mut installed: Vec<String> = Vec::new();
+    // 修1：收集「已落盘但连不上」的原因（mcp_saved 的 connected:false +
+    // connectError），随成功响应透传，前端据此弹 warning 而非绿色假成功。
+    let mut connect_errors: Vec<Value> = Vec::new();
     for (name, mcp_body) in entries {
         // 同一个持久化函数：去重、build_entry 校验、patch_settings、sync_engine 全部复用。
         let resp = mcp_server_add(State(state.clone()), Json(mcp_body)).await.0;
@@ -519,9 +596,13 @@ pub async fn mcp_market_install(
                 .unwrap_or("写入 settings.json 失败");
             return Json(market::failure(format!("安装 {} 失败: {}", name, reason)));
         }
+        if let Some(err) = collect_connect_error(&name, &resp) {
+            connect_errors.push(err);
+        }
         installed.push(name);
     }
-    Json(market::succeed(json!({"installed": installed})))
+    // installed 语义保持「已落盘名单」；connectErrors 全部连接成功时为空数组。
+    Json(market::succeed(json!({"installed": installed, "connectErrors": connect_errors})))
 }
 
 #[cfg(test)]
@@ -963,6 +1044,69 @@ mod tests {
         );
     }
 
+    /// 行为级回归：广场安装必须把目录展示元数据带进每一个 McpBody。
+    ///
+    /// 用户报障「连接器·已安装没有图片和名字，与技能·已安装显示不一致」的根因
+    /// 就是 normalize 丢弃了 name/chinese_name/logo_url/description。这里真跑
+    /// normalize + attach_catalog_meta 并逐字段断言，接线点被删会立刻红。
+    #[test]
+    fn mcp_market_install_carries_catalog_display_metadata() {
+        let detail = json!({
+            "name": "amap-maps",
+            "chinese_name": "高德地图",
+            "logo_url": "https://cdn.example.com/amap.png",
+            "description": "高德地图 MCP 服务",
+            "server_config": [{"mcpServers": {
+                "amap": {"type": "sse", "url": "https://mcp.amap.com/sse"},
+                "amap-local": {"command": "uvx", "args": ["amap-mcp"]}
+            }}],
+        });
+        let mut entries = normalize_server_config(&detail, None).expect("合法详情应能归一化");
+        attach_catalog_meta(&detail, "@amap/amap-maps", &mut entries);
+        assert_eq!(entries.len(), 2, "多 server 条目每个都要带元数据");
+        for (_name, body) in &entries {
+            assert_eq!(body.display_name.as_deref(), Some("高德地图"), "chinese_name 优先");
+            assert_eq!(body.icon_url.as_deref(), Some("https://cdn.example.com/amap.png"));
+            assert_eq!(body.description.as_deref(), Some("高德地图 MCP 服务"));
+            assert_eq!(body.market_id.as_deref(), Some("@amap/amap-maps"),
+                "marketId 必须随每个条目落盘（广场卡片已安装态的唯一匹配口径）");
+        }
+        // 落盘层必须真的写进 settings 条目（build_entry 是 install 的必经之路）。
+        let entry = crate::server::settings_api::build_entry_for_test(&entries[0].1, None)
+            .expect("带元数据的 body 应能落盘");
+        assert_eq!(entry["displayName"], json!("高德地图"));
+        assert_eq!(entry["iconUrl"], json!("https://cdn.example.com/amap.png"));
+        assert_eq!(entry["description"], json!("高德地图 MCP 服务"));
+        assert_eq!(entry["marketId"], json!("@amap/amap-maps"),
+            "build_entry 不透传 marketId 的话，广场已安装态永远匹配不上");
+    }
+
+    /// 元数据缺失/空白时不得写空串字段：前端回退目录名 + 首字母底，
+    /// 空串会让「有字段但没内容」的卡片画出一张空白图。
+    #[test]
+    fn mcp_market_catalog_meta_absent_stays_none() {
+        let detail = json!({
+            "name": "  ",
+            "logo_url": "",
+            "server_config": [{"mcpServers": {"s": {"command": "uvx", "args": []}}}],
+        });
+        let mut entries = normalize_server_config(&detail, None).unwrap();
+        attach_catalog_meta(&detail, "", &mut entries);
+        let body = &entries[0].1;
+        assert!(body.display_name.is_none());
+        assert!(body.icon_url.is_none());
+        assert!(body.description.is_none());
+        assert!(body.market_id.is_none(), "空 marketId 不写空串字段");
+        // 只有英文名时回退英文名，不能因为 chinese_name 缺失就整个不写。
+        let en = json!({
+            "name": "fetch",
+            "server_config": [{"mcpServers": {"s": {"command": "uvx", "args": []}}}],
+        });
+        let mut e2 = normalize_server_config(&en, None).unwrap();
+        attach_catalog_meta(&en, "", &mut e2);
+        assert_eq!(e2[0].1.display_name.as_deref(), Some("fetch"));
+    }
+
     #[test]
     fn mcp_market_url_construction() {
         assert_eq!(LIST_URL, "https://www.modelscope.cn/openapi/v1/mcp/servers");
@@ -973,5 +1117,176 @@ mod tests {
         let b = market::list_body("", 1, 20, "", false);
         assert_eq!(b["filter"]["is_hosted"], json!(false));
         assert_eq!(b["page_size"], json!(20));
+    }
+
+    /// `hosted` 退役后的双重护栏：
+    /// ① 上游 `filter.is_hosted` 键必须**始终存在**且恒为 `HOSTED_FILTER`
+    ///    （键缺失会让上游改判语义；值非 false 会捞出 4806 条连不上的 hosted 条目）。
+    /// ② `ServersParams` 不得再有 `hosted` 字段——旧书签/旧客户端传 `?hosted=true`
+    ///    必须被静默忽略（serde 未知字段），而不是重新打开那条必败路径。
+    #[test]
+    fn hosted_filter_is_pinned_false_and_not_client_controllable() {
+        assert!(!HOSTED_FILTER, "hosted 条目的连接 URL 需要 Bearer Token（未实现），只能是 false");
+        let b = market::list_body("", 1, 20, "", HOSTED_FILTER);
+        assert_eq!(b["filter"]["is_hosted"], json!(false),
+            "上游靠 is_hosted 区分 7993/4806 条，键必须存在");
+
+        // ②：带 hosted 的 query 反序列化后不得产生任何效果。
+        let p: ServersParams = serde_json::from_value(json!({
+            "search": "map", "hosted": "true", "page": "1"
+        })).expect("未知字段必须被容忍，不能 400");
+        assert_eq!(p.search.as_deref(), Some("map"));
+        assert_eq!(p.page.as_deref(), Some("1"));
+        let q = ServerQuery {
+            search: p.search.unwrap_or_default(),
+            page: parse_i64(p.page, 1),
+            page_size: parse_i64(p.page_size, 20),
+            category: p.category.unwrap_or_default(),
+            hosted: HOSTED_FILTER,
+        };
+        assert!(!q.hosted, "?hosted=true 必须被忽略，不得变成 hosted 查询");
+    }
+
+    // ─── 修1/2/3/4 的纯函数级回归护栏 ────────────────────────────────────────
+    //
+    // mcp_server_add 依赖完整 AppState（engine 连接、settings 落盘），单测难以
+    // 构造；因此后缀分配 / 预检 / connectErrors 收集都提取成了纯函数，这里
+    // 直接钉行为。install 里的接线（先预检 → 再分配 → 循环收集）由预检必须
+    // 使用 build_entry 同源判据 + 下方响应形状断言共同兜住。
+
+    /// 修2：重名自动加后缀。魔搭条目 key 多为 fetch/time 等通用名，撞名是
+    /// 常态：已存在 fetch → fetch-2；fetch-2 也存在 → fetch-3；同一批内部
+    /// 两个 fetch 也不得互撞。name（tuple）与 body.name 必须同步改，否则
+    /// installed 返回的名字与实际落盘名分叉，前端 auth 弹窗按错名字查询。
+    #[test]
+    fn mcp_market_assign_unique_names_suffixes_and_batch_dedup() {
+        let detail = json!({"server_config": [{"mcpServers": {
+            "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]},
+            "time": {"command": "uvx", "args": ["mcp-server-time"]}
+        }}]});
+        let mut entries = normalize_server_config(&detail, None).unwrap();
+        // normalize 按 map 遍历，顺序不定；按名字排序稳定化后断言。
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut taken: HashSet<String> =
+            ["fetch".to_string(), "fetch-2".to_string(), "other".to_string()]
+                .into_iter().collect();
+        assign_unique_names(&mut entries, &mut taken);
+        let fetch = entries.iter().find(|(n, _)| n.starts_with("fetch")).unwrap();
+        assert_eq!(fetch.0, "fetch-3", "fetch 与 fetch-2 都被占，必须落到 fetch-3");
+        assert_eq!(fetch.1.name, "fetch-3", "body.name 必须与落盘名同步");
+        let time = entries.iter().find(|(n, _)| n.starts_with("time")).unwrap();
+        assert_eq!(time.0, "time", "不冲突的名字不得被改名");
+        assert_eq!(time.1.name, "time");
+        assert!(taken.contains("fetch-3") && taken.contains("time"));
+
+        // 同一批内部互撞：两个条目原名都叫 fetch（构造上上游 map 不可能同 key，
+        // 但后缀可能撞上批内后续条目的原名——用「fetch 与 fetch-2」模拟）。
+        let d2 = json!({"server_config": [{"mcpServers": {
+            "fetch": {"command": "uvx", "args": []},
+            "fetch-2": {"command": "uvx", "args": []}
+        }}]});
+        let mut e2 = normalize_server_config(&d2, None).unwrap();
+        e2.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut taken2: HashSet<String> = ["fetch".to_string()].into_iter().collect();
+        assign_unique_names(&mut e2, &mut taken2);
+        let names: Vec<&str> = e2.iter().map(|(n, _)| n.as_str()).collect();
+        // 规则是「冲突者基于**自己的原名**加后缀」：fetch → fetch-2；批内原名
+        // fetch-2 的条目撞上已分配名 → fetch-2-2。名字唯一即可，installed
+        // 返回真实落盘名，前端按返回名工作。
+        assert_eq!(names, vec!["fetch-2", "fetch-2-2"],
+            "批内互撞必须被消解（同名落盘会覆盖前一条目）");
+        let uniq: HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(uniq.len(), names.len(), "落盘名必须两两不同");
+        for (n, b) in &e2 {
+            assert_eq!(n, &b.name);
+        }
+    }
+
+    /// 修3：多条目预检。任一失败必须整体 Err（install 据此 400、零落盘），
+    /// 且报错要指名是哪个条目。判据必须与 mcp_server_add 同源（build_entry），
+    /// 不是归一化层另抄的校验。
+    #[test]
+    fn mcp_market_preflight_rejects_whole_batch_before_any_write() {
+        // 全合法批：放行。
+        let good = json!({"server_config": [{"mcpServers": {
+            "a": {"command": "uvx", "args": []},
+            "b": {"type": "sse", "url": "https://x/sse"}
+        }}]});
+        let entries = normalize_server_config(&good, None).unwrap();
+        assert!(preflight_entries(&entries).is_ok());
+
+        // 第二条 url 为空：normalize 不拦（url 空串合法归一化），build_entry
+        // 会拒（URL 不能为空）。预检必须在这条上失败并指名 b —— 旧代码会先
+        // 把 a 写盘、到 b 才失败，留下「部分安装」。
+        let mixed = json!({"server_config": [{"mcpServers": {
+            "a": {"command": "uvx", "args": []},
+            "b": {"type": "sse", "url": ""}
+        }}]});
+        let entries = normalize_server_config(&mixed, None).unwrap();
+        let err = match preflight_entries(&entries) {
+            Err(e) => e,
+            Ok(()) => panic!("含非法条目的批必须整体拒绝，否则 a 已落盘 = 部分安装"),
+        };
+        assert!(err.contains('b'), "报错要指名失败的条目: {}", err);
+        // 与真正落盘判据同源的证明：同一条目直接过 build_entry 也必须失败。
+        let bad = entries.iter().find(|(n, _)| n == "b").unwrap();
+        assert!(crate::server::settings_api::build_entry_for_test(&bad.1, None).is_err());
+    }
+
+    /// 修1：connectErrors 收集。mcp_saved 的「已落盘但连不上」响应
+    /// （code 200 + connected:false + connectError）必须被提取成
+    /// {name, error}；连接成功 / 字段缺失不得误报。
+    #[test]
+    fn mcp_market_collect_connect_error_shapes() {
+        // settings_api::mcp_saved 的真实失败形状。
+        let failed = json!({
+            "code": 200, "saved": true, "connected": false,
+            "connectError": "spawn uvx ENOENT", "message": "spawn uvx ENOENT",
+            "description": "spawn uvx ENOENT"
+        });
+        let e = collect_connect_error("fetch", &failed).expect("connected:false 必须被收集");
+        assert_eq!(e["name"], json!("fetch"));
+        assert_eq!(e["error"], json!("spawn uvx ENOENT"));
+
+        // 连接成功：不收集。
+        let ok = json!({"code": 200, "saved": true, "connected": true});
+        assert!(collect_connect_error("fetch", &ok).is_none());
+        // connected 字段缺失（旧内核/其他路径）：不当作失败。
+        assert!(collect_connect_error("fetch", &json!({"code": 200})).is_none());
+        // connected:false 但无 connectError：回退 message，再回退兜底文案，
+        // 绝不静默丢弃（否则又是假成功）。
+        let bare = json!({"code": 200, "connected": false, "message": "boom"});
+        assert_eq!(collect_connect_error("t", &bare).unwrap()["error"], json!("boom"));
+        let naked = json!({"code": 200, "connected": false});
+        assert!(!collect_connect_error("t", &naked).unwrap()["error"]
+            .as_str().unwrap().is_empty());
+    }
+
+    /// 修4：marketId 必须走「attach_catalog_meta → build_entry」全链路落盘，
+    /// 且 update 语义保留（编辑表单不提交 marketId，不保留就每编辑一次丢一次
+    /// 已安装标记）。
+    #[test]
+    fn mcp_market_market_id_survives_build_entry_and_update() {
+        let detail = json!({
+            "name": "fetch",
+            "server_config": [{"mcpServers": {"fetch": {"command": "uvx", "args": []}}}],
+        });
+        let mut entries = normalize_server_config(&detail, None).unwrap();
+        attach_catalog_meta(&detail, "@modelscope/fetch", &mut entries);
+        let entry = crate::server::settings_api::build_entry_for_test(&entries[0].1, None).unwrap();
+        assert_eq!(entry["marketId"], json!("@modelscope/fetch"));
+        // update（不带 marketId 的部分提交）必须保留已存的 marketId。
+        let partial = McpBody {
+            name: "fetch".into(),
+            kind: "stdio".into(),
+            command: Some("uvx".into()),
+            ..McpBody::default()
+        };
+        let updated = crate::server::settings_api::build_entry_for_test(&partial, Some(&entry)).unwrap();
+        assert_eq!(updated["marketId"], json!("@modelscope/fetch"),
+            "编辑一次就丢 marketId 的话，广场已安装态会随每次编辑消失");
+        // 手动添加（无 marketId、无 existing）不得凭空造出该字段。
+        let manual = crate::server::settings_api::build_entry_for_test(&partial, None).unwrap();
+        assert!(manual.get("marketId").is_none());
     }
 }

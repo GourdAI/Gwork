@@ -955,7 +955,9 @@ function showToast(message, type, duration) {
     }
     var item = $('<div>')[0];
     $(item).addClass('toast-item ' + (type || 'info'));
-    var icons = { success: '\u2714', error: '\u2716', info: '\u2139' };
+    /* warning：市场安装「已保存但连接失败」等半成功态。类名原样透传
+     * （.toast-item.warning 的强调边见 mcp-market.css），图标缺省回落 info。 */
+    var icons = { success: '\u2714', error: '\u2716', info: '\u2139', warning: '\u26A0' };
     $(item).html('<span>' + (icons[type] || icons.info) + '</span><span>' + escapeHtml(message) + '</span>');
     $(toastContainer).append(item);
     setTimeout(function() {

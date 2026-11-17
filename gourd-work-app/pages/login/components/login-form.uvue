@@ -1,0 +1,119 @@
+<template>
+	<view class="login-form">
+		<view class="login-form__field" :class="focused ? 'login-form__field--focus' : ''">
+			<rice-input v-model="email" :placeholder="t('login.emailPlaceholder')" :clearable="true"
+				clear-trigger="always" border="none" height="52px" font-size="15.5px" @focus="onFocus"
+				@blur="onBlur" />
+		</view>
+
+		<view class="login-form__submit">
+			<view class="login-form__submit-btn">
+				<rice-button :text="t('login.getCode')" color="transparent"
+					text-color="var(--color-text-inverse)" text-size="15.5px" width="100%" height="52px"
+					shape="square" @click="onSubmit" />
+			</view>
+		</view>
+
+		<view class="login-form__agree">
+			<rice-checkbox v-model="agreed" shape="round" icon-size="16px" checked-color="var(--color-primary)">
+				<view class="login-form__agree-lines">
+					<text class="login-form__agree-text">{{ t('login.agreePrefix') }}</text>
+					<text class="login-form__agree-link">{{ t('login.userAgreement') }}</text>
+					<text class="login-form__agree-text">{{ t('login.and') }}</text>
+					<text class="login-form__agree-link">{{ t('login.privacyPolicy') }}</text>
+				</view>
+			</rice-checkbox>
+		</view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+
+	// 主题变量由页面根节点的 themeClass 注入，组件内不再引入 theme.scss
+	defineOptions({
+		styleIsolation: 'app-and-page'
+	})
+
+	const emit = defineEmits<{
+		(e: 'submit', email: string, agreed: boolean): void
+	}>()
+
+	const email = ref<string>('tila@gwork.com')
+	const agreed = ref<boolean>(true)
+	const focused = ref<boolean>(false)
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function onFocus(): void {
+		focused.value = true
+	}
+
+	function onBlur(): void {
+		focused.value = false
+	}
+
+	function onSubmit(): void {
+		emit('submit', email.value, agreed.value)
+	}
+</script>
+
+<style lang="scss">
+	.login-form {
+		&__field {
+			height: 52px;
+			padding: 0 16px;
+			border-radius: 15px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+			justify-content: center;
+
+			&--focus {
+				border-color: var(--color-primary);
+				background-color: var(--color-bg);
+			}
+		}
+
+		&__submit {
+			margin-top: 18px;
+		}
+
+		&__submit-btn {
+			border-radius: 15px;
+			background-color: var(--color-primary);
+		}
+
+		&__agree {
+			margin-top: 22px;
+		}
+
+		&__agree-lines {
+			flex: 1;
+			flex-direction: row;
+			flex-wrap: wrap;
+			align-items: center;
+			margin-left: 6px;
+		}
+
+		&__agree-text {
+			margin-right: 4px;
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-text-secondary);
+		}
+
+		&__agree-link {
+			/* UCSS 不保证继承，字号、行高需显式声明 */
+			margin-right: 4px;
+			font-size: 12px;
+			line-height: 18px;
+			font-weight: 800;
+			color: var(--color-text);
+		}
+	}
+</style>

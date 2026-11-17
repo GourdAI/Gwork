@@ -434,12 +434,38 @@ fn create_main_window(app: &tauri::AppHandle, kernel_origin: &str) -> tauri::Res
         .initialization_script(&ipc_bridge::init_script(kernel_origin))
         .initialization_script(&titlebar_ui::init_script())
         .on_new_window(move |url, _features| {
-            if external_link::is_internal_url(&url) {
-                tauri::webview::NewWindowResponse::Allow
+            // NEVER allow a page-requested popup: this is a single-window app.
+            //
+            // Returning the "allow" response here makes wry/WebView2 create a
+            // brand-new top-level window running the same UI. Because the
+            // in-process kernel serves the whole app on a loopback port and
+            // `is_internal_url` (rightly) treats loopback as internal, any
+            // `window.open`/`target="_blank"` whose URL resolves to loopback —
+            // an OAuth redirect echo, a vendor CLI login URL like
+            // `http://localhost:<port>`, a stray relative link — cloned the
+            // entire app window. Each clone re-runs the same boot code, which
+            // is how the connector page produced an endless cascade of
+            // windows (field report, 2026-11: "切到连接器后无限弹框"; WebView2
+            // history of the packaged build shows the `http://localhost/`
+            // navigations).
+            //
+            // Replacement semantics:
+            //   - our own UI URL → bring the existing main window to front
+            //     (what a user clicking an app-internal link actually wants);
+            //   - any other http(s) → system browser, same as the navigation
+            //     guard;
+            //   - anything else (about:/data:/blob:/file:) → dropped by
+            //     `open_external`'s scheme guard, window not created.
+            if external_link::is_app_own_url(&url) {
+                if let Some(win) = win_app.get_webview_window(MAIN_WINDOW_LABEL) {
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
             } else {
                 external_link::open_external(&win_app, &url);
-                tauri::webview::NewWindowResponse::Deny
             }
+            tauri::webview::NewWindowResponse::Deny
         })
         .on_navigation(move |url| {
             if external_link::is_internal_url(url) {

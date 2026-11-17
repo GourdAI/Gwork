@@ -1,0 +1,564 @@
+<template>
+	<view class="app-composer">
+		<!-- 字体图标缺 spark，附件 tag 图标暂缺 -->
+		<rice-tag v-if="hasTag" v-show="!holding" class="app-composer__tag" type="primary" plain :text="tag"
+			text-color="var(--color-primary)" text-size="11px" :custom-style="tagStyle"></rice-tag>
+
+		<!-- 录音态面板：波形 + 提示悬于输入条上方（设计稿形态二/三）。
+			常驻节点用 v-show 显隐——按住手势期间做结构增删会打断原生触摸流，曾致上滑取消失灵、浮层滞留 -->
+		<view v-show="holding" class="app-composer__rec">
+			<app-voice-wave :active="holding" :error="canceling"></app-voice-wave>
+			<text class="app-composer__rec-hint" :class="canceling ? 'app-composer__rec-hint--error' : ''">{{ recHint }}</text>
+		</view>
+
+		<!-- 收起态整条输入栏均可长按直接进录音：长按手势发生在中央节点上，录音态不销毁节点，move/end 连续派发。
+			box 也挂 touch 系列：长按落在留白区时手势节点是 box；处理器均有 holding 幂等守卫，与 center 重复派发无副作用 -->
+		<view class="app-composer__box" :class="boxClass" @click="onBoxClick" @longpress="onBoxLongPress"
+			@touchmove="onTouchMove" @touchend="onTouchEnd" @touchcancel="onTouchCancel">
+			<!-- 中央节点：文字/语音两形态共用同一节点。文字态点击展开、长按下录；语音态按住说话。
+				子节点必须保持单 text 常驻（形态切换只改绑定，不做 v-if 分支切换）——
+				长按下录瞬间若子树重建，原生触摸流会被掐断，滑动状态与松手收尾全部失灵。
+				.stop 阻断冒泡，防止 swiper 等原生容器在滑动手势中途抢走事件流 -->
+			<view v-if="!expanded" class="app-composer__center" @longpress="onCenterLongPress"
+				@touchstart="onTouchStart" @touchmove.stop="onTouchMove" @touchend.stop="onTouchEnd" @touchcancel.stop="onTouchCancel">
+				<text v-show="!holding"
+					:class="voiceMode ? 'app-composer__hold-text' : (hasText ? 'app-composer__fake-text' : 'app-composer__fake-placeholder')">{{ voiceMode ? holdText : (hasText ? modelValue : placeholder) }}</text>
+			</view>
+			<input v-if="expanded" :id="inputId" class="app-composer__input" v-model="text" :placeholder="placeholder"
+				:placeholder-style="placeholderStyle" confirm-type="send" :adjust-position="true" @focus="onFocus"
+				@confirm="onSend" />
+
+			<!-- 圆形图标按钮手写 view 而不用 rice-button：此处不需要其文字/主题变体能力，
+				且原生 view 的点击行为更可控；.stop 阻断冒泡，避免误触 __box 的展开 -->
+			<!-- 语音模式左上：切回键盘 -->
+			<view v-if="!expanded && voiceMode" v-show="!holding" class="app-composer__circ app-composer__circ--mic" @click.stop="exitVoiceMode">
+				<text class="iconfont app-composer__mic-glyph">&#xe643;</text>
+			</view>
+			<view v-if="!expanded && !voiceMode" class="app-composer__circ app-composer__circ--mic" @click.stop="onVoiceClick">
+				<rice-icon name="voice" size="20px" color="var(--color-text-secondary)" />
+			</view>
+			<!-- 回复中（收起态）：停止按钮顶替加号位，语音/文字形态一致；按住录音时隐藏 -->
+			<view v-if="!expanded && processing" v-show="!holding" class="app-composer__circ app-composer__circ--plus app-composer__circ--stop"
+				@click.stop="emit('stop')">
+				<view class="app-composer__stop-square"></view>
+			</view>
+			<view v-if="!expanded && !processing" v-show="!holding" class="app-composer__circ app-composer__circ--plus" @click.stop="emit('open-plus')">
+				<rice-icon name="plus" size="20px" color="var(--color-text-secondary)" />
+			</view>
+
+			<view v-if="expanded" class="app-composer__tools">
+				<view class="app-composer__circ" @click.stop="onVoiceClick">
+					<rice-icon name="voice" size="20px" color="var(--color-text-secondary)" />
+				</view>
+				<view class="app-composer__model" @click.stop="emit('open-model')">
+					<text class="app-composer__model-text">{{ model }}</text>
+					<rice-icon name="arrow-down" size="12px" color="var(--color-text-tertiary)" />
+				</view>
+				<view class="app-composer__spacer"></view>
+				<!-- 设计稿：展开态有文字时隐藏加号，只留发送 -->
+				<view v-if="!hasText" class="app-composer__circ app-composer__circ--gap" @click.stop="emit('open-plus')">
+					<rice-icon name="plus" size="20px" color="var(--color-text-secondary)" />
+				</view>
+				<!-- 回复中：发送按钮原位换成停止按钮，禁再次发送（对齐 uni-ai-x input-tool-bar）；
+					字体图标暂缺 stop，以圆角方块 view 占位，待字体图标补全后替换 -->
+				<view v-if="processing" class="app-composer__circ app-composer__circ--gap app-composer__circ--stop"
+					@click.stop="emit('stop')">
+					<view class="app-composer__stop-square"></view>
+				</view>
+				<view v-else class="app-composer__circ app-composer__circ--gap" :class="hasText ? 'app-composer__circ--send' : ''"
+					@click.stop="onSend">
+					<!-- 只挂 .iconfont：Web 端 iconfont.css 的 .icon-fasong:before 会与 text 内的码点重复出一个字形 -->
+					<text class="iconfont" :class="hasText ? 'app-composer__icon--send' : ''">&#xe670;</text>
+                </view>
+			</view>
+		</view>
+
+		<!-- 录音手势捕获层：按住期间浮满视口，手指滑出输入栏后 move/end 仍派发到本层，
+			上滑变红/松开收尾才可靠；置尾保证盖在输入栏之上，处理器带 holding 幂等守卫；
+			.stop 防止冒泡给 swiper 等原生容器被中途抢流 -->
+		<view v-show="holding" class="app-composer__gesture-mask" @touchmove.stop="onTouchMove" @touchend.stop="onTouchEnd"
+			@touchcancel.stop="onTouchCancel"></view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed, nextTick, ref, watch } from 'vue'
+	import type { ComputedRef, Ref, WritableComputedRef } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { isVoiceRecordSupported, startVoiceRecord, stopVoiceRecord, voiceRecordErrorText } from '@/utils/voice-recorder.ts'
+	import type { VoiceRecordResult } from '@/utils/voice-recorder.ts'
+	import { recognizeSpeech } from '@/utils/speech-recognizer.ts'
+	import AppVoiceWave from '@/components/app-voice-wave/app-voice-wave.uvue'
+
+	defineOptions({
+		name: 'app-composer',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = withDefaults(defineProps<{
+		modelValue: string
+		expanded: boolean
+		model: string
+		tag: string
+		/** 当前会话回复中：发送按钮换停止按钮 */
+		processing?: boolean
+		/** 输入框节点 id，首页与对话页同栈时需各自唯一，聚焦用 */
+		inputId?: string
+	}>(), {
+		modelValue: '',
+		expanded: false,
+		model: '',
+		tag: '',
+		processing: false,
+		inputId: 'app-composer-input'
+	})
+
+	const emit = defineEmits<{
+		(e: 'update:modelValue', value: string): void
+		(e: 'expand'): void
+		(e: 'collapse'): void
+		(e: 'send', text: string): void
+		(e: 'stop'): void
+		(e: 'open-model'): void
+		(e: 'open-plus'): void
+	}>()
+
+	/** 上滑取消的位移阈值（px） */
+	const SWIPE_THRESHOLD = 60
+	/** 单段录音上限：RecorderManager 到时自动 onStop */
+	const MAX_DURATION_MS = 60000
+	/** 短于该时长视为误触，丢弃 */
+	const MIN_DURATION_MS = 600
+	/** 按住 watchdog：touchend/touchcancel 丢失时强制结束录音会话，避免浮层滞留 */
+	const HOLD_WATCHDOG_MS = MAX_DURATION_MS + 5000
+
+	const text: WritableComputedRef<string> = computed<string>({
+		get: (): string => props.modelValue,
+		set: (value: string): void => emit('update:modelValue', value)
+	})
+
+	const hasText: ComputedRef<boolean> = computed<boolean>((): boolean => props.modelValue.trim().length > 0)
+	const hasTag: ComputedRef<boolean> = computed<boolean>((): boolean => props.tag.length > 0)
+
+	// 语音模式：由麦克风按钮/输入框长按进出；进入时若在展开态，先让父级收起
+	const voiceMode: Ref<boolean> = ref<boolean>(false)
+	// 长按直录标记：本次录音会话结束后回到文字形态（麦克风进入的语音形态不受影响）
+	const voiceFromLongPress: Ref<boolean> = ref<boolean>(false)
+	// 录音态与取消态：holding 期间节点只换色，不做结构变更
+	const holding: Ref<boolean> = ref<boolean>(false)
+	const canceling: Ref<boolean> = ref<boolean>(false)
+	const touchStartY: Ref<number> = ref<number>(0)
+	let holdWatchdog: number = 0
+
+	const boxClass: ComputedRef<string> = computed<string>((): string => {
+		if (voiceMode.value) {
+			// 录音态只换配色（边框/背景），不改几何，避免重建节点打断手势
+			if (holding.value) {
+				return canceling.value ? 'app-composer__box--record app-composer__box--record-error' : 'app-composer__box--record'
+			}
+			return ''
+		}
+		return props.expanded ? 'app-composer__box--open' : ''
+	})
+
+	const placeholder: ComputedRef<string> = computed<string>((): string => {
+		return i18n.global.t(props.expanded ? 'home.placeholderExpanded' : 'home.placeholder')
+	})
+
+	const placeholderStyle: ComputedRef<string> = computed<string>((): string => {
+		return 'color:var(--color-text-tertiary);'
+	})
+
+	const holdText: ComputedRef<string> = computed<string>((): string => i18n.global.t('home.voice.holdToTalk'))
+
+	const recHint: ComputedRef<string> = computed<string>((): string => {
+		return i18n.global.t(canceling.value ? 'home.voice.releaseCancel' : 'home.voice.releaseSend')
+	})
+
+	const tagStyle: UTSJSONObject = {
+		height: '26px',
+		padding: '0 9px',
+		border: 'none',
+		'border-radius': '9px',
+		'background-color': 'var(--color-brand-soft)'
+	}
+
+	// 展开态渲染出真 input 后聚焦；输入框是同一节点只改布局，避免重建导致失焦、键盘收起
+	watch((): boolean => props.expanded, (expanded: boolean): void => {
+		if (!expanded) return
+		nextTick((): void => {
+			const input = uni.getElementById(props.inputId)
+			if (input != null) input.focus()
+		})
+	})
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function onFocus(): void {
+		emit('expand')
+	}
+
+	function onBoxClick(): void {
+		// 长按起录后个别端不派发 touchend，click 是释放兜底信号；
+		// touchend 正常收尾时 holding 已复位，这里不会命中，天然幂等
+		if (holding.value) {
+			holding.value = false
+			stopHoldWatchdog()
+			finishRecord(canceling.value)
+			canceling.value = false
+			return
+		}
+		// 语音模式点输入条不展开为文字输入，避免打断录音模式
+		if (voiceMode.value) return
+		emit('expand')
+	}
+
+	function onSend(): void {
+		emit('send', props.modelValue)
+	}
+
+	function onVoiceClick(): void {
+		if (!isVoiceRecordSupported()) {
+			uni.showToast({ title: t('home.voice.unsupported'), icon: 'none' })
+			return
+		}
+		voiceMode.value = true
+		if (props.expanded) emit('collapse')
+	}
+
+	function exitVoiceMode(): void {
+		voiceMode.value = false
+	}
+
+	/** 长按输入框：直接切语音形态并开始录音（长按手势已在本节点，move/end 连续派发） */
+	function onCenterLongPress(): void {
+		if (props.expanded || voiceMode.value || holding.value) return
+		if (!isVoiceRecordSupported()) {
+			uni.showToast({ title: t('home.voice.unsupported'), icon: 'none' })
+			return
+		}
+		voiceMode.value = true
+		// 长按直录是一次性会话：结束后回文字形态；麦克风进入的语音形态则保持
+		voiceFromLongPress.value = true
+		beginHold()
+	}
+
+	function onBoxLongPress(): void {
+		// 展开态是可编辑真 input，长按留给系统文本操作；语音模式下长按无意义
+		if (props.expanded || voiceMode.value || holding.value) return
+		if (!isVoiceRecordSupported()) {
+			uni.showToast({ title: t('home.voice.unsupported'), icon: 'none' })
+			return
+		}
+		voiceMode.value = true
+		voiceFromLongPress.value = true
+		beginHold()
+	}
+
+	function startHoldWatchdog(): void {
+		stopHoldWatchdog()
+		holdWatchdog = setTimeout((): void => {
+			forceEndHold()
+		}, HOLD_WATCHDOG_MS)
+	}
+
+	function stopHoldWatchdog(): void {
+		if (holdWatchdog != 0) {
+			clearTimeout(holdWatchdog)
+			holdWatchdog = 0
+		}
+	}
+
+	/** 兜底：手势事件丢失（如系统弹窗/页面切换吞掉 touchend）时强制收尾，浮层不滞留 */
+	function forceEndHold(): void {
+		if (!holding.value) return
+		holding.value = false
+		canceling.value = false
+		finishRecord(true)
+	}
+
+	function onTouchStart(e: TouchEvent): void {
+		// 起点坐标任何形态都要记：长按起录发生在 touchstart 之后，届时手势系统不再派发 touchstart
+		if (e.touches.length > 0) touchStartY.value = e.touches[0].clientY
+		// 文字形态下 touch 系列不介入，把点击/长按让给 click/longpress 手势
+		if (!voiceMode.value || holding.value) return
+		beginHold()
+	}
+
+	function beginHold(): void {
+		holding.value = true
+		canceling.value = false
+		startHoldWatchdog()
+		// 授权弹窗由框架在 start 时拉起；拒绝授权走 onError，stopVoiceRecord 以 null 落地
+		const ok: boolean = startVoiceRecord(MAX_DURATION_MS)
+		if (!ok) {
+			stopHoldWatchdog()
+			holding.value = false
+			uni.showToast({ title: t('home.voice.unsupported'), icon: 'none' })
+		}
+	}
+
+	function onTouchMove(e: TouchEvent): void {
+		if (!holding.value || e.touches.length == 0) return
+		const deltaY: number = e.touches[0].clientY - touchStartY.value
+		// 上滑进取消态，下滑回发送态
+		canceling.value = deltaY < -SWIPE_THRESHOLD
+	}
+
+	function onTouchEnd(e: TouchEvent): void {
+		if (!holding.value) return
+		// 收尾时以 changedTouches 的终点复算一次取消态，兜住最后一程 touchmove 缺失
+		if (!canceling.value && e.changedTouches.length > 0) {
+			const deltaY: number = e.changedTouches[0].clientY - touchStartY.value
+			canceling.value = deltaY < -SWIPE_THRESHOLD
+		}
+		holding.value = false
+		stopHoldWatchdog()
+		finishRecord(canceling.value)
+		canceling.value = false
+	}
+
+	/** 系统抢占手势（授权弹窗、来电等）：按取消处理，静默丢弃 */
+	function onTouchCancel(): void {
+		if (!holding.value) return
+		holding.value = false
+		stopHoldWatchdog()
+		finishRecord(true)
+		canceling.value = false
+	}
+
+	async function finishRecord(canceled: boolean): Promise<void> {
+		// 长按直录的会话一旦收尾就回文字形态（含取消/过短/失败）；语音模式（麦克风进入）保持
+		if (voiceFromLongPress.value) {
+			voiceFromLongPress.value = false
+			voiceMode.value = false
+		}
+		const res: VoiceRecordResult | null = await stopVoiceRecord()
+		// 取消：直接丢弃录音，不提示
+		if (canceled) return
+		if (res == null) {
+			uni.showToast({ title: voiceRecordErrorText(), icon: 'none' })
+			return
+		}
+		if (res.duration < MIN_DURATION_MS) {
+			uni.showToast({ title: t('home.voice.tooShort'), icon: 'none' })
+			return
+		}
+		try {
+			const text: string = await recognizeSpeech(res.tempFilePath, res.duration)
+			const content: string = text.trim()
+			if (content.length === 0) {
+				uni.showToast({ title: t('home.voice.recognizeEmpty'), icon: 'none' })
+				return
+			}
+			// 识别文本走既有 send 链路（trim/空判由父级统一兜底）；输入形态保持语音，不自动切回文字
+			emit('send', content)
+		} catch (e: Error) {
+			uni.showToast({ title: t('home.voice.recognizeFail'), icon: 'none' })
+		}
+	}
+</script>
+
+<style lang="scss">
+	.app-composer {
+		/* 展开态的空白点击层是绝对定位节点，输入区需要同级定位才能盖在它上面接收点击 */
+		position: relative;
+		padding: 0 18px 26px;
+
+		&__tag {
+			margin: 0 4px 8px;
+		}
+
+		// 录音态面板：波形在上、提示在下（UCSS 无 gap，用 margin）
+		&__rec {
+			flex-direction: column;
+			align-items: center;
+			margin-bottom: 10px;
+		}
+
+		&__rec-hint {
+			margin-top: 10px;
+			font-size: 13px;
+			color: var(--color-text-secondary);
+
+			&--error {
+				color: var(--color-error);
+			}
+		}
+
+		&__box {
+			position: relative;
+			flex-direction: row;
+			align-items: center;
+			height: 56px;
+			padding-left: 14px;
+			padding-right: 10px;
+			border-radius: 22px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+
+			&--open {
+				height: auto;
+				flex-direction: column;
+				align-items: stretch;
+				padding: 10px 12px;
+				border-radius: 20px;
+			}
+
+			// 录音态：整条转主题蓝，取消态转危险红（对齐设计稿形态二/三）；只动配色不动几何
+			&--record {
+				border-color: var(--color-primary);
+				background-color: var(--color-primary);
+			}
+
+			&--record-error {
+				border-color: var(--color-error);
+				background-color: var(--color-error);
+			}
+		}
+
+		// 中央节点：文字形态是假输入（点击展开、长按下录），语音形态是按住说话热区
+		&__center {
+			flex: 1;
+			height: 36px;
+			margin-left: 45px;
+			margin-right: 45px;
+			flex-direction: column;
+			justify-content: center;
+			overflow: hidden;
+		}
+
+		&__fake-text {
+			font-size: 14px;
+			color: var(--color-text);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__fake-placeholder {
+			font-size: 14px;
+			color: var(--color-text-tertiary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__hold-text {
+			font-size: 14px;
+			font-weight: 600;
+			text-align: center;
+			color: var(--color-text-secondary);
+		}
+
+		&__input {
+			flex: 1;
+			height: 38px;
+			margin-left: 0;
+			margin-right: 0;
+			padding-left: 4px;
+			padding-right: 4px;
+			font-size: 14px;
+			color: var(--color-text);
+		}
+
+		&__circ {
+			width: 36px;
+			height: 36px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 18px;
+			background-color: var(--color-bg-hover);
+
+			// 展开态工具行内相邻按钮的间距（UCSS 无 gap，用 margin）
+			&--gap {
+				margin-left: 8px;
+			}
+
+			&--send {
+				background-color: var(--color-primary);
+			}
+
+			// 停止按钮与发送同位同尺寸，底色取中性强色；内部方块即停止符号（图标补全前的占位）
+			&--stop {
+				background-color: var(--color-text);
+			}
+
+			&--mic {
+				position: absolute;
+				left: 14px;
+				top: 10px;
+			}
+
+			&--plus {
+				position: absolute;
+				right: 10px;
+				top: 10px;
+			}
+		}
+
+		&__tools {
+			flex-direction: row;
+			align-items: center;
+			height: 36px;
+			margin-top: 8px;
+		}
+
+		&__model {
+			flex-direction: row;
+			align-items: center;
+			height: 32px;
+			margin-left: 8px;
+			margin-right: 8px;
+			padding-left: 11px;
+			padding-right: 11px;
+			border-radius: 11px;
+			background-color: var(--color-bg-hover);
+		}
+
+		&__model-text {
+			margin-right: 5px;
+			font-size: 12px;
+			font-weight: 700;
+			color: var(--color-text-secondary);
+		}
+
+		&__spacer {
+			flex: 1;
+		}
+
+		/* UCSS 无样式继承，图标色需显式声明；反色文本取主题变量 */
+		&__icon--send {
+			color: var(--color-text-inverse);
+		}
+
+		/* 语音模式左上「切回键盘」的字体图标（iconfont 码点），字号对齐原 rice-icon 的 20px */
+		&__mic-glyph {
+			font-size: 20px;
+			color: var(--color-text-secondary);
+		}
+
+		// 停止符号：圆按钮内的圆角小方块
+		&__stop-square {
+			width: 11px;
+			height: 11px;
+			border-radius: 2.5px;
+			background-color: var(--color-bg-card);
+		}
+
+		// 录音手势捕获层：transparent 不拦视觉，fixed 浮满视口（项目内 app-popup 同款定位方式）
+		&__gesture-mask {
+			position: fixed;
+			left: 0;
+			right: 0;
+			top: 0;
+			bottom: 0;
+			z-index: 999;
+			background-color: transparent;
+		}
+	}
+</style>

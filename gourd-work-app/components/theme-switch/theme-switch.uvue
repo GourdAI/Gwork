@@ -1,0 +1,89 @@
+<template>
+	<view class="theme-switch">
+		<text class="theme-switch__title">{{ title }}</text>
+		<view class="theme-switch__group">
+			<view v-for="item in options" :key="item.mode" class="theme-switch__item"
+				:class="item.mode === currentMode ? 'theme-switch__item--active' : ''" @click="onSelect(item.mode)">
+				<text class="theme-switch__text"
+					:class="item.mode === currentMode ? 'theme-switch__text--active' : ''">{{ item.text }}</text>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme, ThemeMode } from '@/hooks/useTheme'
+
+	type ThemeOption = {
+		mode: ThemeMode
+		text: string
+	}
+
+	defineOptions({
+		name: 'theme-switch',
+		styleIsolation: 'app-and-page'
+	})
+
+	const { currentMode, setThemeMode } = useTheme()
+
+	const title = computed<string>((): string => i18n.global.t('theme.title'))
+
+	const options = computed<ThemeOption[]>((): ThemeOption[] => {
+		return [
+			{ mode: 'light', text: i18n.global.t('theme.light') } as ThemeOption,
+			{ mode: 'dark', text: i18n.global.t('theme.dark') } as ThemeOption,
+			{ mode: 'auto', text: i18n.global.t('theme.auto') } as ThemeOption
+		]
+	})
+
+	function onSelect(mode: ThemeMode): void {
+		setThemeMode(mode)
+	}
+</script>
+
+<style lang="scss">
+	.theme-switch {
+		padding: 16px;
+		background-color: var(--color-bg-card);
+		border-radius: 12px;
+	}
+
+	.theme-switch__title {
+		font-size: 14px;
+		color: var(--color-text-secondary);
+	}
+
+	.theme-switch__group {
+		flex-direction: row;
+		margin-top: 12px;
+	}
+
+	.theme-switch__item {
+		flex: 1;
+		height: 36px;
+		justify-content: center;
+		align-items: center;
+		margin-right: 8px;
+		border-radius: 8px;
+		background-color: var(--color-bg);
+		border-width: 1px;
+		border-style: solid;
+		border-color: var(--color-border);
+	}
+
+	.theme-switch__item--active {
+		background-color: var(--color-primary-alpha);
+		border-color: var(--color-primary);
+	}
+
+	.theme-switch__text {
+		font-size: 13px;
+		color: var(--color-text-secondary);
+	}
+
+	.theme-switch__text--active {
+		color: var(--color-primary);
+	}
+</style>

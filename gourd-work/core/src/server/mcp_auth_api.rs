@@ -106,7 +106,6 @@ fn auth_spec_for(entry: &Value) -> AuthSpec {
         ("authQrModal", "auth_qr_modal"),
         ("deviceAuthorizationEndpoint", "device_authorization_endpoint"),
         ("devicePollIntervalSecs", "device_poll_interval_secs"),
-        ("qrVendor", "qr_vendor"),
     ];
 
     let source = entry.get("auth").filter(|v| v.is_object()).unwrap_or(entry);
@@ -172,7 +171,6 @@ fn merge_specs(primary: AuthSpec, fallback: AuthSpec, scopes: Vec<String>) -> Au
     } else {
         fallback.device_poll_interval_secs
     };
-    out.qr_vendor = pick(primary.qr_vendor, fallback.qr_vendor);
     out
 }
 
@@ -212,7 +210,6 @@ fn state_payload(
     error: Option<String>,
     device_flow: bool,
     qr_modal: bool,
-    qr_vendor: &str,
 ) -> Value {
     json!({
         "ok": true,
@@ -229,8 +226,6 @@ fn state_payload(
         // Non-secret presentation metadata for the two WorkBuddy-style flows.
         "authDeviceFlow": device_flow,
         "authQrModal": qr_modal,
-        // Vendor QR protocol selector (authType=qrcode_poll), e.g. "tencent-docs".
-        "qrVendor": qr_vendor,
     })
 }
 
@@ -278,7 +273,6 @@ pub async fn mcp_auth_state(
         None,
         spec.auth_device_flow,
         spec.auth_qr_modal,
-        &spec.qr_vendor,
     ))
 }
 
@@ -324,41 +318,6 @@ pub async fn mcp_auth_device_start(
     }
 }
 
-/// `POST /web/settings/mcp/auth/qrcode/start` — vendor QR-code authorization.
-///
-/// Only for connectors declaring `authType: "qrcode_poll"` with a `qrVendor`.
-/// No OAuth discovery: the vendor protocol (session code → authorization URL →
-/// poll for a token) is implemented by `mcp::qrcode_vendor`. Returns the
-/// authorization URL (the UI renders it as a QR image) plus expiry; the
-/// background task polls the vendor endpoint and stores the granted token as a
-/// static token. Same session table as device flow, so `/auth/status` and
-/// `/auth/cancel` work unchanged.
-pub async fn mcp_auth_qrcode_start(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<NameBody>,
-) -> Json<Value> {
-    let name = body.name.trim().to_string();
-    let Some(entry) = read_mcp_entry(&name).await else {
-        return Json(error_payload("connector not found"));
-    };
-    let spec = auth_spec_for(&entry);
-    if spec.kind() != AuthKind::QrcodePoll || spec.qr_vendor.trim().is_empty() {
-        return Json(error_payload("connector does not declare authType=qrcode_poll with a qrVendor"));
-    }
-    let config = config_of(&entry);
-    // Same user-visible retry budget as device flow (see mcp_auth_device_start).
-    let transient_budget = state.settings.read().await.general.mcp_retries.clamp(1, 10);
-    match state.mcp_auth.start_qrcode_poll(&name, &config, &spec, transient_budget).await {
-        Ok(s) => Json(json!({
-            "ok": true,
-            "phase": "waiting_for_browser",
-            "verificationUri": s.verification_uri,
-            "expiresIn": s.expires_in,
-        })),
-        Err(e) => Json(error_payload(e.to_string())),
-    }
-}
-
 /// `POST /web/settings/mcp/auth/start` — 仅对 `authType: oauth` 启动浏览器授权。
 ///
 /// 成功时立即返回 `authorizationUrl`（会话在后台继续完成回调与换 token）；
@@ -381,12 +340,16 @@ pub async fn mcp_auth_start(
                     "ok": true,
                     "phase": "waiting_for_browser",
                     "authorizationUrl": authorization_url,
+                    // The backend's actual callback budget (60..=600s, user
+                    // configurable). The UI aligns its polling deadline to it
+                    // instead of a hardcoded 5-minute cap that could fire
+                    // while the backend was still legitimately waiting.
+                    "timeoutSecs": crate::mcp::auth::AuthManager::auth_timeout_secs(&config),
                 })),
                 Err(e) => Json(error_payload(e.to_string())),
             }
         }
         AuthKind::Token => Json(error_payload("use /auth/token")),
-        AuthKind::QrcodePoll => Json(error_payload("use /auth/qrcode/start")),
         AuthKind::None => Json(error_payload("connector does not require authorization")),
     }
 }
@@ -463,6 +426,13 @@ pub async fn mcp_auth_token(
 }
 
 /// `POST /web/settings/mcp/auth/clear` — 清除该连接器的 OAuth 与静态凭据。
+///
+/// 清除成功后立即断开该服务器的活动连接：连接对象里缓存着已解析的
+/// Authorization 头，只删文件不断连接的话，「登出」后的每次工具调用仍会
+/// 把旧 token 发出去，直到下次重连——对被盗 token 场景这是实际安全问题。
+/// 用 `forget_server`（连配置一起忘）而非 `disconnect_one`：后者保留配置，
+/// `call_tool` 的自动重建会让刚登出的服务器在下一次工具调用时复活。
+/// 用户重新授权后由保存/开关路径重新 connect。
 pub async fn mcp_auth_clear(
     State(state): State<Arc<AppState>>,
     Json(body): Json<NameBody>,
@@ -473,7 +443,10 @@ pub async fn mcp_auth_clear(
     };
     let config = config_of(&entry);
     match state.mcp_auth.vault().clear_all(&config.url).await {
-        Ok(()) => Json(ok_payload()),
+        Ok(()) => {
+            state.mcp.forget_server(&name).await;
+            Json(ok_payload())
+        }
         Err(e) => Json(error_payload(e.to_string())),
     }
 }
@@ -561,7 +534,6 @@ mod tests {
                 None,
                 false,
                 false,
-                "",
             ),
             json!({"ok": true, "phase": "waiting_for_browser", "authorizationUrl": "https://as.example/authorize"}),
             json!({"ok": true, "phase": "idle"}),
@@ -594,7 +566,6 @@ mod tests {
             None,
             true,   // authDeviceFlow
             false,  // authQrModal
-            "",     // qrVendor
         );
         let mut keys: Vec<&str> = payload.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort();
@@ -614,7 +585,6 @@ mod tests {
                 "needsAuth",
                 "ok",
                 "phase",
-                "qrVendor",
             ]
         );
         assert_eq!(payload["ok"], json!(true));
@@ -631,24 +601,18 @@ mod tests {
         assert_eq!(payload["authDeviceFlow"], json!(true));
         assert_eq!(payload["authQrModal"], json!(false));
 
-        let with_credential = state_payload("dnb", "token", true, "", "", "", json!("idle"), None, false, false, "");
+        let with_credential = state_payload("dnb", "token", true, "", "", "", json!("idle"), None, false, false);
         assert_eq!(with_credential["connected"], json!(true));
         assert_eq!(with_credential["hasCredential"], json!(true));
         assert_eq!(with_credential["needsAuth"], json!(false));
 
-        let none_kind = state_payload("stdio", "none", false, "", "", "", json!("idle"), None, false, false, "");
+        let none_kind = state_payload("stdio", "none", false, "", "", "", json!("idle"), None, false, false);
         assert_eq!(none_kind["needsAuth"], json!(false));
 
-        let failed = state_payload("dnb", "oauth", false, "", "", "", json!("failed"), Some("denied".into()), false, true, "");
+        let failed = state_payload("dnb", "oauth", false, "", "", "", json!("failed"), Some("denied".into()), false, true);
         assert_eq!(failed["phase"], json!("failed"));
         assert_eq!(failed["error"], json!("denied"));
         assert_eq!(failed["authQrModal"], json!(true));
-
-        // 厂商扫码型：authType=qrcode_poll + qrVendor 透出，needsAuth 判定不变。
-        let qr = state_payload("tencent-docs", "qrcode_poll", false, "腾讯文档", "", "", json!("idle"), None, false, false, "tencent-docs");
-        assert_eq!(qr["authType"], json!("qrcode_poll"));
-        assert_eq!(qr["qrVendor"], json!("tencent-docs"));
-        assert_eq!(qr["needsAuth"], json!(true));
     }
 
     #[test]

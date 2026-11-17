@@ -354,8 +354,10 @@
      * 只在技能主 tab 激活时显示（showPane 控制 wrap 显隐），分类 chips 保留在下面。
      */
     function renderSourceTabs() {
-        /* 只在技能主 tab 下产出技能源；连接器页该容器归 renderConnTabs 管，
-         * 否则 renderTabs()（i18n/loadMarkets）会把「已安装/广场」冲回技能源。 */
+        /* 只在技能主 tab 下产出技能源；连接器页该容器归 renderConnTabs 管
+         * （连接器二级导航 = 已安装 / 广场；连接器广场已无目录源 tabs ——
+         * 唯一目录源是魔搭），否则 renderTabs()（i18n/loadMarkets）会把
+         * 「已安装/广场」冲回技能源。 */
         if (_currentView === VIEW_CONNECTORS || _currentView === VIEW_INTERFACES) return;
         var installedCount = _installedAll.length;
         var html = '<button type="button" class="skills-source-tab' + (_currentView === VIEW_INSTALLED ? ' active' : '') + '" data-view="' + VIEW_INSTALLED + '">'
@@ -428,7 +430,7 @@
 
     /**
      * 连接器 pane 的显隐落地：
-     *   广场   → 只显 #mcpMarketRoot + 头部广场筛选行（分类 chips + 已托管）；
+     *   广场   → 只显 #mcpMarketRoot + 头部广场筛选行（仅分类 chips）；
      *   已安装 → 只显迁入的 MCP 配置区（#skillsMcpInstalled），表单/工具二级视图
      *            归 app-settings-mcp.js 自己管，这里只切列表容器归属。
      * 顶栏按钮随视图分派：广场=搜索框；已安装=导入+添加。

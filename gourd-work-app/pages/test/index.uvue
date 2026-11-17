@@ -1,0 +1,169 @@
+<template>
+	<view class="swipe-test" :class="themeClass">
+		<!-- 抽屉用 swiper 原生分页实现：0=抽屉 1=内容页。
+			横向手势与纵向滚动由原生层仲裁，不经过 JS，跟手与方向锁定都是系统级表现 -->
+		<swiper class="swipe-test__swiper" :current="current" :duration="300" @change="onChange">
+			<swiper-item class="swipe-test__item">
+				<view class="swipe-test__drawer">
+					<text class="swipe-test__drawer-title">{{ t('swipe.drawerTitle') }}</text>
+					<list-view class="swipe-test__drawer-list" :show-scrollbar="false">
+						<list-item v-for="(item, index) in items" :key="index" class="swipe-test__drawer-item"
+							@click="onSelect(item)">
+							<text class="swipe-test__drawer-item-text">{{ item }}</text>
+						</list-item>
+					</list-view>
+				</view>
+			</swiper-item>
+
+			<swiper-item class="swipe-test__item">
+				<view class="swipe-test__body">
+					<text class="swipe-test__title">{{ t('swipe.title') }}</text>
+					<text class="swipe-test__hint">{{ t('swipe.hint') }}</text>
+					<view class="swipe-test__action">
+						<rice-button :text="t('swipe.open')" type="default" height="40px"
+							@click="openDrawer"></rice-button>
+					</view>
+					<list-view class="swipe-test__rows" :show-scrollbar="false">
+						<list-item v-for="(row, index) in rows" :key="index" class="swipe-test__row">
+							<text class="swipe-test__row-text">{{ row }}</text>
+						</list-item>
+					</list-view>
+				</view>
+			</swiper-item>
+		</swiper>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed, ref } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme } from '@/hooks/useTheme'
+	import { onBackPress } from '@dcloudio/uni-app'
+
+	const { themeClass } = useTheme()
+
+	// 0=抽屉 1=内容页；初始落在内容页
+	const current: Ref<number> = ref<number>(1)
+
+	function t(key: string, values?: Record<string, string>): string {
+		if (values == null) return i18n.global.t(key)
+		return i18n.global.t(key, values)
+	}
+
+	// 词条驱动生成，数量足够触发纵向滚动，用于验证横向滑动与列表滚动互不干扰
+	const items: ComputedRef<string[]> = computed<string[]>((): string[] => {
+		const list: string[] = []
+		for (let i: number = 1; i <= 20; i++) list.push(t('swipe.item', { n: i.toString() }))
+		return list
+	})
+
+	const rows: ComputedRef<string[]> = computed<string[]>((): string[] => {
+		const list: string[] = []
+		for (let i: number = 1; i <= 30; i++) list.push(t('swipe.row', { n: i.toString() }))
+		return list
+	})
+
+	function onChange(e: SwiperChangeEvent): void {
+		current.value = e.detail.current
+	}
+
+	function openDrawer(): void {
+		current.value = 0
+	}
+
+	function onSelect(name: string): void {
+		current.value = 1
+		uni.showToast({ title: t('swipe.selected', { name: name }), icon: 'none' })
+	}
+
+	// 抽屉开着时先切回内容页，二次返回才离开页面
+	onBackPress((): boolean => {
+		if (current.value === 0) {
+			current.value = 1
+			return true
+		}
+		return false
+	})
+</script>
+
+<style lang="scss">
+	.swipe-test {
+		flex: 1;
+		flex-direction: column;
+		padding-top: var(--status-bar-height);
+		padding-bottom: env(safe-area-inset-bottom);
+		background-color: var(--color-bg);
+
+		&__swiper,
+		&__item {
+			flex: 1;
+		}
+
+		&__body {
+			flex: 1;
+			flex-direction: column;
+			padding: 20px 18px 0;
+		}
+
+		&__title {
+			font-size: 22px;
+			font-weight: 700;
+			color: var(--color-text);
+		}
+
+		&__hint {
+			margin-top: 10px;
+			margin-bottom: 18px;
+			font-size: 13px;
+			line-height: 20px;
+			color: var(--color-text-secondary);
+		}
+
+		&__action {
+			flex-direction: row;
+			margin-bottom: 18px;
+		}
+
+		&__rows {
+			flex: 1;
+		}
+
+		&__row {
+			padding: 14px 4px;
+			border-bottom: 1px solid var(--color-border);
+
+			&-text {
+				font-size: 14px;
+				color: var(--color-text);
+			}
+		}
+
+		&__drawer {
+			flex: 1;
+			flex-direction: column;
+			background-color: var(--color-bg);
+		}
+
+		&__drawer-title {
+			padding: 18px 18px 12px;
+			font-size: 17px;
+			font-weight: 700;
+			color: var(--color-text);
+		}
+
+		&__drawer-list {
+			flex: 1;
+		}
+
+		&__drawer-item {
+			padding: 13px 18px;
+			border-bottom: 1px solid var(--color-border);
+
+			&-text {
+				font-size: 14px;
+				color: var(--color-text);
+			}
+		}
+	}
+</style>

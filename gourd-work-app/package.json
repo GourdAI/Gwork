@@ -1,0 +1,11 @@
+{
+	"name": "gwork-app",
+	"version": "0.0.1",
+	"description": "uni-app x (vapor) AI 聊天客户端",
+	"scripts": {
+		"type-check": "tsc --noEmit -p tsconfig.json"
+	},
+	"devDependencies": {
+		"typescript": "^5.6.3"
+	}
+}

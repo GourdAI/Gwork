@@ -88,16 +88,13 @@
                     </button>
                 </div>
 
-                <!-- 连接器·广场筛选行：目录源切换（官方/魔搭扩展）+ 分类 chips
-                     （由 app-mcp-market.js shell 回填）。与技能分类栏同一层级、
-                     同一 hscroll 机制；仅连接器·广场视图显示（applyConnView 分派）。
-                     2026-11 用户拍板：官方仓库为默认源，魔搭降为扩展；
-                     「精选」「已托管」勾选移除（无效概念）。 -->
+                <!-- 连接器·广场筛选行：分类 chips（由 app-mcp-market.js shell 回填）。
+                     与技能分类栏同一层级、同一 hscroll 机制；仅连接器·广场视图显示
+                     （applyConnView 分派）。
+                     2026-11 用户拍板：连接器广场唯一目录源 = 魔搭，自建官方源下线，
+                     目录源 tabs 随之退役（只剩一个源，tab 无意义）。
+                     「精选」「已托管」勾选此前已移除（无效概念）。 -->
                 <div class="mcp-market-filter-bar" id="mcpMarketFilterBar" style="display:none">
-                    <div class="mcp-market-source-tabs" id="mcpMarketSourceTabs" role="tablist">
-                        <button type="button" class="mcp-market-source-tab active" data-source="official" role="tab" data-i18n="settings.mcp.market.source_official">官方</button>
-                        <button type="button" class="mcp-market-source-tab" data-source="modelscope" role="tab" data-i18n="settings.mcp.market.source_modelscope">魔搭扩展</button>
-                    </div>
                     <div class="skills-hscroll-wrap mcp-market-cats-wrap">
                         <button type="button" class="skills-hscroll-nav prev" disabled tabindex="-1" aria-label="向左滚动分类" data-i18n-title="settings.skills.scroll_prev">
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
