@@ -69,7 +69,7 @@
 			</view>
 		</scroll-view>
 
-		<!-- 外观：卡片式选项（设计稿定稿），选中卡蓝描边 + 浅蓝底 + 勾选 -->
+		<!-- 外观：卡片式选项，选中卡主色描边 + 品牌浅底 + 勾选 -->
 		<app-sheet :visible="themeSheetVisible" :title="t('mine.appearance')" @close="themeSheetVisible = false">
 			<view v-for="item in THEME_OPTIONS" :key="item.value" class="theme-opt"
 				:class="currentMode === item.value ? 'theme-opt--on' : ''" @click="onPickTheme(item.value)">
@@ -450,7 +450,7 @@
 		}
 	}
 
-	/* 外观弹层卡片选项：未选中灰底、选中蓝描边+浅蓝底（设计稿定稿） */
+	/* 外观弹层卡片选项：未选中灰底、选中主色描边+品牌浅底（石墨色系） */
 	.theme-opt {
 		flex-direction: row;
 		align-items: center;
@@ -510,7 +510,7 @@
 		}
 	}
 
-	/* 语言弹层卡片选项：规格与外观卡片一致，选中蓝描边+浅蓝底+蓝字+勾选（设计稿定稿） */
+	/* 语言弹层卡片选项：规格与外观卡片一致，选中主色描边+品牌浅底+主色字+勾选 */
 	.lang-opt {
 		flex-direction: row;
 		align-items: center;

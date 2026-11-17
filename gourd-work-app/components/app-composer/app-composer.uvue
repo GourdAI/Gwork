@@ -409,7 +409,7 @@
 				border-radius: 20px;
 			}
 
-			// 录音态：整条转主题蓝，取消态转危险红（对齐设计稿形态二/三）；只动配色不动几何
+			// 录音态：整条转主色实底，取消态转危险红（对齐设计稿形态二/三）；只动配色不动几何
 			&--record {
 				border-color: var(--color-primary);
 				background-color: var(--color-primary);

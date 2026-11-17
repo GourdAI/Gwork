@@ -99,7 +99,7 @@
 						<view class="app-plus__conn-icon" :style="'background-color:' + item.color">
 							<!-- file/mountain 无对应图标，待字体图标补全 -->
 							<rice-icon v-if="riceIconName(item.icon) !== ''" :name="riceIconName(item.icon)" size="22px"
-								color="var(--color-text-inverse)"></rice-icon>
+								color="var(--color-on-solid)"></rice-icon>
 						</view>
 					</template>
 					<template #title>

@@ -1,8 +1,7 @@
 <template>
 	<view class="home-hero">
-		<image class="home-hero__logo" src="/static/logo.png" mode="aspectFit"></image>
-		<text class="home-hero__title">{{ t('home.title') }}</text>
-		<text class="home-hero__sub">{{ t('home.subtitle') }}</text>
+		<image class="home-hero__logo" :src="logoSrc" mode="aspectFit"></image>
+		<text class="home-hero__title">{{ greeting }}</text>
 		<view class="home-hero__caps">
 			<view v-for="cap in CAPS" :key="cap.label" class="home-hero__cap" @click="onCap(cap.prompt)">
 				<view class="home-hero__cap-dot"></view>
@@ -13,7 +12,11 @@
 </template>
 
 <script setup lang="ts">
+	import { computed } from 'vue'
+	import type { ComputedRef } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme } from '@/hooks/useTheme'
+	import { pickGreetingIndex, greetingText } from '@/utils/greeting.ts'
 
 	defineOptions({
 		name: 'home-hero',
@@ -34,6 +37,21 @@
 	const emit = defineEmits<{
 		(e: 'fill', text: string): void
 	}>()
+
+	const { isDark } = useTheme()
+
+	// logo 与桌面端同源：亮色黑底白 G / 暗色近白底黑 G（与暗色主色近白实底同构）
+	const logoSrc: ComputedRef<string> = computed<string>((): string => {
+		return isDark.value ? '/static/logo-inverse.png' : '/static/logo.png'
+	})
+
+	// 欢迎语：桌面端 20 条标语随机轮换。hero 随「新建会话/冷启动」重新挂载（v-if 切换），
+	// 每次挂载抽一条；跨挂载去重在 utils/greeting.ts 模块级实现（setup 作用域会随重建丢失）
+	const greetingIndex: number = pickGreetingIndex()
+
+	const greeting: ComputedRef<string> = computed<string>((): string => {
+		return greetingText(greetingIndex)
+	})
 
 	function t(key: string): string {
 		return i18n.global.t(key)
@@ -58,21 +76,12 @@
 		}
 
 		&__title {
-			font-size: 29px;
-			line-height: 38px;
+			font-size: 24px;
+			line-height: 34px;
 			font-weight: 700;
 			letter-spacing: -0.5px;
 			text-align: center;
 			color: var(--color-hero-title);
-		}
-
-		&__sub {
-			margin-top: 10px;
-			max-width: 300px;
-			font-size: 13.5px;
-			line-height: 22px;
-			text-align: center;
-			color: var(--color-hero-sub);
 		}
 
 		&__caps {

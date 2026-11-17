@@ -1,16 +1,1 @@
-{
-	"light": {
-		"bgColor": "#ffffff",
-		"bgColorTop": "#ffffff",
-		"bgColorBottom": "#ffffff",
-		"navBgColor": "#ffffff",
-		"navTxtStyle": "black"
-	},
-	"dark": {
-		"bgColor": "#1c1c1e",
-		"bgColorTop": "#1c1c1e",
-		"bgColorBottom": "#1c1c1e",
-		"navBgColor": "#1c1c1e",
-		"navTxtStyle": "white"
-	}
-}
+{"dark": {"bgColor": "#17171a", "bgColorBottom": "#17171a", "bgColorTop": "#17171a", "navBgColor": "#17171a", "navTxtStyle": "white"}, "light": {"bgColor": "#ffffff", "bgColorBottom": "#ffffff", "bgColorTop": "#ffffff", "navBgColor": "#ffffff", "navTxtStyle": "black"}}

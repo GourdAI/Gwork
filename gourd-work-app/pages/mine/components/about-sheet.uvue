@@ -2,7 +2,7 @@
 	<!-- 关于弹层：App 信息卡 + 官网入口 + 常见问题折叠列表 -->
 	<app-sheet :visible="visible" :title="t('about.title')" :tall="true" @close="emit('close')">
 		<view class="ab-card">
-			<rice-avatar src="/static/logo.png" size="46px" mode="aspectFit"></rice-avatar>
+			<rice-avatar :src="logoSrc" size="46px" mode="aspectFit"></rice-avatar>
 			<view class="ab-card__tx">
 				<text class="ab-card__name">GWork</text>
 				<text class="ab-card__slogan">{{ t('about.slogan') }} · v{{ VERSION }}</text>
@@ -31,6 +31,7 @@
 	import { computed, ref } from 'vue'
 	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
+	import { useTheme } from '@/hooks/useTheme'
 	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
 
 	defineOptions({
@@ -54,6 +55,13 @@
 	}>()
 
 	const VERSION: string = '1.0.0'
+
+	const { isDark } = useTheme()
+
+	// logo 与首页同源：暗色用近白底黑 G 变体，避免黑 tile 沉进暗色卡片
+	const logoSrc: ComputedRef<string> = computed<string>((): string => {
+		return isDark.value ? '/static/logo-inverse.png' : '/static/logo.png'
+	})
 
 	const openIndex: Ref<number> = ref<number>(-1)
 
