@@ -48,8 +48,7 @@
         { value: 'openai', label: 'OpenAI (Chat Completions)' },
         { value: 'openai-responses', label: 'OpenAI (Responses)' },
         { value: 'anthropic', label: 'Anthropic (Messages)' },
-        { value: 'gemini', label: 'Google (Gemini)' },
-        { value: 'ollama', label: 'Ollama (/api/chat)' }
+        { value: 'gemini', label: 'Google (Gemini)' }
     ];
     var DEFAULT_STANDARD = 'openai';
 
@@ -383,6 +382,14 @@
                     persistProvider();
                 }
             });
+            // 官方模型行 - 接口协议切换：直接写运行时模型表（llm/models/update
+            // 即时落盘），不走自定义供应商的 persistProvider（官方虚拟条目
+            // 禁止 providers 表单写入）。内核按四值白名单尊重该覆盖。
+            layui.form.on('select(msOfficialModelStd)', function (data) {
+                var llmName = $(data.elem).data('llm-name');
+                var isSynced = $(data.elem).data('synced') === true || $(data.elem).data('synced') === 'true';
+                changeOfficialModelStandard(llmName, data.value, isSynced);
+            });
         }
 
         // 名称：编辑模式下变更即时保存（内置连接输入框为 readonly，不会触发）
@@ -691,25 +698,18 @@
                 : '';
             var defaultTag = isDefaultModel ? ' <span class="provider-model-default-tag">' + GourdI18n.t('settings.providers.default_badge') + '</span>' : '';
 
-            // 【P0-B】官方模型的接口协议被内核**钉死为 OpenAI**：
-            // LlmClient 对 official 模型强制 standard=openai + Dialect::OpenAiChat，
-            // 既不走 Dialect::resolve，也不认 settings.json 里写入的 anthropic/gemini
-            // ——这是安全设计（防官方 key 经 x-api-key/x-goog-api-key 这类
-            // reqwest 重定向不剥离的凭据头外泄）。因此这里**绝不给可改的协议下拉**：
-            // 那会是一个假控件（用户改了、UI 显示改了、实际调用静默无效）。
-            // 只渲染一个只读徽标，如实告知协议固定。
-            var stdFixed = '<div class="provider-model-standard-wrap" title="' +
-                escapeAttr(officialText(
-                    'settings.providers.official_std_fixed_tip',
-                    '官方模型固定使用 OpenAI 协议，不可更改',
-                    'Official models always use the OpenAI protocol and cannot be changed'
-                )) + '">' +
-                '<span class="provider-model-standard-readonly">' +
-                escapeHtml(officialText(
-                    'settings.providers.official_std_fixed',
-                    'OpenAI（固定）',
-                    'OpenAI (fixed)'
-                )) + '</span>' +
+            // 【2026-11 用户决策】官方 relay（new-api）支持多协议端点，官方模型
+            // 协议可切换，与自定义供应商同一套下拉/保存链路（llm/models/update）。
+            // key 安全由内核保证：鉴权恒走 Authorization: Bearer（各协议端点统一
+            // 认它）、HTTP 客户端禁跟随重定向、apiUrl 钉死官方站点——前端无需
+            // 也不应再渲染「固定」徽标。协议白名单与内核一致（四值，无 ollama）。
+            var curStd = (isSynced && synced.standard) ? synced.standard : DEFAULT_STANDARD;
+            var stdOptions = '';
+            STANDARD_OPTIONS.forEach(function (opt) {
+                stdOptions += '<option value="' + opt.value + '"' + (opt.value === curStd ? ' selected' : '') + '>' + opt.label + '</option>';
+            });
+            var stdSelect = '<div class="provider-model-standard-wrap">' +
+                '<select lay-filter="msOfficialModelStd" data-model-id="' + escapeAttr(id) + '" data-llm-name="' + escapeAttr(llmName) + '" data-synced="' + isSynced + '"' + (isSynced ? '' : ' disabled') + '>' + stdOptions + '</select>' +
                 '</div>';
 
             html += '<div class="provider-model-item' + (!enabled ? ' disabled' : '') + '" data-model-id="' + escapeAttr(id) + '">' +
@@ -718,7 +718,7 @@
                 '</div>' +
                 '<div class="provider-model-actions">' +
                     defaultBtn +
-                    stdFixed +
+                    stdSelect +
                      '<label class="toggle-switch">' +
                         '<input type="checkbox" ' + (enabled ? 'checked' : '') + ' class="provider-model-toggle" data-synced="' + isSynced + '" data-llm-name="' + escapeAttr(llmName) + '"/>' +
                         '<span class="toggle-slider"></span>' +
@@ -746,6 +746,25 @@
             } else {
                 showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error');
                 renderOfficialModels();
+            }
+        });
+    }
+
+    /** 官方模型行协议切换：llm/models/update 即时写运行时并落盘（与启停同链路）。 */
+    function changeOfficialModelStandard(llmName, standard, isSynced) {
+        if (!isSynced || !llmName) {
+            // 内核尚未物化（登录刚完成/旧内核）：重读运行时表后重绘，不做无目标写入
+            loadLlmModelsCache(function () { renderOfficialModels(); });
+            return;
+        }
+        postJson('/web/settings/llm/models/update', { name: llmName, standard: standard }, function (resp) {
+            if (resp.code === 200) {
+                // 协议变了，思考档位表也可能变（reasoning 按 standard 推断）：刷新聊天下拉
+                if (typeof window.reloadModels === 'function') window.reloadModels();
+                loadLlmModelsCache(function () { renderOfficialModels(); });
+            } else {
+                showToast(GourdI18n.t('settings.loop.operation_failed') + ': ' + (resp.message || GourdI18n.t('common.unknown_error')), 'error');
+                loadLlmModelsCache(function () { renderOfficialModels(); });
             }
         });
     }

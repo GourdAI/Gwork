@@ -20,10 +20,8 @@ public class ModelProviderFactory {
     @Init
     public void init() {
         OpenAIModelProvider openAIModelProvider = new OpenAIModelProvider();
-        OllamaModelProvider ollamaModelProvider = new OllamaModelProvider();
         ZhiPuModelProvider zhiPuModelProvider = new ZhiPuModelProvider();
         providerMap.put(openAIModelProvider.getProviderName(), openAIModelProvider);
-        providerMap.put(ollamaModelProvider.getProviderName(), ollamaModelProvider);
         providerMap.put(zhiPuModelProvider.getProviderName(), zhiPuModelProvider);
         defaultProvider = openAIModelProvider;
     }

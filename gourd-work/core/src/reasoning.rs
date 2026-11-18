@@ -8,8 +8,8 @@
 //! The rule table below is a faithful port of the Java
 //! `ReasoningCapabilities` pools (version ranges included). It is deliberately
 //! conservative: unknown models fall back to the interface default pool, and
-//! non-reasoning interfaces (ollama) report an empty list so the frontend
-//! hides the selector entirely.
+//! toggle-only shapes report an empty list so the frontend hides the selector
+//! entirely.
 
 /// Ordered level ladder (excluding AUTO, which the frontend pins on top).
 const LADDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -84,11 +84,6 @@ fn poolver_hit(model: &str, family: &str, min: (u32, u32), max: (u32, u32), suff
 pub fn selectable_codes(standard: &str, model: &str) -> Vec<String> {
     let std = standard.to_lowercase();
     let m = model.to_lowercase();
-
-    // Non-reasoning interfaces: nothing to tune.
-    if std.contains("ollama") {
-        return Vec::new();
-    }
 
     // ── Exact model exceptions (must precede family ranges) ──
     if contains(&m, "gpt-5-pro") {
@@ -200,11 +195,6 @@ mod tests {
             selectable_codes("anthropic", "claude-sonnet-4-5-20250929"),
             codes(&LADDER)
         );
-    }
-
-    #[test]
-    fn ollama_has_no_levels() {
-        assert!(selectable_codes("ollama", "qwen3").is_empty());
     }
 
     #[test]

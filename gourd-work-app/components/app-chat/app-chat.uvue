@@ -1,8 +1,8 @@
 <template>
 	<view class="app-chat">
 		<view class="app-chat__head">
-			<view class="app-chat__row">
-				<view class="app-chat__icon" @click="emit('back')">
+			<view class="app-chat__row" :style="colStyle">
+				<view v-if="!props.hideMenu" class="app-chat__icon" @click="emit('back')">
 					<!-- 左上是菜单（转出会话抽屉），不是返回；码点即菜单图标。
 						 不能带 icon-caidan1 类名：Web 端引入了 iconfont.css，.icon-caidan1:before 会再补一个字形，与 text 内容重复 -->
 					<text class="iconfont app-chat__back">&#xe634;</text>
@@ -30,7 +30,8 @@
 				:show-scrollbar="false" :initial-scroll-bottom="initialScrollBottom" :scroll-anchoring="true"
 				:scroll-top="scrollTop" :scroll-into-view="scrollIntoViewId">
 				<list-item v-for="msg in messages" :key="msg.id" :type="msg.role === 'user' ? 1 : 2">
-					<view class="app-chat__msg" :class="msg.role === 'user' ? 'app-chat__msg--user' : ''">
+					<view class="app-chat__msg" :class="msg.role === 'user' ? 'app-chat__msg--user' : ''"
+						:style="msgColStyle">
 						<!-- 气泡宽度上限靠定宽 wrapper 实现：UCSS 的 max-width 不支持百分比；AI 消息占满整行，用户消息 82% 上限 -->
 						<view class="app-chat__bubble-wrap"
 							:class="msg.role === 'user' ? 'app-chat__bubble-wrap--user' : 'app-chat__bubble-wrap--ai'">
@@ -48,8 +49,9 @@
 		<view v-if="expanded" class="app-chat__catcher" @click="expanded = false"></view>
 
 		<app-composer v-model="draft" :expanded="expanded" :model="model" :tag="attachTag" :processing="processing"
-			input-id="app-chat-composer-input" @expand="expanded = true" @collapse="expanded = false" @send="onSend"
-			@stop="onStop" @open-model="modelSheetVisible = true" @open-plus="plusSheetVisible = true"></app-composer>
+			:column-style="colStyle" input-id="app-chat-composer-input" @expand="expanded = true"
+			@collapse="expanded = false" @send="onSend" @stop="onStop" @open-model="modelSheetVisible = true"
+			@open-plus="plusSheetVisible = true"></app-composer>
 
 		<app-run-sheet :visible="runSheetVisible" :device="device" :workspace="workspace" :permission="permission"
 			:lock-env="true" @close="runSheetVisible = false" @update-permission="onUpdatePermission"></app-run-sheet>
@@ -66,7 +68,7 @@
 
 		<!-- APP 端禁用原生 dialogPage：其关闭动画期内重开会叠开原生页，滞留的透明页会吞掉全屏点击 -->
 		<rice-action-sheet v-model:show="menuVisible" :actions="menuActions" :use-dialog-page="false"
-			:cancel-text="t('conv.cancel')" @select="onMenuSelect"></rice-action-sheet>
+			:custom-style="sheetStyle" :cancel-text="t('conv.cancel')" @select="onMenuSelect"></rice-action-sheet>
 
 		<app-input-dialog :visible="renameVisible" :title="t('conv.renameTitle')" :value="title"
 			@close="renameVisible = false" @confirm="onRenameConfirm"></app-input-dialog>
@@ -77,6 +79,7 @@
 	import { computed, nextTick, ref, watch } from 'vue'
 	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
+	import { useViewport, CHAT_COLUMN_WIDTH } from '@/hooks/useViewport'
 	import { useRunEnv } from '@/hooks/useRunEnv'
 	import { useConversations } from '@/hooks/useConversations'
 	import AppEnvBar from '@/components/app-env-bar/app-env-bar.uvue'
@@ -100,6 +103,27 @@
 		(e: 'back'): void
 		(e: 'new-chat'): void
 	}>()
+
+	// 宽屏双栏下侧栏常驻，「转出会话抽屉」按钮无意义，由页面传 hide-menu 隐藏
+	const props = withDefaults(defineProps<{
+		hideMenu?: boolean
+	}>(), {
+		hideMenu: false
+	})
+
+	const { chatColumnStyle, paneWidth, sheetShellStyle } = useViewport()
+	// 消息流/头部/输入列共用的限宽居中样式（窄屏为空串，保持原有撑满布局）
+	const colStyle: ComputedRef<string> = chatColumnStyle
+	// rice-action-sheet 外壳：宽屏限宽居中 + 矮视口限高
+	const sheetStyle: ComputedRef<UTSJSONObject> = sheetShellStyle
+	// 消息行自带 18px 横向内边距，列宽相应放宽，保证气泡可用宽度与头部/输入列一致
+	const msgColStyle: ComputedRef<string> = computed<string>((): string => {
+		if (colStyle.value.length === 0) return ''
+		const pane: number = paneWidth.value
+		const col: number = Math.min(CHAT_COLUMN_WIDTH + 36, pane)
+		const margin: number = Math.round((pane - col) / 2)
+		return 'width:' + col.toString() + 'px;margin-left:' + margin.toString() + 'px;'
+	})
 
 	const env = useRunEnv()
 	const {

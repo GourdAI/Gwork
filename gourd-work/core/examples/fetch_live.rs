@@ -9,7 +9,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 fn ctx() -> ToolContext {
-    ToolContext {
+    ToolContext {        access_override: None,
         workspace: PathBuf::from("."),
         session_dir: None,
         session_id: "fetch-live".into(),

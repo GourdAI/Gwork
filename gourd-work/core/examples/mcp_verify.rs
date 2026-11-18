@@ -16,7 +16,7 @@ static mut PASS: u32 = 0;
 static mut FAIL: u32 = 0;
 
 fn ctx(gate: Option<Arc<ToolGate>>) -> ToolContext {
-    ToolContext {
+    ToolContext {        access_override: None,
         workspace: PathBuf::from("."), session_dir: None, session_id: "v".into(),
         tool_call_id: "c".into(), run_id: "r".into(), frame_tx: None,
         access_mode: "full".into(), cancel: CancellationToken::new(), hitl_approved: false,

@@ -147,7 +147,7 @@ pub async fn execute_loop_task(state: Arc<AppState>, task_id: String, task: Loop
         &state.workspace,
     );
     state.change_ledger.register_run_root(&session_id, &run_workspace);
-    let config = ReActConfig {
+    let config = ReActConfig {        access_override: None,
         session_id: session_id.clone(),
         workspace: run_workspace,
         // Loop sessions are real sessions with their own storage; route

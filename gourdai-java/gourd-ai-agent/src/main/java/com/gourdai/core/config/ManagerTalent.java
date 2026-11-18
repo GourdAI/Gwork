@@ -51,7 +51,7 @@ public class ManagerTalent extends AbsTalent {
             @Param(name = "name", description = "模型名称标识（可选；不传则自动取 model 值）", required = false) String name,
             @Param(name = "apiUrl", description = "API 服务地址（如 https://api.openai.com/v1）") String apiUrl,
             @Param(name = "apiKey", description = "API 密钥") String apiKey,
-            @Param(name = "standard", description = "接口规范：openai、ollama、anthropic（不传则自动推断）", required = false) String standard,
+            @Param(name = "standard", description = "接口规范：openai、anthropic（不传则自动推断）", required = false) String standard,
             @Param(name = "model", description = "模型 ID（如 gpt-5.5、deepseek-v4-flash）") String model,
             @Param(name = "headers", description = "自定义请求头（如 Authorization: Bearer xxx）", required = false) Map<String, String> headers,
             @Param(name = "timeout", description = "超时秒数，默认 120", required = false) String timeout) {

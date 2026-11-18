@@ -67,6 +67,10 @@
 	"app-ios": {
 		"distribute": {
 			"modules": {},
+			// iPad 原生支持：universal 同时支持 iPhone/iPad；不设则 iPhone 应用在 iPad 上以兼容模式跑
+			"devices": "universal",
+			// false = 允许 iPad 分屏（Split View / Slide Over），窗口尺寸变化由 useViewport 响应
+			"UIRequiresFullScreen": false,
 			"icons": {
 				"appstore": "static/logos/logo_1024x1024.png"
 			},

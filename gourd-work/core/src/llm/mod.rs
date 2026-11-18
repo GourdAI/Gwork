@@ -1,11 +1,11 @@
 //! llm — streaming LLM client.
 //!
 //! Supports:
-//! - Streaming completions over SSE (and Ollama's newline-delimited JSON)
+//! - Streaming completions over SSE
 //! - Tool/function calling with parallel tool calls
 //! - Retry with exponential backoff
 //! - Multiple protocol standards: see [`dialect`] for openai chat completions,
-//!   openai responses, anthropic messages, gemini generateContent and ollama
+//!   openai responses, anthropic messages and gemini generateContent
 
 pub mod client;
 pub mod dialect;

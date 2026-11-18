@@ -1,8 +1,11 @@
 <template>
-	<view class="home-hero">
-		<image class="home-hero__logo" :src="logoSrc" mode="aspectFit"></image>
-		<text class="home-hero__title">{{ greeting }}</text>
-		<view class="home-hero__caps">
+	<view class="home-hero" :class="isShort ? 'home-hero--short' : ''">
+		<image class="home-hero__logo" :class="isShort ? 'home-hero__logo--short' : ''" :src="logoSrc" mode="aspectFit"></image>
+		<!-- 轮播淡出→换文→淡入靠 opacity 过渡；标题定高两行，长短标语切换不推挤下方布局 -->
+		<text class="home-hero__title"
+			:class="(isShort ? 'home-hero__title--short ' : '') + (fading ? 'home-hero__title--fading' : '')">{{ greeting }}</text>
+		<text class="home-hero__sub" :class="isShort ? 'home-hero__sub--short' : ''">{{ t('home.subtitle') }}</text>
+		<view class="home-hero__caps" :class="isShort ? 'home-hero__caps--short' : ''">
 			<view v-for="cap in CAPS" :key="cap.label" class="home-hero__cap" @click="onCap(cap.prompt)">
 				<view class="home-hero__cap-dot"></view>
 				<text class="home-hero__cap-text">{{ t(cap.label) }}</text>
@@ -12,10 +15,11 @@
 </template>
 
 <script setup lang="ts">
-	import { computed } from 'vue'
-	import type { ComputedRef } from 'vue'
+	import { computed, onMounted, onUnmounted, ref } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
 	import { useTheme } from '@/hooks/useTheme'
+	import { useViewport } from '@/hooks/useViewport'
 	import { pickGreetingIndex, greetingText } from '@/utils/greeting.ts'
 
 	defineOptions({
@@ -39,6 +43,7 @@
 	}>()
 
 	const { isDark } = useTheme()
+	const { isShort } = useViewport()
 
 	// logo 与桌面端同源：亮色黑底白 G / 暗色近白底黑 G（与暗色主色近白实底同构）
 	const logoSrc: ComputedRef<string> = computed<string>((): string => {
@@ -46,12 +51,46 @@
 	})
 
 	// 欢迎语：桌面端 20 条标语随机轮换。hero 随「新建会话/冷启动」重新挂载（v-if 切换），
-	// 每次挂载抽一条；跨挂载去重在 utils/greeting.ts 模块级实现（setup 作用域会随重建丢失）
-	const greetingIndex: number = pickGreetingIndex()
+	// 每次挂载抽一条；跨挂载去重在 utils/greeting.ts 模块级实现（setup 作用域会随重建丢失）。
+	// 桌面端 10s 才换一条在手机上等感太久，这里压到 4s，并保留其「淡出→换文→淡入」节奏
+	const ROTATE_MS = 4000
+	const FADE_MS = 240
+
+	const greetingIndex: Ref<number> = ref<number>(pickGreetingIndex())
+	const fading: Ref<boolean> = ref<boolean>(false)
 
 	const greeting: ComputedRef<string> = computed<string>((): string => {
-		return greetingText(greetingIndex)
+		return greetingText(greetingIndex.value)
 	})
+
+	let rotateTimer: number = 0
+	let fadeTimer: number = 0
+
+	onMounted((): void => {
+		rotateTimer = setInterval((): void => {
+			fading.value = true
+			fadeTimer = setTimeout((): void => {
+				fadeTimer = 0
+				greetingIndex.value = pickGreetingIndex()
+				fading.value = false
+			}, FADE_MS)
+		}, ROTATE_MS)
+	})
+
+	onUnmounted((): void => {
+		stopTimers()
+	})
+
+	function stopTimers(): void {
+		if (rotateTimer != 0) {
+			clearInterval(rotateTimer)
+			rotateTimer = 0
+		}
+		if (fadeTimer != 0) {
+			clearTimeout(fadeTimer)
+			fadeTimer = 0
+		}
+	}
 
 	function t(key: string): string {
 		return i18n.global.t(key)
@@ -69,19 +108,60 @@
 		justify-content: center;
 		padding: 0 16px 18px;
 
+		// 矮视口（横屏手机/分屏）：压缩纵向留白，输入条不被挤出屏外
+		&--short {
+			padding-bottom: 6px;
+		}
+
 		&__logo {
 			width: 74px;
 			height: 74px;
 			margin-bottom: 18px;
+
+			&--short {
+				width: 44px;
+				height: 44px;
+				margin-bottom: 8px;
+			}
 		}
 
 		&__title {
+			// 定高两行：标语长短不一，轮播换文时不推挤副标题与输入条
+			height: 68px;
 			font-size: 24px;
 			line-height: 34px;
 			font-weight: 700;
 			letter-spacing: -0.5px;
 			text-align: center;
 			color: var(--color-hero-title);
+			opacity: 1;
+			transition-property: opacity;
+			transition-duration: 240ms;
+			transition-timing-function: ease;
+
+			&--short {
+				height: 54px;
+				font-size: 19px;
+				line-height: 27px;
+			}
+
+			&--fading {
+				opacity: 0;
+			}
+		}
+
+		&__sub {
+			margin-top: 10px;
+			font-size: 14px;
+			line-height: 20px;
+			text-align: center;
+			color: var(--color-hero-sub);
+
+			&--short {
+				margin-top: 4px;
+				font-size: 12px;
+				line-height: 17px;
+			}
 		}
 
 		&__caps {
@@ -90,6 +170,10 @@
 			align-items: center;
 			justify-content: center;
 			margin-top: 30px;
+
+			&--short {
+				margin-top: 10px;
+			}
 		}
 
 		&__cap {

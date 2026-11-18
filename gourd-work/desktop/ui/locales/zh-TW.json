@@ -554,7 +554,9 @@
       "common_close": "關閉",
       "network_error": "網路錯誤",
       "market": {
-        "market_tab": "廣場",
+        "source_modelscope": "魔搭",
+        "source_tencent": "騰訊雲",
+        "source_smithery": "Smithery",
         "title": "連接器廣場",
         "search_placeholder": "搜尋連接器…",
         "installed": "已安裝",

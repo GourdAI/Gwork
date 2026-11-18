@@ -15,7 +15,7 @@ fn ctx() -> (
     PermissionSettings,
 ) {
     (
-        gourd_work_core::tools::registry::ToolContext {
+        gourd_work_core::tools::registry::ToolContext {            access_override: None,
             workspace: PathBuf::from("."), session_dir: None, session_id: "p".into(),
             tool_call_id: "c".into(), run_id: "r".into(), frame_tx: None,
             access_mode: "full".into(), cancel: CancellationToken::new(), hitl_approved: false,

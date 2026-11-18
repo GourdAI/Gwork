@@ -30,7 +30,5 @@ public interface ChatDialects {
     static String GOOGLE_GENERATE = "google-generate"; //old
     static String GOOGLE_INTERACTIONS = "google-interactions";
 
-    static String OLLAMA = "ollama";
-
     static String DASHSCOPE = "dashscope";
 }

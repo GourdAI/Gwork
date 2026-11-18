@@ -99,10 +99,13 @@ pub struct ContextSizePayload {
     pub generation_ms: u64,
     /// Completion tokens produced in those same timed decode segments.
     pub generated_tokens: u64,
-    /// Time to first token (ms): elapsed from the run's start to the first
-    /// visible model output (Java `TurnTimer.finish` / `onVisibleOutput`).
-    /// `None` = the run never produced a visible delta; the wire key is then
-    /// omitted entirely rather than fabricating a 0 ms latency.
+    /// Model first-token latency (ms): the run's first responding model call,
+    /// request issued → first upstream frame of ANY kind (text, reasoning or
+    /// tool-call). Local tool execution and multi-turn round-trips are excluded
+    /// (【2026-11 用户拍板】the old run-start → first-visible-character reading
+    /// charged minutes of tool time into "first token", session work-mwlhix12).
+    /// `None` = the model never responded; the wire key is then omitted entirely
+    /// rather than fabricating a 0 ms latency.
     pub ttft_ms: Option<u64>,
 }
 
@@ -517,10 +520,11 @@ impl Frame {
             args.insert("generationMs".into(), serde_json::json!(p.generation_ms));
             args.insert("generatedTokens".into(), serde_json::json!(p.generated_tokens));
         }
-        // Time to first token (Java TurnTimer.finish). Rides in `args` alongside the
-        // decode-speed pair so it inherits history replay + the frontend's monotonic
-        // createdAt gate with no extra per-session state. `None` (no visible output
-        // this run) omits the key instead of reporting a fake 0 ms.
+        // Model first-token latency (request → first upstream frame, tool time
+        // excluded). Rides in `args` alongside the decode-speed pair so it inherits
+        // history replay + the frontend's monotonic createdAt gate with no extra
+        // per-session state. `None` (model never responded) omits the key instead
+        // of reporting a fake 0 ms.
         if let Some(ttft) = p.ttft_ms {
             args.insert("ttftMs".into(), serde_json::json!(ttft));
         }
@@ -568,8 +572,9 @@ impl Frame {
     /// `generatedTokens / generationMs` from them unchanged. Unlike
     /// [`Frame::context_size`] (the settlement snapshot), these two values are
     /// a sliding window, so the readout reacts immediately to a slowdown.
-    /// `ttftMs` is latched at the very first visible delta and therefore also
-    /// reaches the UI while the answer is still being typed.
+    /// `ttftMs` is the run-latched model first-token latency (first call's
+    /// request → first upstream frame of any kind) and therefore also reaches
+    /// the UI while the answer is still being typed.
     ///
     /// Deliberately carries **no phase**: it is a passive metadata frame, and
     /// a phase on it would rewrite the main conversation's phase state machine
@@ -1054,10 +1059,10 @@ mod tests {
         assert!(!args.contains_key("ttftMs"));
     }
 
-    /// A run with no visible output must not report a fabricated 0 ms TTFT, while
-    /// a real first-token delay is carried verbatim (Java `TurnTimer.finish`).
+    /// A run whose model never responded must not report a fabricated 0 ms TTFT,
+    /// while a real first-token delay is carried verbatim.
     #[test]
-    fn context_size_ttft_only_when_a_visible_delta_existed() {
+    fn context_size_ttft_only_when_the_model_responded() {
         let none_frame: serde_json::Value = serde_json::from_str(
             &Frame::context_size("work-x", &ContextSizePayload { ttft_ms: None, ..Default::default() }).to_json(),
         )

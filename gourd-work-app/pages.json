@@ -4,12 +4,6 @@
 			"path": "pages/login/index"
 		},
 		{
-			"path": "pages/verify/index"
-		},
-		{
-			"path": "pages/enterprise-login/index"
-		},
-		{
 			"path": "pages/home/index"
 		}
 	,{
@@ -22,9 +16,6 @@
 	    "path": "pages/rebind-email/index"
 	}
 	,{
-    "path": "pages/test/index"
-}
-	,{
     "path": "uni_modules/rice-ui/pages/action-sheet/action-sheet"
 }
 ,{
@@ -33,6 +24,9 @@
 ],
 	"globalStyle": {
 		"navigationStyle": "custom",
+		// 横屏/平板适配：uni-app x 默认 portrait（锁竖屏），必须显式放开旋转，
+		// 否则手机横过来页面纹丝不动；页面内布局由 useViewport 按窗口尺寸自适应
+		"pageOrientation": "auto",
 		// 导航栏 / 下拉窗口背景由 theme.json 提供亮暗两套值；转场第一帧的页面容器背景见 App.uvue 的 page 规则
 		"navigationBarTextStyle": "@navTxtStyle",
 		"navigationBarTitleText": "uni-app x",

@@ -27,7 +27,7 @@ class ModelsHttpClassificationTest {
     }
 
     @Test void validatesUrls() {
-        assertEquals("https://localhost:11434", ModelsHttp.requireHttpUrl("https://localhost:11434", "t"));
+        assertEquals("https://localhost:8443", ModelsHttp.requireHttpUrl("https://localhost:8443", "t"));
         assertThrows(ModelsFetchException.class, () -> ModelsHttp.requireHttpUrl("ftp://host", "t"));
         assertThrows(ModelsFetchException.class, () -> ModelsHttp.requireHttpUrl("https：//host", "t"));
         assertThrows(ModelsFetchException.class, () -> ModelsHttp.requireHttpUrl("https://host?q=1", "t"));

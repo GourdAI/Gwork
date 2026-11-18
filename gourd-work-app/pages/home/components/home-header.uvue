@@ -1,9 +1,9 @@
 <template>
 	<view class="home-header">
-		<view class="home-header__menu" @click="emit('menu')">
+		<view v-if="!props.hideMenu" class="home-header__menu" @click="emit('menu')">
 			<text class="iconfont">&#xe634;</text>
 		</view>
-		<text class="home-header__brand">{{ t('home.brand') }}</text>
+		<text class="home-header__brand" :class="props.hideMenu ? 'home-header__brand--solo' : ''">{{ t('home.brand') }}</text>
 		<app-env-bar class="home-header__env" :device="device" :device-online="deviceOnline" :workspace="workspace"
 			:permission="permission" :show-permission="false" @open-run="emit('open-run')"></app-env-bar>
 	</view>
@@ -18,12 +18,16 @@
 		styleIsolation: 'app-and-page'
 	})
 
-	defineProps<{
+	// 宽屏双栏下侧栏常驻，菜单按钮无意义，由页面传 hide-menu 隐藏
+	const props = withDefaults(defineProps<{
 		device: string
 		deviceOnline: boolean
 		workspace: string
 		permission: string
-	}>()
+		hideMenu?: boolean
+	}>(), {
+		hideMenu: false
+	})
 
 	const emit = defineEmits<{
 		(e: 'menu'): void
@@ -55,6 +59,11 @@
 			font-weight: 800;
 			letter-spacing: -0.3px;
 			color: var(--color-text);
+
+			// 双栏态无菜单按钮，品牌名顶格（与侧栏内容左缘节奏一致）
+			&--solo {
+				margin-left: 4px;
+			}
 		}
 
 		&__env {

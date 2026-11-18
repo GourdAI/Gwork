@@ -1,4 +1,4 @@
-//! `mcp::market` — 魔搭 ModelScope MCP 广场适配器（连接器页的**唯一**内置目录源）。
+﻿//! `mcp::market` — 魔搭 ModelScope MCP 广场适配器（连接器页的默认目录源）。
 //!
 //! 上游契约（实测，匿名可用，无需 Token）：
 //! * 列表/搜索：`PUT https://www.modelscope.cn/openapi/v1/mcp/servers`
@@ -7,8 +7,14 @@
 //! * 详情：`GET https://www.modelscope.cn/openapi/v1/mcp/servers/{id}`，`{id}` 含 `@` 与 `/`，
 //!   必须把整个 id 当作**单个路径段**做百分号编码（`@amap/amap-maps` → `%40amap%2Famap-maps`）。
 //!
-//! 明确不做：官方 Registry、自定义源、多源、Hosted 专属连接 URL（那需要 Bearer Token，
-//! 属于 deploy / operational 范畴，本轮不实现）。
+//! 2026-11 集成 SolonCode 同源目录：本模块之外新增 `mcp::tencent`（腾讯云 MCP
+//! 广场）与 `mcp::smithery`（Smithery 注册表）两个兄弟适配器，三者输出**同一套
+//! 列表/详情形状**（`total_count/mcp_server_list` 与 `server_config/env_schema`），
+//! 由 `server::mcp_market_api` 按 `source` 参数分流。魔搭条目 id 加 `modelscope:`
+//! 前缀、腾讯 `tencent:`、Smithery `smithery:`，跨源不撞（数字 id vs qualifiedName）。
+//!
+//! 明确不做：自建官方 Registry（已删除，不得复活）、用户自定义目录源、
+//! Hosted 专属连接 URL（那需要 Bearer Token，属于 deploy / operational 范畴）。
 //!
 //! 本模块只负责「上游 HTTP + 纯数据变换」；落盘由 `server::mcp_market_api` 复用
 //! `settings_api::mcp_server_add`，不在这里复制写文件逻辑。
@@ -16,8 +22,10 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+pub use super::market_http::{MAX_API_BODY_BYTES, USER_AGENT};
+use super::market_http;
+
 pub const LIST_URL: &str = "https://www.modelscope.cn/openapi/v1/mcp/servers";
-pub const USER_AGENT: &str = "GourdWorkDesktop/0.3 (+MCP Market)";
 pub const MAX_SCAN: i64 = 100;
 
 /// 详情 URL。id 整体编码为一个路径段，避免 `@scope/name` 里的 `/` 被当成路径分隔。
@@ -140,53 +148,6 @@ pub fn failure(msg: impl Into<String>) -> Value {
     json!({"code": 400, "description": msg.into()})
 }
 
-// ─── 上游传输 ────────────────────────────────────────────────────────────────
-
-/// 上游 JSON 响应体上限，与 `skills::market::MAX_API_BODY_BYTES` 同级加固。
-///
-/// 详情接口的 `readme` 实测近 5 万字符，正常远不到这个量级；但上游异常或被劫持
-/// 镜像返回超大 JSON 时，`resp.json::<Value>()` 会无上限全量解析直至 OOM
-/// （`unpack` 里的 `data.clone()` 还会让峰值再翻一倍）。超限一律**报错**，
-/// 绝不返回截断体：半个 JSON 无法解析，且会被 `unpack` 误判成上游返回了
-/// `success=false`，把一个 DoS 防护伪装成业务失败。
-pub const MAX_API_BODY_BYTES: usize = 16 * 1024 * 1024;
-
-/// 流式读取响应体，拒绝缓冲超过 `cap` 的字节。
-///
-/// `Ok(None)` 表示超限。与 `skills::market::read_capped` 同构（而非直接复用），
-/// 因为那个函数是私有的；两处逻辑必须保持一致，改一处要同步另一处。
-async fn read_capped(resp: reqwest::Response, cap: usize) -> reqwest::Result<Option<Vec<u8>>> {
-    use futures_util::StreamExt;
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        if buf.len() + chunk.len() > cap {
-            return Ok(None);
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    Ok(Some(buf))
-}
-
-/// 读取带体积上限的 JSON 响应体。
-///
-/// `what` 只用于拼装与加固前**逐字一致**的中文错误文案，避免前端/测试对
-/// 错误串的断言因为这次加固而静默失效。
-async fn capped_json(resp: reqwest::Response, cap: usize, what: &str) -> Result<(u16, Value), String> {
-    let status = resp.status().as_u16();
-    let Some(bytes) = read_capped(resp, cap).await.map_err(|e| format!("解析{what}响应失败: {e}"))?
-    else {
-        return Err(format!(
-            "解析{what}响应失败: 响应体超过 {} 字节上限，已拒绝（疑似上游异常）",
-            cap
-        ));
-    };
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|e| format!("解析{what}响应失败: {e}"))?;
-    Ok((status, value))
-}
-
 /// 只声明本模块真正用到的两个动词（PUT 列表 / GET 详情）。
 /// 与 `skills::market::MarketHttp` 分开，避免为了 PUT 去改既有 trait 的行为。
 #[async_trait]
@@ -208,15 +169,7 @@ impl ReqwestMcpMarketHttp {
         // 执行一次，落在常量路径上，不再是「每次请求都可能 panic 整个进程」——
         // 那会绕过本模块 `failure()` 统一信封的契约。
         // 与 `skills::market` 的单例做法保持一致。
-        static CLIENT: once_cell::sync::Lazy<reqwest::Client> = once_cell::sync::Lazy::new(|| {
-            reqwest::Client::builder()
-                .user_agent(USER_AGENT)
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .expect("reqwest mcp market client")
-        });
-        Self { client: CLIENT.clone() }
+        Self { client: market_http::client() }
     }
 }
 
@@ -237,7 +190,7 @@ impl McpMarketHttp for ReqwestMcpMarketHttp {
             .send()
             .await
             .map_err(|e| format!("请求魔搭 MCP 广场失败: {}", e))?;
-        capped_json(resp, MAX_API_BODY_BYTES, "魔搭 MCP 广场").await
+        market_http::capped_json(resp, MAX_API_BODY_BYTES, "魔搭 MCP 广场").await
     }
 
     async fn get_json(&self, url: &str) -> Result<(u16, Value), String> {
@@ -248,7 +201,7 @@ impl McpMarketHttp for ReqwestMcpMarketHttp {
             .send()
             .await
             .map_err(|e| format!("请求魔搭 MCP 服务详情失败: {}", e))?;
-        capped_json(resp, MAX_API_BODY_BYTES, "魔搭 MCP 服务详情").await
+        market_http::capped_json(resp, MAX_API_BODY_BYTES, "魔搭 MCP 服务详情").await
     }
 }
 

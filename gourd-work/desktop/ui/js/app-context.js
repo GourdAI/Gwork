@@ -90,9 +90,12 @@ function buildContextModel(chunk) {
         // outputTokens ÷ elapsedMs 顶替（口径不同，会伪装成同一个指标）。
         generationMs: Math.round(args.generationMs || 0),
         generatedTokens: Math.round(args.generatedTokens || 0),
-        // 首 Token 延迟（TTFT）：内核用 run 级 latch 测得「起点 → 首个可见输出」，同样注入 args。
-        // 用 hasOwnProperty 判存在而非判真值：合法的 0ms 首字与「本轮根本没有可见输出」是两回事
-        // （对齐 Java TurnTimer.finish：无可见输出时 ttftMs 为 null，绝不下发 0）。
+        // 首 Token 延迟（TTFT）：内核测「模型调用发起 → 首个上游帧（正文/思考/工具帧均算）」，
+        // run 内首次响应即锁存，同样注入 args。【2026-11 用户拍板】工具执行是本地时间，
+        // 绝不计入模型延迟（旧「run 起点 → 首个可见字符」口径曾把 8.6 分钟工具执行
+        // 算成 518.50s 首字延迟，session work-mwlhix12）。
+        // 用 hasOwnProperty 判存在而非判真值：合法的 0ms 首字与「模型根本未响应」是两回事
+        // （模型未响应时 ttftMs 为 null，绝不下发 0）。
         ttftMs: Object.prototype.hasOwnProperty.call(args, 'ttftMs') && args.ttftMs != null
             ? Math.round(args.ttftMs) : null
     };
@@ -228,17 +231,24 @@ function ctxTpsText(m) {
 }
 
 /**
- * 首 Token 延迟文本（不足 1 秒用 ms，否则用 2 位小数的秒）。
- * <p>口径与原 trace 弹层一致，复用 chat.ttft（12 语言包已有译文）。
+ * 首 Token 延迟文本（不足 1 秒用 ms；1s～1min 用 2 位小数的秒；≥1min 换档 Xmin Ys）。
+ * <p>口径：模型首字响应（请求 → 首个上游帧），复用 chat.ttft（12 语言包已有译文）。
+ * ≥60s 换档与 ctxFmtElapsed（任务耗时）同格式：模型异常慢时不再渲染
+ * "518.50s" 这类反直觉读数（用户报障截图）。
  * 旧历史帧无 args.ttftMs 时为 null，该行恒在、值显示 '--' 而非伪造 0。</p>
  * @param {Object} m - buildContextModel 归一后的展示模型
- * @returns {string} 形如 "860ms" / "5.39s"；无数据时空串
+ * @returns {string} 形如 "860ms" / "5.39s" / "8min 38s"；无数据时空串
  */
 function ctxTtftText(m) {
     if (typeof m.ttftMs !== 'number' || !(m.ttftMs >= 0) || !isFinite(m.ttftMs)) return '';
     var ms = m.ttftMs;
     if (ms < 1000) return Math.round(ms) + 'ms';
-    return (Math.round(ms / 10) / 100).toFixed(2) + 's';
+    if (ms < 60000) return (Math.round(ms / 10) / 100).toFixed(2) + 's';
+    // ≥1min 与 ctxFmtElapsed 完全同格式（含整分 "1min 0s" 与 ≥1h 换档），
+    // 同一卡面两种耗时行不出现两套分钟写法。
+    var s = Math.round(ms / 1000);
+    if (s < 3600) return Math.floor(s / 60) + 'min ' + (s % 60) + 's';
+    return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'min ' + (s % 60) + 's';
 }
 
 /** 明细卡单行。 */

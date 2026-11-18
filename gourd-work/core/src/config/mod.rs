@@ -352,7 +352,7 @@ pub struct ModelConfig {
     pub api_url: String,
     #[serde(rename = "apiKey")]
     pub api_key: String,
-    /// Protocol standard: "openai" | "anthropic" | "ollama"
+    /// Protocol standard: "openai" | "openai-responses" | "anthropic" | "gemini"
     pub standard: String,
     pub provider: String,
     /// The actual model ID sent to the API (e.g. "gpt-4o-mini").

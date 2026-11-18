@@ -18,6 +18,7 @@
 <script setup lang="ts">
 	import { computed, ref, watch, onUnmounted } from 'vue'
 	import type { ComputedRef, Ref } from 'vue'
+	import { useViewport, SHEET_MAX_WIDTH } from '@/hooks/useViewport'
 
 	defineOptions({
 		name: 'app-popup',
@@ -49,7 +50,8 @@
 		(e: 'clickOverlay'): void
 	}>()
 
-	const safeBottom: number = uni.getWindowInfo().safeAreaInsets.bottom
+	// 安全区/宽高经响应式单例取值：旋转后已打开的弹层即时跟随（原实现只在创建时读一次）
+	const { windowWidth, windowHeight, isWide, safeBottom } = useViewport()
 
 	// 双态渲染：mounted 控制 v-if 挂载，animOn 驱动过渡。与 rice-popup 的本质区别是 watch 按
 	// show 电平对齐状态：rice-popup 边沿触发，关闭动画期内重开时 open 被吞且不再补偿，弹层永久打不开；
@@ -161,8 +163,16 @@
 		const radius: string = props.radius.toString() + 'px'
 		css.set('border-top-left-radius', radius)
 		css.set('border-top-right-radius', radius)
-		if (props.safeAreaInsetBottom && safeBottom > 0) {
-			css.set('padding-bottom', safeBottom.toString() + 'px')
+		if (props.safeAreaInsetBottom && safeBottom.value > 0) {
+			css.set('padding-bottom', safeBottom.value.toString() + 'px')
+		}
+		// 高度上限：矮视口（横屏手机/分屏）内容不顶穿屏幕
+		css.set('max-height', Math.round(windowHeight.value * 0.85).toString() + 'px')
+		// 宽屏限宽居中（样式表里的 width:100% 由行内 width 覆盖）
+		if (isWide.value) {
+			const width: number = Math.min(SHEET_MAX_WIDTH, windowWidth.value - 48)
+			css.set('width', width.toString() + 'px')
+			css.set('margin-left', Math.round((windowWidth.value - width) / 2).toString() + 'px')
 		}
 		return css
 	})

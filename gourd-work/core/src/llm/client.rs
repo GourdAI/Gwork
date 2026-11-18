@@ -52,12 +52,19 @@ impl LlmClient {
             // 发到第三方 host。官方源不是可配置自定义地址（契约 C/D 节）。
             // base 自带 /v1，Dialect::OpenAiChat 据此拼 /v1/chat/completions。
             model.api_url = crate::official::base_url();
-            // 【安全】官方 relay 只说 OpenAI chat-completions，固定协议，
-            // 绝不走 Dialect::resolve：settings.json 里若被塞 anthropic/gemini，
-            // 或模型名含 claude/gemini，resolve 会选中 x-api-key /
-            // x-goog-api-key 这类「reqwest 重定向不剥离」的自定义凭据头，
-            // 一旦遇到开放重定向就会把官方 key 原样带到第三方。
-            model.standard = "openai".to_string();
+            // 【2026-11 用户决策】官方 relay（new-api）支持多协议端点，官方
+            // 模型协议可由用户切换（openai / openai-responses / anthropic /
+            // gemini）。只认这四个显式白名单值：settings.json 里被塞进别的
+            // 字符串时回落 openai，绝不让 Dialect::resolve 的模型名启发式
+            // （含 claude/gemini 就换协议）替用户做决定。
+            // key 安全不靠钉死协议，而靠三件事：鉴权恒走 Authorization
+            // Bearer（new-api 各协议端点统一认它，见 build_headers_for）、
+            // HTTP 客户端 redirect none、apiUrl 无条件钉死官方 host。
+            let std = model.standard.trim().to_ascii_lowercase();
+            model.standard = match std.as_str() {
+                "openai-responses" | "anthropic" | "gemini" => std,
+                _ => "openai".to_string(),
+            };
             // 用户自定义头在 build_headers 里是「最后写入、可覆盖」的，
             // 官方源一律清空，防止在 settings.json 里塞 Authorization /
             // x-api-key 与官方 key 一起外发或覆盖之。
@@ -94,12 +101,16 @@ impl LlmClient {
             .expect("failed to build http client");
         // Resolved once: the model config cannot change for the lifetime of a run,
         // and resolving per request would repeat the same string matching.
-        // 【安全】官方 relay 只说 OpenAI chat-completions，直接钉死 dialect：
-        // Dialect::resolve 除了 standard 还会看 URL 与**模型名**（含 claude /
-        // gemini 就切到 x-api-key / x-goog-api-key），而 reqwest 重定向不剥离
-        // 这类自定义凭据头。只把 standard 改成 openai 挡不住模型名启发式。
+        // 官方模型：standard 已在上面归一到四值白名单，按它显式选 dialect，
+        // 不走 Dialect::resolve 的 URL/模型名启发式（那会让「claude-x 模型 +
+        // 用户选的 openai 协议」被静默改写成 anthropic）。
         let dialect = if model.official {
-            Dialect::OpenAiChat
+            match model.standard.as_str() {
+                "openai-responses" => Dialect::OpenAiResponses,
+                "anthropic" => Dialect::AnthropicMessages,
+                "gemini" => Dialect::GeminiGenerate,
+                _ => Dialect::OpenAiChat,
+            }
         } else {
             Dialect::resolve(&model)
         };
@@ -313,12 +324,33 @@ fn build_headers_for(model: &ModelConfig, dialect: Dialect) -> reqwest::header::
         reqwest::header::CONTENT_TYPE,
         "application/json".parse().unwrap(),
     );
-    for (k, v) in dialect.auth_headers(&effective) {
-        if let (Ok(name), Ok(val)) = (
-            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-            v.parse(),
-        ) {
-            headers.insert(name, val);
+    if model.official {
+        // 【安全】官方 relay（new-api）的 anthropic/gemini 端点同样认
+        // Authorization: Bearer。官方模型无论选什么协议都只发 Bearer，
+        // 绝不走 dialect 的 x-api-key / x-goog-api-key 自定义凭据头——
+        // 那类头不在 reqwest 重定向剥离名单里（虽然本客户端 redirect none，
+        // 仍按纵深防御保持单一凭据形态，脱敏/审计也只有一个基准）。
+        let key = effective.api_key.trim();
+        if !key.is_empty() {
+            if let Ok(val) = format!("Bearer {}", key).parse() {
+                headers.insert(reqwest::header::AUTHORIZATION, val);
+            }
+        }
+        if matches!(dialect, Dialect::AnthropicMessages) {
+            // Anthropic 协议端点要求的版本头（非凭据，可安全外发）。
+            headers.insert(
+                reqwest::header::HeaderName::from_static("anthropic-version"),
+                "2023-06-01".parse().unwrap(),
+            );
+        }
+    } else {
+        for (k, v) in dialect.auth_headers(&effective) {
+            if let (Ok(name), Ok(val)) = (
+                reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                v.parse(),
+            ) {
+                headers.insert(name, val);
+            }
         }
     }
     for (k, v) in &effective.headers {
@@ -410,7 +442,7 @@ fn snippet(s: &str) -> String {
 /// subject line rather than an error.
 fn extract_completion_text(v: &serde_json::Value, dialect: Dialect) -> String {
     match dialect {
-        Dialect::OpenAiChat | Dialect::OllamaChat => v["choices"][0]["message"]["content"]
+        Dialect::OpenAiChat => v["choices"][0]["message"]["content"]
             .as_str()
             .or_else(|| v["message"]["content"].as_str())
             .unwrap_or_default()
@@ -485,9 +517,9 @@ fn normalise_thinking(level: Option<&str>) -> Option<String> {
 /// Perform a single streaming request, pushing events into `tx`.
 ///
 /// Line splitting is shared across dialects; only the *interpretation* of a line
-/// differs, which is what [`StreamParser`] abstracts. Ollama is the reason this
-/// cannot assume SSE: it streams bare NDJSON, and looking for a `data:` prefix
-/// there yields zero events — an empty answer with no error to explain it.
+/// differs, which is what [`StreamParser`] abstracts. Lines are passed to the
+/// parser unstripped so each dialect can tolerate framing quirks (some proxies
+/// drop the `data:` prefix) without the transport guessing.
 ///
 /// The returned error carries [`StreamFailure::delivered`], which tells the
 /// caller whether anything had already been pushed downstream. That bit is the
@@ -573,8 +605,8 @@ async fn do_stream(
         }
     }
 
-    // Flush a trailing line that had no final newline — Ollama's last JSON object
-    // often arrives that way, and dropping it loses the usage counters.
+    // Flush a trailing line that had no final newline — some gateways send the
+    // last JSON object that way, and dropping it loses the usage counters.
     let tail = decoder.finish();
     if !tail.is_empty() {
         buffer.push_str(&tail);
@@ -882,33 +914,70 @@ mod tests {
         crate::official::clear();
     }
 
-    /// 安全：settings.json 里被篡改成 anthropic/gemini 或塞自定义凭据头，
-    /// 官方模型必须强制固定为 OpenAI + 清头，绝不走 reqwest 重定向不剥离的
-    /// x-api-key / x-goog-api-key 分支。
+    /// 官方模型协议可切换（2026-11 用户决策），但安全边界不变：
+    /// 无论选什么协议，鉴权只发 Authorization: Bearer（new-api 各协议端点
+    /// 统一认它），绝不发 x-api-key / x-goog-api-key；自定义头清空；
+    /// apiUrl 钉死官方 host。
     #[test]
-    fn official_model_pins_protocol_and_strips_custom_headers() {
+    fn official_model_switchable_protocol_always_bearer_only() {
         let _guard = crate::official::test_lock();
         crate::official::set(official_fixture("SECRET-KEY"));
-        let mut m = official_model_cfg("https://attacker.example/v1");
-        m.standard = "anthropic".into();
-        m.model = "claude-3".into();
-        m.headers.insert("x-api-key".into(), "injected".into());
-        m.headers.insert("Authorization".into(), "CustomScheme x".into());
+        for (std, dialect, suffix) in [
+            ("openai", Dialect::OpenAiChat, "/v1/chat/completions"),
+            ("openai-responses", Dialect::OpenAiResponses, "/v1/responses"),
+            ("anthropic", Dialect::AnthropicMessages, "/v1/messages"),
+        ] {
+            let mut m = official_model_cfg("https://attacker.example/v1");
+            m.standard = std.into();
+            m.model = "claude-3".into();
+            m.headers.insert("x-api-key".into(), "injected".into());
+            m.headers.insert("Authorization".into(), "CustomScheme x".into());
+            let c = LlmClient::with_retries(m, 1).expect("build");
+            assert_eq!(c.model.standard, std, "explicit whitelist value must be honoured");
+            assert!(c.model.headers.is_empty());
+            assert_eq!(c.dialect, dialect);
+            assert_eq!(
+                c.dialect.endpoint(&c.model, true),
+                format!("{}{}", crate::official::host(), suffix),
+                "official endpoint must stay on the official host — no /v1/v1"
+            );
+            let h = c.build_headers();
+            assert_eq!(
+                h.get(reqwest::header::AUTHORIZATION).unwrap().to_str().unwrap(),
+                "Bearer sk-SECRET-KEY"
+            );
+            assert!(h.get("x-api-key").is_none(), "{std}: x-api-key must never be sent");
+            assert!(h.get("x-goog-api-key").is_none(), "{std}: x-goog-api-key must never be sent");
+        }
+        // gemini 端点带模型名与流式动词，单独断言。
+        let mut m = official_model_cfg("");
+        m.standard = "gemini".into();
+        m.model = "gemini-3".into();
         let c = LlmClient::with_retries(m, 1).expect("build");
-        assert_eq!(c.model.standard, "openai");
-        assert!(c.model.headers.is_empty());
-        assert_eq!(c.dialect, Dialect::OpenAiChat);
-        assert_eq!(
-            c.dialect.endpoint(&c.model, true),
-            format!("{}/v1/chat/completions", crate::official::host()),
-            "official chat endpoint must be host/v1/chat/completions — no /v1/v1"
-        );
+        assert_eq!(c.dialect, Dialect::GeminiGenerate);
         let h = c.build_headers();
         assert_eq!(
             h.get(reqwest::header::AUTHORIZATION).unwrap().to_str().unwrap(),
             "Bearer sk-SECRET-KEY"
         );
-        assert!(h.get("x-api-key").is_none());
+        assert!(h.get("x-goog-api-key").is_none());
+        crate::official::clear();
+    }
+
+    /// 白名单外的 standard（脏值/旧 ollama 残留）回落 openai；模型名启发式
+    /// 绝不替用户改协议：claude-x 模型 + 用户选 openai 必须仍是 OpenAiChat。
+    #[test]
+    fn official_model_standard_whitelist_falls_back_to_openai() {
+        let _guard = crate::official::test_lock();
+        crate::official::set(official_fixture("SECRET-KEY"));
+        for dirty in ["ollama", "claude", "bogus", ""] {
+            let mut m = official_model_cfg("");
+            m.standard = dirty.into();
+            m.model = "claude-3".into();
+            let c = LlmClient::with_retries(m, 1).expect("build");
+            assert_eq!(c.model.standard, "openai", "dirty value {dirty:?} must normalize");
+            assert_eq!(c.dialect, Dialect::OpenAiChat, "no model-name heuristic for official");
+        }
         crate::official::clear();
     }
 
@@ -1019,10 +1088,6 @@ mod tests {
             Dialect::AnthropicMessages
         );
         assert_eq!(
-            client("ollama", "http://localhost:11434", "llama3").dialect(),
-            Dialect::OllamaChat
-        );
-        assert_eq!(
             client("openai", "https://api.openai.com/v1", "gpt-4o").dialect(),
             Dialect::OpenAiChat
         );
@@ -1084,12 +1149,10 @@ mod tests {
     fn complete_text_extraction_per_dialect() {
         let openai = serde_json::json!({"choices":[{"message":{"content":"draft"}}]});
         assert_eq!(extract_completion_text(&openai, Dialect::OpenAiChat), "draft");
-        assert_eq!(extract_completion_text(&openai, Dialect::OllamaChat), "draft");
 
-        // Ollama's non-streaming shape nests under `message`, not `choices`.
-        let ollama = serde_json::json!({"message":{"role":"assistant","content":"ollama draft"}});
-        assert_eq!(extract_completion_text(&ollama, Dialect::OllamaChat), "ollama draft");
-
+        // Some OpenAI-compatible gateways nest under `message`, not `choices`.
+        let nested = serde_json::json!({"message":{"role":"assistant","content":"nested draft"}});
+        assert_eq!(extract_completion_text(&nested, Dialect::OpenAiChat), "nested draft");
         let responses = serde_json::json!({
             "output": [{"type":"message","content":[{"type":"output_text","text":"resp "}]}],
             "output_text": ""
@@ -1123,7 +1186,6 @@ mod tests {
             Dialect::OpenAiResponses,
             Dialect::AnthropicMessages,
             Dialect::GeminiGenerate,
-            Dialect::OllamaChat,
         ] {
             assert_eq!(extract_completion_text(&empty, d), "", "{:?}", d);
         }

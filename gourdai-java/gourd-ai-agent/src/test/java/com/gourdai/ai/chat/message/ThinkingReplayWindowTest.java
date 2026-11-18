@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * 思考回放窗口口径的契约测试。
  *
- * <p>窗口 = {@code (or $last (gt $i $lastUserIdx))}，与 Qwen3 / Ollama 官方模板逐字对齐。
+ * <p>窗口 = {@code (or $last (gt $i $lastUserIdx))}，与 Qwen3 官方模板逐字对齐。
  * 这两个条件<b>缺一不可</b>，本测试对两半分别设了独立用例：</p>
  * <ul>
  *   <li>只有 {@code gt $i $lastUserIdx}：会误剥 assistant prefill（末条是 assistant 且在 user 之前）；</li>

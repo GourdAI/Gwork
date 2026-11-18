@@ -7,7 +7,6 @@ import com.gourdai.core.portal.web.thinking.ThinkingLevel;
 import com.gourdai.ai.chat.ChatConfigReadonly;
 import com.gourdai.ai.chat.ChatModel;
 import com.gourdai.ai.chat.ModelOptionsAmend;
-import com.gourdai.ai.llm.dialect.ollama.OllamaChatDialect;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -53,7 +52,7 @@ public final class ThinkingDepth {
     public static final String AUTO = ThinkingLevel.AUTO.code();
 
     /** 本类管理的请求键，切换/降级时统一清理，保证幂等。 */
-    private static final String[] MANAGED_KEYS = {"thinking", "think", "reasoning", "reasoning_effort"};
+    private static final String[] MANAGED_KEYS = {"thinking", "reasoning", "reasoning_effort"};
 
     /**
      * 规范化档位编码：null / 空 / 不识别 → {@link #AUTO}；并迁移历史值。
@@ -125,8 +124,7 @@ public final class ThinkingDepth {
      * @param depth   档位编码
      */
     public static void applyTo(ModelOptionsAmend<?, ?> options, ChatModel model, String depth) {
-        applyInternal(options, capabilityOf(model), ThinkingLevel.from(depth), maxOutputOf(model),
-                model != null && model.getDialect() instanceof OllamaChatDialect);
+        applyInternal(options, capabilityOf(model), ThinkingLevel.from(depth), maxOutputOf(model));
     }
 
     /**
@@ -141,7 +139,7 @@ public final class ThinkingDepth {
      */
     public static void applyTo(ModelOptionsAmend<?, ?> options, String standard, String depth) {
         applyInternal(options, ReasoningCapabilities.resolve(standard, null, null),
-                ThinkingLevel.from(depth), null, "ollama".equalsIgnoreCase(standard));
+                ThinkingLevel.from(depth), null);
     }
 
     // ------------------------------------------------------------------
@@ -150,7 +148,7 @@ public final class ThinkingDepth {
 
     @SuppressWarnings("unchecked")
     private static void applyInternal(ModelOptionsAmend<?, ?> options, ReasoningCapability cap,
-                                      ThinkingLevel level, Integer maxOutput, boolean nativeOllama) {
+                                      ThinkingLevel level, Integer maxOutput) {
         if (options == null) {
             return;
         }
@@ -158,20 +156,6 @@ public final class ThinkingDepth {
         clearManagedKeys(options);
 
         if (level.isAuto() || cap.isNone()) {
-            return;
-        }
-
-        // Ollama 原生接口只使用 think；能力值域仍负责档位降级。
-        // https://docs.ollama.com/capabilities/thinking：GPT-OSS 接受 low/medium/high，非布尔。
-        if (nativeOllama) {
-            if (cap.shape() == ReasoningCapability.Shape.TOGGLE) {
-                options.optionSet("think", true);
-            } else {
-                String effort = cap.resolveEffort(level);
-                if (effort != null) {
-                    options.optionSet("think", effort);
-                }
-            }
             return;
         }
 
@@ -317,8 +301,7 @@ public final class ThinkingDepth {
             return ReasoningCapabilities.resolve(null, null, null);
         }
         String modelName = modelNameOf(model);
-        String standard = model.getDialect() instanceof OllamaChatDialect
-                ? "ollama" : model.getStandardOrProvider();
+        String standard = model.getStandardOrProvider();
         return ReasoningCapabilities.resolve(standard, modelName,
                 ModelProfiles.capabilitiesOf(modelName));
     }

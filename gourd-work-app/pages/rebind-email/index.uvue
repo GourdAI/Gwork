@@ -1,4 +1,4 @@
-<template>
+﻿<template>
 	<view class="rebind" :class="themeClass">
 		<view class="rebind__nav">
 			<view class="rebind__back" @click="onBack">
@@ -9,7 +9,7 @@
 		</view>
 
 		<!-- 步骤条：当前步高亮，两步之间以细线相连（原型 rb-steps） -->
-		<view class="rebind__steps">
+		<view class="rebind__steps" :style="colStyle">
 			<view class="rebind-step">
 				<text class="rebind-step__num" :class="step === 1 ? 'rebind-step__num--on' : ''">1</text>
 				<text class="rebind-step__text" :class="step === 1 ? 'rebind-step__text--on' : ''">{{ t('rebind.step1') }}</text>
@@ -22,47 +22,53 @@
 		</view>
 
 		<scroll-view class="rebind__scroll" direction="vertical" :show-scrollbar="false">
-			<!-- 第一步：验证当前邮箱 -->
-			<view v-if="step === 1" class="rebind__form">
+			<!-- 第一步：输入新邮箱 + 密码验证（后台 step-up 安全流程：先验密码，再向新旧邮箱发码） -->
+			<view v-if="step === 1" class="rebind__form" :style="colStyle">
 				<text class="rebind__label">{{ t('rebind.curEmail') }}</text>
 				<view class="rebind__field rebind__field--ro">
-					<text class="rebind__ro-text">{{ email }}</text>
+					<text class="rebind__ro-text">{{ email.length > 0 ? email : t('rebind.noEmail') }}</text>
 				</view>
-				<text class="rebind__label">{{ t('rebind.curCode') }}</text>
-				<view class="rebind__field">
-					<rice-input v-model="oldCode" :placeholder="t('rebind.codePlaceholder')" :maxlength="6"
-						:clearable="true" clear-trigger="always" border="none" height="44px" font-size="13px"
-						:custom-style="inputFlexStyle"></rice-input>
-					<view class="rebind__code-btn" @click="onSendCode">
-						<text class="rebind__code-btn-text">{{ t('rebind.getCode') }}</text>
-					</view>
-				</view>
-				<text class="rebind__hint">{{ t('rebind.hintOld') }}</text>
-				<view class="rebind__submit" @click="onNext">
-					<text class="rebind__submit-text">{{ t('rebind.next') }}</text>
-				</view>
-			</view>
-
-			<!-- 第二步：绑定新邮箱 -->
-			<view v-else class="rebind__form">
 				<text class="rebind__label">{{ t('rebind.newEmail') }}</text>
 				<view class="rebind__field">
 					<rice-input v-model="newEmail" :placeholder="t('rebind.emailPlaceholder')" :clearable="true"
-						clear-trigger="always" border="none" height="44px" font-size="13px"
+						clear-trigger="always" inputmode="email" border="none" height="44px" font-size="13px"
 						:custom-style="inputFlexStyle"></rice-input>
 				</view>
+				<text class="rebind__label">{{ t('rebind.password') }}</text>
+				<view class="rebind__field">
+					<rice-input v-model="password" type="password" :show-password="true"
+						:placeholder="t('rebind.passwordPlaceholder')" border="none" height="44px" font-size="13px"
+						:custom-style="inputFlexStyle"></rice-input>
+				</view>
+				<text class="rebind__hint">{{ t('rebind.hintOld') }}</text>
+				<view class="rebind__submit" :class="busy ? 'rebind__submit--busy' : ''" @click="onNext">
+					<text class="rebind__submit-text">{{ busy ? t('gwork.working') : t('rebind.next') }}</text>
+				</view>
+			</view>
+
+			<!-- 第二步：新旧邮箱验证码（未绑过邮箱时后台不要求旧码，隐藏该行） -->
+			<view v-else class="rebind__form" :style="colStyle">
+				<template v-if="oldEmailRequired">
+					<text class="rebind__label">{{ t('rebind.curCode') }}</text>
+					<view class="rebind__field">
+						<rice-input v-model="oldCode" :placeholder="t('rebind.codePlaceholder')" :maxlength="6"
+							inputmode="numeric" :clearable="true" clear-trigger="always" border="none" height="44px"
+							font-size="13px" :custom-style="inputFlexStyle"></rice-input>
+					</view>
+				</template>
 				<text class="rebind__label">{{ t('rebind.newCode') }}</text>
 				<view class="rebind__field">
 					<rice-input v-model="newCode" :placeholder="t('rebind.codePlaceholder')" :maxlength="6"
-						:clearable="true" clear-trigger="always" border="none" height="44px" font-size="13px"
-						:custom-style="inputFlexStyle"></rice-input>
-					<view class="rebind__code-btn" @click="onSendCode">
-						<text class="rebind__code-btn-text">{{ t('rebind.getCode') }}</text>
+						inputmode="numeric" :clearable="true" clear-trigger="always" border="none" height="44px"
+						font-size="13px" :custom-style="inputFlexStyle"></rice-input>
+					<view class="rebind__code-btn" :class="resendCooldown > 0 ? 'rebind__code-btn--off' : ''"
+						@click="onSendCode">
+						<text class="rebind__code-btn-text">{{ resendCooldown > 0 ? t('gwork.codeRetrySeconds', { seconds: resendCooldown }) : t('rebind.getCode') }}</text>
 					</view>
 				</view>
 				<text class="rebind__hint">{{ t('rebind.hintNew') }}</text>
-				<view class="rebind__submit" @click="onSubmit">
-					<text class="rebind__submit-text">{{ t('rebind.submit') }}</text>
+				<view class="rebind__submit" :class="busy ? 'rebind__submit--busy' : ''" @click="onSubmit">
+					<text class="rebind__submit-text">{{ busy ? t('gwork.working') : t('rebind.submit') }}</text>
 				</view>
 				<text class="rebind__back-step" @click="onBackStep">{{ t('rebind.back') }}</text>
 			</view>
@@ -71,65 +77,151 @@
 </template>
 
 <script setup lang="ts">
-	import { ref } from 'vue'
-	import type { Ref } from 'vue'
+	import { computed, onUnmounted, ref } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import { onResize, onShow } from '@dcloudio/uni-app'
 	import { i18n } from '@/locale/i18n.ts'
 	import { useTheme } from '@/hooks/useTheme'
-	import { useUser } from '@/hooks/useUser'
+	import { refreshViewport, formColumn } from '@/hooks/useViewport'
+	import { useUser, refreshUserFromAccount } from '@/hooks/useUser'
+	import { errorToMessage } from '@/utils/tools.ts'
+	import { gworkVerifyForEmailBind, gworkEmailBindStart, gworkEmailBindFinish, gworkEmailBindResend } from '@/utils/gwork-auth.ts'
+	import type { EmailBindFlow } from '@/utils/gwork-auth.ts'
 
 	const ACCOUNT_PAGE: string = '/pages/account-settings/index'
 	// 与登录页同一邮箱格式（pages/login/index.uvue 的 EMAIL_PATTERN）
 	const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
 
 	const { themeClass } = useTheme()
-	const { email, setEmail } = useUser()
+	const { email } = useUser()
+
+	// APP 端旋转/分屏只有页面级 onResize；onShow 兜底后台期间的旋转
+	onResize((_e: OnResizeOptions): void => { refreshViewport() })
+	onShow((): void => { refreshViewport() })
+
+	// 宽屏内容列限宽居中（步骤条与两步表单同列；32 = form 左右 padding 16×2）
+	const colStyle: ComputedRef<string> = computed<string>((): string => formColumn(32))
 
 	const step: Ref<number> = ref<number>(1)
 	const oldCode: Ref<string> = ref<string>('')
 	const newEmail: Ref<string> = ref<string>('')
 	const newCode: Ref<string> = ref<string>('')
+	const password: Ref<string> = ref<string>('')
+	const busy: Ref<boolean> = ref<boolean>(false)
+	const oldEmailRequired: Ref<boolean> = ref<boolean>(true)
+	const resendCooldown: Ref<number> = ref<number>(0)
+	let flowToken: string = ''
+	let cooldownTimer: number | null = null
 
 	// 验证码按钮占据行尾，输入框占满剩余宽度
 	const inputFlexStyle: UTSJSONObject = { flex: 1 }
 
-	function t(key: string): string {
-		return i18n.global.t(key)
+	function t(key: string, values?: Record<string, any>): string {
+		if (values == null) return i18n.global.t(key)
+		return i18n.global.t(key, values)
 	}
 
 	function isCodeValid(code: string): boolean {
 		return /^[0-9]{6}$/.test(code)
 	}
 
-	function onSendCode(): void {
-		// TODO 接入发送验证码接口（当前邮箱 / 新邮箱两种收件人）
-		uni.showToast({ title: t('rebind.codeSent'), icon: 'none' })
-	}
-
-	function onNext(): void {
-		if (!isCodeValid(oldCode.value)) {
-			uni.showToast({ title: t('rebind.codeInvalid'), icon: 'none' })
-			return
+	function stopCooldown(): void {
+		if (cooldownTimer != null) {
+			clearInterval(cooldownTimer)
+			cooldownTimer = null
 		}
-		step.value = 2
 	}
 
-	function onBackStep(): void {
-		step.value = 1
+	/** 以服务端 resend_at（unix 秒）为准起倒计时，客户端不自行拍冷却时长 */
+	function startCooldown(resendAt: number): void {
+		stopCooldown()
+		const secs = Math.max(0, resendAt - Math.floor(Date.now() / 1000))
+		resendCooldown.value = secs
+		if (secs === 0) return
+		cooldownTimer = setInterval((): void => {
+			if (resendCooldown.value <= 1) {
+				resendCooldown.value = 0
+				stopCooldown()
+				return
+			}
+			resendCooldown.value -= 1
+		}, 1000)
 	}
 
-	function onSubmit(): void {
-		if (!EMAIL_PATTERN.test(newEmail.value)) {
+	/** 重发：后台向新旧邮箱同时重发（bind/resend），无需重新密码验证 */
+	function onSendCode(): void {
+		if (busy.value || resendCooldown.value > 0 || flowToken.length === 0) return
+		busy.value = true
+		gworkEmailBindResend(flowToken).then((resendAt: number): void => {
+			busy.value = false
+			startCooldown(resendAt)
+			uni.showToast({ title: t('rebind.codeSent'), icon: 'none' })
+		}, (err: any): void => {
+			busy.value = false
+			uni.showToast({ title: errorToMessage(err), icon: 'none' })
+		})
+	}
+
+	/** 第一步：密码 step-up 验证 → bind/start 发码（proof 一次性，失败留在本步重试） */
+	function onNext(): void {
+		if (busy.value) return
+		if (!EMAIL_PATTERN.test(newEmail.value.trim())) {
 			uni.showToast({ title: t('rebind.emailInvalid'), icon: 'none' })
 			return
 		}
+		if (password.value.length === 0) {
+			uni.showToast({ title: t('rebind.passwordRequired'), icon: 'none' })
+			return
+		}
+		busy.value = true
+		const target = newEmail.value.trim()
+		gworkVerifyForEmailBind(target, password.value).then((proof: string): Promise<EmailBindFlow> => {
+			return gworkEmailBindStart(target, proof)
+		}).then((flow: EmailBindFlow): void => {
+			busy.value = false
+			flowToken = flow.flowToken
+			oldEmailRequired.value = flow.oldEmailRequired
+			startCooldown(flow.resendAt)
+			step.value = 2
+			uni.showToast({ title: t('rebind.codeSent'), icon: 'none' })
+		}, (err: any): void => {
+			busy.value = false
+			uni.showToast({ title: errorToMessage(err), icon: 'none' })
+		})
+	}
+
+	function onBackStep(): void {
+		// 返回第一步需重新验证（proof/flow 已消费或作废），清空敏感输入
+		step.value = 1
+		password.value = ''
+		oldCode.value = ''
+		newCode.value = ''
+		flowToken = ''
+		stopCooldown()
+		resendCooldown.value = 0
+	}
+
+	function onSubmit(): void {
+		if (busy.value || flowToken.length === 0) return
 		if (!isCodeValid(newCode.value)) {
 			uni.showToast({ title: t('rebind.codeInvalid'), icon: 'none' })
 			return
 		}
-		// 演示环境任意 6 位验证码可通过；接口接入后在此调用校验接口，成功再回写
-		setEmail(newEmail.value)
-		uni.showToast({ title: t('rebind.success'), icon: 'none' })
-		onBack()
+		if (oldEmailRequired.value && !isCodeValid(oldCode.value)) {
+			uni.showToast({ title: t('rebind.codeInvalid'), icon: 'none' })
+			return
+		}
+		busy.value = true
+		gworkEmailBindFinish(flowToken, newCode.value, oldCode.value).then((): void => {
+			busy.value = false
+			// 服务端已换绑，拉 GetSelf 回写共享状态（不再本地伪造 setEmail）
+			refreshUserFromAccount()
+			uni.showToast({ title: t('rebind.success'), icon: 'none' })
+			onBack()
+		}, (err: any): void => {
+			busy.value = false
+			uni.showToast({ title: errorToMessage(err), icon: 'none' })
+		})
 	}
 
 	function onBack(): void {
@@ -139,6 +231,10 @@
 			}
 		})
 	}
+
+	onUnmounted((): void => {
+		stopCooldown()
+	})
 </script>
 
 <style lang="scss">
@@ -239,6 +335,10 @@
 			justify-content: center;
 			border-radius: 9px;
 			background-color: var(--color-brand-soft);
+
+			&--off {
+				opacity: 0.5;
+			}
 		}
 
 		&__code-btn-text {
@@ -261,6 +361,10 @@
 			justify-content: center;
 			border-radius: 15px;
 			background-color: var(--color-primary);
+
+			&--busy {
+				opacity: 0.6;
+			}
 		}
 
 		&__submit-text {

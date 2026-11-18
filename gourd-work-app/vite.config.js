@@ -12,6 +12,19 @@ const alias = {
     '@/': `${resolve(__dirname, './')}`
 }
 
+// H5 浏览器把 Set-Cookie 从 XHR 响应头里剥掉（forbidden response header），
+// uni.request 的 header 里永远拿不到 new_api_refresh —— 登录会一直报「缺少会话凭据」。
+// 代理层把 Set-Cookie 原样镜像到自定义可读头 X-Gwork-Set-Cookie，客户端兜底读取。
+// 生产部署的网关必须做同样的镜像（见 AGENTS.md / gwork-request.ts 注释），否则线上 H5 登录同样失败。
+function mirrorSetCookie(proxy) {
+    proxy.on('proxyRes', (proxyRes) => {
+        const cookies = proxyRes.headers['set-cookie']
+        if (cookies != null && cookies.length > 0) {
+            proxyRes.headers['x-gwork-set-cookie'] = cookies.join('\n')
+        }
+    })
+}
+
 export const r = (...args) => resolve(__dirname, '.', ...args)
 
 
@@ -20,7 +33,6 @@ const isDev = process.env.NODE_ENV === 'development'
 
 export default defineConfig(({mode}) => {
 	const envConfig = loadEnv(mode, __dirname);
-		const yixiaoBase = new URL(envConfig.VITE_YIXIAO_BASE_URL);
     return {
         base: '/',
         plugins: [
@@ -50,17 +62,25 @@ export default defineConfig(({mode}) => {
             port: envConfig.VITE_PORT,
 			host: "0.0.0.0",     // ← 关键！允许所有 IP 访问
             proxy: {
-                '/claw-app': {
-                    target: envConfig.VITE_API_URL,
+                // GWork 官方账号双站点代理（登录/注册路由未挂 CORS，H5 直连会被浏览器拦）。
+                // 前缀与 .env.* 的 VITE_GWORK_PROXY_CN/INTL 一一对应，改一处要改两处。
+                // cookieDomainRewrite 置空：Set-Cookie 的 Domain 改写为当前 host，
+                // 让浏览器接受轮换后的 new_api_refresh（H5 刷新依赖它）。
+                '/gwork-cn': {
+                    target: envConfig.VITE_GWORK_HOST_CN,
                     ws: false,
                     changeOrigin: true,
-                    rewrite: (path) => path.replace(/^\/claw-app/, '')
+                    cookieDomainRewrite: '',
+                    rewrite: (path) => path.replace(/^\/gwork-cn/, ''),
+                    configure: mirrorSetCookie
                 },
-                '/yixiao-app': {
-                    target: yixiaoBase.origin,
+                '/gwork-intl': {
+                    target: envConfig.VITE_GWORK_HOST_INTL,
                     ws: false,
                     changeOrigin: true,
-                    rewrite: (path) => path.replace(/^\/yixiao-app/, yixiaoBase.pathname.replace(/\/$/, ''))
+                    cookieDomainRewrite: '',
+                    rewrite: (path) => path.replace(/^\/gwork-intl/, ''),
+                    configure: mirrorSetCookie
                 }
             }
         },

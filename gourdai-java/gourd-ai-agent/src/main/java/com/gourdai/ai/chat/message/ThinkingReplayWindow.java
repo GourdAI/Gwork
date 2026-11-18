@@ -24,7 +24,7 @@ import java.util.List;
  *
  * <p><b>为什么不是「全量回放」也不是「一律剥离」</b>——两端都会出事故：</p>
  * <ul>
- *   <li><b>全量回放</b>（本类引入前 ollama / openai-chat 的行为）：每轮把历史各轮思考
+ *   <li><b>全量回放</b>（本类引入前 openai-chat 的行为）：每轮把历史各轮思考
  *       重新上行。思考明文通常是可见正文的数十倍，逐轮累加即上下文膨胀
  *       （Responses 协议同源缺陷实测占单轮上行 token 的 71.74%）。</li>
  *   <li><b>一律剥离</b>：DeepSeek thinking 模式下，带 {@code tool_calls} 的 assistant 消息
@@ -35,7 +35,7 @@ import java.util.List;
  * </ul>
  *
  * <p><b>窗口口径</b>：跨 user 轮边界剥离、轮内保留。这既满足 DeepSeek 的硬要求
- * （它只要求「本轮」工具循环里的 assistant 消息带思考），又与 Ollama / Qwen3 官方模板
+ * （它只要求「本轮」工具循环里的 assistant 消息带思考），又与 Qwen3 官方模板
  * 的既有行为一致（模板自身只向模型展示最近一条 user 之后的思考），
  * 因此对这些目标而言本窗口不改变模型可见输入，纯粹省掉白传的字节。</p>
  *
@@ -92,7 +92,7 @@ public final class ThinkingReplayWindow {
     /**
      * 给定已算好的最后 user 下标，判定是否在窗口内（循环内复用，避免 O(n²)）。
      *
-     * <p><b>两个条件取并集</b>，与 Qwen3 / Ollama 官方模板的
+     * <p><b>两个条件取并集</b>，与 Qwen3 官方模板的
      * {@code (or $last (gt $i $lastUserIdx))} 逐字对齐：</p>
      * <ul>
      *   <li>{@code index > lastUserIndex}：最后一条 user 之后的当轮消息；</li>

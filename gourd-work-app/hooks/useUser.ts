@@ -2,52 +2,57 @@
  * 当前登录用户的跨页面共享状态。
  *
  * 「我的」、账号设置、换绑邮箱与会话抽屉底栏共用同一份；模块级单例 ref，
- * 与 useRunEnv 同一模式，无需 provide / inject。接口接入后改为启动时拉取。
+ * 与 useRunEnv 同一模式，无需 provide / inject。
+ *
+ * 账号数据来自 GWork 官方后台（utils/gwork-auth.ts）：
+ * - 登录成功 / 启动恢复后调 refreshUserFromAccount() 拉取 GetSelf 回写；
+ * - 余额只认服务端格式化串 quota_display（桌面端同款纪律）：原始 quota 整数
+ *   既不是金额也不是可读余额，客户端绝不自行换算；旧后台未下发时显示「—」。
+ * - 账号均为个人身份（产品无企业账号体系）。
  */
-import { computed, ref } from 'vue'
-import type { ComputedRef, Ref } from 'vue'
-import { ENTERPRISES } from '@/data/app-data'
-import type { EnterpriseAccount, IdentityType } from '@/data/app-data'
+import { ref } from 'vue'
+import type { Ref } from 'vue'
+import { gworkSelf, gworkUpdateDisplayName, gworkSignedIn } from '@/utils/gwork-auth.ts'
+import type { GworkSelf } from '@/utils/gwork-auth.ts'
 
-const name: Ref<string> = ref<string>('Tila')
-const email: Ref<string> = ref<string>('tila@gwork.com')
-const points: Ref<string> = ref<string>('2000.00')
-const avatar: Ref<string> = ref<string>('/static/avatar-default.png')
-const idType: Ref<IdentityType> = ref<IdentityType>('personal')
-const enterprise: Ref<string> = ref<string>('')
+const DEFAULT_AVATAR = '/static/avatar-default.png'
 
-/** 企业身份下的角色；个人身份没有角色徽标，返回空串 */
-const role: ComputedRef<string> = computed<string>((): string => {
-	if (idType.value !== 'enterprise') return ''
-	const found: EnterpriseAccount | undefined = ENTERPRISES.find((item: EnterpriseAccount): boolean => item.name === enterprise.value)
-	return found?.role ?? ''
-})
+const name: Ref<string> = ref<string>('')
+const email: Ref<string> = ref<string>('')
+const points: Ref<string> = ref<string>('—')
+const avatar: Ref<string> = ref<string>(DEFAULT_AVATAR)
 
-function setName(value: string): void {
-	name.value = value
+/** GetSelf 回写共享状态；displayName 缺省回落 username（与后台 web 端同规则） */
+function applySelf(self: GworkSelf): void {
+	name.value = self.displayName.length > 0 ? self.displayName : self.username
+	email.value = self.email
+	points.value = self.quotaDisplay.length > 0 ? self.quotaDisplay : '—'
 }
 
-function setEmail(value: string): void {
-	email.value = value
+/** 登录成功 / 会话恢复后调用：拉取用户信息回写；失败静默（余额保持「—」，不阻塞页面） */
+export function refreshUserFromAccount(): void {
+	if (!gworkSignedIn().value) return
+	gworkSelf().then((self: GworkSelf): void => {
+		applySelf(self)
+	}, (): void => { })
+}
+
+/** 退出登录后清空共享状态，避免下个账号看到上一个账号的资料 */
+export function resetUser(): void {
+	name.value = ''
+	email.value = ''
+	points.value = '—'
+	avatar.value = DEFAULT_AVATAR
 }
 
 function setAvatar(value: string): void {
 	avatar.value = value
 }
 
-function switchToPersonal(): void {
-	idType.value = 'personal'
-	enterprise.value = ''
-}
-
-/** 返回 false 表示企业受阻（认证中 / 未认证 / 未购套餐），由调用方弹提示 */
-function switchToEnterprise(entName: string): boolean {
-	const found: EnterpriseAccount | undefined = ENTERPRISES.find((item: EnterpriseAccount): boolean => item.name === entName)
-	if (found == null) return false
-	if (found.status !== 'ok' || !found.pkg) return false
-	idType.value = 'enterprise'
-	enterprise.value = found.name
-	return true
+/** 修改显示名：真实调用后台 UpdateSelf，成功后回写共享状态；失败 reject 由页面提示 */
+async function updateDisplayName(value: string): Promise<void> {
+	await gworkUpdateDisplayName(value)
+	name.value = value
 }
 
 export type User = {
@@ -55,14 +60,8 @@ export type User = {
 	email: Ref<string>
 	points: Ref<string>
 	avatar: Ref<string>
-	idType: Ref<IdentityType>
-	enterprise: Ref<string>
-	role: ComputedRef<string>
-	setName: (value: string) => void
-	setEmail: (value: string) => void
 	setAvatar: (value: string) => void
-	switchToPersonal: () => void
-	switchToEnterprise: (entName: string) => boolean
+	updateDisplayName: (value: string) => Promise<void>
 }
 
 export function useUser(): User {
@@ -71,13 +70,7 @@ export function useUser(): User {
 		email,
 		points,
 		avatar,
-		idType,
-		enterprise,
-		role,
-		setName,
-		setEmail,
 		setAvatar,
-		switchToPersonal,
-		switchToEnterprise
+		updateDisplayName
 	}
 }

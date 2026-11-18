@@ -82,7 +82,7 @@ import java.util.stream.Collectors;
  *                 .apiUrl("http://localhost:8081/sse")
  *                 .build();
  *
- * ChatModel chatModel = ChatModel.of("http://127.0.0.1:11434/api/chat")
+ * ChatModel chatModel = ChatModel.of("https://api.deepseek.com/v1/chat/completions")
  *                 .model("deepseek-v3")
  *                 .defaultToolsAdd(toolProvider)
  *                 .build();

@@ -1,8 +1,36 @@
 <template>
 	<view class="home" :class="themeClass">
-		<!-- 会话抽屉改为 swiper 原生分页：0=抽屉 1=首页内容。
+		<!-- 宽屏（平板/横屏）：会话抽屉常驻侧栏 + 主区双栏，无横滑分页；
+			侧栏常驻时 close 事件不再驱动布局（抽屉组件的关闭按钮由 hide-close 隐藏） -->
+		<view v-if="isWide" class="home__split">
+			<view class="home__side" :style="sideStyle">
+				<app-conv-drawer :hide-close="true" @open-conv="onOpenConv" @new-chat="onNewChat"></app-conv-drawer>
+			</view>
+			<view class="home__side-sep"></view>
+			<view class="home__pane">
+				<view v-if="!inChat" class="home__main">
+					<home-header :device="device" :device-online="deviceOnline" :workspace="workspace"
+						:permission="permission" :hide-menu="true" @open-run="openSheet('run')"></home-header>
+
+					<home-hero @fill="onFill"></home-hero>
+
+					<view v-if="expanded" class="home__catcher" @click="onCollapse"></view>
+
+					<app-composer v-model="draft" :expanded="expanded" :model="model" :tag="attachTag"
+						:column-style="chatColumnStyle" input-id="home-composer-input" @expand="onExpand"
+						@collapse="onCollapse" @send="onSend" @open-model="openSheet('model')"
+						@open-plus="openSheet('plus')"></app-composer>
+				</view>
+
+				<view v-else class="home__chat">
+					<app-chat :hide-menu="true" @new-chat="onNewChat"></app-chat>
+				</view>
+			</view>
+		</view>
+
+		<!-- 窄屏（手机竖屏）：会话抽屉改为 swiper 原生分页：0=抽屉 1=首页内容。
 			横向手势与纵向滚动由原生层仲裁，页面不再自行判定侧滑 -->
-		<swiper class="home__pager" :current="current" :duration="300" @change="onSwiperChange">
+		<swiper v-else class="home__pager" :current="current" :duration="300" @change="onSwiperChange">
 			<swiper-item class="home__page">
 				<app-conv-drawer @close="closeDrawer" @open-conv="onOpenConv" @new-chat="onNewChat"></app-conv-drawer>
 			</swiper-item>
@@ -21,8 +49,9 @@
 					<view v-if="expanded" class="home__catcher" @click="onCollapse"></view>
 
 					<app-composer v-model="draft" :expanded="expanded" :model="model" :tag="attachTag"
-						input-id="home-composer-input" @expand="onExpand" @collapse="onCollapse" @send="onSend"
-						@open-model="openSheet('model')" @open-plus="openSheet('plus')"></app-composer>
+						:column-style="chatColumnStyle" input-id="home-composer-input" @expand="onExpand"
+						@collapse="onCollapse" @send="onSend" @open-model="openSheet('model')"
+						@open-plus="openSheet('plus')"></app-composer>
 				</view>
 
 				<view v-else class="home__chat">
@@ -45,13 +74,15 @@
 </template>
 
 <script setup lang="ts">
-	import { ref } from 'vue'
-	import type { Ref } from 'vue'
+	import { computed, ref } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
 	import { useTheme } from '@/hooks/useTheme'
+	import { useViewport, chatColumnStyle } from '@/hooks/useViewport'
 	import { useRunEnv } from '@/hooks/useRunEnv'
 	import { useConversations } from '@/hooks/useConversations'
-	import { onBackPress } from '@dcloudio/uni-app'
+	import { onBackPress, onResize, onShow } from '@dcloudio/uni-app'
+	import { refreshViewport } from '@/hooks/useViewport'
 	import HomeHeader from './components/home-header.uvue'
 	import HomeHero from './components/home-hero.uvue'
 	import AppComposer from '@/components/app-composer/app-composer.uvue'
@@ -64,7 +95,13 @@
 	type HomeSheetName = '' | 'run' | 'model' | 'plus'
 
 	const { themeClass } = useTheme()
+	const { isWide, sidebarWidth, safeLeft } = useViewport()
 	const env = useRunEnv()
+
+	// 侧栏宽度行内注入；横屏刘海在左侧时让出安全区（页面级 env() 只处理了底部）
+	const sideStyle: ComputedRef<string> = computed<string>((): string => {
+		return 'width:' + sidebarWidth.value.toString() + 'px;padding-left:' + safeLeft.value.toString() + 'px;'
+	})
 	const { createConversation, sendMessage, setActive } = useConversations()
 
 	const {
@@ -79,18 +116,26 @@
 	const current: Ref<number> = ref<number>(1)
 	const inChat: Ref<boolean> = ref<boolean>(false)
 
-	// 系统返回手势/返回键：聊天态先转出会话抽屉；抽屉或弹层开着时先收起，二次返回才离开页面
+	// APP 端旋转/分屏只有页面级 onResize（无全局 uni.onWindowResize）；onShow 兜底后台期间的旋转
+	onResize((_e: OnResizeOptions): void => {
+		refreshViewport()
+	})
+	onShow((): void => {
+		refreshViewport()
+	})
+
+	// 系统返回手势/返回键：聊天态先转出会话抽屉（宽屏侧栏常驻，无需转出）；抽屉或弹层开着时先收起，二次返回才离开页面
 	onBackPress((): boolean => {
-		if (inChat.value) {
+		if (inChat.value && !isWide.value) {
 			exitChatToDrawer()
-			return true
-		}
-		if (current.value === 0) {
-			closeDrawer()
 			return true
 		}
 		if (activeSheet.value !== '') {
 			closeSheets()
+			return true
+		}
+		if (current.value === 0) {
+			closeDrawer()
 			return true
 		}
 		return false
@@ -233,6 +278,27 @@
 		&__pager,
 		&__page {
 			flex: 1;
+		}
+
+		// 宽屏双栏：侧栏 + 1px 分隔线 + 主区
+		&__split {
+			flex: 1;
+			flex-direction: row;
+		}
+
+		&__side {
+			flex-direction: column;
+		}
+
+		&__side-sep {
+			width: 1px;
+			background-color: var(--color-border-light);
+		}
+
+		&__pane {
+			flex: 1;
+			min-width: 0;
+			flex-direction: column;
 		}
 
 		// 首页态容器：relative 让展开态的 catcher 以它为定位父级，点击层的影响范围锁在容器内

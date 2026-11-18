@@ -38,8 +38,7 @@
         { value: 'openai', label: 'OpenAI (Chat Completions)' },
         { value: 'openai-responses', label: 'OpenAI (Responses)' },
         { value: 'anthropic', label: 'Anthropic (Messages)' },
-        { value: 'gemini', label: 'Google (Gemini)' },
-        { value: 'ollama', label: 'Ollama (/api/chat)' }
+        { value: 'gemini', label: 'Google (Gemini)' }
     ];
     var DEFAULT_STANDARD = 'openai';
 

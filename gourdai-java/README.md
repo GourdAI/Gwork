@@ -35,7 +35,7 @@ GWork 不是又一个聊天机器人，而是一套完整的 **桌面智能体�
 
 | | 能力 | 说明 |
 |---|---|---|
-| 🧠 | **多协议 AI 接入** | OpenAI / Anthropic / Gemini / DeepSeek / Ollama 等，一个配置自由切换，模型零锁定 |
+| 🧠 | **多协议 AI 接入** | OpenAI / Anthropic / Gemini / DeepSeek 等，一个配置自由切换，模型零锁定 |
 | 🛠️ | **Skills 技能市场** | 一键安装 Clawhub / Skillhub / SkillsSh 技能，能力无限扩展 |
 | 🔌 | **MCP 协议** | 原生支持 MCP Server（stdio / SSE / Streamable），接入整个 MCP 生态 |
 | 🧬 | **长短期记忆** | 工作空间 + 全局双层记忆域，跨会话记住你的偏好、决策与项目上下文 |

@@ -3,7 +3,10 @@
 //! Supports stdio and HTTP (SSE/streamable) transports. MCP servers registered
 //! in settings expose additional tools to the agent.
 //!
-//! `market` is the single built-in connector catalog adapter (ModelScope MCP 广场).
+//! Built-in connector catalog adapters: `market` (ModelScope MCP 广场, default),
+//! `tencent` (腾讯云 MCP 广场) and `smithery` (Smithery registry) — the latter two
+//! ported from SolonCode v2026.11's connector market. All three emit the same
+//! list/detail JSON shape so `server::mcp_market_api` reuses one install path.
 //!
 //! Config format (settings.json → "mcpServers"):
 //! ```json
@@ -27,7 +30,10 @@
 
 pub mod auth;
 pub mod market;
+pub mod market_http;
 pub mod oauth;
+pub mod smithery;
+pub mod tencent;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

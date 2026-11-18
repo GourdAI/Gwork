@@ -8,9 +8,9 @@
 //!
 //! # Why this existed as a single hard-coded protocol
 //!
-//! `ModelConfig` has always carried a `standard` field, and the settings UI has
-//! always offered five choices (`app-model-settings.js` `STANDARD_OPTIONS`:
-//! openai / openai-responses / anthropic / gemini / ollama). But `LlmClient`
+//! `ModelConfig` has always carried a `standard` field, and the settings UI
+//! offers four choices (`app-model-settings.js` `STANDARD_OPTIONS`:
+//! openai / openai-responses / anthropic / gemini). But `LlmClient`
 //! built a `ChatCompletionRequest` unconditionally and derived the URL with
 //! `completions_url()`, which appends `/v1/chat/completions` no matter what.
 //! `standard` was read only for *display* (the model list, and
@@ -38,8 +38,6 @@ pub enum Dialect {
     AnthropicMessages,
     /// Google `:generateContent` / `:streamGenerateContent`.
     GeminiGenerate,
-    /// Ollama `/api/chat` (newline-delimited JSON, **not** SSE).
-    OllamaChat,
 }
 
 impl Dialect {
@@ -65,10 +63,6 @@ impl Dialect {
         if std.contains("gemini") || std.contains("google") || std.contains("interactions") {
             return Dialect::GeminiGenerate;
         }
-        if std.contains("ollama") {
-            return Dialect::OllamaChat;
-        }
-
         // URL-based fallbacks (Java applies the same, e.g.
         // `GeminiChatDialect`: `apiUrl.contains(":generateContent")`).
         if url.contains(":generatecontent") || url.contains(":streamgeneratecontent") {
@@ -80,10 +74,6 @@ impl Dialect {
         if url.ends_with("/responses") || url.contains("/v1/responses") {
             return Dialect::OpenAiResponses;
         }
-        if url.ends_with("/api/chat") || url.contains("/api/chat") {
-            return Dialect::OllamaChat;
-        }
-
         // Model-name heuristic, last resort. Java's `AbstractChatDialect` does the
         // same for Gemini (`containsAny(model, "gemini")`).
         if m.contains("gemini") {
@@ -156,13 +146,6 @@ impl Dialect {
                     if stream { "streamGenerateContent" } else { "generateContent" });
                 if stream { with_sse_flag(&url) } else { url }
             }
-            Dialect::OllamaChat => {
-                if lower.ends_with("/api/chat") {
-                    base
-                } else {
-                    format!("{}/api/chat", base)
-                }
-            }
         }
     }
 
@@ -172,8 +155,6 @@ impl Dialect {
     /// single most common cause of a 401 that looks like a bad key:
     /// - Anthropic wants `x-api-key` and a pinned `anthropic-version`;
     /// - Gemini wants `x-goog-api-key`;
-    /// - Ollama wants no auth at all (and rejects nothing, but a stray Bearer is
-    ///   harmless);
     /// - OpenAI (both) wants `Authorization: Bearer`.
     pub fn auth_headers(&self, model: &ModelConfig) -> Vec<(String, String)> {
         let mut out = Vec::new();
@@ -189,12 +170,6 @@ impl Dialect {
             Dialect::GeminiGenerate => {
                 if !key.is_empty() {
                     out.push(("x-goog-api-key".into(), key.to_string()));
-                }
-            }
-            Dialect::OllamaChat => {
-                // Local server; a key is unusual but honour it if configured.
-                if !key.is_empty() {
-                    out.push(("Authorization".into(), format!("Bearer {}", key)));
                 }
             }
             Dialect::OpenAiChat | Dialect::OpenAiResponses => {
@@ -213,7 +188,6 @@ impl Dialect {
             Dialect::OpenAiResponses => openai_responses_body(req),
             Dialect::AnthropicMessages => anthropic_body(req),
             Dialect::GeminiGenerate => gemini_body(req),
-            Dialect::OllamaChat => ollama_body(req),
         }
     }
 
@@ -224,17 +198,15 @@ impl Dialect {
             Dialect::OpenAiResponses => Box::new(ResponsesParser::default()),
             Dialect::AnthropicMessages => Box::new(AnthropicParser::default()),
             Dialect::GeminiGenerate => Box::new(GeminiParser::default()),
-            Dialect::OllamaChat => Box::new(OllamaParser::default()),
         }
     }
 
-    /// Whether this dialect's stream is SSE (`data:` framed) or bare NDJSON.
+    /// Whether this dialect's stream is SSE (`data:` framed).
     ///
-    /// Ollama is the odd one out: `/api/chat` streams newline-delimited JSON with
-    /// no `data:` prefix. Treating it as SSE silently yields zero events and the
-    /// run ends with an empty answer.
+    /// All supported protocols stream SSE (Gemini via `?alt=sse`). Kept as a
+    /// method so the transport can branch without matching on every variant.
     pub fn is_sse(&self) -> bool {
-        !matches!(self, Dialect::OllamaChat)
+        true
     }
 }
 
@@ -886,43 +858,6 @@ fn gemini_image(url: &str) -> Value {
     json!({ "fileData": { "fileUri": url } })
 }
 
-// ─── Ollama ───────────────────────────────────────────────────────────────────
-
-fn ollama_body(req: &DialectRequest) -> Value {
-    // Ollama speaks the OpenAI message shape, so `messages` serialises directly.
-    let mut body = json!({
-        "model": req.model,
-        "messages": req.messages,
-        "stream": req.stream,
-    });
-    let obj = body.as_object_mut().unwrap();
-    if !req.tools.is_empty() {
-        obj.insert("tools".into(), json!(req.tools));
-    }
-    if let Some(level) = &req.thinking {
-        // Ollama's `think` is a boolean, not a level. "auto"/empty mean "provider
-        // default" — omit the key rather than forcing thinking on.
-        let on = !matches!(
-            level.to_ascii_lowercase().as_str(),
-            "minimal" | "none" | "off" | "auto" | ""
-        );
-        if on {
-            obj.insert("think".into(), json!(true));
-        }
-    }
-    if req.temperature.is_some() || req.max_tokens.is_some() {
-        let mut options = json!({});
-        if let Some(t) = req.temperature {
-            options["temperature"] = json!(t);
-        }
-        if let Some(m) = req.max_tokens {
-            options["num_predict"] = json!(m);
-        }
-        obj.insert("options".into(), options);
-    }
-    body
-}
-
 // ─── Stream parsing ───────────────────────────────────────────────────────────
 
 /// Translates one provider's stream into [`StreamEvent`]s.
@@ -932,8 +867,8 @@ fn ollama_body(req: &DialectRequest) -> Value {
 pub trait StreamParser: Send {
     /// Feed one line of the raw stream (already split on `\n`, `\r` trimmed).
     ///
-    /// The line is passed **unstripped**: SSE dialects remove their own `data:`
-    /// prefix, while Ollama parses the line as JSON directly.
+    /// The line is passed **unstripped**: each dialect removes its own `data:`
+    /// prefix (and tolerates bare JSON where proxies drop the SSE framing).
     fn feed_line(&mut self, line: &str) -> Vec<StreamEvent>;
     /// The transport ended. Must yield a terminal `Done` if none was seen.
     fn finish(&mut self) -> Vec<StreamEvent>;
@@ -1504,99 +1439,6 @@ impl StreamParser for GeminiParser {
     }
 }
 
-// ── Ollama ────────────────────────────────────────────────────────────────────
-
-#[derive(Default)]
-pub struct OllamaParser {
-    acc: ToolAccumulator,
-    next_tool_index: u32,
-}
-
-impl StreamParser for OllamaParser {
-    fn feed_line(&mut self, line: &str) -> Vec<StreamEvent> {
-        let t = line.trim();
-        if t.is_empty() {
-            return Vec::new();
-        }
-        // Ollama streams bare NDJSON. Tolerate an SSE wrapper anyway: some
-        // proxies in front of Ollama add one, and refusing to parse would turn a
-        // working setup into a silent empty answer.
-        let payload = strip_sse(t).unwrap_or(t);
-        if payload == "[DONE]" {
-            return self.acc.terminal();
-        }
-        let Ok(v) = serde_json::from_str::<Value>(payload) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-
-        if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
-            out.push(StreamEvent::Error(err.to_string()));
-            self.acc.done = true;
-            return out;
-        }
-
-        if let Some(msg) = v.get("message") {
-            if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
-                if !text.is_empty() {
-                    out.push(StreamEvent::ContentDelta(text.to_string()));
-                }
-            }
-            // Ollama carries thinking in its own field (qwen3 with `think:true`);
-            // dropping it here lost the reasoning channel entirely.
-            if let Some(th) = msg.get("thinking").and_then(|c| c.as_str()) {
-                if !th.is_empty() {
-                    out.push(StreamEvent::ReasoningDelta(th.to_string()));
-                }
-            }
-            // Ollama delivers tool calls whole, like Gemini.
-            if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
-                for tc in tcs {
-                    let Some(f) = tc.get("function") else { continue };
-                    let name = f.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                    if name.is_empty() {
-                        continue;
-                    }
-                    let args = f.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                    let idx = self.next_tool_index;
-                    self.next_tool_index += 1;
-                    let slot = self.acc.slot(idx);
-                    let id = format!("ollama-call-{}", idx);
-                    self.acc.calls[slot].0 = id.clone();
-                    self.acc.calls[slot].1 = name.clone();
-                    out.push(StreamEvent::ToolCallStart { index: idx, id, name });
-                    out.push(StreamEvent::ToolCallArgsDelta { index: idx, args: args.to_string() });
-                }
-            }
-        }
-
-        if let Some(u) = v.get("prompt_eval_count").and_then(|n| n.as_u64()) {
-            let usage = self.acc.usage.get_or_insert_with(UsageInfo::default);
-            usage.prompt_tokens = u;
-        }
-        if let Some(u) = v.get("eval_count").and_then(|n| n.as_u64()) {
-            let usage = self.acc.usage.get_or_insert_with(UsageInfo::default);
-            usage.completion_tokens = u;
-        }
-
-        // `done: true` is Ollama's terminator.
-        if v.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
-            if let Some(reason) = v.get("done_reason").and_then(|r| r.as_str()) {
-                self.acc.finish_reason = Some(match reason {
-                    "length" => "length".to_string(),
-                    _ => "stop".to_string(),
-                });
-            }
-            out.extend(self.acc.terminal());
-        }
-        out
-    }
-
-    fn finish(&mut self) -> Vec<StreamEvent> {
-        self.acc.terminal()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1635,10 +1477,6 @@ mod tests {
             Dialect::resolve(&model("gemini", "https://generativelanguage.googleapis.com", "gemini-2.5-pro")),
             Dialect::GeminiGenerate
         );
-        assert_eq!(
-            Dialect::resolve(&model("ollama", "http://localhost:11434", "llama3")),
-            Dialect::OllamaChat
-        );
     }
 
     /// `anthropic-messages` is the constant Java uses; it must resolve too.
@@ -1667,10 +1505,6 @@ mod tests {
         assert_eq!(
             Dialect::resolve(&model("", "https://api.anthropic.com/v1/messages", "claude-x")),
             Dialect::AnthropicMessages
-        );
-        assert_eq!(
-            Dialect::resolve(&model("", "http://localhost:11434/api/chat", "llama3")),
-            Dialect::OllamaChat
         );
         assert_eq!(
             Dialect::resolve(&model("", "https://x/v1/responses", "gpt-5")),
@@ -1726,10 +1560,6 @@ mod tests {
             Dialect::AnthropicMessages.endpoint(&model("anthropic", "https://api.anthropic.com", "m"), true),
             "https://api.anthropic.com/v1/messages"
         );
-        assert_eq!(
-            Dialect::OllamaChat.endpoint(&model("ollama", "http://localhost:11434", "m"), true),
-            "http://localhost:11434/api/chat"
-        );
     }
 
     /// Gemini's URL embeds the model id and flips verb with streaming, and must
@@ -1754,8 +1584,6 @@ mod tests {
             Dialect::AnthropicMessages.endpoint(&m, true),
             "https://api.anthropic.com/v1/messages"
         );
-        let m2 = model("ollama", "http://localhost:11434/api/chat", "llama3");
-        assert_eq!(Dialect::OllamaChat.endpoint(&m2, true), "http://localhost:11434/api/chat");
         let m3 = model("openai", "https://x/v1/chat/completions", "g");
         assert_eq!(Dialect::OpenAiChat.endpoint(&m3, true), "https://x/v1/chat/completions");
     }
@@ -1794,12 +1622,12 @@ mod tests {
         }
     }
 
-    /// No key configured → no auth header at all (Ollama and local proxies).
+    /// No key configured → no credential header at all (local proxies).
     #[test]
     fn a_missing_key_produces_no_auth_header() {
-        let mut m = model("ollama", "http://localhost:11434", "llama3");
+        let mut m = model("openai", "http://localhost:8080", "local-model");
         m.api_key = String::new();
-        assert!(Dialect::OllamaChat.auth_headers(&m).is_empty());
+        assert!(Dialect::OpenAiChat.auth_headers(&m).is_empty());
         // Anthropic still needs its version header.
         let h: std::collections::HashMap<_, _> =
             Dialect::AnthropicMessages.auth_headers(&m).into_iter().collect();
@@ -1857,7 +1685,6 @@ mod tests {
         assert!(a["thinking"]["budget_tokens"].as_u64().unwrap() > 0);
         let g = Dialect::GeminiGenerate.request_body(&req);
         assert!(g["generationConfig"]["thinkingConfig"]["thinkingBudget"].as_i64().unwrap() > 0);
-        assert_eq!(Dialect::OllamaChat.request_body(&req)["think"], true);
     }
 
     /// `xhigh` is a GWork-level concept OpenAI does not accept; it must be clamped
@@ -1883,7 +1710,6 @@ mod tests {
             ..Default::default()
         };
         assert!(Dialect::OpenAiChat.request_body(&req).get("reasoning_effort").is_none());
-        assert!(Dialect::OllamaChat.request_body(&req).get("think").is_none());
     }
 
     /// Anthropic's thinking budget must fit inside `max_tokens`, or the API
@@ -2362,26 +2188,6 @@ mod tests {
         assert!(b.get("messages").is_none());
     }
 
-    #[test]
-    fn ollama_body_uses_openai_message_shape() {
-        let req = DialectRequest {
-            model: "llama3".into(),
-            messages: vec![ChatMessage::system("sys"), ChatMessage::user("hi")],
-            tools: vec![tool_def()],
-            stream: true,
-            temperature: Some(0.5),
-            max_tokens: Some(100),
-            ..Default::default()
-        };
-        let b = Dialect::OllamaChat.request_body(&req);
-        assert_eq!(b["model"], "llama3");
-        assert_eq!(b["messages"][0]["role"], "system");
-        assert_eq!(b["tools"][0]["function"]["name"], "read");
-        // Ollama nests tuning under `options`.
-        assert_eq!(b["options"]["temperature"], 0.5);
-        assert_eq!(b["options"]["num_predict"], 100);
-    }
-
     /// No tools → the key must be absent. An empty `tools: []` makes some
     /// providers reject the request or force tool use.
     #[test]
@@ -2396,7 +2202,6 @@ mod tests {
             Dialect::OpenAiResponses,
             Dialect::AnthropicMessages,
             Dialect::GeminiGenerate,
-            Dialect::OllamaChat,
         ] {
             let b = d.request_body(&req);
             assert!(b.get("tools").is_none(), "{:?} emitted an empty tools array: {}", d, b);
@@ -2710,70 +2515,6 @@ mod tests {
         }
     }
 
-    /// Ollama streams bare NDJSON — no `data:` prefix. Parsing it as SSE yields
-    /// nothing, which presents as an empty answer with no error.
-    #[test]
-    fn ollama_parses_bare_ndjson() {
-        assert!(!Dialect::OllamaChat.is_sse());
-        let mut p = Dialect::OllamaChat.parser();
-        let events = collect(
-            p.as_mut(),
-            &[
-                "{\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"done\":false}",
-                "{\"message\":{\"role\":\"assistant\",\"content\":\" there\"},\"done\":false,\"prompt_eval_count\":9,\"eval_count\":3}",
-                "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}",
-            ],
-        );
-        assert_eq!(texts(&events), "Hi there");
-        match events.last().unwrap() {
-            StreamEvent::Done { usage, .. } => {
-                let u = usage.as_ref().unwrap();
-                assert_eq!(u.prompt_tokens, 9);
-                assert_eq!(u.completion_tokens, 3);
-            }
-            other => panic!("{:?}", other),
-        }
-    }
-
-    #[test]
-    fn ollama_parses_tool_calls() {
-        let mut p = Dialect::OllamaChat.parser();
-        let events = collect(
-            p.as_mut(),
-            &["{\"message\":{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"name\":\"read\",\"arguments\":{\"p\":1}}}]},\"done\":true}"],
-        );
-        assert!(matches!(&events[0], StreamEvent::ToolCallStart { name, .. } if name == "read"));
-        let args: String = events
-            .iter()
-            .filter_map(|e| match e { StreamEvent::ToolCallArgsDelta { args, .. } => Some(args.as_str()), _ => None })
-            .collect();
-        assert!(args.contains("\"p\":1"), "{}", args);
-    }
-
-    /// An Ollama error field must surface rather than being read as content.
-    #[test]
-    fn ollama_surfaces_errors() {
-        let mut p = Dialect::OllamaChat.parser();
-        let events = collect(p.as_mut(), &["{\"error\":\"model 'x' not found\"}"]);
-        assert!(matches!(&events[0], StreamEvent::Error(m) if m.contains("not found")), "{:?}", events);
-    }
-
-    /// Ollama's `message.thinking` (qwen3 with think enabled) is the reasoning
-    /// channel; dropping it lost the thinking block entirely.
-    #[test]
-    fn ollama_thinking_maps_to_reasoning() {
-        let mut p = Dialect::OllamaChat.parser();
-        let events = collect(
-            p.as_mut(),
-            &[
-                "{\"message\":{\"role\":\"assistant\",\"thinking\":\"hmm\",\"content\":\"\"},\"done\":false}",
-                "{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":true,\"done_reason\":\"stop\"}",
-            ],
-        );
-        assert_eq!(texts(&events), "ok");
-        assert_eq!(reasonings(&events), "hmm");
-    }
-
     // ── Robustness ────────────────────────────────────────────────────────────
 
     /// Every parser must terminate with exactly one `Done`, even on a truncated
@@ -2785,7 +2526,6 @@ mod tests {
             Dialect::OpenAiResponses,
             Dialect::AnthropicMessages,
             Dialect::GeminiGenerate,
-            Dialect::OllamaChat,
         ] {
             let mut p = d.parser();
             let events = collect(p.as_mut(), &["data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}"]);
@@ -2812,7 +2552,6 @@ mod tests {
             Dialect::OpenAiResponses,
             Dialect::AnthropicMessages,
             Dialect::GeminiGenerate,
-            Dialect::OllamaChat,
         ] {
             let mut p = d.parser();
             let events = collect(

@@ -40,12 +40,24 @@
     var MAIN_SKILLS = 'skills';
     var VIEW_CONNECTORS = 'connectors';
     var VIEW_INTERFACES = 'interfaces';
-    /* 连接器主 tab 内的二级视图：已安装（配置列表）/ 广场（魔搭目录）。
-     * 用户报障「MCP 都跑到下面了」的根因就是二者曾上下堆叠在同一 pane；
-     * 现按参考图拆成二级导航互斥切换，与技能页「已安装/各市场」同构。 */
+    /* 连接器主 tab 内的二级视图：已安装（配置列表）+ 三个目录源直切
+     * （魔搭 / 腾讯云 / Smithery，2026-11 集成 SolonCode v2026.11 连接器市场）。
+     * 用户拍板「不要再显示广场了，就按照技能那样，三个源切换」——
+     * 「广场」中间层 tab 退役（conn-market / market_tab 键一并删除），
+     * 二级导航与技能页「已安装/各市场」完全同构。 */
     var CONN_INSTALLED = 'conn-installed';
-    var CONN_MARKET = 'conn-market';
-    var _connView = CONN_MARKET;      // 广场是主场景（对齐技能页默认进市场）
+    var CONN_SOURCES = ['modelscope', 'tencent', 'smithery'];
+    /* 源 tab 值加 conn-src: 前缀，避免与技能市场 name（modelscope.cn 等域名）
+     * 在 switchView 的统一入口里撞名。 */
+    function connSourceView(src) { return 'conn-src:' + src; }
+    function isConnSourceView(view) {
+        return typeof view === 'string' && view.indexOf('conn-src:') === 0 &&
+            CONN_SOURCES.indexOf(view.slice(9)) >= 0;
+    }
+    function connViewSource() {
+        return isConnSourceView(_connView) ? _connView.slice(9) : 'modelscope';
+    }
+    var _connView = connSourceView('modelscope'); // 目录是主场景（默认魔搭，行为不变）
     var _mcpInstalledCount = 0;       // 由 app-settings-mcp.js renderMcpList 上报
 
 
@@ -381,19 +393,33 @@
     }
 
     /**
-     * 连接器主 tab 内的二级导航：已安装（计数徽标）/ 广场。
-     * 复用技能页 #skillsSourceBarWrap 同一容器与 pill 形态（用户参考图：
-     * 二级导航是主 tab 下方一排小圆角标签），事件走 data-conn 分派。
+     * 连接器主 tab 内的二级导航：已安装（计数徽标）+ 三个目录源直切
+     * （魔搭 / 腾讯云 / Smithery）。与技能页「已安装/各市场」完全同构：
+     * 复用 #skillsSourceBarWrap 同一容器与 pill 形态，事件走 data-conn 分派。
+     * 「广场」中间层 tab 已退役（用户拍板）；总数徽标 #mcpMarketTotal 挂在
+     * 当前激活的源 tab 上（只有一个，无重复 id）。
      * 接口页无二级视图，wrap 由 showPane 隐藏。
      */
+    var CONN_SOURCE_LABELS = { modelscope: 'ModelScope', tencent: '腾讯云', smithery: 'Smithery' };
     function renderConnTabs() {
         var html = '<button type="button" class="skills-source-tab skills-conn-tab' + (_connView === CONN_INSTALLED ? ' active' : '') + '" data-conn="' + CONN_INSTALLED + '">'
             + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>'
             + '<span>' + escapeHtml(GourdI18n.t('settings.skills.installed_tab')) + '</span>'
             + '<span class="skills-tab-count">' + (_mcpInstalledCount > 0 ? _mcpInstalledCount : '') + '</span></button>';
-        html += '<button type="button" class="skills-source-tab skills-conn-tab' + (_connView === CONN_MARKET ? ' active' : '') + '" data-conn="' + CONN_MARKET + '">'
-            + '<span>' + escapeHtml(GourdI18n.t('settings.mcp.market.market_tab')) + '</span>'
-            + '<span class="skills-tab-count" id="mcpMarketTotal"></span></button>';
+        CONN_SOURCES.forEach(function (src) {
+            var view = connSourceView(src);
+            var active = _connView === view;
+            /* GourdI18n.t 缺键时返回键名本身（非空串），`t(k) || fallback` 永远
+             * 走不到 fallback —— 必须显式判「返回值 === 键名」。语言包未加载完
+             * 的首帧否则会把 settings.mcp.market.source_xxx 裸键画进 tab。 */
+            var key = 'settings.mcp.market.source_' + src;
+            var tr = GourdI18n.t(key);
+            var label = (tr && tr !== key) ? tr : CONN_SOURCE_LABELS[src];
+            html += '<button type="button" class="skills-source-tab skills-conn-tab' + (active ? ' active' : '') + '" data-conn="' + view + '">'
+                + '<span>' + escapeHtml(label) + '</span>'
+                + (active ? '<span class="skills-tab-count" id="mcpMarketTotal">' + (_connMarketTotal > 0 ? _connMarketTotal : '') + '</span>' : '')
+                + '</button>';
+        });
         /* 复用技能二级源容器：同一时刻只有一个主 tab 激活，内容互斥重绘即可，
          * 不另造第二个 hscroll 骨架（箭头/渐隐/拖拽全套机制直接继承）。 */
         if (_currentView === VIEW_CONNECTORS) {
@@ -402,15 +428,27 @@
         }
     }
 
+    /* 当前源目录总数（由 app-mcp-market.js syncChrome 上报）。renderConnTabs
+     * 会被配置数上报/语言切换等随时重建，徽标 span 是新建的空节点 —— 不记住
+     * 最近值，重建后总数徽标闪空直到下一次列表加载。 */
+    var _connMarketTotal = 0;
+    window._mcpMarketReportTotal = function (n) {
+        _connMarketTotal = Number(n) || 0;
+        var el = document.getElementById('mcpMarketTotal');
+        if (el) el.textContent = _connMarketTotal > 0 ? String(_connMarketTotal) : '';
+    };
+
     /** MCP 配置模块上报已安装数（renderMcpList 时调用），徽标即时刷新。 */
     window._skillsReportMcpCount = function (n) {
         _mcpInstalledCount = Number(n) || 0;
         if (_currentView === VIEW_CONNECTORS) renderConnTabs();
     };
 
-    /** 连接器二级视图切换：已安装 ⇄ 广场，互斥显隐（MCP 不再堆到页面底部）。 */
+    /** 连接器二级视图切换：已安装 ⇄ 各目录源，互斥显隐（MCP 不再堆到页面底部）。
+     * 源间切换（魔搭→腾讯云等）走 _mcpMarket.setSource：重置分类/搜索/页码后
+     * 拉新源的分类表与列表；已安装→源 走 load()（源未变时不必重置筛选）。 */
     function switchConnView(view) {
-        if (view !== CONN_INSTALLED && view !== CONN_MARKET) return;
+        if (view !== CONN_INSTALLED && !isConnSourceView(view)) return;
         if (_connView === view) { renderConnTabs(); return; }
         _connView = view;
         /* 查询词不跨二级视图携带（与主 tab 切换同口径）。
@@ -423,21 +461,40 @@
         applyConnView();
         if (view === CONN_INSTALLED) {
             if (window._settingsMcp && typeof window._settingsMcp.load === 'function') window._settingsMcp.load();
-        } else {
-            if (window._mcpMarket && typeof window._mcpMarket.load === 'function') window._mcpMarket.load();
+        } else if (window._mcpMarket) {
+            var src = view.slice(9);
+            var mm = window._mcpMarket;
+            var current = typeof mm.getSource === 'function' ? mm.getSource() : 'modelscope';
+            if (typeof mm.setSource === 'function' && current !== src) {
+                /* 源变了：setSource 自带分类表+列表重拉（含首次从已安装进入时
+                 * 模块源与 tab 源不一致的对齐场景）。
+                 * 竞态防护（2026-11 codereview）：快速连点两个源 tab 会有两个
+                 * setSource 在飞，先发的慢响应完成时不得再 renderConnTabs ——
+                 * 否则徽标挂回旧源 tab。完成回调只在「当前视图仍是这次切换的
+                 * 目标」时重画。 */
+                mm.setSource(src).then(function () {
+                    if (_connView === view) renderConnTabs();
+                });
+            } else if (typeof mm.load === 'function') {
+                mm.load();
+            }
         }
     }
 
     /**
      * 连接器 pane 的显隐落地：
-     *   广场   → 只显 #mcpMarketRoot + 头部广场筛选行（仅分类 chips）；
+     *   目录源 → 只显 #mcpMarketRoot + 头部筛选行（分类 chips）；
      *   已安装 → 只显迁入的 MCP 配置区（#skillsMcpInstalled），表单/工具二级视图
      *            归 app-settings-mcp.js 自己管，这里只切列表容器归属。
-     * 顶栏按钮随视图分派：广场=搜索框；已安装=导入+添加。
+     * 顶栏按钮随视图分派：目录源=搜索框+添加；已安装=导入+添加。
+     * 「+ 添加服务器」（自定义 MCP）在**全部连接器视图**可见 —— 用户报障
+     * 「连接器怎么没有添加 MCP 的入口了」：此前只在已安装视图显示，用户在
+     * 目录视图里找不到手动添加自定义 MCP 的入口。点击后切到已安装视图并
+     * 打开表单（见 #skillsAddMcpBtn 委托），语义闭环。
      */
     function applyConnView() {
         var isConn = _currentView === VIEW_CONNECTORS;
-        var market = isConn && _connView === CONN_MARKET;
+        var market = isConn && isConnSourceView(_connView);
         var installed = isConn && _connView === CONN_INSTALLED;
         $('#mcpMarketRoot').toggle(market);
         $('#mcpMarketFilterBar').toggle(market);
@@ -450,7 +507,7 @@
         var phKey = market ? 'settings.mcp.market.search_placeholder' : 'settings.skills.search_placeholder';
         $('#skillsSearchInput').attr('data-i18n-placeholder', phKey)
             .attr('placeholder', GourdI18n.t(phKey));
-        $('#skillsAddMcpBtn').toggle(installed);
+        $('#skillsAddMcpBtn').toggle(market || installed);
         $('#skillsImportMcpWrap').toggle(installed);
         /* 搜索框可见性唯一出口：广场=市场搜索；已安装=隐藏（配置列表无搜索语义）。 */
         $skillsSearchWrap.toggle(market);
@@ -492,7 +549,7 @@
         if ($paneConnectors.length) $paneConnectors.toggle(view === VIEW_CONNECTORS);
         if ($paneInterfaces.length) $paneInterfaces.toggle(view === VIEW_INTERFACES);
         $skillsViewTabsWrap.show();
-        /* 二级栏三态：技能=源切换（已安装/各市场）；连接器=已安装/广场；接口=隐藏。
+        /* 二级栏三态：技能=源切换（已安装/各市场）；连接器=已安装/各目录源；接口=隐藏。
          * 技能与连接器共用 #skillsSourceTabs 容器（同一时刻只有一个主 tab 激活）。 */
         var isConn = view === VIEW_CONNECTORS;
         if ($skillsSourceBarWrap.length) {
@@ -885,8 +942,8 @@
     // ==================== 视图切换 ====================
 
     function switchView(view) {
-        /* 连接器二级视图（已安装/广场）：主 tab 不变，只切 pane 内互斥分区。 */
-        if (view === CONN_INSTALLED || view === CONN_MARKET) { switchConnView(view); return; }
+        /* 连接器二级视图（已安装/各目录源）：主 tab 不变，只切 pane 内互斥分区。 */
+        if (view === CONN_INSTALLED || isConnSourceView(view)) { switchConnView(view); return; }
         /* 允许 installed / 市场名 / connectors / interfaces。 */
         var isSkillView = (view === VIEW_INSTALLED || _markets.some(function (m) { return m.name === view; }));
         var isKnown = isSkillView || view === VIEW_CONNECTORS || view === VIEW_INTERFACES;
@@ -921,11 +978,11 @@
             /* 离开技能视图：不再触发任何技能列表请求（loadSkillsList 也有守卫）。 */
             _currentCategory = '';
             hideCategoryBar();
-            /* 二级视图互斥加载：已安装列表拉配置；广场拉目录。
+            /* 二级视图互斥加载：已安装列表拉配置；目录源拉列表。
              * 两个请求都发（配置数徽标即时可见），但 DOM 互斥不堆叠。 */
             if (window._settingsMcp && typeof window._settingsMcp.load === 'function') window._settingsMcp.load();
-            /* 广场空（首次进入/上次未加载）即补载；已有数据不重发请求。 */
-            if (_connView === CONN_MARKET && window._mcpMarket && typeof window._mcpMarket.load === 'function') {
+            /* 目录空（首次进入/上次未加载）即补载；已有数据不重发请求。 */
+            if (isConnSourceView(_connView) && window._mcpMarket && typeof window._mcpMarket.load === 'function') {
                 var grid = document.getElementById('mcpMarketGrid');
                 if (!grid || !grid.children.length) window._mcpMarket.load();
             }
@@ -1410,7 +1467,7 @@
             /* 连接器广场：顶栏就是市场的唯一搜索框（壳内搜索框已删，
              * 双框状态不同步的旧缺陷被结构性消灭）。 */
             if (_currentView === VIEW_CONNECTORS) {
-                if (_connView === CONN_MARKET && window._mcpMarket) window._mcpMarket.search(val);
+                if (isConnSourceView(_connView) && window._mcpMarket) window._mcpMarket.search(val);
                 return;
             }
             _currentQuery = val || null;
@@ -1425,7 +1482,7 @@
         $skillsSearchInput.val('').focus();
         $(this).hide();
         if (_currentView === VIEW_CONNECTORS) {
-            if (_connView === CONN_MARKET && window._mcpMarket) window._mcpMarket.search('');
+            if (isConnSourceView(_connView) && window._mcpMarket) window._mcpMarket.search('');
             return;
         }
         _currentQuery = null;
@@ -1491,7 +1548,7 @@
         if (!isSkillsViewActive()) return;
         /* 连接器广场：市场模块自管分页与代际，这里只转发滚动意图。 */
         if (_currentView === VIEW_CONNECTORS) {
-            if (_connView === CONN_MARKET && window._mcpMarket &&
+            if (isConnSourceView(_connView) && window._mcpMarket &&
                 typeof window._mcpMarket.loadMore === 'function' && window._mcpMarket.hasMore()) {
                 window._mcpMarket.loadMore();
             }
@@ -1522,7 +1579,7 @@
         var body = document.querySelector('#skillsScroll');
         if (!body || body.scrollHeight > body.clientHeight + 4) return;
         if (_currentView === VIEW_CONNECTORS) {
-            if (_connView === CONN_MARKET && window._mcpMarket &&
+            if (isConnSourceView(_connView) && window._mcpMarket &&
                 typeof window._mcpMarket.loadMore === 'function' && window._mcpMarket.hasMore()) {
                 window._mcpMarket.loadMore();
             }
@@ -1609,7 +1666,7 @@
             if (_currentView === VIEW_CONNECTORS) {
                 showPane(VIEW_CONNECTORS);
                 // MCP 卡片文案随语言重绘，不重发上游列表请求
-                if (_connView === CONN_MARKET && window._mcpMarket && typeof window._mcpMarket.refresh === 'function') window._mcpMarket.refresh();
+                if (isConnSourceView(_connView) && window._mcpMarket && typeof window._mcpMarket.refresh === 'function') window._mcpMarket.refresh();
                 if (window._settingsMcp && typeof window._settingsMcp.load === 'function') window._settingsMcp.load();
             } else if (_currentView === VIEW_INTERFACES) {
                 showPane(VIEW_INTERFACES);

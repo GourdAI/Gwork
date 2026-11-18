@@ -673,7 +673,7 @@ mod tests {
                 ModelConfig { name: n.to_string(), ..Default::default() },
             );
         }
-        ToolContext {
+        ToolContext {            access_override: None,
             workspace: std::path::PathBuf::from("/kernel/workspace"),
             session_dir: None,
             session_id: "work-parent".into(),

@@ -124,8 +124,11 @@ pub struct AppState {
     issued_seq_flush: Mutex<HashMap<String, IssuedFlushState>>,
     /// Per-session selected model override.
     session_models: Mutex<HashMap<String, String>>,
-    /// Per-session access mode override.
-    session_access: Mutex<HashMap<String, String>>,
+    /// Per-session access mode override. `Arc` so a running ReAct loop can hold
+    /// the same map and re-resolve the tier per tool invocation
+    /// (`ReActConfig::access_override`) — a mid-run picker switch must disarm
+    /// the next gate, not the next run.
+    session_access: Arc<Mutex<HashMap<String, String>>>,
     /// sessionId → workspace root registry, shared with the Java kernel via
     /// `~/.gwork/session-roots.json`. Drives the global-vs-project split of
     /// `/web/chat/sessions` and per-session storage routing.
@@ -318,7 +321,7 @@ pub async fn serve_with_static(
         seq_counters: Mutex::new(HashMap::new()),
         issued_seq_flush: Mutex::new(HashMap::new()),
         session_models: Mutex::new(HashMap::new()),
-        session_access: Mutex::new(HashMap::new()),
+        session_access: Arc::new(Mutex::new(HashMap::new())),
         session_roots: Arc::new(crate::session::SessionRoots::load()),
         settings_loaded: AtomicBool::new(loaded_flag.load(Ordering::SeqCst)),
         mirror: crate::remote::mirror::MirrorState::new(),
@@ -1550,6 +1553,17 @@ async fn chat_access_select(
             {
                 let frame = Frame::hitl_released(&form.session_id, sp.action_id.as_deref());
                 broadcast_frame(&state, &form.session_id, frame).await;
+                // Switching to full is itself an approval of the pending command:
+                // run it NOW and resume the loop, exactly as the approve button
+                // would. The old behaviour only released the card and left the
+                // run suspended forever — the user then had to approve the model's
+                // retry of the same command ("批了一次后又弹出来"), because the
+                // resumed run carried the suspension's frozen `access_mode`
+                // ("default") and gated the retry again. Two fixes cooperate here:
+                // ① this auto-approve consumes the suspension so no retry is needed;
+                // ② `ReActConfig.access_override` keeps any *later* gate in the
+                // resumed run on the live tier.
+                auto_approve_and_resume(&state, &form.session_id, sp).await;
             }
         }
     }
@@ -2431,31 +2445,9 @@ async fn handle_hitl_action(
 
     if approved {
         // Execute the approved command NOW (it was not run before suspension)
-        // and feed the real output back as the tool result.
-        let command = sp.pending_command.clone().unwrap_or_default();
-        let output = if command.is_empty() {
-            "The approved command could not be determined.".to_string()
-        } else {
-            // The approved command is about to run outside `BashTool::execute`
-            // (which normally calls `note_bash`), so record the same warning
-            // here on the suspension's original runId.
-            state.change_ledger.note_bash(session_id, &sp.run_id);
-            execute_approved_command(
-                &state.workspace,
-                session_id,
-                &command,
-                sp.pending_timeout_ms,
-                sp.pending_background,
-            ).await
-        };
-        let messages: Vec<ChatMessage> = serde_json::from_str(&sp.messages_json).unwrap_or_default();
-        spawn_resume(
-            state.clone(),
-            session_id.to_string(),
-            sp,
-            messages,
-            output,
-        );
+        // and feed the real output back as the tool result. Shared with the
+        // full-access auto-approve path — one implementation, one semantics.
+        auto_approve_and_resume(state, session_id, sp).await;
     } else {
         // Denied: inject denial as tool result
         let messages: Vec<ChatMessage> = serde_json::from_str(&sp.messages_json).unwrap_or_default();
@@ -2469,6 +2461,43 @@ async fn handle_hitl_action(
     }
 
     Json(serde_json::json!({"code": 200}))
+}
+
+/// Execute an already-consumed HITL suspension's command and resume the run.
+///
+/// Shared tail of the two "user said yes" paths: the approve button
+/// (`handle_hitl_action`) and the mid-suspension switch to full access
+/// (`chat_access_select`). Both must execute the command with the model's
+/// original timeout/background intent, note the bash warning on the ORIGINAL
+/// runId, and resume via `spawn_resume` (same runId, reopened ledger) — a
+/// release-only path that skips this leaves the run suspended forever and
+/// forces the model to retry the command, which is precisely the
+/// "approved once, prompted again" report.
+///
+/// The caller has already consumed the suspension atomically; this function
+/// never re-validates and must not be called with an unconsumed `sp`.
+async fn auto_approve_and_resume(state: &Arc<AppState>, session_id: &str, sp: SuspensionPoint) {
+    let command = sp.pending_command.clone().unwrap_or_default();
+    let output = if command.is_empty() {
+        "The approved command could not be determined.".to_string()
+    } else {
+        state.change_ledger.note_bash(session_id, &sp.run_id);
+        execute_approved_command(
+            &state.workspace,
+            session_id,
+            &command,
+            sp.pending_timeout_ms,
+            sp.pending_background,
+        ).await
+    };
+    let messages: Vec<ChatMessage> = serde_json::from_str(&sp.messages_json).unwrap_or_default();
+    spawn_resume(
+        state.clone(),
+        session_id.to_string(),
+        sp,
+        messages,
+        output,
+    );
 }
 
 /// 把用户答案格式化成回填给模型的 tool result 文本。
@@ -3072,6 +3101,10 @@ async fn run_react_session(
         model: model.clone(),
         settings: settings.clone(),
         access_mode: effective_access.clone(),
+        // Live tier handle (see ReActConfig::access_override): the picker writes
+        // this same map, so flipping to full mid-run disarms the very next gate
+        // instead of waiting for the next user message.
+        access_override: Some(state.session_access.clone()),
         max_turns: settings.general.max_turns,
         run_id: run_id.clone(),
         start_seq,
@@ -5117,9 +5150,13 @@ struct ModelUpdateForm {
     timeout: Option<String>,
 }
 
+/// `FlexBody`, not `Form`: the model-settings page's `postJson` sends
+/// `Content-Type: application/json` (official-model protocol switch uses this
+/// endpoint), which axum's `Form` rejects with 415 — same trap as
+/// `settings_llm_model_toggle`.
 async fn settings_llm_model_update(
     State(state): State<Arc<AppState>>,
-    Form(form): Form<ModelUpdateForm>,
+    FlexBody(form): FlexBody<ModelUpdateForm>,
 ) -> Json<serde_json::Value> {
     let mut settings = state.settings.write().await;
     if let Some(m) = settings.models.get_mut(&form.name) {

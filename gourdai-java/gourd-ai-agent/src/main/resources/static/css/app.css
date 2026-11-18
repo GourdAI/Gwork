@@ -598,7 +598,23 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     50%      { background-color: var(--color-success-dim, rgba(74,194,107,0.25)); }
 }
 .tool-card.hitl-pending { border-color: var(--color-warning); }
-.tool-card .hitl-card-actions { display: flex; gap: 10px; padding: 0 14px 14px; }
+/* 【2026-11 用户报「授权框样式不好看、和主题不搭」的整卡重设计】
+   旧形态：透明底 + 全饱和橙整圈描边 + 裸命令文本（无底色无内距）+ 大按钮悬空，
+   在已收敛为中性灰阶的消息流里是唯一的高饱和色块，观感突兀且不像可交互组件。
+   新形态（警示语义不弱化，契约 hitl-interactive-boundary / process-flat-contract 仍锁
+   整圈警示描边 + 6px 圆角）：
+     · 底色 = --bg-warning-subtle（主题令牌的 12% 警示淡染，明暗两态、五套皮肤自动跟随）；
+     · 头部标签警示色（需要授权是决策点，不是普通过程注脚）；
+     · 命令包进 --bg-code 代码块（等宽、内距、限高滚动），与全站输出块同一族系；
+     · 按钮收敛为紧凑规格（6px 16px / 12.5px），主次配色不变（accent 实心 / 描边次操作）。 */
+.tool-card.hitl-pending { background: var(--bg-warning-subtle); border-radius: 6px; margin: 6px 0; }
+.tool-card.hitl-pending .tool-card-header { padding: 8px 12px 6px; }
+.tool-card.hitl-pending .tool-name { color: var(--color-warning); font-weight: 600; }
+/* 待审批卡的命令体：代码块形态由【内层 .hitl-command】承担（与旧 .hitl-card 的
+   命令块同族），外层卡体保持 padding:0 / 320px 契约不动（tool-edit-expand-contract
+   用首匹配正则钉基类规则，任何更具体的 .tool-card-body 前置变体都会截胡误伤）。 */
+.hitl-command { padding: 8px 12px; margin: 0 12px; background: var(--bg-code); border-radius: 6px; color: var(--text-primary); max-height: 200px; overflow-y: auto; line-height: 1.6; }
+.tool-card .hitl-card-actions { display: flex; gap: 8px; padding: 8px 12px 10px; }
 /* 过程卡四族头部标签统一字重 500（与思考卡 .thinking-block-label 同口径，2026-09-29 用户反馈）：
    过程轨迹是次要信息，600 半粗在高频调用下形成「粗体墙」，且与思考行来回跳字重；
    颜色已由尾部低彩度块统一降为 --text-secondary，字重在此补齐最后一项统一。 */
@@ -689,8 +705,28 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .tool-duration.failed { color: var(--color-danger, #e5484d); opacity: 1; }
 .tool-label { color: var(--text-secondary); font-size: 12px; }
 /* 展开的结果体：以顶部细分隔线归属到本行，而非再套一层盒子边框 */
-.tool-card-body { display: none; padding: 0 10px 8px; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
+/* 【2026-11 用户报「展开有的有阴影有的没有、阴影块与标题头宽度不一致」统一口径】
+   卡体一律全宽（padding:0，与 header 同宽贴齐），底色统一由内部内容块承担
+   （.bash-output / .tool-file-pre / .grep-result / .file-listing / .is-edit 均为
+   --bg-code 同一浅底、14px 同一内节奏），限高统一 320px。旧形态是兜底文本
+   自带 0 10px 8px 内边距（比 header 窄一圈、无底色），而 bash/read 等渲染器又
+   各自内联 padding:0 + 自带底色 → 同为「展开」却两套宽度两种底色。
+   现兜底文本也包进 .tool-plain-out（同底同宽同内距），四类输出观感完全一致。
+   注意：此处不得加 border-top（process-flat-contract ④ 钉死）/圆角/竖条（② 钉死）。 */
+.tool-card-body { display: none; padding: 0; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow-y: auto; }
 .tool-card.expanded .tool-card-body { display: block; }
+/* 兜底纯文本输出块：与专用渲染器同底同宽同内距（fillToolBody 兜底路径包裹） */
+.tool-plain-out { padding: 8px 14px; background: var(--bg-code); }
+/* read/write/todo 高亮文件体：内边距/底色从 JS 内联样式收敛到此处，统一 14px 节奏 */
+.tool-file-pre { margin: 0; padding: 8px 14px; overflow-x: auto; border-radius: 0; background: var(--bg-code); line-height: 1.6; }
+/* edit 卡体：diff 行自带语义底色，卡体给同一浅底兜住 hunk/上下文行，与其余工具一致。
+   限高不在此声明（旧 400px 被下方统一 320px 覆盖，属死声明，删掉防误读）。 */
+.tool-card-body.is-edit { background: var(--bg-code); }
+/* 【统一限高】bash/read/todo 此前不限高（is-bash/is-file 无 max-height 覆盖），长输出
+   会把消息流撑出数屏；edit 400px、兜底 320px、bash/read 无限——三档并存正是
+   「展开体验不统一」的另一半。全部收敛到与卡体基线同一 320px（内部滚动）。 */
+.tool-card-body.is-bash, .tool-card-body.is-file, .tool-card-body.is-edit { max-height: 320px; }
+
 /* 参数流式生成中的骨架卡（action_draft 建卡 → action_start 原地转正）。
    为何只改轮廓与头部文案、不动状态点：状态点四态（loading/done/warn/reject）语义已满，
    且 setToolCardStatus 带 loading 守卫——给骨架卡换状态点 class，这张卡此后永远落不了态。
@@ -702,7 +738,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 /* 参数体积进度文案（「生成参数中 · 1.2 KB」）：与 .tool-args / .tool-diff-stat 同档，
    12px + 三级文字色 + 等宽数字（字节数每帧跳动时不会带着整行左右抖动）。 */
 .tool-args-progress { order: 3; flex: 1 1 0; color: var(--text-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.tool-expand-full { display: inline-block; margin: 8px 0 2px; padding: 4px 12px; font-size: 12px; font-family: inherit; color: var(--text-secondary); background: var(--bg-code-block, rgba(127,127,127,.08)); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; }
+/* margin-left 14px：卡体全宽化（padding:0）后按钮直接 append 在卡体里，
+   不加左距会贴卡体左缘 0px，与其它输出的 14px 节奏脱节 */
+.tool-expand-full { display: inline-block; margin: 8px 0 2px 14px; padding: 4px 12px; font-size: 12px; font-family: inherit; color: var(--text-secondary); background: var(--bg-code-block, rgba(127,127,127,.08)); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; }
 .tool-expand-full:hover:not(:disabled) { color: var(--text-primary); border-color: var(--text-secondary); }
 .tool-expand-full:disabled { opacity: .6; cursor: default; }
 
@@ -786,7 +824,8 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .tool-batch-group.expanded .batch-tool-items { display: block; }
 .batch-tool-items > .tool-card { margin: 0; border: 0; border-left: 0; border-radius: 0; background: transparent; }
 .batch-tool-items > .tool-card .tool-card-header { padding: 4px 10px 4px 14px; }
-.batch-tool-items > .tool-card .tool-card-body { border-top: 0; padding-left: 14px; padding-right: 10px; }
+/* 批次成员卡体与主列同口径全宽（旧 14px/10px 内边距会让成员输出块比头部窄一圈） */
+.batch-tool-items > .tool-card .tool-card-body { border-top: 0; padding-left: 0; padding-right: 0; }
 .batch-tool-items > .tool-card[data-batch-degraded="1"] .tool-card-header::after { content: '•'; color: var(--text-tertiary); margin-left: 2px; }
 
 
@@ -868,7 +907,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    拒绝的「风险」含义不丢：它是本卡唯一可能变红的元素，且静止时不与主操作抢注意力。 */
 /* border 统一在基类给 1px 透明衬：两个变体因此拥有完全一致的盒模型与视觉高度
    （border-box 下 padding 从 8/20 让位给 7/19，总高不变），不会一高一矮。 */
-.hitl-btn { padding: 7px 19px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.2s; display: flex; align-items: center; gap: 6px; }
+/* 紧凑规格（2026-11 授权卡重设计）：旧 7px 19px / 13px 在 12px 等宽命令体旁显得 oversized；
+   收敛到 6px 16px / 12.5px 与工具流节奏一致。主次配色纪律见上方注释，不变。 */
+.hitl-btn { padding: 6px 16px; border-radius: 7px; border: 1px solid transparent; cursor: pointer; font-size: 12.5px; font-weight: 500; transition: all 0.2s; display: flex; align-items: center; gap: 6px; }
 .hitl-btn-approve { background: var(--accent); color: var(--accent-contrast); }
 .hitl-btn-approve:hover { background: var(--accent-hover); }
 .hitl-btn-reject { background: transparent; border-color: var(--border-input); color: var(--text-secondary); }
@@ -2433,6 +2474,12 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     background: none;
 }
 
+/* 【edit 卡 diff 行】行内节奏统一 14px（与 bash/read/grep 输出块同一左缘），
+   此前 .git-diff-line 无 padding，diff 文字贴卡体左缘 0px，而其它工具输出都是 14px。
+   只作用于工具卡内的 diff（.is-edit），git-diff 全屏查看器（.git-diff-content）不受影响。 */
+.tool-card-body.is-edit .git-diff-line { padding: 0 14px; }
+.tool-card-body.is-edit .git-line-num { width: 40px; min-width: 40px; padding-right: 8px; }
+
 .git-line-add { background: var(--git-line-add-bg); color: var(--git-line-add-text); }
 .git-line-del { background: var(--git-line-del-bg); color: var(--git-line-del-text); }
 .git-line-hunk { color: var(--git-line-hunk-text); font-weight: 500; }
@@ -2473,7 +2520,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     top: 0;
     background: var(--bg-code, #f5f5f5);
 }
-.grep-result, .file-listing { padding: 0; }
+/* grep / glob / ls 结果列表：同底同宽（原先透明底，展开后与 bash/read 的浅底不一致，
+   正是用户报「有的有阴影有的没有」；统一 --bg-code 与其余工具输出一致） */
+.grep-result, .file-listing { padding: 0; background: var(--bg-code); }
 .grep-file {
     display: flex;
     align-items: center;
@@ -2510,7 +2559,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 }
 .file-entry-icon { opacity: 0.7; flex-shrink: 0; display: inline-flex; align-items: center; }
 .file-entry.is-dir .file-entry-path { color: var(--text-primary); font-weight: 500; }
-.bash-output { background: var(--bg-code-block); border-radius: 0; }
+/* bash 输出与其余工具输出统一同一浅底（--bg-code）：旧 --bg-code-block 深色块
+   在浅色主题下与 read/grep 的浅底并列，正是「有的有阴影有的没有」的观感来源 */
+.bash-output { background: var(--bg-code); border-radius: 0; }
 .bash-cmd {
     padding: 8px 14px;
     color: var(--text-primary);
@@ -2520,13 +2571,13 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 }
 .bash-stdout {
     margin: 0;
-    padding: 10px 14px;
+    padding: 8px 14px;
     color: var(--text-primary);
-    background: var(--bg-code-block);
+    background: var(--bg-code);
     white-space: pre-wrap;
     word-break: break-all;
     overflow-x: auto;
-    line-height: 1.5;
+    line-height: 1.6;
 }
 /* 统一段头视觉语言：bash 的 提示符与 edit 的结果标签共享字重/不可选节奏 */
 .bash-prompt, .edit-result-label {
@@ -2548,7 +2599,7 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     padding: 8px 14px;
     font-family: var(--font-mono);
     font-size: 12px;
-    line-height: 1.5;
+    line-height: 1.6;
     white-space: pre-wrap;
     word-break: break-all;
 }
@@ -5006,3 +5057,31 @@ pre:hover .code-copy-btn { opacity: 1; }
 .main-nav-label.nav-composite { display: flex; align-items: center; gap: 0; white-space: nowrap; min-width: 0; }
 .main-nav-label.nav-composite > span:not(.nav-sep) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .nav-sep { display: inline-block; flex: 0 0 auto; flex-shrink: 0; margin: 0 .3em; opacity: .5; line-height: 1; }
+
+/* ===== ⑱ 待审批 HITL 卡终态层（2026-11 用户报「授权框样式和主题不搭」）=====
+   基础层（:600 段）已给出淡警示底 + 代码块命令体 + 紧凑按钮，但 Qoder 对齐层
+   （②③⑥⑦）与去卡片层（⑯）都在其后，用更高特异性 / !important 把待审批卡
+   重新刷成普通过程行：背景 transparent !important、header padding 5px 10px、
+   tool-name 灰色 500 字重 —— 淡染底和警示标签全被压掉，正是不搭观感的层叠根源。
+   本块排在文件最末，同/更高特异性 + !important 恢复审批卡的决策点形态；
+   ①-b 的整圈警示描边 + 6px 圆角护栏不动（契约测试锁定）。
+   全部选择器都带 .hitl-pending：批准/拒绝摘类后自动回归普通过程行，零残留。 */
+.msg-row.assistant .msg-bubble .tool-card.hitl-pending {
+    background: var(--bg-warning-subtle) !important;
+}
+.msg-row.assistant .msg-bubble .tool-card.hitl-pending > .tool-card-header {
+    padding: 8px 12px 6px !important;
+}
+.msg-row.assistant .msg-bubble .tool-card.hitl-pending .tool-name {
+    color: var(--color-warning) !important; font-weight: 600 !important;
+}
+/* 命令体：内层 .hitl-command 代码块（外层卡体 padding:0 契约不动）。
+   ⑥ 的 background:transparent !important 会把内层块一并刷掉（它命中
+   `[data-turn-process] .tool-card-body` 的所有后代？否——只命中卡体本身；
+   内层块是独立元素，⑥ 零命中），此处只需保证运行态字号不压掉等宽语义。 */
+.msg-row.assistant .msg-bubble .tool-card.hitl-pending .hitl-command {
+    font: 12.5px/1.6 var(--font-mono, monospace) !important;
+}
+.msg-row.assistant .msg-bubble .tool-card.hitl-pending .hitl-card-actions {
+    padding: 8px 12px 10px !important; gap: 8px !important;
+}

@@ -19,7 +19,6 @@ import com.gourdai.ai.chat.ChatConfig;
 import com.gourdai.ai.llm.dialect.anthropic.AnthropicChatDialect;
 import com.gourdai.ai.llm.dialect.gemini.GeminiChatDialect;
 import com.gourdai.ai.llm.dialect.gemini.GeminiInteractionsDialect;
-import com.gourdai.ai.llm.dialect.ollama.OllamaChatDialect;
 import com.gourdai.ai.llm.dialect.openai.OpenaiChatDialect;
 import com.gourdai.ai.llm.dialect.openai.OpenaiResponsesDialect;
 import org.noear.solon.core.util.RankEntity;
@@ -48,13 +47,12 @@ public class ChatDialectManager {
         //     表现为「编译通过但模型调用时方言丢失」，极难定位；
         //  2) 原反射写法是为了适配「方言作为可选模块单独引入」的场景，本项目已将
         //     所需方言全部内聪，不再存在类缺失的可能。
-        // 仅恢复 Ollama 聊天方言；DashScope 仍不注册。
+        // DashScope 不注册。
         register(new OpenaiChatDialect());
         register(new OpenaiResponsesDialect());
         register(new GeminiInteractionsDialect());
         register(new GeminiChatDialect());
         register(new AnthropicChatDialect());
-        register(new OllamaChatDialect());
     }
 
     /**

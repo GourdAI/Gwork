@@ -2314,7 +2314,7 @@ public class WebSettingsController {
             // 使用与最终连接参数一致的 adapter 获取模型列表
             ModelsAdapter provider = modelProviderFactory.getProvider(effectiveStandard);
 
-            // 鉴权头交给对应协议的 adapter 自行处理（OpenAI/Ollama 用 Authorization: Bearer，
+            // 鉴权头交给对应协议的 adapter 自行处理（OpenAI 用 Authorization: Bearer，
             // Anthropic 用 x-api-key + anthropic-version），此处不再写死 Bearer，
             // 否则选 anthropic 协议时会同时带上多余的 Authorization 头。
             Map<String, String> headers = new HashMap<>();

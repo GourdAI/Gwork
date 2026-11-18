@@ -10,7 +10,7 @@ import java.util.Map;
 
 /**
  * 模型信息
- * 支持 OpenAI、Anthropic、Ollama 等多种格式
+ * 支持 OpenAI、Anthropic 等多种格式
  */
 @Data
 @Builder

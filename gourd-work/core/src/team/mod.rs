@@ -231,7 +231,7 @@ impl TeamOrchestrator {
         // reason). AutoRethink still applies on top of it inside the loop.
         let max_turns = settings.general.max_turns;
         let next_depth = task.depth + 1;
-        let config = ReActConfig {
+        let config = ReActConfig {            access_override: None,
             session_id: format!("sub-{}", task.id),
             workspace,
             // Sub-agents get synthetic `sub-*` ids that are not real sessions and

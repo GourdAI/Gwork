@@ -215,7 +215,7 @@ public abstract class AbstractChatDialect implements ChatDialect {
      * 目标方言用于回放历史思考的出站 JSON 字段名（无则返回 null）。
      *
      * <p>供 {@link #applyThinkingReplayWindow} 定位并剥离历史轮思考明文。子类若改用其它
-     * 字段名（如 Ollama 固定 {@code thinking}），必须一并重写本方法，否则历史轮明文剥不掉。</p>
+     * 出站字段名，必须一并重写本方法，否则历史轮明文剥不掉。</p>
      *
      * @since 4.1.1
      */

@@ -109,6 +109,7 @@ const CONCAT_FAMILIES = {
     'undo_file', 'undo_run', 'undone',
     'error_not_found', 'error_invalid_request', 'error_partial', 'error_compensated', 'error_generic',
   ],
+  'settings.mcp.market.source_': ['modelscope', 'tencent', 'smithery'], // app-skills.js renderConnTabs 三个目录源 tab
 };
 // 可选族：消费方刻意容忍缺失，只校验跨语言包的一致性（全有或全无）
 const OPTIONAL_FAMILIES = {

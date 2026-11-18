@@ -1,6 +1,9 @@
 <script setup>
 	import { initTheme } from '@/hooks/useTheme'
 	import { initLocale } from '@/hooks/useLocale'
+	import { initViewport } from '@/hooks/useViewport'
+	import { gworkRestore, gworkRefresh, gworkSessionSnapshot } from '@/utils/gwork-auth.ts'
+	import { refreshUserFromAccount } from '@/hooks/useUser'
 
 	// #ifdef APP-ANDROID || APP-HARMONY
 	let firstBackTime = 0
@@ -16,10 +19,21 @@
 		// 主题必须在首帧前恢复，否则会先按默认亮色渲染再跳变
 		initTheme()
 		initLocale()
+		// 视口尺寸同样要在首帧前就绪：横屏/平板冷启动时首页直接按双栏渲染，避免先窄后宽跳变
+		initViewport()
+		// 会话恢复走异步：登录页 onShow 检查 signedIn 决定是否直接进首页
+		gworkRestore().then((ok: boolean): void => {
+			if (ok) refreshUserFromAccount()
+		}, (): void => { })
 	})
 
 	onAppShow(() => {
 		console.log('App Show')
+		// 移动端切后台很久再回来：access token 大概率已过期，有会话时补一次保活刷新。
+		// 不用 gworkRestore（它会重读 storage，可能覆盖内存里刚登录的新会话）
+		if (gworkSessionSnapshot() != null) {
+			gworkRefresh().then((_s): void => { }, (): void => { })
+		}
 	})
 
 	onAppHide(() => {

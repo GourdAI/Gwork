@@ -47,6 +47,19 @@ body.code-mode .skills-view { display: none !important; }
       回退成 overflow:hidden 会把补齐线重新裁掉（勿改）。 */
 .skills-head::before { content: ""; position: absolute; left: -5px; bottom: -1px; width: 5px; height: 1px; background: var(--border-color); pointer-events: none; z-index: 120; }
 
+/* 顶行标题栏分割线补齐（用户报障「别的模块这里都有分割线，技能/连接器/接口没有」）：
+   其它视图的顶行线由 .titlebar-drag-region 的 border-bottom 画在 44px 底边（app.css:45），
+   本视图把该 strip 整体隐藏（下方 :has 门控）后线也随之消失，顶部 44px 成为无分隔的
+   空白带。修法：不动布局（head 仍从 y=0 起、inner padding-top 仍 48px），用 ::after
+   在 head 内 y=44px 处补画一条与其它视图同位置的 1px 线 —— 与 task-monitor.css
+   顶行色带的 border-bottom 同款思路，三处（主区/右栏/本视图）分割线同高连续。
+   ⚠ 高度 44px 是跨栈契约字面量（app.css 顶部注释），顶条改高时必须同改；
+     top:44px 的线占 y=44..45，与 strip 的 border-bottom（44 盒高含 1px 边框）逐像素同位。
+   左端同样补 5px handle 缺口：::after 的 box-shadow 向左延伸一段同色线
+   （伪元素不能再挂 ::before，用 shadow 替代；.skills-view 的 overflow-clip-margin:6px
+   已放行盒外 5px 绘制，勿改回 overflow:hidden）。 */
+body.is-electron .skills-head::after { content: ""; position: absolute; top: 44px; left: 0; right: 0; height: 1px; background: var(--border-color); box-shadow: -5px 0 0 0 var(--border-color); pointer-events: none; z-index: 120; }
+
 body.is-electron .skills-head { -webkit-app-region: drag; }
 body.is-electron .skills-head button,
 body.is-electron .skills-head input { -webkit-app-region: no-drag; }

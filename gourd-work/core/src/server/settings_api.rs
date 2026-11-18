@@ -1488,15 +1488,15 @@ fn official_provider_item() -> serde_json::Value {
     official_provider_item_with_overrides(&official_model_overrides_from_disk())
 }
 
-/// 从磁盘 settings.json 读官方模型的用户覆盖（仅 `enabled`）。
+/// 官方模型的用户覆盖：`enabled` + `standard`。
 ///
-/// **不读 `standard`**：内核 `LlmClient` 对 official 模型无条件钉死
-/// `standard=openai` + `Dialect::OpenAiChat`（安全设计，防官方 key 经
-/// x-api-key/x-goog-api-key 这类 reqwest 重定向不剥离的凭据头外泄），磁盘里
-/// 残留的 anthropic/gemini 对官方模型是**无效维度**。把它回显出来等于谎报
-/// 协议（P0-B），所以这里只认 `enabled`——那是内核真正尊重的覆盖。
+/// 【2026-11 用户决策】官方 relay（new-api）支持多协议端点，官方模型协议
+/// 可切换。`LlmClient` 只认四值白名单（openai / openai-responses /
+/// anthropic / gemini），鉴权恒走 Bearer，所以磁盘里的 standard 是内核
+/// 真正尊重的覆盖，这里如实回显；白名单外的脏值归一到 openai，与
+/// `LlmClient::with_retries` 的口径一致，绝不谎报协议。
 /// 读失败一律回落缺省值：官方条目本身是内存投影，磁盘不可读不该让它消失。
-fn official_model_overrides_from_disk() -> std::collections::HashMap<String, bool> {
+fn official_model_overrides_from_disk() -> std::collections::HashMap<String, (bool, String)> {
     let prefix = official_model_prefix();
     let mut out = std::collections::HashMap::new();
     let map = read_settings_key("models");
@@ -1509,25 +1509,37 @@ fn official_model_overrides_from_disk() -> std::collections::HashMap<String, boo
             continue;
         }
         let enabled = val.get("enabled").and_then(|b| b.as_bool()).unwrap_or(true);
-        out.insert(key.clone(), enabled);
+        let standard = normalize_official_standard(
+            val.get("standard").and_then(|s| s.as_str()).unwrap_or("openai"),
+        );
+        out.insert(key.clone(), (enabled, standard));
     }
     out
 }
 
+/// 官方模型协议白名单归一（与 `LlmClient::with_retries` 同一口径）。
+fn normalize_official_standard(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        s @ ("openai-responses" | "anthropic" | "gemini") => s.to_string(),
+        _ => "openai".to_string(),
+    }
+}
+
 fn official_provider_item_with_overrides(
-    overrides: &std::collections::HashMap<String, bool>,
+    overrides: &std::collections::HashMap<String, (bool, String)>,
 ) -> serde_json::Value {
     let prefix = official_model_prefix();
     let models: Vec<serde_json::Value> = crate::official::models()
         .iter()
         .map(|m| {
             let key = format!("{}{}", prefix, m.id);
-            // 协议恒为 openai（见 official_model_overrides_from_disk 说明），
-            // 只有 enabled 反映用户覆盖。
-            let enabled = overrides.get(&key).copied().unwrap_or(true);
+            let (enabled, standard) = overrides
+                .get(&key)
+                .cloned()
+                .unwrap_or((true, "openai".to_string()));
             serde_json::json!({
                 "id": m.id,
-                "standard": "openai",
+                "standard": standard,
                 "manual": false,
                 "enabled": enabled,
             })
@@ -2196,7 +2208,7 @@ pub async fn providers_fetch(Form(body): Form<ProviderFetchBody>) -> Json<serde_
             if id.is_empty() {
                 continue;
             }
-            // Anthropic/Ollama adapters stamp their own protocol; proxies return
+            // Anthropic/Gemini adapters stamp their own protocol; proxies return
             // `supported_endpoint_types` so the UI can pick the chat dialect.
             let item_standard = infer_model_standard(it, &std_lower);
             out.push(serde_json::json!({
@@ -2250,13 +2262,6 @@ fn http_fetch_reason(status: u16) -> &'static str {
 /// provider that genuinely serves `/models` at the root still works.
 fn model_list_urls(base: &str, standard: &str) -> Vec<String> {
     let b = base.trim().trim_end_matches('/');
-    if standard == "ollama" {
-        return vec![if b.ends_with("/api/tags") {
-            b.to_string()
-        } else {
-            format!("{}/api/tags", b)
-        }];
-    }
     if b.ends_with("/models") {
         return vec![b.to_string()];
     }
@@ -2281,10 +2286,9 @@ fn model_list_urls(base: &str, standard: &str) -> Vec<String> {
 
 /// Extract the model array from a provider response, or `None` when the body is
 /// not a model list at all (an error object, an HTML page, `{"data":null}`).
-fn model_list_items<'a>(payload: &'a serde_json::Value, standard: &str) -> Option<&'a Vec<serde_json::Value>> {
-    // OpenAI/Anthropic: {"data":[{...}]}; Ollama: {"models":[{...}]}.
-    let key = if standard == "ollama" { "models" } else { "data" };
-    if let Some(arr) = payload.get(key).and_then(|v| v.as_array()) {
+fn model_list_items<'a>(payload: &'a serde_json::Value, _standard: &str) -> Option<&'a Vec<serde_json::Value>> {
+    // OpenAI/Anthropic: {"data":[{...}]}; Gemini: {"models":[{...}]}.
+    if let Some(arr) = payload.get("data").and_then(|v| v.as_array()) {
         return Some(arr);
     }
     if let Some(arr) = payload.get("models").and_then(|v| v.as_array()) {
@@ -2297,7 +2301,7 @@ fn model_list_items<'a>(payload: &'a serde_json::Value, standard: &str) -> Optio
 /// Per-model chat dialect. Mirrors Java `ModelInfo.inferStandard`, with the
 /// protocol-specific adapters' fixed values applied first.
 fn infer_model_standard(item: &serde_json::Value, standard: &str) -> String {
-    if standard == "anthropic" || standard == "ollama" || standard == "gemini" {
+    if standard == "anthropic" || standard == "gemini" {
         return standard.to_string();
     }
     if let Some(types) = item.get("supported_endpoint_types").and_then(|v| v.as_array()) {
@@ -2594,12 +2598,11 @@ fn materialize_official_models_at(path: &std::path::Path) -> Materialization {
                         existing["official"] = serde_json::json!(true);
                         // 官方条目永不带凭据落盘：即便历史文件里被塞过值也清掉。
                         existing["apiKey"] = serde_json::json!("");
-                        // 协议强制归一到 openai：内核对 official 模型钉死
-                        // standard=openai + Dialect::OpenAiChat，磁盘里残留的
-                        // anthropic/gemini（旧假控件写入的脏值）对官方模型无效。
-                        // 不归一会让设置页谎报协议（P0-B）。enabled 不在这里动——
-                        // 那是内核真正尊重的用户覆盖，由 existing 原样保留。
-                        existing["standard"] = serde_json::json!("openai");
+                        // 协议保留用户覆盖（2026-11 用户决策：官方模型可切协议），
+                        // 但按 LlmClient 的四值白名单归一：白名单外的脏值
+                        // （旧 ollama 残留等）回落 openai。enabled 同样原样保留。
+                        let std = existing.get("standard").and_then(|s| s.as_str()).unwrap_or("openai");
+                        existing["standard"] = serde_json::json!(normalize_official_standard(std));
                     }
                     None => {
                         models_map.insert(
@@ -3166,9 +3169,9 @@ mod tests {
             &path,
             serde_json::json!({
                 "models": {
-                    // 用户此前停用了该模型（enabled:false 必须保留），且磁盘里残留
-                    // 一个旧假控件写入的 standard:"anthropic"——内核对 official 模型
-                    // 钉死 openai，物化必须把这个无效脏值归一掉（P0-B）。
+                    // 用户此前停用了该模型（enabled:false 必须保留），且把协议切成
+                    // 了 anthropic——2026-11 用户决策：官方模型协议可切换，
+                    // 白名单内的 standard 是用户覆盖，物化必须原样保留。
                     key_x.clone(): {
                         "name": key_x.clone(), "model": "gwork-x", "standard": "anthropic",
                         "apiUrl": "https://old.example/v1", "apiKey": "stale",
@@ -3208,7 +3211,7 @@ mod tests {
         let x = &models[&key_x];
         assert_eq!(x["official"], true);
         assert_eq!(x["apiKey"], "", "official entries must never persist a credential");
-        assert_eq!(x["standard"], "openai", "official model protocol must be normalized to openai");
+        assert_eq!(x["standard"], "anthropic", "user-chosen whitelisted protocol must survive materialization");
         assert_eq!(x["enabled"], false, "user disable must survive materialization");
         assert_eq!(x["provider"], official_name);
 
@@ -3555,11 +3558,7 @@ mod tests {
     }
 
     #[test]
-    fn ollama_and_gemini_use_their_own_model_endpoints() {
-        assert_eq!(
-            model_list_urls("http://127.0.0.1:11434", "ollama"),
-            vec!["http://127.0.0.1:11434/api/tags"]
-        );
+    fn gemini_uses_its_own_model_endpoint() {
         assert_eq!(
             model_list_urls("https://host/v1beta", "gemini"),
             vec!["https://host/v1beta/models"]

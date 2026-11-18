@@ -204,26 +204,6 @@ body.code-mode .model-settings-view { display: none !important; }
 }
 .ms-model-search-clear:hover { background: var(--bg-hover); color: var(--text-primary); }
 
-/* 官方模型行内的接口协议只读徽标（P0-B）。
-   内核把 official 模型协议钉死为 OpenAI（LlmClient 强制 standard=openai +
-   Dialect::OpenAiChat，防官方 key 经 x-api-key/x-goog-api-key 这类 reqwest
-   重定向不剥离的凭据头外泄），前端不再提供可改的协议下拉，改渲染这个只读
-   徽标如实告知「固定、不可改」。复用 provider-model-standard-wrap 的容器宽度，
-   使官方行与自定义行的协议列对齐。 */
-.provider-model-standard-readonly {
-    display: inline-flex;
-    align-items: center;
-    height: 30px;
-    padding: 0 10px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    background: var(--bg-hover);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    white-space: nowrap;
-    cursor: default;
-}
-
 /* 响应式：窄屏时上下堆叠 */
 @media (max-width: 860px) {
     .model-settings-inner { height: auto; display: block; }

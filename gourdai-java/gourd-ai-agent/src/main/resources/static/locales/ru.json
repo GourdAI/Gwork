@@ -562,7 +562,9 @@
       "common_close": "Close",
       "network_error": "Network error",
       "market": {
-        "market_tab": "Маркет",
+        "source_modelscope": "ModelScope",
+        "source_tencent": "Tencent Cloud",
+        "source_smithery": "Smithery",
         "title": "MCP Marketplace",
         "search_placeholder": "Search MCP servers",
         "installed": "Installed",

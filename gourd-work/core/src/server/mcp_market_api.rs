@@ -1,16 +1,26 @@
-//! server::mcp_market_api — 连接器广场的 4 个 axum handler（唯一目录源 = 魔搭）。
+//! server::mcp_market_api — 连接器广场的 4 个 axum handler（三个内置目录源）。
 //!
 //! | Method | Path                                      | 用途 |
 //! |--------|-------------------------------------------|------|
-//! | GET    | `/web/settings/mcp/market/servers`        | 列表 / 搜索 / 分类 |
+//! | GET    | `/web/settings/mcp/market/servers?source=` | 列表 / 搜索 / 分类 |
 //! | GET    | `/web/settings/mcp/market/detail?id=`     | 详情（server_config / env_schema / readme）|
-//! | GET    | `/web/settings/mcp/market/categories`     | 内置静态分类表 |
+//! | GET    | `/web/settings/mcp/market/categories?source=` | 各源内置静态分类表 |
 //! | POST   | `/web/settings/mcp/market/install`        | 归一化 + 复用 mcp_server_add 落盘 |
 //!
-//! 目录源（2026-11 用户拍板）：**只保留魔搭 ModelScope 一个源**（`mcp::market`）。
-//! 自建官方连接器仓库（`mcp::registry` / `mcp::featured` / `mcp::cli` / CLI 连接器 /
-//! 内置 Node 运行时）已整体删除，`source` 参数、`official:`/`featured:` id 分流、
-//! admin 远程目录拉取、`registry_error` 软失败态全部不再存在。
+//! 目录源（2026-11 集成 SolonCode v2026.11 连接器市场后）：
+//! * `modelscope`（默认，缺省 source）→ `mcp::market`
+//! * `tencent`   → `mcp::tencent`（腾讯云 MCP 广场，SolonCode 默认源）
+//! * `smithery`  → `mcp::smithery`（Smithery 注册表，境外源）
+//!
+//! 三源输出同一套列表/详情形状，归一化/预检/落盘链路**零分叉**复用。
+//! detail/install 的源由 **id 前缀**分流（`tencent:` / `smithery:`，无前缀=魔搭），
+//! 与 SolonCode 的 marketName 参数不同——id 前缀让「详情弹窗/安装」不必额外携带
+//! source 参数，深链与缓存 key 天然跨源不撞。
+//!
+//! ⚠ 已删除且不得复活的概念：自建官方连接器仓库（`mcp::registry` / `mcp::featured` /
+//! `mcp::cli` / CLI 连接器 / 内置 Node 运行时）、`official:`/`featured:` id 前缀、
+//! admin 远程目录拉取、`registry_error` 软失败态。本轮的 `source` 参数只在上述
+//! 三个**公开目录源**之间切换，与已删除的自建官方源无关。
 //!
 //! 响应统一 `{code:200,description:"",data:{...}}`；上游失败 → `{code:400,description:"..."}`,
 //! 不伪造成功。install 不自己写 settings.json：它把 `server_config[0].mcpServers`
@@ -30,9 +40,53 @@ use super::AppState;
 use crate::mcp::market::{
     self, ModelscopeMcpMarket, ReqwestMcpMarketHttp, ServerQuery,
 };
+use crate::mcp::smithery::{ReqwestSmitheryHttp, SmitheryMcpMarket};
+use crate::mcp::tencent::{ReqwestTencentHttp, TencentMcpMarket};
 
 fn market() -> ModelscopeMcpMarket<ReqwestMcpMarketHttp> {
     ModelscopeMcpMarket::new(ReqwestMcpMarketHttp::new())
+}
+
+/// Smithery 适配器进程级单例：本地搜索索引（热度前 5 页，TTL 10 分钟）必须
+/// 跨请求存活，每请求新建实例会让每次搜索都重抓 5 页上游。
+fn smithery_market() -> &'static SmitheryMcpMarket<ReqwestSmitheryHttp> {
+    static INSTANCE: once_cell::sync::Lazy<SmitheryMcpMarket<ReqwestSmitheryHttp>> =
+        once_cell::sync::Lazy::new(|| SmitheryMcpMarket::new(ReqwestSmitheryHttp));
+    &INSTANCE
+}
+
+/// 内置目录源白名单。未知值一律回落魔搭（旧客户端不带 source 参数，行为不变）。
+pub const SOURCE_MODELSCOPE: &str = "modelscope";
+pub const SOURCE_TENCENT: &str = "tencent";
+pub const SOURCE_SMITHERY: &str = "smithery";
+
+pub fn normalize_source(raw: Option<&str>) -> &'static str {
+    match raw.map(str::trim).unwrap_or("") {
+        SOURCE_TENCENT => SOURCE_TENCENT,
+        SOURCE_SMITHERY => SOURCE_SMITHERY,
+        _ => SOURCE_MODELSCOPE,
+    }
+}
+
+/// detail/install 的源分流：id 前缀是唯一口径（列表条目 id 由各适配器加前缀）。
+pub fn source_of_id(id: &str) -> &'static str {
+    let t = id.trim();
+    if t.starts_with("tencent:") {
+        SOURCE_TENCENT
+    } else if t.starts_with("smithery:") {
+        SOURCE_SMITHERY
+    } else {
+        SOURCE_MODELSCOPE
+    }
+}
+
+/// 统一详情入口：按 id 前缀分流到对应适配器。返回形状三源一致。
+async fn detail_by_id(id: &str) -> Result<Value, String> {
+    match source_of_id(id) {
+        SOURCE_TENCENT => TencentMcpMarket::new(ReqwestTencentHttp).detail(id).await,
+        SOURCE_SMITHERY => smithery_market().detail(id).await,
+        _ => market().detail(id).await,
+    }
 }
 
 /// 缺失或非法数字都给默认值，避免 axum Query 直接 400 绕过统一信封。
@@ -52,6 +106,10 @@ pub struct ServersParams {
     pub page_size: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
+    /// 目录源：modelscope（默认）/ tencent / smithery。未知值回落魔搭。
+    /// 仅列表/分类用；detail/install 由 id 前缀分流（见 source_of_id）。
+    #[serde(default)]
+    pub source: Option<String>,
     // 曾有 `hosted: Option<String>`（旧「已托管」筛选勾选）。2026-11 官方源下线轮
     // 一并退役：UI 两处 query 构造都不再发它，语言包 `hosted` 键也已删。
     // 之所以不是「保留透传兼容旧调用」——hosted=true 返回的 4806 条条目，其连接
@@ -96,7 +154,12 @@ pub async fn mcp_market_servers(Query(p): Query<ServersParams>) -> Json<Value> {
         category: p.category.unwrap_or_default(),
         hosted: HOSTED_FILTER,
     };
-    Json(match market().servers(&q).await {
+    let result = match normalize_source(p.source.as_deref()) {
+        SOURCE_TENCENT => TencentMcpMarket::new(ReqwestTencentHttp).servers(&q).await,
+        SOURCE_SMITHERY => smithery_market().servers(&q).await,
+        _ => market().servers(&q).await,
+    };
+    Json(match result {
         Ok(data) => market::succeed(data),
         Err(e) => market::failure(e),
     })
@@ -106,7 +169,7 @@ pub async fn mcp_market_detail(Query(p): Query<DetailParams>) -> Json<Value> {
     if p.id.trim().is_empty() {
         return Json(market::failure("id is required"));
     }
-    Json(match market().detail(&p.id).await {
+    Json(match detail_by_id(&p.id).await {
         Ok(mut data) => {
             // 注入 env_supported：告诉前端「这个服务填的环境变量能不能被存下来」。
             // 判据必须由内核给出（见下方 env_supported 的文档），前端只读标志。
@@ -159,13 +222,18 @@ pub fn env_supported(data: &Value) -> bool {
     true
 }
 
-/// 分类表：魔搭内置静态表。
+/// 分类表：各源内置静态表（`?source=`，缺省魔搭）。
 ///
 /// 计数一律取列表响应里的 `total_count`，**绝不逐类发请求凑计数**；分类只作为
-/// 筛选条件传给上游 `filter.category`。表里的 key 全部经上游实测确认非零，
-/// 死 key 黑名单见 `mcp::market::DEAD_CATEGORY_KEYS`。
-pub async fn mcp_market_categories() -> Json<Value> {
-    Json(market::succeed(market().categories()))
+/// 筛选条件传给上游。魔搭表里的 key 全部经上游实测确认非零，死 key 黑名单见
+/// `mcp::market::DEAD_CATEGORY_KEYS`；腾讯是 2026-11-17 快照；Smithery 无分类维度。
+pub async fn mcp_market_categories(Query(p): Query<ServersParams>) -> Json<Value> {
+    let cats = match normalize_source(p.source.as_deref()) {
+        SOURCE_TENCENT => crate::mcp::tencent::categories(),
+        SOURCE_SMITHERY => crate::mcp::smithery::categories(),
+        _ => market().categories(),
+    };
+    Json(market::succeed(cats))
 }
 
 /// `type` → 标准 kind，并在此处就校验合法性。
@@ -200,17 +268,30 @@ pub fn normalize_server_config(
     data: &Value,
     supplied_env: Option<&HashMap<String, String>>,
 ) -> Result<Vec<(String, McpBody)>, String> {
+    // 空数组与缺键同语义：腾讯/Smithery 解析不出启动配置时 detail 返回
+    // server_config:[]（详情可看、安装明确报错）。给出「手动添加」出口，绝不猜配置。
+    let catalog = data.get("id").and_then(Value::as_str).map(source_of_id).unwrap_or(SOURCE_MODELSCOPE);
+    let no_config_msg = || match catalog {
+        SOURCE_TENCENT | SOURCE_SMITHERY => {
+            let page = data.get("detail_page").and_then(Value::as_str).unwrap_or("");
+            format!(
+                "该连接器未提供可直接导入的启动配置，请使用顶栏「添加服务器」按项目文档手动添加{}",
+                if page.is_empty() { String::new() } else { format!("（参考: {}）", page) }
+            )
+        }
+        _ => "魔搭 MCP 服务缺少 server_config，无法安装".to_string(),
+    };
     let first = data
         .get("server_config")
         .and_then(Value::as_array)
         .and_then(|a| a.first())
-        .ok_or_else(|| "魔搭 MCP 服务缺少 server_config，无法安装".to_string())?;
+        .ok_or_else(no_config_msg)?;
     let servers = first
         .get("mcpServers")
         .and_then(Value::as_object)
-        .ok_or_else(|| "魔搭 MCP 服务缺少 mcpServers 配置".to_string())?;
+        .ok_or_else(|| "MCP 服务缺少 mcpServers 配置".to_string())?;
     if servers.is_empty() {
-        return Err("魔搭 MCP 服务的 mcpServers 为空".into());
+        return Err("MCP 服务的 mcpServers 为空".into());
     }
     // http 型配置存不下 env（build_entry 只写 url/headers），必须在**归一化的必经
     // 之路上**拦掉，而不是只依赖 install 里的提前调用：接线点可被误删，这里删不掉。
@@ -548,7 +629,7 @@ pub async fn mcp_market_install(
     if body.id.trim().is_empty() {
         return Json(market::failure("id is required"));
     }
-    let data = match market().detail(&body.id).await {
+    let data = match detail_by_id(&body.id).await {
         Ok(d) => d,
         Err(e) => return Json(market::failure(e)),
     };
@@ -755,6 +836,73 @@ mod tests {
         let entries = normalize_server_config(&detail, Some(&env)).unwrap();
         assert_eq!(entries[0].1.env.as_ref().unwrap().get("API_KEY").map(String::as_str), Some("secret"));
         assert_eq!(entries[0].1.env.as_ref().unwrap().get("UV_CACHE_DIR").map(String::as_str), Some("/tmp/uv"));
+    }
+
+    // ─── 2026-11 SolonCode 集成轮：三源分流 ─────────────────────────────────
+
+    #[test]
+    fn source_whitelist_normalizes_unknown_to_modelscope() {
+        assert_eq!(normalize_source(None), SOURCE_MODELSCOPE);
+        assert_eq!(normalize_source(Some("")), SOURCE_MODELSCOPE);
+        assert_eq!(normalize_source(Some("official")), SOURCE_MODELSCOPE, "自建官方源已删除，不得复活");
+        assert_eq!(normalize_source(Some("tencent")), SOURCE_TENCENT);
+        assert_eq!(normalize_source(Some(" smithery ")), SOURCE_SMITHERY);
+    }
+
+    #[test]
+    fn id_prefix_routes_detail_and_install_to_the_right_source() {
+        assert_eq!(source_of_id("@amap/amap-maps"), SOURCE_MODELSCOPE);
+        assert_eq!(source_of_id("tencent:10039"), SOURCE_TENCENT);
+        assert_eq!(source_of_id("smithery:brave"), SOURCE_SMITHERY);
+        assert_eq!(source_of_id("smithery:owner/name"), SOURCE_SMITHERY);
+        // 官方源前缀已删除：不得被识别成任何特殊源（回落魔搭后按普通 id 处理）。
+        assert_eq!(source_of_id("official:x"), SOURCE_MODELSCOPE);
+        assert_eq!(source_of_id("featured:x"), SOURCE_MODELSCOPE);
+    }
+
+    #[test]
+    fn tencent_token_auth_declaration_survives_normalize_and_preflight() {
+        // 腾讯 http 型单头参数 → token 声明：必须原样穿过归一化 + build_entry
+        // 白名单（tokenHeader/tokenPrefix/tokenLabel/tokenHelpUrl 都在 12 键内），
+        // 否则「后端要授权、连接器 401 且无从下手」。
+        let detail = json!({
+            "id": "tencent:10039",
+            "server_config": [{"mcpServers": {"maps": {
+                "type": "streamable", "url": "https://m.example/mcp",
+                "headers": {},
+                "auth": {"authType": "token", "tokenHeader": "Authorization",
+                          "tokenPrefix": "Bearer", "tokenLabel": "密钥", "tokenHelpUrl": "https://home"}
+            }}}],
+            "env_schema": Value::Null,
+        });
+        let entries = normalize_server_config(&detail, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        let auth = entries[0].1.auth.as_ref().unwrap();
+        assert_eq!(auth["tokenHeader"], json!("Authorization"));
+        assert_eq!(auth["tokenPrefix"], json!("Bearer"));
+        preflight_entries(&entries).expect("token 声明必须能通过 build_entry 白名单");
+    }
+
+    #[test]
+    fn empty_server_config_from_new_sources_reports_manual_add_hint() {
+        // 腾讯/Smithery 解析不出启动配置 → server_config:[]：install 必须明确
+        // 报错并给「添加服务器」出口，绝不伪造成功、绝不猜配置。
+        for id in ["tencent:9", "smithery:o/local"] {
+            let detail = json!({"id": id, "server_config": [], "detail_page": "https://doc"});
+            let err = match normalize_server_config(&detail, None) {
+                Ok(_) => panic!("{}: 空 server_config 必须报错，不得伪造成功", id),
+                Err(e) => e,
+            };
+            assert!(err.contains("添加服务器"), "{}: 错误必须引导手动添加: {}", id, err);
+            assert!(err.contains("https://doc"), "{}: 错误须带文档链接: {}", id, err);
+        }
+        // 魔搭缺 server_config 的旧文案保持不变（历史契约）。
+        let ms = json!({"id": "@a/b"});
+        let err = match normalize_server_config(&ms, None) {
+            Ok(_) => panic!("魔搭缺 server_config 必须报错"),
+            Err(e) => e,
+        };
+        assert!(err.contains("魔搭"), "{}", err);
     }
 
     #[tokio::test]

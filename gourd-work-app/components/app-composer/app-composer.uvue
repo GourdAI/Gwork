@@ -1,5 +1,7 @@
 <template>
 	<view class="app-composer">
+		<!-- 宽屏内容列：限宽居中由父级传 columnStyle，内部结构与窄屏完全一致 -->
+		<view class="app-composer__col" :style="columnStyle">
 		<!-- 字体图标缺 spark，附件 tag 图标暂缺 -->
 		<rice-tag v-if="hasTag" v-show="!holding" class="app-composer__tag" type="primary" plain :text="tag"
 			text-color="var(--color-primary)" text-size="11px" :custom-style="tagStyle"></rice-tag>
@@ -72,6 +74,7 @@
                 </view>
 			</view>
 		</view>
+		</view>
 
 		<!-- 录音手势捕获层：按住期间浮满视口，手指滑出输入栏后 move/end 仍派发到本层，
 			上滑变红/松开收尾才可靠；置尾保证盖在输入栏之上，处理器带 holding 幂等守卫；
@@ -104,13 +107,16 @@
 		processing?: boolean
 		/** 输入框节点 id，首页与对话页同栈时需各自唯一，聚焦用 */
 		inputId?: string
+		/** 宽屏内容列样式（width+margin-left）；窄屏传空串保持撑满 */
+		columnStyle?: string
 	}>(), {
 		modelValue: '',
 		expanded: false,
 		model: '',
 		tag: '',
 		processing: false,
-		inputId: 'app-composer-input'
+		inputId: 'app-composer-input',
+		columnStyle: ''
 	})
 
 	const emit = defineEmits<{
@@ -366,6 +372,11 @@
 		/* 展开态的空白点击层是绝对定位节点，输入区需要同级定位才能盖在它上面接收点击 */
 		position: relative;
 		padding: 0 18px 26px;
+
+		/* 宽屏内容列容器：columnStyle 为空时默认拉伸占满，窄屏零回归 */
+		&__col {
+			flex-direction: column;
+		}
 
 		&__tag {
 			margin: 0 4px 8px;

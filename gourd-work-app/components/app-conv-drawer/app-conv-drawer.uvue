@@ -9,7 +9,7 @@
 					<text class="app-drawer__dev-name">{{ device }}</text>
 					<rice-icon name="arrow-down" size="13px" color="var(--color-text-tertiary)"></rice-icon>
 				</view>
-				<view class="app-drawer__icon" @click="emit('close')">
+				<view v-if="!props.hideClose" class="app-drawer__icon" @click="emit('close')">
 					<rice-icon name="cross" size="18px" color="var(--color-text-secondary)"></rice-icon>
 				</view>
 			</view>
@@ -79,7 +79,7 @@
 
 		<!-- APP 端禁用原生 dialogPage：其关闭动画期内重开会叠开原生页，滞留的透明页会吞掉全屏点击 -->
 		<rice-action-sheet v-model:show="menuVisible" :actions="menuActions" :use-dialog-page="false"
-			:cancel-text="t('conv.cancel')" @select="onMenuSelect"></rice-action-sheet>
+			:custom-style="sheetStyle" :cancel-text="t('conv.cancel')" @select="onMenuSelect"></rice-action-sheet>
 
 		<app-device-sheet :visible="deviceSheetVisible" :device="device" @close="deviceSheetVisible = false"
 			@select="onSelectDevice"></app-device-sheet>
@@ -110,6 +110,7 @@
 	import { i18n } from '@/locale/i18n.ts'
 	import { useTheme } from '@/hooks/useTheme'
 	import type { ThemeMode } from '@/hooks/useTheme'
+	import { useViewport } from '@/hooks/useViewport'
 	import { useRunEnv } from '@/hooks/useRunEnv'
 	import { useUser } from '@/hooks/useUser'
 	import { useConversations } from '@/hooks/useConversations'
@@ -145,7 +146,17 @@
 		(e: 'new-chat'): void
 	}>()
 
+	// 宽屏双栏下侧栏常驻，关闭按钮无意义，由页面传 hide-close 隐藏
+	const props = withDefaults(defineProps<{
+		hideClose?: boolean
+	}>(), {
+		hideClose: false
+	})
+
 	const { currentMode, setThemeMode } = useTheme()
+	const { sheetShellStyle } = useViewport()
+	// rice-action-sheet 外壳：宽屏限宽居中 + 矮视口限高
+	const sheetStyle: ComputedRef<UTSJSONObject> = sheetShellStyle
 	const env = useRunEnv()
 	const { device, deviceOnline, workspace } = env
 	const { name, points, avatar } = useUser()

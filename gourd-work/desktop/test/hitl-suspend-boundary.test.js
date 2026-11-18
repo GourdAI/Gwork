@@ -111,14 +111,84 @@ test('★ 后端：handle_hitl_action 的 approve 与 deny 都走 spawn_resume�
     const prod = SERVER_SRC.split('#[cfg(test)]')[0];
     const start = prod.indexOf('async fn handle_hitl_action(');
     assert.ok(start > 0, 'handle_hitl_action 缺失');
-    const end = prod.indexOf('fn format_answers_for_llm(', start);
-    assert.ok(end > start, '函数边界锚点缺失');
+    const end = prod.indexOf('async fn auto_approve_and_resume(', start);
+    assert.ok(end > start, '函数边界锚点缺失（共享放行尾巴必须紧随其后）');
     const body = prod.slice(start, end);
-    const calls = (body.match(/^\s*spawn_resume\(/gm) || []).length;
-    assert.equal(calls, 2,
-        'approve 与 deny 各一次；漏一条会让该分支 mint 新 runId / 漏 reopen，'
-        + '用户又会在授权场景看到两张「已编辑 N 个文件」');
+    /* 【2026-11 重构】approve 分支收敛进共享尾巴 auto_approve_and_resume（切完全
+       访问自动放行复用同一实现），deny 仍直调 spawn_resume。语义不变：两条分支
+       都必须以「执行/拒绝 + spawn_resume（沿用 runId + reopen）」收尾。 */
+    assert.equal((body.match(/^\s*auto_approve_and_resume\(/gm) || []).length, 1,
+        'approve 必须走共享放行尾巴（与切档自动放行同一实现）');
+    assert.equal((body.match(/^\s*spawn_resume\(/gm) || []).length, 1,
+        'deny 必须直调 spawn_resume；漏掉会让拒绝分支 mint 新 runId / 漏 reopen');
     assert.ok(!body.includes('new_run_id()'), 'HITL 决策分支不得自行铸造 runId');
+    // 共享尾巴本身必须真的续跑（不是只收卡的空壳）
+    const aStart = prod.indexOf('async fn auto_approve_and_resume(');
+    assert.ok(aStart > 0, '共享放行尾巴缺失');
+    const aEnd = prod.indexOf('fn format_answers_for_llm(', aStart);
+    const aBody = prod.slice(aStart, aEnd > aStart ? aEnd : undefined);
+    assert.ok(aBody.includes('spawn_resume('), '共享尾巴必须 spawn_resume 续跑');
+    assert.ok(aBody.includes('execute_approved_command('), '共享尾巴必须真实执行被批准的命令');
+    assert.ok(!aBody.includes('new_run_id()'), '共享尾巴不得自行铸造 runId');
+});
+
+/* ── 2026-11 用户报障「切了完全访问还弹授权框；批了一次后又弹」 ────────────
+ * 根因：run 的 access_mode 是启动时快照。① 运行中切 full 对已 spawn 的 run 不生效
+ * （下一张 hitl 卡照弹）；② 挂起中切 full 只收卡不续跑（挂起悬空，模型重试同一命令
+ * 再弹一卡）；③ 恢复 run 沿用挂起快照 default，批准后的新命令又被门控。
+ * 三层修复的接线在此钉死。 */
+
+test('★ 后端：run 内档位活读——ReActConfig.access_override 必须接到 ToolContext', () => {
+    const fs = require('node:fs');
+    const reactSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'core', 'src', 'react', 'mod.rs'), 'utf8');
+    const prod = reactSrc.split('#[cfg(test)]')[0];
+    assert.ok(/pub access_override:/.test(prod), 'ReActConfig 缺活读句柄字段');
+    const i = prod.indexOf('let tool_ctx = ToolContext {');
+    assert.ok(i > 0, 'tool_ctx 构造点缺失');
+    const lit = prod.slice(i, prod.indexOf('};', i));
+    assert.ok(lit.includes('access_override: config.access_override.clone()'),
+        '活读句柄没有传进 ToolContext：门控仍读启动快照，切档对运行中 run 不生效');
+    const regSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'core', 'src', 'tools', 'registry.rs'), 'utf8');
+    const regProd = regSrc.split('#[cfg(test)]')[0];
+    assert.ok(/pub fn live_access_mode\(&self\) -> String/.test(regProd), '缺 live_access_mode 单点解析');
+    const ar = regProd.indexOf('pub fn approval_required(');
+    const arBody = regProd.slice(ar, regProd.indexOf('}', ar));
+    assert.ok(arBody.includes('live_access_mode()'), 'approval_required 必须活读档位');
+    const so = regProd.indexOf('pub fn space_open(');
+    const soBody = regProd.slice(so, regProd.indexOf('}', so));
+    assert.ok(soBody.includes('live_access_mode()'), 'space_open 必须与审批门同一档位口径');
+});
+
+test('★ 后端：挂起中切 full 必须自动执行并续跑（不是只收卡）', () => {
+    const prod = SERVER_SRC.split('#[cfg(test)]')[0];
+    const start = prod.indexOf('async fn chat_access_select(');
+    assert.ok(start > 0, 'chat_access_select 缺失');
+    const end = prod.indexOf('fn resolve_access_mode(', start);
+    const body = prod.slice(start, end > start ? end : undefined);
+    assert.ok(body.includes('auto_approve_and_resume('),
+        '切 full 消费挂起后必须自动执行命令并续跑；只发 hitl_released 会把 run 悬空');
+    assert.ok(body.includes('Frame::hitl_released('), '收卡帧仍必须发（前端收掉待审批态）');
+});
+
+test('★ 前端：hitl 帧到达时按会话档位兜底自动放行（双镜像 + 三重门禁）', () => {
+    const fs = require('node:fs');
+    const mirrors = [
+        path.join(__dirname, '..', 'ui', 'js', 'app-streaming.js'),
+        path.join(__dirname, '..', '..', '..', 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static', 'js', 'app-streaming.js')
+    ];
+    for (const f of mirrors) {
+        const src = fs.readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+        /* dispatch switch 的 hitl 分支带渲染调用；相位映射表里还有一个字面同形的
+           `case 'hitl': return PHASE_HITL;`（更靠前），必须锚定渲染调用那处。 */
+        const i = src.indexOf("case 'hitl':   finishThinkingBlock");
+        assert.ok(i > 0, 'hitl 渲染分支缺失: ' + f);
+        const branch = src.slice(i, src.indexOf("case 'hitl_released'", i));
+        assert.ok(branch.includes('modeForSession(sess.sessionId)'), '必须按会话查档位: ' + f);
+        assert.ok(branch.includes('!sess._replaying'), '回放帧不得自动放行: ' + f);
+        assert.ok(branch.includes('_autoApprovedHitlIds'), '每 actionId 只自动提交一次: ' + f);
+        assert.ok(branch.includes('data-hitl-action-id'), '必须按 actionId 精确寻卡: ' + f);
+        assert.ok(/trigger\('click'\)/.test(branch), '必须走与点击批准相同的路径: ' + f);
+    }
 });
 
 test('★ 后端：spawn_resume 沿用挂起 runId 并 reopen ledger（HITL 与 ask 同一入口）', () => {

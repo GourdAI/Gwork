@@ -2,8 +2,10 @@
  * 行为级测试：底部「上下文用量」明细卡的首 Token 延迟（TTFT）行。
  *
  * 用户要求把 TPS / 首 Token 延迟 / 总用时从尾部 hover 弹层收进用量卡。TPS 早已在
- * app-context.js 渲染，本轮补 TTFT：Rust 内核用 run 级 latch 测「起点 → 首个可见输出」
- * 并注入 context_size.args.ttftMs（与 TPS 同源、同落盘、同回放、同 createdAt 门禁）。
+ * app-context.js 渲染，本轮补 TTFT。【2026-11 用户拍板】口径改为「模型首字响应」：
+ * 模型调用发起 → 首个上游帧（正文/思考/工具帧均算），run 内首次响应即锁存；
+ * 工具执行是本地时间绝不计入（旧口径把 8.6 分钟工具执行算成 518.50s，work-mwlhix12）。
+ * 内核注入 context_size.args.ttftMs（与 TPS 同源、同落盘、同回放、同 createdAt 门禁）。
  *
  * 这里在 node:vm 沙箱里【真跑】app-context.js 的纯函数：不靠源码字符串匹配，
  * 而是断言数字、格式化口径、缺数据时的整行省略、以及新轮不串旧值。
@@ -53,6 +55,22 @@ test('TTFT 格式化：不足 1s 用 ms，>=1s 用 2 位小数秒，0 合法', (
     assert.equal(sandbox.ctxTtftText({ ttftMs: 0 }), '0ms');
     assert.equal(sandbox.ctxTtftText({ ttftMs: 1690 }), '1.69s');
     assert.equal(sandbox.ctxTtftText({ ttftMs: 12345 }), '12.35s');
+});
+
+test('TTFT ≥60s 换档 Xmin Ys（与任务耗时同格式），不再渲染 "518.50s"', () => {
+    // 用户报障截图：518503ms 被渲染成 "518.50s"，反直觉。
+    assert.equal(sandbox.ctxTtftText({ ttftMs: 518503 }), '8min 39s');
+    assert.equal(sandbox.ctxTtftText({ ttftMs: 60000 }), '1min 0s', '整分与 ctxFmtElapsed 同写法');
+    assert.equal(sandbox.ctxTtftText({ ttftMs: 59990 }), '59.99s', '换档边界仍在秒档');
+    assert.equal(sandbox.ctxTtftText({ ttftMs: 3600000 }), '1h 0min 0s', '≥1h 与任务耗时同档');
+    // 与 ctxFmtElapsed 在同一数值上完全一致（同卡面两种耗时行不得两套写法）
+    for (const ms of [60000, 95000, 518503, 3599999, 3600000, 7325000]) {
+        assert.equal(sandbox.ctxTtftText({ ttftMs: ms }), sandbox.ctxFmtElapsed(ms), String(ms));
+    }
+    // 卡面行为层：报障数值走整条渲染链也必须是分钟档
+    const html = sandbox.buildContextRows(chunk({ ttftMs: 518503 }), {});
+    assert.match(html, /data-ctx-ttft="1">8min 39s</);
+    assert.ok(!/518\.50s/.test(html), '不得再出现反直觉的三位数秒读数');
 });
 
 test('旧历史帧无 ttftMs 时行恒在显示 --（null 与「合法 0ms」必须可区分）', () => {
@@ -133,7 +151,28 @@ test('内核协议契约：context_size 帧下发 ttftMs，None 时省略', () =
 
     const react = fs.readFileSync(
         path.resolve(__dirname, '../../core/src/react/mod.rs'), 'utf8');
-    assert.match(react, /ttft_ms: ttft_ms_since\(started_at, first_visible_at\)/,
-        'react 必须把 run 级 TTFT 接进 context_size payload');
-    assert.match(react, /fn ttft_ms_since\(/, '必须有可测的纯函数计量');
+    const product = react.split('#[cfg(test)]')[0];
+    assert.match(product, /ttft_ms: model_ttft_ms,/,
+        'react 必须把锁存的模型 TTFT 接进 context_size payload');
+    assert.match(product, /fn ttft_ms_since\(/, '必须有可测的纯函数计量');
+    // 【2026-11 口径修正】只测模型响应：传输层首个上游帧锁存（工具帧也算），
+    // 从本次调用的请求起点计，绝不再从 run 起点计（工具执行是本地时间）。
+    assert.match(product, /model_ttft_ms = ttft_ms_since\(stream_started_at, Some\(last_chunk_at\)\);/,
+        'TTFT 必须在 rx.recv() 收到首个上游帧时从本次请求起点锁存');
+    assert.ok(!product.includes('first_visible_at'),
+        '旧「run 起点 → 首个可见字符」latch 不得回潮（518.50s 报障根因）');
+    assert.ok(!/ttft_ms_since\((?:[\w.]+::)?started_at,/.test(product),
+        'TTFT 不得再从 run 起点计量（含 std::time:: 全限定写法）');
+    // Retry/Error 都是传输层信号而非模型输出：耗尽重试后的 Error 帧若被当作
+    // 「首帧」锁存，就给一个从未响应的模型伪造了首字延迟（null-vs-0 契约）。
+    assert.match(product, /!matches!\(ev, StreamEvent::Retry \{ \.\. \} \| StreamEvent::Error\(_\)\)/,
+        '锁存必须同时排除 Retry 与 Error（传输信号不是模型响应）');
+    // 两处重置：① 传输层 Retry 分支（含首字节前失败）；② 每个模型调用开头
+    // （覆盖 react 层 continue 重试——它们不经传输层 Retry 事件）。
+    const resets = (product.match(/model_ttft_ms = None;/g) || []).length;
+    assert.equal(resets, 2,
+        '模型首字时钟必须在「传输层 Retry」与「新模型调用起点」两处重置');
+    const callStart = product.split('let stream_started_at = std::time::Instant::now();')[1] || '';
+    assert.ok(callStart.split('loop {')[0].includes('model_ttft_ms = None;'),
+        '新调用的重置必须紧贴 stream_started_at（在接收循环之前）');
 });

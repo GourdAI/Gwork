@@ -1,9 +1,11 @@
-/* ===== 魔搭 MCP 市场 + 三 Tab 接线契约 =====
+/* ===== 连接器目录（魔搭/腾讯云/Smithery）+ 三 Tab 接线契约 =====
  *
- * 用户拍板：连接器广场唯一目录源 = 魔搭 ModelScope，不做自定义源 / 第三方 Registry /
- * deploy / operational；自建官方连接器源（admin 远程目录）与随它提供数据的厂商
- * 命令行连接器流程均已整体下线（见被删测试 ㉒~㉕/㉙ 的历史）。
- * 设置页配置迁入后仍保留「手动添加 MCP」入口。
+ * 2026-11 SolonCode 集成轮（用户拍板）：三个内置目录源 = 魔搭 ModelScope（默认）
+ * + 腾讯云 MCP 广场 + Smithery（SolonCode v2026.11 同源契约），二级导航按技能页
+ * 「已安装/各市场」同构直切，「广场」中间层 tab 退役。不做用户自定义目录源 /
+ * MCP 官方 Registry / deploy / operational；自建官方连接器源（admin 远程目录）
+ * 与随它提供数据的厂商命令行连接器流程均已整体下线（见被删测试 ㉒~㉕/㉙ 的历史）。
+ * 「手动添加 MCP」入口在全部连接器视图可见（用户报障：目录视图找不到入口）。
  *
  * 本测试专抓「接线断点」：脚本加载顺序、宿主容器（不能把整个 pane 当宿主，
  * 否则 innerHTML 会冲掉迁入的 MCP 配置 DOM）、手动添加按钮、后端路由、i18n 键集。
@@ -102,29 +104,34 @@ test('③ bootstrap 加载 app-mcp-market.js，且必须在 app-skills.js 之前
   assert.match(read(path.join(ST, 'index.html')), /css\/mcp-market\.css/, 'static: 未引入市场样式');
 });
 
-test('④ 市场模块单目录源（魔搭 ModelScope），不硬编码 Token，不实现自定义源/多源切换', () => {
+test('④ 市场模块三个内置目录源（魔搭/腾讯云/Smithery），不硬编码 Token，不实现自建官方源/用户自定义源', () => {
   VARIANTS.forEach(v => {
     const s = read(path.join(v.base, 'js', 'app-mcp-market.js'));
     assert.match(s, /\/web\/settings\/mcp\/market\/servers/, v.tag + ': 未接后端列表端点');
     assert.match(s, /\/web\/settings\/mcp\/market\/install/, v.tag + ': 未接一键安装端点');
-    /* 2026-11 用户拍板：自建官方源下线，广场只剩魔搭一个目录源。
-     * 因此「源」这个维度在前端不该存在：无 state.source、无 source 查询参数、
-     * 无源切换 tab。留着就是「标签与实际数据不符」的死代码。 */
-    assert.ok(!/state\.source/.test(s), v.tag + ': state.source 已随官方源下线，不得复活');
-    assert.ok(!/p\.set\('source'/.test(s), v.tag + ': 列表查询不得再携带 source 参数');
+    /* 2026-11 集成 SolonCode v2026.11 连接器市场：三个内置目录源
+     * modelscope（默认）/ tencent / smithery，源切换走 app-skills.js 二级导航
+     * （与技能页「已安装/各市场」同构，用户拍板「不要再显示广场」）。
+     * 已删除且不得复活的是**自建官方源**（official）与用户自定义目录源
+     * （addSource/customSource —— 用户明确否决过），与本轮三个公开目录源无关。 */
+    assert.match(s, /SOURCES\s*=\s*\['modelscope',\s*'tencent',\s*'smithery'\]/,
+      v.tag + ': 三源白名单漂移（须与后端 normalize_source 同口径）');
+    assert.match(s, /state\.source/, v.tag + ': 缺 state.source（多源状态）');
+    assert.match(s, /p\.set\('source'/, v.tag + ': 列表查询必须携带 source 参数');
+    assert.match(s, /setSource/, v.tag + ': 缺 setSource（源切换入口）');
     assert.ok(!/mcpMarketSourceTabs|mcp-market-source-tab|syncSourceTabs/.test(s),
-      v.tag + ': 目录源 tabs 已退役（只剩一个源，tab 无意义）');
-    assert.ok(!/'official'|"official"/.test(s), v.tag + ': 不得残留 official 源字面量');
+      v.tag + ': 壳内源 tabs 已退役（源切换统一在 app-skills.js 二级导航）');
+    assert.ok(!/'official'|"official"/.test(s), v.tag + ': 不得残留自建官方源字面量');
     assert.ok(!/Authorization:\s*Bearer|api[_-]?key\s*[:=]\s*['"]ms-/.test(s),
-      v.tag + ': 不得硬编码任何魔搭 Token');
-    assert.ok(!/registry\.modelcontextprotocol\.io|smithery\.ai/.test(s),
-      v.tag + ': 用户明确否决第三方 Registry / 三方多源');
+      v.tag + ': 不得硬编码任何 Token（Smithery key 走 CredentialVault）');
+    assert.ok(!/registry\.modelcontextprotocol\.io/.test(s),
+      v.tag + ': MCP 官方 Registry 未启用（SolonCode 自己也注释停用），不得引入');
     assert.ok(!/addSource|customSource|sourceManager/.test(s),
-      v.tag + ': 用户明确否决自定义源（都不知道 API 标准）');
-    /* 分页钳制仍必须存在：魔搭上游 100 条窗口 */
-    assert.match(s, /hasMorePages/, v.tag + ': 缺分页判定（魔搭 100 条窗口钳制）');
-    assert.ok(!/hasMorePages\(\)\s*\{[\s\S]{0,120}state\.source/.test(s),
-      v.tag + ': hasMorePages 不得再按源分支（只有魔搭，应始终走分页逻辑）');
+      v.tag + ': 用户明确否决自定义目录源（三个内置源之外不加源管理）');
+    /* 分页判定按源：魔搭 100 条窗口钳制必须保留；腾讯/Smithery 无窗口。 */
+    assert.match(s, /hasMorePages/, v.tag + ': 缺分页判定');
+    assert.match(s, /state\.source === 'modelscope'[\s\S]{0,80}< 100/,
+      v.tag + ': 魔搭 100 条窗口钳制丢失');
   });
 });
 
@@ -161,7 +168,8 @@ test('⑥ 24 份语言包含 settings.mcp.market.* 且键集一致', () => {
        *    （带 {msg} 占位）与 retry：此前错误文案硬编码中文，12 语种下
        *    英文用户会看到中文 toast。
        * 既防缺键（界面裸键）也防死键复活。 */
-      ['title', 'market_tab', 'search_placeholder', 'installed', 'empty', 'required',
+      ['title', 'source_modelscope', 'source_tencent', 'source_smithery',
+        'search_placeholder', 'installed', 'empty', 'required',
         'verified', 'connect', 'connect_title', 'save_connect', 'cancel', 'config',
         'load_failed', 'install_failed', 'installed_names', 'detail_failed', 'retry',
         'oauth_badge', 'token_badge', 'saved_connect_failed', 'installed_badge']
@@ -174,10 +182,12 @@ test('⑥ 24 份语言包含 settings.mcp.market.* 且键集一致', () => {
       /* 「精选」概念移除（featured_only/featured_badge 死键不得复活）。 */
       assert.ok(!('featured_only' in mkt), f + ': featured_only 已随「精选」概念移除，不得复活');
       assert.ok(!('featured_badge' in mkt), f + ': featured_badge 已随「精选」概念移除，不得复活');
-      /* 2026-11 用户拍板：自建官方源下线 → 目录源 tabs 退役，
-       * source_official / source_modelscope 成为死键，24 份语言包一并删除，反向断言防复活。 */
-      assert.ok(!('source_official' in mkt), f + ': source_official 已随目录源 tabs 退役，不得复活');
-      assert.ok(!('source_modelscope' in mkt), f + ': source_modelscope 已随目录源 tabs 退役，不得复活');
+      /* 自建官方源死键不得复活（source_official）。source_modelscope 在
+       * SolonCode 集成轮以「三源 tab 展示名」语义回归（见上方必含键集），
+       * 与已删除的官方/魔搭双源 tabs 无关。 */
+      assert.ok(!('source_official' in mkt), f + ': source_official 已随自建官方源下线，不得复活');
+      /* 「广场」中间层 tab 退役（用户拍板：按技能那样三源直切），market_tab 死键。 */
+      assert.ok(!('market_tab' in mkt), f + ': market_tab 已随「广场」tab 退役，不得复活');
       /* qrcode_poll 厂商扫码徽标已随官方源下线：后端 AuthKind::parse 把
        * qrcode_poll/qrcode/qr_poll/scan 一族归入 None（不再授权），前端徽标必须
        * 同口径删除，否则卡片画「扫码授权」却根本不走扫码 = 误导。scan_badge 死键不得复活。 */
@@ -211,8 +221,10 @@ test('⑥ 24 份语言包含 settings.mcp.market.* 且键集一致', () => {
        * 退役）/-cli_* 26 键（该流程数据源消失，UI 整体下线）。48→20。
        * 2026-11 codereview 轮：-scan_badge（qrcode_poll 扫码徽标随后端归 None 一并下线）。20→19。
        * 2026-11 安装链路修复轮：+saved_connect_failed（修1「已保存但连接失败」warning
-       * toast，带 {msg}）/+installed_badge（修4 广场卡片与详情弹窗的「已安装」徽标）。19→21。 */
-      assert.equal(Object.keys(mkt).length, 21, f + ': market 键数漂移，键集契约需同步更新');
+       * toast，带 {msg}）/+installed_badge（修4 广场卡片与详情弹窗的「已安装」徽标）。19→21。
+       * 2026-11 SolonCode 集成轮：-market_tab（「广场」中间层 tab 退役，三源直切）
+       * +source_modelscope/+source_tencent/+source_smithery（源 tab 展示名）。21→23。 */
+      assert.equal(Object.keys(mkt).length, 23, f + ': market 键数漂移，键集契约需同步更新');
       /* connect_title 是纯标题（调用处不传 params），不得残留 {msg} 占位符——
        * zh-TW 曾写成「連接 {msg}」，界面直接漏出字面占位符。 */
       assert.ok(!String(mkt.connect_title || '').includes('{msg}'),
@@ -1153,9 +1165,10 @@ test('㉗ 授权徽标别名归一 + 详情扁平 authType（静态接线护栏�
       v.tag + ': 扫码徽标 class 已删，不得复活');
     /* 后端 normalize 兼容扁平 authType，详情只读嵌套会「卡片有徽标、详情无」。 */
     assert.match(js, /cfg\.authType/, v.tag + ': detailAuthKind 未兼容扁平 authType');
-    /* 分类请求不再带 source（只有一个源，后端 categories 无需分流）。 */
-    assert.ok(!/API\.categories[^\n]*\?source=/.test(js),
-      v.tag + ': 分类请求不得再携带 source 参数（官方源已下线）');
+    /* 分类请求必须带 source（三个源的分类表完全不同：魔搭 kebab key /
+     * 腾讯数字 id / Smithery 无分类）。SolonCode 集成轮由「不得带」反转为「必须带」。 */
+    assert.match(js, /API\.categories[^\n]*source=/,
+      v.tag + ': 分类请求必须携带 source 参数（三源分类表分流）');
   });
 });
 

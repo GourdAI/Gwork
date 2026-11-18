@@ -562,7 +562,9 @@
       "common_close": "关闭",
       "network_error": "网络错误",
       "market": {
-        "market_tab": "广场",
+        "source_modelscope": "魔搭",
+        "source_tencent": "腾讯云",
+        "source_smithery": "Smithery",
         "title": "MCP 服务市场",
         "search_placeholder": "搜索 MCP 服务",
         "installed": "已安装",

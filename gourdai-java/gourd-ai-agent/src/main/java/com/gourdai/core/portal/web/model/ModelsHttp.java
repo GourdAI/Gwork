@@ -17,7 +17,7 @@ import javax.net.ssl.SSLException;
 /**
  * 模型列表拉取的 HTTP 公共工具：URL 前置校验与传输层异常分类。
  *
- * <p>三个 adapter 共用，保证 OpenAI/Anthropic/Ollama 对同一类故障给出同一个
+ * <p>各 adapter 共用，保证 OpenAI/Anthropic 对同一类故障给出同一个
  * {@link ModelsFetchReason}，前端只需维护一份文案映射。</p>
  */
 public final class ModelsHttp {
@@ -36,7 +36,7 @@ public final class ModelsHttp {
      * 甚至被静默拼成一个能解析但指向错误主机的地址，所以在发请求之前先明确拒绝。</p>
      *
      * @param url 待校验的完整 URL
-     * @param tag 日志标签（如 OpenAI/Anthropic/Ollama），仅用于异常消息定位
+     * @param tag 日志标签（如 OpenAI/Anthropic），仅用于异常消息定位
      * @return 原样返回的 URL
      * @throws ModelsFetchException reason = {@link ModelsFetchReason#INVALID_URL}，status = 0
      */

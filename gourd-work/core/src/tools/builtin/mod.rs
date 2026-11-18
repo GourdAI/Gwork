@@ -2906,7 +2906,7 @@ impl Tool for AddModelTool {
                 "apiKey": {"type": "string"},
                 "model": {"type": "string", "description": "Model ID (e.g. gpt-4o)"},
                 "name": {"type": "string", "description": "Display name (defaults to model)"},
-                "standard": {"type": "string", "description": "openai | anthropic | ollama"},
+                "standard": {"type": "string", "description": "openai | openai-responses | anthropic | gemini"},
                 "timeout": {"type": "string", "description": "Timeout seconds, default 120"}
             },
             "required": ["apiUrl", "apiKey", "model"]
@@ -3259,6 +3259,35 @@ mod tests {
         assert!(susp.background);
     }
 
+    /// 【2026-11 用户报障「切了完全访问还弹授权框」】run 以 default 快照启动后，
+    /// 用户运行中把档位切到 full：下一次 bash 调用必须直接放行，不得再挂起。
+    /// 反向（full → default）同样成立：档位收回后危险命令重新挂起。
+    /// 用真实的 BashTool.execute 走完整门控路径，钉的是行为不是字符串。
+    #[tokio::test]
+    async fn mid_run_switch_to_full_disarms_the_bash_gate() {
+        let s = Scratch::new("hitl-live-tier");
+        let mut ctx = tool_ctx_for(&s.0);
+        ctx.access_mode = "default".into();
+        ctx.hitl_approved = false;
+        let map = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        ctx.access_override = Some(map.clone());
+
+        // ① 无覆盖：default 快照下危险命令挂起（基线，证明门真的开着）
+        let out = BashTool.execute(json!({"command": "rm -rf build"}), &ctx).await;
+        assert!(out.suspend.is_some(), "baseline: default tier must suspend");
+
+        // ② 模拟运行中切档（picker 写共享 map）→ 同一 ctx 的下一次调用直接执行
+        map.lock().await.insert(ctx.session_id.clone(), "full".to_string());
+        let out = BashTool.execute(json!({"command": "rm -rf build"}), &ctx).await;
+        assert!(out.suspend.is_none(),
+            "mid-run switch to full must disarm the gate; got suspend: {:?}", out.suspend);
+
+        // ③ 切回 default → 门重新生效（无 run 级免疫残留）
+        map.lock().await.insert(ctx.session_id.clone(), "default".to_string());
+        let out = BashTool.execute(json!({"command": "rm -rf build"}), &ctx).await;
+        assert!(out.suspend.is_some(), "switching back to default must re-arm the gate");
+    }
+
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
@@ -3558,7 +3587,7 @@ mod tests {
         let s = Scratch::new("grep-e2e");
         s.write("src/x.rs", "fn target_fn() {}\n");
 
-        let ctx = ToolContext {
+        let ctx = ToolContext {            access_override: None,
             workspace: s.0.clone(),
             session_dir: None,
             session_id: "work-test".into(),
@@ -3598,7 +3627,7 @@ mod tests {
     /// `grep_tool_follows_the_access_mode_tier` below.)
     #[tokio::test]    async fn grep_tool_rejects_path_escaping_workspace() {
         let s = Scratch::new("grep-escape");
-        let ctx = ToolContext {
+        let ctx = ToolContext {            access_override: None,
             workspace: s.0.clone(),
             session_dir: None,
             session_id: "work-test".into(),
@@ -3646,7 +3675,7 @@ mod tests {
         std::fs::create_dir_all(sibling.join("src")).unwrap();
         std::fs::write(sibling.join("src").join("y.rs"), "fn target_fn() {}\n").unwrap();
 
-        let mut ctx = ToolContext {
+        let mut ctx = ToolContext {            access_override: None,
             workspace: s.0.clone(),
             session_dir: None,
             session_id: "work-test".into(),
@@ -3733,7 +3762,7 @@ mod tests {
         let target_s = target.to_string_lossy().to_string();
         let dir_s = sibling.to_string_lossy().to_string();
 
-        let mut ctx = ToolContext {
+        let mut ctx = ToolContext {            access_override: None,
             workspace: s.0.clone(),
             session_dir: None,
             session_id: "work-tier-all".into(),
@@ -4054,7 +4083,7 @@ mod tests {
         let f = UploadsFixture::new("img");
         std::fs::write(f.workspace.join("shot.png"), tiny_png_bytes()).unwrap();
 
-        let ctx = ToolContext {
+        let ctx = ToolContext {            access_override: None,
             workspace: f.workspace.clone(),
             session_dir: Some(f.session_dir.clone()),
             session_id: "work-test".into(),
@@ -4092,7 +4121,7 @@ mod tests {
         let f = UploadsFixture::new("img2");
         std::fs::write(f.workspace.join("photo.JPG"), tiny_png_bytes()).unwrap();
 
-        let ctx = ToolContext {
+        let ctx = ToolContext {            access_override: None,
             workspace: f.workspace.clone(),
             session_dir: Some(f.session_dir.clone()),
             session_id: "work-test".into(),
@@ -4128,7 +4157,7 @@ mod tests {
         v[..8].copy_from_slice(&tiny_png_bytes()[..8]);
         std::fs::write(&big, v).unwrap();
 
-        let ctx = ToolContext {
+        let ctx = ToolContext {            access_override: None,
             workspace: f.workspace.clone(),
             session_dir: Some(f.session_dir.clone()),
             session_id: "work-test".into(),
@@ -4164,7 +4193,7 @@ mod tests {
         std::fs::write(f.workspace.join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
         std::fs::write(f.workspace.join("note.txt"), "hello").unwrap();
 
-        let ctx = ToolContext {
+        let ctx = ToolContext {            access_override: None,
             workspace: f.workspace.clone(),
             session_dir: Some(f.session_dir.clone()),
             session_id: "work-test".into(),
@@ -4203,7 +4232,7 @@ mod tests {
     // ─── read 三层上限 / BOM / 读状态 ────────────────────────────────────────
 
     fn plain_ctx(workspace: PathBuf) -> ToolContext {
-        ToolContext {
+        ToolContext {            access_override: None,
             workspace,
             session_dir: None,
             session_id: "read-limits".into(),
@@ -4549,7 +4578,7 @@ mod tests {
     /// Layout mirrors the real one: `<root>/.gwork/sessions/<sid>` — `project_root`
     /// walks up three levels from `session_dir`.
     fn project_ctx(root: &Path, sid: &str) -> ToolContext {
-        ToolContext {
+        ToolContext {            access_override: None,
             workspace: root.to_path_buf(),
             session_dir: Some(root.join(".gwork").join("sessions").join(sid)),
             session_id: sid.into(),
@@ -5341,7 +5370,7 @@ mod tests {
             let dir = std::env::temp_dir().format_todo_dir(tag);
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            let ctx = ToolContext {
+            let ctx = ToolContext {                access_override: None,
                 workspace: dir.clone(),
                 session_dir: Some(dir.clone()),
                 session_id: "work-todo-test".into(),
@@ -5608,7 +5637,7 @@ mod tests {
     fn ask_ctx() -> ToolContext {
         let dir = std::env::temp_dir().join(format!("gwork-ask-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        ToolContext {
+        ToolContext {            access_override: None,
             workspace: dir.clone(),
             session_dir: Some(dir),
             session_id: "work-ask-test".into(),
@@ -5924,7 +5953,7 @@ mod tests {
     }
 
     fn tool_ctx_for(dir: &Path) -> ToolContext {
-        ToolContext {
+        ToolContext {            access_override: None,
             workspace: dir.to_path_buf(),
             session_dir: None,
             session_id: "work-t".into(),

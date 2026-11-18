@@ -310,6 +310,8 @@ async fn main() -> Result<()> {
             model: model.clone(),
             settings: settings.clone(),
             access_mode: "full".into(),
+            // CLI one-shots have no interactive tier picker: snapshot is final.
+            access_override: None,
             max_turns: settings.general.max_turns,
             run_id: format!("cli-run-{}", &uuid::Uuid::new_v4().to_string()[..8]),
             start_seq: 0,

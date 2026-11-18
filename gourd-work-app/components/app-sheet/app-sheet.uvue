@@ -6,6 +6,7 @@
 		bg-color="var(--color-bg)"
 		overlay-bg-color="var(--color-sheet-mask)" drag-bar-class="app-sheet__grabber"
 		drag-wrap-class="app-sheet__dragwrap"
+		:custom-style="popupStyle"
 		@update:show="onShowChange" @click-overlay="emit('close')">
 		<view class="app-sheet" :style="panelStyle">
 			<view class="app-sheet__head" :class="compact ? 'app-sheet__head--compact' : ''">
@@ -31,6 +32,7 @@
 <script setup lang="ts">
 	import { computed } from 'vue'
 	import type { ComputedRef } from 'vue'
+	import { useViewport, SHEET_MAX_WIDTH } from '@/hooks/useViewport'
 
 	defineOptions({
 		name: 'app-sheet',
@@ -59,11 +61,28 @@
 		(e: 'search'): void
 	}>()
 
-	// UCSS 的 max-height 只接受像素值，按窗口高度换算设计稿的 80% / 88%
+	const { windowWidth, windowHeight, isWide, sheetShellStyle } = useViewport()
+
+	// UCSS 的 max-height 只接受像素值，按窗口高度换算设计稿的 80% / 88%；
+	// 窗口尺寸取响应式单例，旋转/分屏后已打开的弹层高度即时跟随
 	const panelStyle: ComputedRef<string> = computed<string>((): string => {
 		const ratio: number = props.tall ? 0.88 : 0.8
-		const height: number = Math.round(uni.getWindowInfo().windowHeight * ratio)
+		const height: number = Math.round(windowHeight.value * ratio)
 		return 'max-height:' + height.toString() + 'px;'
+	})
+
+	// 弹层外壳（rice-popup 根节点）：宽屏限宽居中 + 高度上限，逻辑与 action-sheet 共用同一份；
+	// tall 形态（连接器/运行环境等长列表）上限放宽到 92%
+	const popupStyle: ComputedRef<UTSJSONObject> = computed<UTSJSONObject>((): UTSJSONObject => {
+		if (!props.tall) return sheetShellStyle.value
+		const style: UTSJSONObject = {}
+		style['max-height'] = Math.round(windowHeight.value * 0.92).toString() + 'px'
+		if (isWide.value) {
+			const width: number = Math.min(SHEET_MAX_WIDTH, windowWidth.value - 48)
+			style['width'] = width.toString() + 'px'
+			style['margin-left'] = Math.round((windowWidth.value - width) / 2).toString() + 'px'
+		}
+		return style
 	})
 
 	// rice-popup 的关闭（自带 X / 点遮罩 / 下滑）最终都走关闭动画，结束时统一让页面收起弹层

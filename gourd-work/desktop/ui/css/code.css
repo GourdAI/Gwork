@@ -882,7 +882,9 @@ body.code-mode #chatView .tool-card-header { padding: 6px 10px; gap: 6px; font-s
 body.code-mode #chatView .tool-type-icon { font-size: 13px; }
 body.code-mode #chatView .tool-file-lang { font-size: 12px; }
 body.code-mode #chatView .tool-args { font-size: 11px; }
-body.code-mode #chatView .tool-card-body { padding: 0 10px 8px; font-size: 11px; }
+/* 卡体全宽口径与 chat 模式一致（app.css 基线 padding:0，底色/内距由内容块承担）；
+   旧 0 10px 8px 会让 code 模式的输出块比头部窄一圈，复现「宽度不一致」 */
+body.code-mode #chatView .tool-card-body { padding: 0; font-size: 11px; }
 
 /* 每轮变更卡片（消息流内）：码模式聊天列窄，行内元素收紧 */
 body.code-mode #chatView .file-change-row { gap: 5px; padding: 5px 3px; align-items: flex-start; flex-direction: column; }

@@ -132,26 +132,6 @@ export const CONNECTORS: ConnectorOption[] = [
 	{ name: 'MasterGo 莫高设计', desc: '连接 MasterGo 画布，让 AI 进入设计流程。', enabled: false, color: '#4f8cff', icon: 'mountain' }
 ]
 
-/** 账号身份：个人账号 / 企业账号（「我的」与账号设置按它切换文案与徽标） */
-export type IdentityType = 'personal' | 'enterprise'
-
-/** 企业认证状态：ok 可直接进入；pending / fail / 未购套餐 只能弹提示（原型 ENT_ALERTS 三种受阻态） */
-export type EnterpriseStatus = 'ok' | 'pending' | 'fail'
-
-export type EnterpriseAccount = {
-	name: string
-	role: string
-	status: EnterpriseStatus
-	pkg: boolean
-}
-
-/** 当前账号已加入的企业；名称与角色是内容数据（同工作区命名），提示文案在 locale */
-export const ENTERPRISES: EnterpriseAccount[] = [
-	{ name: 'GWork 科技', role: '管理员', status: 'ok', pkg: true },
-	{ name: '星辰传媒', role: '成员', status: 'pending', pkg: true },
-	{ name: '蓝鲸制造', role: '成员', status: 'fail', pkg: false }
-]
-
 /** 演示产物清单：接口接入前对所有会话展示同一份（设计稿 S3 弹层示例数据） */
 export const ARTIFACTS: ArtifactFile[] = [
 	{ name: '信息架构梳理.md', kind: 'MD', icon: 'doc', size: '12.4 KB' },

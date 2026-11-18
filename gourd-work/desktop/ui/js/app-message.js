@@ -1570,18 +1570,53 @@ window.markToolCardFailed = markToolCardFailed;
    新增工具的专用展示只需 window._toolRenderers[name] = fn，无需改动主流程。 */
 window._toolRenderers = window._toolRenderers || {};
 
+/* edit 兜底：用 old_str/new_str 合成 unified diff。
+   【为何必须存在】Rust 内核 edit 的 action_end 不带 args（协议注释明确「回放由
+   action_start + action_end 重建」，args 只在 start 帧上），也不带 args.diff
+   （那是 Java 内核的扩展字段），结果文本只有一句 "Edited … (N replacement(s) at line L)"。
+   旧渲染器只认 args.diff / '---' 前缀，成功时又把结果文本整段隐藏 → html 恒为空串
+   却 return true，展开就是一块空板（用户报「编辑的消息点击无法展开」的真因）。
+   本函数从 action_start 暂存的参数（cardEl._toolArgs）合成带行号的 diff；
+   replace_all 多区间无法还原各处上下文，只合成首个区间并在 @@ 行保留原始匹配语义。
+   首行号从结果文案 "at line L" 解析（内核按首个匹配区间计算，口径一致），解析不到则从 1 起。 */
+function synthesizeEditDiff(args, text) {
+    if (!args || typeof args.old_str !== 'string' || typeof args.new_str !== 'string') return null;
+    if (!args.old_str && !args.new_str) return null;
+    var startLine = 1;
+    var m = (typeof text === 'string') ? text.match(/at line (\d+)/) : null;
+    if (m) startLine = parseInt(m[1], 10) || 1;
+    /* 【CRLF 归一化】模型 args 可能是 CRLF 而文件是 LF（内核匹配时做了 EOL 转写，
+       落盘的是转写后的文本）；不归一化则每行末尾残留 \r，pre-wrap 下多画一个
+       回车占位，且尾行判定 endsWith('\n') 之外的 '\r' 会漏删空行。 */
+    var oldStr = args.old_str.replace(/\r\n/g, '\n');
+    var newStr = args.new_str.replace(/\r\n/g, '\n');
+    var oldLines = oldStr.split('\n');
+    var newLines = newStr.split('\n');
+    /* 尾部换行会 split 出一个空串元素，它不是真实行，去掉避免多画一行空删除/新增 */
+    if (oldLines.length > 1 && oldLines[oldLines.length - 1] === '' && oldStr.endsWith('\n')) oldLines.pop();
+    if (newLines.length > 1 && newLines[newLines.length - 1] === '' && newStr.endsWith('\n')) newLines.pop();
+    var out = ['@@ -' + startLine + ',' + oldLines.length + ' +' + startLine + ',' + newLines.length + ' @@'];
+    var i;
+    for (i = 0; i < oldLines.length; i++) out.push('-' + oldLines[i]);
+    for (i = 0; i < newLines.length; i++) out.push('+' + newLines[i]);
+    return out.join('\n');
+}
+window.synthesizeEditDiff = synthesizeEditDiff;
+
 /* edit：git-diff 风格逐行着色 + 行号 */
 window._toolRenderers.edit = function(bodyEl, text, args, failed) {
     var diff = (args && typeof args.diff === 'string') ? args.diff : null;
     var result = (typeof text === 'string') ? text : null;
     if (!diff && result && result.startsWith('---')) { diff = result; result = null; }
-    if (!diff && !result) return false;
-    bodyEl.style.padding = '0';
-    bodyEl.style.maxHeight = '400px';
-    bodyEl.style.overflow = 'auto';
-    bodyEl.style.fontFamily = 'var(--font-mono)';
-    bodyEl.style.fontSize = '12px';
-    bodyEl.style.lineHeight = '1.5';
+    /* Rust 内核路径：无 args.diff 时由 old_str/new_str 合成（含实时与历史回放） */
+    if (!diff) diff = synthesizeEditDiff(args, result);
+    /* failed=true 不得提前交还兜底：帧文本可能为空串，兜底渲染空串又是空板，
+       须走到下方失败态保底段自渲染警示标签 */
+    if (!diff && !result && failed !== true) return false;
+    /* 视觉参数全部走 CSS 类（.tool-card-body.is-edit + .git-diff-line），不再写内联样式：
+       内联 fontSize/lineHeight 会压过 Qoder 对齐层 ⑦ 的 12.5px/1.6，造成 edit 卡与
+       其它工具卡字号行距漂移（用户报「有的有阴影有的没有、宽度不一致」的伴生问题）。 */
+    bodyEl.classList.add('is-edit');
 
     var lines = (diff || '').split('\n');
     var html = '';
@@ -1624,18 +1659,28 @@ window._toolRenderers.edit = function(bodyEl, text, args, failed) {
                 + '<span class="git-line-text">' + line + '</span></div>';
         }
     }
-    // 输出段：成功时仅展示 diff（结果提示与改动重复，显示冗余，已隐藏）；
-    // 仅在出错时渲染错误信息，避免编辑失败时卡片体空白。
+    // 输出段：成功时结果摘要一行常显（Edited … 是「改在哪一行、替换几处」的唯一线索，
+    // 旧实现整段隐藏，diff 又合成不出来时卡体就是空的）；失败时带警示标签。
     if (result && result !== diff) {
         // NOTE: 失败判定唯一依赖后端 failed 标识，不再嗅探成功文案（Rust 内核成功文案为英文 Edited ...，旧判定会误报失败）。
         var isErr = failed === true;
+        if (diff) html += '<div class="edit-result-sep"></div>';
         if (isErr) {
-            if (diff) html += '<div class="edit-result-sep"></div>';
             html += '<div class="edit-result is-error">'
                 + '<span class="edit-result-label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> ' + GourdI18n.t('chat.edit_failed') + '</span>'
                 + '<span class="edit-result-text">' + escapeHtml(result) + '</span></div>';
+        } else {
+            html += '<div class="edit-result is-ok"><span class="edit-result-text">' + escapeHtml(result) + '</span></div>';
         }
     }
+    /* 【失败态保底】failed=true 却既无 diff 也无结果文案（如帧文本被上游截断成空串）时，
+       至少给出警示标签段——否则 return false 落到纯文本兜底渲染空串，又是空板。 */
+    if (!html && failed === true) {
+        html = '<div class="edit-result is-error">'
+            + '<span class="edit-result-label">' + GourdI18n.t('chat.edit_failed') + '</span></div>';
+    }
+    /* 终极兜底：diff 与 result 都没有可渲染内容时交还纯文本路径，绝不 return true 留空板 */
+    if (!html) return false;
     bodyEl.innerHTML = html;
     return true;
 };
@@ -1648,7 +1693,10 @@ function renderHighlightedFile(bodyEl, text, args) {
     if (lang && typeof hljs !== 'undefined') {
         try {
             var highlighted = hljs.highlight(text, { language: lang, ignoreIllegals: true });
-            bodyEl.innerHTML = '<pre style="margin:0;padding:10px;overflow:auto;border-radius:0;background:var(--bg-code, #f5f5f5);line-height:1.5"><code class="hljs">' + highlighted.value + '</code></pre>';
+            /* 内边距/底色全部走 .tool-file-pre（CSS 统一），不再写内联样式：
+               内联 padding 会让 read/write 的内容块与其它工具卡的 14px 节奏漂移。 */
+            bodyEl.classList.add('is-file');
+            bodyEl.innerHTML = '<pre class="tool-file-pre"><code class="hljs">' + highlighted.value + '</code></pre>';
             return true;
         } catch(e) {
             return false;
@@ -1736,7 +1784,7 @@ window._toolRenderers.ls = renderFileListing;
 
 /* bash：终端风格输出块，等宽、深色、保留换行 */
 window._toolRenderers.bash = function(bodyEl, text, args) {
-    bodyEl.style.padding = '0';
+    bodyEl.classList.add('is-bash');
     var cmd = (args && args.command) ? args.command : '';
     var html = '<div class="bash-output">';
     if (cmd) html += '<div class="bash-cmd"><span class="bash-prompt">$</span> ' + escapeHtml(cmd) + '</div>';
@@ -1756,7 +1804,8 @@ function renderTodoMarkdown(bodyEl, text, args) {
         try { inner = hljs.highlight(md, { language: 'markdown' }).value; } catch(e) {}
     }
     if (!inner) inner = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    bodyEl.innerHTML = '<pre style="margin:0;padding:10px"><code class="hljs language-markdown">' + inner + '</code></pre>';
+    bodyEl.classList.add('is-file');
+    bodyEl.innerHTML = '<pre class="tool-file-pre"><code class="hljs language-markdown">' + inner + '</code></pre>';
     return true;
 }
 window._toolRenderers.todowrite = renderTodoMarkdown;
@@ -2060,6 +2109,10 @@ function createToolCardShell(sess, toolName, args, toolTitle, actionId, agentBod
         + '<div class="tool-card-body"></div>';
     applyToolPresentation(card, toolName, toolTitle, toolPresentationOptions(agentBody, args));
     updateToolHeaderMeta(card, toolName, args, null);
+    /* 完整 args 暂存到卡片元素：action_end 帧不带 args（协议约定），结果体渲染
+       （edit 合成 diff / bash 命令回显 / read-write 语言推断）要靠它取回。
+       生命周期与卡片一致，容器清空即随之回收（与 _pendingToolBody 同一纪律）。 */
+    if (args && typeof args === 'object') card._toolArgs = args;
 
     bindToolCardToggle(card);
     return card;
@@ -2167,6 +2220,8 @@ function adoptArgsStreamingCard(sess, card, toolName, args, presentationTitle, a
 
     applyToolPresentation(card, toolName, presentationTitle, toolPresentationOptions(agentBody, args, card));
     updateToolHeaderMeta(card, toolName, args, null);
+    /* 骨架转正时补存完整 args（draft 阶段参数尚不存在，createToolCardShell 存不到） */
+    if (args && typeof args === 'object') card._toolArgs = args;
     if (argsStr == null) argsStr = formatToolArgsStr(args);
     if (argsStr) {
         var argsEl = $(card).find('.tool-args').first()[0];
@@ -2263,6 +2318,8 @@ function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agent
         if (actionId) approvedCard.setAttribute('data-action-id', actionId);
         applyToolPresentation(approvedCard, toolName, presentationTitle, toolPresentationOptions(insertAgentBody, args, approvedCard));
         updateToolHeaderMeta(approvedCard, toolName, args, null);
+        /* HITL 接管路径同样补存 args：审批卡由 hitl 帧创建，从未走过 createToolCardShell */
+        if (args && typeof args === 'object') approvedCard._toolArgs = args;
         var approvedArgsEl = $(approvedCard).find('.tool-args').first()[0];
         if (argsStr) {
             if (approvedArgsEl) approvedArgsEl.textContent = argsStr;
@@ -2420,7 +2477,9 @@ function fillToolBody(sess, bodyEl, toolName, text, args, meta, failed) {
         // 兜底路径：renderToolBody 分发前已削过一遍，这里再调一次是幂等的（无 ESC 时
     // 直接返回原串）。保留是为了让「未经 renderToolBody」的调用方也能复用本行语义，
     // 且阅读时不必回溯分发函数才能确信显示无颜色码。
-    bodyEl.textContent = stripAnsiForDisplay(text || '');
+    /* 包进 .tool-plain-out：与专用渲染器同底（--bg-code）同宽（全宽）同内距（14px），
+       消灭「兜底工具无底色窄一圈、专用工具有底色全宽」的双轨观感。 */
+    bodyEl.innerHTML = '<div class="tool-plain-out">' + escapeHtml(stripAnsiForDisplay(text || '')) + '</div>';
     }
     if (meta && meta.truncated && meta.seq) {
         appendExpandFullBtn(sess, bodyEl, toolName, args, meta);
@@ -2489,6 +2548,11 @@ function bindToolCardToggle(card) {
 function updateToolCardContent(sess, cardEl, toolName, toolTitle, args, text, meta, options, failed) {
     var presentation = applyToolPresentation(cardEl, toolName, toolTitle, options);
     var bareToolName = presentation.bareToolName;
+    /* 【args 回填】协议约定 action_end 不带 args（回放由 action_start + action_end 重建，
+       见 protocol/mod.rs），而 edit 渲染器合成 diff、bash 渲染器回显命令、read/write
+       推断语言全部依赖 args。start 帧到达时已把完整 args 暂存到卡片（_toolArgs），
+       此处 end 帧 args 缺失时取回，否则实时/回放的 edit 卡都拿不到 old_str/new_str。 */
+    if (!args && cardEl && cardEl._toolArgs) args = cardEl._toolArgs;
     updateToolHeaderMeta(cardEl, bareToolName, args, text);
     var argsStr = formatToolArgsStr(args);
     var argsEl = $(cardEl).find('.tool-args').first()[0];
@@ -2529,7 +2593,7 @@ function appendExpandFullBtn(sess, bodyEl, toolName, args, meta) {
                renderer 不暴露，只有 bash 以外的工具才落到这条兜底上，因此手测
                容易漏）。 */
             if (!renderToolBody(bodyEl, toolName, full, args, false)) {
-                bodyEl.textContent = stripAnsiForDisplay(full);
+                bodyEl.innerHTML = '<div class="tool-plain-out">' + escapeHtml(stripAnsiForDisplay(full)) + '</div>';
             }
             if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(bodyEl);
             if (sess.sessionId === activeSessionId) scrollToBottom();
@@ -3577,7 +3641,9 @@ function appendHitlCard(sess, toolName, command, actionId) {
         + argsHtml
         + '<span class="tool-status-icon warn">' + HITL_WARN_SVG + '</span>'
         + '</div>'
-        + '<div class="tool-card-body">' + (command ? escapeHtml(command) : GourdI18n.t('chat.waiting_auth')) + '</div>'
+        // 命令包进 .hitl-command 代码块（与旧 .hitl-card 命令块同族）：外层卡体保持
+        // padding:0 全宽契约，代码块的底色/内距/限高由内层承担（2026-11 授权卡重设计）
+        + '<div class="tool-card-body">' + (command ? '<div class="hitl-command">' + escapeHtml(command) + '</div>' : GourdI18n.t('chat.waiting_auth')) + '</div>'
         + '<div class="hitl-card-actions">'
         + '<button class="hitl-btn hitl-btn-approve" data-i18n="chat.approve">' + GourdI18n.t('chat.approve') + '</button>'
         + '<button class="hitl-btn hitl-btn-reject" data-i18n="chat.reject">' + GourdI18n.t('chat.reject') + '</button>'

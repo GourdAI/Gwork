@@ -659,7 +659,21 @@ pub struct ToolContext {
     /// Frame sender — tools can push frames (e.g. HITL prompts) mid-execution.
     pub frame_tx: Option<mpsc::UnboundedSender<Frame>>,
     /// Access mode: "default" requires approval for dangerous ops; "full" skips.
+    ///
+    /// This is the **run-start snapshot**. For interactive runs it can go stale
+    /// the moment the user flips the picker mid-run; the gates must therefore
+    /// consult [`Self::live_access_mode`] / [`Self::approval_required`] /
+    /// [`Self::space_open`], never this field directly.
     pub access_mode: String,
+    /// Shared handle to the server's per-session access-tier override map
+    /// (`AppState.session_access`), threaded from `ReActConfig.access_override`.
+    ///
+    /// `None` for callers with no live picker (CLI, ACP, loop tasks, sub-agents):
+    /// the snapshot is then the whole truth. Only recognised values ("full" /
+    /// "default") count as an override — an empty or garbage entry must fall
+    /// through to the snapshot, mirroring `server::resolve_access_mode`.
+    pub access_override:
+        Option<Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>>,
     /// Cooperative cancellation — set when the user hits Stop.
     pub cancel: CancellationToken,
     /// True when resuming a run after the user approved a HITL gate. Tools that
@@ -761,9 +775,33 @@ pub struct ToolContext {
 }
 
 impl ToolContext {
+    /// The access tier **right now**: live session override when present and
+    /// recognised, otherwise the run-start snapshot.
+    ///
+    /// `try_lock` deliberately: the map's critical sections are microseconds
+    /// (insert on picker change, clone on run start), so contention is
+    /// vanishingly rare — and a gate must never *block* a tool on a UI bookkeeping
+    /// lock. On the rare contended read we fall back to the snapshot, which is
+    /// exactly the pre-fix behaviour (fail-safe: might ask once more, never
+    /// silently widens).
+    pub fn live_access_mode(&self) -> String {
+        if let Some(map) = &self.access_override {
+            if let Ok(guard) = map.try_lock() {
+                if let Some(v) = guard.get(&self.session_id) {
+                    if v == "full" || v == "default" {
+                        return v.clone();
+                    }
+                }
+            }
+        }
+        self.access_mode.clone()
+    }
+
     /// Whether the current access mode requires approval gates.
+    /// Reads the **live** tier — a mid-run switch to full disarms the gate for
+    /// every subsequent invocation of the same run.
     pub fn approval_required(&self) -> bool {
-        self.access_mode != "full"
+        self.live_access_mode() != "full"
     }
 
     /// Whether the workspace boundary of the file tools is lifted.
@@ -790,7 +828,7 @@ impl ToolContext {
     /// two kernels requires adding tier inheritance to `ParentRun`, not
     /// deleting this check.
     pub fn space_open(&self) -> bool {
-        self.access_mode == "full" && self.subagent_depth == 0
+        self.live_access_mode() == "full" && self.subagent_depth == 0
     }
 
     /// Where this session's `TODO.md` lives.
@@ -1239,7 +1277,7 @@ mod tests {
     use super::*;
 
     fn ctx(session_dir: Option<PathBuf>, tool_call_id: &str) -> ToolContext {
-        ToolContext {
+        ToolContext {            access_override: None,
             workspace: PathBuf::from("/kernel/workspace"),
             session_dir,
             session_id: "work-test".into(),
@@ -1281,6 +1319,69 @@ mod tests {
     #[test]
     fn action_id_falls_back_to_the_legacy_placeholder() {
         assert_eq!(ctx(None, "").action_id(), "pending");
+    }
+
+    // ── Live access tier (2026-11 「切了完全访问还弹授权框」) ─────────────────
+    //
+    // The run-start `access_mode` is a snapshot; the picker writes the shared
+    // override map mid-run. These lock the single resolution point so the
+    // approval gate and the workspace boundary can never disagree, and so a
+    // garbage/absent override can never silently widen permissions.
+
+    fn ctx_with_override(snapshot: &str, entry: Option<(&str, &str)>) -> ToolContext {
+        let mut c = ctx(None, "call-live");
+        c.access_mode = snapshot.into();
+        let mut map = std::collections::HashMap::new();
+        if let Some((sid, mode)) = entry {
+            map.insert(sid.to_string(), mode.to_string());
+        }
+        c.access_override = Some(Arc::new(tokio::sync::Mutex::new(map)));
+        c
+    }
+
+    #[test]
+    fn live_override_full_disarms_the_gate_of_a_default_snapshot_run() {
+        // The exact reported defect: run spawned under "default", user flips the
+        // picker to full mid-run — the very next invocation must not gate.
+        let c = ctx_with_override("default", Some(("work-test", "full")));
+        assert_eq!(c.live_access_mode(), "full");
+        assert!(!c.approval_required(), "mid-run switch to full must disarm the gate");
+        assert!(c.space_open(), "the boundary must follow the same live tier");
+    }
+
+    #[test]
+    fn live_override_default_rearms_the_gate_of_a_full_snapshot_run() {
+        // The reverse direction must work too: switching back to default mid-run
+        // re-enables gating (no stale "full" immunity for the rest of the run).
+        let c = ctx_with_override("full", Some(("work-test", "default")));
+        assert!(c.approval_required());
+        assert!(!c.space_open());
+    }
+
+    #[test]
+    fn absent_or_garbage_override_falls_through_to_the_snapshot() {
+        // No entry for this session → snapshot stands.
+        let c = ctx_with_override("default", Some(("other-session", "full")));
+        assert!(c.approval_required(), "another session's tier must not leak");
+        // Present but unrecognised → snapshot stands (never silently widen).
+        let c = ctx_with_override("default", Some(("work-test", "yolo")));
+        assert!(c.approval_required());
+        let c = ctx_with_override("default", Some(("work-test", "")));
+        assert!(c.approval_required());
+        // No handle at all (CLI/ACP/loop/sub-agent) → snapshot is the whole truth.
+        let mut c = ctx(None, "call-live");
+        c.access_mode = "full".into();
+        c.access_override = None;
+        assert!(!c.approval_required());
+    }
+
+    #[test]
+    fn subagent_depth_still_contains_the_boundary_even_with_a_full_override() {
+        // The depth guard is orthogonal to the tier: a delegated run stays
+        // contained regardless of what the parent's picker says.
+        let mut c = ctx_with_override("full", Some(("work-test", "full")));
+        c.subagent_depth = 1;
+        assert!(!c.space_open(), "depth containment must survive the live tier");
     }
 
     /// TODO.md belongs in the session directory (Java `TodoTalent.getTodoPath`).

@@ -118,7 +118,7 @@ class RemoteWebAuthContractTest {
     // ───────────────────────── WebAuthFilter 行为 ─────────────────────────
 
     /**
-     * Solon Context 桩：用仓库既有范式 ContextEmpty（WsControllerOllamaModelsTest 同款），
+     * Solon Context 桩：用仓库既有范式 ContextEmpty，
      * 只覆写 Filter 用到的方法（method/path/header/status/headerSet）。
      */
     private static class RecordingContext extends org.noear.solon.core.handle.ContextEmpty {

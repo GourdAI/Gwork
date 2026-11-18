@@ -9,16 +9,14 @@
 		</view>
 
 		<scroll-view class="mine__scroll" direction="vertical" :show-scrollbar="false">
-			<view class="mine__content">
+			<view class="mine__content" :style="colStyle">
 				<!-- 资料卡：整卡进入账号设置（原型 S7 me-card） -->
 				<view class="mine-card" @click="goAccount">
 					<rice-avatar :src="avatar" size="56px" mode="aspectFill" radius="28px"></rice-avatar>
 					<view class="mine-card__id">
 						<view class="mine-card__l1">
 							<text class="mine-card__name">{{ name }}</text>
-							<text v-if="isEnterprise" class="mine-card__role">{{ role }}</text>
 						</view>
-						<text v-if="isEnterprise" class="mine-card__company">{{ enterprise }}</text>
 						<text class="mine-card__email">{{ email }}</text>
 					</view>
 					<rice-icon name="arrow-right" size="16px" color="var(--color-text-tertiary)"></rice-icon>
@@ -59,9 +57,6 @@
 				</view>
 
 				<view class="mine-sec">
-					<view class="mine-row mine-row--center mine-row--divided" @click="identityVisible = true">
-						<text class="mine-row__center">{{ t('mine.switchAccount') }}</text>
-					</view>
 					<view class="mine-row mine-row--center" @click="onLogout">
 						<text class="mine-row__center mine-row__center--danger">{{ t('mine.logout') }}</text>
 					</view>
@@ -98,34 +93,27 @@
 			</view>
 		</app-sheet>
 
-		<identity-sheet :visible="identityVisible" @close="identityVisible = false"
-			@select="onIdentitySelect"></identity-sheet>
-
 		<about-sheet :visible="aboutVisible" @close="aboutVisible = false"></about-sheet>
 
 		<mine-message-dialog :visible="notifyVisible" :title="t('mine.notifyTitle')"
 			:message="t('mine.notifyDesc')" :confirm-text="t('mine.notifyGo')" :show-cancel="true"
 			@close="notifyVisible = false" @confirm="onNotifyGo"></mine-message-dialog>
-
-		<mine-message-dialog :visible="entAlertVisible" :title="entAlertTitle" :message="entAlertDesc"
-			:note="entAlertNote" :confirm-text="t('mine.iGotIt')"
-			@close="entAlertVisible = false" @confirm="entAlertVisible = false"></mine-message-dialog>
 	</view>
 </template>
 
 <script setup lang="ts">
 	import { computed, ref } from 'vue'
 	import type { ComputedRef, Ref } from 'vue'
+	import { onResize, onShow } from '@dcloudio/uni-app'
 	import { i18n } from '@/locale/i18n.ts'
 	import { useTheme } from '@/hooks/useTheme'
 	import type { ThemeMode } from '@/hooks/useTheme'
+	import { refreshViewport, formColumn } from '@/hooks/useViewport'
 	import { useLocale } from '@/hooks/useLocale'
 	import type { Locale } from '@/hooks/useLocale'
-	import { useUser } from '@/hooks/useUser'
-	import { ENTERPRISES } from '@/data/app-data'
-	import type { EnterpriseAccount } from '@/data/app-data'
+	import { useUser, resetUser } from '@/hooks/useUser'
+	import { gworkLogout } from '@/utils/gwork-auth.ts'
 	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
-	import IdentitySheet from './components/identity-sheet.uvue'
 	import AboutSheet from './components/about-sheet.uvue'
 	import MineMessageDialog from './components/mine-message-dialog.uvue'
 
@@ -161,20 +149,20 @@
 	]
 
 	const { themeClass, currentMode, setThemeMode } = useTheme()
+
+	// APP 端旋转/分屏只有页面级 onResize；onShow 兜底后台期间的旋转
+	onResize((_e: OnResizeOptions): void => { refreshViewport() })
+	onShow((): void => { refreshViewport() })
+
+	// 宽屏内容列限宽居中：设置行不再横向拉满整块平板屏（32 = content 左右 padding 16×2）
+	const colStyle: ComputedRef<string> = computed<string>((): string => formColumn(32))
 	const { currentLocale, setLocale } = useLocale()
-	const { name, email, points, avatar, idType, enterprise, role, switchToPersonal, switchToEnterprise } = useUser()
+	const { name, email, points, avatar } = useUser()
 
 	const themeSheetVisible: Ref<boolean> = ref<boolean>(false)
 	const langSheetVisible: Ref<boolean> = ref<boolean>(false)
-	const identityVisible: Ref<boolean> = ref<boolean>(false)
 	const aboutVisible: Ref<boolean> = ref<boolean>(false)
 	const notifyVisible: Ref<boolean> = ref<boolean>(false)
-	const entAlertVisible: Ref<boolean> = ref<boolean>(false)
-	const entAlertTitle: Ref<string> = ref<string>('')
-	const entAlertDesc: Ref<string> = ref<string>('')
-	const entAlertNote: Ref<string> = ref<string>('')
-
-	const isEnterprise: ComputedRef<boolean> = computed<boolean>((): boolean => idType.value === 'enterprise')
 
 	const themeLabel: ComputedRef<string> = computed<string>((): string => {
 		if (currentMode.value === 'light') return t('theme.light')
@@ -229,47 +217,16 @@
 		uni.showToast({ title: t('mine.notifyDone'), icon: 'none' })
 	}
 
-	function onIdentitySelect(key: string): void {
-		if (key === 'personal') {
-			identityVisible.value = false
-			switchToPersonal()
-			uni.showToast({ title: t('mine.switchedPersonal'), icon: 'none' })
-			uni.reLaunch({ url: HOME_PAGE })
-			return
-		}
-		const ent: EnterpriseAccount | undefined = ENTERPRISES.find((item: EnterpriseAccount): boolean => item.name === key)
-		if (ent != null && switchToEnterprise(key)) {
-			identityVisible.value = false
-			uni.showToast({ title: t('mine.switchedEnterprise', { name: key }), icon: 'none' })
-			uni.reLaunch({ url: HOME_PAGE })
-			return
-		}
-		showEntAlert(ent)
-	}
-
-	/** 受阻企业的提示，优先级与原型一致：认证中 > 未认证 > 未购套餐 */
-	function showEntAlert(ent: EnterpriseAccount | undefined): void {
-		if (ent == null) return
-		if (ent.status === 'pending') {
-			entAlertTitle.value = t('mine.entPendingTitle')
-			entAlertDesc.value = t('mine.entPendingDesc')
-			entAlertNote.value = ''
-		} else if (ent.status === 'fail') {
-			entAlertTitle.value = t('mine.entFailTitle')
-			entAlertDesc.value = t('mine.entFailDesc')
-			entAlertNote.value = t('mine.entFailNote')
-		} else {
-			entAlertTitle.value = t('mine.entPkgTitle')
-			entAlertDesc.value = t('mine.entPkgDesc')
-			entAlertNote.value = t('mine.entPkgNote')
-		}
-		entAlertVisible.value = true
-	}
-
 	function onLogout(): void {
-		// TODO 接入退出登录接口并清理各请求实例 token
-		uni.showToast({ title: t('mine.loggedOut'), icon: 'none' })
-		uni.reLaunch({ url: LOGIN_PAGE })
+		// 服务端撤销会话 + 清本地凭据；网络失败也会清本地（gworkLogout 内部保证）
+		gworkLogout().then((): void => {
+			resetUser()
+			uni.showToast({ title: t('mine.loggedOut'), icon: 'none' })
+			uni.reLaunch({ url: LOGIN_PAGE })
+		}, (): void => {
+			resetUser()
+			uni.reLaunch({ url: LOGIN_PAGE })
+		})
 	}
 </script>
 
@@ -347,23 +304,6 @@
 			font-size: 17px;
 			font-weight: 760;
 			color: var(--color-text);
-		}
-
-		&__role {
-			margin-left: 8px;
-			font-size: 10.5px;
-			font-weight: 700;
-			padding: 3px 8px;
-			border-radius: 8px;
-			background-color: var(--color-brand-soft);
-			color: var(--color-primary);
-		}
-
-		&__company {
-			margin-top: 4px;
-			font-size: 11.5px;
-			font-weight: 650;
-			color: var(--color-text-secondary);
 		}
 
 		&__email {

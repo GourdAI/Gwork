@@ -1085,7 +1085,39 @@ function onWebChunk(sess, chunk) {
                 // 始终在主对话展示重试提示（下一 chunk 到达时自动清除），不得写入智能体卡片体
                 appendRetryChunk(sess, chunk.text);
                 break;
-        case 'hitl':   finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendHitlCard(sess, chunk.toolName, chunk.command, chunk.actionId); break;
+        case 'hitl':   finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendHitlCard(sess, chunk.toolName, chunk.command, chunk.actionId);
+            /* 【完全访问兜底自动放行 · 2026-11 用户报障「切了完全访问还弹授权框」】
+               会话档位已是 full 时这张卡本不该存在：后端旧内核按 run 启动时的快照门控，
+               运行中切档对已 spawn 的 run 不生效。这里按【本端会话档位】兜底：渲染后立即
+               走与点击批准完全相同的路径（handleHitlResponse），命令执行、结果回填、
+               失败回退全部复用既有链路。三重门禁防误放：
+               ① 回放帧不触发（历史里的 hitl 卡由 hitl_released/后续结果收口，重放批准会 409）；
+               ② 每 actionId 只自动提交一次（防失败回退→再渲染→再提交的死循环；失败后
+                  restoreHitlCardPending 恢复手动按钮，用户仍可点）；
+               ③ 档位查询按会话（modeForSession），别的会话切 full 不影响本会话。
+               新内核已在 bash 门活读档位，本分支正常情况下不会再命中，仅兜底旧内核/竞态。 */
+            if (!sess._replaying && window.GourdAccessMode
+                    && typeof window.GourdAccessMode.modeForSession === 'function'
+                    && window.GourdAccessMode.modeForSession(sess.sessionId) === 'full') {
+                if (!sess._autoApprovedHitlIds) sess._autoApprovedHitlIds = {};
+                var autoKey = chunk.actionId || ('seq-' + (chunk.eventSeq || chunk.seq || Date.now()));
+                /* 卡片按 actionId 精确寻位（data-hitl-action-id 是 appendHitlCard 落上的），
+                   不用 sess.pendingHitlCard——那是上次【已提交】的卡（失败回退时才非空），
+                   按它找会点错卡。渲染落点用 renderRoot（本会话作用域，不扫别的会话）。 */
+                var autoCard = null;
+                if (typeof renderRoot === 'function') {
+                    var $cards = $(renderRoot(sess)).find('.hitl-pending');
+                    autoCard = chunk.actionId
+                        ? $cards.filter('[data-hitl-action-id="' + chunk.actionId + '"]').last()[0]
+                        : $cards.last()[0];
+                }
+                if (autoCard && !sess._autoApprovedHitlIds[autoKey]) {
+                    sess._autoApprovedHitlIds[autoKey] = true;
+                    var autoBtn = $(autoCard).find('.hitl-btn-approve')[0];
+                    if (autoBtn) { $(autoBtn).trigger('click'); }
+                }
+            }
+            break;
         // 后端解除挂起（切完全访问）：把对应审批卡收为「已放行」终态。
         // 回放同走此分支：已落盘的 hitl 帧重渲染出的卡会被紧随其后的释放帧收掉，
         // 历史里不再留可点的死卡（后端已无挂起任务，点批准只会 ACTION_MISMATCH）。

@@ -1,7 +1,7 @@
 <template>
 	<view class="login-brand">
-		<image class="login-brand__mark" :src="markSrc" mode="aspectFit"></image>
-		<text class="login-brand__name">GWork</text>
+		<image class="login-brand__mark" :class="compact ? 'login-brand__mark--compact' : ''" :src="markSrc" mode="aspectFit"></image>
+		<text class="login-brand__name" :class="compact ? 'login-brand__name--compact' : ''">GWork</text>
 	</view>
 </template>
 
@@ -13,6 +13,13 @@
 	// 主题变量由页面根节点的 themeClass 注入，组件内不再引入 theme.scss
 	defineOptions({
 		styleIsolation: 'app-and-page'
+	})
+
+	// 矮视口（横屏手机/分屏）压缩品牌区，由页面传入
+	withDefaults(defineProps<{
+		compact?: boolean
+	}>(), {
+		compact: false
 	})
 
 	const { isDark } = useTheme()
@@ -31,6 +38,11 @@
 		&__mark {
 			width: 150px;
 			height: 150px;
+
+			&--compact {
+				width: 88px;
+				height: 88px;
+			}
 		}
 
 		&__name {
@@ -39,6 +51,11 @@
 			font-weight: 800;
 			letter-spacing: -1px;
 			color: var(--color-text);
+
+			&--compact {
+				margin-top: 6px;
+				font-size: 22px;
+			}
 		}
 	}
 </style>

@@ -1,16 +1,66 @@
 <template>
 	<view class="login-form">
-		<view class="login-form__field" :class="focused ? 'login-form__field--focus' : ''">
-			<rice-input v-model="email" :placeholder="t('login.emailPlaceholder')" :clearable="true"
-				clear-trigger="always" border="none" height="52px" font-size="15.5px" @focus="onFocus"
-				@blur="onBlur" />
+		<!-- 登录/注册分段控件：与桌面端登录弹框同一交互（tabs 切换，单一主操作按钮） -->
+		<view class="login-form__tabs">
+			<rice-subsection v-model="tabIndex" :list="tabList" shape="round" @change="onTabChange" />
 		</view>
 
+		<view class="login-form__field" :class="focusedField === 'username' ? 'login-form__field--focus' : ''">
+			<rice-input v-model="username" :placeholder="t('gwork.usernamePlaceholder')" :clearable="true"
+				clear-trigger="always" :maxlength="20" border="none" height="52px" font-size="15.5px"
+				:custom-style="inputPadStyle" color="var(--color-text)" :placeholder-style="placeholderStyle"
+				@focus="onFocus('username')" @blur="onBlur" />
+		</view>
+
+		<view class="login-form__field login-form__field--gap"
+			:class="focusedField === 'password' ? 'login-form__field--focus' : ''">
+			<rice-input v-model="password" type="password" :show-password="true"
+				:placeholder="t('gwork.passwordPlaceholder')" border="none" height="52px" font-size="15.5px"
+				:custom-style="inputPadStyle" color="var(--color-text)" :placeholder-style="placeholderStyle"
+				@focus="onFocus('password')" @blur="onBlur" />
+		</view>
+
+		<template v-if="isRegister">
+			<view class="login-form__field login-form__field--gap"
+				:class="focusedField === 'password2' ? 'login-form__field--focus' : ''">
+				<rice-input v-model="password2" type="password" :show-password="true"
+					:placeholder="t('gwork.passwordConfirmPlaceholder')" border="none" height="52px" font-size="15.5px"
+					:custom-style="inputPadStyle" color="var(--color-text)" :placeholder-style="placeholderStyle"
+					@focus="onFocus('password2')" @blur="onBlur" />
+			</view>
+
+			<view class="login-form__field login-form__field--gap"
+				:class="focusedField === 'email' ? 'login-form__field--focus' : ''">
+				<rice-input v-model="email" :placeholder="emailPlaceholder" :clearable="true"
+					clear-trigger="always" inputmode="email" border="none" height="52px" font-size="15.5px"
+					:custom-style="inputPadStyle" color="var(--color-text)" :placeholder-style="placeholderStyle"
+					@focus="onFocus('email')" @blur="onBlur" />
+			</view>
+
+			<!-- 验证码行：输入框 + 发送按钮（60s 冷却，后台限流同 IP 30s/2 次，客户端更宽松） -->
+			<view class="login-form__code-row">
+				<view class="login-form__field login-form__code-field"
+					:class="focusedField === 'code' ? 'login-form__field--focus' : ''">
+					<rice-input v-model="code" :placeholder="t('gwork.codePlaceholder')" :maxlength="6"
+						inputmode="numeric" border="none" height="52px" font-size="15.5px"
+						:custom-style="inputPadStyle" color="var(--color-text)" :placeholder-style="placeholderStyle"
+						@focus="onFocus('code')" @blur="onBlur" />
+				</view>
+				<view class="login-form__code-btn" :class="codeBtnDisabled ? 'login-form__code-btn--off' : ''"
+					@click="onSendCode">
+					<text class="login-form__code-btn-text"
+						:class="codeBtnDisabled ? 'login-form__code-btn-text--off' : ''">{{ codeBtnText }}</text>
+				</view>
+			</view>
+		</template>
+
+		<!-- 错误提示：与桌面端登录弹框的 hint 同位（表单与主按钮之间），后台错误原样回显 -->
+		<text v-if="hint.length > 0" class="login-form__hint">{{ hint }}</text>
+
 		<view class="login-form__submit">
-			<view class="login-form__submit-btn">
-				<rice-button :text="t('login.getCode')" color="transparent"
-					text-color="var(--color-text-inverse)" text-size="15.5px" width="100%" height="52px"
-					shape="square" @click="onSubmit" />
+			<view class="login-form__submit-btn" :class="busy ? 'login-form__submit-btn--busy' : ''">
+				<rice-button :text="submitText" color="transparent" text-color="var(--color-text-inverse)"
+					text-size="15.5px" width="100%" height="52px" shape="square" :disabled="busy" @click="onSubmit" />
 			</view>
 		</view>
 
@@ -28,7 +78,8 @@
 </template>
 
 <script setup lang="ts">
-	import { ref } from 'vue'
+	import { computed, ref } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
 
 	// 主题变量由页面根节点的 themeClass 注入，组件内不再引入 theme.scss
@@ -36,33 +87,99 @@
 		styleIsolation: 'app-and-page'
 	})
 
+	const props = withDefaults(defineProps<{
+		busy?: boolean
+		hint?: string
+		emailRequired?: boolean
+		codeCooldown?: number
+		codeSending?: boolean
+		codeSentOnce?: boolean
+	}>(), {
+		busy: false,
+		hint: '',
+		emailRequired: true,
+		codeCooldown: 0,
+		codeSending: false,
+		codeSentOnce: false
+	})
+
 	const emit = defineEmits<{
-		(e: 'submit', email: string, agreed: boolean): void
+		(e: 'submit', mode: string, username: string, password: string, password2: string, email: string, code: string, agreed: boolean): void
+		(e: 'sendCode', email: string): void
+		(e: 'modeChange', mode: string): void
 	}>()
 
-	const email = ref<string>('tila@gwork.com')
-	const agreed = ref<boolean>(true)
-	const focused = ref<boolean>(false)
+	const tabIndex: Ref<number> = ref<number>(0)
+	const username: Ref<string> = ref<string>('')
+	const password: Ref<string> = ref<string>('')
+	const password2: Ref<string> = ref<string>('')
+	const email: Ref<string> = ref<string>('')
+	const code: Ref<string> = ref<string>('')
+	const agreed: Ref<boolean> = ref<boolean>(false)
+	const focusedField: Ref<string> = ref<string>('')
 
-	function t(key: string): string {
-		return i18n.global.t(key)
+	const isRegister: ComputedRef<boolean> = computed<boolean>((): boolean => tabIndex.value === 1)
+
+	const tabList: ComputedRef<string[]> = computed<string[]>((): string[] => [t('gwork.signIn'), t('gwork.signUp')])
+
+	const inputPadStyle: UTSJSONObject = { paddingLeft: '0px', paddingRight: '0px' }
+
+	const placeholderStyle: ComputedRef<string> = computed<string>((): string => 'color:var(--color-text-tertiary)')
+
+	const emailPlaceholder: ComputedRef<string> = computed<string>((): string => {
+		return props.emailRequired ? t('gwork.emailRequiredPlaceholder') : t('gwork.emailOptionalPlaceholder')
+	})
+
+	const submitText: ComputedRef<string> = computed<string>((): string => {
+		if (props.busy) return t('gwork.working')
+		return isRegister.value ? t('gwork.signUpSubmit') : t('gwork.signIn')
+	})
+
+	const codeBtnDisabled: ComputedRef<boolean> = computed<boolean>((): boolean => {
+		return props.codeSending || props.codeCooldown > 0 || props.busy
+	})
+
+	const codeBtnText: ComputedRef<string> = computed<string>((): string => {
+		if (props.codeSending) return t('gwork.working')
+		if (props.codeCooldown > 0) return t('gwork.codeRetrySeconds', { seconds: props.codeCooldown })
+		return props.codeSentOnce ? t('gwork.codeRetry') : t('gwork.sendCode')
+	})
+
+	function t(key: string, values?: Record<string, any>): string {
+		if (values == null) return i18n.global.t(key)
+		return i18n.global.t(key, values)
 	}
 
-	function onFocus(): void {
-		focused.value = true
+	function onFocus(field: string): void {
+		focusedField.value = field
 	}
 
 	function onBlur(): void {
-		focused.value = false
+		focusedField.value = ''
+	}
+
+	function onTabChange(index: number): void {
+		emit('modeChange', index === 1 ? 'register' : 'login')
+	}
+
+	function onSendCode(): void {
+		if (codeBtnDisabled.value) return
+		emit('sendCode', email.value.trim())
 	}
 
 	function onSubmit(): void {
-		emit('submit', email.value, agreed.value)
+		if (props.busy) return
+		emit('submit', isRegister.value ? 'register' : 'login', username.value.trim(), password.value,
+			password2.value, email.value.trim(), code.value.trim(), agreed.value)
 	}
 </script>
 
 <style lang="scss">
 	.login-form {
+		&__tabs {
+			margin-bottom: 18px;
+		}
+
 		&__field {
 			height: 52px;
 			padding: 0 16px;
@@ -77,6 +194,55 @@
 				border-color: var(--color-primary);
 				background-color: var(--color-bg);
 			}
+
+			&--gap {
+				margin-top: 12px;
+			}
+		}
+
+		&__code-row {
+			flex-direction: row;
+			align-items: center;
+			margin-top: 12px;
+		}
+
+		&__code-field {
+			flex: 1;
+			min-width: 0;
+		}
+
+		&__code-btn {
+			height: 52px;
+			margin-left: 10px;
+			padding: 0 14px;
+			border-radius: 15px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-primary);
+			align-items: center;
+			justify-content: center;
+			background-color: var(--color-bg-card);
+
+			&--off {
+				border-color: var(--color-border);
+			}
+		}
+
+		&__code-btn-text {
+			font-size: 13px;
+			font-weight: 700;
+			color: var(--color-primary);
+
+			&--off {
+				color: var(--color-text-tertiary);
+			}
+		}
+
+		&__hint {
+			margin-top: 12px;
+			font-size: 12.5px;
+			line-height: 18px;
+			color: var(--color-error);
 		}
 
 		&__submit {
@@ -86,6 +252,10 @@
 		&__submit-btn {
 			border-radius: 15px;
 			background-color: var(--color-primary);
+
+			&--busy {
+				opacity: 0.6;
+			}
 		}
 
 		&__agree {

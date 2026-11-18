@@ -1,89 +1,254 @@
 <template>
 	<view class="login" :class="themeClass">
-		<view class="login__body">
-			<view class="login__brand">
-				<login-brand></login-brand>
+		<!-- 矮视口（横屏手机/分屏）整体可滚动：品牌+表单不再定高挤压，键盘弹出时也能滚到输入框 -->
+		<scroll-view class="login__scroll" direction="vertical" :show-scrollbar="false">
+			<view class="login__body" :style="bodyStyle">
+				<view class="login__col" :style="colStyle">
+					<view class="login__brand" :class="isShort ? 'login__brand--short' : ''">
+						<login-brand :compact="isShort || isRegister"></login-brand>
+					</view>
+					<login-form :busy="busy" :hint="hint" :email-required="emailRequired" :code-cooldown="codeCooldown"
+						:code-sending="codeSending" :code-sent-once="codeSentOnce" @submit="onSubmit"
+						@send-code="onSendCode" @mode-change="onModeChange"></login-form>
+				</view>
 			</view>
-			<login-form @submit="onSubmit"></login-form>
-		</view>
-		<login-footer @enterprise="onEnterpriseLogin"></login-footer>
+		</scroll-view>
 		<!-- 放在最后：绝对定位元素只有位于同级末尾时才不会被后续全屏节点抢走点击 -->
-		<view class="login__theme">
-			<rice-button :icon="themeIcon" type="default" plain shape="round" height="36px" width="36px"
-				icon-color="var(--color-text-secondary)" @click="toggleTheme" />
+		<!-- 手写圆形 view 而不用 rice-button：rice 内置字体在部分端缺字（月亮 sleep 渲染成
+			空白），与会话抽屉「外观」弹层同一处置——月亮走全局 iconfont 码点，
+			太阳用 rice 字体已验证有字的 sun（抽屉亮色项同款） -->
+		<view class="login__theme" @click="toggleTheme">
+			<rice-icon v-if="isDark" name="sun" size="18px" color="var(--color-text-secondary)" />
+			<text v-else class="iconfont login__theme-glyph">&#xe6e1;</text>
 		</view>
 	</view>
 </template>
 
 <script setup lang="ts">
-	import { computed } from 'vue'
-	import type { ComputedRef } from 'vue'
+	import { computed, onUnmounted, ref } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import { onResize, onShow } from '@dcloudio/uni-app'
 	import { i18n } from '@/locale/i18n.ts'
 	import { useTheme } from '@/hooks/useTheme'
+	import { useViewport, refreshViewport, formColumn } from '@/hooks/useViewport'
+	import { errorToMessage } from '@/utils/tools.ts'
+	import { gworkLogin, gworkRegister, gworkSendCode, gworkSignedIn, probeRegisterConfig } from '@/utils/gwork-auth.ts'
+	import { refreshUserFromAccount } from '@/hooks/useUser'
 	import LoginBrand from './components/login-brand.uvue'
 	import LoginForm from './components/login-form.uvue'
-	import LoginFooter from './components/login-footer.uvue'
 
 	const { themeClass, isDark, setThemeMode } = useTheme()
+	const { windowHeight, isShort } = useViewport()
 
-	const themeIcon = computed<string>((): string => isDark.value ? 'sun' : 'sleep')
+	// APP 端旋转/分屏只有页面级 onResize；onShow 兜底后台期间的旋转
+	onResize((_e: OnResizeOptions): void => { refreshViewport() })
+	onShow((): void => {
+		refreshViewport()
+		// 会话恢复成功（App.uvue onLaunch 异步 restore）时直接进首页，不重复登录
+		if (gworkSignedIn().value) enterHome()
+	})
+
+	// 宽屏内容列限宽居中（54 = body 左右 padding 27×2）
+	const colStyle: ComputedRef<string> = computed<string>((): string => formColumn(54))
+
+	// 内容块高度：常规视口撑满剩余空间做垂直居中；矮视口改为自然高度+滚动，
+	// scroll-view 的子节点必须有可滚动高度，固定 flex:1 会把溢出内容裁掉。
+	// 注册态字段多，一律按自然高度渲染避免溢出
+	const bodyStyle: ComputedRef<string> = computed<string>((): string => {
+		if (isShort.value || isRegister.value) return 'padding-top:12px;padding-bottom:12px;'
+		const height: number = windowHeight.value - 64
+		return 'height:' + height.toString() + 'px;justify-content:center;'
+	})
 
 	const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
-	const ENTERPRISE_PAGE = '/pages/enterprise-login/index'
-	const VERIFY_PAGE = '/pages/verify/index'
+	const HOME_PAGE = '/pages/home/index'
+	/** 验证码冷却 60s：后台限流同 IP 30s 内 2 次，客户端更宽松（与桌面端一致） */
+	const CODE_COOLDOWN_SECS = 60
+
+	const isRegister: Ref<boolean> = ref<boolean>(false)
+	const busy: Ref<boolean> = ref<boolean>(false)
+	const hint: Ref<string> = ref<string>('')
+	const emailRequired: Ref<boolean> = ref<boolean>(true)
+	const codeCooldown: Ref<number> = ref<number>(0)
+	const codeSending: Ref<boolean> = ref<boolean>(false)
+	const codeSentOnce: Ref<boolean> = ref<boolean>(false)
+	let cooldownTimer: number | null = null
+	let entered = false
 
 	function t(key: string): string {
 		return i18n.global.t(key)
 	}
 
-	function onSubmit(email: string, agreed: boolean): void {
-		if (!agreed) {
-			uni.showToast({ title: t('login.agreeRequired'), icon: 'none' })
-			return
-		}
-		const account = email.trim()
-		if (!EMAIL_PATTERN.test(account)) {
-			uni.showToast({ title: t('login.emailInvalid'), icon: 'none' })
-			return
-		}
-		// TODO 接入发送验证码接口，成功后再进入验证码页
-		uni.navigateTo({ url: VERIFY_PAGE + '?email=' + encodeURIComponent(account) })
+	function enterHome(): void {
+		if (entered) return
+		entered = true
+		refreshUserFromAccount()
+		uni.reLaunch({ url: HOME_PAGE })
 	}
 
-	function onEnterpriseLogin(): void {
-		uni.navigateTo({ url: ENTERPRISE_PAGE })
+	function onModeChange(mode: string): void {
+		isRegister.value = mode === 'register'
+		hint.value = ''
+		if (isRegister.value) {
+			probeRegisterConfig().then((required: boolean): void => {
+				emailRequired.value = required
+			}, (): void => { })
+		}
+	}
+
+	function stopCooldown(): void {
+		if (cooldownTimer != null) {
+			clearInterval(cooldownTimer)
+			cooldownTimer = null
+		}
+	}
+
+	function startCooldown(): void {
+		stopCooldown()
+		codeCooldown.value = CODE_COOLDOWN_SECS
+		cooldownTimer = setInterval((): void => {
+			if (codeCooldown.value <= 1) {
+				codeCooldown.value = 0
+				stopCooldown()
+				return
+			}
+			codeCooldown.value -= 1
+		}, 1000)
+	}
+
+	function onSendCode(email: string): void {
+		if (busy.value || codeSending.value || codeCooldown.value > 0) return
+		if (email.length === 0) {
+			hint.value = t('gwork.emailFirst')
+			return
+		}
+		if (!EMAIL_PATTERN.test(email)) {
+			hint.value = t('login.emailInvalid')
+			return
+		}
+		codeSending.value = true
+		hint.value = ''
+		gworkSendCode(email).then((msg: string): void => {
+			codeSending.value = false
+			codeSentOnce.value = true
+			startCooldown()
+			uni.showToast({ title: msg, icon: 'none' })
+		}, (err: any): void => {
+			codeSending.value = false
+			hint.value = errorToMessage(err)
+		})
+	}
+
+	function onSubmit(mode: string, username: string, password: string, password2: string, email: string, code: string, agreed: boolean): void {
+		if (busy.value) return
+		if (!agreed) {
+			hint.value = t('login.agreeRequired')
+			return
+		}
+		if (username.length === 0 || password.length === 0) {
+			hint.value = t('gwork.required')
+			return
+		}
+		// 后台 validate:"max=20"，超长会被服务端拒（Invalid input），客户端先拦
+		if (username.length > 20) {
+			hint.value = t('gwork.usernameTooLong')
+			return
+		}
+		if (password.length < 8 || password.length > 128) {
+			hint.value = t('gwork.passwordPolicy')
+			return
+		}
+		if (mode === 'register') {
+			if (password2 !== password) {
+				hint.value = t('gwork.passwordMismatch')
+				return
+			}
+			if (emailRequired.value) {
+				if (email.length === 0) {
+					hint.value = t('gwork.emailFirst')
+					return
+				}
+				if (!EMAIL_PATTERN.test(email)) {
+					hint.value = t('login.emailInvalid')
+					return
+				}
+				if (code.length === 0) {
+					hint.value = t('gwork.codeRequired')
+					return
+				}
+			}
+		}
+		busy.value = true
+		hint.value = ''
+		const pending = mode === 'register'
+			? gworkRegister(username, password, email, code)
+			: gworkLogin(username, password)
+		pending.then((): void => {
+			busy.value = false
+			uni.showToast({ title: t('login.success'), icon: 'none' })
+			enterHome()
+		}, (err: any): void => {
+			busy.value = false
+			hint.value = errorToMessage(err)
+		})
 	}
 
 	/** 临时入口：便于在登录页直接验证亮 / 暗两种样式 */
 	function toggleTheme(): void {
 		setThemeMode(isDark.value ? 'light' : 'dark')
-		console.log('[login] theme ->', isDark.value ? 'dark' : 'light')
 	}
+
+	onUnmounted((): void => {
+		stopCooldown()
+	})
 </script>
 
 <style lang="scss">
 	.login {
 		flex: 1;
 		flex-direction: column;
+		padding-top: var(--status-bar-height);
 		padding-bottom: env(safe-area-inset-bottom);
 		background-color: var(--color-bg);
 
-		/* 临时主题切换入口，验证完可移除 */
+		/* 主题切换入口：圆形按钮手写 view（rice-button 的字体图标缺字问题见模板注释） */
 		&__theme {
 			position: absolute;
 			top: 56px;
 			right: 16px;
+			width: 36px;
+			height: 36px;
+			align-items: center;
+			justify-content: center;
+			border-radius: 18px;
+			border: 1px solid var(--color-border);
+		}
+
+		&__theme-glyph {
+			font-size: 18px;
+			color: var(--color-text-secondary);
+		}
+
+		&__scroll {
+			flex: 1;
+			min-height: 0;
 		}
 
 		&__body {
-			flex: 1;
-			justify-content: center;
 			padding: 30px 27px 0;
 		}
 
-		/* 设计稿中品牌区与表单之间留白 100px */
+		&__col {
+			flex-direction: column;
+		}
+
+		/* 设计稿中品牌区与表单之间留白 100px；矮视口压缩到 24px */
 		&__brand {
-			padding-bottom: 100px;
+			padding-bottom: 60px;
+
+			&--short {
+				padding-bottom: 24px;
+			}
 		}
 	}
 </style>

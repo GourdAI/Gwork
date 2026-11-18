@@ -14,17 +14,15 @@ public class ModelsAdapterManager {
 public ModelsAdapterManager() {
         OpenAIModelsAdapter openAIModelProvider = new OpenAIModelsAdapter();
         AnthropicModelsAdapter anthropicModelsAdapter = new AnthropicModelsAdapter();
-        OllamaModelsAdapter ollamaModelsAdapter = new OllamaModelsAdapter();
-        
+
         providerMap.put(openAIModelProvider.getStandard(), openAIModelProvider);
         providerMap.put(anthropicModelsAdapter.getStandard(), anthropicModelsAdapter);
-        providerMap.put(ollamaModelsAdapter.getStandard(), ollamaModelsAdapter);
         defaultProvider = openAIModelProvider;
     }
 
 /**
      * 根据接口规范获取对应的 ModelProvider
-     * @param standard 接口规范（如 openai、ollama、anthropic 等）
+     * @param standard 接口规范（如 openai、anthropic 等）
      * @return 对应的 ModelProvider，如果不存在则返回默认的 OpenAI 提供商
      */
     public ModelsAdapter getProvider(String standard) {

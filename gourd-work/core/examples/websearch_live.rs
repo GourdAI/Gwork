@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() {
     let query = std::env::args().nth(1).unwrap_or_else(|| "Rust tokio tutorial".into());
-    let ctx = ToolContext {
+    let ctx = ToolContext {        access_override: None,
         workspace: PathBuf::from("."),
         session_dir: None,
         session_id: "websearch-live".into(),

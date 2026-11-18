@@ -193,6 +193,7 @@ impl ArgsProgress {
 }
 
 /// Configuration for a ReAct run.
+#[derive(Default)]
 pub struct ReActConfig {
     pub session_id: String,
     pub workspace: std::path::PathBuf,
@@ -213,6 +214,23 @@ pub struct ReActConfig {
     pub model: ModelConfig,
     pub settings: Settings,
     pub access_mode: String,
+    /// Live view of the session's access-tier override (`AppState.session_access`),
+    /// consulted at **every tool invocation** rather than frozen at run start.
+    ///
+    /// Why this exists: `access_mode` above is a snapshot taken when the run
+    /// spawns. A user who flips the picker to 完全访问 *mid-run* used to keep
+    /// getting approval cards for the rest of that run — the exact "我切了完全
+    /// 访问为什么还弹授权" report (session work-mwlp18n3: picker showed full,
+    /// two `hitl` frames still fired inside one run). `/web/chat/access/select`
+    /// writes the shared map; this handle reads it, so the very next bash call
+    /// gates on the tier the picker shows.
+    ///
+    /// `None` for callers with no interactive tier surface (CLI one-shots, ACP,
+    /// loop tasks, sub-agents): they keep the spawn-time `access_mode` semantics.
+    /// The resolver lives in [`ToolContext::live_access_mode`] — one place, so
+    /// the approval gate and the workspace boundary can never disagree.
+    pub access_override:
+        Option<std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>>,
     pub max_turns: u32,
     /// Unique ID for this run (one input → one run).
     pub run_id: String,
@@ -285,15 +303,18 @@ pub struct ReActConfig {
     pub resume_calibration: bool,
 }
 
-/// Time to first token (ms) from the run's start to the first visible model output.
+/// Model first-token latency (ms): model-call request start → first upstream frame.
+///
+/// 【2026-11 用户拍板】只测模型响应：首帧可以是正文/思考/工具调用任意一种；
+/// 工具执行是本地时间，绝不计入（旧「run 起点 → 首个可见字符」口径在多轮
+/// 工具型任务里把本地执行算成了模型延迟，session work-mwlhix12: 518.50s）。
 ///
 /// **Pure** so the whole timing contract is table-testable without a wall clock.
-/// `None` means the run never produced a visible content/reasoning delta, which is
-/// deliberately different from a real 0 ms first token (Java `TurnTimer.finish`:
-/// `ttftMs` stays null when `firstVisibleNanos == null`). `saturating_duration_since`
+/// `None` means the model never responded at all, which is deliberately different
+/// from a real 0 ms first token (never fabricate a 0). `saturating_duration_since`
 /// guards against an implausible out-of-order pair instead of panicking/underflowing.
-fn ttft_ms_since(started_at: std::time::Instant, first_visible: Option<std::time::Instant>) -> Option<u64> {
-    let first = first_visible?;
+fn ttft_ms_since(started_at: std::time::Instant, first_frame: Option<std::time::Instant>) -> Option<u64> {
+    let first = first_frame?;
     Some(first.saturating_duration_since(started_at).as_millis() as u64)
 }
 
@@ -450,8 +471,8 @@ impl ReActAgent {
                 .collect(),
             _ => Vec::new(),
         };
-        // Scope the exemption to the LAST assistant(tool_calls) group: Gemini /
-        // Ollama synthesise call ids like `gemini-call-0` per stream, so an older
+        // Scope the exemption to the LAST assistant(tool_calls) group: Gemini
+        // synthesises call ids like `gemini-call-0` per stream, so an older
         // orphan can reuse the exact id of the current pending call. Matching by
         // string across the whole history would exempt that older orphan too and
         // leave the resumed request with an unpaired tool_call (HTTP 400).
@@ -610,12 +631,25 @@ impl ReActAgent {
         // so the ratio is a comparable decode throughput across models.
         let mut generation_ms_total: u64 = 0;
         let mut generated_tokens_total: u64 = 0;
-        // Run-level latch for the FIRST visible output (Java TurnTimer.firstVisibleNanos).
-        // This is deliberately SEPARATE from the per-attempt `first_content_at` below:
-        // that one times a decode segment and is reset on a transport retry, whereas
-        // TTFT is "how long the user waited to see the first character" and must not be
-        // rewritten by a retry (the aborted attempt's deltas already reached the screen).
-        let mut first_visible_at: Option<std::time::Instant> = None;
+        // Latch for the model's FIRST-TOKEN latency of the most recent model
+        // call: request issued → first upstream frame of ANY kind (content,
+        // reasoning, tool-call start/args, usage).
+        //
+        // 【2026-11 用户拍板】旧口径是「run 起点 → 首个可见字符」，工具执行与多轮
+        // 模型往返全部计入。生产会话 work-mwlhix12：本轮前 8.6 分钟模型只发工具
+        // 调用帧、没有正文/思考，卡面显示 TTFT=518.50s——数值忠实但语义误导。
+        // 工具执行是本地时间，不属于模型延迟：TTFT 只测「模型首字响应」。
+        //
+        // 生命周期（code review 修正）：
+        // - 每个模型调用（含 react 层重试/腐蚀门禁重试）开头清零：新请求新时钟。
+        //   不清零会把上一次调用的读数带进新调用——旧调用只发了 Error（从未成功
+        //   响应）时新调用会一直显示 '--'，直到下一轮结算才恢复。
+        // - 传输层 Retry 事件也清零（新 attempt 重新计时，见 Retry 分支）。
+        // - 工具执行阶段刻意保留上一次调用的读数（与前端 _ctxTiming 缓存同语义：
+        //   展示最近一次模型响应的首字延迟，而不是显示 '--'）。
+        // 声明不初始化：首个动作就是每次调用开头的清零，初始值永不被读
+        // （unused_assignments 警告）；Rust 流敏感初始化保证读前必有赋值。
+        let mut model_ttft_ms: Option<u64>;
 
         // ── P2: retry/latency budget (Java's four caps, aligned 2026-10-31) ──
         // Java production incident work-mua28gy6: 34 retries burned 5 tiers of
@@ -1129,6 +1163,14 @@ impl ReActAgent {
             // idle clock. See the reset in the `rx.recv()` arm below.
             let stream_started_at = std::time::Instant::now();
             let mut last_chunk_at = std::time::Instant::now();
+            // A fresh model call = a fresh first-token clock. This covers the
+            // react-layer retries (empty/partial-output failure, corruption gate)
+            // that re-issue the request through `continue` without a transport
+            // Retry event — without the reset the new call would either carry a
+            // stale reading or (after an Error-only attempt) show '--' until the
+            // next turn settles. Tool-execution gaps deliberately keep the last
+            // reading: the card shows the most recent model response's latency.
+            model_ttft_ms = None;
             // Start of the first visible model output in this stream; the decode
             // segment is [first_content_at, usage settlement]. None until a real
             // content/reasoning delta arrives (Java TurnTimer.onVisibleOutput).
@@ -1200,6 +1242,23 @@ impl ReActAgent {
                             // the equivalent. A genuinely dead stream emits
                             // nothing, so it still trips both sleep arms above.
                             last_chunk_at = std::time::Instant::now();
+                            // TTFT = model first-token latency: the FIRST upstream
+                            // frame of this call proves the model responded — a
+                            // tool-call frame counts exactly like a text delta
+                            // (the old visible-only latch charged minutes of local
+                            // tool execution into "first token", session
+                            // work-mwlhix12: 518.50s). Latched once per call; each
+                            // new call / transport retry re-arms it (fresh clock).
+                            //
+                            // Retry AND Error are transport-generated signals, NOT
+                            // model output: an exhausted attempt's Error must never
+                            // latch a fake "first token" (that would violate the
+                            // null-vs-0 contract: the model never responded).
+                            if model_ttft_ms.is_none()
+                                && !matches!(ev, StreamEvent::Retry { .. } | StreamEvent::Error(_))
+                            {
+                                model_ttft_ms = ttft_ms_since(stream_started_at, Some(last_chunk_at));
+                            }
                             ev
                         }
                         None => break,
@@ -1227,14 +1286,11 @@ impl ReActAgent {
                         content_buf.push_str(&delta);
                         let now = std::time::Instant::now();
                         // `first_content_at` times the authoritative decode segment
-                        // for the settlement frame; `first_visible_at` is the run-level
-                        // TTFT latch (how long the user waited for the first character).
-                        // Tool-call frames are not visible characters and never latch it.
+                        // for the settlement frame. TTFT is latched separately at
+                        // the transport (`rx.recv()` arm) on the first upstream
+                        // frame of ANY kind, so nothing to do here.
                         if first_content_at.is_none() {
                             first_content_at = Some(now);
-                        }
-                        if first_visible_at.is_none() {
-                            first_visible_at = Some(now);
                         }
                         // `note_delta` re-anchors on this model call's FIRST visible
                         // delta (per-turn, not run-level): prefill/TTFT wait must not
@@ -1246,7 +1302,7 @@ impl ReActAgent {
                                 &config.session_id,
                                 0,
                                 0,
-                                ttft_ms_since(started_at, first_visible_at),
+                                model_ttft_ms,
                             ));
                         }
                         emit!(Frame::text_delta(&config.session_id, &delta));
@@ -1258,7 +1314,7 @@ impl ReActAgent {
                                 &config.session_id,
                                 ms,
                                 tokens,
-                                ttft_ms_since(started_at, first_visible_at),
+                                model_ttft_ms,
                             ));
                         }
                     }
@@ -1269,15 +1325,12 @@ impl ReActAgent {
                         if first_content_at.is_none() {
                             first_content_at = Some(now);
                         }
-                        if first_visible_at.is_none() {
-                            first_visible_at = Some(now);
-                        }
                         if tps_meter.note_delta(now) {
                             emit!(Frame::tps_progress(
                                 &config.session_id,
                                 0,
                                 0,
-                                ttft_ms_since(started_at, first_visible_at),
+                                model_ttft_ms,
                             ));
                         }
                         if tps_meter.should_emit(now) {
@@ -1286,7 +1339,7 @@ impl ReActAgent {
                                 &config.session_id,
                                 ms,
                                 tokens,
-                                ttft_ms_since(started_at, first_visible_at),
+                                model_ttft_ms,
                             ));
                         }
                     }
@@ -1368,12 +1421,23 @@ impl ReActAgent {
                         // 「报错了但根本没重试」。现在两种形态都发 retry 帧，
                         // 计数一律是 attempt/modelRetries（Java
                         // RetryNotifyInterceptor 契约），不再是 turns/maxTurns。
+                        // A retry is a brand-new request: the model's first-token
+                        // clock restarts with it (both delivered and pre-first-byte
+                        // failures). The next attempt's first upstream frame
+                        // re-latches `model_ttft_ms` at the transport.
+                        //
+                        // 口径边界（有意为之）：时钟锚点是 stream_started_at（本
+                        // 次 stream_chat 的起点），传输层退避（client.rs 的
+                        // 500*2^attempt ms）与失败 attempt 的耗时无法在 react 层
+                        // 区分，故计入。TTFT 因此是「请求侧首字延迟」的保守上界，
+                        // 绝不掺入工具执行等本地业务时间。
+                        model_ttft_ms = None;
                         if !delivered {
                             // Nothing was rendered: accumulators are empty and
                             // the DOM has no seam to roll back. Only surface the
-                            // retry banner (no discardPartial). TTFT/decode
-                            // latches stay untouched — no visible delta ever
-                            // happened, so there is nothing to re-anchor.
+                            // retry banner (no discardPartial). The decode latch
+                            // stays untouched — no visible delta ever happened,
+                            // so there is nothing to re-anchor.
                             warn!(
                                 session = %config.session_id,
                                 turn = turns,
@@ -1428,8 +1492,6 @@ impl ReActAgent {
                         // A fresh meter + a cleared per-turn marker means the next
                         // attempt's first visible delta re-anchors the window again,
                         // so its prefill wait is excluded just like any other turn.
-                        // TTFT (`first_visible_at`) deliberately survives: those
-                        // aborted-attempt deltas did reach the screen.
                         let retry_now = std::time::Instant::now();
                         tps_meter = TpsMeter::new(retry_now);
                         // The retry restarts the round's clock: the new attempt
@@ -1500,7 +1562,7 @@ impl ReActAgent {
                                     total_messages: seed.message_count(),
                                     generation_ms: generation_ms_total,
                                     generated_tokens: generated_tokens_total,
-                                    ttft_ms: ttft_ms_since(started_at, first_visible_at),
+                                    ttft_ms: model_ttft_ms,
                                 }
                             ));
                             // Anchor the local estimator to the provider's real
@@ -2330,6 +2392,9 @@ impl ReActAgent {
                         run_id: config.run_id.clone(),
                         frame_tx: Some(frame_tx.clone()),
                         access_mode: config.access_mode.clone(),
+                        // Live tier handle: the gates re-resolve per invocation so a
+                        // mid-run picker switch takes effect on the very next tool call.
+                        access_override: config.access_override.clone(),
                         cancel: cancel.clone(),
                         hitl_approved: config.hitl_approved,
                         change_ledger: config.change_ledger.clone(),
@@ -3236,14 +3301,14 @@ mod tests {
 
     // ─── TTFT (time to first token) ─────────────────────────────────────────
 
-    /// Java `TurnTimer.finish` parity: TTFT is "run start → first visible output",
-    /// null when no visible output ever arrived (never a fabricated 0), and the
-    /// FIRST latch wins — a later delta must not rewrite it.
+    /// TTFT is "model-call request → first upstream frame", null when the model
+    /// never responded (never a fabricated 0), and the FIRST latch wins — a later
+    /// frame must not rewrite it.
     #[test]
-    fn ttft_is_first_visible_delta_from_run_start() {
+    fn ttft_is_first_upstream_frame_from_request_start() {
         let t0 = std::time::Instant::now();
         let at = |ms| t0 + std::time::Duration::from_millis(ms);
-        assert_eq!(ttft_ms_since(t0, None), None, "no visible output ⇒ no TTFT");
+        assert_eq!(ttft_ms_since(t0, None), None, "no model response ⇒ no TTFT");
         assert_eq!(ttft_ms_since(t0, Some(at(0))), Some(0), "instant first token is a real 0");
         assert_eq!(ttft_ms_since(t0, Some(at(1_690))), Some(1_690));
         assert_eq!(ttft_ms_since(t0, Some(at(5))), Some(5), "sub-10ms must not be rounded away");
@@ -3251,12 +3316,16 @@ mod tests {
         assert_eq!(ttft_ms_since(at(9_000), Some(t0)), Some(0), "out-of-order pair clamps to 0");
     }
 
-    /// The latch must be armed by ContentDelta AND ReasoningDelta only, and never
-    /// reset by a transport retry (unlike `first_content_at`, whose decode segment
-    /// legitimately restarts). A source-level pin: a pure-function test cannot see
-    /// which event arm writes the run-level variable.
+    /// 【2026-11 用户拍板】TTFT = model first-token latency only. The latch must be
+    /// armed at the TRANSPORT (`rx.recv()` arm) by the first upstream frame of ANY
+    /// kind — tool-call frames included — measured from that call's request start,
+    /// never from the run start (session work-mwlhix12: minutes of local tool
+    /// execution leaked into a "518.50s first token"). Retry/Error are transport
+    /// signals, not model output; every new model call and every transport retry
+    /// re-arms the clock. Source-level pin: a pure-function test cannot see which
+    /// arm writes the variable.
     #[test]
-    fn ttft_latch_is_armed_only_by_visible_deltas_and_survives_retry() {
+    fn ttft_latch_is_armed_at_transport_by_any_frame_and_reset_on_retry() {
         let src = include_str!("mod.rs");
         let norm = src.replace("\r\n", "\n");
         // Only inspect PRODUCT code. The test module below quotes the very same
@@ -3264,22 +3333,61 @@ mod tests {
         // test literal "prove" a wire that was removed from production (a source
         // guard that can never go red). Truncate at the first test module.
         let product = norm.split("#[cfg(test)]").next().unwrap_or("");
-        // Both visible arms set the run-level latch (two occurrences).
+        // Latched exactly once, at the transport, from the per-call request clock.
+        // Retry AND Error must both be excluded: an exhausted attempt's Error is
+        // transport-generated, and latching it would fabricate a "first token"
+        // for a model that never responded (null-vs-0 contract).
         assert_eq!(
-            product.matches("if first_visible_at.is_none() {\n                            first_visible_at = Some(now);").count(),
-            2,
-            "ContentDelta and ReasoningDelta must BOTH arm the TTFT latch"
+            product.matches("if model_ttft_ms.is_none()\n                                && !matches!(ev, StreamEvent::Retry { .. } | StreamEvent::Error(_))").count(),
+            1,
+            "TTFT must latch on the first upstream frame (any kind) in the rx.recv() arm, excluding Retry AND Error"
         );
-        // The retry branch resets the per-attempt decode segment but NOT the run latch.
+        assert!(
+            product.contains("model_ttft_ms = ttft_ms_since(stream_started_at, Some(last_chunk_at));"),
+            "TTFT must be measured from THIS call's request start, not the run start"
+        );
+        // The old run-start → first-visible-character wiring must be gone entirely.
+        assert!(!product.contains("first_visible_at"),
+            "the old run-level visible-character latch must not come back");
+        // Every CALL SITE of ttft_ms_since must use the PER-CALL clock: the only
+        // legal anchor is stream_started_at. The fn definition itself (which
+        // takes a parameter) is not a call site and must be excluded, otherwise
+        // the guard is red on correct code. Covers bare and qualified spellings
+        // of any other clock.
+        let anchor = "ttft_ms_since(stream_started_at,";
+        assert!(product.contains(anchor), "the per-call anchor must be in use");
+        let call_sites = product.matches("ttft_ms_since(").count()
+            - product.matches("fn ttft_ms_since(").count();
+        assert_eq!(
+            call_sites,
+            product.matches(anchor).count(),
+            "every ttft_ms_since call site must anchor at stream_started_at \
+             (run-start / fabricated clocks are forbidden)"
+        );
+        // A fresh model call re-arms the clock right beside its stream clock.
+        // This covers the react-layer retries (empty/partial-output, corruption
+        // gate) which `continue` without a transport Retry event: without this
+        // reset an Error-only attempt would leave the next call showing '--'.
+        let call_start = product.split("let stream_started_at = std::time::Instant::now();")
+            .nth(1).unwrap_or("")
+            .split("loop {").next().unwrap_or("");
+        assert!(call_start.contains("model_ttft_ms = None;"),
+            "each model call must reset the TTFT latch beside stream_started_at");
+        // The retry branch re-arms the latch BEFORE the delivered/not-delivered
+        // split, so both retry shapes restart the model clock; the decode segment
+        // reset stays in the delivered branch.
         let retry = product.split("StreamEvent::Retry { attempt, max, reason, delivered } =>")
             .nth(1).unwrap_or("")
             .split("emit!(Frame::stream_retry").next().unwrap_or("");
         assert!(retry.contains("first_content_at = None;"), "retry must drop the aborted decode segment");
-        assert!(!retry.contains("first_visible_at = None"),
-            "retry must NOT reset TTFT: those deltas were already shown to the user");
-        // Wire it into the meter frame.
-        assert!(product.contains("ttft_ms: ttft_ms_since(started_at, first_visible_at)"),
-            "context_size payload must carry the run-level TTFT");
+        assert!(retry.contains("model_ttft_ms = None;"),
+            "retry is a fresh request: the model first-token clock must restart");
+        let (before_split, _after) = retry.split_once("if !delivered {").expect("delivered split must exist");
+        assert!(before_split.contains("model_ttft_ms = None;"),
+            "the TTFT reset must cover pre-first-byte retries too");
+        // Wire it into the settlement frame.
+        assert!(product.contains("ttft_ms: model_ttft_ms,"),
+            "context_size payload must carry the latched model TTFT");
     }
 
     fn call(id: &str, name: &str) -> ToolCall {
@@ -3421,7 +3529,7 @@ mod tests {
 
     #[test]
     fn suspension_skip_does_not_exempt_an_older_orphan_with_the_same_id() {
-        // Gemini / Ollama synthesise `gemini-call-0` per stream, so the very
+        // Gemini synthesises `gemini-call-0` per stream, so the very
         // same id can appear in an older, genuinely orphaned group and in the
         // pending suspension. A global string match would exempt both and the
         // resumed request would 400 on the unpaired older call.
@@ -5223,7 +5331,7 @@ mod tests {
         settings.general.api_retries = 0;
         settings.general.model_retries = 3;
 
-        let config = ReActConfig {
+        let config = ReActConfig {            access_override: None,
             session_id: "work-retry-itest".into(),
             workspace: std::env::temp_dir(),
             session_dir: None,
@@ -5778,7 +5886,7 @@ mod tests {
     /// (temp dir), full access, generous turn budget — the budget assertions
     /// are made on `MAX_CORRUPTION_RETRIES`, not `max_turns`.
     fn corruption_itest_config(port: u16, id: &str, max_turns: u32) -> ReActConfig {
-        ReActConfig {
+        ReActConfig {            access_override: None,
             session_id: id.into(),
             workspace: std::env::temp_dir(),
             session_dir: None,
@@ -5892,7 +6000,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = ReActConfig {
+        let config = ReActConfig {            access_override: None,
             session_id: "work-itest".into(),
             workspace: std::env::temp_dir(),
             session_dir: None,
@@ -6013,7 +6121,7 @@ mod tests {
         settings.general.api_retries = 7;
         settings.general.auto_rethink = false;
 
-        let config = ReActConfig {
+        let config = ReActConfig {            access_override: None,
             session_id: "work-queued-403".into(),
             workspace: std::env::temp_dir(),
             session_dir: None,

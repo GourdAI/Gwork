@@ -5,12 +5,12 @@ import java.util.Map;
 
 /**
  * AI 模型列表适配器接口
- * 每个 API 协议（OpenAI、Ollama 等）对应一个实现类
+ * 每个 API 协议（OpenAI、Anthropic 等）对应一个实现类
  */
 public interface ModelsAdapter {
 
     /**
-     * 获取接口规范标识（如 openai、ollama、anthropic）
+     * 获取接口规范标识（如 openai、anthropic）
      */
     String getStandard();
 

@@ -226,7 +226,7 @@ impl AcpAgent {
         // ACP has its own thinking-depth setting rather than the per-session
         // context the chat UI writes.
         let acp_thinking = settings.general.acp_thinking_depth.clone();
-        let config = ReActConfig {
+        let config = ReActConfig {            access_override: None,
             session_id: session_id.clone(),
             workspace,
             // ACP sessions are driven by an external client and have no local

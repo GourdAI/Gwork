@@ -113,7 +113,6 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
 				url: config.baseUrl + path,
 				header: requestHeader,
 				success: (res: UniRequestResponse) => {
-					// console.log('[TEST] url', config.baseUrl + path, 'status', res.statusCode, 'body', res.data)
 					const body = (res.data ?? null) as ApiBody | null
 					const verdict = interceptResponse(res.statusCode, body)
 					if (verdict.ok) {
@@ -125,7 +124,9 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
 				},
 				fail: () => {
 					const message = i18n.global.t('request.network')
-					showError(message)
+					// toast:false 对网络失败同样生效（此前只对业务失败生效）：
+					// 站点竞速探测必然有一路失败，静默请求不能往用户脸上弹「网络异常」
+					if (toast !== false) showError(message)
 					reject(new ApiError(message, config.errorSubject, 0, 0, null))
 				}
 			})

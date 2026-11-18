@@ -1,22 +1,23 @@
 /* =============================================================================
- * app-mcp-market.js — 「连接器」页广场目录（唯一目录源 = 魔搭 ModelScope）
+ * app-mcp-market.js — 「连接器」页目录（三个内置源：魔搭 / 腾讯云 / Smithery）
  *
- * 2026-11 用户拍板：连接器广场只保留魔搭一个目录源。自建官方连接器源整体
- * 下线，随之下线的还有：
- *   · 目录源 tabs（官方 / 魔搭扩展）—— 只剩一个源，tab 无意义；
- *   · 厂商命令行连接器（钉钉 / 企微 / 飞书 / 腾讯会议）整条流程 ——
- *     其安装参数 100% 来自官方目录，官方源一删就没有数据来源
- *     （安装 / npm / 技能包 / Node 下载进度条 / 扫码授权弹窗全部退役）；
- *   · 官方目录远程软失败的可重试空态 —— 那是官方目录专用观感补偿。
- * 「精选」「已托管」概念此前已移除（魔搭条目几乎全 stdio 手填密钥，
- * hosted 专属 URL 未实现）。手动添加 MCP 入口保留（app-skills.js #mcpAddBtn）。
+ * 2026-11 集成 SolonCode v2026.11 连接器市场：新增腾讯云 MCP 广场（SolonCode
+ * 默认源）与 Smithery 注册表两个目录源，魔搭保留为默认。源切换与技能页
+ * 「已安装/各市场」同构：二级导航 = 已安装 / 魔搭 / 腾讯云 / Smithery
+ * （app-skills.js renderConnTabs），「广场」这个中间层概念退役。
+ * 顶栏「+ 添加服务器」（自定义 MCP）在全部连接器视图可见（用户报障：
+ * 广场视图找不到添加自定义 MCP 的入口）。
  *
- * 后端：GET  /web/settings/mcp/market/servers?search=&page=&pageSize=&category=
- *       GET  /web/settings/mcp/market/detail?id=
- *       GET  /web/settings/mcp/market/categories
+ * 已删除且不得复活：自建官方源（official）、厂商 CLI 连接器流程、
+ * 「精选/已托管」概念、registry_error 软失败空态。
+ *
+ * 后端：GET  /web/settings/mcp/market/servers?source=&search=&page=&pageSize=&category=
+ *       GET  /web/settings/mcp/market/detail?id=   （源由 id 前缀分流：tencent:/smithery:）
+ *       GET  /web/settings/mcp/market/categories?source=
  *       POST /web/settings/mcp/market/install  {id, env}
  *
- * 列表走魔搭上游（分页 / 100 条窗口钳制）。不硬编码任何 Token。
+ * 分页窗口按源：魔搭 100 条硬窗口；腾讯云/Smithery 无窗口（total_count 驱动）。
+ * 不硬编码任何 Token。
  * ========================================================================== */
 (function () {
   'use strict';
@@ -43,8 +44,16 @@
     'stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
     '<polyline points="20 6 9 17 4 12"/></svg>';
 
+  /* 内置目录源白名单（与后端 normalize_source 同口径）。展示名走
+   * settings.mcp.market.source_* 键；未知值一律回落魔搭。 */
+  var SOURCES = ['modelscope', 'tencent', 'smithery'];
+
   var state = {
     root: null,
+    /* 当前目录源：modelscope（默认）/ tencent / smithery。
+     * 列表与分类查询携带 source；详情/安装由 id 前缀分流（后端 source_of_id），
+     * 因此 detailCache / installedIndex 的 key 天然跨源不撞。 */
+    source: 'modelscope',
     search: '',
     category: '',
     page: 1,
@@ -114,6 +123,15 @@
     if (n >= 1000000) return (n / 1000000).toFixed(1) + 'm';
     if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
     return String(n);
+  }
+  /** 目录图标经内核代理加载（与 app-settings-mcp.js mcpIconSrc 同一端点）：
+   *  腾讯云 CDN 有 Referer 防盗链、Smithery 图标在境外域名，WebView 直连
+   *  <img> 常 403/超时。内核 fetch_icon 逐跳校验 scheme/host（SSRF 门禁）
+   *  并带回 image/* Content-Type。__gworkApiUrl 在桌面壳里补内核绝对地址。 */
+  function proxyIcon(url) {
+    if (!url) return '';
+    var path = '/web/settings/skills/icon?url=' + encodeURIComponent(url);
+    return (typeof window.__gworkApiUrl === 'function') ? window.__gworkApiUrl(path) : path;
   }
   function isZh() {
     return !!(window.GourdI18n && window.GourdI18n.getLocale &&
@@ -210,6 +228,7 @@
 
   function query() {
     var p = new URLSearchParams();
+    p.set('source', state.source);
     if (state.search) p.set('search', state.search);
     p.set('page', String(state.page));
     p.set('pageSize', String(state.pageSize));
@@ -235,8 +254,6 @@
      * 触发 loadMore。 */
     var catsBar = document.getElementById('mcpMarketCatBar');
     if (catsBar) catsBar.innerHTML = cats;
-    var totalEl = document.getElementById('mcpMarketTotal');
-    if (totalEl) totalEl.textContent = state.total ? String(state.total) : '';
     return '' +
       '<div class="mcp-market">' +
       (catsBar ? '' : '  <div class="mcp-market-cats">' + cats + '</div>') +
@@ -302,7 +319,7 @@
     grid.innerHTML = state.items.map(function (it) {
       var id = esc(it.id || '');
       var logo = it.logo_url
-        ? '<img class="mcp-market-logo" src="' + esc(it.logo_url) + '" alt="" loading="lazy">'
+        ? '<img class="mcp-market-logo" src="' + esc(proxyIcon(it.logo_url)) + '" alt="" loading="lazy" onerror="this.remove()">'
         : '<div class="mcp-market-logo mcp-market-logo-ph">M</div>';
       /* 列表接口（PUT /mcp/servers）实测只返回：
        *   id, publisher, name, chinese_name, description, tags, logo_url,
@@ -360,17 +377,26 @@
     }).join('');
   }
 
-  /** 上游 100 条窗口钳制：page*pageSize>=100 或本页不满即无下一页。 */
+  /** 分页窗口按源：魔搭上游硬限制 page*pageSize≤100（钳制必须保留）；
+   * 腾讯云（offset 换算跨上游页）与 Smithery（totalPages 250+）无窗口，
+   * 以 total_count 驱动。本页不满一律视为无下一页。 */
   function hasMorePages() {
-    return state.items.length > 0 &&
-      state.items.length >= state.page * state.pageSize &&
-      state.page * state.pageSize < 100;
+    if (!(state.items.length > 0 && state.items.length >= state.page * state.pageSize)) return false;
+    if (state.source === 'modelscope') return state.page * state.pageSize < 100;
+    return !state.total || state.items.length < state.total;
   }
 
   function syncChrome() {
     if (!state.root) return;
-    var totalEl = document.getElementById('mcpMarketTotal');
-    if (totalEl) totalEl.textContent = state.total ? String(state.total) : '';
+    /* 总数经宿主统一登记（app-skills.js _mcpMarketReportTotal）：tab 重建时
+     * 徽标 span 是新节点，宿主记住最近值即时回填，不再闪空。独立嵌入
+     * （无宿主回调）时退回直写。 */
+    if (typeof window._mcpMarketReportTotal === 'function') {
+      window._mcpMarketReportTotal(state.total);
+    } else {
+      var totalEl = document.getElementById('mcpMarketTotal');
+      if (totalEl) totalEl.textContent = state.total ? String(state.total) : '';
+    }
     var sentinel = document.getElementById('mcpMarketSentinel');
     if (sentinel) {
       var st = state.appending ? 'loading'
@@ -531,6 +557,7 @@
     var ap = ++state.appendSeq;
     var nextPage = state.page + 1;
     var p = new URLSearchParams();
+    p.set('source', state.source);
     if (state.search) p.set('search', state.search);
     p.set('page', String(nextPage));
     p.set('pageSize', String(state.pageSize));
@@ -580,14 +607,65 @@
     return !!(id && state.installedIndex[String(id)]);
   }
 
-  async function loadCategories() {
+  /** 分类表按源缓存（三源都是内核静态表，运行期不变）：切源不再每次
+   * 多发一个分类请求。失败不入缓存（下次进源重试），也不阻塞列表首屏。 */
+  var catCache = {};
+  async function ensureCategories(src) {
+    if (catCache[src]) { state.categories = catCache[src]; return; }
     try {
-      var data = await api(API.categories);
-      state.categories = Array.isArray(data) ? data : (data.categories || []);
+      var data = await api(API.categories + '?source=' + encodeURIComponent(src));
+      var cats = Array.isArray(data) ? data : (data.categories || []);
+      /* 过期响应丢弃：请求期间用户又切了源，旧源分类不得盖掉新源的表
+       * （三源分类 key 语义完全不同，盖掉 = 点分类得到空列表）。 */
+      if (state.source !== src) return;
+      catCache[src] = cats;
+      state.categories = cats;
     } catch (e) {
       console.warn('[mcp-market] categories failed: ' + e.message);
-      state.categories = [{ key: '', nameZh: '全部', name: 'All' }];
+      if (state.source === src && !state.categories.length) {
+        state.categories = [{ key: '', nameZh: '全部', name: 'All' }];
+      }
     }
+  }
+
+  /** 切换目录源（app-skills.js 二级导航分派）。重置筛选代际：分类/搜索/页码
+   * 全部归零 —— 三个源的分类 key 语义完全不同（魔搭 kebab key / 腾讯数字 id /
+   * Smithery 无分类），沿用旧 category 会得到空列表。搜索词也清空（各源检索
+   * 能力不同：Smithery 是本地索引）。detailCache 不清（key=带前缀 id，跨源不撞）。
+   *
+   * ⚠ 先 load() 后补分类（2026-11 codereview）：旧实现 await loadCategories()
+   * 再 load()，把列表首屏押在分类请求后面 —— 串行两跳；且 await 窗口里用户
+   * 再切源/再进页会并发触发第二次 load()，旧源慢响应回来还会污染新源视图。
+   * 现在列表立即发出（分类只是筛选增强），分类异步回填 + 代际校验。 */
+  async function setSource(src) {
+    src = String(src || 'modelscope');
+    if (SOURCES.indexOf(src) < 0) src = 'modelscope';
+    if (state.source === src) return;
+    state.source = src;
+    state.category = '';
+    state.search = '';
+    state.page = 1;
+    state.items = [];
+    state.total = 0;
+    state.categories = [];
+    state.detailId = null;
+    state.loadError = false;
+    var pending = load();
+    ensureCategories(src).then(function () {
+      if (state.source === src) { syncChrome(); refreshCatBar(); }
+    });
+    await pending;
+  }
+
+  /** 分类异步回填后只重画 chips（不整壳重建：列表/滚动位置保持）。 */
+  function refreshCatBar() {
+    var bar = document.getElementById('mcpMarketCatBar');
+    if (!bar) return;
+    bar.innerHTML = state.categories.map(function (c) {
+      var name = (window.GourdI18n && /zh/i.test(window.GourdI18n.getLocale ? window.GourdI18n.getLocale() : '')) ? c.nameZh : (c.name || c.nameZh);
+      return '<button type="button" class="skills-category-chip' + (state.category === c.key ? ' active' : '') +
+        '" data-cat="' + esc(c.key) + '">' + esc(name || c.nameZh) + '</button>';
+    }).join('');
   }
 
   async function load() {
@@ -727,7 +805,7 @@
     if (authKind === 'oauth') badges += '<span class="mcp-market-badge-oauth">' + esc(m('oauth_badge', '登录/扫码授权')) + '</span>';
     else if (authKind === 'token') badges += '<span class="mcp-market-token-badge">' + esc(m('token_badge', 'Token')) + '</span>';
     var logo = (d && d.logo_url)
-      ? '<img class="mcp-market-hero-logo" src="' + esc(d.logo_url) + '" alt="" onerror="this.remove()">'
+      ? '<img class="mcp-market-hero-logo" src="' + esc(proxyIcon(d.logo_url)) + '" alt="" onerror="this.remove()">'
       : '';
     if (!logo) {
       logo = '<div class="mcp-market-hero-logo mcp-market-logo-ph">' +
@@ -908,15 +986,28 @@
 
   // ─── 对外 ────────────────────────────────────────────────────────────────
   window._mcpMarket = {
+    /* 只登记宿主节点，不发请求：applyConnView 每次显隐都会调它；
+     * 首次挂载的补载统一由 app-skills.js 的「grid 为空才 load」分支负责，
+     * 加载入口唯一，不存在 setHost 与显式 load() 的双请求路径。 */
     setHost: function (selector) {
       state.root = typeof selector === 'string' ? document.querySelector(selector) : selector;
     },
     load: async function () {
       if (!state.root) return;
-      if (!state.categories.length) await loadCategories();
+      /* 列表立即发出；分类缺失时异步回填（不阻塞首屏，见 setSource 注释）。 */
+      var src = state.source;
+      if (!state.categories.length && !catCache[src]) {
+        ensureCategories(src).then(function () {
+          if (state.source === src) { syncChrome(); refreshCatBar(); }
+        });
+      }
       await load();
     },
     search: function (kw) { state.search = kw || ''; state.page = 1; return load(); },
+    /* 源切换（app-skills.js 二级导航「魔搭/腾讯云/Smithery」分派）。 */
+    setSource: setSource,
+    getSource: function () { return state.source; },
+    sources: SOURCES.slice(),
     /* 只重置查询词、不发请求：主 tab / 二级视图切换时用来作废幽灵过滤，
      * 真正的重查由切换流程里那次 load() 统一发出（避免重复请求）。 */
     clearSearch: function () { state.search = ''; state.page = 1; },
