@@ -226,6 +226,12 @@ pub fn visible_mcp_tools(
             if permission.disallowed_tools.iter().any(|d| d == &t.name) {
                 return false;
             }
+            // Conversation picker: only the selected connectors' tools are
+            // offered. `Some(empty)` filters everything out — the user
+            // explicitly picked no connectors for this conversation.
+            if gate.map(|g| !g.allows_server(&t.server_name)).unwrap_or(false) {
+                return false;
+            }
             gate.map(|g| g.allows(&t.name, true)).unwrap_or(true)
         })
         .cloned()
@@ -572,12 +578,25 @@ pub struct ToolGate {
     /// tools flat into the registry alongside built-ins, and their names are
     /// server-defined, so a static whitelist could never enumerate them.
     pub mcp_allowed: bool,
+    /// Per-conversation connector selection (the composer picker, persisted on
+    /// `SessionContext::mcp_servers`). `None` = no selection axis — every
+    /// enabled server is reachable, which is the pre-picker behaviour every
+    /// non-interactive caller (CLI, ACP, loop tasks, tests) keeps.
+    /// `Some(set)` = ONLY these servers are reachable; an **empty** set means
+    /// the user picked nothing, so no connector tools at all (2026-11 user
+    /// decision: conversations start with connectors OFF, WorkBuddy-style).
+    ///
+    /// Server names, not tool names: the picker lists connectors, and one
+    /// connector fans out to N server-defined tools. Applied at BOTH ends —
+    /// `visible_mcp_tools` (what the model is offered) and `execute` (what
+    /// actually runs), for the same reason `mcp_allowed` is.
+    pub mcp_servers: Option<std::collections::HashSet<String>>,
 }
 
 impl ToolGate {
     /// No restrictions.
     pub fn open() -> Self {
-        Self { allowed: None, disallowed: std::collections::HashSet::new(), mcp_allowed: true }
+        Self { allowed: None, disallowed: std::collections::HashSet::new(), mcp_allowed: true, mcp_servers: None }
     }
 
     /// Gate carrying the user's global `disallowedTools`.
@@ -597,6 +616,23 @@ impl ToolGate {
             allowed: None,
             disallowed: permission.disallowed_tools.iter().cloned().collect(),
             mcp_allowed: true,
+            mcp_servers: None,
+        }
+    }
+
+    /// Restrict this gate to the connectors the user picked for the
+    /// conversation. `Some(empty)` deliberately means "none" — see the field
+    /// docs; `None` keeps every enabled server reachable.
+    pub fn with_mcp_servers(mut self, servers: Option<std::collections::HashSet<String>>) -> Self {
+        self.mcp_servers = servers;
+        self
+    }
+
+    /// Whether a tool from `server_name` passes the conversation selection.
+    pub fn allows_server(&self, server_name: &str) -> bool {
+        match &self.mcp_servers {
+            None => true,
+            Some(set) => set.contains(server_name),
         }
     }
 
@@ -610,6 +646,11 @@ impl ToolGate {
 
     /// Whether `name` may be called. `is_mcp` distinguishes MCP-routed tools,
     /// which are only reachable when the gate explicitly allows MCP.
+    ///
+    /// NOTE: the per-conversation `mcp_servers` axis needs the *server* name,
+    /// which a bare tool name cannot supply — MCP call sites check
+    /// [`Self::allows_server`] alongside this method (both `visible_mcp_tools`
+    /// and `execute` do).
     pub fn allows(&self, name: &str, is_mcp: bool) -> bool {
         if self.disallowed.contains(name) {
             return false;
@@ -1170,7 +1211,7 @@ impl ToolRegistry {
                 .or_else(|| tools.iter().find(|t| t.enabled && t.name == name));
             if let Some(t) = matched {
                 if let Some(gate) = &ctx.gate {
-                    if !gate.allows(&t.name, true) {
+                    if !gate.allows(&t.name, true) || !gate.allows_server(&t.server_name) {
                         return Self::gated_out(name);
                     }
                 }
@@ -1421,6 +1462,7 @@ mod tests {
             allowed: Some(names.iter().map(|s| s.to_string()).collect()),
             disallowed: std::collections::HashSet::new(),
             mcp_allowed: false,
+            mcp_servers: None,
         }
     }
 
@@ -1457,6 +1499,7 @@ mod tests {
             allowed: Some(["read".to_string(), "bash".to_string()].into_iter().collect()),
             disallowed: ["bash".to_string()].into_iter().collect(),
             mcp_allowed: true,
+            mcp_servers: None,
         };
         assert!(g.allows("read", false));
         assert!(!g.allows("bash", false), "blacklist must override the whitelist");
@@ -1811,7 +1854,7 @@ mod tests {
         assert_eq!(mcp_fold_stage(discovered.len()), McpFoldStage::List);
         assert_eq!(mcp_fold_stage(visible.len()), McpFoldStage::Full);
 
-        let gate = ToolGate { allowed: None, disallowed: HashSet::new(), mcp_allowed: false };
+        let gate = ToolGate { allowed: None, disallowed: HashSet::new(), mcp_allowed: false, mcp_servers: None };
         assert_eq!(visible_mcp_tools(&discovered, &builtins, &perm, Some(&gate)).len(), 0);
         assert_eq!(mcp_fold_stage(0), McpFoldStage::Full);
 
@@ -1916,5 +1959,87 @@ mod tests {
         let unknown = resolve_mcp_call_target(&visible, &all, "not-a-tool").unwrap_err();
         assert!(unknown.is_error);
         assert!(unknown.text.contains("search_tools"));
+    }
+
+    // ─── Conversation connector selection (composer picker) ─────────────────
+    //
+    // 2026-11 user decision: conversations start with connectors OFF
+    // (WorkBuddy-style opt-in). The interactive run path always builds a gate
+    // with `mcp_servers: Some(picked)` — empty picked = no MCP tools at all.
+    // These tests pin BOTH ends: what the model is offered and what executes.
+
+    fn two_server_tools() -> Vec<McpTool> {
+        let mut tools = fake_mcp_tools(3);
+        tools[2].server_name = "other".into();
+        tools
+    }
+
+    #[test]
+    fn conversation_selection_filters_visibility_per_server() {
+        let tools = two_server_tools();
+        let perm = PermissionSettings::default();
+        let builtins = HashSet::new();
+
+        // No selection axis (CLI/ACP/loop): everything enabled stays visible.
+        let open = ToolGate::open();
+        assert_eq!(visible_mcp_tools(&tools, &builtins, &perm, Some(&open)).len(), 3);
+
+        // Picked only "srv": the other server's tool disappears.
+        let picked = ToolGate::open()
+            .with_mcp_servers(Some(["srv".to_string()].into_iter().collect()));
+        let visible = visible_mcp_tools(&tools, &builtins, &perm, Some(&picked));
+        assert_eq!(visible.len(), 2);
+        assert!(visible.iter().all(|t| t.server_name == "srv"));
+
+        // Explicit empty selection: NO connector tools (the default state of
+        // a fresh conversation). This must not fall back to "all".
+        let none = ToolGate::open().with_mcp_servers(Some(HashSet::new()));
+        assert_eq!(visible_mcp_tools(&tools, &builtins, &perm, Some(&none)).len(), 0);
+        // ...and the fold stage sees zero, so no gateway is advertised either.
+        assert_eq!(mcp_fold_stage(0), McpFoldStage::Full);
+        assert!(mcp_definitions_for_stage(McpFoldStage::Full, &[], &perm, Some(&none)).is_empty());
+    }
+
+    #[test]
+    fn execute_boundary_checks_the_conversation_selection() {
+        // The visibility filter alone would be cosmetic: a hallucinated name
+        // (or one persisted in older history) must be refused at execute too.
+        // A live execute test needs a connected MCP manager (real transport);
+        // this pins the WIRING instead — same technique as the startup-order
+        // test in mcp/mod.rs. Both the direct route and the folding gateway
+        // must consult the selection, or the two ends drift.
+        let src = include_str!("registry.rs");
+        let exec_at = src.find("pub async fn execute(").expect("execute present");
+        let exec_body = &src[exec_at..];
+        assert!(
+            exec_body.contains("!gate.allows(&t.name, true) || !gate.allows_server(&t.server_name)"),
+            "the direct MCP route must refuse tools of unselected servers"
+        );
+        // The gateway rebuilds `visible` through visible_mcp_tools with the
+        // run's gate, so the selection applies there via the visibility axis.
+        let vis_at = src.find("pub fn visible_mcp_tools(").expect("visible_mcp_tools present");
+        let vis_body = &src[vis_at..vis_at + 2500];
+        assert!(
+            vis_body.contains("g.allows_server(&t.server_name)"),
+            "visibility must apply the conversation selection (gateway path relies on it)"
+        );
+
+        let g = ToolGate::open()
+            .with_mcp_servers(Some(["srv".to_string()].into_iter().collect()));
+        assert!(g.allows_server("srv"));
+        assert!(!g.allows_server("other"));
+        let none = ToolGate::open().with_mcp_servers(Some(HashSet::new()));
+        assert!(!none.allows_server("srv"), "empty selection must deny every server");
+    }
+
+    #[test]
+    fn subagent_gate_inherits_the_conversation_selection() {
+        // team::execute_task folds parent.mcp_servers into the definition's
+        // gate; an agent definition cannot re-grant unselected connectors.
+        let parent_selection = Some(["srv".to_string()].into_iter().collect::<HashSet<String>>());
+        let d = crate::agents::AgentManager::builtin().get("general").unwrap().clone();
+        let gate = d.tool_gate().with_mcp_servers(parent_selection);
+        assert!(gate.allows_server("srv"));
+        assert!(!gate.allows_server("other"), "definition must not widen the conversation selection");
     }
 }

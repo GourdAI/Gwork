@@ -114,6 +114,17 @@
                     </div>
                     <div class="access-dropdown" id="welcomeAccessDropdown"></div>
                 </div>
+                <!-- 连接器选择（会话级，WorkBuddy 式；默认不启用）：勾选本会话可用的连接器，
+                     内核按 ToolGate::mcp_servers 双端门控。结构同 .access-selector，逻辑见
+                     app-connector-picker.js；两套 DOM（欢迎页/对话页）id 不同。 -->
+                <div class="conn-selector composer-tray-item" id="welcomeConnSelector">
+                    <div class="conn-selector-current" id="welcomeConnCurrent" data-i18n-title="app.conn_pick_title">
+                        <svg class="conn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/></svg>
+                        <span class="conn-label" data-i18n="app.conn_pick_label">连接器</span>
+                        <svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                    </div>
+                    <div class="conn-dropdown" id="welcomeConnDropdown"></div>
+                </div>
             </div>
         </div>
         <!-- 消息执行队列 -->
@@ -253,6 +264,16 @@
                                 <svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
                             </div>
                             <div class="access-dropdown" id="chatAccessDropdown"></div>
+                        </div>
+                        <!-- 连接器选择（会话级）：结构同欢迎页 .conn-selector，id 前缀换为 chat；
+                             见 composer-tray 注释与 app-connector-picker.js。 -->
+                        <div class="conn-selector" id="chatConnSelector">
+                            <div class="conn-selector-current" id="chatConnCurrent" data-i18n-title="app.conn_pick_title">
+                                <svg class="conn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/></svg>
+                                <span class="conn-label" data-i18n="app.conn_pick_label">连接器</span>
+                                <svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                            </div>
+                            <div class="conn-dropdown" id="chatConnDropdown"></div>
                         </div>
                         <input type="file" class="attach-input" id="chatAttachInput" multiple accept="*/*"/>
                         <input type="file" class="attach-input" id="chatImageInput" multiple accept="image/*"/>

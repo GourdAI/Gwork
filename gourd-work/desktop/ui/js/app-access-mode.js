@@ -335,6 +335,7 @@
                 var opening = !$sel.hasClass('open');
                 $('.access-selector').not(el).removeClass('open');
                 $('.plus-menu-wrap').removeClass('open'); // 收起「+」菜单（浮层互斥）
+                $('.conn-selector').removeClass('open'); // 收起连接器选择器（同族互斥）
                 if (opening && typeof window.closeAllToolbarPanels === 'function') window.closeAllToolbarPanels();
                 if (opening) render();
                 $sel.toggleClass('open', opening);

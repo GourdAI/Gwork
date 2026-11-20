@@ -152,6 +152,9 @@ impl AgentDefinition {
             allowed: Some(self.tools.iter().cloned().collect()),
             disallowed: self.disallowed_tools.iter().cloned().collect(),
             mcp_allowed: self.mcp_allowed,
+            // Conversation connector selection is inherited from the parent
+            // run's gate in `team::execute_task`, not from the definition.
+            mcp_servers: None,
         }
     }
 }

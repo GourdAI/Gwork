@@ -1,0 +1,21 @@
+{
+	"module": {
+		// name 为鸿蒙 module.json5 必填字段（字母/数字/下划线），缺失会构建失败
+		"name": "uni_modules__gwork_speech",
+		"type": "har",
+		"deviceTypes": [
+			"default",
+			"tablet",
+			"2in1"
+		],
+		"requestPermissions": [
+			{
+				"name": "ohos.permission.MICROPHONE",
+				"usedScene": {
+					"when": "inuse"
+				},
+				"reason": "$string:gwork_speech_mic_reason"
+			}
+		]
+	}
+}

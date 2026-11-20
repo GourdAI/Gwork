@@ -5,12 +5,6 @@
 		<text class="home-hero__title"
 			:class="(isShort ? 'home-hero__title--short ' : '') + (fading ? 'home-hero__title--fading' : '')">{{ greeting }}</text>
 		<text class="home-hero__sub" :class="isShort ? 'home-hero__sub--short' : ''">{{ t('home.subtitle') }}</text>
-		<view class="home-hero__caps" :class="isShort ? 'home-hero__caps--short' : ''">
-			<view v-for="cap in CAPS" :key="cap.label" class="home-hero__cap" @click="onCap(cap.prompt)">
-				<view class="home-hero__cap-dot"></view>
-				<text class="home-hero__cap-text">{{ t(cap.label) }}</text>
-			</view>
-		</view>
 	</view>
 </template>
 
@@ -26,21 +20,6 @@
 		name: 'home-hero',
 		styleIsolation: 'app-and-page'
 	})
-
-	type Capability = {
-		label: string
-		prompt: string
-	}
-
-	const CAPS: Capability[] = [
-		{ label: 'home.cap.task', prompt: 'home.cap.taskPrompt' },
-		{ label: 'home.cap.continuous', prompt: 'home.cap.continuousPrompt' },
-		{ label: 'home.cap.parallel', prompt: 'home.cap.parallelPrompt' }
-	]
-
-	const emit = defineEmits<{
-		(e: 'fill', text: string): void
-	}>()
 
 	const { isDark } = useTheme()
 	const { isShort } = useViewport()
@@ -94,10 +73,6 @@
 
 	function t(key: string): string {
 		return i18n.global.t(key)
-	}
-
-	function onCap(promptKey: string): void {
-		emit('fill', t(promptKey))
 	}
 </script>
 
@@ -162,38 +137,6 @@
 				font-size: 12px;
 				line-height: 17px;
 			}
-		}
-
-		&__caps {
-			flex-direction: row;
-			flex-wrap: wrap;
-			align-items: center;
-			justify-content: center;
-			margin-top: 30px;
-
-			&--short {
-				margin-top: 10px;
-			}
-		}
-
-		&__cap {
-			flex-direction: row;
-			align-items: center;
-			margin: 4px 9px;
-		}
-
-		&__cap-dot {
-			width: 8px;
-			height: 8px;
-			margin-right: 9px;
-			border-radius: 4px;
-			background-color: var(--color-cap-dot);
-		}
-
-		&__cap-text {
-			font-size: 14px;
-			font-weight: 500;
-			color: var(--color-cap-text);
 		}
 	}
 </style>

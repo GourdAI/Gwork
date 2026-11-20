@@ -1,0 +1,4 @@
+{
+	"frameworks": ["Speech.framework", "AVFoundation.framework"],
+	"deploymentTarget": "12.0"
+}

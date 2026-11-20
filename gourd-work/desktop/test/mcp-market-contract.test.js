@@ -1,4 +1,4 @@
-/* ===== 连接器目录（魔搭/腾讯云/Smithery）+ 三 Tab 接线契约 =====
+﻿/* ===== 连接器目录（魔搭/腾讯云/Smithery）+ 三 Tab 接线契约 =====
  *
  * 2026-11 SolonCode 集成轮（用户拍板）：三个内置目录源 = 魔搭 ModelScope（默认）
  * + 腾讯云 MCP 广场 + Smithery（SolonCode v2026.11 同源契约），二级导航按技能页
@@ -172,7 +172,12 @@ test('⑥ 24 份语言包含 settings.mcp.market.* 且键集一致', () => {
         'search_placeholder', 'installed', 'empty', 'required',
         'verified', 'connect', 'connect_title', 'save_connect', 'cancel', 'config',
         'load_failed', 'install_failed', 'installed_names', 'detail_failed', 'retry',
-        'oauth_badge', 'token_badge', 'saved_connect_failed', 'installed_badge']
+        'oauth_badge', 'token_badge', 'saved_connect_failed', 'installed_badge',
+        /* 2026-11 运行时代装轮（「program not found」报障；用户二次拍板
+         * 「缺少环境就自动安装，交互上只提示正在下载，不要确认点击；
+         * 运行环境装好整个连接器才算安装完成」）：进度弹窗自动代装。 */
+        'rt_title', 'rt_need', 'rt_source', 'rt_downloading',
+        'rt_extracting', 'rt_done', 'rt_failed', 'rt_conn_failed']
         .forEach(k => assert.equal(typeof mkt[k], 'string', f + ': 缺 ' + k));
       assert.ok(!('install' in mkt), f + ': install 键已废弃（UI 改用 connect/save_connect），不得复活');
       /* 死键反向断言：try_it / detail 若复活，说明「示例区」或「详情文字按钮」
@@ -208,7 +213,8 @@ test('⑥ 24 份语言包含 settings.mcp.market.* 且键集一致', () => {
       assert.ok(!('hosted' in mkt), f + ': hosted 已随「已托管」概念移除，不得复活');
       /* 带占位符的错误文案必须真的含 {msg}，否则 GourdI18n 插值失效、
        * 界面上会漏出字面 {msg} 或丢掉真实错误原因。 */
-      ['load_failed', 'install_failed', 'installed_names', 'detail_failed', 'saved_connect_failed']
+      ['load_failed', 'install_failed', 'installed_names', 'detail_failed', 'saved_connect_failed',
+        'rt_need', 'rt_downloading', 'rt_failed', 'rt_conn_failed']
         .forEach(k => assert.ok(mkt[k].includes('{msg}'), f + ': ' + k + ' 缺 {msg} 占位符'));
       /* 2026-11 排版重构：+market_tab（连接器二级导航「广场」标签，与技能页
        * 「已安装/各市场」同构）。17→18。
@@ -223,8 +229,18 @@ test('⑥ 24 份语言包含 settings.mcp.market.* 且键集一致', () => {
        * 2026-11 安装链路修复轮：+saved_connect_failed（修1「已保存但连接失败」warning
        * toast，带 {msg}）/+installed_badge（修4 广场卡片与详情弹窗的「已安装」徽标）。19→21。
        * 2026-11 SolonCode 集成轮：-market_tab（「广场」中间层 tab 退役，三源直切）
-       * +source_modelscope/+source_tencent/+source_smithery（源 tab 展示名）。21→23。 */
-      assert.equal(Object.keys(mkt).length, 23, f + ': market 键数漂移，键集契约需同步更新');
+       * +source_modelscope/+source_tencent/+source_smithery（源 tab 展示名）。21→23。
+       * 2026-11 运行时代装轮：+rt_* 9 键（缺 uvx/npx 引导弹窗：告知/确认/进度/
+       * 完成/失败，用户拍板「远程拉取运行环境，要考虑交互」）。23→32。
+       * 2026-11 自动代装轮（用户二次拍板「不要确认点击，缺环境就自动装，
+       * 装好整个连接器才算安装完成」）：-rt_install（确认按钮退役）
+       * /-rt_installed（运行时就绪中间态 toast 退役，成功统一报 installed_names）
+       * /+rt_conn_failed（运行时装好但重连仍失败，带 {msg}）。32→31。 */
+      assert.equal(Object.keys(mkt).length, 31, f + ': market 键数漂移，键集契约需同步更新');
+      /* 确认门死键防复活：自动代装没有「下载并安装」确认按钮，也没有
+       * 「运行环境已就绪」中间态成功 toast（装好+重连成功才报安装完成）。 */
+      assert.ok(!('rt_install' in mkt), f + ': rt_install 已随确认按钮退役，不得复活');
+      assert.ok(!('rt_installed' in mkt), f + ': rt_installed 已随中间态 toast 退役，不得复活');
       /* connect_title 是纯标题（调用处不传 params），不得残留 {msg} 占位符——
        * zh-TW 曾写成「連接 {msg}」，界面直接漏出字面占位符。 */
       assert.ok(!String(mkt.connect_title || '').includes('{msg}'),
@@ -1364,4 +1380,326 @@ test('㉜ 修1/2/3/4 Rust 接线护栏：预检/后缀/connectErrors/marketId �
     '修4: install 未把目录 id 作为 marketId 附着到条目');
   // 手动添加的重名 400 必须保持不变（仅市场路径加后缀）。
   assert.match(st, /Server name already exists/, '手动添加 mcp_server_add 的重名 400 不得被移除');
+});
+
+/* ===== ㉝ 运行时代装轮（2026-11「program not found」报障，用户拍板
+ * 「远程拉取运行环境，要考虑交互，告诉用户在安装对应的运行环境」）=====
+ *
+ * 抓四类接线断点：
+ * A. Rust：spawn NotFound → typed MissingProgram（含命令名）→ missingCommand
+ *    透传 → collect_connect_error 结构化 runtime 字段；三个 runtime 路由；
+ *    toggle 响应也透传 missingCommand（重连结果可判定）。
+ * B. 前端（用户二次拍板：零确认点击）：connectErrors[].runtime →
+ *    offerRuntimeInstall 进度弹窗挂载即自动 POST install → status 轮询 →
+ *    done 后 toggle 重连并核实结果，全部成功才报「安装完成」；
+ *    缺运行时不得先弹错误 toast。
+ * C. 手动添加路径：resp.missingCommand → _mcpMarket.offerRuntime 同一自动流程，
+ *    错误 toast 只在代装未接管/失败时出现。
+ * D. 红线：不执行远程安装脚本（irm|iex / powershell -c）、不改系统 PATH。 */
+test('㉝ 运行时代装：Rust typed 错误 + 3 路由 + 前端零确认自动安装 + 双壳一致', () => {
+  const rt = read(path.join(REPO, 'gourd-work', 'core', 'src', 'mcp', 'runtime.rs'));
+  const mod = read(path.join(REPO, 'gourd-work', 'core', 'src', 'mcp', 'mod.rs'));
+  const srv = read(path.join(REPO, 'gourd-work', 'core', 'src', 'server', 'mod.rs'));
+  const mkt = read(path.join(REPO, 'gourd-work', 'core', 'src', 'server', 'mcp_market_api.rs'));
+  const st = read(path.join(REPO, 'gourd-work', 'core', 'src', 'server', 'settings_api.rs'));
+
+  // A1: spawn NotFound 必须转 typed MissingProgram（裸 "program not found" 不含命令名）。
+  assert.match(mod, /pub struct MissingProgram/, 'A1: 缺 typed MissingProgram');
+  assert.match(mod, /ErrorKind::NotFound[\s\S]{0,200}MissingProgram \{ command/,
+    'A1: spawn NotFound 未携带命令名转 MissingProgram');
+  // A2: 报错文案必须指名命令并给出安装出路（可行动化，非裸透传）。
+  assert.match(rt, /pub fn missing_program_message/, 'A2: 缺可行动报错函数');
+  assert.match(rt, /未找到命令/, 'A2: 报错未指名缺失命令');
+  // A3: missingCommand 全链路：settings_api 提取 → mcp_saved_outcome 落响应 →
+  //     collect_connect_error 转结构化 runtime。
+  assert.match(st, /downcast_ref::<crate::mcp::MissingProgram>/, 'A3: sync_engine 未提取 MissingProgram');
+  assert.match(st, /missingCommand/, 'A3: 保存响应未透传 missingCommand');
+  assert.match(mkt, /runtime_for_command\(cmd\)/, 'A3: connectErrors 未做命令→运行时映射');
+  assert.match(mkt, /"runtimeInstallable"/, 'A3: connectErrors 缺 runtimeInstallable');
+  // A4: 三个路由 + AppState 挂 installer。
+  ['/web/settings/mcp/runtime/check', '/web/settings/mcp/runtime/install', '/web/settings/mcp/runtime/status']
+    .forEach(r => assert.ok(srv.includes(r), 'A4: 缺路由 ' + r));
+  assert.match(srv, /mcp_runtime: Arc<crate::mcp::runtime::RuntimeInstaller>/, 'A4: AppState 未挂 RuntimeInstaller');
+  // A5: 下载源契约：uv 走 astral CDN 首选，Node 走 npmmirror 首选 + nodejs.org 回退。
+  assert.match(rt, /releases\.astral\.sh/, 'A5: uv 下载源缺 astral CDN');
+  assert.match(rt, /npmmirror\.com/, 'A5: Node 下载源缺 npmmirror');
+  assert.match(rt, /nodejs\.org\/dist/, 'A5: Node 缺官方回退源');
+  // A6: uvx 首跑拉包走国内 PyPI 镜像（pypi.org 直连极慢 → initialize 超时，
+  //     实机实证过的第二段根因）；只注入应用自管 uv，条目显式 env 优先。
+  assert.match(rt, /pub fn apply_managed_env/, 'A6: 缺自管 uv 镜像注入');
+  assert.match(rt, /UV_DEFAULT_INDEX/, 'A6: 缺 PyPI 镜像环境变量');
+  assert.match(mod, /runtime::apply_managed_env\(&mut cmd/, 'A6: open_stdio 未接镜像注入');
+  const iEnv = mod.indexOf('runtime::apply_managed_env(&mut cmd');
+  const iCfgEnv = mod.indexOf('for (k, v) in &config.env', iEnv);
+  assert.ok(iEnv > 0 && iCfgEnv > iEnv, 'A6: 镜像注入必须先于 config.env（条目显式配置覆盖默认值）');
+  // A7: 幂等——已装（marker 在）不得重复下载。
+  assert.match(rt, /managed_marker\(id\)\.is_some\(\)[\s\S]{0,900}return Ok\(st\)/,
+    'A7: start 缺已装幂等短路（重复触发同一运行时会重复下载）');
+  // A8: toggle 也走 mcp_saved_outcome（透传 missingCommand）——代装后的自动
+  //     重连要据 toggle 响应判定「真的连上了 / 仍缺别的运行时」。
+  const iToggle = st.indexOf('pub async fn mcp_server_toggle');
+  const toggleBody = st.slice(iToggle, st.indexOf('pub async fn', iToggle + 10));
+  assert.match(toggleBody, /sync_engine_outcome/, 'A8: toggle 未走 outcome 通道');
+  assert.match(toggleBody, /Json\(mcp_saved_outcome\(outcome\)\)/,
+    'A8: toggle 响应未透传 missingCommand（重连结果不可判定）');
+  // D: 红线——不执行远程安装脚本、不改系统/用户 PATH（只改进程环境）。
+  assert.ok(!/irm[^"]*\|\s*iex/.test(rt), 'D: 不得执行远程 PowerShell 安装脚本');
+  assert.ok(!/setx|Environment\.Path|\[Environment\]::SetEnvironmentVariable/.test(rt),
+    'D: 不得改系统/用户 PATH（只允许进程内 std::env::set_var）');
+
+  // B/C: 前端双壳。
+  VARIANTS.forEach(v => {
+    const js = read(path.join(v.base, 'js', 'app-mcp-market.js'));
+    const sm = read(path.join(v.base, 'js', 'app-settings-mcp.js'));
+    assert.match(js, /function offerRuntimeInstall\(/, v.tag + ': 缺运行时引导弹窗');
+    assert.match(js, /runtimeCheck|runtime\/check/, v.tag + ': 缺 check 探测端点');
+    assert.match(js, /runtimeInstall|runtime\/install/, v.tag + ': 缺 install 端点');
+    assert.match(js, /runtimeStatus|runtime\/status/, v.tag + ': 缺 status 轮询端点');
+    // 零确认点击（用户二次拍板）：进度弹窗挂载即自动开始下载安装。
+    assert.match(js, /startRuntimeInstall\(runtime, names, restEntries, carryFailed \|\| \[\], carryOk \|\| \[\], gen, overlay, finish\);\s*\n\s*\}\);/,
+      v.tag + ': offerRuntimeInstall 必须在弹窗挂载后立即自动开始安装（不要确认点击）');
+    assert.ok(!js.includes('mcpRuntimeGo'), v.tag + ': 确认按钮 mcpRuntimeGo 已退役，不得复活');
+    assert.ok(!/rt_install'/.test(js), v.tag + ': rt_install 确认文案已退役，不得复活');
+    // 重试按钮只在失败后出现（footer 初始隐藏，showErr 才显示）。
+    assert.match(js, /id="mcpRuntimeFooter" style="display:none"/,
+      v.tag + ': 重试/关闭 footer 必须初始隐藏（失败才出现，不得变成确认门）');
+    assert.match(js, /mcpRuntimeRetry'\)\.addEventListener\('click'[\s\S]{0,520}startRuntimeInstall/,
+      v.tag + ': 失败后的重试必须重走自动安装');
+    // code review 修复护栏：弹窗代际 + 节点身份判活（旧弹窗在途回调不得写新弹窗）；
+    // 混合运行时其余条目并入续装（不得静默丢弃）；续装携带硬失败（不得吞掉）。
+    assert.match(js, /var gen = \+\+rtState\.gen/, v.tag + ': 缺弹窗代际号（旧回调会污染新弹窗）');
+    assert.match(js, /document\.getElementById\('mcpRuntimeOverlay'\) === overlay/,
+      v.tag + ': alive 必须按节点身份判定（同 id 新弹窗不得被旧回调写入）');
+    assert.match(js, /var restEntries = entries\.filter/, v.tag + ': 混合运行时的其余条目被静默丢弃');
+    assert.match(js, /\.concat\(restEntries\)/, v.tag + ': 其余运行时条目未并入续装名单');
+    assert.match(js, /\.concat\(carryFailed \|\| \[\]\)/, v.tag + ': 续装吞掉了上一轮硬失败');
+    assert.match(js, /\.concat\(carryOk \|\| \[\]\)/, v.tag + ': 成功 toast 漏掉前几轮已装好的条目');
+    // connectErrors[].runtime → 自动代装接线，且缺运行时不得先弹错误 toast。
+    assert.match(js, /rtEntries[\s\S]{0,120}offerRuntimeInstall\(rtEntries\)/,
+      v.tag + ': connectErrors 的 runtime 字段未接自动代装');
+    assert.match(js, /var rtEntries = errs\.filter[\s\S]{0,400}var hardErrs[\s\S]{0,300}if \(hardErrs\.length\)/,
+      v.tag + ': warning toast 只允许针对非运行时失败（hardErrs），缺运行时不算报错');
+    // done 后自动重连（toggle off→on 热插拔）并核实结果：全部成功才报完成。
+    assert.match(js, /function reconnectServers\(/, v.tag + ': 缺装后自动重连');
+    assert.match(js, /servers\/toggle/, v.tag + ': 重连必须走 toggle 热插拔端点');
+    assert.match(js, /var results = await reconnectServers\(names\)/,
+      v.tag + ': 代装完成后必须核实重连结果（不能触发即算成功）');
+    assert.match(js, /r\.ok = !!\(resp && resp\.connected !== false\)/,
+      v.tag + ': 重连结果必须按 toggle 响应 connected 判定');
+    assert.match(js, /if \(!failed\.length && !again\.length\)[\s\S]{0,420}installed_names/,
+      v.tag + ': 运行环境装好且全部重连成功才报「安装完成」');
+    assert.match(js, /rt_conn_failed/, v.tag + ': 重连仍失败必须如实报错（不得假成功）');
+    // 手动添加路径同一入口：错误 toast 只在代装未接管/失败时出现。
+    assert.match(sm, /resp\.missingCommand[\s\S]{0,200}offerRuntime/,
+      v.tag + ': 手动保存失败分支未接运行时自动代装');
+    assert.match(sm, /if \(!handled\)[\s\S]{0,160}showToast\(resp\.connectError/,
+      v.tag + ': 缺运行时不得先弹错误 toast（代装接管时静默，失败才提示）');
+    assert.match(js, /offerRuntime: offerRuntimeForCommand/, v.tag + ': 未对外暴露 offerRuntime');
+    // 弹窗骨架复用认证弹窗样式（不新建平行视觉体系）。
+    assert.match(js, /mcp-auth-overlay/, v.tag + ': 运行时弹窗必须复用 mcp-auth 骨架');
+    const css = read(path.join(v.base, 'css', 'mcp-auth.css'));
+    assert.match(css, /\.mcp-auth-runtime-bar-fill/, v.tag + ': 缺进度条样式');
+    assert.ok(!/\.mcp-auth-runtime-bar-fill[^}]*#[0-9a-fA-F]{3,6}/.test(css),
+      v.tag + ': 进度条颜色必须走主题令牌，禁硬编码');
+  });
+});
+
+/* ===== ㉞ 运行时自动代装·运行时行为护栏（vm 沙箱跑真实模块源码）=====
+ *
+ * ㉝ 是静态断言；「零确认点击」「装好+重连成功才报完成」是行为语义，
+ * 静态字符串测不出（例如弹窗挂载后忘了调 startRuntimeInstall，或把
+ * 运行环境 done 直接当安装完成）。这里桩掉 fetch/DOM，真实走一遍：
+ *   install 响应缺运行时 → 自动 POST runtime/install（无任何点击）
+ *   → status done → toggle off/on 重连 → connected:true 才出成功 toast。
+ * 反向场景：重连仍失败 → 不得出成功 toast，弹窗内如实报错。 */
+function makeRtEl(tag) {
+  const el = {
+    tag, id: '', className: '', style: {}, textContent: '', _ls: {}, _html: '',
+    addEventListener(t, f) { (this._ls[t] = this._ls[t] || []).push(f); },
+    querySelector(sel) { return (el._kids || []).find(k => k._sel === sel) || null; },
+    querySelectorAll(sel) { return (el._kids || []).filter(k => k._sel === sel); },
+    remove() { if (el._onRemove) el._onRemove(el); },
+    set innerHTML(v) {
+      this._html = v;
+      /* 从模板里提取带 id 的节点 + data-rt-close 按钮，做成可查询的孩子。 */
+      el._kids = [];
+      const idRe = /id="([^"]+)"/g; let mm;
+      while ((mm = idRe.exec(v))) {
+        const k = makeRtEl('child'); k.id = mm[1]; k._sel = '#' + mm[1];
+        el._kids.push(k);
+      }
+      if (v.includes('data-rt-close')) {
+        const k = makeRtEl('close'); k._sel = '[data-rt-close]'; el._kids.push(k);
+      }
+    },
+    get innerHTML() { return this._html; },
+  };
+  return el;
+}
+
+function loadRtModule(file, opts) {
+  const calls = [];
+  const toasts = [];
+  const overlays = [];
+  const removed = [];
+  const root = makeEl('mcpMarketRoot');
+  const byId = { mcpMarketRoot: root };
+  let statusPolls = 0;
+  const ok = (data) => ({ ok: true, status: 200, json: async () => ({ code: 200, data }) });
+  const sandbox = {
+    console, setTimeout, clearTimeout, URLSearchParams,
+    document: {
+      getElementById: (id) => byId[id] || null,
+      querySelector: (sel) => (sel === '#mcpMarketRoot' ? root : null),
+      addEventListener() {},
+      createElement: () => makeRtEl('div'),
+      body: {
+        appendChild(el) {
+          overlays.push(el); byId[el.id] = el;
+          el._onRemove = (e) => { delete byId[e.id]; removed.push(e); };
+        },
+      },
+    },
+    window: {
+      addEventListener() {},
+      showToast(msg, type) { toasts.push({ msg, type }); },
+      GourdI18n: null,
+    },
+    fetch: async (url, o) => {
+      calls.push({ url, body: o && o.body ? JSON.parse(o.body) : null });
+      if (/market\/install/.test(url)) {
+        if (opts.mixed) {
+          /* 混合运行时批次：uvx 条目 + npx 条目同装（code review 修复回归：
+           * 其余运行时条目不得被静默丢弃，必须续装）。 */
+          return ok({ installed: ['blender', 'fetcher'], connectErrors: [
+            { name: 'blender', error: '未找到命令 uvx', missingCommand: 'uvx', runtime: 'uv', runtimeInstallable: true },
+            { name: 'fetcher', error: '未找到命令 npx', missingCommand: 'npx', runtime: 'node', runtimeInstallable: true },
+          ] });
+        }
+        return ok({ installed: ['blender'], connectErrors: [{ name: 'blender', error: '未找到命令 uvx', missingCommand: 'uvx', runtime: 'uv', runtimeInstallable: true }] });
+      }
+      if (/market\/detail/.test(url)) return ok({ server_config: [{ mcpServers: { blender: { command: 'uvx' } } }], env_schema: { properties: {}, required: [] } });
+      if (/runtime\/install/.test(url)) return ok({ phase: 'downloading' });
+      if (/runtime\/status/.test(url)) {
+        statusPolls += 1;
+        return ok(statusPolls < 2 ? { phase: 'downloading', received: 5, total: 10 } : { phase: 'done' });
+      }
+      if (/servers\/toggle/.test(url)) {
+        const enabling = JSON.parse(o.body).enabled === true;
+        return { ok: true, status: 200, json: async () => (enabling
+          ? (opts.reconnectOk
+            ? { code: 200, saved: true, connected: true }
+            : { code: 200, saved: true, connected: false, connectError: 'handshake timeout' })
+          : { code: 200 }) };
+      }
+      if (/mcp\/servers(\?|$)/.test(url)) return ok([]);
+      if (/market\/categories/.test(url)) return ok([{ key: '', nameZh: '全部', name: 'All' }]);
+      return ok({ total_count: 0, mcp_server_list: [] });
+    },
+    Element: function () {},
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(read(file), sandbox, { filename: file });
+  const market = sandbox.window._mcpMarket;
+  market.setHost('#mcpMarketRoot');
+  return { market, calls, toasts, overlays, removed };
+}
+
+async function waitFor(pred, ms) {
+  const t0 = Date.now();
+  while (!pred()) {
+    if (Date.now() - t0 > ms) throw new Error('waitFor timeout');
+    await new Promise(r => setTimeout(r, 50));
+  }
+}
+
+test('㉞ 缺运行时零点击自动代装：装好+重连成功才报完成，重连失败不假成功', async () => {
+  for (const base of [UI, ST]) {
+    const tag = base === UI ? 'desktop' : 'static';
+    const file = path.join(base, 'js', 'app-mcp-market.js');
+
+    // 场景1：重连成功 → 自动安装（零点击）→ 成功 toast 在 toggle-on 之后。
+    {
+      const ctx = loadRtModule(file, { reconnectOk: true });
+      /* 不 await 跨 realm 的 install Promise：它要等整条代装链完成才 resolve，
+       * 期间若事件循环短暂排空会被 node:test 误判挂起。发射后按观察态收敛。 */
+      ctx.market.install('@x/blender', {});
+      await waitFor(() => ctx.toasts.some(t => t.type === 'success'), 8000);
+      const rtPost = ctx.calls.findIndex(c => /runtime\/install/.test(c.url));
+      assert.ok(rtPost > 0, tag + ': 缺运行时未自动 POST runtime/install（零确认点击契约）');
+      assert.equal(ctx.calls.filter(c => /runtime\/install/.test(c.url)).length, 1,
+        tag + ': 一次安装只应触发一次 runtime/install');
+      assert.ok(!ctx.toasts.some(t => t.type === 'warning' || t.type === 'error'),
+        tag + ': 缺运行时不算报错，不得弹 warning/error toast');
+      const iOn = ctx.calls.findIndex(c => /servers\/toggle/.test(c.url) && c.body && c.body.enabled === true);
+      assert.ok(iOn > rtPost, tag + ': 必须先装运行环境再重连');
+      assert.ok(ctx.toasts.some(t => t.type === 'success' && t.msg.includes('blender')),
+        tag + ': 运行环境装好且重连成功后必须报「已安装：blender」');
+      assert.ok(ctx.overlays.length >= 1 && ctx.overlays.every(o => ctx.removed.includes(o)),
+        tag + ': 完成后进度弹窗必须关闭');
+    }
+
+    // 场景2：重连仍失败 → 不得假成功，弹窗内如实报错并可重试。
+    {
+      const ctx = loadRtModule(file, { reconnectOk: false });
+      ctx.market.install('@x/blender', {});   // 同上：发射后按观察态收敛（此场景 Promise 永不 resolve）
+      await waitFor(() => ctx.calls.some(c => /servers\/toggle/.test(c.url) && c.body && c.body.enabled === true), 8000);
+      await new Promise(r => setTimeout(r, 300));
+      assert.ok(!ctx.toasts.some(t => t.type === 'success'),
+        tag + ': 重连失败绝不得报「安装完成」（假成功回归）');
+      const ov = ctx.overlays[ctx.overlays.length - 1];
+      const err = ov.querySelector('#mcpRuntimeError');
+      assert.ok(err && err.style.display !== 'none' && /handshake timeout/.test(err.textContent),
+        tag + ': 重连失败必须在弹窗内如实展示原因');
+      const footer = ov.querySelector('#mcpRuntimeFooter');
+      assert.ok(footer && footer.style.display !== 'none', tag + ': 失败后才出现重试/关闭按钮');
+      const retry = ov.querySelector('#mcpRuntimeRetry');
+      assert.ok(retry && retry._ls.click && retry._ls.click.length === 1, tag + ': 重试按钮必须可用');
+      // 收尾：点关闭，清掉轮询定时器。
+      ov.querySelectorAll('[data-rt-close]').forEach(b => (b._ls.click || []).forEach(f => f()));
+    }
+
+    // 场景3（code review 修复回归）：混合运行时批次 uv+node → 两个运行时都
+    // 自动续装、两个条目都重连，成功 toast 必须包含全部名字（不得静默丢弃）。
+    {
+      const ctx = loadRtModule(file, { reconnectOk: true, mixed: true });
+      ctx.market.install('@x/blender', {});
+      await waitFor(() => ctx.toasts.some(t => t.type === 'success'), 12000);
+      const rtPosts = ctx.calls.filter(c => /runtime\/install/.test(c.url)).map(c => c.body.runtime);
+      assert.ok(rtPosts.includes('uv') && rtPosts.includes('node'),
+        tag + ': 混合运行时批次必须两个都装（其余条目被静默丢弃回归）: ' + JSON.stringify(rtPosts));
+      const onNames = ctx.calls.filter(c => /servers\/toggle/.test(c.url) && c.body && c.body.enabled === true)
+        .map(c => c.body.name);
+      assert.ok(onNames.includes('blender') && onNames.includes('fetcher'),
+        tag + ': 两个条目都必须重连: ' + JSON.stringify(onNames));
+      const okToast = ctx.toasts.find(t => t.type === 'success');
+      assert.ok(okToast.msg.includes('blender') && okToast.msg.includes('fetcher'),
+        tag + ': 成功 toast 必须涵盖全部装好的条目');
+      assert.ok(!ctx.toasts.some(t => t.type === 'warning' || t.type === 'error'),
+        tag + ': 混合批次全程成功不得弹错误');
+      assert.ok(ctx.overlays.length >= 2 && ctx.overlays.every(o => ctx.removed.includes(o)),
+        tag + ': 续装换弹窗后旧弹窗必须全部关闭');
+    }
+
+    // 场景4（code review 修复回归）：下载中用户点关闭 → 轮询终止，之后
+    // 后端 done 也不得幽灵重连/假成功（旧回调判活按节点身份+代际）。
+    {
+      const ctx = loadRtModule(file, { reconnectOk: true });
+      ctx.market.install('@x/blender', {});
+      await waitFor(() => ctx.overlays.length >= 1, 8000);
+      const ov = ctx.overlays[0];
+      // 等到至少一次 status 轮询发生（下载中），再点关闭。
+      await waitFor(() => ctx.calls.some(c => /runtime\/status/.test(c.url)), 8000);
+      ov.querySelectorAll('[data-rt-close]').forEach(b => (b._ls.click || []).forEach(f => f()));
+      const postsAtClose = ctx.calls.filter(c => /runtime\/status/.test(c.url)).length;
+      await new Promise(r => setTimeout(r, 1500));   // > 2 个轮询周期
+      assert.equal(ctx.calls.filter(c => /runtime\/status/.test(c.url)).length, postsAtClose,
+        tag + ': 关闭后轮询必须终止');
+      assert.ok(!ctx.calls.some(c => /servers\/toggle/.test(c.url)),
+        tag + ': 关闭后不得幽灵重连');
+      assert.ok(!ctx.toasts.some(t => t.type === 'success'),
+        tag + ': 用户关闭后不得再报「安装完成」');
+    }
+  }
 });

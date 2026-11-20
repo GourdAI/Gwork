@@ -72,6 +72,12 @@ pub struct ParentRun {
     /// Shared ledger of the run that delegated this task. `None` for callers
     /// (ACP/CLI/tests) that have no file-change ledger at all.
     pub change_ledger: Option<Arc<crate::changes::ChangeLedger>>,
+    /// The parent run's conversation connector selection (`ToolGate::mcp_servers`).
+    /// Inherited so a sub-agent cannot reach connectors the user did not enable
+    /// for this conversation — same inheritance rule as the global
+    /// `disallowedTools` fold at the gate build site. `None` = parent had no
+    /// selection axis (CLI/ACP/loop keep every enabled connector).
+    pub mcp_servers: Option<std::collections::HashSet<String>>,
 }
 
 /// Result from a sub-agent execution.
@@ -208,10 +214,13 @@ impl TeamOrchestrator {
         // The definition's whitelist, intersected with the user's global
         // `disallowedTools`. The global list must win: it is the operator's
         // setting, and an agent definition file living in a project directory
-        // should not be able to re-grant a tool the user banned.
+        // should not be able to re-grant a tool the user banned. The parent's
+        // conversation connector selection is folded in the same way — a
+        // sub-agent cannot reach connectors the user did not pick.
         let gate: Arc<ToolGate> = Arc::new(
             def.tool_gate()
-                .with_extra_disallowed(settings.permission.disallowed_tools.iter().cloned()),
+                .with_extra_disallowed(settings.permission.disallowed_tools.iter().cloned())
+                .with_mcp_servers(parent.mcp_servers.clone()),
         );
 
         let run_id = format!("sub-{}", task.id);

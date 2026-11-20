@@ -1453,6 +1453,20 @@ pub struct SessionContext {
     /// never did.
     #[serde(rename = "interrupted", default, skip_serializing_if = "Option::is_none")]
     pub interrupted: Option<bool>,
+    /// Connectors the user enabled for THIS conversation (composer picker,
+    /// WorkBuddy-style). Server directory names from settings.json
+    /// `mcpServers`.
+    ///
+    /// Semantics (2026-11 user decision "默认不启用"):
+    /// * `None` — never touched by the picker. Interactive chat treats this
+    ///   as "no connectors" (fresh conversations start clean); non-chat
+    ///   callers (CLI/ACP/loop) never read it and keep all enabled servers.
+    /// * `Some([])` — user explicitly unchecked everything: no connectors.
+    /// * `Some([...])` — only these servers' tools enter the run's toolset,
+    ///   enforced at BOTH the definitions and the execute boundary via
+    ///   `ToolGate::mcp_servers`.
+    #[serde(rename = "mcpServers", default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Vec<String>>,
 }
 
 /// Serialises `context.json` read-modify-write across the whole process.
@@ -2092,6 +2106,42 @@ mod tests {
         store.write_context(id, &ctx2);
         let back2 = store.read_context(id);
         assert_eq!(back2.thinking.as_deref(), Some("low"), "second write must not corrupt");
+
+        let _ = std::fs::remove_dir_all(&s.0);
+    }
+
+    /// Conversation connector selection must round-trip through context.json
+    /// with all three states distinguishable: never picked (`None`, key
+    /// absent — legacy files load unchanged), explicitly none (`Some([])`),
+    /// and a real selection. The run gate keys off exactly this distinction
+    /// (`None`/`Some([])` → no connectors in chat; `Some([...])` → only those).
+    #[test]
+    fn context_mcp_servers_round_trips_all_three_states() {
+        let s = Scratch::new("context-mcp-servers");
+        let store = SessionStore::with_base(s.0.clone());
+        let id = "work-mcp-pick";
+
+        // Legacy file without the key: loads as None, siblings intact.
+        let dir = store.session_dir_pub(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("context.json"), r#"{"model":"m1","thinking":"high"}"#).unwrap();
+        let legacy = store.read_context(id);
+        assert_eq!(legacy.mcp_servers, None);
+        assert_eq!(legacy.model.as_deref(), Some("m1"));
+
+        // Explicit empty selection persists as [] — NOT skipped like None.
+        store.update_context(id, |ctx| ctx.mcp_servers = Some(Vec::new()));
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("context.json")).unwrap()).unwrap();
+        assert_eq!(raw["mcpServers"], serde_json::json!([]), "Some([]) must be written, not omitted");
+        assert_eq!(store.read_context(id).mcp_servers, Some(Vec::new()));
+
+        // A real selection round-trips and a sibling picker write keeps it.
+        store.update_context(id, |ctx| ctx.mcp_servers = Some(vec!["memory".into(), "deepwiki".into()]));
+        store.update_context(id, |ctx| ctx.thinking = Some("low".into()));
+        let back = store.read_context(id);
+        assert_eq!(back.mcp_servers, Some(vec!["memory".to_string(), "deepwiki".to_string()]));
+        assert_eq!(back.thinking.as_deref(), Some("low"), "sibling field write must not clobber the selection");
 
         let _ = std::fs::remove_dir_all(&s.0);
     }

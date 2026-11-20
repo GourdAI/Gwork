@@ -537,15 +537,14 @@
     function renderProviderList() {
         applyProviderOrder();
         var customHtml = '';
-        var hasCustom = false;
 
         providers.forEach(function (provider) {
-            var item = renderProviderItem(provider);
-            customHtml += item;
-            hasCustom = true;
+            customHtml += renderProviderItem(provider);
         });
 
-        $customGroup.toggle(hasCustom);
+        // 自定义分组恒显示：整组隐藏会把分组标题和「+ 新建供应商」按钮一起藏掉，
+        // 列表为空（还没建过 / 拉取失败）时用户反而无从新增。空态只表现为列表为空。
+        $customGroup.show();
         $customList.html(customHtml);
     }
 

@@ -25,7 +25,11 @@
 .mcp-market-card:active { transform: scale(0.997); }
 .mcp-market-card-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .mcp-market-logo { width: 38px; height: 38px; flex: 0 0 38px; border-radius: 9px; object-fit: contain; background: var(--bg-input-box); }
-.mcp-market-logo-ph { display: flex; align-items: center; justify-content: center; background: var(--accent-light); color: var(--accent); font-weight: 700; font-size: 16px; }
+/* 默认名字图标（用户拍板：与技能卡一致——名字前两字母做底，代理 <img> 叠上面，
+   加载失败 onerror 自毁露出字母底）。容器化后 img 绝对定位铺满，contain 保留
+   任意宽高比 + 白底垫透明横幅（同 skills.css .skill-card-icon img 的既有口径）。 */
+.mcp-market-logo-ph { position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; background: var(--accent-light); color: var(--accent); font-weight: 700; font-size: 14px; }
+.mcp-market-logo-ph img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; background: var(--bg-card); border-radius: inherit; }
 .mcp-market-card-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; color: var(--text-primary); }
 /* 卡片安装入口：与技能卡 .skill-card-add（skills.css:196）**同形态**——
    26px 方形、透明底、hover 翻 accent 实底。用户拍板「和技能安装样式保持一致」：
@@ -67,7 +71,7 @@
    唯一主操作在 foot，hero 再放「连接」就是双按钮同语义重复）。 */
 .mcp-market-hero { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 6px 8px 4px; }
 .mcp-market-hero-logo { width: 64px; height: 64px; flex: 0 0 64px; border-radius: 14px; object-fit: contain; background: var(--bg-input-box); }
-.mcp-market-hero-logo.mcp-market-logo-ph { font-size: 26px; }
+.mcp-market-hero-logo.mcp-market-logo-ph { font-size: 24px; }
 .mcp-market-hero-title { margin-top: 14px; font-size: 17px; font-weight: 700; color: var(--text-primary); }
 .mcp-market-hero .mcp-market-badges { margin-top: 8px; }
 .mcp-market-hero-desc { margin-top: 10px; max-width: 46ch; font-size: 12px; line-height: 1.7; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }

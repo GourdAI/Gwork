@@ -1,0 +1,50 @@
+/**
+ * iOS 端入口：实时识别引擎在同目录 GworkSpeechEngine.swift（UTS 原生混编）。
+ * Swift 侧负责权限双申请（识别 + 麦克风）、AVAudioEngine 采集、SFSpeechRecognizer 流式识别；
+ * 本文件只做单例持有与统一接口转发。会话终态守卫在 Swift 侧（finished）。
+ * 隐私描述（NSMicrophoneUsageDescription / NSSpeechRecognitionUsageDescription）在项目根 Info.plist。
+ */
+// 平台入口内直接定义类型：iOS 是 JS 引擎环境，仅放在 interface.uts 的类型不参与本平台编译
+// （Android 是 Kotlin 同语言环境可直接 import interface.uts，两端规则不同，与 uni-ai-md 同构）。
+// 定义须与 ../interface.uts 保持一致。
+export type SpeechErrorCode = 'unsupported' | 'permission' | 'network' | 'no-match' | 'busy' | 'timeout' | 'unknown'
+
+export type SpeechError = {
+	code: SpeechErrorCode
+	detail: string
+}
+
+export type StartListeningOptions = {
+	language: string
+	maxDurationMs: number
+	onPartial: (text: string) => void
+	onResult: (text: string) => void
+	onError: (error: SpeechError) => void
+}
+
+const engine = new GworkSpeechEngine()
+
+/** language 为业务层传入的 BCP-47 标签（uni.getLocale 在 uni-app x 蒸汽模式不存在，语言由调用方决定） */
+export function isSpeechAvailable(language: string): boolean {
+	return engine.available(language = language)
+}
+
+export function startListening(opts: StartListeningOptions): void {
+	engine.start(language = opts.language, onPartial = (text: string) => {
+		opts.onPartial(text)
+	}, onResult = (text: string) => {
+		opts.onResult(text)
+	}, onError = (code: string, detail: string) => {
+		const err: SpeechError = { code: code as SpeechErrorCode, detail: detail }
+		opts.onError(err)
+	})
+}
+
+export function stopListening(): void {
+	engine.stop()
+}
+
+export function cancelListening(): void {
+	engine.cancel()
+}
+

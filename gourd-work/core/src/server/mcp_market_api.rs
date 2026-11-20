@@ -618,7 +618,18 @@ pub fn collect_connect_error(name: &str, resp: &Value) -> Option<Value> {
         .or_else(|| resp.get("description"))
         .and_then(Value::as_str)
         .unwrap_or("连接失败");
-    Some(json!({"name": name, "error": reason}))
+    let mut out = json!({"name": name, "error": reason});
+    // 缺运行时的失败带上结构化字段：前端据此弹「安装运行环境」引导框，
+    // 而不是让用户对着 warning toast 里的文字自己想办法。判据与 spawn 侧
+    // MissingProgram 同源（runtime_for_command），不嗅探报错文案。
+    if let Some(cmd) = resp.get("missingCommand").and_then(Value::as_str) {
+        if let Some(id) = crate::mcp::runtime::runtime_for_command(cmd) {
+            out["missingCommand"] = json!(cmd);
+            out["runtime"] = json!(id.as_str());
+            out["runtimeInstallable"] = json!(crate::mcp::runtime::recipe_for(id).is_ok());
+        }
+    }
+    Some(out)
 }
 
 /// POST /web/settings/mcp/market/install — 拉详情 → 校验 env → 复用 mcp_server_add。
@@ -683,6 +694,8 @@ pub async fn mcp_market_install(
         installed.push(name);
     }
     // installed 语义保持「已落盘名单」；connectErrors 全部连接成功时为空数组。
+    // 缺运行时的条目附带 runtime/missingCommand（collect_connect_error），
+    // 前端据此弹「正在下载运行环境」进度弹窗并自动代装（零确认点击）。
     Json(market::succeed(json!({"installed": installed, "connectErrors": connect_errors})))
 }
 
@@ -1408,6 +1421,22 @@ mod tests {
         let naked = json!({"code": 200, "connected": false});
         assert!(!collect_connect_error("t", &naked).unwrap()["error"]
             .as_str().unwrap().is_empty());
+        // 缺运行时：missingCommand 必须转成结构化 runtime 字段（前端弹代装
+        // 引导框的唯一依据）；不可代装的命令（blender）不得虚报 runtime。
+        let missing_uv = json!({
+            "code": 200, "connected": false,
+            "connectError": "未找到命令 uvx：它由 uv (astral) 提供…",
+            "missingCommand": "uvx"
+        });
+        let e = collect_connect_error("blender", &missing_uv).unwrap();
+        assert_eq!(e["missingCommand"], json!("uvx"));
+        assert_eq!(e["runtime"], json!("uv"));
+        assert!(e["runtimeInstallable"].is_boolean());
+        let missing_other = json!({
+            "code": 200, "connected": false, "connectError": "x", "missingCommand": "blender"
+        });
+        let e2 = collect_connect_error("b", &missing_other).unwrap();
+        assert!(e2.get("runtime").is_none(), "不可代装的命令不得虚报 runtime: {:?}", e2);
     }
 
     /// 修4：marketId 必须走「attach_catalog_meta → build_entry」全链路落盘，

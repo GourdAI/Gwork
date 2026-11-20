@@ -1,0 +1,8 @@
+{
+	"string": [
+		{
+			"name": "gwork_speech_mic_reason",
+			"value": "用于按住说话时的语音输入，将你的声音实时转写为文字"
+		}
+	]
+}

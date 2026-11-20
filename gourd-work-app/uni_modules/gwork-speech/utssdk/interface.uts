@@ -1,0 +1,43 @@
+/**
+ * gwork-speech 跨端接口：按住实时语音识别（系统原生 ASR，零三方 SDK）。
+ * 会话模型：startListening 开始 → onPartial 持续吐中间结果 → stopListening 收尾
+ * → onResult 最终结果（或 onError）→ 会话终结。cancelListening 静默放弃。
+ * 每个会话至多触发一次 onResult / onError（终态回调），之后回调不再派发。
+ */
+
+/**
+ * 统一错误码（三端原生错误码归一化，调用方按码取文案）：
+ * - unsupported  当前平台/设备无系统识别能力（含无厂商引擎、鸿蒙非大陆机型）
+ * - permission   麦克风或语音识别权限被拒绝
+ * - network      识别引擎网络错误（Android 引擎联网 / iOS 默认识别走苹果服务器）
+ * - no-match     没听到有效语音
+ * - busy         上一会话未结束（识别引擎单例占用）
+ * - timeout      收尾等待最终结果超时
+ * - unknown      其它原生错误（detail 携带原始码）
+ */
+export type SpeechErrorCode = 'unsupported' | 'permission' | 'network' | 'no-match' | 'busy' | 'timeout' | 'unknown'
+
+export type SpeechError = {
+	code: SpeechErrorCode
+	/** 平台原始错误码/描述，仅用于日志排查，不参与 UI 文案 */
+	detail: string
+}
+
+export type StartListeningOptions = {
+	/** BCP-47 语言标签（如 zh-CN / en-US）；鸿蒙端仅支持 zh-CN */
+	language: string
+	/** 单段识别上限（毫秒），到时自动收尾并回调已有结果 */
+	maxDurationMs: number
+	/** 中间结果（边说边出字），同一会话内文本为全量替换语义 */
+	onPartial: (text: string) => void
+	/** 最终结果（终态回调，可能为空串 = 没听清） */
+	onResult: (text: string) => void
+	/** 失败（终态回调） */
+	onError: (error: SpeechError) => void
+}
+
+/** language 为 BCP-47 标签（业务层按应用语言映射后传入；Android 端忽略） */
+export type IsSpeechAvailable = (language: string) => boolean
+export type StartListening = (options: StartListeningOptions) => void
+export type StopListening = () => void
+export type CancelListening = () => void

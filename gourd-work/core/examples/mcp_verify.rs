@@ -161,7 +161,7 @@ async fn main() {
 
     // ── sub-agent gate ────────────────────────────────────────────────────
     let g = Arc::new(ToolGate { allowed: Some(["read".into()].into_iter().collect()),
-        disallowed: Default::default(), mcp_allowed: false });
+        disallowed: Default::default(), mcp_allowed: false, mcp_servers: None });
     let defs = reg.definitions_async(&perm, Some(&g)).await;
     let leaked: Vec<&str> = defs.iter().filter(|d| d.function.name.starts_with("mcp__")).map(|d| d.function.name.as_str()).collect();
     let o = reg.execute("mcp__alpha__echo_ok", json!({"message":"x"}), &ctx(Some(g))).await;

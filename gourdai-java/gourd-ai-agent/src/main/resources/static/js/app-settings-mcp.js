@@ -901,9 +901,22 @@
                     if (resp.code === 200) {
                         loadMcpList(); showMcpListView(); resetMcpForm();
                         if (resp.connected === false) {
-                            // 配置已落盘但连接失败：如实提示后端给出的原因，不能显示
-                            // 「操作成功」让用户以为服务器已可用（这正是曾经的假成功缺陷）。
-                            showToast(resp.connectError || (actionText + GourdI18n.t('settings.loop.operation_failed')), 'error');
+                            /* 缺运行时（uvx/npx 未装）：不算报错 —— 后端
+                             * missingCommand → 直接进「正在下载运行环境」
+                             * 进度弹窗自动代装（零确认点击），装好自动重连，
+                             * 成功才报完成。复用市场页 offerRuntimeInstall，
+                             * 两处入口同一体验。其余失败如实提示原因，
+                             * 不能显示「操作成功」（曾经的假成功缺陷）。 */
+                            var runtimeOffered = resp.missingCommand && window._mcpMarket && window._mcpMarket.offerRuntime
+                                ? window._mcpMarket.offerRuntime(resp.missingCommand, [bodyObj.name])
+                                : Promise.resolve(false);
+                            Promise.resolve(runtimeOffered).then(function (handled) {
+                                if (!handled) {
+                                    showToast(resp.connectError || (actionText + GourdI18n.t('settings.loop.operation_failed')), 'error');
+                                }
+                            }).catch(function () {
+                                showToast(resp.connectError || (actionText + GourdI18n.t('settings.loop.operation_failed')), 'error');
+                            });
                         } else {
                             showToast(actionText + GourdI18n.t('settings.loop.operation_success'));
                         }

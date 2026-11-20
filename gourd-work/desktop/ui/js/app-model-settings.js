@@ -951,20 +951,20 @@
     function renderProviderList() {
         applyProviderOrder();
         var customHtml = '';
-        var hasCustom = false;
 
         providers.forEach(function (provider) {
             // 内核在列表头注入的虚拟官方条目不进自定义分组，也不参与拖拽排序。
             if (provider && (provider.official === true || provider.name === OFFICIAL_NAME)) return;
-            var item = renderProviderItem(provider);
-            customHtml += item;
-            hasCustom = true;
+            customHtml += renderProviderItem(provider);
         });
 
-        // 官方分组恒显示（哪怕未登录也要给出登录入口），自定义分组按有无条目折叠
+        // 官方分组恒显示（哪怕未登录也要给出登录入口）；自定义分组同样恒显示：
+        // 整组隐藏会把分组标题和「+ 新建供应商」按钮一起藏掉——自定义列表为空
+        // （还没建过 / 启动预载拉取失败）时用户反而无从新增，只能看到一块空白。
+        // 分组恒在，空态只表现为列表为空。
         $('#msGroupOfficial').show();
         renderOfficialList();
-        $customGroup.toggle(hasCustom);
+        $customGroup.show();
         $customList.html(customHtml);
     }
 

@@ -135,6 +135,7 @@
         '/js/app-file-changes.js',
         '/js/app-streaming.js',
         '/js/app-access-mode.js',
+        '/js/app-connector-picker.js', // 对话内连接器选择（会话级；须在 app-history 之后——setActiveSession 钩子链）
         '/js/app-todos.js',
         '/js/app-memory.js',
         '/js/app-context.js',

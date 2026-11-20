@@ -1,4 +1,4 @@
-/* =============================================================================
+﻿/* =============================================================================
  * app-mcp-market.js — 「连接器」页目录（三个内置源：魔搭 / 腾讯云 / Smithery）
  *
  * 2026-11 集成 SolonCode v2026.11 连接器市场：新增腾讯云 MCP 广场（SolonCode
@@ -27,6 +27,14 @@
     detail: '/web/settings/mcp/market/detail',
     categories: '/web/settings/mcp/market/categories',
     install: '/web/settings/mcp/market/install',
+    /* stdio 运行时（uv/Node）检测与代装（2026-11「program not found」报障轮；
+     * 同日用户二次拍板「缺少环境就自动安装，交互上只提示正在下载运行环境，
+     * 不要再让用户确认点击；运行环境装好并重连成功，整个连接器才算安装
+     * 完成」）。链路：缺运行时 → 进度弹窗自动 POST install → status 轮询 →
+     * done 后 toggle 重连，全部成功才报安装完成。失败才给重试/关闭。 */
+    runtimeCheck: '/web/settings/mcp/runtime/check',
+    runtimeInstall: '/web/settings/mcp/runtime/install',
+    runtimeStatus: '/web/settings/mcp/runtime/status',
     /* 已落盘连接器名单（与 app-settings-mcp.js loadMcpList 同一端点）。
      * 响应 {code:200, data:[{name, marketId, ...}]}，data 是数组不是对象。 */
     installed: '/web/settings/mcp/servers',
@@ -318,9 +326,16 @@
     }
     grid.innerHTML = state.items.map(function (it) {
       var id = esc(it.id || '');
-      var logo = it.logo_url
-        ? '<img class="mcp-market-logo" src="' + esc(proxyIcon(it.logo_url)) + '" alt="" loading="lazy" onerror="this.remove()">'
-        : '<div class="mcp-market-logo mcp-market-logo-ph">M</div>';
+      /* 默认图标与技能卡同款（用户拍板「连接器没图片要有默认的，和技能一样，
+       * 显示名字图片」）：名字前两字母做底，代理 <img> 叠在上面，加载失败
+       * onerror 自毁露出字母底——不再是硬编码 "M"，也不是失败后整块消失。 */
+      var displayName = pickText(it, 'name') || it.id || 'M';
+      var letter = esc(String(displayName).substring(0, 2).toUpperCase());
+      var logo = '<div class="mcp-market-logo mcp-market-logo-ph"><span>' + letter + '</span>' +
+        (it.logo_url
+          ? '<img src="' + esc(proxyIcon(it.logo_url)) + '" alt="" loading="lazy" onerror="this.remove()">'
+          : '') +
+        '</div>';
       /* 列表接口（PUT /mcp/servers）实测只返回：
        *   id, publisher, name, chinese_name, description, tags, logo_url,
        *   view_count, locales, categories, auth_kind
@@ -804,13 +819,15 @@
     var authKind = canonicalAuthKind(detailAuthKind(d));
     if (authKind === 'oauth') badges += '<span class="mcp-market-badge-oauth">' + esc(m('oauth_badge', '登录/扫码授权')) + '</span>';
     else if (authKind === 'token') badges += '<span class="mcp-market-token-badge">' + esc(m('token_badge', 'Token')) + '</span>';
-    var logo = (d && d.logo_url)
-      ? '<img class="mcp-market-hero-logo" src="' + esc(proxyIcon(d.logo_url)) + '" alt="" onerror="this.remove()">'
-      : '';
-    if (!logo) {
-      logo = '<div class="mcp-market-hero-logo mcp-market-logo-ph">' +
-        esc((pickText(d, 'name') || id).charAt(0).toUpperCase()) + '</div>';
-    }
+    /* 详情弹窗默认图标与卡片同款：名字前两字母做底，代理 <img> 叠上面，
+     * 失败自毁露出字母底（旧版 img 失败后整块消失，无图条目只有单字母）。 */
+    var heroName = pickText(d, 'name') || id || 'M';
+    var heroLetter = esc(String(heroName).substring(0, 2).toUpperCase());
+    var logo = '<div class="mcp-market-hero-logo mcp-market-logo-ph"><span>' + heroLetter + '</span>' +
+      ((d && d.logo_url)
+        ? '<img src="' + esc(proxyIcon(d.logo_url)) + '" alt="" onerror="this.remove()">'
+        : '') +
+      '</div>';
     // 本地化 + 轻量安全 Markdown：不再 <pre> 原样输出上游 HTML table，也不再 slice(1200)
     var readmeHtml = renderReadme(pickReadme(d));
     modal.innerHTML = '' +
@@ -965,12 +982,22 @@
     });
     var names = (data && data.installed) || [];
     var errs = (data && data.connectErrors) || [];
-    if (errs.length) {
-      var msg = errs.map(function (e) {
+    /* 缺运行时（后端 MissingProgram → connectErrors[].runtime）：不算报错，
+     * 不弹错误 toast —— 直接进「正在下载运行环境」进度弹窗自动代装，装好
+     * 自动重连，全部成功才报「安装完成」（offerRuntimeInstall 内负责成功
+     * toast）。其余失败（网络/凭据/不可代装命令）如实 warning，绝不假成功。 */
+    rtState.rounds = 0;                     // 新一轮安装：续装轮次清零
+    var rtEntries = errs.filter(function (e) { return e && e.runtime && e.runtimeInstallable !== false; });
+    var hardErrs = errs.filter(function (e) { return rtEntries.indexOf(e) < 0; });
+    if (hardErrs.length) {
+      var msg = hardErrs.map(function (e) {
         return (e && e.name ? e.name + ': ' : '') + ((e && e.error) || '');
       }).join('; ');
       toast(tMsg('saved_connect_failed', '已保存，但连接失败：{msg}', msg), 'warning');
-    } else {
+    }
+    if (rtEntries.length) {
+      await offerRuntimeInstall(rtEntries);
+    } else if (!errs.length) {
       toast(names.length
         ? tMsg('installed_names', '已安装：{msg}', names.join(', '))
         : m('installed', '已安装'), 'success');
@@ -982,6 +1009,262 @@
     if (window._settingsMcp && window._settingsMcp.load) window._settingsMcp.load();
     if (window._skills && window._skills.refresh) window._skills.refresh();
     return data;
+  }
+
+  // ─── 运行时（uv/Node）自动代装 ───────────────────────────────────────────
+  //
+  // 2026-11 报障「blender: 检测失败: program not found」：目录条目大量依赖
+  // uvx/npx 启动器，本机没装对应运行时则 spawn 必败。用户二次拍板：
+  // 「不要提示报错，缺少环境就静默安装，只是交互上提示用户在下载运行环境，
+  //   不要再让用户确认点击；运行环境安装完成，整个连接器才安装完成」。链路：
+  //   install 响应 connectErrors[].runtime（后端 MissingProgram 结构化透传）
+  //   → 进度弹窗立即 POST runtime/install（零确认点击）→ status 轮询进度条
+  //   → done 后自动 toggle 重连已落盘条目 → 全部重连成功才报「安装完成」；
+  //   重连仍缺别的运行时则自动续装（有轮次上限防死循环）。
+  //   失败才显示错误 + 重试/关闭按钮。
+  // 弹窗骨架复用 mcp-auth.css（认证弹窗同源视觉），不新建样式文件。
+
+  /* gen = 弹窗代际号：每次开新弹窗 +1。在途的轮询/重连回调只有仍持有当前
+   * 代际才允许写 UI / 续装 / finish——否则关闭旧弹窗后立刻开新弹窗（或续装
+   * 换运行时）时，旧回调会把错误写进新弹窗、甚至用旧名单误报「已安装」。 */
+  var rtState = { gen: 0, pollTimer: null, cancelled: false, rounds: 0 };
+
+  function rtName(id) {
+    return id === 'uv' ? 'uv (astral)' : 'Node.js';
+  }
+
+  function closeRuntimeDialog() {
+    if (rtState.pollTimer) { clearTimeout(rtState.pollTimer); rtState.pollTimer = null; }
+    var el = document.getElementById('mcpRuntimeOverlay');
+    if (el) el.remove();
+  }
+
+  /** 命令级入口（手动添加/编辑表单用）：check 探测命令 → 可代装则直接
+   *  进自动代装进度弹窗（无需用户确认）。command 如 "uvx"；
+   *  names = 装好后要重连的已落盘连接器名。 */
+  async function offerRuntimeForCommand(command, names) {
+    if (!command) return false;
+    var st;
+    try {
+      st = await api(API.runtimeCheck + '?command=' + encodeURIComponent(command));
+    } catch (_) { return false; }
+    if (!st || st.resolved || !st.runtime || !st.installable) return false;
+    rtState.rounds = 0;                     // 新一轮安装：续装轮次清零
+    return offerRuntimeInstall([{ name: (names && names[0]) || '', runtime: st.runtime, runtimeInstallable: true }].concat(
+      (names || []).slice(1).map(function (n) { return { name: n, runtime: st.runtime, runtimeInstallable: true }; })));
+  }
+
+  /** 缺运行时自动代装。entries = connectErrors 里带 runtime 字段的条目；
+   *  carryFailed = 上一轮续装携带的硬失败（本弹窗最终失败时必须一并展示，
+   *  成功时也必须如实提示这些条目没连上，绝不静默吞掉）。
+   *  弹窗出现即自动开始下载（零确认点击），只展示「正在下载运行环境」进度。
+   *  resolve(true) = 运行时装好且全部重连成功（此刻才报「安装完成」）；
+   *  resolve(false) = 下载失败 / 重连仍失败 / 用户中途关闭。 */
+  function offerRuntimeInstall(entries, carryFailed, carryOk) {
+    var pick = null;
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i] && entries[i].runtime && entries[i].runtimeInstallable !== false) { pick = entries[i]; break; }
+    }
+    if (!pick) return Promise.resolve(false);
+    var runtime = pick.runtime;
+    var names = entries.filter(function (e) { return e && e.runtime === runtime; })
+      .map(function (e) { return e.name; });
+    closeRuntimeDialog();
+    var gen = ++rtState.gen;                // 新弹窗代际：旧弹窗在途回调即刻失效
+    /* 同一弹窗内混合运行时（如 uvx 条目 + npx 条目同装）：先装 pick 的运行时、
+     * 只重连它的条目；其余运行时的条目并入续装名单，装完接着装下一个——
+     * 否则它们被静默丢弃，永远停在「已落盘未连接」。 */
+    var restEntries = entries.filter(function (e) {
+      return e && e.runtime && e.runtimeInstallable !== false && e.runtime !== runtime;
+    });
+    var overlay = document.createElement('div');
+    overlay.className = 'mcp-auth-overlay';
+    overlay.id = 'mcpRuntimeOverlay';
+    overlay.innerHTML =
+      '<div class="mcp-auth-dialog" role="dialog" aria-modal="true">' +
+      '  <div class="mcp-auth-header"><span class="mcp-auth-title">' +
+      esc(m('rt_title', '正在安装运行环境')) + '</span></div>' +
+      '  <div class="mcp-auth-body">' +
+      '    <div class="mcp-auth-help-text">' +
+      esc(tMsg('rt_need', '连接器需要 {msg} 运行环境，正在自动下载安装…', rtName(runtime))) + '</div>' +
+      '    <div class="mcp-auth-help-text">' +
+      esc(m('rt_source', '正在从官方渠道下载并安装到应用目录（不修改系统 PATH，无需管理员权限）。')) + '</div>' +
+      '    <div class="mcp-auth-runtime-progress" id="mcpRuntimeProgress">' +
+      '      <div class="mcp-auth-runtime-bar"><div class="mcp-auth-runtime-bar-fill" id="mcpRuntimeBarFill"></div></div>' +
+      '      <div class="mcp-auth-help-text" id="mcpRuntimePhase">' +
+      esc(tMsg('rt_downloading', '正在下载运行环境… {msg}', '0%')) + '</div>' +
+      '    </div>' +
+      '    <div class="mcp-auth-error" id="mcpRuntimeError" style="display:none"></div>' +
+      '  </div>' +
+      '  <div class="mcp-auth-footer" id="mcpRuntimeFooter" style="display:none">' +
+      '    <button type="button" class="mcp-auth-btn mcp-auth-btn-ghost" data-rt-close>' +
+      esc(m('cancel', '取消')) + '</button>' +
+      '    <button type="button" class="mcp-auth-btn mcp-auth-btn-primary" id="mcpRuntimeRetry">' +
+      esc(m('retry', '重试')) + '</button>' +
+      '  </div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    return new Promise(function (resolve) {
+      var settled = false;
+      function finish(ok) {
+        if (settled) return;
+        settled = true;
+        closeRuntimeDialog();
+        resolve(ok);
+      }
+      rtState.cancelled = false;
+      overlay.querySelectorAll('[data-rt-close]').forEach(function (b) {
+        b.addEventListener('click', function () { rtState.cancelled = true; finish(false); });
+      });
+      /* 失败后才出现的「重试」：重新走一遍自动安装（不是安装前的确认门）。
+       * gen 失效（弹窗已被新安装取代）后不再响应，避免旧弹窗幽灵重连。 */
+      overlay.querySelector('#mcpRuntimeRetry').addEventListener('click', function () {
+        if (gen !== rtState.gen) return;
+        rtState.cancelled = false;
+        overlay.querySelector('#mcpRuntimeFooter').style.display = 'none';
+        overlay.querySelector('#mcpRuntimeError').style.display = 'none';
+        overlay.querySelector('#mcpRuntimeProgress').style.display = '';
+        overlay.querySelector('#mcpRuntimeBarFill').style.width = '0%';
+        startRuntimeInstall(runtime, names, restEntries, carryFailed || [], carryOk || [], gen, overlay, finish);
+      });
+      /* 用户拍板：不要确认点击 —— 弹窗挂载即自动开始下载安装。 */
+      startRuntimeInstall(runtime, names, restEntries, carryFailed || [], carryOk || [], gen, overlay, finish);
+    });
+  }
+
+  async function startRuntimeInstall(runtime, names, restEntries, carryFailed, carryOk, gen, overlay, finish) {
+    if (gen !== rtState.gen) return;
+    var errBox = overlay.querySelector('#mcpRuntimeError');
+    var phaseEl = overlay.querySelector('#mcpRuntimePhase');
+    var fill = overlay.querySelector('#mcpRuntimeBarFill');
+    /* alive：本弹窗仍是当前弹窗且未被取消。所有 await 之后都必须重查——
+     * 用户关闭 / 续装换弹窗发生在 await 期间时，旧回调不得再写 UI 或续装。
+     * 判据用节点身份（=== 当前 overlay）而非仅存在性：换弹窗后旧节点已
+     * remove，但新节点同 id 存在，只查存在性会把旧回调写进新弹窗。 */
+    function alive() {
+      return !rtState.cancelled && gen === rtState.gen
+        && document.getElementById('mcpRuntimeOverlay') === overlay;
+    }
+    function showErr(msg) {
+      if (!alive()) return;
+      errBox.textContent = msg;
+      errBox.style.display = '';
+      overlay.querySelector('#mcpRuntimeProgress').style.display = 'none';
+      overlay.querySelector('#mcpRuntimeFooter').style.display = '';
+    }
+    try {
+      await api(API.runtimeInstall, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runtime: runtime }),
+      });
+    } catch (e) {
+      showErr(tMsg('rt_failed', '运行环境安装失败：{msg}', e.message));
+      return;
+    }
+    if (!alive()) return;
+    function poll() {
+      rtState.pollTimer = setTimeout(async function () {
+        if (!alive()) return;
+        var st;
+        try {
+          st = await api(API.runtimeStatus + '?runtime=' + encodeURIComponent(runtime));
+        } catch (e) {
+          showErr(tMsg('rt_failed', '运行环境安装失败：{msg}', e.message));
+          return;
+        }
+        if (!alive()) return;               // 弹窗已关闭 / 已被新安装取代
+        if (st.phase === 'downloading') {
+          var pct = st.total > 0 ? Math.min(99, Math.round(st.received * 100 / st.total)) : 0;
+          fill.style.width = pct + '%';
+          phaseEl.textContent = tMsg('rt_downloading', '正在下载运行环境… {msg}',
+            st.total > 0 ? pct + '%' : Math.round(st.received / 1024) + ' KB');
+          poll();
+        } else if (st.phase === 'extracting') {
+          fill.style.width = '100%';
+          phaseEl.textContent = m('rt_extracting', '正在解压安装…');
+          poll();
+        } else if (st.phase === 'done') {
+          fill.style.width = '100%';
+          phaseEl.textContent = m('rt_done', '运行环境安装完成，正在连接连接器…');
+          /* 运行环境装好 ≠ 连接器装好：必须重连并核实结果，全部成功
+           * 才报「安装完成」；仍缺别的运行时（含同批混合运行时的其余条目）
+           * 则自动续装（上限 3 轮防死循环）。 */
+          var results = await reconnectServers(names);
+          if (!alive()) return;
+          var again = results.filter(function (r) { return r && r.runtime && r.runtimeInstallable !== false; })
+            .concat(restEntries);
+          /* 硬失败 = 本轮非运行时失败 + 上一轮续装携带的失败（绝不吞掉）。 */
+          var failed = results.filter(function (r) { return r && !r.ok && again.indexOf(r) < 0; })
+            .concat(carryFailed || []);
+          if (again.length && rtState.rounds < 3) {
+            rtState.rounds += 1;
+            /* 续装换弹窗会 ++gen，旧回调自此失效；硬失败带进新弹窗一并如实
+             * 展示（否则 A 失败 + B 续装成功会把 A 的失败静默吞掉）；本轮
+             * 已成功的名单同样携带，最终成功 toast 涵盖全部装好的条目。 */
+            var okSoFar = results.filter(function (r) { return r && r.ok; })
+              .map(function (r) { return r.name; }).concat(carryOk || []);
+            var next = await offerRuntimeInstall(again, failed, okSoFar);
+            finish(next);
+            return;
+          }
+          if (!failed.length && !again.length) {
+            /* 成功名单 = 本轮重连成功 + 前几轮已成功（续装携带）——混合
+             * 运行时批次分轮完成，只报最后一轮会把先装好的条目漏掉。 */
+            var okNames = results.filter(function (r) { return r && r.ok; })
+              .map(function (r) { return r.name; }).concat(carryOk || []);
+            toast(tMsg('installed_names', '已安装：{msg}', okNames.join(', ')), 'success');
+            finish(true);
+          } else {
+            /* again 非空但轮次用尽：这些条目仍缺运行时，同样如实计入失败。 */
+            var allFailed = failed.concat(again);
+            var msg = allFailed.map(function (r) {
+              return (r.name ? r.name + ': ' : '') + (r.error || '');
+            }).join('; ') || tMsg('rt_conn_failed', '运行环境已安装，但连接器仍未连接成功：{msg}', names.join(', '));
+            showErr(tMsg('rt_conn_failed', '运行环境已安装，但连接器仍未连接成功：{msg}', msg));
+          }
+        } else if (st.phase === 'error') {
+          showErr(tMsg('rt_failed', '运行环境安装失败：{msg}', st.error || ''));
+        } else {
+          poll();
+        }
+      }, 600);
+    }
+    poll();
+  }
+
+  /** 代装完成后重连已落盘条目：toggle off→on 走后端 sync_engine 热插拔，
+   *  与手动开关完全同链路（不新增重连端点）。返回逐条结果
+   *  {name, ok, error, runtime, runtimeInstallable}——调用方据此判定
+   *  「整个连接器是否安装完成」，不再失败静默。 */
+  async function reconnectServers(names) {
+    var out = [];
+    for (var i = 0; i < names.length; i++) {
+      var r = { name: names[i], ok: false, error: '' };
+      try {
+        await api('/web/settings/mcp/servers/toggle', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: names[i], enabled: false }),
+        });
+        var resp = await api('/web/settings/mcp/servers/toggle', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: names[i], enabled: true }),
+        });
+        r.ok = !!(resp && resp.connected !== false);
+        if (!r.ok) {
+          r.error = resp.connectError || resp.message || '';
+          /* 重连仍缺运行时（后端 mcp_saved_outcome 透传 missingCommand）：
+           * 查 check 拿结构化 runtime，交给上层自动续装。 */
+          if (resp.missingCommand) {
+            var st = await api(API.runtimeCheck + '?command=' + encodeURIComponent(resp.missingCommand)).catch(function () { return null; });
+            if (st && st.runtime && st.installable) { r.runtime = st.runtime; r.runtimeInstallable = true; }
+          }
+        }
+      } catch (e) { r.error = (e && e.message) || ''; }
+      out.push(r);
+    }
+    if (window._settingsMcp && window._settingsMcp.load) window._settingsMcp.load();
+    refreshInstalled().then(function () { cards(); });
+    return out;
   }
 
   // ─── 对外 ────────────────────────────────────────────────────────────────
@@ -1013,6 +1296,8 @@
     clearSearch: function () { state.search = ''; state.page = 1; },
     showDetail: showDetail,
     install: install,
+    /* 手动添加/编辑表单的缺运行时自动代装（app-settings-mcp.js doSave 失败分支）。 */
+    offerRuntime: offerRuntimeForCommand,
     refresh: function () { return load(); },
     /* 无限滚动对外面：技能页滚动分派与「没有更多」判定用。 */
     hasMore: function () { return hasMorePages(); },

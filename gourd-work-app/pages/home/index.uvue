@@ -12,7 +12,7 @@
 					<home-header :device="device" :device-online="deviceOnline" :workspace="workspace"
 						:permission="permission" :hide-menu="true" @open-run="openSheet('run')"></home-header>
 
-					<home-hero @fill="onFill"></home-hero>
+					<home-hero></home-hero>
 
 					<view v-if="expanded" class="home__catcher" @click="onCollapse"></view>
 
@@ -43,7 +43,7 @@
 					<home-header :device="device" :device-online="deviceOnline" :workspace="workspace"
 						:permission="permission" @menu="onMenu" @open-run="openSheet('run')"></home-header>
 
-					<home-hero @fill="onFill"></home-hero>
+					<home-hero></home-hero>
 
 					<!-- 展开态点空白处收起；放在输入区之前，输入区靠渲染顺序盖在它上面 -->
 					<view v-if="expanded" class="home__catcher" @click="onCollapse"></view>
@@ -197,10 +197,6 @@
 		expanded.value = false
 	}
 
-	function onFill(text: string): void {
-		draft.value = text
-		expanded.value = true
-	}
 
 	function onExpand(): void {
 		expanded.value = true

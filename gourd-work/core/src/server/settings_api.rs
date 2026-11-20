@@ -865,6 +865,18 @@ pub(crate) fn build_entry_for_test(
 /// configuration *is* saved in that case, so the response stays 200 — but it now
 /// also carries `connected: false` plus the reason.
 async fn sync_engine(state: &Arc<AppState>, name: &str, entry: Option<&serde_json::Value>) -> Option<String> {
+    sync_engine_outcome(state, name, entry).await.map(|(reason, _)| reason)
+}
+
+/// Like [`sync_engine`], but also returns the missing command when the failure
+/// was a spawn `NotFound` (`mcp::MissingProgram`). The market install path
+/// forwards it as a structured `missingCommand` so the UI can offer the
+/// runtime-install dialog instead of a dead-end warning toast.
+async fn sync_engine_outcome(
+    state: &Arc<AppState>,
+    name: &str,
+    entry: Option<&serde_json::Value>,
+) -> Option<(String, Option<String>)> {
     match entry {
         Some(e) => {
             let cfg = entry_to_config(e);
@@ -873,7 +885,10 @@ async fn sync_engine(state: &Arc<AppState>, name: &str, entry: Option<&serde_jso
                 Ok(_) => None,
                 Err(err) => {
                     tracing::warn!(server = %name, error = %err, "MCP hot-plug failed");
-                    Some(humanize_connect_error(&err.to_string(), &kind))
+                    let missing = err
+                        .downcast_ref::<crate::mcp::MissingProgram>()
+                        .map(|m| m.command.clone());
+                    Some((humanize_connect_error(&err.to_string(), &kind), missing))
                 }
             }
         }
@@ -895,19 +910,32 @@ async fn sync_engine(state: &Arc<AppState>, name: &str, entry: Option<&serde_jso
 /// disk. `connected` distinguishes "saved and live" from "saved but unreachable",
 /// which the UI renders as a different toast.
 fn mcp_saved(connect_error: Option<String>) -> serde_json::Value {
-    match connect_error {
+    mcp_saved_outcome(connect_error.map(|r| (r, None)))
+}
+
+/// `mcp_saved` with the structured missing-command channel: when the connect
+/// failure was spawn NotFound, `missingCommand` lets the market install path
+/// (and any future caller) offer the runtime-install dialog.
+fn mcp_saved_outcome(outcome: Option<(String, Option<String>)>) -> serde_json::Value {
+    match outcome {
         None => serde_json::json!({"code": 200, "saved": true, "connected": true}),
-        Some(reason) => serde_json::json!({
-            "code": 200,
-            "saved": true,
-            "connected": false,
-            "connectError": reason,
-            // Also mirrored into message/description: the UI's failure branch
-            // reads `resp.message`, and any future caller that only checks the
-            // code will still find the reason in the payload.
-            "message": reason,
-            "description": reason,
-        }),
+        Some((reason, missing)) => {
+            let mut out = serde_json::json!({
+                "code": 200,
+                "saved": true,
+                "connected": false,
+                "connectError": reason,
+                // Also mirrored into message/description: the UI's failure branch
+                // reads `resp.message`, and any future caller that only checks the
+                // code will still find the reason in the payload.
+                "message": reason,
+                "description": reason,
+            });
+            if let Some(cmd) = missing {
+                out["missingCommand"] = serde_json::json!(cmd);
+            }
+            out
+        }
     }
 }
 
@@ -941,12 +969,12 @@ pub async fn mcp_server_add(
     if !patch_settings("mcpServers", servers) {
         return Json(settings_write_failed());
     }
-    let connect_error = if enabled {
-        sync_engine(&state, &name, Some(&entry)).await
+    let outcome = if enabled {
+        sync_engine_outcome(&state, &name, Some(&entry)).await
     } else {
         None
     };
-    Json(mcp_saved(connect_error))
+    Json(mcp_saved_outcome(outcome))
 }
 
 /// POST /web/settings/mcp/servers/update
@@ -1052,13 +1080,15 @@ pub async fn mcp_server_toggle(
         return Json(settings_write_failed());
     }
 
-    let connect_error = if enabled {
-        sync_engine(&state, &name, Some(&snapshot)).await
+    let outcome = if enabled {
+        sync_engine_outcome(&state, &name, Some(&snapshot)).await
     } else {
         sync_engine(&state, &name, None).await;
         None
     };
-    Json(mcp_saved(connect_error))
+    // mcp_saved_outcome（而非 mcp_saved）：透传 missingCommand，代装运行时后
+    // 的自动重连要据此判定「是否真的连上」——仍缺运行时则继续装下一个。
+    Json(mcp_saved_outcome(outcome))
 }
 
 /// POST /web/settings/mcp/servers/check — test a config **without saving it**.

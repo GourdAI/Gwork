@@ -1,4 +1,4 @@
-/* mcp-auth.css — 连接器认证弹窗（静态 token / OAuth 等待授权）
+﻿/* mcp-auth.css — 连接器认证弹窗（静态 token / OAuth 等待授权）
  *
  * 视觉复刻 settings.css 的 .import-overlay / .import-dialog 骨架，但所有类名
  * 统一 mcp-auth- 前缀，不改原文件任何规则。颜色一律走 theme.css 真实令牌
@@ -217,4 +217,28 @@
     border: 1px solid var(--border-color);
     border-radius: 10px;
     background: var(--bg-card);
+}
+
+/* ── 运行时（uv/Node）代装引导：下载进度条 ─────────────────────────────
+ * 弹窗骨架复用上方 .mcp-auth-*（app-mcp-market.js offerRuntimeInstall），
+ * 这里只补进度条两个节点。颜色全走主题令牌，禁硬编码。 */
+.mcp-auth-runtime-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 4px;
+}
+.mcp-auth-runtime-bar {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+}
+.mcp-auth-runtime-bar-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 4px;
+    background: var(--accent);
+    transition: width 0.3s ease;
 }

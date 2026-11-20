@@ -536,6 +536,11 @@ impl ReActAgent {
         // given, otherwise the user's global `disallowedTools`. Resolved once here
         // so the definitions sent to the model and the `execute` check cannot
         // disagree about what this run may call.
+        //
+        // The interactive chat path always supplies a gate (built from
+        // permission + the conversation's connector selection), so the fallback
+        // below serves CLI/ACP/loop callers only — they keep every enabled
+        // connector, which is their pre-picker behaviour.
         let gate: Arc<crate::tools::ToolGate> = config.gate.clone().unwrap_or_else(|| {
             Arc::new(crate::tools::ToolGate::from_permission(&config.settings.permission))
         });

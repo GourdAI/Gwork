@@ -10,7 +10,7 @@
 			常驻节点用 v-show 显隐——按住手势期间做结构增删会打断原生触摸流，曾致上滑取消失灵、浮层滞留 -->
 		<view v-show="holding" class="app-composer__rec">
 			<app-voice-wave :active="holding" :error="canceling"></app-voice-wave>
-			<text class="app-composer__rec-hint" :class="canceling ? 'app-composer__rec-hint--error' : ''">{{ recHint }}</text>
+			<text class="app-composer__rec-hint" :class="recHintClass">{{ recDisplay }}</text>
 		</view>
 
 		<!-- 收起态整条输入栏均可长按直接进录音：长按手势发生在中央节点上，录音态不销毁节点，move/end 连续派发。
@@ -21,7 +21,7 @@
 				子节点必须保持单 text 常驻（形态切换只改绑定，不做 v-if 分支切换）——
 				长按下录瞬间若子树重建，原生触摸流会被掐断，滑动状态与松手收尾全部失灵。
 				.stop 阻断冒泡，防止 swiper 等原生容器在滑动手势中途抢走事件流 -->
-			<view v-if="!expanded" class="app-composer__center" @longpress="onCenterLongPress"
+			<view v-if="!expanded" class="app-composer__center" :class="speechSupported ? '' : 'app-composer__center--nomic'" @longpress="onCenterLongPress"
 				@touchstart="onTouchStart" @touchmove.stop="onTouchMove" @touchend.stop="onTouchEnd" @touchcancel.stop="onTouchCancel">
 				<text v-show="!holding"
 					:class="voiceMode ? 'app-composer__hold-text' : (hasText ? 'app-composer__fake-text' : 'app-composer__fake-placeholder')">{{ voiceMode ? holdText : (hasText ? modelValue : placeholder) }}</text>
@@ -36,7 +36,7 @@
 			<view v-if="!expanded && voiceMode" v-show="!holding" class="app-composer__circ app-composer__circ--mic" @click.stop="exitVoiceMode">
 				<text class="iconfont app-composer__mic-glyph">&#xe643;</text>
 			</view>
-			<view v-if="!expanded && !voiceMode" class="app-composer__circ app-composer__circ--mic" @click.stop="onVoiceClick">
+			<view v-if="!expanded && !voiceMode && speechSupported" class="app-composer__circ app-composer__circ--mic" @click.stop="onVoiceClick">
 				<rice-icon name="voice" size="20px" color="var(--color-text-secondary)" />
 			</view>
 			<!-- 回复中（收起态）：停止按钮顶替加号位，语音/文字形态一致；按住录音时隐藏 -->
@@ -49,7 +49,7 @@
 			</view>
 
 			<view v-if="expanded" class="app-composer__tools">
-				<view class="app-composer__circ" @click.stop="onVoiceClick">
+				<view v-if="speechSupported" class="app-composer__circ" @click.stop="onVoiceClick">
 					<rice-icon name="voice" size="20px" color="var(--color-text-secondary)" />
 				</view>
 				<view class="app-composer__model" @click.stop="emit('open-model')">
@@ -85,12 +85,13 @@
 </template>
 
 <script setup lang="ts">
-	import { computed, nextTick, ref, watch } from 'vue'
+	import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 	import type { ComputedRef, Ref, WritableComputedRef } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
-	import { isVoiceRecordSupported, startVoiceRecord, stopVoiceRecord, voiceRecordErrorText } from '@/utils/voice-recorder.ts'
-	import type { VoiceRecordResult } from '@/utils/voice-recorder.ts'
-	import { recognizeSpeech } from '@/utils/speech-recognizer.ts'
+	import { isSpeechSupported, setSpeechLanguage, startSpeechSession, stopSpeechSession, cancelSpeechSession } from '@/utils/speech-recognizer.uts'
+	import type { SpeechStartResult } from '@/utils/speech-recognizer.uts'
+	import { useLocale } from '@/hooks/useLocale.ts'
+	import type { Locale } from '@/hooks/useLocale.ts'
 	import AppVoiceWave from '@/components/app-voice-wave/app-voice-wave.uvue'
 
 	defineOptions({
@@ -131,11 +132,11 @@
 
 	/** 上滑取消的位移阈值（px） */
 	const SWIPE_THRESHOLD = 60
-	/** 单段录音上限：RecorderManager 到时自动 onStop */
+	/** 单段识别上限：系统引擎到时自动收尾并回吐已有结果 */
 	const MAX_DURATION_MS = 60000
 	/** 短于该时长视为误触，丢弃 */
 	const MIN_DURATION_MS = 600
-	/** 按住 watchdog：touchend/touchcancel 丢失时强制结束录音会话，避免浮层滞留 */
+	/** 按住 watchdog：touchend/touchcancel 丢失时强制结束识别会话，避免浮层滞留 */
 	const HOLD_WATCHDOG_MS = MAX_DURATION_MS + 5000
 
 	const text: WritableComputedRef<string> = computed<string>({
@@ -146,6 +147,36 @@
 	const hasText: ComputedRef<boolean> = computed<boolean>((): boolean => props.modelValue.trim().length > 0)
 	const hasTag: ComputedRef<boolean> = computed<boolean>((): boolean => props.tag.length > 0)
 
+	// 识别语言跟随应用语言：应用 locale → 系统引擎认的 BCP-47 标签，注入 .uts 接入层
+	// （uni.getLocale 在 uni-app x 蒸汽模式不存在，.uts 也不 import 应用层 .ts，语言由本宿主决定）
+	const { currentLocale } = useLocale()
+	const SPEECH_LOCALE_MAP = new Map<string, string>([
+		['zh-Hans', 'zh-CN'], ['zh-Hant', 'zh-TW'], ['en', 'en-US'], ['ja', 'ja-JP'],
+		['ru', 'ru-RU'], ['de', 'de-DE'], ['es', 'es-ES'], ['fr', 'fr-FR'],
+		['pt', 'pt-PT'], ['el', 'el-GR'], ['ro', 'ro-RO'], ['vi', 'vi-VN']
+	])
+	function syncSpeechLanguage(): void {
+		const mapped = SPEECH_LOCALE_MAP.get(currentLocale.value)
+		setSpeechLanguage(mapped != null ? mapped : 'zh-CN')
+	}
+	syncSpeechLanguage()
+
+	// 语音能力门控：设备无引擎/平台不支持/语言不支持时整体隐藏语音入口（麦克风按钮、长按直录），
+	// 而不是让用户点击后必报错。探测结果按语言缓存（见 speech-recognizer）；
+	// 运行时 unsupported（鸿蒙非大陆机型等）经失败分支即时翻转隐藏。
+	// ref 而非 computed：探测含原生调用，只在挂载/语言切换/展开态变化/会话失败时刷新，避免每次渲染都打
+	const speechSupported: Ref<boolean> = ref<boolean>(isSpeechSupported())
+
+	// 设置页切语言即时生效：重注入语言并重探测（鸿蒙「仅中文」、iOS 各语言引擎可用性不同）
+	watch(currentLocale, (_next: Locale): void => {
+		syncSpeechLanguage()
+		speechSupported.value = isSpeechSupported()
+		if (!speechSupported.value) {
+			voiceMode.value = false
+			voiceFromLongPress.value = false
+		}
+	})
+
 	// 语音模式：由麦克风按钮/输入框长按进出；进入时若在展开态，先让父级收起
 	const voiceMode: Ref<boolean> = ref<boolean>(false)
 	// 长按直录标记：本次录音会话结束后回到文字形态（麦克风进入的语音形态不受影响）
@@ -155,6 +186,10 @@
 	const canceling: Ref<boolean> = ref<boolean>(false)
 	const touchStartY: Ref<number> = ref<number>(0)
 	let holdWatchdog: number = 0
+	// 实时识别的中间结果（边说边出字）；会话代号防串：上一会话迟到的收尾不作用于新会话
+	const partialText: Ref<string> = ref<string>('')
+	let speechGeneration = 0
+	let holdStartedAt = 0
 
 	const boxClass: ComputedRef<string> = computed<string>((): string => {
 		if (voiceMode.value) {
@@ -181,6 +216,18 @@
 		return i18n.global.t(canceling.value ? 'home.voice.releaseCancel' : 'home.voice.releaseSend')
 	})
 
+	// 边说边出字：有中间结果时录音面板显示识别文本（单行截断），否则显示操作提示
+	const recDisplay: ComputedRef<string> = computed<string>((): string => {
+		if (!canceling.value && partialText.value.length > 0) return partialText.value
+		return recHint.value
+	})
+
+	const recHintClass: ComputedRef<string> = computed<string>((): string => {
+		if (canceling.value) return 'app-composer__rec-hint--error'
+		if (partialText.value.length > 0) return 'app-composer__rec-hint--partial'
+		return ''
+	})
+
 	const tagStyle: UTSJSONObject = {
 		height: '26px',
 		padding: '0 9px',
@@ -189,8 +236,10 @@
 		'background-color': 'var(--color-brand-soft)'
 	}
 
-	// 展开态渲染出真 input 后聚焦；输入框是同一节点只改布局，避免重建导致失焦、键盘收起
+	// 展开态渲染出真 input 后聚焦；输入框是同一节点只改布局，避免重建导致失焦、键盘收起。
+	// 同时刷新语音能力缓存（语言可能已在设置页切换，探测按语言缓存见 speech-recognizer）
 	watch((): boolean => props.expanded, (expanded: boolean): void => {
+		speechSupported.value = isSpeechSupported()
 		if (!expanded) return
 		nextTick((): void => {
 			const input = uni.getElementById(props.inputId)
@@ -226,10 +275,7 @@
 	}
 
 	function onVoiceClick(): void {
-		if (!isVoiceRecordSupported()) {
-			uni.showToast({ title: t('home.voice.unsupported'), icon: 'none' })
-			return
-		}
+		if (!speechSupported.value) return
 		voiceMode.value = true
 		if (props.expanded) emit('collapse')
 	}
@@ -241,10 +287,8 @@
 	/** 长按输入框：直接切语音形态并开始录音（长按手势已在本节点，move/end 连续派发） */
 	function onCenterLongPress(): void {
 		if (props.expanded || voiceMode.value || holding.value) return
-		if (!isVoiceRecordSupported()) {
-			uni.showToast({ title: t('home.voice.unsupported'), icon: 'none' })
-			return
-		}
+		// 不支持时长按静默忽略（入口已隐藏，这里是兜底守卫），不弹提示打扰
+		if (!speechSupported.value) return
 		voiceMode.value = true
 		// 长按直录是一次性会话：结束后回文字形态；麦克风进入的语音形态则保持
 		voiceFromLongPress.value = true
@@ -254,10 +298,7 @@
 	function onBoxLongPress(): void {
 		// 展开态是可编辑真 input，长按留给系统文本操作；语音模式下长按无意义
 		if (props.expanded || voiceMode.value || holding.value) return
-		if (!isVoiceRecordSupported()) {
-			uni.showToast({ title: t('home.voice.unsupported'), icon: 'none' })
-			return
-		}
+		if (!speechSupported.value) return
 		voiceMode.value = true
 		voiceFromLongPress.value = true
 		beginHold()
@@ -296,15 +337,85 @@
 	function beginHold(): void {
 		holding.value = true
 		canceling.value = false
+		partialText.value = ''
+		holdStartedAt = Date.now()
 		startHoldWatchdog()
-		// 授权弹窗由框架在 start 时拉起；拒绝授权走 onError，stopVoiceRecord 以 null 落地
-		const ok: boolean = startVoiceRecord(MAX_DURATION_MS)
-		if (!ok) {
-			stopHoldWatchdog()
+		const gen = ++speechGeneration
+		// 起录前同步一次语言（设置页可能已切换），识别语言始终跟随当前应用语言
+		syncSpeechLanguage()
+		// 按住即实时识别：权限弹窗在插件内拉起，拒绝/失败经同一 Promise 终态落地。
+		// 收尾统一走 finishRecord（取消判定/过短/发送都在那里），此处只暂存终态结果并唤醒等待方
+		sessionPromise = startSpeechSession(MAX_DURATION_MS, (text: string): void => {
+			if (gen != speechGeneration || !holding.value) return
+			partialText.value = text
+		})
+		sessionPromise.then((res: SpeechStartResult): void => {
+			if (gen != speechGeneration) return
+			pendingResult = res
+			const waiter = resultWaiter
+			resultWaiter = null
+			if (waiter != null) {
+				waiter(res)
+				return
+			}
+			if (!holding.value) return
+			// 无人在等且仍按住：要么是按住期间失败（权限拒绝/无引擎），要么是单段到时自动收尾。
+			// 失败立即复位并提示；到时收尾走正常发送链路（取消态下静默丢弃）
+			if (!res.ok) {
+				holding.value = false
+				canceling.value = false
+				stopHoldWatchdog()
+				partialText.value = ''
+				sessionPromise = null
+				pendingResult = null
+				if (res.errorKey != null) uni.showToast({ title: t(res.errorKey!), icon: 'none' })
+				// 设备级 unsupported 已落缓存：即时隐藏语音入口并退出语音形态
+				speechSupported.value = isSpeechSupported()
+				if (!speechSupported.value) {
+					voiceMode.value = false
+					voiceFromLongPress.value = false
+				}
+				return
+			}
+			const wasCanceling = canceling.value
 			holding.value = false
-			uni.showToast({ title: t('home.voice.unsupported'), icon: 'none' })
-		}
+			canceling.value = false
+			stopHoldWatchdog()
+			finishRecord(wasCanceling)
+		})
 	}
+
+	// 会话终态的暂存与唤醒：finishRecord 松手后 await；结果先到（权限拒绝/引擎秒失败）则直接消费
+	let sessionPromise: Promise<SpeechStartResult> | null = null
+	let pendingResult: SpeechStartResult | null = null
+	let resultWaiter: ((res: SpeechStartResult) => void) | null = null
+
+	function awaitSpeechResult(): Promise<SpeechStartResult> {
+		const done = pendingResult
+		if (done != null) {
+			pendingResult = null
+			return Promise.resolve<SpeechStartResult>(done)
+		}
+		return new Promise<SpeechStartResult>((resolve: (res: SpeechStartResult) => void) => {
+			resultWaiter = resolve
+		})
+	}
+
+	/** 放弃当前会话（取消/失败后清场）：代号自增使迟到回调失效，引擎静默释放 */
+	function abandonSpeech(): void {
+		speechGeneration++
+		pendingResult = null
+		resultWaiter = null
+		sessionPromise = null
+		partialText.value = ''
+		cancelSpeechSession()
+	}
+
+	// 页面切换/组件销毁不能吞掉手势收尾：按住中卸载按取消清场，麦克风绝不滞留占用
+	onUnmounted((): void => {
+		stopHoldWatchdog()
+		abandonSpeech()
+	})
 
 	function onTouchMove(e: TouchEvent): void {
 		if (!holding.value || e.touches.length == 0) return
@@ -341,29 +452,44 @@
 			voiceFromLongPress.value = false
 			voiceMode.value = false
 		}
-		const res: VoiceRecordResult | null = await stopVoiceRecord()
-		// 取消：直接丢弃录音，不提示
-		if (canceled) return
-		if (res == null) {
-			uni.showToast({ title: voiceRecordErrorText(), icon: 'none' })
+		// 取消：静默放弃识别会话，不提示
+		if (canceled) {
+			holdStartedAt = 0
+			abandonSpeech()
 			return
 		}
-		if (res.duration < MIN_DURATION_MS) {
-			uni.showToast({ title: t('home.voice.tooShort'), icon: 'none' })
+		const duration = holdStartedAt > 0 ? Date.now() - holdStartedAt : 0
+		holdStartedAt = 0
+		if (duration < MIN_DURATION_MS) {
+			// 首次按住被系统授权弹窗打断（touchcancel 秒收尾）时用户还没说话，不按「太短」打扰
+			const showToast = sessionPromise != null && duration >= 200
+			abandonSpeech()
+			if (showToast) uni.showToast({ title: t('home.voice.tooShort'), icon: 'none' })
 			return
 		}
-		try {
-			const text: string = await recognizeSpeech(res.tempFilePath, res.duration)
-			const content: string = text.trim()
-			if (content.length === 0) {
-				uni.showToast({ title: t('home.voice.recognizeEmpty'), icon: 'none' })
-				return
+		if (sessionPromise == null) return
+		// 通知引擎停止采集；最终结果从会话 Promise 落地（插件 3s + 接入层 5s 双兜底，绝不悬挂）
+		stopSpeechSession()
+		const res: SpeechStartResult = await awaitSpeechResult()
+		sessionPromise = null
+		partialText.value = ''
+		if (!res.ok) {
+			if (res.errorKey != null) uni.showToast({ title: t(res.errorKey!), icon: 'none' })
+			// 设备级 unsupported 已落缓存：即时隐藏语音入口并退出语音形态
+			speechSupported.value = isSpeechSupported()
+			if (!speechSupported.value) {
+				voiceMode.value = false
+				voiceFromLongPress.value = false
 			}
-			// 识别文本走既有 send 链路（trim/空判由父级统一兜底）；输入形态保持语音，不自动切回文字
-			emit('send', content)
-		} catch (e: Error) {
-			uni.showToast({ title: t('home.voice.recognizeFail'), icon: 'none' })
+			return
 		}
+		const content: string = res.text != null ? res.text!.trim() : ''
+		if (content.length === 0) {
+			uni.showToast({ title: t('home.voice.recognizeEmpty'), icon: 'none' })
+			return
+		}
+		// 识别文本走既有 send 链路（trim/空判由父级统一兜底）；输入形态保持语音，不自动切回文字
+		emit('send', content)
 	}
 </script>
 
@@ -393,9 +519,17 @@
 			margin-top: 10px;
 			font-size: 13px;
 			color: var(--color-text-secondary);
+			max-width: 300px;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
 
 			&--error {
 				color: var(--color-error);
+			}
+
+			&--partial {
+				color: var(--color-text);
 			}
 		}
 
@@ -441,6 +575,11 @@
 			flex-direction: column;
 			justify-content: center;
 			overflow: hidden;
+
+			// 语音入口隐藏时左侧没有麦克风按钮，收窄左边距避免占位文字悬空
+			&--nomic {
+				margin-left: 4px;
+			}
 		}
 
 		&__fake-text {

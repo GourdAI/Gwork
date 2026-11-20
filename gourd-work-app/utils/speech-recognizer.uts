@@ -1,0 +1,190 @@
+/**
+ * 语音识别接入层：gwork-speech 插件（系统原生 ASR，零三方 SDK）的业务封装。
+ * 交互为「按住即实时识别」：startSpeechSession 按下调用（边说边出字），
+ * stopSpeechSession 松手收尾，cancelSpeechSession 上滑/系统抢占时静默放弃。
+ * 会话终态从 startSpeechSession 返回的 Promise 落地（至多一次）——按住期间失败
+ * （权限拒绝/无引擎）与松手收尾共用同一通道；双层超时兜底（插件 3s + 本层 5s）
+ * 保证调用方绝不悬挂。Web / 小程序端不支持，由 isSpeechSupported() 拦截。
+ *
+ * 本文件必须是 .uts（不能是 .ts）：蒸汽模式下 import UTS 插件的模块要参与 UTS 编译，
+ * 插件才会被注册进原生编译管线；.ts 宿主不触发注册，插件会按普通 JS 模块解析，
+ * 报 [plugin:uts] Could not resolve "android.content.Context"。
+ * 与 uni-ai-x（.uts/.uvue 宿主 import uni-ai-md 插件）同构。
+ *
+ * 插件用「插件根目录」import（@/uni_modules/gwork-speech），由编译器按平台解析到
+ * utssdk 平台目录下的 index.uts 并注册原生编译；不能带 utssdk 平台路径（见 vite 插件
+ * resolveUTSAppModule：仅父目录为 uni_modules 或 utssdk 的模块 id 才走 UTS 代理）。
+ */
+
+// #ifdef APP
+import { isSpeechAvailable, startListening, stopListening, cancelListening } from '@/uni_modules/gwork-speech'
+// #endif
+// #ifdef APP-ANDROID || APP-HARMONY
+import type { SpeechError } from '@/uni_modules/gwork-speech/utssdk/interface.uts'
+// #endif
+// #ifdef APP-IOS
+import type { SpeechError } from '@/uni_modules/gwork-speech/utssdk/app-ios/index.uts'
+// #endif
+export type SpeechStartResult = {
+	/** 会话是否成功建立（false 时 text 恒 null，errorKey 给出原因文案键） */
+	ok: boolean
+	text: string | null
+	errorKey: string | null
+}
+
+// 语言真源：业务宿主（app-composer.uvue，Vue 管线）按应用 locale 映射成 BCP-47 标签后注入。
+// 本 .uts 不 import 应用层 .ts（项目内 .uts 依赖链只走 .uts，避免 Kotlin 编译管线卷入 Vue 模块）；
+// uni.getLocale/setLocale 在 uni-app x 蒸汽模式不存在，严禁调用。
+let appLanguage = 'zh-CN'
+
+/** 宿主在 setup / 语言切换 / 起录前调用；语言变化会触发能力重新探测（鸿蒙仅 zh、iOS 各语言引擎不同） */
+export function setSpeechLanguage(language: string): void {
+	appLanguage = language
+}
+
+// 会话单例：composer 在首页与聊天态各挂一份，底层引擎全局只有一个
+let active = false
+let settled = false
+let settle: ((res: SpeechStartResult) => void) | null = null
+let stopTimer = 0
+let lastPartial = ''
+
+/**
+ * 能力探测缓存：设备不支持/无厂商引擎时语音入口整体隐藏（而非点击必报错）。
+ * 按语言缓存——切换应用语言后重新探测（鸿蒙仅 zh、iOS 各语言引擎可用性不同）。
+ * 运行时 unsupported 终态（鸿蒙非大陆机型 createEngine 失败等）也落缓存，入口即时隐藏。
+ */
+let probedLocale = ''
+let probedAvailable = false
+let runtimeUnsupported = false
+
+/** 统一错误码 → locale 文案键（未列出的码兜底 recognizeFail） */
+const ERROR_TEXT_KEY = new Map<string, string>([
+	['unsupported', 'home.voice.engineUnavailable'],
+	['permission', 'home.voice.recordError'],
+	['network', 'home.voice.networkError'],
+	['no-match', 'home.voice.recognizeEmpty'],
+	['busy', 'home.voice.recognizeFail'],
+	['timeout', 'home.voice.recognizeFail'],
+	['unknown', 'home.voice.recognizeFail']
+])
+
+/**
+ * 当前端/设备/语言是否支持系统语音识别；false 时调用方应隐藏语音入口。
+ * Web / 小程序恒 false；APP 端验设备引擎可用性并按语言缓存（探测含原生调用，避免每次渲染都打）。
+ */
+export function isSpeechSupported(): boolean {
+	// #ifdef APP
+	const language = speechLanguage()
+	if (language != probedLocale) {
+		// 语言切换重新探测：鸿蒙「仅中文」限制随语言变化，切回中文应重新给机会；
+		// 真无引擎的设备会在下次会话再次落 unsupported
+		probedLocale = language
+		runtimeUnsupported = false
+		probedAvailable = isSpeechAvailable(language)
+	}
+	if (runtimeUnsupported) return false
+	return probedAvailable
+	// #endif
+	// #ifndef APP
+	return false
+	// #endif
+}
+
+/**
+ * 开始一次实时识别会话，resolve 于会话终态（松手收尾 / 按住期间失败）。
+ * 立即返回的 ok=false 由调用方同步判断（不支持 / 上一会话未结束）；
+ * 权限弹窗在插件内拉起，拒绝走终态 errorKey='home.voice.recordError'。
+ */
+export function startSpeechSession(maxDurationMs: number, onPartial: (text: string) => void): Promise<SpeechStartResult> {
+	// #ifdef APP
+	if (active) return Promise.resolve<SpeechStartResult>({ ok: false, text: null, errorKey: null })
+	active = true
+	settled = false
+	lastPartial = ''
+	return new Promise<SpeechStartResult>((resolve: (res: SpeechStartResult) => void) => {
+		settle = resolve
+		startListening({
+			language: speechLanguage(),
+			maxDurationMs: maxDurationMs,
+			onPartial: (text: string): void => {
+				if (!active || settled) return
+				lastPartial = text
+				onPartial(text)
+			},
+			onResult: (text: string): void => {
+				finishSession({ ok: true, text: text, errorKey: null })
+			},
+			onError: (error: SpeechError): void => {
+				console.error('gwork-speech', error.code, error.detail)
+				// 设备级不支持（无引擎/非大陆机型等）：落缓存，语音入口从此隐藏，不再反复报错
+				if (error.code == 'unsupported') {
+					runtimeUnsupported = true
+					probedAvailable = false
+				}
+				const key = ERROR_TEXT_KEY.get(error.code)
+				finishSession({ ok: false, text: null, errorKey: key != null ? key : 'home.voice.recognizeFail' })
+			}
+		})
+	})
+	// #endif
+	// #ifndef APP
+	return Promise.resolve<SpeechStartResult>({ ok: false, text: null, errorKey: 'home.voice.unsupported' })
+	// #endif
+}
+
+/**
+ * 松手收尾：通知引擎停止采集并等最终结果；实际结果从 startSpeechSession 的 Promise 落地。
+ * 会话已终态（按住期间失败）时本调用无副作用。
+ */
+export function stopSpeechSession(): void {
+	// #ifdef APP
+	if (!active || settled) return
+	stopTimer = setTimeout((): void => {
+		stopTimer = 0
+		// 插件层 3s 兜底也失效的极端情况：以已有中间结果落地，绝不悬挂
+		if (lastPartial.length > 0) {
+			finishSession({ ok: true, text: lastPartial, errorKey: null })
+		} else {
+			finishSession({ ok: false, text: null, errorKey: 'home.voice.recognizeFail' })
+		}
+	}, 5000)
+	stopListening()
+	// #endif
+}
+
+/** 静默放弃（上滑取消 / touchcancel / watchdog）：不派发终态，不提示 */
+export function cancelSpeechSession(): void {
+	// #ifdef APP
+	// 无条件转发 cancel：权限弹窗期间插件会话尚未 active，也要让迟到的授权链失效
+	if (active) {
+		active = false
+		settled = true
+		clearStopTimer()
+		settle = null
+	}
+	cancelListening()
+	// #endif
+}
+
+function clearStopTimer(): void {
+	if (stopTimer != 0) {
+		clearTimeout(stopTimer)
+		stopTimer = 0
+	}
+}
+
+function finishSession(res: SpeechStartResult): void {
+	if (!active || settled) return
+	settled = true
+	active = false
+	clearStopTimer()
+	const done = settle
+	settle = null
+	if (done != null) done(res)
+}
+
+/** 识别语言 = 宿主注入的 BCP-47 标签（默认 zh-CN）；鸿蒙端仅支持中文（插件内对非 zh 直接 unsupported） */
+function speechLanguage(): string {
+	return appLanguage
+}

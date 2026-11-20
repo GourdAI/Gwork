@@ -32,6 +32,7 @@ pub mod auth;
 pub mod market;
 pub mod market_http;
 pub mod oauth;
+pub mod runtime;
 pub mod smithery;
 pub mod tencent;
 
@@ -714,6 +715,14 @@ struct HttpConnection {
     auth_kind: auth::AuthKind,
     /// The configured server URL, i.e. the vault key. Empty for stdio.
     server_url: String,
+    /// The original config, retained so an expired HTTP session can be rebuilt
+    /// in place (fresh `initialize`) without going through the manager. This is
+    /// the MCP-spec recovery path: servers drop idle sessions and answer later
+    /// requests with 404 (spec) or 400 "Bad Request: Mcp-Session-Id header is
+    /// required" (TypeScript-SDK servers, typescript-sdk#389). The official
+    /// clients re-initialize on that answer; replaying the dead session id
+    /// forever is the "装上了也用不了/全是握手报错" failure this closes.
+    config: McpServerConfig,
 }
 
 /// A live connection, whichever transport produced it.
@@ -795,6 +804,25 @@ pub fn reconnect_backoff(attempts: u32) -> std::time::Duration {
     std::time::Duration::from_millis(ms.min(RECONNECT_BACKOFF_CAP_MS))
 }
 
+/// The stdio program could not be found on this machine (spawn `NotFound`).
+///
+/// Typed at the spawn site so the command name survives into every consumer
+/// (settings toast, health `last_error`, market install `connectErrors`).
+/// The raw OS text is just "program not found" — it names neither the command
+/// nor a way out, which is exactly the unactionable toast users reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingProgram {
+    pub command: String,
+}
+
+impl std::fmt::Display for MissingProgram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", runtime::missing_program_message(&self.command))
+    }
+}
+
+impl std::error::Error for MissingProgram {}
+
 /// Turn a raw connect/handshake error into a message a user can act on.
 ///
 /// Lives here rather than in `settings_api` because connection health is owned by
@@ -802,6 +830,11 @@ pub fn reconnect_backoff(attempts: u32) -> std::time::Duration {
 /// renders `last_error`) and any future CLI/log consumer. Duplicating it would
 /// let the two drift into describing the same failure differently.
 pub fn humanize_connect_error(raw: &str, kind: &str) -> String {
+    // Typed path first: the message is already fully actionable (names the
+    // command, the runtime that provides it, and how to install it).
+    if raw.starts_with("未找到命令 ") || raw.starts_with("命令无法执行（未找到可执行文件）: ") {
+        return raw.to_string();
+    }
     let lower = raw.to_lowercase();
     if lower.contains("not implemented") {
         return format!("不支持检测的类型: {}", kind);
@@ -812,7 +845,7 @@ pub fn humanize_connect_error(raw: &str, kind: &str) -> String {
     if lower.contains("connection refused") || lower.contains("actively refused") {
         return "连接被拒绝，请检查地址和端口是否正确".into();
     }
-    if lower.contains("os error 2") || lower.contains("no such file") {
+    if lower.contains("os error 2") || lower.contains("no such file") || lower.contains("program not found") {
         return format!("命令无法执行（未找到可执行文件）: {}", raw);
     }
     if lower.contains("closed stdout") {
@@ -846,6 +879,53 @@ impl std::error::Error for TransportDead {}
 /// True when an error means "the transport is gone", so the caller may rebuild it.
 pub fn is_transport_dead(e: &anyhow::Error) -> bool {
     e.downcast_ref::<TransportDead>().is_some()
+}
+
+/// The HTTP session this client holds is no longer known to the server.
+///
+/// Spec (2025-03-26+ Transports): a server that terminated a session MUST
+/// answer subsequent requests with **404**, and the client MUST start a new
+/// session by re-sending `initialize` without the old session id. Real-world
+/// TypeScript-SDK servers additionally answer **400** with a body like
+/// "Bad Request: Mcp-Session-Id header is required" / "No valid session ID
+/// provided" (typescript-sdk#389) — the Java/TS official clients treat that
+/// exactly like the 404. Typed, not substring-sniffed at the call site; the
+/// status+body classification happens once, where the response is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpSessionExpired {
+    pub detail: String,
+}
+
+impl std::fmt::Display for HttpSessionExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MCP session expired ({})", self.detail)
+    }
+}
+
+impl std::error::Error for HttpSessionExpired {}
+
+/// Classify a failed HTTP response as "session expired" per the rules above.
+///
+/// * 404 while we hold a session id → expired (a 404 with no session means the
+///   URL itself is wrong; that must stay a plain error).
+/// * 400 whose body mentions the session id → expired. A 400 about anything
+///   else (malformed params) is NOT retried: re-initializing cannot fix it and
+///   would mask the real complaint.
+pub fn classify_session_failure(
+    status: reqwest::StatusCode,
+    had_session: bool,
+    body: &str,
+) -> Option<HttpSessionExpired> {
+    if status == reqwest::StatusCode::NOT_FOUND && had_session {
+        return Some(HttpSessionExpired { detail: format!("HTTP 404: {}", truncate(body, 160)) });
+    }
+    if status == reqwest::StatusCode::BAD_REQUEST && had_session {
+        let lower = body.to_lowercase();
+        if lower.contains("session") {
+            return Some(HttpSessionExpired { detail: format!("HTTP 400: {}", truncate(body, 160)) });
+        }
+    }
+    None
 }
 
 /// MCP client manager.
@@ -1363,7 +1443,42 @@ impl McpManager {
         match config.resolved_type().as_str() {
             TYPE_STDIO => Ok(Connection::Stdio(Self::open_stdio(config).await?)),
             TYPE_STREAMABLE | TYPE_STREAMABLE_STATELESS => {
-                Ok(Connection::Http(Self::open_streamable(config).await?))
+                match Self::open_streamable(config).await {
+                    Ok(c) => Ok(Connection::Http(c)),
+                    Err(e) => {
+                        // Transport auto-fallback, same as the official MCP
+                        // clients (TS SDK falls back to SSE on 4xx at the
+                        // streamable endpoint; SolonCode's remote channel does
+                        // the same). Many catalog entries publish a legacy
+                        // `/sse` URL while configs/importers label everything
+                        // "streamable" — without this every such entry dies
+                        // with "MCP HTTP 404/405" although the server is fine.
+                        // Only transport-shaped failures fall back; an auth
+                        // challenge or a protocol-version rejection must keep
+                        // its own actionable error, not be masked by a second
+                        // failure from the SSE attempt.
+                        let raw = e.to_string();
+                        let lower = raw.to_lowercase();
+                        let transport_shaped = e.downcast_ref::<HttpSessionExpired>().is_some()
+                            || lower.contains("mcp http 4")
+                            || lower.contains("mcp http 5")
+                            || lower.contains("mcp reply was not json")
+                            || lower.contains("was empty");
+                        if !transport_shaped {
+                            return Err(e);
+                        }
+                        tracing::info!(
+                            url = %config.url, error = %raw,
+                            "MCP streamable endpoint failed; retrying as legacy SSE"
+                        );
+                        let mut sse_cfg = config.clone();
+                        sse_cfg.kind = TYPE_SSE.to_string();
+                        sse_cfg.transport = String::new();
+                        Self::open_sse(&sse_cfg).await.map(Connection::Http).map_err(|sse_err| {
+                            anyhow::anyhow!("{} (SSE fallback also failed: {})", raw, sse_err)
+                        })
+                    }
+                }
             }
             TYPE_SSE => Ok(Connection::Http(Self::open_sse(config).await?)),
             other => anyhow::bail!("unsupported MCP transport '{}'", other),
@@ -1478,12 +1593,97 @@ impl McpManager {
         Self::kill_connection(&mut conn).await;
     }
 
+    /// Resolve the program to spawn for a stdio server.
+    ///
+    /// Windows `CreateProcessW` (what `Command::new` bottoms out in) only finds
+    /// `.exe` on PATH — it does **not** honour `PATHEXT`. `npx`/`uvx`/`pnpm`/
+    /// `yarn`/`bunx` are `.cmd` shims on Windows, so spawning the bare name fails
+    /// with "program not found" even though the very same config works in a
+    /// terminal (cmd.exe resolves PATHEXT itself). That is the whole "装了连接器
+    /// 却无法使用" class of failures on Windows: every market entry whose readme
+    /// says `npx -y …` died at spawn. The Java kernel never hit it because the
+    /// MCP Java SDK's stdio transport wraps Windows commands in `cmd.exe /c`.
+    ///
+    /// Resolution order (Windows only, bare names without a path separator):
+    /// try the name as written, then each `PATHEXT` extension, across PATH.
+    /// A `.cmd`/`.bat` hit is returned as-is — tokio's `Command` on Windows
+    /// transparently wraps batch files in `cmd.exe /c` since 1.7x, and the
+    /// CREATE_NO_WINDOW flag still applies to that wrapper.
+    fn resolve_stdio_program(command: &str) -> String {
+        #[cfg(windows)]
+        {
+            let trimmed = command.trim();
+            // Explicit paths (or quoted paths) are the user's own business.
+            if trimmed.is_empty() || trimmed.contains('\\') || trimmed.contains('/') {
+                return command.to_string();
+            }
+            // Already carries an extension CreateProcess can execute? Keep it.
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.ends_with(".exe") || lower.ends_with(".com") {
+                return command.to_string();
+            }
+            let pathext = std::env::var("PATHEXT")
+                .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+            let exts: Vec<String> = pathext
+                .split(';')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            // If the user already typed `npx.cmd`, honour it verbatim first.
+            let has_known_ext = exts.iter().any(|e| lower.ends_with(e.as_str()));
+            let mut candidates: Vec<String> = Vec::new();
+            if has_known_ext {
+                candidates.push(trimmed.to_string());
+            } else {
+                // .exe first (cheapest, no cmd wrapper), then the rest of PATHEXT.
+                candidates.push(format!("{}.exe", trimmed));
+                for e in &exts {
+                    if e != ".exe" {
+                        candidates.push(format!("{}{}", trimmed, e));
+                    }
+                }
+            }
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            for dir in std::env::split_paths(&path) {
+                for cand in &candidates {
+                    let full = dir.join(cand);
+                    if full.is_file() {
+                        return full.to_string_lossy().into_owned();
+                    }
+                }
+            }
+            // Nothing found: keep the original so the spawn error names what
+            // the user configured, not an internal candidate.
+            command.to_string()
+        }
+        #[cfg(not(windows))]
+        {
+            command.to_string()
+        }
+    }
+
+    /// Public seam for `mcp::runtime` detection: same resolution the spawn
+    /// path uses, so "check says installed" and "spawn succeeds" cannot drift.
+    /// Returns `Some(path)` only when a real file was located.
+    pub(crate) fn resolve_stdio_program_public(command: &str) -> Option<String> {
+        let resolved = Self::resolve_stdio_program(command);
+        if std::path::Path::new(&resolved).is_file() {
+            Some(resolved)
+        } else {
+            None
+        }
+    }
+
     /// Spawn a stdio child and complete the handshake. Returns the tool count.
     async fn open_stdio(config: &McpServerConfig) -> anyhow::Result<StdioConnection> {
         if config.command.trim().is_empty() {
             anyhow::bail!("命令不能为空");
         }
-        let mut cmd = Command::new(&config.command);
+        // 代装的运行时目录前置到进程 PATH（幂等）：用户确认安装 uv/Node 后
+        // 无需重启应用，下一次 spawn 即可命中。
+        runtime::ensure_managed_on_path();
+        let program = Self::resolve_stdio_program(&config.command);
+        let mut cmd = Command::new(&program);
         cmd.args(&config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1495,10 +1695,24 @@ impl McpManager {
         {
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
+        // 应用代装的 uv/uvx：注入国内 PyPI/Python 镜像默认值（用户显式配置
+        // 优先，自装 uv 不受影响）。否则 uvx 首跑从 pypi.org 拉包极慢 →
+        // initialize 超时（「装好了还是连不上」的第二段根因）。先于 config.env
+        // 设置：条目级显式 env 永远覆盖默认值。
+        runtime::apply_managed_env(&mut cmd, &program, &config.command);
         for (k, v) in &config.env {
             cmd.env(k, v);
         }
-        let mut child = cmd.spawn()?;
+        let mut child = cmd.spawn().map_err(|e| {
+            // NotFound 的裸文案是 "program not found"——不含命令名、不含出路，
+            // 正是「blender: 检测失败: program not found」这条报障的全部信息量。
+            // 在错误源头就带上命令名与安装指引（typed，不靠下游嗅探字符串）。
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::Error::new(MissingProgram { command: config.command.trim().to_string() })
+            } else {
+                anyhow::Error::new(e).context(format!("启动 {} 失败", config.command))
+            }
+        })?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("no stdout"))?;
         let stdout_lines = BufReader::new(stdout);
@@ -2044,6 +2258,7 @@ impl McpManager {
             auth_headers,
             auth_kind: auth::AuthSpec::from_config(config).kind(),
             server_url: config.url.trim().to_string(),
+            config: config.clone(),
         };
         // The session id arrives as a response header on initialize and must be
         // echoed on every later request, so it is captured before parsing the body.
@@ -2101,7 +2316,24 @@ impl McpManager {
                 Self::abort_conn(&mut conn);
                 e
             })?;
-        Self::http_notify(&conn, "notifications/initialized").await?;
+        // A server (or gateway) can reject the initialized notification with a
+        // session complaint even though initialize just handed us the id —
+        // observed in the wild as 400 "Bad Request: Mcp-Session-Id header is
+        // required" from load-balanced deployments. One fresh handshake is the
+        // spec's recovery; failing here would report "握手失败" for a server
+        // that is actually reachable.
+        if let Err(e) = Self::http_notify(&conn, "notifications/initialized").await {
+            if e.downcast_ref::<HttpSessionExpired>().is_some() {
+                tracing::info!(url = %config.url, "MCP initialized notification rejected the fresh session; re-initializing once");
+                Self::http_reinitialize(&mut conn).await.map_err(|e2| {
+                    Self::abort_conn(&mut conn);
+                    e2
+                })?;
+            } else {
+                Self::abort_conn(&mut conn);
+                return Err(e);
+            }
+        }
         Ok(conn)
     }
 
@@ -2189,6 +2421,7 @@ impl McpManager {
             auth_headers,
             auth_kind: auth::AuthSpec::from_config(config).kind(),
             server_url: config.url.trim().to_string(),
+            config: config.clone(),
         };
         // Handshake failures must abort the pump too — the `?` below used to
         // return with the task still running.
@@ -2414,6 +2647,12 @@ fn build_default_headers(config: &McpServerConfig) -> anyhow::Result<reqwest::he
                     );
                 }
             }
+            // Session-expiry classification BEFORE the generic flatten: 404 with
+            // a session, or 400 mentioning the session id, is the spec's "start
+            // a new session" signal (see HttpSessionExpired), not a hard error.
+            if let Some(expired) = classify_session_failure(status, conn.session_id.is_some(), &text) {
+                return Err(expired.into());
+            }
             anyhow::bail!("MCP HTTP {}: {}", status, truncate(&text, 300));
         }
         Ok(resp)
@@ -2491,7 +2730,53 @@ fn build_default_headers(config: &McpServerConfig) -> anyhow::Result<reqwest::he
         check_rpc_error(v)
     }
 
+    /// Re-run the `initialize` handshake on an existing streamable connection
+    /// after the server declared our session dead ([`HttpSessionExpired`]).
+    ///
+    /// Mirrors the official clients: drop the old session id, POST `initialize`
+    /// again (the header must be ABSENT, not stale), capture the new id, adopt
+    /// the negotiated version, send `notifications/initialized`. Legacy-SSE
+    /// connections cannot be re-initialized in place (their POST endpoint is
+    /// bound to the GET stream) — those surface as [`TransportDead`] so the
+    /// manager rebuilds the whole connection instead.
+    async fn http_reinitialize(conn: &mut HttpConnection) -> anyhow::Result<()> {
+        if conn.sse_rx.is_some() {
+            anyhow::bail!(TransportDead {
+                reason: "MCP legacy-SSE session expired; the stream must be reopened".into(),
+            });
+        }
+        let config = conn.config.clone();
+        conn.session_id = None;
+        // The negotiated-version header describes the OLD session; the fresh
+        // initialize must not carry it (same rule as the first handshake).
+        conn.protocol_version = String::new();
+        let id = conn.next_id;
+        conn.next_id += 1;
+        let resp = Self::http_post_raw(conn, "initialize", id, Self::initialize_params_for(&config)).await?;
+        conn.session_id = resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let init_result = Self::read_rpc_body(resp, id).await?;
+        conn.protocol_version = Self::accept_negotiated_version_for(
+            &config.url,
+            config.protocol_mode(),
+            PROTOCOL_VERSION,
+            &init_result,
+        )?;
+        Self::http_notify(conn, "notifications/initialized").await?;
+        Ok(())
+    }
+
     /// JSON-RPC over an HTTP connection, handling both reply routes.
+    ///
+    /// Session-expiry recovery (spec 2025-03-26+ / typescript-sdk#389): when the
+    /// POST fails with [`HttpSessionExpired`] (404, or 400 "Mcp-Session-Id …"),
+    /// re-initialize once and replay the request. Safe to replay: the server
+    /// rejected the request because it does not know the session, so the tool
+    /// never ran. Exactly one retry — a server that expires the fresh session
+    /// immediately is broken, and looping would hammer it.
     async fn rpc_http(
         conn: &mut HttpConnection,
         method: &str,
@@ -2502,14 +2787,57 @@ fn build_default_headers(config: &McpServerConfig) -> anyhow::Result<reqwest::he
         // Decide the reply route before borrowing `sse_rx` mutably, so the POST
         // (an immutable borrow) does not overlap the mutable one.
         let legacy_sse = conn.sse_rx.is_some();
-        let resp = Self::http_post_raw(conn, method, id, params).await?;
+        let resp = match Self::http_post_raw(conn, method, id, params.clone()).await {
+            Ok(r) => r,
+            Err(e) => {
+                if e.downcast_ref::<HttpSessionExpired>().is_none() {
+                    return Err(e);
+                }
+                tracing::info!(
+                    url = %conn.server_url, method,
+                    "MCP server no longer knows our session; re-initializing and replaying once"
+                );
+                Self::http_reinitialize(conn).await?;
+                // Fresh id: the re-initialize consumed ids too, and the old one
+                // was never answered.
+                let retry_id = conn.next_id;
+                conn.next_id += 1;
+                return Self::rpc_http_once(conn, method, retry_id, params).await;
+            }
+        };
         if !legacy_sse {
             return Self::read_rpc_body(resp, id).await;
         }
         // Legacy SSE: the POST returns 202 with no useful body; the reply arrives
         // on the GET stream. Drop the POST response and read from the channel.
         drop(resp);
-        let rx = conn.sse_rx.as_mut().expect("legacy_sse implies sse_rx is Some");
+        Self::read_sse_reply(conn, method, id).await
+    }
+
+    /// One POST + reply read, with NO session-expiry recovery. Used for the
+    /// single replay after [`Self::http_reinitialize`] so recovery cannot recurse.
+    async fn rpc_http_once(
+        conn: &mut HttpConnection,
+        method: &str,
+        id: u64,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let legacy_sse = conn.sse_rx.is_some();
+        let resp = Self::http_post_raw(conn, method, id, params).await?;
+        if !legacy_sse {
+            return Self::read_rpc_body(resp, id).await;
+        }
+        drop(resp);
+        Self::read_sse_reply(conn, method, id).await
+    }
+
+    /// Read the reply to `id` off a legacy-SSE GET stream.
+    async fn read_sse_reply(
+        conn: &mut HttpConnection,
+        method: &str,
+        id: u64,
+    ) -> anyhow::Result<serde_json::Value> {
+        let rx = conn.sse_rx.as_mut().expect("read_sse_reply requires a legacy SSE stream");
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             if tokio::time::Instant::now() > deadline {
@@ -3008,6 +3336,83 @@ mod tests {
         let v = serde_json::json!({"type": "stdio", "transport": "sse", "command": "npx"});
         let cfg: McpServerConfig = serde_json::from_value(v).unwrap();
         assert_eq!(cfg.resolved_type(), TYPE_STDIO);
+    }
+
+    // ─── session-expiry classification (spec 404 / TS-SDK 400) ────────────
+
+    #[test]
+    fn session_failure_404_with_session_is_expired() {
+        let e = classify_session_failure(reqwest::StatusCode::NOT_FOUND, true, "Session not found");
+        assert!(e.is_some(), "404 while holding a session must trigger re-initialize");
+        // Without a session a 404 means the URL is wrong — plain error, no retry.
+        assert!(classify_session_failure(reqwest::StatusCode::NOT_FOUND, false, "not here").is_none());
+    }
+
+    #[test]
+    fn session_failure_400_mentions_session_is_expired() {
+        // The exact wording observed from TypeScript-SDK servers (user report).
+        let e = classify_session_failure(
+            reqwest::StatusCode::BAD_REQUEST,
+            true,
+            "Bad Request: Mcp-Session-Id header is required",
+        );
+        assert!(e.is_some());
+        let e2 = classify_session_failure(
+            reqwest::StatusCode::BAD_REQUEST,
+            true,
+            "{\"error\":\"No valid session ID provided\"}",
+        );
+        assert!(e2.is_some());
+        // A 400 about anything else must NOT be retried — re-initializing
+        // cannot fix malformed params and would mask the real complaint.
+        assert!(classify_session_failure(reqwest::StatusCode::BAD_REQUEST, true, "invalid params: foo").is_none());
+        // No session held → the initialize request itself was rejected; plain error.
+        assert!(classify_session_failure(reqwest::StatusCode::BAD_REQUEST, false, "session required").is_none());
+    }
+
+    #[test]
+    fn session_failure_other_statuses_are_plain_errors() {
+        for s in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            reqwest::StatusCode::METHOD_NOT_ALLOWED,
+        ] {
+            assert!(classify_session_failure(s, true, "session").is_none(), "{}", s);
+        }
+    }
+
+    // ─── Windows launcher resolution (npx.cmd / PATHEXT shims) ────────────
+
+    #[test]
+    #[cfg(windows)]
+    fn stdio_program_resolves_cmd_shims_on_windows() {
+        // `cmd` itself is cmd.exe in SYSTEM32 — resolution must find the .exe.
+        let resolved = McpManager::resolve_stdio_program("cmd");
+        assert!(resolved.to_ascii_lowercase().ends_with("cmd.exe"), "{}", resolved);
+        // An explicit path is never rewritten.
+        let explicit = "C:\\tools\\my server.exe";
+        assert_eq!(McpManager::resolve_stdio_program(explicit), explicit);
+        // Unknown program keeps the user's spelling so the spawn error names it.
+        assert_eq!(
+            McpManager::resolve_stdio_program("definitely-not-a-real-program-xyz"),
+            "definitely-not-a-real-program-xyz"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn stdio_program_finds_npx_if_installed() {
+        // Only meaningful on machines with Node installed (CI/dev boxes have it).
+        // When present, the bare `npx` must resolve to a real file — this is the
+        // exact "装了连接器却无法使用: program not found" regression.
+        let resolved = McpManager::resolve_stdio_program("npx");
+        if resolved != "npx" {
+            let p = std::path::Path::new(&resolved);
+            assert!(p.is_file(), "{}", resolved);
+            let lower = resolved.to_ascii_lowercase();
+            assert!(lower.ends_with(".cmd") || lower.ends_with(".exe"), "{}", resolved);
+        }
     }
 
     #[test]

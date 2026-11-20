@@ -61,6 +61,10 @@ fn parent_run(ctx: &ToolContext) -> crate::team::ParentRun {
         thinking: ctx.thinking.clone(),
         run_id: ctx.run_id.clone(),
         change_ledger: ctx.change_ledger.clone(),
+        // Conversation connector selection follows the delegation chain: a
+        // sub-agent must not reach connectors the user did not pick for this
+        // conversation (the definition's own mcp_allowed still applies on top).
+        mcp_servers: ctx.gate.as_ref().and_then(|g| g.mcp_servers.clone()),
     }
 }
 

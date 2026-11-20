@@ -65,9 +65,6 @@ $theme-palette: (
 		/* 首页主视觉（欢迎语标题 = 桌面端 text-primary，副文案 = text-secondary） */
 		'hero-title': #18181b,
 		'hero-sub': #71717a,
-		'cap-text': #71717a,
-		'cap-dot': #a1a1aa,                   // 能力点：中性灰点，去品牌蓝
-		'cap-dot-ring': rgba(24, 24, 27, 0.08),
 		/* 登录页：品牌浅底与投影（logo 贴图与桌面端同源：黑底白 G，不再做蓝色渐变） */
 		'login-brand-soft': #ececee,
 		'login-shadow': rgba(24, 24, 27, 0.18)
@@ -119,9 +116,6 @@ $theme-palette: (
 		/* 首页主视觉 */
 		'hero-title': #e4e4e7,
 		'hero-sub': #8f8f96,
-		'cap-text': #8f8f96,
-		'cap-dot': #66666d,
-		'cap-dot-ring': rgba(228, 228, 231, 0.14),
 		/* 登录页：品牌浅底与投影 */
 		'login-brand-soft': #2a2a2e,
 		'login-shadow': rgba(0, 0, 0, 0.45)

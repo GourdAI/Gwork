@@ -1,0 +1,94 @@
+/**
+ * Android 端：android.speech.SpeechRecognizer 系统识别引擎。
+ * 引擎只是「壳」，实际能力取决于厂商预装引擎（Google/小爱/百度等），
+ * 无引擎设备通过 isRecognitionAvailable 拦截为 unsupported（业务层据此隐藏语音入口）。
+ *
+ * 识别会话在同目录 GworkSpeechSession.kt（UTS 原生混编）：
+ * SpeechRecognizer 全 API 必须主线程调用、RecognitionListener 回调实现、Long 型
+ * 静音容忍 extra 都在 Kotlin 侧直写，规避 UTS→Kotlin 翻译层的不确定性。
+ * 本文件只做权限申请与统一接口转发；会话终态守卫在 Kotlin 侧（finished）。
+ */
+import Context from 'android.content.Context'
+import { SpeechError, SpeechErrorCode, StartListeningOptions } from '../interface.uts'
+
+/** 会话代号：权限弹窗期间用户松手取消后，迟到的授权成功回调不得再启动引擎 */
+let sessionToken = 0
+
+/** language 与三端签名对齐（Android 引擎探测与语言无关，忽略该参数） */
+export function isSpeechAvailable(_language: string): boolean {
+	const context = UTSAndroid.getAppContext()
+	if (context == null) return false
+	return GworkSpeechSession.available(context as Context)
+}
+
+/** 会话进行中（含权限弹窗窗口）：Kotlin 侧 finished 在授权后才翻转，UTS 侧先行占位防并发 */
+let starting = false
+
+export function startListening(opts: StartListeningOptions): void {
+	if (starting) {
+		opts.onError({ code: 'busy', detail: 'previous session active' } as SpeechError)
+		return
+	}
+	if (!isSpeechAvailable(opts.language)) {
+		opts.onError({ code: 'unsupported', detail: 'no recognition service' } as SpeechError)
+		return
+	}
+	const activity = UTSAndroid.getUniActivity()
+	if (activity == null) {
+		opts.onError({ code: 'unknown', detail: 'no activity' } as SpeechError)
+		return
+	}
+	const context = UTSAndroid.getAppContext()
+	if (context == null) {
+		opts.onError({ code: 'unknown', detail: 'no context' } as SpeechError)
+		return
+	}
+	// 先申请录音权限：拒绝直接终态，按住手势由调用方按 onError 收尾。
+	// requestSystemPermission 部分授权时 success/fail 可能都回调，用 dispatched 保证终态只派发一次
+	const token = ++sessionToken
+	starting = true
+	let dispatched = false
+	const failOnce = (detail: string): void => {
+		if (dispatched || token != sessionToken) return
+		dispatched = true
+		starting = false
+		opts.onError({ code: 'permission', detail: detail } as SpeechError)
+	}
+	UTSAndroid.requestSystemPermission(activity, ['android.permission.RECORD_AUDIO'], (allRight: boolean, _: string[]) => {
+		if (dispatched || token != sessionToken) return
+		if (!allRight) {
+			failOnce('RECORD_AUDIO denied')
+			return
+		}
+		dispatched = true
+		// Kotlin 混编参数是 Long，UTS number 需显式 toLong()（编译器 known-issue #17）
+		GworkSpeechSession.start(context as Context, opts.language, opts.maxDurationMs.toLong(), (text: string) => {
+			opts.onPartial(text)
+		}, (text: string) => {
+			starting = false
+			opts.onResult(text)
+		}, (code: string, detail: string) => {
+			starting = false
+			const err: SpeechError = { code: code as SpeechErrorCode, detail: detail }
+			opts.onError(err)
+		})
+	}, (_: boolean, _2: string[]) => {
+		failOnce('RECORD_AUDIO denied')
+	})
+}
+
+export function stopListening(): void {
+	// 权限弹窗期间松手：静默放弃（代号自增使迟到的授权链失效），Kotlin 会话尚未建立
+	if (starting) {
+		cancelListening()
+		return
+	}
+	GworkSpeechSession.stop()
+}
+
+export function cancelListening(): void {
+	// 代号自增令迟到的授权链失效；Kotlin 侧 cancel 静默清场（含引擎 destroy）
+	sessionToken++
+	starting = false
+	GworkSpeechSession.cancel()
+}

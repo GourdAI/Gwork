@@ -1908,6 +1908,54 @@ pub fn unpack_zip(zip: &[u8], dest: &Path, mode: UnpackMode) -> Result<usize, St
     Ok(written)
 }
 
+// ─── 加固 zip 解析的跨模块复用缝（mcp::runtime 代装运行时用） ─────────────────
+//
+// 运行时安装包（uv/Node 发行 zip）与技能包共用同一套 zip 加固：EOCD/中央目录
+// 解析、zip-slip 拒绝、CRC 校验、体积上限。这里只暴露「读记录/判危险/取字节」
+// 三个只读原语，落盘策略由各调用方自定（技能全量解压，运行时只提取白名单）。
+
+/// 中央目录记录（对外只读视图）。字段语义见 [`ZipRecord`]。
+pub struct ZipEntry {
+    pub name: String,
+    pub dir: bool,
+    rec: ZipRecord,
+}
+
+/// 解析 zip 中央目录。zip64/截断/超条目数一律 Err（与 unpack_zip 同判据）。
+pub fn zip_records(zip: &[u8]) -> Result<Vec<ZipEntry>, String> {
+    Ok(central_directory(zip)?
+        .into_iter()
+        .map(|rec| ZipEntry { name: rec.name.clone(), dir: rec.dir, rec })
+        .collect())
+}
+
+/// Zip-slip 判据（与 unpack_zip 同源）：绝对路径 / 盘符 / `..` 一律危险。
+pub fn zip_entry_unsafe(name: &str) -> bool {
+    is_unsafe_entry(&normalize_entry_name(name))
+}
+
+/// 读取并校验单个条目字节（store/deflate + CRC + 解压体积上限）。
+pub fn zip_entry_bytes(zip: &[u8], entry: &ZipEntry) -> Result<Vec<u8>, String> {
+    let rec = &entry.rec;
+    if rec.dir {
+        return Ok(Vec::new());
+    }
+    if rec.uncompressed_size > MAX_UNCOMPRESSED_BYTES {
+        return Err("压缩包条目解压后体积超过上限".into());
+    }
+    let start = local_data_offset(zip, rec)?;
+    let data = &zip[start..start + rec.compressed_size as usize];
+    let bytes = match rec.method {
+        0 => data.to_vec(),
+        8 => inflate(data, rec.uncompressed_size).map_err(|e| e.to_string())?,
+        other => return Err(format!("不支持的压缩算法 {}", other)),
+    };
+    if rec.flags & 0x08 == 0 && crc32(&bytes) != rec.crc32 {
+        return Err(format!("压缩包条目校验失败: {}", rec.name));
+    }
+    Ok(bytes)
+}
+
 /// CRC-32 (IEEE, as used by ZIP). Table-free bitwise version: archives are
 /// small and this keeps the dependency surface at zero.
 pub fn crc32(data: &[u8]) -> u32 {

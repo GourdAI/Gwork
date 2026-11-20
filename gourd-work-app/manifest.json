@@ -47,7 +47,7 @@
 		}
 	},
 	"app-android": {
-		// 录音权限：getRecorderManager 依赖；运行时授权弹窗由框架在 start 时拉起
+		// 录音权限：gwork-speech 系统语音识别依赖；运行时授权由插件内 UTSAndroid.requestSystemPermission 拉起
 		"permissions": [
 			"android.permission.RECORD_AUDIO"
 		],

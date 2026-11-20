@@ -798,12 +798,19 @@ mod tests {
 
     /// The exact on-disk shape the Java kernel writes. If this stops parsing, the
     /// memory page goes empty again — the regression this module was rewritten for.
+    ///
+    /// `stored_at`/`time` are generated relative to now: the fixture used to pin
+    /// "2026-10-19" with a 30-day TTL, so the test silently turned into a
+    /// time bomb — once the wall clock passed 2026-11-18 the entry was legitimately
+    /// expired and `load_all` (correctly) dropped it. The shape, not the calendar
+    /// date, is what this test pins.
     #[test]
     fn parses_the_java_front_matter_format() {
         let s = Scratch::new("parse");
+        let ts = now_string();
         s.write_raw(
             "shared__my_key.md",
-            "---\nname: \"shared__my_key\"\ntitle: \"墙钟codereview\"\ntime: \"2026-10-19 18:03:24\"\nimportance: 9\nttl: 2592000\nstored_at: \"2026-10-19 18:03:24\"\n---\n\n【正文】第一行\n第二行\n",
+            &format!("---\nname: \"shared__my_key\"\ntitle: \"墙钟codereview\"\ntime: \"{ts}\"\nimportance: 9\nttl: 2592000\nstored_at: \"{ts}\"\n---\n\n【正文】第一行\n第二行\n", ts = ts),
         );
 
         let all = s.store().load_all();
@@ -813,7 +820,7 @@ mod tests {
         assert_eq!(e.title, "墙钟codereview");
         assert_eq!(e.importance, 9);
         assert_eq!(e.ttl, 2592000);
-        assert_eq!(e.time, "2026-10-19 18:03:24");
+        assert_eq!(e.time, ts);
         assert!(e.content.starts_with("【正文】第一行"), "content={:?}", e.content);
         assert!(e.content.contains("第二行"), "multi-line body must survive");
     }

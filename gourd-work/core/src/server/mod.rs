@@ -43,6 +43,7 @@ pub mod loop_driver;
 pub mod loop_runner;
 pub mod mcp_auth_api;
 pub mod mcp_market_api;
+pub mod mcp_runtime_api;
 pub mod misc_api;
 pub mod official_api;
 pub mod projects_api;
@@ -101,6 +102,8 @@ pub struct AppState {
     /// Connector authorization: in-flight browser flows and the local-only
     /// credential vault. Held here so auth endpoints survive across requests.
     pub mcp_auth: Arc<crate::mcp::auth::AuthManager>,
+    /// stdio 运行时（uv/Node）代装会话：缺运行时自动按需拉取（零确认，交互可见），跨请求轮询进度。
+    pub mcp_runtime: Arc<crate::mcp::runtime::RuntimeInstaller>,
     /// File-change ledger for capturing write/edit operations.
     pub change_ledger: Arc<crate::changes::ChangeLedger>,
     /// Loop scheduler.
@@ -310,6 +313,7 @@ pub async fn serve_with_static(
         registry: Arc::new(registry),
         mcp: mcp.clone(),
         mcp_auth,
+        mcp_runtime: Arc::new(crate::mcp::runtime::RuntimeInstaller::new()),
         change_ledger: Arc::new(crate::changes::ChangeLedger::new(workspace.clone())),
         loop_scheduler: Arc::new(crate::loop_task::LoopScheduler::new(workspace.clone())),
         queue_manager: Arc::new(crate::queue::QueueManager::new()),
@@ -405,6 +409,7 @@ pub async fn serve_with_static(
         .route("/web/chat/thinking/select", post(chat_thinking_select))
         .route("/web/chat/context/select", post(chat_context_select))
         .route("/web/chat/access/select", post(chat_access_select))
+        .route("/web/chat/mcp/select", post(chat_mcp_select))
         .route("/web/chat/messages", get(chat_messages))
         .route("/web/chat/replay", get(chat_replay))
         .route("/web/chat/input", post(chat_input))
@@ -536,6 +541,10 @@ pub async fn serve_with_static(
         .route("/web/settings/mcp/market/detail", get(mcp_market_api::mcp_market_detail))
         .route("/web/settings/mcp/market/categories", get(mcp_market_api::mcp_market_categories))
         .route("/web/settings/mcp/market/install", post(mcp_market_api::mcp_market_install))
+        // stdio 运行时（uv/Node）检测与代装：缺运行时自动拉取，零确认（详见 mcp_runtime_api）。
+        .route("/web/settings/mcp/runtime/check", get(mcp_runtime_api::mcp_runtime_check))
+        .route("/web/settings/mcp/runtime/install", post(mcp_runtime_api::mcp_runtime_install))
+        .route("/web/settings/mcp/runtime/status", get(mcp_runtime_api::mcp_runtime_status))
         // Connector authorization: browser OAuth (start/status/cancel), static
         // token dialog (token/clear), and one state read for the UI to decide
         // which dialog to show. Credentials never pass through settings.json.
@@ -1339,6 +1348,10 @@ async fn chat_models(State(state): State<Arc<AppState>>, Query(q): Query<Session
 
     let thinking_depth = ctx.thinking.unwrap_or_else(|| "auto".into());
     let context_length = ctx.context_length.unwrap_or(crate::usage::DEFAULT_CONTEXT_LENGTH);
+    // Connector picker echo: `null` = never picked (frontend shows "none"),
+    // an array (possibly empty) = the persisted selection. Same context file
+    // the run path reads, so picker display and run gating cannot disagree.
+    let mcp_servers = ctx.mcp_servers.clone();
 
     Json(serde_json::json!({
         "code": 200,
@@ -1350,6 +1363,7 @@ async fn chat_models(State(state): State<Arc<AppState>>, Query(q): Query<Session
             "contextLengthDefault": crate::usage::DEFAULT_CONTEXT_LENGTH,
             "contextOptions": crate::usage::CONTEXT_LENGTH_OPTIONS,
             "accessMode": access_mode,
+            "mcpServers": mcp_servers,
         }
     }))
 }
@@ -1566,6 +1580,52 @@ async fn chat_access_select(
                 auto_approve_and_resume(&state, &form.session_id, sp).await;
             }
         }
+    }
+    Json(serde_json::json!({"code": 200}))
+}
+
+#[derive(serde::Deserialize)]
+struct McpSelectForm {
+    #[serde(rename = "sessionId", default)]
+    session_id: String,
+    /// JSON array of server directory names, e.g. `["memory","deepwiki"]`.
+    /// An explicit `[]` persists "user unchecked everything" — distinct from
+    /// an absent/invalid field, which is a no-op (mirrors the other selects).
+    #[serde(default)]
+    servers: String,
+}
+
+/// POST /web/chat/mcp/select — persist the conversation's connector selection.
+///
+/// Same shape and ownership rules as `chat_thinking_select`: bind the session
+/// cwd first (missing header would write a second context.json under the
+/// global root while the run reads the project-bound one), then a locked
+/// read-modify-write of one field. The run path snapshots this into its
+/// ToolGate at turn start; the picker echo comes back via /web/chat/models.
+async fn chat_mcp_select(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Form(form): Form<McpSelectForm>,
+) -> Json<serde_json::Value> {
+    if let Some(r) = reject_bad_session_id(&form.session_id) {
+        return r;
+    }
+    if !form.session_id.is_empty() && !form.servers.trim().is_empty() {
+        // Must be a JSON array of strings; anything else is a client bug and
+        // must not silently persist garbage into the gate's input.
+        let parsed: Vec<String> = match serde_json::from_str::<serde_json::Value>(form.servers.trim()) {
+            Ok(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => return Json(serde_json::json!({"code": 400, "description": "servers must be a JSON array of names"})),
+        };
+        let store = bind_session_cwd(&state, &form.session_id, cwd_header_of(&headers).as_deref());
+        let picked = parsed.clone();
+        store.update_context(&form.session_id, |ctx| ctx.mcp_servers = Some(picked));
+        return Json(serde_json::json!({"code": 200, "data": parsed}));
     }
     Json(serde_json::json!({"code": 200}))
 }
@@ -3109,7 +3169,22 @@ async fn run_react_session(
         run_id: run_id.clone(),
         start_seq,
         hitl_approved,
-        gate: None,
+        // Conversation connector selection (composer picker, WorkBuddy-style;
+        // 2026-11 user decision: conversations start with connectors OFF).
+        // Interactive chat is the ONLY path that narrows MCP to the picked
+        // servers — CLI/ACP/loop keep every enabled connector (`gate: None`).
+        // `None` in the persisted context = picker never touched = no
+        // connectors for a chat run, same as `Some([])`. Built here (not in
+        // the loop) so definitions and execute share ONE gate snapshot;
+        // mid-run picker edits apply to the next turn, exactly like model
+        // and thinking selections.
+        gate: Some(std::sync::Arc::new(
+            crate::tools::ToolGate::from_permission(&settings.permission)
+                .with_mcp_servers(Some(
+                    session_ctx.mcp_servers.clone().unwrap_or_default()
+                        .into_iter().collect::<std::collections::HashSet<String>>(),
+                )),
+        )),
         change_ledger: Some(state.change_ledger.clone()),
         // The interactive chat run is a top-level run.
         subagent_depth: 0,

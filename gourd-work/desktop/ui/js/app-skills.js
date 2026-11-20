@@ -1611,12 +1611,23 @@
                 $skillsLoading.hide();
                 $skillsStatus.show();
                 $skillsError.text(GourdI18n.t('settings.skills.load_failed_retry')).show();
+                // 挂起导航目标是 connectors/interfaces 时不依赖技能市场端点，仍可直达
+                if (_pendingNavView === VIEW_CONNECTORS || _pendingNavView === VIEW_INTERFACES) {
+                    var nav = _pendingNavView;
+                    _pendingNavView = null;
+                    switchView(nav);
+                }
                 return;
             }
             _marketsLoadFailed = false;
             // 默认进入第一个市场标签页（市场浏览是主场景；已安装是同级的第一个标签）
             var target = _markets[0].name;
             _currentView = VIEW_INSTALLED; // 先置回，保证 switchView 不短路
+            // 挂起的跨页导航目标（连接器选择器「管理连接器」）优先于默认市场
+            if (_pendingNavView) {
+                target = _pendingNavView;
+                _pendingNavView = null;
+            }
             switchView(target);
         });
         loadInstalledIndex(null);
@@ -1653,6 +1664,20 @@
     window.openSkills = openSkills;
     window.closeSkills = closeSkills;
     window.isSkillsOpen = function () { return $('#skillsView').hasClass('active'); };
+    /* 跨页导航入口（对话内连接器选择器的「管理连接器」）：openSkills 的
+     * resetAndLoad 是异步落视图（loadMarkets 回调里 switchView 到首个市场），
+     * 同步紧跟着 switchView('connectors') 会被回调覆盖——所以走「挂起目标」：
+     * resetAndLoad 回调末尾消费一次。仅供导航，不改变手动点 tab 的行为。 */
+    var _pendingNavView = null;
+    window.switchSkillsView = function (view) {
+        if (view !== VIEW_CONNECTORS && view !== VIEW_INTERFACES && view !== VIEW_INSTALLED
+            && !_markets.some(function (m) { return m.name === view; })) return;
+        if ($('#skillsView').hasClass('active') && _markets.length) {
+            switchView(view);
+        } else {
+            _pendingNavView = view;
+        }
+    };
 
     // 语言切换后重绘当前页（列表内容是动态渲染的，静态翻译无法覆盖）
     document.addEventListener('i18n:localeChanged', function () {

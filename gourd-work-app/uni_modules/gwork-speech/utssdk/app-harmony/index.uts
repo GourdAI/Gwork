@@ -1,0 +1,310 @@
+/**
+ * 鸿蒙端：@kit.CoreSpeechKit speechRecognizer（纯端侧离线，音频不出设备）。
+ * 系统引擎不拉麦克风，需 AudioCapturer 采集 16k/单声道/16bit PCM 后 writeAudio 喂入。
+ * 硬约束：仅 zh-CN、仅中国大陆机型、不支持模拟器（API 20 前）；CreateEngineParams.online=1 为离线。
+ * 引擎同进程单例，会话终结必须 shutdown 释放，否则下次 createEngine 报 1002200001。
+ */
+import { speechRecognizer } from '@kit.CoreSpeechKit'
+import { audio } from '@kit.AudioKit'
+import { BusinessError } from '@kit.BasicServicesKit'
+import { SpeechError, SpeechErrorCode, StartListeningOptions } from '../interface.uts'
+
+let engine: speechRecognizer.SpeechRecognitionEngine | null = null
+let capturer: audio.AudioCapturer | null = null
+let options: StartListeningOptions | null = null
+let finished = true
+/** 会话建立中（权限→建引擎→建采集器异步链）：此窗口 finished 仍为 true，需单独占位防并发/防 busy 误判 */
+let starting = false
+let stopping = false
+let lastPartial = ''
+let sessionId = ''
+let maxTimer = 0
+let stopTimer = 0
+/** 会话代号：异步链（权限→建引擎→建采集器）落地时校验，过期链静默放弃 */
+let sessionToken = 0
+
+function clearTimers(): void {
+	if (maxTimer != 0) {
+		clearTimeout(maxTimer)
+		maxTimer = 0
+	}
+	if (stopTimer != 0) {
+		clearTimeout(stopTimer)
+		stopTimer = 0
+	}
+}
+
+function releaseEngine(): void {
+	const e = engine
+	engine = null
+	if (e != null) {
+		try {
+			e.shutdown()
+		} catch (err) {
+			console.error('gwork-speech shutdown', err)
+		}
+	}
+}
+
+function releaseCapturer(): void {
+	const c = capturer
+	capturer = null
+	if (c != null) {
+		c.stop((_err: BusinessError) => {
+			c.release((_err2: BusinessError) => {})
+		})
+	}
+}
+
+function emitError(code: SpeechErrorCode, detail: string): void {
+	if (finished) return
+	finished = true
+	starting = false
+	sessionToken++
+	clearTimers()
+	releaseCapturer()
+	releaseEngine()
+	const cb = options
+	options = null
+	const err: SpeechError = { code: code, detail: detail }
+	if (cb != null) cb.onError(err)
+}
+
+function emitResult(text: string): void {
+	if (finished) return
+	finished = true
+	starting = false
+	sessionToken++
+	clearTimers()
+	releaseCapturer()
+	releaseEngine()
+	const cb = options
+	options = null
+	if (cb != null) cb.onResult(text)
+}
+
+/** 建立期失败（options 尚未接管）：复位占位并直接回调，不走 emitError（finished 此时为 true） */
+function failStarting(opts: StartListeningOptions, code: SpeechErrorCode, detail: string): void {
+	starting = false
+	sessionToken++
+	const err: SpeechError = { code: code, detail: detail }
+	opts.onError(err)
+}
+
+/** language 为业务层传入的 BCP-47 标签（uni.getLocale 在 uni-app x 蒸汽模式不存在，语言由调用方决定） */
+export function isSpeechAvailable(language: string): boolean {
+	// 静态门控：系统能力位 + 语言（CoreSpeechKit 仅 zh-CN）。非中文时入口隐藏而非点击报错。
+	// 大陆机型等地域限制无法同步探测，由 createEngine 失败归 unsupported，业务层缓存后隐藏入口
+	if (!canIUse('SystemCapability.AI.SpeechRecognizer')) return false
+	return language.startsWith('zh')
+}
+
+export function startListening(opts: StartListeningOptions): void {
+	if (!finished || starting) {
+		opts.onError({ code: 'busy', detail: 'previous session active' } as SpeechError)
+		return
+	}
+	// 系统 ASR 仅支持中文普通话：其它语言直接 unsupported，避免静默错识别
+	if (!opts.language.startsWith('zh')) {
+		opts.onError({ code: 'unsupported', detail: 'harmony ASR supports zh-CN only, got ' + opts.language } as SpeechError)
+		return
+	}
+	const token = ++sessionToken
+	starting = true
+	// 官方统一权限入口（uni-app x 4.61+）：内部处理弹窗与「不再询问」，替代已废弃的全局 getContext() 链路。
+	// 部分授权时 success/fail 可能都回调，dispatched 保证终态只派发一次
+	let dispatched = false
+	const failOnce = (detail: string): void => {
+		if (dispatched || token != sessionToken) return
+		dispatched = true
+		failStarting(opts, 'permission', detail)
+	}
+	UTSHarmony.requestSystemPermission(['ohos.permission.MICROPHONE'], (allRight: boolean, _: string[]) => {
+		if (dispatched || token != sessionToken) return
+		if (!allRight) {
+			failOnce('MICROPHONE denied')
+			return
+		}
+		dispatched = true
+		createAsrEngine(opts, token)
+	}, (_: boolean, _2: string[]) => {
+		failOnce('MICROPHONE denied')
+	})
+}
+
+function createAsrEngine(opts: StartListeningOptions, token: number): void {
+	const extra: Record<string, Object> = { 'locate': 'CN', 'recognizerMode': 'short' }
+	const params: speechRecognizer.CreateEngineParams = {
+		language: 'zh-CN',
+		// 华为官方 API 文档：online=1 为离线（当前仅支持离线模式）。0 是错误取值，会创建失败
+		online: 1,
+		extraParams: extra
+	}
+	speechRecognizer.createEngine(params, (err: BusinessError, asr: speechRecognizer.SpeechRecognitionEngine) => {
+		if (token != sessionToken) {
+			// 会话已被取消：迟到的引擎立即释放，避免占用单例
+			if (asr != null) {
+				try { asr.shutdown() } catch (e) { console.error('gwork-speech late shutdown', e) }
+			}
+			return
+		}
+		if (err != null && err.code != 0) {
+			// 1002200006（引擎忙，多为其它应用占用）/1002200008（正在销毁）是瞬态错误，
+			// 归 busy 不落「设备不支持」缓存；1002200001 等才是设备级不支持（隐藏语音入口）
+			const transient = err.code == 1002200006 || err.code == 1002200008
+			failStarting(opts, transient ? 'busy' : 'unsupported', 'createEngine ' + err.code.toString() + ' ' + err.message)
+			return
+		}
+		options = opts
+		finished = false
+		starting = false
+		stopping = false
+		lastPartial = ''
+		engine = asr
+		sessionId = 'gwork-' + Date.now().toString()
+		// RecognitionListener 是 interface，ArkTS 对象字面量必须显式 as 标注类型
+		asr.setListener({
+			onStart: (_sid: string, _msg: string): void => {},
+			onEvent: (_sid: string, _event: number, _msg: string): void => {},
+			onResult: (sid: string, result: speechRecognizer.SpeechRecognitionResult): void => {
+				if (finished || sid != sessionId) return
+				const text = result.result
+				if (text != null && text.length > 0) {
+					lastPartial = text
+					const cb = options
+					if (cb != null && !result.isFinal) cb.onPartial(text)
+				}
+				if (result.isFinal) {
+					emitResult(lastPartial)
+				}
+			},
+			onComplete: (_sid: string, _msg: string): void => {
+				if (finished) return
+				// finish() 后引擎收尾：以已收到的最终/中间结果落地
+				emitResult(lastPartial)
+			},
+			onError: (sid: string, code: number, msg: string): void => {
+				if (finished || sid != sessionId) return
+				if (stopping && lastPartial.length > 0) {
+					emitResult(lastPartial)
+					return
+				}
+				emitError('unknown', 'asr error ' + code.toString() + ' ' + msg)
+			}
+		} as speechRecognizer.RecognitionListener)
+		const startParams: speechRecognizer.StartParams = {
+			sessionId: sessionId,
+			audioInfo: {
+				audioType: 'pcm',
+				sampleRate: 16000,
+				soundChannel: 1,
+				sampleBit: 16
+			}
+		}
+		try {
+			asr.startListening(startParams)
+		} catch (e) {
+			// startListening 同步抛错时引擎可能已半初始化：emitError 内统一 shutdown 释放单例
+			emitError('unknown', 'startListening failed')
+			return
+		}
+		maxTimer = setTimeout((): void => {
+			maxTimer = 0
+			stopListening()
+		}, opts.maxDurationMs)
+		startCapture(token)
+	})
+}
+
+function startCapture(token: number): void {
+	const streamInfo: audio.AudioStreamInfo = {
+		samplingRate: audio.AudioSamplingRate.SAMPLE_RATE_16000,
+		channels: audio.AudioChannel.CHANNEL_1,
+		sampleFormat: audio.AudioSampleFormat.SAMPLE_FORMAT_S16LE,
+		encodingType: audio.AudioEncodingType.ENCODING_TYPE_RAW
+	}
+	const capturerInfo: audio.AudioCapturerInfo = {
+		source: audio.SourceType.SOURCE_TYPE_MIC,
+		capturerFlags: 0
+	}
+	const capturerOptions: audio.AudioCapturerOptions = {
+		streamInfo: streamInfo,
+		capturerInfo: capturerInfo
+	}
+	audio.createAudioCapturer(capturerOptions).then((c: audio.AudioCapturer) => {
+		if (token != sessionToken) {
+			c.release((_err: BusinessError) => {})
+			return
+		}
+		capturer = c
+		c.on('readData', (buffer: ArrayBuffer): void => {
+			const e = engine
+			if (finished || stopping || e == null) return
+			try {
+				e.writeAudio(sessionId, new Uint8Array(buffer))
+			} catch (err) {
+				console.error('gwork-speech writeAudio', err)
+			}
+		})
+		c.start((_err: BusinessError) => {
+			if (_err != null && _err.code != 0 && token == sessionToken) {
+				emitError('permission', 'capturer start ' + _err.code.toString())
+			}
+		})
+	}).catch((err: BusinessError) => {
+		if (token != sessionToken) return
+		emitError('unknown', 'createAudioCapturer ' + err.code.toString() + ' ' + err.message)
+	})
+}
+
+export function stopListening(): void {
+	// 建立期松手：静默放弃（token 自增使异步链失效，迟到的引擎/采集器自行释放），不派发终态
+	if (starting) {
+		cancelListening()
+		return
+	}
+	if (finished || stopping) return
+	stopping = true
+	if (maxTimer != 0) {
+		clearTimeout(maxTimer)
+		maxTimer = 0
+	}
+	releaseCapturer()
+	const e = engine
+	if (e == null) {
+		emitResult(lastPartial)
+		return
+	}
+	try {
+		// finish 通知引擎音频结束，等最终结果（onResult isFinal / onComplete）
+		e.finish(sessionId)
+	} catch (err) {
+		emitResult(lastPartial)
+		return
+	}
+	stopTimer = setTimeout((): void => {
+		stopTimer = 0
+		if (lastPartial.length > 0) {
+			emitResult(lastPartial)
+		} else {
+			emitError('timeout', 'stop timeout without final result')
+		}
+	}, 3000)
+}
+
+export function cancelListening(): void {
+	// starting 窗口 finished 仍为 true：必须一并处理，否则取消不掉建立中的会话
+	if (finished && !starting) return
+	finished = true
+	starting = false
+	sessionToken++
+	clearTimers()
+	const e = engine
+	const sid = sessionId
+	releaseCapturer()
+	if (e != null) {
+		try { e.cancel(sid) } catch (err) { console.error('gwork-speech cancel', err) }
+	}
+	releaseEngine()
+	options = null
+}

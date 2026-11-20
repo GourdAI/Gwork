@@ -26,6 +26,8 @@ function normalize(value: unknown): Locale {
 export function setLocale(next: Locale): void {
 	locale.value = next
 	i18n.global.locale.value = next
+	// 注意：uni.setLocale / uni.getLocale 是 uni-app（vue2/3）API，uni-app x 蒸汽模式运行时不存在，
+	// 调用会抛 TypeError 打断 onLaunch。语言真源就是本模块的 locale ref（语音识别等消费方直接读它）。
 	uni.setStorageSync(STORAGE_KEY, next)
 }
 

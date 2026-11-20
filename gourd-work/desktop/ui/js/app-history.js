@@ -3393,6 +3393,8 @@ function closeAllToolbarPanels() {
     $('#chatModelDropdown, #welcomeModelDropdown').removeClass('show');
     // 访问控制档位气泡（工具栏左区，与其余浮层互斥）
     $('.access-selector').removeClass('open');
+    // 连接器选择器气泡（同族；模型/档位/任务面板任一打开都收起它）
+    $('.conn-selector').removeClass('open');
     // 任务面板
     if (typeof window.hideTodoPanel === 'function') window.hideTodoPanel();
     // 队列面板
@@ -4933,6 +4935,13 @@ function inheritSelectionToSession(newSessionId) {
     }).fail(function (err) {
         console.error('Failed to inherit context length to new session:', err);
     });
+
+    // 连接器选择同样继承（含空选择）：新会话明确「无/哪些连接器」，
+    // 不落盘会让 context.mcpServers 停在 null——语义上等价于无，但回显
+    // 与用户刚做的选择可能不一致（欢迎页勾了却没带过去）。
+    if (window.GourdConnPicker && typeof window.GourdConnPicker.inheritToSession === 'function') {
+        window.GourdConnPicker.inheritToSession(newSessionId);
+    }
 }
 window.inheritSelectionToSession = inheritSelectionToSession;
 
@@ -5138,6 +5147,10 @@ function refreshSessionModel(sessionId) {
                 // 同一会话重新打开（刷新后）时恢复用户上次档位；新建会话不会走这里（无缓存 + 后端也回 default）。
                 if (window.GourdAccessMode && typeof window.GourdAccessMode.applyServerMode === 'function') {
                     window.GourdAccessMode.applyServerMode(sessionId, data.accessMode);
+                }
+                // 连接器选择回显（会话级）：同一响应携带 mcpServers（null=从未选过=无）。
+                if (window.GourdConnPicker && typeof window.GourdConnPicker.applyServerSelection === 'function') {
+                    window.GourdConnPicker.applyServerSelection(sessionId, data.mcpServers);
                 }
                 // Loop 执行取证提示条恢复：执行会话 composer 回显的是会话自己的旧值（任务参数
                 // transient 不写会话），刷新后/任意入口打开执行会话都靠这里从 /web/chat/loop-run
