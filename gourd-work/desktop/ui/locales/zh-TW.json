@@ -589,7 +589,8 @@
         "rt_extracting": "正在解壓安裝…",
         "rt_done": "執行環境安裝完成，正在連接連接器…",
         "rt_failed": "執行環境安裝失敗：{msg}",
-        "rt_conn_failed": "執行環境已安裝，但連接器仍未連接成功：{msg}"
+        "rt_conn_failed": "執行環境已安裝，但連接器仍未連接成功：{msg}",
+        "connecting": "正在連接…"
       },
       "title": "MCP 伺服器",
       "desc": "管理外部工具伺服器，擴充檔案、資料庫、瀏覽器等工具能力",

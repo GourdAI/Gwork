@@ -597,7 +597,8 @@
         "rt_extracting": "Extraction et installation…",
         "rt_done": "Environnement installé. Connexion du connecteur…",
         "rt_failed": "Échec de l'installation de l'environnement : {msg}",
-        "rt_conn_failed": "L’environnement est installé, mais le connecteur ne parvient toujours pas à se connecter : {msg}"
+        "rt_conn_failed": "L’environnement est installé, mais le connecteur ne parvient toujours pas à se connecter : {msg}",
+        "connecting": "Connexion…"
       },
       "title": "Serveurs MCP",
       "desc": "Gérer les serveurs d'outils externes (fichiers, bases de données, navigateurs)",

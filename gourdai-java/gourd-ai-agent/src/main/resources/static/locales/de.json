@@ -597,7 +597,8 @@
         "rt_extracting": "Wird entpackt und installiert…",
         "rt_done": "Runtime installiert. Connector wird verbunden…",
         "rt_failed": "Runtime-Installation fehlgeschlagen: {msg}",
-        "rt_conn_failed": "Runtime installiert, aber der Connector konnte weiterhin nicht verbunden werden: {msg}"
+        "rt_conn_failed": "Runtime installiert, aber der Connector konnte weiterhin nicht verbunden werden: {msg}",
+        "connecting": "Verbinden…"
       },
       "title": "MCP-Server",
       "desc": "Externe Tool-Server verwalten, Date-, Datenbank-, Browser-Tools erweitern",

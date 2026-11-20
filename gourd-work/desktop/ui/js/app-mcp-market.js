@@ -52,6 +52,14 @@
     'stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
     '<polyline points="20 6 9 17 4 12"/></svg>';
 
+  /** 安装中的圆弧 spinner（2026-11 用户报障「加号在转」）：旧实现直接旋转
+   *  PLUS_SVG —— 加号转 45° 看起来是个 ×，且安装 POST 要同步等后端拉起
+   *  npx/uvx 完成 MCP 握手（冷启动现下包可达分钟级），干转的加号像卡死。
+   *  现改为真正的 loading 圆弧 + title「正在连接…」，语义不再歧义。 */
+  var SPINNER_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="2.4" stroke-linecap="round">' +
+    '<path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>';
+
   /* 内置目录源白名单（与后端 normalize_source 同口径）。展示名走
    * settings.mcp.market.source_* 键；未知值一律回落魔搭。 */
   var SOURCES = ['modelscope', 'tencent', 'smithery'];
@@ -366,10 +374,21 @@
        *
        * 已安装条目（marketId 命中 installed 索引）：+ 号换成对勾 disabled 态
        * （title=已安装），卡片加 .mcp-market-card-installed 类与徽标（形态参考
-       * 技能卡 .skill-card-installed）。整卡仍可点开详情弹窗查看/重复连接。 */
+       * 技能卡 .skill-card-installed）。整卡仍可点开详情弹窗查看（弹窗主按钮
+       * 同为禁用「已安装」态——2026-11 用户拍板：不再放行重复安装出 name-2 副本）。
+       *
+       * 安装中（installing[id]，内存锁为唯一真源）：cards() 会因追加加载/
+       * installed 索引回填反复重建 DOM，安装态必须在**生成时**就按锁渲染
+       * （圆弧 spinner + disabled），否则重绘后新按钮丢 installing 态、
+       * 界面与内存锁脱节。 */
       var installed = isInstalled(it.id);
-      var addLabel = installed ? m('installed_badge', '已安装') : m('connect', '连接');
-      var addBtn = installed
+      var busy = !!installing[it.id];
+      var addLabel = busy ? m('connecting', '正在连接…')
+        : installed ? m('installed_badge', '已安装') : m('connect', '连接');
+      var addBtn = busy
+        ? '<button type="button" class="mcp-market-card-add installing" disabled data-id="' + id +
+          '" title="' + esc(addLabel) + '" aria-label="' + esc(addLabel) + '">' + SPINNER_SVG + '</button>'
+        : installed
         ? '<button type="button" class="mcp-market-card-add mcp-market-card-installed-check" disabled' +
           ' title="' + esc(addLabel) + '" aria-label="' + esc(addLabel) + '">' + CHECK_SVG + '</button>'
         : '<button type="button" class="mcp-market-card-add" data-act="install" data-id="' + id +
@@ -806,9 +825,12 @@
      * 「精选」「已托管」概念已按用户拍板整体移除：魔搭 hosted 专属 URL
      * 未实现，展示「已托管」只会误导用户勾了连不上。 */
     var badges = '';
-    /* 已安装徽标：弹窗顶部提示该条目已落盘。主按钮保持「连接」仍可点——
-     * 重复安装因后端重名自动加后缀会装成 name-2，是可接受行为，不禁止。 */
-    if (isInstalled(id)) {
+    /* 已安装徽标：弹窗顶部提示该条目已落盘。主按钮同步收口为禁用「已安装」
+     * （2026-11 用户报障 + 拍板：旧实现放行重复安装，后端重名自动加后缀装成
+     * name-2，用户看到两张一样的卡；现与卡片右上角 ✓ 禁用态同口径。重连
+     * 入口在「已安装」页的开关，不在这里）。 */
+    var alreadyInstalled = isInstalled(id);
+    if (alreadyInstalled) {
       badges += '<span class="mcp-market-badge mcp-market-installed-badge">' +
         esc(m('installed_badge', '已安装')) + '</span>';
     }
@@ -846,11 +868,20 @@
       '  </div>' +
       '  <div class="mcp-market-modal-foot">' +
       '    <button type="button" class="mcp-market-cancel-btn" data-close>' + esc(m('cancel', '取消')) + '</button>' +
-      '    <button type="button" class="mcp-market-install-btn" data-confirm data-id="' + esc(id) + '">' +
-      esc(fields ? m('save_connect', '保存并连接') : m('connect', '连接')) + '</button>' +
+      /* 已安装：主按钮禁用「已安装」，不再挂 data-confirm（DOM 层就没有提交
+       * 入口，2026-11 用户拍板：不再放行重复安装出 name-2 副本）；
+       * confirmInstall/install 里另有 isInstalled 兜底（防外部直调）。 */
+      (alreadyInstalled
+        ? '    <button type="button" class="mcp-market-install-btn mcp-market-installed-btn" disabled>' +
+          esc(m('installed_badge', '已安装')) + '</button>'
+        : '    <button type="button" class="mcp-market-install-btn" data-confirm data-id="' + esc(id) + '">' +
+          esc(fields ? m('save_connect', '保存并连接') : m('connect', '连接')) + '</button>') +
       '  </div>' +
       '</div>';
     modal.setAttribute('data-current', id);
+    /* 安装中打开/重绘详情（install 转必填 env 弹窗、i18n 重绘等路径）：
+     * 按内存锁恢复主按钮 installing 态，与卡片 spinner 同口径。 */
+    if (installing[id]) setInstalling(id, true);
   }
 
   /**
@@ -901,22 +932,46 @@
 
   /* 安装在途锁（per-id）：install 是「取详情 → auth.state → POST」的异步链，
    * 连点 `+` 或弹窗「连接」会并发提交，第二个请求撞后端重名 400，用户看到
-   * 「已安装」紧跟「安装失败」。CSS 里 .installing 态早已备好，这里接上。 */
+   * 「已安装」紧跟「安装失败」。
+   *
+   * ⚠ 这张内存表是安装态的**唯一真源**：cards() 会因追加加载 / installed
+   * 索引回填反复重建卡片区，setInstalling 对旧 DOM 节点打的 class 随重建
+   * 丢失 —— cards() 生成时必须按本表渲染 spinner（2026-11 用户报障轮），
+   * 否则「界面可点、内存锁在」的脱节态又回来。 */
   var installing = {};
   function setInstalling(id, on) {
     if (on) installing[id] = true; else delete installing[id];
+    var label = on ? m('connecting', '正在连接…') : m('connect', '连接');
     var root = state.root || document;
     root.querySelectorAll('.mcp-market-card-add[data-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]')
-      .forEach(function (b) { b.classList.toggle('installing', !!on); b.disabled = !!on; });
+      .forEach(function (b) {
+        b.classList.toggle('installing', !!on); b.disabled = !!on;
+        /* 图标随锁切换：安装中 = 圆弧 spinner（不再旋转加号——加号转 45°
+         * 是个 ×，用户报障「加号在转」像卡死）；结束 = 还原 + 号。
+         * 已安装对勾按钮没有 data-id，不会命中这里；安装成功后的对勾
+         * 由 refreshInstalled → cards() 重绘接管。 */
+        b.innerHTML = on ? SPINNER_SVG : PLUS_SVG;
+        b.setAttribute('title', label); b.setAttribute('aria-label', label);
+      });
     var modal = document.getElementById('mcpMarketDetail');
     if (modal) modal.querySelectorAll('[data-confirm],[data-retry]').forEach(function (b) {
       b.classList.toggle('installing', !!on); b.disabled = !!on;
+      /* 弹窗主按钮同步给出文字进度：安装 POST 同步等后端拉起 npx/uvx 完成
+       * MCP 握手，冷启动现下包可达分钟级，无文案的静默等待像卡死。 */
+      if (b.getAttribute('data-confirm') !== null) {
+        b.textContent = on ? m('connecting', '正在连接…')
+          : (modal.querySelector('[data-env]') ? m('save_connect', '保存并连接') : m('connect', '连接'));
+      }
     });
   }
 
   async function install(id, env) {
     if (!id) return;
     if (installing[id]) return;            // 在途：连点直接忽略
+    /* 已安装收口兜底（2026-11 用户拍板）：弹窗主按钮已按 isInstalled 渲染为
+     * 禁用态，这里再挡一层外部直调 / 索引晚到导致的重复提交，绝不装出
+     * name-2 副本。重连入口在「已安装」页的开关。 */
+    if (isInstalled(id)) return;
     setInstalling(id, true);
     try {
       // 详情弹窗会带 env；卡片直装时先取详情，若存在必填 env 则弹出表单让用户补，

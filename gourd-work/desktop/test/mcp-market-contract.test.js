@@ -177,7 +177,10 @@ test('⑥ 24 份语言包含 settings.mcp.market.* 且键集一致', () => {
          * 「缺少环境就自动安装，交互上只提示正在下载，不要确认点击；
          * 运行环境装好整个连接器才算安装完成」）：进度弹窗自动代装。 */
         'rt_title', 'rt_need', 'rt_source', 'rt_downloading',
-        'rt_extracting', 'rt_done', 'rt_failed', 'rt_conn_failed']
+        'rt_extracting', 'rt_done', 'rt_failed', 'rt_conn_failed',
+        /* 2026-11 用户报障「加号在转」轮：安装中按钮/弹窗主按钮的进度文案
+         * （安装 POST 同步等 MCP 握手，冷启动分钟级，静默等待像卡死）。 */
+        'connecting']
         .forEach(k => assert.equal(typeof mkt[k], 'string', f + ': 缺 ' + k));
       assert.ok(!('install' in mkt), f + ': install 键已废弃（UI 改用 connect/save_connect），不得复活');
       /* 死键反向断言：try_it / detail 若复活，说明「示例区」或「详情文字按钮」
@@ -235,8 +238,10 @@ test('⑥ 24 份语言包含 settings.mcp.market.* 且键集一致', () => {
        * 2026-11 自动代装轮（用户二次拍板「不要确认点击，缺环境就自动装，
        * 装好整个连接器才算安装完成」）：-rt_install（确认按钮退役）
        * /-rt_installed（运行时就绪中间态 toast 退役，成功统一报 installed_names）
-       * /+rt_conn_failed（运行时装好但重连仍失败，带 {msg}）。32→31。 */
-      assert.equal(Object.keys(mkt).length, 31, f + ': market 键数漂移，键集契约需同步更新');
+       * /+rt_conn_failed（运行时装好但重连仍失败，带 {msg}）。32→31。
+       * 2026-11 「加号在转」报障轮：+connecting（安装中 spinner 的 title 与
+       * 弹窗主按钮进度文案）。31→32。 */
+      assert.equal(Object.keys(mkt).length, 32, f + ': market 键数漂移，键集契约需同步更新');
       /* 确认门死键防复活：自动代装没有「下载并安装」确认按钮，也没有
        * 「运行环境已就绪」中间态成功 toast（装好+重连成功才报安装完成）。 */
       assert.ok(!('rt_install' in mkt), f + ': rt_install 已随确认按钮退役，不得复活');
@@ -1233,7 +1238,11 @@ function mkInstallSandbox(base, opts) {
     window: { addEventListener() {}, showToast: (m, t) => toasts.push({ m, t }), GourdI18n: null },
     fetch: async (url, init) => {
       url = String(url);
-      if (/market\/install/.test(url)) return ok(opts.installData);
+      if (/market\/install/.test(url)) {
+        /* ㉟ 用：installGate 挂起安装响应，制造「POST 在途时卡片区重绘」窗口。 */
+        if (opts.installGate) await opts.installGate;
+        return ok(opts.installData);
+      }
       if (/market\/detail/.test(url)) return ok({
         name: 'Fetch', description: 'd', readme: '',
         env_schema: { properties: {}, required: [] },
@@ -1339,7 +1348,10 @@ test('㉛ 修4：已安装卡片（marketId 命中）+ 按钮为对勾 disabled 
     assert.ok(!/mcp-market-card-installed/.test(h3.grid.innerHTML), v.tag + ': 降级态不得画已安装');
     assert.equal(h3.toasts.length, 0, v.tag + ': 名单失败必须静默，不得弹错误 toast');
 
-    // (d) 详情弹窗：已安装条目顶部画徽标，主按钮「连接」仍可点（重复安装装成 name-2 可接受）。
+    /* (d) 详情弹窗收口（2026-11 用户报障「已安装过的怎么还能点击安装」+ 拍板
+     * 「禁用显示已安装」）：旧契约放行重复安装（后端重名加后缀装成 name-2，
+     * 用户看到两张一样的卡）。现主按钮必须是 disabled「已安装」，DOM 层
+     * 不得再挂 data-confirm；install() 外部直调也要被 isInstalled 兜底挡住。 */
     const h4 = mkInstallSandbox(v.base, {
       installData: { installed: [] },
       installedList: [{ name: 'fetch', marketId: '@a/b' }],
@@ -1349,7 +1361,70 @@ test('㉛ 修4：已安装卡片（marketId 命中）+ 按钮为对勾 disabled 
     await h4.market.showDetail('@a/b');
     const modalHtml = h4.modal.innerHTML;
     assert.ok(/mcp-market-installed-badge/.test(modalHtml), v.tag + ': 已安装条目的详情弹窗缺徽标');
-    assert.ok(/data-confirm/.test(modalHtml), v.tag + ': 已安装条目的「连接」主按钮不得被禁用');
+    assert.ok(!/data-confirm/.test(modalHtml),
+      v.tag + ': 已安装条目的弹窗仍挂 data-confirm（重复安装出 name-2 副本的口子没堵）');
+    const footBtn = /<button[^>]*mcp-market-install-btn[^>]*>/.exec(modalHtml);
+    assert.ok(footBtn && /\bdisabled\b/.test(footBtn[0]),
+      v.tag + ': 已安装条目的弹窗主按钮必须 disabled: ' + (footBtn && footBtn[0]));
+    assert.ok(/mcp-market-installed-btn/.test(modalHtml), v.tag + ': 缺已安装主按钮的幽灵态类名');
+    // 兜底：绕过 DOM 直调 install() 也不得发出安装请求（无 toast、无副本）。
+    await h4.market.install('@a/b', {});
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(h4.toasts.length, 0,
+      v.tag + ': 已安装条目直调 install() 未被 isInstalled 兜底拦截: ' + JSON.stringify(h4.toasts));
+  }
+});
+
+/* ===== ㉟ 2026-11 用户报障「加号在转」轮：安装中形态与状态保持 =====
+ *
+ * 报障链：.installing 直接旋转 PLUS_SVG —— 加号转 45° 是个 ×，且安装 POST
+ * 同步等后端拉起 npx/uvx 完成 MCP 握手（冷启动分钟级），干转的加号像卡死。
+ * 连带缺陷：cards() 因追加加载 / installed 索引回填反复重建 DOM，
+ * setInstalling 打在旧节点上的 class 随重建丢失 → 界面可点、内存锁在。
+ * 修法：SPINNER_SVG 圆弧 + cards() 生成时按 installing 内存表渲染（唯一真源）。
+ */
+test('㉟ 安装中必须是圆弧 spinner（不得旋转加号），且 cards() 重绘后状态不丢', async () => {
+  for (const v of VARIANTS) {
+    const src = read(path.join(v.base, 'js', 'app-mcp-market.js'));
+    // (a) 静态：SPINNER_SVG 存在且是圆弧 path（与 + 号的两条 line 结构不同）
+    const spM = /var SPINNER_SVG = ([\s\S]*?);\r?\n/.exec(src);
+    assert.ok(spM, v.tag + ': 缺 SPINNER_SVG 常量');
+    assert.ok(/<path/.test(spM[1]) && !/<line/.test(spM[1]),
+      v.tag + ': SPINNER_SVG 必须是圆弧 path，不得还是 + 号（旋转加号 = 用户报障的 ×）');
+    // (b) cards() 生成时必须查 installing 内存表（重绘后状态保持的唯一真源）
+    const cardsFn = /function cards\(\)[\s\S]*?\n  \}/.exec(src);
+    assert.ok(cardsFn && /installing\[/.test(cardsFn[0]),
+      v.tag + ': cards() 未按 installing 内存表渲染安装态（重绘后 spinner 丢失回归）');
+    // (c) 行为：安装 POST 在途时触发一次重绘（模拟 installed 索引回填），
+    //     重绘出的按钮必须仍是 installing disabled + spinner，且无 install 动作。
+    let releaseInstall;
+    const gate = new Promise(r => { releaseInstall = r; });
+    const h = mkInstallSandbox(v.base, {
+      installData: { installed: ['fetch'], connectErrors: [] },
+      installedList: [],
+      installGate: gate,
+    });
+    await h.market.refresh();
+    await new Promise(r => setTimeout(r, 30));
+    const inflight = h.market.install('@a/b', {});
+    await new Promise(r => setTimeout(r, 30));   // 安装请求已在途（被 gate 卡住）
+    await h.market.refresh();                    // 重绘：旧 DOM 节点连同 installing class 全部丢弃
+    await new Promise(r => setTimeout(r, 30));
+    const busyBtn = /<button[^>]*mcp-market-card-add[^>]*>/.exec(h.grid.innerHTML);
+    assert.ok(busyBtn, v.tag + ': 重绘后卡片按钮缺失');
+    assert.ok(/installing/.test(busyBtn[0]) && /\bdisabled\b/.test(busyBtn[0]),
+      v.tag + ': 重绘后安装态丢失（界面可点、内存锁在的脱节态回归）: ' + busyBtn[0]);
+    assert.ok(!/data-act="install"/.test(busyBtn[0]),
+      v.tag + ': 安装中的按钮不得再挂 install 动作');
+    assert.ok(/<path/.test(h.grid.innerHTML) && !/mcp-market-card-add[^>]*>\s*<svg[^>]*><line/.test(h.grid.innerHTML),
+      v.tag + ': 安装中按钮应画圆弧 spinner 而不是 + 号');
+    releaseInstall();
+    await inflight;
+    await new Promise(r => setTimeout(r, 30));
+    // (d) 安装完成 + 索引回填后：对勾 disabled 态接管，spinner 退场。
+    const doneBtn = /<button[^>]*mcp-market-card-add[^>]*>/.exec(h.grid.innerHTML);
+    assert.ok(doneBtn && !/installing/.test(doneBtn[0]),
+      v.tag + ': 安装完成后 spinner 未退场: ' + (doneBtn && doneBtn[0]));
   }
 });
 

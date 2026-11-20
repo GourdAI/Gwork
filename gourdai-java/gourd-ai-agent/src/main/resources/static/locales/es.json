@@ -597,7 +597,8 @@
         "rt_extracting": "Extrayendo e instalando…",
         "rt_done": "Entorno instalado. Conectando el conector…",
         "rt_failed": "Error al instalar el entorno: {msg}",
-        "rt_conn_failed": "El entorno se instaló, pero el conector sigue sin conectarse: {msg}"
+        "rt_conn_failed": "El entorno se instaló, pero el conector sigue sin conectarse: {msg}",
+        "connecting": "Conectando…"
       },
       "title": "Servidores MCP",
       "desc": "Gestionar servidores externos de herramientas (archivos, bases de datos, navegadores)",

@@ -597,7 +597,8 @@
         "rt_extracting": "Se extrage și se instalează…",
         "rt_done": "Mediu instalat. Se conectează conectorul…",
         "rt_failed": "Instalarea mediului a eșuat: {msg}",
-        "rt_conn_failed": "Mediul a fost instalat, dar conectorul tot nu se poate conecta: {msg}"
+        "rt_conn_failed": "Mediul a fost instalat, dar conectorul tot nu se poate conecta: {msg}",
+        "connecting": "Conectare…"
       },
       "title": "Servere MCP",
       "desc": "Gestionarea serverelor externe de instrumente (fișiere, baze de date, browsere)",

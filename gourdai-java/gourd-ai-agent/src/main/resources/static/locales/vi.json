@@ -597,7 +597,8 @@
         "rt_extracting": "Đang giải nén và cài đặt…",
         "rt_done": "Đã cài môi trường. Đang kết nối trình kết nối…",
         "rt_failed": "Cài đặt môi trường thất bại: {msg}",
-        "rt_conn_failed": "Môi trường đã được cài, nhưng trình kết nối vẫn chưa kết nối được: {msg}"
+        "rt_conn_failed": "Môi trường đã được cài, nhưng trình kết nối vẫn chưa kết nối được: {msg}",
+        "connecting": "Đang kết nối…"
       },
       "title": "Máy chủ MCP",
       "desc": "Quản lý máy chủ công cụ bên ngoài (tệp, cơ sở dữ liệu, trình duyệt)",

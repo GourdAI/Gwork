@@ -37,9 +37,20 @@
    与技能卡的 + 号割裂，且「详情」与「点整卡开弹窗」语义重复。 */
 .mcp-market-card-add { width: 26px; height: 26px; flex: 0 0 26px; border: none; border-radius: 7px; background: var(--bg-hover); color: var(--text-primary); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s, color 0.15s; }
 .mcp-market-card-add:hover { background: var(--accent); color: var(--accent-contrast); }
-.mcp-market-card-add.installing { opacity: 0.6; cursor: wait; }
+/* 安装中：按钮内是 JS 换入的圆弧 spinner（SPINNER_SVG），这里只负责让它转。
+   2026-11 用户报障「加号在转」：旧实现直接旋转 PLUS_SVG，加号转 45° 是个 ×，
+   语义歧义且像卡死。hover 不翻 accent（disabled 态无交互）。 */
+.mcp-market-card-add.installing,
+.mcp-market-card-add.installing:hover { opacity: 0.6; cursor: wait; background: var(--bg-hover); color: var(--text-primary); }
 .mcp-market-card-add.installing svg { animation: mcp-market-spin 0.8s linear infinite; }
 @keyframes mcp-market-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+/* 弹窗主按钮安装中：同样禁止 hover 变色（disabled），文字由 JS 写「正在连接…」。 */
+.mcp-market-install-btn.installing,
+.mcp-market-install-btn.installing:hover { opacity: 0.6; cursor: wait; background: var(--accent); border-color: var(--accent); }
+/* 已安装条目的弹窗主按钮（disabled「已安装」，2026-11 用户拍板收口重复安装）：
+   success 描边幽灵态，与卡片 ✓ / 已安装徽标同色系，不再是可以点击的实底主钮。 */
+.mcp-market-install-btn.mcp-market-installed-btn,
+.mcp-market-install-btn.mcp-market-installed-btn:hover { background: transparent; border-color: var(--color-success); color: var(--color-success); cursor: default; opacity: 1; }
 .mcp-market-verified { margin-left: 4px; color: var(--color-success); font-size: 11px; }
 /* 详情弹窗头部标识区。is_verified 只在详情接口返回，所以画在弹窗里，
    不画在卡片上（列表接口无此字段）。「已托管」徽标已随概念移除。 */

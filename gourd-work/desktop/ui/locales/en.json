@@ -597,7 +597,8 @@
         "rt_extracting": "Extracting and installing…",
         "rt_done": "Runtime installed. Connecting the connector…",
         "rt_failed": "Runtime installation failed: {msg}",
-        "rt_conn_failed": "Runtime installed, but the connector still failed to connect: {msg}"
+        "rt_conn_failed": "Runtime installed, but the connector still failed to connect: {msg}",
+        "connecting": "Connecting…"
       },
       "title": "MCP Servers",
       "desc": "Manage external tool servers to extend file, database, browser capabilities",
