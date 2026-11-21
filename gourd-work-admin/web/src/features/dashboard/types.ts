@@ -50,6 +50,20 @@ export interface FlowQuotaDataItem {
   quota?: number
 }
 
+// ============================================================================
+// GWork Devices (desktop clients linked to the current account)
+// ============================================================================
+
+export interface GworkDevice {
+  deviceId: string
+  name: string
+  platform: string
+  online: boolean
+  /** Millisecond timestamp of the last connect/disconnect event. */
+  lastSeen: number
+  appVersion: string
+}
+
 export type FlowMetric = 'quota' | 'tokens' | 'requests'
 
 export type FlowOverflowMode = 'aggregate' | 'hide'

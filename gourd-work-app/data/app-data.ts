@@ -1,19 +1,26 @@
 /**
- * 首页与对话页共享的静态占位数据。
+ * 首页与对话页共享的数据类型与剩余静态占位数据。
  *
- * 设备、工作空间、模型、技能、连接器、会话后续都应由接口返回；这里的名称与
- * 描述是演示内容，不是主题色；技能 / 连接器的标识色属于内容色（与头像同理），
+ * 设备 / 工作区 / 模型 / 会话已接真实链路（hooks/useDevices、useRunEnv、useConversations）；
+ * 权限、技能、连接器仍为演示内容。技能 / 连接器的标识色属于内容色（与头像同理），
  * 不参与亮暗主题切换，因此保留在后端数据位置而不是 $theme-palette。
  */
 
 export type DeviceOption = {
+	/** 后台设备 id（dev-xxxxxxxx）；未登录/无设备时为空串 */
+	deviceId: string
 	name: string
 	online: boolean
 	note: string
+	/** 毫秒时间戳，最后在线时刻（契约 §1.1 lastSeen）；0=未知 */
+	lastSeen: number
 }
 
 export type WorkspaceOption = {
+	/** 展示名：项目工作区为路径 basename，全局「对话」区为 i18n 文案 */
 	name: string
+	/** 工作区绝对路径；空串=全局「对话」区（sessions?root= 空） */
+	root: string
 }
 
 export type PermissionOption = {
@@ -23,12 +30,19 @@ export type PermissionOption = {
 }
 
 export type ModelOption = {
+	/** 内核模型标识（POST models/select 的 modelName 字段） */
+	model: string
 	name: string
 	desc: string
+	/** 该模型可选的思考深度码（内核 thinkingLevels，空=不支持选择） */
+	thinkingLevels: string[]
 }
 
 export type LevelOption = {
+	/** 展示名（i18n 文案或格式化窗口大小） */
 	name: string
+	/** 提交给内核的原始值：思考深度码（low/medium/...）或上下文 token 数串 */
+	value: string
 	desc: string
 }
 
@@ -78,44 +92,13 @@ export type ArtifactFile = {
 	size: string
 }
 
-export const DEFAULT_WORKSPACE: string = '对话'
-
-export const DEVICES: DeviceOption[] = [
-	{ name: 'MacBook', online: true, note: '' },
-	{ name: 'MacBook Pro 16', online: true, note: '' },
-	{ name: 'iMac Studio', online: false, note: '上次连接 2 天前' },
-	{ name: 'Windows 工作站', online: true, note: '' }
-]
-
-export const WORKSPACES: WorkspaceOption[] = [
-	{ name: DEFAULT_WORKSPACE },
-	{ name: '2026-08-15-16-14-35' },
-	{ name: '助理' }
-]
+/** 全局「对话」区的内部键：不落 UI（展示名走 i18n conv.title），也是 root='' 的映射键。
+ * 不能用展示文案当键：切换语言后所有比对会失配 */
+export const DEFAULT_WORKSPACE: string = '__chat__'
 
 export const PERMISSIONS: PermissionOption[] = [
 	{ name: '默认权限', desc: '仅可访问当前工作空间内的文件', danger: false },
 	{ name: '允许完全访问', desc: '可读写本机文件并执行命令', danger: true }
-]
-
-export const MODELS: ModelOption[] = [
-	{ name: 'Hy4', desc: '腾讯混元 · 综合能力强' },
-	{ name: 'Claude 4.5 Sonnet', desc: 'Anthropic · 擅长代码与长文' },
-	{ name: 'GPT-5', desc: 'OpenAI · 通用推理' },
-	{ name: 'DeepSeek V3', desc: 'DeepSeek · 高性价比' }
-]
-
-export const THINK_LEVELS: LevelOption[] = [
-	{ name: '低', desc: '快速响应，几乎不额外推理' },
-	{ name: '中', desc: '常规任务，速度与质量平衡' },
-	{ name: '高', desc: '复杂任务，深度推理更准确' }
-]
-
-export const CONTEXT_WINDOWS: LevelOption[] = [
-	{ name: '32K', desc: '短对话，响应更快' },
-	{ name: '128K', desc: '常规长文档与多轮对话' },
-	{ name: '300K', desc: '超长上下文，适合大型资料' },
-	{ name: '1M', desc: '最大窗口，适合整库级上下文' }
 ]
 
 export const SKILLS: SkillOption[] = [

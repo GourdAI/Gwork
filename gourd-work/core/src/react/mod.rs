@@ -172,7 +172,11 @@ impl ArgsProgress {
     /// frame waits a full interval: the skeleton card was *just* created by
     /// `action_draft`, so an immediate "0 B" update would be noise.
     pub fn new(now: i64) -> Self {
-        Self { bytes: 0, last_emit_bytes: 0, last_emit_at: now }
+        Self {
+            bytes: 0,
+            last_emit_bytes: 0,
+            last_emit_at: now,
+        }
     }
 
     /// Whether a progress frame is due at `now`.
@@ -313,7 +317,10 @@ pub struct ReActConfig {
 /// `None` means the model never responded at all, which is deliberately different
 /// from a real 0 ms first token (never fabricate a 0). `saturating_duration_since`
 /// guards against an implausible out-of-order pair instead of panicking/underflowing.
-fn ttft_ms_since(started_at: std::time::Instant, first_frame: Option<std::time::Instant>) -> Option<u64> {
+fn ttft_ms_since(
+    started_at: std::time::Instant,
+    first_frame: Option<std::time::Instant>,
+) -> Option<u64> {
     let first = first_frame?;
     Some(first.saturating_duration_since(started_at).as_millis() as u64)
 }
@@ -384,7 +391,9 @@ impl ReActAgent {
         frame_tx: mpsc::UnboundedSender<Frame>,
         cancel: CancellationToken,
     ) -> ReActResult {
-        let mut result = self.run_inner(config, history, frame_tx.clone(), cancel).await;
+        let mut result = self
+            .run_inner(config, history, frame_tx.clone(), cancel)
+            .await;
 
         // SINGLE TERMINAL GATE. Every abnormal exit inside `run_inner` emits an
         // `error` frame but returns without `done`, because the frontend leaves
@@ -464,11 +473,9 @@ impl ReActAgent {
         // genuinely died mid-flight, and those still need a placeholder or the
         // provider rejects the whole history on the resumed request.
         let suspended_call: Vec<String> = match result.stop_reason {
-            StopReason::SuspendedQuestion | StopReason::SuspendedHitl => result
-                .pending_tool_call_id
-                .clone()
-                .into_iter()
-                .collect(),
+            StopReason::SuspendedQuestion | StopReason::SuspendedHitl => {
+                result.pending_tool_call_id.clone().into_iter().collect()
+            }
             _ => Vec::new(),
         };
         // Scope the exemption to the LAST assistant(tool_calls) group: Gemini
@@ -476,10 +483,8 @@ impl ReActAgent {
         // orphan can reuse the exact id of the current pending call. Matching by
         // string across the whole history would exempt that older orphan too and
         // leave the resumed request with an unpaired tool_call (HTTP 400).
-        let repaired = repair_tool_pairing_except_in_last_group(
-            &mut result.messages,
-            &suspended_call,
-        );
+        let repaired =
+            repair_tool_pairing_except_in_last_group(&mut result.messages, &suspended_call);
         if repaired > 0 {
             warn!(
                 session = %config.session_id,
@@ -518,7 +523,9 @@ impl ReActAgent {
                     stop_reason: StopReason::Error,
                     next_seq: config.start_seq + 1,
                     messages: history,
-                    pending_command: None, pending_timeout_ms: None, pending_background: false,
+                    pending_command: None,
+                    pending_timeout_ms: None,
+                    pending_background: false,
                     pending_tool_call_id: None,
                 };
             }
@@ -542,7 +549,9 @@ impl ReActAgent {
         // below serves CLI/ACP/loop callers only — they keep every enabled
         // connector, which is their pre-picker behaviour.
         let gate: Arc<crate::tools::ToolGate> = config.gate.clone().unwrap_or_else(|| {
-            Arc::new(crate::tools::ToolGate::from_permission(&config.settings.permission))
+            Arc::new(crate::tools::ToolGate::from_permission(
+                &config.settings.permission,
+            ))
         });
         // What a delegated sub-agent inherits from this run. Hoisted beside the
         // gate for the same reason: both are fixed for the whole run, while a
@@ -576,7 +585,10 @@ impl ReActAgent {
                 );
             }
         }
-        let tool_defs = self.registry.definitions_async(&config.settings.permission, Some(&gate)).await;
+        let tool_defs = self
+            .registry
+            .definitions_async(&config.settings.permission, Some(&gate))
+            .await;
         // ── Tool-visibility guard (Qoder / ZCode / Java parity) ──────────────
         // The wire `tools` field is the ONLY schema source; the system prompt
         // gets a compact NAME-ONLY roster derived from this exact same list,
@@ -596,7 +608,11 @@ impl ReActAgent {
                 "no tool definitions available for this run; the model will see NO callable tools"
             );
         }
-        let tools = if tool_defs.is_empty() { None } else { Some(tool_defs.clone()) };
+        let tools = if tool_defs.is_empty() {
+            None
+        } else {
+            Some(tool_defs.clone())
+        };
         let roster = crate::react::prompt::tool_roster_prompt(tools.as_deref());
         let visibility_note = if roster.is_empty() {
             crate::react::prompt::NO_TOOLS_NOTICE.to_string()
@@ -719,21 +735,37 @@ impl ReActAgent {
         let mut max_turns = initial_max_turns;
         let mut seq = config.start_seq;
         let started_at = std::time::Instant::now();
-        // Loop detection (Java `StopLoopInterceptor`, aligned 2026-10-31).
+        // Loop detection (Java `StopLoopInterceptor`, redesigned 2026-11-20
+        // after the work-mwod1kcs false kill; competitor-aligned).
         //
-        // The old form compared only the *previous* fingerprint byte-for-byte,
-        // so it required four consecutive byte-identical rounds to fire —
-        // measured on real long runs: 0 triggers in 7h21m of logs. Real model
-        // arguments drift every round (different file, longer todo list), so a
-        // strict-equality detector is structurally blind. The windowed form
-        // below catches A-B-A-B alternation and, with canonicalised arguments,
-        // key-order/whitespace-only differences.
-        let mut loop_window: std::collections::VecDeque<String> =
-            std::collections::VecDeque::with_capacity(LOOP_WINDOW as usize);
-        let mut loop_reminders = 0u32;
-        // Turns of genuinely varied work since the last loop reminder. Used to
-        // forgive `loop_reminders` once the model has demonstrably broken out.
-        let mut productive_turns = 0u32;
+        // Two defects were fixed together:
+        //
+        // 1. The old fingerprint truncated every argument value to 120 chars.
+        //    A long shared prefix (e.g. `$f='C:\Apps\HBuilderX\...\compiler-sfc.cjs.js';
+        //    Select-String -Pattern '<different symbol>'`) ate the whole budget,
+        //    so 12 *different* investigation commands collapsed into one
+        //    fingerprint and the run was stopped mid-debugging. Arguments are
+        //    now canonicalised in full and hashed — no truncation.
+        //
+        // 2. The old shape was "windowed frequency → 3 reminders → hard stop".
+        //    Claude Code and Codex have no behavioural loop detector at all;
+        //    DSH (`repeat-tool-reminder`) uses a *consecutive* chain with
+        //    escalating reminders at 3/5/8 and **never blocks or stops**
+        //    ("Advisory, not veto" — its design notes explicitly reject
+        //    hard stops to protect legitimate polling/re-checking). This
+        //    kernel now follows DSH: consecutive-chain counting, escalating
+        //    soft reminders, no repetition-based hard stop. The only bound on
+        //    AutoRethink extension is context exhaustion (+ the user's Stop).
+        //
+        // Progress awareness (user decision 2026-11-20): a successful
+        // write/edit between two identical calls, or a *different* result for
+        // the same call, means the repeat produced new information — the
+        // chain restarts instead of escalating. Edit→restart→poll cycles are
+        // legitimate debugging, not spinning.
+        let mut loop_chain: Option<LoopChain> = None;
+        // Whether the previous executed round successfully mutated workspace
+        // state (write/edit). Consumed by the chain judge below.
+        let mut prev_round_mutated = false;
 
         // Turn-based todo-staleness reminder (Qoder CLI `todo_reminder`). Counts
         // reasoning turns since the last `todowrite` and since the last reminder;
@@ -790,12 +822,13 @@ impl ReActAgent {
         // back under the trigger, which needs the protected prefix or the
         // `min_reserved_messages` floor to exceed the window on its own;
         // measured normal runs sit at 13K-98K against a 223K trigger, so it
-        // effectively never fires. The loop cap is forgiven after
-        // `PRODUCTIVE_TURNS_TO_FORGIVE` varied turns. A model doing varied but
-        // useless work therefore extends indefinitely and only the user's Stop
-        // ends it. That is the deliberate trade, and it matches Java: the
-        // attempt to bound this by output volume is exactly what killed healthy
-        // runs, and a wrong bound costs more than no bound.
+        // effectively never fires. The loop guard is advisory-only (DSH
+        // semantics, 2026-11-20): reminders never stop a run. A model doing
+        // varied but useless work therefore extends indefinitely and only the
+        // user's Stop ends it. That is the deliberate trade, and it matches
+        // Java / Claude Code / Codex / DSH: every attempt to bound this by
+        // behaviour (output volume, reminder caps) killed healthy runs, and a
+        // wrong bound costs more than no bound.
 
         // Convergence gate (Java `EXTRA_CONVERGE_PENDING` /
         // `EXTRA_CONVERGE_DEFERRED_COUNT`): armed whenever a convergence-oriented
@@ -808,7 +841,8 @@ impl ReActAgent {
         let mut bg_deferred = 0u32;
 
         // Context compression (Java `ContextCompressionInterceptor`).
-        let compress_cfg = crate::compress::CompressionConfig::from_settings(&config.settings.general);
+        let compress_cfg =
+            crate::compress::CompressionConfig::from_settings(&config.settings.general);
         let mut calibration = crate::compress::Calibration::default();
 
         // Session-cumulative ledger for the meter's `args.total*` rows. The seed
@@ -902,7 +936,9 @@ impl ReActAgent {
                     stop_reason: StopReason::Cancelled,
                     next_seq: seq,
                     messages,
-                    pending_command: None, pending_timeout_ms: None, pending_background: false,
+                    pending_command: None,
+                    pending_timeout_ms: None,
+                    pending_background: false,
                     pending_tool_call_id: None,
                 };
             }
@@ -984,16 +1020,19 @@ impl ReActAgent {
                 // request that is certain to be rejected.
                 let threshold = (max_turns - 1).max((max_turns as f64 * 0.8) as u32);
                 if turns >= threshold {
-                    if context_exhausted || loop_reminders >= MAX_LOOP_REMINDERS {
-                        let reason = if context_exhausted {
-                            "context window exhausted"
-                        } else {
-                            "repeated unproductive tool calls"
-                        };
+                    // 2026-11-20 (user decision, competitor-aligned): the ONLY
+                    // early stop left is context exhaustion. The old
+                    // `|| loop_reminders >= MAX_LOOP_REMINDERS` disjunct killed
+                    // a healthy debugging run (work-mwod1kcs) whose "repeats"
+                    // were a fingerprint-truncation artefact; even with the
+                    // fingerprint fixed, repetition is a strategy signal for
+                    // the model (advisory reminders), not a kill signal for
+                    // the harness — Claude Code / Codex / DSH all agree.
+                    if context_exhausted {
                         let msg = format!(
-                            "Stopped after {} turns ({}); the task may be incomplete. \
+                            "Stopped after {} turns (context window exhausted); the task may be incomplete. \
                              Starting a new session, or lowering the retained history, will give it room to continue.",
-                            turns.saturating_sub(1), reason
+                            turns.saturating_sub(1)
                         );
                         // Ended on its own, not by Stop → hand the interjections
                         // back rather than discarding what the user typed.
@@ -1006,7 +1045,9 @@ impl ReActAgent {
                             stop_reason: StopReason::MaxTurns,
                             next_seq: seq,
                             messages,
-                            pending_command: None, pending_timeout_ms: None, pending_background: false,
+                            pending_command: None,
+                            pending_timeout_ms: None,
+                            pending_background: false,
                             pending_tool_call_id: None,
                         };
                     }
@@ -1027,7 +1068,10 @@ impl ReActAgent {
                 }
             } else if turns > max_turns {
                 // Hard stop, matching Java's standard (non-AutoRethink) branch.
-                let msg = format!("Reached maximum turns ({}). Task may be incomplete.", max_turns);
+                let msg = format!(
+                    "Reached maximum turns ({}). Task may be incomplete.",
+                    max_turns
+                );
                 steer_exit!(Frame::steer_dropped, true);
                 emit!(Frame::error(&config.session_id, &msg));
                 return ReActResult {
@@ -1037,7 +1081,9 @@ impl ReActAgent {
                     stop_reason: StopReason::MaxTurns,
                     next_seq: seq,
                     messages,
-                    pending_command: None, pending_timeout_ms: None, pending_background: false,
+                    pending_command: None,
+                    pending_timeout_ms: None,
+                    pending_background: false,
                     pending_tool_call_id: None,
                 };
             }
@@ -1111,7 +1157,10 @@ impl ReActAgent {
 
             // Emit reason_start (carries turnStartMs so the meter's elapsed row
             // restarts immediately instead of freezing on the previous trace).
-            emit!(Frame::reason_start(&config.session_id, config.turn_start_ms));
+            emit!(Frame::reason_start(
+                &config.session_id,
+                config.turn_start_ms
+            ));
 
             // Repair before sending, too: history rebuilt from disk may already
             // contain an orphan from a run that died before this gate existed
@@ -1138,8 +1187,10 @@ impl ReActAgent {
                         stop_reason: StopReason::Error,
                         next_seq: seq,
                         messages,
-                        pending_command: None, pending_timeout_ms: None, pending_background: false,
-                    pending_tool_call_id: None,
+                        pending_command: None,
+                        pending_timeout_ms: None,
+                        pending_background: false,
+                        pending_tool_call_id: None,
                     };
                 }
             };
@@ -1303,12 +1354,7 @@ impl ReActAgent {
                         // The first-delta frame carries the latched TTFT immediately,
                         // with no speed yet, instead of waiting for the first 500 ms.
                         if tps_meter.note_delta(now) {
-                            emit!(Frame::tps_progress(
-                                &config.session_id,
-                                0,
-                                0,
-                                model_ttft_ms,
-                            ));
+                            emit!(Frame::tps_progress(&config.session_id, 0, 0, model_ttft_ms,));
                         }
                         emit!(Frame::text_delta(&config.session_id, &delta));
                         if tps_meter.should_emit(now) {
@@ -1331,12 +1377,7 @@ impl ReActAgent {
                             first_content_at = Some(now);
                         }
                         if tps_meter.note_delta(now) {
-                            emit!(Frame::tps_progress(
-                                &config.session_id,
-                                0,
-                                0,
-                                model_ttft_ms,
-                            ));
+                            emit!(Frame::tps_progress(&config.session_id, 0, 0, model_ttft_ms,));
                         }
                         if tps_meter.should_emit(now) {
                             let (tokens, ms) = tps_meter.take_window(now);
@@ -1379,10 +1420,7 @@ impl ReActAgent {
                         // 帧抑制，见 LIFECYCLE_SUPPRESSED_TOOLS）。仍记 args_progress
                         // 以便执行段统一 remove，避免节流状态泄漏到后续轮次。
                         if !id.is_empty() && !name.is_empty() {
-                            args_progress.insert(
-                                index,
-                                ArgsProgress::new(now_ms()),
-                            );
+                            args_progress.insert(index, ArgsProgress::new(now_ms()));
                             if !lifecycle_suppressed(&name) {
                                 emit!(Frame::action_draft(&config.session_id, &name, &id));
                             }
@@ -1418,7 +1456,12 @@ impl ReActAgent {
                             }
                         }
                     }
-                    StreamEvent::Retry { attempt, max, reason, delivered } => {
+                    StreamEvent::Retry {
+                        attempt,
+                        max,
+                        reason,
+                        delivered,
+                    } => {
                         // The transport is re-issuing the same request.
                         //
                         // 【2026-11 用户决策】首字节前的失败也到达这里
@@ -1503,9 +1546,17 @@ impl ReActAgent {
                         // is a fresh stream, and measuring the idle/total caps
                         // against the aborted one would trip them immediately.
                         last_chunk_at = std::time::Instant::now();
-                        emit!(Frame::stream_retry(&config.session_id, attempt, max, &reason));
+                        emit!(Frame::stream_retry(
+                            &config.session_id,
+                            attempt,
+                            max,
+                            &reason
+                        ));
                     }
-                    StreamEvent::Done { finish_reason: fr, usage } => {
+                    StreamEvent::Done {
+                        finish_reason: fr,
+                        usage,
+                    } => {
                         finish_reason = fr;
                         // A provider may omit `usage` (or the stream may end
                         // abnormally). The frontend ends its live speed window on
@@ -1642,7 +1693,8 @@ impl ReActAgent {
                     // class. Re-armed per turn (Java `RetryTask` lifetime), shared
                     // by this call's retries, `Instant`-based so a wall-clock jump
                     // cannot fake-extend it.
-                    let timeout_out = timeout_class && timeout_retries >= MAX_TIMEOUT_RETRIES_PER_TURN;
+                    let timeout_out =
+                        timeout_class && timeout_retries >= MAX_TIMEOUT_RETRIES_PER_TURN;
                     let deadline_out = std::time::Instant::now() > retry_deadline;
                     let retries_out = call_retries >= model_retry_budget;
                     if !timeout_out && !deadline_out && !retries_out {
@@ -1653,7 +1705,12 @@ impl ReActAgent {
                         // Same call, so keep its deadline (see the re-arm point at
                         // the top of this loop).
                         retry_of_same_call = true;
-                        emit!(Frame::retry(&config.session_id, call_retries, model_retry_budget, &err));
+                        emit!(Frame::retry(
+                            &config.session_id,
+                            call_retries,
+                            model_retry_budget,
+                            &err
+                        ));
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         continue;
                     } else {
@@ -1670,7 +1727,8 @@ impl ReActAgent {
                                 "{}\nThis model call has spent {} minutes retrying without one \
                                  successful response, so the run stopped instead of retrying the \
                                  same request again. Resend the message to continue.",
-                                err, MODEL_CALL_RETRY_DEADLINE_SECS / 60
+                                err,
+                                MODEL_CALL_RETRY_DEADLINE_SECS / 60
                             )
                         } else if retries_out {
                             format!(
@@ -1689,8 +1747,10 @@ impl ReActAgent {
                             stop_reason: StopReason::Error,
                             next_seq: seq,
                             messages,
-                            pending_command: None, pending_timeout_ms: None, pending_background: false,
-                    pending_tool_call_id: None,
+                            pending_command: None,
+                            pending_timeout_ms: None,
+                            pending_background: false,
+                            pending_tool_call_id: None,
                         };
                     }
                 } else {
@@ -1763,7 +1823,9 @@ impl ReActAgent {
                         stop_reason: StopReason::Error,
                         next_seq: seq,
                         messages,
-                        pending_command: None, pending_timeout_ms: None, pending_background: false,
+                        pending_command: None,
+                        pending_timeout_ms: None,
+                        pending_background: false,
                         pending_tool_call_id: None,
                     };
                 }
@@ -1918,7 +1980,9 @@ impl ReActAgent {
                         stop_reason: StopReason::Error,
                         next_seq: seq,
                         messages,
-                        pending_command: None, pending_timeout_ms: None, pending_background: false,
+                        pending_command: None,
+                        pending_timeout_ms: None,
+                        pending_background: false,
                         pending_tool_call_id: None,
                     };
                 }
@@ -2002,7 +2066,9 @@ impl ReActAgent {
                     stop_reason: StopReason::Error,
                     next_seq: seq,
                     messages,
-                    pending_command: None, pending_timeout_ms: None, pending_background: false,
+                    pending_command: None,
+                    pending_timeout_ms: None,
+                    pending_background: false,
                     pending_tool_call_id: None,
                 };
             }
@@ -2055,7 +2121,9 @@ impl ReActAgent {
                         stop_reason: StopReason::Error,
                         next_seq: seq,
                         messages,
-                        pending_command: None, pending_timeout_ms: None, pending_background: false,
+                        pending_command: None,
+                        pending_timeout_ms: None,
+                        pending_background: false,
                         pending_tool_call_id: None,
                     };
                 }
@@ -2075,7 +2143,10 @@ impl ReActAgent {
                 // insists on plain text it genuinely believes it is done. Without
                 // a cap the gate becomes its own dead loop — the model wants to
                 // stop but never can.
-                if converge_pending && converge_deferred < MAX_CONVERGE_DEFERRALS && !answer.is_empty() {
+                if converge_pending
+                    && converge_deferred < MAX_CONVERGE_DEFERRALS
+                    && !answer.is_empty()
+                {
                     // 契约 §2.1 放行判据：TODO 全完成 或 回答去空白 ≥400 字符，
                     // 任一命中即放行 END，不注入校验——完整回答被门禁反复打回
                     // 重写，正是「总结输出两遍」的直接成因。读取失败（None）
@@ -2101,7 +2172,9 @@ impl ReActAgent {
                         // prompt follows the previous user message and the model
                         // cannot see what it just said.
                         messages.push(ChatMessage::assistant(answer.clone()));
-                        messages.push(ChatMessage::user(completion_check_prompt(converge_deferred)));
+                        messages.push(ChatMessage::user(completion_check_prompt(
+                            converge_deferred,
+                        )));
                         // Stays armed: the next text-only reply is gated too, until
                         // the cap is reached.
                         continue;
@@ -2162,82 +2235,21 @@ impl ReActAgent {
                     stop_reason: StopReason::Completed,
                     next_seq: seq,
                     messages,
-                    pending_command: None, pending_timeout_ms: None, pending_background: false,
+                    pending_command: None,
+                    pending_timeout_ms: None,
+                    pending_background: false,
                     pending_tool_call_id: None,
                 };
             }
 
-            // Loop detection (Java `StopLoopInterceptor`, aligned 2026-10-31):
-            // windowed frequency over canonicalised fingerprints, not strict
-            // equality with the previous round. See the state declaration above
-            // for why the old form was structurally blind.
+            // Loop fingerprint for this round, computed *before* execution but
+            // judged *after* it (below): progress awareness needs the results.
+            // `None` (unparseable args) opts the round out of the chain entirely
+            // — Java's "宁漏勿误判" policy.
             let fingerprint = loop_fingerprint(&tool_calls, &content_buf);
-            if let Some(fp) = fingerprint.as_deref() {
-                loop_window.push_back(fp.to_string());
-                while loop_window.len() > LOOP_WINDOW as usize {
-                    loop_window.pop_front();
-                }
-                let repeats_in_window =
-                    loop_window.iter().filter(|f| f.as_str() == fp).count() as u32;
-                if repeats_in_window >= LOOP_REMINDER_THRESHOLD {
-                    // Soft reminder, not a hard stop (Java `StopLoopInterceptor`).
-                    //
-                    // This used to abort the run with an error frame. A repeated
-                    // call is evidence of a bad strategy, not of a broken agent:
-                    // killing the run discards everything it had accomplished and
-                    // leaves the user with nothing. Java injects a self-correction
-                    // prompt and lets the model break out on its own.
-                    //
-                    // The wording must not say "output your Final Answer now".
-                    // That phrasing is precisely what made the model treat a
-                    // transitional intent declaration as the final answer
-                    // (work-mupc5nd0). It suggests a different angle and leaves
-                    // convergence to the model plus the gate armed below.
-                    loop_reminders += 1;
-                    warn!(
-                        session = %config.session_id,
-                        repeats = repeats_in_window,
-                        reminders = loop_reminders,
-                        "loop detected, injecting self-correction prompt"
-                    );
-                    messages.push(ChatMessage::user(loop_detected_prompt(repeats_in_window)));
-                    converge_pending = true;
-                    // Clear the window so the injected message is not itself
-                    // counted as another repeat (Java `history.clear()`).
-                    loop_window.clear();
-                    productive_turns = 0;
-                } else {
-                    productive_turns += 1;
-                    // Forgive past reminders once the model has clearly moved on.
-                    //
-                    // Without this, `loop_reminders` only ever grows, so a long task
-                    // that hits three *separate* dead ends across fifty turns —
-                    // ordinary trial-and-error while debugging — gets stopped even
-                    // though the model recovered every time. That would replace the
-                    // old "dies at turn 20" failure with a new "dies after the third
-                    // stumble" one. Java's interceptor clears its window after each
-                    // reminder for the same reason: a reminder is a fresh start, not
-                    // a strike.
-                    //
-                    // The threshold keeps the safety net real: a model that ignores
-                    // the reminder and immediately repeats never accumulates enough
-                    // productive turns to reset, so it still stops at the cap.
-                    if productive_turns >= PRODUCTIVE_TURNS_TO_FORGIVE && loop_reminders > 0 {
-                        info!(
-                            session = %config.session_id,
-                            reminders_forgiven = loop_reminders,
-                            "model broke out of the loop; resetting loop-reminder budget"
-                        );
-                        loop_reminders = 0;
-                        productive_turns = 0;
-                    }
-                }
-            } else {
-                // Fingerprint unavailable (unparseable arguments): this round
-                // participates in neither detection nor forgiveness, matching
-                // Java's "宁漏匆误判" policy.
-                productive_turns += 1;
-            }
+            // Per-call result hashes + mutation flag, filled during execution.
+            let mut round_results: Vec<u64> = Vec::with_capacity(tool_calls.len());
+            let mut round_mutated = false;
 
             // Turn-based todo-staleness reminder (Qoder CLI `todo_reminder`).
             //
@@ -2251,11 +2263,16 @@ impl ReActAgent {
             if tool_calls.iter().any(|tc| tc.function.name == "todowrite") {
                 turns_since_todowrite = 0;
                 todo_reminders = 0;
-            } else if todo_reminder_due(turns_since_todowrite, turns_since_todo_reminder, todo_reminders) {
+            } else if todo_reminder_due(
+                turns_since_todowrite,
+                turns_since_todo_reminder,
+                todo_reminders,
+            ) {
                 // Same resolution as `ToolContext::todo_file` (single source:
                 // `session::todo_path`). Read only past the gate (at most once
                 // per `TODO_REMINDER_TURNS_BETWEEN` turns).
-                let todo_path = crate::session::todo_path(config.session_dir.as_deref(), &config.workspace);
+                let todo_path =
+                    crate::session::todo_path(config.session_dir.as_deref(), &config.workspace);
                 if let Ok(raw) = std::fs::read_to_string(&todo_path) {
                     if crate::todo::has_unfinished_items(&raw) {
                         messages.push(ChatMessage::user(crate::todo::stale_reminder(&raw)));
@@ -2268,7 +2285,11 @@ impl ReActAgent {
             // Add the assistant message with tool_calls to history
             let assistant_msg = ChatMessage {
                 role: Role::Assistant,
-                content: if content_buf.is_empty() { None } else { Some(crate::llm::MessageContent::Text(content_buf.clone())) },
+                content: if content_buf.is_empty() {
+                    None
+                } else {
+                    Some(crate::llm::MessageContent::Text(content_buf.clone()))
+                },
                 tool_calls: Some(tool_calls.clone()),
                 tool_call_id: None,
                 name: None,
@@ -2298,7 +2319,11 @@ impl ReActAgent {
                 .collect();
             if visible_members.len() > 1 {
                 let batch_id = format!("batch-{}", &config.run_id);
-                emit!(Frame::action_batch(&config.session_id, &batch_id, visible_members));
+                emit!(Frame::action_batch(
+                    &config.session_id,
+                    &batch_id,
+                    visible_members
+                ));
             }
 
             // Execute each tool call.
@@ -2306,7 +2331,9 @@ impl ReActAgent {
             // 契约 §4.2：complete_task 排到批尾（同批还有其他调用时它必须最后
             // 执行）；`stream_index` 保留原始流式索引，args_progress 按它记账。
             let ordered_calls = order_complete_task_last(tool_calls.clone());
-            let batch_has_ask = ordered_calls.iter().any(|(_, tc)| tc.function.name == "ask_user");
+            let batch_has_ask = ordered_calls
+                .iter()
+                .any(|(_, tc)| tc.function.name == "ask_user");
             // 契约 §4.2：complete_task 成功执行后把 summary 作为 final_answer
             // 直通 END（跳过收敛/后台门禁）。批内先记录，批末统一收尾——保证
             // 同批其他调用的 tool result 都已配对入史。
@@ -2338,13 +2365,15 @@ impl ReActAgent {
                         stop_reason: StopReason::Cancelled,
                         next_seq: seq,
                         messages,
-                        pending_command: None, pending_timeout_ms: None, pending_background: false,
+                        pending_command: None,
+                        pending_timeout_ms: None,
+                        pending_background: false,
                         pending_tool_call_id: None,
                     };
                 }
 
-                let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(serde_json::json!({}));
+                let args: serde_json::Value =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
 
                 info!(tool = %tc.function.name, action_id = %tc.id, "executing tool");
 
@@ -2527,7 +2556,9 @@ impl ReActAgent {
                                 stop_reason: StopReason::SuspendedQuestion,
                                 next_seq: seq,
                                 messages,
-                                pending_command: None, pending_timeout_ms: None, pending_background: false,
+                                pending_command: None,
+                                pending_timeout_ms: None,
+                                pending_background: false,
                                 pending_tool_call_id: Some(tc.id.clone()),
                             };
                         }
@@ -2593,6 +2624,16 @@ impl ReActAgent {
                     completed_summary = Some(output.text.clone());
                 }
 
+                // Loop-guard evidence (progress awareness): hash the *full*
+                // result, and note successful state mutations. Same call with
+                // a different answer = new information, not spinning; a
+                // successful write/edit between identical probes legitimises
+                // the re-run (edit → restart → poll).
+                round_results.push(simple_hash(&output.text));
+                if !output.is_error && STATE_MUTATING_TOOLS.contains(&tc.function.name.as_str()) {
+                    round_mutated = true;
+                }
+
                 // Add tool result to messages.
                 //
                 // Capped here rather than left to the compressor. This line used to
@@ -2618,7 +2659,10 @@ impl ReActAgent {
                 // 失败时退回纯截断，工具执行不受影响。
                 let persisted = crate::tools::output::persist_if_large(
                     &output.text,
-                    &crate::tools::output::store_dir(&config.workspace, config.session_dir.as_deref()),
+                    &crate::tools::output::store_dir(
+                        &config.workspace,
+                        config.session_dir.as_deref(),
+                    ),
                     &tc.function.name,
                     &tc.id,
                 );
@@ -2691,9 +2735,38 @@ impl ReActAgent {
                     stop_reason: StopReason::Completed,
                     next_seq: seq,
                     messages,
-                    pending_command: None, pending_timeout_ms: None, pending_background: false,
+                    pending_command: None,
+                    pending_timeout_ms: None,
+                    pending_background: false,
                     pending_tool_call_id: None,
                 };
+            }
+
+            // Loop guard (DSH `repeat-tool-reminder` semantics, 2026-11-20):
+            // judged after execution so progress awareness can see the
+            // results. Consecutive-chain counting with escalating reminders
+            // at 3/5/8; advisory only — never blocks, never stops the run.
+            // The reminder lands after this round's tool results, exactly
+            // where DSH's `additionalContexts` puts it.
+            if let Some(fp) = fingerprint.as_deref() {
+                let repeats =
+                    loop_chain_step(&mut loop_chain, fp, round_results, prev_round_mutated);
+                if repeats > 0 {
+                    warn!(
+                        session = %config.session_id,
+                        repeats,
+                        "repeat chain threshold reached, injecting advisory reminder"
+                    );
+                    messages.push(ChatMessage::user(loop_detected_prompt(repeats)));
+                    converge_pending = true;
+                }
+                prev_round_mutated = round_mutated;
+            } else {
+                // Fingerprint unavailable (unparseable arguments): the round
+                // neither extends nor resets the chain ("宁漏勿误判"), but a
+                // successful mutation still counts as progress for the next
+                // judgeable round.
+                prev_round_mutated |= round_mutated;
             }
 
             // Loop back for next reasoning turn
@@ -2708,32 +2781,86 @@ impl ReActAgent {
 /// or a bash command that already ran once can double-apply its side effects.
 const INTERRUPTED_MARKER: &str = "[该工具调用因任务中断/取消未执行完成，无输出结果。请勿直接重复执行同一调用；若确实需要该结果，请先评估副作用再决定。]";
 
-/// How many rounds back the loop-detection window reaches (Java
-/// `StopLoopInterceptor` default `windowSize = 8`). The window, not strict
-/// equality with the previous round, is what catches A-B-A-B alternation.
-const LOOP_WINDOW: usize = 8;
+/// Escalating reminder thresholds on the *consecutive* repeat chain, ported
+/// from DSH `repeat-tool-reminder` (defaults `[3, 5, 8]`). At each threshold a
+/// reminder is injected once; past the last the chain goes silent. **No
+/// threshold ever blocks a call or stops the run** — DSH's design notes
+/// explicitly reject "escalate to block" because it kills legitimate polling
+/// and re-checking, and Claude Code / Codex ship no behavioural detector at
+/// all. The old `LOOP_WINDOW`/`MAX_LOOP_REMINDERS` hard-stop shape killed a
+/// healthy debugging run (work-mwod1kcs, 448 turns) and is gone.
+const LOOP_REMINDER_THRESHOLDS: [u32; 3] = [3, 5, 8];
 
-/// How many identical fingerprints inside [`LOOP_WINDOW`] trigger a loop
-/// reminder (Java `maxRepeatCount = 3`). Not necessarily consecutive.
-const LOOP_REMINDER_THRESHOLD: u32 = 3;
+/// State of the consecutive-repeat chain (DSH: one chain per agent, reset by
+/// any different tracked call). `last_results` holds the previous round's
+/// per-call result hashes so progress awareness can tell "same call, new
+/// information" from "same call, same answer".
+struct LoopChain {
+    fingerprint: String,
+    count: u32,
+    /// Which of [`LOOP_REMINDER_THRESHOLDS`] already fired for this chain.
+    fired: usize,
+    /// Result hashes of the previous round's calls (same order as the batch).
+    last_results: Vec<u64>,
+}
 
-/// Cap on loop reminders per run.
+/// Tools whose successful execution mutates workspace state. A successful
+/// mutation between two identical calls means the world changed under the
+/// model's feet — re-running the same probe is then legitimate verification
+/// (edit → restart dev server → poll), not spinning.
 ///
-/// A reminder that does not change the model's behaviour will not change it the
-/// fourth time either; past this the run is genuinely stuck and the turn-budget
-/// branch stops it with an honest message instead of burning tokens forever.
-///
-/// Counted *since the last forgiveness* (see `PRODUCTIVE_TURNS_TO_FORGIVE`), not
-/// over the whole run, so ordinary trial-and-error in a long task does not add up
-/// to a stop.
-const MAX_LOOP_REMINDERS: u32 = 3;
+/// `write`/`edit` are the only registered file-mutating tools in this kernel
+/// (tools/builtin/mod.rs). `multiedit`/`notebookedit` were Claude Code names
+/// carried over from the Java mirror — dead entries here, removed. Edits made
+/// through `bash` are not listed: their result text changes too, so the
+/// result-hash leg of progress awareness covers them.
+const STATE_MUTATING_TOOLS: &[&str] = &["write", "edit"];
 
-/// How many consecutive turns of varied tool calls prove the model has broken out
-/// of a loop, earning a reset of the reminder budget.
+/// Pure decision step of the loop guard, table-testable without a live run.
 ///
-/// Three matches `LOOP_REMINDER_THRESHOLD`: it takes as much sustained varied
-/// work to earn forgiveness as it took repeated work to trigger the reminder.
-const PRODUCTIVE_TURNS_TO_FORGIVE: u32 = 3;
+/// Returns the reminder count to inject (0 = silent). `results` are this
+/// round's per-call result hashes; `mutated` says whether this round executed
+/// a successful state-mutating tool. Progress awareness: when the fingerprint
+/// repeats but the results differ from the previous round, or the previous
+/// round successfully mutated state, the chain restarts at 1 — the repeat is
+/// producing new information.
+fn loop_chain_step(
+    chain: &mut Option<LoopChain>,
+    fingerprint: &str,
+    results: Vec<u64>,
+    prev_mutated: bool,
+) -> u32 {
+    let repeats = match chain {
+        Some(c) if c.fingerprint == fingerprint => {
+            let new_info = prev_mutated || c.last_results != results;
+            if new_info {
+                c.count = 1;
+                c.fired = 0;
+                c.last_results = results;
+                return 0;
+            }
+            c.count += 1;
+            c.last_results = results;
+            c.count
+        }
+        _ => {
+            *chain = Some(LoopChain {
+                fingerprint: fingerprint.to_string(),
+                count: 1,
+                fired: 0,
+                last_results: results,
+            });
+            return 0;
+        }
+    };
+    // Fire each threshold at most once per chain; past the last, silence.
+    let c = chain.as_mut().expect("chain set above");
+    if c.fired < LOOP_REMINDER_THRESHOLDS.len() && repeats >= LOOP_REMINDER_THRESHOLDS[c.fired] {
+        c.fired += 1;
+        return repeats;
+    }
+    0
+}
 
 /// Turn-based todo-staleness reminder, ported from Qoder CLI `todo_reminder`
 /// (decoded runtime `MMi = {TURNS_SINCE_WRITE:10, TURNS_BETWEEN_REMINDERS:10}`).
@@ -2746,7 +2873,7 @@ const PRODUCTIVE_TURNS_TO_FORGIVE: u32 = 3;
 const TODO_REMINDER_TURNS_SINCE_WRITE: u32 = 10;
 const TODO_REMINDER_TURNS_BETWEEN: u32 = 10;
 
-/// Cap on todo reminders per run (mirrors `MAX_LOOP_REMINDERS`). A model that
+/// Cap on todo reminders per run. A model that
 /// ignores the nudge this many times is not going to be moved by a fourth;
 /// forgiven to zero whenever it calls `todowrite` on its own.
 const MAX_TODO_REMINDERS: u32 = 3;
@@ -2813,14 +2940,18 @@ const MODEL_CALL_RETRY_DEADLINE_SECS: u64 = 45 * 60;
 /// wall-clock jump cannot extend or fake-expire it). Single source for both the
 /// initial value and the per-turn re-arm, so the two can never drift apart.
 fn retry_deadline_from_now() -> std::time::Instant {
-    std::time::Instant::now()
-        + std::time::Duration::from_secs(MODEL_CALL_RETRY_DEADLINE_SECS)
+    std::time::Instant::now() + std::time::Duration::from_secs(MODEL_CALL_RETRY_DEADLINE_SECS)
 }
 
 /// Loop fingerprint for one round, Java `StopLoopInterceptor` semantics:
-/// canonicalised tool name + arguments (except NAME_ONLY_TOOLS, whose args
-/// change every round by design), or a hash of the text prefix for a
-/// text-only round.
+/// tool name + hash of the *fully* canonicalised arguments (except
+/// NAME_ONLY_TOOLS, whose args change every round by design), or a hash of
+/// the text prefix for a text-only round.
+///
+/// Full-value hashing is the work-mwod1kcs fix: the old 120-char-per-value
+/// truncation collapsed distinct commands sharing a long prefix into one
+/// fingerprint. Hashing keeps the fingerprint compact without losing any
+/// distinguishing bytes.
 ///
 /// Returns `None` when a tool-call's arguments cannot be parsed as JSON — an
 /// unparseable payload makes the fingerprint unreliable, and Java's policy is
@@ -2835,7 +2966,10 @@ fn loop_fingerprint(tool_calls: &[ToolCall], content: &str) -> Option<String> {
                 continue;
             }
             sb.push_str("#args:");
-            sb.push_str(&canonical_args(&tc.function.arguments)?);
+            sb.push_str(&format!(
+                "{:x}",
+                simple_hash(&canonical_args(&tc.function.arguments)?)
+            ));
         }
         return Some(sb);
     }
@@ -2875,7 +3009,10 @@ fn lifecycle_suppressed(tool_name: &str) -> bool {
 /// 没有 complete_task 时原样返回，零开销。
 fn order_complete_task_last(tool_calls: Vec<ToolCall>) -> Vec<(usize, ToolCall)> {
     let indexed: Vec<(usize, ToolCall)> = tool_calls.into_iter().enumerate().collect();
-    if !indexed.iter().any(|(_, tc)| tc.function.name == "complete_task") {
+    if !indexed
+        .iter()
+        .any(|(_, tc)| tc.function.name == "complete_task")
+    {
         return indexed;
     }
     let (mut rest, completes): (Vec<_>, Vec<_>) = indexed
@@ -2893,36 +3030,59 @@ const COMPLETE_TASK_WITH_ASK_ERROR: &str =
     "complete_task 未结束任务：本批含待用户回应的挂起操作（提问或审批），不能同时提交完成。请先等待用户回应，再决定是否收尾。";
 
 /// Canonical argument string for fingerprinting: parse the JSON, sort keys,
-/// truncate values to 120 chars. Key order and whitespace differences must
-/// not produce different fingerprints; different `file_path` / `command`
-/// values must (Java `canonicalArgsOf`).
+/// include values **in full**, and emit the result via serde_json so every
+/// structural character inside keys/values is escaped (hashed by the caller).
+/// Key order and whitespace differences must not produce different
+/// fingerprints; different `file_path` / `command` values must.
+///
+/// The old form truncated every value to 120 chars "defensively". That was the
+/// work-mwod1kcs false kill: commands sharing a >120-char prefix (a long
+/// `$f='C:\Apps\HBuilderX\...'` path assignment) differed only *after* the cut,
+/// so 12 distinct Select-String investigations fingerprinted identically and
+/// the run was stopped as "repeated unproductive tool calls". Full values cost
+/// nothing here — the result is hashed, never stored raw.
+///
+/// The intermediate form joined raw values with `|` and `=` (Java
+/// `canonicalArgsOf` still does). Unescaped delimiters let constructively
+/// different payloads canonicalise identically — `{"a":"x|b=y"}` vs
+/// `{"a":"x","b":"y"}` — so a genuinely new call could be misread as a repeat.
+/// JSON emission escapes `"` and `\` inside every string, making the mapping
+/// injective: distinct argument trees always produce distinct strings.
+/// (Java parity is deliberately not maintained — that kernel is slated for
+/// removal; Rust is the single source of truth.)
 fn canonical_args(raw: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let obj = match v {
-        serde_json::Value::Object(m) => m,
-        serde_json::Value::Null => return Some(String::new()),
-        // Non-object payloads (string, number) still fingerprint by value.
-        other => return Some(other.to_string()),
-    };
-    let mut keys: Vec<&String> = obj.keys().collect();
-    keys.sort();
-    let mut sb = String::new();
-    for k in keys {
-        if !sb.is_empty() {
-            sb.push('|');
+    serde_json::to_string(&canonical_value(&v)).ok()
+}
+
+/// Recursive canonicalisation into a fresh JSON value: objects sort their keys
+/// at every depth, arrays keep order, scalars pass through unchanged. No
+/// truncation anywhere. The caller serialises the result, which is where
+/// delimiter safety comes from.
+fn canonical_value(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(m) => {
+            // Explicit sort, then re-insert into a fresh Map. The workspace
+            // builds serde_json with `preserve_order` (IndexMap-backed, needed
+            // for settings.json — see Cargo.toml), so BTreeMap → Map::collect
+            // would *not* guarantee sorted output; insertion order is what
+            // counts, and we control it here.
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            let mut sorted = serde_json::Map::new();
+            for k in keys {
+                sorted.insert(
+                    k.clone(),
+                    canonical_value(m.get(k).unwrap_or(&serde_json::Value::Null)),
+                );
+            }
+            serde_json::Value::Object(sorted)
         }
-        let val = match obj.get(k) {
-            Some(serde_json::Value::Null) => "".to_string(),
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(other) => other.to_string(),
-            None => String::new(),
-        };
-        let val: String = val.chars().take(120).collect();
-        sb.push_str(k);
-        sb.push('=');
-        sb.push_str(&val);
+        serde_json::Value::Array(a) => {
+            serde_json::Value::Array(a.iter().map(canonical_value).collect())
+        }
+        other => other.clone(),
     }
-    Some(sb)
 }
 
 /// Stable, dependency-free string hash (FNV-1a 64). Only used for text
@@ -3006,19 +3166,31 @@ fn completion_check_prompt(deferred: u32) -> String {
 }
 
 /// Loop-detected reminder (Java `StopLoopInterceptor`, wording kept identical).
+/// Escalates DSH-style: gentle at 3, explicit at 5/8. Advisory only.
 ///
 /// Suggests a different angle only. It must not instruct the model to end the
 /// task: that phrasing made the model emit a transitional intent declaration as
 /// its final answer, so a Loop terminated "normally" with 0/10 TODOs done.
+/// The "若确认任务已全部完成" exit is kept (a genuinely finished task may end),
+/// but the reminder never *commands* convergence.
 fn loop_detected_prompt(count: u32) -> String {
-    format!(
-        "【系统提示：检测到潜在循环 (Loop Detected)】\n\
-         系统检测到您最近 {count} 次（连续 {count} 次相同）执行了高度相似的操作，可能存在\"原地打转\"的情况。\n\n\
-         请立即暂停当前操作思路，审视历史 Observation 并执行以下步骤：\n\
-         1. **有效性评估**：如果最近的尝试没有带来有效新线索，说明当前策略已失效，请必须更换思路或换个角度切入。\n\
-         2. **避免重复**：不要重复执行已经执行过且未产生新信息的操作。\n\
-         3. **任务完成校验**：若确认任务已全部完成，请给出面向用户的完整总结报告作为最终回答；若尚未完成，请继续执行未完成事项。"
-    )
+    if count <= LOOP_REMINDER_THRESHOLDS[0] {
+        format!(
+            "【系统提示：检测到潜在循环 (Loop Detected)】\n\
+             系统检测到您已连续 {count} 次执行完全相同的工具调用（参数与结果均未变化），可能存在\"原地打转\"的情况。\n\n\
+             请审视历史 Observation：如果最近的尝试没有带来有效新线索，请更换思路或换个角度切入；不要重复执行已执行过且未产生新信息的操作。\n\
+             若确认任务已全部完成，可给出面向用户的总结作为最终回答；若尚未完成，请继续执行未完成事项。"
+        )
+    } else {
+        format!(
+            "【系统提示：检测到潜在循环 (Loop Detected)】\n\
+             您已连续 {count} 次执行完全相同的工具调用（参数与结果均未变化）。重复同一调用不会产生新信息。\n\n\
+             请不要再以完全相同的参数调用该工具。请执行以下步骤：\n\
+             1. **有效性评估**：当前策略已失效，必须更换思路或换个角度切入（换工具、换参数、换排查方向）。\n\
+             2. **阻塞上报**：若客观限制导致无法推进，请向用户说明卡点与已排除的方向，请求协助。\n\
+             3. **任务完成校验**：若确认任务已全部完成，可给出面向用户的总结作为最终回答；若尚未完成，请继续执行未完成事项。"
+        )
+    }
 }
 
 /// One interjection as it appears on the wire (`args.items[]`).
@@ -3109,7 +3281,10 @@ fn settle_steers(
 fn queued_message_text(item: &crate::queue::QueuedMessage) -> String {
     let mut text = item.content.clone();
     if !item.image_paths.is_empty() {
-        text.push_str(&format!("\n[用户附带图片: {}]", item.image_paths.join(", ")));
+        text.push_str(&format!(
+            "\n[用户附带图片: {}]",
+            item.image_paths.join(", ")
+        ));
     }
     if !item.file_paths.is_empty() {
         text.push_str(&format!("\n[用户附带文件: {}]", item.file_paths.join(", ")));
@@ -3194,13 +3369,13 @@ fn repair_tool_pairing_except(messages: &mut Vec<ChatMessage>, skip: &[String]) 
         // so the group stays contiguous and correctly paired.
         let mut insert_at = j;
         for tc in &calls {
-            if tc.id.is_empty()
-                || skip.iter().any(|id| id == &tc.id)
-                || have.contains(&tc.id)
-            {
+            if tc.id.is_empty() || skip.iter().any(|id| id == &tc.id) || have.contains(&tc.id) {
                 continue;
             }
-            messages.insert(insert_at, ChatMessage::tool_result(&tc.id, INTERRUPTED_MARKER));
+            messages.insert(
+                insert_at,
+                ChatMessage::tool_result(&tc.id, INTERRUPTED_MARKER),
+            );
             insert_at += 1;
             repaired += 1;
         }
@@ -3314,11 +3489,23 @@ mod tests {
         let t0 = std::time::Instant::now();
         let at = |ms| t0 + std::time::Duration::from_millis(ms);
         assert_eq!(ttft_ms_since(t0, None), None, "no model response ⇒ no TTFT");
-        assert_eq!(ttft_ms_since(t0, Some(at(0))), Some(0), "instant first token is a real 0");
+        assert_eq!(
+            ttft_ms_since(t0, Some(at(0))),
+            Some(0),
+            "instant first token is a real 0"
+        );
         assert_eq!(ttft_ms_since(t0, Some(at(1_690))), Some(1_690));
-        assert_eq!(ttft_ms_since(t0, Some(at(5))), Some(5), "sub-10ms must not be rounded away");
+        assert_eq!(
+            ttft_ms_since(t0, Some(at(5))),
+            Some(5),
+            "sub-10ms must not be rounded away"
+        );
         // Clock anomaly (first before start) must not underflow to a huge u64.
-        assert_eq!(ttft_ms_since(at(9_000), Some(t0)), Some(0), "out-of-order pair clamps to 0");
+        assert_eq!(
+            ttft_ms_since(at(9_000), Some(t0)),
+            Some(0),
+            "out-of-order pair clamps to 0"
+        );
     }
 
     /// 【2026-11 用户拍板】TTFT = model first-token latency only. The latch must be
@@ -3348,19 +3535,25 @@ mod tests {
             "TTFT must latch on the first upstream frame (any kind) in the rx.recv() arm, excluding Retry AND Error"
         );
         assert!(
-            product.contains("model_ttft_ms = ttft_ms_since(stream_started_at, Some(last_chunk_at));"),
+            product
+                .contains("model_ttft_ms = ttft_ms_since(stream_started_at, Some(last_chunk_at));"),
             "TTFT must be measured from THIS call's request start, not the run start"
         );
         // The old run-start → first-visible-character wiring must be gone entirely.
-        assert!(!product.contains("first_visible_at"),
-            "the old run-level visible-character latch must not come back");
+        assert!(
+            !product.contains("first_visible_at"),
+            "the old run-level visible-character latch must not come back"
+        );
         // Every CALL SITE of ttft_ms_since must use the PER-CALL clock: the only
         // legal anchor is stream_started_at. The fn definition itself (which
         // takes a parameter) is not a call site and must be excluded, otherwise
         // the guard is red on correct code. Covers bare and qualified spellings
         // of any other clock.
         let anchor = "ttft_ms_since(stream_started_at,";
-        assert!(product.contains(anchor), "the per-call anchor must be in use");
+        assert!(
+            product.contains(anchor),
+            "the per-call anchor must be in use"
+        );
         let call_sites = product.matches("ttft_ms_since(").count()
             - product.matches("fn ttft_ms_since(").count();
         assert_eq!(
@@ -3373,33 +3566,66 @@ mod tests {
         // This covers the react-layer retries (empty/partial-output, corruption
         // gate) which `continue` without a transport Retry event: without this
         // reset an Error-only attempt would leave the next call showing '--'.
-        let call_start = product.split("let stream_started_at = std::time::Instant::now();")
-            .nth(1).unwrap_or("")
-            .split("loop {").next().unwrap_or("");
-        assert!(call_start.contains("model_ttft_ms = None;"),
-            "each model call must reset the TTFT latch beside stream_started_at");
+        let call_start = product
+            .split("let stream_started_at = std::time::Instant::now();")
+            .nth(1)
+            .unwrap_or("")
+            .split("loop {")
+            .next()
+            .unwrap_or("");
+        assert!(
+            call_start.contains("model_ttft_ms = None;"),
+            "each model call must reset the TTFT latch beside stream_started_at"
+        );
         // The retry branch re-arms the latch BEFORE the delivered/not-delivered
         // split, so both retry shapes restart the model clock; the decode segment
         // reset stays in the delivered branch.
-        let retry = product.split("StreamEvent::Retry { attempt, max, reason, delivered } =>")
-            .nth(1).unwrap_or("")
-            .split("emit!(Frame::stream_retry").next().unwrap_or("");
-        assert!(retry.contains("first_content_at = None;"), "retry must drop the aborted decode segment");
-        assert!(retry.contains("model_ttft_ms = None;"),
-            "retry is a fresh request: the model first-token clock must restart");
-        let (before_split, _after) = retry.split_once("if !delivered {").expect("delivered split must exist");
-        assert!(before_split.contains("model_ttft_ms = None;"),
-            "the TTFT reset must cover pre-first-byte retries too");
+        // Whitespace-normalised copy for layout-sensitive splits: rustfmt may
+        // wrap the match-arm pattern across lines.
+        let flat: String = product.split_whitespace().collect::<Vec<_>>().join(" ");
+        // rustfmt may keep the arm pattern on one line or expand it per-field
+        // (with a trailing comma); accept both layouts.
+        let retry = flat
+            .split("StreamEvent::Retry { attempt, max, reason, delivered } =>")
+            .nth(1)
+            .or_else(|| {
+                flat.split("StreamEvent::Retry { attempt, max, reason, delivered, } =>")
+                    .nth(1)
+            })
+            .unwrap_or("")
+            .split("emit!(Frame::stream_retry")
+            .next()
+            .unwrap_or("");
+        assert!(
+            retry.contains("first_content_at = None;"),
+            "retry must drop the aborted decode segment"
+        );
+        assert!(
+            retry.contains("model_ttft_ms = None;"),
+            "retry is a fresh request: the model first-token clock must restart"
+        );
+        let (before_split, _after) = retry
+            .split_once("if !delivered {")
+            .expect("delivered split must exist");
+        assert!(
+            before_split.contains("model_ttft_ms = None;"),
+            "the TTFT reset must cover pre-first-byte retries too"
+        );
         // Wire it into the settlement frame.
-        assert!(product.contains("ttft_ms: model_ttft_ms,"),
-            "context_size payload must carry the latched model TTFT");
+        assert!(
+            product.contains("ttft_ms: model_ttft_ms,"),
+            "context_size payload must carry the latched model TTFT"
+        );
     }
 
     fn call(id: &str, name: &str) -> ToolCall {
         ToolCall {
             id: id.to_string(),
             call_type: "function".into(),
-            function: FunctionCall { name: name.into(), arguments: "{}".into() },
+            function: FunctionCall {
+                name: name.into(),
+                arguments: "{}".into(),
+            },
         }
     }
 
@@ -3434,9 +3660,19 @@ mod tests {
         // Layer 2: the system prompt gets a compact roster from THAT SAME list.
         let roster = crate::react::prompt::tool_roster_prompt(Some(&defs));
         assert!(roster.contains("Available tools"), "{}", roster);
-        assert!(roster.contains("skillread"), "skill tools must be visible in the roster");
-        assert!(!roster.contains("\"properties\""), "roster must not duplicate the JSON Schema");
-        assert!(roster.len() < 2300, "roster must stay token-cheap, got {}", roster.len());
+        assert!(
+            roster.contains("skillread"),
+            "skill tools must be visible in the roster"
+        );
+        assert!(
+            !roster.contains("\"properties\""),
+            "roster must not duplicate the JSON Schema"
+        );
+        assert!(
+            roster.len() < 2300,
+            "roster must stay token-cheap, got {}",
+            roster.len()
+        );
         // Layer 3: a genuinely empty list is an explicit, honest state.
         assert!(crate::react::prompt::tool_roster_prompt(None).is_empty());
         assert!(crate::react::prompt::NO_TOOLS_NOTICE.contains("无可用工具"));
@@ -3451,17 +3687,29 @@ mod tests {
         let product = src.split("#[cfg(test)]").next().unwrap_or("");
         let run_inner = product
             .split_once("async fn run_inner(")
-            .map(|(_, rest)| rest.split("/// Marker written for a tool call").next().unwrap_or(""))
+            .map(|(_, rest)| {
+                rest.split("/// Marker written for a tool call")
+                    .next()
+                    .unwrap_or("")
+            })
             .unwrap_or("");
-        assert!(run_inner.contains("tool_roster_prompt(tools.as_deref())"),
-            "the compact roster must be derived from the same tools sent on the wire");
-        assert!(run_inner.contains("NO_TOOLS_NOTICE"),
-            "an empty tool set must be stated explicitly to the model");
-        assert!(run_inner.contains("ChatMessage::system(sys_text)"),
-            "the roster must be appended to the system message");
+        assert!(
+            run_inner.contains("tool_roster_prompt(tools.as_deref())"),
+            "the compact roster must be derived from the same tools sent on the wire"
+        );
+        assert!(
+            run_inner.contains("NO_TOOLS_NOTICE"),
+            "an empty tool set must be stated explicitly to the model"
+        );
+        assert!(
+            run_inner.contains("ChatMessage::system(sys_text)"),
+            "the roster must be appended to the system message"
+        );
         // The wire definitions and the roster must come from ONE list.
-        assert!(run_inner.contains("Some(tool_defs.clone())"),
-            "wire tools and the prompt roster must share one source");
+        assert!(
+            run_inner.contains("Some(tool_defs.clone())"),
+            "wire tools and the prompt roster must share one source"
+        );
     }
 
     // ─── terminal done gate (abnormal exits must close the UI) ───────────
@@ -3485,7 +3733,9 @@ mod tests {
             .expect("run_inner follows run")
             .0;
         assert!(
-            run.contains("if matches!(result.stop_reason, StopReason::Error | StopReason::MaxTurns)"),
+            run.contains(
+                "if matches!(result.stop_reason, StopReason::Error | StopReason::MaxTurns)"
+            ),
             "the terminal gate must cover BOTH Error and MaxTurns"
         );
         assert!(
@@ -3626,12 +3876,18 @@ mod tests {
     fn corrupt_name_is_flagged_and_empty_name_is_named() {
         let mut named = call("c1", "read");
         named.function.name = "re\u{FFFD}d".into();
-        assert_eq!(corrupt_argument_calls(&[named]), vec!["re\u{FFFD}d".to_string()]);
+        assert_eq!(
+            corrupt_argument_calls(&[named]),
+            vec!["re\u{FFFD}d".to_string()]
+        );
 
         let mut anon = call("c2", "");
         anon.function.name = String::new();
         anon.function.arguments = "{\"p\":\"\u{FFFD}\"}".into();
-        assert_eq!(corrupt_argument_calls(&[anon]), vec!["<unnamed>".to_string()]);
+        assert_eq!(
+            corrupt_argument_calls(&[anon]),
+            vec!["<unnamed>".to_string()]
+        );
     }
 
     /// Healthy arguments of every kind must pass. This is the false-positive
@@ -3644,10 +3900,12 @@ mod tests {
         let mut a = call("c1", "grep");
         a.function.arguments = "{\"pattern\":\"<tool_call>\",\"include\":\"*.rs\"}".into();
         let mut b = call("c2", "grep");
-        b.function.arguments = "{\"pattern\":\"<parameter=|tool_calls\\\\\\\":\",\"include\":\"*\"}".into();
+        b.function.arguments =
+            "{\"pattern\":\"<parameter=|tool_calls\\\\\\\":\",\"include\":\"*\"}".into();
         let mut c = call("c3", "write");
         // A lone `<arg_key>` is quotable prose; only the paired framing counts.
-        c.function.arguments = "{\"file_path\":\"x.md\",\"content\":\"the token <arg_key> appears\"}".into();
+        c.function.arguments =
+            "{\"file_path\":\"x.md\",\"content\":\"the token <arg_key> appears\"}".into();
         let mut d = call("c4", "read");
         d.function.arguments = "{\"file_path\":\"src/main.rs\"}".into();
         assert!(
@@ -3660,10 +3918,21 @@ mod tests {
     /// required — this is the anti-false-positive contract for the leak check.
     #[test]
     fn foreign_framing_leak_requires_the_paired_shape() {
-        assert!(is_foreign_framing_leak("<arg_key>command</arg_key><arg_value>x</arg_value>"));
-        assert!(!is_foreign_framing_leak("only <arg_key> here"), "a lone key is prose");
-        assert!(!is_foreign_framing_leak("only <arg_value> here"), "a lone value is prose");
-        assert!(!is_foreign_framing_leak("clean arguments"), "clean text never trips");
+        assert!(is_foreign_framing_leak(
+            "<arg_key>command</arg_key><arg_value>x</arg_value>"
+        ));
+        assert!(
+            !is_foreign_framing_leak("only <arg_key> here"),
+            "a lone key is prose"
+        );
+        assert!(
+            !is_foreign_framing_leak("only <arg_value> here"),
+            "a lone value is prose"
+        );
+        assert!(
+            !is_foreign_framing_leak("clean arguments"),
+            "clean text never trips"
+        );
     }
 
     /// `corruption_signatures` names every hit so logs and the user-facing
@@ -3707,9 +3976,17 @@ mod tests {
             ChatMessage::assistant("done"),
         ];
         let before = msgs.clone();
-        assert_eq!(repair_tool_pairing(&mut msgs), 0, "healthy history needs no repair");
+        assert_eq!(
+            repair_tool_pairing(&mut msgs),
+            0,
+            "healthy history needs no repair"
+        );
         assert_eq!(msgs.len(), before.len());
-        assert_eq!(msgs[3].content_text(), "ok", "existing results must not be touched");
+        assert_eq!(
+            msgs[3].content_text(),
+            "ok",
+            "existing results must not be touched"
+        );
     }
 
     #[test]
@@ -3738,21 +4015,32 @@ mod tests {
             ChatMessage::tool_result("b", "middle result"),
         ];
         assert_eq!(repair_tool_pairing(&mut msgs), 2);
-        let ids: Vec<Option<String>> = msgs.iter().filter(|m| m.role == Role::Tool)
-            .map(|m| m.tool_call_id.clone()).collect();
+        let ids: Vec<Option<String>> = msgs
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.tool_call_id.clone())
+            .collect();
         assert_eq!(
             ids,
             vec![Some("b".into()), Some("a".into()), Some("c".into())],
             "existing result stays first, missing ones appended in declaration order"
         );
-        assert_eq!(msgs[1].content_text(), "middle result", "real result must survive");
+        assert_eq!(
+            msgs[1].content_text(),
+            "middle result",
+            "real result must survive"
+        );
     }
 
     #[test]
     fn repair_is_idempotent() {
         let mut msgs = vec![assistant_calling(&[("c1", "bash")])];
         assert_eq!(repair_tool_pairing(&mut msgs), 1);
-        assert_eq!(repair_tool_pairing(&mut msgs), 0, "second pass must be a no-op");
+        assert_eq!(
+            repair_tool_pairing(&mut msgs),
+            0,
+            "second pass must be a no-op"
+        );
         assert_eq!(msgs.len(), 2);
     }
 
@@ -3769,13 +4057,22 @@ mod tests {
         assert_eq!(repair_tool_pairing(&mut msgs), 2);
         // Every declared call now has exactly one result.
         for id in ["c1", "c2", "c3"] {
-            let n = msgs.iter().filter(|m| m.tool_call_id.as_deref() == Some(id)).count();
+            let n = msgs
+                .iter()
+                .filter(|m| m.tool_call_id.as_deref() == Some(id))
+                .count();
             assert_eq!(n, 1, "{id} must have exactly one tool result");
         }
         // The c2 placeholder must sit before the following user message, keeping
         // the group contiguous.
-        let c2 = msgs.iter().position(|m| m.tool_call_id.as_deref() == Some("c2")).unwrap();
-        let user = msgs.iter().position(|m| m.content_text() == "next").unwrap();
+        let c2 = msgs
+            .iter()
+            .position(|m| m.tool_call_id.as_deref() == Some("c2"))
+            .unwrap();
+        let user = msgs
+            .iter()
+            .position(|m| m.content_text() == "next")
+            .unwrap();
         assert!(c2 < user, "c2 result must precede the later user message");
     }
 
@@ -3791,12 +4088,16 @@ mod tests {
         let skip = vec!["c-ask".to_string()];
         assert_eq!(repair_tool_pairing_except(&mut msgs, &skip), 1);
         assert_eq!(
-            msgs.iter().filter(|m| m.tool_call_id.as_deref() == Some("c-ask")).count(),
+            msgs.iter()
+                .filter(|m| m.tool_call_id.as_deref() == Some("c-ask"))
+                .count(),
             0,
             "suspended call must stay unrepaired so spawn_resume can inject the real answer"
         );
         assert_eq!(
-            msgs.iter().filter(|m| m.tool_call_id.as_deref() == Some("c-dead")).count(),
+            msgs.iter()
+                .filter(|m| m.tool_call_id.as_deref() == Some("c-dead"))
+                .count(),
             1,
             "the other orphan still needs a placeholder"
         );
@@ -3822,7 +4123,10 @@ mod tests {
         let p = loop_detected_prompt(3);
         assert!(p.contains("Loop Detected"));
         assert!(p.contains("更换思路"));
-        assert!(!p.contains("直接输出 Final Answer"), "must not force convergence");
+        assert!(
+            !p.contains("直接输出 Final Answer"),
+            "must not force convergence"
+        );
         // It must still offer both exits, so a genuinely finished task can end.
         assert!(p.contains("若确认任务已全部完成"));
         assert!(p.contains("若尚未完成"));
@@ -3834,11 +4138,23 @@ mod tests {
         // 旧断言「完整总结报告」正是双份总结的成因，按新文案反转。
         let p = completion_check_prompt(1);
         assert!(p.contains("Completion Check"));
-        assert!(p.contains("继续执行它们，不要停止"), "must allow continuing");
-        assert!(p.contains("直接确认结束，不要重复输出已说过的内容"), "must allow ending without repeating");
+        assert!(
+            p.contains("继续执行它们，不要停止"),
+            "must allow continuing"
+        );
+        assert!(
+            p.contains("直接确认结束，不要重复输出已说过的内容"),
+            "must allow ending without repeating"
+        );
         assert!(p.contains("只补充遗漏部分"), "must allow gap-filling only");
-        assert!(p.contains("严禁复述已交付的总结"), "must forbid re-summarising");
-        assert!(!p.contains("完整总结报告"), "旧「重新输出完整总结」文案必须消失");
+        assert!(
+            p.contains("严禁复述已交付的总结"),
+            "must forbid re-summarising"
+        );
+        assert!(
+            !p.contains("完整总结报告"),
+            "旧「重新输出完整总结」文案必须消失"
+        );
         assert!(p.contains("1/2"), "must show the deferral counter");
         assert!(!p.contains("直接输出 Final Answer"));
     }
@@ -3914,13 +4230,15 @@ mod tests {
         // An unbounded gate is its own dead loop: the model wants to stop but
         // never can. Two deferrals is the contract.
         assert_eq!(MAX_CONVERGE_DEFERRALS, 2);
-        assert_eq!(MAX_LOOP_REMINDERS, 3);
-        assert_eq!(LOOP_REMINDER_THRESHOLD, 3);
-        assert_eq!(LOOP_WINDOW, 8, "Java StopLoopInterceptor windowSize");
+        assert_eq!(
+            LOOP_REMINDER_THRESHOLDS,
+            [3, 5, 8],
+            "DSH repeat-tool-reminder defaults"
+        );
         assert_eq!(MAX_EMPTY_ROUNDS, 3, "Java emptyRetryCounter cap");
     }
 
-    // ─── P0: windowed loop fingerprint ─────────────────────────────────────
+    // ─── P0: loop fingerprint (full-value hashing) ─────────────────────────
 
     fn tc(name: &str, args: &str) -> ToolCall {
         ToolCall {
@@ -4033,9 +4351,9 @@ mod tests {
         // Java extends unconditionally at the threshold (`ReasonTask.java`
         // 500-528) and has no diminishing-output or no-progress judgement
         // anywhere; a repo-wide search for diminish/deltaToken/noProgress/
-        // stagnat finds nothing. Keep this kernel aligned: the only things
-        // allowed to bound AutoRethink are an exhausted context window and
-        // the loop-reminder cap.
+        // stagnat finds nothing. Keep this kernel aligned: the only thing
+        // allowed to bound AutoRethink is an exhausted context window. The
+        // loop-reminder cap joined the ban list on 2026-11-20 (work-mwod1kcs).
         let src = include_str!("mod.rs");
         // Scope to the loop body: the comment block explaining *why* these
         // names are gone, and this test itself, both mention them by design.
@@ -4044,6 +4362,14 @@ mod tests {
             .nth(1)
             .and_then(|s| s.split("mod tests").next())
             .expect("run_inner body must be locatable");
+        // Strip line comments: the extension point's own explanation quotes
+        // the banned identifiers verbatim.
+        let body: String = body
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = body.as_str();
         for banned in [
             "DIMINISHING_DELTA_TOKENS",
             "DIMINISHING_MIN_TURNS",
@@ -4051,31 +4377,41 @@ mod tests {
             "NO_PROGRESS_STOP_ROUNDS",
             "diminishing_rounds",
             "no_progress_rounds",
+            // 2026-11-20: the repetition-based hard stop is banned too. It
+            // killed work-mwod1kcs (448 turns of legitimate debugging judged
+            // as "repeated unproductive tool calls"). Reminders are advisory.
+            // (The explaining comment at the extension point mentions the old
+            // identifiers by design, so strip comments before the ban scan.)
+            "MAX_LOOP_REMINDERS",
+            "loop_reminders",
         ] {
             assert!(
                 !body.contains(banned),
-                "`{banned}` is back in the loop body: output volume must not \
-                 gate the turn budget (killed healthy runs at turn 19)"
+                "`{banned}` is back in the loop body: behavioural judgements \
+                 must not gate the turn budget (killed healthy runs)"
             );
         }
         assert!(
-            body.contains("if context_exhausted || loop_reminders >= MAX_LOOP_REMINDERS"),
-            "the extension point must gate on context exhaustion and the loop \
-             cap only"
+            body.contains("if context_exhausted {"),
+            "the extension point must gate on context exhaustion only"
         );
         assert!(
             !body.contains("no observable progress"),
             "the stop reason that killed healthy runs must not come back"
+        );
+        assert!(
+            !body.contains("repeated unproductive tool calls"),
+            "the stop reason that killed work-mwod1kcs must not come back"
         );
     }
 
     /// Name-based bans are not enough: the defect can be reintroduced under
     /// any identifier (mutation N1 added a bare `|| turns >= 10` and survived
     /// the ban list). Pin the *shape* instead — the extension-point condition
-    /// must be exactly the two allowed terms, so any extra disjunct fails
+    /// must be exactly the one allowed term, so any extra disjunct fails
     /// regardless of how it is spelled.
     #[test]
-    fn extension_point_condition_has_exactly_two_allowed_terms() {
+    fn extension_point_condition_has_exactly_one_allowed_term() {
         let src = include_str!("mod.rs");
         let marker = "let threshold = (max_turns - 1).max((max_turns as f64 * 0.8) as u32);";
         let after = src
@@ -4085,14 +4421,25 @@ mod tests {
         let cond = after
             .split_once("if turns >= threshold {")
             .and_then(|(_, rest)| rest.split_once('{'))
-            .map(|(head, _)| head.trim().to_string())
+            .map(|(head, _)| {
+                // Strip line comments: the block explains the removed disjunct
+                // by quoting it verbatim.
+                head.lines()
+                    .map(|l| l.split("//").next().unwrap_or(""))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .expect("the extension point must guard on `turns >= threshold`");
         assert_eq!(
-            cond, "if context_exhausted || loop_reminders >= MAX_LOOP_REMINDERS",
+            cond, "if context_exhausted",
             "the early-stop condition at the AutoRethink extension point must \
-             stay exactly these two terms. Java extends unconditionally here \
+             stay exactly this one term. Java extends unconditionally here \
              (`ReasonTask.java:500-528`); every extra disjunct added to this \
-             line so far has stopped healthy runs."
+             line so far has stopped healthy runs — including the loop-reminder \
+             cap removed on 2026-11-20 (work-mwod1kcs)."
         );
     }
 
@@ -4164,14 +4511,22 @@ mod tests {
     /// !deadline_out && turns < max_turns` exactly — the lesson from the D-1
     /// round: Windows timer granularity makes wall-clock tests flaky, so the
     /// decision logic is table-driven and the loop only threads state in.
-    fn retry_gate(fatal: bool, timeout_class: bool, timeout_retries: u32, deadline_out: bool) -> bool {
+    fn retry_gate(
+        fatal: bool,
+        timeout_class: bool,
+        timeout_retries: u32,
+        deadline_out: bool,
+    ) -> bool {
         let timeout_out = timeout_class && timeout_retries >= MAX_TIMEOUT_RETRIES_PER_TURN;
         !fatal && !timeout_out && !deadline_out
     }
 
     #[test]
     fn p2_retry_gate_lets_transient_failures_retry() {
-        assert!(retry_gate(false, false, 0, false), "generic transient: retry");
+        assert!(
+            retry_gate(false, false, 0, false),
+            "generic transient: retry"
+        );
         assert!(retry_gate(false, true, 0, false), "first timeout: retry");
         assert!(retry_gate(false, true, 1, false), "second timeout: retry");
     }
@@ -4179,18 +4534,27 @@ mod tests {
     #[test]
     fn p2_retry_gate_stops_deterministic_immediately() {
         assert!(!retry_gate(true, false, 0, false), "fatal never retries");
-        assert!(!retry_gate(true, true, 2, true), "fatal overrides everything");
+        assert!(
+            !retry_gate(true, true, 2, true),
+            "fatal overrides everything"
+        );
     }
 
     #[test]
     fn p2_retry_gate_buckets_timeouts_at_two() {
         // work-mua28gy6: the third identical timeout is guaranteed to fail the
         // same way — the bucket must cut the loop exactly at the cap.
-        assert!(!retry_gate(false, true, 2, false), "third timeout-class: stop");
+        assert!(
+            !retry_gate(false, true, 2, false),
+            "third timeout-class: stop"
+        );
         assert!(!retry_gate(false, true, 5, false), "way past cap: stop");
         // The bucket is *timeout-only*: a round of generic 5xx retries must not
         // consume the timeout allowance.
-        assert!(retry_gate(false, false, 5, false), "generic retries don't touch the timeout bucket");
+        assert!(
+            retry_gate(false, false, 5, false),
+            "generic retries don't touch the timeout bucket"
+        );
     }
 
     #[test]
@@ -4206,9 +4570,17 @@ mod tests {
     #[test]
     fn p2_retry_branch_gates_on_bucket_and_deadline() {
         let src = include_str!("mod.rs");
-        let body = src.split("P2: if the stream expired idle/total").nth(1).unwrap_or("");
-        let body = body.split("// Filter out empty tool calls").next().unwrap_or(body);
-        let norm = body.replace("\r\n", "\n");
+        let body = src
+            .split("P2: if the stream expired idle/total")
+            .nth(1)
+            .unwrap_or("");
+        let body = body
+            .split("// Filter out empty tool calls")
+            .next()
+            .unwrap_or(body);
+        // Whitespace-normalised: rustfmt may wrap the statement across lines;
+        // the pin is about the tokens, not the layout.
+        let norm: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             norm.contains("let timeout_out = timeout_class && timeout_retries >= MAX_TIMEOUT_RETRIES_PER_TURN;"),
             "timeout bucket must gate the retry (M-pin: bucket removed → infinite timeout retries)"
@@ -4323,7 +4695,8 @@ mod tests {
         // statements: the helper's own `fn` definition also contains the name and
         // sits inside this same slice, so counting bare call sites reads 3.
         assert_eq!(
-            norm.matches("retry_deadline = retry_deadline_from_now();").count(),
+            norm.matches("retry_deadline = retry_deadline_from_now();")
+                .count(),
             2,
             "exactly two arms of the deadline (initial + per-turn re-arm)"
         );
@@ -4331,7 +4704,9 @@ mod tests {
         // 【2026-11 用户决策】重试不烧轮次：turns 只能在「非重试」守卫内递增。
         // 旧实现无条件 turns += 1，同一次调用的重试既虚增前台重试计数，
         // 又吃掉 maxTurns 预算（用户看到「设置 10 却重试 40」的另一半）。
-        let p_loop = norm.find("loop {").expect("run_inner must have its turn loop");
+        let p_loop = norm
+            .find("loop {")
+            .expect("run_inner must have its turn loop");
         let p_turns = norm.find("turns += 1;").expect("turns must still advance");
         let p_guard = norm[..p_turns]
             .rfind("if !retry_of_same_call {")
@@ -4376,8 +4751,14 @@ mod tests {
     #[test]
     fn p2_timeout_bucket_resets_after_a_healthy_round() {
         let src = include_str!("mod.rs");
-        let body = src.split("A round that reached the model").nth(1).unwrap_or("");
-        let body = body.split("// Filter out empty tool calls").next().unwrap_or(body);
+        let body = src
+            .split("A round that reached the model")
+            .nth(1)
+            .unwrap_or("");
+        let body = body
+            .split("// Filter out empty tool calls")
+            .next()
+            .unwrap_or(body);
         assert!(
             body.contains("timeout_retries = 0;"),
             "bucket must reset after a completed round, or one outage scars the whole run"
@@ -4393,7 +4774,10 @@ mod tests {
     fn p3_background_gate_defers_the_text_end_instead_of_completing() {
         let src = include_str!("mod.rs");
         let body = src.split("P3: background-task gate").nth(1).unwrap_or("");
-        let body = body.split("let elapsed = started_at.elapsed()").next().unwrap_or(body);
+        let body = body
+            .split("let elapsed = started_at.elapsed()")
+            .next()
+            .unwrap_or(body);
         let norm = body.replace("\r\n", "\n");
         assert!(
             norm.contains("bg_gate::running_count(&config.session_id).await"),
@@ -4412,7 +4796,8 @@ mod tests {
             "the check prompt must be injected"
         );
         assert!(
-            norm.trim_end().ends_with("continue;") || norm.contains("));\n                    continue;"),
+            norm.trim_end().ends_with("continue;")
+                || norm.contains("));\n                    continue;"),
             "the gate must `continue` the loop, never fall through to done (M8-class pin)"
         );
     }
@@ -4422,7 +4807,10 @@ mod tests {
     #[test]
     fn p3_notices_drain_at_the_top_of_each_turn() {
         let src = include_str!("mod.rs");
-        let body = src.split("P3: background completion notices").nth(1).unwrap_or("");
+        let body = src
+            .split("P3: background completion notices")
+            .nth(1)
+            .unwrap_or("");
         let body = body.split("// Emit reason_start").next().unwrap_or(body);
         let norm = body.replace("\r\n", "\n");
         assert!(
@@ -4442,8 +4830,14 @@ mod tests {
     #[test]
     fn p2_stream_caps_are_wired_into_the_receive_select() {
         let src = include_str!("mod.rs");
-        let body = src.split("P2: measure idle against the last").nth(1).unwrap_or("");
-        let body = body.split("StreamEvent::ContentDelta").next().unwrap_or(body);
+        let body = src
+            .split("P2: measure idle against the last")
+            .nth(1)
+            .unwrap_or("");
+        let body = body
+            .split("StreamEvent::ContentDelta")
+            .next()
+            .unwrap_or(body);
         let norm = body.replace("\r\n", "\n");
         assert!(
             norm.contains("last_chunk_at.elapsed() > stream_idle_cap"),
@@ -4470,7 +4864,10 @@ mod tests {
     fn idle_clock_resets_on_any_received_event_not_only_content() {
         let src = include_str!("mod.rs");
         // The reset must be in the receive arm, before the per-variant match.
-        let recv = src.split("ev = rx.recv() => match ev {").nth(1).unwrap_or("");
+        let recv = src
+            .split("ev = rx.recv() => match ev {")
+            .nth(1)
+            .unwrap_or("");
         let recv = recv.split("None => break,").next().unwrap_or(recv);
         assert!(
             recv.contains("last_chunk_at = std::time::Instant::now();"),
@@ -4478,7 +4875,10 @@ mod tests {
         );
         // ...and must NOT be duplicated back into a single variant arm: a reset
         // only on ContentDelta would leave reasoning/tool-args streams unwatched.
-        let cd = src.split("StreamEvent::ContentDelta(delta) => {").nth(1).unwrap_or("");
+        let cd = src
+            .split("StreamEvent::ContentDelta(delta) => {")
+            .nth(1)
+            .unwrap_or("");
         let cd = cd.split("StreamEvent::ReasoningDelta").next().unwrap_or(cd);
         assert!(
             !cd.contains("last_chunk_at"),
@@ -4502,31 +4902,200 @@ mod tests {
             "the injected empty-response prompt must be followed by `continue` (mutation M8 pin)"
         );
         assert!(
-            body.replace("\r\n", "\n").contains("stop_reason: StopReason::Error"),
+            body.replace("\r\n", "\n")
+                .contains("stop_reason: StopReason::Error"),
             "past MAX_EMPTY_ROUNDS the run must stop with Error, never Completed"
         );
     }
 
-    /// The windowed detector must catch A-B-A-B alternation — the shape the
-    /// old compare-with-previous-round form was structurally blind to.
+    // ─── loop chain: DSH consecutive semantics + progress awareness ────────
+
+    /// Three identical calls with identical results fire the first reminder.
     #[test]
-    fn windowed_detector_catches_abab() {
-        let fa = loop_fingerprint(&[tc("read", r#"{"path":"a.rs"}"#)], "").unwrap();
-        let fb = loop_fingerprint(&[tc("read", r#"{"path":"b.rs"}"#)], "").unwrap();
-        let mut window: std::collections::VecDeque<String> =
-            std::collections::VecDeque::with_capacity(LOOP_WINDOW);
-        let mut fired = 0;
-        for fp in [fa.clone(), fb.clone(), fa.clone(), fb.clone(), fa.clone(), fb.clone()] {
-            window.push_back(fp.clone());
-            while window.len() > LOOP_WINDOW {
-                window.pop_front();
-            }
-            if window.iter().filter(|f| **f == fp).count() as u32 >= LOOP_REMINDER_THRESHOLD {
-                fired += 1;
-                window.clear();
+    fn chain_fires_at_three_identical_rounds() {
+        let fp = loop_fingerprint(&[tc("read", r#"{"path":"a.rs"}"#)], "").unwrap();
+        let mut chain = None;
+        assert_eq!(loop_chain_step(&mut chain, &fp, vec![42], false), 0);
+        assert_eq!(loop_chain_step(&mut chain, &fp, vec![42], false), 0);
+        assert_eq!(
+            loop_chain_step(&mut chain, &fp, vec![42], false),
+            3,
+            "third identical round fires"
+        );
+    }
+
+    /// Escalation 3/5/8, each threshold fires once, then silence — never a stop.
+    #[test]
+    fn chain_escalates_3_5_8_then_goes_silent() {
+        let fp = loop_fingerprint(&[tc("bash", r#"{"command":"x"}"#)], "").unwrap();
+        let mut chain = None;
+        let mut fired = vec![];
+        for i in 1..=20u32 {
+            let r = loop_chain_step(&mut chain, &fp, vec![7], false);
+            if r > 0 {
+                fired.push((i, r));
             }
         }
-        assert!(fired >= 1, "A-B-A-B alternation must trigger the reminder");
+        assert_eq!(
+            fired,
+            vec![(3, 3), (5, 5), (8, 8)],
+            "DSH thresholds, once each, then silent"
+        );
+    }
+
+    /// A different call resets the chain (DSH: any different tracked call).
+    #[test]
+    fn chain_resets_on_different_call() {
+        let fa = loop_fingerprint(&[tc("read", r#"{"path":"a.rs"}"#)], "").unwrap();
+        let fb = loop_fingerprint(&[tc("read", r#"{"path":"b.rs"}"#)], "").unwrap();
+        let mut chain = None;
+        loop_chain_step(&mut chain, &fa, vec![1], false);
+        loop_chain_step(&mut chain, &fa, vec![1], false);
+        loop_chain_step(&mut chain, &fb, vec![2], false); // reset
+        assert_eq!(
+            loop_chain_step(&mut chain, &fa, vec![1], false),
+            0,
+            "chain restarted at 1"
+        );
+        assert_eq!(loop_chain_step(&mut chain, &fa, vec![1], false), 0);
+        assert_eq!(loop_chain_step(&mut chain, &fa, vec![1], false), 3);
+    }
+
+    /// Progress awareness A: same call, *different result* = new information.
+    /// The chain restarts instead of escalating — polling a build log that
+    /// keeps changing is legitimate, not spinning.
+    #[test]
+    fn same_call_new_result_restarts_chain() {
+        let fp = loop_fingerprint(&[tc("bash", r#"{"command":"poll"}"#)], "").unwrap();
+        let mut chain = None;
+        let mut fired = 0;
+        for i in 0..12u64 {
+            if loop_chain_step(&mut chain, &fp, vec![i], false) > 0 {
+                fired += 1;
+            }
+        }
+        assert_eq!(fired, 0, "12 polls with changing output must never remind");
+    }
+
+    /// Progress awareness B: a successful write/edit between identical probes
+    /// legitimises the re-run (edit → restart → poll). work-mwod1kcs shape.
+    #[test]
+    fn mutation_between_identical_calls_restarts_chain() {
+        let fp = loop_fingerprint(&[tc("bash", r#"{"command":"check"}"#)], "").unwrap();
+        let mut chain = None;
+        let mut fired = 0;
+        for _ in 0..12 {
+            if loop_chain_step(&mut chain, &fp, vec![9], true) > 0 {
+                fired += 1;
+            }
+        }
+        assert_eq!(fired, 0, "edit-between-probes cycles must never remind");
+    }
+
+    /// The work-mwod1kcs false kill, replayed: 12 Select-String commands that
+    /// share a >120-char path prefix but differ in the pattern. The old
+    /// 120-char truncation collapsed them into one fingerprint (3 reminders →
+    /// hard stop at turn 448). Full-value hashing must keep them distinct.
+    #[test]
+    fn long_shared_prefix_commands_must_not_collide() {
+        let prefix = "$f='C:\\Apps\\HBuilderX\\plugins\\uniapp-cli-vite\\node_modules\\@dcloudio\\uni-cli-shared\\lib\\dom2\\web\\@vue\\compiler-sfc\\dist\\compiler-sfc.cjs.js'; ";
+        assert!(
+            prefix.chars().count() > 120,
+            "premise: prefix exceeds the old truncation budget"
+        );
+        let patterns = [
+            "function fileToScope",
+            "function resolveFS",
+            "new ScriptCompileContext",
+            "fileToScopeCache",
+            "Unresolvable type reference",
+            "function resolveTypeReference",
+            "function recordTypes",
+            "function recordType\\b",
+            "extraOptions",
+            "class ScriptCompileContext",
+            "ScriptCompileContext = class",
+            "invalidateTypeCache",
+        ];
+        let mut chain = None;
+        let mut fired = 0;
+        for (i, p) in patterns.iter().enumerate() {
+            let args = serde_json::json!({ "command": format!("{prefix}Select-String -Path $f -Pattern '{p}'"), "timeout": 30000 });
+            let fp = loop_fingerprint(&[tc("bash", &args.to_string())], "").unwrap();
+            if loop_chain_step(&mut chain, &fp, vec![i as u64], false) > 0 {
+                fired += 1;
+            }
+        }
+        assert_eq!(
+            fired, 0,
+            "12 distinct investigation commands must not remind (work-mwod1kcs regression)"
+        );
+    }
+
+    /// Key order inside *nested* objects must also canonicalise (the old form
+    /// serialised nested values verbatim, so reordered nested keys looked
+    /// different and the detector was blind to genuine repeats).
+    #[test]
+    fn fingerprint_canonicalises_nested_key_order() {
+        let a = loop_fingerprint(&[tc("x", r#"{"opt":{"b":2,"a":1}}"#)], "");
+        let b = loop_fingerprint(&[tc("x", r#"{"opt":{"a":1,"b":2}}"#)], "");
+        assert_eq!(a, b);
+    }
+
+    /// Delimiter injection: the old raw-join form (`k=v|k2=v2`) let value
+    /// content impersonate structure — `{"a":"x|b=y"}` and `{"a":"x","b":"y"}`
+    /// canonicalised to the SAME string, so a genuinely different call could
+    /// be misread as a repeat. JSON emission escapes `"`/`\` inside strings,
+    /// making distinct argument trees always fingerprint distinctly.
+    #[test]
+    fn fingerprint_delimiters_in_values_cannot_impersonate_structure() {
+        let a = loop_fingerprint(&[tc("x", r#"{"a":"x|b=y"}"#)], "");
+        let b = loop_fingerprint(&[tc("x", r#"{"a":"x","b":"y"}"#)], "");
+        assert_ne!(
+            a, b,
+            "a value containing '|k=v' must not collide with real extra keys"
+        );
+        // Same idea with '=' and nested objects, plus the escaped-quote shape.
+        let c = loop_fingerprint(&[tc("x", r#"{"a":"1","b":"2"}"#)], "");
+        let d = loop_fingerprint(&[tc("x", r#"{"a":"1\",\"b\":\"2"}"#)], "");
+        assert_ne!(c, d, "escaped quotes in a value must not forge keys");
+        // And sanity: the injection pair really is semantically different —
+        // canonical strings must differ at the canonical_args level too.
+        assert_ne!(
+            canonical_args(r#"{"a":"x|b=y"}"#),
+            canonical_args(r#"{"a":"x","b":"y"}"#)
+        );
+    }
+
+    /// The workspace builds serde_json with `preserve_order` (IndexMap). The
+    /// canonicaliser must sort by explicit insertion, not rely on Map's
+    /// default ordering — this pins that the emitted canonical string is
+    /// key-sorted regardless of input order, at every depth.
+    #[test]
+    fn canonical_args_emits_sorted_keys_despite_preserve_order() {
+        let a = canonical_args(r#"{"z":1,"opt":{"b":2,"a":1},"m":[3,{"y":4,"x":5}]}"#).unwrap();
+        let b = canonical_args(r#"{"m":[3,{"x":5,"y":4}],"opt":{"a":1,"b":2},"z":1}"#).unwrap();
+        assert_eq!(a, b);
+        // Sorted emission: "m" before "opt" before "z"; nested "a" before "b".
+        assert!(a.find("\"m\"").unwrap() < a.find("\"opt\"").unwrap());
+        assert!(a.find("\"opt\"").unwrap() < a.find("\"z\"").unwrap());
+        assert!(a.find("\"a\"").unwrap() < a.find("\"b\"").unwrap());
+    }
+
+    /// Mutation list hygiene: only tools actually registered in this kernel
+    /// belong in STATE_MUTATING_TOOLS. Claude Code names (multiedit /
+    /// notebookedit) are dead config and must not creep back in — a stale
+    /// entry silently claims "progress" for a tool that can never run.
+    #[test]
+    fn state_mutating_tools_are_registered_tools() {
+        assert_eq!(STATE_MUTATING_TOOLS, ["write", "edit"]);
+        let reg = crate::tools::registry::ToolRegistry::default_registry();
+        for name in STATE_MUTATING_TOOLS {
+            assert!(
+                reg.get(name).is_some(),
+                "{name} must be a registered tool (no dead mutation entries)"
+            );
+        }
     }
 
     // ─── todo-staleness reminder (Qoder `todo_reminder` port) ────────────────
@@ -4540,11 +5109,20 @@ mod tests {
         let w = TODO_REMINDER_TURNS_SINCE_WRITE;
         let b = TODO_REMINDER_TURNS_BETWEEN;
         assert!(todo_reminder_due(w, b, 0), "both gates met → due");
-        assert!(!todo_reminder_due(w - 1, b, 0), "one turn short of write gate → not due");
-        assert!(!todo_reminder_due(w, b - 1, 0), "one turn short of reminder gate → not due");
+        assert!(
+            !todo_reminder_due(w - 1, b, 0),
+            "one turn short of write gate → not due"
+        );
+        assert!(
+            !todo_reminder_due(w, b - 1, 0),
+            "one turn short of reminder gate → not due"
+        );
         assert!(!todo_reminder_due(0, 0, 0), "fresh write → not due");
         // Just after a reminder the reminder-gate resets even if still stale.
-        assert!(!todo_reminder_due(w, 0, 1), "reminder just fired → cooldown");
+        assert!(
+            !todo_reminder_due(w, 0, 1),
+            "reminder just fired → cooldown"
+        );
     }
 
     /// The per-run cap holds even when both turn gates stay met forever.
@@ -4552,9 +5130,18 @@ mod tests {
     fn todo_reminder_respects_per_run_cap() {
         let w = TODO_REMINDER_TURNS_SINCE_WRITE;
         let b = TODO_REMINDER_TURNS_BETWEEN;
-        assert!(todo_reminder_due(w, b, MAX_TODO_REMINDERS - 1), "last allowed reminder");
-        assert!(!todo_reminder_due(w, b, MAX_TODO_REMINDERS), "cap reached → silent");
-        assert!(!todo_reminder_due(w, b, MAX_TODO_REMINDERS + 5), "past cap → silent");
+        assert!(
+            todo_reminder_due(w, b, MAX_TODO_REMINDERS - 1),
+            "last allowed reminder"
+        );
+        assert!(
+            !todo_reminder_due(w, b, MAX_TODO_REMINDERS),
+            "cap reached → silent"
+        );
+        assert!(
+            !todo_reminder_due(w, b, MAX_TODO_REMINDERS + 5),
+            "past cap → silent"
+        );
     }
 
     /// Source-level wiring guard (mutation-tested): the loop must forgive the
@@ -4563,15 +5150,24 @@ mod tests {
     #[test]
     fn todo_reminder_is_wired_with_forgiveness_and_checklist_gate() {
         let src = include_str!("mod.rs");
-        let block = src.split("Count this reasoning turn, then forgive the budget").nth(1).unwrap_or("");
-        let block = block.split("// Add the assistant message with tool_calls to history").next().unwrap_or(block);
-        let norm = block.replace("\r\n", "\n");
+        let block = src
+            .split("Count this reasoning turn, then forgive the budget")
+            .nth(1)
+            .unwrap_or("");
+        let block = block
+            .split("// Add the assistant message with tool_calls to history")
+            .next()
+            .unwrap_or(block);
+        // Whitespace-normalised (rustfmt may wrap long calls across lines).
+        let norm: String = block.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            norm.contains("tc.function.name == \"todowrite\"") && norm.contains("todo_reminders = 0;"),
+            norm.contains("tc.function.name == \"todowrite\"")
+                && norm.contains("todo_reminders = 0;"),
             "a self-initiated todowrite must reset the staleness counter and forgive the budget"
         );
         assert!(
-            norm.contains("todo_reminder_due(turns_since_todowrite, turns_since_todo_reminder, todo_reminders)"),
+            norm.contains("todo_reminder_due(turns_since_todowrite, turns_since_todo_reminder, todo_reminders")
+                || norm.contains("todo_reminder_due( turns_since_todowrite, turns_since_todo_reminder, todo_reminders"),
             "the dual gate must guard the injection"
         );
         assert!(
@@ -4591,8 +5187,14 @@ mod tests {
         let p = empty_response_prompt(12, 2);
         assert!(p.contains("空响应"));
         assert!(p.contains("2/3"), "must show the retry counter");
-        assert!(p.contains("回溯任务目标"), "reflection body (Java :712-719)");
-        assert!(p.contains("工具调用"), "must ask for an action OR an answer");
+        assert!(
+            p.contains("回溯任务目标"),
+            "reflection body (Java :712-719)"
+        );
+        assert!(
+            p.contains("工具调用"),
+            "must ask for an action OR an answer"
+        );
     }
 
     // ─── queued interjection rendering ──────────────────────────────────────
@@ -4654,7 +5256,10 @@ mod tests {
         // the paths into tiles itself and would otherwise show a tile *and* a path.
         let raw = env["text"].as_str().unwrap();
         assert!(!raw.contains('['), "frame text must be raw, got {raw}");
-        assert!(!raw.contains("uploads/"), "paths belong in their own fields");
+        assert!(
+            !raw.contains("uploads/"),
+            "paths belong in their own fields"
+        );
     }
 
     #[test]
@@ -4692,7 +5297,11 @@ mod tests {
         assert_eq!(gone.len(), 1);
         assert_eq!(gone[0]["steerId"], "s-1");
         let rest = qm.list(&dir);
-        assert_eq!(rest.len(), 1, "a cancelled steer must not survive in the queue");
+        assert_eq!(
+            rest.len(),
+            1,
+            "a cancelled steer must not survive in the queue"
+        );
         assert_eq!(rest[0].content, "typed earlier");
 
         // …and the plain item is untouched either way: it is the frontend's to send.
@@ -4701,7 +5310,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gwork-settle2-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let qm = crate::queue::QueueManager::new();
-        qm.add(&dir, "late steer".into(), vec!["u/i.png".into()], vec![], Some("s-2".into()));
+        qm.add(
+            &dir,
+            "late steer".into(),
+            vec!["u/i.png".into()],
+            vec![],
+            Some("s-2".into()),
+        );
         qm.add(&dir, "plain".into(), vec![], vec![], None);
 
         // requeue = true (normal end): the frame must not arrive before the item is
@@ -4709,10 +5324,24 @@ mod tests {
         let back = settle_steers(&qm, &dir, "run-2", true);
         assert_eq!(back.len(), 1);
         let after = qm.list(&dir);
-        assert_eq!(after.len(), 2, "the dropped steer must be durably re-queued");
-        let requeued = after.iter().find(|m| m.origin_steer_id.as_deref() == Some("s-2")).unwrap();
-        assert_eq!(requeued.content, "late steer", "content must survive the hand-back");
-        assert_eq!(requeued.image_paths, vec!["u/i.png".to_string()], "attachments too");
+        assert_eq!(
+            after.len(),
+            2,
+            "the dropped steer must be durably re-queued"
+        );
+        let requeued = after
+            .iter()
+            .find(|m| m.origin_steer_id.as_deref() == Some("s-2"))
+            .unwrap();
+        assert_eq!(
+            requeued.content, "late steer",
+            "content must survive the hand-back"
+        );
+        assert_eq!(
+            requeued.image_paths,
+            vec!["u/i.png".to_string()],
+            "attachments too"
+        );
 
         // A normal exit must not consume the queue: the item stays put for the
         // frontend's post-`done` dispatch, and the frame is a notification only.
@@ -4789,7 +5418,10 @@ mod tests {
             let add = 10u32.max(initial / 2);
             // The threshold must never exceed the ceiling, or the extension would
             // fire after the hard stop had already happened.
-            assert!(threshold <= max_turns, "initial={initial} threshold={threshold}");
+            assert!(
+                threshold <= max_turns,
+                "initial={initial} threshold={threshold}"
+            );
             // And it must leave at least one turn of headroom to act on the
             // self-review, which is the whole point of intervening early.
             assert!(threshold < max_turns || max_turns == 1, "initial={initial}");
@@ -4825,11 +5457,16 @@ mod tests {
              minutes) after a successful Stop"
         );
         assert!(
-            body.contains("output = self.registry.execute(&tc.function.name, args, &tool_ctx) => output"),
+            body.contains(
+                "output = self.registry.execute(&tc.function.name, args, &tool_ctx) => output"
+            ),
             "the tool call must be one arm of the select that races cancellation"
         );
         // Deterministic winner when both arms are ready.
-        assert!(body.contains("biased;"), "cancel must win the race deterministically");
+        assert!(
+            body.contains("biased;"),
+            "cancel must win the race deterministically"
+        );
     }
 
     /// A cancelled tool must still close its own card.
@@ -5025,12 +5662,21 @@ mod tests {
         for _ in 0..50 {
             m.on_delta();
         }
-        assert!(!m.should_emit(tps_at(t0, 499)), "one ms short of the interval");
-        assert!(m.should_emit(tps_at(t0, 500)), "exactly one interval with real output");
+        assert!(
+            !m.should_emit(tps_at(t0, 499)),
+            "one ms short of the interval"
+        );
+        assert!(
+            m.should_emit(tps_at(t0, 500)),
+            "exactly one interval with real output"
+        );
         let (tokens, ms) = m.take_window(tps_at(t0, 500));
         assert_eq!(tokens, 50, "every observed delta is counted, no estimation");
         assert_eq!(ms, 500, "denominator is the real elapsed monotonic time");
-        assert!(!m.should_emit(tps_at(t0, 999)), "window restarts after an emit");
+        assert!(
+            !m.should_emit(tps_at(t0, 999)),
+            "window restarts after an emit"
+        );
         m.on_delta();
         assert!(m.should_emit(tps_at(t0, 1_000)));
     }
@@ -5039,12 +5685,18 @@ mod tests {
     fn tps_meter_note_delta_reanchors_the_first_delta_only() {
         let t0 = std::time::Instant::now();
         let mut m = TpsMeter::new(t0); // stream starts here
-        // 6 s of prompt processing / TTFT wait, then two visible deltas.
+                                       // 6 s of prompt processing / TTFT wait, then two visible deltas.
         assert!(m.note_delta(tps_at(t0, 6_000)), "first delta is reported");
-        assert!(!m.note_delta(tps_at(t0, 6_010)), "only the first is reported");
+        assert!(
+            !m.note_delta(tps_at(t0, 6_010)),
+            "only the first is reported"
+        );
         // The 6 s wait must not enter the denominator.
         let (_, ms) = m.take_window(tps_at(t0, 6_500));
-        assert_eq!(ms, 500, "only the 500 ms decode window, not the 6 s TTFT wait");
+        assert_eq!(
+            ms, 500,
+            "only the 500 ms decode window, not the 6 s TTFT wait"
+        );
     }
 
     /// Regression for the P1 code-review finding: the old code keyed the
@@ -5075,7 +5727,10 @@ mod tests {
         // Transport retry inside the same turn: fresh meter, fresh latch.
         let t2 = tps_at(t0, 30_000);
         let mut retried = TpsMeter::new(t2);
-        assert!(retried.note_delta(tps_at(t2, 4_000)), "retry must re-arm the latch");
+        assert!(
+            retried.note_delta(tps_at(t2, 4_000)),
+            "retry must re-arm the latch"
+        );
         let (_, ms3) = retried.take_window(tps_at(t2, 4_500));
         assert_eq!(ms3, 500, "retried attempt excludes its prefill wait");
     }
@@ -5092,7 +5747,11 @@ mod tests {
         assert!(!m.should_emit(tps_at(t0, 599)));
         assert!(m.should_emit(tps_at(t0, 600)));
         let (tokens, ms) = m.take_window(tps_at(t0, 600));
-        assert_eq!((tokens, ms), (1, 500), "one delta over a real 500 ms window");
+        assert_eq!(
+            (tokens, ms),
+            (1, 500),
+            "one delta over a real 500 ms window"
+        );
     }
 
     /// Live progress frames must be transient and must not be forwarded by a
@@ -5126,7 +5785,10 @@ mod tests {
         // created by `action_draft`, so an immediate "0 B" update is noise.
         let p = ArgsProgress::new(1_000);
         assert!(!p.should_emit(1_000), "same instant must not emit");
-        assert!(!p.should_emit(1_199), "one ms short of the interval must not emit");
+        assert!(
+            !p.should_emit(1_199),
+            "one ms short of the interval must not emit"
+        );
         assert!(p.should_emit(1_200), "exactly one interval must emit");
     }
 
@@ -5137,7 +5799,10 @@ mod tests {
         let mut p = ArgsProgress::new(0);
         p.bytes = 10;
         assert!(!p.should_emit(100), "under both thresholds");
-        assert!(p.should_emit(200), "time threshold reached with only 10 bytes");
+        assert!(
+            p.should_emit(200),
+            "time threshold reached with only 10 bytes"
+        );
         p.mark_emitted(10, 200);
         assert!(!p.should_emit(399), "interval restarts after an emit");
         assert!(p.should_emit(400));
@@ -5151,7 +5816,10 @@ mod tests {
         p.bytes = ARGS_PROGRESS_BYTES - 1;
         assert!(!p.should_emit(1), "one byte short must not emit");
         p.bytes = ARGS_PROGRESS_BYTES;
-        assert!(p.should_emit(1), "byte threshold fires well inside the interval");
+        assert!(
+            p.should_emit(1),
+            "byte threshold fires well inside the interval"
+        );
         p.mark_emitted(ARGS_PROGRESS_BYTES, 1);
         p.bytes = ARGS_PROGRESS_BYTES + 100;
         assert!(!p.should_emit(2), "counter restarts after an emit");
@@ -5182,7 +5850,11 @@ mod tests {
             emitted
         );
         // But it must not collapse to nothing — the card has to keep moving.
-        assert!(emitted > 10, "progress must still be visible, got {}", emitted);
+        assert!(
+            emitted > 10,
+            "progress must still be visible, got {}",
+            emitted
+        );
     }
 
     #[test]
@@ -5191,11 +5863,17 @@ mod tests {
         // into a huge interval that silently stops all progress reporting.
         let mut p = ArgsProgress::new(1_000);
         p.bytes = 10;
-        assert!(!p.should_emit(500), "clock went backwards: no emit, no panic");
+        assert!(
+            !p.should_emit(500),
+            "clock went backwards: no emit, no panic"
+        );
         // Bytes below the last emit (a reset) must not underflow either.
         p.mark_emitted(5_000, 1_000);
         p.bytes = 100;
-        assert!(!p.should_emit(1_000), "bytes < last_emit_bytes must not underflow");
+        assert!(
+            !p.should_emit(1_000),
+            "bytes < last_emit_bytes must not underflow"
+        );
     }
 
     // ─── transport retry must not double-concatenate tool arguments ──────────
@@ -5287,11 +5965,10 @@ mod tests {
                             // call, properly terminated. If the react loop had
                             // kept attempt 1's half-argument, the concatenation
                             // would be invalid JSON and the turn would abort.
-                            let body =
-                                format!("{}Connection: close\r\n\r\n", HDR)
-                                    + &tool_call_delta(&full_args)
-                                    + FINISH_TOOLS
-                                    + DONE;
+                            let body = format!("{}Connection: close\r\n\r\n", HDR)
+                                + &tool_call_delta(&full_args)
+                                + FINISH_TOOLS
+                                + DONE;
                             let _ = sock.write_all(body.as_bytes()).await;
                             let _ = sock.shutdown().await;
                         }
@@ -5336,7 +6013,8 @@ mod tests {
         settings.general.api_retries = 0;
         settings.general.model_retries = 3;
 
-        let config = ReActConfig {            access_override: None,
+        let config = ReActConfig {
+            access_override: None,
             session_id: "work-retry-itest".into(),
             workspace: std::env::temp_dir(),
             session_dir: None,
@@ -5386,13 +6064,16 @@ mod tests {
         // Ordering matters — without this, every assertion below could pass
         // vacuously if the mock's truncated first attempt never triggered the
         // retry loop at all (the exact "test is green but proves nothing" trap).
-        let retry_frame = frames
-            .iter()
-            .find(|f| f.frame_type == "retry" && f.extra["discardPartial"] == serde_json::json!(true));
+        let retry_frame = frames.iter().find(|f| {
+            f.frame_type == "retry" && f.extra["discardPartial"] == serde_json::json!(true)
+        });
         assert!(
             retry_frame.is_some(),
             "a mid-stream transport retry must emit a discardPartial retry frame; got frames {:?}",
-            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+            frames
+                .iter()
+                .map(|f| f.frame_type.as_str())
+                .collect::<Vec<_>>()
         );
 
         // Which retry knob actually reached the LLM client. `api_retries` is 0
@@ -5557,10 +6238,15 @@ mod tests {
         // client to roll back. Without this, everything below could pass
         // vacuously (e.g. if the dialect parser silently dropped the delta).
         assert!(
-            frames.iter().any(|f| f.frame_type == "retry"
-                && f.extra["discardPartial"] == serde_json::json!(true)),
+            frames
+                .iter()
+                .any(|f| f.frame_type == "retry"
+                    && f.extra["discardPartial"] == serde_json::json!(true)),
             "the corruption gate must emit a discardPartial retry frame; got {:?}",
-            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+            frames
+                .iter()
+                .map(|f| f.frame_type.as_str())
+                .collect::<Vec<_>>()
         );
         // The corrupt call never executed: `action_start` is emitted only at
         // execution time, so its absence is the proof (no File-not-found card,
@@ -5865,10 +6551,15 @@ mod tests {
         // and asked the client to roll back the garbled thinking block. Without
         // `reasoning_buf` this finds nothing and the test fails.
         assert!(
-            frames.iter().any(|f| f.frame_type == "retry"
-                && f.extra["discardPartial"] == serde_json::json!(true)),
+            frames
+                .iter()
+                .any(|f| f.frame_type == "retry"
+                    && f.extra["discardPartial"] == serde_json::json!(true)),
             "corruption confined to the thinking block must still fire the gate; got {:?}",
-            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+            frames
+                .iter()
+                .map(|f| f.frame_type.as_str())
+                .collect::<Vec<_>>()
         );
         // The retry must have been *taken* and produced the clean attempt, not
         // merely offered — otherwise the discardPartial frame above could come
@@ -5891,7 +6582,8 @@ mod tests {
     /// (temp dir), full access, generous turn budget — the budget assertions
     /// are made on `MAX_CORRUPTION_RETRIES`, not `max_turns`.
     fn corruption_itest_config(port: u16, id: &str, max_turns: u32) -> ReActConfig {
-        ReActConfig {            access_override: None,
+        ReActConfig {
+            access_override: None,
             session_id: id.into(),
             workspace: std::env::temp_dir(),
             session_dir: None,
@@ -5992,8 +6684,12 @@ mod tests {
         for i in 0..40 {
             let call_id = format!("c{i}");
             history.push(assistant_calling(&[(call_id.as_str(), "read")]));
-            history.push(crate::llm::types::ChatMessage::tool_result(&call_id, "payload"));
-            history.push(crate::llm::types::ChatMessage::assistant(format!("thought {i}")));
+            history.push(crate::llm::types::ChatMessage::tool_result(
+                &call_id, "payload",
+            ));
+            history.push(crate::llm::types::ChatMessage::assistant(format!(
+                "thought {i}"
+            )));
         }
 
         let model = crate::config::ModelConfig {
@@ -6005,7 +6701,8 @@ mod tests {
             ..Default::default()
         };
 
-        let config = ReActConfig {            access_override: None,
+        let config = ReActConfig {
+            access_override: None,
             session_id: "work-itest".into(),
             workspace: std::env::temp_dir(),
             session_dir: None,
@@ -6034,14 +6731,20 @@ mod tests {
         let (frame_tx, _frame_rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let result = agent
-            .run(&config, history, frame_tx, cancel)
-            .await;
-        assert_eq!(result.stop_reason, StopReason::Completed, "mock must complete, got {:?}", result.stop_reason);
+        let result = agent.run(&config, history, frame_tx, cancel).await;
+        assert_eq!(
+            result.stop_reason,
+            StopReason::Completed,
+            "mock must complete, got {:?}",
+            result.stop_reason
+        );
 
         // The request the mock received must contain the focus turn: the forced
         // pass ran inside the loop and the compressed history carried the focus.
-        let req = seen_rx.recv().await.expect("the loop must have called the mock");
+        let req = seen_rx
+            .recv()
+            .await
+            .expect("the loop must have called the mock");
         let req_text = String::from_utf8_lossy(&req);
         assert!(
             req_text.contains("prioritise rust-remediation notes"),
@@ -6077,7 +6780,9 @@ mod tests {
         tokio::spawn(async move {
             let mut n = 0u32;
             loop {
-                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
                 let mut buf = [0u8; 8192];
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(300),
@@ -6106,7 +6811,9 @@ mod tests {
                 }
                 let _ = sock.shutdown().await;
                 drop(sock);
-                if n >= 2 { break; }
+                if n >= 2 {
+                    break;
+                }
             }
         });
 
@@ -6126,7 +6833,8 @@ mod tests {
         settings.general.api_retries = 7;
         settings.general.auto_rethink = false;
 
-        let config = ReActConfig {            access_override: None,
+        let config = ReActConfig {
+            access_override: None,
             session_id: "work-queued-403".into(),
             workspace: std::env::temp_dir(),
             session_dir: None,
@@ -6173,19 +6881,28 @@ mod tests {
         assert!(
             !retry_frames.is_empty(),
             "a queued 403 must produce a visible retry frame; got {:?}",
-            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+            frames
+                .iter()
+                .map(|f| f.frame_type.as_str())
+                .collect::<Vec<_>>()
         );
         let f = retry_frames[0];
         assert_ne!(
-            f.extra["discardPartial"], serde_json::json!(true),
+            f.extra["discardPartial"],
+            serde_json::json!(true),
             "nothing was delivered before the 403, so no DOM rollback may be requested"
         );
 
         // 2) 计数 = attempt/modelRetries：1/3。
         //    旧实现这里是 turns/maxTurns = 1/2（线上被 AutoRethink 扩成 n/40）。
-        assert_eq!(f.extra["attempt"], serde_json::json!(1), "first retry of this call");
         assert_eq!(
-            f.extra["max"], serde_json::json!(3),
+            f.extra["attempt"],
+            serde_json::json!(1),
+            "first retry of this call"
+        );
+        assert_eq!(
+            f.extra["max"],
+            serde_json::json!(3),
             "the denominator must be settings.modelRetries (3), not maxTurns (2) \
              or apiRetries (7)"
         );
@@ -6196,7 +6913,10 @@ mod tests {
         );
 
         // 3) 重试不烧轮次：一次调用 + 一次传输层重试，turns_used 仍为 1。
-        assert_eq!(result.turns_used, 1, "a retry of the same call must not consume a turn");
+        assert_eq!(
+            result.turns_used, 1,
+            "a retry of the same call must not consume a turn"
+        );
         assert_eq!(
             result.stop_reason,
             StopReason::Completed,
@@ -6213,7 +6933,10 @@ mod tests {
         let mk = |id: &str, name: &str| ToolCall {
             id: id.into(),
             call_type: "function".into(),
-            function: crate::llm::types::FunctionCall { name: name.into(), arguments: "{}".into() },
+            function: crate::llm::types::FunctionCall {
+                name: name.into(),
+                arguments: "{}".into(),
+            },
         };
         // complete_task 在中间 → 移到末尾，read/grep 相对顺序不变。
         let ordered = order_complete_task_last(vec![
@@ -6221,13 +6944,22 @@ mod tests {
             mk("c2", "complete_task"),
             mk("c3", "grep"),
         ]);
-        let names: Vec<&str> = ordered.iter().map(|(_, tc)| tc.function.name.as_str()).collect();
+        let names: Vec<&str> = ordered
+            .iter()
+            .map(|(_, tc)| tc.function.name.as_str())
+            .collect();
         assert_eq!(names, vec!["read", "grep", "complete_task"]);
         // 原始流式索引保留（args_progress 按它记账）。
-        assert_eq!(ordered[2].0, 1, "complete_task keeps its original stream index");
+        assert_eq!(
+            ordered[2].0, 1,
+            "complete_task keeps its original stream index"
+        );
         // 无 complete_task → 原样。
         let plain = order_complete_task_last(vec![mk("a", "read"), mk("b", "grep")]);
-        assert_eq!(plain.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            plain.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 
     /// 生命周期帧抑制名单：ask_user 与 complete_task 都在内。
@@ -6278,21 +7010,23 @@ mod tests {
         )
     }
 
-    const SSE_HDR: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
-    const SSE_FINISH_TOOLS: &str = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+    const SSE_HDR: &str =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+    const SSE_FINISH_TOOLS: &str =
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
     const SSE_DONE: &str = "data: [DONE]\n\n";
 
-    async fn run_complete_task_scenario(responses: Vec<String>, id: &str) -> (ReActResult, Vec<Frame>) {
+    async fn run_complete_task_scenario(
+        responses: Vec<String>,
+        id: &str,
+    ) -> (ReActResult, Vec<Frame>) {
         let port = scripted_mock(responses).await;
         let config = corruption_itest_config(port, id, 6);
         let registry = std::sync::Arc::new(crate::tools::ToolRegistry::default_registry());
         let agent = ReActAgent::new(registry);
         let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel = tokio_util::sync::CancellationToken::new();
-        let history = vec![
-            ChatMessage::system("sys"),
-            ChatMessage::user("do the work"),
-        ];
+        let history = vec![ChatMessage::system("sys"), ChatMessage::user("do the work")];
         let run = agent.run(&config, history, frame_tx, cancel);
         let collector = tokio::spawn(async move {
             let mut frames = Vec::new();
@@ -6313,29 +7047,46 @@ mod tests {
         let summary = "## 完成\n改动已落地，测试全绿。";
         let resp = format!(
             "{SSE_HDR}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
-            sse_tool_call(0, "ct-1", "complete_task", &serde_json::json!({"summary": summary}))
+            sse_tool_call(
+                0,
+                "ct-1",
+                "complete_task",
+                &serde_json::json!({"summary": summary})
+            )
         );
         let (result, frames) = run_complete_task_scenario(vec![resp], "ct-direct").await;
         assert_eq!(result.stop_reason, StopReason::Completed);
         assert_eq!(result.final_answer, summary);
         // text 帧整段呈现 summary（不逐 token）。
         assert!(
-            frames.iter().any(|f| f.frame_type == "text" && f.text.as_deref() == Some(summary)),
+            frames
+                .iter()
+                .any(|f| f.frame_type == "text" && f.text.as_deref() == Some(summary)),
             "summary must be delivered as one text frame: {:?}",
-            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+            frames
+                .iter()
+                .map(|f| f.frame_type.as_str())
+                .collect::<Vec<_>>()
         );
         assert!(frames.iter().any(|f| f.frame_type == "trace"));
         assert!(frames.iter().any(|f| f.frame_type == "done"));
         // 生命周期帧抑制：complete_task 不建工具卡。
         assert!(
-            !frames.iter().any(|f| f.tool_name.as_deref() == Some("complete_task")
-                && (f.frame_type == "action_start" || f.frame_type == "action_end" || f.frame_type == "action_draft")),
+            !frames
+                .iter()
+                .any(|f| f.tool_name.as_deref() == Some("complete_task")
+                    && (f.frame_type == "action_start"
+                        || f.frame_type == "action_end"
+                        || f.frame_type == "action_draft")),
             "complete_task must not emit lifecycle cards"
         );
         // 历史配对完整：complete_task 的 tool result（ok(summary)）入史。
         assert!(
-            result.messages.iter().any(|m| m.tool_call_id.as_deref() == Some("ct-1")
-                && m.content_text().contains(summary)),
+            result
+                .messages
+                .iter()
+                .any(|m| m.tool_call_id.as_deref() == Some("ct-1")
+                    && m.content_text().contains(summary)),
             "complete_task must have a paired tool result in history"
         );
     }
@@ -6348,8 +7099,18 @@ mod tests {
         let summary = "收尾。";
         let resp = format!(
             "{SSE_HDR}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
-            sse_tool_call(0, "rd-1", "read", &serde_json::json!({"file_path":"Cargo.toml"})),
-            sse_tool_call(1, "ct-b", "complete_task", &serde_json::json!({"summary": summary}))
+            sse_tool_call(
+                0,
+                "rd-1",
+                "read",
+                &serde_json::json!({"file_path":"Cargo.toml"})
+            ),
+            sse_tool_call(
+                1,
+                "ct-b",
+                "complete_task",
+                &serde_json::json!({"summary": summary})
+            )
         );
         let (result, frames) = run_complete_task_scenario(vec![resp], "ct-batch").await;
         assert_eq!(result.stop_reason, StopReason::Completed);
@@ -6357,7 +7118,10 @@ mod tests {
         assert!(
             !frames.iter().any(|f| f.frame_type == "action_batch"),
             "a batch with only one visible member must not declare a batch: {:?}",
-            frames.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>()
+            frames
+                .iter()
+                .map(|f| f.frame_type.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -6367,18 +7131,39 @@ mod tests {
     async fn batch_declaration_counts_only_visible_members() {
         let resp = format!(
             "{SSE_HDR}{}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
-            sse_tool_call(0, "rd-2", "read", &serde_json::json!({"file_path":"Cargo.toml"})),
-            sse_tool_call(1, "ct-c", "complete_task", &serde_json::json!({"summary":"收尾。"})),
+            sse_tool_call(
+                0,
+                "rd-2",
+                "read",
+                &serde_json::json!({"file_path":"Cargo.toml"})
+            ),
+            sse_tool_call(
+                1,
+                "ct-c",
+                "complete_task",
+                &serde_json::json!({"summary":"收尾。"})
+            ),
             sse_tool_call(2, "ls-1", "ls", &serde_json::json!({}))
         );
         let (result, frames) = run_complete_task_scenario(vec![resp], "ct-batch2").await;
         assert_eq!(result.stop_reason, StopReason::Completed);
-        let batch = frames.iter().find(|f| f.frame_type == "action_batch")
+        let batch = frames
+            .iter()
+            .find(|f| f.frame_type == "action_batch")
             .expect("two visible members must declare a batch");
-        assert_eq!(batch.extra.get("batchSize").and_then(|v| v.as_u64()), Some(2));
-        let members = batch.extra.get("batchMembers").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(
+            batch.extra.get("batchSize").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        let members = batch
+            .extra
+            .get("batchMembers")
+            .and_then(|v| v.as_array())
+            .unwrap();
         assert!(
-            members.iter().all(|m| m.get("toolName").and_then(|v| v.as_str()) != Some("complete_task")),
+            members
+                .iter()
+                .all(|m| m.get("toolName").and_then(|v| v.as_str()) != Some("complete_task")),
             "suppressed tools must not be batch members: {members:?}"
         );
     }
@@ -6389,22 +7174,31 @@ mod tests {
     async fn complete_task_summary_identical_to_streamed_text_is_not_resent() {
         let summary = "## 完成\n改动已落地，测试全绿。";
         // 正文先逐段流式输出同一段总结（含首尾空白差异，判重按 trim 口径）
-        let text_delta = |t: &str| format!(
-            "data: {}\n\n",
-            serde_json::json!({"choices":[{"delta":{"content":t}}]})
-        );
+        let text_delta = |t: &str| {
+            format!(
+                "data: {}\n\n",
+                serde_json::json!({"choices":[{"delta":{"content":t}}]})
+            )
+        };
         let resp = format!(
             "{SSE_HDR}{}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
             text_delta("## 完成\n"),
             text_delta("改动已落地，测试全绿。"),
-            sse_tool_call(0, "ct-dup", "complete_task", &serde_json::json!({"summary": summary}))
+            sse_tool_call(
+                0,
+                "ct-dup",
+                "complete_task",
+                &serde_json::json!({"summary": summary})
+            )
         );
         let (result, frames) = run_complete_task_scenario(vec![resp], "ct-dup").await;
         assert_eq!(result.stop_reason, StopReason::Completed);
         assert_eq!(result.final_answer, summary);
         // 整段 summary 的 text 帧不得出现（正文已逐 token 流式交付）。
         assert!(
-            !frames.iter().any(|f| f.frame_type == "text" && f.text.as_deref() == Some(summary)),
+            !frames
+                .iter()
+                .any(|f| f.frame_type == "text" && f.text.as_deref() == Some(summary)),
             "summary identical to streamed content must not be re-emitted as a whole text frame"
         );
         assert!(frames.iter().any(|f| f.frame_type == "done"));
@@ -6422,12 +7216,19 @@ mod tests {
         );
         let resp = format!(
             "{SSE_HDR}{text_delta}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
-            sse_tool_call(0, "ct-diff", "complete_task", &serde_json::json!({"summary": summary}))
+            sse_tool_call(
+                0,
+                "ct-diff",
+                "complete_task",
+                &serde_json::json!({"summary": summary})
+            )
         );
         let (result, frames) = run_complete_task_scenario(vec![resp], "ct-diff").await;
         assert_eq!(result.stop_reason, StopReason::Completed);
         assert!(
-            frames.iter().any(|f| f.frame_type == "text" && f.text.as_deref() == Some(summary)),
+            frames
+                .iter()
+                .any(|f| f.frame_type == "text" && f.text.as_deref() == Some(summary)),
             "a summary that extends the streamed text must still be delivered"
         );
     }
@@ -6439,8 +7240,18 @@ mod tests {
     async fn complete_task_gets_conflict_receipt_when_batch_hitl_suspends() {
         let resp = format!(
             "{SSE_HDR}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
-            sse_tool_call(0, "bash-hitl", "bash", &serde_json::json!({"command":"rm -rf node_modules"})),
-            sse_tool_call(1, "ct-hitl", "complete_task", &serde_json::json!({"summary":"收尾。"}))
+            sse_tool_call(
+                0,
+                "bash-hitl",
+                "bash",
+                &serde_json::json!({"command":"rm -rf node_modules"})
+            ),
+            sse_tool_call(
+                1,
+                "ct-hitl",
+                "complete_task",
+                &serde_json::json!({"summary":"收尾。"})
+            )
         );
         let port = scripted_mock(vec![resp]).await;
         let mut config = corruption_itest_config(port, "ct-hitl", 6);
@@ -6454,16 +7265,29 @@ mod tests {
         let run = agent.run(&config, history, frame_tx, cancel);
         let collector = tokio::spawn(async move {
             let mut frames = Vec::new();
-            while let Some(f) = frame_rx.recv().await { frames.push(f); }
+            while let Some(f) = frame_rx.recv().await {
+                frames.push(f);
+            }
             frames
         });
         let result = run.await;
         let _frames = collector.await.unwrap();
-        assert_eq!(result.stop_reason, StopReason::SuspendedHitl, "bash 必须触发 HITL 挂起");
-        let receipt = result.messages.iter().find(|m| m.tool_call_id.as_deref() == Some("ct-hitl"));
-        let receipt = receipt.expect("complete_task 必须有配对回执（否则恢复后孤儿调用 400/被填中断标记）");
-        assert_eq!(receipt.content_text(), COMPLETE_TASK_WITH_ASK_ERROR,
-            "回执必须是互斥错误文案，而非 INTERRUPTED_MARKER");
+        assert_eq!(
+            result.stop_reason,
+            StopReason::SuspendedHitl,
+            "bash 必须触发 HITL 挂起"
+        );
+        let receipt = result
+            .messages
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("ct-hitl"));
+        let receipt =
+            receipt.expect("complete_task 必须有配对回执（否则恢复后孤儿调用 400/被填中断标记）");
+        assert_eq!(
+            receipt.content_text(),
+            COMPLETE_TASK_WITH_ASK_ERROR,
+            "回执必须是互斥错误文案，而非 INTERRUPTED_MARKER"
+        );
     }
 
     /// 契约 §4.2：同批含 ask_user 时 complete_task 返回错误、不结束；ask_user 照常挂起。
@@ -6473,17 +7297,33 @@ mod tests {
         // ask_user 先执行、complete_task 被互斥拒绝。
         let resp = format!(
             "{SSE_HDR}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
-            sse_tool_call(0, "ct-x", "complete_task", &serde_json::json!({"summary":"done"})),
-            sse_tool_call(1, "ask-x", "ask_user", &serde_json::json!({"questions":[{"header":"选哪个？","options":[{"label":"A"}]}]}))
+            sse_tool_call(
+                0,
+                "ct-x",
+                "complete_task",
+                &serde_json::json!({"summary":"done"})
+            ),
+            sse_tool_call(
+                1,
+                "ask-x",
+                "ask_user",
+                &serde_json::json!({"questions":[{"header":"选哪个？","options":[{"label":"A"}]}]})
+            )
         );
         let (result, frames) = run_complete_task_scenario(vec![resp], "ct-ask").await;
         // ask_user 挂起 → 整个 run 以 SuspendedQuestion 结束，而非 Completed。
         assert_eq!(result.stop_reason, StopReason::SuspendedQuestion);
-        assert_ne!(result.final_answer, "done", "complete_task must NOT end the run");
+        assert_ne!(
+            result.final_answer, "done",
+            "complete_task must NOT end the run"
+        );
         // complete_task 的互斥错误回执入史（配对完整）。
         assert!(
-            result.messages.iter().any(|m| m.tool_call_id.as_deref() == Some("ct-x")
-                && m.content_text().contains("不能同时提交完成")),
+            result
+                .messages
+                .iter()
+                .any(|m| m.tool_call_id.as_deref() == Some("ct-x")
+                    && m.content_text().contains("不能同时提交完成")),
             "complete_task must get the mutual-exclusion error result"
         );
         // ask_user 的 question 帧照常发。
@@ -6497,15 +7337,31 @@ mod tests {
         std::fs::write(&tmp, b"hello").unwrap();
         let resp = format!(
             "{SSE_HDR}{}{}{SSE_FINISH_TOOLS}{SSE_DONE}",
-            sse_tool_call(0, "ct-b", "complete_task", &serde_json::json!({"summary":"收尾"})),
-            sse_tool_call(1, "rd-b", "read", &serde_json::json!({"file_path": tmp.to_string_lossy()}))
+            sse_tool_call(
+                0,
+                "ct-b",
+                "complete_task",
+                &serde_json::json!({"summary":"收尾"})
+            ),
+            sse_tool_call(
+                1,
+                "rd-b",
+                "read",
+                &serde_json::json!({"file_path": tmp.to_string_lossy()})
+            )
         );
         let (result, _frames) = run_complete_task_scenario(vec![resp], "ct-batch").await;
         assert_eq!(result.stop_reason, StopReason::Completed);
         assert_eq!(result.final_answer, "收尾");
         // read 与 complete_task 的 tool result 都入史（配对完整）。
-        assert!(result.messages.iter().any(|m| m.tool_call_id.as_deref() == Some("rd-b")));
-        assert!(result.messages.iter().any(|m| m.tool_call_id.as_deref() == Some("ct-b")));
+        assert!(result
+            .messages
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("rd-b")));
+        assert!(result
+            .messages
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("ct-b")));
         let _ = std::fs::remove_file(&tmp);
     }
 }

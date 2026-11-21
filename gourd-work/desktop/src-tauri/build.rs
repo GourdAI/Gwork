@@ -84,6 +84,9 @@ const COMMANDS: &[&str] = &[
     "auth_refresh",
     "auth_self",
     "auth_official_refresh",
+    // ─── 设备中转（device_link.rs）──────────────────────────────────
+    // 移动端串联的状态查询命令；start/stop 由 auth 生命周期内部驱动。
+    "device_link_status",
     // ─── 自动更新（updater.rs）───────────────────────────────────────
     // 与 src/lib.rs 的 generate_handler! 一一对应；漏登会被 ACL 静默拒绝，
     // 表现为「检查更新按钮点了没反应」而非报错。
@@ -124,4 +127,76 @@ fn main() {
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
     )
     .expect("failed to run tauri-build");
+
+    // ─── GNU 工具链：把 CC v6 manifest 显式链进 lib-test ─────────────────────
+    //
+    // tauri-plugin-dialog → rfd(common-controls-v6) 直接导入
+    // comctl32!TaskDialogIndirect（只存在于 v6 并行程序集）。tauri-build 生成
+    // 的 resource.rc 已含 Common-Controls v6 manifest，主 bin 经 tauri-winres
+    // 的 rustc-link-lib 拿到它；但 `cargo test` 的 lib-test 链接参数里实测
+    // **没有** -lresource（--print link-args 取证），进程无 manifest →
+    // 加载 v5.82 comctl32 → 启动即 STATUS_ENTRYPOINT_NOT_FOUND(0xc0000139)。
+    //
+    // 对策：用 windres 把同一份 resource.rc 编成独立归档 libgwork_res.a，
+    // 以 `cargo:rustc-link-lib=static:+whole-archive` 显式链入（lib 与
+    // lib-test 都生效；主 bin 会同时有 tauri 的 resource 与本归档，GNU ld
+    // 对重复 RT_MANIFEST/ICON/VERSIONINFO 取先见者，内容一致无冲突）。
+    // windres 不可用/产物不合法时仅 warn 跳过，不影响构建本身。
+    #[cfg(all(target_os = "windows", target_env = "gnu"))]
+    {
+        let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+        let rc = std::path::Path::new(&out_dir).join("resource.rc");
+        let arch = std::path::Path::new(&out_dir).join("libgwork_res.a");
+        let _ = std::fs::remove_file(&arch);
+        println!("cargo:rerun-if-changed=build.rs");
+        if rc.exists() {
+            // windres 默认用 gcc 预处理 .rc；部分环境 gcc 驱动不可用，
+            // 用 cmd /c type 代替（tauri 的 .rc 无宏，无需真预处理）。
+            // 产物必须是合法 COFF 归档（`!<arch>\n`），否则宁缺毋滥。
+            let status = std::process::Command::new("windres")
+                .args([
+                    "--use-temp-file",
+                    "--preprocessor",
+                    "C:\\Windows\\System32\\cmd.exe",
+                    "--preprocessor-arg=/c",
+                    "--preprocessor-arg=type",
+                    "-i",
+                    "resource.rc",
+                    "-F",
+                    "pe-x86-64",
+                    "-O",
+                    "coff",
+                    "-o",
+                    "gwork_res.o",
+                ])
+                .current_dir(&out_dir)
+                .status();
+            let coff_ok = std::fs::read(std::path::Path::new(&out_dir).join("gwork_res.o"))
+                .map(|b| b.starts_with(&[0x64, 0x86]))
+                .unwrap_or(false);
+            let ar_ok = matches!(status, Ok(s) if s.success())
+                && coff_ok
+                && matches!(
+                    std::process::Command::new("ar")
+                        .args(["rcs", "libgwork_res.a", "gwork_res.o"])
+                        .current_dir(&out_dir)
+                        .status(),
+                    Ok(s) if s.success()
+                )
+                && std::fs::read(&arch)
+                    .map(|b| b.starts_with(b"!<arch>\n"))
+                    .unwrap_or(false);
+            if ar_ok {
+                println!("cargo:rustc-link-search=native={}", out_dir);
+                println!("cargo:rustc-link-lib=static:+whole-archive=gwork_res");
+            } else {
+                let _ = std::fs::remove_file(&arch);
+                println!(
+                    "cargo:warning=windres/ar unavailable; GNU lib-test may lack the \
+                     Common-Controls v6 manifest (cargo test can fail to start with \
+                     STATUS_ENTRYPOINT_NOT_FOUND). MSVC builds are unaffected."
+                );
+            }
+        }
+    }
 }

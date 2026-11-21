@@ -10,6 +10,9 @@ export type UniMethod = NonNullable<UniRequestOptions['method']>
 export type UniRequestResponse = Parameters<NonNullable<UniRequestOptions['success']>>[0]
 export type UniRequestTask = ReturnType<typeof uni.request>
 
+/** 取自 uni.connectSocket 的返回类型（设备中转 WS 用，见 utils/gwork-link.ts） */
+export type UniSocketTask = ReturnType<typeof uni.connectSocket>
+
 /** 与 uni.request 参数一致（去掉由工厂接管的 url 与回调），额外支持 anon、toast 与 onTask */
 export type ApiRequestOptions = Omit<UniRequestOptions, 'url' | 'success' | 'fail' | 'complete'> & {
 	/** 不带 token */

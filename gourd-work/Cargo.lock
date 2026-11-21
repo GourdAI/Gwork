@@ -2079,11 +2079,13 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tower",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "winreg 0.52.0",
 ]
 

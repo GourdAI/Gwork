@@ -20,6 +20,7 @@ import { api } from '@/lib/api'
 
 import type {
   FlowQuotaDataItem,
+  GworkDevice,
   QuotaDataItem,
   UptimeGroupResult,
 } from './types'
@@ -89,5 +90,31 @@ export async function getUptimeStatus() {
   const res = await api.get<{ success: boolean; data: UptimeGroupResult[] }>(
     '/api/uptime/status'
   )
+  return res.data
+}
+
+// ----------------------------------------------------------------------------
+// GWork Devices
+// ----------------------------------------------------------------------------
+
+// List desktop devices linked to the current account (online state is
+// resolved from the relay hub's live connections, not the database).
+export async function getGworkDevices() {
+  const res = await api.get<{
+    success: boolean
+    data?: GworkDevice[]
+    message?: string
+  }>('/api/gwork/devices')
+  return res.data
+}
+
+// Remove an offline device registration. The backend refuses with
+// code=DEVICE_ONLINE while the device still holds a live relay connection.
+export async function deleteGworkDevice(deviceId: string) {
+  const res = await api.delete<{
+    success: boolean
+    message?: string
+    code?: string
+  }>(`/api/gwork/devices/${encodeURIComponent(deviceId)}`)
   return res.data
 }

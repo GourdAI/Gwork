@@ -384,6 +384,7 @@ func migrateDB() error {
 		&AuthzRole{},
 		&UserAccessToken{},
 		&Installer{},
+		&GworkDevice{},
 	)
 	if err != nil {
 		return err

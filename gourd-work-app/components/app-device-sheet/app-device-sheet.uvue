@@ -3,7 +3,8 @@
 		<!-- 行结构对齐原型 首页.html 的 .opt / .oi / .ot / .ov。
 		     自建行而非 rice-cell：#value 插槽与 rice-cell 的 value prop 同名，运行时不会被注册（实测整块不挂载），
 		     右侧状态区只能落在不受支持的插槽上；同时原型的状态芯片规格（10px 字 / 圆角 6 / 2px 6px 内距）rice-tag 也覆盖不了。 -->
-		<view v-for="item in DEVICES" :key="item.name" class="app-device__opt"
+		<text v-if="deviceList.length === 0" class="app-device__empty">{{ emptyHint }}</text>
+		<view v-for="item in deviceList" :key="item.deviceId" class="app-device__opt"
 			:class="item.name === draft ? 'app-device__opt--on' : ''" @click="onPick(item)">
 			<view class="app-device__oi">
 				<text class="iconfont app-device__oi-font"
@@ -29,11 +30,12 @@
 </template>
 
 <script setup lang="ts">
-	import { ref, watch } from 'vue'
-	import type { Ref } from 'vue'
+	import { computed, ref, watch } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
 	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
-	import { DEVICES } from '@/data/app-data'
+	import { useDevices } from '@/hooks/useDevices'
+	import { gworkSignedIn } from '@/utils/gwork-auth.ts'
 	import type { DeviceOption } from '@/data/app-data'
 
 	defineOptions({
@@ -54,11 +56,21 @@
 		(e: 'select', name: string, online: boolean): void
 	}>()
 
+	const { devices, refreshDevices } = useDevices()
+	const deviceList: Ref<DeviceOption[]> = devices
+
 	// 弹层打开期间先暂存草稿，避免直接改动共享状态
 	const draft: Ref<string> = ref<string>('')
 
+	const emptyHint: ComputedRef<string> = computed<string>((): string => {
+		return gworkSignedIn().value ? t('home.device.empty') : t('chat.loginRequired')
+	})
+
 	watch((): boolean => props.visible, (visible: boolean): void => {
-		if (visible) draft.value = props.device
+		if (!visible) return
+		draft.value = props.device
+		// 打开即刷新在线态：设备可能刚上线/掉线，清单以后台为准
+		refreshDevices()
 	})
 
 	function t(key: string): string {
@@ -174,6 +186,12 @@
 
 		&__check {
 			margin-left: 5px;
+		}
+
+		&__empty {
+			padding: 14px 4px;
+			font-size: 13px;
+			color: var(--color-text-tertiary);
 		}
 	}
 </style>

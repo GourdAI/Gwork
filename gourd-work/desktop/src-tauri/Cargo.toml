@@ -78,6 +78,11 @@ hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
 # 以下两个不在 workspace.dependencies 里，按成员自有依赖声明（无需改 workspace 根）
 tower = { version = "0.5", features = ["util"] }
 lazy_static = "1"
+# ─── 设备中转（device_link.rs：移动端 ⇄ 官方后台 ⇄ 本地内核）──────────────
+# deviceId 持久身份（dev-<uuid8>）；gate 订阅握手需自定义 Authorization 头，
+# core 的 TungsteniteWs::connect 不收 headers，直接用 tokio-tungstenite 薄包。
+uuid.workspace = true
+tokio-tungstenite.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # WSL 默认用户探测（Lxss 注册表 DefaultUid → root 特判）

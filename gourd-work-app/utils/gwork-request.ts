@@ -37,6 +37,12 @@ export function gworkOrigin(): string {
 	return originOf(gworkBase())
 }
 
+/** 当前锁定站点下标（-1=未探测）。中转 WS 的 H5 代理前缀必须与 REST 锁定同一站点，
+ * 否则凭据跨站重放；调用前先 await ensureGworkHost() */
+export function gworkHostIndex(): number {
+	return hostIndex
+}
+
 function strOf(body: ApiBody | null, key: string): string {
 	if (body == null) return ''
 	const v = body[key]

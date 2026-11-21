@@ -25,6 +25,7 @@
 
 			<scroll-view class="app-drawer__scroll" direction="vertical" :show-scrollbar="false">
 				<view class="app-drawer__content">
+					<text v-if="remoteHint.length > 0" class="app-drawer__hint">{{ remoteHint }}</text>
 					<text class="app-drawer__group">{{ t('conv.title') }} ({{ defaultConversations.length }})</text>
 					<app-conv-row v-for="(item, index) in visibleConversations" :key="item.id" :title="item.title"
 						:time="formatRelativeTime(item.updatedAt)" :pinned="item.pinned"
@@ -38,27 +39,27 @@
 					</view>
 
 					<text class="app-drawer__group">{{ t('conv.workspace') }} ({{ otherWorkspaces.length }})</text>
-					<view v-for="(ws, wsIndex) in otherWorkspaces" :key="ws.name" class="app-drawer__ws">
+					<view v-for="(ws, wsIndex) in otherWorkspaces" :key="ws.root" class="app-drawer__ws">
 						<view class="app-drawer__ws-row" @longpress="onWsLongpress(ws.name, wsIndex)">
 							<text class="iconfont app-drawer__ws-glyph">&#xe67c;</text>
-							<text class="app-drawer__ws-name" @click="onPickWorkspace(ws.name)">{{ ws.name }}</text>
+							<text class="app-drawer__ws-name" @click="onPickWorkspace(ws.root)">{{ ws.name }}</text>
 							<view class="app-drawer__ws-icon"
-								:class="openWs === ws.name ? 'app-drawer__ws-icon--open' : ''"
-								@click="openWs = openWs === ws.name ? '' : ws.name">
+								:class="openWs === ws.root ? 'app-drawer__ws-icon--open' : ''"
+								@click="openWs = openWs === ws.root ? '' : ws.root">
 								<rice-icon name="arrow-down" size="13px" color="var(--color-text-tertiary)"></rice-icon>
 							</view>
-							<view class="app-drawer__ws-icon" @click="onNewInWorkspace(ws.name)">
+							<view class="app-drawer__ws-icon" @click="onNewInWorkspace(ws.root)">
 								<rice-icon name="plus" size="15px" color="var(--color-text-secondary)"></rice-icon>
 							</view>
 						</view>
-						<view v-if="openWs === ws.name" class="app-drawer__ws-sub">
-							<view v-for="(sub, subIndex) in conversationsOf(ws.name)" :key="sub.id"
+						<view v-if="openWs === ws.root" class="app-drawer__ws-sub">
+							<view v-for="(sub, subIndex) in conversationsOf(ws.root)" :key="sub.id"
 								class="app-drawer__sub-row" @click="onOpenConv(sub.id)"
 								@longpress="onSubLongpress(sub.id, wsIndex, subIndex)">
 								<text class="app-drawer__sub-name">{{ sub.title }}</text>
 								<text class="app-drawer__sub-time">{{ formatRelativeTime(sub.updatedAt) }}</text>
 							</view>
-							<text v-if="conversationsOf(ws.name).length === 0" class="app-drawer__sub-empty">{{ t('conv.empty') }}</text>
+							<text v-if="conversationsOf(ws.root).length === 0" class="app-drawer__sub-empty">{{ t('conv.empty') }}</text>
 						</view>
 					</view>
 				</view>
@@ -115,8 +116,10 @@
 	import { useUser } from '@/hooks/useUser'
 	import { useConversations } from '@/hooks/useConversations'
 	import { formatRelativeTime } from '@/utils/tools.ts'
-	import { WORKSPACES } from '@/data/app-data'
-	import type { Conversation } from '@/data/app-data'
+	import { useWorkspaces } from '@/hooks/useWorkspaces'
+	import { useDevices } from '@/hooks/useDevices'
+	import { gworkSignedIn } from '@/utils/gwork-auth.ts'
+	import type { Conversation, WorkspaceOption } from '@/data/app-data'
 	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
 	import AppDeviceSheet from '@/components/app-device-sheet/app-device-sheet.uvue'
 	import AppInputDialog from '@/components/app-input-dialog/app-input-dialog.uvue'
@@ -162,8 +165,10 @@
 	const { name, points, avatar } = useUser()
 	const {
 		conversations, defaultConversations, conversationsOf,
-		setActive, renameConversation, togglePin, removeConversation
+		setActive, renameConversation, togglePin, removeConversation, listError
 	} = useConversations()
+	const spaces = useWorkspaces()
+	const { activeDeviceId } = useDevices()
 
 	/** 折叠阈值：默认只展示前 N 条会话 */
 	const COLLAPSE_COUNT: number = 4
@@ -182,8 +187,17 @@
 	/** 待重命名的目标；ws 时 id 存工作区名 */
 	const renameTarget: Ref<{ kind: MenuKind; id: string } | null> = ref<{ kind: MenuKind; id: string } | null>(null)
 
-	const otherWorkspaces: ComputedRef<{ name: string }[]> = computed<{ name: string }[]>((): { name: string }[] => {
-		return WORKSPACES.filter((item: { name: string }): boolean => item.name !== workspace.value)
+	// 项目工作区动态清单（sessions projectRoot 去重）；当前工作区不重复展示
+	const otherWorkspaces: ComputedRef<WorkspaceOption[]> = computed<WorkspaceOption[]>((): WorkspaceOption[] => {
+		return spaces.projects.value.filter((item: WorkspaceOption): boolean => item.root !== spaces.current.value)
+	})
+	/** 未登录/无设备/加载失败的引导文案；正常时为空串 */
+	const remoteHint: ComputedRef<string> = computed<string>((): string => {
+		if (!gworkSignedIn().value) return t('chat.loginRequired')
+		if (activeDeviceId.value.length === 0) return t('chat.deviceRequired')
+		if (listError.value.length > 0) return listError.value
+		if (conversations.value.length === 0) return t('conv.emptyRemote')
+		return ''
 	})
 	const visibleConversations: ComputedRef<Conversation[]> = computed<Conversation[]>((): Conversation[] => {
 		const list: Conversation[] = defaultConversations.value
@@ -234,16 +248,16 @@
 		emit('open-conv', id)
 	}
 
-	function onPickWorkspace(name: string): void {
-		env.setWorkspace(name)
-		uni.showToast({ title: t('home.workspace.switched', { name: name }), icon: 'none' })
+	function onPickWorkspace(root: string): void {
+		env.setWorkspace(root)
+		uni.showToast({ title: t('home.workspace.switched', { name: workspace.value }), icon: 'none' })
 	}
 
 	/** 工作区 ＋：先把当前工作区切过去，随后同「新建会话」回到初始输入态，
 		发送时才在该工作区建会话（不预建，避免留下空会话） */
-	function onNewInWorkspace(name: string): void {
-		env.setWorkspace(name)
-		uni.showToast({ title: t('home.workspace.switched', { name: name }), icon: 'none' })
+	function onNewInWorkspace(root: string): void {
+		env.setWorkspace(root)
+		uni.showToast({ title: t('home.workspace.switched', { name: workspace.value }), icon: 'none' })
 		emit('new-chat')
 	}
 
@@ -499,6 +513,13 @@
 		&__sub-empty {
 			height: 30px;
 			font-size: 13.5px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__hint {
+			padding: 8px 0;
+			font-size: 13px;
+			line-height: 18px;
 			color: var(--color-text-tertiary);
 		}
 

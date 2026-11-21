@@ -16,30 +16,30 @@
 package com.gourdai.agent.react.intercept;
 
 import com.gourdai.agent.react.ReActTrace;
+import com.gourdai.agent.react.task.ToolExchanger;
 import com.gourdai.ai.chat.message.AssistantMessage;
 import com.gourdai.ai.chat.tool.ToolCall;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 循环检测指纹「只读工具纳入参数」的行为测试。
+ * 循环检测「完整参数指纹 + 连续链 3/5/8 建议式提醒 + 进展感知」的行为测试。
  *
- * <p>用户实测场景（本轮修复的直接动因）：子代理连续 read 不同文件（每次获取的信息都不同），
- * 旧指纹只看工具名，8 次窗口内 3 次 read 就触发循环提醒，注入的「强制收敛」提示诱导模型
- * 提前收尾——任务没干完就自己停了。</p>
- *
- * <p>修复后：read/grep/glob/ls 的参数参与指纹，读不同文件是不同指纹，不再误判；
- * 同名同参的重复调用（真正的原地打转）仍然能被检测到。</p>
+ * <p>2026-11-20 重设计（work-mwod1kcs 误杀复盘，Rust react/mod.rs 同步同语义）：
+ * 旧「窗口频率 + 120 字符截断」把 12 条共享长路径前缀但 Pattern 不同的排查命令
+ * 判成同一指纹并硬停任务。新口径：完整值哈希零截断；连续链计数（任何不同调用重置）；
+ * 3/5/8 各提醒一次后沉默，永不阻断/停机；同调用但结果变化、或上轮成功 write/edit，
+ * 链重置（重复≠无产出）。</p>
  *
  * @author oisin
  */
@@ -57,22 +57,39 @@ class StopLoopInterceptorFingerprintTest {
         return AssistantMessage.snapshot(content, "", null, null, null, null, null);
     }
 
-    /** 连续 onThought count 次，返回期间是否注入过循环提醒（以工作记忆新增 user 消息为准）。 */
-    private static boolean loopDetected(int repeatCount, AssistantMessage msg) {
-        StopLoopInterceptor interceptor = new StopLoopInterceptor(); // 默认 (3, 8)
+    /**
+     * 连续 onThought count 次（无 onObservation 证据 → 结果恒空、无写入），
+     * 返回期间注入的提醒条数。同参无进展的真重复在第 3 次触发首档。
+     */
+    private static int remindersFor(int repeatCount, AssistantMessage msg) {
+        StopLoopInterceptor interceptor = new StopLoopInterceptor();
         ReActTrace trace = new ReActTrace();
 
         int before = trace.getWorkingMemory().getMessages().size();
         for (int i = 0; i < repeatCount; i++) {
             interceptor.onThought(trace, null, msg);
         }
-        return trace.getWorkingMemory().getMessages().size() > before;
+        return trace.getWorkingMemory().getMessages().size() - before;
+    }
+
+    private static boolean loopDetected(int repeatCount, AssistantMessage msg) {
+        return remindersFor(repeatCount, msg) > 0;
+    }
+
+    /** 模拟一轮：onThought（判定）→ onObservation（喂本轮结果证据）。 */
+    private static void round(StopLoopInterceptor interceptor, ReActTrace trace,
+                              AssistantMessage msg, String toolName, String result, boolean failed) {
+        interceptor.onThought(trace, null, msg);
+        ToolExchanger ex = new ToolExchanger(toolName, new HashMap<>());
+        ex.setResult(result);
+        ex.setFailed(failed);
+        interceptor.onObservation(trace, ex, null, null, 1);
     }
 
     @Test
-    @DisplayName("同一窗口内 3 次不同文件 read 不触发（用户实测场景复现）")
-    void threeDifferentReadsInOneWindowMustNotTrigger() {
-        StopLoopInterceptor interceptor = new StopLoopInterceptor(); // (3, 8)
+    @DisplayName("连续 3 次不同文件 read 不触发（用户实测场景复现）")
+    void threeDifferentReadsMustNotTrigger() {
+        StopLoopInterceptor interceptor = new StopLoopInterceptor();
         ReActTrace trace = new ReActTrace();
 
         int before = trace.getWorkingMemory().getMessages().size();
@@ -86,7 +103,7 @@ class StopLoopInterceptorFingerprintTest {
     }
 
     @Test
-    @DisplayName("同名同参的 read 连续 3 次仍触发（真循环检测能力不得回归）")
+    @DisplayName("同名同参同结果的 read 连续 3 次仍触发（真循环检测能力不得回归）")
     void sameArgsReadStillTriggers() {
         Map<String, Object> args = new LinkedHashMap<>();
         args.put("file_path", "src/same.txt");
@@ -110,7 +127,7 @@ class StopLoopInterceptorFingerprintTest {
         interceptor.onThought(trace, null, toolCallMsg("grep", b));
         interceptor.onThought(trace, null, toolCallMsg("grep", a));
         assertFalse(trace.getWorkingMemory().getMessages().size() > before,
-                "交替搜两个不同 pattern 不是循环（A-B-A 型但参数均不同）");
+                "交替搜两个不同 pattern 不是循环（连续链语义：任何不同调用重置）");
 
         assertTrue(loopDetected(3, toolCallMsg("grep", a)),
                 "同 pattern grep ×3 是真循环，必须触发");
@@ -130,7 +147,7 @@ class StopLoopInterceptorFingerprintTest {
         ReActTrace trace = new ReActTrace();
 
         int before = trace.getWorkingMemory().getMessages().size();
-        // a b a：若 key 顺序参与指纹，a 和 b 是不同指纹，两次 a + 一次 b 只计 a×2，不触发；
+        // a b a：若 key 顺序参与指纹，a 和 b 是不同指纹，链不断重置，不触发；
         // 规范化后 a==b，3 次同指纹，触发。断言「触发」即证明 key 顺序被正确规范化掉。
         interceptor.onThought(trace, null, toolCallMsg("read", a));
         interceptor.onThought(trace, null, toolCallMsg("read", b));
@@ -140,12 +157,32 @@ class StopLoopInterceptorFingerprintTest {
     }
 
     @Test
+    @DisplayName("嵌套 Map 的 key 顺序也规范化（深度排序）")
+    void nestedKeyOrderMustNotChangeFingerprint() {
+        Map<String, Object> inner1 = new LinkedHashMap<>();
+        inner1.put("b", 2);
+        inner1.put("a", 1);
+        Map<String, Object> a = new LinkedHashMap<>();
+        a.put("opt", inner1);
+        Map<String, Object> inner2 = new LinkedHashMap<>();
+        inner2.put("a", 1);
+        inner2.put("b", 2);
+        Map<String, Object> b = new LinkedHashMap<>();
+        b.put("opt", inner2);
+
+        StopLoopInterceptor interceptor = new StopLoopInterceptor();
+        ReActTrace trace = new ReActTrace();
+        int before = trace.getWorkingMemory().getMessages().size();
+        interceptor.onThought(trace, null, toolCallMsg("x", a));
+        interceptor.onThought(trace, null, toolCallMsg("x", b));
+        interceptor.onThought(trace, null, toolCallMsg("x", a));
+        assertTrue(trace.getWorkingMemory().getMessages().size() > before,
+                "嵌套 key 顺序不同的同键值 args 应产生相同指纹");
+    }
+
+    @Test
     @DisplayName("同名不同参的 bash ×3 不再触发（自查场景实测误判源）")
     void bashWithDifferentCommandsMustNotTrigger() {
-        // 2026-10-02 口径反转：旧断言「bash 不同命令 ×3 仍触发」的「危险信号语义」在实测中
-        // 是主要误判源（work-mupc5nd0：连续 bash Select-String 定位不同符号 → 同名指纹 ≥3 →
-        // 注入「直接输出 Final Answer」式收敛指令 → 模型提前收口，0/10 任务未完成）。
-        // 新口径：除任务清单工具（NAME_ONLY_TOOLS）外全部看参数，同名不同参不触发。
         StopLoopInterceptor interceptor = new StopLoopInterceptor();
         ReActTrace trace = new ReActTrace();
 
@@ -160,6 +197,32 @@ class StopLoopInterceptorFingerprintTest {
     }
 
     @Test
+    @DisplayName("work-mwod1kcs 回归：共享 >120 字符前缀但 Pattern 不同的 12 条命令零提醒")
+    void longSharedPrefixCommandsMustNotCollide() {
+        // 旧 canonicalArgsOf 截断到 120 字符：路径前缀吃满预算，Pattern 差异全被
+        // 截掉 → 12 条不同排查命令同一指纹 → 3 次提醒耗尽 → Rust 侧硬停 448 回合。
+        String prefix = "$f='C:\\Apps\\HBuilderX\\plugins\\uniapp-cli-vite\\node_modules\\@dcloudio\\uni-cli-shared\\lib\\dom2\\web\\@vue\\compiler-sfc\\dist\\compiler-sfc.cjs.js'; ";
+        assertTrue(prefix.length() > 120, "前提：前缀超过旧截断预算");
+        String[] patterns = {
+                "function fileToScope", "function resolveFS", "new ScriptCompileContext",
+                "fileToScopeCache", "Unresolvable type reference", "function resolveTypeReference",
+                "function recordTypes", "function recordType\\b", "extraOptions",
+                "class ScriptCompileContext", "ScriptCompileContext = class", "invalidateTypeCache",
+        };
+        StopLoopInterceptor interceptor = new StopLoopInterceptor();
+        ReActTrace trace = new ReActTrace();
+        int before = trace.getWorkingMemory().getMessages().size();
+        for (String p : patterns) {
+            Map<String, Object> args = new LinkedHashMap<>();
+            args.put("command", prefix + "Select-String -Path $f -Pattern '" + p + "'");
+            args.put("timeout", 30000);
+            interceptor.onThought(trace, null, toolCallMsg("bash", args));
+        }
+        assertEquals(before, trace.getWorkingMemory().getMessages().size(),
+                "12 条实质不同的排查命令不得触发任何提醒（work-mwod1kcs 误杀回归）");
+    }
+
+    @Test
     @DisplayName("同命令 bash ×3 仍触发（真循环检测能力不回归）")
     void sameCommandBashStillTriggers() {
         Map<String, Object> args = new LinkedHashMap<>();
@@ -169,11 +232,82 @@ class StopLoopInterceptorFingerprintTest {
     }
 
     @Test
+    @DisplayName("升级式提醒：3/5/8 各一次，之后沉默，20 轮共 3 条且永不停机")
+    void escalationFiresOncePerThresholdThenSilent() {
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("command", "x");
+        AssistantMessage msg = toolCallMsg("bash", args);
+        assertEquals(3, remindersFor(20, msg), "3/5/8 各提醒一次，之后沉默");
+    }
+
+    @Test
+    @DisplayName("进展感知 A：同调用但结果每次不同（轮询产出新信息）→ 零提醒")
+    void sameCallChangingResultNeverReminds() {
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("command", "poll-build-log");
+        AssistantMessage msg = toolCallMsg("bash", args);
+        StopLoopInterceptor interceptor = new StopLoopInterceptor();
+        ReActTrace trace = new ReActTrace();
+        int before = trace.getWorkingMemory().getMessages().size();
+        for (int i = 0; i < 12; i++) {
+            round(interceptor, trace, msg, "bash", "log line " + i, false);
+        }
+        assertEquals(before, trace.getWorkingMemory().getMessages().size(),
+                "结果不断变化的轮询是合法排查，不得提醒");
+    }
+
+    @Test
+    @DisplayName("进展感知 B：两次相同探测之间夹成功 edit（改一版测一版）→ 零提醒")
+    void successfulEditBetweenProbesNeverReminds() {
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("command", "check-dev-server");
+        AssistantMessage probe = toolCallMsg("bash", args);
+        StopLoopInterceptor interceptor = new StopLoopInterceptor();
+        ReActTrace trace = new ReActTrace();
+        int before = trace.getWorkingMemory().getMessages().size();
+        for (int i = 0; i < 12; i++) {
+            // 每轮：edit 成功（状态变更）→ 相同探测、相同结果。
+            ToolExchanger edit = new ToolExchanger("edit", new HashMap<>());
+            edit.setResult("ok");
+            interceptor.onObservation(trace, edit, null, null, 1);
+            interceptor.onThought(trace, null, probe);
+            ToolExchanger check = new ToolExchanger("bash", new HashMap<>());
+            check.setResult("same output");
+            interceptor.onObservation(trace, check, null, null, 1);
+        }
+        assertEquals(before, trace.getWorkingMemory().getMessages().size(),
+                "edit→重启→轮询 循环是合法调试（work-mwod1kcs 形态），不得提醒");
+    }
+
+    @Test
+    @DisplayName("失败的 edit 不算进展：同参同结果重复仍触发")
+    void failedEditDoesNotCountAsProgress() {
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("command", "check");
+        AssistantMessage probe = toolCallMsg("bash", args);
+        StopLoopInterceptor interceptor = new StopLoopInterceptor();
+        ReActTrace trace = new ReActTrace();
+        int before = trace.getWorkingMemory().getMessages().size();
+        // 每轮两个调用：失败的 edit + 相同的 bash 探测（真实 ActionTask 顺序：
+        // onThought 先于本轮 onObservation，证据喂给下一轮判定）。
+        // 第 1 轮建基线（count=1），第 2/3/4 轮同证据递增 → 第 4 轮 count=3 触发。
+        for (int i = 0; i < 4; i++) {
+            interceptor.onThought(trace, null, probe);
+            ToolExchanger edit = new ToolExchanger("edit", new HashMap<>());
+            edit.setResult("old_str not found");
+            edit.setFailed(true);
+            interceptor.onObservation(trace, edit, null, null, 1);
+            ToolExchanger check = new ToolExchanger("bash", new HashMap<>());
+            check.setResult("same output");
+            interceptor.onObservation(trace, check, null, null, 1);
+        }
+        assertTrue(trace.getWorkingMemory().getMessages().size() > before,
+                "失败写入不构成进展，真重复仍须提醒");
+    }
+
+    @Test
     @DisplayName("todowrite/todoread 只看名字：同名同参/同名不同参均按名字指纹")
     void todoToolsFingerprintByNameOnly() {
-        // 清单工具每轮参数必然变化（清单内容随进度变），若纳入参数，正常推进任务会被误判为
-        // 不同操作从而丢失检测能力；反之若同名即指纹，连续 todowrite ×3 会被判定为可疑重复
-        // ——但这正是「每轮都重写清单却无实质推进」的信号，提醒是合理的。
         Map<String, Object> a = new LinkedHashMap<>();
         a.put("todos", "- [ ] step1\n- [ ] step2");
         Map<String, Object> b = new LinkedHashMap<>();
@@ -198,10 +332,6 @@ class StopLoopInterceptorFingerprintTest {
         StopLoopInterceptor interceptor = new StopLoopInterceptor();
         ReActTrace trace = new ReActTrace();
 
-        // 场景复现（work-mupc5nd0 实测形态）：长自查结论开头雷同，仅后半不同。旧口径取前
-        // 50 字符裸前缀 → 三次指纹相同 → 误注入收敛指令。新口径：120 字符哈希化，后半差异
-        // 参与哈希 → 不同指纹，不触发。前 60 字刻意完全相同（覆盖旧口径的截断窗口），
-        // 确保本用例能杀死「退回短前缀」的变异。
         String same60 = "现在我有足够的信息了。排查结论如下：经过对缓存槽位、额度更新、计费落点三个方向的深入排查，";
         String t1 = same60 + "确认 P0 是缓存路由遮蔽，必须修 A。";
         String t2 = same60 + "确认 P0 是额度更新丢用量，必须修 B。";
@@ -214,7 +344,6 @@ class StopLoopInterceptorFingerprintTest {
         assertFalse(trace.getWorkingMemory().getMessages().size() > before,
                 "开头雷同但实质不同的长文本思考，不得被误判为循环（work-mupc5nd0 实测误判形态）");
 
-        // 完全相同文本 ×3 仍必须触发（真重复）
         assertTrue(loopDetected(3, textMsg(t1)),
                 "完全相同的纯文本思考 ×3 是真重复，必须仍能检测到");
     }
@@ -251,6 +380,23 @@ class StopLoopInterceptorFingerprintTest {
                 "收敛指令会诱导模型把意图声明当最终答案（work-mupc5nd0 实测），已改为完成校验措辞:\n" + injected);
         assertTrue(injected.contains("若尚未完成，请继续执行"),
                 "新文案应引导「未完成则继续执行」:\n" + injected);
+    }
+
+    @Test
+    @DisplayName("提醒永不挂起、永不终止：触发后 route 与 finalAnswer 均不受影响")
+    void reminderNeverSuspendsOrTerminates() {
+        Map<String, Object> args = new LinkedHashMap<>();
+        args.put("command", "x");
+        StopLoopInterceptor interceptor = new StopLoopInterceptor();
+        ReActTrace trace = new ReActTrace();
+        for (int i = 0; i < 20; i++) {
+            interceptor.onThought(trace, null, toolCallMsg("bash", args));
+        }
+        // 裸 trace 无 session（prepare 未跑）；拦截器若挂起会先 NPE 或置位，两者都算失败。
+        assertTrue(trace.getSession() == null || !trace.getSession().isPending(),
+                "建议式提醒不得挂起会话");
+        assertTrue(trace.getFinalAnswer() == null || trace.getFinalAnswer().isEmpty(),
+                "建议式提醒不得强行终止任务");
     }
 
     @Test

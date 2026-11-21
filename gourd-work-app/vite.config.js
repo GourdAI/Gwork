@@ -20,7 +20,9 @@ function mirrorSetCookie(proxy) {
     proxy.on('proxyRes', (proxyRes) => {
         const cookies = proxyRes.headers['set-cookie']
         if (cookies != null && cookies.length > 0) {
-            proxyRes.headers['x-gwork-set-cookie'] = cookies.join('\n')
+            // HTTP 头值不允许裸换行（Node setHeader 抛 ERR_INVALID_CHAR 崩 dev server）；
+            // 用 ", " 连接（Set-Cookie 多值惯例），客户端 split('\n') 得单行也能逐行解析。
+            proxyRes.headers['x-gwork-set-cookie'] = cookies.join(', ')
         }
     })
 }
@@ -41,6 +43,7 @@ export default defineConfig(({mode}) => {
                 excludePages: []  // 需要排除的页面路径，例如 ['pages/special/index']
             }),
             uni(),
+            h5verifyFixUtsForIn,
 			/*AutoImport({
 				imports: ['vue', 'uni-app'],
                 include: [
@@ -68,7 +71,8 @@ export default defineConfig(({mode}) => {
                 // 让浏览器接受轮换后的 new_api_refresh（H5 刷新依赖它）。
                 '/gwork-cn': {
                     target: envConfig.VITE_GWORK_HOST_CN,
-                    ws: false,
+                    // 设备中转 WS（/api/gwork/link）与 REST 同前缀转发
+                    ws: true,
                     changeOrigin: true,
                     cookieDomainRewrite: '',
                     rewrite: (path) => path.replace(/^\/gwork-cn/, ''),
@@ -76,7 +80,7 @@ export default defineConfig(({mode}) => {
                 },
                 '/gwork-intl': {
                     target: envConfig.VITE_GWORK_HOST_INTL,
-                    ws: false,
+                    ws: true,
                     changeOrigin: true,
                     cookieDomainRewrite: '',
                     rewrite: (path) => path.replace(/^\/gwork-intl/, ''),
@@ -100,3 +104,16 @@ export default defineConfig(({mode}) => {
         }
     }
 });
+
+// [h5verify] 本机 H5 联调临时修正：rice-ui 经 UTS→TS 转译后残留
+// `for (let key = null in css)`（UTS for-in 写法，JS 非法）→ 改写为合法 JS。
+// App 原生打包不经此 transform，不受影响；联调结束可整段删除。
+const h5verifyFixUtsForIn = {
+    name: 'h5verify-fix-uts-for-in',
+    enforce: 'post',
+    transform(code, id) {
+        if (!/\.uts|\.uvue/.test(id)) return null
+        const out = code.replace(/for\s*\(\s*(const|let|var)\s+(\w+)\s*(?::[^=]+)?=\s*null\s+in\s/g, 'for ($1 $2 in ')
+        return out === code ? null : { code: out, map: null }
+    }
+}

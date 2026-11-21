@@ -4223,7 +4223,12 @@ mod tests {
         // Both orderings are exactly what makes the fix work, and both would
         // silently no-op if inverted (a `#[tokio::test]` could not catch the
         // server-side ordering at all, since that path needs a live HTTP server).
-        let react = include_str!("../react/mod.rs");
+        // Whitespace-normalised AND dots squeezed (`self .registry` → `self.registry`):
+        // rustfmt may wrap the method chain across lines; the pin is about
+        // ordering, not layout.
+        let react: String = include_str!("../react/mod.rs")
+            .split_whitespace().collect::<Vec<_>>().join(" ")
+            .replace(" .", ".");
         let wait_at = react.find("wait_for_startup(MCP_STARTUP_WAIT)")
             .expect("the loop must wait for MCP startup");
         let snap_at = react.find("let tool_defs = self.registry.definitions_async(")

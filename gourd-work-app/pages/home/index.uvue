@@ -81,6 +81,9 @@
 	import { useViewport, chatColumnStyle } from '@/hooks/useViewport'
 	import { useRunEnv } from '@/hooks/useRunEnv'
 	import { useConversations } from '@/hooks/useConversations'
+	import { useWorkspaces } from '@/hooks/useWorkspaces'
+	import { useDevices } from '@/hooks/useDevices'
+	import { gworkSignedIn } from '@/utils/gwork-auth.ts'
 	import { onBackPress, onResize, onShow } from '@dcloudio/uni-app'
 	import { refreshViewport } from '@/hooks/useViewport'
 	import HomeHeader from './components/home-header.uvue'
@@ -212,10 +215,25 @@
 			uni.showToast({ title: t('home.emptySend'), icon: 'none' })
 			return
 		}
+		// 发送前置校验：未登录/无设备/设备离线先 toast 引导，不进入聊天态
+		if (!gworkSignedIn().value) {
+			uni.showToast({ title: t('chat.loginRequired'), icon: 'none' })
+			return
+		}
+		const devices = useDevices()
+		if (devices.activeDeviceId.value.length === 0) {
+			uni.showToast({ title: t('chat.deviceRequired'), icon: 'none' })
+			return
+		}
+		if (!devices.deviceOnline.value) {
+			uni.showToast({ title: t('chat.deviceOffline'), icon: 'none' })
+			return
+		}
 		draft.value = ''
 		attachTag.value = ''
 		expanded.value = false
-		const convId: string = createConversation(workspace.value, content)
+		// createConversation 返回本地 id（work-8hex，契约允许自带），sendMessage 内部走异步中转
+		const convId: string = createConversation(useWorkspaces().current.value, content)
 		sendMessage(convId, content)
 		inChat.value = true
 	}
@@ -248,7 +266,7 @@
 
 	function onUpdateWorkspace(name: string): void {
 		env.setWorkspace(name)
-		uni.showToast({ title: t('home.workspace.switched', { name: name }), icon: 'none' })
+		uni.showToast({ title: t('home.workspace.switched', { name: workspace.value }), icon: 'none' })
 	}
 
 	function onUpdatePermission(name: string): void {

@@ -42,7 +42,8 @@
 		</view>
 
 		<view v-else-if="view === 'device'">
-			<rice-cell v-for="item in DEVICES" :key="item.name" class="app-run__opt"
+			<text v-if="devices.length === 0" class="app-run__empty">{{ t('home.device.empty') }}</text>
+			<rice-cell v-for="item in devices" :key="item.deviceId" class="app-run__opt"
 				:class="deviceRowClass(item)" :border="false" center :custom-style="cellStyle"
 				:title="item.name" :title-text-style="deviceTitleStyle(item)"
 				:label="deviceNote(item)" :label-style="descStyle"
@@ -70,7 +71,7 @@
 
 		<view v-else-if="view === 'ws'">
 			<rice-cell class="app-run__opt" :class="isChatWorkspace ? 'app-run__opt--on' : ''" :border="false"
-				center :custom-style="cellStyle" :title="DEFAULT_WORKSPACE" :title-text-style="titleStyle"
+				center :custom-style="cellStyle" :title="chatWorkspaceLabel" :title-text-style="titleStyle"
 				@click="onPickWorkspace(DEFAULT_WORKSPACE)">
 				<template #leftIcon>
 					<view class="app-run__oi">
@@ -84,17 +85,17 @@
 				</template>
 			</rice-cell>
 			<view class="app-run__ws-other">
-				<rice-cell v-for="(item, index) in otherWorkspaces" :key="item.name"
+				<rice-cell v-for="(item, index) in otherWorkspaces" :key="item.root"
 					class="app-run__opt app-run__opt--sub" :class="wsRowClass(index, item)"
 					:border="false" center :custom-style="cellStyle" :title="item.name"
-					:title-text-style="titleStyle" @click="onPickWorkspace(item.name)">
+					:title-text-style="titleStyle" @click="onPickWorkspace(item.root)">
 					<template #leftIcon>
 						<view class="app-run__oi">
 							<text class="iconfont app-run__oi-font">&#xe67c;</text>
 						</view>
 					</template>
 					<template #rightIcon>
-						<view v-if="item.name === workspace" class="app-run__check">
+						<view v-if="item.root === currentWs" class="app-run__check">
 							<rice-icon name="checked" size="16px" color="var(--color-primary)" />
 						</view>
 					</template>
@@ -130,8 +131,10 @@
 	import type { UTSJSONObject } from '@dcloudio/uni-app-x/types/uni'
 	import { i18n } from '@/locale/i18n.ts'
 	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
-	import { DEFAULT_WORKSPACE, DEVICES, PERMISSIONS, WORKSPACES } from '@/data/app-data'
+	import { DEFAULT_WORKSPACE, PERMISSIONS } from '@/data/app-data'
 	import type { DeviceOption, WorkspaceOption } from '@/data/app-data'
+	import { useDevices } from '@/hooks/useDevices'
+	import { useWorkspaces, workspaceLabel } from '@/hooks/useWorkspaces'
 
 	defineOptions({
 		name: 'app-run-sheet',
@@ -175,12 +178,17 @@
 	const permissionDanger: ComputedRef<boolean> = computed<boolean>((): boolean => {
 		return props.permission === PERMISSIONS[1].name
 	})
+	const { devices, refreshDevices } = useDevices()
+	const spaces = useWorkspaces()
+	// 当前工作区键收敛为顶层 computed，模板直接比对（避免深层 ref 解包差异）
+	const currentWs: ComputedRef<string> = computed<string>((): string => spaces.current.value)
 	const isChatWorkspace: ComputedRef<boolean> = computed<boolean>((): boolean => {
-		return props.workspace === DEFAULT_WORKSPACE
+		return currentWs.value === DEFAULT_WORKSPACE
 	})
-	// 对话（默认工作空间）固定占首行，其余按原顺序列在下方；选中只换高亮，不换位置
+	// 对话（默认工作空间）固定占首行，其余按原顺序列在下方；选中只换高亮，不换位置。
+	// 清单来自 sessions projectRoot 去重（useWorkspaces），展示 basename
 	const otherWorkspaces: ComputedRef<WorkspaceOption[]> = computed<WorkspaceOption[]>((): WorkspaceOption[] => {
-		return WORKSPACES.slice(1)
+		return spaces.projects.value
 	})
 
 	// 选中态的底色与边框在外层卡片上，cell 本身透明，只承担布局与点击
@@ -191,8 +199,12 @@
 	const valueStyle: UTSJSONObject = { color: 'var(--color-text-secondary)', fontSize: '12px', marginRight: '5px' }
 	const valueDangerStyle: UTSJSONObject = { color: 'var(--color-error)', fontSize: '12px', marginRight: '5px' }
 
+	const chatWorkspaceLabel: ComputedRef<string> = computed<string>((): string => workspaceLabel(DEFAULT_WORKSPACE))
+
 	watch((): boolean => props.visible, (visible: boolean): void => {
-		if (visible) view.value = 'main'
+		if (!visible) return
+		view.value = 'main'
+		refreshDevices()
 	})
 
 	function t(key: string): string {
@@ -224,7 +236,7 @@
 
 	function wsRowClass(index: number, item: WorkspaceOption): string {
 		let cls: string = index > 0 ? 'app-run__opt--sub-top' : ''
-		if (item.name === props.workspace) cls += ' app-run__opt--sub-on'
+		if (item.root === currentWs.value) cls += ' app-run__opt--sub-on'
 		return cls
 	}
 
@@ -352,6 +364,12 @@
 			border-color: var(--color-border);
 			background-color: var(--color-bg-card);
 			overflow: hidden;
+		}
+
+		&__empty {
+			padding: 14px 4px;
+			font-size: 13px;
+			color: var(--color-text-tertiary);
 		}
 	}
 </style>

@@ -1,0 +1,87 @@
+/**
+ * 工作区清单的跨页面共享状态（模块级单例，与 useTheme 同一模式）。
+ *
+ * 契约 §4（已修订）：工作区清单权威来源 = GET /web/chat/projects
+ * （桌面注册的项目，data:[{name,path,createdAt}]），name=桌面给的展示名、
+ * path=绝对路径；sessions 的 projectRoot 去重只作兜底补充。
+ * 全局「对话」区固定占首位（root=''）。
+ * 由会话层刷新时拉取回写，run-sheet / conv-drawer 只读消费，避免双源。
+ */
+import { computed, ref } from 'vue'
+import type { ComputedRef, Ref } from 'vue'
+import { i18n } from '@/locale/i18n.ts'
+import { DEFAULT_WORKSPACE } from '@/data/app-data'
+import type { WorkspaceOption } from '@/data/app-data'
+
+/** 项目工作区（不含全局「对话」区），name=basename、root=绝对路径 */
+const projectWorkspaces: Ref<WorkspaceOption[]> = ref<WorkspaceOption[]>([])
+
+/** 当前工作区键：DEFAULT_WORKSPACE=全局区，其余为项目绝对路径 */
+const currentWorkspace: Ref<string> = ref<string>(DEFAULT_WORKSPACE)
+
+/** 展示名：全局区走 i18n（语言切换即时跟随），项目区用 basename */
+export function workspaceLabel(key: string): string {
+	if (key === DEFAULT_WORKSPACE) return i18n.global.t('conv.title')
+	return basenameOf(key)
+}
+
+export function basenameOf(root: string): string {
+	const trimmed: string = root.replace(/[\\/]+$/, '')
+	const idx: number = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+	const name: string = idx >= 0 ? trimmed.slice(idx + 1) : trimmed
+	return name.length > 0 ? name : root
+}
+
+/** 会话层回写：权威清单来自 /web/chat/projects（name+path）；
+ * sessions 里出现但项目清单没有的 root 作兜底补充（basename 展示）。
+ * 当前选中项若已消失则回落全局区 */
+export function setProjectRoots(roots: string[], named?: WorkspaceOption[]): void {
+	const seen: Set<string> = new Set<string>()
+	const list: WorkspaceOption[] = []
+	if (named != null) {
+		for (let i = 0; i < named.length; i++) {
+			const item: WorkspaceOption = named[i]
+			if (item.root.length === 0 || seen.has(item.root)) continue
+			seen.add(item.root)
+			list.push({ name: item.name.length > 0 ? item.name : basenameOf(item.root), root: item.root })
+		}
+	}
+	for (let i = 0; i < roots.length; i++) {
+		const root: string = roots[i]
+		if (root.length === 0 || seen.has(root)) continue
+		seen.add(root)
+		list.push({ name: basenameOf(root), root: root })
+	}
+	projectWorkspaces.value = list
+	if (currentWorkspace.value !== DEFAULT_WORKSPACE && !seen.has(currentWorkspace.value)) {
+		currentWorkspace.value = DEFAULT_WORKSPACE
+	}
+}
+
+export function clearWorkspaces(): void {
+	projectWorkspaces.value = []
+	currentWorkspace.value = DEFAULT_WORKSPACE
+}
+
+export type Workspaces = {
+	/** 全部工作区：全局「对话」区固定首位 + 项目区 */
+	workspaces: ComputedRef<WorkspaceOption[]>
+	projects: Ref<WorkspaceOption[]>
+	current: Ref<string>
+	setCurrent: (key: string) => void
+}
+
+export function useWorkspaces(): Workspaces {
+	const workspaces: ComputedRef<WorkspaceOption[]> = computed<WorkspaceOption[]>((): WorkspaceOption[] => {
+		const global: WorkspaceOption = { name: i18n.global.t('conv.title'), root: '' }
+		return [global].concat(projectWorkspaces.value.map((item: WorkspaceOption): WorkspaceOption => {
+			return { name: item.name.length > 0 ? item.name : basenameOf(item.root), root: item.root }
+		}))
+	})
+
+	function setCurrent(key: string): void {
+		currentWorkspace.value = key.length === 0 ? DEFAULT_WORKSPACE : key
+	}
+
+	return { workspaces, projects: projectWorkspaces, current: currentWorkspace, setCurrent }
+}

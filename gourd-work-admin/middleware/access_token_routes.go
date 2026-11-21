@@ -59,11 +59,11 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"POST /api/verify":                    accessTokenAnyRule,
 
 	// router/api-router.go: /api/user (self)
-	"GET /api/user/sessions":                       accessTokenSessionRule,
-	"DELETE /api/user/sessions/:sid":               accessTokenSessionRule,
-	"POST /api/user/sessions/revoke-others":        accessTokenSessionRule,
-	"GET /api/user/self/groups":                    accessTokenScopeRule("profile:read"),
-	"GET /api/user/self":                           accessTokenScopeRule("profile:read"),
+	"GET /api/user/sessions":                accessTokenSessionRule,
+	"DELETE /api/user/sessions/:sid":        accessTokenSessionRule,
+	"POST /api/user/sessions/revoke-others": accessTokenSessionRule,
+	"GET /api/user/self/groups":             accessTokenScopeRule("profile:read"),
+	"GET /api/user/self":                    accessTokenScopeRule("profile:read"),
 	// PAT 不能用自身权限自举换取模型 key；只允许会话身份验证。
 	"GET /api/user/self/model-key":                 accessTokenSessionRule,
 	"GET /api/user/models":                         accessTokenScopeRule("profile:read"),
@@ -315,6 +315,16 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"PUT /api/deployments/:id/name":                     accessTokenScopeRule("deployment:write"),
 	"POST /api/deployments/:id/extend":                  accessTokenScopeRule("deployment:write"),
 	"DELETE /api/deployments/:id":                       accessTokenScopeRule("deployment:write"),
+
+	// router/api-router.go: /api/gwork (device relay). Session-only like
+	// /api/user/self/model-key: PATs are always refused. The WS routes do not
+	// run UserAuth (query-token auth in the controller) but are declared so a
+	// PAT presented in Authorization is audited as session_required instead of
+	// logging an undeclared-route error.
+	"GET /api/gwork/devices":              accessTokenSessionRule,
+	"DELETE /api/gwork/devices/:deviceId": accessTokenSessionRule,
+	"GET /api/gwork/device/link":          accessTokenSessionRule,
+	"GET /api/gwork/link":                 accessTokenSessionRule,
 
 	// router/relay-router.go
 	"POST /pg/chat/completions": accessTokenSessionRule,

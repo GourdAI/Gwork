@@ -65,6 +65,7 @@ import {
 } from '../../hooks/use-status-data'
 import { AnnouncementsPanel } from './announcements-panel'
 import { ApiInfoPanel } from './api-info-panel'
+import { DevicesPanel } from './devices-panel'
 import { FAQPanel } from './faq-panel'
 import { PerformanceHealthPanel } from './performance-health-panel'
 import { SummaryCards } from './summary-cards'
@@ -616,7 +617,9 @@ export function OverviewDashboard() {
     manualSetupGuideExpanded ?? (setupStatusReady && !setupComplete)
   const showLeftContentPanels =
     isAdmin || showApiInfoPanel || showAnnouncementsPanel || showFAQPanel
-  const showContentPanels = showLeftContentPanels || showUptimePanel
+  // The devices card is always visible for signed-in users; the right rail
+  // therefore renders even when uptime monitoring is not configured.
+  const showContentPanels = true
 
   const handleSetupGuideToggle = () => {
     const nextExpanded = !setupGuideExpanded
@@ -794,7 +797,6 @@ export function OverviewDashboard() {
               className={cn(
                 'grid grid-cols-1 gap-4',
                 showLeftContentPanels &&
-                  showUptimePanel &&
                   'xl:grid-cols-[minmax(0,1fr)_22rem]'
               )}
             >
@@ -830,11 +832,16 @@ export function OverviewDashboard() {
                   )}
                 </div>
               )}
-              {showUptimePanel && (
+              <div className='grid min-w-0 content-start gap-4'>
                 <CardStaggerItem>
-                  <UptimePanel />
+                  <DevicesPanel />
                 </CardStaggerItem>
-              )}
+                {showUptimePanel && (
+                  <CardStaggerItem>
+                    <UptimePanel />
+                  </CardStaggerItem>
+                )}
+              </div>
             </CardStaggerContainer>
           )}
         </div>

@@ -1,7 +1,8 @@
 <template>
 	<app-sheet :visible="visible" :title="title" @close="emit('close')">
 		<view v-if="view === 'main'">
-			<view v-for="item in MODELS" :key="item.name" class="app-model__opt"
+			<text v-if="modelList.length === 0" class="app-model__empty">{{ t('model.empty') }}</text>
+			<view v-for="item in modelList" :key="item.model" class="app-model__opt"
 				:class="item.name === draftModel ? 'app-model__opt--on' : ''">
 				<rice-cell :border="false" center :custom-style="cellStyle" @click="draftModel = item.name">
 					<template #title>
@@ -36,7 +37,7 @@
 		</view>
 
 		<view v-else-if="view === 'think'">
-			<view v-for="item in THINK_LEVELS" :key="item.name" class="app-model__opt"
+			<view v-for="item in thinkList" :key="item.value" class="app-model__opt"
 				:class="item.name === draftThink ? 'app-model__opt--on' : ''">
 				<rice-cell :border="false" center :custom-style="cellStyle" @click="onPickThink(item.name)">
 					<template #title>
@@ -55,7 +56,7 @@
 		</view>
 
 		<view v-else>
-			<view v-for="item in CONTEXT_WINDOWS" :key="item.name" class="app-model__opt"
+			<view v-for="item in contextList" :key="item.value" class="app-model__opt"
 				:class="item.name === draftContext ? 'app-model__opt--on' : ''">
 				<rice-cell :border="false" center :custom-style="cellStyle" @click="onPickContext(item.name)">
 					<template #title>
@@ -90,7 +91,7 @@
 	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
 	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
-	import { CONTEXT_WINDOWS, MODELS, THINK_LEVELS } from '@/data/app-data'
+	import { useRunEnv } from '@/hooks/useRunEnv'
 
 	defineOptions({
 		name: 'app-model-sheet',
@@ -134,6 +135,12 @@
 		color: 'var(--color-text-tertiary)', fontSize: '12.5px', fontWeight: '600'
 	}))
 
+	// 清单来自内核 /web/chat/models（useRunEnv 单例），打开时补拉一次
+	const { models, thinkLevels, contextWindows, refreshModels } = useRunEnv()
+	const modelList = models
+	const thinkList = thinkLevels
+	const contextList = contextWindows
+
 	// 草稿只在弹层打开时同步，弹层内切换先暂存，点「确认」才回写页面
 	watch((): boolean => props.visible, (visible: boolean): void => {
 		if (!visible) return
@@ -141,6 +148,7 @@
 		draftModel.value = props.model
 		draftThink.value = props.think
 		draftContext.value = props.context
+		if (modelList.value.length === 0) refreshModels()
 	})
 
 	function t(key: string): string {
@@ -218,6 +226,12 @@
 		&__confirm {
 			border-radius: 15px;
 			background-color: var(--color-primary);
+		}
+
+		&__empty {
+			padding: 14px 4px;
+			font-size: 13px;
+			color: var(--color-text-tertiary);
 		}
 	}
 </style>

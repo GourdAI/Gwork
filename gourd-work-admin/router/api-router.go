@@ -175,6 +175,23 @@ func SetApiRouter(router *gin.Engine) {
 			}
 		}
 
+		// GWork device relay: REST behind UserAuth; the two websocket routes
+		// authenticate the query access token inside the controller (H5 cannot
+		// set Authorization headers). gin-contrib/gzip skips requests whose
+		// Connection header contains "Upgrade", so the /api gzip middleware
+		// never wraps the hijacked ResponseWriter (verified in e2e).
+		gworkRoute := apiRouter.Group("/gwork")
+		gworkRoute.Use(middleware.UserAuth())
+		{
+			gworkRoute.GET("/devices", controller.GetGworkDevices)
+			gworkRoute.DELETE("/devices/:deviceId", controller.DeleteGworkDevice)
+		}
+		gworkWsRoute := apiRouter.Group("/gwork")
+		{
+			gworkWsRoute.GET("/device/link", controller.GworkDeviceLink)
+			gworkWsRoute.GET("/link", controller.GworkLink)
+		}
+
 		// Subscription billing (plans, purchase, admin management)
 		subscriptionRoute := apiRouter.Group("/subscription")
 		subscriptionRoute.Use(middleware.UserAuth())

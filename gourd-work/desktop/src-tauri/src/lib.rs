@@ -36,6 +36,7 @@ use tracing::{error, info, warn};
 
 mod commands;
 mod auth;
+mod device_link;
 mod external_link;
 mod ipc_bridge;
 mod logging;
@@ -261,7 +262,15 @@ pub fn run() {
                         } else if let Some(st) = h2.try_state::<AppState>() {
                             st.kernel_ready.store(true, Ordering::SeqCst);
                             // 广播就绪：server.rs 的反代据此放行请求（不再宽限等待）。
-                            let _ = st.backend_ready.send(true);
+                            //
+                            // 必须用 send_replace 而不是 send：tokio watch::Sender::send
+                            // 在**没有任何 receiver** 时返回 Err 且**不更新值**（1.54.1
+                            // 源码实锤）。设备链路由登录/restore 异步拉起，完全可能晚于
+                            // 这次广播才 subscribe；一旦就绪通知被静默丢弃，link_loop
+                            // 就永久卡在就绪闸门，一次 WSS 都不发，后台设备表始终为空。
+                            // send_replace 无论有无 receiver 都会把值写进去，晚到的订阅者
+                            // 立刻看到 true。
+                            st.backend_ready.send_replace(true);
                         }
                         if let Err(e) = create_main_window(&h2, &origin2) {
                             error!(error = %e, "failed to create main window");
@@ -363,6 +372,8 @@ pub fn run() {
             auth::auth_refresh,
             auth::auth_self,
             auth::auth_official_refresh,
+            // 设备中转状态查询（移动端串联；start/stop 由 auth 生命周期驱动）
+            device_link::device_link_status,
             // 自动更新状态机（前端 app-settings-about.js / app-update-badge.js
             // 通过 __GOURD_IPC__ 的 updater* 方法订阅，状态机本身已就绪）
             updater::updater_get_version,
@@ -396,6 +407,8 @@ pub fn run() {
                 // 注意这里只在**真退出**时跑：收进托盘不触发 Exit，远端连接因此
                 // 得以保留（符合预期 —— 任务还在跑）。
                 RunEvent::Exit => {
+                    // 设备中转随进程退出停掉（后台按心跳超时判设备离线）。
+                    device_link::stop();
                     tauri::async_runtime::block_on(async {
                         remote::shutdown_all().await;
                     });

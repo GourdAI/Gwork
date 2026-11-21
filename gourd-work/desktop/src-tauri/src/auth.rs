@@ -123,6 +123,10 @@ pub struct AuthState {
     client: reqwest::Client,
     /// 保活任务是否已启动（进程生命周期内只起一次）。
     keeper_started: Mutex<bool>,
+    /// keeper 自愈用的 AppHandle（install 时写入）。refresh 成功后据此
+    /// 幂等拉起 device_link —— 链路因任何原因停掉（登出竞态/会话轮换/
+    /// 任务异常退出）都能在下一次成功保活时自动恢复，无需重新登录。
+    keeper_app: Mutex<Option<tauri::AppHandle>>,
     /// 会话写操作互斥锁：login / refresh / logout 必须串行。
     ///
     /// 服务端 refresh 是「轮换密钥」：同一时刻两个请求若都带旧 secret，靠
@@ -184,6 +188,7 @@ impl AuthState {
             session: Mutex::new(None),
             client,
             keeper_started: Mutex::new(false),
+            keeper_app: Mutex::new(None),
             session_lock: tokio::sync::Mutex::new(()),
             base_url: std::sync::RwLock::new(
                 base_url.into().trim_end_matches('/').to_string(),
@@ -285,6 +290,17 @@ impl AuthState {
 
     pub fn snapshot(&self) -> Option<StoredSession> {
         self.session.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// 是否持有会话凭据（不校验时效）。device_link 只需要「登录与否」这个
+    /// 布尔口径，不该看见 StoredSession 里的 token —— 用本方法而非 snapshot，
+    /// 避免把私有凭据类型暴露到模块外（private_interfaces）。
+    pub fn is_signed_in(&self) -> bool {
+        self.session
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s| !s.access_token.is_empty()))
+            .unwrap_or(false)
     }
 
     fn store(&self, s: Option<StoredSession>) {
@@ -1314,6 +1330,48 @@ impl AuthState {
         }
     }
 
+    /// 设备中转（device_link）取连接用 access token。`force=false`：临近到期
+    /// （REFRESH_LEAD_SECS 内）才 refresh，否则直接用现有 token；`force=true`：
+    /// 后台判 401 后强制轮换一次再重连（§2「重连必须用新 token」）。
+    ///
+    /// review 修复（登出竞态）：refresh 因**网络类**错误失败时，不得把整条
+    /// device_link 判死——网络抖动会让桌面端断连后拿不到新 token 而整个停止，
+    /// 移动端要一直等到服务端心跳超时（~10 分钟）才判离线。现有 access token
+    /// 若仍在有效期内，直接拿它重连；连上后若后台判 401，link_loop 的
+    /// Unauthorized 分支会再走 force 刷新。决策由 [`refresh_failure_action`]
+    /// 纯函数承载（可枚举单测）；终结性错误仍上抛由调用方停止中转。
+    /// 返回的 token 绝不写日志（device_link §5 同口径）。
+    pub async fn fresh_access_token(&self, force: bool) -> Result<String, String> {
+        self.ensure_host().await;
+        let current = self.snapshot().ok_or_else(|| "尚未登录".to_string())?;
+        if current.access_token.is_empty() {
+            return Err("尚未登录".to_string());
+        }
+        if !force && current.access_expires_at > now_secs() + REFRESH_LEAD_SECS {
+            return Ok(current.access_token);
+        }
+        if let Err(e) = self.refresh().await {
+            return match refresh_failure_action(
+                current.access_expires_at - now_secs(),
+                is_session_terminal_error(&e),
+            ) {
+                RefreshFailureAction::UseStaleToken => Ok(current.access_token),
+                RefreshFailureAction::Propagate => Err(e),
+            };
+        }
+        let s = self.snapshot().ok_or_else(|| "尚未登录".to_string())?;
+        if s.access_token.is_empty() {
+            return Err("后台刷新未返回访问令牌".to_string());
+        }
+        Ok(s.access_token)
+    }
+
+    /// 会话是否已被服务端判定不可恢复（撤销/过期/不匹配）。device_link 用它
+    /// 决定「停止中转等重新登录」还是「退避后重试」。口径与 keeper 完全一致。
+    pub fn session_error_is_terminal(err: &str) -> bool {
+        is_session_terminal_error(err)
+    }
+
     /// 需要鉴权的后台请求（如 /api/user/self）。access token 临近到期时先刷新。
     pub async fn authorized_get(&self, path: &str) -> Result<serde_json::Value, String> {
         self.ensure_host().await;
@@ -1379,7 +1437,17 @@ impl AuthState {
                     .min(RETRY_INTERVAL.as_secs() as i64);
                 tokio::time::sleep(Duration::from_secs(wait as u64)).await;
                 let ok = match state.refresh().await {
-                    Ok(_) => true,
+                    Ok(_) => {
+                        // 自愈闭环：会话活着但中转任务可能已停（登出竞态、
+                        // 会话轮换窗口误判、任务异常退出）。start 幂等——
+                        // 已在跑时内部直接返回，这里每次成功保活都补拉一次。
+                        if let Ok(g) = state.keeper_app.lock() {
+                            if let Some(app) = g.as_ref() {
+                                crate::device_link::start(app);
+                            }
+                        }
+                        true
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "auth keep-alive refresh failed; will retry");
                         // 会话被服务端撤销（绝对上限/改密码）时才真正清本地状态；
@@ -1388,6 +1456,9 @@ impl AuthState {
                             state.store(None);
                             keyring_clear().await;
                             gourd_work_core::official::clear();
+                            // 会话已死：设备中转一并停掉（否则 link_loop 还会
+                            // 拿着旧凭据反复打后台）。重新登录时 start 会重启。
+                            crate::device_link::stop();
                         }
                         false
                     }
@@ -1426,6 +1497,27 @@ fn is_session_terminal_error(err: &str) -> bool {
     TERMINAL_CODES.iter().any(|c| upper.contains(c))
 }
 
+/// refresh 失败后的决策（fresh_access_token 的纯函数形态，供单测枚举真值表）。
+///
+/// - 终结性错误（服务端撤销/绝对上限/改密码）：一律上抛，device_link 停止中转；
+/// - 网络类失败 + 旧 access token 仍在有效期：先交出去重连（连上后被判 401
+///   由 link_loop 的 Unauthorized 分支再 force 刷新）—— 绝不能因后台抖动把
+///   整条中转判死，否则移动端要等心跳超时（~10 分钟）才判离线；
+/// - 网络类失败 + 旧 token 已过期：上抛（Transient），link_loop 退避后重试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshFailureAction {
+    UseStaleToken,
+    Propagate,
+}
+
+fn refresh_failure_action(access_token_remaining_secs: i64, terminal: bool) -> RefreshFailureAction {
+    if terminal || access_token_remaining_secs <= 0 {
+        RefreshFailureAction::Propagate
+    } else {
+        RefreshFailureAction::UseStaleToken
+    }
+}
+
 /// keeper 任务需要跨 `'static` 拿到 AuthState。Tauri 的 `manage` 会把它放进
 /// 全局状态，这里用一个进程级 OnceLock 存 Arc，避免给每个 command 传 State
 /// 生命周期参数（async command 里 `State<'_>` 跨 await 很受限）。
@@ -1447,6 +1539,10 @@ static KEEPER_STATE: KeeperState = KeeperState::new();
 pub fn install(app: &tauri::AppHandle) -> Arc<AuthState> {
     use tauri::Manager;
     let state = Arc::new(AuthState::new());
+    // keeper 自愈需要 AppHandle：refresh 成功后幂等拉起 device_link。
+    if let Ok(mut g) = state.keeper_app.lock() {
+        *g = Some(app.clone());
+    }
     KEEPER_STATE.install(state.clone());
     app.manage(state.clone());
 
@@ -1463,12 +1559,18 @@ pub fn install(app: &tauri::AppHandle) -> Arc<AuthState> {
     }));
 
     let s = state.clone();
+    let app_handle = app.clone();
     async_runtime::spawn(async move {
         // 与登录/取 key 共用同一个幂等闸门：竞速选站只跑一次，restore 的
         // refresh 与随后 prime 一定用同一个 host。全部探测失败保留默认站，
         // 启动流程不因此卡死。
         s.ensure_host().await;
-        let _ = s.restore().await;
+        let status = s.restore().await;
+        // 启动恢复出登录态：拉起设备中转（幂等）。app handle 由 install
+        // 传入，clone 进任务即可；未登录时 start 内部直接返回。
+        if status.signed_in {
+            crate::device_link::start(&app_handle);
+        }
     });
     state
 }
@@ -1500,6 +1602,8 @@ pub async fn auth_login(
     // 重置，或干脆属于上一个账号）会一直用下去。
     gourd_work_core::official::clear();
     prime_official_credential(&state, true).await;
+    // 登录成功：启动设备中转（幂等；未登录/已在跑时内部直接返回）。
+    crate::device_link::start(&app);
     Ok(status)
 }
 
@@ -1518,6 +1622,7 @@ pub async fn auth_register(
     // 注册成功后 Register 内部会再 login 一次；新用户此时已有 admin 自动建的 key。
     gourd_work_core::official::clear();
     prime_official_credential(&state, true).await;
+    crate::device_link::start(&app);
     Ok(status)
 }
 
@@ -1539,6 +1644,8 @@ pub async fn auth_logout(app: tauri::AppHandle) -> Result<AuthStatus, String> {
     let state = state_of(&app)?;
     state.logout().await?;
     gourd_work_core::official::clear();
+    // 登出：停掉设备中转（幂等），移动端连接由后台按设备离线处理。
+    crate::device_link::stop();
     Ok(state.status())
 }
 
@@ -2045,5 +2152,26 @@ mod tests {
             decide_login_encryption(200, &ok_body(serde_json::json!({"enabled": false}))),
             LoginEncryption::Disabled
         ));
+    }
+
+    // ── fresh_access_token（device_link 取 token；review 修复的决策真值表）──
+    //
+    // 注意：fresh_access_token 本体不做集成级单测——它入口的 ensure_host 会
+    // 竞速探测 OFFICIAL_HOSTS（真实公网站点），mock 不了也不该让单测打生产。
+    // 决策逻辑已抽成 refresh_failure_action 纯函数，在此枚举全部真值组合。
+
+    #[test]
+    fn refresh_failure_action_truth_table() {
+        use RefreshFailureAction::*;
+        // 终结性错误（服务端撤销/绝对上限）：无论旧 token 剩多久，一律上抛。
+        assert_eq!(refresh_failure_action(3600, true), Propagate);
+        assert_eq!(refresh_failure_action(0, true), Propagate);
+        assert_eq!(refresh_failure_action(-10, true), Propagate);
+        // 网络类失败 + 旧 token 仍有效：交旧 token 让 device_link 先重连。
+        assert_eq!(refresh_failure_action(30, false), UseStaleToken);
+        assert_eq!(refresh_failure_action(1, false), UseStaleToken);
+        // 网络类失败 + 旧 token 已过期：上抛（Transient），退避后重试。
+        assert_eq!(refresh_failure_action(0, false), Propagate);
+        assert_eq!(refresh_failure_action(-5, false), Propagate);
     }
 }

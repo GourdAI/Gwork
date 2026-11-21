@@ -60,6 +60,7 @@
     "allow-auth-refresh",
     "allow-auth-self",
     "allow-auth-official-refresh",
+    "allow-device-link-status",
     "allow-updater-get-version",
     "allow-updater-get-state",
     "allow-updater-check",

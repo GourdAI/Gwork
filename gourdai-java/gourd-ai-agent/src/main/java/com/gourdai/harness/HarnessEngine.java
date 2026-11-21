@@ -980,9 +980,9 @@ public class HarnessEngine {
         options.getCompressionInterceptor().setIntentChainEnabled(options.isIntentChainEnabled());
         options.getCompressionInterceptor().setIntentChainMaxTokens(options.getIntentChainMaxTokens());
 
-        //停止循环拦截器默认处理
+        //停止循环拦截器默认处理（2026-11-20 起：连续链 3/5/8 建议式提醒，永不阻断/停机）
         if (options.getStopLoopInterceptor() == null) {
-            options.setStopLoopInterceptor(new StopLoopInterceptor(3, 8));
+            options.setStopLoopInterceptor(new StopLoopInterceptor());
         }
 
         //人工介入拦截器默认处理

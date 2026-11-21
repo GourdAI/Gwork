@@ -11,7 +11,7 @@
 					<text class="app-chat__title" @click="onRename">{{ title }}</text>
 					<!-- 详情页环境行不展示权限段，仅设备与工作空间（设计稿 S3） -->
 					<app-env-bar class="app-chat__env" :device="device" :device-online="deviceOnline"
-						:workspace="workspace" :permission="permission" :show-permission="false"
+						:workspace="convWorkspace" :permission="permission" :show-permission="false"
 						@open-run="runSheetVisible = true"></app-env-bar>
 				</view>
 				<view class="app-chat__icon" @click="onNewChat">
@@ -53,7 +53,7 @@
 			@collapse="expanded = false" @send="onSend" @stop="onStop" @open-model="modelSheetVisible = true"
 			@open-plus="plusSheetVisible = true"></app-composer>
 
-		<app-run-sheet :visible="runSheetVisible" :device="device" :workspace="workspace" :permission="permission"
+		<app-run-sheet :visible="runSheetVisible" :device="device" :workspace="convWorkspace" :permission="permission"
 			:lock-env="true" @close="runSheetVisible = false" @update-permission="onUpdatePermission"></app-run-sheet>
 
 		<app-model-sheet :visible="modelSheetVisible" :model="model" :think="think" :context="context"
@@ -82,6 +82,8 @@
 	import { useViewport, CHAT_COLUMN_WIDTH } from '@/hooks/useViewport'
 	import { useRunEnv } from '@/hooks/useRunEnv'
 	import { useConversations } from '@/hooks/useConversations'
+	import { workspaceLabel } from '@/hooks/useWorkspaces'
+	import { gworkSignedIn } from '@/utils/gwork-auth.ts'
 	import AppEnvBar from '@/components/app-env-bar/app-env-bar.uvue'
 	import AppComposer from '@/components/app-composer/app-composer.uvue'
 	import AppRunSheet from '@/components/app-run-sheet/app-run-sheet.uvue'
@@ -167,6 +169,11 @@
 	const title: ComputedRef<string> = computed<string>((): string => {
 		const conv = activeConversation.value
 		return conv != null ? conv.title : t('conv.newChat')
+	})
+	// 详情页环境行展示会话自身的工作区（而非全局当前选择）：会话归属不随切换漂移
+	const convWorkspace: ComputedRef<string> = computed<string>((): string => {
+		const conv = activeConversation.value
+		return conv != null ? workspaceLabel(conv.workspace) : workspace.value
 	})
 	const messages: ComputedRef<ChatMessage[]> = computed<ChatMessage[]>((): ChatMessage[] => {
 		const conv = activeConversation.value
@@ -268,6 +275,15 @@
 		// 回复中禁止再发：停止按钮已替换发送按钮，这里兜住键盘 confirm 等旁路入口
 		if (processing.value) {
 			uni.showToast({ title: t('chat.busySend'), icon: 'none' })
+			return
+		}
+		// 前置校验放在清空草稿之前：拦截时用户输入必须保留
+		if (!gworkSignedIn().value) {
+			uni.showToast({ title: t('chat.loginRequired'), icon: 'none' })
+			return
+		}
+		if (!deviceOnline.value || device.value.length === 0) {
+			uni.showToast({ title: device.value.length === 0 ? t('chat.deviceRequired') : t('chat.deviceOffline'), icon: 'none' })
 			return
 		}
 		draft.value = ''
