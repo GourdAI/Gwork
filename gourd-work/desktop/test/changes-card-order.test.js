@@ -315,11 +315,12 @@ test('★ F3 placeHostInBubble 行为级：收口后新内容晚于卡片到达�
     assert.deepEqual(b.children, before, '位置正确时零移动');
 });
 
-test('★ E1 三镜像同步：app-message/app-file-changes/app-turn-display 逐字一致', () => {
+test('★ E1 镜像同步：app-message/app-file-changes/app-turn-display 逐字一致', () => {
     const ROOT = path.resolve(__dirname, '..', '..', '..');
+    /* gourd-ai-tauri 已随「桌面端统一 rust 内核」删除（7370119），不再是镜像目标；
+       仅校验现存的 Java 静态资源镜像。桌面 UI 以本目录 ui/ 为唯一源。 */
     const mirrors = [
-        path.join(ROOT, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static'),
-        path.join(ROOT, 'gourd-ai-tauri', 'ui')
+        path.join(ROOT, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static')
     ];
     for (const m of mirrors) {
         for (const f of ['js/app-message.js', 'js/app-file-changes.js', 'js/app-turn-display.js']) {

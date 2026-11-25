@@ -570,6 +570,14 @@ function sendMessage(forceQueue) {
     isStreaming = true;
     ensureSidebarRefreshTimer();
     setBtnStopMode();
+    /* 新消息发出 = 轮边界：收口旧 bubble 的运行态（agent-live / 批次盖子 / 折叠摘要），
+       与 appendSteerNote / finishStream(keepBatchIndex) 同口径。
+       不调此步则旧 bubble 保留 agent-live，计时器继续涨，视觉上看起来「旧消息也在加载」。
+       必须在 resetStreamState 之前：resetStreamState 会把 currentBubbleEl 置 null，
+       settleSteerTurnBoundary 靠它定位旧 bubble 行。 */
+    if (typeof settleSteerTurnBoundary === 'function') {
+        try { settleSteerTurnBoundary(sess); } catch (e) { /* 展示增强，不阻断发送 */ }
+    }
     resetStreamState(sess);
     showThinking(sess);
 
@@ -608,6 +616,9 @@ function sendCommandSilent(cmdText, onBeforeSend) {
     isStreaming = true;
     ensureSidebarRefreshTimer();
     setBtnStopMode();
+    if (typeof settleSteerTurnBoundary === 'function') {
+        try { settleSteerTurnBoundary(sess); } catch (e) { /* 展示增强，不阻断发送 */ }
+    }
     resetStreamState(sess);
     showThinking(sess);
 
@@ -727,6 +738,9 @@ function sendWithFormDataGrouped(sess, text, filesToSend) {
     if (sess.sessionId === activeSessionId) {
         isStreaming = true;
         setBtnStopMode();
+    }
+    if (typeof settleSteerTurnBoundary === 'function') {
+        try { settleSteerTurnBoundary(sess); } catch (e) { /* 展示增强，不阻断发送 */ }
     }
     resetStreamState(sess);
     showThinking(sess);

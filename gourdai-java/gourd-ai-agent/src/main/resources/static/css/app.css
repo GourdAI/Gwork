@@ -727,7 +727,22 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    各自内联 padding:0 + 自带底色 → 同为「展开」却两套宽度两种底色。
    现兜底文本也包进 .tool-plain-out（同底同宽同内距），四类输出观感完全一致。
    注意：此处不得加 border-top（process-flat-contract ④ 钉死）/圆角/竖条（② 钉死）。 */
-.tool-card-body { display: none; padding: 0; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow-y: auto; }
+/* 【㉑ 滚动链闸门 · 2026-11-25 用户报「内部滚动的时候，会出现外部滚动条」】
+   本卡体是内部滚动容器（max-height + overflow-y:auto）。默认 overscroll-behavior:auto
+   会把「滚到自身边界后继续的滚轮」沿滚动链交给祖先 —— 祖先正是整页消息区
+   .messages-wrap，于是「在工具输出里滚」变成「整页跟着滚」，用户看到外层滚动条在动。
+   真实 Chromium + CDP 真实滚轮 A/B（同一页面、同一坐标，只切 overscroll 值）：
+   指针停在思考卡体中心（elementFromPoint 实命中 .thinking-inner-out），连发
+   6 次 deltaY=300，卡体自身可滚 825px：
+     · auto（旧）   卡体 0→300→600→825，随后整页 989→989→989→1289→1589→1714（推到底）
+     · contain（新）卡体 0→300→600→825，整页恒 989（纹丝不动）
+   口径：内部滚动体一律 contain —— 边界处停住，不外溢；外部只在用户把指针移出
+   内部区域、或整体内容超出时才滚。
+   【㉔ 补充 · codereview 实测】contain 只管浏览器原生滚动链，管不住 JS：批次限高窗
+   的合成滚动（bindWindowWheel）绑在气泡上、按 DOM 归属把成员卡体也认成「窗内」，
+   preventDefault 直接吃掉原生滚动 —— 那条路径上 contain 完全失效。已配套修复：
+   见 app-turn-display.js innerScrollerForWheel（内部还有余量时整窗让位）。 */
+.tool-card-body { display: none; padding: 0; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
 .tool-card.expanded .tool-card-body { display: block; }
 /* 兜底纯文本输出块：与专用渲染器同底同宽同内距（fillToolBody 兜底路径包裹） */
 .tool-plain-out { padding: 8px 14px; background: var(--bg-code); }
@@ -740,6 +755,36 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    会把消息流撑出数屏；edit 400px、兜底 320px、bash/read 无限——三档并存正是
    「展开体验不统一」的另一半。全部收敛到与卡体基线同一 320px（内部滚动）。 */
 .tool-card-body.is-bash, .tool-card-body.is-file, .tool-card-body.is-edit { max-height: 320px; }
+/* 【clip-path 合成层隔离修复 2026-11】paintWindow 把 clip-path:inset(...) 写到成员卡上时，
+   Chromium 将其提升为合成层/stacking context，通配符 *::-webkit-scrollbar-* 在该层内失效，
+   .tool-card-body / .thinking-block-body / .agent-card-body 的 overflow:auto 回退为系统
+   原生滚条（宽轨道 + 灰底）。显式声明三个容器的 webkit 滚条规则，不靠 * 通配符继承。
+   几何值与 theme.css 变量同源，视觉完全统一；合成层隔断问题由此绕过。 */
+.tool-card-body::-webkit-scrollbar,
+.thinking-block-body::-webkit-scrollbar,
+.agent-card-body::-webkit-scrollbar { width: var(--scrollbar-size, 12px); }
+.tool-card-body::-webkit-scrollbar-track,
+.thinking-block-body::-webkit-scrollbar-track,
+.agent-card-body::-webkit-scrollbar-track { background: transparent; }
+.tool-card-body::-webkit-scrollbar-thumb,
+.thinking-block-body::-webkit-scrollbar-thumb,
+.agent-card-body::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb, rgba(150,152,158,.35));
+    border-radius: var(--scrollbar-radius, 8px);
+    border: var(--scrollbar-thumb-inset, 3px) solid transparent;
+    background-clip: padding-box;
+    min-height: var(--scrollbar-thumb-min, 36px);
+}
+.tool-card-body::-webkit-scrollbar-thumb:hover,
+.thinking-block-body::-webkit-scrollbar-thumb:hover,
+.agent-card-body::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover, rgba(150,152,158,.65));
+    background-clip: padding-box;
+    border-width: var(--scrollbar-thumb-inset-hover, 2px);
+}
+.tool-card-body::-webkit-scrollbar-button,
+.thinking-block-body::-webkit-scrollbar-button,
+.agent-card-body::-webkit-scrollbar-button { display: none; }
 
 /* 参数流式生成中的骨架卡（action_draft 建卡 → action_start 原地转正）。
    为何只改轮廓与头部文案、不动状态点：状态点四态（loading/done/warn/reject）语义已满，
@@ -877,10 +922,14 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 
 /* 子智能体块内容体（默认隐藏，展开后显示；复用外部主智能体 md-content 样式）。
    限高滚动：子代理输出（思考 + 多个工具卡 + 正文）体量常远超主气泡单段，无 max-height 时
-   卡片会一路向下撑开、把主对话顶出视口。与 .tool-card-body(200px) / .thinking-block-body(300px)
-   同口径，卡体自身成为滚动容器。不加 overscroll-behavior：保留默认滚动链，卡体触底后继续滚
-   会自然传给消息区，避免鼠标停在卡上时页面滚动被卡体“吃掉”。 */
-.agent-card-body { display: none; padding: 4px 10px 8px; font-size: 13px; color: var(--text-primary); line-height: 1.7; min-height: 0; max-height: 420px; overflow-y: auto; }
+   卡片会一路向下撑开、把主对话顶出视口。与 .tool-card-body(320px) / .thinking-block-body(300px)
+   同口径，卡体自身成为滚动容器。
+   【㉑ 滚动链闸门 · 2026-11-25 口径反转】旧注释主张「不加 overscroll-behavior，
+   保留默认滚动链，卡体触底后继续滚会自然传给消息区」—— 那正是用户本轮报障
+   「内部滚动的时候，会出现外部滚动条」的机制本身：内部元素的滚轮不该驱动整页。
+   现统一 contain：内部滚动到边界即停，外层只在指针移出内部区域或整体超出时才滚。
+   （旧注释保留为决策记录，勿据此回退。） */
+.agent-card-body { display: none; padding: 4px 10px 8px; font-size: 13px; color: var(--text-primary); line-height: 1.7; min-height: 0; max-height: 420px; overflow-y: auto; overscroll-behavior: contain; }
 .agent-card.expanded .agent-card-body { display: block; }
 /* 空结果体不占空间 */
 .agent-card.expanded .agent-card-body:empty { display: none; }
@@ -1185,7 +1234,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    同族：容器全宽 padding:0（限高/滚动在容器上），灰底块由内层 .thinking-inner-out
    承担（--bg-code 同底、14px 同内节奏，与 .tool-plain-out / .bash-output 一致）。
    旧形态 padding:0 10px 8px 无底色 —— 展开后裸文本贴左缘，比标题头还靠左。 */
-.thinking-block-body { padding: 0; font-size: 13px; color: var(--text-secondary); line-height: 1.7; max-height: 300px; overflow-y: auto; }
+/* overscroll-behavior: contain —— 同㉑滚动链闸门（思考体也是内部滚动容器，
+   触底后不得把滚轮交给整页消息区）。 */
+.thinking-block-body { padding: 0; font-size: 13px; color: var(--text-secondary); line-height: 1.7; max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }
 .thinking-inner-out { padding: 8px 14px; background: var(--bg-code); }
 /* 收起态的「此刻在想什么」：取末条非空行（同 ZCode 收起态摘要），
    展开后隐藏。已并入 header（见 .preview-inline），不再是独立一行。 */
@@ -4542,16 +4593,34 @@ pre:hover .code-copy-btn { opacity: 1; }
    零 DOM 插入（兄弟区间/邻接校验/compact 分类全部不受影响）。几何由 JS 经
    CSS 变量下发（--win-sb-top/-h/-thumb-h/-thumb-y，见 app-turn-display.js
    paintWindowScrollbar）；折叠时盖子 display:none，滚动条随之消失。
-   轨道贴盖子右缘内侧 2px；命中区由 JS pointerdown 判定（右缘 16px 宽），
+   轨道贴盖子右缘（right:0，与原生滚动条占位同缘，㉓ 前是内侧 2px）；
+   命中区由 JS pointerdown 判定（右缘 16px 宽），
    伪元素 pointer-events:none 不挡盖子本体点击。 */
 .turn-batch-header.turn-batch-windowed { position: relative; }
+/* 【㉓ 2026-11-25 用户报「内部的滚动条是不是没用统一的滚动条，上下端我记得是有弧度圆角的」】
+   自绘 thumb 此前是独立一套几何：宽 6px、圆角 3px、最小高 28px（JS SB_MIN_THUMB），
+   而全站规范（theme.css :root + *::-webkit-scrollbar-*）是「轨道 12px 保命中 +
+   3px 透明内衬把可见滑块收窄到 6px + 圆角 8px + 最小长 36px」。同一个界面里
+   两种滚动条：原生的是两端大圆弧的胶囊，自绘的是两端近乎直角的小方条。
+   现全部改为引用同一组 --scrollbar-* 变量，几何与原生逐像素同源：
+     · 轨道宽 = --scrollbar-size（12px），与原生占位同宽，右缘对齐；
+     · 可见滑块 = 轨道宽 - 2×--scrollbar-thumb-inset（12-6=6px），用左右透明边框
+       + background-clip:padding-box 收窄（与原生 thumb 同一手法，不是另画一条）；
+     · 圆角 = --scrollbar-radius（8px）⇒ 两端胶囊弧度与原生一致；
+     · 最小高由 JS 读 --scrollbar-thumb-min 下发（app-turn-display.js paintWindowScrollbar → scrollbarVar，读不到时回落 SB_MIN_THUMB_FALLBACK=36；浏览器实测 ::after width 12px / radius 8px / border 3px / clip padding-box / right 0px）。
+   轨道本体透明（原生 track 也是 transparent），只画滑块。 */
 .turn-batch-header.turn-batch-windowed::after {
     content: ''; position: absolute; pointer-events: none;
-    right: 2px; top: var(--win-sb-top, 100%);
-    width: 6px; height: var(--win-sb-h, 232px);
-    border-radius: 3px;
+    right: 0; top: var(--win-sb-top, 100%);
+    box-sizing: border-box;
+    width: var(--scrollbar-size, 12px); height: var(--win-sb-h, 232px);
+    border-left: var(--scrollbar-thumb-inset, 3px) solid transparent;
+    border-right: var(--scrollbar-thumb-inset, 3px) solid transparent;
+    border-radius: var(--scrollbar-radius, 8px);
     background: linear-gradient(var(--scrollbar-thumb, rgba(150,152,158,.35)) 0 0)
         0 var(--win-sb-thumb-y, 0px) / 100% var(--win-sb-thumb-h, 40px) no-repeat;
+    background-clip: padding-box;
+    background-origin: padding-box;
 }
 /* 成员折叠：JS 管理类的单一窄规则；:empty 的正文壳本就不占位，无需特判 */
 .msg-bubble > .turn-batch-collapsed { display: none !important; }
@@ -5205,13 +5274,53 @@ pre:hover .code-copy-btn { opacity: 1; }
     padding: 8px 12px 10px !important; gap: 8px !important;
 }
 
-/* ===== ⑲ 展开内容缩进对齐标题头（2026-11 用户报「缩进比标题头还在前面，看起来不奇怪嘛」）=====
-   【⑳ 层级缩进改造后口径】批次成员行标题头 = padding-left 26px + 类型图标 16px + gap 8px
-   ⇒ 标签文字左缘在 50px。展开的灰底内容块（bash-cmd/bash-stdout/tool-plain-out/
-   tool-file-pre/thinking-inner-out）左内距同抬到 50px，与标题头标签同列；
-   右内距保持 14px 不变。只命中 assistant 气泡内的过程行展开体，用户气泡零命中。
-   diff 行（git-diff-line）与 grep/file 行同口径抬左缘，行号列宽不动。
-   旧口径 34px（成员未缩进时代的 10+16+8）已由 ⑳ 取代，勿回退。 */
+/* ===== ⑲ 展开内容缩进对齐标题头（2026-11 用户报「缩进比标题头还在前面」）=====
+   【㉒ 2026-11-25 二次报障返工 · 缩进单位从「文字列」改为「盒子列」】
+   用户原话：「展开的阴影都把前面线条都遮挡了，缩进都超出对应标题栏了」。
+
+   ── 旧口径为什么错（真实 Chromium 量测，相对气泡左缘）──
+   旧 ⑲ 只抬【灰底块自身的 padding-left】到 50px，让 *文字* 与标题头标签同列。
+   但灰底块的 *盒子* 左缘仍在 0px：
+       引导线（盖子 ::before）  x = 16
+       成员标题头 padding-left  = 26（⑳）
+       灰底块盒子左缘           = 0   ← 比引导线还左 16px、比标题头内容还左 26px
+   于是整块 --bg-code 浅底从 0px 铺开，把 16px 处的引导线整条盖住（截图里
+   「线条被阴影遮挡」），并且展开块比它所属的标题栏向左凸出一大截（「缩进超出标题栏」）。
+   根因是把「文字对齐」当成了「层级对齐」：Qoder 的层级是【盒子整体右移一列】，
+   文字自然随之右移，而不是盒子不动、只把文字推过去。
+
+   ── 新口径（本块）──
+   层级由【卡体盒子】的左外边距承担，灰底块内距回到基线 14px：
+       成员卡体 margin-left = 26px（与标题头 padding-left 同值 ⇒ 盒子左缘对齐图标列）
+       灰底块 padding-left  = 14px（基线节奏）⇒ 文字落在 26+14 = 40px
+   结果：引导线 16 < 盒子 26 < 文字 40 < 标题头标签 50，四级阶梯清晰，
+   引导线永远在灰底块左侧之外，绝不会被遮挡。
+   卡内（智能体卡体自带 padding-left 26px，⑰ 契约钉死）同口径：
+       入批成员卡体 margin-left 26 ⇒ 盒子 52、文字 66；
+       未入批行（批次偏好关闭等回退态）margin-left 10 ⇒ 盒子 36、文字 50。
+   零包装节点（margin 写在卡体自身，兄弟区间/邻接判定/限高窗几何全部不受影响）。
+   HITL 待审批卡 :not(.hitl-pending) 豁免（审批卡形态不得弱化，与 ⑳ 同口径）。
+   护栏见 test/qoder-indent-nojump.test.js C1 与 test/expand-scroll-and-indent.test.js B1/B2/B3。 */
+.msg-row.assistant .msg-bubble > .tool-card[data-turn-batch="1"]:not(.hitl-pending) > .tool-card-body,
+.msg-row.assistant .msg-bubble > .thinking-block[data-turn-batch="1"] > .thinking-block-body,
+.msg-row.assistant .msg-bubble > .tool-batch-group[data-turn-batch="1"] .batch-tool-items > .tool-card:not(.hitl-pending) > .tool-card-body,
+.msg-bubble.turn-compact-open > .tool-batch-group[data-turn-batch="1"] .batch-tool-items > .tool-card:not(.hitl-pending) > .tool-card-body {
+    margin-left: 26px;
+}
+/* 卡内成员：卡体已有 26px 内距（⑰），再右移 26px 与卡内标题头 padding-left 同列 */
+.msg-row.assistant .msg-bubble .agent-card-body > .tool-card[data-turn-batch="1"]:not(.hitl-pending) > .tool-card-body,
+.msg-row.assistant .msg-bubble .agent-card-body > .thinking-block[data-turn-batch="1"] > .thinking-block-body,
+.msg-row.assistant .msg-bubble .agent-card-body > .tool-batch-group[data-turn-batch="1"] .batch-tool-items > .tool-card:not(.hitl-pending) > .tool-card-body {
+    margin-left: 26px;
+}
+/* 卡内未入批行（回退态）：标题头仍是 10px ⇒ 卡体右移 10px 同列 */
+.msg-row.assistant .msg-bubble .agent-card-body > .tool-card:not([data-turn-batch="1"]) > .tool-card-body,
+.msg-row.assistant .msg-bubble .agent-card-body > .thinking-block:not([data-turn-batch="1"]) > .thinking-block-body {
+    margin-left: 10px;
+}
+/* 灰底块内距回基线 14px（层级已由上面的卡体 margin 承担，不再靠 padding 推文字）。
+   这四类是全部展开内容块：bash 命令/输出、兜底纯文本、read/write 高亮体、思考体。
+   diff/grep/file 行同口径回基线，行号列宽不动。 */
 .msg-row.assistant .msg-bubble .tool-card .bash-cmd,
 .msg-row.assistant .msg-bubble .tool-card .bash-stdout,
 .msg-row.assistant .msg-bubble .tool-card .tool-plain-out,
@@ -5220,41 +5329,8 @@ pre:hover .code-copy-btn { opacity: 1; }
 .msg-row.assistant .msg-bubble .tool-card .grep-note,
 .msg-row.assistant .msg-bubble .tool-card .file-entry,
 .msg-row.assistant .msg-bubble .thinking-block .thinking-inner-out {
-    padding-left: 50px;
+    padding-left: 14px;
 }
-.msg-row.assistant .msg-bubble .tool-card-body.is-edit .git-diff-line { padding-left: 50px; }
-.msg-row.assistant .msg-bubble .tool-card .grep-file { padding-left: 50px; }
-.msg-row.assistant .msg-bubble .tool-card .grep-hit { padding-left: 64px; }
-/* 【⑳ 例外】智能体卡体内的展开内容：卡体自带 padding-left 26px（⑰ 口径，
-   契约测试 agent-body-align 钉死，不改）。
-   · 入批成员行 header 左内距 26px（⑳）+ 图标 16 + gap 8 ⇒ 标签列 = 26+50 = 76px，
-     灰底块补 50px 同列；
-   · 未入批行（批次偏好关闭等回退态）header 仍是 10px ⇒ 标签列 60px，灰底块补 34px。
-   不写例外会套用外部 50px 双重叠加（缩进过深或错位）。 */
-.msg-row.assistant .msg-bubble .agent-card .tool-card .bash-cmd,
-.msg-row.assistant .msg-bubble .agent-card .tool-card .bash-stdout,
-.msg-row.assistant .msg-bubble .agent-card .tool-card .tool-plain-out,
-.msg-row.assistant .msg-bubble .agent-card .tool-card .tool-file-pre,
-.msg-row.assistant .msg-bubble .agent-card .tool-card .edit-result,
-.msg-row.assistant .msg-bubble .agent-card .tool-card .grep-note,
-.msg-row.assistant .msg-bubble .agent-card .tool-card .file-entry,
-.msg-row.assistant .msg-bubble .agent-card .thinking-block .thinking-inner-out {
-    padding-left: 34px;
-}
-.msg-row.assistant .msg-bubble .agent-card .tool-card-body.is-edit .git-diff-line { padding-left: 34px; }
-.msg-row.assistant .msg-bubble .agent-card .tool-card .grep-file { padding-left: 34px; }
-.msg-row.assistant .msg-bubble .agent-card .tool-card .grep-hit { padding-left: 48px; }
-.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .bash-cmd,
-.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .bash-stdout,
-.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .tool-plain-out,
-.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .tool-file-pre,
-.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .edit-result,
-.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .grep-note,
-.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .file-entry,
-.msg-row.assistant .msg-bubble .agent-card .thinking-block[data-turn-batch="1"] .thinking-inner-out {
-    padding-left: 50px;
-}
-.msg-row.assistant .msg-bubble .agent-card .tool-card-body.is-edit .git-diff-line { padding-left: 34px; }
-.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .tool-card-body.is-edit .git-diff-line { padding-left: 50px; }
-.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .grep-file { padding-left: 50px; }
-.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .grep-hit { padding-left: 64px; }
+.msg-row.assistant .msg-bubble .tool-card-body.is-edit .git-diff-line { padding-left: 14px; }
+.msg-row.assistant .msg-bubble .tool-card .grep-file { padding-left: 14px; }
+.msg-row.assistant .msg-bubble .tool-card .grep-hit { padding-left: 28px; }

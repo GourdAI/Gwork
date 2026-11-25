@@ -544,9 +544,25 @@
            pointermove 换算 pos 写游标 + paintWindow（与 wheel 同一绘制管线），
            并 stopPropagation 防止冒泡触发盖子的展开/收起 click。
          · wheel 高频路径只写 CSS 变量（纯算术），不读布局。 */
-    var SB_W = 6;              /* 轨道视觉宽度 */
+    /* 【㉓ 2026-11-25 用户报「内部滚动条没统一，上下端应该有弧度圆角」】
+       自绘滚动条几何一律取自全站规范变量（theme.css :root 的 --scrollbar-*），
+       不再各写一套常量：轨道宽 = --scrollbar-size（12px，与原生占位同宽），
+       可见滑块由 CSS 的透明内衬收窄到 6px、圆角 --scrollbar-radius（8px 胶囊），
+       最小可抓握长度 = --scrollbar-thumb-min（36px）。
+       读不到变量（桩 DOM / 变量缺失）时回落到与 theme.css 同值的字面量，
+       保证 Node 契约测试与极端环境下的行为不变。 */
+    var SB_MIN_THUMB_FALLBACK = 36;
     var SB_HIT = 16;           /* 盖子右缘拖动命中区宽度（视觉 6px，命中 16px） */
-    var SB_MIN_THUMB = 28;     /* thumb 最小高度：内容极长时仍可抓握 */
+
+    /* 读 :root 上的滚动条规范变量（一次量测，缓存；主题切换不改这组几何值）。 */
+    function scrollbarVar(header, name, fallback) {
+        var doc = header && header.ownerDocument;
+        var view = doc && doc.defaultView;
+        if (!view || !view.getComputedStyle || !doc.documentElement) return fallback;
+        var v = view.getComputedStyle(doc.documentElement).getPropertyValue(name);
+        var n = parseFloat(v);
+        return (isFinite(n) && n > 0) ? n : fallback;
+    }
 
     /* 量测/重绘滚动条几何。metrics 是 refreshWindow 清补偿后、paintWindow 之前
        量的纯布局位（top 不含 translateY），首成员 mt 上缘即成员区顶。 */
@@ -563,7 +579,8 @@
         var trackTop = metrics[0].top - hr.top;
         if (!(trackTop >= 0)) trackTop = hr.height;   /* 防御：异常几何回落盖子高 */
         var total = overflow + WINDOW_MAX_PX;
-        var thumbH = Math.max(SB_MIN_THUMB, Math.round(WINDOW_MAX_PX * WINDOW_MAX_PX / total));
+        var minThumb = scrollbarVar(header, '--scrollbar-thumb-min', SB_MIN_THUMB_FALLBACK);
+        var thumbH = Math.max(minThumb, Math.round(WINDOW_MAX_PX * WINDOW_MAX_PX / total));
         var thumbTop = overflow > 0 ? Math.round((WINDOW_MAX_PX - thumbH) * pos / overflow) : 0;
         header.style.setProperty('--win-sb-top', px(trackTop));
         header.style.setProperty('--win-sb-h', px(WINDOW_MAX_PX));
@@ -715,6 +732,36 @@
         return had;
     }
 
+    /* 【㉔ 2026-11-25 codereview 实测修复 · 内部滚动体优先】
+       指针落在【真实可滚的内部容器】（工具卡体 / 思考卡体 / 子代理卡体，CSS 已给
+       overscroll-behavior:contain）上时，滚轮必须归它，合成窗不得接管。
+       真因：本监听绑在气泡上、按 DOM 归属认窗，成员卡体是成员的后代 ⇒ 恒被判为
+       「窗内」，于是 preventDefault 把原生滚动整个吃掉。真实 Chromium + CDP 滚轮
+       实测（指针命中 .thinking-inner-out，卡体自身尚可滚 825px）：
+         修前：卡体 scrollTop 恒 0，批次 _winPos 300→500→673，窗到底后整页
+               .messages-wrap 632→832→1032 —— 正是用户报的「内部滚动外部出现滚动条」，
+               且 CSS 的 contain 闸门对这条路径完全无效（preventDefault 走的是 JS 链，
+               不经浏览器滚动链）。
+         修后：卡体自己滚，窗与整页纹丝不动。
+       判定口径：只在「该方向上还有余量」时让位；内部已到边界则仍由窗接管，
+       避免指针停在长输出上时批次永远滚不动。 */
+    function innerScrollerForWheel(target, dy) {
+        var node = target;
+        while (node && node.nodeType === 1) {
+            var cls = node.classList;
+            if (cls && (cls.contains('tool-card-body') || cls.contains('thinking-block-body')
+                    || cls.contains('agent-card-body'))) {
+                var canScroll = node.scrollHeight > node.clientHeight + 1;
+                var room = dy > 0
+                    ? (node.scrollHeight - node.clientHeight - node.scrollTop)
+                    : node.scrollTop;
+                if (canScroll && room > 1) return node;
+            }
+            node = node.parentNode;
+        }
+        return null;
+    }
+
     /* 滚轮接管：wheel 绑在【气泡/卡体容器】上（成员不是盖子子节点，事件不经过
        盖子），按 ev.target 的 DOM 归属找到窗口批次。一容器一监听防重复。
        到边界放行（不 preventDefault）：页面继续滚，不吃掉整页滚动。 */
@@ -733,6 +780,8 @@
             var dy = ev.deltaY;
             if (ev.deltaMode === 1) dy *= 29;               /* 行 → 过程行高 */
             else if (ev.deltaMode === 2) dy *= WINDOW_MAX_PX; /* 页 → 视窗高 */
+            /* ㉔ 内部滚动体优先：还有余量就整个让位（不 preventDefault、不动窗） */
+            if (innerScrollerForWheel(ev.target, dy)) return;
             var pos = typeof h._winPos === 'number' ? h._winPos : 0;
             var next = Math.max(0, Math.min(overflow, pos + dy));
             if (next === pos) return;   /* 已在边界：放行给页面 */

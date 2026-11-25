@@ -11,14 +11,16 @@
  *     id 选择器）；HITL 待审批卡显式 :not(.hitl-pending) 豁免（审批卡形态不得弱化）。
  *  B. 引导线：画在盖子自身 ::before（零 DOM 插入），高度经 --batch-guide-h 下发；
  *     JS 侧建窗态恒 WINDOW_MAX_PX、收起/一键回退必须清变量（残线防回潮）。
- *  C. 展开内容对齐：灰底块左内距 50px（26+16+8 与成员标签同列）；
- *     智能体卡内未入批行 34px / 入批行 50px（卡体自带 26px 不双重叠加）。
+ *  C. 展开内容层级【㉒ 2026-11-25 返工后口径】：层级由【卡体盒子】margin-left 26px
+ *     承担（卡内未入批回退态 10px），灰底块内距回基线 14px。
+ *     旧口径「灰底块 padding-left 50/34px 只推文字」已废 —— 盒子左缘仍在 0px，
+ *     浅底盖住 16px 处的引导线且比标题栏左凸，正是用户二次报障的根因。
  *  D. 防跳动：showThinking / showInlineThinking 必须是 no-op（只清残留、不建 DOM、
  *     不启计时器、不 scrollToBottom）；看门狗（startStreamWatchdog）与停止按钮
  *     （setBtnStopMode）接线不得随指示器一起被删。
  *
- * 三份镜像（desktop / java static / tauri ui）逐字一致由既有契约
- * （process-flat-contract ①、connector-picker-contract ⑧）承担，本文件只钉形态。
+ * 权威镜像（desktop / java static）逐字一致由既有契约（process-flat-contract ①）
+ * 与本文件 D4 承担；构建产物副本另由 expand-scroll-and-indent D1 校验。
  */
 'use strict';
 const test = require('node:test');
@@ -120,19 +122,33 @@ test('★ B2 JS 接线：建窗态下发 WINDOW_MAX_PX；收起/一键回退清 
 
 /* ===== C. 展开内容对齐 ===== */
 
-test('★ C1 灰底展开块与成员标签同列：外部 50px、卡内未入批 34px、卡内入批 50px', () => {
-    /* 外部（⑲ 主规则）：50px = 成员 header 26 + 图标 16 + gap 8 */
+test('★ C1 ㉒ 层级由【卡体盒子】右移承担，灰底块内距回基线 14px（旧「只推文字」口径已废）', () => {
+    /* 【㉒ 2026-11-25 用户二次报障】旧 C1 锁的是「灰底块 padding-left 50px 让文字与
+       标签同列」——那恰恰是缺陷本身：盒子左缘仍在 0px，整块浅底盖住 16px 处的引导线，
+       且比所属标题栏向左凸出。用户原话「展开的阴影都把前面线条都遮挡了，缩进都超出
+       对应标题栏了」。Qoder 的层级是盒子整体右移一列，不是盒子不动只推文字。
+       本条改为锁新口径：卡体 margin-left 承担层级 + 灰底块 padding 回基线。 */
     const outer = cssClean.match(/\.msg-row\.assistant \.msg-bubble \.tool-card \.bash-cmd,[\s\S]{0,900}?\{([^}]*)\}/);
-    assert.ok(outer, '⑲ 展开内容对齐规则缺失');
-    assert.match(outer[1], /padding-left:\s*50px/, '外部灰底块必须 50px（旧 34px 已随成员缩进过时）');
-    /* 卡内例外两档都在 */
-    assert.match(cssClean, /\.agent-card \.tool-card \.bash-cmd,[\s\S]{0,900}?padding-left:\s*34px/,
-        '卡内未入批行灰底块 34px（卡体 26 + header 10 + 16 + 8 = 60 同列）');
-    assert.match(cssClean, /\.agent-card \.tool-card\[data-turn-batch="1"\]:not\(\.hitl-pending\) \.bash-cmd,[\s\S]{0,1200}?padding-left:\s*50px/,
-        '卡内入批行灰底块 50px（卡体 26 + header 26 + 16 + 8 = 76 同列）');
-    /* diff/grep 行同口径 */
-    assert.match(cssClean, /\.tool-card-body\.is-edit \.git-diff-line \{ padding-left: 50px; \}/);
-    assert.match(cssClean, /\.tool-card \.grep-hit \{ padding-left: 64px; \}/);
+    assert.ok(outer, '展开内容内距规则缺失');
+    assert.match(outer[1], /padding-left:\s*14px/, '灰底块内距回基线 14px（层级已由卡体 margin 承担）');
+    assert.doesNotMatch(outer[1], /padding-left:\s*(34|50|64)px/, '不得再用 padding 推文字冒充层级缩进');
+    /* 层级本体：成员卡体右移 26px（= 成员 header padding-left，盒子左缘对齐图标列） */
+    assert.match(cssClean,
+        /\.msg-bubble > \.tool-card\[data-turn-batch="1"\]:not\(\.hitl-pending\) > \.tool-card-body[\s\S]{0,600}?\{[^}]*margin-left:\s*26px/,
+        '外部成员卡体 margin-left 26px 缺失（层级本体）');
+    /* 卡内两档：入批 26px（卡体已有 26 内距）、未入批回退态 10px */
+    assert.match(cssClean,
+        /\.agent-card-body > \.tool-card\[data-turn-batch="1"\]:not\(\.hitl-pending\) > \.tool-card-body[\s\S]{0,400}?\{[^}]*margin-left:\s*26px/,
+        '卡内入批成员卡体 margin-left 26px');
+    assert.match(cssClean,
+        /\.agent-card-body > \.tool-card:not\(\[data-turn-batch="1"\]\) > \.tool-card-body[\s\S]{0,300}?\{[^}]*margin-left:\s*10px/,
+        '卡内未入批回退态卡体 margin-left 10px');
+    /* diff/grep 行同口径回基线 */
+    assert.match(cssClean, /\.tool-card-body\.is-edit \.git-diff-line \{ padding-left: 14px; \}/);
+    assert.match(cssClean, /\.tool-card \.grep-hit \{ padding-left: 28px; \}/);
+    /* 反证：旧的「卡内 padding 34/50」例外块必须整体消失，不得与新 margin 叠成双重缩进 */
+    assert.doesNotMatch(cssClean, /\.agent-card \.tool-card \.bash-cmd,/,
+        '旧卡内 padding 例外块仍在 → 与卡体 margin 双重叠加');
 });
 
 /* ===== D. 底部指示器退役（防跳动） ===== */
@@ -178,11 +194,15 @@ test('★ D3 运行反馈三层保留：停止按钮 / 看门狗 / 批次盖子�
     assert.match(msgClean, /function purgeInlineThinking\(sess\)/);
 });
 
-test('★ D4 双镜像 + tauri 壳同步：app-message/app-streaming/app-turn-display 逐字一致', () => {
+test('★ D4 权威镜像同步：app-message/app-streaming/app-turn-display/app.css 逐字一致', () => {
     const ROOT = path.resolve(__dirname, '..', '..', '..');
+    /* 【codereview 2026-11-25】原列表里的 `ROOT/gourd-ai-tauri/ui` 是幽灵路径：
+       该目录已随「桌面端统一 rust 内核」删除，本仓 tauri 壳位于
+       gourdai-java/gourd-ai-tauri，且其 ui/ 被 .gitignore 忽略（构建期由
+       cmd/prepare-ui.js 从 static/ 拷贝生成）。故此处只钉唯一权威镜像
+       java static；构建产物的同源由 expand-scroll-and-indent D1 四份校验承担。 */
     const mirrors = [
-        path.join(ROOT, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static'),
-        path.join(ROOT, 'gourd-ai-tauri', 'ui')
+        path.join(ROOT, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static')
     ];
     for (const m of mirrors) {
         for (const f of ['js/app-message.js', 'js/app-streaming.js', 'js/app-turn-display.js', 'css/app.css']) {

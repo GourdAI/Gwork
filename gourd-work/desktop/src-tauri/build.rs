@@ -122,6 +122,35 @@ fn main() {
         .join("kernels");
     let _ = std::fs::create_dir_all(&kernels_dir);
 
+    // ─── frontendDist（../ui）必须显式登记为构建依赖 ───────────────────────
+    //
+    // 【2026-11-25 实测根因】tauri-build 生成的 build script output 里只有
+    // tauri.conf.json / permissions / capabilities / extraResources\kernels 四条
+    // `cargo:rerun-if-changed`，**没有 ../ui**。而 UI 资产是在 `generate_context!`
+    // 宏展开时（即 desktop crate 编译期）被 brotli 压缩内嵌进二进制的。
+    // 后果：只改 desktop/ui/**（不动任何 .rs）时 cargo 认为 desktop crate 新鲜，
+    // 不重跑 build script、不重编 crate → 安装包里的 UI 停在上一次 Rust 侧编译时的版本。
+    // 本轮实测：包内 js/app-streaming.js=190011B（settleSteerTurnBoundary 调用 0 处），
+    // 工作树=190977B（3 处）—— 前端修复静默丢失，且构建 EXIT=0、无任何报错。
+    //
+    // 目录级 rerun-if-changed 只比对目录自身 mtime（增删文件才变），改文件内容不触发，
+    // 因此必须逐文件登记。ui 目录约 214 个文件，开销可忽略。
+    let ui_dir = std::path::Path::new(&manifest_dir).join("..").join("ui");
+    fn watch_dir(dir: &std::path::Path) {
+        println!("cargo:rerun-if-changed={}", dir.display());
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    watch_dir(&p);
+                } else {
+                    println!("cargo:rerun-if-changed={}", p.display());
+                }
+            }
+        }
+    }
+    watch_dir(&ui_dir);
+
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),

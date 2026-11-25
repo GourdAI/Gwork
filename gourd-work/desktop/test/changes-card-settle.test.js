@@ -186,9 +186,9 @@ test('★ S3 接线锁：positionCard 落卡后必须调 settleTurnAfterCard；�
     assert.equal(typeof api.settleChangesCard, 'function', '出口面必须导出 settleChangesCard');
 
     const ROOT = path.resolve(__dirname, '..', '..', '..');
+    /* gourd-ai-tauri 已随「桌面端统一 rust 内核」删除（7370119），不再是镜像目标 */
     const mirrors = [
-        path.join(ROOT, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static'),
-        path.join(ROOT, 'gourd-ai-tauri', 'ui')
+        path.join(ROOT, 'gourdai-java', 'gourd-ai-agent', 'src', 'main', 'resources', 'static')
     ];
     const read = p => fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '');
     for (const m of mirrors) {

@@ -571,11 +571,10 @@ function appendSteerNote(sess, item) {
     // 回放落点在游离容器里量不到高度：打待补测标记，由 replayDoneCore 入真实容器后校正
     if (!canMeasure) row.setAttribute('data-steer-collapse-pending', '1');
 
-    // 轮次边界：插话气泡必须是新旧正文的分界。不能直接调 advanceBodyPointer：①旧正文块
-    // 视觉为空时它会先把旧块 remove，随后 insertBeforeActions 的页脚锚点（从旧指针取
-    // parentNode）为 null，新块静默成孤儿，后续正文全部写进游离子树；②旧正文块非空时新块
-    // 会被插进旧气泡内部（页脚之前），即插话气泡上方，顺序颠倒。正确语义是插话之后开一条
-    // 全新助手气泡：先收尾旧块的流式渲染器，清指针并清扫指针遗留空壳，再强制新建气泡。
+    // 轮次边界：插话气泡必须是新旧正文的分界。不能直接调 advanceBodyPointer：
+    // 它的语义是在【同一气泡内】推进指针（追加 md-content），而插话必须在旧气泡之后
+    // 开一条全新 msg-row；若仍复用旧气泡，新块会落在页脚之前（即插话上方），顺序颠倒。
+    // 正确路径：先收尾旧块的流式渲染器，清指针并清扫指针遗留空壳，再强制新建气泡。
     // 【轮边界收口】清指针之前必须先把旧气泡收成最终态：任务并未结束，finishStream 稍后
     // 只会收口【新】气泡，旧气泡的运行态批次盖子 / agent-live / 隐藏的操作按钮会永久残留
     // （用户 2026-11「插话后会出问题」）。helper 只动 DOM，不改任何流式状态。
@@ -699,6 +698,14 @@ function assistantRowShouldShowHead(sess) {
 }
 
 function ensureAssistantBubble(sess) {
+    /* 【孤儿指针自愈 · 2026-11-25】与 advanceBodyPointer 的顺序修复配套的双保险：
+       任何路径（purge/回滚/清扫）把 currentBubbleEl 摘离 DOM 后，指针非 null 但
+       parentNode === null。旧守卫只判 null，会把孤儿指针原样返回，后续内容被
+       append 进游离容器而整段不可见。这里把「游离」与「null」同等对待：脱离文档
+       即重建气泡，保证后续内容始终插进真实可见的气泡。 */
+    if (sess.currentBubbleEl && !sess.currentBubbleEl.parentNode) {
+        sess.currentBubbleEl = null;
+    }
     if (!sess.currentBubbleEl) {
         removeThinking(sess);
         /* agent-live = 「本轮正在跑」的运行态标记。CSS 据此把思考/工具/子代理卡
@@ -1264,10 +1271,19 @@ function advanceBodyPointer(sess, h, insertFresh) {
         if (typeof highlightCodeBlocks === 'function') highlightCodeBlocks(prev);
     }
     h.reasonBuffer = '';
-    if (isVisuallyEmptyMd(h.currentBubbleEl)) $(h.currentBubbleEl).remove();
+    /* 【孤儿指针根因修复 · 2026-11-25 用户报障「卡片跑到上面/工具帧不全/思考跑出来」】
+       旧顺序是「先 remove 空旧 md → 再 insertFresh」。remove 之后 currentBubbleEl
+       仍指向已脱离 DOM 的旧节点（非 null 但 parentNode === null）；insertFresh
+       （insertBeforeActions）的兜底守卫只判 null 不判游离，ensureAssistantBubble
+       原样返回这个孤儿指针 → 兜底失败 → 新 md 被 append 进游离的 renderTarget，
+       此后整轮正文/思考/工具全部写进不可见容器：用户看到变更卡压在残缺过程区上方、
+       工具帧只剩零星几个、思考平铺外漏。修法：先插新壳、再摘旧空壳——指针交接全程
+       不出现「非 null 但游离」的窗口，insertBeforeActions 恒以真实气泡为锚。 */
+    var staleMd = h.currentBubbleEl;
     var freshMd = $('<div>').addClass('md-content')[0];
     insertFresh(freshMd);
     h.currentBubbleEl = freshMd;
+    if (staleMd && staleMd !== freshMd && isVisuallyEmptyMd(staleMd)) $(staleMd).remove();
 }
 
 function ensureThinkingBlock(sess) {
