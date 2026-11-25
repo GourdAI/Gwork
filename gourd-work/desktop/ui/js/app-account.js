@@ -57,6 +57,49 @@
         return (msg && msg !== key) ? msg : (fallback || key);
     }
 
+    /* ── 账号错误码 → 本地化文案 ─────────────────────────────────────────
+       【2026-11 用户报障】登录失败时弹框显示的是
+         Conflict [AUTH_SESSION_LIMIT]
+       用户原话「这个提示都不知道是啥错」。根因是两段拼接都没有面向用户的
+       语义：服务端 writeAuthSessionError 把 message 写成 http.StatusText(409)
+       （就是 "Conflict"），真因只放在 code 里；而本文件的 errText 又把 Rust
+       侧的原始串直接上屏，中间少了一层 code→文案 的翻译。admin 的 web 控制台
+       之所以正常，是因为它有 serverErrorMessageKeys 这张表，桌面端没有。
+
+       所以这里补同一张表。契约是 Rust auth.rs::parse_api_response 的失败串
+       恒为 "{message} [{code}]"，方括号里的 code 取自服务端 JSON 的 code 字段
+       —— 只认这个后缀，不做宽松子串匹配，避免把正文里恰好出现的大写词当成
+       错误码而给出误导文案。映射不到时原样透出，绝不吞掉后台的真因。 */
+    var AUTH_ERROR_KEYS = {
+        AUTH_SESSION_LIMIT: 'account.err_session_limit',
+        AUTH_SESSION_ISSUANCE_LIMIT: 'account.err_issuance_limit',
+        AUTH_SESSION_MISMATCH: 'account.err_session_mismatch',
+        AUTH_REFRESH_RACE: 'account.err_refresh_race',
+        AUTH_TOKEN_EXPIRED: 'account.err_token_expired',
+        AUTH_SESSION_REVOKED: 'account.err_session_revoked',
+        AUTH_UNAUTHORIZED: 'account.err_unauthorized',
+        AUTH_INTERNAL_ERROR: 'account.err_internal'
+    };
+    /* 语言包缺键时的中文兜底（t(key, fallback) 语义）。正常 12 份语言包齐备，
+       这层只防漂移后界面出现裸键名。 */
+    var AUTH_ERROR_FALLBACK = {
+        'account.err_session_limit': '登录设备数已达上限，已自动释放最久未使用的登录；若仍无法登录，请到网页端「安全 - 登录设备」中退出其他设备',
+        'account.err_issuance_limit': '近 24 小时内登录次数过多，请稍后再试',
+        'account.err_session_mismatch': '本地登录凭证已过期或不一致，请刷新后重新登录',
+        'account.err_refresh_race': '登录状态正在刷新中，请几秒后重试',
+        'account.err_token_expired': '登录已过期，请重新登录',
+        'account.err_session_revoked': '登录已失效（例如修改过密码或在其他设备上退出），请重新登录',
+        'account.err_unauthorized': '登录凭证无效，请重新登录',
+        'account.err_internal': '登录服务暂时不可用，请稍后再试'
+    };
+
+    function authErrorKey(text) {
+        var m = /\[([A-Z][A-Z0-9_]+)\]\s*$/.exec(String(text == null ? '' : text));
+        if (!m) return null;
+        var key = AUTH_ERROR_KEYS[m[1]];
+        return key || null;
+    }
+
     function esc(s) {
         return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
             return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -819,8 +862,12 @@
 
     function errText(e) {
         if (!e) return t('account.failed', '操作失败');
-        if (typeof e === 'string') return e;
-        return String(e.message || e);
+        var raw = (typeof e === 'string') ? e : String(e.message || e);
+        /* 服务端错误码优先翻成本地化人话；映射不到就原样透出后台真因，
+           绝不退化成一句无信息量的「操作失败」，也绝不吞掉原始串。 */
+        var key = authErrorKey(raw);
+        if (key) return t(key, AUTH_ERROR_FALLBACK[key]);
+        return raw;
     }
 
     /* ---------- 初始化 ----------

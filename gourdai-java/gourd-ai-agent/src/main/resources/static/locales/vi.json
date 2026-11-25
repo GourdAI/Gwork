@@ -1514,6 +1514,14 @@
     "code_sent": "Đã gửi mã, hãy kiểm tra hộp thư",
     "code_required": "Vui lòng nhập mã xác minh",
     "email_first": "Vui lòng điền email trước",
-    "password_mismatch": "Hai mật khẩu không khớp"
+    "password_mismatch": "Hai mật khẩu không khớp",
+    "err_issuance_limit": "Quá nhiều lần đăng nhập trong 24 giờ qua. Vui lòng đợi một lát rồi thử lại.",
+    "err_session_mismatch": "Thông tin đăng nhập cục bộ đã lỗi thời hoặc không khớp. Hãy tải lại và đăng nhập lại.",
+    "err_refresh_race": "Phiên đăng nhập đang được làm mới. Vui lòng thử lại sau vài giây.",
+    "err_token_expired": "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.",
+    "err_session_revoked": "Phiên đăng nhập này đã bị thu hồi, ví dụ do đổi mật khẩu hoặc đăng xuất trên thiết bị khác. Vui lòng đăng nhập lại.",
+    "err_unauthorized": "Thông tin đăng nhập không hợp lệ. Vui lòng đăng nhập lại.",
+    "err_internal": "Dịch vụ đăng nhập tạm thời không khả dụng. Vui lòng thử lại sau.",
+    "err_session_limit": "Bạn đã đạt giới hạn số phiên đăng nhập. Phiên ít được sử dụng nhất đã được giải phóng tự động. Nếu vẫn không đăng nhập được, hãy mở mục Bảo mật > Phiên đăng nhập trong bảng điều khiển web và đăng xuất các thiết bị khác."
   }
 }

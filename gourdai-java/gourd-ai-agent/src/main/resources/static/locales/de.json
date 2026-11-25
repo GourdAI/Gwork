@@ -1514,6 +1514,14 @@
     "code_sent": "Bestätigungscode gesendet, bitte Postfach prüfen",
     "code_required": "Bitte E-Mail-Bestätigungscode eingeben",
     "email_first": "Bitte zuerst die E-Mail-Adresse ausfüllen",
-    "password_mismatch": "Die beiden Passwörter stimmen nicht überein"
+    "password_mismatch": "Die beiden Passwörter stimmen nicht überein",
+    "err_issuance_limit": "Zu viele Anmeldungen in den letzten 24 Stunden. Bitte warten Sie einen Moment und versuchen Sie es erneut.",
+    "err_session_mismatch": "Ihre lokale Anmeldeinformation ist veraltet oder stimmt nicht überein. Bitte neu laden und erneut anmelden.",
+    "err_refresh_race": "Ihre Anmeldung wird gerade aktualisiert. Bitte versuchen Sie es in wenigen Sekunden erneut.",
+    "err_token_expired": "Ihre Anmeldung ist abgelaufen. Bitte melden Sie sich erneut an.",
+    "err_session_revoked": "Diese Anmeldung wurde widerrufen, etwa durch eine Passwortänderung oder eine Abmeldung auf einem anderen Gerät. Bitte melden Sie sich erneut an.",
+    "err_unauthorized": "Ihre Anmeldeinformation ist ungültig. Bitte melden Sie sich erneut an.",
+    "err_internal": "Der Anmeldedienst ist vorübergehend nicht verfügbar. Bitte versuchen Sie es später erneut.",
+    "err_session_limit": "Die maximale Anzahl gleichzeitiger Anmeldungen ist erreicht. Die am längsten inaktive Anmeldung wurde automatisch freigegeben. Falls die Anmeldung weiterhin fehlschlägt, öffnen Sie in der Webkonsole Sicherheit > Anmeldesitzungen und melden Sie andere Geräte ab."
   }
 }

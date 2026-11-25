@@ -155,6 +155,27 @@ func CompleteLoginVerification(token string, verification *LoginVerification, me
 	if err != nil {
 		return nil, nil, err
 	}
+	// 2FA/passkey/email-challenge logins issue through the same quota as a
+	// password login, so they need the same reclaim. It runs here rather than
+	// inside the flow transaction because the deny fence must be published
+	// before the status flip commits (see reclaimUserSessionQuota).
+	//
+	// The issuance window is read first and refused before any eviction: it
+	// rejects unconditionally, so evicting here would sign another device out
+	// for a login that cannot succeed anyway. CreateUserSessionFromLoginFlow
+	// re-checks both limits inside its own transaction as the authoritative
+	// gate; these counts only decide whether eviction may happen.
+	now := time.Now().Unix()
+	activeCount, issuanceCount, err := countSessionGrowthLimits(session.UserID, session.UserAuthVersion, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	if issuanceCount >= int64(common.UserSessionIssuanceLimit) {
+		return nil, nil, model.ErrUserSessionIssuanceLimit
+	}
+	if _, err := reclaimUserSessionQuota(session.UserID, session.UserAuthVersion, activeCount); err != nil {
+		return nil, nil, err
+	}
 	var migration *LegacyGitHubMigration
 	if err := model.CreateUserSessionFromLoginFlow(token, session, func(tx *gorm.DB, flow *model.AuthFlow, state *model.UserVerificationState) error {
 		var payload loginFlowPayload

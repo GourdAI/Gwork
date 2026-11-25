@@ -119,6 +119,13 @@ const OPTIONAL_FAMILIES = {
 // ── 间接引用：键藏在常量表里、经变量传给 t()，静态看不见调用点 ──────
 const INDIRECT_KEYS = [
   'chat.question_skip', 'chat.question_next', 'chat.question_submit',   // QUESTION_SUBMIT_MODE_KEYS
+  // app-account.js AUTH_ERROR_KEYS：服务端错误码 → 文案键，经变量传给 t()，
+  // 静态扫不到调用点。必须登记：否则「12 份语言包同时缺该键」不会被键集一致
+  // 断言抓到，登录失败就会退回显示裸键名（正是本轮报障要消灭的现象）。
+  'account.err_session_limit', 'account.err_issuance_limit',             // AUTH_ERROR_KEYS
+  'account.err_session_mismatch', 'account.err_refresh_race',
+  'account.err_token_expired', 'account.err_session_revoked',
+  'account.err_unauthorized', 'account.err_internal',
 ];
 
 function collectRefs() {

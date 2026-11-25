@@ -1514,6 +1514,14 @@
     "code_sent": "验证码已发送，请查收邮箱",
     "code_required": "请输入邮箱验证码",
     "email_first": "请先填写邮箱地址",
-    "password_mismatch": "两次输入的密码不一致"
+    "password_mismatch": "两次输入的密码不一致",
+    "err_issuance_limit": "近 24 小时内登录次数过多，请稍后再试",
+    "err_session_mismatch": "本地登录凭证已过期或不一致，请刷新后重新登录",
+    "err_refresh_race": "登录状态正在刷新中，请几秒后重试",
+    "err_token_expired": "登录已过期，请重新登录",
+    "err_session_revoked": "登录已失效（例如修改过密码或在其他设备上退出），请重新登录",
+    "err_unauthorized": "登录凭证无效，请重新登录",
+    "err_internal": "登录服务暂时不可用，请稍后再试",
+    "err_session_limit": "登录设备数已达上限，已自动释放最久未使用的登录；若仍无法登录，请到网页端「安全 - 登录设备」中退出其他设备"
   }
 }

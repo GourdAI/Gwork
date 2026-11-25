@@ -68,8 +68,18 @@ func CreateUserSessionFromLoginFlow(token string, session *UserSession, validate
 			return err
 		}
 		now := time.Now().Unix()
+		// Same quota semantics as createLoginSession: only sessions the user can
+		// actually see and use count. A row left at an older auth version is
+		// unusable forever and invisible in the device list, so charging it
+		// against the cap let an account exhaust the limit with rows nobody
+		// could revoke. Eviction itself deliberately does NOT happen here: the
+		// deny fence must be published before the row flip commits, and doing
+		// that inside this transaction would leave the fence standing if the
+		// caller rolls back — turning a reclaimed slot into a wrongly rejected
+		// live session. service.CompleteLoginVerification reclaims quota before
+		// opening this transaction instead.
 		var activeCount, issuanceCount int64
-		if err := tx.Model(&UserSession{}).Where("user_id = ? AND status = ? AND expires_at > ?", session.UserID, UserSessionStatusActive, now).Count(&activeCount).Error; err != nil {
+		if err := tx.Model(&UserSession{}).Where("user_id = ? AND user_auth_version = ? AND status = ? AND expires_at > ?", session.UserID, session.UserAuthVersion, UserSessionStatusActive, now).Count(&activeCount).Error; err != nil {
 			return err
 		}
 		if activeCount >= int64(common.UserSessionActiveLimit) {

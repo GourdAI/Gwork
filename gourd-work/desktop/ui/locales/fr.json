@@ -1514,6 +1514,14 @@
     "code_sent": "Code envoyé, consultez votre boîte mail",
     "code_required": "Veuillez saisir le code de vérification",
     "email_first": "Veuillez d'abord saisir votre adresse e-mail",
-    "password_mismatch": "Les deux mots de passe ne correspondent pas"
+    "password_mismatch": "Les deux mots de passe ne correspondent pas",
+    "err_issuance_limit": "Trop de connexions au cours des dernières 24 heures. Veuillez patienter et réessayer.",
+    "err_session_mismatch": "Vos identifiants de connexion locaux sont obsolètes ou incohérents. Rechargez la page et reconnectez-vous.",
+    "err_refresh_race": "Votre session est en cours d’actualisation. Réessayez dans quelques secondes.",
+    "err_token_expired": "Votre session a expiré. Veuillez vous reconnecter.",
+    "err_session_revoked": "Cette session a été révoquée, par exemple après un changement de mot de passe ou une déconnexion depuis un autre appareil. Veuillez vous reconnecter.",
+    "err_unauthorized": "Vos identifiants de connexion sont invalides. Veuillez vous reconnecter.",
+    "err_internal": "Le service de connexion est temporairement indisponible. Veuillez réessayer plus tard.",
+    "err_session_limit": "Vous avez atteint la limite de connexions simultanées. La connexion la moins récemment utilisée a été libérée automatiquement. Si la connexion échoue toujours, ouvrez Sécurité > Sessions de connexion dans la console web et déconnectez les autres appareils."
   }
 }

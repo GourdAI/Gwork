@@ -172,7 +172,13 @@ test('12 locales all carry the same account key set', () => {
     // 开启邮箱验证时强制 email + verification_code）
     'password_confirm', 'email_required', 'code', 'code_placeholder',
     'send_code', 'code_retry', 'code_sent', 'code_required',
-    'email_first', 'password_mismatch'
+    'email_first', 'password_mismatch',
+    // 服务端鉴权错误码 → 文案（app-account.js AUTH_ERROR_KEYS）。这些键经变量
+    // 传给 t()，静态扫不到调用点，必须在此显式登记：否则「12 份语言包同时缺该
+    // 键」不会被抓到，登录失败就会退回显示裸键名——正是本轮要消灭的现象。
+    'err_session_limit', 'err_issuance_limit', 'err_session_mismatch',
+    'err_refresh_race', 'err_token_expired', 'err_session_revoked',
+    'err_unauthorized', 'err_internal'
   ].sort();
   for (const f of files) {
     const obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));

@@ -190,6 +190,56 @@ func CountActiveUserSessions(userID int, now int64) (int64, error) {
 	return count, err
 }
 
+// CountUsableUserSessions counts only the sessions a client can actually still
+// use: status active, not expired, and issued at the user's current auth
+// version. This is the number USER_SESSION_ACTIVE_LIMIT must be measured
+// against.
+//
+// CountActiveUserSessions is deliberately NOT usable for that: a row left at an
+// older user_auth_version is rejected forever by ValidateLoginSession and by
+// every refresh, yet it stays status=active until its expiry — up to the
+// 365-day absolute ceiling. Those rows are also invisible in the device list
+// (ListActiveUserSessions filters on the current version), so the user had no
+// Revoke button for them. Charging them against the quota therefore let an
+// account exhaust it with rows nobody could see or delete, and login failed
+// with 409 AUTH_SESSION_LIMIT while every real device had already signed out.
+// Quota accounting has to follow what the user can see and act on.
+func CountUsableUserSessions(userID int, authVersion int64, now int64) (int64, error) {
+	if userID <= 0 || authVersion <= 0 {
+		return 0, ErrUserSessionInvalid
+	}
+	if now <= 0 {
+		now = time.Now().Unix()
+	}
+	var count int64
+	err := DB.Model(&UserSession{}).
+		Where(
+			"user_id = ? AND user_auth_version = ? AND status = ? AND expires_at > ?",
+			userID, authVersion, UserSessionStatusActive, now,
+		).
+		Count(&count).Error
+	return count, err
+}
+
+// CountStaleUserSessions counts active rows of one user that can never be used
+// again because a security change advanced user_auth_version past them.
+func CountStaleUserSessions(userID int, authVersion int64, now int64) (int64, error) {
+	if userID <= 0 || authVersion <= 0 {
+		return 0, ErrUserSessionInvalid
+	}
+	if now <= 0 {
+		now = time.Now().Unix()
+	}
+	var count int64
+	err := DB.Model(&UserSession{}).
+		Where(
+			"user_id = ? AND user_auth_version <> ? AND status = ? AND expires_at > ?",
+			userID, authVersion, UserSessionStatusActive, now,
+		).
+		Count(&count).Error
+	return count, err
+}
+
 // CountUserSessionsCreatedSince counts every issued row, regardless of its
 // current status or expiry. userID zero selects the global count.
 func CountUserSessionsCreatedSince(userID int, createdAfter int64) (int64, error) {
@@ -740,19 +790,99 @@ func RevokeAllUserSessions(userID int, reason string) (int64, error) {
 	return revokeUserSessions(userID, "", reason)
 }
 
+// RevokeStaleUserSessions revokes one user's active rows that were issued at an
+// older auth version and can therefore never be used again. See
+// CountUsableUserSessions for why those rows must not keep occupying quota.
+func RevokeStaleUserSessions(userID int, authVersion int64, reason string) (int64, error) {
+	if userID <= 0 || authVersion <= 0 {
+		return 0, ErrUserSessionInvalid
+	}
+	now := time.Now().Unix()
+	return revokeUserSessionsByQuery(func(tx *gorm.DB) *gorm.DB {
+		return tx.Where(
+			"user_id = ? AND user_auth_version <> ? AND status = ? AND expires_at > ?",
+			userID, authVersion, UserSessionStatusActive, now,
+		)
+	}, 0, "sid", reason)
+}
+
+// RevokeAllStaleUserSessions sweeps stale auth-version rows across every user.
+// It is the global backstop behind the per-login lazy cleanup: an account that
+// stopped logging in after a security change keeps its rows until the hourly
+// task reaches them.
+func RevokeAllStaleUserSessions(reason string) (int64, error) {
+	now := time.Now().Unix()
+	return revokeUserSessionsByQuery(func(tx *gorm.DB) *gorm.DB {
+		// A soft-deleted or disabled user's rows are all stale by definition;
+		// joining users keeps this correct without loading every user into
+		// memory. s.* is required, not s.sid: the deny fence publishes the whole
+		// row snapshot, so selecting only the key would publish a tombstone with
+		// zeroed UserID/Version that the cache integrity check rejects.
+		return tx.Table("user_sessions AS s").
+			Joins("JOIN users AS u ON u.id = s.user_id").
+			Where("s.status = ? AND s.expires_at > ?", UserSessionStatusActive, now).
+			Where("s.user_auth_version <> u.auth_version OR u.auth_version <= 0").
+			Select("s.*")
+	}, 0, "s.sid", reason)
+}
+
+// RevokeLeastRecentlyActiveUserSessions revokes up to maxRevoke of a user's
+// usable sessions, oldest last_active_at first, keeping currentSID. It is what
+// lets a login proceed instead of failing with AUTH_SESSION_LIMIT: the account
+// is at its cap, so the idlest session gives up its slot.
+func RevokeLeastRecentlyActiveUserSessions(userID int, authVersion int64, currentSID string, maxRevoke int64, reason string) (int64, error) {
+	if userID <= 0 || authVersion <= 0 || maxRevoke <= 0 {
+		return 0, ErrUserSessionInvalid
+	}
+	now := time.Now().Unix()
+	return revokeUserSessionsByQuery(func(tx *gorm.DB) *gorm.DB {
+		query := tx.Where(
+			"user_id = ? AND user_auth_version = ? AND status = ? AND expires_at > ?",
+			userID, authVersion, UserSessionStatusActive, now,
+		)
+		if currentSID != "" {
+			query = query.Where("sid <> ?", currentSID)
+		}
+		return query
+	}, maxRevoke, "last_active_at ASC, created_at ASC", reason)
+}
+
 func revokeUserSessions(userID int, excludedSID, reason string) (int64, error) {
 	if userID <= 0 {
 		return 0, ErrUserSessionInvalid
 	}
 	now := time.Now().Unix()
-	var totalAffected int64
-	for {
-		query := DB.Where("user_id = ? AND status = ? AND expires_at > ?", userID, UserSessionStatusActive, now)
+	return revokeUserSessionsByQuery(func(tx *gorm.DB) *gorm.DB {
+		query := tx.Where("user_id = ? AND status = ? AND expires_at > ?", userID, UserSessionStatusActive, now)
 		if excludedSID != "" {
 			query = query.Where("sid <> ?", excludedSID)
 		}
+		return query
+	}, 0, "sid", reason)
+}
+
+// revokeUserSessionsByQuery publishes a deny fence for every candidate before
+// the status flip, then flips and tombstones them in bounded batches. The fence
+// must come first so a Redis-backed node can never serve a session snapshot as
+// active after its row was revoked. maxRevoke <= 0 means "all matches".
+//
+// Every revoke path shares this one implementation: duplicating the fence/CAS
+// ordering per call site is how a revoke ends up looking successful while the
+// cache keeps handing out the old active snapshot.
+func revokeUserSessionsByQuery(buildQuery func(*gorm.DB) *gorm.DB, maxRevoke int64, order string, reason string) (int64, error) {
+	now := time.Now().Unix()
+	var totalAffected int64
+	for {
+		if maxRevoke > 0 && totalAffected >= maxRevoke {
+			return totalAffected, nil
+		}
+		batchLimit := userSessionRevokeBatchSize
+		if maxRevoke > 0 {
+			batchLimit = min(userSessionRevokeBatchSize, int(maxRevoke-totalAffected))
+		}
 		var candidates []UserSession
-		if err := query.Order("sid").Limit(userSessionRevokeBatchSize).Find(&candidates).Error; err != nil {
+		if err := buildQuery(DB.Model(&UserSession{})).
+			Order(order).Limit(batchLimit).Find(&candidates).Error; err != nil {
 			return totalAffected, err
 		}
 		if len(candidates) == 0 {

@@ -1514,6 +1514,14 @@
     "code_sent": "Cod trimis, verifică-ți inboxul",
     "code_required": "Introdu codul de verificare",
     "email_first": "Completează mai întâi adresa de e-mail",
-    "password_mismatch": "Cele două parole nu coincid"
+    "password_mismatch": "Cele două parole nu coincid",
+    "err_issuance_limit": "Prea multe autentificări în ultimele 24 de ore. Așteaptă puțin și încearcă din nou.",
+    "err_session_mismatch": "Datele tale locale de autentificare sunt vechi sau nu se potrivesc. Reîncarcă și autentifică-te din nou.",
+    "err_refresh_race": "Sesiunea ta este în curs de actualizare. Încearcă din nou peste câteva secunde.",
+    "err_token_expired": "Sesiunea ta a expirat. Autentifică-te din nou.",
+    "err_session_revoked": "Această sesiune a fost revocată, de exemplu în urma schimbării parolei sau a deconectării de pe alt dispozitiv. Autentifică-te din nou.",
+    "err_unauthorized": "Datele tale de autentificare sunt invalide. Autentifică-te din nou.",
+    "err_internal": "Serviciul de autentificare este temporar indisponibil. Încearcă din nou mai târziu.",
+    "err_session_limit": "Ai atins limita de sesiuni de autentificare active. Cea mai puțin folosită sesiune a fost eliberată automat. Dacă tot nu te poți autentifica, deschide în consola web Securitate > Sesiuni de autentificare și deconectează celelalte dispozitive."
   }
 }

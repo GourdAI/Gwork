@@ -1514,6 +1514,14 @@
     "code_sent": "驗證碼已發送，請查收信箱",
     "code_required": "請輸入信箱驗證碼",
     "email_first": "請先填寫信箱地址",
-    "password_mismatch": "兩次輸入的密碼不一致"
+    "password_mismatch": "兩次輸入的密碼不一致",
+    "err_issuance_limit": "近 24 小時內登入次數過多，請稍後再試",
+    "err_session_mismatch": "本機登入憑證已過期或不一致，請重新整理後再次登入",
+    "err_refresh_race": "登入狀態正在重新整理中，請幾秒後重試",
+    "err_token_expired": "登入已過期，請重新登入",
+    "err_session_revoked": "登入已失效（例如修改過密碼或在其他裝置上登出），請重新登入",
+    "err_unauthorized": "登入憑證無效，請重新登入",
+    "err_internal": "登入服務暫時無法使用，請稍後再試",
+    "err_session_limit": "登入裝置數已達上限，已自動釋放最久未使用的登入；若仍無法登入，請至網頁端「安全 - 登入裝置」中登出其他裝置"
   }
 }

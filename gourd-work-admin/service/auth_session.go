@@ -72,19 +72,25 @@ func createLoginSession(userID int, expectedAuthVersion int64, loginMethod, ip, 
 		return nil, ErrLoginSessionRevoked
 	}
 	now := time.Now().Unix()
-	activeCount, err := model.CountActiveUserSessions(userID, now)
-	if err != nil {
-		return nil, err
-	}
-	if activeCount >= int64(common.UserSessionActiveLimit) {
-		return nil, model.ErrUserSessionLimit
-	}
-	issuanceCount, err := model.CountUserSessionsCreatedSince(userID, now-common.UserSessionIssuanceWindowSeconds)
+	activeCount, issuanceCount, err := countSessionGrowthLimits(userID, user.AuthVersion, now)
 	if err != nil {
 		return nil, err
 	}
 	if issuanceCount >= int64(common.UserSessionIssuanceLimit) {
+		// Refuse before reclaim runs: this limit rejects unconditionally, and
+		// evicting another device's session for a login that cannot succeed
+		// would sign the user out elsewhere without signing them in anywhere.
 		return nil, model.ErrUserSessionIssuanceLimit
+	}
+	activeAfterReclaim, err := reclaimUserSessionQuota(userID, user.AuthVersion, activeCount)
+	if err != nil {
+		return nil, err
+	}
+	if activeAfterReclaim >= int64(common.UserSessionActiveLimit) {
+		// reclaimUserSessionQuota already swept and evicted; still at the cap
+		// means nothing was evictable. Refuse explicitly rather than issuing an
+		// over-limit session.
+		return nil, model.ErrUserSessionLimit
 	}
 	session, refreshSecret, err := newLoginSession(userID, user.AuthVersion, loginMethod, ip, userAgent)
 	if err != nil {
@@ -99,6 +105,84 @@ func createLoginSession(userID int, expectedAuthVersion int64, loginMethod, ip, 
 		return nil, err
 	}
 	return bundle, nil
+}
+
+// countSessionGrowthLimits reads the two growth limits every session issuance
+// shares. Splitting it out keeps the two issuance paths (createLoginSession and
+// the 2FA/passkey flow) counting with identical semantics.
+func countSessionGrowthLimits(userID int, authVersion int64, now int64) (int64, int64, error) {
+	activeCount, err := model.CountUsableUserSessions(userID, authVersion, now)
+	if err != nil {
+		return 0, 0, err
+	}
+	issuanceCount, err := model.CountUserSessionsCreatedSince(userID, now-common.UserSessionIssuanceWindowSeconds)
+	if err != nil {
+		return 0, 0, err
+	}
+	return activeCount, issuanceCount, nil
+}
+
+// reclaimUserSessionQuota frees USER_SESSION_ACTIVE_LIMIT slots before a login
+// issues its own session, and returns how many usable sessions are left
+// afterwards so the caller can decide without a second read. Two things occupy
+// slots that the user cannot free:
+//
+//  1. Stale auth-version rows. A security change (password, 2FA, passkey)
+//     advances user_auth_version and invalidates every other session, but those
+//     rows keep status=active until they expire — up to the 365-day absolute
+//     ceiling. The device list filters on the current version, so they were
+//     invisible: no row, no Revoke button, and no way to reclaim the slot except
+//     from a device that was still signed in.
+//  2. A genuine cap. With only the device list as an escape hatch, an account at
+//     the cap could be locked out entirely — 409 AUTH_SESSION_LIMIT on every
+//     login attempt, with the one remedy (sign in elsewhere and revoke) blocked
+//     by the very error it was supposed to fix.
+//
+// So the idlest usable session yields its slot, and the caller counts only what
+// remains.
+//
+// Eviction is an irreversible side effect, so it must only ever run for a login
+// that is actually going to be issued. Callers therefore check the issuance
+// window before calling this, and pass in the activeCount they already read: one
+// read, one decision, and no eviction wasted on a login that was going to fail.
+//
+// Eviction runs outside any caller transaction on purpose: the deny fence has to
+// be published before the status flip commits, and a fence published inside a
+// transaction that later rolls back would leave a live session wrongly rejected.
+func reclaimUserSessionQuota(userID int, authVersion int64, activeCount int64) (int64, error) {
+	if userID <= 0 || authVersion <= 0 {
+		return 0, ErrLoginSessionInvalid
+	}
+	if _, err := model.RevokeStaleUserSessions(userID, authVersion, "stale_auth_version"); err != nil {
+		// Not fatal for this login: CountUsableUserSessions already excludes
+		// those rows, so a failed sweep only delays reclaiming the storage. Log
+		// it so the fault stays visible instead of silently repeating on every
+		// login for the same account.
+		common.SysLog(common.LogText(
+			"failed to revoke stale user sessions for user %d: %s", userID, err.Error()))
+	}
+	if activeCount < int64(common.UserSessionActiveLimit) {
+		return activeCount, nil
+	}
+	// Reserve exactly one slot for the session about to be issued.
+	needed := activeCount - int64(common.UserSessionActiveLimit) + 1
+	evicted, err := model.RevokeLeastRecentlyActiveUserSessions(
+		userID, authVersion, "", needed, "session_limit_evicted",
+	)
+	if err != nil {
+		return activeCount, err
+	}
+	if evicted == 0 {
+		// Nothing was evictable (every candidate lost a concurrent revoke, or
+		// the limit leaves no room). Let the caller surface AUTH_SESSION_LIMIT
+		// rather than issuing an over-limit session.
+		return activeCount, nil
+	}
+	common.SysLog(common.LogText(
+		"user session limit reached; evicted least recently active sessions: user=%d evicted=%d active=%d limit=%d",
+		userID, evicted, activeCount-evicted, common.UserSessionActiveLimit,
+	))
+	return activeCount - evicted, nil
 }
 
 func newLoginSession(userID int, authVersion int64, loginMethod, ip, userAgent string) (*model.UserSession, string, error) {
@@ -486,6 +570,29 @@ func truncateAuthMetadata(value string, max int) string {
 	return value[:max]
 }
 
+// authSessionErrorMessage returns an English, actionable sentence for a session
+// error code.
+//
+// writeAuthSessionError used to answer with http.StatusText(status), so a
+// session-limit refusal carried the single word "Conflict". The web console
+// survived that because it translates `code` through serverErrorMessageKeys,
+// but every other client has no such table: the Rust desktop shell concatenates
+// `message` and `code` and showed "Conflict [AUTH_SESSION_LIMIT]", and the uni-app
+// client surfaced `message` alone. Neither string tells the user what is wrong or
+// what to do, which is exactly how a capacity problem ends up reported as a login
+// bug. `code` stays machine-readable and unchanged; `message` becomes a sentence
+// a human can act on.
+var authSessionErrorMessages = map[string]string{
+	"AUTH_SESSION_LIMIT":          "Your account has reached the maximum number of simultaneous sign-ins. The least recently used sign-in was released automatically; if you still cannot sign in, sign out other devices from Security > Login sessions, or reset your password to sign out everywhere.",
+	"AUTH_SESSION_ISSUANCE_LIMIT": "Too many sign-ins were created for this account in the last 24 hours. Wait for the rolling window to pass, then try again.",
+	"AUTH_SESSION_MISMATCH":       "This session identifier does not match the stored sign-in credential. Refresh the page to reload the current session, then try again.",
+	"AUTH_REFRESH_RACE":           "Another request is refreshing this sign-in at the same time. Retry in a few seconds.",
+	"AUTH_TOKEN_EXPIRED":          "Your sign-in has expired. Please sign in again.",
+	"AUTH_SESSION_REVOKED":        "This sign-in was revoked, for example by a password change or by signing out on another device. Please sign in again.",
+	"AUTH_UNAUTHORIZED":           "Your sign-in credential is missing or invalid. Please sign in again.",
+	"AUTH_INTERNAL_ERROR":         "The sign-in service could not process this request. Please try again later.",
+}
+
 func authSessionErrorCode(err error) (int, string) {
 	switch {
 	case errors.Is(err, model.ErrUserSessionLimit):
@@ -509,6 +616,15 @@ func authSessionErrorCode(err error) (int, string) {
 
 func AuthSessionErrorCode(err error) (int, string) {
 	return authSessionErrorCode(err)
+}
+
+// AuthSessionErrorMessage maps a session error code to its user-facing English
+// message, falling back to the HTTP status text for codes with no entry.
+func AuthSessionErrorMessage(status int, code string) string {
+	if message, ok := authSessionErrorMessages[code]; ok {
+		return message
+	}
+	return http.StatusText(status)
 }
 
 func FormatAuthError(err error) string {

@@ -1105,6 +1105,10 @@ impl AuthState {
     pub async fn login(&self, username: &str, password: &str) -> Result<AuthStatus, String> {
         self.ensure_host().await;
         let _guard = self.session_lock.lock().await;
+        // 本机上一份会话的快照，必须在 self.store(Some(..)) 覆盖之前取：
+        // 覆盖之后旧 refresh token 就永久丢失，那份 Session 在服务端会一直
+        // active 到绝对上限到期。见 revoke_superseded_session。
+        let superseded = self.snapshot();
         let url = format!("{}/api/user/login", self.host());
         let mut payload = serde_json::json!({ "username": username, "password": password });
         // 是否需要加密，只问 /api/user/login/encryption-key 这一个端点。
@@ -1156,8 +1160,66 @@ impl AuthState {
         let session = session_from_auth_data(data, refresh, None);
         self.store(Some(session.clone()));
         keyring_store(&session).await;
+        if let Some(old) = superseded {
+            self.revoke_superseded_session(&old, &session.sid).await;
+        }
         self.start_keeper();
         Ok(self.status())
+    }
+
+    /// 登录成功后，在服务端撤销本机被顶替掉的那一份会话。
+    ///
+    /// 【2026-11 `Conflict [AUTH_SESSION_LIMIT]` 报障的一环】桌面端每次登录都
+    /// 无条件让后台签发一份新 Session，并用它覆盖内存与 keyring 里的旧凭据。
+    /// 旧凭据一旦被覆盖就再也拿不到 refresh token，也就永远无法登出，于是那份
+    /// Session 在服务端保持 `status=active` 直到 365 天绝对上限到期。反复登录
+    /// 同一账号、或在两个账号之间来回切换，就会攒出一堆用户既看不见（设备列表
+    /// 只显示当前鉴权版本）也撤不掉的僵尸行，最终把 `USER_SESSION_ACTIVE_LIMIT`
+    /// 占满。服务端已改为触顶时按 `last_active_at` 自动挤号兜底，但本机自己
+    /// 制造的垃圾应由本机自己清掉，不该靠兜底去把用户别的设备挤下线。
+    ///
+    /// best-effort：失败只记日志，绝不影响刚刚成功的登录。旧凭据可能已在服务端
+    /// 失效（改过密码、被挤号、绝对上限到期），后台此时返回错误属于预期。
+    ///
+    /// 调用点持有 `session_lock`，因此这里**不得**再取该锁（会死锁）；keeper 的
+    /// refresh 同样要抢这把锁，所以不存在与保活任务并发撤销同一份会话的竞态。
+    async fn revoke_superseded_session(&self, old: &StoredSession, new_sid: &str) {
+        if !should_revoke_superseded(&old.sid, new_sid, &old.refresh_token) {
+            return;
+        }
+        let url = format!("{}/api/user/auth/logout", self.host());
+        let result = self
+            .client
+            .post(&url)
+            .header("Origin", request_origin(&self.host()))
+            .header("Accept", "application/json")
+            .header("X-Auth-Session", &old.sid)
+            .header(
+                "Cookie",
+                format!("{}={}", REFRESH_COOKIE_NAME, old.refresh_token),
+            )
+            .bearer_auth(&old.access_token)
+            .send()
+            .await;
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::debug!(old_sid = %old.sid, "revoked superseded local session");
+            }
+            Ok(resp) => {
+                tracing::debug!(
+                    status = resp.status().as_u16(),
+                    old_sid = %old.sid,
+                    "superseded session revoke rejected (likely already gone server-side); ignored"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    old_sid = %old.sid,
+                    "superseded session revoke failed; ignored"
+                );
+            }
+        }
     }
 
     /// 注册。new-api 的注册接口只返回 `{success:true}` 不发 token，因此
@@ -1498,6 +1560,18 @@ impl AuthState {
     }
 }
 
+/// 是否应在登录成功后撤销被顶替的旧会话（[`AuthState::revoke_superseded_session`]
+/// 的判据，抽成纯函数以便单测枚举真值表）。
+///
+/// 三种情况必须跳过，否则会主动把刚登录的用户弄掉线：
+/// - 旧 sid 为空：本地从没存过会话（首次登录），无东西可撤；
+/// - 旧 sid == 新 sid：后台复用了同一个 Session（refresh 语义），撤它就是撤自己；
+/// - 旧 refresh token 为空：`logout` 靠 Refresh Cookie 定位会话，缺它请求必然
+///   被拒，白发一次网络请求没有意义。
+fn should_revoke_superseded(old_sid: &str, new_sid: &str, old_refresh_token: &str) -> bool {
+    !old_sid.is_empty() && old_sid != new_sid && !old_refresh_token.is_empty()
+}
+
 /// 只有「会话已不可恢复」的错误才清本地；其余（超时/5xx/连接失败/限流/
 /// TLS 或证书错误）一律保留凭据等下次重试。
 ///
@@ -1711,6 +1785,22 @@ pub async fn auth_self(app: tauri::AppHandle) -> Result<serde_json::Value, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 登录后撤销被顶替的本机会话：三种跳过条件必须逐一守住，否则会把刚登录
+    /// 成功的用户自己弄掉线。真值表全部枚举，缺一条就是回归。
+    #[test]
+    fn revokes_superseded_session_only_when_it_is_a_distinct_usable_one() {
+        // 正常情形：换账号或重复登录，后台签发了新 sid，旧的要撤掉。
+        assert!(should_revoke_superseded("old-sid", "new-sid", "old-secret"));
+        // 首次登录：本地从没存过会话，没有东西可撤。
+        assert!(!should_revoke_superseded("", "new-sid", "old-secret"));
+        assert!(!should_revoke_superseded("", "", ""));
+        // 后台复用同一个 Session（refresh 语义）：撤它就是撤自己，刚登录立刻掉线。
+        assert!(!should_revoke_superseded("same-sid", "same-sid", "old-secret"));
+        // 缺 refresh token：logout 靠 Refresh Cookie 定位会话，请求必然被拒，
+        // 白发一次网络没有意义。
+        assert!(!should_revoke_superseded("old-sid", "new-sid", ""));
+    }
 
     #[test]
     fn extracts_named_cookie_from_set_cookie_header() {

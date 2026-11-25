@@ -569,7 +569,7 @@
       "post": {
         "summary": "用户登录",
         "deprecated": false,
-        "description": "🔓 无需鉴权。签发新登录 Session 时可能返回 409 AUTH_SESSION_LIMIT 或 429 AUTH_SESSION_ISSUANCE_LIMIT。",
+        "description": "🔓 无需鉴权。签发新登录 Session 时若达到活跃上限，会自动撤销最久未使用的 Session 并正常登录，不再返回 409；仅在连最旧 Session 都无法撤销的极端情况下才返回 409 AUTH_SESSION_LIMIT。签发窗口计数达到上限时返回 429 AUTH_SESSION_ISSUANCE_LIMIT（该限额在任何撤销发生之前判定，不会挤掉其他设备）。",
         "tags": [
           "用户登陆注册"
         ],
@@ -597,7 +597,7 @@
             "headers": {}
           },
           "409": {
-            "description": "该用户的活跃登录 Session 已达上限",
+            "description": "该用户的活跃登录 Session 已达上限，且连最久未使用的 Session 都无法撤销（兜底情况）；正常情况下达到上限会自动挤掉最旧 Session 并返回 200",
             "content": {
               "application/json": {
                 "schema": {
@@ -607,7 +607,7 @@
             }
           },
           "429": {
-            "description": "该用户在统计窗口内创建的 Session 已达上限",
+            "description": "该用户在统计窗口内创建的 Session 已达上限（该判定先于任何撤销，不会挤掉其他设备）",
             "content": {
               "application/json": {
                 "schema": {
@@ -631,7 +631,7 @@
       "post": {
         "summary": "两步验证登录",
         "deprecated": false,
-        "description": "🔓 无需鉴权（登录流程）。签发新登录 Session 时可能返回 409 AUTH_SESSION_LIMIT 或 429 AUTH_SESSION_ISSUANCE_LIMIT。",
+        "description": "🔓 无需鉴权（登录流程）。签发新登录 Session 时若达到活跃上限，会自动撤销最久未使用的 Session 并正常登录，不再返回 409；仅在连最旧 Session 都无法撤销的极端情况下才返回 409 AUTH_SESSION_LIMIT。签发窗口计数达到上限时返回 429 AUTH_SESSION_ISSUANCE_LIMIT（该限额在任何撤销发生之前判定，不会挤掉其他设备）。",
         "tags": [
           "用户登陆注册"
         ],
@@ -660,7 +660,7 @@
             "headers": {}
           },
           "409": {
-            "description": "该用户的活跃登录 Session 已达上限",
+            "description": "该用户的活跃登录 Session 已达上限，且连最久未使用的 Session 都无法撤销（兜底情况）；正常情况下达到上限会自动挤掉最旧 Session 并返回 200",
             "content": {
               "application/json": {
                 "schema": {
@@ -670,7 +670,7 @@
             }
           },
           "429": {
-            "description": "该用户在统计窗口内创建的 Session 已达上限",
+            "description": "该用户在统计窗口内创建的 Session 已达上限（该判定先于任何撤销，不会挤掉其他设备）",
             "content": {
               "application/json": {
                 "schema": {
@@ -880,7 +880,7 @@
       "post": {
         "summary": "完成Passkey登录",
         "deprecated": false,
-        "description": "🔓 无需鉴权。签发新登录 Session 时可能返回 409 AUTH_SESSION_LIMIT 或 429 AUTH_SESSION_ISSUANCE_LIMIT。",
+        "description": "🔓 无需鉴权。签发新登录 Session 时若达到活跃上限，会自动撤销最久未使用的 Session 并正常登录，不再返回 409；仅在连最旧 Session 都无法撤销的极端情况下才返回 409 AUTH_SESSION_LIMIT。签发窗口计数达到上限时返回 429 AUTH_SESSION_ISSUANCE_LIMIT（该限额在任何撤销发生之前判定，不会挤掉其他设备）。",
         "tags": [
           "用户登陆注册"
         ],
@@ -891,7 +891,7 @@
             "headers": {}
           },
           "409": {
-            "description": "该用户的活跃登录 Session 已达上限",
+            "description": "该用户的活跃登录 Session 已达上限，且连最久未使用的 Session 都无法撤销（兜底情况）；正常情况下达到上限会自动挤掉最旧 Session 并返回 200",
             "content": {
               "application/json": {
                 "schema": {
@@ -901,7 +901,7 @@
             }
           },
           "429": {
-            "description": "该用户在统计窗口内创建的 Session 已达上限",
+            "description": "该用户在统计窗口内创建的 Session 已达上限（该判定先于任何撤销，不会挤掉其他设备）",
             "content": {
               "application/json": {
                 "schema": {
@@ -925,7 +925,7 @@
       "get": {
         "summary": "GitHub OAuth登录",
         "deprecated": false,
-        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受 AUTH_SESSION_LIMIT 和 AUTH_SESSION_ISSUANCE_LIMIT 约束。",
+        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受活跃上限与签发窗口约束：达到活跃上限会自动撤销最久未使用的 Session 而非拒绝登录，仅签发窗口计数触顶返回 429 AUTH_SESSION_ISSUANCE_LIMIT。",
         "tags": [
           "OAuth"
         ],
@@ -966,7 +966,7 @@
       "get": {
         "summary": "Discord OAuth登录",
         "deprecated": false,
-        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受 AUTH_SESSION_LIMIT 和 AUTH_SESSION_ISSUANCE_LIMIT 约束。",
+        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受活跃上限与签发窗口约束：达到活跃上限会自动撤销最久未使用的 Session 而非拒绝登录，仅签发窗口计数触顶返回 429 AUTH_SESSION_ISSUANCE_LIMIT。",
         "tags": [
           "OAuth"
         ],
@@ -1007,7 +1007,7 @@
       "get": {
         "summary": "OIDC登录",
         "deprecated": false,
-        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受 AUTH_SESSION_LIMIT 和 AUTH_SESSION_ISSUANCE_LIMIT 约束。",
+        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受活跃上限与签发窗口约束：达到活跃上限会自动撤销最久未使用的 Session 而非拒绝登录，仅签发窗口计数触顶返回 429 AUTH_SESSION_ISSUANCE_LIMIT。",
         "tags": [
           "OAuth"
         ],
@@ -1038,7 +1038,7 @@
       "get": {
         "summary": "LinuxDO OAuth登录",
         "deprecated": false,
-        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受 AUTH_SESSION_LIMIT 和 AUTH_SESSION_ISSUANCE_LIMIT 约束。",
+        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受活跃上限与签发窗口约束：达到活跃上限会自动撤销最久未使用的 Session 而非拒绝登录，仅签发窗口计数触顶返回 429 AUTH_SESSION_ISSUANCE_LIMIT。",
         "tags": [
           "OAuth"
         ],
@@ -1124,7 +1124,7 @@
       "get": {
         "summary": "微信OAuth登录",
         "deprecated": false,
-        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受 AUTH_SESSION_LIMIT 和 AUTH_SESSION_ISSUANCE_LIMIT 约束。",
+        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受活跃上限与签发窗口约束：达到活跃上限会自动撤销最久未使用的 Session 而非拒绝登录，仅签发窗口计数触顶返回 429 AUTH_SESSION_ISSUANCE_LIMIT。",
         "tags": [
           "OAuth"
         ],
@@ -1240,7 +1240,7 @@
       "get": {
         "summary": "Telegram登录",
         "deprecated": false,
-        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受 AUTH_SESSION_LIMIT 和 AUTH_SESSION_ISSUANCE_LIMIT 约束。",
+        "description": "🔓 无需鉴权（OAuth 回调）。创建本地登录 Session 时同样受活跃上限与签发窗口约束：达到活跃上限会自动撤销最久未使用的 Session 而非拒绝登录，仅签发窗口计数触顶返回 429 AUTH_SESSION_ISSUANCE_LIMIT。",
         "tags": [
           "OAuth"
         ],
@@ -5577,7 +5577,7 @@
     },
     "responses": {
       "AuthSessionLimit": {
-        "description": "该用户的活跃登录 Session 已达上限",
+        "description": "该用户的活跃登录 Session 已达上限，且连最久未使用的 Session 都无法撤销（兜底情况）；正常情况下达到上限会自动挤掉最旧 Session 并返回 200",
         "content": {
           "application/json": {
             "schema": {
@@ -5587,7 +5587,7 @@
         }
       },
       "AuthSessionIssuanceLimit": {
-        "description": "该用户在统计窗口内创建的 Session 已达上限",
+        "description": "该用户在统计窗口内创建的 Session 已达上限（该判定先于任何撤销，不会挤掉其他设备）",
         "content": {
           "application/json": {
             "schema": {

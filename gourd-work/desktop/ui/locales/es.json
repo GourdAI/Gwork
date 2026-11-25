@@ -1514,6 +1514,14 @@
     "code_sent": "Código enviado, revisa tu correo",
     "code_required": "Introduce el código de verificación",
     "email_first": "Introduce primero tu correo electrónico",
-    "password_mismatch": "Las dos contraseñas no coinciden"
+    "password_mismatch": "Las dos contraseñas no coinciden",
+    "err_issuance_limit": "Demasiados inicios de sesión en las últimas 24 horas. Espera un momento e inténtalo de nuevo.",
+    "err_session_mismatch": "Tu credencial local de inicio de sesión está desactualizada o no coincide. Vuelve a cargar e inicia sesión de nuevo.",
+    "err_refresh_race": "Tu sesión se está actualizando. Vuelve a intentarlo en unos segundos.",
+    "err_token_expired": "Tu sesión ha caducado. Inicia sesión de nuevo.",
+    "err_session_revoked": "Esta sesión fue revocada, por ejemplo por un cambio de contraseña o por cerrar sesión en otro dispositivo. Inicia sesión de nuevo.",
+    "err_unauthorized": "Tu credencial de inicio de sesión no es válida. Inicia sesión de nuevo.",
+    "err_internal": "El servicio de inicio de sesión no está disponible temporalmente. Inténtalo de nuevo más tarde.",
+    "err_session_limit": "Has alcanzado el límite de sesiones activas. La sesión menos utilizada se ha liberado automáticamente. Si sigues sin poder iniciar sesión, abre Seguridad > Sesiones de inicio en la consola web y cierra sesión en los otros dispositivos."
   }
 }

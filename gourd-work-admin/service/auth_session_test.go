@@ -97,7 +97,15 @@ func cachedLoginSessionKey(t *testing.T, server *miniredis.Miniredis) string {
 	return ""
 }
 
-func TestCreateLoginSessionEnforcesActiveLimitAcrossAuthVersions(t *testing.T) {
+// TestCreateLoginSessionIgnoresStaleAuthVersionsForActiveLimit replaces the
+// previous "AcrossAuthVersions" contract, which asserted that a row left at a
+// different auth version counted toward USER_SESSION_ACTIVE_LIMIT. That
+// assertion was the bug, not its guard: such a row is rejected forever by
+// ValidateLoginSession and hidden from the device list (ListActiveUserSessions
+// filters on the current version), so it consumed a slot the user could neither
+// see nor revoke. Accounts therefore drifted into a permanent
+// 409 AUTH_SESSION_LIMIT with no signed-in device left to remediate from.
+func TestCreateLoginSessionIgnoresStaleAuthVersionsForActiveLimit(t *testing.T) {
 	useTestSessionSecret(t)
 	user := setupAuthSessionTestDB(t)
 	common.UserSessionActiveLimit = 50
@@ -107,6 +115,8 @@ func TestCreateLoginSessionEnforcesActiveLimitAcrossAuthVersions(t *testing.T) {
 	for i := range 49 {
 		authVersion := user.AuthVersion
 		if i == 0 {
+			// A row from a superseded auth version: unusable, and invisible in
+			// the device list.
 			authVersion++
 		}
 		rows = append(rows, model.UserSession{
@@ -124,15 +134,165 @@ func TestCreateLoginSessionEnforcesActiveLimitAcrossAuthVersions(t *testing.T) {
 	}
 	require.NoError(t, model.DB.Create(&rows).Error)
 
+	// 48 usable + 1 stale. The stale row must not block issuance...
 	_, err := CreateLoginSession(user.Id, "password", "127.0.0.1", "test-agent")
-	require.NoError(t, err, "49 active sessions must allow creation of the 50th")
+	require.NoError(t, err, "a stale auth-version row must not consume the active limit")
 
+	// ...and the lazy sweep must have revoked it, so it stops occupying storage
+	// and stops being returned by any quota query.
+	var stale model.UserSession
+	require.NoError(t, model.DB.Where("sid = ?", "active-limit-00").First(&stale).Error)
+	assert.Equal(t, model.UserSessionStatusRevoked, stale.Status)
+	assert.Equal(t, "stale_auth_version", stale.RevokedReason)
+
+	// 49 usable now, so a 50th still fits.
 	_, err = CreateLoginSession(user.Id, "password", "127.0.0.1", "test-agent")
-	assert.ErrorIs(t, err, model.ErrUserSessionLimit)
-	var count int64
-	require.NoError(t, model.DB.Model(&model.UserSession{}).Count(&count).Error)
-	assert.Equal(t, int64(50), count)
+	require.NoError(t, err, "49 usable sessions must allow creation of the 50th")
+
+	usable, err := model.CountUsableUserSessions(user.Id, user.AuthVersion, now)
+	require.NoError(t, err)
+	assert.Equal(t, int64(50), usable)
 }
+
+// TestCreateLoginSessionEvictsIdlestAtActiveLimit pins the self-service escape
+// hatch. At the cap the login must succeed by releasing the least recently used
+// session: refusing with 409 left accounts locked out, because the only remedy
+// (sign in on another device and revoke) was blocked by the error itself.
+func TestCreateLoginSessionEvictsIdlestAtActiveLimit(t *testing.T) {
+	useTestSessionSecret(t)
+	user := setupAuthSessionTestDB(t)
+	common.UserSessionActiveLimit = 3
+	common.UserSessionIssuanceLimit = 100
+	now := time.Now().Unix()
+	rows := make([]model.UserSession, 0, 3)
+	for i := range 3 {
+		rows = append(rows, model.UserSession{
+			SID:             fmt.Sprintf("evict-candidate-%02d", i),
+			UserID:          user.Id,
+			Version:         1,
+			UserAuthVersion: user.AuthVersion,
+			Status:          model.UserSessionStatusActive,
+			RefreshHash:     fmt.Sprintf("hash-%02d", i),
+			LoginMethod:     "password",
+			CreatedAt:       now - int64(i*100),
+			// i=0 was used most recently, i=2 is the idlest — so candidate-02 is
+			// the one eviction must take.
+			LastActiveAt: now - int64(i*100),
+			ExpiresAt:    now + 3600,
+		})
+	}
+	require.NoError(t, model.DB.Create(&rows).Error)
+
+	bundle, err := CreateLoginSession(user.Id, "password", "127.0.0.1", "test-agent")
+	require.NoError(t, err, "reaching the cap must evict the idlest session, not refuse the login")
+	require.NotEmpty(t, bundle.AccessToken)
+
+	var evicted model.UserSession
+	require.NoError(t, model.DB.Where("sid = ?", "evict-candidate-02").First(&evicted).Error)
+	assert.Equal(t, model.UserSessionStatusRevoked, evicted.Status)
+	assert.Equal(t, "session_limit_evicted", evicted.RevokedReason)
+
+	// The cap still holds: exactly one slot was reclaimed for exactly one new
+	// session, and the two more recently used sessions survive.
+	usable, err := model.CountUsableUserSessions(user.Id, user.AuthVersion, now)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), usable)
+	for _, sid := range []string{"evict-candidate-00", "evict-candidate-01"} {
+		var survivor model.UserSession
+		require.NoError(t, model.DB.Where("sid = ?", sid).First(&survivor).Error)
+		assert.Equal(t, model.UserSessionStatusActive, survivor.Status, "%s must survive", sid)
+	}
+}
+
+// TestRevokeAllStaleUserSessionsSweepsEveryUser covers the hourly backstop: the
+// lazy reclaim only runs for accounts that keep logging in, so an account that
+// changed its password once and never returned would otherwise keep its
+// unusable-but-active rows for the entire absolute session ceiling.
+func TestRevokeAllStaleUserSessionsSweepsEveryUser(t *testing.T) {
+	useTestSessionSecret(t)
+	user := setupAuthSessionTestDB(t)
+	other := &model.User{
+		Username: "session-user-2", Password: "unused-password-hash",
+		Role: common.RoleCommonUser, Status: common.UserStatusEnabled,
+		Group: "default", AuthVersion: 5, AffCode: "sweep-other",
+	}
+	require.NoError(t, model.DB.Create(other).Error)
+	now := time.Now().Unix()
+	rows := []model.UserSession{
+		{ // stale: never logged in again after the version bump
+			SID: "sweep-stale-other", UserID: other.Id, Version: 1, UserAuthVersion: 2,
+			Status: model.UserSessionStatusActive, RefreshHash: "hash-a", LoginMethod: "password",
+			CreatedAt: now, LastActiveAt: now, ExpiresAt: now + 3600,
+		},
+		{ // usable: must be untouched
+			SID: "sweep-usable-other", UserID: other.Id, Version: 1, UserAuthVersion: 5,
+			Status: model.UserSessionStatusActive, RefreshHash: "hash-b", LoginMethod: "password",
+			CreatedAt: now, LastActiveAt: now, ExpiresAt: now + 3600,
+		},
+		{ // stale on the first user
+			SID: "sweep-stale-user", UserID: user.Id, Version: 1, UserAuthVersion: user.AuthVersion + 1,
+			Status: model.UserSessionStatusActive, RefreshHash: "hash-c", LoginMethod: "password",
+			CreatedAt: now, LastActiveAt: now, ExpiresAt: now + 3600,
+		},
+		{ // already revoked and expired: not a candidate at all
+			SID: "sweep-expired", UserID: user.Id, Version: 1, UserAuthVersion: user.AuthVersion + 1,
+			Status: model.UserSessionStatusRevoked, RefreshHash: "hash-d", LoginMethod: "password",
+			CreatedAt: now - 7200, LastActiveAt: now - 7200, ExpiresAt: now - 3600, RevokedAt: now - 3600,
+		},
+	}
+	require.NoError(t, model.DB.Create(&rows).Error)
+
+	revoked, err := model.RevokeAllStaleUserSessions("stale_auth_version_sweep")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), revoked, "both stale rows across both users must be swept")
+
+	for _, sid := range []string{"sweep-stale-other", "sweep-stale-user"} {
+		var row model.UserSession
+		require.NoError(t, model.DB.Where("sid = ?", sid).First(&row).Error)
+		assert.Equal(t, model.UserSessionStatusRevoked, row.Status, "%s must be revoked", sid)
+	}
+	var usableRow model.UserSession
+	require.NoError(t, model.DB.Where("sid = ?", "sweep-usable-other").First(&usableRow).Error)
+	assert.Equal(t, model.UserSessionStatusActive, usableRow.Status, "a usable session must survive the sweep")
+}
+
+// TestRefusedLoginNeverEvictsAnotherDevice pins the side-effect ordering.
+//
+// Eviction is irreversible: once a session row is flipped to revoked its device
+// is signed out and cannot be brought back. So it may only run for a login that
+// is actually going to be issued. When both growth limits are at their cap the
+// issuance window wins, and it refuses unconditionally — evicting there would
+// sign the user's other device out without signing them in anywhere, leaving the
+// account strictly worse off than before the failed attempt.
+//
+// Both limits must be saturated at once for this to be observable. A test that
+// only fills the issuance window (active limit still high) cannot tell the two
+// orderings apart, because reclaim finds nothing to evict.
+func TestRefusedLoginNeverEvictsAnotherDevice(t *testing.T) {
+	useTestSessionSecret(t)
+	user := setupAuthSessionTestDB(t)
+	// One usable session saturates the active cap AND sits inside the issuance
+	// window, so both limits refuse on the same attempt.
+	common.UserSessionActiveLimit = 1
+	common.UserSessionIssuanceLimit = 1
+	now := time.Now().Unix()
+	victim := model.UserSession{
+		SID: "issuance-refusal-victim", UserID: user.Id, Version: 1, UserAuthVersion: user.AuthVersion,
+		Status: model.UserSessionStatusActive, RefreshHash: "victim-hash", LoginMethod: "password",
+		CreatedAt: now - 10, LastActiveAt: now - 10, ExpiresAt: now + 3600,
+	}
+	require.NoError(t, model.DB.Create(&victim).Error)
+
+	_, err := CreateLoginSession(user.Id, "password", "127.0.0.1", "test-agent")
+	assert.ErrorIs(t, err, model.ErrUserSessionIssuanceLimit)
+
+	var stored model.UserSession
+	require.NoError(t, model.DB.Where("sid = ?", "issuance-refusal-victim").First(&stored).Error)
+	assert.Equal(t, model.UserSessionStatusActive, stored.Status,
+		"a refused login must not sign out another device")
+	assert.Empty(t, stored.RevokedReason)
+}
+
 
 func TestCreateLoginSessionEnforcesIssuanceLimitAcrossAllStatuses(t *testing.T) {
 	useTestSessionSecret(t)

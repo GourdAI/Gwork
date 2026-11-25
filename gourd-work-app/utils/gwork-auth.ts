@@ -294,6 +294,10 @@ function invalidateEncKeyCache(): void {
 export async function gworkLogin(username: string, password: string): Promise<GworkSession> {
 	return serialize<GworkSession>(async (): Promise<GworkSession> => {
 		await ensureGworkHost()
+		// 本机上一份会话的快照，必须在 session = ... 覆盖之前取：覆盖之后旧
+		// refreshToken 就永久丢失，那份 Session 会在服务端一直 active 到绝对
+		// 上限到期。见下方 revokeSessionQuietly 调用处的说明。
+		const superseded = session
 		const payload = await buildLoginPayload(username, password)
 		let res: ApiResponse<ApiBody>
 		try {
@@ -317,6 +321,18 @@ export async function gworkLogin(username: string, password: string): Promise<Gw
 			throw new Error(t('gwork.needVerification'))
 		}
 		persist()
+		/* 【2026-11 `Conflict [AUTH_SESSION_LIMIT]` 报障的一环】移动端每次登录都
+		   让后台签发一份新 Session，并用它覆盖内存与 storage 里的旧凭据。旧凭据被
+		   覆盖后 refreshToken 永久丢失，那份 Session 会在服务端保持 active 直到
+		   365 天绝对上限到期 —— 反复登录、或在两个账号之间来回切换，就会攒出一堆
+		   用户既看不见也撤不掉的僵尸行，最终占满 USER_SESSION_ACTIVE_LIMIT。
+		   服务端已改为触顶时自动挤号兜底，但本机自己制造的垃圾应由本机自己清掉，
+		   不该靠兜底把用户别的设备挤下线。
+		   best-effort：失败不影响刚刚成功的登录；旧凭据可能早已在服务端失效。
+		   调用点在 serialize 链内，与 refresh/logout 天然串行，无并发撤销竞态。 */
+		if (superseded != null && shouldRevokeSuperseded(superseded.sid, session.sid, superseded.refreshToken)) {
+			await revokeSessionQuietly(superseded)
+		}
 		return session
 	})
 }
@@ -428,22 +444,38 @@ export async function gworkLogout(): Promise<void> {
 	return serialize<void>(async (): Promise<void> => {
 		const current = session
 		if (current != null && current.refreshToken.length > 0) {
-			try {
-				await gworkRequest.post<ApiBody>('/api/user/auth/logout', null, {
-					anon: true,
-					toast: false,
-					header: sessionHeader({
-						'X-Auth-Session': current.sid,
-						'Cookie': REFRESH_COOKIE + '=' + current.refreshToken,
-						'Authorization': 'Bearer ' + current.accessToken
-					})
-				})
-			} catch (_) {
-				// 服务端撤销失败不阻塞本地登出
-			}
+			await revokeSessionQuietly(current)
 		}
 		clearSession()
 	})
+}
+
+/** 让服务端撤销一份会话，失败一律吞掉（best-effort）。
+ *  logout 与登录后的顶替清理共用这一份实现：两处的失败都不该阻塞主流程。 */
+async function revokeSessionQuietly(target: GworkSession): Promise<void> {
+	try {
+		await gworkRequest.post<ApiBody>('/api/user/auth/logout', null, {
+			anon: true,
+			toast: false,
+			header: sessionHeader({
+				'X-Auth-Session': target.sid,
+				'Cookie': REFRESH_COOKIE + '=' + target.refreshToken,
+				'Authorization': 'Bearer ' + target.accessToken
+			})
+		})
+	} catch (_) {
+		// 服务端撤销失败不阻塞本地登出；旧会话可能早已失效，被拒属于预期
+	}
+}
+
+/** 登录后是否该撤销被顶替掉的旧会话（纯判据，便于单测枚举真值表）。
+ *
+ * 三种情况必须跳过，否则会把刚登录成功的用户自己弄掉线：
+ * - 旧 sid 为空：本地从没存过会话（首次登录），无东西可撤；
+ * - 旧 sid == 新 sid：后台复用了同一个 Session，撤它就是撤自己；
+ * - 旧 refreshToken 为空：logout 靠 Refresh Cookie 定位会话，缺它必然被拒。 */
+function shouldRevokeSuperseded(oldSid: string, newSid: string, oldRefreshToken: string): boolean {
+	return oldSid.length > 0 && oldSid !== newSid && oldRefreshToken.length > 0
 }
 
 /* ---------------- 用户信息 ---------------- */

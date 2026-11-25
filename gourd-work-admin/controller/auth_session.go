@@ -172,7 +172,16 @@ func writeAuthSessionError(c *gin.Context, err error) {
 		// failure is indistinguishable from the client side.
 		logger.LogError(c.Request.Context(), common.LogText("auth session internal error (%s %s): %v", c.Request.Method, c.Request.URL.Path, err))
 	}
-	c.JSON(status, gin.H{"success": false, "code": code, "message": http.StatusText(status)})
+	// `code` is the machine-readable key (the web console translates it through
+	// serverErrorMessageKeys); `message` carries an actionable sentence for every
+	// other client. It used to be http.StatusText(status), so a session-limit
+	// refusal reached the Rust desktop shell as "Conflict [AUTH_SESSION_LIMIT]"
+	// and the uni-app client as a bare "Conflict" — neither says what is wrong.
+	c.JSON(status, gin.H{
+		"success": false,
+		"code":    code,
+		"message": service.AuthSessionErrorMessage(status, code),
+	})
 }
 
 func setAuthNoStore(c *gin.Context) {

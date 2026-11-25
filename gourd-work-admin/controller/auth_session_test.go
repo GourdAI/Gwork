@@ -107,7 +107,17 @@ func TestWriteAuthSessionErrorMapsSessionGrowthLimits(t *testing.T) {
 	}
 }
 
-func TestSessionLimitDoesNotRecordRejectedLoginAsSuccessful(t *testing.T) {
+// TestRejectedLoginDoesNotRecordLastLoginAt keeps the audit invariant: a login
+// the server refuses must not look like a successful one in users.last_login_at.
+//
+// It used to reach that refusal through USER_SESSION_ACTIVE_LIMIT. That trigger
+// no longer rejects: being at the active cap now evicts the least recently used
+// session and signs the user in, because refusing there was a dead end — the
+// only remedy was to sign in on another device and revoke, which the refusal
+// itself prevented. The rolling issuance window is the remaining growth limit
+// that still refuses, so it drives this test. The active limit is set high
+// deliberately, to keep eviction out of the scenario under test.
+func TestRejectedLoginDoesNotRecordLastLoginAt(t *testing.T) {
 	previousDB := model.DB
 	previousRedis := common.RedisEnabled
 	previousActiveLimit := common.UserSessionActiveLimit
@@ -118,8 +128,8 @@ func TestSessionLimitDoesNotRecordRejectedLoginAsSuccessful(t *testing.T) {
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.TwoFA{}, &model.PasskeyCredential{}))
 	model.DB = db
 	common.RedisEnabled = false
-	common.UserSessionActiveLimit = 1
-	common.UserSessionIssuanceLimit = 100
+	common.UserSessionActiveLimit = 50
+	common.UserSessionIssuanceLimit = 1
 	common.UserSessionIssuanceWindowSeconds = int64(common.DefaultUserSessionIssuanceWindowSeconds)
 	t.Cleanup(func() {
 		model.DB = previousDB
@@ -148,8 +158,17 @@ func TestSessionLimitDoesNotRecordRejectedLoginAsSuccessful(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/user/login", nil)
 	setupLogin(user, nil, c)
 
-	assert.Equal(t, http.StatusConflict, recorder.Code)
+	assert.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	var stored model.User
 	require.NoError(t, db.First(&stored, user.Id).Error)
 	assert.Equal(t, previousLastLoginAt, stored.LastLoginAt)
+
+	// The pre-existing session must survive. The active limit is set high here so
+	// eviction cannot fire at all; the ordering itself (issuance refuses before
+	// any eviction) is pinned by
+	// service.TestRefusedLoginNeverEvictsAnotherDevice, which saturates both
+	// limits at once — the only configuration where a regression is observable.
+	var existing model.UserSession
+	require.NoError(t, db.Where("sid = ?", "existing-active-session").First(&existing).Error)
+	assert.Equal(t, model.UserSessionStatusActive, existing.Status)
 }

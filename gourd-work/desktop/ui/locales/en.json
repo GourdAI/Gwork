@@ -1514,6 +1514,14 @@
     "code_sent": "Verification code sent, check your inbox",
     "code_required": "Please enter the email verification code",
     "email_first": "Please fill in your email address first",
-    "password_mismatch": "The two passwords do not match"
+    "password_mismatch": "The two passwords do not match",
+    "err_issuance_limit": "Too many sign-ins in the last 24 hours. Please wait a while and try again.",
+    "err_session_mismatch": "Your local sign-in credential is stale or mismatched. Reload and sign in again.",
+    "err_refresh_race": "Your sign-in is being refreshed. Please retry in a few seconds.",
+    "err_token_expired": "Your sign-in has expired. Please sign in again.",
+    "err_session_revoked": "This sign-in was revoked, for example by a password change or by signing out on another device. Please sign in again.",
+    "err_unauthorized": "Your sign-in credential is invalid. Please sign in again.",
+    "err_internal": "The sign-in service is temporarily unavailable. Please try again later.",
+    "err_session_limit": "You have reached the sign-in limit for this account. The least recently used sign-in was released automatically. If you still cannot sign in, open Security > Login sessions in the web console and sign out other devices."
   }
 }

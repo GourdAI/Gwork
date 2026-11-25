@@ -5,7 +5,9 @@
  * - 响应信封 {success, message, data}，只有「HTTP 2xx + 显式 success:true」算成功
  *   （fail-closed：缺 success 字段的异常 JSON 一律按失败处理，绝不 fail-open）。
  * - 业务错误也常是 HTTP 200 + success:false；message 可能只是 HTTP StatusText，
- *   精确原因在 code 里，报错时把 code 一并带出（如 AUTH_SESSION_REVOKED）。
+ *   精确原因在 code 里。已知鉴权 code 会翻成本地化文案（AUTH_ERROR_I18N_KEYS），
+ *   未知 code 仍按 `message [code]` 原样带出（如 AUTH_SESSION_REVOKED），
+ *   调用方依据 body.code 判定，不依赖 message 文本。
  * - 站点选定后全程锁定同一 base：会话 Cookie / 刷新令牌不跨站重放。
  *
  * 本实例不用工厂的 token 注入（access token 由 gwork-auth.ts 管理并在临期时
@@ -50,6 +52,29 @@ function strOf(body: ApiBody | null, key: string): string {
 }
 
 /**
+ * 鉴权命名空间错误码 → 本地化文案键。
+ *
+ * 【2026-11 用户报障】登录失败时移动端上屏的是服务端原样拼出来的
+ * `Conflict [AUTH_SESSION_LIMIT]`：`Conflict` 来自 HTTP StatusText，方括号里是
+ * 机器码，两句都不面向用户。桌面端有同一张表（app-account.js AUTH_ERROR_KEYS），
+ * admin 的 web 控制台有 serverErrorMessageKeys，移动端此前缺这一层。
+ *
+ * 只认这张表里的**精确** code，不做宽松子串匹配：正文里恰好出现的大写词不该
+ * 被当成错误码而给出误导文案。映射不到时保持 `message [code]` 原样透出，绝不
+ * 吞掉后台的真因。
+ */
+const AUTH_ERROR_I18N_KEYS: Record<string, string> = {
+	'AUTH_SESSION_LIMIT': 'gwork.errSessionLimit',
+	'AUTH_SESSION_ISSUANCE_LIMIT': 'gwork.errIssuanceLimit',
+	'AUTH_SESSION_MISMATCH': 'gwork.errSessionMismatch',
+	'AUTH_REFRESH_RACE': 'gwork.errRefreshRace',
+	'AUTH_TOKEN_EXPIRED': 'gwork.errTokenExpired',
+	'AUTH_SESSION_REVOKED': 'gwork.errSessionRevoked',
+	'AUTH_UNAUTHORIZED': 'gwork.errUnauthorized',
+	'AUTH_INTERNAL_ERROR': 'gwork.errInternal'
+}
+
+/**
  * new-api 判定：HTTP 2xx + 显式 success:true 才成功。
  * 会话终结类错误（token 失效 / 会话撤销）由 gwork-auth.ts 依据 code 处理，
  * 这里只负责如实报错，不清凭据、不跳页 —— 网络抖动不能把用户踢下线。
@@ -60,6 +85,17 @@ function interceptGworkResponse(statusCode: number, body: ApiBody | null): Respo
 	if (httpOk && success && body != null) return { ok: true }
 
 	const code = strOf(body, 'code')
+	// 已知鉴权码优先翻成人话。i18n 缺键时 vue-i18n 会回吐键名本身，那比裸的
+	// `Conflict [CODE]` 更难懂，所以显式判一次：译文取不到就走下面的原样透出。
+	if (code.length > 0) {
+		const key = AUTH_ERROR_I18N_KEYS[code]
+		if (key != null) {
+			const localized = i18n.global.t(key)
+			if (localized.length > 0 && localized !== key) {
+				return { ok: false, message: localized, businessCode: statusCode, silent: true }
+			}
+		}
+	}
 	const msg = strOf(body, 'message')
 	const fallback = httpOk
 		? i18n.global.t('request.failed')

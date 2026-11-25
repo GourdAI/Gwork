@@ -1514,6 +1514,14 @@
     "code_sent": "Código enviado, verifique sua caixa de entrada",
     "code_required": "Insira o código de verificação",
     "email_first": "Preencha primeiro o endereço de e-mail",
-    "password_mismatch": "As duas senhas não coincidem"
+    "password_mismatch": "As duas senhas não coincidem",
+    "err_issuance_limit": "Muitos logins nas últimas 24 horas. Aguarde um pouco e tente novamente.",
+    "err_session_mismatch": "Sua credencial de login local está desatualizada ou inconsistente. Recarregue e entre novamente.",
+    "err_refresh_race": "Sua sessão está sendo atualizada. Tente novamente em alguns segundos.",
+    "err_token_expired": "Seu login expirou. Entre novamente.",
+    "err_session_revoked": "Este login foi revogado, por exemplo por uma alteração de senha ou por sair em outro dispositivo. Entre novamente.",
+    "err_unauthorized": "Sua credencial de login é inválida. Entre novamente.",
+    "err_internal": "O serviço de login está temporariamente indisponível. Tente novamente mais tarde.",
+    "err_session_limit": "Você atingiu o limite de sessões ativas. A sessão menos utilizada foi liberada automaticamente. Se ainda não conseguir entrar, abra Segurança > Sessões de login no console web e saia dos outros dispositivos."
   }
 }
